@@ -18,9 +18,8 @@ use qsag_asm::{
     gf2_128_dot_with_backend, gf2_128_mul_acc_batch_with_backend,
     gf2_xor_combine_planes_with_backend, transpose64x256_with_backend,
 };
+use qsag_core::sponge::keccak::{Cshake256WordStream4, cshake256_static_midstate};
 use qsag_core::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES};
-#[cfg(test)]
-use qsag_core::sponge::keccak::cshake256_static_midstate;
 
 const MAX_PENDING_BITS: usize = 262_144;
 const BIT_TENSOR_BITS: usize = 6;
@@ -104,11 +103,7 @@ pub(crate) trait Core {
     fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error>;
     /// Jointly input 64-lane prime-field words: the shared value is the mod-`p_d` sum of all
     /// parties' canonical `own_words`, masked so no peer sees another party's raw share.
-    fn fshare_many(
-        &mut self,
-        own_words: &[Value],
-        d: Domain,
-    ) -> Result<Vec<FieldWord>, Error>;
+    fn fshare_many(&mut self, own_words: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error>;
     /// Broadcast a byte slice from every party in canonical quorum order after settling pending checks.
     fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error>;
     fn and_into(
@@ -367,6 +362,25 @@ impl WordSponge136 {
         }
         ct_zeroize_u64s(&mut words);
         out
+    }
+}
+
+/// V4 pairwise pads: four independently domain-separated cSHAKE streams,
+/// interleaved wordwise by the existing SIMD XOF. No rounds are removed.
+/// Cshake256WordStream4 erases all four states on drop.
+struct PadStream(Cshake256WordStream4);
+const PAD_MIDSTATE: [u64; 25] = cshake256_static_midstate(b"QSAG.OUTER.PADS.V4");
+impl PadStream {
+    fn new(seed: &[u8; 32]) -> Self {
+        Self(Cshake256WordStream4::new(&PAD_MIDSTATE, seed))
+    }
+    fn squeeze_u64s(&mut self, out: &mut [u64]) {
+        self.0.fill_words(out);
+    }
+    fn squeeze_u64(&mut self) -> u64 {
+        let mut word = Secret([0u64]);
+        self.squeeze_u64s(&mut word[..]);
+        word[0]
     }
 }
 
@@ -831,7 +845,7 @@ pub(crate) struct Engine<T> {
     session: [u8; 32],
     keys: [[u8; 32]; 2],
     mac_prefix: [Cshake256Xof; 2],
-    pads: [WordSponge136; 2],
+    pads: [PadStream; 2],
     edge_sponges: [WordSponge136; 2],
     coin_rng: WordSponge136,
     sequence: u64,
@@ -873,8 +887,8 @@ impl<T: Transport> Engine<T> {
             build_mac_prefix(&keys[1], &session),
         ];
         let pads = keys.map(|key| {
-            let mut seed = cshake256_framed_32(b"QSAG.OUTER.PADS.V1", &[&key, &session]);
-            let sp = WordSponge136::from_shake_seed(&seed);
+            let mut seed = cshake256_framed_32(b"QSAG.OUTER.PADS.V4", &[&key, &session]);
+            let sp = PadStream::new(&seed);
             ct_zeroize_bytes(&mut seed);
             sp
         });
@@ -1109,7 +1123,11 @@ impl<T: Transport> Engine<T> {
         self.pads[0].squeeze_u64s(&mut self.scratch_r[..k]);
         self.pads[1].squeeze_u64s(&mut self.scratch_s[..k]);
         let mut masked = Vec::with_capacity(k);
-        for ((&x, &r), &s) in own.iter().zip(&self.scratch_r[..k]).zip(&self.scratch_s[..k]) {
+        for ((&x, &r), &s) in own
+            .iter()
+            .zip(&self.scratch_r[..k])
+            .zip(&self.scratch_s[..k])
+        {
             masked.push(x ^ r ^ s);
         }
         let (mut mine, mut next) = self.raw_share_owned(masked)?;
@@ -1119,11 +1137,7 @@ impl<T: Transport> Engine<T> {
         Ok(out)
     }
 
-    pub fn fshare_many(
-        &mut self,
-        own_words: &[Value],
-        d: Domain,
-    ) -> Result<Vec<FieldWord>, Error> {
+    pub fn fshare_many(&mut self, own_words: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> {
         if self.poisoned {
             return Err(Error::MultiplicationCheck);
         }
@@ -1139,16 +1153,16 @@ impl<T: Transport> Engine<T> {
         let word_u64s = 64 * wlen;
         let mut own_flat = Secret(Vec::with_capacity(k * word_u64s));
         for &val in own_words {
-                if !d.canonical(val) {
-                    self.poisoned = true;
-                    return Err(Error::InvalidConfiguration);
-                }
-                let r = Secret([
-                    Self::field_pad(&mut self.pads[0], d),
-                    Self::field_pad(&mut self.pads[1], d),
-                ]);
-                let masked = Secret(d.add(val, d.sub(r[0], r[1])));
-                own_flat.extend_from_slice(&masked[..wlen]);
+            if !d.canonical(val) {
+                self.poisoned = true;
+                return Err(Error::InvalidConfiguration);
+            }
+            let r = Secret([
+                Self::field_pad(&mut self.pads[0], d),
+                Self::field_pad(&mut self.pads[1], d),
+            ]);
+            let masked = Secret(d.add(val, d.sub(r[0], r[1])));
+            own_flat.extend_from_slice(&masked[..wlen]);
         }
         let (own_raw, next_raw) = self.raw_share_owned(core::mem::take(&mut *own_flat))?;
         let mut results = Vec::with_capacity(k);
@@ -1157,7 +1171,9 @@ impl<T: Transport> Engine<T> {
             .zip(next_raw.chunks_exact(word_u64s))
         {
             let mut fw = FieldWord::with_capacity(64);
-            for (av_slice, b_slice) in word_own.chunks_exact(wlen).zip(word_next.chunks_exact(wlen))
+            for (av_slice, b_slice) in word_own
+                .chunks_exact(wlen)
+                .zip(word_next.chunks_exact(wlen))
             {
                 let mut av = Secret(ZERO);
                 let mut bv = Secret(ZERO);
@@ -2233,7 +2249,7 @@ impl<T: Transport> Engine<T> {
     }
 
     fn prss_g3(&mut self) -> RepGoldExt3 {
-        let sample = |sp: &mut WordSponge136| -> GoldExt3 {
+        let sample = |sp: &mut PadStream| -> GoldExt3 {
             core::array::from_fn(|_| {
                 loop {
                     let w = sp.squeeze_u64();
@@ -2657,11 +2673,7 @@ impl<T: Transport> Core for Engine<T> {
     fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word, Error> {
         Engine::share_uniform_lanes(self, own)
     }
-    fn fshare_many(
-        &mut self,
-        own_words: &[Value],
-        d: Domain,
-    ) -> Result<Vec<FieldWord>, Error> {
+    fn fshare_many(&mut self, own_words: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> {
         Engine::fshare_many(self, own_words, d)
     }
     fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
@@ -3549,7 +3561,7 @@ impl<T: Transport> Engine<T> {
         ]
         .into()
     }
-    fn field_pad(s: &mut WordSponge136, d: Domain) -> Value {
+    fn field_pad(s: &mut PadStream, d: Domain) -> Value {
         if d == Domain::Gold {
             loop {
                 let w = Secret(s.squeeze_u64());
@@ -3673,7 +3685,9 @@ impl<T: Transport> Engine<T> {
             .zip(next_raw.chunks_exact(word_u64s))
         {
             let mut fw = FieldWord::with_capacity(64);
-            for (av_slice, b_slice) in word_own.chunks_exact(wlen).zip(word_next.chunks_exact(wlen))
+            for (av_slice, b_slice) in word_own
+                .chunks_exact(wlen)
+                .zip(word_next.chunks_exact(wlen))
             {
                 let mut av = ZERO;
                 let mut bv = ZERO;
@@ -3733,14 +3747,12 @@ impl<T: Transport> Engine<T> {
                 let off = base_w + lane_u64s * lane;
                 let prev: [Value; 2] = core::array::from_fn(|j| {
                     let mut v = ZERO;
-                    v[..wlen]
-                        .copy_from_slice(&received[0][off + wlen * j..off + wlen * (j + 1)]);
+                    v[..wlen].copy_from_slice(&received[0][off + wlen * j..off + wlen * (j + 1)]);
                     v
                 });
                 let next: [Value; 2] = core::array::from_fn(|j| {
                     let mut v = ZERO;
-                    v[..wlen]
-                        .copy_from_slice(&received[1][off + wlen * j..off + wlen * (j + 1)]);
+                    v[..wlen].copy_from_slice(&received[1][off + wlen * j..off + wlen * (j + 1)]);
                     v
                 });
                 if prev[1] != a[0] {
@@ -4187,19 +4199,61 @@ pub(crate) mod tests {
         });
     }
 
+    #[test]
+    fn v4_simd_pads_match_four_scalar_streams_across_partial_reads() {
+        let seed = [0x5a; 32];
+        let mut pad = PadStream::new(&seed);
+        let mut expected = Vec::new();
+        let mut scalar: [Cshake256Xof; 4] = core::array::from_fn(|i| {
+            let mut s = Cshake256Xof::new(b"QSAG.OUTER.PADS.V4");
+            s.absorb(&seed);
+            s.absorb(&[i as u8]);
+            s
+        });
+        for _ in 0..4 {
+            let mut blocks = [[0u8; SHAKE256_RATE_BYTES]; 4];
+            for (s, b) in scalar.iter_mut().zip(&mut blocks) {
+                s.squeeze(b);
+            }
+            for word in 0..17 {
+                for b in &blocks {
+                    expected.push(u64::from_le_bytes(
+                        b[8 * word..8 * (word + 1)].try_into().unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut got = vec![0u64; expected.len()];
+        let mut offset = 0;
+        for size in [1, 16, 51, 3, 64, 137] {
+            pad.squeeze_u64s(&mut got[offset..offset + size]);
+            offset += size;
+        }
+        assert_eq!(offset, got.len());
+        assert_eq!(got, expected);
+    }
+
     /// Delegates to a backend and records every opened field word.
     struct FieldOpenings<E>(E, Vec<Vec<Value>>);
     impl<E: Core> Core for FieldOpenings<E> {
         type Bit = E::Bit;
-        fn quorum_position(&self) -> (usize, usize) { self.0.quorum_position() }
-        fn share_masked(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> { self.0.share_masked(own) }
-        fn fshare_many(&mut self, own: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> { self.0.fshare_many(own, d) }
-        fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> { self.0.broadcast_bytes(own) }
+        fn quorum_position(&self) -> (usize, usize) {
+            self.0.quorum_position()
+        }
+        fn share_masked(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
+            self.0.share_masked(own)
+        }
+        fn fshare_many(&mut self, own: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> {
+            self.0.fshare_many(own, d)
+        }
+        fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
+            self.0.broadcast_bytes(own)
+        }
         fn constant(&self, x: u64) -> Self::Bit {
             self.0.constant(x)
         }
         #[cfg(test)]
-    fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
+        fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
             self.0.share(own)
         }
         fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {

@@ -7,9 +7,10 @@
 //!    `unrank` / `rank` operate exclusively on **public** randomized message digests
 //!    `H_msg(R, pk, M, ctr)` (never secret ranks), while secret `SK.seed`/`SK.prf` expansion and
 //!    `U384` primitives execute in straight-line constant time.
-//! 3. Mandatory `SK.prf`-derived per-signature randomizer `R` + monotonic `uses_completed`
-//!    and [`FtsEpochWal`] reservation preventing deterministic 2-message reuse or unbounded
-//!    `q >= 3` over-signing.
+//! 3. Mandatory `SK.prf`-derived per-signature randomizer `R`, and a monotonic use counter
+//!    (`uses_completed`, reserved durably through [`FtsEpochWal`] before any signature
+//!    material is computed) that refuses every signature past the profile's
+//!    `max_safe_uses`, which is 1 for every profile.
 //! 4. Full 256-bit message digest pre-binding with 32-byte nodes: `Compact1122`
 //!    (`1,122 B`) and `Full256Bit` (`2,338 B`) wire profiles.
 
@@ -528,8 +529,6 @@ pub struct FrontierFtsPublicKey {
     pub root: Vec<u8>,
 }
 
-/// Signing key for `FrontierSumFts` with mandatory monotonic use-budget latch, `<REDACTED>` `Debug`,
-/// and `write_volatile` zeroization of both secret seeds AND cached chain states on `Drop`.
 /// Durable monotonic use reservation. Implementations must sync before returning.
 pub trait FtsEpochWal {
     fn uses_completed(&self, key: &[u8; 32]) -> Result<u8, FrontierFtsError>;
@@ -544,6 +543,10 @@ enum FrontierFaultInjection {
     SkipMinimalGrindCounter,
 }
 
+/// Signing key for `FrontierSumFts`. [`Self::sign`] advances the use counter and reserves
+/// the use in the attached [`FtsEpochWal`] before it computes any signature material, and
+/// refuses once `max_uses` is reached; outside tests a key with no WAL attached refuses to
+/// sign. `Debug` redacts both seeds; they and the cached chain values are erased on `Drop`.
 pub struct FrontierFtsSigningKey {
     pub profile: FrontierFtsProfile,
     sk_seed: RedactedSecret<32>,
@@ -587,6 +590,59 @@ pub struct FrontierFtsSignature {
     pub randomizer: Vec<u8>,
     pub grind_counter: u16,
     pub chain_values: Vec<u8>,
+}
+
+/// A signature under construction. Its chain values are secret chain positions until
+/// `verify_before_release` accepts them, so every exit that does not release the
+/// signature erases them and the randomizer.
+struct UnreleasedSignature(FrontierFtsSignature);
+
+impl UnreleasedSignature {
+    fn release(mut self) -> FrontierFtsSignature {
+        FrontierFtsSignature {
+            randomizer: core::mem::take(&mut self.0.randomizer),
+            grind_counter: self.0.grind_counter,
+            chain_values: core::mem::take(&mut self.0.chain_values),
+        }
+    }
+}
+
+impl Drop for UnreleasedSignature {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.0.chain_values);
+        ct_zeroize_bytes(&mut self.0.randomizer);
+        #[cfg(test)]
+        unreleased_probe::dropped(&self.0);
+    }
+}
+
+/// Records, on the current thread, what each discarded signature still held after the
+/// erase: its chain-value length and how many chain or randomizer bytes read back nonzero.
+#[cfg(test)]
+mod unreleased_probe {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static DISCARDED: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    }
+    pub(super) fn take() -> Vec<(usize, usize)> {
+        DISCARDED.with(|d| core::mem::take(&mut *d.borrow_mut()))
+    }
+    pub(super) fn dropped(sig: &super::FrontierFtsSignature) {
+        // A released signature leaves the guard empty.
+        if sig.chain_values.is_empty() && sig.randomizer.is_empty() {
+            return;
+        }
+        let nonzero = sig
+            .chain_values
+            .iter()
+            .chain(&sig.randomizer)
+            .filter(|&&byte| byte != 0)
+            .count();
+        DISCARDED.with(|d| d.borrow_mut().push((sig.chain_values.len(), nonzero)));
+    }
 }
 
 impl FrontierFtsSignature {
@@ -1068,7 +1124,13 @@ impl FrontierFtsSigningKey {
 
         let msg_digest32 = prehash_message_256(&pid, &self.pk.pk_seed, &self.pk.root, msg);
         let seq_bytes = [use_seq];
-        let mut randomizer = vec![0u8; n];
+        // Both buffers have their final size from here on; the guard erases them on
+        // every exit below except the release at the end.
+        let mut sig = UnreleasedSignature(FrontierFtsSignature {
+            randomizer: vec![0u8; n],
+            grind_counter: 0,
+            chain_values: vec![0u8; p.frontier_len * n],
+        });
         cshake256_framed_xof(
             TAG_RAND,
             &[
@@ -1080,17 +1142,17 @@ impl FrontierFtsSigningKey {
                 &seq_bytes,
                 &msg_digest32,
             ],
-            &mut randomizer,
+            &mut sig.0.randomizer,
         );
         #[cfg(test)]
         if let Some(FrontierFaultInjection::PreGrindRandomizerFlip { index, mask }) =
             self.test_fault
-            && let Some(slot) = randomizer.get_mut(index)
+            && let Some(slot) = sig.0.randomizer.get_mut(index)
         {
             *slot ^= mask;
         }
 
-        let max_ctr: u32 = 1u32 << p.counter_bits;
+        let max_ctr = 1u64 << p.counter_bits;
         let mut found_ctr = None;
         let mut target_rank = U384::ZERO;
         #[cfg(test)]
@@ -1100,7 +1162,7 @@ impl FrontierFtsSigningKey {
                 &pid,
                 &self.pk.pk_seed,
                 &self.pk.root,
-                &randomizer,
+                &sig.0.randomizer,
                 &msg_digest32,
                 ctr as u16,
                 p.index_bits,
@@ -1120,10 +1182,10 @@ impl FrontierFtsSigningKey {
                 break;
             }
         }
-        let grind_counter = found_ctr.ok_or(FrontierFtsError::GrindingExhausted)?;
+        sig.0.grind_counter = found_ctr.ok_or(FrontierFtsError::GrindingExhausted)?;
         let (frontier, offsets) = dp.unrank(target_rank)?;
 
-        let mut chain_values = vec![0u8; p.frontier_len * n];
+        let chain_values = &mut sig.0.chain_values;
         if let Some(ref cbuf) = self.cached_chains {
             // Constant-time scan across all `j in 0..w` for each frontier node `v`.
             let mut slot_val = SecretBuffer([0u8; 32]);
@@ -1156,18 +1218,9 @@ impl FrontierFtsSigningKey {
             *slot ^= mask;
         }
 
-        let mut sig = FrontierFtsSignature {
-            randomizer,
-            grind_counter,
-            chain_values,
-        };
         // Mandatory verify-before-release + pre-grind randomizer & canonical counter check!
-        if let Err(err) = self.verify_before_release(dp, use_seq, msg, opt_hedging_nonce, &sig) {
-            ct_zeroize_bytes(&mut sig.chain_values);
-            ct_zeroize_bytes(&mut sig.randomizer);
-            return Err(err);
-        }
-        Ok(sig)
+        self.verify_before_release(dp, use_seq, msg, opt_hedging_nonce, &sig.0)?;
+        Ok(sig.release())
     }
 
     fn verify_before_release(
@@ -1198,7 +1251,7 @@ impl FrontierFtsSigningKey {
             &mut expected_randomizer,
         );
         let rand_ok = ct_eq_bytes(&sig.randomizer, &expected_randomizer);
-        let max_ctr: u32 = 1u32 << p.counter_bits;
+        let max_ctr = 1u64 << p.counter_bits;
         let mut canonical_ctr = None;
         for ctr in 0..max_ctr {
             let cand = squeeze_target_index(
@@ -1501,11 +1554,15 @@ mod rank_domain_tests {
             index: 0,
             mask: 0x01,
         });
+        let chain_bytes = profile.params().frontier_len * profile.params().node_bytes;
+        let _ = unreleased_probe::take();
         assert_eq!(
             sk_chain.sign(&dp, msg, &hedge),
             Err(FrontierFtsError::SignatureVerificationFailed)
         );
         assert_eq!(sk_chain.uses_completed(), 1);
+        // The refused signature held every chain value; all of them were erased.
+        assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
 
         // 2. Pre-grind randomizer bit-flip produces a self-consistent signature that WOULD pass
         //    bare `verify_frontier_fts`, yet `sign` deterministically aborts!
@@ -1526,6 +1583,7 @@ mod rank_domain_tests {
             Err(FrontierFtsError::SignatureVerificationFailed)
         );
         assert_eq!(sk_rand.uses_completed(), 1);
+        assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
 
         // 3. Skipping the minimal valid grinding counter also produces a valid codeword under
         //    bare `verify_frontier_fts`, yet `sign` deterministically aborts!
@@ -1543,6 +1601,7 @@ mod rank_domain_tests {
             Err(FrontierFtsError::SignatureVerificationFailed)
         );
         assert_eq!(sk_ctr.uses_completed(), 1);
+        assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
 
         // 4. Write-once per-use `(randomizer, grind_counter)` consistency rejects conflicting release.
         let mut sk_cache = FrontierFtsSigningKey::keygen(
@@ -1557,6 +1616,46 @@ mod rank_domain_tests {
         assert_eq!(
             sk_cache.sign(&dp, msg, &hedge),
             Err(FrontierFtsError::SignatureVerificationFailed)
+        );
+        assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
+
+        // 5. An accepted signature is released intact and leaves nothing to erase.
+        let mut sk_ok = FrontierFtsSigningKey::keygen(
+            profile,
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            true,
+            &CpuReferenceBackend::new(),
+        );
+        let released = sk_ok.sign(&dp, msg, &hedge).unwrap();
+        assert_eq!(released.chain_values.len(), chain_bytes);
+        assert!(released.chain_values.iter().any(|&byte| byte != 0));
+        verify_frontier_fts(&sk_ok.pk, &dp, msg, &released).unwrap();
+        assert!(unreleased_probe::take().is_empty());
+
+        // 6. The uncached path fails the same way and erases the same buffer.
+        let mut sk_uncached = FrontierFtsSigningKey::keygen(
+            FrontierFtsProfile::Fast256Test,
+            [1u8; 32],
+            [2u8; 32],
+            [3u8; 32],
+            false,
+            &CpuReferenceBackend::new(),
+        );
+        let fast = FrontierFtsProfile::Fast256Test;
+        let fast_dp = FrontierDpTable::build(fast);
+        sk_uncached.test_fault = Some(FrontierFaultInjection::ChainByteFlip {
+            index: 5,
+            mask: 0x10,
+        });
+        assert_eq!(
+            sk_uncached.sign(&fast_dp, msg, &hedge),
+            Err(FrontierFtsError::SignatureVerificationFailed)
+        );
+        assert_eq!(
+            unreleased_probe::take(),
+            [(fast.params().frontier_len * fast.params().node_bytes, 0)]
         );
     }
 }

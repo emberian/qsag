@@ -19,7 +19,7 @@ case "$fam" in
     *) echo "family must be xcup or ecp5"; exit 2 ;;
 esac
 case "$top" in
-    qsag_keccak_turboshake|qsag_keccak_p12_pipe|qsag_keccak_compact|qsag_ts_canopy_engine|qsag_gf128_clmul|qsag_gf128_tower_map|qsag_gf128_tower_mul|qsag_gl64_reduce|qsag_p2_linear|qsag_p2_chain_engine|qsag_sdp_bram|qsag_gf128_reduce|qsag_clmul_kara) tile="" ;;
+    qsag_keccak_turboshake|qsag_keccak_p12_pipe|qsag_keccak_compact|qsag_ts_canopy_engine|qsag_gf128_clmul|qsag_gf128_tower_map|qsag_gf128_tower_mul|qsag_gf128_compact|qsag_gl64_reduce|qsag_p2_linear|qsag_p2_chain_engine|qsag_sdp_bram|qsag_gf128_reduce|qsag_clmul_kara) tile="" ;;
 esac
 json=""; [ "${WRITE_JSON:-0}" = 1 ] && json="write_json $out.json;"
 # Logic depth: delete every sequential / hard cell, then the longest remaining path in any module

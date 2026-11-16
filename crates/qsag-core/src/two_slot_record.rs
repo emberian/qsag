@@ -134,8 +134,11 @@ impl TwoSlotRecord {
         ];
         // A slot whose sidecar is missing, damaged or not the one genesis names is
         // unavailable: it is neither read nor written, and the other slot still opens.
+        // Opening creates nothing, so a missing slot gains no sidecar here. A slot
+        // that lost only its record file keeps its sidecar and is rewritten by the
+        // next commit to it.
         let slots = core::array::from_fn(|index| {
-            LockedRecord::acquire(&paths.slots[index])
+            LockedRecord::open_provisioned(&paths.slots[index])
                 .ok()
                 .filter(|slot| slot.lock_identity_seal() == slot_identities[index])
         });
@@ -534,6 +537,59 @@ mod tests {
             assert_eq!(record.read().unwrap(), b"new");
             record.commit_mirrored(b"next").unwrap();
             drop(record);
+            assert_eq!(dir.open(None).unwrap().read().unwrap(), b"next");
+        }
+    }
+
+    fn lock_of(path: &std::path::Path) -> PathBuf {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".lock");
+        name.into()
+    }
+
+    #[test]
+    fn opening_with_a_missing_slot_creates_no_sidecar() {
+        for lost in 0..2 {
+            let dir = Scratch::new("orphan");
+            let mut record = TwoSlotRecord::create(dir.paths(), KEY, DOMAIN, 1024, b"old").unwrap();
+            record.commit_mirrored(b"new").unwrap();
+            drop(record);
+            // The slot and its sidecar are both gone: the slot stays unavailable, and
+            // opening does not put an unrelated sidecar in its place.
+            std::fs::remove_file(dir.slot(lost)).unwrap();
+            std::fs::remove_file(lock_of(&dir.slot(lost))).unwrap();
+            for _ in 0..2 {
+                let record = dir.open(None).unwrap();
+                assert_eq!(record.read().unwrap(), b"new");
+                drop(record);
+                assert!(!lock_of(&dir.slot(lost)).exists());
+                assert!(!dir.slot(lost).exists());
+            }
+            // A sidecar recreated by hand is not the one genesis names.
+            std::fs::write(lock_of(&dir.slot(lost)), []).unwrap();
+            let mut record = dir.open(None).unwrap();
+            assert_eq!(record.read().unwrap(), b"new");
+            // The next generation belongs to the lost slot, which stays unwritten.
+            assert!(record.commit(b"x").is_err());
+            assert!(!dir.slot(lost).exists());
+        }
+    }
+
+    #[test]
+    fn a_slot_that_lost_only_its_record_file_is_rewritten() {
+        for lost in 0..2 {
+            let dir = Scratch::new("lost-record");
+            let mut record = TwoSlotRecord::create(dir.paths(), KEY, DOMAIN, 1024, b"old").unwrap();
+            record.commit_mirrored(b"new").unwrap();
+            drop(record);
+            std::fs::remove_file(dir.slot(lost)).unwrap();
+            let mut record = dir.open(None).unwrap();
+            assert_eq!(record.read().unwrap(), b"new");
+            record.commit_mirrored(b"next").unwrap();
+            drop(record);
+            assert!(dir.slot(lost).exists());
+            let other = 1 - lost;
+            dir.tear(other);
             assert_eq!(dir.open(None).unwrap().read().unwrap(), b"next");
         }
     }

@@ -876,6 +876,9 @@ pub(crate) enum Fault {
     WrongConsistencyHash { peer: usize },
 }
 
+/// Per held slot: packed `u64` bit-shares and flattened `128 * words` `u64` `GF(2^128)` bit-planes.
+type PlaneSlotShares = (Vec<Vec<u64>>, Vec<Vec<u64>>);
+
 struct CachedKeyPlanes {
     words: usize,
     /// Per held slot: `words` little-endian `u64` words.
@@ -1947,7 +1950,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         v_bits: &[u64],
         v_rand: &[u64],
         words: usize,
-    ) -> Result<(Vec<Vec<u64>>, Vec<Vec<u64>>), CnfPartyError> {
+    ) -> Result<PlaneSlotShares, CnfPartyError> {
         let ctr = self.mult_ctr;
         self.mult_ctr = ctr.checked_add(1).ok_or(CnfPartyError::CounterOverflow)?;
         let bit_words = v_bits.len();
@@ -2049,7 +2052,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
         x_rand: &[Vec<u64>],
         y_bits: &[Vec<u64>],
         words: usize,
-    ) -> Result<(Vec<Vec<u64>>, Vec<Vec<u64>>), CnfPartyError> {
+    ) -> Result<PlaneSlotShares, CnfPartyError> {
         let bit_words = if x_bits.is_some() { words } else { 0 };
         let rand_words = 128 * words;
         let mut v_bits = vec![0u64; bit_words];
@@ -2122,11 +2125,10 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             })
             .collect();
         let mut r_planes = vec![vec![0u64; 128 * words]; held];
-        for l in 0..held {
-            let rl = self.r[l];
+        for (rp, &rl) in r_planes.iter_mut().zip(&self.r) {
             for k in 0..128 {
                 if ((rl >> k) & 1) == 1 {
-                    r_planes[l][k * words..(k + 1) * words].fill(u64::MAX);
+                    rp[k * words..(k + 1) * words].fill(u64::MAX);
                 }
             }
         }
@@ -2280,10 +2282,10 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                         let br = linear_bits(&state.rand[l][idx]);
                         lin_rand[l][idx] = br;
                         let xr = &mut x_rand[l][25 * idx..25 * (idx + 1)];
-                        for lane in 0..25 {
+                        for (lane, dst_x) in xr.iter_mut().enumerate() {
                             let row = 5 * (lane / 5);
                             let u_lane = row + (lane + 1) % 5;
-                            xr[lane] = br[u_lane] ^ r_mask;
+                            *dst_x = br[u_lane] ^ r_mask;
                         }
                     }
                 }
@@ -2422,7 +2424,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             wipe_bytes(&mut open_payload);
 
             let mut opens = Vec::with_capacity(n);
-            for p in 0..n {
+            for (p, com_entry) in commits.iter().enumerate() {
                 if p == me {
                     opens.push(my_open.clone());
                 } else {
@@ -2438,7 +2440,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                     let share = raw[64..].to_vec();
                     wipe_bytes(&mut raw);
                     let exp = compute_hedged_r_commit_v1(&hedged_sid, p as u64, &share, &salt);
-                    if !ct_eq_bytes32(&exp, &commits[p].commit) {
+                    if !ct_eq_bytes32(&exp, &com_entry.commit) {
                         return Err(CnfPartyError::OpeningRejected { party: p });
                     }
                     opens.push(HedgedRandomizerOpen {
@@ -3171,9 +3173,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedSlhBackend for IsolatedCnfParty
                     }
                 }
 
-                for sp in 0..c_len {
+                for sp_bits in &cur_bits {
                     for (l, dst) in final_shares.iter_mut().enumerate() {
-                        words_to_bytes(&cur_bits[sp][l][..key_words], dst);
+                        words_to_bytes(&sp_bits[l][..key_words], dst);
                     }
                 }
                 wipe_sponge_chain_state(&mut cur_bits, &mut cur_rand);

@@ -22,6 +22,119 @@
 use crate::volatile_fill;
 use core::ops::{Deref, DerefMut};
 
+// Vector-register erasure for compiled SIMD code. Compiled code picks its own
+// registers, so these clear the whole caller-saved vector file; call one last, after
+// every stack wipe, in a function whose vector registers held secrets. Each is
+// declared to clobber what it clears, so no value is kept in a vector register
+// across it.
+
+/// Zero the caller-saved vector registers after portable code that the compiler may have
+/// vectorized: the widest set the build's baseline features give it. A no-op under Miri
+/// and on architectures without one of the wipes below.
+#[inline(always)]
+pub(crate) fn wipe_vector_scratch() {
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    // SAFETY: each wipe needs exactly the target feature its `cfg` checks at build time
+    // (SSE2 is baseline), and writes vector registers only.
+    unsafe {
+        #[cfg(target_feature = "avx512f")]
+        wipe_zmm_regs();
+        #[cfg(all(target_feature = "avx", not(target_feature = "avx512f")))]
+        wipe_ymm_regs();
+        #[cfg(not(target_feature = "avx"))]
+        wipe_xmm_regs();
+    }
+    #[cfg(all(target_arch = "aarch64", not(miri)))]
+    // SAFETY: NEON is baseline on AArch64; only caller-saved vector registers are written.
+    unsafe {
+        crate::aarch64_simd::wipe_neon_scratch_regs();
+    }
+}
+
+/// Zero `xmm0..xmm15` with baseline SSE2, for code built without AVX.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+pub(crate) unsafe fn wipe_xmm_regs() {
+    // SAFETY: SSE2 is baseline on x86-64; only the declared registers are written.
+    unsafe {
+        core::arch::asm!(
+            "pxor xmm0, xmm0", "pxor xmm1, xmm1", "pxor xmm2, xmm2", "pxor xmm3, xmm3",
+            "pxor xmm4, xmm4", "pxor xmm5, xmm5", "pxor xmm6, xmm6", "pxor xmm7, xmm7",
+            "pxor xmm8, xmm8", "pxor xmm9, xmm9", "pxor xmm10, xmm10", "pxor xmm11, xmm11",
+            "pxor xmm12, xmm12", "pxor xmm13, xmm13", "pxor xmm14, xmm14", "pxor xmm15, xmm15",
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
+            out("xmm12") _, out("xmm13") _, out("xmm14") _, out("xmm15") _,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+}
+
+/// Zero `ymm0..ymm15`, upper halves included. The caller has checked AVX.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx")]
+pub(crate) unsafe fn wipe_ymm_regs() {
+    // SAFETY: AVX is enabled; only the declared registers are written.
+    unsafe {
+        core::arch::asm!(
+            "vpxor xmm0, xmm0, xmm0", "vpxor xmm1, xmm1, xmm1",
+            "vpxor xmm2, xmm2, xmm2", "vpxor xmm3, xmm3, xmm3",
+            "vpxor xmm4, xmm4, xmm4", "vpxor xmm5, xmm5, xmm5",
+            "vpxor xmm6, xmm6, xmm6", "vpxor xmm7, xmm7, xmm7",
+            "vpxor xmm8, xmm8, xmm8", "vpxor xmm9, xmm9, xmm9",
+            "vpxor xmm10, xmm10, xmm10", "vpxor xmm11, xmm11, xmm11",
+            "vpxor xmm12, xmm12, xmm12", "vpxor xmm13, xmm13, xmm13",
+            "vpxor xmm14, xmm14, xmm14", "vpxor xmm15, xmm15, xmm15",
+            "vzeroupper",
+            out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+            out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+            out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+            out("ymm12") _, out("ymm13") _, out("ymm14") _, out("ymm15") _,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+}
+
+/// Zero `zmm0..zmm31`. The caller has checked AVX-512F.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx512f")]
+pub(crate) unsafe fn wipe_zmm_regs() {
+    // SAFETY: AVX-512F is enabled; only the declared registers are written.
+    unsafe {
+        core::arch::asm!(
+            "vpxorq zmm0, zmm0, zmm0", "vpxorq zmm1, zmm1, zmm1",
+            "vpxorq zmm2, zmm2, zmm2", "vpxorq zmm3, zmm3, zmm3",
+            "vpxorq zmm4, zmm4, zmm4", "vpxorq zmm5, zmm5, zmm5",
+            "vpxorq zmm6, zmm6, zmm6", "vpxorq zmm7, zmm7, zmm7",
+            "vpxorq zmm8, zmm8, zmm8", "vpxorq zmm9, zmm9, zmm9",
+            "vpxorq zmm10, zmm10, zmm10", "vpxorq zmm11, zmm11, zmm11",
+            "vpxorq zmm12, zmm12, zmm12", "vpxorq zmm13, zmm13, zmm13",
+            "vpxorq zmm14, zmm14, zmm14", "vpxorq zmm15, zmm15, zmm15",
+            "vpxorq zmm16, zmm16, zmm16", "vpxorq zmm17, zmm17, zmm17",
+            "vpxorq zmm18, zmm18, zmm18", "vpxorq zmm19, zmm19, zmm19",
+            "vpxorq zmm20, zmm20, zmm20", "vpxorq zmm21, zmm21, zmm21",
+            "vpxorq zmm22, zmm22, zmm22", "vpxorq zmm23, zmm23, zmm23",
+            "vpxorq zmm24, zmm24, zmm24", "vpxorq zmm25, zmm25, zmm25",
+            "vpxorq zmm26, zmm26, zmm26", "vpxorq zmm27, zmm27, zmm27",
+            "vpxorq zmm28, zmm28, zmm28", "vpxorq zmm29, zmm29, zmm29",
+            "vpxorq zmm30, zmm30, zmm30", "vpxorq zmm31, zmm31, zmm31",
+            "vzeroupper",
+            out("zmm0") _, out("zmm1") _, out("zmm2") _, out("zmm3") _,
+            out("zmm4") _, out("zmm5") _, out("zmm6") _, out("zmm7") _,
+            out("zmm8") _, out("zmm9") _, out("zmm10") _, out("zmm11") _,
+            out("zmm12") _, out("zmm13") _, out("zmm14") _, out("zmm15") _,
+            out("zmm16") _, out("zmm17") _, out("zmm18") _, out("zmm19") _,
+            out("zmm20") _, out("zmm21") _, out("zmm22") _, out("zmm23") _,
+            out("zmm24") _, out("zmm25") _, out("zmm26") _, out("zmm27") _,
+            out("zmm28") _, out("zmm29") _, out("zmm30") _, out("zmm31") _,
+            options(nostack, nomem, preserves_flags),
+        );
+    }
+}
+
 /// Overwrite `self` with zeros through volatile writes.
 pub trait SecretWipe {
     fn secret_wipe(&mut self);

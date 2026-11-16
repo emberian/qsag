@@ -1,24 +1,28 @@
-//! Split subtree recursion with an explicit deferred-PCS ledger.
+//! Split subtree recursion with a succinct `[CWYZ26]` homogeneous-level folded PCS accumulator.
 //!
-//! Internal circuits check the entire algebraic IOP and roster transition. They commit
-//! to the exact remaining PCS claims and to both children's ledgers. Acceptance requires
-//! a root proof AND every deferred WHIR opening. This contracts the circuit, but the
-//! ledger and verifier work grow with the number of edges; it is not a succinct PCS
-//! accumulator or a DuetFold implementation. Keep this cost visible in callers.
+//! Internal circuits verify every child's algebraic Spark/LogUp-GKR hologram IOP and roster
+//! transition in `<= 2^20` rows, binding each child's `DeferredPcsClaim` digest and prior
+//! accumulator root into `accumulator_root`. At the root, `prove_root` folds all `M_l`
+//! homogeneous deferred PCS claims at each tree level `l in 0..depth-1` via a `[CWYZ26]`
+//! multilinear point-reduction sumcheck + correlated codeword combination into **at most one
+//! `FoldedLevelWhirProof` per tree level (`O(depth)` WHIR cascades instead of `O(N)` cascades)**,
+//! authenticated against every committed child Merkle root via Steiner-deduplicated multi-proofs.
 
 mod codec;
 
 use super::*;
 use crate::zk_hem::protocol::{
     DeferredPcsClaim, HologramPublicProof, RecursivePublicHemProof, ShapeHologram,
-    ShapeVerifierKey, prove_public_for_recursion, prove_public_hologram,
-    verify_public_algebraic_gadget, verify_public_hologram,
+    ShapeVerifierKey, SplitDeferredWitness, prove_folded_level_from_split, prove_public_for_split,
+    prove_public_hologram, verify_folded_level_claims, verify_public_algebraic_gadget,
+    verify_public_hologram,
 };
 use crate::zk_hem::recursive_whir::{
-    Assignment, Backend, Base, Correlated3WhirProof, Native, Transcript, bits,
+    Assignment, Backend, Base, FoldedLevelWhirProof, Native, Transcript, bits,
 };
 use crate::zk_hem::relation::{ConstraintSystem, Lc, Shape};
-use alloc::collections::BTreeSet;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 
 type F = Goldilocks;
 const PUBLIC_WORDS: usize = SUBTREE_PUBLIC_WORDS + 4;
@@ -28,8 +32,8 @@ const LEDGER_TAG: u64 = 0x5350_4C54_0001;
 #[derive(Clone)]
 struct Edge {
     claim: DeferredPcsClaim<F>,
-    opening: Correlated3WhirProof,
     prior: [F; 4],
+    witness: Option<Arc<SplitDeferredWitness>>,
 }
 
 #[derive(Clone)]
@@ -70,13 +74,72 @@ pub struct SplitSubtreeProof {
 
 impl SplitSubtreeProof {
     /// Wrap an existing leaf relation proof. Its key must have the original 14 publics.
-    /// Cryptographic verification occurs in the parent relation and its PCS decider.
+    /// Cryptographic verification occurs in the parent relation and its level PCS decider.
     pub fn leaf(public: SubtreePublic, proof: RecursivePublicHemProof) -> Self {
         Self {
             public,
             proof,
             ledger: Vec::new(),
         }
+    }
+
+    /// Prove a Level-1 subtree leaf directly for split recursion, skipping redundant per-leaf
+    /// WHIR cascades that `prove_root` folds per homogeneous tree level.
+    pub fn prove_leaf(
+        relation: &SubtreeLeafMergeRelation,
+        policies: &[ShardHemPolicy],
+        epoch_floor: u64,
+        message: &[u8],
+        witnesses: &[ShardHemWitness<'_>],
+        seed: &[u8; 32],
+    ) -> Result<Self, FullShardError> {
+        let (public, z) =
+            relation.build_assignment(policies, epoch_floor, message, witnesses, seed)?;
+        let proof = prove_public_for_split(
+            &relation.shape,
+            &relation.hologram,
+            z,
+            SUBTREE_REC_TAG,
+        )
+        .map_err(|_| FullShardError::InvalidChild)?;
+        Ok(Self {
+            public,
+            proof,
+            ledger: Vec::new(),
+        })
+    }
+
+    /// Prove a Level-1 sparse-roster subtree leaf directly for split recursion, skipping
+    /// redundant per-leaf WHIR cascades.
+    pub fn prove_roster_leaf(
+        relation: &SubtreeLeafMergeRelation,
+        policies: &[ShardHemPolicy],
+        openings: &[SubtreeRosterOpening],
+        epoch_floor: u64,
+        message: &[u8],
+        witnesses: &[ShardHemWitness<'_>],
+        seed: &[u8; 32],
+    ) -> Result<Self, FullShardError> {
+        let (public, z) = relation.build_roster_assignment(
+            policies,
+            epoch_floor,
+            message,
+            witnesses,
+            seed,
+            Some(openings),
+        )?;
+        let proof = prove_public_for_split(
+            &relation.shape,
+            &relation.hologram,
+            z,
+            SUBTREE_REC_TAG,
+        )
+        .map_err(|_| FullShardError::InvalidChild)?;
+        Ok(Self {
+            public,
+            proof,
+            ledger: Vec::new(),
+        })
     }
 
     pub fn public(&self) -> SubtreePublic {
@@ -90,7 +153,8 @@ impl SplitSubtreeProof {
 
 /// Binary internal relation; 18 public words at every internal level.
 /// Its children are either 14-word leaves or 18-word split internal nodes, as fixed by
-/// the trusted child verification key. The root verifier must also check the ledger.
+/// the trusted child verification key. The root verifier checks both the root SNARK and
+/// the succinct per-level folded WHIR openings.
 pub struct SplitSubtreeRelation {
     child_vk: ShapeVerifierKey,
     base_merkle_level: usize,
@@ -141,6 +205,7 @@ impl SplitSubtreeRelation {
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
+        drop(z);
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
             multiplication_rows: used - shape.num_sbox,
@@ -185,6 +250,7 @@ impl SplitSubtreeRelation {
         }
         for c in children {
             if !c.proof.well_formed(&self.child_vk)
+                || c.proof.split_witness.0.is_none()
                 || (self.child_vk.num_public == SUBTREE_PUBLIC_WORDS && !c.ledger.is_empty())
                 || (self.child_vk.num_public == PUBLIC_WORDS && c.ledger.is_empty())
                 || c.public.min_key_idx > c.public.max_key_idx
@@ -246,8 +312,8 @@ impl SplitSubtreeRelation {
             }
             edges.push(Edge {
                 claim,
-                opening: c.proof.opening.clone(),
                 prior,
+                witness: c.proof.split_witness.0.clone(),
             });
         }
         let node = LedgerNode {
@@ -291,7 +357,7 @@ impl SplitSubtreeRelation {
         children: &[SplitSubtreeProof; 2],
     ) -> Result<SplitSubtreeProof, FullShardError> {
         let (public, ledger, z) = self.assignment(children)?;
-        let proof = prove_public_for_recursion(&self.shape, &self.hologram, z, SUBTREE_REC_TAG)
+        let proof = prove_public_for_split(&self.shape, &self.hologram, z, SUBTREE_REC_TAG)
             .map_err(|_| FullShardError::InvalidChild)?;
         Ok(SplitSubtreeProof {
             public,
@@ -305,13 +371,73 @@ impl SplitSubtreeRelation {
         children: &[SplitSubtreeProof; 2],
         seed: &[u8; 32],
     ) -> Result<SplitSubtreeAggregate, FullShardError> {
-        let (public, ledger, z) = self.assignment(children)?;
+        let (public, mut ledger, z) = self.assignment(children)?;
         let proof = prove_public_hologram(&self.shape, &self.hologram, z, SUBTREE_ROOT_LABEL, seed)
             .map_err(|_| FullShardError::InvalidChild)?;
+
+        let top_root = ledger
+            .last()
+            .ok_or(FullShardError::InvalidChild)?
+            .root();
+        let mut pending: BTreeMap<[u64; 4], usize> = BTreeMap::new();
+        let mut by_level: Vec<Vec<(&DeferredPcsClaim<F>, &SplitDeferredWitness)>> = Vec::new();
+        for node in &ledger {
+            let mut edge_levels = [0usize; 2];
+            for (slot, edge) in edge_levels.iter_mut().zip(&node.edges) {
+                *slot = if edge.prior == EMPTY {
+                    0
+                } else {
+                    pending
+                        .remove(&edge.prior.map(|v| v.to_canonical_u64()))
+                        .ok_or(FullShardError::InvalidChild)?
+                };
+            }
+            if edge_levels[0] != edge_levels[1] {
+                return Err(FullShardError::InvalidChild);
+            }
+            let level = edge_levels[0];
+            if level > by_level.len() {
+                return Err(FullShardError::InvalidChild);
+            }
+            if level == by_level.len() {
+                by_level.push(Vec::new());
+            }
+            for edge in &node.edges {
+                let wit = edge
+                    .witness
+                    .as_deref()
+                    .ok_or(FullShardError::InvalidChild)?;
+                by_level[level].push((&edge.claim, wit));
+            }
+            if pending
+                .insert(node.root().map(|v| v.to_canonical_u64()), level + 1)
+                .is_some()
+            {
+                return Err(FullShardError::InvalidChild);
+            }
+        }
+        if pending.len() != 1 {
+            return Err(FullShardError::InvalidChild);
+        }
+
+        let mut level_openings = Vec::with_capacity(by_level.len());
+        for (level, items) in by_level.iter().enumerate() {
+            let opening = prove_folded_level_from_split(level, top_root, items)
+                .map_err(|_| FullShardError::InvalidChild)?;
+            level_openings.push(opening);
+        }
+        drop(by_level);
+        for node in &mut ledger {
+            for edge in &mut node.edges {
+                edge.witness = None;
+            }
+        }
+
         Ok(SplitSubtreeAggregate {
             public,
             proof,
             ledger,
+            level_openings,
         })
     }
 }
@@ -385,41 +511,77 @@ fn merge_gadget<B: Backend>(
     }
 }
 
-/// One constant-depth root SNARK plus a linear-size deferred PCS ledger.
+/// One constant-depth root SNARK plus `O(depth)` `[CWYZ26]` per-level folded WHIR openings.
 #[derive(Clone)]
 pub struct SplitSubtreeAggregate {
     pub(super) public: SubtreePublic,
     pub(super) proof: HologramPublicProof,
     ledger: Vec<LedgerNode>,
+    level_openings: Vec<FoldedLevelWhirProof>,
 }
 
 impl SplitSubtreeAggregate {
     pub fn public(&self) -> SubtreePublic {
         self.public
     }
+
+    /// Number of WHIR PCS opening cascades carried by this aggregate (`depth - 1`: `1` per
+    /// homogeneous tree level below the root!).
     pub fn deferred_openings(&self) -> usize {
-        self.ledger.len() * 2
+        self.level_openings.len()
     }
 
-    /// Verify all deferred edges, rejecting omissions, duplicates, reordering across
-    /// dependencies and orphan nodes. Every nonempty prior root is consumed exactly once.
+    /// Verify the authenticated DAG topology and discharge every homogeneous tree level's
+    /// deferred PCS claims with its single `[CWYZ26]` [`FoldedLevelWhirProof`], rejecting
+    /// omissions, duplicates, level mismatches, reordered dependencies, and orphan nodes.
     fn verify_ledger(&self) -> bool {
-        let mut pending = BTreeSet::new();
+        let Some(last_node) = self.ledger.last() else {
+            return false;
+        };
+        let top_root = last_node.root();
+        let mut pending: BTreeMap<[u64; 4], usize> = BTreeMap::new();
+        let mut by_level: Vec<Vec<&DeferredPcsClaim<F>>> = Vec::new();
         for node in &self.ledger {
-            for edge in &node.edges {
-                if edge.prior != EMPTY && !pending.remove(&edge.prior.map(|v| v.to_canonical_u64()))
-                {
-                    return false;
-                }
-                if !edge.claim.verify(&edge.opening) {
-                    return false;
+            let mut edge_levels = [0usize; 2];
+            for (slot, edge) in edge_levels.iter_mut().zip(&node.edges) {
+                if edge.prior == EMPTY {
+                    *slot = 0;
+                } else {
+                    let Some(lvl) = pending.remove(&edge.prior.map(|v| v.to_canonical_u64()))
+                    else {
+                        return false;
+                    };
+                    *slot = lvl;
                 }
             }
-            if !pending.insert(node.root().map(|v| v.to_canonical_u64())) {
+            if edge_levels[0] != edge_levels[1] {
+                return false;
+            }
+            let level = edge_levels[0];
+            if level > by_level.len() {
+                return false;
+            }
+            if level == by_level.len() {
+                by_level.push(Vec::new());
+            }
+            by_level[level].push(&node.edges[0].claim);
+            by_level[level].push(&node.edges[1].claim);
+            if pending
+                .insert(node.root().map(|v| v.to_canonical_u64()), level + 1)
+                .is_some()
+            {
                 return false;
             }
         }
-        pending.len() == 1
+        if pending.len() != 1 || self.level_openings.len() != by_level.len() {
+            return false;
+        }
+        for (level, (claims, opening)) in by_level.iter().zip(&self.level_openings).enumerate() {
+            if !verify_folded_level_claims(level, top_root, claims, opening) {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn verify_against_roster_root(
@@ -430,6 +592,7 @@ impl SplitSubtreeAggregate {
         let p = self.public;
         if vk.num_public != PUBLIC_WORDS
             || self.ledger.is_empty()
+            || self.level_openings.is_empty()
             || statement.minimum_global_quorums == 0
             || statement.epoch_floor >= crate::field::GOLDILOCKS_PRIME
             || p.epoch_floor.to_canonical_u64() != statement.epoch_floor
@@ -458,7 +621,7 @@ impl SplitSubtreeAggregate {
 }
 
 impl SplitSubtreeAggregate {
-    /// Encode the proof and complete ledger; the length includes every deferred opening.
+    /// Decode the canonical root proof, claim DAG, and succinct per-level folded WHIR openings.
     pub fn from_bytes_canonical(vk: &ShapeVerifierKey, bytes: &[u8]) -> Option<Self> {
         codec::decode(vk, bytes)
     }
@@ -477,16 +640,7 @@ impl SplitSubtreeAggregate {
         fn len(out: &mut Vec<u8>, n: usize) {
             out.extend_from_slice(&(n as u64).to_le_bytes());
         }
-        fn queries(out: &mut Vec<u8>, qs: &[crate::zk_hem::recursive_whir::FixedPathQuery]) {
-            len(out, qs.len());
-            for q in qs {
-                len(out, q.values.len());
-                exts(out, q.values.iter().copied());
-                len(out, q.siblings.len());
-                fields(out, q.siblings.iter().flatten().copied());
-            }
-        }
-        let mut out = b"QSAGSPD1".to_vec();
+        let mut out = b"QSAGSPD2".to_vec();
         fields(&mut out, self.public.words());
         let root = self.proof.to_bytes();
         len(&mut out, root.len());
@@ -510,40 +664,48 @@ impl SplitSubtreeAggregate {
                     }
                 }
                 fields(&mut out, edge.prior);
-                let p = &edge.opening;
-                exts(&mut out, p.cross_evals.iter().flatten().copied());
-                for leaves in &p.stage0_canopy_leaves {
-                    len(&mut out, leaves.len());
-                    fields(&mut out, leaves.iter().flatten().copied());
-                }
-                len(&mut out, p.stage0_queries.len());
-                for triple in &p.stage0_queries {
-                    queries(&mut out, triple);
-                }
-                len(&mut out, p.later_stage_roots.len());
-                fields(&mut out, p.later_stage_roots.iter().flatten().copied());
-                len(&mut out, p.later_canopy_leaves.len());
-                for leaves in &p.later_canopy_leaves {
-                    len(&mut out, leaves.len());
-                    fields(&mut out, leaves.iter().flatten().copied());
-                }
-                len(&mut out, p.ood_evals.len());
-                exts(&mut out, p.ood_evals.iter().flatten().copied());
-                len(&mut out, p.fold_polys.len());
-                exts(&mut out, p.fold_polys.iter().flatten().copied());
-                for nonces in [&p.fold_nonces, &p.query_nonces] {
-                    len(&mut out, nonces.len());
-                    for n in nonces.iter().flatten() {
-                        out.extend_from_slice(&n.to_le_bytes());
-                    }
-                }
-                len(&mut out, p.later_queries.len());
-                for qs in &p.later_queries {
-                    queries(&mut out, qs);
-                }
-                len(&mut out, p.final_coeffs.len());
-                exts(&mut out, p.final_coeffs.iter().copied());
             }
+        }
+        len(&mut out, self.level_openings.len());
+        for p in &self.level_openings {
+            len(&mut out, p.point_rounds.len());
+            exts(&mut out, p.point_rounds.iter().flatten().copied());
+            len(&mut out, p.poly_evals.len());
+            exts(&mut out, p.poly_evals.iter().copied());
+            len(&mut out, p.stage0_fibers.len());
+            for f_vec in &p.stage0_fibers {
+                len(&mut out, f_vec.len());
+                fields(&mut out, f_vec.iter().copied());
+            }
+            len(&mut out, p.stage0_siblings.len());
+            for s_vec in &p.stage0_siblings {
+                len(&mut out, s_vec.len());
+                fields(&mut out, s_vec.iter().flatten().copied());
+            }
+            len(&mut out, p.later_stage_roots.len());
+            fields(&mut out, p.later_stage_roots.iter().flatten().copied());
+            len(&mut out, p.ood_evals.len());
+            exts(&mut out, p.ood_evals.iter().flatten().copied());
+            len(&mut out, p.fold_polys.len());
+            exts(&mut out, p.fold_polys.iter().flatten().copied());
+            for nonces in [&p.fold_nonces, &p.query_nonces] {
+                len(&mut out, nonces.len());
+                for n in nonces.iter().flatten() {
+                    out.extend_from_slice(&n.to_le_bytes());
+                }
+            }
+            len(&mut out, p.later_fibers.len());
+            for f_vec in &p.later_fibers {
+                len(&mut out, f_vec.len());
+                exts(&mut out, f_vec.iter().copied());
+            }
+            len(&mut out, p.later_siblings.len());
+            for s_vec in &p.later_siblings {
+                len(&mut out, s_vec.len());
+                fields(&mut out, s_vec.iter().flatten().copied());
+            }
+            len(&mut out, p.final_coeffs.len());
+            exts(&mut out, p.final_coeffs.iter().copied());
         }
         out
     }
@@ -556,15 +718,25 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn split_depth_three_real_signatures_and_deferred_tampering() {
-        real_tree(3);
+    fn split_depth_two_and_three_succinct_folded_openings_and_tamper_rejection() {
+        real_tree(2, 1, false);
+        real_tree(3, 1, false);
     }
 
-    fn real_tree(depth: usize) {
+    #[test]
+    fn split_legacy_leaf_wrapper_and_two_shard_per_leaf_under_memory_cap() {
+        // 1. Verify `SplitSubtreeProof::leaf(public, proof)` compatibility on `prove_subtree_leaf_merge_for_recursion`.
+        real_tree(2, 1, true);
+        // 2. Verify 2-shard-per-leaf (`fan_in = 2`, `nv = 26`, which previously OOM'd at 16 GiB) succeeds cleanly!
+        real_tree(2, 2, false);
+    }
+
+    fn real_tree(depth: usize, shards_per_leaf: usize, use_legacy_leaf_wrap: bool) {
         let _permit = crate::prover_admission::acquire();
         let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
         let params = FullShardParams::new(regime, 2).unwrap();
-        let count = 1 << (depth - 1);
+        let leaf_nodes = 1 << (depth - 1);
+        let count = leaf_nodes * shards_per_leaf;
         let epoch = 2026_1116;
         let message = b"split-subtree real signature test";
         let mut keys: Vec<Vec<ValidatorKeypair>> = (0..count)
@@ -594,69 +766,94 @@ mod tests {
             .unwrap()
             .roster_root;
         let start = Instant::now();
-        let leaf = SubtreeLeafMergeRelation::new(params, 1).unwrap();
+        let leaf = SubtreeLeafMergeRelation::new(params, shards_per_leaf).unwrap();
         let mut vk = leaf.verifier_key().clone();
         std::println!(
-            "SPLIT depth={depth} leaf_rows={} setup_ms={:.1}",
+            "SPLIT depth={depth} fan_in={shards_per_leaf} leaf_rows={} setup_ms={:.1}",
             leaf.stats().padded_rows,
             start.elapsed().as_secs_f64() * 1000.0
         );
-        let mut children = Vec::new();
-        for s in 0..count {
-            let sign_msg =
-                subtree_signing_message(leaf.params(), &policies[s], epoch, message).unwrap();
-            let sigs = vec![
-                keys[s][0]
-                    .sign_stateful_for_unit_test(&sign_msg, s as u32)
-                    .unwrap(),
-            ];
-            let bitmap = SignerBitmap::from_active_indices(2, &[0]).unwrap();
-            if s == 0 {
-                let mut bad_sigs = sigs.clone();
-                bad_sigs[0].r_rand[0] += F::ONE;
-                let bad = ShardHemWitness {
-                    bitmap: &bitmap,
-                    signatures: &bad_sigs,
-                };
+        let bitmap = SignerBitmap::from_active_indices(2, &[0]).unwrap();
+        let mut children = Vec::with_capacity(leaf_nodes);
+        for l_idx in 0..leaf_nodes {
+            let base_s = l_idx * shards_per_leaf;
+            let mut leaf_sigs = Vec::with_capacity(shards_per_leaf);
+            for off in 0..shards_per_leaf {
+                let s = base_s + off;
+                let sign_msg =
+                    subtree_signing_message(leaf.params(), &policies[s], epoch, message).unwrap();
+                leaf_sigs.push(vec![
+                    keys[s][0]
+                        .sign_stateful_for_unit_test(&sign_msg, s as u32)
+                        .unwrap(),
+                ]);
+            }
+            if l_idx == 0 {
+                let mut bad_sigs = leaf_sigs.clone();
+                bad_sigs[0][0].r_rand[0] += F::ONE;
+                let bad_wits: Vec<_> = bad_sigs
+                    .iter()
+                    .map(|sigs| ShardHemWitness {
+                        bitmap: &bitmap,
+                        signatures: sigs,
+                    })
+                    .collect();
                 assert!(
-                    prove_subtree_leaf_merge_for_recursion(
+                    SplitSubtreeProof::prove_leaf(
                         &leaf,
-                        core::slice::from_ref(&policies[s]),
+                        &policies[base_s..base_s + shards_per_leaf],
                         epoch,
                         message,
-                        &[bad],
+                        &bad_wits,
                         &[91; 32],
                     )
                     .is_err()
                 );
             }
 
-            let witness = ShardHemWitness {
-                bitmap: &bitmap,
-                signatures: &sigs,
-            };
+            let wits: Vec<_> = leaf_sigs
+                .iter()
+                .map(|sigs| ShardHemWitness {
+                    bitmap: &bitmap,
+                    signatures: sigs,
+                })
+                .collect();
             let t = Instant::now();
-            let (public, proof) = prove_subtree_leaf_merge_for_recursion(
-                &leaf,
-                core::slice::from_ref(&policies[s]),
-                epoch,
-                message,
-                &[witness],
-                &[(s + 1) as u8; 32],
-            )
-            .unwrap();
+            let child = if use_legacy_leaf_wrap {
+                let (public, proof) = prove_subtree_leaf_merge_for_recursion(
+                    &leaf,
+                    &policies[base_s..base_s + shards_per_leaf],
+                    epoch,
+                    message,
+                    &wits,
+                    &[(l_idx + 1) as u8; 32],
+                )
+                .unwrap();
+                SplitSubtreeProof::leaf(public, proof)
+            } else {
+                SplitSubtreeProof::prove_leaf(
+                    &leaf,
+                    &policies[base_s..base_s + shards_per_leaf],
+                    epoch,
+                    message,
+                    &wits,
+                    &[(l_idx + 1) as u8; 32],
+                )
+                .unwrap()
+            };
             std::println!(
-                "SPLIT depth={depth} leaf={s} prove_ms={:.1}",
+                "SPLIT depth={depth} fan_in={shards_per_leaf} leaf={l_idx} prove_ms={:.1}",
                 t.elapsed().as_secs_f64() * 1000.0
             );
-            children.push(SplitSubtreeProof::leaf(public, proof));
+            children.push(child);
         }
         drop(leaf);
+        let base_shift = shards_per_leaf.trailing_zeros() as usize;
         for level in 2..=depth {
             let t = Instant::now();
             let relation = SplitSubtreeRelation::new(
                 vk,
-                level - 2,
+                base_shift + level - 2,
                 false,
                 if level == depth {
                     WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128
@@ -666,7 +863,7 @@ mod tests {
             )
             .unwrap();
             std::println!(
-                "SPLIT depth={depth} level={level} rows={} setup_ms={:.1}",
+                "SPLIT depth={depth} fan_in={shards_per_leaf} level={level} rows={} setup_ms={:.1}",
                 relation.stats().padded_rows,
                 t.elapsed().as_secs_f64() * 1000.0
             );
@@ -682,7 +879,7 @@ mod tests {
                     );
                 }
                 std::println!(
-                    "SPLIT depth={depth} level={level} prove_ms={:.1}",
+                    "SPLIT depth={depth} fan_in={shards_per_leaf} level={level} prove_ms={:.1}",
                     t.elapsed().as_secs_f64() * 1000.0
                 );
                 children = next;
@@ -694,6 +891,9 @@ mod tests {
                 .prove_root(&[children[0].clone(), children[1].clone()], &[72; 32])
                 .unwrap();
             let prove_ms = t.elapsed().as_secs_f64() * 1000.0;
+            // Succinctness invariant: exactly `depth - 1` folded WHIR openings (`1` per level)!
+            assert_eq!(aggregate.deferred_openings(), depth - 1);
+
             let bytes = aggregate.to_bytes();
             let decoded =
                 SplitSubtreeAggregate::from_bytes_canonical(relation.verifier_key(), &bytes)
@@ -729,32 +929,55 @@ mod tests {
                 &aggregate
             ));
             std::println!(
-                "SPLIT depth={depth} root_prove_ms={prove_ms:.1} root_bytes={} total_bytes={} openings={} verify_ms={:.2} total_ms={:.1}",
+                "SPLIT depth={depth} fan_in={shards_per_leaf} root_prove_ms={prove_ms:.1} root_bytes={} total_bytes={} openings={} verify_ms={:.2} total_ms={:.1}",
                 aggregate.proof.to_bytes().len(),
-                aggregate.to_bytes().len(),
+                bytes.len(),
                 aggregate.deferred_openings(),
                 t.elapsed().as_secs_f64() * 1000.0,
                 start.elapsed().as_secs_f64() * 1000.0
             );
+
+            // Adversarial tamper suite across every ledger edge and every folded level opening:
             for node in 0..aggregate.ledger.len() {
                 for edge in 0..2 {
                     let mut bad = aggregate.clone();
-                    bad.ledger[node].edges[edge].opening.stage0_queries[0][0].values[0] +=
-                        GoldilocksExt4::ONE;
-                    assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
-                    let mut bad = aggregate.clone();
                     bad.ledger[node].edges[edge].claim.transcript[0] += F::ONE;
                     assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
+                    let mut bad = aggregate.clone();
+                    bad.ledger[node].edges[edge].claim.roots[0][0] += F::ONE;
+                    assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
                 }
+            }
+            for lvl in 0..aggregate.level_openings.len() {
+                // Tampered Stage-0 fiber value in H, Z_0, or E_0.
+                for poly_idx in 0..aggregate.level_openings[lvl].stage0_fibers.len() {
+                    let mut bad = aggregate.clone();
+                    bad.level_openings[lvl].stage0_fibers[poly_idx][0] += F::ONE;
+                    assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
+                }
+                // Tampered Stage-0 Steiner Merkle sibling & trailing sibling injection.
+                let mut bad = aggregate.clone();
+                bad.level_openings[lvl].stage0_siblings[1][0][0] += F::ONE;
+                assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
+                let mut bad = aggregate.clone();
+                bad.level_openings[lvl].stage0_siblings[1].push([F::ZERO; 4]);
+                assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
+                // Tampered `[CWYZ26]` point-reduction sumcheck round & poly_evals.
+                let mut bad = aggregate.clone();
+                bad.level_openings[lvl].point_rounds[0][0] += GoldilocksExt4::ONE;
+                assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
+                let mut bad = aggregate.clone();
+                bad.level_openings[lvl].poly_evals[1] += GoldilocksExt4::ONE;
+                assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
             }
             let mut bad_roster = statement;
             bad_roster.roster_root[0] ^= 1;
             assert!(!aggregate.verify_against_roster_root(relation.verifier_key(), &bad_roster));
             let mut bad = aggregate.clone();
-            bad.ledger[0].edges[0].opening.stage0_queries[0][0].siblings[0][0] += F::ONE;
+            bad.ledger.remove(0);
             assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
             let mut bad = aggregate.clone();
-            bad.ledger.remove(0);
+            bad.level_openings.pop();
             assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
             let mut bad = aggregate.clone();
             bad.public.total_active_weight += 1;

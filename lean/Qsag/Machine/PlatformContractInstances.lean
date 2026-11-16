@@ -40,9 +40,6 @@ import Qsag.Machine.Tactic.KernelRfl
 public section
 namespace Qsag
 
-attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
-  UInt64.instLawfulOrderOrd Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
-
 set_option autoImplicit false
 
 /-! ## §1. SIMT contract of a SPIR-V barrier epoch -/

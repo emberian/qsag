@@ -264,7 +264,7 @@ module qsag_wire_engine #(
     logic [3:0]  kvat_we;
     logic        kvat_commit, zk_latch_we, zk_latch_set, zk_latch_clr;
     logic        vat_pchk_clr, vat_pwe, vat_cchk_clr, vat_cwe, vat_commit_inv;
-    wire         vat_ready, zk_root_valid, vat_att_ok, vat_inv_ok, vat_need_fram;
+    wire         vat_ready, zk_root_valid, vat_att_ok, vat_att_step_ok, vat_inv_ok, vat_need_fram;
     wire  [63:0] kvat_rdata;
     wire  [31:0] vat_spend_used;
 
@@ -272,6 +272,7 @@ module qsag_wire_engine #(
                                 (op == OP_PRFMSG) ? 16'h0002 : 16'h0004;
     wire [31:0] vat_req_epoch = (op == OP_CTH)    ? y_hold0[31:0] : {16'd0, arg};
     wire [31:0] vat_req_spend = (op == OP_CTH)    ? {24'd0, arg[7:0]} : 32'd1;
+    wire [63:0] kvat_wd_mux   = (st == S_KLH) ? in_data : port;
 
     assign vat_ready_o = vat_ready;
 
@@ -357,8 +358,8 @@ module qsag_wire_engine #(
 
     dregg_captp_vat u_vat (
         .clk(clk), .rst_n(sub_rst_n), .srst_n(secret_rst_n), .permit_control(permit_control),
-        .kvat_we(kvat_we), .kvat_wdata(port), .kvat_commit(kvat_commit), .vat_ready(vat_ready),
-        .kvat_ridx((cnt2 - 5'd1)[1:0]), .kvat_rdata(kvat_rdata),
+        .kvat_we(kvat_we), .kvat_wdata(kvat_wd_mux), .kvat_commit(kvat_commit), .vat_ready(vat_ready),
+        .kvat_ridx(cnt2[1:0] - 2'd1), .kvat_rdata(kvat_rdata),
         .zk_latch_we(zk_latch_we), .zk_latch_idx(cnt2[1:0]), .zk_latch_wdata(port),
         .zk_latch_valid_set(zk_latch_set), .zk_latch_clear(zk_latch_clr), .zk_root_valid(zk_root_valid),
         .parent_chk_clr(vat_pchk_clr), .parent_we(vat_pwe), .parent_idx(cnt2[2:0]),
@@ -371,7 +372,7 @@ module qsag_wire_engine #(
         .req_right_bit(vat_req_right), .req_epoch(vat_req_epoch), .req_spend(vat_req_spend),
         .req_bind_lo(y_hold1), .req_bind_hi(dfa_diff),
         .check_is_zk(op == OP_VAT_ZK), .commit_invocation(vat_commit_inv),
-        .attenuate_legal(vat_att_ok), .invoke_legal(vat_inv_ok),
+        .attenuate_legal(vat_att_ok), .attenuate_step_ok(vat_att_step_ok), .invoke_legal(vat_inv_ok),
         .need_stateful_fram(vat_need_fram), .vat_spend_used(vat_spend_used)
     );
 
@@ -793,9 +794,11 @@ module qsag_wire_engine #(
                 key_we = 6'b010000 << cnt2[0];
             end
             S_KLH: begin
-                cond   = in_valid;
-                do_pop = 1'b1;
-                key_we = 6'b000001 << cnt2[1:0];
+                cond        = in_valid;
+                do_pop      = 1'b1;
+                key_we      = (cnt2 <= 5'd3) ? (6'b000001 << cnt2[1:0]) : 6'd0;
+                kvat_we     = (flags[2] && cnt2 >= 5'd4 && cnt2 <= 5'd7) ? (4'b0001 << cnt2[1:0]) : 4'd0;
+                kvat_commit = flags[2] && (cnt2 == 5'd7);
             end
             S_KLT: begin
                 cond      = trng_valid;
@@ -1066,25 +1069,28 @@ module qsag_wire_engine #(
                 vat_pwe      = !(op == OP_VAT && !flags[0]);
             end
             S_VTG: begin
-                cond   = in_valid;
-                do_pop = 1'b1;
-                e_rd   = {1'b0, cnt2};
-            end
-            S_VAT: begin
                 cond         = in_valid;
                 do_pop       = 1'b1;
-                e_rd         = 6'd32 + {1'b0, cnt2};
-                e_wreq       = 1'b1;
-                e_wa         = 6'd32 + {1'b0, cnt2};
-                xsel         = 3'd0;
-                vat_cchk_clr = 1'b0;
-                vat_cwe      = 1'b1;
+                e_rd         = {1'b0, cnt2};
+                vat_cchk_clr = (cnt2 == 5'd3) && (op == OP_VAT);
+            end
+            S_VAT: begin
+                cond    = in_valid;
+                do_pop  = 1'b1;
+                e_rd    = 6'd32 + {1'b0, cnt2};
+                e_wreq  = 1'b1;
+                e_wa    = 6'd32 + {1'b0, cnt2};
+                xsel    = 3'd0;
+                vat_cwe = 1'b1;
             end
             S_VOT: begin
                 cond      = out_ready;
                 emit      = 1'b1;
                 emit_port = 1'b1;
                 e_rd      = (cnt2 < 5'd8) ? (6'd32 + {1'b0, cnt2}) : {1'b0, cnt2 - 5'd8};
+            end
+            S_VZK: begin
+                vat_commit_inv = vat_inv_ok;
             end
             // ---------------------------------------------------------- Houyhnhnm DB + NCO (0x52)
             S_DB0: begin
@@ -1167,6 +1173,14 @@ module qsag_wire_engine #(
             end
             default: ;
         endcase
+        if (st == S_KSW && op == OP_PRFMSG && cap_mode && key_valid && !macdiff && vat_inv_ok)
+            vat_commit_inv = 1'b1;
+        if (st == S_CTD && cap_mode && key_valid && !macdiff && vat_inv_ok && (!stateful || pubgen))
+            vat_commit_inv = 1'b1;
+        if (st == S_CA3 && cap_mode && rcmp)
+            vat_commit_inv = 1'b1;
+        if (st == S_IDLE && (in_data[15:8] == OP_FOLD || in_data[15:8] == OP_HEM))
+            zk_latch_clr = 1'b1;
         if (emit && !emit_port) xsel = 3'd1;
     end
 
@@ -1227,7 +1241,10 @@ module qsag_wire_engine #(
                             st <= S_DRAIN;
                         end else begin
                             unique case (in_data[15:8])
-                                OP_PING: st <= (in_data[47:24] == 24'd0) ? S_HDR : S_DRAIN;
+                                OP_PING: begin
+                                    ret <= S_PING;
+                                    st  <= (in_data[47:24] == 24'd0) ? S_HDR : S_DRAIN;
+                                end
                                 OP_CSR:  st <= (in_data[47:24] == 24'd8) ? S_CSR : S_DRAIN;
                                 OP_BIST: begin
                                     verify_ok <= 1'b0;
@@ -1573,7 +1590,7 @@ module qsag_wire_engine #(
                             steps       <= rem_st;
                             steps_inv_q <= ~rem_st;
                             ret3        <= S_CKD;
-                            st          <= S_BLD; // note: S_CY1 already wrote st[6]=y_hold0; write st[7] via S_CM1!
+                            st          <= S_CM1; // copies st[1] -> st[7] then enters S_BLD!
                         end
                     end
                     S_CZ0: st <= S_CZ1;
@@ -1631,10 +1648,9 @@ module qsag_wire_engine #(
                         end else st <= ret2;
                     end
                     S_VAT: if (cnt2 == 5'd7) begin
-                        // Note: att_seen_q[7] sets on this edge; check vat_att_ok on next state or child_word_ok!
                         ret3 <= S_HDR;
                         ret  <= S_VOT;
-                        st   <= (vat_att_ok_next) ? S_BLD : S_DRAIN;
+                        st   <= vat_att_step_ok ? S_BLD : S_DRAIN;
                     end
                     S_VOT: if (cnt2 == 5'd11) st <= S_WIPE;
                     S_VZK: begin
@@ -1692,6 +1708,10 @@ module qsag_wire_engine #(
                         st        <= S_BLD;
                     end
                     S_HVS: begin
+                        ret <= S_HVC;
+                        st  <= S_OUTL;
+                    end
+                    S_HVC: begin
                         ret <= S_IDLE;
                         st  <= S_OUTL;
                     end
@@ -1700,9 +1720,6 @@ module qsag_wire_engine #(
             end
         end
     end
-
-    // Check child word 7 legality combinationally at cnt2 == 7 in S_VAT
-    wire vat_att_ok_next = vat_ready && u_vat.att_ok_q && u_vat.child_word_ok;
 
     // Non-secret datapath & framing registers (synchronous reset -> dffq_1 area savings + 0 GLS X!)
     always_ff @(posedge clk) begin
@@ -1780,9 +1797,583 @@ module qsag_wire_engine #(
             puf_blk         <= '0;
             puf_any_err     <= 1'b0;
             puf_corr_tot    <= '0;
-        end else begin
-            vat_cchk_clr_ unused_fix; // removed below
+        end else if (!(zeroize_q || control_bad || fault_control || fault_laser_dfa)) begin
+            if (in_pop) wrem <= wrem - 21'd1;
+            if (in_pop && inrec) dleft <= dleft - 16'd1;
+            if (bg_sh_can_take) begin
+                sh_mask[sh_fill[2:0]] <= 1'b1;
+                sh_fill               <= sh_fill + 4'd1;
+            end
+            if (fire) begin
+                unique case (st)
+                    S_IDLE: begin
+                        op        <= in_data[15:8];
+                        flags     <= in_data[23:16];
+                        lenb      <= in_data[26:24];
+                        wrem      <= in_data[47:27] + {20'd0, |in_data[26:24]};
+                        arg       <= in_data[63:48];
+                        rerr      <= 1'b0;
+                        rok       <= 1'b1;
+                        rcode     <= '0;
+                        rlen      <= '0;
+                        cnt       <= '0;
+                        cnt2      <= '0;
+                        wi        <= '0;
+                        partial   <= 1'b0;
+                        sh_fill   <= '0;
+                        sh_mask   <= '0;
+                        fail      <= 1'b0;
+                        fset      <= 1'b0;
+                        noncanon  <= 1'b0;
+                        recidx    <= '0;
+                        fidx      <= '0;
+                        inrec     <= 1'b0;
+                        hs_k      <= '0;
+                        gfdone    <= 1'b0;
+                        macdiff   <= 1'b0;
+                        idx_armed <= 1'b0;
+                        chk_cont  <= 1'b0;
+                        if (in_data[7:0] != 8'h51) begin
+                            rcode <= E_MAGIC;
+                        end else begin
+                            unique case (in_data[15:8])
+                                OP_PING: begin
+                                    rlen <= 24'd32;
+                                    if (in_data[47:24] != 24'd0) rcode <= E_LEN;
+                                end
+                                OP_CSR:  if (in_data[47:24] != 24'd8) rcode <= E_LEN;
+                                OP_BIST: if (in_data[47:24] != 24'd0) rcode <= E_LEN;
+                                OP_P2: begin
+                                    if (in_data[16]) begin
+                                        if (in_data[47:24] != 24'd96) rcode <= E_LEN;
+                                    end else if (in_data[47:24] < 24'd40 || in_data[26:24] != 3'd0) begin
+                                        rcode <= E_LEN;
+                                    end else begin
+                                        hs_n      <= in_data[42:27] - 16'd5;
+                                        hs_capsrc <= 2'd0;
+                                        hs_latch  <= 3'd0;
+                                        hs_skip   <= 2'd0;
+                                    end
+                                end
+                                OP_MERKLE: begin
+                                    if (in_data[53:48] == 6'd0 || in_data[53:48] > 6'd62 ||
+                                        in_data[47:24] != 24'd96 + {16'd0, in_data[53:48], 2'd0} * 24'd8)
+                                        rcode <= E_LEN;
+                                end
+                                OP_KECCAK: ;
+                                OP_PRFMSG: begin
+                                    y_hold1  <= {48'd0, in_data[63:48]};
+                                    dfa_diff <= 64'd0;
+                                    if (in_data[18]) begin
+                                        if (!vat_ready || !key_valid) rcode <= E_NOKEY;
+                                        else if (in_data[47:24] < 24'd96) rcode <= E_LEN;
+                                    end
+                                end
+                                OP_FOLD, OP_HEM: if (in_data[26:24] != 3'd0) rcode <= E_LEN;
+                                OP_KEYLOAD: begin
+                                    if (key_valid) rcode <= E_KEYSET;
+                                    else if (in_data[16] ? (in_data[47:24] != (in_data[18] ? 24'd80 : 24'd48))
+                                                         : (in_data[47:24] < 24'd16 || in_data[47:24] > 24'd96 ||
+                                                            in_data[26:24] != 3'd0))
+                                        rcode <= E_LEN;
+                                end
+                                OP_CTH: begin
+                                    logic [23:0] exp_len;
+                                    exp_len = (in_data[18] ? 24'd160 : 24'd80) +
+                                              ((in_data[19] && !in_data[16]) ? {12'd0, in_data[55:48], 4'd0} : 24'd0);
+                                    if (in_data[47:24] != exp_len || in_data[60:56] == 5'd0 ||
+                                        in_data[60:56] > 5'd16 || in_data[55:48] == 8'd0)
+                                        rcode <= E_LEN;
+                                    else if (in_data[18] && (!vat_ready || !key_valid))
+                                        rcode <= E_NOKEY;
+                                end
+                                OP_PUF: begin
+                                    puf_recon_mode  <= in_data[16];
+                                    puf_margin      <= (in_data[53:48] == 6'd0) ? 6'd4 : in_data[53:48];
+                                    puf_noise_flips <= in_data[56:54];
+                                    puf_blk         <= 3'd0;
+                                    puf_any_err     <= 1'b0;
+                                    puf_corr_tot    <= 8'd0;
+                                    if (in_data[16] ? (in_data[47:24] != 24'd160) : (in_data[47:24] != 24'd0))
+                                        rcode <= E_LEN;
+                                    else if (!in_data[16])
+                                        rlen <= 24'd160;
+                                end
+                                OP_VAT: begin
+                                    if (!vat_ready) rcode <= E_NOKEY;
+                                    else if (!in_data[16] && vat_mint_locked) rcode <= E_LOCKED;
+                                    else if (in_data[47:24] != (in_data[16] ? 24'd160 : 24'd64))
+                                        rcode <= E_LEN;
+                                    else
+                                        rlen <= 24'd96;
+                                end
+                                OP_DB_NCO: begin
+                                    if (in_data[47:24] != 24'd24) rcode <= E_LEN;
+                                    else                          rlen  <= 24'd32;
+                                end
+                                OP_VAT_ZK: begin
+                                    y_hold1 <= {48'd0, in_data[63:48]};
+                                    if (!vat_ready) rcode <= E_NOKEY;
+                                    else if (in_data[47:24] != 24'd96) rcode <= E_LEN;
+                                    else rlen <= 24'd32;
+                                end
+                                default: rcode <= E_OPCODE;
+                            endcase
+                        end
+                    end
+                    S_DRAIN: if (wrem == 21'd0) begin
+                        rerr <= 1'b1;
+                        rok  <= 1'b0;
+                        rlen <= '0;
+                    end
+                    S_HDR: cnt2 <= '0;
+                    S_OUTL: cnt2 <= cnt2 + 5'd1;
+                    S_PING: cnt2 <= cnt2 + 5'd1;
+                    S_BSW: cnt2 <= '0;
+                    S_BS0: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) begin
+                            cnt2  <= '0;
+                            bmode <= 3'd1;
+                        end
+                    end
+                    S_BS2: begin
+                        logic [63:0] kat_w;
+                        kat_w   = port ^ gf_acc[63:0];
+                        y_hold0 <= kat_w;
+                        verdict <= (kat_w == BIST_GOLDEN_KAT);
+                        rok     <= (kat_w == BIST_GOLDEN_KAT);
+                        rlen    <= 24'd8;
+                    end
+                    S_P2R: cnt2 <= cnt2 + 5'd1;
+                    S_P2RP: begin
+                        rlen  <= 24'd96;
+                        obase <= 6'd0;
+                        olim  <= 5'd12;
+                    end
+                    S_HSZ: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2   <= '0;
+                            gfdone <= 1'b0;
+                        end
+                    end
+                    S_HSD: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                        end
+                    end
+                    S_HSC: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (hs_capsrc == 2'd1 || cnt2 == 5'd3) cnt2 <= '0;
+                    end
+                    S_HSN: begin
+                        hs_idx   <= 4'd2;
+                        hs_first <= 1'b1;
+                        hs_ph    <= 1'b0;
+                    end
+                    S_HSL: if (hs_n != 16'd0) begin
+                        if (bindw) gfdone <= 1'b1;
+                        else if (hs_lat_now) hs_ph <= 1'b1;
+                        else begin
+                            if (hs_k == 16'd0 && in_ge_p && (op != OP_P2)) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            hs_ph  <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            hs_n   <= hs_n - 16'd1;
+                            hs_idx <= hs_idx + 4'd1;
+                        end
+                    end
+                    S_HSP: begin
+                        hs_first <= 1'b0;
+                        hs_idx   <= '0;
+                    end
+                    S_HSF: begin
+                        rlen  <= 24'd32;
+                        obase <= 6'd0;
+                        olim  <= 5'd4;
+                    end
+                    S_MK5: begin
+                        midx <= {1'b0, midx[62:1]};
+                        cnt  <= cnt - 16'd1;
+                        cnt2 <= '0;
+                    end
+                    S_MPS: if (cnt != 16'd0) begin
+                        if (in_ge_p) noncanon <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                    end
+                    S_MOK: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) cnt2 <= '0;
+                    end
+                    S_MOI: begin
+                        midx  <= (63'd1 << arg[5:0]) | {1'b0, in_data[61:0]};
+                        lidx  <= in_data[61:0];
+                        mk_kb <= 6'd16;
+                    end
+                    S_MOL: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            cnt  <= {10'd0, arg[5:0]};
+                        end
+                    end
+                    S_MOR: cnt2 <= cnt2 + 5'd1;
+                    S_MOE: begin
+                        verdict <= fe_eq;
+                        rok     <= fe_eq;
+                        rlen    <= 24'd40;
+                    end
+                    S_MOV: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        olim  <= 5'd4;
+                    end
+                    S_KSW: begin
+                        cnt2    <= '0;
+                        wi      <= '0;
+                        sh_fill <= '0;
+                        sh_mask <= '0;
+                        if (op == OP_PRFMSG) begin
+                            if (!key_valid) rcode <= E_NOKEY;
+                            else if (cap_mode && macdiff) rcode <= E_MAC;
+                            else if (cap_mode && !vat_inv_ok) rcode <= E_CAP;
+                        end
+                    end
+                    S_KSK: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) wi <= 5'd2;
+                    end
+                    S_KSA: begin
+                        if (wrem == 21'd1 && lenb != 3'd0) begin
+                            partial <= 1'b1;
+                        end else if (wrem != 21'd0) begin
+                            if (wi == 5'd16) begin
+                                wi      <= '0;
+                                sh_fill <= '0;
+                                sh_mask <= '0;
+                            end else wi <= wi + 5'd1;
+                        end
+                    end
+                    S_KSB: begin
+                        wi      <= {1'b0, sh_fill};
+                        sh_fill <= '0;
+                        sh_mask <= '0;
+                    end
+                    S_KSQ: begin
+                        cnt  <= (op == OP_KECCAK) ? {8'd0, arg[15:8]} : 16'd2;
+                        rlen <= (op == OP_KECCAK) ? {13'd0, arg[15:8], 3'd0} : 24'd16;
+                        wi   <= '0;
+                    end
+                    S_KSO: if (cnt != 16'd0) begin
+                        cnt <= cnt - 16'd1;
+                        if (wi == 5'd16 && cnt != 16'd1) wi <= '0;
+                        else wi <= wi + 5'd1;
+                    end
+                    S_KLM: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            cnt2 <= '0;
+                            if (!flags[0] && !trng_ok) rcode <= E_TRNG;
+                        end
+                    end
+                    S_KLH: cnt2 <= cnt2 + 5'd1;
+                    S_KLW: wi <= '0;
+                    S_KLT: wi <= wi + 5'd1;
+                    S_KLA: if (wrem != 21'd0 && wi != 5'd15) wi <= wi + 5'd1;
+                    S_KLP: cnt2 <= '0;
+                    S_KLK: cnt2 <= cnt2 + 5'd1;
+                    S_KLN: begin
+                        ctmp  <= '0;
+                        aslot <= 1'b0;
+                        if (flags[1]) begin
+                            bmode <= 3'd1;
+                            cnt2  <= '0;
+                        end
+                    end
+                    S_KLF: begin
+                        if (!rcmp) rcode <= E_ANCHOR_IO;
+                        else if (!aslot) begin
+                            aslot <= 1'b1;
+                            bmode <= 3'd1;
+                            cnt2  <= '0;
+                        end else hwm <= '0;
+                    end
+                    S_BLD: cnt2 <= cnt2 + 5'd1;
+                    S_BKC: begin
+                        cnt2 <= '0;
+                        if (bmode == 3'd0) begin
+                            if (!isprf) hj <= hj + 16'd1;
+                            isprf <= 1'b0;
+                        end
+                    end
+                    S_AR1: begin
+                        ctmp  <= an_rx[31:0];
+                        hi0   <= (an_rx[63:32] == 32'd0);
+                        bmode <= 3'd1;
+                        cnt2  <= '0;
+                    end
+                    S_AR3: rcmp <= !cmp_ne && hi0;
+                    S_AR4: rcmp <= rcmp && !cmp_ne;
+                    S_AW7: rcmp <= !cmp_ne;
+                    S_AW8, S_AW9: rcmp <= rcmp && !cmp_ne;
+                    S_CTG: cnt2 <= '0;
+                    S_CTL: begin
+                        if (cnt2 == 5'd0) y_hold0  <= in_data;
+                        if (cnt2 == 5'd1) y_hold1  <= in_data;
+                        if (cnt2 == 5'd2) dfa_diff <= in_data;
+                        if (cnt2 == 5'd4) is_fors  <= (in_data[31:24] == 8'd3);
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2 <= '0;
+                            if (!cap_mode && !pubgen) bmode <= 3'd2;
+                        end
+                    end
+                    S_CTT: begin
+                        if (!pubgen && cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                    end
+                    S_CTD: begin
+                        cnt2 <= '0;
+                        if (!key_valid) rcode <= E_NOKEY;
+                        else if (macdiff) rcode <= E_MAC;
+                        else if (cap_mode && !vat_inv_ok) rcode <= E_CAP;
+                        else if (stateful && !pubgen) aslot <= 1'b0;
+                        else begin
+                            rlen <= {12'd0, nch, 4'd0};
+                            ci   <= '0;
+                            widx <= '0;
+                            sh   <= '0;
+                        end
+                    end
+                    S_CA0: begin
+                        v0    <= rcmp;
+                        cur   <= ctmp;
+                        aslot <= 1'b1;
+                    end
+                    S_CA1: begin
+                        anyv <= v0 | rcmp;
+                        if (rcmp && (!v0 || ctmp >= cur)) begin
+                            cur   <= ctmp;
+                            older <= 1'b0;
+                        end else older <= 1'b1;
+                    end
+                    S_CA2: begin
+                        if (!anyv) rcode <= E_ANCHOR_EMPTY;
+                        else if (hwm_valid && cur < hwm) rcode <= E_ROLLBACK;
+                        else if (port[31:0] < cur || port[31:0] == 32'hFFFF_FFFF) rcode <= E_REUSE;
+                        else begin
+                            ctmp  <= port[31:0] + 32'd1;
+                            aslot <= older;
+                            bmode <= 3'd1;
+                            cnt2  <= '0;
+                        end
+                    end
+                    S_CA3: begin
+                        if (!rcmp) rcode <= E_ANCHOR_IO;
+                        else begin
+                            hwm  <= ctmp;
+                            rlen <= {12'd0, nch, 4'd0};
+                            ci   <= '0;
+                            widx <= '0;
+                            sh   <= '0;
+                        end
+                    end
+                    S_CTS: if (ci != nch) begin
+                        sym      <= port_sh[15:0] & symmask;
+                        chk_cont <= 1'b0;
+                        if (sh + {2'd0, sw} + {2'd0, sw} > 7'd64) begin
+                            sh   <= '0;
+                            widx <= widx + 2'd1;
+                        end else sh <= sh + {2'd0, sw};
+                        hj    <= '0;
+                        isprf <= 1'b1;
+                        bmode <= 3'd0;
+                        cnt2  <= '0;
+                    end
+                    S_CM1: cnt2 <= '0;
+                    S_CKD: cnt2 <= '0;
+                    S_CY0: begin
+                        y_hold0  <= port;
+                        dfa_diff <= DFA_CANARY_SEED;
+                    end
+                    S_CY1: begin
+                        y_hold1  <= port;
+                        chk_cont <= 1'b1;
+                        bmode    <= 3'd0;
+                        cnt2     <= '0;
+                    end
+                    S_CZ0: dfa_diff <= (dfa_diff ^ DFA_CANARY_SEED) | (port ^ in_data);
+                    S_CZ1: begin
+                        dfa_diff <= dfa_diff | (port ^ in_data);
+                        cnt2     <= '0;
+                    end
+                    S_CO: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) ci <= ci + 8'd1;
+                    end
+                    S_PF0: if (puf_recon_mode) puf_vmask_in <= in_data;
+                    S_PF1: if (puf_recon_mode) puf_syn_in   <= in_data[26:0];
+                    S_PF2: begin
+                        if (puf_blk_err) puf_any_err <= 1'b1;
+                        puf_corr_tot <= puf_corr_tot + {4'd0, puf_corrected};
+                    end
+                    S_PF3: begin
+                        cnt2  <= '0;
+                        bmode <= 3'd5;
+                        if (puf_blk != 3'd7) puf_blk <= puf_blk + 3'd1;
+                    end
+                    S_PF4: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd9) begin
+                            cnt2  <= '0;
+                            bmode <= 3'd6;
+                        end
+                    end
+                    S_PF5: begin
+                        if (puf_recon_mode && cnt2 <= 5'd3 && cmp_ne)
+                            macdiff <= 1'b1;
+                        if (puf_recon_mode && cnt2 == 5'd3 && (puf_any_err || macdiff || cmp_ne)) begin
+                            rerr  <= 1'b1;
+                            rok   <= 1'b0;
+                            rlen  <= '0;
+                            rcode <= E_PUF;
+                        end else if (puf_recon_mode && cnt2 == 5'd13) begin
+                            rlen    <= 24'd8;
+                            rok     <= 1'b1;
+                            y_hold0 <= {48'd0, 7'd0, !puf_any_err, puf_corr_tot};
+                        end
+                        cnt2 <= cnt2 + 5'd1;
+                    end
+                    S_VLD: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2  <= '0;
+                            bmode <= 3'd4;
+                        end
+                    end
+                    S_VTG: begin
+                        if (cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            if (macdiff || cmp_ne) rcode <= E_MAC;
+                        end
+                    end
+                    S_VAT: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2  <= '0;
+                            bmode <= 3'd4;
+                            if (!vat_att_step_ok) rcode <= E_CAP;
+                        end
+                    end
+                    S_VOT: cnt2 <= cnt2 + 5'd1;
+                    S_VZK: begin
+                        if (!vat_inv_ok) rcode <= E_CAP;
+                        else begin
+                            cnt2  <= '0;
+                            bmode <= 3'd7;
+                            obase <= 6'd0;
+                            olim  <= 5'd4;
+                        end
+                    end
+                    S_DB0, S_DBO: cnt2 <= cnt2 + 5'd1;
+                    S_HVR: begin
+                        if (wrem == 21'd0) begin
+                            verdict <= !fail && !noncanon;
+                            cnt2    <= '0;
+                        end else begin
+                            hop    <= in_data[3:0] | {4{|in_data[7:4]}};
+                            ha     <= in_data[15:8];
+                            hb     <= in_data[23:16];
+                            hc     <= in_data[31:24];
+                            dleft  <= in_data[47:32];
+                            hs_k   <= in_data[63:48];
+                            recidx <= recidx + 16'd1;
+                            inrec  <= 1'b1;
+                            gfdone <= 1'b0;
+                        end
+                    end
+                    S_HVD: begin
+                        cnt2 <= '0;
+                        unique case (hop)
+                            4'd1: begin
+                                if (dleft == 16'd0) fail <= 1'b1;
+                                else begin
+                                    hs_n      <= dleft - 16'd1;
+                                    hs_capsrc <= hc[3] ? 2'd2 : 2'd1;
+                                    hs_capreg <= hb[2:0];
+                                    hs_latch  <= hc[2:0];
+                                    hs_skip   <= hc[5:4];
+                                end
+                            end
+                            4'd2, 4'd3, 4'd4, 4'd6, 4'd7, 4'd9: ;
+                            4'd5: if (dleft != 16'd4) fail <= 1'b1;
+                            4'd8: if (ha[5:0] == 6'd0 || ha[5:0] > 6'd62 ||
+                                      dleft != 16'd1 + {8'd0, ha[5:0], 2'd0}) fail <= 1'b1;
+                            default: fail <= 1'b1;
+                        endcase
+                    end
+                    S_HVL: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            if (hs_k == 16'd0 && in_ge_p) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            cnt2 <= cnt2 + 5'd1;
+                        end
+                    end
+                    S_HVE: if (!fe_eq) fail <= 1'b1;
+                    S_HVQ: if ((res[31:0] & lowmask(hc[5:0])) != 32'd0) fail <= 1'b1;
+                    S_HVM: begin
+                        if (idx_armed && in_data[61:0] != lidx) fail <= 1'b1;
+                        idx_armed <= 1'b0;
+                        midx  <= (63'd1 << ha[5:0]) | {1'b0, in_data[61:0]};
+                        mk_kb <= rb(hb[2:0]);
+                        cnt   <= {10'd0, ha[5:0]};
+                        cnt2  <= '0;
+                    end
+                    S_HVJ: begin
+                        lidx      <= res[61:0] & lowmask62(hc[5:0]);
+                        idx_armed <= 1'b1;
+                    end
+                    S_HVN: if (dleft == 16'd0) begin
+                        inrec <= 1'b0;
+                        hs_k  <= '0;
+                        if (fail && !fset) begin
+                            fset <= 1'b1;
+                            fidx <= recidx;
+                        end
+                    end
+                    S_HVF: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2  <= '0;
+                            bmode <= 3'd3;
+                            rok   <= verdict;
+                            rlen  <= 24'd72;
+                        end
+                    end
+                    S_HVS: begin
+                        cnt2  <= '0;
+                        obase <= 6'd0;
+                        olim  <= 5'd4;
+                    end
+                    S_HVC: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        olim  <= 5'd4;
+                    end
+                    default: ;
+                endcase
+            end
         end
     end
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused = &{1'b0, mul_busy, gf_busy, vat_att_ok, vat_spend_used[31:16]};
+    /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire

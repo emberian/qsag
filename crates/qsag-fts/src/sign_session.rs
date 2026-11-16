@@ -186,6 +186,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             step: 0,
             done: false,
         });
+        state.reserve_openings();
         state.prepare_power()?;
         Ok(state)
     }
@@ -563,6 +564,15 @@ impl<'a> ParallelSeededSignSession<'a> {
             .collect();
         self.spn_round = 0;
         self.step_rounds = 0;
+        self.reserve_openings();
+    }
+    /// Reserves the masked openings of the whole batch before its first round: every
+    /// job runs one step from the seed plus `remaining` chain steps, each of
+    /// `SPN_ROUNDS` rounds with one opening per lane. The buffer that collects this
+    /// party's shares and MAC shares of those openings is then never replaced mid-batch.
+    fn reserve_openings(&mut self) {
+        let steps: usize = self.jobs.iter().map(|job| 1 + job.remaining).sum();
+        self.share.reserve_pending_openings(2 * SPN_ROUNDS * steps);
     }
     fn prepare_power(&mut self) -> Result<(), ParallelSeededError> {
         self.masked.clear();
@@ -613,7 +623,7 @@ impl<'a> ParallelSeededSignSession<'a> {
     fn apply_open_powers(&mut self, values: &[u128]) -> Result<(), ParallelSeededError> {
         let first = self.share.party_id == self.roster[0];
         for (&opened, wire) in values.iter().zip(&self.masked) {
-            self.share.pending_openings.push((opened, wire.clone()));
+            self.share.push_pending_opening(opened, wire.clone());
         }
         let mut outputs = self
             .powers
@@ -1029,12 +1039,96 @@ mod release_barrier_tests {
         };
         let canonical = [[1, 2, 3, 4], [5, 6, 7, 8]];
         assert!(assemble_parallel_seeded_public_key(params, [9; 32], &canonical).is_ok());
+        // The largest canonical limb is accepted in every position.
+        let largest = [[qsag_accel::goldilocks::GOLDILOCKS_PRIME - 1; 4]; 2];
+        assert!(assemble_parallel_seeded_public_key(params, [9; 32], &largest).is_ok());
         for bad in [qsag_accel::goldilocks::GOLDILOCKS_PRIME, u64::MAX] {
-            let noncanonical = [[bad, 2, 3, 4], [5, 6, 7, 8]];
-            assert_eq!(
-                assemble_parallel_seeded_public_key(params, [9; 32], &noncanonical).err(),
-                Some(ParallelSeededError::InvalidAuthenticationPath)
-            );
+            for leaf in 0..2 {
+                for limb in 0..4 {
+                    let mut noncanonical = canonical;
+                    noncanonical[leaf][limb] = bad;
+                    assert_eq!(
+                        assemble_parallel_seeded_public_key(params, [9; 32], &noncanonical).err(),
+                        Some(ParallelSeededError::InvalidAuthenticationPath),
+                        "leaf {leaf} limb {limb} = {bad:#x}"
+                    );
+                }
+            }
         }
+        // The reduction the tree hash would otherwise apply silently: `p + 1` and `1`
+        // are the same field element, so accepting both would give one key two encodings.
+        let alias = [
+            [qsag_accel::goldilocks::GOLDILOCKS_PRIME + 1, 2, 3, 4],
+            [5, 6, 7, 8],
+        ];
+        assert!(assemble_parallel_seeded_public_key(params, [9; 32], &alias).is_err());
+    }
+
+    /// A whole distributed signature: each batch of masked openings is reserved before
+    /// its first round, so the buffer holding this party's shares of them is never
+    /// replaced while it holds any, and it is empty once the session ends.
+    #[test]
+    fn session_reserves_every_batch_of_pending_openings_up_front() {
+        let accel = CpuReferenceBackend;
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            winternitz_w: 2,
+            num_chains: 2,
+            target_sum: 1,
+        };
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            params, 2, [31; 32], [32; 32], &accel,
+        )
+        .unwrap();
+        let mut burn = InMemoryBurnLog::default();
+        let siblings = [setup.public_tree_layers[0][1]];
+        let roster: Vec<_> = setup.shares.iter().map(|s| s.party_id).collect();
+        crate::parallel_mpc::pending_probe::reset();
+        let mut sessions: Vec<_> = setup
+            .shares
+            .iter_mut()
+            .map(|s| {
+                ParallelSeededSignSession::begin(
+                    s,
+                    &ParallelSeededSignRequest {
+                        pk: &setup.pk,
+                        epoch: 0,
+                        msg: b"reserved",
+                        session_id: [33; 32],
+                        roster: &roster,
+                        siblings: &siblings,
+                    },
+                    &mut burn,
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut most_pending = 0;
+        for _ in 0..2_000 {
+            if sessions.iter().all(|s| s.result().is_some()) {
+                break;
+            }
+            let messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
+            for session in &mut sessions {
+                session.advance(&messages).unwrap();
+                let pending = &session.share.pending_openings;
+                most_pending = most_pending.max(pending.len());
+            }
+        }
+        let Some(ParallelSeededSignResult::Signature(sig)) = sessions[0].result().cloned() else {
+            panic!("the session did not finish with a signature");
+        };
+        drop(sessions);
+        verify_parallel_seeded_fts(&setup.pk, b"reserved", &sig, &accel).unwrap();
+        // The chain batch: one seed step per chain plus `target_sum` chain steps.
+        assert_eq!(
+            most_pending,
+            2 * SPN_ROUNDS * (params.num_chains + params.target_sum)
+        );
+        assert_eq!(
+            crate::parallel_mpc::pending_probe::counts(),
+            crate::parallel_mpc::pending_probe::Counts::default()
+        );
+        assert!(setup.shares.iter().all(|s| s.pending_openings.is_empty()));
     }
 }

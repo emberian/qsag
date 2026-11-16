@@ -125,7 +125,7 @@ global_placement -density 0.52
 source {PDK / cfg['set_rc']}
 estimate_parasitics -placement
 repair_design
-repair_timing -setup -max_passes 150
+repair_timing -setup -max_passes 15
 detailed_placement
 check_placement -verbose
 estimate_parasitics -placement
@@ -144,7 +144,7 @@ exit
     log_path = out / "openroad.log"
     tcl_path.write_text(tcl)
     with log_path.open("w") as f:
-        p = subprocess.run(RUN + [OPENROAD, "-exit", str(tcl_path)], stdout=f, stderr=subprocess.STDOUT)
+        p = subprocess.run(RUN + [OPENROAD, "-threads", "8", "-exit", str(tcl_path)], stdout=f, stderr=subprocess.STDOUT)
     txt = log_path.read_text()
     print(f"[OpenROAD {lib}] exit={p.returncode}", flush=True)
     for line in txt.splitlines():
@@ -195,11 +195,11 @@ CONFIGS = [
         "ver_layer": "metal2",
         "macro_w": 190.0,
         "macro_h": 140.0,
-        "die_w": 1400,
-        "die_h": 1400,
+        "die_w": 1550,
+        "die_h": 1550,
         "margin": 20,
-        "bank_xs": [30, 260, 920, 1150],
-        "bank_y": 1220,
+        "bank_xs": [30, 260, 1070, 1300],
+        "bank_y": 1370,
         "period_ns": 8.0,
         "io_delay": 0.4,
         "nand2_um2": 0.7980,
@@ -219,11 +219,11 @@ CONFIGS = [
         "ver_layer": "met2",
         "macro_w": 368.0,
         "macro_h": 272.0,
-        "die_w": 3200,
-        "die_h": 3200,
+        "die_w": 3400,
+        "die_h": 3400,
         "margin": 40,
-        "bank_xs": [60, 500, 2260, 2700],
-        "bank_y": 2860,
+        "bank_xs": [60, 500, 2460, 2900],
+        "bank_y": 3060,
         "period_ns": 25.0,
         "io_delay": 1.5,
         "nand2_um2": 3.7536,
@@ -232,7 +232,9 @@ CONFIGS = [
 
 
 if __name__ == "__main__":
-    all_res = [run_pdk_pnr(c) for c in CONFIGS]
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        all_res = list(ex.map(run_pdk_pnr, CONFIGS))
     out_all = ROOT / "synth" / "hier" / "openroad_all_summary.json"
     out_all.write_text(json.dumps(all_res, indent=2) + "\n")
     print(json.dumps(all_res, indent=2), flush=True)

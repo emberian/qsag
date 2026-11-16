@@ -1,7 +1,8 @@
-//! Bounded, canonical decoder for the split carrier. Lengths never reserve memory
-//! before the corresponding bytes have been read; no allocation trusts a count alone.
+//! Bounded, canonical decoder for the succinct split carrier (`QSAGSPD2`).
+//! Lengths never reserve memory before the corresponding bytes have been read;
+//! no allocation trusts a wire count alone.
 use super::*;
-use crate::zk_hem::recursive_whir::{Ext, FixedPathQuery};
+use crate::zk_hem::recursive_whir::{Ext, FoldedLevelWhirProof};
 
 type E = GoldilocksExt4;
 struct Reader<'a>(&'a [u8]);
@@ -35,59 +36,11 @@ impl<'a> Reader<'a> {
         if n > self.0.len() / minimum_bytes {
             return None;
         }
-        let mut values = Vec::new();
+        let mut values = Vec::with_capacity(n);
         for _ in 0..n {
             values.push(parse(self)?);
         }
         Some(values)
-    }
-    fn queries(&mut self) -> Option<Vec<FixedPathQuery>> {
-        self.vector(16, |r| {
-            Some(FixedPathQuery {
-                values: r.vector(32, Self::e)?,
-                siblings: r.vector(32, Self::digest)?,
-            })
-        })
-    }
-    fn opening(&mut self) -> Option<Correlated3WhirProof> {
-        let mut cross_evals = [[E::ZERO; 3]; 3];
-        for e in cross_evals.iter_mut().flatten() {
-            *e = self.e()?;
-        }
-        let mut stage0_canopy_leaves = [Vec::new(), Vec::new(), Vec::new()];
-        for leaves in &mut stage0_canopy_leaves {
-            *leaves = self.vector(32, Self::digest)?;
-        }
-        let stage0_queries = self.vector(3 * (8 + 16), |r| r.queries()?.try_into().ok())?;
-        let later_stage_roots = self.vector(32, Self::digest)?;
-        let later_canopy_leaves = self.vector(8, |r| r.vector(32, Self::digest))?;
-        let ood_evals = self.vector(64, |r| Some([r.e()?, r.e()?]))?;
-        let fold_polys = self.vector(160, |r| Some([r.e()?, r.e()?, r.e()?, r.e()?, r.e()?]))?;
-        let mut nonces = || {
-            self.vector(8, |r| {
-                Some([
-                    u32::from_le_bytes(r.take(4)?.try_into().ok()?),
-                    u32::from_le_bytes(r.take(4)?.try_into().ok()?),
-                ])
-            })
-        };
-        let fold_nonces = nonces()?;
-        let query_nonces = nonces()?;
-        let later_queries = self.vector(8, Self::queries)?;
-        let final_coeffs = self.vector(32, Self::e)?;
-        Some(Correlated3WhirProof {
-            cross_evals,
-            stage0_canopy_leaves,
-            stage0_queries,
-            later_stage_roots,
-            later_canopy_leaves,
-            ood_evals,
-            fold_polys,
-            fold_nonces,
-            query_nonces,
-            later_queries,
-            final_coeffs,
-        })
     }
     fn edge(&mut self) -> Option<Edge> {
         let regime = WhirSecurityRegime::from_u8(self.byte()?)?;
@@ -119,7 +72,6 @@ impl<'a> Reader<'a> {
             };
         }
         let prior = self.digest()?;
-        let opening = self.opening()?;
         Some(Edge {
             claim: DeferredPcsClaim {
                 regime,
@@ -129,8 +81,44 @@ impl<'a> Reader<'a> {
                 points,
                 claims,
             },
-            opening,
             prior,
+            witness: None,
+        })
+    }
+    fn level_opening(&mut self) -> Option<FoldedLevelWhirProof> {
+        let point_rounds = self.vector(96, |r| Some([r.e()?, r.e()?, r.e()?]))?;
+        let poly_evals = self.vector(32, Self::e)?;
+        let stage0_fibers = self.vector(8, |r| r.vector(8, Self::f))?;
+        let stage0_siblings = self.vector(8, |r| r.vector(32, Self::digest))?;
+        let later_stage_roots = self.vector(32, Self::digest)?;
+        let ood_evals = self.vector(64, |r| Some([r.e()?, r.e()?]))?;
+        let fold_polys = self.vector(160, |r| Some([r.e()?, r.e()?, r.e()?, r.e()?, r.e()?]))?;
+        let mut nonces = || {
+            self.vector(8, |r| {
+                Some([
+                    u32::from_le_bytes(r.take(4)?.try_into().ok()?),
+                    u32::from_le_bytes(r.take(4)?.try_into().ok()?),
+                ])
+            })
+        };
+        let fold_nonces = nonces()?;
+        let query_nonces = nonces()?;
+        let later_fibers = self.vector(8, |r| r.vector(32, Self::e))?;
+        let later_siblings = self.vector(8, |r| r.vector(32, Self::digest))?;
+        let final_coeffs = self.vector(32, Self::e)?;
+        Some(FoldedLevelWhirProof {
+            point_rounds,
+            poly_evals,
+            stage0_fibers,
+            stage0_siblings,
+            later_stage_roots,
+            ood_evals,
+            fold_polys,
+            fold_nonces,
+            query_nonces,
+            later_fibers,
+            later_siblings,
+            final_coeffs,
         })
     }
 }
@@ -140,7 +128,7 @@ pub(super) fn decode(vk: &ShapeVerifierKey, bytes: &[u8]) -> Option<SplitSubtree
         return None;
     }
     let mut r = Reader(bytes);
-    if r.take(8)? != b"QSAGSPD1" {
+    if r.take(8)? != b"QSAGSPD2" {
         return None;
     }
     let subtree_registry_root = r.digest()?;
@@ -178,12 +166,14 @@ pub(super) fn decode(vk: &ShapeVerifierKey, bytes: &[u8]) -> Option<SplitSubtree
             edges: [r.edge()?, r.edge()?],
         })
     })?;
-    if !r.0.is_empty() || ledger.is_empty() {
+    let level_openings = r.vector(200, Reader::level_opening)?;
+    if !r.0.is_empty() || ledger.is_empty() || level_openings.is_empty() {
         return None;
     }
     Some(SplitSubtreeAggregate {
         public,
         proof,
         ledger,
+        level_openings,
     })
 }

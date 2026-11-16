@@ -768,7 +768,17 @@ theorem blindVc_concrete_fp5_qrom_opening_soundness
     Instantiates `CredentialImplementation` on the concrete SPDZ TOPRF + `PiBlindVc` protocol
     machine `Qsag.piToprfCredService cfg` over `ToprfCredWire Attr` with non-identity state
     abstraction `Rel c a := c.abs = a` (collapsing `ToprfReservoir` cursors, quorum poisoning,
-    server counter high-water marks, 3-phase audit logs, and `blindVcTag` onto `IdealCredState`). -/
+    server counter high-water marks, 3-phase audit logs, and `blindVcTag` onto `IdealCredState`).
+
+    Scope. The transition function validates wire data on its own state: caller port, issuance
+    arity, the 33-repetition Limbo opening, ticket quorum and counter window, reservoir cursors,
+    and the SPDZ MAC equations on the three openings of an evaluation. It contains no call to
+    `Spec.credExec` and reads no verdict bit from a wire. It is still a model of the gates, not
+    of the arithmetic behind them: an accepted evaluation returns `cfg.oprf` at the ticket's
+    point instead of a value reconstructed from shares, issuance stores the submitted attributes
+    without a ZKBoo transcript, and the MAC key is a state field whose secrecy is not modelled.
+    The refinement therefore shows that these gates admit no behaviour outside
+    `Spec.idealCredMachine`; it does not show that the SPDZ circuit computes the PRF. -/
 def toprfCredentialImplementation {O : Type} (Attr : Type) [DecidableEq Attr]
     (cfg : Qsag.Spec.IdealCredConfig O) :
     CredentialImplementation Attr cfg (Qsag.piToprfCredService (Attr := Attr) cfg) where
@@ -819,6 +829,46 @@ theorem piToprfCredService_reservoir_never_resets {Attr O : Type} [DecidableEq A
     ∀ c' out, (Qsag.piToprfCredService cfg).step c (port, w) = some (c', out) →
       Qsag.ReservoirStepMonotone c.reservoir c'.reservoir :=
   Qsag.piToprfCredService_reservoir_monotone cfg c port w
+
+/-- **No preprocessing session is rewound, internal turns included.** Every accepted step of the
+    full machine `Qsag.piToprfCredMachine` (wire steps and `prepareReservoir` turns) either stays
+    in the current session with cursors that only advance and an untouched session ledger, or
+    installs a session identifier that is neither the current one nor a retired one, and retires
+    the current one. -/
+theorem piToprfCredMachine_reservoir_never_rewinds {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) (c c' : Qsag.PiToprfCredState Attr O)
+    (inp : Qsag.ToprfMachineInput Attr) (out : Option (Qsag.Spec.IdealCredOutput O))
+    (hStep : (Qsag.piToprfCredMachine cfg).step c inp = some (c', out)) :
+    (Qsag.ReservoirStepMonotone c.reservoir c'.reservoir ∧ c'.retiredSids = c.retiredSids ∧
+      c'.spdzMacKey = c.spdzMacKey) ∨
+    (c'.reservoir.preprocessSid ≠ c.reservoir.preprocessSid ∧
+      c'.reservoir.preprocessSid ∉ c.retiredSids ∧
+      c'.retiredSids = c.reservoir.preprocessSid :: c.retiredSids ∧
+      c'.reservoir.pow7Cursor = 0 ∧ c'.reservoir.beaverCursor = 0) :=
+  Qsag.piToprfCredMachine_reservoir_never_rewinds cfg c c' inp out hStep
+
+/-- **An accepted TOPRF evaluation passed the checks computed from its wire data**: context equal
+    to the granted ticket, canonical request word, the SPDZ MAC equation on all three openings
+    under the MAC key in the machine state, zero dual-copy difference, equal output copies. The
+    wire carries no verdict bit. What this does not say: the released value is `cfg.oprf` at the
+    ticket's point; the machine does not recompute the PRF from shares, and the MAC key's secrecy
+    is not modelled. -/
+theorem piToprfCredService_eval_accept_checks {Attr O : Type} [DecidableEq Attr]
+    (cfg : Qsag.Spec.IdealCredConfig O) (c c' : Qsag.PiToprfCredState Attr O)
+    (port : Qsag.Spec.CredPort) (t : Qsag.Spec.ToprfTicket) (input : Qsag.Spec.Bytes)
+    (online : Qsag.SpdzOnlineTranscript) (out : Qsag.Spec.IdealCredOutput O)
+    (hStep : (Qsag.piToprfCredService cfg).step c (port, .evalToprfWire t input online) =
+      some (c', out)) :
+    online.context = t ∧ online.requestWord < Qsag.goldilocksPrime ∧
+    online.inputBind.val = Qsag.Goldilocks.zero ∧
+    online.inputBind.mac =
+      Qsag.CommRingOps.mul c.spdzMacKey (Qsag.GoldilocksExt2.ofBase online.inputBind.val) ∧
+    online.circuit.mac =
+      Qsag.CommRingOps.mul c.spdzMacKey (Qsag.GoldilocksExt2.ofBase online.circuit.val) ∧
+    online.output.mac =
+      Qsag.CommRingOps.mul c.spdzMacKey (Qsag.GoldilocksExt2.ofBase online.output.val) ∧
+    online.outputCopyA = online.outputCopyB :=
+  Qsag.piToprfCredService_eval_accept_checks cfg c c' port t input online out hStep
 
 /-- Concrete issuance authentication for `piToprfCredService`. -/
 theorem piToprfCredService_issuance_authenticated {Attr O : Type} [DecidableEq Attr]
@@ -1138,6 +1188,8 @@ theorem inhabited_piToprfCredService_issuance :
   Qsag.Top.blindVc_concrete_fp5_qrom_opening_soundness
   Qsag.Top.toprfCredentialImplementation_non_identity_state
   Qsag.Top.piToprfCredService_reservoir_never_resets
+  Qsag.Top.piToprfCredMachine_reservoir_never_rewinds
+  Qsag.Top.piToprfCredService_eval_accept_checks
   Qsag.Top.piToprfCredService_issuance_authenticated
   Qsag.Top.piToprfCredService_presentation_provenance
   Qsag.Top.piToprfCredService_toprf_provenance
@@ -1157,6 +1209,10 @@ theorem inhabited_piToprfCredService_issuance :
   Qsag.Top.tooth_open_relay_spoofs_issuer_credPort
 #tooth_pair Qsag.Top.piToprfCredService_issuance_authenticated vs
   Qsag.Top.unauthenticatedCredService_not_implementation
+#tooth_pair Qsag.Top.piToprfCredMachine_reservoir_never_rewinds vs
+  Qsag.tooth_reprepare_same_session_refused
+#tooth_pair Qsag.Top.piToprfCredService_eval_accept_checks vs
+  Qsag.tooth_forged_circuit_opening_not_released
 #tooth_pair Qsag.Top.credential_preprocessing_lattice_and_lpn_assumptions_bound vs
   Qsag.Top.tooth_degenerate_moduleSis_noRows_refuted
 #tooth_pair Qsag.Top.threshold_mldsa_frozen_sacrifice_sign_step_soundness vs

@@ -24,6 +24,7 @@ rtl/qsag_gf128_reduce.sv
 rtl/qsag_gf128_clmul.sv
 rtl/qsag_gf128_tower_map.sv
 rtl/qsag_gf128_tower_mul.sv
+rtl/qsag_gf128_compact.sv
 rtl/qsag_p2_chain_engine.sv
 rtl/qsag_p2_compact.sv
 rtl/qsag_ext4_compact_bfly.sv

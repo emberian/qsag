@@ -795,37 +795,64 @@ mod tests {
         sender.join().unwrap();
     }
 
+    fn plan(send_words: usize) -> [ParallelSeededDkgOtPeer<'static>; 1] {
+        [ParallelSeededDkgOtPeer {
+            peer: 1,
+            send_words,
+            choices: &[],
+        }]
+    }
+
+    /// A word count whose OT count wraps `usize` is refused as a size error: no session is
+    /// registered, nothing is sent, nothing is awaited. Unchecked, `(2^63 + 1) * 128` wraps
+    /// to 128 and passes the `MAX_OTS` bound, the session is registered and the engine
+    /// waits on the wire for columns of the wrapped length before it aborts.
     #[test]
-    fn random_ots_rejects_overflow_and_poisoned_zero_work_calls() {
-        let (mut left, mut right) = engine_pair();
-        // Arithmetic overflow on `send_words * 128` must fail cleanly without wrapping or panicking.
-        let overflow_words = (1usize << (usize::BITS - 1)) + 1;
-        let overflow_plan = [ParallelSeededDkgOtPeer {
-            peer: 1,
-            send_words: overflow_words,
-            choices: &[],
-        }];
+    fn random_ots_refuses_a_wrapping_word_count_before_any_session_or_message() {
+        // The first wraps to 128 OTs, the second (the smallest wrapping count) to zero.
+        for words in [(1usize << (usize::BITS - 1)) + 1, usize::MAX / 128 + 1] {
+            let (mut left, right) = engine_pair();
+            let started = std::time::Instant::now();
+            assert_eq!(
+                left.random_ots([91; 32], &plan(words)).err(),
+                Some(ParallelSeededError::InvalidThresholdParameters),
+                "{words} words"
+            );
+            // Far below the 30 s the test wire waits for a message that never comes.
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            assert!(left.used.is_empty(), "{words} words registered a session");
+            assert!(left.failed);
+            // The peer was sent nothing, not even an abort.
+            assert!(matches!(
+                right.wire.1.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    /// A poisoned engine refuses requests that would do no work: `begin` is never
+    /// reached for them, so the refusal has to be at the entry of `random_ots`.
+    #[test]
+    fn poisoned_engine_refuses_empty_and_zero_work_random_ots() {
+        let (mut left, right) = engine_pair();
+        // Healthy: both zero-work shapes succeed and say nothing on the wire.
+        assert!(left.random_ots([90; 32], &[]).unwrap().is_empty());
+        let pads = left.random_ots([90; 32], &plan(0)).unwrap();
+        assert_eq!(pads.len(), 1);
+        assert!(pads[0].sent.is_empty() && pads[0].received.is_empty());
+        assert!(right.wire.1.try_recv().is_err());
+        // Poison it through an unrelated entry point.
+        assert!(left.send_words(99, [94; 32], Vec::new()).is_err());
+        assert!(left.failed);
         assert_eq!(
-            left.random_ots([91; 32], &overflow_plan).err(),
+            left.random_ots([95; 32], &[]).err(),
             Some(ParallelSeededError::InvalidThresholdParameters)
         );
-        // Once poisoned, even empty or zero-work `random_ots` calls must fail closed!
         assert_eq!(
-            left.random_ots([92; 32], &[]).err(),
+            left.random_ots([96; 32], &plan(0)).err(),
             Some(ParallelSeededError::InvalidThresholdParameters)
         );
-        let zero_plan = [ParallelSeededDkgOtPeer {
-            peer: 1,
-            send_words: 0,
-            choices: &[],
-        }];
-        assert_eq!(
-            left.random_ots([93; 32], &zero_plan).err(),
-            Some(ParallelSeededError::InvalidThresholdParameters)
-        );
-        // Also poison `right` via out-of-range peer and verify empty/zero-work refusal.
-        assert!(right.send_words(99, [94; 32], Vec::new()).is_err());
-        assert!(right.random_ots([95; 32], &[]).is_err());
+        assert!(right.wire.1.try_recv().is_err());
     }
 }
 

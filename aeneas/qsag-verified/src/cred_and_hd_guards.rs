@@ -2,7 +2,9 @@
 //!
 //! 1. `MlDsaReleaseGate` (non-`Clone`): holds a masked partial `ML-DSA` response `z_share`
 //!    privately and releases it ONLY when `(z_norm_ok && r0_norm_ok && w1_match && u_com_bound)`
-//!    all hold (`P0-06`), wiping `z_share` and aborting on any rejection!
+//!    all hold (`P0-06`), wiping `z_share` and aborting on any rejection! Production callers
+//!    use the `&mut self` forms (`try_release_z_share_into`, `abort_in_place`), which zero the
+//!    value where it is stored instead of moving the gate.
 //! 2. `toprf_majority_of_3_goldilocks(s0, s1, s2) -> Option<(u64, Option<u8>)>`:
 //!    branch-clean 2-of-3 canonical Goldilocks replica majority decoder + faulty-party index
 //!    pinpointing used in 2-of-5 Poseidon2 TOPRF evaluation.
@@ -205,6 +207,53 @@ impl MlDsaReleaseGate {
             aborted: false,
         };
         (next, Ok(out))
+    }
+
+    /// In-place form of [`Self::try_release_z_share`] with the same decision table.
+    ///
+    /// The gate is updated through `&mut self`, so no second copy of the gate (and of
+    /// `z_share_masked`) is created by moving it. On success the sealed value is written
+    /// to the caller-owned `out` and the gate keeps only zeros; on every refusal `out` is
+    /// zeroed, the gate's copy is zeroed and the gate is marked aborted.
+    pub fn try_release_z_share_into(
+        &mut self,
+        checks: MlDsaBarrierChecks,
+        out: &mut [u8; 32],
+    ) -> Result<(), CredHdGuardError> {
+        let refusal = if self.aborted || self.released {
+            Some(CredHdGuardError::GateAbortedOrReleased)
+        } else if !ct_eq_bytes32(&self.session_id, &checks.req_session_id) {
+            Some(CredHdGuardError::SessionIdMismatch)
+        } else if self.attempt != checks.req_attempt {
+            Some(CredHdGuardError::AttemptMismatch)
+        } else if !(checks.z_norm_ok && checks.r0_norm_ok && checks.w1_match && checks.u_com_bound)
+        {
+            Some(CredHdGuardError::RejectionSamplingBarrierFailed)
+        } else {
+            None
+        };
+        match refusal {
+            Some(error) => {
+                *out = [0u8; 32];
+                self.abort_in_place();
+                Err(error)
+            }
+            None => {
+                *out = self.z_share_masked;
+                self.z_share_masked = [0u8; 32];
+                self.released = true;
+                self.aborted = false;
+                Ok(())
+            }
+        }
+    }
+
+    /// Zero `z_share_masked` where it is stored and mark the gate aborted. The owner calls
+    /// this when a signing attempt is abandoned before any release decision.
+    pub fn abort_in_place(&mut self) {
+        self.z_share_masked = [0u8; 32];
+        self.released = false;
+        self.aborted = true;
     }
 }
 
@@ -487,5 +536,72 @@ impl HdCommittedZeroTest {
             family_quarantined: false,
         };
         (next, Ok(()))
+    }
+}
+
+#[cfg(test)]
+mod in_place_gate_tests {
+    use super::*;
+
+    const SID: [u8; 32] = [7; 32];
+    const KEY: [u8; 32] = [0xA5; 32];
+
+    fn checks(sid: [u8; 32], attempt: u32, bits: u8) -> MlDsaBarrierChecks {
+        MlDsaBarrierChecks {
+            req_session_id: sid,
+            req_attempt: attempt,
+            z_norm_ok: bits & 1 != 0,
+            r0_norm_ok: bits & 2 != 0,
+            w1_match: bits & 4 != 0,
+            u_com_bound: bits & 8 != 0,
+        }
+    }
+
+    /// The in-place form returns the same verdict, value and final state as the
+    /// extracted by-value form, for every barrier combination and both mismatches.
+    #[test]
+    fn in_place_release_agrees_with_by_value_release() {
+        let mut cases = [(SID, 3u32, 0u8); 18];
+        for (bits, case) in cases.iter_mut().take(16).enumerate() {
+            case.2 = bits as u8;
+        }
+        cases[16] = ([8; 32], 3, 15);
+        cases[17] = (SID, 4, 15);
+        for (sid, attempt, bits) in cases {
+            let request = checks(sid, attempt, bits);
+            let (by_value, expected) =
+                MlDsaReleaseGate::new_sealed(SID, 3, KEY).try_release_z_share(request);
+            let mut gate = MlDsaReleaseGate::new_sealed(SID, 3, KEY);
+            let mut out = [0x11u8; 32];
+            let got = gate.try_release_z_share_into(request, &mut out);
+            assert_eq!(got.map(|()| out), expected);
+            assert_eq!(out, expected.unwrap_or([0; 32]));
+            assert_eq!(gate.z_share_masked, [0; 32]);
+            assert_eq!(gate.z_share_masked, by_value.z_share_masked);
+            assert_eq!(gate.released, by_value.released);
+            assert_eq!(gate.aborted, by_value.aborted);
+            // A decided gate never releases again.
+            let mut again = [0x22u8; 32];
+            assert_eq!(
+                gate.try_release_z_share_into(checks(SID, 3, 15), &mut again),
+                Err(CredHdGuardError::GateAbortedOrReleased)
+            );
+            assert_eq!(again, [0; 32]);
+            assert!(gate.aborted && !gate.released);
+        }
+    }
+
+    #[test]
+    fn abort_in_place_erases_the_sealed_value_and_blocks_release() {
+        let mut gate = MlDsaReleaseGate::new_sealed(SID, 0, KEY);
+        gate.abort_in_place();
+        assert_eq!(gate.z_share_masked, [0; 32]);
+        assert!(gate.aborted && !gate.released);
+        let mut out = [0x33u8; 32];
+        assert_eq!(
+            gate.try_release_z_share_into(checks(SID, 0, 15), &mut out),
+            Err(CredHdGuardError::GateAbortedOrReleased)
+        );
+        assert_eq!(out, [0; 32]);
     }
 }

@@ -954,6 +954,8 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     }
     let expected_child_pk = from_hex_exact::<32>(proof_json.field_str("child_pk")?, "child_pk")?;
 
+    // Validate metadata before its counts control signer allocation.
+    let config = build_committee(threshold, parties, label)?;
     let signers = parse_recover_signers(args.get("signers"), parties, threshold)?;
     if signers.len() < threshold {
         return Err(CliError::state(format!(
@@ -961,8 +963,6 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
             signers.len()
         )));
     }
-    let config = build_committee(threshold, parties, label)?;
-
     if usize::try_from(child_idx).map_err(|_| CliError::input("HD index or count out of range"))?
         >= batch_size
     {

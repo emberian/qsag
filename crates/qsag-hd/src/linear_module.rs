@@ -471,7 +471,7 @@ impl LinearModulePartyShare {
         if self.testing_poison_journal {
             return Ok(());
         }
-        if self.poison_journal.is_some() && !self.is_poisoned() {
+        if self.poison_journal.is_some() && !self.is_permanently_poisoned() {
             return Ok(());
         }
         Err(HdError::MacCheckFailed)
@@ -480,7 +480,9 @@ impl LinearModulePartyShare {
         &mut self,
         journal: Arc<dyn crate::poison::HdPoisonJournal>,
     ) -> Result<(), HdError> {
-        if journal.family_id() != self.family_id || journal.is_poisoned().unwrap_or(true) {
+        if journal.family_id() != self.family_id
+            || journal.is_permanently_poisoned().unwrap_or(true)
+        {
             self.poison();
             return Err(HdError::MacCheckFailed);
         }
@@ -490,18 +492,30 @@ impl LinearModulePartyShare {
         self.poison_journal = Some(journal);
         Ok(())
     }
-    pub fn is_poisoned(&self) -> bool {
+    /// True iff this family is permanently quarantined: this handle (or a sibling
+    /// sharing its latch) failed, or the durable journal records a quarantine or is
+    /// damaged. The result is latched. A disclosure in flight is not a quarantine.
+    pub fn is_permanently_poisoned(&self) -> bool {
         if self.poisoned.load(Ordering::Acquire) {
             return true;
         }
-        if let Some(j) = &self.poison_journal {
-            if j.is_permanently_poisoned().unwrap_or(true) {
-                self.poisoned.store(true, Ordering::Release);
-                return true;
-            }
-            return j.is_poisoned().unwrap_or(true);
+        if let Some(journal) = &self.poison_journal
+            && journal.is_permanently_poisoned().unwrap_or(true)
+        {
+            self.poisoned.store(true, Ordering::Release);
+            return true;
         }
         false
+    }
+    /// True while this share must not start an operation: it is permanently
+    /// quarantined, or a disclosure on its family journal is in flight. Only the
+    /// first is latched; the second clears when that disclosure completes.
+    pub fn is_poisoned(&self) -> bool {
+        self.is_permanently_poisoned()
+            || self
+                .poison_journal
+                .as_ref()
+                .is_some_and(|journal| journal.is_poisoned().unwrap_or(true))
     }
     fn poison(&mut self) {
         self.poisoned.store(true, Ordering::Release);
@@ -1042,6 +1056,55 @@ mod ntt_tests {
         lifted.coeffs[255] = u32::MAX - (u32::MAX - a.coeffs[255]) % MODULE_Q;
         assert_eq!(lifted.mul_negacyclic(&b), a.mul_negacyclic(&b));
         assert_eq!(b.mul_negacyclic(&lifted), a.mul_negacyclic(&b));
+    }
+
+    #[test]
+    fn noncanonical_public_coefficients_are_reduced_in_arithmetic_and_refused_in_keys() {
+        let q = MODULE_Q as u64;
+        for (a, b) in [
+            (MODULE_Q, 0),
+            (0, MODULE_Q),
+            (MODULE_Q + 5, MODULE_Q - 1),
+            (2 * MODULE_Q + 1, 3 * MODULE_Q + 7),
+            (u32::MAX, 1),
+            (1, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ] {
+            let (ar, br) = (a as u64 % q, b as u64 % q);
+            assert_eq!(mod_q_add(a, b) as u64, (ar + br) % q);
+            assert_eq!(mod_q_sub(a, b) as u64, (ar + q - br) % q);
+        }
+        // The centered norm of a lifted polynomial is the norm of its canonical form;
+        // it used to underflow `q - c` (a debug panic, a wrapped square in release).
+        let canonical = RingPoly::sample_uniform_mod_q(b"test", &[9; 32], 0);
+        let mut lifted = canonical.clone();
+        for (i, c) in lifted.coeffs.iter_mut().enumerate() {
+            *c += MODULE_Q * (1 + i as u32 % 500);
+        }
+        lifted.coeffs[0] = u32::MAX - (u32::MAX - canonical.coeffs[0]) % MODULE_Q;
+        assert_eq!(
+            lifted.centered_l2_norm_sq(),
+            canonical.centered_l2_norm_sq()
+        );
+        // A public key with a coefficient outside `[0, q)` is not hashed into a child
+        // or an address.
+        let (pk, _) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
+        assert!(pk.is_canonical());
+        assert!(pk.derive_child(1).is_ok());
+        assert!(pk.to_address("qsp").is_ok());
+        for value in [MODULE_Q, MODULE_Q + pk.t_vec[2].coeffs[7], u32::MAX] {
+            let mut bad = pk.clone();
+            bad.t_vec[2].coeffs[7] = value;
+            assert!(!bad.is_canonical());
+            assert_eq!(
+                bad.derive_child(1).err(),
+                Some(HdError::InvalidThresholdParameters)
+            );
+            assert_eq!(
+                bad.to_address("qsp").err(),
+                Some(HdError::InvalidThresholdParameters)
+            );
+        }
     }
 }
 

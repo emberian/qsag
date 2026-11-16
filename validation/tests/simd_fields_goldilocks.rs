@@ -19,7 +19,8 @@ use qsag_asm::{
     gf2_128_mul_acc_batch_with_backend, gf256_shamir_mac_avx2_russian_peasant,
     gf256_shamir_mac_with_backend, gf256_shamir_mul_avx2_russian_peasant,
     gf256_shamir_mul_with_backend, goldilocks_add_ct, goldilocks_dot2_ct,
-    goldilocks_mul_ct_with_backend, goldilocks_pow7_ct_with_backend, goldilocks_sub_ct,
+    goldilocks_mul_ct, goldilocks_mul_ct_with_backend, goldilocks_pow7_ct,
+    goldilocks_pow7_ct_with_backend, goldilocks_sub_ct,
     poly128_to_tower128_ct, probe_capabilities, tower128_bdoz_2lane_mac_with_backend,
     tower128_bdoz_2lane_poly_mac_with_backend, tower128_to_poly128_ct,
 };
@@ -330,8 +331,44 @@ proptest! {
     }
 }
 
-/// Canonical edge-value grid (`0, 1, 2^32 - 1, 2^32, p - 1, p, u64::MAX`) comparing
-/// `qsag-agg`, `qsag-core`, and `qsag-asm` (`BMI2/ADX` assembly) against Plonky3 `p3-goldilocks`!
+/// `(a + b) mod p` over the integers, for any two `u64`.
+fn gl_add_u128_ref(a: u64, b: u64) -> u64 {
+    ((a as u128 + b as u128) % GOLDILOCKS_PRIME as u128) as u64
+}
+
+/// `(a - b) mod p` over the integers, for any two `u64` (`2p > u64::MAX` keeps it positive).
+fn gl_sub_u128_ref(a: u64, b: u64) -> u64 {
+    ((a as u128 + 2 * GOLDILOCKS_PRIME as u128 - b as u128) % GOLDILOCKS_PRIME as u128) as u64
+}
+
+/// `x^7 mod p` by seven-fold repeated multiplication (no square-and-multiply chain shared
+/// with the kernel).
+fn gl_pow7_u128_ref(x: u64) -> u64 {
+    let p = GOLDILOCKS_PRIME as u128;
+    let x = x as u128 % p;
+    let mut acc = 1u128;
+    for _ in 0..7 {
+        acc = acc * x % p;
+    }
+    acc as u64
+}
+
+/// `(a0 * b0 + a1 * b1) mod p` with each product reduced in `u128` first.
+fn gl_dot2_u128_ref(a0: u64, b0: u64, a1: u64, b1: u64) -> u64 {
+    let p = GOLDILOCKS_PRIME as u128;
+    ((a0 as u128 * b0 as u128 % p + a1 as u128 * b1 as u128 % p) % p) as u64
+}
+
+/// Raw `u64` with half of the mass on the non-canonical band `[p, u64::MAX]`
+/// (`2^32 - 1` values that a uniform `u64` hits with probability `2^-32`).
+fn gl_raw_u64() -> impl Strategy<Value = u64> {
+    prop_oneof![GOLDILOCKS_PRIME..=u64::MAX, any::<u64>()]
+}
+
+/// Edge-value grid (`0, 1, 2^32 - 1, 2^32, p - 1, p, p + 1, u64::MAX`) comparing
+/// `qsag-agg`, `qsag-core`, and `qsag-asm` (`BMI2/ADX` assembly) against Plonky3 `p3-goldilocks`.
+/// The `qsag-asm` kernels document exactness on all of `[0, u64::MAX]`, so they receive the
+/// raw, unreduced operands; the expected value comes from the reduced operands.
 #[test]
 fn goldilocks_edge_grid_and_ntt_against_plonky3() {
     let edges: &[u64] = &[
@@ -375,19 +412,47 @@ fn goldilocks_edge_grid_and_ntt_against_plonky3() {
             assert_eq!(exp_mul, goldilocks_mul_u128_ref(ca, cb));
             assert_eq!((agg_a + agg_b).to_canonical_u64(), exp_add);
             assert_eq!((core_a + core_b).to_canonical_u64(), exp_add);
-            assert_eq!(goldilocks_add_ct(ca, cb), exp_add);
+            assert_eq!(goldilocks_add_ct(ra, rb), exp_add, "add({ra:#x}, {rb:#x})");
+            assert_eq!(gl_add_u128_ref(ra, rb), exp_add);
 
             assert_eq!((agg_a - agg_b).to_canonical_u64(), exp_sub);
             assert_eq!((core_a - core_b).to_canonical_u64(), exp_sub);
-            assert_eq!(goldilocks_sub_ct(ca, cb), exp_sub);
+            assert_eq!(goldilocks_sub_ct(ra, rb), exp_sub, "sub({ra:#x}, {rb:#x})");
+            assert_eq!(gl_sub_u128_ref(ra, rb), exp_sub);
 
             assert_eq!((agg_a * agg_b).to_canonical_u64(), exp_mul);
             assert_eq!((core_a * core_b).to_canonical_u64(), exp_mul);
             assert_eq!(agg_a.inv().to_canonical_u64(), exp_inv);
 
             for backend in ALL_SIMD_BACKENDS {
-                assert_eq!(goldilocks_mul_ct_with_backend(ca, cb, backend), exp_mul);
-                assert_eq!(goldilocks_pow7_ct_with_backend(ca, backend), exp_pow7);
+                assert_eq!(
+                    goldilocks_mul_ct_with_backend(ra, rb, backend),
+                    exp_mul,
+                    "mul({ra:#x}, {rb:#x}) on {backend:?}"
+                );
+                assert_eq!(
+                    goldilocks_pow7_ct_with_backend(ra, backend),
+                    exp_pow7,
+                    "pow7({ra:#x}) on {backend:?}"
+                );
+            }
+            assert_eq!(goldilocks_mul_ct(ra, rb), exp_mul);
+            assert_eq!(goldilocks_pow7_ct(ra), exp_pow7);
+            assert_eq!(gl_pow7_u128_ref(ra), exp_pow7);
+
+            // Two-term inner product over the full raw grid in all four operands.
+            for &rc in edges {
+                let p3_c = P3Goldilocks::from_canonical_u64(rc % GOLDILOCKS_PRIME);
+                for &rd in edges {
+                    let p3_d = P3Goldilocks::from_canonical_u64(rd % GOLDILOCKS_PRIME);
+                    let exp_dot = (p3_a * p3_b + p3_c * p3_d).as_canonical_u64();
+                    assert_eq!(
+                        goldilocks_dot2_ct(ra, rb, rc, rd),
+                        exp_dot,
+                        "dot2({ra:#x}, {rb:#x}, {rc:#x}, {rd:#x})"
+                    );
+                    assert_eq!(gl_dot2_u128_ref(ra, rb, rc, rd), exp_dot);
+                }
             }
         }
     }
@@ -425,6 +490,44 @@ fn goldilocks_edge_grid_and_ntt_against_plonky3() {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+    /// Every `qsag-asm` Goldilocks kernel on raw operands, half of them drawn from the
+    /// non-canonical band `[p, u64::MAX]`, against integer `u128` arithmetic and Plonky3.
+    /// A kernel that only canonicalizes operands below `p`, or that returns a value in
+    /// `[p, 2^64)`, fails here.
+    #[test]
+    fn goldilocks_asm_kernels_on_unreduced_inputs_against_u128_and_plonky3(
+        a in gl_raw_u64(),
+        b in gl_raw_u64(),
+        c in gl_raw_u64(),
+        d in gl_raw_u64(),
+    ) {
+        let p3 = |x: u64| P3Goldilocks::from_canonical_u64(x % GOLDILOCKS_PRIME);
+        let exp_add = gl_add_u128_ref(a, b);
+        let exp_sub = gl_sub_u128_ref(a, b);
+        let exp_mul = goldilocks_mul_u128_ref(a, b);
+        let exp_pow7 = gl_pow7_u128_ref(a);
+        let exp_dot = gl_dot2_u128_ref(a, b, c, d);
+        prop_assert_eq!(exp_add, (p3(a) + p3(b)).as_canonical_u64());
+        prop_assert_eq!(exp_sub, (p3(a) - p3(b)).as_canonical_u64());
+        prop_assert_eq!(exp_mul, (p3(a) * p3(b)).as_canonical_u64());
+        prop_assert_eq!(exp_pow7, p3(a).exp_u64(7).as_canonical_u64());
+        prop_assert_eq!(exp_dot, (p3(a) * p3(b) + p3(c) * p3(d)).as_canonical_u64());
+
+        prop_assert_eq!(goldilocks_add_ct(a, b), exp_add);
+        prop_assert_eq!(goldilocks_sub_ct(a, b), exp_sub);
+        prop_assert_eq!(goldilocks_mul_ct(a, b), exp_mul);
+        prop_assert_eq!(goldilocks_pow7_ct(a), exp_pow7);
+        prop_assert_eq!(goldilocks_dot2_ct(a, b, c, d), exp_dot);
+        for backend in ALL_SIMD_BACKENDS {
+            prop_assert_eq!(goldilocks_mul_ct_with_backend(a, b, backend), exp_mul);
+            prop_assert_eq!(goldilocks_pow7_ct_with_backend(a, backend), exp_pow7);
+        }
+    }
+}
+
+proptest! {
     #![proptest_config(ProptestConfig::with_cases(10_000))]
 
     /// 10,000-case property-based test comparing `Goldilocks`, `GoldilocksExt2`, and
@@ -434,19 +537,16 @@ proptest! {
         x_raw in any::<[u64; 4]>(),
         y_raw in any::<[u64; 4]>(),
     ) {
-        // 1. Base field + `goldilocks_dot2_ct` vs Plonky3
-        let a0 = x_raw[0] % GOLDILOCKS_PRIME;
-        let b0 = y_raw[0] % GOLDILOCKS_PRIME;
-        let a1 = x_raw[1] % GOLDILOCKS_PRIME;
-        let b1 = y_raw[1] % GOLDILOCKS_PRIME;
+        // 1. Base field + `goldilocks_dot2_ct` vs Plonky3. The kernels take the raw words;
+        //    only the Plonky3 operands are reduced.
+        let (a0, b0, a1, b1) = (x_raw[0], y_raw[0], x_raw[1], y_raw[1]);
+        let p3 = |x: u64| P3Goldilocks::from_canonical_u64(x % GOLDILOCKS_PRIME);
 
-        let p3_dot = (P3Goldilocks::from_canonical_u64(a0) * P3Goldilocks::from_canonical_u64(b0)
-            + P3Goldilocks::from_canonical_u64(a1) * P3Goldilocks::from_canonical_u64(b1))
-            .as_canonical_u64();
+        let p3_dot = (p3(a0) * p3(b0) + p3(a1) * p3(b1)).as_canonical_u64();
         prop_assert_eq!(goldilocks_dot2_ct(a0, b0, a1, b1), p3_dot);
         prop_assert_eq!(
             goldilocks_mul_ct_with_backend(a0, b0, SimdBackend::X86Avx512GfniVpclmul),
-            (P3Goldilocks::from_canonical_u64(a0) * P3Goldilocks::from_canonical_u64(b0)).as_canonical_u64()
+            (p3(a0) * p3(b0)).as_canonical_u64()
         );
 
         // 2. Quadratic extension `GoldilocksExt2` vs `p3_field::BinomialExtensionField<P3Goldilocks, 2>`

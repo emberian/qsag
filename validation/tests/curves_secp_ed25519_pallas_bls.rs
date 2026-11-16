@@ -116,6 +116,150 @@ fn ref_ethereum_keccak20(sk: &K256SecretKey) -> [u8; 20] {
 // 5A. Property-Based Differential Tests: `secp256k1`, `Ed25519`, `BIP-32`, `SLIP-0010`
 // ============================================================================
 
+/// Order `n` of the secp256k1 group (SEC 2 §2.4.1), big-endian.
+const SECP256K1_N_BE: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+];
+
+/// Order `r` of the BLS12-381 prime-order subgroups, big-endian.
+const BLS12_381_R_BE: [u8; 32] = [
+    0x73, 0xED, 0xA7, 0x53, 0x29, 0x9D, 0x7D, 0x48, 0x33, 0x39, 0xD8, 0x08, 0x09, 0xA1, 0xD8, 0x05,
+    0x53, 0xBD, 0xA4, 0x02, 0xFF, 0xFE, 0x5B, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x01,
+];
+
+/// Big-endian 256-bit `value + delta` for a small signed `delta` (panics on overflow).
+fn be256_offset(value: &[u8; 32], delta: i8) -> [u8; 32] {
+    let mut out = *value;
+    let mut carry = i16::from(delta);
+    for byte in out.iter_mut().rev() {
+        let t = i16::from(*byte) + carry;
+        *byte = t.rem_euclid(256) as u8;
+        carry = t.div_euclid(256);
+    }
+    assert_eq!(carry, 0, "offset left the 256-bit range");
+    out
+}
+
+fn be256_small(value: u8) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[31] = value;
+    out
+}
+
+/// Uniform scalar in `[1, order - 1]` by rejection: 32 uniform bytes are kept exactly when
+/// they are nonzero and below `order` (big-endian arrays order as the integers they encode).
+/// No byte is masked, reduced or forced, so every valid scalar is equally likely.
+fn uniform_nonzero_scalar_below(order_be: [u8; 32]) -> impl Strategy<Value = [u8; 32]> {
+    any::<[u8; 32]>().prop_filter("scalar outside [1, order - 1]", move |bytes| {
+        *bytes != [0u8; 32] && *bytes < order_be
+    })
+}
+
+/// secp256k1 key `sk_be` in `[1, n - 1]`: fixed-base multiplication, the three commitment
+/// kinds and hardened BIP-32 derivation against `k256`, `sha2`, `ripemd`, `sha3`, `hmac`.
+fn check_secp256k1_scalar_against_k256(
+    sk_be: [u8; 32],
+    chain_code: [u8; 32],
+    child_low: u32,
+) -> Result<(), TestCaseError> {
+    let ref_sk = K256SecretKey::from_slice(&sk_be).expect("canonical nonzero secp256k1 scalar");
+    let ref_pk = ref_sk.public_key();
+    let ref_comp33: [u8; 33] = ref_pk.to_encoded_point(true).as_bytes().try_into().unwrap();
+    let ref_uncomp65 = ref_pk.to_encoded_point(false);
+    let ref_uncomp64: [u8; 64] = ref_uncomp65.as_bytes()[1..65].try_into().unwrap();
+
+    // 1. Constant-time generator multiplication compressed + uncompressed match `k256`
+    let mut qsag_pt = SecpPoint::generator_mul_ct(&sk_be);
+    prop_assert_eq!(qsag_pt.to_compressed_bytes(), Some(ref_comp33));
+    prop_assert_eq!(qsag_pt.to_uncompressed_64(), Some(ref_uncomp64));
+    qsag_pt.wipe();
+
+    // 2. All three secp256k1 commitment kinds match independent `k256` + `sha2`/`ripemd`/`sha3`
+    let wit = LegacyOwnershipWitness::from_raw_secret(sk_be);
+    prop_assert_eq!(
+        wit.compute_bitcoin_hash160(),
+        Some(LegacyCommitmentKind::BitcoinHash160(ref_bitcoin_hash160(&ref_comp33)))
+    );
+    prop_assert_eq!(
+        wit.compute_taproot_tweaked_xonly(),
+        Some(LegacyCommitmentKind::BitcoinTaprootXOnly(ref_taproot_tweaked_xonly(&ref_sk)))
+    );
+    prop_assert_eq!(
+        wit.compute_ethereum_keccak20(),
+        Some(LegacyCommitmentKind::EthereumKeccak20(ref_ethereum_keccak20(&ref_sk)))
+    );
+
+    // 3. Hardened BIP-32 child derivation matches independent `Hmac<Sha512>` + `k256::Scalar`
+    let hardened_idx = child_low | 0x8000_0000;
+    let step = HardenedChainStep::new(sk_be, chain_code, hardened_idx)
+        .expect("hardened index accepted");
+    let mut mac = HmacSha512::new_from_slice(&chain_code).unwrap();
+    mac.update(&[0x00]);
+    mac.update(&sk_be);
+    mac.update(&hardened_idx.to_be_bytes());
+    let il_ir = mac.finalize().into_bytes();
+    let il_bytes: [u8; 32] = il_ir[0..32].try_into().unwrap();
+    let ir_bytes: [u8; 32] = il_ir[32..64].try_into().unwrap();
+
+    if let Some(il_scalar) = Option::<K256Scalar>::from(K256Scalar::from_repr(il_bytes.into())) {
+        let parent_scalar: K256Scalar = *ref_sk.to_nonzero_scalar().as_ref();
+        let child_scalar = il_scalar + parent_scalar;
+        if !bool::from(child_scalar.is_zero()) {
+            let expected_child_sk: [u8; 32] = child_scalar.to_bytes().into();
+            let (got_sk, got_cc) = step
+                .derive_bip32_secp256k1_child()
+                .expect("valid hardened BIP-32 child");
+            prop_assert_eq!(got_sk, expected_child_sk);
+            prop_assert_eq!(got_cc, ir_bytes);
+        }
+    }
+    Ok(())
+}
+
+/// The explicit ends of the secp256k1 scalar range. `1`, `2`, `n - 2`, `n - 1` go through
+/// the full differential check; `0`, `n`, `n + 1` and `2^256 - 1` must be refused by every
+/// API that validates a secret key. A validator that compares only the top limb, or one
+/// that accepts `n` (whose public key is the identity), fails here.
+#[test]
+fn secp256k1_edge_scalars_and_out_of_range_refusal() {
+    let n = SECP256K1_N_BE;
+    for (index, sk_be) in [be256_small(1), be256_small(2), be256_offset(&n, -2), be256_offset(&n, -1)]
+        .into_iter()
+        .enumerate()
+    {
+        for child_low in [0u32, 1, 0x7FFF_FFFF] {
+            check_secp256k1_scalar_against_k256(sk_be, [0x30 + index as u8; 32], child_low)
+                .unwrap_or_else(|e| panic!("edge scalar {sk_be:02x?}: {e}"));
+        }
+    }
+    // `[1] G` is the generator and `[n - 1] G` is its negation: same x, opposite parity.
+    let g = K256Proj::GENERATOR.to_affine().to_encoded_point(true);
+    let one = SecpPoint::generator_mul_ct(&be256_small(1)).to_compressed_bytes().unwrap();
+    let minus_one = SecpPoint::generator_mul_ct(&be256_offset(&n, -1)).to_compressed_bytes().unwrap();
+    assert_eq!(one.as_slice(), g.as_bytes());
+    assert_eq!(one[1..], minus_one[1..]);
+    assert_eq!(one[0] ^ minus_one[0], 0x01);
+
+    for bad in [[0u8; 32], n, be256_offset(&n, 1), [0xFF; 32]] {
+        assert!(K256SecretKey::from_slice(&bad).is_err());
+        let wit = LegacyOwnershipWitness::from_raw_secret(bad);
+        assert_eq!(wit.compute_bitcoin_hash160(), None, "{bad:02x?}");
+        assert_eq!(wit.compute_taproot_tweaked_xonly(), None, "{bad:02x?}");
+        assert_eq!(wit.compute_ethereum_keccak20(), None, "{bad:02x?}");
+        let step = HardenedChainStep::new(bad, [0x77; 32], 0x8000_0001).expect("hardened index");
+        assert_eq!(step.derive_bip32_secp256k1_child(), None, "{bad:02x?}");
+    }
+    // The raw fixed-base multiplier does not validate: it computes `[k mod n] G`, so `0` and
+    // `n` give the identity (no encoding) and `n + 1` gives the generator.
+    assert_eq!(SecpPoint::generator_mul_ct(&[0u8; 32]).to_compressed_bytes(), None);
+    assert_eq!(SecpPoint::generator_mul_ct(&n).to_compressed_bytes(), None);
+    assert_eq!(
+        SecpPoint::generator_mul_ct(&be256_offset(&n, 1)).to_compressed_bytes().unwrap().as_slice(),
+        g.as_bytes()
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
@@ -125,66 +269,11 @@ proptest! {
 
     #[test]
     fn pbt_secp256k1_ct_and_legacy_commitments_match_k256(
-        mut sk_be in any::<[u8; 32]>(),
+        sk_be in uniform_nonzero_scalar_below(SECP256K1_N_BE),
         chain_code in any::<[u8; 32]>(),
         child_low in 0u32..0x8000_0000u32,
     ) {
-        // Ensure non-zero canonical scalar if random bytes hit 0 or >= n
-        if K256SecretKey::from_slice(&sk_be).is_err() {
-            sk_be[0] &= 0x7F;
-            sk_be[31] |= 0x01;
-        }
-        let ref_sk = K256SecretKey::from_slice(&sk_be).expect("canonical nonzero secp256k1 scalar");
-        let ref_pk = ref_sk.public_key();
-        let ref_comp33: [u8; 33] = ref_pk.to_encoded_point(true).as_bytes().try_into().unwrap();
-        let ref_uncomp65 = ref_pk.to_encoded_point(false);
-        let ref_uncomp64: [u8; 64] = ref_uncomp65.as_bytes()[1..65].try_into().unwrap();
-
-        // 1. Constant-time generator multiplication compressed + uncompressed match `k256`
-        let mut qsag_pt = SecpPoint::generator_mul_ct(&sk_be);
-        prop_assert_eq!(qsag_pt.to_compressed_bytes(), Some(ref_comp33));
-        prop_assert_eq!(qsag_pt.to_uncompressed_64(), Some(ref_uncomp64));
-        qsag_pt.wipe();
-
-        // 2. All three secp256k1 commitment kinds match independent `k256` + `sha2`/`ripemd`/`sha3`
-        let wit = LegacyOwnershipWitness::from_raw_secret(sk_be);
-        prop_assert_eq!(
-            wit.compute_bitcoin_hash160(),
-            Some(LegacyCommitmentKind::BitcoinHash160(ref_bitcoin_hash160(&ref_comp33)))
-        );
-        prop_assert_eq!(
-            wit.compute_taproot_tweaked_xonly(),
-            Some(LegacyCommitmentKind::BitcoinTaprootXOnly(ref_taproot_tweaked_xonly(&ref_sk)))
-        );
-        prop_assert_eq!(
-            wit.compute_ethereum_keccak20(),
-            Some(LegacyCommitmentKind::EthereumKeccak20(ref_ethereum_keccak20(&ref_sk)))
-        );
-
-        // 3. Hardened BIP-32 child derivation matches independent `Hmac<Sha512>` + `k256::Scalar`
-        let hardened_idx = child_low | 0x8000_0000;
-        let step = HardenedChainStep::new(sk_be, chain_code, hardened_idx)
-            .expect("hardened index accepted");
-        let mut mac = HmacSha512::new_from_slice(&chain_code).unwrap();
-        mac.update(&[0x00]);
-        mac.update(&sk_be);
-        mac.update(&hardened_idx.to_be_bytes());
-        let il_ir = mac.finalize().into_bytes();
-        let il_bytes: [u8; 32] = il_ir[0..32].try_into().unwrap();
-        let ir_bytes: [u8; 32] = il_ir[32..64].try_into().unwrap();
-
-        if let Some(il_scalar) = Option::<K256Scalar>::from(K256Scalar::from_repr(il_bytes.into())) {
-            let parent_scalar: K256Scalar = *ref_sk.to_nonzero_scalar().as_ref();
-            let child_scalar = il_scalar + parent_scalar;
-            if !bool::from(child_scalar.is_zero()) {
-                let expected_child_sk: [u8; 32] = child_scalar.to_bytes().into();
-                let (got_sk, got_cc) = step
-                    .derive_bip32_secp256k1_child()
-                    .expect("valid hardened BIP-32 child");
-                prop_assert_eq!(got_sk, expected_child_sk);
-                prop_assert_eq!(got_cc, ir_bytes);
-            }
-        }
+        check_secp256k1_scalar_against_k256(sk_be, chain_code, child_low)?;
     }
 
     #[test]
@@ -340,6 +429,85 @@ proptest! {
 // 5C. Property-Based Differential Tests: Ethereum Beacon `BLS12-381` vs `blstrs`
 // ============================================================================
 
+/// BLS12-381 secret scalars in `[1, r - 1]`: generator multiplication, the 48-byte IETF
+/// encoding, `0x00` withdrawal credentials, complete addition and doubling against `blstrs`.
+fn check_bls12_381_scalars_against_blstrs(
+    sk1_be: [u8; 32],
+    sk2_be: [u8; 32],
+) -> Result<(), TestCaseError> {
+    let ref_sk1 = BlsRefScalar::from_bytes_be(&sk1_be).expect("canonical BlsRefScalar");
+    let ref_sk2 = BlsRefScalar::from_bytes_be(&sk2_be).expect("canonical BlsRefScalar");
+
+    // 1. Scalar arithmetic vs `blstrs::Scalar`
+    let q_sk1 = FrBls381::from_nonzero_be_bytes(&sk1_be).expect("nonzero FrBls381");
+    let q_sk2 = FrBls381::from_nonzero_be_bytes(&sk2_be).expect("nonzero FrBls381");
+    let ref_pt1 = BlsRefG1Proj::generator() * ref_sk1;
+    let ref_pt2 = BlsRefG1Proj::generator() * ref_sk2;
+    let ref_pk48_1 = BlsRefG1Affine::from(ref_pt1).to_compressed();
+    let ref_pk48_2 = BlsRefG1Affine::from(ref_pt2).to_compressed();
+
+    // 2. Generator scalar mul & 48-byte IETF compressed encoding vs `blstrs`
+    let wit1 = BlsOwnershipWitness::from_secret_scalar_be(sk1_be).unwrap();
+    prop_assert_eq!(wit1.compute_validator_pubkey_48(), Some(ref_pk48_1));
+    prop_assert_eq!(
+        wit1.compute_beacon_commitment(),
+        Some(BlsValidatorCommitment::BeaconValidatorPubkey(ref_pk48_1))
+    );
+
+    // 3. `0x00` `BLS_WITHDRAWAL_PREFIX` credential vs `sha2::Sha256`
+    let mut ref_cred32: [u8; 32] = Sha256::digest(ref_pk48_1).into();
+    ref_cred32[0] = 0x00;
+    prop_assert_eq!(compute_bls_0x00_withdrawal_credentials(&ref_pk48_1), ref_cred32);
+    prop_assert_eq!(
+        wit1.compute_unrevealed_0x00_commitment(),
+        Some(BlsValidatorCommitment::UnrevealedBls0x00Credential(ref_cred32))
+    );
+
+    // 4. Complete addition, doubling, & compressed 48-byte roundtrip
+    let qp1 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_1).expect("valid G1 pubkey 1");
+    let qp2 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_2).expect("valid G1 pubkey 2");
+    prop_assert_eq!(qp1.clone(), BlsG1Point::generator_mul_ct(&q_sk1));
+    prop_assert_eq!(qp2.clone(), BlsG1Point::generator_mul_ct(&q_sk2));
+    prop_assert_eq!(
+        qp1.complete_add(&qp2).to_compressed_48(),
+        BlsRefG1Affine::from(ref_pt1 + ref_pt2).to_compressed()
+    );
+    prop_assert_eq!(
+        qp1.complete_add(&qp1).to_compressed_48(),
+        BlsRefG1Affine::from(ref_pt1.double()).to_compressed()
+    );
+    Ok(())
+}
+
+/// The explicit ends of the BLS12-381 scalar range. `1`, `2`, `r - 2`, `r - 1` go through
+/// the full differential check in every ordered pair (so `[1] G + [r - 1] G` exercises the
+/// identity result of complete addition); `0`, `r`, `r + 1` and `2^256 - 1` must be refused.
+/// The removed `sk[0] %= 0x73` sampling could never produce a scalar whose top byte is
+/// `0x73`, so the band `[0x73 << 248, r - 1]` next to the modulus was never tested.
+#[test]
+fn bls12_381_edge_scalars_and_out_of_range_refusal() {
+    let r = BLS12_381_R_BE;
+    let edges = [be256_small(1), be256_small(2), be256_offset(&r, -2), be256_offset(&r, -1)];
+    for sk1_be in edges {
+        for sk2_be in edges {
+            check_bls12_381_scalars_against_blstrs(sk1_be, sk2_be)
+                .unwrap_or_else(|e| panic!("edge scalars {sk1_be:02x?}, {sk2_be:02x?}: {e}"));
+        }
+    }
+    for bad in [[0u8; 32], r, be256_offset(&r, 1), [0xFF; 32]] {
+        assert!(FrBls381::from_nonzero_be_bytes(&bad).is_none(), "{bad:02x?}");
+        assert!(BlsOwnershipWitness::from_secret_scalar_be(bad).is_none(), "{bad:02x?}");
+        let mut bad_le = bad;
+        bad_le.reverse();
+        assert!(FrBls381::from_nonzero_le_bytes(&bad_le).is_none(), "{bad:02x?}");
+        assert!(BlsOwnershipWitness::from_secret_scalar_le(bad_le).is_none(), "{bad:02x?}");
+    }
+    // Zero is a canonical field element (only the secret-key parser refuses it); `r` is not.
+    assert!(FrBls381::from_be_bytes(&[0u8; 32]).is_some());
+    assert!(FrBls381::from_be_bytes(&r).is_none());
+    assert!(bool::from(BlsRefScalar::from_bytes_be(&r).is_none()));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: 256,
@@ -349,62 +517,10 @@ proptest! {
 
     #[test]
     fn pbt_bls12_381_g1_and_validator_commitments_match_blstrs(
-        mut sk1_be in prop::array::uniform32(any::<u8>()),
-        mut sk2_be in prop::array::uniform32(any::<u8>()),
+        sk1_be in uniform_nonzero_scalar_below(BLS12_381_R_BE),
+        sk2_be in uniform_nonzero_scalar_below(BLS12_381_R_BE),
     ) {
-        // Reduce into `[1, r - 1]` (`r = 0x73eda753...`, so top byte `< 0x73` is strictly `< r`)
-        sk1_be[0] %= 0x73;
-        let mut ref_sk1 = BlsRefScalar::from_bytes_be(&sk1_be).expect("canonical BlsRefScalar");
-        if bool::from(ref_sk1.is_zero()) {
-            ref_sk1 = BlsRefScalar::ONE;
-            sk1_be = ref_sk1.to_bytes_be();
-        }
-
-        sk2_be[0] %= 0x73;
-        let mut ref_sk2 = BlsRefScalar::from_bytes_be(&sk2_be).expect("canonical BlsRefScalar");
-        if bool::from(ref_sk2.is_zero()) {
-            ref_sk2 = BlsRefScalar::ONE;
-            sk2_be = ref_sk2.to_bytes_be();
-        }
-
-        // 1. Scalar arithmetic vs `blstrs::Scalar`
-        let q_sk1 = FrBls381::from_nonzero_be_bytes(&sk1_be).expect("nonzero FrBls381");
-        let q_sk2 = FrBls381::from_nonzero_be_bytes(&sk2_be).expect("nonzero FrBls381");
-        let ref_pt1 = BlsRefG1Proj::generator() * ref_sk1;
-        let ref_pt2 = BlsRefG1Proj::generator() * ref_sk2;
-        let ref_pk48_1 = BlsRefG1Affine::from(ref_pt1).to_compressed();
-        let ref_pk48_2 = BlsRefG1Affine::from(ref_pt2).to_compressed();
-
-        // 2. Generator scalar mul & 48-byte IETF compressed encoding vs `blstrs`
-        let wit1 = BlsOwnershipWitness::from_secret_scalar_be(sk1_be).unwrap();
-        prop_assert_eq!(wit1.compute_validator_pubkey_48(), Some(ref_pk48_1));
-        prop_assert_eq!(
-            wit1.compute_beacon_commitment(),
-            Some(BlsValidatorCommitment::BeaconValidatorPubkey(ref_pk48_1))
-        );
-
-        // 3. `0x00` `BLS_WITHDRAWAL_PREFIX` credential vs `sha2::Sha256`
-        let mut ref_cred32: [u8; 32] = Sha256::digest(ref_pk48_1).into();
-        ref_cred32[0] = 0x00;
-        prop_assert_eq!(compute_bls_0x00_withdrawal_credentials(&ref_pk48_1), ref_cred32);
-        prop_assert_eq!(
-            wit1.compute_unrevealed_0x00_commitment(),
-            Some(BlsValidatorCommitment::UnrevealedBls0x00Credential(ref_cred32))
-        );
-
-        // 4. Complete addition, doubling, & compressed 48-byte roundtrip
-        let qp1 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_1).expect("valid G1 pubkey 1");
-        let qp2 = BlsG1Point::from_validator_pubkey_48(&ref_pk48_2).expect("valid G1 pubkey 2");
-        prop_assert_eq!(qp1.clone(), BlsG1Point::generator_mul_ct(&q_sk1));
-        prop_assert_eq!(qp2.clone(), BlsG1Point::generator_mul_ct(&q_sk2));
-        prop_assert_eq!(
-            qp1.complete_add(&qp2).to_compressed_48(),
-            BlsRefG1Affine::from(ref_pt1 + ref_pt2).to_compressed()
-        );
-        prop_assert_eq!(
-            qp1.complete_add(&qp1).to_compressed_48(),
-            BlsRefG1Affine::from(ref_pt1.double()).to_compressed()
-        );
+        check_bls12_381_scalars_against_blstrs(sk1_be, sk2_be)?;
     }
 }
 

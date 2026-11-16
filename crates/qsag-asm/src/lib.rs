@@ -162,11 +162,8 @@ pub fn keccak_f1600_x4_with_backend(state: &mut KeccakState4x, backend: SimdBack
     #[cfg(target_arch = "aarch64")]
     {
         let caps = cpuid::probe_capabilities();
-        if backend == SimdBackend::Aarch64NeonSha3Pmull
-            && caps.aarch64_neon
-            && caps.aarch64_sha3
-            && caps.aarch64_dit
-        {
+        // DIT is taken when the core has it; the kernel does not depend on it.
+        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_sha3 {
             let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
             // SAFETY: `probe_capabilities()` verified runtime `NEON` + `FEAT_SHA3` (`eor3`, `rax1`,
             // `xar`, `bcax`) before invoking `run_keccak_f1600_sha3_neon_4x`.
@@ -631,6 +628,8 @@ pub fn gf256_shamir_mul_avx2_russian_peasant(dst: &mut [u8], a: &[u8], b: &[u8])
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     portable::gf256_shamir_mul_portable(dst, a, b);
 }
 
@@ -680,6 +679,8 @@ pub fn gf256_shamir_mac_avx2_russian_peasant(acc: &mut [u8], shares: &[u8], scal
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     portable::gf256_shamir_mac_portable(acc, shares, scalar);
 }
 

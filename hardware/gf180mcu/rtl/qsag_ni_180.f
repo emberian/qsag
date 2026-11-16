@@ -5,6 +5,11 @@ rtl/qsag_sponge.sv
 rtl/qsag_keccak_serial.sv
 rtl/qsag_gf128_clmul.sv
 rtl/qsag_field_engine.sv
+rtl/dregg_captp_vat.sv
+rtl/dregg_ro_puf_bch.sv
+rtl/dregg_nfc_nco.sv
+rtl/dregg_distance_tdc.sv
+rtl/dregg_shield_canaries.sv
 rtl/qsag_wire_engine.sv
 rtl/qsag_async_fifo_gray.sv
 rtl/qsag_muller_c.sv

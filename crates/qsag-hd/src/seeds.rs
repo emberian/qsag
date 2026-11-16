@@ -63,17 +63,16 @@ impl CustodianSet {
     pub fn contains(self, position: usize) -> bool {
         position < MAX_CUSTODIANS && (self.0[position / 64] >> (position % 64)) & 1 != 0
     }
-    /// Insert `position` (`< MAX_CUSTODIANS`), returning `false` without panicking if out of range.
-    pub fn try_insert(&mut self, position: usize) -> bool {
+    /// Adds `position` and returns `true`. A position `>= MAX_CUSTODIANS` is not
+    /// representable: the set is left unchanged and `false` is returned, matching
+    /// `contains`, which reports `false` for the same positions. Never panics.
+    #[must_use = "an out-of-range position is not inserted"]
+    pub fn insert(&mut self, position: usize) -> bool {
         if position >= MAX_CUSTODIANS {
             return false;
         }
         self.0[position / 64] |= 1u64 << (position % 64);
         true
-    }
-    /// Insert `position` when `< MAX_CUSTODIANS` (no-op if `position >= MAX_CUSTODIANS`).
-    pub fn insert(&mut self, position: usize) {
-        let _ = self.try_insert(position);
     }
     pub fn to_be_bytes(self) -> [u8; 32] {
         let mut bytes = [0; 32];
@@ -198,7 +197,9 @@ impl CommitteeConfig {
         loop {
             let mut subset = CustodianSet::default();
             for &p in &positions {
-                subset.insert(p);
+                // `p < n <= MAX_CUSTODIANS` for every validated committee.
+                let representable = subset.insert(p);
+                debug_assert!(representable);
             }
             subsets.push(subset);
             let Some(i) = (0..size)
@@ -751,6 +752,37 @@ mod tests {
     fn config(t: u16, n: u16) -> CommitteeConfig {
         let members: Vec<_> = (0..n).map(|i| (i + 10, u32::from(i) + 1)).collect();
         CommitteeConfig::new(t, &members, [7; 32]).unwrap()
+    }
+
+    #[test]
+    fn custodian_set_insert_refuses_unrepresentable_positions_without_panicking() {
+        let mut set = CustodianSet::default();
+        assert!(set.insert(0));
+        assert!(set.insert(MAX_CUSTODIANS - 1));
+        let before = set;
+        for position in [MAX_CUSTODIANS, MAX_CUSTODIANS + 1, usize::MAX] {
+            assert!(!set.insert(position));
+            assert!(!set.contains(position));
+            assert_eq!(set, before);
+        }
+        assert!(set.contains(0) && set.contains(MAX_CUSTODIANS - 1));
+    }
+
+    #[test]
+    fn pairwise_key_exists_only_for_another_committee_member() {
+        let cfg = config(2, 3);
+        let seeds = run_seed_ceremony(&cfg, 0x51);
+        let n = cfg.members().len();
+        for other in 0..n {
+            assert_eq!(seeds[0].pairwise_key(other, b"pair").is_some(), other != 0);
+        }
+        let forward = seeds[0].pairwise_key(1, b"pair").unwrap();
+        let backward = seeds[1].pairwise_key(0, b"pair").unwrap();
+        assert_eq!(forward[..], backward[..]);
+        // A position outside the committee has no pairwise key (it used to hash to one).
+        for other in [n, n + 1, MAX_CUSTODIANS, usize::MAX] {
+            assert!(seeds[0].pairwise_key(other, b"pair").is_none());
+        }
     }
 
     #[test]

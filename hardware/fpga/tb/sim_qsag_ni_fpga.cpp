@@ -24,7 +24,7 @@ static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7
 static const int P2_RING_LEN = 16, P2_PASSES = 31, P2_PIPE_LAT = 453;
 #if defined(QSAG_COMPACT)
 static constexpr bool COMPACT = true;
-static const int TOP_P2_LAT = 1314, TOP_EXT_LAT = 24, TOP_KEC_RPC = 1;
+static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 24, TOP_KEC_RPC = 1;
 #elif defined(QSAG_PIPE)
 static constexpr bool COMPACT = false;
 static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2;

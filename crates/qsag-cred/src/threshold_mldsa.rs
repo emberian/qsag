@@ -97,7 +97,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::{KECCAK_RC, Shake256, cshake256_framed_32};
-use qsag_core::wipe::SecretBuffer;
+use qsag_core::wipe::{SecretBuffer, SecretBytes};
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
@@ -181,12 +181,34 @@ impl core::error::Error for ThresholdMlDsaError {}
 /// Durable reservation of a signing attempt. `reserve` must return `false`
 /// if `(party_id, epoch)` or `(party_id, session_id, attempt)` was reserved
 /// before for this key, across restarts. Epochs must advance monotonically.
+///
+/// `reserve` carries no key identifier, so the binding of a store to a key is
+/// checked through [`Self::next_epoch`]: [`threshold_sign_mldsa_party`] calls it
+/// with the key identifier of the signing share before any network round and
+/// refuses to sign when it fails or when the share's epoch is behind the
+/// durable one. A store that signs must therefore implement `next_epoch`; the
+/// default refuses.
 pub trait NonceBurnPersistence {
     fn reserve(&mut self, party_id: u16, epoch: u64, session_id: &[u8; 32], attempt: u32) -> bool;
 
-    /// Durable next unused epoch for this key and party. Unsupported recovery fails closed.
+    /// Durable next unused epoch for this key and party. It must fail for a
+    /// `key_id` other than the one the store was provisioned for. Unsupported
+    /// recovery fails closed.
     fn next_epoch(&self, _key_id: &[u8; 32], _party_id: u16) -> Result<u64, ThresholdMlDsaError> {
         Err(ThresholdMlDsaError::NoncePersistenceFailed)
+    }
+
+    /// Restricts later reservations to the enrolled custodians of `key_id`.
+    /// [`threshold_sign_mldsa_party`] calls this at entry with the custodian
+    /// list of the verification pack. The default accepts: a store without a
+    /// per-party table has nothing to restrict. A wrapper around a store that
+    /// overrides this method should forward it.
+    fn enroll_parties(
+        &mut self,
+        _key_id: &[u8; 32],
+        _party_ids: &[u16],
+    ) -> Result<(), ThresholdMlDsaError> {
+        Ok(())
     }
 }
 
@@ -403,6 +425,14 @@ impl PartyBurnState {
 /// parties, 2^20 sessions per party, 256 attempts `>= 128` per session, and
 /// the record size [`qsag_asm::durable::LockedRecord`] reads back.
 ///
+/// A party slot is created by the first reservation that names the party.
+/// Once [`NonceBurnPersistence::enroll_parties`] has run (signing does this at
+/// entry), a party outside the enrolled list is refused, so reservations for
+/// identifiers that are not custodians cannot use up the slots. The list is
+/// held in memory and is installed again by the next signing call after a
+/// restart; calling `reserve` directly on a store that was never enrolled
+/// keeps the old behaviour.
+///
 /// `QSCBURN2` row ledgers are rebuilt into this form and rewritten atomically
 /// on open. Both formats are authenticated under the customization string
 /// `QSAG.MLDSA.NONCE_BURN.V2`; the MAC input frames the whole record, which
@@ -421,6 +451,8 @@ pub struct FsNonceBurnStore {
     /// Count of reservations; equals the number of burned attempts recorded.
     generation: u64,
     parties: Vec<PartyBurnState>,
+    /// Sorted custodian identifiers, once installed by `enroll_parties`.
+    enrolled: Option<Vec<u16>>,
     poisoned: bool,
 }
 
@@ -442,6 +474,7 @@ impl FsNonceBurnStore {
             mac_key,
             generation: 0,
             parties: Vec::new(),
+            enrolled: None,
             poisoned: false,
         };
         store.persist()?;
@@ -495,6 +528,7 @@ impl FsNonceBurnStore {
             mac_key,
             generation,
             parties: Vec::new(),
+            enrolled: None,
             poisoned: false,
         };
         let payload = &body[BURN_HEADER_BYTES..];
@@ -602,6 +636,13 @@ impl FsNonceBurnStore {
         if self.poisoned || epoch == u64::MAX {
             return false;
         }
+        if self
+            .enrolled
+            .as_ref()
+            .is_some_and(|enrolled| enrolled.binary_search(&party).is_err())
+        {
+            return false;
+        }
         let Ok(idx) = self.parties.binary_search_by_key(&party, |p| p.party_id) else {
             return self.parties.len() < MAX_THRESHOLD_MLDSA_PARTIES;
         };
@@ -682,6 +723,32 @@ impl NonceBurnPersistence for FsNonceBurnStore {
             .parties
             .binary_search_by_key(&party_id, |p| p.party_id)
             .map_or(0, |idx| self.parties[idx].max_epoch + 1))
+    }
+
+    fn enroll_parties(
+        &mut self,
+        key_id: &[u8; 32],
+        party_ids: &[u16],
+    ) -> Result<(), ThresholdMlDsaError> {
+        if self.poisoned
+            || !ct_eq_bytes(key_id, &self.key_id)
+            || party_ids.len() > MAX_THRESHOLD_MLDSA_PARTIES
+        {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+        let enrolled =
+            sorted_distinct(party_ids).map_err(|_| ThresholdMlDsaError::NoncePersistenceFailed)?;
+        // A ledger that already holds burns of a party outside the list belongs
+        // to another committee; refuse instead of hiding those burns.
+        if self
+            .parties
+            .iter()
+            .any(|party| enrolled.binary_search(&party.party_id).is_err())
+        {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+        self.enrolled = Some(enrolled);
+        Ok(())
     }
 }
 
@@ -862,7 +929,7 @@ impl ThresholdMlDsaSignerShare {
         self.shamir.is_some()
     }
 
-    pub(crate) fn custody_digest(&self) -> [u8; 32] {
+    pub(crate) fn custody_digest(&self) -> SecretBytes<32> {
         let mut xof = Shake256::new();
         xof.absorb(b"QSAG.TMLDSA.CUSTODY.V1");
         let replicated = self
@@ -879,8 +946,10 @@ impl ThresholdMlDsaSignerShare {
             }
         }
         xof.finalize(0x1F);
-        let mut out = [0u8; 32];
-        xof.squeeze(&mut out);
+        // The digest is a function of the key share: it is written straight into
+        // a guard that erases it on drop.
+        let mut out = SecretBytes::<32>::zeroed();
+        xof.squeeze(&mut out.0);
         out
     }
 
@@ -1935,65 +2004,89 @@ fn apply_response_stream_cipher(
 
 /// Seals the pending `z` shares under a per-attempt XOF stream cipher whose only
 /// decryption key is held privately inside `qsag_verified::MlDsaReleaseGate`.
-/// Any failed rejection-sampling or commitment barrier wipes the key to `[0u8; 32]`
-/// inside `qsag-verified`, rendering `sealed_response` cryptographically unrecoverable.
+///
+/// The key is erased where it is stored on every way out of an attempt: a failed
+/// barrier erases it inside the gate (`try_release_z_share_into`), and dropping
+/// the response before a verdict (a rejected attempt, an error return, a panic
+/// unwind) aborts the gate in place. Without the key `sealed_response` cannot be
+/// decrypted. The gate is never moved out of this structure.
 struct PendingResponse {
     sealed_response: Sh,
     ciphertext_tag: [u8; 32],
     gate: MlDsaReleaseGate,
 }
 
+impl Drop for PendingResponse {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
 impl PendingResponse {
+    /// Erases the seal key inside the gate. After a release the gate holds
+    /// only zeros already and this changes nothing that matters.
+    fn abandon(&mut self) {
+        self.gate.abort_in_place();
+        // `qsag-verified` forbids `unsafe`, so the erasure above is an ordinary
+        // store; the opaque read keeps it from being removed as dead.
+        core::hint::black_box(&self.gate);
+    }
+
     fn new_sealed(
         mut response: Sh,
         context: [u8; 32],
         attempt: u32,
         seal_entropy: &[u8; 32],
     ) -> Self {
-        let mut seal_key = cshake256_framed_32(
+        let seal_key = SecretBuffer(cshake256_framed_32(
             b"QSAG.MLDSA.SEAL_KEY.V1",
             &[seal_entropy, &context, &attempt.to_be_bytes()],
-        );
+        ));
         apply_response_stream_cipher(&mut response, &seal_key, &context, attempt, true);
         let ciphertext_tag = Self::ciphertext_tag(&response, &context, attempt);
-        let gate = MlDsaReleaseGate::new_sealed(context, attempt, seal_key);
-        ct_zeroize_bytes(&mut seal_key);
         Self {
             sealed_response: response,
             ciphertext_tag,
-            gate,
+            gate: MlDsaReleaseGate::new_sealed(context, attempt, *seal_key),
         }
     }
 
+    /// Tag of the sealed response under the canonical length-framed cSHAKE256:
+    /// the frames are the context, the attempt, the component count and one
+    /// frame of little-endian coefficients per component.
     fn ciphertext_tag(ciphertext: &Sh, context: &[u8; 32], attempt: u32) -> [u8; 32] {
-        let mut sponge = Shake256::new();
-        sponge.absorb(b"QSAG.MLDSA.PENDING_CT_TAG.V1");
-        sponge.absorb(context);
-        sponge.absorb(&attempt.to_be_bytes());
-        sponge.absorb(&(ciphertext.c.len() as u64).to_be_bytes());
-        for component in &ciphertext.c {
-            sponge.absorb(&(component.len() as u64).to_be_bytes());
-            for coefficient in component {
-                sponge.absorb(&coefficient.to_le_bytes());
-            }
-        }
-        sponge.finalize(0x1f);
-        let mut digest = [0; 32];
-        sponge.squeeze(&mut digest);
-        digest
+        let components: Vec<Vec<u8>> = ciphertext
+            .c
+            .iter()
+            .map(|component| {
+                let mut bytes = Vec::with_capacity(4 * component.len());
+                for coefficient in component {
+                    bytes.extend_from_slice(&coefficient.to_le_bytes());
+                }
+                bytes
+            })
+            .collect();
+        let attempt_bytes = attempt.to_be_bytes();
+        let count_bytes = (components.len() as u64).to_be_bytes();
+        let mut frames: Vec<&[u8]> = Vec::with_capacity(3 + components.len());
+        frames.push(context);
+        frames.push(&attempt_bytes);
+        frames.push(&count_bytes);
+        frames.extend(components.iter().map(Vec::as_slice));
+        cshake256_framed_32(b"QSAG.MLDSA.PENDING_CT_TAG.V2", &frames)
     }
 
     fn release(mut self, checks: MlDsaBarrierChecks) -> Result<Sh, ThresholdMlDsaError> {
-        let (_, released_key) = self.gate.try_release_z_share(checks);
-        let mut seal_key =
-            released_key.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        let mut seal_key = SecretBytes::<32>::zeroed();
+        self.gate
+            .try_release_z_share_into(checks, &mut seal_key.0)
+            .map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
         let expected_tag = Self::ciphertext_tag(
             &self.sealed_response,
             &checks.req_session_id,
             checks.req_attempt,
         );
         if !ct_eq_bytes(&self.ciphertext_tag, &expected_tag) {
-            ct_zeroize_bytes(&mut seal_key);
             return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
         }
         apply_response_stream_cipher(
@@ -2003,8 +2096,10 @@ impl PendingResponse {
             checks.req_attempt,
             false,
         );
-        ct_zeroize_bytes(&mut seal_key);
-        Ok(self.sealed_response)
+        Ok(core::mem::replace(
+            &mut self.sealed_response,
+            Sh { c: Vec::new() },
+        ))
     }
 }
 
@@ -2144,9 +2239,16 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
 ) -> Result<ThresholdSignOutput, ThresholdMlDsaError> {
     let level = share.pack.level;
     let threshold = share.pack.threshold;
-    check_parameters(level, threshold, share.pack.party_ids.len())?;
+    // The pack has public fields. Everything below indexes by it, so it is
+    // checked in full before any network round or reservation.
+    share.pack.validate()?;
     if share.shamir.is_some() != share.subsets.is_empty() {
         return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+    }
+    if !share.pack.party_ids.contains(&share.party_id) {
+        return Err(ThresholdMlDsaError::DuplicateOrUnknownParty {
+            party_id: share.party_id,
+        });
     }
     let params = level.params();
     let quorum = sorted_distinct(&session.quorum)?;
@@ -2167,6 +2269,17 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
     let mu = compute_fips204_mu(&share.pack.pk_bytes, msg, ctx)
         .ok_or(ThresholdMlDsaError::ContextTooLong)?;
     let structure = Structure::new(quorum.len(), threshold)?;
+    // Bind the ledger to this key and custodian before the first round: the
+    // store must answer for this key (a ledger provisioned for another key
+    // refuses), must not be ahead of the share's epoch (a share restored
+    // without `recover_epoch_from_store` is refused instead of burning an
+    // attempt that can only fail), and from here on only reserves for the
+    // enrolled custodians.
+    let burn_key_id = share.pack.policy_signing_key_id();
+    if share.next_epoch < burn.next_epoch(&burn_key_id, share.party_id)? {
+        return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+    }
+    burn.enroll_parties(&burn_key_id, &share.pack.party_ids)?;
     let context = cshake256_framed_32(
         b"QSAG.TMLDSA.SIGN.CTX.V1",
         &[
@@ -2177,10 +2290,12 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
             &[threshold as u8],
         ],
     );
-    let hedged = cshake256_framed_32(
+    let custody_digest = share.custody_digest();
+    let hedged = SecretBuffer(cshake256_framed_32(
         b"QSAG.TMLDSA.SIGN.ENTROPY.V1",
-        &[entropy, &share.custody_digest(), &context],
-    );
+        &[entropy, &custody_digest.0, &context],
+    ));
+    drop(custody_digest);
     let mut engine = Engine::setup(net, structure.clone(), me, &context, &hedged)?;
     let comps = engine.comps().len();
 
@@ -2329,17 +2444,17 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let z_masked = z
             .add(&engine.public_const(z_bound - 1, z_len)?)
             .add(&mask_values.gather(z_idx));
-        let mut seal_entropy = cshake256_framed_32(
+        let seal_entropy = SecretBuffer(cshake256_framed_32(
             b"QSAG.TMLDSA.SEAL_ENTROPY.V1",
             &[
-                &hedged,
+                &hedged.0,
                 &context,
                 &attempt.to_be_bytes(),
                 &epoch.to_be_bytes(),
             ],
-        );
+        ));
         let pending = PendingResponse::new_sealed(z, context, attempt, &seal_entropy);
-        ct_zeroize_bytes(&mut seal_entropy);
+        drop(seal_entropy);
         let low_masks = mask_values.gather(low_idx);
         let ct0_masks = mask_values.gather(ct0_idx);
         let hint_r_masks = mask_values.gather(hint_r_idx);
@@ -2358,7 +2473,8 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
             gamma2,
         )?;
         let Some((z_norm_ok, r0_norm_ok, w1_match)) = checks else {
-            // Dropping the sealed response wipes it before the next attempt.
+            // Dropping the sealed response aborts its gate, which erases the
+            // seal key, and wipes the ciphertext before the next attempt.
             continue;
         };
         let u_com_bound = engine.verify().is_ok();

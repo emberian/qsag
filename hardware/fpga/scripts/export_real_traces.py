@@ -123,7 +123,9 @@ pub fn mid_id(mid: &[u64; 25]) -> u8 {
         0x460887f1cba4a839 => 2, // TURBOSHAKE_CANOPY_MIDSTATE
         0x05c2a834d12f320b => 3, // TURBOSHAKE_POW_MIDSTATE
         0xec954fc7c2fc5381 => 4, // CANOPY_MIDSTATE
-        _ => 5,                  // custom midstate (e.g. POW_MIDSTATE)
+        0x91d7c2b5d9c349d5 => 5, // TURBOSHAKE_FS_MIDSTATE
+        0x912cd4369f324315 => 6, // POW_MIDSTATE
+        _ => 7,                  // custom midstate
     }
 }
 
@@ -133,7 +135,7 @@ pub fn ks_sponge(midstate: &[u64; 25], input: &[u8], out_len: usize, nr12: bool,
     }
     let _g = suppress();
     let mid = mid_id(midstate);
-    if mid == 5 {
+    if mid == 7 {
         words("KM", midstate);
     }
     let mut state = *midstate;
@@ -151,7 +153,7 @@ pub fn ks_sponge(midstate: &[u64; 25], input: &[u8], out_len: usize, nr12: bool,
             crate::sponge::keccak_f1600(&mut state);
         }
         if let Some(w) = TRACE.lock().unwrap().as_mut() {
-            let init_flag = if first && mid != 5 { 1 } else { 0 };
+            let init_flag = if first && mid != 7 { 1 } else { 0 };
             write!(w, "KS {} {} {} 0", mid, nr12 as u8, init_flag).unwrap();
             for &l in &lanes {
                 write!(w, " {l:016x}").unwrap();
@@ -179,7 +181,7 @@ pub fn ks_sponge(midstate: &[u64; 25], input: &[u8], out_len: usize, nr12: bool,
         crate::sponge::keccak_f1600(&mut state);
     }
     if let Some(w) = TRACE.lock().unwrap().as_mut() {
-        let init_flag = if first && mid != 5 { 1 } else { 0 };
+        let init_flag = if first && mid != 7 { 1 } else { 0 };
         write!(w, "KS {} {} {} 1", mid, nr12 as u8, init_flag).unwrap();
         for &l in &lanes {
             write!(w, " {l:016x}").unwrap();

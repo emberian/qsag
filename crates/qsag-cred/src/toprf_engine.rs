@@ -24,6 +24,14 @@
 //! The recipient accepts a received vector only if it equals the other vector
 //! or matches that digest. Two of the three contributions are honest, so an
 //! accepted vector is the honest one unless the hash collides.
+//!
+//! Availability. A recipient can decode a term from two of its three senders, so
+//! one silent server does not by itself stop a layer. That is not a four-of-five
+//! availability guarantee for the protocol: [`crate::voprf::Server::evaluate`]
+//! reaches this engine only after all five servers have confirmed the client's
+//! input, and it spends the durable counter between that confirmation and the
+//! first layer. A server that drops out after that point can still abort the
+//! batch (a layer needs agreeing senders), and the counter stays burned.
 use crate::voprf::{Error, SERVERS, Transport};
 use alloc::{vec, vec::Vec};
 use qsag_accel::{

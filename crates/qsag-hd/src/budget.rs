@@ -23,14 +23,15 @@ const DATA_SEAL_BYTES: usize = 16;
 // Header, each HWM slot, and the chain occupy disjoint physical pages.
 // Page 0 payload layout (`[0..4080)` after the 16-byte `QSAGREC1` record header):
 // - `[0..16)`: `data_seal` (`dev_le64 || ino_le64` of the data file)
-// - `[16..24)`: `QSHDQB04` format magic
+// - `[16..24)`: `QSHDQB05` format magic
 // - `[24..48)`: `lock_identity` (`dev_le64 || ino_le64 || seal8` of the `.lock` sidecar)
 // - `[48..80)`: `genesis_seal_mac` authenticating `(key, family, lock_identity, data_seal, LIMIT)`
+// - `[80..4080)`: reserved zero padding before Slot A on physical page 1 (`4096`).
 // Every record MAC and both HWM slot MACs also bind the full 24-byte `lock_identity`
 // (domains `QSAG.HD.QUERY_BUDGET.V4` / `QSAG.HD.QUERY_BUDGET.HWM.V5`), so a journal
 // only authenticates against the exact `.lock` inode that was held at genesis.
-// - `[80..4080)`: reserved zero padding before Slot A on physical page 1 (`4096`).
-const FORMAT_MAGIC: &[u8; 8] = b"QSHDQB04";
+// `QSHDQB04` journals (8-byte lock seal in the record MACs) do not open.
+const FORMAT_MAGIC: &[u8; 8] = b"QSHDQB05";
 const LOCK_IDENTITY_OFFSET: usize = DATA_SEAL_BYTES + FORMAT_MAGIC.len();
 const LOCK_IDENTITY_BYTES: usize = 24;
 const GENESIS_SEAL_MAC_OFFSET: usize = LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES;

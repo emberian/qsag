@@ -22,7 +22,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use qsag_asm::wipe::{SecretBuffer, SecretWipe};
+use qsag_asm::wipe::{SecretBuffer, SecretWipe, secret_vec_push};
 
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u64s};
 use qsag_accel::goldilocks::{gl_add, gl_is_canonical, gl_mul, gl_reduce_u64, gl_sub};
@@ -60,6 +60,24 @@ pub const VC_SD_LIMBO_PARTIES: usize = 256;
 pub const VC_SD_GGM_DEPTH: usize = 8;
 
 impl ZkSoundnessProfile {
+    /// Statement tag of the blind-issuance proof. Both profiles carry one, so a
+    /// proof never verifies under a profile other than the one it was made for
+    /// by the absence of a tag alone.
+    const fn issuance_statement_tag(self) -> &'static [u8] {
+        match self {
+            Self::Classical128 => b"QSAG.VC.PROFILE.Classical128:219",
+            Self::Quantum128 => b"QSAG.VC.PROFILE.Quantum128:438",
+        }
+    }
+
+    /// Transcript tag of the blind-issuance proof.
+    const fn issuance_transcript_tag(self) -> &'static [u8] {
+        match self {
+            Self::Classical128 => b"Classical128:219",
+            Self::Quantum128 => b"Quantum128:438",
+        }
+    }
+
     /// Repetition count for 3-party ZKBoo blind issuance (`(2/3)^r` soundness).
     pub const fn repetitions(self) -> usize {
         match self {
@@ -80,6 +98,9 @@ impl ZkSoundnessProfile {
 
 pub const VC_FINAL_OUTPUTS: usize = 18 + VC_ACCUMULATOR_DEPTH;
 
+/// Verifier challenges one [`HolderCredentialSecret`] remembers (2 MiB of history).
+pub const MAX_SEEN_VERIFIER_CHALLENGES: usize = 1 << 16;
+
 const VC_ATTR_COMMIT_TAG: u64 = 0x5643_4154_5452_5631; // "VCATTRV1"
 const VC_PRES_COMMIT_TAG: u64 = 0x5643_5052_4553_5631; // "VCPRESV1"
 const VC_SCOPE_TAG_DOM: u64 = 0x5643_5343_4F50_5631; // "VCSCOPV1"
@@ -96,6 +117,8 @@ pub enum BlindVcError {
     BlindIssuanceProofInvalid,
     InvalidOprfEvaluation,
     ReplayedVerifierChallenge,
+    /// The holder's challenge history reached [`MAX_SEEN_VERIFIER_CHALLENGES`].
+    ChallengeHistoryFull,
     AccumulatorFull,
     InvalidAccumulatorLeafIndex,
     CredentialBindingMismatch,
@@ -325,7 +348,8 @@ impl ZkBooProverTape {
     }
 
     fn perm12(&mut self, message: &mut [[u64; 3]]) {
-        let mut state = [[0; 3]; 12];
+        // All three shares of every state wire: erased on every way out.
+        let mut state = SecretBuffer([[0u64; 3]; 12]);
         for chunk in message.chunks(6) {
             for (wire, value) in state.iter_mut().zip(chunk) {
                 for m in 0..3 {
@@ -341,7 +365,7 @@ impl ZkBooProverTape {
             state[0][0] = gl_add(state[0][0], 1);
             self.raw_perm12(&mut state);
         }
-        message[..12].copy_from_slice(&state);
+        message[..12].copy_from_slice(&state[..]);
     }
     fn raw_perm12(&mut self, st: &mut [[u64; 3]; 12]) {
         apply_me_3(st);
@@ -609,9 +633,21 @@ pub struct OpenedZkBooRepetition {
 // ============================================================================
 
 /// Holder secret state with redacted `Debug` and zeroizing `Drop`.
-/// Challenge history is retained for this credential's lifetime, independently
-/// of caller entropy. Persist it with the credential when adding backup support;
-/// rolling back the entire holder state cannot preserve replay protection.
+///
+/// # Challenge history
+/// `seen_challenges` records every verifier challenge this value has answered,
+/// so the same challenge is refused twice (`ReplayedVerifierChallenge`). Its
+/// scope is exactly this in-memory value:
+/// - It is **not persisted**. A holder secret rebuilt after a restart, or
+///   restored from a backup, starts with an empty history. Replay protection
+///   across restarts is the verifier's: it must issue fresh challenges and
+///   reject a presentation whose challenge it did not issue. The history is a
+///   second line of defence for the lifetime of one process.
+/// - It is **bounded** at [`MAX_SEEN_VERIFIER_CHALLENGES`] entries (32 bytes
+///   each). When it is full, further presentations are refused with
+///   [`BlindVcError::ChallengeHistoryFull`] instead of forgetting old
+///   challenges; obtain a new credential to continue.
+/// - It is kept sorted, so a lookup is a binary search.
 pub struct HolderCredentialSecret {
     pub schema_id: u64,
     arity: usize,
@@ -639,6 +675,22 @@ impl Drop for HolderCredentialSecret {
 }
 
 impl HolderCredentialSecret {
+    /// Records `challenge` in the sorted history, or refuses it when it was
+    /// answered before or the history is full.
+    fn burn_verifier_challenge(&self, challenge: &[u8; 32]) -> Result<(), BlindVcError> {
+        let mut seen = self.seen_challenges.borrow_mut();
+        match seen.binary_search(challenge) {
+            Ok(_) => Err(BlindVcError::ReplayedVerifierChallenge),
+            Err(_) if seen.len() >= MAX_SEEN_VERIFIER_CHALLENGES => {
+                Err(BlindVcError::ChallengeHistoryFull)
+            }
+            Err(position) => {
+                seen.insert(position, *challenge);
+                Ok(())
+            }
+        }
+    }
+
     /// Number of active Goldilocks attribute limbs (`<= MAX_VC_ATTRS`) committed by this credential.
     #[inline]
     pub const fn arity(&self) -> usize {
@@ -671,8 +723,9 @@ pub struct BlindIssuanceRequest {
     pub opened_reps: Vec<OpenedZkBooRepetition>,
 }
 
-/// OPRF-issued credential enrolled in the issuer accumulator.
-#[derive(Clone, PartialEq, Eq)]
+/// OPRF-issued credential enrolled in the issuer accumulator. The token is
+/// erased on drop and compared without data-dependent timing.
+#[derive(Clone)]
 pub struct BlindVerifiableCredential {
     pub issuer_epoch: u64,
     pub schema_id: u64,
@@ -680,6 +733,24 @@ pub struct BlindVerifiableCredential {
     /// OPRF token; accumulator membership supplies public authorization.
     pub issuance_token: [u8; 32],
     pub accumulator_leaf_index: usize,
+}
+
+impl PartialEq for BlindVerifiableCredential {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.issuer_epoch == other.issuer_epoch)
+            & (self.schema_id == other.schema_id)
+            & (self.attr_commit == other.attr_commit)
+            & (self.accumulator_leaf_index == other.accumulator_leaf_index);
+        ct_eq_bytes(&self.issuance_token, &other.issuance_token) & public
+    }
+}
+
+impl Eq for BlindVerifiableCredential {}
+
+impl Drop for BlindVerifiableCredential {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.issuance_token);
+    }
 }
 
 impl core::fmt::Debug for BlindVerifiableCredential {
@@ -782,18 +853,14 @@ pub fn holder_prepare_blind_issuance_with_profile(
     for &c in &attr_commit {
         inst_bytes.extend_from_slice(&c.to_le_bytes());
     }
-    if profile == ZkSoundnessProfile::Quantum128 {
-        inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
-    }
+    inst_bytes.extend_from_slice(profile.issuance_statement_tag());
     let statement_digest = cshake256_framed_32(b"QSAG.VC.ISS_STMT_DIGEST.V1", &[&inst_bytes]);
     let hedged_zk_seed = qsag_accel::ct::RedactedSecret::new(cshake256_framed_32(
         b"QSAG.VC.ISS_ZK_SEED.V1",
         &[&statement_digest, ent.expose(), &session_id],
     ));
     let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.ISSUE_ZK.V1", &inst_bytes);
-    if profile == ZkSoundnessProfile::Quantum128 {
-        tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
-    }
+    tr.absorb(b"VC_SOUNDNESS_PROFILE", profile.issuance_transcript_tag());
 
     let mut secret_wires = SecretBuffer(attrs[..attr_slots].to_vec());
     secret_wires.extend_wiping(&holder_blind);
@@ -843,7 +910,10 @@ pub fn holder_prepare_blind_issuance_with_profile(
         let mut in0 = Vec::with_capacity(input_wires);
         let mut in1 = Vec::with_capacity(input_wires);
         let mut in2 = Vec::with_capacity(input_wires);
-        let mut wire_3 = vec![[0u64; 3]; input_wires];
+        // Sized for the three padding wires appended before the permutation, so
+        // the secret shares are never copied to a second heap block.
+        let mut wire_3 = SecretBuffer(Vec::with_capacity(input_wires + 3));
+        wire_3.resize(input_wires, [0u64; 3]);
         for (w, wire) in wire_3.iter_mut().enumerate() {
             let s = if w < attr_slots {
                 [secret_wires[w], 0, 0]
@@ -896,9 +966,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
 
         let mut final_outs = [[0u64; 3]; VC_FINAL_OUTPUTS];
         final_outs[..6].copy_from_slice(&st[..6]);
-        for wire in &mut st {
-            ct_zeroize_u64s(wire);
-        }
+        drop(st);
 
         let in_shares = [in0, in1, in2];
         let commits: [[u8; 32]; 3] = core::array::from_fn(|m| {
@@ -1030,13 +1098,9 @@ pub fn verify_blind_issuance_request_with_profile(
     for &c in &req.attr_commit {
         inst_bytes.extend_from_slice(&c.to_le_bytes());
     }
-    if profile == ZkSoundnessProfile::Quantum128 {
-        inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
-    }
+    inst_bytes.extend_from_slice(profile.issuance_statement_tag());
     let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.ISSUE_ZK.V1", &inst_bytes);
-    if profile == ZkSoundnessProfile::Quantum128 {
-        tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
-    }
+    tr.absorb(b"VC_SOUNDNESS_PROFILE", profile.issuance_transcript_tag());
 
     let mut round1_bundle = Vec::with_capacity(profile.repetitions() * 192);
 
@@ -1269,7 +1333,9 @@ impl IssuerRootAttestation {
 }
 
 /// Holder-local authorization path; contains no other holders' leaves or tokens.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The token and the path are erased on drop, `Debug` does not print them, and
+/// equality compares the token without data-dependent timing.
+#[derive(Clone)]
 pub struct CredentialMembershipWitness {
     pub leaf_index: usize,
     pub siblings: [[u64; 6]; VC_ACCUMULATOR_DEPTH],
@@ -1279,17 +1345,118 @@ pub struct CredentialMembershipWitness {
     pub issuance_token: Option<[u8; 32]>,
 }
 
+/// Equality of optional issuance tokens. Whether a token is present is public
+/// (it distinguishes test enrolment from issued credentials); its bytes are not.
+fn ct_eq_optional_token(a: &Option<[u8; 32]>, b: &Option<[u8; 32]>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => ct_eq_bytes(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl PartialEq for CredentialMembershipWitness {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.leaf_index == other.leaf_index)
+            & (self.siblings == other.siblings)
+            & (self.accumulator_root == other.accumulator_root)
+            & (self.issuer_epoch == other.issuer_epoch)
+            & (self.issuer_pk_digest == other.issuer_pk_digest);
+        ct_eq_optional_token(&self.issuance_token, &other.issuance_token) & public
+    }
+}
+
+impl Eq for CredentialMembershipWitness {}
+
+impl Drop for CredentialMembershipWitness {
+    fn drop(&mut self) {
+        self.issuance_token.secret_wipe();
+        self.siblings.secret_wipe();
+    }
+}
+
+impl fmt::Debug for CredentialMembershipWitness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CredentialMembershipWitness")
+            .field("leaf_index", &self.leaf_index)
+            .field("accumulator_root", &self.accumulator_root)
+            .field("issuer_epoch", &self.issuer_epoch)
+            .field("issuer_pk_digest", &self.issuer_pk_digest)
+            .field("siblings", &"<REDACTED>")
+            .field("issuance_token", &"<REDACTED>")
+            .finish()
+    }
+}
+
 /// Authoritative issuer accumulator of OPRF-issued credential commitments.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// It holds every holder's issuance token (`enrolled_tokens`, needed to hand
+/// out membership witnesses). They are erased on drop, grown without leaving
+/// copies in freed heap blocks, never printed by `Debug`, and compared without
+/// data-dependent timing. The duplicate-issuance index stores a digest of
+/// `(attr_commit, token)`, not the token.
+#[derive(Clone)]
 pub struct IssuerCredentialAccumulator {
     pub oprf_key: PublicKey,
     pub issuer_epoch: u64,
     leaves: Vec<[u64; 6]>,
     enrolled_tokens: Vec<Option<[u8; 32]>>,
     consumed_sessions: BTreeSet<[u8; 32]>,
-    issued_tokens: BTreeSet<([u64; 6], [u8; 32])>,
+    issued_tokens: BTreeSet<[u8; 32]>,
     layers: Vec<Vec<[u64; 6]>>,
     empty: Vec<[u64; 6]>,
+}
+
+impl PartialEq for IssuerCredentialAccumulator {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.oprf_key == other.oprf_key)
+            & (self.issuer_epoch == other.issuer_epoch)
+            & (self.leaves == other.leaves)
+            & (self.consumed_sessions == other.consumed_sessions)
+            & (self.issued_tokens == other.issued_tokens)
+            & (self.layers == other.layers)
+            & (self.empty == other.empty)
+            & (self.enrolled_tokens.len() == other.enrolled_tokens.len());
+        let tokens = self
+            .enrolled_tokens
+            .iter()
+            .zip(&other.enrolled_tokens)
+            .fold(true, |acc, (a, b)| acc & ct_eq_optional_token(a, b));
+        tokens & public
+    }
+}
+
+impl Eq for IssuerCredentialAccumulator {}
+
+impl Drop for IssuerCredentialAccumulator {
+    fn drop(&mut self) {
+        self.enrolled_tokens.secret_wipe();
+    }
+}
+
+impl fmt::Debug for IssuerCredentialAccumulator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuerCredentialAccumulator")
+            .field("oprf_key", &self.oprf_key)
+            .field("issuer_epoch", &self.issuer_epoch)
+            .field("leaves", &self.leaves.len())
+            .field("root", &self.root())
+            .field("enrolled_tokens", &"<REDACTED>")
+            .finish()
+    }
+}
+
+/// Index key of an issued `(attr_commit, token)` pair: a one-way digest, so the
+/// duplicate-issuance set holds no token.
+fn issued_token_index(attr_commit: &[u64; 6], issuance_token: &[u8; 32]) -> [u8; 32] {
+    let mut commit_bytes = [0u8; 48];
+    for (chunk, limb) in commit_bytes.as_chunks_mut::<8>().0.iter_mut().zip(attr_commit) {
+        *chunk = limb.to_le_bytes();
+    }
+    cshake256_framed_32(
+        b"QSAG.VC.ISSUED_TOKEN_INDEX.V1",
+        &[&commit_bytes, issuance_token],
+    )
 }
 
 impl IssuerCredentialAccumulator {
@@ -1333,7 +1500,7 @@ impl IssuerCredentialAccumulator {
         let idx = self.leaves.len();
         self.leaves.push(attr_commit);
         self.append_merkle_leaf(attr_commit);
-        self.enrolled_tokens.push(None);
+        secret_vec_push(&mut self.enrolled_tokens, None);
         Ok(idx)
     }
 
@@ -1343,8 +1510,8 @@ impl IssuerCredentialAccumulator {
         attr_commit: [u64; 6],
         issuance_token: [u8; 32],
     ) -> Result<usize, BlindVcError> {
-        if self.consumed_sessions.contains(&session_id)
-            || self.issued_tokens.contains(&(attr_commit, issuance_token))
+        let token_index = issued_token_index(&attr_commit, &issuance_token);
+        if self.consumed_sessions.contains(&session_id) || self.issued_tokens.contains(&token_index)
         {
             return Err(BlindVcError::InvalidOprfEvaluation);
         }
@@ -1354,9 +1521,9 @@ impl IssuerCredentialAccumulator {
         let idx = self.leaves.len();
         self.leaves.push(attr_commit);
         self.append_merkle_leaf(attr_commit);
-        self.enrolled_tokens.push(Some(issuance_token));
+        secret_vec_push(&mut self.enrolled_tokens, Some(issuance_token));
         self.consumed_sessions.insert(session_id);
-        self.issued_tokens.insert((attr_commit, issuance_token));
+        self.issued_tokens.insert(token_index);
         Ok(idx)
     }
 
@@ -1740,15 +1907,14 @@ fn ggm_expand_children(
     let mut sp = Shake256::new();
     sp.absorb(&msg);
     sp.finalize(0x1F);
-    let mut children = [0u8; 64];
-    sp.squeeze(&mut children);
+    // Both child seeds are secret; the squeeze buffer is erased on drop.
+    let mut children = SecretBuffer([0u8; 64]);
+    sp.squeeze(&mut children.0);
     ct_zeroize_bytes(&mut msg);
-    let mut left = [0u8; 32];
-    let mut right = [0u8; 32];
-    left.copy_from_slice(&children[0..32]);
-    right.copy_from_slice(&children[32..64]);
-    ct_zeroize_bytes(&mut children);
-    (left, right)
+    (
+        core::array::from_fn(|i| children[i]),
+        core::array::from_fn(|i| children[32 + i]),
+    )
 }
 
 fn expand_ggm_tree_256_into(
@@ -2192,7 +2358,7 @@ fn eval_sd_plaintext_circuit(
     let mut rec = PlaintextGateRecorder::new();
     let mut cursor = 0usize;
 
-    let mut attr_wires = [0u64; MAX_VC_ATTRS];
+    let mut attr_wires = SecretBuffer([0u64; MAX_VC_ATTRS]);
     for (i, slot_w) in attr_wires.iter_mut().enumerate() {
         if i >= arity {
             *slot_w = 0;
@@ -2203,49 +2369,51 @@ fn eval_sd_plaintext_circuit(
             cursor += 1;
         }
     }
-    let hb_wires: [u64; 4] = core::array::from_fn(|_| {
+    let hb_wires: SecretBuffer<[u64; 4]> = SecretBuffer(core::array::from_fn(|_| {
         let v = secret_vals[cursor];
         cursor += 1;
         v
-    });
-    let pb_wires: [u64; 4] = core::array::from_fn(|_| {
+    }));
+    let pb_wires: SecretBuffer<[u64; 4]> = SecretBuffer(core::array::from_fn(|_| {
         let v = secret_vals[cursor];
         cursor += 1;
         v
-    });
-    let bit_wires: [u64; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+    }));
+    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
         let v = secret_vals[cursor];
         cursor += 1;
         v
-    });
-    let sib_wires: [[u64; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+    }));
+    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
         core::array::from_fn(|_| {
             let v = secret_vals[cursor];
             cursor += 1;
             v
         })
-    });
+    }));
     debug_assert_eq!(cursor, secret_vals.len());
 
-    let mut st_attr = attr_wires[..arity.max(6)].to_vec();
-    st_attr.extend_from_slice(&hb_wires);
+    // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
+    let mut st_attr = SecretBuffer(Vec::with_capacity(arity.max(6) + 7));
+    st_attr.extend_from_slice(&attr_wires[..arity.max(6)]);
+    st_attr.extend_from_slice(&hb_wires[..]);
     st_attr.extend_from_slice(&[
         schema_id & 0xffff_ffff,
         gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
         arity as u64,
     ]);
     rec.perm12(&mut st_attr);
-    let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
+    let mut cur_node = SecretBuffer(core::array::from_fn::<u64, 6, _>(|j| st_attr[j]));
     ct_zeroize_u64s(&mut st_attr);
 
-    let mut bool_zeros = [0u64; VC_ACCUMULATOR_DEPTH];
-    for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
+    let mut bool_zeros = SecretBuffer([0u64; VC_ACCUMULATOR_DEPTH]);
+    for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(bit_wires.iter()).enumerate() {
         let one_minus_b = gl_sub(1, b);
         *zero = rec.mul_gate(b, one_minus_b);
 
-        let mut left = [0u64; 6];
-        let mut right = [0u64; 6];
-        for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
+        let mut left = SecretBuffer([0u64; 6]);
+        let mut right = SecretBuffer([0u64; 6]);
+        for (j, (left_slot, right_slot)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             let sib_j = sib_wires[lvl][j];
             let diff = gl_sub(sib_j, cur_node[j]);
             let delta = rec.mul_gate(b, diff);
@@ -2253,7 +2421,7 @@ fn eval_sd_plaintext_circuit(
             *right_slot = gl_sub(sib_j, delta);
         }
 
-        let mut st_mk: [u64; 16] = [
+        let mut st_mk = SecretBuffer([
             left[0],
             left[1],
             left[2],
@@ -2270,14 +2438,15 @@ fn eval_sd_plaintext_circuit(
             lvl as u64,
             gl_reduce_u64(VC_MERKLE_NODE_TAG),
             gl_add(issuer_epoch >> 32, gl_reduce_u64(POSEIDON2_CONST_IV)),
-        ];
-        rec.perm12(&mut st_mk);
-        cur_node = core::array::from_fn(|j| st_mk[j]);
-        ct_zeroize_u64s(&mut st_mk);
+        ]);
+        rec.perm12(&mut st_mk[..]);
+        *cur_node = core::array::from_fn(|j| st_mk[j]);
     }
 
-    let mut st_pres = attr_wires[..arity.max(6)].to_vec();
-    st_pres.extend_from_slice(&pb_wires);
+    // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
+    let mut st_pres = SecretBuffer(Vec::with_capacity(arity.max(6) + 7));
+    st_pres.extend_from_slice(&attr_wires[..arity.max(6)]);
+    st_pres.extend_from_slice(&pb_wires[..]);
     st_pres.extend_from_slice(&[
         schema_id & 0xffff_ffff,
         gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
@@ -2285,7 +2454,7 @@ fn eval_sd_plaintext_circuit(
     ]);
     rec.perm12(&mut st_pres);
 
-    let mut st_sc: [u64; 12] = [
+    let mut st_sc = SecretBuffer([
         hb_wires[0],
         hb_wires[1],
         hb_wires[2],
@@ -2298,8 +2467,8 @@ fn eval_sd_plaintext_circuit(
         0,
         schema_id & 0xffff_ffff,
         gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
-    ];
-    rec.perm12(&mut st_sc);
+    ]);
+    rec.perm12(&mut st_sc[..]);
     debug_assert_eq!(
         rec.x.len(),
         SD_TOTAL_GATES
@@ -2311,13 +2480,11 @@ fn eval_sd_plaintext_circuit(
     rec.z.resize(SD_TOTAL_GATES, 0);
 
     let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
-    final_outs[0..6].copy_from_slice(&cur_node);
+    final_outs[0..6].copy_from_slice(&cur_node[..]);
     final_outs[6..12].copy_from_slice(&st_pres[0..6]);
     final_outs[12..18].copy_from_slice(&st_sc[0..6]);
-    final_outs[18..VC_FINAL_OUTPUTS].copy_from_slice(&bool_zeros);
+    final_outs[18..VC_FINAL_OUTPUTS].copy_from_slice(&bool_zeros[..]);
     ct_zeroize_u64s(&mut st_pres);
-    ct_zeroize_u64s(&mut st_sc);
-    ct_zeroize_u64s(&mut attr_wires);
 
     debug_assert_eq!(&final_outs, expected_final_outs);
 
@@ -2380,7 +2547,7 @@ impl<'a> LinearShareEvaluator<'a> {
     }
 
     fn perm12(&mut self, message: &mut [u64]) {
-        let mut state = [0u64; 12];
+        let mut state = SecretBuffer([0u64; 12]);
         for chunk in message.chunks(6) {
             for (wire, &value) in state.iter_mut().zip(chunk) {
                 *wire = gl_add(*wire, value);
@@ -2394,7 +2561,7 @@ impl<'a> LinearShareEvaluator<'a> {
             state[0] = self.add_const(state[0], 1);
             self.raw_perm12(&mut state);
         }
-        message[..12].copy_from_slice(&state);
+        message[..12].copy_from_slice(&state[..]);
     }
 
     fn raw_perm12(&mut self, st: &mut [u64; 12]) {
@@ -2463,7 +2630,7 @@ fn eval_sd_party_shares(
     };
 
     let mut cursor = 0usize;
-    let mut attr_wires = [0u64; MAX_VC_ATTRS];
+    let mut attr_wires = SecretBuffer([0u64; MAX_VC_ATTRS]);
     for (i, slot_w) in attr_wires.iter_mut().enumerate() {
         if i >= arity {
             *slot_w = 0;
@@ -2474,49 +2641,51 @@ fn eval_sd_party_shares(
             cursor += 1;
         }
     }
-    let hb_wires: [u64; 4] = core::array::from_fn(|_| {
+    let hb_wires: SecretBuffer<[u64; 4]> = SecretBuffer(core::array::from_fn(|_| {
         let v = w_shares[cursor];
         cursor += 1;
         v
-    });
-    let pb_wires: [u64; 4] = core::array::from_fn(|_| {
+    }));
+    let pb_wires: SecretBuffer<[u64; 4]> = SecretBuffer(core::array::from_fn(|_| {
         let v = w_shares[cursor];
         cursor += 1;
         v
-    });
-    let bit_wires: [u64; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+    }));
+    let bit_wires: SecretBuffer<[u64; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
         let v = w_shares[cursor];
         cursor += 1;
         v
-    });
-    let sib_wires: [[u64; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+    }));
+    let sib_wires: SecretBuffer<[[u64; 6]; VC_ACCUMULATOR_DEPTH]> = SecretBuffer(core::array::from_fn(|_| {
         core::array::from_fn(|_| {
             let v = w_shares[cursor];
             cursor += 1;
             v
         })
-    });
+    }));
     debug_assert_eq!(cursor, w_shares.len());
 
-    let mut st_attr = attr_wires[..arity.max(6)].to_vec();
-    st_attr.extend_from_slice(&hb_wires);
+    // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
+    let mut st_attr = SecretBuffer(Vec::with_capacity(arity.max(6) + 7));
+    st_attr.extend_from_slice(&attr_wires[..arity.max(6)]);
+    st_attr.extend_from_slice(&hb_wires[..]);
     st_attr.extend_from_slice(&[
         ev.const_share(schema_id & 0xffff_ffff),
         ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG))),
         ev.const_share(arity as u64),
     ]);
     ev.perm12(&mut st_attr);
-    let mut cur_node: [u64; 6] = core::array::from_fn(|j| st_attr[j]);
+    let mut cur_node = SecretBuffer(core::array::from_fn::<u64, 6, _>(|j| st_attr[j]));
 
-    let mut bool_zeros = [0u64; VC_ACCUMULATOR_DEPTH];
-    for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
+    let mut bool_zeros = SecretBuffer([0u64; VC_ACCUMULATOR_DEPTH]);
+    for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(bit_wires.iter()).enumerate() {
         let one_share = ev.const_share(1);
         let one_minus_b = gl_sub(one_share, b);
         *zero = ev.mul_gate(b, one_minus_b);
 
-        let mut left = [0u64; 6];
-        let mut right = [0u64; 6];
-        for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
+        let mut left = SecretBuffer([0u64; 6]);
+        let mut right = SecretBuffer([0u64; 6]);
+        for (j, (left_slot, right_slot)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
             let sib_j = sib_wires[lvl][j];
             let diff = gl_sub(sib_j, cur_node[j]);
             let delta = ev.mul_gate(b, diff);
@@ -2524,7 +2693,7 @@ fn eval_sd_party_shares(
             *right_slot = gl_sub(sib_j, delta);
         }
 
-        let mut st_mk: [u64; 16] = [
+        let mut st_mk = SecretBuffer([
             left[0],
             left[1],
             left[2],
@@ -2544,13 +2713,15 @@ fn eval_sd_party_shares(
                 issuer_epoch >> 32,
                 gl_reduce_u64(POSEIDON2_CONST_IV),
             )),
-        ];
-        ev.perm12(&mut st_mk);
-        cur_node = core::array::from_fn(|j| st_mk[j]);
+        ]);
+        ev.perm12(&mut st_mk[..]);
+        *cur_node = core::array::from_fn(|j| st_mk[j]);
     }
 
-    let mut st_pres = attr_wires[..arity.max(6)].to_vec();
-    st_pres.extend_from_slice(&pb_wires);
+    // Sized once: growing a `to_vec` copy would leave the wires in freed heap blocks.
+    let mut st_pres = SecretBuffer(Vec::with_capacity(arity.max(6) + 7));
+    st_pres.extend_from_slice(&attr_wires[..arity.max(6)]);
+    st_pres.extend_from_slice(&pb_wires[..]);
     st_pres.extend_from_slice(&[
         ev.const_share(schema_id & 0xffff_ffff),
         ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG))),
@@ -2558,7 +2729,7 @@ fn eval_sd_party_shares(
     ]);
     ev.perm12(&mut st_pres);
 
-    let mut st_sc: [u64; 12] = [
+    let mut st_sc = SecretBuffer([
         hb_wires[0],
         hb_wires[1],
         hb_wires[2],
@@ -2571,8 +2742,8 @@ fn eval_sd_party_shares(
         0,
         ev.const_share(schema_id & 0xffff_ffff),
         ev.const_share(gl_add(schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM))),
-    ];
-    ev.perm12(&mut st_sc);
+    ]);
+    ev.perm12(&mut st_sc[..]);
     debug_assert_eq!(
         ev.gate_cursor,
         SD_TOTAL_GATES
@@ -2591,10 +2762,10 @@ fn eval_sd_party_shares(
     }
 
     let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
-    final_outs[0..6].copy_from_slice(&cur_node);
+    final_outs[0..6].copy_from_slice(&cur_node[..]);
     final_outs[6..12].copy_from_slice(&st_pres[0..6]);
     final_outs[12..18].copy_from_slice(&st_sc[0..6]);
-    final_outs[18..VC_FINAL_OUTPUTS].copy_from_slice(&bool_zeros);
+    final_outs[18..VC_FINAL_OUTPUTS].copy_from_slice(&bool_zeros[..]);
 
     let one_const = if party == 0 { 1 } else { 0 };
     for j in 0..VC_FINAL_OUTPUTS {
@@ -3084,12 +3255,7 @@ pub fn prove_selective_disclosure_with_profile(
 
     // Burn before producing a proof, including failed attempts. Scope changes
     // must not let a verifier bypass the per-credential challenge history.
-    let mut seen = holder_secret.seen_challenges.borrow_mut();
-    if seen.contains(verifier_challenge) {
-        return Err(BlindVcError::ReplayedVerifierChallenge);
-    }
-    seen.push(*verifier_challenge);
-    drop(seen);
+    holder_secret.burn_verifier_challenge(verifier_challenge)?;
 
     let mut nonce_bind = Vec::with_capacity(64 + sorted_idx.len() * 12);
     nonce_bind.extend_from_slice(&cred.issuer_epoch.to_le_bytes());

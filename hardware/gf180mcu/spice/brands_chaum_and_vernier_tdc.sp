@@ -26,8 +26,6 @@ X_MCAP 2 1 2 2 nfet_06v0 w=c_width l=c_length dtemp=dtemp
 .include "/spice/pdk/gf180mcu_fd_sc_mcu7t5v0.spice"
 .include "/spice/pdk/gf180mcu_fd_io.spice"
 
-.options method=gear reltol=2e-3 vntol=1e-4 abstol=1e-11 gmin=1e-12 cshunt=5e-15
-
 * ------------------------------------------------------------------------------
 * Power Supplies + Adjacent PAD_EAST (dvdd_pads[1] / dvss_pads[1]) Bondwires
 *   Note: Production channel has dedicated physical East-bank PDN (1.8 nH + 80 mOhm
@@ -158,8 +156,8 @@ C_PCB_RESPS PCB_RESP_SCH 0            15.0p
 
 * ==============================================================================
 * PART B: 16-Stage Vernier Delay Line Slice (dregg_vernier_tdc32 exact cell load)
-*   Slow line: dlya_1 + 3fF row wire + dffrsnq_1.D pin load
-*   Fast line: buf_2  + 3fF row wire + clkbuf_2 -> dffrsnq_1.CLK pin load
+*   Slow line: dlya_1 + 3fF row wire + dffrnq_1.D pin load
+*   Fast line: buf_2  + 3fF row wire + clkbuf_2 -> dffrnq_1.CLK pin load
 * ==============================================================================
 .subckt vernier_tap s_in s_out f_in f_out q_out tap_rn vdd vss
 X_SLOW s_in  s_int vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__dlya_1
@@ -169,18 +167,19 @@ X_FAST f_in  f_int vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__buf_2
 R_WF   f_int f_out 4.5
 C_WF   f_out vss   3.0f
 X_FC   f_out f_clk vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__clkbuf_2
-* dffrsnq_1: D RN SETN CLK Q VDD VNW VPW VSS
-X_FF   s_out tap_rn vdd f_clk q_out vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__dffrsnq_1
+* dffrnq_1 (exact synthesized posedge DFF w/ async active-low RN): D RN CLK Q VDD VNW VPW VSS
+X_FF   s_out tap_rn f_clk q_out vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__dffrnq_1
 .ends vernier_tap
 
 * Clean VDD supply for core TDC characterization (isolating from simultaneous pad switching)
-VVDD_TDC VDD_TDC 0 {vdd_val}
-VVSS_TDC VSS_TDC 0 0.0
-V_ARM_N  TAP_RN  0 PWL(0 0 1.5n 0 1.8n {vdd_val})
+VVDD_TDC  VDD_TDC     0 {vdd_val}
+VVSS_TDC  VSS_TDC     0 0.0
+V_ARM_RAW TAP_RN_RAW  0 PWL(0 0 1.5n 0 1.8n {vdd_val})
+X_RN_BUF  TAP_RN_RAW  TAP_RN VDD_TDC VDD_TDC VSS_TDC VSS_TDC gf180mcu_fd_sc_mcu7t5v0__clkbuf_2
 
-* Launch START at t=5.00 ns, STOP at t=6.50 ns (Delta_T_in = 1.500 ns)
+* Launch START at t=5.00 ns, STOP at t=6.43 ns (Delta_T_in = 1.430 ns)
 V_TDC_START TDC_START_RAW 0 PULSE(0 {vdd_val} 5.00n 0.15n 0.15n 20n 50n)
-V_TDC_STOP  TDC_STOP_RAW  0 PULSE(0 {vdd_val} 6.50n 0.15n 0.15n 20n 50n)
+V_TDC_STOP  TDC_STOP_RAW  0 PULSE(0 {vdd_val} 6.43n 0.15n 0.15n 20n 50n)
 
 X_ISTA TDC_START_RAW S0 VDD_TDC VDD_TDC VSS_TDC VSS_TDC gf180mcu_fd_sc_mcu7t5v0__buf_2
 X_ISTO TDC_STOP_RAW  F0 VDD_TDC VDD_TDC VSS_TDC VSS_TDC gf180mcu_fd_sc_mcu7t5v0__buf_2

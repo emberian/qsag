@@ -2598,6 +2598,9 @@ fn mldsa_sign(raw: &[String]) -> Result<(), CliError> {
         .map_err(|_| CliError::input("threshold out of range"))?;
     let parties = usize::try_from(meta.field_u64("parties")?)
         .map_err(|_| CliError::input("parties out of range"))?;
+    if parties == 0 || parties > usize::from(u16::MAX) || threshold == 0 || threshold > parties {
+        return Err(CliError::input("invalid ML-DSA threshold or party count"));
+    }
     let dkg_session_id = from_hex_exact::<32>(meta.field_str("session_id")?, "session_id")?;
     let key_id = from_hex_exact::<32>(meta.field_str("key_id")?, "key_id")?;
     let expected_pk = meta.field_hex("public_key")?;
@@ -2916,7 +2919,7 @@ fn mldsa_verify(raw: &[String]) -> Result<(), CliError> {
     )?;
     if args.flag("help") {
         println!(
-            "qsag cred mldsa-verify --public <path> --in <path|-> [--context-hex <hex>] --sig <path> [--json]"
+            "qsag cred mldsa-verify --public <path> --in <path|-> [--context-hex <hex>] --sig <path> [--json]\n  --context-hex defaults to empty; a signature cannot select its own verification context."
         );
         return Ok(());
     }

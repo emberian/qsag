@@ -92,7 +92,8 @@ module qsag_ni_fpga_top #(
     localparam int          TS_FAW    = PROFILE_COMPACT ? 8 : 9;
     localparam int          TS_SAW    = 11;
 
-    // Static sponge midstate ROM (0=zero, 1=FS_MID, 2=TS_CANOPY_MID, 3=TS_POW_MID, 4=CS_CANOPY_MID).
+    // Static sponge midstate ROM (0=zero, 1=FS_MID, 2=TS_CANOPY_MID, 3=TS_POW_MID,
+    // 4=CS_CANOPY_MID, 5=TS_FS_MID, 6=CS_POW_MID).
     function automatic logic [63:0] sponge_mid_rom(input logic [2:0] sel, input logic [4:0] lane);
         case (sel)
             3'd1: begin // FS_MIDSTATE ("QSAG.AGG.FS_TRANSCRIPT/v1")
@@ -212,6 +213,66 @@ module qsag_ni_fpga_top #(
                     5'd22: sponge_mid_rom = 64'h704aa293b550c49a;
                     5'd23: sponge_mid_rom = 64'hddcb710a40908d75;
                     5'd24: sponge_mid_rom = 64'h856c96f5dc9851aa;
+                    default: sponge_mid_rom = 64'd0;
+                endcase
+            end
+            3'd5: begin // TURBOSHAKE_FS_MIDSTATE ("QSAG.AGG.TURBO_FS/v1")
+                case (lane)
+                    5'd0:  sponge_mid_rom = 64'h91d7c2b5d9c349d5;
+                    5'd1:  sponge_mid_rom = 64'h0fe9e1320d052990;
+                    5'd2:  sponge_mid_rom = 64'hbb49dcb163df0998;
+                    5'd3:  sponge_mid_rom = 64'h41863aed68216b69;
+                    5'd4:  sponge_mid_rom = 64'h9b36e33d0b572914;
+                    5'd5:  sponge_mid_rom = 64'h47fd0269a80e1a2f;
+                    5'd6:  sponge_mid_rom = 64'h0fd8d3b0bb052910;
+                    5'd7:  sponge_mid_rom = 64'h777b25e68d3b55e4;
+                    5'd8:  sponge_mid_rom = 64'hda8aea200595a598;
+                    5'd9:  sponge_mid_rom = 64'h234b7b795b42b2f1;
+                    5'd10: sponge_mid_rom = 64'h8931ca9d1d33d881;
+                    5'd11: sponge_mid_rom = 64'h265565cd4ead330a;
+                    5'd12: sponge_mid_rom = 64'heb457d90d1f36480;
+                    5'd13: sponge_mid_rom = 64'hea2ba3d9236057ab;
+                    5'd14: sponge_mid_rom = 64'h03572a55d68c5e72;
+                    5'd15: sponge_mid_rom = 64'h997c789c6f5417f5;
+                    5'd16: sponge_mid_rom = 64'hd8fa575d2aa329b2;
+                    5'd17: sponge_mid_rom = 64'ha11c1a07edc22223;
+                    5'd18: sponge_mid_rom = 64'hee86f4bac42c763f;
+                    5'd19: sponge_mid_rom = 64'hf9d93986d50c63f5;
+                    5'd20: sponge_mid_rom = 64'h1d88a5c7c867f955;
+                    5'd21: sponge_mid_rom = 64'h394442877b64831d;
+                    5'd22: sponge_mid_rom = 64'hcba53b397e6c7084;
+                    5'd23: sponge_mid_rom = 64'h8ad61a49d597e2ad;
+                    5'd24: sponge_mid_rom = 64'h4918107a763c890a;
+                    default: sponge_mid_rom = 64'd0;
+                endcase
+            end
+            3'd6: begin // POW_MIDSTATE ("QSAG.PCS.POW.V2")
+                case (lane)
+                    5'd0:  sponge_mid_rom = 64'h912cd4369f324315;
+                    5'd1:  sponge_mid_rom = 64'h999c04d88741d72f;
+                    5'd2:  sponge_mid_rom = 64'h826e87f172a72886;
+                    5'd3:  sponge_mid_rom = 64'h9ab34da963aec230;
+                    5'd4:  sponge_mid_rom = 64'he59866a9c4dee082;
+                    5'd5:  sponge_mid_rom = 64'h2e0d70596264312e;
+                    5'd6:  sponge_mid_rom = 64'h1f62aa1e3894cb9e;
+                    5'd7:  sponge_mid_rom = 64'h221e18927402f5dd;
+                    5'd8:  sponge_mid_rom = 64'h52411767f8e30a27;
+                    5'd9:  sponge_mid_rom = 64'h38ed890d9450b4bd;
+                    5'd10: sponge_mid_rom = 64'ha7adc24cbbe0d095;
+                    5'd11: sponge_mid_rom = 64'heb93ea9d288eb573;
+                    5'd12: sponge_mid_rom = 64'ha8e1b8213cc6bf0a;
+                    5'd13: sponge_mid_rom = 64'h4f30b691a18fb10d;
+                    5'd14: sponge_mid_rom = 64'h07d90cb270b3a2ce;
+                    5'd15: sponge_mid_rom = 64'hbc3100ec6f44ddea;
+                    5'd16: sponge_mid_rom = 64'h36d8b62669667d1a;
+                    5'd17: sponge_mid_rom = 64'h0cd9a4529023823c;
+                    5'd18: sponge_mid_rom = 64'h7d70c6da8ff3dd83;
+                    5'd19: sponge_mid_rom = 64'h10aad610c87ac7b3;
+                    5'd20: sponge_mid_rom = 64'h288423a030b1eda5;
+                    5'd21: sponge_mid_rom = 64'hdc8757b91cac4cc1;
+                    5'd22: sponge_mid_rom = 64'h6fdc27bd98b433d0;
+                    5'd23: sponge_mid_rom = 64'h33985abee9b9cc90;
+                    5'd24: sponge_mid_rom = 64'h5f9bd4e625811719;
                     default: sponge_mid_rom = 64'd0;
                 endcase
             end
@@ -479,7 +540,7 @@ module qsag_ni_fpga_top #(
     for (genvar i = 0; i < 4; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
         wire [63:0] b_l = sc_add_b[64*i +: 64];
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(34)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(22)) u_s1 (
             .x({sc_add_c0 ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
             .y(sc_raw_d[66*i +: 66]));
 
@@ -490,8 +551,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_on UNUSEDSIGNAL */
         wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r1 (.x(tr1), .y(r1));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
     end
 
@@ -521,6 +582,23 @@ module qsag_ni_fpga_top #(
     logic          ksp_fail_q;
 
     if (PROFILE_COMPACT) begin : g_kec_compact
+        (* rom_style = "block" *) logic [63:0] mid_rom_mem [0:255];
+        initial begin
+            for (int s = 0; s < 8; s++)
+                for (int l = 0; l < 32; l++)
+                    mid_rom_mem[s * 32 + l] = (l < 25) ? sponge_mid_rom(3'(s), 5'(l)) : 64'd0;
+        end
+        logic [63:0] mid_rom_q;
+        wire  [2:0]  mid_rom_sel = (op_st == O_KSP_COLLECT)
+                                 ? {s_axis_tdata[69], s_axis_tdata[66:65]}
+                                 : {ksp_flags_q[5], ksp_flags_q[2:1]};
+        wire  [4:0]  mid_rom_idx = (op_st == O_KSP_COLLECT)
+                                 ? 5'd0
+                                 : (kcmd_ready ? (kcmp_idx + 5'd1) : kcmp_idx);
+        always_ff @(posedge clk) begin
+            mid_rom_q <= mid_rom_mem[{mid_rom_sel, mid_rom_idx}];
+        end
+
         logic        top_kcmd_valid, top_kcmd_nr12;
         logic [1:0]  top_kcmd_op;
         logic [4:0]  top_kcmd_idx;
@@ -552,7 +630,7 @@ module qsag_ni_fpga_top #(
                 O_KSP_CMP_INIT: begin
                     top_kcmd_valid = 1'b1;
                     top_kcmd_op    = 2'd0;
-                    top_kcmd_wdata = sponge_mid_rom(ksp_flags_q[5] ? 3'd4 : {1'b0, ksp_flags_q[2:1]}, kcmp_idx);
+                    top_kcmd_wdata = mid_rom_q;
                 end
                 O_KSP_CMP_XOR: begin
                     top_kcmd_valid = 1'b1;
@@ -593,7 +671,7 @@ module qsag_ni_fpga_top #(
         always_comb begin
             for (int l = 0; l < 25; l++)
                 ksp_base[64*l +: 64] = ksp_flags_q[0]
-                    ? sponge_mid_rom(ksp_flags_q[5] ? 3'd4 : {1'b0, ksp_flags_q[2:1]}, 5'(l))
+                    ? sponge_mid_rom({ksp_flags_q[5], ksp_flags_q[2:1]}, 5'(l))
                     : kec_hold_q[64*l +: 64];
             if (op_st == O_TS_CANOPY) begin
                 kec_in = ts_kec_state;
@@ -652,28 +730,30 @@ module qsag_ni_fpga_top #(
         .kcmd_done(kcmd_done), .kcmd_rd_valid(kcmd_rd_valid), .kcmd_rd_data(kcmd_rd_data));
 
     // ------------------------------------------------------------------ GF(2^128) + Wiedemann Tower
-    logic [127:0] gf_in_a, gf_in_b, gf_raw_r, gf_tow_r, gf_r;
+    logic         gf_start, gf_done;
+    logic [127:0] gf_r;
     logic [2:0]   gf_cnt;
     if (PROFILE_COMPACT) begin : g_gf_cmp
-        logic [127:0] gf_map_out, gf_a_q, gf_b_q;
-        wire  [127:0] gf_map_in = (gf_cnt == 3'd0) ? x_q[1:0] : x_q[3:2];
-        qsag_gf128_tower_map #(.INVERSE(0)) u_tow_ab (.x(gf_map_in), .y(gf_map_out));
-        always_ff @(posedge clk) begin
-            if (gf_cnt == 3'd0) gf_a_q <= cmd_a0_q[0] ? gf_map_out : x_q[1:0];
-            if (gf_cnt == 3'd1) gf_b_q <= cmd_a0_q[0] ? gf_map_out : x_q[3:2];
-        end
-        assign gf_in_a = gf_a_q;
-        assign gf_in_b = gf_b_q;
+        qsag_gf128_compact u_gf_cmp (
+            .clk(clk), .rst(rst), .start(gf_start), .tower(cmd_a0_q[0]),
+            .a(x_q[1:0]), .b(x_q[3:2]), .done(gf_done), .r(gf_r));
+        /* verilator lint_off UNUSEDSIGNAL */
+        wire unused_gf_cnt = &{1'b0, gf_cnt};
+        /* verilator lint_on UNUSEDSIGNAL */
     end else begin : g_gf_par
-        logic [127:0] gf_pa, gf_pb;
+        logic [127:0] gf_pa, gf_pb, gf_in_a, gf_in_b, gf_raw_r, gf_tow_r;
         qsag_gf128_tower_map #(.INVERSE(0)) u_tow_a (.x(x_q[1:0]), .y(gf_pa));
         qsag_gf128_tower_map #(.INVERSE(0)) u_tow_b (.x(x_q[3:2]), .y(gf_pb));
         assign gf_in_a = cmd_a0_q[0] ? gf_pa : x_q[1:0];
         assign gf_in_b = cmd_a0_q[0] ? gf_pb : x_q[3:2];
+        qsag_gf128_clmul u_gf (.clk(clk), .a(gf_in_a), .b(gf_in_b), .r(gf_raw_r));
+        qsag_gf128_tower_map #(.INVERSE(1)) u_tow_r (.x(gf_raw_r), .y(gf_tow_r));
+        assign gf_r    = cmd_a0_q[0] ? gf_tow_r : gf_raw_r;
+        assign gf_done = (gf_cnt == 3'(GF128_LAT));
+        /* verilator lint_off UNUSEDSIGNAL */
+        wire unused_gf_st = gf_start;
+        /* verilator lint_on UNUSEDSIGNAL */
     end
-    qsag_gf128_clmul u_gf (.clk(clk), .a(gf_in_a), .b(gf_in_b), .r(gf_raw_r));
-    qsag_gf128_tower_map #(.INVERSE(1)) u_tow_r (.x(gf_raw_r), .y(gf_tow_r));
-    assign gf_r = cmd_a0_q[0] ? gf_tow_r : gf_raw_r;
 
     // ------------------------------------------------------------------ Stream backpressure & FSM
     always_comb begin
@@ -698,12 +778,27 @@ module qsag_ni_fpga_top #(
 
     wire engines_busy = op_busy || p2_busy || (|chain_busy) || fold_busy || kec_busy || ts_busy;
 
+    // Word-level CE write path for `x_q` (2,048 FFs): avoids per-byte enable LUT4 bloat on ECP5.
+    wire [31:0] x_cur32 = wr_word[0] ? x_q[wr_word[5:1]][63:32] : x_q[wr_word[5:1]][31:0];
+    logic [31:0] x_new32;
+    always_comb begin
+        for (int b = 0; b < 4; b++)
+            x_new32[8*b +: 8] = wr_strb[b] ? wr_data[8*b +: 8] : x_cur32[8*b +: 8];
+    end
+    always_ff @(posedge clk) begin
+        if (wr_fire && !wr_error && (|wr_strb) && wr_word[9:6] == 4'h1) begin
+            if (wr_word[0]) x_q[wr_word[5:1]][63:32] <= x_new32;
+            else            x_q[wr_word[5:1]][31:0]  <= x_new32;
+        end
+    end
+
     always_ff @(posedge clk) begin
         fold_start    <= 1'b0;
         mac_valid_fsm <= 1'b0;
         kec_start_top <= 1'b0;
         kec_load      <= 1'b0;
         ts_start      <= 1'b0;
+        gf_start      <= 1'b0;
         eng_clr       <= 1'b0;
         sc_s2_en      <= 1'b0;
         if (sc_s2_en) sc_sum_q <= sc_can_d;
@@ -744,8 +839,6 @@ module qsag_ni_fpga_top #(
                         if (wr_strb[byte_idx]) begin
                             if (wr_word == 10'h005) arg32_q[8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
                             if (wr_word == 10'h008) stream_q[8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
-                            if (wr_word[9:6] == 4'h1)
-                                x_q[wr_word[5:1]][32*int'(wr_word[0])+8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
                         end
                     end
                 end
@@ -915,8 +1008,9 @@ module qsag_ni_fpga_top #(
                                 op_st    <= O_TS_CANOPY;
                             end
                             8'h30: begin
-                                gf_cnt <= 3'd0;
-                                op_st  <= O_GF;
+                                gf_start <= 1'b1;
+                                gf_cnt   <= 3'd0;
+                                op_st    <= O_GF;
                             end
                             8'h3F: begin
                                 err_noncanon <= 1'b0;
@@ -1210,8 +1304,8 @@ module qsag_ni_fpga_top #(
                     end
                 end
                 O_GF: begin
-                    gf_cnt <= gf_cnt + 3'd1;
-                    if (gf_cnt == 3'(GF128_LAT + (PROFILE_COMPACT ? 2 : 0))) begin
+                    if (!PROFILE_COMPACT) gf_cnt <= gf_cnt + 3'd1;
+                    if (gf_done) begin
                         y_q[1:0] <= gf_r ^ x_q[5:4];
                         op_ok    <= ((gf_r ^ x_q[5:4]) == x_q[7:6]);
                         op_st    <= O_FIN;

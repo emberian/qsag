@@ -3,6 +3,7 @@
 //! Seiler Signed-Montgomery NTT Differential PBT (`10,000+` polynomials), and 2-of-3 Dealerless
 //! Threshold `ML-DSA` Cross-Verification Against Upstream `fips204` (`v0.4`).
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Condvar, Mutex};
 
 use fips204::traits::{KeyGen, SerDes, Signer, Verifier};
@@ -13,10 +14,11 @@ use qsag_asm::{
     mldsa_pointwise_mul_with_backend, probe_capabilities,
 };
 use qsag_cred::{
-    MLDSA_N, MLDSA_Q, MlDsaLevel, MpcTransport, MpcTransportError, NonceBurnPersistence, Poly256,
-    RoundInbox, RoundInfo, RoundKind, ThresholdMlDsaDkgConfig, ThresholdMlDsaSignerShare,
-    ThresholdSignSession, ml_dsa_keygen_from_seed, ml_dsa_sign_deterministic, ml_dsa_verify,
-    threshold_mldsa_dkg_party, threshold_sign_mldsa_party,
+    FsNonceBurnStore, MLDSA_N, MLDSA_Q, MlDsaLevel, MpcTransport, MpcTransportError,
+    NonceBurnPersistence, Poly256, RoundInbox, RoundInfo, RoundKind, ThresholdMlDsaDkgConfig,
+    ThresholdMlDsaError, ThresholdMlDsaSignerShare, ThresholdSignOutput, ThresholdSignSession,
+    ml_dsa_keygen_from_seed, ml_dsa_sign_deterministic, ml_dsa_verify, threshold_mldsa_dkg_party,
+    threshold_sign_mldsa_party,
 };
 use qsag_external_validation::{ALL_SIMD_BACKENDS, mldsa_poly_mul_negacyclic_ref};
 
@@ -364,80 +366,353 @@ fn run_mpc_parties<S: Send, R: Send>(
     })
 }
 
-struct InMemoryBurn;
-impl NonceBurnPersistence for InMemoryBurn {
-    fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
-        true
+/// A custodian's nonce ledger that enforces the [`NonceBurnPersistence`] contract in
+/// memory: an epoch is granted only above every earlier one, a `(session, attempt)` pair
+/// only once, and both only for the key and custodian the ledger was provisioned for.
+struct StrictBurnLedger {
+    key_id: [u8; 32],
+    party_id: u16,
+    max_epoch: Option<u64>,
+    burned: BTreeSet<([u8; 32], u32)>,
+    granted: u32,
+    refused: u32,
+}
+
+impl StrictBurnLedger {
+    fn provision(share: &ThresholdMlDsaSignerShare) -> Self {
+        Self {
+            key_id: share.verification_pack().policy_signing_key_id(),
+            party_id: share.party_id(),
+            max_epoch: None,
+            burned: BTreeSet::new(),
+            granted: 0,
+            refused: 0,
+        }
     }
 }
 
-fn run_threshold_mldsa_2of3_sign(
+impl NonceBurnPersistence for StrictBurnLedger {
+    fn reserve(&mut self, party_id: u16, epoch: u64, session_id: &[u8; 32], attempt: u32) -> bool {
+        let fresh = party_id == self.party_id
+            && epoch != u64::MAX
+            && self.max_epoch.is_none_or(|max| epoch > max)
+            && !self.burned.contains(&(*session_id, attempt));
+        if !fresh {
+            self.refused += 1;
+            return false;
+        }
+        self.max_epoch = Some(epoch);
+        self.burned.insert((*session_id, attempt));
+        self.granted += 1;
+        true
+    }
+
+    fn next_epoch(&self, key_id: &[u8; 32], party_id: u16) -> Result<u64, ThresholdMlDsaError> {
+        if *key_id != self.key_id || party_id != self.party_id {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+        Ok(self.max_epoch.map_or(0, |max| max + 1))
+    }
+}
+
+/// Runs the dealerless key generation for `party_ids` (ascending) and returns the public
+/// key with every custodian's share.
+fn threshold_mldsa_dkg(
     level: MlDsaLevel,
+    threshold: usize,
+    party_ids: &[u16],
     session_tag: u8,
-    msg: &[u8],
-    ctx: &[u8],
-) -> (Vec<u8>, Vec<u8>) {
-    let party_ids = vec![1u16, 2u16, 3u16];
+) -> (Vec<u8>, Vec<ThresholdMlDsaSignerShare>) {
     let dkg_cfg = ThresholdMlDsaDkgConfig {
         level,
-        threshold: 2,
-        party_ids: party_ids.clone(),
+        threshold,
+        party_ids: party_ids.to_vec(),
         session_id: [session_tag; 32],
     };
     let shares: Vec<ThresholdMlDsaSignerShare> =
-        run_mpc_parties(party_ids.clone(), |me, id, net| {
+        run_mpc_parties(party_ids.to_vec(), |me, id, net| {
             let entropy = [session_tag.wrapping_add((me as u8) * 17 + 3); 32];
             threshold_mldsa_dkg_party(&dkg_cfg, id, &entropy, net).expect("threshold ML-DSA DKG")
         });
-
     let pk_bytes = shares[0].verification_pack().pk_bytes.clone();
-    assert_eq!(pk_bytes, shares[1].verification_pack().pk_bytes);
-    assert_eq!(pk_bytes, shares[2].verification_pack().pk_bytes);
-
-    let sign_session = ThresholdSignSession {
-        session_id: [session_tag ^ 0xA5; 32],
-        quorum: vec![1u16, 2u16, 3u16],
-    };
-    // Run across all 3 RSS custodians (`2t - 1 = 3` active quorum for `t = 2`)
-    let outputs = run_mpc_parties(shares, |me, mut share, net| {
-        let entropy = [session_tag.wrapping_add((me as u8) * 29 + 0x41); 32];
-        let mut burn = InMemoryBurn;
-        threshold_sign_mldsa_party(&mut share, &sign_session, msg, ctx, &entropy, &mut burn, net)
-            .expect("threshold ML-DSA sign")
-    });
-    assert_eq!(outputs[0].signature, outputs[1].signature);
-    assert_eq!(outputs[1].signature, outputs[2].signature);
-    (pk_bytes, outputs.into_iter().next().unwrap().signature)
+    for (share, &id) in shares.iter().zip(party_ids) {
+        assert_eq!(share.party_id(), id);
+        assert_eq!(share.verification_pack().pk_bytes, pk_bytes);
+        assert_eq!(share.verification_pack().signing_quorum(), 2 * threshold - 1);
+    }
+    (pk_bytes, shares)
 }
 
-/// Cross-verifies dealerless 2-of-3 threshold `ML-DSA-44`, `ML-DSA-65`, and `ML-DSA-87`
-/// public keys and signatures directly under **upstream `fips204::{ml_dsa_44, ml_dsa_65, ml_dsa_87}`**!
-#[test]
-fn threshold_mldsa_44_65_87_dkg_and_signatures_verify_under_upstream_fips204() {
-    let msg = b"dealerless-2of3-threshold-mldsa-verified-by-upstream-fips204";
+/// One signing session among the custodians named by `quorum` (ascending). `burns[i]`
+/// is the ledger of `shares[i]`. Returns each quorum member's result in quorum order.
+fn threshold_mldsa_sign_quorum<B: NonceBurnPersistence + Send>(
+    shares: &mut [ThresholdMlDsaSignerShare],
+    burns: &mut [B],
+    quorum: &[u16],
+    session_id: [u8; 32],
+    msg: &[u8],
+    ctx: &[u8],
+) -> Vec<Result<ThresholdSignOutput, ThresholdMlDsaError>> {
+    let session = ThresholdSignSession {
+        session_id,
+        quorum: quorum.to_vec(),
+    };
+    let members: Vec<(&mut ThresholdMlDsaSignerShare, &mut B)> = shares
+        .iter_mut()
+        .zip(burns.iter_mut())
+        .filter(|(share, _)| quorum.contains(&share.party_id()))
+        .collect();
+    run_mpc_parties(members, |me, (share, burn), net| {
+        let mut entropy = session_id;
+        entropy[0] ^= 0x41;
+        entropy[1] = entropy[1].wrapping_add(me as u8 * 29);
+        threshold_sign_mldsa_party(share, &session, msg, ctx, &entropy, burn, net)
+    })
+}
+
+/// Upstream `fips204` verification of `sig` under `pk` for the parameter set of `level`.
+fn upstream_fips204_verify(level: MlDsaLevel, pk: &[u8], msg: &[u8], sig: &[u8], ctx: &[u8]) -> bool {
+    match level {
+        MlDsaLevel::MlDsa44 => {
+            let pk = ml_dsa_44::PublicKey::try_from_bytes(pk.try_into().expect("ML-DSA-44 pk length"))
+                .expect("upstream ml_dsa_44 PublicKey::try_from_bytes");
+            sig.try_into().is_ok_and(|sig: &[u8; ml_dsa_44::SIG_LEN]| pk.verify(msg, sig, ctx))
+        }
+        MlDsaLevel::MlDsa65 => {
+            let pk = ml_dsa_65::PublicKey::try_from_bytes(pk.try_into().expect("ML-DSA-65 pk length"))
+                .expect("upstream ml_dsa_65 PublicKey::try_from_bytes");
+            sig.try_into().is_ok_and(|sig: &[u8; ml_dsa_65::SIG_LEN]| pk.verify(msg, sig, ctx))
+        }
+        MlDsaLevel::MlDsa87 => {
+            let pk = ml_dsa_87::PublicKey::try_from_bytes(pk.try_into().expect("ML-DSA-87 pk length"))
+                .expect("upstream ml_dsa_87 PublicKey::try_from_bytes");
+            sig.try_into().is_ok_and(|sig: &[u8; ml_dsa_87::SIG_LEN]| pk.verify(msg, sig, ctx))
+        }
+    }
+}
+
+/// Every subset of `ids` with exactly `size` members, each ascending.
+fn subsets_of_size(ids: &[u16], size: usize) -> Vec<Vec<u16>> {
+    (0u32..1 << ids.len())
+        .filter(|mask| mask.count_ones() as usize == size)
+        .map(|mask| {
+            ids.iter()
+                .enumerate()
+                .filter(|(bit, _)| mask >> bit & 1 == 1)
+                .map(|(_, &id)| id)
+                .collect()
+        })
+        .collect()
+}
+
+/// For one committee: every quorum of at least `2t - 1` custodians signs a standard
+/// signature that upstream `fips204` accepts and that fails after any single bit flip;
+/// every smaller quorum and every quorum naming a stranger is refused before a signature
+/// exists. Each ledger grants exactly as many reservations as the signer reports attempts.
+fn check_threshold_mldsa_committee(level: MlDsaLevel, threshold: usize, party_ids: &[u16], tag: u8) {
+    let msg = b"dealerless-threshold-mldsa-verified-by-upstream-fips204";
     let ctx = b"qsag-threshold-fips204-ctx";
+    let (pk, mut shares) = threshold_mldsa_dkg(level, threshold, party_ids, tag);
+    let mut ledgers: Vec<StrictBurnLedger> = shares.iter().map(StrictBurnLedger::provision).collect();
+    let need = 2 * threshold - 1;
+    let mut session_counter = 0u8;
+    let mut next_session = || {
+        session_counter += 1;
+        let mut id = [tag ^ 0xA5; 32];
+        id[31] = session_counter;
+        id
+    };
 
-    // ML-DSA-44
-    let (pk44, sig44) = run_threshold_mldsa_2of3_sign(MlDsaLevel::MlDsa44, 0x44, msg, ctx);
-    let u_pk44 = ml_dsa_44::PublicKey::try_from_bytes(pk44.as_slice().try_into().unwrap())
-        .expect("upstream ml_dsa_44 PublicKey::try_from_bytes");
-    let u_sig44: [u8; ml_dsa_44::SIG_LEN] = sig44.as_slice().try_into().unwrap();
-    assert!(u_pk44.verify(msg, &u_sig44, ctx));
-    let mut bad44 = u_sig44;
-    bad44[0] ^= 1;
-    assert!(!u_pk44.verify(msg, &bad44, ctx));
+    let mut signatures = BTreeSet::new();
+    for size in need..=party_ids.len() {
+        for quorum in subsets_of_size(party_ids, size) {
+            let granted_before: Vec<u32> = ledgers.iter().map(|l| l.granted).collect();
+            let outputs: Vec<ThresholdSignOutput> =
+                threshold_mldsa_sign_quorum(&mut shares, &mut ledgers, &quorum, next_session(), msg, ctx)
+                    .into_iter()
+                    .map(|r| r.unwrap_or_else(|e| panic!("{level:?} quorum {quorum:?}: {e}")))
+                    .collect();
+            assert_eq!(outputs.len(), quorum.len());
+            let sig = &outputs[0].signature;
+            for output in &outputs {
+                assert_eq!(&output.signature, sig, "{level:?} quorum {quorum:?}");
+            }
+            for (ledger, before) in ledgers.iter().zip(granted_before) {
+                let spent = ledger.granted - before;
+                match quorum.iter().position(|&id| id == ledger.party_id) {
+                    Some(at) => assert_eq!(spent, outputs[at].attempts, "{level:?} {quorum:?}"),
+                    None => assert_eq!(spent, 0, "a custodian outside the quorum burned a nonce"),
+                }
+                assert_eq!(ledger.refused, 0);
+            }
 
-    // ML-DSA-65
-    let (pk65, sig65) = run_threshold_mldsa_2of3_sign(MlDsaLevel::MlDsa65, 0x65, msg, ctx);
-    let u_pk65 = ml_dsa_65::PublicKey::try_from_bytes(pk65.as_slice().try_into().unwrap())
-        .expect("upstream ml_dsa_65 PublicKey::try_from_bytes");
-    let u_sig65: [u8; ml_dsa_65::SIG_LEN] = sig65.as_slice().try_into().unwrap();
-    assert!(u_pk65.verify(msg, &u_sig65, ctx));
+            assert!(upstream_fips204_verify(level, &pk, msg, sig, ctx), "{level:?} {quorum:?}");
+            assert!(ml_dsa_verify(level, &pk, msg, ctx, sig));
+            assert!(!upstream_fips204_verify(level, &pk, b"another message", sig, ctx));
+            assert!(!upstream_fips204_verify(level, &pk, msg, sig, b"another context"));
+            for byte in [0, 1, sig.len() / 3, sig.len() / 2, sig.len() - 1] {
+                for bit in [0u8, 7] {
+                    let mut bad = sig.clone();
+                    bad[byte] ^= 1 << bit;
+                    assert!(
+                        !upstream_fips204_verify(level, &pk, msg, &bad, ctx),
+                        "{level:?} {quorum:?}: upstream accepted a flip at byte {byte} bit {bit}"
+                    );
+                    assert!(
+                        !ml_dsa_verify(level, &pk, msg, ctx, &bad),
+                        "{level:?} {quorum:?}: qsag accepted a flip at byte {byte} bit {bit}"
+                    );
+                }
+            }
+            signatures.insert(sig.clone());
+        }
+    }
+    // Sessions differ, so the hedged nonces and with them the signatures differ.
+    let valid_quorums: usize = (need..=party_ids.len())
+        .map(|size| subsets_of_size(party_ids, size).len())
+        .sum();
+    assert_eq!(signatures.len(), valid_quorums);
 
-    // ML-DSA-87
-    let (pk87, sig87) = run_threshold_mldsa_2of3_sign(MlDsaLevel::MlDsa87, 0x87, msg, ctx);
-    let u_pk87 = ml_dsa_87::PublicKey::try_from_bytes(pk87.as_slice().try_into().unwrap())
-        .expect("upstream ml_dsa_87 PublicKey::try_from_bytes");
-    let u_sig87: [u8; ml_dsa_87::SIG_LEN] = sig87.as_slice().try_into().unwrap();
-    assert!(u_pk87.verify(msg, &u_sig87, ctx));
+    // Below `2t - 1` custodians: refused by every member, and no nonce is spent.
+    let granted_before: Vec<u32> = ledgers.iter().map(|l| l.granted).collect();
+    for size in 1..need {
+        for quorum in subsets_of_size(party_ids, size) {
+            let results =
+                threshold_mldsa_sign_quorum(&mut shares, &mut ledgers, &quorum, next_session(), msg, ctx);
+            assert_eq!(results.len(), size);
+            for result in results {
+                assert_eq!(
+                    result.map(|output| output.signature),
+                    Err(ThresholdMlDsaError::QuorumTooSmall { have: size, need }),
+                    "{level:?} quorum {quorum:?}"
+                );
+            }
+        }
+    }
+    // A quorum of the right size that names a custodian outside the committee.
+    let stranger = party_ids.iter().max().unwrap() + 7;
+    let mut with_stranger = party_ids[..need - 1].to_vec();
+    with_stranger.push(stranger);
+    for result in
+        threshold_mldsa_sign_quorum(&mut shares, &mut ledgers, &with_stranger, next_session(), msg, ctx)
+    {
+        assert_eq!(
+            result.map(|output| output.signature),
+            Err(ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: stranger })
+        );
+    }
+    let granted_after: Vec<u32> = ledgers.iter().map(|l| l.granted).collect();
+    assert_eq!(granted_before, granted_after, "a refused quorum spent a nonce");
+}
+
+/// Dealerless threshold `ML-DSA-44`, `-65` and `-87` under upstream `fips204`, for a
+/// 2-of-3 committee (whose only signing quorum is all three custodians) and a 2-of-4
+/// committee (four quorums of three and one of four).
+#[test]
+fn threshold_mldsa_44_65_87_every_valid_quorum_verifies_under_upstream_fips204() {
+    for (level, tag) in [
+        (MlDsaLevel::MlDsa44, 0x44u8),
+        (MlDsaLevel::MlDsa65, 0x65),
+        (MlDsaLevel::MlDsa87, 0x87),
+    ] {
+        check_threshold_mldsa_committee(level, 2, &[1, 2, 3], tag);
+        check_threshold_mldsa_committee(level, 2, &[2, 5, 7, 11], tag ^ 0x10);
+    }
+}
+
+/// Signs one session, expects success, and returns the signature.
+fn sign_session_ok<B: NonceBurnPersistence + Send>(
+    shares: &mut [ThresholdMlDsaSignerShare],
+    burns: &mut [B],
+    session_id: [u8; 32],
+    msg: &[u8],
+) -> Vec<u8> {
+    let mut signatures: Vec<Vec<u8>> =
+        threshold_mldsa_sign_quorum(shares, burns, &[1, 2, 3], session_id, msg, b"burn-ctx")
+            .into_iter()
+            .map(|r| r.expect("fresh session signs").signature)
+            .collect();
+    signatures.dedup();
+    assert_eq!(signatures.len(), 1);
+    signatures.pop().unwrap()
+}
+
+/// Signs one session and expects every custodian to stop at its nonce ledger.
+fn sign_session_refused_by_ledger<B: NonceBurnPersistence + Send>(
+    shares: &mut [ThresholdMlDsaSignerShare],
+    burns: &mut [B],
+    session_id: [u8; 32],
+    msg: &[u8],
+) {
+    for result in threshold_mldsa_sign_quorum(shares, burns, &[1, 2, 3], session_id, msg, b"burn-ctx") {
+        assert_eq!(
+            result.map(|output| output.signature),
+            Err(ThresholdMlDsaError::NoncePersistenceFailed)
+        );
+    }
+}
+
+/// A signing session cannot be run twice: the second run of the same session identifier
+/// (the same or a different message) is refused by each custodian's ledger and yields no
+/// signature, while a new session identifier still signs. Checked with the in-memory
+/// ledger above and with the crate's durable [`FsNonceBurnStore`], including after the
+/// store is closed and reopened. Signing code that stopped consulting the ledger, or a
+/// store that forgot its burns, would produce a second signature here.
+#[test]
+fn threshold_mldsa_nonce_ledger_refuses_a_replayed_session() {
+    let level = MlDsaLevel::MlDsa44;
+    let (pk, mut shares) = threshold_mldsa_dkg(level, 2, &[1, 2, 3], 0xB7);
+    let msg = b"single-use signing session";
+
+    // 1. In-memory ledger.
+    let mut ledgers: Vec<StrictBurnLedger> = shares.iter().map(StrictBurnLedger::provision).collect();
+    let sig_a = sign_session_ok(&mut shares, &mut ledgers, [0xA1; 32], msg);
+    assert!(upstream_fips204_verify(level, &pk, msg, &sig_a, b"burn-ctx"));
+    let granted: Vec<u32> = ledgers.iter().map(|l| l.granted).collect();
+    sign_session_refused_by_ledger(&mut shares, &mut ledgers, [0xA1; 32], msg);
+    sign_session_refused_by_ledger(&mut shares, &mut ledgers, [0xA1; 32], b"a different message");
+    for (ledger, before) in ledgers.iter().zip(&granted) {
+        assert_eq!(ledger.granted, *before, "a replayed session was granted a nonce");
+        assert_eq!(ledger.refused, 2);
+    }
+    let sig_b = sign_session_ok(&mut shares, &mut ledgers, [0xA2; 32], msg);
+    assert!(upstream_fips204_verify(level, &pk, msg, &sig_b, b"burn-ctx"));
+    assert_ne!(sig_a, sig_b);
+
+    // 2. The durable store, across a close and reopen.
+    let dir = std::env::temp_dir().join(format!(
+        "qsag-validation-burn-{}-{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let key_id = shares[0].verification_pack().policy_signing_key_id();
+    let path_of = |party: u16| dir.join(format!("party-{party}.burn"));
+    let mac_key_of = |party: u16| [0x60 + party as u8; 32];
+    let mut stores: Vec<FsNonceBurnStore> = shares
+        .iter()
+        .map(|share| {
+            let party = share.party_id();
+            FsNonceBurnStore::create(path_of(party), key_id, mac_key_of(party)).unwrap()
+        })
+        .collect();
+    let sig_c = sign_session_ok(&mut shares, &mut stores, [0xC1; 32], msg);
+    assert!(upstream_fips204_verify(level, &pk, msg, &sig_c, b"burn-ctx"));
+    sign_session_refused_by_ledger(&mut shares, &mut stores, [0xC1; 32], msg);
+    drop(stores);
+    let mut stores: Vec<FsNonceBurnStore> = shares
+        .iter()
+        .map(|share| {
+            let party = share.party_id();
+            FsNonceBurnStore::open(path_of(party), key_id, mac_key_of(party)).unwrap()
+        })
+        .collect();
+    sign_session_refused_by_ledger(&mut shares, &mut stores, [0xC1; 32], msg);
+    let sig_d = sign_session_ok(&mut shares, &mut stores, [0xC2; 32], msg);
+    assert!(upstream_fips204_verify(level, &pk, msg, &sig_d, b"burn-ctx"));
+    drop(stores);
+    std::fs::remove_dir_all(&dir).unwrap();
 }

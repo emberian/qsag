@@ -459,7 +459,10 @@ impl QuorumKeyEscrow {
         }
     }
 
-    pub(crate) fn register(&self, keys: MacKeyShare) -> std::sync::Arc<std::sync::Mutex<MacKeyShare>> {
+    pub(crate) fn register(
+        &self,
+        keys: MacKeyShare,
+    ) -> std::sync::Arc<std::sync::Mutex<MacKeyShare>> {
         let slot = std::sync::Arc::new(std::sync::Mutex::new(keys));
         if self.is_poisoned() {
             slot.lock().unwrap_or_else(|e| e.into_inner()).wipe();
@@ -571,9 +574,9 @@ impl BlindKind {
     #[inline]
     fn choice_words(self) -> usize {
         match self {
-            Self::Gf128 | Self::GoldExt2 => 6,        // 384 bits >= 128 + 256
-            Self::Prime(Domain::BlsFp) => 10,         // 640 bits >= 381 + 259
-            Self::Prime(_) => 8,                      // 512 bits >= 256 + 256
+            Self::Gf128 | Self::GoldExt2 => 6, // 384 bits >= 128 + 256
+            Self::Prime(Domain::BlsFp) => 10,  // 640 bits >= 381 + 259
+            Self::Prime(_) => 8,               // 512 bits >= 256 + 256
         }
     }
 
@@ -1097,7 +1100,12 @@ impl<T: Transport> SpdzEngine<T> {
             {
                 return self.fail(Error::Authentication(peer));
             }
-            in_digests.push(edge_digest(&self.session, peer, self.party, &message.payload));
+            in_digests.push(edge_digest(
+                &self.session,
+                peer,
+                self.party,
+                &message.payload,
+            ));
             received.push(SecretVec::from(core::mem::take(&mut message.payload)));
         }
         self.sequence = match self.sequence.checked_add(1) {
@@ -1441,8 +1449,22 @@ impl<T: Transport> SpdzEngine<T> {
                 let mut t1_tmp: SecretVec<u64> = vec![0u64; w_tot].into();
                 for col in 0..128 {
                     let mut t0_col: SecretVec<u64> = vec![0u64; w_tot].into();
-                    expand_col(peer, my_party, ctr, col, &ot.receiver_seeds[col][0], &mut t0_col);
-                    expand_col(peer, my_party, ctr, col, &ot.receiver_seeds[col][1], &mut t1_tmp);
+                    expand_col(
+                        peer,
+                        my_party,
+                        ctr,
+                        col,
+                        &ot.receiver_seeds[col][0],
+                        &mut t0_col,
+                    );
+                    expand_col(
+                        peer,
+                        my_party,
+                        ctr,
+                        col,
+                        &ot.receiver_seeds[col][1],
+                        &mut t1_tmp,
+                    );
                     for w in 0..w_tot {
                         u_flat.push(t0_col[w] ^ t1_tmp[w] ^ c_own[w]);
                     }
@@ -1703,8 +1725,10 @@ impl<T: Transport> SpdzEngine<T> {
             let mut w_item = Secret(kind.mul(*r_own, local_d[item_idx]));
             for i in 0..peer_count {
                 for (l, &g) in g_weights.iter().enumerate() {
-                    let sum_sy =
-                        Secret(kind.add(sender_shares[i][item_idx][l], receiver_shares[i][item_idx][l]));
+                    let sum_sy = Secret(kind.add(
+                        sender_shares[i][item_idx][l],
+                        receiver_shares[i][item_idx][l],
+                    ));
                     *w_item = kind.add(*w_item, kind.mul(g, *sum_sy));
                 }
             }
@@ -1918,11 +1942,7 @@ impl<T: Transport> Core for SpdzEngine<T> {
         self.input(own, true)
     }
 
-    fn fshare_many(
-        &mut self,
-        own_words: &[Value],
-        d: Domain,
-    ) -> Result<Vec<FieldWord>, Error> {
+    fn fshare_many(&mut self, own_words: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> {
         if self.is_failed() {
             return Err(Error::MultiplicationCheck);
         }
@@ -1946,12 +1966,12 @@ impl<T: Transport> Core for SpdzEngine<T> {
         let mut masked_flat: SecretVec<u64> = SecretVec::with_capacity(count * wlen);
         let mut rand_iter = randoms.iter();
         for &val in own_words {
-                if !d.canonical(val) {
-                    return self.fail(Error::InvalidConfiguration);
-                }
-                let r = rand_iter.next().unwrap();
-                let diff = Secret(d.sub(val, r.0[0]));
-                masked_flat.extend_from_slice(&diff[..wlen]);
+            if !d.canonical(val) {
+                return self.fail(Error::InvalidConfiguration);
+            }
+            let r = rand_iter.next().unwrap();
+            let diff = Secret(d.sub(val, r.0[0]));
+            masked_flat.extend_from_slice(&diff[..wlen]);
         }
         let received = self.broadcast(&masked_flat)?;
         let mut public_sums = vec![ZERO; count];
@@ -2405,12 +2425,9 @@ impl<T: Transport> Core for SpdzEngine<T> {
                 .map(|lanes| {
                     (0..width)
                         .map(|bit| {
-                            self.public_bit(lanes.iter().enumerate().fold(
-                                0,
-                                |word, (lane, v)| {
-                                    word | (((v[bit / 64] >> (bit % 64)) & 1) << lane)
-                                },
-                            ))
+                            self.public_bit(lanes.iter().enumerate().fold(0, |word, (lane, v)| {
+                                word | (((v[bit / 64] >> (bit % 64)) & 1) << lane)
+                            }))
                         })
                         .collect()
                 })
@@ -3408,7 +3425,11 @@ pub(crate) mod tests {
             ) -> Result<Vec<FieldShare>, Error> {
                 self.inner.take_field_randoms(f, c)
             }
-            fn take_dabits(&mut self, f: ThresholdField, c: usize) -> Result<Vec<DaBitWord>, Error> {
+            fn take_dabits(
+                &mut self,
+                f: ThresholdField,
+                c: usize,
+            ) -> Result<Vec<DaBitWord>, Error> {
                 self.inner.take_dabits(f, c)
             }
         }
@@ -3428,7 +3449,12 @@ pub(crate) mod tests {
             // Fork fresh OT streams from the SAME underlying `MacKeyShare`s `(Δ, α_f)`.
             let trial_parties: Vec<_> = base_keys
                 .iter()
-                .map(|k| (k.fork_stream(b"ABORT_TRIAL", trial), Source::Fixture(supply.clone())))
+                .map(|k| {
+                    (
+                        k.fork_stream(b"ABORT_TRIAL", trial),
+                        Source::Fixture(supply.clone()),
+                    )
+                })
                 .collect();
             let spy_msgs: [Arc<Mutex<Vec<Vec<u64>>>>; 3] =
                 core::array::from_fn(|_| Arc::new(Mutex::new(Vec::new())));
@@ -3456,7 +3482,11 @@ pub(crate) mod tests {
                 assert!(e.failed && e.keys.is_wiped());
                 res
             });
-            assert!(outcomes.iter().all(|o| *o == Err(Error::MultiplicationCheck)));
+            assert!(
+                outcomes
+                    .iter()
+                    .all(|o| *o == Err(Error::MultiplicationCheck))
+            );
 
             // Reconstruct the opened `blind_sigma` XOR sum across all 3 quorum members:
             // the final broadcast payload of each party has `[w_inst0 (2 words), w_inst1 (2 words), nonce (4 words)]`.
@@ -3470,11 +3500,17 @@ pub(crate) mod tests {
                 sum_inst0 ^= (msg[0] as u128) | ((msg[1] as u128) << 64);
                 sum_inst1 ^= (msg[2] as u128) | ((msg[3] as u128) << 64);
             }
-            assert_ne!(sum_inst0, 0, "blinded residual must be nonzero on wire fault");
+            assert_ne!(
+                sum_inst0, 0,
+                "blinded residual must be nonzero on wire fault"
+            );
             assert_ne!(sum_inst1, 0, "second blinded instance must also be nonzero");
             assert_ne!(sum_inst0, true_delta);
             assert_ne!(sum_inst1, true_delta);
-            assert!(!observed_w0.contains(&sum_inst0), "blinded residuals must be fresh uniform per session");
+            assert!(
+                !observed_w0.contains(&sum_inst0),
+                "blinded residuals must be fresh uniform per session"
+            );
             observed_w0.push(sum_inst0);
         }
 

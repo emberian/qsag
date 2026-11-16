@@ -216,7 +216,7 @@ theorem elf_mir_tower128_pclmul (s : Qsag.X86State)
   refine ⟨sl, y, hf, hd, hy, habs, hhalt, ?_⟩
   have hout := Qsag.current_rlib_gf2_128_mul_acc_pclmul_tower_dot s 0 0 (by decide) hp hh hn
   rw [habs]
-  simpa only [Qsag.gf128PclmulTowerSum_one] using hout
+  simpa only [Nat.zero_add, Qsag.gf128PclmulTowerSum_one] using hout
 
 end qsag_verified.proofs
 end

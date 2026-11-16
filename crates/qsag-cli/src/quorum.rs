@@ -337,13 +337,12 @@ fn reject_hem_unsupported_keygen_args(args: &Args) -> Result<(), CliError> {
             )));
         }
     }
-    if args.flag("policy-allow-single-disk-anchor")
-        || args.flag("policy-vmgenid")
-        || args.flag("policy-vmgenid-strict")
-    {
-        return Err(CliError::usage(format!(
-            "--policy-allow-single-disk-anchor is only supported with --scheme {SCHEME_NAME}"
-        )));
+    for flag in crate::policy_ledger::GATE_FLAG_OPTIONS {
+        if args.flag(flag) {
+            return Err(CliError::usage(format!(
+                "--{flag} is only supported with --scheme {SCHEME_NAME}"
+            )));
+        }
     }
     Ok(())
 }

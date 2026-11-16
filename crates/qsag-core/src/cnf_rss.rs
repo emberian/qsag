@@ -4214,11 +4214,6 @@ impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
         Ok((nodes, CutBoundaryMacToken::mint_verified()))
     }
 }
-}
-
-#[doc(hidden)]
-#[allow(deprecated)]
-pub use legacy_coordinator_prototype::*;
 
 // ============================================================================
 // 6. Comprehensive Unit, Active-Fault-Abort & `3-of-5` Release Benchmark Tests
@@ -4822,3 +4817,8 @@ mod tests {
         );
     }
 }
+}
+
+#[doc(hidden)]
+#[allow(deprecated)]
+pub use legacy_coordinator_prototype::*;

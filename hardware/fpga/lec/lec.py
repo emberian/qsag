@@ -74,7 +74,7 @@ def solve(name, text, secs, prefer_bitwuzla=True):
         ans = "timeout"
     return ans, time.time() - t0
 
-def record(name, statement, expect, text, secs=None, required=True, prefer_bitwuzla=True):
+def record(name, statement, expect, text, secs=None, required=True, prefer_bitwuzla=False):
     ans, dt = solve(name, text, secs or Z3_SECS, prefer_bitwuzla=prefer_bitwuzla)
     ok = ans == expect
     tag = "PASS" if ok else ("FAIL" if required else "open")
@@ -214,7 +214,7 @@ def check_reduce(tag, files, expect, reg_out=1, required=True):
     body = ys + unroll(steps)
     stmt = reduce_spec(acc("x", "s0"), acc("r", f"s{steps}"))
     return record(tag, f"qsag_gl64_reduce REG_OUT={reg_out}: for all 2^136 inputs, r ({steps} clocks later) < p and V(x) = r + k*p",
-                  expect, body + f"(assert (not {stmt}))\n(check-sat)\n", required=required)
+                  expect, body + f"(assert (not {stmt}))\n(check-sat)\n", required=required, prefer_bitwuzla=True)
 
 def tile_sum(aw, bw, a, b, fn):
     na, nb, tw = -(-64 // aw), 4, aw + bw
@@ -298,12 +298,14 @@ def check_glmul(tag, files, aw, bw, reg_out=1, expect_product="unsat", expect_re
     ys = abstract_tiles(ys, n, tw)
     ok = record(tag + "_product", f"qsag_gl64_dsp_mul AW={aw} BW={bw}: for all 2^128 inputs, prod (3 clocks later) "
                 f"= weighted sum X of the {n} tile products",
-                expect_product, ys + unroll(3) + hyps + f"(assert (not (= {acc('prod', 's3')} {spec})))\n(check-sat)\n")
+                expect_product, ys + unroll(3) + hyps + f"(assert (not (= {acc('prod', 's3')} {spec})))\n(check-sat)\n",
+                prefer_bitwuzla=True)
     rsteps = 2 if reg_out else 1
     stmt = reduce_spec(zext(acc("prod", "s0"), 128, 136), acc("r", f"s{rsteps}"))
     ok &= record(tag + "_reduce", f"qsag_gl64_dsp_mul AW={aw} BW={bw} REG_OUT={reg_out}: for every prod X, r ({rsteps} clocks later) "
                  f"< p and V(X) = r + k*p",
-                 expect_reduce, ys + unroll(rsteps) + f"(assert (not {stmt}))\n(check-sat)\n")
+                 expect_reduce, ys + unroll(rsteps) + f"(assert (not {stmt}))\n(check-sat)\n",
+                 prefer_bitwuzla=True)
     return ok
 
 def check_tiling_identity(aw, bw):
@@ -474,7 +476,8 @@ def check_glue(aw, bw):
         cut = reduce_spec(zext(acc("prod", "s3"), 128, 136), acc("r", f"s{tot}"))
         ok = record(tag + "_temporal_join",
                     f"full {tot}-cycle pipeline (REG_OUT={reg_out}): reducer consumes prod at cycle 3 and emits canonical residue at cycle {tot}",
-                    "unsat", ys + unroll(tot) + f"(assert (not {cut}))\n(check-sat)\n")
+                    "unsat", ys + unroll(tot) + f"(assert (not {cut}))\n(check-sat)\n",
+                    prefer_bitwuzla=True)
         if not ok:
             raise SystemExit("failed temporal join")
         combined = reduce_spec(zext(spec, 128, 136), acc("r", f"s{tot}"))
@@ -520,7 +523,7 @@ def check_gf_reduce(tag, files, expect, required=True):
         e = f"(bvxor {e} (ite (= ((_ extract {i} {i}) {c}) #b1) {bv(xp[i], 128)} {bv(0, 128)}))"
     return record(tag, "qsag_gf128_reduce: for all 2^255 inputs, r = c mod (x^128+x^7+x^2+x+1)",
                   expect, ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
-                  f"(assert (not (= {acc('r', 's0')} {e})))\n(check-sat)\n", required=required)
+                  f"(assert (not (= {acc('r', 's0')} {e})))\n(check-sat)\n", required=required, prefer_bitwuzla=True)
 
 def gf_mul_spec(a, b):
     lets, prev = [], bv(0, 128)
@@ -626,12 +629,9 @@ def group_tower():
         repo_cand = "/home/build/qsag-ni-fpga/work/astra/repo"
     rows, inv, cols, ic, _ = G.matrices(Path(repo_cand))
 
-    def parity(x, mask):
-        bits = [f"((_ extract {i} {i}) {x})" for i in range(128) if (mask >> i) & 1]
-        v = "#b0"
-        for b in bits:
-            v = f"(bvxor {v} {b})"
-        return v
+    def parity_bool(x, mask):
+        bits = [f"(= ((_ extract {i} {i}) {x}) #b1)" for i in range(128) if (mask >> i) & 1]
+        return "false" if not bits else (bits[0] if len(bits) == 1 else "(xor " + " ".join(bits) + ")")
 
     # 1. Universal Z3 proof over all 2^128 inputs for both INVERSE=0 and INVERSE=1 RTL maps.
     for direction, rs in enumerate([rows, inv]):
@@ -639,36 +639,35 @@ def group_tower():
                         f"-chparam INVERSE {direction}", use_contracts=False)
         x, y = acc("x", "s0"), acc("y", "s0")
         base = ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
-        assertions = [f"(= ((_ extract {i} {i}) {y}) {parity(x, m)})" for i, m in enumerate(rs)]
+        assertions = [f"(= (= ((_ extract {i} {i}) {y}) #b1) {parity_bool(x, m)})" for i, m in enumerate(rs)]
         if not record(f"tower_map_dir{direction}",
                       f"qsag_gf128_tower_map INVERSE={direction}: for all 2^128 inputs, RTL == exact Wiedemann matrix",
                       "unsat", base + "(assert (not (and " + " ".join(assertions) + ")))\n(check-sat)\n"):
             raise SystemExit("failed tower_map Z3 proof")
 
-    # 2. Universal Z3 round-trip bijection directly on composed RTL (`inv(fwd(x)) == x` and `fwd(inv(x)) == x`).
-    rt_sv = os.path.join(OUT, "tower_roundtrip.sv")
-    open(rt_sv, "w").write("""
-module qsag_tower_rt (input logic [127:0] x, output logic [127:0] y01, output logic [127:0] y10);
-    logic [127:0] m0, m1;
-    qsag_gf128_tower_map #(.INVERSE(0)) u_f0 (.x(x),  .y(m0));
-    qsag_gf128_tower_map #(.INVERSE(1)) u_i0 (.x(m0), .y(y01));
-    qsag_gf128_tower_map #(.INVERSE(1)) u_i1 (.x(x),  .y(m1));
-    qsag_gf128_tower_map #(.INVERSE(0)) u_f1 (.x(m1), .y(y10));
-endmodule
-""")
-    ys_rt = yosys_smt2("tower_roundtrip", "qsag_tower_rt", [TMAP, rt_sv], use_contracts=False)
-    x = acc("x", "s0")
-    if not record("tower_map_bijection",
-                  "composed RTL: inv(fwd(x)) == x and fwd(inv(x)) == x for all 2^128 inputs",
-                  "unsat", ys_rt + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
-                  f"(assert (not (and (= {acc('y01','s0')} {x}) (= {acc('y10','s0')} {x}))))\n(check-sat)\n"):
-        raise SystemExit("failed tower roundtrip Z3 proof")
+    # 2. Universal Z3 round-trip bijection over GF(2)^128 (`inv(fwd(x)) == x` and `fwd(inv(x)) == x`):
+    #    combines proved RTL map specs (`tower_map_dir0`, `tower_map_dir1`) with flat XOR cancellation in Z3.
+    for direction, (m_outer, m_inner, label) in enumerate([(inv, rows, "inv(fwd(x))"), (rows, inv, "fwd(inv(x))")]):
+        decl = "(declare-const x (_ BitVec 128))\n"
+        eqs = []
+        for k in range(128):
+            flat_terms = [f"(= ((_ extract {j} {j}) x) #b1)"
+                          for i in range(128) if (m_outer[k] >> i) & 1
+                          for j in range(128) if (m_inner[i] >> j) & 1]
+            lhs = "(xor " + " ".join(flat_terms) + ")"
+            rhs = f"(= ((_ extract {k} {k}) x) #b1)"
+            eqs.append(f"(= {lhs} {rhs})")
+        if not record(f"tower_map_bijection_dir{direction}",
+                      f"universal Z3 GF(2)^128 bijection: {label} == x for all 2^128 inputs",
+                      "unsat", decl + "(assert (not (and " + " ".join(eqs) + ")))\n(check-sat)\n"):
+            raise SystemExit("failed tower roundtrip Z3 proof")
 
     # 3. Mutant tooth on qsag_gf128_tower_map: flip 1 mask bit in INVERSE=0 row 0 -> must return sat!
     m_tow = mutate(TMAP, "128'hd353a5afc268871ad268eb72003a04ad",
                    "128'hd353a5afc268871ad268eb72003a04ac", "mut_tower_map.sv")
     ys_mt = yosys_smt2("mut_tower_map", "qsag_gf128_tower_map", [m_tow], "-chparam INVERSE 0", use_contracts=False)
-    assertions0 = [f"(= ((_ extract {i} {i}) {acc('y','s0')}) {parity(acc('x','s0'), m)})" for i, m in enumerate(rows)]
+    assertions0 = [f"(= (= ((_ extract {i} {i}) {acc('y','s0')}) #b1) {parity_bool(acc('x','s0'), m)})"
+                   for i, m in enumerate(rows)]
     if not record("mut_tower_map_bitflip", "mutant tooth: 1-bit mask flip in qsag_gf128_tower_map is refuted",
                   "sat", ys_mt + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
                   "(assert (not (and " + " ".join(assertions0) + ")))\n(check-sat)\n"):

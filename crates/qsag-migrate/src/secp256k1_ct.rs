@@ -49,8 +49,10 @@ impl PartialEq for Fp256 {
     fn eq(&self, other: &Self) -> bool {
         let a = self.normalize();
         let b = other.normalize();
-        ct_eq_u64((a.0[0] ^ b.0[0]) | (a.0[1] ^ b.0[1])
-            | (a.0[2] ^ b.0[2]) | (a.0[3] ^ b.0[3]), 0)
+        ct_eq_u64(
+            (a.0[0] ^ b.0[0]) | (a.0[1] ^ b.0[1]) | (a.0[2] ^ b.0[2]) | (a.0[3] ^ b.0[3]),
+            0,
+        )
     }
 }
 impl Eq for Fp256 {}

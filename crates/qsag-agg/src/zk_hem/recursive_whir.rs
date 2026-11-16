@@ -2138,11 +2138,6 @@ impl PublicRecursionCommitment {
     }
 
     #[inline]
-    pub(super) fn coeffs(&self) -> &[F] {
-        &self.coeffs
-    }
-
-    #[inline]
     pub(super) fn levels(&self) -> &[Vec<Digest>] {
         &self.oracle.levels
     }
@@ -3729,7 +3724,7 @@ pub(crate) fn verify_folded_level(
         let mut shifted = Vec::with_capacity(count);
         if stage == 0 {
             let want_vals = uniq_q.len() * arity;
-            for k in 0..num_polys {
+            for (k, root_k) in roots0.iter().enumerate() {
                 let fibers = &proof.stage0_fibers[k];
                 if fibers.len() != want_vals {
                     return false;
@@ -3747,7 +3742,7 @@ pub(crate) fn verify_folded_level(
                 if !verify_steiner_multiproof(
                     0,
                     path_depth,
-                    &roots0[k],
+                    root_k,
                     &uniq_q,
                     &leaf_digests,
                     &proof.stage0_siblings[k],

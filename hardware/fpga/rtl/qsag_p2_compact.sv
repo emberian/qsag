@@ -1,11 +1,10 @@
 // Compact rotating-ring Poseidon2 width-12 core for ECP5_COMPACT:
-//   - Instantiates ONE pipelined S-box (`qsag_p2_sbox7`: 64 MULT18X18D on ECP5) fed directly from
-//     `x[63:0]` with zero 12:1 read/write muxes;
+//   - Instantiates ONE pipelined Goldilocks multiplier (`qsag_gl64_dsp_mul`: 16 MULT18X18D on ECP5)
+//     fed directly from `x[63:0]` and `x_base[63:0]` across 4 S-box stages (`x^2, x^3, x^6, x^7`);
 //   - Rotates the 768-bit state register `x` (`x <= {..., x[767:64]}`) through ONE single-lane
-//     pipelined carry-save linear reducer and ONE single-column M4 unit, eliminating ~18,000 LUT4
-//     of wide dynamic multiplexers while keeping reg-to-reg logic depth <= 18 levels.
-//   - Latency: 1,314 clocks/permutation (2.6x faster than single-multiplier serial, 12x fewer DSPs
-//     than the 12-lane ring).
+//     pipelined carry-save linear reducer (with pre-registered round constants) and ONE single-column
+//     M4 unit, keeping register-to-register logic depth <= 18 LUT4/CCU2C levels on ECP5-85F;
+//   - Latency: 1,878 clocks/permutation (only 16 MULT18X18D total across the entire Poseidon2 core).
 module qsag_p2_compact #(
     parameter int TAGW = 7,
     parameter int AW   = 16,
@@ -24,7 +23,7 @@ module qsag_p2_compact #(
     output logic [TAGW-1:0] out_tag,
     output logic            busy
 );
-    localparam int            SB_LAT   = qsag_ni_pkg::P2_SBOX_LAT; // 13 clocks
+    localparam int            MUL_LAT  = qsag_ni_pkg::GL_MUL_LAT; // 5 clocks
     localparam logic [63:0]   GL_P     = qsag_ni_pkg::GL_P;
     localparam int            LW       = 76;
     localparam logic [LW-1:0] MI0_BIAS = LW'(128'(2) * 128'(GL_P) - (128'd1 << 64) + 128'd1) << 6;
@@ -33,33 +32,32 @@ module qsag_p2_compact #(
     typedef enum logic [1:0] {IDLE, LIN_PREP, LIN_STREAM, SBOX} state_t;
     state_t st;
 
-    logic [767:0] x, rc;
-    logic [267:0] ff, m4_col0, m4_col1, m4_col2;
-    logic [4:0]   pass, sb_cnt;
-    logic [3:0]   p_cnt, lstep;
-    logic [1:0]   lc;
-    logic [67:0]  sum12_q, sum12_next;
+    logic [767:0]  x, x_base, rc;
+    logic [267:0]  ff, m4_col0, m4_col1, m4_col2;
+    logic [4:0]    pass, sb_cnt;
+    logic [3:0]    p_cnt, lstep;
+    logic [1:0]    lc, sb_stage;
+    logic [67:0]   sum12_q, sum12_next;
     logic [LW-1:0] lazy_d, lazy_q;
-    logic [63:0]  red_y_q;
-    logic         mi;
+    logic [63:0]   rc_lane_q, red_y_q, mul_r;
+    logic          mi;
 
     assign busy     = (st != IDLE) || out_valid;
     assign in_ready = !rst && (st == IDLE);
     assign mi       = (pass >= 5'd5) && (pass <= 5'd26);
 
     // Single-lane feed-forward adder: during pass 0 LIN_PREP p_cnt=0..3, x[0], x[4], x[8] present
-    // lanes (i, i+4, i+8) as `x` rotates!
+    // lanes (i, i+4, i+8) as `x` rotates.
     logic [66:0] ff_one;
-    qsag_sum_csa #(.W(67), .N(3), .CHUNK(34)) u_ff1 (
+    qsag_sum_csa #(.W(67), .N(3), .CHUNK(22)) u_ff1 (
         .x({67'(x[64*8 +: 64]) << 2, 67'(x[64*4 +: 64]) << 1, 67'(x[0 +: 64])}),
         .y(ff_one));
 
     // Sequential 12-lane accumulator during LIN_PREP (p_cnt = 0..11).
-    qsag_add_split #(.W(68), .CHUNK(34)) u_sum_acc (
+    qsag_add_split #(.W(68), .CHUNK(22)) u_sum_acc (
         .a(sum12_q), .b(68'(x[63:0])), .y(sum12_next));
 
-    // Hardwired column M4 on x[0], x[3], x[6], x[9] (during p_cnt = 0, 1, 2, rotating `x` presents
-    // columns 0, 1, 2 with zero column muxes).
+    // Hardwired column M4 on x[0], x[3], x[6], x[9].
     wire [66:0] mb [4];
     assign mb[0] = 67'(x[64*0 +: 64]);
     assign mb[1] = 67'(x[64*3 +: 64]);
@@ -75,17 +73,18 @@ module qsag_p2_compact #(
             mb[(k + 1) % 4] << 1,
             mb[k] << 1
         };
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(34)) u_m4 (
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(22)) u_m4 (
             .x(m4_terms), .y(m4_d[67*k +: 67]));
     end
 
-    // Round constant lookup for current streamed lane.
+    // Pre-registered round constant lookup for next streamed lane (0 extra clock latency).
     qsag_p2_rc u_rc (.pass(pass), .rc(rc));
-    wire [3:0]  safe_lstep = (lstep < 4'd12) ? lstep : 4'd0;
-    wire [63:0] rc_lane    = rc[64*safe_lstep +: 64];
-    wire [66:0] add_i      = (pass == 5'd30)
-                           ? ((out_jive && lstep < 4'd4) ? ff[66:0] : 67'd0)
-                           : 67'(rc_lane);
+    wire [3:0]  next_rc_idx = (lstep < 4'd11) ? (lstep + 4'd1) : 4'd0;
+    wire [63:0] rc_next     = rc[64*next_rc_idx +: 64];
+    wire [3:0]  safe_lstep  = (lstep < 4'd12) ? lstep : 4'd0;
+    wire [66:0] add_i       = (pass == 5'd30)
+                            ? ((out_jive && lstep < 4'd4) ? ff[66:0] : 67'd0)
+                            : 67'(rc_lane_q);
 
     // Single-lane linear stream (Stage 1 CSA+add -> Stage 2 Goldilocks fold).
     wire [66:0] m4_cur = (lc == 2'd0) ? m4_col0[66:0]
@@ -122,7 +121,7 @@ module qsag_p2_compact #(
         end
     end
 
-    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(38)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
+    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(22)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
 
     logic [63:0] lo;
     logic [11:0] t_hi;
@@ -132,45 +131,81 @@ module qsag_p2_compact #(
     /* verilator lint_on UNUSEDSIGNAL */
     wire [4*66-1:0] tr0 = {66'd1,            ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
     wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r0 (.x(tr0), .y(r0));
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r1 (.x(tr1), .y(r1));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_lin_r0 (.x(tr0), .y(r0));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_lin_r1 (.x(tr1), .y(r1));
     wire [63:0] red_y_d = r1[65] ? r0[63:0] : r1[63:0];
 
-    // S-box hardwired directly to lane 0 (`x[63:0]`) with zero input mux!
-    logic [63:0] sb_y;
-    qsag_p2_sbox7 #(.AW(AW), .BW(BW)) u_sbox (.clk(clk), .x(x[63:0]), .y(sb_y));
+    // Single shared Goldilocks DSP multiplier across all 4 S-box stages (`x^2, x^3, x^6, x^7`).
+    wire [63:0] mul_a = x[63:0];
+    wire [63:0] mul_b = (sb_stage == 2'd0 || sb_stage == 2'd2) ? x[63:0] : x_base[63:0];
+    qsag_gl64_dsp_mul #(.AW(AW), .BW(BW), .REG_OUT(1)) u_mul (
+        .clk(clk), .a(mul_a), .b(mul_b), .r(mul_r));
+
+    // Datapath shift registers without reset gating so TRELLIS_FF uses native slice CEs.
+    always_ff @(posedge clk) begin
+        lazy_q  <= lazy_d;
+        red_y_q <= red_y_d;
+        case (st)
+            IDLE: if (!rst && in_valid) begin
+                x        <= in_state;
+                out_tag  <= in_tag;
+                out_jive <= in_jive;
+            end
+            LIN_PREP: begin
+                x       <= {x[63:0], x[767:64]};
+                sum12_q <= (p_cnt == 4'd0) ? 68'(x[63:0]) : sum12_next;
+                if (pass == 5'd0 && p_cnt < 4'd4) ff <= {ff_one, ff[267:67]};
+                if (p_cnt < 4'd3) begin
+                    m4_col0 <= m4_col1;
+                    m4_col1 <= m4_col2;
+                    m4_col2 <= m4_d;
+                end
+                if (p_cnt == 4'd11) rc_lane_q <= rc[0 +: 64];
+            end
+            LIN_STREAM: begin
+                rc_lane_q <= rc_next;
+                if (pass == 5'd30 && lstep < 4'd4) ff <= {67'd0, ff[267:67]};
+                if (lstep < 4'd2)        x <= {x[63:0], x[767:64]};
+                else if (lstep < 4'd12)  x <= {x[63:0], x[767:704], red_y_q, x[639:64]};
+                else if (lstep == 4'd12) x[703:640] <= red_y_q;
+                else                     x[767:704] <= red_y_q;
+
+                if (lstep < 4'd12 && lc == 2'd2) begin
+                    m4_col0 <= {67'd0, m4_col0[267:67]};
+                    m4_col1 <= {67'd0, m4_col1[267:67]};
+                    m4_col2 <= {67'd0, m4_col2[267:67]};
+                end
+                if (lstep == 4'd13) begin
+                    if (pass == 5'd30) out_state <= {red_y_q, x[703:0]};
+                    else               x_base    <= {red_y_q, x[703:0]};
+                end
+            end
+            SBOX: begin
+                if (mi) begin
+                    if (sb_cnt == 5'(MUL_LAT)) x[63:0] <= mul_r;
+                end else begin
+                    if (sb_cnt < 5'(MUL_LAT)) x <= {x[63:0], x[767:64]};
+                    else                      x <= {mul_r, x[767:64]};
+                    if (sb_cnt < 5'd12)       x_base <= {x_base[63:0], x_base[767:64]};
+                end
+            end
+            default: ;
+        endcase
+    end
 
     always_ff @(posedge clk) begin
         out_valid <= 1'b0;
-        lazy_q    <= lazy_d;
-        red_y_q   <= red_y_d;
-
         if (rst) begin
             st        <= IDLE;
             out_valid <= 1'b0;
         end else begin
             case (st)
-                IDLE: begin
-                    if (in_valid) begin
-                        x        <= in_state;
-                        out_tag  <= in_tag;
-                        out_jive <= in_jive;
-                        pass     <= 5'd0;
-                        p_cnt    <= 4'd0;
-                        st       <= LIN_PREP;
-                    end
+                IDLE: if (in_valid) begin
+                    pass  <= 5'd0;
+                    p_cnt <= 4'd0;
+                    st    <= LIN_PREP;
                 end
                 LIN_PREP: begin
-                    x       <= {x[63:0], x[767:64]};
-                    sum12_q <= (p_cnt == 4'd0) ? 68'(x[63:0]) : sum12_next;
-                    if (pass == 5'd0 && p_cnt < 4'd4) begin
-                        ff <= {ff_one, ff[267:67]};
-                    end
-                    if (p_cnt < 4'd3) begin
-                        m4_col0 <= m4_col1;
-                        m4_col1 <= m4_col2;
-                        m4_col2 <= m4_d;
-                    end
                     if (p_cnt == 4'd11) begin
                         lstep <= 4'd0;
                         lc    <= 2'd0;
@@ -180,39 +215,16 @@ module qsag_p2_compact #(
                     end
                 end
                 LIN_STREAM: begin
-                    if (pass == 5'd30 && lstep < 4'd4) begin
-                        ff <= {67'd0, ff[267:67]};
-                    end
-                    if (lstep < 4'd2) begin
-                        x <= {x[63:0], x[767:64]};
-                    end else if (lstep < 4'd12) begin
-                        x <= {x[63:0], x[767:704], red_y_q, x[639:64]};
-                    end else if (lstep == 4'd12) begin
-                        x[703:640] <= red_y_q;
-                    end else begin
-                        x[767:704] <= red_y_q;
-                    end
-
-                    if (lstep < 4'd12) begin
-                        if (lc == 2'd2) begin
-                            lc      <= 2'd0;
-                            m4_col0 <= {67'd0, m4_col0[267:67]};
-                            m4_col1 <= {67'd0, m4_col1[267:67]};
-                            m4_col2 <= {67'd0, m4_col2[267:67]};
-                        end else begin
-                            lc <= lc + 2'd1;
-                        end
-                    end
-
+                    if (lstep < 4'd12) lc <= (lc == 2'd2) ? 2'd0 : (lc + 2'd1);
                     if (lstep == 4'd13) begin
                         if (pass == 5'd30) begin
-                            out_state <= {red_y_q, x[703:0]};
                             out_valid <= 1'b1;
                             st        <= IDLE;
                         end else begin
-                            pass   <= pass + 5'd1;
-                            sb_cnt <= 5'd0;
-                            st     <= SBOX;
+                            pass     <= pass + 5'd1;
+                            sb_stage <= 2'd0;
+                            sb_cnt   <= 5'd0;
+                            st       <= SBOX;
                         end
                     end else begin
                         lstep <= lstep + 4'd1;
@@ -220,22 +232,26 @@ module qsag_p2_compact #(
                 end
                 SBOX: begin
                     if (mi) begin
-                        if (sb_cnt == 5'(SB_LAT)) begin
-                            x[63:0] <= sb_y;
-                            p_cnt   <= 4'd0;
-                            st      <= LIN_PREP;
+                        if (sb_cnt == 5'(MUL_LAT)) begin
+                            sb_cnt <= 5'd0;
+                            if (sb_stage == 2'd3) begin
+                                p_cnt <= 4'd0;
+                                st    <= LIN_PREP;
+                            end else begin
+                                sb_stage <= sb_stage + 2'd1;
+                            end
                         end else begin
                             sb_cnt <= sb_cnt + 5'd1;
                         end
                     end else begin
-                        if (sb_cnt < 5'd12) begin
-                            x <= {x[63:0], x[767:64]};
-                        end else if (sb_cnt >= 5'(SB_LAT)) begin
-                            x <= {sb_y, x[767:64]};
-                        end
-                        if (sb_cnt == 5'(SB_LAT + 11)) begin
-                            p_cnt <= 4'd0;
-                            st    <= LIN_PREP;
+                        if (sb_cnt == 5'(MUL_LAT + 11)) begin
+                            sb_cnt <= 5'd0;
+                            if (sb_stage == 2'd3) begin
+                                p_cnt <= 4'd0;
+                                st    <= LIN_PREP;
+                            end else begin
+                                sb_stage <= sb_stage + 2'd1;
+                            end
                         end else begin
                             sb_cnt <= sb_cnt + 5'd1;
                         end
