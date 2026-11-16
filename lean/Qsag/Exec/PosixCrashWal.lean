@@ -10118,7 +10118,7 @@ theorem openBurnBytes_journalBytes (key identity keyId genesis : Bytes)
   have hGen : ((burnJournalBytes key identity keyId genesis records).drop 40).take 32 =
       genesis := by
     have hSplit : burnJournalBytes key identity keyId genesis records =
-        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x33] ++ keyId) ++
+        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId) ++
           (genesis ++ (burnGenesisTag key identity keyId genesis ++
             records.flatMap (fun r => r.1 ++ r.2))) := by
       simp [burnJournalBytes, burnHeader, burnHeaderBody, List.append_assoc]
@@ -10149,7 +10149,7 @@ theorem openBurnBytes_copied_inode_refused (key identity identity' keyId genesis
   have hGen : ((burnJournalBytes key identity keyId genesis records).drop 40).take 32 =
       genesis := by
     have hSplit : burnJournalBytes key identity keyId genesis records =
-        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x33] ++ keyId) ++
+        ([0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId) ++
           (genesis ++ (burnGenesisTag key identity keyId genesis ++
             records.flatMap (fun r => r.1 ++ r.2))) := by
       simp [burnJournalBytes, burnHeader, burnHeaderBody, List.append_assoc]
