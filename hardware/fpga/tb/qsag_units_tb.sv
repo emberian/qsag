@@ -51,6 +51,7 @@ module qsag_units_tb (
     // GF(2^128)
     input  logic [127:0]  gf_a,
     input  logic [127:0]  gf_b,
+    output logic [127:0]  tower_r,
     output logic [127:0]  gf_r
 );
     qsag_gl64_dsp_mul #(.AW(26), .BW(17)) u_mul   (.clk(clk), .a(mul_a), .b(mul_b), .r(mul_r));
@@ -78,5 +79,6 @@ module qsag_units_tb (
         .clk(clk), .rst(rst), .start(kec_start), .nr12(kec_nr12), .state_i(kec_state_i),
         .busy(kec2_busy), .done(kec2_done), .state_o(kec2_state_o));
 
+    qsag_gf128_tower_mul u_tower (.clk(clk), .a(gf_a), .b(gf_b), .r(tower_r));
     qsag_gf128_clmul u_gf (.clk(clk), .a(gf_a), .b(gf_b), .r(gf_r));
 endmodule

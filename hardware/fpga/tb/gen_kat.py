@@ -34,4 +34,13 @@ for e in d["sponges"]:
     o.append('  {"%s", "%s", "%s", "%s"},' % (e["msg_hex"], e["sha3_256_hex"], e["shake256_64_hex"], e["cshake256_64_hex"]))
 o.append("};")
 o.append('static const char KAT_CSHAKE_CUSTOM[] = "QSAG.EXTERNAL.SPEC";')
+o.append("struct KatTower { uint64_t a[2], b[2], mul[2], inv[2]; };")
+o.append("static const KatTower KAT_TOWER[] = {")
+for e in d['tower128']:
+    vals=[]
+    for key in ['a_le_hex','b_le_hex','mul_le_hex','inv_a_le_hex']:
+        v=int.from_bytes(bytes.fromhex(e[key]),'little')
+        vals.append("{"+u(v & (2**64-1))+", "+u(v>>64)+"}")
+    o.append("  {"+", ".join(vals)+"},")
+o.append("};")
 open(sys.argv[2], "w").write("\n".join(o) + "\n")
