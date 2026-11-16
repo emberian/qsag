@@ -487,6 +487,101 @@ theorem credExec_present_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr 
   | false => simp only [credExec, hC, Bool.false_eq_true, ↓reduceIte]
   | true => simp only [credExec, hC, ↓reduceIte]
 
+omit [DecidableEq Attr] in
+theorem IdealCredState.issueAccepts_eq (st : IdealCredState Attr O) (attrs : List Attr) :
+    st.issueAccepts attrs =
+      (decide (0 < attrs.length) &&
+       decide (attrs.length ≤ pqCredentialProfile.maxAttrs) &&
+       decide (st.issuedThisEpoch < 2 ^ pqCredentialProfile.accumulatorDepth)) := by
+  rfl
+
+theorem IdealCredState.eligible_eq (st : IdealCredState Attr O)
+    (h cid : Nat) (stmt : CredentialStatement Attr) :
+    st.eligible h cid stmt =
+      st.records.any (fun r =>
+        decide (r.credId = cid) && decide (r.holder = h) && decide (r.epoch = st.epoch) &&
+          CredentialMatchesAttributes stmt r.attrs) := by
+  rfl
+
+theorem IdealCredState.presentAccepts_eq (st : IdealCredState Attr O)
+    (h cid : Nat) (stmt : CredentialStatement Attr) :
+    st.presentAccepts h cid stmt =
+      (decide (stmt.issuerPk = st.issuerPk) &&
+       decide (stmt.epoch = st.epoch) &&
+       decide (stmt.accumulatorRoot = st.accumulatorRoot) &&
+       decide (stmt.challengeNonce ∉ st.usedChallenges) &&
+       st.eligible h cid stmt) := by
+  rfl
+
+omit [DecidableEq Attr] in
+theorem IdealCredState.approvalCount_eq (st : IdealCredState Attr O) (t : ToprfTicket) :
+    st.approvalCount t =
+      (List.range pqCredentialProfile.toprfServers).countP
+        (fun i => decide ((i, t) ∈ st.toprfApprovals)) := by
+  rfl
+
+omit [DecidableEq Attr] in
+theorem IdealCredState.toprfAccepts_eq (st : IdealCredState Attr O)
+    (cfg : IdealCredConfig O) (t : ToprfTicket) :
+    st.toprfAccepts cfg t =
+      (decide (pqCredentialProfile.toprfOnlineServers ≤ st.approvalCount t) &&
+       decide (t.epoch = st.epoch) &&
+       decide (st.oprfCharges.countP (fun c => decide (c.keyId = t.keyId)) < cfg.oprfQuota) &&
+       st.oprfCharges.all (fun c => !decide (c.keyId = t.keyId) || decide (c.counter < t.counter)) &&
+       (st.oprfCharges.any (fun c => decide (c.keyId = t.keyId) &&
+           decide (t.counter ≤ c.counter + pqCredentialProfile.toprfCounterWindow)) ||
+         (!st.oprfCharges.any (fun c => decide (c.keyId = t.keyId)) &&
+           decide (t.counter < pqCredentialProfile.toprfCounterWindow))) &&
+       decide (t.counter < 18446744073709551615)) := by
+  rfl
+
+theorem credExec_issue_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (h : Nat) (attrs : List Attr) (newRoot : Digest256) :
+    credExec cfg st (.issue h attrs newRoot) =
+      if st.issueAccepts attrs then
+        some ({ st with
+                records := st.records ++
+                  [{ credId := st.records.length, holder := h, attrs := attrs, epoch := st.epoch,
+                     root := newRoot }]
+                accumulatorRoot := newRoot
+                issuedThisEpoch := st.issuedThisEpoch + 1 },
+              .issued st.records.length)
+      else none := by
+  rfl
+
+theorem credExec_advanceEpoch_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (newEpoch : Nat) (newRoot : Digest256) :
+    credExec cfg st (.advanceEpoch newEpoch newRoot) =
+      if decide (st.epoch < newEpoch) then
+        some ({ st with epoch := newEpoch, accumulatorRoot := newRoot, issuedThisEpoch := 0 },
+              .epochAdvanced newEpoch)
+      else none := by
+  rfl
+
+theorem credExec_approveToprf_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (i : Nat) (t : ToprfTicket) :
+    credExec cfg st (.approveToprf i t) =
+      if decide (i < pqCredentialProfile.toprfServers) && decide (t.epoch = st.epoch) then
+        some ({ st with toprfApprovals := (i, t) :: st.toprfApprovals }, .toprfApproved)
+      else none := by
+  rfl
+
+theorem credExec_evalToprf_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (t : ToprfTicket) (input : Bytes) :
+    credExec cfg st (.evalToprf t input) =
+      if st.toprfAccepts cfg t then
+        match st.oprfTable.find? (fun e => decide (e.1 = ⟨t.keyId, t.epoch, input⟩)) with
+        | some e =>
+          some ({ st with oprfCharges := t :: st.oprfCharges }, .toprfEvaluated e.2)
+        | none =>
+          some ({ st with
+                  oprfCharges := t :: st.oprfCharges
+                  oprfTable := (⟨t.keyId, t.epoch, input⟩, cfg.oprf ⟨t.keyId, t.epoch, input⟩) ::
+                    st.oprfTable },
+                .toprfEvaluated (cfg.oprf ⟨t.keyId, t.epoch, input⟩))
+      else none := by
+  rfl
+
 theorem credExec_present_true_inv {h cid : Nat} {stmt : CredentialStatement Attr}
     (hExec : credExec cfg st (.present h cid stmt) = some (st', .presentationVerdict true)) :
     st.presentAccepts h cid stmt = true ∧
