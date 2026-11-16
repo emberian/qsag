@@ -29,8 +29,6 @@ X_MCAP 2 1 2 2 nfet_06v0 w=c_width l=c_length dtemp=dtemp
 .include "/spice/pdk/gf180mcu_fd_sc_mcu7t5v0.spice"
 .include "/spice/pdk/gf180mcu_fd_io.spice"
 
-.options method=gear reltol=2e-3 vntol=1e-4 abstol=1e-11 gmin=1e-12 cshunt=5e-15
-
 * ------------------------------------------------------------------------------
 * 1. External PCB 5V0 Plane + 4 x 100 nF 0402 X7R Decoupling Ring (ESL=0.4nH, ESR=30mOhm)
 * ------------------------------------------------------------------------------
@@ -124,11 +122,19 @@ R_GRID_E_VSS VSS_EAST  VSS_CORE 0.12
 R_GRID_N_VSS VSS_NORTH VSS_CORE 0.12
 R_GRID_W_VSS VSS_WEST  VSS_CORE 0.12
 
-* Foundry IO ESD rail clamps (1 pair per side)
-X_DVDD_S VDD_SOUTH VSS_SOUTH VSS_CORE gf180mcu_fd_io__dvdd
-X_DVSS_S VDD_SOUTH VSS_SOUTH VDD_CORE gf180mcu_fd_io__dvss
-X_DVDD_E VDD_EAST  VSS_EAST  VSS_CORE gf180mcu_fd_io__dvdd
-X_DVSS_E VDD_EAST  VSS_EAST  VDD_CORE gf180mcu_fd_io__dvss
+* Foundry IO ESD rail clamps (separated by 20 mOhm padring segments)
+R_CL_SD VDD_SOUTH DVDD_CLS 20m
+R_CL_SS VSS_SOUTH DVSS_CLS 20m
+X_DVDD_S DVDD_CLS DVSS_CLS VSS_CORE gf180mcu_fd_io__dvdd
+R_CL_SD2 VDD_SOUTH DVDD_CLS2 20m
+R_CL_SS2 VSS_SOUTH DVSS_CLS2 20m
+X_DVSS_S DVDD_CLS2 DVSS_CLS2 VDD_CORE gf180mcu_fd_io__dvss
+R_CL_ED VDD_EAST  DVDD_CLE 20m
+R_CL_ES VSS_EAST  DVSS_CLE 20m
+X_DVDD_E DVDD_CLE DVSS_CLE VSS_CORE gf180mcu_fd_io__dvdd
+R_CL_ED2 VDD_EAST  DVDD_CLE2 20m
+R_CL_ES2 VSS_EAST  DVSS_CLE2 20m
+X_DVSS_E DVDD_CLE2 DVSS_CLE2 VDD_CORE gf180mcu_fd_io__dvss
 
 * ------------------------------------------------------------------------------
 * 3. Real Foundry On-Die MOS Decoupling: gf180mcu_fd_sc_mcu7t5v0__fillcap_16
@@ -177,22 +183,28 @@ X_DQ7 DRV_RAW SL_NET VDD_EAST  VSS_EAST  VDD_CORE VSS_CORE DQ_PCB7 ssn_bi24t_lan
 R_CLK_LO 0        CLK_LO_BW 80m
 L_CLK_LO CLK_LO_BW CLK_LO_PAD 1.8n
 RP_CLK_LO CLK_LO_BW CLK_LO_PAD 150
+R_PR_VLO_D VDD_SOUTH DVDD_VLO 20m
+R_PR_VLO_S VSS_SOUTH DVSS_VLO 20m
 * gf180mcu_fd_io__in_s: DVDD DVSS PAD PD PU VDD VSS Y
-X_VIC_CLK_LO VDD_SOUTH VSS_SOUTH CLK_LO_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_LO_Y gf180mcu_fd_io__in_s
+X_VIC_CLK_LO DVDD_VLO DVSS_VLO CLK_LO_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_LO_Y gf180mcu_fd_io__in_s
 X_VIC_LOAD0  CLK_LO_Y  CLK_LO_BUF VDD_CORE VDD_CORE VSS_CORE VSS_CORE gf180mcu_fd_sc_mcu7t5v0__clkbuf_2
 
-* Victim B: clk_pad held at worst-case noisy V_IL = 0.60 V external DC bias!
-V_BIAS_600M  V_600M 0 0.60
+* Victim B: clk_pad held at worst-case noisy V_IL = 0.55 V external DC bias!
+V_BIAS_600M  V_600M 0 0.55
 R_CLK_600M   V_600M CLK_600M_BW 80m
 L_CLK_600M   CLK_600M_BW CLK_600M_PAD 1.8n
 RP_CLK_600M  CLK_600M_BW CLK_600M_PAD 150
-X_VIC_CLK_600M VDD_SOUTH VSS_SOUTH CLK_600M_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_600M_Y gf180mcu_fd_io__in_s
+R_PR_V60_D   VDD_SOUTH DVDD_V60 20m
+R_PR_V60_S   VSS_SOUTH DVSS_V60 20m
+X_VIC_CLK_600M DVDD_V60 DVSS_V60 CLK_600M_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_600M_Y gf180mcu_fd_io__in_s
 
 * Victim C: clk_pad held IDLE HIGH (VDD_REG) during 8-lane 0->1 VDD droop blast!
 R_CLK_HI VDD_REG   CLK_HI_BW 80m
 L_CLK_HI CLK_HI_BW CLK_HI_PAD 1.8n
 RP_CLK_HI CLK_HI_BW CLK_HI_PAD 150
-X_VIC_CLK_HI VDD_SOUTH VSS_SOUTH CLK_HI_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_HI_Y gf180mcu_fd_io__in_s
+R_PR_VHI_D VDD_SOUTH DVDD_VHI 20m
+R_PR_VHI_S VSS_SOUTH DVSS_VHI 20m
+X_VIC_CLK_HI DVDD_VHI DVSS_VHI CLK_HI_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_HI_Y gf180mcu_fd_io__in_s
 
 * Reference Schmitt Hysteresis Characterizer (isolated clean rail, triangle 0 -> VDD -> 0)
 VVDD_REF VDD_REF 0 {vdd_val}

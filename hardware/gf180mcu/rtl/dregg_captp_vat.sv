@@ -56,6 +56,7 @@ module dregg_captp_vat (
     input  wire         check_is_zk,
     input  wire         commit_invocation,
     output wire         attenuate_legal,
+    output wire         attenuate_step_ok,
     output wire         invoke_legal,
     output wire         need_stateful_fram,
     output logic [31:0] vat_spend_used
@@ -138,7 +139,8 @@ module dregg_captp_vat (
 
     logic       att_ok_q;
     logic [7:0] att_seen_q;
-    assign attenuate_legal = vat_ready && att_ok_q && (att_seen_q == 8'hFF);
+    assign attenuate_legal   = vat_ready && att_ok_q && (att_seen_q == 8'hFF);
+    assign attenuate_step_ok = vat_ready && att_ok_q && child_word_ok;
 
     // Invocation legality check
     wire right_ok = (p_rights & req_right_bit) == req_right_bit;
