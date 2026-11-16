@@ -40,8 +40,29 @@ impl Drop for Workdir {
 }
 
 fn qsag(args: &[&str]) -> Output {
+    let mut args = args.to_vec();
+    let stateful = matches!(
+        (args.first(), args.get(1)),
+        (
+            Some(&"quorum"),
+            Some(&"keygen" | &"sign" | &"refresh" | &"reshare")
+        )
+    );
+    let has_anchor = args.iter().any(|a| {
+        matches!(
+            *a,
+            "--anchor-dir"
+                | "--anchor-tpm-nv"
+                | "--anchor-vmgenid"
+                | "--ephemeral-unanchored"
+                | "--help"
+        )
+    });
+    if stateful && !has_anchor {
+        args.push("--ephemeral-unanchored");
+    }
     Command::new(env!("CARGO_BIN_EXE_qsag"))
-        .args(args)
+        .args(&args)
         .output()
         .unwrap()
 }
@@ -139,6 +160,7 @@ fn concurrent_signs_on_one_vault_never_share_a_leaf() {
                     &dir.msg(&format!("message {i}")),
                     "--out",
                     &dir.path(&format!("sig-{i}")),
+                    "--ephemeral-unanchored",
                 ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -419,6 +441,7 @@ fn old_format_vault_without_a_lock_is_converted_by_concurrent_commands_one_at_a_
                     &dir.msg(&format!("old {i}")),
                     "--out",
                     &dir.path(&format!("sig-{i}")),
+                    "--ephemeral-unanchored",
                 ])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -551,4 +574,174 @@ fn failed_sign_that_spent_a_leaf_is_recorded_and_the_retry_uses_the_next_leaf() 
         0,
     );
     assert_eq!(high_water(&dir, "vault"), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn anchored_hem_quorum_sign_and_reshare_reject_snapshot_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("anchored-rollback");
+    let anchor = dir.0.join("anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let vault = dir.path("vault");
+    let pk = dir.path("pk");
+    run(
+        &[
+            "quorum",
+            "keygen",
+            "--scheme",
+            "hem-jorts-poseidon2",
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--leaves",
+            "4",
+            "--seed-file",
+            &dir.path("seed"),
+            "--vault-dir",
+            &vault,
+            "--public-out",
+            &pk,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+
+    // Omitting --anchor-dir on an anchored vault is refused with exit code 4.
+    run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault,
+            "--message",
+            &dir.msg("no-anchor"),
+            "--out",
+            &dir.path("sig-no-anchor"),
+        ],
+        4,
+    );
+
+    let snap_before_sign = vault_files(&dir, "vault");
+    run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault,
+            "--message",
+            &dir.msg("anchored-0"),
+            "--out",
+            &dir.path("sig-0"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    run(
+        &[
+            "quorum",
+            "verify",
+            "--public",
+            &pk,
+            "--message",
+            &dir.msg("anchored-0"),
+            "--sig",
+            &dir.path("sig-0"),
+        ],
+        0,
+    );
+
+    // Restore vault files to pre-sign snapshot in place; external anchor must refuse rollback!
+    let snap_after_sign = vault_files(&dir, "vault");
+    for (name, bytes) in &snap_before_sign {
+        std::fs::write(dir.0.join("vault").join(name), bytes).unwrap();
+    }
+    run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault,
+            "--message",
+            &dir.msg("rollback-attempt"),
+            "--out",
+            &dir.path("sig-rollback"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+    assert!(!dir.0.join("sig-rollback").exists());
+
+    // Restore current vault state, then reshare to a new anchored vault; old vault is retired on anchor!
+    for (name, bytes) in &snap_after_sign {
+        std::fs::write(dir.0.join("vault").join(name), bytes).unwrap();
+    }
+    let vault2 = dir.path("vault2");
+    run(
+        &[
+            "quorum",
+            "reshare",
+            "--vault-dir",
+            &vault,
+            "--new-threshold",
+            "2",
+            "--new-parties",
+            "3",
+            "--out-vault-dir",
+            &vault2,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    // Restore old vault files to pre-reshare snapshot; retired anchor refuses signing on old vault!
+    for (name, bytes) in &snap_after_sign {
+        std::fs::write(dir.0.join("vault").join(name), bytes).unwrap();
+    }
+    run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault,
+            "--message",
+            &dir.msg("after-reshare-rollback"),
+            "--out",
+            &dir.path("sig-retired"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+    // Meanwhile the new reshared vault signs at epoch 1 cleanly!
+    run(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            &vault2,
+            "--message",
+            &dir.msg("new-vault-epoch-1"),
+            "--out",
+            &dir.path("sig-1"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    assert_eq!(json_member(&dir.read("sig-1"), "epoch"), "1");
 }

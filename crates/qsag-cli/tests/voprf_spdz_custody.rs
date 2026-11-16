@@ -12,8 +12,26 @@ impl Drop for Scratch {
     }
 }
 fn run(args: &[&str]) -> Output {
+    let mut args = args.to_vec();
+    let stateful = matches!(
+        (args.first(), args.get(1)),
+        (Some(&"cred"), Some(&"voprf-keygen" | &"voprf-eval"))
+    );
+    let has_anchor = args.iter().any(|a| {
+        matches!(
+            *a,
+            "--anchor-dir"
+                | "--anchor-tpm-nv"
+                | "--anchor-vmgenid"
+                | "--ephemeral-unanchored"
+                | "--help"
+        )
+    });
+    if stateful && !has_anchor {
+        args.push("--ephemeral-unanchored");
+    }
     Command::new(env!("CARGO_BIN_EXE_qsag"))
-        .args(args)
+        .args(&args)
         .env("QSAG_TOPRF_PASS", "TOPRF test passphrase")
         .output()
         .unwrap()

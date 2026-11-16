@@ -43,14 +43,31 @@ fn qsag(args: &[&str]) -> Output {
     let mut args = args.to_vec();
     // Tests without an anchor directory use disposable keys and say so, as the CLI
     // requires. Anchored invocations run exactly as written.
-    let enrolls_custody = match (args.first(), args.get(1)) {
-        (Some(&"keygen" | &"sign" | &"aggregate"), _) => true,
-        // Jorts quorums anchor their belts and journals; the hem and coupon quorums do not.
-        (Some(&"quorum"), Some(&"keygen")) => !args.contains(&"hem-jorts-poseidon2"),
-        (Some(&"policy"), Some(&"init")) => true,
+    let enrolls_custody = match (args.first(), args.get(1), args.get(2)) {
+        (Some(&"keygen" | &"sign" | &"aggregate"), _, _) => true,
+        (Some(&"quorum"), Some(&"keygen" | &"sign" | &"refresh" | &"reshare"), _) => true,
+        (
+            Some(&"cred"),
+            Some(&"voprf-keygen" | &"voprf-eval" | &"mldsa-keygen" | &"mldsa-sign"),
+            _,
+        ) => true,
+        (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss"), _) => true,
+        (Some(&"policy"), Some(&"init"), _) => true,
+        (Some(&"policy"), Some(&"biscuit"), Some(&"keygen" | &"mint")) => true,
         _ => false,
     };
-    if enrolls_custody && !args.contains(&"--anchor-dir") && !args.contains(&"--help") {
+    let has_anchor = args.iter().any(|a| {
+        matches!(
+            *a,
+            "--anchor-dir"
+                | "--anchor-tpm-nv"
+                | "--anchor-vmgenid"
+                | "--ephemeral-unanchored"
+                | "--help"
+                | "-h"
+        )
+    });
+    if enrolls_custody && !has_anchor {
         args.push("--ephemeral-unanchored");
     }
     Command::new(env!("CARGO_BIN_EXE_qsag"))
@@ -2837,7 +2854,15 @@ fn durable_signing_requires_anchor_or_explicit_ephemeral_flag() {
     let (vault, ledger, anchor) = (dir.path("quorum"), dir.path("ledger"), dir.path("anchor"));
     let quorum_pk = dir.path("quorum.pk");
     let (frontier_sk, frontier_pk) = (dir.path("anchored.sk"), dir.path("anchored.pk"));
-    let refusals: [&[&str]; 3] = [
+    let (hem_vault, cred_vault, hd_vault, hd_watch, biscuit_sk, biscuit_pk) = (
+        dir.path("hem-vault"),
+        dir.path("cred-vault"),
+        dir.path("hd-vault"),
+        dir.path("hd.watch"),
+        dir.path("biscuit.sk"),
+        dir.path("biscuit.pk"),
+    );
+    let refusals: [&[&str]; 8] = [
         &[
             "quorum",
             "keygen",
@@ -2845,6 +2870,53 @@ fn durable_signing_requires_anchor_or_explicit_ephemeral_flag() {
             &vault,
             "--public-out",
             &quorum_pk,
+        ],
+        &[
+            "quorum",
+            "keygen",
+            "--scheme",
+            "hem-jorts-poseidon2",
+            "--vault-dir",
+            &hem_vault,
+            "--public-out",
+            &quorum_pk,
+        ],
+        &[
+            "cred",
+            "mldsa-keygen",
+            "--vault-dir",
+            &cred_vault,
+            "--public-out",
+            &quorum_pk,
+            "--allow-unencrypted",
+        ],
+        &[
+            "cred",
+            "voprf-keygen",
+            "--vault-dir",
+            &cred_vault,
+            "--public-out",
+            &quorum_pk,
+            "--allow-unencrypted",
+        ],
+        &[
+            "hd",
+            "keygen",
+            "--vault-dir",
+            &hd_vault,
+            "--watch-out",
+            &hd_watch,
+            "--allow-unencrypted",
+        ],
+        &[
+            "policy",
+            "biscuit",
+            "keygen",
+            "--secret-out",
+            &biscuit_sk,
+            "--public-out",
+            &biscuit_pk,
+            "--allow-unencrypted",
         ],
         &[
             "policy",
@@ -2881,7 +2953,594 @@ fn durable_signing_requires_anchor_or_explicit_ephemeral_flag() {
             "{args:?}: {stderr}"
         );
     }
-    for created in [&vault, &ledger, &anchor, &quorum_pk, &frontier_sk] {
+    for created in [
+        &vault,
+        &hem_vault,
+        &cred_vault,
+        &hd_vault,
+        &ledger,
+        &anchor,
+        &quorum_pk,
+        &frontier_sk,
+        &biscuit_sk,
+    ] {
         assert!(!Path::new(created).exists(), "{created}");
     }
+}
+
+#[test]
+fn e2e_policy_macaroon_attenuation_third_party_discharge_and_refusal() {
+    let dir = Workdir::new("policy-macaroon");
+    let root_key = dir.path("root.mac.key");
+    let tp_key = dir.path("tp.mac.key");
+    let tok0 = dir.path("tok0.json");
+    let tok1 = dir.path("tok1.json");
+    let dis_raw = dir.path("dis_raw.json");
+    let dis_bound = dir.path("dis_bound.json");
+    let audience = &"aa".repeat(32);
+    let resource = &"bb".repeat(32);
+    let tp_id = &"cc".repeat(32);
+    let huge_amount = "100000000000000000000"; // 10^20 > u64::MAX
+
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "keygen",
+            "--out",
+            &root_key,
+            "--allow-unencrypted",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "keygen",
+            "--out",
+            &tp_key,
+            "--allow-unencrypted",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "issue",
+            "--key",
+            &root_key,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "7",
+            "--third-party-hex",
+            tp_id,
+            "--out",
+            &tok0,
+        ],
+        0,
+    );
+    // Attenuate offline with a 128-bit max-amount cap (> u64::MAX).
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "attenuate",
+            "--in",
+            &tok0,
+            "--max-amount",
+            huge_amount,
+            "--expires-at",
+            "4102444800",
+            "--out",
+            &tok1,
+        ],
+        0,
+    );
+    // Missing third-party discharge is denied (exit 3).
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "verify",
+            "--key",
+            &root_key,
+            "--in",
+            &tok1,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            huge_amount,
+            "--now",
+            "1700000000",
+        ],
+        3,
+    );
+    // Issue third-party discharge and verify unbound discharge is rejected (exit 3).
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "issue-discharge",
+            "--key",
+            &tp_key,
+            "--id-hex",
+            tp_id,
+            "--audience-hex",
+            audience,
+            "--expires-at",
+            "4102444800",
+            "--out",
+            &dis_raw,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "verify",
+            "--key",
+            &root_key,
+            "--in",
+            &tok1,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            huge_amount,
+            "--now",
+            "1700000000",
+            "--discharge",
+            &dis_raw,
+            "--discharge-key",
+            &tp_key,
+        ],
+        3,
+    );
+    // Bind discharge to tok1 -> verification succeeds!
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "bind-discharge",
+            "--parent",
+            &tok1,
+            "--discharge",
+            &dis_raw,
+            "--out",
+            &dis_bound,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "verify",
+            "--key",
+            &root_key,
+            "--in",
+            &tok1,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            huge_amount,
+            "--now",
+            "1700000000",
+            "--discharge",
+            &dis_bound,
+            "--discharge-key",
+            &tp_key,
+        ],
+        0,
+    );
+    // Spending 1 unit over the u128 max-amount cap is denied (exit 3).
+    expect(
+        &[
+            "policy",
+            "macaroon",
+            "verify",
+            "--key",
+            &root_key,
+            "--in",
+            &tok1,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            "100000000000000000001",
+            "--now",
+            "1700000000",
+            "--discharge",
+            &dis_bound,
+            "--discharge-key",
+            &tp_key,
+        ],
+        3,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("policy-biscuit");
+    let anchor = dir.0.join("biscuit-anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let auth_sk = dir.path("auth.sk");
+    let auth_pk = dir.path("auth.pk");
+    let tok0 = dir.path("b0.json");
+    let step0 = dir.path("step0.sk");
+    let tok1 = dir.path("b1.json");
+    let step1 = dir.path("step1.sk");
+    let sealed = dir.path("sealed.json");
+    let audience = &"12".repeat(32);
+    let resource = &"34".repeat(32);
+
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "keygen",
+            "--secret-out",
+            &auth_sk,
+            "--public-out",
+            &auth_pk,
+            "--tree-height",
+            "2",
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--allow-unencrypted",
+        ],
+        0,
+    );
+    let sk_before = std::fs::read(&auth_sk).unwrap();
+    let lock_before = std::fs::read(format!("{auth_sk}.vault.lock")).unwrap();
+
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "mint",
+            "--secret",
+            &auth_sk,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "15",
+            "--token-out",
+            &tok0,
+            "--step-key-out",
+            &step0,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    // Attenuate consumes step0.sk (single-use retirement)!
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "attenuate",
+            "--in",
+            &tok0,
+            "--step-key",
+            &step0,
+            "--max-amount",
+            "50000000000000000000",
+            "--token-out",
+            &tok1,
+            "--step-key-out",
+            &step1,
+        ],
+        0,
+    );
+    assert!(!Path::new(&step0).exists());
+    // Reusing retired step0.sk fails!
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "attenuate",
+            "--in",
+            &tok0,
+            "--step-key",
+            &step0,
+            "--max-amount",
+            "99999999999999999999",
+            "--token-out",
+            &dir.path("forged.json"),
+            "--step-key-out",
+            &dir.path("forged.sk"),
+        ],
+        4,
+    );
+
+    // Seal with --bind-request and verify publicly!
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "seal",
+            "--in",
+            &tok1,
+            "--step-key",
+            &step1,
+            "--bind-request",
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            "50000000000000000000",
+            "--now",
+            "1700000000",
+            "--out",
+            &sealed,
+        ],
+        0,
+    );
+    assert!(!Path::new(&step1).exists());
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "verify",
+            "--public",
+            &auth_pk,
+            "--in",
+            &sealed,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            "50000000000000000000",
+            "--now",
+            "1700000000",
+        ],
+        0,
+    );
+    // Request mismatch (different amount than bound request) fails verification!
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "verify",
+            "--public",
+            &auth_pk,
+            "--in",
+            &sealed,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            "1",
+            "--now",
+            "1700000000",
+        ],
+        2,
+    );
+
+    // Snapshot rollback of auth.sk + lock is refused by the external anchor!
+    std::fs::write(&auth_sk, &sk_before).unwrap();
+    std::fs::write(format!("{auth_sk}.vault.lock"), &lock_before).unwrap();
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "mint",
+            "--secret",
+            &auth_sk,
+            "--audience-hex",
+            audience,
+            "--token-out",
+            &dir.path("rb.json"),
+            "--step-key-out",
+            &dir.path("rb.sk"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+}
+
+#[test]
+fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
+    let dir = Workdir::new("fts-threshold-reservoirs");
+    let sk = dir.path("fts.sk");
+    let pk = dir.path("fts.pk");
+    let msg = dir.path("msg");
+    let other = dir.path("other");
+    let sig0 = dir.path("sig0");
+    let sig1 = dir.path("sig1");
+
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-threshold",
+            "--fast-demo",
+            "--tree-height",
+            "2",
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+        ],
+        0,
+    );
+    for p in 0..3 {
+        assert!(Path::new(&format!("{sk}.party-{p}.reservoir")).is_file());
+        assert!(Path::new(&format!("{sk}.party-{p}.reservoir.lock")).is_file());
+    }
+    expect(
+        &["sign", "--secret", &sk, "--in", &msg, "--out", &sig0],
+        0,
+    );
+    expect(
+        &["verify", "--public", &pk, "--in", &msg, "--sig", &sig0],
+        0,
+    );
+    expect(
+        &["sign", "--secret", &sk, "--in", &other, "--out", &sig1],
+        0,
+    );
+    expect(
+        &["verify", "--public", &pk, "--in", &other, "--sig", &sig1],
+        0,
+    );
+
+    // Corrupting a persisted party reservoir sidecar fails closed before signing.
+    let res0 = format!("{sk}.party-0.reservoir");
+    let mut raw = std::fs::read(&res0).unwrap();
+    let mid = raw.len() / 2;
+    raw[mid] ^= 0x55;
+    std::fs::write(&res0, &raw).unwrap();
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &dir.path("corrupt.sig"),
+        ],
+        4,
+    );
+    assert!(!Path::new(&dir.path("corrupt.sig")).exists());
+}
+
+#[test]
+fn e2e_policy_ledger_u128_amount_above_u64_max() {
+    let dir = Workdir::new("policy-u128");
+    let (sk, pk, payload) = (dir.path("sk"), dir.path("pk"), dir.path("msg"));
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-2338",
+            "--secret-out",
+            &dir.path("recipient.sk"),
+            "--public-out",
+            &dir.path("recipient.pk"),
+        ],
+        0,
+    );
+    let recipient = json_member(&dir.read("recipient.pk"), "address");
+    let policy_path = dir.path("policy-u128.json");
+    // 2 * 10^20 single tx cap, 3 * 10^20 window cap (well above u64::MAX = 18_446_744_073_709_551_615).
+    std::fs::write(
+        &policy_path,
+        format!(
+            r#"{{
+  "format": "qsag-policy-v1",
+  "chain_id": 1,
+  "suite": "FrontierSumFts",
+  "recipient_allowlist": ["{recipient}"],
+  "max_single_tx_amount": 200000000000000000000,
+  "velocity_window_cap": 300000000000000000000,
+  "valid_not_before_secs": 0,
+  "valid_not_after_secs": 4102444800,
+  "forbid_initiator_self_approval": true,
+  "hardware_guardian_party": 3,
+  "quorum_tiers": [
+    {{"max_amount_units": 200000000000000000000, "min_approvers": 2, "require_hardware_guardian": true}}
+  ],
+  "parties": [1, 2, 3]
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let ledger_dir = dir.path("ledger");
+    expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy_path,
+            "--accept-single-host-custody",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-2338",
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+            "--policy-ledger-dir",
+            &ledger_dir,
+        ],
+        0,
+    );
+    let ledger = ["--ledger-dir", ledger_dir.as_str()];
+    let intent_msg = dir.path("intent.msg");
+    let huge = "100000000000000000000";
+    let intent = propose(&ledger, &pk, &payload, &recipient, huge, &intent_msg);
+    approve(&ledger, &intent, "2", 0);
+    approve(&ledger, &intent, "3", 0);
+    let sig = dir.path("huge.sig");
+    let signed = expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &intent_msg,
+            "--out",
+            &sig,
+            "--policy-ledger-dir",
+            &ledger_dir,
+            "--policy-intent",
+            &intent,
+            "--json",
+        ],
+        0,
+    );
+    assert_eq!(json_member(&signed, "spend_amount"), huge);
+    assert_eq!(window_spend(&ledger), huge);
 }
