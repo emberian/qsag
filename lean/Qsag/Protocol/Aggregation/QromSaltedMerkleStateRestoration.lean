@@ -43,17 +43,12 @@ Mechanized constructive reductions connecting:
      * `unitaryZeroPow`: `q = (216, 109, 74, 56)` + 0-bit PoW (`455` openings, zero PoW grinding) at `Q + 1 ≤ 2^40`.
 -/
 public import Qsag.Oracle.Qrom
-public import Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-public import Qsag.Protocol.Aggregation.HemSlicedFoldBudget
+public import Qsag.Protocol.Aggregation.HemOpening
 public import Qsag.Tactic.AssuranceKit
-import all Qsag.Oracle.Qrom
-import all Qsag.Protocol.Aggregation.HemExtractedOpeningBridge
-import all Qsag.Protocol.Aggregation.HemSlicedFoldBudget
-import all Qsag.Coding.Cwyz26
-import all Qsag.Protocol.Aggregation.HemVerifierAcceptance
-import all Qsag.Protocol.Aggregation.HemWhirRbrSoundness
-import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
-import all Qsag.Protocol.Aggregation.ConcreteSecurityBudget
+import Qsag.Coding.Cwyz26
+import Qsag.Protocol.Aggregation.HemRbrSoundness
+import Qsag.Protocol.Aggregation.MultiRoundFsQrom
+import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 
 public section
 namespace Qsag
@@ -143,10 +138,10 @@ theorem domainTableWeight_le_tableWeight :
     ∀ (n : Nat) {cardDom : Nat} (domainOf : Fin n → Fin cardDom)
       (dom : Fin cardDom) (d : OracleBitTable n),
       domainTableWeight n domainOf dom d ≤ tableWeight n d
-  | 0, _, _, _, _ => Nat.le_refl 0
+  | 0, _, _, _, _ => Nat.zero_le _
   | n + 1, _, domainOf, dom, (b, rest) => by
     have ih := domainTableWeight_le_tableWeight n (fun i => domainOf i.succ) dom rest
-    simp only [domainTableWeight, tableWeight]
+    simp only [domainTableWeight, tableWeight_succ]
     cases b <;> simp only [Bool.false_and, Bool.true_and, Bool.false_eq_true, ↓reduceIte]
     · omega
     · split <;> omega
@@ -159,9 +154,9 @@ theorem domainTableWeight_sum_eq_tableWeight :
     ∀ (n : Nat) {cardDom : Nat} (domainOf : Fin n → Fin cardDom) (d : OracleBitTable n),
       qsum cardDom (fun dom => domainTableWeight n domainOf dom d) = tableWeight n d
   | 0, _, _, _ => by
-    simp only [domainTableWeight, tableWeight, qsum_const, Nat.mul_zero]
+    simp only [domainTableWeight, tableWeight_zero, qsum_const, Nat.mul_zero]
   | n + 1, cardDom, domainOf, (b, rest) => by
-    simp only [domainTableWeight, tableWeight, qsum_add]
+    simp only [domainTableWeight, tableWeight_succ, qsum_add]
     rw [domainTableWeight_sum_eq_tableWeight n (fun i => domainOf i.succ) rest]
     congr 1
     cases b
@@ -223,6 +218,12 @@ theorem coherent_salted_oracle_execution_bridge
 /-! ### §1.3 Full `2m`-Bit (`w = 256` `Digest256`) `⊥`-Labeled DFMS Compressed-Oracle Register,
     Online Extraction Disturbance & Authenticated `Hem` Bridge (`[DFMS22, Eq. (6)–(8)]`) -/
 
+private theorem gaussZero_add_zero : GaussInt.zero.add GaussInt.zero = GaussInt.zero := by
+  apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.zero_def]
+
+private theorem gaussZero_sub_zero : GaussInt.zero.sub GaussInt.zero = GaussInt.zero := by
+  apply GaussInt.ext <;> simp [GaussInt.sub_def, GaussInt.zero_def]
+
 private def intSum : (N : Nat) → (Fin N → Int) → Int
   | 0, _ => 0
   | N + 1, f => f ⟨0, Nat.zero_lt_succ N⟩ + intSum N (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
@@ -276,55 +277,55 @@ private theorem intSum_comm : ∀ (A B : Nat) (h : Fin A → Fin B → Int),
 
 private theorem intSum_of_qsum : ∀ (N : Nat) (f : Fin N → Nat),
     intSum N (fun i => (f i : Int)) = (qsum N f : Int)
-  | 0, _ => rfl
+  | 0, _ => by rw [qsum_zero]; rfl
   | N + 1, f => by
-    simp only [intSum, qsum, intSum_of_qsum N]
+    simp only [intSum, qsum_succ, intSum_of_qsum N]
     omega
 
 private theorem gaussDoublePow_re : ∀ (k : Nat) (z : GaussInt),
     (gaussDoublePow k z).re = ((2 ^ k : Nat) : Int) * z.re
-  | 0, z => by simp [gaussDoublePow]
+  | 0, z => by simp [gaussDoublePow_base]
   | k + 1, z => by
-    simp only [gaussDoublePow, GaussInt.add, gaussDoublePow_re k z]
+    simp only [gaussDoublePow_step, GaussInt.add_def, gaussDoublePow_re k z]
     have h2 : ((2 ^ (k + 1) : Nat) : Int) = ((2 ^ k : Nat) : Int) + ((2 ^ k : Nat) : Int) := by
       rw [Nat.pow_succ]; omega
     rw [h2, Int.add_mul]
 
 private theorem gaussDoublePow_im : ∀ (k : Nat) (z : GaussInt),
     (gaussDoublePow k z).im = ((2 ^ k : Nat) : Int) * z.im
-  | 0, z => by simp [gaussDoublePow]
+  | 0, z => by simp [gaussDoublePow_base]
   | k + 1, z => by
-    simp only [gaussDoublePow, GaussInt.add, gaussDoublePow_im k z]
+    simp only [gaussDoublePow_step, GaussInt.add_def, gaussDoublePow_im k z]
     have h2 : ((2 ^ (k + 1) : Nat) : Int) = ((2 ^ k : Nat) : Int) + ((2 ^ k : Nat) : Int) := by
       rw [Nat.pow_succ]; omega
     rw [h2, Int.add_mul]
 
 private theorem gaussDoublePow_zero : ∀ (k : Nat), gaussDoublePow k GaussInt.zero = GaussInt.zero
-  | 0 => rfl
-  | k + 1 => by simp only [gaussDoublePow, gaussDoublePow_zero k]; rfl
+  | 0 => gaussDoublePow_base _
+  | k + 1 => by simp only [gaussDoublePow_step, gaussDoublePow_zero k]; exact gaussZero_add_zero
 
 private theorem gaussDoublePow_inj : ∀ (k : Nat) {u v : GaussInt},
     gaussDoublePow k u = gaussDoublePow k v → u = v
-  | 0, _, _, h => h
+  | 0, _, _, h => by rw [gaussDoublePow_base, gaussDoublePow_base] at h; exact h
   | k + 1, u, v, h => by
     apply gaussDoublePow_inj k
     have hr := congrArg GaussInt.re h
     have hi := congrArg GaussInt.im h
-    apply GaussInt.ext <;> simp only [gaussDoublePow, GaussInt.add] at hr hi <;> omega
+    apply GaussInt.ext <;> simp only [gaussDoublePow_step, GaussInt.add_def] at hr hi <;> omega
 
 private theorem gaussDoublePow_map_add : ∀ (k : Nat) (u v : GaussInt),
     gaussDoublePow k (u.add v) = (gaussDoublePow k u).add (gaussDoublePow k v)
-  | 0, _, _ => rfl
+  | 0, _, _ => by simp only [gaussDoublePow_base]
   | k + 1, u, v => by
-    simp only [gaussDoublePow, gaussDoublePow_map_add k]
-    apply GaussInt.ext <;> simp [GaussInt.add] <;> omega
+    simp only [gaussDoublePow_step, gaussDoublePow_map_add k]
+    apply GaussInt.ext <;> simp [GaussInt.add_def] <;> omega
 
 private theorem gaussDoublePow_map_sub : ∀ (k : Nat) (u v : GaussInt),
     gaussDoublePow k (u.sub v) = (gaussDoublePow k u).sub (gaussDoublePow k v)
-  | 0, _, _ => rfl
+  | 0, _, _ => by simp only [gaussDoublePow_base]
   | k + 1, u, v => by
-    simp only [gaussDoublePow, gaussDoublePow_map_sub k]
-    apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+    simp only [gaussDoublePow_step, gaussDoublePow_map_sub k]
+    apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.sub_def] <;> omega
 
 /-- Exact Gaussian-integer sum over all `2 ^ w` values of `BitVec w`. -/
 def bvGaussSum (w : Nat) (f : BitVec w → GaussInt) : GaussInt :=
@@ -333,11 +334,11 @@ def bvGaussSum (w : Nat) (f : BitVec w → GaussInt) : GaussInt :=
 
 private theorem bvGaussSum_add (w : Nat) (f g : BitVec w → GaussInt) :
     bvGaussSum w (fun y => (f y).add (g y)) = (bvGaussSum w f).add (bvGaussSum w g) := by
-  apply GaussInt.ext <;> simp [bvGaussSum, GaussInt.add, intSum_add]
+  apply GaussInt.ext <;> simp [bvGaussSum, GaussInt.add_def, intSum_add]
 
 private theorem bvGaussSum_sub (w : Nat) (f g : BitVec w → GaussInt) :
     bvGaussSum w (fun y => (f y).sub (g y)) = (bvGaussSum w f).sub (bvGaussSum w g) := by
-  apply GaussInt.ext <;> simp [bvGaussSum, GaussInt.sub, intSum_sub]
+  apply GaussInt.ext <;> simp [bvGaussSum, GaussInt.sub_def, intSum_sub]
 
 private theorem bvGaussSum_doublePow (w k : Nat) (f : BitVec w → GaussInt) :
     bvGaussSum w (fun y => gaussDoublePow k (f y)) = gaussDoublePow k (bvGaussSum w f) := by
@@ -395,7 +396,7 @@ private theorem dfmsCellDecompress_add (m : Nat) (f g : Option (BitVec (2 * m)) 
     simp only [dfmsCellDecompress, bvGaussSum_add, gaussDoublePow_map_add]
   | some y =>
     simp only [dfmsCellDecompress, bvGaussSum_add, gaussDoublePow_map_add]
-    apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+    apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.sub_def] <;> omega
 
 private theorem dfmsCellDecompress_sub (m : Nat) (f g : Option (BitVec (2 * m)) → GaussInt)
     (c : Option (BitVec (2 * m))) :
@@ -406,7 +407,7 @@ private theorem dfmsCellDecompress_sub (m : Nat) (f g : Option (BitVec (2 * m)) 
     simp only [dfmsCellDecompress, bvGaussSum_sub, gaussDoublePow_map_sub]
   | some y =>
     simp only [dfmsCellDecompress, bvGaussSum_sub, gaussDoublePow_map_sub]
-    apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+    apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.sub_def] <;> omega
 
 private theorem dfmsCellDecompress_doublePow (m k : Nat) (f : Option (BitVec (2 * m)) → GaussInt)
     (c : Option (BitVec (2 * m))) :
@@ -443,7 +444,7 @@ private theorem dfmsCellDecompress_zero (m : Nat) (c : Option (BitVec (2 * m))) 
     rw [bvGaussSum_const, gaussDoublePow_zero]
   cases c with
   | none => simp only [dfmsCellDecompress, hz, gaussDoublePow_zero]
-  | some _ => simp only [dfmsCellDecompress, hz, gaussDoublePow_zero]; rfl
+  | some _ => simp only [dfmsCellDecompress, hz, gaussDoublePow_zero, gaussZero_sub_zero, gaussZero_add_zero]
 
 /-- Exact involution up to known integer normalization `2 ^ (4 * m)`:
     `dfmsCellDecompress m (dfmsCellDecompress m f) = 2^(4m) * f`. -/
@@ -456,7 +457,7 @@ theorem dfmsCellDecompress_square (m : Nat) (f : Option (BitVec (2 * m)) → Gau
       bvGaussSum_const, gaussDoublePow_add]
     have h3 : m + 2 * m = 3 * m := by omega
     rw [h3]
-    apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+    apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.sub_def] <;> omega
   cases c with
   | none =>
     change gaussDoublePow m (bvGaussSum (2 * m) (fun y => dfmsCellDecompress m f (some y))) =
@@ -475,7 +476,7 @@ theorem dfmsCellDecompress_square (m : Nat) (f : Option (BitVec (2 * m)) → Gau
     have h3 : 2 * m + m = 3 * m := by omega
     have h2 : m + m = 2 * m := by omega
     rw [h4, h3, h2]
-    apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.sub] <;> omega
+    apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.sub_def] <;> omega
 
 private theorem natCast_mul_eq : ∀ (x y : Nat), ((x * y : Nat) : Int) = (x : Int) * (y : Int)
   | 0, _ => by simp
@@ -568,7 +569,7 @@ theorem dfmsCellDecompress_norm (m : Nat) (f : Option (BitVec (2 * m)) → Gauss
       qsum (2 ^ (2 * m)) (fun j => GaussInt.normSq (f (some (BitVec.ofFin j))))) : Nat) : Int)
   have hCastL : ∀ x y : Nat, ((x + y : Nat) : Int) = (x : Int) + (y : Int) := fun _ _ => by omega
   have hNormCast : ∀ z : GaussInt, ((z.normSq : Nat) : Int) = z.re * z.re + z.im * z.im :=
-    fun z => (GaussInt.normSqInt_eq_ofNat_normSq z).symm
+    fun z => by rw [← GaussInt.normSqInt_def]; exact (GaussInt.normSqInt_eq_ofNat_normSq z).symm
   rw [hCastL, natCast_mul_eq, hCastL, hPow, ← intSum_of_qsum, ← intSum_of_qsum]
   have hNone : ((GaussInt.normSq (dfmsCellDecompress m f none) : Nat) : Int) =
       (((2 ^ m : Nat) : Int) * intSum (2 ^ (2 * m)) (fun i => (f (some (BitVec.ofFin i))).re)) *
@@ -593,7 +594,7 @@ theorem dfmsCellDecompress_norm (m : Nat) (f : Option (BitVec (2 * m)) → Gauss
         ((2 ^ m : Nat) : Int) * (f none).im) := by
     intro i
     rw [hNormCast]
-    simp only [dfmsCellDecompress, GaussInt.add, GaussInt.sub, gaussDoublePow_re,
+    simp only [dfmsCellDecompress, GaussInt.add_def, GaussInt.sub_def, gaussDoublePow_re,
       gaussDoublePow_im, bvGaussSum]
   have hRhsSome : ∀ i : Fin (2 ^ (2 * m)),
       ((GaussInt.normSq (f (some (BitVec.ofFin i))) : Nat) : Int) =
@@ -690,9 +691,9 @@ private theorem dfmsTableSum_qsum (m : Nat) : ∀ (n k : Nat) (f : DfmsTable m n
       rw [qsum_congr h1]
       clear h1
       induction k with
-      | zero => simp [qsum, qsum_const]
+      | zero => simp [qsum_zero, qsum_const]
       | succ k' ih =>
-        simp only [qsum, qsum_add]
+        simp only [qsum_succ, qsum_add]
         rw [ih (fun D i => f D ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
     rw [hSub, ← qsum_add]
 
@@ -781,7 +782,7 @@ theorem dfmsTableSum_total_eq_uniform (m : Nat) :
     ∀ (n : Nat) (f : (Fin n → BitVec (2 * m)) → Nat),
       dfmsTableSum m n (fun D => if dfmsIsTotal m n D then f (dfmsToOracle m n D) else 0) =
         uniformOracleSum (2 * m) n f
-  | 0, _ => rfl
+  | 0, _ => by rw [uniformOracleSum_zero]; rfl
   | n + 1, f => by
     unfold dfmsTableSum dfmsCellSum
     dsimp only
@@ -790,7 +791,7 @@ theorem dfmsTableSum_total_eq_uniform (m : Nat) :
       simp only [dfmsIsTotal, Option.isSome_none, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
       exact dfmsTableSum_zero m n
     rw [hNone, Nat.zero_add]
-    unfold uniformOracleSum
+    simp only [uniformOracleSum_succ]
     apply qsum_congr
     intro j
     have hSome : ∀ D : DfmsTable m n,
@@ -889,7 +890,7 @@ private theorem dfmsCellDecompress_comm_decompress (m : Nat) (n : Nat)
 theorem dfmsDecompress_square (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → GaussInt)
     (D : DfmsTable m n),
     dfmsDecompress m n (dfmsDecompress m n f) D = gaussDoublePow (4 * m * n) (f D)
-  | 0, _, () => by simp [dfmsDecompress, gaussDoublePow]
+  | 0, _, () => by simp [dfmsDecompress, gaussDoublePow_base]
   | n + 1, f, (c, D) => by
     change dfmsCellDecompress m
       (fun c' => dfmsDecompress m n
@@ -957,7 +958,7 @@ theorem dfmsDecompress_norm (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → Gau
 theorem dfmsDecompress_allBot (m : Nat) : ∀ (n : Nat) (z : GaussInt) (D : DfmsTable m n),
     dfmsDecompress m n (fun X => if dfmsIsAllBot m n X then z else GaussInt.zero) D =
       if dfmsIsTotal m n D then gaussDoublePow (m * n) z else GaussInt.zero
-  | 0, z, () => by simp [dfmsDecompress, dfmsIsAllBot, dfmsIsTotal, gaussDoublePow]
+  | 0, z, () => by simp [dfmsDecompress, dfmsIsAllBot, dfmsIsTotal, gaussDoublePow_base]
   | n + 1, z, (c, D) => by
     unfold dfmsDecompress
     have hInner : (fun c' : Option (BitVec (2 * m)) =>
@@ -983,15 +984,15 @@ theorem dfmsDecompress_allBot (m : Nat) : ∀ (n : Nat) (z : GaussInt) (D : Dfms
     | some y =>
       simp only [dfmsCellDecompress, hSumZero, gaussDoublePow_zero, dfmsIsTotal,
         Option.isSome_some, Bool.true_and]
-      have hzSub : GaussInt.zero.sub GaussInt.zero = GaussInt.zero := rfl
+      have hzSub : GaussInt.zero.sub GaussInt.zero = GaussInt.zero := gaussZero_sub_zero
       rw [hzSub]
       cases dfmsIsTotal m n D
-      · simp only [Bool.false_eq_true, ↓reduceIte, gaussDoublePow_zero]; rfl
+      · simp only [Bool.false_eq_true, ↓reduceIte, gaussDoublePow_zero]; exact gaussZero_add_zero
       · simp only [↓reduceIte, gaussDoublePow_add]
         have hAdd : GaussInt.zero.add (gaussDoublePow (m + m * n) z) = gaussDoublePow (m * (n + 1)) z := by
           have hm : m + m * n = m * (n + 1) := by rw [Nat.mul_succ, Nat.add_comm]
           rw [hm]
-          apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.zero]
+          apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.zero_def]
         exact hAdd
 
 /-- Joint quantum state over the `DfmsTable m n` (`Option (BitVec (2 * m))`) compressed database
@@ -1043,25 +1044,45 @@ def dfmsAdvStateAt (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m) cardA
   | t + 1, ht => dfmsOracleStep (A.steps ⟨t, ht⟩)
       (dfmsAdvStateAt m A t (Nat.le_of_succ_le ht))
 
+private theorem doubleDfmsState_apply {m n cardAnc : Nat} (k : Nat) (ψ : DfmsState m n cardAnc)
+    (D : DfmsTable m n) (x : Fin n) (y : Fin (2 ^ (2 * m))) (a : Fin cardAnc) :
+    doubleDfmsState k ψ D x y a = gaussDoublePow k (ψ D x y a) := by
+  unfold doubleDfmsState
+  rw [qvecDoublePow_def]
+
+private theorem doubleDfmsState_zero {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) :
+    doubleDfmsState 0 ψ = ψ := by
+  funext D x y a
+  rw [doubleDfmsState_apply, gaussDoublePow_base]
+
 private theorem dfmsDecompressState_square {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) :
     dfmsDecompressState (dfmsDecompressState ψ) = doubleDfmsState (4 * m * n) ψ := by
   funext D x y a
+  rw [doubleDfmsState_apply]
   exact dfmsDecompress_square m n _ D
 
 private theorem dfmsDecompressState_double {m n cardAnc : Nat} (k : Nat) (ψ : DfmsState m n cardAnc) :
     dfmsDecompressState (doubleDfmsState k ψ) = doubleDfmsState k (dfmsDecompressState ψ) := by
   funext D x y a
-  exact dfmsDecompress_doublePow m n k _ D
+  rw [doubleDfmsState_apply]
+  have h := dfmsDecompress_doublePow m n k (fun X => ψ X x y a) D
+  have hf : (fun X => gaussDoublePow k (ψ X x y a)) = (fun X => doubleDfmsState k ψ X x y a) := by
+    funext X; rw [doubleDfmsState_apply]
+  rw [hf] at h
+  exact h
 
 private theorem doubleDfmsState_add {m n cardAnc : Nat} (k l : Nat) (ψ : DfmsState m n cardAnc) :
     doubleDfmsState k (doubleDfmsState l ψ) = doubleDfmsState (k + l) ψ := by
   funext D x y a
+  rw [doubleDfmsState_apply, doubleDfmsState_apply, doubleDfmsState_apply]
   exact gaussDoublePow_add k l _
 
 private theorem doubleDfmsState_inj {m n cardAnc : Nat} (k : Nat)
     {ψ φ : DfmsState m n cardAnc} (h : doubleDfmsState k ψ = doubleDfmsState k φ) : ψ = φ := by
   funext D x y a
-  exact gaussDoublePow_inj k (congrArg (fun s => s D x y a) h)
+  have hp := congrArg (fun s => s D x y a) h
+  rw [doubleDfmsState_apply, doubleDfmsState_apply] at hp
+  exact gaussDoublePow_inj k hp
 
 private theorem dfmsCoherentStep_double {m n cardAnc : Nat} (U : ScaledUnitary n (2 * m) cardAnc)
     (k : Nat) (ψ : DfmsState m n cardAnc) :
@@ -1069,8 +1090,7 @@ private theorem dfmsCoherentStep_double {m n cardAnc : Nat} (U : ScaledUnitary n
   funext D
   have hCell : dfmsCellXor D (qvecDoublePow k (ψ D)) = qvecDoublePow k (dfmsCellXor D (ψ D)) := by
     funext x y a
-    unfold dfmsCellXor qvecDoublePow
-    dsimp only
+    (unfold dfmsCellXor; simp only [qvecDoublePow_def])
     cases dfmsEntry n D x <;> rfl
   unfold dfmsCoherentStep doubleDfmsState
   rw [hCell, U.map_doublePow]
@@ -1098,12 +1118,12 @@ private theorem dfmsCoherentStep_embedReal {m n cardAnc : Nat}
   · simp only [hTot, ↓reduceIte]
     congr 1
     funext x y a
-    unfold dfmsCellXor oracleXor
+    (unfold dfmsCellXor; simp only [oracleXor_def])
     rw [dfmsToOracle_eq_entry m n D hTot x]
   · simp only [hTot, Bool.false_eq_true, ↓reduceIte]
     have hz : dfmsCellXor D (QVec.zero n (2 * m) cardAnc) = QVec.zero n (2 * m) cardAnc := by
       funext x y a
-      unfold dfmsCellXor QVec.zero
+      (unfold dfmsCellXor; simp only [QVec.zero_def])
       cases dfmsEntry n D x <;> rfl
     rw [hz, ScaledUnitary.apply_zero]
 
@@ -1111,7 +1131,7 @@ private theorem dfmsCoherentStep_embedReal {m n cardAnc : Nat}
 theorem dfmsDecompressState_norm {m n cardAnc : Nat} (ψ : DfmsState m n cardAnc) :
     dfmsTableSum m n (fun D => QVec.stateNormSq (dfmsDecompressState ψ D)) =
       4 ^ (2 * m * n) * dfmsTableSum m n (fun D => QVec.stateNormSq (ψ D)) := by
-  unfold QVec.stateNormSq QVec.queryWeight dfmsDecompressState
+  (simp only [QVec.stateNormSq_def, QVec.queryWeight_def]; unfold dfmsDecompressState)
   simp only [dfmsTableSum_qsum, dfmsDecompress_norm, qsum_mul_left]
 
 /-- Exact state correspondence between the `⊥`-initialized DFMS compressed-oracle runtime
@@ -1126,7 +1146,7 @@ theorem dfmsAdvStateAt_eq (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m
     have hBase : dfmsDecompressState (dfmsInitState (m := m) A.init) =
         doubleDfmsState (m * n) (embedRealOracleState (fun _ => A.init)) := by
       funext D x y a
-      unfold dfmsDecompressState dfmsInitState doubleDfmsState embedRealOracleState qvecDoublePow QVec.zero
+      (unfold dfmsDecompressState dfmsInitState doubleDfmsState embedRealOracleState; simp only [qvecDoublePow_def, QVec.zero_def])
       have hCond : (fun D' => (if dfmsIsAllBot m n D' = true then A.init else fun _ _ _ => GaussInt.zero) x y a) =
           (fun D' => if dfmsIsAllBot m n D' = true then A.init x y a else GaussInt.zero) := by
         funext D'; cases dfmsIsAllBot m n D' <;> rfl
@@ -1141,6 +1161,13 @@ theorem dfmsAdvStateAt_eq (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m
         _ = (1 + 3) * (m * n) := by rw [Nat.mul_assoc]
         _ = m * n + 3 * m * n := by rw [Nat.add_mul, Nat.one_mul, ← Nat.mul_assoc]
     rw [hSplit, ← doubleDfmsState_add] at hApp
+    have hInit : (fun H : Fin n → BitVec (2 * m) => advStateAt A H 0 (Nat.zero_le Q)) =
+        (fun _ => A.init) := by
+      funext H; exact advStateAt_zero A H _
+    show doubleDfmsState (3 * m * n) (dfmsInitState A.init) =
+      doubleDfmsState (4 * m * n * 0)
+        (dfmsDecompressState (embedRealOracleState (fun H => advStateAt A H 0 (Nat.zero_le Q))))
+    rw [hInit, Nat.mul_zero, doubleDfmsState_zero]
     exact doubleDfmsState_inj (m * n) hApp
   | t + 1, ht => by
     have ih := dfmsAdvStateAt_eq m A t (Nat.le_of_succ_le ht)
@@ -1156,7 +1183,7 @@ theorem dfmsAdvStateAt_eq (m : Nat) {n cardAnc Q : Nat} (A : QuantumAdv n (2 * m
       dfmsCoherentStep_double, dfmsCoherentStep_embedReal, dfmsDecompressState_double]
     have hExp : 4 * m * n * t + 4 * m * n = 4 * m * n * (t + 1) := by rw [Nat.mul_succ]
     rw [hExp]
-    rfl
+    simp only [advStateAt_succ]
 
 /-- Decoding the final `dfmsAdvStateAt m A Q _` register recovers the exact coherent `2m`-bit
     random-oracle execution (`0` amplitude on partial tables, `2^(4*m*n*Q + m*n)` scale on total tables). -/
@@ -1165,6 +1192,7 @@ theorem dfmsAdvStateAt_decode (m : Nat) {n cardAnc Q : Nat}
     dfmsDecompressState (dfmsAdvStateAt m A Q (Nat.le_refl Q)) =
       doubleDfmsState (4 * m * n * Q + m * n)
         (embedRealOracleState (fun H => runQuantumAdv A H)) := by
+  simp only [runQuantumAdv_def]
   have hEq := congrArg dfmsDecompressState (dfmsAdvStateAt_eq m A Q (Nat.le_refl Q))
   rw [dfmsDecompressState_double (3 * m * n), dfmsDecompressState_double (4 * m * n * Q),
     dfmsDecompressState_square, doubleDfmsState_add] at hEq
@@ -1206,7 +1234,7 @@ theorem dfmsAdv_event_eq (m : Nat) {n cardAnc Q : Nat}
     intro D
     rw [queryMassOn_doublePow]
     cases dfmsIsTotal m n D
-    · simp [QVec.queryMassOn, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · simp [QVec.queryMassOn_def, QVec.queryWeight_def, QVec.zero_def, GaussInt.normSq_zero, qsum_const]
     · simp
   rw [dfmsTableSum_congr m n _ _ hPoint, dfmsTableSum_mul,
     dfmsTableSum_total_eq_uniform m n (fun H => QVec.queryMassOn (event H) (runQuantumAdv A H))]
@@ -1251,26 +1279,44 @@ private theorem dfmsDecompress_local {m cardX w cardAnc : Nat}
           induction N with
           | zero =>
             intro _
+            have hz : (fun (_ : Fin cardX) (_ : Fin (2 ^ w)) (_ : Fin cardAnc) =>
+                (⟨0, 0⟩ : GaussInt)) = QVec.zero cardX w cardAnc := by
+              rw [QVec.zero_def, GaussInt.zero_def]
+            show U.apply (fun _ _ _ => (⟨0, 0⟩ : GaussInt)) = fun _ _ _ => (⟨0, 0⟩ : GaussInt)
+            rw [hz]
             exact ScaledUnitary.apply_zero U
           | succ N ih =>
             intro q
-            change U.apply (QVec.add (q ⟨0, Nat.zero_lt_succ N⟩)
-              (fun x y a => ⟨intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).re),
-                             intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).im)⟩)) = _
-            rw [U.map_add, ih]
+            have hEq : (fun x y a => (⟨intSum (N + 1) (fun i => (q i x y a).re),
+                  intSum (N + 1) (fun i => (q i x y a).im)⟩ : GaussInt)) =
+                QVec.add (q ⟨0, Nat.zero_lt_succ N⟩)
+                  (fun x y a => ⟨intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).re),
+                                 intSum N (fun i => (q ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ x y a).im)⟩) := by
+              rw [QVec.add_def]; funext x y a; rw [GaussInt.add_def]; rfl
+            refine (congrArg U.apply hEq).trans ?_
+            rw [U.map_add, ih, QVec.add_def]
+            funext x y a
+            rw [GaussInt.add_def]
             rfl
         exact hFin (2 ^ (2 * m)) (fun i => h (BitVec.ofFin i))
       cases c0 with
       | none =>
-        change U.apply (qvecDoublePow m (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a))) = _
-        rw [U.map_doublePow, hBv]
+        have hEq : (fun x y a => dfmsCellDecompress m (fun c' => f c' x y a) none) =
+            qvecDoublePow m (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a)) := by
+          rw [qvecDoublePow_def]; rfl
+        refine (congrArg U.apply hEq).trans ?_
+        rw [U.map_doublePow, hBv, qvecDoublePow_def]
         rfl
       | some y0 =>
-        change U.apply (QVec.add
-          (QVec.sub (qvecDoublePow (2 * m) (f (some y0)))
-            (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a)))
-          (qvecDoublePow m (f none))) = _
+        have hEq : (fun x y a => dfmsCellDecompress m (fun c' => f c' x y a) (some y0)) =
+            QVec.add
+              (QVec.sub (qvecDoublePow (2 * m) (f (some y0)))
+                (fun x y a => bvGaussSum (2 * m) (fun z => f (some z) x y a)))
+              (qvecDoublePow m (f none)) := by
+          simp only [QVec.add_def, QVec.sub_def, qvecDoublePow_def]; rfl
+        refine (congrArg U.apply hEq).trans ?_
         rw [U.map_add, U.map_sub, U.map_doublePow, U.map_doublePow, hBv]
+        simp only [QVec.add_def, QVec.sub_def, qvecDoublePow_def]
         rfl
     unfold dfmsDecompress
     rw [hCell (fun c' x y a => dfmsDecompress m k (fun D' => ψ (c', D') x y a) D) c]
@@ -1401,12 +1447,13 @@ theorem dfms_runtime_support (m : Nat) {n cardAnc Q : Nat}
     have hPreZero : dfmsDecompressState (fun D' => dfmsCellXor D' (dfmsDecompressState φ D')) D =
         QVec.zero n (2 * m) cardAnc := by
       funext x y a
+      rw [QVec.zero_apply]
       apply dfms_mux_zero_of_fiber_zero m n (fun D'' y' => φ D'' x y' a) D x y
       intro c' y'
       have hUpd := dfmsRecordedCount_updateAt_le n D x c'
       have hZeroVec := dfms_runtime_support m A t (Nat.le_of_succ_le ht)
         (dfmsUpdateAt n D x c') (by omega)
-      exact congrArg (fun v => v x y' a) hZeroVec
+      exact (congrArg (fun v => v x y' a) hZeroVec).trans (QVec.zero_apply _ _ _ x y' a)
     unfold dfmsAdvStateAt dfmsOracleStep dfmsCoherentStep
     have hLoc : dfmsDecompressState (fun D' => (A.steps ⟨t, ht⟩).apply (dfmsCellXor D' (dfmsDecompressState φ D'))) D =
         (A.steps ⟨t, ht⟩).apply (dfmsDecompressState (fun D' => dfmsCellXor D' (dfmsDecompressState φ D')) D) := by
@@ -1429,7 +1476,7 @@ theorem dfms_database_overflow_mass_zero (m : Nat) {n cardAnc Q : Nat}
     intro D
     by_cases hOver : Q < dfmsRecordedCount n D
     · rw [ite_eq_left hOver, dfms_runtime_support m A Q (Nat.le_refl Q) D hOver]
-      simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+      simp [QVec.stateNormSq_def, QVec.queryWeight_def, QVec.zero_def, GaussInt.normSq_zero, qsum_const]
     · exact ite_eq_right hOver
   rw [dfmsTableSum_congr m n _ _ hPoint, dfmsTableSum_zero]
 
@@ -1479,21 +1526,22 @@ theorem dfms_projective_extraction_disturbance_bound {m n cardAnc : Nat}
     apply congrFun
     apply dfmsDecompress_congr m n
     intro D'
-    unfold ψGood ψBad projectDfmsPred QVec.zero
-    cases P D' <;> apply GaussInt.ext <;> simp [GaussInt.add, GaussInt.zero]
+    unfold ψGood ψBad projectDfmsPred
+    simp only [QVec.zero_def]
+    cases P D' <;> apply GaussInt.ext <;> simp [GaussInt.add_def, GaussInt.zero_def]
   have hPerTable : ∀ D : DfmsTable m n,
       QVec.queryMassOn (event (dfmsToOracle m n D)) (dfmsDecompressState ψ D) ≤
         2 * QVec.queryMassOn (event (dfmsToOracle m n D)) (dfmsDecompressState ψGood D) +
         2 * QVec.stateNormSq (dfmsDecompressState ψBad D) := by
     intro D
-    unfold QVec.queryMassOn QVec.stateNormSq
+    simp only [QVec.queryMassOn_def, QVec.stateNormSq_def]
     rw [← qsum_mul_left, ← qsum_mul_left, ← qsum_add]
     apply qsum_le_qsum
     intro x
     cases event (dfmsToOracle m n D) x
     · simp
     · simp only [↓reduceIte]
-      unfold QVec.queryWeight
+      simp only [QVec.queryWeight_def]
       rw [← qsum_mul_left, ← qsum_mul_left, ← qsum_add]
       apply qsum_le_qsum
       intro y
@@ -1522,7 +1570,7 @@ theorem dfms_projective_extraction_disturbance_bound {m n cardAnc : Nat}
     unfold ψBad
     cases P D
     · simp
-    · simp [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const]
+    · simp [QVec.stateNormSq_def, QVec.queryWeight_def, QVec.zero_def, GaussInt.normSq_zero, qsum_const]
   rw [dfmsTableSum_congr m n _ _ hBadNorm] at hMain
   simpa [dfmsCoherentEventMass, Nat.mul_assoc] using hMain
 
@@ -1566,67 +1614,16 @@ theorem dfms_hem256_online_extraction_disturbance_bound {n cardAnc Q : Nat}
       · simp [hLe]
       · have hGt : Q < dfmsRecordedCount n D := by omega
         rw [ite_eq_right hLe, dfms_runtime_support 128 A Q (Nat.le_refl Q) D hGt]
-        simp only [QVec.stateNormSq, QVec.queryWeight, QVec.zero, GaussInt.normSq_zero, qsum_const,
+        simp only [QVec.stateNormSq_def, QVec.queryWeight_def, QVec.zero_def, GaussInt.normSq_zero, qsum_const,
           Nat.mul_zero]
     · simp
   have h256 : 2 * 128 * n = 256 * n := by omega
   rw [dfmsTableSum_congr 128 n _ _ hTrunc, h256] at hBase
   exact hBase
 
-/-- Concrete `w = 2` (`m = 1`, 2-bit output!) 1-query superposed parity adversary deciding
-    `(H 0).lsb ⊕ (H 1).lsb` across all `16` two-bit 2-address oracles in a single coherent query,
-    using `hadamardQuery2 2 1 : ScaledUnitary 2 2 1`. -/
-def dfmsW2ParityAdv : QuantumAdv 2 2 1 1 where
-  init := fun _ y _ => if y.1 % 2 == 0 then ⟨1, 0⟩ else ⟨-1, 0⟩
-  h_init_pos := by decide
-  steps := fun _ => hadamardQuery2 2 1
-
-/-- Event testing whether output address `x : Fin 2` equals `((H 0).toNat + (H 1).toNat) % 2`. -/
-def dfmsW2ParityEvent (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
-  decide (x.1 = ((H ⟨0, by decide⟩).toNat + (H ⟨1, by decide⟩).toNat) % 2)
-
-/-- Decidable equality on `DfmsTable 1 2` (`25` states: `Option (BitVec 2) × Option (BitVec 2)`). -/
-def dfmsW2TableEq (D₁ D₂ : DfmsTable 1 2) : Bool :=
-  decide (D₁.1 = D₂.1 ∧ D₁.2.1 = D₂.2.1)
-
-/-- Executable `w = 2` (`m = 1`, 2-bit `Option (BitVec 2)` compressed database!) kernel-`decide`
-    witness: after 1 coherent 2-bit query, `dfmsW2ParityAdv` has **0 mass** on `dfmsRecordedCount > 1`,
-    strictly positive mass on recorded `some (y : BitVec 2)` entries, and **100% (`256 / 256`)**
-    undisturbed parity success both in `uniformOracleSum 2 2` and after `dfmsDecompressState`! -/
-theorem dfms_w2_coherent_runtime_witness :
-    uniformOracleSum 2 2 (fun H =>
-      QVec.queryMassOn (dfmsW2ParityEvent H) (runQuantumAdv dfmsW2ParityAdv H)) = 256 ∧
-    quantumExperimentTotal dfmsW2ParityAdv = 256 ∧
-    dfmsTableSum 1 2 (fun D =>
-      if 1 < dfmsRecordedCount 2 D then
-        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
-      else 0) = 0 ∧
-    0 < dfmsTableSum 1 2 (fun D =>
-      if dfmsRecordedCount 2 D == 1 then
-        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
-      else 0) ∧
-    dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
-      (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) =
-      4 ^ 10 * 256 := by
-  decide +kernel
-
-/-- `#tooth` negative control at `w = 2` (`Option (BitVec 2)`): naively collapsing the `DfmsTable 1 2`
-    database (`projectDfmsPred (dfmsW2TableEq D)`) before decompression destroys coherent cross-address
-    interference and drops `dfmsW2ParityEvent` mass from `4^10 * 256` (`100%`) strictly down to
-    `4^10 * 128` (`50%`), demonstrating why `dfms_projective_extraction_disturbance_bound` is required! -/
-theorem tooth_dfms_w2_raw_database_measurement_disturbs :
-    ∃ measuredMass : Nat,
-      measuredMass = dfmsTableSum 1 2 (fun D =>
-        dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
-          (dfmsDecompressState
-            (projectDfmsPred (dfmsW2TableEq D)
-              (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))))) ∧
-      measuredMass = 4 ^ 10 * 128 ∧
-      measuredMass ≠ dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
-        (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) :=
-  ⟨4 ^ 10 * 128, by decide +kernel, rfl, by decide +kernel⟩
-
-
+/- The executed `w = 2` runtime witness `dfms_w2_coherent_runtime_witness` and the raw-measurement tooth
+   `tooth_dfms_w2_raw_database_measurement_disturbs` (kernel runs of `dfmsAdvStateAt` on a concrete
+   Hadamard adversary) are in `Qsag.Tests.QromCoherentOracleTests`. -/
 
 /-! ## §2. Adaptive State-Restoration Games & Coherent Joint `(PoW × Challenge)` QROM Reduction -/
 
@@ -1936,7 +1933,7 @@ def QromJointPowRbrSpec.toQromRbrRound {cardX bPow wChal : Nat}
       intro j
       unfold QromJointPowRbrSpec.isLiveAfter
       rw [spec.chalFlip_local H x (BitVec.ofFin j)]
-      simp only [reprogramOracle, ↓reduceIte]
+      simp only [reprogramOracle_def, ↓reduceIte]
     have hCongr :
         qsum (2 ^ (bPow + wChal)) (fun j =>
           if spec.isLiveAfter (reprogramOracle H x (BitVec.ofFin j)) x = true then 1 else 0) =
@@ -1988,6 +1985,32 @@ theorem qrom_joint_pow_multiRound_success_bound
   rw [← hDen]
   exact hMain
 
+/-- Copy of `qsum` with a body the kernel can evaluate in this module. -/
+private def qsumK : (n : Nat) → (Fin n → Nat) → Nat
+  | 0, _ => 0
+  | n + 1, f => f ⟨0, Nat.zero_lt_succ n⟩ + qsumK n (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+
+private theorem qsum_eq_qsumK : ∀ (n : Nat) (f : Fin n → Nat), qsum n f = qsumK n f
+  | 0, f => qsum_zero f
+  | n + 1, f =>
+    (qsum_succ n f).trans
+      (congrArg (f ⟨0, Nat.zero_lt_succ n⟩ + ·)
+        (qsum_eq_qsumK n (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)))
+
+/-- Copy of `uniformOracleSum` with a body the kernel can evaluate in this module. -/
+private def uniformOracleSumK (w : Nat) : (n : Nat) → ((Fin n → BitVec w) → Nat) → Nat
+  | 0, f => f Fin.elim0
+  | n + 1, f => qsumK (2 ^ w) (fun j =>
+      uniformOracleSumK w n (fun H => f (Fin.cases (BitVec.ofFin j) H)))
+
+private theorem uniformOracleSum_eq_K (w : Nat) :
+    ∀ (n : Nat) (f : (Fin n → BitVec w) → Nat), uniformOracleSum w n f = uniformOracleSumK w n f
+  | 0, f => uniformOracleSum_zero w f
+  | n + 1, f =>
+    (uniformOracleSum_succ w n f).trans
+      ((qsum_eq_qsumK _ _).trans
+        (congrArg (qsumK (2 ^ w)) (funext fun _ => uniformOracleSum_eq_K w n _)))
+
 /-- Buggy post-squeeze PoW checker: squeezes `chal` from `H_chal` BEFORE absorbing the grinding
     nonce, so `nonce : Fin numNonces` only searches `H_pow nonce = 0#bPow` without changing `chal`! -/
 def buggyPostSqueezePowAccept {wChal bPow numNonces : Nat}
@@ -2008,7 +2031,13 @@ theorem tooth_post_squeeze_pow_forfeits_reduction :
                (fun ch => decide (ch = 0#1)) (BitVec.ofFin c) H_pow = true then 1 else 0)) ∧
       winCount = 3 ∧
       ¬ RatBound.le ⟨winCount, 2 * (2 ^ 1) ^ 2, by decide⟩ ⟨1, 2 ^ 1 * 2 ^ 1, by decide⟩ :=
-  ⟨3, by decide +kernel, rfl, by decide +kernel⟩
+  ⟨3, by
+      have hU : ∀ f : (Fin 2 → BitVec 1) → Nat, uniformOracleSum 1 2 f = uniformOracleSumK 1 2 f :=
+        uniformOracleSum_eq_K 1 2
+      rw [qsum_eq_qsumK]
+      simp only [hU]
+      decide +kernel,
+    rfl, by decide +kernel⟩
 
 
 /-! ### §2.3 End-to-End Composition Over `verifyHemOpeningBatch` (`HemExtractedOpeningBridge`) -/
@@ -2046,14 +2075,14 @@ theorem measured_hem_qrom_bcs_end_to_end_bound {cardX w cardAnc Q k : Nat}
     intro rs
     induction rs with
     | nil =>
-      unfold measuredEventMass
+      simp only [measuredEventMass_def]
       have hz : ∀ H : Fin cardX → BitVec w,
           sumLogs cardX Q (fun xs => QVec.queryMassOn (fun _ => false)
             (measuredStateAt A H Q (Nat.le_refl Q) xs)) = 0 := by
         intro H
         have hp : ∀ xs, QVec.queryMassOn (fun _ => false)
             (measuredStateAt A H Q (Nat.le_refl Q) xs) = 0 := by
-          intro xs; simp [QVec.queryMassOn, qsum_const]
+          intro xs; simp [QVec.queryMassOn_def, qsum_const]
         rw [show (fun xs => QVec.queryMassOn (fun _ => false)
           (measuredStateAt A H Q (Nat.le_refl Q) xs)) = fun _ => 0 * 0 from funext hp]
         rw [sumLogs_mul, Nat.zero_mul]
@@ -2069,10 +2098,11 @@ theorem measured_hem_qrom_bcs_end_to_end_bound {cardX w cardAnc Q k : Nat}
       ((List.finRange n).map f).sum = qsum n f := by
     intro n
     induction n with
-    | zero => intro _; rfl
+    | zero => intro _; rw [qsum_zero]; rfl
     | succ n ih =>
       intro f
       simp only [List.finRange_succ, List.map_cons, List.sum_cons, List.map_map]
+      rw [qsum_succ]
       exact congrArg (f ⟨0, Nat.zero_lt_succ n⟩ + ·) (ih (fun i => f i.succ))
   have hExtLe : measuredEventMass A
       (fun H xs x => verifyHemAffineWhir inst (decode x (extractedOpeningValues L slots H xs x))) ≤
@@ -2254,7 +2284,7 @@ inductive HemOptimizedQromSchedule where
 
 /-- Stage query count `q_j` for blowup `2 ^ logBlowup` (`logBlowup ∈ {2, 4, 6, 8}`) under each
     proved cheaper `Hem` QROM schedule. -/
-def HemOptimizedQromSchedule.minQueries (sched : HemOptimizedQromSchedule) (logBlowup : Nat) : Nat :=
+@[expose] def HemOptimizedQromSchedule.minQueries (sched : HemOptimizedQromSchedule) (logBlowup : Nat) : Nat :=
   match sched with
   | .unitaryPow16 =>
     if logBlowup ≤ 2 then 200 else if logBlowup ≤ 4 then 101 else if logBlowup ≤ 6 then 69 else 52
@@ -2274,7 +2304,7 @@ def HemOptimizedQromSchedule.powBits : HemOptimizedQromSchedule → Nat
 
 /-- Pure distinct-fiber query target bits certified on every non-exhaustive stage of `nv ∈ 2..=24`
     for each schedule (`198`, `200`, `204`, `214`). -/
-def HemOptimizedQromSchedule.pureQueryTargetBits : HemOptimizedQromSchedule → Nat
+@[expose] def HemOptimizedQromSchedule.pureQueryTargetBits : HemOptimizedQromSchedule → Nat
   | .unitaryPow16 => 198
   | .cdhzPow16At2pow38 => 200
   | .cdhz320Pow16At2pow40 => 204
@@ -2284,7 +2314,7 @@ def HemOptimizedQromSchedule.pureQueryTargetBits : HemOptimizedQromSchedule → 
     four cheaper schedules simultaneously across EVERY `num_vars ∈ 2..=24`.
     Every row for `num_vars ∈ 18..=24` (`K = 4..128` shard sizes and recursive hierarchy levels)
     is **verbatim identical** to `hemJohnsonQromWitnessTable` (`affine_schedule.rs::WITNESSES`)! -/
-def hemOptimizedQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
+@[expose] def hemOptimizedQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
   [ (7, 1, 98, 1, 25),
     (8, 1, 98, 1, 25),
     (9, 0, 196, 1, 22),
@@ -2335,10 +2365,10 @@ def hemOptimizedQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
     (24, 2, 17484, 16, 5228),
     (24, 3, 4482, 16, 2067) ]
 
-def hemOptimizedQromTableRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat × Nat) :=
+@[expose] def hemOptimizedQromTableRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat × Nat) :=
   hemOptimizedQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage)
 
-def hemOptimizedStageExhaustive (sched : HemOptimizedQromSchedule) (g : HemStageGeom) : Bool :=
+@[expose] def hemOptimizedStageExhaustive (sched : HemOptimizedQromSchedule) (g : HemStageGeom) : Bool :=
   decide (g.n ≤ sched.minQueries g.logBlowup)
 
 def hemOptimizedStageWitness (sched : HemOptimizedQromSchedule) (nv : Nat) (g : HemStageGeom) :
@@ -2367,6 +2397,270 @@ def hemOptimizedStageWitnesses (sched : HemOptimizedQromSchedule) (nv : Nat) :
 def hemOptimizedQueryBounds (sched : HemOptimizedQromSchedule) (nv : Nat) : List RatBound :=
   (hemOptimizedStageWitnesses sched nv).map whirAffinePureQueryBoundOrOne
 
+/-! ### Kernel-evaluable copies of the `Coding.Cwyz26` checker and geometry
+
+`Coding.Cwyz26`, `Oracle.Qrom` and the budget modules do not expose the bodies of the witness
+checker, the stage-geometry mirror and the search-factor bounds, so the kernel cannot evaluate
+them in this module. Each copy below has the same body as the definition it mirrors and is proved
+equal to it from the exported defining equations; the certificates of this section rewrite to the
+copies and are then evaluated by the kernel. -/
+
+private def interpUnknownsK (mA_sub_D d D : Nat) : Nat → Nat
+  | 0 => mA_sub_D * (D + 1)
+  | j + 1 => interpUnknownsK mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1)
+
+private theorem interpUnknownsAux_eq_K : interpUnknownsAux = interpUnknownsK := by
+  funext a d D j
+  induction j with
+  | zero => exact interpUnknownsAux_zero a d D
+  | succ j ih =>
+    exact (interpUnknownsAux_succ a d D j).trans
+      (congrArg (· + (a - d * (j + 1)) * (D - (j + 1) + 1)) ih)
+
+private def interpEquationsK (m D : Nat) : Nat → Nat
+  | 0 => m * (D + 1)
+  | s + 1 => interpEquationsK m D s + (m - (s + 1)) * (D - (s + 1) + 1)
+
+private theorem interpEquationsAux_eq_K : interpEquationsAux = interpEquationsK := by
+  funext m D s
+  induction s with
+  | zero => exact interpEquationsAux_zero m D
+  | succ s ih =>
+    exact (interpEquationsAux_succ m D s).trans
+      (congrArg (· + (m - (s + 1)) * (D - (s + 1) + 1)) ih)
+
+private def natCeilDivK (a b : Nat) : Nat := (a + b - 1) / b
+
+private theorem natCeilDiv_eq_K : natCeilDiv = natCeilDivK := by
+  funext a b
+  exact natCeilDiv_def a b
+
+private def checkWhirAffineWitnessK (w : WhirAffineWitness) (q : Nat) : Bool :=
+  let mA := w.m * w.A
+  let M := Nat.min w.D ((mA - w.D - 1) / w.d)
+  let K := Nat.min (w.m - 1) M
+  let unknowns := interpUnknownsK (mA - w.D) w.d w.D M
+  let eqsPerPoint := interpEquationsK w.m w.D K
+  let nonpersCeil := w.D * w.D +
+    natCeilDivK (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+               ((w.A - w.B) * (w.A - w.B))
+  decide (
+    1 ≤ w.sFolds ∧
+    2 ≤ w.n ∧
+    1 ≤ w.d ∧
+    w.d + 2 ≤ w.B ∧
+    w.B < w.A ∧
+    w.A + w.sFolds ≤ w.n ∧
+    1 ≤ w.m ∧
+    1 ≤ w.D ∧
+    w.D + 1 + w.d ≤ mA ∧
+    1 ≤ M ∧
+    w.n * eqsPerPoint < unknowns ∧
+    w.n * (w.d + 1) < w.B * w.B ∧
+    w.n * w.d < (w.A - 1) * (w.A - 1) ∧
+    w.n * (w.n - 1) / 2 ≤ q ∧
+    nonpersCeil ≤ q ∧
+    w.queries ≤ w.n ∧
+    affineFallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
+      affineFallingFactorial w.n w.queries
+  )
+
+private theorem checkWhirAffineWitness_eq_K : checkWhirAffineWitness = checkWhirAffineWitnessK := by
+  funext w q
+  rw [checkWhirAffineWitness_def, interpUnknownsAux_eq_K, interpEquationsAux_eq_K, natCeilDiv_eq_K]
+    <;> rfl
+
+private def whirAffineStageSimpleNumK (w : WhirAffineWitness) : Nat :=
+  w.sFolds * ((w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1)) +
+    2 * ((w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)) + 1)
+
+private theorem whirAffineStageSimpleNum_eq_K :
+    whirAffineStageSimpleNum = whirAffineStageSimpleNumK := by
+  funext w
+  exact whirAffineStageSimpleNum_def w
+
+private def hemStageGeometryK (nv : Nat) : List (Nat × Nat) :=
+  if nv ≤ 6 then
+    let es := if nv ≤ 3 then 1 else 2
+    [(4, nv - es)]
+  else if nv ≤ 11 then
+    let es := if nv ≤ 8 then 3 else 4
+    let rem := nv - es
+    let s0 := (rem + 1) / 2
+    [(2, s0), (4, rem - s0)]
+  else if nv ≤ 16 then
+    let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
+    let rem := nv - es
+    let s0 := Nat.min 4 (rem - 4)
+    let s1 := (rem - s0) / 2
+    [(2, s0), (4, s1), (6, rem - s0 - s1)]
+  else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
+  else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
+  else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
+  else [(2, 6), (4, 4), (6, 3), (8, 3)]
+
+private theorem hemStageGeometry_eq_K : hemStageGeometry = hemStageGeometryK := by
+  funext nv
+  exact hemStageGeometry_def nv
+
+private def hemStageGeomsAuxK : Nat → Nat → List (Nat × Nat) → List HemStageGeom
+  | _, _, [] => []
+  | idx, rem, (lb, sv) :: rest =>
+    { stageIdx := idx, logBlowup := lb, stepVars := sv,
+      n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
+      hemStageGeomsAuxK (idx + 1) (rem - sv) rest
+
+private theorem hemStageGeomsAux_eq_K :
+    ∀ (l : List (Nat × Nat)) (idx rem : Nat),
+      hemStageGeomsAux idx rem l = hemStageGeomsAuxK idx rem l
+  | [], idx, rem => hemStageGeomsAux_nil idx rem
+  | (lb, sv) :: rest, idx, rem =>
+    (hemStageGeomsAux_cons idx rem lb sv rest).trans
+      (congrArg
+        (List.cons { stageIdx := idx, logBlowup := lb, stepVars := sv,
+                     n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 })
+        (hemStageGeomsAux_eq_K rest (idx + 1) (rem - sv)))
+
+private def hemStageGeomsK (nv : Nat) : List HemStageGeom :=
+  hemStageGeomsAuxK 0 nv (hemStageGeometryK nv)
+
+private theorem hemStageGeoms_eq_K : hemStageGeoms = hemStageGeomsK := by
+  funext nv
+  rw [hemStageGeoms_def, hemStageGeometry_eq_K]
+  exact hemStageGeomsAux_eq_K _ _ _
+
+private theorem hemJohnsonQromTableRow_eq_find :
+    hemJohnsonQromTableRow = fun nv stage =>
+      hemJohnsonQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage) := by
+  funext nv stage
+  exact hemJohnsonQromTableRow_def nv stage
+
+private def hemOptimizedStageCoveredK (sched : HemOptimizedQromSchedule) (q nv : Nat)
+    (g : HemStageGeom) : Bool :=
+  if hemOptimizedStageExhaustive sched g = true then
+    (hemOptimizedQromTableRow nv g.stageIdx).isNone
+  else
+    match hemOptimizedStageWitness sched nv g with
+    | none => false
+    | some w => checkWhirAffineWitnessK w q && decide (whirAffineStageSimpleNumK w + 1 < 1900)
+
+private theorem hemOptimizedStageCovered_eq_K :
+    hemOptimizedStageCovered = hemOptimizedStageCoveredK := by
+  funext sched q nv g
+  unfold hemOptimizedStageCovered hemOptimizedStageCoveredK
+  rw [checkWhirAffineWitness_eq_K, whirAffineStageSimpleNum_eq_K] <;> rfl
+
+private theorem ratBoundOne_eq : RatBound.one = ⟨1, 1, Nat.zero_lt_one⟩ := by
+  have h1 := RatBound.one_num
+  have h2 := RatBound.one_den
+  generalize RatBound.one = r at h1 h2
+  obtain ⟨n, d, hp⟩ := r
+  dsimp only at h1 h2
+  subst h1
+  subst h2
+  rfl
+
+private def pureQueryBoundOrOneK (w : WhirAffineWitness) : RatBound :=
+  if hq : w.queries ≤ w.n then
+    ⟨affineFallingFactorial (w.A + w.sFolds) w.queries, affineFallingFactorial w.n w.queries,
+     affineFallingFactorial_pos w.n w.queries hq⟩
+  else ⟨1, 1, Nat.zero_lt_one⟩
+
+private theorem whirAffinePureQueryBoundOrOne_eq_K :
+    whirAffinePureQueryBoundOrOne = pureQueryBoundOrOneK := by
+  funext w
+  rw [whirAffinePureQueryBoundOrOne_def]
+  unfold pureQueryBoundOrOneK
+  by_cases hq : w.queries ≤ w.n
+  · simp only [hq, ↓reduceDIte]
+    exact whirAffinePureQueryBound_def w hq
+  · simp only [hq, ↓reduceDIte]
+    exact ratBoundOne_eq
+
+private def hemOptimizedQueryBoundsK (sched : HemOptimizedQromSchedule) (nv : Nat) :
+    List RatBound :=
+  ((hemStageGeomsK nv).filterMap (fun g =>
+    if hemOptimizedStageExhaustive sched g = true then none
+    else hemOptimizedStageWitness sched nv g)).map pureQueryBoundOrOneK
+
+private theorem hemOptimizedQueryBounds_eq_K :
+    hemOptimizedQueryBounds = hemOptimizedQueryBoundsK := by
+  funext sched nv
+  unfold hemOptimizedQueryBounds hemOptimizedStageWitnesses hemOptimizedQueryBoundsK
+  rw [hemStageGeoms_eq_K, whirAffinePureQueryBoundOrOne_eq_K]
+
+private theorem ratBound_eq_of_num_den :
+    ∀ {a b : RatBound}, a.num = b.num → a.den = b.den → a = b
+  | ⟨_, _, _⟩, ⟨_, _, _⟩, rfl, rfl => rfl
+
+private theorem ratBound_list_eq_of_num_den_eq :
+    ∀ (xs ys : List RatBound),
+      xs.map (fun b => (b.num, b.den)) = ys.map (fun b => (b.num, b.den)) → xs = ys
+  | [], [], _ => rfl
+  | [], _ :: _, h => by
+    simp only [List.map_cons, List.map_nil] at h
+    exact absurd h.symm (List.cons_ne_nil _ _)
+  | _ :: _, [], h => by
+    simp only [List.map_cons, List.map_nil] at h
+    exact absurd h (List.cons_ne_nil _ _)
+  | x :: xs, y :: ys, h => by
+    have h' := List.cons.inj h
+    have hp := Prod.mk.inj h'.1
+    rw [ratBound_eq_of_num_den hp.1 hp.2, ratBound_list_eq_of_num_den_eq xs ys h'.2]
+
+/-- The five conditional RBR inputs `(4182, 1644, 824, 489, 792) / p^4` as a literal list. -/
+private def hemV6FiveRoundRbrBoundsK : List RatBound :=
+  [4182, 1644, 824, 489, 792].map
+    (fun n => ⟨n, goldilocksPrime ^ 4, Nat.pow_pos (by decide)⟩)
+
+private theorem hemV6FiveRoundRbrBounds_eq_K :
+    hemV6FiveRoundRbrBounds = hemV6FiveRoundRbrBoundsK := by
+  apply ratBound_list_eq_of_num_den_eq
+  rw [hemV6FiveRoundRbrBounds_eq_deployed, goldilocksExt4Card_def] <;> rfl
+
+private def powScaledFsQromCompilerBoundK
+    (Q numRoots secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  RatBound.add
+    (RatBound.sumList (rbrChallengeBounds.map (dfmRoundScale Q)))
+    (RatBound.add
+      (RatBound.scale numRoots
+        (RatBound.add ⟨8 * 1 * (Q + 1) ^ 2, 2 ^ secBits, Nat.two_pow_pos secBits⟩
+          ⟨8 * (Q + 1) ^ 3, 2 ^ secBits, Nat.two_pow_pos secBits⟩))
+      (RatBound.sumList (queryStageBounds.map (fun b =>
+        RatBound.scale (8 * (Q + 1) ^ 2) (powDivBound stagePowBits b)))))
+
+private theorem powScaledFsQromCompilerBound_eq_K
+    (Q numRoots secBits stagePowBits : Nat) (rbr qb : List RatBound) :
+    powScaledFsQromCompilerBound Q numRoots secBits stagePowBits rbr qb =
+      powScaledFsQromCompilerBoundK Q numRoots secBits stagePowBits rbr qb := by
+  unfold powScaledFsQromCompilerBound powScaledFsQromCompilerBoundK qromMerkleOnlineExtractBound
+  simp only [quantumGroverGrindingBound_def, quantumGroverSingleTargetBound_def,
+    quantumZhandryMultiTargetBound_def, quantumBhtCollisionBound_def]
+
+private def cdhz320BhtCompilerBoundK
+    (Q numRoots secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) : RatBound :=
+  let k := rbrChallengeBounds.length + queryStageBounds.length
+  let rbrSum := RatBound.add
+    (RatBound.sumList rbrChallengeBounds)
+    (RatBound.sumList (queryStageBounds.map (powDivBound stagePowBits)))
+  RatBound.add
+    (RatBound.scale (4 * (80 * (Q + k + 1) * (Q + k))) rbrSum)
+    (RatBound.scale numRoots
+      (RatBound.add ⟨8 * 1 * (Q + 1) ^ 2, 2 ^ secBits, Nat.two_pow_pos secBits⟩
+        ⟨8 * (Q + 1) ^ 3, 2 ^ secBits, Nat.two_pow_pos secBits⟩))
+
+private theorem cdhz320BhtCompilerBound_eq_K
+    (Q numRoots secBits stagePowBits : Nat) (rbr qb : List RatBound) :
+    cdhz320BhtCompilerBound Q numRoots secBits stagePowBits rbr qb =
+      cdhz320BhtCompilerBoundK Q numRoots secBits stagePowBits rbr qb := by
+  unfold cdhz320BhtCompilerBound cdhz320BhtCompilerBoundK qromMerkleOnlineExtractBound
+  simp only [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def,
+    quantumBhtCollisionBound_def]
+
 /-- **Universal Coverage Certificate Across All Four Cheaper Schedules (`nv ∈ 2..=24`)**:
     1. Every canonical stage of every `nv ∈ 2..=24` passes `checkWhirAffineWitness` at `q = p^4`
        under ALL FOUR schedules (`unitaryPow16`, `cdhzPow16At2pow38`, `cdhz320Pow16At2pow40`,
@@ -2382,22 +2676,27 @@ theorem hemOptimizedSchedule_covers_all_canonical_stages :
   have hU16 : ((List.range 23).all fun i =>
       (hemStageGeoms (i + 2)).all
         (hemOptimizedStageCovered .unitaryPow16 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    rw [hemStageGeoms_eq_K, hemOptimizedStageCovered_eq_K]
     decide +kernel
   have hC38 : ((List.range 23).all fun i =>
       (hemStageGeoms (i + 2)).all
         (hemOptimizedStageCovered .cdhzPow16At2pow38 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    rw [hemStageGeoms_eq_K, hemOptimizedStageCovered_eq_K]
     decide +kernel
   have hC40 : ((List.range 23).all fun i =>
       (hemStageGeoms (i + 2)).all
         (hemOptimizedStageCovered .cdhz320Pow16At2pow40 (goldilocksPrime ^ 4) (i + 2))) = true := by
+    rw [hemStageGeoms_eq_K, hemOptimizedStageCovered_eq_K]
     decide +kernel
   have hZ0 : ((List.range 23).all fun i =>
       (hemStageGeoms (i + 2)).all
         (hemOptimizedStageCovered .unitaryZeroPow (goldilocksPrime ^ 4) (i + 2))) = true := by
+    rw [hemStageGeoms_eq_K, hemOptimizedStageCovered_eq_K]
     decide +kernel
   have hParity : ((List.range 7).all fun i =>
       (List.range 4).all fun s =>
         decide (hemOptimizedQromTableRow (i + 18) s = hemJohnsonQromTableRow (i + 18) s)) = true := by
+    rw [hemJohnsonQromTableRow_eq_find, hemJohnsonQromWitnessTable_def]
     decide +kernel
   refine ⟨?_, ?_⟩
   · intro sched nv h2 h24 g hg
@@ -2475,14 +2774,12 @@ private theorem powScaledFsQromCompilerBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ Q
     · unfold qromMerkleOnlineExtractBound
       apply scale_mono_right numRoots
       apply RatBound.add_le_add
-      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
-        dsimp only
+      · (unfold RatBound.le; simp only [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def])
         exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
-      · unfold RatBound.le quantumBhtCollisionBound
-        dsimp only
+      · (unfold RatBound.le; simp only [quantumBhtCollisionBound_def])
         exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
     · apply sumList_mono_pt (by simp)
-      intro i; simp only [List.get_eq_getElem, List.getElem_map]
+      intro i; simp only [List.get_eq_getElem, List.getElem_map, quantumGroverGrindingBound_def]
       exact scale_mono_left hGr _
 
 private theorem cdhzSnargEnvelopeBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ QMax)
@@ -2531,11 +2828,9 @@ private theorem cdhz320BhtCompilerBound_mono_Q {Q QMax : Nat} (hQ : Q ≤ QMax)
   · unfold qromMerkleOnlineExtractBound
     apply scale_mono_right numRoots
     apply RatBound.add_le_add
-    · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
-      dsimp only
+    · (unfold RatBound.le; simp only [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def])
       exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
-    · unfold RatBound.le quantumBhtCollisionBound
-      dsimp only
+    · (unfold RatBound.le; simp only [quantumBhtCollisionBound_def])
       exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
 
 /-- **Schedule 1 Soundness (`hemNv24_unitaryPow16_sound_up_to_2pow40`)**:
@@ -2552,6 +2847,7 @@ theorem hemNv24_unitaryPow16_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 40
   have hTop : strictlyMoreThanBits 128
       (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 16
         hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)) := by
+    rw [powScaledFsQromCompilerBound_eq_K, hemV6FiveRoundRbrBounds_eq_K, hemOptimizedQueryBounds_eq_K]
     decide +kernel
   have hLe := powScaledFsQromCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 16
     hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryPow16 24)
@@ -2573,6 +2869,7 @@ theorem hemNv24_cdhz_sound_up_to_2pow38 (Q wFs wVc : Nat)
   have hTop : strictlyMoreThanBits 128
       (cdhzSnargEnvelopeBound (2 ^ 38) 426 20 256 16
         hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) := by
+    rw [hemV6FiveRoundRbrBounds_eq_K, hemOptimizedQueryBounds_eq_K]
     decide +kernel
   have hPartLe := cdhzSnargPartitionBound_le_envelope Q wFs wVc 426 20 256 16 hPart
     hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)
@@ -2594,6 +2891,7 @@ theorem hemNv24_cdhz320_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 40) :
   have hTop : strictlyMoreThanBits 128
       (cdhz320BhtCompilerBound (2 ^ 40 - 1) 5 256 16
         hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)) := by
+    rw [cdhz320BhtCompilerBound_eq_K, hemV6FiveRoundRbrBounds_eq_K, hemOptimizedQueryBounds_eq_K]
     decide +kernel
   have hLe := cdhz320BhtCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 16
     hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhz320Pow16At2pow40 24)
@@ -2613,6 +2911,7 @@ theorem hemNv24_unitaryZeroPow_sound_up_to_2pow40 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 
   have hTop : strictlyMoreThanBits 128
       (powScaledFsQromCompilerBound (2 ^ 40 - 1) 5 256 0
         hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)) := by
+    rw [powScaledFsQromCompilerBound_eq_K, hemV6FiveRoundRbrBounds_eq_K, hemOptimizedQueryBounds_eq_K]
     decide +kernel
   have hLe := powScaledFsQromCompilerBound_mono_Q (Q := Q) (QMax := 2 ^ 40 - 1) (by omega) 5 256 0
     hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .unitaryZeroPow 24)
@@ -2645,7 +2944,11 @@ theorem tooth_linear_sr_query_schedule_unsound_in_qrom :
       strictlyMoreThanBits 128
         (classicalStateRestorationBcsBound Q 5 256 16
           hemV6FiveRoundRbrBounds hemNv24LinearSrFallacyQueryBounds) :=
-  ⟨2 ^ 40 - 1, rfl, by decide +kernel⟩
+  ⟨2 ^ 40 - 1, rfl, by
+    rw [powScaledFsQromCompilerBound_eq_K, hemV6FiveRoundRbrBounds_eq_K]
+    unfold hemNv24LinearSrFallacyQueryBounds
+    rw [whirAffineStageWitnesses_qrom_eq_deployed.2, whirAffinePureQueryBoundOrOne_eq_K]
+    decide +kernel⟩
 
 /-- `#tooth`: `[CDHZ25]`'s raw Theorem 8.3 cubic Merkle constant (`4 * 160 * Q * (2Q+1)^2 / 2^256`)
     crosses `2^-128` at `Q = 2^39`, certifying tightness of the `Q ≤ 2^38` budget in
@@ -2654,6 +2957,7 @@ theorem tooth_cdhz_raw_merkle_fails_at_2pow39 :
     ¬ atLeastBits 128
       (cdhzSnargPartitionBound (2 ^ 39) (2 ^ 38) (2 ^ 38) 426 20 256 16
         hemV6FiveRoundRbrBounds (hemOptimizedQueryBounds .cdhzPow16At2pow38 24)) := by
+  rw [hemV6FiveRoundRbrBounds_eq_K, hemOptimizedQueryBounds_eq_K]
   decide +kernel
 
 /-- Inhabitedness witness for `hemNv24_unitaryPow16_sound_up_to_2pow40` at full `Q = 2^40 - 1`
@@ -2708,8 +3012,6 @@ theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
   Qsag.dfms_salted_domain_budget_zero_of_overflow
   Qsag.dfms_projective_extraction_disturbance_bound
   Qsag.dfms_hem256_online_extraction_disturbance_bound
-  Qsag.dfms_w2_coherent_runtime_witness
-  Qsag.tooth_dfms_w2_raw_database_measurement_disturbs
   Qsag.classical_state_restoration_tree_bound
   Qsag.classical_state_restoration_soundness
   Qsag.classical_sr_sliced184_sound_at_2pow56
@@ -2727,7 +3029,6 @@ theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
   Qsag.tooth_linear_sr_query_schedule_unsound_in_qrom
   Qsag.tooth_cdhz_raw_merkle_fails_at_2pow39
 
-#tooth_pair dfms_projective_extraction_disturbance_bound vs tooth_dfms_w2_raw_database_measurement_disturbs
 #tooth_pair qrom_joint_pow_multiRound_success_bound vs tooth_post_squeeze_pow_forfeits_reduction
 #tooth_pair hemNv24_unitaryPow16_sound_up_to_2pow40 vs tooth_linear_sr_query_schedule_unsound_in_qrom
 #tooth_pair hemNv24_cdhz_sound_up_to_2pow38 vs tooth_cdhz_raw_merkle_fails_at_2pow39
@@ -2735,6 +3036,57 @@ theorem inhabited_hemNv24_unitaryZeroPow_at_2pow40 :
 #verify_inhabited hemNv24_unitaryPow16_sound_up_to_2pow40 inhabited_hemNv24_unitaryPow16_at_2pow40
 #verify_inhabited hemNv24_cdhz_sound_up_to_2pow38 inhabited_hemNv24_cdhz_at_2pow38
 #verify_inhabited hemNv24_unitaryZeroPow_sound_up_to_2pow40 inhabited_hemNv24_unitaryZeroPow_at_2pow40
+
+end Qsag
+end
+
+public section
+namespace Qsag
+/-! Calculation equations for profile arithmetic outside this module. -/
+theorem cdhzPqsrBound_def (t wFs k : Nat) (rbrSum : RatBound) :
+    cdhzPqsrBound t wFs k rbrSum =
+  RatBound.scale (80 * (t + k + 1) * (wFs + k)) rbrSum := by rfl
+
+theorem cdhzSaltedMerkleOfflineBound_def (tOff wVc qV logMaxLeaf secBits : Nat) :
+    cdhzSaltedMerkleOfflineBound tOff wVc qV logMaxLeaf secBits =
+  ⟨160 * wVc * tOff ^ 2 + 16 * qV * logMaxLeaf, 2 ^ secBits, Nat.two_pow_pos secBits⟩ := by rfl
+
+theorem cdhzSaltedMerkleOnlineBound_def (tOn wVc secBits : Nat) :
+    cdhzSaltedMerkleOnlineBound tOn wVc secBits =
+  ⟨240 * wVc * tOn ^ 2, 2 ^ secBits, Nat.two_pow_pos secBits⟩ := by rfl
+
+theorem cdhzSaltedMerkleComBound_def (t secBits : Nat) :
+    cdhzSaltedMerkleComBound t secBits =
+  ⟨240 * (t + 1), 2 ^ secBits, Nat.two_pow_pos secBits⟩ := by rfl
+
+theorem cdhzSnargPartitionBound_def (Q wFs wVc qV logMaxLeaf secBits stagePowBits : Nat)
+    (rbrChallengeBounds : List RatBound)
+    (queryStageBounds : List RatBound) :
+    cdhzSnargPartitionBound Q wFs wVc qV logMaxLeaf secBits stagePowBits rbrChallengeBounds queryStageBounds =
+  let k := rbrChallengeBounds.length + queryStageBounds.length
+  let rbrSum := RatBound.add
+    (RatBound.sumList rbrChallengeBounds)
+    (RatBound.sumList (queryStageBounds.map (powDivBound stagePowBits)))
+  let sr4 := RatBound.scale 4 (cdhzPqsrBound Q wFs k rbrSum)
+  let off4 := RatBound.scale 4 (cdhzSaltedMerkleOfflineBound (2 * Q + 1) wVc qV logMaxLeaf secBits)
+  let on4 := RatBound.scale 4 (cdhzSaltedMerkleOnlineBound (Q + 1 + qV + k) wVc secBits)
+  let comTerm := RatBound.scale (2 * qV ^ 2) (cdhzSaltedMerkleComBound Q secBits)
+  RatBound.add sr4 (RatBound.add off4 (RatBound.add on4 comTerm)) := by rfl
+
+/-- The four concrete witness rows used by the deployed zero-PoW 24-variable profile. -/
+theorem hemOptimizedStageWitnesses_unitaryZeroPow_24 :
+    hemOptimizedStageWitnesses .unitaryZeroPow 24 =
+      [ { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+          m := 64, D := 27164, queries := 216, queryTargetBits := 214 },
+        { n := 262144, d := 16386, sFolds := 4, A := 66992, B := 66991,
+          m := 32, D := 11069, queries := 109, queryTargetBits := 214 },
+        { n := 131072, d := 2050, sFolds := 3, A := 17484, B := 17483,
+          m := 16, D := 5228, queries := 74, queryTargetBits := 214 },
+        { n := 65536, d := 258, sFolds := 3, A := 4482, B := 4481,
+          m := 16, D := 2067, queries := 56, queryTargetBits := 214 } ] := by
+  unfold hemOptimizedStageWitnesses
+  rw [hemStageGeoms_24_eq]
+  rfl
 
 end Qsag
 end
