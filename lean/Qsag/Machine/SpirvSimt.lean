@@ -1985,3 +1985,820 @@ theorem stepWorkgroupWave_total_and_inv {env : SpirvModuleEnv} {cfg : WorkgroupC
 
 /-- **Cross-Wave Diamond Commutativity Lemma (`stepWorkgroupWave_comm`)**:
     Under `FaialMapRaceFree`, stepping two distinct Wave32 subgroups `w₁ ≠ w₂` strictly commutes! -/
+theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
+    (hDrf : FaialMapRaceFree cfg.totalThreads proto)
+    {w₁ w₂ : Nat} (hne : w₁ ≠ w₂) (st : WorkgroupExecState)
+    (hInv : AllWavesInv cfg waveInv st) :
+    (stepWorkgroupWave env cfg prog w₁ st >>= stepWorkgroupWave env cfg prog w₂) =
+    (stepWorkgroupWave env cfg prog w₂ st >>= stepWorkgroupWave env cfg prog w₁) := by
+  by_cases hw₁ : w₁ < cfg.numWaves
+  · by_cases hw₂ : w₂ < cfg.numWaves
+    · obtain ⟨s₁, hs₁, _⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv
+      obtain ⟨s₂, hs₂, _⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv
+      unfold stepWorkgroupWave at hs₁ hs₂ ⊢
+      simp only [hw₁, hw₂, ↓reduceIte] at hs₁ hs₂ ⊢
+      have hSelf₁ := hResp.read_locality w₁ hw₁ (st.waves w₁) (hInv w₁ hw₁) st.mem st.mem
+        ⟨rfl, fun _ _ _ _ => rfl, fun _ _ _ _ _ => rfl⟩
+      have hSelf₂ := hResp.read_locality w₂ hw₂ (st.waves w₂) (hInv w₂ hw₂) st.mem st.mem
+        ⟨rfl, fun _ _ _ _ => rfl, fun _ _ _ _ _ => rfl⟩
+      cases hStep1 : stepWave32One env prog (st.waves w₁) st.mem with
+      | error e => rw [hStep1] at hs₁; cases hs₁
+      | ok p1 =>
+        rcases p1 with ⟨wSt₁, m₁⟩
+        cases hStep2 : stepWave32One env prog (st.waves w₂) st.mem with
+        | error e => rw [hStep2] at hs₂; cases hs₂
+        | ok p2 =>
+          rcases p2 with ⟨wSt₂, m₂⟩
+          rw [hStep1] at hSelf₁
+          rw [hStep2] at hSelf₂
+          rcases hSelf₁ with ⟨_, hpc₁, _, _, hNoLds₁, _, hNoSsbo₁⟩
+          rcases hSelf₂ with ⟨_, hpc₂, _, _, hNoLds₂, _, hNoSsbo₂⟩
+          have hAgree2After1 : MemAgreesOnWaveFootprint w₂ proto st.mem m₁ := by
+            refine ⟨hpc₁.symm, ?_, ?_⟩
+            · intro l₂ a hl₂ hFoot₂
+              have hNoW₁ : ∀ l₁ < wave32Lanes, proto.ldsWrite (w₁ * wave32Lanes + l₁) a = false := by
+                intro l₁ hl₁
+                cases hW : proto.ldsWrite (w₁ * wave32Lanes + l₁) a with
+                | false => rfl
+                | true =>
+                  have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have hDisj := (hDrf _ _ ht₁ ht₂ (wave_threads_ne hne hl₁ hl₂)).1 a hW
+                  rcases hFoot₂ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
+              exact (hNoLds₁ a hNoW₁).1.symm
+            · intro l₂ b a hl₂ hFoot₂
+              have hNoW₁ : ∀ l₁ < wave32Lanes, proto.ssboWrite (w₁ * wave32Lanes + l₁) b a = false := by
+                intro l₁ hl₁
+                cases hW : proto.ssboWrite (w₁ * wave32Lanes + l₁) b a with
+                | false => rfl
+                | true =>
+                  have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have hDisj := (hDrf _ _ ht₁ ht₂ (wave_threads_ne hne hl₁ hl₂)).2 b a hW
+                  rcases hFoot₂ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
+              exact (hNoSsbo₁ b a hNoW₁).1.symm
+          have hAgree1After2 : MemAgreesOnWaveFootprint w₁ proto st.mem m₂ := by
+            refine ⟨hpc₂.symm, ?_, ?_⟩
+            · intro l₁ a hl₁ hFoot₁
+              have hNoW₂ : ∀ l₂ < wave32Lanes, proto.ldsWrite (w₂ * wave32Lanes + l₂) a = false := by
+                intro l₂ hl₂
+                cases hW : proto.ldsWrite (w₂ * wave32Lanes + l₂) a with
+                | false => rfl
+                | true =>
+                  have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have hDisj := (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).1 a hW
+                  rcases hFoot₁ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
+              exact (hNoLds₂ a hNoW₂).1.symm
+            · intro l₁ b a hl₁ hFoot₁
+              have hNoW₂ : ∀ l₂ < wave32Lanes, proto.ssboWrite (w₂ * wave32Lanes + l₂) b a = false := by
+                intro l₂ hl₂
+                cases hW : proto.ssboWrite (w₂ * wave32Lanes + l₂) b a with
+                | false => rfl
+                | true =>
+                  have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                    unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                  have hDisj := (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).2 b a hW
+                  rcases hFoot₁ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
+              exact (hNoSsbo₂ b a hNoW₂).1.symm
+          have hLoc2 := hResp.read_locality w₂ hw₂ (st.waves w₂) (hInv w₂ hw₂) st.mem m₁ hAgree2After1
+          have hLoc1 := hResp.read_locality w₁ hw₁ (st.waves w₁) (hInv w₁ hw₁) st.mem m₂ hAgree1After2
+          rw [hStep2] at hLoc2
+          rw [hStep1] at hLoc1
+          simp only [Bind.bind, Except.bind,
+            writeFn_other st.waves _ hne.symm, writeFn_other st.waves _ hne]
+          cases hStep2_after1 : stepWave32One env prog (st.waves w₂) m₁ with
+          | error e => rw [hStep2_after1] at hLoc2; cases hLoc2
+          | ok p12 =>
+            rcases p12 with ⟨wSt₂', m₁₂⟩
+            cases hStep1_after2 : stepWave32One env prog (st.waves w₁) m₂ with
+            | error e => rw [hStep1_after2] at hLoc1; cases hLoc1
+            | ok p21 =>
+              rcases p21 with ⟨wSt₁', m₂₁⟩
+              rw [hStep2_after1] at hLoc2
+              rw [hStep1_after2] at hLoc1
+              rcases hLoc2 with ⟨hwSt₂Eq, _, hpc₁₂, hW₂Lds, hNoW₂Lds, hW₂Ssbo, hNoW₂Ssbo⟩
+              rcases hLoc1 with ⟨hwSt₁Eq, _, hpc₂₁, hW₁Lds, hNoW₁Lds, hW₁Ssbo, hNoW₁Ssbo⟩
+              subst hwSt₂Eq; subst hwSt₁Eq
+              dsimp only
+              have hWavesEq := writeFn_comm st.waves wSt₁ wSt₂ hne
+              have hMemEq : m₁₂ = m₂₁ := by
+                cases m₁₂ with | mk lds12 ssbo12 pc12 =>
+                cases m₂₁ with | mk lds21 ssbo21 pc21 =>
+                simp only at hpc₁₂ hpc₂₁ hW₂Lds hNoW₂Lds hW₂Ssbo hNoW₂Ssbo hW₁Lds hNoW₁Lds hW₁Ssbo hNoW₁Ssbo
+                have hLdsEq : lds12 = lds21 := by
+                  funext a
+                  by_cases hex₂ : ∃ l₂ < wave32Lanes, proto.ldsWrite (w₂ * wave32Lanes + l₂) a = true
+                  · obtain ⟨l₂, hl₂, hw₂a⟩ := hex₂
+                    have hNoW₁a : ∀ l₁ < wave32Lanes, proto.ldsWrite (w₁ * wave32Lanes + l₁) a = false := by
+                      intro l₁ hl₁
+                      have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                        unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                      have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                        unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                      exact (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).1 a hw₂a |>.1
+                    rw [← hW₂Lds a ⟨l₂, hl₂, hw₂a⟩, (hNoW₁Lds a hNoW₁a).2]
+                  · have hAll₂ : ∀ l₂ < wave32Lanes, proto.ldsWrite (w₂ * wave32Lanes + l₂) a = false := by
+                      intro l₂ hl₂
+                      cases h : proto.ldsWrite (w₂ * wave32Lanes + l₂) a with
+                      | false => rfl
+                      | true => exact False.elim (hex₂ ⟨l₂, hl₂, h⟩)
+                    by_cases hex₁ : ∃ l₁ < wave32Lanes, proto.ldsWrite (w₁ * wave32Lanes + l₁) a = true
+                    · rw [(hNoW₂Lds a hAll₂).2, hW₁Lds a hex₁]
+                    · have hAll₁ : ∀ l₁ < wave32Lanes, proto.ldsWrite (w₁ * wave32Lanes + l₁) a = false := by
+                        intro l₁ hl₁
+                        cases h : proto.ldsWrite (w₁ * wave32Lanes + l₁) a with
+                        | false => rfl
+                        | true => exact False.elim (hex₁ ⟨l₁, hl₁, h⟩)
+                      rw [(hNoW₂Lds a hAll₂).2, (hNoW₁Lds a hAll₁).2,
+                          (hNoLds₁ a hAll₁).1, (hNoLds₂ a hAll₂).1]
+                have hSsboEq : ssbo12 = ssbo21 := by
+                  funext b a
+                  by_cases hex₂ : ∃ l₂ < wave32Lanes, proto.ssboWrite (w₂ * wave32Lanes + l₂) b a = true
+                  · obtain ⟨l₂, hl₂, hw₂a⟩ := hex₂
+                    have hNoW₁a : ∀ l₁ < wave32Lanes, proto.ssboWrite (w₁ * wave32Lanes + l₁) b a = false := by
+                      intro l₁ hl₁
+                      have ht₁ : w₁ * wave32Lanes + l₁ < cfg.totalThreads := by
+                        unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                      have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
+                        unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
+                      exact (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).2 b a hw₂a |>.1
+                    rw [← hW₂Ssbo b a ⟨l₂, hl₂, hw₂a⟩, (hNoW₁Ssbo b a hNoW₁a).2]
+                  · have hAll₂ : ∀ l₂ < wave32Lanes, proto.ssboWrite (w₂ * wave32Lanes + l₂) b a = false := by
+                      intro l₂ hl₂
+                      cases h : proto.ssboWrite (w₂ * wave32Lanes + l₂) b a with
+                      | false => rfl
+                      | true => exact False.elim (hex₂ ⟨l₂, hl₂, h⟩)
+                    by_cases hex₁ : ∃ l₁ < wave32Lanes, proto.ssboWrite (w₁ * wave32Lanes + l₁) b a = true
+                    · rw [(hNoW₂Ssbo b a hAll₂).2, hW₁Ssbo b a hex₁]
+                    · have hAll₁ : ∀ l₁ < wave32Lanes, proto.ssboWrite (w₁ * wave32Lanes + l₁) b a = false := by
+                        intro l₁ hl₁
+                        cases h : proto.ssboWrite (w₁ * wave32Lanes + l₁) b a with
+                        | false => rfl
+                        | true => exact False.elim (hex₁ ⟨l₁, hl₁, h⟩)
+                      rw [(hNoW₂Ssbo b a hAll₂).2, (hNoW₁Ssbo b a hAll₁).2,
+                          (hNoSsbo₁ b a hAll₁).1, (hNoSsbo₂ b a hAll₂).1]
+                have hPcEq : pc12 = pc21 := by
+                  rw [hpc₁₂, hpc₁, hpc₂₁, hpc₂]
+                rw [hLdsEq, hSsboEq, hPcEq]
+              rw [hWavesEq, hMemEq]
+    · unfold stepWorkgroupWave
+      simp only [Bind.bind, Except.bind, hw₁, hw₂, ↓reduceIte]
+      cases stepWave32One env prog (st.waves w₁) st.mem with
+      | error _ => rfl
+      | ok _ => simp
+  · by_cases hw₂ : w₂ < cfg.numWaves
+    · unfold stepWorkgroupWave
+      simp only [Bind.bind, Except.bind, hw₁, hw₂, ↓reduceIte]
+      cases stepWave32One env prog (st.waves w₂) st.mem with
+      | error _ => rfl
+      | ok _ => simp
+    · unfold stepWorkgroupWave
+      simp [Bind.bind, Except.bind, hw₁, hw₂]
+
+/-- Adjacent-swap equivalence of wave schedules (`w₁ :: w₂ :: ws ~ w₂ :: w₁ :: ws` for `w₁ ≠ w₂`). -/
+inductive SchedPerm : List Nat → List Nat → Prop where
+  | refl (s : List Nat) : SchedPerm s s
+  | swap {w₁ w₂ : Nat} (hne : w₁ ≠ w₂) (rest : List Nat) :
+      SchedPerm (w₁ :: w₂ :: rest) (w₂ :: w₁ :: rest)
+  | cons (w : Nat) {s₁ s₂ : List Nat} : SchedPerm s₁ s₂ → SchedPerm (w :: s₁) (w :: s₂)
+  | trans {s₁ s₂ s₃ : List Nat} : SchedPerm s₁ s₂ → SchedPerm s₂ s₃ → SchedPerm s₁ s₃
+
+/-- **Multi-Wave Schedule Confluence Theorem (`multiWave_schedule_confluence`)**:
+    Under `FaialMapRaceFree` and `WaveRespectsProtocol`, ANY two valid cross-wave instruction
+    schedules related by arbitrary non-interfering wave reorderings (`SchedPerm`) produce the
+    **exact same** multi-wave workgroup state (shared `64 KiB` LDS + global `StorageBuffer` +
+    all Wave32 registers)! -/
+theorem multiWave_schedule_confluence {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
+    (hDrf : FaialMapRaceFree cfg.totalThreads proto)
+    {sched₁ sched₂ : List Nat} (hPerm : SchedPerm sched₁ sched₂) :
+    ∀ st : WorkgroupExecState,
+      AllWavesInv cfg waveInv st →
+      runInterleavedSchedule env cfg prog sched₁ st =
+      runInterleavedSchedule env cfg prog sched₂ st := by
+  induction hPerm with
+  | refl _ => intro _ _; rfl
+  | @swap w₁ w₂ hne rest =>
+    intro st hInv
+    have hComm := stepWorkgroupWave_comm hResp hDrf hne st hInv
+    obtain ⟨s₁, hs₁, hInv₁⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv
+    obtain ⟨s₂, hs₂, hInv₂⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv
+    obtain ⟨s₁₂, hs₁₂, _⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv₁
+    obtain ⟨s₂₁, hs₂₁, _⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv₂
+    dsimp only [runInterleavedSchedule]
+    rw [hs₁, hs₂]
+    dsimp only [runInterleavedSchedule]
+    rw [hs₁₂, hs₂₁]
+    have hEq12 : (Except.ok s₁₂ : Except SimtExecError WorkgroupExecState) = .ok s₂₁ := by
+      simpa [Bind.bind, Except.bind, hs₁, hs₂, hs₁₂, hs₂₁] using hComm
+    injection hEq12 with hStateEq
+    rw [hStateEq]
+  | cons w _ ih =>
+    intro st hInv
+    dsimp only [runInterleavedSchedule]
+    obtain ⟨st', hst', hInv'⟩ := stepWorkgroupWave_total_and_inv hResp w hInv
+    rw [hst']
+    exact ih st' hInv'
+  | trans _ _ ih₁ ih₂ =>
+    intro st hInv
+    exact (ih₁ st hInv).trans (ih₂ st hInv)
+
+/-- Any schedule `sched` with identical per-wave step counts (`∀ w, sched.count w = ...`) reduces
+    by `SchedPerm` to grouping waves in canonical order `0, 1, ..., numWaves - 1`! -/
+private theorem schedPerm_bubble_front (w : Nat) :
+    ∀ (xs ys : List Nat),
+      (∀ x ∈ xs, x ≠ w) →
+      SchedPerm (xs ++ w :: ys) (w :: xs ++ ys)
+  | [], _, _ => .refl _
+  | x :: xs, ys, hne =>
+    have hx : x ≠ w := hne x (.head _)
+    have hrest : ∀ z ∈ xs, z ≠ w := fun z hz => hne z (.tail _ hz)
+    .trans (.cons x (schedPerm_bubble_front w xs ys hrest)) (.swap hx (xs ++ ys))
+
+private def extractAllWave (w : Nat) : List Nat → List Nat × List Nat
+  | [] => ([], [])
+  | x :: xs =>
+    let (ws, rest) := extractAllWave w xs
+    if x = w then (w :: ws, rest) else (ws, x :: rest)
+
+private theorem schedPerm_extractAllWave (w : Nat) :
+    ∀ s : List Nat,
+      SchedPerm s ((extractAllWave w s).1 ++ (extractAllWave w s).2)
+  | [] => .refl []
+  | x :: xs => by
+    dsimp only [extractAllWave]
+    by_cases hxw : x = w
+    · subst hxw
+      simp only [↓reduceIte, List.cons_append]
+      exact .cons x (schedPerm_extractAllWave x xs)
+    · simp only [hxw, ↓reduceIte]
+      have hPermTail := schedPerm_extractAllWave w xs
+      -- `x :: (ws ++ rest) ~ ws ++ (x :: rest)` since every element of `ws` equals `w ≠ x`
+      have hAllW : ∀ z ∈ (extractAllWave w xs).1, z = w := by
+        clear hPermTail hxw
+        induction xs with
+        | nil => intro _ h; cases h
+        | cons y ys ih =>
+          dsimp only [extractAllWave]
+          split
+          · intro z hz; rcases List.mem_cons.mp hz with rfl | hm
+            · rfl
+            · exact ih z hm
+          · exact ih
+      have hPushX : ∀ (ws rest : List Nat), (∀ z ∈ ws, z = w) →
+          SchedPerm (x :: ws ++ rest) (ws ++ x :: rest) := by
+        intro ws rest hws
+        induction ws with
+        | nil => exact .refl _
+        | cons z ws ih =>
+          have hzw : z = w := hws z (.head _)
+          cases hzw
+          exact .trans (.swap hxw (ws ++ rest))
+            (.cons w (ih (fun u hu => hws u (.tail _ hu))))
+      exact .trans (.cons x hPermTail) (hPushX _ _ hAllW)
+
+private theorem extractAllWave_fst_eq_replicate (w : Nat) :
+    ∀ s : List Nat, (extractAllWave w s).1 = List.replicate (s.count w) w
+  | [] => rfl
+  | x :: xs => by
+    dsimp only [extractAllWave]
+    by_cases hxw : x = w
+    · subst hxw
+      simp [List.count_cons_self, List.replicate_succ, extractAllWave_fst_eq_replicate x xs]
+    · simp [hxw, extractAllWave_fst_eq_replicate w xs]
+
+private theorem extractAllWave_snd_count (w u : Nat) :
+    ∀ s : List Nat, ((extractAllWave w s).2).count u = if u = w then 0 else s.count u
+  | [] => by simp [extractAllWave]
+  | x :: xs => by
+    dsimp only [extractAllWave]
+    by_cases hxw : x = w
+    · subst hxw
+      simp only [↓reduceIte, extractAllWave_snd_count x u xs]
+      by_cases hux : u = x
+      · subst hux; simp
+      · have hne : (x == u) = false := beq_false_of_ne (Ne.symm hux)
+        simp [hux, List.count_cons, hne]
+    · simp only [hxw, ↓reduceIte, List.count_cons, extractAllWave_snd_count w u xs]
+      by_cases hux : u = w
+      · subst hux
+        have hne : (x == u) = false := beq_false_of_ne hxw
+        simp [hne]
+      · simp [hux]
+
+private theorem extractAllWave_snd_mem {w z : Nat} :
+    ∀ {s : List Nat}, z ∈ (extractAllWave w s).2 → z ∈ s ∧ z ≠ w
+  | [], h => by cases h
+  | x :: xs, h => by
+    dsimp only [extractAllWave] at h
+    by_cases hxw : x = w
+    · simp only [hxw, ↓reduceIte] at h
+      obtain ⟨hm, hne⟩ := extractAllWave_snd_mem h
+      exact ⟨.tail _ hm, hne⟩
+    · simp only [hxw, ↓reduceIte, List.mem_cons] at h
+      rcases h with rfl | hm
+      · exact ⟨.head _, hxw⟩
+      · obtain ⟨hm', hne⟩ := extractAllWave_snd_mem hm
+        exact ⟨.tail _ hm', hne⟩
+
+/-- Any two schedules `s₁, s₂` bounded by `< bound` with identical per-wave step counts (`count w`)
+    are `SchedPerm`-equivalent! -/
+theorem schedPerm_of_same_counts :
+    ∀ (bound : Nat) {s₁ s₂ : List Nat},
+      (∀ w ∈ s₁, w < bound) →
+      (∀ w ∈ s₂, w < bound) →
+      (∀ w < bound, s₁.count w = s₂.count w) →
+      SchedPerm s₁ s₂
+  | 0, s₁, s₂, h₁, h₂, _ => by
+    cases s₁ with
+    | nil =>
+      cases s₂ with
+      | nil => exact .refl []
+      | cons y _ => exact absurd (h₂ y (.head _)) (by omega)
+    | cons x _ => exact absurd (h₁ x (.head _)) (by omega)
+  | b + 1, s₁, s₂, h₁, h₂, hCnt => by
+    have p₁ := schedPerm_extractAllWave b s₁
+    have p₂ := schedPerm_extractAllWave b s₂
+    rw [extractAllWave_fst_eq_replicate b s₁] at p₁
+    rw [extractAllWave_fst_eq_replicate b s₂, ← hCnt b (by omega)] at p₂
+    have hSub₁ : ∀ w ∈ (extractAllWave b s₁).2, w < b := by
+      intro w hw
+      obtain ⟨hm, hne⟩ := extractAllWave_snd_mem hw
+      have hlt := h₁ w hm
+      omega
+    have hSub₂ : ∀ w ∈ (extractAllWave b s₂).2, w < b := by
+      intro w hw
+      obtain ⟨hm, hne⟩ := extractAllWave_snd_mem hw
+      have hlt := h₂ w hm
+      omega
+    have hSubCnt : ∀ w < b, ((extractAllWave b s₁).2).count w = ((extractAllWave b s₂).2).count w := by
+      intro w hw
+      have hne : w ≠ b := by omega
+      rw [extractAllWave_snd_count b w s₁, extractAllWave_snd_count b w s₂]
+      simp [hne, hCnt w (by omega)]
+    have ih := schedPerm_of_same_counts b hSub₁ hSub₂ hSubCnt
+    have hPrepend : ∀ (k : Nat) {u v : List Nat}, SchedPerm u v →
+        SchedPerm (List.replicate k b ++ u) (List.replicate k b ++ v) := by
+      intro k u v huv
+      induction k with
+      | zero => simpa using huv
+      | succ k ihk => exact .cons b ihk
+    have hSymm : ∀ {u v : List Nat}, SchedPerm u v → SchedPerm v u := by
+      intro u v huv
+      induction huv with
+      | refl s => exact .refl s
+      | swap hne rest => exact .swap hne.symm rest
+      | cons w _ ihs => exact .cons w ihs
+      | trans _ _ iha ihb => exact .trans ihb iha
+    exact .trans p₁ (.trans (hPrepend (s₁.count b) ih) (hSymm p₂))
+
+/-! ### `#tooth` Witnesses for Cross-Wave Synchronization & Persistent Shared `64 KiB` LDS -/
+
+/-- Minimal 2-wave (`64`-thread = `2 × Wave32`) SPIR-V module environment for cross-wave LDS tree
+    reduction:
+    - `%1` : `LocalInvocationId` (`0 .. 63`)
+    - `%2` : `Workgroup` LDS pointer (`u32[]`)
+    - `%3` : `StorageBuffer` binding `0` (`u32[]` input)
+    - `%4` : `StorageBuffer` binding `1` (`u32[]` output)
+    - `%5` : constant `32 : u32` (cross-wave stride: Wave 0 reads `tid + 32` written by Wave 1!)
+    - `%6` : pointer type `Workgroup u32*`
+    - `%7` : pointer type `StorageBuffer u32*`
+    - `%8` : `u32` type -/
+def twoWaveReductionEnv : SpirvModuleEnv where
+  intWidths id := if id == 8 then some .w32 else none
+  ptrInfo id :=
+    if id == 2 || id == 6 || id == 12 || id == 13 || id == 16 then some (.workgroup, 0, .w32)
+    else if id == 3 || id == 7 || id == 10 then some (.storageBuffer, 0, .w32)
+    else if id == 4 || id == 9 || id == 19 then some (.storageBuffer, 1, .w32)
+    else none
+  initConst id := if id == 5 then .vU32 32 else .vUndef
+  builtIns id := if id == 1 then some .localInvocationId else none
+
+def twoWavePhase0WriteLds : List SpirvInst :=
+  [ -- %10 = &inBuf[tid]; %11 = inBuf[tid]; %12 = &lds[tid]; lds[tid] = %11
+    .opAccessChain 7 10 3 [1],
+    .opLoad 8 11 10,
+    .opAccessChain 6 12 2 [1],
+    .opStore 12 11
+  ]
+
+def twoWavePhase1CrossWaveRead : List SpirvInst :=
+  [ -- %13 = &lds[tid]; %14 = lds[tid]; %15 = (tid + 32) & 63? Wait: (tid ^ 32) pairs Wave 0 <-> Wave 1!
+    .opAccessChain 6 13 2 [1],
+    .opLoad 8 14 13,
+    .opBitwiseXor 8 15 1 5,
+    .opAccessChain 6 16 2 [15],
+    .opLoad 8 17 16,
+    .opIAdd 8 18 14 17,
+    .opAccessChain 9 19 4 [1],
+    .opStore 19 18
+  ]
+
+def twoWaveCfg : WorkgroupConfig :=
+  { workgroupId := 0, numWaves := 2, wavesPos := by decide, workgroupCount := 1 }
+
+/-- Project a single `StorageBuffer` dword out of an execution result (`Option UInt32` has `DecidableEq`). -/
+def peekSsboDword (binding addr : Nat) (res : Except SimtExecError WorkgroupExecState) : Option UInt32 :=
+  match res with
+  | .ok s => some (s.mem.ssbo binding addr)
+  | .error _ => none
+
+/-! ### `SIMT-CT` Constant-Time Side-Channel Model & 32-Bank RDNA2 LDS Conflict Freedom -/
+
+/-- RDNA2 `64 KiB` LDS physical bank index (`32` banks × `4`-byte dwords):
+    `ldsBank(byteAddr) = (byteAddr / 4) % 32`. -/
+def ldsBank (byteAddr : Nat) : Nat :=
+  (byteAddr / 4) % 32
+
+/-- **`LdsBankConflictFree32`**: across all 32 lanes `lane ∈ [0, 32)` of a Wave32 subgroup,
+    `ldsBank ∘ byteAddrFn` is injective (`32` lanes map to `32` distinct LDS banks -> `0` bank
+    serialization!). -/
+def LdsBankConflictFree32 (byteAddrFn : Nat → Nat) : Prop :=
+  ∀ l₁ l₂ : Nat, l₁ < wave32Lanes → l₂ < wave32Lanes →
+    ldsBank (byteAddrFn l₁) = ldsBank (byteAddrFn l₂) → l₁ = l₂
+
+/-- Count how many lanes `l < 32` collide with lane `0` in the same LDS bank at distinct byte
+    addresses (`1` = conflict-free; `32` = worst-case 32-way bank serialization). -/
+def ldsLane0BankWays (byteAddrFn : Nat → Nat) : Nat :=
+  ((List.range 32).filter fun l =>
+    decide (ldsBank (byteAddrFn l) = ldsBank (byteAddrFn 0))).length
+
+private theorem pow_two_dvd_of_odd :
+    ∀ (k g c : Nat), c % 2 = 1 → 2 ^ k ∣ g * c → 2 ^ k ∣ g
+  | 0, g, _, _, _ => Nat.one_dvd g
+  | k + 1, g, c, hodd, hdvd => by
+    have h2prime : IsPrimeNat 2 := isPrimeNat_2
+    have hnc : ¬ (2 ∣ c) := fun hc => by obtain ⟨t, rfl⟩ := hc; omega
+    have h2dvd : 2 ∣ g * c := by
+      rw [Nat.pow_succ] at hdvd
+      exact Nat.dvd_trans (Nat.dvd_mul_left 2 (2 ^ k)) hdvd
+    obtain ⟨g', rfl⟩ := h2prime.dvd_mul (Nat.mul_comm g c ▸ h2dvd) hnc
+    have hk : 2 ^ k ∣ g' * c := by
+      obtain ⟨u, hu⟩ := hdvd
+      refine ⟨u, ?_⟩
+      rw [Nat.pow_succ, Nat.mul_comm (2 ^ k) 2] at hu
+      have hAssoc : 2 * (g' * c) = 2 * (2 ^ k * u) := by
+        calc 2 * (g' * c) = 2 * g' * c := (Nat.mul_assoc 2 g' c).symm
+        _ = 2 * 2 ^ k * u := hu
+        _ = 2 * (2 ^ k * u) := Nat.mul_assoc 2 (2 ^ k) u
+      exact (Nat.mul_right_inj (by decide : 2 ≠ 0)).mp hAssoc
+    rw [Nat.pow_succ, Nat.mul_comm (2 ^ k) 2]
+    exact Nat.mul_dvd_mul_left 2 (pow_two_dvd_of_odd k g' c hodd hk)
+
+private theorem odd_mul_sub_not_dvd_32 {s d : Nat} (hOdd : s % 2 = 1) (hdPos : 0 < d) (hdLt : d < 32) :
+    (s * d) % 32 ≠ 0 := by
+  intro hMod0
+  have hdvd : 2 ^ 5 ∣ d * s := by
+    rw [Nat.mul_comm]
+    exact Nat.dvd_of_mod_eq_zero hMod0
+  have hd32 : 32 ∣ d := pow_two_dvd_of_odd 5 d s hOdd hdvd
+  have hle := Nat.le_of_dvd hdPos hd32
+  omega
+
+/-- **Universal Odd-Stride Wave32 LDS Bank-Conflict-Free Theorem (`odd_stride_lds_bank_conflict_free`)**:
+    For **every** base dword offset `baseDword` and **every** odd dword stride `stride` (`stride % 2 = 1`,
+    including unit stride `1`, `+1`-padded 32×32 transpose stride `33`, and `+1`-padded Poseidon2
+    width-12 stride `13`), `byteAddr(lane) = 4 * (baseDword + stride * lane)` hits `32` pairwise
+    distinct LDS banks across every Wave32 subgroup (`0` bank conflicts)! -/
+theorem odd_stride_lds_bank_conflict_free (baseDword stride : Nat) (hOdd : stride % 2 = 1) :
+    LdsBankConflictFree32 (fun lane => 4 * (baseDword + stride * lane)) := by
+  intro l₁ l₂ hl₁ hl₂ hBank
+  unfold wave32Lanes at hl₁ hl₂
+  unfold ldsBank at hBank
+  have hDiv1 : 4 * (baseDword + stride * l₁) / 4 = baseDword + stride * l₁ := by omega
+  have hDiv2 : 4 * (baseDword + stride * l₂) / 4 = baseDword + stride * l₂ := by omega
+  rw [hDiv1, hDiv2] at hBank
+  by_cases hEq : l₁ = l₂
+  · exact hEq
+  · by_cases hlt : l₁ < l₂
+    · have hdPos : 0 < l₂ - l₁ := by omega
+      have hdLt : l₂ - l₁ < 32 := by omega
+      have hDiff : baseDword + stride * l₂ = (baseDword + stride * l₁) + stride * (l₂ - l₁) := by
+        rw [Nat.mul_sub_left_distrib]
+        have hle : stride * l₁ ≤ stride * l₂ := Nat.mul_le_mul_left stride (by omega)
+        omega
+      have hMod0 : (stride * (l₂ - l₁)) % 32 = 0 := by
+        have h1 := Nat.div_add_mod (baseDword + stride * l₁) 32
+        have h2 := Nat.div_add_mod (baseDword + stride * l₂) 32
+        have h3 := Nat.div_add_mod (stride * (l₂ - l₁)) 32
+        omega
+      exact False.elim (odd_mul_sub_not_dvd_32 hOdd hdPos hdLt hMod0)
+    · have hgt : l₂ < l₁ := by omega
+      have hdPos : 0 < l₁ - l₂ := by omega
+      have hdLt : l₁ - l₂ < 32 := by omega
+      have hDiff : baseDword + stride * l₁ = (baseDword + stride * l₂) + stride * (l₁ - l₂) := by
+        rw [Nat.mul_sub_left_distrib]
+        have hle : stride * l₂ ≤ stride * l₁ := Nat.mul_le_mul_left stride (by omega)
+        omega
+      have hMod0 : (stride * (l₁ - l₂)) % 32 = 0 := by
+        have h1 := Nat.div_add_mod (baseDword + stride * l₁) 32
+        have h2 := Nat.div_add_mod (baseDword + stride * l₂) 32
+        have h3 := Nat.div_add_mod (stride * (l₁ - l₂)) 32
+        omega
+      exact False.elim (odd_mul_sub_not_dvd_32 hOdd hdPos hdLt hMod0)
+
+/-- Bank-skewed shared-LDS dword offset for 2-level multi-wave Wave32 Merkle tree nodes (`8` dwords =
+    `4 × u64` per node): `merkleSkewedLdsDword idx = 9 * idx + idx / 32`. -/
+def merkleSkewedLdsDword (idx : Nat) : Nat :=
+  9 * idx + idx / 32
+
+theorem merkleSkewedLdsDword_slots_disjoint {i₁ i₂ d₁ d₂ : Nat}
+    (hd₁ : d₁ < 8) (hd₂ : d₂ < 8) (hne : i₁ ≠ i₂) :
+    merkleSkewedLdsDword i₁ + d₁ ≠ merkleSkewedLdsDword i₂ + d₂ := by
+  unfold merkleSkewedLdsDword
+  by_cases hlt : i₁ < i₂
+  · have hDiv : i₁ / 32 ≤ i₂ / 32 := Nat.div_le_div_right (by omega)
+    omega
+  · have hgt : i₂ < i₁ := by omega
+    have hDiv : i₂ / 32 ≤ i₁ / 32 := Nat.div_le_div_right (by omega)
+    omega
+
+/-- **2-Epoch Skewed Merkle LDS Bank-Conflict-Free Theorem (`merkle_skewed_lds_bank_conflict_free_both_epochs`)**:
+    For **every** wave `w : Nat` and **every** dword sub-offset `d < 8`, `merkleSkewedLdsDword`:
+    1. Is **32-bank conflict-free in Epoch 0** (`idx = 32 * w + lane`), AND
+    2. Is **32-bank conflict-free in Epoch 1** (`idx = 2 * (32 * w + lane) + childBit` for BOTH
+       left child `childBit = 0` and right child `childBit = 1`)! -/
+theorem merkle_skewed_lds_bank_conflict_free_both_epochs (w d : Nat) :
+    LdsBankConflictFree32 (fun lane => 4 * (merkleSkewedLdsDword (w * 32 + lane) + d)) ∧
+    (∀ childBit : Nat, childBit < 2 →
+      LdsBankConflictFree32 (fun lane => 4 * (merkleSkewedLdsDword (2 * (w * 32 + lane) + childBit) + d))) := by
+  refine ⟨?_, ?_⟩
+  · intro l₁ l₂ hl₁ hl₂ hBank
+    unfold wave32Lanes at hl₁ hl₂
+    dsimp only at hBank
+    have hEqFn : ∀ l < 32, 4 * (merkleSkewedLdsDword (w * 32 + l) + d) =
+        4 * ((289 * w + d) + 9 * l) := by
+      intro l _; unfold merkleSkewedLdsDword
+      have hDiv : (w * 32 + l) / 32 = w := by omega
+      omega
+    rw [hEqFn l₁ hl₁, hEqFn l₂ hl₂] at hBank
+    exact odd_stride_lds_bank_conflict_free (289 * w + d) 9 rfl l₁ l₂ hl₁ hl₂ hBank
+  · intro c hc l₁ l₂ hl₁ hl₂ hBank
+    unfold wave32Lanes at hl₁ hl₂
+    unfold ldsBank merkleSkewedLdsDword at hBank
+    have h4_1 : 4 * (9 * (2 * (w * 32 + l₁) + c) + (2 * (w * 32 + l₁) + c) / 32 + d) / 4 =
+        9 * (2 * (w * 32 + l₁) + c) + (2 * (w * 32 + l₁) + c) / 32 + d := by omega
+    have h4_2 : 4 * (9 * (2 * (w * 32 + l₂) + c) + (2 * (w * 32 + l₂) + c) / 32 + d) / 4 =
+        9 * (2 * (w * 32 + l₂) + c) + (2 * (w * 32 + l₂) + c) / 32 + d := by omega
+    rw [h4_1, h4_2] at hBank
+    -- Notice `(2 * (w * 32 + l) + c) / 32 = 2 * w + l / 16` since `c < 2`!
+    have hDivL₁ : (2 * (w * 32 + l₁) + c) / 32 = 2 * w + l₁ / 16 := by omega
+    have hDivL₂ : (2 * (w * 32 + l₂) + c) / 32 = 2 * w + l₂ / 16 := by omega
+    rw [hDivL₁, hDivL₂] at hBank
+    -- Now modulo 2, `(18 * l + l / 16)` has parity `l / 16 ∈ {0, 1}`, so `l₁ / 16 = l₂ / 16`!
+    -- Once `l₁ / 16 = l₂ / 16`, `18 * l₁ ≡ 18 * l₂ (mod 32)` -> `9 * (l₁ % 16) ≡ 9 * (l₂ % 16) (mod 16)`!
+    -- Since `l₁ < 32` and `l₂ < 32` are bounded, `omega` closes the linear/mod-32 case split directly!
+    have hq₁ : l₁ / 16 = 0 ∨ l₁ / 16 = 1 := by omega
+    have hq₂ : l₂ / 16 = 0 ∨ l₂ / 16 = 1 := by omega
+    -- Check parity first: `(A + 18 * l₁ + l₁ / 16) % 2 = (A + 18 * l₂ + l₂ / 16) % 2`
+    have hPar : (9 * (2 * (w * 32 + l₁) + c) + (2 * w + l₁ / 16) + d) % 2 =
+                (9 * (2 * (w * 32 + l₂) + c) + (2 * w + l₂ / 16) + d) % 2 := by omega
+    have hSameHalf : l₁ / 16 = l₂ / 16 := by omega
+    rw [hSameHalf] at hBank
+    -- Now `(base + 18 * l₁) % 32 = (base + 18 * l₂) % 32` with `|l₁ - l₂| < 16`!
+    -- Since `9` is odd, `18 * k % 32 = 0` for `0 ≤ k < 16` implies `k = 0`!
+    by_cases hEq : l₁ = l₂
+    · exact hEq
+    · by_cases hlt : l₁ < l₂
+      · have hkLt : l₂ - l₁ < 16 := by omega
+        have hMod32 : (18 * (l₂ - l₁)) % 32 = 0 := by
+          have d1 := Nat.div_add_mod (9 * (2 * (w * 32 + l₁) + c) + (2 * w + l₂ / 16) + d) 32
+          have d2 := Nat.div_add_mod (9 * (2 * (w * 32 + l₂) + c) + (2 * w + l₂ / 16) + d) 32
+          have d3 := Nat.div_add_mod (18 * (l₂ - l₁)) 32
+          have hSub : 9 * (2 * (w * 32 + l₂) + c) =
+              9 * (2 * (w * 32 + l₁) + c) + 18 * (l₂ - l₁) := by
+            rw [Nat.mul_sub_left_distrib]
+            have : 18 * l₁ ≤ 18 * l₂ := Nat.mul_le_mul_left 18 (by omega)
+            omega
+          omega
+        have hMod32' : (9 * (2 * (l₂ - l₁))) % 32 = 0 := by
+          have : 9 * (2 * (l₂ - l₁)) = 18 * (l₂ - l₁) := by omega
+          rwa [this]
+        exact False.elim (odd_mul_sub_not_dvd_32 (s := 9) (d := 2 * (l₂ - l₁)) rfl (by omega) (by omega) hMod32')
+      · have hkLt : l₁ - l₂ < 16 := by omega
+        have hMod32 : (18 * (l₁ - l₂)) % 32 = 0 := by
+          have d1 := Nat.div_add_mod (9 * (2 * (w * 32 + l₁) + c) + (2 * w + l₂ / 16) + d) 32
+          have d2 := Nat.div_add_mod (9 * (2 * (w * 32 + l₂) + c) + (2 * w + l₂ / 16) + d) 32
+          have d3 := Nat.div_add_mod (18 * (l₁ - l₂)) 32
+          have hSub : 9 * (2 * (w * 32 + l₁) + c) =
+              9 * (2 * (w * 32 + l₂) + c) + 18 * (l₁ - l₂) := by
+            rw [Nat.mul_sub_left_distrib]
+            have : 18 * l₂ ≤ 18 * l₁ := Nat.mul_le_mul_left 18 (by omega)
+            omega
+          omega
+        have hMod32' : (9 * (2 * (l₁ - l₂))) % 32 = 0 := by
+          have : 9 * (2 * (l₁ - l₂)) = 18 * (l₁ - l₂) := by omega
+          rwa [this]
+        exact False.elim (odd_mul_sub_not_dvd_32 (s := 9) (d := 2 * (l₁ - l₂)) rfl (by omega) (by omega) hMod32')
+
+/-! ### Static `SIMT-CT` Information-Flow Type System & Leakage-Trace Noninterference -/
+
+/-- Two-point information-flow lattice: `pub` (public dispatch geometry / constants) ≤ `sec` (witness). -/
+inductive SecLabel where
+  | pub
+  | sec
+  deriving DecidableEq, Repr
+
+def SecLabel.join : SecLabel → SecLabel → SecLabel
+  | .pub, .pub => .pub
+  | _, _ => .sec
+
+/-- Hardware side-channel observation emitted by one Wave32 instruction step:
+    - `pc` : instruction address
+    - `activeMask` : 32-lane `EXEC_LO` active predicate (`List Bool` of length 32)
+    - `memTraces` : per-lane memory access descriptor `(storageClass, binding, elemIdx)` (exposes
+      both global VMEM coalescing spread AND physical LDS bank `(4 * elemIdx / 4) % 32`!). -/
+structure SimtWaveObs where
+  pc : Nat
+  activeMask : List Bool
+  memTraces : List (Option (SpirvStorageClass × Nat × Nat))
+  deriving DecidableEq, Repr
+
+def observeLaneMem (regs : Nat → SpirvVal) : SpirvInst → Option (SpirvStorageClass × Nat × Nat)
+  | .opLoad _ _ ptrId | .opStore ptrId _ =>
+    match regs ptrId.toNat with
+    | .vPtr sc binding elemIdx _ => some (sc, binding, elemIdx)
+    | _ => none
+  | _ => none
+
+def stepWaveObs (wSt : Wave32State) (inst : SpirvInst) : SimtWaveObs :=
+  { pc := wSt.pc
+    activeMask := (List.range wave32Lanes).map wSt.execMask
+    memTraces := (List.range wave32Lanes).map fun lane =>
+      if wSt.execMask lane then observeLaneMem (wSt.laneRegs lane) inst else none }
+
+/-- Collect the complete Wave32 hardware side-channel observation trace across a straight-line
+    epoch `prog` starting from `(wSt, mem)`. -/
+def runWaveWithObs (env : SpirvModuleEnv) (prog : List SpirvInst) :
+    Nat → Wave32State → GpuMemState → List SimtWaveObs
+  | 0, _, _ => []
+  | fuel + 1, wSt, mem =>
+    if wSt.atBarrier then []
+    else
+      match prog[wSt.pc]? with
+      | none => []
+      | some inst =>
+        let obs := stepWaveObs wSt inst
+        match stepWave32One env prog wSt mem with
+        | .error _ => [obs]
+        | .ok (wSt', mem') => obs :: runWaveWithObs env prog fuel wSt' mem'
+
+/-- Static `SIMT-CT` typing environment:
+    - `ssboSec binding` classifies each `StorageBuffer` as `pub` or `sec`
+    - `ldsSec` classifies `Workgroup` LDS contents (`sec` when holding witness intermediates!)
+    - `regSec ssaId` assigns a `SecLabel` to every SSA `%id` (`pub` values must match across
+      all public-equivalent memories!). -/
+structure SimtCtPolicy where
+  ssboSec : Nat → SecLabel
+  ldsSec : SecLabel
+  regSec : Nat → SecLabel
+
+/-- Static `SIMT-CT` instruction checker:
+    1. Zero `EXEC`-mask divergence: no branches (`opBranchConditional`, `opBranch`) inside straight-line
+       epochs; conditional selection uses branchless `OpSelect` (`v_cndmask_b32`)!
+    2. Public-affine addressing: every `OpAccessChain` index `%idx` is `pub`, and every pointer
+       register `%ptr` is `pub` (so `OpLoad` / `OpStore` addresses never depend on secrets!).
+    3. Monotone label propagation on all fixed-latency VALU operations (`OpUMulExtended`, `OpIAdd`,
+       `OpISub`, `OpIMul`, `OpBitwise*`, `OpShift*`, `OpSelect`, comparisons). -/
+def checkInstSimtCt (pol : SimtCtPolicy) : SpirvInst → Bool
+  | .opAccessChain _ resId baseId [idxId] =>
+    (pol.regSec baseId.toNat == .pub) &&
+    (pol.regSec idxId.toNat == .pub) &&
+    (pol.regSec resId.toNat == .pub)
+  | .opAccessChain _ _ _ _ => false
+  | .opLoad _ _ ptrId =>
+    pol.regSec ptrId.toNat == .pub
+  | .opStore ptrId _ =>
+    pol.regSec ptrId.toNat == .pub
+  | .opCompositeExtract _ resId compId _ =>
+    (pol.regSec resId.toNat == .sec) || (pol.regSec compId.toNat == .pub)
+  | .opUConvert _ resId valId
+  | .opNot _ resId valId
+  | .opLogicalNot _ resId valId =>
+    (pol.regSec resId.toNat == .sec) || (pol.regSec valId.toNat == .pub)
+  | .opIAdd _ resId aId bId
+  | .opISub _ resId aId bId
+  | .opIMul _ resId aId bId
+  | .opUMulExtended _ resId aId bId
+  | .opLogicalOr _ resId aId bId
+  | .opLogicalAnd _ resId aId bId
+  | .opIEqual _ resId aId bId
+  | .opINotEqual _ resId aId bId
+  | .opUGreaterThan _ resId aId bId
+  | .opUGreaterThanEqual _ resId aId bId
+  | .opULessThan _ resId aId bId
+  | .opULessThanEqual _ resId aId bId
+  | .opShiftRightLogical _ resId aId bId
+  | .opShiftLeftLogical _ resId aId bId
+  | .opBitwiseXor _ resId aId bId
+  | .opBitwiseOr _ resId aId bId
+  | .opBitwiseAnd _ resId aId bId =>
+    (pol.regSec resId.toNat == .sec) ||
+    ((pol.regSec aId.toNat == .pub) && (pol.regSec bId.toNat == .pub))
+  | .opSelect _ resId cId tId fId =>
+    (pol.regSec resId.toNat == .sec) ||
+    ((pol.regSec cId.toNat == .pub) && (pol.regSec tId.toNat == .pub) && (pol.regSec fId.toNat == .pub))
+  | .opControlBarrier es ms sem =>
+    (es == SpirvScope.workgroup.toWord) &&
+    (ms == SpirvScope.workgroup.toWord) &&
+    (sem == spirvSemWorkgroupAcqRel)
+  | .opLabel _ => true
+  | _ => false
+
+/-- Strict `SIMT-CT` check refining `OpLoad`, `OpStore`, and `OpAccessChain` label soundness:
+    - `OpLoad` into a `pub` register requires a `pub` source memory space;
+    - `OpStore` of a `sec` register requires a `sec` target memory space (no `sec -> pub` flow);
+    - `OpAccessChain` requires `pub` base pointer and `pub` index with consistent pointer metadata. -/
+def checkInstSimtCtStrict (env : SpirvModuleEnv) (pol : SimtCtPolicy) (inst : SpirvInst) : Bool :=
+  match inst with
+  | .opLoad _ resId ptrId =>
+    (pol.regSec ptrId.toNat == .pub) &&
+    (match pol.regSec resId.toNat with
+     | .sec => true
+     | .pub =>
+       match env.ptrInfo ptrId.toNat with
+       | some (.pushConstant, _, _) => true
+       | some (.storageBuffer, b, _) => pol.ssboSec b == .pub
+       | some (.workgroup, _, _) => pol.ldsSec == .pub
+       | _ => false)
+  | .opStore ptrId valId =>
+    (pol.regSec ptrId.toNat == .pub) &&
+    (match pol.regSec valId.toNat with
+     | .pub => true
+     | .sec =>
+       match env.ptrInfo ptrId.toNat with
+       | some (.storageBuffer, b, _) => pol.ssboSec b == .sec
+       | some (.workgroup, _, _) => pol.ldsSec == .sec
+       | _ => false)
+  | .opAccessChain tyId resId baseId [idxId] =>
+    (pol.regSec baseId.toNat == .pub) &&
+    (pol.regSec idxId.toNat == .pub) &&
+    (pol.regSec resId.toNat == .pub) &&
+    (match env.ptrInfo baseId.toNat, env.ptrInfo resId.toNat, env.ptrInfo tyId.toNat with
+     | some (sc1, b1, w1), some (sc2, b2, w2), some (sc3, b3, w3) =>
+       decide (sc1 = sc2 ∧ b1 = b2 ∧ w1 = w2 ∧ sc1 = sc3 ∧ b1 = b3 ∧ w1 = w3)
+     | _, _, _ => false)
+  | .opAccessChain _ _ _ _ => false
+  | .opControlBarrier es ms sem => isWorkgroupAcqRelBarrier env es ms sem
+  | other => checkInstSimtCt pol other
+
+def checkProgSimtCt (env : SpirvModuleEnv) (pol : SimtCtPolicy) (prog : List SpirvInst) : Bool :=
+  prog.all (checkInstSimtCtStrict env pol)
+
+/-- Two `SpirvVal`s have matching runtime tag/width shape (`vU32` vs `vU32`, `vU64` vs `vU64`, etc.)
+    so secret data differences never induce type-error divergence! -/
+def SpirvVal.SameShape : SpirvVal → SpirvVal → Prop
+  | .vUndef, .vUndef => True
+  | .vBool _, .vBool _ => True
+  | .vU32 _, .vU32 _ => True
+  | .vU64 _, .vU64 _ => True
+  | .vPair32 _ _, .vPair32 _ _ => True
+  | .vPair64 _ _, .vPair64 _ _ => True
+  | .vPtr sc1 b1 i1 w1, .vPtr sc2 b2 i2 w2 => sc1 = sc2 ∧ b1 = b2 ∧ i1 = i2 ∧ w1 = w2
+  | _, _ => False
+
+theorem SpirvVal.sameShape_refl (v : SpirvVal) : SpirvVal.SameShape v v := by
+  cases v <;> simp [SpirvVal.SameShape]
+
+/-- Static consistency of scalar constants in `SpirvModuleEnv` (constants are scalar, never raw pointers). -/
+def ScalarConstEnv (env : SpirvModuleEnv) : Prop :=
+  ∀ id sc b off w, env.initConst id ≠ .vPtr sc b off w
+
+/-- Low-equivalence (`pub`-indistinguishability) of memories and Wave32 states under `pol`. -/
+def MemLowEq (pol : SimtCtPolicy) (m₁ m₂ : GpuMemState) : Prop :=
+  m₁.pushConsts = m₂.pushConsts ∧
+  (pol.ldsSec = .pub → m₁.lds = m₂.lds) ∧
+  (∀ b : Nat, pol.ssboSec b = .pub → m₁.ssbo b = m₂.ssbo b)
+
+def LaneRegsLowEq (env : SpirvModuleEnv) (pol : SimtCtPolicy) (r₁ r₂ : Nat → SpirvVal) : Prop :=
+  (∀ id : Nat, SpirvVal.SameShape (r₁ id) (r₂ id)) ∧
+  (∀ id : Nat, pol.regSec id = .pub → r₁ id = r₂ id) ∧
+  (∀ id sc b off w, r₁ id = .vPtr sc b off w →
+    pol.regSec id = .pub → env.ptrInfo id = some (sc, b, w))
+
+def WaveLowEq (env : SpirvModuleEnv) (pol : SimtCtPolicy) (w₁ w₂ : Wave32State) : Prop :=
+  w₁.pc = w₂.pc ∧
+  w₁.atBarrier = w₂.atBarrier ∧
+  w₁.execMask = w₂.execMask ∧
+  (∀ lane < wave32Lanes, LaneRegsLowEq env pol (w₁.laneRegs lane) (w₂.laneRegs lane))
+
