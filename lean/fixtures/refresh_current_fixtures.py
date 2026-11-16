@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh current archive literals and slices, preserving frozen challenge fixtures.
+"""Refresh the archive literals and slice lists of `lean/Qsag/Machine/ElfFixtures.lean`.
 
 Use only artifacts built on the designated Linux host. The generated data are
 untrusted proposals; ElfParse proves extraction and ElfFixtureVerify checks CT.
@@ -14,6 +14,18 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import extract_rlib_elf as elf
 
+LITERALS_BEGIN = "/-- Fresh Linux source build;"
+LITERALS_END = "end Qsag\nend\n"
+SLICES_BEGIN = "def currentX86ExtractedSlices"
+
+def split_fixture(text):
+    """`ElfFixtures.lean` is: head, archive literals, `LITERALS_END`, middle, slice lists, `end Qsag`.
+    Return the two hand-maintained parts (head, middle); the rest is regenerated."""
+    head = text[:text.index(LITERALS_BEGIN)]
+    rest = text[text.index(LITERALS_END) + len(LITERALS_END):]
+    middle = rest[:rest.rfind("@[expose]", 0, rest.index(SLICES_BEGIN))]
+    return head, middle
+
 def byte_list(data):
     return "[" + ", ".join(f"0x{x:02x}" for x in data) + "]"
 
@@ -22,14 +34,9 @@ def main():
     ap.add_argument("--x86-rlib", type=Path, required=True)
     ap.add_argument("--aarch64-rlib", type=Path, required=True)
     args = ap.parse_args()
-    fixture = ROOT / "lean/Qsag/Machine/CompiledRlibFixtures.lean"
-    slices = ROOT / "lean/Qsag/Machine/ElfFixtureSlices.lean"
-    source = fixture.read_text()
-    start = source.index("/-- Fresh Linux source build;")
-    source = source[:start]
-    normalized = slices.read_text()
-    start = normalized.rfind("@[expose]", 0, normalized.index("def currentX86ExtractedSlices"))
-    normalized = normalized[:start]
+    fixture = ROOT / "lean/Qsag/Machine/ElfFixtures.lean"
+    head, middle = split_fixture(fixture.read_text())
+    source, normalized = head, ""
     bitslice_sha = hashlib.sha256((ROOT / "crates/qsag-asm/src/bitslice.rs").read_bytes()).hexdigest()
     for prefix, path, machine, count in [
         ("currentX86", args.x86_rlib, 62, 19),
@@ -58,8 +65,7 @@ def main():
                         f'    code := {byte_list(symbol.code)} }}')
         normalized += ",\n".join(rows) + "\n]\n\n"
         print(f"{prefix}: {count} pinned symbols, object SHA-256 {obj.sha256}")
-    fixture.write_text(source + "end Qsag\nend\n")
-    slices.write_text(normalized + "end Qsag\n")
+    fixture.write_text(source + LITERALS_END + middle + normalized + "end Qsag\n")
 
 if __name__ == "__main__":
     main()
