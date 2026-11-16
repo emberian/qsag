@@ -599,3 +599,928 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
 
 // ============================================================================
 // Journey B: `qsag-policy` + `SpongeMacaroon` / `PqBiscuit` -> `threshold_sign_mldsa_party_policy_gated`
+// ============================================================================
+
+#[test]
+fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
+    let accel = CpuReferenceBackend::new();
+    let tmp = TempDirGuard::new("policy-mldsa");
+
+    // 1. Verify newly unified `WitnessSuiteTag` discriminants (`C4-F6`) and run 2-of-3 dealerless
+    //    Threshold ML-DSA-44 DKG (`qsag-cred`).
+    assert_eq!(WitnessSuiteTag::Baggy as u16, 0x0211);
+    assert_eq!(WitnessSuiteTag::Jorts as u16, 0x0212);
+    assert_eq!(WitnessSuiteTag::QuorumJorts as u16, 0x0213);
+    assert_eq!(WitnessSuiteTag::JortsPoseidon2 as u16, 0x0214);
+    assert_eq!(WitnessSuiteTag::CorduroyPoseidon2 as u16, 0x0215);
+
+    let party_ids = [10u16, 20, 30];
+    let dkg_cfg = ThresholdMlDsaDkgConfig {
+        level: MlDsaLevel::MlDsa44,
+        threshold: 2,
+        party_ids: party_ids.to_vec(),
+        session_id: [0x31; 32],
+    };
+    let mut mldsa_shares = run_mpc_parties(vec![0u8, 1, 2], |_, idx, net| {
+        threshold_mldsa_dkg_party(&dkg_cfg, party_ids[idx as usize], &[0x40 + idx; 32], net)
+            .expect("threshold_mldsa_dkg_party")
+    });
+
+    let pack = mldsa_shares[0].verification_pack().clone();
+    let canonical_key_id = policy_signing_key_id(WitnessSuiteTag::MlDsa44, &pack.pk_bytes);
+    assert_eq!(
+        pack.policy_signing_key_id(),
+        canonical_key_id,
+        "C4-F3 regression: ThresholdVerificationPack::policy_signing_key_id != qsag_addr::policy_signing_key_id"
+    );
+    assert_eq!(
+        qsag_policy::policy_signing_key_id(WitnessSuiteTag::MlDsa44, &pack.pk_bytes),
+        canonical_key_id
+    );
+    let upstream_pk =
+        ml_dsa_44::PublicKey::try_from_bytes(pack.pk_bytes.as_slice().try_into().unwrap())
+            .expect("upstream fips204::ml_dsa_44::PublicKey");
+
+    // 2. Build allowlisted `QsagAddress`, `TransactionPolicy`, and dealerless `PolicySignerGuardShare`s.
+    let recipient = QsagAddress::from_pubkey_poseidon2(
+        "qsag",
+        WitnessSuiteTag::MlDsa44,
+        KeyIdentityKind::SingleOrThreshold,
+        b"recipient-vault-ml-dsa-44-pubkey",
+    )
+    .expect("recipient QsagAddress");
+    let bech = recipient.encode().expect("Bech32m encode");
+    assert_eq!(
+        QsagAddress::decode_for_hrp(&bech, "qsag").expect("Bech32m decode"),
+        recipient
+    );
+
+    let policy = TransactionPolicy {
+        chain_id: 2026,
+        pinned_suite: WitnessSuiteTag::MlDsa44,
+        recipient_allowlist: vec![recipient.commitment_256],
+        max_single_tx_amount: 10_000,
+        velocity_window_cap: 15_000,
+        valid_not_before_secs: 1_000,
+        valid_not_after_secs: 9_000,
+        forbid_initiator_self_approval: true,
+        hardware_guardian_party: Some(30),
+        quorum_tiers: vec![
+            QuorumTierRule {
+                max_amount_units: 1_000,
+                min_approvers: 1,
+                require_hardware_guardian: false,
+            },
+            QuorumTierRule {
+                max_amount_units: 10_000,
+                min_approvers: 2,
+                require_hardware_guardian: true,
+            },
+        ],
+    };
+    let required_actions = 0b0011u64;
+    let engine = PolicyEngine::new(&policy, required_actions);
+    let authority_pk = [0xAA; 32];
+    let signing_ctx = b"qsag-policy-gated-mldsa-v1";
+    // Custodian `10` initiates (`forbid_initiator_self_approval = true`), so custodians `[20, 30]`
+    // (including hardware guardian `30`) form the 2-of-3 BDOZ approval & threshold signing quorum!
+    let quorum = [20u16, 30];
+
+    let mut guards = provision_dealerless_policy_guards(&party_ids, [0x51; 32], 6);
+
+    // Durable `FsNonceBurnStore` (`QSCBURN3`) per custodian.
+    let mut burn_stores: Vec<FsNonceBurnStore> = party_ids
+        .iter()
+        .map(|&pid| {
+            FsNonceBurnStore::create(
+                tmp.path().join(format!("mldsa-burn-{pid}")),
+                canonical_key_id,
+                [0x60 + (pid as u8); 32],
+            )
+            .expect("FsNonceBurnStore::create")
+        })
+        .collect();
+
+    // ------------------------------------------------------------------------
+    // Flow B1: `SpongeMacaroon` + 3rd-party `Discharge` -> `PolicyEngine` -> `ThresholdMlDsa`
+    // ------------------------------------------------------------------------
+    let session_b1 = [0x71; 32];
+    let (mut intent_b1, _) = TransactionIntent::builder(
+        2026,
+        WitnessSuiteTag::MlDsa44,
+        recipient.clone(),
+        4_500,
+    )
+    .window_id(0)
+    .timestamp_secs(2_500)
+    .initiator_and_approvers(10, &[20, 30])
+    .bind_signing_payload(
+        &SigningPayloadBinding {
+            key_id: canonical_key_id,
+            payload: b"wire-transfer-001: 4500 units",
+            ctx: signing_ctx,
+            session_id: session_b1,
+            policy_revision: 1,
+            quorum: &quorum,
+            authority_pk,
+        },
+        &policy,
+    )
+    .expect("bind_signing_payload B1");
+    let signing_bytes_b1 = guards[0]
+        .authenticate_initiated_intent(&policy, &mut intent_b1)
+        .expect("authenticate_initiated_intent B1");
+    let intent_digest_b1 = intent_b1.canonical_digest();
+
+    let mac_root_key = [0x81; 32];
+    let mac_id = [0x82; 32];
+    let third_party_key = [0x83; 32];
+    let third_party_caveat_id = [0x84; 32];
+    let audience = policy.canonical_digest();
+    let mac_verifier = MacaroonVerifier::new(&mac_root_key, mac_id, audience);
+
+    let mut macaroon = SpongeMacaroon::issue(&mac_root_key, mac_id, audience);
+    macaroon.attenuate(Caveat::NotBefore(2_000)).unwrap();
+    macaroon.attenuate(Caveat::ExpiresAt(5_000)).unwrap();
+    macaroon
+        .attenuate(Caveat::Resource(recipient.commitment_256))
+        .unwrap();
+    macaroon.attenuate(Caveat::Actions(0b0111)).unwrap();
+    macaroon.attenuate(Caveat::MaxAmount(5_000)).unwrap();
+    macaroon
+        .attenuate(Caveat::ThirdParty(third_party_caveat_id))
+        .unwrap();
+
+    // Missing or unbound 3rd-party discharge MUST be rejected by `PolicyEngine` BEFORE BDOZ slot burn!
+    let unbound_discharge =
+        SpongeMacaroon::issue_discharge(&third_party_key, third_party_caveat_id, audience);
+    let bad_gate = CapabilityGate::Macaroon {
+        verifier: &mac_verifier,
+        token: &macaroon,
+        discharges: &[Discharge {
+            token: &unbound_discharge,
+            root_key: &third_party_key,
+        }],
+    };
+    assert_eq!(
+        engine
+            .authorize_committed_barrier(
+                &intent_b1,
+                session_b1,
+                2_500,
+                Some(&bad_gate),
+                &mut guards[1..3],
+                &accel,
+            )
+            .err(),
+        Some(PolicyViolation::CapabilityDenied(
+            CapabilityError::UnboundDischarge
+        ))
+    );
+    assert!(guards.iter().all(|g| !g.is_poisoned() && g.accumulated_window_spend() == 0));
+
+    // Bind discharge to parent macaroon and authorize through the 4-round BDOZ barrier!
+    let mut bound_discharge = unbound_discharge;
+    macaroon
+        .bind_discharge(&mut bound_discharge)
+        .expect("bind_discharge");
+    let mac_gate = CapabilityGate::Macaroon {
+        verifier: &mac_verifier,
+        token: &macaroon,
+        discharges: &[Discharge {
+            token: &bound_discharge,
+            root_key: &third_party_key,
+        }],
+    };
+    let release_b1 = engine
+        .authorize_committed_barrier(
+            &intent_b1,
+            session_b1,
+            2_500,
+            Some(&mac_gate),
+            &mut guards[1..3],
+            &accel,
+        )
+        .expect("PolicyEngine authorize B1");
+    assert_eq!(guards[0].accumulated_window_spend(), 0);
+    assert!(guards[1..3].iter().all(|g| g.accumulated_window_spend() == 4_500));
+
+    let party_tokens_b1 = release_b1.into_quorum_party_tokens();
+    assert_eq!(party_tokens_b1.len(), 2);
+
+    // Execute real policy-gated 2-of-3 threshold ML-DSA signing across `[20, 30]`!
+    let party_inputs_b1: Vec<_> = mldsa_shares[1..3]
+        .iter_mut()
+        .zip(burn_stores[1..3].iter_mut())
+        .zip(party_tokens_b1)
+        .enumerate()
+        .map(|(idx, ((sh, burn), tok))| (idx, sh, burn, tok))
+        .collect();
+    let sig_outputs_b1 = run_mpc_parties(party_inputs_b1, |_, (idx, sh, burn, tok), net| {
+        threshold_sign_mldsa_party_policy_gated(
+            sh,
+            ThresholdPolicyGate {
+                token: tok,
+                expected_intent_digest: &intent_digest_b1,
+                quorum: &quorum,
+            },
+            &signing_bytes_b1,
+            signing_ctx,
+            &[0xA0 + idx as u8; 32],
+            burn as &mut dyn NonceBurnPersistence,
+            net,
+        )
+        .expect("threshold_sign_mldsa_party_policy_gated B1")
+    });
+    let sig_b1 = &sig_outputs_b1[0].signature;
+    assert!(sig_outputs_b1.iter().all(|o| &o.signature == sig_b1));
+    assert!(ml_dsa_verify(
+        MlDsaLevel::MlDsa44,
+        &pack.pk_bytes,
+        &signing_bytes_b1,
+        signing_ctx,
+        sig_b1
+    ));
+    let sig_b1_arr: [u8; ml_dsa_44::SIG_LEN] = sig_b1.as_slice().try_into().unwrap();
+    assert!(upstream_pk.verify(&signing_bytes_b1, &sig_b1_arr, signing_ctx));
+
+    // ------------------------------------------------------------------------
+    // Flow B2: Multi-hop `Compact1122` `PqBiscuit` (PoP request-bound) -> `PolicyEngine` -> `ThresholdMlDsa`
+    // ------------------------------------------------------------------------
+    assert_eq!(PQ_BISCUIT_HOP_CRYPTO_BYTES, 1154);
+    let dp_1122 = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+    let mut biscuit_auth =
+        PqBiscuitAuthorityKey::keygen([0xB1; 32], [0xB2; 32], 2, &accel).expect("PqBiscuit keygen");
+    let biscuit_auth_pk = *biscuit_auth.public_key();
+    assert_eq!(biscuit_auth.remaining_mints(), 4);
+
+    let session_b2 = [0x72; 32];
+    let (mut intent_b2, _) = TransactionIntent::builder(
+        2026,
+        WitnessSuiteTag::MlDsa44,
+        recipient.clone(),
+        800, // Tier 0 (`<= 1000`, 1 non-initiator approver suffices, rolling spend `4500 + 800 = 5300`)
+    )
+    .rolling_window(4_500, [0; 32])
+    .window_id(0)
+    .timestamp_secs(3_000)
+    .initiator_and_approvers(10, &[20, 30])
+    .bind_signing_payload(
+        &SigningPayloadBinding {
+            key_id: canonical_key_id,
+            payload: b"wire-transfer-002: 800 units via Compact1122 PQ Biscuit",
+            ctx: signing_ctx,
+            session_id: session_b2,
+            policy_revision: 1,
+            quorum: &quorum,
+            authority_pk,
+        },
+        &policy,
+    )
+    .expect("bind_signing_payload B2");
+    let signing_bytes_b2 = guards[0]
+        .authenticate_initiated_intent(&policy, &mut intent_b2)
+        .expect("authenticate_initiated_intent B2");
+    let intent_digest_b2 = intent_b2.canonical_digest();
+
+    // Root mint (hop 0) -> offline public-key attenuation (hop 1) -> PoP request-bound seal!
+    let (biscuit_hop0, step1) = biscuit_auth
+        .mint(
+            &dp_1122,
+            [0xC1; 32],
+            audience,
+            &[Caveat::NotBefore(2_000), Caveat::ExpiresAt(6_000), Caveat::MaxAmount(5_000)],
+            [0xC2; 32],
+            &[0xC3; 32],
+            &accel,
+        )
+        .expect("PqBiscuit mint");
+    assert_eq!(biscuit_auth.remaining_mints(), 3);
+
+    // Unsealed `PqBiscuit` MUST be rejected before latching any BDOZ slot!
+    let unsealed_gate = CapabilityGate::Biscuit {
+        authority_pk: &biscuit_auth_pk,
+        dp: &dp_1122,
+        token: &biscuit_hop0,
+    };
+    assert!(
+        engine
+            .authorize_committed_barrier(
+                &intent_b2,
+                session_b2,
+                3_000,
+                Some(&unsealed_gate),
+                &mut guards[1..3],
+                &accel,
+            )
+            .is_err()
+    );
+
+    // Offline attenuation narrowing `MaxAmount` to `1_000` and pinning `Resource` + `Actions`.
+    let (biscuit_hop1, step2) = step1
+        .attenuate(
+            &biscuit_hop0,
+            &dp_1122,
+            &[
+                Caveat::MaxAmount(1_000),
+                Caveat::Resource(recipient.commitment_256),
+                Caveat::Actions(required_actions),
+            ],
+            [0xC4; 32],
+            &[0xC5; 32],
+            &accel,
+        )
+        .expect("PqBiscuit attenuate");
+    let bound_req = CapabilityRequest::from_policy_intent(&policy, &intent_b2, required_actions, 3_000);
+    let sealed_biscuit = step2
+        .seal(&biscuit_hop1, &dp_1122, Some(&bound_req), &[0xC6; 32], &accel)
+        .expect("PqBiscuit seal");
+
+    let biscuit_wire = sealed_biscuit.to_bytes().expect("PqBiscuit::to_bytes");
+    let decoded_biscuit = PqBiscuit::from_bytes(&biscuit_wire).expect("PqBiscuit::from_bytes");
+    assert_eq!(decoded_biscuit, sealed_biscuit);
+
+    let biscuit_gate = CapabilityGate::Biscuit {
+        authority_pk: &biscuit_auth_pk,
+        dp: &dp_1122,
+        token: &decoded_biscuit,
+    };
+    // Replay at a different timestamp (`3_001 != 3_000`) fails PoP request-bound seal verification!
+    assert_eq!(
+        engine.verify_capability(&intent_b2, 3_001, &biscuit_gate),
+        Err(PolicyViolation::CapabilityDenied(CapabilityError::InvalidTag))
+    );
+
+    let release_b2 = engine
+        .authorize_committed_barrier(
+            &intent_b2,
+            session_b2,
+            3_000,
+            Some(&biscuit_gate),
+            &mut guards[1..3],
+            &accel,
+        )
+        .expect("PolicyEngine authorize B2 via Compact1122 PqBiscuit");
+    assert!(guards[1..3].iter().all(|g| g.accumulated_window_spend() == 5_300));
+
+    let party_tokens_b2 = release_b2.into_quorum_party_tokens();
+    assert_eq!(party_tokens_b2.len(), 2);
+    let party_inputs_b2: Vec<_> = mldsa_shares[1..3]
+        .iter_mut()
+        .zip(burn_stores[1..3].iter_mut())
+        .zip(party_tokens_b2)
+        .enumerate()
+        .map(|(idx, ((sh, burn), tok))| (idx, sh, burn, tok))
+        .collect();
+    let sig_outputs_b2 = run_mpc_parties(party_inputs_b2, |_, (idx, sh, burn, tok), net| {
+        threshold_sign_mldsa_party_policy_gated(
+            sh,
+            ThresholdPolicyGate {
+                token: tok,
+                expected_intent_digest: &intent_digest_b2,
+                quorum: &quorum,
+            },
+            &signing_bytes_b2,
+            signing_ctx,
+            &[0xD0 + idx as u8; 32],
+            burn as &mut dyn NonceBurnPersistence,
+            net,
+        )
+        .expect("threshold_sign_mldsa_party_policy_gated B2")
+    });
+    let sig_b2_arr: [u8; ml_dsa_44::SIG_LEN] =
+        sig_outputs_b2[0].signature.as_slice().try_into().unwrap();
+    assert!(upstream_pk.verify(&signing_bytes_b2, &sig_b2_arr, signing_ctx));
+
+    // Negative check (Flow B3): a fresh move-only `AuthorizedSignReleaseToken` presented with a
+    // hijacked signing payload MUST be rejected by `threshold_sign_mldsa_party_policy_gated` with
+    // `PolicyTokenDigestMismatch` before running any MPC round!
+    let session_b3 = [0x73; 32];
+    let (mut intent_b3, _) = TransactionIntent::builder(
+        2026,
+        WitnessSuiteTag::MlDsa44,
+        recipient,
+        100,
+    )
+    .rolling_window(5_300, [0; 32])
+    .window_id(0)
+    .timestamp_secs(3_100)
+    .initiator_and_approvers(10, &[20, 30])
+    .bind_signing_payload(
+        &SigningPayloadBinding {
+            key_id: canonical_key_id,
+            payload: b"wire-transfer-003: 100 units",
+            ctx: signing_ctx,
+            session_id: session_b3,
+            policy_revision: 1,
+            quorum: &quorum,
+            authority_pk,
+        },
+        &policy,
+    )
+    .expect("bind_signing_payload B3");
+    let _ = guards[0]
+        .authenticate_initiated_intent(&policy, &mut intent_b3)
+        .expect("authenticate_initiated_intent B3");
+    let intent_digest_b3 = intent_b3.canonical_digest();
+    let release_b3 = engine
+        .authorize_committed_barrier(&intent_b3, session_b3, 3_100, None, &mut guards[1..3], &accel)
+        .expect("PolicyEngine authorize B3");
+    let mut party_tokens_b3 = release_b3.into_quorum_party_tokens();
+    let tok0_b3 = party_tokens_b3.remove(0);
+
+    let mut dummy_ep = MpcEndpoint {
+        net: Arc::new(LocalMpcNet {
+            state: Mutex::new(NetState {
+                round: 0,
+                posted: vec![None],
+                taken: vec![false],
+                stopped: false,
+            }),
+            changed: Condvar::new(),
+        }),
+        me: 0,
+    };
+    let bad_res = threshold_sign_mldsa_party_policy_gated(
+        &mut mldsa_shares[1],
+        ThresholdPolicyGate {
+            token: tok0_b3,
+            expected_intent_digest: &intent_digest_b3,
+            quorum: &quorum,
+        },
+        b"unauthorized-hijacked-payload",
+        signing_ctx,
+        &[0x99; 32],
+        &mut burn_stores[1],
+        &mut dummy_ep,
+    );
+    assert_eq!(
+        bad_res.err(),
+        Some(ThresholdMlDsaError::PolicyTokenDigestMismatch)
+    );
+}
+
+// ============================================================================
+// Journey C: Paged Crash Journals (`QSBURN05` in `qsag-fts` & `QSHDQB04` in `qsag-hd`)
+// ============================================================================
+
+const PAGE_BYTES: usize = HWM_PAGE_BYTES as usize; // 4096
+const HEADER_BYTES: usize = 3 * PAGE_BYTES; // 12,288
+const SLOT_A_OFF: usize = PAGE_BYTES; // 4096
+const SLOT_B_OFF: usize = 2 * PAGE_BYTES; // 8192
+const QSBURN05_REC_BYTES: usize = 42;
+const QSHDQB04_REC_BYTES: usize = 40;
+
+fn write_in_place(path: &Path, offset: u64, data: &[u8]) {
+    let mut f = OpenOptions::new().write(true).open(path).unwrap();
+    f.seek(SeekFrom::Start(offset)).unwrap();
+    f.write_all(data).unwrap();
+    f.sync_all().unwrap();
+}
+
+fn burn_file_identity_be(path: &Path) -> [u8; 16] {
+    let meta = fs::metadata(path).unwrap();
+    let (dev, ino) = file_dev_ino(&meta).unwrap();
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&dev.to_be_bytes());
+    id[8..].copy_from_slice(&ino.to_be_bytes());
+    id
+}
+
+#[test]
+fn e2e_qsburn05_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
+    let tmp = TempDirGuard::new("qsburn05");
+    let key = [0x17; 32];
+    let mac_key = [0x29; 32];
+
+    // Provision a clean journal with 2 committed burns: `(0, 10)` and `(1, 11)`.
+    let mk_two_burns = |name: &str| -> (PathBuf, [u8; 32], [u8; 32], [u8; 32]) {
+        let p = tmp.path().join(name);
+        let mut j = DurableBurnJournal::create(&p, key, mac_key).unwrap();
+        j.reserve(&key, 0, 10).unwrap();
+        let ck1 = j.checkpoint();
+        j.reserve(&key, 1, 11).unwrap();
+        let ck2 = j.checkpoint();
+        drop(j);
+
+        let raw = fs::read(&p).unwrap();
+        assert_eq!(raw.len(), HEADER_BYTES + 2 * QSBURN05_REC_BYTES);
+        assert_eq!(&raw[..8], b"QSBURN05");
+        let genesis: [u8; 32] = raw[40..72].try_into().unwrap();
+        (p, genesis, ck1.tag, ck2.tag)
+    };
+
+    // 1. Verify exact 3-page layout (`4096`, `8192`, `12288`) & NIST SP 800-185 cSHAKE256 MAC parity!
+    {
+        let (p, genesis, tag1, tag2) = mk_two_burns("layout.burn");
+        let raw = fs::read(&p).unwrap();
+        let id = burn_file_identity_be(&p);
+
+        let expected_gen_mac = cshake256_framed_32_nist_ref(
+            b"QSAG.BURN.GENESIS.V4",
+            &[&mac_key, &id, &raw[..72]],
+        );
+        assert_eq!(&raw[72..104], &expected_gen_mac);
+
+        let expected_rec1_mac = cshake256_framed_32_nist_ref(
+            b"QSAG.BURN.RECORD.V2",
+            &[&mac_key, &key, &genesis, &expected_gen_mac, &raw[HEADER_BYTES..HEADER_BYTES + 10]],
+        );
+        assert_eq!(tag1, expected_rec1_mac);
+
+        for (slot, off) in [(0u8, SLOT_A_OFF), (1u8, SLOT_B_OFF)] {
+            let slot_bytes = &raw[off..off + HWM_SLOT_BYTES];
+            assert_eq!(&slot_bytes[..8], &2u64.to_be_bytes());
+            assert_eq!(&slot_bytes[8..40], &tag2);
+            let expected_hwm_mac = cshake256_framed_32_nist_ref(
+                b"QSAG.BURN.HWM.V4",
+                &[
+                    &mac_key,
+                    &id,
+                    &key,
+                    &genesis,
+                    &[slot],
+                    &2u64.to_be_bytes(),
+                    &tag2,
+                    &[0u8; 8],
+                ],
+            );
+            assert_eq!(&slot_bytes[40..72], &expected_hwm_mac);
+            assert_eq!(&slot_bytes[72..80], &[0u8; 8]);
+        }
+    }
+
+    // 2. Sector tear on Slot A (`4096`) AND sector tear on Slot B (`8192`) -> heals cleanly;
+    //    simultaneous tear on BOTH Slot A and Slot B -> fails closed!
+    for (name, tear_off) in [("tear_a.burn", SLOT_A_OFF), ("tear_b.burn", SLOT_B_OFF)] {
+        let (p, _, _, tag2) = mk_two_burns(name);
+        write_in_place(&p, tear_off as u64, &[0xFFu8; HWM_SLOT_BYTES]);
+        let mut recovered = DurableBurnJournal::open_existing(&p, key, mac_key).unwrap();
+        assert_eq!(recovered.checkpoint().generation, 2);
+        assert_eq!(recovered.checkpoint().tag, tag2);
+        // Burned epochs remain enforced and new burns succeed!
+        assert!(recovered.reserve(&key, 0, 10).is_err());
+        assert!(recovered.reserve(&key, 1, 11).is_err());
+        recovered.reserve(&key, 2, 12).unwrap();
+        assert_eq!(recovered.checkpoint().generation, 3);
+    }
+    {
+        let (p, _, _, _) = mk_two_burns("tear_both.burn");
+        write_in_place(&p, SLOT_A_OFF as u64, &[0xAAu8; HWM_SLOT_BYTES]);
+        write_in_place(&p, SLOT_B_OFF as u64, &[0x55u8; HWM_SLOT_BYTES]);
+        assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
+    }
+
+    // 3. Uncommitted tail bytes (`<= 42 B`) across ALL 3 `TwoSlotHwmCrashModel` crash states:
+    //    (3a) Steady `(Slot A = 2, Slot B = 2)` + 17-byte partial append AND 42-byte torn record
+    for tail_len in [1usize, 17, QSBURN05_REC_BYTES] {
+        let (p, _, _, tag2) = mk_two_burns(&format!("tail_steady_{tail_len}.burn"));
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 2 * QSBURN05_REC_BYTES) as u64,
+            &vec![0xEEu8; tail_len],
+        );
+        let recovered = DurableBurnJournal::open_existing(&p, key, mac_key).unwrap();
+        assert_eq!(recovered.checkpoint().generation, 2);
+        assert_eq!(recovered.checkpoint().tag, tag2);
+        drop(recovered);
+        assert_eq!(
+            fs::metadata(&p).unwrap().len(),
+            (HEADER_BYTES + 2 * QSBURN05_REC_BYTES) as u64
+        );
+    }
+
+    //    (3b) Lagging Slot B (`Slot A = 2, Slot B = 1`) + 42-byte uncommitted tail:
+    //         Recovery truncates tail AND heals Slot B up to `2`!
+    {
+        let (p, genesis, tag1, tag2) = mk_two_burns("tail_lagging_b.burn");
+        let id = burn_file_identity_be(&p);
+        let hwm_mac = |slot: u8, ctr: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
+            cshake256_framed_32_nist_ref(
+                b"QSAG.BURN.HWM.V4",
+                &[&mac_key, &id, &key, &genesis, &[slot], ctr, tip, res],
+            )
+        };
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Big, &hwm_mac);
+        let slot_b_gen1 = hwm.encode(1, 1, &tag1);
+        write_in_place(&p, SLOT_B_OFF as u64, &slot_b_gen1);
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 2 * QSBURN05_REC_BYTES) as u64,
+            &[0xDEu8; QSBURN05_REC_BYTES],
+        );
+
+        let recovered = DurableBurnJournal::open_existing(&p, key, mac_key).unwrap();
+        assert_eq!(recovered.checkpoint().generation, 2);
+        assert_eq!(recovered.checkpoint().tag, tag2);
+        drop(recovered);
+        let healed = fs::read(&p).unwrap();
+        assert_eq!(healed.len(), HEADER_BYTES + 2 * QSBURN05_REC_BYTES);
+        assert_eq!(&healed[SLOT_B_OFF..SLOT_B_OFF + 8], &2u64.to_be_bytes());
+    }
+
+    //    (3c) Unacknowledged synced record (`committed = 3` reached disk while `Slot A = Slot B = 2`),
+    //         followed by a 19-byte uncommitted tail -> advances HWM to `3` AND truncates the 19-byte tail!
+    {
+        let (p, genesis, _, tag2) = mk_two_burns("tail_committed_plus_1.burn");
+        let mut rec3 = [0u8; QSBURN05_REC_BYTES];
+        rec3[..2].copy_from_slice(&2u16.to_be_bytes());
+        rec3[2..10].copy_from_slice(&12u64.to_be_bytes());
+        let tag3 = cshake256_framed_32_nist_ref(
+            b"QSAG.BURN.RECORD.V2",
+            &[&mac_key, &key, &genesis, &tag2, &rec3[..10]],
+        );
+        rec3[10..].copy_from_slice(&tag3);
+        write_in_place(&p, (HEADER_BYTES + 2 * QSBURN05_REC_BYTES) as u64, &rec3);
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 3 * QSBURN05_REC_BYTES) as u64,
+            &[0xABu8; 19],
+        );
+
+        let mut recovered = DurableBurnJournal::open_existing(&p, key, mac_key).unwrap();
+        assert_eq!(recovered.checkpoint().generation, 3);
+        assert_eq!(recovered.checkpoint().tag, tag3);
+        assert!(recovered.reserve(&key, 2, 12).is_err(), "record 3 must stay burned");
+        drop(recovered);
+        let healed = fs::read(&p).unwrap();
+        assert_eq!(healed.len(), HEADER_BYTES + 3 * QSBURN05_REC_BYTES);
+        assert_eq!(&healed[SLOT_A_OFF..SLOT_A_OFF + 8], &3u64.to_be_bytes());
+        assert_eq!(&healed[SLOT_B_OFF..SLOT_B_OFF + 8], &3u64.to_be_bytes());
+    }
+
+    //    (3d) Oversized uncommitted tail (`43 B = RECORD_LEN + 1`) -> MUST fail closed!
+    {
+        let (p, _, _, _) = mk_two_burns("tail_oversized.burn");
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 2 * QSBURN05_REC_BYTES) as u64,
+            &[0xEEu8; QSBURN05_REC_BYTES + 1],
+        );
+        assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
+    }
+
+    // 4. Committed-record corruption, silent last-record truncation, overclaimed HWM, and inode copy:
+    //    ALL must fail closed without truncating committed history!
+    {
+        // Flipping 1 bit in committed record #2 (`index = 1`): `verified = 1 < HWM = 2` -> refused!
+        let (p, _, _, _) = mk_two_burns("corrupt_committed.burn");
+        let last_rec_off = HEADER_BYTES + QSBURN05_REC_BYTES + 5;
+        let mut raw = fs::read(&p).unwrap();
+        raw[last_rec_off] ^= 0x01;
+        write_in_place(&p, last_rec_off as u64, &[raw[last_rec_off]]);
+        assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
+    }
+    {
+        // Truncating record #2 off disk while HWM slots hold `2` -> refused!
+        let (p, _, _, _) = mk_two_burns("truncated_chain.burn");
+        let f = OpenOptions::new().write(true).open(&p).unwrap();
+        f.set_len((HEADER_BYTES + QSBURN05_REC_BYTES) as u64).unwrap();
+        f.sync_all().unwrap();
+        assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
+    }
+    {
+        // Forging authenticated HWM slots claiming `counter = 3` when only `2` records exist -> refused!
+        let (p, genesis, _, tag2) = mk_two_burns("overclaimed_hwm.burn");
+        let id = burn_file_identity_be(&p);
+        let hwm_mac = |slot: u8, ctr: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
+            cshake256_framed_32_nist_ref(
+                b"QSAG.BURN.HWM.V4",
+                &[&mac_key, &id, &key, &genesis, &[slot], ctr, tip, res],
+            )
+        };
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Big, &hwm_mac);
+        write_in_place(&p, SLOT_A_OFF as u64, &hwm.encode(0, 3, &tag2));
+        write_in_place(&p, SLOT_B_OFF as u64, &hwm.encode(1, 3, &tag2));
+        assert!(DurableBurnJournal::open_existing(&p, key, mac_key).is_err());
+    }
+    {
+        // Copying valid journal bytes onto a fresh file (different inode) -> refused!
+        let (p, _, _, _) = mk_two_burns("orig_inode.burn");
+        let copy_path = tmp.path().join("copied_inode.burn");
+        fs::copy(&p, &copy_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&copy_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(DurableBurnJournal::open_existing(&copy_path, key, mac_key).is_err());
+    }
+}
+
+#[test]
+fn e2e_qshdqb04_paged_crash_journal_tears_tail_truncation_and_tamper_matrix() {
+    let tmp = TempDirGuard::new("qshdqb04");
+    let family = [0x3B; 32];
+    let key = [0x4D; 32];
+
+    // Provision a clean `QSHDQB04` HD query-budget journal with `used = 2` (`3` records including genesis `0`).
+    let mk_two_uses = |name: &str| -> (PathBuf, [u8; 8], [u8; 16], [u8; 32], [u8; 32]) {
+        let p = tmp.path().join(name);
+        let mut b = DurableQueryBudget::create(&p, family, key).unwrap();
+        b.reserve().unwrap();
+        let mac1 = b.checkpoint().tag;
+        b.reserve().unwrap();
+        let mac2 = b.checkpoint().tag;
+        assert_eq!(b.used(), 2);
+        drop(b);
+
+        let raw = fs::read(&p).unwrap();
+        assert_eq!(raw.len(), HEADER_BYTES + 3 * QSHDQB04_REC_BYTES);
+        assert_eq!(
+            &raw[RECORD_HEADER_BYTES + 16..RECORD_HEADER_BYTES + 24],
+            b"QSHDQB04"
+        );
+        // `LockedRecord` 16-byte header stores `QSAGREC1` (`[0..8]`) + `lock_seal` (`[8..16]`).
+        assert_eq!(&raw[0..8], b"QSAGREC1");
+        let lock_seal: [u8; 8] = raw[8..16].try_into().unwrap();
+        let data_seal = asm_file_identity(&fs::metadata(&p).unwrap());
+        assert_eq!(&raw[RECORD_HEADER_BYTES..RECORD_HEADER_BYTES + 16], &data_seal);
+        (p, lock_seal, data_seal, mac1, mac2)
+    };
+
+    // 1. Verify physical page alignment (`4096` Slot A, `8192` Slot B, `12288` genesis record)
+    //    and NIST SP 800-185 `cshake256_framed_32_nist_ref` MAC parity!
+    {
+        let (p, lock_seal, data_seal, mac1, mac2) = mk_two_uses("layout.hdqb");
+        let raw = fs::read(&p).unwrap();
+        let limit_le = 128u64.to_le_bytes();
+
+        let mac0 = cshake256_framed_32_nist_ref(
+            b"QSAG.HD.QUERY_BUDGET.V3",
+            &[&key, &family, &lock_seal, &data_seal, &limit_le, &0u64.to_le_bytes(), &[0u8; 32]],
+        );
+        assert_eq!(&raw[HEADER_BYTES + 8..HEADER_BYTES + 40], &mac0);
+        let expected_mac1 = cshake256_framed_32_nist_ref(
+            b"QSAG.HD.QUERY_BUDGET.V3",
+            &[&key, &family, &lock_seal, &data_seal, &limit_le, &1u64.to_le_bytes(), &mac0],
+        );
+        assert_eq!(mac1, expected_mac1);
+
+        for (slot, off) in [(0u8, SLOT_A_OFF), (1u8, SLOT_B_OFF)] {
+            let slot_bytes = &raw[off..off + HWM_SLOT_BYTES];
+            assert_eq!(&slot_bytes[..8], &2u64.to_le_bytes());
+            assert_eq!(&slot_bytes[8..40], &mac2);
+            let expected_hwm_mac = cshake256_framed_32_nist_ref(
+                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                &[
+                    &key,
+                    &family,
+                    &lock_seal,
+                    &data_seal,
+                    &[slot],
+                    &limit_le,
+                    &2u64.to_le_bytes(),
+                    &mac2,
+                    &[0u8; 8],
+                ],
+            );
+            assert_eq!(&slot_bytes[40..72], &expected_hwm_mac);
+        }
+    }
+
+    // 2. Sector tear on Slot A (`4096`) AND Slot B (`8192`) -> recovers; dual tear -> fails closed!
+    for (name, tear_off) in [("tear_a.hdqb", SLOT_A_OFF), ("tear_b.hdqb", SLOT_B_OFF)] {
+        let (p, _, _, _, mac2) = mk_two_uses(name);
+        write_in_place(&p, tear_off as u64, &[0xCCu8; HWM_SLOT_BYTES]);
+        let mut b = DurableQueryBudget::open(&p, family, key).unwrap();
+        assert_eq!(b.used(), 2);
+        assert_eq!(b.checkpoint().tag, mac2);
+        b.reserve().unwrap();
+        assert_eq!(b.used(), 3);
+    }
+    {
+        let (p, _, _, _, _) = mk_two_uses("tear_both.hdqb");
+        write_in_place(&p, SLOT_A_OFF as u64, &[0xCCu8; HWM_SLOT_BYTES]);
+        write_in_place(&p, SLOT_B_OFF as u64, &[0x33u8; HWM_SLOT_BYTES]);
+        assert_eq!(
+            DurableQueryBudget::open(&p, family, key).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+    }
+
+    // 3. Uncommitted tail bytes (`<= 40 B`) across steady `(2, 2)`, lagging Slot B `(2, 1)`,
+    //    and synced unacknowledged record `used = 3` while HWM holds `(2, 2)`, plus `41 B` rejection!
+    for tail_len in [1usize, 23, QSHDQB04_REC_BYTES] {
+        let (p, _, _, _, mac2) = mk_two_uses(&format!("tail_steady_{tail_len}.hdqb"));
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 3 * QSHDQB04_REC_BYTES) as u64,
+            &vec![0x77u8; tail_len],
+        );
+        let b = DurableQueryBudget::open(&p, family, key).unwrap();
+        assert_eq!(b.used(), 2);
+        assert_eq!(b.checkpoint().tag, mac2);
+        drop(b);
+        assert_eq!(
+            fs::metadata(&p).unwrap().len(),
+            (HEADER_BYTES + 3 * QSHDQB04_REC_BYTES) as u64
+        );
+    }
+
+    {
+        // Lagging Slot B (`Slot A = 2, Slot B = 1`) + 40-byte uncommitted tail -> truncates & heals!
+        let (p, lock_seal, data_seal, mac1, mac2) = mk_two_uses("tail_lagging_b.hdqb");
+        let limit_le = 128u64.to_le_bytes();
+        let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
+            cshake256_framed_32_nist_ref(
+                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                &[&key, &family, &lock_seal, &data_seal, &[slot], &limit_le, used, tip, res],
+            )
+        };
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &hwm_mac);
+        write_in_place(&p, SLOT_B_OFF as u64, &hwm.encode(1, 1, &mac1));
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 3 * QSHDQB04_REC_BYTES) as u64,
+            &[0x99u8; QSHDQB04_REC_BYTES],
+        );
+
+        let b = DurableQueryBudget::open(&p, family, key).unwrap();
+        assert_eq!(b.used(), 2);
+        assert_eq!(b.checkpoint().tag, mac2);
+        drop(b);
+        let healed = fs::read(&p).unwrap();
+        assert_eq!(healed.len(), HEADER_BYTES + 3 * QSHDQB04_REC_BYTES);
+        assert_eq!(&healed[SLOT_B_OFF..SLOT_B_OFF + 8], &2u64.to_le_bytes());
+    }
+
+    {
+        // Unacknowledged synced record `count = 3` (`used = 3`) while HWM slots hold `2`, plus 15B tail!
+        let (p, lock_seal, data_seal, _, mac2) = mk_two_uses("tail_committed_plus_1.hdqb");
+        let mut rec3 = [0u8; QSHDQB04_REC_BYTES];
+        rec3[..8].copy_from_slice(&3u64.to_le_bytes());
+        let mac3 = cshake256_framed_32_nist_ref(
+            b"QSAG.HD.QUERY_BUDGET.V3",
+            &[
+                &key,
+                &family,
+                &lock_seal,
+                &data_seal,
+                &128u64.to_le_bytes(),
+                &rec3[..8],
+                &mac2,
+            ],
+        );
+        rec3[8..].copy_from_slice(&mac3);
+        write_in_place(&p, (HEADER_BYTES + 3 * QSHDQB04_REC_BYTES) as u64, &rec3);
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 4 * QSHDQB04_REC_BYTES) as u64,
+            &[0xFEu8; 15],
+        );
+
+        let b = DurableQueryBudget::open(&p, family, key).unwrap();
+        assert_eq!(b.used(), 3);
+        assert_eq!(b.checkpoint().tag, mac3);
+        drop(b);
+        let healed = fs::read(&p).unwrap();
+        assert_eq!(healed.len(), HEADER_BYTES + 4 * QSHDQB04_REC_BYTES);
+        assert_eq!(&healed[SLOT_A_OFF..SLOT_A_OFF + 8], &3u64.to_le_bytes());
+        assert_eq!(&healed[SLOT_B_OFF..SLOT_B_OFF + 8], &3u64.to_le_bytes());
+    }
+
+    {
+        // Oversized tail (`41 B = RECORD_LEN + 1`) -> fails closed!
+        let (p, _, _, _, _) = mk_two_uses("tail_oversized.hdqb");
+        write_in_place(
+            &p,
+            (HEADER_BYTES + 3 * QSHDQB04_REC_BYTES) as u64,
+            &[0x77u8; QSHDQB04_REC_BYTES + 1],
+        );
+        assert_eq!(
+            DurableQueryBudget::open(&p, family, key).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+    }
+
+    // 4. Committed-record corruption & overclaimed HWM must fail closed!
+    {
+        let (p, _, _, _, _) = mk_two_uses("corrupt_committed.hdqb");
+        let rec2_off = HEADER_BYTES + 2 * QSHDQB04_REC_BYTES + 12;
+        let mut raw = fs::read(&p).unwrap();
+        raw[rec2_off] ^= 0x01;
+        write_in_place(&p, rec2_off as u64, &[raw[rec2_off]]);
+        assert_eq!(
+            DurableQueryBudget::open(&p, family, key).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+    }
+    {
+        let (p, lock_seal, data_seal, _, mac2) = mk_two_uses("overclaimed_hwm.hdqb");
+        let limit_le = 128u64.to_le_bytes();
+        let hwm_mac = |slot: u8, used: &[u8; 8], tip: &[u8; 32], res: &[u8; 8]| {
+            cshake256_framed_32_nist_ref(
+                b"QSAG.HD.QUERY_BUDGET.HWM.V4",
+                &[&key, &family, &lock_seal, &data_seal, &[slot], &limit_le, used, tip, res],
+            )
+        };
+        let hwm = TwoSlotHwm::paged(1, CounterOrder::Little, &hwm_mac);
+        write_in_place(&p, SLOT_A_OFF as u64, &hwm.encode(0, 3, &mac2));
+        write_in_place(&p, SLOT_B_OFF as u64, &hwm.encode(1, 3, &mac2));
+        assert_eq!(
+            DurableQueryBudget::open(&p, family, key).err(),
+            Some(HdError::BudgetStorageFailed)
+        );
+    }
+}

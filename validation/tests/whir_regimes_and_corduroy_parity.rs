@@ -23,15 +23,16 @@
 //!    `HEM_PUBLIC_CELLS` batching) AND `zk_hem::full_shard` (`prove_recursive_shard`,
 //!    `prove_full_shard_merge`, `verify_full_shard_merge`, `QSAGFSM1`) + adversarial tamper rejection.
 
-use qsag_agg::field::{Goldilocks, GoldilocksExt4, GoldilocksOps as _, build_eq_table_ext4};
+use qsag_agg::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use qsag_agg::pcs::{
     HemWhirOpeningProof, MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, WhirSchedule, WhirSecurityRegime,
     whir_commit_owned_with_schedule, whir_open, whir_verify_with_schedule,
 };
 use qsag_agg::sig::{
     CORDUROY_MAX_STATELESS_SIGS_PER_KEY, CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT,
-    DOMAIN_PRF_MSG, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, ValidatorKeypair, WOTS_CHAINS,
-    WOTS_TARGET_SUM, verify_signature_batch,
+    DOMAIN_PRF_MSG, EpochWalSink, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, SigError,
+    StatelessBudgetWalSink, ValidatorKeypair, WOTS_CHAINS, WOTS_TARGET_SUM, WalEpochState,
+    verify_signature_batch,
 };
 use qsag_agg::sponge::{FiatShamirTranscript, InstanceBound};
 use qsag_agg::zk_hem::full_shard::{
@@ -89,6 +90,42 @@ fn pcs_transcript(schedule: &WhirSchedule) -> FiatShamirTranscript<InstanceBound
     FiatShamirTranscript::new()
         .bind_relation(b"VALIDATION.PCS.REGIMES/v1", &[0x5Au8; 32], schedule)
         .bind_instance(&[b"whir-differential-instance"])
+}
+
+#[derive(Default)]
+struct InMemStatelessWal {
+    count: u64,
+}
+
+impl StatelessBudgetWalSink for InMemStatelessWal {
+    fn reserve(&mut self, _pk_root: &[u8; 32], limit: u64) -> Result<u64, SigError> {
+        if self.count >= limit {
+            return Err(SigError::StatelessBudgetExhausted);
+        }
+        self.count += 1;
+        Ok(self.count)
+    }
+}
+
+#[derive(Default)]
+struct InMemEpochWal {
+    state: Option<WalEpochState>,
+}
+
+impl EpochWalSink for InMemEpochWal {
+    fn recovered_state(&self, _pk_root: &[u8; 32]) -> Result<Option<WalEpochState>, SigError> {
+        Ok(self.state)
+    }
+    fn persist_latched_epoch(
+        &mut self,
+        _pk_root: &[u8; 32],
+        next_unused_epoch: u32,
+        latched_epoch: u32,
+        mu_bytes: &[u8; 32],
+    ) -> Result<(), SigError> {
+        self.state = Some((next_unused_epoch, latched_epoch, *mu_bytes));
+        Ok(())
+    }
 }
 
 #[test]
@@ -222,8 +259,12 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
             ]
         })
         .collect();
-    let point: Vec<GoldilocksExt4> = point_limbs.iter().copied().map(GoldilocksExt4::from_limbs).collect();
-    let p3_claimed = GoldilocksExt4::from_limbs(multilinear_eval_p3_ref(&evals, &point_limbs));
+    let point: Vec<GoldilocksExt4> = point_limbs
+        .iter()
+        .map(|arr| GoldilocksExt4::from_limbs(arr.map(gl)))
+        .collect();
+    let p3_claimed =
+        GoldilocksExt4::from_limbs(multilinear_eval_p3_ref(&evals, &point_limbs).map(gl));
 
     let eq_tbl = build_eq_table_ext4(&point);
     let agg_claimed = evals
@@ -347,7 +388,8 @@ fn whir_stage_geometries_across_nv_2_to_28_and_bounds_rejection() {
         assert!(domain0_log2 <= 30, "nv={nv} Stage-0 domain 2^{domain0_log2} > 2^30");
     }
 
-    let expected_high_cap: &[(usize, usize, &[(usize, usize)])] = &[
+    type StagePairs = &'static [(usize, usize)];
+    let expected_high_cap: &[(usize, usize, StagePairs)] = &[
         (20, 8, &[(4, 5), (16, 3), (64, 4)]),
         (21, 8, &[(4, 6), (16, 3), (64, 4)]),
         (22, 8, &[(4, 6), (16, 4), (64, 4)]),
@@ -410,7 +452,7 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
             )
         })
         .collect();
-    let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.public_key).collect();
+    let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
     for pk in &pks {
         let raw_pk = pk.to_bytes();
         assert_eq!(raw_pk[0], 2);
@@ -418,8 +460,10 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     }
 
     let msg = b"qsag-validation: stateless CorduroyPoseidon2 76,896B -> Hem WHIR shard merge";
-    let sig0 = kps[0].sign_stateless(msg, &[0x71; 32]).expect("corduroy sign 0");
-    let sig1 = kps[1].sign_stateless(msg, &[0x72; 32]).expect("corduroy sign 1");
+    let mut wal0 = InMemStatelessWal::default();
+    let mut wal1 = InMemStatelessWal::default();
+    let sig0 = kps[0].sign_stateless(msg, &mut wal0).expect("corduroy sign 0");
+    let sig1 = kps[1].sign_stateless(msg, &mut wal1).expect("corduroy sign 1");
     assert_eq!(kps[0].stateless_sigs_issued(), 1);
     assert_eq!(sig0.fors_openings.len(), 32);
     assert_eq!(sig0.layers.len(), 16);
@@ -658,9 +702,12 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
             .collect();
         let sigs: Vec<ValidatorSignature> = active
             .iter()
-            .map(|&idx| kps[idx].sign_stateful(&msg32, &[seed_tag ^ 0x55; 32]).unwrap())
+            .map(|&idx| {
+                let mut wal = InMemEpochWal::default();
+                kps[idx].sign_stateful(&msg32, 0, &mut wal).unwrap()
+            })
             .collect();
-        let keys = kps.into_iter().map(|kp| kp.public_key).collect();
+        let keys = kps.into_iter().map(|kp| kp.pk).collect();
         let bitmap = SignerBitmap::from_active_indices(2, active).unwrap();
         let statement = RecursiveShardStatement {
             keys,
