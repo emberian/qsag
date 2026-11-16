@@ -1,5 +1,6 @@
 // Balanced 3:2 carry-save (CSA) LUT compressor tree modulo 2^W: compresses N W-bit operands
 // to two carry-save vectors (s, c) with zero carry propagation.
+(* flatten *)
 module qsag_csa_reduce2 #(
     parameter int W = 128,
     parameter int N = 4

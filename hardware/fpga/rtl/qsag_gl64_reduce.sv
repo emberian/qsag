@@ -34,19 +34,17 @@ module qsag_gl64_reduce #(
     assign terms[5*66 +: 66] = C_BIAS;
 
     logic [65:0] v_d, v_q;
-    qsag_sum_csa #(.W(66), .N(6), .CHUNK(16)) u_v (.x(terms), .y(v_d));
+    qsag_sum_csa #(.W(66), .N(6), .CHUNK(24)) u_v (.x(terms), .y(v_d));
     always_ff @(posedge clk) v_q <= v_d;
 
-    // Note: in unsigned addition {1'b0, v_q} + (2^67 - k*p), bit 66 is 0 iff v_q >= k*p
-    //? Wait: if v_q >= k*p, v_q + 2^67 - k*p >= 2^67, which WRAPS modulo 2^67 so bit 66 is
-    // (v_q - k*p)[66] == 0! If v_q < k*p, v_q + 2^67 - k*p = 2^67 - (k*p - v_q) in [2^67 - 2p, 2^67 - 1],
-    // whose bit 66 is 1 (since 2p < 2^65 < 2^66, so 2^67 - 2p > 2^66)!
-    // Thus v1[66] and v2[66] are IDENTICAL to the two's-complement borrow/sign bits!
+    // Note: in unsigned addition {1'b0, v_q} + (2^67 - k*p), bit 66 is 0 iff v_q >= k*p:
+    // if v_q >= k*p, v_q + 2^67 - k*p >= 2^67 wraps modulo 2^67 so bit 66 is 0;
+    // if v_q < k*p, v_q + 2^67 - k*p in [2^67 - 2p, 2^67 - 1] has bit 66 == 1.
     /* verilator lint_off UNUSEDSIGNAL */
     logic [66:0] v1, v2;
     /* verilator lint_on UNUSEDSIGNAL */
-    qsag_add_split #(.W(67), .CHUNK(16)) u_v1 (.a({1'b0, v_q}), .b(NEG_1P), .y(v1));
-    qsag_add_split #(.W(67), .CHUNK(16)) u_v2 (.a({1'b0, v_q}), .b(NEG_2P), .y(v2));
+    qsag_add_split #(.W(67), .CHUNK(24)) u_v1 (.a({1'b0, v_q}), .b(NEG_1P), .y(v1));
+    qsag_add_split #(.W(67), .CHUNK(24)) u_v2 (.a({1'b0, v_q}), .b(NEG_2P), .y(v2));
 
     logic [63:0] r_d;
     assign r_d = !v2[66] ? v2[63:0] : !v1[66] ? v1[63:0] : v_q[63:0];

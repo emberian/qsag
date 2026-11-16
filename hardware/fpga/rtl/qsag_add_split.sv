@@ -2,6 +2,7 @@
 // Chunk 0 uses a single hardware carry chain (carry_in = 0); chunks 1..N-1 evaluate
 // both carry cases in CHUNK-bit carry chains and resolve all chunk carries in parallel
 // via a logarithmic (G, P) prefix network, eliminating wide ripple-carry chains.
+(* flatten *)
 module qsag_add_split #(
     parameter int W = 128,
     parameter int CHUNK = 24
