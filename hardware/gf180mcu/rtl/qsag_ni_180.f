@@ -1,0 +1,15 @@
+rtl/qsag_cells.sv
+rtl/qsag_gl64_karatsuba_csa.sv
+rtl/qsag_p2_rc.sv
+rtl/qsag_sponge.sv
+rtl/qsag_keccak_serial.sv
+rtl/qsag_gf128_clmul.sv
+rtl/qsag_field_engine.sv
+rtl/qsag_wire_engine.sv
+rtl/qsag_async_fifo_gray.sv
+rtl/qsag_muller_c.sv
+rtl/qsag_anchor_spi.sv
+rtl/qsag_trng.sv
+rtl/qsag_gals_clk_rst.sv
+rtl/qsag_io_shell.sv
+src/chip_core.sv

@@ -810,3 +810,815 @@ module qsag_wire_engine #(
                 cond = out_ready;
                 emit = 1'b1;
                 imm  = stat_word;
+            end
+            default: ;
+        endcase
+        if (emit && !emit_port) xsel = 3'd1;
+    end
+
+    // port-dependent outputs are kept out of the control decode (it produces the read address)
+    assign key_d  = (st == S_KLK) ? port : in_data;
+    assign an_tx  = (st == S_AW2) ? {32'd0, ctmp} : port;
+    assign cmp_ne = (st == S_AW7) ? (an_rx != {32'd0, ctmp})
+                  : (st == S_CTT) ? (in_data != (port ^ (cnt2[0] ? gf_acc[127:64] : gf_acc[63:0])))
+                  : (an_rx != port);
+    assign fe_start = launch && (kind == K_FE);
+    assign kc_start = launch && (kind == K_KC);
+    assign gf_start = launch && (kind == K_GF);
+    assign in_pop   = fire && do_pop;
+    assign out_push = fire && emit;
+    assign out_data = emit_port ? port : imm;
+    assign e_we     = (fire && e_wreq) || (launch && e_wlaunch);
+
+    // ------------------------------------------------------------------ sequencing
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            st           <= S_IDLE;
+            ret          <= S_IDLE;
+            ret2         <= S_IDLE;
+            ret3         <= S_IDLE;
+            w            <= 1'b0;
+            op           <= '0;
+            flags        <= '0;
+            arg          <= '0;
+            wrem         <= '0;
+            lenb         <= '0;
+            rlen         <= '0;
+            rcode        <= '0;
+            rerr         <= 1'b0;
+            rok          <= 1'b0;
+            cnt          <= '0;
+            cnt2         <= '0;
+            wi           <= '0;
+            obase        <= '0;
+            olim         <= '0;
+            partial      <= 1'b0;
+            hs_n         <= '0;
+            hs_k         <= '0;
+            hs_idx       <= '0;
+            hs_first     <= 1'b0;
+            hs_ph        <= 1'b0;
+            gfdone       <= 1'b0;
+            hs_capsrc    <= '0;
+            hs_capreg    <= '0;
+            hs_latch     <= '0;
+            hs_skip      <= '0;
+            idx_armed    <= 1'b0;
+            midx         <= '0;
+            lidx         <= '0;
+            mk_kb        <= '0;
+            hop          <= '0;
+            ha           <= '0;
+            hb           <= '0;
+            hc           <= '0;
+            dleft        <= '0;
+            recidx       <= '0;
+            fidx         <= '0;
+            inrec        <= 1'b0;
+            fail         <= 1'b0;
+            fset         <= 1'b0;
+            noncanon     <= 1'b0;
+            verdict      <= 1'b0;
+            verify_ok    <= 1'b0;
+            key_valid    <= 1'b0;
+            cur          <= '0;
+            hwm          <= '0;
+            ctmp         <= '0;
+            hwm_valid    <= 1'b0;
+            v0           <= 1'b0;
+            anyv         <= 1'b0;
+            older        <= 1'b0;
+            aslot        <= 1'b0;
+            rcmp         <= 1'b0;
+            hi0          <= 1'b0;
+            macdiff      <= 1'b0;
+            is_fors      <= 1'b0;
+            isprf        <= 1'b0;
+            bmode        <= '0;
+            ci           <= '0;
+            widx         <= '0;
+            sh           <= '0;
+            sym          <= '0;
+            steps        <= '0;
+            hj           <= '0;
+            fault_anchor <= 1'b0;
+            fault_mac    <= 1'b0;
+            csr          <= 64'h0000_0000_0268_C01F;   // see qsag_gals_clk_rst: tap 31, slow slew, TRNG on
+        end else if (zeroize_q || control_bad || fault_control) begin
+            st        <= S_DEAD;
+            w         <= 1'b0;
+            key_valid <= 1'b0;
+            verify_ok <= 1'b0;
+            hwm_valid <= 1'b0;
+        end else begin
+            if (launch) w <= 1'b1;
+            if (in_pop) wrem <= wrem - 21'd1;
+            if (in_pop && inrec) dleft <= dleft - 16'd1;
+            if (fire) begin
+                w <= 1'b0;
+                unique case (st)
+                    S_IDLE: begin
+                        op       <= in_data[15:8];
+                        flags    <= in_data[23:16];
+                        lenb     <= in_data[26:24];
+                        wrem     <= in_data[47:27] + {20'd0, |in_data[26:24]};
+                        arg      <= in_data[63:48];
+                        rerr     <= 1'b0;
+                        rok      <= 1'b1;
+                        rcode    <= '0;
+                        rlen     <= '0;
+                        cnt      <= '0;
+                        cnt2     <= '0;
+                        wi       <= '0;
+                        partial  <= 1'b0;
+                        fail     <= 1'b0;
+                        fset     <= 1'b0;
+                        noncanon <= 1'b0;
+                        recidx   <= '0;
+                        fidx     <= '0;
+                        inrec    <= 1'b0;
+                        hs_k     <= '0;
+                        gfdone   <= 1'b0;
+                        macdiff  <= 1'b0;
+                        idx_armed <= 1'b0;
+                        ret      <= S_IDLE;
+                        if (in_data[7:0] != 8'h51) begin
+                            rcode <= E_MAGIC;
+                            st    <= S_DRAIN;
+                        end else begin
+                            unique case (in_data[15:8])
+                                OP_PING: begin
+                                    rlen <= 24'd32;
+                                    ret  <= S_PING;
+                                    st   <= (in_data[47:24] == 24'd0) ? S_HDR : S_DRAIN;
+                                    if (in_data[47:24] != 24'd0) rcode <= E_LEN;
+                                end
+                                OP_CSR: begin
+                                    st <= (in_data[47:24] == 24'd8) ? S_CSR : S_DRAIN;
+                                    if (in_data[47:24] != 24'd8) rcode <= E_LEN;
+                                end
+                                OP_P2: begin
+                                    verify_ok <= 1'b0;
+                                    if (in_data[16]) begin  // raw permutation
+                                        st <= (in_data[47:24] == 24'd96) ? S_P2R : S_DRAIN;
+                                        if (in_data[47:24] != 24'd96) rcode <= E_LEN;
+                                    end else if (in_data[47:24] < 24'd40 || in_data[26:24] != 3'd0) begin
+                                        rcode <= E_LEN;
+                                        st    <= S_DRAIN;
+                                    end else begin
+                                        hs_n      <= in_data[42:27] - 16'd5;
+                                        hs_capsrc <= 2'd0;
+                                        hs_latch  <= 3'd0;
+                                        hs_skip   <= 2'd0;
+                                        ret       <= S_HDR;
+                                        st        <= S_HSZ;
+                                    end
+                                end
+                                OP_MERKLE: begin
+                                    verify_ok <= 1'b0;
+                                    // 3 key + 1 index + 4 leaf + 4*depth siblings + 4 root words
+                                    if (in_data[53:48] == 6'd0 || in_data[53:48] > 6'd32 ||
+                                        in_data[47:24] != 24'd96 + {16'd0, in_data[53:48], 2'd0} * 24'd8) begin
+                                        rcode <= E_LEN;
+                                        st    <= S_DRAIN;
+                                    end else st <= S_MOK;
+                                end
+                                OP_KECCAK: st <= S_KSW;
+                                OP_PRFMSG: st <= S_KSW;
+                                OP_FOLD, OP_HEM: begin
+                                    verify_ok <= 1'b0;
+                                    if (in_data[26:24] != 3'd0) begin
+                                        rcode <= E_LEN;
+                                        st    <= S_DRAIN;
+                                    end else st <= S_HVG;
+                                end
+                                OP_KEYLOAD: begin
+                                    if (key_valid) begin
+                                        rcode <= E_KEYSET;
+                                        st    <= S_DRAIN;
+                                    end else if (in_data[16] ? (in_data[47:24] != 24'd48)
+                                                             : (in_data[47:24] < 24'd16 || in_data[47:24] > 24'd96 ||
+                                                                in_data[26:24] != 3'd0)) begin
+                                        rcode <= E_LEN;
+                                        st    <= S_DRAIN;
+                                    end else st <= S_KLM;
+                                end
+                                OP_CTH: begin
+                                    // 8 request words + 2 tag words; symbols fit three words
+                                    if (in_data[47:24] != 24'd80 || in_data[60:56] == 5'd0 || in_data[60:56] > 5'd16 ||
+                                        in_data[55:48] == 8'd0) begin
+                                        rcode <= E_LEN;
+                                        st    <= S_DRAIN;
+                                    end else st <= S_CTG;
+                                end
+                                default: begin
+                                    rcode <= E_OPCODE;
+                                    st    <= S_DRAIN;
+                                end
+                            endcase
+                        end
+                    end
+                    S_DRAIN: if (wrem == 21'd0) begin
+                        rerr <= 1'b1;
+                        rok  <= 1'b0;
+                        rlen <= '0;
+                        st   <= S_EHDR;
+                    end
+                    S_EHDR: st <= S_WIPE;
+                    S_HDR: begin
+                        cnt2 <= '0;
+                        st   <= ret;
+                        if (ret == S_HDR) begin  // lanes obase.. follow the header
+                            ret <= S_IDLE;
+                            st  <= S_OUTL;
+                        end
+                    end
+                    S_OUTL: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 + 5'd1 == olim) st <= ret;
+                    end
+                    S_WIPE: st <= S_IDLE;
+                    S_PING: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) st <= S_IDLE;
+                    end
+                    S_CSR: begin
+                        csr <= in_data;
+                        ret <= S_IDLE;
+                        st  <= S_HDR;
+                    end
+                    // ------------------------------------------------ Poseidon2
+                    S_P2R: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd11) st <= S_P2RP;
+                    end
+                    S_P2RP: begin
+                        rlen  <= 24'd96;
+                        obase <= 6'd0;
+                        olim  <= 5'd12;
+                        ret   <= S_HDR;
+                        st    <= S_HDR;
+                    end
+                    S_HSZ: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2   <= '0;
+                            gfdone <= 1'b0;
+                            st     <= S_HSD;
+                        end
+                    end
+                    S_HSD: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            st <= S_HSC;
+                        end
+                    end
+                    S_HSC: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (hs_capsrc == 2'd1 || cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            st   <= S_HSN;
+                        end
+                    end
+                    S_HSN: begin
+                        hs_idx   <= 4'd2;
+                        hs_first <= 1'b1;
+                        hs_ph    <= 1'b0;
+                        st       <= S_HSL;
+                    end
+                    S_HSL: begin
+                        if (hs_n == 16'd0) st <= S_HSF;
+                        else if (bindw) gfdone <= 1'b1;
+                        else if (hs_lat_now) hs_ph <= 1'b1;
+                        else begin
+                            if (hs_k == 16'd0 && in_ge_p && (op != OP_P2)) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            hs_ph  <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            hs_n   <= hs_n - 16'd1;
+                            hs_idx <= hs_idx + 4'd1;
+                            if (hs_idx == 4'd7) st <= S_HSP;
+                        end
+                    end
+                    S_HSP: begin
+                        hs_first <= 1'b0;
+                        hs_idx   <= '0;
+                        st       <= S_HSL;
+                    end
+                    S_HSF: begin
+                        rlen  <= 24'd32;
+                        obase <= 6'd0;
+                        olim  <= 5'd4;
+                        st    <= ret;
+                    end
+                    // ------------------------------------------------ Canopy
+                    S_MK0: st <= S_MK1;
+                    S_MK1: st <= S_MK2;
+                    S_MK2: st <= S_MK3;
+                    S_MK3: st <= S_MK4;
+                    S_MK4: st <= S_MK5;
+                    S_MK5: begin
+                        midx <= {1'b0, midx[32:1]};
+                        cnt  <= cnt - 16'd1;
+                        cnt2 <= '0;
+                        st   <= S_MPS;
+                    end
+                    S_MPS: begin
+                        if (cnt == 16'd0) st <= ret2;
+                        else begin
+                            if (in_ge_p) noncanon <= 1'b1;
+                            cnt2 <= cnt2 + 5'd1;
+                            if (cnt2 == 5'd3) st <= S_MK0;
+                        end
+                    end
+                    S_MOK: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd2) begin
+                            cnt2 <= '0;
+                            st   <= S_MOI;
+                        end
+                    end
+                    S_MOI: begin
+                        midx  <= (33'd1 << arg[5:0]) | {1'b0, in_data[31:0]};
+                        lidx  <= in_data[31:0];
+                        mk_kb <= 6'd16;
+                        st    <= S_MOL;
+                    end
+                    S_MOL: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2 <= '0;
+                            cnt  <= {10'd0, arg[5:0]};
+                            ret2 <= S_MOR;
+                            st   <= S_MPS;
+                        end
+                    end
+                    S_MOR: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) st <= S_MOE;
+                    end
+                    S_MOE: begin
+                        verdict   <= fe_eq;
+                        verify_ok <= fe_eq;
+                        rok       <= fe_eq;
+                        rlen      <= 24'd40;
+                        ret       <= S_MOV;
+                        st        <= S_HDR;
+                    end
+                    S_MOV: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        olim  <= 5'd4;
+                        ret   <= S_IDLE;
+                        st    <= S_OUTL;
+                    end
+                    // ------------------------------------------------ Keccak
+                    S_KSW: begin
+                        cnt2 <= '0;
+                        wi   <= '0;
+                        if (op == OP_PRFMSG) begin
+                            if (!key_valid) begin
+                                rcode <= E_NOKEY;
+                                st    <= S_DRAIN;
+                            end else st <= S_KSK;
+                        end else st <= S_KSA;
+                    end
+                    S_KSK: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            wi <= 5'd2;
+                            st <= S_KSA;
+                        end
+                    end
+                    S_KSA: begin
+                        if (wrem == 21'd0) st <= S_KSD;
+                        else if (wrem == 21'd1 && lenb != 3'd0) begin
+                            partial <= 1'b1;
+                            st      <= S_KSD;
+                        end else if (wi == 5'd16) begin
+                            wi <= '0;
+                            st <= S_KSP;
+                        end else wi <= wi + 5'd1;
+                    end
+                    S_KSP: st <= S_KSA;
+                    S_KSD: st <= S_KSE;
+                    S_KSE: st <= S_KSQ;
+                    S_KSQ: begin
+                        cnt  <= (op == OP_KECCAK) ? {8'd0, arg[15:8]} : 16'd2;
+                        rlen <= (op == OP_KECCAK) ? {13'd0, arg[15:8], 3'd0} : 24'd16;
+                        wi   <= '0;
+                        ret  <= S_KSO;
+                        st   <= S_HDR;
+                    end
+                    S_KSO: begin
+                        if (cnt == 16'd0) st <= S_WIPE;
+                        else begin
+                            cnt <= cnt - 16'd1;
+                            if (wi == 5'd16 && cnt != 16'd1) begin
+                                wi <= '0;
+                                st <= S_KSR;
+                            end else wi <= wi + 5'd1;
+                        end
+                    end
+                    S_KSR: st <= S_KSO;
+                    // ------------------------------------------------ key load
+                    S_KLM: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            cnt2 <= '0;
+                            if (flags[0]) st <= S_KLH;
+                            else if (!trng_ok) begin
+                                rcode <= E_TRNG;
+                                st    <= S_DRAIN;
+                            end else st <= S_KLW;
+                        end
+                    end
+                    S_KLH: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) st <= S_KLN;
+                    end
+                    S_KLW: begin
+                        wi <= '0;
+                        st <= S_KLT;
+                    end
+                    S_KLT: begin
+                        wi <= wi + 5'd1;
+                        if (wi == 5'd3) st <= S_KLA;
+                    end
+                    S_KLA: begin
+                        if (wrem == 21'd0) st <= S_KLD;
+                        else if (wi != 5'd15) wi <= wi + 5'd1;
+                    end
+                    S_KLD: st <= S_KLE;
+                    S_KLE: st <= S_KLP;
+                    S_KLP: begin
+                        cnt2 <= '0;
+                        st   <= S_KLK;
+                    end
+                    S_KLK: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) st <= S_KLZ;
+                    end
+                    S_KLZ: st <= S_KLN;
+                    S_KLN: begin  // optional anchor initialisation: counter 0 in both slots
+                        key_valid <= 1'b1;
+                        ctmp      <= '0;
+                        aslot     <= 1'b0;
+                        if (flags[1]) begin
+                            bmode <= 2'd1;
+                            cnt2  <= '0;
+                            ret3  <= S_AW1;
+                            ret2  <= S_KLF;
+                            st    <= S_BLD;
+                        end else begin
+                            ret <= S_IDLE;
+                            st  <= S_HDR;
+                        end
+                    end
+                    S_KLF: begin
+                        if (!rcmp) begin
+                            key_valid    <= 1'b0;
+                            fault_anchor <= 1'b1;
+                            rcode        <= E_ANCHOR_IO;
+                            st           <= S_DRAIN;
+                        end else if (!aslot) begin
+                            aslot <= 1'b1;
+                            bmode <= 2'd1;
+                            cnt2  <= '0;
+                            ret3  <= S_AW1;
+                            st    <= S_BLD;
+                        end else begin
+                            hwm       <= '0;
+                            hwm_valid <= 1'b1;
+                            ret       <= S_IDLE;
+                            st        <= S_HDR;
+                        end
+                    end
+                    // ------------------------------------------------ keyed block build + permute
+                    S_BLD: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd24) st <= S_BKC;
+                    end
+                    S_BKC: begin
+                        cnt2 <= '0;
+                        if (bmode == 2'd0) begin
+                            if (!isprf) hj <= hj + 16'd1;
+                            isprf <= 1'b0;
+                        end
+                        st <= ret3;
+                    end
+                    // ------------------------------------------------ anchor read: slot aslot
+                    S_AR0: st <= S_AR1;
+                    S_AR1: begin
+                        ctmp  <= an_rx[31:0];
+                        hi0   <= (an_rx[63:32] == 32'd0);
+                        bmode <= 2'd1;
+                        cnt2  <= '0;
+                        ret3  <= S_AR2;
+                        st    <= S_BLD;
+                    end
+                    S_AR2: st <= S_AR3;
+                    S_AR3: begin
+                        rcmp <= !cmp_ne && hi0;
+                        st   <= S_AR4;
+                    end
+                    S_AR4: begin
+                        rcmp <= rcmp && !cmp_ne;
+                        st   <= S_AR5;
+                    end
+                    S_AR5: st <= ret2;
+                    // ------------------------------------------------ anchor write + read back
+                    S_AW1: st <= S_AW2;
+                    S_AW2: st <= S_AW3;
+                    S_AW3: st <= S_AW4;
+                    S_AW4: st <= S_AW5;
+                    S_AW5: st <= S_AW6;
+                    S_AW6: st <= S_AW7;
+                    S_AW7: begin
+                        rcmp <= !cmp_ne;
+                        st   <= S_AW8;
+                    end
+                    S_AW8: begin
+                        rcmp <= rcmp && !cmp_ne;
+                        st   <= S_AW9;
+                    end
+                    S_AW9: begin
+                        rcmp <= rcmp && !cmp_ne;
+                        st   <= S_AWA;
+                    end
+                    S_AWA: st <= ret2;
+                    // ------------------------------------------------ Cut-the-Hash
+                    S_CTG: begin
+                        cnt2 <= '0;
+                        st   <= S_CTL;
+                    end
+                    S_CTL: begin
+                        if (cnt2 == 5'd4) is_fors <= (in_data[31:24] == 8'd3);
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd7) begin
+                            cnt2 <= '0;
+                            if (pubgen) st <= S_CTT;
+                            else begin
+                                bmode <= 2'd2;
+                                ret3  <= S_CTT;
+                                st    <= S_BLD;
+                            end
+                        end
+                    end
+                    S_CTT: begin
+                        if (!pubgen && cmp_ne) macdiff <= 1'b1;
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) st <= S_CTD;
+                    end
+                    S_CTD: begin
+                        cnt2 <= '0;
+                        if (!key_valid) begin
+                            rcode <= E_NOKEY;
+                            st    <= S_DRAIN;
+                        end else if (macdiff) begin
+                            fault_mac <= 1'b1;
+                            rcode     <= E_MAC;
+                            st        <= S_DRAIN;
+                        end else if (stateful && !pubgen) begin
+                            aslot <= 1'b0;
+                            ret2  <= S_CA0;
+                            st    <= S_AR0;
+                        end else begin
+                            rlen <= {12'd0, nch, 4'd0};
+                            ret  <= S_CTS;
+                            ci   <= '0;
+                            widx <= '0;
+                            sh   <= '0;
+                            st   <= S_HDR;
+                        end
+                    end
+                    S_CA0: begin
+                        v0    <= rcmp;
+                        cur   <= ctmp;
+                        aslot <= 1'b1;
+                        ret2  <= S_CA1;
+                        st    <= S_AR0;
+                    end
+                    S_CA1: begin
+                        anyv <= v0 | rcmp;
+                        if (rcmp && (!v0 || ctmp >= cur)) begin
+                            cur   <= ctmp;
+                            older <= 1'b0;
+                        end else older <= 1'b1;
+                        st <= S_CA2;
+                    end
+                    S_CA2: begin
+                        if (!anyv) begin
+                            rcode <= E_ANCHOR_EMPTY;
+                            st    <= S_DRAIN;
+                        end else if (hwm_valid && cur < hwm) begin
+                            fault_anchor <= 1'b1;
+                            rcode        <= E_ROLLBACK;
+                            st           <= S_DRAIN;
+                        end else if (port[31:0] < cur || port[31:0] == 32'hFFFF_FFFF) begin
+                            rcode <= E_REUSE;
+                            st    <= S_DRAIN;
+                        end else begin
+                            ctmp  <= port[31:0] + 32'd1;
+                            aslot <= older;
+                            bmode <= 2'd1;
+                            cnt2  <= '0;
+                            ret3  <= S_AW1;
+                            ret2  <= S_CA3;
+                            st    <= S_BLD;
+                        end
+                    end
+                    S_CA3: begin
+                        if (!rcmp) begin
+                            fault_anchor <= 1'b1;
+                            rcode        <= E_ANCHOR_IO;
+                            st           <= S_DRAIN;
+                        end else begin
+                            hwm       <= ctmp;
+                            hwm_valid <= 1'b1;
+                            rlen      <= {12'd0, nch, 4'd0};
+                            ret       <= S_CTS;
+                            ci        <= '0;
+                            widx      <= '0;
+                            sh        <= '0;
+                            st        <= S_HDR;
+                        end
+                    end
+                    S_CTS: begin
+                        if (ci == nch) st <= S_WIPE;
+                        else begin
+                            sym   <= port_sh[15:0] & symmask;
+                            steps <= pubgen ? (is_fors ? 16'd1 : symmask) : (is_fors ? 16'd0 : (port_sh[15:0] & symmask));
+                            if (sh + {2'd0, sw} + {2'd0, sw} > 7'd64) begin
+                                sh   <= '0;
+                                widx <= widx + 2'd1;
+                            end else sh <= sh + {2'd0, sw};
+                            hj    <= '0;
+                            isprf <= 1'b1;
+                            bmode <= 2'd0;
+                            cnt2  <= '0;
+                            ret3  <= S_CKD;
+                            st    <= S_BLD;
+                        end
+                    end
+                    S_CM0: st <= S_CM1;
+                    S_CM1: begin
+                        cnt2 <= '0;
+                        st   <= S_BLD;
+                    end
+                    S_CKD: begin
+                        cnt2 <= '0;
+                        if (steps == 16'd0) st <= S_CO;
+                        else begin
+                            steps <= steps - 16'd1;
+                            st    <= S_CM0;
+                        end
+                    end
+                    S_CO: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd1) begin
+                            ci <= ci + 8'd1;
+                            st <= S_CTS;
+                        end
+                    end
+                    // ------------------------------------------------ verifier VM
+                    S_HVG: st <= S_HVR;
+                    S_HVR: begin
+                        if (wrem == 21'd0) begin
+                            verdict <= !fail && !noncanon;
+                            cnt2    <= '0;
+                            st      <= S_HVF;
+                        end else begin
+                            hop    <= in_data[3:0] | {4{|in_data[7:4]}};
+                            ha     <= in_data[15:8];
+                            hb     <= in_data[23:16];
+                            hc     <= in_data[31:24];
+                            dleft  <= in_data[47:32];
+                            hs_k   <= in_data[63:48];
+                            recidx <= recidx + 16'd1;
+                            inrec  <= 1'b1;
+                            gfdone <= 1'b0;
+                            st     <= S_HVD;
+                        end
+                    end
+                    S_HVD: begin
+                        cnt2 <= '0;
+                        unique case (hop)
+                            4'd1: begin  // HASH dst a, cap b / FS-init, latch c[2:0]
+                                if (dleft == 16'd0) begin
+                                    fail <= 1'b1;
+                                    st   <= S_HVN;
+                                end else begin
+                                    hs_n      <= dleft - 16'd1;
+                                    hs_capsrc <= hc[3] ? 2'd2 : 2'd1;
+                                    hs_capreg <= hb[2:0];
+                                    hs_latch  <= hc[2:0];
+                                    hs_skip   <= hc[5:4];
+                                    ret       <= S_HVH;
+                                    st        <= S_HSZ;
+                                end
+                            end
+                            4'd2, 4'd3, 4'd4: st <= S_HVA;
+                            4'd5: begin
+                                if (dleft != 16'd4) begin
+                                    fail <= 1'b1;
+                                    st   <= S_HVN;
+                                end else st <= S_HVL;
+                            end
+                            4'd6: st <= S_HVE;
+                            4'd7: st <= S_HVP;
+                            4'd8: begin
+                                if (ha[5:0] == 6'd0 || ha[5:0] > 6'd32 || dleft != 16'd1 + {8'd0, ha[5:0], 2'd0}) begin
+                                    fail <= 1'b1;
+                                    st   <= S_HVN;
+                                end else st <= S_HVM;
+                            end
+                            4'd9: st <= S_HVI;
+                            default: begin
+                                fail <= 1'b1;
+                                st   <= S_HVN;
+                            end
+                        endcase
+                    end
+                    S_HVH, S_HVA: st <= S_HVN;
+                    S_HVL: begin
+                        if (bindw) gfdone <= 1'b1;
+                        else begin
+                            if (hs_k == 16'd0 && in_ge_p) noncanon <= 1'b1;
+                            gfdone <= 1'b0;
+                            if (hs_k != 16'd0) hs_k <= hs_k - 16'd1;
+                            cnt2 <= cnt2 + 5'd1;
+                            if (cnt2 == 5'd3) st <= S_HVN;
+                        end
+                    end
+                    S_HVE: begin
+                        if (!fe_eq) fail <= 1'b1;
+                        st <= S_HVN;
+                    end
+                    S_HVP: st <= S_HVQ;
+                    S_HVQ: begin
+                        if ((res[31:0] & lowmask(hc[5:0])) != 32'd0) fail <= 1'b1;
+                        st <= S_HVN;
+                    end
+                    S_HVM: begin
+                        if (idx_armed && in_data[31:0] != lidx) fail <= 1'b1;
+                        idx_armed <= 1'b0;
+                        midx  <= (33'd1 << ha[5:0]) | {1'b0, in_data[31:0]};
+                        mk_kb <= rb(hb[2:0]);
+                        cnt   <= {10'd0, ha[5:0]};
+                        cnt2  <= '0;
+                        ret2  <= S_HVN;
+                        st    <= S_MPS;
+                    end
+                    S_HVI: st <= S_HVJ;
+                    S_HVJ: begin
+                        lidx      <= res[31:0] & lowmask(hc[5:0]);
+                        idx_armed <= 1'b1;
+                        st <= S_HVN;
+                    end
+                    S_HVN: if (dleft == 16'd0) begin
+                        inrec <= 1'b0;
+                        hs_k  <= '0;
+                        if (fail && !fset) begin
+                            fset <= 1'b1;
+                            fidx <= recidx;
+                        end
+                        st <= S_HVR;
+                    end
+                    S_HVF: begin
+                        cnt2 <= cnt2 + 5'd1;
+                        if (cnt2 == 5'd3) begin
+                            cnt2      <= '0;
+                            bmode     <= 2'd3;
+                            rok       <= verdict;
+                            verify_ok <= verdict;
+                            rlen      <= 24'd72;
+                            ret3      <= S_HDR;
+                            ret       <= S_HVS;
+                            st        <= S_BLD;
+                        end
+                    end
+                    S_HVS: begin  // receipt (lanes 0..3), then the transcript state (shadow 32..35)
+                        cnt2  <= '0;
+                        obase <= 6'd0;
+                        olim  <= 5'd4;
+                        ret   <= S_HVC;
+                        st    <= S_OUTL;
+                    end
+                    S_HVC: begin
+                        cnt2  <= '0;
+                        obase <= 6'd32;
+                        ret   <= S_WIPE;
+                        st    <= S_OUTL;
+                    end
+                    default: st <= S_IDLE;
+                endcase
+            end
+        end
+    end
+
+    wire unused = &{1'b0, mul_busy, gf_busy, res[63:32], port_sh[63:16], ha[7:6], hb[7:3], hc[7:6]};
+endmodule
+`default_nettype wire
