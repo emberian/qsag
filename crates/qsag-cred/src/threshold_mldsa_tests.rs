@@ -993,6 +993,15 @@ fn a_refused_attempt_reservation_stops_before_any_mask_exists() {
     assert!(log.iter().all(|r| r.phase == PHASE_SETUP));
 }
 
+type PackMutation = fn(&mut ThresholdVerificationPack);
+/// One party's signing result, its ledger's reservation count and the
+/// custodian list the ledger was given.
+type BoundAttempt = (
+    Result<ThresholdSignOutput, ThresholdMlDsaError>,
+    usize,
+    Option<Vec<u16>>,
+);
+
 /// Every way a hand-built pack can be wrong is refused by `validate`, with the
 /// same verdict `from_bytes` gives for the encoded form.
 #[test]
@@ -1005,7 +1014,7 @@ fn pack_validation_rejects_every_malformed_field() {
         Ok(&good)
     );
     let malformed = Err(ThresholdMlDsaError::ProtocolInvariantViolated);
-    let mutations: [(&str, fn(&mut ThresholdVerificationPack)); 11] = [
+    let mutations: [(&str, PackMutation); 11] = [
         ("unsorted ids", |p| p.party_ids = vec![2, 1, 3]),
         ("missing polynomial", |p| {
             p.t.pop();
@@ -1056,7 +1065,7 @@ fn signing_with_a_malformed_pack_stops_before_any_round_or_reservation() {
         session_id: [0x51; 32],
         quorum: vec![1, 2, 3],
     };
-    let mutations: [fn(&mut ThresholdVerificationPack); 4] = [
+    let mutations: [PackMutation; 4] = [
         |p| {
             p.t.pop();
         },
@@ -1124,7 +1133,7 @@ fn a_shamir_share_is_not_restored_against_a_malformed_pack() {
     let bytes = holder.to_shamir_bytes().unwrap();
     let restored = ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, good.clone(), 2).unwrap();
     assert_eq!((restored.party_id, restored.next_epoch), (2, 5));
-    let mutations: [fn(&mut ThresholdVerificationPack); 4] = [
+    let mutations: [PackMutation; 4] = [
         |p| p.party_ids = vec![2, 1, 3],
         |p| {
             p.t.pop();
@@ -1172,8 +1181,7 @@ fn signing_binds_the_ledger_to_the_key_and_epoch_before_any_round() {
             (result, burn.reservations, burn.enrolled)
         })
     };
-    let refused = |results: Vec<(Result<ThresholdSignOutput, ThresholdMlDsaError>, usize, Option<Vec<u16>>)>,
-                   log: Vec<RoundInfo>| {
+    let refused = |results: Vec<BoundAttempt>, log: Vec<RoundInfo>| {
         for (result, reservations, enrolled) in results {
             assert_eq!(result, Err(ThresholdMlDsaError::NoncePersistenceFailed));
             assert_eq!(reservations, 0);
@@ -2698,7 +2706,10 @@ fn file_ledger_is_bound_to_its_key_and_enrolled_custodians() {
     assert!(store.reserve(2, 0, &[2; 32], 0));
     assert!(store.reserve(9, 1, &[2; 32], 0));
     assert_eq!(store.next_epoch(&key, 2), Ok(1));
-    assert_eq!(store.next_epoch(&[0x70; 32], 2), failed);
+    assert_eq!(
+        store.next_epoch(&[0x70; 32], 2),
+        Err(ThresholdMlDsaError::NoncePersistenceFailed)
+    );
 
     // Outsiders cannot use up the party table: every slot stays available to
     // the custodians.

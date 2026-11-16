@@ -112,7 +112,7 @@ module dregg_nfc_nco (
 
     logic         h0_sample;
     logic [7:0]   bit_cnt;
-    logic [7:0]   sync_sr;
+    logic [6:0]   sync_sr;
     logic [15:0]  crc_reg;
     wire  [143:0] pay_sr;
 
@@ -152,7 +152,7 @@ module dregg_nfc_nco (
                         h0_sample <= 1'b0;
                         half_idx  <= 1'b1;
                         bit_cnt   <= 8'd0;
-                        sync_sr   <= 8'd0;
+                        sync_sr <= 7'd0;
                         nst       <= N_SYNC;
                     end
                 end
@@ -167,7 +167,7 @@ module dregg_nfc_nco (
                             if (h0_sample != 1'b0) nst <= N_IDLE;
                             else                   bit_cnt <= 8'd1;
                         end else begin
-                            sync_sr <= {sync_sr[6:0], h0_sample};
+                            sync_sr <= {sync_sr[5:0], h0_sample};
                             if (bit_cnt == 8'd8) begin
                                 if ({sync_sr[6:0], h0_sample} == 8'hA5) begin
                                     bit_cnt <= 8'd0;
@@ -231,7 +231,9 @@ module dregg_nfc_nco (
         .d(nco_pkt_load ? nco_pkt_data : {fsk_sr[62:0], 1'b0}), .q(fsk_sr)
     );
 
-    wire fsk_bit = (fsk_bits > 7'd64) ? (16'hD391 >> (fsk_bits - 7'd65)) & 1'b1 : fsk_sr[63];
+    wire [3:0] sync_bidx = fsk_bits[3:0] - 4'd1;
+    wire [15:0] sync_hdr = 16'hD391;
+    wire fsk_bit = (fsk_bits > 7'd64) ? sync_hdr[sync_bidx] : fsk_sr[63];
     // Share ONE 32-bit delta adder for both 2-FSK (+/- delta) and linear FM chirp (+ delta)!
     wire fsk_sub          = (nco_mode == 2'd1) && nco_tx_active && !fsk_bit;
     wire [31:0] add_lhs   = (nco_mode == 2'd2) ? cur_ftw : nco_ftw_base;

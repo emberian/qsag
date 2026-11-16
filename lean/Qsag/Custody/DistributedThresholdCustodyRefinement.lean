@@ -48,6 +48,7 @@ statement, and it is information-theoretic about the dealt shares only.
 public import Qsag.Spec.IdealCustody
 public import Qsag.Spec.IdealSign
 public import Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa
+public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -2311,6 +2312,1338 @@ theorem distCustody_dataRefines_or_collision {Share Contrib Preimage PK SK D Sig
     exact ⟨x₁, x₂, hNe, hCol, hx₁, hx₂⟩
 
 end UnconditionalAndShareOpening
+
+/-! ## 9. Authenticated custodian network: `Fin n` parties, MAC'd acknowledgements, sealed WAL
+
+Section 1's `distMachine` gives the adversary an authenticated channel for free: `inject` is only
+accepted for a sender that is already corrupted. The machine of this section removes that
+assumption and adds the durable state the Rust custodians keep.
+
+* The custodians are a `Fin n`-indexed family of `AuthParty` records (`n = quorum.numParties`).
+  Besides share, latch, approval log and volatile coupons, a party holds its WAL record on disk as
+  raw bytes in the `FsBeltWal` format of `Qsag.sealBeltWalRecord` (72-byte header
+  `generation || reservation || nonce`, state bytes, MAC under `"QSAG.BELT.LATCH.WAL.MAC/v3"`),
+  the ticket it was sealed under, and an `anchor`: the tag of the last committed record, kept
+  outside the disk (`LedgerCheckpoint.tag`).
+* An acknowledgement on the wire carries `Qsag.custodianAckTag` (`"QSAG.BELT.ACK.v1"`) under the
+  sender's key over the coordinator's guard-key commitment, the epoch, a message tag of
+  `(deploymentId, intent)` and the sender's id. The coordinator counts an approver only if the
+  wire holds an acknowledgement from it with a valid tag and a share that opens its commitment.
+* The adversary may put any message on the wire at any time (`inject` in the name of a corrupted
+  custodian, `deliver` in the name of an uncorrupted one), drop any message, corrupt custodians
+  adaptively below the threshold, overwrite any custodian's disk record with arbitrary bytes
+  (`tamperDisk`) and crash any custodian. A crashed custodian recovers its latch and log from the
+  disk record through `unsealBeltWalRecord`, the anchor comparison and `parseState`; if recovery
+  fails it is poisoned and approves nothing further.
+
+Two events separate this machine from the ideal functionality, and `authViolation` decides them:
+
+* `deliver m` where `m` carries a valid tag in the name of an uncorrupted enrolled custodian for
+  this deployment and an intent that custodian has not approved. `deliver_violation_classified`
+  shows such an `m` is a tag on a preimage the custodian never tagged, or two intents share a
+  message tag.
+* `crash p` where the disk record passes recovery with a latch or log other than the custodian's
+  own. `crash_violation_collision` shows this exhibits a collision of the hash.
+
+`authGuardedMachine` is `authMachine` with these two turns refused. `authCustody_refines_ideal` is
+a `Spec.DataRefines` witness from the guarded machine into `Spec.idealCustodyMachine`;
+`authMachine_trace_guarded_or_violation` shows the two machines run identically up to the first
+violation; `authCustody_ideal_or_forgery` combines them for `authMachine` itself.
+
+Assumed, in `AuthDeployment.WellFormed`: the Shamir deployment conditions of Section 1 (including
+injectivity of the share commitment), and `parseState (stateBytes l L) = some (l, L)` for the
+state codec, which stands for `BeltLatchState::to_bytes` / `from_bytes`. Nothing is assumed about
+the hash; no probability is assigned to the violation events here. Not modelled: the coordinator
+is a single trusted ledger as in Section 1, the anchor is not adversarially writable, keys are
+static, and the generation counter is a `UInt64` that wraps (a wrapped record has generation 0 and
+is refused at recovery). The refinement is one-directional, as in Section 1. -/
+
+section Authenticated
+
+variable {F C PK D Sig : Type} [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+
+/-- Deployment of the authenticated network: the Shamir deployment, the hash, the per-custodian
+    acknowledgement and WAL keys, the coordinator's guard-key commitment, the message tag of
+    `(deploymentId, intent)`, the anchor's tickets and the state codec. -/
+structure AuthDeployment (F C PK D Sig : Type) where
+  core : Deployment F C PK D Sig
+  hash : List UInt8 → Digest256
+  ackKey : Nat → Digest256
+  guardKeyCommit : Digest256
+  msgTag : Nat → CustodyIntent → Digest256
+  walKey : Nat → Digest256
+  lockSeal : Nat → List UInt8
+  ticket : Nat → UInt64 → Digest256 × Digest256
+  stateBytes : Nat → List CustodyIntent → List UInt8
+  parseState : List UInt8 → Option (Nat × List CustodyIntent)
+
+/-- Deployment conditions: those of the Shamir deployment, and the state codec round trip. -/
+structure AuthDeployment.WellFormed (dep : AuthDeployment F C PK D Sig) : Prop where
+  core : dep.core.WellFormed
+  parse_stateBytes : ∀ (l : Nat) (L : List CustodyIntent),
+    dep.parseState (dep.stateBytes l L) = some (l, L)
+
+/-- An acknowledgement on the wire. -/
+structure AuthAck (F : Type) where
+  sender : Nat
+  deploymentId : Nat
+  intent : CustodyIntent
+  share : F
+  mac : Digest256
+
+/-- One custodian. `coupons` is volatile; `disk` is adversarially writable; `anchor` is not. -/
+structure AuthParty (F : Type) where
+  share : F
+  latch : Nat
+  latched : List CustodyIntent
+  coupons : List Nat
+  poisoned : Bool
+  ticket : BeltWalTicketSeal
+  disk : List UInt8
+  anchor : Digest256
+
+/-- Custodians, wire, corruption set and the coordinator's ledger. -/
+structure AuthState (F PK D Sig : Type) (n : Nat) where
+  parties : Fin n → AuthParty F
+  wire : List (AuthAck F)
+  corrupt : List Nat
+  ledger : CustodyLedger PK D Sig
+
+/-- Schedule alphabet. `inject` and `deliver` together let the adversary place any message on the
+    wire; the constructor records whether the named sender is corrupted at that moment. -/
+inductive AuthTurn (F : Type) (n : Nat) where
+  | approve (p : Fin n) (deploymentId : Nat) (intent : CustodyIntent)
+  | inject (m : AuthAck F)
+  | deliver (m : AuthAck F)
+  | corrupt (p : Fin n)
+  | crash (p : Fin n)
+  | tamperDisk (p : Fin n) (raw : List UInt8)
+  | dropMsg (idx : Nat)
+  | execute (deploymentId : Nat) (approvers : List Nat) (intent : CustodyIntent)
+      (abortBeforeRelease : Bool)
+
+/-- Outputs. -/
+inductive AuthEvent (F Sig : Type) where
+  | approved (ack : AuthAck F)
+  | injected
+  | delivered
+  | corrupted (share : F) (latched : List CustodyIntent)
+  | recovered (restored : Bool)
+  | tampered
+  | dropped
+  | custody (out : CustodyOutcome Sig)
+
+/-- The `SHAKE256` preimage of custodian `p`'s acknowledgement of `(d, i)`. -/
+def AuthDeployment.ackFrame (dep : AuthDeployment F C PK D Sig) (p d : Nat)
+    (i : CustodyIntent) : List UInt8 :=
+  custodianAckFrame (dep.ackKey p) dep.guardKeyCommit (UInt64.ofNat i.epoch) (dep.msgTag d i)
+    (UInt8.ofNat p)
+
+/-- Custodian `p`'s acknowledgement tag on `(d, i)`: `custodianAckTag` of the frame fields. -/
+def AuthDeployment.ackMac (dep : AuthDeployment F C PK D Sig) (p d : Nat)
+    (i : CustodyIntent) : Digest256 :=
+  custodianAckTag dep.hash (dep.ackKey p) dep.guardKeyCommit (UInt64.ofNat i.epoch)
+    (dep.msgTag d i) (UInt8.ofNat p)
+
+/-- The coordinator's check on a wire message: an enrolled sender and a correct tag. -/
+def AuthDeployment.ackValid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F) : Bool :=
+  decide (m.sender < dep.core.quorum.numParties) &&
+    decide (m.mac = dep.ackMac m.sender m.deploymentId m.intent)
+
+/-- The approval an acknowledgement carries. -/
+def AuthAck.toApproval (m : AuthAck F) : Approval F :=
+  { sender := m.sender, deploymentId := m.deploymentId, intent := m.intent, share := m.share }
+
+/-- The approvals the coordinator reads off the wire: those with a valid tag. -/
+def AuthDeployment.verified (dep : AuthDeployment F C PK D Sig) (wire : List (AuthAck F)) :
+    List (Approval F) :=
+  (wire.filter dep.ackValid).map AuthAck.toApproval
+
+/-- The WAL record MAC of custodian `p`. -/
+def AuthDeployment.sealTag (dep : AuthDeployment F C PK D Sig) (p : Nat)
+    (tkt : BeltWalTicketSeal) (bytes : List UInt8) : Digest256 :=
+  computeBeltWalSealTag dep.hash (dep.walKey p) (dep.lockSeal p) tkt bytes
+
+/-- The ticket of the next record: the successor generation with the anchor's reservation and
+    nonce for it. -/
+def AuthDeployment.nextTicket (dep : AuthDeployment F C PK D Sig) (p : Nat)
+    (tkt : BeltWalTicketSeal) : BeltWalTicketSeal :=
+  { generation := tkt.generation + 1
+    reservation := (dep.ticket p (tkt.generation + 1)).1
+    nonce := (dep.ticket p (tkt.generation + 1)).2 }
+
+/-- Genesis ticket: generation 1, no anchor reservation (`FsBeltWal::provision_genesis`). -/
+def genesisTicket : BeltWalTicketSeal :=
+  { generation := 1, reservation := 0#256, nonce := 0#256 }
+
+/-- Recovery of custodian `p` from its disk record: `unsealBeltWalRecord`, comparison of the
+    record's MAC with the anchor, and the state parse. -/
+def AuthDeployment.recover (dep : AuthDeployment F C PK D Sig) (p : Nat) (anchor : Digest256)
+    (disk : List UInt8) : Option (BeltWalTicketSeal × Nat × List CustodyIntent) :=
+  match unsealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) disk with
+  | none => none
+  | some (tkt, bytes) =>
+    if dep.sealTag p tkt bytes = anchor then
+      match dep.parseState bytes with
+      | some s => some (tkt, s.1, s.2)
+      | none => none
+    else none
+
+/-- The custodian after approving `i`: latch, log and coupon advanced, and a fresh record sealed
+    under the next ticket and committed to the anchor. -/
+def AuthDeployment.approveParty (dep : AuthDeployment F C PK D Sig) (p : Nat) (i : CustodyIntent)
+    (P : AuthParty F) : AuthParty F :=
+  { share := P.share
+    latch := i.epoch + 1
+    latched := i :: P.latched
+    coupons := i.sessionId :: P.coupons
+    poisoned := false
+    ticket := dep.nextTicket p P.ticket
+    disk := sealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) (dep.nextTicket p P.ticket)
+      (dep.stateBytes (i.epoch + 1) (i :: P.latched))
+    anchor := dep.sealTag p (dep.nextTicket p P.ticket)
+      (dep.stateBytes (i.epoch + 1) (i :: P.latched)) }
+
+/-- The acknowledgement custodian `p` sends for `(d, i)`. -/
+def AuthDeployment.approveAck (dep : AuthDeployment F C PK D Sig) (p d : Nat) (i : CustodyIntent)
+    (P : AuthParty F) : AuthAck F :=
+  { sender := p, deploymentId := d, intent := i, share := P.share, mac := dep.ackMac p d i }
+
+/-- The custodian after a crash: coupons gone; latch, log and ticket read back from the disk
+    record, or the custodian poisoned when the record is refused. -/
+def AuthDeployment.crashParty (dep : AuthDeployment F C PK D Sig) (p : Nat) (P : AuthParty F) :
+    AuthParty F :=
+  match dep.recover p P.anchor P.disk with
+  | some r =>
+    { share := P.share, latch := r.2.1, latched := r.2.2, coupons := [], poisoned := P.poisoned,
+      ticket := r.1, disk := P.disk, anchor := P.anchor }
+  | none =>
+    { share := P.share, latch := P.latch, latched := P.latched, coupons := [], poisoned := true,
+      ticket := P.ticket, disk := P.disk, anchor := P.anchor }
+
+abbrev setParty {n : Nat} (parties : Fin n → AuthParty F) (p : Fin n) (P : AuthParty F) :
+    Fin n → AuthParty F :=
+  fun q => if q = p then P else parties q
+
+/-- Initial state: dealt shares, genesis records on disk and in the anchors. -/
+def AuthState.init (dep : AuthDeployment F C PK D Sig) :
+    AuthState F PK D Sig dep.core.quorum.numParties where
+  parties := fun p =>
+    { share := dep.core.trueShare p.val
+      latch := 0
+      latched := []
+      coupons := []
+      poisoned := false
+      ticket := genesisTicket
+      disk := sealBeltWalRecord dep.hash (dep.walKey p.val) (dep.lockSeal p.val) genesisTicket
+        (dep.stateBytes 0 [])
+      anchor := dep.sealTag p.val genesisTicket (dep.stateBytes 0 []) }
+  wire := []
+  corrupt := []
+  ledger := (IdealCustodyState.init dep.core.deploymentId dep.core.pk dep.core.quorum).ledger
+
+/-- The approval log of custodian `q`, empty for an index that is not enrolled. -/
+def AuthState.latchedOf {n : Nat} (st : AuthState F PK D Sig n) (q : Nat) : List CustodyIntent :=
+  if h : q < n then (st.parties ⟨q, h⟩).latched else []
+
+/-- One turn of the authenticated network. -/
+def authStep (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) :
+    AuthTurn F dep.core.quorum.numParties →
+      Option (AuthState F PK D Sig dep.core.quorum.numParties × AuthEvent F Sig)
+  | .approve p d i =>
+    if p.val ∉ st.corrupt ∧ d = dep.core.deploymentId ∧ (st.parties p).latch ≤ i.epoch ∧
+        i.sessionId ∉ (st.parties p).coupons ∧ (st.parties p).poisoned = false then
+      some ({ st with
+              parties := setParty st.parties p (dep.approveParty p.val i (st.parties p))
+              wire := dep.approveAck p.val d i (st.parties p) :: st.wire },
+            .approved (dep.approveAck p.val d i (st.parties p)))
+    else none
+  | .inject m =>
+    if m.sender ∈ st.corrupt then
+      some ({ st with wire := m :: st.wire }, .injected)
+    else none
+  | .deliver m =>
+    if m.sender ∉ st.corrupt then
+      some ({ st with wire := m :: st.wire }, .delivered)
+    else none
+  | .corrupt p =>
+    if p.val ∉ st.corrupt ∧ st.corrupt.length + 1 < dep.core.quorum.threshold then
+      some ({ st with corrupt := p.val :: st.corrupt },
+            .corrupted (st.parties p).share (st.parties p).latched)
+    else none
+  | .crash p =>
+    some ({ st with parties := setParty st.parties p (dep.crashParty p.val (st.parties p)) },
+          .recovered (dep.recover p.val (st.parties p).anchor (st.parties p).disk).isSome)
+  | .tamperDisk p raw =>
+    some ({ st with
+            parties := setParty st.parties p
+              { share := (st.parties p).share, latch := (st.parties p).latch,
+                latched := (st.parties p).latched, coupons := (st.parties p).coupons,
+                poisoned := (st.parties p).poisoned, ticket := (st.parties p).ticket,
+                disk := raw, anchor := (st.parties p).anchor } },
+          .tampered)
+  | .dropMsg idx =>
+    some ({ st with wire := st.wire.take idx ++ st.wire.drop (idx + 1) }, .dropped)
+  | .execute d approvers i ab =>
+    (custodyLedgerSign dep.core.digests
+        (dep.core.signWith (quorumKey dep.core (dep.verified st.wire) approvers i)) st.ledger
+        (if quorumReady dep.core (dep.verified st.wire) approvers i then approvers.length else 0)
+        d i ab).map
+      (fun r => ({ st with ledger := r.1 }, AuthEvent.custody r.2))
+
+/-- The two events that separate the network from the ideal functionality: a delivered message
+    with a valid tag in the name of an uncorrupted custodian for an intent it has not approved,
+    and a crash whose disk record passes recovery with another latch or log. -/
+def authViolation (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) :
+    AuthTurn F dep.core.quorum.numParties → Bool
+  | .deliver m =>
+    dep.ackValid m && decide (m.deploymentId = dep.core.deploymentId) &&
+      decide (m.sender ∉ st.corrupt) && !decide (m.intent ∈ st.latchedOf m.sender)
+  | .crash p =>
+    match dep.recover p.val (st.parties p).anchor (st.parties p).disk with
+    | some r => !decide (r.2.1 = (st.parties p).latch ∧ r.2.2 = (st.parties p).latched)
+    | none => false
+  | _ => false
+
+/-- The authenticated custodian network. -/
+def authMachine (dep : AuthDeployment F C PK D Sig) :
+    Machine (AuthState F PK D Sig dep.core.quorum.numParties)
+      (AuthTurn F dep.core.quorum.numParties) (AuthEvent F Sig) where
+  Init st := st = AuthState.init dep
+  step := authStep dep
+  errStep st _ := st
+
+/-- `authMachine` with the two violation turns refused. -/
+def authGuardedMachine (dep : AuthDeployment F C PK D Sig) :
+    Machine (AuthState F PK D Sig dep.core.quorum.numParties)
+      (AuthTurn F dep.core.quorum.numParties) (AuthEvent F Sig) where
+  Init st := st = AuthState.init dep
+  step st t := if authViolation dep st t = true then none else authStep dep st t
+  errStep st _ := st
+
+/-- The ideal port a turn implements. An injected message counts as an adversarial permit when it
+    is for this deployment and carries a valid tag; `deliver`, `crash`, `tamperDisk` and `dropMsg`
+    are internal. -/
+def authVisIn (dep : AuthDeployment F C PK D Sig) :
+    AuthTurn F dep.core.quorum.numParties → Option CustodyInput
+  | .approve p d i => some (.approve p.val d i)
+  | .inject m =>
+    if m.deploymentId = dep.core.deploymentId ∧ dep.ackValid m = true then
+      some (.advApprove m.sender m.deploymentId m.intent)
+    else none
+  | .deliver _ => none
+  | .corrupt p => some (.corrupt p.val)
+  | .crash _ => none
+  | .tamperDisk _ _ => none
+  | .dropMsg _ => none
+  | .execute d _ i ab => some (.sign d i ab)
+
+/-- The ideal output of an event. -/
+def authVisOut : AuthEvent F Sig → CustodyOutcome Sig
+  | .approved _ => .approvalRecorded
+  | .injected => .approvalRecorded
+  | .delivered => .approvalRecorded
+  | .corrupted _ latched => .corrupted latched
+  | .recovered _ => .approvalRecorded
+  | .tampered => .approvalRecorded
+  | .dropped => .approvalRecorded
+  | .custody out => out
+
+/-! ### The Section 1 view of an authenticated state -/
+
+def AuthParty.toCustodian (P : AuthParty F) : Custodian F :=
+  { share := P.share, latch := P.latch, latched := P.latched, coupons := P.coupons }
+
+/-- The custodian table of Section 1 read off the `Fin n` family; an index that is not enrolled
+    shows the dealt share and an empty log, as in `State.init`. -/
+def viewNodes (dep : AuthDeployment F C PK D Sig)
+    (parties : Fin dep.core.quorum.numParties → AuthParty F) : Nat → Custodian F :=
+  fun q =>
+    if h : q < dep.core.quorum.numParties then (parties ⟨q, h⟩).toCustodian
+    else { share := dep.core.trueShare q, latch := 0, latched := [], coupons := [] }
+
+/-- The Section 1 state the coordinator and the ideal functionality see: the custodians' shares,
+    latches, logs and coupons, and the approvals with a valid tag. -/
+def AuthDeployment.view (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) : State F PK D Sig where
+  nodes := viewNodes dep st.parties
+  buffer := dep.verified st.wire
+  corrupt := st.corrupt
+  ledger := st.ledger
+
+private theorem dc_dif_pos {α : Type} {p : Prop} [Decidable p] (hp : p) (a : p → α)
+    (b : ¬ p → α) : (if h : p then a h else b h) = a hp := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem dc_dif_neg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (a : p → α)
+    (b : ¬ p → α) : (if h : p then a h else b h) = b hnp := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem state_ext {a b : State F PK D Sig} (hN : a.nodes = b.nodes)
+    (hB : a.buffer = b.buffer) (hC : a.corrupt = b.corrupt) (hL : a.ledger = b.ledger) :
+    a = b := by
+  cases a; cases b
+  dsimp only at hN hB hC hL
+  subst hN hB hC hL
+  rfl
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem viewNodes_enrolled (dep : AuthDeployment F C PK D Sig)
+    (parties : Fin dep.core.quorum.numParties → AuthParty F)
+    (p : Fin dep.core.quorum.numParties) :
+    viewNodes dep parties p.val = (parties p).toCustodian := by
+  unfold viewNodes
+  exact dc_dif_pos p.isLt _ _
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem viewNodes_setParty (dep : AuthDeployment F C PK D Sig)
+    (parties : Fin dep.core.quorum.numParties → AuthParty F)
+    (p : Fin dep.core.quorum.numParties) (P : AuthParty F) :
+    viewNodes dep (setParty parties p P) = setNode (viewNodes dep parties) p.val P.toCustodian := by
+  funext q
+  by_cases hqp : q = p.val
+  · subst hqp
+    rw [setNode_self, viewNodes_enrolled]
+    show (if p = p then P else parties p).toCustodian = P.toCustodian
+    rw [dc_if_pos rfl]
+  · rw [setNode_ne _ _ _ _ hqp]
+    by_cases hq : q < dep.core.quorum.numParties
+    · have hne : (⟨q, hq⟩ : Fin dep.core.quorum.numParties) ≠ p :=
+        fun h => hqp (congrArg Fin.val h)
+      unfold viewNodes
+      rw [dc_dif_pos hq, dc_dif_pos hq]
+      show (if (⟨q, hq⟩ : Fin dep.core.quorum.numParties) = p then P
+        else parties ⟨q, hq⟩).toCustodian = _
+      rw [dc_if_neg hne]
+    · unfold viewNodes
+      rw [dc_dif_neg hq, dc_dif_neg hq]
+
+omit [LawfulField F] [DecidableEq F] in
+private theorem setNode_same (nodes : Nat → Custodian F) (p : Nat) :
+    setNode nodes p (nodes p) = nodes := by
+  funext q
+  by_cases hqp : q = p
+  · subst hqp
+    exact setNode_self _ _ _
+  · exact setNode_ne _ _ _ _ hqp
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem verified_cons_valid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F)
+    (wire : List (AuthAck F)) (h : dep.ackValid m = true) :
+    dep.verified (m :: wire) = m.toApproval :: dep.verified wire := by
+  unfold AuthDeployment.verified
+  rw [List.filter_cons_of_pos h, List.map_cons]
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem verified_cons_invalid (dep : AuthDeployment F C PK D Sig) (m : AuthAck F)
+    (wire : List (AuthAck F)) (h : ¬ dep.ackValid m = true) :
+    dep.verified (m :: wire) = dep.verified wire := by
+  unfold AuthDeployment.verified
+  rw [List.filter_cons_of_neg h]
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem verified_subset (dep : AuthDeployment F C PK D Sig) {w' w : List (AuthAck F)}
+    (hSub : ∀ m, m ∈ w' → m ∈ w) {a : Approval F} (ha : a ∈ dep.verified w') :
+    a ∈ dep.verified w := by
+  unfold AuthDeployment.verified at ha ⊢
+  obtain ⟨m, hm, hEq⟩ := List.mem_map.mp ha
+  obtain ⟨hmW, hV⟩ := List.mem_filter.mp hm
+  exact List.mem_map.mpr ⟨m, List.mem_filter.mpr ⟨hSub m hmW, hV⟩, hEq⟩
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- Replacing the buffer by one whose messages for this deployment are all backed by a recorded
+    permit preserves the Section 1 relation. -/
+private theorem rel_of_buffer (dep : Deployment F C PK D Sig) {c : State F PK D Sig}
+    {a : IdealCustodyState PK D Sig} (hRel : Rel dep c a) (buffer' : List (Approval F))
+    (hB : ∀ m : Approval F, m ∈ buffer' → m.deploymentId = dep.deploymentId →
+      CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.honestApprovals ∨
+        CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.corruptApprovals) :
+    Rel dep { c with buffer := buffer' } a :=
+  { inv :=
+      { deployment := hRel.inv.deployment
+        enrolled := hRel.inv.enrolled
+        profile := hRel.inv.profile
+        shares := hRel.inv.shares
+        latchBound := hRel.inv.latchBound
+        latchNodup := hRel.inv.latchNodup }
+    ledger := hRel.ledger
+    corrupt := hRel.corrupt
+    latched := hRel.latched
+    buffered := hB }
+
+/-! ### The WAL invariant -/
+
+/-- Every custodian's anchor is the MAC, under its current ticket, of state bytes that parse to
+    its latch and log. -/
+def AuthPartiesInv (dep : AuthDeployment F C PK D Sig)
+    (parties : Fin dep.core.quorum.numParties → AuthParty F) : Prop :=
+  ∀ p : Fin dep.core.quorum.numParties, ∃ bytes : List UInt8,
+    (parties p).anchor = dep.sealTag p.val (parties p).ticket bytes ∧
+      dep.parseState bytes = some ((parties p).latch, (parties p).latched)
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem partiesInv_setParty (dep : AuthDeployment F C PK D Sig)
+    {parties : Fin dep.core.quorum.numParties → AuthParty F} (hInv : AuthPartiesInv dep parties)
+    (p : Fin dep.core.quorum.numParties) (P : AuthParty F)
+    (hP : ∃ bytes : List UInt8, P.anchor = dep.sealTag p.val P.ticket bytes ∧
+      dep.parseState bytes = some (P.latch, P.latched)) :
+    AuthPartiesInv dep (setParty parties p P) := by
+  intro q
+  by_cases hq : q = p
+  · subst hq
+    have e : setParty parties q P q = P := dc_if_pos rfl _ _
+    rw [e]
+    exact hP
+  · have e : setParty parties p P q = parties q := dc_if_neg hq _ _
+    rw [e]
+    exact hInv q
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- An accepted recovery returns a ticket and state bytes whose MAC is the anchor. -/
+theorem AuthDeployment.recover_some (dep : AuthDeployment F C PK D Sig) {p : Nat}
+    {anchor : Digest256} {disk : List UInt8} {tkt : BeltWalTicketSeal} {l : Nat}
+    {L : List CustodyIntent} (h : dep.recover p anchor disk = some (tkt, l, L)) :
+    ∃ bytes : List UInt8,
+      unsealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) disk = some (tkt, bytes) ∧
+      dep.sealTag p tkt bytes = anchor ∧ dep.parseState bytes = some (l, L) := by
+  unfold AuthDeployment.recover at h
+  cases hU : unsealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) disk with
+  | none => rw [hU] at h; cases h
+  | some r =>
+    obtain ⟨tkt', bytes⟩ := r
+    rw [hU] at h
+    dsimp only at h
+    by_cases hA : dep.sealTag p tkt' bytes = anchor
+    · rw [dc_if_pos hA] at h
+      cases hP : dep.parseState bytes with
+      | none => rw [hP] at h; cases h
+      | some s =>
+        obtain ⟨l', L'⟩ := s
+        rw [hP] at h
+        cases h
+        exact ⟨bytes, rfl, hA, rfl⟩
+    · rw [dc_if_neg hA] at h
+      cases h
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- **An untampered record recovers.** The record a custodian seals at a nonzero generation,
+    checked against the anchor it committed, returns the sealed latch and log. -/
+theorem AuthDeployment.recover_sealed (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    (p : Nat) (tkt : BeltWalTicketSeal) (hGen : tkt.generation ≠ 0) (l : Nat)
+    (L : List CustodyIntent) :
+    dep.recover p (dep.sealTag p tkt (dep.stateBytes l L))
+        (sealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) tkt (dep.stateBytes l L)) =
+      some (tkt, l, L) := by
+  unfold AuthDeployment.recover
+  rw [unsealBeltWalRecord_sealBeltWalRecord dep.hash (dep.walKey p) (dep.lockSeal p) tkt
+    (dep.stateBytes l L) hGen]
+  dsimp only
+  rw [dc_if_pos rfl, hWf.parse_stateBytes l L]
+
+/-! ### The refinement of the guarded machine -/
+
+/-- Simulation relation: the Section 1 relation on the view, the ideal functionality's safety
+    invariant, and the WAL invariant. -/
+structure AuthRel (dep : AuthDeployment F C PK D Sig)
+    (c : AuthState F PK D Sig dep.core.quorum.numParties) (a : IdealCustodyState PK D Sig) :
+    Prop where
+  rel : Rel dep.core (dep.view c) a
+  safe : a.SafeInv dep.core.digests dep.core.idealOracle dep.core.deploymentId dep.core.pk
+    dep.core.quorum
+  wal : AuthPartiesInv dep c.parties
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+private theorem guarded_step_some (dep : AuthDeployment F C PK D Sig)
+    {c c' : AuthState F PK D Sig dep.core.quorum.numParties}
+    {t : AuthTurn F dep.core.quorum.numParties} {ev : AuthEvent F Sig}
+    (h : (authGuardedMachine dep).step c t = some (c', ev)) :
+    authViolation dep c t = false ∧ authStep dep c t = some (c', ev) := by
+  have h' : (if authViolation dep c t = true then none else authStep dep c t) = some (c', ev) := h
+  cases hV : authViolation dep c t with
+  | true => rw [hV, dc_if_pos rfl] at h'; cases h'
+  | false =>
+    rw [hV, dc_if_neg Bool.false_ne_true] at h'
+    exact ⟨rfl, h'⟩
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+private theorem guarded_step_of_no_violation (dep : AuthDeployment F C PK D Sig)
+    (c : AuthState F PK D Sig dep.core.quorum.numParties)
+    (t : AuthTurn F dep.core.quorum.numParties) (hV : authViolation dep c t = false) :
+    (authGuardedMachine dep).step c t = authStep dep c t := by
+  show (if authViolation dep c t = true then none else authStep dep c t) = authStep dep c t
+  rw [hV, dc_if_neg Bool.false_ne_true]
+
+/-- A delivered message that is not a violation, has a valid tag and is for this deployment is
+    backed by a permit recorded through its sender's own port. -/
+private theorem deliver_backed (dep : AuthDeployment F C PK D Sig)
+    {c : AuthState F PK D Sig dep.core.quorum.numParties} {a : IdealCustodyState PK D Sig}
+    (hRel : AuthRel dep c a) (m : AuthAck F) (hNotCor : m.sender ∉ c.corrupt)
+    (hV : authViolation dep c (.deliver m) = false) (hValid : dep.ackValid m = true)
+    (hDep : m.deploymentId = dep.core.deploymentId) :
+    CustodyApproval.mk m.sender m.deploymentId m.intent ∈ a.honestApprovals := by
+  have hEnr : m.sender < dep.core.quorum.numParties := by
+    unfold AuthDeployment.ackValid at hValid
+    exact of_decide_eq_true (Bool.and_eq_true_iff.mp hValid).1
+  have hMem : m.intent ∈ c.latchedOf m.sender := by
+    by_cases hMem : m.intent ∈ c.latchedOf m.sender
+    · exact hMem
+    · have hT : authViolation dep c (.deliver m) = true := by
+        show (dep.ackValid m && decide (m.deploymentId = dep.core.deploymentId) &&
+          decide (m.sender ∉ c.corrupt) && !decide (m.intent ∈ c.latchedOf m.sender)) = true
+        rw [hValid, decide_eq_true hDep, decide_eq_true hNotCor, decide_eq_false hMem]
+        rfl
+      rw [hT] at hV
+      cases hV
+  have hLat : m.intent ∈ ((dep.view c).nodes m.sender).latched := by
+    unfold AuthState.latchedOf at hMem
+    rw [dc_dif_pos hEnr] at hMem
+    show m.intent ∈ (viewNodes dep c.parties m.sender).latched
+    unfold viewNodes
+    rw [dc_dif_pos hEnr]
+    exact hMem
+  rw [hRel.rel.latched m.sender] at hLat
+  obtain ⟨ap, hap, hParty, hInt⟩ := custodyRevealed_mem hLat
+  have hApDep := (hRel.safe.honestBound ap hap).1
+  cases ap with
+  | mk party deploymentId intent =>
+    dsimp only at hParty hInt hApDep
+    subst hParty hInt
+    rw [hDep, ← hApDep]
+    exact hap
+
+/-- A visible accepted turn of the guarded machine is an accepted step of the ideal functionality
+    on its port with the mapped output. -/
+private theorem auth_sim_visible (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {c c' : AuthState F PK D Sig dep.core.quorum.numParties} {a : IdealCustodyState PK D Sig}
+    {t : AuthTurn F dep.core.quorum.numParties} {ev : AuthEvent F Sig} {j : CustodyInput}
+    (hRel : AuthRel dep c a) (hStep : authStep dep c t = some (c', ev))
+    (hVis : authVisIn dep t = some j) :
+    ∃ a' : IdealCustodyState PK D Sig,
+      idealCustodyStep dep.core.digests dep.core.idealOracle a j = some (a', authVisOut ev) ∧
+        AuthRel dep c' a' := by
+  cases t with
+  | approve p d i =>
+    cases hVis
+    unfold authStep at hStep
+    dsimp only at hStep
+    by_cases hG : p.val ∉ c.corrupt ∧ d = dep.core.deploymentId ∧ (c.parties p).latch ≤ i.epoch ∧
+        i.sessionId ∉ (c.parties p).coupons ∧ (c.parties p).poisoned = false
+    · rw [dc_if_pos hG] at hStep
+      cases hStep
+      have hNode : (dep.view c).nodes p.val = (c.parties p).toCustodian :=
+        viewNodes_enrolled dep c.parties p
+      have hg : p.val < dep.core.quorum.numParties ∧ p.val ∉ (dep.view c).corrupt ∧
+          d = dep.core.deploymentId ∧ ((dep.view c).nodes p.val).latch ≤ i.epoch ∧
+          i.sessionId ∉ ((dep.view c).nodes p.val).coupons := by
+        rw [hNode]
+        exact ⟨p.isLt, hG.1, hG.2.1, hG.2.2.1, hG.2.2.2.1⟩
+      have hAckValid : dep.ackValid (dep.approveAck p.val d i (c.parties p)) = true := by
+        unfold AuthDeployment.ackValid AuthDeployment.approveAck
+        dsimp only
+        rw [decide_eq_true p.isLt, decide_eq_true rfl]
+        rfl
+      have hD : step dep.core (dep.view c) (.approve p.val d i) =
+          some (dep.view
+            { c with
+              parties := setParty c.parties p (dep.approveParty p.val i (c.parties p))
+              wire := dep.approveAck p.val d i (c.parties p) :: c.wire }, Event.approved) := by
+        unfold step
+        dsimp only
+        rw [dc_if_pos hg]
+        refine congrArg (fun s => some (s, Event.approved)) (state_ext ?_ ?_ rfl rfl)
+        · show setNode (dep.view c).nodes p.val _ = viewNodes dep (setParty c.parties p _)
+          rw [viewNodes_setParty, hNode]
+          rfl
+        · show _ :: (dep.view c).buffer = dep.verified (_ :: c.wire)
+          rw [verified_cons_valid dep _ _ hAckValid, hNode]
+          rfl
+      obtain ⟨a', hA, hRel'⟩ := step_sim_visible dep.core hWf.core hRel.rel hD rfl
+      exact ⟨a', hA,
+        { rel := hRel'
+          safe := idealCustodyStep_preserves_safeInv hRel.safe hA
+          wal := partiesInv_setParty dep hRel.wal p _
+            ⟨dep.stateBytes (i.epoch + 1) (i :: (c.parties p).latched), rfl,
+              hWf.parse_stateBytes _ _⟩ }⟩
+    · rw [dc_if_neg hG] at hStep
+      cases hStep
+  | inject m =>
+    have hVis' : (if m.deploymentId = dep.core.deploymentId ∧ dep.ackValid m = true then
+        some (CustodyInput.advApprove m.sender m.deploymentId m.intent) else none) = some j := hVis
+    by_cases hc : m.deploymentId = dep.core.deploymentId ∧ dep.ackValid m = true
+    · rw [dc_if_pos hc] at hVis'
+      cases hVis'
+      unfold authStep at hStep
+      dsimp only at hStep
+      by_cases hCor : m.sender ∈ c.corrupt
+      · rw [dc_if_pos hCor] at hStep
+        cases hStep
+        have hD : step dep.core (dep.view c) (.inject m.toApproval) =
+            some (dep.view { c with wire := m :: c.wire }, Event.injected) := by
+          unfold step
+          dsimp only
+          have hCor' : m.toApproval.sender ∈ (dep.view c).corrupt := hCor
+          rw [dc_if_pos hCor']
+          refine congrArg (fun s => some (s, Event.injected)) (state_ext rfl ?_ rfl rfl)
+          show _ :: (dep.view c).buffer = dep.verified (m :: c.wire)
+          rw [verified_cons_valid dep _ _ hc.2]
+          rfl
+        have hVisD : visIn dep.core (.inject m.toApproval) =
+            some (.advApprove m.sender m.deploymentId m.intent) := by
+          show (if m.toApproval.deploymentId = dep.core.deploymentId then
+            some (CustodyInput.advApprove m.toApproval.sender m.toApproval.deploymentId
+              m.toApproval.intent) else none) = _
+          have hDep' : m.toApproval.deploymentId = dep.core.deploymentId := hc.1
+          rw [dc_if_pos hDep']
+          rfl
+        obtain ⟨a', hA, hRel'⟩ := step_sim_visible dep.core hWf.core hRel.rel hD hVisD
+        exact ⟨a', hA,
+          { rel := hRel'
+            safe := idealCustodyStep_preserves_safeInv hRel.safe hA
+            wal := hRel.wal }⟩
+      · rw [dc_if_neg hCor] at hStep
+        cases hStep
+    · rw [dc_if_neg hc] at hVis'
+      cases hVis'
+  | deliver m => cases hVis
+  | corrupt p =>
+    cases hVis
+    unfold authStep at hStep
+    dsimp only at hStep
+    by_cases hG : p.val ∉ c.corrupt ∧ c.corrupt.length + 1 < dep.core.quorum.threshold
+    · rw [dc_if_pos hG] at hStep
+      cases hStep
+      have hNode : (dep.view c).nodes p.val = (c.parties p).toCustodian :=
+        viewNodes_enrolled dep c.parties p
+      have hg : p.val < dep.core.quorum.numParties ∧ p.val ∉ (dep.view c).corrupt ∧
+          (dep.view c).corrupt.length + 1 < dep.core.quorum.threshold := ⟨p.isLt, hG.1, hG.2⟩
+      have hD : step dep.core (dep.view c) (.corrupt p.val) =
+          some (dep.view { c with corrupt := p.val :: c.corrupt },
+            Event.corrupted (c.parties p).share (c.parties p).latched) := by
+        unfold step
+        dsimp only
+        rw [dc_if_pos hg, hNode]
+        rfl
+      obtain ⟨a', hA, hRel'⟩ := step_sim_visible dep.core hWf.core hRel.rel hD rfl
+      exact ⟨a', hA,
+        { rel := hRel'
+          safe := idealCustodyStep_preserves_safeInv hRel.safe hA
+          wal := hRel.wal }⟩
+    · rw [dc_if_neg hG] at hStep
+      cases hStep
+  | crash p => cases hVis
+  | tamperDisk p raw => cases hVis
+  | dropMsg idx => cases hVis
+  | execute d approvers i ab =>
+    cases hVis
+    unfold authStep at hStep
+    dsimp only at hStep
+    cases hS : custodyLedgerSign dep.core.digests
+        (dep.core.signWith (quorumKey dep.core (dep.verified c.wire) approvers i)) c.ledger
+        (if quorumReady dep.core (dep.verified c.wire) approvers i then approvers.length else 0)
+        d i ab with
+    | none => rw [hS] at hStep; cases hStep
+    | some r =>
+      rw [hS] at hStep
+      cases hStep
+      have hD : step dep.core (dep.view c) (.execute d approvers i ab) =
+          some (dep.view { c with ledger := r.1 }, Event.custody r.2) := by
+        show ((custodyLedgerSign dep.core.digests
+            (dep.core.signWith (quorumKey dep.core (dep.verified c.wire) approvers i)) c.ledger
+            (if quorumReady dep.core (dep.verified c.wire) approvers i then approvers.length
+              else 0) d i ab).map
+            (fun r => ({ dep.view c with ledger := r.1 }, r.2))).map
+            (fun r => (r.1, Event.custody r.2)) = _
+        rw [hS]
+        rfl
+      obtain ⟨a', hA, hRel'⟩ := step_sim_visible dep.core hWf.core hRel.rel hD rfl
+      exact ⟨a', hA,
+        { rel := hRel'
+          safe := idealCustodyStep_preserves_safeInv hRel.safe hA
+          wal := hRel.wal }⟩
+
+/-- An internal accepted turn of the guarded machine preserves the relation with the same ideal
+    state. -/
+private theorem auth_sim_internal (dep : AuthDeployment F C PK D Sig)
+    {c c' : AuthState F PK D Sig dep.core.quorum.numParties} {a : IdealCustodyState PK D Sig}
+    {t : AuthTurn F dep.core.quorum.numParties} {ev : AuthEvent F Sig}
+    (hRel : AuthRel dep c a) (hViol : authViolation dep c t = false)
+    (hStep : authStep dep c t = some (c', ev)) (hInt : authVisIn dep t = none) :
+    AuthRel dep c' a := by
+  cases t with
+  | approve p d i => cases hInt
+  | inject m =>
+    have hInt' : (if m.deploymentId = dep.core.deploymentId ∧ dep.ackValid m = true then
+        some (CustodyInput.advApprove m.sender m.deploymentId m.intent) else none) = none := hInt
+    by_cases hc : m.deploymentId = dep.core.deploymentId ∧ dep.ackValid m = true
+    · rw [dc_if_pos hc] at hInt'
+      cases hInt'
+    · unfold authStep at hStep
+      dsimp only at hStep
+      by_cases hCor : m.sender ∈ c.corrupt
+      · rw [dc_if_pos hCor] at hStep
+        cases hStep
+        by_cases hValid : dep.ackValid m = true
+        · have hDepNe : ¬ m.deploymentId = dep.core.deploymentId := fun h => hc ⟨h, hValid⟩
+          have hD : step dep.core (dep.view c) (.inject m.toApproval) =
+              some (dep.view { c with wire := m :: c.wire }, Event.injected) := by
+            unfold step
+            dsimp only
+            have hCor' : m.toApproval.sender ∈ (dep.view c).corrupt := hCor
+            rw [dc_if_pos hCor']
+            refine congrArg (fun s => some (s, Event.injected)) (state_ext rfl ?_ rfl rfl)
+            show _ :: (dep.view c).buffer = dep.verified (m :: c.wire)
+            rw [verified_cons_valid dep _ _ hValid]
+            rfl
+          have hVisD : visIn dep.core (.inject m.toApproval) = none := by
+            show (if m.toApproval.deploymentId = dep.core.deploymentId then
+              some (CustodyInput.advApprove m.toApproval.sender m.toApproval.deploymentId
+                m.toApproval.intent) else none) = _
+            have hDep' : ¬ m.toApproval.deploymentId = dep.core.deploymentId := hDepNe
+            rw [dc_if_neg hDep']
+          exact
+            { rel := step_sim_internal dep.core hRel.rel hD hVisD
+              safe := hRel.safe
+              wal := hRel.wal }
+        · have hView : dep.view { c with wire := m :: c.wire } = dep.view c :=
+            state_ext rfl (verified_cons_invalid dep m c.wire hValid) rfl rfl
+          exact
+            { rel := hView ▸ hRel.rel
+              safe := hRel.safe
+              wal := hRel.wal }
+      · rw [dc_if_neg hCor] at hStep
+        cases hStep
+  | deliver m =>
+    unfold authStep at hStep
+    dsimp only at hStep
+    by_cases hNotCor : m.sender ∉ c.corrupt
+    · rw [dc_if_pos hNotCor] at hStep
+      cases hStep
+      by_cases hValid : dep.ackValid m = true
+      · refine
+          { rel := rel_of_buffer dep.core hRel.rel (dep.verified (m :: c.wire)) ?_
+            safe := hRel.safe
+            wal := hRel.wal }
+        intro m' hm' hm'D
+        rw [verified_cons_valid dep _ _ hValid] at hm'
+        rcases List.mem_cons.mp hm' with hEq | hOld
+        · subst hEq
+          exact .inl (deliver_backed dep hRel m hNotCor hViol hValid hm'D)
+        · exact hRel.rel.buffered m' hOld hm'D
+      · have hView : dep.view { c with wire := m :: c.wire } = dep.view c :=
+          state_ext rfl (verified_cons_invalid dep m c.wire hValid) rfl rfl
+        exact
+          { rel := hView ▸ hRel.rel
+            safe := hRel.safe
+            wal := hRel.wal }
+    · rw [dc_if_neg hNotCor] at hStep
+      cases hStep
+  | corrupt p => cases hInt
+  | crash p =>
+    unfold authStep at hStep
+    dsimp only at hStep
+    cases hStep
+    have hNode : (dep.view c).nodes p.val = (c.parties p).toCustodian :=
+      viewNodes_enrolled dep c.parties p
+    have hCust : (dep.crashParty p.val (c.parties p)).toCustodian =
+        { share := (c.parties p).share, latch := (c.parties p).latch,
+          latched := (c.parties p).latched, coupons := [] } := by
+      unfold AuthDeployment.crashParty
+      cases hR : dep.recover p.val (c.parties p).anchor (c.parties p).disk with
+      | none => rfl
+      | some r =>
+        have hV : (!decide (r.2.1 = (c.parties p).latch ∧ r.2.2 = (c.parties p).latched)) =
+            false := by
+          have hV' : (match dep.recover p.val (c.parties p).anchor (c.parties p).disk with
+            | some r => !decide (r.2.1 = (c.parties p).latch ∧ r.2.2 = (c.parties p).latched)
+            | none => false) = false := hViol
+          rw [hR] at hV'
+          exact hV'
+        have hEq : r.2.1 = (c.parties p).latch ∧ r.2.2 = (c.parties p).latched := by
+          by_cases hEq : r.2.1 = (c.parties p).latch ∧ r.2.2 = (c.parties p).latched
+          · exact hEq
+          · rw [decide_eq_false hEq] at hV
+            cases hV
+        show AuthParty.toCustodian
+          { share := (c.parties p).share, latch := r.2.1, latched := r.2.2, coupons := [],
+            poisoned := (c.parties p).poisoned, ticket := r.1, disk := (c.parties p).disk,
+            anchor := (c.parties p).anchor } = _
+        unfold AuthParty.toCustodian
+        dsimp only
+        rw [hEq.1, hEq.2]
+    have hD : step dep.core (dep.view c) (.crash p.val) =
+        some (dep.view
+          { c with parties := setParty c.parties p (dep.crashParty p.val (c.parties p)) },
+          Event.recovered) := by
+      unfold step
+      dsimp only
+      refine congrArg (fun s => some (s, Event.recovered)) (state_ext ?_ rfl rfl rfl)
+      show setNode (dep.view c).nodes p.val _ = viewNodes dep (setParty c.parties p _)
+      rw [viewNodes_setParty, hCust, hNode]
+      rfl
+    refine
+      { rel := step_sim_internal dep.core hRel.rel hD rfl
+        safe := hRel.safe
+        wal := partiesInv_setParty dep hRel.wal p _ ?_ }
+    unfold AuthDeployment.crashParty
+    cases hR : dep.recover p.val (c.parties p).anchor (c.parties p).disk with
+    | none => exact hRel.wal p
+    | some r =>
+      obtain ⟨tkt, l, L⟩ := r
+      obtain ⟨bytes, _, hTag, hParse⟩ := dep.recover_some hR
+      exact ⟨bytes, hTag.symm, hParse⟩
+  | tamperDisk p raw =>
+    unfold authStep at hStep
+    dsimp only at hStep
+    cases hStep
+    have hView : dep.view
+        { c with
+          parties := setParty c.parties p
+            { share := (c.parties p).share, latch := (c.parties p).latch,
+              latched := (c.parties p).latched, coupons := (c.parties p).coupons,
+              poisoned := (c.parties p).poisoned, ticket := (c.parties p).ticket,
+              disk := raw, anchor := (c.parties p).anchor } } = dep.view c := by
+      refine state_ext ?_ rfl rfl rfl
+      show viewNodes dep (setParty c.parties p _) = viewNodes dep c.parties
+      rw [viewNodes_setParty]
+      have hSame : AuthParty.toCustodian
+          { share := (c.parties p).share, latch := (c.parties p).latch,
+            latched := (c.parties p).latched, coupons := (c.parties p).coupons,
+            poisoned := (c.parties p).poisoned, ticket := (c.parties p).ticket,
+            disk := raw, anchor := (c.parties p).anchor } =
+          viewNodes dep c.parties p.val := by
+        rw [viewNodes_enrolled]
+        rfl
+      rw [hSame]
+      exact setNode_same _ _
+    exact
+      { rel := hView ▸ hRel.rel
+        safe := hRel.safe
+        wal := partiesInv_setParty dep hRel.wal p _ (hRel.wal p) }
+  | dropMsg idx =>
+    unfold authStep at hStep
+    dsimp only at hStep
+    cases hStep
+    refine
+      { rel := rel_of_buffer dep.core hRel.rel
+          (dep.verified (c.wire.take idx ++ c.wire.drop (idx + 1))) ?_
+        safe := hRel.safe
+        wal := hRel.wal }
+    intro m' hm' hm'D
+    refine hRel.rel.buffered m' (verified_subset dep ?_ hm') hm'D
+    intro m hm
+    rcases List.mem_append.mp hm with hT | hDr
+    · exact List.mem_of_mem_take hT
+    · exact List.mem_of_mem_drop hDr
+  | execute d approvers i ab => cases hInt
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+private theorem auth_init_rel (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed) :
+    AuthRel dep (AuthState.init dep)
+      (IdealCustodyState.init dep.core.deploymentId dep.core.pk dep.core.quorum) where
+  rel := by
+    have hView : dep.view (AuthState.init dep) = State.init dep.core := by
+      refine state_ext ?_ rfl rfl rfl
+      funext q
+      show viewNodes dep (AuthState.init dep).parties q = _
+      unfold viewNodes
+      by_cases hq : q < dep.core.quorum.numParties
+      · rw [dc_dif_pos hq]
+        rfl
+      · rw [dc_dif_neg hq]
+        rfl
+    rw [hView]
+    exact init_rel dep.core
+  safe := IdealCustodyState.init_safeInv _ _ _ _ _
+  wal := fun p => ⟨dep.stateBytes 0 [], rfl, hWf.parse_stateBytes 0 []⟩
+
+/-- **The guarded authenticated network refines `Spec.idealCustodyMachine`.** `approve`, a
+    validly tagged `inject` for this deployment, `corrupt` and `execute` implement the four ideal
+    ports; every other accepted turn leaves the ideal state where it is. -/
+def authCustody_refines_ideal (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed) :
+    DataRefines (authGuardedMachine dep)
+      (idealCustodyMachine dep.core.digests dep.core.idealOracle dep.core.deploymentId
+        dep.core.pk dep.core.quorum)
+      (authVisIn dep) authVisOut where
+  Rel := AuthRel dep
+  absInit := fun _ => IdealCustodyState.init dep.core.deploymentId dep.core.pk dep.core.quorum
+  init_ok {c₀} hInit := by
+    have h0 : c₀ = AuthState.init dep := hInit
+    subst h0
+    exact ⟨rfl, auth_init_rel dep hWf⟩
+  sim_visible hRel hStepC hVis :=
+    auth_sim_visible dep hWf hRel (guarded_step_some dep hStepC).2 hVis
+  sim_internal hRel hStepC hVis :=
+    auth_sim_internal dep hRel (guarded_step_some dep hStepC).1 (guarded_step_some dep hStepC).2
+      hVis
+  sim_reject hRel _ := hRel
+
+/-! ### What a violation is -/
+
+/-- A tag on a fresh preimage: `m` carries the correct `custodianAckTag` under the key of an
+    enrolled, uncorrupted custodian, and its preimage differs from the preimage of every
+    acknowledgement that custodian has sent. -/
+def AckMacForgery (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F) : Prop :=
+  m.sender < dep.core.quorum.numParties ∧ m.sender ∉ st.corrupt ∧
+    m.mac = dep.ackMac m.sender m.deploymentId m.intent ∧
+    ∀ i : CustodyIntent, i ∈ st.latchedOf m.sender →
+      dep.ackFrame m.sender dep.core.deploymentId i ≠
+        dep.ackFrame m.sender m.deploymentId m.intent
+
+/-- Two distinct intents of this deployment with the same message tag. -/
+def MsgTagCollision (dep : AuthDeployment F C PK D Sig) : Prop :=
+  ∃ i j : CustodyIntent, i ≠ j ∧
+    dep.msgTag dep.core.deploymentId i = dep.msgTag dep.core.deploymentId j
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- **A `deliver` violation is a tag forgery or a message-tag collision.** -/
+theorem deliver_violation_classified (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F)
+    (hV : authViolation dep st (.deliver m) = true) :
+    AckMacForgery dep st m ∨ MsgTagCollision dep := by
+  have hV' : (dep.ackValid m && decide (m.deploymentId = dep.core.deploymentId) &&
+      decide (m.sender ∉ st.corrupt) && !decide (m.intent ∈ st.latchedOf m.sender)) = true := hV
+  obtain ⟨h123, h4⟩ := Bool.and_eq_true_iff.mp hV'
+  obtain ⟨h12, h3⟩ := Bool.and_eq_true_iff.mp h123
+  obtain ⟨h1, h2⟩ := Bool.and_eq_true_iff.mp h12
+  have hDep : m.deploymentId = dep.core.deploymentId := of_decide_eq_true h2
+  have hNotCor : m.sender ∉ st.corrupt := of_decide_eq_true h3
+  have hNotMem : m.intent ∉ st.latchedOf m.sender := by
+    intro hMem
+    rw [decide_eq_true hMem] at h4
+    cases h4
+  unfold AuthDeployment.ackValid at h1
+  obtain ⟨hEnr, hMac⟩ := Bool.and_eq_true_iff.mp h1
+  cases hAny : (st.latchedOf m.sender).any
+      (fun i => decide (dep.msgTag dep.core.deploymentId i =
+        dep.msgTag dep.core.deploymentId m.intent)) with
+  | true =>
+    obtain ⟨i, hi, hTag⟩ := List.any_eq_true.mp hAny
+    exact .inr ⟨i, m.intent, fun h => hNotMem (h ▸ hi), of_decide_eq_true hTag⟩
+  | false =>
+    refine .inl ⟨of_decide_eq_true hEnr, hNotCor, of_decide_eq_true hMac, ?_⟩
+    intro i hi hFrame
+    unfold AuthDeployment.ackFrame at hFrame
+    rw [hDep] at hFrame
+    have hTag := (custodianAckFrame_injective hFrame).2.2.2.1
+    have hT : (st.latchedOf m.sender).any
+        (fun i => decide (dep.msgTag dep.core.deploymentId i =
+          dep.msgTag dep.core.deploymentId m.intent)) = true :=
+      List.any_eq_true.mpr ⟨i, hi, decide_eq_true hTag⟩
+    rw [hT] at hAny
+    cases hAny
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- **A `crash` violation exhibits a hash collision.** Under the WAL invariant, a disk record that
+    passes recovery with a latch or log other than the custodian's own has the anchor's MAC on
+    other state bytes. -/
+theorem crash_violation_collision (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) (hInv : AuthPartiesInv dep st.parties)
+    (p : Fin dep.core.quorum.numParties) (hV : authViolation dep st (.crash p) = true) :
+    Nonempty (HashCollision256 dep.hash) := by
+  have hV' : (match dep.recover p.val (st.parties p).anchor (st.parties p).disk with
+    | some r => !decide (r.2.1 = (st.parties p).latch ∧ r.2.2 = (st.parties p).latched)
+    | none => false) = true := hV
+  cases hR : dep.recover p.val (st.parties p).anchor (st.parties p).disk with
+  | none => rw [hR] at hV'; cases hV'
+  | some r =>
+    obtain ⟨tkt, l, L⟩ := r
+    rw [hR] at hV'
+    have hNe : ¬ (l = (st.parties p).latch ∧ L = (st.parties p).latched) := by
+      intro hEq
+      have hV'' : (!decide (l = (st.parties p).latch ∧ L = (st.parties p).latched)) = true := hV'
+      rw [decide_eq_true hEq] at hV''
+      cases hV''
+    obtain ⟨bytes', _, hTag', hParse'⟩ := dep.recover_some hR
+    obtain ⟨bytes, hAnchor, hParse⟩ := hInv p
+    have hTagEq : computeBeltWalSealTag dep.hash (dep.walKey p.val) (dep.lockSeal p.val) tkt
+        bytes' = computeBeltWalSealTag dep.hash (dep.walKey p.val) (dep.lockSeal p.val)
+        (st.parties p).ticket bytes := hTag'.trans hAnchor
+    rcases computeBeltWalSealTag_binding dep.hash hTagEq with ⟨_, _, _, hBytes⟩ | hCol
+    · rw [hBytes, hParse] at hParse'
+      have hPair := Option.some.inj hParse'
+      exact absurd ⟨(congrArg Prod.fst hPair).symm, (congrArg Prod.snd hPair).symm⟩ hNe
+    · exact hCol
+
+/-! ### The unguarded machine -/
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+/-- **Identical until the first violation.** Every execution of `authMachine` is an execution of
+    the guarded machine, or has a prefix that the guarded machine also runs and that ends in a
+    state where the next turn is a violation. -/
+theorem authMachine_trace_guarded_or_violation (dep : AuthDeployment F C PK D Sig) :
+    ∀ {s s' : AuthState F PK D Sig dep.core.quorum.numParties}
+      {tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig)},
+      (authMachine dep).ValidTrace s tr s' →
+      (authGuardedMachine dep).ValidTrace s tr s' ∨
+        ∃ (tr₀ : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig))
+          (st : AuthState F PK D Sig dep.core.quorum.numParties)
+          (t : AuthTurn F dep.core.quorum.numParties),
+          (authGuardedMachine dep).ValidTrace s tr₀ st ∧ authViolation dep st t = true
+  | s, _, _, .nil _ => .inl (.nil s)
+  | s, _, _, .accept (inp := inp) (out := out) hStep hRest => by
+    cases hV : authViolation dep s inp with
+    | true => exact .inr ⟨[], s, inp, .nil s, hV⟩
+    | false =>
+      have hG : (authGuardedMachine dep).step s inp = some (_, out) :=
+        (guarded_step_of_no_violation dep s inp hV).trans hStep
+      rcases authMachine_trace_guarded_or_violation dep hRest with hT | ⟨tr₀, st, t, hT, hVt⟩
+      · exact .inl (.accept hG hT)
+      · exact .inr ⟨_, st, t, .accept hG hT, hVt⟩
+  | s, _, _, .reject inp hNone hRest => by
+    have hG : (authGuardedMachine dep).step s inp = none := by
+      cases hV : authViolation dep s inp with
+      | true =>
+        show (if authViolation dep s inp = true then none else authStep dep s inp) = none
+        rw [hV, dc_if_pos rfl]
+      | false => exact (guarded_step_of_no_violation dep s inp hV).trans hNone
+    rcases authMachine_trace_guarded_or_violation dep hRest with hT | ⟨tr₀, st, t, hT, hVt⟩
+    · exact .inl (.reject inp hG hT)
+    · exact .inr ⟨tr₀, st, t, .reject inp hG hT, hVt⟩
+
+/-- **Every execution of the authenticated network is an execution of the ideal functionality, or
+    exhibits a forgery or a collision.** For any schedule of `authMachine` from its initial state,
+    the projected trace is a trace of `Spec.idealCustodyMachine`, or a state the guarded machine
+    reaches admits a tag forgery, or two intents share a message tag, or the hash has a
+    collision. -/
+theorem authCustody_ideal_or_forgery (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig)}
+    (hAdmits : (authMachine dep).AdmitsTrace tr) :
+    (idealCustodyMachine dep.core.digests dep.core.idealOracle dep.core.deploymentId dep.core.pk
+        dep.core.quorum).AdmitsTrace (projectTrace (authVisIn dep) authVisOut tr) ∨
+    (∃ (st : AuthState F PK D Sig dep.core.quorum.numParties) (m : AuthAck F),
+      (authGuardedMachine dep).Reachable st ∧ AckMacForgery dep st m) ∨
+    MsgTagCollision dep ∨ Nonempty (HashCollision256 dep.hash) := by
+  obtain ⟨s₀, sF, hInit, hTr⟩ := hAdmits
+  have hInitG : (authGuardedMachine dep).Init s₀ := hInit
+  rcases authMachine_trace_guarded_or_violation dep hTr with hG | ⟨tr₀, st, t, hG, hV⟩
+  · exact .inl ((authCustody_refines_ideal dep hWf).preserve_admitsTrace ⟨s₀, sF, hInitG, hG⟩)
+  · have hReach : (authGuardedMachine dep).Reachable st := ⟨s₀, tr₀, hInitG, hG⟩
+    obtain ⟨a, _, hRel⟩ := (authCustody_refines_ideal dep hWf).reachable_rel hReach
+    have hRel' : AuthRel dep st a := hRel
+    cases t with
+    | deliver m =>
+      rcases deliver_violation_classified dep st m hV with hF | hC
+      · exact .inr (.inl ⟨st, m, hReach, hF⟩)
+      · exact .inr (.inr (.inl hC))
+    | crash p => exact .inr (.inr (.inr (crash_violation_collision dep st hRel'.wal p hV)))
+    | approve p d i => cases hV
+    | inject m => cases hV
+    | corrupt p => cases hV
+    | tamperDisk p raw => cases hV
+    | dropMsg idx => cases hV
+    | execute d approvers i ab => cases hV
+
+/-- **Safety of every state the guarded network reaches.** Fewer than `threshold` custodians are
+    corrupted; cumulative spend is within the cap; every WAL release carries the dealt key's
+    signature on `digest deploymentId intent` and its intent is in the approval log of an enrolled
+    custodian whose latch has moved past its epoch; no custodian has approved two intents at one
+    epoch; and every custodian's anchor commits to its latch and log. -/
+theorem authCustody_reachable_safe (dep : AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : AuthState F PK D Sig dep.core.quorum.numParties}
+    (hReach : (authGuardedMachine dep).Reachable st) :
+    st.corrupt.length < dep.core.quorum.threshold ∧
+    st.ledger.spent ≤ dep.core.quorum.spendCap ∧
+    (∀ r : CustodyRelease D Sig, r ∈ st.ledger.releasedHistory →
+      r.sig = dep.core.signWith dep.core.secret
+        (dep.core.digests.digest dep.core.deploymentId r.intent) ∧
+      ∃ p : Fin dep.core.quorum.numParties, r.intent ∈ (st.parties p).latched ∧
+        r.intent.epoch < (st.parties p).latch) ∧
+    (∀ p : Fin dep.core.quorum.numParties,
+      ((st.parties p).latched.map CustodyIntent.epoch).Nodup) ∧
+    AuthPartiesInv dep st.parties := by
+  obtain ⟨a, hReachA, hRel⟩ := (authCustody_refines_ideal dep hWf).reachable_rel hReach
+  have hRel' : AuthRel dep st a := hRel
+  have hCor : a.corruptParties = st.corrupt := hRel'.rel.corrupt
+  have hLed : a.ledger = st.ledger := hRel'.rel.ledger
+  refine ⟨hCor ▸ hRel'.safe.corruptBudget, hLed ▸ hRel'.safe.budget, ?_, ?_, hRel'.wal⟩
+  · intro r hr
+    obtain ⟨hSig, q, hLt, hMem⟩ :=
+      idealCustody_reachable_release_honestly_approved hReachA (hLed ▸ hr)
+    refine ⟨hSig, ⟨q, hLt⟩, ?_⟩
+    have hLat : r.intent ∈ ((dep.view st).nodes q).latched := by
+      rw [hRel'.rel.latched q]
+      unfold custodyRevealed
+      exact List.mem_map.mpr ⟨_, List.mem_filter.mpr ⟨hMem, decide_eq_true rfl⟩, rfl⟩
+    have hBound := hRel'.rel.inv.latchBound q _ hLat
+    have hNode : (dep.view st).nodes q = (st.parties ⟨q, hLt⟩).toCustodian :=
+      viewNodes_enrolled dep st.parties ⟨q, hLt⟩
+    rw [hNode] at hLat hBound
+    exact ⟨hLat, hBound⟩
+  · intro p
+    have hNd := hRel'.rel.inv.latchNodup p.val
+    have hNode : (dep.view st).nodes p.val = (st.parties p).toCustodian :=
+      viewNodes_enrolled dep st.parties p
+    rw [hNode] at hNd
+    exact hNd
+
+/-! ### Runs and the unsafe-release event -/
+
+/-- The state after running a schedule on `authMachine`, and whether some turn was a violation
+    of kind `ev` at the state it was taken in. -/
+def authRun (dep : AuthDeployment F C PK D Sig)
+    (ev : AuthState F PK D Sig dep.core.quorum.numParties →
+      AuthTurn F dep.core.quorum.numParties → Bool) :
+    AuthState F PK D Sig dep.core.quorum.numParties →
+      List (AuthTurn F dep.core.quorum.numParties) →
+      AuthState F PK D Sig dep.core.quorum.numParties × Bool
+  | st, [] => (st, false)
+  | st, t :: ts =>
+    ((authRun dep ev ((authMachine dep).runStep st t).1 ts).1,
+      ev st t || (authRun dep ev ((authMachine dep).runStep st t).1 ts).2)
+
+/-- The `deliver` half of `authViolation`. -/
+def authAckViolation (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) :
+    AuthTurn F dep.core.quorum.numParties → Bool
+  | .deliver m => authViolation dep st (.deliver m)
+  | _ => false
+
+/-- The `crash` half of `authViolation`. -/
+def authWalViolation (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) :
+    AuthTurn F dep.core.quorum.numParties → Bool
+  | .crash p => authViolation dep st (.crash p)
+  | _ => false
+
+/-- The coordinator's WAL holds a release whose intent is in no enrolled custodian's approval
+    log. -/
+def authUnsafeRelease (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties) : Bool :=
+  st.ledger.releasedHistory.any (fun r =>
+    !(List.range dep.core.quorum.numParties).any (fun q => decide (r.intent ∈ st.latchedOf q)))
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+theorem authViolation_split (dep : AuthDeployment F C PK D Sig)
+    (st : AuthState F PK D Sig dep.core.quorum.numParties)
+    (t : AuthTurn F dep.core.quorum.numParties) :
+    authViolation dep st t = (authAckViolation dep st t || authWalViolation dep st t) := by
+  cases t with
+  | deliver m => exact (Bool.or_false _).symm
+  | crash p => exact (Bool.false_or _).symm
+  | approve p d i => rfl
+  | inject m => rfl
+  | corrupt p => rfl
+  | tamperDisk p raw => rfl
+  | dropMsg idx => rfl
+  | execute d approvers i ab => rfl
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+/-- The final state of a run does not depend on the event that is tracked. -/
+theorem authRun_state (dep : AuthDeployment F C PK D Sig)
+    (ev ev' : AuthState F PK D Sig dep.core.quorum.numParties →
+      AuthTurn F dep.core.quorum.numParties → Bool) :
+    ∀ (ts : List (AuthTurn F dep.core.quorum.numParties))
+      (st : AuthState F PK D Sig dep.core.quorum.numParties),
+      (authRun dep ev st ts).1 = (authRun dep ev' st ts).1
+  | [], _ => rfl
+  | t :: ts, st => authRun_state dep ev ev' ts _
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+/-- A run flags a violation exactly when it flags one of the two kinds. -/
+theorem authRun_violation_split (dep : AuthDeployment F C PK D Sig) :
+    ∀ (ts : List (AuthTurn F dep.core.quorum.numParties))
+      (st : AuthState F PK D Sig dep.core.quorum.numParties),
+      (authRun dep (authViolation dep) st ts).2 =
+        ((authRun dep (authAckViolation dep) st ts).2 ||
+          (authRun dep (authWalViolation dep) st ts).2)
+  | [], _ => rfl
+  | t :: ts, st => by
+    show (authViolation dep st t ||
+        (authRun dep (authViolation dep) ((authMachine dep).runStep st t).1 ts).2) =
+      ((authAckViolation dep st t ||
+          (authRun dep (authAckViolation dep) ((authMachine dep).runStep st t).1 ts).2) ||
+        (authWalViolation dep st t ||
+          (authRun dep (authWalViolation dep) ((authMachine dep).runStep st t).1 ts).2))
+    rw [authRun_violation_split dep ts, authViolation_split]
+    cases authAckViolation dep st t <;> cases authWalViolation dep st t <;>
+      cases (authRun dep (authAckViolation dep) ((authMachine dep).runStep st t).1 ts).2 <;>
+      cases (authRun dep (authWalViolation dep) ((authMachine dep).runStep st t).1 ts).2 <;> rfl
+
+omit [LawfulField F] [DecidableEq F] [DecidableEq C] in
+/-- A run without a violation is an execution of the guarded machine. -/
+theorem authRun_guarded (dep : AuthDeployment F C PK D Sig) :
+    ∀ (ts : List (AuthTurn F dep.core.quorum.numParties))
+      (st : AuthState F PK D Sig dep.core.quorum.numParties),
+      (authRun dep (authViolation dep) st ts).2 = false →
+      ∃ tr : List (AuthTurn F dep.core.quorum.numParties × AuthEvent F Sig),
+        (authGuardedMachine dep).ValidTrace st tr (authRun dep (authViolation dep) st ts).1
+  | [], st, _ => ⟨[], .nil st⟩
+  | t :: ts, st, h => by
+    have h' : (authViolation dep st t ||
+        (authRun dep (authViolation dep) ((authMachine dep).runStep st t).1 ts).2) = false := h
+    obtain ⟨hV, hRest⟩ := Bool.or_eq_false_iff.mp h'
+    obtain ⟨tr, hTr⟩ := authRun_guarded dep ts _ hRest
+    have hTr' : (authGuardedMachine dep).ValidTrace ((authMachine dep).runStep st t).1 tr
+        (authRun dep (authViolation dep) st (t :: ts)).1 := hTr
+    cases hS : authStep dep st t with
+    | none =>
+      have hNext : ((authMachine dep).runStep st t).1 = st := by
+        unfold Machine.runStep
+        have hS' : (authMachine dep).step st t = none := hS
+        rw [hS']
+        rfl
+      rw [hNext] at hTr'
+      exact ⟨tr, .reject t ((guarded_step_of_no_violation dep st t hV).trans hS) hTr'⟩
+    | some r =>
+      have hNext : ((authMachine dep).runStep st t).1 = r.1 := by
+        unfold Machine.runStep
+        have hS' : (authMachine dep).step st t = some r := hS
+        rw [hS']
+      rw [hNext] at hTr'
+      exact ⟨(t, r.2) :: tr,
+        .accept ((guarded_step_of_no_violation dep st t hV).trans hS) hTr'⟩
+
+/-- **An unsafe release needs a violation.** If, after any schedule from the initial state, the
+    coordinator's WAL holds a release that no enrolled custodian approved, then some turn of the
+    schedule was a violation. -/
+theorem authRun_unsafe_release_violation (dep : AuthDeployment F C PK D Sig)
+    (hWf : dep.WellFormed) (ts : List (AuthTurn F dep.core.quorum.numParties))
+    (hU : authUnsafeRelease dep
+      (authRun dep (authViolation dep) (AuthState.init dep) ts).1 = true) :
+    (authRun dep (authViolation dep) (AuthState.init dep) ts).2 = true := by
+  cases hB : (authRun dep (authViolation dep) (AuthState.init dep) ts).2 with
+  | true => rfl
+  | false =>
+    obtain ⟨tr, hTr⟩ := authRun_guarded dep ts (AuthState.init dep) hB
+    have hReach : (authGuardedMachine dep).Reachable
+        (authRun dep (authViolation dep) (AuthState.init dep) ts).1 :=
+      ⟨AuthState.init dep, tr, rfl, hTr⟩
+    obtain ⟨_, _, hRelease, _, _⟩ := authCustody_reachable_safe dep hWf hReach
+    unfold authUnsafeRelease at hU
+    obtain ⟨r, hr, hb⟩ := List.any_eq_true.mp hU
+    obtain ⟨_, p, hMem, _⟩ := hRelease r hr
+    have hLat : r.intent ∈
+        (authRun dep (authViolation dep) (AuthState.init dep) ts).1.latchedOf p.val := by
+      unfold AuthState.latchedOf
+      rw [dc_dif_pos p.isLt]
+      exact hMem
+    have hAny : (List.range dep.core.quorum.numParties).any (fun q => decide (r.intent ∈
+        (authRun dep (authViolation dep) (AuthState.init dep) ts).1.latchedOf q)) = true :=
+      List.any_eq_true.mpr ⟨p.val, List.mem_range.mpr p.isLt, decide_eq_true hLat⟩
+    rw [hAny] at hb
+    cases hb
+
+end Authenticated
+
+#verify_constructive
+  Qsag.DistCustody.AuthDeployment.recover_some
+  Qsag.DistCustody.AuthDeployment.recover_sealed
+  Qsag.DistCustody.deliver_violation_classified
+  Qsag.DistCustody.crash_violation_collision
+  Qsag.DistCustody.authMachine_trace_guarded_or_violation
+  Qsag.DistCustody.authCustody_ideal_or_forgery
+  Qsag.DistCustody.authCustody_reachable_safe
+  Qsag.DistCustody.authRun_violation_split
+  Qsag.DistCustody.authRun_guarded
+  Qsag.DistCustody.authRun_unsafe_release_violation
 
 #verify_constructive
   Qsag.DistCustody.Deployment.WellFormed.point_inj

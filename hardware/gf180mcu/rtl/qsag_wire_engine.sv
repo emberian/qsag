@@ -305,7 +305,9 @@ module qsag_wire_engine #(
     logic [7:0]  blk_abs_pulse;
 
     logic zeroize_q;
+    /* verilator lint_off SYNCASYNCNET */
     wire  sub_rst_n = rst_n & ~zeroize_q & ~fault_control & ~fault_laser_dfa;
+    /* verilator lint_on SYNCASYNCNET */
     always_ff @(posedge clk or negedge rst_n)
         if (!rst_n) zeroize_q <= 1'b0;
         else        zeroize_q <= zeroize;
@@ -2373,7 +2375,8 @@ module qsag_wire_engine #(
         end
     end
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, mul_busy, gf_busy, vat_att_ok, vat_spend_used[31:16]};
+    wire unused = &{1'b0, mul_busy, gf_busy, vat_att_ok, vat_spend_used[31:16],
+                    ha[7:6], hb[7:3], hc[7:6], res[63:62], port_sh[63:16]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire

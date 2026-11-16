@@ -747,9 +747,15 @@ impl PartialEq for BlindVerifiableCredential {
 
 impl Eq for BlindVerifiableCredential {}
 
+impl BlindVerifiableCredential {
+    fn erase_secrets(&mut self) {
+        ct_zeroize_bytes(&mut self.issuance_token);
+    }
+}
+
 impl Drop for BlindVerifiableCredential {
     fn drop(&mut self) {
-        ct_zeroize_bytes(&mut self.issuance_token);
+        self.erase_secrets();
     }
 }
 
@@ -1368,10 +1374,16 @@ impl PartialEq for CredentialMembershipWitness {
 
 impl Eq for CredentialMembershipWitness {}
 
-impl Drop for CredentialMembershipWitness {
-    fn drop(&mut self) {
+impl CredentialMembershipWitness {
+    fn erase_secrets(&mut self) {
         self.issuance_token.secret_wipe();
         self.siblings.secret_wipe();
+    }
+}
+
+impl Drop for CredentialMembershipWitness {
+    fn drop(&mut self) {
+        self.erase_secrets();
     }
 }
 
@@ -1430,7 +1442,7 @@ impl Eq for IssuerCredentialAccumulator {}
 
 impl Drop for IssuerCredentialAccumulator {
     fn drop(&mut self) {
-        self.enrolled_tokens.secret_wipe();
+        self.erase_secrets();
     }
 }
 
@@ -1461,6 +1473,10 @@ fn issued_token_index(attr_commit: &[u64; 6], issuance_token: &[u8; 32]) -> [u8;
 
 impl IssuerCredentialAccumulator {
     pub const CAPACITY: usize = 1 << VC_ACCUMULATOR_DEPTH;
+
+    fn erase_secrets(&mut self) {
+        self.enrolled_tokens.secret_wipe();
+    }
 
     pub fn new(oprf_key: PublicKey, issuer_epoch: u64) -> Self {
         let empty_leaf = [
@@ -4773,6 +4789,181 @@ mod tests {
             compute_vc_poseidon2_commit(42, &[0; MAX_VC_ATTRS + 1], &blind, VC_ATTR_COMMIT_TAG)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn issuance_profile_tags_are_explicit_for_both_profiles() {
+        let classical = ZkSoundnessProfile::Classical128;
+        let quantum = ZkSoundnessProfile::Quantum128;
+        assert_eq!(
+            classical.issuance_statement_tag(),
+            b"QSAG.VC.PROFILE.Classical128:219"
+        );
+        assert_eq!(
+            quantum.issuance_statement_tag(),
+            b"QSAG.VC.PROFILE.Quantum128:438"
+        );
+        assert_eq!(classical.issuance_transcript_tag(), b"Classical128:219");
+        assert_eq!(quantum.issuance_transcript_tag(), b"Quantum128:438");
+        for profile in [classical, quantum] {
+            let suffix = std::format!(":{}", profile.repetitions());
+            assert!(profile.issuance_statement_tag().ends_with(suffix.as_bytes()));
+            assert!(profile.issuance_transcript_tag().ends_with(suffix.as_bytes()));
+        }
+        // The tagged classical statement still proves and verifies, under its
+        // own profile only.
+        let (req, _) = holder_prepare_blind_issuance_with_profile(
+            42,
+            &[1, 2],
+            [3; 32],
+            7,
+            [4; 32],
+            [5; 32],
+            classical,
+        )
+        .unwrap();
+        assert_eq!(req.opened_reps.len(), 219);
+        assert!(verify_blind_issuance_request_with_profile(&req, &[1, 2], 42, classical));
+        assert!(!verify_blind_issuance_request_with_profile(&req, &[1, 2], 42, quantum));
+    }
+
+    #[test]
+    fn verifier_challenge_history_is_sorted_bounded_and_refuses_replays() {
+        let holder = HolderCredentialSecret {
+            schema_id: 1,
+            arity: 0,
+            attrs: [0; MAX_VC_ATTRS],
+            holder_blind: [0; 4],
+            seen_challenges: core::cell::RefCell::new(Vec::new()),
+        };
+        for byte in [9u8, 3, 200, 0, 77] {
+            assert_eq!(holder.burn_verifier_challenge(&[byte; 32]), Ok(()));
+            assert_eq!(
+                holder.burn_verifier_challenge(&[byte; 32]),
+                Err(BlindVcError::ReplayedVerifierChallenge)
+            );
+        }
+        assert_eq!(holder.seen_challenges.borrow().len(), 5);
+        assert!(holder.seen_challenges.borrow().is_sorted());
+
+        // Fill the history to one below the bound.
+        {
+            let mut seen = holder.seen_challenges.borrow_mut();
+            seen.clear();
+            seen.extend((0..MAX_SEEN_VERIFIER_CHALLENGES as u32 - 1).map(|i| {
+                let mut challenge = [0u8; 32];
+                challenge[..4].copy_from_slice(&i.to_be_bytes());
+                challenge
+            }));
+        }
+        assert_eq!(holder.burn_verifier_challenge(&[0xEE; 32]), Ok(()));
+        assert_eq!(
+            holder.seen_challenges.borrow().len(),
+            MAX_SEEN_VERIFIER_CHALLENGES
+        );
+        // Full: a new challenge is refused and not recorded; an old one is
+        // still reported as a replay.
+        for _ in 0..2 {
+            assert_eq!(
+                holder.burn_verifier_challenge(&[0xEF; 32]),
+                Err(BlindVcError::ChallengeHistoryFull)
+            );
+        }
+        assert_eq!(
+            holder.burn_verifier_challenge(&[0xEE; 32]),
+            Err(BlindVcError::ReplayedVerifierChallenge)
+        );
+        assert_eq!(
+            holder.seen_challenges.borrow().len(),
+            MAX_SEEN_VERIFIER_CHALLENGES
+        );
+        assert!(holder.seen_challenges.borrow().is_sorted());
+    }
+
+    #[test]
+    fn credential_tokens_are_redacted_compared_in_full_and_erased() {
+        let token = [0xA7u8; 32];
+        let printed_token = "167, 167";
+        let mut accumulator = IssuerCredentialAccumulator::new(PublicKey::test_key(), 7);
+        let index = accumulator.enroll_issued([1; 32], [5; 6], token).unwrap();
+        let witness = accumulator.membership_witness(index).unwrap();
+        assert_eq!(witness.issuance_token, Some(token));
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: [5; 6],
+            issuance_token: token,
+            accumulator_leaf_index: index,
+        };
+        for text in [
+            std::format!("{cred:?}"),
+            std::format!("{witness:?}"),
+            std::format!("{accumulator:?}"),
+        ] {
+            assert!(!text.contains(printed_token), "{text}");
+            assert!(text.contains("<REDACTED>"), "{text}");
+        }
+
+        // Equality still distinguishes every token byte.
+        for byte in [0, 13, 31] {
+            let mut other = cred.clone();
+            assert_eq!(cred, other);
+            other.issuance_token[byte] ^= 1;
+            assert_ne!(cred, other);
+
+            let mut other = witness.clone();
+            assert_eq!(witness, other);
+            let mut changed = token;
+            changed[byte] ^= 0x80;
+            other.issuance_token = Some(changed);
+            assert_ne!(witness, other);
+
+            let mut other = accumulator.clone();
+            assert_eq!(accumulator, other);
+            other.enrolled_tokens[index] = Some(changed);
+            assert_ne!(accumulator, other);
+        }
+        let mut other = witness.clone();
+        other.issuance_token = None;
+        assert_ne!(witness, other);
+        let mut other = cred.clone();
+        other.accumulator_leaf_index += 1;
+        assert_ne!(cred, other);
+        let mut other = witness.clone();
+        other.siblings[3][2] ^= 1;
+        assert_ne!(witness, other);
+
+        // The duplicate-issuance index holds a digest, not the token, and still
+        // refuses the same `(commitment, token)` pair under a new session.
+        assert_eq!(accumulator.issued_tokens.len(), 1);
+        assert!(!accumulator.issued_tokens.contains(&token));
+        assert!(
+            accumulator
+                .issued_tokens
+                .contains(&issued_token_index(&[5; 6], &token))
+        );
+        assert_eq!(
+            accumulator.enroll_issued([2; 32], [5; 6], token),
+            Err(BlindVcError::InvalidOprfEvaluation)
+        );
+        assert_eq!(accumulator.enroll_issued([2; 32], [6; 6], token), Ok(1));
+
+        // What `Drop` runs.
+        let mut cred = cred;
+        cred.erase_secrets();
+        assert_eq!(cred.issuance_token, [0; 32]);
+        let mut witness = witness;
+        witness.erase_secrets();
+        assert_eq!(witness.issuance_token, Some([0; 32]));
+        assert_eq!(witness.siblings, [[0; 6]; VC_ACCUMULATOR_DEPTH]);
+        accumulator.erase_secrets();
+        assert!(
+            accumulator
+                .enrolled_tokens
+                .iter()
+                .all(|token| token.is_none_or(|bytes| bytes == [0; 32]))
+        );
+        assert_eq!(accumulator.enrolled_tokens.len(), 2);
     }
 
     #[test]

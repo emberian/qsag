@@ -21,18 +21,20 @@ module
 * `deployedSched`: the `nv = 24` `unitaryZeroPow` stages read from
   `hemOptimizedStageWitnesses`; `deployedSched_error_at_2pow40`.
 
-What is proved vs assumed on `WhirScheduleCert`:
-* **Constructed non-empty `WhirScheduleCert` (`singleStageExactScheduleCert`):** §5 constructs a
-  non-empty 1-stage `WhirVerifierSchedule` (`singleStageExactWhirSched`, `stages.length = 1`,
-  `johnsonOk = true`) whose verifier accepts honest proofs (`singleStageExactWhir_honest_accepts`),
-  whose false-statement language complement `¬ whirInLang` is inhabited
-  (`singleStageExactWhir_false_not_inLang`), and whose `WhirScheduleCert` holds constructively for
-  every oracle width `w`!
-* **Open locale hypothesis for `deployedSched` (`deployed_whir_exec_closed_qrom_128`):** for the
-  4-stage `nv = 24` `deployedSched`, algebraic soundness enters conditionally as an explicit
-  `(sc : WhirScheduleCert env deployedSched w)` hypothesis, and `deployedStages` uses the profile
-  input `mcaNum := whirAffineStageSimpleNum` (not yet bridged from the proved sliced MCA counts of
-  `Cwyz26EqualDegreeAndMultiFold`).
+What is proved and what is assumed about `WhirScheduleCert`:
+* Constructed (§5): `sampledQueryCert`, a certificate for a one-stage schedule over a four-point
+  domain whose single query position is the round challenge. Its verifier accepts honest proofs
+  (`sampledQuery_honest_accepts`), a false statement is accepted on at most two of four
+  challenges and on at least one (`sampledQuery_query_round_flips`,
+  `sampledQuery_false_statement_accepted_once`), and the flip count is covered by the stage's
+  shift-query bound. The schedule has no fold, sumcheck or out-of-domain round, so those bounds
+  are not exercised, and its `scheduleQromError` is above one.
+* Assumed: a certificate for `deployedSched`. `deployed_whir_exec_closed_qrom_128` takes
+  `(sc : WhirScheduleCert env deployedSched w)` as a hypothesis and no such certificate is
+  constructed in this library. In addition `deployedStages` uses the profile input
+  `mcaNum := whirAffineStageSimpleNum`, which the proved sliced MCA counts of
+  `Cwyz26EqualDegreeAndMultiFold` do not reach. The `2^-128` statement for the deployed
+  schedule is conditional on both.
 -/
 
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
@@ -860,226 +862,304 @@ theorem deployed_whir_exec_closed_qrom_128 {F D : Type} [CommRingOps F] [Decidab
     (RatBound.add_le_add (RatBound.le_trans (scheduleQromError_mono deployedSched hQ) h128)
       (RatBound.le_refl _))
 
-/-! ## §5. Constructive Non-Empty 1-Stage `WhirScheduleCert` (`stages.length = 1`) -/
+/-! ## §5. A constructed certificate for a one-stage schedule with a sampled query
 
-/-- Concrete 1-stage unique-decoding WHIR stage (`n = 4`, `d = 1`, `A = 4`, `η = 1/4`, `L = 4`,
-    `foldK = 0`, `queryCount = 4`). -/
-def singleStageExactWhirStage : WhirStage where
+The schedule `sampledQuerySched` has one stage over a four-point domain: no fold rounds, no
+out-of-domain sample, one query whose position is the round challenge modulo four, agreement
+threshold three, and a final polynomial of degree at most one. Its verifier reads one point of
+the statement's table and compares it with the committed polynomial. For a statement outside
+the language at most two of the four challenges are accepted, and that count is within the
+stage's shift-query bound: `sampledQueryCert` inhabits `WhirScheduleCert` at challenge width two
+with flip count `2` in the query round.
+
+This is evidence that the certificate interface is satisfiable by a verifier that accepts honest
+proofs, rejects with nonzero and non-total probability, and meets `covers` through the shift
+bound. It is a toy: it has no folding, no sumcheck round and no out-of-domain round, so the
+fold and OOD bounds are not exercised, and `scheduleQromError sampledQuerySched Q` exceeds one.
+It says nothing about `deployedSched`. -/
+
+/-- One stage: `n = 4`, `d = 1`, `A = 3`, `η = 1/100`, `L = 100`, no folds, no OOD sample, one
+    query. -/
+def sampledQueryStage : WhirStage where
   foldK := 0
   logDomain := 2
   logInvRate := 2
   oodCount := 0
-  queryCount := 4
+  queryCount := 1
   degBound := 1
-  agree := 4
+  agree := 3
   etaNum := 1
-  etaDen := 4
-  listSize := 4
+  etaDen := 100
+  listSize := 100
   sumcheckDeg := 0
   mcaNum := 0
 
-/-- Concrete non-empty (`stages.length = 1`) `WhirVerifierSchedule` over `Goldilocks`. -/
-def singleStageExactWhirSched : WhirVerifierSchedule where
+def sampledQuerySched : WhirVerifierSchedule where
   nv := 2
   fieldCard := goldilocksPrime
   fieldPos := by decide
-  stages := [singleStageExactWhirStage]
+  stages := [sampledQueryStage]
 
-theorem singleStageExactWhirSched_nonempty_and_johnsonOk :
-    singleStageExactWhirSched.stages.length = 1 ∧
-    singleStageExactWhirSched.johnsonOk = true ∧
-    singleStageExactWhirSched.numRounds = 2 := by
+theorem sampledQuerySched_shape :
+    sampledQuerySched.stages.length = 1 ∧
+    sampledQuerySched.johnsonOk = true ∧
+    sampledQuerySched.numRounds = 2 := by
   decide
 
-/-- Concrete `WhirEnv Goldilocks` reading all 4 domain fibers `[0, 1, 2, 3]` and checking degree-`0`
-    polynomial consistency (`finalDeg = 0`, `P.length ≤ 1`). -/
-def singleStageExactEnv : WhirEnv Goldilocks where
+/-- Evaluation points `0, 1, 2, 3`; the query position is the challenge modulo the domain size;
+    the claim of a polynomial is its value at zero; the final polynomial has degree at most one. -/
+def sampledQueryEnv : WhirEnv Goldilocks where
   chalField _ _ := Goldilocks.zero
-  chalPos _ j _ := j
+  chalPos c _ n := c % n
   domPt _ p := Goldilocks.ofNat p
   fold2 _ _ a _ := a
   finalClaim P _ := RoundPoly.evalCoeffs P CommRingOps.zero
   initClaim P := RoundPoly.evalCoeffs P CommRingOps.zero
-  finalDeg := 0
+  finalDeg := 1
 
-/-- Any transcript accepted by `whirOracleIop singleStageExactEnv singleStageExactWhirSched w`
-    certifies `whirInLang singleStageExactEnv singleStageExactWhirSched x` via `m₀.poly`! -/
-theorem singleStageExactWhir_verify_sound (w : Nat) (x : WhirStmt Goldilocks)
-    (tr : List (WhirMsg Goldilocks × Nat))
-    (hVer : (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x tr = true) :
-    whirInLang singleStageExactEnv singleStageExactWhirSched x := by
-  rw [OracleIop.verify_eq] at hVer
-  obtain ⟨hLenDec, hVerd⟩ := Bool.and_eq_true_iff.mp hVer
-  have hLen : tr.length = 2 := of_decide_eq_true hLenDec
-  rcases tr with _ | ⟨⟨m0, c0⟩, _ | ⟨⟨m1, c1⟩, _ | _⟩⟩
-  · cases hLen
-  · cases hLen
-  · dsimp only [whirOracleIop, whirVerdict, whirQueries, splitStages, singleStageExactWhirSched,
-      singleStageExactWhirStage, allStageQueries, stageQueries, whirTable,
-      commitRoundIdx, whirCheckStages, sumcheckRun, foldBlock, singleStageExactEnv] at hVerd
-    obtain ⟨hRest1, _⟩ := Bool.and_eq_true_iff.mp hVerd
-    obtain ⟨hRest2, hClaimEq⟩ := Bool.and_eq_true_iff.mp hRest1
-    obtain ⟨hRest3, hFoldAll⟩ := Bool.and_eq_true_iff.mp hRest2
-    obtain ⟨hRest4, _⟩ := Bool.and_eq_true_iff.mp hRest3
-    obtain ⟨_, hDeg0⟩ := Bool.and_eq_true_iff.mp hRest4
-    have hPolyLen : m0.poly.length ≤ 1 := of_decide_eq_true hDeg0
-    have hClaim : x.claim = RoundPoly.evalCoeffs m0.poly CommRingOps.zero :=
-      of_decide_eq_true hClaimEq
-    have hAt : ∀ j ∈ ([0, 1, 2, 3] : List Nat),
-        RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat j) = x.table.getD j CommRingOps.zero := by
-      intro j hj
-      simp only [List.mem_cons, List.not_mem_nil, or_false] at hj
-      rcases hj with rfl | rfl | rfl | rfl
-      · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (0, x.table.getD 0 CommRingOps.zero) (by decide))
-      · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (1, x.table.getD 1 CommRingOps.zero) (by decide))
-      · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (2, x.table.getD 2 CommRingOps.zero) (by decide))
-      · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (3, x.table.getD 3 CommRingOps.zero) (by decide))
-    refine ⟨m0.poly, ?_, ?_, hClaim.symm⟩
-    · dsimp only [singleStageExactWhirStage]; omega
-    · unfold agreeCount singleStageExactWhirStage WhirStage.domainSize singleStageExactEnv
-      dsimp only
-      have hF0 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 0) = x.table.getD 0 CommRingOps.zero) = true :=
-        decide_eq_true (hAt 0 (by decide))
-      have hF1 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 1) = x.table.getD 1 CommRingOps.zero) = true :=
-        decide_eq_true (hAt 1 (by decide))
-      have hF2 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 2) = x.table.getD 2 CommRingOps.zero) = true :=
-        decide_eq_true (hAt 2 (by decide))
-      have hF3 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 3) = x.table.getD 3 CommRingOps.zero) = true :=
-        decide_eq_true (hAt 3 (by decide))
-      have hRange : List.range (1 * 4) = [0, 1, 2, 3] := by decide
-      rw [hRange]
-      simp only [List.filter_cons, List.filter_nil, hF0, hF1, hF2, hF3, ↓reduceIte, List.length_cons,
-        List.length_nil]
-      decide
-  · cases hLen
-
-/-- **Constructive Non-Empty `WhirScheduleCert` (`singleStageExactScheduleCert`)**:
-    Inhabits `WhirScheduleCert` on a `stages.length = 1`, `johnsonOk = true` schedule for every
-    oracle output width `w`! -/
-def singleStageExactScheduleCert (w : Nat) :
-    WhirScheduleCert singleStageExactEnv singleStageExactWhirSched w where
-  cert := {
-    state := (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify
-    bad := fun _ => 0
-    init := fun x _ => by
-      rw [OracleIop.verify_eq]
-      have hNe : decide (([] : List (WhirMsg Goldilocks × Nat)).length =
-          singleStageExactWhirSched.numRounds) = false := by decide
-      rw [hNe, Bool.false_and]
-    accept := fun _ _ hv => hv
-    flip := fun x hx _ pref m _ _ => by
-      have hZero : ∀ ch : Fin (2 ^ (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).w),
-          (if (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-            (pref ++ [(m, ch.val)]) = true then 1 else 0) = 0 := fun ch => by
-        cases hv : (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-            (pref ++ [(m, ch.val)]) with
-        | false => rfl
-        | true => exact False.elim (hx (singleStageExactWhir_verify_sound w x _ hv))
-      have hEq : (fun ch : Fin (2 ^ (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).w) =>
-            if (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-              (pref ++ [(m, ch.val)]) = true then 1 else 0) = (fun _ => 0) :=
-        funext hZero
-      rw [hEq, qsum_zero]
-      exact Nat.le_refl 0
-  }
-  covers := fun _ => by
-    show 0 * _ ≤ _
-    rw [Nat.zero_mul]
-    exact Nat.zero_le _
-
-/-- Honest constant-`1` statement and 2-round transcript accepted by `singleStageExactWhirSched`. -/
-theorem singleStageExactWhir_honest_accepts (w : Nat) :
-    let xHonest : WhirStmt Goldilocks :=
-      ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩
-    let m0 : WhirMsg Goldilocks := ⟨[], [Goldilocks.one], []⟩
-    let m1 : WhirMsg Goldilocks := ⟨[], [], []⟩
-    (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify xHonest
-      [(m0, 0), (m1, 0)] = true := by
-  dsimp only
+/-- The verifier on a two-round transcript, spelled out: no OOD answers, a committed polynomial
+    of at most two coefficients that carries the claim, and agreement with the table at the
+    sampled position. -/
+theorem sampledQuery_verify_iff (w : Nat) (x : WhirStmt Goldilocks)
+    (m0 m1 : WhirMsg Goldilocks) (c0 c1 : Nat) :
+    (whirOracleIop sampledQueryEnv sampledQuerySched w).verify x [(m0, c0), (m1, c1)] = true ↔
+      (m1.answers.length = 0 ∧ m0.poly.length ≤ 2 ∧
+        x.claim = RoundPoly.evalCoeffs m0.poly CommRingOps.zero ∧
+        RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat (c1 % 4)) =
+          x.table.getD (c1 % 4) CommRingOps.zero) := by
   rw [OracleIop.verify_eq]
-  decide
+  have hRounds : decide (([(m0, c0), (m1, c1)] : List (WhirMsg Goldilocks × Nat)).length =
+      sampledQuerySched.numRounds) = true := decide_eq_true rfl
+  rw [hRounds, Bool.true_and]
+  have hR1 : List.range 1 = [0] := by decide
+  have hR0 : List.range 0 = ([] : List Nat) := by decide
+  simp only [whirOracleIop, whirVerdict, whirQueries, sampledQuerySched, sampledQueryStage,
+    sampledQueryEnv, splitStages, allStageQueries, stageQueries, whirTable, whirCheckStages,
+    sumcheckRun, foldBlock, WhirStage.domainSize, List.map_cons, List.map_nil, List.drop_zero,
+    List.take_zero, Option.map_some, hR1, hR0, List.flatMap_cons, List.flatMap_nil,
+    List.append_nil, Nat.pow_zero, Nat.zero_mul, Nat.add_zero, Nat.one_mul, List.length_cons,
+    List.length_nil, List.isEmpty_nil, ↓reduceIte, List.zip_nil_left, List.all_nil,
+    List.zip_cons_cons, List.all_cons, List.take_succ_cons, List.headD_cons,
+    Bool.and_true, Bool.and_eq_true, decide_eq_true_eq, Nat.le_refl, decide_true, Bool.true_and,
+    and_true, true_and, Nat.reduceAdd, Nat.reducePow, Nat.reduceMul]
+  exact ⟨fun h => ⟨h.1, h.2.1.1, h.2.2, of_decide_eq_true h.2.1.2⟩,
+    fun h => ⟨h.1, ⟨h.2.1, decide_eq_true h.2.2.2⟩, h.2.2.1⟩⟩
 
-/-- False statement `⟨[1, 2, 1, 1], 1⟩` outside `whirInLang`: no degree-`≤ 1` polynomial can equal
-    `1` at `0`, `2` at `1`, and `1` at `2` over `Goldilocks`! -/
-theorem singleStageExactWhir_false_not_inLang :
-    ¬ whirInLang singleStageExactEnv singleStageExactWhirSched
-      ⟨[Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩ := by
-  rintro ⟨P, hLen, hAgree, _⟩
-  unfold agreeCount singleStageExactWhirStage WhirStage.domainSize singleStageExactEnv at hAgree
-  dsimp only at hAgree
-  have hRange : List.range (1 * 4) = [0, 1, 2, 3] := by decide
-  rw [hRange] at hAgree
-  have hAllTrue : ∀ p ∈ ([0, 1, 2, 3] : List Nat),
-      decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat p) =
-        ([Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD
-          p CommRingOps.zero) = true := by
-    intro p hp
-    cases h0 : decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) =
-        ([Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 0 CommRingOps.zero) <;>
-    cases h1 : decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) =
-        ([Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 1 CommRingOps.zero) <;>
-    cases h2 : decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) =
-        ([Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 2 CommRingOps.zero) <;>
-    cases h3 : decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 3) =
-        ([Goldilocks.one, Goldilocks.ofNat 2, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 3 CommRingOps.zero)
-    all_goals simp only [List.filter_cons, List.filter_nil, h0, h1, h2, h3, ↓reduceIte,
-      List.length_cons, List.length_nil] at hAgree
-    all_goals try omega
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
-    rcases hp with rfl | rfl | rfl | rfl
-    · exact h0
-    · exact h1
-    · exact h2
-    · exact h3
-  have he0 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) = Goldilocks.one :=
-    of_decide_eq_true (hAllTrue 0 (by decide))
-  have he1 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) = Goldilocks.ofNat 2 :=
-    of_decide_eq_true (hAllTrue 1 (by decide))
-  have he2 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) = Goldilocks.one :=
-    of_decide_eq_true (hAllTrue 2 (by decide))
-  rcases P with _ | ⟨c0, _ | ⟨c1, _ | _⟩⟩
-  · exact (by decide : CommRingOps.zero ≠ Goldilocks.one) he0
-  · have hc0 : c0 = Goldilocks.one := by
-      dsimp only [RoundPoly.evalCoeffs] at he0
-      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he0
-      exact he0
-    have hc1 : c0 = Goldilocks.ofNat 2 := by
-      dsimp only [RoundPoly.evalCoeffs] at he1
-      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he1
-      exact he1
-    exact (by decide : Goldilocks.one ≠ Goldilocks.ofNat 2) (hc0.symm.trans hc1)
-  · have hc0 : c0 = Goldilocks.one := by
-      dsimp only [RoundPoly.evalCoeffs] at he0
-      have h0eq : Goldilocks.ofNat 0 = CommRingOps.zero := by decide
-      rw [h0eq, LawfulCommRing.zero_mul, LawfulCommRing.add_zero] at he0
-      exact he0
+private theorem sampledQuery_verify_length (w : Nat) (x : WhirStmt Goldilocks)
+    (tr : List (WhirMsg Goldilocks × Nat))
+    (h : (whirOracleIop sampledQueryEnv sampledQuerySched w).verify x tr = true) :
+    tr.length = 2 := by
+  rw [OracleIop.verify_eq] at h
+  exact of_decide_eq_true (Bool.and_eq_true_iff.mp h).1
+
+private def bit (b : Bool) : Nat := if b = true then 1 else 0
+
+private theorem bit_filter4 (p : Nat → Bool) :
+    (([0, 1, 2, 3] : List Nat).filter p).length = bit (p 0) + bit (p 1) + bit (p 2) + bit (p 3) := by
+  cases h0 : p 0 <;> cases h1 : p 1 <;> cases h2 : p 2 <;> cases h3 : p 3 <;>
+    simp only [List.filter_cons, List.filter_nil, h0, h1, h2, h3, ↓reduceIte, Bool.false_eq_true,
+      List.length_cons, List.length_nil, bit] <;> rfl
+
+/-- Agreement of `P` with the table over the stage's four points, as a sum of four bits. -/
+private theorem sampledQuery_agreeCount (table P : List Goldilocks) :
+    agreeCount sampledQueryEnv (2 ^ sampledQueryStage.foldK * sampledQueryStage.domainSize)
+        table P =
+      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) = table.getD 0 CommRingOps.zero)) +
+      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) = table.getD 1 CommRingOps.zero)) +
+      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) = table.getD 2 CommRingOps.zero)) +
+      bit (decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 3) = table.getD 3 CommRingOps.zero)) := by
+  have hRange : List.range (2 ^ sampledQueryStage.foldK * sampledQueryStage.domainSize) =
+      [0, 1, 2, 3] := by decide
+  unfold agreeCount
+  rw [hRange]
+  exact bit_filter4 _
+
+/-- If each accepted challenge needs the gate `g` and its own agreement bit, and the gate with
+    three agreements is impossible, at most two of the four challenges are accepted. -/
+private theorem at_most_two_of_four (g a0 a1 a2 a3 v0 v1 v2 v3 : Bool)
+    (h0 : v0 = true → g = true ∧ a0 = true) (h1 : v1 = true → g = true ∧ a1 = true)
+    (h2 : v2 = true → g = true ∧ a2 = true) (h3 : v3 = true → g = true ∧ a3 = true)
+    (hN : ¬ (g = true ∧ 3 ≤ bit a0 + bit a1 + bit a2 + bit a3)) :
+    bit v0 + (bit v1 + (bit v2 + (bit v3 + 0))) ≤ 2 := by
+  cases g <;> cases a0 <;> cases a1 <;> cases a2 <;> cases a3 <;>
+    cases v0 <;> cases v1 <;> cases v2 <;> cases v3 <;>
+    first
+    | decide
+    | exact absurd (h0 rfl).1 (by decide)
+    | exact absurd (h0 rfl).2 (by decide)
+    | exact absurd (h1 rfl).1 (by decide)
+    | exact absurd (h1 rfl).2 (by decide)
+    | exact absurd (h2 rfl).1 (by decide)
+    | exact absurd (h2 rfl).2 (by decide)
+    | exact absurd (h3 rfl).1 (by decide)
+    | exact absurd (h3 rfl).2 (by decide)
+    | exact absurd ⟨rfl, by decide⟩ hN
+
+/-- **Query-round soundness of the one-stage verifier.** For a statement outside the language and
+    any first-round message, at most two of the four query challenges are accepted. -/
+theorem sampledQuery_query_round_flips (x : WhirStmt Goldilocks)
+    (hx : ¬ whirInLang sampledQueryEnv sampledQuerySched x)
+    (m0 m1 : WhirMsg Goldilocks) (c0 : Nat) :
+    bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 0)]) +
+    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 1)]) +
+    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 2)]) +
+    (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, 3)]) +
+      0))) ≤ 2 := by
+  have hGate : ∀ c1 : Nat,
+      (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m0, c0), (m1, c1)] = true →
+      decide (m0.poly.length ≤ 2 ∧
+          x.claim = RoundPoly.evalCoeffs m0.poly CommRingOps.zero) = true ∧
+        decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat (c1 % 4)) =
+          x.table.getD (c1 % 4) CommRingOps.zero) = true := fun c1 hv =>
+    have h := (sampledQuery_verify_iff 2 x m0 m1 c0 c1).mp hv
+    ⟨decide_eq_true ⟨h.2.1, h.2.2.1⟩, decide_eq_true h.2.2.2⟩
+  refine at_most_two_of_four _ _ _ _ _ _ _ _ _ (hGate 0) (hGate 1) (hGate 2) (hGate 3) ?_
+  rintro ⟨hG, hAgree⟩
+  have hG' := of_decide_eq_true hG
+  rw [← sampledQuery_agreeCount] at hAgree
+  exact hx ⟨m0.poly, hG'.1, hAgree, hG'.2.symm⟩
+
+/-- **A constructed `WhirScheduleCert` for a schedule with a stage.** The state is the verifier's
+    verdict, the commit round never flips, and the query round flips on at most two of the four
+    challenges, within the stage's shift-query bound `(3/4)^1 + 100/q`. -/
+def sampledQueryCert : WhirScheduleCert sampledQueryEnv sampledQuerySched 2 where
+  cert := {
+    state := (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+    bad := fun r => if r.1 = 1 then 2 else 0
+    init := fun x _ => by
+      cases hv : (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [] with
+      | false => rfl
+      | true => exact absurd (sampledQuery_verify_length 2 x [] hv) (show ¬ (0 : Nat) = 2 by decide)
+    accept := fun _ _ hv => hv
+    flip := fun x hx r pref m hLen _ => by
+      match r, pref, hLen with
+      | ⟨0, _⟩, [], _ =>
+        have hZero : ∀ ch : Nat,
+            (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, ch)] = false :=
+          fun ch => by
+            cases hv : (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, ch)] with
+            | false => rfl
+            | true =>
+              exact absurd (sampledQuery_verify_length 2 x _ hv) (show ¬ (1 : Nat) = 2 by decide)
+        show bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 0)]) +
+          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 1)]) +
+          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 2)]) +
+          (bit ((whirOracleIop sampledQueryEnv sampledQuerySched 2).verify x [(m, 3)]) + 0))) ≤ 0
+        rw [hZero 0, hZero 1, hZero 2, hZero 3]
+        exact Nat.le_refl 0
+      | ⟨1, _⟩, [(m0, c0)], _ => exact sampledQuery_query_round_flips x hx m0 m c0
+      | ⟨0, _⟩, _ :: _, h => exact absurd h (by simp only [List.length_cons]; exact Nat.succ_ne_zero _)
+      | ⟨1, _⟩, [], h => exact absurd h (show ¬ (0 : Nat) = 1 by decide)
+      | ⟨1, _⟩, _ :: _ :: _, h =>
+        exact absurd (Nat.succ.inj h) (by simp only [List.length_cons]; exact Nat.succ_ne_zero _)
+      | ⟨n + 2, hn⟩, _, _ =>
+        exact absurd hn (by
+          have h2 : sampledQuerySched.numRounds = 2 := by decide
+          rw [h2]
+          exact Nat.not_lt.mpr (Nat.le_add_left 2 n))
+  }
+  covers := fun r => by
+    match r with
+    | ⟨0, _⟩ =>
+      show 0 * _ ≤ _
+      rw [Nat.zero_mul]
+      exact Nat.zero_le _
+    | ⟨1, _⟩ =>
+      show 2 * (4 ^ 1 * goldilocksPrime) ≤ ((3 + 0) ^ 1 * goldilocksPrime + 100 * (1 + 0) * 4 ^ 1) * 2 ^ 2
+      decide
+    | ⟨n + 2, hn⟩ =>
+      exact absurd hn (by
+        have h2 : sampledQuerySched.numRounds = 2 := by decide
+        rw [h2]
+        exact Nat.not_lt.mpr (Nat.le_add_left 2 n))
+
+/-- The query round's flip count is not zero: the certificate is not the all-rejecting one. -/
+theorem sampledQueryCert_query_round_bad :
+    sampledQueryCert.cert.bad ⟨1, by decide⟩ = 2 := by rfl
+
+/-- The all-ones table with claim `1` and the committed constant `1` is accepted on every query
+    challenge. -/
+theorem sampledQuery_honest_accepts :
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩
+        [(⟨[], [Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 0)] = true ∧
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩
+        [(⟨[], [Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 1)] = true ∧
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩
+        [(⟨[], [Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 2)] = true ∧
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.one⟩
+        [(⟨[], [Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 3)] = true :=
+  ⟨(sampledQuery_verify_iff 2 _ _ _ 0 0).mpr ⟨rfl, by decide, by decide, by decide⟩,
+   (sampledQuery_verify_iff 2 _ _ _ 0 1).mpr ⟨rfl, by decide, by decide, by decide⟩,
+   (sampledQuery_verify_iff 2 _ _ _ 0 2).mpr ⟨rfl, by decide, by decide, by decide⟩,
+   (sampledQuery_verify_iff 2 _ _ _ 0 3).mpr ⟨rfl, by decide, by decide, by decide⟩⟩
+
+/-- The all-ones table with claim `0` is outside the language: a polynomial `c₀ + c₁ X` with
+    value `0` at `0` misses the table there, and agreement at `1` forces `c₁ = 1`, which misses
+    the table at `2`. -/
+theorem sampledQuery_false_not_inLang :
+    ¬ whirInLang sampledQueryEnv sampledQuerySched
+      ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.zero⟩ := by
+  rintro ⟨P, hLen, hAgree, hClaim⟩
+  rw [sampledQuery_agreeCount] at hAgree
+  have hZeroEq : Goldilocks.ofNat 0 = CommRingOps.zero := by decide
+  have hOneEq : Goldilocks.ofNat 1 = CommRingOps.one := by decide
+  have hClaim0 : RoundPoly.evalCoeffs P CommRingOps.zero = Goldilocks.zero := hClaim
+  have hA0 : decide (RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) =
+      ([Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 0
+        CommRingOps.zero) = false := by
+    rw [hZeroEq, hClaim0]
+    decide
+  rw [hA0] at hAgree
+  have hBoth : ∀ a1 a2 a3 : Bool, 2 ^ sampledQueryStage.foldK * sampledQueryStage.agree ≤
+      bit false + bit a1 + bit a2 + bit a3 → a1 = true ∧ a2 = true := by
+    intro a1 a2 a3
+    cases a1 <;> cases a2 <;> cases a3 <;> decide
+  obtain ⟨h1, h2⟩ := hBoth _ _ _ hAgree
+  have he1 := of_decide_eq_true h1
+  have he2 := of_decide_eq_true h2
+  rcases P with _ | ⟨c0, _ | ⟨c1, _ | ⟨c2, rest⟩⟩⟩
+  · exact (by decide : (CommRingOps.zero : Goldilocks) ≠ Goldilocks.one) he1
+  · have hc0 : c0 = Goldilocks.zero := by
+      dsimp only [RoundPoly.evalCoeffs] at hClaim0
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hClaim0
+      exact hClaim0
     subst hc0
-    have hEval1 : CommRingOps.add Goldilocks.one c1 = Goldilocks.ofNat 2 := by
+    exact (by decide : RoundPoly.evalCoeffs [Goldilocks.zero] (Goldilocks.ofNat 1) ≠
+      ([Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 1
+        CommRingOps.zero) he1
+  · have hc0 : c0 = Goldilocks.zero := by
+      dsimp only [RoundPoly.evalCoeffs] at hClaim0
+      rw [LawfulCommRing.zero_mul, LawfulCommRing.add_zero] at hClaim0
+      exact hClaim0
+    subst hc0
+    have hc1 : c1 = Goldilocks.one := by
       dsimp only [RoundPoly.evalCoeffs] at he1
-      have h1eq : Goldilocks.ofNat 1 = CommRingOps.one := by decide
-      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero, h1eq, LawfulCommRing.one_mul] at he1
-      exact he1
-    have hEval2 : CommRingOps.add Goldilocks.one (CommRingOps.mul (Goldilocks.ofNat 2) c1) =
-        Goldilocks.one := by
-      dsimp only [RoundPoly.evalCoeffs] at he2
-      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he2
-      exact he2
-    have hTwoEq : Goldilocks.ofNat 2 = CommRingOps.add Goldilocks.one Goldilocks.one := by decide
-    have hExpand : CommRingOps.add Goldilocks.one (CommRingOps.mul (Goldilocks.ofNat 2) c1) =
-        CommRingOps.add (CommRingOps.add Goldilocks.one c1) c1 := by
-      rw [hTwoEq, LawfulCommRing.right_distrib]
-      have h1eq : Goldilocks.one = CommRingOps.one := rfl
-      rw [h1eq, LawfulCommRing.one_mul, ← LawfulCommRing.add_assoc]
-      rfl
-    rw [hExpand, hEval1] at hEval2
-    have hAddOne := congrArg (CommRingOps.add Goldilocks.one) hEval2
-    rw [← LawfulCommRing.add_assoc, show CommRingOps.add Goldilocks.one (Goldilocks.ofNat 2) =
-        CommRingOps.add (Goldilocks.ofNat 2) Goldilocks.one from LawfulCommRing.add_comm _ _,
-        LawfulCommRing.add_assoc, hEval1] at hAddOne
-    exact (by decide : CommRingOps.add (Goldilocks.ofNat 2) (Goldilocks.ofNat 2) ≠
-      CommRingOps.add Goldilocks.one Goldilocks.one) hAddOne
-  · dsimp only [singleStageExactWhirStage, List.length_cons] at hLen
-    omega
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero, hOneEq, LawfulCommRing.one_mul] at he1
+      exact (LawfulCommRing.zero_add c1).symm.trans he1
+    subst hc1
+    exact (by decide : RoundPoly.evalCoeffs [Goldilocks.zero, Goldilocks.one] (Goldilocks.ofNat 2) ≠
+      ([Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one] : List Goldilocks).getD 2
+        CommRingOps.zero) he2
+  · have h3 : rest.length + 3 ≤ 2 := hLen
+    exact absurd (Nat.le_trans (Nat.le_add_left 3 rest.length) h3) (by decide)
+
+/-- That false statement is still accepted on one challenge: with the committed polynomial `X`
+    the query at position `1` passes. The verifier's soundness error is not zero, and the
+    certificate's count of two is an upper bound on a real event. -/
+theorem sampledQuery_false_statement_accepted_once :
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.zero⟩
+        [(⟨[], [Goldilocks.zero, Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 1)] = true ∧
+    (whirOracleIop sampledQueryEnv sampledQuerySched 2).verify
+        ⟨[Goldilocks.one, Goldilocks.one, Goldilocks.one, Goldilocks.one], Goldilocks.zero⟩
+        [(⟨[], [Goldilocks.zero, Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 2)] = false :=
+  ⟨(sampledQuery_verify_iff 2 _ _ _ 0 1).mpr ⟨rfl, by decide, by decide, by decide⟩,
+   Bool.eq_false_iff.mpr (fun h =>
+     absurd ((sampledQuery_verify_iff 2 _ _ _ 0 2).mp h).2.2.2 (by decide))⟩
 
 #verify_constructive Qsag.ClosedWhir.johnson_core
 #verify_constructive Qsag.ClosedWhir.WhirStage.johnson_list_le
@@ -1094,13 +1174,16 @@ theorem singleStageExactWhir_false_not_inLang :
 #verify_constructive Qsag.ClosedWhir.deployedSched_error_at_2pow40
 #verify_constructive Qsag.ClosedWhir.scheduleQromError_mono
 #verify_constructive Qsag.ClosedWhir.deployed_whir_exec_closed_qrom_128
-#verify_constructive Qsag.ClosedWhir.singleStageExactWhirSched_nonempty_and_johnsonOk
-#verify_constructive Qsag.ClosedWhir.singleStageExactWhir_verify_sound
-#verify_constructive Qsag.ClosedWhir.singleStageExactWhir_honest_accepts
-#verify_constructive Qsag.ClosedWhir.singleStageExactWhir_false_not_inLang
+#verify_constructive Qsag.ClosedWhir.sampledQuerySched_shape
+#verify_constructive Qsag.ClosedWhir.sampledQuery_verify_iff
+#verify_constructive Qsag.ClosedWhir.sampledQuery_query_round_flips
+#verify_constructive Qsag.ClosedWhir.sampledQueryCert_query_round_bad
+#verify_constructive Qsag.ClosedWhir.sampledQuery_honest_accepts
+#verify_constructive Qsag.ClosedWhir.sampledQuery_false_not_inLang
+#verify_constructive Qsag.ClosedWhir.sampledQuery_false_statement_accepted_once
 
-#tooth_pair Qsag.ClosedWhir.singleStageExactWhir_honest_accepts vs
-  Qsag.ClosedWhir.singleStageExactWhir_false_not_inLang
+#tooth_pair Qsag.ClosedWhir.sampledQuery_honest_accepts vs
+  Qsag.ClosedWhir.sampledQuery_false_not_inLang
 
 end Qsag.ClosedWhir
 end
