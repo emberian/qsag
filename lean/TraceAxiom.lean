@@ -8,7 +8,7 @@ import all Qsag.Oracle.Keccak
 import all Qsag.Protocol.Threshold.ThresholdMpc
 import all Qsag.Protocol.Threshold.Preprocessing
 import all Qsag.Machine.ConstantTimeIsa
-import all Qsag.Machine.ElfBinaryVerify
+import all Qsag.Machine.ElfVerify
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import Lean
