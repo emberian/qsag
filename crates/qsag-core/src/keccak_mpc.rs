@@ -230,6 +230,9 @@ impl Drop for RssKeyShare256 {
     }
 }
 
+/// Replicated 200-byte (`[u64; 25]`) `Keccak-f[1600]` state pair `(mine, next)` for one 2-of-3 RSS party.
+pub type ReplicatedKeccakStatePair = ([u64; 25], [u64; 25]);
+
 impl RssKeyShare256 {
     /// The identity recorded by [`Self::bind_scheme_identity`], if any.
     #[inline]
@@ -281,7 +284,7 @@ impl RssKeyShare256 {
         use_prf: bool,
         public_template: &[u64; 25],
         secret_byte_offset: usize,
-    ) -> Result<SecretBuffer<([u64; 25], [u64; 25])>, KeccakMpcError> {
+    ) -> Result<SecretBuffer<ReplicatedKeccakStatePair>, KeccakMpcError> {
         if self.party_id >= 3 || !matches!(self.key_len, 16 | 24 | 32) {
             return Err(KeccakMpcError::InvalidParameters);
         }
@@ -321,8 +324,8 @@ impl RssKeyShare256 {
             let mut n8 = [0u8; 8];
             m8.copy_from_slice(&mine_bytes[8 * i..8 * i + 8]);
             n8.copy_from_slice(&next_bytes[8 * i..8 * i + 8]);
-            (*pair).0[i] = u64::from_le_bytes(m8);
-            (*pair).1[i] = u64::from_le_bytes(n8);
+            pair.0.0[i] = u64::from_le_bytes(m8);
+            pair.0.1[i] = u64::from_le_bytes(n8);
         }
         Ok(pair)
     }
@@ -427,13 +430,11 @@ impl RssKeyShare256 {
             return Err(KeccakMpcError::InvalidParameters);
         }
         let mut pk_norm = pk_seed;
-        for b in key_len..32 {
-            pk_norm[b] = 0;
-            sk_seed.0[0][b] = 0;
-            sk_seed.0[1][b] = 0;
-            sk_prf.0[0][b] = 0;
-            sk_prf.0[1][b] = 0;
-        }
+        pk_norm[key_len..32].fill(0);
+        sk_seed.0[0][key_len..32].fill(0);
+        sk_seed.0[1][key_len..32].fill(0);
+        sk_prf.0[0][key_len..32].fill(0);
+        sk_prf.0[1][key_len..32].fill(0);
         Ok(Self {
             party_id,
             key_len,
