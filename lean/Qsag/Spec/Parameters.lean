@@ -28,6 +28,7 @@ public section
 namespace Qsag.Spec
 
 set_option autoImplicit false
+set_option exponentiation.threshold 512
 
 /-- Normative parameter profile for tweakable-hash hypertree signing (supporting both stateless
     FORS/TSW presets and FORS-free stateful `Jorts` presets with `forsTrees = 0`). Mirrors
@@ -230,6 +231,10 @@ def baggySha3_128fProfile : BaggyPorsFpProfile where
   porsReveal := 28
   porsMaxAuthNodes := 128
   maxSigBytes := 71654
+
+theorem baggySha3_128fProfile_maxSigBytes : baggySha3_128fProfile.maxSigBytes = 71654 := by
+  unfold baggySha3_128fProfile
+  rfl
 
 /-- NIST FIPS-205 `SLH-DSA-SHAKE-128f` reference profile (`n = 16`-byte digest, `w = 16`,
     `len = 35 = 32 + 3`, `d = 22, h' = 3` (`h = 66`), `k = 33, a = 6`, `2^64` signatures). Not a
@@ -502,8 +507,7 @@ def AggregationProfile.WellFormed (p : AggregationProfile) : Prop :=
   (p.cdhzZeroPowQueries.zip p.johnsonQromQueries).all (fun x => decide (x.1 < x.2)) = true
 
 theorem hemGoldilocksExt4Profile_wellFormed : hemGoldilocksExt4Profile.WellFormed := by
-  unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
-  decide +kernel
+  simp [AggregationProfile.WellFormed, hemGoldilocksExt4Profile]
 
 /-- A well-formed aggregation profile has one query count of each kind per stage, and at least
     one stage. -/
@@ -529,8 +533,7 @@ theorem AggregationProfile.wellFormed_rejects_short_queries :
        ({ hemGoldilocksExt4Profile with maxBatchPolys := 0 } :
           AggregationProfile).WellFormed ∨
        ({ hemGoldilocksExt4Profile with grindingBits := 0 } : AggregationProfile).WellFormed) := by
-  unfold AggregationProfile.WellFormed hemGoldilocksExt4Profile
-  decide +kernel
+  simp [AggregationProfile.WellFormed, hemGoldilocksExt4Profile]
 
 theorem hemGoldilocksExt4Profile_basePrime_eq :
     hemGoldilocksExt4Profile.basePrime = 2 ^ 64 - 2 ^ 32 + 1 ∧

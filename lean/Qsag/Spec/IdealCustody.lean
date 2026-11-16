@@ -1475,5 +1475,93 @@ theorem idealCustody_tooth_wrong_deployment_rejected :
 #tooth_pair Qsag.Spec.idealCustodyStep_sign_fresh_has_honest_approver vs
   Qsag.Spec.idealCustodyStep_sign_unapproved_rejected
 
+/-! ## Asymmetric quorums and persistent per-key leaf latches -/
+
+/-- Personal quorum families with constructive honest intersection for every admitted actual
+fault set. Quorums are lists; multiplicity is irrelevant because safety uses membership, never
+length. The predicate representation avoids a decidable equality or finite-universe assumption. -/
+structure AsymmetricQuorumSystem (P : Type) where
+  quorumsOf : P → List P → Prop
+  faultSets : P → P → (P → Prop) → Prop
+  quorums_monotone : ∀ i Q Q', quorumsOf i Q →
+    (∀ p, p ∈ Q → p ∈ Q') → quorumsOf i Q'
+  honest_intersection : ∀ i j Q₁ Q₂ F,
+    quorumsOf i Q₁ → quorumsOf j Q₂ → faultSets i j F →
+      ∃ h, h ∈ Q₁ ∧ h ∈ Q₂ ∧ ¬ F h
+
+/-- Honest custodians never bind two messages to one `(pk, leaf_idx)` in their cumulative
+history. The history includes past bindings, even after a volatile latch has been cleared. -/
+@[expose] def BeltLatchHistorySafe {P PK Msg : Type} (F : P → Prop)
+    (bound : P → PK → Nat → Msg → Prop) : Prop :=
+  ∀ p, ¬ F p → ∀ pk leaf_idx m₁ m₂,
+    bound p pk leaf_idx m₁ → bound p pk leaf_idx m₂ → m₁ = m₂
+
+/-- ABQS safety: two personal quorum certificates for the same key and leaf cannot bind distinct
+messages. The only quorum requirement is an honest intersection; no symmetric threshold or
+cardinality bound is needed. Persistence is supplied by the cumulative-history invariant. -/
+theorem abqs_belt_latch_unique_msg {P PK Msg : Type}
+    (S : AsymmetricQuorumSystem P) (bound : P → PK → Nat → Msg → Prop)
+    (i j : P) (Q₁ Q₂ : List P) (F : P → Prop) (pk : PK) (leaf_idx : Nat) (m₁ m₂ : Msg)
+    (hQ₁ : S.quorumsOf i Q₁) (hQ₂ : S.quorumsOf j Q₂) (hF : S.faultSets i j F)
+    (hSafe : BeltLatchHistorySafe F bound)
+    (hCert₁ : ∀ p ∈ Q₁, ¬ F p → bound p pk leaf_idx m₁)
+    (hCert₂ : ∀ p ∈ Q₂, ¬ F p → bound p pk leaf_idx m₂) : m₁ = m₂ := by
+  obtain ⟨h, hh₁, hh₂, hhF⟩ := S.honest_intersection i j Q₁ Q₂ F hQ₁ hQ₂ hF
+  exact hSafe h hhF pk leaf_idx m₁ m₂ (hCert₁ h hh₁ hhF) (hCert₂ h hh₂ hhF)
+
+/-- Constructively turn the usual finite-set condition `Q₁ ∩ Q₂ ⊈ F` into an honest
+intersection witness. Decidability is local to membership and corruption; no choice is used. -/
+theorem honest_intersection_of_not_subset {P : Type} [DecidableEq P]
+    (F : P → Prop) [DecidablePred F] (Q₁ Q₂ : List P)
+    (h : ¬ (∀ p ∈ Q₁, p ∈ Q₂ → F p)) :
+    ∃ p, p ∈ Q₁ ∧ p ∈ Q₂ ∧ ¬ F p := by
+  induction Q₁ with
+  | nil => exact False.elim (h (fun p hp => False.elim (List.not_mem_nil hp)))
+  | cons p rest ih =>
+    by_cases hIn : p ∈ Q₂
+    · by_cases hFault : F p
+      · obtain ⟨x, hx, hx₂, hxF⟩ := ih (fun hRest => h (by
+          intro x hx hx₂
+          rcases List.mem_cons.mp hx with rfl | hx
+          · exact hFault
+          · exact hRest x hx hx₂))
+        exact ⟨x, List.mem_cons_of_mem p hx, hx₂, hxF⟩
+      · exact ⟨p, List.mem_cons_self, hIn, hFault⟩
+    · obtain ⟨x, hx, hx₂, hxF⟩ := ih (fun hRest => h (by
+        intro x hx hx₂
+        rcases List.mem_cons.mp hx with rfl | hx
+        · exact False.elim (hIn hx₂)
+        · exact hRest x hx hx₂))
+      exact ⟨x, List.mem_cons_of_mem p hx, hx₂, hxF⟩
+
+/-- Pairwise form of ABQS uniqueness using exactly `Q₁ ∩ Q₂ ⊈ F`. -/
+theorem abqs_belt_latch_unique_msg_of_not_subset {P PK Msg : Type} [DecidableEq P]
+    (F : P → Prop) [DecidablePred F] (bound : P → PK → Nat → Msg → Prop)
+    (Q₁ Q₂ : List P) (pk : PK) (leaf_idx : Nat) (m₁ m₂ : Msg)
+    (hIntersection : ¬ (∀ p ∈ Q₁, p ∈ Q₂ → F p))
+    (hSafe : BeltLatchHistorySafe F bound)
+    (hCert₁ : ∀ p ∈ Q₁, ¬ F p → bound p pk leaf_idx m₁)
+    (hCert₂ : ∀ p ∈ Q₂, ¬ F p → bound p pk leaf_idx m₂) : m₁ = m₂ := by
+  obtain ⟨p, hp₁, hp₂, hpF⟩ := honest_intersection_of_not_subset F Q₁ Q₂ hIntersection
+  exact hSafe p hpF pk leaf_idx m₁ m₂ (hCert₁ p hp₁ hpF) (hCert₂ p hp₂ hpF)
+
+#verify_constructive honest_intersection_of_not_subset abqs_belt_latch_unique_msg_of_not_subset
+
+/-- Persistent snapshots instantiate cumulative-history safety. Bindings at different times are
+compared at the later time; retaining a binding is required only for honest custodians. -/
+theorem beltLatch_persistent_history_safe {P PK Msg : Type}
+    (F : P → Prop) (latch : Nat → P → PK → Nat → Option Msg)
+    (hPersist : ∀ t t', t ≤ t' → ∀ p, ¬ F p → ∀ pk leaf_idx m,
+      latch t p pk leaf_idx = some m → latch t' p pk leaf_idx = some m) :
+    BeltLatchHistorySafe F (fun p pk leaf_idx m => ∃ t, latch t p pk leaf_idx = some m) := by
+  intro p hp pk leaf_idx m₁ m₂ h₁ h₂
+  obtain ⟨t₁, ht₁⟩ := h₁
+  obtain ⟨t₂, ht₂⟩ := h₂
+  rcases Nat.le_total t₁ t₂ with hle | hle
+  · exact Option.some.inj ((hPersist t₁ t₂ hle p hp pk leaf_idx m₁ ht₁).symm.trans ht₂)
+  · exact Option.some.inj (ht₁.symm.trans (hPersist t₂ t₁ hle p hp pk leaf_idx m₂ ht₂))
+
+#verify_constructive abqs_belt_latch_unique_msg beltLatch_persistent_history_safe
+
 end Qsag.Spec
 end
