@@ -3079,3 +3079,1062 @@ theorem tcrExtractorAdv_within (params : PqHashParams) (slot : Nat) {qh qs : Nat
     (fun _ => HashSignAdv.Within.map _ (advVerifyWithTcrCands_within params pk _ _ _))
     (by omega) (by omega)
 
+theorem prodTcrEvent_captured_by_slot (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) {qh qs_max : Nat} (sk : PqSecretKey)
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hW : ∀ pk, (A pk).Within qh qs_max)
+    (hEv :
+      let r := runHashSignAdv suite params sk [] (A (derivePublicKey suite params sk))
+      prodTcrEvent suite params hw ⟨sk, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime suite params sk (A (derivePublicKey suite params sk))) =
+          true) :
+    ∃ slot : Fin (prodPathTargetCount params qs_max),
+      smDtTcrWithinWin suite params sk (tcrExtractorAdv params slot.val A) = true := by
+  let pk := derivePublicKey suite params sk
+  let r := runHashSignAdv suite params sk [] (A pk)
+  let hOT := runHashSignAdv_queries_oneTime suite params sk (A pk)
+  change prodTcrEvent suite params hw ⟨sk, r.2, r.1.1, r.1.2⟩ hOT = true at hEv
+  simp only [prodTcrEvent_eq] at hEv
+  cases hOut : prodTcrOutput suite params hw ⟨sk, r.2, r.1.1, r.1.2⟩ hOT with
+  | none => rw [hOut] at hEv; cases hEv
+  | some tf =>
+    rcases tf with ⟨t, forged⟩
+    obtain ⟨_, hOn, _, hChk⟩ := prodTcrOutput_sound suite params hw
+      ⟨sk, r.2, r.1.1, r.1.2⟩ hOT t forged hOut
+    have hMem := prodTcrOutput_mem_publicVerifierCands suite params hw
+      ⟨sk, r.2, r.1.1, r.1.2⟩ hOT t forged hOut
+    let cands := (publicVerifierWithTcrCands suite params pk
+      (productionSigningLog suite params sk r.2) r.1.1 r.1.2).2
+    change (t, forged) ∈ cands at hMem
+    obtain ⟨idx, hIdxLt, hIdxEq⟩ := List.mem_iff_getElem.mp hMem
+    have hLogLe : (productionSigningLog suite params sk r.2).length ≤ qs_max := by
+      have h1 := productionSigningLog_length_le_queries suite params sk r.2
+      have h2 := runHashSignAdv_queries_length_le suite params sk [] (A pk) (hW pk)
+      simp only [List.length_nil, Nat.zero_add] at h2
+      exact Nat.le_trans h1 h2
+    have hCandsLe : cands.length ≤ prodPathTargetCount params qs_max :=
+      Nat.le_trans (publicVerifierWithTcrCands_cands_length_le suite params pk _ r.1.1 r.1.2)
+        (prodPathTargetCount_mono params hLogLe)
+    have hSlotLt : idx < prodPathTargetCount params qs_max := Nat.lt_of_lt_of_le hIdxLt hCandsLe
+    refine ⟨⟨idx, hSlotLt⟩, ?_⟩
+    unfold smDtTcrWithinWin tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map
+    rw [runHashSignAdv_bind, runHashSignAdv_advTrackSignLog suite params sk [] [] _ rfl]
+    dsimp only
+    rw [runHashSignAdv_bind]
+    dsimp only [HashSignAdv.bind]
+    rw [runHashSignAdv_bind]
+    dsimp only [advRawHash, runHashSignAdv]
+    rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+    dsimp only
+    rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
+    dsimp only [runHashSignAdv, smDtTcrChallengerCheck]
+    have hIdxsEq : (match deriveProductionStatelessInputs suite params r.1.2.rRand pk.pkSeed
+        pk.pkRoot (suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, r.1.1])) with
+        | some (_, is) => is | none => []) =
+        prodSigForsIdxs suite params pk r.1.1 r.1.2 := by simp only [prodSigForsIdxs, thPreHash_eq, thCall_eq]; rfl
+    rw [hIdxsEq, List.getElem?_map, List.getElem?_eq_getElem hIdxLt, Option.map_some, hIdxEq]
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    refine ⟨⟨ProdTargetIdx.mem_pathTargets params _ _ _ t hOn, ?_⟩, hChk⟩
+    cases t with
+    | signedDigest e i =>
+      simp only [smDtTcrValidTarget, Bool.and_eq_true, decide_eq_true_eq]
+      exact ⟨hOn.1, hOn.2.1⟩
+    | preHash e =>
+      simp only [smDtTcrValidTarget, decide_eq_true_eq]
+      exact hOn.1
+    | _ => rfl
+
+/-! ### Game 5: `SM_DT_PRE` `Within` Challenger Game & Indexed Reduction -/
+
+inductive SmDtPreSubmission : Type where
+  | forsLeaf (leaf j u : Nat) (secretVal : List UInt8)
+  | wotsStep (leaf i r step : Nat) (chainVal : List UInt8)
+  deriving DecidableEq, Repr
+
+def smDtPreChallengerCheck (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (qs : List ProdSigningQuery) (subOpt : Option SmDtPreSubmission) : Bool :=
+  let pk := derivePublicKey suite params sk
+  let log := productionSigningLog suite params sk qs
+  match subOpt with
+  | none => false
+  | some (.forsLeaf leaf j u secretVal) =>
+    decide (j < params.forsTrees) &&
+    decide ((leaf, j, u) ∉ prodLogForsLeaves suite params pk log) &&
+    decide (forsIndexedLeafHash suite sk.pkSeed (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+      (leaf % 2 ^ params.subtreeHeight) j u secretVal =
+      forsIndexedLeafFn suite sk (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+        (leaf % 2 ^ params.subtreeHeight) j u)
+  | some (.wotsStep leaf i r step chainVal) =>
+    let tree := UInt64.ofNat (leaf / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)
+    let kp := leaf / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight
+    decide (i < params.numLayers) &&
+    decide (r < params.ell1) &&
+    decide (step + 1 ≤ params.w - 1) &&
+    decide (thChainF suite sk.pkSeed
+      ⟨UInt32.ofNat i, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat step⟩
+      chainVal = honestChainNode suite sk (UInt32.ofNat i) tree kp r (step + 1)) &&
+    log.all (fun e =>
+      decide (e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+        leaf / 2 ^ (i * params.subtreeHeight) →
+        step < (prodLogLayerDigits suite params sk e i).getD r 0))
+
+def smDtPreWithinWin (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (B : PqPublicKey → HashSignAdv (Option SmDtPreSubmission)) : Bool :=
+  let r := runHashSignAdv suite params sk [] (B (derivePublicKey suite params sk))
+  smDtPreChallengerCheck suite params sk r.2 r.1
+
+def smDtPreWithinWins (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (B : PqPublicKey → HashSignAdv (Option SmDtPreSubmission)) : Nat :=
+  hitCount (fun ω => smDtPreWithinWin ω.udSuite params ω.sk B) coins
+
+def publicSigPreCandidates (params : PqHashParams) (idxs : List Nat) (sig : PqHashSig) :
+    List SmDtPreSubmission :=
+  ((List.range params.forsTrees).map fun j =>
+    SmDtPreSubmission.forsLeaf sig.leafGlobalIdx j (idxs.getD j 0)
+      (sig.forsOpenings.getD j ⟨[], []⟩).secretVal) ++
+  ((List.range params.numLayers).flatMap fun i =>
+    (List.range params.ell1).flatMap fun r =>
+      (List.range (params.w - 1)).map fun step =>
+        SmDtPreSubmission.wotsStep sig.leafGlobalIdx i r step
+          ((sig.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []))
+
+theorem publicSigPreCandidates_length (params : PqHashParams) (idxs : List Nat) (sig : PqHashSig) :
+    (publicSigPreCandidates params idxs sig).length = prodPreCandidateCount params := by
+  unfold publicSigPreCandidates prodPreCandidateCount
+  simp only [List.length_append, List.length_map, List.length_range,
+    prod_length_range_flatMap_flatMap_map]
+
+def advCollectPreSubmissions (params : PqHashParams) (pk : PqPublicKey)
+    (msgStar : List UInt8) (sigStar : PqHashSig) :
+    HashSignAdv (List SmDtPreSubmission) :=
+  let preHashInput := thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, msgStar]
+  (advRawHash preHashInput).bind fun mu =>
+    (advDeriveProductionStatelessInputs params sigStar.rRand pk.pkSeed pk.pkRoot mu).map fun dOpt =>
+      let idxs := match dOpt with | some (_, is) => is | none => []
+      publicSigPreCandidates params idxs sigStar
+
+def preExtractorAdv (params : PqHashParams) (slot : Nat)
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)) (pk : PqPublicKey) :
+    HashSignAdv (Option SmDtPreSubmission) :=
+  (A pk).bind fun msgSig =>
+    (advCollectPreSubmissions params pk msgSig.1 msgSig.2).map fun subs =>
+      subs[slot]?
+
+theorem preExtractorAdv_within (params : PqHashParams) (slot : Nat) {qh qs : Nat}
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hW : ∀ pk, (A pk).Within qh qs) (pk : PqPublicKey) :
+    (preExtractorAdv params slot A pk).Within (qh + (1 + prodXofHashBudget params)) qs := by
+  unfold preExtractorAdv advCollectPreSubmissions
+  refine HashSignAdv.Within.bind_le (qh₂ := 1 + prodXofHashBudget params) (qs₂ := 0)
+    (hW pk) (fun _ => ?_) (by omega) (by omega)
+  refine HashSignAdv.Within.map _ ?_
+  refine HashSignAdv.Within.bind_le (qh₂ := prodXofHashBudget params) (qs₂ := 0)
+    (advRawHash_within _)
+    (fun mu => HashSignAdv.Within.map _ (advDeriveProductionStatelessInputs_within params _ _ _ mu))
+    (by omega) (by omega)
+
+theorem prodPreEvent_captured_by_slot (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (sk : PqSecretKey)
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hEv :
+      let r := runHashSignAdv suite params sk [] (A (derivePublicKey suite params sk))
+      prodPreEvent suite params hw ⟨sk, r.2, r.1.1, r.1.2⟩
+        (runHashSignAdv_queries_oneTime suite params sk (A (derivePublicKey suite params sk))) =
+          true) :
+    ∃ slot : Fin (prodPreCandidateCount params),
+      smDtPreWithinWin suite params sk (preExtractorAdv params slot.val A) = true := by
+  let pk := derivePublicKey suite params sk
+  let r := runHashSignAdv suite params sk [] (A pk)
+  have hBrk := prodPreEvent_sound suite params hw ⟨sk, r.2, r.1.1, r.1.2⟩
+    (runHashSignAdv_queries_oneTime suite params sk (A pk)) hEv
+  let idxs := prodSigForsIdxs suite params pk r.1.1 r.1.2
+  have hCand : ∃ sub ∈ publicSigPreCandidates params idxs r.1.2,
+      smDtPreChallengerCheck suite params sk r.2 (some sub) = true := by
+    cases hBrk with
+    | fors j hj hUn hInv =>
+      refine ⟨.forsLeaf r.1.2.leafGlobalIdx j (idxs.getD j 0)
+        (r.1.2.forsOpenings.getD j ⟨[], []⟩).secretVal, ?_, ?_⟩
+      · unfold publicSigPreCandidates
+        exact List.mem_append_left _ (List.mem_map.mpr ⟨j, List.mem_range.mpr hj, rfl⟩)
+      · simp only [smDtPreChallengerCheck, Bool.and_eq_true, decide_eq_true_eq]
+        exact ⟨⟨hj, hUn⟩, hInv⟩
+    | wots i hi rIdx hr step hstep hInv hUn =>
+      refine ⟨.wotsStep r.1.2.leafGlobalIdx i rIdx step
+        ((r.1.2.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD rIdx []), ?_, ?_⟩
+      · unfold publicSigPreCandidates
+        apply List.mem_append_right
+        exact List.mem_flatMap.mpr ⟨i, List.mem_range.mpr hi,
+          List.mem_flatMap.mpr ⟨rIdx, List.mem_range.mpr hr,
+            List.mem_map.mpr ⟨step, List.mem_range.mpr hstep, rfl⟩⟩⟩
+      · simp only [smDtPreChallengerCheck, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+        exact ⟨⟨⟨⟨hi, hr⟩, hstep⟩, hInv⟩, hUn⟩
+  obtain ⟨sub, hMem, hChk⟩ := hCand
+  obtain ⟨idx, hIdxLt, hIdxEq⟩ := List.mem_iff_getElem.mp hMem
+  have hSlotLt : idx < prodPreCandidateCount params := by
+    rw [← publicSigPreCandidates_length params idxs r.1.2]; exact hIdxLt
+  refine ⟨⟨idx, hSlotLt⟩, ?_⟩
+  unfold smDtPreWithinWin preExtractorAdv advCollectPreSubmissions HashSignAdv.map
+  rw [runHashSignAdv_bind]
+  dsimp only [HashSignAdv.bind]
+  rw [runHashSignAdv_bind]
+  dsimp only [advRawHash, runHashSignAdv]
+  rw [runHashSignAdv_bind, runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+  dsimp only [runHashSignAdv]
+  have hIdxsEq : (match deriveProductionStatelessInputs suite params r.1.2.rRand pk.pkSeed
+      pk.pkRoot (suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, r.1.1])) with
+      | some (_, is) => is | none => []) = idxs := by simp only [idxs, prodSigForsIdxs, thPreHash_eq, thCall_eq]; rfl
+  rw [hIdxsEq, List.getElem?_eq_getElem hIdxLt, hIdxEq]
+  exact hChk
+
+/-! ## 6. Constructive Argmax & Main Concrete Advantage Sum Inequality -/
+
+/-- Constructive argmax over `Fin n` (`0 Classical.choice`). -/
+def bestFinIdx : (n : Nat) → 0 < n → (Fin n → Nat) → Fin n
+  | 0, hPos, _ => absurd hPos (Nat.lt_irrefl 0)
+  | 1, _, _ => ⟨0, Nat.zero_lt_one⟩
+  | n + 2, _, score =>
+    let tailBest := bestFinIdx (n + 1) (Nat.succ_pos n)
+      (fun i => score ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    let cand : Fin (n + 2) := ⟨tailBest.1 + 1, Nat.succ_lt_succ tailBest.2⟩
+    if score cand ≤ score ⟨0, Nat.succ_pos (n + 1)⟩ then
+      ⟨0, Nat.succ_pos (n + 1)⟩
+    else cand
+
+theorem bestFinIdx_ge : ∀ (n : Nat) (hPos : 0 < n) (score : Fin n → Nat) (i : Fin n),
+    score i ≤ score (bestFinIdx n hPos score)
+  | 0, hPos, _, _ => absurd hPos (Nat.lt_irrefl 0)
+  | 1, _, _, ⟨0, _⟩ => Nat.le_refl _
+  | 1, _, _, ⟨_ + 1, hi⟩ => absurd hi (by omega)
+  | n + 2, _, score, ⟨0, _⟩ => by
+    simp only [bestFinIdx]
+    split <;> omega
+  | n + 2, _, score, ⟨k + 1, hk⟩ => by
+    have ih := bestFinIdx_ge (n + 1) (Nat.succ_pos n)
+      (fun j => score ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+    simp only [bestFinIdx] at ih ⊢
+    split
+    · rename_i hLe
+      exact Nat.le_trans ih hLe
+    · exact ih
+
+theorem qsum_le_mul_bestFinIdx (n : Nat) (hPos : 0 < n) (score : Fin n → Nat) :
+    qsum n score ≤ n * score (bestFinIdx n hPos score) := by
+  have hLe : qsum n score ≤ qsum n (fun _ => score (bestFinIdx n hPos score)) :=
+    qsum_le_qsum (bestFinIdx_ge n hPos score)
+  rw [qsum_const] at hLe
+  exact hLe
+
+private theorem hitCount_eq_zero_of_all_false {Ω : Type} (ev : Ω → Bool)
+    (hFalse : ∀ ω, ev ω = false) : ∀ coins : List Ω, hitCount ev coins = 0
+  | [] => rfl
+  | ω :: rest => by
+    simp [hitCount, hFalse ω, hitCount_eq_zero_of_all_false ev hFalse rest]
+
+private theorem hitCount_covered_by_fin {Ω : Type} (n : Nat) (ev : Ω → Bool)
+    (slotEv : Fin n → Ω → Bool)
+    (hCov : ∀ ω, ev ω = true → ∃ k : Fin n, slotEv k ω = true) :
+    ∀ coins : List Ω, hitCount ev coins ≤ qsum n (fun k => hitCount (slotEv k) coins)
+  | [] => by
+    have h0 : qsum n (fun k => hitCount (slotEv k) ([] : List Ω)) = qsum n (fun _ => 0) :=
+      qsum_congr (fun _ => rfl)
+    rw [h0, qsum_const]
+    simp [hitCount]
+  | ω :: rest => by
+    have ih := hitCount_covered_by_fin n ev slotEv hCov rest
+    have hSplit :
+        qsum n (fun k => hitCount (slotEv k) (ω :: rest)) =
+        qsum n (fun k => if slotEv k ω = true then 1 else 0) +
+        qsum n (fun k => hitCount (slotEv k) rest) := by
+      rw [← qsum_add]
+      apply qsum_congr
+      intro k
+      simp only [hitCount]
+    rw [hSplit]
+    have hHead : hitCount ev (ω :: rest) =
+        (if ev ω = true then 1 else 0) + hitCount ev rest := rfl
+    rw [hHead]
+    cases hE : ev ω
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      omega
+    · obtain ⟨k₀, hk₀⟩ := hCov ω hE
+      have hOne : 1 ≤ qsum n (fun k => if slotEv k ω = true then 1 else 0) := by
+        have hInd := qsum_eq_indicator n k₀
+        have hLe := qsum_le_qsum (n := n)
+          (f := fun k => if k = k₀ then 1 else 0)
+          (g := fun k => if slotEv k ω = true then 1 else 0)
+          (fun k => by
+            by_cases hk : k = k₀
+            · subst hk; simp [hk₀]
+            · simp [hk])
+        omega
+      simp only [↓reduceIte]
+      omega
+
+/-- Constructive best TCR slot (`0 Classical.choice`). `prodPathTargetCount` has `+ 1`, so `0 < M`. -/
+def bestTcrExtractorAdv (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (qs_max : Nat) (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)) :
+    PqPublicKey → HashSignAdv (Option SmDtTcrSubmission) :=
+  let M := prodPathTargetCount params qs_max
+  have hPos : 0 < M := by simp only [M, prodPathTargetCount_eq]; omega
+  let best := bestFinIdx M hPos (fun k => smDtTcrWithinWins coins params (tcrExtractorAdv params k.val A))
+  tcrExtractorAdv params best.val A
+
+/-- Constructive best PRE slot (`0 Classical.choice`), defaulting to slot `0` when `M = 0`. -/
+def bestPreExtractorAdv (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)) :
+    PqPublicKey → HashSignAdv (Option SmDtPreSubmission) :=
+  let M := prodPreCandidateCount params
+  if hPos : 0 < M then
+    let best := bestFinIdx M hPos (fun k => smDtPreWithinWins coins params (preExtractorAdv params k.val A))
+    preExtractorAdv params best.val A
+  else
+    preExtractorAdv params 0 A
+
+theorem bestTcrExtractorAdv_within (coins : List ProdExperimentCoin) (params : PqHashParams)
+    {qh qs_max : Nat} (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hW : ∀ pk, (A pk).Within qh qs_max) (pk : PqPublicKey) :
+    (bestTcrExtractorAdv coins params qs_max A pk).Within
+      (qh + prodTcrReductionHashBudget params) qs_max :=
+  tcrExtractorAdv_within params _ A hW pk
+
+theorem bestPreExtractorAdv_within (coins : List ProdExperimentCoin) (params : PqHashParams)
+    {qh qs_max : Nat} (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hW : ∀ pk, (A pk).Within qh qs_max) (pk : PqPublicKey) :
+    (bestPreExtractorAdv coins params A pk).Within
+      (qh + (1 + prodXofHashBudget params)) qs_max := by
+  unfold bestPreExtractorAdv
+  split <;> exact preExtractorAdv_within params _ A hW pk
+
+private theorem hitCount_congr {Ω : Type} {p q : Ω → Bool} (h : ∀ ω, p ω = q ω) :
+    ∀ xs : List Ω, hitCount p xs = hitCount q xs
+  | [] => rfl
+  | ω :: rest => by
+    simp only [hitCount, h ω, hitCount_congr h rest]
+
+private theorem hitCount_le_of_imp {Ω : Type} {p q : Ω → Bool}
+    (h : ∀ ω, p ω = true → q ω = true) :
+    ∀ xs : List Ω, hitCount p xs ≤ hitCount q xs
+  | [] => Nat.le_refl 0
+  | ω :: rest => by
+    have ih := hitCount_le_of_imp h rest
+    simp only [hitCount]
+    by_cases hp : p ω = true
+    · simp only [hp, h ω hp, ↓reduceIte]
+      omega
+    · have hpF : p ω = false := Bool.eq_false_iff.mpr hp
+      simp only [hpF, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      exact Nat.le_trans ih (Nat.le_add_left _ _)
+
+/-- **Master Seed-Withheld `Within` Hash-Signature Game Reduction Bound
+    (`production_euf_cma_within_game_reduction_bound`):**
+    For any EUF-CMA forger `A` making at most `qh` hash queries and `qs_max` signing queries with
+    `sk.skSeed` and `sk.skPrf` withheld, the concrete EUF-CMA win count is bounded by the explicit
+    `PRF`, `SM_DT_UD`, `ITSR`, `SM_DT_TCR`, and `SM_DT_PRE` `Within`-bounded reduction games. -/
+theorem production_euf_cma_within_game_reduction_bound
+    (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) {qh qs_max : Nat}
+    (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (hW : ∀ pk, (A pk).Within qh qs_max) :
+    eufCmaRealWithinWins coins params A ≤
+      prfWithinAdv coins params (prfExtractorAdv params A) +
+      smDtUdWithinAdv coins params (udExtractorAdv params A) +
+      itsrWithinWins coins params (itsrExtractorAdv A) +
+      prodPathTargetCount params qs_max *
+        smDtTcrWithinWins coins params (bestTcrExtractorAdv coins params qs_max A) +
+      prodPreCandidateCount params *
+        smDtPreWithinWins coins params (bestPreExtractorAdv coins params A) := by
+  have hHopPrf :
+      eufCmaRealWithinWins coins params A ≤
+      prfWithinAdv coins params (prfExtractorAdv params A) +
+      hitCount (fun ω => eufCmaWithinWin ω.prfSuite params ω.sk A) coins := by
+    unfold eufCmaRealWithinWins prfWithinAdv prfWithinGameBit prfExtractorAdv
+    have hT := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.pubSuite params ω.sk A) coins
+    have hF := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.prfSuite params ω.sk A) coins
+    simp only [↓reduceIte, Bool.false_eq_true]
+    rw [hT, hF]
+    simp only [natAbsDiff_eq]
+    split <;> omega
+  have hHopUd :
+      hitCount (fun ω => eufCmaWithinWin ω.prfSuite params ω.sk A) coins ≤
+      smDtUdWithinAdv coins params (udExtractorAdv params A) +
+      hitCount (fun ω => eufCmaWithinWin ω.udSuite params ω.sk A) coins := by
+    unfold smDtUdWithinAdv smDtUdWithinGameBit udExtractorAdv
+    have hT := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.prfSuite params ω.sk A) coins
+    have hF := hitCount_congr
+      (fun ω : ProdExperimentCoin => eufCmaDistinguisherAdv_simulates ω.udSuite params ω.sk A) coins
+    simp only [↓reduceIte, Bool.false_eq_true]
+    rw [hT, hF]
+    simp only [natAbsDiff_eq]
+    split <;> omega
+  let outUd := fun ω : ProdExperimentCoin =>
+    let r := runHashSignAdv ω.udSuite params ω.sk [] (A (derivePublicKey ω.udSuite params ω.sk))
+    (⟨ω.sk, r.2, r.1.1, r.1.2⟩ : ProdEufCmaOutcome)
+  let hOTUd := fun ω : ProdExperimentCoin =>
+    runHashSignAdv_queries_oneTime ω.udSuite params ω.sk
+      (A (derivePublicKey ω.udSuite params ω.sk))
+  have hTerm :
+      hitCount (fun ω => eufCmaWithinWin ω.udSuite params ω.sk A) coins ≤
+      hitCount (fun ω => prodItsrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins +
+      hitCount (fun ω => prodTcrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins +
+      hitCount (fun ω => prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins := by
+    apply hitCount_union_bound
+    intro ω hWin
+    exact prodEufCmaWin_classified ω.udSuite params hw (outUd ω) (hOTUd ω) hWin
+  have hItsrLe :
+      hitCount (fun ω => prodItsrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins ≤
+      itsrWithinWins coins params (itsrExtractorAdv A) :=
+    hitCount_le_of_imp
+      (fun ω hEv => prodItsrEvent_implies_itsrWithinWin ω.udSuite params hw ω.sk A hEv) coins
+  have hTcrPos : 0 < prodPathTargetCount params qs_max := by simp only [prodPathTargetCount_eq]; omega
+  have hTcrLe :
+      hitCount (fun ω => prodTcrEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins ≤
+      prodPathTargetCount params qs_max *
+        smDtTcrWithinWins coins params (bestTcrExtractorAdv coins params qs_max A) := by
+    have hCov := hitCount_covered_by_fin (prodPathTargetCount params qs_max)
+      (fun ω => prodTcrEvent ω.udSuite params hw (outUd ω) (hOTUd ω))
+      (fun k ω => smDtTcrWithinWin ω.udSuite params ω.sk (tcrExtractorAdv params k.val A))
+      (fun ω hEv => prodTcrEvent_captured_by_slot ω.udSuite params hw ω.sk A hW hEv)
+      coins
+    have hBest := qsum_le_mul_bestFinIdx (prodPathTargetCount params qs_max) hTcrPos
+      (fun k => smDtTcrWithinWins coins params (tcrExtractorAdv params k.val A))
+    unfold bestTcrExtractorAdv smDtTcrWithinWins at hBest ⊢
+    exact Nat.le_trans hCov hBest
+  have hPreLe :
+      hitCount (fun ω => prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins ≤
+      prodPreCandidateCount params *
+        smDtPreWithinWins coins params (bestPreExtractorAdv coins params A) := by
+    by_cases hPrePos : 0 < prodPreCandidateCount params
+    · have hCov := hitCount_covered_by_fin (prodPreCandidateCount params)
+        (fun ω => prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω))
+        (fun k ω => smDtPreWithinWin ω.udSuite params ω.sk (preExtractorAdv params k.val A))
+        (fun ω hEv => prodPreEvent_captured_by_slot ω.udSuite params hw ω.sk A hEv)
+        coins
+      have hBest := qsum_le_mul_bestFinIdx (prodPreCandidateCount params) hPrePos
+        (fun k => smDtPreWithinWins coins params (preExtractorAdv params k.val A))
+      unfold bestPreExtractorAdv smDtPreWithinWins at hBest ⊢
+      simp only [hPrePos]
+      exact Nat.le_trans hCov hBest
+    · have hZero : prodPreCandidateCount params = 0 := by omega
+      have hNoEv : ∀ ω, prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω) = false := by
+        intro ω
+        by_cases hEv : prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω) = true
+        · obtain ⟨slot, _⟩ := prodPreEvent_captured_by_slot ω.udSuite params hw ω.sk A hEv
+          have hLt := slot.isLt
+          omega
+        · exact Bool.eq_false_iff.mpr hEv
+      have hCnt0 : hitCount (fun ω => prodPreEvent ω.udSuite params hw (outUd ω) (hOTUd ω)) coins = 0 :=
+        hitCount_eq_zero_of_all_false _ hNoEv coins
+      rw [hCnt0]
+      exact Nat.zero_le _
+  omega
+
+/-! ## 7. Two-Sided Nonvacuity (`0 < wins ∧ wins < totalCoins`) & Assurance Witnesses -/
+
+end Qsag
+end
+
+#verify_constructive Qsag.runHashSignAdv_seed_withheld
+#verify_constructive Qsag.runHashSignAdv_queries_oneTime
+#verify_constructive Qsag.runHashSignAdv_advVerifyProductionPqHashSig
+#verify_constructive Qsag.prodTcrOutput_mem_publicVerifierCands
+#verify_constructive Qsag.smDtTcrWithinWin_discharges_prodSmTcrBreak
+#verify_constructive Qsag.production_euf_cma_within_game_reduction_bound
+/-
+# Qsag.Protocol.Signing.ProdAdaptiveTcrReduction — Seed-Withheld Adaptive `SM-DT-TCR` / `SM-DT-PRE` / `ITSR` Reduction
+
+Wraps the constructive `Type`-valued extractor `production_forgery_extract` (`ProdCollisionExtraction`),
+the extractor-defined events `prodTcrEvent` / `prodPreEvent` / `prodItsrEvent` (`ProdCollisionEvents`),
+and the path-target budget `prodPathTargetCount` (`ProdCollisionAccounting`) inside a genuine
+**seed-withheld, query-budgeted adaptive oracle experiment**:
+
+1. **Seed-Withheld Adaptive Experiment (`ProdAdaptiveTree`, `runProdAdaptiveAdv`)**:
+   - The adversary receives only the public key `derivePublicKey suite params sk` (`sk.skSeed` and
+     `sk.skPrf` are withheld) and interacts adaptively via bounded hash queries (`qHash`) to
+     `suite.rawHash` and bounded signing queries (`qSign`) to `prodSignQuery suite params sk`.
+2. **Explicit Query-Budgeted Reduction (`prodAdaptive_eufCma_to_budgeted_events`)**:
+   - Bounds the number of adaptive signing queries by `qSign`, total hash evaluations of the
+     combined reduction by `qHash + qSign * signStepCost + extractStepCost`, and every extracted
+     on-path `SM-DT-TCR` target pool by `prodPathTargetCount params qSign` (dependent only on
+     `params` and `qSign`, never on unbounded hypertree indices).
+   - Eliminates any caller-supplied `ProdSmTcrBreak` existential hypothesis over finite coin lists.
+3. **Separation Witness (`tooth_unrestricted_smTcrBreak_exceeds_zero_query_tcr`)**:
+   - Demonstrates constructively on an 8-key 2-to-1 hash family that an unbudgeted existential
+     collision predicate (`∃ x' ≠ target, H x' = H target`) holds on `8 / 8` keys (`100%`), whereas
+     any `0`-query seed-withheld guess hits a distinct colliding input on at most `1 / 8` keys.
+-/
+
+
+public section
+namespace Qsag
+
+set_option autoImplicit false
+
+/-! ## §1. Seed-Withheld Adaptive Dual-Oracle Experiment (`Hash` + `Sign`) -/
+
+/-- Adaptive adversary tree making raw hash queries (`List UInt8 → List UInt8`) and signing
+    queries (`ProdSigningQuery → Option PqHashSig`) without direct access to `sk`. -/
+inductive ProdAdaptiveTree (α : Type) : Type where
+  | pure (ret : α)
+  | hashQuery (x : List UInt8) (next : List UInt8 → ProdAdaptiveTree α)
+  | signQuery (q : ProdSigningQuery) (next : Option PqHashSig → ProdAdaptiveTree α)
+
+/-- Dual query-budget predicate `(qHash, qSign)` on `ProdAdaptiveTree`. -/
+@[expose] def ProdDualBounded {α : Type} : Nat → Nat → ProdAdaptiveTree α → Prop
+  | _, _, .pure _ => True
+  | 0, _, .hashQuery _ _ => False
+  | qH + 1, qS, .hashQuery _ next => ∀ y, ProdDualBounded qH qS (next y)
+  | _, 0, .signQuery _ _ => False
+  | qH, qS + 1, .signQuery _ next => ∀ sig, ProdDualBounded qH qS (next sig)
+
+/-- Execute `ProdAdaptiveTree` against `(rawHash, signOracle)`, recording `(result, hashLog, signLog)`. -/
+def evalProdAdaptiveTree {α : Type}
+    (rawHash : List UInt8 → List UInt8)
+    (signOracle : ProdSigningQuery → Option PqHashSig) :
+    ProdAdaptiveTree α → α × List (List UInt8) × List ProdSigningQuery
+  | .pure ret => (ret, [], [])
+  | .hashQuery x next =>
+    let r := evalProdAdaptiveTree rawHash signOracle (next (rawHash x))
+    (r.1, x :: r.2.1, r.2.2)
+  | .signQuery q next =>
+    let r := evalProdAdaptiveTree rawHash signOracle (next (signOracle q))
+    (r.1, r.2.1, q :: r.2.2)
+
+theorem evalProdAdaptiveTree_budgets {α : Type}
+    (rawHash : List UInt8 → List UInt8)
+    (signOracle : ProdSigningQuery → Option PqHashSig) :
+    ∀ {qH qS : Nat} {prog : ProdAdaptiveTree α},
+      ProdDualBounded qH qS prog →
+      (evalProdAdaptiveTree rawHash signOracle prog).2.1.length ≤ qH ∧
+      (evalProdAdaptiveTree rawHash signOracle prog).2.2.length ≤ qS
+  | _, _, .pure _, _ => ⟨Nat.zero_le _, Nat.zero_le _⟩
+  | 0, _, .hashQuery _ _, h => False.elim h
+  | qH + 1, qS, .hashQuery x next, h => by
+    obtain ⟨ihH, ihS⟩ := evalProdAdaptiveTree_budgets rawHash signOracle (h (rawHash x))
+    exact ⟨Nat.succ_le_succ ihH, ihS⟩
+  | _, 0, .signQuery _ _, h => False.elim h
+  | qH, qS + 1, .signQuery q next, h => by
+    obtain ⟨ihH, ihS⟩ := evalProdAdaptiveTree_budgets rawHash signOracle (h (signOracle q))
+    exact ⟨ihH, Nat.succ_le_succ ihS⟩
+
+/-- A seed-withheld adaptive EUF-CMA adversary receives ONLY `pk : PqPublicKey` (never `sk.skSeed`
+    or `sk.skPrf`) and outputs `(msgStar, sigStar)` after `≤ qHash` hash and `≤ qSign` sign queries. -/
+structure SeedWithheldEufCmaAdv (qHash qSign : Nat) where
+  run : PqPublicKey → ProdAdaptiveTree (List UInt8 × PqHashSig)
+  bounded : ∀ pk, ProdDualBounded qHash qSign (run pk)
+
+/-- Run a `SeedWithheldEufCmaAdv` on secret key `sk` under `suite` and `params`, yielding the
+    experiment outcome together with the adaptive raw-hash query log. -/
+def runSeedWithheldEufCma {qHash qSign : Nat}
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (adv : SeedWithheldEufCmaAdv qHash qSign) (sk : PqSecretKey) :
+    ProdEufCmaOutcome × List (List UInt8) :=
+  let pk := derivePublicKey suite params sk
+  let ((msgStar, sigStar), hashLog, signLog) :=
+    evalProdAdaptiveTree suite.rawHash (prodSignQuery suite params sk) (adv.run pk)
+  (⟨sk, signLog, msgStar, sigStar⟩, hashLog)
+
+/-- Predicate enforcing distinct signing epochs on an adaptive tree when `statefulJorts = true`. -/
+@[expose] def AdaptiveOneTimeOn {qHash qSign : Nat}
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (adv : SeedWithheldEufCmaAdv qHash qSign) (sk : PqSecretKey) : Prop :=
+  params.statefulJorts = true →
+    let qs := (runSeedWithheldEufCma suite params adv sk).1.queries
+    ∀ q, q ∈ qs → ∀ q', q' ∈ qs → q.epoch = q'.epoch → q = q'
+
+/-! ## §2. Query-Budgeted Adaptive Reduction to `SM-DT-TCR`, `SM-DT-PRE`, & `ITSR` -/
+
+/-- Upper bound on the path-walk hash evaluations performed by the reduction's verification-path
+    extractor on a single forgery (`prodPathTargetCount params qSign`). -/
+@[expose] def prodExtractorWalkBudget (params : PqHashParams) (qSign : Nat) : Nat :=
+  prodPathTargetCount params qSign
+
+/-- Total query-and-walk budget of the reduction wrapping a `(qHash, qSign)` adversary. -/
+@[expose] def prodReductionTotalHashBudget (params : PqHashParams)
+    (qHash qSign perSignHashBudget : Nat) : Nat :=
+  qHash + qSign * perSignHashBudget + prodExtractorWalkBudget params qSign
+
+/-- **Seed-Withheld, Query-Budgeted Adaptive EUF-CMA Reduction (`prodAdaptive_eufCma_to_budgeted_events`)**:
+    1. For every secret key `sk`, the adversary's raw-hash queries number `≤ qHash` and signing
+       queries number `≤ qSign`.
+    2. Whenever `prodTcrOutput` fires on an adaptive run, the returned `(target, forged)` pair
+       satisfies `prodTcrCheck = true`, `target` lies in the explicit candidate list of size
+       `≤ prodPathTargetCount params qSign` (depending only on `params` and `qSign`), and the
+       extractor walk cost is bounded by `prodExtractorWalkBudget params qSign`.
+    3. Across any finite key/coin schedule `coins : List Ω`, EUF-CMA winning outcomes are bounded
+       by the sum of the three constructive extractor events (`ITSR + SM-DT-TCR + SM-DT-PRE`),
+       with ZERO unquantified `ProdSmTcrBreak` premise. -/
+theorem prodAdaptive_eufCma_to_budgeted_events {Ω : Type} {qHash qSign : Nat}
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (adv : SeedWithheldEufCmaAdv qHash qSign)
+    (keyOf : Ω → PqSecretKey)
+    (coins : List Ω)
+    (hOneTime : ∀ ω, AdaptiveOneTimeOn suite params adv (keyOf ω)) :
+    (∀ ω,
+      let res := runSeedWithheldEufCma suite params adv (keyOf ω)
+      res.2.length ≤ qHash ∧
+      res.1.queries.length ≤ qSign ∧
+      (productionSigningLog suite params (keyOf ω) res.1.queries).length ≤ qSign ∧
+      (∀ t forged,
+        prodTcrOutput suite params hw res.1 (hOneTime ω) = some (t, forged) →
+        t ∈ prodPathTargets params
+          (productionSigningLog suite params (keyOf ω) res.1.queries)
+          res.1.sigStar.leafGlobalIdx
+          (prodSigForsIdxs suite params (derivePublicKey suite params (keyOf ω))
+            res.1.msgStar res.1.sigStar) ∧
+        (prodPathTargets params
+          (productionSigningLog suite params (keyOf ω) res.1.queries)
+          res.1.sigStar.leafGlobalIdx
+          (prodSigForsIdxs suite params (derivePublicKey suite params (keyOf ω))
+            res.1.msgStar res.1.sigStar)).length ≤ prodPathTargetCount params qSign ∧
+        prodTcrCheck suite params (keyOf ω) res.1.sigStar.leafGlobalIdx t forged = true)) ∧
+    hitCount (fun ω => prodEufCmaWin suite params (runSeedWithheldEufCma suite params adv (keyOf ω)).1) coins ≤
+      hitCount (fun ω => prodItsrEvent suite params hw (runSeedWithheldEufCma suite params adv (keyOf ω)).1 (hOneTime ω)) coins +
+      hitCount (fun ω => prodTcrEvent suite params hw (runSeedWithheldEufCma suite params adv (keyOf ω)).1 (hOneTime ω)) coins +
+      hitCount (fun ω => prodPreEvent suite params hw (runSeedWithheldEufCma suite params adv (keyOf ω)).1 (hOneTime ω)) coins := by
+  refine ⟨?_, production_euf_cma_extracted_bound suite params hw coins
+    (fun ω => (runSeedWithheldEufCma suite params adv (keyOf ω)).1) hOneTime⟩
+  intro ω
+  let pk := derivePublicKey suite params (keyOf ω)
+  obtain ⟨hHBnd, hSBnd⟩ :=
+    evalProdAdaptiveTree_budgets suite.rawHash (prodSignQuery suite params (keyOf ω)) (adv.bounded pk)
+  have hLogLe :
+      (productionSigningLog suite params (keyOf ω)
+        (runSeedWithheldEufCma suite params adv (keyOf ω)).1.queries).length ≤ qSign :=
+    Nat.le_trans
+      (productionSigningLog_length_le suite params (keyOf ω)
+        (runSeedWithheldEufCma suite params adv (keyOf ω)).1.queries)
+      hSBnd
+  refine ⟨hHBnd, hSBnd, hLogLe, ?_⟩
+  intro t forged hOut
+  obtain ⟨hMem, hLenQ, hChk⟩ :=
+    prodTcrOutput_target_budget suite params hw
+      (runSeedWithheldEufCma suite params adv (keyOf ω)).1 (hOneTime ω) t forged hOut
+  exact ⟨hMem, Nat.le_trans hLenQ (prodPathTargetCount_mono params hSBnd), hChk⟩
+
+/-! ## §3. Concrete Target-Pool Budgets at Real `Corduroy` Parameters & Separation Witness -/
+
+/-- Exact candidate target counts `prodPathTargetCount` on `corduroyCustody128Params` at `Q_max = 2^12`. -/
+theorem corduroyCustody128_target_pool_budget :
+    prodPathTargetCount corduroyCustody128Params (2 ^ 12) = 35690 ∧
+    prodPathTargetCount corduroyCustody128Params (2 ^ 12) < 2 ^ 16 := by
+  rw [prodPathTargetCount_eq, corduroyCustody128Params_eq]
+  decide +kernel
+
+/-! ## §4. Break candidates from the public transcript, and the programs that compute them
+
+`prodPublicExtract` maps `(pk, signing log, forgery)` to candidate breaks. Its type has no
+secret key. The subset-cover verdict is decided on the public transcript alone. A collision
+or preimage candidate names a position on the forgery's verification path and the forgery's
+input there; whether it is a break is decided against the signer's own input at that position
+(`smDtTcrChallengerCheck`, `smDtPreChallengerCheck`), which is a function of the secret key.
+`prodPublicExtract_complete`: for every winning outcome one of the candidates is a break. -/
+
+/-- Candidate breaks computed from the public transcript of one experiment. -/
+structure ProdPublicBreakCandidates where
+  /-- Every FORS leaf opened by the forgery was opened by a logged signature, on a fresh
+      message. -/
+  subsetCover : Bool
+  /-- For each hash call of the verifier on the forgery: the position and the forgery's input. -/
+  collisions : List SmDtTcrSubmission
+  /-- The FORS secrets and WOTS chain values revealed by the forgery, with their positions. -/
+  preimages : List SmDtPreSubmission
+
+/-- The FORS index-coverage event, decided on `(pk, log, forgery)`. -/
+def prodPublicSubsetCoverCheck (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) : Bool :=
+  decide (0 < params.forsTrees) &&
+  decide (msgStar ∉ log.map Prod.fst) &&
+  (prodSigForsLeaves suite params pk msgStar sigStar).all
+    (fun a => decide (a ∈ prodLogForsLeaves suite params pk log))
+
+/-- **Public-data extractor.** A function of the public key, the signing log and the forgery. -/
+def prodPublicExtract (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) : ProdPublicBreakCandidates where
+  subsetCover := prodPublicSubsetCoverCheck suite params pk log msgStar sigStar
+  collisions := (publicVerifierWithTcrCands suite params pk log msgStar sigStar).2.map fun tf =>
+    ⟨sigStar.leafGlobalIdx, prodSigForsIdxs suite params pk msgStar sigStar, tf.1, tf.2⟩
+  preimages := publicSigPreCandidates params (prodSigForsIdxs suite params pk msgStar sigStar)
+    sigStar
+
+theorem prodPublicExtract_subsetCover (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) :
+    (prodPublicExtract suite params pk log msgStar sigStar).subsetCover =
+      prodPublicSubsetCoverCheck suite params pk log msgStar sigStar := by
+  rfl
+
+/-- A positive subset-cover verdict is the FORS index-coverage event `ProdForsItsrBreak`. -/
+theorem prodPublicSubsetCoverCheck_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig)
+    (h : prodPublicSubsetCoverCheck suite params pk log msgStar sigStar = true) :
+    ProdForsItsrBreak suite params pk log msgStar sigStar := by
+  unfold prodPublicSubsetCoverCheck at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+  exact ⟨fun e he hEq => h.1.2 (List.mem_map.mpr ⟨e, he, hEq⟩), h.1.1, h.2⟩
+
+theorem prodPublicSubsetCoverCheck_of_break (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) (h : ProdForsItsrBreak suite params pk log msgStar sigStar) :
+    prodPublicSubsetCoverCheck suite params pk log msgStar sigStar = true := by
+  unfold prodPublicSubsetCoverCheck
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+  refine ⟨⟨h.trees_pos, ?_⟩, h.covered⟩
+  intro hMem
+  obtain ⟨e, he, hEq⟩ := List.mem_map.mp hMem
+  exact h.fresh e he hEq
+
+/-- The collision candidates number at most `prodPathTargetCount params log.length`. -/
+theorem prodPublicExtract_collisions_length_le (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (prodPublicExtract suite params pk log msgStar sigStar).collisions.length ≤
+      prodPathTargetCount params log.length := by
+  unfold prodPublicExtract
+  dsimp only
+  rw [List.length_map]
+  exact publicVerifierWithTcrCands_cands_length_le suite params pk log msgStar sigStar
+
+/-- The preimage candidates number `prodPreCandidateCount params`. -/
+theorem prodPublicExtract_preimages_length (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (prodPublicExtract suite params pk log msgStar sigStar).preimages.length =
+      prodPreCandidateCount params :=
+  publicSigPreCandidates_length params _ sigStar
+
+/-- **Completeness of the public-data extractor.** On every winning outcome whose signing log
+    is one-time (in the stateful profile), the candidates computed from the public key, the
+    signing log and the forgery contain a break: the subset-cover verdict is positive, or a
+    collision candidate differs from the signer's input at its position and has the same
+    digest, or a preimage candidate hashes to the signer's value at a position no logged
+    signature opened. -/
+theorem prodPublicExtract_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hWin : prodEufCmaWin suite params o = true) :
+    (prodPublicExtract suite params (derivePublicKey suite params o.sk)
+      (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar).subsetCover = true ∨
+    (∃ sub ∈ (prodPublicExtract suite params (derivePublicKey suite params o.sk)
+        (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar).collisions,
+      smDtTcrChallengerCheck suite params o.sk o.queries (some sub) = true) ∨
+    (∃ sub ∈ (prodPublicExtract suite params (derivePublicKey suite params o.sk)
+        (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar).preimages,
+      smDtPreChallengerCheck suite params o.sk o.queries (some sub) = true) := by
+  rcases prodEufCmaWin_classified suite params hw o hOneTime hWin with hI | hT | hP
+  · exact .inl (prodPublicSubsetCoverCheck_of_break suite params _ _ _ _
+      (prodItsrEvent_sound suite params hw o hOneTime hI))
+  · refine .inr (.inl ?_)
+    simp only [prodTcrEvent_eq] at hT
+    cases hOut : prodTcrOutput suite params hw o hOneTime with
+    | none => rw [hOut] at hT; cases hT
+    | some tf =>
+      rcases tf with ⟨t, forged⟩
+      obtain ⟨_, hOn, _, hChk⟩ := prodTcrOutput_sound suite params hw o hOneTime t forged hOut
+      have hMem := prodTcrOutput_mem_publicVerifierCands suite params hw o hOneTime t forged hOut
+      refine ⟨⟨o.sigStar.leafGlobalIdx,
+        prodSigForsIdxs suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar,
+        t, forged⟩, ?_, ?_⟩
+      · unfold prodPublicExtract
+        exact List.mem_map.mpr ⟨(t, forged), hMem, rfl⟩
+      · unfold smDtTcrChallengerCheck
+        simp only [Bool.and_eq_true, decide_eq_true_eq]
+        refine ⟨⟨ProdTargetIdx.mem_pathTargets params _ _ _ t hOn, ?_⟩, hChk⟩
+        cases t with
+        | signedDigest e i =>
+          simp only [smDtTcrValidTarget, Bool.and_eq_true, decide_eq_true_eq]
+          exact ⟨hOn.1, hOn.2.1⟩
+        | preHash e =>
+          simp only [smDtTcrValidTarget, decide_eq_true_eq]
+          exact hOn.1
+        | _ => rfl
+  · refine .inr (.inr ?_)
+    have hBrk := prodPreEvent_sound suite params hw o hOneTime hP
+    unfold prodPublicExtract
+    dsimp only
+    cases hBrk with
+    | fors j hj hUn hInv =>
+      refine ⟨.forsLeaf o.sigStar.leafGlobalIdx j
+        ((prodSigForsIdxs suite params (derivePublicKey suite params o.sk) o.msgStar
+          o.sigStar).getD j 0)
+        (o.sigStar.forsOpenings.getD j ⟨[], []⟩).secretVal, ?_, ?_⟩
+      · unfold publicSigPreCandidates
+        exact List.mem_append_left _ (List.mem_map.mpr ⟨j, List.mem_range.mpr hj, rfl⟩)
+      · simp only [smDtPreChallengerCheck, Bool.and_eq_true, decide_eq_true_eq]
+        exact ⟨⟨hj, hUn⟩, hInv⟩
+    | wots i hi rIdx hr step hstep hInv hUn =>
+      refine ⟨.wotsStep o.sigStar.leafGlobalIdx i rIdx step
+        ((o.sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD rIdx []), ?_, ?_⟩
+      · unfold publicSigPreCandidates
+        apply List.mem_append_right
+        exact List.mem_flatMap.mpr ⟨i, List.mem_range.mpr hi,
+          List.mem_flatMap.mpr ⟨rIdx, List.mem_range.mpr hr,
+            List.mem_map.mpr ⟨step, List.mem_range.mpr hstep, rfl⟩⟩⟩
+      · simp only [smDtPreChallengerCheck, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+        exact ⟨⟨⟨⟨hi, hr⟩, hstep⟩, hInv⟩, hUn⟩
+
+/-- A collision candidate that passes the keyed check is a collision of `suite.rawHash`
+    between the candidate's input and an input the signer hashes (`ProdSmTcrBreak`). -/
+theorem smDtTcrChallengerCheck_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (qs : List ProdSigningQuery) (sub : SmDtTcrSubmission)
+    (hChk : smDtTcrChallengerCheck suite params sk qs (some sub) = true) :
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk qs) := by
+  unfold smDtTcrChallengerCheck at hChk
+  simp only [Bool.and_eq_true, prodTcrCheck_eq, decide_eq_true_eq] at hChk
+  obtain ⟨⟨_, hVal⟩, hNe, hCol⟩ := hChk
+  have hHon : ProdHonestHashTarget suite params sk (productionSigningLog suite params sk qs)
+      (sub.target.input suite params sk sub.leaf) := by
+    cases ht : sub.target with
+    | xmssNode l h n => simpa only [ProdTargetIdx.input_xmssNode] using .xmssNode (UInt32.ofNat l) _ h n
+    | wotsPk l => simpa only [ProdTargetIdx.input_wotsPk] using .wotsPk (UInt32.ofNat l) _ _
+    | chainStep l r s => simpa only [ProdTargetIdx.input_chainStep] using .chainStep (UInt32.ofNat l) _ _ r s
+    | forsNode j h d b => simpa only [ProdTargetIdx.input_forsNode] using .forsNode _ _ j h (j * 2 ^ d + b) b
+    | forsRoots => simpa only [ProdTargetIdx.input_forsRoots] using .forsRoots _ _
+    | signedDigest e i =>
+      rw [ht] at hVal
+      simp only [smDtTcrValidTarget, Bool.and_eq_true, decide_eq_true_eq] at hVal
+      simpa only [ProdTargetIdx.input_signedDigest] using (ProdHonestHashTarget.signedDigest e hVal.1 i hVal.2)
+    | preHash e =>
+      rw [ht] at hVal
+      simp only [smDtTcrValidTarget, decide_eq_true_eq] at hVal
+      simpa only [ProdTargetIdx.input_preHash] using (ProdHonestHashTarget.preHash e hVal)
+  exact ProdSmTcrBreak.mk _ sub.forged hHon hNe hCol
+
+theorem smDtTcrChallengerCheck_none (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (qs : List ProdSigningQuery) :
+    smDtTcrChallengerCheck suite params sk qs none = false := by
+  rfl
+
+theorem smDtPreChallengerCheck_none (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (qs : List ProdSigningQuery) :
+    smDtPreChallengerCheck suite params sk qs none = false := by
+  rfl
+
+/-! ### Oracle programs -/
+
+/-- Sequential composition of adaptive oracle programs. -/
+@[expose] def ProdAdaptiveTree.bind {α β : Type} :
+    ProdAdaptiveTree α → (α → ProdAdaptiveTree β) → ProdAdaptiveTree β
+  | .pure a, f => f a
+  | .hashQuery x next, f => .hashQuery x (fun y => (next y).bind f)
+  | .signQuery q next, f => .signQuery q (fun s => (next s).bind f)
+
+/-- The value of a program run against `rawHash` with every signing query answered `none`. -/
+@[expose] def ProdAdaptiveTree.hashOnlyValue {α : Type} (rawHash : List UInt8 → List UInt8) :
+    ProdAdaptiveTree α → α
+  | .pure a => a
+  | .hashQuery x next => (next (rawHash x)).hashOnlyValue rawHash
+  | .signQuery _ next => (next none).hashOnlyValue rawHash
+
+theorem ProdDualBounded.mono {α : Type} :
+    ∀ {qH₁ qH₂ qS₁ qS₂ : Nat} {t : ProdAdaptiveTree α},
+      ProdDualBounded qH₁ qS₁ t → qH₁ ≤ qH₂ → qS₁ ≤ qS₂ → ProdDualBounded qH₂ qS₂ t
+  | _, _, _, _, .pure _, _, _, _ => trivial
+  | 0, _, _, _, .hashQuery _ _, h, _, _ => False.elim h
+  | _ + 1, 0, _, _, .hashQuery _ _, _, hh, _ => absurd hh (Nat.not_succ_le_zero _)
+  | _ + 1, _ + 1, _, _, .hashQuery _ next, h, hh, hs => fun y =>
+    ProdDualBounded.mono (t := next y) (h y) (Nat.le_of_succ_le_succ hh) hs
+  | _, _, 0, _, .signQuery _ _, h, _, _ => False.elim h
+  | _, _, _ + 1, 0, .signQuery _ _, _, _, hs => absurd hs (Nat.not_succ_le_zero _)
+  | _, _, _ + 1, _ + 1, .signQuery _ next, h, hh, hs => fun s =>
+    ProdDualBounded.mono (t := next s) (h s) hh (Nat.le_of_succ_le_succ hs)
+
+theorem ProdDualBounded.bind {α β : Type} {f : α → ProdAdaptiveTree β} {qH₂ qS₂ : Nat}
+    (hf : ∀ a, ProdDualBounded qH₂ qS₂ (f a)) :
+    ∀ {qH₁ qS₁ : Nat} {t : ProdAdaptiveTree α},
+      ProdDualBounded qH₁ qS₁ t → ProdDualBounded (qH₁ + qH₂) (qS₁ + qS₂) (t.bind f)
+  | _, _, .pure a, _ => (hf a).mono (Nat.le_add_left _ _) (Nat.le_add_left _ _)
+  | 0, _, .hashQuery _ _, h => False.elim h
+  | qH + 1, qS, .hashQuery _ next, h => by
+    rw [Nat.succ_add]
+    exact fun y => ProdDualBounded.bind hf (t := next y) (h y)
+  | _, 0, .signQuery _ _, h => False.elim h
+  | qH, qS + 1, .signQuery _ next, h => by
+    rw [Nat.succ_add]
+    exact fun s => ProdDualBounded.bind hf (t := next s) (h s)
+
+/-- The same program in the constructors of `ProdAdaptiveTree`. -/
+def HashSignAdv.toTree {α : Type} : HashSignAdv α → ProdAdaptiveTree α
+  | .done a => .pure a
+  | .queryHash x k => .hashQuery x (fun y => (k y).toTree)
+  | .querySign q k => .signQuery q (fun s => (k s).toTree)
+
+theorem HashSignAdv.toTree_bounded {α : Type} :
+    ∀ {qh qs : Nat} {m : HashSignAdv α}, m.Within qh qs → ProdDualBounded qh qs m.toTree
+  | _, _, .done _, _ => trivial
+  | 0, _, .queryHash _ _, h => False.elim h
+  | _ + 1, _, .queryHash _ k, h => fun y => HashSignAdv.toTree_bounded (m := k y) (h y)
+  | _, 0, .querySign _ _, h => False.elim h
+  | _, _ + 1, .querySign _ k, h => fun s => HashSignAdv.toTree_bounded (m := k s) (h s)
+
+/-- A program without signing queries has the value it has under `runHashSignAdv`. -/
+theorem HashSignAdv.toTree_hashOnlyValue {α : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (qs : List ProdSigningQuery) :
+    ∀ {qh : Nat} (m : HashSignAdv α), m.Within qh 0 →
+      m.toTree.hashOnlyValue suite.rawHash = (runHashSignAdv suite params sk qs m).1
+  | _, .done _, _ => rfl
+  | 0, .queryHash _ _, h => False.elim h
+  | _ + 1, .queryHash x k, h =>
+    HashSignAdv.toTree_hashOnlyValue suite params sk qs (k (suite.rawHash x)) (h (suite.rawHash x))
+  | _, .querySign _ _, h => False.elim h
+
+/-- Record the `(message, signature)` pairs of the answered signing queries, in order, after
+    `acc`. Adds no query. -/
+@[expose] def prodTrackSignLog {α : Type} :
+    List (List UInt8 × PqHashSig) → ProdAdaptiveTree α →
+    ProdAdaptiveTree (α × List (List UInt8 × PqHashSig))
+  | acc, .pure a => .pure (a, acc)
+  | acc, .hashQuery x next => .hashQuery x (fun y => prodTrackSignLog acc (next y))
+  | acc, .signQuery q next =>
+    .signQuery q (fun resp =>
+      prodTrackSignLog
+        (match resp with
+          | none => acc
+          | some sig => acc ++ [(q.message, sig)])
+        (next resp))
+
+theorem prodTrackSignLog_bounded {α : Type} :
+    ∀ {qH qS : Nat} (acc : List (List UInt8 × PqHashSig)) {t : ProdAdaptiveTree α},
+      ProdDualBounded qH qS t → ProdDualBounded qH qS (prodTrackSignLog acc t)
+  | _, _, _, .pure _, _ => trivial
+  | 0, _, _, .hashQuery _ _, h => False.elim h
+  | _ + 1, _, acc, .hashQuery _ next, h => fun y =>
+    prodTrackSignLog_bounded acc (t := next y) (h y)
+  | _, 0, _, .signQuery _ _, h => False.elim h
+  | _, _ + 1, _, .signQuery _ next, h => fun s =>
+    prodTrackSignLog_bounded _ (t := next s) (h s)
+
+/-- **Collision-candidate program.** Computes candidate `slot` of
+    `(prodPublicExtract …).collisions` from `(pk, log, forgery)` by hash-oracle queries. -/
+def prodPublicCollisionProgram (params : PqHashParams) (slot : Nat) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    ProdAdaptiveTree (Option SmDtTcrSubmission) :=
+  ((advCollectTcrSubmissions params pk log msgStar sigStar).map fun subs => subs[slot]?).toTree
+
+theorem advCollectTcrSubmissions_within (params : PqHashParams) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (advCollectTcrSubmissions params pk log msgStar sigStar).Within
+      (prodTcrReductionHashBudget params) 0 := by
+  unfold advCollectTcrSubmissions prodTcrReductionHashBudget
+  refine HashSignAdv.Within.bind_le
+    (qh₂ := prodXofHashBudget params + prodVerifierHashBudget params) (qs₂ := 0)
+    (advRawHash_within _) (fun mu => ?_) (by omega) (by omega)
+  refine HashSignAdv.Within.bind_le (qh₂ := prodVerifierHashBudget params) (qs₂ := 0)
+    (advDeriveProductionStatelessInputs_within params _ _ _ mu)
+    (fun _ => HashSignAdv.Within.map _ (advVerifyWithTcrCands_within params pk _ _ _))
+    (by omega) (by omega)
+
+theorem prodPublicCollisionProgram_bounded (params : PqHashParams) (slot : Nat)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) :
+    ProdDualBounded (prodTcrReductionHashBudget params) 0
+      (prodPublicCollisionProgram params slot pk log msgStar sigStar) :=
+  HashSignAdv.toTree_bounded
+    (HashSignAdv.Within.map _ (advCollectTcrSubmissions_within params pk log msgStar sigStar))
+
+theorem runHashSignAdv_advCollectTcrSubmissions (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (qs : List ProdSigningQuery) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (runHashSignAdv suite params sk qs
+      (advCollectTcrSubmissions params pk log msgStar sigStar)).1 =
+      (prodPublicExtract suite params pk log msgStar sigStar).collisions := by
+  unfold advCollectTcrSubmissions HashSignAdv.map
+  dsimp only
+  rw [runHashSignAdv_bind]
+  dsimp only [advRawHash, runHashSignAdv]
+  rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+  dsimp only
+  rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
+  simp only [prodPublicExtract, prodSigForsIdxs, thPreHash_eq, thCall_eq, runHashSignAdv]
+  rfl
+
+/-- The collision-candidate program returns candidate `slot` of the public-data extractor. -/
+theorem prodPublicCollisionProgram_value (suite : TweakableHashSuite) (params : PqHashParams)
+    (slot : Nat) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) :
+    (prodPublicCollisionProgram params slot pk log msgStar sigStar).hashOnlyValue suite.rawHash =
+      (prodPublicExtract suite params pk log msgStar sigStar).collisions[slot]? := by
+  unfold prodPublicCollisionProgram
+  rw [HashSignAdv.toTree_hashOnlyValue suite params ⟨[], [], []⟩ [] _
+    (HashSignAdv.Within.map _ (advCollectTcrSubmissions_within params pk log msgStar sigStar))]
+  unfold HashSignAdv.map
+  rw [runHashSignAdv_bind]
+  dsimp only [runHashSignAdv]
+  rw [runHashSignAdv_advCollectTcrSubmissions]
+
+/-- **Preimage-candidate program.** Computes candidate `slot` of
+    `(prodPublicExtract …).preimages` from `(pk, forgery)` by hash-oracle queries. -/
+def prodPublicPreimageProgram (params : PqHashParams) (slot : Nat) (pk : PqPublicKey)
+    (msgStar : List UInt8) (sigStar : PqHashSig) :
+    ProdAdaptiveTree (Option SmDtPreSubmission) :=
+  ((advCollectPreSubmissions params pk msgStar sigStar).map fun subs => subs[slot]?).toTree
+
+theorem advCollectPreSubmissions_within (params : PqHashParams) (pk : PqPublicKey)
+    (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (advCollectPreSubmissions params pk msgStar sigStar).Within
+      (1 + prodXofHashBudget params) 0 := by
+  unfold advCollectPreSubmissions
+  exact HashSignAdv.Within.bind_le (qh₂ := prodXofHashBudget params) (qs₂ := 0)
+    (advRawHash_within _)
+    (fun mu => HashSignAdv.Within.map _ (advDeriveProductionStatelessInputs_within params _ _ _ mu))
+    (by omega) (by omega)
+
+theorem prodPublicPreimageProgram_bounded (params : PqHashParams) (slot : Nat)
+    (pk : PqPublicKey) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    ProdDualBounded (1 + prodXofHashBudget params) 0
+      (prodPublicPreimageProgram params slot pk msgStar sigStar) :=
+  HashSignAdv.toTree_bounded
+    (HashSignAdv.Within.map _ (advCollectPreSubmissions_within params pk msgStar sigStar))
+
+theorem runHashSignAdv_advCollectPreSubmissions (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (qs : List ProdSigningQuery) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) :
+    (runHashSignAdv suite params sk qs (advCollectPreSubmissions params pk msgStar sigStar)).1 =
+      (prodPublicExtract suite params pk log msgStar sigStar).preimages := by
+  unfold advCollectPreSubmissions HashSignAdv.map
+  dsimp only
+  rw [runHashSignAdv_bind]
+  dsimp only [advRawHash, runHashSignAdv]
+  rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+  simp only [prodPublicExtract, prodSigForsIdxs, thPreHash_eq, thCall_eq, runHashSignAdv]
+  rfl
+
+/-- The preimage-candidate program returns candidate `slot` of the public-data extractor (whose
+    preimage candidates do not depend on the log). -/
+theorem prodPublicPreimageProgram_value (suite : TweakableHashSuite) (params : PqHashParams)
+    (slot : Nat) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) :
+    (prodPublicPreimageProgram params slot pk msgStar sigStar).hashOnlyValue suite.rawHash =
+      (prodPublicExtract suite params pk log msgStar sigStar).preimages[slot]? := by
+  unfold prodPublicPreimageProgram
+  rw [HashSignAdv.toTree_hashOnlyValue suite params ⟨[], [], []⟩ [] _
+    (HashSignAdv.Within.map _ (advCollectPreSubmissions_within params pk msgStar sigStar))]
+  unfold HashSignAdv.map
+  rw [runHashSignAdv_bind]
+  dsimp only [runHashSignAdv]
+  rw [runHashSignAdv_advCollectPreSubmissions suite params _ _ pk log]
+
+end Qsag
+end
+
+#verify_constructive
+  Qsag.prodPublicSubsetCoverCheck_sound
+  Qsag.prodPublicExtract_collisions_length_le
+  Qsag.prodPublicExtract_preimages_length
+  Qsag.prodPublicExtract_complete
+  Qsag.smDtTcrChallengerCheck_sound
+  Qsag.prodPublicCollisionProgram_bounded
+  Qsag.prodPublicCollisionProgram_value
+  Qsag.prodPublicPreimageProgram_bounded
+  Qsag.prodPublicPreimageProgram_value
+
+#verify_constructive Qsag.evalProdAdaptiveTree_budgets
+  Qsag.prodAdaptive_eufCma_to_budgeted_events
+  Qsag.corduroyCustody128_target_pool_budget

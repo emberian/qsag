@@ -1074,3 +1074,1139 @@ inductive ProdWalkOutcome (suite : TweakableHashSuite) (params : PqHashParams) (
   | pre (h : ProdPreimageBreak suite params sk log msgStar sigStar)
 
 /-- `prod_hypertree_walk_break` as a function. -/
+@[expose] def prodHypertreeWalkExtract (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log) :
+    ∀ (sigs : List LayerXmssSig) (i : Nat) (cur : List UInt8),
+      sigs ≠ [] →
+      (∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩) →
+      i + sigs.length = params.numLayers →
+      verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand i (pos⟪i⟫) cur
+          sigs =
+        some TOP_ROOT →
+      ProdWalkOutcome suite params sk log msgStar sigStar i cur
+  | [], _, _, hNe, _, _, _ => absurd rfl hNe
+  | lsig :: rest, i, cur, _, hAlign, hLenEq, hVer =>
+    have hi : i < params.numLayers := by
+      rw [← hLenEq, List.length_cons]
+      omega
+    have hLs : lsig = lsig⟪i⟫ := by
+      have h := hAlign 0
+      rw [List.getD_cons_zero, Nat.add_zero] at h
+      exact h
+    have hStep : pos⟪i⟫ / 2 ^ params.subtreeHeight =
+        sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight) := by
+      have h := div_pow_mul_pow_mul sigStar.leafGlobalIdx i 1 params.subtreeHeight
+      rw [Nat.one_mul] at h
+      exact h
+    have hInv := verifyProductionHypertreeLayers_cons_inv suite params _ _ _ _ _ _ _ _ _ hVer
+    have hTsw : checkTargetSum params.w params.ell1 params.targetSum digs⟪i⟫ = true := by
+      rw [← hLs]; exact hInv.2.1
+    match hNextW : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ .tree
+        params.subtreeHeight 0 kp⟪i⟫
+        (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digs⟪i⟫
+          lsig⟪i⟫.wotsChains)
+        lsig⟪i⟫.authPath with
+    | none => False.elim (by
+        obtain ⟨_, _, n', hW, _⟩ := hInv
+        rw [hLs] at hW
+        rw [hNextW] at hW
+        cases hW)
+    | some next =>
+      have hRest : verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand (i
+          + 1)
+          (sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight)) next rest = some TOP_ROOT
+              := by
+        obtain ⟨_, _, n', hW, hR⟩ := hInv
+        rw [hLs] at hW
+        rw [hNextW] at hW
+        have hn : next = n' := Option.some.inj hW
+        rw [← hn, hStep] at hR
+        exact hR
+      let step : PSum (next = computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) tree⟪i⟫)
+          (PSum (ProdTcrWitness suite params sk log msgStar sigStar) (ProdPreimageBreak suite
+              params sk log msgStar sigStar)) :=
+        match hR : rest with
+        | [] => .inl (by
+            have hRest' := hRest
+            rw [hR, verifyProductionHypertreeLayers_nil] at hRest'
+            simp only [Option.some.injEq] at hRest'
+            have hD : params.numLayers = i + 1 := by
+              rw [← hLenEq, hR, List.length_cons, List.length_nil]
+            rw [hD, Nat.add_sub_cancel] at hRest'
+            rw [hStep]
+            exact hRest')
+        | _ :: _ =>
+          match prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf hLog hCons
+              rest (i + 1) next
+              (by rw [hR]; exact List.cons_ne_nil _ _)
+              (fun j => by
+                have h := hAlign (j + 1)
+                rw [List.getD_cons_succ] at h
+                rw [h, show i + (j + 1) = i + 1 + j by omega])
+              (by rw [← hLenEq, List.length_cons]; omega)
+              hRest with
+          | .honest e _ hPos hEq => .inl (by
+              rw [hEq]
+              unfold prodHonestLayerMsg
+              simp only [Nat.add_one_ne_zero, ↓reduceIte, Nat.add_sub_cancel]
+              rw [hPos, hStep])
+          | .tcr w => .inr (.inl w)
+          | .pre h => .inr (.inr h)
+      match step with
+      | .inr (.inl w) => .tcr w
+      | .inr (.inr h) => .pre h
+      | .inl hNext =>
+        match prodListSearch
+            (fun e : List UInt8 × PqHashSig =>
+              e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = pos⟪i⟫ ∧
+              cur = prodHonestLayerMsg suite params sk e i)
+            (fun e =>
+              if h : e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = pos⟪i⟫ ∧
+                  cur = prodHonestLayerMsg suite params sk e i then .inl h
+              else .inr h) log with
+        | .inl ⟨e, ⟨he, hP⟩⟩ => .honest e he hP.1 hP.2
+        | .inr hNone =>
+          match prodLayerExtract suite params sk log msgStar sigStar hw hPwf hLog hCons i hi cur
+              digs⟪i⟫ rfl
+              (fun e he hPos hEq => hNone e he ⟨hPos, hEq⟩) hTsw
+              (by rw [← hNext]; exact hNextW) with
+          | .inl w => .tcr w
+          | .inr h => .pre h
+
+end Qsag
+end
+
+#verify_constructive Qsag.prod_layer_preimage_logged Qsag.prod_layer_preimage_unused
+#verify_constructive Qsag.production_accept_leaf_lt
+
+/-!
+# Qsag.Protocol.Signing.ProdCollisionExtraction — the production forgery reduction as a function
+
+`production_forgery_extract` maps an accepted production signature on an unsigned message to a
+`ProdBreakWitness`: the FORS index-coverage event, a returned `ProdTcrWitness`, or the preimage
+event. It follows the same traversal as `production_forgery_break_of_signingLog`, with every case
+split made on decidable data, so the collision it returns is the one the verifier walk meets.
+
+`ProdCollisionEvents` runs it on game outcomes and `ProdCollisionAccounting` enumerates the
+candidate targets of one forgery.
+
+Scope. Deterministic extraction only: no probability is assigned to any branch, the hash is not
+modelled as an oracle, and no running time is given for the extractor. The index-coverage and
+preimage events stay propositions tied to the forgery; only the branch taken is data.
+-/
+
+public section
+namespace Qsag
+
+set_option autoImplicit false
+
+/-! Local abbreviations for positions on the verification path of `sigStar`. They are unhygienic
+notations: each expands in place to the term on its right, over the `suite`, `params`, `sk`,
+`msgStar`, `sigStar` (and, for `digs⟪i⟫`, `cur`) in scope. -/
+
+-- Hypertree position of the path at layer `i`.
+set_option hygiene false in
+local notation:max "pos⟪" i "⟫" => sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)
+-- Tree address of the path at layer `i`.
+set_option hygiene false in
+local notation:max "tree⟪" i "⟫" =>
+  UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)
+-- Key-pair (leaf) index of the path at layer `i`.
+set_option hygiene false in
+local notation:max "kp⟪" i "⟫" =>
+  (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+-- Layer-`i` XMSS signature of the forgery.
+set_option hygiene false in
+local notation:max "lsig⟪" i "⟫" => (sigStar.layerSigs.getD i ⟨0, [], []⟩)
+-- Honest public root.
+set_option hygiene false in
+local notation:max "PK_ROOT" => (derivePublicKey suite params sk).pkRoot
+-- Root of the top subtree, as the verifier walk reaches it.
+set_option hygiene false in
+local notation:max "TOP_ROOT" =>
+  (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+    (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight))))
+-- FORS tree address, key pair and leaf indices of the forgery.
+set_option hygiene false in
+local notation:max "FORS_TREE" => (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+set_option hygiene false in
+local notation:max "FORS_KP" => (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight)
+set_option hygiene false in
+local notation:max "FORS_IDXS" =>
+  (prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar)
+
+/-! ### FORS -/
+
+/-- `prod_forsRoots_meet_honest` as a function. -/
+@[expose] def prodForsRootsExtract (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (tree0 : UInt64) (kp0 : Nat) (idxs : List Nat) (ops : List ForsTreeOpening) (C : Type)
+    (mkCol : ∀ (j h d b : Nat) (x y : List UInt8),
+      j < params.forsTrees → d + (h + 1) = params.forsHeight →
+      b * 2 ^ (h + 1) ≤ idxs.getD j 0 → idxs.getD j 0 < (b + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH sk.pkSeed
+          ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+            UInt32.ofNat (j * 2 ^ d + b)⟩ [x, y] ≠
+        thPreimage tagThH sk.pkSeed
+          ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+            UInt32.ofNat (j * 2 ^ d + b)⟩
+          [computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+             (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b)) (2 * b),
+           computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+             (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b) + 1) (2 * b + 1)] →
+      suite.rawHash
+          (thPreimage tagThH sk.pkSeed
+            ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+              UInt32.ofNat (j * 2 ^ d + b)⟩ [x, y]) =
+        suite.rawHash
+          (thPreimage tagThH sk.pkSeed
+            ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+              UInt32.ofNat (j * 2 ^ d + b)⟩
+            [computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+               (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b)) (2 * b),
+             computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+               (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b) + 1)
+               (2 * b + 1)]) → C)
+    (hIdxs : ∀ J, J < params.forsTrees → idxs.getD J 0 < 2 ^ params.forsHeight) :
+    ∀ (rem j : Nat) (rootsF : List (List UInt8)),
+      j + rem ≤ params.forsTrees →
+      recoverProductionForsTreeRoots suite params sk.pkSeed tree0 kp0 idxs ops j rem = some rootsF →
+      rootsF = (List.range rem).map (fun off =>
+        computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+          (forsIndexedLeafFn suite sk tree0 kp0 (j + off)) params.forsHeight (j + off) 0) →
+      PSum (∀ off, off < rem →
+        forsIndexedLeafHash suite sk.pkSeed tree0 kp0 (j + off) (idxs.getD (j + off) 0)
+          (ops.getD (j + off) ⟨[], []⟩).secretVal =
+        forsIndexedLeafFn suite sk tree0 kp0 (j + off) (idxs.getD (j + off) 0)) C
+  | 0, _, _, _, _, _ => .inl (fun off h => absurd h (Nat.not_lt_zero off))
+  | rem + 1, j, rootsF, hB, hRec, hEq =>
+    have hj : j < params.forsTrees :=
+      Nat.lt_of_lt_of_le (Nat.lt_add_of_pos_right (Nat.succ_pos rem)) hB
+    have hInv := prod_recoverForsTreeRoots_succ_inv suite params sk.pkSeed tree0 kp0 idxs ops j rem
+      rootsF hRec
+    match hWalk : walkMerkleAuthPathKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+        params.forsHeight j (idxs.getD j 0)
+        (forsIndexedLeafHash suite sk.pkSeed tree0 kp0 j (idxs.getD j 0)
+          (ops.getD j ⟨[], []⟩).secretVal)
+        (ops.getD j ⟨[], []⟩).authPath with
+    | none => False.elim (by
+        obtain ⟨rJ, _, hW, _, _⟩ := hInv
+        rw [hWalk] at hW
+        cases hW)
+    | some rJ =>
+      match hRest : recoverProductionForsTreeRoots suite params sk.pkSeed tree0 kp0 idxs ops
+          (j + 1) rem with
+      | none => False.elim (by
+          obtain ⟨_, rs, _, hR, _⟩ := hInv
+          rw [hRest] at hR
+          cases hR)
+      | some rsF =>
+        have hSplit :
+            rJ = computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+              (forsIndexedLeafFn suite sk tree0 kp0 j) params.forsHeight j 0 ∧
+            rsF = (List.range rem).map (fun off =>
+              computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+                (forsIndexedLeafFn suite sk tree0 kp0 (j + 1 + off)) params.forsHeight
+                (j + 1 + off) 0) := by
+          obtain ⟨rJ', rs', hW, hR, hRoots⟩ := hInv
+          rw [hWalk] at hW
+          rw [hRest] at hR
+          have h1 : rJ = rJ' := Option.some.inj hW
+          have h2 : rsF = rs' := Option.some.inj hR
+          rw [hRoots, ← h1, ← h2, prod_list_range_succ_shift] at hEq
+          simp only [Nat.add_zero, List.cons.injEq] at hEq
+          refine ⟨hEq.1, ?_⟩
+          rw [hEq.2]
+          apply List.map_congr_left
+          intro off _
+          rw [show j + (off + 1) = j + 1 + off by omega]
+        have hj0 : j * 2 ^ 0 + 0 = j := by rw [Nat.pow_zero, Nat.mul_one, Nat.add_zero]
+        match prodWalkMerkleKpExtract suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+            (forsIndexedLeafFn suite sk tree0 kp0 j) j (idxs.getD j 0) params.forsHeight C
+            (fun h d b x y hD hLo hHi hNe hHash => mkCol j h d b x y hj hD hLo hHi hNe hHash)
+            params.forsHeight 0 0 (idxs.getD j 0)
+            (forsIndexedLeafHash suite sk.pkSeed tree0 kp0 j (idxs.getD j 0)
+              (ops.getD j ⟨[], []⟩).secretVal)
+            (ops.getD j ⟨[], []⟩).authPath (Nat.zero_add _) (hIdxs j hj)
+            (by rw [Nat.zero_mul, Nat.zero_add])
+            (by rw [hj0, ← hSplit.1]; exact hWalk) with
+        | .inr c => .inr c
+        | .inl hLeaf =>
+          match prodForsRootsExtract suite params sk tree0 kp0 idxs ops C mkCol hIdxs rem (j + 1)
+              rsF (by omega) hRest hSplit.2 with
+          | .inr c => .inr c
+          | .inl hAll =>
+            .inl (fun off hoff => by
+              cases off with
+              | zero =>
+                rw [Nat.add_zero]
+                exact hLeaf
+              | succ off' =>
+                have h := hAll off' (by omega)
+                rw [show j + 1 + off' = j + (off' + 1) by omega] at h
+                exact h)
+
+/-- Outcome of the production reduction on one accepted forgery. -/
+inductive ProdBreakWitness (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig) : Type where
+  | itsr (h : ProdForsItsrBreak suite params (derivePublicKey suite params sk) log msgStar sigStar)
+  | tcr (w : ProdTcrWitness suite params sk log msgStar sigStar)
+  | pre (h : ProdPreimageBreak suite params sk log msgStar sigStar)
+
+/-- `prod_fors_break` as a function. -/
+@[expose] def prodForsExtract (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hStateless : params.statefulJorts = false)
+    (hTrees : 0 < params.forsTrees) (hFresh : ∀ e ∈ log, e.1 ≠ msgStar)
+    (hLenI : (FORS_IDXS).length = params.forsTrees)
+    (hBnd : ∀ idx ∈ (FORS_IDXS), idx < 2 ^ params.forsHeight)
+    (hRec : recoverProductionForsPk suite params sk.pkSeed FORS_TREE FORS_KP (FORS_IDXS)
+        sigStar.forsOpenings =
+      some (computeProductionForsPk suite params sk FORS_TREE FORS_KP)) :
+    ProdBreakWitness suite params sk log msgStar sigStar :=
+  have hInv := prod_recoverForsPk_some_inv suite params sk.pkSeed FORS_TREE FORS_KP (FORS_IDXS)
+    sigStar.forsOpenings _ hRec
+  match hRoots : recoverProductionForsTreeRoots suite params sk.pkSeed FORS_TREE FORS_KP (FORS_IDXS)
+      sigStar.forsOpenings 0 params.forsTrees with
+  | none => False.elim (by
+      obtain ⟨r, hr, _⟩ := hInv
+      rw [hRoots] at hr
+      cases hr)
+  | some rootsF =>
+    have hPkEq :
+        thCall suite tagThTl sk.pkSeed ⟨0, FORS_TREE, .forsRoots, UInt32.ofNat FORS_KP, 0, 0⟩
+            rootsF =
+        thCall suite tagThTl sk.pkSeed ⟨0, FORS_TREE, .forsRoots, UInt32.ofNat FORS_KP, 0, 0⟩
+          ((List.range params.forsTrees).map fun j =>
+            computeMerkleNodeKp suite sk.pkSeed 0 FORS_TREE .forsTree (UInt32.ofNat FORS_KP)
+              (forsIndexedLeafFn suite sk FORS_TREE FORS_KP j) params.forsHeight j 0) := by
+      obtain ⟨r, hr, hpk⟩ := hInv
+      rw [hRoots] at hr
+      have hrEq : rootsF = r := Option.some.inj hr
+      rw [← hrEq, computeProductionForsPk_eq] at hpk
+      dsimp only at hpk
+      rw [thTweakTl_eq, thTweakTl_eq] at hpk
+      exact hpk.symm
+    match prodThCallSplit suite hPkEq with
+    | .inr ⟨hNe, hHash⟩ =>
+      .tcr ⟨.forsRoots, _, hStateless, ⟨rootsF, rfl⟩,
+        (by rw [ProdTargetIdx.input_forsRoots]; exact hNe),
+        (by rw [ProdTargetIdx.input_forsRoots]; exact hHash)⟩
+    | .inl hArgs =>
+      have hIdxs : ∀ J, J < params.forsTrees → (FORS_IDXS).getD J 0 < 2 ^ params.forsHeight := by
+        intro J hJ
+        have hJLen : J < (FORS_IDXS).length := by rw [hLenI]; exact hJ
+        rw [list_getD_eq_getElem _ 0 hJLen]
+        exact hBnd _ (List.getElem_mem hJLen)
+      match prodForsRootsExtract suite params sk FORS_TREE FORS_KP (FORS_IDXS) sigStar.forsOpenings
+          (ProdTcrWitness suite params sk log msgStar sigStar)
+          (fun j h d b x y hj hD hLo hHi hNe hHash =>
+            ⟨.forsNode j h d b, _, ⟨hStateless, hj, hD, hLo, hHi⟩, ⟨x, y, rfl⟩,
+              (by rw [ProdTargetIdx.input_forsNode]; exact hNe),
+              (by rw [ProdTargetIdx.input_forsNode]; exact hHash)⟩)
+          hIdxs params.forsTrees 0 rootsF (by omega) hRoots
+          (by
+            rw [hArgs]
+            apply List.map_congr_left
+            intro off _
+            rw [Nat.zero_add]) with
+      | .inr w => .tcr w
+      | .inl hAll =>
+        match prodBoundedSearch
+            (fun j => (sigStar.leafGlobalIdx, j, (FORS_IDXS).getD j 0) ∉
+              prodLogForsLeaves suite params (derivePublicKey suite params sk) log)
+            (fun j =>
+              if h : (sigStar.leafGlobalIdx, j, (FORS_IDXS).getD j 0) ∈
+                  prodLogForsLeaves suite params (derivePublicKey suite params sk) log then
+                .inr (fun hn => hn h)
+              else .inl h) params.forsTrees with
+        | .inl ⟨j, ⟨hj, hUn⟩⟩ =>
+          .pre (by
+            have h := hAll j hj
+            rw [Nat.zero_add] at h
+            exact ProdPreimageBreak.fors j hj hUn h)
+        | .inr hCov =>
+          .itsr ⟨hFresh, hTrees, by
+            intro a ha
+            unfold prodSigForsLeaves at ha
+            obtain ⟨j, hj, hEq⟩ := List.mem_map.mp ha
+            rw [← hEq]
+            exact Decidable.of_not_not (hCov j (List.mem_range.mp hj))⟩
+
+/-! ### Extraction from the production signing log -/
+
+/-- **Stateful production profiles.** The accepted forgery yields a returned collision on its
+    verification path (including a collision on the message pre-hash) or the WOTS preimage
+    event. -/
+@[expose] def production_stateful_forgery_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateful : params.statefulJorts = true)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    PSum (ProdTcrWitness suite params sk (productionSigningLog suite params sk queries) msgStar
+        sigStar)
+      (ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar
+        sigStar) :=
+  have hLog := fun e he => productionSigningLog_entryOk suite params sk queries e he
+  have hCons := productionSigningLog_consistent suite params sk queries (fun _ => hOneTime)
+  have hInv := verifyProductionPqHashSig_stateful_inv suite params _ msgStar sigStar hStateful
+      hAccept
+  have hNe : sigStar.layerSigs ≠ [] := by
+    obtain ⟨hPwf, hLen, _, _⟩ := hInv
+    obtain ⟨hDPos, _⟩ := params.productionWellFormed_facts hPwf
+    intro hnil
+    rw [hnil, List.length_nil] at hLen
+    omega
+  have hVer : verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand 0
+      (pos⟪0⟫)
+      (thPreHash suite sk.pkSeed PK_ROOT msgStar) sigStar.layerSigs = some TOP_ROOT := by
+    obtain ⟨_, _, hLt, hHt⟩ := hInv
+    have h0 : pos⟪0⟫ = sigStar.leafGlobalIdx := by
+      simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one]
+    have hTop : PK_ROOT = TOP_ROOT := by
+      rw [Nat.div_eq_of_lt hLt]
+      rfl
+    rw [h0, ← hTop]
+    exact hHt
+  match prodHypertreeWalkExtract suite params sk (productionSigningLog suite params sk queries)
+      msgStar sigStar hw hInv.1 hLog hCons sigStar.layerSigs 0 _ hNe
+      (fun j => by rw [Nat.zero_add]) (by rw [Nat.zero_add]; exact hInv.2.1) hVer with
+  | .tcr w => .inl w
+  | .pre h => .inr h
+  | .honest e he _ hEq =>
+    have hMu :
+        thCall suite tagHPre sk.pkSeed zeroAdrs [PK_ROOT, msgStar] =
+        thCall suite tagHPre sk.pkSeed zeroAdrs [PK_ROOT, e.1] := by
+      have h := hEq
+      unfold prodHonestLayerMsg at h
+      simp only [hStateful, ↓reduceIte] at h
+      rw [thPreHash_eq, thPreHash_eq] at h
+      exact h
+    match prodThCallSplit suite hMu with
+    | .inl hArgs => False.elim (by
+        simp only [List.cons.injEq, and_true] at hArgs
+        exact hFresh e he hArgs.2.symm)
+    | .inr ⟨hNe', hHash⟩ =>
+      .inl ⟨.preHash e, _, ⟨he, hStateful⟩, rfl,
+        (by rw [ProdTargetIdx.input_preHash]; exact hNe'),
+        (by rw [ProdTargetIdx.input_preHash]; exact hHash)⟩
+
+/-- **Stateless production profiles.** -/
+@[expose] def production_stateless_forgery_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdBreakWitness suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar :=
+  have hLog := fun e he => productionSigningLog_entryOk suite params sk queries e he
+  have hCons := productionSigningLog_consistent suite params sk queries
+    (fun hSt => by rw [hStateless] at hSt; cases hSt)
+  have hFacts := prod_stateless_accept_facts suite params sk msgStar sigStar hStateless hAccept
+  have hPwf := hFacts.1
+  have hTrees := (params.productionWellFormed_stateless_fors hPwf hStateless).1
+  have hNe : sigStar.layerSigs ≠ [] := by
+    obtain ⟨hDPos, _⟩ := params.productionWellFormed_facts hPwf
+    have hLen := hFacts.2.1
+    intro hnil
+    rw [hnil, List.length_nil] at hLen
+    omega
+  match hFors : recoverProductionForsPk suite params sk.pkSeed FORS_TREE FORS_KP (FORS_IDXS)
+      sigStar.forsOpenings with
+  | none => False.elim (by
+      obtain ⟨_, _, _, _, _, f, hF, _⟩ := hFacts
+      rw [hFors] at hF
+      cases hF)
+  | some forsPkF =>
+    have hVer : verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand 0
+        (pos⟪0⟫)
+        forsPkF sigStar.layerSigs = some TOP_ROOT := by
+      obtain ⟨_, _, hLt, _, _, f, hF, hHt⟩ := hFacts
+      rw [hFors] at hF
+      have hf : forsPkF = f := Option.some.inj hF
+      have h0 : pos⟪0⟫ = sigStar.leafGlobalIdx := by
+        simp only [Nat.zero_mul, Nat.pow_zero, Nat.div_one]
+      have hTop : PK_ROOT = TOP_ROOT := by
+        rw [Nat.div_eq_of_lt hLt]
+        rfl
+      rw [h0, ← hTop, hf]
+      exact hHt
+    match prodHypertreeWalkExtract suite params sk (productionSigningLog suite params sk queries)
+        msgStar sigStar hw hPwf hLog hCons sigStar.layerSigs 0 forsPkF hNe
+        (fun j => by rw [Nat.zero_add]) (by rw [Nat.zero_add]; exact hFacts.2.1) hVer with
+    | .tcr w => .tcr w
+    | .pre h => .pre h
+    | .honest e _ hPos hEq =>
+      prodForsExtract suite params sk (productionSigningLog suite params sk queries) msgStar
+        sigStar hStateless hTrees hFresh hFacts.2.2.2.1 hFacts.2.2.2.2.1 (by
+          have hL : e.2.leafGlobalIdx = sigStar.leafGlobalIdx := by
+            simpa only [Nat.zero_mul, Nat.pow_zero, Nat.div_one] using hPos
+          have hForsEq : forsPkF = computeProductionForsPk suite params sk FORS_TREE FORS_KP := by
+            rw [hEq]
+            unfold prodHonestLayerMsg
+            simp only [hStateless, ↓reduceIte, Bool.false_eq_true, hL]
+          rw [← hForsEq]
+          exact hFors)
+
+/-- **Both production modes.** -/
+def production_forgery_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdBreakWitness suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar :=
+  match hSt : params.statefulJorts with
+  | false =>
+    production_stateless_forgery_extract suite params sk queries msgStar sigStar hw hSt hFresh
+      hAccept
+  | true =>
+    match production_stateful_forgery_extract suite params sk queries msgStar sigStar hw hSt
+        (hOneTime hSt) hFresh hAccept with
+    | .inl w => .tcr w
+    | .inr h => .pre h
+
+/-! ### Statements about the returned witness -/
+
+theorem production_forgery_extract_false (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hSt : params.statefulJorts = false)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh hAccept =
+      production_stateless_forgery_extract suite params sk queries msgStar sigStar hw hSt hFresh hAccept := by
+  unfold production_forgery_extract
+  split
+  · rfl
+  · rename_i hTrue; rw [hSt] at hTrue; cases hTrue
+
+theorem production_forgery_extract_true (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hSt : params.statefulJorts = true)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh hAccept =
+      (match production_stateful_forgery_extract suite params sk queries msgStar sigStar hw hSt
+          (hOneTime hSt) hFresh hAccept with
+       | .inl w => .tcr w
+       | .inr h => .pre h) := by
+  unfold production_forgery_extract
+  split
+  · rename_i hFalse; rw [hSt] at hFalse; cases hFalse
+  · rfl
+
+
+theorem ProdBreakWitness.toBreak {suite : TweakableHashSuite} {params : PqHashParams}
+    {sk : PqSecretKey} {log : List (List UInt8 × PqHashSig)} {msgStar : List UInt8}
+    {sigStar : PqHashSig} (b : ProdBreakWitness suite params sk log msgStar sigStar) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk) log msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk log ∨ ProdPreimageBreak suite params sk log msgStar sigStar :=
+  match b with
+  | .itsr h => .inl h
+  | .tcr w => .inr (.inl w.toSmTcrBreak)
+  | .pre h => .inr (.inr h)
+
+/-- **Stateful production forgery: returned collision or preimage.** Strengthens
+    `production_stateful_forgery_break`: the collision branch is a `ProdTcrWitness` for this
+    forgery, not the unrestricted `ProdSmTcrBreak`. -/
+theorem production_stateful_forgery_witness (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateful : params.statefulJorts = true)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    Nonempty (ProdTcrWitness suite params sk (productionSigningLog suite params sk queries)
+      msgStar sigStar) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar :=
+  match production_stateful_forgery_extract suite params sk queries msgStar sigStar hw hStateful
+      hOneTime hFresh hAccept with
+  | .inl w => .inl ⟨w⟩
+  | .inr h => .inr h
+
+/-- **Production forgery, both modes: index coverage, returned collision or preimage.** -/
+theorem production_forgery_witness (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    Nonempty (ProdTcrWitness suite params sk (productionSigningLog suite params sk queries)
+      msgStar sigStar) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar :=
+  match production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh
+      hAccept with
+  | .itsr h => .inl h
+  | .tcr w => .inr (.inl ⟨w⟩)
+  | .pre h => .inr (.inr h)
+
+/-- The existing existential statement `production_forgery_break_of_signingLog` is the image of
+    the extractor output under `ProdBreakWitness.toBreak`. -/
+theorem production_forgery_break_via_extract (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery) (msgStar : List UInt8) (sigStar :
+        PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    ProdSmTcrBreak suite params sk (productionSigningLog suite params sk queries) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar :=
+  (production_forgery_extract suite params sk queries msgStar sigStar hw hOneTime hFresh
+    hAccept).toBreak
+
+/-- **Production checked stateless boundary: index coverage, returned collision or preimage.** -/
+theorem production_checked_stateless_forgery_witness (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionStatelessChecked suite params (derivePublicKey suite params sk)
+      msgStar sigStar = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params sk)
+      (productionSigningLog suite params sk queries) msgStar sigStar ∨
+    Nonempty (ProdTcrWitness suite params sk (productionSigningLog suite params sk queries)
+      msgStar sigStar) ∨
+    ProdPreimageBreak suite params sk (productionSigningLog suite params sk queries) msgStar
+      sigStar := by
+  obtain ⟨hSt, hVer⟩ := verifyProductionStatelessChecked_sound suite params _ msgStar sigStar
+      hAccept
+  exact production_forgery_witness suite params sk queries msgStar sigStar hw
+    (fun hT => by rw [hSt] at hT; cases hT) hFresh hVer
+
+/-- **`ValidProductionJortsBatch` item: returned collision or preimage.** -/
+theorem validProductionJortsBatch_item_forgery_witness (params : PqHashParams)
+    (items : List JortsBatchItem) (hValid : ValidProductionJortsBatch params items = true)
+    (item : JortsBatchItem) (hItem : item ∈ items)
+    (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (hPk : item.validatorPk = derivePublicKey poseidon2Suite params sk)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog poseidon2Suite params sk queries, e.1 ≠ item.message) :
+    Nonempty (ProdTcrWitness poseidon2Suite params sk
+      (productionSigningLog poseidon2Suite params sk queries) item.message item.signature) ∨
+    ProdPreimageBreak poseidon2Suite params sk
+      (productionSigningLog poseidon2Suite params sk queries) item.message item.signature := by
+  obtain ⟨hSt, _, _, hAll⟩ := validProductionJortsBatch_sound hValid
+  have hAcc := hAll item hItem
+  rw [hPk] at hAcc
+  exact production_stateful_forgery_witness poseidon2Suite params sk queries item.message
+    item.signature hw hSt hOneTime hFresh hAcc
+
+end Qsag
+end
+
+#verify_constructive Qsag.ProdBreakWitness.toBreak
+#verify_constructive Qsag.production_stateful_forgery_witness Qsag.production_forgery_witness
+#verify_constructive Qsag.validProductionJortsBatch_item_forgery_witness
+#verify_constructive Qsag.production_forgery_break_via_extract
+#verify_constructive Qsag.production_checked_stateless_forgery_witness
+
+/-!
+# Qsag.Protocol.Signing.ProdCollisionEvents — winning events defined from the extractor output
+
+`prodOutcomeBreak` runs `production_forgery_extract` on a game outcome. `prodTcrOutput` is the
+`(target, colliding input)` pair it returns, and `prodTcrEvent` is the executable check
+`prodTcrCheck` on that pair. `production_euf_cma_extracted_bound` counts wins against the three
+events defined this way. It has no supplied event and no hypothesis covering `ProdSmTcrBreak`,
+which is what `production_euf_cma_advantage_bound` requires of its caller.
+
+Scope. The count is a deterministic classification over a finite coin list. It assigns no
+probability to the three events and does not model the hash as an oracle, so it is not yet a
+bound by a primitive advantage. `prodTcrOutput` is a function of the whole outcome, secret key
+included; an adversary that computes it from public data and oracle answers is not constructed
+here.
+-/
+
+public section
+namespace Qsag
+
+set_option autoImplicit false
+
+/-! ### Events defined from the extractor output -/
+
+/-- The reduction run on one experiment outcome: `none` when the outcome is not a win. -/
+def prodOutcomeBreak (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') :
+    Option (ProdBreakWitness suite params o.sk (productionSigningLog suite params o.sk o.queries)
+      o.msgStar o.sigStar) :=
+  if hWin : prodEufCmaWin suite params o = true then
+    some (production_forgery_extract suite params o.sk o.queries o.msgStar o.sigStar hw hOneTime
+      (fun e he hEq => by
+        unfold prodEufCmaWin at hWin
+        rw [Bool.and_eq_true] at hWin
+        exact of_decide_eq_true hWin.2 (List.mem_map.mpr ⟨e, he, hEq⟩))
+      (by
+        unfold prodEufCmaWin at hWin
+        rw [Bool.and_eq_true] at hWin
+        exact hWin.1))
+  else none
+
+/-- Output of the target-collision reduction on one outcome: the chosen target and the colliding
+    input, when the forgery leads to a collision. -/
+def prodTcrOutput (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') :
+    Option (ProdTargetIdx × List UInt8) :=
+  match prodOutcomeBreak suite params hw o hOneTime with
+  | some (.tcr w) => some (w.target, w.forged)
+  | _ => none
+
+/-- Primitive target-collision win: `prodTcrCheck` on the returned pair. -/
+def prodTcrEvent (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') : Bool :=
+  match prodTcrOutput suite params hw o hOneTime with
+  | some (t, forged) => prodTcrCheck suite params o.sk o.sigStar.leafGlobalIdx t forged
+  | none => false
+
+/-- The reduction ends in the FORS index-coverage event. -/
+def prodItsrEvent (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') : Bool :=
+  match prodOutcomeBreak suite params hw o hOneTime with
+  | some (.itsr _) => true
+  | _ => false
+
+/-- The reduction ends in the preimage event. -/
+def prodPreEvent (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') : Bool :=
+  match prodOutcomeBreak suite params hw o hOneTime with
+  | some (.pre _) => true
+  | _ => false
+
+theorem prodOutcomeBreak_of_win (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hWin : prodEufCmaWin suite params o = true)
+    (hFresh : ∀ e ∈ productionSigningLog suite params o.sk o.queries, e.1 ≠ o.msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params o.sk)
+      o.msgStar o.sigStar = true) :
+    prodOutcomeBreak suite params hw o hOneTime =
+      some (production_forgery_extract suite params o.sk o.queries o.msgStar o.sigStar hw hOneTime
+        hFresh hAccept) := by
+  unfold prodOutcomeBreak
+  rw [dite_eq_left hWin]
+
+theorem prodOutcomeBreak_of_not_win (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hWin : ¬ prodEufCmaWin suite params o = true) :
+    prodOutcomeBreak suite params hw o hOneTime = none := by
+  unfold prodOutcomeBreak
+  rw [dite_eq_right hWin]
+
+theorem prodTcrOutput_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') :
+    prodTcrOutput suite params hw o hOneTime =
+      match prodOutcomeBreak suite params hw o hOneTime with
+      | some (.tcr w) => some (w.target, w.forged)
+      | _ => none := by
+  rfl
+
+theorem prodTcrEvent_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q') :
+    prodTcrEvent suite params hw o hOneTime =
+      match prodTcrOutput suite params hw o hOneTime with
+      | some (t, forged) => prodTcrCheck suite params o.sk o.sigStar.leafGlobalIdx t forged
+      | none => false := by
+  rfl
+
+/-- A returned pair is a checked collision with an on-path target, at a hash call of the verifier
+    on the forgery, and comes from a winning outcome. -/
+theorem prodTcrOutput_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (t : ProdTargetIdx) (forged : List UInt8)
+    (hOut : prodTcrOutput suite params hw o hOneTime = some (t, forged)) :
+    prodEufCmaWin suite params o = true ∧
+    t.OnPath params (productionSigningLog suite params o.sk o.queries) o.sigStar.leafGlobalIdx
+      (prodSigForsIdxs suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar) ∧
+    t.ForgedCall suite params o.sk o.msgStar o.sigStar forged ∧
+    prodTcrCheck suite params o.sk o.sigStar.leafGlobalIdx t forged = true := by
+  unfold prodTcrOutput at hOut
+  cases hB : prodOutcomeBreak suite params hw o hOneTime with
+  | none => rw [hB] at hOut; cases hOut
+  | some b =>
+    rw [hB] at hOut
+    have hWin : prodEufCmaWin suite params o = true := by
+      unfold prodOutcomeBreak at hB
+      split at hB
+      · assumption
+      · cases hB
+    cases b with
+    | itsr h => cases hOut
+    | pre h => cases hOut
+    | tcr w =>
+      have hEq : (w.target, w.forged) = (t, forged) := Option.some.inj hOut
+      have h1 : w.target = t := congrArg Prod.fst hEq
+      have h2 : w.forged = forged := congrArg Prod.snd hEq
+      rw [← h1, ← h2]
+      exact ⟨hWin, w.onPath, w.call, w.check⟩
+
+theorem prodItsrEvent_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hEv : prodItsrEvent suite params hw o hOneTime = true) :
+    ProdForsItsrBreak suite params (derivePublicKey suite params o.sk)
+      (productionSigningLog suite params o.sk o.queries) o.msgStar o.sigStar := by
+  unfold prodItsrEvent at hEv
+  cases hB : prodOutcomeBreak suite params hw o hOneTime with
+  | none => rw [hB] at hEv; cases hEv
+  | some b =>
+    rw [hB] at hEv
+    cases b with
+    | itsr h => exact h
+    | pre h => cases hEv
+    | tcr w => cases hEv
+
+theorem prodPreEvent_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hEv : prodPreEvent suite params hw o hOneTime = true) :
+    ProdPreimageBreak suite params o.sk (productionSigningLog suite params o.sk o.queries)
+      o.msgStar o.sigStar := by
+  unfold prodPreEvent at hEv
+  cases hB : prodOutcomeBreak suite params hw o hOneTime with
+  | none => rw [hB] at hEv; cases hEv
+  | some b =>
+    rw [hB] at hEv
+    cases b with
+    | itsr h => cases hEv
+    | pre h => exact h
+    | tcr w => cases hEv
+
+/-- Every winning outcome lands in one of the three extractor-defined events. -/
+theorem prodEufCmaWin_classified (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (hWin : prodEufCmaWin suite params o = true) :
+    prodItsrEvent suite params hw o hOneTime = true ∨
+    prodTcrEvent suite params hw o hOneTime = true ∨
+    prodPreEvent suite params hw o hOneTime = true := by
+  cases hB : prodOutcomeBreak suite params hw o hOneTime with
+  | none =>
+    exfalso
+    unfold prodOutcomeBreak at hB
+    split at hB
+    · cases hB
+    · rename_i hNo
+      exact hNo hWin
+  | some b =>
+    cases b with
+    | itsr h =>
+      left
+      unfold prodItsrEvent
+      rw [hB]
+    | pre h =>
+      right; right
+      unfold prodPreEvent
+      rw [hB]
+    | tcr w =>
+      right; left
+      unfold prodTcrEvent prodTcrOutput
+      rw [hB]
+      exact w.check
+
+/-- **Production EUF-CMA count against extractor-defined events.** The number of winning coins is
+    at most the number of coins on which the reduction ends in index coverage, plus the number on
+    which the pair it returns passes `prodTcrCheck`, plus the number on which it ends in the
+    preimage event. Unlike `production_euf_cma_advantage_bound` there is no supplied event and no
+    hypothesis covering `ProdSmTcrBreak`. -/
+theorem production_euf_cma_extracted_bound {Ω : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (coins : List Ω) (game : Ω → ProdEufCmaOutcome)
+    (hOneTime : ∀ ω, params.statefulJorts = true → ∀ q, q ∈ (game ω).queries →
+      ∀ q', q' ∈ (game ω).queries → q.epoch = q'.epoch → q = q') :
+    hitCount (fun ω => prodEufCmaWin suite params (game ω)) coins ≤
+      hitCount (fun ω => prodItsrEvent suite params hw (game ω) (hOneTime ω)) coins +
+      hitCount (fun ω => prodTcrEvent suite params hw (game ω) (hOneTime ω)) coins +
+      hitCount (fun ω => prodPreEvent suite params hw (game ω) (hOneTime ω)) coins :=
+  hitCount_union_bound _ _ _ _
+    (fun ω hWin => prodEufCmaWin_classified suite params hw (game ω) (hOneTime ω) hWin) coins
+
+end Qsag
+end
+
+#verify_constructive Qsag.prodTcrOutput_sound Qsag.prodItsrEvent_sound Qsag.prodPreEvent_sound
+#verify_constructive Qsag.prodEufCmaWin_classified Qsag.production_euf_cma_extracted_bound
+
+/-!
+# Qsag.Protocol.Signing.ProdCollisionAccounting — the candidate targets of one forgery
+
+`ProdSmTcrBreak` ranges over every honest hash input of the key. A returned `ProdTcrWitness` is
+narrower: `ProdTargetIdx.OnPath` leaves no free index. `prodPathTargets` lists the candidates for
+a forgery with hypertree leaf `leaf` and FORS indices `idxs`:
+
+* per layer, the `subtreeHeight` XMSS nodes on the path, one WOTS public-key compression and
+  `ell1 * (w - 1)` chain steps;
+* per FORS tree, the `forsHeight` nodes on the path of its opened leaf, and one root compression;
+* per logged signature, its `numLayers` layer digests and its message pre-hash.
+
+`ProdTargetIdx.mem_pathTargets` shows every on-path target is in the list and
+`prodPathTargets_length` gives its length `prodPathTargetCount params log.length`.
+`prodTcrOutput_target_budget` states both for the pair the reduction returns, with the log length
+bounded by the number of signing queries.
+
+Scope and limits.
+* The list depends on the leaf and FORS indices of the forgery, which the adversary chooses after
+  seeing signatures. This is a bound on the targets *selected by one forgery*, not on a target set
+  fixed before the experiment. Over all leaves the node, compression and chain targets range over
+  the whole hypertree and FORS forest of the key.
+* In stateless profiles an on-path node need not have been evaluated by any signing query: it is
+  determined by the secret key, not by the log.
+* No count of hash evaluations made by the extractor is proved, and no probability is assigned.
+-/
+
+public section
+namespace Qsag
+
+set_option autoImplicit false
+
+-- FORS tree address, key pair and leaf indices of the forgery.
+set_option hygiene false in
+local notation:max "FORS_TREE" => (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+set_option hygiene false in
+local notation:max "FORS_KP" => (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight)
+set_option hygiene false in
+local notation:max "FORS_IDXS" =>
+  (prodSigForsIdxs suite params (derivePublicKey suite params sk) msgStar sigStar)
+
+theorem prod_length_flatMap_const {α β : Type} (f : α → List β) (k : Nat) :
+    ∀ (xs : List α), (∀ x ∈ xs, (f x).length = k) → (xs.flatMap f).length = xs.length * k
+  | [], _ => by rw [List.flatMap_nil, List.length_nil, List.length_nil, Nat.zero_mul]
+  | x :: xs, h => by
+    rw [List.flatMap_cons, List.length_append, h x List.mem_cons_self,
+      prod_length_flatMap_const f k xs (fun y hy => h y (List.mem_cons_of_mem x hy)),
+      List.length_cons, Nat.succ_mul, Nat.add_comm]
+
+theorem prod_length_range_flatMap_map {β : Type} (n k : Nat) (g : Nat → Nat → β) :
+    ((List.range n).flatMap fun x => (List.range k).map (g x)).length = n * k := by
+  rw [prod_length_flatMap_const _ k _ (fun x _ => by rw [List.length_map, List.length_range]),
+    List.length_range]
+
+theorem prod_length_range_flatMap_flatMap_map {β : Type} (n m k : Nat) (g : Nat → Nat → Nat → β) :
+    ((List.range n).flatMap fun x => (List.range m).flatMap fun y =>
+      (List.range k).map (g x y)).length = n * (m * k) := by
+  rw [prod_length_flatMap_const _ (m * k) _
+      (fun x _ => prod_length_range_flatMap_map m k (g x)),
+    List.length_range]
+
+theorem prod_length_flatMap_range_map {α β : Type} (xs : List α) (k : Nat) (g : α → Nat → β) :
+    (xs.flatMap fun e => (List.range k).map (g e)).length = xs.length * k :=
+  prod_length_flatMap_const _ k xs (fun x _ => by rw [List.length_map, List.length_range])
+
+/-- Honest hash inputs on the verification path of a forgery with leaf `leaf` and FORS leaf
+    indices `idxs`, over the log `log`. -/
+def prodPathTargets (params : PqHashParams) (log : List (List UInt8 × PqHashSig)) (leaf : Nat)
+    (idxs : List Nat) : List ProdTargetIdx :=
+  ((List.range params.numLayers).flatMap fun l => (List.range params.subtreeHeight).map fun h =>
+    ProdTargetIdx.xmssNode l h
+      (leaf / 2 ^ (l * params.subtreeHeight) % 2 ^ params.subtreeHeight / 2 ^ (h + 1))) ++
+  ((List.range params.numLayers).map ProdTargetIdx.wotsPk ++
+  (((List.range params.numLayers).flatMap fun l => (List.range params.ell1).flatMap fun r =>
+    (List.range (params.w - 1)).map fun s => ProdTargetIdx.chainStep l r s) ++
+  (((List.range params.forsTrees).flatMap fun j => (List.range params.forsHeight).map fun h =>
+    ProdTargetIdx.forsNode j h (params.forsHeight - (h + 1)) (idxs.getD j 0 / 2 ^ (h + 1))) ++
+  (ProdTargetIdx.forsRoots ::
+  ((log.flatMap fun e => (List.range params.numLayers).map fun i =>
+    ProdTargetIdx.signedDigest e i) ++
+  log.map ProdTargetIdx.preHash)))))
+
+/-- Number of candidate targets of one forgery against a log of `logLen` signatures. -/
+def prodPathTargetCount (params : PqHashParams) (logLen : Nat) : Nat :=
+  params.numLayers * params.subtreeHeight +
+  (params.numLayers +
+  (params.numLayers * (params.ell1 * (params.w - 1)) +
+  (params.forsTrees * params.forsHeight +
+  (logLen * params.numLayers + logLen + 1))))
+
+theorem prodPathTargetCount_eq (params : PqHashParams) (logLen : Nat) :
+    prodPathTargetCount params logLen =
+      params.numLayers * params.subtreeHeight +
+      (params.numLayers +
+      (params.numLayers * (params.ell1 * (params.w - 1)) +
+      (params.forsTrees * params.forsHeight +
+      (logLen * params.numLayers + logLen + 1)))) := by
+  rfl
+
+theorem prodPathTargets_length (params : PqHashParams) (log : List (List UInt8 × PqHashSig))
+    (leaf : Nat) (idxs : List Nat) :
+    (prodPathTargets params log leaf idxs).length = prodPathTargetCount params log.length := by
+  unfold prodPathTargets prodPathTargetCount
+  simp only [List.length_append, List.length_cons, List.length_map, List.length_range,
+    prod_length_range_flatMap_flatMap_map, prod_length_flatMap_range_map]
+
+theorem prodPathTargetCount_mono (params : PqHashParams) {a b : Nat} (h : a ≤ b) :
+    prodPathTargetCount params a ≤ prodPathTargetCount params b := by
+  unfold prodPathTargetCount
+  have h1 : a * params.numLayers ≤ b * params.numLayers := Nat.mul_le_mul_right _ h
+  omega
+
+/-- Every on-path target is one of the listed candidates. -/
+theorem ProdTargetIdx.mem_pathTargets (params : PqHashParams)
+    (log : List (List UInt8 × PqHashSig)) (leaf : Nat) (idxs : List Nat) :
+    ∀ t : ProdTargetIdx, t.OnPath params log leaf idxs → t ∈ prodPathTargets params log leaf idxs
+  | .xmssNode l h n, hOn => by
+    obtain ⟨hl, hh, hLo, hHi⟩ := hOn
+    have hn : leaf / 2 ^ (l * params.subtreeHeight) % 2 ^ params.subtreeHeight / 2 ^ (h + 1) = n :=
+      Nat.div_eq_of_lt_le hLo hHi
+    unfold prodPathTargets
+    apply List.mem_append_left
+    exact List.mem_flatMap.mpr ⟨l, List.mem_range.mpr hl,
+      List.mem_map.mpr ⟨h, List.mem_range.mpr hh, by rw [hn]⟩⟩
+  | .wotsPk l, hOn => by
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_left
+    exact List.mem_map.mpr ⟨l, List.mem_range.mpr hOn, rfl⟩
+  | .chainStep l r s, hOn => by
+    obtain ⟨hl, hr, hs⟩ := hOn
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_left
+    exact List.mem_flatMap.mpr ⟨l, List.mem_range.mpr hl,
+      List.mem_flatMap.mpr ⟨r, List.mem_range.mpr hr,
+        List.mem_map.mpr ⟨s, List.mem_range.mpr hs, rfl⟩⟩⟩
+  | .forsNode j h d b, hOn => by
+    obtain ⟨_, hj, hD, hLo, hHi⟩ := hOn
+    have hb : idxs.getD j 0 / 2 ^ (h + 1) = b := Nat.div_eq_of_lt_le hLo hHi
+    have hd : params.forsHeight - (h + 1) = d := by rw [← hD, Nat.add_sub_cancel]
+    have hh : h < params.forsHeight := by
+      rw [← hD]
+      exact Nat.lt_of_lt_of_le (Nat.lt_succ_self h) (Nat.le_add_left _ _)
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_left
+    exact List.mem_flatMap.mpr ⟨j, List.mem_range.mpr hj,
+      List.mem_map.mpr ⟨h, List.mem_range.mpr hh, by rw [hd, hb]⟩⟩
+  | .forsRoots, hOn => by
+    have _hSt : params.statefulJorts = false := hOn
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    exact List.mem_cons_self
+  | .signedDigest e i, hOn => by
+    obtain ⟨he, hi, _⟩ := hOn
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_cons_of_mem
+    apply List.mem_append_left
+    exact List.mem_flatMap.mpr ⟨e, he, List.mem_map.mpr ⟨i, List.mem_range.mpr hi, rfl⟩⟩
+  | .preHash e, hOn => by
+    obtain ⟨he, _⟩ := hOn
+    unfold prodPathTargets
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_append_right
+    apply List.mem_cons_of_mem
+    apply List.mem_append_right
+    exact List.mem_map.mpr ⟨e, he, rfl⟩
+
+theorem productionSigningLog_length_le (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) :
+    ∀ queries : List ProdSigningQuery,
+      (productionSigningLog suite params sk queries).length ≤ queries.length
+  | [] => Nat.le_refl 0
+  | q :: qs => by
+    have ih := productionSigningLog_length_le suite params sk qs
+    unfold productionSigningLog
+    cases prodSignQuery suite params sk q with
+    | none => exact Nat.le_trans ih (Nat.le_succ _)
+    | some sig => exact Nat.succ_le_succ ih
+
+/-- The target of a returned witness is one of the candidates of its forgery. -/
+theorem ProdTcrWitness.target_mem {suite : TweakableHashSuite} {params : PqHashParams}
+    {sk : PqSecretKey} {log : List (List UInt8 × PqHashSig)} {msgStar : List UInt8}
+    {sigStar : PqHashSig} (w : ProdTcrWitness suite params sk log msgStar sigStar) :
+    w.target ∈ prodPathTargets params log sigStar.leafGlobalIdx (FORS_IDXS) :=
+  ProdTargetIdx.mem_pathTargets params log _ _ w.target w.onPath
+
+/-- **Target budget of the returned pair.** The target returned on an experiment outcome is one
+    of the listed candidates of that forgery, a checked collision with it, and the number of
+    candidates is at most `prodPathTargetCount params (number of signing queries)`. -/
+theorem prodTcrOutput_target_budget (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (o : ProdEufCmaOutcome)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ o.queries → ∀ q', q' ∈ o.queries → q.epoch = q'.epoch → q = q')
+    (t : ProdTargetIdx) (forged : List UInt8)
+    (hOut : prodTcrOutput suite params hw o hOneTime = some (t, forged)) :
+    t ∈ prodPathTargets params (productionSigningLog suite params o.sk o.queries)
+      o.sigStar.leafGlobalIdx
+      (prodSigForsIdxs suite params (derivePublicKey suite params o.sk) o.msgStar o.sigStar) ∧
+    (prodPathTargets params (productionSigningLog suite params o.sk o.queries)
+      o.sigStar.leafGlobalIdx
+      (prodSigForsIdxs suite params (derivePublicKey suite params o.sk) o.msgStar
+        o.sigStar)).length ≤ prodPathTargetCount params o.queries.length ∧
+    prodTcrCheck suite params o.sk o.sigStar.leafGlobalIdx t forged = true := by
+  obtain ⟨_, hOn, _, hChk⟩ := prodTcrOutput_sound suite params hw o hOneTime t forged hOut
+  refine ⟨ProdTargetIdx.mem_pathTargets params _ _ _ t hOn, ?_, hChk⟩
+  rw [prodPathTargets_length]
+  exact prodPathTargetCount_mono params (productionSigningLog_length_le suite params o.sk o.queries)
+
+/-- An out-of-range layer is not a candidate target: the bound is not vacuous. -/
+theorem prodTargetIdx_layer_out_of_range (params : PqHashParams)
+    (log : List (List UInt8 × PqHashSig)) (leaf : Nat) (idxs : List Nat) (layer : Nat)
+    (hLayer : params.numLayers ≤ layer) :
+    ¬ (ProdTargetIdx.wotsPk layer).OnPath params log leaf idxs :=
+  fun hOn => Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hOn hLayer)
+
+end Qsag
+end
+
+#verify_constructive Qsag.prodPathTargets_length Qsag.prodPathTargetCount_mono
+#verify_constructive Qsag.ProdTargetIdx.mem_pathTargets Qsag.productionSigningLog_length_le
+#verify_constructive Qsag.ProdTcrWitness.target_mem Qsag.prodTcrOutput_target_budget
+#verify_constructive Qsag.prodTargetIdx_layer_out_of_range
