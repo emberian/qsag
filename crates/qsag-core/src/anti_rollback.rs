@@ -1551,7 +1551,11 @@ mod tests {
             ));
         }
         // An oversized nonceTPM / hmac size inside the auth area is refused as well.
-        for (offset, value) in [(14 + 10, u16::MAX), (14 + 10 + 3, u16::MAX), (14 + 10 + 3, 1)] {
+        for (offset, value) in [
+            (14 + 10, u16::MAX),
+            (14 + 10 + 3, u16::MAX),
+            (14 + 10 + 3, 1),
+        ] {
             let mut rsp = honest.clone();
             rsp[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
             assert!(
