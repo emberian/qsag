@@ -1,0 +1,4124 @@
+{
+  "crate": "aeneas/qsag-verified",
+  "format": 1,
+  "functions": [
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:143",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_bitmap",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.impl.ack_bitmap",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:140",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::ack_count",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.ack_count",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:274",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::authorize_shares",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:161",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::guard_key_commit",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.impl.guard_key_commit",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:158",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::is_poisoned",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.is_poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:146",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::n",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.n",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:104",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.new_validated",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
+      ],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1599 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:152",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::next_epoch",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.next_epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:155",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::phase",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.phase",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:165",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::propose_or_retry_epoch",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:149",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::q",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.q",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:206",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::record_custodian_ack",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:289",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::step",
+      "lean_definition": "authenticated_belt.VerifiedBeltQuorumGuard.step",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:32",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::custodian_ack_tag",
+      "lean_definition": "authenticated_belt.custodian_ack_tag",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1849 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1896 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/authenticated_belt.rs:51",
+      "extracted": true,
+      "function": "qsag_verified::authenticated_belt::wal_receipt_tag",
+      "lean_definition": "authenticated_belt.wal_receipt_tag",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1622 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1796 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:213",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::bind",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.bind",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:195",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::capacity_limit",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.capacity_limit",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:199",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::has_in_flight",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.has_in_flight",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:203",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::in_flight",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.in_flight",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:207",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::is_wal_poisoned",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.is_wal_poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:142",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::new_empty",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.new_empty",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:191",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::next_epoch",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.impl.next_epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:162",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::BeltLatchKernel::recover",
+      "lean_definition": "belt_latch_kernel.BeltLatchKernel.recover",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/belt_latch.rs:1050 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/belt_latch_kernel.rs:46",
+      "extracted": true,
+      "function": "qsag_verified::belt_latch_kernel::belt_latch_digits_eq",
+      "lean_definition": "belt_latch_kernel.belt_latch_digits_eq",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:314",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::family_quarantined",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.family_quarantined",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:341",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::freeze_peer_commitment",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-hd/src/zero_gate.rs:98 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:304",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::frozen_peer_commitment",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.frozen_peer_commitment",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:309",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::modulus_q",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.modulus_q",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:321",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::new_awaiting_peer_commit",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-hd/src/zero_gate.rs:45 (assoc)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:384",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::open_local_residual",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.open_local_residual",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-hd/src/zero_gate.rs:87 (method-lexical)",
+        "crates/qsag-hd/src/zero_gate.rs:106 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:299",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::phase",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.phase",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:294",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::session_id",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.impl.session_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:427",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::verify_peer_opening",
+      "lean_definition": "cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-hd/src/zero_gate.rs:122 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:148",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::aborted",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.aborted",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:138",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::attempt",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.attempt",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:154",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::new_sealed",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.new_sealed",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:1663 (assoc)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:143",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::released",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.released",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:133",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::session_id",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.impl.session_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:2166 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:171",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::try_release_z_share",
+      "lean_definition": "cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/threshold_mldsa.rs:1691 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:62",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::check_mldsa44_norm_bounds",
+      "lean_definition": "cred_and_hd_guards.check_mldsa44_norm_bounds",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/fips204_ntt.rs:900 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1370 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1397 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:78",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::check_mldsa65_norm_bounds",
+      "lean_definition": "cred_and_hd_guards.check_mldsa65_norm_bounds",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/fips204_ntt.rs:901 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1371 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1398 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:48",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::mldsa44_sample_eta2_nibble_mod_q",
+      "lean_definition": "cred_and_hd_guards.mldsa44_sample_eta2_nibble_mod_q",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/fips204_ntt.rs:1039 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-cred/src/fips204_ntt.rs:1011 (path)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/cred_and_hd_guards.rs:218",
+      "extracted": true,
+      "function": "qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks",
+      "lean_definition": "cred_and_hd_guards.toprf_majority_of_3_goldilocks",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/toprf_engine.rs:200 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:69",
+      "extracted": true,
+      "function": "qsag_verified::fips205::Fips205Adrs::from_tree_u96",
+      "lean_definition": "fips205.Fips205Adrs.from_tree_u96",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:292 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:34",
+      "extracted": true,
+      "function": "qsag_verified::fips205::Fips205AdrsType::from_u32",
+      "lean_definition": "fips205.Fips205AdrsType.from_u32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Adrs.lean",
+        "aeneas/lean/QsagVerified/Proofs/AdrsConverse.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:288 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:21",
+      "extracted": true,
+      "function": "qsag_verified::fips205::Fips205AdrsType::to_u32",
+      "lean_definition": "fips205.Fips205AdrsType.to_u32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Adrs.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::fips205::encode_fips205_adrs",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:148",
+      "extracted": true,
+      "function": "qsag_verified::fips205::decode_fips205_adrs",
+      "lean_definition": "fips205.decode_fips205_adrs",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Adrs.lean",
+        "aeneas/lean/QsagVerified/Proofs/AdrsConverse.lean",
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:304 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:92",
+      "extracted": true,
+      "function": "qsag_verified::fips205::encode_fips205_adrs",
+      "lean_definition": "fips205.encode_fips205_adrs",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Adrs.lean",
+        "aeneas/lean/QsagVerified/Proofs/AdrsConverse.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/fips205.rs:292 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:288",
+      "extracted": true,
+      "function": "qsag_verified::fips205::fips205_f",
+      "lean_definition": "fips205.fips205_f",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Hash.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [
+        "crates/qsag-core/src/fips205.rs:1273"
+      ],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:300",
+      "extracted": true,
+      "function": "qsag_verified::fips205::fips205_wots_chain",
+      "lean_definition": "fips205.fips205_wots_chain",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Hash.lean",
+        "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:273",
+      "extracted": true,
+      "function": "qsag_verified::fips205::fips205_wots_checksum",
+      "lean_definition": "fips205.fips205_wots_checksum",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Wots.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:323",
+      "extracted": true,
+      "function": "qsag_verified::fips205::tsw_canonical_target_sum",
+      "lean_definition": "fips205.tsw_canonical_target_sum",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:333",
+      "extracted": true,
+      "function": "qsag_verified::fips205::tsw_check_target_sum",
+      "lean_definition": "fips205.tsw_check_target_sum",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean",
+        "aeneas/lean/QsagVerified/Proofs/Tsw.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:226",
+      "extracted": true,
+      "function": "qsag_verified::fips205::wots_checksum_base16",
+      "lean_definition": "fips205.wots_checksum_base16",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Wots.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fips205.rs:175",
+      "extracted": true,
+      "function": "qsag_verified::fips205::wots_extract_base16_digits",
+      "lean_definition": "fips205.wots_extract_base16_digits",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Wots.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:246",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::intermediate_mac_verified",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.intermediate_mac_verified",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:286",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::is_quarantined",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.is_quarantined",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:328 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:263",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::new_spn48_evaluated",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:175 (assoc)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:251",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::output_released",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.output_released",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:256",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::quarantined",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.quarantined",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:345",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.release_spn_output",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:270 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:236",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::session_id",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.session_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:291 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:241",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::spn_rounds_completed",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.impl.spn_rounds_completed",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:292",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::verify_intermediate_mac",
+      "lean_definition": "fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:204 (method-lexical)",
+        "crates/qsag-fts/src/release_gate.rs:231 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:119",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::consume_epoch_once",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.consume_epoch_once",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:84",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::epoch",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:79",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::key_id",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.key_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:89",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::max_epochs",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.max_epochs",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:106",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::new_unused",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.new_unused",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/parallel_mpc.rs:1138 (path)",
+        "crates/qsag-fts/src/sign_session.rs:146 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:99",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::poisoned",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:94",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochGuard::used",
+      "lean_definition": "fts_spn_guard.FtsEpochGuard.impl.used",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:56",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::FtsEpochPermit::into_binding",
+      "lean_definition": "fts_spn_guard.FtsEpochPermit.into_binding",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:202",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::wots_cs_verify_68_array",
+      "lean_definition": "fts_spn_guard.wots_cs_verify_68_array",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/fts_spn_guard.rs:179",
+      "extracted": true,
+      "function": "qsag_verified::fts_spn_guard::wots_cs_verify_68_w5_sum136",
+      "lean_definition": "fts_spn_guard.wots_cs_verify_68_w5_sum136",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::fts_spn_guard::FtsDeferredMacSession::release_spn_output",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:67",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_add",
+      "lean_definition": "goldilocks.goldilocks_add",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecFieldWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:53",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_canon",
+      "lean_definition": "goldilocks.goldilocks_canon",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:184",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_ext2_add",
+      "lean_definition": "goldilocks.goldilocks_ext2_add",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:212",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_ext2_mul",
+      "lean_definition": "goldilocks.goldilocks_ext2_mul",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:202",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_ext2_neg",
+      "lean_definition": "goldilocks.goldilocks_ext2_neg",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:193",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_ext2_sub",
+      "lean_definition": "goldilocks.goldilocks_ext2_sub",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:38",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_from_canonical",
+      "lean_definition": "goldilocks.goldilocks_from_canonical",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean",
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:177",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_inv",
+      "lean_definition": "goldilocks.goldilocks_inv",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecFieldWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:160",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_inv_or_zero",
+      "lean_definition": "goldilocks.goldilocks_inv_or_zero",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecFieldWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:114",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_mul",
+      "lean_definition": "goldilocks.goldilocks_mul",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecFieldWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:94",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_neg",
+      "lean_definition": "goldilocks.goldilocks_neg",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:129",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_pow7",
+      "lean_definition": "goldilocks.goldilocks_pow7",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:102",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_reduce128",
+      "lean_definition": "goldilocks.goldilocks_reduce128",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:123",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_square",
+      "lean_definition": "goldilocks.goldilocks_square",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/goldilocks.rs:83",
+      "extracted": true,
+      "function": "qsag_verified::goldilocks::goldilocks_sub",
+      "lean_definition": "goldilocks.goldilocks_sub",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecFieldWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:280",
+      "extracted": true,
+      "function": "qsag_verified::keccak::Shake256Sponge::absorb",
+      "lean_definition": "keccak.Shake256Sponge.absorb",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/Sponge.lean",
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
+      ],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::custodian_ack_tag",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:301",
+      "extracted": true,
+      "function": "qsag_verified::keccak::Shake256Sponge::finalize",
+      "lean_definition": "keccak.Shake256Sponge.finalize",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Sponge.lean",
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
+      ],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::keccak::Shake256Sponge::squeeze",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:237",
+      "extracted": true,
+      "function": "qsag_verified::keccak::Shake256Sponge::new_cshake256",
+      "lean_definition": "keccak.Shake256Sponge.new_cshake256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-cred/src/toprf_engine.rs:258 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:223",
+      "extracted": true,
+      "function": "qsag_verified::keccak::Shake256Sponge::new_shake256",
+      "lean_definition": "keccak.Shake256Sponge.new_shake256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/Hash.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean",
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::custodian_ack_tag",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:324",
+      "extracted": true,
+      "function": "qsag_verified::keccak::Shake256Sponge::squeeze",
+      "lean_definition": "keccak.Shake256Sponge.squeeze",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/Sponge.lean",
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::custodian_ack_tag",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:352",
+      "extracted": true,
+      "function": "qsag_verified::keccak::cshake256_32",
+      "lean_definition": "keccak.cshake256_32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [
+        "crates/qsag-agg/src/sponge.rs:541",
+        "crates/qsag-core/src/sponge/keccak.rs:699"
+      ],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:139",
+      "extracted": true,
+      "function": "qsag_verified::keccak::keccak_f1600",
+      "lean_definition": "keccak.keccak_f1600",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness.lean",
+        "aeneas/lean/QsagVerified/Proofs/Sponge.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
+      ],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::keccak::Shake256Sponge::new_cshake256",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [
+        "crates/qsag-accel/src/keccak.rs:32",
+        "crates/qsag-agg/src/sponge.rs:38",
+        "crates/qsag-core/src/sponge/keccak.rs:79"
+      ],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:39",
+      "extracted": true,
+      "function": "qsag_verified::keccak::keccak_f1600_round",
+      "lean_definition": "keccak.keccak_f1600_round",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group0.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group1.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group2.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group3.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group4.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group5.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group6.lean",
+        "aeneas/lean/QsagVerified/Proofs/KeccakWitness/Group7.lean",
+        "aeneas/lean/QsagVerified/Proofs/Sponge.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecKeccakWeld.lean"
+      ],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::keccak::keccak_f1600",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/keccak.rs:343",
+      "extracted": true,
+      "function": "qsag_verified::keccak::shake256_32",
+      "lean_definition": "keccak.shake256_32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/SpongeFraming.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:802 (path)"
+      ],
+      "same_named_production_fns": [
+        "crates/qsag-core/src/sponge/keccak.rs:709"
+      ],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-addr/src/lib.rs:1700 (path)",
+        "crates/qsag-hd/tests/hybrid_framing.rs:29 (path)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:86",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorb_opening",
+      "lean_definition": "opening_guard.ConsumingOpeningGuard2Lane.absorb_opening",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ConsumingOpening.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:245 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:79",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::absorbed",
+      "lean_definition": "opening_guard.ConsumingOpeningGuard2Lane.impl.absorbed",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:75",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::is_consumed",
+      "lean_definition": "opening_guard.ConsumingOpeningGuard2Lane.is_consumed",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:57",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::new",
+      "lean_definition": "opening_guard.ConsumingOpeningGuard2Lane.new",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ConsumingOpening.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:183 (assoc)",
+        "crates/qsag-policy/src/lib.rs:1027 (path)",
+        "crates/qsag-quorum/src/party_node.rs:1500 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:124",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::verify_once",
+      "lean_definition": "opening_guard.ConsumingOpeningGuard2Lane.verify_once",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ConsumingOpening.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:246 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:38",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::OpeningReleasePermit::openings",
+      "lean_definition": "opening_guard.OpeningReleasePermit.impl.openings",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:293 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:33",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::OpeningReleasePermit::round_id",
+      "lean_definition": "opening_guard.OpeningReleasePermit.impl.round_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:292 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/opening_guard.rs:29",
+      "extracted": true,
+      "function": "qsag_verified::opening_guard::OpeningReleasePermit::session_id",
+      "lean_definition": "opening_guard.OpeningReleasePermit.impl.session_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-fts/src/release_gate.rs:291 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:277",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::ack_count",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.ack_count",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:419",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::authorize_shares",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.authorize_shares",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:267",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_epoch",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:272",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::bound_msg_tag",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:232",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::f",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.f",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:242",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::global_liveness_mode",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.global_liveness_mode",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:262",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::has_bound_epoch",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:282",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::is_poisoned",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.is_poisoned",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:252",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::max_jump_window",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.max_jump_window",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:222",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::n",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.n",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:192",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::new_validated",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.new_validated",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:247",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::next_epoch",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.next_epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:257",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::phase",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.phase",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:289",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::propose_or_retry_epoch",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:237",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::q",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.q",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:360",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::record_custodian_ack",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BeltAckProvenance.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:488",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::step",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.step",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:227",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::BeltQuorumCore::t",
+      "lean_definition": "pants_and_quorum_guards.BeltQuorumCore.impl.t",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:750",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::authorize_open",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:692",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.is_poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/party_node.rs:896 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:687",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.is_unverified",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/party_node.rs:905 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:673",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:1577 (path)",
+        "crates/qsag-core/src/rss256.rs:1656 (path)",
+        "crates/qsag-quorum/src/party_node.rs:856 (path)",
+        "crates/qsag-quorum/src/party_node.rs:860 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:682",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::pending_relations",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.impl.pending_relations",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:727",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::record_check_result",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:697",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::stage_relations",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:771",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::step",
+      "lean_definition": "pants_and_quorum_guards.VerifiedRssPoisonLatch.step",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:912",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_kp",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_kp",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:902",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_layer",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_layer",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:907",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::ancestor_tree",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_tree",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:940",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::authorize_ancestor_derivation",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:917",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::expected_static_child_root",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.expected_static_child_root",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:922",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::has_locked_codeword",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.has_locked_codeword",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:932",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::is_poisoned",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.is_poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:897",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_params_tag",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_params_tag",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:892",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::key_pk_tag",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_pk_tag",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:927",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::locked_ancestor_codeword_tag",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.locked_ancestor_codeword_tag",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:870",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/baggy.rs:1754 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:612",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digit_at",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.digit_at",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:602",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::digits",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.digits",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:582",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:302 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:597",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::validated_digest",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.validated_digest",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:607",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::verified_sum",
+      "lean_definition": "pants_and_quorum_guards.VerifiedWotsC256Guard.impl.verified_sum",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:123",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config",
+      "lean_definition": "pants_and_quorum_guards.validate_belt_quorum_config",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:1360 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:3227 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:3236 (path)"
+      ],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:548",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits",
+      "lean_definition": "pants_and_quorum_guards.verified_wotsc256_extract_digits",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/wots_c.rs:80 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:559",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum",
+      "lean_definition": "pants_and_quorum_guards.verified_wotsc256_verify_sum",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecHashWeld.lean"
+      ],
+      "production_call_sites": [
+        "crates/qsag-core/src/wots_c.rs:79 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/pants_and_quorum_guards.rs:537",
+      "extracted": true,
+      "function": "qsag_verified::pants_and_quorum_guards::wotsc256_extract_digit",
+      "lean_definition": "pants_and_quorum_guards.wotsc256_extract_digit",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits",
+        "edge": "definite"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:591",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::HybridRoleTag::to_u8",
+      "lean_definition": "policy_and_addr.HybridRoleTag.to_u8",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::policy_and_addr::check_hybrid_domain_framing",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:203",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentAddressVersion::from_u8",
+      "lean_definition": "policy_and_addr.IntentAddressVersion.from_u8",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:195",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentAddressVersion::to_u8",
+      "lean_definition": "policy_and_addr.IntentAddressVersion.to_u8",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::policy_and_addr::check_hybrid_domain_framing",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:231",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentIdentityKind::from_u8",
+      "lean_definition": "policy_and_addr.IntentIdentityKind.from_u8",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:222",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentIdentityKind::to_u8",
+      "lean_definition": "policy_and_addr.IntentIdentityKind.to_u8",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::policy_and_addr::check_hybrid_domain_framing",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:264",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentSuiteTag::from_u16",
+      "lean_definition": "policy_and_addr.IntentSuiteTag.from_u16",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:253",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentSuiteTag::to_u16",
+      "lean_definition": "policy_and_addr.IntentSuiteTag.to_u16",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:89",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::authority_pin",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.authority_pin",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:123",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::authorize_spend",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.authorize_spend",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/RealSpecGuardBoundary.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:79",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::cap_units",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.cap_units",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:94",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::last_nonce",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.last_nonce",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:100",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::new_window",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.new_window",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/durable.rs:656 (path)",
+        "crates/qsag-policy/src/lib.rs:474 (path)",
+        "crates/qsag-policy/src/lib.rs:1372 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:84",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::policy_pin",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.policy_pin",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:159",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::rotate_window",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.rotate_window",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:74",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::spent_units",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.spent_units",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:69",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::StatefulVelocityGuard::window_id",
+      "lean_definition": "policy_and_addr.StatefulVelocityGuard.impl.window_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:601",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::check_hybrid_domain_framing",
+      "lean_definition": "policy_and_addr.check_hybrid_domain_framing",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:18 (re-export)",
+        "crates/qsag-addr/src/lib.rs:687 (call)",
+        "crates/qsag-addr/src/lib.rs:695 (call)",
+        "crates/qsag-addr/src/lib.rs:718 (call)",
+        "crates/qsag-addr/src/lib.rs:787 (call)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-addr/src/lib.rs:1701 (call)",
+        "crates/qsag-addr/src/lib.rs:1713 (call)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:676",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::checked_velocity_spend",
+      "lean_definition": "policy_and_addr.checked_velocity_spend",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-policy/src/lib.rs:200 (path)",
+        "crates/qsag-policy/src/lib.rs:790 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:558",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::decode_intent_128",
+      "lean_definition": "policy_and_addr.decode_intent_128",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:18 (re-export)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-addr/src/lib.rs:1744 (call)",
+        "crates/qsag-addr/src/lib.rs:1758 (call)",
+        "crates/qsag-addr/src/lib.rs:1761 (call)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:643",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::derive_hybrid_transcript_digest",
+      "lean_definition": "policy_and_addr.derive_hybrid_transcript_digest",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:18 (re-export)",
+        "crates/qsag-addr/src/lib.rs:728 (call)",
+        "crates/qsag-addr/src/lib.rs:794 (call)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-hd/tests/hybrid_framing.rs:21 (call)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:546",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::encode_intent_128",
+      "lean_definition": "policy_and_addr.encode_intent_128",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:18 (re-export)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [
+        "crates/qsag-addr/src/lib.rs:1742 (call)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:168",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::advance_round2_chi",
+      "lean_definition": "rss_cut_session.RssCutGateSession.advance_round2_chi",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:215",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::advance_round3_verify_consistency",
+      "lean_definition": "rss_cut_session.RssCutGateSession.advance_round3_verify_consistency",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:162",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::is_consistency_verified",
+      "lean_definition": "rss_cut_session.RssCutGateSession.is_consistency_verified",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:150",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::is_poisoned",
+      "lean_definition": "rss_cut_session.RssCutGateSession.is_poisoned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/authenticated_belt.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:128",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::mask_commitment",
+      "lean_definition": "rss_cut_session.RssCutGateSession.impl.mask_commitment",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:134",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed",
+      "lean_definition": "rss_cut_session.RssCutGateSession.new_round1_committed",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
+      ],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2668 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:262",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::open_verified_cut",
+      "lean_definition": "rss_cut_session.RssCutGateSession.open_verified_cut",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:156",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::phase",
+      "lean_definition": "rss_cut_session.RssCutGateSession.impl.phase",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:123",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::session_id",
+      "lean_definition": "rss_cut_session.RssCutGateSession.impl.session_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:306",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::RssCutGateSession::step",
+      "lean_definition": "rss_cut_session.RssCutGateSession.step",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/CallerContracts.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/rss_cut_session.rs:84",
+      "extracted": true,
+      "function": "qsag_verified::rss_cut_session::compute_rss_mask_commitment",
+      "lean_definition": "rss_cut_session.compute_rss_mask_commitment",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-core/src/rss256.rs:2662 (path)",
+        "crates/qsag-core/src/rss256.rs:2689 (path)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:605",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::acquire_or_retry",
+      "lean_definition": "threshold.EpochLatch.acquire_or_retry",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:577",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::key_epoch_id",
+      "lean_definition": "threshold.EpochLatch.impl.key_epoch_id",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:580",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::last_bound",
+      "lean_definition": "threshold.EpochLatch.impl.last_bound",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:574",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::max_epoch",
+      "lean_definition": "threshold.EpochLatch.impl.max_epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:586",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::new",
+      "lean_definition": "threshold.EpochLatch.new",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:571",
+      "extracted": true,
+      "function": "qsag_verified::threshold::EpochLatch::next_epoch",
+      "lean_definition": "threshold.EpochLatch.impl.next_epoch",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:548",
+      "extracted": true,
+      "function": "qsag_verified::threshold::derive_jorts_legacy_v1_det_r_rand",
+      "lean_definition": "threshold.derive_jorts_legacy_v1_det_r_rand",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:252",
+      "extracted": true,
+      "function": "qsag_verified::threshold::dkg_beaver_frobenius_eval_gf256",
+      "lean_definition": "threshold.dkg_beaver_frobenius_eval_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:265",
+      "extracted": true,
+      "function": "qsag_verified::threshold::dkg_beaver_frobenius_share_shamir_gf256",
+      "lean_definition": "threshold.dkg_beaver_frobenius_share_shamir_gf256",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:288",
+      "extracted": true,
+      "function": "qsag_verified::threshold::dkg_verify_key_shares_boolean_bdoz_gf256",
+      "lean_definition": "threshold.dkg_verify_key_shares_boolean_bdoz_gf256",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:310",
+      "extracted": true,
+      "function": "qsag_verified::threshold::dkg_verify_shamir_2of3_key_bit_gf256",
+      "lean_definition": "threshold.dkg_verify_shamir_2of3_key_bit_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:678",
+      "extracted": true,
+      "function": "qsag_verified::threshold::epoch_latch_advance",
+      "lean_definition": "threshold.epoch_latch_advance",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:417",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_and_gate",
+      "lean_definition": "threshold.rss_and_gate",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:433",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_keccak_chi_lane",
+      "lean_definition": "threshold.rss_keccak_chi_lane",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:392",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_not",
+      "lean_definition": "threshold.rss_not",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:403",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_party_and_local",
+      "lean_definition": "threshold.rss_party_and_local",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:376",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_reconstruct",
+      "lean_definition": "threshold.rss_reconstruct",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:427",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_reshare_views",
+      "lean_definition": "threshold.rss_reshare_views",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "unreferenced",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:366",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_share_u64",
+      "lean_definition": "threshold.rss_share_u64",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": []
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:382",
+      "extracted": true,
+      "function": "qsag_verified::threshold::rss_xor",
+      "lean_definition": "threshold.rss_xor",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:203",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_degree_reduce_2of3_gf256",
+      "lean_definition": "threshold.shamir_degree_reduce_2of3_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:50",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_eval_poly_gf256",
+      "lean_definition": "threshold.shamir_eval_poly_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:61",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_eval_poly_goldilocks",
+      "lean_definition": "threshold.shamir_eval_poly_goldilocks",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Goldilocks.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:110",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_lagrange_at_zero_gf256",
+      "lean_definition": "threshold.shamir_lagrange_at_zero_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:174",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_lagrange_at_zero_goldilocks",
+      "lean_definition": "threshold.shamir_lagrange_at_zero_goldilocks",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:73",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_lagrange_weight_zero_gf256",
+      "lean_definition": "threshold.shamir_lagrange_weight_zero_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:134",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_lagrange_weight_zero_goldilocks",
+      "lean_definition": "threshold.shamir_lagrange_weight_zero_goldilocks",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/threshold.rs:26",
+      "extracted": true,
+      "function": "qsag_verified::threshold::shamir_validate_points_gf256",
+      "lean_definition": "threshold.shamir_validate_points_gf256",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean",
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:516",
+      "extracted": true,
+      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::is_consumed",
+      "lean_definition": "tower.BdozOpeningGuard2Lane.is_consumed",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:507",
+      "extracted": true,
+      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::new",
+      "lean_definition": "tower.BdozOpeningGuard2Lane.new",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:522",
+      "extracted": true,
+      "function": "qsag_verified::tower::BdozOpeningGuard2Lane::verify_once",
+      "lean_definition": "tower.BdozOpeningGuard2Lane.verify_once",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/BdozConsumption.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/opening_guard.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:68",
+      "extracted": true,
+      "function": "qsag_verified::tower::BdozVerifierSession2Lane::is_burned",
+      "lean_definition": "tower.BdozVerifierSession2Lane.is_burned",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:61",
+      "extracted": true,
+      "function": "qsag_verified::tower::BdozVerifierSession2Lane::new",
+      "lean_definition": "tower.BdozVerifierSession2Lane.new",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:377",
+      "extracted": true,
+      "function": "qsag_verified::tower::bdoz_commit_masked_tag",
+      "lean_definition": "tower.bdoz_commit_masked_tag",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:408",
+      "extracted": true,
+      "function": "qsag_verified::tower::bdoz_fold_masked_value",
+      "lean_definition": "tower.bdoz_fold_masked_value",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:83",
+      "extracted": true,
+      "function": "qsag_verified::tower::ct_eq_bytes32",
+      "lean_definition": "tower.ct_eq_bytes32",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Common.lean",
+        "aeneas/lean/QsagVerified/Proofs/CredAndHdGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/FtsSpnGuard.lean",
+        "aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean",
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean",
+        "aeneas/lean/QsagVerified/Proofs/RssCutSession.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-quorum/src/quorum_jorts.rs:399 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:506 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:521 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1305 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1808 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1903 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1953 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1973 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2263 (path)"
+      ],
+      "same_named_production_fns": [
+        "crates/qsag-core/src/wipe.rs:114"
+      ],
+      "status": "direct",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:293",
+      "extracted": true,
+      "function": "qsag_verified::tower::embed_gf256_to_tower128",
+      "lean_definition": "tower.embed_gf256_to_tower128",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:230",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf16_add",
+      "lean_definition": "tower.gf16_add",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:236",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf16_mul",
+      "lean_definition": "tower.gf16_mul",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "test-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:242",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_add",
+      "lean_definition": "tower.gf256_add",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean",
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:281",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_frobenius_residual",
+      "lean_definition": "tower.gf256_frobenius_residual",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean",
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:273",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_inv",
+      "lean_definition": "tower.gf256_inv",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean",
+        "aeneas/lean/QsagVerified/Proofs/ShamirDkg.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:256",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_inv_or_zero",
+      "lean_definition": "tower.gf256_inv_or_zero",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:287",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_is_boolean_frobenius",
+      "lean_definition": "tower.gf256_is_boolean_frobenius",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Epoch.lean",
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:248",
+      "extracted": true,
+      "function": "qsag_verified::tower::gf256_mul",
+      "lean_definition": "tower.gf256_mul",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Gf256.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:299",
+      "extracted": true,
+      "function": "qsag_verified::tower::tower128_add",
+      "lean_definition": "tower.tower128_add",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:305",
+      "extracted": true,
+      "function": "qsag_verified::tower::tower128_mul",
+      "lean_definition": "tower.tower128_mul",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/bdoz_consumption.rs",
+        "aeneas/qsag-verified/tests/parity_qsag_core.rs",
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:320",
+      "extracted": true,
+      "function": "qsag_verified::tower::tower256_add",
+      "lean_definition": "tower.tower256_add",
+      "lean_proof_modules": [],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:329",
+      "extracted": true,
+      "function": "qsag_verified::tower::tower256_mul",
+      "lean_definition": "tower.tower256_mul",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [
+        "aeneas/lean/QsagVerified/Proofs/RealSpecTowerWeld.lean"
+      ],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "spec-welded",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:426",
+      "extracted": true,
+      "function": "qsag_verified::tower::verify_mac_2lane",
+      "lean_definition": "tower.verify_mac_2lane",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/BdozConsumption.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/tower.rs:468",
+      "extracted": true,
+      "function": "qsag_verified::tower::verify_mac_2lane_with_burn",
+      "lean_definition": "tower.verify_mac_2lane_with_burn",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/Bdoz.lean",
+        "aeneas/lean/QsagVerified/Proofs/MultiTurnMediationAndReachability.lean",
+        "aeneas/lean/QsagVerified/Proofs/TowerBdoz.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "same_named_production_fns": [],
+      "status": "proof-only",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    }
+  ],
+  "method": "lexical; see scripts/gen_extraction_coverage.py",
+  "summary": {
+    "direct": 36,
+    "direct-lexical": 14,
+    "not_extracted": 0,
+    "proof-only": 68,
+    "reached": 13,
+    "spec-welded": 16,
+    "test-only": 56,
+    "total": 235,
+    "unreferenced": 32
+  }
+}

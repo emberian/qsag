@@ -5,36 +5,29 @@
     "charon-driver": "91419b27887a21991508643a0b612636331e4614558f27febd204643e86f5914"
   },
   "files": {
-    "aeneas/lean/Aeneas.lean": "6914cc44f52972ca00ccf216299bbab266cc6066b34f4ed57b1aa4bd795b8e87",
+    "aeneas/lean/Aeneas.lean": "55551f593a8e7b937e8326f095f6ae268ab2eb3e0e2b2f5bea3cc973ebfd0433",
     "aeneas/lean/Aeneas/Elab/Attrs.lean": "83ec66b14a21d0d6a7498ef738beea9f259acf6b3ff9c2056a04b587e5edd83b",
     "aeneas/lean/Aeneas/Std/Containers.lean": "2285f0ad4a9e02f45837d52d92fb5ae90da71668a7dbd1faff13c90c17966eb6",
-    "aeneas/lean/Aeneas/Std/Types.lean": "37ab863f7dbdff0b40b9e22c3823ceba1840d788176191dde7c717b61440ec16",
-    "aeneas/lean/QsagVerified/Funs.lean": "c48fd8f7c4a1b3c0bb9d4222eca3fbbe4ff9c78b50a629500f7fe5bd3d609888",
-    "aeneas/lean/QsagVerified/Types.lean": "73a870ab01724621396e0fc96476dc112be44eb85e3414a3b19d4ac2d416a8ca",
+    "aeneas/lean/Aeneas/Std/Types.lean": "cc1774b2549a6cb02d0bb98fcb7bba1b27da2898a6af6733a610b3314932646a",
+    "aeneas/lean/QsagVerified/Funs.lean": "db9eaeb8df97a83069cf6f2763975144902b08c41fe49f4d248ba7907aca5400",
+    "aeneas/lean/QsagVerified/Types.lean": "49b759a3d2b3d95b2ca26ecddf1aa6784bb13e22e0cf1901a01710f2e64b24d5",
     "aeneas/qsag-verified/Cargo.toml": "4565aaa6bf797037260c1d753f1e8e219153778bb73b5344c814f3b5966d3dbc",
-    "aeneas/qsag-verified/build.rs": "901ac814b8c7a483705cb8913fd7e3ab24b34e56421b5f48d0506eabe6d6b02c",
+    "aeneas/qsag-verified/build.rs": "053607fb8312145b2ee27141ef9cb9bfe1f4ff91254e310f979d7ef7e18d9b60",
     "aeneas/qsag-verified/rust-toolchain.toml": "140e89d548e89937db2bfe7bda9c3ab7e125596f1f6a3130a0f827ab8b6a692b",
     "aeneas/qsag-verified/src/authenticated_belt.rs": "5b6a11f27650d2d9130209212a5e07fbe67ee6c2d271b83a0ae1e1560c0eb379",
     "aeneas/qsag-verified/src/belt_latch_kernel.rs": "687d019e0279943e5883463dd922e7b9934f4c4cbee6cecd84590725d6a708ac",
     "aeneas/qsag-verified/src/cred_and_hd_guards.rs": "44ca9a53c80f74884a4a0c534c707a5e56858fe07c1f4467782ed02445006474",
     "aeneas/qsag-verified/src/fips205.rs": "6ad0d7f5e9c1dc006434fd222a04924a4503c7a14c46fed58849d726eb1e3b2d",
-    "aeneas/qsag-verified/src/fts_spn_guard.rs": "872e2153a6821ae80a2d8d0f997f48431e42d9d54534b85b801782feeb92609a",
+    "aeneas/qsag-verified/src/fts_spn_guard.rs": "1eaba39bac2768c5b1d388b8446ba7a5ddb2c8a982369223cd3c4961bb59c56f",
     "aeneas/qsag-verified/src/goldilocks.rs": "818623e641f14895c37068d3247c6b8b6b13ad603aa45e131297f5dccdea79ba",
-    "aeneas/qsag-verified/src/keccak.rs": "523351d550d09cd1ff5f81a72ffd226451ea13ff6096b9b34045ce2037171115",
-    "aeneas/qsag-verified/src/lib.rs": "eacd24c680adc8defb374249c8189a0826bd506b41e89590dde230d45a11cf72",
-    "aeneas/qsag-verified/src/opening_guard.rs": "e9cc5665b816fdd79e5973780ce95c7c930af0eaff932c3029f0af375ebfce4f",
-    "aeneas/qsag-verified/src/pants_and_quorum_guards.rs": "c5f2481406517d6f85e77d6431d2286c462d639227d01f2d34ef33819c068c71",
+    "aeneas/qsag-verified/src/keccak.rs": "545626aedabb45dc2d1f1c3ed278bfa1f4f320877d8234f8b28ee5bb83a16709",
+    "aeneas/qsag-verified/src/lib.rs": "213dfd2b3d3fca6af264030ca75b733424349f65f5f40afb64dfb3764bbe3eee",
+    "aeneas/qsag-verified/src/opening_guard.rs": "9e1c2436ea822b736a8d439176fbe6e7af1574a4be18a1cbea1773ff9e9e348b",
+    "aeneas/qsag-verified/src/pants_and_quorum_guards.rs": "385e241a08aca4bb9184374e87121ac8d2ed56b2141dc6f2d2809a33f331dc08",
     "aeneas/qsag-verified/src/policy_and_addr.rs": "e685db268cbae193605cc7b26e38be85d45156562562a8b9cf72304b5e70c1fc",
     "aeneas/qsag-verified/src/rss_cut_session.rs": "330396fa9f63d7d08716171dc0c7fcc1aefb84d34bef5bc1d16d261c721ab4a5",
-    "aeneas/qsag-verified/src/threshold.rs": "1bed0b77f0f6e9b38fd76263fba7173308ecfa1f2037cb8f5e7a18c072398e44",
+    "aeneas/qsag-verified/src/threshold.rs": "a13cd7d837ce9e377930af6582dbd243b3e17d1d0ac52e88a974d580823d56b7",
     "aeneas/qsag-verified/src/tower.rs": "03f7fd67c9cf7828792febd995e2d552ff8ca58feb9c23b74b06482e195b53b1"
   },
-  "format": 1,
-  "validation": {
-    "comparator": "71 theorems and 25 definitions; six kernels passed",
-    "full_pipeline": "blocked by Qsag.RssSlhFullSecurity (unresolved G identifiers)",
-    "generation": "Charon and Aeneas completed",
-    "note": "This binds generated output and sources; it does not certify the blocked full custody/audit build.",
-    "primitive_lean": "passed with warnings treated as errors"
-  }
+  "format": 1
 }
