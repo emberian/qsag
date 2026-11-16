@@ -8,40 +8,6 @@
 // ~42k um^2!).
 `default_nettype none
 
-module qsag_keccak_rc (
-    input  wire  [4:0]  idx,
-    output logic [63:0] rc
-);
-    always_comb begin
-        unique case (idx)
-            5'd0:    rc = 64'h0000_0000_0000_0001;
-            5'd1:    rc = 64'h0000_0000_0000_8082;
-            5'd2:    rc = 64'h8000_0000_0000_808A;
-            5'd3:    rc = 64'h8000_0000_8000_8000;
-            5'd4:    rc = 64'h0000_0000_0000_808B;
-            5'd5:    rc = 64'h0000_0000_8000_0001;
-            5'd6:    rc = 64'h8000_0000_8000_8081;
-            5'd7:    rc = 64'h8000_0000_0000_8009;
-            5'd8:    rc = 64'h0000_0000_0000_008A;
-            5'd9:    rc = 64'h0000_0000_0000_0088;
-            5'd10:   rc = 64'h0000_0000_8000_8009;
-            5'd11:   rc = 64'h0000_0000_8000_000A;
-            5'd12:   rc = 64'h0000_0000_8000_808B;
-            5'd13:   rc = 64'h8000_0000_0000_008B;
-            5'd14:   rc = 64'h8000_0000_0000_8089;
-            5'd15:   rc = 64'h8000_0000_0000_8003;
-            5'd16:   rc = 64'h8000_0000_0000_8002;
-            5'd17:   rc = 64'h8000_0000_0000_0080;
-            5'd18:   rc = 64'h0000_0000_0000_800A;
-            5'd19:   rc = 64'h8000_0000_8000_000A;
-            5'd20:   rc = 64'h8000_0000_8000_8081;
-            5'd21:   rc = 64'h8000_0000_0000_8080;
-            5'd22:   rc = 64'h0000_0000_8000_0001;
-            default: rc = 64'h8000_0000_8000_8008;
-        endcase
-    end
-endmodule
-
 module qsag_keccak_serial (
     input  wire         clk,
     input  wire         rst_n,
@@ -125,6 +91,8 @@ module qsag_keccak_serial (
                             : 64'd0;
     wire  [63:0] chi_out  = w0 ^ (~w1 & chi_b2) ^ iota_xor;
 
+    wire  [4:0]  dst_ln  = pi_lane((step == 5'd25) ? 5'd0 : (step - 5'd1));
+
     always_comb begin
         rd_addr = 6'd0;
         wr_en   = 1'b0;
@@ -141,8 +109,6 @@ module qsag_keccak_serial (
                 end else if (step == 5'd1) begin
                     rd_addr = 6'd1; // pi_lane(0) into w0
                 end else begin
-                    // step = 2..25: write pi_lane(step-1) <= rot_out, simultaneously read pi_lane(step-1) into w0!
-                    wire [4:0] dst_ln = pi_lane((step == 5'd25) ? 5'd0 : (step - 5'd1));
                     rd_addr = {1'b0, dst_ln};
                     wr_en   = 1'b1;
                     wr_addr = {1'b0, dst_ln};
@@ -165,35 +131,34 @@ module qsag_keccak_serial (
         endcase
     end
 
-    // Register updates for cd[0..4] and w0, w1, b0_save, b1_save
-    logic [4:0]  cd_en;
-    logic [63:0] cd_d [5];
+    // Register updates for cd[0..4] and w0, w1, b0_save, b1_save (zero unpacked-array warnings!)
     genvar gx;
     generate
         for (gx = 0; gx < 5; gx++) begin : g_cd
             localparam int PRV = (gx + 4) % 5;
             localparam int NXT = (gx + 1) % 5;
-            wire [63:0] d_calc = cd[PRV] ^ {cd[NXT][62:0], cd[NXT][63]};
-            wire th0_hit = (st == K_TH0) && (mod5_of(step) == 3'(gx));
-            wire cw_hit  = (st == K_CW)  && (step[2:0] == 3'(gx));
-            assign cd_en[gx] = (!busy && start) || th0_hit || (st == K_THD) || cw_hit;
-            assign cd_d[gx]  = (!busy && start) ? 64'd0 :
-                               (st == K_THD)    ? d_calc :
-                               th0_hit          ? (cd[gx] ^ port) :
-                               (row_y == 3'd0)  ? chi_out : (cd[gx] ^ chi_out);
-            qsag_ereg #(.W(64)) u_cd (.clk(clk), .rst_n(srst_n), .en(cd_en[gx]), .d(cd_d[gx]), .q(cd[gx]));
+            wire [63:0] d_calc  = cd[PRV] ^ {cd[NXT][62:0], cd[NXT][63]};
+            wire        th0_hit = (st == K_TH0) && (mod5_of(step) == 3'(gx));
+            wire        cw_hit  = (st == K_CW)  && (step[2:0] == 3'(gx));
+            wire        cd_en_w = (!busy && start) || th0_hit || (st == K_THD) || cw_hit;
+            wire [63:0] cd_d_w  = (!busy && start) ? 64'd0 :
+                                  (st == K_THD)    ? d_calc :
+                                  th0_hit          ? (cd[gx] ^ port) :
+                                  (row_y == 3'd0)  ? chi_out : (cd[gx] ^ chi_out);
+            qsag_ereg #(.W(64)) u_cd (.clk(clk), .rst_n(srst_n), .en(cd_en_w), .d(cd_d_w), .q(cd[gx]));
         end
     endgenerate
 
-    wire w0_en = (st == K_RHO && step >= 5'd1 && step <= 5'd24) ||
+    wire w_clr = !srst_n;
+    wire w0_en = w_clr || (st == K_RHO && step >= 5'd1 && step <= 5'd24) ||
                  (st == K_CR && step == 5'd0) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w0_d = (st == K_CW) ? w1 : port;
-    wire w1_en = (st == K_CR && step == 5'd1) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w1_d = (st == K_CW) ? chi_b2 : port;
-    qsag_ereg #(.W(64)) u_w0  (.clk(clk), .rst_n(srst_n), .en(w0_en), .d(w0_d), .q(w0));
-    qsag_ereg #(.W(64)) u_w1  (.clk(clk), .rst_n(srst_n), .en(w1_en), .d(w1_d), .q(w1));
-    qsag_ereg #(.W(64)) u_b0s (.clk(clk), .rst_n(srst_n), .en(st == K_CR && step == 5'd0), .d(port), .q(b0_save));
-    qsag_ereg #(.W(64)) u_b1s (.clk(clk), .rst_n(srst_n), .en(st == K_CR && step == 5'd1), .d(port), .q(b1_save));
+    wire [63:0] w0_d = w_clr ? 64'd0 : ((st == K_CW) ? w1 : port);
+    wire w1_en = w_clr || (st == K_CR && step == 5'd1) || (st == K_CW && step <= 5'd3);
+    wire [63:0] w1_d = w_clr ? 64'd0 : ((st == K_CW) ? chi_b2 : port);
+    qsag_ereg_nr #(.W(64)) u_w0  (.clk(clk), .en(w0_en), .d(w0_d), .q(w0));
+    qsag_ereg_nr #(.W(64)) u_w1  (.clk(clk), .en(w1_en), .d(w1_d), .q(w1));
+    qsag_ereg_nr #(.W(64)) u_b0s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd0)), .d(w_clr ? 64'd0 : port), .q(b0_save));
+    qsag_ereg_nr #(.W(64)) u_b1s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd1)), .d(w_clr ? 64'd0 : port), .q(b1_save));
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

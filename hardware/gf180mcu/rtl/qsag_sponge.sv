@@ -20,6 +20,10 @@ module qsag_sponge (
     input  wire [63:0] wr_data,
     input  wire [5:0]  rd_addr,
     output logic [63:0] rd_data,
+    // concurrent shadow-latch write port (active while u_kc permutes st[0..24]!)
+    input  wire        sh_ext_we,
+    input  wire [2:0]  sh_ext_addr,
+    input  wire [63:0] sh_ext_wdata,
     // 1-clock 64-byte shadow-to-sponge parallel block absorb
     input  wire [7:0]  blk_absorb_mask
 );
@@ -29,23 +33,33 @@ module qsag_sponge (
     genvar i;
     generate
         for (i = 0; i < 25; i++) begin : g_lane
-            wire        sc_we = wr_en && (wr_addr == 6'(i));
-            wire        ab_w  = (i < 8) ? blk_absorb_mask[i] : 1'b0;
-            wire [63:0] ab_d  = (i < 8) ? (st[i] ^ sh[i]) : 64'd0;
-            wire        we    = wipe | ab_w | sc_we;
-            wire [63:0] wd    = wipe ? 64'd0 : (ab_w ? ab_d : wr_data);
+            wire sc_we = wr_en && (wr_addr == 6'(i));
+            wire ab_w;
+            wire [63:0] ab_d;
+            if (i < 8) begin : g_ab
+                assign ab_w = blk_absorb_mask[i];
+                assign ab_d = st[i] ^ sh[i];
+            end else begin : g_noab
+                assign ab_w = 1'b0;
+                assign ab_d = 64'd0;
+            end
+            wire        we = wipe | ab_w | sc_we;
+            wire [63:0] wd = wipe ? 64'd0 : (ab_w ? ab_d : wr_data);
             qsag_ereg_nr #(.W(64)) u_r (.clk(clk), .en(we), .d(wd), .q(st[i]));
         end
     endgenerate
 
-    wire        sh_sel = wr_en && (wr_addr[5:3] == 3'b100);
+    wire        sh_sc_sel = wr_en && (wr_addr[5:3] == 3'b100);
+    wire        sh_any_we = sh_ext_we | sh_sc_sel;
+    wire [2:0]  sh_waddr  = sh_ext_we ? sh_ext_addr  : wr_addr[2:0];
+    wire [63:0] sh_wdata  = sh_ext_we ? sh_ext_wdata : wr_data;
     wire [63:0] wd_sh_q;
     qsag_ereg_nr #(.W(64)) u_wd_hold (
-        .clk(clk), .en(wipe | sh_sel), .d(wipe ? 64'd0 : wr_data), .q(wd_sh_q)
+        .clk(clk), .en(wipe | sh_any_we), .d(wipe ? 64'd0 : sh_wdata), .q(wd_sh_q)
     );
     generate
         for (i = 0; i < 8; i++) begin : g_shadow
-            wire sh_we = (sh_sel && (wr_addr[2:0] == 3'(i)));
+            wire sh_we = (sh_any_we && (sh_waddr == 3'(i)));
             wire gate;
             qsag_clkgate_1 u_cg (.clk(clk), .en(sh_we), .gclk(gate));
             qsag_latch_word_rst #(.W(64)) u_lat (.gate(gate), .rst_n(srst_n & ~wipe), .d(wd_sh_q), .q(sh[i]));
