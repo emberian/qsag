@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use qsag_accel::ct::{ct_eq_bytes, ct_lt_u64, ct_select_u64, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake128, Shake256};
-use qsag_core::wipe::SecretBytes;
+use qsag_core::wipe::{SecretBuffer, SecretBytes};
 
 /// FIPS 204 prime modulus $q = 8\_380\_417 = 2^{23} - 2^{13} + 1$.
 pub const MLDSA_Q: u32 = 8_380_417;
@@ -973,27 +973,7 @@ impl core::fmt::Debug for MlDsaSigningKey {
 }
 
 struct SecretPolys(Vec<Poly256>);
-impl Drop for SecretPolys {
-    fn drop(&mut self) {
-        for p in &mut self.0 {
-            p.zeroize();
-        }
-    }
-}
-impl Drop for MlDsaSigningKey {
-    fn drop(&mut self) {
-        qsag_accel::ct::ct_zeroize_bytes(&mut self.key.0);
-        for poly in self
-            .s1
-            .0
-            .iter_mut()
-            .chain(&mut self.s2.0)
-            .chain(&mut self.t0.0)
-        {
-            poly.zeroize();
-        }
-    }
-}
+// Each Poly256 and SecretBytes field already wipes itself on drop, including errors.
 
 #[cfg(test)]
 fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
@@ -1053,7 +1033,7 @@ fn rej_eta_ingest_block(
 /// FIPS 204 `ExpandS` (`Algorithm 33`) batch sampler across `total_polys` (`ell + k`) `SHAKE256` streams.
 #[allow(clippy::needless_range_loop)]
 fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> Vec<Poly256> {
-    let mut seed_w = pack_u64_words_64(seed);
+    let seed_w = SecretBuffer(pack_u64_words_64(seed));
     let mut out = Vec::with_capacity(total_polys);
 
     for base in (0..total_polys).step_by(8) {
@@ -1131,7 +1111,6 @@ fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> V
         }
     }
 
-    qsag_asm::volatile_fill(&mut seed_w, 0);
     out
 }
 
@@ -1254,7 +1233,7 @@ fn expand_signing_masks_batch(
     start_nonce: u16,
 ) -> Vec<Poly256> {
     debug_assert!(params.z_poly_bytes <= 680);
-    let mut seed_w = pack_u64_words_64(seed);
+    let seed_w = SecretBuffer(pack_u64_words_64(seed));
     let total = params.ell;
     let mut out = Vec::with_capacity(total);
 
@@ -1315,7 +1294,6 @@ fn expand_signing_masks_batch(
         }
     }
 
-    qsag_asm::volatile_fill(&mut seed_w, 0);
     out
 }
 
@@ -1351,10 +1329,10 @@ pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -
                     coeffs: p.coeffs.map(|c| high_bits_ct(c, params.gamma2)),
                 })
                 .collect();
-        let mut challenge = vec![0; params.c_tilde_bytes];
+        let mut challenge = SecretBuffer(vec![0; params.c_tilde_bytes]);
         let mut h = Shake256::new();
         h.absorb(&mu);
-        h.absorb(&w1_encode(&params, &w1));
+        h.absorb(&SecretBuffer(w1_encode(&params, &w1)));
         h.finalize(0x1f);
         h.squeeze(&mut challenge);
         let mut c = sample_in_ball(&challenge, params.tau);
@@ -1374,10 +1352,10 @@ pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -
             reject |= !z_ok;
             z.0.push(response);
         }
-        let mut hints = vec![[0; MLDSA_N]; params.k];
+        let mut hints = SecretBuffer(vec![[0; MLDSA_N]; params.k]);
         let mut ones = 0usize;
         for (((row, secret), low), hint_row) in
-            w.0.iter().zip(&sk.s2.0).zip(&sk.t0.0).zip(&mut hints)
+            w.0.iter().zip(&sk.s2.0).zip(&sk.t0.0).zip(hints.iter_mut())
         {
             let mut cs2 = c.pointwise_mul(secret);
             cs2.inv_ntt();

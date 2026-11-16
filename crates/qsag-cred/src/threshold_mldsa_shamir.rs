@@ -50,7 +50,7 @@ use crate::rss_mpc::{
 };
 use crate::threshold_mldsa::{
     PHASE_DKG_SHAMIR, ShamirShare, ThresholdMlDsaDkgConfig, ThresholdMlDsaError,
-    ThresholdMlDsaSignerShare, ThresholdVerificationPack, check_parameters, flatten, ids_bytes,
+    ThresholdMlDsaSignerShare, ThresholdVerificationPack, check_parameters, flatten, flatten_key, ids_bytes,
     inv_ntt_all, lagrange_weights, sorted_distinct, to_polys,
 };
 use alloc::vec;
@@ -190,8 +190,9 @@ impl ThresholdMlDsaSignerShare {
         out.extend_from_slice(SHARE_MAGIC);
         out.extend_from_slice(&self.party_id.to_le_bytes());
         out.extend_from_slice(&self.next_epoch.to_le_bytes());
-        pack(&flatten(&share.s1_hat), &mut out);
-        pack(&flatten(&share.s2_hat), &mut out);
+        for poly in share.s1_hat.iter().chain(&share.s2_hat) {
+            pack(&poly.coeffs, &mut out);
+        }
         Some(out)
     }
 
@@ -361,8 +362,7 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
         broadcast.extend_from_slice(&record);
         let custody = SecretBuffer(share.custody_digest());
         for (component, &subset) in share.subsets.iter().zip(&structure.subsets_of(me)) {
-            let mut secret = SecretBuffer(flatten(&component.s1_hat));
-            secret.extend_from_slice(&flatten(&component.s2_hat));
+            let secret = flatten_key(&component.s1_hat, &component.s2_hat);
             let key = SecretBuffer(cshake256_framed_32(
                 b"QSAG.TMLDSA.SHAMIR.DEAL.V1",
                 &[
