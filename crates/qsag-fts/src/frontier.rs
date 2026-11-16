@@ -1285,9 +1285,11 @@ impl FrontierFtsSigningKey {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         }
         verify_frontier_fts(&self.pk, dp, msg, sig)?;
+        // Both copies carry the chain values of a signature that is not released yet.
+        let encoded = SecretBuffer(sig.to_bytes(self.profile));
         let roundtrip =
-            FrontierFtsSignature::from_bytes(self.profile, &sig.to_bytes(self.profile))?;
-        if roundtrip != *sig {
+            UnreleasedSignature(FrontierFtsSignature::from_bytes(self.profile, &encoded)?);
+        if roundtrip.0 != *sig {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         }
         *slot = Some((sig.randomizer.clone(), sig.grind_counter));
@@ -1619,7 +1621,8 @@ mod rank_domain_tests {
         );
         assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
 
-        // 5. An accepted signature is released intact and leaves nothing to erase.
+        // 5. An accepted signature is released intact. The one discarded buffer is the
+        //    decoded copy of the canonical-encoding check, erased like a refused signature.
         let mut sk_ok = FrontierFtsSigningKey::keygen(
             profile,
             [1u8; 32],
@@ -1632,7 +1635,7 @@ mod rank_domain_tests {
         assert_eq!(released.chain_values.len(), chain_bytes);
         assert!(released.chain_values.iter().any(|&byte| byte != 0));
         verify_frontier_fts(&sk_ok.pk, &dp, msg, &released).unwrap();
-        assert!(unreleased_probe::take().is_empty());
+        assert_eq!(unreleased_probe::take(), [(chain_bytes, 0)]);
 
         // 6. The uncached path fails the same way and erases the same buffer.
         let mut sk_uncached = FrontierFtsSigningKey::keygen(
