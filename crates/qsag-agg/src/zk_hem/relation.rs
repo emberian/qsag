@@ -16,8 +16,8 @@ use alloc::vec::Vec;
 
 use crate::field::{Goldilocks, GoldilocksOps as _};
 use crate::sponge::{
-    POSEIDON2_HALF_EXT_ROUNDS, POSEIDON2_INT_ROUNDS, cshake256_32, poseidon2_apply_me,
-    poseidon2_apply_mi, poseidon2_const_at, poseidon2_perm12, poseidon2_sbox7,
+    POSEIDON2_HALF_EXT_ROUNDS, POSEIDON2_INT_ROUNDS, cshake256_static_midstate, keccak_f1600,
+    poseidon2_apply_me, poseidon2_apply_mi, poseidon2_const_at, poseidon2_perm12, poseidon2_sbox7,
 };
 
 type F = Goldilocks;
@@ -185,14 +185,14 @@ impl Csr {
             .fold(F::ZERO, |acc, (c, v)| acc + v.const_mul(z[c]))
     }
 
-    fn absorb_into(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&(self.ptr.len() as u64).to_le_bytes());
+    fn stream_into(&self, mut push: impl FnMut(&[u8])) {
+        push(&(self.ptr.len() as u64).to_le_bytes());
         for &p in &self.ptr {
-            out.extend_from_slice(&p.to_le_bytes());
+            push(&p.to_le_bytes());
         }
         for (&c, &v) in self.col.iter().zip(&self.val) {
-            out.extend_from_slice(&c.to_le_bytes());
-            out.extend_from_slice(&v.to_le_bytes());
+            push(&c.to_le_bytes());
+            push(&v.to_le_bytes());
         }
     }
 }
@@ -286,7 +286,30 @@ impl Shape {
     }
 
     fn compute_digest(&self) -> [u8; 32] {
-        let mut bytes = Vec::with_capacity(64 + 12 * (self.a.nnz() + self.b.nnz() + self.c.nnz()));
+        const SHAPE_MIDSTATE: [u64; 25] = cshake256_static_midstate(b"QSAG.ZKHEM.SHAPE/v1");
+        const RATE: usize = 136;
+
+        let mut state = SHAPE_MIDSTATE;
+        let mut buf = [0u8; RATE];
+        let mut filled = 0usize;
+        let xor_rate = |st: &mut [u64; 25], blk: &[u8; RATE]| {
+            for (lane, chunk) in st.iter_mut().take(17).zip(blk.as_chunks::<8>().0) {
+                *lane ^= u64::from_le_bytes(*chunk);
+            }
+        };
+        let mut push = |mut data: &[u8]| {
+            while !data.is_empty() {
+                let take = (RATE - filled).min(data.len());
+                buf[filled..filled + take].copy_from_slice(&data[..take]);
+                filled += take;
+                data = &data[take..];
+                if filled == RATE {
+                    xor_rate(&mut state, &buf);
+                    keccak_f1600(&mut state);
+                    filled = 0;
+                }
+            }
+        };
         for n in [
             self.log_rows,
             self.num_sbox,
@@ -294,12 +317,22 @@ impl Shape {
             self.num_public,
             self.mask_var_base,
         ] {
-            bytes.extend_from_slice(&(n as u64).to_le_bytes());
+            push(&(n as u64).to_le_bytes());
         }
-        self.a.absorb_into(&mut bytes);
-        self.b.absorb_into(&mut bytes);
-        self.c.absorb_into(&mut bytes);
-        cshake256_32(b"QSAG.ZKHEM.SHAPE/v1", &bytes)
+        self.a.stream_into(&mut push);
+        self.b.stream_into(&mut push);
+        self.c.stream_into(&mut push);
+
+        buf[filled..].fill(0);
+        buf[filled] ^= 0x04;
+        buf[RATE - 1] ^= 0x80;
+        xor_rate(&mut state, &buf);
+        keccak_f1600(&mut state);
+        let mut out = [0u8; 32];
+        for (lane, dst) in state.iter().take(4).zip(out.as_chunks_mut::<8>().0) {
+            *dst = lane.to_le_bytes();
+        }
+        out
     }
 
     /// Whether `z` (with `z[0] = 1`) satisfies every row.
@@ -591,16 +624,19 @@ impl ConstraintSystem {
                 .max(4) as usize;
             let total = 1usize << log_rows;
 
+            let num_sbox = self.sbox.len();
+            let sbox = core::mem::take(&mut self.sbox);
+            let mul = core::mem::take(&mut self.mul);
             let (mut a, mut b, mut c) = (Csr::new(), Csr::new(), Csr::new());
-            for (ra, rc) in &self.sbox {
-                a.push_row(ra);
+            for (ra, rc) in sbox {
+                a.push_row(&ra);
                 b.push_row(&empty);
-                c.push_row(rc);
+                c.push_row(&rc);
             }
-            for (ra, rb, rc) in &self.mul {
-                a.push_row(ra);
-                b.push_row(rb);
-                c.push_row(rc);
+            for (ra, rb, rc) in mul {
+                a.push_row(&ra);
+                b.push_row(&rb);
+                c.push_row(&rc);
             }
             for _ in used..total - MASK_ROWS {
                 a.push_row(&empty);
@@ -627,10 +663,11 @@ impl ConstraintSystem {
                     }
                 }
             }
+            let z = core::mem::take(&mut self.values);
             let mut shape = Shape {
                 log_rows,
-                num_sbox: self.sbox.len(),
-                num_vars: self.values.len(),
+                num_sbox,
+                num_vars: z.len(),
                 num_public: self.num_public,
                 mask_var_base,
                 a,
@@ -640,7 +677,7 @@ impl ConstraintSystem {
                 digest: [0; 32],
             };
             shape.digest = shape.compute_digest();
-            return (shape, core::mem::take(&mut self.values));
+            return (shape, z);
         }
 
         let pub_prefix = 1 + self.num_public;
@@ -660,11 +697,12 @@ impl ConstraintSystem {
                 (misc_var_base as u32) + (v - (pub_prefix as u32))
             }
         };
-        let remap_lc = |lc: &Lc| -> Lc {
-            let mut terms: Vec<(u32, F)> =
-                lc.0.iter()
-                    .map(|&(v, coeff)| (remap_var(v), coeff))
-                    .collect();
+        let remap_lc = |lc: Lc| -> Lc {
+            let mut terms: Vec<(u32, F)> = lc
+                .0
+                .into_iter()
+                .map(|(v, coeff)| (remap_var(v), coeff))
+                .collect();
             terms.sort_unstable_by_key(|&(v, _)| v);
             Lc(terms)
         };
@@ -677,13 +715,16 @@ impl ConstraintSystem {
             .max(4) as usize;
         let total = 1usize << log_rows;
 
+        let p2_sbox = core::mem::take(&mut self.p2_sbox);
+        let sbox = core::mem::take(&mut self.sbox);
+        let mul = core::mem::take(&mut self.mul);
         let (mut a, mut b, mut c) = (Csr::new(), Csr::new(), Csr::new());
-        for (ra, rc) in self.p2_sbox.iter().chain(&self.sbox) {
+        for (ra, rc) in p2_sbox.into_iter().chain(sbox) {
             a.push_row(&remap_lc(ra));
             b.push_row(&empty);
             c.push_row(&remap_lc(rc));
         }
-        for (ra, rb, rc) in &self.mul {
+        for (ra, rb, rc) in mul {
             a.push_row(&remap_lc(ra));
             b.push_row(&remap_lc(rb));
             c.push_row(&remap_lc(rc));
@@ -719,10 +760,12 @@ impl ConstraintSystem {
         qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.values[..pub_prefix]);
         z.resize(p2_var_base, F::ZERO);
         qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.p2_values);
-        qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.values[pub_prefix..]);
-        z.resize(num_vars, F::ZERO);
-        qsag_asm::volatile_fill(&mut self.values, F::ZERO);
         qsag_asm::volatile_fill(&mut self.p2_values, F::ZERO);
+        self.p2_values = Vec::new();
+        qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.values[pub_prefix..]);
+        qsag_asm::volatile_fill(&mut self.values, F::ZERO);
+        self.values = Vec::new();
+        z.resize(num_vars, F::ZERO);
 
         let mut shape = Shape {
             log_rows,

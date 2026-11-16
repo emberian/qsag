@@ -3532,17 +3532,18 @@ fn whir_commit_batch_owned_with_schedule_inner(
     if table_len >= 4_096
         && num_vars <= MAX_GPU_PCS_NUM_VARS
         && !schedule.regime.uses_poseidon2_canopy()
-        && !schedule.regime.uses_turboshake_canopy()
-        && let Some(session) = crate::acceleration::try_acquire_whir_session()
+        && let Some(session) = crate::acceleration::try_acquire_whir_session_for(secret)
     {
         const PAR_CHUNK: usize = 262_144;
         const STAGING_CHUNK_WORDS: usize = 4 * 1024 * 1024;
+        let turbo = schedule.regime.uses_turboshake_canopy();
         let mut wb_chunk = vec![0u64; STAGING_CHUNK_WORDS.min(table_len)];
         let (max_stage_dom, max_stage_grps) = max_intermediate_stage_dims(num_vars, &schedule);
         let domain_len = table_len * st0.blowup;
         let num_groups = domain_len / group_arity_0;
 
-        let gpu_res = session.raw().prover_whir_commit_round0_with(
+        let gpu_res = session.raw().prover_whir_commit_round0_with_mode(
+            turbo,
             polys.len(),
             salt_seed,
             num_vars,
@@ -3585,11 +3586,11 @@ fn whir_commit_batch_owned_with_schedule_inner(
                 if session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) =>
             {
                 let log_leaves = num_groups.trailing_zeros() as usize;
-                let root = hash_tree_root(log_leaves as u8, &top_node);
+                let root = hash_tree_root_mode(turbo, log_leaves as u8, &top_node);
                 let tree_0 = MerkleCanopyTree {
                     log_leaves,
                     is_compact: false,
-                    is_turboshake: false,
+                    is_turboshake: turbo,
                     nodes: vec![[0u8; 32], top_node],
                     root,
                 };
@@ -4986,8 +4987,9 @@ fn whir_open_core_gpu(
             if !session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) {
                 return Err(qsag_accel::VulkanError::WorkspacePoisoned);
             }
+            let turbo = sched.regime.uses_turboshake_canopy();
             let comm_next = CanopyCommitment {
-                root: hash_tree_root(log_leaves_next, &top_next),
+                root: hash_tree_root_mode(turbo, log_leaves_next, &top_next),
                 log_leaves: log_leaves_next,
             };
             transcript.absorb(b"WHIR_NEXT_COMMIT", &comm_next.to_bytes());
@@ -7374,6 +7376,138 @@ mod pcs_unit_tests {
         assert_eq!(transcript.pow_bits(), 16);
         assert!((0..nonce).all(|n| poseidon2_pow_word(chain, n) & mask != 0));
         assert!((0..nonce).all(|n| !verify_pcs_pow(&transcript, n)));
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn gpu_turboshake_whir_single_and_batch_match_cpu_bit_for_bit() {
+        if crate::acceleration::vulkan_execution_counts().is_none() {
+            return;
+        }
+        let cpu_state = |polys: Vec<Vec<Goldilocks>>,
+                         salt_seed: &[u8; 32],
+                         schedule: &WhirSchedule|
+         -> (CanopyCommitment, HemWhirProverState) {
+            let st0 = schedule.stages[0];
+            let group_arity_0 = 1usize << st0.step_vars;
+            let (monomial_coeffs_0, codewords_0, tree_0) = build_cpu_round0(
+                &polys,
+                salt_seed,
+                schedule.regime,
+                st0.blowup,
+                group_arity_0,
+                true,
+            );
+            let comm = tree_0.commitment();
+            (
+                comm,
+                HemWhirProverState {
+                    num_vars: polys[0].len().trailing_zeros() as usize,
+                    schedule: schedule.clone(),
+                    group_arity_0,
+                    hypercube_evals: polys,
+                    codewords_0,
+                    monomial_coeffs_0,
+                    secret: true,
+                    salt_seed: *salt_seed,
+                    tree_0,
+                    round0_tree_on_cpu: true,
+                    gpu_session: None,
+                },
+            )
+        };
+        let nv = 14usize;
+        for regime in [
+            WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
+            WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
+        ] {
+            let schedule = regime.schedule(nv);
+            let p0 = regime_test_poly(nv, 101);
+            let p1 = regime_test_poly(nv, 202);
+            let pt0 = regime_test_point(nv, 303);
+            let pt1 = regime_test_point(nv, 404);
+            let val0 = crate::field::mle_eval_base_at_ext4(&p0, &pt0);
+            let val1 = crate::field::mle_eval_base_at_ext4(&p1, &pt1);
+
+            // Single polynomial GPU commitment + opening vs CPU reference (`0` GPU fallbacks!).
+            let before = crate::acceleration::vulkan_execution_counts().unwrap();
+            let (comm_gpu, state_gpu) =
+                whir_commit_owned_with_schedule(p0.clone(), &[0x79; 32], &schedule);
+            assert!(
+                state_gpu.gpu_session.is_some(),
+                "TurboSHAKE single commit fell back to CPU"
+            );
+            let mut tr_gpu = regime_transcript(&schedule, b"turbo-gpu-single");
+            let proof_gpu = whir_open(&state_gpu, &pt0, val0, &mut tr_gpu);
+            drop(state_gpu);
+            let after = crate::acceleration::vulkan_execution_counts().unwrap();
+            assert_eq!(after.2, before.2, "unexpected GPU fallback on {regime:?}");
+
+            let (comm_cpu, state_cpu) = cpu_state(alloc::vec![p0.clone()], &[0x79; 32], &schedule);
+            assert_eq!(comm_gpu, comm_cpu);
+            let mut tr_cpu = regime_transcript(&schedule, b"turbo-gpu-single");
+            let proof_cpu = whir_open(&state_cpu, &pt0, val0, &mut tr_cpu);
+            drop(state_cpu);
+            assert_eq!(proof_gpu, proof_cpu);
+            assert_eq!(tr_gpu.transcript_digest(), tr_cpu.transcript_digest());
+            let mut tr_ver = regime_transcript(&schedule, b"turbo-gpu-single");
+            assert!(whir_verify_with_schedule(
+                &comm_gpu,
+                nv,
+                &pt0,
+                val0,
+                &proof_gpu,
+                &mut tr_ver,
+                &schedule,
+            ));
+
+            // Multi-polynomial batch GPU commitment + opening vs CPU reference (`0` GPU fallbacks!).
+            let before_b = crate::acceleration::vulkan_execution_counts().unwrap();
+            let (bcomm_gpu, bstate_gpu) = whir_commit_batch_owned_with_schedule(
+                alloc::vec![p0.clone(), p1.clone()],
+                &[0x5A; 32],
+                &schedule,
+            );
+            assert!(
+                bstate_gpu.gpu_session.is_some(),
+                "TurboSHAKE batch commit fell back to CPU"
+            );
+            let mut btr_gpu = regime_transcript(&schedule, b"turbo-gpu-batch");
+            let bproof_gpu = whir_open_batch(
+                &bstate_gpu,
+                &[&pt0, &pt1],
+                &[val0, val1],
+                &mut btr_gpu,
+            );
+            drop(bstate_gpu);
+            let after_b = crate::acceleration::vulkan_execution_counts().unwrap();
+            assert_eq!(
+                after_b.2, before_b.2,
+                "unexpected GPU batch fallback on {regime:?}"
+            );
+
+            let (bcomm_cpu, bstate_cpu) = cpu_state(alloc::vec![p0, p1], &[0x5A; 32], &schedule);
+            assert_eq!(bcomm_gpu, bcomm_cpu);
+            let mut btr_cpu = regime_transcript(&schedule, b"turbo-gpu-batch");
+            let bproof_cpu = whir_open_batch(
+                &bstate_cpu,
+                &[&pt0, &pt1],
+                &[val0, val1],
+                &mut btr_cpu,
+            );
+            drop(bstate_cpu);
+            assert_eq!(bproof_gpu, bproof_cpu);
+            let mut btr_ver = regime_transcript(&schedule, b"turbo-gpu-batch");
+            assert!(whir_verify_batch_with_schedule(
+                &bcomm_gpu,
+                nv,
+                &[&pt0, &pt1],
+                &[val0, val1],
+                &bproof_gpu,
+                &mut btr_ver,
+                &schedule,
+            ));
+        }
     }
 
     #[cfg(feature = "vulkan")]

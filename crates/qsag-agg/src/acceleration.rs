@@ -81,7 +81,12 @@ impl Drop for GpuWhirSession {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
+    try_acquire_whir_session_for(false)
+}
+
+pub(crate) fn try_acquire_whir_session_for(secret: bool) -> Option<GpuWhirSession> {
     let d = device()?;
     let cur_tid = std::thread::current().id();
     {
@@ -105,7 +110,12 @@ pub(crate) fn try_acquire_whir_session() -> Option<GpuWhirSession> {
     while owner.is_some() {
         owner = d.session_cv.wait(owner).ok()?;
     }
-    if d.backend.inner().try_acquire_prover_session().is_ok() {
+    let acquired = if secret {
+        d.backend.inner().try_acquire_secret_prover_session()
+    } else {
+        d.backend.inner().try_acquire_prover_session()
+    };
+    if acquired.is_ok() {
         *owner = Some(cur_tid);
         Some(GpuWhirSession {
             device: d,

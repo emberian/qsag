@@ -649,11 +649,19 @@ pub fn turboshake256_from_midstate_32_x4(
     midstate: &[u64; 25],
     inputs: [&[u8]; 4],
 ) -> [[u8; 32]; 4] {
-    #[cfg(any(target_feature = "avx2", target_feature = "avx512f"))]
+    #[cfg(any(
+        target_pointer_width = "64",
+        target_feature = "avx2",
+        target_feature = "avx512f"
+    ))]
     {
         turboshake256_from_midstate_32_lanes::<4>(midstate, inputs)
     }
-    #[cfg(not(any(target_feature = "avx2", target_feature = "avx512f")))]
+    #[cfg(not(any(
+        target_pointer_width = "64",
+        target_feature = "avx2",
+        target_feature = "avx512f"
+    )))]
     {
         let lo = turboshake256_from_midstate_32_lanes::<2>(midstate, [inputs[0], inputs[1]]);
         let hi = turboshake256_from_midstate_32_lanes::<2>(midstate, [inputs[2], inputs[3]]);
@@ -750,13 +758,20 @@ pub fn turboshake256_pow_u64_x8(
     {
         turboshake256_pow_lanes::<8>(midstate, chal, base_nonce)
     }
-    #[cfg(all(not(target_feature = "avx512f"), target_feature = "avx2"))]
+    #[cfg(all(
+        not(target_feature = "avx512f"),
+        any(target_pointer_width = "64", target_feature = "avx2")
+    ))]
     {
         let lo = turboshake256_pow_lanes::<4>(midstate, chal, base_nonce);
         let hi = turboshake256_pow_lanes::<4>(midstate, chal, base_nonce.wrapping_add(4));
         [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]]
     }
-    #[cfg(not(any(target_feature = "avx2", target_feature = "avx512f")))]
+    #[cfg(not(any(
+        target_pointer_width = "64",
+        target_feature = "avx2",
+        target_feature = "avx512f"
+    )))]
     {
         let a = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce);
         let b = turboshake256_pow_lanes::<2>(midstate, chal, base_nonce.wrapping_add(2));
@@ -1771,6 +1786,7 @@ pub use qsag_core::sponge::{InstanceBound, RelationBound, TranscriptPhase, Unbou
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TranscriptBackend {
     Cshake256,
+    TurboShake256,
     Poseidon2 { p2_chain: [Goldilocks; 4] },
 }
 
@@ -1780,9 +1796,10 @@ enum TranscriptBackend {
 /// BOTH `.bind_relation(...)` AND `.bind_instance(...)` have been executed on self-delimiting
 /// multi-field frames, eliminating weak-Fiat–Shamir last-round grinding attacks.
 ///
-/// Supports both `cSHAKE256` (default, bit-identical for byte-hash WHIR regimes) and algebraic
-/// Width-12 Rate-8 `Poseidon2` (selected automatically by `bind_relation` when
-/// `schedule.regime.uses_poseidon2_canopy()` is `true`, enabling native in-circuit verification).
+/// Supports `cSHAKE256` (default, bit-identical for standard byte-hash WHIR regimes), RFC 9861
+/// 12-round `TurboSHAKE256` (selected automatically when `schedule.regime.uses_turboshake_canopy()`
+/// is `true` for Role-1 outer WHIR commitments/transcripts), and algebraic Width-12 Rate-8
+/// `Poseidon2` (selected when `schedule.regime.uses_poseidon2_canopy()` is `true`).
 pub struct FiatShamirTranscript<P: TranscriptPhase> {
     chain_digest: [u8; 32],
     backend: TranscriptBackend,
@@ -1808,6 +1825,8 @@ impl<P: TranscriptPhase> Clone for FiatShamirTranscript<P> {
 
 const FS_CUSTOM: &[u8] = b"QSAG.AGG.FS_TRANSCRIPT/v1";
 const FS_MIDSTATE: [u64; 25] = cshake256_static_midstate(FS_CUSTOM);
+const TURBOSHAKE_FS_CUSTOM: &[u8] = b"QSAG.AGG.TURBOFS_TRANSCRIPT/v1";
+const TURBOSHAKE_FS_MIDSTATE: [u64; 25] = turboshake256_static_midstate(TURBOSHAKE_FS_CUSTOM);
 
 impl FiatShamirTranscript<Unbound> {
     /// Initialize a fresh unbound Fiat–Shamir transcript.
@@ -1862,6 +1881,25 @@ impl FiatShamirTranscript<Unbound> {
 
         let mut encoded = sched_bytes;
         encoded.extend_from_slice(&pow_bits.to_le_bytes());
+        if turboshake_pow {
+            let init_turbo = turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, b"INIT");
+            let frame = encode_multi_frame(&[
+                b"BIND_RELATION_HEM_WHIR_EXT4_V5",
+                &init_turbo,
+                relation_tag,
+                params_bytes,
+                &encoded,
+            ]);
+            return FiatShamirTranscript {
+                chain_digest: turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame),
+                backend: TranscriptBackend::TurboShake256,
+                turboshake_pow: true,
+                pow_bits,
+                counter: 0,
+                _phase: PhantomData,
+            };
+        }
+
         let frame = encode_multi_frame(&[
             b"BIND_RELATION_HEM_WHIR_EXT4_V5",
             &self.chain_digest,
@@ -1891,7 +1929,7 @@ impl FiatShamirTranscript<RelationBound> {
     #[inline]
     pub fn poseidon2_chain(&self) -> Option<[Goldilocks; 4]> {
         match self.backend {
-            TranscriptBackend::Cshake256 => None,
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => None,
             TranscriptBackend::Poseidon2 { p2_chain } => Some(p2_chain),
         }
     }
@@ -1916,6 +1954,18 @@ impl FiatShamirTranscript<RelationBound> {
                     backend: TranscriptBackend::Poseidon2 {
                         p2_chain: next_chain,
                     },
+                    turboshake_pow: self.turboshake_pow,
+                    pow_bits: self.pow_bits,
+                    counter: 0,
+                    _phase: PhantomData,
+                }
+            }
+            TranscriptBackend::TurboShake256 => {
+                let inner = encode_multi_frame(instance_fields);
+                let frame = encode_multi_frame(&[b"BIND_INSTANCE", &self.chain_digest, &inner]);
+                FiatShamirTranscript {
+                    chain_digest: turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame),
+                    backend: TranscriptBackend::TurboShake256,
                     turboshake_pow: self.turboshake_pow,
                     pow_bits: self.pow_bits,
                     counter: 0,
@@ -1961,13 +2011,13 @@ impl FiatShamirTranscript<InstanceBound> {
     #[inline]
     pub fn poseidon2_chain(&self) -> Option<[Goldilocks; 4]> {
         match self.backend {
-            TranscriptBackend::Cshake256 => None,
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => None,
             TranscriptBackend::Poseidon2 { p2_chain } => Some(p2_chain),
         }
     }
 
     /// Absorb canonical `Goldilocks` limbs directly in `Poseidon2` mode (or their canonical LE
-    /// byte encoding in `cSHAKE256` mode).
+    /// byte encoding in `cSHAKE256` / `TurboSHAKE256` mode).
     pub fn absorb_limbs(&mut self, label: &[u8], payload_limbs: &[Goldilocks]) {
         match &mut self.backend {
             TranscriptBackend::Poseidon2 { p2_chain } => {
@@ -1981,7 +2031,7 @@ impl FiatShamirTranscript<InstanceBound> {
                 self.chain_digest = limbs4_to_le_bytes32(next);
                 self.counter = 0;
             }
-            TranscriptBackend::Cshake256 => {
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
                 let mut bytes = Vec::with_capacity(8 * payload_limbs.len());
                 for &limb in payload_limbs {
                     bytes.extend_from_slice(&limb.to_le_bytes());
@@ -2005,6 +2055,11 @@ impl FiatShamirTranscript<InstanceBound> {
                 self.chain_digest = limbs4_to_le_bytes32(next);
                 self.counter = 0;
             }
+            TranscriptBackend::TurboShake256 => {
+                let frame = encode_multi_frame(&[b"ABSORB", &self.chain_digest, label, payload]);
+                self.chain_digest = turboshake256_from_midstate_32(&TURBOSHAKE_FS_MIDSTATE, &frame);
+                self.counter = 0;
+            }
             TranscriptBackend::Cshake256 => {
                 let frame = encode_multi_frame(&[b"ABSORB", &self.chain_digest, label, payload]);
                 self.chain_digest = cshake256_from_midstate_32(&FS_MIDSTATE, &frame);
@@ -2013,16 +2068,18 @@ impl FiatShamirTranscript<InstanceBound> {
         }
     }
 
-    /// Absorb an `Ext4` element (`4` native `Goldilocks` limbs in `Poseidon2` mode; canonical 32B LE in `cSHAKE256`).
+    /// Absorb an `Ext4` element (`4` native `Goldilocks` limbs in `Poseidon2` mode; canonical 32B LE in byte-sponge modes).
     pub fn absorb_ext4(&mut self, label: &[u8], val: GoldilocksExt4) {
         match self.backend {
             TranscriptBackend::Poseidon2 { .. } => self.absorb_limbs(label, &val.to_limbs()),
-            TranscriptBackend::Cshake256 => self.absorb(label, &val.to_le_bytes()),
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
+                self.absorb(label, &val.to_le_bytes())
+            }
         }
     }
 
     /// Absorb a slice of `Ext4` elements (`4 * vals.len()` native `Goldilocks` limbs in `Poseidon2` mode;
-    /// bit-identical `32 * vals.len()` LE byte slice in `cSHAKE256` mode).
+    /// bit-identical `32 * vals.len()` LE byte slice in byte-sponge modes).
     pub fn absorb_ext4_slice(&mut self, label: &[u8], vals: &[GoldilocksExt4]) {
         match self.backend {
             TranscriptBackend::Poseidon2 { .. } => {
@@ -2032,7 +2089,7 @@ impl FiatShamirTranscript<InstanceBound> {
                 }
                 self.absorb_limbs(label, &limbs);
             }
-            TranscriptBackend::Cshake256 => {
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
                 let mut bytes = Vec::with_capacity(32 * vals.len());
                 for v in vals {
                     bytes.extend_from_slice(&v.to_le_bytes());
@@ -2042,7 +2099,7 @@ impl FiatShamirTranscript<InstanceBound> {
         }
     }
 
-    /// Absorb a `CanopyCommitment` (`[root_limbs[0..4], log_leaves]` in `Poseidon2` mode; 33B wire in `cSHAKE256`).
+    /// Absorb a `CanopyCommitment` (`[root_limbs[0..4], log_leaves]` in `Poseidon2` mode; 33B wire in byte-sponge modes).
     /// Returns `false` in `Poseidon2` mode if `comm.root` does not decode to 4 canonical `< p` limbs.
     pub fn absorb_canopy_commitment(
         &mut self,
@@ -2066,24 +2123,26 @@ impl FiatShamirTranscript<InstanceBound> {
                 );
                 true
             }
-            TranscriptBackend::Cshake256 => {
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
                 self.absorb(label, &comm.to_bytes());
                 true
             }
         }
     }
 
-    /// Absorb a `u32` scalar (`1` `Goldilocks` limb in `Poseidon2` mode; 4B LE in `cSHAKE256`).
+    /// Absorb a `u32` scalar (`1` `Goldilocks` limb in `Poseidon2` mode; 4B LE in byte-sponge modes).
     pub fn absorb_u32(&mut self, label: &[u8], val: u32) {
         match self.backend {
             TranscriptBackend::Poseidon2 { .. } => {
                 self.absorb_limbs(label, &[Goldilocks::from_u64_reduced(val as u64)]);
             }
-            TranscriptBackend::Cshake256 => self.absorb(label, &val.to_le_bytes()),
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
+                self.absorb(label, &val.to_le_bytes())
+            }
         }
     }
 
-    /// Absorb a `u64` scalar (`[lo32, hi32]` canonical `Goldilocks` limbs in `Poseidon2` mode; 8B LE in `cSHAKE256`).
+    /// Absorb a `u64` scalar (`[lo32, hi32]` canonical `Goldilocks` limbs in `Poseidon2` mode; 8B LE in byte-sponge modes).
     pub fn absorb_u64(&mut self, label: &[u8], val: u64) {
         match self.backend {
             TranscriptBackend::Poseidon2 { .. } => {
@@ -2095,7 +2154,9 @@ impl FiatShamirTranscript<InstanceBound> {
                     ],
                 );
             }
-            TranscriptBackend::Cshake256 => self.absorb(label, &val.to_le_bytes()),
+            TranscriptBackend::Cshake256 | TranscriptBackend::TurboShake256 => {
+                self.absorb(label, &val.to_le_bytes())
+            }
         }
     }
 
@@ -2109,6 +2170,7 @@ impl FiatShamirTranscript<InstanceBound> {
             return poseidon2_sponge_hash_limbs(P2_DOMAIN_FS_SQUEEZE_BASE, p2_chain, &limbs)[0];
         }
 
+        let is_turbo = matches!(self.backend, TranscriptBackend::TurboShake256);
         let mut sub_try: u64 = 0;
         loop {
             let ctr_bytes = self.counter.to_le_bytes();
@@ -2121,7 +2183,11 @@ impl FiatShamirTranscript<InstanceBound> {
                 &try_bytes,
             ]);
             let mut raw = [0u8; 8];
-            cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+            if is_turbo {
+                turboshake256_from_midstate_into(&TURBOSHAKE_FS_MIDSTATE, &frame, &mut raw);
+            } else {
+                cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+            }
             let cand = u64::from_le_bytes(raw);
             if let Some(f) = Goldilocks::from_canonical_u64(cand) {
                 self.counter += 1;
@@ -2200,7 +2266,11 @@ impl FiatShamirTranscript<InstanceBound> {
         self.counter += 1;
         let frame = encode_multi_frame(&[b"SQUEEZE_IDX", &self.chain_digest, label, &ctr_bytes]);
         let mut raw = vec![0u8; 8 * num_queries];
-        cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+        if matches!(self.backend, TranscriptBackend::TurboShake256) {
+            turboshake256_from_midstate_into(&TURBOSHAKE_FS_MIDSTATE, &frame, &mut raw);
+        } else {
+            cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+        }
         raw.as_chunks::<8>()
             .0
             .iter()

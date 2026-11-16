@@ -220,7 +220,11 @@ theorem unframed_partition_tooth : ∃ a b x y : List UInt8,
     as `"QSAG.DPCG.SILENT.CHUNK/v1"` in `preprocessing.rs` is retained).
     Includes wire magics, transcript labels and label fragments completed by `format!`
     (`"QSAG.OT."`, `"QSAG.RNG"`, `"QSAG.PRG"`); membership alone does not imply that a label is
-    a cSHAKE customization. Shared labels retain every owning crate. -/
+    a cSHAKE customization. Twelve intentional cross-crate wire/Merkle/policy labels
+    (`sharedCrossCrateLabels`) retain every owning crate; `auditedByteLabels_cshake256_encodings_ne`
+    proves intra-crate pairwise `cSHAKE256` separation, and
+    `auditedByteLabels_cross_crate_disjoint_modulo_shared` proves cross-crate disjointness
+    outside `sharedCrossCrateLabels`. -/
 @[expose] def auditedByteLabels : List (String × List String) := [
   ("qsag-accel", [
     "QSAG.ACCEL.ALG.BDOZ_GF2_128_DOT.V1", "QSAG.ACCEL.ALG.COSET_LDE_EXT2.V1", "QSAG.ACCEL.ALG.GOLDILOCKS_NTT.V1", "QSAG.ACCEL.ALG.KECCAK_F1600.V1", "QSAG.ACCEL.ALG.MERKLE_POSEIDON2.V1", "QSAG.ACCEL.ALG.POSEIDON2_PERM12.V1",
@@ -254,7 +258,7 @@ theorem unframed_partition_tooth : ∃ a b x y : List UInt8,
     "QSAG.CLI.FTS.DKG.PARTY_ENTROPY.V1", "QSAG.CLI.FTS.DKG.SESSION.V1", "QSAG.CLI.FTS.LEAF_PREP.V1", "QSAG.CLI.HD.DET.CUSTODIAN.V1", "QSAG.CLI.HD.DET.LABEL.V1", "QSAG.CLI.HD.DET.PK_SEED.V1",
     "QSAG.CLI.HEM.DIR_DIGEST.V1", "QSAG.CLI.HEM.META_DIGEST.V2", "QSAG.CLI.HEM.PRIVATE/v1", "QSAG.CLI.HEM.QUORUM.LATCH_SEED.V1", "QSAG.CLI.HEM.QUORUM.SEED_FILE.V1", "QSAG.CLI.HEM.REFRESH.DET.V1",
     "QSAG.CLI.HEM.RESHARE.DET.V1", "QSAG.CLI.HEM.SHARE_DIGEST.V1", "QSAG.CLI.MIGRATE.DEFAULT_DOMAIN.V1", "QSAG.CLI.MIGRATE.DET.ENTROPY.V1", "QSAG.CLI.OT.RECEIVER.V1", "QSAG.CLI.OT.SENDER.V1",
-    "QSAG.CLI.POLICY.COMMITTEE_CHECKPOINT.V1", "QSAG.CLI.POLICY.DKG.PARTY_ENTROPY.V1", "QSAG.CLI.POLICY.DKG.SETUP.V1", "QSAG.CLI.POLICY.EPHEMERAL.KEY.V1", "QSAG.CLI.POLICY.INTENT_RECORD.V1", "QSAG.CLI.POLICY.KEY_ID.V1",
+    "QSAG.CLI.POLICY.COMMITTEE_CHECKPOINT.V1", "QSAG.CLI.POLICY.DKG.PARTY_ENTROPY.V1", "QSAG.CLI.POLICY.DKG.SETUP.V1", "QSAG.CLI.POLICY.EPHEMERAL.KEY.V1", "QSAG.CLI.POLICY.INTENT_RECORD.V1",
     "QSAG.CLI.POLICY.LEDGER.KDF.V1", "QSAG.CLI.POLICY.LEDGER_ID.SEED.V1", "QSAG.CLI.POLICY.LEDGER_ID.V1", "QSAG.CLI.POLICY.WINDOW_STATE.V1", "QSAG.CLI.PUBLIC_AGG.BLINDING.V1", "QSAG.CLI.PUBLIC_AGG.SIG_ACC.V1",
     "QSAG.CLI.QUORUM.CEREMONY_ID.V1", "QSAG.CLI.QUORUM.COUPON.ROOT.DKG.RNG.V1", "QSAG.CLI.QUORUM.COUPON.ROOT.ENGINE.RNG.V1", "QSAG.CLI.QUORUM.DKG.RNG.V1", "QSAG.CLI.QUORUM.KEYGEN.RNG.V1", "QSAG.CLI.QUORUM.ONLINE_RNG.V1",
     "QSAG.CLI.QUORUM.ONLINE_RNG_STREAM.V1", "QSAG.CLI.QUORUM.ONLINE_SID.V1", "QSAG.CLI.QUORUM.PARTY_KDF.V1", "QSAG.CLI.QUORUM.PARTY_KEY_ID.V1", "QSAG.CLI.QUORUM.TREE_DIGEST.V1", "QSAG.CLI.SESSION.HEDGE.V1",
@@ -306,7 +310,7 @@ theorem unframed_partition_tooth : ∃ a b x y : List UInt8,
     "QSAGWPK1", "QSAGWPRF", "QSAGWSTP"]),
   ("qsag-cred", [
     "QSAG.BLIND_VC.ISSUE_ZK.V1", "QSAG.BLIND_VC.SCOPE.V1", "QSAG.BLIND_VC.SCOPE_GL.V1", "QSAG.BLIND_VC.SD_LIMBO.V1", "QSAG.BVC.SD.LIMBO256.V2\x00", "QSAG.MLDSA.NONCE_BURN.V2",
-    "QSAG.MLDSA.NONCE_BURN.V3", "QSAG.MLDSA.PENDING_CIPHER.V1", "QSAG.MLDSA.PENDING_CT_TAG.V1", "QSAG.MLDSA.SEAL_KEY.V1", "QSAG.RSS.KEY.V1", "QSAG.RSS.KEYCONFIRM.V1",
+    "QSAG.MLDSA.PENDING_CIPHER.V1", "QSAG.MLDSA.PENDING_CT_TAG.V1", "QSAG.MLDSA.SEAL_KEY.V1", "QSAG.RSS.KEY.V1", "QSAG.RSS.KEYCONFIRM.V1",
     "QSAG.RSS.KEYSHARE.V1", "QSAG.RSS.OPEN.BIN.V1", "QSAG.RSS.OPEN.V1", "QSAG.RSS.PRSS.V1", "QSAG.RSS.VIEW.BIN.V1", "QSAG.RSS.VIEW.DIGEST.V1",
     "QSAG.RSS.VIEW.INIT.V1", "QSAG.RSS.VIEW.V1", "QSAG.TMLDSA.CUSTODY.V1", "QSAG.TMLDSA.DKG.CONFIRM.V1", "QSAG.TMLDSA.DKG.CTX.V1", "QSAG.TMLDSA.DKG.RHO.V1",
     "QSAG.TMLDSA.SEAL_ENTROPY.V1", "QSAG.TMLDSA.SHAMIR.COIN.COMMIT.V1", "QSAG.TMLDSA.SHAMIR.COIN.SEED.V1", "QSAG.TMLDSA.SHAMIR.COIN.V1", "QSAG.TMLDSA.SHAMIR.COMMITTEE.V1", "QSAG.TMLDSA.SHAMIR.CONFIRM.V1",
@@ -370,6 +374,7 @@ theorem unframed_partition_tooth : ∃ a b x y : List UInt8,
     "QSAG.POLICY.QUORUM_SET.V2", "QSAG.POLICY.SHARED_LEDGER.V2", "QSAG.POLICY.SIGMA_COMMIT.V1", "QSAG.POLICY.SIGMA_SALT.V1", "QSAG.POLICY.SIGNED_INTENT.V2", "QSAG.POLICY.SPEC.V1",
     "QSAG.POLICY.VERIFIED_DELTAS.V2", "QSAG.POLICY.WINDOW_ADVANCE/v1", "QSAG.POLICY.WINDOW_KEY/v1", "QSAG.POLICY.WIRE_META.V1"]),
   ("qsag-quorum", [
+    "QSAG.BELT.ACK.v1",
     "QSAG.CAPABILITY.COMPACT1122.CHILD/v1", "QSAG.CAPABILITY.COMPACT1122.KEY/v1", "QSAG.CAPABILITY.INDEXED_LEAF/v1", "QSAG.CAPABILITY.MERKLE_NODE/v1", "QSAG.CAPABILITY.PADDING/v1", "QSAG.DIRECTORY.ANCHOR.V2",
     "QSAG.FIRST_SIGNED.V1", "QSAG.HEM.EPOCH.ACK/v1", "QSAG.HEM.LATCH.KEY/v1", "QSAG.HEM.QSA.ECHO/v1", "QSAG.HEM.QSA.PKSEED/v1", "QSAG.HEM.QSA.RNG.STREAM/v1",
     "QSAG.HEM.QSA.RNG/v1", "QSAG.HEM.QSA.SKPRF/v1", "QSAG.HEM.QSA.SKSEED/v1", "QSAG.HEM.QSB.CHAL.STREAM/v1", "QSAG.HEM.QSB.CHAL/v1", "QSAG.HEM.QSB.COMMIT/v1",
@@ -454,6 +459,22 @@ theorem auditedByteLabels_cshake256_encodings_ne
     (fun hPair => hBytesNe (Prod.mk.inj hPair).2)
   simpa [hNeNil₁, hNeNil₂] using hDisj
 
+/-- Explicit allowlist of the 12 intentional cross-crate wire/Merkle/policy labels shared across
+    multiple crates in `auditedByteLabels`. -/
+@[expose] def sharedCrossCrateLabels : List String :=
+  ["QSAG.FIRST_SIGNED.V1", "QSAG.MU/v2", "QSAG.POLICY.CTX.V1", "QSAG.POLICY.KEY.V1",
+   "QSAG.SEED_BURN.V1", "QSAGFNOD", "QSAGHMS1", "QSAGMRKL",
+   "QSAGPRFM", "QSAGWPK1", "QSAGWPRF", "QSAGWSTP"]
+
+/-- **Cross-Crate Label Disjointness Modulo `sharedCrossCrateLabels`
+    (`auditedByteLabels_cross_crate_disjoint_modulo_shared`)**:
+    Across distinct crates `c₁.1 ≠ c₂.1` in `auditedByteLabels`, any label `l ∈ c₁.2 ∩ c₂.2`
+    belongs to the explicit 12-entry `sharedCrossCrateLabels` allowlist! -/
+theorem auditedByteLabels_cross_crate_disjoint_modulo_shared :
+    ∀ c₁ ∈ auditedByteLabels, ∀ c₂ ∈ auditedByteLabels,
+      c₁.1 ≠ c₂.1 → ∀ l ∈ c₁.2, l ∈ c₂.2 → l ∈ sharedCrossCrateLabels := by
+  decide +kernel
+
 theorem digest5_modular_pair_tooth : ∃ a b : BitVec 256,
     digest5FromBitVec256 a ≠ digest5FromBitVec256 b ∧
     naiveLimb a.toNat = naiveLimb b.toNat :=
@@ -481,6 +502,7 @@ theorem digest_reduction_witness : ∃ a b : BitVec 256,
 
 #verify_constructive auditedByteLabels_crates auditedByteLabels_nodup
   auditedByteLabels_bytes_ok auditedByteLabels_cshake256_encodings_ne
+  auditedByteLabels_cross_crate_disjoint_modulo_shared
 #verify_constructive transcript_witness digest5_collision_reduction digest_reduction_witness
 #verify_constructive outer_reprogram_zero_drift digest5_collision_iff marked_bytes_collision_iff
   naive_limb_collision_family naive_family_distinct digest5_vs_modular_tooth

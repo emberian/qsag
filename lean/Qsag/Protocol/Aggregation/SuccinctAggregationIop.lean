@@ -9080,8 +9080,8 @@ structure WhirStageSpec where
   numQueries : Nat
   deriving DecidableEq, Repr
 
-/-- `pcs.rs:WhirSecurityRegime`: the six wire-decodable regimes, defined once in
-    `Aggregation.WhirSecurityRegime` (tags `2, 4, 5, 6, 7, 8`). -/
+/-- `pcs.rs:WhirSecurityRegime`: the eight wire-decodable regimes, defined once in
+    `Aggregation.WhirSecurityRegime` (tags `2, 4, 5, 6, 7, 8, 9, 10`). -/
 abbrev WhirSecurityRegime := Aggregation.WhirSecurityRegime
 
 namespace WhirSecurityRegime
@@ -9097,6 +9097,10 @@ namespace WhirSecurityRegime
   Aggregation.WhirSecurityRegime.poseidon2Cdhz25JohnsonQrom128
 @[match_pattern] abbrev poseidon2Cdhz25ZeroPowQrom128 : WhirSecurityRegime :=
   Aggregation.WhirSecurityRegime.poseidon2Cdhz25ZeroPowQrom128
+@[match_pattern] abbrev turboShakeBciksJohnsonQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.turboShakeBciksJohnsonQrom128
+@[match_pattern] abbrev turboShakeCdhz25JohnsonQrom128 : WhirSecurityRegime :=
+  Aggregation.WhirSecurityRegime.turboShakeCdhz25JohnsonQrom128
 end WhirSecurityRegime
 
 /-- `pcs.rs:WhirSchedule`. -/
@@ -9166,13 +9170,14 @@ def WhirSecurityRegime.queryExponentBits (r : WhirSecurityRegime) : Nat :=
   if logB ≤ 2 then t0 else if logB ≤ 4 then t1 else if logB ≤ 6 then t2 else t3
 
 /-- Per-stage query count of `pcs.rs:WhirSecurityRegime::minimum_queries`:
-    `ceil(256 / log2 B) + 1` (tag `2`), `ceil(512 / log2 B) + 2` (tag `4`), the table
-    `(202, 102, 70, 52)` (tags `5, 7`) or `(216, 109, 74, 56)` (tags `6, 8`). -/
+    `ceil(256 / log2 B) + 1` (tag `2`), `ceil(512 / log2 B) + 2` (tags `4, 9`), the table
+    `(202, 102, 70, 52)` (tags `5, 7, 10`) or `(216, 109, 74, 56)` (tags `6, 8`). -/
 @[expose] def WhirSecurityRegime.numQueries (r : WhirSecurityRegime) (blowup : Nat) : Nat :=
   match r with
   | .bciksJohnsonClassical128 => (256 + whirLogBlowup blowup - 1) / whirLogBlowup blowup + 1
-  | .bciksJohnsonQrom128 => (512 + whirLogBlowup blowup - 1) / whirLogBlowup blowup + 2
-  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 =>
+  | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 =>
+    (512 + whirLogBlowup blowup - 1) / whirLogBlowup blowup + 2
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 =>
     whirQueryTable 202 102 70 52 (whirLogBlowup blowup)
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 =>
     whirQueryTable 216 109 74 56 (whirLogBlowup blowup)
@@ -9290,14 +9295,15 @@ theorem whir_johnson_qrom_schedule_deployed :
       ⟨.bciksJohnsonQrom128, 8,
         [⟨4, 6, 258⟩, ⟨16, 4, 130⟩, ⟨64, 3, 88⟩, ⟨256, 3, 66⟩]⟩ := by decide
 
-/-- The budget regime of a Johnson regime. `Qsag.WhirBudgetRegime` models tags `2` and `4`
-    only; the four CDHZ25 regimes have no budget-regime counterpart. -/
+/-- The budget regime of a Johnson regime. `Qsag.WhirBudgetRegime` models the unconditional
+    Johnson query tables (tags `2` and `4, 9`); the five CDHZ25 regimes have no budget-regime
+    counterpart. -/
 def WhirSecurityRegime.toBudgetRegime? : WhirSecurityRegime → Option Qsag.WhirBudgetRegime
   | .bciksJohnsonClassical128 => some .bciksJohnsonClassical128
-  | .bciksJohnsonQrom128 => some .bciksJohnsonQrom128
+  | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 => some .bciksJohnsonQrom128
   | _ => none
 
-/-- For the two Johnson regimes the IOP and the concrete security budget use the same stage
+/-- For the Johnson regimes the IOP and the concrete security budget use the same stage
     geometry and query counts at 24 variables, including the deployed `(258,130,88,66)`. -/
 theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime)
     (b : Qsag.WhirBudgetRegime) (hb : r.toBudgetRegime? = some b) :
@@ -9310,6 +9316,8 @@ theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime)
   · cases hb
   · cases hb
   · cases hb
+  · cases hb
+  · cases Option.some.inj hb; decide +kernel
   · cases hb
 
 /-- The default (`bciksJohnsonQrom128`) schedule at `numVars = 20` (the `K = 8` shard):

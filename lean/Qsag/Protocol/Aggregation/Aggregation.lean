@@ -393,15 +393,17 @@ theorem terminal_check_ext4_omission_unsound (halfClaim : GoldilocksExt4) :
 
 /-! ## 5. Unconditional `[BCIKS20]` Johnson WHIR Schedule Ladder -/
 
-/-- `pcs.rs:WhirSecurityRegime`: the six wire-decodable query-accounting regimes
-    (`#[repr(u8)]` tags `2, 4, 5, 6, 7, 8`; retired capacity tags `0, 1, 3` are rejected).
+/-- `pcs.rs:WhirSecurityRegime`: the eight wire-decodable query-accounting regimes
+    (`#[repr(u8)]` tags `2, 4, 5, 6, 7, 8, 9, 10`; retired capacity tags `0, 1, 3` are rejected).
     - `bciksJohnsonClassical128` (tag `2`): `q = (129, 65, 44, 33)`, 16-bit PoW.
     - `bciksJohnsonQrom128` (tag `4`, default): `q = (258, 130, 88, 66)`, 16-bit PoW.
     - `cdhz25JohnsonQrom128` (tag `5`): `q = (202, 102, 70, 52)`, 16-bit PoW, `cSHAKE256`.
     - `cdhz25ZeroPowQrom128` (tag `6`): `q = (216, 109, 74, 56)`, no PoW, `cSHAKE256`.
     - `poseidon2Cdhz25JohnsonQrom128` (tag `7`): the tag-5 table over the Poseidon2 canopy.
     - `poseidon2Cdhz25ZeroPowQrom128` (tag `8`): the tag-6 table over the Poseidon2 canopy.
-    Only tag `4` has 128 nominal Grover round bits; see `WhirSecurityRegime.qromGroverRoundBits`. -/
+    - `turboShakeBciksJohnsonQrom128` (tag `9`): the tag-4 Johnson QROM table over 12-round `TurboSHAKE256`.
+    - `turboShakeCdhz25JohnsonQrom128` (tag `10`): the tag-5 CDHZ25 table over 12-round `TurboSHAKE256`.
+    Tags `4` and `9` have 136 nominal Grover round bits (`≥ 128`); see `WhirSecurityRegime.qromGroverRoundBits`. -/
 inductive WhirSecurityRegime where
   | bciksJohnsonClassical128
   | bciksJohnsonQrom128
@@ -409,6 +411,8 @@ inductive WhirSecurityRegime where
   | cdhz25ZeroPowQrom128
   | poseidon2Cdhz25JohnsonQrom128
   | poseidon2Cdhz25ZeroPowQrom128
+  | turboShakeBciksJohnsonQrom128
+  | turboShakeCdhz25JohnsonQrom128
   deriving DecidableEq, Repr
 
 def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
@@ -416,7 +420,8 @@ def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom12
 /-- `WhirSecurityRegime::ALL`. -/
 @[expose] def WhirSecurityRegime.all : List WhirSecurityRegime :=
   [.bciksJohnsonClassical128, .bciksJohnsonQrom128, .cdhz25JohnsonQrom128,
-   .cdhz25ZeroPowQrom128, .poseidon2Cdhz25JohnsonQrom128, .poseidon2Cdhz25ZeroPowQrom128]
+   .cdhz25ZeroPowQrom128, .poseidon2Cdhz25JohnsonQrom128, .poseidon2Cdhz25ZeroPowQrom128,
+   .turboShakeBciksJohnsonQrom128, .turboShakeCdhz25JohnsonQrom128]
 
 theorem WhirSecurityRegime.mem_all (r : WhirSecurityRegime) : r ∈ WhirSecurityRegime.all := by
   cases r <;> decide
@@ -428,8 +433,10 @@ def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
   | .cdhz25ZeroPowQrom128 => 6
   | .poseidon2Cdhz25JohnsonQrom128 => 7
   | .poseidon2Cdhz25ZeroPowQrom128 => 8
+  | .turboShakeBciksJohnsonQrom128 => 9
+  | .turboShakeCdhz25JohnsonQrom128 => 10
 
-/-- `WhirSecurityRegime::from_u8`: accepts exactly the wire tags `2, 4, 5, 6, 7, 8`. -/
+/-- `WhirSecurityRegime::from_u8`: accepts exactly the wire tags `2, 4, 5, 6, 7, 8, 9, 10`. -/
 @[expose] def WhirSecurityRegime.decodeTag? (tag : UInt8) : Option WhirSecurityRegime :=
   if tag = 2 then some .bciksJohnsonClassical128
   else if tag = 4 then some .bciksJohnsonQrom128
@@ -437,6 +444,8 @@ def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
   else if tag = 6 then some .cdhz25ZeroPowQrom128
   else if tag = 7 then some .poseidon2Cdhz25JohnsonQrom128
   else if tag = 8 then some .poseidon2Cdhz25ZeroPowQrom128
+  else if tag = 9 then some .turboShakeBciksJohnsonQrom128
+  else if tag = 10 then some .turboShakeCdhz25JohnsonQrom128
   else none
 
 theorem WhirSecurityRegime.decodeTag?_tagByte (r : WhirSecurityRegime) :
@@ -465,6 +474,12 @@ theorem WhirSecurityRegime.tagByte_of_decodeTag? {tag : UInt8} {r : WhirSecurity
   by_cases h8 : tag = 8
   · rw [ite_eq_left h8] at h; cases h; exact h8.symm
   rw [ite_eq_right h8] at h
+  by_cases h9 : tag = 9
+  · rw [ite_eq_left h9] at h; cases h; exact h9.symm
+  rw [ite_eq_right h9] at h
+  by_cases h10 : tag = 10
+  · rw [ite_eq_left h10] at h; cases h; exact h10.symm
+  rw [ite_eq_right h10] at h
   cases h
 
 theorem WhirSecurityRegime.tagByte_injective {r1 r2 : WhirSecurityRegime}
@@ -473,10 +488,10 @@ theorem WhirSecurityRegime.tagByte_injective {r1 r2 : WhirSecurityRegime}
   rw [h, WhirSecurityRegime.decodeTag?_tagByte r2] at h1
   exact (Option.some.inj h1).symm
 
-/-- A tag decodes exactly when it is one of the six `repr(u8)` values. -/
+/-- A tag decodes exactly when it is one of the eight `repr(u8)` values. -/
 theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
     (WhirSecurityRegime.decodeTag? tag).isSome = true ↔
-      tag = 2 ∨ tag = 4 ∨ tag = 5 ∨ tag = 6 ∨ tag = 7 ∨ tag = 8 := by
+      tag = 2 ∨ tag = 4 ∨ tag = 5 ∨ tag = 6 ∨ tag = 7 ∨ tag = 8 ∨ tag = 9 ∨ tag = 10 := by
   constructor
   · intro h
     cases hd : WhirSecurityRegime.decodeTag? tag with
@@ -489,8 +504,10 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
       · exact .inr (.inr (.inl ht.symm))
       · exact .inr (.inr (.inr (.inl ht.symm)))
       · exact .inr (.inr (.inr (.inr (.inl ht.symm))))
-      · exact .inr (.inr (.inr (.inr (.inr ht.symm))))
-  · rintro (h | h | h | h | h | h) <;> rw [h] <;> rfl
+      · exact .inr (.inr (.inr (.inr (.inr (.inl ht.symm)))))
+      · exact .inr (.inr (.inr (.inr (.inr (.inr (.inl ht.symm))))))
+      · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr ht.symm))))))
+  · rintro (h | h | h | h | h | h | h | h) <;> rw [h] <;> rfl
 
 /-- `WhirSecurityRegime::pow_bits`. -/
 @[expose] def WhirSecurityRegime.powBits : WhirSecurityRegime → Nat
@@ -501,8 +518,8 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
     distinct-fiber query error is below `2^-t` (`whirRegime_positive_slack`). -/
 @[expose] def WhirSecurityRegime.pureQueryTargetBits : WhirSecurityRegime → Nat
   | .bciksJohnsonClassical128 => 128
-  | .bciksJohnsonQrom128 => 256
-  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 => 200
+  | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 => 256
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 => 200
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 214
 
 /-- `WhirSecurityRegime::classical_fs_round_bits`: query target plus PoW bits. -/
@@ -518,34 +535,45 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
 def WhirSecurityRegime.meetsUnconditionalGrover128Floor (r : WhirSecurityRegime) : Bool :=
   decide (128 ≤ r.qromGroverRoundBits)
 
-/-- `WhirSecurityRegime::meets_bounded_qrom_128_profile`: the four CDHZ25 regimes. -/
+/-- `WhirSecurityRegime::meets_bounded_qrom_128_profile`: the five CDHZ25 regimes (`5, 6, 7, 8, 10`). -/
 def WhirSecurityRegime.meetsBoundedQrom128Profile : WhirSecurityRegime → Bool
   | .cdhz25JohnsonQrom128 | .cdhz25ZeroPowQrom128
-  | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => true
+  | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128
+  | .turboShakeCdhz25JohnsonQrom128 => true
   | _ => false
 
-/-- `WhirSecurityRegime::meets_qrom_128_floor`: the aggregate authorization policy. Despite the
-    Rust name, `true` does not mean 128 bits of unconditional Grover work. -/
-def WhirSecurityRegime.meetsQrom128Floor (r : WhirSecurityRegime) : Bool :=
+/-- Canonical honest name for the aggregate authorization policy: either the unconditional
+    128-bit Grover round-work floor (tags `4, 9`) or an accounted bounded-query CDHZ25 profile
+    (tags `5, 6, 7, 8, 10`). Classical tag `2` is never authorized. -/
+def WhirSecurityRegime.meetsAuthorizedAggRegimeFloor (r : WhirSecurityRegime) : Bool :=
   r.meetsUnconditionalGrover128Floor || r.meetsBoundedQrom128Profile
+
+/-- Backwards-compatible alias matching Rust `WhirSecurityRegime::meets_qrom_128_floor`. -/
+abbrev WhirSecurityRegime.meetsQrom128Floor (r : WhirSecurityRegime) : Bool :=
+  r.meetsAuthorizedAggRegimeFloor
 
 /-- `WhirSecurityRegime::uses_poseidon2_canopy`. -/
 def WhirSecurityRegime.usesPoseidon2Canopy : WhirSecurityRegime → Bool
   | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => true
   | _ => false
 
+/-- `WhirSecurityRegime::uses_turboshake_canopy` (Role-1 12-round `TurboSHAKE256`, RFC 9861). -/
+def WhirSecurityRegime.usesTurboShakeCanopy : WhirSecurityRegime → Bool
+  | .turboShakeBciksJohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 => true
+  | _ => false
+
 /-- `log2` of the oracle-query budget a bounded-query profile is accounted at (doc comment of
     `WhirSecurityRegime`): `Q ≤ 2^38` for the 16-bit-PoW CDHZ25 table, `Q + 1 ≤ 2^40` for the
-    zero-PoW table. The two Johnson regimes carry no query bound. -/
+    zero-PoW table. The Johnson regimes carry no query bound. -/
 def WhirSecurityRegime.boundedQueryLog2? : WhirSecurityRegime → Option Nat
-  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 => some 38
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 => some 38
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => some 40
   | _ => none
 
 /-- Denominator of the proximity slack `η = 1 / slackDen` at which
     `whirRegime_positive_slack` holds. -/
 def WhirSecurityRegime.slackDen : WhirSecurityRegime → Nat
-  | .bciksJohnsonQrom128 => 1024
+  | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 => 1024
   | _ => 512
 
 /-- `#tooth`: retired capacity-proximity wire tags `0`, `1`, and `3` are rejected (`none`) by
@@ -570,9 +598,9 @@ structure WhirStageSpec where
 @[expose] def whirSchedule4Stage : WhirSecurityRegime → List WhirStageSpec
   | .bciksJohnsonClassical128 =>
     [ ⟨0, 4, 2, 129, 16⟩, ⟨1, 16, 4, 65, 16⟩, ⟨2, 64, 8, 44, 16⟩, ⟨3, 256, 16, 33, 16⟩ ]
-  | .bciksJohnsonQrom128 =>
+  | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 =>
     [ ⟨0, 4, 2, 258, 16⟩, ⟨1, 16, 4, 130, 16⟩, ⟨2, 64, 8, 88, 16⟩, ⟨3, 256, 16, 66, 16⟩ ]
-  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 =>
+  | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 =>
     [ ⟨0, 4, 2, 202, 16⟩, ⟨1, 16, 4, 102, 16⟩, ⟨2, 64, 8, 70, 16⟩, ⟨3, 256, 16, 52, 16⟩ ]
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 =>
     [ ⟨0, 4, 2, 216, 0⟩, ⟨1, 16, 4, 109, 0⟩, ⟨2, 64, 8, 74, 0⟩, ⟨3, 256, 16, 56, 0⟩ ]
@@ -641,34 +669,40 @@ theorem whirRegime_positive_slack (r : WhirSecurityRegime) :
       s.powBits = r.powBits := by
   cases r <;> decide +kernel
 
-/-- **(a) The unconditional Grover-floor regime.** Exactly one of the six regimes, the default
-    `bciksJohnsonQrom128` (tag `4`), has at least 128 nominal Grover round bits; it has 136. -/
+/-- **(a) The unconditional Grover-floor regimes.** Exactly two of the eight regimes—default
+    `bciksJohnsonQrom128` (tag `4`) and `turboShakeBciksJohnsonQrom128` (tag `9`)—have at least
+    128 nominal Grover round bits; both have 136. -/
 theorem whirRegime_unconditional_grover_floor (r : WhirSecurityRegime) :
-    (r.meetsUnconditionalGrover128Floor = true ↔ r = .bciksJohnsonQrom128) ∧
-    WhirSecurityRegime.bciksJohnsonQrom128.qromGroverRoundBits = 136 := by
+    (r.meetsUnconditionalGrover128Floor = true ↔
+      r = .bciksJohnsonQrom128 ∨ r = .turboShakeBciksJohnsonQrom128) ∧
+    WhirSecurityRegime.bciksJohnsonQrom128.qromGroverRoundBits = 136 ∧
+    WhirSecurityRegime.turboShakeBciksJohnsonQrom128.qromGroverRoundBits = 136 := by
   cases r <;> decide
 
-/-- **(b) The bounded-query profiles.** The four CDHZ25 regimes (tags `5, 6, 7, 8`) are exactly
-    the regimes with `meetsBoundedQrom128Profile`. None reaches the 128-bit nominal Grover
-    floor: tags `5, 7` have 108 bits at an accounted budget `Q ≤ 2^38`, tags `6, 8` have 107
+/-- **(b) The bounded-query profiles.** The five CDHZ25 regimes (tags `5, 6, 7, 8, 10`) are
+    exactly the regimes with `meetsBoundedQrom128Profile`. None reaches the 128-bit nominal Grover
+    floor: tags `5, 7, 10` have 108 bits at an accounted budget `Q ≤ 2^38`, tags `6, 8` have 107
     bits at `Q + 1 ≤ 2^40`. -/
 theorem whirRegime_bounded_query_profiles (r : WhirSecurityRegime) :
     (r.meetsBoundedQrom128Profile = true ↔
       r = .cdhz25JohnsonQrom128 ∨ r = .cdhz25ZeroPowQrom128 ∨
-      r = .poseidon2Cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128) ∧
+      r = .poseidon2Cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128 ∨
+      r = .turboShakeCdhz25JohnsonQrom128) ∧
     (r.meetsBoundedQrom128Profile = true → r.meetsUnconditionalGrover128Floor = false) ∧
-    (r = .cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25JohnsonQrom128 →
+    (r = .cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25JohnsonQrom128 ∨
+      r = .turboShakeCdhz25JohnsonQrom128 →
       r.qromGroverRoundBits = 108 ∧ r.boundedQueryLog2? = some 38) ∧
     (r = .cdhz25ZeroPowQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128 →
       r.qromGroverRoundBits = 107 ∧ r.boundedQueryLog2? = some 40) := by
   cases r <;> decide
 
-/-- Nominal Grover round bits of the six regimes in tag order `2, 4, 5, 6, 7, 8`; the
+/-- Nominal Grover round bits of the eight regimes in tag order `2, 4, 5, 6, 7, 8, 9, 10`; the
     classical regime (tag `2`) has 72 and is never authorized for aggregates. -/
 theorem whirRegime_grover_round_bits_table :
-    WhirSecurityRegime.all.map (·.qromGroverRoundBits) = [72, 136, 108, 107, 108, 107] ∧
-    WhirSecurityRegime.all.map (·.meetsQrom128Floor) = [false, true, true, true, true, true] ∧
-    WhirSecurityRegime.all.map (·.tagByte) = [2, 4, 5, 6, 7, 8] := by
+    WhirSecurityRegime.all.map (·.qromGroverRoundBits) = [72, 136, 108, 107, 108, 107, 136, 108] ∧
+    WhirSecurityRegime.all.map (·.meetsAuthorizedAggRegimeFloor) =
+      [false, true, true, true, true, true, true, true] ∧
+    WhirSecurityRegime.all.map (·.tagByte) = [2, 4, 5, 6, 7, 8, 9, 10] := by
   decide
 
 /-- **Quadratic-search accounting of the bounded-query profiles.** With per-round failure
@@ -688,6 +722,8 @@ theorem whirRegime_bounded_query_search_accounting (r : WhirSecurityRegime) (b Q
   · cases Option.some.inj hb; decide
   · cases Option.some.inj hb; decide
   · cases Option.some.inj hb; decide
+  · cases Option.some.inj hb; decide
+  · cases hb
   · cases Option.some.inj hb; decide
 
 set_option exponentiation.threshold 512 in

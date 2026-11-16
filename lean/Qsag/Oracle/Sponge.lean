@@ -541,6 +541,17 @@ theorem keccak_cshake256_precomputed_midstate_eq
   simp only [hNonEmpty, ↓reduceIte, absorbPadded_eq, shake256RateBytes_eq]
   exact hGen
 
+/-- Precomputed 136-byte canopy header midstate equivalence for Role-1 `TurboSHAKE256`
+    (`domTurboShake256 = 0x1F`, RFC 9861) over any 12-round permutation `π12`. -/
+theorem turboshake256_canopy_precomputed_midstate_eq {σ : Type}
+    (π12 : σ → σ) (s0 : σ) (xorBlk : σ → List UInt8 → σ) (extractRate : σ → List UInt8)
+    (hdr136 msg : List UInt8) (hHdr : hdr136.length = 136) (outLen : Nat) :
+    evalSponge 136 domTurboShake256 π12 (π12 (xorBlk s0 hdr136)) xorBlk extractRate msg outLen =
+      evalSponge 136 domTurboShake256 π12 s0 xorBlk extractRate (hdr136 ++ msg) outLen := by
+  unfold evalSponge
+  rw [absorbPayload_single_block_prefix (by decide +kernel) domTurboShake256 hdr136 msg hHdr]
+  rfl
+
 end Qsag
 end
 
@@ -561,6 +572,14 @@ theorem fips202_shake_cshake_sha3_padded_blocks_ne (m₁ m₂ : List UInt8) :
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
     absorbPayload 136 domCshake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
   fips202_shake_cshake_sha3_encodings_ne m₁ m₂
+
+/-- Role-1 `TurboSHAKE256` (`domTurboShake256 = 0x1F`, RFC 9861) vs `cSHAKE256` (`0x04`) and
+    `SHA3-256` (`0x06`) padded 136-byte block separation. -/
+theorem turboshake256_vs_cshake256_padded_blocks_ne (m₁ m₂ : List UInt8) :
+    absorbPayload 136 domTurboShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
+    absorbPayload 136 domTurboShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
+  ⟨(fips202_shake_cshake_sha3_encodings_ne m₁ m₂).1,
+   (fips202_shake_cshake_sha3_encodings_ne m₁ m₂).2.1⟩
 
 /-- Pairwise inequality of complete padded 136-byte block sequences across distinct SP 800-185
     `(N, S)` customization pairs. -/
@@ -593,6 +612,8 @@ theorem qsag_tags_sponge_padded_blocks_ne (m₁ m₂ : List UInt8) :
   Qsag.absorbPayload_cross_domain_encodings_ne
   Qsag.absorbPayload_cross_domain_padded_blocks_ne
   Qsag.fips202_shake_cshake_sha3_padded_blocks_ne
+  Qsag.turboshake256_vs_cshake256_padded_blocks_ne
+  Qsag.turboshake256_canopy_precomputed_midstate_eq
   Qsag.evalSponge_keccak_eq_shake256Xof
   Qsag.cshakePrefix_prefix_free
   Qsag.cshakePrefix_injective
