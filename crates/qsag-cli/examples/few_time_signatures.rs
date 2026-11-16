@@ -5,7 +5,7 @@
 //! ```
 //!
 //! 1. `FrontierSumFts`: a 2,338-byte `Full256Bit` signature (`Compact1122` is 1,122 bytes),
-//!    the two-use budget, and a wire round trip.
+//!    the one-use budget, and a wire round trip.
 //! 2. `ParallelSeededFts`: three parties sign under one public key without reconstructing it,
 //!    with a durable burn journal that refuses to spend an epoch twice, even after a restart.
 
@@ -60,7 +60,7 @@ fn main() {
         Some(FrontierFtsError::UseBudgetExhausted)
     );
     println!(
-        "  [ok] {}-byte signature verified; third signature refused",
+        "  [ok] {}-byte signature verified; further signatures refused",
         wire.len()
     );
 
@@ -86,6 +86,8 @@ fn main() {
     let mut journal =
         FsWalFtsEpochLatch::create(&journal_path, public_key.pk_seed_bytes, journal_key)
             .expect("fresh burn journal");
+    // Save the pre-signing reservoir state to exercise stale-state recovery below.
+    let (generation, blobs) = setup.serialize_reservoirs().expect("serialize reservoirs");
     let signature = setup
         .threshold_sign(1, b"settle batch 41", [0x24; 32], &mut journal)
         .expect("three parties sign at epoch 1");
@@ -111,15 +113,20 @@ fn main() {
         .is_err()
     );
 
-    // Restart: a new process rebuilds its shares and reopens the journal. Epoch 1 stays spent.
+    // Restart from the saved pre-signing reservoirs, preserving the shares and key.
+    // Re-running randomized DKG would enroll a different key, even with the same
+    // demonstration seed. The durable journal must still refuse spent epoch 1.
+    let blob_slices: Vec<&[u8]> = blobs.iter().map(|blob| blob.as_slice()).collect();
+    drop(setup);
     drop(journal);
-    let mut restarted = dealerless_ceremony::DealerlessThresholdFtsSetup::run_ceremony(
-        params,
-        3,
-        [0x21; 32],
-        Some((public_key.clone(), cached_layers)),
-    )
-    .expect("valid parameters");
+    let mut restarted =
+        dealerless_ceremony::DealerlessThresholdFtsSetup::from_persisted_reservoirs(
+            public_key.clone(),
+            cached_layers,
+            generation,
+            &blob_slices,
+        )
+        .expect("restore original committee without DKG");
     let mut journal =
         FsWalFtsEpochLatch::open_existing(&journal_path, public_key.pk_seed_bytes, journal_key)
             .expect("authentic burn journal");
