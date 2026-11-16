@@ -25,10 +25,15 @@ module
   `execX86Prog` on a checker-accepted kernel entry; the data are the secret-labelled registers,
   flags and memory. The `ExecMode` enters through the initial `ditEnabled` / `doitEnabled` /
   `ymmUpperDirty` bits of the machine state.
+* §5 `elfX86DitContract`, `elfAarch64DitContract`, `rlibX86CtEntry`, `rlibArm64CtEntry`: connects
+  `Spec.DitHardwareContract` directly to `ElfVerify` and `ElfFixtureVerify`'s 28 real compiled
+  `qsag-asm` `.rlib` symbol contracts (`19` `x86_64` symbols in `currentX86SymbolContracts` and `9`
+  `aarch64` symbols in `currentAarch64SymbolContracts`).
 -/
 public import Qsag.Spec.Assumptions
 public import Qsag.Machine.SpirvSimt
 public import Qsag.Machine.ConstantTimeIsa
+public import Qsag.Machine.ElfFixtureVerify
 import Qsag.Tactic.AssuranceKit
 import Qsag.Machine.Tactic.KernelRfl
 
@@ -725,6 +730,457 @@ theorem tooth_x86_unrestricted_programs_have_no_dit_contract :
   exact div64X86Prog_leaks _ _ h
 
 end Qsag.ConstantTimeIsa
+
+/-! ## §5. Compiled `.rlib` `ELF64` Symbol Contracts (`28` `qsag-asm` Kernels)
+
+Connects `Spec.DitHardwareContract` directly to the decoded `x86_64` (`19` symbols, `1,935`
+instructions) and `aarch64` (`9` symbols, `1,420` instructions) `.rlib` archives certified in
+`Machine.ElfVerify` and `Machine.ElfFixtureVerify`, complementing §4's `ConstantTimeIsa`
+microarchitectural `umulh`/`div` model with the production `qsag-asm` binary contracts. -/
+
+namespace Qsag
+
+private theorem bank16_get_ofFn {α : Type} (f : Nat → α) (r : Nat) (hr : r < 16) :
+    (Bank16.ofFn f).get r = f r := by
+  match r, hr with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _
+  | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _ => rfl
+  | k + 16, h => exact absurd h (Nat.not_lt_of_ge (Nat.le_add_left 16 k))
+
+private theorem bank32_get_ofFn {α : Type} (f : Nat → α) (r : Nat) (hr : r < 32) :
+    (Bank32.ofFn f).get r = f r := by
+  match r, hr with
+  | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _
+  | 8, _ | 9, _ | 10, _ | 11, _ | 12, _ | 13, _ | 14, _ | 15, _
+  | 16, _ | 17, _ | 18, _ | 19, _ | 20, _ | 21, _ | 22, _ | 23, _
+  | 24, _ | 25, _ | 26, _ | 27, _ | 28, _ | 29, _ | 30, _ | 31, _ => rfl
+  | k + 32, h => exact absurd h (Nat.not_lt_of_ge (Nat.le_add_left 32 k))
+
+/-- Decidable check whether byte address `a` lies in one of `c.pubMemRegions` under caller frame `pub`. -/
+def inContractPubMem (c : FuncContract) (pub : Qsag.X86State) (a : UInt64) : Bool :=
+  c.pubMemRegions.any (fun rl =>
+    (List.range rl.2).any (fun off => a == pub.gpr.get rl.1 + UInt64.ofNat off))
+
+private theorem inContractPubMem_hit {c : FuncContract} {pub : Qsag.X86State}
+    {rl : Nat × Nat} (hRl : rl ∈ c.pubMemRegions) {off : Nat} (hOff : off < rl.2) :
+    inContractPubMem c pub (pub.gpr.get rl.1 + UInt64.ofNat off) = true := by
+  unfold inContractPubMem
+  exact List.any_eq_true.mpr ⟨rl, hRl,
+    List.any_eq_true.mpr ⟨off, List.mem_range.mpr hOff, beq_self_eq_true _⟩⟩
+
+/-- Certified decoded `x86_64` `.text` slice entry paired with its `FuncContract` and public ABI frame. -/
+structure ElfX86CtEntry where
+  slice : ElfFuncSlice
+  contract : FuncContract
+  fuel : Nat
+  pub : Qsag.X86State
+  hMachine : slice.machine = elfMachineX86_64
+  hPubLt : ∀ r ∈ contract.pubGprs, r < 16
+  hMemPub : ∀ rl ∈ contract.pubMemRegions, rl.1 ∈ contract.pubGprs ∧ rl.1 < 16
+  hFramePub : contract.usesRbpFrame = true →
+    4 ∈ contract.pubGprs ∧ contract.outPtrReg ∈ contract.pubGprs ∧ contract.outPtrReg < 16
+  hFrame : X86FramePrecond contract pub
+  hSafe : ElfSliceThreeWayNISafe slice contract
+
+/-- Merge public ABI pointers/lengths/LUT bytes from `e.pub` with secret GPRs/YMMs/flags/memory from `sec`,
+    wiring `ymmDirty := !mode.cleanSimdUpper` from `Spec.ExecMode`. -/
+def ElfX86CtEntry.entryState (e : ElfX86CtEntry) (mode : Spec.ExecMode)
+    (sec : Qsag.X86State) : Qsag.X86State where
+  pc := 0
+  gpr := Bank16.ofFn (fun r =>
+    if e.contract.pubGprs.any (· == r) then e.pub.gpr.get r else sec.gpr.get r)
+  ymm := sec.ymm
+  cf := sec.cf
+  ofFlag := sec.ofFlag
+  zf := sec.zf
+  ymmDirty := !mode.cleanSimdUpper
+  halted := false
+  mem := fun a => if inContractPubMem e.contract e.pub a then e.pub.mem a else sec.mem a
+
+theorem ElfX86CtEntry.entryState_pub_gpr (e : ElfX86CtEntry) (mode : Spec.ExecMode)
+    (sec : Qsag.X86State) {r : Nat} (hr : r ∈ e.contract.pubGprs) :
+    (e.entryState mode sec).gpr.get r = e.pub.gpr.get r := by
+  have hLt : r < 16 := e.hPubLt r hr
+  have hAny : e.contract.pubGprs.any (· == r) = true :=
+    List.any_eq_true.mpr ⟨r, hr, beq_self_eq_true r⟩
+  show (Bank16.ofFn _).get r = e.pub.gpr.get r
+  rw [bank16_get_ofFn _ r hLt, hAny]
+  rfl
+
+theorem ElfX86CtEntry.entryState_contractInit (e : ElfX86CtEntry)
+    (d₁ d₂ : Qsag.X86State) :
+    X86ContractInit e.contract
+      (e.entryState Spec.ExecMode.constantTimeSafe d₁)
+      (e.entryState Spec.ExecMode.constantTimeSafe d₂) := by
+  have hClean : (e.entryState Spec.ExecMode.constantTimeSafe d₁).ymmDirty = false := by
+    change (!Spec.ExecMode.constantTimeSafe.cleanSimdUpper) = false
+    rw [Spec.ExecMode.constantTimeSafe_flags.2.1]
+    rfl
+  have hClean2 : (e.entryState Spec.ExecMode.constantTimeSafe d₂).ymmDirty = false := hClean
+  have hFrameOne : ∀ d : Qsag.X86State,
+      X86FramePrecond e.contract (e.entryState Spec.ExecMode.constantTimeSafe d) := by
+    intro d
+    rw [X86FramePrecond.public_eq_1]
+    cases hRbp : e.contract.usesRbpFrame with
+    | false => exact Or.inl rfl
+    | true =>
+      obtain ⟨h4Mem, hOutMem, hOutLt⟩ := e.hFramePub hRbp
+      have hPubFrame := e.hFrame
+      rw [X86FramePrecond.public_eq_1] at hPubFrame
+      rcases hPubFrame with hFalse | ⟨_, hRsp, hDisj⟩
+      · rw [hRbp] at hFalse; cases hFalse
+      · right
+        rw [e.entryState_pub_gpr _ d h4Mem, e.entryState_pub_gpr _ d hOutMem]
+        exact ⟨hOutLt, hRsp, hDisj⟩
+  rw [X86ContractInit.public_eq_1]
+  refine ⟨rfl, rfl, rfl, rfl, hClean, hClean2, ?_, ?_, hFrameOne d₁, hFrameOne d₂⟩
+  · intro r hr
+    exact ⟨e.hPubLt r hr,
+      (e.entryState_pub_gpr _ d₁ hr).trans (e.entryState_pub_gpr _ d₂ hr).symm⟩
+  · intro rl hRl
+    obtain ⟨hRegMem, hRegLt⟩ := e.hMemPub rl hRl
+    refine ⟨hRegLt, fun off hOff => ?_⟩
+    rw [e.entryState_pub_gpr _ d₁ hRegMem, e.entryState_pub_gpr _ d₂ hRegMem]
+    have hHit := inContractPubMem_hit hRl hOff
+    show (if inContractPubMem e.contract e.pub _ then _ else _) =
+      (if inContractPubMem e.contract e.pub _ then _ else _)
+    rw [hHit]
+
+/-- Decoded `x86_64` `StepObs` leakage trace (`PC`, memory-access addresses, `isDoitSafe`). -/
+def elfX86Leakage (mode : Spec.ExecMode) (e : ElfX86CtEntry) (sec : Qsag.X86State) :
+    List StepObs :=
+  match decodeX86Stream e.slice.code with
+  | none => []
+  | some prog => (runX86 prog e.fuel (e.entryState mode sec)).2
+
+/-- `Spec.DitHardwareContract` instantiated directly over decoded `x86_64` `ELF64` `.text` slices. -/
+def elfX86DitContract : Spec.DitHardwareContract ElfX86CtEntry Qsag.X86State (List StepObs) where
+  observe := elfX86Leakage
+  dataIndependent e d₁ d₂ := by
+    have hSafe := e.hSafe
+    rw [ElfSliceThreeWayNISafe.public_eq_1] at hSafe
+    rcases hSafe with ⟨_, hX86⟩ | ⟨hArmMach, _⟩
+    · obtain ⟨prog, hDec, hTraceEq, _, _⟩ :=
+        hX86 _ _ (e.entryState_contractInit d₁ d₂) e.fuel
+      simp only [elfX86Leakage, hDec]
+      exact hTraceEq
+    · exact absurd (e.hMachine.symm.trans hArmMach) (by decide)
+
+/-- Certified decoded `aarch64` `.text` slice entry paired with its `FuncContract` and public ABI frame. -/
+structure ElfArm64CtEntry where
+  slice : ElfFuncSlice
+  contract : FuncContract
+  fuel : Nat
+  pub : Arm64State
+  hMachine : slice.machine = elfMachineAArch64
+  hDoit : contract.doitEnabled = true
+  hPubLt : ∀ r ∈ contract.pubGprs, r < 31
+  hSafe : ElfSliceThreeWayNISafe slice contract
+
+/-- Merge public ABI `x0..x30` pointers/counts from `e.pub` with secret GPRs/NEON/flags/memory from `sec`,
+    wiring `PSTATE.DIT := mode.ditEnabled` from `Spec.ExecMode`. -/
+def ElfArm64CtEntry.entryState (e : ElfArm64CtEntry) (mode : Spec.ExecMode)
+    (sec : Arm64State) : Arm64State where
+  pc := 0
+  gpr := Bank32.ofFn (fun r =>
+    if e.contract.pubGprs.any (· == r) then e.pub.gpr.get r else sec.gpr.get r)
+  vec := sec.vec
+  cf := sec.cf
+  zf := sec.zf
+  dit := mode.ditEnabled
+  halted := false
+  mem := sec.mem
+
+theorem ElfArm64CtEntry.entryState_pub_gpr (e : ElfArm64CtEntry) (mode : Spec.ExecMode)
+    (sec : Arm64State) {r : Nat} (hr : r ∈ e.contract.pubGprs) :
+    (e.entryState mode sec).gpr.get r = e.pub.gpr.get r := by
+  have hLt : r < 32 := Nat.lt_trans (e.hPubLt r hr) (by decide)
+  have hAny : e.contract.pubGprs.any (· == r) = true :=
+    List.any_eq_true.mpr ⟨r, hr, beq_self_eq_true r⟩
+  show (Bank32.ofFn _).get r = e.pub.gpr.get r
+  rw [bank32_get_ofFn _ r hLt, hAny]
+  rfl
+
+theorem ElfArm64CtEntry.entryState_contractInit (e : ElfArm64CtEntry)
+    (d₁ d₂ : Arm64State) :
+    Arm64ContractInit e.contract
+      (e.entryState Spec.ExecMode.constantTimeSafe d₁)
+      (e.entryState Spec.ExecMode.constantTimeSafe d₂) := by
+  have hDit : (e.entryState Spec.ExecMode.constantTimeSafe d₁).dit = e.contract.doitEnabled := by
+    show Spec.ExecMode.constantTimeSafe.ditEnabled = e.contract.doitEnabled
+    rw [Spec.ExecMode.constantTimeSafe_flags.1, e.hDoit]
+  rw [Arm64ContractInit.public_eq_1]
+  refine ⟨rfl, rfl, rfl, rfl, hDit, hDit, fun r hr => ?_⟩
+  exact ⟨e.hPubLt r hr,
+    (e.entryState_pub_gpr _ d₁ hr).trans (e.entryState_pub_gpr _ d₂ hr).symm⟩
+
+/-- Decoded `aarch64` `StepObs` leakage trace (`PC`, memory-access addresses, `isDoitSafe`). -/
+def elfArm64Leakage (mode : Spec.ExecMode) (e : ElfArm64CtEntry) (sec : Arm64State) :
+    List StepObs :=
+  match decodeArm64Stream e.slice.code with
+  | none => []
+  | some prog => (runArm64 prog e.fuel (e.entryState mode sec)).2
+
+/-- `Spec.DitHardwareContract` instantiated directly over decoded `aarch64` `ELF64` `.text` slices. -/
+def elfArm64DitContract : Spec.DitHardwareContract ElfArm64CtEntry Arm64State (List StepObs) where
+  observe := elfArm64Leakage
+  dataIndependent e d₁ d₂ := by
+    have hSafe := e.hSafe
+    rw [ElfSliceThreeWayNISafe.public_eq_1] at hSafe
+    rcases hSafe with ⟨hX86Mach, _⟩ | ⟨_, hArm⟩
+    · exact absurd (e.hMachine.symm.trans hX86Mach) (by decide)
+    · obtain ⟨prog, hDec, hTraceEq, _, _⟩ :=
+        hArm _ _ (e.entryState_contractInit d₁ d₂) e.fuel
+      simp only [elfArm64Leakage, hDec]
+      exact hTraceEq
+
+/-! ### Binding all `28` compiled `.rlib` symbols (`19` `x86_64` + `9` `aarch64`) -/
+
+def x86ContractEntryWf (c : FuncContract) : Bool :=
+  c.pubGprs.all (· < 16) &&
+  c.pubMemRegions.all (fun rl => c.pubGprs.any (· == rl.1) && decide (rl.1 < 16)) &&
+  (!c.usesRbpFrame ||
+    (c.pubGprs.any (· == 4) && c.pubGprs.any (· == c.outPtrReg) &&
+     decide (c.outPtrReg < 16) && decide (c.outPtrReg != 4) && decide (c.outBytes ≤ 0x10000)))
+
+def arm64ContractEntryWf (c : FuncContract) : Bool :=
+  c.doitEnabled && c.pubGprs.all (· < 31)
+
+theorem currentX86SymbolContracts_all_wf :
+    currentX86SymbolContracts.all x86ContractEntryWf = true := by decide
+
+theorem currentAarch64SymbolContracts_all_wf :
+    currentAarch64SymbolContracts.all arm64ContractEntryWf = true := by decide
+
+theorem currentX86ExtractedSlices_all_x86_machine :
+    currentX86ExtractedSlices.all (fun s => s.machine == elfMachineX86_64) = true := by
+  decide +kernel
+
+theorem currentAarch64ExtractedSlices_all_aarch64_machine :
+    currentAarch64ExtractedSlices.all (fun s => s.machine == elfMachineAArch64) = true := by
+  decide +kernel
+
+/-- Canonical non-aliasing public ABI frame (`rsp = 0x80000`, public pointers at `0x10000`)
+    valid for every contract in `currentX86SymbolContracts`. -/
+def rlibX86DefaultPubState : Qsag.X86State where
+  pc := 0
+  gpr := Bank16.ofFn (fun r => if r == 4 then 0x80000 else 0x10000)
+  ymm := Bank16.const Vec256.zero
+  cf := false
+  ofFlag := false
+  zf := false
+  ymmDirty := false
+  halted := false
+  mem := fun _ => 0x11
+
+private theorem rlibX86DefaultPubState_frame {c : FuncContract}
+    (hWf : x86ContractEntryWf c = true) :
+    X86FramePrecond c rlibX86DefaultPubState := by
+  unfold x86ContractEntryWf at hWf
+  rcases Bool.and_eq_true_iff.mp hWf with ⟨_, hRbpPart⟩
+  rw [X86FramePrecond.public_eq_1]
+  cases hRbp : c.usesRbpFrame with
+  | false => exact Or.inl rfl
+  | true =>
+    rw [hRbp] at hRbpPart
+    simp only [Bool.not_true, Bool.false_or, Bool.and_eq_true, decide_eq_true_eq, bne_iff_ne] at hRbpPart
+    rcases hRbpPart with ⟨⟨⟨⟨_, _⟩, hOutLt⟩, hOutNe4⟩, hOutSz⟩
+    right
+    have hSp : rlibX86DefaultPubState.gpr.get 4 = (0x80000 : UInt64) := rfl
+    have hOut : rlibX86DefaultPubState.gpr.get c.outPtrReg = (0x10000 : UInt64) := by
+      show (Bank16.ofFn (fun r => if r == 4 then (0x80000 : UInt64) else 0x10000)).get c.outPtrReg = 0x10000
+      rw [bank16_get_ofFn _ c.outPtrReg hOutLt]
+      have hBeq : (c.outPtrReg == 4) = false := beq_false_of_ne hOutNe4
+      rw [hBeq]
+      rfl
+    refine ⟨hOutLt, by rw [hSp]; decide, fun j k hj hk hEq => ?_⟩
+    rw [hOut, hSp] at hEq
+    have hNat := congrArg UInt64.toNat hEq
+    have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+    have h10000 : (0x10000 : UInt64).toNat = 0x10000 := rfl
+    have h7fff8 : ((0x80000 : UInt64) - 8).toNat = 0x7FFF8 := rfl
+    simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h10000, h7fff8, h64] at hNat
+    omega
+
+private theorem currentX86_idx_props (idx : Fin 19) :
+    have hs : idx.val < currentX86ExtractedSlices.length := idx.isLt
+    have hc : idx.val < currentX86SymbolContracts.length := idx.isLt
+    (currentX86ExtractedSlices[idx.val]'hs).machine = elfMachineX86_64 ∧
+    x86ContractEntryWf (currentX86SymbolContracts[idx.val]'hc) = true ∧
+    ElfSliceThreeWayNISafe (currentX86ExtractedSlices[idx.val]'hs)
+      (currentX86SymbolContracts[idx.val]'hc) := by
+  have hs : idx.val < currentX86ExtractedSlices.length := idx.isLt
+  have hc : idx.val < currentX86SymbolContracts.length := idx.isLt
+  refine ⟨beq_iff_eq.mp (List.all_eq_true.mp currentX86ExtractedSlices_all_x86_machine _
+      (List.getElem_mem hs)),
+    List.all_eq_true.mp currentX86SymbolContracts_all_wf _ (List.getElem_mem hc),
+    (certSliceAt_sound currentX86_all_symbol_certificates idx.val hs hc).2⟩
+
+private theorem x86ContractEntryWf_pubLt {c : FuncContract}
+    (hWf : x86ContractEntryWf c = true) : ∀ r ∈ c.pubGprs, r < 16 := by
+  intro r hr
+  have h1 := (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hWf).1).1
+  exact of_decide_eq_true (List.all_eq_true.mp h1 r hr)
+
+private theorem x86ContractEntryWf_memPub {c : FuncContract}
+    (hWf : x86ContractEntryWf c = true) :
+    ∀ rl ∈ c.pubMemRegions, rl.1 ∈ c.pubGprs ∧ rl.1 < 16 := by
+  intro rl hRl
+  have h2 := (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hWf).1).2
+  have hRlOk := Bool.and_eq_true_iff.mp (List.all_eq_true.mp h2 rl hRl)
+  obtain ⟨r', hr'Mem, hr'Eq⟩ := List.any_eq_true.mp hRlOk.1
+  rw [beq_iff_eq.mp hr'Eq] at hr'Mem
+  exact ⟨hr'Mem, of_decide_eq_true hRlOk.2⟩
+
+private theorem x86ContractEntryWf_framePub {c : FuncContract}
+    (hWf : x86ContractEntryWf c = true) (hRbp : c.usesRbpFrame = true) :
+    4 ∈ c.pubGprs ∧ c.outPtrReg ∈ c.pubGprs ∧ c.outPtrReg < 16 := by
+  unfold x86ContractEntryWf at hWf
+  have h3 := (Bool.and_eq_true_iff.mp hWf).2
+  rw [hRbp] at h3
+  simp only [Bool.not_true, Bool.false_or, Bool.and_eq_true, decide_eq_true_eq] at h3
+  rcases h3 with ⟨⟨⟨⟨h4Any, hOutAny⟩, hOutLt⟩, _⟩, _⟩
+  obtain ⟨r4, hr4Mem, hr4Eq⟩ := List.any_eq_true.mp h4Any
+  obtain ⟨ro, hroMem, hroEq⟩ := List.any_eq_true.mp hOutAny
+  rw [← beq_iff_eq.mp hr4Eq]
+  rw [← beq_iff_eq.mp hroEq]
+  exact ⟨hr4Mem, hroMem, hOutLt⟩
+
+/-- Construct the certified `ElfX86CtEntry` for any of the `19` compiled `qsag-asm` `x86_64` `.rlib` symbols. -/
+def rlibX86CtEntry (idx : Fin 19) (fuel : Nat) : ElfX86CtEntry :=
+  let hs : idx.val < currentX86ExtractedSlices.length := idx.isLt
+  let hc : idx.val < currentX86SymbolContracts.length := idx.isLt
+  let hProps := currentX86_idx_props idx
+  { slice := currentX86ExtractedSlices[idx.val]'hs
+    contract := currentX86SymbolContracts[idx.val]'hc
+    fuel := fuel
+    pub := rlibX86DefaultPubState
+    hMachine := hProps.1
+    hPubLt := x86ContractEntryWf_pubLt hProps.2.1
+    hMemPub := x86ContractEntryWf_memPub hProps.2.1
+    hFramePub := x86ContractEntryWf_framePub hProps.2.1
+    hFrame := rlibX86DefaultPubState_frame hProps.2.1
+    hSafe := hProps.2.2 }
+
+theorem rlibX86CtEntry_binds_rlib_archive (idx : Fin 19) (fuel : Nat) :
+    (extractAllRlibFuncs currentX86RlibArchiveBytes)[idx.val]? =
+      some (rlibX86CtEntry idx fuel).slice ∧
+    currentX86SymbolContracts[idx.val]? =
+      some (rlibX86CtEntry idx fuel).contract := by
+  rw [currentX86_rlib_extracted_slices]
+  exact ⟨List.getElem?_eq_getElem idx.isLt, List.getElem?_eq_getElem idx.isLt⟩
+
+private theorem currentAarch64_idx_props (idx : Fin 9) :
+    have hs : idx.val < currentAarch64ExtractedSlices.length := idx.isLt
+    have hc : idx.val < currentAarch64SymbolContracts.length := idx.isLt
+    (currentAarch64ExtractedSlices[idx.val]'hs).machine = elfMachineAArch64 ∧
+    arm64ContractEntryWf (currentAarch64SymbolContracts[idx.val]'hc) = true ∧
+    ElfSliceThreeWayNISafe (currentAarch64ExtractedSlices[idx.val]'hs)
+      (currentAarch64SymbolContracts[idx.val]'hc) := by
+  have hs : idx.val < currentAarch64ExtractedSlices.length := idx.isLt
+  have hc : idx.val < currentAarch64SymbolContracts.length := idx.isLt
+  refine ⟨beq_iff_eq.mp (List.all_eq_true.mp currentAarch64ExtractedSlices_all_aarch64_machine _
+      (List.getElem_mem hs)),
+    List.all_eq_true.mp currentAarch64SymbolContracts_all_wf _ (List.getElem_mem hc),
+    (certSliceAt_sound currentAarch64_all_symbol_certificates idx.val hs hc).2⟩
+
+/-- Construct the certified `ElfArm64CtEntry` for any of the `9` compiled `qsag-asm` `aarch64` `.rlib` symbols. -/
+def rlibArm64CtEntry (idx : Fin 9) (fuel : Nat) (pub : Arm64State) : ElfArm64CtEntry :=
+  let hs : idx.val < currentAarch64ExtractedSlices.length := idx.isLt
+  let hc : idx.val < currentAarch64SymbolContracts.length := idx.isLt
+  let hProps := currentAarch64_idx_props idx
+  { slice := currentAarch64ExtractedSlices[idx.val]'hs
+    contract := currentAarch64SymbolContracts[idx.val]'hc
+    fuel := fuel
+    pub := pub
+    hMachine := hProps.1
+    hDoit := (Bool.and_eq_true_iff.mp hProps.2.1).1
+    hPubLt := fun r hr =>
+      of_decide_eq_true (List.all_eq_true.mp (Bool.and_eq_true_iff.mp hProps.2.1).2 r hr)
+    hSafe := hProps.2.2 }
+
+theorem rlibArm64CtEntry_binds_rlib_archive (idx : Fin 9) (fuel : Nat) (pub : Arm64State) :
+    (extractAllRlibFuncs currentAarch64RlibArchiveBytes)[idx.val]? =
+      some (rlibArm64CtEntry idx fuel pub).slice ∧
+    currentAarch64SymbolContracts[idx.val]? =
+      some (rlibArm64CtEntry idx fuel pub).contract := by
+  rw [currentAarch64_rlib_extracted_slices]
+  exact ⟨List.getElem?_eq_getElem idx.isLt, List.getElem?_eq_getElem idx.isLt⟩
+
+/-- Every multi-call invocation trace of the `19` compiled `x86_64` `.rlib` kernels with matching
+    `(symbolIdx, fuel)` schedule produces identical `StepObs` leakage traces under `constantTimeSafe`,
+    regardless of secret GPRs, YMM registers, flags, and secret memory. -/
+theorem rlib_x86_all19_dit_trace_data_independent
+    (tr₁ tr₂ : List ((Fin 19 × Nat) × Qsag.X86State))
+    (hSched : tr₁.map Prod.fst = tr₂.map Prod.fst) :
+    tr₁.map (fun call => elfX86Leakage Spec.ExecMode.constantTimeSafe
+        (rlibX86CtEntry call.1.1 call.1.2) call.2) =
+      tr₂.map (fun call => elfX86Leakage Spec.ExecMode.constantTimeSafe
+        (rlibX86CtEntry call.1.1 call.1.2) call.2) := by
+  let liftCall := fun (call : (Fin 19 × Nat) × Qsag.X86State) =>
+    (rlibX86CtEntry call.1.1 call.1.2, call.2)
+  have hMapEq : (tr₁.map liftCall).map Prod.fst = (tr₂.map liftCall).map Prod.fst := by
+    rw [List.map_map, List.map_map]
+    exact congrArg (List.map (fun p : Fin 19 × Nat => rlibX86CtEntry p.1 p.2)) hSched
+  have hRes := elfX86DitContract.trace_data_independent Spec.ExecMode.constantTimeSafe rfl
+    (tr₁.map liftCall) (tr₂.map liftCall) hMapEq
+  simpa only [List.map_map, Function.comp_def, elfX86DitContract] using hRes
+
+/-- Every multi-call invocation trace of the `9` compiled `aarch64` `.rlib` kernels with matching
+    `(symbolIdx, fuel, pub)` schedule produces identical `StepObs` leakage traces under `constantTimeSafe`,
+    regardless of secret GPRs, NEON vectors, flags, and secret memory. -/
+theorem rlib_aarch64_all9_dit_trace_data_independent
+    (tr₁ tr₂ : List ((Fin 9 × Nat × Arm64State) × Arm64State))
+    (hSched : tr₁.map Prod.fst = tr₂.map Prod.fst) :
+    tr₁.map (fun call => elfArm64Leakage Spec.ExecMode.constantTimeSafe
+        (rlibArm64CtEntry call.1.1 call.1.2.1 call.1.2.2) call.2) =
+      tr₂.map (fun call => elfArm64Leakage Spec.ExecMode.constantTimeSafe
+        (rlibArm64CtEntry call.1.1 call.1.2.1 call.1.2.2) call.2) := by
+  let liftCall := fun (call : (Fin 9 × Nat × Arm64State) × Arm64State) =>
+    (rlibArm64CtEntry call.1.1 call.1.2.1 call.1.2.2, call.2)
+  have hMapEq : (tr₁.map liftCall).map Prod.fst = (tr₂.map liftCall).map Prod.fst := by
+    rw [List.map_map, List.map_map]
+    exact congrArg (List.map (fun p : Fin 9 × Nat × Arm64State =>
+      rlibArm64CtEntry p.1 p.2.1 p.2.2)) hSched
+  have hRes := elfArm64DitContract.trace_data_independent Spec.ExecMode.constantTimeSafe rfl
+    (tr₁.map liftCall) (tr₂.map liftCall) hMapEq
+  simpa only [List.map_map, Function.comp_def, elfArm64DitContract] using hRes
+
+/-- Inhabitedness witness exercising real `.rlib` symbol `8` (`qsag_asm_goldilocks_mul_ct_x86_64`)
+    on distinct secret operands (`rdi = 3 ≠ 7`) with identical `StepObs` leakage trace. -/
+theorem inhabited_rlib_x86_dit_sequence :
+    ∃ tr₁ tr₂ : List ((Fin 19 × Nat) × Qsag.X86State),
+      tr₁.map Prod.fst = tr₂.map Prod.fst ∧
+      ¬ (tr₁.map (fun c => c.2.gpr.get 7) = tr₂.map (fun c => c.2.gpr.get 7)) ∧
+      tr₁.map (fun call => elfX86Leakage Spec.ExecMode.constantTimeSafe
+          (rlibX86CtEntry call.1.1 call.1.2) call.2) =
+        tr₂.map (fun call => elfX86Leakage Spec.ExecMode.constantTimeSafe
+          (rlibX86CtEntry call.1.1 call.1.2) call.2) := by
+  let s1 : Qsag.X86State := { rlibX86DefaultPubState with
+    gpr := Bank16.ofFn (fun r => if r == 7 then 3 else 0x10000) }
+  let s2 : Qsag.X86State := { rlibX86DefaultPubState with
+    gpr := Bank16.ofFn (fun r => if r == 7 then 7 else 0x10000) }
+  refine ⟨[((⟨8, by decide⟩, 64), s1)], [((⟨8, by decide⟩, 64), s2)], rfl, by decide, ?_⟩
+  exact rlib_x86_all19_dit_trace_data_independent _ _ rfl
+
+/-- `#tooth`: patching the compiled `qsag_asm_gf256_shamir_mul_gfni` `.rlib` slice (`rlibX86CtEntry 2`)
+    to NOP its vector-clear epilogue violates the 3-way constant-time + SIMD-hygiene contract. -/
+theorem tooth_rlib_x86_gfni_missing_vzeroupper_rejected :
+    checkX86WithInv (patchBytesAt (rlibX86CtEntry ⟨2, by decide⟩ 0).slice.code 0x72
+      [0x90, 0x90, 0x90, 0x90, 0x90])
+      (rlibX86CtEntry ⟨2, by decide⟩ 0).contract qsag_asm_gf256_shamir_mul_gfni_currentInv = false :=
+  current_gfni_missing_vector_cleanup_rejected
+
+/-- `#tooth`: patching the compiled `qsag_asm_tower128_bdoz_mac_pmull` `.rlib` slice (`rlibArm64CtEntry 3`)
+    to NOP its NEON zeroization epilogue violates the `aarch64` constant-time contract. -/
+theorem tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected (pub : Arm64State) :
+    checkArm64WithInv (patchBytesAt (rlibArm64CtEntry ⟨3, by decide⟩ 0 pub).slice.code 0x104
+      [0x1F, 0x20, 0x03, 0xD5])
+      (rlibArm64CtEntry ⟨3, by decide⟩ 0 pub).contract
+      qsag_asm_tower128_bdoz_mac_pmull_currentInv = false :=
+  current_pmull_missing_wipe_rejected
+
+end Qsag
 end
 
 #verify_constructive Qsag.simtEpochContract_uniformControlFlow
@@ -746,6 +1202,18 @@ end
 #verify_constructive Qsag.ConstantTimeIsa.x86_kernel_sequence_leakage_data_independent
 #verify_constructive Qsag.ConstantTimeIsa.tooth_arm_umulh_leaks_without_dit_mode
 #verify_constructive Qsag.ConstantTimeIsa.tooth_x86_unrestricted_programs_have_no_dit_contract
+#verify_constructive Qsag.ElfX86CtEntry.entryState_contractInit
+#verify_constructive Qsag.ElfArm64CtEntry.entryState_contractInit
+#verify_constructive Qsag.rlibX86CtEntry_binds_rlib_archive
+#verify_constructive Qsag.rlibArm64CtEntry_binds_rlib_archive
+#verify_constructive Qsag.rlib_x86_all19_dit_trace_data_independent
+#verify_constructive Qsag.rlib_aarch64_all9_dit_trace_data_independent
+#verify_constructive Qsag.inhabited_rlib_x86_dit_sequence
+#verify_constructive Qsag.tooth_rlib_x86_gfni_missing_vzeroupper_rejected
+#verify_constructive Qsag.tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected
 #tooth_pair Qsag.twoWaveReduction_epochs_wellFormed vs Qsag.twoWaveNoBarrier_not_wellFormed
 #tooth_pair Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent vs Qsag.ConstantTimeIsa.tooth_arm_umulh_leaks_without_dit_mode
+#tooth_pair Qsag.rlib_x86_all19_dit_trace_data_independent vs Qsag.tooth_rlib_x86_gfni_missing_vzeroupper_rejected
+#tooth_pair Qsag.rlib_aarch64_all9_dit_trace_data_independent vs Qsag.tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected
 #verify_inhabited Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent Qsag.ConstantTimeIsa.inhabited_arm_kernel_sequence
+#verify_inhabited Qsag.rlib_x86_all19_dit_trace_data_independent Qsag.inhabited_rlib_x86_dit_sequence
