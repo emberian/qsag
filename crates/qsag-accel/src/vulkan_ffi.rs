@@ -6767,6 +6767,43 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Legacy OOD tables may be extended above 24 variables only if their geometric
+    /// structure is checked. The first block may carry a public claim weight xi.
+    fn validate_legacy_geometric(src: &[[u64; 4]]) -> Result<(), VulkanError> {
+        if src.len() != 768 {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let one = [1, 0, 0, 0];
+        let mul = Self::fp4_mul_arr;
+        let pow256 = |mut x| { for _ in 0..8 { x = mul(x, x); } x };
+        if src[0] == [0; 4] {
+            if src[..256].iter().any(|x| *x != [0; 4]) {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+        } else {
+            for i in 2..256 {
+                if mul(src[i], src[0]) != mul(src[i - 1], src[1]) {
+                    return Err(crate::AccelError::LengthOverflow.into());
+                }
+            }
+            if pow256(src[1]) != mul(pow256(src[0]), src[257]) {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
+        }
+        for block in [256, 512] {
+            if src[block] != one { return Err(crate::AccelError::LengthOverflow.into()); }
+            for i in 2..256 {
+                if src[block + i] != mul(src[block + i - 1], src[block + 1]) {
+                    return Err(crate::AccelError::LengthOverflow.into());
+                }
+            }
+        }
+        if pow256(src[257]) != src[513] {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        Ok(())
+    }
+
     /// Extends a 3-byte (`768`-entry) geometric Kronecker table `[xi * z^k0, z^(256*k1), z^(65536*k2)]`
     /// to a 4-byte (`1024`-entry) table `[..., z^(16777216*k3)]` in staging at `byte_offset`.
     /// Entry `768` (`k3 = 0`) is always `[1, 0, 0, 0]`, so arbitrary non-geometric test tables
@@ -7478,6 +7515,10 @@ impl RawVulkanEngine {
                 2048 => 1024usize,
                 _ => return Err(crate::AccelError::LengthOverflow.into()),
             };
+            if stride == 768 && num_vars > 24 {
+                Self::validate_legacy_geometric(&z_ood_kronecker[..768])?;
+                Self::validate_legacy_geometric(&z_ood_kronecker[768..])?;
+            }
             let core_len = pow2_len(num_vars, 26)?;
             engine.prover_session()?;
             engine.prover.air = None;
@@ -7706,6 +7747,10 @@ impl RawVulkanEngine {
                 2048 => 1024usize,
                 _ => return Err(crate::AccelError::LengthOverflow.into()),
             };
+            if stride == 768 && k_len > (1 << 24) {
+                Self::validate_legacy_geometric(&xi_z_kronecker[..768])?;
+                Self::validate_legacy_geometric(&xi_z_kronecker[768..])?;
+            }
             engine.prover_session()?;
             engine.prover.air = None;
             to_u32(k_len)?;
@@ -8512,6 +8557,10 @@ impl RawVulkanEngine {
                 2048 => 1024usize,
                 _ => return Err(crate::AccelError::LengthOverflow.into()),
             };
+            if stride == 768 && coeff_len > (1 << 24) {
+                Self::validate_legacy_geometric(&z_ood_kronecker[..768])?;
+                Self::validate_legacy_geometric(&z_ood_kronecker[768..])?;
+            }
             engine.prover_session()?;
             engine.prover.air = None;
             to_u32(coeff_len)?;
@@ -10243,6 +10292,19 @@ mod tests {
                 turboshake_canopy: false,
             })
         );
+    }
+
+    #[test]
+    fn legacy_ood_extension_requires_geometric_tables() {
+        let full = crate::goldilocks::geometric_kronecker_1024([1, 0, 0, 0], [3, 5, 7, 11]);
+        let mut table = full[..768].to_vec();
+        assert!(RawVulkanEngine::validate_legacy_geometric(&table).is_ok());
+        for v in &mut table[..256] { *v = RawVulkanEngine::fp4_mul_arr(*v, [13, 17, 19, 23]); }
+        assert!(RawVulkanEngine::validate_legacy_geometric(&table).is_ok());
+        for idx in [2, 127, 256, 257, 511, 512, 640, 767] {
+            let mut bad = table.clone(); bad[idx][0] ^= 1;
+            assert!(RawVulkanEngine::validate_legacy_geometric(&bad).is_err(), "index {idx}");
+        }
     }
 
     #[test]
