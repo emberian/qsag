@@ -192,7 +192,7 @@ fn canonical_spirv_pin_digests_are_frozen() {
         ),
         (
             KernelSlot::MerkleLayerPoseidon2,
-            "b2d360c3b4fd4fe38bee3a3886001e89f987f1f1dcae5bb162e59d49e0901d92",
+            "2c0b53d67a739eb4aed21d4337957128af2215df9fb9f3be5e157eff37da1c19",
         ),
         (
             KernelSlot::BdozGf2128BatchDot,
@@ -211,7 +211,7 @@ fn canonical_spirv_pin_digests_are_frozen() {
         ),
         (
             ProverKernelSlot::WhirFoldSumcheck,
-            "8ce8d4f2eef6b6dfcf3a40dbfe45b369d09d647c2f0658a5c623cd9e59ab7188",
+            "291f84c5249ebce359f072744353eede299d075388c4b05e7583bb9da19db952",
         ),
         (
             ProverKernelSlot::AirRowGroupA,

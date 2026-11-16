@@ -982,6 +982,17 @@ fn span_end(base: u64, count: u64, stride: u64, elem_bytes: u64) -> Result<u64, 
     cmul(cadd(base, cmul(count, stride)?)?, elem_bytes)
 }
 
+/// Parallel folds and transposes cannot overwrite another invocation's unread input.
+/// All coordinates use the same element unit; touching endpoints are allowed.
+fn check_disjoint(src: u64, src_len: u64, dst: u64, dst_len: u64) -> Result<(), VulkanError> {
+    let src_end = cadd(src, src_len)?;
+    let dst_end = cadd(dst, dst_len)?;
+    if src_len != 0 && dst_len != 0 && src < dst_end && dst < src_end {
+        return Err(length_overflow());
+    }
+    Ok(())
+}
+
 fn to_u32<T: TryInto<u32>>(value: T) -> Result<u32, VulkanError> {
     value.try_into().map_err(|_| length_overflow())
 }
@@ -1183,6 +1194,12 @@ struct ProverArena {
     /// `Some` between a successful round-0 commit and the next scrub of the session. Every
     /// other prover entry point refuses to run without it.
     session: Option<ProverSessionDims>,
+    /// Actual tree occupying round zero and each parity slot: (stage, arity, groups).
+    committed_trees: [Option<(usize, usize, usize)>; 3],
+    /// A failed scrub must finish after idle recovery, before any arena reuse.
+    scrub_pending: bool,
+    /// Survives a partially failed resize until all bindings have been rewritten.
+    descriptors_dirty: bool,
     /// `Some` between `exec_prover_air_init_shard` and the next job that rewrites `vram_aux_in`.
     air: Option<AirShardState>,
     /// Buffers whose scrub submission failed: they may still be referenced by the device, so
@@ -3522,7 +3539,8 @@ impl RawVulkanEngine {
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_SHADER_READ_BIT
                     | VK_ACCESS_SHADER_WRITE_BIT
-                    | VK_ACCESS_TRANSFER_READ_BIT,
+                    | VK_ACCESS_TRANSFER_READ_BIT
+                    | VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT,
             );
             for &(buffer, bytes) in ranges {
@@ -3601,6 +3619,7 @@ impl RawVulkanEngine {
             ]);
             self.prover.twiddles_ready = false;
             self.prover.session = None;
+            self.prover.committed_trees = [None; 3];
             self.prover.air = None;
             self.submit_and_wait()
         }
@@ -3609,15 +3628,18 @@ impl RawVulkanEngine {
     /// Scrub all session-bearing buffers in `ProverArena` on session release while retaining
     /// precomputed public `twiddles_24` and buffer allocations for zero-alloc reuse.
     pub(crate) fn scrub_prover_session(&mut self) -> Result<(), VulkanError> {
+        self.prover.scrub_pending = true;
         crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
         // Whatever happens below, nothing may read this session's buffers again until a new
         // round-0 commit re-establishes the arena.
         self.prover.session = None;
+        self.prover.committed_trees = [None; 3];
         self.prover.air = None;
         unsafe {
             self.settle_staging();
             self.ensure_ready()?;
             if self.cmd_buf.is_null() || !self.prover.initialized {
+                self.prover.scrub_pending = false;
                 return Ok(());
             }
             let span = |b: &GpuBuffer| (b.buffer, b.used.min(b.capacity) & !7);
@@ -3637,6 +3659,7 @@ impl RawVulkanEngine {
                 span(&self.prover.vram_partials),
             ];
             if ranges.iter().all(|&(_, bytes)| bytes == 0) {
+                self.prover.scrub_pending = false;
                 return Ok(());
             }
             self.begin_cmd()?;
@@ -3655,6 +3678,7 @@ impl RawVulkanEngine {
             self.prover.vram_aux_in.used = 0;
             self.prover.vram_aux_b.used = 0;
             self.prover.vram_partials.used = 0;
+            self.prover.scrub_pending = false;
             Ok(())
         }
     }
@@ -5566,6 +5590,15 @@ impl RawVulkanEngine {
         }
         impl Drop for SettleProverOnExit<'_> {
             fn drop(&mut self) {
+                if self.1 {
+                    // Invalidate even when idle cannot yet be established. The partial job
+                    // may have overwritten session data before its fence failed.
+                    self.0.prover.session = None;
+                    self.0.prover.committed_trees = [None; 3];
+                    self.0.prover.air = None;
+                    self.0.prover.scrub_pending = true;
+                    crate::ct::ct_zeroize_u64s(&mut self.0.prover.salt_seed_words);
+                }
                 unsafe {
                     self.0.settle_staging();
                     if self.1 && self.0.exec_state == EngineExecState::Ready {
@@ -5578,6 +5611,9 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let mut guard = SettleProverOnExit(self, true);
+        if guard.0.prover.scrub_pending {
+            guard.0.scrub_prover_session()?;
+        }
         let res = job(guard.engine());
         guard.1 = res.is_err();
         drop(guard);
@@ -5635,6 +5671,7 @@ impl RawVulkanEngine {
                 return Err(e);
             }
             let mut old = core::mem::replace(slot_offset(&mut self.prover), new_buf);
+            self.prover.descriptors_dirty = true;
             unsafe {
                 self.destroy_gpu_buffer(&mut old);
             }
@@ -5763,7 +5800,7 @@ impl RawVulkanEngine {
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_partials, req_partials)?;
         }
 
-        if changed {
+        if changed || self.prover.descriptors_dirty {
             unsafe {
                 self.refresh_prover_descriptor_sets()?;
             }
@@ -5773,7 +5810,7 @@ impl RawVulkanEngine {
 
     /// Rewrite all ten prover descriptor sets. Updating a set that a pending command buffer
     /// uses is undefined, so this refuses unless the engine is `Ready`.
-    unsafe fn refresh_prover_descriptor_sets(&self) -> Result<(), VulkanError> {
+    unsafe fn refresh_prover_descriptor_sets(&mut self) -> Result<(), VulkanError> {
         if self.exec_state != EngineExecState::Ready {
             return Err(VulkanError::WorkspacePoisoned);
         }
@@ -5867,6 +5904,7 @@ impl RawVulkanEngine {
         unsafe {
             (self.fns.update_descriptor_sets)(self.device, 60, writes.as_ptr(), 0, null());
         }
+        self.prover.descriptors_dirty = false;
         Ok(())
     }
 
@@ -5962,7 +6000,6 @@ impl RawVulkanEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_prover_whir_commit_round0_with<F>(
         &mut self,
         num_polys: usize,
@@ -6010,6 +6047,9 @@ impl RawVulkanEngine {
         F: FnMut(usize, usize, &mut [u64]),
     {
         // A commit re-establishes the arena; until it succeeds there is no session.
+        if self.prover.session.is_some() {
+            self.scrub_prover_session()?;
+        }
         self.prover.session = None;
         self.prover.air = None;
         if num_polys == 0
@@ -6700,6 +6740,7 @@ impl RawVulkanEngine {
                 num_polys,
                 num_vars,
             });
+            self.prover.committed_trees[0] = Some((0, group_arity, num_groups));
             Ok((top_node, subs))
         }
     }
@@ -7034,6 +7075,10 @@ impl RawVulkanEngine {
             // Mode 4 reads like mode 3 and writes `dst_base + p * half + gid` in both buffers.
             let src_end = span_end(u64::from(src_base), np, len, EXT4_BYTES)?;
             let dst_end = span_end(u64::from(dst_base), np, to_u64(half), EXT4_BYTES)?;
+            check_disjoint(
+                u64::from(src_base), cmul(np, len)?,
+                u64::from(dst_base), cmul(np, to_u64(half))?,
+            )?;
             engine
                 .prover
                 .vram_work_a
@@ -7858,6 +7903,7 @@ impl RawVulkanEngine {
             // `c_base + 2 * gid (+ 1)` for `gid < min(pairs_c, k_half - 1)`, and writes
             // `k_dst + gid` for `gid <= k_half`.
             let kh = u64::from(k_half);
+            check_disjoint(u64::from(k_src), cmul(kh, 2)?, u64::from(k_dst), cadd(kh, 1)?)?;
             engine.prover.vram_work_a.check_read(
                 "vram_work_a (fold kernel)",
                 span_end(u64::from(k_src), kh, 2, EXT4_BYTES)?,
@@ -7981,6 +8027,10 @@ impl RawVulkanEngine {
             engine.prover_session()?;
             to_u32(m)?;
             let total_wg = to_u32(cadd(to_u64(m), 1)?.div_ceil(256).max(1))?;
+            check_disjoint(
+                u64::from(c_src), cmul(to_u64(m), 2)?,
+                u64::from(c_dst), cadd(to_u64(m), 1)?,
+            )?;
             // Mode 7 reads `c_src + 2 * gid (+ 1)` for `gid < m` and writes `c_dst + gid` for
             // `gid <= m`, both in `vram_work_b`.
             engine.prover.vram_work_b.check_read(
@@ -8094,7 +8144,9 @@ impl RawVulkanEngine {
         group_arity: usize,
     ) -> Result<[u8; 32], VulkanError> {
         self.run_prover_job(|engine| {
-            if !domain_len.is_power_of_two()
+            if stage_idx == 0
+                || coeff_len > domain_len
+                || !domain_len.is_power_of_two()
                 || !group_arity.is_power_of_two()
                 || group_arity == 0
                 || !domain_len.is_multiple_of(group_arity)
@@ -8380,6 +8432,7 @@ impl RawVulkanEngine {
                 for (i, w) in top_words.into_iter().enumerate() {
                     top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
                 }
+                engine.prover.committed_trees[1 + slot_idx] = Some((stage_idx, group_arity, num_groups));
                 Ok(top_node)
             }
         })
@@ -8579,6 +8632,12 @@ impl RawVulkanEngine {
             let in_bytes = cmul(to_u64(in_words.max(1)), WORD_BYTES)?;
             let out_bytes = cmul(expected_out, WORD_BYTES)?;
             let slot_idx = stage_idx & 1;
+            let tree_slot = if is_ext4 { 1 + slot_idx } else { 0 };
+            if engine.prover.committed_trees[tree_slot] != Some((stage_idx, group_arity, num_groups))
+                || num_polys != if is_ext4 { 1 } else { engine.prover_session()?.num_polys }
+            {
+                return Err(length_overflow());
+            }
             let t_base = 0u64;
             let c_base = 0u64;
             let max_threads = num_q.max(num_s).max(1);
@@ -8920,6 +8979,10 @@ impl RawVulkanEngine {
             let need_wb = cmul(cmul(8 * 12, half_m)?, EXT4_BYTES)?;
             let need_ab = cmul(sh_bytes, 2)?;
             let need_ain = cadd(gm_bytes, 4 * 1024 * 1024)?;
+            check_disjoint(
+                u64::from(witness_word_offset), cmul(rows, 256)?,
+                u64::from(cols_base_word_offset), cmul(rows, 256)?,
+            )?;
             // Mode 0 reads the row-major shard (`col_src + row * 256 + col`) and writes it
             // column-major (`col_dst + col * rows + row`), both in `vram_witness`. The witness
             // is session data from the commit: it is checked, never regrown.
@@ -9380,6 +9443,10 @@ impl RawVulkanEngine {
             }
             // Modes 3/4 read 256 columns of `cur_m` rows and write 256 columns of half as many
             // into `vram_work_a`; mode 5 does the same for the 3 shift tables in `vram_aux_b`.
+            if !is_round0_base {
+                check_disjoint(u64::from(col_src), cmul(m, 256)?, u64::from(col_dst), cmul(hm, 256)?)?;
+            }
+            check_disjoint(u64::from(sh_src), cmul(m, 3)?, u64::from(sh_dst), cmul(hm, 3)?)?;
             if is_round0_base {
                 engine.prover.vram_witness.check_read(
                     "vram_witness (AIR base columns)",

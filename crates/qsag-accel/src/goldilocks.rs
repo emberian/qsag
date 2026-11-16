@@ -710,51 +710,38 @@ pub const fn ext4_pow_pub(mut base: [u64; 4], mut exp: u64) -> [u64; 4] {
 
 /// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear equality Kronecker table over
 /// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+/// Panics if `point` contains more than 32 variables.
 pub fn eq_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
-    let mut out = [EXT4_ZERO; 1024];
-    for byte_idx in 0..4usize {
-        for k in 0..256usize {
-            let mut prod = EXT4_ONE;
-            let mut zeroed = false;
-            for j in 0..8usize {
-                let b = 8 * byte_idx + j;
-                let bit = (k >> j) & 1 == 1;
-                if b < point.len() {
-                    let p = point[b];
-                    let term = if bit { p } else { ext4_sub(EXT4_ONE, p) };
-                    prod = ext4_mul(prod, term);
-                } else if bit {
-                    zeroed = true;
-                    break;
-                }
-            }
-            out[256 * byte_idx + k] = if zeroed { EXT4_ZERO } else { prod };
-        }
-    }
-    out
+    multilinear_kronecker_1024(point, true)
 }
 
 /// Build a 4-byte (`1,024`-entry = `32 KiB`) multilinear monomial Kronecker table over
 /// $\mathbb{F}_{p^4}$ supporting up to `32` variables (`num_vars <= 26` in VRAM WHIR).
+/// Panics if `point` contains more than 32 variables.
 pub fn mono_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
+    multilinear_kronecker_1024(point, false)
+}
+
+fn multilinear_kronecker_1024(point: &[[u64; 4]], equality: bool) -> [[u64; 4]; 1024] {
+    assert!(point.len() <= 32, "Kronecker tables support at most 32 variables");
     let mut out = [EXT4_ZERO; 1024];
-    for byte_idx in 0..4usize {
-        for k in 0..256usize {
-            let mut prod = EXT4_ONE;
-            let mut zeroed = false;
-            for j in 0..8usize {
-                let b = 8 * byte_idx + j;
-                let bit = (k >> j) & 1 == 1;
-                if b < point.len() {
-                    if bit {
-                        prod = ext4_mul(prod, point[b]);
-                    }
-                } else if bit {
-                    zeroed = true;
-                    break;
+    for (byte_idx, table) in out.as_chunks_mut::<256>().0.iter_mut().enumerate() {
+        table[0] = EXT4_ONE;
+        let start = byte_idx * 8;
+        let bits = point.len().saturating_sub(start).min(8);
+        // Double the populated prefix per variable; missing high bits stay zero. This
+        // shares partial products instead of recomputing eight factors for every entry.
+        for bit in 0..bits {
+            let p = point[start + bit];
+            let complement = ext4_sub(EXT4_ONE, p);
+            let half = 1 << bit;
+            for k in 0..half {
+                let prefix = table[k];
+                table[half + k] = ext4_mul(prefix, p);
+                if equality {
+                    table[k] = ext4_mul(prefix, complement);
                 }
             }
-            out[256 * byte_idx + k] = if zeroed { EXT4_ZERO } else { prod };
         }
     }
     out
