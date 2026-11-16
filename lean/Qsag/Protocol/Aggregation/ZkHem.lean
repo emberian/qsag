@@ -1905,3 +1905,953 @@ theorem bitSum_congr : ∀ (m : Nat) (f g : List Bool → F),
       bitSum_congr m (fun bs => f (true :: bs)) (fun bs => g (true :: bs))
         (fun bs hb => h (true :: bs) (congrArg Nat.succ hb))]
 
+theorem bitSum_zero : ∀ m : Nat, bitSum m (fun _ => (zero : F)) = zero
+  | 0 => by rfl
+  | m + 1 => by
+    show add (bitSum m (fun _ => (zero : F))) (bitSum m (fun _ => (zero : F))) = zero
+    rw [bitSum_zero m]
+    constructive_ring
+
+theorem bitSum_add : ∀ (m : Nat) (f g : List Bool → F),
+    bitSum m (fun bs => add (f bs) (g bs)) = add (bitSum m f) (bitSum m g)
+  | 0, _, _ => by rfl
+  | m + 1, f, g => by
+    show add (bitSum m (fun bs => add (f (false :: bs)) (g (false :: bs))))
+        (bitSum m (fun bs => add (f (true :: bs)) (g (true :: bs)))) =
+      add (add (bitSum m (fun bs => f (false :: bs))) (bitSum m (fun bs => f (true :: bs))))
+        (add (bitSum m (fun bs => g (false :: bs))) (bitSum m (fun bs => g (true :: bs))))
+    rw [bitSum_add m (fun bs => f (false :: bs)) (fun bs => g (false :: bs)),
+      bitSum_add m (fun bs => f (true :: bs)) (fun bs => g (true :: bs))]
+    constructive_ring
+
+theorem bitSum_mul_left (a : F) : ∀ (m : Nat) (f : List Bool → F),
+    bitSum m (fun bs => mul a (f bs)) = mul a (bitSum m f)
+  | 0, _ => by rfl
+  | m + 1, f => by
+    show add (bitSum m (fun bs => mul a (f (false :: bs))))
+        (bitSum m (fun bs => mul a (f (true :: bs)))) =
+      mul a (add (bitSum m (fun bs => f (false :: bs))) (bitSum m (fun bs => f (true :: bs))))
+    rw [bitSum_mul_left a m (fun bs => f (false :: bs)),
+      bitSum_mul_left a m (fun bs => f (true :: bs))]
+    constructive_ring
+
+/-- Exchange of two cube sums. -/
+theorem bitSum_comm : ∀ (m k : Nat) (f : List Bool → List Bool → F),
+    bitSum m (fun a => bitSum k (fun b => f a b)) = bitSum k (fun b => bitSum m (fun a => f a b))
+  | 0, _, _ => by rfl
+  | m + 1, k, f => by
+    show add (bitSum m (fun a => bitSum k (fun b => f (false :: a) b)))
+        (bitSum m (fun a => bitSum k (fun b => f (true :: a) b))) =
+      bitSum k (fun b => add (bitSum m (fun a => f (false :: a) b))
+        (bitSum m (fun a => f (true :: a) b)))
+    rw [bitSum_comm m k (fun a b => f (false :: a) b), bitSum_comm m k (fun a b => f (true :: a) b),
+      bitSum_add]
+
+/-- Multilinear extension of the table `T` on `{0,1}^m` at a point; the first coordinate of
+    the point is the first bit. Missing coordinates read as `0`. -/
+def mle : Nat → (List Bool → F) → List F → F
+  | 0, T, _ => T []
+  | m + 1, T, xs =>
+    add (mul (sub one (xs.headD zero)) (mle m (fun bs => T (false :: bs)) xs.tail))
+      (mul (xs.headD zero) (mle m (fun bs => T (true :: bs)) xs.tail))
+
+theorem mle_zero_dim (T : List Bool → F) (xs : List F) : mle 0 T xs = T [] := by rfl
+
+theorem mle_cons (m : Nat) (T : List Bool → F) (x : F) (xs : List F) :
+    mle (m + 1) T (x :: xs) =
+      add (mul (sub one x) (mle m (fun bs => T (false :: bs)) xs))
+        (mul x (mle m (fun bs => T (true :: bs)) xs)) := by rfl
+
+/-- On a Boolean point the multilinear extension is the table entry. -/
+theorem mle_bitPt : ∀ (m : Nat) (T : List Bool → F) (bs : List Bool), bs.length = m →
+    mle m T (bitPt bs) = T bs
+  | 0, _, [], _ => by rfl
+  | 0, _, _ :: _, h => absurd h (Nat.succ_ne_zero _)
+  | m + 1, _, [], h => absurd h.symm (Nat.succ_ne_zero m)
+  | m + 1, T, b :: bs, h => by
+    have ih0 := mle_bitPt m (fun t => T (false :: t)) bs (Nat.succ.inj h)
+    have ih1 := mle_bitPt m (fun t => T (true :: t)) bs (Nat.succ.inj h)
+    cases b with
+    | false =>
+      show add (mul (sub one zero) (mle m (fun t => T (false :: t)) (bitPt bs)))
+        (mul zero (mle m (fun t => T (true :: t)) (bitPt bs))) = T (false :: bs)
+      rw [ih0]
+      constructive_ring
+    | true =>
+      show add (mul (sub one one) (mle m (fun t => T (false :: t)) (bitPt bs)))
+        (mul one (mle m (fun t => T (true :: t)) (bitPt bs))) = T (true :: bs)
+      rw [ih1]
+      constructive_ring
+
+theorem mle_congr : ∀ (m : Nat) (T T' : List Bool → F) (xs : List F),
+    (∀ bs : List Bool, bs.length = m → T bs = T' bs) → mle m T xs = mle m T' xs
+  | 0, _, _, _, h => h [] rfl
+  | m + 1, T, T', xs, h => by
+    show add (mul (sub one (xs.headD zero)) (mle m (fun bs => T (false :: bs)) xs.tail))
+        (mul (xs.headD zero) (mle m (fun bs => T (true :: bs)) xs.tail)) =
+      add (mul (sub one (xs.headD zero)) (mle m (fun bs => T' (false :: bs)) xs.tail))
+        (mul (xs.headD zero) (mle m (fun bs => T' (true :: bs)) xs.tail))
+    rw [mle_congr m (fun bs => T (false :: bs)) (fun bs => T' (false :: bs)) xs.tail
+        (fun bs hb => h (false :: bs) (congrArg Nat.succ hb)),
+      mle_congr m (fun bs => T (true :: bs)) (fun bs => T' (true :: bs)) xs.tail
+        (fun bs hb => h (true :: bs) (congrArg Nat.succ hb))]
+
+theorem mle_add : ∀ (m : Nat) (T T' : List Bool → F) (xs : List F),
+    mle m (fun bs => add (T bs) (T' bs)) xs = add (mle m T xs) (mle m T' xs)
+  | 0, _, _, _ => by rfl
+  | m + 1, T, T', xs => by
+    show add (mul (sub one (xs.headD zero))
+          (mle m (fun bs => add (T (false :: bs)) (T' (false :: bs))) xs.tail))
+        (mul (xs.headD zero) (mle m (fun bs => add (T (true :: bs)) (T' (true :: bs))) xs.tail)) =
+      add (add (mul (sub one (xs.headD zero)) (mle m (fun bs => T (false :: bs)) xs.tail))
+          (mul (xs.headD zero) (mle m (fun bs => T (true :: bs)) xs.tail)))
+        (add (mul (sub one (xs.headD zero)) (mle m (fun bs => T' (false :: bs)) xs.tail))
+          (mul (xs.headD zero) (mle m (fun bs => T' (true :: bs)) xs.tail)))
+    rw [mle_add m (fun bs => T (false :: bs)) (fun bs => T' (false :: bs)) xs.tail,
+      mle_add m (fun bs => T (true :: bs)) (fun bs => T' (true :: bs)) xs.tail]
+    constructive_ring
+
+theorem mle_mul_left (a : F) : ∀ (m : Nat) (T : List Bool → F) (xs : List F),
+    mle m (fun bs => mul a (T bs)) xs = mul a (mle m T xs)
+  | 0, _, _ => by rfl
+  | m + 1, T, xs => by
+    show add (mul (sub one (xs.headD zero)) (mle m (fun bs => mul a (T (false :: bs))) xs.tail))
+        (mul (xs.headD zero) (mle m (fun bs => mul a (T (true :: bs))) xs.tail)) =
+      mul a (add (mul (sub one (xs.headD zero)) (mle m (fun bs => T (false :: bs)) xs.tail))
+        (mul (xs.headD zero) (mle m (fun bs => T (true :: bs)) xs.tail)))
+    rw [mle_mul_left a m (fun bs => T (false :: bs)) xs.tail,
+      mle_mul_left a m (fun bs => T (true :: bs)) xs.tail]
+    constructive_ring
+
+theorem mle_const_zero : ∀ (m : Nat) (xs : List F), mle m (fun _ => (zero : F)) xs = zero
+  | 0, _ => by rfl
+  | m + 1, xs => by
+    show add (mul (sub one (xs.headD zero)) (mle m (fun _ => (zero : F)) xs.tail))
+      (mul (xs.headD zero) (mle m (fun _ => (zero : F)) xs.tail)) = zero
+    rw [mle_const_zero m xs.tail]
+    constructive_ring
+
+/-- The multilinear extension commutes with a cube sum over a second index. -/
+theorem mle_bitSum (m : Nat) (xs : List F) : ∀ (k : Nat) (f : List Bool → List Bool → F),
+    mle m (fun i => bitSum k (fun y => f i y)) xs = bitSum k (fun y => mle m (fun i => f i y) xs)
+  | 0, _ => by rfl
+  | k + 1, f => by
+    show mle m (fun i => add (bitSum k (fun y => f i (false :: y)))
+        (bitSum k (fun y => f i (true :: y)))) xs =
+      add (bitSum k (fun y => mle m (fun i => f i (false :: y)) xs))
+        (bitSum k (fun y => mle m (fun i => f i (true :: y)) xs))
+    rw [mle_add, mle_bitSum m xs k (fun i y => f i (false :: y)),
+      mle_bitSum m xs k (fun i y => f i (true :: y))]
+
+/-- A function of a point that is affine in every coordinate. -/
+def CoordAffine (h : List F → F) : Prop :=
+  ∀ (cs : List F) (x : F) (t : List F),
+    h (cs ++ x :: t) =
+      add (h (cs ++ zero :: t)) (mul x (sub (h (cs ++ one :: t)) (h (cs ++ zero :: t))))
+
+theorem mle_coordAffine : ∀ (m : Nat) (T : List Bool → F), CoordAffine (mle m T)
+  | 0, T, _, x, _ => by
+    show T [] = add (T []) (mul x (sub (T []) (T [])))
+    constructive_ring
+  | m + 1, T, [], x, t => by
+    show add (mul (sub one x) (mle m (fun bs => T (false :: bs)) t))
+        (mul x (mle m (fun bs => T (true :: bs)) t)) =
+      add (add (mul (sub one zero) (mle m (fun bs => T (false :: bs)) t))
+          (mul zero (mle m (fun bs => T (true :: bs)) t)))
+        (mul x (sub (add (mul (sub one one) (mle m (fun bs => T (false :: bs)) t))
+            (mul one (mle m (fun bs => T (true :: bs)) t)))
+          (add (mul (sub one zero) (mle m (fun bs => T (false :: bs)) t))
+            (mul zero (mle m (fun bs => T (true :: bs)) t)))))
+    constructive_ring
+  | m + 1, T, c :: cs, x, t => by
+    show add (mul (sub one c) (mle m (fun bs => T (false :: bs)) (cs ++ x :: t)))
+        (mul c (mle m (fun bs => T (true :: bs)) (cs ++ x :: t))) =
+      add (add (mul (sub one c) (mle m (fun bs => T (false :: bs)) (cs ++ zero :: t)))
+          (mul c (mle m (fun bs => T (true :: bs)) (cs ++ zero :: t))))
+        (mul x (sub (add (mul (sub one c) (mle m (fun bs => T (false :: bs)) (cs ++ one :: t)))
+            (mul c (mle m (fun bs => T (true :: bs)) (cs ++ one :: t))))
+          (add (mul (sub one c) (mle m (fun bs => T (false :: bs)) (cs ++ zero :: t)))
+            (mul c (mle m (fun bs => T (true :: bs)) (cs ++ zero :: t))))))
+    rw [mle_coordAffine m (fun bs => T (false :: bs)) cs x t,
+      mle_coordAffine m (fun bs => T (true :: bs)) cs x t]
+    constructive_ring
+
+/-- `eq(τ, x) = ∏_j (τ_j x_j + (1 - τ_j)(1 - x_j))`. -/
+def eqPt : List F → List F → F
+  | [], _ => one
+  | t :: ts, xs =>
+    mul (add (mul t (xs.headD zero)) (mul (sub one t) (sub one (xs.headD zero)))) (eqPt ts xs.tail)
+
+theorem eqPt_coordAffine : ∀ tau : List F, CoordAffine (eqPt tau)
+  | [], _, x, _ => by
+    show (one : F) = add one (mul x (sub one one))
+    constructive_ring
+  | a :: ts, [], x, t => by
+    show mul (add (mul a x) (mul (sub one a) (sub one x))) (eqPt ts t) =
+      add (mul (add (mul a zero) (mul (sub one a) (sub one zero))) (eqPt ts t))
+        (mul x (sub (mul (add (mul a one) (mul (sub one a) (sub one one))) (eqPt ts t))
+          (mul (add (mul a zero) (mul (sub one a) (sub one zero))) (eqPt ts t))))
+    constructive_ring
+  | a :: ts, c :: cs, x, t => by
+    show mul (add (mul a c) (mul (sub one a) (sub one c))) (eqPt ts (cs ++ x :: t)) =
+      add (mul (add (mul a c) (mul (sub one a) (sub one c))) (eqPt ts (cs ++ zero :: t)))
+        (mul x (sub (mul (add (mul a c) (mul (sub one a) (sub one c))) (eqPt ts (cs ++ one :: t)))
+          (mul (add (mul a c) (mul (sub one a) (sub one c))) (eqPt ts (cs ++ zero :: t)))))
+    rw [eqPt_coordAffine ts cs x t]
+    constructive_ring
+
+/-- The first `i` challenges as a point. -/
+def chalPrefix (c : Nat → F) (i : Nat) : List F := (List.range i).map c
+
+omit [LawfulField F] in
+theorem chalPrefix_length (c : Nat → F) (i : Nat) : (chalPrefix c i).length = i := by
+  unfold chalPrefix
+  rw [List.length_map, List.length_range]
+
+omit [LawfulField F] in
+theorem chalPrefix_succ (c : Nat → F) (i : Nat) :
+    chalPrefix c (i + 1) = chalPrefix c i ++ [c i] := by
+  unfold chalPrefix
+  rw [List.range_succ, List.map_append]
+  rfl
+
+/-- Sum of `g` over the Boolean completions of the bound prefix `cs` of an `n`-variable point. -/
+def cubeClaim (g : List F → F) (n : Nat) (cs : List F) : F :=
+  bitSum (n - cs.length) (fun bs => g (cs ++ bitPt bs))
+
+/-- The round polynomial after the prefix `cs`, as a function of the next variable. -/
+def cubeRound (g : List F → F) (n : Nat) (cs : List F) (x : F) : F :=
+  bitSum (n - (cs.length + 1)) (fun bs => g (cs ++ x :: bitPt bs))
+
+theorem cubeRound_telescope (g : List F → F) (n : Nat) (cs : List F) (h : cs.length < n) :
+    add (cubeRound g n cs zero) (cubeRound g n cs one) = cubeClaim g n cs := by
+  unfold cubeRound cubeClaim
+  have hn : n - cs.length = (n - (cs.length + 1)) + 1 := by omega
+  rw [hn]
+  rfl
+
+theorem cubeRound_eq_claim (g : List F → F) (n : Nat) (cs : List F) (x : F) :
+    cubeRound g n cs x = cubeClaim g n (cs ++ [x]) := by
+  unfold cubeRound cubeClaim
+  rw [List.length_append]
+  exact bitSum_congr _ _ _ (fun bs _ => by rw [List.append_assoc]; rfl)
+
+theorem cubeClaim_full (g : List F → F) (n : Nat) (cs : List F) (h : cs.length = n) :
+    cubeClaim g n cs = g cs := by
+  unfold cubeClaim
+  rw [h, Nat.sub_self]
+  show g (cs ++ []) = g cs
+  rw [List.append_nil]
+
+/-- `w` is an honest sumcheck transcript for the summand `g` on `n` variables: its claim is
+    the cube sum of `g` and its `i`-th message is the round polynomial at the challenge
+    prefix. -/
+def WitnessRounds.Proves (w : WitnessRounds F) (g : List F → F) (n d : Nat) (c : Nat → F) : Prop :=
+  w.H = cubeClaim g n [] ∧
+    ∀ i : Nat, i < n → ∀ x : F, evalCoeffs (w.msg d i) x = cubeRound g n (chalPrefix c i) x
+
+theorem WitnessRounds.Proves.claim_eq {w : WitnessRounds F} {g : List F → F} {n d : Nat}
+    {c : Nat → F} (h : w.Proves g n d c) :
+    ∀ i : Nat, i ≤ n → w.claim d c i = cubeClaim g n (chalPrefix c i)
+  | 0, _ => h.1
+  | i + 1, hi => by
+    show evalCoeffs (w.msg d i) (c i) = _
+    rw [h.2 i hi (c i), cubeRound_eq_claim, chalPrefix_succ]
+
+theorem WitnessRounds.Proves.honest {w : WitnessRounds F} {g : List F → F} {n d : Nat}
+    {c : Nat → F} (h : w.Proves g n d c) : w.Honest n d c := by
+  intro i hi
+  rw [h.2 i hi zero, h.2 i hi one,
+    cubeRound_telescope g n _ (by rw [chalPrefix_length]; exact hi),
+    ← h.claim_eq i (Nat.le_of_lt hi)]
+
+/-- The last running claim of an honest transcript is the summand at the challenge point. -/
+theorem WitnessRounds.Proves.terminal {w : WitnessRounds F} {g : List F → F} {n d : Nat}
+    {c : Nat → F} (h : w.Proves g n d c) : w.claim d c n = g (chalPrefix c n) := by
+  rw [h.claim_eq n (Nat.le_refl n), cubeClaim_full _ _ _ (chalPrefix_length c n)]
+
+/-- `cs` has at most `d + 1` coefficients and is the univariate `f`. -/
+def CoeffRep (d : Nat) (f : F → F) (cs : List F) : Prop :=
+  cs.length ≤ d + 1 ∧ ∀ x : F, evalCoeffs cs x = f x
+
+omit [LawfulField F] in
+theorem rawAdd_length_le [CommRingOps F] : ∀ (a b : List F) (B : Nat), a.length ≤ B → b.length ≤ B →
+    (rawAddCoeffs a b).length ≤ B
+  | [], _, _, _, hb => hb
+  | _ :: _, [], _, ha, _ => ha
+  | _ :: _, _ :: _, 0, ha, _ => absurd ha (Nat.not_succ_le_zero _)
+  | _ :: cs, _ :: es, B + 1, ha, hb =>
+    Nat.succ_le_succ (rawAdd_length_le cs es B (Nat.le_of_succ_le_succ ha)
+      (Nat.le_of_succ_le_succ hb))
+
+theorem rawMul_length_le : ∀ (a b : List F), (rawMul a b).length ≤ a.length + (b.length - 1)
+  | [], _ => Nat.zero_le _
+  | c :: cs, b => by
+    show (rawAddCoeffs (b.map (mul c)) (zero :: rawMul cs b)).length ≤
+      cs.length + 1 + (b.length - 1)
+    have ih := rawMul_length_le cs b
+    apply rawAdd_length_le
+    · rw [List.length_map]
+      omega
+    · show (rawMul cs b).length + 1 ≤ cs.length + 1 + (b.length - 1)
+      omega
+
+theorem CoeffRep.mono {d d' : Nat} {f : F → F} {cs : List F} (h : CoeffRep d f cs)
+    (hd : d ≤ d') : CoeffRep d' f cs :=
+  ⟨Nat.le_trans h.1 (Nat.succ_le_succ hd), h.2⟩
+
+theorem CoeffRep.mul {d₁ d₂ : Nat} {f g : F → F} {p q : List F} (hp : CoeffRep d₁ f p)
+    (hq : CoeffRep d₂ g q) : CoeffRep (d₁ + d₂) (fun x => mul (f x) (g x)) (rawMul p q) := by
+  refine ⟨?_, fun x => ?_⟩
+  · have h := rawMul_length_le p q
+    have h1 := hp.1
+    have h2 := hq.1
+    omega
+  · rw [evalCoeffs_rawMul, hp.2, hq.2]
+
+theorem CoeffRep.add {d : Nat} {f g : F → F} {p q : List F} (hp : CoeffRep d f p)
+    (hq : CoeffRep d g q) : CoeffRep d (fun x => add (f x) (g x)) (rawAddCoeffs p q) :=
+  ⟨rawAdd_length_le p q _ hp.1 hq.1, fun x => by rw [evalCoeffs_rawAdd, hp.2, hq.2]⟩
+
+theorem CoeffRep.sub {d : Nat} {f g : F → F} {p q : List F} (hp : CoeffRep d f p)
+    (hq : CoeffRep d g q) : CoeffRep d (fun x => sub (f x) (g x)) (subCoeffs p q) := by
+  refine ⟨?_, fun x => by rw [evalCoeffs_sub, hp.2, hq.2]⟩
+  rw [subCoeffs_length]
+  exact Nat.max_le.mpr ⟨hp.1, hq.1⟩
+
+/-- The two coefficients of a coordinatewise affine function along one coordinate. -/
+def line2 (h : List F → F) (cs t : List F) : List F :=
+  [h (cs ++ zero :: t), sub (h (cs ++ one :: t)) (h (cs ++ zero :: t))]
+
+theorem CoordAffine.rep {h : List F → F} (hh : CoordAffine h) (cs t : List F) :
+    CoeffRep 1 (fun x => h (cs ++ x :: t)) (line2 h cs t) := by
+  refine ⟨Nat.le_refl 2, fun x => ?_⟩
+  show add (h (cs ++ zero :: t))
+    (mul x (add (sub (h (cs ++ one :: t)) (h (cs ++ zero :: t))) (mul x zero))) = h (cs ++ x :: t)
+  rw [hh cs x t]
+  constructive_ring
+
+/-- Coefficientwise sum of polynomials over `{0,1}^m`. -/
+def bitSumL : Nat → (List Bool → List F) → List F
+  | 0, f => f []
+  | m + 1, f =>
+    rawAddCoeffs (bitSumL m (fun bs => f (false :: bs))) (bitSumL m (fun bs => f (true :: bs)))
+
+theorem bitSumL_length_le (B : Nat) : ∀ (m : Nat) (f : List Bool → List F),
+    (∀ bs : List Bool, (f bs).length ≤ B) → (bitSumL m f).length ≤ B
+  | 0, _, h => h []
+  | m + 1, _, h =>
+    rawAdd_length_le _ _ B (bitSumL_length_le B m _ (fun bs => h (false :: bs)))
+      (bitSumL_length_le B m _ (fun bs => h (true :: bs)))
+
+theorem evalCoeffs_bitSumL (x : F) : ∀ (m : Nat) (f : List Bool → List F),
+    evalCoeffs (bitSumL m f) x = bitSum m (fun bs => evalCoeffs (f bs) x)
+  | 0, _ => by rfl
+  | m + 1, f => by
+    show evalCoeffs (rawAddCoeffs (bitSumL m (fun bs => f (false :: bs)))
+        (bitSumL m (fun bs => f (true :: bs)))) x =
+      add (bitSum m (fun bs => evalCoeffs (f (false :: bs)) x))
+        (bitSum m (fun bs => evalCoeffs (f (true :: bs)) x))
+    rw [evalCoeffs_rawAdd, evalCoeffs_bitSumL x m (fun bs => f (false :: bs)),
+      evalCoeffs_bitSumL x m (fun bs => f (true :: bs))]
+
+/-- Degree-`d` coefficient lists of a summand along every coordinate line. -/
+structure LineRep (g : List F → F) (d : Nat) where
+  line : List F → List F → List F
+  len : ∀ cs t : List F, (line cs t).length ≤ d + 1
+  eval : ∀ (cs t : List F) (x : F), evalCoeffs (line cs t) x = g (cs ++ x :: t)
+
+/-- Coefficients of the round polynomial after the prefix `cs`. -/
+def cubeMsg {g : List F → F} {d : Nat} (L : LineRep g d) (n : Nat) (cs : List F) : List F :=
+  bitSumL (n - (cs.length + 1)) (fun bs => L.line cs (bitPt bs))
+
+theorem cubeMsg_rep {g : List F → F} {d : Nat} (L : LineRep g d) (n : Nat) (cs : List F) :
+    CoeffRep d (cubeRound g n cs) (cubeMsg L n cs) := by
+  refine ⟨bitSumL_length_le _ _ _ (fun bs => L.len cs (bitPt bs)), fun x => ?_⟩
+  unfold cubeMsg cubeRound
+  rw [evalCoeffs_bitSumL]
+  exact bitSum_congr _ _ _ (fun bs _ => L.eval cs (bitPt bs) x)
+
+theorem evalCoeffs_getD_range' (x : F) : ∀ (cs : List F) (s m : Nat) (g : Nat → F),
+    cs.length ≤ m → (∀ k : Nat, g (s + k) = cs.getD k zero) →
+    evalCoeffs ((List.range' s m).map g) x = evalCoeffs cs x
+  | [], _, 0, _, _, _ => by rfl
+  | [], s, m + 1, g, _, h => by
+    show add (g s) (mul x (evalCoeffs ((List.range' (s + 1) m).map g) x)) = zero
+    have h0 : g s = zero := h 0
+    rw [h0, evalCoeffs_getD_range' x [] (s + 1) m g (Nat.zero_le m) (fun k => by
+      rw [Nat.succ_add_eq_add_succ]
+      exact h (k + 1))]
+    show add zero (mul x zero) = (zero : F)
+    constructive_ring
+  | _ :: _, _, 0, _, hl, _ => absurd hl (Nat.not_succ_le_zero _)
+  | c :: cs, s, m + 1, g, hl, h => by
+    show add (g s) (mul x (evalCoeffs ((List.range' (s + 1) m).map g) x)) =
+      add c (mul x (evalCoeffs cs x))
+    have h0 : g s = c := h 0
+    rw [h0, evalCoeffs_getD_range' x cs (s + 1) m g (Nat.le_of_succ_le_succ hl) (fun k => by
+      rw [Nat.succ_add_eq_add_succ]
+      exact h (k + 1))]
+
+/-- A sumcheck transcript from its claim and its round coefficient lists. -/
+def roundsOfMsgs (H : F) (msgs : Nat → List F) : WitnessRounds F :=
+  ⟨H, fun i => (msgs i).getD 0 zero, fun i k => (msgs i).getD (k + 1) zero⟩
+
+theorem roundsOfMsgs_eval (H : F) (msgs : Nat → List F) (d i : Nat)
+    (hl : (msgs i).length ≤ d + 1) (x : F) :
+    evalCoeffs ((roundsOfMsgs H msgs).msg d i) x = evalCoeffs (msgs i) x := by
+  show add ((msgs i).getD 0 zero)
+    (mul x (evalCoeffs ((List.range d).map (fun k => (msgs i).getD (k + 1) zero)) x)) = _
+  rw [List.range_eq_range']
+  generalize msgs i = l at hl
+  cases l with
+  | nil =>
+    rw [evalCoeffs_getD_range' x [] 0 d (fun k => ([] : List F).getD (k + 1) zero)
+      (Nat.zero_le d) (fun _ => rfl)]
+    show add zero (mul x zero) = (zero : F)
+    constructive_ring
+  | cons c tl =>
+    rw [evalCoeffs_getD_range' x tl 0 d (fun k => (c :: tl).getD (k + 1) zero)
+      (Nat.le_of_succ_le_succ hl) (fun k => by rw [Nat.zero_add]; rfl)]
+    rfl
+
+/-- The honest sumcheck prover for a summand with degree-`d` line coefficients. -/
+def cubeProver {g : List F → F} {d : Nat} (L : LineRep g d) (n : Nat) (c : Nat → F) :
+    WitnessRounds F :=
+  roundsOfMsgs (cubeClaim g n []) (fun i => cubeMsg L n (chalPrefix c i))
+
+theorem cubeProver_proves {g : List F → F} {d : Nat} (L : LineRep g d) (n : Nat) (c : Nat → F) :
+    (cubeProver L n c).Proves g n d c :=
+  ⟨rfl, fun i _ x => by
+    show evalCoeffs ((roundsOfMsgs (cubeClaim g n []) (fun i => cubeMsg L n (chalPrefix c i))).msg
+      d i) x = _
+    rw [roundsOfMsgs_eval _ _ d i (cubeMsg_rep L n (chalPrefix c i)).1,
+      (cubeMsg_rep L n (chalPrefix c i)).2]⟩
+
+/-- `a^7`, multiplied as in `row_gate` of `zk_hem/protocol.rs`. -/
+def pow7 (a : F) : F := mul (mul (mul (mul a a) (mul a a)) (mul a a)) a
+
+/-- Row constraint `s (a^7 - a b) + a b - c`: `a^7 = c` on S-box rows (`s = 1`), `a b = c`
+    on multiplication rows (`s = 0`). -/
+def rowGate (s a b c : F) : F := add (mul s (sub (pow7 a) (mul a b))) (sub (mul a b) c)
+
+/-- Summand of the row sumcheck: `eq(τ, x) · gate(sel(x), A(x), B(x), C(x))` for the selector
+    table and the three row tables on `{0,1}^n`. -/
+def rowSummand (n : Nat) (tau : List F) (sel ta tb tc : List Bool → F) (x : List F) : F :=
+  mul (eqPt tau x) (rowGate (mle n sel x) (mle n ta x) (mle n tb x) (mle n tc x))
+
+/-- Summand of the column sumcheck: `M(y) · Z(y)` on `{0,1}^k`. -/
+def colSummand (k : Nat) (tm tz : List Bool → F) (y : List F) : F :=
+  mul (mle k tm y) (mle k tz y)
+
+/-- Coefficients of the row summand along one coordinate: individual degree `9`
+    (`ROW_DEGREE`). -/
+def rowLine (n : Nat) (tau : List F) (sel ta tb tc : List Bool → F) (cs t : List F) : List F :=
+  rawMul (line2 (eqPt tau) cs t)
+    (rawAddCoeffs
+      (rawMul (line2 (mle n sel) cs t)
+        (subCoeffs
+          (rawMul (rawMul (rawMul (rawMul (line2 (mle n ta) cs t) (line2 (mle n ta) cs t))
+            (rawMul (line2 (mle n ta) cs t) (line2 (mle n ta) cs t)))
+            (rawMul (line2 (mle n ta) cs t) (line2 (mle n ta) cs t))) (line2 (mle n ta) cs t))
+          (rawMul (line2 (mle n ta) cs t) (line2 (mle n tb) cs t))))
+      (subCoeffs (rawMul (line2 (mle n ta) cs t) (line2 (mle n tb) cs t))
+        (line2 (mle n tc) cs t)))
+
+theorem rowLine_rep (n : Nat) (tau : List F) (sel ta tb tc : List Bool → F) (cs t : List F) :
+    CoeffRep 9 (fun x => rowSummand n tau sel ta tb tc (cs ++ x :: t))
+      (rowLine n tau sel ta tb tc cs t) := by
+  have he := (eqPt_coordAffine tau).rep cs t
+  have hs := (mle_coordAffine n sel).rep cs t
+  have ha := (mle_coordAffine n ta).rep cs t
+  have hb := (mle_coordAffine n tb).rep cs t
+  have hc := (mle_coordAffine n tc).rep cs t
+  have hab : CoeffRep 2 _ _ := ha.mul hb
+  have ha2 : CoeffRep 2 _ _ := ha.mul ha
+  have ha7 : CoeffRep 7 _ _ := ((ha2.mul ha2).mul ha2).mul ha
+  have hin : CoeffRep 7 _ _ := ha7.sub (hab.mono (by decide))
+  have ht1 : CoeffRep 8 _ _ := hs.mul hin
+  have ht2 : CoeffRep 8 _ _ := (hab.sub (hc.mono (by decide))).mono (by decide)
+  have hg : CoeffRep 8 _ _ := ht1.add ht2
+  exact he.mul hg
+
+/-- Degree-`9` line coefficients of the row summand. -/
+def rowLineRep (n : Nat) (tau : List F) (sel ta tb tc : List Bool → F) :
+    LineRep (rowSummand n tau sel ta tb tc) 9 where
+  line := rowLine n tau sel ta tb tc
+  len := fun cs t => (rowLine_rep n tau sel ta tb tc cs t).1
+  eval := fun cs t x => (rowLine_rep n tau sel ta tb tc cs t).2 x
+
+theorem colLine_rep (k : Nat) (tm tz : List Bool → F) (cs t : List F) :
+    CoeffRep 2 (fun x => colSummand k tm tz (cs ++ x :: t))
+      (rawMul (line2 (mle k tm) cs t) (line2 (mle k tz) cs t)) :=
+  ((mle_coordAffine k tm).rep cs t).mul ((mle_coordAffine k tz).rep cs t)
+
+/-- Degree-`2` line coefficients of the column summand (`COL_DEGREE`). -/
+def colLineRep (k : Nat) (tm tz : List Bool → F) : LineRep (colSummand k tm tz) 2 where
+  line := fun cs t => rawMul (line2 (mle k tm) cs t) (line2 (mle k tz) cs t)
+  len := fun cs t => (colLine_rep k tm tz cs t).1
+  eval := fun cs t x => (colLine_rep k tm tz cs t).2 x
+
+end Cube
+
+/-! ## §11. Public subcube relation, masking rows and finite salt queries -/
+
+attribute [-instance] Fin.instLinearOrderPackage
+
+/-! ## Twelve masking cells and the deployed corner-row linear map
+
+The three groups of four cells are the twelve rows allocated by `MASK_ROWS`.
+The two low row variables supply the four multilinear corner weights; all remaining
+row variables contribute the group's `cornerFactor`. The resulting three-by-three
+map has determinant `k₁ k₂ k₃`, independently of the witness. -/
+
+def cornerFactorFrom (base j : Nat) : List Fp4 → Fp4
+  | [] => one
+  | x :: xs => mul (if (base / 2 ^ j) % 2 = 1 then x else sub one x)
+      (cornerFactorFrom base (j + 1) xs)
+
+def cornerFactor (rx : List Fp4) (base : Nat) : Fp4 :=
+  cornerFactorFrom base 2 (rx.drop 2)
+
+def cornerPad (a b : Fp4) (r : Pad) : Fp4 :=
+  add (add (add
+    (mul (embed r.r0) (mul (sub one a) (sub one b)))
+    (mul (embed r.r1) (mul a (sub one b))))
+    (mul (embed r.r2) (mul (sub one a) b)))
+    (mul (embed r.r3) (mul a b))
+
+theorem Pad.ext {x y : Pad} (h0 : x.r0 = y.r0) (h1 : x.r1 = y.r1)
+    (h2 : x.r2 = y.r2) (h3 : x.r3 = y.r3) : x = y := by
+  cases x; cases y; cases h0; cases h1; cases h2; cases h3; rfl
+
+/-- Base-field change of coordinates from Boolean-corner to monomial coefficients. -/
+def cornerCoeffs (r : Pad) : Pad :=
+  ⟨r.r0, sub r.r1 r.r0, sub r.r2 r.r0,
+   add (sub (sub r.r0 r.r1) r.r2) r.r3⟩
+
+def cornerCoeffsInv (r : Pad) : Pad :=
+  ⟨r.r0, add r.r1 r.r0, add r.r2 r.r0,
+   add (add (add r.r3 r.r1) r.r2) r.r0⟩
+
+theorem cornerCoeffs_left (r : Pad) : cornerCoeffsInv (cornerCoeffs r) = r := by
+  apply Pad.ext <;> dsimp [cornerCoeffs, cornerCoeffsInv] <;> constructive_ring
+
+theorem cornerCoeffs_right (r : Pad) : cornerCoeffs (cornerCoeffsInv r) = r := by
+  apply Pad.ext <;> dsimp [cornerCoeffs, cornerCoeffsInv] <;> constructive_ring
+
+theorem embed_add (a b : Fp) : embed (add a b) = add (embed a) (embed b) := by
+  exact GoldilocksField.GoldilocksExt4.embedBase_add a b
+
+theorem embed_sub (a b : Fp) : embed (sub a b) = sub (embed a) (embed b) := by
+  exact GoldilocksField.GoldilocksExt4.embedBase_sub a b
+
+theorem cornerPad_power_point (z : Fp4) (r : Pad) :
+    cornerPad z (mul z z) r = padMap z (cornerCoeffs r) := by
+  simp only [cornerPad, padMap, cornerCoeffs, embed_add, embed_sub]
+  constructive_ring
+
+/-- A rank certificate for the actual four Boolean-corner weights. This is the condition
+    checked by the four-by-four base-field elimination in Rust's `CornerPadBasis::new`. -/
+structure CornerPadBasis (a b : Fp4) where
+  invert : Fp4 → Pad
+  left_inv : ∀ r, invert (cornerPad a b r) = r
+  right_inv : ∀ v, cornerPad a b (invert v) = v
+
+/-- The rank predicate has genuine inhabitants: every primitive power point works. -/
+def cornerPadBasis_power_point (z : Fp4) (hz : z.c1 ≠ zero) : CornerPadBasis z (mul z z) where
+  invert v := cornerCoeffsInv (padInv z v)
+  left_inv r := by
+    rw [cornerPad_power_point, padInv_padMap z hz, cornerCoeffs_left]
+  right_inv v := by
+    rw [cornerPad_power_point, cornerCoeffs_right, padMap_padInv z hz]
+
+structure RowTriple where
+  a : Fp4
+  b : Fp4
+  c : Fp4
+
+theorem RowTriple.ext {x y : RowTriple} (ha : x.a = y.a) (hb : x.b = y.b)
+    (hc : x.c = y.c) : x = y := by
+  cases x; cases y; cases ha; cases hb; cases hc; rfl
+
+/-- Twelve independent base-field masking variables, split into three groups of four. -/
+structure RowMaskCells where
+  first : Pad
+  second : Pad
+  third : Pad
+
+def rowMaskMap (k₁ k₂ k₃ : Fp4) (e : RowTriple) : RowTriple :=
+  ⟨add (mul k₁ e.a) (mul k₃ e.c), mul k₂ e.b,
+   add (add (mul k₁ e.a) (mul k₂ e.b)) (add (mul k₃ e.c) (mul k₃ e.c))⟩
+
+def rowMaskInv (k₁ k₂ k₃ : Fp4) (d : RowTriple) : RowTriple :=
+  let e₃ := mul (sub (sub d.c d.b) d.a) (LawfulField.inv k₃)
+  ⟨mul (sub d.a (mul k₃ e₃)) (LawfulField.inv k₁),
+   mul d.b (LawfulField.inv k₂), e₃⟩
+
+/-- The determinant of the three row groups, expanded without a matrix-library convention. -/
+theorem rowMask_determinant (k₁ k₂ k₃ : Fp4) :
+    sub (mul (mul k₁ k₂) (add k₃ k₃)) (mul (mul k₃ k₂) k₁) =
+      mul (mul k₁ k₂) k₃ := by
+  constructive_ring
+
+theorem scale_inv (k x : Fp4) (hk : k ≠ zero) :
+    mul k (mul x (LawfulField.inv k)) = x := by
+  calc
+    _ = mul x (mul k (LawfulField.inv k)) := by constructive_ring
+    _ = x := by rw [LawfulField.mul_inv_cancel hk, LawfulCommRing.mul_one]
+
+theorem inv_scale (k x : Fp4) (hk : k ≠ zero) :
+    mul (mul k x) (LawfulField.inv k) = x := by
+  calc
+    _ = mul x (mul k (LawfulField.inv k)) := by constructive_ring
+    _ = x := by rw [LawfulField.mul_inv_cancel hk, LawfulCommRing.mul_one]
+
+theorem rowMaskMap_right (k₁ k₂ k₃ : Fp4)
+    (h₁ : k₁ ≠ zero) (h₂ : k₂ ≠ zero) (h₃ : k₃ ≠ zero) (d : RowTriple) :
+    rowMaskMap k₁ k₂ k₃ (rowMaskInv k₁ k₂ k₃ d) = d := by
+  apply RowTriple.ext <;>
+    dsimp [rowMaskMap, rowMaskInv] <;>
+    simp only [scale_inv k₁ _ h₁, scale_inv k₂ _ h₂, scale_inv k₃ _ h₃] <;>
+    constructive_ring
+
+theorem rowMaskMap_left (k₁ k₂ k₃ : Fp4)
+    (h₁ : k₁ ≠ zero) (h₂ : k₂ ≠ zero) (h₃ : k₃ ≠ zero) (e : RowTriple) :
+    rowMaskInv k₁ k₂ k₃ (rowMaskMap k₁ k₂ k₃ e) = e := by
+  have hc : sub (sub (rowMaskMap k₁ k₂ k₃ e).c (rowMaskMap k₁ k₂ k₃ e).b)
+      (rowMaskMap k₁ k₂ k₃ e).a = mul k₃ e.c := by
+    simp only [rowMaskMap]
+    constructive_ring
+  have ha : sub (rowMaskMap k₁ k₂ k₃ e).a (mul k₃ e.c) = mul k₁ e.a := by
+    simp only [rowMaskMap]
+    constructive_ring
+  unfold rowMaskInv
+  rw [hc, inv_scale k₃ _ h₃]
+  dsimp only
+  rw [ha]
+  simp only [rowMaskMap, inv_scale k₁ _ h₁, inv_scale k₂ _ h₂]
+
+def rowMaskCellsMap {a b : Fp4} (_basis : CornerPadBasis a b)
+    (k₁ k₂ k₃ : Fp4) (r : RowMaskCells) : RowTriple :=
+  rowMaskMap k₁ k₂ k₃
+    ⟨cornerPad a b r.first, cornerPad a b r.second, cornerPad a b r.third⟩
+
+def rowMaskCellsInv {a b : Fp4} (basis : CornerPadBasis a b)
+    (k₁ k₂ k₃ : Fp4) (v : RowTriple) : RowMaskCells :=
+  let e := rowMaskInv k₁ k₂ k₃ v
+  ⟨basis.invert e.a, basis.invert e.b, basis.invert e.c⟩
+
+/-- Exactly the three nonzero corner factors and the four-corner rank test suffice;
+    no witness-specific invertibility premise is needed. -/
+def rowMaskCellsBij {a b : Fp4} (basis : CornerPadBasis a b)
+    (k₁ k₂ k₃ : Fp4) (h₁ : k₁ ≠ zero) (h₂ : k₂ ≠ zero) (h₃ : k₃ ≠ zero) :
+    SimpleEquiv RowMaskCells RowTriple where
+  toFun := rowMaskCellsMap basis k₁ k₂ k₃
+  invFun := rowMaskCellsInv basis k₁ k₂ k₃
+  left_inv r := by
+    dsimp [rowMaskCellsMap, rowMaskCellsInv]
+    rw [rowMaskMap_left k₁ k₂ k₃ h₁ h₂ h₃]
+    simp only [basis.left_inv]
+  right_inv v := by
+    dsimp [rowMaskCellsMap, rowMaskCellsInv]
+    rw [basis.right_inv, basis.right_inv, basis.right_inv]
+    exact rowMaskMap_right k₁ k₂ k₃ h₁ h₂ h₃ v
+
+def rowTripleAdd (w v : RowTriple) : RowTriple :=
+  ⟨add w.a v.a, add w.b v.b, add w.c v.c⟩
+
+def rowTripleSub (v w : RowTriple) : RowTriple :=
+  ⟨sub v.a w.a, sub v.b w.b, sub v.c w.c⟩
+
+/-- The actual twelve-cell masking-row observation is uniform jointly in all three
+    revealed operands. Its simulator has no assignment/witness argument. -/
+theorem masking_rows_joint_perfectly_simulated {a b : Fp4} (basis : CornerPadBasis a b)
+    (k₁ k₂ k₃ : Fp4) (h₁ : k₁ ≠ zero) (h₂ : k₂ ≠ zero) (h₃ : k₃ ≠ zero) :
+    PerfectlySimulated
+      (fun (w : RowTriple) (r : RowMaskCells) =>
+        rowTripleAdd w (rowMaskCellsMap basis k₁ k₂ k₃ r))
+      (fun (v : RowTriple) => v) := by
+  let e := rowMaskCellsBij basis k₁ k₂ k₃ h₁ h₂ h₃
+  intro w
+  refine ⟨⟨fun r => rowTripleAdd w (e.toFun r),
+    fun v => e.invFun (rowTripleSub v w), ?_, ?_⟩, fun _ => rfl⟩
+  · intro r
+    have h : rowTripleSub (rowTripleAdd w (e.toFun r)) w = e.toFun r := by
+      apply RowTriple.ext <;> dsimp [rowTripleAdd, rowTripleSub] <;> constructive_ring
+    rw [h, e.left_inv]
+  · intro v
+    rw [e.right_inv]
+    apply RowTriple.ext <;> dsimp [rowTripleAdd, rowTripleSub] <;> constructive_ring
+
+#verify_constructive Qsag.ZkHem.cornerCoeffs_left Qsag.ZkHem.cornerCoeffs_right
+  Qsag.ZkHem.cornerPad_power_point Qsag.ZkHem.rowMask_determinant
+  Qsag.ZkHem.masking_rows_joint_perfectly_simulated
+
+/-- Salt-query bad-event accounting for a finite adaptive oracle run. The reference
+    oracle and its answers may be arbitrary; the fresh uniform salt is sampled
+    independently of this reference run. Repetitions in the query log only weaken the bound. -/
+theorem fresh_hidden_salt_query_bound {F D A : Type} {N Q : Nat}
+    (O : Fin N × F → D) (adv : RoAdv (Fin N) F D A)
+    (hQ : (adv.queriedSalts O).length ≤ Q) :
+    qsum N (fun s => if s ∈ adv.queriedSalts O then 1 else 0) ≤ Q :=
+  Nat.le_trans (qsum_mem_list_le N (adv.queriedSalts O)) hQ
+
+/-- The same finite bad event controls the witness-removing oracle re-keying, rather
+    than an unrelated salt guess game. The adversary is adaptive through its oracle replies. -/
+theorem fresh_hidden_salt_coupling {F D A : Type} [LawfulField F] {N : Nat}
+    (O : Fin N × F → D) (adv : RoAdv (Fin N) F D A) (s : Fin N) (δ : F)
+    (hFresh : s ∉ adv.queriedSalts O) :
+    adv.run (saltShift (fun t => if t = s then δ else zero) O) = adv.run O := by
+  apply salted_leaves_identical_until_bad _ (fun t => t = s)
+  · intro t ht
+    exact ite_eq_right ht
+  · apply (RoAdv.avoids_iff O (fun t => t = s) adv).mpr
+    intro t ht heq
+    exact hFresh (heq ▸ ht)
+
+#verify_constructive Qsag.ZkHem.fresh_hidden_salt_query_bound
+  Qsag.ZkHem.fresh_hidden_salt_coupling
+
+
+/-! ## One-table public Hem: a relation on exactly the variable subcube -/
+section PublicHem
+variable {F : Type} [LawfulField F]
+
+/-- The three sparse relation matrices, represented by their Boolean-row/column entries.
+    `Z` below has exactly `varBits` variables: masks and opening blinders are absent. -/
+structure HemPublicShape (F : Type) where
+  rowBits : Nat
+  varBits : Nat
+  selector : List Bool → F
+  matrixA : List Bool → List Bool → F
+  matrixB : List Bool → List Bool → F
+  matrixC : List Bool → List Bool → F
+
+def matrixProduct (k : Nat) (M : List Bool → List Bool → F)
+    (Z : List Bool → F) (row : List Bool) : F :=
+  bitSum k (fun col => mul (M row col) (Z col))
+
+def HemPublicShape.Satisfied (s : HemPublicShape F) (Z : List Bool → F) : Prop :=
+  ∀ row : List Bool, row.length = s.rowBits →
+    rowGate (s.selector row) (matrixProduct s.varBits s.matrixA Z row)
+      (matrixProduct s.varBits s.matrixB Z row)
+      (matrixProduct s.varBits s.matrixC Z row) = zero
+
+def HemPublicShape.rowFunction (s : HemPublicShape F) (Z : List Bool → F)
+    (tau : List F) : List F → F :=
+  rowSummand s.rowBits tau s.selector (matrixProduct s.varBits s.matrixA Z)
+    (matrixProduct s.varBits s.matrixB Z) (matrixProduct s.varBits s.matrixC Z)
+
+def HemPublicShape.rowProver (s : HemPublicShape F) (Z : List Bool → F)
+    (tau : List F) (c : Nat → F) : WitnessRounds F :=
+  cubeProver (rowLineRep s.rowBits tau s.selector (matrixProduct s.varBits s.matrixA Z)
+    (matrixProduct s.varBits s.matrixB Z) (matrixProduct s.varBits s.matrixC Z)) s.rowBits c
+
+theorem publicHem_row_claim_zero (s : HemPublicShape F) (Z : List Bool → F)
+    (hZ : s.Satisfied Z) (tau : List F) :
+    cubeClaim (s.rowFunction Z tau) s.rowBits [] = zero := by
+  unfold cubeClaim
+  simp only [List.length_nil, Nat.sub_zero, List.nil_append]
+  calc
+    _ = bitSum s.rowBits (fun _ => (zero : F)) := by
+      apply bitSum_congr
+      intro row hrow
+      simp only [HemPublicShape.rowFunction, rowSummand,
+        mle_bitPt s.rowBits _ row hrow, hZ row hrow, LawfulCommRing.mul_zero]
+    _ = zero := bitSum_zero s.rowBits
+
+theorem publicHem_row_prover_correct (s : HemPublicShape F) (Z : List Bool → F)
+    (hZ : s.Satisfied Z) (tau : List F) (c : Nat → F) :
+    (s.rowProver Z tau c).H = zero ∧
+    (s.rowProver Z tau c).Honest s.rowBits 9 c ∧
+    (s.rowProver Z tau c).claim 9 c s.rowBits = s.rowFunction Z tau (chalPrefix c s.rowBits) := by
+  have h := cubeProver_proves (rowLineRep s.rowBits tau s.selector
+    (matrixProduct s.varBits s.matrixA Z) (matrixProduct s.varBits s.matrixB Z)
+    (matrixProduct s.varBits s.matrixC Z)) s.rowBits c
+  exact ⟨h.1.trans (publicHem_row_claim_zero s Z hZ tau), h.honest, h.terminal⟩
+
+/-- Matrix-vector multiplication commutes with multilinear evaluation of the row index. -/
+theorem matrixProduct_mle (n k : Nat) (M : List Bool → List Bool → F)
+    (Z : List Bool → F) (rx : List F) :
+    mle n (matrixProduct k M Z) rx =
+      bitSum k (fun col => mul (mle n (fun row => M row col) rx) (Z col)) := by
+  unfold matrixProduct
+  rw [mle_bitSum]
+  apply bitSum_congr
+  intro col _
+  calc
+    _ = mle n (fun row => mul (Z col) (M row col)) rx := by
+      apply mle_congr
+      intro row _
+      exact LawfulCommRing.mul_comm _ _
+    _ = mul (Z col) (mle n (fun row => M row col) rx) := mle_mul_left _ _ _ _
+    _ = _ := LawfulCommRing.mul_comm _ _
+
+/-- The column sumcheck's matrix is the verifier's random linear combination of the
+    three matrices evaluated at the row challenge. -/
+def HemPublicShape.columnMatrix (s : HemPublicShape F) (rx : List F) (nu : F)
+    (col : List Bool) : F :=
+  add (add (mle s.rowBits (fun row => s.matrixA row col) rx)
+    (mul nu (mle s.rowBits (fun row => s.matrixB row col) rx)))
+    (mul (mul nu nu) (mle s.rowBits (fun row => s.matrixC row col) rx))
+
+def HemPublicShape.columnClaim (s : HemPublicShape F) (Z : List Bool → F)
+    (rx : List F) (nu : F) : F :=
+  add (add (mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx)
+    (mul nu (mle s.rowBits (matrixProduct s.varBits s.matrixB Z) rx)))
+    (mul (mul nu nu) (mle s.rowBits (matrixProduct s.varBits s.matrixC Z) rx))
+
+def HemPublicShape.columnProver (s : HemPublicShape F) (Z : List Bool → F)
+    (rx : List F) (nu : F) (c : Nat → F) : WitnessRounds F :=
+  cubeProver (colLineRep s.varBits (s.columnMatrix rx nu) Z) s.varBits c
+
+theorem publicHem_column_claim (s : HemPublicShape F) (Z : List Bool → F)
+    (rx : List F) (nu : F) :
+    cubeClaim (colSummand s.varBits (s.columnMatrix rx nu) Z) s.varBits [] =
+      s.columnClaim Z rx nu := by
+  unfold cubeClaim
+  simp only [List.length_nil, Nat.sub_zero, List.nil_append]
+  calc
+    _ = bitSum s.varBits (fun col => mul (s.columnMatrix rx nu col) (Z col)) := by
+      apply bitSum_congr
+      intro col hcol
+      simp only [colSummand, mle_bitPt s.varBits _ col hcol]
+    _ = s.columnClaim Z rx nu := by
+      unfold HemPublicShape.columnClaim
+      rw [matrixProduct_mle, matrixProduct_mle, matrixProduct_mle,
+        ← bitSum_mul_left, ← bitSum_mul_left, ← bitSum_add, ← bitSum_add]
+      apply bitSum_congr
+      intro col _
+      simp only [HemPublicShape.columnMatrix]
+      constructive_ring
+
+theorem publicHem_column_prover_correct (s : HemPublicShape F) (Z : List Bool → F)
+    (rx : List F) (nu : F) (c : Nat → F) :
+    (s.columnProver Z rx nu c).H = s.columnClaim Z rx nu ∧
+    (s.columnProver Z rx nu c).Honest s.varBits 2 c ∧
+    (s.columnProver Z rx nu c).claim 2 c s.varBits =
+      mul (mle s.varBits (s.columnMatrix rx nu) (chalPrefix c s.varBits))
+        (mle s.varBits Z (chalPrefix c s.varBits)) := by
+  have h := cubeProver_proves (colLineRep s.varBits (s.columnMatrix rx nu) Z) s.varBits c
+  exact ⟨h.1.trans (publicHem_column_claim s Z rx nu), h.honest, h.terminal⟩
+
+/-- Concrete sumcheck flip bound against the constructed honest round polynomial.
+    This gives degree 9 for `rowLineRep`, degree 2 for `colLineRep`. -/
+theorem cubeProver_round_flip_bound [DecidableEq F] {g : List F → F} {d : Nat}
+    (L : LineRep g d) (n : Nat) (cs : List F) (hcs : cs.length < n)
+    (msg : List F) (hm : msg.length ≤ d + 1)
+    (hWrong : add (RoundPoly.evalCoeffs msg zero) (RoundPoly.evalCoeffs msg one) ≠
+      cubeClaim g n cs) (S : List F) (hS : S.Nodup) :
+    (S.filter (fun x => decide (RoundPoly.evalCoeffs msg x = cubeRound g n cs x))).length ≤ d := by
+  have hrep := cubeMsg_rep L n cs
+  have hne : add (RoundPoly.evalCoeffs msg zero) (RoundPoly.evalCoeffs msg one) ≠
+      add (RoundPoly.evalCoeffs (cubeMsg L n cs) zero)
+        (RoundPoly.evalCoeffs (cubeMsg L n cs) one) := by
+    rw [hrep.2 zero, hrep.2 one, cubeRound_telescope g n cs hcs]
+    exact hWrong
+  have hb := masked_sumcheck_round_flip_le_degree d msg (cubeMsg L n cs) hm hrep.1 hne S hS
+  have heq : S.filter (fun x => decide (RoundPoly.evalCoeffs msg x = cubeRound g n cs x)) =
+      S.filter (fun x => decide (RoundPoly.evalCoeffs msg x =
+        RoundPoly.evalCoeffs (cubeMsg L n cs) x)) := by
+    apply List.filter_congr
+    intro x _
+    rw [hrep.2 x]
+  rw [heq]
+  exact hb
+end PublicHem
+
+#verify_constructive Qsag.ZkHem.publicHem_row_prover_correct
+  Qsag.ZkHem.publicHem_column_prover_correct Qsag.ZkHem.cubeProver_round_flip_bound
+
+
+
+/-! ## Fresh salt vectors: query hits and birthday collisions in one finite experiment -/
+
+/-- Exact bad-leaf mass for `m` independent uniform salts. A query hit or a repeat of an
+    earlier salt is bad; after the first bad salt all suffixes are counted. The reference
+    query list may be the adaptive `RoAdv.queriedSalts O` of any fixed reference oracle. -/
+def saltVectorBadMass {N : Nat} (queries : List (Fin N)) : List (Fin N) → Nat → Nat
+  | _, 0 => 0
+  | prior, m + 1 => qsum N (fun s =>
+      if s ∈ queries ++ prior then N ^ m else saltVectorBadMass queries (s :: prior) m)
+
+private theorem saltBinom_succ (m : Nat) : (m + 1) * m / 2 = m + m * (m - 1) / 2 := by
+  have he : (m + 1) * m = 2 * m + m * (m - 1) := by
+    cases m with
+    | zero => rfl
+    | succ k =>
+      simp only [Nat.add_sub_cancel]
+      have h : k + 1 + 1 = 2 + k := by omega
+      rw [h, Nat.add_mul]
+      rw [Nat.mul_comm k (k + 1)]
+  rw [he]
+  omega
+
+/-- Exact union bound `m(|queries|+|prior|) + binom(m,2)`, with no independence
+    assumption on the query list's dependence on the *reference oracle*. The newly sampled
+    salt vector is independent of that reference run. -/
+theorem saltVectorBadMass_bound {N : Nat} (queries : List (Fin N)) :
+    ∀ (m : Nat) (prior : List (Fin N)),
+      saltVectorBadMass queries prior m ≤
+        (m * (queries.length + prior.length) + m * (m - 1) / 2) * N ^ (m - 1)
+  | 0, prior => by
+    simp only [saltVectorBadMass, Nat.zero_mul, Nat.zero_div, Nat.zero_add]
+    exact Nat.le_refl 0
+  | m + 1, prior => by
+    have hSplit := qsum_le_qsum (n := N) (fun s : Fin N => show
+        (if s ∈ queries ++ prior then N ^ m else saltVectorBadMass queries (s :: prior) m) ≤
+        (if s ∈ queries ++ prior then N ^ m else 0) + saltVectorBadMass queries (s :: prior) m from by
+      split <;> omega)
+    rw [qsum_add] at hSplit
+    have hBad : qsum N (fun s => if s ∈ queries ++ prior then N ^ m else 0) ≤
+        (queries.length + prior.length) * N ^ m := by
+      have hEq : qsum N (fun s => if s ∈ queries ++ prior then N ^ m else 0) =
+          qsum N (fun s => (if s ∈ queries ++ prior then 1 else 0) * N ^ m) := by
+        apply qsum_congr
+        intro s
+        split <;> simp
+      rw [hEq, qsum_mul_right]
+      have h := Nat.mul_le_mul_right (N ^ m) (qsum_mem_list_le N (queries ++ prior))
+      simpa only [List.length_append] using h
+    have hFuture : qsum N (fun s => saltVectorBadMass queries (s :: prior) m) ≤
+        (m * (queries.length + prior.length + 1) + m * (m - 1) / 2) * N ^ m := by
+      have h := qsum_le_qsum (fun s : Fin N => saltVectorBadMass_bound queries m (s :: prior))
+      simp only [List.length_cons, ← Nat.add_assoc] at h
+      rw [qsum_const] at h
+      have he : N * ((m * (queries.length + prior.length + 1) + m * (m - 1) / 2) * N ^ (m - 1)) =
+          (m * (queries.length + prior.length + 1) + m * (m - 1) / 2) * N ^ m := by
+        cases m with
+        | zero => simp
+        | succ k =>
+          simp only [Nat.add_sub_cancel, Nat.pow_succ]
+          ac_rfl
+      rw [he] at h
+      exact h
+    have hTotal := Nat.le_trans hSplit (Nat.add_le_add hBad hFuture)
+    have hc : queries.length + prior.length +
+        (m * (queries.length + prior.length + 1) + m * (m - 1) / 2) =
+        (m + 1) * (queries.length + prior.length) + (m + 1) * m / 2 := by
+      rw [saltBinom_succ, Nat.add_mul, Nat.one_mul, Nat.mul_add, Nat.mul_one]
+      omega
+    simpa only [saltVectorBadMass, Nat.add_sub_cancel, ← Nat.add_mul, hc] using hTotal
+
+/-- Query-hit and repeated-salt probability for `m` fresh independent salts. -/
+theorem saltVector_bad_probability {N : Nat} (hN : 0 < N)
+    (queries : List (Fin N)) (m : Nat) :
+    RatBound.le
+      ⟨saltVectorBadMass queries [] m, N ^ m, Nat.pow_pos hN⟩
+      ⟨m * queries.length + m * (m - 1) / 2, N, hN⟩ := by
+  unfold RatBound.le
+  dsimp only
+  cases m with
+  | zero => simp only [saltVectorBadMass, Nat.zero_mul, Nat.zero_div, Nat.zero_add]; omega
+  | succ k =>
+    have h := Nat.mul_le_mul_right N (saltVectorBadMass_bound queries (k + 1) [])
+    simpa only [List.length_nil, Nat.add_zero, Nat.add_sub_cancel, Nat.mul_assoc,
+      ← Nat.pow_succ] using h
+
+#verify_constructive Qsag.ZkHem.saltVectorBadMass_bound Qsag.ZkHem.saltVector_bad_probability
+
+
+
