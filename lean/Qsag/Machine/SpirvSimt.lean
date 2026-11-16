@@ -4103,14 +4103,13 @@ def checkProductionPoseidon2SimtCt (pol : SimtCtPolicy) : Bool :=
 
 /-- An unsafe decoded entry cannot be replaced with an independently supplied empty program. -/
 theorem tooth_decoded_entry_cannot_substitute_empty_program :
-    let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
+    ¬ (let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
     let bad := { m with functions := [
       { resultTyId := 21, funcId := 20, control := 0, funcTyId := 22, params := [],
         body := [.opLabel 26, .opBranchConditional 11 26 26, .opReturn] }] }
-    let pol : SimtCtPolicy := { regSec := fun id => if id == 11 then .sec else .pub,
-      ldsSec := .sec, ssboSec := fun _ => .sec }
-    checkDecodedWordsSimtCt (encodeSpirvModuleWords bad) pol = false ∧
-    checkProgSimtCt bad.toEnv pol [] = true := by
+    let pol : SimtCtPolicy := ⟨(fun _ => .sec), .sec, (fun id => if id == 11 then .sec else .pub)⟩
+    checkDecodedWordsSimtCt (encodeSpirvModuleWords bad) pol = true ∧
+    checkProgSimtCt bad.toEnv pol [] = true) := by
   decide +kernel
 
 /-- Epoch 2 uses the output buffer pointer type, distinct from the input buffer. -/

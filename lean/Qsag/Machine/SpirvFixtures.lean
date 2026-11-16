@@ -3,6 +3,7 @@ module
 This is a byte/word pin, not a functional or constant-time certificate. -/
 public section
 namespace Qsag
+set_option maxRecDepth 65536
 @[expose] def poseidon2Perm12SpvWords : Array UInt32 := #[
   0x07230203, 0x00010500, 0x0008000b, 0x00000369, 0x00000000, 0x00020011, 0x00000001, 0x00020011,
   0x0000000b, 0x0006000b, 0x00000001, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, 0x0003000e,
