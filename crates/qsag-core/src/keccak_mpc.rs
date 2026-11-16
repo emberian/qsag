@@ -32,8 +32,7 @@ use crate::fips205::{
 };
 use crate::preprocessing::{
     OtMesh, PartyPrivateRng, PreprocessError, PreprocessedKeccakPartyVault,
-    commit_and_open_spdz_bs_gf256_batch_quorum, run_commit_and_open_coin,
-    spdz_authenticate_bs_gf256_words, validate_all_eval_points_gf256,
+    run_commit_and_open_coin, spdz_authenticate_bs_gf256_words, validate_all_eval_points_gf256,
 };
 use crate::sponge::keccak::{
     Cshake256WordStream4, Cshake256Xof, KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS,
@@ -180,7 +179,7 @@ pub struct RssKeyShare256 {
     /// Identity of the hash-signature key and parameter set this share was generated for,
     /// recorded once by the scheme's key generation (see [`Self::bind_scheme_identity`]).
     scheme_identity: Option<[u8; 32]>,
-    slh_params: Option<Fips205Params>,
+    slh_profile_digest: Option<[u64; 4]>,
 }
 
 /// Parameter-set digest and public root that a set of RSS key shares was generated for.
@@ -246,7 +245,7 @@ impl RssKeyShare256 {
     /// re-pointed at another parameter set or root. The record lives in this value; a caller
     /// that persists key shares must persist it with them.
     pub fn bind_scheme_identity(&mut self, identity: &[u8; 32]) -> Result<(), KeccakMpcError> {
-        if self.slh_params.is_some() {
+        if self.slh_profile_digest.is_some() || self.tsw_binding.is_some() {
             return Err(KeccakMpcError::KeyBindingMismatch);
         }
         match &self.scheme_identity {
@@ -330,9 +329,20 @@ impl RssKeyShare256 {
         Ok(pair)
     }
 
-    /// Canonical 268-byte secret serialization of one custodian's 2-of-3 RSS share (`QSRSSK01`).
+    /// Canonical `QSRSSK01` secret serialization: the legacy 268-byte form is unchanged.
+    /// Byte 11 selects a fail-closed extension: 1 appends a 32-byte SLH profile digest;
+    /// 2 appends the 64-byte TSW parameter/root binding. Old decoders reject both.
     pub fn to_secret_bytes(&self) -> crate::wipe::SecretVec<u8> {
-        let mut out = SecretBuffer(Vec::with_capacity(268));
+        let profile_flag = if self.slh_profile_digest.is_some() {
+            1u8
+        } else if self.tsw_binding.is_some() {
+            2
+        } else {
+            0
+        };
+        // Allocate the final capacity before writing secrets; Vec growth would free
+        // an unwiped old allocation even though the final buffer wipes on drop.
+        let mut out = SecretBuffer(Vec::with_capacity(268 + 32 * usize::from(profile_flag)));
         out.0.extend_from_slice(b"QSRSSK01");
         out.0.push(self.party_id as u8);
         out.0.push(self.key_len as u8);
@@ -341,7 +351,7 @@ impl RssKeyShare256 {
             None => (0u8, [0u8; 32]),
         };
         out.0.push(has_scheme_id);
-        out.0.push(0u8);
+        out.0.push(profile_flag);
         out.0.extend_from_slice(&self.pk_seed);
         out.0.extend_from_slice(&self.sk_seed_primary);
         out.0.extend_from_slice(&self.sk_seed_secondary);
@@ -350,21 +360,35 @@ impl RssKeyShare256 {
         out.0.extend_from_slice(&self.prg_seed_primary);
         out.0.extend_from_slice(&self.prg_seed_secondary);
         out.0.extend_from_slice(&scheme_id_bytes);
-        debug_assert_eq!(out.0.len(), 268);
+        if let Some(profile) = self.slh_profile_digest {
+            for word in profile {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        } else if let Some(binding) = self.tsw_binding {
+            out.extend_from_slice(&binding.params_digest);
+            out.extend_from_slice(&binding.pk_root);
+        }
+        debug_assert_eq!(out.0.len(), 268 + 32 * usize::from(profile_flag));
         out
     }
 
-    /// Decode a canonical 268-byte `QSRSSK01` 2-of-3 RSS custodian share, rejecting malformed headers
+    /// Decode a canonical `QSRSSK01` custodian share, retaining suite bindings and rejecting malformed headers
     /// or non-zero trailing `scheme_identity` bytes when `has_scheme_id == 0`.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, KeccakMpcError> {
-        if bytes.len() != 268 || &bytes[0..8] != b"QSRSSK01" {
+        if bytes.len() < 268 || &bytes[0..8] != b"QSRSSK01" {
             return Err(KeccakMpcError::InvalidParameters);
         }
         let party_id = usize::from(bytes[8]);
         let key_len = usize::from(bytes[9]);
         let has_scheme_id = bytes[10];
-        let reserved = bytes[11];
-        if party_id >= 3 || !matches!(key_len, 16 | 24 | 32) || has_scheme_id > 1 || reserved != 0 {
+        let profile_flag = bytes[11];
+        if party_id >= 3
+            || !matches!(key_len, 16 | 24 | 32)
+            || has_scheme_id > 1
+            || profile_flag > 2
+            || bytes.len() != 268 + 32 * usize::from(profile_flag)
+            || (profile_flag != 0 && has_scheme_id != 0)
+        {
             return Err(KeccakMpcError::InvalidParameters);
         }
         let read32 = |off: usize| -> [u8; 32] {
@@ -372,13 +396,22 @@ impl RssKeyShare256 {
             arr.copy_from_slice(&bytes[off..off + 32]);
             arr
         };
+        let slh_profile_digest = (profile_flag == 1).then(|| {
+            core::array::from_fn(|i| {
+                u64::from_le_bytes(core::array::from_fn(|b| bytes[268 + 8 * i + b]))
+            })
+        });
+        let tsw_binding = (profile_flag == 2).then(|| TswKeyBinding {
+            params_digest: read32(268),
+            pk_root: read32(300),
+        });
         let pk_seed = read32(12);
-        let sk_seed_primary = read32(44);
-        let sk_seed_secondary = read32(76);
-        let sk_prf_primary = read32(108);
-        let sk_prf_secondary = read32(140);
-        let prg_seed_primary = read32(172);
-        let prg_seed_secondary = read32(204);
+        let sk_seed_primary = SecretBuffer(read32(44));
+        let sk_seed_secondary = SecretBuffer(read32(76));
+        let sk_prf_primary = SecretBuffer(read32(108));
+        let sk_prf_secondary = SecretBuffer(read32(140));
+        let prg_seed_primary = SecretBuffer(read32(172));
+        let prg_seed_secondary = SecretBuffer(read32(204));
         let scheme_id_bytes = read32(236);
         let scheme_identity = if has_scheme_id == 1 {
             Some(scheme_id_bytes)
@@ -401,15 +434,15 @@ impl RssKeyShare256 {
             party_id,
             key_len,
             pk_seed,
-            sk_seed_primary,
-            sk_seed_secondary,
-            sk_prf_primary,
-            sk_prf_secondary,
-            prg_seed_primary,
-            prg_seed_secondary,
-            tsw_binding: None,
+            sk_seed_primary: sk_seed_primary.0,
+            sk_seed_secondary: sk_seed_secondary.0,
+            sk_prf_primary: sk_prf_primary.0,
+            sk_prf_secondary: sk_prf_secondary.0,
+            prg_seed_primary: prg_seed_primary.0,
+            prg_seed_secondary: prg_seed_secondary.0,
+            tsw_binding,
             scheme_identity,
-            slh_params: None,
+            slh_profile_digest,
         })
     }
 
@@ -447,7 +480,7 @@ impl RssKeyShare256 {
             prg_seed_secondary: prg_seed.0[1],
             tsw_binding: None,
             scheme_identity: None,
-            slh_params: None,
+            slh_profile_digest: None,
         })
     }
 }
@@ -517,7 +550,7 @@ pub fn run_dealerless_rss_dkg_2of3(
             prg_seed_secondary: prg_seeds[next],
             tsw_binding: None,
             scheme_identity: None,
-            slh_params: None,
+            slh_profile_digest: None,
         }
     });
     for i in 0..3 {
@@ -2389,7 +2422,7 @@ impl RssSlhMpcCluster {
                 k.pk_seed != keys[0].pk_seed
                     || k.scheme_identity != keys[0].scheme_identity
                     || k.tsw_binding != keys[0].tsw_binding
-                    || k.slh_params != keys[0].slh_params
+                    || k.slh_profile_digest != keys[0].slh_profile_digest
             })
         {
             return Err(KeccakMpcError::InvalidParameters);
@@ -2419,13 +2452,15 @@ impl RssSlhMpcCluster {
                     || key.pk_seed[..key.key_len] != *pk_seed
                     || key.tsw_binding.is_some()
                     || key.scheme_identity.is_some()
-                    || key.slh_params.is_some_and(|bound| bound != *params)
+                    || key
+                        .slh_profile_digest
+                        .is_some_and(|bound| bound != slh_profile_digest_u64x4(params))
             })
         {
             return Err(Fips205Error::InvalidParameterSet);
         }
         for key in &mut self.keys {
-            key.slh_params = Some(*params);
+            key.slh_profile_digest = Some(slh_profile_digest_u64x4(params));
         }
         Ok(())
     }
@@ -2456,7 +2491,11 @@ impl RssSlhMpcCluster {
     /// The stateless hash-signature binding shared by all three key shares, `None` when no
     /// share is bound. Shares that disagree are refused.
     fn tsw_binding(&self) -> Result<Option<TswKeyBinding>, KeccakMpcError> {
-        if self.keys.iter().any(|k| k.slh_params.is_some()) {
+        if self
+            .keys
+            .iter()
+            .any(|k| k.slh_profile_digest.is_some() || k.scheme_identity.is_some())
+        {
             return Err(KeccakMpcError::KeyBindingMismatch);
         }
         let binding = self.keys[0].tsw_binding;
@@ -3594,9 +3633,9 @@ fn commit_and_open_beaver_de_batch(
 /// openings `pending_opened` **strictly before** any party reveals its cut-boundary output share!
 #[expect(
     clippy::too_many_arguments,
-    reason = "Preserve the existing explicit protocol interface for callers"
+    reason = "The authenticated batch and retained OT mesh are separate protocol inputs"
 )]
-pub(crate) fn verify_pending_spdz_mac_batch(
+pub(crate) fn verify_pending_spdz_mac_batch_with_mesh(
     session_id: &[u8; 32],
     phase: &'static str,
     t: usize,
@@ -3605,7 +3644,19 @@ pub(crate) fn verify_pending_spdz_mac_batch(
     pending_macs: &[Vec<[[Tower128; 64]; 2]>],
     alpha_shares: &[[Tower128; 2]],
     party_rngs: &mut [PartyPrivateRng],
+    mut mesh: Option<&mut OtMesh>,
 ) -> Result<(), PreprocessError> {
+    let n = quorum_pts.len();
+    if t == 0
+        || t > n
+        || pending_macs.len() != n
+        || alpha_shares.len() != n
+        || party_rngs.len() != n
+        || pending_macs.iter().any(|m| m.len() != pending_opened.len())
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    crate::preprocessing::validate_all_eval_points_gf256(quorum_pts)?;
     if pending_opened.is_empty() {
         return Ok(());
     }
@@ -3628,87 +3679,48 @@ pub(crate) fn verify_pending_spdz_mac_batch(
     let (x_folded, mut m_folded) =
         crate::preprocessing::fold_spdz_mac_words(&fold_coin, pending_opened, pending_macs, t);
 
-    let mut z_masks = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
-    if t > 1 {
-        let mut r = 0;
-        while r < t {
-            let mut s0 = Tower128::ZERO;
-            let mut s1 = Tower128::ZERO;
-            let mut q = 0;
-            while q < (t - 1) {
-                let u0 = party_rngs[r].next_tower128();
-                let u1 = party_rngs[r].next_tower128();
-                z_masks[q][0] = z_masks[q][0].add(u0);
-                z_masks[q][1] = z_masks[q][1].add(u1);
-                s0 = s0.add(u0);
-                s1 = s1.add(u1);
-                q += 1;
-            }
-            z_masks[t - 1][0] = z_masks[t - 1][0].add(s0);
-            z_masks[t - 1][1] = z_masks[t - 1][1].add(s1);
-            r += 1;
-        }
-    }
-
-    let mut sigmas = SecretBuffer(Vec::with_capacity(t));
-    let mut sig_salts = SecretBuffer(Vec::with_capacity(t));
-    let mut sig_coms = Vec::with_capacity(t);
-    for q in 0..t {
-        let d0 = m_folded[q][0].add(alpha_shares[q][0].mul(x_folded[0]));
-        let d1 = m_folded[q][1].add(alpha_shares[q][1].mul(x_folded[1]));
-        let sig_q = [
-            d0.mul_gf256(lambdas_0[q]).add(z_masks[q][0]),
-            d1.mul_gf256(lambdas_0[q]).add(z_masks[q][1]),
-        ];
-        let salt = party_rngs[q].next_bytes32();
-        let q_be = (q as u64).to_be_bytes();
-        let s0_b = sig_q[0].0.to_le_bytes();
-        let s1_b = sig_q[1].0.to_le_bytes();
-        let com = cshake256_32_multi_frame(
-            b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
-            &[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt],
+    // Additive masking alone cancels in the aggregate and leaks alpha on abort.
+    // Keep residuals private and open only independently multiplicatively blinded lanes.
+    for lane in 0..2 {
+        let residual = SecretBuffer(
+            (0..n)
+                .map(|q| {
+                    if q < t {
+                        m_folded[q][lane]
+                            .add(alpha_shares[q][lane].mul(x_folded[lane]))
+                            .mul_gf256(lambdas_0[q])
+                    } else {
+                        Tower128::ZERO
+                    }
+                })
+                .collect::<Vec<_>>(),
         );
-        secret_vec_push(&mut sigmas, sig_q);
-        secret_vec_push(&mut sig_salts, salt);
-        sig_coms.push(com);
-    }
-    for z in z_masks.iter_mut() {
-        wipe_tower128(z);
-    }
-    for m in m_folded.iter_mut() {
-        wipe_tower128(m);
-    }
-
-    let mut sum0 = Tower128::ZERO;
-    let mut sum1 = Tower128::ZERO;
-    for q in 0..t {
-        let q_be = (q as u64).to_be_bytes();
-        let s0_b = sigmas[q][0].0.to_le_bytes();
-        let s1_b = sigmas[q][1].0.to_le_bytes();
-        let exp = cshake256_32_multi_frame(
+        let sid = cshake256_32_multi_frame(
             b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
             &[
                 session_id,
                 phase.as_bytes(),
-                &q_be,
-                &s0_b,
-                &s1_b,
-                &sig_salts[q],
+                b"blinded-lane",
+                &(lane as u64).to_be_bytes(),
+                &fold_coin,
             ],
         );
-        wipe_bytes32(&mut sig_salts[q]);
-        if !ct_eq_bytes32(&exp, &sig_coms[q]) {
-            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: q });
-        }
-        sum0 = sum0.add(sigmas[q][0]);
-        sum1 = sum1.add(sigmas[q][1]);
-        wipe_tower128(&mut sigmas[q]);
-    }
-    if !(sum0.ct_eq(Tower128::ZERO) && sum1.ct_eq(Tower128::ZERO)) {
-        return Err(PreprocessError::MacCheckFailed {
+        let opened = crate::preprocessing::blind_open_tower128(
+            &sid,
             phase,
-            accused_party: None,
-        });
+            &residual,
+            mesh.as_deref_mut(),
+            party_rngs,
+        )?;
+        if !opened.ct_eq(Tower128::ZERO) {
+            return Err(PreprocessError::MacCheckFailed {
+                phase,
+                accused_party: None,
+            });
+        }
+    }
+    for row in m_folded.iter_mut() {
+        wipe_tower128(row);
     }
     Ok(())
 }
@@ -4142,7 +4154,7 @@ pub fn eval_spdz_keccak_f1600_batch64(
     Ok(())
 }
 
-fn slh_profile_digest_u64x4(params: &Fips205Params) -> [u64; 4] {
+pub(crate) fn slh_profile_digest_u64x4(params: &Fips205Params) -> [u64; 4] {
     let n_b = (params.n as u64).to_le_bytes();
     let h_b = (params.h as u64).to_le_bytes();
     let d_b = (params.d as u64).to_le_bytes();
@@ -4423,6 +4435,7 @@ pub struct SpdzSlhMpcCluster<'a> {
     pub vaults: &'a mut [PreprocessedKeccakPartyVault],
     pub party_rngs: &'a mut [PartyPrivateRng],
     perm_ctr: usize,
+    online_mesh: Option<OtMesh>,
 }
 
 impl<'a> SpdzSlhMpcCluster<'a> {
@@ -4470,7 +4483,25 @@ impl<'a> SpdzSlhMpcCluster<'a> {
             vaults,
             party_rngs,
             perm_ctr: 0,
+            online_mesh: None,
         })
+    }
+
+    /// Construct with a pre-established online mesh, retained across every barrier.
+    pub fn new_with_mesh(
+        session_id: [u8; 32],
+        t: usize,
+        keys: &'a [SpdzAuthenticatedKeyShare],
+        vaults: &'a mut [PreprocessedKeccakPartyVault],
+        party_rngs: &'a mut [PartyPrivateRng],
+        online_mesh: OtMesh,
+    ) -> Result<Self, KeccakMpcError> {
+        if online_mesh.n != keys.len() {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let mut cluster = Self::new(session_id, t, keys, vaults, party_rngs)?;
+        cluster.online_mesh = Some(online_mesh);
+        Ok(cluster)
     }
 
     fn poison_all(&mut self) {
@@ -4481,7 +4512,22 @@ impl<'a> SpdzSlhMpcCluster<'a> {
 
     /// Entry check of every evaluation and opening method.
     fn ensure_live(&mut self) -> Result<(), Fips205Error> {
-        spdz_refuse_poisoned_vaults(self.vaults).map_err(|_| Fips205Error::MpcActiveTamperDetected)
+        spdz_refuse_poisoned_vaults(self.vaults)
+            .map_err(|_| Fips205Error::MpcActiveTamperDetected)?;
+        if self.online_mesh.is_none() {
+            let sid = cshake256_32_multi_frame(
+                b"QSAG.SPDZ.BLIND.OT/v1",
+                &[&self.session_id, b"spdz-slh-online"],
+            );
+            match OtMesh::try_establish(sid, self.party_rngs) {
+                Ok(mesh) => self.online_mesh = Some(mesh),
+                Err(_) => {
+                    self.poison_all();
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Instance-bitsliced absorb of one public rate block per sponge instance into a zero
@@ -4559,7 +4605,7 @@ impl<'a> SpdzSlhMpcCluster<'a> {
                 .map(|p| self.vaults[p].mac_alpha_lanes)
                 .collect::<Vec<[Tower128; 2]>>(),
         );
-        if verify_pending_spdz_mac_batch(
+        if verify_pending_spdz_mac_batch_with_mesh(
             &self.session_id,
             "spdz_batch64_chi",
             self.t,
@@ -4568,6 +4614,7 @@ impl<'a> SpdzSlhMpcCluster<'a> {
             &pending_macs,
             &alpha_sh,
             self.party_rngs,
+            self.online_mesh.as_mut(),
         )
         .is_err()
         {
@@ -4704,22 +4751,24 @@ impl<'a> SpdzSlhMpcCluster<'a> {
                 .map(|p| self.vaults[p].mac_alpha_lanes)
                 .collect::<Vec<[Tower128; 2]>>(),
         );
-        let opened_words = match commit_and_open_spdz_bs_gf256_batch_quorum(
-            &self.session_id,
-            phase,
-            self.t,
-            &self.quorum_pts,
-            cut_sh,
-            cut_mac,
-            &alpha_sh,
-            self.party_rngs,
-        ) {
-            Ok(w) => w,
-            Err(_) => {
-                self.poison_all();
-                return Err(Fips205Error::MpcActiveTamperDetected);
-            }
-        };
+        let opened_words =
+            match crate::preprocessing::commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh(
+                &self.session_id,
+                phase,
+                self.t,
+                &self.quorum_pts,
+                cut_sh,
+                cut_mac,
+                &alpha_sh,
+                self.online_mesh.as_mut(),
+                self.party_rngs,
+            ) {
+                Ok(w) => w,
+                Err(_) => {
+                    self.poison_all();
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            };
         // Every opened share must be a bit: planes 1..8 of each word are zero.
         if opened_words.len() != chunk_sizes.len() * n_bits
             || opened_words.iter().any(|w| w[1..] != [0u64; 7])
@@ -4768,7 +4817,7 @@ impl<'a> SpdzSlhMpcCluster<'a> {
                 .collect::<Vec<[Tower128; 2]>>(),
         );
 
-        if verify_pending_spdz_mac_batch(
+        if verify_pending_spdz_mac_batch_with_mesh(
             &self.session_id,
             phase,
             self.t,
@@ -4777,6 +4826,7 @@ impl<'a> SpdzSlhMpcCluster<'a> {
             pending_macs,
             &alpha_sh,
             self.party_rngs,
+            self.online_mesh.as_mut(),
         )
         .is_err()
         {
@@ -4784,22 +4834,24 @@ impl<'a> SpdzSlhMpcCluster<'a> {
             return Err(Fips205Error::MpcActiveTamperDetected);
         }
 
-        let opened_words = match commit_and_open_spdz_bs_gf256_batch_quorum(
-            &self.session_id,
-            phase,
-            self.t,
-            &self.quorum_pts,
-            cut_words_sh,
-            cut_words_mac,
-            &alpha_sh,
-            self.party_rngs,
-        ) {
-            Ok(w) => w,
-            Err(_) => {
-                self.poison_all();
-                return Err(Fips205Error::MpcActiveTamperDetected);
-            }
-        };
+        let opened_words =
+            match crate::preprocessing::commit_and_open_spdz_bs_gf256_batch_quorum_with_mesh(
+                &self.session_id,
+                phase,
+                self.t,
+                &self.quorum_pts,
+                cut_words_sh,
+                cut_words_mac,
+                &alpha_sh,
+                self.online_mesh.as_mut(),
+                self.party_rngs,
+            ) {
+                Ok(w) => w,
+                Err(_) => {
+                    self.poison_all();
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+            };
 
         for w in &opened_words {
             if w[1..] != [0u64; 7] {
@@ -7395,6 +7447,85 @@ pub(crate) mod tests {
         (0..n)
             .map(|p| PartyPrivateRng::from_seed([tag + p as u8; 32], b"spdz-k"))
             .collect()
+    }
+
+    #[test]
+    fn rss_secret_codec_preserves_slh_and_tsw_profile_locks() {
+        let mut rngs: [PartyPrivateRng; 3] = core::array::from_fn(|i| {
+            PartyPrivateRng::from_seed([0x18 + i as u8; 32], b"codec-profile")
+        });
+        let (mut shares, _) = run_dealerless_rss_dkg_2of3([0x38; 32], 32, &mut rngs).unwrap();
+        shares[0].slh_profile_digest =
+            Some(slh_profile_digest_u64x4(&Fips205Params::SLH_DSA_SHAKE_256F));
+        let encoded = shares[0].to_secret_bytes();
+        assert_eq!(encoded.len(), 300);
+        let mut restored = RssKeyShare256::from_secret_bytes(&encoded).unwrap();
+        assert_eq!(restored.slh_profile_digest, shares[0].slh_profile_digest);
+        assert!(restored.bind_scheme_identity(&[7; 32]).is_err());
+        assert!(RssKeyShare256::from_secret_bytes(&encoded[..268]).is_err());
+        shares[1].tsw_binding = Some(TswKeyBinding {
+            params_digest: [7; 32],
+            pk_root: [8; 32],
+        });
+        let encoded = shares[1].to_secret_bytes();
+        assert_eq!(encoded.len(), 332);
+        let restored = RssKeyShare256::from_secret_bytes(&encoded).unwrap();
+        assert!(restored.tsw_binding == shares[1].tsw_binding);
+    }
+
+    #[test]
+    fn pending_mac_uses_retained_mesh_and_rejects_each_corrupt_lane() {
+        let sid = [0x57; 32];
+        let mut rngs = spdz_test_rngs(3, 0x3a);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        let points = [TowerGf256(1), TowerGf256(2), TowerGf256(3)];
+        let opened = vec![[0u64; 8]];
+        let mut macs = vec![vec![[[Tower128::ZERO; 64]; 2]]; 3];
+        let alpha = [[Tower128(9), Tower128(11)]; 3];
+        verify_pending_spdz_mac_batch_with_mesh(
+            &sid,
+            "test_pending_blind",
+            2,
+            &points,
+            &opened,
+            &macs,
+            &alpha,
+            &mut rngs,
+            Some(&mut mesh),
+        )
+        .unwrap();
+        for lane in 0..2 {
+            macs[0][0][lane][0] = Tower128(1);
+            assert!(matches!(
+                verify_pending_spdz_mac_batch_with_mesh(
+                    &sid,
+                    "test_pending_blind",
+                    2,
+                    &points,
+                    &opened,
+                    &macs,
+                    &alpha,
+                    &mut rngs,
+                    Some(&mut mesh)
+                ),
+                Err(PreprocessError::MacCheckFailed { .. })
+            ));
+            macs[0][0][lane][0] = Tower128::ZERO;
+        }
+        assert!(
+            verify_pending_spdz_mac_batch_with_mesh(
+                &sid,
+                "test_pending_blind",
+                4,
+                &points,
+                &opened,
+                &macs,
+                &alpha,
+                &mut rngs,
+                Some(&mut mesh)
+            )
+            .is_err()
+        );
     }
 
     #[test]
