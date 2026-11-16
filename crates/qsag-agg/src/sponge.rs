@@ -208,7 +208,8 @@ pub const POW_MIDSTATE: [u64; 25] = cshake256_static_midstate(POW_CUSTOM);
 
 /// RFC 9861 12-round `Keccak-p[1600, 12]` permutation (rounds `12..24` of `KECCAK_RC`).
 /// Preserves 256-bit preimage, 128-bit collision, and 128-bit Grover QROM security for Role-1
-/// outer WHIR commitments and PoW grinding (zero AIR constraints) at 2x throughput.
+/// outer WHIR commitments and PoW grinding (zero AIR constraints). The permutation uses
+/// half the rounds of Keccak-f[1600]; end-to-end throughput depends on the workload.
 #[inline(always)]
 pub const fn keccak_p1600_12(state: &mut [u64; 25]) {
     let mut s0 = state[0];
