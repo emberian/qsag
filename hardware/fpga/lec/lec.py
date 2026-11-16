@@ -259,19 +259,24 @@ module qsag_dsp_tile_cell (
 endmodule
 """)
     ys = yosys_smt2(f"dsp_tile_{aw}x{bw}", "qsag_dsp_tile_cell", [tile_sv], use_contracts=False)
+    a0, b0 = acc("a", "s0"), acc("b", "s0")
+    exact_mul = f"(bvmul {zext(a0, aw, tw)} {zext(b0, bw, tw)})"
+    q_full = ys + unroll(2) + f"(assert (not (= {acc('tq', 's2')} {exact_mul})))\n(check-sat)\n"
+    if not record(f"dsp_tile_exact_{aw}x{bw}_all",
+                  f"bit-precise 2-stage DSP tile ({aw}x{bw}): tq == zext(a)*zext(b) (mod 2^{tw}) for all 2^{tw} inputs",
+                  "unsat", q_full, prefer_bitwuzla=False):
+        raise SystemExit("failed bit-precise DSP tile proof")
     for wa, wb in shapes:
-        a0, b0 = acc("a", "s0"), acc("b", "s0")
-        hi_cond = []
-        if wa < aw: hi_cond.append(f"(= ((_ extract {aw-1} {wa}) {a0}) {bv(0, aw - wa)})")
-        if wb < bw: hi_cond.append(f"(= ((_ extract {bw-1} {wb}) {b0}) {bv(0, bw - wb)})")
-        pre = f"(assert (and {' '.join(hi_cond)}))\n" if hi_cond else ""
-        exact_mul = f"(bvmul {zext(a0, aw, tw)} {zext(b0, bw, tw)})"
-        q = (ys + unroll(2) + pre +
-             f"(assert (not (= {acc('tq', 's2')} {exact_mul})))\n(check-sat)\n")
-        if not record(f"dsp_tile_exact_{aw}x{bw}_{wa}x{wb}",
-                      f"bit-precise 2-stage DSP tile ({wa}x{wb} in {aw}x{bw}): tq == zext(a)*zext(b) (mod 2^{tw}, non-wrapping by tile_bound_{wa}x{wb}) for all 2^{wa+wb} inputs",
-                      "unsat", q, prefer_bitwuzla=True):
-            raise SystemExit("failed bit-precise DSP tile glue")
+        q_pad = (f"(set-logic QF_UFBV)\n(declare-fun qmul ((_ BitVec {tw}) (_ BitVec {tw})) (_ BitVec {tw}))\n"
+                 f"(declare-fun asub () (_ BitVec {wa}))\n(declare-fun bsub () (_ BitVec {wb}))\n"
+                 f"(define-fun apad () (_ BitVec {aw}) {zext('asub', wa, aw)})\n"
+                 f"(define-fun bpad () (_ BitVec {bw}) {zext('bsub', wb, bw)})\n"
+                 f"(assert (not (= (qmul {zext('apad', aw, tw)} {zext('bpad', bw, tw)}) "
+                 f"(qmul {zext('asub', wa, tw)} {zext('bsub', wb, tw)}))))\n(check-sat)\n")
+        if not record(f"dsp_tile_pad_{aw}x{bw}_{wa}x{wb}",
+                      f"tile zero-padding glue ({wa}x{wb} -> {aw}x{bw}): padded DSP operands equal direct {tw}-bit zero-extensions",
+                      "unsat", q_pad, prefer_bitwuzla=False):
+            raise SystemExit("failed DSP tile zero-padding glue")
 
 def check_mul_wiring(tag, files, aw, bw, expect, precise=False, required=True, secs=None):
     chp = f"-chparam AW {aw} -chparam BW {bw}"
@@ -340,7 +345,8 @@ def check_csa_inductive(w, target_n):
     body3 = ys3 + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
     if not record(f"contract_csa2_{w}_n3_base",
                   f"qsag_csa_reduce2 W={w} N=3 base: s + c == sum x_i (mod 2^{w}) for all 2^{3*w} inputs",
-                  "unsat", body3 + f"(assert (not (= (bvadd {acc('s','s0')} {acc('c','s0')}) {spec3})))\n(check-sat)\n"):
+                  "unsat", body3 + f"(assert (not (= (bvadd {acc('s','s0')} {acc('c','s0')}) {spec3})))\n(check-sat)\n",
+                  prefer_bitwuzla=False):
         raise SystemExit("failed CSA base N=3")
 
     csa_src = open(CSA2).read().replace("(* flatten *)", "")
@@ -380,7 +386,8 @@ endmodule
         body_n = ys_step + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
         if not record(f"contract_csa2_{w}_n{n}_step",
                       f"qsag_csa_reduce2 W={w} N={n} inductive step (from proved M={m}): s + c == sum x_i for all 2^{n*w} inputs",
-                      "unsat", body_n + f"(assert (not (= (bvadd {acc('s','s0')} {acc('c','s0')}) {spec_n})))\n(check-sat)\n"):
+                      "unsat", body_n + f"(assert (not (= (bvadd {acc('s','s0')} {acc('c','s0')}) {spec_n})))\n(check-sat)\n",
+                      prefer_bitwuzla=False):
             raise SystemExit(f"failed CSA inductive step N={n}")
 
 def check_adder_contracts():
@@ -568,7 +575,8 @@ def group_gl():
     check_remainder_glue()
 
 def group_glmut():
-    check_adder_contracts()
+    if not CONTRACTS_READY:
+        check_adder_contracts()
     # Mutant 1: reducer Stage-1 negated limb h sign flip
     m1 = mutate(RED, "assign terms[3*66 +: 66] = ~{34'b0, h};", "assign terms[3*66 +: 66] = {34'b0, h};", "mut_reduce_sign.sv")
     check_reduce("mut_gl64_reduce_sign", [PKG, m1], "sat")

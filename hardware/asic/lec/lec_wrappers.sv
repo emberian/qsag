@@ -110,7 +110,7 @@ module lec_fold_s1_gold (
 );
   wire [3:0] qh = {2'd0, sx[65:64]} + {2'd0, sy[65:64]} + {2'd0, cx[65:64]} + {2'd0, cy[65:64]};
   assign sum = {4'd0, sx[63:0]} + {4'd0, sy[63:0]} + {4'd0, cx[63:0]} + {4'd0, cy[63:0]}
-             + ({32'd0, qh, 32'd0} - {64'd0, qh});
+             + ({32'd0, qh, 32'd0} + {4'd0, 64'hFFFF_FFFF_0000_0001} - {64'd0, qh});
 endmodule
 module lec_fold_s1_gate (
   input wire [`QSAG_FOLD_W1-1:0] sx, sy, cx, cy,
