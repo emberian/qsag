@@ -138,6 +138,52 @@ module qsag_latch_word_rst #(parameter int W = 64) (
 `endif
 endmodule
 
+// Single-bit transparent latch (`latq_1`, ~190 ps D->Q) for single-shot Brands-Chaum challenge lock.
+module qsag_chal_lock_latch #(
+    parameter int TD = 190
+) (
+    input  wire d,
+    input  wire en,
+    output wire q
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__latq_1 u_cl (.D(d), .E(en), .Q(q));
+`elsif QSAG_SIM_DELAYS
+    logic qr;
+    /* verilator lint_off LATCH */
+    /* verilator lint_off COMBDLY */
+    always_latch if (en) qr <= #(TD) d;
+    /* verilator lint_on COMBDLY */
+    /* verilator lint_on LATCH */
+    assign q = qr;
+`else
+    logic qr;
+    /* verilator lint_off LATCH */
+    /* verilator lint_off COMBDLY */
+    always_latch if (en) qr <= d;
+    /* verilator lint_on COMBDLY */
+    /* verilator lint_on LATCH */
+    assign q = qr;
+`endif
+endmodule
+
+// Explicit 1-bit full adder cell (`gf180mcu_fd_sc_mcu7t5v0__addf_1`: 72.44 um^2 & 5 pins vs
+// 93.93 um^2 & 12 pins when Yosys splats CSA into discrete gates).
+module qsag_fa1 (
+    input  wire a,
+    input  wire b,
+    input  wire ci,
+    output wire s,
+    output wire co
+);
+`ifdef QSAG_GF180_CELLS
+    gf180mcu_fd_sc_mcu7t5v0__addf_1 u_fa (.A(a), .B(b), .CI(ci), .S(s), .CO(co));
+`else
+    assign s  = a ^ b ^ ci;
+    assign co = (a & b) | (a & ci) | (b & ci);
+`endif
+endmodule
+
 // Non-dont_touch isolation buffer placed immediately outside dont_touch rings, C-elements,
 // and responder muxes so OpenROAD Resizer never hits RSZ-3006 when repairing upstream nets.
 module qsag_iso_buf (

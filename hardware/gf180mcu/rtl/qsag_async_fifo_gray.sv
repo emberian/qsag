@@ -47,11 +47,24 @@ module qsag_async_fifo_gray #(
     assign wfull  = wcount[AW];
 
     genvar i;
+`ifdef QSAG_LATCH_RF
+    wire         any_we = winc && !wfull;
+    wire [W-1:0] wd_hold_q;
+    qsag_ereg_nr #(.W(W)) u_wh (.clk(wclk), .en(any_we), .d(wdata), .q(wd_hold_q));
+    generate
+        for (i = 0; i < DEPTH; i++) begin : g_mem
+            wire we = any_we && (wbin[AW-1:0] == AW'(i));
+            wire gate;
+            qsag_clkgate_1 u_cg (.clk(wclk), .en(we), .gclk(gate));
+            qsag_latch_word #(.W(W)) u_m (.gate(gate), .d(wd_hold_q), .q(mem[i]));
+        end
+`else
     generate
         for (i = 0; i < DEPTH; i++) begin : g_mem
             wire we = winc && !wfull && (wbin[AW-1:0] == AW'(i));
             qsag_ereg_nr #(.W(W)) u_m (.clk(wclk), .en(we), .d(wdata), .q(mem[i]));
         end
+`endif
         for (i = 0; i < AW; i++) begin : g_g2b
             assign rbin_w[i] = rbin_w[i+1] ^ rgray_w[i];
             assign wbin_r[i] = wbin_r[i+1] ^ wgray_r[i];

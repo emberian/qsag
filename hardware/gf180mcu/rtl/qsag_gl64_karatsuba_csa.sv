@@ -87,24 +87,37 @@ module qsag_mul33 #(
     localparam int PW = 2 * N;
     localparam int R  = (N + 2) / 2;
     wire [N+1:0] ap = {2'b0, a};
-    wire [N+1:0] an;
-    qsag_prefix_add #(.N(N+2)) u_neg (.a(~ap), .b({(N+2){1'b0}}), .cin(1'b1), .sum(an));
+    wire [N+1:0] ap2 = ap << 1;
     wire [2*R:0] bx = {{(2*R-N){1'b0}}, b, 1'b0};
-    wire [R*PW-1:0] rows;
+    wire [(R+1)*PW-1:0] rows;
+    wire [R-1:0] neg_bits;
     for (genvar j = 0; j < R; j++) begin : g_booth
         logic [N+1:0] digit;
+        logic         neg_j;
         always_comb begin
+            neg_j = 1'b0;
             case (bx[2*j +: 3])
                 3'b001, 3'b010: digit = ap;
-                3'b011:         digit = ap << 1;
-                3'b100:         digit = an << 1;
-                3'b101, 3'b110: digit = an;
+                3'b011:         digit = ap2;
+                3'b100:         begin digit = ~ap2; neg_j = 1'b1; end
+                3'b101, 3'b110: begin digit = ~ap;  neg_j = 1'b1; end
                 default:        digit = '0;
             endcase
         end
-        assign rows[j*PW +: PW] = {{(PW-N-2){digit[N+1]}}, digit} << (2*j);
+        assign neg_bits[j]       = neg_j;
+        assign rows[j*PW +: PW]  = {{(PW-N-2){digit[N+1]}}, digit} << (2*j);
     end
-    qsag_mul_csa_tree #(.N(PW), .ROWS(R)) u_tree (.rows(rows), .sum(p));
+    // Non-overlapping 1's-complement +1 carry injections at even bit positions 0, 2, ..., 2*(R-1)
+    wire [PW-1:0] neg_row;
+    for (genvar k = 0; k < PW; k++) begin : g_neg_row
+        if ((k % 2 == 0) && (k / 2 < R)) begin : g_nb
+            assign neg_row[k] = neg_bits[k / 2];
+        end else begin : g_nz
+            assign neg_row[k] = 1'b0;
+        end
+    end
+    assign rows[R*PW +: PW] = neg_row;
+    qsag_mul_csa_tree #(.N(PW), .ROWS(R + 1)) u_tree (.rows(rows), .sum(p));
 endmodule
 
 // Unsigned W x W multiplier mapped via Yosys Booth/Dadda generator (`-booth` / SYNTH_MUL_BOOTH).
@@ -163,11 +176,24 @@ module qsag_csa32 #(
     output wire [N-1:0] s,
     output wire [N-1:0] cy
 );
+`ifdef QSAG_GF180_CELLS
+    wire [N-1:0] co;
+    for (genvar i = 0; i < N - 1; i++) begin : g_fa
+        qsag_fa1 u_fa (.a(a[i]), .b(b[i]), .ci(c[i]), .s(s[i]), .co(co[i]));
+    end
+    assign s[N-1]  = a[N-1] ^ b[N-1] ^ c[N-1];
+    assign co[N-1] = 1'b0;
+    assign cy      = {co[N-2:0], 1'b0};
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_co = co[N-1];
+    /* verilator lint_on UNUSEDSIGNAL */
+`else
     /* verilator lint_off UNUSEDSIGNAL */
     wire [N-1:0] m = (a & b) | (a & c) | (b & c);
     /* verilator lint_on UNUSEDSIGNAL */
     assign s  = a ^ b ^ c;
     assign cy = {m[N-2:0], 1'b0};
+`endif
 endmodule
 
 // Five rows to two. Exact as long as the integer sum is below 2^N.
@@ -355,12 +381,12 @@ module qsag_gl64_karatsuba_csa #(
     localparam logic [LW-1:0] K_NEG0 = PRIME - ((LW'(1) << W) - LW'(2));
     localparam logic [LW-1:0] K_NEG6 = PRIME - (((LW'(1) << W) - LW'(2)) << 6);
 
-    logic [LW-1:0] opa, opb, resr;
-    logic [AW-1:0] acc_s, acc_c;
-    logic [LW+1:0] preg;
-    logic [W:0]    sa, sb;
-    logic [1:0]    mph;
-    logic          asel_q, bsel_q;
+    wire [LW-1:0] opa, opb, resr;
+    wire [AW-1:0] acc_s, acc_c;
+    wire [LW+1:0] preg;
+    logic [W:0]   sa, sb;
+    logic [1:0]   mph;
+    logic         asel_q, bsel_q;
 
     // ------------------------------------------------------------ multiplier
     wire          a_sel = (mph == 2'd0) ? mul_asel : asel_q;
@@ -425,33 +451,26 @@ module qsag_gl64_karatsuba_csa #(
     qsag_prefix_add #(.N(W+1)) u_sa (.a({1'b0, ma[W-1:0]}), .b({1'b0, ma[LW-1:W]}), .cin(1'b0), .sum(sa_n));
     qsag_prefix_add #(.N(W+1)) u_sb (.a({1'b0, mb[W-1:0]}), .b({1'b0, mb[LW-1:W]}), .cin(1'b0), .sum(sb_n));
 
+    wire acc_upd  = !rst_n || (in_mul ? (mph != 2'd3) : acc_we);
+    wire preg_upd = !rst_n || (mph == 2'd0 && mul_start) || (mph == 2'd1) || (mph == 2'd2);
+    qsag_ereg_nr #(.W(LW))   u_opa  (.clk(clk), .en(!rst_n | ld_opa), .d(!rst_n ? '0 : cv),  .q(opa));
+    qsag_ereg_nr #(.W(LW))   u_opb  (.clk(clk), .en(!rst_n | ld_opb), .d(!rst_n ? '0 : cv),  .q(opb));
+    qsag_ereg_nr #(.W(LW))   u_res  (.clk(clk), .en(!rst_n | ld_res), .d(!rst_n ? '0 : cv),  .q(resr));
+    qsag_ereg_nr #(.W(AW))   u_accs (.clk(clk), .en(acc_upd),         .d(!rst_n ? '0 : ns),  .q(acc_s));
+    qsag_ereg_nr #(.W(AW))   u_accc (.clk(clk), .en(acc_upd),         .d(!rst_n ? '0 : nc),  .q(acc_c));
+    qsag_ereg_nr #(.W(LW+2)) u_preg (.clk(clk), .en(preg_upd),        .d(!rst_n ? '0 : m_p), .q(preg));
+
     always_ff @(posedge clk) begin
         if (!rst_n) begin
-            opa    <= '0;
-            opb    <= '0;
-            resr   <= '0;
-            acc_s  <= '0;
-            acc_c  <= '0;
-            preg   <= '0;
             sa     <= '0;
             sb     <= '0;
             asel_q <= 1'b0;
             bsel_q <= 1'b0;
-        end else begin
-            if (ld_opa) opa <= cv;
-            if (ld_opb) opb <= cv;
-            if (ld_res) resr <= cv;
-            if (in_mul ? (mph != 2'd3) : acc_we) begin
-                acc_s <= ns;
-                acc_c <= nc;
-            end
-            if ((mph == 2'd0 && mul_start) || mph == 2'd1 || mph == 2'd2) preg <= m_p;
-            if (mph == 2'd0 && mul_start) begin
-                sa     <= sa_n;
-                sb     <= sb_n;
-                asel_q <= mul_asel;
-                bsel_q <= mul_bsel;
-            end
+        end else if (mph == 2'd0 && mul_start) begin
+            sa     <= sa_n;
+            sb     <= sb_n;
+            asel_q <= mul_asel;
+            bsel_q <= mul_bsel;
         end
     end
 

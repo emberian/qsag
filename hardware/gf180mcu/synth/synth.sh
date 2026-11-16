@@ -9,9 +9,9 @@ LIB=$LIBDIR/gf180mcu_fd_sc_mcu7t5v0__${CORNER:-tt_025C_5v00}.lib
 mkdir -p build
 cat > build/synth_$TAG.ys <<YS
 read_liberty -lib -ignore_miss_dir -setattr blackbox $LIB
-read_verilog -sv -DSYNTHESIS -DQSAG_GF180_CELLS -DQSAG_ICG $DEFS $FILES
+read_verilog -sv -DSYNTHESIS -DQSAG_GF180_CELLS -DQSAG_ICG -DQSAG_LATCH_RF $DEFS $FILES
 hierarchy -check -top $TOP
-synth -top $TOP -booth ${FLATTEN:--flatten}
+synth -top $TOP -booth -noabc ${FLATTEN:--flatten}
 opt -purge
 dfflibmap -liberty $LIB
 abc -liberty $LIB -dont_use gf180mcu_fd_sc_mcu7t5v0__dlya_* -dont_use gf180mcu_fd_sc_mcu7t5v0__dlyb_* -dont_use gf180mcu_fd_sc_mcu7t5v0__dlyc_* -dont_use gf180mcu_fd_sc_mcu7t5v0__dlyd_* ${ABC_OPTS:--D 20000}

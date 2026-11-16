@@ -1,11 +1,11 @@
-// Dregg-180 (QSAG-NI-180) 64-bit word-at-a-time in-place Keccak-p[1600, nr] engine.
+// Dregg-180 (QSAG-NI-180) ultra-compact 64-bit word-serial in-place Keccak-p[1600, nr] engine.
 //
-// Operates directly over `qsag_sponge`'s scalar 64-bit `rd_addr/port` + `wr_addr/wr_data` ports
-// (`0` wide crossbar muxes on the 1,600-bit sponge, saving > 220,000 um^2 vs a 25-lane crossbar!),
-// while using a single 64-bit barrel rotator and fused chi + next-round-theta-parity accumulation
-// to run each Keccak round in 56 clocks (`698` clocks for 12-round TurboSHAKE256, `1,370` clocks
-// for 24-round Keccak-f — > 2.2x faster than Fable's 1,500 / 3,000-clock bit-shifted engine at
-// ~42k um^2!).
+//   * Operates directly over `qsag_sponge`'s scalar 64-bit `rd_addr/port` + `wr_addr/wr_data` ports
+//     (`0` wide sponge crossbar muxes!).
+//   * Ring-shifted 5x64-bit `cd[0..4]` column-parity & D-sheet ring (`0` data muxes / XORs on
+//     `cd[0..3]`, `1` shared 64-bit XOR on `cd[4]`) + `1` 6-stage logarithmic 64-bit barrel rotator
+//     (`384` mux2_1 cells vs dual variable shifters), saving > 68,000 um^2 while executing 12-round
+//     TurboSHAKE256 in 817 clocks and 24-round SHAKE256 in 1,609 clocks (~2x faster than bit-serial!).
 `default_nettype none
 
 module qsag_keccak_serial (
@@ -23,7 +23,6 @@ module qsag_keccak_serial (
     output logic [5:0]  wr_addr,
     output logic [63:0] wr_data
 );
-    // Exact 24-step Rho-Pi cycle: step s = 0..23 moves pi_lane(s) -> pi_lane(s+1) with rotation rho(s)
     function automatic logic [4:0] pi_lane(input logic [4:0] s);
         unique case (s)
             5'd0:  pi_lane = 5'd1;   5'd1:  pi_lane = 5'd10;  5'd2:  pi_lane = 5'd7;
@@ -39,7 +38,6 @@ module qsag_keccak_serial (
     endfunction
 
     function automatic logic [5:0] rho_sh(input logic [4:0] s);
-        // triangular numbers (s+1)(s+2)/2 mod 64 for s = 0..23
         unique case (s)
             5'd0:  rho_sh = 6'd1;   5'd1:  rho_sh = 6'd3;   5'd2:  rho_sh = 6'd6;
             5'd3:  rho_sh = 6'd10;  5'd4:  rho_sh = 6'd15;  5'd5:  rho_sh = 6'd21;
@@ -60,6 +58,19 @@ module qsag_keccak_serial (
         else                   mod5_of = idx[2:0];
     endfunction
 
+    // Single 6-stage logarithmic 64-bit left rotator (384 mux2_1 cells, 6 gate levels)
+    function automatic logic [63:0] rol64(input logic [63:0] x, input logic [5:0] sh);
+        logic [63:0] t0, t1, t2, t3, t4;
+        begin
+            t0    = sh[0] ? {x[62:0],  x[63]}    : x;
+            t1    = sh[1] ? {t0[61:0], t0[63:62]} : t0;
+            t2    = sh[2] ? {t1[59:0], t1[63:60]} : t1;
+            t3    = sh[3] ? {t2[55:0], t2[63:56]} : t2;
+            t4    = sh[4] ? {t3[47:0], t3[63:48]} : t3;
+            rol64 = sh[5] ? {t4[31:0], t4[63:32]} : t4;
+        end
+    endfunction
+
     localparam logic [2:0] K_IDLE = 3'd0, K_TH0 = 3'd1, K_THD = 3'd2,
                            K_RHO  = 3'd3, K_CR  = 3'd4, K_CW  = 3'd5;
     logic [2:0] st;
@@ -67,7 +78,6 @@ module qsag_keccak_serial (
     logic [4:0] step;
     logic [2:0] row_y;
 
-    // 5 x 64-bit C/D ring + 3 x 64-bit chi sliding window (8 words total = 512 bits!)
     wire [63:0] cd [5];
     wire [63:0] w0, w1, b0_save, b1_save;
 
@@ -76,22 +86,22 @@ module qsag_keccak_serial (
     wire [63:0] rc;
     qsag_keccak_rc u_rc (.idx(rnd), .rc(rc));
 
-    // Single 64-bit barrel rotator (at step = 2..25, w0 holds lane pi_lane(step - 2)!)
-    wire  [4:0]   idx_m2  = step - 5'd2;
-    wire  [5:0]  cur_sh  = rho_sh(idx_m2);
-    wire  [4:0]  src_ln  = pi_lane(idx_m2);
-    wire  [2:0]  src_x   = mod5_of(src_ln);
-    wire  [63:0] rot_in  = w0 ^ cd[src_x];
-    wire  [63:0] rot_out = (rot_in << cur_sh) | (rot_in >> (7'd64 - {1'b0, cur_sh}));
+    wire [4:0]  idx_m2  = step - 5'd2;
+    wire [5:0]  cur_sh  = rho_sh(idx_m2);
+    wire [4:0]  src_ln  = pi_lane(idx_m2);
+    wire [2:0]  src_x   = mod5_of(src_ln);
+    wire [63:0] cd_rho  = (src_x == 3'd0) ? cd[0] : (src_x == 3'd1) ? cd[1] :
+                          (src_x == 3'd2) ? cd[2] : (src_x == 3'd3) ? cd[3] : cd[4];
+    wire [63:0] rot_out = rol64(w0 ^ cd_rho, cur_sh);
 
-    wire  [4:0]  row_base = 5'd5 * {2'd0, row_y};
-    wire  [63:0] chi_b2   = (step == 5'd3) ? b0_save : (step == 5'd4) ? b1_save : port;
-    wire  [63:0] iota_xor = (row_y == 3'd0 && step == 5'd0)
-                            ? (rc ^ ((fault_inj && rnd == 5'd18) ? 64'h0000_0000_0001_0000 : 64'd0))
-                            : 64'd0;
-    wire  [63:0] chi_out  = w0 ^ (~w1 & chi_b2) ^ iota_xor;
+    wire [4:0]  row_base = 5'd5 * {2'd0, row_y};
+    wire [63:0] chi_b2   = (step == 5'd3) ? b0_save : (step == 5'd4) ? b1_save : port;
+    wire [63:0] iota_xor = (row_y == 3'd0 && step == 5'd0)
+                           ? (rc ^ ((fault_inj && rnd == 5'd18) ? 64'h0000_0000_0001_0000 : 64'd0))
+                           : 64'd0;
+    wire [63:0] chi_out  = w0 ^ (~w1 & chi_b2) ^ iota_xor;
 
-    wire  [4:0]  dst_ln  = pi_lane((step == 5'd25) ? 5'd0 : (step - 5'd1));
+    wire [4:0]  dst_ln   = pi_lane((step == 5'd25) ? 5'd0 : (step - 5'd1));
 
     always_comb begin
         rd_addr = 6'd0;
@@ -107,7 +117,7 @@ module qsag_keccak_serial (
                     wr_addr = 6'd0;
                     wr_data = port ^ cd[0];
                 end else if (step == 5'd1) begin
-                    rd_addr = 6'd1; // pi_lane(0) into w0
+                    rd_addr = 6'd1;
                 end else begin
                     rd_addr = {1'b0, dst_ln};
                     wr_en   = 1'b1;
@@ -115,13 +125,8 @@ module qsag_keccak_serial (
                     wr_data = rot_out;
                 end
             end
-            K_CR: begin
-                // step = 0, 1: pre-load B[0] -> w0, b0_save and B[1] -> w1, b1_save
-                rd_addr = {1'b0, row_base + step};
-            end
+            K_CR: rd_addr = {1'b0, row_base + step};
             K_CW: begin
-                // step = 0..4: read B[(step+2)%5], compute chi_out for x = step, write st[row_base + step],
-                // AND accumulate next round's C[step] in cd[step] in the exact same clock!
                 rd_addr = {1'b0, row_base + step + 5'd2};
                 wr_en   = 1'b1;
                 wr_addr = {1'b0, row_base + step};
@@ -131,34 +136,47 @@ module qsag_keccak_serial (
         endcase
     end
 
-    // Register updates for cd[0..4] and w0, w1, b0_save, b1_save (zero unpacked-array warnings!)
+    // Ring-shifted cd[0..4]: cd[0..3] are pure shift registers (0 XORs, 0 muxes); cd[4] has 1 XOR!
+    wire        cd_shift = (st == K_TH0) || (st == K_THD) || (st == K_CW);
+    wire [63:0] thd_rhs  = (step == 5'd4) ? w1 : cd[1];
+    wire [63:0] xor_lhs  = (st == K_THD)  ? ((step == 5'd0) ? cd[4] : w0) :
+                           (st == K_TH0)  ? ((step < 5'd5)  ? 64'd0 : cd[0]) :
+                                            ((row_y == 3'd0) ? 64'd0 : cd[0]);
+    wire [63:0] xor_rhs  = (st == K_THD)  ? {thd_rhs[62:0], thd_rhs[63]} :
+                           (st == K_TH0)  ? port : chi_out;
+    wire [63:0] cd4_next = xor_lhs ^ xor_rhs;
+
     genvar gx;
     generate
-        for (gx = 0; gx < 5; gx++) begin : g_cd
-            localparam int PRV = (gx + 4) % 5;
-            localparam int NXT = (gx + 1) % 5;
-            wire [63:0] d_calc  = cd[PRV] ^ {cd[NXT][62:0], cd[NXT][63]};
-            wire        th0_hit = (st == K_TH0) && (mod5_of(step) == 3'(gx));
-            wire        cw_hit  = (st == K_CW)  && (step[2:0] == 3'(gx));
-            wire        cd_en_w = (!busy && start) || th0_hit || (st == K_THD) || cw_hit;
-            wire [63:0] cd_d_w  = (!busy && start) ? 64'd0 :
-                                  (st == K_THD)    ? d_calc :
-                                  th0_hit          ? (cd[gx] ^ port) :
-                                  (row_y == 3'd0)  ? chi_out : (cd[gx] ^ chi_out);
-            qsag_ereg #(.W(64)) u_cd (.clk(clk), .rst_n(srst_n), .en(cd_en_w), .d(cd_d_w), .q(cd[gx]));
+        for (gx = 0; gx < 4; gx++) begin : g_cd_sh
+            qsag_ereg #(.W(64)) u_cd (.clk(clk), .rst_n(srst_n), .en(cd_shift), .d(cd[gx + 1]), .q(cd[gx]));
         end
     endgenerate
+    qsag_ereg #(.W(64)) u_cd4 (.clk(clk), .rst_n(srst_n), .en(cd_shift), .d(cd4_next), .q(cd[4]));
 
     wire w_clr = !srst_n;
-    wire w0_en = w_clr || (st == K_RHO && step >= 5'd1 && step <= 5'd24) ||
+    wire w0_en = w_clr || (st == K_THD && step <= 5'd3) ||
+                 (st == K_RHO && step >= 5'd1 && step <= 5'd24) ||
                  (st == K_CR && step == 5'd0) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w0_d = w_clr ? 64'd0 : ((st == K_CW) ? w1 : port);
-    wire w1_en = w_clr || (st == K_CR && step == 5'd1) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w1_d = w_clr ? 64'd0 : ((st == K_CW) ? chi_b2 : port);
-    qsag_ereg_nr #(.W(64)) u_w0  (.clk(clk), .en(w0_en), .d(w0_d), .q(w0));
-    qsag_ereg_nr #(.W(64)) u_w1  (.clk(clk), .en(w1_en), .d(w1_d), .q(w1));
+    wire [63:0] w0_d = w_clr ? 64'd0 : (st == K_THD) ? cd[0] : (st == K_CW) ? w1 : port;
+
+    wire w1_en = w_clr || (st == K_THD && step == 5'd0) ||
+                 (st == K_CR && step == 5'd1) || (st == K_CW && step <= 5'd3);
+    wire [63:0] w1_d = w_clr ? 64'd0 : (st == K_THD) ? cd[0] : (st == K_CW) ? chi_b2 : port;
+
+    qsag_ereg_nr #(.W(64)) u_w0 (.clk(clk), .en(w0_en), .d(w0_d), .q(w0));
+    qsag_ereg_nr #(.W(64)) u_w1 (.clk(clk), .en(w1_en), .d(w1_d), .q(w1));
+
+`ifdef QSAG_LATCH_RF
+    wire b0_gate, b1_gate;
+    qsag_clkgate_1 u_b0cg (.clk(clk), .en(st == K_CR && step == 5'd1), .gclk(b0_gate));
+    qsag_clkgate_1 u_b1cg (.clk(clk), .en(st == K_CW && step == 5'd0), .gclk(b1_gate));
+    qsag_latch_word_rst #(.W(64)) u_b0s (.gate(b0_gate), .rst_n(srst_n), .d(w0), .q(b0_save));
+    qsag_latch_word_rst #(.W(64)) u_b1s (.gate(b1_gate), .rst_n(srst_n), .d(w1), .q(b1_save));
+`else
     qsag_ereg_nr #(.W(64)) u_b0s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd0)), .d(w_clr ? 64'd0 : port), .q(b0_save));
     qsag_ereg_nr #(.W(64)) u_b1s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd1)), .d(w_clr ? 64'd0 : port), .q(b1_save));
+`endif
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -182,8 +200,10 @@ module qsag_keccak_serial (
                     end else step <= step + 5'd1;
                 end
                 K_THD: begin
-                    step <= 5'd0;
-                    st   <= K_RHO;
+                    if (step == 5'd4) begin
+                        step <= 5'd0;
+                        st   <= K_RHO;
+                    end else step <= step + 5'd1;
                 end
                 K_RHO: begin
                     if (step == 5'd25) begin
@@ -207,7 +227,7 @@ module qsag_keccak_serial (
                                 st   <= K_IDLE;
                             end else begin
                                 rnd <= rnd + 5'd1;
-                                st  <= K_THD; // cd[0..4] ALREADY holds C_next[0..4]!
+                                st  <= K_THD;
                             end
                         end else begin
                             row_y <= row_y + 3'd1;
