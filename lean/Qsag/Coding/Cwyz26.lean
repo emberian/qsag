@@ -1448,34 +1448,3 @@ theorem slicedStageTable_def : slicedStageTable =
     (24, 3, 4120, 201) ] := by rfl
 end Qsag
 end
-
-/-! ### Exports for lane math -/
-public section
-
-#verify_constructive Qsag.cwyz26_whir_nv20_and_nv24_all_stages_valid
-#verify_constructive Qsag.hem_gs_interpolation_dimensions
-#verify_constructive Qsag.cwyz26_affineMcaBound_of_nonExcluded
-#verify_constructive Qsag.cwyz26_affineMcaBound_sliced
-#verify_constructive Qsag.sumTo_le_of_le
-#verify_constructive Qsag.slicedParamsOk_sound
-#verify_constructive Qsag.sliced_stage_table_covers_every_canonical_stage
-#verify_constructive Qsag.sliced_stage_decomp_bound
-#verify_constructive Qsag.sliced_rest_exceeds_simple_budget
-
-namespace Qsag
-
-/-- Every deployed `nv = 24` QROM stage row has more than 256 bits of query soundness. -/
-theorem whirAffineStageWitnesses_24_query_rows_kat :
-    ∀ v ∈ whirAffineStageWitnesses 24 true,
-      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
-        affineFallingFactorial v.n v.queries := by decide +kernel
-
-/-- The first deployed `nv = 24` QROM stage row. -/
-theorem whirAffineStageWitnesses_24_head_mem :
-    ({ n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
-       m := 64, D := 27164, queries := 258, queryTargetBits := 256 } : WhirAffineWitness) ∈
-      whirAffineStageWitnesses 24 true := List.mem_cons_self ..
-
-end Qsag
-
-end

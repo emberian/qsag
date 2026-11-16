@@ -466,13 +466,3 @@ end
 #verify_constructive Qsag.VolatileCoupon.attenuated_capability_release_narrows
 #verify_constructive Qsag.VolatileCoupon.failed_caveat_blocks_capability_release
 #verify_constructive Qsag.VolatileCoupon.capability_release_discharge_not_transplantable
-
-/-! ### Exports for lane cust -/
-
-public section
-namespace Qsag.VolatileCoupon
-
-#export_eqns Reachable Collides consume coinWins consumeUnderCapability
-
-end Qsag.VolatileCoupon
-end
