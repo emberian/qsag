@@ -13,8 +13,11 @@
 //! type. Real proofs built in `LLVMFuzzerInitialize` (the `init:` block) seed sparse-edit
 //! mutations, so the verifiers run on inputs that are one field away from valid.
 //!
-//! `qsag_cred::blind_vc::SelectiveDisclosurePresentation` is megabytes on the wire; its
-//! decoder and verifier are driven from a real presentation in `fuzz_blind_vc_presentation`.
+//! `qsag_cred::blind_vc::SelectiveDisclosurePresentation` gets its decoder's magic, bounds
+//! and exact-length checks only. An encoding is at least 4.7 MiB, above the campaign's
+//! `-max_len`, so no input decodes; and a real presentation cannot seed this target either:
+//! measured under coverage instrumentation, building one takes about 200 s and verifying it
+//! once takes about 75 s, against a 20 s per-input watchdog.
 
 use std::sync::OnceLock;
 
@@ -339,6 +342,15 @@ fuzz_target!(init: {
     fixtures();
 }, |data: &[u8]| {
     let fx = fixtures();
+
+    if let Ok(presentation) =
+        qsag_cred::blind_vc::SelectiveDisclosurePresentation::from_compact_wire_bytes(data)
+    {
+        let reencoded = presentation
+            .to_compact_wire_bytes()
+            .expect("decoded presentation re-encodes");
+        assert_eq!(reencoded, data);
+    }
 
     // 1. Canonical PCS schedule, Merkle-Canopy commitment, multi-proof, and WHIR opening decoders
     let num_vars = 2 + (data.first().copied().unwrap_or(0) as usize % 23);
