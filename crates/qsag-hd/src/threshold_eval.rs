@@ -268,6 +268,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         };
         if share.is_poisoned()
             || (share.hardened && expected.chain_code.is_some())
+            || !expected.is_canonical()
             || threshold == 0
             || roster.len() < usize::from(threshold)
             || share.seed_a != expected.seed_a
@@ -276,7 +277,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
             || share.max_depth != expected.max_depth
             || expected
                 .chain_code
-                .is_some_and(|cc| share.chain_code.expose() != &cc)
+                .is_some_and(|cc| !ct_eq_bytes(share.chain_code.expose(), &cc))
             || !roster.contains(&(share.party_id, own_x))
             || roster.windows(2).any(|w| w[0].0 >= w[1].0)
             || roster.iter().any(|entry| !share.committee.contains(entry))
@@ -284,12 +285,19 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
         {
             return Err(HdError::InvalidThresholdParameters);
         }
-        if mask.party_id != share.party_id || mask.roster != roster || mask.session != session_id {
+        let expected_xpub_digest = hash_t_vec(&expected.seed_a, &expected.t_vec);
+        if mask.party_id != share.party_id
+            || mask.roster != roster
+            || mask.session != session_id
+            || mask
+                .xpub_digest
+                .is_some_and(|d| !ct_eq_bytes(&d, &expected_xpub_digest))
+        {
             return Err(HdError::InvalidThresholdParameters);
         }
-        share.burn_query()?;
         let xs: Vec<_> = roster.iter().map(|entry| entry.1).collect();
         validate_shamir_eval_points(&xs)?;
+        share.burn_query()?;
         let lambda = match share.scheme {
             ShareScheme::Shamir { .. } => interpolation_weight(&xs, own_x),
             ShareScheme::Additive { .. } => 1,
@@ -510,7 +518,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             return Err(HdError::MacCheckFailed);
         }
         let own = self.0.share.party_id;
-        let mut peer_sums = [0; SPDZ_LANES];
+        let mut peer_sums = SecretBuffer([0; SPDZ_LANES]);
         let mut recomputed = Vec::with_capacity(openings.len());
         for expected in &self.0.mac_commitments {
             let mut found = openings.iter().filter(|m| m.party_id == expected.party_id);
@@ -543,8 +551,8 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             .zero_test
             .as_mut()
             .ok_or(HdError::MacCheckFailed)
-            .and_then(|gates| gates.verify(peers, &peer_sums));
-        wipe(&mut peer_sums);
+            .and_then(|gates| gates.verify(peers, &peer_sums[..]));
+        drop(peer_sums);
         accepted?;
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
         if self.0.disclosure_started.get()
@@ -572,6 +580,7 @@ pub struct OpeningMask {
     roster: Vec<(u16, u32)>,
     session: [u8; 32],
     projection: Option<AuthorizedHdProjection>,
+    xpub_digest: Option<[u8; 32]>,
     value: u32,
 }
 impl OpeningMask {
@@ -589,20 +598,54 @@ impl Drop for OpeningMask {
 /// Dealerless opening mask: this custodian's share of a pseudorandom additive
 /// sharing of zero among `roster`, derived locally from the subset seeds.
 ///
-/// For every other roster member the custodian adds (lower committee position) or
-/// subtracts (higher position) a PRF output under their pairwise key, bound to the
-/// session, roster and projection. The shares sum to zero by construction, whatever
-/// a corrupt custodian does with its own. Any coalition of at most `t - 1`
-/// custodians misses the pairwise key of every pair of honest roster members, so
-/// the honest masks are jointly pseudorandom subject only to their sum. A mask is
-/// accepted by `begin` only for the exact projection it was derived for; deriving
-/// it twice for the same `(session, roster, projection)` repeats the same broadcast
-/// and reveals nothing further. No private message and no dealer is involved.
+/// Note: `session` must be unique per `(LinearModuleXPub, opening)`. Callers that
+/// may reuse `session` across distinct keys under the same `CustodianSeeds` MUST
+/// call [`dealerless_opening_mask_for_xpub`], which cryptographically binds
+/// `expected`'s public key digest and derivation depth into the mask and enforces
+/// key equality inside [`HdThresholdEvalRound1Commit::begin`].
 pub fn dealerless_opening_mask(
     seeds: &CustodianSeeds,
     roster: &[(u16, u32)],
     session: [u8; 32],
     projection: AuthorizedHdProjection,
+) -> Result<OpeningMask, HdError> {
+    dealerless_opening_mask_inner(seeds, roster, session, session, projection, None)
+}
+
+/// Key-bound dealerless opening mask binding `expected` (`seed_a`, `t_vec`, `depth_used`)
+/// into the pairwise PRF session so cross-key `session` reuse can never cancel masks.
+pub fn dealerless_opening_mask_for_xpub(
+    seeds: &CustodianSeeds,
+    expected: &LinearModuleXPub,
+    roster: &[(u16, u32)],
+    session: [u8; 32],
+    projection: AuthorizedHdProjection,
+) -> Result<OpeningMask, HdError> {
+    if !expected.is_canonical() {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let xpub_digest = hash_t_vec(&expected.seed_a, &expected.t_vec);
+    let prf_session = cshake256_framed_32(
+        b"QSAG.HD.EVAL.CONTEXT.V2",
+        &[&session, &xpub_digest, &expected.depth_used.to_be_bytes()],
+    );
+    dealerless_opening_mask_inner(
+        seeds,
+        roster,
+        session,
+        prf_session,
+        projection,
+        Some(xpub_digest),
+    )
+}
+
+fn dealerless_opening_mask_inner(
+    seeds: &CustodianSeeds,
+    roster: &[(u16, u32)],
+    session: [u8; 32],
+    prf_session: [u8; 32],
+    projection: AuthorizedHdProjection,
+    xpub_digest: Option<[u8; 32]>,
 ) -> Result<OpeningMask, HdError> {
     let config = seeds.config();
     let party_id = seeds.party_id();
@@ -633,7 +676,7 @@ pub fn dealerless_opening_mask(
         let mut wide = SecretBuffer([0u8; 24]);
         cshake256_framed_xof(
             b"QSAG.HD.OPENING_ZERO.DEALERLESS.V1",
-            &[&key[..], &session, &context],
+            &[&key[..], &prf_session, &context],
             &mut wide[..],
         );
         let mut term = reduce_wide_mod_q(&wide[..]);
@@ -649,6 +692,7 @@ pub fn dealerless_opening_mask(
         roster: roster.to_vec(),
         session,
         projection: Some(projection),
+        xpub_digest,
         value,
     })
 }
@@ -702,6 +746,7 @@ pub(crate) fn trusted_dealer_opening_masks(
                 roster: roster.to_vec(),
                 session,
                 projection: None,
+                xpub_digest: None,
                 value: mod_q_mul(lambda, z),
             }
         })

@@ -621,6 +621,22 @@ pub fn recover_child_signing_seed_budgeted(
     if !ct_eq_bytes(&budget.family_id(), &config.digest()) {
         return Err(HdError::BudgetStorageFailed);
     }
+    // Validate structural committee/vault/index bounds before burning an irreversible budget slot.
+    let digest = config.digest();
+    if vaults.is_empty() {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    for (i, vault) in vaults.iter().enumerate() {
+        if vault.config_digest != digest
+            || config.position(vault.party_id).is_none()
+            || vaults[..i]
+                .iter()
+                .any(|prior| prior.party_id == vault.party_id)
+        {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        vault.child_components(child_idx)?;
+    }
     budget.reserve()?;
     recover_child_signing_seed(config, vaults, child_idx, Some(expected_child_pk))
 }

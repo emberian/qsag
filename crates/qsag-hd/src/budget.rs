@@ -21,7 +21,17 @@ const LIMIT: u64 = 128;
 const RECORD: usize = 40;
 const DATA_SEAL_BYTES: usize = 16;
 // Header, each HWM slot, and the chain occupy disjoint physical pages.
+// Page 0 payload layout (`[0..4080)` after the 16-byte `QSAGREC1` record header):
+// - `[0..16)`: `data_seal` (`dev_le64 || ino_le64` of the data file)
+// - `[16..24)`: `QSHDQB04` format magic
+// - `[24..48)`: `lock_identity` (`dev_le64 || ino_le64 || seal8` of the `.lock` sidecar)
+// - `[48..80)`: `genesis_seal_mac` authenticating `(key, family, lock_identity, data_seal, LIMIT)`
+// - `[80..4080)`: reserved zero padding before Slot A on physical page 1 (`4096`).
 const FORMAT_MAGIC: &[u8; 8] = b"QSHDQB04";
+const LOCK_IDENTITY_OFFSET: usize = DATA_SEAL_BYTES + FORMAT_MAGIC.len();
+const LOCK_IDENTITY_BYTES: usize = 24;
+const GENESIS_SEAL_MAC_OFFSET: usize = LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES;
+const GENESIS_SEAL_END: usize = GENESIS_SEAL_MAC_OFFSET + 32;
 const HWM_SLOT_A_PAYLOAD_OFFSET: usize = HWM_PAGE_BYTES as usize - RECORD_HEADER_BYTES;
 const HWM_SLOT_B_PAYLOAD_OFFSET: usize = 2 * HWM_PAGE_BYTES as usize - RECORD_HEADER_BYTES;
 const FILE_PREFIX_BYTES: usize = 3 * HWM_PAGE_BYTES as usize;
@@ -57,7 +67,8 @@ fn guard_key(mut raw: [u8; 32]) -> RedactedSecret<32> {
 }
 
 /// Everything a journal's MACs bind besides the record itself: the storage key,
-/// the family, the lock sidecar's seal and the data file's `(dev, ino)`.
+/// the family, the lock sidecar's full `(dev, ino, seal)` identity (via the genesis
+/// Page-0 seal MAC) and creation seal, and the data file's `(dev, ino)`.
 struct Binding<'a> {
     key: &'a [u8; 32],
     family: &'a [u8; 32],
@@ -66,6 +77,22 @@ struct Binding<'a> {
 }
 
 impl Binding<'_> {
+    /// Authenticates the 24-byte `.lock` sidecar `(dev, ino, seal)` identity in Page 0.
+    /// Length-framed with 5 slices (24-byte `lock_identity` at index 2), strictly disjoint
+    /// from the 7-slice `record()` preimage (8-byte `lock_seal` at index 2).
+    fn genesis_seal_mac(&self, lock_identity: &[u8; LOCK_IDENTITY_BYTES]) -> [u8; 32] {
+        cshake256_framed_32(
+            b"QSAG.HD.QUERY_BUDGET.V3",
+            &[
+                self.key,
+                self.family,
+                lock_identity,
+                &self.data_seal,
+                &LIMIT.to_le_bytes(),
+            ],
+        )
+    }
+
     /// Record `count` of the chain and its MAC, which is the next record's `prev_mac`.
     fn record(&self, count: u64, prev_mac: &[u8; 32]) -> ([u8; RECORD], [u8; 32]) {
         let mut out = [0u8; RECORD];
@@ -252,6 +279,8 @@ impl DurableQueryBudget {
             lock_seal: record.lock_seal(),
             data_seal: file_identity(&meta),
         };
+        let lock_identity = record.lock_identity_seal();
+        let genesis_seal_mac = binding.genesis_seal_mac(&lock_identity);
         let (genesis_rec, genesis_mac) = binding.record(0, &[0u8; 32]);
         let (slot_a, slot_b) = binding.with_hwm(|hwm| {
             (
@@ -266,6 +295,9 @@ impl DurableQueryBudget {
         payload[..DATA_SEAL_BYTES].copy_from_slice(&binding.data_seal);
         payload[DATA_SEAL_BYTES..DATA_SEAL_BYTES + FORMAT_MAGIC.len()]
             .copy_from_slice(FORMAT_MAGIC);
+        payload[LOCK_IDENTITY_OFFSET..LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES]
+            .copy_from_slice(&lock_identity);
+        payload[GENESIS_SEAL_MAC_OFFSET..GENESIS_SEAL_END].copy_from_slice(&genesis_seal_mac);
         payload[HWM_SLOT_A_PAYLOAD_OFFSET..HWM_SLOT_A_PAYLOAD_OFFSET + HWM_SLOT_BYTES]
             .copy_from_slice(&slot_a);
         payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES]
@@ -281,7 +313,6 @@ impl DurableQueryBudget {
         }
 
         let data_seal = binding.data_seal;
-        let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
             record,
@@ -362,6 +393,20 @@ impl DurableQueryBudget {
             lock_seal: record.lock_seal(),
             data_seal,
         };
+        let stored_lock_identity: [u8; LOCK_IDENTITY_BYTES] = payload
+            [LOCK_IDENTITY_OFFSET..LOCK_IDENTITY_OFFSET + LOCK_IDENTITY_BYTES]
+            .try_into()
+            .map_err(|_| HdError::BudgetStorageFailed)?;
+        let stored_seal_mac = &payload[GENESIS_SEAL_MAC_OFFSET..GENESIS_SEAL_END];
+        let expected_seal_mac = binding.genesis_seal_mac(&stored_lock_identity);
+        if !ct_eq_bytes(&stored_lock_identity[16..24], &record.lock_seal())
+            || !ct_eq_bytes(stored_seal_mac, &expected_seal_mac)
+            || payload[GENESIS_SEAL_END..HWM_SLOT_A_PAYLOAD_OFFSET]
+                .iter()
+                .any(|&b| b != 0)
+        {
+            return Err(HdError::BudgetStorageFailed);
+        }
         let mut prev_mac = [0u8; 32];
         let mut penultimate_mac = [0u8; 32];
         // Records from the genesis record on that continue the chain. Whatever follows
@@ -393,8 +438,10 @@ impl DurableQueryBudget {
             &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
 
         // `read_bounded` used its own descriptor. Before any repair write, confirm the
-        // lock is still held and the path still names the descriptor held here.
-        storage(record.verify_lock_identity(&record.lock_identity_seal()))?;
+        // held `.lock` sidecar matches the MAC-authenticated genesis `stored_lock_identity`
+        // (never comparing `record.lock_identity_seal()` tautologically against itself)
+        // and the path still names the descriptor held here.
+        storage(record.verify_lock_identity(&stored_lock_identity))?;
         verify_data_identity(&path_buf, &file, &data_seal, file_meta.len())?;
         // Rejects tail truncation and unexplained gaps; heals the crash states (record
         // synced before slot A, slot A synced before slot B, one slot torn mid-write).
@@ -427,11 +474,10 @@ impl DurableQueryBudget {
             &data_seal,
             (FILE_PREFIX_BYTES + verified * RECORD) as u64,
         )?;
-        let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
             record,
-            lock_identity,
+            lock_identity: stored_lock_identity,
             file,
             data_seal,
             last_mac: prev_mac,
@@ -604,6 +650,33 @@ mod tests {
         assert!(DurableQueryBudget::open(&path, [1; 32], [2; 32]).is_err());
         assert!(budget.reserve().is_err());
         drop(budget);
+        // Rewriting the copied sidecar's `header[16..32]` (`dev || ino`) to match the new
+        // `.lock` inode while keeping `lock_seal` MUST still fail closed (both with untouched
+        // Page-0 `lock_identity` and with forged Page-0 `lock_identity`).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut lock_bytes = std::fs::read(&lock).unwrap();
+            let new_lock_id = file_identity(&std::fs::symlink_metadata(&lock).unwrap());
+            lock_bytes[16..32].copy_from_slice(&new_lock_id);
+            std::fs::write(&lock, &lock_bytes).unwrap();
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                DurableQueryBudget::open(&path, [1; 32], [2; 32]).err(),
+                Some(HdError::BudgetStorageFailed)
+            );
+            // Also patch unauthenticated `lock_identity` in Page 0 (`[40..64]`) without key:
+            // genesis seal MAC rejects it!
+            let mut data_bytes = std::fs::read(&path).unwrap();
+            data_bytes[RECORD_HEADER_BYTES + LOCK_IDENTITY_OFFSET
+                ..RECORD_HEADER_BYTES + LOCK_IDENTITY_OFFSET + 16]
+                .copy_from_slice(&new_lock_id);
+            std::fs::write(&path, &data_bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                DurableQueryBudget::open(&path, [1; 32], [2; 32]).err(),
+                Some(HdError::BudgetStorageFailed)
+            );
+        }
         std::fs::remove_file(&lock).unwrap();
         symlink(dir.join("old.lock"), &lock).unwrap();
         assert!(DurableQueryBudget::open(&path, [1; 32], [2; 32]).is_err());
