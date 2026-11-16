@@ -25,6 +25,6 @@ json=""; [ "${WRITE_JSON:-0}" = 1 ] && json="write_json $out.json;"
 # Logic depth: delete every sequential / hard cell, then the longest remaining path in any module
 # is the longest register-to-register run of LUTs and carry elements.
 SEQ="t:FDRE t:FDSE t:FDCE t:FDPE t:SRL16E t:SRLC32E t:DSP48E2 t:RAMB36E2 t:RAMB18E2 t:RAM32M t:RAM64M t:RAM32X1D t:RAM64X1D t:RAM32M16 t:RAM64M8 t:BUFG t:TRELLIS_FF t:MULT18X18D t:DP16KD t:TRELLIS_DPR16X4"
-yosys -l "$out.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $tile $chparam; $cmd; $json tee -o $out.stat stat -top $top; delete $SEQ; tee -o $out.ltp ltp" \
+yosys -l "$out.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $tile $chparam; $cmd; $json tee -o $out.stat stat -top $top; flatten; delete $SEQ; tee -o $out.ltp ltp" \
     > /dev/null
 python3 synth/summarize.py "$out.stat" "$out.ltp" "$fam" "$tag" | tee "$out.summary"
