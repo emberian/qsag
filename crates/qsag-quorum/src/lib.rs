@@ -17,14 +17,19 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+mod test_budget;
+
 pub mod access;
 pub use access::{AsymmetricQuorumSystem, MonotoneSpanProgram, PersonalQuorumSlice};
 
+pub mod cnf_party;
 pub mod dealerless_staging;
 pub mod dzk;
 pub mod hash;
 pub mod hem_quorum;
 pub mod party_node;
+pub mod personal_release;
 pub mod quorum_jorts;
 pub mod wire_channel;
 
