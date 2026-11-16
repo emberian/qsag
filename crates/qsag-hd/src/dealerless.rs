@@ -2733,37 +2733,48 @@ mod tests {
             .map(|(_, sh)| sh.into_additive().unwrap())
             .collect();
 
-        // Start child ceremony up through Round 5 (`open_zero_test` -> `begin_disclosure`).
-        let c1: Vec<_> = seeds
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                root_shares[i]
-                    .derive_child_share(c, &root_pk, 7, false, [0x33; 32], [0x40 + i as u8; 32])
-                    .unwrap()
-            })
-            .collect();
-        let (cs1, chellos): (Vec<_>, Vec<_>) = c1.into_iter().unzip();
-        let (cs2, cproducts): (Vec<_>, Vec<_>) = cs1
-            .into_iter()
-            .map(|s| s.open_products(&chellos).unwrap())
-            .unzip();
-        let (cs3, ccoins): (Vec<_>, Vec<_>) = cs2
-            .into_iter()
-            .map(|s| s.open_coin(&cproducts).unwrap())
-            .unzip();
-        let (cs4, cmasked): (Vec<_>, Vec<_>) = cs3
-            .into_iter()
-            .map(|s| s.open_masked(&ccoins).unwrap())
-            .unzip();
-        let (cs5, ccommits): (Vec<_>, Vec<_>) = cs4
-            .into_iter()
-            .map(|s| s.commit_zero_test(&cmasked).unwrap())
-            .unzip();
-        let (cs6, copenings): (Vec<_>, Vec<_>) = cs5
-            .into_iter()
-            .map(|s| s.open_zero_test(&ccommits).unwrap())
-            .unzip();
+        // A child ceremony up through Round 5 (`open_zero_test` -> `begin_disclosure`).
+        let child_to_round6 = |index: u32, tag: u8| {
+            let c1: Vec<_> = seeds
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    root_shares[i]
+                        .derive_child_share(
+                            c,
+                            &root_pk,
+                            index,
+                            false,
+                            [tag; 32],
+                            [tag.wrapping_add(0x0D + i as u8); 32],
+                        )
+                        .unwrap()
+                })
+                .collect();
+            let (cs1, chellos): (Vec<_>, Vec<_>) = c1.into_iter().unzip();
+            let (cs2, cproducts): (Vec<_>, Vec<_>) = cs1
+                .into_iter()
+                .map(|s| s.open_products(&chellos).unwrap())
+                .unzip();
+            let (cs3, ccoins): (Vec<_>, Vec<_>) = cs2
+                .into_iter()
+                .map(|s| s.open_coin(&cproducts).unwrap())
+                .unzip();
+            let (cs4, cmasked): (Vec<_>, Vec<_>) = cs3
+                .into_iter()
+                .map(|s| s.open_masked(&ccoins).unwrap())
+                .unzip();
+            let (cs5, ccommits): (Vec<_>, Vec<_>) = cs4
+                .into_iter()
+                .map(|s| s.commit_zero_test(&cmasked).unwrap())
+                .unzip();
+            let (cs6, copenings): (Vec<RekeyRound6>, Vec<RekeyZeroOpening>) = cs5
+                .into_iter()
+                .map(|s| s.open_zero_test(&ccommits).unwrap())
+                .unzip();
+            (cs6, copenings)
+        };
+        let (cs6, copenings) = child_to_round6(7, 0x33);
 
         // While disclosure is active, `is_poisoned()` returns true to block concurrent
         // ceremonies, WITHOUT permanently latching `root_shares[i].poisoned`!
@@ -2782,6 +2793,32 @@ mod tests {
             assert!(!child_sh.is_poisoned());
         }
         assert!(!root_shares[0].is_poisoned());
+
+        // Finishing a child with a journal of another family is a custody fault: it is
+        // refused and the family is quarantined for good (it used to be ignored).
+        use crate::poison::HdPoisonJournal;
+        let (cs6, copenings) = child_to_round6(9, 0x66);
+        let foreign: Arc<dyn HdPoisonJournal> = Arc::new(
+            crate::poison::FsHdPoisonJournal::create_new(
+                dir.join("foreign.journal"),
+                [0xEE; 32],
+                [0x7F; 32],
+            )
+            .unwrap(),
+        );
+        let first = cs6.into_iter().next().unwrap();
+        assert!(matches!(
+            first.finish(&copenings, Arc::clone(&foreign)),
+            Err(HdError::MacCheckFailed)
+        ));
+        assert!(!foreign.is_poisoned().unwrap());
+        assert!(journals[0].is_permanently_poisoned().unwrap());
+        assert!(root_shares[0].is_permanently_poisoned());
+        assert!(
+            root_shares[0]
+                .derive_child_share(&seeds[0], &root_pk, 10, false, [0x77; 32], [0x78; 32])
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

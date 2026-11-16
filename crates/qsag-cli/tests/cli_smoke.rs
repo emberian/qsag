@@ -3673,6 +3673,13 @@ fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
         ],
         0,
     );
+    let mut seen_salts = std::collections::BTreeSet::new();
+    let mut seen_tags = std::collections::BTreeSet::new();
+    seen_salts.insert(json_member(&std::fs::read_to_string(&sk).unwrap(), "salt"));
+    seen_tags.insert(json_member(
+        &std::fs::read_to_string(&sk).unwrap(),
+        "envelope_tag",
+    ));
     for mint in 0..3 {
         let token = dir.path(&format!("token-{mint}"));
         let step = dir.path(&format!("step-{mint}"));
@@ -3698,6 +3705,35 @@ fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
             "--allow-single-disk-anchor",
         ];
         let before = std::fs::read(&sk).unwrap();
+        // Omitting passphrase must fail closed without advancing vault or anchor.
+        expect(
+            &[
+                "policy",
+                "biscuit",
+                "mint",
+                "--secret",
+                &sk,
+                "--audience-hex",
+                &audience,
+                "--resource-hex",
+                &resource,
+                "--token-out",
+                &token,
+                "--step-key-out",
+                &step,
+                "--anchor-dir",
+                &anchor,
+                "--allow-single-disk-anchor",
+            ],
+            1,
+        );
+        assert_eq!(std::fs::read(&sk).unwrap(), before);
+        // Pre-existing --token-out must fail preflight before burning a leaf.
+        std::fs::write(&token, b"occupied").unwrap();
+        expect(&args, 1);
+        assert_eq!(std::fs::read(&sk).unwrap(), before);
+        std::fs::remove_file(&token).unwrap();
+        // Wrong passphrase must fail closed without advancing vault or anchor.
         std::fs::write(&pass, b"wrong password").unwrap();
         expect(&args, 1);
         assert_eq!(std::fs::read(&sk).unwrap(), before);
@@ -3709,6 +3745,8 @@ fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
         for field in ["envelope", "salt", "envelope_tag"] {
             assert_eq!(updated.matches(&format!("\"{field}\":")).count(), 1);
         }
+        assert!(seen_salts.insert(json_member(&updated, "salt")));
+        assert!(seen_tags.insert(json_member(&updated, "envelope_tag")));
         expect(
             &[
                 "policy",
@@ -3747,7 +3785,13 @@ fn migration_rejects_sealed_or_damaged_envelope_legacy_seeds() {
     let dir = Workdir::new("migration-sealed-seed");
     let key = dir.path("legacy.json");
     let output = dir.path("claim.json");
-    for header in ["envelope", "salt", "envelope_tag"] {
+    for header in [
+        "envelope",
+        "salt",
+        "envelope_tag",
+        "envelope_salt",
+        "envelope_nonce",
+    ] {
         std::fs::write(&key, format!("{{\"seed\":\"{SEED}\",\"{header}\":\"00\"}}")).unwrap();
         let rejected = qsag(&[
             "migrate",
@@ -3778,6 +3822,23 @@ fn migration_rejects_sealed_or_damaged_envelope_legacy_seeds() {
         assert!(String::from_utf8_lossy(&rejected.stderr).contains("sealed legacy keys"));
         assert!(!Path::new(&output).exists());
     }
+    // A 32-byte malformed JSON object must never be treated as 32 raw key bytes.
+    let malformed_32b = format!("{:<32}", "{\"seed\":\"0011\"}");
+    assert_eq!(malformed_32b.len(), 32);
+    std::fs::write(&key, malformed_32b).unwrap();
+    let rejected = qsag(&[
+        "migrate",
+        "commit",
+        "--kind",
+        "btc-taproot",
+        "--legacy-secret",
+        &key,
+        "--out",
+        &output,
+    ]);
+    assert_eq!(code(&rejected), 1);
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("must be 32 bytes"));
+    assert!(!Path::new(&output).exists());
 }
 
 #[test]
@@ -3804,7 +3865,7 @@ fn hd_rejects_threshold_truncation_before_enrollment() {
         1,
     );
     assert!(!Path::new(&watch).exists());
-    assert!(!Path::new(&vault).join("hd-meta.json").exists());
+    assert!(!Path::new(&vault).exists());
 }
 
 #[cfg(unix)]
@@ -3812,34 +3873,71 @@ fn hd_rejects_threshold_truncation_before_enrollment() {
 fn enrollment_preflights_party_files_before_external_anchor_provisioning() {
     use std::os::unix::fs::DirBuilderExt;
     let dir = Workdir::new("preflight-party-files");
-    for name in ["hd", "mldsa-share", "mldsa-burn", "anchor"] {
+    for name in [
+        "hd",
+        "mldsa-share",
+        "mldsa-burn",
+        "mldsa-burn-lock",
+        "voprf-rss",
+        "voprf-spdz",
+        "anchor",
+    ] {
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(dir.path(name))
             .unwrap();
     }
     let anchor = dir.path("anchor");
-    for (vault_name, filename, command) in [
-        ("hd", "hd-custodian-0.share", "hd"),
-        ("mldsa-share", "mldsa-party-0.share", "cred"),
-        ("mldsa-burn", "mldsa-party-0.burn", "cred"),
+    for (vault_name, filename, command, subcommand, parties) in [
+        ("hd", "hd-custodian-0.share", "hd", "keygen", "3"),
+        (
+            "mldsa-share",
+            "mldsa-party-0.share",
+            "cred",
+            "mldsa-keygen",
+            "3",
+        ),
+        (
+            "mldsa-burn",
+            "mldsa-party-0.burn",
+            "cred",
+            "mldsa-keygen",
+            "3",
+        ),
+        (
+            "mldsa-burn-lock",
+            "mldsa-party-0.burn.lock",
+            "cred",
+            "mldsa-keygen",
+            "3",
+        ),
+        (
+            "voprf-rss",
+            "voprf-party-0.share",
+            "cred",
+            "voprf-keygen",
+            "5",
+        ),
+        (
+            "voprf-spdz",
+            "voprf-counter-0.json",
+            "cred",
+            "voprf-keygen",
+            "3",
+        ),
     ] {
         let vault = dir.path(vault_name);
         let occupied = Path::new(&vault).join(filename);
         std::fs::write(&occupied, b"existing custody artifact").unwrap();
         let mut args = vec![
             command,
-            if command == "hd" {
-                "keygen"
-            } else {
-                "mldsa-keygen"
-            },
+            subcommand,
             "--vault-dir",
             &vault,
             "--threshold",
             "2",
             "--parties",
-            "3",
+            parties,
             "--deterministic",
             "--anchor-dir",
             &anchor,

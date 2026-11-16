@@ -986,6 +986,18 @@ fn format_voprf_eval_refusal(counter: u64, err: voprf::Error) -> CliError {
     }
 }
 
+fn preflight_voprf_party_files(vault_dir: &str, parties: usize) -> Result<(), CliError> {
+    for party in 0..parties {
+        let share = voprf_share_path(vault_dir, party);
+        ensure_absent(&share)?;
+        ensure_absent(&format!("{share}.vault.lock"))?;
+        let counter = voprf_counter_path(vault_dir, party);
+        ensure_absent(&counter)?;
+        ensure_absent(&format!("{counter}.lock"))?;
+    }
+    Ok(())
+}
+
 /// Dealerless Shamir-SPDZ enrollment for any `2 <= threshold <= parties <= 64`.
 #[allow(clippy::too_many_arguments)]
 fn voprf_spdz_keygen(
@@ -1007,6 +1019,8 @@ fn voprf_spdz_keygen(
             "the Shamir-SPDZ TOPRF backend supports 2 <= --threshold <= --parties <= 64",
         )
     })?;
+    private_dir(vault_dir, true)?;
+    preflight_voprf_party_files(vault_dir, config.servers())?;
     let deterministic = args.flag("deterministic");
     let session = toprf_seed(
         deterministic,
@@ -1428,7 +1442,6 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
     }
     ensure_absent(&voprf_meta_path(vault_dir))?;
     ensure_absent(public_out)?;
-    private_dir(vault_dir, true)?;
     if spdz {
         return voprf_spdz_keygen(
             &args,
@@ -1441,6 +1454,8 @@ fn voprf_keygen(raw: &[String]) -> Result<(), CliError> {
             public_out,
         );
     }
+    private_dir(vault_dir, true)?;
+    preflight_voprf_party_files(vault_dir, TOPRF_SERVERS)?;
 
     let deterministic = args.flag("deterministic");
     let session = toprf_seed(
@@ -2305,7 +2320,6 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
     let (level, level_name) = parse_mldsa_level(args.get("level"))?;
     ensure_absent(&mldsa_meta_path(vault_dir))?;
     ensure_absent(public_out)?;
-    private_dir(vault_dir, true)?;
 
     let deterministic = args.flag("deterministic");
     let session_id = if deterministic {
@@ -2350,15 +2364,17 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
         MLDSA_SHARE_FORMAT
     };
 
+    private_dir(vault_dir, true)?;
     for idx in 0..parties {
         let path = mldsa_share_path(vault_dir, idx);
         ensure_absent(&path)?;
         ensure_absent(&format!("{path}.vault.lock"))?;
-        ensure_absent(
-            mldsa_burn_path(vault_dir, idx)
-                .to_str()
-                .ok_or_else(|| CliError::usage("burn path must be UTF-8"))?,
-        )?;
+        let burn_path = mldsa_burn_path(vault_dir, idx);
+        let burn_str = burn_path
+            .to_str()
+            .ok_or_else(|| CliError::usage("burn path must be UTF-8"))?;
+        ensure_absent(burn_str)?;
+        ensure_absent(&format!("{burn_str}.lock"))?;
     }
     let mut entropies = Vec::with_capacity(parties);
     for idx in 0..parties {

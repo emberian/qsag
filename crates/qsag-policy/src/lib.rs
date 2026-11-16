@@ -5783,10 +5783,7 @@ mod tests {
             }
             fault(&mut opens);
             for (state, g) in states.into_iter().zip(&mut guards) {
-                assert!(
-                    state.round3_commit_sigma(g, &opens).is_err(),
-                    "case {case}"
-                );
+                assert!(state.round3_commit_sigma(g, &opens).is_err(), "case {case}");
                 assert_slot_aborted_not_bricked(g, 1);
                 for peer in ids.into_iter().filter(|p| *p != g.party_id) {
                     assert_peer_slot_retired(g, peer, 1);
@@ -6280,8 +6277,7 @@ mod tests {
         };
         let retained = observe(guard.verified_velocity.as_ref().unwrap());
         assert_eq!((retained.1, retained.5), (30, 2));
-        let replayed =
-            replay_verified_velocity(guard.verified_velocity.as_ref().unwrap()).unwrap();
+        let replayed = replay_verified_velocity(guard.verified_velocity.as_ref().unwrap()).unwrap();
         assert_eq!(observe(&replayed), retained);
 
         let state = recorded_state(&guard);
@@ -6297,10 +6293,7 @@ mod tests {
                     .is_err()
             );
             assert_eq!(recorded_state(&guard), state);
-            assert_eq!(
-                observe(guard.verified_velocity.as_ref().unwrap()),
-                retained
-            );
+            assert_eq!(observe(guard.verified_velocity.as_ref().unwrap()), retained);
         }
         guard
             .record_approved_intent(50, 50, [5; 32], [6; 32])

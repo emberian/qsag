@@ -733,19 +733,61 @@ fn slot_stem(domain: &str, key_id: &[u8; 32]) -> String {
     )
 }
 
-/// Remove the fork-guard target for a known, never-committed enrollment attempt.
-/// The caller must hold the destination vault lock and verify that it has no committed meta.
+fn remove_file_if_present(path: &Path, label: &'static str) -> Result<(), CliError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CliError::io(label, e)),
+    }
+}
+
+/// Remove uncommitted fork-guard and filesystem anchor artifacts for a known, never-committed
+/// enrollment attempt. The caller must hold the destination vault lock and verify that it has
+/// no committed meta.
 pub fn remove_uncommitted_guarded_target(
     vault_dir: &str,
+    anchor_dir: Option<&str>,
     domain: &str,
     key_id: &[u8; 32],
 ) -> Result<(), CliError> {
-    let path = Path::new(vault_dir).join(format!(".qsag-{}.target", slot_stem(domain, key_id)));
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(CliError::io("removing uncommitted fork-guard target", e)),
+    let stem = slot_stem(domain, key_id);
+    for ext in [
+        "target",
+        "anchor",
+        "anchor.lock",
+        "tpm",
+        "tpm.lock",
+        "vmgen",
+        "vmgen.lock",
+    ] {
+        let local = Path::new(vault_dir).join(format!(".qsag-{stem}.{ext}"));
+        remove_file_if_present(&local, "removing uncommitted local anchor artifact")?;
     }
+    if let Some(dir) = anchor_dir {
+        for ext in [
+            "anchor",
+            "anchor.lock",
+            "tpm",
+            "tpm.lock",
+            "vmgen",
+            "vmgen.lock",
+        ] {
+            let ext_path = Path::new(dir).join(format!("{stem}.{ext}"));
+            remove_file_if_present(&ext_path, "removing uncommitted external anchor artifact")?;
+        }
+        let mirror = anchor_mirror_dir_path(dir, domain, key_id);
+        match std::fs::remove_dir_all(&mirror) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(CliError::io(
+                    "removing uncommitted external mirror directory",
+                    e,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn anchor_record_path(anchor_dir: &str, domain: &str, key_id: &[u8; 32]) -> PathBuf {

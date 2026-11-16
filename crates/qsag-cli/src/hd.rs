@@ -526,7 +526,6 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     ensure_absent(&hd_meta_path(vault_dir))?;
     ensure_absent(watch_out)?;
-    private_dir(vault_dir, true)?;
 
     let deterministic = args.flag("deterministic");
     let label = if deterministic {
@@ -547,16 +546,24 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
         os_random_32()?
     };
     let config = build_committee(threshold, parties, label)?;
+    private_dir(vault_dir, true)?;
     for idx in 0..parties {
         let path = hd_share_path(vault_dir, idx);
         ensure_absent(&path)?;
         ensure_absent(&format!("{path}.vault.lock"))?;
     }
-    ensure_absent(
-        hd_budget_path(vault_dir)
-            .to_str()
-            .ok_or_else(|| CliError::usage("budget path must be UTF-8"))?,
-    )?;
+    let budget_path = hd_budget_path(vault_dir);
+    let budget_str = budget_path
+        .to_str()
+        .ok_or_else(|| CliError::usage("budget path must be UTF-8"))?;
+    for candidate in [
+        budget_str.to_owned(),
+        format!("{budget_str}.lock"),
+        format!("{budget_str}.hwm"),
+        format!("{budget_str}.hwm.lock"),
+    ] {
+        ensure_absent(&candidate)?;
+    }
     let family = config.digest();
     let budget_mac = Secret32::new(if deterministic {
         cshake256_framed_32(b"QSAG.CLI.HD.DET.BUDGET_MAC.V1", &[&family, &pk_seed])

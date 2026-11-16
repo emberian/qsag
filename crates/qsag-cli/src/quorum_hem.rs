@@ -625,8 +625,9 @@ struct PendingReshare {
     target: String,
     /// The quorum epoch the new vault starts at.
     quorum_epoch: u64,
-    /// Identifies only this attempt's uncommitted fork-guard target.
+    /// Identifies only this attempt's uncommitted fork-guard target and external anchor.
     anchor_key_id: Option<[u8; 32]>,
+    anchor_dir: Option<String>,
 }
 
 /// The committed state of a v2 vault.
@@ -771,6 +772,10 @@ impl Meta {
                     frames.push(b"QSAG.HEM.PENDING.ANCHOR.KEYID.V2".to_vec());
                     frames.push(key_id.to_vec());
                 }
+                if let Some(dir) = &pending.anchor_dir {
+                    frames.push(b"QSAG.HEM.PENDING.ANCHOR.DIR.V2".to_vec());
+                    frames.push(dir.as_bytes().to_vec());
+                }
             }
         }
         if let Some(env) = &self.envelope {
@@ -871,6 +876,9 @@ impl Meta {
             if let Some(key_id) = pending.anchor_key_id {
                 members.push(("pending_reshare_anchor_key_id", Json::hex(&key_id)));
             }
+            if let Some(dir) = &pending.anchor_dir {
+                members.push(("pending_reshare_anchor_dir", Json::str(dir.clone())));
+            }
         }
         members.push(("meta_digest", Json::hex(&self.digest())));
         Json::object(members)
@@ -903,6 +911,10 @@ impl Meta {
                             "pending_reshare_anchor_key_id",
                         )
                     })
+                    .transpose()?,
+                anchor_dir: json
+                    .get("pending_reshare_anchor_dir")
+                    .map(|value| value.as_str().ok_or_else(corrupt).map(str::to_owned))
                     .transpose()?,
             }),
         };
@@ -1391,7 +1403,12 @@ fn settle_interrupted_reshare(
             (None, None) => None,
         };
         if let Some(key_id) = target_anchor_key_id {
-            crate::anchor::remove_uncommitted_guarded_target(&target, HEM_ANCHOR_DOMAIN, &key_id)?;
+            crate::anchor::remove_uncommitted_guarded_target(
+                &target,
+                pending.anchor_dir.as_deref(),
+                HEM_ANCHOR_DOMAIN,
+                &key_id,
+            )?;
         }
         for leftover in [directory_path(&target), lock_path(&target)] {
             if exists(&leftover)? {
@@ -1853,6 +1870,7 @@ fn reshare_tx_anchored(
         target: target.clone(),
         quorum_epoch: quorum.quorum_epoch(),
         anchor_key_id: new_anchor_cfg.map(|_| key_id),
+        anchor_dir: new_anchor_cfg.and_then(|cfg| cfg.anchor_dir.clone()),
     });
     old_meta.write(old_vault_dir, false)?;
     hook(Step::IntentRecorded)?;
@@ -2291,6 +2309,7 @@ mod tests {
     //! the file system's contract with `fsync` and `rename`, which these tests cannot reach.)
 
     use super::*;
+    use crate::codec::to_hex;
 
     struct Scratch(String);
 
@@ -2376,15 +2395,32 @@ mod tests {
                 b"QSAG.CLI.ANCHOR.SLOT.V1",
                 &[HEM_ANCHOR_DOMAIN.as_bytes(), &key_id],
             );
-            let artifact = join(
-                &target,
-                &format!(".qsag-hem_quorum-{}.target", to_hex(&digest)),
-            );
+            let stem = format!("hem_quorum-{}", to_hex(&digest));
+            let artifact = join(&target, &format!(".qsag-{stem}.target"));
+            let ext_anchor_file = join(&anchor_dir, &format!("{stem}.anchor"));
+            let ext_mirror_dir = join(&anchor_dir, &format!("{stem}.mirror"));
+            assert!(exists(&ext_anchor_file).unwrap());
+            assert!(exists(&ext_mirror_dir).unwrap());
             std::fs::write(&artifact, b"uncommitted target").unwrap();
             drop(open_vault(&old, None, &mut no_crash).unwrap());
             assert!(!exists(&artifact).unwrap());
+            assert!(!exists(&ext_anchor_file).unwrap());
+            assert!(!exists(&ext_mirror_dir).unwrap());
             assert!(!exists(&meta_path(&target)).unwrap());
         }
+        // Legacy pre-existing unrecorded external anchor remains untouched, while
+        // the successor commits cleanly under its own fresh identity.
+        let leftover_digest = cshake256_framed_32(
+            b"QSAG.CLI.ANCHOR.SLOT.V1",
+            &[HEM_ANCHOR_DOMAIN.as_bytes(), &leftover_id],
+        );
+        assert!(
+            exists(&join(
+                &anchor_dir,
+                &format!("hem_quorum-{}.anchor", to_hex(&leftover_digest)),
+            ))
+            .unwrap()
+        );
         reshare_tx_anchored(
             &old,
             &target,
