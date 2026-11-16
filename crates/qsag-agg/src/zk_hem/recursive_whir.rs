@@ -114,6 +114,17 @@ impl Backend for Native {
 #[derive(Default)]
 pub(super) struct Assignment {
     pub(super) values: Vec<F>,
+    pub(super) p2_values: Vec<F>,
+    pub(super) aligned: bool,
+}
+impl Assignment {
+    pub(super) fn hologram_aligned() -> Self {
+        Self {
+            values: Vec::new(),
+            p2_values: Vec::new(),
+            aligned: true,
+        }
+    }
 }
 impl Backend for Assignment {
     type W = F;
@@ -132,7 +143,12 @@ impl Backend for Assignment {
     fn perm(&mut self, s: &mut [F; 12]) {
         let mut outputs = [F::ZERO; 118];
         *s = crate::trace::record_poseidon2_perm12(*s, &mut outputs);
-        self.values.extend(outputs);
+        if self.aligned {
+            self.p2_values.extend(outputs);
+            self.p2_values.extend([F::ZERO; 10]);
+        } else {
+            self.values.extend(outputs);
+        }
     }
 }
 
@@ -453,7 +469,18 @@ fn leaf<B: Backend>(b: &mut B, stage: usize, index: &B::W, values: &[Ext<B::W>])
     core::array::from_fn(|i| b.pin(tr.state[i].clone()))
 }
 
-/// One explicitly authenticated coset fiber. Path length is fixed by the stage geometry.
+/// Canopy height capped at 5 levels (at most 32 leaves = 1 KiB per stage), trimming the top 5
+/// Merkle siblings from every query path while eliminating per-query upper-sibling muxes.
+pub(super) const CANOPY_MAX_DEPTH: usize = 5;
+
+#[inline]
+pub(super) fn canopy_split(path_depth: usize) -> (usize, usize) {
+    let depth = path_depth.min(CANOPY_MAX_DEPTH);
+    (depth, path_depth - depth)
+}
+
+/// One explicitly authenticated coset fiber. `siblings` carries only the bottom `base_level`
+/// digests below the stage canopy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedPathQuery {
     pub values: Vec<E>,
@@ -463,6 +490,7 @@ pub struct FixedPathQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedPathWhirProof {
     pub stage_roots: Vec<Digest>,
+    pub canopy_leaves: Vec<Vec<Digest>>,
     pub ood_evals: Vec<[E; 2]>,
     pub fold_polys: Vec<[E; 5]>,
     pub fold_nonces: Vec<[u32; 2]>,
@@ -544,20 +572,28 @@ impl FixedPathWhirParams {
     }
     pub(super) fn placeholder(&self) -> FixedPathWhirProof {
         let nv = self.num_vars().expect("validated parameters");
+        let geos = self.geometries();
         FixedPathWhirProof {
             stage_roots: vec![[F::ZERO; 4]; self.schedule.stages.len()],
+            canopy_leaves: geos
+                .iter()
+                .map(|&(_, groups, _)| {
+                    let (depth, _) = canopy_split(groups.trailing_zeros() as usize);
+                    vec![[F::ZERO; 4]; 1usize << depth]
+                })
+                .collect(),
             ood_evals: vec![[E::ZERO; 2]; self.schedule.stages.len()],
             fold_polys: vec![[E::ZERO; 5]; nv - self.schedule.early_stop_vars],
             fold_nonces: vec![[0; 2]; nv - self.schedule.early_stop_vars],
             query_nonces: vec![[0; 2]; self.schedule.stages.len()],
-            queries: self
-                .geometries()
+            queries: geos
                 .iter()
                 .map(|&(arity, groups, count)| {
+                    let (_, base_level) = canopy_split(groups.trailing_zeros() as usize);
                     vec![
                         FixedPathQuery {
                             values: vec![E::ZERO; arity],
-                            siblings: vec![[F::ZERO; 4]; groups.trailing_zeros() as usize]
+                            siblings: vec![[F::ZERO; 4]; base_level],
                         };
                         count
                     ]
@@ -575,23 +611,28 @@ impl FixedPathWhirParams {
             return false;
         };
         let stages = self.schedule.stages.len();
+        let geos = self.geometries();
         statement.point.len() == nv
             && proof.stage_roots.len() == stages
+            && proof.canopy_leaves.len() == stages
             && proof.ood_evals.len() == stages
             && proof.fold_polys.len() == nv - self.schedule.early_stop_vars
             && proof.fold_nonces.len() == proof.fold_polys.len()
             && proof.query_nonces.len() == stages
             && proof.final_coeffs.len() == (1 << self.schedule.early_stop_vars) + 2
             && proof.queries.len() == stages
-            && self.geometries().iter().zip(&proof.queries).all(
-                |(&(arity, groups, count), queries)| {
-                    queries.len() == count
-                        && queries.iter().all(|q| {
-                            q.values.len() == arity
-                                && q.siblings.len() == groups.trailing_zeros() as usize
-                        })
-                },
-            )
+            && geos
+                .iter()
+                .zip(&proof.canopy_leaves)
+                .zip(&proof.queries)
+                .all(|((&(arity, groups, count), leaves), queries)| {
+                    let (depth, base_level) = canopy_split(groups.trailing_zeros() as usize);
+                    leaves.len() == (1usize << depth)
+                        && queries.len() == count
+                        && queries
+                            .iter()
+                            .all(|q| q.values.len() == arity && q.siblings.len() == base_level)
+                })
             // The committed polynomial and its first codeword are over the base field.
             && proof.queries[0]
                 .iter()
@@ -693,6 +734,10 @@ fn remainder<B: Backend>(b: &mut B, word: &B::W, divisor: u64) -> B::W {
     b.equal(word, &q.scale(f(divisor)).plus(&r));
     r
 }
+/// Threshold above which partial Fisher-Yates switches from direct scan (`<= 20` swaps)
+/// to BEGKN91 Poseidon2-bound offline memory checking (`O(Q)` rows instead of `O(Q^2)`).
+const DIRECT_SAMPLER_MAX_QUERIES: usize = 20;
+
 #[derive(Default)]
 struct QuerySampler<W> {
     swaps: Vec<(W, W)>,
@@ -729,28 +774,204 @@ impl<W: Base> QuerySampler<W> {
         (index, binary)
     }
 }
-// A fixed four-level canopy. Internal nodes are witnesses; an internal hash is
-// enforced whenever a query traverses it. Unvisited subtrees may remain opaque,
-// exactly as in the original authentication paths. Every supplied upper sibling
-// is still compared, so inconsistent duplicate paths are rejected.
-struct CanopyQuery<W> {
-    binary: Vec<W>,
-    current: [W; 4],
-    siblings: Vec<Digest>,
+
+/// Sample `count` distinct coset indices in `0..groups` via partial Fisher-Yates.
+///
+/// For `count > DIRECT_SAMPLER_MAX_QUERIES` (`count < groups`), replaces the `O(Q^2)` linear
+/// swap scan with an `O(Q)` BEGKN91 offline-memory multiset check over `K = groups.min(2 * count)`
+/// strictly increasing addresses in `0..groups`, bound via Poseidon2 Fiat-Shamir on a fork of `tr`
+/// after all `count` raw challenges have been squeezed (preserving `tr` identically).
+fn sample_queries<B: Backend>(
+    b: &mut B,
+    tr: &mut Transcript<B::W>,
+    groups: usize,
+    count: usize,
+) -> Vec<(B::W, Vec<B::W>)> {
+    let depth = groups.trailing_zeros() as usize;
+    if count == groups || count <= DIRECT_SAMPLER_MAX_QUERIES {
+        let mut sampler = QuerySampler { swaps: Vec::new() };
+        return (0..count)
+            .map(|q| sampler.next(b, tr, groups, count, q))
+            .collect();
+    }
+
+    // 1. Squeeze and range-reduce all `count` Fisher-Yates ranks from `tr`.
+    let ranks: Vec<B::W> = (0..count)
+        .map(|q| {
+            let word = tr.ext(b, 40).0[0].clone();
+            remainder(b, &word, (groups - q) as u64)
+        })
+        .collect();
+
+    // 2. Deterministic untrusted witness hints from the concrete rank values.
+    let cap = groups.min(2 * count);
+    let mut mem = alloc::collections::BTreeMap::<usize, (usize, usize)>::new();
+    let mut step_hints = Vec::with_capacity(count);
+    for (q, rank_w) in ranks.iter().enumerate() {
+        let r_raw = (b.value(rank_w).to_canonical_u64() as usize).min(groups - 1 - q);
+        let a_rep = groups - 1 - q;
+        let (rep_val, rep_ts) = mem.get(&a_rep).copied().unwrap_or((a_rep, 0));
+        mem.insert(a_rep, (rep_val, 2 * q + 1));
+        let (idx_val, idx_ts) = mem.get(&r_raw).copied().unwrap_or((r_raw, 0));
+        mem.insert(r_raw, (rep_val, 2 * q + 2));
+        step_hints.push((rep_val, rep_ts, idx_val, idx_ts));
+    }
+    let mut pad_addr = 0usize;
+    while mem.len() < cap {
+        mem.entry(pad_addr).or_insert((pad_addr, 0));
+        pad_addr += 1;
+    }
+    let table_hints: Vec<(usize, usize, usize)> = mem
+        .into_iter()
+        .map(|(addr, (val, ts))| (addr, val, ts))
+        .collect();
+    debug_assert_eq!(table_hints.len(), cap);
+
+    // 3. Allocate strictly ordered address table `0 <= a_0 < a_1 < ... < a_{K-1} < groups`
+    //    and final `(val, ts)` entries, plus causal step `(rep_val, rep_ts, idx_val, idx_ts)`.
+    let ts_bits = (2 * count + 1)
+        .next_power_of_two()
+        .trailing_zeros()
+        .max(1) as usize;
+    assert!(depth <= 30 && ts_bits <= 10);
+    let one = B::W::constant(F::ONE);
+
+    let mut addr_w = Vec::with_capacity(cap);
+    let mut fval_w = Vec::with_capacity(cap);
+    let mut fts_w = Vec::with_capacity(cap);
+    for (i, &(addr, fval, fts)) in table_hints.iter().enumerate() {
+        let aw = b.alloc(f(addr as u64));
+        let vw = b.alloc(f(fval as u64));
+        let tw = b.alloc(f(fts as u64));
+        if i == 0 {
+            bits(b, &aw, depth);
+        } else {
+            let diff = aw.minus(&addr_w[i - 1]).minus(&one);
+            bits(b, &diff, depth);
+        }
+        if i + 1 == cap {
+            bits(b, &aw, depth);
+        }
+        bits(b, &vw, depth);
+        bits(b, &tw, ts_bits);
+        addr_w.push(aw);
+        fval_w.push(vw);
+        fts_w.push(tw);
+    }
+
+    let mut out = Vec::with_capacity(count);
+    let mut rep_val_w = Vec::with_capacity(count);
+    let mut rep_ts_w = Vec::with_capacity(count);
+    let mut idx_ts_w = Vec::with_capacity(count);
+    for (q, &(rv, rt, iv, it)) in step_hints.iter().enumerate() {
+        let rvw = b.alloc(f(rv as u64));
+        let rtw = b.alloc(f(rt as u64));
+        let ivw = b.alloc(f(iv as u64));
+        let itw = b.alloc(f(it as u64));
+        bits(b, &rvw, depth);
+        let bin = bits(b, &ivw, depth);
+        bits(b, &rtw, ts_bits);
+        bits(b, &B::W::constant(f((2 * q) as u64)).minus(&rtw), ts_bits);
+        bits(b, &itw, ts_bits);
+        bits(
+            b,
+            &B::W::constant(f((2 * q + 1) as u64)).minus(&itw),
+            ts_bits,
+        );
+        rep_val_w.push(rvw);
+        rep_ts_w.push(rtw);
+        idx_ts_w.push(itw);
+        out.push((ivw, bin));
+    }
+
+    // 4. Injectively pack all bit-bounded memory wires (`<= 30`-bit pairs, `<= 10`-bit 6-tuples)
+    //    into a forked Poseidon2 transcript before squeezing `(alpha_mem, gamma_mem)`.
+    let mut packed = Vec::with_capacity(cap + count + (cap + 2 * count).div_ceil(6) + 4);
+    let pack_pairs = |dst: &mut Vec<B::W>, items: &[B::W]| {
+        let shift = f(1u64 << 30);
+        for chunk in items.chunks(2) {
+            if chunk.len() == 2 {
+                dst.push(chunk[0].plus(&chunk[1].scale(shift)));
+            } else {
+                dst.push(chunk[0].clone());
+            }
+        }
+    };
+    let pack_ts = |dst: &mut Vec<B::W>, items: &[B::W]| {
+        for chunk in items.chunks(6) {
+            let mut acc = B::W::constant(F::ZERO);
+            for (j, w) in chunk.iter().enumerate() {
+                acc = acc.plus(&w.scale(f(1u64 << (10 * j))));
+            }
+            dst.push(acc);
+        }
+    };
+    pack_pairs(&mut packed, &addr_w);
+    pack_pairs(&mut packed, &fval_w);
+    pack_pairs(&mut packed, &rep_val_w);
+    let idx_vals: Vec<B::W> = out.iter().map(|(iv, _)| iv.clone()).collect();
+    pack_pairs(&mut packed, &idx_vals);
+    let mut all_ts = Vec::with_capacity(cap + 2 * count);
+    all_ts.extend_from_slice(&fts_w);
+    all_ts.extend_from_slice(&rep_ts_w);
+    all_ts.extend_from_slice(&idx_ts_w);
+    pack_ts(&mut packed, &all_ts);
+
+    let mut mem_tr = tr.clone();
+    mem_tr.absorb(b, 41, &packed);
+    let alpha = mem_tr.ext(b, 42);
+    let gamma = mem_tr.ext(b, 43);
+    let alpha2 = alpha.mul(b, &alpha);
+
+    // 5. Grand-product memory check: Init * StepWrites == StepReads * Final.
+    let tuple_dyn = |b: &mut B, addr: &B::W, val: &B::W, ts: &B::W| -> Ext<B::W> {
+        let av = alpha.mul_base(b, val);
+        let a2t = alpha2.mul_base(b, ts);
+        gamma.sub(&Ext::base(addr.clone()).add(&av).add(&a2t))
+    };
+    let tuple_const_ts = |b: &mut B, addr: &B::W, val: &B::W, ts: u64| -> Ext<B::W> {
+        let av = alpha.mul_base(b, val);
+        let a2t = alpha2.scale(f(ts));
+        gamma.sub(&Ext::base(addr.clone()).add(&av).add(&a2t))
+    };
+
+    let mut lhs = Ext::one();
+    let mut rhs = Ext::one();
+    for i in 0..cap {
+        let init_f = tuple_const_ts(b, &addr_w[i], &addr_w[i], 0);
+        let fin_f = tuple_dyn(b, &addr_w[i], &fval_w[i], &fts_w[i]);
+        lhs = lhs.mul(b, &init_f);
+        rhs = rhs.mul(b, &fin_f);
+    }
+    for q in 0..count {
+        let a_rep = B::W::constant(f((groups - 1 - q) as u64));
+        let r1 = tuple_dyn(b, &a_rep, &rep_val_w[q], &rep_ts_w[q]);
+        let w1 = tuple_const_ts(b, &a_rep, &rep_val_w[q], (2 * q + 1) as u64);
+        let r2 = tuple_dyn(b, &ranks[q], &out[q].0, &idx_ts_w[q]);
+        let w2 = tuple_const_ts(b, &ranks[q], &rep_val_w[q], (2 * q + 2) as u64);
+        rhs = rhs.mul(b, &r1);
+        rhs = rhs.mul(b, &r2);
+        lhs = lhs.mul(b, &w1);
+        lhs = lhs.mul(b, &w2);
+    }
+    lhs.equal(b, &rhs);
+    out
 }
+
+// Explicit stage canopy: bottom `base_level` levels are hashed along each query path, while the
+// top `depth <= CANOPY_MAX_DEPTH` levels (`<= 32` canopy leaves) are hashed once unconditionally
+// to `root` and selected by each query's top index bits.
 struct Canopy<W> {
     depth: usize,
     base_level: usize,
-    nodes: Vec<Digest>,
-    queries: Vec<CanopyQuery<W>>,
+    queries: Vec<(Vec<W>, [W; 4])>,
 }
 impl<W: Base> Canopy<W> {
     fn new(path_depth: usize) -> Self {
-        let depth = path_depth.min(4);
+        let (depth, base_level) = canopy_split(path_depth);
         Self {
             depth,
-            base_level: path_depth - depth,
-            nodes: vec![[F::ZERO; 4]; 2 << depth],
+            base_level,
             queries: Vec::new(),
         }
     }
@@ -770,97 +991,47 @@ impl<W: Base> Canopy<W> {
             let right = core::array::from_fn(|i| cur[i].plus(&sibling[i]).minus(&left[i]));
             cur = compress(b, &left, &right, stage, level);
         }
-        // Assign the shared heap-indexed tree from the existing full paths. Values
-        // affect only witnesses; the emitted rows and coefficients stay fixed.
-        let mut idx =
-            (1 << self.depth) + (b.value(index).to_canonical_u64() as usize >> self.base_level);
-        let mut native = cur.clone().map(|v| b.value(&v));
-        self.nodes[idx] = native;
-        for (level, sibling) in path.iter().enumerate().skip(self.base_level) {
-            self.nodes[idx ^ 1] = *sibling;
-            let (left, right) = if idx & 1 == 0 {
-                (native, *sibling)
-            } else {
-                (*sibling, native)
-            };
-            native = compress(&mut Native::default(), &left, &right, stage, level);
-            idx >>= 1;
-            self.nodes[idx] = native;
-        }
-        self.queries.push(CanopyQuery {
-            binary: binary[self.base_level..].to_vec(),
-            current: cur,
-            siblings: path[self.base_level..].to_vec(),
-        });
+        self.queries.push((binary[self.base_level..].to_vec(), cur));
     }
-    fn finish<B: Backend<W = W>>(self, b: &mut B, stage: usize, root: &[W; 4]) {
-        let nodes: Vec<[W; 4]> = self
-            .nodes
-            .into_iter()
+    fn finish<B: Backend<W = W>>(
+        self,
+        b: &mut B,
+        stage: usize,
+        canopy_leaves: &[Digest],
+        root: &[W; 4],
+    ) {
+        assert_eq!(canopy_leaves.len(), 1usize << self.depth);
+        let bottom: Vec<[W; 4]> = canopy_leaves
+            .iter()
             .map(|d| d.map(|v| b.alloc(v)))
             .collect();
-        let mut counts = vec![W::constant(F::ZERO); 1 << self.depth];
-        for query in self.queries {
-            // Prefix indicators also give exact nonzero traversal counts. Each
-            // is Boolean, and there are fewer than p queries, so no modular alias.
-            let mut prefixes = vec![W::constant(F::ONE)];
-            for (level, bit) in query.binary.iter().rev().enumerate() {
-                for (i, prefix) in prefixes.iter().enumerate() {
-                    counts[(1 << level) + i] = counts[(1 << level) + i].plus(prefix);
-                }
-                // The bottom layer has no hash of its own, so its indicators are not needed.
-                if level + 1 < self.depth {
-                    prefixes = prefixes
-                        .iter()
-                        .flat_map(|prefix| {
-                            let right = b.mul(prefix, bit);
-                            [prefix.minus(&right), right]
-                        })
-                        .collect();
-                }
+        let choose = |b: &mut B, mut layer: Vec<[W; 4]>, bits: &[W]| -> [W; 4] {
+            for bit in bits {
+                layer = layer
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| core::array::from_fn(|i| select(b, bit, &pair[1][i], &pair[0][i])))
+                    .collect();
             }
-            let choose = |b: &mut B, mut layer: Vec<[W; 4]>, bits: &[W]| -> [W; 4] {
-                for bit in bits {
-                    layer = layer
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|pair| {
-                            core::array::from_fn(|i| select(b, bit, &pair[1][i], &pair[0][i]))
-                        })
-                        .collect();
-                }
-                layer[0].clone()
-            };
-            let bottom = 1 << self.depth;
-            let selected = choose(b, nodes[bottom..2 * bottom].to_vec(), &query.binary);
-            for (a, c) in query.current.iter().zip(&selected) {
+            layer[0].clone()
+        };
+        for (top_bits, cur) in self.queries {
+            let selected = choose(b, bottom.clone(), &top_bits);
+            for (a, c) in cur.iter().zip(&selected) {
                 b.equal(a, c);
             }
-            for (level, sibling) in query.siblings.iter().enumerate() {
-                let begin = bottom >> level;
-                let layer = (begin..2 * begin).map(|i| nodes[i ^ 1].clone()).collect();
-                let selected = choose(b, layer, &query.binary[level..]);
-                for (a, c) in sibling.iter().zip(&selected) {
-                    let a = b.alloc(*a);
-                    b.equal(&a, c);
-                }
-            }
         }
-        for i in 1usize..1 << self.depth {
-            let height = self.depth - i.ilog2() as usize - 1;
-            let digest = compress(
-                b,
-                &nodes[2 * i],
-                &nodes[2 * i + 1],
-                stage,
-                self.base_level + height,
-            );
-            for (a, c) in digest.iter().zip(&nodes[i]) {
-                b.product(&counts[i], &a.minus(c), &W::constant(F::ZERO));
-            }
+        let mut layer = bottom;
+        for h in 0..self.depth {
+            layer = layer
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| compress(b, &pair[0], &pair[1], stage, self.base_level + h))
+                .collect();
         }
-        for (a, c) in nodes[1].iter().zip(root) {
+        for (a, c) in layer[0].iter().zip(root) {
             b.equal(a, c);
         }
     }
@@ -1187,9 +1358,8 @@ pub(super) fn verify_gadget<B: Backend>(
         let (arity, groups, count) = geos[stage];
         let mut shifted = Vec::with_capacity(count);
         let mut canopy = Canopy::new(groups.trailing_zeros() as usize);
-        let mut sampler = QuerySampler { swaps: Vec::new() };
-        for q in 0..count {
-            let (index, binary) = sampler.next(b, &mut tr, groups, count, q);
+        let sampled = sample_queries(b, &mut tr, groups, count);
+        for (q, (index, binary)) in sampled.into_iter().enumerate() {
             let query = &proof.queries[stage][q];
             // Initial codeword is over the base field, as is the committed polynomial.
             let values: Vec<_> = query
@@ -1212,7 +1382,7 @@ pub(super) fn verify_gadget<B: Backend>(
             }
             shifted.push((z, e));
         }
-        canopy.finish(b, stage, &roots[stage]);
+        canopy.finish(b, stage, &proof.canopy_leaves[stage], &roots[stage]);
         if !last {
             let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
             tr.absorb_exts(b, 22, &values);
@@ -1317,13 +1487,20 @@ impl Oracle {
     fn root(&self) -> Digest {
         self.levels.last().unwrap()[0]
     }
+    fn canopy_leaves(&self) -> Vec<Digest> {
+        let path_depth = self.levels.len() - 1;
+        let (_, base_level) = canopy_split(path_depth);
+        self.levels[base_level].clone()
+    }
     fn query(&self, index: usize) -> FixedPathQuery {
         let groups = self.codeword.len() / self.arity;
+        let path_depth = self.levels.len() - 1;
+        let (_, base_level) = canopy_split(path_depth);
         FixedPathQuery {
             values: (0..self.arity)
                 .map(|j| self.codeword.at(index + j * groups))
                 .collect(),
-            siblings: (0..self.levels.len() - 1)
+            siblings: (0..base_level)
                 .map(|d| self.levels[d][(index >> d) ^ 1])
                 .collect(),
         }
@@ -1465,6 +1642,7 @@ pub fn open_for_recursion(
     };
     let mut proof = params.placeholder();
     proof.stage_roots[0] = oracle.root();
+    proof.canopy_leaves[0] = oracle.canopy_leaves();
     let mut b = Native::default();
     let mut tr = start(&mut b, params, &statement.words());
     tr.absorb(&mut b, 3, &oracle.root());
@@ -1565,6 +1743,7 @@ pub fn open_for_recursion(
             let spec = params.schedule.stages[stage + 1];
             let next = Oracle::new(&coeffs.0, spec.blowup, 1 << spec.step_vars, stage + 1);
             proof.stage_roots[stage + 1] = next.root();
+            proof.canopy_leaves[stage + 1] = next.canopy_leaves();
             tr.absorb(&mut b, 3, &next.root());
             let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
             let ood = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
@@ -1580,9 +1759,8 @@ pub fn open_for_recursion(
         let groups = oracle.codeword.len() / oracle.arity;
         let count = groups.min(spec.num_queries);
         let mut shifted = Vec::with_capacity(count);
-        let mut sampler = QuerySampler { swaps: Vec::new() };
-        for q in 0..count {
-            let (index, binary) = sampler.next(&mut b, &mut tr, groups, count, q);
+        let sampled = sample_queries(&mut b, &mut tr, groups, count);
+        for (q, (index, binary)) in sampled.into_iter().enumerate() {
             let query = oracle.query(index.to_canonical_u64() as usize);
             let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
             let x = coset_point(
@@ -1614,6 +1792,625 @@ pub fn open_for_recursion(
     }
     debug_assert!(!b.failed);
     Ok((statement, proof))
+}
+
+// ============================================================================
+// Correlated 3-Oracle Fixed-Path WHIR (`(Z_pad, H_super, E_super)` in 1 Cascade)
+// ============================================================================
+
+/// Reusable non-hiding recursion commitment (used for deterministic public [`ShapeHologram`]
+/// commitments so one compiled hologram can open across any number of recursive proofs).
+pub struct PublicRecursionCommitment {
+    coeffs: Vec<E>,
+    oracle: Oracle,
+}
+
+impl Clone for PublicRecursionCommitment {
+    fn clone(&self) -> Self {
+        let codeword = match &self.oracle.codeword {
+            Codeword::Base(v) => Codeword::Base(v.clone()),
+            Codeword::Ext(v) => Codeword::Ext(v.clone()),
+        };
+        Self {
+            coeffs: self.coeffs.clone(),
+            oracle: Oracle {
+                codeword,
+                levels: self.oracle.levels.clone(),
+                arity: self.oracle.arity,
+            },
+        }
+    }
+}
+
+impl core::fmt::Debug for PublicRecursionCommitment {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        fmt.debug_struct("PublicRecursionCommitment")
+            .field("root", &self.root())
+            .field("arity", &self.oracle.arity)
+            .finish()
+    }
+}
+
+impl PublicRecursionCommitment {
+    pub fn commit(
+        params: &FixedPathWhirParams,
+        evaluations: &[F],
+    ) -> Result<Self, RecursiveWhirError> {
+        let nv = params
+            .num_vars()
+            .ok_or(RecursiveWhirError::InvalidParameters)?;
+        if evaluations.len() != 1usize << nv {
+            return Err(RecursiveWhirError::InvalidParameters);
+        }
+        let base = hypercube_to_monomial_coeffs(evaluations);
+        let spec = params.schedule.stages[0];
+        let oracle = Oracle::base(&base, spec.blowup, 1 << spec.step_vars);
+        let mut coeffs = vec![E::ZERO; base.len() + 2];
+        crate::pcs::fill_indexed(&mut coeffs[..base.len()], |i| E::from_base(base[i]));
+        Ok(Self { coeffs, oracle })
+    }
+
+    #[inline]
+    pub fn root(&self) -> Digest {
+        self.oracle.root()
+    }
+}
+
+/// Correlated fixed-path WHIR opening of 3 Stage-0 base-field commitments `(W_0, W_1, W_2)`
+/// across 3 evaluation points `(p_0, p_1, p_2)` sharing ONE CWYZ fold & query cascade.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Correlated3WhirProof {
+    /// `cross_evals[m][j] = W_m(p_j)` for `m in 0..3, j in 0..3`.
+    pub cross_evals: [[E; 3]; 3],
+    /// Stage-0 canopy leaves for each of the 3 base-field commitments.
+    pub stage0_canopy_leaves: [Vec<Digest>; 3],
+    /// Stage-0 queries (`count` queries, each carrying the fiber in all 3 Stage-0 trees).
+    pub stage0_queries: Vec<[FixedPathQuery; 3]>,
+    /// Stage roots for folded extension stages `1..stages`.
+    pub later_stage_roots: Vec<Digest>,
+    /// Canopy leaves for folded extension stages `1..stages`.
+    pub later_canopy_leaves: Vec<Vec<Digest>>,
+    /// OOD evaluations `[z_0, z_1]` for all `0..stages` (on the combined polynomial `U`).
+    pub ood_evals: Vec<[E; 2]>,
+    pub fold_polys: Vec<[E; 5]>,
+    pub fold_nonces: Vec<[u32; 2]>,
+    pub query_nonces: Vec<[u32; 2]>,
+    /// Queries for folded extension stages `1..stages`.
+    pub later_queries: Vec<Vec<FixedPathQuery>>,
+    pub final_coeffs: Vec<E>,
+}
+
+impl FixedPathWhirParams {
+    pub(super) fn placeholder_correlated3(&self) -> Correlated3WhirProof {
+        let nv = self.num_vars().expect("validated parameters");
+        let geos = self.geometries();
+        let (arity0, groups0, count0) = geos[0];
+        let (depth0, base0) = canopy_split(groups0.trailing_zeros() as usize);
+        let q0 = FixedPathQuery {
+            values: vec![E::ZERO; arity0],
+            siblings: vec![[F::ZERO; 4]; base0],
+        };
+        let stages = self.schedule.stages.len();
+        Correlated3WhirProof {
+            cross_evals: [[E::ZERO; 3]; 3],
+            stage0_canopy_leaves: core::array::from_fn(|_| vec![[F::ZERO; 4]; 1usize << depth0]),
+            stage0_queries: vec![[q0.clone(), q0.clone(), q0]; count0],
+            later_stage_roots: vec![[F::ZERO; 4]; stages.saturating_sub(1)],
+            later_canopy_leaves: geos[1..]
+                .iter()
+                .map(|&(_, groups, _)| {
+                    let (depth, _) = canopy_split(groups.trailing_zeros() as usize);
+                    vec![[F::ZERO; 4]; 1usize << depth]
+                })
+                .collect(),
+            ood_evals: vec![[E::ZERO; 2]; stages],
+            fold_polys: vec![[E::ZERO; 5]; nv - self.schedule.early_stop_vars],
+            fold_nonces: vec![[0; 2]; nv - self.schedule.early_stop_vars],
+            query_nonces: vec![[0; 2]; stages],
+            later_queries: geos[1..]
+                .iter()
+                .map(|&(arity, groups, count)| {
+                    let (_, base_level) = canopy_split(groups.trailing_zeros() as usize);
+                    vec![
+                        FixedPathQuery {
+                            values: vec![E::ZERO; arity],
+                            siblings: vec![[F::ZERO; 4]; base_level],
+                        };
+                        count
+                    ]
+                })
+                .collect(),
+            final_coeffs: vec![E::ZERO; (1 << self.schedule.early_stop_vars) + 2],
+        }
+    }
+
+    pub(super) fn well_formed_correlated3(&self, proof: &Correlated3WhirProof) -> bool {
+        let Some(nv) = self.num_vars() else {
+            return false;
+        };
+        let stages = self.schedule.stages.len();
+        let geos = self.geometries();
+        let (arity0, groups0, count0) = geos[0];
+        let (depth0, base0) = canopy_split(groups0.trailing_zeros() as usize);
+        proof
+            .stage0_canopy_leaves
+            .iter()
+            .all(|l| l.len() == (1usize << depth0))
+            && proof.stage0_queries.len() == count0
+            && proof.stage0_queries.iter().all(|triple| {
+                triple.iter().all(|q| {
+                    q.values.len() == arity0
+                        && q.siblings.len() == base0
+                        && q.values.iter().all(|v| v.to_limbs()[1..] == [F::ZERO; 3])
+                })
+            })
+            && proof.later_stage_roots.len() == stages.saturating_sub(1)
+            && proof.later_canopy_leaves.len() == stages.saturating_sub(1)
+            && proof.ood_evals.len() == stages
+            && proof.fold_polys.len() == nv - self.schedule.early_stop_vars
+            && proof.fold_nonces.len() == proof.fold_polys.len()
+            && proof.query_nonces.len() == stages
+            && proof.final_coeffs.len() == (1 << self.schedule.early_stop_vars) + 2
+            && proof.later_queries.len() == stages.saturating_sub(1)
+            && geos[1..]
+                .iter()
+                .zip(&proof.later_canopy_leaves)
+                .zip(&proof.later_queries)
+                .all(|((&(arity, groups, count), leaves), queries)| {
+                    let (depth, base_level) = canopy_split(groups.trailing_zeros() as usize);
+                    leaves.len() == (1usize << depth)
+                        && queries.len() == count
+                        && queries
+                            .iter()
+                            .all(|q| q.values.len() == arity && q.siblings.len() == base_level)
+                })
+    }
+}
+
+/// Open `(w0, w1_public, w2)` at 3 points `points` on an existing Poseidon2 [`Transcript`].
+pub(super) fn open_correlated3_for_recursion(
+    params: &FixedPathWhirParams,
+    tr: &mut Transcript<F>,
+    w0: RecursionCommitment,
+    w1: &PublicRecursionCommitment,
+    w2: RecursionCommitment,
+    points: &[Vec<E>; 3],
+) -> Result<Correlated3WhirProof, RecursiveWhirError> {
+    let nv = params
+        .num_vars()
+        .ok_or(RecursiveWhirError::InvalidParameters)?;
+    let want_len = (1usize << nv) + 2;
+    if points.iter().any(|p| p.len() != nv)
+        || w0.coeffs.0.len() != want_len
+        || w1.coeffs.len() != want_len
+        || w2.coeffs.0.len() != want_len
+    {
+        return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let mut b = Native::default();
+    let point_kernels: [Vec<E>; 3] =
+        core::array::from_fn(|j| crate::pcs::affine::monomial_table(&points[j]));
+    let coeffs_ref: [&[E]; 3] = [&w0.coeffs.0, &w1.coeffs, &w2.coeffs.0];
+    let cross_evals: [[E; 3]; 3] =
+        core::array::from_fn(|m| core::array::from_fn(|j| dot(coeffs_ref[m], &point_kernels[j])));
+
+    let mut proof = params.placeholder_correlated3();
+    proof.cross_evals = cross_evals;
+    let oracles0 = [&w0.oracle, &w1.oracle, &w2.oracle];
+    for (slot, orc) in proof.stage0_canopy_leaves.iter_mut().zip(&oracles0) {
+        *slot = orc.canopy_leaves();
+    }
+
+    let flat_cross: Vec<Ext<F>> = cross_evals
+        .iter()
+        .flatten()
+        .copied()
+        .map(Ext::constant)
+        .collect();
+    tr.absorb_exts(&mut b, 50, &flat_cross);
+    let mu = tr.ext(&mut b, 51).value(&b);
+    let zeta = tr.ext(&mut b, 52).value(&b);
+    let mu2 = mu * mu;
+    let zeta2 = zeta * zeta;
+    let mu_pows = [E::ONE, mu, mu2];
+    let zeta_pows = [E::ONE, zeta, zeta2];
+
+    let mut coeffs = SecretExts(vec![E::ZERO; want_len]);
+    crate::pcs::fill_indexed(&mut coeffs.0, |i| {
+        w0.coeffs.0[i] + mu * w1.coeffs[i] + mu2 * w2.coeffs.0[i]
+    });
+    let mut kernel = vec![E::ZERO; want_len];
+    crate::pcs::fill_indexed(&mut kernel, |i| {
+        point_kernels[0][i] + zeta * point_kernels[1][i] + zeta2 * point_kernels[2][i]
+    });
+    let mut claim = E::ZERO;
+    for j in 0..3 {
+        let mut col_sum = E::ZERO;
+        for m in 0..3 {
+            col_sum += mu_pows[m] * cross_evals[m][j];
+        }
+        claim += zeta_pows[j] * col_sum;
+    }
+
+    let mut roots0_words = Vec::with_capacity(12);
+    for orc in &oracles0 {
+        roots0_words.extend_from_slice(&orc.root());
+    }
+    tr.absorb(&mut b, 53, &roots0_words);
+    let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+    let evals = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+    proof.ood_evals[0] = evals;
+    tr.absorb_exts(&mut b, 5, &evals.map(Ext::constant));
+    for (z, e) in zs.into_iter().zip(evals) {
+        let weight = tr.ext(&mut b, 6).value(&b);
+        claim += weight * e;
+        crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
+    }
+
+    let mut cursor = 0usize;
+    let mut scratch_c = SecretExts(Vec::new());
+    let mut scratch_k = Vec::new();
+    let mut later_oracle: Option<Oracle> = None;
+
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let mut wire = [E::ZERO; 5];
+            {
+                let (c, k) = (&coeffs.0, &kernel);
+                let head = sum_indexed(c.len() / 2, |i| {
+                    [
+                        c[2 * i] * k[2 * i],
+                        c[2 * i] * k[2 * i + 1],
+                        c[2 * i + 1] * k[2 * i],
+                    ]
+                });
+                wire[..3].copy_from_slice(&head);
+            }
+            tr.absorb_exts(
+                &mut b,
+                10,
+                &wire[..3]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let phi = tr.ext(&mut b, 11);
+            crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+            core::mem::swap(&mut kernel, &mut scratch_k);
+            {
+                let (c, k) = (&coeffs.0, &kernel);
+                let tail = sum_indexed(c.len() / 2, |i| {
+                    [c[2 * i] * k[i + 1], c[2 * i + 1] * k[i + 1]]
+                });
+                wire[3..].copy_from_slice(&tail);
+            }
+            tr.absorb_exts(
+                &mut b,
+                12,
+                &wire[3..]
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            let nonce = grind(tr, params.schedule.regime.pow_bits());
+            pow(&mut b, tr, nonce, params.schedule.regime.pow_bits());
+            let chal = [tr.ext(&mut b, 13), tr.ext(&mut b, 14), tr.ext(&mut b, 15)];
+            claim = bridge(
+                &mut b,
+                &wire.map(Ext::constant),
+                &Ext::constant(claim),
+                &phi,
+                &chal,
+            )
+            .value(&b);
+            let chal_values = core::array::from_fn(|i| chal[i].value(&b));
+            crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
+            qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
+            core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
+            proof.fold_polys[cursor] = wire;
+            proof.fold_nonces[cursor] = nonce;
+            chals.push(chal);
+            cursor += 1;
+        }
+        let last = stage + 1 == params.schedule.stages.len();
+        let mut next_ood = None;
+        let next = if last {
+            proof.final_coeffs.clone_from(&coeffs.0);
+            tr.absorb_exts(
+                &mut b,
+                21,
+                &coeffs
+                    .0
+                    .iter()
+                    .copied()
+                    .map(Ext::constant)
+                    .collect::<Vec<_>>(),
+            );
+            None
+        } else {
+            let next_spec = params.schedule.stages[stage + 1];
+            let next = Oracle::new(&coeffs.0, next_spec.blowup, 1 << next_spec.step_vars, stage + 1);
+            proof.later_stage_roots[stage] = next.root();
+            proof.later_canopy_leaves[stage] = next.canopy_leaves();
+            tr.absorb(&mut b, 3, &next.root());
+            let zs = [tr.ext(&mut b, 4).value(&b), tr.ext(&mut b, 4).value(&b)];
+            let ood = zs.map(|z| crate::field::eval_univariate_ext4(&coeffs.0, z));
+            proof.ood_evals[stage + 1] = ood;
+            tr.absorb_exts(&mut b, 5, &ood.map(Ext::constant));
+            next_ood = Some((zs, ood));
+            Some(next)
+        };
+        let nonce = grind(tr, params.schedule.regime.pow_bits());
+        proof.query_nonces[stage] = nonce;
+        pow(&mut b, tr, nonce, params.schedule.regime.pow_bits());
+        let (arity, groups, count) = params.geometries()[stage];
+        let domain_log2 = (groups * arity).trailing_zeros() as usize;
+        let mut shifted = Vec::with_capacity(count);
+        let sampled = sample_queries(&mut b, tr, groups, count);
+        if stage == 0 {
+            for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                let idx = index.to_canonical_u64() as usize;
+                let q_triple: [FixedPathQuery; 3] =
+                    core::array::from_fn(|m| oracles0[m].query(idx));
+                let combined: Vec<Ext<F>> = (0..arity)
+                    .map(|k| {
+                        Ext::constant(
+                            q_triple[0].values[k]
+                                + mu * q_triple[1].values[k]
+                                + mu2 * q_triple[2].values[k],
+                        )
+                    })
+                    .collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &combined, x, &chals, false));
+                proof.stage0_queries[q] = q_triple;
+            }
+        } else {
+            let cur_oracle = later_oracle.as_ref().expect("folded extension oracle");
+            for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                let query = cur_oracle.query(index.to_canonical_u64() as usize);
+                let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &values, x, &chals, false));
+                proof.later_queries[stage - 1][q] = query;
+            }
+        }
+        if let Some(next) = next {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(&mut b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(&mut b, 6).value(&b);
+                claim += weight * e;
+                crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, z);
+            }
+            let gamma = tr.ext(&mut b, 23).value(&b);
+            let mut weight = gamma;
+            for (z, e) in shifted {
+                claim += weight * e.value(&b);
+                crate::pcs::affine::add_geometric_scaled_in_place(
+                    &mut kernel,
+                    weight,
+                    E::from_base(z),
+                );
+                weight *= gamma;
+            }
+            later_oracle = Some(next);
+        }
+    }
+    debug_assert!(!b.failed);
+    Ok(proof)
+}
+
+/// Verify a [`Correlated3WhirProof`] natively or inside a parent [`ConstraintSystem`].
+pub(super) fn verify_correlated3_gadget<B: Backend>(
+    b: &mut B,
+    params: &FixedPathWhirParams,
+    tr: &mut Transcript<B::W>,
+    roots0: &[[B::W; 4]; 3],
+    points: &[Vec<Ext<B::W>>; 3],
+    expected_claims: &[[Option<Ext<B::W>>; 3]; 3],
+    proof: &Correlated3WhirProof,
+) {
+    let nv = params.num_vars().expect("validated parameters");
+    let geos = params.geometries();
+    let cross_w: [[Ext<B::W>; 3]; 3] =
+        core::array::from_fn(|m| core::array::from_fn(|j| Ext::alloc(b, proof.cross_evals[m][j])));
+    for m in 0..3 {
+        for j in 0..3 {
+            if let Some(exp) = &expected_claims[m][j] {
+                cross_w[m][j].equal(b, exp);
+            }
+        }
+    }
+    let flat_cross: Vec<Ext<B::W>> = cross_w.iter().flatten().cloned().collect();
+    tr.absorb_exts(b, 50, &flat_cross);
+    let mu = tr.ext(b, 51);
+    let zeta = tr.ext(b, 52);
+    let mu2 = mu.mul(b, &mu);
+    let zeta2 = zeta.mul(b, &zeta);
+
+    let mut kernels = vec![
+        Kernel::initial(points[0].clone()),
+        Kernel {
+            offset: 0,
+            weight: zeta.clone(),
+            point: KernelPoint::Ext {
+                point: points[1].clone(),
+                overflow: [Ext::zero(), Ext::zero()],
+            },
+        },
+        Kernel {
+            offset: 0,
+            weight: zeta2.clone(),
+            point: KernelPoint::Ext {
+                point: points[2].clone(),
+                overflow: [Ext::zero(), Ext::zero()],
+            },
+        },
+    ];
+    let col_claim = |b: &mut B, j: usize| -> Ext<B::W> {
+        let t1 = mu.mul(b, &cross_w[1][j]);
+        let t2 = mu2.mul(b, &cross_w[2][j]);
+        cross_w[0][j].add(&t1).add(&t2)
+    };
+    let c0 = col_claim(b, 0);
+    let c1 = col_claim(b, 1);
+    let c2 = col_claim(b, 2);
+    let zc1 = zeta.mul(b, &c1);
+    let zc2 = zeta2.mul(b, &c2);
+    let mut claim = c0.add(&zc1).add(&zc2);
+
+    let later_roots: Vec<[B::W; 4]> = proof
+        .later_stage_roots
+        .iter()
+        .map(|r| r.map(|v| b.alloc(v)))
+        .collect();
+    let mut roots0_words = Vec::with_capacity(12);
+    for r in roots0 {
+        roots0_words.extend_from_slice(r);
+    }
+    tr.absorb(b, 53, &roots0_words);
+    let zs = [tr.ext(b, 4), tr.ext(b, 4)];
+    let ood0: Vec<_> = proof.ood_evals[0].iter().map(|&v| Ext::alloc(b, v)).collect();
+    tr.absorb_exts(b, 5, &ood0);
+    let mut cursor = 0usize;
+    let mut remaining = nv;
+    for (z, e) in zs.into_iter().zip(ood0) {
+        let weight = tr.ext(b, 6);
+        claim = claim.add(&weight.mul(b, &e));
+        kernels.push(geometric(b, cursor, weight, z, remaining));
+    }
+
+    let mut phis = Vec::new();
+    for (stage, spec) in params.schedule.stages.iter().enumerate() {
+        let mut chals = Vec::with_capacity(spec.step_vars);
+        for _ in 0..spec.step_vars {
+            let wire = proof.fold_polys[cursor].map(|v| Ext::alloc(b, v));
+            tr.absorb_exts(b, 10, &wire[..3]);
+            let phi = tr.ext(b, 11);
+            tr.absorb_exts(b, 12, &wire[3..]);
+            pow(
+                b,
+                tr,
+                proof.fold_nonces[cursor],
+                params.schedule.regime.pow_bits(),
+            );
+            let chal = [tr.ext(b, 13), tr.ext(b, 14), tr.ext(b, 15)];
+            claim = bridge(b, &wire, &claim, &phi, &chal);
+            phis.push(phi);
+            chals.push(chal);
+            cursor += 1;
+        }
+        remaining -= spec.step_vars;
+        let last = stage + 1 == params.schedule.stages.len();
+        let mut next_ood = None;
+        let final_coeffs: Vec<_> = if last {
+            let values: Vec<_> = proof
+                .final_coeffs
+                .iter()
+                .map(|&v| Ext::alloc(b, v))
+                .collect();
+            tr.absorb_exts(b, 21, &values);
+            let expected = terminal(b, &values, &phis, &kernels);
+            claim.equal(b, &expected);
+            values
+        } else {
+            tr.absorb(b, 3, &later_roots[stage]);
+            let zs = [tr.ext(b, 4), tr.ext(b, 4)];
+            let ood = proof.ood_evals[stage + 1].map(|v| Ext::alloc(b, v));
+            tr.absorb_exts(b, 5, &ood);
+            next_ood = Some((zs, ood));
+            Vec::new()
+        };
+        pow(
+            b,
+            tr,
+            proof.query_nonces[stage],
+            params.schedule.regime.pow_bits(),
+        );
+        let (arity, groups, count) = geos[stage];
+        let path_depth = groups.trailing_zeros() as usize;
+        let domain_log2 = (groups * arity).trailing_zeros() as usize;
+        let mut shifted = Vec::with_capacity(count);
+        let sampled = sample_queries(b, tr, groups, count);
+        if stage == 0 {
+            let mut canopies: [Canopy<B::W>; 3] =
+                core::array::from_fn(|_| Canopy::new(path_depth));
+            for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                let triple = &proof.stage0_queries[q];
+                let tree_vals: [Vec<Ext<B::W>>; 3] = core::array::from_fn(|m| {
+                    triple[m]
+                        .values
+                        .iter()
+                        .map(|&v| Ext::alloc_base(b, v))
+                        .collect()
+                });
+                for m in 0..3 {
+                    canopies[m].path(b, 0, &index, &binary, &tree_vals[m], &triple[m].siblings);
+                }
+                let combined: Vec<Ext<B::W>> = (0..arity)
+                    .map(|k| {
+                        let t1 = mu.mul_base(b, &tree_vals[1][k].0[0]);
+                        let t2 = mu2.mul_base(b, &tree_vals[2][k].0[0]);
+                        tree_vals[0][k].add(&t1).add(&t2)
+                    })
+                    .collect();
+                let x = coset_point(b, &binary, domain_log2);
+                let (z, e) = fold_fiber(b, &combined, x, &chals, false);
+                if last {
+                    let expected = horner(b, &final_coeffs, &z);
+                    e.equal(b, &expected);
+                }
+                shifted.push((z, e));
+            }
+            let [c0, c1, c2] = canopies;
+            c0.finish(b, 0, &proof.stage0_canopy_leaves[0], &roots0[0]);
+            c1.finish(b, 0, &proof.stage0_canopy_leaves[1], &roots0[1]);
+            c2.finish(b, 0, &proof.stage0_canopy_leaves[2], &roots0[2]);
+        } else {
+            let mut canopy = Canopy::new(path_depth);
+            for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                let query = &proof.later_queries[stage - 1][q];
+                let values: Vec<_> = query.values.iter().map(|&v| Ext::alloc(b, v)).collect();
+                canopy.path(b, stage, &index, &binary, &values, &query.siblings);
+                let x = coset_point(b, &binary, domain_log2);
+                let (z, e) = fold_fiber(b, &values, x, &chals, false);
+                if last {
+                    let expected = horner(b, &final_coeffs, &z);
+                    e.equal(b, &expected);
+                }
+                shifted.push((z, e));
+            }
+            canopy.finish(
+                b,
+                stage,
+                &proof.later_canopy_leaves[stage - 1],
+                &later_roots[stage - 1],
+            );
+        }
+        if !last {
+            let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
+            tr.absorb_exts(b, 22, &values);
+            let (zs, ood) = next_ood.expect("nonterminal stage OOD pins");
+            for (z, e) in zs.into_iter().zip(ood) {
+                let weight = tr.ext(b, 6);
+                claim = claim.add(&weight.mul(b, &e));
+                kernels.push(geometric(b, cursor, weight, z, remaining));
+            }
+            let gamma = tr.ext(b, 23);
+            let mut weight = gamma.clone();
+            for (z, e) in shifted {
+                claim = claim.add(&weight.mul(b, &e));
+                kernels.push(geometric_base(b, cursor, weight.clone(), z, remaining));
+                weight = weight.mul(b, &gamma);
+            }
+        }
+    }
 }
 
 /// Largest fan-in of one merge relation.
@@ -2140,20 +2937,19 @@ mod tests {
         assert_eq!(shape, other);
         assert_eq!(violated(&shape, &z), [0]);
 
-        // The same forged direction bit inside a Merkle path.
+        // The same forged direction bit inside a Merkle canopy/path.
         let values = [sample(1), sample(2)].map(Ext::constant);
-        let path = [[f(11), f(12), f(13), f(14)], [f(21), f(22), f(23), f(24)]];
         let mut native = Native::default();
-        let index = f(2);
-        let binary = bits(&mut native, &index, 2);
-        let mut root = leaf(&mut native, 1, &index, &values);
-        for (level, (bit, sibling)) in binary.iter().zip(&path).enumerate() {
-            root = if *bit == F::ZERO {
-                compress(&mut native, &root, sibling, 1, level)
+        let leaves: [Digest; 4] = core::array::from_fn(|idx| {
+            if idx == 2 {
+                leaf(&mut native, 1, &f(2), &values)
             } else {
-                compress(&mut native, sibling, &root, 1, level)
-            };
-        }
+                [f(10 + idx as u64), f(20 + idx as u64), f(30), f(40)]
+            }
+        });
+        let n01 = compress(&mut native, &leaves[0], &leaves[1], 1, 0);
+        let n23 = compress(&mut native, &leaves[2], &leaves[3], 1, 0);
+        let root = compress(&mut native, &n01, &n23, 1, 1);
         let run = |b: &mut Forger| {
             let index = b.alloc(f(2));
             let binary = bits(b, &index, 2);
@@ -2162,8 +2958,8 @@ mod tests {
                 .map(|&v| Ext::alloc(b, v))
                 .collect();
             let mut canopy = Canopy::new(binary.len());
-            canopy.path(b, 1, &index, &binary, &values, &path);
-            canopy.finish(b, 1, &root.map(Lc::constant));
+            canopy.path(b, 1, &index, &binary, &values, &[]);
+            canopy.finish(b, 1, &leaves, &root.map(Lc::constant));
         };
         let (shape, z, _) = forge(&[], run);
         assert!(violated(&shape, &z).is_empty());
@@ -2287,7 +3083,7 @@ mod tests {
             let mut bad = proof.clone();
             match kind {
                 0 => bad.queries[0][0].values[0] += E::ONE,
-                1 => bad.queries[0][0].siblings[0][0] += F::ONE,
+                1 => bad.canopy_leaves[0][0][0] += F::ONE,
                 2 => bad.fold_polys[0][2] += E::V,
                 _ => bad.final_coeffs[1] += E::ONE,
             }
@@ -2296,6 +3092,14 @@ mod tests {
             assert_eq!(shape, other);
             assert!(!shape.is_satisfied(&z), "tamper kind={kind}");
         }
+        // Also tamper a bottom-tree sibling below the canopy at nv = 7 (`path_depth = 7 > 5`).
+        let params7 = FixedPathWhirParams::new(REGIME, 7).unwrap();
+        let (stmt7, mut proof7) = child(&params7, 9);
+        assert!(!proof7.queries[0][0].siblings.is_empty());
+        proof7.queries[0][0].siblings[0][0] += F::ONE;
+        assert!(!verify_fixed_path(&params7, &stmt7, &proof7));
+        let (_, z7) = relation_for_child(&params7, &stmt7, &proof7);
+        assert!(!relation_for_child(&params7, &stmt7, &child(&params7, 9).1).0.is_satisfied(&z7));
 
         // Solve the affine bridge for a fake input claim after changing a polynomial.
         // Keeping the original challenges can make the final algebraic equation true,
@@ -2342,6 +3146,115 @@ mod tests {
         assert_eq!(shape, other);
         assert!(!shape.is_satisfied(&z));
     }
+    #[test]
+    fn begkn91_query_sampler_and_correlated3_opening_soundness() {
+        // 1. Exercise the O(Q) BEGKN91 offline-memory sampler (`count = 24 > 20`, `groups = 64`)
+        //    and verify parity with direct `QuerySampler` plus forgery rejection.
+        let mut b_direct = Native::default();
+        let mut tr_direct = Transcript::new();
+        tr_direct.absorb(&mut b_direct, 99, &[f(42)]);
+        let mut direct = QuerySampler { swaps: Vec::new() };
+        let expected: Vec<F> = (0..24)
+            .map(|q| direct.next(&mut b_direct, &mut tr_direct, 64, 24, q).0)
+            .collect();
+
+        let mut b_mem = Native::default();
+        let mut tr_mem = Transcript::new();
+        tr_mem.absorb(&mut b_mem, 99, &[f(42)]);
+        let got: Vec<F> = sample_queries(&mut b_mem, &mut tr_mem, 64, 24)
+            .into_iter()
+            .map(|(idx, _)| idx)
+            .collect();
+        assert!(!b_mem.failed);
+        assert_eq!(got, expected);
+        assert_eq!(tr_mem.state, tr_direct.state);
+
+        let run = |b: &mut Forger| {
+            let mut tr = Transcript::new();
+            tr.absorb(b, 99, &[Lc::constant(f(42))]);
+            let out = sample_queries(b, &mut tr, 64, 24);
+            for ((idx, _), &want) in out.iter().zip(&expected) {
+                b.equal(idx, &Lc::constant(want));
+            }
+        };
+        let (shape, z, allocated) = forge(&[], run);
+        assert!(violated(&shape, &z).is_empty());
+        // Forging the first sorted address wire breaks strict ordering / multiset balance.
+        let at_addr = allocated
+            .iter()
+            .enumerate()
+            .skip(200)
+            .find(|&(_, &v)| v.to_canonical_u64() < 64)
+            .map(|(i, _)| i)
+            .unwrap();
+        let (other, z_bad, _) = forge(&[(at_addr, allocated[at_addr] + F::ONE)], run);
+        assert_eq!(shape, other);
+        assert!(!violated(&shape, &z_bad).is_empty());
+
+        // 2. Correlated 3-oracle WHIR opening at nv = 7 (exercises multi-stage + O(Q) sampler!).
+        let params = FixedPathWhirParams::new(REGIME, 7).unwrap();
+        let nv = 7;
+        let t0: Vec<F> = (0..1 << nv).map(|i| f((i * 13 + 3) as u64)).collect();
+        let t1: Vec<F> = (0..1 << nv).map(|i| f((i * i + 17) as u64)).collect();
+        let t2: Vec<F> = (0..1 << nv).map(|i| f((i * 29 + 5) as u64)).collect();
+        let w0 = commit_for_recursion(&params, &t0).unwrap();
+        let w1 = PublicRecursionCommitment::commit(&params, &t1).unwrap();
+        let w2 = commit_for_recursion(&params, &t2).unwrap();
+        let roots0 = [w0.root(), w1.root(), w2.root()];
+        let pts: [Vec<E>; 3] = core::array::from_fn(|j| (0..nv).map(|i| sample(j * 11 + i)).collect());
+        let claims = [
+            [
+                Some(crate::field::mle_eval_base_at_ext4(&t0, &pts[0])),
+                None,
+                None,
+            ],
+            [
+                None,
+                Some(crate::field::mle_eval_base_at_ext4(&t1, &pts[1])),
+                Some(crate::field::mle_eval_base_at_ext4(&t1, &pts[2])),
+            ],
+            [
+                None,
+                Some(crate::field::mle_eval_base_at_ext4(&t2, &pts[1])),
+                Some(crate::field::mle_eval_base_at_ext4(&t2, &pts[2])),
+            ],
+        ];
+        let mut tr_p = Transcript::new();
+        let proof = open_correlated3_for_recursion(&params, &mut tr_p, w0, &w1, w2, &pts).unwrap();
+        assert!(params.well_formed_correlated3(&proof));
+
+        let mut b_v = Native::default();
+        let mut tr_v = Transcript::new();
+        let pts_c: [Vec<Ext<F>>; 3] =
+            core::array::from_fn(|j| pts[j].iter().copied().map(Ext::constant).collect());
+        let claims_c: [[Option<Ext<F>>; 3]; 3] =
+            core::array::from_fn(|m| core::array::from_fn(|j| claims[m][j].map(Ext::constant)));
+        verify_correlated3_gadget(&mut b_v, &params, &mut tr_v, &roots0, &pts_c, &claims_c, &proof);
+        assert!(!b_v.failed);
+
+        let mut cs = ConstraintSystem::new();
+        let mut tr_cs = Transcript::new();
+        let roots_cs: [[Lc; 4]; 3] = roots0.map(|r| r.map(|x| cs.public_input(x).into()));
+        let pts_cs: [Vec<Ext<Lc>>; 3] =
+            core::array::from_fn(|j| pts[j].iter().copied().map(Ext::constant).collect());
+        let claims_cs: [[Option<Ext<Lc>>; 3]; 3] =
+            core::array::from_fn(|m| core::array::from_fn(|j| claims[m][j].map(Ext::constant)));
+        verify_correlated3_gadget(
+            &mut cs, &params, &mut tr_cs, &roots_cs, &pts_cs, &claims_cs, &proof,
+        );
+        let (c_shape, c_z) = cs.finish();
+        assert!(c_shape.is_satisfied(&c_z));
+
+        let mut bad_proof = proof.clone();
+        bad_proof.stage0_queries[0][1].values[0] += E::ONE;
+        let mut b_bad = Native::default();
+        let mut tr_bad = Transcript::new();
+        verify_correlated3_gadget(
+            &mut b_bad, &params, &mut tr_bad, &roots0, &pts_c, &claims_c, &bad_proof,
+        );
+        assert!(b_bad.failed);
+    }
+
     #[test]
     fn succinct_merge_public_binding_for_two_and_four_children() {
         measure_children(2, 2);
@@ -2511,6 +3424,13 @@ impl FixedPathWhirProof {
                 out.extend_from_slice(&x.to_le_bytes());
             }
         }
+        for leaves in &self.canopy_leaves {
+            for d in leaves {
+                for x in d {
+                    out.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+        }
         for e in self
             .ood_evals
             .iter()
@@ -2524,10 +3444,14 @@ impl FixedPathWhirProof {
                 out.extend_from_slice(&limb.to_le_bytes());
             }
         }
-        for queries in &self.queries {
+        for (stage, queries) in self.queries.iter().enumerate() {
             for q in queries {
                 for e in &q.values {
-                    out.extend_from_slice(&e.to_le_bytes());
+                    if stage == 0 {
+                        out.extend_from_slice(&e.to_limbs()[0].to_le_bytes());
+                    } else {
+                        out.extend_from_slice(&e.to_le_bytes());
+                    }
                 }
                 for d in &q.siblings {
                     for x in d {
@@ -2548,8 +3472,11 @@ impl FixedPathWhirProof {
         let stages = params.schedule.stages.len();
         let rounds = nv - params.schedule.early_stop_vars;
         let mut size = 8 + stages * 32 + stages * 64 + rounds * 160 + (rounds + stages) * 8;
-        for (arity, groups, count) in params.geometries() {
-            size += count * (arity + groups.trailing_zeros() as usize) * 32;
+        for (stage, (arity, groups, count)) in params.geometries().into_iter().enumerate() {
+            let (depth, base_level) = canopy_split(groups.trailing_zeros() as usize);
+            size += (1usize << depth) * 32;
+            let val_bytes = if stage == 0 { 8 } else { 32 };
+            size += count * (arity * val_bytes + base_level * 32);
         }
         size += ((1usize << params.schedule.early_stop_vars) + 2) * 32;
         if bytes.len() != size || bytes.get(..8)? != b"QSAGFWP1" {
@@ -2577,6 +3504,13 @@ impl FixedPathWhirProof {
                 *x = r.base()?;
             }
         }
+        for leaves in &mut proof.canopy_leaves {
+            for d in leaves {
+                for x in d {
+                    *x = r.base()?;
+                }
+            }
+        }
         for e in proof
             .ood_evals
             .iter_mut()
@@ -2590,10 +3524,14 @@ impl FixedPathWhirProof {
                 *limb = u32::from_le_bytes(r.word()?);
             }
         }
-        for queries in &mut proof.queries {
+        for (stage, queries) in proof.queries.iter_mut().enumerate() {
             for q in queries {
                 for e in &mut q.values {
-                    *e = r.ext()?;
+                    *e = if stage == 0 {
+                        E::from_base(r.base()?)
+                    } else {
+                        r.ext()?
+                    };
                 }
                 for d in &mut q.siblings {
                     for x in d {
