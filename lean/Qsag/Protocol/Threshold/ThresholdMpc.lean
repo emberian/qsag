@@ -242,7 +242,7 @@ private theorem buildMerkleAuthPath_congr_leafFn (suite : TweakableHashSuite) (p
       exact ⟨computeMerkleNode_congr_leafFn suite pkSeed layer tree nodeKind f g hfg h _,
              buildMerkleAuthPath_congr_leafFn suite pkSeed layer tree nodeKind f g hfg h _ _⟩
 
-private theorem mpcComputeWotsPk_eq (suite : TweakableHashSuite) (params : PqHashParams)
+theorem mpcComputeWotsPk_eq (suite : TweakableHashSuite) (params : PqHashParams)
     (o : PqHashMpcOracles) (sk : PqSecretKey) (hMatch : o.MatchesKey suite sk)
     (layer : UInt32) (tree : UInt64) (kp : Nat) :
     mpcComputeWotsPk suite params o sk.pkSeed layer tree kp = computeWotsPk suite params sk layer tree kp := by
@@ -250,7 +250,7 @@ private theorem mpcComputeWotsPk_eq (suite : TweakableHashSuite) (params : PqHas
   rw [computeWotsPk_eq]
   simp [hMatch.2.1]
 
-private theorem mpcComputeXmssSubtreeRoot_eq (suite : TweakableHashSuite) (params : PqHashParams)
+theorem mpcComputeXmssSubtreeRoot_eq (suite : TweakableHashSuite) (params : PqHashParams)
     (o : PqHashMpcOracles) (sk : PqSecretKey) (hMatch : o.MatchesKey suite sk)
     (layer : UInt32) (tree : UInt64) :
     mpcComputeXmssSubtreeRoot suite params o sk.pkSeed layer tree =
@@ -501,7 +501,7 @@ def rssBitAnd (a b : RssBitShare) (seeds : RssPrfZeroBitSeeds) : RssBitShare :=
 def mpcKeccakChiBitRss (a b c : RssBitShare) (seeds : RssPrfZeroBitSeeds) : RssBitShare :=
   rssBitXor a (rssBitAnd (rssBitNot b) c seeds)
 
-private theorem rssBoolAnd_identity (a0 a1 a2 b0 b1 b2 r0 r1 r2 : Bool) :
+theorem rssBoolAnd_identity (a0 a1 a2 b0 b1 b2 r0 r1 r2 : Bool) :
     (((a0 && b0) ^^ (a0 && b1) ^^ (a1 && b0) ^^ (r0 ^^ r1)) ^^
      ((a1 && b1) ^^ (a1 && b2) ^^ (a2 && b1) ^^ (r1 ^^ r2)) ^^
      ((a2 && b2) ^^ (a2 && b0) ^^ (a0 && b2) ^^ (r2 ^^ r0))) =
@@ -742,7 +742,7 @@ private theorem rotlK_xor (u v k j : UInt64)
       simp [BitVec.getLsbD, Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.div_eq_of_lt hLt]
     simp [hLow, hOut]
 
-private theorem thetaS_xorKState (u v : KState) :
+theorem thetaS_xorKState (u v : KState) :
     thetaS (xorKState u v) = xorKState (thetaS u) (thetaS v) := by
   rw [xorKState_eq, thetaS_eq, thetaS_eq, thetaS_eq, xorKState_eq]
   dsimp only
@@ -773,7 +773,7 @@ private theorem thetaS_xorKState (u v : KState) :
     simp (config := { singlePass := true }) only [hr1]
     simp (config := { singlePass := true }) only [hLane]
 
-private theorem rhoPiS_xorKState (u v : KState) :
+theorem rhoPiS_xorKState (u v : KState) :
     rhoPiS (xorKState u v) = xorKState (rhoPiS u) (rhoPiS v) := by
   rw [xorKState_eq, rhoPiS_eq, rhoPiS_eq, rhoPiS_eq, xorKState_eq]
   dsimp only
@@ -978,7 +978,7 @@ structure RssByteShares where
   b2 : List UInt8
   deriving DecidableEq, Repr
 
-def RssByteShares.WellFormed (sh : RssByteShares) : Prop :=
+@[expose] def RssByteShares.WellFormed (sh : RssByteShares) : Prop :=
   sh.b0.length = sh.b1.length ∧ sh.b1.length = sh.b2.length
 
 @[expose] def reconstructRssBytes (sh : RssByteShares) : List UInt8 :=
@@ -1017,14 +1017,14 @@ private theorem zipXor_append : ∀ {x1 x2 y1 y2 : List UInt8},
   | _ :: x1, x2, _ :: y1, y2, h => by
     simp [zipXor_append (Nat.succ.inj h)]
 
-private theorem zipXor_take : ∀ (n : Nat) (xs ys : List UInt8),
+theorem zipXor_take : ∀ (n : Nat) (xs ys : List UInt8),
     List.zipWith (· ^^^ ·) (xs.take n) (ys.take n) = (List.zipWith (· ^^^ ·) xs ys).take n
   | 0, _, _ => rfl
   | _ + 1, [], _ => rfl
   | _ + 1, _ :: _, [] => rfl
   | n + 1, _ :: xs, _ :: ys => by simp [zipXor_take n xs ys]
 
-private theorem zipXor_drop : ∀ (n : Nat) (xs ys : List UInt8),
+theorem zipXor_drop : ∀ (n : Nat) (xs ys : List UInt8),
     List.zipWith (· ^^^ ·) (xs.drop n) (ys.drop n) = (List.zipWith (· ^^^ ·) xs ys).drop n
   | 0, _, _ => rfl
   | _ + 1, [], _ => by simp
@@ -1089,7 +1089,7 @@ theorem reconstructRssBytes_rssPadForRate {sh : RssByteShares} (hWf : sh.WellFor
 def mpcXorRate136Rss (st : RssKState) (blk : RssByteShares) : RssKState :=
   ⟨xorRate136 st.s0 blk.b0, xorRate136 st.s1 blk.b1, xorRate136 st.s2 blk.b2⟩
 
-private theorem reconstructRssKState_mpcXorRate136Rss (st : RssKState) {blk : RssByteShares}
+theorem reconstructRssKState_mpcXorRate136Rss (st : RssKState) {blk : RssByteShares}
     (hWf : blk.WellFormed) :
     reconstructRssKState (mpcXorRate136Rss st blk) =
       xorRate136 (reconstructRssKState st) (reconstructRssBytes blk) := by
@@ -1188,7 +1188,7 @@ private theorem mpcSqueezeFuelSharedRss_simulates :
       exact ⟨rssAppendShares_wellFormed hBlkWf ihWf,
              by rw [reconstructRssBytes_append hBlkWf, hBlkRec, ihRec]⟩
 
-private theorem mpcAbsorbBlocksRss_simulates :
+theorem mpcAbsorbBlocksRss_simulates :
     ∀ (k blkIdx : Nat) (st : RssKState) (rest : RssByteShares)
       (blkTape : Nat → Nat → Nat → RssPrfZeroSeeds),
       rest.WellFormed →
@@ -1402,7 +1402,7 @@ def rssFrameSingleSecretCall (roleTag pkSeed : List UInt8) (adrs : HashAdrs)
     encodeListField (encodeAdrs adrs) ++ leb128 secretSh.b0.length
   rssAppendShares (rssPublicBytes pubPrefix) secretSh
 
-private theorem reconstructRssBytes_rssFrameSingleSecretCall (roleTag pkSeed : List UInt8)
+theorem reconstructRssBytes_rssFrameSingleSecretCall (roleTag pkSeed : List UInt8)
     (adrs : HashAdrs) {secretSh : RssByteShares} (hWf : secretSh.WellFormed) :
     (rssFrameSingleSecretCall roleTag pkSeed adrs secretSh).WellFormed ∧
     reconstructRssBytes (rssFrameSingleSecretCall roleTag pkSeed adrs secretSh) =
@@ -3889,7 +3889,7 @@ inductive RssQuorum where
   deriving DecidableEq, Repr
 
 /-- The two parties' local views (each party holds two of the three components). -/
-def RssQuorum.views (q : RssQuorum) (sh : RssByteShares) :
+@[expose] def RssQuorum.views (q : RssQuorum) (sh : RssByteShares) :
     (List UInt8 × List UInt8) × (List UInt8 × List UInt8) :=
   match q with
   | .p01 => ((sh.b0, sh.b1), (sh.b1, sh.b2))
@@ -4828,7 +4828,7 @@ structure ProductionPqHashMpcOracles extends PqHashMpcOracles where
   evalIndexedForsReveal : UInt64 → Nat → Nat → Nat → List UInt8
   evalIndexedForsLeafHash : UInt64 → Nat → Nat → Nat → List UInt8
 
-def ProductionPqHashMpcOracles.MatchesKey (o : ProductionPqHashMpcOracles)
+@[expose] def ProductionPqHashMpcOracles.MatchesKey (o : ProductionPqHashMpcOracles)
     (suite : TweakableHashSuite) (sk : PqSecretKey) : Prop :=
   o.toPqHashMpcOracles.MatchesKey suite sk ∧
   (∀ tree kp j u, o.evalIndexedForsReveal tree kp j u = forsIndexedSecretLeaf suite sk tree kp j u) ∧
@@ -4858,7 +4858,7 @@ def mpcBuildProductionForsOpenings (suite : TweakableHashSuite) (params : PqHash
       authPath  := buildMerkleAuthPathKp suite pkSeed 0 tree0 .forsTree kpU32
                      (o.evalIndexedForsLeafHash tree0 kp0 j) params.forsHeight j 0 idxJ }
 
-def mpcSignProductionHypertreeLayers (suite : TweakableHashSuite) (params : PqHashParams)
+@[expose] def mpcSignProductionHypertreeLayers (suite : TweakableHashSuite) (params : PqHashParams)
     (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
     Nat → Nat → List UInt8 → Nat → Option (List LayerXmssSig)
   | _, _, _, 0 => some []
@@ -4890,7 +4890,7 @@ def mpcSignProductionHypertreeLayers (suite : TweakableHashSuite) (params : PqHa
       | some restSigs =>
         some ({ tswCtr := ctr, wotsChains := wotsChains, authPath := authPath } :: restSigs)
 
-def mpcSignProductionHypertreeCore (suite : TweakableHashSuite) (params : PqHashParams)
+@[expose] def mpcSignProductionHypertreeCore (suite : TweakableHashSuite) (params : PqHashParams)
     (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pk : PqPublicKey) (msg mu rRand : List UInt8)
     (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat)) (maxGrind : Nat) : Option PqHashSig :=
   let subLeaves := 2 ^ params.subtreeHeight
@@ -6960,5 +6960,17 @@ namespace Qsag
     p.validAt ls = ((∀ r l, (p.extInit r l).1.validAt ls ∧ verifySpdzZeroSumMac (p.extInit r l).2 = true) ∧
       (∀ r, (p.inter r).1.validAt ls ∧ verifySpdzZeroSumMac (p.inter r).2 = true) ∧
       (∀ r l, (p.extTerm r l).1.validAt ls ∧ verifySpdzZeroSumMac (p.extTerm r l).2 = true)) := by rfl
+
+theorem RssByteShares.wellFormed_iff (sh : RssByteShares) :
+    sh.WellFormed ↔ sh.b0.length = sh.b1.length ∧ sh.b1.length = sh.b2.length := Iff.rfl
+
+#export_eqns rssChiLane1 PqHashMpcOracles.MatchesKey mpcComputeWotsPk mpcComputeXmssSubtreeRoot derivePublicKeyMpc
+  mpcComputeProductionForsPk mpcBuildProductionForsOpenings mpcSignProductionHypertreeLayers
+  mpcSignProductionHypertreeCore mpcEvalProductionStatefulSign mpcEvalProductionStatelessSign
+  reconstructRssKState mpcThetaRss mpcRhoPiRss shamirQuorumShares
+  rssTakeShares rssDropShares mpcXorRate136Rss rssChiLane0 mpcAbsorbPaddedRss mpcSqueezeFuelSharedRss mpcCshake256SharedRss
+
+#export_eqns rssPartyAndLocal
+
 end Qsag
 end

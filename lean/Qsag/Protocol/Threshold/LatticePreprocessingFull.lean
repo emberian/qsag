@@ -1869,7 +1869,7 @@ theorem encodeJointOrCommsLe_injective : ∀ {R : Nat} {c1 c2 : Fin R → (PolyR
     | succ k' => exact congrFun hTailEq ⟨k', Nat.lt_of_succ_lt_succ hk⟩
 
 /-- Exact Fiat-Shamir byte preimage absorbed into `cSHAKE256("QSAG.OT.RLWE.ZKPOK/v3")`,
-    explicitly binding length-framed public CRS polynomial `aCrs` (`stmt.a`), `pk0`, `tCrs`,
+    explicitly binding the fixed-width public CRS polynomial `aCrs` (`stmt.a`), `pk0`, `tCrs`,
     fixed-width context headers, repetition count `R`, challenge bit-width `be 4 rlweZkpokChalBits` (`11`),
     and all `R` commitment pairs `comms`. -/
 def encodeRlweZkpokFsInput (R : Nat)
@@ -1884,7 +1884,6 @@ def encodeRlweZkpokFsInput (R : Nat)
   be 4 otIdx ++
   be 4 R ++
   be 4 rlweZkpokChalBits ++
-  be 4 (encodePolyRqLe aCrs).length ++
   encodePolyRqLe aCrs ++
   encodePolyRqLe pk0 ++
   encodePolyRqLe tCrs ++
@@ -1916,8 +1915,7 @@ theorem encodeRlweZkpokFsInput_injective {R : Nat}
   obtain ⟨hOt, h5⟩ := List.append_inj h4 (by simp [length_be])
   obtain ⟨_, h6⟩ := List.append_inj h5 (by simp [length_be])
   obtain ⟨_, h7⟩ := List.append_inj h6 (by simp [length_be])
-  obtain ⟨_, h7a⟩ := List.append_inj h7 (by simp [length_be])
-  obtain ⟨hA, h7b⟩ := List.append_inj h7a (by simp [encodePolyRqLe_length])
+  obtain ⟨hA, h7b⟩ := List.append_inj h7 (by simp [encodePolyRqLe_length])
   obtain ⟨hPk, h8⟩ := List.append_inj h7b (by simp [encodePolyRqLe_length])
   obtain ⟨hT, hComms⟩ := List.append_inj h8 (by simp [encodePolyRqLe_length])
   exact ⟨hC, hS,
@@ -1928,6 +1926,29 @@ theorem encodeRlweZkpokFsInput_injective {R : Nat}
     encodePolyRqLe_injective hPk,
     encodePolyRqLe_injective hT,
     encodeJointOrCommsLe_injective hComms⟩
+
+/-- Every commitment pair has two fixed-width 1024-coefficient polynomials. -/
+theorem encodeJointOrCommsLe_length : ∀ {R : Nat}
+    (comms : Fin R → (PolyRq1024 × PolyRq1024)),
+    (encodeJointOrCommsLe comms).length = 4096 * R
+  | 0, _ => rfl
+  | R + 1, comms => by
+    simp only [encodeJointOrCommsLe, List.length_append, encodePolyRqLe_length,
+      encodeJointOrCommsLe_length]
+    omega
+
+/-- Rust's fixed-width 92-byte header is followed directly by `a`, `pk0`, `tCrs`,
+then the commitment pairs. In particular, there is no extra length word before `a`. -/
+theorem encodeRlweZkpokFsInput_length {R : Nat}
+    (crsCoin sessionId : List UInt8) (senderId receiverId otIdx : Nat)
+    (aCrs pk0 tCrs : PolyRq1024) (comms : Fin R → (PolyRq1024 × PolyRq1024))
+    (hc : crsCoin.length = 32) (hs : sessionId.length = 32) :
+    (encodeRlweZkpokFsInput R crsCoin sessionId senderId receiverId otIdx
+      aCrs pk0 tCrs comms).length = 6236 + 4096 * R := by
+  simp only [encodeRlweZkpokFsInput, List.length_append, length_be,
+    encodePolyRqLe_length, encodeJointOrCommsLe_length, hc, hs]
+
+#verify_constructive encodeRlweZkpokFsInput_injective encodeRlweZkpokFsInput_length
 
 /-- Squeeze `R` consecutive 11-bit signed-monomial challenges (`u32::from_le_bytes(out) & 0x7FF`,
     `preprocessing.rs:1756-1763`) from a squeezed XOF byte stream. -/

@@ -2860,11 +2860,11 @@ theorem spdz_partial_reserve_burns_witness :
    by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, rfl⟩
 
 theorem tooth_unratcheted_failed_slot_recycles_counter :
-    let failSlot : SpdzCounterSlot := ⟨1, some 6, some 6, false⟩
+    ∃ failSlot : SpdzCounterSlot, failSlot = ⟨1, some 6, some 6, false⟩ ∧
     spdzAdmitCounter failSlot.lastCounter failSlot.storeHighWater 7 = true ∧
     ∀ st ∈ (spdzRatchetPass 7 false [⟨0, some 6, some 6, true⟩, failSlot, ⟨2, some 6, some 6, true⟩]).2,
       spdzAdmitCounter st.lastCounter st.storeHighWater 7 = false := by
-  decide
+  exact ⟨⟨1, some 6, some 6, false⟩, rfl, by decide⟩
 
 #verify_constructive
   Qsag.spdz_constants_exact

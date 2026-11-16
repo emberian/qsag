@@ -2179,8 +2179,8 @@ private theorem flipFirstLeaf_ne_self :
   | _ + 1, .branch p0 _ => by
     unfold flipFirstLeaf
     intro h
-    cases h
-    exact flipFirstLeaf_ne_self p0 rfl
+    have h0 : flipFirstLeaf p0 = p0 := by injection h
+    exact flipFirstLeaf_ne_self p0 h0
 
 /-- Forged signing attempt flipping leaf 0 of `cs1` (`products ≠ rssComputeProducts`). -/
 def rssForgedAttemptInput
@@ -2247,8 +2247,7 @@ theorem tooth_rssSacrificedSignStep_swapped_order_forges
       have hFit : rssSacrificedProductsValid chalHash sampleInBall st inp chi
           (rssFittedSacrifice204 chalHash sampleInBall st inp chi) = true :=
         rssSacrificedProductsValid_fitted_accepts chalHash sampleInBall st inp chi rfl
-      rw [hEp, hFit]
-      rfl
+      simpa only [List.getElem?_cons_zero, Option.getD_some, hEp, Bool.true_and] using hFit
 
 theorem inhabited_rssSacrificedSignStep_frozen_ext6_soundness :
     ∃ (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)

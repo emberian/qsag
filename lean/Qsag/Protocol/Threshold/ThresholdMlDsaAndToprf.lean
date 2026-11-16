@@ -16286,3 +16286,63 @@ theorem rssSignCore_is_ok
   split <;> exact ⟨_, rfl⟩
 
 end Qsag
+
+/-! ### Exports for lane mir -/
+
+public section
+namespace Qsag
+
+theorem addVec4_apply (u v : PolyVec4) (i : Fin 4) :
+    addVec4 u v i = PolyTree.add (u i) (v i) := by
+  unfold addVec4
+  rfl
+
+theorem subVec4_apply (u v : PolyVec4) (i : Fin 4) :
+    subVec4 u v i = PolyTree.sub (u i) (v i) := by
+  unfold subVec4
+  rfl
+
+theorem HintTree.weight_leaf (b : Bool) :
+    (HintTree.leaf b).weight = if b then 1 else 0 := by
+  unfold HintTree.weight
+  rfl
+
+theorem HintTree.weight_branch {d : Nat} (h0 h1 : HintTree d) :
+    (HintTree.branch h0 h1).weight = h0.weight + h1.weight := by
+  rw [HintTree.weight]
+
+theorem centeredDiffNormTree_leaf (r : Fq204) (w1 : Nat) :
+    centeredDiffNormTree (.leaf r) (.leaf w1) =
+      Fq204.centeredAbs (Fq204.sub r (Fq204.ofNat (w1 * 190464))) := by
+  unfold centeredDiffNormTree
+  rfl
+
+theorem centeredDiffNormTree_branch {d : Nat} (r0 r1 : PolyTree d) (w0 w1 : NatTree d) :
+    centeredDiffNormTree (.branch r0 r1) (.branch w0 w1) =
+      max (centeredDiffNormTree r0 w0) (centeredDiffNormTree r1 w1) := by
+  rw [centeredDiffNormTree]
+
+theorem infNormVec4_eq (v : PolyVec4) :
+    infNormVec4 v =
+      max (max (PolyTree.infNorm (v ⟨0, by decide⟩)) (PolyTree.infNorm (v ⟨1, by decide⟩)))
+          (max (PolyTree.infNorm (v ⟨2, by decide⟩)) (PolyTree.infNorm (v ⟨3, by decide⟩))) := by
+  unfold infNormVec4
+  rfl
+
+theorem hintWeightVec4_eq (h : Fin 4 → HintTree 8) :
+    hintWeightVec4 h =
+      HintTree.weight (h ⟨0, by decide⟩) + HintTree.weight (h ⟨1, by decide⟩) +
+      HintTree.weight (h ⟨2, by decide⟩) + HintTree.weight (h ⟨3, by decide⟩) := by
+  unfold hintWeightVec4
+  rfl
+
+theorem centeredDiffNormVec4_eq (r : PolyVec4) (w1 : Fin 4 → NatTree 8) :
+    centeredDiffNormVec4 r w1 =
+      max (max (centeredDiffNormTree (r ⟨0, by decide⟩) (w1 ⟨0, by decide⟩))
+               (centeredDiffNormTree (r ⟨1, by decide⟩) (w1 ⟨1, by decide⟩)))
+          (max (centeredDiffNormTree (r ⟨2, by decide⟩) (w1 ⟨2, by decide⟩))
+               (centeredDiffNormTree (r ⟨3, by decide⟩) (w1 ⟨3, by decide⟩))) := by
+  unfold centeredDiffNormVec4
+  rfl
+
+end Qsag

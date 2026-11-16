@@ -3186,3 +3186,8 @@ end IdealTsigCustodyRefinement
 
 end Qsag
 end
+
+public section
+namespace Qsag
+#export_eqns execIdealTsig
+end Qsag
