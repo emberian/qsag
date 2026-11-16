@@ -18,7 +18,9 @@ use qsag_asm::{
     gf2_128_dot_with_backend, gf2_128_mul_acc_batch_with_backend,
     gf2_xor_combine_planes_with_backend, transpose64x256_with_backend,
 };
-use qsag_core::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES, cshake256_static_midstate};
+use qsag_core::sponge::keccak::{Cshake256Xof, SHAKE256_RATE_BYTES};
+#[cfg(test)]
+use qsag_core::sponge::keccak::cshake256_static_midstate;
 
 const MAX_PENDING_BITS: usize = 262_144;
 const BIT_TENSOR_BITS: usize = 6;
@@ -94,6 +96,7 @@ pub(crate) trait Core {
     /// Public 64-lane constant.
     fn constant(&self, x: u64) -> Self::Bit;
     /// Jointly input words: the shared value is the XOR of all parties' `own`.
+    #[cfg(test)]
     fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error>;
     /// Jointly input words with pairwise PRSS / authenticated masking so no peer sees raw `own`.
     fn share_masked(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error>;
@@ -103,7 +106,7 @@ pub(crate) trait Core {
     /// parties' canonical `own_words`, masked so no peer sees another party's raw share.
     fn fshare_many(
         &mut self,
-        own_words: &[SecretVec<Value>],
+        own_words: &[Value],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error>;
     /// Broadcast a byte slice from every party in canonical quorum order after settling pending checks.
@@ -1082,6 +1085,7 @@ impl<T: Transport> Engine<T> {
         Ok((own_copy, next_share))
     }
 
+    #[cfg(test)]
     pub fn share(&mut self, own: &[u64]) -> Result<Word, Error> {
         let (mut mine, mut next) = self.raw_share_owned(own.to_vec())?;
         let out = mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])).collect();
@@ -1117,7 +1121,7 @@ impl<T: Transport> Engine<T> {
 
     pub fn fshare_many(
         &mut self,
-        own_words: &[SecretVec<Value>],
+        own_words: &[Value],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
         if self.poisoned {
@@ -1126,16 +1130,15 @@ impl<T: Transport> Engine<T> {
         if own_words.is_empty() {
             return Ok(Vec::new());
         }
-        let k = own_words.len();
+        if !own_words.len().is_multiple_of(64) {
+            self.poison();
+            return Err(Error::InvalidConfiguration);
+        }
+        let k = own_words.len() / 64;
         let wlen = d.limbs_len();
         let word_u64s = 64 * wlen;
-        let mut own_flat = Vec::with_capacity(k * word_u64s);
-        for word in own_words {
-            if word.len() != 64 {
-                self.poisoned = true;
-                return Err(Error::InvalidConfiguration);
-            }
-            for &val in word.iter() {
+        let mut own_flat = Secret(Vec::with_capacity(k * word_u64s));
+        for &val in own_words {
                 if !d.canonical(val) {
                     self.poisoned = true;
                     return Err(Error::InvalidConfiguration);
@@ -1146,9 +1149,8 @@ impl<T: Transport> Engine<T> {
                 ]);
                 let masked = Secret(d.add(val, d.sub(r[0], r[1])));
                 own_flat.extend_from_slice(&masked[..wlen]);
-            }
         }
-        let (own_raw, next_raw) = self.raw_share_owned(own_flat)?;
+        let (own_raw, next_raw) = self.raw_share_owned(core::mem::take(&mut *own_flat))?;
         let mut results = Vec::with_capacity(k);
         for (word_own, word_next) in own_raw
             .chunks_exact(word_u64s)
@@ -1157,15 +1159,15 @@ impl<T: Transport> Engine<T> {
             let mut fw = FieldWord::with_capacity(64);
             for (av_slice, b_slice) in word_own.chunks_exact(wlen).zip(word_next.chunks_exact(wlen))
             {
-                let mut av = ZERO;
-                let mut bv = ZERO;
+                let mut av = Secret(ZERO);
+                let mut bv = Secret(ZERO);
                 av[..wlen].copy_from_slice(av_slice);
                 bv[..wlen].copy_from_slice(b_slice);
-                if !d.canonical(bv) {
+                if !d.canonical(*bv) {
                     self.poisoned = true;
                     return Err(Error::Disagreement((self.party + 1) % 3));
                 }
-                fw.push([av, bv]);
+                fw.push([*av, *bv]);
             }
             results.push(fw);
         }
@@ -1175,7 +1177,7 @@ impl<T: Transport> Engine<T> {
     pub fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
         self.verify_all_pending()?;
         let word_len = 1 + own.len().div_ceil(8);
-        let mut words = Vec::with_capacity(word_len);
+        let mut words = Secret(Vec::with_capacity(word_len));
         words.push(own.len() as u64);
         for chunk in own.chunks(8) {
             let mut buf = [0u8; 8];
@@ -1183,7 +1185,7 @@ impl<T: Transport> Engine<T> {
             words.push(u64::from_le_bytes(buf));
             ct_zeroize_bytes(&mut buf);
         }
-        let received = self.raw_exchange([words.clone(), words.clone()])?;
+        let received = self.raw_exchange([words.to_vec(), words.to_vec()])?;
         if received[0].len() != word_len
             || received[1].len() != word_len
             || received[0][0] != own.len() as u64
@@ -2645,6 +2647,7 @@ impl<T: Transport> Core for Engine<T> {
     fn constant(&self, x: u64) -> Bit {
         Engine::constant(self, x)
     }
+    #[cfg(test)]
     fn share(&mut self, own: &[u64]) -> Result<Word, Error> {
         Engine::share(self, own)
     }
@@ -2656,7 +2659,7 @@ impl<T: Transport> Core for Engine<T> {
     }
     fn fshare_many(
         &mut self,
-        own_words: &[SecretVec<Value>],
+        own_words: &[Value],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
         Engine::fshare_many(self, own_words, d)
@@ -3293,7 +3296,6 @@ pub(crate) trait Gadgets: Core {
     }
 
     /// Lockstep 24-round `Keccak-f[1600]` across multiple 1600-bit states (`24` network rounds total).
-    #[cfg(test)]
     fn permutations(&mut self, states: &mut [&mut [Self::Bit]]) -> Result<(), Error> {
         self.permutations_with_rc(states, &KECCAK_RC)
     }
@@ -3303,7 +3305,6 @@ pub(crate) trait Gadgets: Core {
         self.permutations_with_rc(states, &KECCAK_RC[12..24])
     }
 
-    #[cfg(test)]
     fn permutation(&mut self, state: &mut Word<Self::Bit>) -> Result<(), Error> {
         self.permutations(&mut [state.as_mut_slice()])
     }
@@ -3397,7 +3398,6 @@ impl<B: ShareBit> Sponge<B> {
             pos: 0,
         }
     }
-    #[cfg(test)]
     pub fn absorb<E: Core<Bit = B>>(&mut self, e: &mut E, input: &[B]) -> Result<(), Error> {
         for &b in input {
             self.state[self.pos] = self.state[self.pos] ^ b;
@@ -3409,7 +3409,6 @@ impl<B: ShareBit> Sponge<B> {
         }
         Ok(())
     }
-    #[cfg(test)]
     pub fn public<E: Core<Bit = B>>(&mut self, e: &mut E, bytes: &[u8]) -> Result<(), Error> {
         let bits = public_bytes(e, bytes);
         self.absorb(e, &bits)
@@ -3465,6 +3464,53 @@ impl<B: ShareBit> Sponge<B> {
     }
 }
 
+/// Squeeze `counts[i]` bits from each `sponges[i]` in lockstep, sharing one
+/// `Engine::permutations` batch call per 1088-bit block across all sponges that need more output.
+pub(crate) fn squeeze_sponges_lockstep<E: Core>(
+    e: &mut E,
+    sponges: &mut [Sponge<E::Bit>],
+    counts: &[usize],
+) -> Result<Vec<Word<E::Bit>>, Error> {
+    let mut outs: Vec<Word<E::Bit>> = counts
+        .iter()
+        .map(|&c| SecretVec::with_capacity(c))
+        .collect();
+    loop {
+        let mut need_perm = Vec::new();
+        for (idx, (sp, &target)) in sponges.iter_mut().zip(counts).enumerate() {
+            let rem = target - outs[idx].len();
+            if rem == 0 {
+                continue;
+            }
+            if sp.pos < 1088 {
+                let take = (1088 - sp.pos).min(rem);
+                outs[idx].extend_from_slice(&sp.state[sp.pos..sp.pos + take]);
+                sp.pos += take;
+            }
+            if outs[idx].len() < target && sp.pos == 1088 {
+                need_perm.push(idx);
+            }
+        }
+        if need_perm.is_empty() {
+            break;
+        }
+        let mut refs: Vec<&mut [E::Bit]> = Vec::with_capacity(need_perm.len());
+        // Split borrows safely across `sponges` in index order.
+        let mut cursor = 0usize;
+        let mut rest: &mut [Sponge<E::Bit>] = &mut *sponges;
+        for &idx in &need_perm {
+            let (_, after) = rest.split_at_mut(idx - cursor);
+            let (first, tail) = after.split_first_mut().unwrap();
+            first.pos = 0;
+            refs.push(first.state.as_mut_slice());
+            rest = tail;
+            cursor = idx + 1;
+        }
+        e.permutations(&mut refs)?;
+    }
+    Ok(outs)
+}
+
 pub(crate) fn public_bytes<E: Core>(e: &E, bytes: &[u8]) -> Word<E::Bit> {
     bytes
         .iter()
@@ -3481,6 +3527,11 @@ pub(crate) fn lane_bytes(words: &[u64], lane: usize) -> Vec<u8> {
                 .fold(0, |v, (i, b)| v | (((b >> lane) & 1) as u8) << i)
         })
         .collect()
+}
+
+pub(crate) fn encode<B: ShareBit>(out: &mut Word<B>, value: &[B]) {
+    out.extend_from_slice(value);
+    out.resize(out.len().div_ceil(8) * 8, B::default());
 }
 
 impl<T: Transport> Engine<T> {
@@ -4140,10 +4191,15 @@ pub(crate) mod tests {
     struct FieldOpenings<E>(E, Vec<Vec<Value>>);
     impl<E: Core> Core for FieldOpenings<E> {
         type Bit = E::Bit;
+        fn quorum_position(&self) -> (usize, usize) { self.0.quorum_position() }
+        fn share_masked(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> { self.0.share_masked(own) }
+        fn fshare_many(&mut self, own: &[Value], d: Domain) -> Result<Vec<FieldWord>, Error> { self.0.fshare_many(own, d) }
+        fn broadcast_bytes(&mut self, own: &[u8]) -> Result<Vec<Vec<u8>>, Error> { self.0.broadcast_bytes(own) }
         fn constant(&self, x: u64) -> Self::Bit {
             self.0.constant(x)
         }
-        fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
+        #[cfg(test)]
+    fn share(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {
             self.0.share(own)
         }
         fn share_uniform_lanes(&mut self, own: &[u64]) -> Result<Word<Self::Bit>, Error> {

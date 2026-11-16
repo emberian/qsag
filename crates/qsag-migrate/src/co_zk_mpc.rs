@@ -18,7 +18,7 @@
 //! `< 2^-126`). Abort is non-identifiable and unfair in both: one corrupt
 //! custodian can force it. See `SECURITY.md` for exact scope.
 pub use crate::outer_mpc::{Envelope, Error, Transport};
-use crate::secret::{SecretVec, Wipe};
+use crate::secret::{Secret, SecretVec, Wipe};
 #[cfg(any(feature = "std", test))]
 use crate::threshold_mpc::QuorumKeyEscrow;
 use crate::{
@@ -759,8 +759,8 @@ impl CoZkCustodianShare {
         let mut local_batches = Vec::with_capacity(num_batches);
         let mut own_commits_flat = Vec::with_capacity(MIT_REPETITIONS * 3 * 32);
         for batch in 0..num_batches {
-            let mut subseeds = [[[0u8; 32]; 64]; 3];
-            let mut salts = [[[0u8; 32]; 64]; 3];
+            let mut subseeds = Secret([[[0u8; 32]; 64]; 3]);
+            let mut salts = Secret([[[0u8; 32]; 64]; 3]);
             for (head, (head_seeds, head_salts)) in
                 subseeds.iter_mut().zip(salts.iter_mut()).enumerate()
             {
@@ -836,8 +836,6 @@ impl CoZkCustodianShare {
             circuit,
             witness,
             &local_batches,
-            quorum_pos,
-            quorum_m,
             children,
             &self.entropy,
         )?;
@@ -883,7 +881,7 @@ impl CoZkCustodianShare {
         // Phase 3a: Reveal salted sub-seeds ONLY for the two challenged heads of each
         // repetition (`(e_r, (e_r + 1) % 3)`); the hidden third head's sub-seeds and salts
         // are NEVER transmitted. Verify every peer's Phase-0 commitment in constant time.
-        let mut own_decommits = Vec::with_capacity(MIT_REPETITIONS * 2 * 64);
+        let mut own_decommits = Secret(Vec::with_capacity(MIT_REPETITIONS * 2 * 64));
         for (rep, &ch_byte) in challenges.iter().enumerate() {
             let batch = rep / 64;
             let lane = rep % 64;
@@ -897,14 +895,14 @@ impl CoZkCustodianShare {
 
         #[cfg(test)]
         e.on_public_or_view_open();
-        let mut peer_decommits = e.broadcast_bytes(&own_decommits)?;
+        let mut peer_decommits = Secret(e.broadcast_bytes(&own_decommits)?);
         ct_zeroize_bytes(&mut own_decommits);
         if peer_decommits.len() != quorum_m
             || peer_decommits
                 .iter()
                 .any(|d| d.len() != MIT_REPETITIONS * 2 * 64)
         {
-            for d in &mut peer_decommits {
+            for d in peer_decommits.iter_mut() {
                 ct_zeroize_bytes(d);
             }
             e.poison();
@@ -934,7 +932,7 @@ impl CoZkCustodianShare {
                 }
             }
             if all_ok != u64::MAX {
-                for d in &mut peer_decommits {
+                for d in peer_decommits.iter_mut() {
                     ct_zeroize_bytes(d);
                 }
                 e.poison();
@@ -1027,7 +1025,7 @@ impl CoZkCustodianShare {
                     });
                 }
                 if subseed_match_mask != u64::MAX {
-                    for d in &mut peer_decommits {
+                    for d in peer_decommits.iter_mut() {
                         ct_zeroize_bytes(d);
                     }
                     opening_engine.poison();
@@ -1054,7 +1052,7 @@ impl CoZkCustodianShare {
                 });
             }
         }
-        for d in &mut peer_decommits {
+        for d in peer_decommits.iter_mut() {
             ct_zeroize_bytes(d);
         }
 
@@ -1063,6 +1061,8 @@ impl CoZkCustodianShare {
             repetitions,
         };
         verify_fn(&proof)?;
+        #[cfg(test)]
+        std::eprintln!("BENCH cozk repetitions={} proof_bytes={}", proof.repetitions.len(), crate::benchmarks::proof_bytes(&proof));
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
         e.audit(self, witness, &audit_inputs, &proof);
@@ -1308,28 +1308,49 @@ impl<T: Transport> ProverEngine for SpdzEngine<T> {
     }
 }
 
+struct LocalBatchSeeds {
+    subseeds: Secret<[[[u8; 32]; 64]; 3]>,
+    salts: Secret<[[[u8; 32]; 64]; 3]>,
+}
+
 struct BatchComputed<E: Core> {
     views: Vec<SharedView<E::Bit>>,
     commit_bits: [Word<E::Bit>; 3],
     engine: Option<E>,
+    #[cfg(test)]
+    audit_witness_inputs: [Word<E::Bit>; 3],
 }
 
 fn compute_batch<E: Core>(
     e: &mut E,
     c: &Circuit,
     witness: &[E::Bit],
-    seeds: &[Word<E::Bit>],
+    seeds: &LocalBatchSeeds,
     batch: usize,
 ) -> Result<BatchComputed<E>, Error> {
-    let views = evaluate_inner(e, c, witness, seeds, true)?;
-    let commit_bits = compute_view_commit_bits(e, batch, &views)?;
-    // Verify all pending Boolean and prime-field multiplications in this batch
-    // BEFORE returning or opening any view commitment or output wire.
+    let (pos, m) = e.quorum_position();
+    let mut own = SecretVec::from(vec![0u64; 3 * m * 256]);
+    for h in 0..3 {
+        for bit in 0..256 {
+            own[(h * m + pos) * 256 + bit] = (0..64).fold(0, |v, lane| {
+                v | (u64::from((seeds.subseeds[h][lane][bit / 8] >> (bit % 8)) & 1) << lane)
+            });
+        }
+    }
+    let shared = e.share_masked(&own)?;
+    let empty: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
+    let mut views = evaluate_inner_with_local(e, c, witness, &empty, true, Some(seeds))?;
+    for (h, view) in views.iter_mut().enumerate() {
+        view.subseeds = shared[h * m * 256..(h + 1) * m * 256].iter().copied().collect();
+    }
+    let commit_bits = compute_cozk_view_commit_bits(e, batch, &views)?;
     e.verify_all_pending()?;
+    #[cfg(test)]
+    let audit_witness_inputs = core::array::from_fn(|h| views[h].audit_inputs.clone());
     Ok(BatchComputed {
-        views,
-        commit_bits,
-        engine: None,
+        views, commit_bits, engine: None,
+        #[cfg(test)]
+        audit_witness_inputs,
     })
 }
 
@@ -1373,7 +1394,7 @@ fn compute_batches<E: ProverEngine>(
     e: &mut E,
     c: &Circuit,
     witness: &[E::Bit],
-    seeds: &[Vec<Word<E::Bit>>],
+    seeds: &[LocalBatchSeeds],
     children: Vec<E::Transport>,
     entropy: &[u8; 32],
 ) -> Result<Vec<BatchComputed<E>>, Error> {
@@ -1457,6 +1478,10 @@ struct PublicRound {
 }
 
 struct SharedView<B: ShareBit> {
+    subseeds: Word<B>,
+    #[cfg(test)]
+    audit_inputs: Word<B>,
+    #[cfg(test)]
     seed: Word<B>,
     inputs: Word<B>,
     products: Word<B>,
@@ -1766,7 +1791,7 @@ fn derive_nullifier_in_mpc<E: Core>(
     let witness = e.share_uniform_lanes(own_witness)?;
     // No virtual head of this evaluation is ever opened, so its tapes are
     // public zeros: the outer sharing alone hides every wire.
-    let eval = evaluate_wires(e, pre_circuit, &witness, None)?;
+    let eval = evaluate_wires(e, pre_circuit, &witness, None, None)?;
     let split = pre_circuit.outputs.len() - 4;
     // Verify scalar canonicality + public commitment match BEFORE opening the nullifier!
     check_outputs_zero(e, pre_circuit, &eval.wires, &pre_circuit.outputs[..split])?;
@@ -1811,6 +1836,7 @@ fn evaluate_wires<E: Core>(
     c: &Circuit,
     witness: &[E::Bit],
     seeds: Option<&[Word<E::Bit>]>,
+    local: Option<&LocalBatchSeeds>,
 ) -> Result<EvaluatedWires<E::Bit>, Error> {
     // Keep field-fault regressions aimed at circuit evaluation, even when tape
     // conversion itself uses arithmetic multiplications for carry correction.
@@ -1850,13 +1876,13 @@ fn evaluate_wires<E: Core>(
                     let d0 = field_draws.len();
                     field_draws.push(FieldTapeDraw {
                         head: 0,
-                        start: cursors[0].next_field(d),
+                        start: if local.is_some() { 0 } else { cursors[0].next_field(d) },
                         domain: d,
                     });
                     let d1 = field_draws.len();
                     field_draws.push(FieldTapeDraw {
                         head: 1,
-                        start: cursors[1].next_field(d),
+                        start: if local.is_some() { 0 } else { cursors[1].next_field(d) },
                         domain: d,
                     });
                     (
@@ -1886,7 +1912,7 @@ fn evaluate_wires<E: Core>(
                         draws[h] = field_draws.len();
                         field_draws.push(FieldTapeDraw {
                             head: h,
-                            start: cursors[h].next_field(d),
+                            start: if local.is_some() { 0 } else { cursors[h].next_field(d) },
                             domain: d,
                         });
                     }
@@ -1903,7 +1929,56 @@ fn evaluate_wires<E: Core>(
 
     // 2. Initialize all 3 `Tape` sponges and squeeze their exact streams in lockstep.
     let zero_bit = e.constant(0);
-    let (squeezed, raw_draw_words) = if let Some(seeds) = seeds {
+    let mut local_fields: Vec<Option<FieldWord>> = (0..field_draws.len()).map(|_| None).collect();
+    let (squeezed, raw_draw_words) = if let Some(local) = local {
+        let mut own_bits: [SecretVec<u64>; 3] = core::array::from_fn(|h| vec![0; cursors[h].sponge_bits].into());
+        let mut own_fields: SecretVec<Value> = vec![ZERO; field_draws.len() * 64].into();
+        for h in 0..3 {
+            for (lane, seed) in local.subseeds[h].iter().enumerate() {
+                let mut tape = zk_engine::Tape::new(seed);
+                for (node, nt) in c.nodes.iter().zip(&node_tapes) {
+                    match *nt {
+                        NodeTape::InputBit { pos, .. } if h < 2 => {
+                            let v = Secret(tape.sample(Domain::Bit));
+                            own_bits[h][pos[h]] |= v[0] << lane;
+                        }
+                        NodeTape::MulBit { pos } => {
+                            let v = Secret(tape.sample(Domain::Bit));
+                            own_bits[h][pos[h]] |= v[0] << lane;
+                        }
+                        NodeTape::InputField { draws, .. } if h < 2 => {
+                            own_fields[draws[h] * 64 + lane] = tape.sample(node.domain);
+                        }
+                        NodeTape::MulField { draws } => {
+                            own_fields[draws[h] * 64 + lane] = tape.sample(node.domain);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Pack only actual Boolean draws, skipping public field/cached-bit gaps.
+        let mut positions = Vec::new();
+        for nt in &node_tapes {
+            match *nt {
+                NodeTape::InputBit { pos, .. } => positions.extend((0..2).map(|h| (h, pos[h]))),
+                NodeTape::MulBit { pos } => positions.extend((0..3).map(|h| (h, pos[h]))),
+                _ => {}
+            }
+        }
+        let flat: SecretVec<u64> = positions.iter().map(|&(h, p)| own_bits[h][p]).collect();
+        let shares = e.share_masked(&flat)?;
+        let mut streams: Vec<Word<E::Bit>> = cursors.iter().map(|c| vec![zero_bit; c.sponge_bits].into()).collect();
+        for ((h, p), share) in positions.into_iter().zip(shares.iter()) { streams[h][p] = *share; }
+        for d in Domain::ALL_FIELDS {
+            let indices: Vec<_> = field_draws.iter().enumerate().filter_map(|(i, f)| (f.domain == d).then_some(i)).collect();
+            let mut words = SecretVec::with_capacity(indices.len() * 64);
+            for &i in &indices { words.extend_from_slice(&own_fields[i * 64..(i + 1) * 64]); }
+            let shared = e.fshare_many(&words, d)?;
+            for (i, word) in indices.into_iter().zip(shared) { local_fields[i] = Some(word); }
+        }
+        (streams, field_draws.iter().map(|_| SecretVec::new()).collect())
+    } else if let Some(seeds) = seeds {
         let mut tape_sponges = Vec::with_capacity(3);
         for seed in seeds {
             let mut sp = Sponge::new(e);
@@ -2020,7 +2095,8 @@ fn evaluate_wires<E: Core>(
         .iter()
         .map(|fd| seeds.is_none().then(|| e.fconstant(ZERO, fd.domain)))
         .collect();
-    let converted_domains: &[Domain] = if seeds.is_some() {
+    if local.is_some() { draw_fields = local_fields; }
+    let converted_domains: &[Domain] = if seeds.is_some() && local.is_none() {
         &[Domain::Gold, Domain::Secp, Domain::Ed]
     } else {
         &[]
@@ -2062,7 +2138,7 @@ fn evaluate_wires<E: Core>(
         let mut idxs = Vec::new();
         let mut wide_words: Vec<Word<E::Bit>> = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
-            if fd.domain == dom && seeds.is_some() {
+            if fd.domain == dom && seeds.is_some() && local.is_none() {
                 idxs.push(idx);
                 let mut lo: Word<E::Bit> = squeezed[fd.head][fd.start..fd.start + limb_bits]
                     .iter()
@@ -2394,19 +2470,25 @@ fn evaluate_wires<E: Core>(
     })
 }
 
-fn evaluate_inner<E: Core>(
+#[cfg(test)]
+fn evaluate_inner<E: Core>(e: &mut E, c: &Circuit, witness: &[E::Bit], seeds: &[Word<E::Bit>], verify_zero_outputs: bool) -> Result<Vec<SharedView<E::Bit>>, Error> {
+    evaluate_inner_with_local(e, c, witness, seeds, verify_zero_outputs, None)
+}
+
+fn evaluate_inner_with_local<E: Core>(
     e: &mut E,
     c: &Circuit,
     witness: &[E::Bit],
     seeds: &[Word<E::Bit>],
     verify_zero_outputs: bool,
+    local: Option<&LocalBatchSeeds>,
 ) -> Result<Vec<SharedView<E::Bit>>, Error> {
     let EvaluatedWires {
         mut wires,
         raw_draw_words,
         mut encodings,
         node_tapes,
-    } = evaluate_wires(e, c, witness, Some(seeds))?;
+    } = evaluate_wires(e, c, witness, Some(seeds), local)?;
 
     // 5g. Mandatory in-MPC output-residual zero check (`P0-1`): verify that every
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
@@ -2424,7 +2506,7 @@ fn evaluate_inner<E: Core>(
             }
             match node.op {
                 Op::Input => {
-                    let heads = if matches!(dom, Domain::PallasFp | Domain::BlsFp) {
+                    let heads = if local.is_some() || matches!(dom, Domain::PallasFp | Domain::BlsFp) {
                         0..3
                     } else {
                         2..3
@@ -2472,15 +2554,52 @@ fn evaluate_inner<E: Core>(
     }
 
     // 7. Assemble `SharedView<E::Bit>`s in exact `c.nodes` / `c.outputs` topological order.
+    let input_bits: usize = c.nodes.iter().filter(|n| matches!(n.op, Op::Input)).map(|n| n.domain.width()).sum();
+    let product_bits: usize = c.nodes.iter().filter(|n| matches!(n.op, Op::Mul(_, _))).map(|n| n.domain.width()).sum();
+    let output_bits: usize = c.outputs.iter().map(|&i| c.nodes[i].domain.width()).sum();
     let mut views: Vec<SharedView<E::Bit>> = seeds
         .iter()
-        .map(|seed| SharedView {
-            seed: seed.clone(),
-            inputs: SecretVec::new(),
-            products: SecretVec::new(),
-            outputs: SecretVec::new(),
+        .map(|_seed| SharedView {
+            subseeds: SecretVec::new(),
+            #[cfg(test)]
+            audit_inputs: SecretVec::new(),
+            #[cfg(test)]
+            seed: _seed.clone(),
+            inputs: SecretVec::with_capacity(input_bits.div_ceil(8) * 8),
+            products: SecretVec::with_capacity(product_bits.div_ceil(8) * 8),
+            outputs: SecretVec::with_capacity(output_bits.div_ceil(8) * 8),
         })
         .collect();
+
+    if local.is_some() {
+        for (idx, node) in c.nodes.iter().enumerate() {
+            if matches!(node.op, Op::Input | Op::Mul(_, _)) {
+                for h in 0..3 {
+                    let bit;
+                    let bits: &[E::Bit] = if node.domain == Domain::Bit {
+                        bit = [wires[idx].as_ref().unwrap()[h].bit()];
+                        &bit
+                    } else { &encodings[idx][h].as_ref().unwrap()[..node.domain.width()] };
+                    if matches!(node.op, Op::Input) {
+                        #[cfg(test)]
+                        outer_mpc::encode(&mut views[h].audit_inputs, bits);
+                        if h == 2 { views[h].inputs.extend_from_slice(bits); }
+                    } else { views[h].products.extend_from_slice(bits); }
+                }
+            }
+        }
+        for &idx in &c.outputs {
+            for h in 0..3 {
+                if c.nodes[idx].domain == Domain::Bit {
+                    views[h].outputs.push(wires[idx].as_ref().unwrap()[h].bit());
+                } else {
+                    views[h].outputs.extend_from_slice(&encodings[idx][h].as_ref().unwrap()[..c.nodes[idx].domain.width()]);
+                }
+            }
+        }
+        for view in &mut views { pad_byte(&mut view.inputs); pad_byte(&mut view.products); pad_byte(&mut view.outputs); }
+        return Ok(views);
+    }
 
     for (idx, node) in c.nodes.iter().enumerate() {
         let d = node.domain;
@@ -2556,6 +2675,71 @@ fn pad_byte<B: ShareBit>(bits: &mut Word<B>) {
     bits.resize(bits.len().div_ceil(8) * 8, B::default());
 }
 
+/// Hash borrowed streams in lockstep. All scheduling depends on public lengths;
+/// every permutation goes through the actively checked outer MPC.
+fn turbo_shared<E: Core>(e: &mut E, streams: &[Vec<&[E::Bit]>], suffix: u8) -> Result<Vec<Word<E::Bit>>, Error> {
+    let mut sponges: Vec<_> = streams.iter().map(|_| Sponge::from_public_midstate(e, &TURBOSHAKE_VIEW_MIDSTATE)).collect();
+    let mut cursor = vec![(0usize, 0usize); streams.len()];
+    let mut done = vec![false; streams.len()];
+    let mut result: Vec<Word<E::Bit>> = streams.iter().map(|_| SecretVec::with_capacity(256)).collect();
+    while done.iter().any(|&d| !d) {
+        let mut finishing = vec![false; streams.len()];
+        for i in 0..streams.len() {
+            if done[i] { continue; }
+            let sp = &mut sponges[i];
+            sp.pos = 0;
+            let (seg, offset) = &mut cursor[i];
+            while sp.pos < 1088 && *seg < streams[i].len() {
+                let source = &streams[i][*seg][*offset..];
+                let take = (1088 - sp.pos).min(source.len());
+                for (dst, &src) in sp.state[sp.pos..sp.pos + take].iter_mut().zip(&source[..take]) { *dst = *dst ^ src; }
+                sp.pos += take;
+                *offset += take;
+                if *offset == streams[i][*seg].len() { *seg += 1; *offset = 0; }
+            }
+            if sp.pos < 1088 { sp.pad_only(e, suffix); finishing[i] = true; }
+        }
+        let mut refs: Vec<_> = sponges.iter_mut().enumerate().filter_map(|(i, s)| (!done[i]).then_some(s.state.as_mut_slice())).collect();
+        e.permutations_12(&mut refs)?;
+        for i in 0..streams.len() {
+            if finishing[i] { result[i].extend_from_slice(&sponges[i].state[..256]); done[i] = true; }
+        }
+    }
+    Ok(result)
+}
+
+fn compute_cozk_view_commit_bits<E: Core>(e: &mut E, batch: usize, views: &[SharedView<E::Bit>]) -> Result<[Word<E::Bit>; 3], Error> {
+    let headers: Vec<[Word<E::Bit>; 2]> = views.iter().flat_map(|v| (0..COZK_TREE_LEAVES).map(move |leaf| {
+        let (start, end) = cozk_product_leaf_range(v.products.len() / 8, leaf);
+        (leaf, start, end)
+    })).map(|(leaf, start, end)| [outer_mpc::public_bytes(e, &(leaf as u64).to_le_bytes()), outer_mpc::public_bytes(e, &((end-start) as u64).to_le_bytes())]).collect();
+    let streams: Vec<Vec<&[E::Bit]>> = headers.iter().enumerate().map(|(i, h)| {
+        let v = &views[i / COZK_TREE_LEAVES];
+        let (start, end) = cozk_product_leaf_range(v.products.len() / 8, i % COZK_TREE_LEAVES);
+        vec![&h[0], &h[1], &v.products[start * 8..end * 8]]
+    }).collect();
+    let leaves = turbo_shared(e, &streams, TURBOSHAKE_LEAF_SUFFIX)?;
+    let magic = outer_mpc::public_bytes(e, &COZK_VIEW_MAGIC_V4);
+    let rep: Word<E::Bit> = (0..64).map(|bit| e.constant((0..64).fold(0, |v, lane| v | ((((batch * 64 + lane) as u64 >> bit) & 1) << lane)))).collect();
+    let headers: Vec<[Word<E::Bit>; 5]> = views.iter().enumerate().map(|(h, v)| [
+        outer_mpc::public_bytes(e, &[h as u8]),
+        outer_mpc::public_bytes(e, &((v.subseeds.len() / 256) as u64).to_le_bytes()),
+        outer_mpc::public_bytes(e, &((v.inputs.len() / 8) as u64).to_le_bytes()),
+        outer_mpc::public_bytes(e, &((v.products.len() / 8) as u64).to_le_bytes()),
+        outer_mpc::public_bytes(e, &((v.outputs.len() / 8) as u64).to_le_bytes()),
+    ]).collect();
+    let streams: Vec<Vec<&[E::Bit]>> = views.iter().enumerate().map(|(i, v)| {
+        let h = &headers[i];
+        let mut pieces: Vec<&[E::Bit]> = vec![&magic, &rep, &h[0], &h[1], &v.subseeds, &h[2], &v.inputs, &h[3]];
+        pieces.extend(leaves[i * COZK_TREE_LEAVES..(i + 1) * COZK_TREE_LEAVES].iter().map(|w| w.as_slice()));
+        pieces.extend([h[4].as_slice(), v.outputs.as_slice()]);
+        pieces
+    }).collect();
+    let mut hashes = turbo_shared(e, &streams, TURBOSHAKE_ROOT_SUFFIX)?.into_iter();
+    Ok(core::array::from_fn(|_| hashes.next().unwrap()))
+}
+
+#[cfg(test)]
 /// Compute the 256-bit `cSHAKE256("QSAG.MIGRATE.VIEW.V3")` view commitment shares
 /// for all 3 virtual heads in lockstep (`3x` fewer network rounds than sequential
 /// sponges, `0` rounds for the public customization block, `0` intermediate stream
@@ -2694,6 +2878,16 @@ mod tests {
         for (rep, opening) in proof.repetitions.iter().enumerate() {
             let e = opening.opened_e as usize;
             let hidden = (e + 2) % 3;
+            let published_inputs: [Vec<u8>; 2] = core::array::from_fn(|j| {
+                let head = (e + j) % 3;
+                let (seeds, input) = zk_engine::parse_cozk_v4_inputs(&opening.pair[j]).unwrap();
+                if head == 2 {
+                    (0..256).map(|i| (input[i / 8] >> (i % 8)) & 1).collect()
+                } else {
+                    let mut tape = zk_engine::MultiTape::new(&seeds);
+                    (0..256).map(|_| tape.sample(Domain::Bit)[0] as u8).collect()
+                }
+            });
             let lane = rep % 64;
             for components in [1, 2, 3] {
                 let partial: Vec<_> = inputs[rep / 64][hidden]
@@ -2708,7 +2902,7 @@ mod tests {
                 let mut recovered = [0u8; 32];
                 for bit in 0..256 {
                     recovered[bit / 8] |=
-                        (local[bit] ^ opening.pair[0].inputs[bit] ^ opening.pair[1].inputs[bit])
+                        (local[bit] ^ published_inputs[0][bit] ^ published_inputs[1][bit])
                             << (bit % 8);
                 }
                 candidates.push(recovered);
@@ -2728,7 +2922,7 @@ mod tests {
                     })
                 });
                 let missing = (state.party + 2) % 3;
-                let published = &opening.pair[usize::from(e != missing)].inputs;
+                let published = &published_inputs[usize::from(e != missing)];
                 for a in &locals[0] {
                     for b in &locals[1] {
                         let mut recovered = [0u8; 32];
@@ -2739,11 +2933,11 @@ mod tests {
                     }
                 }
             }
-            for view in &opening.pair {
+            for view in &published_inputs {
                 let mut recovered = [0u8; 32];
                 for bit in 0..256 {
                     let local = ((physical_input[bit].0[0] ^ physical_input[bit].0[1]) >> lane) & 1;
-                    recovered[bit / 8] |= ((local as u8) ^ view.inputs[bit]) << (bit % 8);
+                    recovered[bit / 8] |= ((local as u8) ^ view[bit]) << (bit % 8);
                 }
                 candidates.push(recovered);
             }
@@ -2932,6 +3126,60 @@ mod tests {
                 }
             }
         });
+    }
+
+    fn check_v4_batch<E: Core>(e: &mut E) {
+        let (p, m) = e.quorum_position();
+        let c = Builder::default();
+        let bit = c.input(1);
+        for d in Domain::ALL_FIELDS {
+            c.output(c.mul(bit, bit));
+            let a = c.lift(bit, d);
+            let z = c.mul(a, c.small(d, 27));
+            c.output(z);
+            c.output(c.inverse(z));
+        }
+        let c = c.finish();
+        let witness = e.share(&[if p == 0 { u64::MAX } else { 0 }]).unwrap();
+        let seeds = LocalBatchSeeds {
+            subseeds: Secret(core::array::from_fn(|h| core::array::from_fn(|lane| [((p * 11 + h * 3 + lane) % 256) as u8; 32]))),
+            salts: Secret([[[0; 32]; 64]; 3]),
+        };
+        let empty = core::array::from_fn::<_, 3, _>(|_| SecretVec::new());
+        let mut views = evaluate_inner_with_local(e, &c, &witness, &empty, false, Some(&seeds)).unwrap();
+        for (h, view) in views.iter_mut().enumerate() {
+            let own: Vec<u64> = (0..m * 256).map(|i| {
+                if i / 256 != p { return 0; }
+                (0..64).fold(0, |v, lane| v | (u64::from((seeds.subseeds[h][lane][(i % 256) / 8] >> (i % 8)) & 1) << lane))
+            }).collect();
+            view.subseeds = e.share_masked(&own).unwrap();
+        }
+        let commitments = compute_cozk_view_commit_bits(e, 0, &views).unwrap();
+        let opened_commits: Vec<_> = commitments.iter().map(|w| e.open(w).unwrap()).collect();
+        let opened_views: Vec<_> = views.iter().map(|v| (e.open(&v.inputs).unwrap(), e.open(&v.products).unwrap(), e.open(&v.outputs).unwrap())).collect();
+        for lane in [0, 17, 63] {
+            let all_seeds = core::array::from_fn(|h| (0..m).map(|p| [((p * 11 + h * 3 + lane) % 256) as u8; 32]).collect());
+            let native = zk_engine::simulate_cozk_v4(&c, &all_seeds);
+            for h in 0..3 {
+                let (_, input) = zk_engine::parse_cozk_v4_inputs(&native[h]).unwrap();
+                assert_eq!(outer_mpc::lane_bytes(&opened_views[h].0, lane), input);
+                assert_eq!(outer_mpc::lane_bytes(&opened_views[h].1, lane), native[h].products);
+                assert_eq!(outer_mpc::lane_bytes(&opened_views[h].2, lane), native[h].outputs);
+                assert_eq!(outer_mpc::lane_bytes(&opened_commits[h], lane), zk_engine::commit_cozk_v4(lane, h, &native[h]));
+            }
+        }
+    }
+
+    #[test]
+    fn cozk_v4_replicated_tapes_and_tree_match_native_all_domains() {
+        run(|p, t| check_v4_batch(&mut Engine::new(p, [0x62; 32], keys(p), t).unwrap()));
+    }
+
+    #[test]
+    fn cozk_v4_quorum_tapes_and_tree_match_native_all_domains() {
+        use crate::threshold_mpc::tests as quorum;
+        let config = ThresholdConfig::new(2, 3, vec![0, 2]).unwrap();
+        quorum::run(config.clone(), |p, mac, t| check_v4_batch(&mut quorum::engine(&config, p, mac, t)));
     }
 
     #[test]
@@ -3375,7 +3623,7 @@ mod tests {
         });
     }
 
-    const PRECOMMIT_SEQ: u64 = (2 + 3 * MIT_REPETITIONS.div_ceil(64)) as u64;
+    const PRECOMMIT_SEQ: u64 = 4;
 
     struct ZkbooFaultSpy {
         inner: Network,
@@ -3412,7 +3660,8 @@ mod tests {
             })
         }
         fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
-            // Root sequence 0 = STATEMENT, 1 = witness, 2..PRECOMMIT_SEQ = batch seeds, PRECOMMIT_SEQ = PRECOMMIT!
+            // V4 root: 0 = statement, 1 = witness, 2 = seed commitments,
+            // 3 = agreement on those commitments, 4 = PRECOMMIT.
             // A single-stream root also carries the batch evaluation itself, so
             // there only the explicit opening hook marks a release.
             if self.is_root && !self.single_stream && out[0].sequence >= PRECOMMIT_SEQ {

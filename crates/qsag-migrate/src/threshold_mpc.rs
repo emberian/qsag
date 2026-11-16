@@ -1902,6 +1902,7 @@ impl<T: Transport> Core for SpdzEngine<T> {
         self.public_bit(x)
     }
 
+    #[cfg(test)]
     fn share(&mut self, own: &[u64]) -> Result<Word<ABit>, Error> {
         self.input(own, false)
     }
@@ -1919,7 +1920,7 @@ impl<T: Transport> Core for SpdzEngine<T> {
 
     fn fshare_many(
         &mut self,
-        own_words: &[SecretVec<Value>],
+        own_words: &[Value],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
         if self.is_failed() {
@@ -1928,7 +1929,11 @@ impl<T: Transport> Core for SpdzEngine<T> {
         if own_words.is_empty() {
             return Ok(Vec::new());
         }
-        let k = own_words.len();
+        if !own_words.len().is_multiple_of(64) {
+            self.poison();
+            return Err(Error::InvalidConfiguration);
+        }
+        let k = own_words.len() / 64;
         let count = k * 64;
         let taken = self
             .transport
@@ -1940,18 +1945,13 @@ impl<T: Transport> Core for SpdzEngine<T> {
         let wlen = d.limbs_len();
         let mut masked_flat: SecretVec<u64> = SecretVec::with_capacity(count * wlen);
         let mut rand_iter = randoms.iter();
-        for word in own_words {
-            if word.len() != 64 {
-                return self.fail(Error::InvalidConfiguration);
-            }
-            for &val in word.iter() {
+        for &val in own_words {
                 if !d.canonical(val) {
                     return self.fail(Error::InvalidConfiguration);
                 }
                 let r = rand_iter.next().unwrap();
                 let diff = Secret(d.sub(val, r.0[0]));
                 masked_flat.extend_from_slice(&diff[..wlen]);
-            }
         }
         let received = self.broadcast(&masked_flat)?;
         let mut public_sums = vec![ZERO; count];
