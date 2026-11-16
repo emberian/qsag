@@ -1299,7 +1299,7 @@ def slotsPermitTailTruncation {Tip Rec : Type}
     (C : Codec Tip Rec) (L : Layout) (d : Disk) (committed : Nat) : Bool :=
   let okSlot : Option (Nat × Tip) → Bool
     | none => true
-    | some (ctr, _) => decide (ctr ≤ committed ∧ committed ≤ ctr + 1)
+    | some (ctr, _) => decide (ctr ≤ committed) && decide (committed ≤ ctr + 1)
   (((view C L d).a).isSome || ((view C L d).b).isSome) &&
   okSlot (view C L d).a && okSlot (view C L d).b
 
@@ -1336,11 +1336,11 @@ def recoverTruncatedAppendPlan {Tip Rec : Type} [DecidableEq Tip]
   match recoverPlan C L d with
   | some (h, ws) => some (d, h, ws)
   | none =>
-    if 0 < C.recLen ∧ L.chainOff < d.len then
+    if decide (0 < C.recLen) && decide (L.chainOff < d.len) then
       let committed := committedPrefixCount C L d
       let stop := L.chainOff + C.recLen * committed
-      if stop < d.len ∧ d.len - stop ≤ C.recLen ∧
-         slotsPermitTailTruncation C L d committed = true then
+      if decide (stop < d.len) && decide (d.len - stop ≤ C.recLen) &&
+         slotsPermitTailTruncation C L d committed then
         let prefixDisk := d.truncate stop
         match recoverPlan C L prefixDisk with
         | some (h, _ws) => some (prefixDisk, h, commitWrites h.len h.tip)
@@ -1375,7 +1375,18 @@ theorem append_tear_truncate_recovers {Tip Rec : Type} [DecidableEq Tip]
   refine ⟨?_, Disk.truncate_len _ _, fun _ _ => Disk.truncate_bytes _ _ _⟩
   unfold recoverTruncatedAppendPlan
   rw [hTorn]
-  simp only [hRecPos, hChainLt, and_self, ↓reduceIte, hCnt, hTail.1, hTail.2, hSlots, hCommitted]
+  dsimp only
+  have hb1 : (decide (0 < C.recLen) && decide (L.chainOff < d.len)) = true := by
+    rw [decide_eq_true hRecPos, decide_eq_true hChainLt]; rfl
+  rw [hb1]
+  simp only [↓reduceIte]
+  rw [hCnt]
+  have hb2 : (decide (L.chainOff + C.recLen * committed < d.len) &&
+      decide (d.len - (L.chainOff + C.recLen * committed) ≤ C.recLen) &&
+      slotsPermitTailTruncation C L d committed) = true := by
+    rw [decide_eq_true hTail.1, decide_eq_true hTail.2, hSlots]; rfl
+  rw [hb2]
+  simp only [↓reduceIte, hCommitted]
 
 /-- Both staggered HWM slots `(c, c - 1)` at `committed = c` AND steady slots `(c, c)` at
     `committed = c + 1` satisfy `slotsPermitTailTruncation`. -/
@@ -1390,8 +1401,11 @@ theorem slotsPermitTailTruncation_staggered_and_plus_one {Tip Rec : Type}
     slotsPermitTailTruncation C L d₂ (c + 1) = true := by
   unfold slotsPermitTailTruncation
   rw [hA₁, hB₁, hA₂, hB₂]
-  simp only [Option.isSome_some, Bool.or_self, Bool.true_and, Bool.and_eq_true, decide_eq_true_eq]
-  omega
+  dsimp only
+  rw [decide_eq_true (Nat.le_refl c), decide_eq_true (Nat.le_add_right c 1),
+      decide_eq_true (by omega : c - 1 ≤ c), decide_eq_true (by omega : c ≤ c - 1 + 1),
+      decide_eq_true (Nat.le_refl (c + 1))]
+  exact ⟨rfl, rfl⟩
 
 /-- Any authenticating HWM slot outside `ctr ≤ committed ≤ ctr + 1` causes `slotsPermitTailTruncation`
     and `recoverTruncatedAppendPlan` to fail closed. -/
@@ -1402,20 +1416,21 @@ theorem slot_gap_exceeding_one_rejected {Tip Rec : Type} [DecidableEq Tip]
     (hGap : committedPrefixCount C L d < ctr ∨ ctr + 1 < committedPrefixCount C L d) :
     recoverTruncatedAppendPlan C L d = none := by
   have hFalse : slotsPermitTailTruncation C L d (committedPrefixCount C L d) = false := by
+    have hRangeF : (decide (ctr ≤ committedPrefixCount C L d) &&
+        decide (committedPrefixCount C L d ≤ ctr + 1)) = false := by
+      rcases hGap with hLt | hGt
+      · rw [decide_eq_false (Nat.not_le_of_gt hLt), Bool.false_and]
+      · rw [decide_eq_false (Nat.not_le_of_gt hGt), Bool.and_false]
     unfold slotsPermitTailTruncation
     rw [hSlotA]
-    simp only [Option.isSome_some, Bool.true_or, Bool.true_and, Bool.and_eq_false_imp, decide_eq_true_eq]
-    intro hRange
-    omega
+    simp only [Option.isSome_some, Bool.true_or, hRangeF, Bool.false_and, Bool.true_and]
   unfold recoverTruncatedAppendPlan
   rw [hTorn]
-  split
-  · dsimp only
-    split
-    · rename_i hCond
-      exact False.elim (Bool.false_ne_true (hFalse.symm.trans hCond.2.2))
-    · rfl
+  cases hb1 : (decide (0 < C.recLen) && decide (L.chainOff < d.len))
   · rfl
+  · dsimp only [↓reduceIte]
+    rw [hFalse, Bool.and_false]
+    rfl
 
 /-- Neither a zero-length chain nor a shortened/empty file beyond `chainOff` authorizes truncation. -/
 theorem truncated_or_oversized_tail_rejected {Tip Rec : Type} [DecidableEq Tip]
@@ -1423,10 +1438,15 @@ theorem truncated_or_oversized_tail_rejected {Tip Rec : Type} [DecidableEq Tip]
     (hTorn : recoverPlan C L d = none)
     (hBad : d.len ≤ L.chainOff ∨ C.recLen = 0) :
     recoverTruncatedAppendPlan C L d = none := by
-  have hNo : ¬ (0 < C.recLen ∧ L.chainOff < d.len) := by omega
+  have hb1 : (decide (0 < C.recLen) && decide (L.chainOff < d.len)) = false := by
+    rcases hBad with hLe | hZ
+    · have hf : decide (L.chainOff < d.len) = false := decide_eq_false (Nat.not_lt_of_ge hLe)
+      rw [hf, Bool.and_false]
+    · have hf : decide (0 < C.recLen) = false := decide_eq_false (by omega)
+      rw [hf, Bool.false_and]
   unfold recoverTruncatedAppendPlan
-  rw [hTorn]
-  simp only [hNo, ↓reduceIte]
+  rw [hTorn, hb1]
+  rfl
 
 /-- A corrupt committed prefix is refused even when the tail length and HWM slots pass. -/
 theorem corrupt_committed_record_rejected {Tip Rec : Type} [DecidableEq Tip]
@@ -1436,12 +1456,14 @@ theorem corrupt_committed_record_rejected {Tip Rec : Type} [DecidableEq Tip]
     recoverTruncatedAppendPlan C L d = none := by
   unfold recoverTruncatedAppendPlan
   rw [hTorn]
-  split
-  · dsimp only
-    split
-    · rw [hCorrupt]
-    · rfl
+  cases hb1 : (decide (0 < C.recLen) && decide (L.chainOff < d.len))
   · rfl
+  · dsimp only [↓reduceIte]
+    cases hb2 : (decide (L.chainOff + C.recLen * committedPrefixCount C L d < d.len) &&
+        decide (d.len - (L.chainOff + C.recLen * committedPrefixCount C L d) ≤ C.recLen) &&
+        slotsPermitTailTruncation C L d (committedPrefixCount C L d))
+    · rfl
+    · simp only [↓reduceIte, hCorrupt]
 
 #verify_constructive qshdqb04_separated committedPrefixCount_of_tail
   append_tear_truncate_recovers slotsPermitTailTruncation_staggered_and_plus_one

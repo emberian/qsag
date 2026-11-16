@@ -95,7 +95,7 @@ inductive UcStepOutcome (S Out Err : Type) where
   deriving DecidableEq, Repr
 
 /-- Lift a partial `Option (S × Out)` transition into `UcStepOutcome` preserving state on `none`. -/
-@[expose] def liftOptionStep {S In Out : Type} (step : S → In → Option (S × Out))
+def liftOptionStep {S In Out : Type} (step : S → In → Option (S × Out))
     (s : S) (inp : In) : UcStepOutcome S Out Unit :=
   match step s inp with
   | some (s', out) => .ok s' out
@@ -146,7 +146,7 @@ def WalLatchState.WellFormed (st : WalLatchState) : Prop :=
 
 /-- Pre-signing WAL gate: enforces `!poisoned`, `enrolledPkDigest` match, crash-idempotent replay,
     and monotonic `reqEpoch == nextEpoch` ordering. -/
-def walPreSignStep (st : WalLatchState) (pkDigest : List UInt8)
+@[expose] def walPreSignStep (st : WalLatchState) (pkDigest : List UInt8)
     (reqEpoch : Nat) (msgDigest : List UInt8) :
     UcStepOutcome WalLatchState WalReserveOut WalRejectReason :=
   if st.poisoned then
@@ -428,7 +428,7 @@ structure UcRushingAdversary (AdvState : Type) where
   observeOutcome  : AdvState → SessionOutcome → AdvState
 
 /-- Map `walPreSignStep` rejection reasons to network-observable `AbortReason`s. -/
-@[expose] def mapWalRejectReason : WalRejectReason → AbortReason
+def mapWalRejectReason : WalRejectReason → AbortReason
   | .poisonedQuarantine  => .walPoisoned
   | .pkDigestMismatch    => .walPkMismatch
   | .staleOrOutOfOrderEpoch => .walEpochRejected
@@ -473,7 +473,7 @@ def poisonRealCluster {PK ShareT : Type} (cl : RealClusterState PK ShareT) : Rea
     honestShares := fun _ => none }
 
 /-- Execute one interactive 3-round session against rushing adversary `A` in the real protocol. -/
-def execRealSession {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+@[expose] def execRealSession {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
     (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
     (A : UcRushingAdversary AdvState)
     (cl : RealClusterState PK ShareT) (advSt : AdvState) (tape : SessionTape) :
@@ -683,7 +683,7 @@ def poisonIdealCluster {PK : Type} (icl : IdealClusterState PK) : IdealClusterSt
 /-- Execute one session of `IdealFunctionalityExec` coupling `IdealTsig` with black-box `Sim`.
     `idealSignOracle` is invoked **ONLY** when `validThresholdApproval = true` AND `walPreSignStep`
     grants `.authorizedFresh`! -/
-def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+@[expose] def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
     (idealSignOracle : SessionScheduleReq → ByteArray)
     (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
     (A : UcRushingAdversary AdvState)
@@ -1031,7 +1031,7 @@ theorem bad_event_fundamental_lemma {View : Type}
       (fun ω hFalse => congrArg D (hAgreeUnlessBad ω hFalse))
   have hMulAbs : ∀ (x y k : Nat), natAbsDiff (x * k) (y * k) = natAbsDiff x y * k := by
     intro x y k
-    unfold natAbsDiff
+    simp only [natAbsDiff_eq]
     by_cases hxy : x ≤ y
     · have hxkyk : x * k ≤ y * k := Nat.mul_le_mul_right k hxy
       simp [hxy, hxkyk, Nat.sub_mul]
@@ -1101,7 +1101,7 @@ theorem hybrid_multi_session_le {View : Type}
     induction k with
     | zero =>
       intro _
-      simp [qsum, natAbsDiff]
+      simp [qsum, natAbsDiff_eq]
     | succ k ih =>
       intro hkSucc
       have hkLt : k < Q_s := hkSucc
@@ -1140,7 +1140,7 @@ theorem ratLe_trans {a b c : Nat × Nat} (h1 : ratLe a b) (h2 : ratLe b c) : rat
 
 private theorem natAbsDiff_mul_right (x y k : Nat) :
     natAbsDiff (x * k) (y * k) = natAbsDiff x y * k := by
-  unfold natAbsDiff
+  simp only [natAbsDiff_eq]
   by_cases hxy : x ≤ y
   · simp [hxy, Nat.mul_le_mul_right k hxy, Nat.sub_mul]
   · have hyx : y ≤ x := by omega
@@ -1400,7 +1400,7 @@ private theorem nat_count_transfer (R I c e1 e2 : Nat) (hc : 0 < c)
   rw [hL, hR] at h
   have h3 : natAbsDiff R I * e2 ≤ e1 * c := Nat.le_of_mul_le_mul_right h hc
   have h4 : R ≤ I + natAbsDiff R I := by
-    unfold natAbsDiff
+    simp only [natAbsDiff_eq]
     split <;> omega
   have h5 : R * e2 ≤ (I + natAbsDiff R I) * e2 := Nat.mul_le_mul_right e2 h4
   rw [Nat.add_mul] at h5
@@ -4119,7 +4119,7 @@ def activeShamir_perSessionRoundSimSpec
       r2 = (enumP.toFun p, enumGoldilocksExt2.toFun c) ∧ s2 = reb.toFun (enumP.toFun p)
     RelR3 := fun _ _ _ _ _ => True
     badCheck := fun _ _ corrR2 c =>
-      anyGatePinsAlpha (enumGoldilocksExt2.toFun c) (unpackSpdzGates maxGates corrR2)
+      (unpackSpdzGates maxGates corrR2).any (fun g => spdzGatePinsAlpha (enumGoldilocksExt2.toFun c) g.1 g.2)
     hPkDigest := rfl
     hMsgDigest := rfl
     hRound1 := fun _ _ p c => by
@@ -4161,7 +4161,7 @@ def activeShamir_perSessionRoundSimSpec
           cases hPin : spdzGatePinsAlpha alpha g.1 g.2
           · rfl
           · exfalso
-            have hAnyT : anyGatePinsAlpha alpha gates = true :=
+            have hAnyT : (gates.any fun g => spdzGatePinsAlpha alpha g.1 g.2) = true :=
               List.any_eq_true.mpr ⟨g, hg, hPin⟩
             rw [hAnyT] at hBadF
             cases hBadF
@@ -4192,8 +4192,27 @@ def activeShamir_perSessionRoundSimSpec
       dsimp only [activeShamirThresholdProtocol, activeShamirBlackBoxSimulator,
         BlackBoxUcSimulator.finalizeIdealCut]
       cases corrR3.all (fun cw => decide (cw.2.size > 0)) <;> rfl
-    hBadCheckBound := fun _ _ corrR2 =>
-      Nat.le_trans (spdzGateStream_pin_count_le (unpackSpdzGates maxGates corrR2))
+    hBadCheckBound := fun _ _ corrR2 => by
+      have hStream : ∀ (gs : List (Goldilocks × GoldilocksExt2)),
+          qsum goldilocksExt2Card
+            (fun idx => if gs.any (fun g => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2) then 1 else 0) ≤
+            gs.length := by
+        intro gs
+        induction gs with
+        | nil =>
+          have hZ : qsum goldilocksExt2Card
+              (fun idx => if ([] : List (Goldilocks × GoldilocksExt2)).any (fun g => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2) then 1 else 0) =
+              qsum goldilocksExt2Card (fun _ => 0) := qsum_congr (fun _ => rfl)
+          rw [hZ, qsum_const]; omega
+        | cons g rest ih =>
+          simp only [List.any_cons]
+          exact Nat.le_trans
+            (qsum_indicator_or_le
+              (fun idx => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) g.1 g.2)
+              (fun idx => rest.any (fun r => spdzGatePinsAlpha (enumGoldilocksExt2.toFun idx) r.1 r.2)))
+            (by rw [List.length_cons, Nat.add_comm rest.length 1]
+                exact Nat.add_le_add (spdzGatePinsAlpha_count_le_one g.1 g.2) ih)
+      exact Nat.le_trans (hStream (unpackSpdzGates maxGates corrR2))
         (unpackSpdzGates_length_le maxGates corrR2) }
 
 /-- **Active Shamir Concurrent Multi-Session UC `ε`-Emulation (`active_shamir_concurrent_uc_emulation`)**:
@@ -4996,6 +5015,12 @@ theorem tooth_active_shamir_zero_point_breaks_simulation
 #tooth_pair Qsag.active_shamir_concurrent_uc_emulation vs Qsag.tooth_active_shamir_zero_point_breaks_simulation
 
 #verify_inhabited Qsag.active_shamir_concurrent_uc_emulation Qsag.witness_active_shamir_emulation_inhabited
+
+
+#export_eqns walPreSignStep walCommitBeforeRelease encodeUcSigningRequest encodeUcPqPublicKey
+  ucPqPublicKeyDigest execRealSession BlackBoxUcSimulator.finalizeIdealCut execIdealSession
+  poisonIdealCluster poisonRealCluster mapWalRejectReason RealProtocolExec IdealFunctionalityExec
+  activeShamirThresholdProtocol activeShamirBlackBoxSimulator
 
 end Qsag
 end

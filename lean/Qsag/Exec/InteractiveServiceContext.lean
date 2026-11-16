@@ -18,7 +18,7 @@ structure Environment (I O E : Type) where
   query : E → I
   receive : E → O → E
 
-def run {I O S E : Type} (m : Machine I O S) (z : Environment I O E) :
+@[expose] def run {I O S E : Type} (m : Machine I O S) (z : Environment I O E) :
     Nat → S → E → S × E
   | 0, s, e => (s, e)
   | n + 1, s, e =>
@@ -92,7 +92,7 @@ theorem bisimulation_prefixEquivalent {I O S T : Type}
 Both services erase their state; an interactive caller remembers their output. -/
 def bitService (b : Bool) : Machine Unit Bool Unit where
   step _ _ := ((), b)
-def remembering : Environment Unit Bool Bool where
+@[expose] def remembering : Environment Unit Bool Bool where
   query _ := ()
   receive _ b := b
 
