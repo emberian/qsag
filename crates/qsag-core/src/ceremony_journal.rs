@@ -1665,11 +1665,19 @@ mod tests {
 
     #[test]
     fn ceremony_context_persists_full_u128_spend_amount() {
-        let dir = temp_dir("ceremony_u128_spend");
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-ceremony-u128-spend-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ceremony.jrn");
         let key_id = [0x42; 32];
         let mac_key = [0x99; 32];
-        let mut journal = FsCeremonyJournal::provision_genesis(&path, key_id, mac_key).unwrap();
+        let mut journal = FsCeremonyJournal::create_new(&path, key_id, mac_key).unwrap();
         let high_spend: u128 = (1u128 << 105) | 0xdead_beef_cafe_babe_1234_5678u128;
         let ctx = CeremonyContext {
             policy_id: [0x77; 32],
@@ -1684,38 +1692,37 @@ mod tests {
             hedge_generation: 5,
         };
         let permit = journal
-            .persist_epoch_with_context(3, res, ctx)
+            .persist_with_context(res, Some(3), false, ctx)
             .expect("persist u128 spend");
+        let released0 = journal
+            .consume_release_with_context(permit, ctx)
+            .expect("live u128 spend context matches");
+        assert_eq!(released0.ceremony_id, [0x11; 32]);
         let ckpt = journal.checkpoint();
         drop(journal);
 
-        let reopened = FsCeremonyJournal::open_existing_at_least(&path, key_id, mac_key, ckpt)
+        let mut reopened = FsCeremonyJournal::open_existing_at_least(&path, key_id, mac_key, ckpt)
             .expect("reopen u128 ceremony journal");
+        assert_eq!(reopened.entries.last().unwrap().context.spend_amount, high_spend);
         let mut wrong_ctx = ctx;
         wrong_ctx.spend_amount ^= 1;
+        let retry_res = || CeremonyReservation {
+            ceremony_id: [0x11; 32],
+            key_id,
+            epoch_or_codeword: [0x22; 32],
+            seed_burn_cursor: 6,
+            hedge_generation: 6,
+        };
         assert!(
             reopened
-                .consume_release_with_context(
-                    FsCeremonyJournal::provision_genesis(dir.join("dummy.jrn"), key_id, mac_key)
-                        .unwrap()
-                        .persist_epoch_with_context(
-                            3,
-                            CeremonyReservation {
-                                ceremony_id: [0x11; 32],
-                                key_id,
-                                epoch_or_codeword: [0x22; 32],
-                                seed_burn_cursor: 5,
-                                hedge_generation: 5,
-                            },
-                            wrong_ctx,
-                        )
-                        .unwrap(),
-                    ctx,
-                )
+                .persist_with_context(retry_res(), Some(3), true, wrong_ctx)
                 .is_err()
         );
+        let retry_permit = reopened
+            .persist_with_context(retry_res(), Some(3), true, ctx)
+            .expect("retry with matching full u128 spend_amount succeeds");
         let released = reopened
-            .consume_release_with_context(permit, ctx)
+            .consume_release_with_context(retry_permit, ctx)
             .expect("exact u128 spend context matches");
         assert_eq!(released.ceremony_id, [0x11; 32]);
         std::fs::remove_dir_all(dir).unwrap();

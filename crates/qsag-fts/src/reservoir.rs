@@ -611,14 +611,13 @@ mod tests {
             params.signing_power_count() * 2
         );
 
-        let setup_from = |reservoirs: Vec<ParallelSeededDkgReservoir>| {
-            ParallelSeededThresholdSetup {
+        let setup_from =
+            |reservoirs: Vec<ParallelSeededDkgReservoir>| ParallelSeededThresholdSetup {
                 pk: pk.clone(),
                 shares: reservoirs.into_iter().map(|r| r.output.share).collect(),
                 public_tree_layers: public_tree_layers.clone(),
                 test_fault: None,
-            }
-        };
+            };
         let mut restored_setup = setup_from(reservoirs);
         let mut log = InMemoryBurnLog::default();
         let sig = restored_setup

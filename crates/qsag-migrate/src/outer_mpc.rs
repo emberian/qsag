@@ -1,6 +1,6 @@
 //! Replicated mixed-domain evaluation with active 1-of-3 malicious multiplication
 //! verification over authenticated confidential pairwise channels.
-use crate::circuit::{Domain, Value};
+use crate::circuit::{Domain, ONE, Value, ZERO};
 use crate::secret::{Secret, SecretVec, Wipe};
 use crate::threshold_mpc::{
     AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, ThresholdField,
@@ -186,15 +186,34 @@ pub trait Transport: Send {
     #[cfg(test)]
     fn audit_candidates(&self, _candidates: Vec<[u8; 32]>) {}
     #[cfg(test)]
-    fn audit_private_state(
+    fn audit_private_transcript_bytes(
         &self,
         _party: usize,
         _session: &[u8; 32],
-        _witness: &[u8; 32],
+        _witness: &[u8],
         _entropy: &[u8; 32],
         _keys: &[[u8; 32]; 2],
-        _statement: &crate::zk_engine::MigrationStatement,
+        _statement_bytes: &[u8],
     ) {
+    }
+    #[cfg(test)]
+    fn audit_private_state(
+        &self,
+        party: usize,
+        session: &[u8; 32],
+        witness: &[u8; 32],
+        entropy: &[u8; 32],
+        keys: &[[u8; 32]; 2],
+        statement: &crate::zk_engine::MigrationStatement,
+    ) {
+        self.audit_private_transcript_bytes(
+            party,
+            session,
+            witness,
+            entropy,
+            keys,
+            &statement.to_transcript_bytes(),
+        );
     }
     #[cfg(test)]
     fn test_fault_raw(&self) -> Option<[usize; 4]> {
@@ -687,11 +706,14 @@ fn squeeze_g3_challenge(xof: &mut WordSponge136) -> GoldExt3 {
 
 #[inline]
 fn squeeze_fp_challenge(xof: &mut WordSponge136, d: Domain) -> Value {
+    let wlen = d.limbs_len();
     loop {
-        let b = xof.squeeze_bytes32();
-        let mut v = crate::scalar::decode(&b);
-        if d == Domain::Ed {
+        let mut v = ZERO;
+        xof.squeeze_u64s(&mut v[..wlen]);
+        if d == Domain::Ed || d == Domain::PallasFp {
             v[3] &= 0x7fff_ffff_ffff_ffff;
+        } else if d == Domain::BlsFp {
+            v[5] &= 0x1fff_ffff_ffff_ffff;
         }
         if d.canonical(v) {
             return v;
@@ -740,6 +762,8 @@ impl FaultInjection {
                     Domain::Gold => 1,
                     Domain::Secp => 2,
                     Domain::Ed => 3,
+                    Domain::PallasFp => 4,
+                    Domain::BlsFp => 5,
                     Domain::Bit => 0,
                 };
                 [tag, call_countdown, lane, 0]
@@ -760,6 +784,16 @@ impl FaultInjection {
             },
             2 => Self::FieldMul {
                 domain: Domain::Secp,
+                call_countdown: a,
+                lane: b,
+            },
+            4 => Self::FieldMul {
+                domain: Domain::PallasFp,
+                call_countdown: a,
+                lane: b,
+            },
+            5 => Self::FieldMul {
+                domain: Domain::BlsFp,
                 call_countdown: a,
                 lane: b,
             },
@@ -788,6 +822,8 @@ pub(crate) struct Engine<T> {
     pending_secp: Vec<PendingFieldTriple>,
     pending_ed: Vec<PendingFieldTriple>,
     pending_gold: Vec<PendingFieldTriple>,
+    pending_pallas: Vec<PendingFieldTriple>,
+    pending_bls: Vec<PendingFieldTriple>,
     scratch_r: SecretVec<u64>,
     scratch_s: SecretVec<u64>,
     bit_scratch: Option<Box<BitCheckScratch>>,
@@ -858,6 +894,8 @@ impl<T: Transport> Engine<T> {
             pending_secp: Vec::new(),
             pending_ed: Vec::new(),
             pending_gold: Vec::new(),
+            pending_pallas: Vec::new(),
+            pending_bls: Vec::new(),
             scratch_r: SecretVec::new(),
             scratch_s: SecretVec::new(),
             bit_scratch: None,
@@ -882,6 +920,8 @@ impl<T: Transport> Engine<T> {
             self.pending_secp.is_empty()
                 && self.pending_ed.is_empty()
                 && self.pending_gold.is_empty()
+                && self.pending_pallas.is_empty()
+                && self.pending_bls.is_empty()
         );
         self.bit_scratch = None;
         for scratch in [
@@ -1775,19 +1815,21 @@ impl<T: Transport> Engine<T> {
         locals: &[Value],
         d: Domain,
     ) -> Result<SecretVec<[Value; 2]>, Error> {
-        let mut own = Vec::with_capacity(locals.len() * 4);
+        let wlen = d.limbs_len();
+        let mut own = Vec::with_capacity(locals.len() * wlen);
         let mut mine_vals = SecretVec::with_capacity(locals.len());
         for &lv in locals {
             let r0 = Self::field_pad(&mut self.pads[0], d);
             let r1 = Self::field_pad(&mut self.pads[1], d);
             let masked = d.add(lv, d.sub(r0, r1));
             mine_vals.push(masked);
-            own.extend_from_slice(&masked);
+            own.extend_from_slice(&masked[..wlen]);
         }
         let (_, next_raw) = self.raw_share_owned(own)?;
         let mut out = SecretVec::with_capacity(locals.len());
-        for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(4)) {
-            let nv: Value = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(wlen)) {
+            let mut nv = ZERO;
+            nv[..wlen].copy_from_slice(chunk);
             if !d.canonical(nv) {
                 self.poisoned = true;
                 return Err(Error::MultiplicationCheck);
@@ -1802,25 +1844,33 @@ impl<T: Transport> Engine<T> {
         shares: &[[Value; 2]],
         d: Domain,
     ) -> Result<Vec<Value>, Error> {
-        let mut payload = Vec::with_capacity(shares.len() * 8);
+        let wlen = d.limbs_len();
+        let stride = 2 * wlen;
+        let mut payload = Vec::with_capacity(shares.len() * stride);
         for pair in shares {
-            payload.extend_from_slice(&pair[0]);
-            payload.extend_from_slice(&pair[1]);
+            payload.extend_from_slice(&pair[0][..wlen]);
+            payload.extend_from_slice(&pair[1][..wlen]);
         }
         let received = self.raw_exchange([payload.clone(), payload])?;
-        if received.iter().any(|v| v.len() != shares.len() * 8) {
+        if received.iter().any(|v| v.len() != shares.len() * stride) {
             self.poisoned = true;
             return Err(Error::InvalidConfiguration);
         }
         let mut out = Vec::with_capacity(shares.len());
         for (i, a) in shares.iter().enumerate() {
             let prev: [Value; 2] = core::array::from_fn(|j| {
-                let s = &received[0][8 * i + 4 * j..8 * i + 4 * j + 4];
-                [s[0], s[1], s[2], s[3]]
+                let mut v = ZERO;
+                v[..wlen].copy_from_slice(
+                    &received[0][stride * i + wlen * j..stride * i + wlen * (j + 1)],
+                );
+                v
             });
             let next: [Value; 2] = core::array::from_fn(|j| {
-                let s = &received[1][8 * i + 4 * j..8 * i + 4 * j + 4];
-                [s[0], s[1], s[2], s[3]]
+                let mut v = ZERO;
+                v[..wlen].copy_from_slice(
+                    &received[1][stride * i + wlen * j..stride * i + wlen * (j + 1)],
+                );
+                v
             });
             if prev[1] != a[0] {
                 self.poisoned = true;
@@ -1835,10 +1885,10 @@ impl<T: Transport> Engine<T> {
         Ok(out)
     }
 
-    /// Batch-verify large-prime (`Secp256k1` / `Ed25519`, `p > 2^254.99`) multiplications
-    /// via replicated BBCGGI19 inner-product folding + zero-knowledge base-case sacrifice.
-    /// Per-flush cheating probability is `<= FIELD_CHECK_NUMERATOR / (p - 1) = 35 / (p - 1)`:
-    /// `< 2^-250.87` for `Secp` and `< 2^-249.87` for `Ed`, hence `< 2^-249` for both.
+    /// Batch-verify large-prime (`Secp256k1` / `Ed25519` / `PallasFp` / `BlsFp`, `p > 2^254`)
+    /// multiplications via replicated BBCGGI19 inner-product folding + zero-knowledge base-case
+    /// sacrifice. Per-flush cheating probability is `<= FIELD_CHECK_NUMERATOR / (p - 1) =
+    /// 35 / (p - 1) < 2^-248`.
     fn verify_pending_large_prime_slice(
         &mut self,
         triples: &[PendingFieldTriple],
@@ -1864,7 +1914,7 @@ impl<T: Transport> Engine<T> {
             fn drop(&mut self) {
                 for vec_buf in [&mut self.a_vec, &mut self.b_vec] {
                     if vec_buf.len() < self.cap && vec_buf.capacity() >= self.cap {
-                        vec_buf.resize(self.cap, [[0; 4]; 2]);
+                        vec_buf.resize(self.cap, [ZERO; 2]);
                     }
                     for pair in vec_buf.iter_mut() {
                         ct_zeroize_u64s(&mut pair[0]);
@@ -1887,10 +1937,10 @@ impl<T: Transport> Engine<T> {
             a_vec: Vec::with_capacity(total + 1),
             b_vec: Vec::with_capacity(total + 1),
             cap: total + 1,
-            c_claim: [[0; 4]; 2],
-            u_sh: [[0; 4]; 2],
-            v_sh: [[0; 4]; 2],
-            d_loc: [[0; 4]; 2],
+            c_claim: [ZERO; 2],
+            u_sh: [ZERO; 2],
+            v_sh: [ZERO; 2],
+            d_loc: [ZERO; 2],
         };
 
         for (x_fw, y_fw, z_fw) in triples {
@@ -1909,11 +1959,11 @@ impl<T: Transport> Engine<T> {
 
         while sc.a_vec.len() > 1 {
             if sc.a_vec.len() % 2 == 1 {
-                sc.a_vec.push([[0; 4]; 2]);
-                sc.b_vec.push([[0; 4]; 2]);
+                sc.a_vec.push([ZERO; 2]);
+                sc.b_vec.push([ZERO; 2]);
             }
             let half = sc.a_vec.len() / 2;
-            sc.d_loc = [[0u64; 4]; 2];
+            sc.d_loc = [ZERO; 2];
             for k in 0..half {
                 sc.d_loc[0] = d.add(
                     sc.d_loc[0],
@@ -1998,7 +2048,7 @@ impl<T: Transport> Engine<T> {
         let mut xof_base = WordSponge136::from_shake_seed(&seed_base);
         let rb = loop {
             let cand = squeeze_fp_challenge(&mut xof_base, d);
-            if cand != [0; 4] {
+            if cand != ZERO {
                 break cand;
             }
         };
@@ -2320,6 +2370,8 @@ impl<T: Transport> Engine<T> {
             Domain::Secp => core::mem::take(&mut self.pending_secp),
             Domain::Ed => core::mem::take(&mut self.pending_ed),
             Domain::Gold => core::mem::take(&mut self.pending_gold),
+            Domain::PallasFp => core::mem::take(&mut self.pending_pallas),
+            Domain::BlsFp => core::mem::take(&mut self.pending_bls),
             Domain::Bit => return self.flush_pending_bits(),
         };
         if batch.is_empty() {
@@ -2347,6 +2399,8 @@ impl<T: Transport> Engine<T> {
         self.flush_pending_domain(Domain::Secp)?;
         self.flush_pending_domain(Domain::Ed)?;
         self.flush_pending_domain(Domain::Gold)?;
+        self.flush_pending_domain(Domain::PallasFp)?;
+        self.flush_pending_domain(Domain::BlsFp)?;
         Ok(())
     }
 
@@ -2558,7 +2612,7 @@ pub(crate) trait Gadgets: Core {
     fn number(&self, x: Value, n: usize) -> Word<Self::Bit> {
         (0..n)
             .map(|i| {
-                self.constant(if i < 256 && (x[i / 64] >> (i % 64)) & 1 != 0 {
+                self.constant(if i < 384 && (x[i / 64] >> (i % 64)) & 1 != 0 {
                     u64::MAX
                 } else {
                     0
@@ -2911,7 +2965,9 @@ pub(crate) trait Gadgets: Core {
                 a.iter().copied().collect()
             });
         }
-        let mut coefficient = [value[0], value[1], value[2], value[3], 0];
+        let mut coefficient = [
+            value[0], value[1], value[2], value[3], value[4], value[5], 0,
+        ];
         let mut digits = Vec::new();
         let mut shift = 0;
         while coefficient.iter().any(|&x| x != 0) {
@@ -2929,10 +2985,10 @@ pub(crate) trait Gadgets: Core {
                     coefficient[0] -= 1;
                 }
             }
-            for i in 0..4 {
+            for i in 0..6 {
                 coefficient[i] = (coefficient[i] >> 1) | (coefficient[i + 1] << 63);
             }
-            coefficient[4] >>= 1;
+            coefficient[6] >>= 1;
             shift += 1;
         }
         if digits.is_empty() {
@@ -2956,7 +3012,7 @@ pub(crate) trait Gadgets: Core {
             })
             .collect();
         if correction != 0 {
-            rows.push(self.number([correction, 0, 0, 0], width));
+            rows.push(self.number([correction, 0, 0, 0, 0, 0], width));
         }
         let wide = self.sum_rows(rows, width)?;
         self.reduce_wide(wide, d)
@@ -2972,7 +3028,7 @@ pub(crate) trait Gadgets: Core {
             Domain::Ed => 19u64,
             Domain::Secp => 0x1_0000_03d1,
             Domain::Gold => 0xffff_ffff,
-            Domain::Bit => unreachable!(),
+            Domain::Bit | Domain::PallasFp | Domain::BlsFp => unreachable!(),
         };
         let cbits = 64 - c.leading_zeros() as usize;
         while wide.len() > n + 1 {
@@ -3114,7 +3170,7 @@ pub(crate) trait Gadgets: Core {
         let gate = self.fopen_many(&[gate], d)?;
         let nonzero = gate[0]
             .iter()
-            .fold(0u64, |acc, v| acc | v[0] | v[1] | v[2] | v[3]);
+            .fold(0u64, |acc, v| acc | v[0] | v[1] | v[2] | v[3] | v[4] | v[5]);
         if nonzero == 0 {
             self.poison();
             return Err(Error::InvalidProof);
@@ -3125,7 +3181,7 @@ pub(crate) trait Gadgets: Core {
             let mask = self.frandom(d)?;
             let product = self.fmul(a, &mask, d)?;
             let opened = self.fopen_many(&[product], d)?;
-            if opened[0].contains(&[0; 4]) {
+            if opened[0].contains(&ZERO) {
                 continue;
             }
             let inverses: Vec<Value> = opened[0].iter().map(|u| d.inverse(*u)).collect();
@@ -3139,10 +3195,12 @@ impl<E: Core> Gadgets for E {}
 
 fn domain_c_const(d: Domain) -> Value {
     match d {
-        Domain::Ed => [19, 0, 0, 0],
-        Domain::Secp => [0x1_0000_03d1, 0, 0, 0],
-        Domain::Gold => [0xffff_ffff, 0, 0, 0],
-        Domain::Bit => [0, 0, 0, 0],
+        Domain::Ed => [19, 0, 0, 0, 0, 0],
+        Domain::Secp => [0x1_0000_03d1, 0, 0, 0, 0, 0],
+        Domain::Gold => [0xffff_ffff, 0, 0, 0, 0, 0],
+        Domain::PallasFp => crate::limbs::sbb([0, 0, 0, 1u64 << 63, 0, 0], d.modulus()).0,
+        Domain::BlsFp => crate::limbs::sbb([0, 0, 0, 0, 0, 1u64 << 61], d.modulus()).0,
+        Domain::Bit => ZERO,
     }
 }
 
@@ -3292,11 +3350,11 @@ impl<T: Transport> Engine<T> {
     pub fn fconstant(&self, value: Value) -> FieldWord {
         vec![
             [
-                if self.party == 0 { value } else { [0; 4] },
+                if self.party == 0 { value } else { ZERO },
                 if (self.party + 1) % 3 == 0 {
                     value
                 } else {
-                    [0; 4]
+                    ZERO
                 }
             ];
             64
@@ -3308,13 +3366,41 @@ impl<T: Transport> Engine<T> {
             loop {
                 let w = Secret(s.squeeze_u64());
                 if *w < GOLDILOCKS_P {
-                    return [*w, 0, 0, 0];
+                    return [*w, 0, 0, 0, 0, 0];
                 }
             }
         }
+        if d == Domain::PallasFp {
+            let mut raw = Secret([0u64; 8]);
+            s.squeeze_u64s(&mut raw[..]);
+            let lo = [raw[0], raw[1], raw[2], raw[3] & ((1u64 << 62) - 1), 0, 0];
+            let hi = [raw[4], raw[5], raw[6], raw[7] & ((1u64 << 62) - 1), 0, 0];
+            return d.add(lo, d.mul([0, 0, 0, 1u64 << 62, 0, 0], hi));
+        }
+        if d == Domain::BlsFp {
+            let mut raw = Secret([0u64; 12]);
+            s.squeeze_u64s(&mut raw[..]);
+            let lo = [
+                raw[0],
+                raw[1],
+                raw[2],
+                raw[3],
+                raw[4],
+                raw[5] & ((1u64 << 60) - 1),
+            ];
+            let hi = [
+                raw[6],
+                raw[7],
+                raw[8],
+                raw[9],
+                raw[10],
+                raw[11] & ((1u64 << 60) - 1),
+            ];
+            return d.add(lo, d.mul([0, 0, 0, 0, 0, 1u64 << 60], hi));
+        }
         loop {
-            let mut words = Secret([0u64; 4]);
-            s.squeeze_u64s(&mut words[..]);
+            let mut words = Secret(ZERO);
+            s.squeeze_u64s(&mut words[..4]);
             if d == Domain::Ed {
                 words[3] &= 0x7fff_ffff_ffff_ffff;
             }
@@ -3347,7 +3433,9 @@ impl<T: Transport> Engine<T> {
             return Ok(Vec::new());
         }
         let k = pairs.len();
-        let mut own_flat = Vec::with_capacity(k * 256);
+        let wlen = d.limbs_len();
+        let word_u64s = 64 * wlen;
+        let mut own_flat = Vec::with_capacity(k * word_u64s);
         for (pair_idx, &(a, b)) in pairs.iter().enumerate() {
             #[cfg(test)]
             let inject_lane = match self.fault {
@@ -3383,24 +3471,31 @@ impl<T: Transport> Engine<T> {
                 ));
                 #[cfg(test)]
                 let prod = Secret(if inject_lane == Some(lane_idx) {
-                    d.add(*prod, [1, 0, 0, 0])
+                    d.add(*prod, ONE)
                 } else {
                     *prod
                 });
-                own_flat.extend_from_slice(&prod[..]);
+                own_flat.extend_from_slice(&prod[..wlen]);
             }
         }
         let (own_raw, next_raw) = self.raw_share_owned(own_flat)?;
         let mut results = Vec::with_capacity(k);
-        for (word_own, word_next) in own_raw.chunks_exact(256).zip(next_raw.chunks_exact(256)) {
+        for (word_own, word_next) in own_raw
+            .chunks_exact(word_u64s)
+            .zip(next_raw.chunks_exact(word_u64s))
+        {
             let mut fw = FieldWord::with_capacity(64);
-            for (av, b_slice) in word_own.chunks_exact(4).zip(word_next.chunks_exact(4)) {
-                let bv: Value = [b_slice[0], b_slice[1], b_slice[2], b_slice[3]];
+            for (av_slice, b_slice) in word_own.chunks_exact(wlen).zip(word_next.chunks_exact(wlen))
+            {
+                let mut av = ZERO;
+                let mut bv = ZERO;
+                av[..wlen].copy_from_slice(av_slice);
+                bv[..wlen].copy_from_slice(b_slice);
                 if !d.canonical(bv) {
                     self.poisoned = true;
                     return Err(Error::MultiplicationCheck);
                 }
-                fw.push([[av[0], av[1], av[2], av[3]], bv]);
+                fw.push([av, bv]);
             }
             results.push(fw);
         }
@@ -3408,6 +3503,8 @@ impl<T: Transport> Engine<T> {
             Domain::Secp => &mut self.pending_secp,
             Domain::Ed => &mut self.pending_ed,
             Domain::Gold => &mut self.pending_gold,
+            Domain::PallasFp => &mut self.pending_pallas,
+            Domain::BlsFp => &mut self.pending_bls,
             Domain::Bit => return Err(Error::InvalidConfiguration),
         };
         for (&(a, b), z) in pairs.iter().zip(&results) {
@@ -3425,31 +3522,38 @@ impl<T: Transport> Engine<T> {
         }
         self.verify_all_pending()?;
         let k = words.len();
-        let mut payload = Vec::with_capacity(k * 512);
+        let wlen = d.limbs_len();
+        let lane_u64s = 2 * wlen;
+        let word_u64s = 64 * lane_u64s;
+        let mut payload = Vec::with_capacity(k * word_u64s);
         for w in words {
             for pair in w {
-                payload.extend_from_slice(&pair[0]);
-                payload.extend_from_slice(&pair[1]);
+                payload.extend_from_slice(&pair[0][..wlen]);
+                payload.extend_from_slice(&pair[1][..wlen]);
             }
         }
         let received = self.raw_exchange([payload.clone(), payload])?;
-        if received.iter().any(|v| v.len() != k * 512) {
+        if received.iter().any(|v| v.len() != k * word_u64s) {
             self.poisoned = true;
             return Err(Error::InvalidConfiguration);
         }
         let mut all_out = Vec::with_capacity(k);
         for (w_idx, w) in words.iter().enumerate() {
-            let base_w = w_idx * 512;
+            let base_w = w_idx * word_u64s;
             let mut out = Vec::with_capacity(64);
             for (lane, a) in w.iter().enumerate() {
-                let off = base_w + 8 * lane;
+                let off = base_w + lane_u64s * lane;
                 let prev: [Value; 2] = core::array::from_fn(|j| {
-                    let s = &received[0][off + 4 * j..off + 4 * j + 4];
-                    [s[0], s[1], s[2], s[3]]
+                    let mut v = ZERO;
+                    v[..wlen]
+                        .copy_from_slice(&received[0][off + wlen * j..off + wlen * (j + 1)]);
+                    v
                 });
                 let next: [Value; 2] = core::array::from_fn(|j| {
-                    let s = &received[1][off + 4 * j..off + 4 * j + 4];
-                    [s[0], s[1], s[2], s[3]]
+                    let mut v = ZERO;
+                    v[..wlen]
+                        .copy_from_slice(&received[1][off + wlen * j..off + wlen * (j + 1)]);
+                    v
                 });
                 if prev[1] != a[0] {
                     self.poisoned = true;
@@ -3492,34 +3596,8 @@ impl<T: Transport> Engine<T> {
         let p0 = self.component_owner_bits(words, d, 0);
         let p1 = self.component_owner_bits(words, d, 1);
         let p2 = self.component_owner_bits(words, d, 2);
-        let (sum01, carry1) = self.add_many(&p0, &p1, 0)?;
-        let (ring_sum, carry2) = self.add_many(&sum01, &p2, 0)?;
-        // S = ring_sum + (carry1+carry2)*2^n. Encode k*c with k in
-        // {0,1,2}, using mutually exclusive low/high bits of k, then reduce once.
-        // ring_sum + 2*c < 2*p for all supported fields, including Goldilocks.
-        let pairs: SecretVec<_> = carry1.iter().copied().zip(carry2.iter().copied()).collect();
-        let high = self.and(&pairs)?;
-        let c = domain_c_const(d)[0];
-        let correction: Vec<Word> = carry1
-            .iter()
-            .zip(&carry2)
-            .zip(&high)
-            .map(|((&a, &b), &hi)| {
-                (0..d.width())
-                    .map(|bit| {
-                        let mut out = self.constant(0);
-                        if bit < 64 && (c >> bit) & 1 != 0 {
-                            out = out ^ a ^ b;
-                        }
-                        if bit < 64 && ((2 * c) >> bit) & 1 != 0 {
-                            out = out ^ hi;
-                        }
-                        out
-                    })
-                    .collect()
-            })
-            .collect();
-        self.field_add_many(&ring_sum, &correction, d)
+        let sum01 = self.field_add_many(&p0, &p1, d)?;
+        self.field_add_many(&sum01, &p2, d)
     }
 
     /// Convert using a uniform mask in Z/(2^n), with secret carry correction.
@@ -3531,6 +3609,7 @@ impl<T: Transport> Engine<T> {
         words: &[Word],
         d: Domain,
     ) -> Result<Vec<FieldWord>, Error> {
+        let wlen = d.limbs_len();
         let mut out = Vec::with_capacity(words.len());
         for chunk in words.chunks(CONVERT_CHUNK_WORDS) {
             let masks: Vec<FieldWord> = (0..chunk.len())
@@ -3538,10 +3617,12 @@ impl<T: Transport> Engine<T> {
                     (0..64)
                         .map(|_| {
                             core::array::from_fn(|side| {
-                                let mut raw = Secret([0; 4]);
-                                self.pads[side].squeeze_u64s(&mut raw[..d.width().div_ceil(64)]);
-                                if d == Domain::Ed {
+                                let mut raw = Secret(ZERO);
+                                self.pads[side].squeeze_u64s(&mut raw[..wlen]);
+                                if d == Domain::Ed || d == Domain::PallasFp {
                                     raw[3] &= 0x7fff_ffff_ffff_ffff;
+                                } else if d == Domain::BlsFp {
+                                    raw[5] &= 0x1fff_ffff_ffff_ffff;
                                 }
                                 *raw
                             })
@@ -3576,11 +3657,11 @@ impl<T: Transport> Engine<T> {
         let (deltas, no_borrow) = self.add_many(words, &not_mask, u64::MAX)?;
         carries.extend(no_borrow.iter().map(|&b| b ^ ones));
         // Each raw component is below 2^n < 2p. This single conditional
-        // subtraction canonicalizes it, including the Goldilocks boundary.
+        // subtraction canonicalizes it across all 6 limbs.
         for mask in &mut masks {
             for pair in mask.iter_mut() {
                 for value in pair {
-                    *value = crate::scalar::sub(*value, d.modulus(), d.modulus());
+                    *value = crate::limbs::reduce_once(*value, false, d.modulus());
                 }
             }
         }
@@ -3599,11 +3680,11 @@ impl<T: Transport> Engine<T> {
         let opened = self.open(&flat)?;
         for (mask, bits) in corrected.iter_mut().zip(opened.chunks_exact(width)) {
             for (lane, pair) in mask.iter_mut().enumerate() {
-                let mut value = [0; 4];
+                let mut value = ZERO;
                 for (bit, &word) in bits.iter().enumerate() {
                     value[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
                 }
-                let value = crate::scalar::sub(value, d.modulus(), d.modulus());
+                let value = crate::limbs::reduce_once(value, false, d.modulus());
                 for (side, part) in pair.iter_mut().enumerate() {
                     if (self.party + side) % 3 == 0 {
                         *part = d.add(*part, value);
@@ -3659,9 +3740,9 @@ impl<T: Transport> Engine<T> {
                         .map(|lane| {
                             core::array::from_fn(|j| {
                                 if (self.party + j) % 3 == owner {
-                                    [(bit.0[j] >> lane) & 1, 0, 0, 0]
+                                    [(bit.0[j] >> lane) & 1, 0, 0, 0, 0, 0]
                                 } else {
-                                    [0; 4]
+                                    ZERO
                                 }
                             })
                         })
@@ -3680,7 +3761,7 @@ impl<T: Transport> Engine<T> {
             .zip(&ab01)
             .map(|((a, b), ab)| {
                 let sum = self.fadd(a, b, d);
-                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0], d), d)
+                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0, 0, 0], d), d)
             })
             .collect();
         let pairs12: Vec<_> = firsts.iter().zip(&p2).collect();
@@ -3691,7 +3772,7 @@ impl<T: Transport> Engine<T> {
             .zip(&ab12)
             .map(|((f, c), ab)| {
                 let sum = self.fadd(f, c, d);
-                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0], d), d)
+                self.fsub(&sum, &self.fscale(ab, [2, 0, 0, 0, 0, 0], d), d)
             })
             .collect())
     }
@@ -3814,23 +3895,23 @@ pub(crate) mod tests {
                 .unwrap()
                 .extend(candidates);
         }
-        fn audit_private_state(
+        fn audit_private_transcript_bytes(
             &self,
             party: usize,
             session: &[u8; 32],
-            witness: &[u8; 32],
+            witness: &[u8],
             entropy: &[u8; 32],
             keys: &[[u8; 32]; 2],
-            statement: &crate::zk_engine::MigrationStatement,
+            statement_bytes: &[u8],
         ) {
             if let Some(trace) = &self.trace {
                 let mut private = trace.private_view.lock().unwrap();
                 assert!(private.is_empty());
                 private.push(party as u8);
-                for bytes in [session, witness, entropy, &keys[0], &keys[1]] {
+                for bytes in [session.as_slice(), witness, entropy, &keys[0], &keys[1]] {
                     private.extend_from_slice(bytes);
                 }
-                private.extend_from_slice(&statement.to_transcript_bytes());
+                private.extend_from_slice(statement_bytes);
                 trace.party_id.store(party, Ordering::Release);
             }
         }
@@ -3901,16 +3982,16 @@ pub(crate) mod tests {
     fn masked_inverse_matches_plaintext_and_rejects_zero() {
         run(|party, network| {
             let mut e = Engine::new(party, [0x91; 32], keys(party), network).unwrap();
-            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for d in Domain::ALL_FIELDS {
                 let a = e.frandom(d);
                 let clear = e.fopen_many(core::slice::from_ref(&a), d).unwrap();
                 let inverse = e.finverse(&a, d).unwrap();
                 let actual = e.fopen_many(&[inverse], d).unwrap();
                 for (a, b) in clear[0].iter().zip(&actual[0]) {
-                    assert_eq!(d.mul(*a, *b), [1, 0, 0, 0]);
+                    assert_eq!(d.mul(*a, *b), ONE);
                 }
             }
-            let zero = e.fconstant([0; 4]);
+            let zero = e.fconstant(ZERO);
             assert!(matches!(
                 e.finverse(&zero, Domain::Secp),
                 Err(Error::InvalidProof)
@@ -4012,6 +4093,8 @@ pub(crate) mod tests {
             (Domain::Gold, &[17usize][..]),
             (Domain::Secp, &[0, 63]),
             (Domain::Ed, &[40]),
+            (Domain::PallasFp, &[11, 52]),
+            (Domain::BlsFp, &[7, 61]),
             (Domain::Gold, &[3, 4, 5, 62]),
         ] {
             run(|party, network| {
@@ -4019,12 +4102,12 @@ pub(crate) mod tests {
                 let mut e = FieldOpenings(engine, Vec::new());
                 let random = Core::frandom(&mut e, d).unwrap();
                 let keep: Vec<Value> = (0..64)
-                    .map(|lane| [u64::from(!zero_lanes.contains(&lane)), 0, 0, 0])
+                    .map(|lane| [u64::from(!zero_lanes.contains(&lane)), 0, 0, 0, 0, 0])
                     .collect();
                 let a = e.fscale_lanes(&random, &keep, d);
                 assert!(matches!(e.finverse(&a, d), Err(Error::InvalidProof)));
                 // What was opened is the same word whichever lanes are zero.
-                assert_eq!(e.1, vec![vec![[0u64; 4]; 64]]);
+                assert_eq!(e.1, vec![vec![ZERO; 64]]);
                 assert!(matches!(
                     Core::frandom(&mut e, d).and_then(|r| e.fopen_many(&[r], d)),
                     Err(Error::MultiplicationCheck)
@@ -4379,11 +4462,11 @@ pub(crate) mod tests {
                 }
             }
             for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
-                let a = d.sub(d.modulus(), [2, 0, 0, 0]);
-                let b = [0xfedc_ba98_7654_3211, 0, 0, 0];
+                let a = d.sub(d.modulus(), [2, 0, 0, 0, 0, 0]);
+                let b = [0xfedc_ba98_7654_3211, 0, 0, 0, 0, 0];
                 let aa = e.number(a, d.width());
                 let bb = e.number(b, d.width());
-                let scale = d.sub(d.modulus(), [1, 0, 0, 0]);
+                let scale = d.sub(d.modulus(), ONE);
                 for operation in 0..4 {
                     let out = match operation {
                         0 => e.field_add(&aa, &bb, d),
@@ -4398,6 +4481,29 @@ pub(crate) mod tests {
                         2 => d.mul(a, b),
                         _ => d.mul(a, scale),
                     };
+                    let clear = e.open(&out).unwrap();
+                    for (i, &bit) in clear.iter().enumerate() {
+                        assert_eq!(
+                            bit,
+                            if (expected[i / 64] >> (i % 64)) & 1 != 0 {
+                                u64::MAX
+                            } else {
+                                0
+                            },
+                            "domain {d:?}, operation {operation}, bit {i}"
+                        );
+                    }
+                }
+            }
+            for d in [Domain::PallasFp, Domain::BlsFp] {
+                let a = d.sub(d.modulus(), [2, 0, 0, 0, 0, 0]);
+                let b = [0xfedc_ba98_7654_3211, 0, 0, 0, 0, 0];
+                let aa = e.number(a, d.width());
+                let bb = e.number(b, d.width());
+                for (operation, out, expected) in [
+                    (0, e.field_add(&aa, &bb, d).unwrap(), d.add(a, b)),
+                    (1, e.field_sub(&aa, &bb, d).unwrap(), d.sub(a, b)),
+                ] {
                     let clear = e.open(&out).unwrap();
                     for (i, &bit) in clear.iter().enumerate() {
                         assert_eq!(
@@ -4435,9 +4541,9 @@ pub(crate) mod tests {
                         core::array::from_fn(|side| {
                             let bytes =
                                 cshake256_framed_32(b"OUTER.FIELD.TEST", &[&[lane, side as u8]]);
-                            let mut value = crate::scalar::decode(&bytes);
+                            let mut value = crate::circuit::lift4(crate::scalar::decode(&bytes));
                             if d == Domain::Gold {
-                                value = [value[0] >> 1, 0, 0, 0];
+                                value = [value[0] >> 1, 0, 0, 0, 0, 0];
                             } else {
                                 value[3] >>= 2;
                             }
@@ -4459,7 +4565,7 @@ pub(crate) mod tests {
                         0 => e.field_add(&operands[0], &operands[1], d),
                         1 => e.field_sub(&operands[0], &operands[1], d),
                         2 => e.field_mul(&operands[0], &operands[1], d),
-                        _ => e.field_scale(&operands[0], [27, 0, 0, 0], d),
+                        _ => e.field_scale(&operands[0], [27, 0, 0, 0, 0, 0], d),
                     }
                     .unwrap();
                     let clear = e.open(&out).unwrap();
@@ -4468,7 +4574,7 @@ pub(crate) mod tests {
                             0 => d.add(v[0], v[1]),
                             1 => d.sub(v[0], v[1]),
                             2 => d.mul(v[0], v[1]),
-                            _ => d.mul(v[0], [27, 0, 0, 0]),
+                            _ => d.mul(v[0], [27, 0, 0, 0, 0, 0]),
                         };
                         for (bit, &word) in clear.iter().enumerate() {
                             assert_eq!((word >> lane) & 1, (expected[bit / 64] >> (bit % 64)) & 1);
@@ -4483,15 +4589,25 @@ pub(crate) mod tests {
     fn ring_mask_conversion_covers_component_boundaries_and_all_carries() {
         run(|party, network| {
             let mut e = Engine::new(party, [0x63; 32], keys(party), network).unwrap();
-            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for d in Domain::ALL_FIELDS {
                 let max = match d {
-                    Domain::Gold => [u64::MAX, 0, 0, 0],
-                    Domain::Ed => [u64::MAX, u64::MAX, u64::MAX, 0x7fff_ffff_ffff_ffff],
-                    _ => [u64::MAX; 4],
+                    Domain::Gold => [u64::MAX, 0, 0, 0, 0, 0],
+                    Domain::Ed | Domain::PallasFp => {
+                        [u64::MAX, u64::MAX, u64::MAX, 0x7fff_ffff_ffff_ffff, 0, 0]
+                    }
+                    Domain::BlsFp => [
+                        u64::MAX,
+                        u64::MAX,
+                        u64::MAX,
+                        u64::MAX,
+                        u64::MAX,
+                        0x1fff_ffff_ffff_ffff,
+                    ],
+                    _ => [u64::MAX, u64::MAX, u64::MAX, u64::MAX, 0, 0],
                 };
-                let zero = [0; 4];
-                let one = [1, 0, 0, 0];
-                let last = crate::scalar::sub(d.modulus(), one, d.modulus());
+                let zero = ZERO;
+                let one = ONE;
+                let last = d.sub(ZERO, one);
                 let cases = [
                     [zero; 3],
                     [max, one, zero],
@@ -4528,7 +4644,7 @@ pub(crate) mod tests {
                     .map(|mask| {
                         mask.iter()
                             .map(|pair| {
-                                pair.map(|v| crate::scalar::sub(v, d.modulus(), d.modulus()))
+                                pair.map(|v| crate::limbs::reduce_once(v, false, d.modulus()))
                             })
                             .collect()
                     })
@@ -4540,11 +4656,11 @@ pub(crate) mod tests {
                     .zip(cases)
                 {
                     let sum = case.into_iter().fold(zero, |acc, v| {
-                        d.add(acc, crate::scalar::sub(v, d.modulus(), d.modulus()))
+                        d.add(acc, crate::limbs::reduce_once(v, false, d.modulus()))
                     });
                     let opened = e.open(bits).unwrap();
                     for lane in 0..64 {
-                        let mut actual = [0; 4];
+                        let mut actual = ZERO;
                         for (bit, &word) in opened.iter().enumerate() {
                             actual[bit / 64] |= ((word >> lane) & 1) << (bit % 64);
                         }
@@ -4563,20 +4679,16 @@ pub(crate) mod tests {
     fn masked_field_conversions_and_products_match_all_lanes() {
         run(|p, n| {
             let mut e = Engine::new(p, [61; 32], keys(p), n).unwrap();
-            for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for d in Domain::ALL_FIELDS {
                 let values: Vec<[Value; 2]> = (0..64u8)
                     .map(|lane| {
                         core::array::from_fn(|side| {
-                            let mut value = crate::scalar::decode(&cshake256_framed_32(
+                            let seed = cshake256_framed_32(
                                 b"OUTER.CONVERT.TEST",
-                                &[&[lane, side as u8]],
-                            ));
-                            if d == Domain::Gold {
-                                value = [value[0] >> 1, 0, 0, 0];
-                            } else {
-                                value[3] >>= 2;
-                            }
-                            value
+                                &[&[lane, side as u8, d.width() as u8]],
+                            );
+                            let mut xof = WordSponge136::from_shake_seed(&seed);
+                            squeeze_fp_challenge(&mut xof, d)
                         })
                     })
                     .collect();
@@ -4596,7 +4708,7 @@ pub(crate) mod tests {
                     e.fadd(&a, &b, d),
                     e.fsub(&a, &b, d),
                     product,
-                    e.fscale(&a, [27, 0, 0, 0], d),
+                    e.fscale(&a, [27, 0, 0, 0, 0, 0], d),
                 ];
                 for (op, output) in outputs.iter().enumerate() {
                     let encoded = e.field_to_bits(output, d).unwrap();
@@ -4606,7 +4718,7 @@ pub(crate) mod tests {
                             0 => d.add(x[0], x[1]),
                             1 => d.sub(x[0], x[1]),
                             2 => d.mul(x[0], x[1]),
-                            _ => d.mul(x[0], [27, 0, 0, 0]),
+                            _ => d.mul(x[0], [27, 0, 0, 0, 0, 0]),
                         };
                         for (bit, word) in clear.iter().enumerate() {
                             assert_eq!((word >> lane) & 1, (expected[bit / 64] >> (bit % 64)) & 1);
@@ -4725,27 +4837,29 @@ pub(crate) mod tests {
         }
         impl Transport for CorruptFieldReshare {
             fn exchange(&mut self, mut out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
-                // `fmul` resharing has 256 `u64`s to peer 0 and 0 `u64`s to peer 1.
+                let wlen = self.domain.limbs_len();
+                // `fmul` resharing has `64 * wlen` `u64`s to peer 0 and `0` `u64`s to peer 1.
                 if self.is_corrupt
                     && !self.corrupted_once
-                    && out[0].payload.len() == 256
+                    && out[0].payload.len() == 64 * wlen
                     && out[1].payload.is_empty()
                 {
                     self.corrupted_once = true;
                     // Add 1 modulo `p` to lane 13's share so it remains 100% canonical `< p`
                     // AND carries a valid pairwise MAC!
-                    let off = 13 * 4;
-                    let cur: Value = out[0].payload[off..off + 4].try_into().unwrap();
-                    let bad = self.domain.add(cur, [1, 0, 0, 0]);
-                    out[0].payload[off..off + 4].copy_from_slice(&bad);
+                    let off = 13 * wlen;
+                    let mut cur = ZERO;
+                    cur[..wlen].copy_from_slice(&out[0].payload[off..off + wlen]);
+                    let bad = self.domain.add(cur, ONE);
+                    out[0].payload[off..off + wlen].copy_from_slice(&bad[..wlen]);
                     out[0].tag = valid_mac_tag(&self.key0, &self.session, &out[0]);
                 }
-                // Detect if `fopen_many` (`512` `u64`s to both peers) or `open` of A2B/B2A delta
-                // (`d.width() * 2` `u64`s: `128`, `510`, or `512` `u64`s) ever gets transmitted!
+                // Detect if `fopen_many` (`128 * wlen` `u64`s to both peers) or `open` of A2B/B2A
+                // delta (`d.width() * 2` `u64`s) ever gets transmitted!
                 let len0 = out[0].payload.len();
                 let len1 = out[1].payload.len();
                 let is_conversion_delta_open =
-                    len0 == len1 && (len0 == 512 || len0 == 510 || len0 == 128);
+                    len0 == len1 && (len0 == 128 * wlen || len0 == self.domain.width() * 2);
                 if is_conversion_delta_open {
                     self.opened_masked_diff.store(true, Ordering::SeqCst);
                 }
@@ -4753,7 +4867,7 @@ pub(crate) mod tests {
             }
         }
 
-        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+        for d in Domain::ALL_FIELDS {
             for a2b in [true, false] {
                 for corrupt_p in 0..3 {
                     let session = [0xa0 + (corrupt_p as u8) * 7 + u8::from(a2b); 32];
@@ -4771,16 +4885,16 @@ pub(crate) mod tests {
                             opened_masked_diff: leaked[p].clone(),
                         };
                         let mut e = Engine::new(p, session, keys(p), transport).unwrap();
-                        let a = e.fconstant([7, 0, 0, 0]);
-                        let b = e.fconstant([11, 0, 0, 0]);
+                        let a = e.fconstant([7, 0, 0, 0, 0, 0]);
+                        let b = e.fconstant([11, 0, 0, 0, 0, 0]);
                         let bad_prod = e.fmul(&a, &b, d).unwrap();
 
                         let res = if a2b {
-                            // A2B (`field_to_bits`): must abort BEFORE `v - r` (`512` `u64`s) opens!
+                            // A2B (`field_to_bits`): must abort BEFORE `v - r` opens!
                             e.field_to_bits(&bad_prod, d).map(|_| ())
                         } else {
                             // B2A (`bits_to_field`): pending `fmul` fault must abort BEFORE `v - r` opens!
-                            let dummy_bits = e.number([5, 0, 0, 0], d.width());
+                            let dummy_bits = e.number([5, 0, 0, 0, 0, 0], d.width());
                             e.bits_to_field(&dummy_bits, d).map(|_| ())
                         };
                         if p != corrupt_p {
@@ -4814,8 +4928,8 @@ pub(crate) mod tests {
             fn exchange(&mut self, out: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
                 let len0 = out[0].payload.len();
                 let len1 = out[1].payload.len();
-                // Detect any opening of secret wires (`33 * 2 = 66` u64s) or A2B/B2A deltas (`128`, `510`, `512`).
-                if len0 == len1 && matches!(len0, 66 | 128 | 510 | 512) {
+                // Detect any opening of secret wires (`33 * 2 = 66` u64s) or A2B/B2A deltas / `fopen_many`.
+                if len0 == len1 && matches!(len0, 66 | 128 | 510 | 512 | 762 | 768) {
                     self.wire_opened.store(true, Ordering::SeqCst);
                 }
                 self.inner.exchange(out)
@@ -4850,8 +4964,8 @@ pub(crate) mod tests {
         }
 
         // 2. Consistent 1-limb prime-field `fmul` additive fault (`z = x * y + 1 mod p`)
-        //    across `Gold` (`GF(p^3)`), `Secp`, and `Ed` before A2B and B2A openings!
-        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+        //    across ALL 5 fields (`Gold`, `Secp`, `Ed`, `PallasFp`, `BlsFp`) before A2B/B2A!
+        for d in Domain::ALL_FIELDS {
             for a2b in [true, false] {
                 for corrupt_p in 0..3 {
                     let session = [0xc0 + (corrupt_p as u8) * 5 + u8::from(a2b); 32];
@@ -4868,13 +4982,13 @@ pub(crate) mod tests {
                             wire_opened: leaked[p].clone(),
                         };
                         let mut e = Engine::new(p, session, keys(p), transport).unwrap();
-                        let a = e.fconstant([13, 0, 0, 0]);
-                        let b = e.fconstant([17, 0, 0, 0]);
+                        let a = e.fconstant([13, 0, 0, 0, 0, 0]);
+                        let b = e.fconstant([17, 0, 0, 0, 0, 0]);
                         let bad_prod = e.fmul(&a, &b, d).unwrap();
                         let res = if a2b {
                             e.field_to_bits(&bad_prod, d).map(|_| ())
                         } else {
-                            let dummy_bits = e.number([9, 0, 0, 0], d.width());
+                            let dummy_bits = e.number([9, 0, 0, 0, 0, 0], d.width());
                             e.bits_to_field(&dummy_bits, d).map(|_| ())
                         };
                         assert_eq!(res, Err(Error::MultiplicationCheck));

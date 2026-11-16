@@ -982,7 +982,8 @@ mod signature_tests {
         // A budget of another family is refused before anything is burned.
         let config = committee(2, 3);
         let seeds = run_seed_ceremony(&config, 0x8d);
-        let mut foreign = DurableQueryBudget::create(dir.join("foreign"), [0x77; 32], [9; 32]).unwrap();
+        let mut foreign =
+            DurableQueryBudget::create(dir.join("foreign"), [0x77; 32], [9; 32]).unwrap();
         assert_eq!(
             derive_rss_child_share_2of3_budgeted(&mut foreign, &seeds[0], [3; 32], 5).err(),
             Some(HdError::BudgetStorageFailed)
