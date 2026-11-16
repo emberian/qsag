@@ -84,9 +84,39 @@ const OPENING_HEADER: [u8; 32] = *b"QSAG.FULL.SHARD.OPENING/v1\0\0\0\0\0\0";
 // The row constraints as a recorded operation list
 // ============================================================================
 
-/// A value of the row-constraint evaluator while it is being recorded.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Sym(u32);
+/// A value of the row-constraint evaluator while it is being recorded (`#![no_std]` + `alloc`).
+#[derive(Clone, Copy)]
+enum Sym<'a> {
+    Const(F),
+    Wire(&'a RefCell<Vec<Node>>, u32),
+}
+
+impl core::fmt::Debug for Sym<'_> {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Const(c) => fmt.debug_tuple("Const").field(c).finish(),
+            Self::Wire(_, i) => fmt.debug_tuple("Wire").field(i).finish(),
+        }
+    }
+}
+
+impl Default for Sym<'_> {
+    fn default() -> Self {
+        Self::Const(F::ZERO)
+    }
+}
+
+impl PartialEq for Sym<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::Const(a), Self::Const(b)) => a == b,
+            (Self::Wire(_, i), Self::Wire(_, j)) => i == j,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Sym<'_> {}
 
 #[derive(Clone, Debug)]
 enum Node {
@@ -100,41 +130,50 @@ enum Node {
     Sbox(u32),
 }
 
-std::thread_local! {
-    static TAPE: RefCell<Vec<Node>> = const { RefCell::new(Vec::new()) };
+fn push_to<'a>(tape: &'a RefCell<Vec<Node>>, node: Node) -> Sym<'a> {
+    let mut t = tape.borrow_mut();
+    t.push(node);
+    Sym::Wire(
+        tape,
+        u32::try_from(t.len() - 1).expect("row-constraint tape length"),
+    )
 }
 
-fn push(node: Node) -> Sym {
-    TAPE.with(|t| {
-        let mut t = t.borrow_mut();
-        t.push(node);
-        Sym(u32::try_from(t.len() - 1).expect("row-constraint tape length"))
-    })
-}
-fn constant_of(s: Sym) -> Option<F> {
-    TAPE.with(|t| match t.borrow()[s.0 as usize] {
-        Node::Const(c) => Some(c),
-        _ => None,
-    })
-}
-fn constant(c: F) -> Sym {
-    if c == F::ZERO {
-        Sym(0)
-    } else if c == F::ONE {
-        Sym(1)
-    } else {
-        push(Node::Const(c))
+fn node_idx<'a>(tape: &'a RefCell<Vec<Node>>, s: Sym<'a>) -> u32 {
+    match s {
+        Sym::Wire(_, idx) => idx,
+        Sym::Const(c) if c == F::ZERO => 0,
+        Sym::Const(c) if c == F::ONE => 1,
+        Sym::Const(c) => {
+            let mut t = tape.borrow_mut();
+            t.push(Node::Const(c));
+            u32::try_from(t.len() - 1).expect("row-constraint tape length")
+        }
     }
 }
-fn scaled(s: Sym, k: F) -> Sym {
-    match constant_of(s) {
-        Some(c) => constant(c * k),
-        None if k == F::ONE => s,
-        None if k == F::ZERO => Sym(0),
-        None => push(Node::Scale(s.0, k)),
+
+fn scaled(s: Sym<'_>, k: F) -> Sym<'_> {
+    match s {
+        Sym::Const(c) => Sym::Const(c * k),
+        Sym::Wire(..) if k == F::ONE => s,
+        Sym::Wire(..) if k == F::ZERO => Sym::Const(F::ZERO),
+        Sym::Wire(tape, idx) => push_to(tape, Node::Scale(idx, k)),
     }
 }
-fn linear_layer(st: &mut [Sym; 12], layer: fn(&mut [F; 12])) {
+
+fn linear_layer(st: &mut [Sym<'_>; 12], layer: fn(&mut [F; 12])) {
+    let Some(tape) = st.iter().find_map(|s| match *s {
+        Sym::Wire(t, _) => Some(t),
+        Sym::Const(_) => None,
+    }) else {
+        let mut vals: [F; 12] = st.map(|s| match s {
+            Sym::Const(c) => c,
+            Sym::Wire(..) => unreachable!(),
+        });
+        layer(&mut vals);
+        *st = vals.map(Sym::Const);
+        return;
+    };
     // Column `j` of the layer's matrix is its image of the `j`-th unit vector.
     let columns: [[F; 12]; 12] = core::array::from_fn(|j| {
         let mut unit = [F::ZERO; 12];
@@ -142,66 +181,81 @@ fn linear_layer(st: &mut [Sym; 12], layer: fn(&mut [F; 12])) {
         layer(&mut unit);
         unit
     });
-    let input = *st;
+    let input_indices: [u32; 12] = st.map(|s| node_idx(tape, s));
     for (i, out) in st.iter_mut().enumerate() {
-        *out = push(Node::Lin(
-            (0..12).map(|j| (columns[j][i], input[j].0)).collect(),
-        ));
+        *out = push_to(
+            tape,
+            Node::Lin((0..12).map(|j| (columns[j][i], input_indices[j])).collect()),
+        );
     }
 }
 
-impl core::ops::Add for Sym {
+impl<'a> core::ops::Add for Sym<'a> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        match (constant_of(self), constant_of(rhs)) {
-            (Some(a), Some(b)) => constant(a + b),
-            (Some(a), None) if a == F::ZERO => rhs,
-            (None, Some(b)) if b == F::ZERO => self,
-            _ => push(Node::Add(self.0, rhs.0)),
+        match (self, rhs) {
+            (Sym::Const(a), Sym::Const(b)) => Sym::Const(a + b),
+            (Sym::Const(a), _) if a == F::ZERO => rhs,
+            (_, Sym::Const(b)) if b == F::ZERO => self,
+            (Sym::Wire(tape, i), _) => {
+                let j = node_idx(tape, rhs);
+                push_to(tape, Node::Add(i, j))
+            }
+            (_, Sym::Wire(tape, j)) => {
+                let i = node_idx(tape, self);
+                push_to(tape, Node::Add(i, j))
+            }
         }
     }
 }
-impl core::ops::AddAssign for Sym {
+impl<'a> core::ops::AddAssign for Sym<'a> {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
-impl core::ops::Sub for Sym {
+impl<'a> core::ops::Sub for Sym<'a> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        match (constant_of(self), constant_of(rhs)) {
-            (Some(a), Some(b)) => constant(a - b),
-            (None, Some(b)) if b == F::ZERO => self,
-            _ => push(Node::Sub(self.0, rhs.0)),
+        match (self, rhs) {
+            (Sym::Const(a), Sym::Const(b)) => Sym::Const(a - b),
+            (_, Sym::Const(b)) if b == F::ZERO => self,
+            (Sym::Wire(tape, i), _) => {
+                let j = node_idx(tape, rhs);
+                push_to(tape, Node::Sub(i, j))
+            }
+            (_, Sym::Wire(tape, j)) => {
+                let i = node_idx(tape, self);
+                push_to(tape, Node::Sub(i, j))
+            }
         }
     }
 }
-impl core::ops::Mul for Sym {
+impl<'a> core::ops::Mul for Sym<'a> {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        match (constant_of(self), constant_of(rhs)) {
-            (Some(a), _) => scaled(rhs, a),
-            (_, Some(b)) => scaled(self, b),
-            _ => push(Node::Mul(self.0, rhs.0)),
+        match (self, rhs) {
+            (Sym::Const(a), _) => scaled(rhs, a),
+            (_, Sym::Const(b)) => scaled(self, b),
+            (Sym::Wire(tape, i), Sym::Wire(_, j)) => push_to(tape, Node::Mul(i, j)),
         }
     }
 }
-impl TraceField for Sym {
-    const ZERO: Self = Sym(0);
-    const ONE: Self = Sym(1);
+impl TraceField for Sym<'_> {
+    const ZERO: Self = Sym::Const(F::ZERO);
+    const ONE: Self = Sym::Const(F::ONE);
     fn from_base(b: F) -> Self {
-        constant(b)
+        Sym::Const(b)
     }
     fn from_u64(v: u64) -> Self {
-        constant(f(v))
+        Sym::Const(f(v))
     }
     fn mul_base_f(self, s: F) -> Self {
         scaled(self, s)
     }
     fn sbox7(self) -> Self {
-        match constant_of(self) {
-            Some(c) => constant(poseidon2_sbox7(c)),
-            None => push(Node::Sbox(self.0)),
+        match self {
+            Sym::Const(c) => Sym::Const(poseidon2_sbox7(c)),
+            Sym::Wire(tape, idx) => push_to(tape, Node::Sbox(idx)),
         }
     }
     fn apply_me(st: &mut [Self; 12]) {
@@ -229,17 +283,13 @@ struct AirTape {
 impl AirTape {
     fn record(circuit: &ShardCircuit) -> Self {
         let unique_ops = circuit.unique_ops.len();
-        TAPE.with(|t| {
-            let mut t = t.borrow_mut();
-            t.clear();
-            t.extend([Node::Const(F::ZERO), Node::Const(F::ONE)]);
-        });
+        let tape = RefCell::new(vec![Node::Const(F::ZERO), Node::Const(F::ONE)]);
         let mut next = 0u32;
         let mut input = || {
             next += 1;
-            push(Node::Input(next - 1))
+            push_to(&tape, Node::Input(next - 1))
         };
-        let cols: [Sym; NUM_TRACE_COLS] = core::array::from_fn(|_| input());
+        let cols: [Sym<'_>; NUM_TRACE_COLS] = core::array::from_fn(|_| input());
         let active_signer = input();
         let pk_seed = core::array::from_fn(|_| input());
         let pk_root = core::array::from_fn(|_| input());
@@ -251,7 +301,7 @@ impl AirTape {
         let eq_not_last = input();
         let shift_tau = input();
         let gamma = input();
-        let gated_op_sels: Vec<Sym> = (0..unique_ops).map(|_| input()).collect();
+        let gated_op_sels: Vec<Sym<'_>> = (0..unique_ops).map(|_| input()).collect();
         let out = eval_batched_row_constraints_generic(
             &circuit.unique_ops,
             &cols,
@@ -270,7 +320,8 @@ impl AirTape {
             },
             gamma,
         );
-        let nodes = TAPE.with(|t| core::mem::take(&mut *t.borrow_mut()));
+        let output = node_idx(&tape, out);
+        let nodes = tape.into_inner();
         let mut width = Vec::with_capacity(nodes.len());
         let mut pinned = Vec::with_capacity(nodes.len());
         for node in &nodes {
@@ -288,7 +339,7 @@ impl AirTape {
         Self {
             nodes,
             pinned,
-            output: out.0,
+            output,
             unique_ops,
         }
     }
@@ -922,6 +973,9 @@ pub struct RecursiveShardProof {
     pub opening: FixedPathWhirProof,
 }
 
+/// Canonical 8-byte wire header for [`RecursiveShardProof`].
+pub const RECURSIVE_SHARD_WIRE_MAGIC: &[u8; 8] = b"QSAGRSP1";
+
 impl RecursiveShardProof {
     fn placeholder(params: &FullShardParams) -> Self {
         Self {
@@ -944,11 +998,73 @@ impl RecursiveShardProof {
                 &self.opening,
             )
     }
-    /// Field-element count of the proof times eight: its size were it sent on its own.
+    /// Canonical wire serialization (`QSAGRSP1` header).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let opening_bytes = self.opening.to_bytes();
+        let mut out = Vec::with_capacity(
+            8 + 32
+                + 32 * ROW_SUMCHECK_WIRE_COEFFS * self.row_sumcheck_polys.len()
+                + 32 * self.col_evals.len()
+                + opening_bytes.len(),
+        );
+        out.extend_from_slice(RECURSIVE_SHARD_WIRE_MAGIC);
+        for &limb in &self.commitment {
+            out.extend_from_slice(&limb.to_le_bytes());
+        }
+        for poly in &self.row_sumcheck_polys {
+            for &c in poly {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for &col in &self.col_evals {
+            out.extend_from_slice(&col.to_le_bytes());
+        }
+        out.extend_from_slice(&opening_bytes);
+        out
+    }
+
+    /// Canonical wire decoding for `params`, rejecting non-canonical limbs and trailing bytes.
+    pub fn from_bytes(params: &FullShardParams, bytes: &[u8]) -> Option<Self> {
+        if bytes.get(..8)? != RECURSIVE_SHARD_WIRE_MAGIC {
+            return None;
+        }
+        let mut pos = 8usize;
+        let mut take_f = || -> Option<F> {
+            let chunk: [u8; 8] = bytes.get(pos..pos + 8)?.try_into().ok()?;
+            pos += 8;
+            F::from_le_bytes_canonical(chunk).ok()
+        };
+        let mut take_e = || -> Option<E> {
+            let chunk: [u8; 32] = bytes.get(pos..pos + 32)?.try_into().ok()?;
+            pos += 32;
+            E::from_le_bytes_canonical(chunk)
+        };
+        let commitment = [take_f()?, take_f()?, take_f()?, take_f()?];
+        let mut row_sumcheck_polys = Vec::with_capacity(params.circuit.log_rows());
+        for _ in 0..params.circuit.log_rows() {
+            let mut poly = [E::ZERO; ROW_SUMCHECK_WIRE_COEFFS];
+            for slot in &mut poly {
+                *slot = take_e()?;
+            }
+            row_sumcheck_polys.push(poly);
+        }
+        let mut col_evals = Vec::with_capacity(NUM_TRACE_COLS);
+        for _ in 0..NUM_TRACE_COLS {
+            col_evals.push(take_e()?);
+        }
+        let opening = FixedPathWhirProof::from_bytes(&params.whir, bytes.get(pos..)?)?;
+        let out = Self {
+            commitment,
+            row_sumcheck_polys,
+            col_evals,
+            opening,
+        };
+        out.well_formed(params).then_some(out)
+    }
+
+    /// Canonical byte length of this proof.
     pub fn encoded_len(&self) -> usize {
-        32 + 32 * ROW_SUMCHECK_WIRE_COEFFS * self.row_sumcheck_polys.len()
-            + 32 * self.col_evals.len()
-            + self.opening.to_bytes().len()
+        self.to_bytes().len()
     }
 }
 
