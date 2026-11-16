@@ -1,7 +1,7 @@
 // QSAG-NI symmetric units:
 //   * Keccak-f[1600] at two rounds per clock (Keccak-p[1600,12] for TurboSHAKE256 in 6 clocks,
 //     24 rounds for SHA-3/SHAKE in 12 clocks), with 1600-bit customization shadow state, dual-lane
-//     SRAM absorb, and direct 69-byte/34-byte Canopy node/root block framing (`blk_canopy_en`).
+//     SRAM absorb, and direct 69-byte Canopy internal node framing (`canopy_node_go`).
 //   * Single-cycle GF(2^128) multiplier (recursive carry-less Karatsuba over three 64x64 trees,
 //     8-bit symbolic-LEC leaf, reduction by z^128 + z^7 + z^2 + z + 1) + Wiedemann T_7 basis maps.
 `default_nettype none
@@ -61,12 +61,12 @@ module qsag_keccak_2rpc (
   input  wire [4:0]    lane_idx,
   input  wire [63:0]   lane_wdata,
   input  wire          pair_xor_en,     // dual-lane XOR from dual-port SRAM (idle only)
-  input  wire [4:0]    pair_idx,        // absorbs into pair_idx and (pair_last_single ? none : pair_idx+1)
+  input  wire [4:0]    pair_idx,
   input  wire          pair_single,
   input  wire [63:0]   pair_w0,
   input  wire [63:0]   pair_w1,
-  input  wire          pad_end_en,      // XOR 0x8000_0000_0000_0000 into lane 16 (rate=136 end pad)
-  input  wire          canopy_node_go,  // restore shadow + XOR 69B [0x00|idx|left|right|0x07..0x80] + start 12r!
+  input  wire          pad_end_en,      // XOR 0x8000_0000_0000_0000 into lane 16
+  input  wire          canopy_node_go,  // restore shadow + XOR 69B [0x00|idx|left|right|0x07..0x80] + start 12r
   input  wire [31:0]   canopy_node_idx,
   input  wire [255:0]  canopy_left,
   input  wire [255:0]  canopy_right,
@@ -87,69 +87,85 @@ module qsag_keccak_2rpc (
       5'd12: rcon = 64'h000000008000808B; 5'd13: rcon = 64'h800000000000008B;
       5'd14: rcon = 64'h8000000000008089; 5'd15: rcon = 64'h8000000000008003;
       5'd16: rcon = 64'h8000000000008002; 5'd17: rcon = 64'h8000000000000080;
-      5'd18: rcon = 64'h000000000000800A; 5'd19: rcon = 64'h800000008000800A;
+      5'd18: rcon = 64'h000000000000800A; 5'd19: rcon = 64'h800000008000000A;
       5'd20: rcon = 64'h8000000080008081; 5'd21: rcon = 64'h8000000000008080;
       5'd22: rcon = 64'h0000000080000001; 5'd23: rcon = 64'h8000000080008008;
       default: rcon = 64'h0;
     endcase
   endfunction
 
-  logic [1599:0] s, shadow;
-  logic [4:0]    r;
-  logic          run;
+  logic [63:0]   sl [25];
+  logic [63:0]   sh [25];
+  logic [1599:0] s_flat, sh_flat;
+  for (genvar i = 0; i < 25; i++) begin : g_pack
+    assign s_flat[64*i +: 64]  = sl[i];
+    assign sh_flat[64*i +: 64] = sh[i];
+  end
+
+  logic [4:0] r;
+  logic       run;
 
   // 69-byte Canopy Merkle internal node block: [8'h00, node_idx(32b), left(256b), right(256b), 8'h07, 0.., 8'h80]
   wire [575:0] cn_raw = {16'h0000, 8'h07, canopy_right, canopy_left, canopy_node_idx, 8'h00};
   logic [1599:0] cn_init;
   always_comb begin
-    cn_init = shadow;
-    for (int i = 0; i < 9; i++) cn_init[64*i +: 64] = shadow[64*i +: 64] ^ cn_raw[64*i +: 64];
-    cn_init[64*16 + 63] = shadow[64*16 + 63] ^ 1'b1;
+    cn_init = sh_flat;
+    for (int i = 0; i < 9; i++) cn_init[64*i +: 64] = sh_flat[64*i +: 64] ^ cn_raw[64*i +: 64];
+    cn_init[64*16 + 63] = sh_flat[64*16 + 63] ^ 1'b1;
   end
 
-  wire [1599:0] r_in = canopy_node_go ? cn_init : s;
-  wire [4:0]    r_idx = canopy_node_go ? 5'd12 : r;
+  // Combinational pre-padded state so pad_end_en + start takes effect on round 0/12 immediately!
+  logic [63:0] sl_idle [25];
+  always_comb begin
+    for (int i = 0; i < 25; i++) begin
+      if (restore) begin
+        sl_idle[i] = sh[i];
+      end else begin
+        sl_idle[i] = sl[i];
+        if (lane_we && (lane_idx == 5'(i))) begin
+          sl_idle[i] = lane_xor ? (sl[i] ^ lane_wdata) : lane_wdata;
+        end
+        if (pair_xor_en && (pair_idx == 5'(i))) begin
+          sl_idle[i] = sl_idle[i] ^ pair_w0;
+        end
+        if (pair_xor_en && !pair_single && ((pair_idx + 5'd1) == 5'(i))) begin
+          sl_idle[i] = sl_idle[i] ^ pair_w1;
+        end
+        if (pad_end_en && (i == 16)) begin
+          sl_idle[i] = sl_idle[i] ^ 64'h8000_0000_0000_0000;
+        end
+      end
+    end
+  end
+
+  wire [1599:0] r_in  = canopy_node_go ? cn_init : s_flat;
+  wire [4:0]    r_idx = canopy_node_go ? 5'd12   : r;
   wire [1599:0] m, n;
   qsag_keccak_round u_r0 (.a(r_in), .rc(rcon(r_idx)),        .o(m));
   qsag_keccak_round u_r1 (.a(m),    .rc(rcon(r_idx | 5'd1)), .o(n));
 
   assign busy       = run;
-  assign lane_rdata = s[64*lane_idx +: 64];
-  assign digest_o   = s[255:0];
+  assign lane_rdata = (lane_idx < 5'd25) ? sl[lane_idx] : 64'd0;
+  assign digest_o   = {sl[3], sl[2], sl[1], sl[0]};
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      s      <= '0;
-      shadow <= '0;
-      run    <= 1'b0;
-      r      <= '0;
+      for (int i = 0; i < 25; i++) begin sl[i] <= 64'd0; sh[i] <= 64'd0; end
+      run <= 1'b0;
+      r   <= '0;
     end else if (run) begin
-      s <= n;
+      for (int i = 0; i < 25; i++) sl[i] <= n[64*i +: 64];
       r <= r + 5'd2;
       if (r == 5'd22) run <= 1'b0;
     end else if (canopy_node_go) begin
-      // Rounds 12 & 13 execute combinationally in this launch cycle; rounds 14..23 take 5 more clocks!
-      s   <= n;
+      for (int i = 0; i < 25; i++) sl[i] <= n[64*i +: 64];
       r   <= 5'd14;
       run <= 1'b1;
     end else begin
-      if (restore) begin
-        s <= shadow;
-      end else begin
-        if (lane_we) begin
-          s[64*lane_idx +: 64] <= lane_xor ? (s[64*lane_idx +: 64] ^ lane_wdata) : lane_wdata;
-        end
-        if (pair_xor_en) begin
-          s[64*int'(pair_idx) +: 64] <= s[64*int'(pair_idx) +: 64] ^ pair_w0;
-          if (!pair_single) begin
-            s[64*(int'(pair_idx) + 1) +: 64] <= s[64*(int'(pair_idx) + 1) +: 64] ^ pair_w1;
-          end
-        end
-        if (pad_end_en) begin
-          s[64*16 + 63] <= s[64*16 + 63] ^ 1'b1;
-        end
+      for (int i = 0; i < 25; i++) sl[i] <= sl_idle[i];
+      if (save) begin
+        for (int i = 0; i < 25; i++) sh[i] <= sl[i];
       end
-      if (save) shadow <= s;
       if (start) begin
         run <= 1'b1;
         r   <= rounds12 ? 5'd12 : 5'd0;
