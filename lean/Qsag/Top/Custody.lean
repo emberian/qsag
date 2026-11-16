@@ -10,8 +10,8 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
    machine hierarchy (`MirSpecBridgeCore`, `MirSpecBridge`),
 2. Equality of the shared-evaluation RSS release machine and the reference release machine
    (`rssSharedReleaseMachine_eq_reference`), and of the shared and ideal threshold services
-   (`thresholdServiceShared_eq_ideal`, `thresholdDurableShared_eq_ideal`); the `*_refines_*`
-   witnesses of the same names are transports of reflexivity along these equalities,
+   (`thresholdServiceShared_eq_ideal`, `thresholdDurableShared_eq_ideal`). These are equalities of
+   machines over one state type; no `Spec.Refines` witness is packaged for them,
 3. End-to-end authenticated custody quorum submission → `validThresholdApproval` → `IdealTsig`
    execution + policy-mediation provenance / `prodEufCmaWin` reduction (`SeparatedCustodyUcBridge`,
    `CompleteMediationBoundary`, `SeparatedCustodyCollision`), and
@@ -24,13 +24,25 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
    (`certCustody_unsafe_release_le_forgery`).
 6. The real coordinator `Custody.submitRecorded` in a world with production signing and adaptive
    corruption (`sepCustodyMachine`), related to `Spec.idealCustodyMachine` on runs satisfying
-   `SeparatedCustodyRunAssumptions` (`separatedCustody_refines_idealCustody_of`). The ELF, MIR,
-   `IdealTsig`, RSS and WAL machines of items 1–4 are not connected to `Spec.idealCustodyMachine`.
+   `SeparatedCustodyRunAssumptions` (`separatedCustody_refines_idealCustody_of`), and its guarded
+   restriction `sepCustodyGuardedMachine` (no forged certificate, increasing leaves), which outputs
+   the coordinator's decision and no signature. The ELF, MIR, `IdealTsig`, RSS and WAL machines of
+   items 1–4 are not connected to `Spec.idealCustodyMachine`.
 7. Distributed `(t, n)` Shamir custody (`DistCustody.distMachine`: custodians, network buffer,
    adaptive corruption, coordinator ledger) refines `Spec.idealCustodyMachine` for its own
    `deploymentId` (`distributedCustody_refines_idealCustody`), and the Shamir + `BeltLatch`
    validator network: per-custodian refinement to the mediation vault and network non-equivocation
    (`shamirCustodian_refines_mediationVault`, `shamir_custody_network_non_equivocation`).
+8. The authenticated custodian network (`DistCustody.authMachine`: a `Fin n` family of custodians
+   with WAL records sealed under `"QSAG.BELT.LATCH.WAL.MAC/v3"` and an external anchor,
+   acknowledgements tagged under `"QSAG.BELT.ACK.v1"`, a wire the adversary writes freely, disk
+   tampering, crashes and adaptive corruption). Its guarded restriction refines
+   `Spec.idealCustodyMachine` (`authenticatedCustody_refines_idealCustody`); every execution of the
+   unguarded machine is an ideal execution or exhibits a tag forgery, a message-tag collision or a
+   hash collision (`authenticatedCustody_ideal_or_forgery`); and over any finite coin space
+   `Pr[unsafe release] ≤ Pr[acknowledgement violation] + Pr[WAL violation]`
+   (`authenticatedCustody_unsafe_release_le_violations`). The two right-hand probabilities are not
+   bounded in this library.
 -/
 
 public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
@@ -115,13 +127,9 @@ theorem rssSharedReleaseMachine_eq_reference (p : Qsag.RssProduction.Profile) :
   unfold rssSharedReleaseMachine rssReferenceReleaseMachine
   rw [h]
 
-/-- Reflexivity transported along `rssSharedReleaseMachine_eq_reference`. It carries no more
-    content than the equality. -/
-def rssSharedRelease_refines_reference (p : Qsag.RssProduction.Profile) :
-    rssSharedReleaseMachine p ⊑ rssReferenceReleaseMachine p := by
-  rw [rssSharedReleaseMachine_eq_reference p]
-  exact Qsag.Spec.Refines.refl _
-
+/-- A consequence of the equality `rssSharedReleaseMachine_eq_reference` and of nothing else: the
+    two machines admit the same traces. No refinement witness is packaged for this pair; the
+    distributed custody refinements are in Section 9. -/
 theorem rssSharedRelease_preserves_traces (p : Qsag.RssProduction.Profile)
     {tr : List (Qsag.SessionScheduleReq × Except Qsag.RssProduction.Failure (List UInt8))}
     (hAdmits : (rssSharedReleaseMachine p).AdmitsTrace tr) :
@@ -1014,47 +1022,19 @@ theorem thresholdDurableShared_eq_ideal (c : Qsag.ThresholdIdealService.Config) 
   interactiveMachine_ext _ _
     (funext fun s => funext fun i => Qsag.ThresholdIdealDurableService.shared_step_eq_ideal c s i)
 
-/-- Reflexivity transported along `thresholdServiceShared_eq_ideal`. It carries no more content
-    than the equality. -/
-def thresholdServiceShared_refines_ideal (c : Qsag.ThresholdIdealService.Config) :
-    Qsag.Spec.Machine.ofInteractive
-      (fun s => s = Qsag.ThresholdIdealService.initial c)
-      (Qsag.ThresholdIdealService.shared c) ⊑
-    Qsag.Spec.Machine.ofInteractive
-      (fun s => s = Qsag.ThresholdIdealService.initial c)
-      (Qsag.ThresholdIdealService.ideal c) := by
-  rw [thresholdServiceShared_eq_ideal c]
-  exact Qsag.Spec.Refines.refl _
-
-/-- Reflexivity transported along `thresholdDurableShared_eq_ideal`, used to reach the
-    `InteractiveService` feedback lemmas. It carries no more content than the equality. -/
-def thresholdDurableShared_refines_ideal (c : Qsag.ThresholdIdealService.Config) :
-    Qsag.Spec.Machine.ofInteractive
-      (fun s => s = Qsag.ThresholdIdealDurableService.initial)
-      (Qsag.ThresholdIdealDurableService.shared c) ⊑
-    Qsag.Spec.Machine.ofInteractive
-      (fun s => s = Qsag.ThresholdIdealDurableService.initial)
-      (Qsag.ThresholdIdealDurableService.ideal c) := by
-  rw [thresholdDurableShared_eq_ideal c]
-  exact Qsag.Spec.Refines.refl _
-
-/-- **Interactive Feedback Emulation, Durable Crash Safety, and Resource Burn Soundness
-    (`threshold_durable_feedback_and_resource_burn_chain`)**:
-    Composes `thresholdDurableShared_refines_ideal` (transported to `InteractiveService.PrefixEquivalent`
-    and `coupled_accept_bits` via `Spec.Refines.toInteractivePrefixEquivalent` /
-    `toInteractiveCoupledAcceptBits`), `ThresholdIdealDurableService.crash_preserves_durable`,
+/-- **Durable crash safety, threshold authorization and resource-burn soundness
+    (`threshold_durable_feedback_and_resource_burn_chain`)**: collects
+    `ThresholdIdealDurableService.crash_preserves_durable`,
     `ThresholdIdealService.authorized_of_verified_threshold`,
-    `Custody.RequestPolicy.every_observed_wire_has_burn`, and
-    `Custody.RequestPolicy.returned_production_sound`! -/
+    `Custody.RequestPolicy.every_observed_wire_has_burn` and
+    `Custody.RequestPolicy.returned_production_sound`. It says nothing about the relation of the
+    shared services to the ideal ones: those are equal as machines
+    (`thresholdServiceShared_eq_ideal`, `thresholdDurableShared_eq_ideal`), and no refinement
+    witness is packaged for an equality. -/
 theorem threshold_durable_feedback_and_resource_burn_chain
-    {E : Type}
     (c : Qsag.ThresholdIdealService.Config)
     (compute : Qsag.ThresholdIdealDurableService.Compute)
     (sDur : Qsag.ThresholdIdealDurableService.State)
-    (zObs : Qsag.InteractiveService.Observer
-      Qsag.ThresholdIdealDurableService.Command
-      Qsag.ThresholdIdealService.Output E)
-    (e₀ : E)
     (sSvc : Qsag.ThresholdIdealService.State)
     (reqAuth : Qsag.SessionScheduleReq)
     (hThresh : Qsag.validThresholdApproval (Qsag.ThresholdIdealService.publicState c) reqAuth.honestApprovers = true)
@@ -1067,15 +1047,6 @@ theorem threshold_durable_feedback_and_resource_burn_chain
     (retReq : Qsag.SessionScheduleReq) (retBytes : List UInt8)
     (hRet : (retReq, retBytes) ∈ (Qsag.Custody.RequestPolicy.resourceRun profile d corrupt
       (Qsag.Custody.RequestPolicy.resourceInitial d) cmds).returned) :
-    Qsag.InteractiveService.PrefixEquivalent
-      (Qsag.ThresholdIdealDurableService.shared c)
-      (Qsag.ThresholdIdealDurableService.ideal c)
-      Qsag.ThresholdIdealDurableService.initial
-      Qsag.ThresholdIdealDurableService.initial ∧
-    zObs.accept (Qsag.InteractiveService.run (Qsag.ThresholdIdealDurableService.shared c)
-      zObs.environment zObs.fuel Qsag.ThresholdIdealDurableService.initial e₀).2 =
-      zObs.accept (Qsag.InteractiveService.run (Qsag.ThresholdIdealDurableService.ideal c)
-      zObs.environment zObs.fuel Qsag.ThresholdIdealDurableService.initial e₀).2 ∧
     (Qsag.ThresholdIdealDurableService.stepWith c compute sDur .crash).1.nextLeaf = sDur.nextLeaf ∧
     Qsag.ThresholdIdealService.authorized c sSvc reqAuth = true ∧
     (∃ r ∈ (Qsag.Custody.RequestPolicy.resourceRun profile d corrupt
@@ -1083,37 +1054,12 @@ theorem threshold_durable_feedback_and_resource_burn_chain
       r.request = obsPair.1) ∧
     (∃ sig, Qsag.RssProduction.sharedSign profile retReq = some sig ∧
       Qsag.decodeProductionSigWire profile.params retBytes = .ok sig) := by
-  let ref := thresholdDurableShared_refines_ideal c
-  obtain ⟨hAbsEq, hRelRaw⟩ := ref.init_ok (rfl : Qsag.ThresholdIdealDurableService.initial = _)
-  have hRelInit : ref.Rel Qsag.ThresholdIdealDurableService.initial
-      Qsag.ThresholdIdealDurableService.initial := by
-    rw [hAbsEq] at hRelRaw
-    exact hRelRaw
-  have hPref : Qsag.InteractiveService.PrefixEquivalent
-      (Qsag.ThresholdIdealDurableService.shared c)
-      (Qsag.ThresholdIdealDurableService.ideal c)
-      Qsag.ThresholdIdealDurableService.initial
-      Qsag.ThresholdIdealDurableService.initial := by
-    have hP := Qsag.Spec.Refines.toInteractivePrefixEquivalent ref rfl
-    rw [hAbsEq] at hP
-    exact hP
-  have hCoup := Qsag.Spec.Refines.toInteractiveCoupledAcceptBits ref zObs
-    [((Qsag.ThresholdIdealDurableService.initial, Qsag.ThresholdIdealDurableService.initial), e₀)]
-    (fun st hMem => by
-      cases hMem with
-      | head => exact hRelInit
-      | tail _ hNil => cases hNil)
-  have hAccEq : zObs.accept (Qsag.InteractiveService.run (Qsag.ThresholdIdealDurableService.shared c)
-      zObs.environment zObs.fuel Qsag.ThresholdIdealDurableService.initial e₀).2 =
-      zObs.accept (Qsag.InteractiveService.run (Qsag.ThresholdIdealDurableService.ideal c)
-      zObs.environment zObs.fuel Qsag.ThresholdIdealDurableService.initial e₀).2 := by
-    injection hCoup with hHead _
   obtain ⟨hNextLeaf, _, _, _⟩ := Qsag.ThresholdIdealDurableService.crash_preserves_durable c compute sDur
   have hAuth := Qsag.ThresholdIdealService.authorized_of_verified_threshold c sSvc reqAuth hThresh hInputs
   have hBurn := Qsag.Custody.RequestPolicy.every_observed_wire_has_burn profile d corrupt cmds obsPair hObs
   obtain ⟨sig, hSign, _, hDec, _⟩ :=
     Qsag.Custody.RequestPolicy.returned_production_sound profile d corrupt cmds retReq retBytes hRet
-  exact ⟨hPref, hAccEq, hNextLeaf, hAuth, hBurn, ⟨sig, hSign, hDec⟩⟩
+  exact ⟨hNextLeaf, hAuth, hBurn, ⟨sig, hSign, hDec⟩⟩
 
 /-- The commit and rollback boundary of any platform satisfying the explicit fsync contract.
 The record survives every subsequent event trace, and a retained external anchor remains a
@@ -3105,10 +3051,34 @@ theorem sepForged_fresh_verifying_signature (d : Qsag.Custody.Deployment) (c : S
   rw [hIss] at hNotIssued
   exact absurd hNotIssued (by decide)
 
-/-! ### 8b. `Spec.DataRefines` Upgrade & EUF-CMA `GameBound` Composition for `SeparatedCustody` (`L-Ex-6b`) -/
+/-! ### 8b. A guarded restriction of `sepCustodyMachine` and its `Spec.DataRefines` (`L-Ex-6b`)
 
-/-- Guarded separated-custody state pairing `SepCustodyState` with explicit adversarial permits
-    and monotone leaf watermark `nextLeaf` outside the forgery bad event. -/
+`sepCustodyGuardedMachine d` is `sepCustodyMachine d` restricted by three guards on `.submit`, with
+one bookkeeping turn added. It is not the real coordinator and it is not a signer:
+
+* **No forged certificate.** A submission is refused when `sepForged` is nonempty, that is, when
+  it carries a certificate of an uncorrupted party that never signed the intent for this
+  deployment. The probability of that event is bounded separately, under hypotheses, in 8c.
+* **Increasing leaves.** A submission is refused unless its leaf is at or above the watermark
+  `nextLeaf`. `Custody.submitRecorded` has no such check (it checks session freshness only), so
+  this guard removes real behaviours; `sepCustody_stale_leaf_rejected_by_ideal` is the reason the
+  ideal functionality needs it.
+* **Announced adversarial permits.** A certificate of a corrupted party counts only if the
+  adversary announced it with `.advInject`. This costs the adversary nothing: `.advInject` is
+  free for corrupted parties.
+
+The machine outputs the coordinator's decision, `.accepted intent`. `Custody.submitRecorded`
+returns a Boolean and produces no signature, so neither does this machine. The signature that
+`Spec.idealCustodyMachine` releases appears only in the interface map `sepGuardedVisOut`, which
+sends `.accepted r` to the ideal oracle's signature on `digest deploymentId (sepIntent r)`.
+
+`separatedCustody_dataRefines_idealCustody` is a one-directional simulation of this restricted
+machine. `sepCustodyGuarded_projects_to_sepCustody` shows every guarded execution is an execution
+of `sepCustodyMachine` satisfying `SeparatedCustodyRunAssumptions`; the converse holds only for
+real runs that meet those assumptions. -/
+
+/-- State of the guarded machine: the separated-custody world, the adversarial permits announced
+    so far, and the leaf watermark. -/
 structure SepGuardedState where
   base : SepCustodyState
   advPermits : List CustodyApproval
@@ -3122,12 +3092,13 @@ inductive SepGuardedInput where
   | corrupt (party : Nat)
   | submit (intent : Qsag.Custody.Intent) (certs : List Qsag.Custody.Certificate)
 
-/-- Output events of the guarded separated-custody machine. -/
-inductive SepGuardedOutput (Sig : Type) where
+/-- Output events of the guarded separated-custody machine. `.accepted` is the coordinator's
+    decision on a submission; no signature is produced. -/
+inductive SepGuardedOutput where
   | certificate (c : Qsag.Custody.Certificate)
   | injected
   | corrupted (revealed : List CustodyIntent)
-  | released (sig : Sig)
+  | accepted (intent : Qsag.Custody.Intent)
 
 /-- Initial state of `sepCustodyMachine d`. -/
 def sepCustodyInit (d : Qsag.Custody.Deployment) : SepCustodyState :=
@@ -3145,12 +3116,12 @@ def sepRevealedFor (d : Qsag.Custody.Deployment) (issued : List SepIssue) (p : N
       (fun a => CustodyApproval.mk a.party a.deploymentId (sepIntent a.intent)))
     p
 
-/-- Guarded separated-custody transition executing real `Custody.sign` and `Custody.submitRecorded`
-    under monotone leaf watermark `nextLeaf` and forgery-freedom `sepForged = []`. -/
-@[expose] def sepCustodyGuardedStep {D Sig : Type}
-    (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
-    (c : SepGuardedState) :
-    SepGuardedInput → Option (SepGuardedState × SepGuardedOutput Sig)
+/-- Transition of the guarded machine: `Custody.sign` and `Custody.submitRecorded` as in
+    `sepCustodyStep`, with `.submit` refused unless the leaf is at or above the watermark, no
+    certificate is forged, and every corrupted party's certificate was announced. -/
+@[expose] def sepCustodyGuardedStep
+    (d : Qsag.Custody.Deployment) (c : SepGuardedState) :
+    SepGuardedInput → Option (SepGuardedState × SepGuardedOutput)
   | .approve p dep r =>
     if p < d.numParties ∧ p ∉ c.base.corruptParties then
       match Qsag.Custody.sign d.signer (d.keys p) dep p r with
@@ -3181,15 +3152,14 @@ def sepRevealedFor (d : Qsag.Custody.Deployment) (issued : List SepIssue) (p : N
       some ({ c with
               base := { c.base with shared := (Qsag.Custody.submitRecorded d c.base.shared r cs).1 }
               nextLeaf := r.leaf + 1 },
-            .released (oracleSign (S.digest d.deploymentId (sepIntent r))))
+            .accepted r)
     else none
 
-/-- Reactive `Spec.Machine` for guarded separated custody outside the forgery bad event. -/
-def sepCustodyGuardedMachine {D Sig : Type}
-    (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig) :
-    Qsag.Spec.Machine SepGuardedState SepGuardedInput (SepGuardedOutput Sig) where
+/-- The guarded restriction of `sepCustodyMachine d`. -/
+def sepCustodyGuardedMachine (d : Qsag.Custody.Deployment) :
+    Qsag.Spec.Machine SepGuardedState SepGuardedInput SepGuardedOutput where
   Init c := c = sepGuardedInit d
-  step := sepCustodyGuardedStep d S oracleSign
+  step := sepCustodyGuardedStep d
   errStep c _ := c
 
 @[expose] def sepGuardedVisIn (d : Qsag.Custody.Deployment) :
@@ -3201,11 +3171,16 @@ def sepCustodyGuardedMachine {D Sig : Type}
   | .corrupt p => some (.corrupt p)
   | .submit r _ => some (.sign d.deploymentId (sepIntent r) false)
 
-@[expose] def sepGuardedVisOut {Sig : Type} : SepGuardedOutput Sig → CustodyOutcome Sig
+/-- Interface map on outputs. The coordinator's acceptance of `r` is read as the ideal
+    functionality's release of `oracleSign (digest deploymentId (sepIntent r))`; the signature is
+    supplied here, by the ideal oracle, and not by the machine. -/
+@[expose] def sepGuardedVisOut {D Sig : Type}
+    (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig) :
+    SepGuardedOutput → CustodyOutcome Sig
   | .certificate _ => .approvalRecorded
   | .injected => .approvalRecorded
   | .corrupted rev => .corrupted rev
-  | .released sig => .released sig
+  | .accepted r => .released (oracleSign (S.digest d.deploymentId (sepIntent r)))
 
 /-- Simulation invariant for `separatedCustody_dataRefines_idealCustody`. -/
 structure SepGuardedIdealRel {PK D Sig : Type}
@@ -3218,19 +3193,19 @@ structure SepGuardedIdealRel {PK D Sig : Type}
   watermark : st.ledger.nextFreshEpoch ≤ c.nextLeaf
   noForgeries : c.base.forgeries = []
 
-/-- **`SeparatedCustody` Refines `Spec.idealCustodyMachine` via `Spec.DataRefines`
-    (`separatedCustody_dataRefines_idealCustody`, `L-Ex-6b`)**:
-    Upgrades separated-custody ideal simulation from a reachability invariant to a full
-    stuttering forward simulation `Spec.DataRefines` into `Spec.idealCustodyMachine` outside
-    the forgery bad event. -/
+/-- **The guarded restriction of separated custody is simulated by `Spec.idealCustodyMachine`
+    (`separatedCustody_dataRefines_idealCustody`, `L-Ex-6b`)**: a stuttering forward simulation
+    `Spec.DataRefines` of `sepCustodyGuardedMachine d`, with the coordinator's acceptance mapped to
+    the ideal release by `sepGuardedVisOut`. The statement is about the guarded machine only; see
+    the head of this subsection for the three guards. -/
 def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
     (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
     (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
     (hProfile : SepDeploymentProfile d quorum₀) :
     Qsag.Spec.DataRefines
-      (sepCustodyGuardedMachine d S oracleSign)
+      (sepCustodyGuardedMachine d)
       (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀)
-      (sepGuardedVisIn d) sepGuardedVisOut where
+      (sepGuardedVisIn d) (sepGuardedVisOut d S oracleSign) where
   Rel := SepGuardedIdealRel d S oracleSign pk₀ quorum₀
   absInit _ := IdealCustodyState.init d.deploymentId pk₀ quorum₀
   init_ok {c₀} hInit := by
@@ -3493,21 +3468,21 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
   sim_reject hRel _ := hRel
 
 /-- Project a `sepCustodyGuardedMachine` trace onto `sepCustodyMachine` (erasing `.advInject`). -/
-def projectSepGuardedTrace {Sig : Type} :
-    List (SepGuardedInput × SepGuardedOutput Sig) → List (SepCustodyInput × SepCustodyOutput)
+def projectSepGuardedTrace :
+    List (SepGuardedInput × SepGuardedOutput) → List (SepCustodyInput × SepCustodyOutput)
   | [] => []
   | (inp, out) :: rest =>
     match inp, out with
     | .approve p dep r, .certificate cert => (.approve p dep r, .certificate cert) :: projectSepGuardedTrace rest
     | .corrupt p, .corrupted _ => (.corrupt p, .corrupted) :: projectSepGuardedTrace rest
-    | .submit r cs, .released _ => (.submit r cs, .accepted) :: projectSepGuardedTrace rest
+    | .submit r cs, .accepted _ => (.submit r cs, .accepted) :: projectSepGuardedTrace rest
     | _, _ => projectSepGuardedTrace rest
 
-private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
-    {d : Qsag.Custody.Deployment} {S : CustodyDigestScheme D} {oracleSign : D → Sig}
-    {c c' : SepGuardedState} {tr : List (SepGuardedInput × SepGuardedOutput Sig)}
+private theorem sepCustodyGuarded_validTrace_projects
+    {d : Qsag.Custody.Deployment}
+    {c c' : SepGuardedState} {tr : List (SepGuardedInput × SepGuardedOutput)}
     (hNF₀ : c.base.forgeries = [])
-    (hTr : (sepCustodyGuardedMachine d S oracleSign).ValidTrace c tr c') :
+    (hTr : (sepCustodyGuardedMachine d).ValidTrace c tr c') :
     (sepCustodyMachine d).ValidTrace c.base (projectSepGuardedTrace tr) c'.base ∧
     c'.base.forgeries = [] ∧
     sepLeavesFresh c.nextLeaf (projectSepGuardedTrace tr) := by
@@ -3571,21 +3546,22 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
       · rw [cert_if_neg hg] at hStep; cases hStep
   | reject _ _ _ ih => exact ih hNF₀
 
-/-- Every initialized execution of `sepCustodyGuardedMachine` projects onto an execution of
-    `sepCustodyMachine d` satisfying `SeparatedCustodyRunAssumptions` AND simultaneously admits
-    its projected trace in `Spec.idealCustodyMachine` via `separatedCustody_dataRefines_idealCustody`. -/
+/-- Every initialized execution of `sepCustodyGuardedMachine d` projects onto an execution of
+    `sepCustodyMachine d` that satisfies `SeparatedCustodyRunAssumptions`, and its image under the
+    interface maps is a trace of `Spec.idealCustodyMachine`. The converse direction (from an
+    execution of `sepCustodyMachine d` to a guarded one) is not claimed. -/
 theorem sepCustodyGuarded_projects_to_sepCustody {PK D Sig : Type} [DecidableEq D]
     (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
     (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
     (hProfile : SepDeploymentProfile d quorum₀)
-    {cFinal : SepGuardedState} {tr : List (SepGuardedInput × SepGuardedOutput Sig)}
-    (hTr : (sepCustodyGuardedMachine d S oracleSign).ValidTrace (sepGuardedInit d) tr cFinal) :
+    {cFinal : SepGuardedState} {tr : List (SepGuardedInput × SepGuardedOutput)}
+    (hTr : (sepCustodyGuardedMachine d).ValidTrace (sepGuardedInit d) tr cFinal) :
     (sepCustodyMachine d).ValidTrace (sepCustodyInit d) (projectSepGuardedTrace tr) cFinal.base ∧
     SeparatedCustodyRunAssumptions (projectSepGuardedTrace tr) cFinal.base ∧
     (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).AdmitsTrace
-      (Qsag.Spec.projectTrace (sepGuardedVisIn d) sepGuardedVisOut tr) := by
+      (Qsag.Spec.projectTrace (sepGuardedVisIn d) (sepGuardedVisOut d S oracleSign) tr) := by
   obtain ⟨hBaseTr, hNF, hLv⟩ := sepCustodyGuarded_validTrace_projects rfl hTr
-  have hAdm : (sepCustodyGuardedMachine d S oracleSign).AdmitsTrace tr :=
+  have hAdm : (sepCustodyGuardedMachine d).AdmitsTrace tr :=
     ⟨sepGuardedInit d, cFinal, rfl, hTr⟩
   exact ⟨hBaseTr, ⟨hNF, hLv⟩,
     (separatedCustody_dataRefines_idealCustody d S oracleSign pk₀ quorum₀ hProfile).preserve_admitsTrace hAdm⟩
@@ -4085,6 +4061,140 @@ theorem distributedShareCustody_dataRefines_or_collision
       x₁ ∈ Qsag.DistCustody.observedSharePreimages dep tr ∧
       x₂ ∈ Qsag.DistCustody.observedSharePreimages dep tr) :=
   Qsag.DistCustody.distCustody_dataRefines_or_collision dep hWf hTr
+
+/-- **The guarded authenticated custodian network refines the ideal custody functionality.**
+    The concrete machine is `DistCustody.authGuardedMachine`: a `Fin n` family of custodians, each
+    with a WAL record sealed under `"QSAG.BELT.LATCH.WAL.MAC/v3"` and an external anchor;
+    acknowledgements tagged with `custodianAckTag` under `"QSAG.BELT.ACK.v1"`; a wire on which the
+    adversary places any message; disk tampering, crashes and adaptive corruption below the
+    threshold. It is `DistCustody.authMachine` with two kinds of turn refused: delivery of a validly
+    tagged message in the name of an uncorrupted custodian for an intent it has not approved, and
+    a crash whose disk record passes recovery with another latch or log. Assumed in
+    `dep.WellFormed`: the Shamir deployment conditions, among them injectivity of the share
+    commitment, and the round trip of the state codec. -/
+def authenticatedCustody_refines_idealCustody {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    (dep : Qsag.DistCustody.AuthDeployment F C PK D Sig) (hWf : dep.WellFormed) :
+    Qsag.Spec.DataRefines (Qsag.DistCustody.authGuardedMachine dep)
+      (Qsag.Spec.idealCustodyMachine dep.core.digests dep.core.idealOracle dep.core.deploymentId
+        dep.core.pk dep.core.quorum)
+      (Qsag.DistCustody.authVisIn dep) Qsag.DistCustody.authVisOut :=
+  Qsag.DistCustody.authCustody_refines_ideal dep hWf
+
+/-- **Every execution of the authenticated custodian network is an ideal execution, or exhibits a
+    forgery or a collision.** For every trace of the unguarded `DistCustody.authMachine`, one of
+    the following holds.
+    1. Its image under the interface maps is a trace of `Spec.idealCustodyMachine`.
+    2. A state reached without any violation admits a message carrying the correct
+       `"QSAG.BELT.ACK.v1"` tag under the key of an enrolled, uncorrupted custodian whose 121-byte
+       preimage differs from the preimage of every acknowledgement that custodian sent.
+    3. Two distinct intents of this deployment have the same message tag.
+    4. The hash has a collision (a disk record other than the custodian's own carries the
+       anchor's `"QSAG.BELT.LATCH.WAL.MAC/v3"` tag).
+    No probability is attached to alternatives 2 to 4 here. -/
+theorem authenticatedCustody_ideal_or_forgery {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    (dep : Qsag.DistCustody.AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {tr : List (Qsag.DistCustody.AuthTurn F dep.core.quorum.numParties ×
+      Qsag.DistCustody.AuthEvent F Sig)}
+    (hAdmits : (Qsag.DistCustody.authMachine dep).AdmitsTrace tr) :
+    (Qsag.Spec.idealCustodyMachine dep.core.digests dep.core.idealOracle dep.core.deploymentId
+        dep.core.pk dep.core.quorum).AdmitsTrace
+        (Qsag.Spec.projectTrace (Qsag.DistCustody.authVisIn dep) Qsag.DistCustody.authVisOut tr) ∨
+    (∃ (st : Qsag.DistCustody.AuthState F PK D Sig dep.core.quorum.numParties)
+        (m : Qsag.DistCustody.AuthAck F),
+      (Qsag.DistCustody.authGuardedMachine dep).Reachable st ∧
+        Qsag.DistCustody.AckMacForgery dep st m) ∨
+    Qsag.DistCustody.MsgTagCollision dep ∨ Nonempty (Qsag.HashCollision256 dep.hash) :=
+  Qsag.DistCustody.authCustody_ideal_or_forgery dep hWf hAdmits
+
+/-- **Reachable-state safety of the guarded authenticated network.** Fewer than `threshold`
+    custodians are corrupted; the spend is within the cap; every WAL release carries the dealt
+    key's signature on `digest deploymentId intent` and its intent is in the approval log of an
+    enrolled custodian whose latch has moved past its epoch; no custodian has approved two
+    intents at one epoch. -/
+theorem authenticatedCustody_reachable_safe {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    (dep : Qsag.DistCustody.AuthDeployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : Qsag.DistCustody.AuthState F PK D Sig dep.core.quorum.numParties}
+    (hReach : (Qsag.DistCustody.authGuardedMachine dep).Reachable st) :
+    st.corrupt.length < dep.core.quorum.threshold ∧
+    st.ledger.spent ≤ dep.core.quorum.spendCap ∧
+    (∀ r : Qsag.Spec.CustodyRelease D Sig, r ∈ st.ledger.releasedHistory →
+      r.sig = dep.core.signWith dep.core.secret
+        (dep.core.digests.digest dep.core.deploymentId r.intent) ∧
+      ∃ p : Fin dep.core.quorum.numParties, r.intent ∈ (st.parties p).latched ∧
+        r.intent.epoch < (st.parties p).latch) ∧
+    (∀ p : Fin dep.core.quorum.numParties,
+      ((st.parties p).latched.map Qsag.Spec.CustodyIntent.epoch).Nodup) := by
+  obtain ⟨h1, h2, h3, h4, _⟩ := Qsag.DistCustody.authCustody_reachable_safe dep hWf hReach
+  exact ⟨h1, h2, h3, h4⟩
+
+/-- **`Pr[unsafe release] ≤ Pr[acknowledgement violation] + Pr[WAL violation]`.** Over a finite
+    coin space that determines the whole deployment (keys, hash, dealt polynomial) and the
+    adversary's schedule against the unguarded `DistCustody.authMachine`, the probability that the
+    coordinator's WAL ends up holding a release no enrolled custodian approved is at most the sum
+    of the probabilities of the two violation events.
+
+    The two events on the right are what an unforgeability argument has to bound, and this
+    library does not bound them. By `DistCustody.deliver_violation_classified` the first is a tag
+    forgery under an uncorrupted custodian's key or a message-tag collision; by
+    `DistCustody.crash_violation_collision` the second is a hash collision. -/
+theorem authenticatedCustody_unsafe_release_le_violations {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    {N : Nat} (hN : 0 < N)
+    (dep : Fin N → Qsag.DistCustody.AuthDeployment F C PK D Sig)
+    (hWf : ∀ ω, (dep ω).WellFormed)
+    (adv : (ω : Fin N) → List (Qsag.DistCustody.AuthTurn F (dep ω).core.quorum.numParties)) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.FinGame.mk hN (fun ω => Qsag.DistCustody.authUnsafeRelease (dep ω)
+        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authViolation (dep ω))
+          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).1)).winProb
+      ((Qsag.Spec.FinGame.mk hN (fun ω =>
+          (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authAckViolation (dep ω))
+            (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb.add
+        (Qsag.Spec.FinGame.mk hN (fun ω =>
+          (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authWalViolation (dep ω))
+            (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb) :=
+  Qsag.Spec.event_le_two_reductions _ _ _ (fun ω hU => by
+    have hV := Qsag.DistCustody.authRun_unsafe_release_violation (dep ω) (hWf ω) (adv ω) hU
+    rw [Qsag.DistCustody.authRun_violation_split] at hV
+    exact Bool.or_eq_true_iff.mp hV)
+
+/-- **Conditional bound on unsafe release.** If the acknowledgement-violation event has
+    probability at most `εAck` and the WAL-violation event at most `εWal`, then an unsafe release
+    has probability at most `εAck + εWal`; if that sum is at most `2^{-b}`, so is the probability
+    of an unsafe release. `hAck` and `hWal` are hypotheses: they are the unforgeability of
+    `custodianAckTag` under uncorrupted keys together with collision resistance of the message
+    tag, and collision resistance of the hash. Nothing in this library discharges them. -/
+theorem authenticatedCustody_unsafe_release_bound {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    {N : Nat} (hN : 0 < N)
+    (dep : Fin N → Qsag.DistCustody.AuthDeployment F C PK D Sig)
+    (hWf : ∀ ω, (dep ω).WellFormed)
+    (adv : (ω : Fin N) → List (Qsag.DistCustody.AuthTurn F (dep ω).core.quorum.numParties))
+    (εAck εWal : Qsag.Spec.RatBound)
+    (hAck : Qsag.Spec.GameBound
+      (Qsag.Spec.FinGame.mk hN (fun ω =>
+        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authAckViolation (dep ω))
+          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb εAck)
+    (hWal : Qsag.Spec.GameBound
+      (Qsag.Spec.FinGame.mk hN (fun ω =>
+        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authWalViolation (dep ω))
+          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).2)).winProb εWal) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.FinGame.mk hN (fun ω => Qsag.DistCustody.authUnsafeRelease (dep ω)
+        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authViolation (dep ω))
+          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).1)).winProb
+      (εAck.add εWal) ∧
+    (∀ b : Nat, (εAck.add εWal).atLeastBits b →
+      (Qsag.Spec.FinGame.mk hN (fun ω => Qsag.DistCustody.authUnsafeRelease (dep ω)
+        (Qsag.DistCustody.authRun (dep ω) (Qsag.DistCustody.authViolation (dep ω))
+          (Qsag.DistCustody.AuthState.init (dep ω)) (adv ω)).1)).winProb.atLeastBits b) := by
+  have hBound := Qsag.Spec.GameBound.trans
+    (authenticatedCustody_unsafe_release_le_violations hN dep hWf adv)
+    (Qsag.Spec.RatBound.add_le_add hAck hWal)
+  exact ⟨hBound, fun _ hBits => Qsag.Spec.GameBound.atLeastBits hBound hBits⟩
 
 /-- **A Shamir custodian refines the complete-mediation vault machine.** Concrete state is the
     custodian's `BeltLatchNodeState` and `Custody.Vault`; both machines start in any
@@ -4656,6 +4766,10 @@ end Roster
   Qsag.Top.distributedCustody_trace_inclusion_and_safety
   Qsag.Top.shamir_custody_network_non_equivocation
   Qsag.Top.rssSharedRelease_preserves_traces
+  Qsag.Top.authenticatedCustody_ideal_or_forgery
+  Qsag.Top.authenticatedCustody_reachable_safe
+  Qsag.Top.authenticatedCustody_unsafe_release_le_violations
+  Qsag.Top.authenticatedCustody_unsafe_release_bound
   Qsag.Top.elf_to_idealTsig_trace_inclusion
   Qsag.Top.separated_custody_provenance_and_release_chain
   Qsag.Top.threshold_durable_feedback_and_resource_burn_chain

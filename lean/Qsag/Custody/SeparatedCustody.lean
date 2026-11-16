@@ -9,6 +9,14 @@ import Qsag.Tactic.AssuranceKit
 Each custodian has its own production Jorts key. The spine composes their approvals.
 No public linear map is treated as a signature and no secrecy theorem is assumed.
 The signer is partial: exhausted grinding burns its leaf without releasing a signature.
+
+Relation to the Rust tree. This module is a specification of separated custody by independent
+hash-signature custodians. It is not a model of `crates/qsag-quorum/src/quorum_jorts.rs`, and its
+three domain strings, `"QSAG.CUSTODY.APPROVAL/v3"`, `"QSAG.CUSTODY.ROUND1/v2"` and
+`"QSAG.CUSTODY.KEYID/v1"`, occur nowhere under `crates/` or `aeneas/`. The deployed quorum signer
+uses the `QSAG.QUORUM.*` tags and the `"QSAG.BELT.ACK.v1"` acknowledgement, which are modelled in
+`Qsag.Custody.JortsBeltLatchAndQuorumSwitching`. Nothing proved here is a statement about bytes a
+Rust binary produces.
 -/
 public section
 namespace Qsag.Custody

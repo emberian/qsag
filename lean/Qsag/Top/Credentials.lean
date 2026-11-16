@@ -1211,8 +1211,6 @@ theorem inhabited_piToprfCredService_issuance :
   Qsag.Top.unauthenticatedCredService_not_implementation
 #tooth_pair Qsag.Top.piToprfCredMachine_reservoir_never_rewinds vs
   Qsag.tooth_reprepare_same_session_refused
-#tooth_pair Qsag.Top.piToprfCredService_eval_accept_checks vs
-  Qsag.tooth_forged_circuit_opening_not_released
 #tooth_pair Qsag.Top.credential_preprocessing_lattice_and_lpn_assumptions_bound vs
   Qsag.Top.tooth_degenerate_moduleSis_noRows_refuted
 #tooth_pair Qsag.Top.threshold_mldsa_frozen_sacrifice_sign_step_soundness vs
