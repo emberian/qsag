@@ -8,6 +8,7 @@ use qsag_accel::{
 };
 
 pub(crate) const COZK_VIEW_MAGIC_V4: [u8; 8] = *b"COZKVW04";
+pub(crate) const COZK_VIEW_MAGIC_V5: [u8; 8] = *b"COZKVW05";
 pub(crate) const COZK_TREE_LEAVES: usize = 8;
 pub(crate) const TURBOSHAKE_RATE_BYTES: usize = 136;
 /// RFC 9861 KangarooTwelve / TurboSHAKE leaf hop domain byte (`0x0B` in `0x01..=0x7F`).
@@ -383,12 +384,18 @@ pub(crate) fn turboshake256_slices_32(
 /// Compute all 8 parallel leaf digests `L_0..L_7` of `products` simultaneously in one
 /// 8-lane SIMD `keccak_p1600_12_lanes::<8>` pass, then hash the length-framed root tuple.
 pub(crate) fn commit_cozk_v4_one(
-    rep: usize,
-    head: usize,
-    subseeds: &[[u8; 32]],
-    head_inputs: &[u8],
-    products: &[u8],
-    outputs: &[u8],
+    rep: usize, head: usize, subseeds: &[[u8; 32]], head_inputs: &[u8], products: &[u8], outputs: &[u8],
+) -> [u8; 32] {
+    commit_cozk_tree_one(&COZK_VIEW_MAGIC_V4, rep, head, subseeds, head_inputs, products, outputs)
+}
+
+/// V5 commits to seed commitments and a seed-masked view. Binding follows from
+/// binding of the ordered seed commitments and tree hash: fixed seeds determine
+/// a unique mask, hence a unique plaintext for each masked view. The mask XOF is
+/// domain-separated from the inner proof tapes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_cozk_tree_one(
+    magic: &[u8; 8], rep: usize, head: usize, subseeds: &[[u8; 32]], head_inputs: &[u8], products: &[u8], outputs: &[u8],
 ) -> [u8; 32] {
     let mut st8 = Secret(TURBOSHAKE_VIEW_MIDSTATE.map(|w| [w; COZK_TREE_LEAVES]));
     let ranges: [(usize, usize); COZK_TREE_LEAVES] =
@@ -462,7 +469,7 @@ pub(crate) fn commit_cozk_v4_one(
             }
         }
     };
-    absorb_root(&COZK_VIEW_MAGIC_V4);
+    absorb_root(magic);
     absorb_root(&(rep as u64).to_le_bytes());
     absorb_root(&[head as u8]);
     absorb_root(&(subseeds.len() as u64).to_le_bytes());
@@ -489,6 +496,39 @@ pub(crate) fn commit_cozk_v4_one(
         chunk.copy_from_slice(&w.to_le_bytes());
     }
     out
+}
+
+pub(crate) fn cozk_seed_commit(rep: usize, head: usize, position: usize, seed: &[u8; 32]) -> [u8; 32] {
+    qsag_accel::keccak::cshake256_framed_32(b"QSAG.COZK.SEED.COMMIT.V5", &[&(rep as u64).to_le_bytes(), &(head as u64).to_le_bytes(), &(position as u64).to_le_bytes(), seed])
+}
+
+pub(crate) fn view_mask_stream(seed: &[u8; 32], rep: usize, head: usize) -> qsag_core::sponge::keccak::Cshake256WordStream4 {
+    const MIDSTATE: [u64; 25] = qsag_core::sponge::keccak::cshake256_static_midstate(b"QSAG.COZK.VIEW.MASK.V5");
+    let mut input = Secret([0u8; 41]);
+    input[..32].copy_from_slice(seed);
+    input[32..40].copy_from_slice(&(rep as u64).to_le_bytes());
+    input[40] = head as u8;
+    qsag_core::sponge::keccak::Cshake256WordStream4::new(&MIDSTATE, &input[..])
+}
+
+fn commit_cozk_v5_one(v: &CozkIndexedView<'_>) -> [u8; 32] {
+    let mut masked: SecretVec<u8> = v.head_inputs.iter().chain(v.products).chain(v.outputs).copied().collect();
+    let seed_commits: Vec<_> = v.subseeds.iter().enumerate().map(|(i, s)| cozk_seed_commit(v.rep, v.head, i, s)).collect();
+    for seed in &v.subseeds {
+        let mut mask = view_mask_stream(seed, v.rep, v.head);
+        let mut words = Secret([0u64; 4]);
+        for chunk in masked.chunks_mut(32) {
+            mask.fill_words(&mut words[..]);
+            for (i, byte) in chunk.iter_mut().enumerate() { *byte ^= (words[i / 8] >> (8 * (i % 8))) as u8; }
+        }
+    }
+    let a = v.head_inputs.len();
+    let b = a + v.products.len();
+    commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, v.rep, v.head, &seed_commits, &masked[..a], &masked[a..b], &masked[b..])
+}
+
+pub(crate) fn commit_cozk_v5_indexed(views: &[CozkIndexedView<'_>]) -> Vec<[u8; 32]> {
+    crate::parallel::map(views.len(), |i| commit_cozk_v5_one(&views[i]))
 }
 
 pub(crate) struct CozkIndexedView<'a> {

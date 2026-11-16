@@ -1097,7 +1097,7 @@ pub fn verify_pallas_migration_with_backend<B: AcceleratorBackend>(
     {
         return Err(MigrateError::MalformedProofStructure);
     }
-    if crate::zk_engine::is_cozk_v4_proof(proof) {
+    if crate::zk_engine::is_cozk_proof(proof) {
         let dummy_one = [1u8; 32];
         let circuit =
             build_pallas_ownership_circuit(statement, expected_affine, &dummy_one, &[0; 32]);

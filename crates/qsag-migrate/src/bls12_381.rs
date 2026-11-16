@@ -1139,7 +1139,7 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
     {
         return Err(MigrateError::MalformedProofStructure);
     }
-    if crate::zk_engine::is_cozk_v4_proof(proof) {
+    if crate::zk_engine::is_cozk_proof(proof) {
         let mut dummy_one = [0u8; 32];
         dummy_one[0] = 1;
         let circuit = build_bls_ownership_circuit(statement, public_affine, &dummy_one);
