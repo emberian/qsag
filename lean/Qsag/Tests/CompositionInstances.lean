@@ -496,3 +496,502 @@ theorem both_components_broken_instance :
 /-! ### Real `cSHAKE256` (`keccakF1600`) + `verifyAggNativeSig` (`Poseidon2` Jorts) Hybrid Envelope -/
 
 /-- ASCII customization string `"QSAG.HYBRID.V2"` for `cSHAKE256` envelope hashing. -/
+def hybridCshakeTag : Bytes :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E, 0x56, 0x32]
+
+def beNat (bs : Bytes) : Nat :=
+  bs.foldl (fun acc b => acc * 256 + b.toNat) 0
+
+/-- Real 256-bit `cSHAKE256` (`evalCshake256Sponge keccakF1600`) domain-separated hash for
+`HybridSecurity.Hash`, replacing the polynomial checksum `toyHash`. -/
+def cshakeHybridHash : HybridSecurity.Hash := fun x =>
+  ⟨beNat (evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes
+      [] hybridCshakeTag (encodePre x) 32) % 256 ^ 32,
+   Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
+
+def encodeLane4Bytes (d : Digest4) : Bytes :=
+  be 8 d.x0.val ++ (be 8 d.x1.val ++ (be 8 d.x2.val ++ be 8 d.x3.val))
+
+def decodeLane4Bytes (bs : Bytes) : Option Digest4 :=
+  if bs.length = 32 then
+    some ⟨Goldilocks.ofNat (beNat (bs.take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 8).take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 16).take 8)),
+          Goldilocks.ofNat (beNat ((bs.drop 24).take 8))⟩
+  else none
+
+def encodeCompactJortsPk (pk : AggValidatorPk) : Bytes :=
+  encodeLane4Bytes pk.pkSeed ++ encodeLane4Bytes pk.pkRoot
+
+def decodeCompactJortsPk (bs : Bytes) : Option AggValidatorPk :=
+  if bs.length = 64 then
+    match decodeLane4Bytes (bs.take 32), decodeLane4Bytes (bs.drop 32) with
+    | some s, some r => some ⟨.xmssPoseidon2, s, r⟩
+    | _, _ => none
+  else none
+
+def encodeCompactJortsSig (sig : AggNativeSignature) : Bytes :=
+  match sig.layers with
+  | [⟨ctr, [c0, c1], [s0]⟩] =>
+    be 8 sig.statefulLeafIdx ++ (be 8 ctr ++
+      (encodeLane4Bytes sig.rRand ++
+        (encodeLane4Bytes c0 ++ (encodeLane4Bytes c1 ++ encodeLane4Bytes s0))))
+  | _ => []
+
+def decodeCompactJortsSig (bs : Bytes) : Option AggNativeSignature :=
+  if bs.length = 144 then
+    match decodeLane4Bytes ((bs.drop 16).take 32),
+          decodeLane4Bytes ((bs.drop 48).take 32),
+          decodeLane4Bytes ((bs.drop 80).take 32),
+          decodeLane4Bytes ((bs.drop 112).take 32) with
+    | some rR, some c0, some c1, some s0 =>
+      some ⟨.xmssPoseidon2, rR, beNat (bs.take 8), [],
+        [⟨beNat ((bs.drop 8).take 8), [c0, c1], [s0]⟩]⟩
+    | _, _, _, _ => none
+  else none
+
+/-- Real `Poseidon2` Jorts signature verifier (`verifyAggNativeSig compactAuditGeom`) over decoded
+public-key and signature bytes, replacing the publicly forgeable `toyVerifier`. -/
+def jortsNativeVerifier : Verifier := fun pkBytes t sigBytes =>
+  match decodeCompactJortsPk pkBytes, decodeCompactJortsSig sigBytes with
+  | some pk, some sig => verifyAggNativeSig compactAuditGeom pk (transcriptFields t) sig
+  | _, _ => false
+
+def realHk : Keys :=
+  ⟨.secpMl44, encodeCompactJortsPk (pkOf 0), encodeCompactJortsPk (pkOf 1)⟩
+
+/-- Literal native signatures on the `cshakeHybridHash` classical/PQ transcripts for `paid`
+(`tswCtr = 21` and `122`), tied to `signAggNative` by `real_hybrid_sigs_are_modelled_outputs`. -/
+def realHybridSig0 : AggNativeSignature :=
+  ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨21,
+    [lane 4152917893602010253 5344412802567744713 18406927796743773750 1962659585794765281,
+     lane 12873018474816122043 2869910227242953051 3097284758269903553 18326636155894048790],
+    [lane 5524291857455771020 16376422686410664307 15963494650740044646 18098363549869475062]⟩]⟩
+
+def realHybridSig1 : AggNativeSignature :=
+  ⟨.xmssPoseidon2, auditRRand, 1, [], [⟨122,
+    [lane 10036846859147774993 15499800327978969217 15476824389852128619 15451031862181482938,
+     lane 14010823692816899133 11663312065820974772 3799621797402719272 6812636063505864400],
+    [lane 13388180661509288011 5130805258596798721 8406673262598715289 15360960474733464499]⟩]⟩
+
+theorem real_hybrid_sigs_are_modelled_outputs :
+    realHybridSig0 = signAggNative compactAuditGeom (skOf 0) (pkOf 0)
+      (transcriptFields (transcript cshakeHybridHash realHk false paid)) auditRRand 0 21 [] ∧
+    realHybridSig1 = signAggNative compactAuditGeom (skOf 1) (pkOf 1)
+      (transcriptFields (transcript cshakeHybridHash realHk true paid)) auditRRand 1 122 [] := by
+  decide +kernel
+
+def realEnvelopePaid : HybridPinnedEnvelope :=
+  ⟨realHk, encodeCompactJortsSig realHybridSig0, encodeCompactJortsSig realHybridSig1⟩
+
+theorem real_hybrid_honest_accepts :
+    validateForAddress cshakeHybridHash realEnvelopePaid (addressOf cshakeHybridHash realHk hrpQs 1) ∧
+    verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid paid := by
+  unfold validateForAddress verifyWith; decide +kernel
+
+theorem real_hybrid_rejects_other_message :
+    ¬ verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid unpaid := by
+  unfold verifyWith; decide +kernel
+
+theorem real_hybrid_rejects_rogue_partner :
+    ¬ (jortsNativeVerifier realHk.pq
+        (transcript cshakeHybridHash { realHk with classical := encodeCompactJortsPk (pkOf 1) } true paid)
+        realEnvelopePaid.pqSignature = true) := by
+  decide +kernel
+
+attribute [local irreducible] cshakeHybridHash jortsNativeVerifier realEnvelopePaid
+
+theorem real_hybrid_keybound_instance :
+    ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
+      (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
+      validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
+  ⟨cshakeHybridHash, jortsNativeVerifier, jortsNativeVerifier, realHk, hrpQs, 1,
+    realEnvelopePaid, paid, [unpaid],
+    real_hybrid_honest_accepts.1, real_hybrid_honest_accepts.2, by decide⟩
+
+def pol : TransactionPolicy := ⟨9, [7, 8], 100, 150, [⟨50, 1⟩, ⟨100, 2⟩]⟩
+def intentHash (i : TransactionIntent) : Nat :=
+  ((((i.recipient * 1000003 + i.amount) * 1000003 + i.reportedSpend) * 1000003 + i.nonce) *
+    1000003 + i.session) * 1000003 + i.window
+def payA : TransactionIntent := ⟨7, 60, 0, 1, 11, 5⟩
+def payB : TransactionIntent := ⟨8, 80, 60, 2, 12, 5⟩
+def genesis : Ledger := ⟨0, [], []⟩
+def quorum01 (j : Fin 3) : Bool := decide (j.val < 2)
+def corrupt0 (j : Fin 3) : Bool := decide (j.val = 0)
+/-- The corrupt quorum member holds a token that was never minted for the intent. -/
+def tokensA (j : Fin 3) : AuthorizedSignReleaseToken :=
+  if j.val = 0 then ⟨0, 0, 0, 0, 0⟩ else minted intentHash pol payA
+
+theorem only_honest_member : ∀ j : Fin 3,
+    quorum01 j = true → corrupt0 j = false → j = 1 := by decide +kernel
+theorem acceptsA : PolicyAccepts pol payA 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+theorem acceptsB : PolicyAccepts pol payB 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+theorem stepA : LedgerStep pol.maxWindowSpend 5 genesis payA (burn genesis payA) := by
+  unfold LedgerStep; decide +kernel
+theorem stepB : LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payB
+    (burn (burn genesis payA) payB) := by
+  unfold LedgerStep; decide +kernel
+theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by decide +kernel
+
+/-- `n = 3`, `t = 2`, `f = 1`: the quorum contains the corrupt party; the honest member alone
+supplies the release. -/
+theorem corrupt_quorum_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
+    (H : TransactionIntent → Nat) (i : TransactionIntent) (q corrupt : Fin n → Bool)
+    (before after : Fin n → Ledger) (tokens : Fin n → AuthorizedSignReleaseToken),
+    cardinal q = t ∧ cardinal corrupt ≤ f ∧ f < t ∧
+    (∀ j, q j = true → corrupt j = false →
+      ValidRelease H p t w i (before j) (after j) (tokens j)) :=
+  ⟨3, 2, 1, 5, pol, intentHash, payA, quorum01, corrupt0, fun _ => genesis,
+    fun _ => burn genesis payA, tokensA, by decide +kernel, by decide +kernel, by decide,
+    fun j hq hc => by
+      obtain rfl := only_honest_member j hq hc
+      exact ⟨rfl, acceptsA, stepA⟩⟩
+
+def quorumOf (i : TransactionIntent) (j : Fin 3) : Bool :=
+  if i = payA then decide (j.val < 2) else decide (0 < j.val)
+def beforeOf (i : TransactionIntent) : Ledger := if i = payA then genesis else burn genesis payA
+
+/-- Two intents, two different quorums sharing honest party `1`, one serialized ledger. -/
+theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
+    (H : TransactionIntent → Nat) (is : List TransactionIntent) (corrupt : Fin n → Bool)
+    (q : TransactionIntent → Fin n → Bool) (before after : TransactionIntent → Fin n → Ledger)
+    (tokens : TransactionIntent → Fin n → AuthorizedSignReleaseToken) (final : Ledger),
+    cardinal corrupt ≤ f ∧ f < t ∧ (∀ i ∈ is, cardinal (q i) = t) ∧
+    (∀ i ∈ is, ∀ j, q i j = true → corrupt j = false →
+      ValidRelease H p t w i (before i j) (after i j) (tokens i j)) ∧
+    LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
+  refine ⟨3, 2, 1, 5, pol, intentHash, [payA, payB], corrupt0, quorumOf,
+    fun i _ => beforeOf i, fun i _ => burn (beforeOf i) i, fun i _ => minted intentHash pol i,
+    burn (burn genesis payA) payB, by decide +kernel, by decide, ?_, ?_, ?_⟩
+  · intro i hi
+    rcases List.mem_cons.mp hi with rfl | hi
+    · decide +kernel
+    · obtain rfl := List.mem_singleton.mp hi
+      decide +kernel
+  · intro i hi j _ _
+    rcases List.mem_cons.mp hi with rfl | hi
+    · exact ⟨rfl, acceptsA, stepA⟩
+    · obtain rfl := List.mem_singleton.mp hi
+      exact ⟨rfl, acceptsB, stepB⟩
+  · exact .cons stepA (.cons stepB (.nil _))
+
+theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.2.1 (by decide +kernel)
+theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.1 (by decide +kernel)
+theorem rejects_insufficient_approvals : ¬ PolicyAccepts pol payB 1 := by
+  rintro ⟨_, _, r, hr, hn⟩
+  have e : pol.tiers.find? (fun r => decide (payB.amount ≤ r.cap)) = some ⟨100, 2⟩ := by
+    decide +kernel
+  rw [e] at hr
+  cases hr
+  exact absurd hn (by decide +kernel)
+theorem rejects_nonce_replay :
+    ¬ LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payA
+      (burn (burn genesis payA) payA) :=
+  fun h => absurd h.2.1 (by decide +kernel)
+/-- After `payA` and `payB` (140 of 150 spent) a further 20 has no ledger step at all. -/
+theorem rejects_window_overspend (next : Ledger) :
+    ¬ LedgerStep pol.maxWindowSpend 5 (burn (burn genesis payA) payB)
+      ⟨7, 20, 0, 3, 13, 5⟩ next :=
+  fun h => absurd h.2.2.2.1 (by decide +kernel)
+theorem rejects_stale_window (next : Ledger) :
+    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next :=
+  fun h => absurd h.1 (by decide +kernel)
+theorem token_is_intent_specific :
+    minted intentHash pol payA ≠ minted intentHash pol payB := by decide +kernel
+
+def toyMac (policy old next : Nat) : Nat := (policy * 65537 + old) * 65537 + next + 0x5eed
+theorem window_advance_accepts :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by decide +kernel
+/-- Wrong tag, non-increasing epoch, tag for another policy, tag for another old epoch. -/
+theorem window_advance_rejects :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨5, toyMac 9 5 5⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 8 5 6⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by decide +kernel
+theorem window_advance_rejects_wrong_tag :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by decide +kernel
+end Hybrid
+
+/-! ## 3. Cross-protocol: the modelled Poseidon2 permutation and real labels -/
+section Cross
+open Qsag.CrossProtocol
+
+attribute [local irreducible] poseidon2Perm12 poseidon2Perm12Inv
+
+open CommRingOps LawfulCommRing in
+/-- Componentwise Goldilocks arithmetic on a four-limb lane; `add` is `lane4Add`. -/
+@[instance_reducible] def lane4Ring : LawfulCommRing Lane4 where
+  zero := ⟨zero, zero, zero, zero⟩; one := ⟨one, one, one, one⟩
+  add := fun a b => ⟨add a.x0 b.x0, add a.x1 b.x1, add a.x2 b.x2, add a.x3 b.x3⟩
+  mul := fun a b => ⟨mul a.x0 b.x0, mul a.x1 b.x1, mul a.x2 b.x2, mul a.x3 b.x3⟩
+  neg := fun a => ⟨neg a.x0, neg a.x1, neg a.x2, neg a.x3⟩
+  sub := fun a b => ⟨sub a.x0 b.x0, sub a.x1 b.x1, sub a.x2 b.x2, sub a.x3 b.x3⟩
+  add_assoc := fun _ _ _ => Lane4.ext (add_assoc _ _ _) (add_assoc _ _ _)
+    (add_assoc _ _ _) (add_assoc _ _ _)
+  add_comm := fun _ _ => Lane4.ext (add_comm _ _) (add_comm _ _) (add_comm _ _) (add_comm _ _)
+  zero_add := fun _ => Lane4.ext (zero_add _) (zero_add _) (zero_add _) (zero_add _)
+  add_zero := fun _ => Lane4.ext (add_zero _) (add_zero _) (add_zero _) (add_zero _)
+  add_left_neg := fun _ => Lane4.ext (add_left_neg _) (add_left_neg _)
+    (add_left_neg _) (add_left_neg _)
+  sub_eq_add_neg := fun _ _ => Lane4.ext (sub_eq_add_neg _ _) (sub_eq_add_neg _ _)
+    (sub_eq_add_neg _ _) (sub_eq_add_neg _ _)
+  mul_assoc := fun _ _ _ => Lane4.ext (mul_assoc _ _ _) (mul_assoc _ _ _)
+    (mul_assoc _ _ _) (mul_assoc _ _ _)
+  mul_comm := fun _ _ => Lane4.ext (mul_comm _ _) (mul_comm _ _) (mul_comm _ _) (mul_comm _ _)
+  one_mul := fun _ => Lane4.ext (one_mul _) (one_mul _) (one_mul _) (one_mul _)
+  mul_one := fun _ => Lane4.ext (mul_one _) (mul_one _) (mul_one _) (mul_one _)
+  left_distrib := fun _ _ _ => Lane4.ext (left_distrib _ _ _) (left_distrib _ _ _)
+    (left_distrib _ _ _) (left_distrib _ _ _)
+  right_distrib := fun _ _ _ => Lane4.ext (right_distrib _ _ _) (right_distrib _ _ _)
+    (right_distrib _ _ _) (right_distrib _ _ _)
+attribute [local instance] lane4Ring
+
+def lane4State (s : Poseidon2State12) : State Lane4 := (s.b0, s.b1, s.b2)
+/-- The modelled width-12 Poseidon2 permutation as the `SimpleEquiv` consumed by the
+transcript and counting theorems. -/
+def poseidonEquiv : SimpleEquiv (State Lane4) (State Lane4) where
+  toFun x := lane4State (poseidon2Perm12 ⟨x.1, x.2.1, x.2.2⟩)
+  invFun y := lane4State (poseidon2Perm12Inv ⟨y.1, y.2.1, y.2.2⟩)
+  left_inv x := congrArg lane4State (poseidon2Perm12Inv_left_inv ⟨x.1, x.2.1, x.2.2⟩)
+  right_inv y := congrArg lane4State (poseidon2Perm12Inv_right_inv ⟨y.1, y.2.1, y.2.2⟩)
+
+/-- Input-dependent part of the deployed weighted feed-forward beyond `in0`:
+`2·in1 + 4·tweak`. -/
+def weightedJiveExtra (x : State Lane4) : Lane4 :=
+  lane4Add (lane4Scale (Goldilocks.ofNat 2) x.2.1) (lane4Scale (Goldilocks.ofNat 4) x.2.2)
+
+/-- Consumer bridge: `poseidon2_compress12_ff` of `sponge.rs`, as modelled by
+`poseidon2Compress12FF` (`perm.b0 + in0 + 2·in1 + 4·tweak`), is `jiveCompress` with
+`extra = weightedJiveExtra` over the modelled permutation. -/
+theorem compress12FF_eq_jive (in0 in1 tweak : Lane4) :
+    poseidon2Compress12FF in0 in1 tweak =
+      jiveCompress weightedJiveExtra poseidonEquiv (in0, in1, tweak) := by
+  show CommRingOps.add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0
+      (CommRingOps.add (CommRingOps.add in0 (lane4Scale (Goldilocks.ofNat 2) in1))
+        (lane4Scale (Goldilocks.ofNat 4) tweak)) =
+    CommRingOps.add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0
+      (CommRingOps.add in0 (CommRingOps.add (lane4Scale (Goldilocks.ofNat 2) in1)
+        (lane4Scale (Goldilocks.ofNat 4) tweak)))
+  rw [LawfulCommRing.add_assoc in0]
+
+/-- `checked_preimage_is_transcript_hit` stated for the modelled deployed compression. -/
+theorem deployed_compress_preimage_hits_transcript
+    (t : List (State Lane4 × State Lane4)) (target : Lane4) (x y : State Lane4)
+    (hc : Consistent poseidonEquiv t) (hm : (x, y) ∈ t)
+    (hs : poseidon2Compress12FF x.1 x.2.1 x.2.2 = target) :
+    relation weightedJiveExtra x y = target :=
+  checked_preimage_is_transcript_hit weightedJiveExtra poseidonEquiv t target x y hc hm
+    ((compress12FF_eq_jive x.1 x.2.1 x.2.2).symm.trans hs)
+
+def realX : State Lane4 :=
+  (⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩,
+   ⟨Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7, Goldilocks.ofNat 8⟩,
+   ⟨domainMerkleNode, Goldilocks.ofNat 9, Goldilocks.ofNat 10, poseidon2IvTag⟩)
+def realY : State Lane4 :=
+  (⟨Goldilocks.ofNat 7, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, lane4Zero, lane4Zero)
+/-- One inverse and one forward query to the modelled permutation. -/
+def realTranscript : List (State Lane4 × State Lane4) :=
+  [(poseidonEquiv.invFun realY, realY), (realX, poseidonEquiv.toFun realX)]
+theorem real_transcript_consistent : Consistent poseidonEquiv realTranscript :=
+  inverse_extension _ _
+    (forward_extension _ [] (fun _ _ h => absurd h List.not_mem_nil) realX) realY
+
+theorem real_transcript_instance :
+    ∃ p : SimpleEquiv (State Lane4) (State Lane4),
+    ∃ t : List (State Lane4 × State Lane4), ∃ x y : State Lane4,
+    ∃ target : Lane4, Consistent p t ∧ (x, y) ∈ t ∧
+      jiveCompress weightedJiveExtra p x = target :=
+  ⟨poseidonEquiv, realTranscript, realX, poseidonEquiv.toFun realX,
+    poseidon2Compress12FF realX.1 realX.2.1 realX.2.2, real_transcript_consistent,
+    List.mem_cons_of_mem _ (List.mem_singleton.mpr rfl),
+    (compress12FF_eq_jive realX.1 realX.2.1 realX.2.2).symm⟩
+
+/-- The permutation moves the point and the compression output is nonzero. -/
+theorem real_poseidon_nondegenerate :
+    poseidonEquiv.toFun realX ≠ realX ∧
+    poseidon2Compress12FF realX.1 realX.2.1 realX.2.2 ≠ lane4Zero := by decide +kernel
+/-- On the modelled permutation: one inverse call hits a chosen raw-truncation target, and
+the same point misses that target under feed-forward. -/
+theorem real_poseidon_raw_vs_feedforward :
+    rawTrunc poseidonEquiv (poseidonEquiv.invFun realY) = realY.1 ∧
+    jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) ≠
+      realY.1 :=
+  ⟨raw_inverse poseidonEquiv _ _ _, by decide +kernel⟩
+theorem real_poseidon_feedforward_misses :
+    ¬ (jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) =
+      realY.1) := real_poseidon_raw_vs_feedforward.2
+
+/- `bidirectional_bad_count` on GF(4): of three available answers exactly one lands on the
+target, contributing `1 · 2!` completions, within the bound `1 · 4² · 2!`. -/
+section SmallField
+local instance : LawfulCommRing (Bool × Bool) := towerRing 1
+def smallAvail : List (State (Bool × Bool)) :=
+  [((false, false), (false, false), (false, false)),
+   ((true, false), (false, true), (false, false)),
+   ((true, true), (true, false), (false, true))]
+def smallChosen : State (Bool × Bool) := ((false, true), (true, true), (false, false))
+theorem small_field_bad_count :
+    ((smallAvail.filter (fun x => decide (queryValue false
+        (fun _ _ => (CommRingOps.zero : Bool × Bool)) smallChosen x ∈
+          [((true, true) : Bool × Bool)]))).flatMap
+      (fun y => (extensions (smallAvail.length - 1) (smallAvail.erase y)).map (y :: ·))).length
+      = 2 ∧
+    ((smallAvail.filter (fun x => decide (queryValue false
+        (fun _ _ => (CommRingOps.zero : Bool × Bool)) smallChosen x ∈
+          ([] : List (Bool × Bool))))).flatMap
+      (fun y => (extensions (smallAvail.length - 1) (smallAvail.erase y)).map (y :: ·))).length
+      = 0 := by decide +kernel
+end SmallField
+
+/-- A hash that separates `[1]` from `[2]` and collides on `[0, 1]` and `[1]`. -/
+def foldHash (m : List UInt8) : BitVec 256 :=
+  BitVec.ofNat 256 (m.foldl (fun a b => a * 256 + b.toNat) 0)
+theorem digest_separates_distinct_hashes :
+    digest5FromBitVec256 (foldHash [1]) ≠ digest5FromBitVec256 (foldHash [2]) := by
+  decide +kernel
+/-- Equal digests on distinct messages come from the hash, as `digest5_collision_iff` states. -/
+theorem digest_collision_is_hash_collision :
+    ([0, 1] : List UInt8) ≠ [1] ∧
+    digest5FromBitVec256 (foldHash [0, 1]) = digest5FromBitVec256 (foldHash [1]) ∧
+    foldHash [0, 1] = foldHash [1] := by decide +kernel
+
+/-- ASCII `QSAG.MU/v2` and `QSAG.HEM.MSG/v2` from the audited qsag-agg label inventory. -/
+def muLabel : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x55, 0x2F, 0x76, 0x32]
+def hemMsgLabel : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x45, 0x4D, 0x2E, 0x4D, 0x53, 0x47, 0x2F, 0x76, 0x32]
+
+theorem real_label_partition_instance : ∃ a b x y : List UInt8,
+    8 * a.length < 256 ^ 255 ∧ 8 * b.length < 256 ^ 255 ∧ a ≠ b ∧
+      formatted a x ≠ formatted b y :=
+  ⟨muLabel, hemMsgLabel, [0xAA, 0xBB], [0xAA, 0xBB], by decide, by decide, by decide,
+    universal_customization_partition _ _ _ _ (by decide) (by decide) (by decide)⟩
+
+def toyOracle (x : List UInt8) : Nat := x.foldl (fun a b => a * 257 + b.toNat + 1) 0
+/-- A game that makes two adaptive-capable queries and returns both answers. -/
+def twoQueryGame : OracleProgram (List UInt8) Nat Nat :=
+  .ask [1] fun r1 => .ask [2, 3] fun r2 => .done (r1 * 1000003 + r2)
+
+/-- Reprogramming a query under the other label leaves the `QSAG.MU/v2` game unchanged. -/
+theorem foreign_label_reprogram_instance :
+    runOracle (fun x => reprogramAt toyOracle (formatted hemMsgLabel [1]) 0
+      (formatted muLabel x)) twoQueryGame =
+    runOracle (fun x => toyOracle (formatted muLabel x)) twoQueryGame :=
+  isolated_game_zero_drift toyOracle 0 muLabel hemMsgLabel [1] (by decide) (by decide)
+    (by decide) twoQueryGame
+/-- Reprogramming the same query under the game's own label changes its output. -/
+theorem same_label_reprogram_changes_game :
+    ¬ (runOracle (fun x => reprogramAt toyOracle (formatted muLabel [1]) 0
+      (formatted muLabel x)) twoQueryGame =
+    runOracle (fun x => toyOracle (formatted muLabel x)) twoQueryGame) := by decide +kernel
+end Cross
+
+#verify_constructive transparent_boundary boundary_of_committee_trace
+  boundary_of_hem_opening_batch compactHemInst_valid
+  hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
+  hemOpeningShardVerify_rejects_per_signer hemOpeningShardVerify_boundary
+  hem_opening_regime_instance
+  fixtures_are_modelled_outputs native_accepts
+  native_rejects_other_message native_rejects_other_key native_rejects_tampered_randomizer
+  good_full_accepts good_tree_accepts good_bits good_participation good_no_forgery
+  good_regime_resolves good_regime_instance committee_trace_satisfied committee_slots
+  committee_trace_boundary shared_verify_accepts shared_verify_rejects_per_signer_mode
+  rejects_unsigned_per_signer_message
+  accepts_signed_per_signer_messages rejects_swapped_signature_table
+  rejects_foreign_committee_leaf foreign_committee_leaf_not_accepted
+  unsigned_per_signer_message_not_accepted other_key_not_accepted rogue_not_participated unapproved_signature_is_forgery
+  mixed_accepts mixed_unapproved_is_one mixed_one_unapproved forgery_regime_instance
+  forgery_regime_masses
+#verify_constructive hybrid_honest_accepts hybrid_rejects_other_message
+  hybrid_envelope_valid_for_every_network hybrid_rejects_relabelled_hrp
+  hybrid_rejects_relabelled_version hybrid_address_commitments_differ
+  hybrid_rejects_other_keys_address hybrid_rejects_swapped_roles
+  hybrid_rejects_rogue_partner hybrid_keybound_instance robust_combiner_instance
+  both_components_broken_instance
+  real_hybrid_sigs_are_modelled_outputs
+  real_hybrid_honest_accepts real_hybrid_rejects_other_message
+  real_hybrid_rejects_rogue_partner real_hybrid_keybound_instance
+  only_honest_member acceptsA acceptsB stepA stepB
+  corrupt_token_not_minted corrupt_quorum_instance two_intent_spending_instance
+  rejects_over_per_tx_cap rejects_unlisted_recipient rejects_insufficient_approvals
+  rejects_nonce_replay rejects_window_overspend rejects_stale_window token_is_intent_specific
+  window_advance_accepts window_advance_rejects window_advance_rejects_wrong_tag
+#verify_constructive compress12FF_eq_jive deployed_compress_preimage_hits_transcript
+  real_transcript_consistent real_transcript_instance real_poseidon_nondegenerate
+  real_poseidon_raw_vs_feedforward real_poseidon_feedforward_misses small_field_bad_count digest_separates_distinct_hashes
+  digest_collision_is_hash_collision real_label_partition_instance
+  foreign_label_reprogram_instance same_label_reprogram_changes_game
+#verify_inhabited Qsag.Composed.merged_quorum_reduction good_regime_instance
+#verify_inhabited Qsag.Composed.merged_quorum_reduction hem_opening_regime_instance
+#verify_inhabited Qsag.Composed.quorum_aggregation_reduction good_regime_instance
+#verify_inhabited Qsag.Composed.quorum_aggregation_reduction hem_opening_regime_instance
+#verify_inhabited Qsag.Composed.quorum_advantage_from_extraction forgery_regime_instance
+#verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma hybrid_keybound_instance
+#verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma real_hybrid_keybound_instance
+#verify_inhabited Qsag.HybridSecurity.threshold_policy_composition corrupt_quorum_instance
+#verify_inhabited Qsag.HybridSecurity.threshold_spending_safety two_intent_spending_instance
+#verify_inhabited Qsag.CrossProtocol.checked_preimage_is_transcript_hit real_transcript_instance
+#verify_inhabited Qsag.CrossProtocol.universal_customization_partition
+  real_label_partition_instance
+#tooth_pair Qsag.Composed.merged_quorum_reduction vs foreign_committee_leaf_not_accepted
+#tooth_pair Qsag.Composed.binary_merge_sound vs unsigned_per_signer_message_not_accepted
+#tooth_pair Qsag.Composed.quorum_aggregation_reduction vs other_key_not_accepted
+#tooth_pair Qsag.HybridSecurity.dual_key_euf_cma vs hybrid_rejects_other_message
+#tooth_pair Qsag.HybridSecurity.address_binding vs hybrid_rejects_relabelled_hrp
+#tooth_pair Qsag.HybridSecurity.rogue_partner_resistance vs hybrid_rejects_rogue_partner
+#tooth_pair Qsag.HybridSecurity.threshold_policy_composition vs rejects_insufficient_approvals
+#tooth_pair Qsag.HybridSecurity.ledger_trace_safety vs rejects_nonce_replay
+#tooth_pair Qsag.HybridSecurity.threshold_spending_safety vs rejects_window_overspend
+#tooth_pair Qsag.HybridSecurity.authorized_window_binding vs window_advance_rejects_wrong_tag
+#tooth_pair Qsag.CrossProtocol.inverse_feedforward_relation vs real_poseidon_feedforward_misses
+#tooth_pair Qsag.CrossProtocol.isolated_game_zero_drift vs same_label_reprogram_changes_game
+
+end Qsag.CompositionInstances
+
+/-! ## Evaluated `Composed` fixtures (moved from `ComposedQsAgAndMergeSecurity`) -/
+namespace Qsag.Composed
+set_option autoImplicit false
+
+theorem inhabited_tree : ∃ root verify tree,
+    checkTree (n := 2) root verify 16 tree = true ∧ tree.bitmap.getLsbD 0 = true ∧
+    ∃ s ∈ tree.leaves, ∃ st : WhirStageSpec, st ∈ s.schedule.stages :=
+  ⟨exampleHeader, exampleVerifier, exampleTree, by decide, by decide,
+    exampleShard 1#2, by simp [exampleTree, MergeTree.leaves],
+    (whirStageSchedule 2).stages.headD ⟨0,0,0⟩, by decide⟩
+theorem tooth_overlap : ∃ a b : BitVec 2,
+    a &&& b ≠ 0#2 ∧ weight (a ||| b) < weight a + weight b ∧
+    checkTree exampleHeader exampleVerifier 16
+      (.branch (.leaf (exampleShard a)) (.leaf (exampleShard b)) (a ||| b)) = false :=
+  ⟨1#2, 1#2, by decide, by decide, by decide⟩
+/-- The outer-bad branch is reachable; the honest approval branch has its own fixture. -/
+theorem inhabited_reduction : ∃ geom custody verify bad,
+    ExtractionBoundary (n := 2) geom custody verify bad ∧
+    ∃ s : Shard 2, ∃ v : Fin 2, verify s = true ∧ s.bitmap.getLsbD v.val = true ∧
+    ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true := by
+  refine ⟨compactAuditGeom, (fun _ => exampleCustody), exampleVerifier,
+    (fun _ => True), ⟨fun _ _ => .inl trivial⟩, exampleShard 1#2, ⟨0, by decide⟩,
+    by decide, by decide, exampleHeader, exampleTree, by decide, by decide⟩
+theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 2 → Bool,
+    checkTree root verify 16 tree = true ∧
+    (qsum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
+  ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), by decide, by
+    show (qsum 2 fun _ => 1) = 2
+    rw [qsum_const]⟩
+#verify_inhabited binary_merge_sound inhabited_tree
+#verify_inhabited depth_sixteen inhabited_tree
+#verify_inhabited selected_leaf inhabited_tree
+#verify_inhabited schedule_floor inhabited_tree
+#tooth_pair binary_merge_sound vs tooth_overlap
+#tooth_pair additive_shard_bound vs tooth_overlap
+#verify_inhabited quorum_aggregation_reduction inhabited_reduction
+#verify_inhabited merged_quorum_reduction inhabited_reduction
+#verify_inhabited additive_shard_bound inhabited_shard_bound
+#verify_inhabited composed_advantage_bound inhabited_union
+#tooth_pair composed_advantage_bound vs tooth_omit_outer
+#tooth_pair quorum_advantage_from_extraction vs tooth_omit_outer
+
+end Qsag.Composed
+end
