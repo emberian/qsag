@@ -341,7 +341,7 @@ pub fn compute_presentation_tag(final_tag: &Digest, token_id: &TokenId, ctx: &Di
 
 /// Bearer capability: whoever holds it can present it once its [`Self::mint_leaf`] is
 /// enrolled. `token_id`, `root_tag` and `final_tag` are secret and wiped on drop.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct BearerCapability {
     token_id: TokenId,
     audience: Digest,
@@ -349,6 +349,36 @@ pub struct BearerCapability {
     caveats: Vec<CapCaveat>,
     final_tag: Digest,
 }
+
+impl BearerCapability {
+    /// The secret words in a fixed byte layout, for a constant-time comparison.
+    fn secret_bytes(&self) -> [u8; 96] {
+        let mut out = [0u8; 96];
+        let words = self
+            .token_id
+            .iter()
+            .chain(&self.root_tag)
+            .chain(&self.final_tag);
+        for (chunk, word) in out.as_chunks_mut::<8>().0.iter_mut().zip(words) {
+            *chunk = word.to_le_bytes();
+        }
+        out
+    }
+}
+
+/// The secret words (`token_id`, `root_tag`, `final_tag`) are compared in constant time and
+/// as one block, so neither the position nor the count of matching words affects timing.
+/// The audience and the caveats are compared ordinarily.
+impl PartialEq for BearerCapability {
+    fn eq(&self, other: &Self) -> bool {
+        let (mut mine, mut theirs) = (self.secret_bytes(), other.secret_bytes());
+        let secrets_equal = qsag_asm::ct_eq_bytes(&mine, &theirs);
+        qsag_asm::volatile_fill(&mut mine, 0);
+        qsag_asm::volatile_fill(&mut theirs, 0);
+        secrets_equal & (self.audience == other.audience) & (self.caveats == other.caveats)
+    }
+}
+impl Eq for BearerCapability {}
 
 impl core::fmt::Debug for BearerCapability {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -2141,6 +2171,23 @@ mod tests {
             Err(CapabilityZkError::TooManyCaveats)
         );
         assert_eq!(cap, saved);
+        // Equality covers every secret word, the audience and the caveats.
+        for word in 0..12 {
+            let mut other = saved.clone();
+            let slot = match word / 4 {
+                0 => &mut other.token_id,
+                1 => &mut other.root_tag,
+                _ => &mut other.final_tag,
+            };
+            slot[word % 4] += F::ONE;
+            assert_ne!(cap, other);
+        }
+        let mut other = saved.clone();
+        other.audience[3] += F::ONE;
+        assert_ne!(cap, other);
+        let mut other = saved.clone();
+        other.caveats.pop();
+        assert_ne!(cap, other);
     }
 
     #[test]

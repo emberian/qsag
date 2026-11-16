@@ -23,7 +23,7 @@
 //!    `HEM_PUBLIC_CELLS` batching) + adversarial tamper rejection.
 //! 6. `zk_hem::full_shard` recursion (`prove_recursive_shard`, `prove_full_shard_merge`,
 //!    `verify_full_shard_merge`, `QSAGFSM1`) with child, statement and wire tamper rejection. The
-//!    one-child parent runs by default; the two-child parent is `#[ignore]`d for its memory.
+//!    both one-child and two-child parents run by default.
 
 use qsag_agg::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
 use qsag_agg::pcs::{
@@ -916,9 +916,8 @@ fn full_shard_recursion_one_child_merge_and_tamper_rejection() {
     full_shard_merge_and_tamper_rejection(1);
 }
 
-/// Two children: a `2^22`-row parent relation, which does not fit a 16 GiB memory cap.
+/// Two children: a `2^22`-row parent relation (10.25 GiB peak RSS with owned RS buffers).
 #[test]
-#[ignore = "needs more than 16 GiB: 2^22-row parent relation"]
 fn full_shard_recursion_two_child_merge_and_tamper_rejection() {
     full_shard_merge_and_tamper_rejection(2);
 }

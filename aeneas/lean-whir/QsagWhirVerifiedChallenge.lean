@@ -675,12 +675,9 @@ theorem step_merkle_pair_order_canonical_parity
     pair.tag = 0#u8 ∧
     Qsag.encodeMultiFrame [pair.left.val.map (fun b => UInt8.ofNat b.val),
                            pair.right.val.map (fun b => UInt8.ofNat b.val)] =
-      Qsag.encodeMultiFrame
-        (if (idx.val / 2 ^ level.val) % 2 = 0
-         then [node.val.map (fun b => UInt8.ofNat b.val),
-               sibling.val.map (fun b => UInt8.ofNat b.val)]
-         else [sibling.val.map (fun b => UInt8.ofNat b.val),
-               node.val.map (fun b => UInt8.ofNat b.val)]) := by sorry
+      Qsag.Aggregation.merkleNodeFrame (idx.val / 2 ^ level.val)
+        (node.val.map (fun b => UInt8.ofNat b.val))
+        (sibling.val.map (fun b => UInt8.ofNat b.val)) := by sorry
 
 theorem checked_quorum_sum_sound_qsag
     (counts minimums : Slice U64) (minimum_global total : U64) :
