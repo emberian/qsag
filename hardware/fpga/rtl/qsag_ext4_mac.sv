@@ -9,43 +9,6 @@
 //                     (2^128 - 1) + (2^32 + 1) == 0 (mod p), keeping every accumulator in (0, 2^133)
 //   Stages 5..6     : four canonical Goldilocks reductions (qsag_gl64_reduce, RED_LAT=2)
 // Inputs must be canonical (< p); outputs are canonical (< p). Latency EXT4_MAC_LAT = 7, 1 MAC/clk.
-module qsag_ext4_modadd2 (
-    input  logic [63:0] a,
-    input  logic [63:0] b,
-    output logic [63:0] y
-);
-    localparam logic [65:0] NEG_1P = 66'h3_0000_0000_FFFF_FFFF; // 2^66 - GL_P
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [64:0] s0;
-    logic [65:0] s1;
-    /* verilator lint_on UNUSEDSIGNAL */
-    qsag_add_split #(.W(65), .CHUNK(16)) u_s0 (.a({1'b0, a}), .b({1'b0, b}), .y(s0));
-    qsag_sum_csa   #(.W(66), .N(3), .CHUNK(16)) u_s1 (.x({NEG_1P, {2'b0, b}, {2'b0, a}}), .y(s1));
-    assign y = !s1[65] ? s1[63:0] : s0[63:0];
-endmodule
-
-module qsag_ext4_modadd4 (
-    input  logic [63:0] a0,
-    input  logic [63:0] a1,
-    input  logic [63:0] a2,
-    input  logic [63:0] a3,
-    output logic [63:0] y
-);
-    localparam logic [66:0] NEG_1P = 67'h7_0000_0000_FFFF_FFFF; // 2^67 - GL_P
-    localparam logic [66:0] NEG_2P = 67'h6_0000_0001_FFFF_FFFE; // 2^67 - 2*GL_P
-    localparam logic [66:0] NEG_3P = 67'h5_0000_0002_FFFF_FFFD; // 2^67 - 3*GL_P
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [65:0] s0;
-    logic [66:0] s1, s2, s3;
-    /* verilator lint_on UNUSEDSIGNAL */
-    wire [4*67-1:0] base = {{3'b0, a3}, {3'b0, a2}, {3'b0, a1}, {3'b0, a0}};
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(16)) u_s0 (.x({{2'b0, a3}, {2'b0, a2}, {2'b0, a1}, {2'b0, a0}}), .y(s0));
-    qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s1 (.x({NEG_1P, base}), .y(s1));
-    qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s2 (.x({NEG_2P, base}), .y(s2));
-    qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s3 (.x({NEG_3P, base}), .y(s3));
-    assign y = !s3[66] ? s3[63:0] : !s2[66] ? s2[63:0] : !s1[66] ? s1[63:0] : s0[63:0];
-endmodule
-
 module qsag_ext4_mac #(
     parameter int AW = 26,
     parameter int BW = 17
@@ -59,38 +22,61 @@ module qsag_ext4_mac #(
     localparam int MUL64_LAT = qsag_ni_pkg::MUL64_LAT;
     localparam int C_DLY     = 1 + MUL64_LAT; // 4 clocks to align with m[0..8]
     localparam int CHUNK     = (AW <= 16) ? 16 : 24;
+    localparam logic [65:0] NEG_1P66 = 66'h3_0000_0000_FFFF_FFFF; // 2^66 - GL_P
+    localparam logic [66:0] NEG_1P67 = 67'h7_0000_0000_FFFF_FFFF; // 2^67 - GL_P
+    localparam logic [66:0] NEG_2P67 = 67'h6_0000_0001_FFFF_FFFE; // 2^67 - 2*GL_P
+    localparam logic [66:0] NEG_3P67 = 67'h5_0000_0002_FFFF_FFFD; // 2^67 - 3*GL_P
     // (2^128 - 1) + C1 == 0 (mod p), where C1 = 2^32 + 1.
     localparam logic [135:0] C1 = 136'h0000_0001_0000_0001;
 
     wire [63:0] a0 = a[0   +: 64], a1 = a[64  +: 64], a2 = a[128 +: 64], a3 = a[192 +: 64];
     wire [63:0] b0 = b[0   +: 64], b1 = b[64  +: 64], b2 = b[128 +: 64], b3 = b[192 +: 64];
 
-    // Stage 0: canonical Karatsuba pre-sums (< p).
-    logic [63:0] sa01_d, sa23_d, sa02_d, sa13_d, sa_all_d;
-    logic [63:0] sb01_d, sb23_d, sb02_d, sb13_d, sb_all_d;
-    qsag_ext4_modadd2 u_sa01 (.a(a0), .b(a1), .y(sa01_d));
-    qsag_ext4_modadd2 u_sa23 (.a(a2), .b(a3), .y(sa23_d));
-    qsag_ext4_modadd2 u_sa02 (.a(a0), .b(a2), .y(sa02_d));
-    qsag_ext4_modadd2 u_sa13 (.a(a1), .b(a3), .y(sa13_d));
-    qsag_ext4_modadd4 u_saa  (.a0(a0), .a1(a1), .a2(a2), .a3(a3), .y(sa_all_d));
+    // Stage 0: eight 2-operand canonical modular sums + two 4-operand canonical modular sums.
+    wire [7:0][63:0] p2_lhs = {b1, b0, b2, b0, a1, a0, a2, a0};
+    wire [7:0][63:0] p2_rhs = {b3, b2, b3, b1, a3, a2, a3, a1};
+    logic [7:0][63:0] p2_sum;
+    for (genvar i = 0; i < 8; i++) begin : g_add2
+        /* verilator lint_off UNUSEDSIGNAL */
+        logic [64:0] s0;
+        logic [65:0] s1;
+        /* verilator lint_on UNUSEDSIGNAL */
+        qsag_add_split #(.W(65), .CHUNK(16)) u_s0 (
+            .a({1'b0, p2_lhs[i]}), .b({1'b0, p2_rhs[i]}), .y(s0));
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(16)) u_s1 (
+            .x({NEG_1P66, {2'b0, p2_rhs[i]}, {2'b0, p2_lhs[i]}}), .y(s1));
+        assign p2_sum[i] = !s1[65] ? s1[63:0] : s0[63:0];
+    end
 
-    qsag_ext4_modadd2 u_sb01 (.a(b0), .b(b1), .y(sb01_d));
-    qsag_ext4_modadd2 u_sb23 (.a(b2), .b(b3), .y(sb23_d));
-    qsag_ext4_modadd2 u_sb02 (.a(b0), .b(b2), .y(sb02_d));
-    qsag_ext4_modadd2 u_sb13 (.a(b1), .b(b3), .y(sb13_d));
-    qsag_ext4_modadd4 u_sbb  (.a0(b0), .a1(b1), .a2(b2), .a3(b3), .y(sb_all_d));
+    wire [1:0][255:0] p4_in = {b, a};
+    logic [1:0][63:0] p4_sum;
+    for (genvar i = 0; i < 2; i++) begin : g_add4
+        wire [63:0] x0 = p4_in[i][0   +: 64], x1 = p4_in[i][64  +: 64];
+        wire [63:0] x2 = p4_in[i][128 +: 64], x3 = p4_in[i][192 +: 64];
+        wire [4*67-1:0] base = {{3'b0, x3}, {3'b0, x2}, {3'b0, x1}, {3'b0, x0}};
+        /* verilator lint_off UNUSEDSIGNAL */
+        logic [65:0] s0;
+        logic [66:0] s1, s2, s3;
+        /* verilator lint_on UNUSEDSIGNAL */
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(16)) u_s0 (
+            .x({{2'b0, x3}, {2'b0, x2}, {2'b0, x1}, {2'b0, x0}}), .y(s0));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s1 (.x({NEG_1P67, base}), .y(s1));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s2 (.x({NEG_2P67, base}), .y(s2));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s3 (.x({NEG_3P67, base}), .y(s3));
+        assign p4_sum[i] = !s3[66] ? s3[63:0] : !s2[66] ? s2[63:0] : !s1[66] ? s1[63:0] : s0[63:0];
+    end
 
     logic [8:0][63:0] ma_q, mb_q;
     always_ff @(posedge clk) begin
-        ma_q[0] <= a0;       mb_q[0] <= b0;
-        ma_q[1] <= a1;       mb_q[1] <= b1;
-        ma_q[2] <= sa01_d;   mb_q[2] <= sb01_d;
-        ma_q[3] <= a2;       mb_q[3] <= b2;
-        ma_q[4] <= a3;       mb_q[4] <= b3;
-        ma_q[5] <= sa23_d;   mb_q[5] <= sb23_d;
-        ma_q[6] <= sa02_d;   mb_q[6] <= sb02_d;
-        ma_q[7] <= sa13_d;   mb_q[7] <= sb13_d;
-        ma_q[8] <= sa_all_d; mb_q[8] <= sb_all_d;
+        ma_q[0] <= a0;        mb_q[0] <= b0;
+        ma_q[1] <= a1;        mb_q[1] <= b1;
+        ma_q[2] <= p2_sum[0]; mb_q[2] <= p2_sum[4];
+        ma_q[3] <= a2;        mb_q[3] <= b2;
+        ma_q[4] <= a3;        mb_q[4] <= b3;
+        ma_q[5] <= p2_sum[1]; mb_q[5] <= p2_sum[5];
+        ma_q[6] <= p2_sum[2]; mb_q[6] <= p2_sum[6];
+        ma_q[7] <= p2_sum[3]; mb_q[7] <= p2_sum[7];
+        ma_q[8] <= p4_sum[0]; mb_q[8] <= p4_sum[1];
     end
 
     // Stages 1..3: 9 x 64x64 DSP multipliers (m00, m01, m02, m10, m11, m12, m20, m21, m22).
@@ -107,10 +93,13 @@ module qsag_ext4_mac #(
     wire [63:0] c2 = c_sr[(C_DLY-1)*256 + 128 +: 64];
     wire [63:0] c3 = c_sr[(C_DLY-1)*256 + 192 +: 64];
 
-    // Exact non-negative 136-bit complements: nm[i] = (2^128 - 1) - m[i].
-    logic [8:0][135:0] pm, nm;
-    for (genvar i = 0; i < 9; i++) begin : g_ext
+    // Exact non-negative 136-bit complements: nm[i] = (2^128 - 1) - m[i] for i = 0..7.
+    logic [8:0][135:0] pm;
+    logic [7:0][135:0] nm;
+    for (genvar i = 0; i < 9; i++) begin : g_pm
         assign pm[i] = {8'd0,  m[i]};
+    end
+    for (genvar i = 0; i < 8; i++) begin : g_nm
         assign nm[i] = {8'd0, ~m[i]};
     end
 
