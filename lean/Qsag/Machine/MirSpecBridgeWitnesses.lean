@@ -1,7 +1,6 @@
 module
 
 public import Qsag.Machine.MirSpecBridgeCore
-import all Qsag.Machine.MirSpecBridgeCore
 
 /-! Concrete accepted traces and mutation witnesses for the four-layer model.
 Kept separate from the simulation core to bound kernel elaboration memory. -/
