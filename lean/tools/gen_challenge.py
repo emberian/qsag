@@ -97,7 +97,7 @@ def generate():
     if len(set(names)) != len(names):
         raise SystemExit("duplicate roster theorem name")
     challenge = (HEADER + "\n".join(f"public import {m}" for m in IMPORTS) +
-                 "\n\npublic section\nnamespace Qsag.Top\nopen Qsag CommRingOps Qsag.Aggregation Qsag.RustDurability\nset_option autoImplicit false\n\n" +
+                 "\n\npublic section\nnamespace Qsag.Top\nopen Qsag CommRingOps Qsag.Aggregation Qsag.RustDurability\nset_option autoImplicit false\nset_option warn.sorry false\n\n" +
                  "\n\n".join(parts) + "\n\nend Qsag.Top\n")
     comparator = json.dumps({
         "challenge_module": "QsagChallenge",

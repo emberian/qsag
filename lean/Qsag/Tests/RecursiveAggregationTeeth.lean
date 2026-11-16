@@ -66,33 +66,18 @@ def concreteHemRegistry : List ShardRegistration :=
 def concreteHemRegistryDigest : List UInt8 :=
   poseidon2Hash32 (encodeRegistry concreteHemRegistry)
 
-private theorem concreteSeedRoot_eq (second : Bool) :
-    let seed := if second then Goldilocks.one else Goldilocks.zero
-    CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed = seed := by
-  cases second <;> (dsimp only; rw [pow7Goldilocks_zero]; decide)
-
 private theorem concreteHemArith_eq_seed (second : Bool) :
     let seed := if second then Goldilocks.one else Goldilocks.zero
     rsSbox7TraceArith seed (CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed) =
       concreteHemArith := by
-  have h := concreteSeedRoot_eq second
-  dsimp only at h ⊢
-  rw [h]
-  exact rsSbox7TraceArith_diag _
+  cases second <;>
+    (dsimp only [concreteHemArith, rsSbox7TraceArith]
+     congr 1)
 
-private theorem concreteHemShard_committee (second : Bool) :
-    (concreteHemShard second).inst.committee =
-      [mkSbox7Pk (if second then Goldilocks.one else Goldilocks.zero)
-        (if second then Goldilocks.one else Goldilocks.zero)] :=
-  rsSbox7Inst_committee _ _ _
-
-private theorem concreteHemShard_committee_length (second : Bool) :
-    (concreteHemShard second).inst.committee.length = 1 :=
-  congrArg List.length (concreteHemShard_committee second)
-
-private theorem concreteHemShard_popcount (second : Bool) :
-    bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap = 1 :=
-  buildHonestSbox7WhirBundle_popcount _ _ _ _
+private theorem concreteSeedRoot_eq (second : Bool) :
+    let seed := if second then Goldilocks.one else Goldilocks.zero
+    CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed = seed := by
+  cases second <;> decide
 
 theorem concreteHemShard_accepts (second : Bool) :
     verifyHemShard concreteHemArith rsSbox7WhirDomain [] [] (concreteHemShard second) = true := by
@@ -103,16 +88,16 @@ theorem concreteHemShard_accepts (second : Bool) :
   rw [concreteHemArith_eq_seed second, concreteSeedRoot_eq second] at hAcc
   have c1 : decide ((concreteHemShard second).inst.message =
       shardBoundMessage (concreteHemShard second).shardId [] []) = true := by
-    exact decide_eq_true (rsSbox7Inst_message _ _ _)
+    cases second <;> exact decide_eq_true rfl
   have c2 : decide (1 ≤ (concreteHemShard second).threshold) = true := by
     cases second <;> decide
   have c3 : decide ((concreteHemShard second).threshold ≤
-      (concreteHemShard second).inst.committee.length) = true :=
-    decide_eq_true (Nat.le_of_eq (concreteHemShard_committee_length second).symm)
+      (concreteHemShard second).inst.committee.length) = true := by
+    cases second <;> decide
   have c4 : decide ((concreteHemShard second).threshold ≤
-      bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true :=
-    decide_eq_true (Nat.le_of_eq (concreteHemShard_popcount second).symm)
-  rw [verifyHemShard.public_eqs]
+      bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true := by
+    cases second <;> exact decide_eq_true (Nat.le_refl 1)
+  unfold verifyHemShard
   rw [c1, c2, c3, c4]
   exact hAcc
 
@@ -121,8 +106,9 @@ theorem concreteHemShard_lawful (second : Bool) :
   cases second
   · exact rsSbox7TraceArith_lawful Goldilocks.zero Goldilocks.zero (shardBoundMessage [0] [] [])
   · have hLaw := rsSbox7TraceArith_lawful Goldilocks.one Goldilocks.one (shardBoundMessage [1] [] [])
-    have hEq : rsSbox7TraceArith Goldilocks.one Goldilocks.one = concreteHemArith :=
-      rsSbox7TraceArith_diag _
+    have hEq : rsSbox7TraceArith Goldilocks.one Goldilocks.one = concreteHemArith := by
+      dsimp only [concreteHemArith, rsSbox7TraceArith]
+      congr 1
     rwa [hEq] at hLaw
 
 /-- Concrete prover commitment-opening transcript for `concreteHemShard second`. -/
@@ -143,38 +129,20 @@ theorem concreteHemShardTranscript_accepts (second : Bool) :
     (if second then Goldilocks.one else Goldilocks.zero)
     Goldilocks.zero Goldilocks.one
     (shardBoundMessage [if second then 1 else 0] [] [])).2
-  have hNodup : (rsSbox7WhirDomain.stages.map (·.stageIdx)).Nodup := by
-    rw [rsSbox7WhirDomain_stageIdx]
-    decide
+  have hNodup : (rsSbox7WhirDomain.stages.map (·.stageIdx)).Nodup := by decide
   exact verifyCommittedTableTranscript_transcriptOfBoundView rsSbox7WhirDomain _ _ hNodup hBound
 
 private theorem concreteHemCommittee_nodup :
     (hierarchicalCommittee [concreteHemShard false, concreteHemShard true]).Nodup := by
-  have hCom : hierarchicalCommittee [concreteHemShard false, concreteHemShard true] =
-      [mkSbox7Pk Goldilocks.zero Goldilocks.zero, mkSbox7Pk Goldilocks.one Goldilocks.one] := by
-    simp only [hierarchicalCommittee.public_eqs]
-    rw [concreteHemShard_committee false, concreteHemShard_committee true]
-    rfl
-  rw [hCom]
+  change [mkSbox7Pk Goldilocks.zero Goldilocks.zero,
+    mkSbox7Pk Goldilocks.one Goldilocks.one].Nodup
   simp only [List.nodup_cons, List.mem_cons, List.not_mem_nil, or_false,
     List.nodup_nil, and_true, not_false_eq_true]
   intro h
   have hs := congrArg PqPublicKey.pkSeed h
-  exact mkSbox7Pk_zero_one_pkSeed_ne hs
-
-private theorem concreteHemShardIds_nodup :
-    (hierarchicalShardIds [concreteHemShard false, concreteHemShard true]).Nodup := by
-  simp only [hierarchicalShardIds.public_eqs]
-  decide
-
-private theorem concreteHemClaimedWeight (a b : Bool) :
-    hierarchicalClaimedWeight [concreteHemShard a, concreteHemShard b] = 2 := by
-  simp only [hierarchicalClaimedWeight.public_eqs, concreteHemShard_popcount]
-
-private theorem concreteHemThresholdSum :
-    hierarchicalThresholdSum [concreteHemShard false, concreteHemShard true] = 2 := by
-  simp only [hierarchicalThresholdSum.public_eqs]
-  rfl
+  exact (by decide :
+    (mkSbox7Pk Goldilocks.zero Goldilocks.zero).pkSeed ≠
+      (mkSbox7Pk Goldilocks.one Goldilocks.one).pkSeed) hs
 
 /-- A root certificate with two distinct shard ids, two distinct public keys, and two active
     signers. Its registry commitment is computed by the deployed Poseidon2 hash. -/
@@ -186,30 +154,24 @@ theorem inhabited_verifyHierarchicalHem_two_shards :
     hierarchicalClaimedWeight [concreteHemShard false, concreteHemShard true] = 2 ∧
     hierarchicalThresholdSum [concreteHemShard false, concreteHemShard true] = 2 ∧
     registryThresholdSum concreteHemRegistry = 2 := by
-  have hIds : (hierarchicalShardIds [concreteHemShard false, concreteHemShard true]).Nodup :=
-    concreteHemShardIds_nodup
+  have hIds : (hierarchicalShardIds [concreteHemShard false, concreteHemShard true]).Nodup := by
+    decide
   have hKeys : (hierarchicalCommittee [concreteHemShard false, concreteHemShard true]).Nodup :=
     concreteHemCommittee_nodup
   have hall : [concreteHemShard false, concreteHemShard true].all
       (verifyHemShard concreteHemArith rsSbox7WhirDomain [] []) = true := by
     simp only [List.all_cons, List.all_nil, concreteHemShard_accepts, Bool.and_self]
-  have hWf : concreteHemRegistry.all ShardRegistration.WellFormed = true := by
-    show ((concreteHemShard false).registration.WellFormed &&
-      ((concreteHemShard true).registration.WellFormed && true)) = true
-    rw [verifyHemShard_wellFormed (concreteHemShard_accepts false),
-      verifyHemShard_wellFormed (concreteHemShard_accepts true)]
-    rfl
+  have hWf : concreteHemRegistry.all ShardRegistration.WellFormed = true := by decide
   have hDig : decide (poseidon2Hash32 (encodeRegistry
       ([concreteHemShard false, concreteHemShard true].map HemShardProof.registration)) =
       concreteHemRegistryDigest) = true := decide_eq_true rfl
   have hRegEq : decide ([concreteHemShard false, concreteHemShard true].map
       HemShardProof.registration = concreteHemRegistry) = true := decide_eq_true rfl
-  refine ⟨?_, ?_, concreteHemClaimedWeight false true, concreteHemThresholdSum,
-    (hierarchicalThresholdSum_eq_registryThresholdSum _).symm.trans concreteHemThresholdSum⟩
-  · rw [verifyHierarchicalHem.public_eqs]
+  refine ⟨?_, ?_, rfl, rfl, rfl⟩
+  · unfold verifyHierarchicalHem
     rw [hDig, decide_eq_true hIds, decide_eq_true hKeys, hall]
     rfl
-  · rw [verifyHemHierarchyAgainstRegistry.public_eqs]
+  · unfold verifyHemHierarchyAgainstRegistry
     rw [hWf, hRegEq, decide_eq_true hIds, decide_eq_true hKeys, hall]
     rfl
 
@@ -240,8 +202,7 @@ theorem inhabited_transcript_grounded_two_shards :
       hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length :=
     hierarchySweepOpeningCount_eq_queryCost trs (fun t ht =>
       ⟨hF.2.2.2 t.shard (List.mem_map.mpr ⟨t, ht, rfl⟩), hAllTr t ht⟩)
-  have hQuery24 : hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length = 24 :=
-    hierarchyTranscriptQueryCost_rsSbox7_two
+  have hQuery24 : hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length = 24 := by decide
   exact ⟨hAllTr, hVer, hCostEq.trans hQuery24, hQuery24⟩
 
 /-- Kernel-reducible UTF-8 bytes of `"QSAG.PQ.SUITE.SBOX7/v1"` for concrete Poseidon2 evaluation. -/
@@ -305,20 +266,12 @@ theorem tooth_forged_lower_shard_threshold_rejected :
       concreteTwoKeyRegistryDigest ∧
     verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
       concreteTwoKeyRegistryDigest [] [] [concreteLoweredTwoKeyShard] = false := by
-  have hLowReg : concreteLoweredTwoKeyShard.registration =
-      { shardId := [0], threshold := 1, suiteId := concretePoseidonSuiteTag,
-        params := sbox7Params, committee := concreteTwoKeyCommittee } := by
-    rw [HemShardProof.registration.public_eqs]
-    simp only [concreteLoweredTwoKeyShard, rsSbox7Inst_params]
   have hDigNe :
       poseidon2Hash32 (encodeRegistry [concreteLoweredTwoKeyShard.registration]) ≠
         concreteTwoKeyRegistryDigest := by
-    rw [hLowReg]
-    exact sbox7TwoKeyRegistry_threshold_digest_kat
-  have hLowWf : concreteLoweredTwoKeyShard.registration.WellFormed = true := by
-    rw [hLowReg, ShardRegistration.WellFormed.public_eqs]
+    unfold concreteTwoKeyRegistryDigest
     decide
-  refine ⟨?_, ?_, hLowWf, hDigNe, ?_⟩
+  refine ⟨?_, ?_, by decide, hDigNe, ?_⟩
   · intro H arith dom registryDigest epochFloor msg registry hReg shards i hiS hiR hLower
     match forgedLowerThreshold_rejected_or_collision H arith dom registryDigest epochFloor msg
         registry hReg shards i hiS hiR hLower with
@@ -329,13 +282,11 @@ theorem tooth_forged_lower_shard_threshold_rejected :
           congrArg (·[i]?) hEq
         rw [List.getElem?_map, List.getElem?_eq_getElem hiS, List.getElem?_eq_getElem hiR,
             Option.map_some, Option.some.injEq] at hAt
-        have hThr : (shards[i]'hiS).threshold = (registry[i]'hiR).threshold := by
-          have hT := congrArg ShardRegistration.threshold hAt
-          rw [HemShardProof.registration.public_eqs] at hT
-          exact hT
+        have hThr : (shards[i]'hiS).threshold = (registry[i]'hiR).threshold :=
+          congrArg ShardRegistration.threshold hAt
         exact absurd (hThr ▸ hLower) (Nat.lt_irrefl _)
       refine ⟨?_, .inr ⟨col⟩⟩
-      rw [verifyHemHierarchyAgainstRegistry.public_eqs]
+      unfold verifyHemHierarchyAgainstRegistry
       simp [decide_eq_false hNe]
   · apply Bool.eq_false_iff.mpr
     intro hAcc
@@ -343,7 +294,7 @@ theorem tooth_forged_lower_shard_threshold_rejected :
     have h0 := hAll { concreteHemShard false with threshold := 0 } (List.mem_cons_self ..)
     have hGe1 := (verifyHemShard_facts h0).2.1
     simp at hGe1
-  · rw [verifyHierarchicalHem.public_eqs]
+  · unfold verifyHierarchicalHem
     have hDigNeMap :
         poseidon2Hash32 (encodeRegistry ([concreteLoweredTwoKeyShard].map
           HemShardProof.registration)) ≠ concreteTwoKeyRegistryDigest := hDigNe
@@ -364,8 +315,7 @@ theorem tooth_concrete_unscoped_shard_replay :
   have h := tooth_unscoped_shard_id_allows_quorum_replay_multiplication
     poseidon2Hash32 concreteHemArith rsSbox7WhirDomain concreteHemRegistryDigest [] []
     (concreteHemShard false) 2 (by decide) (concreteHemShard_accepts false)
-  exact ⟨h.1, concreteHemClaimedWeight false false, concreteHemShard_popcount false,
-    h.2.2.2.1, h.2.2.2.2⟩
+  exact ⟨h.1, rfl, rfl, h.2.2.2.1, h.2.2.2.2⟩
 
 /-! ### A.2 Concrete succinct outer certificate -/
 
@@ -392,10 +342,10 @@ theorem inhabited_verifySuccinctRecursiveHem :
       concreteHemRegistryDigest [] [] concreteSuccinctOuterCert = true ∧
     concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128 := by
   have hIds : (concreteSuccinctOuterHeaders.map (·.shardId)).Nodup := by
-    rw [concreteSuccinctOuterHeaders, shardToCompressedHeader_map_shardId]
-    exact concreteHemShardIds_nodup
+    rw [concreteSuccinctOuterHeaders, map_sid_of_headers]
+    decide
   have hCom : (headerCommitteeFlat concreteSuccinctOuterHeaders).Nodup := by
-    rw [concreteSuccinctOuterHeaders, shardToCompressedHeader_committeeFlat]
+    rw [concreteSuccinctOuterHeaders, flat_com_of_headers]
     exact concreteHemCommittee_nodup
   have hLen : 1 ≤ concreteSuccinctOuterHeaders.length :=
     Nat.le_succ 1
@@ -405,12 +355,12 @@ theorem inhabited_verifySuccinctRecursiveHem :
     have c1 : decide (1 ≤ (concreteHemShard second).threshold) = true := by
       cases second <;> decide
     have c2 : decide ((concreteHemShard second).threshold ≤
-        (concreteHemShard second).inst.committee.length) = true :=
-      decide_eq_true (Nat.le_of_eq (concreteHemShard_committee_length second).symm)
+        (concreteHemShard second).inst.committee.length) = true := by
+      cases second <;> decide
     have c3 : decide ((concreteHemShard second).threshold ≤
-        bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true :=
-      decide_eq_true (Nat.le_of_eq (concreteHemShard_popcount second).symm)
-    rw [verifyHeaderQuorum.public_eqs, shardToCompressedHeader.public_eqs]
+        bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true := by
+      cases second <;> exact decide_eq_true (Nat.le_refl 1)
+    unfold verifyHeaderQuorum shardToCompressedHeader
     dsimp only
     rw [c1, c2, c3]
     rfl
@@ -421,8 +371,7 @@ theorem inhabited_verifySuccinctRecursiveHem :
       (rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg)
       concreteOuterBundle.1 concreteOuterBundle.2.1 = true := by
     have hRaw := (honestSbox7WhirProof_accepts Goldilocks.zero Goldilocks.zero Goldilocks.one concreteOuterMsg).1
-    have hz : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero :=
-      concreteSeedRoot_eq false
+    have hz : CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by decide
     have hArithEq : rsSbox7TraceArith Goldilocks.zero
         (CommRingOps.add (pow7Goldilocks Goldilocks.zero) Goldilocks.zero) = concreteHemArith := by
       rw [hz]; rfl
@@ -430,8 +379,7 @@ theorem inhabited_verifySuccinctRecursiveHem :
     exact hRaw
   have hMapReg : concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration =
       concreteHemRegistry :=
-    shardToCompressedHeader_map_registration (fun _ => [0x01])
-      [concreteHemShard false, concreteHemShard true]
+    map_reg_of_headers (fun _ => [0x01]) [concreteHemShard false, concreteHemShard true]
   have hDig : decide (poseidon2Hash32 (encodeRegistry
       (concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration)) =
       concreteHemRegistryDigest) = true := by
@@ -439,20 +387,20 @@ theorem inhabited_verifySuccinctRecursiveHem :
     exact decide_eq_true rfl
   have hPrfReg : ∀ m : List UInt8,
       (buildHonestSbox7WhirBundle Goldilocks.zero Goldilocks.zero Goldilocks.one m).1.agg.regime =
-        .bciksJohnsonQrom128 := fun _ => buildHonestSbox7WhirBundle_regime _ _ _ _
+        .bciksJohnsonQrom128 := fun _ => rfl
   have hRegEq : concreteSuccinctOuterCert.outerProof.agg.regime = .bciksJohnsonQrom128 :=
     hPrfReg concreteOuterMsg
   have hInstReg : decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).regime =
       .bciksJohnsonQrom128) = true :=
-    decide_eq_true (rsSbox7Inst_regime _ _ _)
+    decide_eq_true rfl
   have hPrfRegDec : decide (concreteOuterBundle.1.agg.regime = .bciksJohnsonQrom128) = true :=
     decide_eq_true (hPrfReg concreteOuterMsg)
   have hMsgEq : decide ((rsSbox7Inst Goldilocks.zero Goldilocks.zero concreteOuterMsg).message =
       succinctOuterBoundMessage concreteHemRegistryDigest [] []
         (poseidon2Hash32 (encodeCompressedHeaderChain concreteSuccinctOuterHeaders))) = true :=
-    decide_eq_true (rsSbox7Inst_message _ _ _)
+    decide_eq_true rfl
   refine ⟨?_, hRegEq⟩
-  rw [verifySuccinctRecursiveHem.public_eqs]
+  unfold verifySuccinctRecursiveHem
   change (decide (1 ≤ concreteSuccinctOuterHeaders.length) &&
     decide (poseidon2Hash32 (encodeRegistry (concreteSuccinctOuterHeaders.map ShardCompressedHeader.registration)) =
       concreteHemRegistryDigest) &&
@@ -503,14 +451,14 @@ theorem tooth_succinctRecursiveHem_rejects_downgrade_and_tamper :
   · intro H outerArith outerDom regDig ep msg cert hCl
     apply Bool.eq_false_iff.mpr
     intro hAcc
-    have hQr := (verifySuccinctRecursiveHem_accept_facts hAcc).2.2.2.2.2.1
+    have hQr := (verifySuccinctRecursiveHem_facts hAcc).2.2.2.2.2.1
     rw [hCl] at hQr
     cases hQr
   · intro H outerArith outerDom regDig ep msg cert headers' hAcc hNe hNoCol
     apply Bool.eq_false_iff.mpr
     intro hAcc'
-    have hMsg := (verifySuccinctRecursiveHem_accept_facts hAcc).2.2.2.2.2.2.2.1
-    have hMsg' := (verifySuccinctRecursiveHem_accept_facts hAcc').2.2.2.2.2.2.2.1
+    have hMsg := (verifySuccinctRecursiveHem_facts hAcc).2.2.2.2.2.2.2.1
+    have hMsg' := (verifySuccinctRecursiveHem_facts hAcc').2.2.2.2.2.2.2.1
     dsimp only at hMsg'
     rw [hMsg] at hMsg'
     have hDigEq := (succinctOuterBoundMessage_injective hMsg').2.2.2
@@ -521,17 +469,13 @@ theorem tooth_succinctRecursiveHem_rejects_downgrade_and_tamper :
       hEncNe, hDigEq.symm⟩
   · apply Bool.eq_false_iff.mpr
     intro hAcc'
-    have hMsg' := (verifySuccinctRecursiveHem_accept_facts hAcc').2.2.2.2.2.2.2.1
-    dsimp only at hMsg'
-    rw [rsSbox7Inst_message] at hMsg'
+    have hMsg' := (verifySuccinctRecursiveHem_facts hAcc').2.2.2.2.2.2.2.1
+    dsimp only [rsSbox7Inst] at hMsg'
     have hEncEq := (succinctOuterBoundMessage_injective hMsg').2.2.2
     have hHdrEq := encodeCompressedHeaderChain_injective hEncEq
     have hDflt := shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard false)
     have hHead := congrArg (fun hs : List ShardCompressedHeader => (hs.headD hDflt).childProofDigest) hHdrEq
-    have hL : (concreteSuccinctOuterHeaders.headD hDflt).childProofDigest = [0x01] := by
-      show (shardToCompressedHeader (fun _ => [0x01]) (concreteHemShard false)).childProofDigest =
-        [0x01]
-      rw [shardToCompressedHeader.public_eqs]
+    have hL : (concreteSuccinctOuterHeaders.headD hDflt).childProofDigest = [0x01] := rfl
     have hR : ((concreteSuccinctOuterHeaders.map
         (fun h => { h with childProofDigest := [0xFF] })).headD hDflt).childProofDigest = [0xFF] := rfl
     rw [hL, hR] at hHead
@@ -560,18 +504,10 @@ theorem tooth_noncanonical_shard_header_collides_and_is_rejected :
       verifyRecursiveShardHeader h1 = true ∧
       verifyRecursiveShardHeader h2 = false := by
   have hPre : leafShardHeaderPreimage headerShardZero = leafShardHeaderPreimage headerShardP := by
-    have hP : Goldilocks.ofNat goldilocksPrime = Goldilocks.ofNat 0 := by decide
-    simp only [leafShardHeaderPreimage.public_eqs, headerShardZero, headerShardP, hP]
-  have hNe : ¬ (headerShardZero = headerShardP) := fun h =>
-    absurd (congrArg RecursiveShardHeader.shardId h) (by decide)
-  have hV0 : verifyRecursiveShardHeader headerShardZero = true := by
-    rw [verifyRecursiveShardHeader.public_eqs]
     decide
-  have hVP : verifyRecursiveShardHeader headerShardP = false := by
-    rw [verifyRecursiveShardHeader.public_eqs]
-    decide
-  refine ⟨headerShardZero, headerShardP, hNe, hPre, ?_, hV0, hVP⟩
-  rw [hashLeafShardHeader.public_eqs, hashLeafShardHeader.public_eqs, hPre]
+  refine ⟨headerShardZero, headerShardP, by decide, hPre, ?_, by decide, by decide⟩
+  unfold hashLeafShardHeader
+  rw [hPre]
 
 /-- Positive instance of `leafShardHeaderPreimage_injective`: two canonical headers. -/
 theorem inhabited_canonical_shard_headers :
@@ -579,15 +515,7 @@ theorem inhabited_canonical_shard_headers :
     verifyRecursiveShardHeader { headerShardZero with shardId := 1 } = true ∧
     ¬ (leafShardHeaderPreimage headerShardZero =
       leafShardHeaderPreimage { headerShardZero with shardId := 1 }) := by
-  have hV0 : verifyRecursiveShardHeader headerShardZero = true := by
-    rw [verifyRecursiveShardHeader.public_eqs]
-    decide
-  have hV1 : verifyRecursiveShardHeader { headerShardZero with shardId := 1 } = true := by
-    rw [verifyRecursiveShardHeader.public_eqs]
-    decide
-  refine ⟨hV0, hV1, fun h => ?_⟩
-  exact absurd (congrArg RecursiveShardHeader.shardId (leafShardHeaderPreimage_injective hV0 hV1 h))
-    (by decide)
+  refine ⟨by decide, by decide, by decide⟩
 
 /-! ### B.2 Transcript order -/
 
@@ -596,8 +524,8 @@ def swapRoundB : FsRound := ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2], [Goldi
 
 /-- Swapping two round messages changes the challenge derived after them. -/
 theorem tooth_swapped_round_messages_change_challenge :
-    ¬ (fsDeriveChallenges [swapRoundA, swapRoundB] = fsDeriveChallenges [swapRoundB, swapRoundA]) :=
-  fsDeriveChallenges_swapped_rounds_kat
+    ¬ (fsDeriveChallenges [swapRoundA, swapRoundB] = fsDeriveChallenges [swapRoundB, swapRoundA]) := by
+  decide +kernel
 
 def swapPolyA : List QuarticGoldilocks :=
   [⟨⟨Goldilocks.one, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩]
@@ -610,22 +538,23 @@ def swapZeroLane : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero
 def swapZeroExt : QuarticGoldilocks :=
   ⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩
 
+set_option maxRecDepth 1000000 in
 /-- In the child verifier, exchanging two sumcheck round polynomials changes the fold challenge
     `theta` squeezed after them: the round messages are absorbed, in order. -/
 theorem tooth_swapped_sumcheck_round_changes_theta :
     ¬ ((childWhirChallenges swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane
           [swapPolyA, swapPolyB] []).theta =
        (childWhirChallenges swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane
-          [swapPolyB, swapPolyA] []).theta) :=
-  childWhirChallenges_swapped_sumcheck_theta_kat
+          [swapPolyB, swapPolyA] []).theta) := by
+  decide +kernel
 
 /-- The frame encoding separates a message from its split: one frame `[1, 2]` and two frames
     `[1]`, `[2]` under the same tag have different block encodings. -/
 theorem tooth_frame_boundary_is_encoded :
     ¬ (fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1, Goldilocks.ofNat 2]⟩] =
        fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1]⟩,
-         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩]) :=
-  fsTranscriptBlocks_frame_boundary_kat
+         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩]) := by
+  decide
 
 /-! ### B.3 Leaf relation -/
 
@@ -670,11 +599,9 @@ theorem tooth_accepting_child_proof_without_quorum_rejected :
   refine ⟨subQuorumRecursiveLeaf, mkHonestChildWhirWitness_accepts _ _, ?_⟩
   apply recursive_tree_rejects_leaf_with_failing_shard
   have hQ : decide (subQuorumRecursiveLeaf.shard.threshold ≤
-      bitmapPopcountSpec subQuorumRecursiveLeaf.shard.proof.agg.bitmap) = false := by
-    show decide (2 ≤ bitmapPopcountSpec (concreteHemShard false).proof.agg.bitmap) = false
-    rw [concreteHemShard_popcount false]
-    rfl
-  rw [verifyHemShard.public_eqs, hQ, Bool.and_false, Bool.false_and]
+      bitmapPopcountSpec subQuorumRecursiveLeaf.shard.proof.agg.bitmap) = false := by rfl
+  unfold verifyHemShard
+  rw [hQ, Bool.and_false, Bool.false_and]
 
 /-! ### B.4 Accepted depth-1 tree over the two concrete shards -/
 
@@ -689,12 +616,10 @@ def concreteRecursiveLeaf (b : Bool) : RecursiveHemLeafCert :=
 theorem concreteRecursiveLeaf_header_valid (b : Bool) :
     verifyRecursiveShardHeader (concreteRecursiveLeaf b).header = true := by
   have hThr : (concreteHemShard b).threshold = 1 := by cases b <;> rfl
-  have hCom : (concreteHemShard b).inst.committee.length = 1 :=
-    concreteHemShard_committee_length b
-  have hPop : bitmapPopcountSpec (concreteHemShard b).proof.agg.bitmap = 1 :=
-    concreteHemShard_popcount b
-  rw [verifyRecursiveShardHeader.public_eqs]
-  simp only [concreteRecursiveLeaf, mkLeafShardHeader.public_eqs]
+  have hCom : (concreteHemShard b).inst.committee.length = 1 := by cases b <;> rfl
+  have hPop : bitmapPopcountSpec (concreteHemShard b).proof.agg.bitmap = 1 := by cases b <;> rfl
+  unfold verifyRecursiveShardHeader concreteRecursiveLeaf mkLeafShardHeader
+  dsimp only
   rw [hThr, hCom, hPop]
   cases b <;> decide
 
@@ -747,14 +672,10 @@ theorem inhabited_recursive_hem_forgery_or_break :
       verifyPqHashSig s.inst.suite s.inst.params pk (shardBoundMessage s.shardId [] []) sig = true) ∨
     Nonempty (HemHierarchyBreak poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
       [concreteHemShardEnv false, concreteHemShardEnv true]) := by
-  have hLeaf : recursiveHemLeafShards 1 concreteDepth1Agg =
-      [concreteHemShard false, concreteHemShard true] :=
-    recursiveHemLeafShards_depth1 _ _ _
   refine recursive_hem_false_statement_yields_forgery_or_break poseidon2Hash32 concreteHemArith
     rsSbox7WhirDomain concreteHemRegistryDigest [] [] concreteHemRegistry rfl 2 1 concreteDepth1Agg
-    [concreteHemShardEnv false, concreteHemShardEnv true] hLeaf.symm
-    inhabited_verifyRecursiveHemTree
-    (fun _ _ => false) ⟨concreteHemShard false, by rw [hLeaf]; exact List.mem_cons_self .., ?_⟩
+    [concreteHemShardEnv false, concreteHemShardEnv true] rfl inhabited_verifyRecursiveHemTree
+    (fun _ _ => false) ⟨concreteHemShard false, List.mem_cons_self .., ?_⟩
   show ((concreteHemShard false).inst.committee.filter (fun _ => false)).length <
     (concreteHemShard false).threshold
   rw [filter_false_nil]
