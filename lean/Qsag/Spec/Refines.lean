@@ -489,3 +489,18 @@ inductive PartyMachine.ValidTrace {S In Out : Type} (M : PartyMachine S In Out) 
 
 end Qsag
 end
+
+public section
+namespace Qsag.Spec
+/-- Operational leakage contract for a concrete machine runner. Mode assumptions are explicit;
+no constant-time claim is implied for modes outside `admissible`. -/
+structure LeakageContract (State Input Event : Type) where
+  publicEq : State → State → Prop
+  admissible : ExecMode → State → Prop
+  observe : ExecMode → State → Input → List Event
+
+/-- Equal public states produce equal observations under the contract's hardware assumptions. -/
+@[expose] def LeakageContract.ConstTimeUnder {S I E : Type} (C : LeakageContract S I E) : Prop :=
+  ∀ mode s₁ s₂ inp, C.admissible mode s₁ → C.admissible mode s₂ → C.publicEq s₁ s₂ →
+    C.observe mode s₁ inp = C.observe mode s₂ inp
+end Qsag.Spec
