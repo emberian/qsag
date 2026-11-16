@@ -1335,15 +1335,28 @@ fn cot_field_products(
 // Additive opening with MAC check.
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+std::thread_local! {
+    static ADDITIVE_CHECK_WEIGHTS: core::cell::RefCell<Vec<u128>> = const {
+        core::cell::RefCell::new(Vec::new())
+    };
+    static ADDITIVE_CHECK_OPENINGS: core::cell::RefCell<Vec<Tower128>> = const {
+        core::cell::RefCell::new(Vec::new())
+    };
+}
+
 /// Open additively shared field elements `shares[party][j]` and check their two-lane MACs
-/// `macs[party][j]` against the parties' key shares. Value shares and MAC-check shares are
-/// each committed before any is opened.
+/// `macs[party][j]` against the parties' key shares. Commit value shares before opening them,
+/// and commit MAC residual shares while keeping them private. Only independently randomized
+/// MAC residuals are revealed; a failing residual must never expose a multiple of the key.
+#[inline(never)]
 fn open_additive_authenticated(
     session_id: &[u8; 32],
     phase: &'static str,
     shares: &[Vec<u128>],
     macs: &[Vec<Row>],
     delta: &[Row],
+    mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<u128>, PreprocessError> {
     let n = shares.len();
@@ -1392,21 +1405,98 @@ fn open_additive_authenticated(
         salts[p] = party_rngs[p].next_bytes32();
         coms.push(commit(b"sigma", p, &sigma[p], &salts[p]));
     }
-    let mut total = vec![0u128; 2 * count];
     for p in 0..n {
         if !ct_eq_bytes32(&commit(b"sigma", p, &sigma[p], &salts[p]), &coms[p]) {
             return Err(PreprocessError::ShareCommitMismatch { phase, party_id: p });
         }
         wipe_bytes32(&mut salts[p]);
-        for (dst, s) in total.iter_mut().zip(&sigma[p]) {
-            *dst ^= *s;
-        }
     }
-    if total.iter().any(|v| *v != 0) {
-        return Err(PreprocessError::MacCheckFailed {
-            phase,
-            accused_party: None,
-        });
+    if count == 0 {
+        return Ok(opened);
+    }
+    // Fix the WHOLE residual vector before drawing any projection coefficient.
+    // For a nonzero vector over q = 2^128, a uniform linear projection is zero
+    // with probability 1/q. Conditional on a nonzero projection, the existing
+    // two-round blinding accepts with probability 1/q^2. Three independent
+    // projections therefore accept with probability
+    // (1/q + (1 - 1/q)/q^2)^3 < 1/q^2, even for a fault in only ONE MAC lane.
+    // No projection is ever reconstructed without a fresh private multiplier.
+    let mut binding = Cshake256Xof::new(b"QSAG.TRIPLE.F2.MAC.PROJECTIONS.COM/v1");
+    binding.absorb(session_id);
+    binding.absorb(phase.as_bytes());
+    binding.absorb(&(n as u64).to_be_bytes());
+    binding.absorb(&(count as u64).to_be_bytes());
+    for commitment in &coms {
+        binding.absorb(commitment);
+    }
+    let mut committed = [0u8; 32];
+    binding.squeeze(&mut committed);
+    for projection in 0..3u64 {
+        let sid = cshake256_32_multi_frame(
+            b"QSAG.TRIPLE.F2.MAC.PROJECTION/v1",
+            &[session_id, phase.as_bytes(), &projection.to_be_bytes()],
+        );
+        let coin_binding = cshake256_32_multi_frame(
+            b"QSAG.TRIPLE.F2.MAC.PROJECTION.COIN/v1",
+            &[&committed, &mesh.transcript_digest()],
+        );
+        let coin = run_commit_and_open_coin(
+            &sid,
+            b"PI_TRIPLE_F2_MAC_PROJECTION",
+            &coin_binding,
+            party_rngs,
+        )?;
+        for lane in 0..2 {
+            let mut xof = Cshake256Xof::new(b"QSAG.TRIPLE.F2.MAC.PROJECTION.COEFF/v1");
+            xof.absorb(&coin);
+            xof.absorb(&[lane as u8]);
+            let weights = (0..count)
+                .map(|_| {
+                    let mut bytes = [0u8; 16];
+                    xof.squeeze(&mut bytes);
+                    u128::from_le_bytes(bytes)
+                })
+                .collect::<Vec<_>>();
+            let residual = SecretBuffer(
+                sigma
+                    .iter()
+                    .map(|row| {
+                        let values = SecretBuffer(
+                            row.as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|pair| pair[lane])
+                                .collect::<Vec<_>>(),
+                        );
+                        // Projection uses the MAC's polynomial field. The final coordinate
+                        // map into the tower field is XOR-linear and zero-preserving;
+                        // its blinding zero test needs no multiplicative isomorphism.
+                        Tower128(gf_dot(&weights, &values))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let blind_sid =
+                cshake256_32_multi_frame(b"QSAG.TRIPLE.F2.MAC.BLIND/v1", &[&sid, &[lane as u8]]);
+            let blinded = mac_blind::blind_open_tower128(
+                &blind_sid,
+                phase,
+                &residual,
+                Some(&mut *mesh),
+                party_rngs,
+            )?;
+            #[cfg(test)]
+            {
+                ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().push(blinded));
+                ADDITIVE_CHECK_WEIGHTS
+                    .with(|weights_seen| weights_seen.borrow_mut().push(weights[0]));
+            }
+            if !blinded.ct_eq(Tower128::ZERO) {
+                return Err(PreprocessError::MacCheckFailed {
+                    phase,
+                    accused_party: None,
+                });
+            }
+        }
     }
     Ok(opened)
 }
@@ -1831,8 +1921,8 @@ fn split_even_odd(v: &[u128]) -> (Vec<u128>, Vec<u128>) {
     (even, odd)
 }
 
-/// The recursive inner-product sacrifice over the authenticated raw bits. Returns `Ok(())` only
-/// if both instances' final product openings pass their MAC checks and their product tests.
+/// Prepare the recursive inner-product sacrifice over the authenticated raw bits.
+/// The coordinator must check the returned private opening before accepting these triples.
 #[expect(
     clippy::too_many_arguments,
     reason = "Shares, MAC shares, pads and randomness of one ceremony are separate protocol inputs"
@@ -1848,7 +1938,7 @@ fn recursive_sacrifice(
     transcript: &mut [u8; 32],
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
-) -> Result<(), PreprocessError> {
+) -> Result<PendingSacrifice, PreprocessError> {
     let n = pool.n;
     let nbits = plan.nbits;
     let [a_bits, b_bits, c_bits] = bits;
@@ -2196,22 +2286,10 @@ fn recursive_sacrifice(
             }
         }
     }
-    let opened = open_additive_authenticated(
-        session_id,
-        "pi_triple_f2_sacrifice",
-        &open_shares,
-        &open_macs,
-        &pool.delta,
-        party_rngs,
-    )?;
-    for inst in 0..2 {
-        if opened[3 * inst + 2] != gf_mul(opened[3 * inst], opened[3 * inst + 1]) {
-            return Err(PreprocessError::SacrificeResidualNonZero {
-                phase: "pi_triple_f2",
-            });
-        }
-    }
-    Ok(())
+    Ok(PendingSacrifice {
+        shares: open_shares,
+        macs: open_macs,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2231,6 +2309,51 @@ impl BitTriples {
     }
 }
 
+/// Private inputs to the final sacrifice opening. Workers return these without
+/// publishing sigma; the coordinator checks them on the existing monotone mesh.
+struct PendingSacrifice {
+    shares: SecretBuffer<Vec<Vec<u128>>>,
+    macs: SecretBuffer<Vec<Vec<Row>>>,
+}
+
+struct UncheckedRawBatch {
+    batch: RawBatch,
+    sacrifice: PendingSacrifice,
+}
+
+impl UncheckedRawBatch {
+    fn check(
+        self,
+        session_id: &[u8; 32],
+        mesh: &mut OtMesh,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<RawBatch, PreprocessError> {
+        let opened = open_additive_authenticated(
+            session_id,
+            "pi_triple_f2_sacrifice",
+            &self.sacrifice.shares,
+            &self.sacrifice.macs,
+            &self.batch.delta,
+            mesh,
+            party_rngs,
+        )?;
+        for inst in 0..2 {
+            if opened[3 * inst + 2] != gf_mul(opened[3 * inst], opened[3 * inst + 1]) {
+                return Err(PreprocessError::SacrificeResidualNonZero {
+                    phase: "pi_triple_f2",
+                });
+            }
+        }
+        let mut batch = self.batch;
+        absorb_transcript(
+            &mut batch.transcript,
+            b"mac-blind",
+            &mesh.transcript_digest(),
+        );
+        Ok(batch)
+    }
+}
+
 /// One ceremony's raw triples after its sacrifice has accepted.
 struct RawBatch {
     triples: BitTriples,
@@ -2243,14 +2366,14 @@ struct RawBatch {
 /// per hashed row and one ceremony's transient rows and pads near 1 GiB.
 const RAW_CEREMONY_WORDS: usize = 3072;
 
-/// Ceremonies run side by side. Only the base OTs of a ceremony touch the shared mesh, so each
-/// wave bootstraps its ceremonies in order and then runs them concurrently; a third concurrent
-/// ceremony bought under 10% of wall time for 20% more CPU on a 20-thread host.
+/// Ceremonies run side by side. Each wave bootstraps its ceremonies in order, runs the
+/// private work concurrently, then checks final sacrifice openings in order on the shared
+/// mesh. A third concurrent ceremony bought under 10% of wall time for 20% more CPU.
 const MAX_CONCURRENT_CEREMONIES: usize = 2;
 
-/// Final triples of one combine pool. A pool of at least 7,720 words combines three raw triples
-/// into one (see [`combine_arity`]); larger requests are split into pools of this size or more
-/// so the raw shares held for one combine stay bounded.
+/// Final triples of one combine pool. 8,192 words gives arity 3 (see [`combine_arity`]);
+/// smaller pools such as 7,720 words adaptively require arity >= 4. Larger requests are
+/// split into pools of this size or more so the raw shares held for one combine stay bounded.
 const POOL_WORDS: usize = 8192;
 
 fn pair_pads(n: usize, nbits: usize, plan: &FoldPlan) -> Vec<PairPads> {
@@ -2285,14 +2408,14 @@ fn pair_pads(n: usize, nbits: usize, plan: &FoldPlan) -> Vec<PairPads> {
 }
 
 /// One KOS-backed raw ceremony over a bootstrapped pool: `plan.nbits` authenticated raw bit
-/// triples whose products the recursive sacrifice has accepted.
+/// triples and the pending private sacrifice opening, checked by the coordinator.
 fn raw_ceremony(
     session_id: [u8; 32],
     plan: &FoldPlan,
     boot: PoolBoot,
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
-) -> Result<RawBatch, PreprocessError> {
+) -> Result<UncheckedRawBatch, PreprocessError> {
     let n = boot.n;
     let nbits = plan.nbits;
     let raw_words = nbits / 64;
@@ -2388,7 +2511,7 @@ fn raw_silent_ceremony(
     vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
-) -> Result<RawBatch, PreprocessError> {
+) -> Result<UncheckedRawBatch, PreprocessError> {
     let n = vaults_lane0.len();
     let nbits = plan.nbits;
     let raw_words = nbits / 64;
@@ -2525,8 +2648,8 @@ fn sacrifice_raw(
     mut transcript: [u8; 32],
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
-) -> Result<RawBatch, PreprocessError> {
-    recursive_sacrifice(
+) -> Result<UncheckedRawBatch, PreprocessError> {
+    let sacrifice = recursive_sacrifice(
         session_id,
         plan,
         &mut pool,
@@ -2541,11 +2664,14 @@ fn sacrifice_raw(
     drop(pads);
     let mask = pool.take_check_mask()?;
     let delta = SecretBuffer(pool.delta.to_vec());
-    Ok(RawBatch {
-        triples: BitTriples { bits, macs },
-        mask,
-        delta,
-        transcript,
+    Ok(UncheckedRawBatch {
+        batch: RawBatch {
+            triples: BitTriples { bits, macs },
+            mask,
+            delta,
+            transcript,
+        },
+        sacrifice,
     })
 }
 
@@ -2679,6 +2805,7 @@ fn combine_pass(
     batches: &[&BitTriples],
     delta: &[Row],
     transcript: &mut [u8; 32],
+    mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
 ) -> Result<BitTriples, PreprocessError> {
@@ -2752,7 +2879,9 @@ fn combine_pass(
         shares.push(core::mem::take(&mut part.shares));
         macs.push(core::mem::take(&mut part.macs));
     }
-    let opened = open_additive_authenticated(session_id, phase, &shares, &macs, delta, party_rngs)?;
+    let opened =
+        open_additive_authenticated(session_id, phase, &shares, &macs, delta, mesh, party_rngs)?;
+    absorb_transcript(transcript, b"mac-blind", &mesh.transcript_digest());
     drop((shares, macs));
     let opened_bytes: Vec<u8> = opened.iter().flat_map(|e| e.to_le_bytes()).collect();
     absorb_transcript(transcript, b"open", &opened_bytes);
@@ -2836,6 +2965,7 @@ fn combine_raw(
     batches: &[&BitTriples],
     delta: &[Row],
     transcript: &mut [u8; 32],
+    mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
 ) -> Result<BitTriples, PreprocessError> {
@@ -2850,6 +2980,7 @@ fn combine_raw(
         batches,
         delta,
         transcript,
+        mesh,
         party_rngs,
         faults,
     )?;
@@ -2865,6 +2996,7 @@ fn combine_raw(
         &[&first],
         delta,
         transcript,
+        mesh,
         party_rngs,
         faults,
     )
@@ -2906,7 +3038,7 @@ fn additive_pool(
         session_id: [u8; 32],
         boot: Option<PoolBoot>,
         rngs: Vec<PartyPrivateRng>,
-        raw: Option<Result<RawBatch, PreprocessError>>,
+        raw: Option<Result<UncheckedRawBatch, PreprocessError>>,
     }
     let n = ot_mesh.n;
     let (raw_words, _, _) = combine_shape(out_words, Leak::ChoiceSide);
@@ -2967,7 +3099,8 @@ fn additive_pool(
             });
         }
         for ceremony in &mut ceremonies {
-            batches.push(ceremony.raw.take().expect("every ceremony ran")?);
+            let raw = ceremony.raw.take().expect("every ceremony ran")?;
+            batches.push(raw.check(&ceremony.session_id, ot_mesh, &mut ceremony.rngs)?);
         }
     }
 
@@ -2983,6 +3116,7 @@ fn additive_pool(
         &views,
         &batches[0].delta,
         &mut transcript,
+        ot_mesh,
         party_rngs,
         faults,
     )?;
@@ -3195,8 +3329,9 @@ pub(super) fn run_pi_triple_f2_additive(
 }
 
 /// Authenticate, sacrifice, combine and Shamir-convert silent Boolean Beaver triples drawn from
-/// locally expanded [`crate::pcg_dense::DensePcgExpandedVault`]s without `KosOtExtension`. The
-/// vaults must hold the raw words [`silent_raw_words`] gives for `num_triples`.
+/// locally expanded [`crate::pcg_dense::DensePcgExpandedVault`]s. Blinded MAC checks reuse
+/// `mesh` when supplied; standalone materialization establishes one mesh for all checks.
+/// The vaults must hold the raw words [`silent_raw_words`] gives for `num_triples`.
 #[expect(
     clippy::too_many_arguments,
     reason = "Silent PCG vaults, threshold evaluation points, MAC shares and private RNGs are distinct protocol inputs"
@@ -3209,10 +3344,20 @@ pub(super) fn run_silent_pi_triple_f2(
     alpha_shamir: &[[Tower128; 2]],
     vaults_lane0: &mut [crate::pcg_dense::DensePcgExpandedVault],
     vaults_lane1: &mut [crate::pcg_dense::DensePcgExpandedVault],
+    mesh: Option<&mut OtMesh>,
     party_rngs: &mut [PartyPrivateRng],
     faults: &mut PiTripleF2Faults<'_>,
 ) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
     let n = eval_points.len();
+    let mut owned_mesh;
+    let mesh = match mesh {
+        Some(mesh) => mesh,
+        None => {
+            let blind_sid = derive_session(b"QSAG.TRIPLE.F2.SILENT.BLIND/v1", &session_id, 0);
+            owned_mesh = OtMesh::establish(blind_sid, party_rngs)?;
+            &mut owned_mesh
+        }
+    };
     let plan = FoldPlan::new(64 * silent_raw_words(num_triples))?;
     let RawBatch {
         triples: raw,
@@ -3226,7 +3371,8 @@ pub(super) fn run_silent_pi_triple_f2(
         vaults_lane1,
         party_rngs,
         faults,
-    )?;
+    )?
+    .check(&session_id, mesh, party_rngs)?;
     let combined = combine_raw(
         &session_id,
         Leak::BothFactors,
@@ -3234,6 +3380,7 @@ pub(super) fn run_silent_pi_triple_f2(
         &[&raw],
         &delta,
         &mut transcript,
+        mesh,
         party_rngs,
         faults,
     )?;
@@ -3288,6 +3435,135 @@ mod tests {
                 assert_eq!(got, want, "lane {s}, backend {backend:?}");
             }
         }
+    }
+
+    #[test]
+    fn additive_share_shift_opens_only_fresh_randomized_residuals() {
+        // Keep the portable field circuit out of loop vectorization.
+        #[inline(never)]
+        fn expected_product(r: Tower128, d: Tower128) -> Tower128 {
+            r.mul(d)
+        }
+        let sid = [0xe1; 32];
+        let delta = [[0x1234u128, 0x5678u128], [0x9876u128, 0xabcdu128]];
+        let macs = vec![vec![[0u128; 2]]; 2];
+        let shifted = vec![vec![1u128], vec![0u128]];
+        let total = delta[0][0] ^ delta[1][0];
+        let mut seen = alloc::collections::BTreeSet::new();
+        for honest_tape in 1..=16 {
+            // Fixed alpha, shift, corrupt tape and base-OT setup. Only the
+            // honest party's fresh private randomness varies between aborts.
+            let tapes = [0x91, honest_tape];
+            let rngs = || {
+                tapes
+                    .iter()
+                    .map(|&seed| PartyPrivateRng::from_seed([seed; 32], b"additive-abort"))
+                    .collect::<Vec<_>>()
+            };
+            let mut private = rngs();
+            let mut replay = rngs();
+            let mut setup_rngs: Vec<_> = (0..2)
+                .map(|p| PartyPrivateRng::from_seed([0x42 + p; 32], b"fixed-additive-base-ot"))
+                .collect();
+            let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut setup_rngs);
+            let before = mesh.transcript_digest();
+            let randomizer = replay.iter_mut().fold(Tower128::ZERO, |sum, rng| {
+                // Value salt, sigma salt, committed projection coin share, then R.
+                rng.next_bytes32();
+                rng.next_bytes32();
+                rng.next_bytes32();
+                sum.add(rng.next_tower128())
+            });
+            ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().clear());
+            ADDITIVE_CHECK_WEIGHTS.with(|weights| weights.borrow_mut().clear());
+            assert!(matches!(
+                open_additive_authenticated(
+                    &sid,
+                    "additive_shift",
+                    &shifted,
+                    &macs,
+                    &delta,
+                    &mut mesh,
+                    &mut private
+                ),
+                Err(PreprocessError::MacCheckFailed {
+                    phase: "additive_shift",
+                    ..
+                })
+            ));
+            let checks = ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow().clone());
+            let weights = ADDITIVE_CHECK_WEIGHTS.with(|weights| weights.borrow().clone());
+            assert_eq!(weights.len(), 1);
+            let projected = Tower128(gf_mul(weights[0], total));
+            assert_eq!(checks, [expected_product(randomizer, projected)]);
+            assert_ne!(checks[0], Tower128::ZERO);
+            assert_ne!(checks[0], projected);
+            assert_ne!(mesh.transcript_digest(), before);
+            seen.insert(checks[0].0);
+        }
+        assert_eq!(seen.len(), 16);
+        // A fault confined to the second lane is also rejected.
+        let mut private: Vec<_> = (0..2)
+            .map(|p| PartyPrivateRng::from_seed([0x51 + p; 32], b"additive-second-lane"))
+            .collect();
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut private);
+        let delta = [[0, 19], [0, 23]];
+        ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().clear());
+        assert!(matches!(
+            open_additive_authenticated(
+                &sid,
+                "additive_second_lane",
+                &shifted,
+                &macs,
+                &delta,
+                &mut mesh,
+                &mut private
+            ),
+            Err(PreprocessError::MacCheckFailed { .. })
+        ));
+        ADDITIVE_CHECK_OPENINGS.with(|checks| {
+            assert_eq!(checks.borrow().len(), 2);
+            assert_eq!(checks.borrow()[0], Tower128::ZERO);
+            assert_ne!(checks.borrow()[1], Tower128::ZERO);
+        });
+        ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().clear());
+        assert_eq!(
+            open_additive_authenticated(
+                &sid,
+                "additive_honest",
+                &vec![vec![0]; 2],
+                &macs,
+                &delta,
+                &mut mesh,
+                &mut private
+            )
+            .unwrap(),
+            [0]
+        );
+        // All three projections and BOTH MAC lanes must be checked on success.
+        ADDITIVE_CHECK_OPENINGS.with(|checks| assert_eq!(*checks.borrow(), [Tower128::ZERO; 6]));
+        // A fault in a late element crosses gf_dot's 128-element chunks.
+        let fields = 257;
+        let mut shifted = vec![vec![0u128; fields]; 2];
+        shifted[0][fields - 1] = 1;
+        ADDITIVE_CHECK_OPENINGS.with(|checks| checks.borrow_mut().clear());
+        assert!(matches!(
+            open_additive_authenticated(
+                &sid,
+                "additive_late_element",
+                &shifted,
+                &vec![vec![[0u128; 2]; fields]; 2],
+                &delta,
+                &mut mesh,
+                &mut private
+            ),
+            Err(PreprocessError::MacCheckFailed { .. })
+        ));
+        ADDITIVE_CHECK_OPENINGS.with(|checks| {
+            assert_eq!(checks.borrow().len(), 2);
+            assert_eq!(checks.borrow()[0], Tower128::ZERO);
+            assert_ne!(checks.borrow()[1], Tower128::ZERO);
+        });
     }
 
     type TestSetup = (
@@ -3439,6 +3715,7 @@ mod tests {
             let mut rngs: Vec<_> = (0..3)
                 .map(|p| PartyPrivateRng::from_seed([trial; 32], &[b'c', p]))
                 .collect();
+            let mut mesh = OtMesh::establish_ideal_for_test([trial; 32], &mut rngs);
             let mut transcript = [trial; 32];
             let out = combine_pass(
                 &[0x77; 32],
@@ -3449,6 +3726,7 @@ mod tests {
                 &[&pool],
                 &delta,
                 &mut transcript,
+                &mut mesh,
                 &mut rngs,
                 &mut PiTripleF2Faults::default(),
             )
