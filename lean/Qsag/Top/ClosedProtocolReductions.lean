@@ -22,13 +22,16 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
    by the extractor run on the whole outcome.
 
 Standing assumptions and explicit boundaries, stated where they enter:
-* **WHIR `WhirScheduleCert` scope:** `singleStageExactWhir_closed_qrom_soundness` discharges
-  `ClosedWhir.WhirScheduleCert` unconditionally on a non-empty 1-stage `johnsonOk` schedule
-  (`singleStageExactWhirSched`, `stages.length = 1`) whose verifier accepts honest proofs and
-  rejects false statements. For the 4-stage `nv = 24` `deployedSched`,
-  `deployed_whir_exec_closed_qrom_128` remains explicitly conditional on an open
-  `ClosedWhir.WhirScheduleCert env deployedSched w` hypothesis (and `deployedStages` uses the
-  profile input `whirAffineStageSimpleNum`, not yet bridged from the proved sliced MCA counts);
+* **`WhirScheduleCert`.** `deployed_whir_exec_closed_qrom_128` is conditional: it takes
+  `ClosedWhir.WhirScheduleCert env deployedSched w` as a hypothesis, no such certificate is
+  constructed in this library, and `deployedStages` uses the profile input
+  `whirAffineStageSimpleNum`, which the proved sliced MCA counts do not reach. The `2^-128`
+  figure for the `nv = 24` schedule is therefore not an unconditional theorem here. What is
+  constructed is a certificate for a one-stage toy schedule with one sampled query
+  (`sampledQueryWhir_closed_qrom_soundness`, `sampledQueryWhir_nonvacuity`): the hypotheses of
+  `whir_exec_closed_qrom_soundness` are jointly satisfiable by a verifier that has a stage,
+  accepts honest proofs and errs with positive probability; that instance has no folding and
+  its error bound is above one;
 * the adversary's output carries the committed tables, and the Fiat–Shamir oracle is queried
   on whole message prefixes (`ClosedFs` module header);
 * **Signature reductions:** `jorts_baggy_closed_euf_cma_keyed_target_bound` reduces directly to
@@ -129,51 +132,64 @@ theorem deployed_whir_exec_closed_qrom_128 {cardX cardAnc Q w : Nat}
 
 end Whir
 
-/-- **Unconditional Closed QROM Soundness on a Non-Empty 1-Stage `johnsonOk` WHIR Schedule
-    (`singleStageExactWhir_closed_qrom_soundness`)**:
-    Instantiates `whir_exec_closed_qrom_soundness` with `ClosedWhir.singleStageExactScheduleCert w`
-    (`stages.length = 1`, `johnsonOk = true`), eliminating vacuity on non-empty schedules! -/
-theorem singleStageExactWhir_closed_qrom_soundness {D : Type} [DecidableEq D]
-    {cardX cardAnc Q w : Nat}
+/-- **`whir_exec_closed_qrom_soundness` with its certificate hypothesis discharged**, on the
+    one-stage schedule `ClosedWhir.sampledQuerySched` at challenge width two
+    (`ClosedWhir.sampledQueryCert`). The schedule is a toy with a single sampled query and no
+    fold, sumcheck or out-of-domain round; its `scheduleQromError` is above one, so this instance
+    shows that the theorem's hypotheses are jointly satisfiable by a verifier with a stage, and
+    carries no numerical security claim. -/
+theorem sampledQueryWhir_closed_qrom_soundness {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat}
     (M : Qsag.ClosedFs.MerkleSetup D Qsag.Goldilocks)
     (c : Qsag.ClosedFs.FsCodec (Qsag.ClosedWhir.WhirMsg Qsag.Goldilocks)
-      Qsag.ClosedWhir.singleStageExactWhirSched.numRounds cardX)
+      Qsag.ClosedWhir.sampledQuerySched.numRounds cardX)
     (aux : Fin cardX → List (Qsag.Goldilocks × List D))
     (x : Qsag.ClosedWhir.WhirStmt Qsag.Goldilocks)
-    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.singleStageExactEnv
-      Qsag.ClosedWhir.singleStageExactWhirSched x)
-    (A : Qsag.QuantumAdv cardX w cardAnc Q) :
+    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.sampledQueryEnv
+      Qsag.ClosedWhir.sampledQuerySched x)
+    (A : Qsag.QuantumAdv cardX 2 cardAnc Q) :
     Qsag.Spec.GameBound
       (Qsag.Spec.RatBound.ofBudget
-        (WhirSoundnessWinProb Qsag.ClosedWhir.singleStageExactEnv
-          Qsag.ClosedWhir.singleStageExactWhirSched M c aux x A))
+        (WhirSoundnessWinProb Qsag.ClosedWhir.sampledQueryEnv
+          Qsag.ClosedWhir.sampledQuerySched M c aux x A))
       (Qsag.Spec.RatBound.ofBudget
         (Qsag.RatBound.add
-          (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.singleStageExactWhirSched Q)
-          (WhirMerkleCollisionWinProb Qsag.ClosedWhir.singleStageExactEnv
-            Qsag.ClosedWhir.singleStageExactWhirSched M c aux x A))) :=
-  whir_exec_closed_qrom_soundness Qsag.ClosedWhir.singleStageExactEnv
-    Qsag.ClosedWhir.singleStageExactWhirSched M
-    (Qsag.ClosedWhir.singleStageExactScheduleCert w) c aux x hx A
+          (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.sampledQuerySched Q)
+          (WhirMerkleCollisionWinProb Qsag.ClosedWhir.sampledQueryEnv
+            Qsag.ClosedWhir.sampledQuerySched M c aux x A))) :=
+  whir_exec_closed_qrom_soundness Qsag.ClosedWhir.sampledQueryEnv
+    Qsag.ClosedWhir.sampledQuerySched M Qsag.ClosedWhir.sampledQueryCert c aux x hx A
 
-/-- Non-vacuity certificate for `singleStageExactWhir_closed_qrom_soundness`: `stages.length = 1`,
-    `johnsonOk = true`, honest transcripts are accepted, and `¬ whirInLang` is inhabited! -/
-theorem singleStageExactWhir_nonvacuity (w : Nat) :
-    Qsag.ClosedWhir.singleStageExactWhirSched.stages.length = 1 ∧
-    Qsag.ClosedWhir.singleStageExactWhirSched.johnsonOk = true ∧
-    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.singleStageExactEnv
-      Qsag.ClosedWhir.singleStageExactWhirSched w).verify
+/-- What the one-stage instance has that the empty schedule lacks: a stage passing the Johnson
+    check, an honest transcript the verifier accepts, a statement outside the language, a
+    challenge on which that false statement is still accepted, and a nonzero certified flip
+    count for the query round. -/
+theorem sampledQueryWhir_nonvacuity :
+    Qsag.ClosedWhir.sampledQuerySched.stages.length = 1 ∧
+    Qsag.ClosedWhir.sampledQuerySched.johnsonOk = true ∧
+    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.sampledQueryEnv
+      Qsag.ClosedWhir.sampledQuerySched 2).verify
       ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
        Qsag.Goldilocks.one⟩
       [(⟨[], [Qsag.Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 0)] = true ∧
-    ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.singleStageExactEnv
-      Qsag.ClosedWhir.singleStageExactWhirSched
-      ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.ofNat 2, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
-       Qsag.Goldilocks.one⟩ :=
-  ⟨Qsag.ClosedWhir.singleStageExactWhirSched_nonempty_and_johnsonOk.1,
-   Qsag.ClosedWhir.singleStageExactWhirSched_nonempty_and_johnsonOk.2.1,
-   Qsag.ClosedWhir.singleStageExactWhir_honest_accepts w,
-   Qsag.ClosedWhir.singleStageExactWhir_false_not_inLang⟩
+    ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.sampledQueryEnv
+      Qsag.ClosedWhir.sampledQuerySched
+      ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
+       Qsag.Goldilocks.zero⟩ ∧
+    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.sampledQueryEnv
+      Qsag.ClosedWhir.sampledQuerySched 2).verify
+      ⟨[Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one, Qsag.Goldilocks.one],
+       Qsag.Goldilocks.zero⟩
+      [(⟨[], [Qsag.Goldilocks.zero, Qsag.Goldilocks.one], []⟩, 0), (⟨[], [], []⟩, 1)] = true ∧
+    Qsag.ClosedWhir.sampledQueryCert.cert.bad
+      ⟨1, Nat.lt_of_lt_of_eq (by decide : 1 < 2)
+        Qsag.ClosedWhir.sampledQuerySched_shape.2.2.symm⟩ = 2 :=
+  ⟨Qsag.ClosedWhir.sampledQuerySched_shape.1,
+   Qsag.ClosedWhir.sampledQuerySched_shape.2.1,
+   Qsag.ClosedWhir.sampledQuery_honest_accepts.1,
+   Qsag.ClosedWhir.sampledQuery_false_not_inLang,
+   Qsag.ClosedWhir.sampledQuery_false_statement_accepted_once.1,
+   Qsag.ClosedWhir.sampledQueryCert_query_round_bad⟩
 
 /-- **The collision reduction's output.** With the Merkle hash realized by a byte hash `Hb`
     through prefix-free framings, every output on which the collision event holds yields an
@@ -315,14 +331,25 @@ theorem jorts_baggy_closed_euf_cma_spec_assumptions_bound {n qHash qSign : Nat} 
     Discharges `ItsrHard`, `SmDtTcrHard`, and `SmDtPreHard` via `byteIdxHmsg_itsrHard_within`,
     `poly257Hash_smDtTcrHard_within`, and `poly257Hash_smDtPreHard_within` (`6 / 256 < 1`, while
     coin `0` wins `ExecEufCmaGame`). -/
-theorem concrete_exec_euf_cma_spec_assumptions_witness :=
-  _root_.Qsag.concreteExecEufCma_forger_bound
+theorem concrete_exec_euf_cma_spec_assumptions_witness :
+    (Qsag.ExecEufCmaGame (by decide : 0 < 256 * 256) Qsag.seedZeroRootSuite
+      Qsag.prodToyStatefulParams Qsag.seedPairKeygen
+      (fun _ => Qsag.seedWithheldZeroGuessAdv)).win ⟨0, by decide⟩ = true ∧
+    Qsag.Spec.GameBound
+      (Qsag.ExecEufCmaGame (by decide : 0 < 256 * 256) Qsag.seedZeroRootSuite
+        Qsag.prodToyStatefulParams Qsag.seedPairKeygen
+        (fun _ => Qsag.seedWithheldZeroGuessAdv)).winProb
+      (((⟨2, 256, by decide⟩ : Qsag.Spec.RatBound).add ⟨2, 256, by decide⟩).add
+        ⟨2, 256, by decide⟩) ∧
+    (((⟨2, 256, by decide⟩ : Qsag.Spec.RatBound).add ⟨2, 256, by decide⟩).add
+      ⟨2, 256, by decide⟩).lt Qsag.Spec.RatBound.one :=
+  Qsag.concreteExecEufCma_forger_bound
 
 #verify_constructive
   Qsag.Top.whir_exec_closed_qrom_soundness
   Qsag.Top.deployed_whir_exec_closed_qrom_128
-  Qsag.Top.singleStageExactWhir_closed_qrom_soundness
-  Qsag.Top.singleStageExactWhir_nonvacuity
+  Qsag.Top.sampledQueryWhir_closed_qrom_soundness
+  Qsag.Top.sampledQueryWhir_nonvacuity
   Qsag.Top.whirCollisionReduction_validBreak
   Qsag.Top.jorts_baggy_closed_euf_cma_same_trace_classification
   Qsag.Top.jorts_baggy_closed_euf_cma_keyed_target_bound

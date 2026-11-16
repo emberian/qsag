@@ -3307,6 +3307,7 @@ pub(crate) trait Gadgets: Core {
     }
 
     /// Lockstep RFC 9861 12-round `Keccak-p[1600, 12]` across multiple 1600-bit states (`12` network rounds total).
+    #[cfg(test)]
     fn permutations_12(&mut self, states: &mut [&mut [Self::Bit]]) -> Result<(), Error> {
         self.permutations_with_rc(states, &KECCAK_RC[12..24])
     }
@@ -3454,6 +3455,7 @@ impl<B: ShareBit> Sponge<B> {
         Self::from_public_midstate(e, &cshake256_static_midstate(customization))
     }
     /// Initialize a shared 12-round `TurboSHAKE256` sponge from a precomputed public midstate (`0` MPC rounds).
+    #[cfg(test)]
     pub fn from_public_midstate<E: Core<Bit = B>>(e: &E, st: &[u64; 25]) -> Self {
         let mut s = Self::new(e);
         for (lane_idx, &w) in st.iter().enumerate() {

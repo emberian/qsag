@@ -794,12 +794,15 @@ impl<'a> ParallelSeededSignSession<'a> {
             self.digits = offsets;
             self.prepare_power()
         } else {
-            let nodes: Vec<_> = opened
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|pair| lanes_to_bytes32(pair[0], pair[1]))
-                .collect();
+            // The guard owns the nodes from here: a refused signature, and the leaf
+            // endpoints once they are hashed, are erased when it drops.
+            let unreleased = UnreleasedSignature::from_opened(
+                self.epoch,
+                self.randomizer,
+                self.grind_counter,
+                &opened,
+                self.siblings.clone(),
+            );
             drop(opened);
             self.result = Some(if self.mode == Mode::Leaf {
                 ParallelSeededSignResult::Leaf {
@@ -807,22 +810,22 @@ impl<'a> ParallelSeededSignSession<'a> {
                     digest: hash_epoch_endpoints_poseidon2(
                         &self.pk.pk_seed_limbs,
                         self.epoch,
-                        &nodes,
+                        &unreleased.0.chain_nodes,
                     ),
                 }
             } else {
-                let sig = ParallelSeededSignature {
-                    epoch: self.epoch,
-                    randomizer: self.randomizer,
-                    grind_counter: self.grind_counter,
-                    chain_nodes: nodes,
-                    merkle_siblings: self.siblings.clone(),
-                };
-                verify_parallel_seeded_fts(&self.pk, &self.msg, &sig, &CpuReferenceBackend)?;
-                crate::parallel_mpc::verify_canonical_minimal_grind_counter(
-                    &self.pk, &self.msg, &sig,
+                verify_parallel_seeded_fts(
+                    &self.pk,
+                    &self.msg,
+                    &unreleased.0,
+                    &CpuReferenceBackend,
                 )?;
-                ParallelSeededSignResult::Signature(sig)
+                crate::parallel_mpc::verify_canonical_minimal_grind_counter(
+                    &self.pk,
+                    &self.msg,
+                    &unreleased.0,
+                )?;
+                ParallelSeededSignResult::Signature(unreleased.release())
             });
             self.complete = true;
             self.phase = Phase::Complete;
@@ -1062,6 +1065,75 @@ mod release_barrier_tests {
             [5, 6, 7, 8],
         ];
         assert!(assemble_parallel_seeded_public_key(params, [9; 32], &alias).is_err());
+    }
+
+    /// Every MAC check accepts, then the public verifier refuses the signature because the
+    /// caller supplied a wrong Merkle path. Each party's copy of the chain nodes is erased.
+    #[test]
+    fn chain_nodes_that_fail_final_verification_are_erased() {
+        let accel = CpuReferenceBackend;
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            winternitz_w: 2,
+            num_chains: 2,
+            target_sum: 1,
+        };
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            params, 2, [41; 32], [42; 32], &accel,
+        )
+        .unwrap();
+        let mut burn = InMemoryBurnLog::default();
+        let mut wrong = setup.public_tree_layers[0][1];
+        wrong[0] ^= 1;
+        let siblings = [wrong];
+        let roster: Vec<_> = setup.shares.iter().map(|s| s.party_id).collect();
+        let mut sessions: Vec<_> = setup
+            .shares
+            .iter_mut()
+            .map(|s| {
+                ParallelSeededSignSession::begin(
+                    s,
+                    &ParallelSeededSignRequest {
+                        pk: &setup.pk,
+                        epoch: 0,
+                        msg: b"wrong path",
+                        session_id: [43; 32],
+                        roster: &roster,
+                        siblings: &siblings,
+                    },
+                    &mut burn,
+                )
+                .unwrap()
+            })
+            .collect();
+        let _ = crate::parallel_mpc::unreleased_probe::take();
+        let mut refused = 0;
+        for _ in 0..2_000 {
+            let messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
+            for session in &mut sessions {
+                let at_final_check =
+                    session.mode == Mode::Chains && session.phase == Phase::MacOpen;
+                if let Err(error) = session.advance(&messages) {
+                    // Only the last step fails, and not on a MAC check.
+                    assert!(at_final_check);
+                    assert!(matches!(
+                        error,
+                        ParallelSeededError::SignatureVerificationFailed
+                            | ParallelSeededError::InvalidAuthenticationPath
+                    ));
+                    assert!(session.result().is_none());
+                    refused += 1;
+                }
+            }
+            if refused != 0 {
+                break;
+            }
+        }
+        assert_eq!(refused, 2);
+        assert_eq!(
+            crate::parallel_mpc::unreleased_probe::take(),
+            [(32 * params.num_chains, 0); 2]
+        );
     }
 
     /// A whole distributed signature: each batch of masked openings is reserved before

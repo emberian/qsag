@@ -25,6 +25,12 @@ enforcing:
        lower `xmm` halves, and reloading after a wipe re-marks the register dirty!).
      - `aarch64`: stateful `dirty_neon` (`v0..v31`) live-at-`ret` tracking across ALL 7 kernels
        (reloading a `qN`/`vN` register after `eor vN.16b, vN.16b, vN.16b` re-dirties `vN`!).
+     - compiled Rust: every `target_feature` SIMD kernel, everything in `qsag_asm::bitslice` and
+       `qsag_asm::linear_map`, and the register-wipe helpers must reach each `ret` and tail jump
+       with every caller-saved vector register they wrote zeroed (`xmm`/`ymm`/`zmm0..31`, where
+       `vzeroupper` and `vzeroall` do not cover `zmm16..31`; `v0..v7`, `v16..v31`). The check
+       follows the function's control-flow graph, so a wipe on one arm of a branch does not
+       cover the other. Other compiled Rust is counted and reported, not checked.
   7. Negative `#tooth` self-tests (including 48 vector-to-scalar taint mutations) verifying immediate rejection of
      planted branches, tainted loop counters, static-disp LUTs, pre-added LUTs, `vzeroupper`-only
      dirty XMM leaks, post-wipe NEON reloads, variable shifts, and hardware dividers!
@@ -448,10 +454,18 @@ def is_rust_non_crypto_helper(sym: str) -> bool:
         "Default",
         "rust_eh_personality",
         "__rust_",
-        "drop_in_place",
-        "drop_glue",
     )
-    return any(m in sym for m in non_crypto_markers)
+    if any(m in sym for m in non_crypto_markers):
+        return True
+    # Destructors are storage management, except those of the secret-erasing guards: their
+    # glue is the code that walks and wipes the secret, so it is screened like a kernel.
+    if "drop_in_place" in sym or "drop_glue" in sym:
+        return not is_secret_guard_drop(sym)
+    return False
+
+
+def is_secret_guard_drop(sym: str) -> bool:
+    return bool(re.search(r"drop_(?:in_place|glue)::<qsag_asm::wipe::Secret", sym))
 
 
 def is_branchless_portable_primitive(sym: str) -> bool:
@@ -1253,7 +1267,8 @@ def legacy_main() -> int:
 """Audit native ELF objects, archives and final ThinLTO ET_EXEC/ET_DYN images.
 
 Build linked artifacts with strip=none. Inlining/dead stripping limits observable
-coverage: absent symbols are listed, never counted as audited. This instruction
+coverage: absent symbols are listed, never counted as audited. Destructors of the
+`qsag_asm::wipe` secret guards are screened; other drop glue is not. This instruction
 screen is not a proof of data-independent control flow. Rust protocol functions
 can branch on public lengths/state; --strict-rust-branches checks their taint
 under the documented entry ABI. Assembly kernels always use the existing taint-aware
@@ -1421,6 +1436,10 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
         # Documented `bitslice.rs` contract: `rows` (`rdi`/`x0`) is secret; `pattern` (`rsi`/`x1`)
         # is the public subset-XOR nibble selector matrix.
         public_pointer.add('x1' if arm else 'rsi')
+    if re.search(r'drop_(?:in_place|glue)::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<', symbol):
+        # The guard is exactly a `Vec` header: capacity, pointer and length are public, and
+        # freeing depends on the capacity. What the pointer leads to stays secret.
+        public_pointer.add('x0' if arm else 'rdi')
     flags = True
     errors = []
     addresses = getattr(instructions, 'addresses', [])
@@ -1864,6 +1883,21 @@ def self_tests():
     assert rust_errors('buffer_probe', prefix + [('imul', 'r8, rax, 200'),
         ('mov', 'r9, [rsi + r8]')], True, 62)
     assert is_rust_crypto_symbol('qsag_asm::keccak_f1600_batch_with_backend')
+    # Guard destructors are screened; other drop glue is storage management.
+    vec_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<u8>>>'
+    array_guard = 'core::ptr::drop_glue::<qsag_asm::wipe::SecretBuffer<[u8; 32]>>'
+    assert is_rust_crypto_symbol(vec_guard) and is_rust_crypto_symbol(array_guard)
+    assert not is_rust_crypto_symbol('core::ptr::drop_glue::<qsag_asm::durable::LockedRecord>')
+    capacity_branch = [('mov', 'rbx, rdi'), ('mov', 'rsi, qword ptr [rbx]'),
+                       ('test', 'rsi, rsi'), ('je', '0x40')]
+    content_branch = [('mov', 'r14, qword ptr [rdi + 0x8]'), ('mov', 'al, byte ptr [r14]'),
+                      ('test', 'al, al'), ('je', '0x40')]
+    # A `Vec` guard may branch on its capacity, never on what it holds; an inline guard
+    # has no public header at all.
+    assert not rust_errors(vec_guard, capacity_branch, True, 62)
+    assert rust_errors(vec_guard, content_branch, True, 62)
+    assert rust_errors(array_guard, capacity_branch, True, 62)
+    count += 4
     assert not is_rust_crypto_symbol('<qsag_asm::durable::LockedRecord>::replace')
     assert not is_rust_crypto_symbol('<alloc::vec::Vec<u8>>::resize')
     # AArch64 CSEL overwrites its destination; a secret old destination is not

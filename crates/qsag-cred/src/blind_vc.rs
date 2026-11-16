@@ -5701,10 +5701,14 @@ mod tests {
             actual.push(kat_hex(&kat_bytes_digest(&wire)));
         }
         std::println!("BVC_KAT {actual:?}");
+        // The first digest is the classical issuance request. It was re-pinned when
+        // the `Classical128` statement and transcript gained their explicit profile
+        // tag (before that only `Quantum128` was tagged); the accumulator root and
+        // both presentation wires below did not change.
         assert_eq!(
             actual,
             [
-                "fecf3f36ce677dcc50d6ac83d91f2d8838efbf04d58571c20d586a35432e5d25",
+                "5c060f825fb8fbe4367879bb70cde5b53f2bd6d5e856cd85dd45ea289be47cbc",
                 "ac05d706c5c72c17f54a06fbcd0b6fcc3b1bc9b447529ab75a7cb587201d86b1",
                 "d4bfec08995d0f69f759734b211a542e9e590b2aa9faad9f94a50fc6f2381839",
                 "07813ef70176b90e6e06c194853794a20189acba1d2c4bd6eb4c73a1b82e1e7b",

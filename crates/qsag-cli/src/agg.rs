@@ -191,7 +191,9 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
             }
             if let Some(scheme_val) = json.get("scheme") {
                 let Some(scheme_str) = scheme_val.as_str() else {
-                    return Err(CliError::input("validator public key scheme must be a string"));
+                    return Err(CliError::input(
+                        "validator public key scheme must be a string",
+                    ));
                 };
                 if !matches!(
                     scheme_str,

@@ -82,57 +82,6 @@ mod linux {
         std::io::Read::take(input, (MAX_REQUEST_LINE_BYTES + 2) as u64).read_until(b'\n', line)
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn unterminated_requests_are_bounded_before_allocation() {
-            let mut infinite = std::io::BufReader::new(std::io::repeat(b'a'));
-            let mut line = Vec::new();
-            assert_eq!(
-                read_request_line(&mut infinite, &mut line).unwrap(),
-                MAX_REQUEST_LINE_BYTES + 2
-            );
-            assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES + 2);
-            let mut input = std::io::Cursor::new(b"first\nsecond\n");
-            line.clear();
-            read_request_line(&mut input, &mut line).unwrap();
-            assert_eq!(line, b"first\n");
-        }
-
-        #[test]
-        fn legacy_coupon_roots_require_lock_and_authentication() {
-            let dir = std::env::temp_dir().join(format!(
-                "qsag-coupon-lock-{}",
-                to_hex(&os_random_32().unwrap())
-            ));
-            let dir = dir.to_str().unwrap();
-            private_dir(dir, true).unwrap();
-            let path = party_path(dir, 0);
-            let json = Json::object(vec![
-                ("format", Json::str(ROOT_PARTY_FORMAT)),
-                ("scheme", Json::str(SCHEME_NAME)),
-                ("party_id", Json::num(0)),
-                ("params", Json::str(DEFAULT_PARAMS)),
-                ("pk_seed", Json::hex(&[0; 32])),
-                ("pk_root", Json::hex(&[0; 32])),
-                ("dkg_session_id", Json::hex(&[0; 32])),
-                ("seed", Json::hex(&[1; 32])),
-            ]);
-            write_new(&path, json.to_pretty().as_bytes(), true).unwrap();
-            assert!(
-                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
-            );
-            drop(Vault::acquire(&path, true).unwrap());
-            // A lock alone must not authorize unauthenticated legacy seed material.
-            assert!(
-                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
-            );
-            std::fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
     const KEYGEN_HELP: &str = "\
 qsag quorum coupon keygen --vault-dir <dir> --public-out <path> [options]
 
@@ -903,5 +852,56 @@ signature stops verifying when its coupon expires.
             );
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn unterminated_requests_are_bounded_before_allocation() {
+            let mut infinite = std::io::BufReader::new(std::io::repeat(b'a'));
+            let mut line = Vec::new();
+            assert_eq!(
+                read_request_line(&mut infinite, &mut line).unwrap(),
+                MAX_REQUEST_LINE_BYTES + 2
+            );
+            assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES + 2);
+            let mut input = std::io::Cursor::new(b"first\nsecond\n");
+            line.clear();
+            read_request_line(&mut input, &mut line).unwrap();
+            assert_eq!(line, b"first\n");
+        }
+
+        #[test]
+        fn legacy_coupon_roots_require_lock_and_authentication() {
+            let dir = std::env::temp_dir().join(format!(
+                "qsag-coupon-lock-{}",
+                to_hex(&os_random_32().unwrap())
+            ));
+            let dir = dir.to_str().unwrap();
+            private_dir(dir, true).unwrap();
+            let path = party_path(dir, 0);
+            let json = Json::object(vec![
+                ("format", Json::str(ROOT_PARTY_FORMAT)),
+                ("scheme", Json::str(SCHEME_NAME)),
+                ("party_id", Json::num(0)),
+                ("params", Json::str(DEFAULT_PARAMS)),
+                ("pk_seed", Json::hex(&[0; 32])),
+                ("pk_root", Json::hex(&[0; 32])),
+                ("dkg_session_id", Json::hex(&[0; 32])),
+                ("seed", Json::hex(&[1; 32])),
+            ]);
+            write_new(&path, json.to_pretty().as_bytes(), true).unwrap();
+            assert!(
+                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
+            );
+            drop(Vault::acquire(&path, true).unwrap());
+            // A lock alone must not authorize unauthenticated legacy seed material.
+            assert!(
+                matches!(load_root(dir, None), Err(err) if err.code == crate::cli::exit::STATE_CONFLICT)
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

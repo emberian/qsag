@@ -76,6 +76,13 @@ export qsag_verified.proofs (
   plane_open_release_iff
   tooth_opening_wrong_context_refused
   tooth_sigma_nonzero_lane_refused
+  elf_mir_goldilocks_add_x86_64
+  elf_mir_goldilocks_sub_x86_64
+  elf_mir_goldilocks_mul_x86_64
+  elf_mir_goldilocks_mul_aarch64
+  elf_mir_keccak_f1600_avx2_4x
+  elf_mir_gf256_gfni
+  elf_mir_tower128_pclmul
 )
 end QsagMirProofs
 
@@ -120,6 +127,21 @@ run_cmd do
     match env.find? name with
     | some (.thmInfo _) => pure ()
     | _ => throwError "custody weld axiom audit missing theorem target: {name}"
+  let requiredTriangleTheorems : List Name := [
+    ``qsag_verified.proofs.elf_mir_goldilocks_add_x86_64,
+    ``qsag_verified.proofs.elf_mir_goldilocks_sub_x86_64,
+    ``qsag_verified.proofs.elf_mir_goldilocks_mul_x86_64,
+    ``qsag_verified.proofs.elf_mir_goldilocks_mul_aarch64,
+    ``qsag_verified.proofs.elf_mir_keccak_f1600_avx2_4x,
+    ``qsag_verified.proofs.elf_mir_gf256_gfni,
+    ``qsag_verified.proofs.elf_mir_tower128_pclmul]
+  for name in requiredTriangleTheorems do
+    match env.find? name with
+    | some info =>
+      let isPropThm ← liftTermElabM <| Meta.isProp info.type
+      unless isPropThm do
+        throwError "custody weld triangle target is not Prop-typed: {name}"
+    | none => throwError "custody weld axiom audit missing triangle theorem: {name}"
   let simulationNames : List Name := [
     ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut,
     ``qsag_verified.proofs.extractedVelocity_forwardSim_mirVelocity,

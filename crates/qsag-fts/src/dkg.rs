@@ -1745,12 +1745,15 @@ pub(super) fn finalize_dkg<T: ParallelSeededDkgProducts>(
     for ((&a2, &a4), &u) in a2.iter().zip(a4.iter()).zip(sacrifice.iter()) {
         factors.extend_from_slice(&[a2, a4, u]);
     }
-    #[cfg_attr(not(test), expect(unused_mut))]
-    let mut first = products.multiply(3, &factors, &a)?;
+    let first = products.multiply(3, &factors, &a)?;
     #[cfg(test)]
-    for &(index, delta) in &state.product_faults {
-        first[index] ^= delta;
-    }
+    let first = {
+        let mut faulted = first;
+        for &(index, delta) in &state.product_faults {
+            faulted[index] ^= delta;
+        }
+        faulted
+    };
     let a3 = SecretBuffer(first.iter().step_by(3).copied().collect::<Vec<u128>>());
     let a6 = square(&a3);
     let a7 = products.multiply(1, &a6, &a)?;

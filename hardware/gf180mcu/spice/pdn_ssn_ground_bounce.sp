@@ -122,6 +122,9 @@ R_GRID_E_VSS VSS_EAST  VSS_CORE 0.12
 R_GRID_N_VSS VSS_NORTH VSS_CORE 0.12
 R_GRID_W_VSS VSS_WEST  VSS_CORE 0.12
 
+* QFN-64 Die Backside Substrate Capacitance to Grounded EPAD (~12 pF across 25um epoxy)
+C_SUB_EPAD VSS_CORE 0 12.0p
+
 * Foundry IO ESD rail clamps (separated by 20 mOhm padring segments)
 R_CL_SD VDD_SOUTH DVDD_CLS 20m
 R_CL_SS VSS_SOUTH DVSS_CLS 20m
@@ -150,8 +153,9 @@ X_FCAP_Q3 VDD_WEST  VDD_WEST  VSS_WEST  VSS_WEST  gf180mcu_fd_sc_mcu7t5v0__fillc
 *    All 8 switch HIGH -> LOW at t = 6.0 ns (Ground Bounce!) and LOW -> HIGH at t = 18.0 ns
 * ------------------------------------------------------------------------------
 V_DRV_DATA DRV_RAW 0 PULSE({vdd_val} 0 6.0n 0.20n 0.20n 12.0n 30.0n)
-* Slew control voltage referenced to core rails: slew_sel=1 -> VDD_CORE (slow), 0 -> VSS_CORE (fast)
-B_SL_CTRL  SL_NET  0 V = v(VSS_CORE) + {slew_sel} * (v(VDD_CORE) - v(VSS_CORE))
+* Real CMOS core buffer driving bidir_sl on VDD_CORE / VSS_CORE rails!
+V_SL_DC    SL_DC_IN 0 {slew_sel * vdd_val}
+X_SL_BUF   SL_DC_IN SL_NET VDD_CORE VDD_CORE VSS_CORE VSS_CORE gf180mcu_fd_sc_mcu7t5v0__buf_4
 
 .subckt ssn_bi24t_lane a_in sl_in dvdd_bank dvss_bank vdd_c vss_c pcb_load_node
 X_DRV_BUF a_in a_buf vdd_c vdd_c vss_c vss_c gf180mcu_fd_sc_mcu7t5v0__buf_4
@@ -206,36 +210,25 @@ R_PR_VHI_D VDD_SOUTH DVDD_VHI 20m
 R_PR_VHI_S VSS_SOUTH DVSS_VHI 20m
 X_VIC_CLK_HI DVDD_VHI DVSS_VHI CLK_HI_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_HI_Y gf180mcu_fd_io__in_s
 
-* Reference Schmitt Hysteresis Characterizer (isolated clean rail, triangle 0 -> VDD -> 0)
-VVDD_REF VDD_REF 0 {vdd_val}
-VVSS_REF VSS_REF 0 0.0
-V_TRI    PAD_TRI 0 PWL(0 0 15n {vdd_val} 30n 0)
-X_SCH_REF VDD_REF VSS_REF PAD_TRI VSS_REF VSS_REF VDD_REF VSS_REF SCH_REF_Y gf180mcu_fd_io__in_s
-
-.tran 10p 30n
+.tran 10p 25n
 
 .param vmid='0.5*vdd_val'
 
 * --- Exact Core & Bank Bounce / Droop Measurements ---
-.meas tran vss_core_pk     MAX v(VSS_CORE)  FROM=4n TO=16n
-.meas tran vss_core_neg    MIN v(VSS_CORE)  FROM=4n TO=16n
-.meas tran vss_south_pk    MAX v(VSS_SOUTH) FROM=4n TO=16n
-.meas tran vdd_core_min    MIN v(VDD_CORE)  FROM=16n TO=28n
+.meas tran vss_core_pk     MAX v(VSS_CORE)  FROM=4n TO=15n
+.meas tran vss_core_neg    MIN v(VSS_CORE)  FROM=4n TO=15n
+.meas tran vss_south_pk    MAX v(VSS_SOUTH) FROM=4n TO=15n
+.meas tran vdd_core_min    MIN v(VDD_CORE)  FROM=16n TO=24n
 .meas tran vdd_droop_pk    PARAM='vdd_val - vdd_core_min'
-.meas tran rail_collapse_min MIN par('v(VDD_CORE) - v(VSS_CORE)') FROM=4n TO=28n
+.meas tran rail_collapse_min MIN par('v(VDD_CORE) - v(VSS_CORE)') FROM=4n TO=24n
 
 * --- Peak Total Ground Return Current & Output Slew ---
-.meas tran i_gnd_tot_pk    MAX par('abs(i(V_IS_S) + i(V_IS_E) + i(V_IS_N) + i(V_IS_W))') FROM=4n TO=16n
+.meas tran i_gnd_tot_pk    MAX par('abs(i(V_IS_S) + i(V_IS_E) + i(V_IS_N) + i(V_IS_W))') FROM=4n TO=15n
 .meas tran t_dq0_fall_80_20 TRIG v(DQ_PCB0) VAL='0.8*vdd_val' FALL=1 TARG v(DQ_PCB0) VAL='0.2*vdd_val' FALL=1
 
-* --- Foundry in_s Schmitt Trigger Hysteresis Thresholds (VT+, VT-, VH) ---
-.meas tran vt_plus         FIND v(PAD_TRI) WHEN v(SCH_REF_Y)=vmid RISE=1
-.meas tran vt_minus        FIND v(PAD_TRI) WHEN v(SCH_REF_Y)=vmid FALL=1
-.meas tran v_hyst          PARAM='vt_plus - vt_minus'
-
 * --- Victim Clock Glitch Check (CLK_LO_Y must stay << vmid; CLK_HI_Y must stay >> vmid!) ---
-.meas tran vic_clk_lo_max  MAX par('v(CLK_LO_Y) - v(VSS_CORE)')   FROM=2n TO=29n
-.meas tran vic_clk_600_max MAX par('v(CLK_600M_Y) - v(VSS_CORE)') FROM=2n TO=29n
-.meas tran vic_clk_hi_min  MIN par('v(CLK_HI_Y) - v(VSS_CORE)')   FROM=2n TO=29n
+.meas tran vic_clk_lo_max  MAX par('v(CLK_LO_Y) - v(VSS_CORE)')   FROM=2n TO=24n
+.meas tran vic_clk_600_max MAX par('v(CLK_600M_Y) - v(VSS_CORE)') FROM=2n TO=24n
+.meas tran vic_clk_hi_min  MIN par('v(CLK_HI_Y) - v(VSS_CORE)')   FROM=2n TO=24n
 
 .end

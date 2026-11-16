@@ -411,6 +411,82 @@ impl ParallelSeededSignature {
     }
 }
 
+/// A signature whose chain nodes the MAC check accepted but public verification has not.
+/// Until it verifies, the nodes are chain positions nobody outside the committee has seen,
+/// so every exit that does not release the signature erases them.
+struct UnreleasedSignature(ParallelSeededSignature);
+
+impl UnreleasedSignature {
+    /// `opened` holds two lanes per chain node. The node vector is allocated once at its
+    /// final size.
+    fn from_opened(
+        epoch: u32,
+        randomizer: [u8; 32],
+        grind_counter: u32,
+        opened: &[u128],
+        merkle_siblings: Vec<[u64; 4]>,
+    ) -> Self {
+        let pairs = opened.as_chunks::<2>().0;
+        let mut unreleased = Self(ParallelSeededSignature {
+            epoch,
+            randomizer,
+            grind_counter,
+            chain_nodes: Vec::with_capacity(pairs.len()),
+            merkle_siblings,
+        });
+        for pair in pairs {
+            unreleased
+                .0
+                .chain_nodes
+                .push(lanes_to_bytes32(pair[0], pair[1]));
+        }
+        unreleased
+    }
+
+    fn release(mut self) -> ParallelSeededSignature {
+        ParallelSeededSignature {
+            epoch: self.0.epoch,
+            randomizer: self.0.randomizer,
+            grind_counter: self.0.grind_counter,
+            chain_nodes: core::mem::take(&mut self.0.chain_nodes),
+            merkle_siblings: core::mem::take(&mut self.0.merkle_siblings),
+        }
+    }
+}
+
+impl Drop for UnreleasedSignature {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(self.0.chain_nodes.as_flattened_mut());
+        #[cfg(test)]
+        unreleased_probe::dropped(&self.0.chain_nodes);
+    }
+}
+
+/// Records, on the current thread, what each discarded set of chain nodes still held
+/// after the erase: its length in bytes and how many of them read back nonzero.
+#[cfg(test)]
+pub(crate) mod unreleased_probe {
+    extern crate std;
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    std::thread_local! {
+        static DISCARDED: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    }
+    pub(crate) fn take() -> Vec<(usize, usize)> {
+        DISCARDED.with(|d| core::mem::take(&mut *d.borrow_mut()))
+    }
+    pub(super) fn dropped(nodes: &[[u8; 32]]) {
+        // A released signature leaves the guard empty.
+        if nodes.is_empty() {
+            return;
+        }
+        let bytes = nodes.as_flattened();
+        let nonzero = bytes.iter().filter(|&&byte| byte != 0).count();
+        DISCARDED.with(|d| d.borrow_mut().push((bytes.len(), nonzero)));
+    }
+}
+
 /// Commit-then-open BDOZ 2-lane GF($2^{128}$) MAC barrier message per party.
 #[derive(Clone)]
 pub struct CommittedMacBarrierShare {
@@ -1339,14 +1415,14 @@ impl ParallelSeededThresholdSetup {
             mpc_algebraic_step(&mut self.shares, &prf_in0, &prf_in1, rc0, rc1)?;
 
         // Committed BDOZ MAC check BEFORE opening `randomizer`!
-        let rand_open = self.open_and_verify_bdoz_wires(
+        let rand_open = SecretBuffer(self.open_and_verify_bdoz_wires(
             &session_id,
             0x5241_4E44,
             &[rand_w0, rand_w1],
             None,
             None,
             accel,
-        )?;
+        )?);
         let randomizer = lanes_to_bytes32(rand_open[0], rand_open[1]);
 
         // Public grinding (`0` MPC rounds!)
@@ -1407,7 +1483,7 @@ impl ParallelSeededThresholdSetup {
         }
 
         // Committed BDOZ 2-lane GF(2^128) MAC barrier BEFORE releasing `chain_nodes`!
-        let opened_lanes = self.open_and_verify_bdoz_wires(
+        let opened_lanes = SecretBuffer(self.open_and_verify_bdoz_wires(
             &session_id,
             0x4348_4E53,
             &all_auth_wires,
@@ -1423,12 +1499,7 @@ impl ParallelSeededThresholdSetup {
                 }
             },
             accel,
-        )?;
-
-        let mut chain_nodes = Vec::with_capacity(self.pk.params.num_chains);
-        for pair in opened_lanes.as_chunks::<2>().0.iter() {
-            chain_nodes.push(lanes_to_bytes32(pair[0], pair[1]));
-        }
+        )?);
 
         // Depth = 0 secret rounds: attach plaintext height-`h` Merkle sibling path!
         let mut merkle_siblings = Vec::with_capacity(self.pk.params.tree_height);
@@ -1443,16 +1514,18 @@ impl ParallelSeededThresholdSetup {
             cur_idx >>= 1;
         }
 
-        let sig = ParallelSeededSignature {
+        // Erased unless both checks below accept it.
+        let sig = UnreleasedSignature::from_opened(
             epoch,
             randomizer,
             grind_counter,
-            chain_nodes,
+            &opened_lanes,
             merkle_siblings,
-        };
-        verify_parallel_seeded_fts(&self.pk, msg, &sig, accel)?;
-        verify_canonical_minimal_grind_counter(&self.pk, msg, &sig)?;
-        Ok(sig)
+        );
+        drop(opened_lanes);
+        verify_parallel_seeded_fts(&self.pk, msg, &sig.0, accel)?;
+        verify_canonical_minimal_grind_counter(&self.pk, msg, &sig.0)?;
+        Ok(sig.release())
     }
 
     /// Genuine SPDZ/BDOZ batch MAC verification over `wires`:
@@ -2370,6 +2443,41 @@ mod pending_opening_tests {
         share.clear_pending_openings();
         assert!(share.pending_openings.is_empty());
         assert_eq!(share.pending_openings.as_ptr(), before);
+    }
+
+    /// A signature the MAC check accepted but the public verifier refuses (here: a wrong
+    /// Merkle sibling in the cached tree) is erased, not dropped as it is.
+    #[test]
+    fn reference_signing_erases_chain_nodes_that_fail_final_verification() {
+        let accel = CpuReferenceBackend::new();
+        let mut setup = setup();
+        setup.public_tree_layers[0][1][0] ^= 1;
+        let _ = unreleased_probe::take();
+        assert!(matches!(
+            setup.threshold_sign(
+                0,
+                b"wrong path",
+                [84; 32],
+                &mut InMemoryBurnLog::default(),
+                &accel,
+            ),
+            Err(ParallelSeededError::SignatureVerificationFailed
+                | ParallelSeededError::InvalidAuthenticationPath)
+        ));
+        assert_eq!(unreleased_probe::take(), [(32 * PARAMS.num_chains, 0)]);
+        // An accepted signature is released whole and leaves nothing to erase.
+        let mut setup = self::setup();
+        let sig = setup
+            .threshold_sign(
+                0,
+                b"right path",
+                [85; 32],
+                &mut InMemoryBurnLog::default(),
+                &accel,
+            )
+            .unwrap();
+        assert!(sig.chain_nodes.iter().flatten().any(|&byte| byte != 0));
+        assert!(unreleased_probe::take().is_empty());
     }
 
     /// The reference runner reserves each batch before the first masked opening, so no

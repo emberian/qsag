@@ -1837,7 +1837,7 @@ pub(super) fn commit_levels_for_recursion(
             .expect("RS domain overflow");
         let mut buf = Vec::with_capacity(domain_len);
         buf.extend_from_slice(evaluations);
-        crate::field::hypercube_to_monomial_in_place(&mut buf, 1 << 14);
+        crate::pcs::hypercube_to_monomial_in_place(&mut buf, 1 << 14);
         crate::field::encode_rs_coset_goldilocks_owned_cpu(buf, spec.blowup)
     } else {
         let mut base = hypercube_to_monomial_coeffs(evaluations);
@@ -3280,8 +3280,7 @@ pub(crate) fn prove_folded_level_for_recursion<'a>(
     for (k, &mu_k) in mu_pows.iter().enumerate() {
         poly_buf.clear();
         fill_poly_evals(k, &mut poly_buf);
-        let mut w_coeffs = hypercube_to_monomial_coeffs(&poly_buf);
-        qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
+        crate::pcs::hypercube_to_monomial_in_place(&mut poly_buf, 1 << 14);
         #[cfg(feature = "std")]
         if eval_n >= 16_384 {
             let workers = crate::parallel_workers().min(eval_n.div_ceil(4_096));
@@ -3289,7 +3288,7 @@ pub(crate) fn prove_folded_level_for_recursion<'a>(
             std::thread::scope(|scope| {
                 for (dst_c, src_c) in coeffs.0[..eval_n]
                     .chunks_mut(chunk)
-                    .zip(w_coeffs.chunks(chunk))
+                    .zip(poly_buf.chunks(chunk))
                 {
                     crate::spawn_bounded(scope, move || {
                         for (d, &s) in dst_c.iter_mut().zip(src_c) {
@@ -3299,15 +3298,15 @@ pub(crate) fn prove_folded_level_for_recursion<'a>(
                 }
             });
         } else {
-            for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&w_coeffs) {
+            for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&poly_buf) {
                 *d += mu_k.mul_base(s);
             }
         }
         #[cfg(not(feature = "std"))]
-        for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&w_coeffs) {
+        for (d, &s) in coeffs.0[..eval_n].iter_mut().zip(&poly_buf) {
             *d += mu_k.mul_base(s);
         }
-        qsag_asm::volatile_fill(&mut w_coeffs, F::ZERO);
+        qsag_asm::volatile_fill(&mut poly_buf, F::ZERO);
     }
     drop(poly_buf);
 
@@ -3469,17 +3468,23 @@ pub(crate) fn prove_folded_level_for_recursion<'a>(
         let mut shifted = Vec::with_capacity(count);
         if stage == 0 {
             let blowup0 = spec.blowup;
+            let domain_len0 = eval_n.checked_mul(blowup0).expect("RS domain overflow");
             let mut combined_uniq = vec![vec![E::ZERO; arity]; uniq_q.len()];
-            let mut eval_tmp = Vec::with_capacity(eval_n);
-            let mut reuse_cw = Vec::new();
+            let mut reuse_cw = Vec::with_capacity(domain_len0);
             for (k, &mu_k) in mu_pows.iter().enumerate() {
-                eval_tmp.clear();
-                fill_poly_evals(k, &mut eval_tmp);
-                let mut w_coeffs = hypercube_to_monomial_coeffs(&eval_tmp);
-                qsag_asm::volatile_fill(&mut eval_tmp, F::ZERO);
-                let mut cw = encode_base_single_buf(&w_coeffs, blowup0, &mut reuse_cw);
-                qsag_asm::volatile_fill(&mut w_coeffs, F::ZERO);
-                drop(w_coeffs);
+                reuse_cw.clear();
+                if reuse_cw.capacity() < domain_len0 {
+                    reuse_cw.reserve_exact(domain_len0 - reuse_cw.len());
+                }
+                fill_poly_evals(k, &mut reuse_cw);
+                crate::pcs::hypercube_to_monomial_in_place(&mut reuse_cw, 1 << 14);
+                let mut cw = if eval_n >= (1 << 20) {
+                    crate::field::encode_rs_coset_goldilocks_owned_cpu(reuse_cw, blowup0)
+                } else {
+                    let out = crate::field::encode_rs_coset_goldilocks(&reuse_cw, blowup0);
+                    qsag_asm::volatile_fill(&mut reuse_cw, F::ZERO);
+                    out
+                };
 
                 let mut fibers_k = Vec::with_capacity(uniq_q.len() * arity);
                 for (u_idx, &g_idx) in uniq_q.iter().enumerate() {
@@ -3496,7 +3501,6 @@ pub(crate) fn prove_folded_level_for_recursion<'a>(
                 stage0_fibers.push(fibers_k);
                 stage0_siblings.push(steiner_siblings(poly_levels(k), &uniq_q));
             }
-            drop(eval_tmp);
             drop(reuse_cw);
 
             for (index, binary) in sampled {

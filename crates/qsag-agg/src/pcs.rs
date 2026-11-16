@@ -2784,7 +2784,7 @@ where
     }
 }
 
-fn hypercube_to_monomial_in_place<T>(coeffs: &mut [T], parallel_min_len: usize)
+pub(crate) fn hypercube_to_monomial_in_place<T>(coeffs: &mut [T], parallel_min_len: usize)
 where
     T: Copy + Send + Sync + core::ops::SubAssign,
 {
