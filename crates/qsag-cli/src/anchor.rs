@@ -195,45 +195,46 @@ impl AnchorConfig {
                 "--{single_disk_flag} requires --{dir_option}"
             )));
         }
-        let (tpm_nv_option, tpm_device_option, tpm_auth_option, vmgenid_flag, vmgenid_strict_flag) =
-            if dir_option == "policy-anchor-dir" {
-                (
-                    "policy-anchor-tpm-nv",
-                    "policy-anchor-tpm-device",
-                    "policy-anchor-tpm-auth-env",
-                    "policy-vmgenid",
-                    "policy-vmgenid-strict",
-                )
-            } else if dir_option == "anchor-dir" {
-                (
-                    "anchor-tpm-nv",
-                    "anchor-tpm-device",
-                    "anchor-tpm-auth-env",
-                    "anchor-vmgenid",
-                    "anchor-vmgenid-strict",
-                )
-            } else {
-                // An independently named output anchor has no implicit hardware settings.
-                ("", "", "", "", "")
+        // An independently named output anchor has no hardware options of its own.
+        let hardware_options = match dir_option {
+            "policy-anchor-dir" => Some((
+                "policy-anchor-tpm-nv",
+                "policy-anchor-tpm-device",
+                "policy-anchor-tpm-auth-env",
+                "policy-vmgenid",
+                "policy-vmgenid-strict",
+            )),
+            "anchor-dir" => Some((
+                "anchor-tpm-nv",
+                "anchor-tpm-device",
+                "anchor-tpm-auth-env",
+                "anchor-vmgenid",
+                "anchor-vmgenid-strict",
+            )),
+            _ => None,
+        };
+        let (tpm_nv_index, tpm_device_path, tpm_auth_env, vmgenid, vmgenid_strict) =
+            match hardware_options {
+                Some((nv_option, device_option, auth_option, vmgenid_flag, strict_flag)) => {
+                    let tpm_nv = args.get(nv_option).map(parse_tpm_nv_index).transpose()?;
+                    let tpm_dev = args.get(device_option).map(str::to_owned);
+                    let tpm_auth = args.get(auth_option).map(str::to_owned);
+                    let vmg = args.flag(vmgenid_flag);
+                    let vmg_strict = args.flag(strict_flag);
+                    if tpm_nv.is_none() && (tpm_dev.is_some() || tpm_auth.is_some()) {
+                        return Err(CliError::usage(format!(
+                            "--{device_option} and --{auth_option} require --{nv_option}"
+                        )));
+                    }
+                    if vmg_strict && !vmg {
+                        return Err(CliError::usage(format!(
+                            "--{strict_flag} requires --{vmgenid_flag}"
+                        )));
+                    }
+                    (tpm_nv, tpm_dev, tpm_auth, vmg, vmg_strict)
+                }
+                None => (None, None, None, false, false),
             };
-        let tpm_nv_index = args
-            .get(tpm_nv_option)
-            .map(parse_tpm_nv_index)
-            .transpose()?;
-        let tpm_device_path = args.get(tpm_device_option).map(str::to_owned);
-        let tpm_auth_env = args.get(tpm_auth_option).map(str::to_owned);
-        let vmgenid = args.flag(vmgenid_flag);
-        let vmgenid_strict = args.flag(vmgenid_strict_flag);
-        if tpm_nv_index.is_none() && (tpm_device_path.is_some() || tpm_auth_env.is_some()) {
-            return Err(CliError::usage(format!(
-                "--{tpm_device_option} and --{tpm_auth_option} require --{tpm_nv_option}"
-            )));
-        }
-        if vmgenid_strict && !vmgenid {
-            return Err(CliError::usage(format!(
-                "--{vmgenid_strict_flag} requires --{vmgenid_flag}"
-            )));
-        }
 
         if anchor_dir.is_none() && tpm_nv_index.is_none() && !vmgenid {
             return Ok(None);
