@@ -27,8 +27,11 @@ The `183`-bit and `177`-bit floors are attained at `nv = 28`, stage `0`
 `pcs.rs::stage_geometry` rejects it.
 -/
 public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold
+public import Qsag.Protocol.Aggregation.Cwyz26JohnsonCertificate
+public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Qsag.Protocol.Aggregation.HemOpening
 public import Qsag.Coding.Cwyz26
+public import Qsag.Coding.GuruswamiSudan
 import Qsag.Protocol.Aggregation.ConcreteSecurityBudget
 import Qsag.Math.Counting
 import Qsag.Math.Primality
@@ -37,6 +40,7 @@ import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 set_option autoImplicit false
+attribute [-instance] Fin.instLinearOrderPackage
 
 /-! ### Bridge: defining equations awaiting the upstream export blocks
 
@@ -171,6 +175,56 @@ theorem slicedPcsHighCapRow_of_le_24 (nv stage : Nat) (h24 : nv ≤ 24) :
     slicedPcsHighCapRow nv stage = slicedStageRow nv stage := by
   unfold slicedPcsHighCapRow
   simp only [h24, ↓reduceIte]
+
+/-- `hemStageGeometry` directly encodes `pcs.rs::stage_geometry` across every `nv : Nat`. -/
+theorem hemPcsHighCapStageGeometry_eq_hemStageGeometry (nv : Nat) :
+    hemPcsHighCapStageGeometry nv = hemStageGeometry nv := by
+  cases Nat.lt_or_ge 24 nv with
+  | inr h24 => exact hemPcsHighCapStageGeometry_of_le_24 nv h24
+  | inl h25 =>
+    have hcases : nv = 25 ∨ nv = 26 ∨ nv = 27 ∨ nv = 28 ∨ 29 ≤ nv := by omega
+    rcases hcases with rfl | rfl | rfl | rfl | h29
+    · rw [hemStageGeometry_def]; decide
+    · rw [hemStageGeometry_def]; decide
+    · rw [hemStageGeometry_def]; decide
+    · rw [hemStageGeometry_def]; decide
+    · unfold hemPcsHighCapStageGeometry
+      rw [hemStageGeometry_def]
+      have hNot6 : ¬ nv ≤ 6 := by omega
+      have hNot11 : ¬ nv ≤ 11 := by omega
+      have hNot16 : ¬ nv ≤ 16 := by omega
+      have hNot20 : ¬ nv ≤ 20 := by omega
+      have hNot21 : ¬ nv = 21 := by omega
+      have hNot22 : ¬ nv = 22 := by omega
+      have hNot24 : ¬ nv ≤ 24 := by omega
+      have hNot25 : ¬ nv = 25 := by omega
+      have hNot26 : ¬ nv = 26 := by omega
+      have hNot27 : ¬ nv = 27 := by omega
+      have hNot28 : ¬ nv = 28 := by omega
+      simp only [hNot6, hNot11, hNot16, hNot20, hNot21, hNot22, hNot24, hNot25, hNot26,
+        hNot27, hNot28, ↓reduceIte]
+
+theorem hemPcsHighCapStageGeoms_eq_hemStageGeoms (nv : Nat) :
+    hemPcsHighCapStageGeoms nv = hemStageGeoms nv := by
+  unfold hemPcsHighCapStageGeoms
+  rw [hemPcsHighCapStageGeometry_eq_hemStageGeometry nv, hemStageGeoms_def]
+
+theorem hemPcsHighCapEarlyStopVars_eq_hemEarlyStopVars (nv : Nat) :
+    hemPcsHighCapEarlyStopVars nv = hemEarlyStopVars nv := by
+  unfold hemPcsHighCapEarlyStopVars hemEarlyStopVars
+  cases Nat.lt_or_ge 24 nv with
+  | inr h24 => simp only [h24, ↓reduceIte]
+  | inl h25 =>
+    have hNot24 : ¬ nv ≤ 24 := by omega
+    have hNot23 : ¬ nv = 23 := by omega
+    have hNot20 : ¬ nv ≤ 20 := by omega
+    have hNot16 : ¬ nv ≤ 16 := by omega
+    have hNot15 : ¬ nv ≤ 15 := by omega
+    have hNot13 : ¬ nv ≤ 13 := by omega
+    have hNot8 : ¬ nv ≤ 8 := by omega
+    have hNot6 : ¬ nv ≤ 6 := by omega
+    have hNot3 : ¬ nv ≤ 3 := by omega
+    simp only [hNot24, hNot23, hNot20, hNot16, hNot15, hNot13, hNot8, hNot6, hNot3, ↓reduceIte]
 
 /-- The `25..=28` arms of `pcs.rs::stage_geometry`, and no schedule above
     `MAX_PCS_NUM_VARS = 28`. -/
@@ -597,23 +651,404 @@ theorem highCap_sliced_multifold_stage_supported_budget
       fun _ Q hQ => dfmRoundScale_clears_128bits_of_bits _ 23
         (atLeastBits_weaken (by decide) _ hb177) Q hQ⟩
 
-#verify_constructive
-  Qsag.hemPcsHighCapStageGeometry_of_le_24
-  Qsag.hemPcsHighCapStageGeoms_of_le_24
-  Qsag.hemPcsHighCapTableRow_of_le_24
-  Qsag.slicedPcsHighCapRow_of_le_24
-  Qsag.hemPcsHighCapStageGeometry_nv25_to_28
-  Qsag.hemPcsHighCapStageGeoms_nv25
-  Qsag.hemPcsHighCapStageGeoms_nv26
-  Qsag.hemPcsHighCapStageGeoms_nv27
-  Qsag.hemPcsHighCapStageGeoms_nv28
-  Qsag.hemPcsHighCapStageGeoms_of_ge_29
-  Qsag.hemPcsHighCap_geometry_valid_nv25_to_28
-  Qsag.highCap_stages_nonexhaustive
-  Qsag.dfmRoundScale_clears_128bits_of_bits
-  Qsag.highCap_sliced_stage_supported_budget
-  Qsag.slicedPcsHighCap_multifold_covers_nv25_to_28
-  Qsag.highCap_sliced_multifold_stage_supported_budget
+/-! ### §4. Constructive Cylinder-Sliced Johnson & Guruswami–Sudan Certificates (`nv ∈ 2..=28`) -/
+
+/-- Closed-form bad-triple count for the 3-challenge `(θ, α, β)` equal-degree claim-fold at
+    `(n, d, A, B, m, Dy)` with `q_θ = |S_θ|` and `q = |S|`. -/
+def highCapSlicedThreeChallengeCount (n d A B m Dy q_θ q : Nat) : Nat :=
+  let badMca := Dy + slicedRest n (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy q
+  let jbLo := JohnsonBound.johnsonBound n A d
+  let jbHi := JohnsonBound.johnsonBound n A (d + 1)
+  q_θ * badMca + (jbLo * jbLo) * (q_θ * q) + (jbHi * jbHi) * (q * q)
+
+/-- Full 3-challenge `(θ, α, β)` rational error bound at stage geometry `g` over
+    `QuarticGoldilocks³` (`q³ = (p⁴)³`, setting `d = g.d - 1` and `A = r.2.2.1 - 1`). -/
+def highCapSlicedThreeChallengeStageBound (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) : RatBound :=
+  let q := goldilocksExt4Card
+  ⟨highCapSlicedThreeChallengeCount g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2 q q,
+   q * (q * q),
+   Nat.mul_pos goldilocksExt4Card_pos (Nat.mul_pos goldilocksExt4Card_pos goldilocksExt4Card_pos)⟩
+
+theorem highCapSlicedThreeChallengeCount_def (n d A B m Dy q_θ q : Nat) :
+    highCapSlicedThreeChallengeCount n d A B m Dy q_θ q =
+      q_θ * (Dy + slicedRest n (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy q) +
+        (JohnsonBound.johnsonBound n A d * JohnsonBound.johnsonBound n A d) * (q_θ * q) +
+        (JohnsonBound.johnsonBound n A (d + 1) * JohnsonBound.johnsonBound n A (d + 1)) * (q * q) := by
+  rfl
+
+theorem highCapSlicedThreeChallengeStageBound_num (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) :
+    (highCapSlicedThreeChallengeStageBound g r w).num =
+      highCapSlicedThreeChallengeCount g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2
+        goldilocksExt4Card goldilocksExt4Card := by
+  rfl
+
+theorem highCapSlicedThreeChallengeStageBound_den (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) :
+    (highCapSlicedThreeChallengeStageBound g r w).den =
+      goldilocksExt4Card * (goldilocksExt4Card * goldilocksExt4Card) := by
+  rfl
+
+private def threeT (n d A B m Dy q : Nat) : Nat :=
+  let badMca := Dy + restT n (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy q
+  let jbLo := (n * (A - d)) / (A * A - n * d)
+  let jbHi := (n * (A - (d + 1))) / (A * A - n * (d + 1))
+  q * badMca + (jbLo * jbLo) * (q * q) + (jbHi * jbHi) * (q * q)
+
+private theorem threeT_eq (n d A B m Dy q : Nat) :
+    threeT n d A B m Dy q = highCapSlicedThreeChallengeCount n d A B m Dy q q := by
+  unfold threeT
+  rw [highCapSlicedThreeChallengeCount_def, JohnsonBound.johnsonBound_eq,
+    JohnsonBound.johnsonBound_eq, ← restT_eq]
+
+/-- Evaluable check of bivariate Hasse Guruswami–Sudan interpolation dimensions and 3-challenge
+    equal-degree claim-fold bounds across every stage of `nv ∈ 25..=28`. -/
+private def gsAndThreeRowOkT (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) : Bool :=
+  let d₀ := g.d - 1
+  let A₀ := r.2.2.1 - 1
+  let m := r.2.2.2.1
+  let Dy := r.2.2.2.2
+  let listG₀ := Nat.min Dy ((m * A₀ - 1) / d₀)
+  let listG := Nat.min Dy ((m * r.2.2.1 - 1) / g.d)
+  let q := goldilocksPrime ^ 4
+  decide (2 ≤ g.d) &&
+  decide (d₀ + 2 ≤ A₀) &&
+  decide (r.2.2.1 ≤ g.n) &&
+  paramsOkT g.n g.d r.2.2.1 w.2.2.1 m Dy &&
+  decide (g.n * (m * (m + 1) / 2) < gsMonomialCount (m * A₀) d₀ listG₀) &&
+  decide (g.n * (m * (m + 1) / 2) < gsMonomialCount (m * r.2.2.1) g.d listG) &&
+  decide (threeT g.n d₀ A₀ w.2.2.1 m Dy q * 2 ^ 183 ≤ q * (q * q))
+
+private def gsAndThreeStageOkT (nv : Nat) (g : HemStageGeom) : Bool :=
+  if exhaustiveT g = true then true
+  else
+    match hemPcsHighCapTableRow nv g.stageIdx, slicedPcsHighCapRow nv g.stageIdx with
+    | some r, some w => gsAndThreeRowOkT g r w
+    | _, _ => false
+
+set_option maxRecDepth 1000000 in
+set_option maxHeartbeats 2000000 in
+private theorem gsAndThreeStageOkT_nv25_to_28 :
+    ((List.range 4).all fun i =>
+      (geomsAuxT 0 (i + 25) (hemPcsHighCapStageGeometry (i + 25))).all
+        (gsAndThreeStageOkT (i + 25))) = true := by
+  decide +kernel
+
+private theorem highCap_gs_and_three_rows_nv2_to_28 (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      slicedPcsHighCapRow nv g.stageIdx = some w ∧
+      2 ≤ g.d ∧
+      (g.d - 1) + 2 ≤ r.2.2.1 - 1 ∧
+      r.2.2.1 ≤ g.n ∧
+      slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 = true ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * (r.2.2.1 - 1)) (g.d - 1)
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1))) ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * r.2.2.1) g.d
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)) ∧
+      atLeastBits 183 (highCapSlicedThreeChallengeStageBound g r w) ∧
+      (nv ≤ 24 → atLeastBits 184 (highCapSlicedThreeChallengeStageBound g r w)) := by
+  cases Nat.lt_or_ge 24 nv with
+  | inr h24 =>
+    obtain ⟨r, w, hr, hw, hd2, hdA, hOk, hCert184⟩ :=
+      sliced_three_challenge_table_certificate JohnsonBound.johnsonBound
+        JohnsonBound.johnsonBound_eq goldilocksExt4Card bridge_goldilocksExt4Card_def
+        nv h2 h24 g hg hne
+    obtain ⟨r', hr', hAg, hGs0, hGs1⟩ :=
+      hem_gs_stage_row_dimensions_nv2_to_24 nv h2 h24 g hg hne
+    cases Option.some.inj (hr.symm.trans hr')
+    have hb184 : atLeastBits 184 (highCapSlicedThreeChallengeStageBound g r w) := by
+      show (highCapSlicedThreeChallengeStageBound g r w).num * 2 ^ 184 ≤
+          (highCapSlicedThreeChallengeStageBound g r w).den
+      rw [highCapSlicedThreeChallengeStageBound_num, highCapSlicedThreeChallengeStageBound_den,
+        highCapSlicedThreeChallengeCount_def]
+      exact hCert184
+    exact ⟨r, w, (hemPcsHighCapTableRow_of_le_24 nv _ h24).trans hr,
+      (slicedPcsHighCapRow_of_le_24 nv _ h24).trans hw, hd2, by omega, hAg, hOk, hGs0, hGs1,
+      atLeastBits_weaken (by decide) _ hb184, fun _ => hb184⟩
+  | inl h25 =>
+    have h1 := List.all_eq_true.mp gsAndThreeStageOkT_nv25_to_28 (nv - 25)
+      (List.mem_range.mpr (by omega))
+    have hEq : nv - 25 + 25 = nv := by omega
+    rw [hEq, geomsAuxT_eq, ← hemPcsHighCapStageGeoms, hemPcsHighCapStageGeoms_eq_hemStageGeoms] at h1
+    have h2' := List.all_eq_true.mp h1 g hg
+    unfold gsAndThreeStageOkT at h2'
+    have hExF : exhaustiveT g = false := (exhaustiveT_eq g).trans hne
+    simp only [hExF, Bool.false_eq_true, ↓reduceIte] at h2'
+    cases hr : hemPcsHighCapTableRow nv g.stageIdx with
+    | none => rw [hr] at h2'; exact absurd h2' Bool.false_ne_true
+    | some r =>
+      cases hw : slicedPcsHighCapRow nv g.stageIdx with
+      | none => rw [hr, hw] at h2'; exact absurd h2' Bool.false_ne_true
+      | some w =>
+        rw [hr, hw] at h2'
+        dsimp only at h2'
+        unfold gsAndThreeRowOkT at h2'
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at h2'
+        obtain ⟨⟨⟨⟨⟨⟨hd2, hdA⟩, hAg⟩, hOk⟩, hGs0⟩, hGs1⟩, hTh183⟩ := h2'
+        rw [paramsOkT_eq] at hOk
+        rw [threeT_eq] at hTh183
+        have hNum : (highCapSlicedThreeChallengeStageBound g r w).num =
+            highCapSlicedThreeChallengeCount g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2
+              (goldilocksPrime ^ 4) (goldilocksPrime ^ 4) := by
+          rw [highCapSlicedThreeChallengeStageBound_num, bridge_goldilocksExt4Card_def]
+        have hDen : (highCapSlicedThreeChallengeStageBound g r w).den =
+            (goldilocksPrime ^ 4) * ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4)) := by
+          rw [highCapSlicedThreeChallengeStageBound_den, bridge_goldilocksExt4Card_def]
+        refine ⟨r, w, rfl, rfl, hd2, hdA, hAg, hOk, hGs0, hGs1, ?_,
+          fun h24 => absurd h24 (Nat.not_le_of_gt h25)⟩
+        show (highCapSlicedThreeChallengeStageBound g r w).num * 2 ^ 183 ≤
+            (highCapSlicedThreeChallengeStageBound g r w).den
+        rw [hNum, hDen]
+        exact hTh183
+
+/-- **Guruswami–Sudan bivariate Hasse interpolation dimension certificate across `nv ∈ 2..=28`**:
+    every non-exhaustive stage of `pcs.rs::stage_geometry` (`2..=28`) satisfies the exact bivariate
+    Hasse interpolation dimension inequality both at `(g.d - 1, r.A - 1)` and at `(g.d, r.A)`. -/
+theorem highCap_gs_interpolation_dimensions_nv2_to_28
+    (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ r : Nat × Nat × Nat × Nat × Nat,
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * (r.2.2.1 - 1)) (g.d - 1)
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1))) ∧
+      g.n * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+        gsMonomialCount (r.2.2.2.1 * r.2.2.1) g.d
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)) := by
+  obtain ⟨r, _, hr, _, _, _, _, _, hGs0, hGs1, _, _⟩ :=
+    highCap_gs_and_three_rows_nv2_to_28 nv h2 h28 g hg hne
+  exact ⟨r, hr, hGs0, hGs1⟩
+
+/-- **Executable Guruswami–Sudan Hasse interpolation witness across `nv ∈ 2..=28`** over any
+    decidable field `F`. -/
+theorem highCap_gs_constructive_interpolation_nv2_to_28 {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false)
+    (points : List (F × F)) (hN : points.length = g.n) :
+    ∃ r : Nat × Nat × Nat × Nat × Nat,
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      let B := r.2.2.2.1 * r.2.2.1
+      let D := Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)
+      let coeffs := solveHomogeneous (gsMonomialCount B g.d D)
+        (gsInterpolationRows B g.d D r.2.2.2.1 points)
+      coeffs.length = gsMonomialCount B g.d D ∧
+      coeffs.any (fun c => !(decide (c = CommRingOps.zero))) = true ∧
+      ∀ p ∈ points, ∀ i j, i + j < r.2.2.2.1 →
+        gsHasseEval B g.d D coeffs (i, j) p = CommRingOps.zero := by
+  obtain ⟨r, hr, _, hGs1⟩ := highCap_gs_interpolation_dimensions_nv2_to_28 nv h2 h28 g hg hne
+  refine ⟨r, hr, ?_⟩
+  apply guruswami_sudan_interpolation
+  rw [hN]
+  exact hGs1
+
+/-- **Unconditional Guruswami–Sudan list bound across all non-exhaustive stages of `nv ∈ 2..=28`**
+    over any decidable field `F`. -/
+theorem highCap_gs_deployed_list_bound_nv2_to_28 {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false)
+    (domain : List F) (hDomNd : domain.Nodup) (hDomLen : domain.length = g.n)
+    (word : F → F) :
+    ∃ r : Nat × Nat × Nat × Nat × Nat,
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      (∀ polys : List (GsUniPoly F), polys.Nodup →
+        (∀ P ∈ polys, P.coeffs.length ≤ g.d + 1 ∧
+          r.2.2.1 ≤ (domain.filter (fun x => decide (RoundPoly.evalCoeffs P.coeffs x = word x))).length) →
+        polys.length ≤ Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d) ∧
+        polys.length ≤ r.2.2.2.2) := by
+  obtain ⟨r, hr, _, hGs1⟩ := highCap_gs_interpolation_dimensions_nv2_to_28 nv h2 h28 g hg hne
+  refine ⟨r, hr, fun polys hNd hClose => ?_⟩
+  have hDim : domain.length * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+      gsMonomialCount (r.2.2.2.1 * r.2.2.1) g.d
+        (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)) := by
+    rw [hDomLen]
+    exact hGs1
+  have hB := guruswami_sudan_filter_list_bound domain word g.d r.2.2.1
+    (Nat.min r.2.2.2.2 ((r.2.2.2.1 * r.2.2.1 - 1) / g.d)) r.2.2.2.1 hDomNd hDim polys hNd hClose
+  exact ⟨hB, Nat.le_trans hB (Nat.min_le_left _ _)⟩
+
+/-- **Constructive cylinder-sliced `[CWYZ26]` Johnson cascade certificate across `nv ∈ 2..=28`
+    (`highCap_cwyz26_johnson_cascade_cert_nv2_to_28`)**:
+    Every non-exhaustive canonical stage of `pcs.rs::stage_geometry` (`2 ≤ nv ≤ 28`, including all
+    16 high-capacity stages of `nv = 25, 26, 27, 28`) carries a Lean-verified `HemCascadeRbrCert`
+    constructed unconditionally via `hemCwyz26JohnsonCert_sliced` (`0` residual assumptions, `0`
+    Rust-only witness caveats), paired with a `≥ 183`-bit binary budget (`≥ 184` up to `24`
+    variables). -/
+theorem highCap_cwyz26_johnson_cascade_cert_nv2_to_28
+    (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      slicedPcsHighCapRow nv g.stageIdx = some w ∧
+      (∀ (domPts S : List QuarticGoldilocks),
+        domPts.Nodup → S.Nodup → domPts.length = g.n →
+        HemCascadeRbrCert S domPts (g.d - 1) (r.2.2.1 - 1)
+          (slicedStageCount S.length g r w)
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1)))) ∧
+      atLeastBits 183 (slicedBinaryStageBound g r w) ∧
+      (nv ≤ 24 → atLeastBits 184 (slicedBinaryStageBound g r w)) ∧
+      (25 ≤ nv → atLeastBits w.2.2.2 (slicedBinaryStageBound g r w)) := by
+  have hgHigh : g ∈ hemPcsHighCapStageGeoms nv := by
+    rwa [hemPcsHighCapStageGeoms_eq_hemStageGeoms]
+  obtain ⟨r, w, hr, hw, hd, hb183, hb184, hbRow, _, _⟩ :=
+    highCap_sliced_stage_supported_budget nv h2 h28 g hgHigh hne
+  obtain ⟨r', w', hr', hw', hd2, hdA, hAg, _, hGs0, _, _, _⟩ :=
+    highCap_gs_and_three_rows_nv2_to_28 nv h2 h28 g hg hne
+  cases Option.some.inj (hr.symm.trans hr')
+  cases Option.some.inj (hw.symm.trans hw')
+  refine ⟨r, w, hr, hw, fun domPts S hDom hS hDomLen => ?_, hb183, hb184, hbRow⟩
+  clear hb183 hb184 hbRow hr hw hg hgHigh hne h2 h28
+  have hd1 : (g.d - 1) + 1 = g.d := Nat.sub_add_cancel (Nat.le_trans (by decide : 1 ≤ 2) hd2)
+  have hApos : 1 ≤ r.2.2.1 :=
+    Nat.le_trans (Nat.le_trans (by decide : 1 ≤ 2) (Nat.le_add_left 2 (g.d - 1)))
+      (Nat.le_trans hdA (Nat.sub_le _ _))
+  have hA1 : (r.2.2.1 - 1) + 1 = r.2.2.1 := Nat.sub_add_cancel hApos
+  have hAgDom : (r.2.2.1 - 1) + 1 ≤ domPts.length := by
+    rw [hA1, hDomLen]
+    exact hAg
+  have hDecomp : AffineFoldDecompBound domPts S ((g.d - 1) + 1) ((r.2.2.1 - 1) + 1)
+      (slicedStageCount S.length g r w) := by
+    rw [hd1, hA1]
+    exact hd domPts S hDom hS hDomLen
+  have hGsDim : domPts.length * (r.2.2.2.1 * (r.2.2.2.1 + 1) / 2) <
+      gsMonomialCount (r.2.2.2.1 * (r.2.2.1 - 1)) (g.d - 1)
+        (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1))) := by
+    rwa [hDomLen]
+  have hdLeA : (g.d - 1) + 1 ≤ r.2.2.1 - 1 :=
+    Nat.le_trans (Nat.succ_le_succ (Nat.le_succ _)) hdA
+  exact
+    { dom_nodup := hDom
+      pool_nodup := hS
+      deg_le_agree := hdA
+      agree_succ_le_dom := hAgDom
+      decomp_bound := hDecomp
+      gs_list_bound := fun word =>
+        guruswami_sudan_filter_list_bound domPts word (g.d - 1) (r.2.2.1 - 1)
+          (Nat.min r.2.2.2.2 ((r.2.2.2.1 * (r.2.2.1 - 1) - 1) / (g.d - 1))) r.2.2.2.1
+          hDom hGsDim (gsDecodeList (g.d - 1) (r.2.2.1 - 1) domPts word)
+          (gsDecodeList_nodup (g.d - 1) (r.2.2.1 - 1) domPts word)
+          (fun P hP => (mem_gsDecodeList_iff word hDom hdLeA P).mp hP) }
+
+/-- **Closed-form 3-challenge `(θ, α, β)` equal-degree claim-fold bound at `(n, d, A, B, m, Dy)`**
+    over `QuarticGoldilocks`. -/
+theorem highCap_equal_degree_three_challenge_bound
+    (D S_θ S kernel : List QuarticGoldilocks) (d A B m Dy : Nat)
+    (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
+    (hD : D.Nodup) (hSθ : S_θ.Nodup) (hS : S.Nodup) (hdA : d + 2 ≤ A)
+    (hParams : slicedParamsOk D.length (d + 1) (A + 1) B m Dy = true)
+    (hInvalidFG :
+      (∀ Fw : List QuarticGoldilocks, Fw.length ≤ d + 1 →
+        A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fw z = f z))).length →
+        ringDot Fw kernel ≠ e_f) ∨
+      (∀ Gw : List QuarticGoldilocks, Gw.length ≤ d + 1 →
+        A ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gw z = g z))).length →
+        ringDot Gw kernel ≠ e_g))
+    (L : List (Fin (threePool S_θ S).length)) (hNd : L.Nodup)
+    (hFlip : ∀ ch ∈ L, ¬¬ ∃ P : List QuarticGoldilocks,
+      P.length ≤ d + 2 ∧
+      A + 1 ≤ (D.filter (fun z =>
+        let t := (threePool S_θ S).get ch
+        let h_θ := CommRingOps.add (f z) (CommRingOps.mul t.1 (g z))
+        decide (RoundPoly.evalCoeffs P z =
+          CommRingOps.add (g z)
+            (CommRingOps.mul (CommRingOps.add t.2.1 (CommRingOps.mul t.2.2 z)) h_θ)))).length ∧
+      ringDot P kernel =
+        let t := (threePool S_θ S).get ch
+        hemFoldClaimUpdate e_f e_g c_f c_g t.1 t.2.1 t.2.2) :
+    L.length ≤ highCapSlicedThreeChallengeCount D.length d A B m Dy S_θ.length S.length := by
+  have hBase := equal_degree_three_challenge_fold_bound D S_θ S kernel d A
+    (Dy + slicedRest D.length (d + 1) (A + 1) B (m * (A + 1) - Dy) Dy S.length)
+    f g e_f e_g c_f c_g hD hSθ hS hdA
+    (slicedParamsOk_sound D.length (d + 1) (A + 1) B m Dy hParams D S hD hS rfl)
+    hInvalidFG L hNd hFlip
+  obtain ⟨_, _, _, hBltA1, hDenB, _, _, _⟩ := of_decide_eq_true hParams
+  clear hInvalidFG hFlip hParams
+  have hBLeA : B ≤ A := Nat.le_of_lt_succ hBltA1
+  have hBBLeAA : B * B ≤ A * A := Nat.mul_le_mul hBLeA hBLeA
+  have hDenHi : D.length * (d + 1) < A * A :=
+    Nat.lt_of_lt_of_le (Nat.lt_of_le_of_lt (Nat.mul_le_mul_left D.length (by omega)) hDenB) hBBLeAA
+  have hDenLo : D.length * d < A * A :=
+    Nat.lt_of_le_of_lt (Nat.mul_le_mul_left D.length (by omega)) hDenHi
+  have hF_lo := gsDecodeList_length_le_johnson D f d A hD (by omega) hDenLo
+  have hG_lo := gsDecodeList_length_le_johnson D g d A hD (by omega) hDenLo
+  have hF_hi := gsDecodeList_length_le_johnson D f (d + 1) A hD hdA hDenHi
+  have hG_hi := gsDecodeList_length_le_johnson D g (d + 1) A hD hdA hDenHi
+  rw [highCapSlicedThreeChallengeCount_def]
+  have hMulLo : (gsDecodeList d A D f).length * (gsDecodeList d A D g).length * (S_θ.length * S.length) ≤
+      (JohnsonBound.johnsonBound D.length A d * JohnsonBound.johnsonBound D.length A d) *
+        (S_θ.length * S.length) :=
+    Nat.mul_le_mul_right _ (Nat.mul_le_mul hF_lo hG_lo)
+  have hMulHi : (gsDecodeList (d + 1) A D f).length * (gsDecodeList (d + 1) A D g).length *
+      (S.length * S.length) ≤
+      (JohnsonBound.johnsonBound D.length A (d + 1) * JohnsonBound.johnsonBound D.length A (d + 1)) *
+        (S.length * S.length) :=
+    Nat.mul_le_mul_right _ (Nat.mul_le_mul hF_hi hG_hi)
+  omega
+
+/-- **Three-challenge `(θ, α, β)` equal-degree claim-fold budget across `nv ∈ 2..=28`**:
+    every non-exhaustive canonical stage of `pcs.rs::stage_geometry` (`2 ≤ nv ≤ 28`) satisfies the
+    constructive 3-challenge equal-degree fold bound at `≥ 183` bits (`≥ 184` up to `24`
+    variables), clearing `128` bits under `dfmRoundScale Q` for `Q + 1 ≤ 2^26` (`Q + 1 ≤ 2^27` up
+    to `24` variables). -/
+theorem highCap_sliced_three_challenge_stage_supported_budget
+    (nv : Nat) (h2 : 2 ≤ nv) (h28 : nv ≤ 28)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemPcsHighCapTableRow nv g.stageIdx = some r ∧
+      slicedPcsHighCapRow nv g.stageIdx = some w ∧
+      2 ≤ g.d ∧
+      (g.d - 1) + 2 ≤ r.2.2.1 - 1 ∧
+      slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 = true ∧
+      atLeastBits 183 (highCapSlicedThreeChallengeStageBound g r w) ∧
+      (nv ≤ 24 → atLeastBits 184 (highCapSlicedThreeChallengeStageBound g r w)) ∧
+      (∀ Q : Nat, Q + 1 ≤ 2 ^ 26 →
+        atLeastBits 128 (dfmRoundScale Q (highCapSlicedThreeChallengeStageBound g r w))) ∧
+      (nv ≤ 24 → ∀ Q : Nat, Q + 1 ≤ 2 ^ 27 →
+        atLeastBits 128 (dfmRoundScale Q (highCapSlicedThreeChallengeStageBound g r w))) := by
+  obtain ⟨r, w, hr, hw, hd2, hdA, _, hOk, _, _, hb183, hb184⟩ :=
+    highCap_gs_and_three_rows_nv2_to_28 nv h2 h28 g hg hne
+  exact ⟨r, w, hr, hw, hd2, hdA, hOk, hb183, hb184,
+    fun Q hQ => dfmRoundScale_clears_128bits_of_bits _ 26
+      (atLeastBits_weaken (by decide) _ hb183) Q hQ,
+    fun h24 Q hQ => dfmRoundScale_clears_128bits_of_bits _ 27
+      (atLeastBits_weaken (by decide) _ (hb184 h24)) Q hQ⟩
+
+#verify_constructive Qsag.hemPcsHighCapStageGeometry_of_le_24
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_of_le_24
+#verify_constructive Qsag.hemPcsHighCapTableRow_of_le_24
+#verify_constructive Qsag.slicedPcsHighCapRow_of_le_24
+#verify_constructive Qsag.hemPcsHighCapStageGeometry_eq_hemStageGeometry
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_eq_hemStageGeoms
+#verify_constructive Qsag.hemPcsHighCapEarlyStopVars_eq_hemEarlyStopVars
+#verify_constructive Qsag.hemPcsHighCapStageGeometry_nv25_to_28
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_nv25
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_nv26
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_nv27
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_nv28
+#verify_constructive Qsag.hemPcsHighCapStageGeoms_of_ge_29
+#verify_constructive Qsag.hemPcsHighCap_geometry_valid_nv25_to_28
+#verify_constructive Qsag.highCap_stages_nonexhaustive
+#verify_constructive Qsag.dfmRoundScale_clears_128bits_of_bits
+#verify_constructive Qsag.highCap_sliced_stage_supported_budget
+#verify_constructive Qsag.slicedPcsHighCap_multifold_covers_nv25_to_28
+#verify_constructive Qsag.highCap_sliced_multifold_stage_supported_budget
+#verify_constructive Qsag.highCap_gs_interpolation_dimensions_nv2_to_28
+#verify_constructive Qsag.highCap_gs_constructive_interpolation_nv2_to_28
+#verify_constructive Qsag.highCap_gs_deployed_list_bound_nv2_to_28
+#verify_constructive Qsag.highCap_cwyz26_johnson_cascade_cert_nv2_to_28
+#verify_constructive Qsag.highCap_equal_degree_three_challenge_bound
+#verify_constructive Qsag.highCap_sliced_three_challenge_stage_supported_budget
 
 end Qsag
 end
