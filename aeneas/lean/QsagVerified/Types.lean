@@ -96,9 +96,10 @@ inductive authenticated_belt.BeltQuorumStepInput where
   authenticated_belt.BeltQuorumStepInput
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltAuthorizationGrant]
-    Source: 'src/pants_and_quorum_guards.rs', lines 78:0-82:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 83:0-88:1
     Visibility: public -/
 structure pants_and_quorum_guards.BeltAuthorizationGrant where
+  _private : Unit
   authorized_epoch : Std.U64
   msg_tag : Array Std.U8 32#usize
   certified_acks : Std.U32
@@ -125,7 +126,7 @@ inductive pants_and_quorum_guards.BeltQuorumPhase where
 | Poisoned : pants_and_quorum_guards.BeltQuorumPhase
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCore]
-    Source: 'src/pants_and_quorum_guards.rs', lines 148:0-162:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 154:0-168:1 -/
 structure pants_and_quorum_guards.BeltQuorumCore where
   n : Std.U32
   t : Std.U32
@@ -316,7 +317,7 @@ inductive fts_spn_guard.FtsGuardError where
 | InvalidWotsConstantSum : fts_spn_guard.FtsGuardError
 
 /-- [qsag_verified::fts_spn_guard::FtsEpochPermit]
-    Source: 'src/fts_spn_guard.rs', lines 43:0-47:1
+    Source: 'src/fts_spn_guard.rs', lines 48:0-52:1
     Visibility: public -/
 structure fts_spn_guard.FtsEpochPermit where
   key_id : Array Std.U8 32#usize
@@ -324,7 +325,7 @@ structure fts_spn_guard.FtsEpochPermit where
   msg_digest : Array Std.U8 32#usize
 
 /-- [qsag_verified::fts_spn_guard::FtsEpochGuard]
-    Source: 'src/fts_spn_guard.rs', lines 64:0-70:1
+    Source: 'src/fts_spn_guard.rs', lines 69:0-75:1
     Visibility: public -/
 structure fts_spn_guard.FtsEpochGuard where
   key_id : Array Std.U8 32#usize
@@ -334,7 +335,7 @@ structure fts_spn_guard.FtsEpochGuard where
   poisoned : Bool
 
 /-- [qsag_verified::fts_spn_guard::FtsDeferredMacSession]
-    Source: 'src/fts_spn_guard.rs', lines 203:0-211:1
+    Source: 'src/fts_spn_guard.rs', lines 208:0-216:1
     Visibility: public -/
 structure fts_spn_guard.FtsDeferredMacSession where
   session_id : Array Std.U8 32#usize
@@ -365,7 +366,7 @@ structure goldilocks.GoldilocksExt2 where
   c1 : goldilocks.Goldilocks
 
 /-- [qsag_verified::opening_guard::OpeningReleasePermit]
-    Source: 'src/opening_guard.rs', lines 17:0-21:1
+    Source: 'src/opening_guard.rs', lines 22:0-26:1
     Visibility: public -/
 structure opening_guard.OpeningReleasePermit where
   session_id : Array Std.U8 32#usize
@@ -373,7 +374,7 @@ structure opening_guard.OpeningReleasePermit where
   openings : Std.U64
 
 /-- [qsag_verified::opening_guard::ConsumingOpeningGuard2Lane]
-    Source: 'src/opening_guard.rs', lines 40:0-49:1
+    Source: 'src/opening_guard.rs', lines 45:0-54:1
     Visibility: public -/
 structure opening_guard.ConsumingOpeningGuard2Lane where
   session_id : Array Std.U8 32#usize
@@ -386,7 +387,7 @@ structure opening_guard.ConsumingOpeningGuard2Lane where
   consumed : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCoreInput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 87:0-101:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 93:0-107:1 -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.BeltQuorumCoreInput where
 | ProposeOrRetryEpoch :
@@ -404,7 +405,7 @@ inductive pants_and_quorum_guards.BeltQuorumCoreInput where
   pants_and_quorum_guards.BeltQuorumCoreInput
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCoreOutput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 106:0-110:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 112:0-116:1 -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.BeltQuorumCoreOutput where
 | EpochBound : pants_and_quorum_guards.BeltQuorumCoreOutput
@@ -414,7 +415,7 @@ inductive pants_and_quorum_guards.BeltQuorumCoreOutput where
   pants_and_quorum_guards.BeltQuorumCoreOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 567:0-571:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 574:0-578:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   validated_digest : Array Std.U8 32#usize
@@ -422,13 +423,13 @@ structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   verified_sum : Std.U32
 
 /-- [qsag_verified::pants_and_quorum_guards::RssOpenPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 620:0-622:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 632:0-634:1
     Visibility: public -/
 structure pants_and_quorum_guards.RssOpenPermit where
   verified_clean : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepInput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 626:0-630:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 638:0-642:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepInput where
@@ -437,7 +438,7 @@ inductive pants_and_quorum_guards.RssLatchStepInput where
 | AuthorizeOpen : pants_and_quorum_guards.RssLatchStepInput
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepOutput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 634:0-638:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 646:0-650:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepOutput where
@@ -448,7 +449,7 @@ inductive pants_and_quorum_guards.RssLatchStepOutput where
   pants_and_quorum_guards.RssLatchStepOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch]
-    Source: 'src/pants_and_quorum_guards.rs', lines 643:0-647:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 655:0-659:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   pending_relations : Std.U64
@@ -456,7 +457,7 @@ structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   poisoned : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest]
-    Source: 'src/pants_and_quorum_guards.rs', lines 798:0-806:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 810:0-818:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandDerivationRequest where
   req_layer : Std.U32
@@ -468,9 +469,10 @@ structure pants_and_quorum_guards.WaistbandDerivationRequest where
   candidate_ancestor_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 811:0-817:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 829:0-836:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandAncestorPermit where
+  _private : Unit
   layer : Std.U32
   tree : Std.U64
   kp : Std.U32
@@ -478,7 +480,7 @@ structure pants_and_quorum_guards.WaistbandAncestorPermit where
   authorized_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 820:0-830:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 839:0-849:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWaistbandRootGuard where
   key_pk_tag : Array Std.U8 32#usize
@@ -729,23 +731,24 @@ structure threshold.EpochSignRequest where
   deterministic_r_rand : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochAuthGrant]
-    Source: 'src/threshold.rs', lines 494:0-499:1
+    Source: 'src/threshold.rs', lines 500:0-506:1
     Visibility: public -/
 structure threshold.EpochAuthGrant where
+  _private : Unit
   authorized_epoch : Std.U64
   msg_digest : Array Std.U8 32#usize
   r_rand : Array Std.U8 32#usize
   is_idempotent_retry : Bool
 
 /-- [qsag_verified::threshold::EpochRequest]
-    Source: 'src/threshold.rs', lines 503:0-506:1
+    Source: 'src/threshold.rs', lines 510:0-513:1
     Visibility: public -/
 structure threshold.EpochRequest where
   requested_epoch : Std.U64
   key_epoch_id : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochLatchError]
-    Source: 'src/threshold.rs', lines 510:0-517:1
+    Source: 'src/threshold.rs', lines 517:0-524:1
     Visibility: public -/
 @[discriminant isize]
 inductive threshold.EpochLatchError where

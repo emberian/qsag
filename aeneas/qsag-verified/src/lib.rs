@@ -87,7 +87,8 @@ pub use rss_cut_session::{
 };
 pub use threshold::{
     BoundEpochRecord, EpochAuthGrant, EpochLatch, EpochLatchError, EpochRequest, EpochSignRequest,
-    LastBoundEpoch, RssShare64, RssZeroSeeds64, ct_eq_bytes32, derive_jorts_det_r_rand,
+    LastBoundEpoch, RssShare64, RssZeroSeeds64, ct_eq_bytes32,
+    derive_jorts_legacy_v1_det_r_rand,
     dkg_beaver_frobenius_eval_gf256, dkg_beaver_frobenius_share_shamir_gf256,
     dkg_verify_key_shares_boolean_bdoz_gf256, dkg_verify_shamir_2of3_key_bit_gf256,
     epoch_latch_advance, rss_and_gate, rss_keccak_chi_lane, rss_not, rss_party_and_local,

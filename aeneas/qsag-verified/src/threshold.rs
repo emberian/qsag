@@ -5,7 +5,7 @@
 //! 2. 2-of-3 Replicated Secret Sharing (`RSS`) 64-lane bitsliced `rss_and_gate`, degree-reduction
 //!    resharing, and Keccak `chi` lane evaluation,
 //! 3. Affine `EpochLatch` transitions for caller-managed durable WAL storage (`EpochLatch::acquire_or_retry`, `epoch_latch_advance`,
-//!    and `derive_jorts_det_r_rand`) reject epoch equivocation and `r_rand` drift after state restoration.
+//!    and the legacy v1 fixture `derive_jorts_legacy_v1_det_r_rand`) reject epoch equivocation and `r_rand` drift after state restoration.
 
 use crate::goldilocks::{
     Goldilocks, goldilocks_add, goldilocks_canon, goldilocks_inv, goldilocks_mul, goldilocks_sub,
@@ -537,9 +537,15 @@ const fn encode_be_u64(v: u64) -> [u8; 8] {
     ]
 }
 
-/// Derive a strictly deterministic stateful `Jorts` message randomizer `r_rand`,
-/// forbidding non-deterministic `opt_rand` so crash-retries derive the exact bit-identical `r_rand`.
-pub fn derive_jorts_det_r_rand(
+/// LEGACY v1 MODEL (`QSAG.JORTSV1.DET`): a deterministic stateful `Jorts` message randomizer
+/// `r_rand = SHAKE256(tag || sk_prf || key_epoch_id || epoch_be || msg_digest)`.
+///
+/// This is not the production derivation and no production crate calls it. Production derives
+/// `r_rand` in `qsag_core::tsw_baggy::derive_stateful_r_rand` as `PRF_msg` over the frame
+/// `encode_multi_frame(["QSAG.PQ.BAGGYSIG.DET/v1", epoch_be, pk_seed])`; the two outputs differ.
+/// It is kept as the fixture that drives the `EpochLatch` retry tests, which only need *some*
+/// deterministic randomizer (crash-retries must derive the bit-identical `r_rand`).
+pub fn derive_jorts_legacy_v1_det_r_rand(
     sk_prf: &[u8; 32],
     key_epoch_id: &[u8; 32],
     epoch: u64,
