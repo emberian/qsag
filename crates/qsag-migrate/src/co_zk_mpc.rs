@@ -19,9 +19,15 @@
 //! custodian can force it. See `SECURITY.md` for exact scope.
 pub use crate::outer_mpc::{Envelope, Error, Transport};
 use crate::secret::{SecretVec, Wipe};
+#[cfg(any(feature = "std", test))]
+use crate::threshold_mpc::QuorumKeyEscrow;
 use crate::{
-    circuit::{Circuit, Domain, Op},
+    bls12_381::{
+        self, BlsG1Point, BlsMigrationRequest, BlsMigrationStatement, BlsValidatorCommitment,
+    },
+    circuit::{Circuit, Domain, Op, ZERO},
     outer_mpc::{self, Core, Engine, FieldWord, Gadgets, ShareBit, Sponge, Word},
+    pallas::{self, PallasMigrationRequest, PallasMigrationStatement, PallasPoint},
     threshold_mpc::{MacKeyShare, SpdzEngine, ThresholdConfig},
     zk_engine::{
         self, MIT_REPETITIONS, MigrationStatement, MigrationZkProof, OpenedRepetitionView,
@@ -31,13 +37,14 @@ use crate::{
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
     ct::{ct_zeroize_bytes, ct_zeroize_u64s},
-    keccak::cshake256_framed_32,
+    keccak::{InterleavedTranscript, cshake256_framed_32},
 };
 
 /// General-quorum custody: the active quorum, one channel key per other
 /// quorum member (in quorum order) and this custodian's MAC key shares.
 struct QuorumCustody {
     config: ThresholdConfig,
+    is_shamir: bool,
     peer_keys: Vec<[u8; 32]>,
     mac_keys: MacKeyShare,
 }
@@ -47,6 +54,11 @@ impl Drop for QuorumCustody {
             ct_zeroize_bytes(k);
         }
     }
+}
+
+enum CeremonyEngine<T> {
+    Replicated(alloc::boxed::Box<Engine<T>>),
+    Quorum(alloc::boxed::Box<SpdzEngine<T>>),
 }
 
 /// One-shot local custody material. Supply the XOR share of the *normalized
@@ -60,6 +72,7 @@ pub struct CoZkCustodianShare {
     party: usize,
     session: [u8; 32],
     witness: [u8; 32],
+    rerandomizer: Option<[u8; 32]>,
     entropy: [u8; 32],
     /// Replicated custody: keys shared with `[previous, next]`.
     channel_keys: [[u8; 32]; 2],
@@ -68,6 +81,9 @@ pub struct CoZkCustodianShare {
 impl Drop for CoZkCustodianShare {
     fn drop(&mut self) {
         ct_zeroize_bytes(&mut self.witness);
+        if let Some(alpha) = &mut self.rerandomizer {
+            ct_zeroize_bytes(alpha);
+        }
         ct_zeroize_bytes(&mut self.entropy);
         for k in &mut self.channel_keys {
             ct_zeroize_bytes(k);
@@ -87,6 +103,7 @@ impl CoZkCustodianShare {
             party,
             session,
             witness,
+            rerandomizer: None,
             entropy,
             channel_keys,
             quorum: None,
@@ -97,11 +114,11 @@ impl CoZkCustodianShare {
         Ok(share)
     }
 
-    /// General `(t,n)` bytewise Shamir custody. The selected, sorted quorum
-    /// must contain at least `t` members. `peer_keys` follow quorum order,
-    /// omitting self. All members use the same session and configuration,
-    /// independent entropy, and MAC key shares and preprocessing from one
-    /// ceremony (`threshold_prep`). The transport must implement
+    /// General `(t,n)` bytewise Shamir custody over the Wiedemann tower `GF(256)`.
+    /// The selected, sorted quorum must contain at least `t` members. `peer_keys`
+    /// follow quorum order, omitting self. All members use the same session and
+    /// configuration, independent entropy, and MAC key shares and preprocessing
+    /// from one ceremony (`threshold_prep`). The transport must implement
     /// `exchange_many` and the `take_*` preprocessing methods.
     pub fn new_shamir(
         party: usize,
@@ -113,7 +130,7 @@ impl CoZkCustodianShare {
         mac_keys: MacKeyShare,
     ) -> Result<Self, Error> {
         let mut share = Self::quorum_contribution(
-            party, config, session, witness, entropy, peer_keys, mac_keys,
+            party, config, true, session, witness, entropy, peer_keys, mac_keys,
         )?;
         let contribution = share
             .quorum
@@ -145,7 +162,7 @@ impl CoZkCustodianShare {
         };
         match config {
             Ok(config) => Self::quorum_contribution(
-                party, config, session, witness, entropy, peer_keys, mac_keys,
+                party, config, false, session, witness, entropy, peer_keys, mac_keys,
             ),
             Err(error) => {
                 let mut secrets = (witness, entropy, peer_keys);
@@ -155,9 +172,40 @@ impl CoZkCustodianShare {
         }
     }
 
+    /// Attach this custodian's share of the 32-byte little-endian RedPallas action
+    /// rerandomizer `alpha` (`0 <= alpha < q_pallas`) for proving Zcash Orchard
+    /// [`pallas::PallasCommitmentKind::OrchardRedPallasRk`] ownership without
+    /// reconstructing `ask` or `alpha`.
+    ///
+    /// For [`Self::new_shamir`] shares, `alpha_share` is scaled by this party's
+    /// `TowerGf256` Lagrange weight at zero; for [`Self::new`] and
+    /// [`Self::new_additive`], `alpha_share` is this party's XOR share directly.
+    pub fn with_rerandomizer(mut self, mut alpha_share: [u8; 32]) -> Result<Self, Error> {
+        if let Some(custody) = &self.quorum
+            && custody.is_shamir
+        {
+            let contribution = match custody.config.shamir_contribution(self.party, &alpha_share) {
+                Ok(c) => c,
+                Err(err) => {
+                    ct_zeroize_bytes(&mut alpha_share);
+                    return Err(err);
+                }
+            };
+            ct_zeroize_bytes(&mut alpha_share);
+            alpha_share = contribution;
+        }
+        if let Some(prev) = &mut self.rerandomizer {
+            ct_zeroize_bytes(prev);
+        }
+        self.rerandomizer = Some(alpha_share);
+        Ok(self)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn quorum_contribution(
         party: usize,
         config: ThresholdConfig,
+        is_shamir: bool,
         session: [u8; 32],
         witness: [u8; 32],
         entropy: [u8; 32],
@@ -168,10 +216,12 @@ impl CoZkCustodianShare {
             party,
             session,
             witness,
+            rerandomizer: None,
             entropy,
             channel_keys: [[0; 32]; 2],
             quorum: Some(QuorumCustody {
                 config,
+                is_shamir,
                 peer_keys,
                 mac_keys,
             }),
@@ -183,6 +233,79 @@ impl CoZkCustodianShare {
             return Err(Error::InvalidConfiguration);
         }
         Ok(share)
+    }
+
+    fn start_ceremony<T: Transport>(
+        &mut self,
+        #[allow(unused_mut)] mut transport: T,
+        #[cfg_attr(not(test), allow(unused_variables))] statement_bytes: &[u8],
+    ) -> Result<(CeremonyEngine<T>, Vec<T>), Error> {
+        #[cfg(test)]
+        if self.quorum.is_none() {
+            transport.audit_private_transcript_bytes(
+                self.party,
+                &self.session,
+                &self.witness,
+                &self.entropy,
+                &self.channel_keys,
+                statement_bytes,
+            );
+        }
+        #[allow(unused_mut)]
+        let mut children = Vec::new();
+        #[cfg(any(feature = "std", test))]
+        {
+            for batch in 0..MIT_REPETITIONS.div_ceil(64) {
+                if let Some(child) = transport.fork(batch) {
+                    children.push(child);
+                }
+            }
+            if !children.is_empty() && children.len() != MIT_REPETITIONS.div_ceil(64) {
+                return Err(Error::InvalidConfiguration);
+            }
+        }
+        match &mut self.quorum {
+            Some(custody) => {
+                // Move `mac_keys` out of `CoZkCustodianShare` so `SpdzEngine` /
+                // `QuorumKeyEscrow` owns the sole live copy and wipes all copies on abort.
+                let mac_keys = core::mem::replace(&mut custody.mac_keys, MacKeyShare::wiped());
+                let mut e = SpdzEngine::new(
+                    self.party,
+                    self.session,
+                    custody.config.clone(),
+                    custody.peer_keys.clone(),
+                    mac_keys,
+                    transport,
+                )?;
+                e.mix_entropy(&self.entropy);
+                Ok((CeremonyEngine::Quorum(alloc::boxed::Box::new(e)), children))
+            }
+            None => {
+                let mut e = Engine::new(self.party, self.session, self.channel_keys, transport)?;
+                e.mix_entropy(&self.entropy);
+                Ok((CeremonyEngine::Replicated(alloc::boxed::Box::new(e)), children))
+            }
+        }
+    }
+
+    fn expand_witness_lanes(&self, expect_rerandomizer: bool) -> Result<SecretVec<u64>, Error> {
+        if self.rerandomizer.is_some() != expect_rerandomizer {
+            return Err(Error::InvalidConfiguration);
+        }
+        let mut own = SecretVec::with_capacity(if expect_rerandomizer { 512 } else { 256 });
+        for &b in &self.witness {
+            for i in 0..8 {
+                own.push(if (b >> i) & 1 != 0 { u64::MAX } else { 0 });
+            }
+        }
+        if let Some(alpha) = &self.rerandomizer {
+            for &b in alpha {
+                for i in 0..8 {
+                    own.push(if (b >> i) & 1 != 0 { u64::MAX } else { 0 });
+                }
+            }
+        }
+        Ok(own)
     }
 
     /// Consumes the ceremony. A transport or verification error consumes all state as well.
@@ -209,83 +332,448 @@ impl CoZkCustodianShare {
     /// Unopened commitments remain interactive shared sponges: applying an
     /// ordinary Keccak kernel to individual shares would not compute their hash.
     pub fn prove_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
-        self,
+        mut self,
         statement: &MigrationStatement,
         transport: T,
         accel: &B,
     ) -> Result<MigrationZkProof, Error> {
-        #[cfg(test)]
-        if self.quorum.is_none() {
-            transport.audit_private_state(
-                self.party,
-                &self.session,
-                &self.witness,
-                &self.entropy,
-                &self.channel_keys,
-                statement,
-            );
+        let own = self.expand_witness_lanes(false)?;
+        let statement_bytes = statement.to_transcript_bytes();
+        let circuit = crate::ownership::build(statement, &[0; 32]);
+        let (engine, children) = self.start_ceremony(transport, &statement_bytes)?;
+        match engine {
+            CeremonyEngine::Replicated(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| zk_engine::transcript(statement, root),
+                |proof| {
+                    zk_engine::verify_migration_proof_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
+            CeremonyEngine::Quorum(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| zk_engine::transcript(statement, root),
+                |proof| {
+                    zk_engine::verify_migration_proof_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
         }
-        #[allow(unused_mut)]
-        let mut transport = transport;
-        #[allow(unused_mut)]
-        let mut children = Vec::new();
-        #[cfg(any(feature = "std", test))]
-        {
-            for batch in 0..MIT_REPETITIONS.div_ceil(64) {
-                if let Some(child) = transport.fork(batch) {
-                    children.push(child);
-                }
-            }
-            if !children.is_empty() && children.len() != MIT_REPETITIONS.div_ceil(64) {
-                return Err(Error::InvalidConfiguration);
-            }
+    }
+
+    /// Prove Zcash Orchard `Pallas` / `RedPallas` (`OrchardSpendAuthKey` `ak` or
+    /// `OrchardRedPallasRk` `rk`) ownership across the custodian quorum without
+    /// reconstructing `ask` or `alpha`.
+    pub fn prove_pallas<T: Transport>(
+        self,
+        statement: &PallasMigrationStatement,
+        transport: T,
+    ) -> Result<MigrationZkProof, Error> {
+        self.prove_pallas_with_backend(statement, transport, &qsag_accel::CpuReferenceBackend)
+    }
+
+    /// Backend-accelerated [`Self::prove_pallas`].
+    pub fn prove_pallas_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
+        mut self,
+        statement: &PallasMigrationStatement,
+        transport: T,
+        accel: &B,
+    ) -> Result<MigrationZkProof, Error> {
+        let is_rk = statement.commitment.is_rerandomized();
+        let own = self.expand_witness_lanes(is_rk)?;
+        let pub_pt = PallasPoint::from_nonidentity_bytes(statement.commitment.compressed_bytes())
+            .ok_or(Error::InvalidConfiguration)?;
+        let expected_affine = pub_pt.to_affine().ok_or(Error::InvalidConfiguration)?;
+        let statement_bytes = statement.to_transcript_bytes();
+        let circuit =
+            pallas::build_pallas_ownership_circuit(statement, expected_affine, &[0; 32], &[0; 32])
+                .0;
+        let (engine, children) = self.start_ceremony(transport, &statement_bytes)?;
+        match engine {
+            CeremonyEngine::Replicated(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| pallas::pallas_transcript(statement, root),
+                |proof| {
+                    pallas::verify_pallas_migration_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
+            CeremonyEngine::Quorum(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| pallas::pallas_transcript(statement, root),
+                |proof| {
+                    pallas::verify_pallas_migration_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
         }
-        match &self.quorum {
-            Some(custody) => {
-                let mut e = SpdzEngine::new(
-                    self.party,
-                    self.session,
-                    custody.config.clone(),
-                    custody.peer_keys.clone(),
-                    custody.mac_keys.duplicate(),
-                    transport,
+    }
+
+    /// Jointly derive the public Poseidon2 `migration_nullifier` inside active MPC
+    /// (after verifying in-MPC that the shared `(ask, alpha)` matches `request.commitment`
+    /// so zero bits open on a mismatched witness!) and prove the full 438-repetition
+    /// Zcash Orchard `Pallas` / `RedPallas` ZKBoo proof without ever reconstructing
+    /// `ask` or `alpha`.
+    pub fn prove_pallas_request<T: Transport>(
+        self,
+        request: PallasMigrationRequest,
+        transport: T,
+    ) -> Result<(PallasMigrationStatement, MigrationZkProof), Error> {
+        self.prove_pallas_request_with_backend(
+            request,
+            transport,
+            &qsag_accel::CpuReferenceBackend,
+        )
+    }
+
+    /// Backend-accelerated [`Self::prove_pallas_request`].
+    pub fn prove_pallas_request_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
+        mut self,
+        request: PallasMigrationRequest,
+        transport: T,
+        accel: &B,
+    ) -> Result<(PallasMigrationStatement, MigrationZkProof), Error> {
+        let is_rk = request.commitment.is_rerandomized();
+        let own = self.expand_witness_lanes(is_rk)?;
+        let pub_pt = PallasPoint::from_nonidentity_bytes(request.commitment.compressed_bytes())
+            .ok_or(Error::InvalidConfiguration)?;
+        let expected_affine = pub_pt.to_affine().ok_or(Error::InvalidConfiguration)?;
+        let mut statement = PallasMigrationStatement {
+            commitment: request.commitment,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: [0; 4],
+        };
+        let req_bytes = statement.to_transcript_bytes();
+        let pre_circuit =
+            pallas::build_pallas_ownership_circuit(&statement, expected_affine, &[0; 32], &[0; 32])
+                .0;
+        let (engine, children) = self.start_ceremony(transport, &req_bytes)?;
+        match engine {
+            CeremonyEngine::Replicated(mut e) => {
+                statement.migration_nullifier = derive_nullifier_in_mpc(
+                    &mut *e,
+                    &pre_circuit,
+                    &own,
+                    &self.entropy,
+                    &self.session,
+                    &req_bytes,
                 )?;
-                e.mix_entropy(&self.entropy);
-                self.run(e, children, statement, accel)
+                let stmt_bytes = statement.to_transcript_bytes();
+                let circuit = pallas::build_pallas_ownership_circuit(
+                    &statement,
+                    expected_affine,
+                    &[0; 32],
+                    &[0; 32],
+                )
+                .0;
+                let proof = self.run_circuit(
+                    &mut *e,
+                    children,
+                    &stmt_bytes,
+                    &circuit,
+                    &own,
+                    |root| pallas::pallas_transcript(&statement, root),
+                    |proof| {
+                        pallas::verify_pallas_migration_with_backend(
+                            &statement,
+                            proof,
+                            &statement.migration_domain,
+                            statement.epoch_anchor,
+                            accel,
+                        )
+                        .map_err(|_| Error::InvalidProof)
+                    },
+                )?;
+                Ok((statement, proof))
             }
-            None => {
-                let mut e = Engine::new(self.party, self.session, self.channel_keys, transport)?;
-                e.mix_entropy(&self.entropy);
-                self.run(e, children, statement, accel)
+            CeremonyEngine::Quorum(mut e) => {
+                statement.migration_nullifier = derive_nullifier_in_mpc(
+                    &mut *e,
+                    &pre_circuit,
+                    &own,
+                    &self.entropy,
+                    &self.session,
+                    &req_bytes,
+                )?;
+                let stmt_bytes = statement.to_transcript_bytes();
+                let circuit = pallas::build_pallas_ownership_circuit(
+                    &statement,
+                    expected_affine,
+                    &[0; 32],
+                    &[0; 32],
+                )
+                .0;
+                let proof = self.run_circuit(
+                    &mut *e,
+                    children,
+                    &stmt_bytes,
+                    &circuit,
+                    &own,
+                    |root| pallas::pallas_transcript(&statement, root),
+                    |proof| {
+                        pallas::verify_pallas_migration_with_backend(
+                            &statement,
+                            proof,
+                            &statement.migration_domain,
+                            statement.epoch_anchor,
+                            accel,
+                        )
+                        .map_err(|_| Error::InvalidProof)
+                    },
+                )?;
+                Ok((statement, proof))
             }
         }
     }
 
-    fn run<E: ProverEngine, B: qsag_accel::AcceleratorBackend>(
-        &self,
-        mut e: E,
-        children: Vec<E::Transport>,
-        statement: &MigrationStatement,
+    /// Prove Ethereum Beacon validator `BLS12-381` (`BeaconValidatorPubkey` or
+    /// `UnrevealedBls0x00Credential`) ownership across the custodian quorum without
+    /// reconstructing `sk` (or `pk_48` in `UnrevealedBls0x00Credential` mode).
+    pub fn prove_bls<T: Transport>(
+        self,
+        statement: &BlsMigrationStatement,
+        transport: T,
+    ) -> Result<MigrationZkProof, Error> {
+        self.prove_bls_with_backend(statement, transport, &qsag_accel::CpuReferenceBackend)
+    }
+
+    /// Backend-accelerated [`Self::prove_bls`].
+    pub fn prove_bls_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
+        mut self,
+        statement: &BlsMigrationStatement,
+        transport: T,
         accel: &B,
     ) -> Result<MigrationZkProof, Error> {
+        let own = self.expand_witness_lanes(false)?;
+        if !statement.credentials_consistent() {
+            return Err(Error::InvalidConfiguration);
+        }
+        let public_affine = match &statement.commitment {
+            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+                let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
+                    .ok_or(Error::InvalidConfiguration)?;
+                Some(pt.to_affine().ok_or(Error::InvalidConfiguration)?)
+            }
+            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+        };
         let statement_bytes = statement.to_transcript_bytes();
+        let circuit = bls12_381::build_bls_ownership_circuit(statement, public_affine, &[0; 32]).0;
+        let (engine, children) = self.start_ceremony(transport, &statement_bytes)?;
+        match engine {
+            CeremonyEngine::Replicated(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| bls12_381::bls_transcript(statement, root),
+                |proof| {
+                    bls12_381::verify_bls_migration_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
+            CeremonyEngine::Quorum(mut e) => self.run_circuit(
+                &mut *e,
+                children,
+                &statement_bytes,
+                &circuit,
+                &own,
+                |root| bls12_381::bls_transcript(statement, root),
+                |proof| {
+                    bls12_381::verify_bls_migration_with_backend(
+                        statement,
+                        proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor,
+                        accel,
+                    )
+                    .map_err(|_| Error::InvalidProof)
+                },
+            ),
+        }
+    }
+
+    /// Jointly derive the public Poseidon2 `migration_nullifier` inside active MPC
+    /// (after verifying in-MPC that the shared `sk` matches `request.commitment`,
+    /// including SHA-256 of the unrevealed compressed `G_1` key in `0x00` mode!) and
+    /// prove the full 438-repetition Ethereum Beacon `BLS12-381` ZKBoo proof without
+    /// ever reconstructing `sk` or `pk_48`.
+    pub fn prove_bls_request<T: Transport>(
+        self,
+        request: BlsMigrationRequest,
+        transport: T,
+    ) -> Result<(BlsMigrationStatement, MigrationZkProof), Error> {
+        self.prove_bls_request_with_backend(request, transport, &qsag_accel::CpuReferenceBackend)
+    }
+
+    /// Backend-accelerated [`Self::prove_bls_request`].
+    pub fn prove_bls_request_with_backend<T: Transport, B: qsag_accel::AcceleratorBackend>(
+        mut self,
+        request: BlsMigrationRequest,
+        transport: T,
+        accel: &B,
+    ) -> Result<(BlsMigrationStatement, MigrationZkProof), Error> {
+        let own = self.expand_witness_lanes(false)?;
+        let public_affine = match &request.commitment {
+            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+                let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
+                    .ok_or(Error::InvalidConfiguration)?;
+                Some(pt.to_affine().ok_or(Error::InvalidConfiguration)?)
+            }
+            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+        };
+        let mut statement = BlsMigrationStatement {
+            commitment: request.commitment,
+            validator_index: request.validator_index,
+            withdrawal_credentials: request.withdrawal_credentials,
+            target_pq_address: request.target,
+            epoch_anchor: request.epoch,
+            migration_domain: request.domain,
+            migration_nullifier: [0; 4],
+        };
+        if !statement.credentials_consistent() {
+            return Err(Error::InvalidConfiguration);
+        }
+        let req_bytes = statement.to_transcript_bytes();
+        let pre_circuit =
+            bls12_381::build_bls_ownership_circuit(&statement, public_affine, &[0; 32]).0;
+        let (engine, children) = self.start_ceremony(transport, &req_bytes)?;
+        match engine {
+            CeremonyEngine::Replicated(mut e) => {
+                statement.migration_nullifier = derive_nullifier_in_mpc(
+                    &mut *e,
+                    &pre_circuit,
+                    &own,
+                    &self.entropy,
+                    &self.session,
+                    &req_bytes,
+                )?;
+                let stmt_bytes = statement.to_transcript_bytes();
+                let circuit =
+                    bls12_381::build_bls_ownership_circuit(&statement, public_affine, &[0; 32]).0;
+                let proof = self.run_circuit(
+                    &mut *e,
+                    children,
+                    &stmt_bytes,
+                    &circuit,
+                    &own,
+                    |root| bls12_381::bls_transcript(&statement, root),
+                    |proof| {
+                        bls12_381::verify_bls_migration_with_backend(
+                            &statement,
+                            proof,
+                            &statement.migration_domain,
+                            statement.epoch_anchor,
+                            accel,
+                        )
+                        .map_err(|_| Error::InvalidProof)
+                    },
+                )?;
+                Ok((statement, proof))
+            }
+            CeremonyEngine::Quorum(mut e) => {
+                statement.migration_nullifier = derive_nullifier_in_mpc(
+                    &mut *e,
+                    &pre_circuit,
+                    &own,
+                    &self.entropy,
+                    &self.session,
+                    &req_bytes,
+                )?;
+                let stmt_bytes = statement.to_transcript_bytes();
+                let circuit =
+                    bls12_381::build_bls_ownership_circuit(&statement, public_affine, &[0; 32]).0;
+                let proof = self.run_circuit(
+                    &mut *e,
+                    children,
+                    &stmt_bytes,
+                    &circuit,
+                    &own,
+                    |root| bls12_381::bls_transcript(&statement, root),
+                    |proof| {
+                        bls12_381::verify_bls_migration_with_backend(
+                            &statement,
+                            proof,
+                            &statement.migration_domain,
+                            statement.epoch_anchor,
+                            accel,
+                        )
+                        .map_err(|_| Error::InvalidProof)
+                    },
+                )?;
+                Ok((statement, proof))
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_circuit<E: ProverEngine>(
+        &self,
+        e: &mut E,
+        children: Vec<E::Transport>,
+        statement_bytes: &[u8],
+        circuit: &Circuit,
+        own_witness: &[u64],
+        transcript_fn: impl FnOnce(&[u8; 32]) -> InterleavedTranscript,
+        verify_fn: impl FnOnce(&MigrationZkProof) -> Result<(), Error>,
+    ) -> Result<MigrationZkProof, Error> {
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.STATEMENT.V1",
-            &[&statement_bytes, &(children.len() as u64).to_le_bytes()],
+            &[statement_bytes, &(children.len() as u64).to_le_bytes()],
         ))?;
 
-        let mut own: Vec<_> = self
-            .witness
-            .iter()
-            .flat_map(|b| (0..8).map(move |i| if (b >> i) & 1 != 0 { u64::MAX } else { 0 }))
-            .collect();
-        let shared = e.share_uniform_lanes(&own);
-        ct_zeroize_u64s(&mut own);
         // Both replicated witness components this custodian holds are wiped on
         // every exit path, as are its shares of all virtual-head tape seeds.
-        let witness = shared?;
+        let witness = e.share_uniform_lanes(own_witness)?;
         let witness: &[E::Bit] = &witness;
-        let circuit = crate::ownership::build(statement, &[0; 32]);
 
         let num_batches = MIT_REPETITIONS.div_ceil(64);
         let mut seeds = Vec::with_capacity(num_batches);
@@ -299,7 +787,7 @@ impl CoZkCustodianShare {
                             &[
                                 &self.entropy,
                                 &self.session,
-                                &statement_bytes,
+                                statement_bytes,
                                 &((batch * 64 + lane) as u64).to_le_bytes(),
                                 &[head],
                             ],
@@ -331,19 +819,19 @@ impl CoZkCustodianShare {
         // mandatory active multiplication checks on EVERY batch BEFORE opening any
         // commitment, public circuit output, or ZKBoo view.
         let mut computed_batches =
-            compute_batches(&mut e, &circuit, witness, &seeds, children, &self.entropy)?;
+            compute_batches(e, circuit, witness, &seeds, children, &self.entropy)?;
 
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.PRECOMMIT.V1",
-            &[&statement_bytes],
+            &[statement_bytes],
         ))?;
 
         // Phase 2: Open view commitments and public outputs for each batch.
         let mut public = Vec::with_capacity(MIT_REPETITIONS);
         for (batch, item) in computed_batches.iter_mut().enumerate() {
-            let opening_engine = item.engine.as_mut().unwrap_or(&mut e);
+            let opening_engine = item.engine.as_mut().unwrap_or(&mut *e);
             let rounds =
                 open_batch_public_rounds(opening_engine, batch, &item.commit_bits, &item.views)?;
             public.extend(rounds);
@@ -361,10 +849,10 @@ impl CoZkCustodianShare {
         // Ceremony-wide Fiat-Shamir freeze precedes every challenged ZKBoo view opening.
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.FREEZE.V1",
-            &[&statement_bytes, &root],
+            &[statement_bytes, &root],
         ))?;
 
-        let mut t = zk_engine::transcript(statement, &root);
+        let mut t = transcript_fn(&root);
         let challenges = zk_engine::challenges(&mut t);
         let mut repetitions = Vec::with_capacity(MIT_REPETITIONS);
 
@@ -375,7 +863,7 @@ impl CoZkCustodianShare {
             .collect();
 
         for (batch, mut result) in computed_batches.into_iter().enumerate() {
-            let opening_engine = result.engine.as_mut().unwrap_or(&mut e);
+            let opening_engine = result.engine.as_mut().unwrap_or(&mut *e);
             let views = &result.views;
             let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
             let mut opened: Vec<Vec<PartyView>> = Vec::with_capacity(3);
@@ -436,14 +924,7 @@ impl CoZkCustodianShare {
             views_merkle_root: root,
             repetitions,
         };
-        zk_engine::verify_migration_proof_with_backend(
-            statement,
-            &proof,
-            &statement.migration_domain,
-            statement.epoch_anchor,
-            accel,
-        )
-        .map_err(|_| Error::InvalidProof)?;
+        verify_fn(&proof)?;
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
         e.audit(self, witness, &audit_inputs, &proof);
@@ -459,7 +940,13 @@ pub(crate) trait ProverEngine: Core + Sized + Send {
     #[cfg(any(feature = "std", test))]
     type BatchSeed: Send + Sync;
     #[cfg(any(feature = "std", test))]
-    fn batch_seed(&self, entropy: &[u8; 32]) -> Self::BatchSeed;
+    fn batch_seed(
+        &mut self,
+        entropy: &[u8; 32],
+        cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> Self::BatchSeed;
+    #[cfg(any(feature = "std", test))]
+    fn poison_batch_seed(_seed: &Self::BatchSeed) {}
     /// Engine for `batch`, bound to a batch-specific session and entropy.
     /// It aborts at its next exchange once `cancelled` is set.
     #[cfg(any(feature = "std", test))]
@@ -522,7 +1009,11 @@ impl<T: Transport> ProverEngine for Engine<T> {
     #[cfg(any(feature = "std", test))]
     type BatchSeed = ReplicatedSeed;
     #[cfg(any(feature = "std", test))]
-    fn batch_seed(&self, entropy: &[u8; 32]) -> ReplicatedSeed {
+    fn batch_seed(
+        &mut self,
+        entropy: &[u8; 32],
+        _cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> ReplicatedSeed {
         let (session, keys) = self.custody();
         ReplicatedSeed {
             party: self.party,
@@ -585,7 +1076,8 @@ pub(crate) struct QuorumSeed {
     entropy: [u8; 32],
     config: ThresholdConfig,
     peer_keys: Vec<[u8; 32]>,
-    mac_keys: MacKeyShare,
+    seed_slot: std::sync::Arc<std::sync::Mutex<MacKeyShare>>,
+    pub(crate) escrow: QuorumKeyEscrow,
 }
 #[cfg(any(feature = "std", test))]
 impl Drop for QuorumSeed {
@@ -594,6 +1086,7 @@ impl Drop for QuorumSeed {
         for k in &mut self.peer_keys {
             ct_zeroize_bytes(k);
         }
+        self.seed_slot.lock().unwrap_or_else(|e| e.into_inner()).wipe();
     }
 }
 impl<T: Transport> ProverEngine for SpdzEngine<T> {
@@ -601,16 +1094,28 @@ impl<T: Transport> ProverEngine for SpdzEngine<T> {
     #[cfg(any(feature = "std", test))]
     type BatchSeed = QuorumSeed;
     #[cfg(any(feature = "std", test))]
-    fn batch_seed(&self, entropy: &[u8; 32]) -> QuorumSeed {
+    fn batch_seed(
+        &mut self,
+        entropy: &[u8; 32],
+        cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    ) -> QuorumSeed {
+        let escrow = QuorumKeyEscrow::new(cancelled);
+        self.attach_escrow(&escrow);
         let (session, config, peer_keys, mac_keys) = self.custody();
+        let seed_slot = escrow.register(mac_keys);
         QuorumSeed {
             party: self.party,
             session,
             entropy: *entropy,
             config,
             peer_keys,
-            mac_keys,
+            seed_slot,
+            escrow,
         }
+    }
+    #[cfg(any(feature = "std", test))]
+    fn poison_batch_seed(seed: &QuorumSeed) {
+        seed.escrow.poison_all();
     }
     #[cfg(any(feature = "std", test))]
     fn for_batch(
@@ -619,22 +1124,34 @@ impl<T: Transport> ProverEngine for SpdzEngine<T> {
         transport: T,
         cancelled: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
     ) -> Result<Self, Error> {
+        if seed.escrow.is_poisoned() {
+            return Err(Error::MultiplicationCheck);
+        }
+        let batch_keys = {
+            let guard = seed.seed_slot.lock().unwrap_or_else(|e| e.into_inner());
+            if seed.escrow.is_poisoned() {
+                return Err(Error::MultiplicationCheck);
+            }
+            guard.fork_stream(b"BATCH", batch as u64)
+        };
         let mut entropy = batch_entropy(&seed.entropy, &seed.session, batch);
         let engine = SpdzEngine::new(
             seed.party,
             batch_session(&seed.session, batch),
             seed.config.clone(),
             seed.peer_keys.clone(),
-            seed.mac_keys.duplicate(),
+            batch_keys,
             transport,
         );
         let mut engine = match engine {
             Ok(engine) => engine,
             Err(error) => {
                 ct_zeroize_bytes(&mut entropy);
+                seed.escrow.poison_all();
                 return Err(error);
             }
         };
+        engine.attach_escrow(&seed.escrow);
         engine.batch_cancelled = Some(cancelled);
         engine.mix_entropy(&entropy);
         ct_zeroize_bytes(&mut entropy);
@@ -721,9 +1238,9 @@ fn compute_batches<E: ProverEngine>(
 ) -> Result<Vec<BatchComputed<E>>, Error> {
     #[cfg(any(feature = "std", test))]
     if !children.is_empty() {
-        let seed = e.batch_seed(entropy);
-        let seed = &seed;
         let cancelled = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let seed = e.batch_seed(entropy, cancelled.clone());
+        let seed = &seed;
         let width = e
             .max_parallel_batches()
             .max(1)
@@ -749,9 +1266,10 @@ fn compute_batches<E: ProverEngine>(
                                 Ok(result)
                             })();
                             if result.is_err() {
-                                // Cancellation can only abort. Every successful batch still
-                                // passes its multiplication checks and the global barrier.
-                                cancelled.store(true, core::sync::atomic::Ordering::Relaxed);
+                                // Cancellation can only abort, and synchronously poisons + wipes
+                                // all concurrent worker `MacKeyShare`s in `QuorumKeyEscrow`.
+                                cancelled.store(true, core::sync::atomic::Ordering::SeqCst);
+                                E::poison_batch_seed(seed);
                             }
                             result
                         })
@@ -759,10 +1277,16 @@ fn compute_batches<E: ProverEngine>(
                     .collect();
                 let results: Vec<Result<_, Error>> = handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or(Err(Error::Transport)))
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            cancelled.store(true, core::sync::atomic::Ordering::SeqCst);
+                            E::poison_batch_seed(seed);
+                            Err(Error::Transport)
+                        })
+                    })
                     .collect();
-                // A sibling cancelled at an exchange reports Transport. Preserve the
-                // actual rejection.
+                // A sibling cancelled at an exchange reports Transport or MultiplicationCheck.
+                // Preserve the primary non-Transport rejection.
                 if let Some(error) = results
                     .iter()
                     .filter_map(|r| r.as_ref().err())
@@ -820,7 +1344,7 @@ impl<B: ShareBit> SharedValue<B> {
         if d == Domain::Bit {
             Self::Bit(B::default())
         } else {
-            Self::Field(vec![[[0; 4]; 2]; 64].into())
+            Self::Field(vec![[ZERO; 2]; 64].into())
         }
     }
     fn bit(&self) -> B {
@@ -864,7 +1388,7 @@ impl TapeCursor {
     }
     fn next_field(&mut self, d: Domain) -> usize {
         let start = self.sponge_bits;
-        self.sponge_bits += d.width().div_ceil(8) * 8;
+        self.sponge_bits += d.tape_draw_bits();
         start
     }
 }
@@ -898,15 +1422,9 @@ const MAX_TAPE_ATTEMPTS: usize = 8;
 //
 // The result is the stream `zk_engine::Tape` reads from the same seed: a
 // non-canonical word is skipped and the draw takes the next word of the same
-// width, Boolean refills take whole 64-bit words in stream order.
-//
-// What is opened: per head and lane, whether every draw found a canonical word
-// within `attempts` candidates. Which draw failed, how many words it skipped and
-// the skipped words stay shared, and the shape of the computation depends only
-// on the public `attempts`. The opened bit is a function of that lane's tape seed
-// alone. The words it is about are discarded, and the words that are used are
-// later squeezes of the same sponge, so the bit says nothing about any share a
-// view is built from or about the witness.
+// width, Boolean refills take whole 64-bit words in stream order. Wide
+// zero-rejection domains (`PallasFp` and `BlsFp`) never reject, while still
+// shifting in lockstep whenever an earlier `Gold`/`Secp`/`Ed` draw skips a word.
 fn canonical_tape_attempt<E: Core>(
     e: &mut E,
     streams: &[Word<E::Bit>],
@@ -925,9 +1443,12 @@ fn canonical_tape_attempt<E: Core>(
         .collect();
     let mut valid: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
     for draw in draws {
+        if matches!(draw.domain, Domain::PallasFp | Domain::BlsFp) {
+            continue;
+        }
         let stream = &mut out[draw.head];
         let width = draw.domain.width();
-        let consumed = width.div_ceil(8) * 8;
+        let consumed = draw.domain.tape_draw_bits();
         for attempt in 0..attempts {
             let word = stream[draw.start..draw.start + width]
                 .iter()
@@ -967,18 +1488,20 @@ fn tape_counts(
     let mut required = counts;
     let mut ends = [0; 3];
     for draw in draws {
-        let width = draw.domain.width().div_ceil(8) * 8;
         if draw.head >= 3 || draw.domain == Domain::Bit {
             return Err(Error::InvalidTape);
         }
+        let width = draw.domain.tape_draw_bits();
         let end = draw.start.checked_add(width).ok_or(Error::InvalidTape)?;
         if draw.start < ends[draw.head] || end > counts[draw.head] {
             return Err(Error::InvalidTape);
         }
         ends[draw.head] = end;
-        required[draw.head] = required[draw.head]
-            .checked_add(width.checked_mul(extra).ok_or(Error::InvalidTape)?)
-            .ok_or(Error::InvalidTape)?;
+        if !matches!(draw.domain, Domain::PallasFp | Domain::BlsFp) {
+            required[draw.head] = required[draw.head]
+                .checked_add(width.checked_mul(extra).ok_or(Error::InvalidTape)?)
+                .ok_or(Error::InvalidTape)?;
+        }
     }
     Ok(required)
 }
@@ -1033,6 +1556,129 @@ fn fold_all_true_bits<E: Core>(e: &mut E, mut bits: Word<E::Bit>) -> Result<E::B
     Ok(bits[0])
 }
 
+struct EvaluatedWires<B: ShareBit> {
+    wires: Vec<Option<[SharedValue<B>; 3]>>,
+    raw_draw_words: Vec<Word<B>>,
+    encodings: Vec<[Option<Word<B>>; 3]>,
+    node_tapes: Vec<NodeTape>,
+}
+
+fn check_outputs_zero<E: Core>(
+    e: &mut E,
+    c: &Circuit,
+    wires: &[Option<[SharedValue<E::Bit>; 3]>],
+    outputs: &[usize],
+) -> Result<(), Error> {
+    let mut residual_bits: Word<E::Bit> = SecretVec::new();
+    for &out in outputs {
+        if c.nodes[out].domain == Domain::Bit {
+            let w = wires[out].as_ref().unwrap();
+            residual_bits.push(w[0].bit() ^ w[1].bit() ^ w[2].bit());
+        }
+    }
+    for dom in Domain::ALL_FIELDS {
+        let mut sums: Vec<FieldWord> = Vec::new();
+        for &out in outputs {
+            if c.nodes[out].domain == dom {
+                let w = wires[out].as_ref().unwrap();
+                let s01 = e.fadd(w[0].field(), w[1].field(), dom);
+                sums.push(e.fadd(&s01, w[2].field(), dom));
+            }
+        }
+        if !sums.is_empty() {
+            let refs: Vec<&FieldWord> = sums.iter().collect();
+            let converted = e.field_to_bits_many(&refs, dom)?;
+            for fw in &mut sums {
+                for pair in fw {
+                    ct_zeroize_u64s(&mut pair[0]);
+                    ct_zeroize_u64s(&mut pair[1]);
+                }
+            }
+            for word in converted {
+                residual_bits.extend(word);
+            }
+        }
+    }
+    let ones = e.constant(u64::MAX);
+    let zero_flags: Word<E::Bit> = residual_bits.into_iter().map(|b| b ^ ones).collect();
+    let all_outputs_zero = fold_all_true_bits(e, zero_flags)?;
+    // Explicitly verify all circuit, conversion, and tree-AND multiplications
+    // BEFORE opening the single 1-bit `all_outputs_zero` predicate.
+    e.verify_all_pending()?;
+    let opened_ok = e.open(&[all_outputs_zero])?;
+    if opened_ok[0] != u64::MAX {
+        return Err(Error::InvalidProof);
+    }
+    Ok(())
+}
+
+fn derive_nullifier_in_mpc<E: Core>(
+    e: &mut E,
+    pre_circuit: &Circuit,
+    own_witness: &[u64],
+    entropy: &[u8; 32],
+    session: &[u8; 32],
+    req_bytes: &[u8],
+) -> Result<[u64; 4], Error> {
+    if pre_circuit.outputs.len() < 4 {
+        return Err(Error::InvalidConfiguration);
+    }
+    e.agree(cshake256_framed_32(
+        b"QSAG.OUTER.REQUEST.V1",
+        &[req_bytes],
+    ))?;
+    let witness = e.share_uniform_lanes(own_witness)?;
+    let mut seeds = Vec::with_capacity(3);
+    for head in 0..3u8 {
+        let mut lane_seeds: Vec<_> = (0..64u64)
+            .map(|lane| {
+                cshake256_framed_32(
+                    b"QSAG.OUTER.NULLIFIER.SEED.V1",
+                    &[entropy, session, req_bytes, &lane.to_le_bytes(), &[head]],
+                )
+            })
+            .collect();
+        let mut own_seed: Vec<_> = (0..256)
+            .map(|i| {
+                lane_seeds.iter().enumerate().fold(0, |v, (lane, s)| {
+                    v | (((s[i / 8] >> (i % 8)) & 1) as u64) << lane
+                })
+            })
+            .collect();
+        for s in &mut lane_seeds {
+            ct_zeroize_bytes(s);
+        }
+        let shared = e.share(&own_seed);
+        ct_zeroize_u64s(&mut own_seed);
+        seeds.push(shared?);
+    }
+    let eval = evaluate_wires(e, pre_circuit, &witness, &seeds)?;
+    let split = pre_circuit.outputs.len() - 4;
+    // Verify scalar canonicality + public commitment match BEFORE opening the nullifier!
+    check_outputs_zero(e, pre_circuit, &eval.wires, &pre_circuit.outputs[..split])?;
+
+    let mut nul_words = Vec::with_capacity(4);
+    for &out_idx in &pre_circuit.outputs[split..] {
+        if pre_circuit.nodes[out_idx].domain != Domain::Gold {
+            return Err(Error::InvalidConfiguration);
+        }
+        let w = eval.wires[out_idx].as_ref().unwrap();
+        let s01 = e.fadd(w[0].field(), w[1].field(), Domain::Gold);
+        nul_words.push(e.fadd(&s01, w[2].field(), Domain::Gold));
+    }
+    let opened = e.fopen_many(&nul_words, Domain::Gold)?;
+    let mut nullifier = [0u64; 4];
+    for (slot, lanes) in nullifier.iter_mut().zip(&opened) {
+        let first = lanes[0][0];
+        if lanes.iter().any(|v| v[0] != first) {
+            e.poison();
+            return Err(Error::InvalidProof);
+        }
+        *slot = first;
+    }
+    Ok(nullifier)
+}
+
 #[cfg(test)]
 fn evaluate<E: Core>(
     e: &mut E,
@@ -1043,13 +1689,12 @@ fn evaluate<E: Core>(
     evaluate_inner(e, c, witness, seeds, false)
 }
 
-fn evaluate_inner<E: Core>(
+fn evaluate_wires<E: Core>(
     e: &mut E,
     c: &Circuit,
     witness: &[E::Bit],
     seeds: &[Word<E::Bit>],
-    verify_zero_outputs: bool,
-) -> Result<Vec<SharedView<E::Bit>>, Error> {
+) -> Result<EvaluatedWires<E::Bit>, Error> {
     // Keep field-fault regressions aimed at circuit evaluation, even when tape
     // conversion itself uses arithmetic multiplications for carry correction.
     #[cfg(test)]
@@ -1164,15 +1809,20 @@ fn evaluate_inner<E: Core>(
         ],
     )?;
 
-    // 3. Batch-check `< modulus` across all field draws per domain and open `valid` upfront.
+    // 3. Batch-check `< modulus` across rejection-sampled domains (`Gold`, `Secp`, `Ed`)
+    // and open `valid` upfront; `PallasFp` and `BlsFp` use wide zero-rejection draws.
     let mut valid_groups: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
     let mut raw_draw_words: Vec<Word<E::Bit>> = field_draws
         .iter()
         .map(|fd| {
-            squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
-                .iter()
-                .copied()
-                .collect()
+            if matches!(fd.domain, Domain::PallasFp | Domain::BlsFp) {
+                SecretVec::new()
+            } else {
+                squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
+                    .iter()
+                    .copied()
+                    .collect()
+            }
         })
         .collect();
 
@@ -1219,14 +1869,15 @@ fn evaluate_inner<E: Core>(
             attempts *= 2;
         }
         for (word, draw) in raw_draw_words.iter_mut().zip(&field_draws) {
-            word.copy_from_slice(
-                &squeezed[draw.head][draw.start..draw.start + draw.domain.width()],
-            );
+            if !matches!(draw.domain, Domain::PallasFp | Domain::BlsFp) {
+                word.copy_from_slice(
+                    &squeezed[draw.head][draw.start..draw.start + draw.domain.width()],
+                );
+            }
         }
     }
 
-    // Only `NodeTape::InputField` draws are read again in Step 7; move all `MulField`
-    // draws directly into `bits_to_field_many` so their `Word<E::Bit>` buffers free early.
+    // Only single-word `NodeTape::InputField` draws (`Gold`/`Secp`/`Ed`) are read again in Step 7.
     let mut keep_raw_draw = vec![false; field_draws.len()];
     for nt in &node_tapes {
         if let NodeTape::InputField { draws, .. } = *nt {
@@ -1254,6 +1905,49 @@ fn evaluate_inner<E: Core>(
             let converted = e.bits_to_field_many(&dom_words, dom)?;
             for (idx, fw) in idxs.into_iter().zip(converted) {
                 draw_fields[idx] = Some(fw);
+            }
+        }
+    }
+    let zero_bit = e.constant(0);
+    for (dom, limb_bits, hi_offset, two_pow) in [
+        (
+            Domain::PallasFp,
+            254usize,
+            256usize,
+            [0, 0, 0, 1u64 << 62, 0, 0],
+        ),
+        (
+            Domain::BlsFp,
+            380usize,
+            384usize,
+            [0, 0, 0, 0, 0, 1u64 << 60],
+        ),
+    ] {
+        let mut idxs = Vec::new();
+        let mut wide_words: Vec<Word<E::Bit>> = Vec::new();
+        for (idx, fd) in field_draws.iter().enumerate() {
+            if fd.domain == dom {
+                idxs.push(idx);
+                let mut lo: Word<E::Bit> = squeezed[fd.head][fd.start..fd.start + limb_bits]
+                    .iter()
+                    .copied()
+                    .collect();
+                lo.push(zero_bit);
+                let mut hi: Word<E::Bit> = squeezed[fd.head]
+                    [fd.start + hi_offset..fd.start + hi_offset + limb_bits]
+                    .iter()
+                    .copied()
+                    .collect();
+                hi.push(zero_bit);
+                wide_words.push(lo);
+                wide_words.push(hi);
+            }
+        }
+        if !wide_words.is_empty() {
+            let converted = e.bits_to_field_many(&wide_words, dom)?;
+            for (idx, pair) in idxs.into_iter().zip(converted.chunks_exact(2)) {
+                let hi_scaled = e.fscale(&pair[1], two_pow, dom);
+                draw_fields[idx] = Some(e.fadd(&pair[0], &hi_scaled, dom));
             }
         }
     }
@@ -1341,7 +2035,7 @@ fn evaluate_inner<E: Core>(
             }
 
             // 5b. `Op::Lift` batched per domain (`lift_bits_many`).
-            for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for dom in Domain::ALL_FIELDS {
                 let mut lift_idxs = Vec::new();
                 let mut lift_owners = Vec::new();
                 let mut lift_bits = SecretVec::new();
@@ -1381,7 +2075,7 @@ fn evaluate_inner<E: Core>(
                         Some(vec![wires[a].as_ref().unwrap()[owner].bit()].into());
                 }
             }
-            for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for dom in Domain::ALL_FIELDS {
                 let mut src_pairs = Vec::new();
                 let mut src_refs = Vec::new();
                 for &(a, owner) in &unique_sources {
@@ -1441,7 +2135,7 @@ fn evaluate_inner<E: Core>(
             }
 
             // 5e. Prime-field `Op::Mul` batched per domain into a single `e.fmul_many`.
-            for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            for dom in Domain::ALL_FIELDS {
                 let mut fmul_idxs = Vec::new();
                 let mut bb_sums: Vec<[FieldWord; 3]> = Vec::new();
                 for &idx in comm_nodes {
@@ -1501,7 +2195,8 @@ fn evaluate_inner<E: Core>(
                         SharedValue::Bit(e.constant(if value[0] == 0 { 0 } else { u64::MAX }))
                     } else {
                         SharedValue::Field(e.fconstant(value, d))
-                    },
+                    }
+                    ,
                     SharedValue::zero(d),
                     SharedValue::zero(d),
                 ],
@@ -1556,54 +2251,37 @@ fn evaluate_inner<E: Core>(
     drop(squeezed);
     drop(draw_fields);
 
+    Ok(EvaluatedWires {
+        wires,
+        raw_draw_words,
+        encodings,
+        node_tapes,
+    })
+}
+
+fn evaluate_inner<E: Core>(
+    e: &mut E,
+    c: &Circuit,
+    witness: &[E::Bit],
+    seeds: &[Word<E::Bit>],
+    verify_zero_outputs: bool,
+) -> Result<Vec<SharedView<E::Bit>>, Error> {
+    let EvaluatedWires {
+        mut wires,
+        raw_draw_words,
+        mut encodings,
+        node_tapes,
+    } = evaluate_wires(e, c, witness, seeds)?;
+
     // 5g. Mandatory in-MPC output-residual zero check (`P0-1`): verify that every
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
     // heads BEFORE converting views or opening any output shares / view commitments.
     if verify_zero_outputs {
-        let mut residual_bits: Word<E::Bit> = SecretVec::new();
-        for &out in &c.outputs {
-            if c.nodes[out].domain == Domain::Bit {
-                let w = wires[out].as_ref().unwrap();
-                residual_bits.push(w[0].bit() ^ w[1].bit() ^ w[2].bit());
-            }
-        }
-        for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
-            let mut sums: Vec<FieldWord> = Vec::new();
-            for &out in &c.outputs {
-                if c.nodes[out].domain == dom {
-                    let w = wires[out].as_ref().unwrap();
-                    let s01 = e.fadd(w[0].field(), w[1].field(), dom);
-                    sums.push(e.fadd(&s01, w[2].field(), dom));
-                }
-            }
-            if !sums.is_empty() {
-                let refs: Vec<&FieldWord> = sums.iter().collect();
-                let converted = e.field_to_bits_many(&refs, dom)?;
-                for fw in &mut sums {
-                    for pair in fw {
-                        ct_zeroize_u64s(&mut pair[0]);
-                        ct_zeroize_u64s(&mut pair[1]);
-                    }
-                }
-                for word in converted {
-                    residual_bits.extend(word);
-                }
-            }
-        }
-        let ones = e.constant(u64::MAX);
-        let zero_flags: Word<E::Bit> = residual_bits.into_iter().map(|b| b ^ ones).collect();
-        let all_outputs_zero = fold_all_true_bits(e, zero_flags)?;
-        // Explicitly verify all circuit, conversion, and tree-AND multiplications
-        // BEFORE opening the single 1-bit `all_outputs_zero` predicate.
-        e.verify_all_pending()?;
-        let opened_ok = e.open(&[all_outputs_zero])?;
-        if opened_ok[0] != u64::MAX {
-            return Err(Error::InvalidProof);
-        }
+        check_outputs_zero(e, c, &wires, &c.outputs)?;
     }
 
     // 6. Batch-convert all remaining `FieldWord`s needed for `views[0..3]` per domain.
-    for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+    for dom in Domain::ALL_FIELDS {
         let mut to_convert_pairs: Vec<(usize, usize)> = Vec::new();
         for (idx, node) in c.nodes.iter().enumerate() {
             if node.domain != dom {
@@ -1611,8 +2289,15 @@ fn evaluate_inner<E: Core>(
             }
             match node.op {
                 Op::Input => {
-                    if encodings[idx][2].is_none() {
-                        to_convert_pairs.push((idx, 2));
+                    let heads = if matches!(dom, Domain::PallasFp | Domain::BlsFp) {
+                        0..3
+                    } else {
+                        2..3
+                    };
+                    for head in heads {
+                        if encodings[idx][head].is_none() {
+                            to_convert_pairs.push((idx, head));
+                        }
                     }
                 }
                 Op::Mul(_, _) => {
@@ -1670,6 +2355,13 @@ fn evaluate_inner<E: Core>(
                     let w = wires[idx].as_ref().unwrap();
                     for head in 0..3 {
                         outer_mpc::encode(&mut views[head].inputs, &[w[head].bit()]);
+                    }
+                } else if matches!(d, Domain::PallasFp | Domain::BlsFp) {
+                    for head in 0..3 {
+                        outer_mpc::encode(
+                            &mut views[head].inputs,
+                            encodings[idx][head].as_ref().unwrap(),
+                        );
                     }
                 } else {
                     let NodeTape::InputField { draws, .. } = node_tapes[idx] else {
@@ -1862,7 +2554,7 @@ mod tests {
         };
         let mut candidates = Vec::with_capacity(MIT_REPETITIONS * 3);
         assert_eq!(state.party, engine.party);
-        assert_eq!(physical_input.len(), 256);
+        assert!(physical_input.len() == 256 || physical_input.len() == 512);
         assert!(messages > 0 && words > 0);
         for (rep, opening) in proof.repetitions.iter().enumerate() {
             let e = opening.opened_e as usize;
@@ -2113,7 +2805,13 @@ mod tests {
             let mut e = Engine::new(p, [51; 32], keys(p), n).unwrap();
             let c = Builder::default();
             let bit = c.input(1);
-            for (d, count) in [(Domain::Gold, 1), (Domain::Secp, 8), (Domain::Ed, 9)] {
+            for (d, count) in [
+                (Domain::Gold, 1),
+                (Domain::Secp, 8),
+                (Domain::Ed, 9),
+                (Domain::PallasFp, 3),
+                (Domain::BlsFp, 5),
+            ] {
                 for _ in 0..count {
                     c.output(c.mul(bit, bit));
                 }
@@ -2121,7 +2819,7 @@ mod tests {
                 let b = c.add(a, c.small(d, 27));
                 let z = c.mul(a, b);
                 c.output(z);
-                if d == Domain::Gold {
+                if matches!(d, Domain::Gold | Domain::PallasFp | Domain::BlsFp) {
                     let inverse = c.inverse(z);
                     c.output(inverse);
                 }
@@ -2194,11 +2892,15 @@ mod tests {
             let c = Builder::default();
             let bit = c.input(1);
             c.output(c.mul(bit, bit));
-            let lifted = c.lift(bit, Domain::Gold);
-            let value = c.mul(lifted, c.small(Domain::Gold, 7));
-            c.output(value);
-            for bit in c.bits(value) {
-                c.output(bit);
+            for dom in [Domain::Gold, Domain::PallasFp, Domain::BlsFp] {
+                let lifted = c.lift(bit, dom);
+                let value = c.mul(lifted, c.small(dom, 7));
+                let inv = c.inverse(value);
+                c.output(value);
+                c.output(inv);
+                for b in c.bits(value) {
+                    c.output(b);
+                }
             }
             let c = c.finish();
             let witness = e
@@ -2795,5 +3497,451 @@ mod tests {
     fn custodian_ed25519_input_key_share_substitution_aborts_before_any_output_or_commitment_opens()
     {
         assert_input_substitution_aborts(true, false, 0xb0);
+    }
+
+    #[test]
+    fn concurrent_quorum_batch_worker_abort_poisons_escrow_and_wipes_all_mac_keys() {
+        let config = ThresholdConfig::new(3, 5, vec![0, 2, 4]).unwrap();
+        let dealer = crate::threshold_prep::FixtureDealer::new(&config, [0x7c; 32]);
+        let mut mac_shares = dealer.mac_key_shares();
+        let party0_keys = mac_shares.remove(0);
+
+        struct DummyTransport;
+        impl Transport for DummyTransport {}
+
+        let mut root = SpdzEngine::new(
+            0,
+            [0x7d; 32],
+            config.clone(),
+            vec![[0x11; 32], [0x22; 32]],
+            party0_keys,
+            DummyTransport,
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let seed = root.batch_seed(&[0x33; 32], cancelled.clone());
+
+        let mut workers: Vec<_> = (0..4)
+            .map(|batch| SpdzEngine::for_batch(&seed, batch, DummyTransport, cancelled.clone()).unwrap())
+            .collect();
+        // Root + QuorumSeed + 4 concurrent workers = 6 registered slots, all non-zero before abort.
+        assert_eq!(seed.escrow.registered_count_and_all_wiped(), (6, false));
+
+        // Induce an abort on worker 2 (`Core::poison`): must synchronously poison the escrow,
+        // set `cancelled = true`, and volatile-wipe ALL 6 `MacKeyShare` slots across workers!
+        Core::poison(&mut workers[2]);
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(seed.escrow.is_poisoned());
+        assert_eq!(seed.escrow.registered_count_and_all_wiped(), (6, true));
+
+        // Subsequent `for_batch` spawns fail closed immediately.
+        assert!(matches!(
+            SpdzEngine::for_batch(&seed, 4, DummyTransport, cancelled),
+            Err(Error::MultiplicationCheck)
+        ));
+    }
+
+    #[test]
+    fn complete_distributed_pallas_ak_and_rk_proofs_verify() {
+        use crate::pallas::PallasOwnershipWitness;
+        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
+        let target = zk_engine::tests::request(
+            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x42; 20]),
+        )
+        .target;
+        let domain = cshake256_framed_32(b"QSAG.PALLAS.CAMPAIGN.V1", &[&77u64.to_le_bytes()]);
+
+        // 1. Direct Zcash Orchard `OrchardSpendAuthKey` (`ak = [ask] SpendAuthG`) via `prove_pallas`.
+        let mut ask_le = [0u8; 32];
+        ask_le[0] = 0x5d;
+        ask_le[7] = 0xa3;
+        ask_le[19] = 0x11;
+        let wit_ak = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
+        let ak_comm = wit_ak.compute_spend_auth_key().unwrap();
+        let (_, _, rsk_ak) = wit_ak.effective_scalar(&ak_comm).unwrap();
+        let stmt_ak = PallasMigrationStatement {
+            commitment: ak_comm,
+            target_pq_address: target.clone(),
+            epoch_anchor: 77,
+            migration_domain: domain,
+            migration_nullifier: rsk_ak.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &domain),
+        };
+        let s0 = [0x91u8; 32];
+        let s1 = [0x64u8; 32];
+        let mut s2 = ask_le;
+        for i in 0..32 {
+            s2[i] ^= s0[i] ^ s1[i];
+        }
+        let ask_shares = [s0, s1, s2];
+        let session_ak = [0x81u8; 32];
+        let outcomes_ak = std::thread::scope(|scope| {
+            let handles: Vec<_> = audited_networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, (net, audit))| {
+                    let st = stmt_ak.clone();
+                    scope.spawn(move || {
+                        let share = CoZkCustodianShare::new(
+                            p,
+                            session_ak,
+                            ask_shares[p],
+                            [0x30 + p as u8; 32],
+                            keys(p),
+                        )
+                        .unwrap();
+                        (share.prove_pallas(&st, net), audit)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (party, (res, audit)) in outcomes_ak.into_iter().enumerate() {
+            let proof = res.expect("distributed Pallas ak proof must succeed");
+            pallas::verify_pallas_migration(&stmt_ak, &proof, &domain, 77).unwrap();
+            let candidates = audit.candidates();
+            assert!(!candidates.is_empty());
+            for recovered in candidates {
+                assert_ne!(recovered, ask_le, "custodian {party} leaked Pallas ask");
+            }
+        }
+
+        // 2. Rerandomized RedPallas `OrchardRedPallasRk` (`rk = [ask + alpha] SpendAuthG`)
+        //    via `prove_pallas_request` (jointly computing `migration_nullifier` inside MPC!).
+        let mut alpha_le = [0u8; 32];
+        alpha_le[0] = 0x77;
+        alpha_le[13] = 0x29;
+        let wit_rk = PallasOwnershipWitness::from_rerandomized_le(ask_le, alpha_le).unwrap();
+        let rk_comm = wit_rk.compute_rerandomized_rk().unwrap();
+        let (_, _, rsk_rk) = wit_rk.effective_scalar(&rk_comm).unwrap();
+        let expected_rk_nul =
+            rsk_rk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_RK, &domain);
+        let a0 = [0x17u8; 32];
+        let a1 = [0xc2u8; 32];
+        let mut a2 = alpha_le;
+        for i in 0..32 {
+            a2[i] ^= a0[i] ^ a1[i];
+        }
+        let alpha_shares = [a0, a1, a2];
+        let req_rk = PallasMigrationRequest {
+            commitment: rk_comm,
+            target,
+            epoch: 77,
+            domain,
+        };
+        let session_rk = [0x82u8; 32];
+        let outcomes_rk = std::thread::scope(|scope| {
+            let handles: Vec<_> = audited_networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, (net, audit))| {
+                    let req = req_rk.clone();
+                    scope.spawn(move || {
+                        let share = CoZkCustodianShare::new(
+                            p,
+                            session_rk,
+                            ask_shares[p],
+                            [0x40 + p as u8; 32],
+                            keys(p),
+                        )
+                        .unwrap()
+                        .with_rerandomizer(alpha_shares[p])
+                        .unwrap();
+                        (share.prove_pallas_request(req, net), audit)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (party, (res, audit)) in outcomes_rk.into_iter().enumerate() {
+            let (stmt_rk, proof) = res.expect("distributed Pallas rk request proof must succeed");
+            assert_eq!(stmt_rk.migration_nullifier, expected_rk_nul);
+            pallas::verify_pallas_migration(&stmt_rk, &proof, &domain, 77).unwrap();
+            for recovered in audit.candidates() {
+                assert_ne!(recovered, ask_le, "custodian {party} leaked Pallas ask");
+                assert_ne!(recovered, alpha_le, "custodian {party} leaked Pallas alpha");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_distributed_bls12_381_pubkey_and_unrevealed_0x00_proofs_verify() {
+        use crate::bls12_381::BlsOwnershipWitness;
+        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
+        let target = zk_engine::tests::request(
+            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x55; 20]),
+        )
+        .target;
+        let domain = cshake256_framed_32(b"QSAG.BLS12_381.CAMPAIGN.V1", &[&99u64.to_le_bytes()]);
+
+        let mut sk_be = [0u8; 32];
+        sk_be[31] = 0x4b;
+        sk_be[24] = 0x9e;
+        sk_be[12] = 0x17;
+        let wit = BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
+        let sk_scalar = wit.scalar().unwrap();
+        let sk_le = sk_scalar.to_le_bytes();
+        let expected_nul = sk_scalar.compute_nullifier(&domain);
+
+        let s0 = [0x3au8; 32];
+        let s1 = [0x8fu8; 32];
+        let mut s2 = sk_le;
+        for i in 0..32 {
+            s2[i] ^= s0[i] ^ s1[i];
+        }
+        let sk_shares = [s0, s1, s2];
+
+        // 1. Active `BeaconValidatorPubkey` (`0x01` credentials) via `prove_bls`.
+        let pub_comm = wit.compute_beacon_commitment().unwrap();
+        let mut wc_0x01 = [0x11u8; 32];
+        wc_0x01[0] = 0x01;
+        let stmt_pub = BlsMigrationStatement {
+            commitment: pub_comm,
+            validator_index: 123_456,
+            withdrawal_credentials: wc_0x01,
+            target_pq_address: target.clone(),
+            epoch_anchor: 99,
+            migration_domain: domain,
+            migration_nullifier: expected_nul,
+        };
+        let session_pub = [0x83u8; 32];
+        let outcomes_pub = std::thread::scope(|scope| {
+            let handles: Vec<_> = audited_networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, (net, audit))| {
+                    let st = stmt_pub.clone();
+                    scope.spawn(move || {
+                        let share = CoZkCustodianShare::new(
+                            p,
+                            session_pub,
+                            sk_shares[p],
+                            [0x70 + p as u8; 32],
+                            keys(p),
+                        )
+                        .unwrap();
+                        (share.prove_bls(&st, net), audit)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (party, (res, audit)) in outcomes_pub.into_iter().enumerate() {
+            let proof = res.expect("distributed BLS BeaconValidatorPubkey proof must succeed");
+            bls12_381::verify_bls_migration(&stmt_pub, &proof, &domain, 99).unwrap();
+            for recovered in audit.candidates() {
+                assert_ne!(recovered, sk_le, "custodian {party} leaked BLS sk");
+            }
+        }
+
+        // 2. Unrevealed legacy `0x00` `BLS_WITHDRAWAL_PREFIX` credential via `prove_bls_request`:
+        //    neither `sk` NOR `pk_48` is reconstructed even among the 3 custodians!
+        let unrev_comm = wit.compute_unrevealed_0x00_commitment().unwrap();
+        let BlsValidatorCommitment::UnrevealedBls0x00Credential(wc_0x00) = unrev_comm else {
+            unreachable!()
+        };
+        let req_unrev = BlsMigrationRequest {
+            commitment: unrev_comm,
+            validator_index: 654_321,
+            withdrawal_credentials: wc_0x00,
+            target,
+            epoch: 99,
+            domain,
+        };
+        let session_unrev = [0x84u8; 32];
+        let outcomes_unrev = std::thread::scope(|scope| {
+            let handles: Vec<_> = audited_networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, (net, audit))| {
+                    let req = req_unrev.clone();
+                    scope.spawn(move || {
+                        let share = CoZkCustodianShare::new(
+                            p,
+                            session_unrev,
+                            sk_shares[p],
+                            [0x80 + p as u8; 32],
+                            keys(p),
+                        )
+                        .unwrap();
+                        (share.prove_bls_request(req, net), audit)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (party, (res, audit)) in outcomes_unrev.into_iter().enumerate() {
+            let (stmt_unrev, proof) =
+                res.expect("distributed BLS UnrevealedBls0x00Credential proof must succeed");
+            assert_eq!(stmt_unrev.migration_nullifier, expected_nul);
+            bls12_381::verify_bls_migration(&stmt_unrev, &proof, &domain, 99).unwrap();
+            for recovered in audit.candidates() {
+                assert_ne!(recovered, sk_le, "custodian {party} leaked BLS sk");
+            }
+        }
+    }
+
+    #[test]
+    fn active_pallas_and_bls12_381_faults_and_bad_shares_abort_cleanly() {
+        use crate::{bls12_381::BlsOwnershipWitness, pallas::PallasOwnershipWitness};
+        let _ceremony_guard = CeremonySlot::acquire(1);
+        let target = zk_engine::tests::request(
+            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x66; 20]),
+        )
+        .target;
+
+        // 1. Active `Domain::PallasFp` field-mul fault in `prove_pallas` aborts with zero openings.
+        let mut ask_le = [0u8; 32];
+        ask_le[0] = 0x19;
+        let wit_p = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
+        let ak_comm = wit_p.compute_spend_auth_key().unwrap();
+        let (_, _, rsk) = wit_p.effective_scalar(&ak_comm).unwrap();
+        let dom_p = [0x21u8; 32];
+        let stmt_p = PallasMigrationStatement {
+            commitment: ak_comm,
+            target_pq_address: target.clone(),
+            epoch_anchor: 5,
+            migration_domain: dom_p,
+            migration_nullifier: rsk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &dom_p),
+        };
+        let p_shares = [[0x11; 32], [0x22; 32], {
+            let mut s = ask_le;
+            for byte in &mut s {
+                *byte ^= 0x11 ^ 0x22;
+            }
+            s
+        }];
+        let leaked_p: [Arc<AtomicBool>; 3] =
+            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+        let res_p = std::thread::scope(|scope| {
+            let handles: Vec<_> = outer_mpc::tests::networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, net)| {
+                    let st = stmt_p.clone();
+                    let flag = leaked_p[p].clone();
+                    scope.spawn(move || {
+                        let spy = ZkbooFaultSpy {
+                            inner: net,
+                            is_root: true,
+                            single_stream: true,
+                            fault: (p == 1).then_some(FaultInjection::FieldMul {
+                                domain: Domain::PallasFp,
+                                call_countdown: 3,
+                                lane: 17,
+                            }),
+                            precommit_or_view_opened: flag,
+                        };
+                        CoZkCustodianShare::new(p, [0x95; 32], p_shares[p], [p as u8; 32], keys(p))
+                            .unwrap()
+                            .prove_pallas(&st, spy)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (p, r) in res_p.into_iter().enumerate() {
+            assert_eq!(r, Err(Error::MultiplicationCheck));
+            assert!(!leaked_p[p].load(Ordering::SeqCst));
+        }
+
+        // 2. Active `Domain::BlsFp` field-mul fault in `prove_bls` + bad-share substitution in `prove_bls_request`.
+        let mut sk_be = [0u8; 32];
+        sk_be[31] = 0x2f;
+        let wit_b = BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
+        let sk_le = wit_b.scalar().unwrap().to_le_bytes();
+        let dom_b = [0x31u8; 32];
+        let pub_comm = wit_b.compute_beacon_commitment().unwrap();
+        let mut wc = [0u8; 32];
+        wc[0] = 0x02;
+        let stmt_b = BlsMigrationStatement {
+            commitment: pub_comm,
+            validator_index: 9,
+            withdrawal_credentials: wc,
+            target_pq_address: target.clone(),
+            epoch_anchor: 6,
+            migration_domain: dom_b,
+            migration_nullifier: wit_b.scalar().unwrap().compute_nullifier(&dom_b),
+        };
+        let b_shares = [[0x44; 32], [0x88; 32], {
+            let mut s = sk_le;
+            for byte in &mut s {
+                *byte ^= 0x44 ^ 0x88;
+            }
+            s
+        }];
+        let leaked_b: [Arc<AtomicBool>; 3] =
+            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
+        let res_b = std::thread::scope(|scope| {
+            let handles: Vec<_> = outer_mpc::tests::networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, net)| {
+                    let st = stmt_b.clone();
+                    let flag = leaked_b[p].clone();
+                    scope.spawn(move || {
+                        let spy = ZkbooFaultSpy {
+                            inner: net,
+                            is_root: true,
+                            single_stream: true,
+                            fault: (p == 2).then_some(FaultInjection::FieldMul {
+                                domain: Domain::BlsFp,
+                                call_countdown: 3,
+                                lane: 9,
+                            }),
+                            precommit_or_view_opened: flag,
+                        };
+                        CoZkCustodianShare::new(p, [0x96; 32], b_shares[p], [p as u8; 32], keys(p))
+                            .unwrap()
+                            .prove_bls(&st, spy)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for (p, r) in res_b.into_iter().enumerate() {
+            assert_eq!(r, Err(Error::MultiplicationCheck));
+            assert!(!leaked_b[p].load(Ordering::SeqCst));
+        }
+
+        // Corrupted witness share in `prove_bls_request` must abort BEFORE opening the nullifier!
+        let mut bad_shares = b_shares;
+        bad_shares[0][0] ^= 0x01;
+        let unrev = wit_b.compute_unrevealed_0x00_commitment().unwrap();
+        let BlsValidatorCommitment::UnrevealedBls0x00Credential(wc0) = unrev else {
+            unreachable!()
+        };
+        let req_bad = BlsMigrationRequest {
+            commitment: unrev,
+            validator_index: 9,
+            withdrawal_credentials: wc0,
+            target,
+            epoch: 6,
+            domain: dom_b,
+        };
+        let res_bad = std::thread::scope(|scope| {
+            let handles: Vec<_> = outer_mpc::tests::networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, net)| {
+                    let req = req_bad.clone();
+                    scope.spawn(move || {
+                        let spy = ZkbooFaultSpy {
+                            inner: net,
+                            is_root: true,
+                            single_stream: true,
+                            fault: None,
+                            precommit_or_view_opened: Arc::new(AtomicBool::new(false)),
+                        };
+                        CoZkCustodianShare::new(p, [0x97; 32], bad_shares[p], [p as u8; 32], keys(p))
+                            .unwrap()
+                            .prove_bls_request(req, spy)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        });
+        for r in res_bad {
+            assert_eq!(r, Err(Error::InvalidProof));
+        }
     }
 }

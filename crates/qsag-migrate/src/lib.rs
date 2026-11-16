@@ -55,6 +55,10 @@ mod parallel;
 mod secret;
 mod tape_sponge;
 pub mod threshold_mpc;
+pub use threshold_mpc::{
+    poly0x11b_to_t3_byte_ct, poly0x11b_to_t3_bytes32_ct, t3_to_poly0x11b_byte_ct,
+    t3_to_poly0x11b_bytes32_ct,
+};
 pub mod threshold_prep;
 pub use zk_engine::{
     MIT_PARTIES, MIT_REPETITIONS, MigrateError, MigrationRequest, MigrationStatement,
