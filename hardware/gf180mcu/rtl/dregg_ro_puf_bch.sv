@@ -11,6 +11,15 @@
 //     leftover min-entropy!); any manipulated FRAM `vmask_in` raises `blk_err` and wipes `word_out`.
 `default_nettype none
 `timescale 1ps / 1ps
+// Modelled oscillator counts exist only in a zero-delay RTL simulation. Any synthesis view
+// (SYNTHESIS or QSAG_GF180_CELLS) and the timed simulation (QSAG_SIM_DELAYS) use the real counters.
+`ifndef SYNTHESIS
+`ifndef QSAG_GF180_CELLS
+`ifndef QSAG_SIM_DELAYS
+`define QSAG_PUF_ZERO_DELAY_MODEL
+`endif
+`endif
+`endif
 /* verilator lint_off UNUSEDPARAM */
 /* verilator lint_off SYNCASYNCNET */
 /* verilator lint_off ZERODLY */
@@ -45,6 +54,32 @@ module dregg_puf_ro5 #(
         end
     endgenerate
     assign osc = n[5];
+endmodule
+
+// Ripple (asynchronous) up-counter clocked by a ring oscillator. Only bit 0 toggles at the
+// oscillator rate (one flop + one inverter in the loop), so the counter keeps up with a 5-stage
+// NAND2 ring (~1.5-3.5 ns period) where a synchronous 20-bit incrementer would not. The count is
+// only valid once the oscillator is stopped and the ripple has settled (20 stages).
+module dregg_ripple_cnt #(
+    parameter int N = 20
+) (
+    input  wire         clk,
+    input  wire         rst_n,
+    output wire [N-1:0] q
+);
+    logic [N-1:0] r;
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) r[0] <= 1'b0;
+        else        r[0] <= ~r[0];
+    genvar k;
+    generate
+        for (k = 1; k < N; k++) begin : g_bit
+            always_ff @(negedge r[k-1] or negedge rst_n)
+                if (!rst_n) r[k] <= 1'b0;
+                else        r[k] <= ~r[k];
+        end
+    endgenerate
+    assign q = r;
 endmodule
 
 module dregg_ro_puf_bch (
@@ -109,31 +144,70 @@ module dregg_ro_puf_bch (
     qsag_clkbuf u_ca (.a(ro_a_out[sel_a]), .y(clk_a));
     qsag_clkbuf u_cb (.a(ro_b_out[sel_b]), .y(clk_b));
 
-    logic        cnt_clr_n;
-    wire         cnt_rn = rst_n & cnt_clr_n;
-    logic [11:0] cnt_a_async, cnt_b_async;
-    always_ff @(posedge clk_a or negedge cnt_rn)
-        if (!cnt_rn) cnt_a_async <= '0;
-        else         cnt_a_async <= cnt_a_async + 12'd1;
-    always_ff @(posedge clk_b or negedge cnt_rn)
-        if (!cnt_rn) cnt_b_async <= '0;
-        else         cnt_b_async <= cnt_b_async + 12'd1;
+    // ------------------------------------------------------------ measurement window
+    // Both oscillators of a pair are enabled for 4096 << win_shift core clocks, then stopped, and
+    // the two ripple counters are read after SETTLE_CYCLES more clocks.
+    //
+    // Why 4096 (R1 B1). A count is N = f_ro * T_win. Its quantization error is one count per
+    // counter (the rings start in a fixed phase when enabled and stop at an arbitrary one), so the
+    // difference of a pair carries up to +-1 count of measurement error. The quantity measured is the
+    // frequency mismatch of two nominally identical rings; with Pelgrom threshold mismatch
+    // sigma(dVt) = A_vt / sqrt(W L) on the 5 V devices of nand2_1, averaged over the ten edges of a
+    // ring period and taken between two rings, the relative spread is a few tenths of a percent.
+    // Taking the pessimistic 0.3 %:
+    //     f_clk 50 MHz, f_ro 280 MHz (slow corner):  N = 81.9 us * 280 MHz = 22.9k, sigma = 69 counts
+    //     f_clk 50 MHz, f_ro 450 MHz (typical):      N = 36.9k,                   sigma = 111 counts
+    // so the quantization error is below 1.5 % of one sigma and margin_thresh (1..63 counts) spans
+    // 0.01..0.9 sigma. The previous 8-clock window gave N = 45..110 and sigma = 0.13..0.33 counts:
+    // every comparison was decided by the stop phase. The 0.3 % figure is an estimate, not a
+    // measurement; win_shift (CSR[59:58], shared with the monitor index, which is only used while
+    // CSR[50] is set) lengthens the window to 8192 / 16384 / 32768 clocks if silicon shows less.
+    // CW = 20 bits holds 32768 clocks at 25 MHz of an 800 MHz ring (1.05M would wrap; the two top
+    // bits set is treated as a fault below).
+    localparam int CW            = 20;
+    localparam int SETTLE_CYCLES = 3;   // 20 ripple stages need about one 20 ns clock at SS; 3 leaves margin
+    wire [1:0]  win_shift = mon_en ? 2'd0 : mon_idx[1:0];
+    wire [15:0] win_last  = (16'd4096 << win_shift) - 16'd1;
+
+    logic          cnt_clr_n;
+    wire           cnt_rn = rst_n & (cnt_clr_n | mon_en);
+    wire  [CW-1:0] cnt_a_async, cnt_b_async;
+    dregg_ripple_cnt #(.N(CW)) u_cnta (.clk(clk_a), .rst_n(cnt_rn), .q(cnt_a_async));
+    dregg_ripple_cnt #(.N(CW)) u_cntb (.clk(clk_b), .rst_n(cnt_rn), .q(cnt_b_async));
 
     assign puf_mon_clk = mon_beat ? (cnt_a_async[2] ^ cnt_b_async[2]) : cnt_a_async[3];
 
-    wire [11:0] sim_a = 12'd520 - 12'(32'(sel_a) * 32'd7);
-    wire [11:0] sim_b = 12'd514 - 12'(32'(sel_b) * 32'd7 + (32'(sel_b) & 32'd3));
-    wire [11:0] eff_a = (cnt_a_async != 12'd0 || cnt_b_async != 12'd0) ? cnt_a_async : sim_a;
-    wire [11:0] eff_b = (cnt_a_async != 12'd0 || cnt_b_async != 12'd0) ? cnt_b_async : sim_b;
-    wire        raw_cmp  = (eff_a >= eff_b);
-    wire [11:0] abs_diff = raw_cmp ? (eff_a - eff_b) : (eff_b - eff_a);
+    // Liveness: an oscillator that ran slower than a quarter of the core clock, or a counter that
+    // came close to wrapping, is a fault. The block is abandoned with blk_err and no word is released.
+    wire [CW-1:0] cnt_min = CW'(1024) << win_shift;
+    wire          ro_dead = (cnt_a_async < cnt_min) || (cnt_b_async < cnt_min) ||
+                            (&cnt_a_async[CW-1:CW-2]) || (&cnt_b_async[CW-1:CW-2]);
+
+`ifdef QSAG_PUF_ZERO_DELAY_MODEL
+    // Zero-delay RTL simulation only: the behavioural rings do not oscillate, so the testbench
+    // gets modelled counts. This block is compiled out of every synthesis view (see the `ifdef` at
+    // the top of the file) and of the timed simulation, where the rings really run.
+    wire [CW-1:0] win_x8 = CW'(4096 * 8) << win_shift;
+    wire [CW-1:0] eff_a  = win_x8 + CW'(520) - CW'(32'(sel_a) * 32'd7);
+    wire [CW-1:0] eff_b  = win_x8 + CW'(514) - CW'(32'(sel_b) * 32'd7 + (32'(sel_b) & 32'd3));
+    wire          eff_dead = 1'b0;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_model = &{1'b0, ro_dead};
+    /* verilator lint_on UNUSEDSIGNAL */
+`else
+    wire [CW-1:0] eff_a    = cnt_a_async;
+    wire [CW-1:0] eff_b    = cnt_b_async;
+    wire          eff_dead = ro_dead;
+`endif
+    wire          raw_cmp  = (eff_a >= eff_b);
+    wire [CW-1:0] abs_diff = raw_cmp ? (eff_a - eff_b) : (eff_b - eff_a);
 
     // Unified FSM + single-GF6-multiplier BCH(63,36,t=5) engine
     localparam logic [3:0] S_IDLE  = 4'd0,  S_CLR   = 4'd1,  S_RUN   = 4'd2,  S_EVAL  = 4'd3,
                            S_REM   = 4'd4,  S_HORN  = 4'd5,  S_EVEN  = 4'd6,  S_BMD   = 4'd7,
-                           S_BMU   = 4'd8,  S_CHIEN = 4'd9;
+                           S_BMU   = 4'd8,  S_CHIEN = 4'd9,  S_SETL  = 4'd10;
     logic [3:0]  st;
-    logic [3:0]  win_cnt;
+    logic [15:0] win_cnt;
     logic [6:0]  acc_cnt;
     logic [63:0] vm_sr;     // unified vmask_in shift-out & vmask_out shift-in!
     logic [62:0] w_sr;      // unified 63-bit PUF word & BCH rotate register!
@@ -280,26 +354,38 @@ module dregg_ro_puf_bch (
                     end else begin
                         cnt_clr_n   <= 1'b1;
                         meas_active <= 1'b1;
-                        win_cnt     <= 4'd0;
+                        win_cnt     <= 16'd0;
                         st          <= S_RUN;
                     end
                 end
                 S_RUN: begin
-                    if (win_cnt == 4'd7) begin
-                        meas_active <= 1'b0;
-                        st          <= S_EVAL;
-                    end else win_cnt <= win_cnt + 4'd1;
+                    if (win_cnt == win_last) begin
+                        meas_active <= 1'b0;   // stop both rings; the counters keep their value
+                        win_cnt     <= 16'd0;
+                        st          <= S_SETL;
+                    end else win_cnt <= win_cnt + 16'd1;
+                end
+                S_SETL: begin
+                    // The rings are stopped. Wait for the last ripple to run out before the counts
+                    // are compared (they were previously read on the edge that stopped the rings).
+                    if (win_cnt == 16'(SETTLE_CYCLES - 1)) st <= S_EVAL;
+                    else                                   win_cnt <= win_cnt + 16'd1;
                 end
                 S_EVAL: begin
                     logic take;
                     cnt_clr_n <= 1'b0;
-                    take = recon_mode ? 1'b1 : ((acc_cnt < {1'b0, BLK_BITS}) && (abs_diff >= {6'd0, margin_thresh}));
+                    take = recon_mode ? 1'b1 : ((acc_cnt < {1'b0, BLK_BITS}) && (abs_diff >= {{(CW-6){1'b0}}, margin_thresh}));
                     vm_sr <= recon_mode ? {1'b0, vm_sr[63:1]} : {take, vm_sr[63:1]};
                     if (take) begin
                         w_sr    <= {w_sr[61:0], recon_mode ? (raw_cmp ^ inj_flip) : raw_cmp};
                         acc_cnt <= acc_cnt + 7'd1;
                     end
-                    if (sub_idx == 6'd63) begin
+                    if (eff_dead) begin
+                        w_sr    <= 63'd0;
+                        blk_err <= 1'b1;
+                        done    <= 1'b1;
+                        st      <= S_IDLE;
+                    end else if (sub_idx == 6'd63) begin
                         if ((acc_cnt + {6'd0, take}) != {1'b0, BLK_BITS}) begin
                             blk_err <= 1'b1;
                             done    <= 1'b1;
@@ -441,7 +527,10 @@ module dregg_ro_puf_bch (
         end
     end
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, rst_n, mon_idx[5], bpol_v[35:30]};
+    wire unused = &{1'b0, mon_idx[5], bpol_v[35:30]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
+`ifdef QSAG_PUF_ZERO_DELAY_MODEL
+`undef QSAG_PUF_ZERO_DELAY_MODEL
+`endif
 `default_nettype wire

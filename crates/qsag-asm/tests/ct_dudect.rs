@@ -684,7 +684,11 @@ fn dudect_dispatched_kernels_outside_the_main_gate() {
             fill_polys(rhs, rng, classes);
         },
         |(lhs, rhs, out), i| {
-            mldsa_pointwise_mul(black_box(&mut **out), black_box(&lhs[i]), black_box(&rhs[i]));
+            mldsa_pointwise_mul(
+                black_box(&mut **out),
+                black_box(&lhs[i]),
+                black_box(&rhs[i]),
+            );
             u64::from(out[0])
         },
     ));
@@ -787,7 +791,11 @@ fn dudect_dispatched_kernels_outside_the_main_gate() {
             }
         },
         |(rows, out), i| {
-            gf2_xor_combine_planes(black_box(&rows[i]), black_box(&pattern), black_box(&mut **out));
+            gf2_xor_combine_planes(
+                black_box(&rows[i]),
+                black_box(&pattern),
+                black_box(&mut **out),
+            );
             out[0][0][0]
         },
     ));
@@ -842,8 +850,14 @@ fn dudect_dispatched_kernels_outside_the_main_gate() {
     // Tower <-> polynomial basis maps (`linear_map`).
     let mut field = [0u128; CHUNK];
     for (name, map) in [
-        ("tower128_to_poly128_ct", tower128_to_poly128_ct as fn(u128) -> u128),
-        ("poly128_to_tower128_ct", poly128_to_tower128_ct as fn(u128) -> u128),
+        (
+            "tower128_to_poly128_ct",
+            tower128_to_poly128_ct as fn(u128) -> u128,
+        ),
+        (
+            "poly128_to_tower128_ct",
+            poly128_to_tower128_ct as fn(u128) -> u128,
+        ),
     ] {
         stats.push(measure_dudect(
             name,
@@ -861,8 +875,14 @@ fn dudect_dispatched_kernels_outside_the_main_gate() {
     // Scalar Goldilocks add and sub on canonical operands.
     let mut gl = [(0u64, 0u64); CHUNK];
     for (name, op) in [
-        ("goldilocks_add_ct", goldilocks_add_ct as fn(u64, u64) -> u64),
-        ("goldilocks_sub_ct", goldilocks_sub_ct as fn(u64, u64) -> u64),
+        (
+            "goldilocks_add_ct",
+            goldilocks_add_ct as fn(u64, u64) -> u64,
+        ),
+        (
+            "goldilocks_sub_ct",
+            goldilocks_sub_ct as fn(u64, u64) -> u64,
+        ),
     ] {
         stats.push(measure_dudect(
             name,

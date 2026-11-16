@@ -1559,19 +1559,22 @@ fn open_typed_values<E: Core>(
     if values.is_empty() {
         return Ok(vec![Vec::new(); 64]);
     }
-    let mut clear: SecretVec<Value> = vec![ZERO; values.len() * 64].into();
-    let bit_indices: Vec<_> = values
-        .iter()
-        .enumerate()
-        .filter_map(|(i, v)| (v.domain == Domain::Bit).then_some(i))
-        .collect();
-    let bits: Word<E::Bit> = bit_indices.iter().map(|&i| values[i].share.bit()).collect();
-    let opened = e.open_lanes(&bits, mask)?;
-    for (&idx, &word) in bit_indices.iter().zip(&opened) {
-        for lane in 0..64 {
-            clear[idx * 64 + lane][0] = (word >> lane) & 1;
+    // Keep Boolean openings bitsliced: materializing a six-limb Value per
+    // bit per lane multiplies the hot scratch footprint by 384 for no benefit.
+    let mut offsets = Vec::with_capacity(values.len());
+    let mut bits: Word<E::Bit> = SecretVec::new();
+    let mut field_count = 0;
+    for v in values {
+        if v.domain == Domain::Bit {
+            offsets.push(bits.len());
+            bits.push(v.share.bit());
+        } else {
+            offsets.push(field_count);
+            field_count += 1;
         }
     }
+    let opened_bits = e.open_lanes(&bits, mask)?;
+    let mut clear_fields: SecretVec<Value> = vec![ZERO; field_count * 64].into();
     let selectors: [Value; 64] = core::array::from_fn(|lane| [(mask >> lane) & 1, 0, 0, 0, 0, 0]);
     for d in Domain::ALL_FIELDS {
         let indices: Vec<_> = values
@@ -1588,7 +1591,8 @@ fn open_typed_values<E: Core>(
             .collect();
         let opened = e.fopen_many(&words, d)?;
         for (idx, word) in indices.into_iter().zip(opened) {
-            clear[idx * 64..(idx + 1) * 64].copy_from_slice(&word);
+            let start = offsets[idx] * 64;
+            clear_fields[start..start + 64].copy_from_slice(&word);
         }
     }
     let bytes = values
@@ -1600,7 +1604,12 @@ fn open_typed_values<E: Core>(
         .map(|lane| {
             let mut packer = zk_engine::BitPacker::with_capacity(bytes);
             for (idx, v) in values.iter().enumerate() {
-                packer.push_value(v.domain, clear[idx * 64 + lane]);
+                let value = if v.domain == Domain::Bit {
+                    [(opened_bits[offsets[idx]] >> lane) & 1, 0, 0, 0, 0, 0]
+                } else {
+                    clear_fields[offsets[idx] * 64 + lane]
+                };
+                packer.push_value(v.domain, value);
             }
             packer.into_bytes()
         })
