@@ -208,8 +208,11 @@ module dregg_ro_puf_bch (
             end
             S_BMD: begin
                 ma = lam_cur;
-                if ((sub_idx >= {3'd0, sub_k} + 6'd1) && (sub_idx <= {3'd0, sub_k} + 6'd10))
-                    mb = syn_v[6 * int'(sub_idx - {3'd0, sub_k} - 6'd1) +: 6];
+                if ((sub_idx >= {3'd0, sub_k} + 6'd1) && (sub_idx <= {3'd0, sub_k} + 6'd10)) begin
+                    logic [5:0] sdiff;
+                    sdiff = sub_idx - {3'd0, sub_k} - 6'd1;
+                    mb    = syn_v[6 * int'(sdiff) +: 6];
+                end
             end
             S_BMU: begin
                 ma = sub_ph ? delta_q : gamma;
@@ -338,7 +341,7 @@ module dregg_ro_puf_bch (
                     end
                 end
                 S_HORN: begin
-                    syn_v[12 * int'(sub_k) +: 6] <= mp ^ {5'd0, rem_q[sub_idx]};
+                    syn_v[12 * int'(sub_k) +: 6] <= mp ^ {5'd0, rem_q[sub_idx[4:0]]};
                     if (sub_k == 3'd4) begin
                         sub_k <= 3'd0;
                         if (sub_idx == 6'd0) st <= S_EVEN;
@@ -440,7 +443,7 @@ module dregg_ro_puf_bch (
         end
     end
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = mon_idx[5];
+    wire unused = &{1'b0, rst_n, mon_idx[5], bpol_v[35:30]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire
