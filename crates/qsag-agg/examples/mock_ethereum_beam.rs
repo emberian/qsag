@@ -284,13 +284,13 @@ fn run_beam_hierarchy_bench(
                 scope.spawn(move || {
                     sub.iter_mut()
                         .map(|(s_idx, region_msg, kp)| {
-                            let sig = match kp.pk.profile {
-                                AggSigProfile::JortsPoseidon2 => {
+                            let sig = match kp.pk.profile.jorts_xmss_height() {
+                                Some(_) => {
                                     let mut wal = MemEpochWal::default();
                                     kp.sign_stateful(region_msg, epoch_floor as u32, &mut wal)
                                         .expect("Jorts subnet sign")
                                 }
-                                AggSigProfile::CorduroyPoseidon2 => {
+                                None => {
                                     let mut wal = MemStatelessWal::default();
                                     kp.sign_stateless(region_msg, &mut wal)
                                         .expect("Corduroy subnet sign")
