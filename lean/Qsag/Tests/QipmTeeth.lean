@@ -1,5 +1,5 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.GoldilocksBase
 /-
 # Qsag.Tests.QipmTeeth — teeth and executed controls for the two-way ideal permutation model
 
@@ -7,9 +7,8 @@ Each tooth is a refutation or an explicit attack paired with the security statem
 The toy game on `Fin 4` is executed by the kernel.
 -/
 public import Qsag.Oracle.TwoWayQipmCompression
-import all Qsag.Oracle.TwoWayQipmCompression
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Math.Goldilocks
+public import Qsag.Oracle.Poseidon2
+public import Qsag.Math.Goldilocks
 
 public section
 namespace Qsag

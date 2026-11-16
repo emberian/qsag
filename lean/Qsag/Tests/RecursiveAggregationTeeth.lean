@@ -1,5 +1,5 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.GoldilocksBase
 /-
 Fixtures and teeth for the recursive aggregation modules.
 
@@ -28,13 +28,11 @@ B. Recursive tree of `Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness`
 -/
 public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
 public import Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
-import all Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
-import all Qsag.Oracle.FiatShamir
-import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.Keccak
-import all Qsag.Math.Goldilocks
+public import Qsag.Oracle.FiatShamir
+public import Qsag.Protocol.Aggregation.Aggregation
+public import Qsag.Oracle.Poseidon2
+public import Qsag.Oracle.Keccak
+public import Qsag.Math.Goldilocks
 import Qsag.Tactic.AssuranceKit
 
 public section
