@@ -1418,6 +1418,10 @@ impl VulkanSpirvBackend {
     /// Upload Round-0 witness polynomials, convert in-place to monomial basis, run 4-coset
     /// Goldilocks Reed-Solomon LDE + salted Canopy leaf hashing + internal Merkle tree layers
     /// inside VRAM, and return `top_node` (`nodes[1]`).
+    ///
+    /// `max_stage1_domain_ext4` and `max_stage1_groups` are the largest domain and group count
+    /// of any folded stage this session will pass to [`Self::prover_whir_commit_stage`], not
+    /// only of stage 1: either parity slot can then hold any stage.
     #[allow(clippy::too_many_arguments)]
     pub fn prover_whir_commit_round0_with<F>(
         &self,
@@ -1545,9 +1549,18 @@ impl VulkanSpirvBackend {
                 .into());
             }
             let slot = ProverKernelSlot::WhirLdeCommitment;
+            // The witness digest covers the words in (polynomial, position) order under a
+            // header that fixes their count, so it does not depend on how the engine
+            // happens to chunk its staging uploads.
             let mut witness_sp = init_cshake256(b"", slot.algorithm_domain());
             witness_sp.absorb(&(num_polys as u64).to_le_bytes());
             witness_sp.absorb(&(num_vars as u64).to_le_bytes());
+            let poly_len = u32::try_from(num_vars)
+                .ok()
+                .and_then(|shift| 1usize.checked_shl(shift))
+                .unwrap_or(0);
+            let mut next_chunk = (0usize, 0usize);
+            let mut in_order = true;
             let top_node = self.prover_whir_commit_round0_with(
                 num_polys,
                 salt_seed,
@@ -1559,9 +1572,13 @@ impl VulkanSpirvBackend {
                 extra_witness_words,
                 |poly_idx, pos, dst| {
                     fill_chunk(poly_idx, pos, dst);
-                    witness_sp.absorb(&(poly_idx as u64).to_le_bytes());
-                    witness_sp.absorb(&(pos as u64).to_le_bytes());
-                    witness_sp.absorb(&(dst.len() as u64).to_le_bytes());
+                    in_order &= (poly_idx, pos) == next_chunk;
+                    let end = pos + dst.len();
+                    next_chunk = if end == poly_len {
+                        (poly_idx + 1, 0)
+                    } else {
+                        (poly_idx, end)
+                    };
                     for sub in dst.chunks(256) {
                         let mut buf = [0u8; 2048];
                         let used = sub.len() * 8;
@@ -1572,6 +1589,9 @@ impl VulkanSpirvBackend {
                     }
                 },
             )?;
+            if !in_order || next_chunk != (num_polys, 0) {
+                return Err(AccelError::BackendFailure.into());
+            }
             finalize_cshake256(&mut witness_sp, true);
             let mut witness_digest = [0u8; 32];
             witness_sp.squeeze(&mut witness_digest);

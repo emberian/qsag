@@ -85,9 +85,9 @@ const MAX_FIBER_ARITY: usize = 1usize << MAX_FOLD_STEP_VARS;
 /// the Stage-0 domain is then $2^{30}$, inside the $2^{31}$ cap of [`WhirSchedule::validate`]).
 pub const MAX_PCS_NUM_VARS: usize = 28;
 
-/// Largest `num_vars` the Vulkan WHIR session supports (its Kronecker tables hold 24 variables).
+/// Largest `num_vars` the Vulkan WHIR session supports (`26` -> $K = 512$ signers in VRAM via 4-byte Kronecker tables).
 #[cfg(feature = "vulkan")]
-const MAX_GPU_PCS_NUM_VARS: usize = 24;
+const MAX_GPU_PCS_NUM_VARS: usize = 26;
 
 /// Largest number of polynomials committed jointly under one Round-0 Merkle-Canopy tree.
 pub const MAX_BATCH_POLYS: usize = 16;
@@ -2189,6 +2189,18 @@ impl MerkleCanopyTree {
         let key = poseidon2_canopy_key(stage_idx, log_leaves as u8);
         let mut nodes = vec![[0u8; 32]; 2 * n];
         fill_indexed(&mut nodes[n..], leaf_fn);
+        #[cfg(feature = "vulkan")]
+        if let Some((gpu_nodes, root)) =
+            crate::acceleration::build_poseidon2_canopy_tree(&nodes[n..], stage_idx)
+        {
+            return Self {
+                log_leaves,
+                is_compact: false,
+                is_turboshake: false,
+                nodes: gpu_nodes,
+                root,
+            };
+        }
         for depth in (0..log_leaves).rev() {
             let half = 1usize << depth;
             let (upper, children) = nodes[..4 * half].split_at_mut(2 * half);
@@ -4496,89 +4508,30 @@ fn max_intermediate_stage_dims(num_vars: usize, schedule: &WhirSchedule) -> (usi
 }
 
 #[cfg(feature = "vulkan")]
-fn eq_kronecker_768(point: &[GoldilocksExt4]) -> [[u64; 4]; 768] {
-    let mut out = [[0u64; 4]; 768];
-    for byte_idx in 0..3 {
-        for k in 0..256usize {
-            let mut prod = GoldilocksExt4::ONE;
-            for j in 0..8usize {
-                let b = 8 * byte_idx + j;
-                let bit = (k >> j) & 1 == 1;
-                if b < point.len() {
-                    prod *= if bit {
-                        point[b]
-                    } else {
-                        GoldilocksExt4::ONE - point[b]
-                    };
-                } else if bit {
-                    prod = GoldilocksExt4::ZERO;
-                    break;
-                }
-            }
-            out[256 * byte_idx + k] = ext4_to_arr(prod);
-        }
-    }
-    out
+fn eq_kronecker_1024(point: &[GoldilocksExt4]) -> [[u64; 4]; 1024] {
+    let raw: Vec<[u64; 4]> = point.iter().copied().map(ext4_to_arr).collect();
+    qsag_accel::eq_kronecker_1024(&raw)
 }
 
 #[cfg(feature = "vulkan")]
-fn mono_kronecker_768(point: &[GoldilocksExt4]) -> [[u64; 4]; 768] {
-    let mut out = [[0u64; 4]; 768];
-    for byte_idx in 0..3 {
-        for k in 0..256usize {
-            let mut prod = GoldilocksExt4::ONE;
-            for j in 0..8usize {
-                let b = 8 * byte_idx + j;
-                let bit = (k >> j) & 1 == 1;
-                if b < point.len() {
-                    if bit {
-                        prod *= point[b];
-                    }
-                } else if bit {
-                    prod = GoldilocksExt4::ZERO;
-                    break;
-                }
-            }
-            out[256 * byte_idx + k] = ext4_to_arr(prod);
-        }
-    }
-    out
+fn mono_kronecker_1024(point: &[GoldilocksExt4]) -> [[u64; 4]; 1024] {
+    let raw: Vec<[u64; 4]> = point.iter().copied().map(ext4_to_arr).collect();
+    qsag_accel::mono_kronecker_1024(&raw)
 }
 
 #[cfg(feature = "vulkan")]
-fn geometric_kronecker_768(scale: GoldilocksExt4, z: GoldilocksExt4) -> [[u64; 4]; 768] {
-    let mut out = [[0u64; 4]; 768];
-    let mut cur = scale;
-    for slot in &mut out[0..256] {
-        *slot = ext4_to_arr(cur);
-        cur *= z;
-    }
-    let z256 = z.pow(256);
-    cur = GoldilocksExt4::ONE;
-    for slot in &mut out[256..512] {
-        *slot = ext4_to_arr(cur);
-        cur *= z256;
-    }
-    let z65536 = z256.pow(256);
-    cur = GoldilocksExt4::ONE;
-    for slot in &mut out[512..768] {
-        *slot = ext4_to_arr(cur);
-        cur *= z65536;
-    }
-    out
-}
-
-#[cfg(feature = "vulkan")]
-fn pair_geometric_kronecker_1536(
+fn pair_geometric_kronecker_2048(
     s0: GoldilocksExt4,
     z0: GoldilocksExt4,
     s1: GoldilocksExt4,
     z1: GoldilocksExt4,
-) -> [[u64; 4]; 1536] {
-    let mut out = [[0u64; 4]; 1536];
-    out[0..768].copy_from_slice(&geometric_kronecker_768(s0, z0));
-    out[768..1536].copy_from_slice(&geometric_kronecker_768(s1, z1));
-    out
+) -> [[u64; 4]; 2048] {
+    qsag_accel::pair_geometric_kronecker_2048(
+        ext4_to_arr(s0),
+        ext4_to_arr(z0),
+        ext4_to_arr(s1),
+        ext4_to_arr(z1),
+    )
 }
 
 #[cfg(feature = "vulkan")]
@@ -4630,10 +4583,10 @@ fn whir_open_single_gpu(
     claimed_eval: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Result<HemWhirOpeningProof, qsag_accel::VulkanError> {
-    let mono_kron = mono_kronecker_768(point);
+    let mono_kron = mono_kronecker_1024(point);
     session
         .raw()
-        .prover_whir_expand_monomial_and_dot(&mono_kron, state.num_vars, 1, &mut [])?;
+        .prover_whir_expand_monomial_and_dot_1024(&mono_kron, state.num_vars, 1, &mut [])?;
     whir_open_core_gpu(
         state,
         session,
@@ -4673,9 +4626,9 @@ fn whir_open_batch_gpu(
         claim += w * e;
     }
 
-    let mut eq_kron_flat = Vec::with_capacity(768 * num_polys);
+    let mut eq_kron_flat = Vec::with_capacity(1024 * num_polys);
     for p in points {
-        eq_kron_flat.extend_from_slice(&eq_kronecker_768(p));
+        eq_kron_flat.extend_from_slice(&eq_kronecker_1024(p));
     }
     let lam_arr: Vec<[u64; 4]> = lambda_pows.iter().copied().map(ext4_to_arr).collect();
     raw.prover_whir_batch_sumcheck_init(&eq_kron_flat, &lam_arr, num_vars)?;
@@ -4768,9 +4721,9 @@ fn whir_open_batch_gpu(
         transcript.absorb_ext4(b"PCS_BATCH_COMMON_EVAL", e);
     }
 
-    let mono_kron = mono_kronecker_768(&rho);
+    let mono_kron = mono_kronecker_1024(&rho);
     let mut shifted_raw = vec![[0u64; 4]; num_polys];
-    raw.prover_whir_expand_monomial_and_dot(&mono_kron, num_vars, 1, &mut shifted_raw)?;
+    raw.prover_whir_expand_monomial_and_dot_1024(&mono_kron, num_vars, 1, &mut shifted_raw)?;
     let shifted_evals: Vec<GoldilocksExt4> = shifted_raw
         .into_iter()
         .map(arr_to_ext4_checked)
@@ -4816,7 +4769,7 @@ fn whir_open_core_gpu(
     let pp_ck = c_len as u32;
 
     let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
-    let z_ood_0_kron = pair_geometric_kronecker_1536(
+    let z_ood_0_kron = pair_geometric_kronecker_2048(
         GoldilocksExt4::ONE,
         z_ood_0[0],
         GoldilocksExt4::ONE,
@@ -4827,7 +4780,7 @@ fn whir_open_core_gpu(
         .map(|w| [ext4_to_arr(w[0]), ext4_to_arr(w[1])])
         .collect();
     let ood0_raw =
-        raw.prover_whir_open_init(state.num_vars, single, &weights_arr, &z_ood_0_kron)?;
+        raw.prover_whir_open_init_1024(state.num_vars, single, &weights_arr, &z_ood_0_kron)?;
     let stage0_ood_evals = [
         arr_to_ext4_checked(ood0_raw[0])?,
         arr_to_ext4_checked(ood0_raw[1])?,
@@ -4840,8 +4793,8 @@ fn whir_open_core_gpu(
     cur_sum_claim += xi_0 * stage0_ood_evals[0];
     let xi_1 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
     cur_sum_claim += xi_1 * stage0_ood_evals[1];
-    let xi_z_0_kron = pair_geometric_kronecker_1536(xi_0, z_ood_0[0], xi_1, z_ood_0[1]);
-    raw.prover_whir_add_ood_claims(k_len, 0, &xi_z_0_kron)?;
+    let xi_z_0_kron = pair_geometric_kronecker_2048(xi_0, z_ood_0[0], xi_1, z_ood_0[1]);
+    raw.prover_whir_add_ood_claims_1024(k_len, 0, &xi_z_0_kron)?;
 
     let inv_two = Goldilocks::TWO.inv();
     let inv_zetas = build_inv_zetas();
@@ -4942,13 +4895,13 @@ fn whir_open_core_gpu(
 
             let z_ood_next =
                 core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
-            let z_ood_next_kron = pair_geometric_kronecker_1536(
+            let z_ood_next_kron = pair_geometric_kronecker_2048(
                 GoldilocksExt4::ONE,
                 z_ood_next[0],
                 GoldilocksExt4::ONE,
                 z_ood_next[1],
             );
-            let ood_raw = raw.prover_whir_eval_univariate_2(c_len, 0, &z_ood_next_kron)?;
+            let ood_raw = raw.prover_whir_eval_univariate_2_1024(c_len, 0, &z_ood_next_kron)?;
             let ood_eval_next = [
                 arr_to_ext4_checked(ood_raw[0])?,
                 arr_to_ext4_checked(ood_raw[1])?,
@@ -5108,8 +5061,8 @@ fn whir_open_core_gpu(
             let xi_next_1 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
             cur_sum_claim += xi_next_1 * ood_eval_next[1];
             let xi_z_next_kron =
-                pair_geometric_kronecker_1536(xi_next_0, z_ood_next[0], xi_next_1, z_ood_next[1]);
-            raw.prover_whir_add_ood_claims(k_len, 0, &xi_z_next_kron)?;
+                pair_geometric_kronecker_2048(xi_next_0, z_ood_next[0], xi_next_1, z_ood_next[1]);
+            raw.prover_whir_add_ood_claims_1024(k_len, 0, &xi_z_next_kron)?;
 
             let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
             let mut z_pow_256 = Vec::with_capacity(shift_claims.len() * 256);

@@ -206,16 +206,86 @@ pub(crate) fn ntt(values: &mut [Goldilocks], inverse: bool) -> bool {
     true
 }
 
-/// Report the missing Poseidon2 canopy pipeline once per process. GPU NTT may still run.
+/// Report Poseidon2 WHIR execution split once per process.
 pub(crate) fn report_cpu_poseidon_canopy() {
     static REPORT: std::sync::Once = std::sync::Once::new();
     if device().is_some() {
         REPORT.call_once(|| {
             std::eprintln!(
-                "qsag_accel: Poseidon2 WHIR canopy/open runs on CPU; eligible NTTs use Vulkan"
+                "qsag_accel: Poseidon2 WHIR leaf/open runs on CPU; Canopy internal tree & eligible NTTs use Vulkan"
             )
         });
     }
+}
+
+/// Build the full 1-indexed Poseidon2 WHIR Canopy tree (`2 * leaves.len()` nodes) in GPU VRAM
+/// via `VulkanSpirvBackend::build_canopy_tree_poseidon2` (`mode = 2`).
+///
+/// Returns `None` below the PCIe crossover (`< 1024` leaves), if any input leaf is non-canonical
+/// (so the CPU caller enforces its exact canonicality panic), or on GPU fallback.
+pub(crate) fn build_poseidon2_canopy_tree(
+    leaves: &[[u8; 32]],
+    stage_idx: u8,
+) -> Option<(Vec<[u8; 32]>, [u8; 32])> {
+    if leaves.len() < 1024 || !leaves.len().is_power_of_two() {
+        return None;
+    }
+    let device = device()?;
+    let mut leaf_words = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        let mut limbs = [0u64; 4];
+        for (i, slot) in limbs.iter_mut().enumerate() {
+            let w = u64::from_le_bytes(leaf[8 * i..8 * (i + 1)].try_into().ok()?);
+            Goldilocks::from_canonical_u64(w)?;
+            *slot = w;
+        }
+        leaf_words.push(limbs);
+    }
+    let mut out_words = alloc::vec![[0u64; 4]; 2 * leaves.len()];
+    let _phase = crate::profile::span("gpu_poseidon2_canopy_tree");
+    let root_words = match device.backend.inner().build_canopy_tree_poseidon2(
+        &leaf_words,
+        stage_idx,
+        [0u64; 4],
+        &mut out_words,
+    ) {
+        Ok(r) => r,
+        Err(err) => {
+            device
+                .fallbacks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            std::eprintln!("qsag_accel: Poseidon2 Canopy tree failed ({err}); recomputing on CPU");
+            return None;
+        }
+    };
+    if root_words
+        .iter()
+        .any(|&w| Goldilocks::from_canonical_u64(w).is_none())
+        || out_words[1..]
+            .iter()
+            .flatten()
+            .any(|&w| Goldilocks::from_canonical_u64(w).is_none())
+    {
+        device
+            .fallbacks
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        std::eprintln!("qsag_accel: Poseidon2 Canopy tree non-canonical output; recomputing on CPU");
+        return None;
+    }
+    let mut nodes = alloc::vec![[0u8; 32]; 2 * leaves.len()];
+    for (dst, src) in nodes[1..].iter_mut().zip(&out_words[1..]) {
+        for (i, &w) in src.iter().enumerate() {
+            dst[8 * i..8 * (i + 1)].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+    let mut root = [0u8; 32];
+    for (i, &w) in root_words.iter().enumerate() {
+        root[8 * i..8 * (i + 1)].copy_from_slice(&w.to_le_bytes());
+    }
+    device
+        .stages
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Some((nodes, root))
 }
 
 // Whole coset encodings against the host's coset-decomposed encoder (RX 6750 XT against an

@@ -17,6 +17,7 @@ use qsag_accel::goldilocks::{
     geometric_kronecker_1024, gl_add, gl_mul, gl_reduce_u64, gl_sub, mono_kronecker_1024,
     pair_geometric_kronecker_2048,
 };
+use qsag_accel::keccak::{finalize_cshake256, init_cshake256};
 use qsag_accel::poseidon2::{
     POSEIDON2_CANOPY_NODE_HI, POSEIDON2_CANOPY_ROOT_DOMAIN, POSEIDON2_CANOPY_SALT_DOMAIN,
     POSEIDON2_CONST_IV, POSEIDON2_FORS_NODE_DOMAIN, POSEIDON2_MERKLE_NODE_DOMAIN,
@@ -27,7 +28,7 @@ use qsag_accel::poseidon2::{
 use qsag_accel::{
     AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CpuReferenceBackend,
     KernelTargetArch, ProverKernelSlot, VerifiedKernelDigestRegistry, VulkanError,
-    VulkanSpirvBackend,
+    VulkanSpirvBackend, prover_stage_io_digest,
 };
 
 type Ext4 = [u64; 4];
@@ -68,6 +69,44 @@ fn sparse_witness_ood(points: &[(usize, u64)], num_vars: usize, z: Ext4) -> Ext4
         sum = ext4_add(sum, term);
     }
     sum
+}
+
+/// Round-0 receipt input digest recomputed by a host that knows the witness and the public
+/// arguments but nothing about how the engine chunks its uploads.
+fn round0_input_digest(
+    salt_seed: &[u8; 32],
+    num_vars: usize,
+    capacities: [usize; 3],
+    sparse_witness: &[(usize, u64)],
+) -> [u8; 32] {
+    let slot = ProverKernelSlot::WhirLdeCommitment;
+    let mut sp = init_cshake256(b"", slot.algorithm_domain());
+    sp.absorb(&1u64.to_le_bytes());
+    sp.absorb(&(num_vars as u64).to_le_bytes());
+    let mut block = [0u8; 4096];
+    for block_idx in 0..(8usize << num_vars) / block.len() {
+        block.fill(0);
+        let first_word = block_idx * (block.len() / 8);
+        for &(idx, val) in sparse_witness {
+            if let Some(at) = idx
+                .checked_sub(first_word)
+                .filter(|&at| at < block.len() / 8)
+            {
+                block[8 * at..8 * at + 8].copy_from_slice(&val.to_le_bytes());
+            }
+        }
+        sp.absorb(&block);
+    }
+    finalize_cshake256(&mut sp, true);
+    let mut witness_digest = [0u8; 32];
+    sp.squeeze(&mut witness_digest);
+    let caps = capacities.map(|c| (c as u64).to_le_bytes());
+    prover_stage_io_digest(
+        slot,
+        0x01,
+        0,
+        &[salt_seed, &witness_digest, &caps[0], &caps[1], &caps[2]],
+    )
 }
 
 fn backend() -> Option<VulkanSpirvBackend> {
@@ -601,6 +640,16 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     assert_ne!(top_r0, [0u8; 32]);
     assert_eq!(rec_r0.hardware_audit_digest, hw_digest);
     assert_eq!(reg.verify_prover_keyed_receipt(&rec_r0, &key), Ok(()));
+    // This witness is uploaded in many staging chunks; the digest must not see them.
+    assert_eq!(
+        rec_r0.input_digest,
+        round0_input_digest(
+            &salt_seed,
+            nv,
+            [stage1_domain, stage1_groups, extra_witness_words],
+            &sparse_eval_pts,
+        )
+    );
     assert_eq!(
         rec_r0.descriptor.slot(),
         ProverKernelSlot::WhirLdeCommitment

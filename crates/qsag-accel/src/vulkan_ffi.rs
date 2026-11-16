@@ -1198,16 +1198,26 @@ struct AirShardState {
     static_words: std::vec::Vec<u64>,
 }
 
+/// Identity of a committed Merkle tree resident in VRAM. A gather must name exactly the
+/// tree that occupies its slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CommittedTree {
+    stage_idx: usize,
+    group_arity: usize,
+    num_groups: usize,
+}
+
 #[derive(Default)]
 struct ProverArena {
     /// `Some` between a successful round-0 commit and the next scrub of the session. Every
     /// other prover entry point refuses to run without it.
     session: Option<ProverSessionDims>,
-    /// Actual tree occupying round zero and each parity slot: (stage, arity, groups).
-    committed_trees: [Option<(usize, usize, usize)>; 3],
-    /// A failed scrub must finish after idle recovery, before any arena reuse.
+    /// The round-0 tree, then the folded-stage tree in each parity slot (`stage_idx & 1`).
+    committed_trees: [Option<CommittedTree>; 3],
+    /// Session data may remain in VRAM: set when a session is invalidated, cleared only by
+    /// a completed scrub. The next prover job scrubs before it touches the arena.
     scrub_pending: bool,
-    /// Survives a partially failed resize until all bindings have been rewritten.
+    /// A buffer was replaced and the descriptor sets still name the old one.
     descriptors_dirty: bool,
     /// `Some` between `exec_prover_air_init_shard` and the next job that rewrites `vram_aux_in`.
     air: Option<AirShardState>,
@@ -1238,6 +1248,38 @@ struct ProverArena {
     vram_aux_in: GpuBuffer,
     vram_aux_b: GpuBuffer,
     vram_partials: GpuBuffer,
+}
+
+impl ProverArena {
+    /// Every buffer that holds session data. `twiddles_24` is public and outlives sessions.
+    fn session_buffers(&mut self) -> [&mut GpuBuffer; 13] {
+        let [cw_stage_0, cw_stage_1] = &mut self.vram_cw_stage;
+        let [tree_stage_0, tree_stage_1] = &mut self.vram_tree_stage;
+        [
+            &mut self.vram_witness,
+            &mut self.vram_mono,
+            &mut self.vram_cw0,
+            &mut self.vram_tree0,
+            &mut self.vram_work_a,
+            &mut self.vram_work_b,
+            cw_stage_0,
+            cw_stage_1,
+            tree_stage_0,
+            tree_stage_1,
+            &mut self.vram_aux_in,
+            &mut self.vram_aux_b,
+            &mut self.vram_partials,
+        ]
+    }
+
+    /// End the session: nothing may read its buffers again, and they are owed a scrub.
+    fn invalidate_session(&mut self) {
+        self.session = None;
+        self.committed_trees = [None; 3];
+        self.air = None;
+        self.scrub_pending = true;
+        crate::ct::ct_zeroize_u64s(&mut self.salt_seed_words);
+    }
 }
 
 pub(crate) struct RawVulkanEngine {
@@ -1452,31 +1494,22 @@ impl RawVulkanEngine {
 
         #[cfg(target_os = "macos")]
         {
-            let mut any_loaded = false;
+            // A loader with no usable ICD falls through to the next candidate; the error
+            // reported is that of the last library that loaded at all.
             let mut last_err = VulkanError::LibraryLoadFailed;
             for cand in MACOS_VULKAN_LIB_CANDIDATES {
                 let lib_handle = unsafe { dlopen(cand.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
                 if lib_handle.is_null() {
                     continue;
                 }
-                any_loaded = true;
                 match unsafe {
                     Self::try_open_with_loaded_lib(lib_handle, true, require_exec_telemetry)
                 } {
                     Ok(ok) => return Ok(ok),
-                    Err(e @ VulkanError::NoDiscreteGpuFound) => {
-                        last_err = e;
-                    }
-                    Err(e) => {
-                        last_err = e;
-                    }
+                    Err(e) => last_err = e,
                 }
             }
-            Err(if any_loaded {
-                last_err
-            } else {
-                VulkanError::LibraryLoadFailed
-            })
+            Err(last_err)
         }
 
         #[cfg(not(target_os = "macos"))]
@@ -1597,34 +1630,32 @@ impl RawVulkanEngine {
         let mut instance: VkInstance = null_mut();
         let rc = unsafe { create_instance(&inst_info, null(), &mut instance) };
         let default_res = if rc == VK_SUCCESS {
-            match unsafe { load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance") }
-            {
-                Ok(destroy_instance) => {
-                    let mut lib_slot = null_mut();
-                    let mut radv_slot = null_mut();
-                    let res = unsafe {
-                        Self::init_with_instance(
-                            &mut lib_slot,
-                            &mut radv_slot,
-                            gipa,
-                            &mut instance,
-                            destroy_instance,
-                            require_exec_telemetry,
-                        )
-                    };
-                    if let Ok((mut eng, info)) = res {
-                        eng.lib_handle = lib_handle;
-                        return Ok((eng, info));
-                    }
-                    unsafe {
-                        if !instance.is_null() {
-                            destroy_instance(instance, null());
-                        }
-                    }
-                    res
-                }
-                Err(e) => Err(e),
+            // Without `vkDestroyInstance` the live instance cannot be destroyed, so the `?`
+            // leaves its library loaded.
+            let destroy_instance: PfnVkDestroyInstance =
+                unsafe { load_inst_fn(gipa, instance, c"vkDestroyInstance", "vkDestroyInstance") }?;
+            let mut lib_slot = null_mut();
+            let mut radv_slot = null_mut();
+            let res = unsafe {
+                Self::init_with_instance(
+                    &mut lib_slot,
+                    &mut radv_slot,
+                    gipa,
+                    &mut instance,
+                    destroy_instance,
+                    require_exec_telemetry,
+                )
+            };
+            if let Ok((mut eng, info)) = res {
+                eng.lib_handle = lib_handle;
+                return Ok((eng, info));
             }
+            unsafe {
+                if !instance.is_null() {
+                    destroy_instance(instance, null());
+                }
+            }
+            res
         } else if rc == -3 || rc == -9 {
             Err(VulkanError::NoDiscreteGpuFound)
         } else {
@@ -1748,9 +1779,7 @@ impl RawVulkanEngine {
                 "vkDestroyInstance",
             )
         }) else {
-            unsafe {
-                let _ = dlclose(radv_lib);
-            }
+            // The live instance cannot be destroyed, so its library stays loaded.
             return None;
         };
 
@@ -3626,69 +3655,40 @@ impl RawVulkanEngine {
                 ),
             ]);
             self.prover.twiddles_ready = false;
-            self.prover.session = None;
-            self.prover.committed_trees = [None; 3];
-            self.prover.air = None;
-            self.submit_and_wait()
+            self.prover.invalidate_session();
+            self.submit_and_wait()?;
+            // Every prover buffer was zeroed over its whole capacity.
+            self.prover.scrub_pending = false;
+            Ok(())
         }
     }
 
     /// Scrub all session-bearing buffers in `ProverArena` on session release while retaining
     /// precomputed public `twiddles_24` and buffer allocations for zero-alloc reuse.
     pub(crate) fn scrub_prover_session(&mut self) -> Result<(), VulkanError> {
-        self.prover.scrub_pending = true;
-        crate::ct::ct_zeroize_u64s(&mut self.prover.salt_seed_words);
         // Whatever happens below, nothing may read this session's buffers again until a new
         // round-0 commit re-establishes the arena.
-        self.prover.session = None;
-        self.prover.committed_trees = [None; 3];
-        self.prover.air = None;
+        self.prover.invalidate_session();
         unsafe {
             self.settle_staging();
             self.ensure_ready()?;
-            if self.cmd_buf.is_null() || !self.prover.initialized {
-                self.prover.scrub_pending = false;
-                return Ok(());
-            }
-            let span = |b: &GpuBuffer| (b.buffer, b.used.min(b.capacity) & !7);
-            let ranges = [
-                span(&self.prover.vram_witness),
-                span(&self.prover.vram_mono),
-                span(&self.prover.vram_cw0),
-                span(&self.prover.vram_tree0),
-                span(&self.prover.vram_work_a),
-                span(&self.prover.vram_work_b),
-                span(&self.prover.vram_cw_stage[0]),
-                span(&self.prover.vram_cw_stage[1]),
-                span(&self.prover.vram_tree_stage[0]),
-                span(&self.prover.vram_tree_stage[1]),
-                span(&self.prover.vram_aux_in),
-                span(&self.prover.vram_aux_b),
-                span(&self.prover.vram_partials),
-            ];
-            if ranges.iter().all(|&(_, bytes)| bytes == 0) {
-                self.prover.scrub_pending = false;
-                return Ok(());
-            }
-            self.begin_cmd()?;
-            self.cmd_scrub_vram(&ranges);
-            self.submit_and_wait()?;
-            self.prover.vram_witness.used = 0;
-            self.prover.vram_mono.used = 0;
-            self.prover.vram_cw0.used = 0;
-            self.prover.vram_tree0.used = 0;
-            self.prover.vram_work_a.used = 0;
-            self.prover.vram_work_b.used = 0;
-            self.prover.vram_cw_stage[0].used = 0;
-            self.prover.vram_cw_stage[1].used = 0;
-            self.prover.vram_tree_stage[0].used = 0;
-            self.prover.vram_tree_stage[1].used = 0;
-            self.prover.vram_aux_in.used = 0;
-            self.prover.vram_aux_b.used = 0;
-            self.prover.vram_partials.used = 0;
-            self.prover.scrub_pending = false;
-            Ok(())
         }
+        let ranges = self
+            .prover
+            .session_buffers()
+            .map(|b| (b.buffer, b.used.min(b.capacity) & !7));
+        if !self.cmd_buf.is_null() && ranges.iter().any(|&(_, bytes)| bytes != 0) {
+            unsafe {
+                self.begin_cmd()?;
+                self.cmd_scrub_vram(&ranges);
+                self.submit_and_wait()?;
+            }
+            for buffer in self.prover.session_buffers() {
+                buffer.used = 0;
+            }
+        }
+        self.prover.scrub_pending = false;
+        Ok(())
     }
 
     /// Zero the first `bytes` of the host-mapped staging buffer. Callers reach this only through
@@ -5600,13 +5600,9 @@ impl RawVulkanEngine {
         impl Drop for SettleProverOnExit<'_> {
             fn drop(&mut self) {
                 if self.1 {
-                    // Invalidate even when idle cannot yet be established. The partial job
+                    // Invalidate even when idle cannot yet be established: the partial job
                     // may have overwritten session data before its fence failed.
-                    self.0.prover.session = None;
-                    self.0.prover.committed_trees = [None; 3];
-                    self.0.prover.air = None;
-                    self.0.prover.scrub_pending = true;
-                    crate::ct::ct_zeroize_u64s(&mut self.0.prover.salt_seed_words);
+                    self.0.prover.invalidate_session();
                 }
                 unsafe {
                     self.0.settle_staging();
@@ -5722,10 +5718,8 @@ impl RawVulkanEngine {
         req_tree0: u64,
         req_work_a: u64,
         req_work_b: u64,
-        req_cw_stage_0: u64,
-        req_cw_stage_1: u64,
-        req_tree_stage_0: u64,
-        req_tree_stage_1: u64,
+        req_cw_stage: u64,
+        req_tree_stage: u64,
         req_aux_in: u64,
         req_aux_b: u64,
         req_partials: u64,
@@ -5798,12 +5792,10 @@ impl RawVulkanEngine {
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree0, req_tree0)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_a, req_work_a)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_b, req_work_b)?;
-            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[0], req_cw_stage_0)?;
-            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[1], req_cw_stage_1)?;
-            changed |=
-                self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[0], req_tree_stage_0)?;
-            changed |=
-                self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[1], req_tree_stage_1)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[0], req_cw_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[1], req_cw_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[0], req_tree_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[1], req_tree_stage)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_in, req_aux_in)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_b, req_aux_b)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_partials, req_partials)?;
@@ -6081,16 +6073,11 @@ impl RawVulkanEngine {
             .max(cmul(cmul(8, max_shard_half)?, 12)?);
         let req_work_b = cmul(work_b_ext4, EXT4_BYTES)?;
 
-        // Odd stages (`stage_idx = 1, 3, ...`, slot 1) fit in `max_stage1_*`; even stages
-        // (`stage_idx = 2, 4, ...`, slot 0) fold at least one variable beyond Stage 1 (`<= / 2`).
-        let stg_cw1 = to_u64(max_stage1_domain_ext4.max(1024));
-        let stg_cw0 = (to_u64(max_stage1_domain_ext4) / 2).max(1024);
-        let stg_tr1 = cmul(2, to_u64(max_stage1_groups.max(512)))?;
-        let stg_tr0 = cmul(2, (to_u64(max_stage1_groups) / 2).max(512))?;
-        let req_cw_stage_0 = cmul(stg_cw0, EXT4_BYTES)?;
-        let req_cw_stage_1 = cmul(stg_cw1, EXT4_BYTES)?;
-        let req_tree_stage_0 = cmul(stg_tr0, EXT4_BYTES)?;
-        let req_tree_stage_1 = cmul(stg_tr1, EXT4_BYTES)?;
+        // Folded stages alternate between two slots (`stage_idx & 1`). `max_stage1_*` bound
+        // every folded stage, and a later stage is not smaller than an earlier one when its
+        // blowup grows faster than its variables fold, so each slot holds the largest.
+        let req_cw_stage = cmul(to_u64(max_stage1_domain_ext4.max(1024)), EXT4_BYTES)?;
+        let req_tree_stage = cmul(cmul(2, to_u64(max_stage1_groups.max(512)))?, EXT4_BYTES)?;
         let req_aux_in = 8 * 1024 * 1024;
         let req_aux_b = cmul(cmul(6, (extra / 256).max(1024))?, EXT4_BYTES)?.max(8 * 1024 * 1024);
         let req_partials = 4 * 1024 * 1024;
@@ -6103,10 +6090,8 @@ impl RawVulkanEngine {
                 req_tree0,
                 req_work_a,
                 req_work_b,
-                req_cw_stage_0,
-                req_cw_stage_1,
-                req_tree_stage_0,
-                req_tree_stage_1,
+                req_cw_stage,
+                req_tree_stage,
                 req_aux_in,
                 req_aux_b,
                 req_partials,
@@ -6721,7 +6706,11 @@ impl RawVulkanEngine {
                 num_polys,
                 num_vars,
             });
-            self.prover.committed_trees[0] = Some((0, group_arity, num_groups));
+            self.prover.committed_trees[0] = Some(CommittedTree {
+                stage_idx: 0,
+                group_arity,
+                num_groups,
+            });
             Ok((top_node, subs))
         }
     }
@@ -8422,8 +8411,11 @@ impl RawVulkanEngine {
                 for (i, w) in top_words.into_iter().enumerate() {
                     top_node[i * 8..(i + 1) * 8].copy_from_slice(&w.to_le_bytes());
                 }
-                engine.prover.committed_trees[1 + slot_idx] =
-                    Some((stage_idx, group_arity, num_groups));
+                engine.prover.committed_trees[1 + slot_idx] = Some(CommittedTree {
+                    stage_idx,
+                    group_arity,
+                    num_groups,
+                });
                 Ok(top_node)
             }
         })
@@ -8623,15 +8615,20 @@ impl RawVulkanEngine {
             let in_bytes = cmul(to_u64(in_words.max(1)), WORD_BYTES)?;
             let out_bytes = cmul(expected_out, WORD_BYTES)?;
             let slot_idx = stage_idx & 1;
-            let tree_slot = if is_ext4 { 1 + slot_idx } else { 0 };
-            if engine.prover.committed_trees[tree_slot]
-                != Some((stage_idx, group_arity, num_groups))
-                || num_polys
-                    != if is_ext4 {
-                        1
-                    } else {
-                        engine.prover_session()?.num_polys
-                    }
+            // The gather must name the tree actually resident in its slot: a parity slot
+            // is reused by stage `s + 2`, and a folded stage holds a single Ext4 polynomial.
+            let (tree_slot, committed_polys) = if is_ext4 {
+                (1 + slot_idx, 1)
+            } else {
+                (0, engine.prover_session()?.num_polys)
+            };
+            let requested = CommittedTree {
+                stage_idx,
+                group_arity,
+                num_groups,
+            };
+            if engine.prover.committed_trees[tree_slot] != Some(requested)
+                || num_polys != committed_polys
             {
                 return Err(length_overflow());
             }
@@ -10297,6 +10294,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn either_stage_slot_holds_the_largest_folded_stage() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        // A schedule whose blowup grows as fast as its variables fold keeps every folded
+        // stage at the same domain, so stage 2 needs as much room as stage 1.
+        const DOMAIN: usize = 1 << 16;
+        const ARITY: usize = 4;
+        engine
+            .exec_prover_whir_commit_round0_with(
+                1,
+                &[7; 32],
+                12,
+                4,
+                16,
+                DOMAIN,
+                DOMAIN / ARITY,
+                0,
+                |_, pos, dst| {
+                    for (i, word) in dst.iter_mut().enumerate() {
+                        *word = (pos + i) as u64 * 7 + 1;
+                    }
+                },
+            )
+            .expect("round-0 commit");
+        for stage_idx in [1, 2, 3] {
+            engine
+                .exec_prover_whir_commit_stage(stage_idx, 16, DOMAIN, ARITY)
+                .expect("largest stage");
+            let mut fiber = [0u64; 4 * ARITY];
+            engine
+                .exec_prover_whir_gather_queries(
+                    stage_idx,
+                    ARITY,
+                    1,
+                    DOMAIN / ARITY,
+                    &[(DOMAIN / ARITY - 1) as u64],
+                    &[],
+                    &mut fiber,
+                )
+                .expect("last group of the largest stage");
+        }
+        engine.scrub_prover_session().unwrap();
     }
 
     #[test]
