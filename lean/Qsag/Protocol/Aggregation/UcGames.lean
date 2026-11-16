@@ -16,8 +16,9 @@ Self-contained Lean 4.35 game-hopping, secret-sharing simulation, and UC signatu
 3. Signature functionality `idealSig` and one game hop against it
    (`sigOracleGameHop_distinguisher_iff_forgery`): the ideal world is handed a signing oracle
    `simSign` that is assumed to answer exactly as the real signer does, and the hop shows that a
-   real/ideal difference is a fresh forgery. No simulator without the signing key is constructed
-   in this module, so this is not a UC-realization theorem. Its per-session and per-caller
+   real/ideal difference is a fresh forgery. The explicit `idealTsigSimulator` interacts only through the ideal signing oracle
+   and public transcripts. The real-key coupling is isolated in compatibility wrappers;
+   this signing-oracle hop alone is not a full threshold UC-realization theorem. Its per-session and per-caller
    corollaries are `multi_session_uc_realizes` and `uc_composition_theorem`.
 -/
 
@@ -40,6 +41,9 @@ def polyAddFixed {R : Type} [CommRingOps R] : List R → List R → List R
   | a :: as, b :: bs => add a b :: polyAddFixed as bs
   | [], _ => []
   | _, [] => []
+
+theorem polyAddFixed_cons {R : Type} [CommRingOps R] (a b : R) (as bs : List R) :
+    polyAddFixed (a :: as) (b :: bs) = add a b :: polyAddFixed as bs := by rfl
 
 def polySubFixed {R : Type} [CommRingOps R] : List R → List R → List R
   | a :: as, b :: bs => sub a b :: polySubFixed as bs
@@ -429,19 +433,39 @@ theorem idealSig_unforgeable {PK SK Msg Sig : Type} [DecidableEq Msg]
     idealSigVerify S pk recorded m sig = false := by
   simp [idealSigVerify, hFresh]
 
-/-- **Ideal Signature Execution (`execIdealSig`)**.
-`F_SIG` stores only `(pk, recorded)` and answers signing requests through the callback
-`simSign : Msg → Sig`. `sk : SK` is not an argument of `execIdealSig`, `findEnvForgery`, or
-`signedBeforeForgery`; whether `simSign` itself depends on `sk` is decided by the caller. Every
-theorem below that relates this execution to `execRealSig` assumes
-`∀ m, simSign m = S.sign sk m`, that is, a signing oracle for the real key. -/
+/-- Public signing-oracle capability supplied by IdealTsig. The signature is
+an oracle response, never a secret-key argument to the simulator. The threshold
+and abort policy is implemented by the caller granting this capability. -/
+structure IdealTsigSigningOracle (Msg Sig : Type) where
+  answer : Msg → Sig
+
+/-- The ideal-world simulator is a closed oracle program. Its only inputs are
+public verification, the public key, the public approved-message transcript,
+and the environment. In particular neither `SK` nor `AbstractSigScheme.sign`
+occurs in its type or implementation. -/
+def idealTsigSimulator {PK Msg Sig : Type} [DecidableEq Msg]
+    (verify : PK → Msg → Sig → Bool) (pk : PK) (recorded : List Msg) :
+    UcSigEnv PK Msg Sig → OracleComp Msg Sig Bool
+  | .halt b => .pure b
+  | .stepSign m next => .query m (fun sig =>
+      idealTsigSimulator verify pk (m :: recorded) (next sig))
+  | .stepVerify m sig next => idealTsigSimulator verify pk recorded
+      (next (decide (m ∈ recorded) && verify pk m sig))
+
+def execIdealTsigOracle {PK Msg Sig : Type} [DecidableEq Msg]
+    (verify : PK → Msg → Sig → Bool) (pk : PK)
+    (oracle : IdealTsigSigningOracle Msg Sig) (recorded : List Msg)
+    (Z : UcSigEnv PK Msg Sig) : Bool :=
+  evalOracleComp oracle.answer (idealTsigSimulator verify pk recorded Z)
+
+/-- Ideal signature execution runs the fixed key-free `idealTsigSimulator`.
+`simSign` is the ideal functionality's oracle implementation, supplied only to
+`evalOracleComp`; it is not passed as code or state to the simulator. Real-key
+agreement is an external oracle coupling used only by the legacy wrappers. -/
 def execIdealSig {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (simSign : Msg → Sig)
-    (recorded : List Msg) : UcSigEnv PK Msg Sig → Bool
-  | .halt b => b
-  | .stepSign m next => execIdealSig S pk simSign (m :: recorded) (next (simSign m))
-  | .stepVerify m sig next =>
-    execIdealSig S pk simSign recorded (next (idealSigVerify S pk recorded m sig))
+    (recorded : List Msg) (Z : UcSigEnv PK Msg Sig) : Bool :=
+  execIdealTsigOracle S.verify pk ⟨simSign⟩ recorded Z
 
 def findEnvForgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (simSign : Msg → Sig)
@@ -454,33 +478,102 @@ def findEnvForgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     else
       findEnvForgery S pk simSign recorded (next (idealSigVerify S pk recorded m sig))
 
+/-- Compatibility with the older callback evaluator. The callback is now
+explicitly the ideal functionality's oracle implementation, not a simulator
+which may execute arbitrary secret-key computations. -/
+theorem idealTsigSimulator_eval {PK SK Msg Sig : Type} [DecidableEq Msg]
+    (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (oracle : Msg → Sig)
+    (recorded : List Msg) (Z : UcSigEnv PK Msg Sig) :
+    evalOracleComp oracle (idealTsigSimulator S.verify pk recorded Z) =
+      execIdealSig S pk oracle recorded Z := by
+  unfold execIdealSig execIdealTsigOracle
+  rfl
+
+/-- Public-oracle real execution: all signing is a query to the functionality. -/
+def execPublicSig {PK Msg Sig : Type}
+    (verify : PK → Msg → Sig → Bool) (pk : PK) (oracle : Msg → Sig) :
+    UcSigEnv PK Msg Sig → Bool
+  | .halt b => b
+  | .stepSign m next => execPublicSig verify pk oracle (next (oracle m))
+  | .stepVerify m sig next => execPublicSig verify pk oracle (next (verify pk m sig))
+
+def findPublicForgery {PK Msg Sig : Type} [DecidableEq Msg]
+    (verify : PK → Msg → Sig → Bool) (pk : PK) (oracle : Msg → Sig)
+    (recorded : List Msg) : UcSigEnv PK Msg Sig → Option (Msg × Sig)
+  | .halt _ => none
+  | .stepSign m next => findPublicForgery verify pk oracle (m :: recorded) (next (oracle m))
+  | .stepVerify m sig next =>
+    if m ∉ recorded ∧ verify pk m sig = true then some (m, sig)
+    else findPublicForgery verify pk oracle recorded
+      (next (decide (m ∈ recorded) && verify pk m sig))
+
+/-- Core oracle simulation theorem: there is no secret key, simulator agreement
+hypothesis, or premise asserting the desired conclusion. A difference between
+public verification and the ideal recorded-message gate exposes a forgery. -/
+theorem idealTsig_oracle_simulation {PK Msg Sig : Type} [DecidableEq Msg]
+    (verify : PK → Msg → Sig → Bool) (pk : PK)
+    (oracle : IdealTsigSigningOracle Msg Sig) (recorded : List Msg) :
+    ∀ Z : UcSigEnv PK Msg Sig,
+      findPublicForgery verify pk oracle.answer recorded Z = none →
+      execPublicSig verify pk oracle.answer Z = execIdealTsigOracle verify pk oracle recorded Z
+  | .halt _, _ => rfl
+  | .stepSign m next, hn => by
+    exact idealTsig_oracle_simulation verify pk oracle (m :: recorded) (next (oracle.answer m)) hn
+  | .stepVerify m sig next, hn => by
+    simp only [findPublicForgery] at hn
+    by_cases hb : m ∉ recorded ∧ verify pk m sig = true
+    · simp [hb] at hn
+    · simp only [hb, ↓reduceIte] at hn
+      have hv : verify pk m sig = (decide (m ∈ recorded) && verify pk m sig) := by
+        by_cases hm : m ∈ recorded
+        · simp [hm]
+        · cases he : verify pk m sig
+          · simp [hm]
+          · exact False.elim (hb ⟨hm, he⟩)
+      change execPublicSig verify pk oracle.answer (next (verify pk m sig)) = _
+      rw [hv]
+      exact idealTsig_oracle_simulation verify pk oracle recorded _ hn
+
+theorem execPublicSig_real {PK SK Msg Sig : Type}
+    (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (Z : UcSigEnv PK Msg Sig) :
+    execPublicSig S.verify pk (S.sign sk) Z = execRealSig S pk sk Z := by
+  induction Z with
+  | halt b => rfl
+  | stepSign m next ih => exact ih (S.sign sk m)
+  | stepVerify m sig next ih => exact ih (S.verify pk m sig)
+
+theorem findPublicForgery_eq {PK SK Msg Sig : Type} [DecidableEq Msg]
+    (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (oracle : Msg → Sig)
+    (recorded : List Msg) (Z : UcSigEnv PK Msg Sig) :
+    findPublicForgery S.verify pk oracle recorded Z = findEnvForgery S pk oracle recorded Z := by
+  induction Z generalizing recorded with
+  | halt b => rfl
+  | stepSign m next ih => exact ih (oracle m) (m :: recorded)
+  | stepVerify m sig next ih =>
+    simp only [findPublicForgery, findEnvForgery]
+    split
+    · rfl
+    · exact ih (idealSigVerify S pk recorded m sig) recorded
+
+/-- Legacy real-key coupling wrapper. `hOracle` relates the functionality's
+oracle to the real-world signer; the simulator itself is `idealTsigSimulator`,
+whose definition above cannot access the real key. -/
 theorem execReal_eq_execIdeal_unless_forgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
-    (hSim : ∀ m, simSign m = S.sign sk m)
+    (hOracle : ∀ m, simSign m = S.sign sk m)
     (recorded : List Msg) :
     ∀ (Z : UcSigEnv PK Msg Sig),
       findEnvForgery S pk simSign recorded Z = none →
       execRealSig S pk sk Z = execIdealSig S pk simSign recorded Z
-  | .halt _, _ => rfl
-  | .stepSign m next, hNone => by
-    simp only [findEnvForgery] at hNone
-    simp only [execRealSig, execIdealSig, ← hSim m]
-    exact execReal_eq_execIdeal_unless_forgery S pk sk simSign hSim (m :: recorded) (next (simSign m)) hNone
-  | .stepVerify m sig next, hNone => by
-    simp only [findEnvForgery] at hNone
-    by_cases hBad : m ∉ recorded ∧ S.verify pk m sig = true
-    · simp [hBad] at hNone
-    · simp only [hBad, ↓reduceIte] at hNone
-      have hVerdictEq : S.verify pk m sig = idealSigVerify S pk recorded m sig := by
-        unfold idealSigVerify
-        by_cases hm : m ∈ recorded
-        · simp [hm]
-        · cases hv : S.verify pk m sig
-          · simp [hm]
-          · exact False.elim (hBad ⟨hm, hv⟩)
-      simp only [execRealSig, execIdealSig, hVerdictEq]
-      exact execReal_eq_execIdeal_unless_forgery S pk sk simSign hSim recorded
-        (next (idealSigVerify S pk recorded m sig)) hNone
+  | Z, hNone => by
+    have h := idealTsig_oracle_simulation S.verify pk ⟨simSign⟩ recorded Z
+      (by rwa [findPublicForgery_eq])
+    change execPublicSig S.verify pk simSign Z =
+      evalOracleComp simSign (idealTsigSimulator S.verify pk recorded Z) at h
+    rw [idealTsigSimulator_eval] at h
+    have ho : simSign = S.sign sk := funext hOracle
+    rw [ho, execPublicSig_real] at h
+    simpa only [ho] using h
 
 def signedBeforeForgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (simSign : Msg → Sig)
@@ -522,19 +615,19 @@ theorem findEnvForgery_sound {PK SK Msg Sig : Type} [DecidableEq Msg]
   execRealSig S pk sk Z = execIdealSig S pk simSign [] Z
 
 /-- **Signing-oracle game hop (`sigOracleGameHop_distinguisher_iff_forgery`)**:
-assume `hSim : ∀ m, simSign m = S.sign sk m`, so the ideal execution is run with a signing oracle
+assume `hOracle : ∀ m, simSign m = S.sign sk m`, so the ideal execution is run with a signing oracle
 for the real key. Then (1) any environment on which the real and ideal executions differ contains
 a verification query that is a fresh valid forgery `(mStar, sigStar)`, found by `findEnvForgery`;
 and (2) conversely any valid pair, submitted as a single verification query, makes the two
 executions differ.
 
 This is the "real equals ideal-with-signing-oracle unless forgery" hop. It is not a
-UC-realization statement: the ideal side is given the real signer by hypothesis, and no simulator
-that lacks `sk` is built here. `tooth_sigOracleGameHop_needs_real_signing_oracle` shows the
+UC-realization statement: the ideal signing functionality must still be coupled to the
+real signer. The simulator is the key-free oracle program `idealTsigSimulator`. `tooth_sigOracleGameHop_needs_real_signing_oracle` shows the
 hypothesis cannot be dropped. -/
 theorem sigOracleGameHop_distinguisher_iff_forgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
-    (hSim : ∀ m, simSign m = S.sign sk m) :
+    (hOracle : ∀ m, simSign m = S.sign sk m) :
     (∀ Z : UcSigEnv PK Msg Sig,
       ¬ UcIndistinguishableOn S pk sk simSign Z →
       ∃ mStar sigStar,
@@ -547,7 +640,7 @@ theorem sigOracleGameHop_distinguisher_iff_forgery {PK SK Msg Sig : Type} [Decid
   · intro Z hDist
     cases hFind : findEnvForgery S pk simSign [] Z with
     | none =>
-      exact False.elim (hDist (execReal_eq_execIdeal_unless_forgery S pk sk simSign hSim [] Z hFind))
+      exact False.elim (hDist (execReal_eq_execIdeal_unless_forgery S pk sk simSign hOracle [] Z hFind))
     | some pair =>
       rcases pair with ⟨mStar, sigStar⟩
       obtain ⟨hFresh, hVer⟩ := findEnvForgery_sound S pk simSign [] Z hFind
@@ -556,7 +649,7 @@ theorem sigOracleGameHop_distinguisher_iff_forgery {PK SK Msg Sig : Type} [Decid
     have hReal : execRealSig S pk sk (.stepVerify mStar sigStar (fun b => .halt b)) = true := by
       simp [execRealSig, hVer]
     have hIdeal : execIdealSig S pk simSign [] (.stepVerify mStar sigStar (fun b => .halt b)) = false := by
-      simp [execIdealSig, idealSigVerify]
+      simp [execIdealSig, execIdealTsigOracle, idealTsigSimulator, evalOracleComp]
     have hEq' : execRealSig S pk sk (.stepVerify mStar sigStar (fun b => .halt b)) =
         execIdealSig S pk simSign [] (.stepVerify mStar sigStar (fun b => .halt b)) := hEq
     rw [hReal, hIdeal] at hEq'
@@ -580,7 +673,7 @@ def execMultiIdealSig {PK SK Msg Sig : Type} [DecidableEq Msg]
 theorem sigOracleGameHop_advantage_le_extracted_forgeries
     {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
-    (hSim : ∀ m, simSign m = S.sign sk m) (N : Nat)
+    (hOracle : ∀ m, simSign m = S.sign sk m) (N : Nat)
     (Z : Fin N → UcSigEnv PK Msg Sig) :
     natAbsDiff
       (qsum N (fun i => if execRealSig S pk sk (Z i) then 1 else 0))
@@ -589,7 +682,7 @@ theorem sigOracleGameHop_advantage_le_extracted_forgeries
   apply qsum_indicator_diff_le
   intro i hNone
   cases hFind : findEnvForgery S pk simSign [] (Z i) with
-  | none => exact execReal_eq_execIdeal_unless_forgery S pk sk simSign hSim [] (Z i) hFind
+  | none => exact execReal_eq_execIdeal_unless_forgery S pk sk simSign hOracle [] (Z i) hFind
   | some pair => simp [hFind] at hNone
 
 /-- Telescoping bound for `natAbsDiff`: if consecutive scores differ by at most `eps`, the first
@@ -616,7 +709,7 @@ theorem natAbsDiff_telescope (S eps : Nat) (score : Nat → Nat)
 theorem multi_session_uc_realizes {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S_sig : AbstractSigScheme PK SK Msg Sig)
     (sessions : List (PK × SK × (Msg → Sig) × UcSigEnv PK Msg Sig))
-    (hAllSim : ∀ pk sk simSign Z, (pk, sk, simSign, Z) ∈ sessions →
+    (hAllOracle : ∀ pk sk simSign Z, (pk, sk, simSign, Z) ∈ sessions →
       ∀ m, simSign m = S_sig.sign sk m) :
     execMultiRealSig S_sig (sessions.map (fun (pk, sk, _, Z) => (pk, sk, Z))) =
       execMultiIdealSig S_sig (sessions.map (fun (pk, _, simSign, Z) => (pk, simSign, Z))) ∨
@@ -628,15 +721,15 @@ theorem multi_session_uc_realizes {PK SK Msg Sig : Type} [DecidableEq Msg]
   | nil => exact .inl rfl
   | cons hd rest ih =>
     rcases hd with ⟨pk, sk, simSign, Z⟩
-    have hHeadSim : ∀ m, simSign m = S_sig.sign sk m := hAllSim pk sk simSign Z (.head _)
-    have hRestSim : ∀ pk' sk' sim' Z', (pk', sk', sim', Z') ∈ rest → ∀ m, sim' m = S_sig.sign sk' m :=
-      fun pk' sk' sim' Z' hm => hAllSim pk' sk' sim' Z' (.tail _ hm)
+    have hHeadOracle : ∀ m, simSign m = S_sig.sign sk m := hAllOracle pk sk simSign Z (.head _)
+    have hRestOracle : ∀ pk' sk' sim' Z', (pk', sk', sim', Z') ∈ rest → ∀ m, sim' m = S_sig.sign sk' m :=
+      fun pk' sk' sim' Z' hm => hAllOracle pk' sk' sim' Z' (.tail _ hm)
     by_cases hHead : execRealSig S_sig pk sk Z = execIdealSig S_sig pk simSign [] Z
-    · rcases ih hRestSim with hRestEq | ⟨pk', sk', sim', Z', mStar, sigStar, hMem, hFresh, hVer⟩
+    · rcases ih hRestOracle with hRestEq | ⟨pk', sk', sim', Z', mStar, sigStar, hMem, hFresh, hVer⟩
       · exact .inl (by simp [execMultiRealSig, execMultiIdealSig, hHead, hRestEq])
       · exact .inr ⟨pk', sk', sim', Z', mStar, sigStar, .tail _ hMem, hFresh, hVer⟩
     · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ :=
-        (sigOracleGameHop_distinguisher_iff_forgery S_sig pk sk simSign hHeadSim).1 Z hHead
+        (sigOracleGameHop_distinguisher_iff_forgery S_sig pk sk simSign hHeadOracle).1 Z hHead
       exact .inr ⟨pk, sk, simSign, Z, mStar, sigStar, .head _, hFresh, hVer⟩
 
 structure CallingProtocol (HighIn HighOut PK Msg Sig : Type) where
@@ -646,11 +739,11 @@ structure CallingProtocol (HighIn HighOut PK Msg Sig : Type) where
     `ρ.compileEnv post inp` that a calling protocol compiles to, the real and ideal executions
     agree or the environment contains a fresh valid forgery. This is
     `sigOracleGameHop_distinguisher_iff_forgery` at that environment, under the same
-    signing-oracle hypothesis `hSim`; it contains no subroutine-substitution argument and is not
+    signing-oracle hypothesis `hOracle`; it contains no subroutine-substitution argument and is not
     the universal composition theorem. -/
 theorem uc_composition_theorem {HighIn HighOut PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
-    (hSim : ∀ m, simSign m = S.sign sk m)
+    (hOracle : ∀ m, simSign m = S.sign sk m)
     (ρ : CallingProtocol HighIn HighOut PK Msg Sig)
     (inp : HighIn) (post : HighIn → HighOut → Bool) :
     let Z := ρ.compileEnv post inp
@@ -662,7 +755,7 @@ theorem uc_composition_theorem {HighIn HighOut PK SK Msg Sig : Type} [DecidableE
   by_cases hEq : execRealSig S pk sk Z = execIdealSig S pk simSign [] Z
   · exact .inl hEq
   · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ :=
-      (sigOracleGameHop_distinguisher_iff_forgery S pk sk simSign hSim).1 Z hEq
+      (sigOracleGameHop_distinguisher_iff_forgery S pk sk simSign hOracle).1 Z hEq
     exact .inr ⟨mStar, sigStar, hFresh, hVer⟩
 
 /-- Two-message scheme used by the teeth below: every signature is `true` and verification
@@ -681,7 +774,7 @@ def toothSignThenEchoEnv : UcSigEnv Unit Bool Bool := .stepSign false (fun sig =
     signer that always outputs `true`), the environment that requests one signature and outputs it
     tells the real execution from the ideal one although it makes no verification query, so
     `findEnvForgery` returns `none`. The conclusion of
-    `sigOracleGameHop_distinguisher_iff_forgery` fails without `hSim`. -/
+    `sigOracleGameHop_distinguisher_iff_forgery` fails without `hOracle`. -/
 theorem tooth_sigOracleGameHop_needs_real_signing_oracle :
     ¬ UcIndistinguishableOn toothConstSigScheme () () (fun _ => false) toothSignThenEchoEnv ∧
     findEnvForgery toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv = none := by
@@ -689,7 +782,8 @@ theorem tooth_sigOracleGameHop_needs_real_signing_oracle :
   · intro h
     have h' : execRealSig toothConstSigScheme () () toothSignThenEchoEnv =
         execIdealSig toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv := h
-    simp [execRealSig, execIdealSig, toothConstSigScheme, toothSignThenEchoEnv] at h'
+    simp [execRealSig, execIdealSig, execIdealTsigOracle, idealTsigSimulator, evalOracleComp,
+      toothConstSigScheme, toothSignThenEchoEnv] at h'
   · simp [findEnvForgery, toothSignThenEchoEnv]
 
 /-- **`#tooth` Recorded-Message Gate (`tooth_idealSig_accepts_valid_unsigned_only_in_real`)**:
@@ -702,7 +796,7 @@ theorem tooth_idealSig_accepts_valid_unsigned_only_in_real {PK SK Msg Sig : Type
     execIdealSig S pk simSign [] (.stepVerify m sig (fun b => .halt b)) = false := by
   refine ⟨?_, ?_⟩
   · simp [execRealSig, hVer]
-  · simp [execIdealSig, idealSigVerify]
+  · simp [execIdealSig, execIdealTsigOracle, idealTsigSimulator, evalOracleComp]
 
 /-- Score sequence that jumps once, from `0` at index `0` to `5` afterwards. -/
 def toothJumpScore (i : Nat) : Nat := if i = 0 then 0 else 5
