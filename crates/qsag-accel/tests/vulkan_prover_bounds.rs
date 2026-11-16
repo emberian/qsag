@@ -730,3 +730,39 @@ fn audit_hardening_bounds_receipts_and_turboshake_canopy() {
 
     drop(session);
 }
+
+#[test]
+fn fold_normalization_uses_independent_kernel_and_coefficient_offsets() {
+    let Some(gpu) = backend() else { return; };
+    let _session = gpu.try_acquire_prover_session().expect("session");
+    let fx = Fixture::new();
+    let run = |c_dst, k_dst, normalize| {
+        fx.commit(&gpu);
+        let mono: [[u64; 4]; 768] = fx.eq_tables[..768].try_into().unwrap();
+        gpu.prover_whir_expand_monomial_and_dot(&mono, NUM_VARS, 1, &mut []).unwrap();
+        let weights: Vec<_> = fx.lambdas.iter().map(|&l| [l, [0; 4]]).collect();
+        gpu.prover_whir_open_init(NUM_VARS, false, &weights, &[[1, 0, 0, 0]; 1536]).unwrap();
+        gpu.prover_whir_fold_pass_b(8, 0, 0, 8, k_dst, fx.chal).unwrap();
+        gpu.prover_whir_fold_pass_c(8, 0, c_dst, fx.chal, fx.chal, fx.chal, normalize, 9).unwrap();
+        gpu.prover_whir_fold_pass_a(4, if normalize { 0 } else { c_dst }, if normalize { 0 } else { k_dst }).unwrap()
+    };
+    for (c_dst, k_dst) in [(64, 64), (64, 128), (128, 64)] {
+        assert_eq!(run(c_dst, k_dst, true), run(c_dst, k_dst, false), "c={c_dst}, k={k_dst}");
+    }
+}
+
+#[test]
+fn partial_safe_upload_callback_cannot_read_previous_witness() {
+    let Some(gpu) = backend() else { return; };
+    let _session = gpu.try_acquire_prover_session().expect("session");
+    let fx = Fixture::new();
+    fx.commit(&gpu);
+    let partial = gpu.prover_whir_commit_round0_with(1, &[3; 32], NUM_VARS, 4, 16, 0, 0, 0,
+        |_, _, dst| {
+            assert!(dst.iter().all(|&w| w == 0), "callback saw stale staging words");
+            dst[0] = 9;
+        }).unwrap();
+    let mut expected = vec![0u64; C_LEN]; expected[0] = 9;
+    let full = gpu.prover_whir_commit_round0(&[&expected], &[3; 32], NUM_VARS, 4, 16, 0, 0, 0).unwrap();
+    assert_eq!(partial, full);
+}
