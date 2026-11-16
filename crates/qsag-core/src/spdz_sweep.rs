@@ -399,6 +399,10 @@ impl<'a> SpdzSweepEngine<'a> {
             &[&self.session_id, &flush_idx.to_le_bytes()],
         );
         self.ensure_online_mesh()?;
+        if self.alpha.is_none() {
+            // Unchecked openings are pending and nothing can check them: fail closed.
+            return self.fail(KeccakMpcError::InvalidParameters);
+        }
         let alpha = self
             .alpha
             .as_ref()
@@ -1152,6 +1156,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sweep_openings_match_the_reference_and_reveal_only_the_picks() {
+        let _memory = crate::test_budget::reserve_mb(1900);
         // 3-of-5 with the non-prefix quorum {1, 2, 4}.
         let mut s = setup(3, 5, &[1, 2, 4], 0x11);
         let sk = sk();
@@ -1286,6 +1291,7 @@ pub(crate) mod tests {
     /// other's sweeps.
     #[test]
     fn routed_engines_sign_the_reference_signature_and_reject_foreign_sweeps() {
+        let _memory = crate::test_budget::reserve_mb(1500);
         use crate::keccak_mpc::run_dealerless_rss_dkg_2of3;
         use crate::rss256::Rss256Engine;
 
@@ -1343,32 +1349,38 @@ pub(crate) mod tests {
 
     #[test]
     fn baggy_two_of_three_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(1400);
         sign_and_compare(&TINY, 2, 3, &[0, 2], 0x31);
     }
 
     #[test]
     fn baggy_three_of_five_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(2100);
         sign_and_compare(&TINY, 3, 5, &[0, 3, 4], 0x32);
     }
 
     #[test]
     fn baggy_five_of_seven_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(3300);
         sign_and_compare(&TINY, 5, 7, &[0, 1, 3, 5, 6], 0x33);
     }
 
     #[test]
     fn baggy_all_of_three_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(2100);
         sign_and_compare(&TINY, 3, 3, &[0, 1, 2], 0x34);
     }
 
     #[test]
     fn baggy_three_of_five_with_a_spare_party_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(2700);
         // Four parties of a 3-of-5 sharing: more than the threshold take part.
         sign_and_compare(&TINY, 3, 5, &[1, 2, 3, 4], 0x35);
     }
 
     #[test]
     fn keygen_two_of_three_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(1400);
         let mut s = setup(2, 3, &[1, 2], 0x36);
         let sk = sk();
         let mut engine =
@@ -1388,6 +1400,7 @@ pub(crate) mod tests {
     /// the hash of the key reconstructed from the same shares.
     #[test]
     fn dealerless_keys_and_triples_drive_a_three_of_four_sweep() {
+        let _memory = crate::test_budget::reserve_mb(1800);
         use crate::dkg::run_dealerless_dkg_seed32_gf256;
         use crate::field::tower::lagrange_weights_zero_gf256;
         use crate::keccak_mpc::authenticate_dkg_seed_shares_for_spdz;

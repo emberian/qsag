@@ -74,6 +74,9 @@ impl core::fmt::Display for CouponError {
 }
 impl std::error::Error for CouponError {}
 
+#[cfg(test)]
+pub(crate) use memory::{cap_allocator_arenas, release_free_heap};
+
 // This is the sole OS-FFI boundary. All cryptographic and protocol code is safe Rust.
 #[allow(unsafe_code)]
 mod memory {
@@ -97,13 +100,34 @@ mod memory {
         fn sysconf(name: c_int) -> c_long;
         fn mlockall(flags: c_int) -> c_int;
         fn prctl(option: c_int, ...) -> c_int;
+        fn mallopt(param: c_int, value: c_int) -> c_int;
+        #[cfg(test)]
+        fn malloc_trim(pad: usize) -> c_int;
+    }
+
+    /// Cap the process allocator at two arenas (`M_ARENA_MAX`). Advisory: an allocator
+    /// without this knob keeps its own policy, so the result is ignored.
+    pub(crate) fn cap_allocator_arenas() {
+        const M_ARENA_MAX: c_int = -8;
+        // SAFETY: `mallopt` only stores an allocator tuning parameter; it takes no
+        // pointers and is safe to call at any time from any thread.
+        let _ = unsafe { mallopt(M_ARENA_MAX, 2) };
+    }
+
+    /// Return free heap pages of every allocator arena to the operating system.
+    #[cfg(test)]
+    pub(crate) fn release_free_heap() {
+        // SAFETY: `malloc_trim` takes no pointers and only releases memory the allocator
+        // already considers free; it is safe to call concurrently with allocation.
+        let _ = unsafe { malloc_trim(0) };
     }
 
     /// Process-wide protection for the existing heap/stack MPC engine. Call in a
     /// dedicated mint worker BEFORE creating its secret RNGs or loading key shares.
     /// This permanently disables core dumps and locks current and future mappings;
     /// it is intentionally not undone on Drop. Insufficient RLIMIT_MEMLOCK fails
-    /// closed. Allocation beyond that limit can abort the worker.
+    /// closed. Allocation beyond that limit can abort the worker. It also caps the
+    /// process allocator at two arenas, which bounds the locked heap.
     ///
     /// Do not fork a worker while MPC scratch exists: only the final LockedBytes
     /// slots have WIPEONFORK. Forked handles cannot invoke minting. Privileged RAM
@@ -120,6 +144,10 @@ mod memory {
             {
                 return Err(CouponError::MemoryProtection);
             }
+            // Under MCL_FUTURE every allocator arena a worker thread creates stays
+            // resident, and minting spawns many short-lived workers: the 2-of-3 two-coupon
+            // mint held 7.8 GB with default arenas and 3.6 GB with two, at equal wall time.
+            cap_allocator_arenas();
             Ok(Self {
                 pid: std::process::id(),
             })

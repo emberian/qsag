@@ -21,6 +21,9 @@ extern crate std;
 
 pub mod wipe;
 
+#[cfg(test)]
+mod test_budget;
+
 #[forbid(unsafe_code)]
 pub mod field;
 
