@@ -4,7 +4,7 @@ module
 
 The parser reads its input through `Bytes`, a length plus an index function, so that a parse touches
 only the header, section-table, symbol-table, name and code bytes it needs. The compiled archives in
-`Qsag.CompiledRlibFixtures` are single natural-number literals; reading byte `i` is one shift.
+`Qsag.Machine.ElfFixtures` are single natural-number literals; reading byte `i` is one shift.
 
 Contents:
 1. `Bytes` and its list views (`toList`, `slice`), with `ofList` round-trip lemmas.
@@ -13,11 +13,10 @@ Contents:
    `extractElfFuncBytes_in_text_section`), and archive-level provenance
    (`extractAllRlibFuncs_provenance`).
 4. Extraction certificates: the parser applied to both compiled archives returns exactly the
-   normalized slices of `Qsag.ElfFixtureSlices`.
+   slices of `Qsag.Machine.ElfFixtures`.
 -/
 
-public import Qsag.Machine.CompiledRlibFixtures
-public import Qsag.Machine.ElfFixtureSlices
+public import Qsag.Machine.ElfFixtures
 
 import Qsag.Tactic.AssuranceKit
 public section
@@ -642,51 +641,49 @@ theorem extractAllRlibFuncs_provenance (rlib : Bytes) (slice : ElfFuncSlice)
 /-! ## §4. Extraction certificates for the compiled archives -/
 
 /-- The compiled `x86_64` archive fixture as an indexed byte source. -/
-@[expose] noncomputable def x86RlibArchiveBytes : Bytes :=
-  Bytes.ofNat x86RlibArchiveLen x86RlibArchiveNat
+@[expose] noncomputable def currentX86RlibArchiveBytes : Bytes :=
+  Bytes.ofNat currentX86RlibLiteral.1 currentX86RlibLiteral.2
 
 /-- The compiled `aarch64` archive fixture as an indexed byte source. -/
-@[expose] noncomputable def aarch64RlibArchiveBytes : Bytes :=
-  Bytes.ofNat aarch64RlibArchiveLen aarch64RlibArchiveNat
+@[expose] noncomputable def currentAarch64RlibArchiveBytes : Bytes :=
+  Bytes.ofNat currentAarch64RlibLiteral.1 currentAarch64RlibLiteral.2
 
 /-- The archive literal has no bits beyond its stated byte length. -/
-theorem x86_rlib_archive_nat_fits :
-    x86RlibArchiveNat < 2 ^ (8 * x86RlibArchiveLen) := by decide +kernel
+theorem currentX86_rlib_archive_nat_fits :
+    currentX86RlibLiteral.2 < 2 ^ (8 * currentX86RlibLiteral.1) := by decide +kernel
 
-theorem aarch64_rlib_archive_nat_fits :
-    aarch64RlibArchiveNat < 2 ^ (8 * aarch64RlibArchiveLen) := by decide +kernel
+theorem currentAarch64_rlib_archive_nat_fits :
+    currentAarch64RlibLiteral.2 < 2 ^ (8 * currentAarch64RlibLiteral.1) := by decide +kernel
 
 /-- Certified extraction boundary: the parser applied to the compiled `x86_64` archive returns
-    exactly the normalized slices consumed by downstream proofs. -/
-theorem x86_rlib_extracted_slices :
-    extractAllRlibFuncs x86RlibArchiveBytes = x86ExtractedSlices := by
-  rfl
+    exactly the slices consumed by downstream proofs. -/
+theorem currentX86_rlib_extracted_slices :
+    extractAllRlibFuncs currentX86RlibArchiveBytes = currentX86ExtractedSlices := by rfl
 
-theorem aarch64_rlib_extracted_slices :
-    extractAllRlibFuncs aarch64RlibArchiveBytes = aarch64ExtractedSlices := by
-  rfl
+theorem currentAarch64_rlib_extracted_slices :
+    extractAllRlibFuncs currentAarch64RlibArchiveBytes = currentAarch64ExtractedSlices := by rfl
 
-/-- `parseArArchive` + `extractAllElfFuncs` discover exactly the 16 exported `x86_64` symbols. -/
-theorem x86_rlib_symbol_names_exact :
-    (extractAllRlibFuncs x86RlibArchiveBytes).map ElfFuncSlice.name =
-      x86ExportedSymbolNames := by
-  rw [x86_rlib_extracted_slices]
+/-- `parseArArchive` + `extractAllElfFuncs` discover exactly the 19 exported `x86_64` symbols. -/
+theorem currentX86_symbol_names_exact :
+    (extractAllRlibFuncs currentX86RlibArchiveBytes).map ElfFuncSlice.name =
+      currentX86ExportedSymbolNames := by
+  rw [currentX86_rlib_extracted_slices]
   decide +kernel
 
-/-- `parseArArchive` + `extractAllElfFuncs` discover exactly the 7 exported `aarch64` symbols. -/
-theorem aarch64_rlib_symbol_names_exact :
-    (extractAllRlibFuncs aarch64RlibArchiveBytes).map ElfFuncSlice.name =
-      aarch64ExportedSymbolNames := by
-  rw [aarch64_rlib_extracted_slices]
+/-- `parseArArchive` + `extractAllElfFuncs` discover exactly the 9 exported `aarch64` symbols. -/
+theorem currentAarch64_symbol_names_exact :
+    (extractAllRlibFuncs currentAarch64RlibArchiveBytes).map ElfFuncSlice.name =
+      currentAarch64ExportedSymbolNames := by
+  rw [currentAarch64_rlib_extracted_slices]
   decide +kernel
 
 /-- Corrupting one byte of the archive literal inside a symbol body changes the extracted code:
     the certificate is sensitive to the code bytes, not only to the layout. -/
-theorem x86_rlib_extraction_detects_code_flip :
+theorem currentX86_rlib_extraction_detects_code_flip :
     (extractAllRlibFuncs
-        (Bytes.ofNat x86RlibArchiveLen (x86RlibArchiveNat ^^^ (1 <<< (8 * 400))))).map
+        (Bytes.ofNat currentX86RlibLiteral.1 (currentX86RlibLiteral.2 ^^^ (1 <<< (8 * 400))))).map
         ElfFuncSlice.code ≠
-      x86ExtractedSlices.map ElfFuncSlice.code := by
+      currentX86ExtractedSlices.map ElfFuncSlice.code := by
   decide +kernel
 
 /-! ## Linked-image extraction
@@ -695,8 +692,8 @@ The ELF64 field layout and PT_LOAD terminology follow ELFSage's
 `ELFSage/Types/ProgramHeaderTable.lean` (Draper Laboratory, MIT license,
 https://github.com/shigoel/ELFSage). This independent indexed-reader
 implementation checks file-backed executable ranges; it never treats BSS
-or a virtual address as an offset into the file. The original fixture
-extractor above intentionally retains its exact legacy symbol selection.
+or a virtual address as an offset into the file. The relocatable-object
+extractor above keeps its own symbol selection.
 -/
 structure Elf64ProgramHeader where
   kind : Nat
@@ -772,63 +769,6 @@ theorem buildImageFuncSlice_sound (elf : Bytes) (eh : Elf64Ehdr) (strSh : Elf64S
   try dsimp only at h
   repeat' first | contradiction | (split at h <;> try dsimp only at h)
   all_goals exact buildFuncSlice_sound _ _ _ _ _ _ _ h
-
-
-/-- Full native object from the source build, including every bitslice export. -/
-@[expose] noncomputable def currentX86RlibArchiveBytes : Bytes :=
-  Bytes.ofNat currentX86RlibLiteral.1 currentX86RlibLiteral.2
-
-theorem currentX86_rlib_extracted_slices :
-    extractAllRlibFuncs currentX86RlibArchiveBytes = currentX86ExtractedSlices := by rfl
-
-/-- Exact symbol-table completeness, including the newly pinned bitslice kernels. -/
-theorem currentX86_symbol_names_exact :
-    (extractAllRlibFuncs currentX86RlibArchiveBytes).map ElfFuncSlice.name =
-      x86ExportedSymbolNames ++ ["qsag_asm_transpose64x256_avx2", "qsag_asm_gf2_128_mul_acc_pclmul", "qsag_asm_gf2_128_mul_acc_vpclmul"] := by
-  rw [currentX86_rlib_extracted_slices]
-  decide +kernel
-
-/-- The bitslice suffix consists of actual, nonempty, in-bounds archive subslices. -/
-theorem currentX86_bitslice_provenance (slice : ElfFuncSlice)
-    (h : slice ∈ currentX86ExtractedSlices.drop 16) :
-    ∃ m ∈ parseArArchive currentX86RlibArchiveBytes,
-      m.payloadOffset + m.payloadSize ≤ currentX86RlibArchiveBytes.len ∧
-      slice.symSize > 0 ∧
-      slice.symValue + slice.symSize ≤ slice.textSize ∧
-      slice.textFileOffset + slice.textSize ≤ m.payloadSize ∧
-      slice.code = currentX86RlibArchiveBytes.slice
-        (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize := by
-  apply extractAllRlibFuncs_provenance
-  rw [currentX86_rlib_extracted_slices]
-  exact List.mem_of_mem_drop h
-
-/-- Full native object from the source build, including every bitslice export. -/
-@[expose] noncomputable def currentAarch64RlibArchiveBytes : Bytes :=
-  Bytes.ofNat currentAarch64RlibLiteral.1 currentAarch64RlibLiteral.2
-
-theorem currentAarch64_rlib_extracted_slices :
-    extractAllRlibFuncs currentAarch64RlibArchiveBytes = currentAarch64ExtractedSlices := by rfl
-
-/-- Exact symbol-table completeness, including the newly pinned bitslice kernels. -/
-theorem currentAarch64_symbol_names_exact :
-    (extractAllRlibFuncs currentAarch64RlibArchiveBytes).map ElfFuncSlice.name =
-      aarch64ExportedSymbolNames ++ ["qsag_asm_transpose64x256_neon", "qsag_asm_gf2_128_mul_acc_pmull"] := by
-  rw [currentAarch64_rlib_extracted_slices]
-  decide +kernel
-
-/-- The bitslice suffix consists of actual, nonempty, in-bounds archive subslices. -/
-theorem currentAarch64_bitslice_provenance (slice : ElfFuncSlice)
-    (h : slice ∈ currentAarch64ExtractedSlices.drop 7) :
-    ∃ m ∈ parseArArchive currentAarch64RlibArchiveBytes,
-      m.payloadOffset + m.payloadSize ≤ currentAarch64RlibArchiveBytes.len ∧
-      slice.symSize > 0 ∧
-      slice.symValue + slice.symSize ≤ slice.textSize ∧
-      slice.textFileOffset + slice.textSize ≤ m.payloadSize ∧
-      slice.code = currentAarch64RlibArchiveBytes.slice
-        (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize := by
-  apply extractAllRlibFuncs_provenance
-  rw [currentAarch64_rlib_extracted_slices]
-  exact List.mem_of_mem_drop h
 
 
 /-- Every fresh symbol is an in-bounds slice of an actual archive member. -/

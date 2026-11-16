@@ -3,12 +3,8 @@ public import Qsag.Custody.SeparatedCustody
 public import Qsag.Exec.RssProductionProfile
 public import Qsag.Exec.SeparatedCustodyUc
 public import Qsag.Exec.ThresholdIdealService
-import all Qsag.Custody.SeparatedCustody
-import all Qsag.Exec.RssProductionProfile
-import all Qsag.Protocol.Signing.HypertreeEufCma
-import all Qsag.Exec.SeparatedCustodyUc
-import all Qsag.Exec.ThresholdIdealService
-import all Qsag.Protocol.Threshold.ThresholdApproval
+public import Qsag.Protocol.Signing.HypertreeEufCma
+public import Qsag.Protocol.Threshold.ThresholdApproval
 import Qsag.Tactic.AssuranceKit
 
 /-! Execution-level module (`Exec/`): the request policy below is stated over the RSS production

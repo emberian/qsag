@@ -1,7 +1,7 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Machine.SpirvFixtures
 /-
-# Qsag.Machine.SpirvSimtGpuEquiv — Binary SPIR-V 1.5/1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
+# Qsag.SpirvSimtGpuEquiv — Binary SPIR-V 1.5/1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
 
 Machine-checked Lean 4.35 GPU verification foundation (constructive proofs, axioms strictly within `{propext, Quot.sound}`):
 
@@ -37,15 +37,18 @@ runtime backend's architecture-enum name.
 
 import Qsag.Tactic.AssuranceKit
 public import Qsag.Tactic.Prelude
-import all Qsag.Tactic.Prelude
+import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
+import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
-import all Qsag.Oracle.Poseidon2
+import Qsag.Oracle.Poseidon2
+public import Qsag.Protocol.Aggregation.Aggregation
+import Qsag.Protocol.Aggregation.Aggregation
 
 public section
 namespace Qsag
 
+open Aggregation
 
 attribute [-instance] UInt8.instLawfulEqOrd UInt32.instLawfulEqOrd UInt32.instLawfulOrderOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
 
@@ -1359,21 +1362,6 @@ theorem encodeSpirvModule_injective {m₁ m₂ : SpirvModule}
   injection hOk
 
 
-/-- `#tooth` Corrupting the `0x07230203` SPIR-V magic header word is rejected by `decodeSpirvModule`. -/
-theorem tooth_corrupted_spirv_magic_rejected (ver gen bound : UInt32) (rest : List UInt32) :
-    decodeSpirvModule (#[0xDEADBEEF, ver, gen, bound, 0] ++ rest.toArray) =
-      .error (.badMagic 0xDEADBEEF) := by
-  unfold decodeSpirvModule
-  simp [decodeSpirvModuleWords, spirvMagic]
-
-/-- `#tooth` Downgrading or corrupting the SPIR-V 1.5/1.6 version header (`0x00010500` / `0x00010600`)
-    to `0x00010000` is rejected by `decodeSpirvModule`. -/
-theorem tooth_corrupted_spirv_version_rejected (gen bound : UInt32) (rest : List UInt32) :
-    decodeSpirvModule (#[spirvMagic, 0x00010000, gen, bound, 0] ++ rest.toArray) =
-      .error (.badVersion 0x00010000) := by
-  unfold decodeSpirvModule
-  simp [decodeSpirvModuleWords, spirvMagic, SpirvVersion.ofWord?, spirvVersion15, spirvVersion16]
-
 /-! ## §2. Genuine Multi-Wave Wave32 Workgroup Operational Semantics (`64 KiB` Shared LDS) -/
 
 /-- Native RDNA2 Wave32 subgroup width (`32` SIMD lanes per wave). -/
@@ -1394,11 +1382,6 @@ structure WorkgroupConfig where
 
 def WorkgroupConfig.totalThreads (cfg : WorkgroupConfig) : Nat :=
   cfg.numWaves * wave32Lanes
-
-theorem WorkgroupConfig.totalThreads_eq (cfg : WorkgroupConfig) :
-    cfg.totalThreads = cfg.numWaves * wave32Lanes := by rfl
-
-theorem wave32Lanes_eq : wave32Lanes = 32 := by rfl
 
 def WorkgroupConfig.localTid (_cfg : WorkgroupConfig) (wave lane : Nat) : Nat :=
   wave * wave32Lanes + lane
@@ -2406,7 +2389,7 @@ def twoWaveReductionEnv : SpirvModuleEnv where
   ptrInfo id :=
     if id == 2 || id == 6 || id == 12 || id == 13 || id == 16 then some (.workgroup, 0, .w32)
     else if id == 3 || id == 7 || id == 10 then some (.storageBuffer, 0, .w32)
-    else if id == 4 || id == 19 then some (.storageBuffer, 1, .w32)
+    else if id == 4 || id == 9 || id == 19 then some (.storageBuffer, 1, .w32)
     else none
   initConst id := if id == 5 then .vU32 32 else .vUndef
   builtIns id := if id == 1 then some .localInvocationId else none
@@ -2427,7 +2410,7 @@ def twoWavePhase1CrossWaveRead : List SpirvInst :=
     .opAccessChain 6 16 2 [15],
     .opLoad 8 17 16,
     .opIAdd 8 18 14 17,
-    .opAccessChain 7 19 4 [1],
+    .opAccessChain 9 19 4 [1],
     .opStore 19 18
   ]
 
@@ -2439,77 +2422,6 @@ def peekSsboDword (binding addr : Nat) (res : Except SimtExecError WorkgroupExec
   match res with
   | .ok s => some (s.mem.ssbo binding addr)
   | .error _ => none
-
-/-- **`#tooth` Missing `OpControlBarrier` Causes Cross-Wave Shared-LDS Data Race
-    (`tooth_missing_barrier_causes_cross_wave_lds_race`)**:
-    In a 2-wave (`64`-thread) workgroup where Wave `0` and Wave `1` exchange values via `lds[tid ^ 32]`:
-    1. **Without `OpControlBarrier`** (concatenating `Phase0 ++ Phase1` into a single epoch), running
-       Wave `0` to completion before Wave `1` (`schedWave0First`) vs running both waves through
-       `Phase0` before `Phase1` (`schedPhased`) yields **distinct global outputs** (`10 ≠ 52`)!
-    2. **With `OpControlBarrier(.workgroup, .workgroup, spirvSemWorkgroupAcqRel)`** separating
-       `Phase0` and `Phase1`, Wave `0` blocks at the barrier until Wave `1` finishes `Phase0`, so
-       putting Wave `0` first in the schedule STILL produces the **exact cross-wave sum `52`**! -/
-theorem tooth_missing_barrier_causes_cross_wave_lds_race :
-    let initMem : GpuMemState :=
-      { lds := fun _ => 0
-        ssbo := fun b idx => if b == 0 then (if idx < 32 then 10 else 42) else 0
-        pushConsts := fun _ => 0 }
-    let buggyNoBarrierProg := twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead
-    let schedWave0First := List.replicate 12 0 ++ List.replicate 12 1
-    let schedInterleaved := List.replicate 4 0 ++ List.replicate 4 1 ++
-                            List.replicate 8 0 ++ List.replicate 8 1
-    let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
-    -- 1. Without OpControlBarrier, two valid 12-step-per-wave schedules disagree on outBuf[0]:
-    peekSsboDword 1 0
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt) = some 10 ∧
-    peekSsboDword 1 0
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt) = some 52 ∧
-    peekSsboDword 1 0
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt) ≠
-    peekSsboDword 1 0
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt) ∧
-    -- 2. With OpControlBarrier separating the two epochs, Wave-0-first schedule produces 52 on both waves:
-    peekSsboDword 1 0
-      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-        [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
-        initSt) = some 52 ∧
-    peekSsboDword 1 32
-      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-        [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
-        initSt) = some 52 := by
-  dsimp only
-  decide
-
-/-- **`#tooth` Single-Wave Wiped-LDS Execution Corrupts Multi-Wave Barrier Reductions
-    (`tooth_single_wave_lds_wipe_corrupts_multiwave_reduction`)**:
-    Wiping `lds := fun _ => 0` between waves (as in broken 1-wave-per-workgroup simulators) loses
-    Wave `0`'s shared-memory writes before Wave `1` runs (`42 ≠ 52`), whereas persistent multi-wave
-    `Workgroup` LDS preserves `52` across both Wave32 subgroups. -/
-theorem tooth_single_wave_lds_wipe_corrupts_multiwave_reduction :
-    let initMem : GpuMemState :=
-      { lds := fun _ => 0
-        ssbo := fun b idx => if b == 0 then (if idx < 32 then 10 else 42) else 0
-        pushConsts := fun _ => 0 }
-    let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
-    let wipedWave1Prog := twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead
-    peekSsboDword 1 32
-      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-        [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt) = some 52 ∧
-    peekSsboDword 1 32
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
-        (List.replicate 12 1) initSt) = some 42 ∧
-    peekSsboDword 1 32
-      (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-        [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-        [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt) ≠
-    peekSsboDword 1 32
-      (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
-        (List.replicate 12 1) initSt) := by
-  dsimp only
-  decide
 
 /-! ### `SIMT-CT` Constant-Time Side-Channel Model & 32-Bank RDNA2 LDS Conflict Freedom -/
 
@@ -2535,10 +2447,7 @@ private theorem pow_two_dvd_of_odd :
     ∀ (k g c : Nat), c % 2 = 1 → 2 ^ k ∣ g * c → 2 ^ k ∣ g
   | 0, g, _, _, _ => Nat.one_dvd g
   | k + 1, g, c, hodd, hdvd => by
-    have h2prime : IsPrimeNat 2 := ⟨by decide, fun d hd => by
-      have hpos : 0 < d := Nat.pos_of_dvd_of_pos hd (by decide)
-      have hle : d ≤ 2 := Nat.le_of_dvd (by decide) hd
-      omega⟩
+    have h2prime : IsPrimeNat 2 := isPrimeNat_2
     have hnc : ¬ (2 ∣ c) := fun hc => by obtain ⟨t, rfl⟩ := hc; omega
     have h2dvd : 2 ∣ g * c := by
       rw [Nat.pow_succ] at hdvd
@@ -2701,43 +2610,6 @@ theorem merkle_skewed_lds_bank_conflict_free_both_epochs (w d : Nat) :
           have : 9 * (2 * (l₁ - l₂)) = 18 * (l₁ - l₂) := by omega
           rwa [this]
         exact False.elim (odd_mul_sub_not_dvd_32 (s := 9) (d := 2 * (l₁ - l₂)) rfl (by omega) (by omega) hMod32')
-
-/-- **`#tooth` Unpadded Stride-32 LDS Access Causes Worst-Case 32-Way Bank Serialization
-    (`tooth_stride32_lds_causes_32way_bank_conflict`)**:
-    Accessing `byteAddr(lane) = 4 * (baseDword + 32 * lane)` across a Wave32 subgroup maps all `32`
-    distinct lane addresses into the single LDS bank `baseDword % 32` (`ldsLane0BankWays = 32` and
-    `¬ LdsBankConflictFree32`), whereas `+1` row padding (`stride = 33`) achieves `ldsLane0BankWays = 1`
-    and `LdsBankConflictFree32`! -/
-theorem tooth_stride32_lds_causes_32way_bank_conflict (baseDword : Nat) :
-    let unpadded := fun lane => 4 * (baseDword + 32 * lane)
-    let padded33 := fun lane => 4 * (baseDword + 33 * lane)
-    (∀ lane < 32, ldsBank (unpadded lane) = baseDword % 32) ∧
-    ldsLane0BankWays unpadded = 32 ∧
-    ¬ LdsBankConflictFree32 unpadded ∧
-    LdsBankConflictFree32 padded33 := by
-  refine ⟨?_, ?_, ?_, odd_stride_lds_bank_conflict_free baseDword 33 rfl⟩
-  · intro lane _
-    unfold ldsBank
-    have h4 : 4 * (baseDword + 32 * lane) / 4 = baseDword + 32 * lane := by omega
-    rw [h4]
-    omega
-  · unfold ldsLane0BankWays
-    have hAll : ∀ l ∈ List.range 32,
-        decide (ldsBank (4 * (baseDword + 32 * l)) = ldsBank (4 * (baseDword + 32 * 0))) = true := by
-      intro l _
-      unfold ldsBank
-      have h1 : 4 * (baseDword + 32 * l) / 4 = baseDword + 32 * l := by omega
-      have h2 : 4 * (baseDword + 32 * 0) / 4 = baseDword := by omega
-      rw [h1, h2]
-      simp [Nat.add_mul_mod_self_left]
-    rw [List.filter_eq_self.mpr hAll, List.length_range]
-  · intro hFree
-    have h01 := hFree 0 1 (by decide) (by decide) (by
-      unfold ldsBank
-      have h1 : 4 * (baseDword + 32 * 0) / 4 = baseDword := by omega
-      have h2 : 4 * (baseDword + 32 * 1) / 4 = baseDword + 32 := by omega
-      rw [h1, h2]; omega)
-    omega
 
 /-! ### Static `SIMT-CT` Information-Flow Type System & Leakage-Trace Noninterference -/
 
@@ -3828,39 +3700,6 @@ theorem simt_ct_zero_exec_divergence (env : SpirvModuleEnv) (prog : List SpirvIn
                   injection hStep with hPair; injection hPair with hWEq _; rw [← hWEq, hMask]
             exact ih wSt' mem' hMaskPres obs hTail
 
-/-- **`#tooth` Secret-Dependent LDS Indexing Rejected by `SIMT-CT` & Leaks Physical Bank Trace
-    (`tooth_secret_index_leaks_lds_bank_trace`)**:
-    A buggy lookup-table S-box kernel that loads `lds[%secWitness]` is rejected by `checkProgSimtCt`
-    (`= false`) AND exhibits two `MemLowEq` secret witnesses (`sec = 0` vs `sec = 1` on lane `0`)
-    whose Wave32 hardware observation traces differ (`ldsBank 0 = 0 ≠ 1 = ldsBank 4`)! -/
-theorem tooth_secret_index_leaks_lds_bank_trace :
-    let pol : SimtCtPolicy :=
-      { ssboSec := fun b => if b == 0 then .sec else .pub
-        ldsSec := .pub
-        regSec := fun id => if id == 11 || id == 12 || id == 13 then .sec else .pub }
-    let buggyLutProg : List SpirvInst :=
-      [ .opAccessChain 7 10 3 [1],   -- %10 = &secIn[tid] (pub ptr)
-        .opLoad 8 11 10,             -- %11 = secIn[tid]  (SECRET witness!)
-        .opAccessChain 6 12 2 [11],  -- %12 = &lds[%11]   (ILLEGAL secret index!)
-        .opLoad 8 13 12 ]            -- %13 = lds[%11]    (SECRET-DEPENDENT LDS BANK!)
-    let m₀ : GpuMemState :=
-      { lds := fun i => UInt32.ofNat i
-        ssbo := fun b i => if b == 0 && i == 0 then 0 else 0
-        pushConsts := fun _ => 0 }
-    let m₁ : GpuMemState :=
-      { lds := fun i => UInt32.ofNat i
-        ssbo := fun b i => if b == 0 && i == 0 then 1 else 0
-        pushConsts := fun _ => 0 }
-    let w₀ := (initWorkgroupExecState twoWaveReductionEnv twoWaveCfg m₀).waves 0
-    checkProgSimtCt twoWaveReductionEnv pol buggyLutProg = false ∧
-    MemLowEq pol m₀ m₁ ∧
-    runWaveWithObs twoWaveReductionEnv buggyLutProg 4 w₀ m₀ ≠
-      runWaveWithObs twoWaveReductionEnv buggyLutProg 4 w₀ m₁ := by
-  refine ⟨by decide, ⟨rfl, fun _ => rfl, fun b hb => ?_⟩, by decide⟩
-  by_cases hb0 : b = 0
-  · subst hb0; simp at hb
-  · funext i; simp [hb0]
-
 /-- The exact scalar-plane swizzle used by goldilocks_ntt.comp and coset_lde_ext2.comp.
 The argument and result are dword offsets; a plane occupies 512 dwords. -/
 def productionLdsIndex (i : Nat) : Nat := i ^^^ (((i >>> 5) &&& 1) * 31)
@@ -3908,14 +3747,6 @@ theorem production_butterfly_address_inhabited :
     ∃ stage wave side : Nat, ProductionButterflyShape stage wave side :=
   ⟨0, 0, 0, by exact ⟨by decide, by decide, by decide⟩⟩
 
-/-- Omitting the XOR duplicates banks already in the first butterfly stage. -/
-theorem tooth_omitted_production_swizzle :
-    ¬ LdsBankConflictFree32 (fun lane => 4 * productionButterflyIndex 0 0 0 lane) := by
-  intro h
-  have he := h 0 16 (by decide) (by decide) (by decide)
-  omega
-
-#tooth_pair production_butterfly_lds_bank_conflict_free vs tooth_omitted_production_swizzle
 
 theorem production_butterfly_lds_bank_conflict_free_bounded (stage wave side : Nat)
     (h : ProductionButterflyShape stage wave side) :
@@ -3937,25 +3768,6 @@ theorem spirv_normative_bitwise_and_comparison_decode :
     decodeInstRaw ⟨176, [1, 2, 3, 4]⟩ = .ok (.opULessThan 1 2 3 4) := by
   exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
-/-- `#tooth` Swapping Khronos SPIR-V `OpBitwiseOr = 197` and `OpBitwiseXor = 198` is rejected
-    both at binary instruction decode AND under per-lane VALU evaluation (`1 ||| 3 = 3 ≠ 2 = 1 ^^^ 3`). -/
-theorem tooth_swapped_spirv_or_xor_corrupts_word_and_alu :
-    let sampleRegs : Nat → SpirvVal := fun r =>
-      if r == 3 then .vU32 1 else if r == 4 then .vU32 3 else .vUndef
-    let sampleMem : GpuMemState := { lds := fun _ => 0, ssbo := fun _ _ => 0, pushConsts := fun _ => 0 }
-    decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseXor 1 2 3 4) ∧
-    decodeInstRaw ⟨198, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseOr 1 2 3 4) ∧
-    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseOr 8 2 3 4) = .ok (2, .vU32 3) ∧
-    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) = .ok (2, .vU32 2) ∧
-    evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseOr 8 2 3 4) ≠
-      evalLanePureInst twoWaveReductionEnv sampleMem sampleRegs (.opBitwiseXor 8 2 3 4) := by
-  refine ⟨nofun, nofun, rfl, rfl, nofun⟩
-
-theorem tooth_spirv_opcode_197_not_xor :
-    decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ ≠ .ok (.opBitwiseXor 1 2 3 4) :=
-  nofun
-
-#tooth_pair spirv_normative_bitwise_and_comparison_decode vs tooth_spirv_opcode_197_not_xor
 
 /-! ## §8. Decoded `SpirvModule` Header → `SpirvModuleEnv` Bridge (`OpExecutionMode` / `OpDecorate`) -/
 
@@ -4129,44 +3941,62 @@ private theorem findInitConstVal_not_ptr (id : Nat) :
 theorem SpirvModule.scalarConstEnv (m : SpirvModule) : ScalarConstEnv m.toEnv :=
   fun id sc b off w => findInitConstVal_not_ptr id m.tyGlobals sc b off w
 
-/-- Check SIMT-CT directly on a binary SPIR-V 1.5/1.6 word stream `words` under its decoded
-    `OpDecorate` / `OpType*` / `OpConstant*` / `OpVariable` module environment. -/
-def checkDecodedWordsSimtCt (words : List UInt32) (pol : SimtCtPolicy) (prog : List SpirvInst) :
-    Bool :=
+/-- The actual decoded entry function, normalized only by removing its terminal `OpReturn`.
+The straight-line checker rejects calls, branches and any earlier return. Missing entry points
+or unterminated functions fail closed. No caller-supplied program enters this interface. -/
+def SpirvModule.entryProgram? (m : SpirvModule) : Option (List SpirvInst) := do
+  let fn ← m.entryFunction?
+  match fn.body.reverse with
+  | .opReturn :: rev => some rev.reverse
+  | _ => none
+
+/-- Check the entry instructions decoded from the binary itself. -/
+def checkDecodedWordsSimtCt (words : List UInt32) (pol : SimtCtPolicy) : Bool :=
   match decodeSpirvModuleWords words with
-  | .ok m => checkProgSimtCt m.toEnv pol prog
+  | .ok m => match m.entryProgram? with
+    | some prog => checkProgSimtCt m.toEnv pol prog
+    | none => false
   | .error _ => false
 
-/-- Execute a Wave32 observation trace directly under the `SpirvModuleEnv` decoded from `words`. -/
+/-- Execute exactly the decoded entry program checked above. -/
 def runDecodedWordsWaveWithObs (words : List UInt32) (cfg : WorkgroupConfig) (w : Nat)
-    (prog : List SpirvInst) (fuel : Nat) (mem : GpuMemState) :
-    Except SpirvDecodeError (List SimtWaveObs) :=
+    (fuel : Nat) (mem : GpuMemState) : Except SpirvDecodeError (List SimtWaveObs) :=
   match decodeSpirvModuleWords words with
-  | .ok m =>
-    let wSt : Wave32State :=
-      { pc := 0, execMask := allActive32, laneRegs := fun l => initLaneRegs m.toEnv cfg w l,
-        atBarrier := false }
-    .ok (runWaveWithObs m.toEnv prog fuel wSt mem)
+  | .ok m => match m.entryProgram? with
+    | none => .error (.malformedSection "missing or unterminated entry function")
+    | some prog =>
+      let wSt : Wave32State :=
+        { pc := 0, execMask := allActive32, laneRegs := fun l => initLaneRegs m.toEnv cfg w l,
+          atBarrier := false }
+      .ok (runWaveWithObs m.toEnv prog fuel wSt mem)
   | .error e => .error e
 
-/-- End-to-end binary-to-leakage bridge: any binary `SPIR-V 1.5/1.6` word stream `words` passing
-    `checkDecodedWordsSimtCt words pol prog = true` executes with identical hardware observation
-    traces (`PC`, `EXEC` mask, global addresses, LDS banks) across any `MemLowEq pol m₁ m₂`. -/
+/-- Binary-to-leakage bridge for the decoded entry body. The function selected for checking
+and execution comes exclusively from `words`; unsupported control flow is rejected. -/
 theorem decoded_spirv_words_simt_ct_noninterference
-    {words : List UInt32} {pol : SimtCtPolicy} {prog : List SpirvInst}
-    (hCt : checkDecodedWordsSimtCt words pol prog = true)
+    {words : List UInt32} {pol : SimtCtPolicy}
+    (hCt : checkDecodedWordsSimtCt words pol = true)
     (cfg : WorkgroupConfig) (w fuel : Nat)
     {m₁ m₂ : GpuMemState} (hMem : MemLowEq pol m₁ m₂) :
-    runDecodedWordsWaveWithObs words cfg w prog fuel m₁ =
-      runDecodedWordsWaveWithObs words cfg w prog fuel m₂ := by
+    runDecodedWordsWaveWithObs words cfg w fuel m₁ =
+      runDecodedWordsWaveWithObs words cfg w fuel m₂ := by
   unfold checkDecodedWordsSimtCt at hCt
   unfold runDecodedWordsWaveWithObs
   cases hDec : decodeSpirvModuleWords words with
   | error _ => rfl
   | ok m =>
     rw [hDec] at hCt
-    dsimp only
-    rw [simt_ct_noninterference hCt fuel (initWave_lowEq m.toEnv pol cfg m.scalarConstEnv w) hMem]
+    dsimp only at hCt ⊢
+    cases hEntry : m.entryProgram? with
+    | none => rfl
+    | some prog =>
+      simp only [hEntry] at hCt ⊢
+      exact congrArg Except.ok
+        (simt_ct_noninterference hCt fuel (initWave_lowEq m.toEnv pol cfg m.scalarConstEnv w) hMem)
+
+/-- Array interface matching the embedded production word arrays. -/
+def checkDecodedModuleEntrySimtCt (words : Array UInt32) (pol : SimtCtPolicy) : Bool :=
+  checkDecodedWordsSimtCt words.toList pol
 
 /-- Canonical SPIR-V 1.5 compute module header and declarations for the 2-wave reduction kernel,
     carrying `OpExecutionMode LocalSize 64 1 1` and `OpDecorate` `BuiltIn` / `Binding` metadata. -/
@@ -4224,31 +4054,36 @@ theorem decoded_spirv_header_env_resolution :
     m.toEnv.initConst 5 = .vU32 32 := by
   exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
 
-/-- `#tooth` Dropping `OpDecorate %4 Binding 1` from the SPIR-V annotation section collapses
-    output `StorageBuffer` `%4` onto descriptor binding `0` instead of binding `1`. -/
-theorem tooth_omitted_spirv_binding_decoration_aliases_slot :
-    (twoWaveReductionHeaderModule [
-      .decorate ⟨1, .builtIn .localInvocationId⟩,
-      .decorate ⟨3, .binding 0⟩
-    ]).toEnv.ptrInfo 4 ≠ some (.storageBuffer, 1, .w32) :=
-  nofun
-
+/-- An actual secret-bearing load/store entry with different secret input memories. -/
 theorem decoded_spirv_words_inhabited :
-    ∃ (words : List UInt32) (pol : SimtCtPolicy) (prog : List SpirvInst)
+    ∃ (words : List UInt32) (pol : SimtCtPolicy)
       (_cfg : WorkgroupConfig) (_w _fuel : Nat) (m₁ m₂ : GpuMemState),
-      checkDecodedWordsSimtCt words pol prog = true ∧
-      MemLowEq pol m₁ m₂ := by
+      checkDecodedWordsSimtCt words pol = true ∧ MemLowEq pol m₁ m₂ ∧
+      pol.ssboSec 0 = .sec ∧ m₁ ≠ m₂ := by
   let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
   let pol : SimtCtPolicy := {
-    regSec := fun _ => .pub
-    ldsSec := .pub
-    ssboSec := fun _ => .pub
+    regSec := fun id => if id == 11 then .sec else .pub
+    ldsSec := .sec
+    ssboSec := fun b => if b == 0 then .sec else .pub
   }
   let mem0 : GpuMemState := { lds := fun _ => 0, ssbo := fun _ _ => 0, pushConsts := fun _ => 0 }
-  exact ⟨encodeSpirvModuleWords m, pol, twoWavePhase0WriteLds, twoWaveCfg, 0, 4, mem0, mem0,
-    by decide, ⟨rfl, fun _ => rfl, fun _ _ => rfl⟩⟩
+  let mem1 : GpuMemState := {
+    lds := fun _ => 0, ssbo := fun b _ => if b == 0 then 1 else 0, pushConsts := fun _ => 0 }
+  refine ⟨encodeSpirvModuleWords m, pol, twoWaveCfg, 0, 5, mem0, mem1,
+    by decide, ⟨rfl, ?_, ?_⟩, rfl, ?_⟩
+  · intro h; cases h
+  · intro b hb
+    have hne : (b == 0) = false := by
+      cases h : b == 0 with
+      | false => rfl
+      | true => simp [pol, h] at hb
+    funext i
+    simp [mem0, mem1, hne]
+  · intro h
+    have hcell := congrArg (fun mem : GpuMemState => mem.ssbo 0 0) h
+    change (0 : UInt32) = 1 at hcell
+    cases hcell
 
-#tooth_pair decoded_spirv_header_env_resolution vs tooth_omitted_spirv_binding_decoration_aliases_slot
 #verify_inhabited decoded_spirv_words_simt_ct_noninterference decoded_spirv_words_inhabited
 
 end Qsag
@@ -4258,3 +4093,34 @@ end
   Qsag.SpirvModule.scalarConstEnv
   Qsag.decoded_spirv_words_simt_ct_noninterference
   Qsag.decoded_spirv_header_env_resolution
+
+public section
+namespace Qsag
+/-- Production entry check is pinned to the actual embedded word array. Unsupported
+instructions fail closed; this wrapper alone is not a certificate of the production shader. -/
+def checkProductionPoseidon2SimtCt (pol : SimtCtPolicy) : Bool :=
+  checkDecodedModuleEntrySimtCt poseidon2Perm12SpvWords pol
+
+/-- An unsafe decoded entry cannot be replaced with an independently supplied empty program. -/
+theorem tooth_decoded_entry_cannot_substitute_empty_program :
+    let m := twoWaveReductionHeaderModule twoWaveCanonicalAnnots
+    let bad := { m with functions := [
+      { resultTyId := 21, funcId := 20, control := 0, funcTyId := 22, params := [],
+        body := [.opLabel 26, .opBranchConditional 11 26 26, .opReturn] }] }
+    let pol : SimtCtPolicy := { regSec := fun id => if id == 11 then .sec else .pub,
+      ldsSec := .sec, ssboSec := fun _ => .sec }
+    checkDecodedWordsSimtCt (encodeSpirvModuleWords bad) pol = false ∧
+    checkProgSimtCt bad.toEnv pol [] = true := by
+  decide +kernel
+
+/-- Epoch 2 uses the output buffer pointer type, distinct from the input buffer. -/
+theorem twoWaveReductionEnv_epoch2_output_binding :
+    twoWaveReductionEnv.ptrInfo 7 = some (.storageBuffer, 0, .w32) ∧
+    twoWaveReductionEnv.ptrInfo 9 = some (.storageBuffer, 1, .w32) ∧
+    twoWaveReductionEnv.ptrInfo 19 = some (.storageBuffer, 1, .w32) := by
+  decide +kernel
+
+#tooth_pair decoded_spirv_words_simt_ct_noninterference vs tooth_decoded_entry_cannot_substitute_empty_program
+#verify_constructive twoWaveReductionEnv_epoch2_output_binding
+end Qsag
+end

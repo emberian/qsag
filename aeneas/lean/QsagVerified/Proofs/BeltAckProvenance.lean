@@ -402,7 +402,7 @@ theorem belt_three_custodian_round_exists
     (hmax : e ≠ core.num.U64.MAX) :
     ∃ acts : List BeltAction, acts.length = 5 ∧
       BeltTraceReachable st acts
-        [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 3#u32 },
+        [⟨{ _private := (), authorized_epoch := e, msg_tag := msg, certified_acks := 3#u32 },
           ((0#u64 ||| beltCustodianBit 0#u8) ||| beltCustodianBit 1#u8) |||
             beltCustodianBit 2#u8⟩]
         (beltAfterGrant (beltAfterAck (beltAfterAck

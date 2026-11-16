@@ -7,7 +7,7 @@ use qsag_verified::{
     GOLDILOCKS_PRIME, Gf16, Gf256, Goldilocks, GoldilocksExt2, LastBoundEpoch, RssShare64,
     RssZeroSeeds64, Shake256Sponge, Tower128, Tower256, bdoz_commit_masked_tag,
     bdoz_fold_masked_value, cshake256_32, ct_eq_bytes32, decode_fips205_adrs,
-    derive_jorts_det_r_rand, dkg_beaver_frobenius_eval_gf256,
+    derive_jorts_legacy_v1_det_r_rand, dkg_beaver_frobenius_eval_gf256,
     dkg_beaver_frobenius_share_shamir_gf256, dkg_verify_key_shares_boolean_bdoz_gf256,
     dkg_verify_shamir_2of3_key_bit_gf256, embed_gf256_to_tower128, encode_fips205_adrs,
     epoch_latch_advance, fips205_f, fips205_wots_chain, fips205_wots_checksum, gf16_add, gf16_mul,
@@ -114,6 +114,35 @@ fn test_shake256_nist_fips202_kats() {
     let mut st = [0u64; 25];
     keccak_f1600(&mut st);
     assert_eq!(st[0], 0xF125_8F79_40E1_DDE7);
+}
+
+/// Production `Cshake256Xof::absorb` panics after squeezing began; the extracted sponge must too.
+#[test]
+#[should_panic(expected = "cannot absorb into Shake256Sponge after squeezing began")]
+fn test_shake256_absorb_after_squeeze_panics() {
+    let mut sp = qsag_verified::Shake256Sponge::new_shake256();
+    sp.absorb(b"abc");
+    let mut out = [0u8; 8];
+    sp.squeeze(&mut out);
+    sp.absorb(b"late");
+}
+
+/// `finalize` and `squeeze` stay legal after squeezing began, and the stream continues.
+#[test]
+fn test_shake256_squeeze_is_resumable_after_finalize() {
+    let mut one = qsag_verified::Shake256Sponge::new_shake256();
+    one.absorb(b"abc");
+    let mut whole = [0u8; 64];
+    one.squeeze(&mut whole);
+    let mut two = qsag_verified::Shake256Sponge::new_shake256();
+    two.absorb(b"abc");
+    two.finalize();
+    two.finalize();
+    let (mut head, mut tail) = ([0u8; 24], [0u8; 40]);
+    two.squeeze(&mut head);
+    two.squeeze(&mut tail);
+    assert_eq!(&whole[..24], &head[..]);
+    assert_eq!(&whole[24..], &tail[..]);
 }
 
 #[test]
@@ -575,9 +604,9 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     bad_key[31] ^= 1;
     assert!(!ct_eq_bytes32(&key_id, &bad_key));
 
-    let r0 = derive_jorts_det_r_rand(&sk_prf, &key_id, 0, &msg_a);
-    assert_eq!(r0, derive_jorts_det_r_rand(&sk_prf, &key_id, 0, &msg_a));
-    assert_ne!(r0, derive_jorts_det_r_rand(&sk_prf, &key_id, 1, &msg_a));
+    let r0 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_a);
+    assert_eq!(r0, derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_a));
+    assert_ne!(r0, derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 1, &msg_a));
 
     let st0 = EpochLatch::new(2, key_id);
     // 1. Acquire epoch 0 fresh
@@ -629,7 +658,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 4. Equivocation attempt on epoch 0 with msg_b MUST fail!
-    let r0_b = derive_jorts_det_r_rand(&sk_prf, &key_id, 0, &msg_b);
+    let r0_b = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 0, &msg_b);
     assert_eq!(
         bound_epoch0()
             .acquire_or_retry(EpochSignRequest {
@@ -643,7 +672,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 5. Advance to epoch 1 on msg_b
-    let r1 = derive_jorts_det_r_rand(&sk_prf, &key_id, 1, &msg_b);
+    let r1 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 1, &msg_b);
     let (st2, g1) = st1_retry
         .acquire_or_retry(EpochSignRequest {
             requested_epoch: 1,
@@ -678,7 +707,7 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     );
 
     // 7. Tree exhaustion at epoch 2 (max_epoch = 2)
-    let r2 = derive_jorts_det_r_rand(&sk_prf, &key_id, 2, &msg_a);
+    let r2 = derive_jorts_legacy_v1_det_r_rand(&sk_prf, &key_id, 2, &msg_a);
     assert_eq!(
         bound_epoch1()
             .acquire_or_retry(EpochSignRequest {

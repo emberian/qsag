@@ -817,12 +817,24 @@ theorem keccak_f1600_result_iff (a b : Array Std.U64 25#usize) :
   rw [keccak_f1600_array_refines_qsag, Result.ok.injEq]
   exact eq_comm
 
-/-- The streaming API ignores additional absorption once squeezing has started.
-A transcript-level specification must preserve this phase boundary. -/
-theorem shake256_absorb_after_squeezing (s : keccak.Shake256Sponge)
+/-- The streaming API rejects absorption once squeezing has started: the extracted `absorb`
+fails its phase assertion for every input, as production `Cshake256Xof::absorb` panics. No
+state is returned, so a late absorb can never be mistaken for a successful no-op. -/
+theorem shake256_absorb_after_squeezing_fails (s : keccak.Shake256Sponge)
     (data : Slice Std.U8) (hs : s.squeezing = true) :
-    keccak.Shake256Sponge.absorb s data = .ok s := by
-  simp [keccak.Shake256Sponge.absorb, hs]
+    keccak.Shake256Sponge.absorb s data = .fail .assertionFailure := by
+  simp only [keccak.Shake256Sponge.absorb, massert_not_of_eq_true hs, bind_eq_result_bind]
+  rfl
+
+/-- Absorption succeeds exactly in the absorbing phase. -/
+theorem shake256_absorb_ok_iff_absorbing (s : keccak.Shake256Sponge) (data : Slice Std.U8) :
+    (∃ out, keccak.Shake256Sponge.absorb s data = .ok out) → s.squeezing = false := by
+  intro ⟨out, h⟩
+  cases hs : s.squeezing with
+  | false => rfl
+  | true =>
+    rw [shake256_absorb_after_squeezing_fails s data hs] at h
+    cases h
 
 /-- Finalization is idempotent on the squeezing phase, including its offset and buffer. -/
 theorem shake256_finalize_after_squeezing (s : keccak.Shake256Sponge)

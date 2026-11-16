@@ -1595,3 +1595,79 @@ theorem wordQuadPool_fiber_le_sixteen (z : QuarticGoldilocks) :
   exact ext4WordMultiplicity_le_sixteen z
 
 end Qsag
+
+public section
+namespace Qsag.Math
+open Qsag
+/-- The MIR WHIR polynomial limb order `[1,v,v²,v³]` embeds into the tower
+carrier in order `[0,2,1,3]`. This is a basis permutation, not a new field model. -/
+abbrev aggOfPolynomial (p : GoldilocksField.GoldilocksExt4.Ext4Poly) :
+    Aggregation.GoldilocksExt4 := ⟨⟨p.a0, p.a2⟩, ⟨p.a1, p.a3⟩⟩
+
+theorem aggOfPolynomial_mul (x y : GoldilocksField.GoldilocksExt4.Ext4Poly) :
+    Aggregation.GoldilocksExt4.mul (aggOfPolynomial x) (aggOfPolynomial y) =
+      aggOfPolynomial (GoldilocksField.GoldilocksExt4.Ext4Poly.mul x y) := by
+  change CommRingOps.mul
+    (GoldilocksField.GoldilocksExt4.polyToTower x)
+    (GoldilocksField.GoldilocksExt4.polyToTower y) =
+      GoldilocksField.GoldilocksExt4.polyToTower
+        (GoldilocksField.GoldilocksExt4.Ext4Poly.mul x y)
+  exact (GoldilocksField.GoldilocksExt4.polyToTower_mul x y).symm
+
+theorem aggOfPolynomial_add (x y : GoldilocksField.GoldilocksExt4.Ext4Poly) :
+    Aggregation.GoldilocksExt4.add (aggOfPolynomial x) (aggOfPolynomial y) =
+      aggOfPolynomial ⟨Goldilocks.add x.a0 y.a0, Goldilocks.add x.a1 y.a1,
+        Goldilocks.add x.a2 y.a2, Goldilocks.add x.a3 y.a3⟩ := by rfl
+
+theorem aggOfPolynomial_sub (x y : GoldilocksField.GoldilocksExt4.Ext4Poly) :
+    Aggregation.GoldilocksExt4.sub (aggOfPolynomial x) (aggOfPolynomial y) =
+      aggOfPolynomial ⟨Goldilocks.sub x.a0 y.a0, Goldilocks.sub x.a1 y.a1,
+        Goldilocks.sub x.a2 y.a2, Goldilocks.sub x.a3 y.a3⟩ := by rfl
+end Qsag.Math
+
+namespace Qsag.Math
+open Qsag
+theorem aggOfPolynomial_scale (p : GoldilocksField.GoldilocksExt4.Ext4Poly) (s : Goldilocks) :
+    Aggregation.GoldilocksExt4.mul (aggOfPolynomial p) (Aggregation.GoldilocksExt4.embedBase s) =
+      aggOfPolynomial ⟨Goldilocks.mul p.a0 s, Goldilocks.mul p.a1 s,
+        Goldilocks.mul p.a2 s, Goldilocks.mul p.a3 s⟩ := by
+  apply Aggregation.GoldilocksExt4.ext
+  · change CommRingOps.add
+      (CommRingOps.mul (⟨p.a0,p.a2⟩ : GoldilocksExt2) (GoldilocksExt2.ofBase s))
+      (CommRingOps.mul Aggregation.GoldilocksExt4.nonResidue
+        (CommRingOps.mul (⟨p.a1,p.a3⟩ : GoldilocksExt2) CommRingOps.zero)) = _
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    apply GoldilocksExt2.ext
+    · change CommRingOps.add (CommRingOps.mul p.a0 s)
+        (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul p.a2 CommRingOps.zero)) = _
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+      rfl
+    · change CommRingOps.add (CommRingOps.mul p.a0 CommRingOps.zero) (CommRingOps.mul p.a2 s) = _
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+      rfl
+  · change CommRingOps.add
+      (CommRingOps.mul (⟨p.a0,p.a2⟩ : GoldilocksExt2) CommRingOps.zero)
+      (CommRingOps.mul (⟨p.a1,p.a3⟩ : GoldilocksExt2) (GoldilocksExt2.ofBase s)) = _
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+    apply GoldilocksExt2.ext
+    · change CommRingOps.add (CommRingOps.mul p.a1 s)
+        (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul p.a3 CommRingOps.zero)) = _
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+      rfl
+    · change CommRingOps.add (CommRingOps.mul p.a1 CommRingOps.zero) (CommRingOps.mul p.a3 s) = _
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+      rfl
+
+theorem aggOfPolynomial_zero :
+    aggOfPolynomial ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ =
+      Aggregation.GoldilocksExt4.zero := by rfl
+end Qsag.Math
+
+public section
+namespace Qsag.QuarticGoldilocks
+/-- Public projections of the canonical quartic ring dictionary. -/
+theorem ring_add (x y : QuarticGoldilocks) : CommRingOps.add x y = add x y := rfl
+theorem ring_sub (x y : QuarticGoldilocks) : CommRingOps.sub x y = sub x y := rfl
+theorem ring_mul (x y : QuarticGoldilocks) : CommRingOps.mul x y = mul x y := rfl
+end Qsag.QuarticGoldilocks
+end

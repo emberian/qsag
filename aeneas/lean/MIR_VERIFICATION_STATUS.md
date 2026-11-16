@@ -110,6 +110,33 @@ Its constructor premise remains open: `new_cshake256` must establish `customizat
 including `left_encode`, zero filling and the prefix flush. Unconditional cSHAKE equality
 is not claimed. Rust bit-length encoding now widens to u128 instead of saturating u64.
 
+## Sponge phase discipline
+
+`Shake256Sponge::absorb` asserts that squeezing has not begun, as production
+`Cshake256Xof::absorb` does. The extracted definition opens with `massert (¬ self.squeezing)`:
+`shake256_absorb_after_squeezing_fails` proves that a late absorb returns
+`.fail .assertionFailure` for every input, and `shake256_absorb_ok_iff_absorbing` that a
+successful absorb implies the absorbing phase. Earlier extractions returned the state
+unchanged. `finalize` and `squeeze` stay idempotent and resumable after squeezing begins
+(`shake256_finalize_after_squeezing`). No function of the crate absorbs after squeezing; the
+only production use of the type is `new_cshake256(..).state` in `qsag-cred`.
+
+## Legacy and separately implemented code
+
+- `threshold::derive_jorts_legacy_v1_det_r_rand` (domain tag `QSAG.JORTSV1.DET`) is a legacy
+  v1 model. Production derives the stateful randomizer in
+  `qsag_core::tsw_baggy::derive_stateful_r_rand` as `PRF_msg` under `QSAG.PQ.BAGGYSIG.DET/v1`;
+  the outputs differ and no production crate calls the legacy function. It has no theorem
+  and serves only as the deterministic fixture of the `EpochLatch` retry tests. The
+  `EpochLatch` theorems treat `r_rand` as opaque bytes and hold for either derivation.
+- `aeneas/qsag-verified/extraction-coverage.{json,md}` (from
+  `scripts/gen_extraction_coverage.py`, `--check` fails when stale) classifies every `pub fn`
+  of the crate: called from `crates/**`, reached from such a function, related to production
+  only through a Lean weld to a shared `Qsag` specification, proved but not welded, used by
+  tests only, or unreferenced. Goldilocks and tower arithmetic are in the weld-only class:
+  production has its own implementations, tied to these by the specification welds and the
+  differential parity tests, not by a call.
+
 ## Validation and remaining work
 
 Linux release tests: 301 passed across the standalone verified crate and five custody crates;

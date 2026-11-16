@@ -1414,8 +1414,13 @@ def whirPowCustomization : List UInt8 :=
 def whirPowWord (chal : List UInt8) (powNonce : Nat) : Nat :=
   ofLeBytes ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 8)
 
+/-- The low-bit predicate of the production extracted PoW gate. The production mask
+supports at most 32 bits; hash selection and the zero-PoW nonce rule are separate. -/
+def whirStagePowMask (word powBits : Nat) : Bool :=
+  decide (powBits ≤ 32 ∧ word % 2 ^ powBits = 0)
+
 /-- **Per-Stage WHIR Proof-of-Work (`verifyWhirStagePow`)**, the function of `verify_pcs_pow` in
-    `crates/qsag-agg/src/pcs.rs`: accept when `powBits = 0`; otherwise the challenge must be a
+    `crates/qsag-agg/src/pcs.rs`: require nonce zero when `powBits = 0`; otherwise the challenge must be a
     32-byte digest, the nonce a `u64`, and the low `powBits` bits of `whirPowWord chal powNonce`
     must all be zero (`word & ((1 << powBits) - 1) == 0`).
 
@@ -1423,9 +1428,9 @@ def whirPowWord (chal : List UInt8) (powNonce : Nat) : Nat :=
     is the running digest of its Fiat–Shamir transcript, which this module does not model;
     `verifyOneWhirStage` feeds it `stagePowDigest` of this module's own transcript frame. -/
 def verifyWhirStagePow (chal : List UInt8) (powNonce powBits : Nat) : Bool :=
-  if powBits = 0 then true
-  else if powBits ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64 then
-    decide (whirPowWord chal powNonce % 2 ^ powBits = 0)
+  if powBits = 0 then decide (powNonce = 0)
+  else if chal.length = 32 ∧ powNonce < 2 ^ 64 then
+    whirStagePowMask (whirPowWord chal powNonce) powBits
   else false
 
 /-- Kernel-reducible UTF-8 bytes of `"QSAG.AGG.WHIR.POW_DIGEST/v2"`. -/
@@ -1449,11 +1454,12 @@ theorem verifyWhirStagePow_16_iff (chal : List UInt8) (powNonce : Nat)
     verifyWhirStagePow chal powNonce 16 = true ↔
       ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 2).all
         (· == 0) = true := by
-  have hGuard : (16 ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64) := ⟨by decide, hLen, hNonce⟩
-  unfold verifyWhirStagePow whirPowWord
+  have hGuard : (chal.length = 32 ∧ powNonce < 2 ^ 64) := ⟨hLen, hNonce⟩
+  unfold verifyWhirStagePow whirStagePowMask whirPowWord
   have h16 : ¬ ((16 : Nat) = 0) := by decide
   rw [ite_eq_right_of_eq_false _ _ (eq_false h16), ite_eq_left_of_eq_true _ _ (eq_true hGuard),
     decide_eq_true_iff]
+  simp only [show (16 : Nat) ≤ 32 from by decide, true_and]
   have hDigLen := cshake256Bytes_length whirPowCustomization (chal ++ leBytes 8 powNonce)
   generalize cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce) = dig at hDigLen ⊢
   rcases dig with _ | ⟨b0, _ | ⟨b1, rest⟩⟩
@@ -1484,7 +1490,7 @@ theorem tooth_whir_pow_rejects_malformed_inputs (chal : List UInt8) (powNonce po
   rw [ite_eq_right_of_eq_false _ _ (eq_false hBits)]
   apply ite_eq_right_of_eq_false
   apply eq_false
-  rintro ⟨_, hLen, hNonce⟩
+  rintro ⟨hLen, hNonce⟩
   rcases hBad with h | h
   · exact h hLen
   · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hNonce h)
@@ -6692,3 +6698,17 @@ end Aggregation
 end Qsag
 end
 
+
+public section
+#export_eqns Qsag.Aggregation.foldDuetExt4
+end
+
+public section
+namespace Qsag.Aggregation
+/-- Disabling PoW does not admit an unbound prover nonce. -/
+theorem verifyWhirStagePow_zero_iff (chal : List UInt8) (nonce : Nat) :
+    verifyWhirStagePow chal nonce 0 = true ↔ nonce = 0 := by
+  simp [verifyWhirStagePow]
+#export_eqns whirStagePowMask
+end Qsag.Aggregation
+end

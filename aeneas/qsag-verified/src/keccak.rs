@@ -273,11 +273,15 @@ impl Shake256Sponge {
         s
     }
 
-    /// Absorb `data` into the sponge prior to squeezing (`no-op` if already squeezing).
+    /// Absorb `data` into the sponge prior to squeezing.
+    ///
+    /// Panics once squeezing has begun, as production `Cshake256Xof::absorb` does
+    /// (`crates/qsag-core/src/sponge/keccak.rs`): a late absorb is a caller bug, never a no-op.
     pub fn absorb(&mut self, data: &[u8]) {
-        if self.squeezing {
-            return;
-        }
+        assert!(
+            !self.squeezing,
+            "cannot absorb into Shake256Sponge after squeezing began"
+        );
         let mut pos: usize = 0;
         while pos < data.len() {
             if self.buf_len < SHAKE256_RATE_BYTES {

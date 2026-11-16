@@ -2,10 +2,9 @@ module
 public import Qsag.Protocol.Aggregation.Aggregation
 public import Qsag.Protocol.Aggregation.ZkHem
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Aggregation.ZkHem
-import all Qsag.Oracle.Qrom
-import all Qsag.Math.GoldilocksBase
-import all Qsag.Oracle.Keccak
+public import Qsag.Oracle.Qrom
+public import Qsag.Math.GoldilocksBase
+public import Qsag.Oracle.Keccak
 /-
 Witnesses and teeth for the Stage-2 aggregation parity statements.
 
@@ -25,13 +24,8 @@ E. The regenerated label inventory of `CrossProtocolAndDualOracleComposition`.
 public import Qsag.Protocol.Aggregation.FieldTransport
 public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
 public import Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.QuarticExt4
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
-import all Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
-import all Qsag.Protocol.Aggregation.CrossProtocolAndDualOracleComposition
-import all Qsag.Protocol.Aggregation.FieldTransport
+public import Qsag.Math.Goldilocks
+public import Qsag.Math.QuarticExt4
 import Qsag.Tactic.AssuranceKit
 
 public section

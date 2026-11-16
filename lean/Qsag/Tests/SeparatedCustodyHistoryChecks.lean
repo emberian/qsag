@@ -1,9 +1,7 @@
 module
-import all Qsag.Custody.CustodySuiteFull
+public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Custody.SeparatedCustody
 public import Qsag.Tests.SeparatedCustodyChecks
-import all Qsag.Custody.SeparatedCustody
-import all Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.HistoryChecks
 set_option autoImplicit false

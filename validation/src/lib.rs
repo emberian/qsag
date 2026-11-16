@@ -8,6 +8,7 @@ use p3_goldilocks::Goldilocks as P3Goldilocks;
 use qsag_asm::SimdBackend;
 
 pub mod poseidon2_ref;
+pub mod spec_ref;
 
 /// Goldilocks prime `p = 2^64 - 2^32 + 1`.
 pub const GOLDILOCKS_P: u64 = poseidon2_ref::P;

@@ -1,6 +1,5 @@
 module
 public import Qsag.Exec.InteractiveServiceContext
-import all Qsag.Exec.InteractiveServiceContext
 
 public section
 namespace Qsag.InteractiveService

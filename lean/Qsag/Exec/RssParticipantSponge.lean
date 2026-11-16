@@ -1,7 +1,6 @@
 module
 public import Qsag.Exec.RssParticipantMachine
-import all Qsag.Exec.RssParticipantMachine
-import all Qsag.Protocol.Threshold.ThresholdMpc
+public import Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-!

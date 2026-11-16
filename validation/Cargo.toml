@@ -21,6 +21,9 @@ qsag-agg = { path = "../crates/qsag-agg", features = ["std"] }
 qsag-accel = { path = "../crates/qsag-accel", features = ["std"] }
 qsag-cred = { path = "../crates/qsag-cred", features = ["std"] }
 qsag-addr = { path = "../crates/qsag-addr", features = ["std"] }
+qsag-fts = { path = "../crates/qsag-fts", features = ["std"] }
+qsag-policy = { path = "../crates/qsag-policy", features = ["std"] }
+qsag-hd = { path = "../crates/qsag-hd", features = ["std"] }
 qsag-migrate = { path = "../crates/qsag-migrate", features = ["std"] }
 qsag-quorum = { path = "../crates/qsag-quorum", features = ["std", "testing-ephemeral"], optional = true }
 

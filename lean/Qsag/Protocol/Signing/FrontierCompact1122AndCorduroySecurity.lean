@@ -892,7 +892,7 @@ theorem fts_cshake_domains_disjoint (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ 
     cases r₁ <;> decide
   have hTagNeNil₂ : r₂.tag ≠ [] := by
     cases r₂ <;> decide
-  have hDisj := cshake256_domains_disjoint m₁ m₂ hN hS₁ hN hS₂ (fun hPair => hTagNe (Prod.mk.inj hPair).2)
+  have hDisj := cshake256_encodings_ne m₁ m₂ hN hS₁ hN hS₂ (fun hPair => hTagNe (Prod.mk.inj hPair).2)
   simpa [hTagNeNil₁, hTagNeNil₂] using hDisj
 
 def evalFtsCshake256_32 (tag payload : List UInt8) : BitVec 256 :=

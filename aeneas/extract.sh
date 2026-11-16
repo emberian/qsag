@@ -56,8 +56,10 @@ for external in "${LEAN_DIR}/QsagVerified/FunsExternal.lean" "${LEAN_DIR}/QsagVe
   fi
 done
 
-# Normalize generated headers for Lean 4.35's module system. Idempotent when
-# Aeneas already emits module/public imports; preserve the generated body.
+# The only post-processing of generated Lean. Aeneas emits `module`, `public import`s and a
+# file-wide `@[expose] public section`; this narrows the latter to `public section` and
+# exposes exactly four scalar aliases. Everything else is byte-for-byte Aeneas output, and
+# the provenance record binds the result. It is idempotent.
 python3 - "${LEAN_DIR}/QsagVerified" <<'PY_HEADERS'
 from pathlib import Path
 import re
@@ -93,7 +95,12 @@ for name in ("Types.lean", "Funs.lean"):
     body_text = "".join(body)
     if name == "Types.lean":
         for alias in ("goldilocks.Goldilocks", "tower.Gf256", "tower.Tower128", "tower.Gf16"):
-            body_text = body_text.replace(f"@[reducible]\ndef {alias} :=", f"@[reducible, expose]\ndef {alias} :=")
+            raw = f"@[reducible]\ndef {alias} :="
+            exposed = f"@[reducible, expose]\ndef {alias} :="
+            # A renamed or reshaped alias must stop the run, not pass through unexposed.
+            if body_text.count(raw) + body_text.count(exposed) != 1:
+                raise SystemExit(f"Expected exactly one scalar alias {alias} in {path}")
+            body_text = body_text.replace(raw, exposed)
     path.write_text("".join(comments) + "module\n"
                     + "".join(f"public import {module}\n" for module in imports)
                     + "public section\n" + body_text)
@@ -110,6 +117,9 @@ echo "[4/4] Verifying Aeneas prelude, extracted MIR functions, and 0-sorry refin
   lake build QsagVerifiedChallenge
   # Protocol-level welds; these need the whole `Qsag.MirSpecBridge` import cone.
   lake build --wfail QsagCustodyWeld
+  # Runtime census over both import-all environments; exits non-zero on any axiom
+  # outside {propext, Quot.sound}.
+  lake exe audit-mir-axioms
   test -s lake-manifest.json
 )
 

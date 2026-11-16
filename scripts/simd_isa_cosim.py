@@ -3,7 +3,7 @@
 
 No assembler substitutes are used for kernel tests. --pin refreshes only the
 fixtures and coverage certificates in
-lean/Qsag/Machine/SimdBinaryEquiv.lean. Default mode checks those pinned bytes
+lean/Qsag/Machine/ClmulSimd.lean. Default mode checks those pinned bytes
 against a fresh release static library, then executes the extracted symbols.
 All feature probes run in children; unsupported instructions fail the run.
 The reference uses polynomial long division, independently of the kernels'
@@ -30,7 +30,7 @@ import tempfile
 from extract_rlib_elf import parse_ar_archive, parse_elf64_object
 
 ROOT = Path(__file__).resolve().parents[1]
-LEAN = ROOT / 'lean/Qsag/Machine/SimdBinaryEquiv.lean'
+LEAN = ROOT / 'lean/Qsag/Machine/ClmulSimd.lean'
 NAMES = ('gf2_128_mul_acc_pclmul', 'gf2_128_mul_acc_vpclmul', 'transpose64x256_avx2')
 EXTRA_NAMES = ('keccak_f1600_avx2_4x', 'keccak_chi_mpc_avx2',
                'gf256_shamir_mul_gfni', 'gf256_shamir_mac_gfni',
@@ -69,11 +69,12 @@ def transpose(rows: list[int]) -> list[int]:
 
 
 def extract(target: str) -> dict:
-    env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / 'target'))
-    subprocess.run(['cargo', 'rustc', '--release', '-p', 'qsag-asm',
-                    '--target', target, '--crate-type', 'staticlib'],
+    env = dict(os.environ, CARGO_TARGET_DIR=str(ROOT / 'target'), CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',
+               CARGO_PROFILE_RELEASE_LTO='false', CARGO_PROFILE_RELEASE_STRIP='none')
+    subprocess.run(['cargo', 'build', '--release', '--locked', '--no-default-features', '-p', 'qsag-asm',
+                    '--target', target],
                    cwd=ROOT, env=env, check=True)
-    archive = ROOT / 'target' / target / 'release/libqsag_asm.a'
+    archive = ROOT / 'target' / target / 'release/libqsag_asm.rlib'
     result = {}
     for member in parse_ar_archive(archive.read_bytes()):
         if member.payload[:4] != b'\x7fELF' or b'qsag_asm_gf2_128_mul_acc' not in member.payload:
@@ -129,60 +130,63 @@ def transpose_certificates(offsets: list[int]) -> str:
 
 
 def pin_or_check(fixtures: dict, pin: bool) -> None:
+    """Check the canonical fixture slices and their kernel-checked chunked views.
+
+    Archive/object/source provenance lives in ElfFixtures.lean; ClmulSimd retains
+    only its four chunked execution views, proved equal to those slices in Lean.
+    """
     source = LEAN.read_text()
+    canonical = (ROOT / 'lean/Qsag/Machine/ElfFixtures.lean').read_text()
+    source_sha = hashlib.sha256((ROOT / 'crates/qsag-asm/src/bitslice.rs').read_bytes()).hexdigest()
+    for arch in ('currentX86', 'currentAarch64'):
+        match = re.search(r'def ' + arch + r'BitsliceSourceSha256 : String := "([0-9a-f]+)"', canonical)
+        if not match or match[1] != source_sha:
+            raise RuntimeError(f'{arch}: canonical bitslice source provenance differs')
+    transpose_offsets = None
+    for name, f in fixtures.items():
+        match = re.search(r'\{ name := "qsag_asm_' + re.escape(name) + r'"(.*?)\}', canonical, re.S)
+        if not match:
+            raise RuntimeError(f'{name}: missing canonical fixture slice')
+        code = re.search(r'code := \[([^\]]*)\]', match[1])
+        offset = re.search(r'symValue := (\d+)', match[1])
+        if not code or bytes(int(x.strip(), 0) for x in code[1].split(',')) != f['code']:
+            raise RuntimeError(f'{name}: canonical bytes differ from release ELF')
+        if not offset or int(offset[1]) != f['offset']:
+            raise RuntimeError(f'{name}: canonical symbol offset differs from release ELF')
+        pattern = r'def ' + re.escape(name) + r'_code : ByteCode := ⟨(\d+), (#\[.*?\])⟩'
+        chunked = re.search(pattern, source)
+        # The NEON transpose has no duplicate chunked model; its canonical slice
+        # is still mandatory above and its execution is checked under qemu below.
+        if not chunked and name != 'transpose64x256_neon':
+            raise RuntimeError(f'{name}: missing chunked execution view')
+        if chunked:
+            if pin:
+                chunks = [f['code'][i:i+32] for i in range(0, len(f['code']), 32)]
+                code_array = '#[' + ', '.join('#[' + ', '.join(str(x) for x in c) + ']' for c in chunks) + ']'
+                replacement = f'def {name}_code : ByteCode := ⟨{len(f["code"])}, {code_array}⟩'
+                source = re.sub(pattern, lambda _: replacement, source)
+                if name in NAMES:
+                    with tempfile.TemporaryDirectory(dir=ROOT/'target') as scratch:
+                        raw = Path(scratch)/'kernel.bin'
+                        raw.write_bytes(f['code'])
+                        dis = subprocess.check_output(['objdump', '-D', '-b', 'binary', '-m', 'i386:x86-64',
+                                                       '--insn-width=16', str(raw)], text=True)
+                    offsets = [int(m[1], 16) for m in re.finditer(r'^\s*([0-9a-f]+):\s+[0-9a-f]{2} ', dis, re.M)]
+                    offsets.append(len(f['code']))
+                    source = re.sub(r'def '+re.escape(name)+r'_offsets : List Nat := \[.*?\]',
+                                    lambda _: f'def {name}_offsets : List Nat := [{", ".join(map(str, offsets))}]', source)
+                    if name == 'transpose64x256_avx2':
+                        transpose_offsets = offsets
+                chunked = re.search(pattern, source)
+            if int(chunked[1]) != len(f['code']) or bytes(map(int, re.findall(r'\d+', chunked[2]))) != f['code']:
+                raise RuntimeError(f'{name}: chunked Lean bytes differ from release ELF')
+        print(f'{name}: {len(f["code"])} bytes sha256={f["sha256"]}', flush=True)
     if pin:
-        version = subprocess.check_output(['rustc', '-V'], text=True).strip()
-        block = ['-- BEGIN RELEASE SIMD FIXTURES', f'-- {version}; release staticlib; thin LTO.',
-                 '-- Digests identify symbol bytes and their containing ELF object.',
-                 'def bitsliceSourceSha256 : String := "' + hashlib.sha256(
-                     (ROOT/'crates/qsag-asm/src/bitslice.rs').read_bytes()).hexdigest() + '"']
-        transpose_offsets = None
-        for name, f in fixtures.items():
-            chunks = [f['code'][i:i+32] for i in range(0, len(f['code']), 32)]
-            code_array = '#[' + ', '.join('#[' + ', '.join(str(x) for x in c) + ']' for c in chunks) + ']'
-            block += [f'def {name}_code : ByteCode := ⟨{len(f["code"])}, {code_array}⟩']
-            if name in NAMES:
-                with tempfile.TemporaryDirectory(dir=ROOT/'target') as scratch:
-                    raw = Path(scratch)/'kernel.bin'
-                    raw.write_bytes(f['code'])
-                    dis = subprocess.check_output(['objdump', '-D', '-b', 'binary', '-m', 'i386:x86-64',
-                                                   '--insn-width=16', str(raw)], text=True)
-                offsets = [int(m[1], 16) for m in re.finditer(r'^\s*([0-9a-f]+):\s+[0-9a-f]{2} ', dis, re.M)]
-                offsets.append(len(f['code']))
-                if name == 'transpose64x256_avx2':
-                    transpose_offsets = offsets
-                block += [f'def {name}_offsets : List Nat := [{", ".join(map(str, offsets))}]']
-            block += [f'def {name}_hex : String := "{f["code"].hex()}"',
-                      f'def {name}_bytes : Array Nat := #[{", ".join(str(x) for x in f["code"])}]',
-                      f'def {name}_sha256 : String := "{f["sha256"]}"',
-                      f'def {name}_object_sha256 : String := "{f["object_sha256"]}"',
-                      f'def {name}_text_offset : Nat := {f["offset"]}']
-        block += ['-- END RELEASE SIMD FIXTURES']
-        source = re.sub(r'-- BEGIN RELEASE SIMD FIXTURES.*?-- END RELEASE SIMD FIXTURES',
-                        '\n'.join(block), source, flags=re.S)
         if transpose_offsets is None:
             raise RuntimeError('transpose coverage was not extracted')
         source = re.sub(r'-- BEGIN TRANSPOSE CERTIFICATES.*?-- END TRANSPOSE CERTIFICATES',
                         lambda _: transpose_certificates(transpose_offsets), source, flags=re.S)
         LEAN.write_text(source)
-    match = re.search(r'def bitsliceSourceSha256 : String := "([0-9a-f]+)"', source)
-    if not match or match[1] != hashlib.sha256((ROOT/'crates/qsag-asm/src/bitslice.rs').read_bytes()).hexdigest():
-        raise RuntimeError('pinned source provenance differs')
-    for name, f in fixtures.items():
-        for suffix, value in [('hex', f['code'].hex()), ('sha256', f['sha256']), ('object_sha256', f['object_sha256'])]:
-            match = re.search(r'def '+name+'_'+suffix+r' : String := "([0-9a-f]+)"', source)
-            if not match or match[1] != value:
-                raise RuntimeError(f'{name}: pinned {suffix} differs from release ELF')
-        match = re.search(r'def '+name+r'_bytes : Array Nat := #\[([^\]]*)\]', source)
-        if not match or bytes(int(x.strip()) for x in match[1].split(',')) != f['code']:
-            raise RuntimeError(f'{name}: Lean byte array differs from release ELF')
-        match = re.search(r'def '+name+r'_code : ByteCode := ⟨(\d+), (#\[.*?\])⟩', source)
-        if not match or int(match[1]) != len(f['code']) or bytes(map(int, re.findall(r'\d+', match[2]))) != f['code']:
-            raise RuntimeError(f'{name}: chunked Lean bytes differ from release ELF')
-        match = re.search(r'def '+name+r'_text_offset : Nat := (\d+)', source)
-        if not match or int(match[1]) != f['offset']:
-            raise RuntimeError(f'{name}: pinned object offset differs')
-        print(f'{name}: {len(f["code"])} bytes sha256={f["sha256"]}', flush=True)
 
 
 class Native:
@@ -468,7 +472,7 @@ int main(void) {
 
 
 def run_rust_test(name):
-    result = subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
+    result = subprocess.run(['cargo', 'test', '--release', '--locked', '--no-default-features', '-p', 'qsag-asm', '--lib',
                              name, '--', '--exact'], cwd=ROOT, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(result.stdout, end='', flush=True)
@@ -510,7 +514,7 @@ def main():
         isolated(name, lambda name=name: test_extra(name, fixtures[name]['code'], args.cases))
     for test in ('gf256_every_simd_tail_matches_portable_and_preserves_sentinels',
                  'tower128_bdoz_2lane_mac_vpclmul_pclmul_wiedemann_parity',
-                 'keccak_batch_tails_match_independent_portable_states',
+                 'keccak_x8_and_batch_tails_match_independent_portable_states',
                  'bitsliced_basis_change_matches_scalar_and_tower_mac_matches_wiedemann_at_every_length'):
         run_rust_test('tests::' + test)
     test_aarch64(fixtures, args.cases)

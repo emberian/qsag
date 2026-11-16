@@ -28,6 +28,29 @@ theorem result_bind_ok {α : Type u} {β : Type v} (x : α) (f : α → Result �
 @[simp]
 theorem lift_eq_ok {α : Type u} (x : α) : lift x = .ok x := rfl
 
+theorem massert_pos {b : Prop} [Decidable b] (h : b) : massert b = .ok () := by
+  unfold massert
+  split
+  · rfl
+  · contradiction
+
+theorem massert_neg {b : Prop} [Decidable b] (h : ¬ b) :
+    massert b = .fail .assertionFailure := by
+  unfold massert
+  split
+  · contradiction
+  · rfl
+
+/-- The guard `assert!(!flag)` passes on a cleared flag. -/
+theorem massert_not_of_eq_false {b : Bool} (h : b = false) :
+    massert (¬ (b = true)) = .ok () :=
+  massert_pos (by rw [h]; exact Bool.false_ne_true)
+
+/-- The guard `assert!(!flag)` fails on a set flag. -/
+theorem massert_not_of_eq_true {b : Bool} (h : b = true) :
+    massert (¬ (b = true)) = .fail .assertionFailure :=
+  massert_neg (fun hn => hn h)
+
 @[simp]
 theorem UScalar.val_ofNat (ty : UScalarTy) (n : Nat) :
     (UScalar.ofNat ty n).val = n % (2 ^ ty.numBits) :=
@@ -381,6 +404,10 @@ def Eq.assert_fields_are_eq.default {I T : Type} (_ : I) (_ : T) : Aeneas.Std.Re
 def impls.PartialEqU8.eq (a b : U8) : Bool := a = b
 @[expose]
 def impls.PartialEqU64.eq (a b : U64) : Bool := a = b
+/-- `<() as PartialEq>::eq` (upstream `core.cmp.impls.PartialEqUnit.eq`): derived `PartialEq`
+    on a struct with a `_private: ()` field calls it. -/
+@[expose]
+def impls.PartialEqUnit.eq (_ _ : Unit) : Aeneas.Std.Result Bool := .ok true
 
 def PartialEqU8 : PartialEq U8 U8 :=
   { eq := fun a b => .ok (a = b) }
@@ -413,8 +440,7 @@ namespace num
 @[expose]
 def U64.MAX : U64 := ⟨BitVec.allOnes 64⟩
 
-@[expose]
-def U128.MAX : U128 := ⟨BitVec.allOnes 128⟩
+abbrev U128.MAX : U128 := ⟨BitVec.allOnes 128⟩
 
 abbrev U64.rotate_left (x : U64) (n : U32) : U64 :=
   ⟨x.bv.rotateLeft (n.val % 64)⟩

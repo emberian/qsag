@@ -160,6 +160,7 @@ public import Qsag.Custody.VolatileCoupon
 
 -- Qsag/Exec
 public import Qsag.Exec.CeremonyAtomicityAndAbort
+public import Qsag.Exec.GuardedMachineSim
 public import Qsag.Exec.IdealOutputBoundary
 public import Qsag.Exec.InteractiveSecurityContract
 public import Qsag.Exec.InteractiveServiceContext
@@ -200,30 +201,33 @@ public import Qsag.Exec.SimulationSpine
 public import Qsag.Exec.SpecOracle
 public import Qsag.Exec.ThresholdIdealDurableService
 public import Qsag.Exec.ThresholdIdealService
+public import Qsag.Exec.TwoSlotHwmCrashModel
+public import Qsag.Exec.WhirKernels
 
 -- Qsag/Exec/Tactic
 public import Qsag.Exec.Tactic.SimulationKit
 
 -- Qsag/Machine
-public import Qsag.Machine.CompiledRlibFixtures
+public import Qsag.Machine.ClmulSimd
 public import Qsag.Machine.ConstantTimeIsa
-public import Qsag.Machine.ElfBinaryVerify
-public import Qsag.Machine.ElfFixtureSlices
 public import Qsag.Machine.ElfFixtureVerify
+public import Qsag.Machine.ElfFixtures
 public import Qsag.Machine.ElfFunctionalEquiv
 public import Qsag.Machine.ElfInvCerts
 public import Qsag.Machine.ElfParse
+public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.FaultAndSpeculativeSafety
 public import Qsag.Machine.Gf128ClmulLoopAgreement
 public import Qsag.Machine.IsaCosim
+public import Qsag.Machine.IsaCt
 public import Qsag.Machine.McRefine
 public import Qsag.Machine.MirSpecBridge
 public import Qsag.Machine.MirSpecBridgeCore
 public import Qsag.Machine.MirSpecBridgeWitnesses
 public import Qsag.Machine.PlatformContractInstances
-public import Qsag.Machine.SimdBinaryEquiv
-public import Qsag.Machine.SpirvSimtGpuEquiv
-public import Qsag.Machine.SydTvTranslationValidation
+public import Qsag.Machine.SpirvFixtures
+public import Qsag.Machine.SpirvSimt
+public import Qsag.Machine.SydTv
 
 -- Qsag/Machine/Tactic
 public import Qsag.Machine.Tactic.KernelRfl
@@ -248,12 +252,14 @@ public import Qsag.Tests.ClosedReductionTeeth
 public import Qsag.Tests.CompositionInstances
 public import Qsag.Tests.ConcreteSecurityBudgetTeeth
 public import Qsag.Tests.ConstructiveQuantumHilbertTeeth
+public import Qsag.Tests.CrashAndGuardKitTeeth
 public import Qsag.Tests.CredentialsTeeth
 public import Qsag.Tests.CustodyTeeth
 public import Qsag.Tests.DistributedCustodyChecks
 public import Qsag.Tests.EquationExportOwner
 public import Qsag.Tests.EquationExports
 public import Qsag.Tests.FrozenAndLpnTeeth
+public import Qsag.Tests.GuardedMachineSimInstance
 public import Qsag.Tests.HemExtractedOpeningBridgeTests
 public import Qsag.Tests.HemHighCapSlicedBudgetTeeth
 public import Qsag.Tests.HemMultistageCascadeTeeth
@@ -278,4 +284,5 @@ public import Qsag.Tests.SeparatedCustodyHistoryChecks
 public import Qsag.Tests.SeparatedCustodyReleaseChecks
 public import Qsag.Tests.SeparatedCustodyUcResourceChecks
 public import Qsag.Tests.SigningTeeth
+public import Qsag.Tests.TwoSlotHwmTeeth
 public import Qsag.Tests.WelchBerlekampTeeth

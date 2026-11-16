@@ -33,7 +33,7 @@ const PINS: [(&str, &str); 10] = [
     ),
     (
         "merkle_layer_poseidon2.comp",
-        "1eb726d0d865df1f24b341c5eb8f7026810f2009d292fcd04ad5e2a4c78f220d",
+        "92e0593a7f25939313497b3b8c392d2dafb10a5897adf4fc736c05840cac9ae0",
     ),
     (
         "bdoz_gf2_128_dot.comp",
@@ -45,7 +45,7 @@ const PINS: [(&str, &str); 10] = [
     ),
     (
         "whir_fold_sumcheck.comp",
-        "8421117d44218a686173176e35d624770eac0be5c4c11459442b58f3ef8f4000",
+        "70cb40c582f8205a0998853a23998b809282340a3ef3f60196d4ffb438456387",
     ),
     (
         "air_row_group_a.comp",

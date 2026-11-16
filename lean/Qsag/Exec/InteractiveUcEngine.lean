@@ -46,9 +46,7 @@ public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.IdealTsig
-import all Qsag.Math.Counting
-import all Qsag.Protocol.Aggregation.UcGames
-import all Qsag.Protocol.Threshold.ThresholdMpc
+public import Qsag.Math.Counting
 
 import Qsag.Tactic.AssuranceKit
 

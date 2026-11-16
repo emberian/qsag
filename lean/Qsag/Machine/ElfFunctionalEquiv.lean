@@ -3,19 +3,13 @@ module
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Oracle.Keccak
-public import Qsag.Machine.ElfBinaryVerify
+public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.ElfFixtureVerify
 public import Qsag.Machine.McRefine
-public import Qsag.Machine.SydTvTranslationValidation
-import all Qsag.Machine.SydTvTranslationValidation
+public import Qsag.Machine.SydTv
 import Qsag.Tactic.Prelude
-import all Qsag.Machine.ElfFixtureSlices
-import all Qsag.Machine.ElfParse
-import all Qsag.Machine.ElfInvCerts
-import all Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.McRefine
-import all Qsag.Math.Gf2Pow128
-import all Qsag.Oracle.Keccak
+public import Qsag.Machine.ElfFixtures
+public import Qsag.Machine.ElfInvCerts
 import Qsag.Tactic.AssuranceKit
 
 /-!
@@ -761,27 +755,6 @@ theorem extractRlibFuncBytes_member_ni_sound {rlib : Bytes} {symName : String}
     subst hSlEq
     exact ⟨m, hm, parseArMember_subslice rlib m hm, hMemExt, hMemNI, hOk', hSafe'⟩
 
-theorem x86_rlib_distinct_names :
-    allDistinctStrings ((extractAllRlibFuncs x86RlibArchiveBytes).map ElfFuncSlice.name) = true := by
-  rw [x86_rlib_symbol_names_exact]
-  decide +kernel
-
-theorem aarch64_rlib_distinct_names :
-    allDistinctStrings ((extractAllRlibFuncs aarch64RlibArchiveBytes).map ElfFuncSlice.name) = true := by
-  rw [aarch64_rlib_symbol_names_exact]
-  decide +kernel
-
-theorem extractRlibFuncBytes_x86_eq (symName : String) :
-    extractRlibFuncBytes x86RlibArchiveBytes symName =
-      x86ExtractedSlices.find? (fun s => s.name == symName) := by
-  unfold extractRlibFuncBytes
-  rw [x86_rlib_extracted_slices]
-
-theorem extractRlibFuncBytes_aarch64_eq (symName : String) :
-    extractRlibFuncBytes aarch64RlibArchiveBytes symName =
-      aarch64ExtractedSlices.find? (fun s => s.name == symName) := by
-  unfold extractRlibFuncBytes
-  rw [aarch64_rlib_extracted_slices]
 
 private def u16LE (v : Nat) : List UInt8 :=
   [UInt8.ofNat (v % 256), UInt8.ofNat ((v / 256) % 256)]
@@ -901,516 +874,15 @@ private theorem mod_goldilocks_lt_u64 (n : Nat) : n % GOLDILOCKS_P < 2 ^ 64 := b
 
 /-! ### §3.1 `qsag_asm_goldilocks_add_ct_x86_64` (`N = 17`, `retPc = 50`) -/
 
-private theorem goldAddX86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 goldAddX86Prog 16
-      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, zf, dy, false, m⟩
-      ⟨50, ⟨goldAddMc r7 r6, 0, r2, r3, r4, r5, r6, r7, 0, 0, 0, r11, r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 16
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_movRR, stepX86_addRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm,
-        stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
-        sbb32_self, sbb64_self, uint64_evalAdd_eq,
-        b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
-        b16set_0, b16set_1, b16set_8, b16set_9, b16set_10]
-      rfl
-  exact StepsX86.zero _
-
-theorem rlib_goldilocks_add_ct_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_add_ct_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_add_ct_x86_64"
-        (mkContract "qsag_asm_goldilocks_add_ct_x86_64" [4]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_goldilocks_add_ct_x86_64" [4]) ∧
-      decodeX86Slice slice.code = some goldAddX86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st16 tr16, execDecodedX86 slice.code 16 st = some (st16, tr16) ∧ st16.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (17 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 50 ∧ trace.length = 17 ∧
-          st'.gpr.get 0 =
-            BitVec.ofNat 64 (((st.gpr.get 7).toNat + (st.gpr.get 6).toNat) % GOLDILOCKS_P) ∧
-          (st'.gpr.get 0).toNat =
-            (Goldilocks.add (Goldilocks.ofNat (st.gpr.get 7).toNat) (Goldilocks.ofNat (st.gpr.get 6).toNat)).val ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 8 = 0#64 ∧
-          st'.gpr.get 9 = 0#64 ∧ st'.gpr.get 10 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_add_ct_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_add_ct_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_goldilocks_add_ct_x86_64" [4]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_add_ct_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_goldilocks_add_ct_x86_64" [4]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some goldAddX86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_add_ct_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some goldAddX86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
-      (goldAddX86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec))
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, rfl, rfl, rfl, rfl⟩
-    · change (goldAddMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec =
-        BitVec.ofNat 64 ((r7.toNat + r6.toNat) % GOLDILOCKS_P)
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldAddMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
-    · change ((goldAddMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec).toNat =
-        (Goldilocks.add (Goldilocks.ofNat r7.toNat) (Goldilocks.ofNat r6.toNat)).val
-      rw [UInt64.toNat_toBitVec, goldAddMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec,
-        Goldilocks.add_val, Goldilocks.ofNat, Goldilocks.ofNat, Nat.add_mod]
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
 
 /-! ### §3.2 `qsag_asm_goldilocks_sub_ct_x86_64` (`N = 23`, `retPc = 74`) -/
 
-private theorem goldSubX86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 goldSubX86Prog 22
-      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, zf, dy, false, m⟩
-      ⟨74, ⟨goldSubMc r7 r6, 0, r2, r3, r4, r5, 0, r7, 0, 0, 0, r11, r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 22
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_movRR, stepX86_addRR64, stepX86_subRR64, stepX86_sbbRR, stepX86_andRR,
-        stepX86_movImm, stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
-        sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
-        b16set_0, b16set_1, b16set_6, b16set_8, b16set_9, b16set_10]
-      rfl
-  exact StepsX86.zero _
-
-theorem rlib_goldilocks_sub_ct_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_sub_ct_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_sub_ct_x86_64"
-        (mkContract "qsag_asm_goldilocks_sub_ct_x86_64" [4]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_goldilocks_sub_ct_x86_64" [4]) ∧
-      decodeX86Slice slice.code = some goldSubX86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st22 tr22, execDecodedX86 slice.code 22 st = some (st22, tr22) ∧ st22.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (23 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 74 ∧ trace.length = 23 ∧
-          st'.gpr.get 0 =
-            BitVec.ofNat 64 (((st.gpr.get 7).toNat + GOLDILOCKS_P -
-              (st.gpr.get 6).toNat % GOLDILOCKS_P) % GOLDILOCKS_P) ∧
-          (st'.gpr.get 0).toNat =
-            (Goldilocks.sub (Goldilocks.ofNat (st.gpr.get 7).toNat) (Goldilocks.ofNat (st.gpr.get 6).toNat)).val ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 6 = 0#64 ∧
-          st'.gpr.get 8 = 0#64 ∧ st'.gpr.get 9 = 0#64 ∧ st'.gpr.get 10 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_sub_ct_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_sub_ct_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_goldilocks_sub_ct_x86_64" [4]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_sub_ct_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_goldilocks_sub_ct_x86_64" [4]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some goldSubX86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_sub_ct_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some goldSubX86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
-      (goldSubX86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec))
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl⟩
-    · change (goldSubMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec =
-        BitVec.ofNat 64 ((r7.toNat + GOLDILOCKS_P - r6.toNat % GOLDILOCKS_P) % GOLDILOCKS_P)
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldSubMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
-    · change ((goldSubMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec).toNat =
-        (Goldilocks.sub (Goldilocks.ofNat r7.toNat) (Goldilocks.ofNat r6.toNat)).val
-      rw [UInt64.toNat_toBitVec, goldSubMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec,
-        Goldilocks.sub_val, Goldilocks.ofNat, Goldilocks.ofNat]
-      have ha : r7.toNat < 2 ^ 64 := r7.isLt
-      have hb : r6.toNat < 2 ^ 64 := r6.isLt
-      show (r7.toNat + 18446744069414584321 - r6.toNat % 18446744069414584321) % 18446744069414584321 =
-        (r7.toNat % 18446744069414584321 + 18446744069414584321 - r6.toNat % 18446744069414584321) % 18446744069414584321
-      omega
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
 
 /-! ### §3.3 `qsag_asm_goldilocks_mul_ct_x86_64` (`N = 25`) & `qsag_asm_goldilocks_mul_ct_aarch64` (`N = 29`) -/
 
-private theorem goldMulX86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 goldMulX86Prog 24
-      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, zf, dy, false, m⟩
-      ⟨76, ⟨goldMulMc r7 r6, 0, 0, r3, r4, r5, r6, r7, 0, 0, r10, r11, r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 24
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-        stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm, stepX86_xorRR,
-        maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero, sbb32_self, sbb64_self,
-        uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8, b16get_9,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9]
-      rfl
-  exact StepsX86.zero _
-
-theorem rlib_goldilocks_mul_ct_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_mul_ct_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_mul_ct_x86_64"
-        (mkContract "qsag_asm_goldilocks_mul_ct_x86_64" [4]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_goldilocks_mul_ct_x86_64" [4]) ∧
-      decodeX86Slice slice.code = some goldMulX86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st24 tr24, execDecodedX86 slice.code 24 st = some (st24, tr24) ∧ st24.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (25 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 76 ∧ trace.length = 25 ∧
-          st'.gpr.get 0 =
-            BitVec.ofNat 64 (((st.gpr.get 7).toNat * (st.gpr.get 6).toNat) % GOLDILOCKS_P) ∧
-          (st'.gpr.get 0).toNat =
-            (Goldilocks.mul (Goldilocks.ofNat (st.gpr.get 7).toNat) (Goldilocks.ofNat (st.gpr.get 6).toNat)).val ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 2 = 0#64 ∧
-          st'.gpr.get 8 = 0#64 ∧ st'.gpr.get 9 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_mul_ct_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_goldilocks_mul_ct_x86_64" [4]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_goldilocks_mul_ct_x86_64" [4]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some goldMulX86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some goldMulX86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
-      (goldMulX86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec))
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, rfl, rfl, rfl, rfl⟩
-    · change (goldMulMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec =
-        BitVec.ofNat 64 ((r7.toNat * r6.toNat) % GOLDILOCKS_P)
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldMulMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
-    · change ((goldMulMc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)).toBitVec).toNat =
-        (Goldilocks.mul (Goldilocks.ofNat r7.toNat) (Goldilocks.ofNat r6.toNat)).val
-      rw [UInt64.toNat_toBitVec, goldMulMc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec,
-        Goldilocks.mul_val, Goldilocks.ofNat, Goldilocks.ofNat, Nat.mul_mod]
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
-
-private theorem goldMulArm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
-    ExecReachesArm64 goldMulArmProg 28
-      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-        v, cf, zf, dit, false, m⟩
-      ⟨112, ⟨⟨armCanon (goldMulArmPre r0 r1), r1, 0, 0, 0, 0, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-        v, decide ((goldMulArmPre r0 r1).toNat + (0xFFFFFFFF : UInt64).toNat ≥ 0x10000000000000000),
-        goldMulArmPre r0 r1 + 0xFFFFFFFF == 0, dit, false, m⟩ := by
-  apply StepsArm64.toExecReaches
-  iterate 28
-    apply StepsArm64.cons rfl rfl
-    · simp only [stepArm64_mul, stepArm64_umulh, stepArm64_lsr64, stepArm64_lsl32, stepArm64_andImm,
-        stepArm64_andRR, stepArm64_movn32, stepArm64_addRR, stepArm64_addsRR, stepArm64_subsRR,
-        stepArm64_subRR, stepArm64_adcRR, stepArm64_sbcRR, stepArm64_movz,
-        u64_shl_zero_zero, uint64_evalSub_eq, uint64_evalAdd_eq, armAdcZero, armSbcZero, u64_neg_cond,
-        movn32_zero, condAll_and_eps, condNone_and_eps,
-        armGet_31, armGet_0, armGet_1, armGet_2, armGet_3, armGet_4, armGet_5, armGet_6, armGet_7, armGet_8,
-        armSet_0, armSet_2, armSet_3, armSet_4, armSet_5, armSet_6, armSet_7, armSet_8]
-      rfl
-  exact StepsArm64.zero _
-
-theorem rlib_goldilocks_mul_ct_aarch64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_goldilocks_mul_ct_aarch64" = some slice ∧
-      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
-      ArPayloadOk aarch64RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_mul_ct_aarch64"
-        (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []) ∧
-      decodeArm64Slice slice.code = some goldMulArmProg ∧
-      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
-        (∃ st28 tr28, execDecodedArm64 slice.code 28 st = some (st28, tr28) ∧ st28.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedArm64 slice.code (29 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 112 ∧ trace.length = 29 ∧
-          st'.gpr.get 0 =
-            BitVec.ofNat 64 (((st.gpr.get 0).toNat * (st.gpr.get 1).toNat) % GOLDILOCKS_P) ∧
-          (st'.gpr.get 0).toNat =
-            (Goldilocks.mul (Goldilocks.ofNat (st.gpr.get 0).toNat) (Goldilocks.ofNat (st.gpr.get 1).toNat)).val ∧
-          Arm64CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          (∀ r : Nat, 2 ≤ r → r ≤ 8 → st'.gpr.get r = 0#64) := by
-  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_aarch64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_goldilocks_mul_ct_aarch64" = some slice := by
-      rw [extractRlibFuncBytes_aarch64_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []) = true := by
-      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_aarch64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_goldilocks_mul_ct_aarch64" []))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeArm64Slice slice.code = some goldMulArmProg := by
-      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_mul_ct_aarch64")).bind
-          (fun sl => decodeArm64Slice sl.code) = some goldMulArmProg := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-      v, cf, zf, dit, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
-    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
-      (goldMulArm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit (fun a => mem a.toBitVec))
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, ?_⟩
-    · dsimp
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldMulArm_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
-    · dsimp
-      rw [UInt64.toNat_toBitVec, goldMulArm_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec,
-        Goldilocks.mul_val, Goldilocks.ofNat, Goldilocks.ofNat, Nat.mul_mod]
-    · exact arm64_callee_saved_of_hi_vec
-    · exact mem_roundtrip mem
-    · intro r hr1 hr2
-      dsimp
-      match r, hr1, hr2 with
-      | 2, _, _ => rfl | 3, _, _ => rfl | 4, _, _ => rfl | 5, _, _ => rfl
-      | 6, _, _ => rfl | 7, _, _ => rfl | 8, _, _ => rfl
-      | n + 9, _, h => exact absurd h (by omega)
 
 /-! ### §3.4 `qsag_asm_goldilocks_pow7_ct_x86_64` (`N = 85`, `retPc = 265`) -/
 
-def goldPow7X86Prog : List (DecodedInstr X86Instr) := [
-  ⟨0, 3, .movRegReg true 11 7⟩,
-  ⟨3, 6, .movImm false 10 4294967295⟩,
-  ⟨9, 3, .movRegReg true 2 11⟩, ⟨12, 5, .mulx 1 0 11⟩, ⟨17, 3, .movRegReg true 2 1⟩,
-  ⟨20, 4, .shiftImm .shr true 1 32⟩, ⟨24, 2, .movRegReg false 2 2⟩,
-  ⟨26, 3, .aluRegReg .sub true 0 1⟩, ⟨29, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨32, 3, .aluRegReg .sub true 0 8⟩, ⟨35, 3, .movRegReg true 9 2⟩,
-  ⟨38, 4, .shiftImm .shl true 9 32⟩, ⟨42, 3, .aluRegReg .sub true 9 2⟩,
-  ⟨45, 3, .aluRegReg .add true 0 9⟩, ⟨48, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨51, 3, .aluRegReg .add true 0 8⟩, ⟨54, 3, .movRegReg true 8 0⟩,
-  ⟨57, 3, .aluRegReg .add true 8 10⟩, ⟨60, 3, .aluRegReg .sbb true 1 1⟩,
-  ⟨63, 3, .aluRegReg .andOp true 1 10⟩, ⟨66, 3, .aluRegReg .add true 0 1⟩,
-  ⟨69, 3, .movRegReg true 2 0⟩, ⟨72, 5, .mulx 1 0 11⟩, ⟨77, 3, .movRegReg true 2 1⟩,
-  ⟨80, 4, .shiftImm .shr true 1 32⟩, ⟨84, 2, .movRegReg false 2 2⟩,
-  ⟨86, 3, .aluRegReg .sub true 0 1⟩, ⟨89, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨92, 3, .aluRegReg .sub true 0 8⟩, ⟨95, 3, .movRegReg true 9 2⟩,
-  ⟨98, 4, .shiftImm .shl true 9 32⟩, ⟨102, 3, .aluRegReg .sub true 9 2⟩,
-  ⟨105, 3, .aluRegReg .add true 0 9⟩, ⟨108, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨111, 3, .aluRegReg .add true 0 8⟩, ⟨114, 3, .movRegReg true 8 0⟩,
-  ⟨117, 3, .aluRegReg .add true 8 10⟩, ⟨120, 3, .aluRegReg .sbb true 1 1⟩,
-  ⟨123, 3, .aluRegReg .andOp true 1 10⟩, ⟨126, 3, .aluRegReg .add true 0 1⟩,
-  ⟨129, 3, .movRegReg true 2 0⟩, ⟨132, 5, .mulx 1 0 0⟩, ⟨137, 3, .movRegReg true 2 1⟩,
-  ⟨140, 4, .shiftImm .shr true 1 32⟩, ⟨144, 2, .movRegReg false 2 2⟩,
-  ⟨146, 3, .aluRegReg .sub true 0 1⟩, ⟨149, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨152, 3, .aluRegReg .sub true 0 8⟩, ⟨155, 3, .movRegReg true 9 2⟩,
-  ⟨158, 4, .shiftImm .shl true 9 32⟩, ⟨162, 3, .aluRegReg .sub true 9 2⟩,
-  ⟨165, 3, .aluRegReg .add true 0 9⟩, ⟨168, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨171, 3, .aluRegReg .add true 0 8⟩, ⟨174, 3, .movRegReg true 8 0⟩,
-  ⟨177, 3, .aluRegReg .add true 8 10⟩, ⟨180, 3, .aluRegReg .sbb true 1 1⟩,
-  ⟨183, 3, .aluRegReg .andOp true 1 10⟩, ⟨186, 3, .aluRegReg .add true 0 1⟩,
-  ⟨189, 3, .movRegReg true 2 0⟩, ⟨192, 5, .mulx 1 0 11⟩, ⟨197, 3, .movRegReg true 2 1⟩,
-  ⟨200, 4, .shiftImm .shr true 1 32⟩, ⟨204, 2, .movRegReg false 2 2⟩,
-  ⟨206, 3, .aluRegReg .sub true 0 1⟩, ⟨209, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨212, 3, .aluRegReg .sub true 0 8⟩, ⟨215, 3, .movRegReg true 9 2⟩,
-  ⟨218, 4, .shiftImm .shl true 9 32⟩, ⟨222, 3, .aluRegReg .sub true 9 2⟩,
-  ⟨225, 3, .aluRegReg .add true 0 9⟩, ⟨228, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨231, 3, .aluRegReg .add true 0 8⟩, ⟨234, 3, .movRegReg true 8 0⟩,
-  ⟨237, 3, .aluRegReg .add true 8 10⟩, ⟨240, 3, .aluRegReg .sbb true 1 1⟩,
-  ⟨243, 3, .aluRegReg .andOp true 1 10⟩, ⟨246, 3, .aluRegReg .add true 0 1⟩,
-  ⟨249, 2, .aluRegReg .xorOp false 1 1⟩, ⟨251, 2, .aluRegReg .xorOp false 2 2⟩,
-  ⟨253, 3, .aluRegReg .xorOp false 8 8⟩, ⟨256, 3, .aluRegReg .xorOp false 9 9⟩,
-  ⟨259, 3, .aluRegReg .xorOp false 10 10⟩, ⟨262, 3, .aluRegReg .xorOp false 11 11⟩,
-  ⟨265, 1, .ret⟩]
-
-private theorem pow7_setup_and_b1 (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ∃ s2, ExecReachesX86 goldPow7X86Prog 21
-        ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨69, ⟨goldMulMc r7 r7, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ := by
-  suffices hS : ∃ s2, StepsX86 goldPow7X86Prog 21
-        ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨69, ⟨goldMulMc r7 r7, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ by
-    rcases hS with ⟨s2, hs, hp⟩
-    exact ⟨s2, hs.toExecReaches, hp⟩
-  iterate 21
-    apply StepsX86_step_ex rfl rfl
-    · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-        stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm,
-        maskGprWidth_true, sbb32_self, sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_7, b16get_8, b16get_9, b16get_10, b16get_11,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9, b16set_10, b16set_11]
-      rfl
-  exact ⟨_, StepsX86.zero _, _, _, _, _, _, _, _, rfl⟩
-
-private theorem pow7_b2 (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ∃ s2, ExecReachesX86 goldPow7X86Prog 19
-        ⟨69, ⟨acc, r1, r2, r3, r4, r5, r6, r7, r8, r9,
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨129, ⟨goldMulMc acc r7, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ := by
-  suffices hS : ∃ s2, StepsX86 goldPow7X86Prog 19
-        ⟨69, ⟨acc, r1, r2, r3, r4, r5, r6, r7, r8, r9,
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨129, ⟨goldMulMc acc r7, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ by
-    rcases hS with ⟨s2, hs, hp⟩
-    exact ⟨s2, hs.toExecReaches, hp⟩
-  iterate 19
-    apply StepsX86_step_ex rfl rfl
-    · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-        stepX86_subRR64, stepX86_sbbRR, stepX86_andRR,
-        maskGprWidth_true, sbb32_self, sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_8, b16get_9, b16get_10, b16get_11,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9]
-      rfl
-  exact ⟨_, StepsX86.zero _, _, _, _, _, _, _, _, rfl⟩
-
-private theorem pow7_b3 (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ∃ s2, ExecReachesX86 goldPow7X86Prog 19
-        ⟨129, ⟨acc, r1, r2, r3, r4, r5, r6, r7, r8, r9,
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨189, ⟨goldMulMc acc acc, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ := by
-  suffices hS : ∃ s2, StepsX86 goldPow7X86Prog 19
-        ⟨129, ⟨acc, r1, r2, r3, r4, r5, r6, r7, r8, r9,
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r1' r2' r8' r9' cf' o' zf',
-        s2 = ⟨189, ⟨goldMulMc acc acc, r1', r2', r3, r4, r5, r6, r7, r8', r9',
-          maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-          y, cf', o', zf', dy, false, m⟩ by
-    rcases hS with ⟨s2, hs, hp⟩
-    exact ⟨s2, hs.toExecReaches, hp⟩
-  iterate 19
-    apply StepsX86_step_ex rfl rfl
-    · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-        stepX86_subRR64, stepX86_sbbRR, stepX86_andRR,
-        maskGprWidth_true, sbb32_self, sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_8, b16get_9, b16get_10,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9]
-      rfl
-  exact ⟨_, StepsX86.zero _, _, _, _, _, _, _, _, rfl⟩
-
-private theorem pow7_b4_and_wipe (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 goldPow7X86Prog 25
-      ⟨189, ⟨acc, r1, r2, r3, r4, r5, r6, r7, r8, r9,
-        maskGprWidth false 4294967295, r7, r12, r13, r14, r15⟩,
-        y, cf, o, zf, dy, false, m⟩
-      ⟨265, ⟨goldMulMc acc r7, 0, 0, r3, r4, r5, r6, r7, 0, 0, 0, 0, r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 25
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-        stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_xorRR,
-        maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero, sbb32_self, sbb64_self,
-        uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_8, b16get_9, b16get_10, b16get_11,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9, b16set_10, b16set_11]
-      rfl
-  exact StepsX86.zero _
 
 private theorem goldPow7Mc_toNat (x : UInt64) :
     (goldMulMc (goldMulMc (goldMulMc (goldMulMc x x) x) (goldMulMc (goldMulMc x x) x)) x).toNat =
@@ -1425,132 +897,9 @@ private theorem goldPow7Mc_toNat (x : UInt64) :
     simp [Nat.pow_succ, Nat.pow_zero, Nat.mul_assoc]
   rw [hPow]
 
-theorem rlib_goldilocks_pow7_ct_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_pow7_ct_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_pow7_ct_x86_64"
-        (mkContract "qsag_asm_goldilocks_pow7_ct_x86_64" [4] [] [11]) = true ∧
-      ElfSliceThreeWayNISafe slice
-        (mkContract "qsag_asm_goldilocks_pow7_ct_x86_64" [4] [] [11]) ∧
-      decodeX86Slice slice.code = some goldPow7X86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st84 tr84, execDecodedX86 slice.code 84 st = some (st84, tr84) ∧ st84.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (85 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 265 ∧ trace.length = 85 ∧
-          st'.gpr.get 0 = BitVec.ofNat 64 (((st.gpr.get 7).toNat ^ 7) % GOLDILOCKS_P) ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 8 = 0#64 ∧
-          st'.gpr.get 9 = 0#64 ∧ st'.gpr.get 10 = 0#64 ∧ st'.gpr.get 11 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_pow7_ct_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_pow7_ct_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice
-        (mkContract "qsag_asm_goldilocks_pow7_ct_x86_64" [4] [] [11]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_pow7_ct_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl
-            (mkContract "qsag_asm_goldilocks_pow7_ct_x86_64" [4] [] [11]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some goldPow7X86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_pow7_ct_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some goldPow7X86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    obtain ⟨_, hb1, r1a, r2a, r8a, r9a, cfa, ofa, zfa, rfl⟩ :=
-      pow7_setup_and_b1 (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec)
-    let u3 := UInt64.ofBitVec r3; let u4 := UInt64.ofBitVec r4
-    let u5 := UInt64.ofBitVec r5; let u6 := UInt64.ofBitVec r6
-    let u7 := UInt64.ofBitVec r7; let u12 := UInt64.ofBitVec r12
-    let u13 := UInt64.ofBitVec r13; let u14 := UInt64.ofBitVec r14
-    let u15 := UInt64.ofBitVec r15
-    obtain ⟨_, hb2, r1b, r2b, r8b, r9b, cfb, ofb, zfb, rfl⟩ :=
-      pow7_b2 (goldMulMc u7 u7) r1a r2a u3 u4 u5 u6 u7 r8a r9a u12 u13 u14 u15
-        y cfa ofa zfa dy (fun a => mem a.toBitVec)
-    obtain ⟨_, hb3, r1c, r2c, r8c, r9c, cfc, ofc, zfc, rfl⟩ :=
-      pow7_b3 (goldMulMc (goldMulMc u7 u7) u7) r1b r2b u3 u4 u5 u6 u7 r8b r9b u12 u13 u14 u15
-        y cfb ofb zfb dy (fun a => mem a.toBitVec)
-    have hb4 :=
-      pow7_b4_and_wipe (goldMulMc (goldMulMc (goldMulMc u7 u7) u7) (goldMulMc (goldMulMc u7 u7) u7))
-        r1c r2c u3 u4 u5 u6 u7 r8c r9c u12 u13 u14 u15 y cfc ofc zfc dy (fun a => mem a.toBitVec)
-    have h84 : ExecReachesX86 goldPow7X86Prog 84 _ _ :=
-      ExecReachesX86_trans (ExecReachesX86_trans (ExecReachesX86_trans hb1 hb2) hb3) hb4
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl h84 rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl⟩
-    · change (goldMulMc (goldMulMc (goldMulMc (goldMulMc u7 u7) u7) (goldMulMc (goldMulMc u7 u7) u7)) u7).toBitVec =
-        BitVec.ofNat 64 ((r7.toNat ^ 7) % GOLDILOCKS_P)
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldPow7Mc_toNat, UInt64.toNat_ofBitVec]
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
 
 /-! ### §3.5 `qsag_asm_goldilocks_dot2_adx_x86_64` (`N = 44`, `retPc = 153`) -/
 
-def goldDot2X86Prog : List (DecodedInstr X86Instr) := [
-  ⟨0, 3, .movRegReg true 10 2⟩,
-  ⟨3, 2, .aluRegReg .xorOp false 0 0⟩,
-  ⟨5, 3, .movRegReg true 2 7⟩,
-  ⟨8, 5, .mulx 9 8 6⟩,
-  ⟨13, 3, .movRegReg true 2 10⟩,
-  ⟨16, 5, .mulx 11 10 1⟩,
-  ⟨21, 6, .adcx 8 10⟩,
-  ⟨27, 6, .adcx 9 11⟩,
-  ⟨33, 6, .adox 0 0⟩,
-  ⟨39, 6, .adcx 0 0⟩,
-  ⟨45, 3, .negReg true 0⟩,
-  ⟨48, 10, .movImm true 11 18446744065119617025⟩,
-  ⟨58, 3, .aluRegReg .andOp true 11 0⟩,
-  ⟨61, 3, .movRegReg true 0 8⟩,
-  ⟨64, 3, .movRegReg true 2 9⟩,
-  ⟨67, 4, .shiftImm .shr true 9 32⟩,
-  ⟨71, 2, .movRegReg false 2 2⟩,
-  ⟨73, 3, .aluRegReg .sub true 0 9⟩,
-  ⟨76, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨79, 3, .aluRegReg .sub true 0 8⟩,
-  ⟨82, 3, .movRegReg true 9 2⟩,
-  ⟨85, 4, .shiftImm .shl true 9 32⟩,
-  ⟨89, 3, .aluRegReg .sub true 9 2⟩,
-  ⟨92, 3, .aluRegReg .add true 0 9⟩,
-  ⟨95, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨98, 3, .aluRegReg .add true 0 8⟩,
-  ⟨101, 3, .aluRegReg .add true 0 11⟩,
-  ⟨104, 3, .aluRegReg .sbb false 8 8⟩,
-  ⟨107, 3, .aluRegReg .add true 0 8⟩,
-  ⟨110, 3, .aluRegReg .sbb false 10 10⟩,
-  ⟨113, 3, .aluRegReg .add true 0 10⟩,
-  ⟨116, 6, .movImm false 9 4294967295⟩,
-  ⟨122, 3, .movRegReg true 8 0⟩,
-  ⟨125, 3, .aluRegReg .add true 8 9⟩,
-  ⟨128, 3, .aluRegReg .sbb true 1 1⟩,
-  ⟨131, 3, .aluRegReg .andOp true 1 9⟩,
-  ⟨134, 3, .aluRegReg .add true 0 1⟩,
-  ⟨137, 2, .aluRegReg .xorOp false 1 1⟩,
-  ⟨139, 2, .aluRegReg .xorOp false 2 2⟩,
-  ⟨141, 3, .aluRegReg .xorOp false 8 8⟩,
-  ⟨144, 3, .aluRegReg .xorOp false 9 9⟩,
-  ⟨147, 3, .aluRegReg .xorOp false 10 10⟩,
-  ⟨150, 3, .aluRegReg .xorOp false 11 11⟩,
-  ⟨153, 1, .ret⟩]
 
 private def goldDot2Mc (a0 b0 a1 b1 : UInt64) : UInt64 :=
   let p0 := a0.toNat * b0.toNat
@@ -1587,60 +936,6 @@ private theorem u64_eps2_and_mask (c : Bool) :
       if c then 18446744065119617025 else 0 := by
   cases c <;> decide
 
-private theorem goldDot2_part1 (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    let p0 := r7.toNat * r6.toNat
-    let p1 := r2.toNat * r1.toNat
-    let lo0 := UInt64.ofNat (p0 % 0x10000000000000000)
-    let hi0 := UInt64.ofNat (p0 / 0x10000000000000000)
-    let lo1 := UInt64.ofNat (p1 % 0x10000000000000000)
-    let hi1 := UInt64.ofNat (p1 / 0x10000000000000000)
-    let sumLo := lo0.toNat + lo1.toNat
-    let r8' := UInt64.ofNat (sumLo % 0x10000000000000000)
-    let cf0 := decide (sumLo ≥ 0x10000000000000000)
-    let sumHi := hi0.toNat + hi1.toNat + (if cf0 then 1 else 0)
-    let r9' := UInt64.ofNat (sumHi % 0x10000000000000000)
-    let cf1 := decide (sumHi ≥ 0x10000000000000000)
-    let r11' : UInt64 := if cf1 then 18446744065119617025 else 0
-    ∃ s2, StepsX86 goldDot2X86Prog 13
-        ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-          y, cf, o, zf, dy, false, m⟩ s2 ∧
-      ∃ r0' zf',
-        s2 = ⟨61, ⟨r0', r1, r2, r3, r4, r5, r6, r7, r8', r9', lo1, r11', r12, r13, r14, r15⟩,
-          y, false, false, zf', dy, false, m⟩ := by
-  dsimp only
-  iterate 13
-    apply StepsX86_step_ex rfl rfl
-    · simp only [stepX86_movRR, stepX86_xorRR, stepX86_mulx, stepX86_adcx, stepX86_adox,
-        stepX86_neg, stepX86_movImm, stepX86_andRR64,
-        maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
-        u64_toNat_zero, Nat.zero_add, Nat.add_zero,
-        u64_ofNat_zero_mod, u64_zero_lt_264, u64_ofNat_b_mod, u64_b_lt_264,
-        u64_eps2_and_mask, Bool.false_eq_true, ite_false,
-        b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10, b16get_11,
-        b16set_0, b16set_2, b16set_8, b16set_9, b16set_10, b16set_11]
-      rfl
-  exact ⟨_, StepsX86.zero _, _, _, rfl⟩
-
-private theorem goldDot2_part2 (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 goldDot2X86Prog 30
-      ⟨61, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, false, false, zf, dy, false, m⟩
-      ⟨153, ⟨goldAddMc (mulRed r8 r9) r11, 0, 0, r3, r4, r5, r6, r7, 0, 0, 0, 0,
-        r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 30
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_movRR, stepX86_shr64, stepX86_shl64, stepX86_addRR64, stepX86_subRR64,
-        stepX86_sbbRR, stepX86_andRR, stepX86_movImm, stepX86_xorRR,
-        maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero, sbb32_self, sbb64_self,
-        uint64_evalAdd_eq, uint64_evalSub_eq,
-        b16get_0, b16get_1, b16get_2, b16get_8, b16get_9, b16get_10, b16get_11,
-        b16set_0, b16set_1, b16set_2, b16set_8, b16set_9, b16set_10, b16set_11]
-      rfl
-  exact StepsX86.zero _
 
 private theorem goldDot2Mc_toNat (a0 b0 a1 b1 : UInt64) :
     (goldDot2Mc a0 b0 a1 b1).toNat =
@@ -1734,178 +1029,8 @@ private theorem goldDot2Mc_toNat (a0 b0 a1 b1 : UInt64) :
     conv => rhs; rw [hSumMid, hHiSplit]
     rw [hSplit0, Nat.add_zero]
 
-theorem rlib_goldilocks_dot2_adx_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_dot2_adx_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_goldilocks_dot2_adx_x86_64"
-        (mkContract "qsag_asm_goldilocks_dot2_adx_x86_64" [4]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_goldilocks_dot2_adx_x86_64" [4]) ∧
-      decodeX86Slice slice.code = some goldDot2X86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st43 tr43, execDecodedX86 slice.code 43 st = some (st43, tr43) ∧ st43.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (44 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 153 ∧ trace.length = 44 ∧
-          st'.gpr.get 0 = BitVec.ofNat 64
-            (((st.gpr.get 7).toNat * (st.gpr.get 6).toNat +
-              (st.gpr.get 2).toNat * (st.gpr.get 1).toNat) % GOLDILOCKS_P) ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 8 = 0#64 ∧
-          st'.gpr.get 9 = 0#64 ∧ st'.gpr.get 10 = 0#64 ∧ st'.gpr.get 11 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_dot2_adx_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_goldilocks_dot2_adx_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_goldilocks_dot2_adx_x86_64" [4]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_dot2_adx_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_goldilocks_dot2_adx_x86_64" [4]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some goldDot2X86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_goldilocks_dot2_adx_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some goldDot2X86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    obtain ⟨_, hp1, r0a, zfa, rfl⟩ :=
-      goldDot2_part1 (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy (fun a => mem a.toBitVec)
-    have h43 := ExecReachesX86_trans hp1.toExecReaches (goldDot2_part2 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ y zfa dy (fun a => mem a.toBitVec))
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl h43 rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl⟩
-    · change (goldDot2Mc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)
-          (UInt64.ofBitVec r2) (UInt64.ofBitVec r1)).toBitVec =
-        BitVec.ofNat 64 ((r7.toNat * r6.toNat + r2.toNat * r1.toNat) % GOLDILOCKS_P)
-      apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
-      rw [goldDot2Mc_toNat, UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec,
-        UInt64.toNat_ofBitVec, UInt64.toNat_ofBitVec]
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
 
 /-! ### §3.6 `qsag_asm_ct_eq_32_x86_64` (`N = 20`) & `qsag_asm_ct_eq_32_aarch64` (`N = 22`) -/
-
-private theorem ctEq32X86_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ExecReachesX86 ctEq32X86Prog 19
-      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, zf, dy, false, m⟩
-      ⟨62, ⟨maskGprWidth false (((ctEq32WordX86 m r7 r6 ||| (0 - ctEq32WordX86 m r7 r6)) >>>
-              UInt64.ofNat 63) ^^^ 1),
-          0, 0, r3, r4, r5, r6, r7, 0, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, false, false, true, dy, false, m⟩ := by
-  apply StepsX86.toExecReaches
-  iterate 19
-    apply StepsX86.cons rfl rfl
-    · simp only [stepX86_load64, stepX86_xorLoad64, stepX86_orRR, stepX86_movRR, stepX86_neg,
-        stepX86_shr64, stepX86_xorImm, stepX86_xorRR, maskGprWidth_true, mask32_xor_self,
-        u64_zero_beq_zero, b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8,
-        b16set_0, b16set_1, b16set_2, b16set_8]
-      rfl
-  exact StepsX86.zero _
-
-theorem rlib_ct_eq_32_x86_64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_ct_eq_32_x86_64" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_ct_eq_32_x86_64"
-        (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]) = true ∧
-      ElfSliceThreeWayNISafe slice
-        (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]) ∧
-      decodeX86Slice slice.code = some ctEq32X86Prog ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        (∃ st19 tr19, execDecodedX86 slice.code 19 st = some (st19, tr19) ∧ st19.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (20 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 62 ∧ trace.length = 20 ∧
-          st'.gpr.get 0 =
-            (if ∀ i : Nat, i < 32 →
-                st.mem (st.gpr.get 7 + BitVec.ofNat 64 i) =
-                  st.mem (st.gpr.get 6 + BitVec.ofNat 64 i)
-              then 1#64 else 0#64) ∧
-          X86CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          st'.gpr.get 1 = 0#64 ∧ st'.gpr.get 2 = 0#64 ∧ st'.gpr.get 8 = 0#64 := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_x86_64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_ct_eq_32_x86_64" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice
-        (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_x86_64")).map
-          (fun sl => checkElfSliceThreeWayNI sl
-            (mkContract "qsag_asm_ct_eq_32_x86_64" [4, 7, 6] [] [1, 2, 8]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some ctEq32X86Prog := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_x86_64")).bind
-          (fun sl => decodeX86Slice sl.code) = some ctEq32X86Prog := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      y, cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : X86BvState := ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, mem⟩
-    let mU : UInt64 → UInt8 := fun a => mem a.toBitVec
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl
-      (ctEq32X86_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) y cf o zf dy mU)
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl⟩
-    · change (maskGprWidth false
-          (((ctEq32WordX86 mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6) |||
-              (0 - ctEq32WordX86 mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6))) >>>
-              UInt64.ofNat 63) ^^^ 1)).toBitVec =
-        (if ∀ i : Nat, i < 32 →
-            mem (r7 + BitVec.ofNat 64 i) = mem (r6 + BitVec.ofNat 64 i)
-          then 1#64 else 0#64)
-      rw [zeroTest64_masked]
-      have hiff0 : ctEq32WordX86 mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6) = 0 ↔
-          ∀ i : Nat, i < 32 →
-            mU (UInt64.ofBitVec r7 + UInt64.ofNat i) =
-              mU (UInt64.ofBitVec r6 + UInt64.ofNat i) :=
-        xorOr4_eq_zero_iff mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6) _ _ _ _ _ _ _ _
-          rfl rfl rfl rfl rfl rfl rfl rfl
-      have hAddrEq (base : BitVec 64) (i : Nat) :
-          (UInt64.ofBitVec base + UInt64.ofNat i).toBitVec = base + BitVec.ofNat 64 i := by
-        rfl
-      have hiff : ctEq32WordX86 mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6) = 0 ↔
-          ∀ i : Nat, i < 32 → mem (r7 + BitVec.ofNat 64 i) = mem (r6 + BitVec.ofNat 64 i) := by
-        simpa only [mU, hAddrEq] using hiff0
-      if hW : ctEq32WordX86 mU (UInt64.ofBitVec r7) (UInt64.ofBitVec r6) = 0 then
-        rw [ite_eq_left hW, ite_eq_left (hiff.mp hW)]; rfl
-      else
-        rw [ite_eq_right hW, ite_eq_right (fun h => hW (hiff.mpr h))]; rfl
-    · exact x86_callee_saved_of_roundtrip
-    · exact mem_roundtrip mem
 
 
 /-! ### §3.7 `qsag_asm_ct_eq_32_aarch64` (`N = 22`, `retPc = 84`) -/
@@ -1928,100 +1053,6 @@ private theorem ctEq32Arm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13
       rfl
   exact StepsArm64.zero _
 
-/-- End-to-end byte-decoded functional equivalence + 3-way CT-NI certificate for the real
-    `rustc --release` `.rlib` `qsag_asm_ct_eq_32_aarch64` kernel (`N = 22` exact steps to `RET`
-    at `pc = 84`). -/
-theorem rlib_ct_eq_32_aarch64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_ct_eq_32_aarch64" = some slice ∧
-      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
-      ArPayloadOk aarch64RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_ct_eq_32_aarch64"
-        (mkContract "qsag_asm_ct_eq_32_aarch64" [0, 1] [] [2, 3, 4, 5, 6, 7]) = true ∧
-      ElfSliceThreeWayNISafe slice
-        (mkContract "qsag_asm_ct_eq_32_aarch64" [0, 1] [] [2, 3, 4, 5, 6, 7]) ∧
-      decodeArm64Slice slice.code = some ctEq32ArmProg ∧
-      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
-        (∃ st21 tr21, execDecodedArm64 slice.code 21 st = some (st21, tr21) ∧ st21.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedArm64 slice.code (22 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 84 ∧ trace.length = 22 ∧
-          st'.gpr.get 0 =
-            (if ∀ i : Nat, i < 32 →
-                st.mem (st.gpr.get 0 + BitVec.ofNat 64 i) =
-                  st.mem (st.gpr.get 1 + BitVec.ofNat 64 i)
-              then 1#64 else 0#64) ∧
-          Arm64CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem ∧
-          (∀ r : Nat, 2 ≤ r → r ≤ 7 → st'.gpr.get r = 0#64) := by
-  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_aarch64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_ct_eq_32_aarch64" = some slice := by
-      rw [extractRlibFuncBytes_aarch64_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice
-        (mkContract "qsag_asm_ct_eq_32_aarch64" [0, 1] [] [2, 3, 4, 5, 6, 7]) = true := by
-      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_aarch64")).map
-          (fun sl => checkElfSliceThreeWayNI sl
-            (mkContract "qsag_asm_ct_eq_32_aarch64" [0, 1] [] [2, 3, 4, 5, 6, 7]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeArm64Slice slice.code = some ctEq32ArmProg := by
-      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_ct_eq_32_aarch64")).bind
-          (fun sl => decodeArm64Slice sl.code) = some ctEq32ArmProg := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-      v, cf, zf, dit, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : Arm64BvState := ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩, v, cf, zf, dit, false, mem⟩
-    let mU : UInt64 → UInt8 := fun a => mem a.toBitVec
-    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
-      (ctEq32Arm_reaches (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2)
-        (UInt64.ofBitVec r3) (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6)
-        (UInt64.ofBitVec r7) (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10)
-        (UInt64.ofBitVec r11) (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14)
-        (UInt64.ofBitVec r15) (bank16ToU64 hi) v cf zf dit mU)
-      rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, arm64_callee_saved_of_hi_vec, mem_roundtrip mem, ?_⟩
-    · change (((ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) |||
-          (0 - ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1))) >>>
-          UInt64.ofNat 63) ^^^ 1).toBitVec =
-        (if ∀ i : Nat, i < 32 →
-            mem (r0 + BitVec.ofNat 64 i) = mem (r1 + BitVec.ofNat 64 i)
-          then 1#64 else 0#64)
-      rw [zeroTest64]
-      have e8 : ∀ x : UInt64, x + 0 + 8 = x + UInt64.ofNat 8 := fun x => by rw [UInt64.add_zero]; rfl
-      have e24 : ∀ x : UInt64, x + 16 + 8 = x + UInt64.ofNat 24 := fun x => by rw [UInt64.add_assoc]; rfl
-      have hiff0 : ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) = 0 ↔
-          ∀ i : Nat, i < 32 →
-            mU (UInt64.ofBitVec r0 + UInt64.ofNat i) =
-              mU (UInt64.ofBitVec r1 + UInt64.ofNat i) :=
-        xorOr4_eq_zero_iff mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) _ _ _ _ _ _ _ _
-          rfl (e8 _) rfl (e24 _) rfl (e8 _) rfl (e24 _)
-      have hAddrEq (base : BitVec 64) (i : Nat) :
-          (UInt64.ofBitVec base + UInt64.ofNat i).toBitVec = base + BitVec.ofNat 64 i := rfl
-      have hiff : ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) = 0 ↔
-          ∀ i : Nat, i < 32 → mem (r0 + BitVec.ofNat 64 i) = mem (r1 + BitVec.ofNat 64 i) := by
-        simpa only [mU, hAddrEq] using hiff0
-      if hW : ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) = 0 then
-        rw [ite_eq_left hW, ite_eq_left (hiff.mp hW)]; rfl
-      else
-        rw [ite_eq_right hW, ite_eq_right (fun h => hW (hiff.mpr h))]; rfl
-    · intro r hr1 hr2
-      match r, hr1, hr2 with
-      | 2, _, _ => rfl | 3, _, _ => rfl | 4, _, _ => rfl
-      | 5, _, _ => rfl | 6, _, _ => rfl | 7, _, _ => rfl
-      | 0, h, _ => exact absurd h (by decide)
-      | 1, h, _ => exact absurd h (by decide)
-      | n + 8, _, h => exact absurd h (by omega)
 
 /-! ## §4. Cross-ISA `ELF64` Scalar Constant-Time Kernels (`ct_select_u64`, `ct_eq_u64`, `aarch64` `goldilocks_add_ct` & `sub_ct`) -/
 
@@ -3245,56 +2276,6 @@ private theorem enableDitArm_reaches (g : Bank32 UInt64) (v : Bank32 Vec128)
   apply StepsArm64.toExecReaches
   exact StepsArm64.cons rfl rfl rfl (StepsArm64.cons rfl rfl rfl (StepsArm64.zero _))
 
-theorem rlib_enable_dit_aarch64_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_enable_dit_aarch64" = some slice ∧
-      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
-      ArPayloadOk aarch64RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_enable_dit_aarch64"
-        (mkContract "qsag_asm_enable_dit_aarch64" []) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_enable_dit_aarch64" []) ∧
-      decodeArm64Slice slice.code = some enableDitArmProg ∧
-      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
-        (∃ st2 tr2, execDecodedArm64 slice.code 2 st = some (st2, tr2) ∧ st2.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedArm64 slice.code (3 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 8 ∧ trace.length = 3 ∧
-          st'.dit = true ∧
-          st'.gpr = st.gpr ∧
-          st'.vec = st.vec ∧
-          st'.cf = st.cf ∧ st'.zf = st.zf ∧
-          Arm64CalleeSavedPreserved st st' ∧
-          st'.mem = st.mem := by
-  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_enable_dit_aarch64" = some slice := by
-      rw [extractRlibFuncBytes_aarch64_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_enable_dit_aarch64" []) = true := by
-      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_enable_dit_aarch64" []))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeArm64Slice slice.code = some enableDitArmProg := by
-      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64")).bind
-          (fun sl => decodeArm64Slice sl.code) = some enableDitArmProg := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc, ⟨lo, hi⟩, v, cf, zf, dit, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : Arm64BvState := ⟨0, ⟨lo, hi⟩, v, cf, zf, dit, false, mem⟩
-    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
-      (enableDitArm_reaches (bank32ToU64 ⟨lo, hi⟩) v cf zf dit (fun a => mem a.toBitVec)) rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, ?_, rfl, rfl, rfl, arm64_callee_saved_of_hi_vec, mem_roundtrip mem⟩
-    show (⟨bank16OfU64 (bank16ToU64 lo), bank16OfU64 (bank16ToU64 hi)⟩ : Bank32 (BitVec 64)) = ⟨lo, hi⟩
-    rw [bank16_roundtrip, bank16_roundtrip]
 
 /-! ### §5.3 `qsag_asm_gf256_shamir_mul_gfni` (`x86_64` AVX2 + GFNI `BinaryTower` Shamir Multiplication & Loop) -/
 
@@ -3742,264 +2723,6 @@ theorem ExecReachesX86_transfer_nonret {prog1 prog2 : List (DecodedInstr X86Inst
         exact ⟨he, by simp at hl; omega⟩
       exact ExecReachesX86_cons hh hf2 rfl (ih hRest)
 
-private theorem gf256MulGfni_reaches_full (k : Nat) (hk : k + 1 < 0x10000000000000000)
-    (r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
-    (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
-    (cf o zf dy : Bool) (m : UInt64 → UInt8) :
-    ∃ cf' o' zf',
-      ExecReachesX86 gf256MulGfniProg (24 + 12 * k)
-        ⟨0, ⟨r0, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-          ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-          cf, o, zf, dy, false, m⟩
-        ⟨117,
-          ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
-            r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
-            r8, r9, r10, r11, r12, r13, r14, r15⟩,
-          ⟨Vec256.zero, Vec256.zero, Vec256.zero,
-            ⟨y3.w0, y3.w1, 0, 0⟩, ⟨y4.w0, y4.w1, 0, 0⟩, ⟨y5.w0, y5.w1, 0, 0⟩,
-            ⟨y6.w0, y6.w1, 0, 0⟩, ⟨y7.w0, y7.w1, 0, 0⟩, ⟨y8.w0, y8.w1, 0, 0⟩,
-            ⟨y9.w0, y9.w1, 0, 0⟩, ⟨y10.w0, y10.w1, 0, 0⟩, ⟨y11.w0, y11.w1, 0, 0⟩,
-            ⟨y12.w0, y12.w1, 0, 0⟩, ⟨y13.w0, y13.w1, 0, 0⟩,
-            Vec256.zero, Vec256.zero⟩,
-          cf', o', zf', false, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ := by
-  obtain ⟨cf', o', zf', hCore⟩ := gf256MulGfniCore_reaches k hk
-    r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
-    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy m
-  have hPres : progPreservesNonRet gf256MulGfniCoreProg gf256MulGfniProg = true := by decide +kernel
-  have hTrans := ExecReachesX86_transfer_nonret hPres hCore.toExecReaches rfl
-  have hVzu : ExecReachesX86 gf256MulGfniProg 1
-      ⟨114,
-        ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
-          r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
-          r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        ⟨Vec256.zero, Vec256.zero, Vec256.zero, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
-          Vec256.zero, Vec256.zero⟩,
-        cf', o', zf', true, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩
-      ⟨117,
-        ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
-          r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
-          r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        ⟨Vec256.zero, Vec256.zero, Vec256.zero,
-          ⟨y3.w0, y3.w1, 0, 0⟩, ⟨y4.w0, y4.w1, 0, 0⟩, ⟨y5.w0, y5.w1, 0, 0⟩,
-          ⟨y6.w0, y6.w1, 0, 0⟩, ⟨y7.w0, y7.w1, 0, 0⟩, ⟨y8.w0, y8.w1, 0, 0⟩,
-          ⟨y9.w0, y9.w1, 0, 0⟩, ⟨y10.w0, y10.w1, 0, 0⟩, ⟨y11.w0, y11.w1, 0, 0⟩,
-          ⟨y12.w0, y12.w1, 0, 0⟩, ⟨y13.w0, y13.w1, 0, 0⟩,
-          Vec256.zero, Vec256.zero⟩,
-        cf', o', zf', false, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ :=
-    ExecReachesX86_step rfl rfl rfl
-  have hFull := ExecReachesX86_trans hTrans hVzu
-  have hStepEq : (23 + 12 * k) + 1 = 24 + 12 * k := by omega
-  rw [hStepEq] at hFull
-  exact ⟨cf', o', zf', hFull⟩
-
-/-- End-to-end single-block (`rcx = 1#64`, 32 lanes) byte-decoded functional equivalence and 3-way
-    CT-NI certificate for `qsag_asm_gf256_shamir_mul_gfni` (`N = 25`, `retPc = 117`), refining
-    every output byte against `BinaryTower.towerMul 3` via `Simulates 3` with zero aliasing or
-    wraparound preconditions. -/
-theorem rlib_gf256_shamir_mul_gfni_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice ∧
-      m ∈ parseArArchive x86RlibArchiveBytes ∧
-      ArPayloadOk x86RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_gf256_shamir_mul_gfni"
-        (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) ∧
-      decodeX86Slice slice.code = some gf256MulGfniProg ∧
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false → st.gpr.get 1 = 1#64 →
-        (∃ st24 tr24, execDecodedX86 slice.code 24 st = some (st24, tr24) ∧ st24.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code (25 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 117 ∧ trace.length = 25 ∧
-          st'.ymmDirty = false ∧
-          st'.gpr.get 1 = 0#64 ∧
-          st'.gpr.get 7 = st.gpr.get 7 + 32#64 ∧
-          st'.gpr.get 6 = st.gpr.get 6 + 32#64 ∧
-          st'.gpr.get 2 = st.gpr.get 2 + 32#64 ∧
-          st'.ymm.get 0 = Vec256.zero ∧ st'.ymm.get 1 = Vec256.zero ∧
-          st'.ymm.get 2 = Vec256.zero ∧ st'.ymm.get 14 = Vec256.zero ∧
-          st'.ymm.get 15 = Vec256.zero ∧
-          X86CalleeSavedPreserved st st' ∧
-          (∀ k : Nat, k < 32 →
-            st'.mem (st.gpr.get 7 + BitVec.ofNat 64 k) =
-              gfniTowerMulByte (st.mem (st.gpr.get 6 + BitVec.ofNat 64 k))
-                               (st.mem (st.gpr.get 2 + BitVec.ofNat 64 k)) ∧
-            Simulates 3
-              (towerMul 3 (unpackTower 3 (st.mem (st.gpr.get 6 + BitVec.ofNat 64 k)).toBitVec)
-                          (unpackTower 3 (st.mem (st.gpr.get 2 + BitVec.ofNat 64 k)).toBitVec))
-              (st'.mem (st.gpr.get 7 + BitVec.ofNat 64 k)).toBitVec) ∧
-          (∀ a : BitVec 64, (∀ k : Nat, k < 32 → a ≠ st.gpr.get 7 + BitVec.ofNat 64 k) →
-            st'.mem a = st.mem a) := by
-  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice := by
-      rw [extractRlibFuncBytes_x86_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) = true := by
-      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeX86Slice slice.code = some gf256MulGfniProg := by
-      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni")).bind
-          (fun sl => decodeX86Slice sl.code) = some gf256MulGfniProg := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh hrcx
-    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-      ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-      cf, o, zf, dy, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    have hr1 : r1 = 1#64 := hrcx; subst hr1
-    let st0 : X86BvState :=
-      ⟨0, ⟨r0, 1#64, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-       ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-       cf, o, zf, dy, false, mem⟩
-    obtain ⟨cf', o', zf', hR⟩ := gf256MulGfni_reaches_full 0 (by decide)
-      (UInt64.ofBitVec r0) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3) (UInt64.ofBitVec r4)
-      (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7) (UInt64.ofBitVec r8)
-      (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11) (UInt64.ofBitVec r12)
-      (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
-      y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy (fun a => mem a.toBitVec)
-    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl hR rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    have hAdd32 : ∀ x : BitVec 64, (UInt64.ofBitVec x + UInt64.ofNat 32).toBitVec = x + 32#64 := by
-      intro x; simp [UInt64.toBitVec_add]
-    have hOfNatBv : ∀ (x : BitVec 64) (k : Nat), k < 32 →
-        (UInt64.ofBitVec x + UInt64.ofNat k) = UInt64.ofBitVec (x + BitVec.ofNat 64 k) := by
-      intro x k _
-      apply UInt64.eq_of_toBitVec_eq
-      simp only [UInt64.toBitVec_add]
-      congr 1
-    refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, rfl, hAdd32 r7, hAdd32 r6, hAdd32 r2,
-      rfl, rfl, rfl, rfl, rfl, x86_callee_saved_of_roundtrip, ?_, ?_⟩
-    · intro k hk
-      dsimp only [X86BvState.ofX86State, gf256MulGfniIterMem]
-      simp only [b16get_7, b16get_6, b16get_2]
-      rw [← hOfNatBv r7 k hk, gf256MulGfniStepMem_at _ _ _ _ k hk]
-      have hA : ((UInt64.ofBitVec r6 + UInt64.ofNat k).toBitVec) = r6 + BitVec.ofNat 64 k := by
-        rw [hOfNatBv r6 k hk, u64_roundtrip]
-      have hB : ((UInt64.ofBitVec r2 + UInt64.ofNat k).toBitVec) = r2 + BitVec.ofNat 64 k := by
-        rw [hOfNatBv r2 k hk, u64_roundtrip]
-      rw [hA, hB]
-      exact ⟨rfl, gfniTowerMulByte_simulates_binaryTower _ _⟩
-    · intro a ha
-      dsimp only [X86BvState.ofX86State, gf256MulGfniIterMem]
-      rw [gf256MulGfniStepMem_outside _ _ _ _ (UInt64.ofBitVec a) (fun k hk heq => by
-        rw [hOfNatBv r7 k hk] at heq
-        have hb := congrArg UInt64.toBitVec heq
-        rw [u64_roundtrip, u64_roundtrip] at hb
-        exact ha k hk hb), u64_roundtrip]
-
-/-- Multi-block inductive backward-`JNZ` loop functional equivalence for
-    `qsag_asm_gf256_shamir_mul_gfni`: for every block count `k + 1` (`32 * (k + 1) ≤ 2^64`),
-    execution halts in exact step count `N = 25 + 12 * k` with every byte `idx < 32 * (k + 1)`
-    simulating `BinaryTower.towerMul 3` whenever output `[dst, dst + 32*(k+1))` is disjoint from
-    inputs. -/
-theorem rlib_gf256_shamir_mul_gfni_loop_functional :
-    ∃ slice,
-      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) ∧
-      ∀ (k : Nat), 32 * (k + 1) ≤ 0x10000000000000000 →
-      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
-        st.gpr.get 1 = BitVec.ofNat 64 (k + 1) →
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedX86 slice.code ((25 + 12 * k) + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 117 ∧ trace.length = 25 + 12 * k ∧
-          st'.ymmDirty = false ∧
-          st'.gpr.get 1 = 0#64 ∧
-          st'.gpr.get 7 = st.gpr.get 7 + BitVec.ofNat 64 (32 * (k + 1)) ∧
-          st'.gpr.get 6 = st.gpr.get 6 + BitVec.ofNat 64 (32 * (k + 1)) ∧
-          st'.gpr.get 2 = st.gpr.get 2 + BitVec.ofNat 64 (32 * (k + 1)) ∧
-          X86CalleeSavedPreserved st st' ∧
-          ((∀ i j : Nat, i < 32 * (k + 1) → j < 32 * (k + 1) →
-              st.gpr.get 7 + BitVec.ofNat 64 i ≠ st.gpr.get 6 + BitVec.ofNat 64 j ∧
-              st.gpr.get 7 + BitVec.ofNat 64 i ≠ st.gpr.get 2 + BitVec.ofNat 64 j) →
-            (∀ idx : Nat, idx < 32 * (k + 1) →
-              Simulates 3
-                (towerMul 3 (unpackTower 3 (st.mem (st.gpr.get 6 + BitVec.ofNat 64 idx)).toBitVec)
-                            (unpackTower 3 (st.mem (st.gpr.get 2 + BitVec.ofNat 64 idx)).toBitVec))
-                (st'.mem (st.gpr.get 7 + BitVec.ofNat 64 idx)).toBitVec)) ∧
-          (∀ a : BitVec 64, (∀ idx : Nat, idx < 32 * (k + 1) → a ≠ st.gpr.get 7 + BitVec.ofNat 64 idx) →
-            st'.mem a = st.mem a) := by
-  obtain ⟨slice, _, hExt, _, _, _, hSafe, hDec, _⟩ := rlib_gf256_shamir_mul_gfni_functional_and_ct
-  refine ⟨slice, hExt, hSafe, fun k hk st hpc hh hrcx extra => ?_⟩
-  rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-    ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-    cf, o, zf, dy, hlt, mem⟩
-  dsimp only at hpc hh; subst hpc hh
-  have hr1 : r1 = BitVec.ofNat 64 (k + 1) := hrcx; subst hr1
-  have hr1U : UInt64.ofBitVec (BitVec.ofNat 64 (k + 1)) = UInt64.ofNat (k + 1) := by
-    apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq
-    simp [UInt64.toNat_toBitVec, Nat.mod_eq_of_lt (show k + 1 < 0x10000000000000000 by omega)]
-  let st0 : X86BvState :=
-    ⟨0, ⟨r0, BitVec.ofNat 64 (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-     ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-     cf, o, zf, dy, false, mem⟩
-  obtain ⟨cf', o', zf', hR⟩ := gf256MulGfni_reaches_full k (by omega)
-    (UInt64.ofBitVec r0) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3) (UInt64.ofBitVec r4)
-    (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7) (UInt64.ofBitVec r8)
-    (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11) (UInt64.ofBitVec r12)
-    (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
-    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy (fun a => mem a.toBitVec)
-  have hSt0 : st0.toX86State =
-      ⟨0, ⟨UInt64.ofBitVec r0, UInt64.ofNat (k + 1), UInt64.ofBitVec r2, UInt64.ofBitVec r3,
-           UInt64.ofBitVec r4, UInt64.ofBitVec r5, UInt64.ofBitVec r6, UInt64.ofBitVec r7,
-           UInt64.ofBitVec r8, UInt64.ofBitVec r9, UInt64.ofBitVec r10, UInt64.ofBitVec r11,
-           UInt64.ofBitVec r12, UInt64.ofBitVec r13, UInt64.ofBitVec r14, UInt64.ofBitVec r15⟩,
-       ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
-       cf, o, zf, dy, false, fun a => mem a.toBitVec⟩ := by
-    simp [st0, X86BvState.toX86State, bank16ToU64, hr1U]
-  obtain ⟨_, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec hSt0 hR rfl rfl
-  have hStepN : (24 + 12 * k) + 1 = 25 + 12 * k := by omega
-  obtain ⟨tr, hExec, hL⟩ := hPost extra
-  rw [hStepN] at hExec hL
-  have hOfNatBv : ∀ (x : BitVec 64) (mNat : Nat), mNat ≤ 0x10000000000000000 →
-      (mNat < 0x10000000000000000 ∨ mNat = 0x10000000000000000) →
-      (UInt64.ofBitVec x + UInt64.ofNat mNat).toBitVec = x + BitVec.ofNat 64 mNat := by
-    intro x mNat _ _
-    simp only [UInt64.toBitVec_add]
-    congr 1
-  have hOfNatU : ∀ (x : BitVec 64) (idx : Nat), idx < 32 * (k + 1) →
-      UInt64.ofBitVec (x + BitVec.ofNat 64 idx) = UInt64.ofBitVec x + UInt64.ofNat idx := by
-    intro x idx hidx
-    apply UInt64.eq_of_toBitVec_eq
-    rw [u64_roundtrip, hOfNatBv x idx (by omega) (Or.inl (by omega))]
-  refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, rfl,
-    hOfNatBv r7 (32 * (k + 1)) hk (by omega),
-    hOfNatBv r6 (32 * (k + 1)) hk (by omega),
-    hOfNatBv r2 (32 * (k + 1)) hk (by omega),
-    x86_callee_saved_of_roundtrip, ?_, ?_⟩
-  · intro hDisj idx hidx
-    dsimp only [X86BvState.ofX86State]
-    simp only [b16get_7, b16get_6, b16get_2]
-    rw [hOfNatU r7 idx hidx]
-    rw [gf256MulGfniIterMem_at (k + 1) _ _ _ _ hk
-      (fun i j hi hj heq => by
-        have hb := congrArg UInt64.toBitVec heq
-        rw [hOfNatBv r7 i (by omega) (Or.inl (by omega)),
-            hOfNatBv r6 j (by omega) (Or.inl (by omega))] at hb
-        exact (hDisj i j hi hj).1 hb)
-      (fun i j hi hj heq => by
-        have hb := congrArg UInt64.toBitVec heq
-        rw [hOfNatBv r7 i (by omega) (Or.inl (by omega)),
-            hOfNatBv r2 j (by omega) (Or.inl (by omega))] at hb
-        exact (hDisj i j hi hj).2 hb)
-      idx hidx]
-    rw [hOfNatBv r6 idx (by omega) (Or.inl (by omega)),
-        hOfNatBv r2 idx (by omega) (Or.inl (by omega))]
-    exact gfniTowerMulByte_simulates_binaryTower _ _
-  · intro a ha
-    dsimp only [X86BvState.ofX86State]
-    rw [gf256MulGfniIterMem_outside (k + 1) _ _ _ _ (UInt64.ofBitVec a) hk
-      (fun idx hidx heq => by
-        have hb := congrArg UInt64.toBitVec heq
-        rw [u64_roundtrip, hOfNatBv r7 idx (by omega) (Or.inl (by omega))] at hb
-        exact ha idx hidx hb), u64_roundtrip]
 
 /-! ### §5.4 `qsag_asm_keccak_sha3_neon` (`AArch64` SHA3 NEON `EOR` + `BCAX` 2-Share Keccak $\chi$ Rows 0 & 1) -/
 
@@ -4197,141 +2920,6 @@ theorem keccakNeonOutMem_outside (mem : UInt64 → UInt8) (outPtr s0Ptr s1Ptr a 
     (outPtr + UInt64.ofNat 48) _) (outPtr + UInt64.ofNat 64) _ a = mem a
   rw [hout 64 (by decide), hout 48 (by decide), hout 32 (by decide), hout 16 (by decide)]
   exact writeMem128_outside mem outPtr _ a (fun k hk => ha k (by omega))
-
-/-- End-to-end byte-decoded functional equivalence + 3-way CT-NI certificate for
-    `qsag_asm_keccak_sha3_neon` (`N = 39`, `retPc = 152`), connecting the compiled `AArch64`
-    SHA3 NEON `EOR` + `BCAX` byte slice directly to `Keccak.chiS` (Rows 0 & 1) and bitwise
-    `Keccak.keccakChiBit` (`chiWordBit_eq_keccakChiBit`), with full NEON scratch wiping and zero
-    aliasing/wraparound preconditions. -/
-theorem rlib_keccak_sha3_neon_functional_and_ct :
-    ∃ slice m,
-      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_keccak_sha3_neon" = some slice ∧
-      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
-      ArPayloadOk aarch64RlibArchiveBytes m ∧
-      checkElfFuncThreeWayNI m.payload "qsag_asm_keccak_sha3_neon"
-        (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) = true ∧
-      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) ∧
-      decodeArm64Slice slice.code = some keccakSha3NeonProg ∧
-      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
-        (∃ st38 tr38, execDecodedArm64 slice.code 38 st = some (st38, tr38) ∧ st38.halted = false) ∧
-        ∀ extra : Nat, ∃ st' trace,
-          execDecodedArm64 slice.code (39 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 152 ∧ trace.length = 39 ∧
-          st'.gpr = st.gpr ∧
-          Arm64CalleeSavedPreserved st st' ∧
-          (∀ vIdx : Nat, (vIdx < 8 ∨ (16 ≤ vIdx ∧ vIdx ≤ 20)) → st'.vec.get vIdx = Vec128.zero) ∧
-          (∀ (K : KState),
-            let memU := fun a : UInt64 => st.mem a.toBitVec
-            let memU' := fun a : UInt64 => st'.mem a.toBitVec
-            let outP := UInt64.ofBitVec (st.gpr.get 0)
-            let s0P := UInt64.ofBitVec (st.gpr.get 1)
-            let s1P := UInt64.ofBitVec (st.gpr.get 2)
-            K.a0 = readMem64 memU s0P ^^^ readMem64 memU s1P →
-            K.a1 = readMem64 memU (s0P + 16) ^^^ readMem64 memU (s1P + 16) →
-            K.a2 = readMem64 memU (s0P + 32) ^^^ readMem64 memU (s1P + 32) →
-            K.a3 = readMem64 memU (s0P + 48) ^^^ readMem64 memU (s1P + 48) →
-            K.a4 = readMem64 memU (s0P + 64) ^^^ readMem64 memU (s1P + 64) →
-            K.a5 = readMem64 memU (s0P + 8) ^^^ readMem64 memU (s1P + 8) →
-            K.a6 = readMem64 memU (s0P + 24) ^^^ readMem64 memU (s1P + 24) →
-            K.a7 = readMem64 memU (s0P + 40) ^^^ readMem64 memU (s1P + 40) →
-            K.a8 = readMem64 memU (s0P + 56) ^^^ readMem64 memU (s1P + 56) →
-            K.a9 = readMem64 memU (s0P + 72) ^^^ readMem64 memU (s1P + 72) →
-              readMem64 memU' outP = (chiS K).a0 ∧
-              readMem64 memU' (outP + 16) = (chiS K).a1 ∧
-              readMem64 memU' (outP + 32) = (chiS K).a2 ∧
-              readMem64 memU' (outP + 48) = (chiS K).a3 ∧
-              readMem64 memU' (outP + 64) = (chiS K).a4 ∧
-              readMem64 memU' (outP + 8) = (chiS K).a5 ∧
-              readMem64 memU' (outP + 24) = (chiS K).a6 ∧
-              readMem64 memU' (outP + 40) = (chiS K).a7 ∧
-              readMem64 memU' (outP + 56) = (chiS K).a8 ∧
-              readMem64 memU' (outP + 72) = (chiS K).a9 ∧
-              (∀ bit : Nat, bit < 64 →
-                (readMem64 memU' outP).toBitVec.getLsbD bit =
-                  keccakChiBit (K.a0.toBitVec.getLsbD bit) (K.a1.toBitVec.getLsbD bit) (K.a2.toBitVec.getLsbD bit))) ∧
-          (∀ a : BitVec 64, (∀ k : Nat, k < 80 → a ≠ st.gpr.get 0 + BitVec.ofNat 64 k) →
-            st'.mem a = st.mem a) := by
-  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon") with
-  | none => exfalso; revert hFind; decide +kernel
-  | some slice =>
-    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_keccak_sha3_neon" = some slice := by
-      rw [extractRlibFuncBytes_aarch64_eq, hFind]
-    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) = true := by
-      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon")).map
-          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]))) =
-          some true := by decide +kernel
-      rw [hFind] at hCheck
-      exact Option.some.inj hCheck
-    have hDec : decodeArm64Slice slice.code = some keccakSha3NeonProg := by
-      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon")).bind
-          (fun sl => decodeArm64Slice sl.code) = some keccakSha3NeonProg := by decide +kernel
-      rw [hFind] at hD
-      exact hD
-    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
-      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
-    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
-    intro st hpc hh
-    rcases st with ⟨pc,
-      ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-      ⟨⟨v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15⟩,
-       ⟨v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
-      cf, zf, dit, hlt, mem⟩
-    dsimp only at hpc hh; subst hpc hh
-    let st0 : Arm64BvState :=
-      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
-        ⟨⟨v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15⟩,
-         ⟨v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
-        cf, zf, dit, false, mem⟩
-    have hR := keccakSha3Neon_reaches
-      (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3)
-      (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7)
-      (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11)
-      (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
-      (bank16ToU64 hi) v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15
-      v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31 cf zf dit
-      (fun a => mem a.toBitVec)
-    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl hR rfl rfl
-    refine ⟨hPre, fun extra => ?_⟩
-    obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, ?_⟩
-    · exact congrArg (Bank32.mk _) (bank16_roundtrip hi)
-    · refine ⟨fun r hr1 _ => ?_, fun vIdx hv1 hv2 => ?_⟩
-      · have hNot16 : ¬ r < 16 := by omega
-        simp only [Arm64BvState.ofArm64State, bank32OfU64, bank16_roundtrip, Bank32.get, ite_eq_right hNot16]
-      · match vIdx, hv1, hv2 with
-        | 8, _, _ | 9, _, _ | 10, _, _ | 11, _, _ | 12, _, _ | 13, _, _ | 14, _, _ | 15, _, _ => rfl
-        | n + 16, _, h => exact absurd h (by omega)
-        | 0, h, _ | 1, h, _ | 2, h, _ | 3, h, _ | 4, h, _ | 5, h, _ | 6, h, _ | 7, h, _ => exact absurd h (by omega)
-    · intro vIdx hv
-      rcases hv with hlt8 | ⟨hge16, hle20⟩
-      · match vIdx, hlt8 with
-        | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ => rfl
-        | n + 8, h => exact absurd h (by omega)
-      · match vIdx, hge16, hle20 with
-        | 16, _, _ | 17, _, _ | 18, _, _ | 19, _, _ | 20, _, _ => rfl
-        | n + 21, _, h => exact absurd h (by omega)
-        | 0, h, _ | 1, h, _ | 2, h, _ | 3, h, _ | 4, h, _ | 5, h, _ | 6, h, _ | 7, h, _
-        | 8, h, _ | 9, h, _ | 10, h, _ | 11, h, _ | 12, h, _ | 13, h, _ | 14, h, _ | 15, h, _ =>
-          exact absurd h (by omega)
-    · intro K
-      dsimp only
-      intro ha0 ha1 ha2 ha3 ha4 ha5 ha6 ha7 ha8 ha9
-      obtain ⟨c0, c1, c2, c3, c4, c5, c6, c7, c8, c9⟩ :=
-        keccakNeonOutMem_lanes (fun x => mem x.toBitVec) (UInt64.ofBitVec r0)
-          (UInt64.ofBitVec r1) (UInt64.ofBitVec r2) K ha0 ha1 ha2 ha3 ha4 ha5 ha6 ha7 ha8 ha9
-      refine ⟨c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, fun bit hbit => ?_⟩
-      exact (congrArg (fun w : UInt64 => w.toBitVec.getLsbD bit) c0).trans
-        (chiWordBit_eq_keccakChiBit K.a0 K.a1 K.a2 bit hbit)
-    · intro a ha
-      dsimp only [Arm64BvState.ofArm64State, b32get_0]
-      rw [keccakNeonOutMem_outside _ _ _ _ (UInt64.ofBitVec a) (fun k hk heq => by
-        have hb := congrArg UInt64.toBitVec heq
-        rw [u64_roundtrip] at hb
-        have hOfNat : (UInt64.ofBitVec r0 + UInt64.ofNat k).toBitVec = r0 + BitVec.ofNat 64 k := by
-          simp only [UInt64.toBitVec_add]
-          congr 1
-        rw [hOfNat] at hb
-        exact ha k hk hb), u64_roundtrip]
 
 
 /-! Fresh archive bindings for unchanged AArch64 semantic bodies. -/
@@ -5508,7 +4096,6 @@ theorem current_rlib_goldilocks_dot2_adx_x86_64_functional_and_ct (st : X86BvSta
     · exact mem_roundtrip mem
 
 
-
 /-- Concrete entry state satisfying both execution premises. -/
 theorem current_rlib_goldilocks_pow7_ct_x86_64_inhabited :
     ∃ st : X86BvState, st.pc = 0 ∧ st.halted = false := by
@@ -6389,7 +4976,6 @@ theorem gf256Avx2_convert_r2t (v : Vec256) :
   gf256Avx2_convert_eq _ v gf256Avx2_split_r2t
 
 
-
 def gf256MulAvx2Prog : List (DecodedInstr X86Instr) := [
   ⟨0, 5, .vload true 12 (.baseDisp 8 0)⟩,
   ⟨5, 6, .vload true 13 (.baseDisp 8 32)⟩,
@@ -7003,8 +5589,6 @@ theorem current_gf256_shamir_mul_avx2_loop_functional
     exact gf256MulGfniIterMem_outside (k + 1) mem r7 r6 r2 a hk ha
 
 
-
-
 /-- Concrete static-table bytes, plus unit-valued input and accumulator buffers. -/
 def gf256Avx2WitnessMem (a : UInt64) : UInt8 :=
   if a.toNat < 32 then
@@ -7304,7 +5888,6 @@ private theorem gf256MacAvx2_loop_steps (k : Nat) (hk : k + 1 < 0x10000000000000
     exact ⟨w0,w1,w2,w3,cf',o',zf',hComb⟩
 
 
-
 private theorem gf256MacAvx2_rounds_preserved (j : Nat) (hj : j < 7) :
     progPreservesNonRet (gf256Avx2RoundProg (136+32*j)) gf256MacAvx2Prog = true := by
   match j, hj with
@@ -7468,8 +6051,6 @@ theorem current_gf256_shamir_mac_avx2_loop_functional
     exact gf256MacGfniIterMem_outside (k + 1) mem r7 r6 r2 a hk ha
 
 
-
-
 def gf256MacAvx2WitnessState : X86State :=
   ⟨0, ⟨0, 1, 0, 0, 0, 0, 256, 384, 0, 0, 0, 0, 0, 0, 0, 0⟩,
     Bank16.const Vec256.zero, false, false, false, false, false, gf256Avx2WitnessMem⟩
@@ -7512,7 +6093,6 @@ theorem gf256MacAvx2_overwrite_tooth :
 
 
 end
-
 
 
 section KeccakMpcFreshVerification
@@ -12820,13 +11400,13 @@ def gf128BdozExitObs (outPtr : UInt64) : List StepObs :=
    ⟨148, [], true⟩, ⟨152, [], true⟩, ⟨156, [], true⟩, ⟨160, [], true⟩, ⟨164, [], true⟩,
    ⟨168, [], true⟩, ⟨173, [], true⟩, ⟨175, [], true⟩, ⟨178, [], true⟩, ⟨181, [], true⟩, ⟨183, [], true⟩, ⟨185, [], true⟩, ⟨187, [], true⟩, ⟨189, [], true⟩, ⟨192, [], true⟩, ⟨195, [], true⟩, ⟨198, [], true⟩, ⟨201, [], true⟩, ⟨203, [], true⟩]
 
-def gf128BdozMirRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
-    MirBdozMac × List StepObs :=
+def gf128BdozAsmFfiRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
+    AsmFfiBdozMac × List StepObs :=
   if n = 0 then
     (⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, 0, mem⟩,
      [⟨0, [], true⟩])
   else
-    let loop := runCuts mirVpclmulBodyStep n.toNat ⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, n.toNat, mem⟩
+    let loop := runCuts asmFfiVpclmulBodyStep n.toNat ⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, n.toNat, mem⟩
     let red := poly87Reduce256 loop.1.accLo loop.1.accHi
     ({ loop.1 with mem := writeMem256 mem outP red },
      vpclmulEntryObs ++ loop.2 ++ gf128BdozExitObs outP)
@@ -12968,7 +11548,7 @@ theorem gf128BdozReplay (fetch : Nat → Option (DecodedInstr X86Instr))
     rw [show 17 * (k + 1) + fuel = 17 + (17 * k + fuel) from by omega, ha8]
     rw [gf128BdozBody fetch hf]
     rw [← ha8]
-    rw [ih (v + 1) (vpclmulBodyStep a).1 (mirVpclmulBodyStep m).1 fuel (by omega) hbody.1]
+    rw [ih (v + 1) (vpclmulBodyStep a).1 (asmFfiVpclmulBodyStep m).1 fuel (by omega) hbody.1]
     simp [runCuts, List.append_assoc]
 
 def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
@@ -12976,10 +11556,10 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     (s₀ : X86State) (fuel : Nat) (hpc : s₀.pc = 0) (hh : s₀.halted = false)
     (n : Word) (hcount : s₀.gpr.get 1 = UInt64.ofBitVec n)
     (hfuel : 17 * n.toNat + 35 ≤ fuel) :
-    UnrestrictedLoopCert X86State MirBdozMac n
+    UnrestrictedLoopCert X86State AsmFfiBdozMac n
       (vpclmulGuardedRun fetch fuel)
-      (fun m => gf128BdozMirRun n m.lhsPtr m.rhsPtr m.outPtr m.mem)
-      vpclmulBodyStep mirVpclmulBodyStep
+      (fun m => gf128BdozAsmFfiRun n m.lhsPtr m.rhsPtr m.outPtr m.mem)
+      vpclmulBodyStep asmFfiVpclmulBodyStep
       s₀ ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n.toNat, s₀.mem⟩
       ⟨8, s₀.gpr.set 1 (UInt64.ofNat n.toNat), (s₀.ymm.set 0 Vec256.zero |>.set 1 Vec256.zero),
         s₀.cf, s₀.ofFlag, s₀.zf, true, false, s₀.mem⟩
@@ -12993,7 +11573,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
   zero_cut := by
     intro hz; subst hz
     have hg0 : (s₀.gpr.get 1 == 0) = true := by simp [hcount]
-    dsimp only [vpclmulGuardedRun, gf128BdozMirRun]
+    dsimp only [vpclmulGuardedRun, gf128BdozAsmFfiRun]
     rw [ite_eq_left hg0, ite_eq_left rfl]
     obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
     have hr1 : r1 = 0 := hcount
@@ -13006,7 +11586,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     intro hn hlp hal hml
     have hg0 : ¬ ((s₀.gpr.get 1 == 0) = true) := by
       rw [beq_false_of_ne (hcount ▸ (bv64_ne_zero_iff_u64_ne_zero n).mp hn)]; decide
-    dsimp only [vpclmulGuardedRun, gf128BdozMirRun]
+    dsimp only [vpclmulGuardedRun, gf128BdozAsmFfiRun]
     rw [ite_eq_right hg0, ite_eq_right hn]
     obtain ⟨extra, hextra⟩ : ∃ extra, fuel = 2 + (17 * n.toNat + (33 + extra)) :=
       ⟨fuel - (17 * n.toNat + 35), by omega⟩
@@ -13037,7 +11617,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     dsimp only at hrep ⊢
     rw [hrep]
     rcases hlp with ⟨cfL, oL, zfL, y2L, y3L, y4L, y5L, y6L, y7L, haL, _, _, _⟩
-    let mFinal := (runCuts mirVpclmulBodyStep n.toNat ⟨r6, r2, r7, Vec256.zero, Vec256.zero, n.toNat, m⟩).1
+    let mFinal := (runCuts asmFfiVpclmulBodyStep n.toNat ⟨r6, r2, r7, Vec256.zero, Vec256.zero, n.toNat, m⟩).1
     have ha83 : (runCuts vpclmulBodyStep n.toNat
         ⟨8, (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15).set 1 (UInt64.ofNat n.toNat),
           ((Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).set 0 Vec256.zero
@@ -13050,7 +11630,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
       simpa [mFinal, b16get_2, b16get_6, b16get_7,
         b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7] using haL
     rw [ha83, gf128BdozExit fetch hf]
-    obtain ⟨hacc, _, _⟩ := mirVpclmul_cuts_accum n.toNat r6 r2 r7 Vec256.zero Vec256.zero n.toNat m
+    obtain ⟨hacc, _, _⟩ := asmFfiVpclmul_cuts_accum n.toNat r6 r2 r7 Vec256.zero Vec256.zero n.toNat m
     have hred : poly87Reduce256 mFinal.accLo mFinal.accHi =
         poly87Reduce256 (bdozMacAccum n.toNat m r6 r2 Vec256.zero Vec256.zero).1
           (bdozMacAccum n.toNat m r6 r2 Vec256.zero Vec256.zero).2 := by

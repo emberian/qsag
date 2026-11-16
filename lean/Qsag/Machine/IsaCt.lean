@@ -1,45 +1,17 @@
 module
-/-
-# Qsag.Machine.ElfBinaryVerify — Compiled `.rlib` / `ELF64` Machine-Code Parser, 3-Way Constant-Time NI & ABI Checker
-
-Pure Lean 4.35 binary verification engine (`0 sorry`, `0` custom axioms, `0 native_decide`, `LAW-M1`):
-1. **Parser (`Qsag.ElfParse`):** the `GNU ar` + `ELF64` parser, its subslice theorems and the
-   extraction certificates for both compiled archives live in `Qsag.ElfParse`; this file consumes
-   the normalized slices through `x86_rlib_extracted_slices` / `aarch64_rlib_extracted_slices`.
-2. **§3–§4 (`x86_64` & `AArch64` Machine-Code Decoders + Operational Semantics):** Decodes variable-length
-   `x86_64` (`REX`, `VEX2`/`VEX3`, `0x66`/`0xF3`, `ModRM`/`SIB`, `AVX2`/`GFNI`/`VPCLMULQDQ`/`BMI2`/`ADX`)
-   and fixed-width 32-bit little-endian `AArch64` (`ARMv8.4-A+SHA3+PMULL+DIT`) machine code directly from
-   the compiled `.rlib` `.text` bytes, with explicit classification of forbidden variable-time opcodes.
-3. **§5 (3-Way Hardware Constant-Time Noninterference + ABI Hygiene):** Relational abstract-origin +
-   invariant verifier `checkElfFuncThreeWayNI` with machine-checked soundness theorem
-   `checkElfFuncThreeWayNI_sound` (`PC-NI`, `Mem-NI`, `DOIT-NI`, callee-saved preservation, `vzeroupper`,
-   and scratch vector register zeroization before `ret`), discharged via kernel `decide` across all 16
-   `x86_64` and all 7 `aarch64` symbols (`23` symbols, `1,298` machine instructions), one kernel
-   certificate per historical symbol. The current archive certificates in ElfFixtureVerify additionally cover all 28 live
-   exports (including the five bitslice kernels); CT does not imply functional refinement.
-   Frame refinements specialize the 0x340-byte Keccak frame and its 0x320-byte wipe loop.
-4. **Mutation tests:** Negative checker tests accompany the structural and noninterference
-   proofs. Input-output refinement of selected decoded kernels is in `Qsag.McRefine`.
--/
-
+/- Canonical decoded x86-64 and AArch64 state, instruction, and step semantics.
+Byte decoders and execution share these exact instruction constructors. -/
+public import Qsag.Spec.Refines
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Keccak
 public import Qsag.Math.Gf2Pow128
-public import Qsag.Machine.CompiledRlibFixtures
-public import Qsag.Machine.ElfFixtureSlices
-public import Qsag.Machine.ElfParse
-import all Qsag.Machine.ElfParse
-
 import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
-
 attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
   UInt64.instLawfulOrderOrd Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
-
 set_option autoImplicit false
 set_option maxRecDepth 65536
-
 /-! ## §3. Constant-Depth Register Banks & `x86_64` Machine-Code Decoder + Semantics -/
 
 /-- Flat 16-slot register bank (`O(1)` WHNF depth, zero `Array` bounds proof obligations). -/
@@ -68,13 +40,13 @@ def Bank16.const {α : Type} (v : α) : Bank16 α :=
 def Bank16.ofFn {α : Type} (f : Nat → α) : Bank16 α :=
   ⟨f 0, f 1, f 2, f 3, f 4, f 5, f 6, f 7, f 8, f 9, f 10, f 11, f 12, f 13, f 14, f 15⟩
 
-def Bank16.get {α : Type} (b : Bank16 α) : Nat → α
+@[expose] def Bank16.get {α : Type} (b : Bank16 α) : Nat → α
   | 0  => b.r0  | 1  => b.r1  | 2  => b.r2  | 3  => b.r3
   | 4  => b.r4  | 5  => b.r5  | 6  => b.r6  | 7  => b.r7
   | 8  => b.r8  | 9  => b.r9  | 10 => b.r10 | 11 => b.r11
   | 12 => b.r12 | 13 => b.r13 | 14 => b.r14 | _  => b.r15
 
-def Bank16.set {α : Type} (b : Bank16 α) (idx : Nat) (v : α) : Bank16 α :=
+@[expose] def Bank16.set {α : Type} (b : Bank16 α) (idx : Nat) (v : α) : Bank16 α :=
   match idx with
   | 0  => { b with r0  := v } | 1  => { b with r1  := v }
   | 2  => { b with r2  := v } | 3  => { b with r3  := v }
@@ -103,7 +75,7 @@ def Bank32.const {α : Type} (v : α) : Bank32 α :=
 def Bank32.ofFn {α : Type} (f : Nat → α) : Bank32 α :=
   ⟨Bank16.ofFn f, Bank16.ofFn (fun i => f (i + 16))⟩
 
-def Bank32.get {α : Type} (b : Bank32 α) (idx : Nat) : α :=
+@[expose] def Bank32.get {α : Type} (b : Bank32 α) (idx : Nat) : α :=
   if idx < 16 then b.lo.get idx else b.hi.get (idx - 16)
 
 def Bank32.set {α : Type} (b : Bank32 α) (idx : Nat) (v : α) : Bank32 α :=
@@ -118,7 +90,7 @@ structure Vec128 where
   w1 : UInt64
   deriving DecidableEq, Repr
 
-def Vec128.zero : Vec128 := ⟨0, 0⟩
+@[expose] def Vec128.zero : Vec128 := ⟨0, 0⟩
 
 /-- 256-bit SIMD register (`ymm0..ymm15`). -/
 structure Vec256 where
@@ -128,7 +100,7 @@ structure Vec256 where
   w3 : UInt64
   deriving DecidableEq, Repr
 
-def Vec256.zero : Vec256 := ⟨0, 0, 0, 0⟩
+@[expose] def Vec256.zero : Vec256 := ⟨0, 0, 0, 0⟩
 
 /-- Hardware leakage observation emitted at each executed machine instruction (`§5`). -/
 structure StepObs where
@@ -734,7 +706,7 @@ def decodeX86Loop : Nat → Nat → List UInt8 → List (DecodedInstr X86Instr) 
 
 /-- Decode an entire `.text` symbol byte slice into an `x86_64` instruction stream. -/
 def decodeX86Stream (code : List UInt8) : Option (List (DecodedInstr X86Instr)) :=
-  decodeX86Loop (lenTR code) 0 code []
+  decodeX86Loop (code.length) 0 code []
 
 /-- Concrete `x86_64` machine state (`RAX..R15`, `YMM0..YMM15`, `CF/OF/ZF`, `ymmDirty`, byte memory). -/
 structure X86State where
@@ -794,7 +766,7 @@ def evalX86Addr (s : X86State) (nextPc : Nat) : X86MemAddr → UInt64
     let bVal := match baseOpt with | some b => s.gpr.get b | none => 0
     bVal + (s.gpr.get idx <<< UInt64.ofNat scale) + disp
 
-def maskGprWidth (is64 : Bool) (v : UInt64) : UInt64 :=
+@[expose] def maskGprWidth (is64 : Bool) (v : UInt64) : UInt64 :=
   if is64 then v else v &&& 0xFFFFFFFF
 
 /-- Parity of an 8-bit byte (`GFNI` `VGF2P8AFFINEQB` dot-product helper). -/
@@ -874,7 +846,7 @@ theorem clmul64_one_two : clmul64 1 2 = ⟨2, 0⟩ := by decide +kernel
     and `5` (`NE`, `!ZF`). Every other code reads `SF`, `PF`, or a combination of flags that the
     state does not carry. `decodeX86InstrAt` produces only these four codes for `jcc` and
     `cmovcc`, and `transferX86Instr` rejects any instruction whose code is outside this set. -/
-def x86CondSupported (cc : Nat) : Bool :=
+@[expose] def x86CondSupported (cc : Nat) : Bool :=
   cc == 2 || cc == 3 || cc == 4 || cc == 5
 
 /-- Concrete condition evaluation for the supported codes `{2, 3, 4, 5}`. An unsupported code
@@ -1067,7 +1039,7 @@ def evalVecShift256 (sk : X86VecShiftKind) (v : Vec256) (imm : Nat) : Vec256 :=
 def clampVecWidth (is256 : Bool) (v : Vec256) : Vec256 :=
   if is256 then v else ⟨v.w0, v.w1, 0, 0⟩
 
-def findInstrAtPc {Instr : Type} (pc : Nat) : List (DecodedInstr Instr) → Option (DecodedInstr Instr)
+@[expose] def findInstrAtPc {Instr : Type} (pc : Nat) : List (DecodedInstr Instr) → Option (DecodedInstr Instr)
   | [] => none
   | d :: ds => if d.offset == pc then some d else findInstrAtPc pc ds
 
@@ -1860,6 +1832,482 @@ def runArm64 (prog : List (DecodedInstr Arm64Instr)) : Nat → Arm64State → (A
       let (s', obs) := stepArm64 d s
       let (sFinal, restObs) := runArm64 prog fuel s'
       (sFinal, obs :: restObs)
+
+
+private theorem fin16_elim {P : Nat → Prop} {i : Nat} (hi : i < 16)
+    (h0 : P 0) (h1 : P 1) (h2 : P 2) (h3 : P 3)
+    (h4 : P 4) (h5 : P 5) (h6 : P 6) (h7 : P 7)
+    (h8 : P 8) (h9 : P 9) (h10 : P 10) (h11 : P 11)
+    (h12 : P 12) (h13 : P 13) (h14 : P 14) (h15 : P 15) : P i := by
+  match i with
+  | 0 => exact h0 | 1 => exact h1 | 2 => exact h2 | 3 => exact h3
+  | 4 => exact h4 | 5 => exact h5 | 6 => exact h6 | 7 => exact h7
+  | 8 => exact h8 | 9 => exact h9 | 10 => exact h10 | 11 => exact h11
+  | 12 => exact h12 | 13 => exact h13 | 14 => exact h14 | 15 => exact h15
+  | _ + 16 => exact False.elim (by omega)
+
+theorem Bank16.get_const {α : Type} (v : α) (i : Nat) :
+    (Bank16.const v).get i = v := by
+  match i with
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 => rfl
+  | _ + 15 => rfl
+
+theorem Bank16.get_ofFn {α : Type} (f : Nat → α) {i : Nat} (hi : i < 16) :
+    (Bank16.ofFn f).get i = f i :=
+  fin16_elim (P := fun i => (Bank16.ofFn f).get i = f i)
+    hi rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
+
+theorem Bank16.get_set_eq {α : Type} (b : Bank16 α) (i : Nat) (v : α) :
+    (b.set i v).get i = v := by
+  match i with
+  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 => rfl
+  | _ + 15 => rfl
+
+theorem Bank16.get_set_ne {α : Type} (b : Bank16 α) {i j : Nat} (v : α)
+    (hi : i < 16) (hj : j < 16) (hne : i ≠ j) :
+    (b.set i v).get j = b.get j := by
+  revert hne
+  refine fin16_elim (P := fun i => i ≠ j → (b.set i v).get j = b.get j) hi
+      ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ <;>
+    (refine fin16_elim (P := fun j => _ ≠ j → (b.set _ v).get j = b.get j) hj
+       ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ <;>
+      (intro hne; first | exact absurd rfl hne | rfl))
+
+theorem Bank16.allIdx_get {α : Type} {p : Nat → α → Bool} {b : Bank16 α}
+    (h : b.allIdx p = true) {i : Nat} (hi : i < 16) :
+    p i (b.get i) = true := by
+  unfold Bank16.allIdx at h
+  simp only [Bool.and_eq_true] at h
+  rcases h with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h0, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩,
+    h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩
+  exact fin16_elim (P := fun i => p i (b.get i) = true)
+    hi h0 h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12 h13 h14 h15
+
+theorem Bank32.get_const {α : Type} (v : α) (i : Nat) :
+    (Bank32.const v).get i = v := by
+  unfold Bank32.const Bank32.get
+  split <;> exact Bank16.get_const v _
+
+theorem Bank32.get_ofFn {α : Type} (f : Nat → α) {i : Nat} (hi : i < 32) :
+    (Bank32.ofFn f).get i = f i := by
+  unfold Bank32.ofFn Bank32.get
+  split
+  · rename_i hlt
+    exact Bank16.get_ofFn f hlt
+  · rename_i hge
+    rw [Bank16.get_ofFn (fun k => f (k + 16)) (by omega)]
+    exact congrArg f (by omega)
+
+theorem Bank32.get_set_eq {α : Type} (b : Bank32 α) (i : Nat) (v : α) :
+    (b.set i v).get i = v := by
+  unfold Bank32.set Bank32.get
+  split <;> simp [*, Bank16.get_set_eq]
+
+theorem Bank32.get_set_ne {α : Type} (b : Bank32 α) {i j : Nat} (v : α)
+    (hi : i < 32) (hj : j < 32) (hne : i ≠ j) :
+    (b.set i v).get j = b.get j := by
+  unfold Bank32.set Bank32.get
+  by_cases hi16 : i < 16 <;> by_cases hj16 : j < 16 <;> simp only [hi16, hj16, ↓reduceIte]
+  · exact Bank16.get_set_ne b.lo v hi16 hj16 hne
+  · exact Bank16.get_set_ne b.hi v (by omega) (by omega) (by omega)
+
+theorem Bank32.allIdx_get {α : Type} {p : Nat → α → Bool} {b : Bank32 α}
+    (h : b.allIdx p = true) {i : Nat} (hi : i < 32) :
+    p i (b.get i) = true := by
+  unfold Bank32.allIdx at h
+  rw [Bool.and_eq_true] at h
+  unfold Bank32.get
+  split
+  · rename_i hlt
+    exact Bank16.allIdx_get h.1 hlt
+  · rename_i hge
+    have hHi := Bank16.allIdx_get h.2 (i := i - 16) (by omega)
+    have hEq : i - 16 + 16 = i := by omega
+    simpa only [hEq] using hHi
+
+
+/-! #### Memory Read-Over-Write & Disjointness Lemmas -/
+
+theorem writeMem8_eq (mem : UInt64 → UInt8) (addr : UInt64) (b : UInt8) :
+    writeMem8 mem addr b addr = b := by
+  change (if addr == addr then b else mem addr) = b
+  have h : (addr == addr) = true := by
+    change (addr.toBitVec == addr.toBitVec) = true
+    exact beq_self_eq_true _
+  rw [h]
+  rfl
+
+theorem writeMem8_ne (mem : UInt64 → UInt8) {addr q : UInt64} (b : UInt8) (hne : q ≠ addr) :
+    writeMem8 mem addr b q = mem q := by
+  unfold writeMem8
+  have hbf : (q == addr) = false := beq_false_of_ne hne
+  rw [hbf]
+  rfl
+
+theorem writeMem64_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : UInt64)
+    (hDisj : ∀ j : Nat, j < 8 → q ≠ addr + UInt64.ofNat j) :
+    writeMem64 mem addr v q = mem q := by
+  unfold writeMem64
+  have h0 : q ≠ addr := by simpa using hDisj 0 (by omega)
+  have h1 : q ≠ addr + 1 := hDisj 1 (by omega)
+  have h2 : q ≠ addr + 2 := hDisj 2 (by omega)
+  have h3 : q ≠ addr + 3 := hDisj 3 (by omega)
+  have h4 : q ≠ addr + 4 := hDisj 4 (by omega)
+  have h5 : q ≠ addr + 5 := hDisj 5 (by omega)
+  have h6 : q ≠ addr + 6 := hDisj 6 (by omega)
+  have h7 : q ≠ addr + 7 := hDisj 7 (by omega)
+  simp only [writeMem8_ne _ _ h7, writeMem8_ne _ _ h6, writeMem8_ne _ _ h5, writeMem8_ne _ _ h4,
+    writeMem8_ne _ _ h3, writeMem8_ne _ _ h2, writeMem8_ne _ _ h1, writeMem8_ne _ _ h0]
+
+theorem uint64_eq_of_toNat_eq {a b : UInt64} (h : a.toNat = b.toNat) : a = b :=
+  UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
+
+theorem writeMem128_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : Vec128)
+    (hDisj : ∀ j : Nat, j < 16 → q ≠ addr + UInt64.ofNat j) :
+    writeMem128 mem addr v q = mem q := by
+  unfold writeMem128
+  rw [writeMem64_ne _ _ (fun j hj => by
+        have := hDisj (8 + j) (by omega)
+        have hAdd : addr + 8 + UInt64.ofNat j = addr + UInt64.ofNat (8 + j) := by
+          apply uint64_eq_of_toNat_eq
+          have h8 : (8 : UInt64).toNat = 8 := rfl
+          simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h8, Nat.add_mod_mod, Nat.mod_add_mod]
+          congr 1; omega
+        rwa [hAdd]),
+      writeMem64_ne _ _ (fun j hj => hDisj j (by omega))]
+
+theorem writeMem256_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : Vec256)
+    (hDisj : ∀ j : Nat, j < 32 → q ≠ addr + UInt64.ofNat j) :
+    writeMem256 mem addr v q = mem q := by
+  unfold writeMem256
+  have hOff (base : Nat) (hbase : base + 8 ≤ 32) :
+      ∀ j : Nat, j < 8 → q ≠ addr + UInt64.ofNat base + UInt64.ofNat j := by
+    intro j hj
+    have hEq : addr + UInt64.ofNat base + UInt64.ofNat j = addr + UInt64.ofNat (base + j) := by
+      apply uint64_eq_of_toNat_eq
+      simp only [UInt64.toNat_add, UInt64.toNat_ofNat', Nat.add_mod_mod, Nat.mod_add_mod]
+      congr 1; omega
+    rw [hEq]
+    exact hDisj (base + j) (by omega)
+  have h8 : ∀ j : Nat, j < 8 → q ≠ addr + 8 + UInt64.ofNat j := hOff 8 (by omega)
+  have h16 : ∀ j : Nat, j < 8 → q ≠ addr + 16 + UInt64.ofNat j := hOff 16 (by omega)
+  have h24 : ∀ j : Nat, j < 8 → q ≠ addr + 24 + UInt64.ofNat j := hOff 24 (by omega)
+  rw [writeMem64_ne _ _ h24,
+      writeMem64_ne _ _ h16,
+      writeMem64_ne _ _ h8,
+      writeMem64_ne _ _ (fun j hj => hDisj j (by omega))]
+
+theorem readMem64_congr {m1 m2 : UInt64 → UInt8} {addr : UInt64}
+    (h : ∀ j : Nat, j < 8 → m1 (addr + UInt64.ofNat j) = m2 (addr + UInt64.ofNat j)) :
+    readMem64 m1 addr = readMem64 m2 addr := by
+  have h0 : m1 addr = m2 addr := by simpa using h 0 (by omega)
+  have h1 : m1 (addr + 1) = m2 (addr + 1) := h 1 (by omega)
+  have h2 : m1 (addr + 2) = m2 (addr + 2) := h 2 (by omega)
+  have h3 : m1 (addr + 3) = m2 (addr + 3) := h 3 (by omega)
+  have h4 : m1 (addr + 4) = m2 (addr + 4) := h 4 (by omega)
+  have h5 : m1 (addr + 5) = m2 (addr + 5) := h 5 (by omega)
+  have h6 : m1 (addr + 6) = m2 (addr + 6) := h 6 (by omega)
+  have h7 : m1 (addr + 7) = m2 (addr + 7) := h 7 (by omega)
+  unfold readMem64
+  rw [h0, h1, h2, h3, h4, h5, h6, h7]
+
+theorem addr_off_ne (addr a b : UInt64) (hne : a ≠ b) :
+    addr + a ≠ addr + b := by
+  intro hEq
+  have hSub : (addr + a) - addr = (addr + b) - addr := congrArg (· - addr) hEq
+  have hCancel (x : UInt64) : (addr + x) - addr = x := by
+    apply uint64_eq_of_toNat_eq
+    have hx := x.toNat_lt
+    have hd := addr.toNat_lt
+    have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+    simp only [UInt64.toNat_sub, UInt64.toNat_add, h64]
+    omega
+  rw [hCancel a, hCancel b] at hSub
+  exact hne hSub
+
+theorem addr_ne_add_pos (addr b : UInt64) (hb : (0 : UInt64) ≠ b) :
+    addr ≠ addr + b := by
+  have h0 : addr + 0 = addr := by
+    apply uint64_eq_of_toNat_eq
+    have hd := addr.toNat_lt
+    have hZ : (0 : UInt64).toNat = 0 := rfl
+    have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+    simp only [UInt64.toNat_add, hZ, h64]
+    omega
+  intro hEq
+  exact addr_off_ne addr 0 b hb (h0.trans hEq)
+
+theorem toUInt8_toUInt64_eq_and (w : UInt64) :
+    w.toUInt8.toUInt64 = (w &&& (0xFF : UInt64)) := by
+  apply uint64_eq_of_toNat_eq
+  have h1 : w.toUInt8.toUInt64.toNat = w.toNat % 256 := by
+    change (UInt8.ofNat w.toNat).toNat = w.toNat % 256
+    exact UInt8.toNat_ofNat'
+  have h2 : (w &&& (0xFF : UInt64)).toNat = w.toNat % 256 := by
+    rw [UInt64.toNat_and]
+    change w.toNat &&& (2 ^ 8 - 1) = w.toNat % 256
+    exact Constructive.and_mask w.toNat 8
+  exact h1.trans h2.symm
+
+def checkMaskFFBits : Bool :=
+  (List.range 64).all (fun i => (0xFF : UInt64).toBitVec.getLsbD i == decide (i < 8))
+
+theorem checkMaskFFBits_true : checkMaskFFBits = true := by decide
+
+theorem mask_ff_getLsbD_lt (k : Nat) (hk : k < 64) :
+    (0xFF : UInt64).toBitVec.getLsbD k = decide (k < 8) := by
+  have h := List.all_eq_true.mp checkMaskFFBits_true k (List.mem_range.mpr hk)
+  exact beq_iff_eq.mp h
+
+theorem uint64_shiftRight_getLsbD (v sh : UInt64) (k : Nat) :
+    (v >>> sh).toBitVec.getLsbD k = v.toBitVec.getLsbD (sh.toNat % 64 + k) := by
+  simp only [BitVec.getLsbD, show (v >>> sh).toBitVec.toNat = (v >>> sh).toNat from rfl,
+    show v.toBitVec.toNat = v.toNat from rfl, UInt64.toNat_shiftRight,
+    Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul, ← Nat.pow_add]
+
+theorem byte_slot_getLsbD (v sh : UInt64) (i : Nat) (hi : i < 64) (hsh : sh.toNat ≤ 56) :
+    (((v >>> sh).toUInt8.toUInt64) <<< sh).toBitVec.getLsbD i =
+      if sh.toNat ≤ i ∧ i < sh.toNat + 8 then v.toBitVec.getLsbD i else false := by
+  have hMod : sh.toNat % 64 = sh.toNat := Nat.mod_eq_of_lt (by omega)
+  have h64Nat : (64 : BitVec 64).toNat = 64 := rfl
+  have hShNat : (sh.toBitVec % 64).toNat = sh.toNat := by
+    rw [BitVec.toNat_umod, h64Nat]
+    exact hMod
+  rw [toUInt8_toUInt64_eq_and, UInt64.toBitVec_shiftLeft, BitVec.shiftLeft_eq', hShNat,
+      BitVec.getLsbD_shiftLeft]
+  simp only [hi, decide_true, Bool.true_and, UInt64.toBitVec_and, BitVec.getLsbD_and,
+    uint64_shiftRight_getLsbD, hMod]
+  have hSub64 : i - sh.toNat < 64 := by omega
+  rw [mask_ff_getLsbD_lt (i - sh.toNat) hSub64]
+  if hLow : i < sh.toNat then
+    have hNot : ¬(sh.toNat ≤ i ∧ i < sh.toNat + 8) := by intro h; omega
+    simp only [decide_eq_true hLow, hNot, ↓reduceIte]
+    rfl
+  else if hHigh : i < sh.toNat + 8 then
+    have hSub : i - sh.toNat < 8 := by omega
+    have hYes : sh.toNat ≤ i ∧ i < sh.toNat + 8 := ⟨by omega, hHigh⟩
+    have hAdd : sh.toNat + (i - sh.toNat) = i := by omega
+    simp only [decide_eq_false hLow, decide_eq_true hSub, hYes, and_self, hAdd, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else
+    have hSub : ¬(i - sh.toNat < 8) := by intro h; omega
+    have hNot : ¬(sh.toNat ≤ i ∧ i < sh.toNat + 8) := by intro h; omega
+    simp only [decide_eq_false hLow, decide_eq_false hSub, hNot, ↓reduceIte]
+    cases v.toBitVec.getLsbD (sh.toNat + (i - sh.toNat)) <;> rfl
+
+theorem byte_reassemble_u64 (v : UInt64) :
+    v.toUInt8.toUInt64 |||
+    ((v >>> 8).toUInt8.toUInt64 <<< 8) |||
+    ((v >>> 16).toUInt8.toUInt64 <<< 16) |||
+    ((v >>> 24).toUInt8.toUInt64 <<< 24) |||
+    ((v >>> 32).toUInt8.toUInt64 <<< 32) |||
+    ((v >>> 40).toUInt8.toUInt64 <<< 40) |||
+    ((v >>> 48).toUInt8.toUInt64 <<< 48) |||
+    ((v >>> 56).toUInt8.toUInt64 <<< 56) = v := by
+  apply UInt64.eq_of_toBitVec_eq
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [UInt64.toBitVec_or, BitVec.getLsbD_or]
+  rw [byte_slot_getLsbD v 8 i hi (by decide),
+      byte_slot_getLsbD v 16 i hi (by decide),
+      byte_slot_getLsbD v 24 i hi (by decide),
+      byte_slot_getLsbD v 32 i hi (by decide),
+      byte_slot_getLsbD v 40 i hi (by decide),
+      byte_slot_getLsbD v 48 i hi (by decide),
+      byte_slot_getLsbD v 56 i hi (by decide),
+      toUInt8_toUInt64_eq_and v]
+  simp only [UInt64.toBitVec_and, BitVec.getLsbD_and, mask_ff_getLsbD_lt i hi,
+    show (8 : UInt64).toNat = 8 from rfl, show (16 : UInt64).toNat = 16 from rfl,
+    show (24 : UInt64).toNat = 24 from rfl, show (32 : UInt64).toNat = 32 from rfl,
+    show (40 : UInt64).toNat = 40 from rfl, show (48 : UInt64).toNat = 48 from rfl,
+    show (56 : UInt64).toNat = 56 from rfl]
+  if c0 : i < 8 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_true c0, n1, n2, n3, n4, n5, n6, n7, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c1 : i < 16 then
+    have y1 : 8 ≤ i ∧ i < 16 := by constructor <;> omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, y1, n2, n3, n4, n5, n6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c2 : i < 24 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have y2 : 16 ≤ i ∧ i < 24 := by constructor <;> omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, n1, y2, n3, n4, n5, n6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c3 : i < 32 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have y3 : 24 ≤ i ∧ i < 32 := by constructor <;> omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, n1, n2, y3, n4, n5, n6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c4 : i < 40 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have y4 : 32 ≤ i ∧ i < 40 := by constructor <;> omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, n1, n2, n3, y4, n5, n6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c5 : i < 48 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have y5 : 40 ≤ i ∧ i < 48 := by constructor <;> omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, n1, n2, n3, n4, y5, n6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else if c6 : i < 56 then
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have y6 : 48 ≤ i ∧ i < 56 := by constructor <;> omega
+    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
+    simp only [decide_eq_false c0, n1, n2, n3, n4, n5, y6, n7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+  else
+    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
+    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
+    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
+    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
+    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
+    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
+    have y7 : 56 ≤ i ∧ i < 64 := by constructor <;> omega
+    simp only [decide_eq_false c0, n1, n2, n3, n4, n5, n6, y7, and_self, ↓reduceIte]
+    cases v.toBitVec.getLsbD i <;> rfl
+
+theorem readMem64_writeMem64_self (mem : UInt64 → UInt8) (addr v : UInt64) :
+    readMem64 (writeMem64 mem addr v) addr = v := by
+  let m0 := writeMem8 mem addr v.toUInt8
+  let m1 := writeMem8 m0 (addr + 1) (v >>> 8).toUInt8
+  let m2 := writeMem8 m1 (addr + 2) (v >>> 16).toUInt8
+  let m3 := writeMem8 m2 (addr + 3) (v >>> 24).toUInt8
+  let m4 := writeMem8 m3 (addr + 4) (v >>> 32).toUInt8
+  let m5 := writeMem8 m4 (addr + 5) (v >>> 40).toUInt8
+  let m6 := writeMem8 m5 (addr + 6) (v >>> 48).toUInt8
+  let m7 := writeMem8 m6 (addr + 7) (v >>> 56).toUInt8
+  change readMem64 m7 addr = v
+  have b7 : m7 (addr + 7) = (v >>> 56).toUInt8 := writeMem8_eq _ _ _
+  have b6 : m7 (addr + 6) = (v >>> 48).toUInt8 := by
+    dsimp only [m7, m6]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 6 7 (by decide))]; exact writeMem8_eq _ _ _
+  have b5 : m7 (addr + 5) = (v >>> 40).toUInt8 := by
+    dsimp only [m7, m6, m5]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 5 7 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 5 6 (by decide))]; exact writeMem8_eq _ _ _
+  have b4 : m7 (addr + 4) = (v >>> 32).toUInt8 := by
+    dsimp only [m7, m6, m5, m4]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 4 7 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 4 6 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 4 5 (by decide))]; exact writeMem8_eq _ _ _
+  have b3 : m7 (addr + 3) = (v >>> 24).toUInt8 := by
+    dsimp only [m7, m6, m5, m4, m3]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 3 7 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 3 6 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 3 5 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 3 4 (by decide))]; exact writeMem8_eq _ _ _
+  have b2 : m7 (addr + 2) = (v >>> 16).toUInt8 := by
+    dsimp only [m7, m6, m5, m4, m3, m2]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 2 7 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 2 6 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 2 5 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 2 4 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 2 3 (by decide))]; exact writeMem8_eq _ _ _
+  have b1 : m7 (addr + 1) = (v >>> 8).toUInt8 := by
+    dsimp only [m7, m6, m5, m4, m3, m2, m1]
+    rw [writeMem8_ne _ _ (addr_off_ne addr 1 7 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 1 6 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 1 5 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 1 4 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 1 3 (by decide)),
+        writeMem8_ne _ _ (addr_off_ne addr 1 2 (by decide))]; exact writeMem8_eq _ _ _
+  have b0 : m7 addr = v.toUInt8 := by
+    dsimp only [m7, m6, m5, m4, m3, m2, m1, m0]
+    rw [writeMem8_ne _ _ (addr_ne_add_pos addr 7 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 6 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 5 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 4 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 3 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 2 (by decide)),
+        writeMem8_ne _ _ (addr_ne_add_pos addr 1 (by decide))]; exact writeMem8_eq _ _ _
+  unfold readMem64
+  rw [b0, b1, b2, b3, b4, b5, b6, b7]
+  exact byte_reassemble_u64 v
+
+def checkAlign32MaskBits : Bool :=
+  (List.range 64).all (fun i =>
+    (0xFFFFFFFFFFFFFFE0 : UInt64).toBitVec.getLsbD i == decide (5 ≤ i))
+
+theorem checkAlign32MaskBits_true : checkAlign32MaskBits = true := by decide
+
+theorem align32_eq_shift (x : UInt64) :
+    (x &&& (0xFFFFFFFFFFFFFFE0 : UInt64)) = (x >>> 5) <<< 5 := by
+  apply UInt64.eq_of_toBitVec_eq
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  have h5 : (5 : UInt64).toBitVec % 64 = BitVec.ofNat 64 5 := by decide
+  have hMaskBit : (0xFFFFFFFFFFFFFFE0 : UInt64).toBitVec.getLsbD i = decide (5 ≤ i) :=
+    beq_iff_eq.mp (List.all_eq_true.mp checkAlign32MaskBits_true i (List.mem_range.mpr hi))
+  rw [UInt64.toBitVec_and, BitVec.getLsbD_and, hMaskBit,
+      UInt64.toBitVec_shiftLeft, BitVec.shiftLeft_eq', h5, BitVec.toNat_ofNat]
+  simp only [show 5 % 64 = 5 from rfl, BitVec.getLsbD_shiftLeft, hi, decide_true, Bool.true_and,
+    uint64_shiftRight_getLsbD, show (5 : UInt64).toNat % 64 = 5 from rfl]
+  if hlt : i < 5 then
+    have hge : ¬(5 ≤ i) := by intro h; omega
+    rw [decide_eq_true hlt, decide_eq_false hge]
+    cases x.toBitVec.getLsbD i <;> rfl
+  else
+    have hge : 5 ≤ i := by omega
+    have hAdd : 5 + (i - 5) = i := by omega
+    rw [decide_eq_false hlt, decide_eq_true hge, hAdd]
+    cases x.toBitVec.getLsbD i <;> rfl
+
+theorem align32_toNat (x : UInt64) :
+    (x &&& (0xFFFFFFFFFFFFFFE0 : UInt64)).toNat = (x.toNat / 32) * 32 := by
+  rw [align32_eq_shift]
+  have hlt : (x.toNat / 32) * 32 < 2 ^ 64 := by have := x.toNat_lt; omega
+  simp [UInt64.toNat_shiftLeft, UInt64.toNat_shiftRight, Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow,
+    Nat.mod_eq_of_lt hlt]
+
+theorem uint64_evalAdd_eq (a b : UInt64) :
+    UInt64.ofNat ((a.toNat + b.toNat) % 0x10000000000000000) = a + b := by
+  apply uint64_eq_of_toNat_eq
+  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+  simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h64, Nat.mod_mod]
+
+theorem uint64_evalSub_eq (a b : UInt64) :
+    UInt64.ofNat ((a.toNat + 0x10000000000000000 - b.toNat) % 0x10000000000000000) = a - b := by
+  apply uint64_eq_of_toNat_eq
+  have ha := a.toNat_lt; have hb := b.toNat_lt
+  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+  simp only [UInt64.toNat_sub, UInt64.toNat_ofNat', h64]; omega
+
 
 /-! ## §5. 3-Way Hardware Constant-Time Noninterference & ABI Hygiene Verifier -/
 
@@ -2704,253 +3152,8 @@ def checkArm64ThreeWayNI (code : List UInt8) (c : FuncContract) : Bool :=
       | none => false
       | some inv => verifyArm64Invariant prog c inv
 
-/-- Unified `ELF64` binary symbol 3-Way Constant-Time NI + ABI Hygiene verifier (`EM_X86_64` & `EM_AARCH64`). -/
-def checkElfSliceThreeWayNI (slice : ElfFuncSlice) (c : FuncContract) : Bool :=
-  if slice.machine == elfMachineX86_64 then
-    checkX86ThreeWayNI slice.code c
-  else if slice.machine == elfMachineAArch64 then
-    checkArm64ThreeWayNI slice.code c
-  else
-    false
-
-def checkElfFuncThreeWayNI (elfBytes : Bytes) (symName : String) (c : FuncContract) : Bool :=
-  match extractElfFuncBytes elfBytes symName with
-  | none => false
-  | some slice => checkElfSliceThreeWayNI slice c
-
-/-! ### Exact Contracts & Kernel `decide` Discharges for All 23 Compiled `.rlib` Symbols -/
-
-def mkContract (name : String) (pubGprs : List Nat)
-    (pubMem : List (Nat × Nat) := []) (wipedGprs : List Nat := [])
-    (usesRbp : Bool := false) (outPtr : Nat := 0) (outBytes : Nat := 0)
-    (doitEnabled : Bool := true) : FuncContract :=
-  ⟨name, pubGprs, pubMem, wipedGprs, usesRbp, outPtr, outBytes, doitEnabled⟩
-
-def x86SymbolContracts : List FuncContract := [
-  mkContract "qsag_asm_keccak_f1600_avx2_4x"        [4, 7, 6]       []           []        true 7 0x320,
-  mkContract "qsag_asm_keccak_chi_mpc_avx2"         [4, 7, 6, 2, 1] []           [],
-  mkContract "qsag_asm_gf256_shamir_mul_gfni"       [4, 7, 6, 2, 1] []           [],
-  mkContract "qsag_asm_gf256_shamir_mac_gfni"       [4, 7, 6, 1]    []           [],
-  mkContract "qsag_asm_gf256_shamir_mul_avx2"       [4, 7, 6, 2, 1, 8] [(8, 0x80)] [],
-  mkContract "qsag_asm_gf256_shamir_mac_avx2"       [4, 7, 6, 1, 8] [(8, 0xA0)]  [],
-  mkContract "qsag_asm_tower128_bdoz_mac_vpclmul"   [4, 7, 6, 2, 1] []           [],
-  mkContract "qsag_asm_tower128_bdoz_mac_pclmul"    [4, 7, 6, 2, 1] []           [],
-  mkContract "qsag_asm_goldilocks_mul_ct_x86_64"    [4]             []           [],
-  mkContract "qsag_asm_goldilocks_add_ct_x86_64"    [4]             []           [],
-  mkContract "qsag_asm_goldilocks_sub_ct_x86_64"    [4]             []           [],
-  mkContract "qsag_asm_goldilocks_pow7_ct_x86_64"   [4]             []           [11],
-  mkContract "qsag_asm_goldilocks_dot2_adx_x86_64"  [4]             []           [],
-  mkContract "qsag_asm_ct_eq_32_x86_64"             [4, 7, 6]       []           [1, 2, 8],
-  mkContract "qsag_asm_ct_eq_bytes_x86_64"          [4, 7, 6, 2]    []           [8, 9],
-  mkContract "qsag_asm_ct_memzero_x86_64"           [4, 7, 6]       []           []
-]
-
-def aarch64SymbolContracts : List FuncContract := [
-  mkContract "qsag_asm_enable_dit_aarch64"          [],
-  mkContract "qsag_asm_keccak_sha3_neon"            [0, 1, 2],
-  mkContract "qsag_asm_keccak_theta_rho_sha3_neon"  [0, 1],
-  mkContract "qsag_asm_tower128_bdoz_mac_pmull"     [0, 1, 2, 3],
-  mkContract "qsag_asm_goldilocks_mul_ct_aarch64"   [],
-  mkContract "qsag_asm_ct_eq_32_aarch64"            [0, 1]          []           [2, 3, 4, 5, 6, 7],
-  mkContract "qsag_asm_ct_memzero_aarch64"          [0, 1]
-]
-
- /-- Live archive contracts. Pointer/count inputs are public; loaded data remain secret. -/
-def currentX86SymbolContracts : List FuncContract :=
-  x86SymbolContracts ++ [
-    mkContract "qsag_asm_transpose64x256_avx2" [4, 7],
-    mkContract "qsag_asm_gf2_128_mul_acc_pclmul" [4, 7, 6, 2, 1],
-    mkContract "qsag_asm_gf2_128_mul_acc_vpclmul" [4, 7, 6, 2, 1]]
-
-def currentAarch64SymbolContracts : List FuncContract :=
-  aarch64SymbolContracts ++ [
-    mkContract "qsag_asm_transpose64x256_neon" [0],
-    mkContract "qsag_asm_gf2_128_mul_acc_pmull" [0, 1, 2, 3]]
-
-def verifySliceContractList : List ElfFuncSlice → List FuncContract → Bool
-  | [], [] => true
-  | s :: ss, c :: cs =>
-    (s.name == c.symName) && checkElfSliceThreeWayNI s c && verifySliceContractList ss cs
-  | _, _ => false
-
-def verifyAllRlibContracts (rlib : Bytes) (contracts : List FuncContract) : Bool :=
-  verifySliceContractList (extractAllRlibFuncs rlib) contracts
-
-/-! ### Mutation / Negative Teeth (`#tooth` Equivalents on Real & Mutated Machine-Code Streams) -/
-
-def patchBytesAt (bs : List UInt8) (off : Nat) (patch : List UInt8) : List UInt8 :=
-  takeTR off bs ++ patch ++ bs.drop (off + patch.length)
-
-def findSliceByNameBytes (slices : List ElfFuncSlice) (target : List UInt8) : Option ElfFuncSlice :=
-  slices.find? (fun s => s.nameBytes == target)
-
-/-- **Negative Tooth 1 (`mutant_secret_branch_rejected`):**
-    A conditional jump (`74 01` = `je +1`) after `sub rax, rsi` (`48 89 f8; 48 29 f0`) on secret
-    Goldilocks field inputs `(rdi, rsi)` is immediately rejected (`false`) by `checkX86ThreeWayNI`. -/
-theorem mutant_secret_branch_rejected :
-    checkX86ThreeWayNI
-      [0x48, 0x89, 0xF8, 0x48, 0x29, 0xF0, 0x74, 0x01, 0x90, 0xC3]
-      (mkContract "mutant_secret_branch" [4]) = false := by
-  decide +kernel
-
-/-- REX.B changes opcode 90 into an exchange, never a no-op. -/
-theorem rex_b_exchange_not_nop : decodeX86InstrAt 0 [0x41, 0x90] = none := by
-  decide +kernel
-
-/-- Unsupported partial writes cannot be treated as full-register zeroization. -/
-theorem partial_write_xor_rejected :
-    decodeX86InstrAt 0 [0x66, 0x31, 0xFF] = none := by decide +kernel
-
-/-- Signed/overflow conditions require flags absent from the current model. -/
-theorem x86_overflow_branch_rejected :
-    decodeX86InstrAt 0 [0x70, 0x00] = none := by decide +kernel
-
-theorem arm_signed_branch_rejected :
-    decodeArm64Word 0 0x5400000B = none := by decide +kernel
-
-/-- Unsigned/equality conditions remain supported. -/
-theorem arm_equal_branch_supported :
-    decodeArm64Word 0 0x54000000 = some (.bCond 0 0) := by decide +kernel
-
-/-- SP-using instructions are rejected until SP has a distinct state component. -/
-theorem arm_stack_pointer_add_rejected :
-    decodeArm64Word 0 0x910003E0 = none := by decide +kernel
-
-theorem arm_stack_pointer_load_rejected :
-    decodeArm64Word 0 0x3DC003E0 = none := by decide +kernel
-
-/-- Register 31 is still accepted where the architecture means XZR. -/
-theorem arm_zero_register_supported :
-    decodeArm64Word 0 0xAA1F03E0 = some (.aluReg .orr true 0 31 31 0 0) := by
-  decide +kernel
-
-/-- Rotating a public register cannot make the incoming secret zero flag public. -/
-theorem mutant_rotate_secret_zero_flag_rejected :
-    checkX86ThreeWayNI [0x48, 0xC1, 0xC7, 0x01, 0x74, 0x01, 0x90, 0xC3]
-      (mkContract "rotate_secret_flag" [4, 7]) = false := by
-  decide +kernel
-
-/-- **Negative Tooth 2 (`mutant_secret_lut_rejected`):**
-    A secret-indexed memory table lookup `movzx eax, byte ptr [rdi + rsi*1]` (`0f b6 04 37; c3`)
-    with public table base `rdi` and secret index `rsi` is immediately rejected (`false`). -/
-theorem mutant_secret_lut_rejected :
-    checkX86ThreeWayNI
-      [0x0F, 0xB6, 0x04, 0x37, 0xC3]
-      (mkContract "mutant_secret_lut" [4, 7]) = false := by
-  decide +kernel
-
-/-- **Negative Tooth 3 (`mutant_variable_shift_rejected`):**
-    Both `x86_64` variable shift `shl rax, cl` (`48 d3 e0; c3`) and `AArch64` variable shift
-    `lslv x0, x0, x1` (`0x9AC12000; ret`) violate `DOIT-NI` and are immediately rejected (`false`). -/
-theorem mutant_variable_shift_rejected :
-    checkX86ThreeWayNI [0x48, 0xD3, 0xE0, 0xC3] (mkContract "mutant_shl_cl" [4]) = false ∧
-    checkArm64ThreeWayNI
-      [0x00, 0x20, 0xC1, 0x9A, 0xC0, 0x03, 0x5F, 0xD6]
-      (mkContract "mutant_lslv" []) = false := by
-  decide +kernel
-
-/-- **Negative Tooth 4 (`mutant_udiv_rejected`):**
-    Both `x86_64` hardware division `div rsi` (`48 f7 f6; c3`) and `AArch64` `udiv x0, x0, x1`
-    (`0x9AC10800; ret`) violate `DOIT-NI` and are immediately rejected (`false`). -/
-theorem mutant_udiv_rejected :
-    checkX86ThreeWayNI [0x48, 0xF7, 0xF6, 0xC3] (mkContract "mutant_div" [4]) = false ∧
-    checkArm64ThreeWayNI
-      [0x00, 0x08, 0xC1, 0x9A, 0xC0, 0x03, 0x5F, 0xD6]
-      (mkContract "mutant_udiv" []) = false := by
-  decide +kernel
 
 /-! ### §5b. Deductive Soundness Proofs (`checkElfFuncThreeWayNI_sound`) & Inhabitedness Witnesses -/
-
-private theorem fin16_elim {P : Nat → Prop} {i : Nat} (hi : i < 16)
-    (h0 : P 0) (h1 : P 1) (h2 : P 2) (h3 : P 3)
-    (h4 : P 4) (h5 : P 5) (h6 : P 6) (h7 : P 7)
-    (h8 : P 8) (h9 : P 9) (h10 : P 10) (h11 : P 11)
-    (h12 : P 12) (h13 : P 13) (h14 : P 14) (h15 : P 15) : P i := by
-  match i with
-  | 0 => exact h0 | 1 => exact h1 | 2 => exact h2 | 3 => exact h3
-  | 4 => exact h4 | 5 => exact h5 | 6 => exact h6 | 7 => exact h7
-  | 8 => exact h8 | 9 => exact h9 | 10 => exact h10 | 11 => exact h11
-  | 12 => exact h12 | 13 => exact h13 | 14 => exact h14 | 15 => exact h15
-  | _ + 16 => exact False.elim (by omega)
-
-theorem Bank16.get_const {α : Type} (v : α) (i : Nat) :
-    (Bank16.const v).get i = v := by
-  match i with
-  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 => rfl
-  | _ + 15 => rfl
-
-theorem Bank16.get_ofFn {α : Type} (f : Nat → α) {i : Nat} (hi : i < 16) :
-    (Bank16.ofFn f).get i = f i :=
-  fin16_elim (P := fun i => (Bank16.ofFn f).get i = f i)
-    hi rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl rfl
-
-theorem Bank16.get_set_eq {α : Type} (b : Bank16 α) (i : Nat) (v : α) :
-    (b.set i v).get i = v := by
-  match i with
-  | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 => rfl
-  | _ + 15 => rfl
-
-theorem Bank16.get_set_ne {α : Type} (b : Bank16 α) {i j : Nat} (v : α)
-    (hi : i < 16) (hj : j < 16) (hne : i ≠ j) :
-    (b.set i v).get j = b.get j := by
-  revert hne
-  refine fin16_elim (P := fun i => i ≠ j → (b.set i v).get j = b.get j) hi
-      ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ <;>
-    (refine fin16_elim (P := fun j => _ ≠ j → (b.set _ v).get j = b.get j) hj
-       ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ <;>
-      (intro hne; first | exact absurd rfl hne | rfl))
-
-theorem Bank16.allIdx_get {α : Type} {p : Nat → α → Bool} {b : Bank16 α}
-    (h : b.allIdx p = true) {i : Nat} (hi : i < 16) :
-    p i (b.get i) = true := by
-  unfold Bank16.allIdx at h
-  simp only [Bool.and_eq_true] at h
-  rcases h with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h0, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩,
-    h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩, h14⟩, h15⟩
-  exact fin16_elim (P := fun i => p i (b.get i) = true)
-    hi h0 h1 h2 h3 h4 h5 h6 h7 h8 h9 h10 h11 h12 h13 h14 h15
-
-theorem Bank32.get_const {α : Type} (v : α) (i : Nat) :
-    (Bank32.const v).get i = v := by
-  unfold Bank32.const Bank32.get
-  split <;> exact Bank16.get_const v _
-
-theorem Bank32.get_ofFn {α : Type} (f : Nat → α) {i : Nat} (hi : i < 32) :
-    (Bank32.ofFn f).get i = f i := by
-  unfold Bank32.ofFn Bank32.get
-  split
-  · rename_i hlt
-    exact Bank16.get_ofFn f hlt
-  · rename_i hge
-    rw [Bank16.get_ofFn (fun k => f (k + 16)) (by omega)]
-    exact congrArg f (by omega)
-
-theorem Bank32.get_set_eq {α : Type} (b : Bank32 α) (i : Nat) (v : α) :
-    (b.set i v).get i = v := by
-  unfold Bank32.set Bank32.get
-  split <;> simp [*, Bank16.get_set_eq]
-
-theorem Bank32.get_set_ne {α : Type} (b : Bank32 α) {i j : Nat} (v : α)
-    (hi : i < 32) (hj : j < 32) (hne : i ≠ j) :
-    (b.set i v).get j = b.get j := by
-  unfold Bank32.set Bank32.get
-  by_cases hi16 : i < 16 <;> by_cases hj16 : j < 16 <;> simp only [hi16, hj16, ↓reduceIte]
-  · exact Bank16.get_set_ne b.lo v hi16 hj16 hne
-  · exact Bank16.get_set_ne b.hi v (by omega) (by omega) (by omega)
-
-theorem Bank32.allIdx_get {α : Type} {p : Nat → α → Bool} {b : Bank32 α}
-    (h : b.allIdx p = true) {i : Nat} (hi : i < 32) :
-    p i (b.get i) = true := by
-  unfold Bank32.allIdx at h
-  rw [Bool.and_eq_true] at h
-  unfold Bank32.get
-  split
-  · rename_i hlt
-    exact Bank16.allIdx_get h.1 hlt
-  · rename_i hge
-    have hHi := Bank16.allIdx_get h.2 (i := i - 16) (by omega)
-    have hEq : i - 16 + 16 = i := by omega
-    simpa only [hEq] using hHi
 
 theorem PcMap.empty_get {α : Type} (pc : Nat) :
     (PcMap.empty : PcMap α).get pc = none := by
@@ -3043,388 +3246,6 @@ theorem buildProgMap_get_eq {Instr : Type} (prog : List (DecodedInstr Instr))
     · have hbeq : (d.offset == pc) = false := beq_false_of_ne heq
       rw [PcMap.get_set_ne _ _ hpc heq, hbeq]
       simp [ih]
-
-/-! #### Memory Read-Over-Write & Disjointness Lemmas -/
-
-theorem writeMem8_eq (mem : UInt64 → UInt8) (addr : UInt64) (b : UInt8) :
-    writeMem8 mem addr b addr = b := by
-  change (if addr == addr then b else mem addr) = b
-  have h : (addr == addr) = true := by
-    change (addr.toBitVec == addr.toBitVec) = true
-    exact beq_self_eq_true _
-  rw [h]
-  rfl
-
-theorem writeMem8_ne (mem : UInt64 → UInt8) {addr q : UInt64} (b : UInt8) (hne : q ≠ addr) :
-    writeMem8 mem addr b q = mem q := by
-  unfold writeMem8
-  have hbf : (q == addr) = false := beq_false_of_ne hne
-  rw [hbf]
-  rfl
-
-theorem writeMem64_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : UInt64)
-    (hDisj : ∀ j : Nat, j < 8 → q ≠ addr + UInt64.ofNat j) :
-    writeMem64 mem addr v q = mem q := by
-  unfold writeMem64
-  have h0 : q ≠ addr := by simpa using hDisj 0 (by omega)
-  have h1 : q ≠ addr + 1 := hDisj 1 (by omega)
-  have h2 : q ≠ addr + 2 := hDisj 2 (by omega)
-  have h3 : q ≠ addr + 3 := hDisj 3 (by omega)
-  have h4 : q ≠ addr + 4 := hDisj 4 (by omega)
-  have h5 : q ≠ addr + 5 := hDisj 5 (by omega)
-  have h6 : q ≠ addr + 6 := hDisj 6 (by omega)
-  have h7 : q ≠ addr + 7 := hDisj 7 (by omega)
-  simp only [writeMem8_ne _ _ h7, writeMem8_ne _ _ h6, writeMem8_ne _ _ h5, writeMem8_ne _ _ h4,
-    writeMem8_ne _ _ h3, writeMem8_ne _ _ h2, writeMem8_ne _ _ h1, writeMem8_ne _ _ h0]
-
-private theorem uint64_eq_of_toNat_eq {a b : UInt64} (h : a.toNat = b.toNat) : a = b :=
-  UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
-
-theorem writeMem128_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : Vec128)
-    (hDisj : ∀ j : Nat, j < 16 → q ≠ addr + UInt64.ofNat j) :
-    writeMem128 mem addr v q = mem q := by
-  unfold writeMem128
-  rw [writeMem64_ne _ _ (fun j hj => by
-        have := hDisj (8 + j) (by omega)
-        have hAdd : addr + 8 + UInt64.ofNat j = addr + UInt64.ofNat (8 + j) := by
-          apply uint64_eq_of_toNat_eq
-          have h8 : (8 : UInt64).toNat = 8 := rfl
-          simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h8, Nat.add_mod_mod, Nat.mod_add_mod]
-          congr 1; omega
-        rwa [hAdd]),
-      writeMem64_ne _ _ (fun j hj => hDisj j (by omega))]
-
-theorem writeMem256_ne (mem : UInt64 → UInt8) {addr q : UInt64} (v : Vec256)
-    (hDisj : ∀ j : Nat, j < 32 → q ≠ addr + UInt64.ofNat j) :
-    writeMem256 mem addr v q = mem q := by
-  unfold writeMem256
-  have hOff (base : Nat) (hbase : base + 8 ≤ 32) :
-      ∀ j : Nat, j < 8 → q ≠ addr + UInt64.ofNat base + UInt64.ofNat j := by
-    intro j hj
-    have hEq : addr + UInt64.ofNat base + UInt64.ofNat j = addr + UInt64.ofNat (base + j) := by
-      apply uint64_eq_of_toNat_eq
-      simp only [UInt64.toNat_add, UInt64.toNat_ofNat', Nat.add_mod_mod, Nat.mod_add_mod]
-      congr 1; omega
-    rw [hEq]
-    exact hDisj (base + j) (by omega)
-  have h8 : ∀ j : Nat, j < 8 → q ≠ addr + 8 + UInt64.ofNat j := hOff 8 (by omega)
-  have h16 : ∀ j : Nat, j < 8 → q ≠ addr + 16 + UInt64.ofNat j := hOff 16 (by omega)
-  have h24 : ∀ j : Nat, j < 8 → q ≠ addr + 24 + UInt64.ofNat j := hOff 24 (by omega)
-  rw [writeMem64_ne _ _ h24,
-      writeMem64_ne _ _ h16,
-      writeMem64_ne _ _ h8,
-      writeMem64_ne _ _ (fun j hj => hDisj j (by omega))]
-
-theorem readMem64_congr {m1 m2 : UInt64 → UInt8} {addr : UInt64}
-    (h : ∀ j : Nat, j < 8 → m1 (addr + UInt64.ofNat j) = m2 (addr + UInt64.ofNat j)) :
-    readMem64 m1 addr = readMem64 m2 addr := by
-  have h0 : m1 addr = m2 addr := by simpa using h 0 (by omega)
-  have h1 : m1 (addr + 1) = m2 (addr + 1) := h 1 (by omega)
-  have h2 : m1 (addr + 2) = m2 (addr + 2) := h 2 (by omega)
-  have h3 : m1 (addr + 3) = m2 (addr + 3) := h 3 (by omega)
-  have h4 : m1 (addr + 4) = m2 (addr + 4) := h 4 (by omega)
-  have h5 : m1 (addr + 5) = m2 (addr + 5) := h 5 (by omega)
-  have h6 : m1 (addr + 6) = m2 (addr + 6) := h 6 (by omega)
-  have h7 : m1 (addr + 7) = m2 (addr + 7) := h 7 (by omega)
-  unfold readMem64
-  rw [h0, h1, h2, h3, h4, h5, h6, h7]
-
-private theorem addr_off_ne (addr a b : UInt64) (hne : a ≠ b) :
-    addr + a ≠ addr + b := by
-  intro hEq
-  have hSub : (addr + a) - addr = (addr + b) - addr := congrArg (· - addr) hEq
-  have hCancel (x : UInt64) : (addr + x) - addr = x := by
-    apply uint64_eq_of_toNat_eq
-    have hx := x.toNat_lt
-    have hd := addr.toNat_lt
-    have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
-    simp only [UInt64.toNat_sub, UInt64.toNat_add, h64]
-    omega
-  rw [hCancel a, hCancel b] at hSub
-  exact hne hSub
-
-private theorem addr_ne_add_pos (addr b : UInt64) (hb : (0 : UInt64) ≠ b) :
-    addr ≠ addr + b := by
-  have h0 : addr + 0 = addr := by
-    apply uint64_eq_of_toNat_eq
-    have hd := addr.toNat_lt
-    have hZ : (0 : UInt64).toNat = 0 := rfl
-    have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
-    simp only [UInt64.toNat_add, hZ, h64]
-    omega
-  intro hEq
-  exact addr_off_ne addr 0 b hb (h0.trans hEq)
-
-private theorem toUInt8_toUInt64_eq_and (w : UInt64) :
-    w.toUInt8.toUInt64 = (w &&& (0xFF : UInt64)) := by
-  apply uint64_eq_of_toNat_eq
-  have h1 : w.toUInt8.toUInt64.toNat = w.toNat % 256 := by
-    change (UInt8.ofNat w.toNat).toNat = w.toNat % 256
-    exact UInt8.toNat_ofNat'
-  have h2 : (w &&& (0xFF : UInt64)).toNat = w.toNat % 256 := by
-    rw [UInt64.toNat_and]
-    change w.toNat &&& (2 ^ 8 - 1) = w.toNat % 256
-    exact Constructive.and_mask w.toNat 8
-  exact h1.trans h2.symm
-
-private def checkMaskFFBits : Bool :=
-  (List.range 64).all (fun i => (0xFF : UInt64).toBitVec.getLsbD i == decide (i < 8))
-
-private theorem checkMaskFFBits_true : checkMaskFFBits = true := by decide
-
-private theorem mask_ff_getLsbD_lt (k : Nat) (hk : k < 64) :
-    (0xFF : UInt64).toBitVec.getLsbD k = decide (k < 8) := by
-  have h := List.all_eq_true.mp checkMaskFFBits_true k (List.mem_range.mpr hk)
-  exact beq_iff_eq.mp h
-
-private theorem uint64_shiftRight_getLsbD (v sh : UInt64) (k : Nat) :
-    (v >>> sh).toBitVec.getLsbD k = v.toBitVec.getLsbD (sh.toNat % 64 + k) := by
-  simp only [BitVec.getLsbD, show (v >>> sh).toBitVec.toNat = (v >>> sh).toNat from rfl,
-    show v.toBitVec.toNat = v.toNat from rfl, UInt64.toNat_shiftRight,
-    Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.div_div_eq_div_mul, ← Nat.pow_add]
-
-private theorem byte_slot_getLsbD (v sh : UInt64) (i : Nat) (hi : i < 64) (hsh : sh.toNat ≤ 56) :
-    (((v >>> sh).toUInt8.toUInt64) <<< sh).toBitVec.getLsbD i =
-      if sh.toNat ≤ i ∧ i < sh.toNat + 8 then v.toBitVec.getLsbD i else false := by
-  have hMod : sh.toNat % 64 = sh.toNat := Nat.mod_eq_of_lt (by omega)
-  have h64Nat : (64 : BitVec 64).toNat = 64 := rfl
-  have hShNat : (sh.toBitVec % 64).toNat = sh.toNat := by
-    rw [BitVec.toNat_umod, h64Nat]
-    exact hMod
-  rw [toUInt8_toUInt64_eq_and, UInt64.toBitVec_shiftLeft, BitVec.shiftLeft_eq', hShNat,
-      BitVec.getLsbD_shiftLeft]
-  simp only [hi, decide_true, Bool.true_and, UInt64.toBitVec_and, BitVec.getLsbD_and,
-    uint64_shiftRight_getLsbD, hMod]
-  have hSub64 : i - sh.toNat < 64 := by omega
-  rw [mask_ff_getLsbD_lt (i - sh.toNat) hSub64]
-  if hLow : i < sh.toNat then
-    have hNot : ¬(sh.toNat ≤ i ∧ i < sh.toNat + 8) := by intro h; omega
-    simp only [decide_eq_true hLow, hNot, ↓reduceIte]
-    rfl
-  else if hHigh : i < sh.toNat + 8 then
-    have hSub : i - sh.toNat < 8 := by omega
-    have hYes : sh.toNat ≤ i ∧ i < sh.toNat + 8 := ⟨by omega, hHigh⟩
-    have hAdd : sh.toNat + (i - sh.toNat) = i := by omega
-    simp only [decide_eq_false hLow, decide_eq_true hSub, hYes, and_self, hAdd, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else
-    have hSub : ¬(i - sh.toNat < 8) := by intro h; omega
-    have hNot : ¬(sh.toNat ≤ i ∧ i < sh.toNat + 8) := by intro h; omega
-    simp only [decide_eq_false hLow, decide_eq_false hSub, hNot, ↓reduceIte]
-    cases v.toBitVec.getLsbD (sh.toNat + (i - sh.toNat)) <;> rfl
-
-private theorem byte_reassemble_u64 (v : UInt64) :
-    v.toUInt8.toUInt64 |||
-    ((v >>> 8).toUInt8.toUInt64 <<< 8) |||
-    ((v >>> 16).toUInt8.toUInt64 <<< 16) |||
-    ((v >>> 24).toUInt8.toUInt64 <<< 24) |||
-    ((v >>> 32).toUInt8.toUInt64 <<< 32) |||
-    ((v >>> 40).toUInt8.toUInt64 <<< 40) |||
-    ((v >>> 48).toUInt8.toUInt64 <<< 48) |||
-    ((v >>> 56).toUInt8.toUInt64 <<< 56) = v := by
-  apply UInt64.eq_of_toBitVec_eq
-  apply BitVec.eq_of_getLsbD_eq
-  intro i hi
-  simp only [UInt64.toBitVec_or, BitVec.getLsbD_or]
-  rw [byte_slot_getLsbD v 8 i hi (by decide),
-      byte_slot_getLsbD v 16 i hi (by decide),
-      byte_slot_getLsbD v 24 i hi (by decide),
-      byte_slot_getLsbD v 32 i hi (by decide),
-      byte_slot_getLsbD v 40 i hi (by decide),
-      byte_slot_getLsbD v 48 i hi (by decide),
-      byte_slot_getLsbD v 56 i hi (by decide),
-      toUInt8_toUInt64_eq_and v]
-  simp only [UInt64.toBitVec_and, BitVec.getLsbD_and, mask_ff_getLsbD_lt i hi,
-    show (8 : UInt64).toNat = 8 from rfl, show (16 : UInt64).toNat = 16 from rfl,
-    show (24 : UInt64).toNat = 24 from rfl, show (32 : UInt64).toNat = 32 from rfl,
-    show (40 : UInt64).toNat = 40 from rfl, show (48 : UInt64).toNat = 48 from rfl,
-    show (56 : UInt64).toNat = 56 from rfl]
-  if c0 : i < 8 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_true c0, n1, n2, n3, n4, n5, n6, n7, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c1 : i < 16 then
-    have y1 : 8 ≤ i ∧ i < 16 := by constructor <;> omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, y1, n2, n3, n4, n5, n6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c2 : i < 24 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have y2 : 16 ≤ i ∧ i < 24 := by constructor <;> omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, n1, y2, n3, n4, n5, n6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c3 : i < 32 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have y3 : 24 ≤ i ∧ i < 32 := by constructor <;> omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, n1, n2, y3, n4, n5, n6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c4 : i < 40 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have y4 : 32 ≤ i ∧ i < 40 := by constructor <;> omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, n1, n2, n3, y4, n5, n6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c5 : i < 48 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have y5 : 40 ≤ i ∧ i < 48 := by constructor <;> omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, n1, n2, n3, n4, y5, n6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else if c6 : i < 56 then
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have y6 : 48 ≤ i ∧ i < 56 := by constructor <;> omega
-    have n7 : ¬(56 ≤ i ∧ i < 64) := by intro h; omega
-    simp only [decide_eq_false c0, n1, n2, n3, n4, n5, y6, n7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-  else
-    have n1 : ¬(8 ≤ i ∧ i < 16) := by intro h; omega
-    have n2 : ¬(16 ≤ i ∧ i < 24) := by intro h; omega
-    have n3 : ¬(24 ≤ i ∧ i < 32) := by intro h; omega
-    have n4 : ¬(32 ≤ i ∧ i < 40) := by intro h; omega
-    have n5 : ¬(40 ≤ i ∧ i < 48) := by intro h; omega
-    have n6 : ¬(48 ≤ i ∧ i < 56) := by intro h; omega
-    have y7 : 56 ≤ i ∧ i < 64 := by constructor <;> omega
-    simp only [decide_eq_false c0, n1, n2, n3, n4, n5, n6, y7, and_self, ↓reduceIte]
-    cases v.toBitVec.getLsbD i <;> rfl
-
-theorem readMem64_writeMem64_self (mem : UInt64 → UInt8) (addr v : UInt64) :
-    readMem64 (writeMem64 mem addr v) addr = v := by
-  let m0 := writeMem8 mem addr v.toUInt8
-  let m1 := writeMem8 m0 (addr + 1) (v >>> 8).toUInt8
-  let m2 := writeMem8 m1 (addr + 2) (v >>> 16).toUInt8
-  let m3 := writeMem8 m2 (addr + 3) (v >>> 24).toUInt8
-  let m4 := writeMem8 m3 (addr + 4) (v >>> 32).toUInt8
-  let m5 := writeMem8 m4 (addr + 5) (v >>> 40).toUInt8
-  let m6 := writeMem8 m5 (addr + 6) (v >>> 48).toUInt8
-  let m7 := writeMem8 m6 (addr + 7) (v >>> 56).toUInt8
-  change readMem64 m7 addr = v
-  have b7 : m7 (addr + 7) = (v >>> 56).toUInt8 := writeMem8_eq _ _ _
-  have b6 : m7 (addr + 6) = (v >>> 48).toUInt8 := by
-    dsimp only [m7, m6]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 6 7 (by decide))]; exact writeMem8_eq _ _ _
-  have b5 : m7 (addr + 5) = (v >>> 40).toUInt8 := by
-    dsimp only [m7, m6, m5]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 5 7 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 5 6 (by decide))]; exact writeMem8_eq _ _ _
-  have b4 : m7 (addr + 4) = (v >>> 32).toUInt8 := by
-    dsimp only [m7, m6, m5, m4]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 4 7 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 4 6 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 4 5 (by decide))]; exact writeMem8_eq _ _ _
-  have b3 : m7 (addr + 3) = (v >>> 24).toUInt8 := by
-    dsimp only [m7, m6, m5, m4, m3]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 3 7 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 3 6 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 3 5 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 3 4 (by decide))]; exact writeMem8_eq _ _ _
-  have b2 : m7 (addr + 2) = (v >>> 16).toUInt8 := by
-    dsimp only [m7, m6, m5, m4, m3, m2]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 2 7 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 2 6 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 2 5 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 2 4 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 2 3 (by decide))]; exact writeMem8_eq _ _ _
-  have b1 : m7 (addr + 1) = (v >>> 8).toUInt8 := by
-    dsimp only [m7, m6, m5, m4, m3, m2, m1]
-    rw [writeMem8_ne _ _ (addr_off_ne addr 1 7 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 1 6 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 1 5 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 1 4 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 1 3 (by decide)),
-        writeMem8_ne _ _ (addr_off_ne addr 1 2 (by decide))]; exact writeMem8_eq _ _ _
-  have b0 : m7 addr = v.toUInt8 := by
-    dsimp only [m7, m6, m5, m4, m3, m2, m1, m0]
-    rw [writeMem8_ne _ _ (addr_ne_add_pos addr 7 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 6 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 5 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 4 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 3 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 2 (by decide)),
-        writeMem8_ne _ _ (addr_ne_add_pos addr 1 (by decide))]; exact writeMem8_eq _ _ _
-  unfold readMem64
-  rw [b0, b1, b2, b3, b4, b5, b6, b7]
-  exact byte_reassemble_u64 v
-
-private def checkAlign32MaskBits : Bool :=
-  (List.range 64).all (fun i =>
-    (0xFFFFFFFFFFFFFFE0 : UInt64).toBitVec.getLsbD i == decide (5 ≤ i))
-
-private theorem checkAlign32MaskBits_true : checkAlign32MaskBits = true := by decide
-
-private theorem align32_eq_shift (x : UInt64) :
-    (x &&& (0xFFFFFFFFFFFFFFE0 : UInt64)) = (x >>> 5) <<< 5 := by
-  apply UInt64.eq_of_toBitVec_eq
-  apply BitVec.eq_of_getLsbD_eq
-  intro i hi
-  have h5 : (5 : UInt64).toBitVec % 64 = BitVec.ofNat 64 5 := by decide
-  have hMaskBit : (0xFFFFFFFFFFFFFFE0 : UInt64).toBitVec.getLsbD i = decide (5 ≤ i) :=
-    beq_iff_eq.mp (List.all_eq_true.mp checkAlign32MaskBits_true i (List.mem_range.mpr hi))
-  rw [UInt64.toBitVec_and, BitVec.getLsbD_and, hMaskBit,
-      UInt64.toBitVec_shiftLeft, BitVec.shiftLeft_eq', h5, BitVec.toNat_ofNat]
-  simp only [show 5 % 64 = 5 from rfl, BitVec.getLsbD_shiftLeft, hi, decide_true, Bool.true_and,
-    uint64_shiftRight_getLsbD, show (5 : UInt64).toNat % 64 = 5 from rfl]
-  if hlt : i < 5 then
-    have hge : ¬(5 ≤ i) := by intro h; omega
-    rw [decide_eq_true hlt, decide_eq_false hge]
-    cases x.toBitVec.getLsbD i <;> rfl
-  else
-    have hge : 5 ≤ i := by omega
-    have hAdd : 5 + (i - 5) = i := by omega
-    rw [decide_eq_false hlt, decide_eq_true hge, hAdd]
-    cases x.toBitVec.getLsbD i <;> rfl
-
-private theorem align32_toNat (x : UInt64) :
-    (x &&& (0xFFFFFFFFFFFFFFE0 : UInt64)).toNat = (x.toNat / 32) * 32 := by
-  rw [align32_eq_shift]
-  have hlt : (x.toNat / 32) * 32 < 2 ^ 64 := by have := x.toNat_lt; omega
-  simp [UInt64.toNat_shiftLeft, UInt64.toNat_shiftRight, Nat.shiftLeft_eq, Nat.shiftRight_eq_div_pow,
-    Nat.mod_eq_of_lt hlt]
-
-private theorem uint64_evalAdd_eq (a b : UInt64) :
-    UInt64.ofNat ((a.toNat + b.toNat) % 0x10000000000000000) = a + b := by
-  apply uint64_eq_of_toNat_eq
-  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
-  simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h64, Nat.mod_mod]
-
-private theorem uint64_evalSub_eq (a b : UInt64) :
-    UInt64.ofNat ((a.toNat + 0x10000000000000000 - b.toNat) % 0x10000000000000000) = a - b := by
-  apply uint64_eq_of_toNat_eq
-  have ha := a.toNat_lt; have hb := b.toNat_lt
-  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
-  simp only [UInt64.toNat_sub, UInt64.toNat_ofNat', h64]; omega
 
 /-! #### `x86_64` & `AArch64` Relational Contracts, Hygiene Postconditions & Inhabitedness Witnesses -/
 
@@ -6265,60 +6086,6 @@ theorem checkArm64ThreeWayNI_sound {code : List UInt8} {c : FuncContract}
           have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
           exact ⟨d0 :: ds, rfl, runArm64_invariant_sound hAll fuel hInvS1 hRel0⟩
 
-/-- Unified 3-Way Constant-Time NI + ABI Hygiene semantic postcondition for an `ELF64` `.text` slice. -/
-def ElfSliceThreeWayNISafe (slice : ElfFuncSlice) (c : FuncContract) : Prop :=
-  (slice.machine = elfMachineX86_64 ∧
-   ∀ (s₁ s₂ : X86State), X86ContractInit c s₁ s₂ → ∀ (fuel : Nat),
-     ∃ prog : List (DecodedInstr X86Instr),
-       decodeX86Stream slice.code = some prog ∧
-       let (s₁f, tr₁) := runX86 prog fuel s₁
-       let (s₂f, tr₂) := runX86 prog fuel s₂
-       tr₁ = tr₂ ∧
-       (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
-       ((s₁f.halted = true ∧ s₂f.halted = true ∧ X86ExitHygiene c s₁ s₂ s₁f s₂f) ∨
-        (s₁f.halted = false ∧ s₂f.halted = false))) ∨
-  (slice.machine = elfMachineAArch64 ∧
-   ∀ (s₁ s₂ : Arm64State), Arm64ContractInit c s₁ s₂ → ∀ (fuel : Nat),
-     ∃ prog : List (DecodedInstr Arm64Instr),
-       decodeArm64Stream slice.code = some prog ∧
-       let (s₁f, tr₁) := runArm64 prog fuel s₁
-       let (s₂f, tr₂) := runArm64 prog fuel s₂
-       tr₁ = tr₂ ∧
-       (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
-       ((s₁f.halted = true ∧ s₂f.halted = true ∧ Arm64ExitHygiene c s₁ s₂ s₁f s₂f) ∨
-        (s₁f.halted = false ∧ s₂f.halted = false)))
-
-theorem checkElfSliceThreeWayNI_sound {slice : ElfFuncSlice} {c : FuncContract}
-    (hCheck : checkElfSliceThreeWayNI slice c = true) :
-    ElfSliceThreeWayNISafe slice c := by
-  unfold checkElfSliceThreeWayNI at hCheck
-  by_cases hx : slice.machine == elfMachineX86_64
-  · simp only [hx, ↓reduceIte] at hCheck
-    exact Or.inl ⟨beq_iff_eq.mp hx, fun _ _ hInit fuel => checkX86ThreeWayNI_sound hCheck hInit fuel⟩
-  · simp only [hx, Bool.false_eq_true, ↓reduceIte] at hCheck
-    by_cases ha : slice.machine == elfMachineAArch64
-    · simp only [ha, ↓reduceIte] at hCheck
-      exact Or.inr ⟨beq_iff_eq.mp ha, fun _ _ hInit fuel => checkArm64ThreeWayNI_sound hCheck hInit fuel⟩
-    · simp [ha] at hCheck
-
-/-- **Master `ELF64` Binary 3-Way Constant-Time NI + ABI Hygiene Soundness Theorem (`§5`):**
-    If `checkElfFuncThreeWayNI elfBytes symName c = true`, then `symName` resolves inside `elfBytes`
-    to a valid `.text` subslice `slice` (`extractElfFuncBytes_in_text_section`) whose decoded
-    machine-code semantics satisfies `PC-NI`, `Mem-NI`, `DOIT-NI`, callee-saved preservation, and
-    epilogue scratch register zeroization (`ElfSliceThreeWayNISafe slice c`)! -/
-theorem checkElfFuncThreeWayNI_sound {elfBytes : Bytes} {symName : String} {c : FuncContract}
-    (hCheck : checkElfFuncThreeWayNI elfBytes symName c = true) :
-    ∃ slice : ElfFuncSlice,
-      extractElfFuncBytes elfBytes symName = some slice ∧
-      ElfSliceOk elfBytes slice ∧
-      ElfSliceThreeWayNISafe slice c := by
-  unfold checkElfFuncThreeWayNI at hCheck
-  cases hExt : extractElfFuncBytes elfBytes symName with
-  | none => simp [hExt] at hCheck
-  | some slice =>
-    simp only [hExt] at hCheck
-    exact ⟨slice, rfl, extractElfFuncBytes_in_text_section elfBytes symName slice hExt,
-      checkElfSliceThreeWayNI_sound hCheck⟩
 
 /-! ### Certificate-checked verification: the invariant is supplied, never inferred in the kernel -/
 
@@ -6399,306 +6166,6 @@ theorem checkArm64WithInv_sound {code : List UInt8} {c : FuncContract} {inv : Pc
         have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
         exact ⟨d0 :: ds, rfl, runArm64_invariant_sound hAll fuel hInvS1 hRel0⟩
 
-/-- An invariant certificate for one symbol. -/
-inductive InvCert where
-  | x86 (inv : PcMap X86AbsState)
-  | arm (inv : PcMap Arm64AbsState)
-
-/-- Architecture-dispatching certificate check for one slice. -/
-def checkElfSliceWithCert (slice : ElfFuncSlice) (c : FuncContract) : InvCert → Bool
-  | .x86 inv => slice.machine == elfMachineX86_64 && checkX86WithInv slice.code c inv
-  | .arm inv => slice.machine == elfMachineAArch64 && checkArm64WithInv slice.code c inv
-
-theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {cert : InvCert}
-    (hCheck : checkElfSliceWithCert slice c cert = true) :
-    ElfSliceThreeWayNISafe slice c := by
-  cases cert with
-  | x86 inv =>
-    simp only [checkElfSliceWithCert, Bool.and_eq_true, beq_iff_eq] at hCheck
-    exact Or.inl ⟨hCheck.1, fun _ _ hInit fuel => checkX86WithInv_sound hCheck.2 hInit fuel⟩
-  | arm inv =>
-    simp only [checkElfSliceWithCert, Bool.and_eq_true, beq_iff_eq] at hCheck
-    exact Or.inr ⟨hCheck.1, fun _ _ hInit fuel => checkArm64WithInv_sound hCheck.2 hInit fuel⟩
-
-/-- The check for the `i`-th slice against the `i`-th contract and the `i`-th certificate. -/
-def certSliceAt (slices : List ElfFuncSlice) (contracts : List FuncContract)
-    (certs : List InvCert) (i : Nat) : Bool :=
-  match slices[i]?, contracts[i]?, certs[i]? with
-  | some s, some c, some k => (s.name == c.symName) && checkElfSliceWithCert s c k
-  | _, _, _ => false
-
-/-- Per-index certificate checks give the name match and the semantic postcondition at every index. -/
-theorem certSliceAt_sound {slices : List ElfFuncSlice} {contracts : List FuncContract}
-    {certs : List InvCert}
-    (hAt : ∀ i, i < slices.length → certSliceAt slices contracts certs i = true)
-    (i : Nat) (hs : i < slices.length) (hc : i < contracts.length) :
-    slices[i].name = contracts[i].symName ∧ ElfSliceThreeWayNISafe slices[i] contracts[i] := by
-  have h := hAt i hs
-  unfold certSliceAt at h
-  rw [List.getElem?_eq_getElem hs, List.getElem?_eq_getElem hc] at h
-  cases hk : certs[i]? with
-  | none => rw [hk] at h; cases h
-  | some k =>
-    rw [hk] at h
-    simp only [Bool.and_eq_true, beq_iff_eq] at h
-    exact ⟨h.1, checkElfSliceWithCert_sound h.2⟩
-
-/-- An empty certificate proves nothing: the entry state is missing. -/
-theorem empty_certificate_rejected (code : List UInt8) (c : FuncContract) :
-    checkX86WithInv code c PcMap.empty = false := by
-  unfold checkX86WithInv
-  cases decodeX86Stream code with
-  | none => rfl
-  | some prog =>
-    cases prog with
-    | nil => rfl
-    | cons d ds => rfl
-
-/-! Semantic anchors. The baseless address distinction follows `Ea.base` /
-`Ea.index` in jyh/x86lean (`X86/Syntax.lean`, Apache-2.0). UBFM's
-nonwrapping extraction and wrapping insertion follow the ASL-derived
-`exec_bitfield` in leanprover/LNSym (`Arm/Insts/DPI/Bitfield.lean`,
-Amazon.com, Inc. or its affiliates, Apache-2.0). These are local anchors,
-not a claim that either upstream repository was imported or proved equivalent.
--/
-theorem tooth_sib_absolute_decode :
-    decodeX86ModRM [0x04, 0x25, 0xff, 0xff, 0xff, 0xff] 0 0 0 =
-      some (0, .mem (.absDisp 0xffffffffffffffff), 6) := by decide +kernel
-
-theorem tooth_sib_absolute_independent (s t : X86State) (pc : Nat) (d : UInt32) :
-    evalX86Addr s pc (.absDisp (signExt32To64 d)) = signExt32To64 d ∧
-    evalX86Addr s pc (.absDisp (signExt32To64 d)) =
-      evalX86Addr t pc (.absDisp (signExt32To64 d)) := ⟨rfl, rfl⟩
-
-theorem tooth_ubfm_extract (s : Arm64State) :
-    (stepArm64 ⟨0, 4, .ubfm true 0 1 4 7⟩ s).1.gpr.get 0 =
-      ((s.gpr.get 1 >>> 4) &&& 15) := by rfl
-
-theorem tooth_ubfm_insert (s : Arm64State) :
-    (stepArm64 ⟨0, 4, .ubfm true 0 1 12 3⟩ s).1.gpr.get 0 =
-      ((s.gpr.get 1 &&& 15) <<< 52) := by rfl
-
-theorem tooth_ubfm_illegal_n : decodeArm64Word 0 0xD3001C20 = none := by decide +kernel
-
-theorem tooth_dit_sensitive_mul (s : Arm64State) :
-    (stepArm64 ⟨0, 4, .mulOp false 2 0 1⟩ s).2.isDoitSafe = s.dit := by rfl
-
-theorem tooth_msr_dit_clears (s : Arm64State) :
-    (stepArm64 ⟨0, 4, .msrDit 0⟩ s).1.dit = false := by rfl
-
-theorem tooth_dit_disabled_rejected (c : FuncContract) (st : Arm64AbsState) :
-    transferArm64Instr c ⟨0, 4, .mulOp false 2 0 1⟩ { st with dit := false } = none := by rfl
-
-/-- `#tooth`: without the `DOITM` assumption in the contract, `cmovcc` (here `cmove rax, rcx`) is
-    rejected in every abstract state, whatever the publicity of its condition and operands. -/
-theorem tooth_x86_cmovcc_rejected_without_doit (c : FuncContract) (st : X86AbsState) :
-    transferX86Instr { c with doitEnabled := false } ⟨0, 4, .cmovcc 4 true 0 1⟩ st = none := by rfl
-
-/-- With the `DOITM` assumption the same instruction is accepted. -/
-theorem x86_cmovcc_accepted_with_doit (c : FuncContract) (st : X86AbsState) :
-    (transferX86Instr { c with doitEnabled := true } ⟨0, 4, .cmovcc 4 true 0 1⟩ st).isSome =
-      true := by rfl
-
-/-- `#tooth`: a `cmovcc` whose condition code is outside `{2, 3, 4, 5}` (here `cmovo`, code `0`)
-    is rejected under every contract and abstract state. -/
-theorem tooth_x86_cmovcc_unsupported_cc_rejected (c : FuncContract) (st : X86AbsState) :
-    transferX86Instr c ⟨0, 4, .cmovcc 0 true 0 1⟩ st = none := by rfl
-
-/-- `#tooth`: a `jcc` whose condition code is outside `{2, 3, 4, 5}` (here `jo`, code `0`; also
-    `js`, code `8`) is rejected under every contract and abstract state, including states in which
-    every tracked flag is public. -/
-theorem tooth_x86_jcc_unsupported_cc_rejected (c : FuncContract) (st : X86AbsState) :
-    transferX86Instr c ⟨0, 2, .jcc 0 0⟩ st = none ∧
-    transferX86Instr c ⟨0, 2, .jcc 8 0⟩ { st with cfPub := true, zfPub := true, ofPub := true } =
-      none := ⟨by rfl, by rfl⟩
-
-/-- Signed-multiply flags. `(-1) * 2 = -2` fits in 64 bits, so `CF` is clear although the unsigned
-    product exceeds `2^64`; `2^62 * 2 = 2^63` does not fit in a signed 64-bit word, so `CF` is set
-    although the unsigned product is below `2^64`. -/
-theorem evalX86Alu_imul2_signed_overflow :
-    evalX86Alu .imul2 true 0xFFFFFFFFFFFFFFFF 2 false = (0xFFFFFFFFFFFFFFFE, false, false) ∧
-    evalX86Alu .imul2 true 0x4000000000000000 2 false = (0x8000000000000000, true, false) := by
-  decide +kernel
-
-/-- `#tooth`: the unsigned-overflow reading (`an * bn ≥ 2^64`) disagrees with the signed flag on
-    both vectors of `evalX86Alu_imul2_signed_overflow`. -/
-theorem tooth_imul2_flag_is_not_unsigned_overflow :
-    imulSignedOverflow (2 ^ 64) 0xFFFFFFFFFFFFFFFF 2 ≠
-      decide (0xFFFFFFFFFFFFFFFF * 2 ≥ 2 ^ 64) ∧
-    imulSignedOverflow (2 ^ 64) 0x4000000000000000 2 ≠
-      decide (0x4000000000000000 * 2 ≥ 2 ^ 64) := by
-  decide +kernel
-
-/-- Two-operand `imul` writes the same value to `CF` and `OF`. -/
-theorem stepX86_imul2_cf_eq_of (is64 : Bool) (dst src : Nat) (s : X86State) :
-    (stepX86 ⟨0, 4, .aluRegReg .imul2 is64 dst src⟩ s).1.cf =
-      (stepX86 ⟨0, 4, .aluRegReg .imul2 is64 dst src⟩ s).1.ofFlag := by rfl
-
-/-- One-operand `mul` / `imul` writes the same value to `CF` and `OF`. -/
-theorem stepX86_mulOneOp_cf_eq_of (isSigned is64 : Bool) (src : Nat) (s : X86State) :
-    (stepX86 ⟨0, 3, .mulOneOp isSigned is64 src⟩ s).1.cf =
-      (stepX86 ⟨0, 3, .mulOneOp isSigned is64 src⟩ s).1.ofFlag := by rfl
-
-/-- One-operand multiply vectors on the helper level: unsigned `0xFFFFFFFF * 2` at 32 bits has a
-    nonzero upper half (`EDX = 1`), while the signed reading `(-1) * 2 = -2` does not overflow. -/
-theorem mulOneOp_32bit_flag_vectors :
-    (0xFFFFFFFF * 2) / 0x100000000 = 1 ∧
-    imulSignedOverflow 0x100000000 0xFFFFFFFF 2 = false ∧
-    imulSignedOverflow 0x100000000 0x40000000 2 = true := by
-  decide +kernel
-
-/-- Immediate arithmetic right shift (`C1 /7`, `D1 /7`) decodes and replicates the sign bit at
-    both widths; the 32-bit form zero-extends its result. -/
-theorem x86_sar_decodes_and_sign_extends :
-    decodeX86InstrAt 0 [0x48, 0xc1, 0xf8, 0x01] = some ⟨0, 4, .shiftImm .sar true 0 1⟩ ∧
-    decodeX86InstrAt 0 [0x48, 0xd1, 0xf8] = some ⟨0, 3, .shiftImm .sar true 0 1⟩ ∧
-    evalX86Shift .sar true 0x8000000000000001 1 false true false =
-      (0xC000000000000000, true, false, false) ∧
-    evalX86Shift .sar true 0x4000000000000000 4 false false false =
-      (0x0400000000000000, false, false, false) ∧
-    evalX86Shift .sar false 0xFFFFFFFF80000000 31 false false false =
-      (0xFFFFFFFF, false, false, false) ∧
-    evalX86Shift .sar true 1 1 false false false = (0, true, false, true) := by decide +kernel
-
-/-- `#tooth`: arithmetic and logical right shift disagree on a negative operand. -/
-theorem tooth_x86_sar_is_not_shr :
-    (evalX86Shift .sar true 0x8000000000000001 1 false false false).1 ≠
-      (evalX86Shift .shr true 0x8000000000000001 1 false false false).1 := by decide +kernel
-
-/-- Every shift/rotate forgets CF/OF publicity, including zero counts. This conservative
-    transfer prevents subsequent carry/overflow consumers from treating secret flags as public. -/
-theorem x86_shift_flag_taint (c : FuncContract) (st : X86AbsState)
-    (sk : X86ShiftKind) (is64 : Bool) (dst cnt : Nat) (hdst : dst < 16) :
-    (transferX86Instr c ⟨0, 4, .shiftImm sk is64 dst cnt⟩ st).map
-      (fun xs => xs.map (fun x => (x.2.cfPub, x.2.ofPub))) = some [(false, false)] := by
-  simp [transferX86Instr, x86InstrRegsValid, hdst]
-
-/-- Effective count zero preserves all tracked flags. -/
-theorem x86_shift_zero_flags (s : X86State) (sk : X86ShiftKind) (is64 : Bool) (dst : Nat) :
-    let t := (stepX86 ⟨0, 4, .shiftImm sk is64 dst 0⟩ s).1
-    t.cf = s.cf ∧ t.ofFlag = s.ofFlag ∧ t.zf = s.zf := by
-  cases is64 <;> cases sk <;> simp [stepX86, evalX86Shift]
-
-/-- Executed one-operand multiply: the unsigned high half and signed sign extension differ. -/
-theorem x86_mulOneOp_executed_vectors :
-    let s : X86State := ⟨0, ((Bank16.const 0).set 0 0xffffffff).set 1 2,
-      Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
-    let u := (stepX86 ⟨0, 3, .mulOneOp false false 1⟩ s).1
-    let i := (stepX86 ⟨0, 3, .mulOneOp true false 1⟩ s).1
-    u.gpr.get 0 = 0xfffffffe ∧ u.gpr.get 2 = 1 ∧ u.cf = true ∧ u.ofFlag = true ∧
-    i.gpr.get 0 = 0xfffffffe ∧ i.gpr.get 2 = 0xffffffff ∧ i.cf = false ∧ i.ofFlag = false := by
-  decide +kernel
-
-/-- A carry branch after a multiply or shift of secret input is rejected. -/
-theorem tooth_x86_secret_arithmetic_flags_rejected :
-    checkX86ThreeWayNI [0x48, 0x0f, 0xaf, 0xc1, 0x72, 0x00, 0xc3]
-      (mkContract "imul_flags" [4]) = false ∧
-    checkX86ThreeWayNI [0x48, 0xf7, 0xe1, 0x72, 0x00, 0xc3]
-      (mkContract "mul_flags" [4]) = false ∧
-    checkX86ThreeWayNI [0x48, 0xc1, 0xe0, 0x01, 0x72, 0x00, 0xc3]
-      (mkContract "shift_flags" [4]) = false := by
-  decide +kernel
-
-/-- Rotations preserve ZF taint even when their register operand is public. -/
-theorem x86_rotate_preserves_zf_taint (c : FuncContract) (st : X86AbsState)
-    (is64 : Bool) (dst cnt : Nat) (hdst : dst < 16) :
-    (transferX86Instr c ⟨0, 4, .shiftImm .ror is64 dst cnt⟩ st).map
-      (fun xs => xs.map (fun x => x.2.zfPub)) = some [st.zfPub] := by
-  simp [transferX86Instr, x86InstrRegsValid, hdst, x86ShiftPreservesZf]
-
-/-- A public rotate does not erase secret ZF from an earlier operation. -/
-theorem tooth_x86_rotate_cannot_launder_secret_zf :
-    checkX86ThreeWayNI
-      [0x48, 0x83, 0xc0, 0x01, 0x48, 0xc1, 0xc9, 0x01, 0x74, 0x00, 0xc3]
-      (mkContract "rotate_zf" [4, 1]) = false := by decide +kernel
-
-/-- `#tooth`: `xor r8d, r8d; inc rax; adox r8, r9; mov rcx, [rdi + r8*8]; ret` (`45 31 c0; 48 ff c0;
-    f3 4d 0f 38 f6 c1; 4a 8b 0c c7; c3`) leaks the signed overflow of secret `rax` (`0` vs
-    `0x7fffffffffffffff`) into the memory load address (`rdi` vs `rdi + 8`) and is rejected (`false`)
-    by `checkX86ThreeWayNI`. -/
-theorem tooth_x86_inc_adox_secret_overflow_rejected :
-    let code : List UInt8 :=
-      [0x45, 0x31, 0xC0, 0x48, 0xFF, 0xC0, 0xF3, 0x4D, 0x0F, 0x38, 0xF6, 0xC1,
-       0x4A, 0x8B, 0x0C, 0xC7, 0xC3]
-    checkX86ThreeWayNI code (mkContract "inc_adox_leak" [4, 7, 8, 9]) = false ∧
-    (match decodeX86Stream code with
-     | none => false
-     | some prog =>
-       let mkS (rax : UInt64) : X86State :=
-         ⟨0, ((Bank16.const 0).set 7 0x1000).set 0 rax, Bank16.const Vec256.zero,
-          false, false, false, false, false, fun _ => 0⟩
-       (runX86 prog 8 (mkS 0)).2 != (runX86 prog 8 (mkS 0x7FFFFFFFFFFFFFFF)).2) = true := by
-  decide +kernel
-
-/-- `#tooth`: 32-bit `cmove eax, ecx` (`0f 44 c1`) zero-extends `eax` into `rax` even when `ZF = 0`
-    (condition false), clearing bits `63:32` of `rax` exactly per Intel SDM. -/
-theorem tooth_x86_cmovcc_32bit_untaken_zero_extends :
-    let s : X86State :=
-      ⟨0, ((Bank16.const 0).set 0 0xDEADBEEF12345678).set 1 0x99999999,
-       Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
-    (stepX86 ⟨0, 3, .cmovcc 4 false 0 1⟩ s).1.gpr.get 0 = 0x0000000012345678 := by
-  decide +kernel
-
-/-! #### Decoder and semantics regressions: shifts, `sf`, prefixes, vector width, frame wipe, DIT -/
-
-/-- `ASR` (shift kind `2`) replicates the operand's sign bit at both widths, `ROR` (kind `3`)
-    rotates, and the two differ on the same input. -/
-theorem arm64_asr_is_arithmetic :
-    applyArmShift true 0x8000000000000000 2 4 = 0xF800000000000000 ∧
-    applyArmShift true 0x4000000000000000 2 4 = 0x0400000000000000 ∧
-    applyArmShift false 0x80000000 2 4 = 0xF8000000 ∧
-    applyArmShift false 0xFFFFFFFF40000000 2 4 = 0x04000000 ∧
-    applyArmShift true 1 2 1 = 0 ∧
-    applyArmShift true 1 3 1 = 0x8000000000000000 := by decide +kernel
-
-/-- `#tooth`: a shift-kind-`2` operand is no longer the rotation the decoder used to compute. -/
-theorem tooth_arm64_asr_differs_from_ror :
-    applyArmShift true 1 2 1 ≠ applyArmShift true 1 3 1 := by decide +kernel
-
-/-- `add x0, x1, x2, asr #4` decodes; the reserved Add/Sub shift `0b11` and `imm6 ≥ 32` under
-    `sf = 0` (Add/Sub and logical) are rejected. -/
-theorem arm64_shifted_register_reserved_encodings :
-    decodeArm64Word 0 0x8B821020 = some (.aluReg .add true 0 1 2 2 4) ∧
-    decodeArm64Word 0 0x8BC20420 = none ∧
-    decodeArm64Word 0 0x0B028020 = none ∧
-    decodeArm64Word 0 0x0A028020 = none := by decide +kernel
-
-/-- `csel w0, w1, w2, eq` keeps `sf = 0` and writes a zero-extended 32-bit result on both the
-    taken and the untaken path; `csel x0, x1, x2, eq` writes all 64 bits. -/
-theorem arm64_csel_sf_width :
-    decodeArm64Word 0 0x1A820020 = some (.csel 0 false false 0 1 2) ∧
-    decodeArm64Word 0 0x9A820020 = some (.csel 0 false true 0 1 2) ∧
-    (let s : Arm64State :=
-      ⟨0, ((Bank32.const 0).set 1 0xDEADBEEF12345678).set 2 0xCAFEF00D9ABCDEF0,
-       Bank32.const Vec128.zero, false, true, true, false, fun _ => 0⟩
-     (stepArm64 ⟨0, 4, .csel 0 false false 0 1 2⟩ s).1.gpr.get 0 = 0x12345678 ∧
-     (stepArm64 ⟨0, 4, .csel 1 false false 0 1 2⟩ s).1.gpr.get 0 = 0x9ABCDEF0 ∧
-     (stepArm64 ⟨0, 4, .csel 1 true false 0 1 2⟩ s).1.gpr.get 0 = 0x6543210F ∧
-     (stepArm64 ⟨0, 4, .csel 0 false true 0 1 2⟩ s).1.gpr.get 0 = 0xDEADBEEF12345678) := by
-  decide +kernel
-
-/-- `#tooth`: the 32-bit and 64-bit `csel` forms are distinct instructions with distinct results. -/
-theorem tooth_arm64_csel_w_is_not_x :
-    decodeArm64Word 0 0x1A820020 ≠ decodeArm64Word 0 0x9A820020 := by decide +kernel
-
-/-- `0xF2` in front of a supported opcode, and `66` / `F3` / `REX` in front of a VEX prefix, are
-    rejected; the same bytes without the offending prefix decode. -/
-theorem x86_prefix_discipline :
-    decodeX86InstrAt 0 [0xF2, 0x48, 0x31, 0xC0] = none ∧
-    decodeX86InstrAt 0 [0x48, 0x31, 0xC0] = some ⟨0, 3, .aluRegReg .xorOp true 0 0⟩ ∧
-    decodeX86InstrAt 0 [0x66, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
-    decodeX86InstrAt 0 [0xF3, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
-    decodeX86InstrAt 0 [0x48, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
-    decodeX86InstrAt 0 [0xC5, 0xFD, 0xEF, 0xC0] = some ⟨0, 4, .vbinOp .vpxor true 0 0 0⟩ := by
-  decide +kernel
-
-/-- Eleven redundant `2E` prefixes on a 4-byte `add rax, 1` reach exactly 15 bytes and decode;
-    a twelfth makes 16 bytes, which only the uncapped decoder accepts. -/
-theorem x86_fifteen_byte_cap :
-    (decodeX86InstrAt 0 (List.replicate 11 0x2E ++ [0x48, 0x83, 0xC0, 0x01])).map (·.byteLen) = some 15 ∧
-    (decodeX86InstrAtUncapped 0 (List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01])).map (·.byteLen) = some 16 ∧
-    decodeX86InstrAt 0 (List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01]) = none := by
-  decide +kernel
 
 /-- Every instruction the decoder returns is at most 15 bytes long. -/
 theorem decodeX86InstrAt_byteLen_le (pc : Nat) (bs : List UInt8) (d : DecodedInstr X86Instr)
@@ -6714,110 +6181,1167 @@ theorem decodeX86InstrAt_byteLen_le (pc : Nat) (bs : List UInt8) (d : DecodedIns
     · simp only [Option.bind_some, hLe, ↓reduceIte] at h
       cases h
 
-/-- `vpbroadcastq xmm0, xmm1` (`VEX.L = 0`) writes the low 128 bits and zeroes the rest without
-    dirtying the upper state; `vpbroadcastq ymm0, xmm1` (`VEX.L = 1`) fills all four lanes. -/
-theorem x86_vpbroadcast_honors_vexL :
-    decodeX86InstrAt 0 [0xC4, 0xE2, 0x79, 0x59, 0xC1] = some ⟨0, 5, .vpbroadcast true false 0 1⟩ ∧
-    decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] = some ⟨0, 5, .vpbroadcast true true 0 1⟩ ∧
-    (let s : X86State :=
-      ⟨0, Bank16.const 0, (Bank16.const ⟨7, 7, 7, 7⟩).set 1 ⟨0x1122334455667788, 9, 9, 9⟩,
-       false, false, false, false, false, fun _ => 0⟩
-     let x := (stepX86 ⟨0, 5, .vpbroadcast true false 0 1⟩ s).1
-     let y := (stepX86 ⟨0, 5, .vpbroadcast true true 0 1⟩ s).1
-     x.ymm.get 0 = ⟨0x1122334455667788, 0x1122334455667788, 0, 0⟩ ∧ x.ymmDirty = false ∧
-     y.ymm.get 0 = ⟨0x1122334455667788, 0x1122334455667788, 0x1122334455667788, 0x1122334455667788⟩ ∧
-     y.ymmDirty = true) := by
-  decide +kernel
+/-! ## §1. Run laws: one-step unfolding and halting -/
 
-/-- `#tooth`: the 128-bit broadcast is not the 256-bit one. -/
-theorem tooth_x86_vpbroadcast_xmm_is_not_ymm :
-    decodeX86InstrAt 0 [0xC4, 0xE2, 0x79, 0x59, 0xC1] ≠ decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] := by
-  decide +kernel
+theorem runX86_halted_fst (prog : List (DecodedInstr X86Instr)) (fuel : Nat) (s : X86State)
+    (h : s.halted = true) : (runX86 prog fuel s).1 = s := by
+  cases fuel with
+  | zero => rfl
+  | succ k =>
+    have e : runX86 prog (k + 1) s = (if s.halted then (s, []) else
+        match findInstrAtPc s.pc prog with
+        | none => ({ s with halted := true }, [])
+        | some d =>
+          let (s', obs) := stepX86 d s
+          let (sFinal, restObs) := runX86 prog k s'
+          (sFinal, obs :: restObs)) := by rfl
+    rw [e, h]
+    rfl
 
-/-- Contract of a minimal frame-allocating kernel (`rsp`, `rdi`, `rsi` public, `rbp` frame). -/
-def frameWipeProbeContract : FuncContract :=
-  mkContract "frame_wipe_probe" [4, 7, 6] [] [] true 7 0x320
+theorem runX86_step_fst (prog : List (DecodedInstr X86Instr)) (fuel : Nat) (s : X86State)
+    (d : DecodedInstr X86Instr) (hh : s.halted = false) (hf : findInstrAtPc s.pc prog = some d) :
+    (runX86 prog (fuel + 1) s).1 = (runX86 prog fuel (stepX86 d s).1).1 := by
+  have e : runX86 prog (fuel + 1) s = (if s.halted then (s, []) else
+      match findInstrAtPc s.pc prog with
+      | none => ({ s with halted := true }, [])
+      | some d =>
+        let (s', obs) := stepX86 d s
+        let (sFinal, restObs) := runX86 prog fuel s'
+        (sFinal, obs :: restObs)) := by rfl
+  rw [e, hh, hf]
+  rfl
 
-/-- `push rbp; mov rbp, rsp; and rsp, -32; sub rsp, 0x340; vpxor ymm0, ymm0, ymm0; mov ecx, 25;
-    mov rax, rsp; L: vmovdqa [rax], ymm0; add rax, 32; dec ecx; jne L; vzeroall; vzeroupper;
-    mov rsp, rbp; pop rbp; xor eax, eax; xor ecx, ecx; ret`. -/
-def frameWipeProbeCode : List UInt8 :=
-  [0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xE4, 0xE0, 0x48, 0x81, 0xEC, 0x40, 0x03, 0x00, 0x00,
-   0xC5, 0xFD, 0xEF, 0xC0, 0xB9, 0x19, 0x00, 0x00, 0x00, 0x48, 0x89, 0xE0,
-   0xC5, 0xFD, 0x7F, 0x00, 0x48, 0x83, 0xC0, 0x20, 0xFF, 0xC9, 0x75, 0xF4,
-   0xC5, 0xFC, 0x77, 0xC5, 0xF8, 0x77, 0x48, 0x89, 0xEC, 0x5D, 0x31, 0xC0, 0x31, 0xC9, 0xC3]
+theorem runArm64_halted_fst (prog : List (DecodedInstr Arm64Instr)) (fuel : Nat) (s : Arm64State)
+    (h : s.halted = true) : (runArm64 prog fuel s).1 = s := by
+  cases fuel with
+  | zero => rfl
+  | succ k =>
+    have e : runArm64 prog (k + 1) s = (if s.halted then (s, []) else
+        match findInstrAtPc s.pc prog with
+        | none => ({ s with halted := true }, [])
+        | some d =>
+          let (s', obs) := stepArm64 d s
+          let (sFinal, restObs) := runArm64 prog k s'
+          (sFinal, obs :: restObs)) := by rfl
+    rw [e, h]
+    rfl
 
-/-- The same kernel with the wipe store replaced by four `nop`s. -/
-def frameWipeProbeNoStoreCode : List UInt8 :=
-  (frameWipeProbeCode.take 27) ++ [0x90, 0x90, 0x90, 0x90] ++ (frameWipeProbeCode.drop 31)
+theorem runArm64_step_fst (prog : List (DecodedInstr Arm64Instr)) (fuel : Nat) (s : Arm64State)
+    (d : DecodedInstr Arm64Instr) (hh : s.halted = false) (hf : findInstrAtPc s.pc prog = some d) :
+    (runArm64 prog (fuel + 1) s).1 = (runArm64 prog fuel (stepArm64 d s).1).1 := by
+  have e : runArm64 prog (fuel + 1) s = (if s.halted then (s, []) else
+      match findInstrAtPc s.pc prog with
+      | none => ({ s with halted := true }, [])
+      | some d =>
+        let (s', obs) := stepArm64 d s
+        let (sFinal, restObs) := runArm64 prog fuel s'
+        (sFinal, obs :: restObs)) := by rfl
+  rw [e, hh, hf]
+  rfl
 
-/-- The same kernel with the `vpxor ymm0, ymm0, ymm0` replaced by `nop`s, so the loop stores
-    caller data instead of zeros. -/
-def frameWipeProbeDirtyStoreCode : List UInt8 :=
-  (frameWipeProbeCode.take 15) ++ [0x90, 0x90, 0x90, 0x90] ++ (frameWipeProbeCode.drop 19)
+/-! ## §2. Register-bank literals -/
 
-/-- A frame-allocating kernel that wipes its 800-byte spill area is accepted. -/
-theorem x86_frame_wipe_probe_accepted :
-    checkX86ThreeWayNI frameWipeProbeCode frameWipeProbeContract = true := by decide +kernel
+section BankLits
+variable {α : Type} (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 v : α)
 
-/-- `#tooth`: returning with the spill area never stored to, or stored with non-zero data, is
-    rejected. -/
-theorem tooth_x86_frame_not_wiped_rejected :
-    checkX86ThreeWayNI frameWipeProbeNoStoreCode frameWipeProbeContract = false ∧
-    checkX86ThreeWayNI frameWipeProbeDirtyStoreCode frameWipeProbeContract = false := by
-  decide +kernel
+theorem b16get_0 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 0 = r0 := by rfl
+theorem b16get_1 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 1 = r1 := by rfl
+theorem b16get_2 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 2 = r2 := by rfl
+theorem b16get_3 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 3 = r3 := by rfl
+theorem b16get_4 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 4 = r4 := by rfl
+theorem b16get_5 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 5 = r5 := by rfl
+theorem b16get_6 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 6 = r6 := by rfl
+theorem b16get_7 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 7 = r7 := by rfl
+theorem b16get_8 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 8 = r8 := by rfl
+theorem b16get_9 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 9 = r9 := by rfl
+theorem b16get_10 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 10 = r10 := by rfl
+theorem b16get_11 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 11 = r11 := by rfl
+theorem b16get_12 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 12 = r12 := by rfl
+theorem b16get_13 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 13 = r13 := by rfl
+theorem b16get_14 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 14 = r14 := by rfl
+theorem b16get_15 : Bank16.get (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 15 = r15 := by rfl
+theorem b16set_0 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 0 v = Bank16.mk v r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_1 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 1 v = Bank16.mk r0 v r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_2 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 2 v = Bank16.mk r0 r1 v r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_3 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 3 v = Bank16.mk r0 r1 r2 v r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_4 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 4 v = Bank16.mk r0 r1 r2 r3 v r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_5 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 5 v = Bank16.mk r0 r1 r2 r3 r4 v r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_6 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 6 v = Bank16.mk r0 r1 r2 r3 r4 r5 v r7 r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_7 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 7 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 v r8 r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_8 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 8 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 v r9 r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_9 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 9 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 v r10 r11 r12 r13 r14 r15 := by rfl
+theorem b16set_10 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 10 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 v r11 r12 r13 r14 r15 := by rfl
+theorem b16set_11 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 11 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 v r12 r13 r14 r15 := by rfl
+theorem b16set_12 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 12 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 v r13 r14 r15 := by rfl
+theorem b16set_13 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 13 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 v r14 r15 := by rfl
+theorem b16set_14 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 14 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 v r15 := by rfl
+theorem b16set_15 : Bank16.set (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) 15 v = Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 v := by rfl
+end BankLits
 
-/-- `ret` under a frame contract is refused in every abstract state that is not the wiped phase. -/
-theorem x86_ret_requires_frame_wipe (c : FuncContract) (st : X86AbsState) (off : Nat)
-    (hFrame : c.usesRbpFrame = true) (hNot : st.stackZeroLoop ≠ 4) :
-    transferX86Instr c ⟨off, 1, .ret⟩ st = none := by
-  have h4 : (st.stackZeroLoop == 4) = false := beq_false_of_ne hNot
-  simp [transferX86Instr, x86InstrRegsValid, hFrame, h4]
+/-- AArch64 register read with `x31` as the zero register (the bank-level form of `getArmGpr`). -/
+@[expose] def armGet (g : Bank32 UInt64) (r : Nat) : UInt64 := if r == 31 then 0 else g.get r
 
-/-- `mul x2, x0, x1; ret` needs `PSTATE.DIT` on entry: it is accepted only under a contract that
-    declares the caller established DIT, and `msr dit, #1` in the kernel removes that need. -/
-theorem arm64_dit_is_a_declared_contract_assumption :
-    checkArm64ThreeWayNI [0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
-      (mkContract "mul_dit_assumed" []) = true ∧
-    checkArm64ThreeWayNI [0x5F, 0x41, 0x03, 0xD5, 0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
-      (mkContract "mul_dit_set" [] [] [] false 0 0 false) = true := by decide +kernel
+/-- AArch64 register write discarding writes to `x31` (the bank-level form of `setArmGpr`). -/
+def armSet (g : Bank32 UInt64) (r : Nat) (v : UInt64) : Bank32 UInt64 := if r == 31 then g else g.set r v
 
-/-- `#tooth`: the same multiply under a contract that does not assume DIT on entry is rejected. -/
-theorem tooth_arm64_mul_without_dit_rejected :
-    checkArm64ThreeWayNI [0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
-      (mkContract "mul_no_dit" [] [] [] false 0 0 false) = false := by decide +kernel
+theorem armGet_31 (g : Bank32 UInt64) : armGet g 31 = 0 := by rfl
+theorem armSet_31 (g : Bank32 UInt64) (v : UInt64) : armSet g 31 v = g := by rfl
 
-/-- The two executions of a contract start with `PSTATE.DIT` exactly as the contract declares. -/
-theorem arm64_contract_init_dit (c : FuncContract) (s₁ s₂ : Arm64State)
-    (h : Arm64ContractInit c s₁ s₂) : s₁.dit = c.doitEnabled ∧ s₂.dit = c.doitEnabled :=
-  ⟨h.2.2.2.2.1, h.2.2.2.2.2.1⟩
+section ArmBankLits
+variable (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 v : UInt64) (hi : Bank16 UInt64)
+
+theorem armGet_0 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 0 = r0 := by rfl
+theorem armGet_1 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 1 = r1 := by rfl
+theorem armGet_2 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 2 = r2 := by rfl
+theorem armGet_3 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 3 = r3 := by rfl
+theorem armGet_4 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 4 = r4 := by rfl
+theorem armGet_5 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 5 = r5 := by rfl
+theorem armGet_6 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 6 = r6 := by rfl
+theorem armGet_7 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 7 = r7 := by rfl
+theorem armGet_8 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 8 = r8 := by rfl
+theorem armGet_9 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 9 = r9 := by rfl
+theorem armGet_10 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 10 = r10 := by rfl
+theorem armGet_11 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 11 = r11 := by rfl
+theorem armGet_12 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 12 = r12 := by rfl
+theorem armGet_13 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 13 = r13 := by rfl
+theorem armGet_14 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 14 = r14 := by rfl
+theorem armGet_15 : armGet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 15 = r15 := by rfl
+theorem armSet_0 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 0 v = Bank32.mk (Bank16.mk v r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_1 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 1 v = Bank32.mk (Bank16.mk r0 v r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_2 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 2 v = Bank32.mk (Bank16.mk r0 r1 v r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_3 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 3 v = Bank32.mk (Bank16.mk r0 r1 r2 v r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_4 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 4 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 v r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_5 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 5 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 v r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_6 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 6 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 v r7 r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_7 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 7 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 v r8 r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_8 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 8 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 v r9 r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_9 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 9 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 v r10 r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_10 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 10 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 v r11 r12 r13 r14 r15) hi := by rfl
+theorem armSet_11 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 11 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 v r12 r13 r14 r15) hi := by rfl
+theorem armSet_12 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 12 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 v r13 r14 r15) hi := by rfl
+theorem armSet_13 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 13 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 v r14 r15) hi := by rfl
+theorem armSet_14 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 14 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 v r15) hi := by rfl
+theorem armSet_15 : armSet (Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15) hi) 15 v = Bank32.mk (Bank16.mk r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 v) hi := by rfl
+end ArmBankLits
+
+/-! ## §3. `x86_64` step lemmas, one per instruction form, on a state given by its fields -/
+
+/-- Program counter after a conditional jump. -/
+@[expose] def jccPc (taken : Bool) (tgt : Int) (next : Nat) : Nat :=
+  if taken && decide (tgt ≥ 0) then tgt.toNat else next
+
+theorem jccPc_false (tgt : Int) (next : Nat) : jccPc false tgt next = next := by rfl
+theorem jccPc_true_5 (next : Nat) : jccPc true 5 next = 5 := by rfl
+theorem jccPc_true_0 (next : Nat) : jccPc true 0 next = 0 := by rfl
+theorem maskGprWidth_true (v : UInt64) : maskGprWidth true v = v := by rfl
+
+section X86Steps
+variable (off len pc : Nat) (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool)
+  (m : UInt64 → UInt8)
+
+theorem stepX86_load64 (dst base : Nat) (disp : UInt64) :
+    (stepX86 ⟨off, len, .loadGpr 8 true dst (.baseDisp base disp)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (readMem64 m (g.get base + disp)), y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_load8 (dst base : Nat) (disp : UInt64) :
+    (stepX86 ⟨off, len, .loadGpr 1 false dst (.baseDisp base disp)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth false (m (g.get base + disp)).toUInt64), y, cf, o, zf, dy, false, m⟩ := by
+  rfl
+
+theorem stepX86_store8 (src base : Nat) (disp : UInt64) :
+    (stepX86 ⟨off, len, .storeGpr 1 src (.baseDisp base disp)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g, y, cf, o, zf, dy, false, writeMem8 m (g.get base + disp) (g.get src).toUInt8⟩ := by rfl
+
+theorem stepX86_xorLoad64 (dst base : Nat) (disp : UInt64) :
+    (stepX86 ⟨off, len, .aluLoad64 .xorOp dst (.baseDisp base disp)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (g.get dst ^^^ readMem64 m (g.get base + disp)), y, false, false,
+        (g.get dst ^^^ readMem64 m (g.get base + disp)) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_xorRR (is64 : Bool) (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .xorOp is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (g.get dst ^^^ g.get src)), y, false, false,
+        maskGprWidth is64 (g.get dst ^^^ g.get src) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_orRR (is64 : Bool) (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .orOp is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (g.get dst ||| g.get src)), y, false, false,
+        maskGprWidth is64 (g.get dst ||| g.get src) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_xorImm (is64 : Bool) (dst : Nat) (imm : UInt64) :
+    (stepX86 ⟨off, len, .aluImm .xorOp is64 dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (g.get dst ^^^ imm)), y, false, false,
+        maskGprWidth is64 (g.get dst ^^^ imm) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_subImm32 (dst : Nat) (imm : UInt64) :
+    (stepX86 ⟨off, len, .aluImm .sub false dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len,
+        g.set dst (maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
+          (maskGprWidth false imm).toNat) % 0x100000000))), y,
+        decide ((maskGprWidth false (g.get dst)).toNat < (maskGprWidth false imm).toNat),
+        evalX86AluOf .sub false (g.get dst) imm cf,
+        maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
+          (maskGprWidth false imm).toNat) % 0x100000000)) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_addRR64 (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .add true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len,
+        g.set dst (UInt64.ofNat (((g.get dst).toNat + (g.get src).toNat) % 0x10000000000000000)), y,
+        decide ((g.get dst).toNat + (g.get src).toNat ≥ 0x10000000000000000),
+        evalX86AluOf .add true (g.get dst) (g.get src) cf,
+        UInt64.ofNat (((g.get dst).toNat + (g.get src).toNat) % 0x10000000000000000) == 0,
+        dy, false, m⟩ := by rfl
+
+theorem stepX86_subRR64 (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .sub true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len,
+        g.set dst (UInt64.ofNat (((g.get dst).toNat + 0x10000000000000000 - (g.get src).toNat) %
+          0x10000000000000000)), y,
+        decide ((g.get dst).toNat < (g.get src).toNat),
+        evalX86AluOf .sub true (g.get dst) (g.get src) cf,
+        UInt64.ofNat (((g.get dst).toNat + 0x10000000000000000 - (g.get src).toNat) %
+          0x10000000000000000) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_sbbRR (is64 : Bool) (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .sbb is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).1, y,
+        (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).2.1,
+        evalX86AluOf .sbb is64 (g.get dst) (g.get src) cf,
+        (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).2.2, dy, false, m⟩ := by rfl
+
+theorem stepX86_andRR (is64 : Bool) (dst src : Nat) :
+    (stepX86 ⟨off, len, .aluRegReg .andOp is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (g.get dst &&& g.get src)), y, false, false,
+        maskGprWidth is64 (g.get dst &&& g.get src) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_movImm (is64 : Bool) (dst : Nat) (imm : UInt64) :
+    (stepX86 ⟨off, len, .movImm is64 dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 imm), y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_mulx (hiDst loDst src : Nat) :
+    (stepX86 ⟨off, len, .mulx hiDst loDst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len,
+        (g.set loDst (UInt64.ofNat (((g.get 2).toNat * (g.get src).toNat) % 0x10000000000000000))).set hiDst
+          (UInt64.ofNat (((g.get 2).toNat * (g.get src).toNat) / 0x10000000000000000)),
+        y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_shl64 (dst cnt : Nat) :
+    (stepX86 ⟨off, len, .shiftImm .shl true dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (evalX86Shift .shl true (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.2.2,
+        dy, false, m⟩ := by rfl
+
+theorem stepX86_movRR (is64 : Bool) (dst src : Nat) :
+    (stepX86 ⟨off, len, .movRegReg is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (g.get src)), y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_neg (is64 : Bool) (dst : Nat) :
+    (stepX86 ⟨off, len, .negReg is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (0 - maskGprWidth is64 (g.get dst))), y,
+        maskGprWidth is64 (g.get dst) != 0,
+        maskGprWidth is64 (g.get dst) == (if is64 then 0x8000000000000000 else 0x80000000),
+        maskGprWidth is64 (0 - maskGprWidth is64 (g.get dst)) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_shr64 (dst cnt : Nat) :
+    (stepX86 ⟨off, len, .shiftImm .shr true dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (evalX86Shift .shr true (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.2.2,
+        dy, false, m⟩ := by rfl
+
+theorem stepX86_shr32 (dst cnt : Nat) :
+    (stepX86 ⟨off, len, .shiftImm .shr false dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (evalX86Shift .shr false (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.2.2,
+        dy, false, m⟩ := by rfl
+
+theorem stepX86_inc (is64 : Bool) (dst : Nat) :
+    (stepX86 ⟨off, len, .incDec true is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + 1)), y, cf,
+        evalX86IncDecOf true is64 (g.get dst),
+        maskGprWidth is64 (maskGprWidth is64 (g.get dst) + 1) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_dec (is64 : Bool) (dst : Nat) :
+    (stepX86 ⟨off, len, .incDec false is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + (0 - 1))), y, cf,
+        evalX86IncDecOf false is64 (g.get dst),
+        maskGprWidth is64 (maskGprWidth is64 (g.get dst) + (0 - 1)) == 0, dy, false, m⟩ := by rfl
+
+theorem stepX86_jnz (tgt : Int) :
+    (stepX86 ⟨off, len, .jcc 5 tgt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨jccPc (!zf) tgt (off + len), g, y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_mfence :
+    (stepX86 ⟨off, len, .mfence⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g, y, cf, o, zf, dy, false, m⟩ := by rfl
+
+theorem stepX86_ret :
+    (stepX86 ⟨off, len, .ret⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨pc, g, y, cf, o, zf, dy, true, m⟩ := by rfl
+
+end X86Steps
+
+/-! ## §4. `AArch64` step lemmas -/
+
+section Arm64Steps
+variable (off len pc : Nat) (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool)
+  (m : UInt64 → UInt8)
+
+theorem stepArm64_ldp (rt1 rt2 rn : Nat) (disp : UInt64) :
+    (stepArm64 ⟨off, len, .ldp64 rt1 rt2 rn disp⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet (armSet g rt1 (readMem64 m (armGet g rn + disp))) rt2
+        (readMem64 m (armGet g rn + disp + 8)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_eorRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .eor true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn ^^^ armGet g rm), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_orrRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .orr true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn ||| armGet g rm), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_subRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .sub true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 - (armGet g rm).toNat) %
+        0x10000000000000000)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_lsr64 (rd rn immr : Nat) :
+    (stepArm64 ⟨off, len, .ubfm true rd rn immr 63⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn >>> UInt64.ofNat immr), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_eorImm (rd rn : Nat) (imm : UInt64) :
+    (stepArm64 ⟨off, len, .aluImm .eor true rd rn imm⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn ^^^ imm), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_subsImm (rd rn : Nat) (imm : UInt64) :
+    (stepArm64 ⟨off, len, .aluImm .subs true rd rn imm⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 - imm.toNat) %
+          0x10000000000000000)), v, decide ((armGet g rn).toNat ≥ imm.toNat),
+        UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 - imm.toNat) % 0x10000000000000000) == 0,
+        dit, false, m⟩ := by rfl
+
+theorem stepArm64_mul (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .mulOp false rd rn rm⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat * (armGet g rm).toNat) %
+        0x10000000000000000)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_umulh (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .mulOp true rd rn rm⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat * (armGet g rm).toNat) /
+        0x10000000000000000)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_lsl32 (rd rn : Nat) :
+    (stepArm64 ⟨off, len, .ubfm true rd rn 32 31⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn <<< UInt64.ofNat (64 - 32)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_andImm (rd rn : Nat) (imm : UInt64) :
+    (stepArm64 ⟨off, len, .aluImm .andOp true rd rn imm⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn &&& imm), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_andRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .andOp true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (armGet g rn &&& armGet g rm), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_movn32 (rd imm16 sh : Nat) :
+    (stepArm64 ⟨off, len, .movWide true false rd imm16 sh⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (maskGprWidth false (~~~(UInt64.ofNat imm16 <<< UInt64.ofNat sh))),
+        v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_addRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .add true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + (armGet g rm).toNat) %
+        0x10000000000000000)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_addsRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .adds true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + (armGet g rm).toNat) %
+          0x10000000000000000)), v,
+        decide ((armGet g rn).toNat + (armGet g rm).toNat ≥ 0x10000000000000000),
+        UInt64.ofNat (((armGet g rn).toNat + (armGet g rm).toNat) % 0x10000000000000000) == 0,
+        dit, false, m⟩ := by rfl
+
+theorem stepArm64_subsRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .subs true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 -
+          (armGet g rm).toNat) % 0x10000000000000000)), v,
+        decide ((armGet g rn).toNat ≥ (armGet g rm).toNat),
+        UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 - (armGet g rm).toNat) %
+          0x10000000000000000) == 0, dit, false, m⟩ := by rfl
+
+theorem stepArm64_adcRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .adc true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + (armGet g rm).toNat +
+        (if cf then 1 else 0)) % 0x10000000000000000)), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_sbcRR (rd rn rm : Nat) :
+    (stepArm64 ⟨off, len, .aluReg .sbc true rd rn rm 0 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat (((armGet g rn).toNat + 0x10000000000000000 * 2 -
+        (armGet g rm).toNat - (if cf then 0 else 1)) % 0x10000000000000000)),
+        v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_movz (rd imm16 sh : Nat) :
+    (stepArm64 ⟨off, len, .movWide false true rd imm16 sh⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rd (UInt64.ofNat imm16 <<< UInt64.ofNat sh), v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_strbPost (rt rn : Nat) (post : UInt64) :
+    (stepArm64 ⟨off, len, .strbPost rt rn post⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, armSet g rn (armGet g rn + post), v, cf, zf, dit, false,
+        writeMem8 m (armGet g rn) (armGet g rt).toUInt8⟩ := by rfl
+
+theorem stepArm64_bne (tgt : Int) :
+    (stepArm64 ⟨off, len, .bCond 1 tgt⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨jccPc (!zf) tgt (off + 4), g, v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_dmb :
+    (stepArm64 ⟨off, len, .dmbIsh⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨off + 4, g, v, cf, zf, dit, false, m⟩ := by rfl
+
+theorem stepArm64_ret :
+    (stepArm64 ⟨off, len, .ret⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩).1 =
+      ⟨pc, g, v, cf, zf, dit, true, m⟩ := by rfl
+
+end Arm64Steps
+
+/-! ## §5. Word and byte arithmetic used by the specifications -/
+
+theorem u64_eq_of_toNat {a b : UInt64} (h : a.toNat = b.toNat) : a = b :=
+  UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
+
+theorem u8_eq_of_toNat {a b : UInt8} (h : a.toNat = b.toNat) : a = b :=
+  UInt8.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq h)
+
+theorem mask32_xor_self (x : UInt64) : maskGprWidth false (x ^^^ x) = 0 := by
+  rw [UInt64.xor_self]; decide
+
+theorem u64_zero_beq_zero : ((0 : UInt64) == 0) = true := by decide
+
+theorem u64_shl_zero_zero : UInt64.ofNat 0 <<< UInt64.ofNat 0 = 0 := by decide
+
+theorem u64_zero_toUInt8 : (0 : UInt64).toUInt8 = 0 := by decide
+
+/-- `((x | -x) >> 63) ^ 1` is the zero test of a 64-bit word. -/
+theorem zeroTest64 (x : UInt64) :
+    ((x ||| (0 - x)) >>> UInt64.ofNat 63) ^^^ 1 = if x = 0 then 1 else 0 := by
+  if hx : x = 0 then
+    subst hx; rw [ite_eq_left rfl]; decide
+  else
+    rw [ite_eq_right hx]
+    have hpos : 0 < x.toNat := Nat.pos_of_ne_zero (fun h => hx (u64_eq_of_toNat h))
+    have hlt : x.toNat < 18446744073709551616 := x.toNat_lt
+    have hneg : (0 - x).toNat = 18446744073709551616 - x.toNat := by
+      have h0 : (0 : UInt64).toNat = 0 := rfl
+      have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+      rw [UInt64.toNat_sub, h0, h64]
+      omega
+    have hl : x.toNat ≤ x.toNat ||| (0 - x).toNat := Nat.left_le_or
+    have hr : (0 - x).toNat ≤ x.toNat ||| (0 - x).toNat := Nat.right_le_or
+    have hor : (x ||| (0 - x)).toNat = x.toNat ||| (0 - x).toNat := UInt64.toNat_or _ _
+    have horLt : (x ||| (0 - x)).toNat < 18446744073709551616 := (x ||| (0 - x)).toNat_lt
+    have hsh : (x ||| (0 - x)) >>> UInt64.ofNat 63 = 1 := by
+      apply u64_eq_of_toNat
+      have h63 : (UInt64.ofNat 63).toNat % 64 = 63 := rfl
+      rw [UInt64.toNat_shiftRight, h63, Nat.shiftRight_eq_div_pow]
+      show (x ||| (0 - x)).toNat / 9223372036854775808 = 1
+      omega
+    rw [hsh]; decide
+
+theorem zeroTest64_masked (x : UInt64) :
+    maskGprWidth false (((x ||| (0 - x)) >>> UInt64.ofNat 63) ^^^ 1) = if x = 0 then 1 else 0 := by
+  rw [zeroTest64]
+  if hx : x = 0 then rw [ite_eq_left hx]; decide else rw [ite_eq_right hx]; decide
+
+theorem or_shl_eq_add (x y i : Nat) (hx : x < 2 ^ i) : x ||| y <<< i = x + y * 2 ^ i := by
+  rw [Nat.or_comm, ← Nat.shiftLeft_add_eq_or_of_lt hx, Nat.shiftLeft_eq, Nat.add_comm]
+
+theorem byte_shl_toNat (b : UInt8) (c : UInt64) (n : Nat) (hc : c.toNat = n) (hn : n ≤ 56) :
+    (b.toUInt64 <<< c).toNat = b.toNat <<< n := by
+  have hb := b.toNat_lt
+  have hlt : b.toNat <<< n < 2 ^ 64 := by
+    rw [Nat.shiftLeft_eq]
+    calc b.toNat * 2 ^ n < 2 ^ 8 * 2 ^ n := Nat.mul_lt_mul_of_pos_right hb (Nat.two_pow_pos n)
+      _ = 2 ^ (8 + n) := (Nat.pow_add 2 8 n).symm
+      _ ≤ 2 ^ 64 := Nat.pow_le_pow_right (by decide) (by omega)
+  rw [UInt64.toNat_shiftLeft, UInt8.toNat_toUInt64, hc, Nat.mod_eq_of_lt (show n < 64 by omega),
+    Nat.mod_eq_of_lt hlt]
+
+/-- Little-endian value of the eight bytes read by `readMem64`. -/
+theorem readMem64_toNat (m : UInt64 → UInt8) (a : UInt64) :
+    (readMem64 m a).toNat =
+      (m a).toNat + (m (a + 1)).toNat * 256 + (m (a + 2)).toNat * 65536 +
+      (m (a + 3)).toNat * 16777216 + (m (a + 4)).toNat * 4294967296 +
+      (m (a + 5)).toNat * 1099511627776 + (m (a + 6)).toNat * 281474976710656 +
+      (m (a + 7)).toNat * 72057594037927936 := by
+  have b0 : (m a).toNat < 256 := (m a).toNat_lt
+  have b1 : (m (a + 1)).toNat < 256 := (m (a + 1)).toNat_lt
+  have b2 : (m (a + 2)).toNat < 256 := (m (a + 2)).toNat_lt
+  have b3 : (m (a + 3)).toNat < 256 := (m (a + 3)).toNat_lt
+  have b4 : (m (a + 4)).toNat < 256 := (m (a + 4)).toNat_lt
+  have b5 : (m (a + 5)).toNat < 256 := (m (a + 5)).toNat_lt
+  have b6 : (m (a + 6)).toNat < 256 := (m (a + 6)).toNat_lt
+  unfold readMem64
+  rw [UInt64.toNat_or, UInt64.toNat_or, UInt64.toNat_or, UInt64.toNat_or, UInt64.toNat_or,
+    UInt64.toNat_or, UInt64.toNat_or, UInt8.toNat_toUInt64,
+    byte_shl_toNat _ 8 8 rfl (by decide), byte_shl_toNat _ 16 16 rfl (by decide),
+    byte_shl_toNat _ 24 24 rfl (by decide), byte_shl_toNat _ 32 32 rfl (by decide),
+    byte_shl_toNat _ 40 40 rfl (by decide), byte_shl_toNat _ 48 48 rfl (by decide),
+    byte_shl_toNat _ 56 56 rfl (by decide)]
+  have e1 := or_shl_eq_add (m a).toNat (m (a + 1)).toNat 8 b0
+  rw [e1]
+  have e2 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8) (m (a + 2)).toNat 16
+    (by show _ < 65536; omega)
+  rw [e2]
+  have e3 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8 + (m (a + 2)).toNat * 2 ^ 16)
+    (m (a + 3)).toNat 24 (by show _ + _ * 256 + _ * 65536 < 16777216; omega)
+  rw [e3]
+  have e4 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8 + (m (a + 2)).toNat * 2 ^ 16 +
+    (m (a + 3)).toNat * 2 ^ 24) (m (a + 4)).toNat 32
+    (by show _ + _ * 256 + _ * 65536 + _ * 16777216 < 4294967296; omega)
+  rw [e4]
+  have e5 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8 + (m (a + 2)).toNat * 2 ^ 16 +
+    (m (a + 3)).toNat * 2 ^ 24 + (m (a + 4)).toNat * 2 ^ 32) (m (a + 5)).toNat 40
+    (by show _ + _ * 256 + _ * 65536 + _ * 16777216 + _ * 4294967296 < 1099511627776; omega)
+  rw [e5]
+  have e6 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8 + (m (a + 2)).toNat * 2 ^ 16 +
+    (m (a + 3)).toNat * 2 ^ 24 + (m (a + 4)).toNat * 2 ^ 32 + (m (a + 5)).toNat * 2 ^ 40)
+    (m (a + 6)).toNat 48
+    (by show _ + _ * 256 + _ * 65536 + _ * 16777216 + _ * 4294967296 + _ * 1099511627776 <
+          281474976710656; omega)
+  rw [e6]
+  have e7 := or_shl_eq_add ((m a).toNat + (m (a + 1)).toNat * 2 ^ 8 + (m (a + 2)).toNat * 2 ^ 16 +
+    (m (a + 3)).toNat * 2 ^ 24 + (m (a + 4)).toNat * 2 ^ 32 + (m (a + 5)).toNat * 2 ^ 40 +
+    (m (a + 6)).toNat * 2 ^ 48) (m (a + 7)).toNat 56
+    (by show _ + _ * 256 + _ * 65536 + _ * 16777216 + _ * 4294967296 + _ * 1099511627776 +
+          _ * 281474976710656 < 72057594037927936; omega)
+  rw [e7]
+
+/-- `readMem64` is injective on the eight bytes it reads. -/
+theorem readMem64_inj {m m' : UInt64 → UInt8} {a b : UInt64} (h : readMem64 m a = readMem64 m' b) :
+    m a = m' b ∧ m (a + 1) = m' (b + 1) ∧ m (a + 2) = m' (b + 2) ∧ m (a + 3) = m' (b + 3) ∧
+    m (a + 4) = m' (b + 4) ∧ m (a + 5) = m' (b + 5) ∧ m (a + 6) = m' (b + 6) ∧
+    m (a + 7) = m' (b + 7) := by
+  have hn := congrArg UInt64.toNat h
+  rw [readMem64_toNat, readMem64_toNat] at hn
+  have a0 : (m a).toNat < 256 := (m a).toNat_lt
+  have a1 : (m (a + 1)).toNat < 256 := (m (a + 1)).toNat_lt
+  have a2 : (m (a + 2)).toNat < 256 := (m (a + 2)).toNat_lt
+  have a3 : (m (a + 3)).toNat < 256 := (m (a + 3)).toNat_lt
+  have a4 : (m (a + 4)).toNat < 256 := (m (a + 4)).toNat_lt
+  have a5 : (m (a + 5)).toNat < 256 := (m (a + 5)).toNat_lt
+  have a6 : (m (a + 6)).toNat < 256 := (m (a + 6)).toNat_lt
+  have a7 : (m (a + 7)).toNat < 256 := (m (a + 7)).toNat_lt
+  have c0 : (m' b).toNat < 256 := (m' b).toNat_lt
+  have c1 : (m' (b + 1)).toNat < 256 := (m' (b + 1)).toNat_lt
+  have c2 : (m' (b + 2)).toNat < 256 := (m' (b + 2)).toNat_lt
+  have c3 : (m' (b + 3)).toNat < 256 := (m' (b + 3)).toNat_lt
+  have c4 : (m' (b + 4)).toNat < 256 := (m' (b + 4)).toNat_lt
+  have c5 : (m' (b + 5)).toNat < 256 := (m' (b + 5)).toNat_lt
+  have c6 : (m' (b + 6)).toNat < 256 := (m' (b + 6)).toNat_lt
+  have c7 : (m' (b + 7)).toNat < 256 := (m' (b + 7)).toNat_lt
+  exact ⟨u8_eq_of_toNat (by omega), u8_eq_of_toNat (by omega), u8_eq_of_toNat (by omega),
+    u8_eq_of_toNat (by omega), u8_eq_of_toNat (by omega), u8_eq_of_toNat (by omega),
+    u8_eq_of_toNat (by omega), u8_eq_of_toNat (by omega)⟩
+
+theorem addr_split (a : UInt64) (d j : Nat) :
+    a + UInt64.ofNat d + UInt64.ofNat j = a + UInt64.ofNat (d + j) := by
+  rw [UInt64.add_assoc, ← UInt64.ofNat_add]
+
+theorem readMem64_eq_iff (m : UInt64 → UInt8) (a b : UInt64) :
+    readMem64 m a = readMem64 m b ↔
+      ∀ j : Nat, j < 8 → m (a + UInt64.ofNat j) = m (b + UInt64.ofNat j) := by
+  have e0 : ∀ x : UInt64, x + UInt64.ofNat 0 = x := fun x => UInt64.add_zero x
+  constructor
+  · intro h
+    obtain ⟨h0, h1, h2, h3, h4, h5, h6, h7⟩ := readMem64_inj h
+    intro j hj
+    match j, hj with
+    | 0, _ => rw [e0, e0]; exact h0
+    | 1, _ => exact h1
+    | 2, _ => exact h2
+    | 3, _ => exact h3
+    | 4, _ => exact h4
+    | 5, _ => exact h5
+    | 6, _ => exact h6
+    | 7, _ => exact h7
+    | n + 8, hn => exact absurd hn (by omega)
+  · intro h
+    have h0 : m a = m b := by
+      have := h 0 (by decide)
+      rw [e0, e0] at this
+      exact this
+    have h1 : m (a + 1) = m (b + 1) := h 1 (by decide)
+    have h2 : m (a + 2) = m (b + 2) := h 2 (by decide)
+    have h3 : m (a + 3) = m (b + 3) := h 3 (by decide)
+    have h4 : m (a + 4) = m (b + 4) := h 4 (by decide)
+    have h5 : m (a + 5) = m (b + 5) := h 5 (by decide)
+    have h6 : m (a + 6) = m (b + 6) := h 6 (by decide)
+    have h7 : m (a + 7) = m (b + 7) := h 7 (by decide)
+    unfold readMem64
+    rw [h0, h1, h2, h3, h4, h5, h6, h7]
+
+theorem block_of_bytes (m : UInt64 → UInt8) (a b : UInt64) (n d : Nat)
+    (h : ∀ i : Nat, i < n → m (a + UInt64.ofNat i) = m (b + UInt64.ofNat i)) (hd : d + 8 ≤ n) :
+    readMem64 m (a + UInt64.ofNat d) = readMem64 m (b + UInt64.ofNat d) :=
+  (readMem64_eq_iff _ _ _).mpr (fun j hj => by
+    rw [addr_split, addr_split]; exact h (d + j) (by omega))
+
+theorem bytes_of_block (m : UInt64 → UInt8) (a b : UInt64) (d : Nat)
+    (h : readMem64 m (a + UInt64.ofNat d) = readMem64 m (b + UInt64.ofNat d))
+    (i : Nat) (h1 : d ≤ i) (h2 : i < d + 8) :
+    m (a + UInt64.ofNat i) = m (b + UInt64.ofNat i) := by
+  have := (readMem64_eq_iff _ _ _).mp h (i - d) (by omega)
+  rw [addr_split, addr_split, show d + (i - d) = i from by omega] at this
+  exact this
+
+/-- The OR of the four XOR-ed 64-bit words vanishes exactly when the two 32-byte buffers agree. -/
+theorem xorOr4_eq_zero_iff (m : UInt64 → UInt8) (a b a0 a1 a2 a3 b0 b1 b2 b3 : UInt64)
+    (ha0 : a0 = a + UInt64.ofNat 0) (ha1 : a1 = a + UInt64.ofNat 8)
+    (ha2 : a2 = a + UInt64.ofNat 16) (ha3 : a3 = a + UInt64.ofNat 24)
+    (hb0 : b0 = b + UInt64.ofNat 0) (hb1 : b1 = b + UInt64.ofNat 8)
+    (hb2 : b2 = b + UInt64.ofNat 16) (hb3 : b3 = b + UInt64.ofNat 24) :
+    (readMem64 m a0 ^^^ readMem64 m b0 ||| readMem64 m a1 ^^^ readMem64 m b1) |||
+      (readMem64 m a2 ^^^ readMem64 m b2 ||| readMem64 m a3 ^^^ readMem64 m b3) = 0 ↔
+    ∀ i : Nat, i < 32 → m (a + UInt64.ofNat i) = m (b + UInt64.ofNat i) := by
+  subst ha0 ha1 ha2 ha3 hb0 hb1 hb2 hb3
+  rw [UInt64.or_eq_zero_iff, UInt64.or_eq_zero_iff, UInt64.or_eq_zero_iff,
+    UInt64.xor_eq_zero_iff, UInt64.xor_eq_zero_iff, UInt64.xor_eq_zero_iff, UInt64.xor_eq_zero_iff]
+  constructor
+  · intro ⟨⟨h0, h1⟩, h2, h3⟩ i hi
+    if c1 : i < 8 then exact bytes_of_block m a b 0 h0 i (by omega) (by omega)
+    else if c2 : i < 16 then exact bytes_of_block m a b 8 h1 i (by omega) (by omega)
+    else if c3 : i < 24 then exact bytes_of_block m a b 16 h2 i (by omega) (by omega)
+    else exact bytes_of_block m a b 24 h3 i (by omega) (by omega)
+  · intro h
+    exact ⟨⟨block_of_bytes m a b 32 0 h (by decide), block_of_bytes m a b 32 8 h (by decide)⟩,
+      block_of_bytes m a b 32 16 h (by decide), block_of_bytes m a b 32 24 h (by decide)⟩
 
 
-theorem decode_overlong_tooth :
-    ∃ bs : List UInt8,
-      (decodeX86InstrAtUncapped 0 bs).map (·.byteLen) = some 16 ∧
-      decodeX86InstrAt 0 bs = none := by
-  exact ⟨List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01], by decide +kernel⟩
-
-theorem arm64_no_dit_contract_tooth :
-    ∃ c : FuncContract, c.doitEnabled = false ∧
-      checkArm64ThreeWayNI [0x00, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6] c = false := by
-  exact ⟨mkContract "mul_no_dit" [] [] [] false 0 0 false, by decide +kernel⟩
-
-theorem x86_broadcast_width_mutation_tooth :
-    ∃ code : List UInt8, decodeX86InstrAt 0 code ≠
-      decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] :=
-  ⟨[0xC4, 0xE2, 0x79, 0x59, 0xC1], tooth_x86_vpbroadcast_xmm_is_not_ymm⟩
-
-theorem decode_byteLen_inhabited :
-    ∃ pc bs d, decodeX86InstrAt pc bs = some d :=
-  ⟨0, [0x90], ⟨0, 1, .nop⟩, by decide +kernel⟩
-
-#tooth_pair decodeX86InstrAt_byteLen_le vs decode_overlong_tooth
-#verify_inhabited decodeX86InstrAt_byteLen_le decode_byteLen_inhabited
-#tooth_pair arm64_asr_is_arithmetic vs tooth_arm64_asr_differs_from_ror
-#tooth_pair arm64_csel_sf_width vs tooth_arm64_csel_w_is_not_x
-#tooth_pair x86_vpbroadcast_honors_vexL vs x86_broadcast_width_mutation_tooth
-#tooth_pair arm64_dit_is_a_declared_contract_assumption vs arm64_no_dit_contract_tooth
+theorem u64_add_neg_one (x : UInt64) : x + (0 - 1) = x - 1 := by
+  apply u64_eq_of_toNat
+  have h0 : (0 : UInt64).toNat = 0 := rfl
+  have h1 : (1 : UInt64).toNat = 1 := rfl
+  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+  have hx : x.toNat < 18446744073709551616 := x.toNat_lt
+  rw [UInt64.toNat_add, UInt64.toNat_sub, UInt64.toNat_sub, h0, h1, h64]
+  omega
 
 end Qsag
+
+namespace Qsag.Machine
+/-- CPU leakage contract uses the same `StepObs` emitted by the decoded instruction runner.
+Hardware mode and public-state hypotheses are supplied by the verified caller. -/
+def x86LeakageContract (lowEq : Qsag.X86State → Qsag.X86State → Prop)
+    (hardware : Spec.ExecMode → Qsag.X86State → Prop) :
+    Spec.LeakageContract Qsag.X86State (List (Qsag.DecodedInstr Qsag.X86Instr) × Nat) Qsag.StepObs where
+  publicEq := lowEq
+  admissible := hardware
+  observe _ s request := (Qsag.runX86 request.1 request.2 s).2
+
+def arm64LeakageContract (lowEq : Qsag.Arm64State → Qsag.Arm64State → Prop)
+    (hardware : Spec.ExecMode → Qsag.Arm64State → Prop) :
+    Spec.LeakageContract Qsag.Arm64State (List (Qsag.DecodedInstr Qsag.Arm64Instr) × Nat) Qsag.StepObs where
+  publicEq := lowEq
+  admissible := hardware
+  observe _ s request := (Qsag.runArm64 request.1 request.2 s).2
+end Qsag.Machine
+
+namespace Qsag.SydTv
+open Qsag
+abbrev Word := BitVec 64
+abbrev Env := Nat → Word
+abbrev Observation := Qsag.StepObs
+/-- Single-instruction `x86_64` byte decoder at offset `pc` wrapping `ElfBinaryVerify.decodeX86InstrAt`. -/
+@[expose] def decodeX86One (code : List UInt8) (pc : Nat) : Option (DecodedInstr X86Instr) :=
+  if pc < code.length then decodeX86InstrAt pc (code.drop pc) else none
+
+/-- Single-instruction `AArch64` byte decoder at 4-byte-aligned offset `pc` wrapping `ElfBinaryVerify.decodeArm64Word`. -/
+@[expose] def decodeArm64One (code : List UInt8) (pc : Nat) : Option (DecodedInstr Arm64Instr) :=
+  if pc % 4 == 0 && pc + 4 ≤ code.length then
+    match readU32LE? (code.drop pc) with
+    | some w => (decodeArm64Word pc w).map (fun ins => ⟨pc, 4, ins⟩)
+    | none => none
+  else none
+
+/-- Generic `x86_64` fetch-step runner parameterized by instruction fetch (`decodeX86One` or `findInstrAtPc`). -/
+def runX86Fetch (fetch : Nat → Option (DecodedInstr X86Instr)) :
+    Nat → X86State → X86State × List StepObs
+  | 0, s => (s, [])
+  | fuel + 1, s =>
+    if s.halted then (s, [])
+    else match fetch s.pc with
+    | none => ({ s with halted := true }, [])
+    | some d =>
+      let (s', obs) := stepX86 d s
+      let (sFinal, restObs) := runX86Fetch fetch fuel s'
+      (sFinal, obs :: restObs)
+
+/-- Live byte-decoded `x86_64` execution fetching each instruction directly via `decodeX86One`. -/
+def runX86One (code : List UInt8) : Nat → X86State → X86State × List StepObs :=
+  runX86Fetch (decodeX86One code)
+
+theorem runX86_eq_runX86Fetch (prog : List (DecodedInstr X86Instr)) (fuel : Nat) (s : X86State) :
+    runX86 prog fuel s = runX86Fetch (fun pc => findInstrAtPc pc prog) fuel s := by
+  induction fuel generalizing s with
+  | zero => rfl
+  | succ k ih =>
+    change (if s.halted then (s, []) else _) = (if s.halted then (s, []) else _)
+    cases s.halted
+    · dsimp only
+      cases hfind : findInstrAtPc s.pc prog with
+      | none => rfl
+      | some d =>
+        dsimp only
+        rw [ih (stepX86 d s).1]
+    · rfl
+
+theorem runX86Fetch_halted (fetch : Nat → Option (DecodedInstr X86Instr)) (fuel : Nat)
+    (s : X86State) (h : s.halted = true) :
+    runX86Fetch fetch fuel s = (s, []) := by
+  cases fuel with
+  | zero => rfl
+  | succ k =>
+    change (if s.halted then (s, []) else _) = (s, [])
+    rw [h]; rfl
+
+theorem runX86Fetch_step (fetch : Nat → Option (DecodedInstr X86Instr)) (fuel : Nat)
+    (s : X86State) (d : DecodedInstr X86Instr) (hh : s.halted = false) (hf : fetch s.pc = some d) :
+    runX86Fetch fetch (fuel + 1) s =
+      let r := stepX86 d s
+      let u := runX86Fetch fetch fuel r.1
+      (u.1, r.2 :: u.2) := by
+  change (if s.halted then (s, []) else _) = _
+  rw [hh, hf]; rfl
+
+theorem findInstrAtPc_some_mem {Instr : Type} (pc : Nat) :
+    ∀ (prog : List (DecodedInstr Instr)) (d : DecodedInstr Instr),
+      findInstrAtPc pc prog = some d → d ∈ prog ∧ d.offset = pc := by
+  intro prog
+  induction prog with
+  | nil => intro d h; exact absurd h (by simp [findInstrAtPc])
+  | cons x xs ih =>
+    intro d h
+    simp only [findInstrAtPc] at h
+    split at h
+    · rename_i hx
+      have hxd : x = d := Option.some.inj h
+      subst hxd
+      exact ⟨List.mem_cons_self, by simpa using hx⟩
+    · obtain ⟨hm, ho⟩ := ih d h
+      exact ⟨List.mem_cons_of_mem _ hm, ho⟩
+
+/-- One fetch-step where the instruction is located by evaluating `findInstrAtPc` on the decoded
+program (`hfind` is closed by `rfl` once the state's `pc` is a literal). -/
+theorem runX86Fetch_step_prog (fetch : Nat → Option (DecodedInstr X86Instr))
+    (prog : List (DecodedInstr X86Instr)) (hf : ∀ d ∈ prog, fetch d.offset = some d)
+    (fuel : Nat) (s : X86State) (d : DecodedInstr X86Instr) (hh : s.halted = false)
+    (hfind : findInstrAtPc s.pc prog = some d) :
+    runX86Fetch fetch (fuel + 1) s =
+      let r := stepX86 d s
+      let u := runX86Fetch fetch fuel r.1
+      (u.1, r.2 :: u.2) := by
+  obtain ⟨hm, ho⟩ := findInstrAtPc_some_mem _ _ _ hfind
+  exact runX86Fetch_step fetch fuel s d hh (by rw [← ho]; exact hf d hm)
+
+/-- Generic `AArch64` fetch-step runner parameterized by instruction fetch (`decodeArm64One` or `findInstrAtPc`). -/
+def runArm64Fetch (fetch : Nat → Option (DecodedInstr Arm64Instr)) :
+    Nat → Arm64State → Arm64State × List StepObs
+  | 0, s => (s, [])
+  | fuel + 1, s =>
+    if s.halted then (s, [])
+    else match fetch s.pc with
+    | none => ({ s with halted := true }, [])
+    | some d =>
+      let (s', obs) := stepArm64 d s
+      let (sFinal, restObs) := runArm64Fetch fetch fuel s'
+      (sFinal, obs :: restObs)
+
+/-- Live byte-decoded `AArch64` execution fetching each instruction directly via `decodeArm64One`. -/
+def runArm64One (code : List UInt8) : Nat → Arm64State → Arm64State × List StepObs :=
+  runArm64Fetch (decodeArm64One code)
+
+theorem runArm64_eq_runArm64Fetch (prog : List (DecodedInstr Arm64Instr)) (fuel : Nat) (s : Arm64State) :
+    runArm64 prog fuel s = runArm64Fetch (fun pc => findInstrAtPc pc prog) fuel s := by
+  induction fuel generalizing s with
+  | zero => rfl
+  | succ k ih =>
+    change (if s.halted then (s, []) else _) = (if s.halted then (s, []) else _)
+    cases s.halted
+    · dsimp only
+      cases hfind : findInstrAtPc s.pc prog with
+      | none => rfl
+      | some d =>
+        dsimp only
+        rw [ih (stepArm64 d s).1]
+    · rfl
+
+theorem runArm64Fetch_halted (fetch : Nat → Option (DecodedInstr Arm64Instr)) (fuel : Nat)
+    (s : Arm64State) (h : s.halted = true) :
+    runArm64Fetch fetch fuel s = (s, []) := by
+  cases fuel with
+  | zero => rfl
+  | succ k =>
+    change (if s.halted then (s, []) else _) = (s, [])
+    rw [h]; rfl
+
+theorem runArm64Fetch_step (fetch : Nat → Option (DecodedInstr Arm64Instr)) (fuel : Nat)
+    (s : Arm64State) (d : DecodedInstr Arm64Instr) (hh : s.halted = false) (hf : fetch s.pc = some d) :
+    runArm64Fetch fetch (fuel + 1) s =
+      let r := stepArm64 d s
+      let u := runArm64Fetch fetch fuel r.1
+      (u.1, r.2 :: u.2) := by
+  change (if s.halted then (s, []) else _) = _
+  rw [hh, hf]; rfl
+
+/-! ## §3. Full State+Trace Step Equations & Arithmetic / SIMD Helpers -/
+
+theorem u64_eq_of_toNat_eq {a b : UInt64} (h : a.toNat = b.toNat) : a = b := by
+  cases a; cases b; congr; exact BitVec.eq_of_toNat_eq h
+
+theorem bv64_ne_zero_iff_u64_ne_zero (n : Word) :
+    n ≠ 0 ↔ UInt64.ofBitVec n ≠ 0 := by
+  constructor
+  · intro hn h0
+    apply hn
+    apply BitVec.eq_of_toNat_eq
+    have := congrArg UInt64.toNat h0
+    simpa using this
+  · intro hu hn
+    subst hn
+    exact hu rfl
+
+theorem bv64_pos_of_ne_zero (n : Word) (hn : n ≠ 0) : 0 < n.toNat := by
+  rcases Nat.eq_zero_or_pos n.toNat with hz | hp
+  · exfalso
+    apply hn
+    apply BitVec.eq_of_toNat_eq
+    simpa using hz
+  · exact hp
+
+theorem u64_evalAdd64_val (a b : UInt64) (cf : Bool) :
+    (evalX86Alu .add true a b cf).1 = a + b := by
+  apply u64_eq_of_toNat_eq
+  change (UInt64.ofNat ((a.toNat + b.toNat) % 0x10000000000000000)).toNat = (a + b).toNat
+  rw [UInt64.toNat_ofNat', UInt64.toNat_add]
+  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+  omega
+
+theorem vpxor_self (v : Vec256) : evalVecBin256 .vpxor v v = Vec256.zero := by
+  cases v
+  simp [evalVecBin256, Vec256.zero]
+
+def bcastQword256 (w : UInt64) : Vec256 := ⟨w, w, w, w⟩
+
+def bcastByte256 (b : UInt8) : Vec256 :=
+  let w := mapBytes64 (fun _ => b)
+  ⟨w, w, w, w⟩
+
+def clmul256 (v1 v2 : Vec256) (imm : UInt8) : Vec256 :=
+  let selLo1 := if (imm &&& 0x01) == 0 then v1.w0 else v1.w1
+  let selLo2 := if (imm &&& 0x10) == 0 then v2.w0 else v2.w1
+  let pLo := clmul64 selLo1 selLo2
+  let selHi1 := if (imm &&& 0x01) == 0 then v1.w2 else v1.w3
+  let selHi2 := if (imm &&& 0x10) == 0 then v2.w2 else v2.w3
+  let pHi := clmul64 selHi1 selHi2
+  ⟨pLo.w0, pLo.w1, pHi.w0, pHi.w1⟩
+
+def zeroUpperVec256 (v : Vec256) : Vec256 := ⟨v.w0, v.w1, 0, 0⟩
+
+theorem zeroUpperVec256_zero : zeroUpperVec256 Vec256.zero = Vec256.zero := by rfl
+
+theorem vzeroupper_bank16 (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256) :
+    Bank16.ofFn (fun i =>
+      let v := (Bank16.mk y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15).get i
+      ⟨v.w0, v.w1, 0, 0⟩) =
+    Bank16.mk (zeroUpperVec256 y0) (zeroUpperVec256 y1) (zeroUpperVec256 y2) (zeroUpperVec256 y3)
+      (zeroUpperVec256 y4) (zeroUpperVec256 y5) (zeroUpperVec256 y6) (zeroUpperVec256 y7)
+      (zeroUpperVec256 y8) (zeroUpperVec256 y9) (zeroUpperVec256 y10) (zeroUpperVec256 y11)
+      (zeroUpperVec256 y12) (zeroUpperVec256 y13) (zeroUpperVec256 y14) (zeroUpperVec256 y15) := by rfl
+
+section FullSteps
+variable (off len pc : Nat) (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool)
+  (m : UInt64 → UInt8)
+
+theorem stepX86Full_movRR (is64 : Bool) (dst src : Nat) :
+    stepX86 ⟨off, len, .movRegReg is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (maskGprWidth is64 (g.get src)), y, cf, o, zf, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_movImm (is64 : Bool) (dst : Nat) (imm : UInt64) :
+    stepX86 ⟨off, len, .movImm is64 dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (maskGprWidth is64 imm), y, cf, o, zf, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_load8 (dst base : Nat) :
+    stepX86 ⟨off, len, .loadGpr 1 false dst (.baseDisp base 0)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (maskGprWidth false (m (g.get base)).toUInt64), y, cf, o, zf, dy, false, m⟩,
+       ⟨off, [(g.get base, 1)], true⟩) := by
+  simp only [stepX86, evalX86Addr, UInt64.add_zero]
+  rfl
+
+theorem stepX86Full_store8 (src base : Nat) :
+    stepX86 ⟨off, len, .storeGpr 1 src (.baseDisp base 0)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y, cf, o, zf, dy, false, writeMem8 m (g.get base) (g.get src).toUInt8⟩,
+       ⟨off, [(g.get base, 1)], true⟩) := by
+  simp only [stepX86, evalX86Addr, UInt64.add_zero]
+  rfl
+
+theorem stepX86Full_xorRR (is64 : Bool) (dst src : Nat) :
+    stepX86 ⟨off, len, .aluRegReg .xorOp is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (maskGprWidth is64 (g.get dst ^^^ g.get src)), y, false, false,
+        maskGprWidth is64 (g.get dst ^^^ g.get src) == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_orRR (is64 : Bool) (dst src : Nat) :
+    stepX86 ⟨off, len, .aluRegReg .orOp is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (maskGprWidth is64 (g.get dst ||| g.get src)), y, false, false,
+        maskGprWidth is64 (g.get dst ||| g.get src) == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_subImm32 (dst : Nat) (imm : UInt64) :
+    stepX86 ⟨off, len, .aluImm .sub false dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len,
+        g.set dst (maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
+          (maskGprWidth false imm).toNat) % 0x100000000))), y,
+        decide ((maskGprWidth false (g.get dst)).toNat < (maskGprWidth false imm).toNat),
+        evalX86AluOf .sub false (g.get dst) imm cf,
+        maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
+          (maskGprWidth false imm).toNat) % 0x100000000)) == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_shr32_31 (dst : Nat) :
+    stepX86 ⟨off, len, .shiftImm .shr false dst 31⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len,
+        g.set dst (maskGprWidth false (maskGprWidth false (g.get dst) >>> UInt64.ofNat (31 % 32))), y,
+        ((maskGprWidth false (g.get dst) >>> UInt64.ofNat (31 % 32 - 1)) &&& 1) != 0,
+        (maskGprWidth false (g.get dst) &&& 0x80000000) != 0,
+        maskGprWidth false (maskGprWidth false (g.get dst) >>> UInt64.ofNat (31 % 32)) == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_addImm64 (dst : Nat) (imm : UInt64) :
+    stepX86 ⟨off, len, .aluImm .add true dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (g.get dst + imm), y,
+        (evalX86Alu .add true (g.get dst) imm cf).2.1,
+        evalX86AluOf .add true (g.get dst) imm cf,
+        (evalX86Alu .add true (g.get dst) imm cf).2.2, dy, false, m⟩,
+       ⟨off, [], true⟩) := by
+  simp only [stepX86, u64_evalAdd64_val]
+
+theorem stepX86Full_inc64 (dst : Nat) :
+    stepX86 ⟨off, len, .incDec true true dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (g.get dst + 1), y, cf, evalX86IncDecOf true true (g.get dst),
+        g.get dst + 1 == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_dec64 (dst : Nat) :
+    stepX86 ⟨off, len, .incDec false true dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (g.get dst - 1), y, cf, evalX86IncDecOf false true (g.get dst),
+        g.get dst - 1 == 0, dy, false, m⟩,
+       ⟨off, [], true⟩) := by
+  have h : stepX86 ⟨off, len, .incDec false true dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g.set dst (g.get dst + (0 - 1)), y, cf, evalX86IncDecOf false true (g.get dst),
+        g.get dst + (0 - 1) == 0, dy, false, m⟩, ⟨off, [], true⟩) := rfl
+  rw [h, u64_add_neg_one]
+
+theorem stepX86Full_jnz (tgt : Int) :
+    stepX86 ⟨off, len, .jcc 5 tgt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨jccPc (!zf) tgt (off + len), g, y, cf, o, zf, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_mfence :
+    stepX86 ⟨off, len, .mfence⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y, cf, o, zf, dy, false, m⟩, ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_ret :
+    stepX86 ⟨off, len, .ret⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨pc, g, y, cf, o, zf, dy, true, m⟩, ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_vload256 (dst base : Nat) :
+    stepX86 ⟨off, len, .vload true dst (.baseDisp base 0)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (readMem256 m (g.get base)), cf, o, zf, true, false, m⟩,
+       ⟨off, [(g.get base, 32)], true⟩) := by
+  simp only [stepX86, evalX86Addr, UInt64.add_zero, Bool.or_true]
+  rfl
+
+theorem stepX86Full_vstore256 (src base : Nat) :
+    stepX86 ⟨off, len, .vstore true src (.baseDisp base 0)⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y, cf, o, zf, dy, false, writeMem256 m (g.get base) (y.get src)⟩,
+       ⟨off, [(g.get base, 32)], true⟩) := by
+  simp only [stepX86, evalX86Addr, UInt64.add_zero]
+  rfl
+
+theorem stepX86Full_vmovGprToXmm (is64 : Bool) (dstVec srcGpr : Nat) :
+    stepX86 ⟨off, len, .vmovGprToXmm is64 dstVec srcGpr⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dstVec ⟨maskGprWidth is64 (g.get srcGpr), 0, 0, 0⟩, cf, o, zf, dy, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepX86Full_vpbroadcastQ (dst src : Nat) :
+    stepX86 ⟨off, len, .vpbroadcast true true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (bcastQword256 (y.get src).w0), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by cases dy <;> rfl
+
+theorem stepX86Full_vpbroadcastB (dst src : Nat) :
+    stepX86 ⟨off, len, .vpbroadcast false true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (bcastByte256 (y.get src).w0.toUInt8), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by cases dy <;> rfl
+
+theorem stepX86Full_vgf2p8affine256 (dst s1 s2 : Nat) (imm : UInt8) :
+    stepX86 ⟨off, len, .vgf2p8affineqb true dst s1 s2 imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (gfniAffineVec256 (y.get s1) (y.get s2) imm), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by
+  simp only [stepX86, clampVecWidth, Bool.or_true]
+  rfl
+
+theorem stepX86Full_vbinOp256 (op : X86VecBinOp) (dst s1 s2 : Nat) :
+    stepX86 ⟨off, len, .vbinOp op true dst s1 s2⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (evalVecBin256 op (y.get s1) (y.get s2)), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by
+  simp only [stepX86, clampVecWidth, Bool.or_true]
+  rfl
+
+theorem stepX86Full_vshift256 (sk : X86VecShiftKind) (dst src imm : Nat) :
+    stepX86 ⟨off, len, .vshiftImm sk true dst src imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (evalVecShift256 sk (y.get src) imm), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by
+  simp only [stepX86, clampVecWidth, Bool.or_true]
+  rfl
+
+theorem stepX86Full_vpclmul256 (dst s1 s2 : Nat) (imm : UInt8) :
+    stepX86 ⟨off, len, .vpclmulqdq true dst s1 s2 imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, y.set dst (clmul256 (y.get s1) (y.get s2) imm), cf, o, zf, true, false, m⟩,
+       ⟨off, [], true⟩) := by
+  simp only [stepX86, clmul256, Bool.or_true]
+  rfl
+
+theorem stepX86Full_vzeroupper :
+    stepX86 ⟨off, len, .vzeroupper⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩ =
+      (⟨off + len, g, Bank16.ofFn (fun i => let v := y.get i; ⟨v.w0, v.w1, 0, 0⟩), cf, o, zf, false, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+end FullSteps
+
+section ArmFullSteps
+variable (off len pc : Nat) (g : Bank32 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool)
+  (m : UInt64 → UInt8)
+
+theorem stepArm64Full_strbPost31_0 :
+    stepArm64 ⟨off, len, .strbPost 31 0 1⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      (⟨off + 4, armSet g 0 (armGet g 0 + 1), v, cf, zf, dit, false, writeMem8 m (armGet g 0) 0⟩,
+       ⟨off, [(armGet g 0, 1)], true⟩) := by rfl
+
+theorem stepArm64Full_subsImm1_1 :
+    stepArm64 ⟨off, len, .aluImm .subs true 1 1 1⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      (⟨off + 4, armSet g 1 (armGet g 1 - 1), v, decide ((armGet g 1).toNat ≥ 1),
+        armGet g 1 - 1 == 0, dit, false, m⟩,
+       ⟨off, [], true⟩) := by
+  have hsub : UInt64.ofNat (((armGet g 1).toNat + 0x10000000000000000 - 1) %
+      0x10000000000000000) = armGet g 1 - 1 := by
+    apply u64_eq_of_toNat_eq
+    have hlt : (armGet g 1).toNat < 18446744073709551616 := (armGet g 1).toNat_lt
+    have h1 : (1 : UInt64).toNat = 1 := rfl
+    have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+    rw [UInt64.toNat_ofNat', UInt64.toNat_sub, h1, h64]
+    omega
+  have h : stepArm64 ⟨off, len, .aluImm .subs true 1 1 1⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      ((⟨off + 4,
+        armSet g 1 (UInt64.ofNat (((armGet g 1).toNat + 0x10000000000000000 - 1) % 0x10000000000000000)),
+        v, decide ((armGet g 1).toNat ≥ 1),
+        UInt64.ofNat (((armGet g 1).toNat + 0x10000000000000000 - 1) % 0x10000000000000000) == 0,
+        dit, false, m⟩ : Arm64State), (⟨off, [], true⟩ : StepObs)) := rfl
+  rw [h, hsub]
+
+theorem stepArm64Full_bne0 :
+    stepArm64 ⟨off, len, .bCond 1 0⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      (⟨jccPc (!zf) 0 (off + 4), g, v, cf, zf, dit, false, m⟩,
+       ⟨off, [], true⟩) := by rfl
+
+theorem stepArm64Full_dmbIsh :
+    stepArm64 ⟨off, len, .dmbIsh⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      (⟨off + 4, g, v, cf, zf, dit, false, m⟩, ⟨off, [], true⟩) := by rfl
+
+theorem stepArm64Full_ret :
+    stepArm64 ⟨off, len, .ret⟩ ⟨pc, g, v, cf, zf, dit, false, m⟩ =
+      (⟨pc, g, v, cf, zf, dit, true, m⟩, ⟨off, [], true⟩) := by rfl
+
+end ArmFullSteps
+
+theorem mask32_xor_self_eq (x : UInt64) : maskGprWidth false (x ^^^ x) = 0 := by
+  rw [UInt64.xor_self]; rfl
+
+theorem u64_zero_beq_true : ((0 : UInt64) == 0) = true := by rfl
+
+
+end Qsag.SydTv
+
+namespace Qsag.Machine
+/-- Byte-selected x86 contract. The checker's `FuncContract` carries its hardware and
+initial-state assumptions; this view records exactly the runner's `StepObs` trace. -/
+def x86CodeLeakageContract (code : List UInt8) (c : Qsag.FuncContract) :
+    Spec.LeakageContract Qsag.X86State Nat Qsag.StepObs where
+  publicEq := Qsag.X86ContractInit c
+  admissible mode _ := mode = Spec.ExecMode.constantTimeSafe
+  observe _ s fuel := match Qsag.decodeX86Stream code with
+    | none => []
+    | some prog => (Qsag.runX86 prog fuel s).2
+
+theorem checkX86_refines_leakage_contract {code : List UInt8} {c : Qsag.FuncContract}
+    (h : Qsag.checkX86ThreeWayNI code c = true) :
+    (x86CodeLeakageContract code c).ConstTimeUnder := by
+  intro mode s₁ s₂ fuel _ _ hi
+  obtain ⟨prog, hd, heq, _⟩ := Qsag.checkX86ThreeWayNI_sound h hi fuel
+  simpa only [x86CodeLeakageContract, hd] using heq
+
+/-- AArch64 counterpart; DIT entry-state obligations remain explicit in `FuncContract`. -/
+def arm64CodeLeakageContract (code : List UInt8) (c : Qsag.FuncContract) :
+    Spec.LeakageContract Qsag.Arm64State Nat Qsag.StepObs where
+  publicEq := Qsag.Arm64ContractInit c
+  admissible mode _ := mode = Spec.ExecMode.constantTimeSafe
+  observe _ s fuel := match Qsag.decodeArm64Stream code with
+    | none => []
+    | some prog => (Qsag.runArm64 prog fuel s).2
+
+theorem checkArm64_refines_leakage_contract {code : List UInt8} {c : Qsag.FuncContract}
+    (h : Qsag.checkArm64ThreeWayNI code c = true) :
+    (arm64CodeLeakageContract code c).ConstTimeUnder := by
+  intro mode s₁ s₂ fuel _ _ hi
+  obtain ⟨prog, hd, heq, _⟩ := Qsag.checkArm64ThreeWayNI_sound h hi fuel
+  simpa only [arm64CodeLeakageContract, hd] using heq
+end Qsag.Machine
+
+public section
+namespace Qsag.SydTv
+@[simp] theorem runX86One_eq (code : List UInt8) :
+    runX86One code = runX86Fetch (decodeX86One code) := by rfl
+@[simp] theorem runArm64One_eq (code : List UInt8) :
+    runArm64One code = runArm64Fetch (decodeArm64One code) := by rfl
+end Qsag.SydTv
+
+public section
+namespace Qsag
+@[simp] theorem armSet_hi0 (g : Bank32 UInt64) (v : UInt64) : (armSet g 0 v).hi = g.hi := by rfl
+@[simp] theorem armSet_hi1 (g : Bank32 UInt64) (v : UInt64) : (armSet g 1 v).hi = g.hi := by rfl
+theorem evalVecBin256_xor_eq (a b : Vec256) : evalVecBin256 .vpxor a b =
+    ⟨a.w0 ^^^ b.w0, a.w1 ^^^ b.w1, a.w2 ^^^ b.w2, a.w3 ^^^ b.w3⟩ := by rfl
+theorem evalVecShift256_left8 (v : Vec256) : evalVecShift256 .vpslldq v 8 =
+    ⟨0, v.w0 <<< 0, 0, v.w2 <<< 0⟩ := by rfl
+theorem evalVecShift256_right8 (v : Vec256) : evalVecShift256 .vpsrldq v 8 =
+    ⟨v.w1 >>> 0, 0, v.w3 >>> 0, 0⟩ := by rfl
+end Qsag
+namespace Qsag.SydTv
+open Qsag
+theorem bcastQword256_eq (w : UInt64) : bcastQword256 w = ⟨w, w, w, w⟩ := by rfl
+theorem clmul256_eq_0 (a b : Vec256) : clmul256 a b 0 =
+    ⟨(clmul64 a.w0 b.w0).w0, (clmul64 a.w0 b.w0).w1,
+      (clmul64 a.w2 b.w2).w0, (clmul64 a.w2 b.w2).w1⟩ := by rfl
+theorem clmul256_eq_1 (a b : Vec256) : clmul256 a b 1 =
+    ⟨(clmul64 a.w1 b.w0).w0, (clmul64 a.w1 b.w0).w1,
+      (clmul64 a.w3 b.w2).w0, (clmul64 a.w3 b.w2).w1⟩ := by rfl
+theorem clmul256_eq_16 (a b : Vec256) : clmul256 a b 16 =
+    ⟨(clmul64 a.w0 b.w1).w0, (clmul64 a.w0 b.w1).w1,
+      (clmul64 a.w2 b.w3).w0, (clmul64 a.w2 b.w3).w1⟩ := by rfl
+theorem clmul256_eq_17 (a b : Vec256) : clmul256 a b 17 =
+    ⟨(clmul64 a.w1 b.w1).w0, (clmul64 a.w1 b.w1).w1,
+      (clmul64 a.w3 b.w3).w0, (clmul64 a.w3 b.w3).w1⟩ := by rfl
+end Qsag.SydTv

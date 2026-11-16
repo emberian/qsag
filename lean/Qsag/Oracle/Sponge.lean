@@ -15,7 +15,7 @@ domains behave as independent random oracles" needs that reduction, which is a s
 obligation and is not proved in this module.
 
 1. **Multi-block rate-`r` sponge specification and padded-encoding injectivity
-   (`pad10star1_joint_injective`, `pad10star1_injective`, `absorbPayload_cross_domain_disjoint`)**:
+   (`pad10star1_joint_injective`, `pad10star1_injective`, `absorbPayload_cross_domain_encodings_ne`)**:
    byte-level rate-`r` (`r = 136` for `SHAKE256` / `cSHAKE256` / `TurboSHAKE256` / `SHA3-256`,
    `r = 64` for the 8-limb `Poseidon2` byte rate) multi-block XOR absorption, `pad10*1` padding,
    and arbitrary-length multi-block squeezing over any function `π` on states, proved equal to
@@ -27,7 +27,7 @@ obligation and is not proved in this module.
    `cshakePrefix N₁ S₁ ++ m₁ = cshakePrefix N₂ S₂ ++ m₂ → N₁ = N₂ ∧ S₁ = S₂ ∧ m₁ = m₂`, where
    `cshakePrefix N S = bytepad(encodeString(N) || encodeString(S), 136)`. Consequently the
    padded block sequences of distinct `(N, S)` pairs, the `QSAG.*` customization tags included,
-   are unequal as sequences (`cshake256_domains_disjoint`, `qsag_tags_sponge_domains_disjoint`).
+   are unequal as sequences (`cshake256_encodings_ne`, `qsag_tags_sponge_encodings_ne`).
 3. **Precomputed-midstate equivalence (`cshake_precomputed_midstate_eq`,
    `keccak_cshake256_precomputed_midstate_eq`)**:
    whenever `encodeString(N) ++ encodeString(S)` fits in a single `136`-byte `bytepad` block
@@ -199,12 +199,12 @@ theorem pad10star1_injective {r : Nat} {domByte : UInt8} {m₁ m₂ : List UInt8
     rw [← (absorbPayload_flatten hr domByte m₁).1, ← (absorbPayload_flatten hr domByte m₂).1, hBlocks]
   exact (pad10star1_joint_injective hr hDom hDom hFlat).2
 
-/-- **Cross-domain inequality of padded block sequences (`absorbPayload_cross_domain_disjoint`)**:
+/-- **Cross-domain inequality of padded block sequences (`absorbPayload_cross_domain_encodings_ne`)**:
     for distinct valid domain bytes `d₁ ≠ d₂` and any messages `m₁, m₂`, the complete padded
     block sequences `absorbPayload r d₁ m₁` and `absorbPayload r d₂ m₂` are unequal. This is
     inequality of the two encodings as whole sequences; they may share leading blocks, and nothing
     is claimed about the permutation queries made while absorbing them. -/
-theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
+theorem absorbPayload_cross_domain_encodings_ne {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
     (hr : 0 < r) (hNe : d₁ ≠ d₂) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) :
     absorbPayload r d₁ m₁ ≠ absorbPayload r d₂ m₂ := by
   intro hEq
@@ -214,13 +214,13 @@ theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ 
 
 /-- The padded block sequences of `SHAKE256` (`0x1F`), `cSHAKE256` (`0x04`), and `SHA3-256` (`0x06`)
     inputs are pairwise unequal (as complete sequences). -/
-theorem fips202_shake_cshake_sha3_domains_disjoint (m₁ m₂ : List UInt8) :
+theorem fips202_shake_cshake_sha3_encodings_ne (m₁ m₂ : List UInt8) :
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
     absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
     absorbPayload 136 domCshake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
-  ⟨absorbPayload_cross_domain_disjoint m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
-   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
-   absorbPayload_cross_domain_disjoint m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩⟩
+  ⟨absorbPayload_cross_domain_encodings_ne m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
+   absorbPayload_cross_domain_encodings_ne m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩,
+   absorbPayload_cross_domain_encodings_ne m₁ m₂ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩⟩
 /-- Generic multi-block sponge absorption over arbitrary permutation `π : σ → σ`. -/
 @[expose] def spongeAbsorbBlocks {σ : Type} (π : σ → σ) (xorBlk : σ → List UInt8 → σ) (s : σ) : List (List UInt8) → σ
   | [] => s
@@ -369,13 +369,13 @@ theorem cshakePrefix_injective {N₁ S₁ N₂ S₂ : List UInt8}
   have h := cshakePrefix_prefix_free (m₁ := []) (m₂ := []) hN₁ hS₁ hN₂ hS₂ (by simpa using hEq)
   exact ⟨h.1, h.2.1⟩
 
-/-- **Inequality of `cSHAKE256` padded encodings (`cshake256_domains_disjoint`)**:
+/-- **Inequality of `cSHAKE256` padded encodings (`cshake256_encodings_ne`)**:
     for distinct `(N₁, S₁) ≠ (N₂, S₂)` (including when one pair is `([], [])`) and any messages
     `m₁, m₂`, the complete padded 136-byte block sequences are unequal. As with
-    `absorbPayload_cross_domain_disjoint`, this is inequality of whole encodings; the sequences can
+    `absorbPayload_cross_domain_encodings_ne`, this is inequality of whole encodings; the sequences can
     agree on a prefix of blocks, and no disjointness of permutation queries or
     indifferentiability bound is claimed. -/
-theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
+theorem cshake256_encodings_ne {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
     (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
     (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
     (hNe : (N₁, S₁) ≠ (N₂, S₂)) :
@@ -388,8 +388,8 @@ theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂
   split <;> split
   · rename_i hEmpty₁ hEmpty₂
     exact False.elim (hNe (Prod.ext (hEmpty₁.1.trans hEmpty₂.1.symm) (hEmpty₁.2.trans hEmpty₂.2.symm)))
-  · exact absorbPayload_cross_domain_disjoint _ _ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩
-  · exact fun h => absorbPayload_cross_domain_disjoint _ _ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ h.symm
+  · exact absorbPayload_cross_domain_encodings_ne _ _ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩
+  · exact fun h => absorbPayload_cross_domain_encodings_ne _ _ (by decide +kernel) (by decide +kernel) ⟨by decide, by decide⟩ ⟨by decide, by decide⟩ h.symm
   · intro hBlocks
     have hMsg := pad10star1_injective (by decide +kernel) ⟨by decide, by decide⟩ hBlocks
     obtain ⟨hNEq, hSEq, _⟩ := cshakePrefix_prefix_free hN₁ hS₁ hN₂ hS₂ hMsg
@@ -401,7 +401,7 @@ def qsagTagCanopyNode : List UInt8 := [81, 83, 65, 71, 46, 87, 72, 73, 82, 46, 6
 def qsagTagFiatShamir : List UInt8 := [81, 83, 65, 71, 46, 70, 83, 47, 118, 49]
 def qsagTagFtsOtPad   : List UInt8 := [81, 83, 65, 71, 46, 70, 84, 83, 46, 79, 84, 46, 80, 65, 68, 46, 86, 49]
 
-theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
+theorem qsag_tags_sponge_encodings_ne (m₁ m₂ : List UInt8) :
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
       absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyNode ++ m₂) ∧
     absorbPayload 136 domCshake256 (cshakePrefix [] qsagTagCanopyLeaf ++ m₁) ≠
@@ -539,5 +539,39 @@ theorem keccak_cshake256_precomputed_midstate_eq
   simp only [hNonEmpty, ↓reduceIte, absorbPadded_eq, shake256RateBytes_eq]
   exact hGen
 
+end Qsag
+end
+
+public section
+namespace Qsag
+theorem absorbPayload_cross_domain_disjoint {r : Nat} {d₁ d₂ : UInt8} (m₁ m₂ : List UInt8)
+    (hr : 0 < r) (hNe : d₁ ≠ d₂) (hd₁ : ValidDomByte d₁) (hd₂ : ValidDomByte d₂) :
+    absorbPayload r d₁ m₁ ≠ absorbPayload r d₂ m₂ :=
+  absorbPayload_cross_domain_encodings_ne m₁ m₂ hr hNe hd₁ hd₂
+
+theorem fips202_shake_cshake_sha3_domains_disjoint (m₁ m₂ : List UInt8) :
+    absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domCshake256 m₂ ∧
+    absorbPayload 136 domShake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ ∧
+    absorbPayload 136 domCshake256 m₁ ≠ absorbPayload 136 domSha3_256 m₂ :=
+  fips202_shake_cshake_sha3_encodings_ne m₁ m₂
+
+theorem cshake256_domains_disjoint {N₁ S₁ N₂ S₂ : List UInt8} (m₁ m₂ : List UInt8)
+    (hN₁ : 8 * N₁.length < 256 ^ 255) (hS₁ : 8 * S₁.length < 256 ^ 255)
+    (hN₂ : 8 * N₂.length < 256 ^ 255) (hS₂ : 8 * S₂.length < 256 ^ 255)
+    (hNe : (N₁, S₁) ≠ (N₂, S₂)) :
+    (if N₁ = [] ∧ S₁ = [] then absorbPayload 136 domShake256 m₁
+     else absorbPayload 136 domCshake256 (cshakePrefix N₁ S₁ ++ m₁)) ≠
+    (if N₂ = [] ∧ S₂ = [] then absorbPayload 136 domShake256 m₂
+     else absorbPayload 136 domCshake256 (cshakePrefix N₂ S₂ ++ m₂)) :=
+  cshake256_encodings_ne m₁ m₂ hN₁ hS₁ hN₂ hS₂ hNe
+
+theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
+    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyLeaf ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyNode ++ m₂) ∧
+    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyLeaf ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] tagWhirFold ++ m₂) ∧
+    absorbPayload 136 domCshake256 (cshakePrefix [] tagCanopyNode ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] tagWhirFold ++ m₂) :=
+  qsag_tags_sponge_encodings_ne m₁ m₂
 end Qsag
 end

@@ -33,9 +33,8 @@ classification.
 
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
 public import Qsag.Tests.SigningTeeth
-import all Qsag.Protocol.Signing.ExecEufCmaClosedGame
-import all Qsag.Protocol.Signing.ProdHashReductions
-import all Qsag.Protocol.Signing.HypertreeEufCma
+public import Qsag.Protocol.Signing.ProdHashReductions
+public import Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
 
 public section

@@ -13,10 +13,8 @@ module
 -/
 public import Qsag.Oracle.ConstructiveQuantumHilbert
 public import Qsag.Oracle.Qrom
-import all Qsag.Math.ConstructiveAmplitudeRing
-import all Qsag.Oracle.ConstructiveQuantumHilbert
-import all Qsag.Oracle.Qrom
-import all Qsag.Math.Counting
+public import Qsag.Math.ConstructiveAmplitudeRing
+public import Qsag.Math.Counting
 
 public section
 namespace Qsag

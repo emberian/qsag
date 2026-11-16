@@ -1,9 +1,7 @@
 module
 public import Qsag.Custody.SeparatedCustody
 public import Qsag.Tests.SeparatedCustodyHistoryChecks
-import all Qsag.Custody.SeparatedCustody
-import all Qsag.Tests.SeparatedCustodyHistoryChecks
-import all Qsag.Tests.SeparatedCustodyChecks
+public import Qsag.Tests.SeparatedCustodyChecks
 public section
 namespace Qsag.Custody.ReleaseChecks
 set_option autoImplicit false

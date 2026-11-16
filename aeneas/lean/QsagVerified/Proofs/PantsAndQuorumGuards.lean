@@ -285,7 +285,7 @@ def beltQuorumMealy :
         else
           some ({ st with phase := .SharesAuthorized },
             .SharesAuthorized {
-              authorized_epoch := st.bound_epoch
+              _private := (), authorized_epoch := st.bound_epoch
               msg_tag := st.bound_msg_tag
               certified_acks := st.ack_count })
   errStep st inp :=
@@ -2177,7 +2177,7 @@ def waistbandRootMealy :
       some ({ st with
         has_locked_codeword := true
         locked_ancestor_codeword_tag := req.candidate_ancestor_codeword_tag },
-        { layer := st.ancestor_layer
+        { _private := (), layer := st.ancestor_layer
           tree := st.ancestor_tree
           kp := st.ancestor_kp
           verified_child_root := st.expected_static_child_root
@@ -2206,7 +2206,7 @@ private theorem waistband_authorize_exact
           has_locked_codeword := true
           locked_ancestor_codeword_tag := req.candidate_ancestor_codeword_tag },
           .Ok {
-            layer := st.ancestor_layer
+            _private := (), layer := st.ancestor_layer
             tree := st.ancestor_tree
             kp := st.ancestor_kp
             verified_child_root := st.expected_static_child_root
@@ -2383,7 +2383,7 @@ private theorem waistband_locked_trace_sound
       p.1.recomputed_child_root = childRoot ∧
       p.1.candidate_ancestor_codeword_tag = lockedCw ∧
       p.2 = {
-        layer := layer
+        _private := (), layer := layer
         tree := tree
         kp := kp
         verified_child_root := childRoot
@@ -2500,7 +2500,7 @@ theorem waistband_root_guard_multiturn_sound
             have hTailProps := waistband_locked_trace_sound
               ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩ hTail
             have hAllCw : ∀ p ∈ (req, {
-                layer := layer, tree := tree, kp := kp,
+                _private := (), layer := layer, tree := tree, kp := kp,
                 verified_child_root := expectedChildRoot,
                 authorized_codeword_tag := req.candidate_ancestor_codeword_tag
               }) :: rest,
@@ -2736,7 +2736,7 @@ theorem inhabited_belt_quorum_trace :
   let st4 := { st1 with ack_count := 3#u32 }
   let st5 := { st4 with phase := .SharesAuthorized }
   let grant : pants_and_quorum_guards.BeltAuthorizationGrant :=
-    { authorized_epoch := 12#u64, msg_tag := tag, certified_acks := 3#u32 }
+    { _private := (), authorized_epoch := 12#u64, msg_tag := tag, certified_acks := 3#u32 }
   have hNew : pants_and_quorum_guards.BeltQuorumCore.new_validated
       3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) := by
     unfold pants_and_quorum_guards.BeltQuorumCore.new_validated
@@ -2968,7 +2968,7 @@ theorem tooth_waistband_corrupted_root_and_second_codeword_fail_closed :
   let st1 := { st0 with has_locked_codeword := true, locked_ancestor_codeword_tag := cw1 }
   let st2 := { st1 with poisoned := true }
   let permit : pants_and_quorum_guards.WaistbandAncestorPermit := {
-    layer := 3#u32, tree := 77#u64, kp := 5#u32,
+    _private := (), layer := 3#u32, tree := 77#u64, kp := 5#u32,
     verified_child_root := goodRoot, authorized_codeword_tag := cw1
   }
   have hpk_eq : ∀ c, tower.ct_eq_bytes32 (Array.repeat 32#usize c) (Array.repeat 32#usize c) = .ok true :=

@@ -1,12 +1,13 @@
 module
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.GoldilocksBase
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Exec.SimulationSpine
+public import Qsag.Exec.GuardedMachineSim
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Math.Gf2Pow128
-public import Qsag.Machine.ElfBinaryVerify
+public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.McRefine
 public import Qsag.Protocol.Threshold.ThresholdApproval
 public import Qsag.Protocol.Threshold.IdealTsig
@@ -14,16 +15,8 @@ public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Custody.CustodySuiteFull
 public import Qsag.Protocol.Threshold.RssSlhFullSecurity
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Math.CoeffPoly
-import all Qsag.Math.Goldilocks
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Exec.SimulationSpine
-import all Qsag.Exec.InteractiveUcEngine
-import all Qsag.Protocol.Threshold.RssSlhFullSecurity
-import all Qsag.Custody.CustodySuiteFull
-import all Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.ElfParse
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+public import Qsag.Math.CoeffPoly
+public import Qsag.Machine.ElfParse
 import Qsag.Tactic.AssuranceKit
 
 /-!
@@ -122,9 +115,9 @@ set_option maxRecDepth 8192
     over the extracted x86-64 and AArch64 `.rlib` object slices. -/
 structure CompiledRlibKernelSuite : Prop where
   ct_eq_32_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEq32X86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 20 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 28 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (runX86 prog fuel s).1.gpr.get 0 =
           (if ∀ i : Nat, i < 32 →
@@ -132,7 +125,7 @@ structure CompiledRlibKernelSuite : Prop where
             then 1 else 0) ∧
         (runX86 prog fuel s).1.mem = s.mem
   ct_eq_32_aarch64 :
-    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctEq32ArmName = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices ctEq32ArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 22 ≤ fuel →
         (runArm64 prog fuel s).1.halted = true ∧
@@ -142,17 +135,17 @@ structure CompiledRlibKernelSuite : Prop where
             then 1 else 0) ∧
         (runArm64 prog fuel s).1.mem = s.mem
   ct_memzero_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctMemzeroX86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
       ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 6).toNat →
-        4 * (s.gpr.get 6).toNat + 4 ≤ fuel →
+        4 * (s.gpr.get 6).toNat + 13 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (∀ i : Nat, i < (s.gpr.get 6).toNat →
           (runX86 prog fuel s).1.mem (s.gpr.get 7 + UInt64.ofNat i) = 0) ∧
         (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 6).toNat → a ≠ s.gpr.get 7 + UInt64.ofNat i) →
           (runX86 prog fuel s).1.mem a = s.mem a)
   ct_memzero_aarch64 :
-    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices ctMemzeroArmName = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices ctMemzeroArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 1).toNat →
         3 * (s.gpr.get 1).toNat + 2 ≤ fuel →
@@ -162,41 +155,41 @@ structure CompiledRlibKernelSuite : Prop where
         (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 1).toNat → a ≠ s.gpr.get 0 + UInt64.ofNat i) →
           (runArm64 prog fuel s).1.mem a = s.mem a)
   ct_eq_bytes_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices ctEqBytesX86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEqBytesX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
       ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 2).toNat →
-        8 * (s.gpr.get 2).toNat + 7 ≤ fuel →
+        8 * (s.gpr.get 2).toNat + 15 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         (runX86 prog fuel s).1.gpr.get 0 =
           (if ∀ i : Nat, i < (s.gpr.get 2).toNat →
               s.mem (s.gpr.get 7 + UInt64.ofNat i) = s.mem (s.gpr.get 6 + UInt64.ofNat i)
             then 1 else 0)
   goldilocks_add_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldAddX86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 17 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat + (s.gpr.get 6).toNat) % goldilocksPrime
   goldilocks_sub_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldSubX86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 23 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 31 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat + goldilocksPrime - (s.gpr.get 6).toNat % goldilocksPrime) %
             goldilocksPrime
   goldilocks_mul_x86_64 :
-    ∃ slice prog, findSliceByNameBytes x86ExtractedSlices goldMulX86Name = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 33 ≤ fuel →
         (runX86 prog fuel s).1.halted = true ∧
         ((runX86 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 7).toNat * (s.gpr.get 6).toNat) % goldilocksPrime
   goldilocks_mul_aarch64 :
-    ∃ slice prog, findSliceByNameBytes aarch64ExtractedSlices goldMulArmName = some slice ∧
+    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
-      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 29 ≤ fuel →
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 30 ≤ fuel →
         (runArm64 prog fuel s).1.halted = true ∧
         ((runArm64 prog fuel s).1.gpr.get 0).toNat =
           ((s.gpr.get 0).toNat * (s.gpr.get 1).toNat) % goldilocksPrime
@@ -204,33 +197,33 @@ structure CompiledRlibKernelSuite : Prop where
 /-- Discharges all 9 compiled `.rlib` machine-code equivalence obligations from `Qsag.McRefine`. -/
 theorem compiled_rlib_nine_kernels_verified : CompiledRlibKernelSuite where
   ct_eq_32_x86_64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_32_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_32_x86_64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, h3, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2, h3⟩⟩
   ct_eq_32_aarch64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_32_aarch64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_32_aarch64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, h3, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2, h3⟩⟩
-  ct_memzero_x86_64 := ct_memzero_x86_64_mc_refines
-  ct_memzero_aarch64 := ct_memzero_aarch64_mc_refines
+  ct_memzero_x86_64 := current_ct_memzero_x86_64_mc_refines
+  ct_memzero_aarch64 := current_ct_memzero_aarch64_mc_refines
   ct_eq_bytes_x86_64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_bytes_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_bytes_x86_64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hn hf' =>
       let ⟨h1, h2, _⟩ := hSpec s fuel hpc hh hn hf'; ⟨h1, h2⟩⟩
   goldilocks_add_x86_64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := goldilocks_add_ct_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_goldilocks_add_ct_x86_64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2⟩⟩
   goldilocks_sub_x86_64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := goldilocks_sub_ct_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_goldilocks_sub_ct_x86_64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2⟩⟩
   goldilocks_mul_x86_64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := goldilocks_mul_ct_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_goldilocks_mul_ct_x86_64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2⟩⟩
   goldilocks_mul_aarch64 := by
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := goldilocks_mul_ct_aarch64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_goldilocks_mul_ct_aarch64_mc_refines
     exact ⟨sl, prog, hf, hd, fun s fuel hpc hh hf' =>
       let ⟨h1, h2, _⟩ := hSpec s fuel hpc hh hf'; ⟨h1, h2⟩⟩
 
@@ -300,14 +293,14 @@ theorem mc_ct_eq_32_refines_digest_equality (d₁ d₂ : List UInt8)
     (hLen₁ : d₁.length = 32) (hLen₂ : d₂.length = 32) :
     let m := writeBytesWindow (writeBytesWindow (fun _ => 0) 0x100 d₁) 0x200 d₂
     (∃ slice prog,
-      findSliceByNameBytes x86ExtractedSlices ctEq32X86Name = some slice ∧
+      findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      let out := (runX86 prog 20 (mkX86MemCall 0x100 0x200 0 m)).1
+      let out := (runX86 prog 28 (mkX86MemCall 0x100 0x200 0 m)).1
       out.halted = true ∧
       out.gpr.get 0 = (if d₁ = d₂ then 1 else 0) ∧
       ((out.gpr.get 0 == 1) = true ↔ d₁ = d₂)) ∧
     (∃ slice prog,
-      findSliceByNameBytes aarch64ExtractedSlices ctEq32ArmName = some slice ∧
+      findSliceByNameBytes currentAarch64ExtractedSlices ctEq32ArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       let out := (runArm64 prog 22 (mkArmMemCall 0x100 0x200 m)).1
       out.halted = true ∧
@@ -345,10 +338,10 @@ theorem mc_ct_eq_32_refines_digest_equality (d₁ d₂ : List UInt8)
       rw [h100, h200, hL, hR]
       exact hAll i hi
   constructor
-  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_32_x86_64_mc_refines
+  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_32_x86_64_mc_refines
     refine ⟨sl, prog, hf, hd, ?_⟩
     obtain ⟨hHalt, hRax, _⟩ :=
-      hSpec (mkX86MemCall 0x100 0x200 0 m) 20 rfl rfl (Nat.le_refl 20)
+      hSpec (mkX86MemCall 0x100 0x200 0 m) 28 rfl rfl (Nat.le_refl 28)
     have hGpr7 : (mkX86MemCall 0x100 0x200 0 m).gpr.get 7 = 0x100 := rfl
     have hGpr6 : (mkX86MemCall 0x100 0x200 0 m).gpr.get 6 = 0x200 := rfl
     have hMemS : (mkX86MemCall 0x100 0x200 0 m).mem = m := rfl
@@ -370,7 +363,7 @@ theorem mc_ct_eq_32_refines_digest_equality (d₁ d₂ : List UInt8)
     else
       rw [ite_eq_right hEqD]
       exact ⟨fun hB => absurd hB (by decide), fun h => False.elim (hEqD h)⟩
-  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_32_aarch64_mc_refines
+  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_32_aarch64_mc_refines
     refine ⟨sl, prog, hf, hd, ?_⟩
     obtain ⟨hHalt, hX0, _⟩ :=
       hSpec (mkArmMemCall 0x100 0x200 m) 22 rfl rfl (Nat.le_refl 22)
@@ -403,14 +396,14 @@ theorem mc_ct_eq_32_refines_digest_equality (d₁ d₂ : List UInt8)
     below `0x180` untouched — directly realizing hardware share zeroization for `walPoisonVault`. -/
 theorem mc_ct_memzero_wipes_secret_share_window (m : UInt64 → UInt8) :
     (∃ slice prog,
-      findSliceByNameBytes x86ExtractedSlices ctMemzeroX86Name = some slice ∧
+      findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      let out := (runX86 prog 132 (mkX86MemCall 0x180 32 0 m)).1
+      let out := (runX86 prog 141 (mkX86MemCall 0x180 32 0 m)).1
       out.halted = true ∧
       (∀ i : Nat, i < 32 → out.mem ((0x180 : UInt64) + UInt64.ofNat i) = 0) ∧
       (∀ a : UInt64, a.toNat < 0x180 → out.mem a = m a)) ∧
     (∃ slice prog,
-      findSliceByNameBytes aarch64ExtractedSlices ctMemzeroArmName = some slice ∧
+      findSliceByNameBytes currentAarch64ExtractedSlices ctMemzeroArmName = some slice ∧
       decodeArm64Stream slice.code = some prog ∧
       let out := (runArm64 prog 98 (mkArmMemCall 0x180 32 m)).1
       out.halted = true ∧
@@ -424,13 +417,13 @@ theorem mc_ct_memzero_wipes_secret_share_window (m : UInt64 → UInt8) :
     rw [h180, addr_offset_toNat (base := 0x180) (i := i) (by omega)] at hToNat
     omega
   constructor
-  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_memzero_x86_64_mc_refines
+  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_memzero_x86_64_mc_refines
     refine ⟨sl, prog, hf, hd, ?_⟩
     obtain ⟨hHalt, hZero, hPres⟩ :=
-      hSpec (mkX86MemCall 0x180 32 0 m) 132 rfl rfl
-        (show 0 < 32 by decide) (show 4 * 32 + 4 ≤ 132 by decide)
+      hSpec (mkX86MemCall 0x180 32 0 m) 141 rfl rfl
+        (show 0 < 32 by decide) (show 4 * 32 + 13 ≤ 141 by decide)
     exact ⟨hHalt, hZero, fun a ha => hPres a (hOutside a ha)⟩
-  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_memzero_aarch64_mc_refines
+  · obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_memzero_aarch64_mc_refines
     refine ⟨sl, prog, hf, hd, ?_⟩
     obtain ⟨hHalt, hZero, hPres⟩ :=
       hSpec (mkArmMemCall 0x180 32 m) 98 rfl rfl
@@ -449,18 +442,18 @@ theorem mc_goldilocks_kernels_refine_field_and_toprf
     let ua : UInt64 := UInt64.ofNat a.val
     let ub : UInt64 := UInt64.ofNat b.val
     (∃ slAdd pAdd slSub pSub slMulX pMulX slMulA pMulA,
-      findSliceByNameBytes x86ExtractedSlices goldAddX86Name = some slAdd ∧
+      findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name = some slAdd ∧
       decodeX86Stream slAdd.code = some pAdd ∧
-      findSliceByNameBytes x86ExtractedSlices goldSubX86Name = some slSub ∧
+      findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name = some slSub ∧
       decodeX86Stream slSub.code = some pSub ∧
-      findSliceByNameBytes x86ExtractedSlices goldMulX86Name = some slMulX ∧
+      findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name = some slMulX ∧
       decodeX86Stream slMulX.code = some pMulX ∧
-      findSliceByNameBytes aarch64ExtractedSlices goldMulArmName = some slMulA ∧
+      findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName = some slMulA ∧
       decodeArm64Stream slMulA.code = some pMulA ∧
-      ((runX86 pAdd 17 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.add a b).val ∧
-      ((runX86 pSub 23 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.sub a b).val ∧
-      ((runX86 pMulX 25 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val ∧
-      ((runArm64 pMulA 29 (armInit ua ub 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val) ∧
+      ((runX86 pAdd 25 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.add a b).val ∧
+      ((runX86 pSub 31 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.sub a b).val ∧
+      ((runX86 pMulX 33 (x86Init ua ub 0 0 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val ∧
+      ((runArm64 pMulA 30 (armInit ua ub 0)).1.gpr.get 0).toNat = (Goldilocks.mul a b).val) ∧
     (∀ (masks : ToprfPerm12Masks) (keyShares inputShares : Fin 5 → Lane4)
        (serverOut : Fin 5 → Option (Fin 5 → Lane4)),
       (∀ p : Fin 5, p ≠ bad →
@@ -480,15 +473,15 @@ theorem mc_goldilocks_kernels_refine_field_and_toprf
     have hbLt := Goldilocks.val_lt_two_pow_64 b
     omega
   refine ⟨?_, (toprf_2of5_corrects_one_malicious_server H ctx layer i j hCtx bad).2.2⟩
-  obtain ⟨slA, pA, hfA, hdA, hSpecA⟩ := goldilocks_add_ct_x86_64_mc_refines
-  obtain ⟨slS, pS, hfS, hdS, hSpecS⟩ := goldilocks_sub_ct_x86_64_mc_refines
-  obtain ⟨slMX, pMX, hfMX, hdMX, hSpecMX⟩ := goldilocks_mul_ct_x86_64_mc_refines
-  obtain ⟨slMA, pMA, hfMA, hdMA, hSpecMA⟩ := goldilocks_mul_ct_aarch64_mc_refines
+  obtain ⟨slA, pA, hfA, hdA, hSpecA⟩ := current_goldilocks_add_ct_x86_64_mc_refines
+  obtain ⟨slS, pS, hfS, hdS, hSpecS⟩ := current_goldilocks_sub_ct_x86_64_mc_refines
+  obtain ⟨slMX, pMX, hfMX, hdMX, hSpecMX⟩ := current_goldilocks_mul_ct_x86_64_mc_refines
+  obtain ⟨slMA, pMA, hfMA, hdMA, hSpecMA⟩ := current_goldilocks_mul_ct_aarch64_mc_refines
   refine ⟨slA, pA, slS, pS, slMX, pMX, slMA, pMA, hfA, hdA, hfS, hdS, hfMX, hdMX, hfMA, hdMA, ?_⟩
-  have hAdd := (hSpecA (x86Init ua ub 0 0 0) 17 rfl rfl (Nat.le_refl 17)).2.1
-  have hSub := (hSpecS (x86Init ua ub 0 0 0) 23 rfl rfl (Nat.le_refl 23)).2.1
-  have hMulX := (hSpecMX (x86Init ua ub 0 0 0) 25 rfl rfl (Nat.le_refl 25)).2.1
-  have hMulA := (hSpecMA (armInit ua ub 0) 29 rfl rfl (Nat.le_refl 29)).2.1
+  have hAdd := (hSpecA (x86Init ua ub 0 0 0) 25 rfl rfl (Nat.le_refl 25)).2.1
+  have hSub := (hSpecS (x86Init ua ub 0 0 0) 31 rfl rfl (Nat.le_refl 31)).2.1
+  have hMulX := (hSpecMX (x86Init ua ub 0 0 0) 33 rfl rfl (Nat.le_refl 33)).2.1
+  have hMulA := (hSpecMA (armInit ua ub 0) 30 rfl rfl (Nat.le_refl 30)).2.1
   have hG7 : (x86Init ua ub 0 0 0).gpr.get 7 = ua := rfl
   have hG6 : (x86Init ua ub 0 0 0).gpr.get 6 = ub := rfl
   have hA0 : (armInit ua ub 0).gpr.get 0 = ua := rfl
@@ -3440,27 +3433,27 @@ def verifyPreCutTranscript {n : Nat}
   verifySessionRound1Openings activeSessionTag storedRound1Commits quorum openings &&
   verifySessionBginBatch verifierBginAlpha verifierBginKeyOffsets round2Wires
 
-/-- Run the historical pinned `.rlib` fixture `qsag_asm_ct_eq_32_x86_64` slice from `x86ExtractedSlices`
+/-- Run the pinned `.rlib` fixture `qsag_asm_ct_eq_32_x86_64` slice from `currentX86ExtractedSlices`
     on address `ptrPinned` (`0x100` or `0x140`) vs `0x200` with candidate `cand` loaded at `0x200`. -/
 def execElfCtEq32 (m : UInt64 → UInt8) (ptrPinned : UInt64) (cand : List UInt8) : Bool :=
   if cand.length != 32 then false
   else
-    match (findSliceByNameBytes x86ExtractedSlices ctEq32X86Name).bind
+    match (findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name).bind
             (fun sl => decodeX86Stream sl.code) with
     | none => false
     | some prog =>
       let mCall := writeBytesWindow m 0x200 cand
-      let out := (runX86 prog 20 (mkX86MemCall ptrPinned 0x200 0 mCall)).1
+      let out := (runX86 prog 28 (mkX86MemCall ptrPinned 0x200 0 mCall)).1
       out.halted && (out.gpr.get 0 == 1)
 
-/-- Run the historical pinned `.rlib` fixture `qsag_asm_ct_memzero_x86_64` slice (`132` instructions with
+/-- Run the pinned `.rlib` fixture `qsag_asm_ct_memzero_x86_64` slice (fuel `141`, ending in
     `mfence; ret`) to physically wipe the 32-byte key-share memory region `[0x180, 0x1A0)`. -/
 def execElfMemzeroShare32 (m : UInt64 → UInt8) : UInt64 → UInt8 :=
-  match (findSliceByNameBytes x86ExtractedSlices ctMemzeroX86Name).bind
+  match (findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name).bind
           (fun sl => decodeX86Stream sl.code) with
   | none => fun _ => 0
   | some prog =>
-    (runX86 prog 132 (mkX86MemCall 0x180 32 0 m)).1.mem
+    (runX86 prog 141 (mkX86MemCall 0x180 32 0 m)).1.mem
 
 private theorem execElfCtEq32_spec {m : UInt64 → UInt8} {pinned cand : List UInt8}
     {base : Nat}
@@ -3475,14 +3468,14 @@ private theorem execElfCtEq32_spec {m : UInt64 → UInt8} {pinned cand : List UI
       · rw [bne, hEq] at hLenNe; cases hLenNe
       · exact Nat.eq_of_beq_eq_true hEq
     simp only [Bool.false_eq_true, ↓reduceIte]
-    obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_eq_32_x86_64_mc_refines
+    obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_eq_32_x86_64_mc_refines
     rw [hf]
     dsimp only [Option.bind]
     rw [hd]
     dsimp only
     let mCall := writeBytesWindow m 0x200 cand
     obtain ⟨hHalt, hRax, _⟩ :=
-      hSpec (mkX86MemCall (UInt64.ofNat base) 0x200 0 mCall) 20 rfl rfl (Nat.le_refl 20)
+      hSpec (mkX86MemCall (UInt64.ofNat base) 0x200 0 mCall) 28 rfl rfl (Nat.le_refl 28)
     have hG7 : (mkX86MemCall (UInt64.ofNat base) 0x200 0 mCall).gpr.get 7 = UInt64.ofNat base := rfl
     have hG6 : (mkX86MemCall (UInt64.ofNat base) 0x200 0 mCall).gpr.get 6 = 0x200 := rfl
     have hMemS : (mkX86MemCall (UInt64.ofNat base) 0x200 0 mCall).mem = mCall := rfl
@@ -3533,14 +3526,14 @@ private theorem execElfMemzeroShare32_spec (m : UInt64 → UInt8) :
     (∀ i : Nat, i < 32 → execElfMemzeroShare32 m (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) ∧
     (∀ a : UInt64, a.toNat < 0x180 → execElfMemzeroShare32 m a = m a) := by
   unfold execElfMemzeroShare32
-  obtain ⟨sl, prog, hf, hd, hSpec⟩ := ct_memzero_x86_64_mc_refines
+  obtain ⟨sl, prog, hf, hd, hSpec⟩ := current_ct_memzero_x86_64_mc_refines
   rw [hf]
   dsimp only [Option.bind]
   rw [hd]
   dsimp only
   obtain ⟨_, hZero, hPres⟩ :=
-    hSpec (mkX86MemCall 0x180 32 0 m) 132 rfl rfl
-      (show 0 < 32 by decide) (show 4 * 32 + 4 ≤ 132 by decide)
+    hSpec (mkX86MemCall 0x180 32 0 m) 141 rfl rfl
+      (show 0 < 32 by decide) (show 4 * 32 + 13 ≤ 141 by decide)
   have hG7 : (mkX86MemCall 0x180 32 0 m).gpr.get 7 = UInt64.ofNat 0x180 := rfl
   have hG6 : ((mkX86MemCall 0x180 32 0 m).gpr.get 6).toNat = 32 := rfl
   refine ⟨fun i hi => by have hz := hZero i hi; rwa [hG7] at hz, fun a ha => hPres a ?_⟩
@@ -3850,7 +3843,7 @@ private def Layer34SessionEq {PK : Type} (s3 : Layer3ProtocolState PK) (s4 : Lay
 
 /-- **Link 1 (`sim_layer1_to_layer2`)**:
     `ForwardSim` from `layer1CompiledElfMachine` (executing decoded `.rlib` x86-64 `ct_eq_32` and
-    `ct_memzero` slices) to `layer2MirGuardedMachine`, proved via `ct_eq_32_x86_64_mc_refines`
+    `ct_memzero` slices) to `layer2MirGuardedMachine`, proved via `current_ct_eq_32_x86_64_mc_refines`
     and `ct_memzero_x86_64_mc_refines`. -/
 def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
     (signFromShare : List UInt8 → List UInt8 → ByteArray) :
@@ -5557,6 +5550,23 @@ def mirVelocityAuthorizeSpend (g : MirStatefulVelocityGuard) (req : MirVelocityS
 def mirVelocityMachine : PartyMachine MirStatefulVelocityGuard MirVelocitySpendRequest (BitVec 128) :=
   PartyMachine.ofOutcome mirVelocityAuthorizeSpend
 
+def mirVelocityGuard : Qsag.Exec.GuardedMachineSim.GuardedMachine MirStatefulVelocityGuard MirVelocitySpendRequest (BitVec 128) where
+  guard g req := decide ((g.policy_pin.length = 32 ∧ g.authority_pin.length = 32 ∧
+    req.policy_pin = g.policy_pin ∧ req.authority_pin = g.authority_pin) ∧
+    req.window_id = g.window_id ∧ g.last_nonce.toNat < req.nonce.toNat ∧
+    g.spent_units.toNat + req.amount_units.toNat < 2 ^ 128 ∧
+    g.spent_units.toNat + req.amount_units.toNat ≤ g.cap_units.toNat)
+  next g req := { g with
+    spent_units := BitVec.ofNat 128 (g.spent_units.toNat + req.amount_units.toNat)
+    last_nonce := req.nonce }
+  out _ req := req.amount_units
+theorem mirVelocity_models : mirVelocityGuard.Models mirVelocityMachine :=
+  mirVelocityGuard.models_ofOutcome _ (fun _ _ => ()) (fun g req => by
+    unfold mirVelocityAuthorizeSpend
+    repeat' split
+    all_goals simp_all [mirVelocityGuard]
+    all_goals omega)
+
 private theorem mirVelocityAuthorizeSpend_ok_props
     {g g' : MirStatefulVelocityGuard} {req : MirVelocitySpendRequest} {out : BitVec 128}
     (h : mirVelocityAuthorizeSpend g req = .ok g' out) :
@@ -5639,46 +5649,33 @@ theorem mirVelocity_multiTurn_cap_and_monotonic_nonce
       p.1.policy_pin = g₀.policy_pin ∧
       p.1.authority_pin = g₀.authority_pin) ∧
     tr.Pairwise (fun a b => a.1.nonce.toNat < b.1.nonce.toNat) := by
-  induction hTr with
-  | nil s =>
-    refine ⟨by simp, hCap₀, by simp, ?_, List.Pairwise.nil⟩
-    intro _ hm; cases hm
-  | @accept sCur sNext sEnd req out rest hStep _ ih =>
-    dsimp only [mirVelocityMachine, PartyMachine.ofOutcome] at hStep
-    cases hOut : mirVelocityAuthorizeSpend sCur req with
-    | err _ _ => rw [hOut] at hStep; cases hStep
-    | ok gNext vOut =>
-      rw [hOut] at hStep
-      injection hStep with hEq
-      rcases Prod.mk.inj hEq with ⟨rfl, rfl⟩
-      obtain ⟨hPol, hAuth, hWin, hNonceLt, _, hNextLeCap, hGWin, hGSpent, hGCap, hGPol, hGAuth, hGLast, rfl⟩ :=
-        mirVelocityAuthorizeSpend_ok_props hOut
-      have hCapNext : gNext.spent_units.toNat ≤ gNext.cap_units.toNat := by
-        rw [hGSpent, hGCap]; exact hNextLeCap
-      obtain ⟨ihSum, ihLe, _, ihAll, ihPair⟩ := ih hCapNext
-      rw [hGSpent] at ihSum
-      rw [hGCap] at ihLe
-      refine ⟨?_, ihLe, ?_, ?_, List.Pairwise.cons ?_ ihPair⟩
-      · dsimp only [List.map, List.foldr]
-        omega
-      · dsimp only [List.map, List.foldr]
-        omega
-      · intro p hp
-        rcases List.mem_cons.mp hp with rfl | hTail
-        · exact ⟨hNonceLt, hWin, hPol, hAuth⟩
-        · obtain ⟨hN2, hW2, hP2, hA2⟩ := ihAll p hTail
-          rw [hGLast] at hN2
-          rw [hGWin] at hW2
-          rw [hGPol] at hP2
-          rw [hGAuth] at hA2
-          exact ⟨Nat.lt_trans hNonceLt hN2, hW2, hP2, hA2⟩
-      · intro b hb
-        obtain ⟨hN2, _, _, _⟩ := ihAll b hb
-        rw [hGLast] at hN2
-        exact hN2
-  | @reject sCur sEnd req rest hNone _ ih =>
-    rw [mirVelocityAuthorizeSpend_err_eq hNone] at ih
-    exact ih hCap₀
+  revert hCap₀
+  refine mirVelocity_models.trace_induction (motive := fun g₀ tr gF =>
+    g₀.spent_units.toNat ≤ g₀.cap_units.toNat →
+      let totalApproved := (tr.map (fun p => p.2.toNat)).foldr (· + ·) 0
+      gF.spent_units.toNat = g₀.spent_units.toNat + totalApproved ∧
+      gF.spent_units.toNat ≤ g₀.cap_units.toNat ∧
+      totalApproved ≤ g₀.cap_units.toNat - g₀.spent_units.toNat ∧
+      (∀ p ∈ tr, g₀.last_nonce.toNat < p.1.nonce.toNat ∧ p.1.window_id = g₀.window_id ∧
+        p.1.policy_pin = g₀.policy_pin ∧ p.1.authority_pin = g₀.authority_pin) ∧
+      tr.Pairwise (fun a b => a.1.nonce.toNat < b.1.nonce.toNat))
+    ?_ ?_ (fun _ _ _ _ _ _ ih => ih) hTr
+  · exact fun s h => ⟨rfl, h, Nat.zero_le _, fun _ hm => absurd hm List.not_mem_nil, .nil⟩
+  · intro g req rest gF hg _ ih hCap
+    obtain ⟨⟨_, _, hPol, hAuth⟩, hWin, hNonce, hOv, hLe⟩ := of_decide_eq_true hg
+    have hSpent : (mirVelocityGuard.next g req).spent_units.toNat
+        = g.spent_units.toNat + req.amount_units.toNat := Nat.mod_eq_of_lt hOv
+    obtain ⟨ihSum, ihLe, _, ihAll, ihPair⟩ := ih (hSpent ▸ hLe)
+    rw [hSpent] at ihSum
+    have ihLe : gF.spent_units.toNat ≤ g.cap_units.toNat := ihLe
+    refine ⟨?_, ihLe, ?_, ?_, .cons (fun b hb => (ihAll b hb).1) ihPair⟩
+    · show _ = _ + (req.amount_units.toNat + _); omega
+    · show req.amount_units.toNat + _ ≤ _; omega
+    · intro p hp
+      rcases List.mem_cons.mp hp with rfl | hT
+      · exact ⟨hNonce, hWin, hPol, hAuth⟩
+      · obtain ⟨h1, h2, h3, h4⟩ := ihAll p hT
+        exact ⟨Nat.lt_trans hNonce h1, h2, h3, h4⟩
 
 /-- Unconditional 2-turn inhabitedness witness for `mirVelocity_multiTurn_cap_and_monotonic_nonce`. -/
 theorem inhabited_mirVelocity_two_turn_trace :

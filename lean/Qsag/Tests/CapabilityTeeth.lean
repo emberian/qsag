@@ -16,8 +16,6 @@ where the definitions unfold. The last part holds the negative witnesses of
 public import Qsag.Custody.MacaroonAttenuation
 public import Qsag.Protocol.Signing.PorsFpSecurity
 public import Qsag.Custody.VolatileCoupon
-import all Qsag.Custody.MacaroonAttenuation
-import all Qsag.Custody.VolatileCoupon
 import Qsag.Tactic.AssuranceKit
 
 public section

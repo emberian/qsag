@@ -96,7 +96,7 @@ private theorem sponge_absorb_block (sp : keccak.Shake256Sponge) (data : Slice S
     · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len data)
     · exact hloop
   refine ⟨{ sp with state := a, buf := buf, buf_len := i }, ?_, hn, hi⟩
-  simp only [keccak.Shake256Sponge.absorb, hn, Bool.false_eq_true, ite_false,
+  simp only [keccak.Shake256Sponge.absorb, massert_not_of_eq_false hn,
     hactual, bind_eq_result_bind, result_bind_ok]
 
 private theorem bdoz_commit_total (sid : Std.Array Std.U8 32#usize) (round : Std.U64)

@@ -2,7 +2,6 @@ module
 
 public import Qsag.Machine.MirSpecBridgeCore
 public import Qsag.Machine.MirSpecBridgeWitnesses
-import all Qsag.Machine.MirSpecBridgeWitnesses
 import Qsag.Tactic.AssuranceKit
 
 /-! Public entry point for the hand-written MIR guard models, their four-layer

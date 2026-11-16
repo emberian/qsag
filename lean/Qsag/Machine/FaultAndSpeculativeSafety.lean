@@ -1,24 +1,20 @@
 module
-import all Qsag.Oracle.Keccak
+public import Qsag.Oracle.Keccak
 
 public import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Protocol.Threshold.MaliciousSecurity
 public import Qsag.Machine.ConstantTimeIsa
-public import Qsag.Machine.ElfBinaryVerify
-public import Qsag.Machine.ElfFixtureSlices
+public import Qsag.Machine.ElfVerify
+public import Qsag.Machine.ElfFixtures
 import Lean
 import Qsag.Tactic.AssuranceKit
-import all Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Threshold.MaliciousSecurity
-import all Qsag.Machine.ConstantTimeIsa
-import all Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.ElfFixtureSlices
+public import Qsag.Machine.IsaCt
 
 public section
 
 /-!
-# `Qsag.Machine.FaultAndSpeculativeSafety`: Fault Injection and Speculative Execution Boundaries
+# `Qsag.FaultAndSpeculativeSafety`: Fault Injection and Speculative Execution Boundaries
 
 Two questions about the signer, answered on the real `HashSigs` primitives and the
 `ConstantTimeIsa` instruction model.
@@ -101,7 +97,8 @@ ends a transient window.
 
 1. `straightline_ct_implies_unbounded_speculative_ni`: a branch-free program accepted by the
    `ConstantTimeIsa` checker has the same speculative trace on public-equal states for every
-   window and every predictor. Instantiated for `ctEq32X86Prog` and `goldilocksMulCtX86Prog`.
+   window and every predictor. The compiled kernels get the corresponding statement on their
+   decoded bytes (`ct_eq_32_rlib_spectre_v1_immunity`, `goldilocks_mul_rlib_spectre_v1_immunity`).
 2. `tooth_unmasked_bounds_branch_leaks_under_speculation`: `if idx < pub_len then table[arr[idx]]`
    is constant-time without speculation and with `W ≤ 1`, and leaks a secret-dependent address
    for every `W ≥ 2`.
@@ -1519,31 +1516,6 @@ theorem straightline_ct_implies_unbounded_speculative_ni
     straightline_speculation_is_architectural pred W prog code 0 [] s₂ hStraight,
     (x86_ct_checker_sound memPol secHeap hPol prog τ τ' 0 hCheck s₁ s₂ hLow).1]
 
-/-- `ct_eq_bytes32` (`ctEq32X86Prog`) as speculative code. -/
-def ctEq32SpecCode : Code := (compileStraight ctEq32X86Prog).getD []
-
-/-- Canonical Goldilocks multiplication (`goldilocksMulCtX86Prog`) as speculative code. -/
-def goldilocksMulSpecCode : Code := (compileStraight goldilocksMulCtX86Prog).getD []
-
-theorem ctEq32_unbounded_speculative_ni (s₁ s₂ : ConstantTimeIsa.X86State)
-    (hLow : X86LowEq (fun _ => .sec) sysvPtrArgs4Taint s₁ s₂)
-    (pred : PredictorOracle) (W : Nat) :
-    execSpeculativeObs ctEq32SpecCode s₁ pred W = execSpeculativeObs ctEq32SpecCode s₂ pred W := by
-  have hChk : ∃ τOut, checkX86Prog true sysvPtrArgs4Taint ctEq32X86Prog = some τOut := ⟨_, rfl⟩
-  rcases hChk with ⟨τOut, hOpt⟩
-  exact straightline_ct_implies_unbounded_speculative_ni (fun _ => .sec) true (fun _ _ => rfl)
-    ctEq32X86Prog ctEq32SpecCode sysvPtrArgs4Taint τOut rfl hOpt s₁ s₂ hLow pred W
-
-theorem goldilocksMul_unbounded_speculative_ni (s₁ s₂ : ConstantTimeIsa.X86State)
-    (hLow : X86LowEq (fun _ => .sec) glAllSecretX86Taint s₁ s₂)
-    (pred : PredictorOracle) (W : Nat) :
-    execSpeculativeObs goldilocksMulSpecCode s₁ pred W =
-      execSpeculativeObs goldilocksMulSpecCode s₂ pred W := by
-  have hChk : ∃ τOut, checkX86Prog true glAllSecretX86Taint goldilocksMulCtX86Prog = some τOut :=
-    ⟨_, rfl⟩
-  rcases hChk with ⟨τOut, hOpt⟩
-  exact straightline_ct_implies_unbounded_speculative_ni (fun _ => .sec) true (fun _ _ => rfl)
-    goldilocksMulCtX86Prog goldilocksMulSpecCode glAllSecretX86Taint τOut rfl hOpt s₁ s₂ hLow pred W
 
 /-! ### Bounds-checked table lookup: Spectre-v1 leak, SLH mask, `lfence` -/
 
@@ -3376,7 +3348,7 @@ theorem arbitrary_depth_openings_unique_or_collision (suite : TweakableHashSuite
 
 This section lifts the all-layer fault-injection gate directly onto the Rust-exact production
 verifier (`verifyProductionPqHashSig` and `verifyProductionHypertreeLayers` in `Qsag.HashSigs`),
-where upper layers hash via `tagHInternal` (`productionLayerDigest`), stateless FORS indices are
+where upper layers hash via `TAG_H_INTERNAL` (`productionLayerDigest`), stateless FORS indices are
 threaded from `deriveProductionStatelessInputs`, FORS leaves use `(j, u)` addressing, and `.forsTree`
 Merkle nodes bind `keyPair = kp0`.
 

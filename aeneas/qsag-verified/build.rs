@@ -49,20 +49,17 @@ fn main() {
     if asm_src.join("lib.rs").is_file() {
         let asm_mirror = out_dir.join("qsag_asm_mirror");
         fs::create_dir_all(&asm_mirror).expect("create qsag_asm mirror dir");
-        for asm_rel in [
-            "lib.rs",
-            "cpuid.rs",
-            "bitslice.rs",
-            "ntt_simd.rs",
-            "portable.rs",
-            "sha2_hw.rs",
-            "avx512.rs",
-            "gf256_simd.rs",
-            "x86_64_asm.rs",
-            "aarch64_asm.rs",
-            "aarch64_simd.rs",
-            "durable.rs",
-        ] {
+        // Mirror every top-level module of `qsag-asm`, so a module added there cannot
+        // silently break the parity build (as `linear_map.rs` and `wipe.rs` once did).
+        let mut asm_modules: Vec<String> = fs::read_dir(&asm_src)
+            .expect("read qsag-asm sources")
+            .map(|entry| entry.expect("read qsag-asm entry"))
+            .filter(|entry| entry.file_type().expect("qsag-asm file type").is_file())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".rs"))
+            .collect();
+        asm_modules.sort();
+        for asm_rel in &asm_modules {
             let p = asm_src.join(asm_rel);
             if p.is_file() {
                 println!("cargo:rerun-if-changed={}", p.display());
@@ -72,7 +69,13 @@ fn main() {
                     if line.trim().starts_with("#![") || line.trim().starts_with("//!") {
                         continue;
                     }
-                    adapted.push_str(&line.replace("crate::", "crate::qsag_asm::"));
+                    // `qsag-core` always enables `qsag-asm/alloc`, and the mirror is only
+                    // compiled into the std-hosted parity test, so its `alloc` gate is open.
+                    adapted.push_str(
+                        &line
+                            .replace("crate::", "crate::qsag_asm::")
+                            .replace("feature = \"alloc\"", "all()"),
+                    );
                     adapted.push('\n');
                 }
                 fs::write(asm_mirror.join(asm_rel), adapted).expect("write mirrored qsag-asm file");
@@ -94,6 +97,27 @@ fn main() {
             asm_mirror.join("lib.rs")
         ));
     }
+
+    // Production core delegates arithmetic, comparisons and SHA-2 to qsag-accel.
+    // Mirror that dependency too, keeping the extracted no_std library dependency-free.
+    let accel_src = core_src.join("../../qsag-accel/src").canonicalize()
+        .expect("locate qsag-accel for production parity");
+    let accel_mirror = out_dir.join("qsag_accel_mirror");
+    fs::create_dir_all(&accel_mirror).expect("create qsag-accel mirror");
+    for entry in fs::read_dir(&accel_src).expect("read qsag-accel sources") {
+        let entry = entry.expect("read qsag-accel entry");
+        if !entry.file_type().expect("qsag-accel file type").is_file() ||
+           entry.path().extension().and_then(|x| x.to_str()) != Some("rs") { continue; }
+        println!("cargo:rerun-if-changed={}", entry.path().display());
+        let raw = fs::read_to_string(entry.path()).expect("read qsag-accel source");
+        let adapted = raw.replace("#![no_std]", "")
+            .replace("crate::", "crate::qsag_accel::") + "\n#[allow(unused_imports)]\nuse crate::qsag_asm;\n";
+        fs::write(accel_mirror.join(entry.file_name()), adapted).expect("write accel mirror");
+    }
+    modules.push_str(&format!(
+        "#[allow(dead_code, unused_imports, clippy::all)]\n#[path = {:?}]\nmod qsag_accel;\n",
+        accel_mirror.join("lib.rs")
+    ));
 
     let mirror_root = out_dir.join("qsag_core_mirror");
     for relative_path in [
@@ -126,6 +150,9 @@ fn main() {
             } else {
                 raw
             };
+            let patched = if patched.contains("qsag_accel::") {
+                patched + "\n#[allow(unused_imports)]\nuse crate::qsag_accel;\n"
+            } else { patched };
             fs::write(&dst_file, patched).expect("write mirrored qsag-core source file");
         }
     }

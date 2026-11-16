@@ -1,6 +1,6 @@
 module
-import all Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.ElfFixtureSlices
+import all Qsag.Machine.ElfVerify
+import all Qsag.Machine.ElfFixtures
 open Qsag
 set_option maxRecDepth 65536
 def bank16Lit {α : Type} (f : α → String) (b : Bank16 α) : String :=

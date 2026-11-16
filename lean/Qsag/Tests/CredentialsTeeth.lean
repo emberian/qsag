@@ -1,10 +1,9 @@
 module
 public import Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
-import all Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
-import all Qsag.Math.MlDsaField
-import all Qsag.Math.MlDsaNtt
-import all Qsag.Math.CyclotomicRlwe
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Math.MlDsaField
+public import Qsag.Math.MlDsaNtt
+public import Qsag.Math.CyclotomicRlwe
+public import Qsag.Math.GoldilocksBase
 /-
 # Qsag.Tests.CredentialsTeeth — teeth and witnesses for the credential modules
 
@@ -19,15 +18,13 @@ import all Qsag.Math.GoldilocksBase
 
 public import Qsag.Protocol.Credentials.BlindVcCollisionFinder
 public import Qsag.Protocol.Credentials.RepetitionCutAndChoose
-import all Qsag.Math.Counting
-import all Qsag.Math.Goldilocks
-import all Qsag.Math.Lattices
-import all Qsag.Oracle.FrozenChallengeGame
-import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
-import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
-import all Qsag.Protocol.Credentials.BlindVcQromSecurity
-import all Qsag.Protocol.Credentials.BlindVcCollisionFinder
-import all Qsag.Protocol.Credentials.RepetitionCutAndChoose
+public import Qsag.Math.Counting
+public import Qsag.Math.Goldilocks
+public import Qsag.Math.Lattices
+public import Qsag.Oracle.FrozenChallengeGame
+public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
+public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+public import Qsag.Protocol.Credentials.BlindVcQromSecurity
 import Qsag.Tactic.AssuranceKit
 
 public section

@@ -27,10 +27,8 @@ module
   `ymmUpperDirty` bits of the machine state.
 -/
 public import Qsag.Spec.Assumptions
-public import Qsag.Machine.SpirvSimtGpuEquiv
+public import Qsag.Machine.SpirvSimt
 public import Qsag.Machine.ConstantTimeIsa
-import all Qsag.Machine.SpirvSimtGpuEquiv
-import all Qsag.Machine.ConstantTimeIsa
 import Qsag.Tactic.AssuranceKit
 import Qsag.Machine.Tactic.KernelRfl
 

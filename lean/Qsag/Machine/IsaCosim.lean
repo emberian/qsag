@@ -1,6 +1,6 @@
 module
-public import Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.ElfBinaryVerify
+public import Qsag.Machine.ElfVerify
+public import Qsag.Machine.IsaCt
 import Qsag.Tactic.AssuranceKit
 public section
 open Qsag
