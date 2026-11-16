@@ -557,12 +557,36 @@ impl PartyOtEndpoint {
         additional: usize,
         rng: &mut PartyPrivateRng,
     ) -> Result<(), PersonalReleaseError> {
+        let result = self.prestage_ext2_blinding_inner(wire, additional, rng);
+        if result.is_err() {
+            self.poison_and_wipe();
+        }
+        result
+    }
+
+    fn prestage_ext2_blinding_inner<T: WireTransport>(
+        &mut self,
+        wire: &mut T,
+        additional: usize,
+        rng: &mut PartyPrivateRng,
+    ) -> Result<(), PersonalReleaseError> {
         if self.poisoned {
             return Err(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
                 PreprocessError::VaultPoisoned {
                     kind: "personal_release_ext2_blind",
                 },
             )));
+        }
+        if wire.party() != self.me || wire.parties() != self.parties {
+            return Err(PersonalReleaseError::LaneRosterMismatch);
+        }
+        // Bound the largest ciphertext frame, including the sealed-channel overhead,
+        // before any multiplication or allocation derived from this public count.
+        let frame_bytes = additional.checked_mul(640 * 32)
+            .ok_or(TransportError::PayloadTooLarge)?;
+        if frame_bytes > crate::wire_channel::MAX_FRAME_PAYLOAD
+            - crate::wire_channel::FRAME_HEADER_BYTES - 33 {
+            return Err(TransportError::PayloadTooLarge.into());
         }
         if additional == 0 {
             return Ok(());
@@ -3179,6 +3203,33 @@ mod tests {
                 0,
                 "party {p} must never send a cut-boundary digest share after Stage A MAC failure"
             );
+        }
+    }
+
+    #[test]
+    fn failed_wire_blinding_refill_wipes_retained_triples_and_refuses_retry() {
+        for additional in [1, usize::MAX] {
+            let (mut endpoints, _) = InMemoryWireMesh::connect(2, [47; 32]);
+            let mut wire = endpoints.pop().unwrap(); // Party 1, receiver on the first OT.
+            let mut ot = PartyOtEndpoint {
+                me: 1, parties: 2, roster: vec![0, 1], session_id: [47; 32],
+                senders: vec![None, None], receivers: vec![None, None], transcript: [9; 32],
+                ext2_blind_pool: vec![WireExt2BlindTriple {
+                    r: GoldilocksExt2::ONE, a: GoldilocksExt2::ONE, c: GoldilocksExt2::ONE,
+                }], ext2_blind_cursor: 0, ext2_blind_serial: 0, poisoned: false,
+            };
+            let mut rng = PartyPrivateRng::from_seed([48; 32], b"failed-refill");
+            let error = ot.prestage_ext2_blinding(&mut wire, additional, &mut rng).unwrap_err();
+            if additional == usize::MAX {
+                assert!(matches!(error, PersonalReleaseError::Transport(TransportError::PayloadTooLarge)));
+            } else {
+                assert!(matches!(error, PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                    PreprocessError::ChannelPoisoned { .. }))));
+            }
+            assert!(ot.poisoned);
+            assert!(ot.ext2_blind_pool.is_empty());
+            assert_eq!(ot.transcript, [0; 32]);
+            assert!(ot.prestage_ext2_blinding(&mut wire, 0, &mut rng).is_err());
         }
     }
 
