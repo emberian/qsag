@@ -1367,16 +1367,16 @@ impl RekeyRound6 {
             depth_used: lineage.depth_used,
             max_depth: lineage.max_depth,
         };
-        let share = if lineage.additive {
-            share.into_additive()?
-        } else {
-            share
-        };
         if let Some(journal) = &core.lineage.poison_journal {
             journal
                 .complete_disclosure(core.session)
                 .map_err(|_| HdError::MacCheckFailed)?;
         }
+        let share = if lineage.additive {
+            share.into_additive()?
+        } else {
+            share
+        };
         core.complete = true;
         Ok((public, share))
     }
@@ -1551,6 +1551,85 @@ pub(crate) mod harness {
         let (states, mut commits) = step(states, |s| s.commit_zero_test(&masked))?;
         tamper(Stage::ZeroCommits(&mut commits));
         let (states, mut openings) = step(states, |s| s.open_zero_test(&commits))?;
+        tamper(Stage::ZeroOpenings(&mut openings));
+        let results: Vec<_> = states
+            .into_iter()
+            .map(|s| s.finish_with_in_memory_poison_journal_for_testing(&openings))
+            .collect();
+        if results.iter().any(Result::is_err) {
+            return Err(results.into_iter().map(Result::err).collect());
+        }
+        Ok(results.into_iter().map(Result::unwrap).collect())
+    }
+
+    /// Runs one session where `corrupt_pos` equivocates in Round 5 (`ZeroCommits`) by
+    /// broadcasting tampered commitments to honest peers while advancing its own local
+    /// state so Round 6 (`finish`) is reached by honest peers.
+    pub(crate) fn run_with_corrupt_zero_commit(
+        seeds: &[CustodianSeeds],
+        parents: Option<(&[LinearModulePartyShare], &LinearModuleXPub)>,
+        index: u32,
+        hardened: bool,
+        session_tag: u8,
+        corrupt_pos: usize,
+        tamper: &mut dyn FnMut(Stage<'_>),
+    ) -> Outcome {
+        let begun: Vec<_> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, custodian)| {
+                let entropy = [session_tag ^ (0x80 + i as u8); 32];
+                match parents {
+                    None => RekeyRound1::begin_root(
+                        custodian,
+                        index,
+                        hardened,
+                        4,
+                        [session_tag; 32],
+                        entropy,
+                        &[0xCC; 32],
+                    ),
+                    Some((shares, public)) => shares[i].derive_child_share(
+                        custodian,
+                        public,
+                        index,
+                        hardened,
+                        [session_tag; 32],
+                        entropy,
+                    ),
+                }
+            })
+            .collect();
+        if begun.iter().any(Result::is_err) {
+            return Err(begun.into_iter().map(Result::err).collect());
+        }
+        let (states, mut hellos): (Vec<_>, Vec<_>) = begun.into_iter().map(Result::unwrap).unzip();
+        tamper(Stage::Hello(&mut hellos));
+        let (states, mut products) = step(states, |s| s.open_products(&hellos))?;
+        tamper(Stage::Products(&mut products));
+        let (states, mut coins) = step(states, |s| s.open_coin(&products))?;
+        tamper(Stage::Coins(&mut coins));
+        let (states, mut masked) = step(states, |s| s.open_masked(&coins))?;
+        tamper(Stage::Masked(&mut masked));
+        let (states, mut commits) = step(states, |s| s.commit_zero_test(&masked))?;
+        let orig_commits = commits.clone();
+        tamper(Stage::ZeroCommits(&mut commits));
+        let round5: Vec<_> = states
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if i == corrupt_pos {
+                    s.open_zero_test(&orig_commits)
+                } else {
+                    s.open_zero_test(&commits)
+                }
+            })
+            .collect();
+        if round5.iter().any(Result::is_err) {
+            return Err(round5.into_iter().map(Result::err).collect());
+        }
+        let (states, mut openings): (Vec<_>, Vec<_>) =
+            round5.into_iter().map(Result::unwrap).unzip();
         tamper(Stage::ZeroOpenings(&mut openings));
         let results: Vec<_> = states
             .into_iter()
@@ -2074,7 +2153,8 @@ mod tests {
             }
         });
         all_fail(outcome, None, RekeyFault::CommitmentMismatch);
-        // Bad commitment opening: the commitment itself replaced.
+        // Bad commitment on wire: honest custodian 1 detects its own commitment was
+        // replaced BEFORE disclosing its zero-test share (`F-07`).
         let (root_pk, root) = honest(&seeds, None, 0, false, 1);
         let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
@@ -2082,68 +2162,91 @@ mod tests {
                 commits[1].digest[0] ^= 1;
             }
         });
-        all_fail(outcome, None, RekeyFault::CommitmentMismatch);
+        let errors = outcome.expect_err("substituted own zero-commit must abort in Round 5");
+        assert_eq!(errors[0], None);
+        assert_eq!(
+            errors[1],
+            Some(HdError::RekeyAborted(RekeyFault::CommitmentMismatch))
+        );
+        assert_eq!(errors[2], None);
+        // When corrupt custodian 1 equivocates so peers reach Round 6, every honest peer
+        // rejects the mismatched opening.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
+        let outcome = run_with_corrupt_zero_commit(&seeds, parents, 5, false, 2, 1, &mut |stage| {
+            if let Stage::ZeroCommits(commits) = stage {
+                commits[1].digest[0] ^= 1;
+            }
+        });
+        all_fail(outcome, Some(1), RekeyFault::CommitmentMismatch);
         // A zero-test share changed consistently with a fresh commitment is off
         // the polynomial fixed by the honest custodians.
         let mut session = [0u8; 32];
         let mut forged = None;
         let (root_pk, root) = honest(&seeds, None, 0, false, 1);
         let parents = Some((root.as_slice(), &root_pk));
-        let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| match stage {
-            Stage::Hello(hellos) => {
-                let mut transcript = init_cshake256(b"", b"QSAG.HD.REKEY.SESSION.V1");
-                // Recompute the public session key exactly as a custodian does.
-                let derivation = cshake256_framed_32(
-                    b"QSAG.HD.TPRF.DERIVATION.V1",
-                    &[
-                        &seeds[0].ceremony_digest(),
-                        &config.digest(),
-                        &[1],
-                        &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec),
-                        &1u16.to_be_bytes(),
-                        &root[0].derivation_index.to_be_bytes(),
-                        &[0],
-                        &5u32.to_be_bytes(),
-                    ],
-                );
-                let request = cshake256_framed_32(
-                    b"QSAG.HD.REKEY.REQUEST.V1",
-                    &[
-                        &derivation,
-                        &[2; 32],
-                        &[0],
-                        &cshake256_framed_32(
-                            b"QSAG.HD.CHAIN_CODE.COMMIT.V1",
-                            &[&root_pk.derive_child(5).unwrap().chain_code.unwrap()],
-                        ),
-                        &4u16.to_be_bytes(),
-                    ],
-                );
-                transcript.absorb(&request);
-                for hello in hellos.iter() {
-                    let bytes = hello.to_bytes();
-                    transcript.absorb(&(bytes.len() as u64).to_le_bytes());
-                    transcript.absorb(&bytes);
+        let outcome = run_with_corrupt_zero_commit(&seeds, parents, 5, false, 2, 1, &mut |stage| {
+            match stage {
+                Stage::Hello(hellos) => {
+                    let mut transcript = init_cshake256(b"", b"QSAG.HD.REKEY.SESSION.V1");
+                    // Recompute the public session key exactly as a custodian does.
+                    let derivation = cshake256_framed_32(
+                        b"QSAG.HD.TPRF.DERIVATION.V1",
+                        &[
+                            &seeds[0].ceremony_digest(),
+                            &config.digest(),
+                            &[1],
+                            &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec),
+                            &1u16.to_be_bytes(),
+                            &root[0].derivation_index.to_be_bytes(),
+                            &[0],
+                            &5u32.to_be_bytes(),
+                        ],
+                    );
+                    let request = cshake256_framed_32(
+                        b"QSAG.HD.REKEY.REQUEST.V1",
+                        &[
+                            &derivation,
+                            &[2; 32],
+                            &[0],
+                            &cshake256_framed_32(
+                                b"QSAG.HD.CHAIN_CODE.COMMIT.V1",
+                                &[&root_pk.derive_child(5).unwrap().chain_code.unwrap()],
+                            ),
+                            &4u16.to_be_bytes(),
+                        ],
+                    );
+                    transcript.absorb(&request);
+                    for hello in hellos.iter() {
+                        let bytes = hello.to_bytes();
+                        transcript.absorb(&(bytes.len() as u64).to_le_bytes());
+                        transcript.absorb(&bytes);
+                    }
+                    finalize_cshake256(&mut transcript, true);
+                    transcript.squeeze(&mut session);
                 }
-                finalize_cshake256(&mut transcript, true);
-                transcript.squeeze(&mut session);
+                Stage::ZeroCommits(commits) => {
+                    // The corrupt custodian cannot know its honest share yet in this
+                    // harness, so it commits to a guess: the all-zero vector.
+                    let values = alloc::vec![0u32; 2 * CHECK_PRODUCTS];
+                    commits[1].digest = commit_mpc_broadcast(
+                        &session,
+                        5,
+                        1,
+                        &pack_field_elements(&values),
+                        &[7; 32],
+                    );
+                    forged = Some(values);
+                }
+                Stage::ZeroOpenings(openings) => {
+                    openings[1].values = forged.take().unwrap();
+                    openings[1].salt = [7; 32];
+                }
+                _ => {}
             }
-            Stage::ZeroCommits(commits) => {
-                // The corrupt custodian cannot know its honest share yet in this
-                // harness, so it commits to a guess: the all-zero vector.
-                let values = alloc::vec![0u32; 2 * CHECK_PRODUCTS];
-                commits[1].digest =
-                    commit_mpc_broadcast(&session, 5, 1, &pack_field_elements(&values), &[7; 32]);
-                forged = Some(values);
-            }
-            Stage::ZeroOpenings(openings) => {
-                openings[1].values = forged.take().unwrap();
-                openings[1].salt = [7; 32];
-            }
-            _ => {}
         });
-        // Custodian 1's own state sees the same public transcript and rejects too.
-        all_fail(outcome, None, RekeyFault::InconsistentDegree);
+        // Honest custodians 0 and 2 see the forged commitment/opening and reject degree.
+        all_fail(outcome, Some(1), RekeyFault::InconsistentDegree);
 
         // Equivocation and substitution in round 1.
         let outcome = run(&seeds, None, 1, true, 3, &mut |stage| {
@@ -2457,5 +2560,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn active_fs_poison_disclosure_blocks_concurrent_ceremony_without_latching_share() {
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "qsag_hd_active_poison_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = committee(2, 3);
+        let seeds = run_seed_ceremony(&config, 0x91);
+
+        // Run a root ceremony backed by persistent `FsHdPoisonJournal` instances.
+        let r1: Vec<_> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                RekeyRound1::begin_root(c, 0, false, 4, [0x11; 32], [0x20 + i as u8; 32], &[0xAA; 32])
+                    .unwrap()
+            })
+            .collect();
+        let (s1, hellos): (Vec<_>, Vec<_>) = r1.into_iter().unzip();
+        let (s2, products): (Vec<_>, Vec<_>) =
+            s1.into_iter().map(|s| s.open_products(&hellos).unwrap()).unzip();
+        let (s3, coins): (Vec<_>, Vec<_>) =
+            s2.into_iter().map(|s| s.open_coin(&products).unwrap()).unzip();
+        let (s4, masked): (Vec<_>, Vec<_>) =
+            s3.into_iter().map(|s| s.open_masked(&coins).unwrap()).unzip();
+        let (s5, commits): (Vec<_>, Vec<_>) =
+            s4.into_iter().map(|s| s.commit_zero_test(&masked).unwrap()).unzip();
+        let (s6, openings): (Vec<_>, Vec<_>) =
+            s5.into_iter().map(|s| s.open_zero_test(&commits).unwrap()).unzip();
+        let family_id = s6[0].family_id().unwrap();
+        let journals: Vec<Arc<dyn crate::poison::HdPoisonJournal>> = (0..3)
+            .map(|i| {
+                let path = dir.join(alloc::format!("poison_{i}.journal"));
+                Arc::new(
+                    crate::poison::FsHdPoisonJournal::open(&path, family_id, [0x70 + i as u8; 32])
+                        .unwrap(),
+                ) as Arc<dyn crate::poison::HdPoisonJournal>
+            })
+            .collect();
+        let root_out: Vec<_> = s6
+            .into_iter()
+            .zip(&journals)
+            .map(|(s, j)| s.finish(&openings, Arc::clone(j)).unwrap())
+            .collect();
+        let root_pk = root_out[0].0.clone();
+        let root_shares: Vec<_> = root_out
+            .into_iter()
+            .map(|(_, sh)| sh.into_additive().unwrap())
+            .collect();
+
+        // Start child ceremony up through Round 5 (`open_zero_test` -> `begin_disclosure`).
+        let c1: Vec<_> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                root_shares[i]
+                    .derive_child_share(c, &root_pk, 7, false, [0x33; 32], [0x40 + i as u8; 32])
+                    .unwrap()
+            })
+            .collect();
+        let (cs1, chellos): (Vec<_>, Vec<_>) = c1.into_iter().unzip();
+        let (cs2, cproducts): (Vec<_>, Vec<_>) = cs1
+            .into_iter()
+            .map(|s| s.open_products(&chellos).unwrap())
+            .unzip();
+        let (cs3, ccoins): (Vec<_>, Vec<_>) = cs2
+            .into_iter()
+            .map(|s| s.open_coin(&cproducts).unwrap())
+            .unzip();
+        let (cs4, cmasked): (Vec<_>, Vec<_>) = cs3
+            .into_iter()
+            .map(|s| s.open_masked(&ccoins).unwrap())
+            .unzip();
+        let (cs5, ccommits): (Vec<_>, Vec<_>) = cs4
+            .into_iter()
+            .map(|s| s.commit_zero_test(&cmasked).unwrap())
+            .unzip();
+        let (cs6, copenings): (Vec<_>, Vec<_>) = cs5
+            .into_iter()
+            .map(|s| s.open_zero_test(&ccommits).unwrap())
+            .unzip();
+
+        // While disclosure is active, `is_poisoned()` returns true to block concurrent
+        // ceremonies, WITHOUT permanently latching `root_shares[i].poisoned`!
+        assert!(root_shares[0].is_poisoned());
+        assert!(
+            root_shares[0]
+                .derive_child_share(&seeds[0], &root_pk, 8, false, [0x44; 32], [0x55; 32])
+                .is_err(),
+            "concurrent ceremony during active disclosure must be refused"
+        );
+
+        // Completing the in-flight ceremony succeeds (even for `Additive` shares!) and
+        // unblocks subsequent ceremonies on `root_shares`.
+        for (s, j) in cs6.into_iter().zip(&journals) {
+            let (_child_pk, child_sh) = s.finish(&copenings, Arc::clone(j)).unwrap();
+            assert!(!child_sh.is_poisoned());
+        }
+        assert!(!root_shares[0].is_poisoned());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

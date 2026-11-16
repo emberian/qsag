@@ -1120,8 +1120,8 @@ theorem rlib_x86_all19_dit_trace_data_independent
   let liftCall := fun (call : (Fin 19 × Nat) × Qsag.X86State) =>
     (rlibX86CtEntry call.1.1 call.1.2, call.2)
   have hMapEq : (tr₁.map liftCall).map Prod.fst = (tr₂.map liftCall).map Prod.fst := by
-    rw [List.map_map, List.map_map]
-    exact congrArg (List.map (fun p : Fin 19 × Nat => rlibX86CtEntry p.1 p.2)) hSched
+    have h1 := congrArg (List.map (fun p : Fin 19 × Nat => rlibX86CtEntry p.1 p.2)) hSched
+    simpa only [List.map_map, Function.comp_def, liftCall] using h1
   have hRes := elfX86DitContract.trace_data_independent Spec.ExecMode.constantTimeSafe rfl
     (tr₁.map liftCall) (tr₂.map liftCall) hMapEq
   simpa only [List.map_map, Function.comp_def, elfX86DitContract] using hRes
@@ -1139,9 +1139,9 @@ theorem rlib_aarch64_all9_dit_trace_data_independent
   let liftCall := fun (call : (Fin 9 × Nat × Arm64State) × Arm64State) =>
     (rlibArm64CtEntry call.1.1 call.1.2.1 call.1.2.2, call.2)
   have hMapEq : (tr₁.map liftCall).map Prod.fst = (tr₂.map liftCall).map Prod.fst := by
-    rw [List.map_map, List.map_map]
-    exact congrArg (List.map (fun p : Fin 9 × Nat × Arm64State =>
+    have h1 := congrArg (List.map (fun p : Fin 9 × Nat × Arm64State =>
       rlibArm64CtEntry p.1 p.2.1 p.2.2)) hSched
+    simpa only [List.map_map, Function.comp_def, liftCall] using h1
   have hRes := elfArm64DitContract.trace_data_independent Spec.ExecMode.constantTimeSafe rfl
     (tr₁.map liftCall) (tr₂.map liftCall) hMapEq
   simpa only [List.map_map, Function.comp_def, elfArm64DitContract] using hRes

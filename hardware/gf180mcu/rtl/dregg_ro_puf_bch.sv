@@ -40,11 +40,10 @@ module dregg_puf_ro5 #(
             always @(n[s] or g) yr <= #(TD_STAGE) ~(n[s] & g);
             assign n[s+1] = yr;
 `else
-            assign n[s+1] = (s == 0) ? 1'b1 : ~(n[i_zero(s)] & g);
+            assign n[s+1] = (s == 0) ? 1'b1 : ~(n[s] & g);
 `endif
         end
     endgenerate
-    function automatic int i_zero(input int x); i_zero = x; endfunction
     assign osc = n[5];
 endmodule
 
