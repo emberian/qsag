@@ -29,7 +29,6 @@ module
 
 public import Qsag.Spec.Assumptions
 public import Qsag.Exec.PosixCrashWal
-import all Qsag.Exec.PosixCrashWal
 import Qsag.Tactic.AssuranceKit
 
 public section

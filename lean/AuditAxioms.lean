@@ -123,6 +123,7 @@ import all Qsag.Custody.SeparatedCustody
 import all Qsag.Custody.ShamirThresholdCustodyRefinement
 import all Qsag.Custody.VolatileCoupon
 import all Qsag.Exec.CeremonyAtomicityAndAbort
+import all Qsag.Exec.GuardedMachineSim
 import all Qsag.Exec.IdealOutputBoundary
 import all Qsag.Exec.InteractiveSecurityContract
 import all Qsag.Exec.InteractiveServiceContext
@@ -163,26 +164,29 @@ import all Qsag.Exec.SimulationSpine
 import all Qsag.Exec.SpecOracle
 import all Qsag.Exec.ThresholdIdealDurableService
 import all Qsag.Exec.ThresholdIdealService
+import all Qsag.Exec.TwoSlotHwmCrashModel
+import all Qsag.Exec.WhirKernels
 import all Qsag.Exec.Tactic.SimulationKit
-import all Qsag.Machine.CompiledRlibFixtures
+import all Qsag.Machine.ClmulSimd
 import all Qsag.Machine.ConstantTimeIsa
-import all Qsag.Machine.ElfBinaryVerify
-import all Qsag.Machine.ElfFixtureSlices
 import all Qsag.Machine.ElfFixtureVerify
+import all Qsag.Machine.ElfFixtures
 import all Qsag.Machine.ElfFunctionalEquiv
 import all Qsag.Machine.ElfInvCerts
 import all Qsag.Machine.ElfParse
+import all Qsag.Machine.ElfVerify
 import all Qsag.Machine.FaultAndSpeculativeSafety
 import all Qsag.Machine.Gf128ClmulLoopAgreement
 import all Qsag.Machine.IsaCosim
+import all Qsag.Machine.IsaCt
 import all Qsag.Machine.McRefine
 import all Qsag.Machine.MirSpecBridge
 import all Qsag.Machine.MirSpecBridgeCore
 import all Qsag.Machine.MirSpecBridgeWitnesses
 import all Qsag.Machine.PlatformContractInstances
-import all Qsag.Machine.SimdBinaryEquiv
-import all Qsag.Machine.SpirvSimtGpuEquiv
-import all Qsag.Machine.SydTvTranslationValidation
+import all Qsag.Machine.SpirvFixtures
+import all Qsag.Machine.SpirvSimt
+import all Qsag.Machine.SydTv
 import all Qsag.Machine.Tactic.KernelRfl
 import all Qsag.Top.Aggregation
 import all Qsag.Top.ClosedProtocolReductions
@@ -201,12 +205,14 @@ import all Qsag.Tests.ClosedReductionTeeth
 import all Qsag.Tests.CompositionInstances
 import all Qsag.Tests.ConcreteSecurityBudgetTeeth
 import all Qsag.Tests.ConstructiveQuantumHilbertTeeth
+import all Qsag.Tests.CrashAndGuardKitTeeth
 import all Qsag.Tests.CredentialsTeeth
 import all Qsag.Tests.CustodyTeeth
 import all Qsag.Tests.DistributedCustodyChecks
 import all Qsag.Tests.EquationExportOwner
 import all Qsag.Tests.EquationExports
 import all Qsag.Tests.FrozenAndLpnTeeth
+import all Qsag.Tests.GuardedMachineSimInstance
 import all Qsag.Tests.HemExtractedOpeningBridgeTests
 import all Qsag.Tests.HemHighCapSlicedBudgetTeeth
 import all Qsag.Tests.HemMultistageCascadeTeeth
@@ -231,6 +237,7 @@ import all Qsag.Tests.SeparatedCustodyHistoryChecks
 import all Qsag.Tests.SeparatedCustodyReleaseChecks
 import all Qsag.Tests.SeparatedCustodyUcResourceChecks
 import all Qsag.Tests.SigningTeeth
+import all Qsag.Tests.TwoSlotHwmTeeth
 import all Qsag.Tests.WelchBerlekampTeeth
 import Lean
 public meta import AxiomAuditSupport
@@ -272,7 +279,8 @@ run_cmd do
   -- Re-export umbrellas: import-only modules that own no declarations (checked below).
   let reexportModules : Array Name := #[
     `Qsag.Math.Algebra,
-    `Qsag.Protocol.Threshold.RlweExtraction
+    `Qsag.Protocol.Threshold.RlweExtraction,
+    `Qsag.Tests.CrashAndGuardKitTeeth
   ]
   let auditedProofModules : Array Name := #[
     `Qsag.Spec.Algebra,
@@ -392,6 +400,7 @@ run_cmd do
     `Qsag.Custody.ShamirThresholdCustodyRefinement,
     `Qsag.Custody.VolatileCoupon,
     `Qsag.Exec.CeremonyAtomicityAndAbort,
+    `Qsag.Exec.GuardedMachineSim,
     `Qsag.Exec.IdealOutputBoundary,
     `Qsag.Exec.InteractiveSecurityContract,
     `Qsag.Exec.InteractiveServiceContext,
@@ -432,25 +441,28 @@ run_cmd do
     `Qsag.Exec.SpecOracle,
     `Qsag.Exec.ThresholdIdealDurableService,
     `Qsag.Exec.ThresholdIdealService,
-    `Qsag.Machine.CompiledRlibFixtures,
+    `Qsag.Exec.TwoSlotHwmCrashModel,
+    `Qsag.Exec.WhirKernels,
+    `Qsag.Machine.ClmulSimd,
     `Qsag.Machine.ConstantTimeIsa,
-    `Qsag.Machine.ElfBinaryVerify,
-    `Qsag.Machine.ElfFixtureSlices,
     `Qsag.Machine.ElfFixtureVerify,
+    `Qsag.Machine.ElfFixtures,
     `Qsag.Machine.ElfFunctionalEquiv,
     `Qsag.Machine.ElfInvCerts,
     `Qsag.Machine.ElfParse,
+    `Qsag.Machine.ElfVerify,
     `Qsag.Machine.FaultAndSpeculativeSafety,
     `Qsag.Machine.Gf128ClmulLoopAgreement,
     `Qsag.Machine.IsaCosim,
+    `Qsag.Machine.IsaCt,
     `Qsag.Machine.McRefine,
     `Qsag.Machine.MirSpecBridge,
     `Qsag.Machine.MirSpecBridgeCore,
     `Qsag.Machine.MirSpecBridgeWitnesses,
     `Qsag.Machine.PlatformContractInstances,
-    `Qsag.Machine.SimdBinaryEquiv,
-    `Qsag.Machine.SpirvSimtGpuEquiv,
-    `Qsag.Machine.SydTvTranslationValidation,
+    `Qsag.Machine.SpirvFixtures,
+    `Qsag.Machine.SpirvSimt,
+    `Qsag.Machine.SydTv,
     `Qsag.Top.Aggregation,
     `Qsag.Top.ClosedProtocolReductions,
     `Qsag.Top.Credentials,
@@ -474,6 +486,7 @@ run_cmd do
     `Qsag.Tests.EquationExportOwner,
     `Qsag.Tests.EquationExports,
     `Qsag.Tests.FrozenAndLpnTeeth,
+    `Qsag.Tests.GuardedMachineSimInstance,
     `Qsag.Tests.HemExtractedOpeningBridgeTests,
     `Qsag.Tests.HemHighCapSlicedBudgetTeeth,
     `Qsag.Tests.HemMultistageCascadeTeeth,
@@ -498,6 +511,7 @@ run_cmd do
     `Qsag.Tests.SeparatedCustodyReleaseChecks,
     `Qsag.Tests.SeparatedCustodyUcResourceChecks,
     `Qsag.Tests.SigningTeeth,
+    `Qsag.Tests.TwoSlotHwmTeeth,
     `Qsag.Tests.WelchBerlekampTeeth
   ]
 
