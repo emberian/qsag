@@ -24,7 +24,9 @@ use qsag_asm::{
     probe_capabilities, sha256_compress_blocks, sha256_compress_blocks_portable,
     sha256_compress_bytes, unpack_256x200_bitslice_with_backend,
 };
-use qsag_core::fips205::{sha256_digest, sha512_digest};
+use qsag_core::fips205::{
+    Fips205Error, SlhPreHash, format_prehash_m_prime, sha256_digest, sha512_digest,
+};
 use qsag_core::sponge::keccak::{
     cshake256_32, cshake256_xof, encode_multi_frame, keccak_f1600 as core_keccak_f1600,
     shake256_32, shake256_xof,
@@ -35,7 +37,7 @@ use qsag_external_validation::{
 use ripemd::Ripemd160;
 use sha2::{Digest as _, Sha256, Sha512};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
-use sha3::{Keccak256, Sha3_256, Sha3_384, Sha3_512, Shake256};
+use sha3::{Keccak256, Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256};
 use tiny_keccak::{CShake, Hasher as _, Keccak as TinyKeccak, Sha3 as TinySha3, Shake, Xof as _};
 
 const RATE_BOUNDARY_LENGTHS: &[usize] = &[
@@ -149,24 +151,16 @@ fn sponge_and_hash_exact_rate_boundaries_and_unaligned_slices() {
             let ref_hash160: [u8; 20] = Ripemd160::digest(ref_sha256).into();
             assert_eq!(accel_hash160(msg), ref_hash160, "hash160 len={len}");
 
-            // Verify FIPS 205 PreHash M' formatting digests (`SHA3-384`, `SHA3-512`) match RustCrypto `sha3`
-            if len <= 256 {
-                let ref_sha3_384: [u8; 48] = Sha3_384::digest(msg).into();
-                let ref_sha3_512: [u8; 64] = Sha3_512::digest(msg).into();
-                let mp384 = qsag_core::fips205::format_prehash_m_prime(
-                    qsag_core::fips205::SlhPreHash::Sha3_384,
-                    msg,
-                    b"ctx",
-                )
-                .unwrap();
-                assert_eq!(&mp384[mp384.len() - 48..], &ref_sha3_384);
-                let mp512 = qsag_core::fips205::format_prehash_m_prime(
-                    qsag_core::fips205::SlhPreHash::Sha3_512,
-                    msg,
-                    b"ctx",
-                )
-                .unwrap();
-                assert_eq!(&mp512[mp512.len() - 64..], &ref_sha3_512);
+            // FIPS 205 pre-hash `M'` for every approved pre-hash function: the whole
+            // encoding (domain byte, context length, context, DER OID, digest) against one
+            // assembled from the standard's layout and RustCrypto digests.
+            for (ph, arc) in PREHASH_VARIANTS {
+                let got = format_prehash_m_prime(ph, msg, b"ctx").unwrap();
+                assert_eq!(
+                    got,
+                    prehash_m_prime_ref(ph, arc, msg, b"ctx"),
+                    "M' mismatch for {ph:?} len={len}"
+                );
             }
 
             // Also verify BLAKE3 reference consistency on identical unaligned buffers
@@ -176,6 +170,126 @@ fn sponge_and_hash_exact_rate_boundaries_and_unaligned_slices() {
             assert_eq!(b3_oneshot, b3_stream.finalize());
         }
     }
+}
+
+/// The seven FIPS 205 §10.2.2 pre-hash functions with the last arc of their NIST CSOR
+/// `hashAlgs` identifier `2.16.840.1.101.3.4.2.<arc>`.
+const PREHASH_VARIANTS: [(SlhPreHash, u32); 7] = [
+    (SlhPreHash::Sha256, 1),
+    (SlhPreHash::Sha512, 3),
+    (SlhPreHash::Sha3_256, 8),
+    (SlhPreHash::Sha3_384, 9),
+    (SlhPreHash::Sha3_512, 10),
+    (SlhPreHash::Shake128, 11),
+    (SlhPreHash::Shake256, 12),
+];
+
+/// X.690 DER `OBJECT IDENTIFIER` built from its arcs: tag `0x06`, short-form length, the
+/// first two arcs folded into `40 * a + b`, every arc in base 128 with continuation bits.
+fn der_oid_from_arcs(arcs: &[u32]) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::new();
+    let mut push_base128 = |value: u32| {
+        let mut groups = vec![(value & 0x7f) as u8];
+        let mut rest = value >> 7;
+        while rest != 0 {
+            groups.push((rest & 0x7f) as u8 | 0x80);
+            rest >>= 7;
+        }
+        body.extend(groups.iter().rev());
+    };
+    push_base128(40 * arcs[0] + arcs[1]);
+    for &arc in &arcs[2..] {
+        push_base128(arc);
+    }
+    assert!(body.len() < 128, "short-form DER length only");
+    let mut der = vec![0x06, body.len() as u8];
+    der.extend(body);
+    der
+}
+
+/// `PH(M)` of FIPS 205 §10.2.2 from RustCrypto: fixed-length digests as they are,
+/// `SHAKE128(M, 256)` and `SHAKE256(M, 512)` for the two XOFs.
+fn prehash_digest_ref(ph: SlhPreHash, msg: &[u8]) -> Vec<u8> {
+    fn xof<X: Default + Update + ExtendableOutput>(msg: &[u8], out_len: usize) -> Vec<u8> {
+        let mut hasher = X::default();
+        hasher.update(msg);
+        let mut out = vec![0u8; out_len];
+        hasher.finalize_xof().read(&mut out);
+        out
+    }
+    match ph {
+        SlhPreHash::Sha256 => Sha256::digest(msg).to_vec(),
+        SlhPreHash::Sha512 => Sha512::digest(msg).to_vec(),
+        SlhPreHash::Sha3_256 => Sha3_256::digest(msg).to_vec(),
+        SlhPreHash::Sha3_384 => Sha3_384::digest(msg).to_vec(),
+        SlhPreHash::Sha3_512 => Sha3_512::digest(msg).to_vec(),
+        SlhPreHash::Shake128 => xof::<Shake128>(msg, 32),
+        SlhPreHash::Shake256 => xof::<Shake256>(msg, 64),
+    }
+}
+
+/// `M' = 0x01 || len(ctx) || ctx || DER(OID) || PH(M)` (FIPS 205 Algorithm 23 line 21,
+/// identical in layout to FIPS 204 Algorithm 4), assembled without any `qsag` code.
+fn prehash_m_prime_ref(ph: SlhPreHash, last_arc: u32, msg: &[u8], ctx: &[u8]) -> Vec<u8> {
+    let mut m_prime = vec![0x01, u8::try_from(ctx.len()).expect("context of at most 255 bytes")];
+    m_prime.extend_from_slice(ctx);
+    m_prime.extend(der_oid_from_arcs(&[2, 16, 840, 1, 101, 3, 4, 2, last_arc]));
+    m_prime.extend(prehash_digest_ref(ph, msg));
+    m_prime
+}
+
+/// Full byte-for-byte `M'` for all seven pre-hash functions over empty, short, boundary and
+/// maximal contexts, with messages straddling each sponge rate and SHA-2 block boundary.
+/// A wrong OID arc, a swapped digest length, a missing context-length byte or a domain
+/// byte of `0x00` all fail here; the digest-suffix check they replace saw none of them.
+#[test]
+fn fips205_prehash_m_prime_full_encoding_for_every_prehash_function() {
+    // The DER encoder reproduces the published SHA-256 identifier of RFC 5754 §2.2.
+    assert_eq!(
+        der_oid_from_arcs(&[2, 16, 840, 1, 101, 3, 4, 2, 1]),
+        [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]
+    );
+
+    let pool: Vec<u8> = (0..2100u32).map(|i| (i.wrapping_mul(193) ^ (i >> 5) ^ 0x3c) as u8).collect();
+    let ctx_pool: Vec<u8> = (0..255u32).map(|i| (i.wrapping_mul(71) ^ 0xa7) as u8).collect();
+    let msg_lens = [
+        0usize, 1, 31, 32, 55, 56, 63, 64, 65, 71, 72, 73, 103, 104, 105, 111, 112, 127, 128, 129,
+        135, 136, 137, 167, 168, 169, 271, 272, 273, 1023, 1024, 2071,
+    ];
+    let ctx_lens = [0usize, 1, 3, 127, 128, 254, 255];
+    let mut distinct_oids = std::collections::BTreeSet::new();
+    for (ph, arc) in PREHASH_VARIANTS {
+        for &msg_len in &msg_lens {
+            let msg = &pool[7..7 + msg_len];
+            for &ctx_len in &ctx_lens {
+                let ctx = &ctx_pool[..ctx_len];
+                let got = format_prehash_m_prime(ph, msg, ctx).unwrap();
+                let exp = prehash_m_prime_ref(ph, arc, msg, ctx);
+                assert_eq!(got, exp, "M' for {ph:?} msg_len={msg_len} ctx_len={ctx_len}");
+
+                // Field by field, so a failure names the field.
+                let digest_len = match ph {
+                    SlhPreHash::Sha256 | SlhPreHash::Sha3_256 | SlhPreHash::Shake128 => 32,
+                    SlhPreHash::Sha3_384 => 48,
+                    SlhPreHash::Sha512 | SlhPreHash::Sha3_512 | SlhPreHash::Shake256 => 64,
+                };
+                assert_eq!(got.len(), 2 + ctx_len + 11 + digest_len);
+                assert_eq!(got[0], 0x01, "pre-hash domain separator");
+                assert_eq!(usize::from(got[1]), ctx_len);
+                assert_eq!(&got[2..2 + ctx_len], ctx);
+                let oid = &got[2 + ctx_len..2 + ctx_len + 11];
+                assert_eq!(&oid[..10], [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02]);
+                assert_eq!(u32::from(oid[10]), arc);
+                distinct_oids.insert(oid.to_vec());
+            }
+        }
+        // A 256-byte context has no one-byte length: refused, never truncated.
+        assert!(matches!(
+            format_prehash_m_prime(ph, b"m", &[0x5a; 256]),
+            Err(Fips205Error::ContextTooLong(256))
+        ));
+    }
+    assert_eq!(distinct_oids.len(), PREHASH_VARIANTS.len());
 }
 
 proptest! {
