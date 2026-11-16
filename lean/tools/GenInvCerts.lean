@@ -1,7 +1,7 @@
 /- Untrusted invariant-certificate proposer. Runs the fixpoint inference outside the kernel and
 prints one line per compiled symbol; `generate_inv_certs.py` turns the output into
 `Qsag/Machine/ElfInvCerts.lean`. The kernel only ever checks the printed invariants. -/
-import Qsag.Machine.ElfBinaryVerify
+import Qsag.Machine.ElfVerify
 open Qsag
 set_option maxRecDepth 100000
 

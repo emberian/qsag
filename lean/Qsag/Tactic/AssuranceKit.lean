@@ -94,3 +94,45 @@ elab_rules : command
         name := fn ++ `public_eqs, levelParams := levels,
         type := bundleType, value := bundleValue }
 end
+
+/- Kernel-only audit for executable witnesses and imported declarations. Unlike
+`#verify_constructive`, this does not claim to inspect an unavailable proof body or diagnose
+unused premises. The transitive kernel axiom allowlist is identical. -/
+public meta section
+open Lean Elab Command
+syntax "#verify_kernel " ident+ : command
+elab_rules : command
+  | `(command| #verify_kernel $[$ids:ident]*) => do
+    for id in ids do
+      let n ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
+      let axs ← liftCoreM <| Lean.collectAxioms n
+      for ax in axs do
+        unless ax == ``propext || ax == ``Quot.sound do
+          throwErrorAt id "kernel audit: forbidden axiom {ax} via {n}"
+end
+
+-- Cross-module regression: the audited proof is opaque but its certificate is retained.
+#verify_constructive Qsag.AssuranceRegression.security
+public meta section
+run_cmd do
+  let rejected ← try
+    discard <| Qsag.Tactic.AssuranceKit.verifyConstructiveDecl
+      (← `(ident| Qsag.AssuranceRegression.unused))
+    pure false
+  catch _ => pure true
+  unless rejected do throwError "uncertified imported theorem passed constructive audit"
+end
+
+-- The same domain operation counts across a normal import even when its body is opaque.
+#tooth_pair Qsag.AssuranceRegression.security vs Qsag.AssuranceRegression.tooth
+#verify_inhabited Qsag.AssuranceRegression.security Qsag.AssuranceRegression.witness
+
+/-- error: inhabitedness audit: imported witness needs an owning-module certificate for this exact pair -/
+#guard_msgs in
+#verify_inhabited Qsag.AssuranceRegression.security Qsag.AssuranceRegression.detachedWitness
+
+-- Imported unexposed scalar operations retain domain identity without a structure projection.
+#tooth_pair Qsag.AssuranceRegression.hiddenSecurity vs Qsag.AssuranceRegression.hiddenTooth
+/-- error: pair audit: no shared protocol/domain constants -/
+#guard_msgs in
+#tooth_pair Qsag.AssuranceRegression.hiddenSecurity vs Qsag.AssuranceRegression.hiddenUnrelated

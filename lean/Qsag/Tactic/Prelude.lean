@@ -1,5 +1,6 @@
 module
 public meta import Lean
+public meta import Qsag.Tactic.AuditRegistry
 public section
 namespace Qsag.Constructive
 
@@ -569,6 +570,11 @@ meta def verifyConstructiveDecl (id : Ident) : CommandElabM (Name × ConstantInf
   let n ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
   let env ← getEnv
   let some ci := env.find? n | throwErrorAt id "unknown theorem {n}"
+  if (env.getModuleIdxFor? n).isSome then
+    unless (constructiveAuditExt.getState env).contains n do
+      throwErrorAt id "constructive audit: imported theorem lacks an owning-module audit certificate: {n}"
+    liftCoreM <| auditDag env [n]
+    return (n, ci)
   unless ci matches .thmInfo _ do
     throwErrorAt id "constructive audit: expected a theorem with visible body: {n}"
   liftCoreM <| auditDag env [n]
@@ -582,6 +588,7 @@ meta def verifyConstructiveDecl (id : Ident) : CommandElabM (Name × ConstantInf
       throwError "constructive audit: trivial True conclusion"
   if (stripBinders (ci.value! (allowOpaque := true))).getAppFn.isConstOf ``True.intro then
     throwErrorAt id "constructive audit: trivial True conclusion"
+  modifyEnv fun env => constructiveAuditExt.addEntry env n
   return (n, ci)
 
 syntax "#verify_constructive " ident+ : command
@@ -604,8 +611,16 @@ private meta def domainConstants (e : Expr) : MetaM (Array Name) := do
     unless (`Qsag).isPrefixOf n do return false
     let some ci := env.find? n | return false
     match ci with
-    | .defnInfo _ => forallTelescope ci.type fun xs result =>
-        return (!xs.isEmpty && !result.isSort) || result == mkSort Level.zero
+    | .defnInfo _ | .opaqueInfo _ | .axiomInfo _ => do
+        -- The module system presents an unexposed imported definition as an
+        -- axiomInfo signature. This is only domain-overlap classification: both
+        -- proofs have already passed the transitive kernel axiom audit above.
+        -- A locally declared axiom must never count as a domain operation.
+        if ci matches .axiomInfo _ then
+          unless (env.getModuleIdxFor? n).isSome do return false
+        if ← isProp ci.type then return false
+        forallTelescope ci.type fun xs result =>
+          return (!xs.isEmpty && !result.isSort) || result == mkSort Level.zero
     | .inductInfo _ => forallTelescope ci.type fun _ result =>
         return result == mkSort Level.zero
     | _ => return false
@@ -772,7 +787,9 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
   let conclusion ← instantiateMVars conclusion
   unless conclusion.getAppFn.isConstOf ``Exists || conclusion.getAppFn.isConstOf ``Nonempty do
     throwError "inhabitedness audit: expected an existential reachable-state witness"
-  let proof ← instantiateMVars (mkAppN (w.value! (allowOpaque := true)) wx)
+  let some witnessValue := w.value? (allowOpaque := true) |
+    throwError "inhabitedness audit: witness proof body unavailable; audit the pair in its owning module"
+  let proof ← instantiateMVars (mkAppN witnessValue wx)
   withWitnessFacts conclusion proof #[] fun facts => do
     let (sx, _, sConclusion) ← forallMetaTelescope s.type
     let mut matchedWitnessPremise := false
@@ -875,11 +892,16 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
 syntax "#verify_inhabited " ident ident : command
 elab_rules : command
   | `(command| #verify_inhabited $s:ident $w:ident) => do
-    let (_, sec) ← verifyConstructiveDecl s
-    let (_, wit) ← verifyConstructiveDecl w
+    let (sn, sec) ← verifyConstructiveDecl s
+    let (wn, wit) ← verifyConstructiveDecl w
+    if (wit.value? (allowOpaque := true)).isNone then
+      unless (inhabitedAuditExt.getState (← getEnv)).contains (sn, wn) do
+        throwError "inhabitedness audit: imported witness needs an owning-module certificate for this exact pair"
+      return
     -- Keep witness search bounded even in modules that disable proof heartbeat limits.
     liftTermElabM <| withOptions (fun o => maxRecDepth.set (maxHeartbeats.set o 200000) (max 4096 (maxRecDepth.get o))) <|
       checkInhabited sec wit
+    modifyEnv fun env => inhabitedAuditExt.addEntry env (sn, wn)
 
 /-! ### `by bv_xor_cancel` — Constructive XOR / Bitwise Canceller (`0 Classical.choice`) -/
 
@@ -1291,6 +1313,14 @@ theorem bogusListDefaulting (xs ys : List Nat) (_hLen : HasLenTwo xs) (_hZero : 
   simpa [HasLenTwo] using _hLen
 theorem nonzeroListWitness : ∃ xs ys : List Nat, HasLenTwo xs ∧ ys.length = 2 :=
   ⟨[1, 2], [3, 4], rfl, rfl⟩
+
+-- Scalar outputs avoid an exposed structure projection masking a missing operation.
+def hiddenStep (n : Nat) : Nat := n + 1
+def hiddenOther (n : Nat) : Nat := n + 2
+theorem hiddenSecurity (n : Nat) : hiddenStep n = n + 1 := by rfl
+theorem hiddenTooth : hiddenStep 0 ≠ 0 := by decide
+theorem hiddenUnrelated : hiddenOther 0 ≠ 0 := by decide
+#verify_constructive hiddenSecurity hiddenTooth hiddenUnrelated
 end AssuranceRegression
 
 #verify_constructive xorEval_norm_eq XorTree.norm_sound xor_rss16 xor_rss32 frameList_append_inj
@@ -1340,3 +1370,6 @@ run_cmd do
       let (_, w) ← verifyConstructiveDecl t
       liftTermElabM <| checkInhabited s w
 end Qsag.Tactic.AssuranceKit
+
+#verify_constructive Qsag.AssuranceRegression.tooth Qsag.AssuranceRegression.witness
+  Qsag.AssuranceRegression.detachedWitness
