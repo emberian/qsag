@@ -794,8 +794,8 @@ theorem shake256_xof_from_extracted_state (chunks : List (Slice Std.U8)) :
 
 /-- cSHAKE256 absorb and pad for a sponge that has absorbed the SP 800-185 customization
 prefix and carries suffix `0x04`: any split of the input, then `finalize`, leaves exactly the
-state `Qsag.cshake256Xof` squeezes from. `sponge_new_cshake256_short_nonempty_absorbed`
-discharges the prefix obligation unconditionally for `1 ≤ customization.val.length ≤ 31`. -/
+state `Qsag.cshake256Xof` squeezes from. `sponge_new_cshake256_nonempty_absorbed` discharges
+the prefix obligation for every nonempty customization. -/
 theorem cshake256_absorb_pad_refines (cust : List UInt8) (hc : cust ≠ [])
     (sp0 : keccak.Shake256Sponge)
     (hpre : SpongeAbsorbed sp0 (Qsag.customizationPrefix cust)) (hsfx : sp0.suffix = 4#u8)
@@ -967,9 +967,8 @@ theorem cshake256_32_empty_refines (input : Slice Std.U8) :
       u8Bytes out.val = Qsag.cshake256Xof 32 [] (u8Bytes input.val) :=
   shake256_32_refines input
 
-/-- cSHAKE's byte-output weld, conditional only on the constructor establishing the
-SP 800-185 prefix (`sponge_new_cshake256_short_nonempty_absorbed` discharges this
-unconditionally for `1 ≤ customization.val.length ≤ 31`). -/
+/-- cSHAKE's byte-output weld from a constructor result that has absorbed the SP 800-185
+prefix. `cshake256_32_refines` discharges the prefix premises. -/
 theorem cshake256_32_refines_of_prefix (customization input : Slice Std.U8)
     (hc : u8Bytes customization.val ≠ []) (sp0 : keccak.Shake256Sponge)
     (hnew : keccak.Shake256Sponge.new_cshake256 customization = .ok sp0)
@@ -1000,51 +999,7 @@ theorem cshake256_32_refines_of_prefix (customization input : Slice Std.U8)
     simp only [Qsag.cshake256Xof, hc, ↓reduceIte]
     rfl
 
-/-! ## Short Nonempty `new_cshake256` Constructor & Unconditional `cSHAKE256` Refinement -/
-
-private theorem leftEncode_one_byte {v : Nat} (hv1 : 1 ≤ v) (hv2 : v < 256) :
-    Qsag.leftEncode v = [1, UInt8.ofNat v] := by
-  cases v with
-  | zero => omega
-  | succ m =>
-    cases m with
-    | zero => decide
-    | succ k =>
-      have hk : k + 1 + 1 = k + 2 := rfl
-      rw [hk]
-      have hne : ¬ (k + 2 = 0) := by omega
-      have hmod : (k + 2) % 256 = k + 2 := Nat.mod_eq_of_lt hv2
-      have hdiv : (k + 2) / 256 = 0 := Nat.div_eq_of_lt hv2
-      unfold Qsag.leftEncode Qsag.natBytesBE Qsag.natBytesLEAux
-      rw [ite_eq_right hne, hmod, hdiv]
-      cases k <;> rfl
-
-private theorem customizationPrefix_short_nonempty (cust : List UInt8)
-    (hLo : 1 ≤ cust.length) (hHi : cust.length ≤ 31) :
-    Qsag.customizationPrefix cust =
-      ([1, 136, 1, 0, 1, UInt8.ofNat (8 * cust.length)] ++ cust) ++
-        List.replicate (136 - (6 + cust.length)) 0 := by
-  have h136 : Qsag.leftEncode Qsag.shake256RateBytes = [1, 136] := by decide
-  have hemp : Qsag.encodeString [] = [1, 0] := by decide
-  have hle : Qsag.leftEncode (8 * cust.length) = [1, UInt8.ofNat (8 * cust.length)] :=
-    leftEncode_one_byte (by omega) (by omega)
-  unfold Qsag.customizationPrefix Qsag.bytepad
-  have hw : ¬ Qsag.shake256RateBytes = 0 := by decide
-  rw [ite_eq_right hw, h136, hemp]
-  unfold Qsag.encodeString
-  rw [hle]
-  have hsw : Qsag.shake256RateBytes = 136 := rfl
-  dsimp only []
-  rw [hsw]
-  have hplen : ([1, 136] ++ ([1, 0] ++ ([1, UInt8.ofNat (8 * cust.length)] ++ cust))).length =
-      6 + cust.length := by
-    simp only [List.length_append, List.length_cons, List.length_nil]
-    omega
-  have hmod1 : (6 + cust.length) % 136 = 6 + cust.length := Nat.mod_eq_of_lt (by omega)
-  have hmod2 : (136 - (6 + cust.length)) % 136 = 136 - (6 + cust.length) :=
-    Nat.mod_eq_of_lt (by omega)
-  rw [hplen, hmod1, hmod2]
-  simp only [List.cons_append, List.nil_append]
+/-! ## `new_cshake256` constructor helpers -/
 
 private theorem u8Bytes_append (xs ys : List Std.U8) :
     u8Bytes (xs ++ ys) = u8Bytes xs ++ u8Bytes ys :=
@@ -1136,293 +1091,11 @@ private theorem new_cshake256_loop1_eq (buf : Array Std.U8 136#usize) (start : S
     decide
   · exact hout
 
-private theorem sp800_185_left_encode_u128_short (v : Std.U128)
-    (hv1 : 1 ≤ v.val) (hv2 : v.val < 256) :
-    ∃ len_enc b0,
-      keccak.sp800_185_left_encode_u128 v = .ok (len_enc, 2#usize) ∧
-      Array.index_usize len_enc 0#usize = .ok 1#u8 ∧
-      Array.index_usize len_enc 1#usize = .ok b0 ∧
-      UInt8.ofBitVec b0.bv = UInt8.ofNat v.val := by
-  have hne0 : ¬ v = 0#u128 := by
-    intro e; rw [e] at hv1; exact absurd hv1 (by decide)
-  have hvgt : v > 0#u128 := by
-    change (0#u128).val < v.val; exact hv1
-  let tmp := Array.repeat 16#usize 0#u8
-  let b0 : Std.U8 := UScalar.cast .U8 (v &&& 255#u128)
-  have hb0_val : b0.bv.toNat = v.val := by
-    change ((v.bv &&& (255#u128).bv).setWidth 8).toNat = v.val
-    rw [BitVec.toNat_setWidth, BitVec.toNat_and]
-    have hm : (255#u128).bv.toNat = 2 ^ 8 - 1 := rfl
-    rw [hm, and_mask_eq_mod, Nat.mod_eq_of_lt hv2, Nat.mod_eq_of_lt hv2]
-  have hb0_u8 : UInt8.ofBitVec b0.bv = UInt8.ofNat v.val := by
-    change UInt8.ofBitVec b0.bv = UInt8.ofBitVec (BitVec.ofNat 8 v.val)
-    apply congrArg UInt8.ofBitVec
-    apply BitVec.eq_of_toNat_eq
-    rw [hb0_val, BitVec.toNat_ofNat]
-    change v.val = v.val % 256
-    exact (Nat.mod_eq_of_lt hv2).symm
-  let tmp1 : Array Std.U8 16#usize :=
-    ⟨tmp.val.set 0 b0, by rw [List.length_set]; exact tmp.property⟩
-  have hupd_tmp : Array.update tmp 0#usize b0 = .ok tmp1 :=
-    array_update_eq tmp 0#usize b0 tmp1 (by decide) rfl
-  dsimp only [b0] at hupd_tmp
-  have hshr : (v >>> 8#i32 : Result Std.U128) = .ok 0#u128 := by
-    have h0 : (v >>> 8#i32 : Result Std.U128) = .ok ⟨v.bv >>> 8⟩ := rfl
-    rw [h0]
-    apply congrArg Result.ok
-    apply UScalar.eq_of_val_eq
-    change (v.bv >>> 8).toNat = 0
-    rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
-    exact Nat.div_eq_of_lt hv2
-  have hn1 : (0#usize + 1#usize : Result Std.Usize) = .ok 1#usize := rfl
-  have hlt16 : (0#usize < 16#usize) := by decide
-  have hnpos0 : ¬ (0#u128 > 0#u128) := by decide
-  have hloop0_b0 : keccak.sp800_185_left_encode_u128_loop0.body tmp 0#usize v =
-      .ok (.cont (tmp1, 1#usize, 0#u128)) := by
-    simp only [keccak.sp800_185_left_encode_u128_loop0.body, hvgt, hlt16, ite_true,
-      hupd_tmp, hshr, hn1, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-  have hloop0_b1 : keccak.sp800_185_left_encode_u128_loop0.body tmp1 1#usize 0#u128 =
-      .ok (.done (tmp1, 1#usize)) := by
-    simp only [keccak.sp800_185_left_encode_u128_loop0.body, hnpos0, ite_false]
-  have hloop0 : keccak.sp800_185_left_encode_u128_loop0 tmp 0#usize v = .ok (tmp1, 1#usize) := by
-    unfold keccak.sp800_185_left_encode_u128_loop0
-    apply loop_ok_of_loopFuel (fuel := 2) (by decide)
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hloop0_b0, result_bind_ok]
-    dsimp only []
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hloop0_b1, result_bind_ok]
-  let out := Array.repeat 17#usize 0#u8
-  let a : Array Std.U8 17#usize :=
-    ⟨out.val.set 0 1#u8, by rw [List.length_set]; exact out.property⟩
-  have hupd_a : Array.update out 0#usize (UScalar.cast .U8 1#usize) = .ok a :=
-    array_update_eq out 0#usize 1#u8 a (by decide) rfl
-  have hidx_tmp1 : Array.index_usize tmp1 0#usize = .ok b0 := by
-    have hi := array_index_getD tmp1 0#usize 0#u8 (by decide)
-    rw [hi]
-    rfl
-  let out1 : Array Std.U8 17#usize :=
-    ⟨a.val.set 1 b0, by rw [List.length_set]; exact a.property⟩
-  have hupd_out1 : Array.update a 1#usize b0 = .ok out1 :=
-    array_update_eq a 1#usize b0 out1 (by decide) rfl
-  have hlt1 : (0#usize < 1#usize) := by decide
-  have hnlt1 : ¬ (1#usize < 1#usize) := by decide
-  have hsub1 : (1#usize - 1#usize : Result Std.Usize) = .ok 0#usize := rfl
-  have hsub0 : (0#usize - 0#usize : Result Std.Usize) = .ok 0#usize := rfl
-  have hadd10 : (1#usize + 0#usize : Result Std.Usize) = .ok 1#usize := rfl
-  have hadd01 : (0#usize + 1#usize : Result Std.Usize) = .ok 1#usize := rfl
-  have hadd11 : (1#usize + 1#usize : Result Std.Usize) = .ok 2#usize := rfl
-  have hloop1_b0 : keccak.sp800_185_left_encode_u128_loop1.body tmp1 1#usize a 0#usize =
-      .ok (.cont (out1, 1#usize)) := by
-    simp only [keccak.sp800_185_left_encode_u128_loop1.body, hlt1, ite_true,
-      hsub1, hsub0, hidx_tmp1, hadd10, hupd_out1, hadd01, bind_eq_result_bind, result_bind_ok]
-  have hloop1_b1 : keccak.sp800_185_left_encode_u128_loop1.body tmp1 1#usize out1 1#usize =
-      .ok (.done out1) := by
-    simp only [keccak.sp800_185_left_encode_u128_loop1.body, hnlt1, ite_false]
-  have hloop1 : keccak.sp800_185_left_encode_u128_loop1 tmp1 1#usize a 0#usize = .ok out1 := by
-    unfold keccak.sp800_185_left_encode_u128_loop1
-    apply loop_ok_of_loopFuel (fuel := 2) (by decide)
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hloop1_b0, result_bind_ok]
-    dsimp only []
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hloop1_b1, result_bind_ok]
-  have hidx_out0 : Array.index_usize out1 0#usize = .ok 1#u8 := by
-    have hi := array_index_getD out1 0#usize 0#u8 (by decide)
-    rw [hi]
-    rfl
-  have hidx_out1 : Array.index_usize out1 1#usize = .ok b0 := by
-    have hi := array_index_getD out1 1#usize 0#u8 (by decide)
-    rw [hi]
-    rfl
-  dsimp only [tmp] at hloop0
-  dsimp only [out] at hupd_a
-  refine ⟨out1, b0, ?_, hidx_out0, hidx_out1, hb0_u8⟩
-  simp only [keccak.sp800_185_left_encode_u128, hne0, ite_false, hloop0, hupd_a, hloop1,
-    hadd11, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-
-/-- Unconditional SP 800-185 constructor theorem for short nonempty customization strings
-(`1 ≤ customization.val.length ≤ 31`, covering every `"QSAG.*"` domain tag):
-`Shake256Sponge.new_cshake256` succeeds, absorbs the exact 136-byte `bytepad` customization
-prefix `Qsag.customizationPrefix`, and sets domain suffix `0x04`. -/
-theorem sponge_new_cshake256_short_nonempty_absorbed (customization : Slice Std.U8)
-    (hLo : 1 ≤ customization.val.length) (hHi : customization.val.length ≤ 31) :
-    ∃ sp0, keccak.Shake256Sponge.new_cshake256 customization = .ok sp0 ∧
-      SpongeAbsorbed sp0 (Qsag.customizationPrefix (u8Bytes customization.val)) ∧
-      sp0.suffix = 4#u8 := by
-  have hne : customization.val.isEmpty = false := by
-    cases h : customization.val with
-    | nil => rw [h] at hLo; exact absurd hLo (by decide)
-    | cons _ _ => rfl
-  let initSp : keccak.Shake256Sponge :=
-    { state := Array.repeat 25#usize 0#u64
-      buf := Array.repeat 136#usize 0#u8
-      buf_len := 0#usize
-      suffix := 4#u8
-      squeezing := false
-      squeeze_offset := 0#usize }
-  have hInit : SpongeAbsorbed initSp [] := by
-    refine ⟨rfl, [], [], 0, rfl, rfl, rfl, by decide, ?_, rfl⟩
-    rw [Qsag.absorbBlocks_zero, Qsag.zeroKState_eq]
-    rfl
-  let hdr := Array.to_slice (Array.make 4#usize [1#u8, 136#u8, 1#u8, 0#u8])
-  obtain ⟨s1, hs1, habs1, hsfx1⟩ := sponge_absorb_refines initSp hdr [] hInit
-  have hhdr : [] ++ u8Bytes hdr.val = [1, 136, 1, 0] := rfl
-  rw [hhdr] at habs1
-  let i := Slice.len customization
-  let i1 := UScalar.cast .U128 i
-  have hi1_val : i1.val = customization.val.length := by
-    have h64 : i.val < 2 ^ 128 := Nat.lt_trans i.bv.isLt (by decide)
-    change (i.bv.setWidth 128).toNat = customization.val.length
-    rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt h64, Slice.len_val]
-  obtain ⟨bit_len, hmul, vbit⟩ := checked_mul_val i1 8#u128 (by
-    change i1.val * 8 < 2 ^ 128
-    rw [hi1_val]; omega)
-  change bit_len.val = i1.val * 8 at vbit
-  have hbit_eq : bit_len.val = 8 * customization.val.length := by rw [vbit, hi1_val]; omega
-  obtain ⟨len_enc, b0, hle, hidx0, hidx1, hb0⟩ :=
-    sp800_185_left_encode_u128_short bit_len (by omega) (by omega)
-  rw [hbit_eq] at hb0
-  let sl0 := Array.to_slice (Array.make 1#usize [1#u8])
-  let sl1 := Array.to_slice (Array.make 1#usize [b0])
-  obtain ⟨s1a, hs1a, habs1a, hsfx1a⟩ := sponge_absorb_refines s1 sl0 _ habs1
-  have hsl0 : [1, 136, 1, 0] ++ u8Bytes sl0.val = [1, 136, 1, 0, 1] := rfl
-  rw [hsl0] at habs1a
-  obtain ⟨s2, hs2, habs2, hsfx2⟩ := sponge_absorb_refines s1a sl1 _ habs1a
-  have hsl1 : [1, 136, 1, 0, 1] ++ u8Bytes sl1.val =
-      [1, 136, 1, 0, 1, UInt8.ofNat (8 * customization.val.length)] := by
-    change [1, 136, 1, 0, 1, UInt8.ofBitVec b0.bv] =
-      [1, 136, 1, 0, 1, UInt8.ofNat (8 * customization.val.length)]
-    rw [hb0]
-  rw [hsl1] at habs2
-  dsimp only [sl0] at hs1a
-  dsimp only [sl1] at hs2
-  have hlt02 : (0#usize < 2#usize) := by decide
-  have hlt12 : (1#usize < 2#usize) := by decide
-  have hnlt22 : ¬ (2#usize < 2#usize) := by decide
-  have hj01 : (0#usize + 1#usize : Result Std.Usize) = .ok 1#usize := rfl
-  have hj12 : (1#usize + 1#usize : Result Std.Usize) = .ok 2#usize := rfl
-  have hl0_b0 : keccak.Shake256Sponge.new_cshake256_loop0.body len_enc 2#usize s1 0#usize =
-      .ok (.cont (s1a, 1#usize)) := by
-    simp only [keccak.Shake256Sponge.new_cshake256_loop0.body, hlt02, ite_true,
-      hidx0, hs1a, hj01, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-  have hl0_b1 : keccak.Shake256Sponge.new_cshake256_loop0.body len_enc 2#usize s1a 1#usize =
-      .ok (.cont (s2, 2#usize)) := by
-    simp only [keccak.Shake256Sponge.new_cshake256_loop0.body, hlt12, ite_true,
-      hidx1, hs2, hj12, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-  have hl0_b2 : keccak.Shake256Sponge.new_cshake256_loop0.body len_enc 2#usize s2 2#usize =
-      .ok (.done s2) := by
-    simp only [keccak.Shake256Sponge.new_cshake256_loop0.body, hnlt22, ite_false]
-  have hloop0 : keccak.Shake256Sponge.new_cshake256_loop0 s1 len_enc 2#usize 0#usize = .ok s2 := by
-    unfold keccak.Shake256Sponge.new_cshake256_loop0
-    apply loop_ok_of_loopFuel (fuel := 3) (by decide)
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hl0_b0, result_bind_ok]
-    dsimp only []
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hl0_b1, result_bind_ok]
-    dsimp only []
-    rw [loopFuel_succ]
-    dsimp only []
-    rw [hl0_b2, result_bind_ok]
-  obtain ⟨s3, hs3, habs3, hsfx3⟩ := sponge_absorb_refines s2 customization _ habs2
-  let pre := [1, 136, 1, 0, 1, UInt8.ofNat (8 * customization.val.length)] ++
-    u8Bytes customization.val
-  have hpre_len : pre.length = 6 + customization.val.length := by
-    simp only [pre, List.length_append, List.length_cons, List.length_nil, u8Bytes_length]
-  obtain ⟨hsq3, hbl3, hst3, htake3⟩ := habs3.canonical
-  have hdiv0 : pre.length / 136 = 0 := Nat.div_eq_of_lt (by omega)
-  have hmod_pre : pre.length % 136 = 6 + customization.val.length := by
-    rw [hpre_len]; exact Nat.mod_eq_of_lt (by omega)
-  have hs3_bl : s3.buf_len.val = 6 + customization.val.length := hbl3.trans hmod_pre
-  have hgt0 : s3.buf_len > 0#usize := by
-    change 0 < s3.buf_len.val; omega
-  have hlt136 : s3.buf_len < keccak.SHAKE256_RATE_BYTES := by
-    unfold keccak.SHAKE256_RATE_BYTES
-    change s3.buf_len.val < 136; omega
-  obtain ⟨a2, hloop1, ha2⟩ := new_cshake256_loop1_eq s3.buf s3.buf_len (by omega)
-  have hu8_a2 : u8Bytes a2.val = Qsag.customizationPrefix (u8Bytes customization.val) := by
-    rw [ha2, u8Bytes_append, u8Bytes_take, htake3, hdiv0, Nat.mul_zero, List.drop_zero,
-      u8Bytes_replicate_zero, hs3_bl]
-    have hcust_len : (u8Bytes customization.val).length = customization.val.length :=
-      u8Bytes_length _
-    rw [customizationPrefix_short_nonempty (u8Bytes customization.val)
-      (by rw [hcust_len]; exact hLo) (by rw [hcust_len]; exact hHi), hcust_len]
-  have hcpre_len : (Qsag.customizationPrefix (u8Bytes customization.val)).length = 136 := by
-    rw [← hu8_a2, u8Bytes_length]; exact a2.property
-  dsimp only [initSp, hdr] at hs1
-  dsimp only [i, i1] at hmul
-  let sp0 : keccak.Shake256Sponge :=
-    { s3 with
-      state := keccakArrayOfState
-        (Qsag.keccakF1600 (Qsag.xorRate136 (keccakStateOfArray s3.state) (u8Bytes a2.val)))
-      buf := a2
-      buf_len := 0#usize }
-  refine ⟨sp0, ?_, ?_, ?_⟩
-  · simp only [keccak.Shake256Sponge.new_cshake256, core.slice.Slice.is_empty, hne,
-      Bool.false_eq_true, ite_false, hs1, hmul, hle, hloop0, hs3, hgt0, hlt136, ite_true,
-      hloop1, keccak_f1600_array_refines_qsag, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-    rw [xor_rate_block_refines, result_bind_ok, keccakStateOfArray_roundtrip]
-  · refine ⟨hsq3, Qsag.customizationPrefix (u8Bytes customization.val), [], 1,
-      by rw [List.append_nil], by rw [hcpre_len], rfl,
-      show (0#usize).val < 136 by decide, ?_, rfl⟩
-    change keccakStateOfArray (keccakArrayOfState _) = _
-    rw [keccakStateOfArray_roundtrip, hst3, hdiv0, Qsag.absorbBlocks_zero, hu8_a2]
-    have hab1 := absorbBlocks_append_block 0 Qsag.zeroKState []
-      (Qsag.customizationPrefix (u8Bytes customization.val)) rfl hcpre_len
-    rw [List.nil_append, Qsag.absorbBlocks_zero] at hab1
-    exact hab1.symm
-  · exact hsfx3.trans (hsfx2.trans (hsfx1a.trans hsfx1))
-
-/-- Unconditional end-to-end 32-byte `cSHAKE256` refinement for all short nonempty customization
-strings (`1 ≤ customization.val.length ≤ 31`, covering every `"QSAG.*"` customization tag). -/
-theorem cshake256_32_short_nonempty_refines (customization input : Slice Std.U8)
-    (hLo : 1 ≤ customization.val.length) (hHi : customization.val.length ≤ 31) :
-    ∃ out, keccak.cshake256_32 customization input = .ok out ∧
-      u8Bytes out.val = Qsag.cshake256Xof 32 (u8Bytes customization.val) (u8Bytes input.val) := by
-  have hc : u8Bytes customization.val ≠ [] := by
-    intro e
-    have hl := congrArg List.length e
-    simp only [u8Bytes_length, List.length_nil] at hl
-    omega
-  obtain ⟨sp0, hnew, hpre, hsfx⟩ :=
-    sponge_new_cshake256_short_nonempty_absorbed customization hLo hHi
-  exact cshake256_32_refines_of_prefix customization input hc sp0 hnew hpre hsfx
-
-/-- Unconditional multi-chunk streaming `cSHAKE256` XOF refinement for all short nonempty
-customization strings (`1 ≤ customization.val.length ≤ 31`). -/
-theorem cshake256_short_nonempty_xof_from_extracted_state (customization : Slice Std.U8)
-    (hLo : 1 ≤ customization.val.length) (hHi : customization.val.length ≤ 31)
-    (chunks : List (Slice Std.U8)) :
-    ∃ sp0 sp1 sp2,
-      keccak.Shake256Sponge.new_cshake256 customization = .ok sp0 ∧
-      spongeAbsorbAll sp0 chunks = .ok sp1 ∧
-      keccak.Shake256Sponge.finalize sp1 = .ok sp2 ∧
-      ∀ outLen, Qsag.cshake256Xof outLen (u8Bytes customization.val)
-          (chunks.map fun d => u8Bytes d.val).flatten =
-        Qsag.squeezeXofAux outLen (keccakStateOfArray sp2.state) := by
-  have hc : u8Bytes customization.val ≠ [] := by
-    intro e
-    have hl := congrArg List.length e
-    simp only [u8Bytes_length, List.length_nil] at hl
-    omega
-  obtain ⟨sp0, hnew, hpre, hsfx⟩ :=
-    sponge_new_cshake256_short_nonempty_absorbed customization hLo hHi
-  obtain ⟨sp1, sp2, h1, h2, hxof, _, _⟩ :=
-    cshake256_absorb_pad_refines (u8Bytes customization.val) hc sp0 hpre hsfx chunks
-  exact ⟨sp0, sp1, sp2, hnew, h1, h2, hxof⟩
-
 /-- The pad is sensitive to the domain suffix: SHAKE and cSHAKE final blocks differ. -/
 theorem tooth_last_block_suffix_sensitive :
     spongeLastBlock [] 0x1f ≠ spongeLastBlock [] 0x04 := by decide
 
-/-! ## Multi-Block Squeeze & Unconditional Arbitrary-Length `cSHAKE256` / `SHAKE256` (`L-Ex-13`) -/
+/-! ## Multi-block squeeze and arbitrary-length `SHAKE256` / `cSHAKE256` -/
 
 private theorem laneBytesLE_len (w : UInt64) : (Qsag.laneBytesLE w).length = 8 := rfl
 
@@ -1441,15 +1114,15 @@ private theorem getD_append_ge {α : Type} (xs ys : List α) (d : α) (i : Nat)
 
 private theorem getD_take_lt {α : Type} (xs : List α) (d : α) (n j : Nat)
     (hj : j < n) : (xs.take n).getD j d = xs.getD j d := by
-  induction xs generalizing n j with
-  | nil => simp
-  | cons x xs ih =>
-    cases n with
-    | zero => omega
-    | succ n =>
+  induction n generalizing xs j with
+  | zero => exact absurd hj (Nat.not_lt_zero j)
+  | succ n ih =>
+    cases xs with
+    | nil => rfl
+    | cons x xs =>
       cases j with
       | zero => rfl
-      | succ j => exact ih n j (Nat.lt_of_succ_lt_succ hj)
+      | succ j => exact ih xs j (Nat.lt_of_succ_lt_succ hj)
 
 private theorem flatMap_laneBytesLE_getD :
     ∀ (ws : List UInt64) (j : Nat),
@@ -1491,7 +1164,7 @@ private theorem rateLanesList_keccakStateOfArray_getD (a : Array Std.U64 25#usiz
                 rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
     rfl
 
-/-- Full 136-byte rate-block byte equivalence (`0 ≤ j < 136`). -/
+/-- Byte `j < 136` of the extracted rate block is byte `j` of `Qsag.rateBlockBytes`. -/
 theorem spongeRateByte_spec136 (a : Array Std.U64 25#usize) (j : Nat) (hj : j < 136) :
     UInt8.ofBitVec (spongeRateByte a j).bv =
       (Qsag.rateBlockBytes (keccakStateOfArray a)).getD j 0 := by
@@ -1504,7 +1177,7 @@ theorem spongeRateByte_spec136 (a : Array Std.U64 25#usize) (j : Nat) (hj : j < 
   have h256 : (2 : Nat) ^ 8 = 256 := rfl
   rw [h256, Nat.mod_mod]
 
-/-- Iterated `Keccak-f[1600]` state progression across multi-block XOF squeezing. -/
+/-- `k` applications of `Keccak-f[1600]`. -/
 def keccakIter : Nat → Qsag.KState → Qsag.KState
   | 0, s => s
   | k + 1, s => keccakIter k (Qsag.keccakF1600 s)
@@ -1515,47 +1188,46 @@ theorem keccakIter_succ_right (k : Nat) (s : Qsag.KState) :
   | zero => rfl
   | succ k ih => exact ih (Qsag.keccakF1600 s)
 
-private theorem squeezeXofFuel_getD :
-    ∀ (fuel outLen : Nat) (s : Qsag.KState) (j : Nat),
-      outLen ≤ 136 * fuel →
-      j < outLen →
-      (Qsag.squeezeXofFuel fuel outLen s).getD j 0 =
-        (Qsag.rateBlockBytes (keccakIter (j / 136) s)).getD (j % 136) 0
-  | 0, outLen, _, j, hf, hj => by omega
-  | _ + 1, 0, _, j, _, hj => by omega
-  | fuel + 1, m + 1, s, j, hf, hj => by
-    rw [Qsag.squeezeXofFuel_succ_succ]
-    dsimp only []
-    by_cases hle : m + 1 ≤ 136
-    · rw [ite_eq_left hle, getD_take_lt _ 0 (m + 1) j hj]
-      have hj136 : j < 136 := by omega
-      rw [Nat.div_eq_of_lt hj136, Nat.mod_eq_of_lt hj136]
-      rfl
-    · rw [ite_eq_right hle]
-      by_cases hj136 : j < 136
-      · rw [getD_append_lt _ _ 0 j (by rw [Qsag.rateBlockBytes_length]; exact hj136),
-          Nat.div_eq_of_lt hj136, Nat.mod_eq_of_lt hj136]
+private theorem squeezeXofFuel_getD (fuel outLen : Nat) (s : Qsag.KState) (j : Nat)
+    (hf : outLen ≤ 136 * fuel) (hj : j < outLen) :
+    (Qsag.squeezeXofFuel fuel outLen s).getD j 0 =
+      (Qsag.rateBlockBytes (keccakIter (j / 136) s)).getD (j % 136) 0 := by
+  induction fuel generalizing outLen s j with
+  | zero => omega
+  | succ fuel ih =>
+    cases outLen with
+    | zero => omega
+    | succ m =>
+      rw [Qsag.squeezeXofFuel_succ_succ]
+      dsimp only []
+      by_cases hle : m + 1 ≤ 136
+      · rw [ite_eq_left hle, getD_take_lt _ 0 (m + 1) j hj]
+        have hj136 : j < 136 := by omega
+        rw [Nat.div_eq_of_lt hj136, Nat.mod_eq_of_lt hj136]
         rfl
-      · have hge136 : 136 ≤ j := by omega
-        rw [getD_append_ge _ _ 0 j (by rw [Qsag.rateBlockBytes_length]; exact hge136),
-          Qsag.rateBlockBytes_length]
-        have hrem : m + 1 - 136 ≤ 136 * fuel := by omega
-        have hjrem : j - 136 < m + 1 - 136 := by omega
-        rw [squeezeXofFuel_getD fuel (m + 1 - 136) (Qsag.keccakF1600 s) (j - 136) hrem hjrem]
-        have hdiv : j / 136 = (j - 136) / 136 + 1 := by omega
-        have hmod : (j - 136) % 136 = j % 136 := by omega
-        rw [hdiv, hmod]
-        rfl
+      · rw [ite_eq_right hle]
+        by_cases hj136 : j < 136
+        · rw [getD_append_lt _ _ 0 j (by rw [Qsag.rateBlockBytes_length]; exact hj136),
+            Nat.div_eq_of_lt hj136, Nat.mod_eq_of_lt hj136]
+          rfl
+        · have hge136 : 136 ≤ j := by omega
+          rw [getD_append_ge _ _ 0 j (by rw [Qsag.rateBlockBytes_length]; exact hge136),
+            Qsag.rateBlockBytes_length]
+          have hrem : m + 1 - 136 ≤ 136 * fuel := by omega
+          have hjrem : j - 136 < m + 1 - 136 := by omega
+          rw [ih (m + 1 - 136) (Qsag.keccakF1600 s) (j - 136) hrem hjrem]
+          have hdiv : j / 136 = (j - 136) / 136 + 1 := by omega
+          have hmod : (j - 136) % 136 = j % 136 := by omega
+          rw [hdiv, hmod]
+          rfl
 
 theorem squeezeXofAux_getD (outLen : Nat) (s : Qsag.KState) (j : Nat) (hj : j < outLen) :
     (Qsag.squeezeXofAux outLen s).getD j 0 =
       (Qsag.rateBlockBytes (keccakIter (j / 136) s)).getD (j % 136) 0 :=
   squeezeXofFuel_getD outLen outLen s j (by omega) hj
 
-/-- **Unconditional Multi-Block Squeeze Refinement (`sponge_squeeze_refines`, `L-Ex-13`)**:
-    For an arbitrary output slice `out : Slice Std.U8` of ANY length (spanning arbitrarily many
-    136-byte `Keccak-f[1600]` rate blocks), `Shake256Sponge.squeeze` terminates without failure
-    and writes `Qsag.squeezeXofAux out.val.length (keccakStateOfArray sp.state)`. -/
+/-- A squeeze from offset zero into a destination of any length, across any number of rate
+blocks, succeeds and writes `Qsag.squeezeXofAux out.val.length (keccakStateOfArray sp.state)`. -/
 theorem sponge_squeeze_refines (sp : keccak.Shake256Sponge) (out : Slice Std.U8)
     (hsq : sp.squeezing = true) (hoff : sp.squeeze_offset = 0#usize) :
     ∃ sp' dst, keccak.Shake256Sponge.squeeze sp out = .ok (sp', dst) ∧
@@ -1703,9 +1375,8 @@ theorem sponge_squeeze_refines (sp : keccak.Shake256Sponge) (out : Slice Std.U8)
       have hjs : j < size := by rw [u8Bytes_length, hd] at hj; exact hj
       rw [u8Bytes_getD, hx j hjs, squeezeXofAux_getD size s₀ j hjs]
 
-/-- **Unconditional Multi-Chunk, Multi-Block `SHAKE256` Squeeze Refinement (`L-Ex-13`)**:
-    Absorbing arbitrary `chunks` and squeezing into an arbitrary-length `out` slice returns
-    `Qsag.shake256Xof out.val.length (chunks.map ...).flatten`. -/
+/-- SHAKE256 end to end: absorbing `chunks` in any split and squeezing into `out` of any
+length yields `Qsag.shake256Xof out.val.length` of the concatenated input. -/
 theorem shake256_squeeze_refines (chunks : List (Slice Std.U8)) (out : Slice Std.U8) :
     ∃ sp0 sp1 sp3 dst,
       keccak.Shake256Sponge.new_shake256 = .ok sp0 ∧
@@ -1723,7 +1394,7 @@ theorem shake256_squeeze_refines (chunks : List (Slice Std.U8)) (out : Slice Std
   · rw [hbytes, hstate]
     rfl
 
-/-! ### Arbitrary-Width SP 800-185 `left_encode` & Multi-Block `new_cshake256` (`L-Ex-13`) -/
+/-! ### SP 800-185 `left_encode` and the `new_cshake256` constructor -/
 
 private theorem natBytesLEAux_fuel_eq :
     ∀ (f1 f2 x : Nat),
@@ -1791,8 +1462,8 @@ private theorem getD_reverse_lt (ds : List UInt8) (i : Nat) (hi : i < ds.length)
   simp only [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hsub,
     List.getElem?_eq_getElem hir, Option.getD_some, List.getElem_reverse]
 
-/-- **Unconditional SP 800-185 `left_encode` Refinement (`sp800_185_left_encode_u128_refines`)**:
-    Refines `Qsag.leftEncode v.val` for **every** `v : Std.U128` (`0 ≤ v.val < 2^128`). -/
+/-- The extracted `left_encode` returns `Qsag.leftEncode v.val` in the first `n ≤ 17` bytes
+of its buffer, for every `v : Std.U128`. -/
 theorem sp800_185_left_encode_u128_refines (v : Std.U128) :
     ∃ len_enc n,
       keccak.sp800_185_left_encode_u128 v = .ok (len_enc, n) ∧
@@ -2093,11 +1764,9 @@ private theorem customizationPrefix_eq_of_z (cust : List UInt8) :
     simp only [z, List.cons_append, List.nil_append, List.append_assoc]
   rw [hz_eq]
 
-/-- **Unconditional Multi-Block SP 800-185 `new_cshake256` Constructor (`L-Ex-13`)**:
-    For **every** nonempty customization slice `customization : Slice Std.U8` of arbitrary length
-    (`1 ≤ customization.val.length < 2^64`), `Shake256Sponge.new_cshake256` succeeds, absorbs
-    the exact multi-block `bytepad` customization prefix `Qsag.customizationPrefix`, and sets
-    domain suffix `0x04`. -/
+/-- For every nonempty customization, of any length, `new_cshake256` succeeds, has absorbed
+exactly the `bytepad` prefix `Qsag.customizationPrefix` (which may span several rate blocks),
+and carries domain suffix `0x04`. -/
 theorem sponge_new_cshake256_nonempty_absorbed (customization : Slice Std.U8)
     (hLo : 1 ≤ customization.val.length) :
     ∃ sp0, keccak.Shake256Sponge.new_cshake256 customization = .ok sp0 ∧
@@ -2218,9 +1887,8 @@ theorem sponge_new_cshake256_nonempty_absorbed (customization : Slice Std.U8)
       exact (absorbBlocks_append_block q Qsag.zeroKState full (u8Bytes a2.val)
         hfull_len ha2_len).symm
 
-/-- **Unconditional End-to-End 32-Byte `cSHAKE256` Refinement (`cshake256_32_refines`, `L-Ex-13`)**:
-    Holds for **all** `customization : Slice Std.U8` (empty or arbitrary nonempty length) and
-    **all** `input : Slice Std.U8` (arbitrary length, multi-block). -/
+/-- The extracted `cshake256_32` returns `Qsag.cshake256Xof 32`, for every customization
+(empty or not) and every input. -/
 theorem cshake256_32_refines (customization input : Slice Std.U8) :
     ∃ out, keccak.cshake256_32 customization input = .ok out ∧
       u8Bytes out.val = Qsag.cshake256Xof 32 (u8Bytes customization.val) (u8Bytes input.val) := by
@@ -2244,10 +1912,8 @@ theorem cshake256_32_refines (customization input : Slice Std.U8) :
     obtain ⟨sp0, hnew, hpre, hsfx⟩ := sponge_new_cshake256_nonempty_absorbed customization hLo
     exact cshake256_32_refines_of_prefix customization input hc sp0 hnew hpre hsfx
 
-/-- **Unconditional Multi-Chunk, Multi-Block `cSHAKE256` XOF Squeeze Refinement (`L-Ex-13`)**:
-    Holds for **all** `customization : Slice Std.U8` (empty or arbitrary nonempty length),
-    **all** input chunk lists `chunks : List (Slice Std.U8)` (arbitrary multi-block message),
-    and **all** output buffers `out : Slice Std.U8` (arbitrary multi-block XOF squeeze length). -/
+/-- cSHAKE256 end to end: for every customization, any split of the input into `chunks` and
+a destination of any length, the first squeeze yields `Qsag.cshake256Xof out.val.length`. -/
 theorem cshake256_squeeze_refines (customization : Slice Std.U8)
     (chunks : List (Slice Std.U8)) (out : Slice Std.U8) :
     ∃ sp0 sp1 sp3 dst,
@@ -2285,9 +1951,8 @@ theorem cshake256_squeeze_refines (customization : Slice Std.U8)
     · simp only [keccak.Shake256Sponge.squeeze, h2, bind_eq_result_bind, result_bind_ok, hloop]
     · rw [hbytes, ← hxof out.val.length]
 
-/-- `#tooth` Multi-Block Rollover Sensitivity (`tooth_multiblock_squeeze_permuted_beyond_136`):
-    At the 136-byte rate boundary, `squeezeXofAux 137 zeroKState` invokes `keccakF1600` rather
-    than wrapping modulo 136 onto `rateBlockBytes zeroKState` (byte `136` is `0xbd ≠ 0x00`). -/
+/-- Byte 136 of the stream comes from the permuted state, not from a wrap-around onto the
+first rate block (`0xbd ≠ 0x00` from the zero state). -/
 theorem tooth_multiblock_squeeze_permuted_beyond_136 :
     (Qsag.squeezeXofAux 137 Qsag.zeroKState).getD 136 0 ≠
       (Qsag.rateBlockBytes Qsag.zeroKState).getD 0 0 := by
