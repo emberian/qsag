@@ -19,14 +19,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "build", "lec")
 
-def netlist(tag, files):
+def netlist(tag, top, files):
     path = os.path.join(OUT, tag + ".json")
-    cmd = (f'yosys -q -p "read_verilog -sv {" ".join(files)}; hierarchy -top qsag_gf128_clmul; proc; flatten; '
+    cmd = (f'yosys -q -p "read_verilog -sv {" ".join(files)}; hierarchy -top {top}; proc; flatten; '
            f'opt_expr; opt_clean; techmap; opt_expr; opt_clean; write_json {path}"')
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if r.returncode:
         sys.exit(r.stdout + r.stderr)
-    return json.load(open(path))["modules"]["qsag_gf128_clmul"]
+    return json.load(open(path))["modules"][top]
 
 # A monomial is an int: 0 is the constant 1, v is the variable v (1..256), u*512+v is u*v, u < v.
 def mmul(m1, m2):
@@ -112,9 +112,32 @@ def spec():
                 if (w >> k) & 1: outs[k] ^= {(1 + i) * 512 + (129 + j)}
     return [frozenset(s) for s in outs]
 
-def run(tag, files, want_equal):
-    got, stages, ncells, gates = anf_outputs(netlist(tag, files))
-    ref = spec()
+def tower_spec():
+    def tmul(k, a, b):
+        if k == 0:
+            return a & b
+        h = 1 << (k - 1)
+        mask = (1 << h) - 1
+        a0, a1 = a & mask, a >> h
+        b0, b1 = b & mask, b >> h
+        p = tmul(k - 1, a0, b0)
+        q = tmul(k - 1, a1, b1)
+        cross = tmul(k - 1, a0 ^ a1, b0 ^ b1) ^ p ^ q
+        g = 1 if k == 1 else 1 << (h // 2)
+        return (p ^ q) | ((cross ^ tmul(k - 1, g, q)) << h)
+
+    outs = [set() for _ in range(128)]
+    for i in range(128):
+        for j in range(128):
+            w = tmul(7, 1 << i, 1 << j)
+            for k in range(128):
+                if (w >> k) & 1:
+                    outs[k] ^= {(1 + i) * 512 + (129 + j)}
+    return [frozenset(s) for s in outs]
+
+def run(tag, top, files, ref_fn, want_equal):
+    got, stages, ncells, gates = anf_outputs(netlist(tag, top, files))
+    ref = ref_fn()
     diff = sum(g != s for g, s in zip(got, ref))
     mono = sum(len(s) for s in ref)
     equal = diff == 0 and stages == {3}
@@ -127,16 +150,25 @@ def run(tag, files, want_equal):
 def main():
     os.makedirs(OUT, exist_ok=True)
     rtl = [os.path.join(ROOT, "rtl", f) for f in ("qsag_clmul_kara.sv", "qsag_gf128_reduce.sv", "qsag_gf128_clmul.sv")]
-    ok1, l1 = run("gf128_clmul_anf", rtl, True)
+    tmap = os.path.join(ROOT, "rtl", "qsag_gf128_tower_map.sv")
+    tmul = os.path.join(ROOT, "rtl", "qsag_gf128_tower_mul.sv")
+    ok1, l1 = run("gf128_clmul_anf", "qsag_gf128_clmul", rtl, spec, True)
     kara = open(rtl[0]).read()
     old = "assign xmid = mid ^ hi ^ (2*HH-1)'(lo);"
     assert kara.count(old) == 1
     mut = os.path.join(OUT, "mut_kara_anf.sv")
     open(mut, "w").write(kara.replace(old, "assign xmid = mid ^ hi;"))
-    ok2, l2 = run("mut_gf128_clmul_anf", [mut] + rtl[1:], False)
+    ok2, l2 = run("mut_gf128_clmul_anf", "qsag_gf128_clmul", [mut] + rtl[1:], spec, False)
+    ok3, l3 = run("gf128_tower_mul_anf", "qsag_gf128_tower_mul", rtl + [tmap, tmul], tower_spec, True)
+    tmap_txt = open(tmap).read()
+    old_t = "128'hd353a5afc268871ad268eb72003a04ad"
+    assert tmap_txt.count(old_t) >= 1
+    mut_t = os.path.join(OUT, "mut_tmap_anf.sv")
+    open(mut_t, "w").write(tmap_txt.replace(old_t, "128'hd353a5afc268871ad268eb72003a04ac", 1))
+    ok4, l4 = run("mut_gf128_tower_mul_anf", "qsag_gf128_tower_mul", rtl + [mut_t, tmul], tower_spec, False)
     with open(os.path.join(OUT, "results_anf.txt"), "w") as f:
-        f.write(l1 + "\n" + l2 + "\n")
-    sys.exit(0 if ok1 and ok2 else 1)
+        f.write("\n".join([l1, l2, l3, l4]) + "\n")
+    sys.exit(0 if (ok1 and ok2 and ok3 and ok4) else 1)
 
 if __name__ == "__main__":
     main()
