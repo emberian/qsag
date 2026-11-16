@@ -1,0 +1,22 @@
+[
+ {
+  "mode": "p2",
+  "merkle_nodes": 5532,
+  "leaf_hashes": 342,
+  "ext4_muladds": 5556,
+  "proof_words": 35088,
+  "fs_perms": 600
+ },
+ {
+  "mode": "ts",
+  "merkle_nodes": 5532,
+  "leaf_hashes": 342,
+  "ext4_muladds": 6240,
+  "proof_words": 35088,
+  "fs_perms": 600
+ },
+ {
+  "nvars": 16,
+  "pair_folds": 65535
+ }
+]
