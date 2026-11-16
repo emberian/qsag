@@ -169,20 +169,18 @@ module lec_me_int #(parameter int LANE = 0) (input wire [767:0] x, input wire [7
   lec_reduce72 u (.t(t), .r(r));
 endmodule
 module lec_mi_int #(parameter int LANE = 0) (input wire [767:0] x, input wire [767:0] rc, output logic [63:0] r);
-  // lane 0: sum_j x_j - 64 x_0 (as + 64 * (p - x_0) on canonical x_0 is not assumed; use + 64*(2^64-1-x_0) + 64 - 64*2^64 folded:
-  // -64 x_0 = 64 * (~x_0) - 64 * (2^64 - 1), and -64 * (2^64 - 1) = 64 * (p - 2^32 + 1) - ... is taken mod p as the constant K below.
+  // lane 0: -64 x_0 = 64 * (~x_0) - 64 * (2^64 - 1); the constant enters reduced mod p, as in the RTL
   localparam logic [63:0] PRIME = 64'hFFFF_FFFF_0000_0001;
-  // K = (-64 * (2^64 - 1)) mod p = 64 * (p - (2^32 - 2)) mod p
-  localparam logic [71:0] K = 72'd64 * (72'(PRIME) - 72'd4294967294);
-  logic [71:0] s;
+  localparam logic [71:0] K = (72'd64 * (72'(PRIME) - 72'd4294967294)) % 72'(PRIME);
+  logic [79:0] s;   // lane 11 carries x << 10: up to 2^74 plus the other terms
   wire  [63:0] rr;
   always_comb begin
-    s = {8'b0, rc[64*LANE +: 64]};
-    for (int j = 0; j < 12; j++) s += {8'b0, x[64*j +: 64]};
-    if (LANE == 0) s += {2'b0, ~x[63:0], 6'b0} + K;
-    else s += 72'(x[64*LANE +: 64]) << (LANE - 1);
+    s = {16'b0, rc[64*LANE +: 64]};
+    for (int j = 0; j < 12; j++) s += {16'b0, x[64*j +: 64]};
+    if (LANE == 0) s += {10'b0, ~x[63:0], 6'b0} + {8'b0, K};
+    else s += 80'(x[64*LANE +: 64]) << (LANE - 1);
   end
-  lec_reduce72 u (.t(s), .r(rr));
+  qsag_gl64_final_seq #(.W(80)) u (.x(s), .y(80'b0), .r(rr));
   assign r = rr;
 endmodule
 
