@@ -1,25 +1,18 @@
-//! Generalized `(t, n)` CNF replicated secret sharing and a trusted-coordinator
-//! prototype of its `t-of-t` online projection into a 56-lane MiniMAC Keccak engine.
+//! Generalized `(t, n)` CNF replicated secret sharing custody (`CnfRssConfig`,
+//! `CnfRssKeyShare256`, `run_dealerless_cnf_rss_dkg`) and the sealed [`IsolatedSlhBackend`]
+//! / [`IsolatedCnfSlhOracles`] bridge for zero-coordinator isolated-party `SLH-DSA` signing
+//! (`qsag_quorum::cnf_party::IsolatedCnfParty`).
 //!
 //! Custody uses one slot for each `(t - 1)`-party subset `S`; party `i` holds that
 //! slot exactly when `i` is not in `S`. Any `(t - 1)`-party coalition misses its own
-//! slot. An active quorum `Q` assigns each slot to `min(Q \ S)`, checks overlapping
-//! replicas, and rerandomizes the resulting additive shares. Supported custody
-//! configurations satisfy `2 <= t <= n <= 10`.
+//! slot. Honest-majority configurations (`2 * (t - 1) < n`, such as `2-of-3` and `3-of-5`)
+//! execute full `Baggy` and `SLH-DSA` signing ceremonies directly over isolated custodian
+//! parties (`qsag_quorum::cnf_party::IsolatedCnfParty`) with zero trusted coordinator.
 //!
-//! The arithmetic uses systematic `[128, 56, 73]` Reed–Solomon codewords over
-//! [`TowerGf256`] and their `[128, 111, 18]` Schur square. It packs 56 Boolean
-//! Keccak lanes and calls [`qsag_asm::gf256_shamir_mul`] on contiguous gate buffers.
-//! Code distances and fault-injection tests describe algebraic checks; they are
-//! not a security proof for the concrete correlation source or party isolation.
-//!
-//! ### Trust boundary
-//! This module currently executes all parties in one address space. Tuple generation
-//! combines every slot seed, and MAC transitions reconstruct both the shared value and
-//! MAC key inside that coordinator. It is therefore a trusted-coordinator prototype,
-//! NOT an isolated-party malicious-secure MPC deployment. The codeword and fault tests
-//! do not establish privacy against the coordinator. Never hand this coordinator the
-//! custody shares when that process is outside the trusted boundary.
+//! The earlier in-process `t-of-t` `MiniMAC` projection (`legacy_coordinator_prototype`)
+//! executes all parties in one address space and is retained strictly hidden (`#[doc(hidden)]`)
+//! for legacy parity/regression harnesses. Never hand real custody shares to the legacy
+//! in-process prototype.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -344,6 +337,11 @@ impl CnfRssKeyShare256 {
     #[inline]
     pub fn scheme_identity(&self) -> Option<[u8; 32]> {
         self.scheme_identity
+    }
+
+    #[inline]
+    pub fn slh_profile_digest(&self) -> Option<[u64; 4]> {
+        self.slh_profile_digest
     }
 
     /// Bind this share once to a `BaggyKeyBinding::identity()` digest (idempotent on same digest).
@@ -731,14 +729,235 @@ pub(crate) fn reconstruct_cnf_rss_secret_for_test(
     (sk_seed, sk_prf)
 }
 
-/// Projected `t-of-t` additive key material for one online signing session (`!Clone`, wiped on `Drop`).
-pub struct ProjectedQuorumSecrets {
-    quorum: Vec<usize>,
-    key_len: usize,
-    pk_seed: [u8; 32],
-    sk_seed_shares: SecretVec<[u8; 32]>,
-    sk_prf_shares: SecretVec<[u8; 32]>,
+/// Compute the 256-bit `SLH-DSA` parameter-profile digest locked by [`CnfRssKeyShare256::bind_slh_params`].
+#[inline]
+pub fn compute_slh_profile_digest(params: &Fips205Params) -> [u64; 4] {
+    crate::keccak_mpc::slh_profile_digest_u64x4(params)
 }
+
+/// Verified isolated-party backend driving NIST FIPS 205 `SLH-DSA` ceremonies without
+/// reconstructing `SK.seed`, `SK.prf`, or any intermediate WOTS+/FORS chain wire.
+///
+/// Implementations (`qsag_quorum::cnf_party::IsolatedCnfParty`) MUST run their active
+/// multiplication check barrier and verify replicated slot-copy agreement across holders
+/// strictly before returning any opened block.
+pub trait IsolatedSlhBackend {
+    /// Lock `(params, pk_seed)` on this custodian's key state before secret-derived outputs.
+    fn bind_slh_profile(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+    ) -> Result<(), Fips205Error>;
+
+    /// Evaluate multi-block `R = PRF_msg([SK.prf], opt_rand, m_prime)` on shared wires,
+    /// run the active multiplication barrier, and open only the `n`-byte `R`.
+    fn eval_prf_msg_verified(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<SlhBlock, Fips205Error>;
+
+    /// Evaluate a batch of `(prf_adrs, step_adrs[0..steps])` chains on shared `SK.seed`,
+    /// keeping `SK.seed` and every intermediate chain node shared, run the active
+    /// multiplication barrier before opening, and open only each chain's final `n`-byte block.
+    fn eval_chains_verified(
+        &mut self,
+        n: usize,
+        pk_seed: &[u8],
+        chains: &[(Fips205Adrs, Vec<Fips205Adrs>)],
+    ) -> Result<Vec<SlhBlock>, Fips205Error>;
+}
+
+/// Sealed [`SlhMpcOracles`] adapter for an [`IsolatedSlhBackend`] (`IsolatedCnfParty`).
+pub struct IsolatedCnfSlhOracles<'a, B: IsolatedSlhBackend>(pub &'a mut B);
+
+impl<B: IsolatedSlhBackend> sealed_mpc_oracles::Sealed for IsolatedCnfSlhOracles<'_, B> {}
+
+impl<B: IsolatedSlhBackend> SlhMpcOracles for IsolatedCnfSlhOracles<'_, B> {
+    fn bind_key_params(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+    ) -> Result<(), Fips205Error> {
+        self.0.bind_slh_profile(params, pk_seed)
+    }
+
+    fn eval_prf_msg_mpc(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<(SlhBlock, CutBoundaryMacToken), Fips205Error> {
+        let r_blk = self.0.eval_prf_msg_verified(n, opt_rand, m_prime)?;
+        Ok((r_blk, CutBoundaryMacToken::mint_verified()))
+    }
+
+    fn eval_fors_trees_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        base_adrs: Fips205Adrs,
+        fors_indices: &[u32],
+    ) -> Result<ForsMpcOutput, Fips205Error> {
+        self.0.bind_slh_profile(params, pk_seed)?;
+        let n = params.n;
+        if fors_indices.len() != params.k {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let t_leaves = 1usize << params.a;
+        let total_leaves = params.k * t_leaves;
+        let mut chains = Vec::with_capacity(params.k + total_leaves);
+        for (i, &idx_u32) in fors_indices.iter().enumerate() {
+            let idx = idx_u32 as usize;
+            if idx >= t_leaves {
+                return Err(Fips205Error::MpcActiveTamperDetected);
+            }
+            let mut prf_a = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+            prf_a.key_pair = base_adrs.key_pair;
+            prf_a.f6 = (i * t_leaves + idx) as u32;
+            chains.push((prf_a, Vec::new()));
+        }
+        for flat in 0..total_leaves {
+            let mut prf_a = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+            prf_a.key_pair = base_adrs.key_pair;
+            prf_a.f6 = flat as u32;
+            let mut leaf_a = base_adrs;
+            leaf_a.adrs_type = Fips205AdrsType::ForsTree;
+            leaf_a.f5 = 0;
+            leaf_a.f6 = flat as u32;
+            chains.push((prf_a, vec![leaf_a]));
+        }
+        let mut all_out = self.0.eval_chains_verified(n, pk_seed, &chains)?;
+        if all_out.len() != params.k + total_leaves {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        let flat_leaves = all_out.split_off(params.k);
+        let revealed_sks = all_out;
+        let mut fors_all_leaves = Vec::with_capacity(params.k);
+        for i in 0..params.k {
+            fors_all_leaves.push(flat_leaves[i * t_leaves..(i + 1) * t_leaves].to_vec());
+        }
+        Ok((
+            revealed_sks,
+            fors_all_leaves,
+            CutBoundaryMacToken::mint_verified(),
+        ))
+    }
+
+    fn eval_wots_pkgen_subtree_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        self.0.bind_slh_profile(params, pk_seed)?;
+        let n = params.n;
+        let n_leaves = 1usize << params.hp;
+        let ell = params.ell();
+        let total_chains = n_leaves * ell;
+        let mut chains = Vec::with_capacity(total_chains);
+        for flat in 0..total_chains {
+            let kp = (flat / ell) as u32;
+            let ch = (flat % ell) as u32;
+            let mut prf_a = Fips205Adrs::ZERO;
+            prf_a.layer = layer;
+            prf_a.set_tree_address(tree);
+            prf_a.adrs_type = Fips205AdrsType::WotsPrf;
+            prf_a.key_pair = kp;
+            prf_a.f5 = ch;
+            let steps: Vec<Fips205Adrs> = (0..15u32)
+                .map(|step| {
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch;
+                    a.f6 = step;
+                    a
+                })
+                .collect();
+            chains.push((prf_a, steps));
+        }
+        let endpoints = self.0.eval_chains_verified(n, pk_seed, &chains)?;
+        Ok((endpoints, CutBoundaryMacToken::mint_verified()))
+    }
+
+    fn eval_wots_layer_sign_and_siblings_mpc(
+        &mut self,
+        _authorization: OracleCallToken,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+        active_kp: u32,
+        msg_to_sign: &SlhBlock,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        self.0.bind_slh_profile(params, pk_seed)?;
+        let n = params.n;
+        let n_leaves = 1usize << params.hp;
+        if msg_to_sign.len() != n || (active_kp as usize) >= n_leaves {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let (digits, ell_check) = try_wots_base16_digits_and_csum(msg_to_sign.as_slice())?;
+        let ell = params.ell();
+        if ell_check != ell {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let total_chains = n_leaves * ell;
+        let mut chains = Vec::with_capacity(total_chains);
+        for flat in 0..total_chains {
+            let kp = (flat / ell) as u32;
+            let ch = flat % ell;
+            let target = if kp == active_kp {
+                digits[ch] as u32
+            } else {
+                15
+            };
+            let mut prf_a = Fips205Adrs::ZERO;
+            prf_a.layer = layer;
+            prf_a.set_tree_address(tree);
+            prf_a.adrs_type = Fips205AdrsType::WotsPrf;
+            prf_a.key_pair = kp;
+            prf_a.f5 = ch as u32;
+            let steps: Vec<Fips205Adrs> = (0..target)
+                .map(|step| {
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch as u32;
+                    a.f6 = step;
+                    a
+                })
+                .collect();
+            chains.push((prf_a, steps));
+        }
+        let nodes = self.0.eval_chains_verified(n, pk_seed, &chains)?;
+        Ok((nodes, CutBoundaryMacToken::mint_verified()))
+    }
+}
+
+/// Quarantined legacy in-process trusted-coordinator prototype (`CnfRssProjectedEngine`).
+///
+/// **Do not use in custodian deployments**: use `qsag_quorum::cnf_party::IsolatedCnfParty`
+/// so each custodian executes in its own isolated party state over encrypted wire channels.
+#[doc(hidden)]
+pub mod legacy_coordinator_prototype {
+    use super::*;
+
+    /// Projected `t-of-t` additive key material for one online signing session (`!Clone`, wiped on `Drop`).
+    #[doc(hidden)]
+    pub struct ProjectedQuorumSecrets {
+        quorum: Vec<usize>,
+        key_len: usize,
+        pk_seed: [u8; 32],
+        pub(super) sk_seed_shares: SecretVec<[u8; 32]>,
+        pub(super) sk_prf_shares: SecretVec<[u8; 32]>,
+    }
 
 /// **Theorem 4.1 Authenticated `t-of-t` Online Key Projection (`project_quorum_keys`):**
 /// 1. Cross-verifies all overlapping slots (`|Q \ S_m| >= 2`) via session-salted commitments;
@@ -2004,10 +2223,17 @@ pub enum CnfRssFault {
     CorruptCutOpening { party: usize },
 }
 
-/// Active `(t, n)` CNF-RSS $\to$ `t-of-t` Projected 56-Lane `MiniMAC` `Keccak-f[1600]` Engine.
+/// Legacy trusted-coordinator `(t, n)` CNF-RSS $\to$ `t-of-t` Projected 56-Lane `MiniMAC` Engine.
 ///
-/// Implements both [`BaggyEngine`] (stateless `Baggy` + `Waistband`) and sealed [`SlhMpcOracles`]
-/// (NIST FIPS 205 `SLH-DSA-SHAKE-*`).
+/// Quarantined: use `qsag_quorum::cnf_party::IsolatedCnfParty` for zero-coordinator isolated-party
+/// `Baggy` and `SLH-DSA` signing ceremonies.
+#[doc(hidden)]
+#[cfg_attr(
+    feature = "testing-ephemeral",
+    deprecated(
+        note = "Trusted-coordinator prototype; use qsag_quorum::cnf_party::IsolatedCnfParty for zero-coordinator isolated-party signing"
+    )
+)]
 pub struct CnfRssProjectedEngine<'a> {
     session_id: [u8; 32],
     projected: ProjectedQuorumSecrets,
@@ -2021,7 +2247,7 @@ pub struct CnfRssProjectedEngine<'a> {
     open_ctr: u64,
     poisoned: bool,
     #[cfg(test)]
-    fault: Option<CnfRssFault>,
+    pub(super) fault: Option<CnfRssFault>,
 }
 
 /// Linear `Theta + Rho + Pi` over a contiguous `1600 * 128`-byte `MiniMAC` state.
@@ -3964,12 +4190,18 @@ impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
         Ok((nodes, CutBoundaryMacToken::mint_verified()))
     }
 }
+}
+
+#[doc(hidden)]
+#[allow(deprecated)]
+pub use legacy_coordinator_prototype::*;
 
 // ============================================================================
 // 6. Comprehensive Unit, Active-Fault-Abort & `3-of-5` Release Benchmark Tests
 // ============================================================================
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::baggy::{

@@ -4005,6 +4005,344 @@ pub struct KosOtProofMsg {
     pub t_kos: Tower128,
 }
 
+fn encode_rlwe_poly_vec(out: &mut Vec<u8>, poly: &RlwePoly) {
+    let mut buf = [0u8; RLWE_N * 2];
+    encode_rlwe_poly_le(poly, &mut buf);
+    out.extend_from_slice(&buf);
+}
+
+fn decode_rlwe_poly_slice(raw: &[u8], pos: &mut usize) -> Option<RlwePoly> {
+    let bytes = raw.get(*pos..*pos + RLWE_N * 2)?;
+    *pos += RLWE_N * 2;
+    let mut coeffs = [0u16; RLWE_N];
+    for (i, slot) in coeffs.iter_mut().enumerate() {
+        *slot = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+    }
+    let poly = RlwePoly(coeffs);
+    poly.is_canonical().then_some(poly)
+}
+
+fn encode_i16_box_reps(out: &mut Vec<u8>, reps: &[[i16; RLWE_N]; RLWE_ZKPOK_REPS]) {
+    for arr in reps {
+        for &v in arr {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
+fn decode_i16_box_reps(
+    raw: &[u8],
+    pos: &mut usize,
+) -> Option<Box<[[i16; RLWE_N]; RLWE_ZKPOK_REPS]>> {
+    let need = RLWE_ZKPOK_REPS * RLWE_N * 2;
+    let bytes = raw.get(*pos..*pos + need)?;
+    *pos += need;
+    let mut out = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
+    let mut off = 0usize;
+    for rep in out.iter_mut() {
+        for coeff in rep.iter_mut() {
+            *coeff = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
+            off += 2;
+        }
+    }
+    Some(out)
+}
+
+impl BaseOtCrsCommitMsg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.receiver_crs_commit
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let receiver_crs_commit: [u8; 32] = raw.try_into().ok()?;
+        Some(Self {
+            receiver_crs_commit,
+        })
+    }
+}
+
+impl BaseOtCrsShareMsg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.sender_crs_share
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let sender_crs_share: [u8; 32] = raw.try_into().ok()?;
+        Some(Self { sender_crs_share })
+    }
+}
+
+impl BaseOtCrsOpenMsg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.receiver_crs_share
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let receiver_crs_share: [u8; 32] = raw.try_into().ok()?;
+        Some(Self { receiver_crs_share })
+    }
+}
+
+impl BaseOtRound1Msg {
+    /// Canonical byte serialization (`384` canonical `RlwePoly`s + `3` `RlweReceiverZkPok`s).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let pok_bytes = RLWE_ZKPOK_REPS * 8 + 4 * RLWE_ZKPOK_REPS * RLWE_N * 2;
+        let mut out = Vec::with_capacity(
+            8 + self.pk0s.len() * RLWE_N * 2 + self.block_poks.len() * pok_bytes,
+        );
+        out.extend_from_slice(&(self.pk0s.len() as u32).to_be_bytes());
+        out.extend_from_slice(&(self.block_poks.len() as u32).to_be_bytes());
+        for pk0 in &self.pk0s {
+            encode_rlwe_poly_vec(&mut out, pk0);
+        }
+        for pok in &self.block_poks {
+            for &c in &pok.chal0 {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+            for &c in &pok.chal1 {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+            encode_i16_box_reps(&mut out, &pok.z_s0);
+            encode_i16_box_reps(&mut out, &pok.z_e0);
+            encode_i16_box_reps(&mut out, &pok.z_s1);
+            encode_i16_box_reps(&mut out, &pok.z_e1);
+        }
+        out
+    }
+
+    /// Strict canonical decoder rejecting non-canonical lengths or coefficients.
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 8 {
+            return None;
+        }
+        let pk_len = u32::from_be_bytes(raw[0..4].try_into().ok()?) as usize;
+        let pok_len = u32::from_be_bytes(raw[4..8].try_into().ok()?) as usize;
+        if pk_len != RLWE_BASE_OT_COUNT || pok_len != RLWE_BASE_OT_BLOCKS {
+            return None;
+        }
+        let mut pos = 8usize;
+        validate_frame_count(pk_len, RLWE_N * 2, raw.len() - pos).ok()?;
+        let mut pk0s = Vec::with_capacity(pk_len);
+        for _ in 0..pk_len {
+            pk0s.push(decode_rlwe_poly_slice(raw, &mut pos)?);
+        }
+        let pok_bytes = RLWE_ZKPOK_REPS * 8 + 4 * RLWE_ZKPOK_REPS * RLWE_N * 2;
+        validate_frame_count(pok_len, pok_bytes, raw.len() - pos).ok()?;
+        let mut block_poks = Vec::with_capacity(pok_len);
+        for _ in 0..pok_len {
+            let mut chal0 = [0u32; RLWE_ZKPOK_REPS];
+            let mut chal1 = [0u32; RLWE_ZKPOK_REPS];
+            for slot in &mut chal0 {
+                let b: [u8; 4] = raw.get(pos..pos + 4)?.try_into().ok()?;
+                pos += 4;
+                *slot = u32::from_le_bytes(b);
+            }
+            for slot in &mut chal1 {
+                let b: [u8; 4] = raw.get(pos..pos + 4)?.try_into().ok()?;
+                pos += 4;
+                *slot = u32::from_le_bytes(b);
+            }
+            let z_s0 = decode_i16_box_reps(raw, &mut pos)?;
+            let z_e0 = decode_i16_box_reps(raw, &mut pos)?;
+            let z_s1 = decode_i16_box_reps(raw, &mut pos)?;
+            let z_e1 = decode_i16_box_reps(raw, &mut pos)?;
+            block_poks.push(RlweReceiverZkPok {
+                chal0,
+                chal1,
+                z_s0,
+                z_e0,
+                z_s1,
+                z_e1,
+            });
+        }
+        (pos == raw.len()).then_some(Self { pk0s, block_poks })
+    }
+}
+
+impl BaseOtRound2Msg {
+    /// Canonical byte serialization (`384` 4-poly FO responses + 32-byte combiner coin commitment).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + self.resps.len() * 4 * RLWE_N * 2 + 32);
+        out.extend_from_slice(&(self.resps.len() as u32).to_be_bytes());
+        for r in &self.resps {
+            encode_rlwe_poly_vec(&mut out, &r.u0);
+            encode_rlwe_poly_vec(&mut out, &r.v0);
+            encode_rlwe_poly_vec(&mut out, &r.u1);
+            encode_rlwe_poly_vec(&mut out, &r.v1);
+        }
+        out.extend_from_slice(&self.receiver_coin_commit);
+        out
+    }
+
+    /// Strict canonical decoder.
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 36 {
+            return None;
+        }
+        let count = u32::from_be_bytes(raw[0..4].try_into().ok()?) as usize;
+        if count != RLWE_BASE_OT_COUNT {
+            return None;
+        }
+        let mut pos = 4usize;
+        validate_frame_count(count, 4 * RLWE_N * 2, raw.len() - pos - 32).ok()?;
+        let mut resps = Vec::with_capacity(count);
+        for _ in 0..count {
+            let u0 = decode_rlwe_poly_slice(raw, &mut pos)?;
+            let v0 = decode_rlwe_poly_slice(raw, &mut pos)?;
+            let u1 = decode_rlwe_poly_slice(raw, &mut pos)?;
+            let v1 = decode_rlwe_poly_slice(raw, &mut pos)?;
+            resps.push(RlweOtSenderMsg { u0, v0, u1, v1 });
+        }
+        let receiver_coin_commit: [u8; 32] = raw.get(pos..pos + 32)?.try_into().ok()?;
+        pos += 32;
+        (pos == raw.len()).then_some(Self {
+            resps,
+            receiver_coin_commit,
+        })
+    }
+}
+
+impl BaseOtRound3Msg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.sender_coin_share
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let sender_coin_share: [u8; 32] = raw.try_into().ok()?;
+        Some(Self { sender_coin_share })
+    }
+}
+
+impl BaseOtRound4Msg {
+    /// Canonical byte serialization (`32`-byte coin opening + `128` length-prefixed parity tables).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let entries: usize = self.parity_tables.iter().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(32 + 2 + self.parity_tables.len() * 2 + entries * 128);
+        out.extend_from_slice(&self.receiver_coin_share);
+        out.extend_from_slice(&(self.parity_tables.len() as u16).to_be_bytes());
+        for row in &self.parity_tables {
+            out.extend_from_slice(&(row.len() as u16).to_be_bytes());
+            for tbl in row {
+                for entry in tbl {
+                    out.extend_from_slice(entry);
+                }
+            }
+        }
+        out
+    }
+
+    /// Strict canonical decoder.
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 34 {
+            return None;
+        }
+        let receiver_coin_share: [u8; 32] = raw[0..32].try_into().ok()?;
+        let rows = u16::from_be_bytes([raw[32], raw[33]]) as usize;
+        if rows != 128 {
+            return None;
+        }
+        let mut pos = 34usize;
+        let mut parity_tables = Vec::with_capacity(128);
+        for _ in 0..128 {
+            let len_bytes: [u8; 2] = raw.get(pos..pos + 2)?.try_into().ok()?;
+            pos += 2;
+            let row_len = u16::from_be_bytes(len_bytes) as usize;
+            if row_len > RLWE_BASE_OT_COUNT {
+                return None;
+            }
+            validate_frame_count(row_len, 128, raw.len() - pos).ok()?;
+            let mut row = Vec::with_capacity(row_len);
+            for _ in 0..row_len {
+                let mut tbl = [[0u8; 32]; 4];
+                for entry in &mut tbl {
+                    entry.copy_from_slice(raw.get(pos..pos + 32)?);
+                    pos += 32;
+                }
+                row.push(tbl);
+            }
+            parity_tables.push(row);
+        }
+        (pos == raw.len()).then_some(Self {
+            receiver_coin_share,
+            parity_tables,
+        })
+    }
+}
+
+impl KosOtUColsMsg {
+    /// Canonical byte serialization (`padded_words_be32` + `128 * padded_words` LE `u64`s).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let padded_words = self.u_cols.first().map_or(0, Vec::len);
+        let mut out = Vec::with_capacity(4 + self.u_cols.len() * padded_words * 8);
+        out.extend_from_slice(&(padded_words as u32).to_be_bytes());
+        for col in &self.u_cols {
+            for &w in col {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Strict canonical decoder.
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 4 {
+            return None;
+        }
+        let padded_words = u32::from_be_bytes(raw[0..4].try_into().ok()?) as usize;
+        if padded_words < 4 {
+            return None;
+        }
+        let mut pos = 4usize;
+        validate_frame_count(padded_words, 128 * 8, raw.len() - pos).ok()?;
+        if raw.len() - pos != 128 * padded_words * 8 {
+            return None;
+        }
+        let mut u_cols = Vec::with_capacity(128);
+        for _ in 0..128 {
+            let mut col = Vec::with_capacity(padded_words);
+            for _ in 0..padded_words {
+                let b: [u8; 8] = raw[pos..pos + 8].try_into().ok()?;
+                pos += 8;
+                col.push(u64::from_le_bytes(b));
+            }
+            u_cols.push(col);
+        }
+        Some(Self { u_cols })
+    }
+}
+
+impl KosOtChallengeMsg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.chi_seed
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        let chi_seed: [u8; 32] = raw.try_into().ok()?;
+        Some(Self { chi_seed })
+    }
+}
+
+impl KosOtProofMsg {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[0..16].copy_from_slice(&self.x_kos.0.to_le_bytes());
+        out[16..32].copy_from_slice(&self.t_kos.0.to_le_bytes());
+        out
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Option<Self> {
+        if raw.len() != 32 {
+            return None;
+        }
+        let x = u128::from_le_bytes(raw[0..16].try_into().ok()?);
+        let t = u128::from_le_bytes(raw[16..32].try_into().ok()?);
+        Some(Self {
+            x_kos: Tower128(x),
+            t_kos: Tower128(t),
+        })
+    }
+}
+
 /// Ephemeral Receiver state awaiting `KosOtChallengeMsg` (`!Clone`, wiped on `Drop`).
 pub struct KosOtReceiverPending {
     batch_ctr: u64,
