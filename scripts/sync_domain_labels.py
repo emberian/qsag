@@ -16,10 +16,9 @@ What counts as a label:
     `#[cfg(test)] mod name;`.
 Labels completed at run time by `format!` or by appended bytes appear as written in the source.
 
-A label that occurs in more than one crate must be listed in `SHARED` (two production crates)
-or be shared only with an `aeneas/` extraction crate, whose labels are re-declarations of
-production labels (`MIRROR_CRATES`). Anything else is a failure: either a new collision between
-crates or a stale allowlist entry.
+A label that occurs in more than one crate must be listed in `SHARED`, with the reason it is
+shared. A shared label missing from `SHARED` is a failure (a new collision between crates), and
+so is a `SHARED` entry that is no longer shared (a stale allowlist entry).
 
     sync_domain_labels.py            check; exit 1 on any difference
     sync_domain_labels.py --write    rewrite the generated block in the Lean file
@@ -39,23 +38,27 @@ BEGIN = "-- BEGIN GENERATED (scripts/sync_domain_labels.py --write)"
 END = "-- END GENERATED (scripts/sync_domain_labels.py)"
 
 SCAN_ROOTS = ["crates", "aeneas"]
-MIRROR_CRATES = {"aeneas/qsag-verified", "aeneas/qsag-whir-verified"}
 
-# Labels that two or more production crates use on purpose, with the reason. Hand-maintained:
-# the scan fails when the set of labels shared between production crates differs from this.
+# Labels that two or more crates use on purpose, with the reason. Hand-maintained: the scan
+# fails when the set of labels actually shared between crates differs from this.
 SHARED: dict[str, str] = {
-    "QSAG.FIRST_SIGNED.V1": "first-signed marker written by qsag-core and read by its callers",
-    "QSAG.MU/v2": "message-representative frame, hashed by qsag-agg and rebuilt by its clients",
-    "QSAG.POLICY.CTX.V1": "policy context digest shared by qsag-policy and its enforcers",
-    "QSAG.POLICY.KEY.V1": "policy key derivation shared by qsag-addr and qsag-policy users",
-    "QSAG.SEED_BURN.V1": "seed-burn record written and checked across custody crates",
-    "QSAGFNOD": "Poseidon2 FORS node domain, one constant in qsag-agg and qsag-accel",
-    "QSAGHMS1": "H_msg domain of the aggregate signature, shared with its accelerators",
-    "QSAGMRKL": "Poseidon2 Merkle node domain, one constant in qsag-agg and qsag-accel",
-    "QSAGPRFM": "PRF_msg domain of the aggregate signature",
-    "QSAGWPK1": "WOTS public-key compression domain",
-    "QSAGWPRF": "WOTS PRF domain",
-    "QSAGWSTP": "WOTS chain-step domain",
+    "QSAG.FIRST_SIGNED.V1": "durable first-signed ledger tag: qsag-core (baggy) and the "
+                            "qsag-quorum durable custody open the same ledger format",
+    "QSAG.HYBRID.V2": "hybrid address tag: aeneas/qsag-verified is the extraction copy of the "
+                      "qsag-addr function",
+    "QSAG.MU/v2": "message-representative frame: hashed by qsag-agg, rebuilt by the qsag-core "
+                  "MPC signer",
+    "QSAG.POLICY.CTX.V1": "policy signing-context digest: qsag-policy computes it, qsag-cli "
+                          "recomputes it for its ledger",
+    "QSAG.SEED_BURN.V1": "durable seed-burn ledger tag: qsag-core (pcg_dense) and the "
+                         "qsag-quorum durable custody open the same ledger format",
+    "QSAGFNOD": "Poseidon2 FORS node domain: one constant in qsag-agg and qsag-accel",
+    "QSAGHMS1": "stateful H_msg domain: qsag-agg signature, qsag-core Poseidon2 MPC",
+    "QSAGMRKL": "Poseidon2 Merkle node domain: qsag-agg, qsag-accel and qsag-core",
+    "QSAGPRFM": "PRF_msg domain: qsag-agg signature, qsag-core Poseidon2 MPC",
+    "QSAGWPK1": "WOTS public-key compression domain: qsag-agg signature, qsag-core MPC",
+    "QSAGWPRF": "WOTS PRF domain: qsag-agg signature, qsag-core MPC",
+    "QSAGWSTP": "WOTS chain-step domain: qsag-agg signature, qsag-core MPC",
 }
 
 SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", "0": "\0", "'": "'", '"': '"'}
@@ -296,16 +299,12 @@ def scan() -> dict[str, list[str]]:
     return inventory
 
 
-def shared_sets(inventory: dict[str, list[str]]):
-    owners: dict[str, list[str]] = {}
-    for crate, labels in inventory.items():
+def shared_labels(inventory: dict[str, list[str]]) -> list[str]:
+    owners: dict[str, int] = {}
+    for labels in inventory.values():
         for label in labels:
-            owners.setdefault(label, []).append(crate)
-    production = sorted(l for l, cs in owners.items()
-                        if len([c for c in cs if c not in MIRROR_CRATES]) > 1)
-    mirror = sorted(l for l, cs in owners.items()
-                    if len(cs) > 1 and any(c in MIRROR_CRATES for c in cs))
-    return production, mirror
+            owners[label] = owners.get(label, 0) + 1
+    return sorted(l for l, k in owners.items() if k > 1)
 
 
 def lean_string(label: str) -> str:
@@ -330,84 +329,84 @@ def label_code(label: str) -> int:
     return code
 
 
-def wrap(items: list[str], indent: str, width: int = 100) -> str:
-    lines, cur = [], indent
+def wrap(items: list[str], indent: str, first: str | None = None, width: int = 100) -> str:
+    """Comma-separated items, wrapped; `first` opens the first line, `indent` the others."""
+    lines, cur = [], indent if first is None else first
+    fresh = True
     for k, item in enumerate(items):
         piece = item + ("," if k + 1 < len(items) else "")
-        if len(cur) > len(indent) and len(cur) + 1 + len(piece) > width:
+        if not fresh and len(cur) + 1 + len(piece) > width:
             lines.append(cur.rstrip())
             cur = indent
         cur += piece + " "
+        fresh = False
     lines.append(cur.rstrip())
     return "\n".join(lines)
 
 
 def render(inventory: dict[str, list[str]]) -> str:
-    production, mirror = shared_sets(inventory)
+    shared = shared_labels(inventory)
     total = sum(len(v) for v in inventory.values())
-    out = [BEGIN, ""]
-    out.append(f"/-- Source literal inventory, {len(inventory)} crates and {total} labels: every "
-               "production string or")
-    out.append("    byte-string literal of `crates/<crate>/src/**/*.rs` and "
-               "`aeneas/<crate>/src/**/*.rs` that")
-    out.append("    starts with `QSAG` (and every eight-byte `0x51534147........` tag), other "
-               "than `QSAG_*`")
-    out.append("    environment-variable names and items under `#[cfg(test)]`. Includes wire "
-               "magics, transcript")
-    out.append("    labels and fragments completed at run time; membership does not imply that "
-               "a label is a")
-    out.append("    cSHAKE customization. Generated; `scripts/sync_domain_labels.py` fails when "
-               "it differs from")
-    out.append("    the sources. -/")
-    out.append("@[expose] def auditedByteLabels : List (String × List String) := [")
     crates = list(inventory.items())
+    out = [BEGIN, ""]
+    out += [
+        f"/-- Source literal inventory, {len(inventory)} crates and {total} labels: every "
+        "production string or",
+        "    byte-string literal of `crates/<crate>/src/**/*.rs` and "
+        "`aeneas/<crate>/src/**/*.rs` that",
+        "    starts with `QSAG` (and every eight-byte `0x51534147........` tag), other than "
+        "`QSAG_*`",
+        "    environment-variable names and code guarded by a test-only attribute. Includes "
+        "wire magics,",
+        "    transcript labels and fragments completed at run time; membership does not imply "
+        "that a",
+        "    label is a cSHAKE customization. Generated: `scripts/sync_domain_labels.py` fails "
+        "when this",
+        "    list differs from the sources. -/",
+        "@[expose] def auditedByteLabels : List (String × List String) := [",
+    ]
     for k, (crate, labels) in enumerate(crates):
         out.append(f"  ({lean_string(crate)}, [")
         out.append(wrap([lean_string(l) for l in labels], "    ") + "])"
                    + ("," if k + 1 < len(crates) else ""))
-    out.append("]")
-    out.append("")
-    out.append("/-- `labelCode` of every label of `auditedByteLabels`, crate by crate in the same "
-               "order. The")
-    out.append("    quadratic checks below run on these numbers; `auditedLabelCodes_eq` ties "
-               "them to the strings. -/")
-    out.append("def auditedLabelCodes : List (List Nat) := [")
-    for k, (crate, labels) in enumerate(crates):
-        out.append(wrap([str(label_code(l)) for l in labels], "  [", 100) + "]"
+    out += [
+        "]",
+        "",
+        "/-- `labelCode` of every label of `auditedByteLabels`, crate by crate in the same "
+        "order: the",
+        "    UTF-8 bytes read base 256 after a leading `1`. The quadratic checks run on these "
+        "numbers;",
+        "    `auditedLabelCodes_eq` proves they are the codes of the strings above. -/",
+        "def auditedLabelCodes : List (List Nat) := [",
+    ]
+    for k, (_crate, labels) in enumerate(crates):
+        out.append(wrap([str(label_code(l)) for l in labels], "   ", first="  [") + "]"
                    + ("," if k + 1 < len(crates) else ""))
-    out.append("]")
-    out.append("")
-    out.append("/-- The labels that two or more production crates use on purpose. Hand-maintained "
-               "in")
-    out.append("    `scripts/sync_domain_labels.py` with a reason per entry; the script fails when "
-               "the labels")
-    out.append("    actually shared between production crates differ from this list. -/")
-    out.append("@[expose] def sharedCrossCrateLabels : List String :=")
-    out.append(wrap([lean_string(l) for l in production], "  [") + "]")
-    out.append("")
-    out.append("/-- The crates under `aeneas/`: extraction copies whose labels re-declare "
-               "production labels. -/")
-    out.append("@[expose] def verifiedMirrorCrates : List String :=")
-    out.append(wrap([lean_string(c) for c in sorted(MIRROR_CRATES) if c in inventory], "  [") + "]")
-    out.append("")
-    out.append("/-- The labels an `aeneas/` extraction crate shares with another crate. -/")
-    out.append("@[expose] def verifiedMirrorLabels : List String :=")
-    out.append(wrap([lean_string(l) for l in mirror], "  [") + "]")
-    out.append("")
-    out.append(END)
+    out += [
+        "]",
+        "",
+        "/-- The labels that two or more crates use on purpose. Hand-maintained in",
+        "    `scripts/sync_domain_labels.py` with a reason per entry; the script fails when the "
+        "labels",
+        "    actually shared between crates differ from this list. -/",
+        "@[expose] def sharedCrossCrateLabels : List String :=",
+        wrap([lean_string(l) for l in shared], "   ", first="  [") + "]",
+        "",
+        END,
+    ]
     return "\n".join(out)
 
 
 def problems(inventory: dict[str, list[str]]) -> list[str]:
-    production, _mirror = shared_sets(inventory)
+    shared = shared_labels(inventory)
     errs = []
-    for label in production:
+    for label in shared:
         if label not in SHARED:
             owners = [c for c, ls in inventory.items() if label in ls]
             errs.append(f"label {label!r} is shared by {owners} and is not in SHARED")
     for label in SHARED:
-        if label not in production:
-            errs.append(f"SHARED entry {label!r} is not shared between production crates")
+        if label not in shared:
+            errs.append(f"SHARED entry {label!r} is not shared between crates")
     for crate, labels in inventory.items():
         for label in labels:
             n = len(label.encode("utf-8"))
@@ -470,7 +469,7 @@ def main() -> int:
         return 1
     total = sum(len(v) for v in inventory.values())
     print(f"PASS: {len(inventory)} crates, {total} labels, "
-          f"{len(shared_sets(inventory)[0])} shared between production crates; Lean block current")
+          f"{len(shared_labels(inventory))} shared between crates; Lean block current")
     return 0
 
 
