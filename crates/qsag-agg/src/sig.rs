@@ -12,6 +12,7 @@ use crate::sponge::{
     POSEIDON2_CONST_IV, cshake256_32, encode_multi_frame, poseidon2_compress12_ff,
     poseidon2_hash32, poseidon2_perm12,
 };
+use qsag_core::poseidon2_mpc::{HemJortsPublicKey, HemJortsSignature};
 use qsag_core::tsw_baggy::{EpochLatchError, MonotonicEpochLatch, StatefulEpochLatch as _};
 
 /// Number of base-4 `WOTS+C` chains ($\ell_1 = 128 \implies 256$-bit full message security, `[P0-02]`).
@@ -26,8 +27,12 @@ pub const WOTS_TARGET_SUM: usize = 192;
 /// Exact constant number of verifier `Poseidon2` WOTS+C step transitions per layer (`192`).
 pub const WOTS_VERIFIER_STEPS: usize = WOTS_CHAINS * WOTS_MAX_STEP - WOTS_TARGET_SUM;
 
-/// Stateful `JortsPoseidon2` XMSS subtree height (`2^6 = 64` epochs per validator keypair).
+/// Default stateful `JortsPoseidon2` XMSS subtree height (`2^6 = 64` epochs per validator keypair).
 pub const JORTS_XMSS_HEIGHT: usize = 6;
+/// Minimum supported stateful `JortsPoseidon2` XMSS height (`6`).
+pub const JORTS_MIN_XMSS_HEIGHT: usize = 6;
+/// Maximum supported stateful `JortsPoseidon2` XMSS height (`20` -> `1,048,576` epochs inside the same `512` trace rows).
+pub const JORTS_MAX_XMSS_HEIGHT: usize = 20;
 
 /// Stateless `CorduroyPoseidon2` FORS tree count ($k = 32$, `[P0-03]`).
 pub const FORS_TREES: usize = 32;
@@ -66,25 +71,122 @@ pub enum AggSigProfile {
     JortsPoseidon2 = 1,
     /// Stateless `Corduroy-Poseidon2` (`256`-bit `FORS` $k=32,a=8$ + $d=16,h'=4$ `256`-bit `WOTS+C` hypertree, `76,896`B raw signature).
     CorduroyPoseidon2 = 2,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `7` (`128` epochs, `512` trace rows).
+    JortsPoseidon2H7 = 7,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `8` (`256` epochs, `512` trace rows).
+    JortsPoseidon2H8 = 8,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `9` (`512` epochs, `512` trace rows).
+    JortsPoseidon2H9 = 9,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `10` (`1,024` epochs, `512` trace rows).
+    JortsPoseidon2H10 = 10,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `11` (`2,048` epochs, `512` trace rows).
+    JortsPoseidon2H11 = 11,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `12` (`4,096` epochs, `512` trace rows).
+    JortsPoseidon2H12 = 12,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `13` (`8,192` epochs, `512` trace rows).
+    JortsPoseidon2H13 = 13,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `14` (`16,384` epochs, `512` trace rows).
+    JortsPoseidon2H14 = 14,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `15` (`32,768` epochs, `512` trace rows).
+    JortsPoseidon2H15 = 15,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `16` (`65,536` epochs, `512` trace rows).
+    JortsPoseidon2H16 = 16,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `17` (`131,072` epochs, `512` trace rows).
+    JortsPoseidon2H17 = 17,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `18` (`262,144` epochs, `512` trace rows).
+    JortsPoseidon2H18 = 18,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `19` (`524,288` epochs, `512` trace rows).
+    JortsPoseidon2H19 = 19,
+    /// Stateful `Jorts-Poseidon2` with XMSS height `20` (`1,048,576` epochs, `512` trace rows).
+    JortsPoseidon2H20 = 20,
 }
 
 impl AggSigProfile {
-    pub fn from_u8(b: u8) -> Option<Self> {
+    #[inline]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn from_u8(b: u8) -> Option<Self> {
         match b {
             1 => Some(Self::JortsPoseidon2),
             2 => Some(Self::CorduroyPoseidon2),
+            7 => Some(Self::JortsPoseidon2H7),
+            8 => Some(Self::JortsPoseidon2H8),
+            9 => Some(Self::JortsPoseidon2H9),
+            10 => Some(Self::JortsPoseidon2H10),
+            11 => Some(Self::JortsPoseidon2H11),
+            12 => Some(Self::JortsPoseidon2H12),
+            13 => Some(Self::JortsPoseidon2H13),
+            14 => Some(Self::JortsPoseidon2H14),
+            15 => Some(Self::JortsPoseidon2H15),
+            16 => Some(Self::JortsPoseidon2H16),
+            17 => Some(Self::JortsPoseidon2H17),
+            18 => Some(Self::JortsPoseidon2H18),
+            19 => Some(Self::JortsPoseidon2H19),
+            20 => Some(Self::JortsPoseidon2H20),
             _ => None,
         }
     }
 
+    /// Construct the canonical `Jorts-Poseidon2` profile for `height in 6..=20`.
+    pub const fn jorts_with_height(height: usize) -> Result<Self, SigError> {
+        match height {
+            6 => Ok(Self::JortsPoseidon2),
+            7 => Ok(Self::JortsPoseidon2H7),
+            8 => Ok(Self::JortsPoseidon2H8),
+            9 => Ok(Self::JortsPoseidon2H9),
+            10 => Ok(Self::JortsPoseidon2H10),
+            11 => Ok(Self::JortsPoseidon2H11),
+            12 => Ok(Self::JortsPoseidon2H12),
+            13 => Ok(Self::JortsPoseidon2H13),
+            14 => Ok(Self::JortsPoseidon2H14),
+            15 => Ok(Self::JortsPoseidon2H15),
+            16 => Ok(Self::JortsPoseidon2H16),
+            17 => Ok(Self::JortsPoseidon2H17),
+            18 => Ok(Self::JortsPoseidon2H18),
+            19 => Ok(Self::JortsPoseidon2H19),
+            20 => Ok(Self::JortsPoseidon2H20),
+            _ => Err(SigError::InvalidXmssHeight),
+        }
+    }
+
+    /// XMSS tree height (`6..=20`) for stateful `Jorts-Poseidon2` profiles, or `None` for stateless `Corduroy`.
+    #[inline]
+    pub const fn jorts_xmss_height(self) -> Option<usize> {
+        match self {
+            Self::JortsPoseidon2 => Some(JORTS_XMSS_HEIGHT),
+            Self::CorduroyPoseidon2 => None,
+            Self::JortsPoseidon2H7 => Some(7),
+            Self::JortsPoseidon2H8 => Some(8),
+            Self::JortsPoseidon2H9 => Some(9),
+            Self::JortsPoseidon2H10 => Some(10),
+            Self::JortsPoseidon2H11 => Some(11),
+            Self::JortsPoseidon2H12 => Some(12),
+            Self::JortsPoseidon2H13 => Some(13),
+            Self::JortsPoseidon2H14 => Some(14),
+            Self::JortsPoseidon2H15 => Some(15),
+            Self::JortsPoseidon2H16 => Some(16),
+            Self::JortsPoseidon2H17 => Some(17),
+            Self::JortsPoseidon2H18 => Some(18),
+            Self::JortsPoseidon2H19 => Some(19),
+            Self::JortsPoseidon2H20 => Some(20),
+        }
+    }
+
+    #[inline]
+    pub const fn is_jorts(self) -> bool {
+        self.jorts_xmss_height().is_some()
+    }
+
     /// Exact raw byte length of one serialized individual signature under this profile.
     pub const fn raw_signature_bytes(self) -> usize {
-        match self {
-            Self::JortsPoseidon2 => {
-                // 32B r_rand + 4B tsw_ctr + 4B leaf_idx + 128*32B WOTS + 6*32B XMSS = 4,328 bytes
-                32 + 4 + 4 + WOTS_CHAINS * 32 + JORTS_XMSS_HEIGHT * 32
+        match self.jorts_xmss_height() {
+            Some(height) => {
+                // 32B r_rand + 4B leaf_idx + 4B tsw_ctr + 128*32B WOTS + height*32B XMSS
+                32 + 4 + 4 + WOTS_CHAINS * 32 + height * 32
             }
-            Self::CorduroyPoseidon2 => {
+            None => {
                 // 32B r_rand + 32*(1+8)*32B FORS + 16*(4B tsw_ctr + 128*32B WOTS + 4*32B Merkle) = 76,896 bytes
                 32 + FORS_TREES * (1 + FORS_HEIGHT) * 32
                     + CORDUROY_NUM_LAYERS * (4 + WOTS_CHAINS * 32 + CORDUROY_SUBTREE_HEIGHT * 32)
@@ -97,6 +199,7 @@ impl AggSigProfile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SigError {
     ProfileMismatch,
+    InvalidXmssHeight,
     EpochOutOfBounds,
     EpochMonotonicityViolation,
     EpochReuseDifferentMessage,
@@ -178,7 +281,7 @@ pub struct ValidatorPublicKey {
 impl ValidatorPublicKey {
     pub fn to_bytes(&self) -> [u8; 65] {
         let mut out = [0u8; 65];
-        out[0] = self.profile as u8;
+        out[0] = self.profile.to_u8();
         out[1..33].copy_from_slice(&digest4_to_bytes(&self.pk_seed));
         out[33..65].copy_from_slice(&digest4_to_bytes(&self.pk_root));
         out
@@ -195,6 +298,74 @@ impl ValidatorPublicKey {
             pk_seed: digest4_from_bytes_canonical(&s)?,
             pk_root: digest4_from_bytes_canonical(&r)?,
         })
+    }
+
+    /// Zero-copy bridge from a `qsag-core` [`HemJortsPublicKey`] with an explicit XMSS height (`6..=20`).
+    #[inline]
+    pub const fn from_hem_jorts_with_height(
+        pk: HemJortsPublicKey,
+        height: usize,
+    ) -> Result<Self, SigError> {
+        match AggSigProfile::jorts_with_height(height) {
+            Ok(profile) => Ok(Self {
+                profile,
+                pk_seed: pk.pk_seed,
+                pk_root: pk.pk_root,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fallible zero-copy conversion to [`HemJortsPublicKey`], rejecting non-Jorts profiles.
+    #[inline]
+    pub const fn to_hem_jorts(&self) -> Result<HemJortsPublicKey, SigError> {
+        if self.profile.is_jorts() {
+            Ok(HemJortsPublicKey {
+                pk_seed: self.pk_seed,
+                pk_root: self.pk_root,
+            })
+        } else {
+            Err(SigError::ProfileMismatch)
+        }
+    }
+}
+
+impl From<HemJortsPublicKey> for ValidatorPublicKey {
+    #[inline]
+    fn from(pk: HemJortsPublicKey) -> Self {
+        Self {
+            profile: AggSigProfile::JortsPoseidon2,
+            pk_seed: pk.pk_seed,
+            pk_root: pk.pk_root,
+        }
+    }
+}
+
+impl From<&HemJortsPublicKey> for ValidatorPublicKey {
+    #[inline]
+    fn from(pk: &HemJortsPublicKey) -> Self {
+        Self::from(*pk)
+    }
+}
+
+impl From<ValidatorPublicKey> for HemJortsPublicKey {
+    #[inline]
+    fn from(pk: ValidatorPublicKey) -> Self {
+        assert!(
+            pk.profile.is_jorts(),
+            "HemJortsPublicKey::from requires a JortsPoseidon2 ValidatorPublicKey"
+        );
+        Self {
+            pk_seed: pk.pk_seed,
+            pk_root: pk.pk_root,
+        }
+    }
+}
+
+impl From<&ValidatorPublicKey> for HemJortsPublicKey {
+    #[inline]
+    fn from(pk: &ValidatorPublicKey) -> Self {
+        Self::from(*pk)
     }
 }
 
@@ -252,15 +423,15 @@ impl ValidatorSignature {
         let r_rand = digest(bytes, &mut pos).ok_or(bad)?;
         let mut stateful_leaf_idx = 0;
         let mut fors_openings = Vec::new();
-        let (layers_count, height) = match profile {
-            AggSigProfile::JortsPoseidon2 => {
+        let (layers_count, height) = match profile.jorts_xmss_height() {
+            Some(jorts_height) => {
                 stateful_leaf_idx = word(bytes, &mut pos).ok_or(bad)?;
-                if stateful_leaf_idx >= 1 << JORTS_XMSS_HEIGHT {
+                if (stateful_leaf_idx as usize) >= (1usize << jorts_height) {
                     return Err(bad);
                 }
-                (1, JORTS_XMSS_HEIGHT)
+                (1, jorts_height)
             }
-            AggSigProfile::CorduroyPoseidon2 => {
+            None => {
                 for _ in 0..FORS_TREES {
                     let secret_val = digest(bytes, &mut pos).ok_or(bad)?;
                     let mut auth_path = [[Goldilocks::ZERO; 4]; FORS_HEIGHT];
@@ -308,7 +479,7 @@ impl ValidatorSignature {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.profile.raw_signature_bytes());
         out.extend_from_slice(&digest4_to_bytes(&self.r_rand));
-        if self.profile == AggSigProfile::JortsPoseidon2 {
+        if self.profile.is_jorts() {
             out.extend_from_slice(&self.stateful_leaf_idx.to_le_bytes());
         } else {
             for op in &self.fors_openings {
@@ -328,6 +499,60 @@ impl ValidatorSignature {
             }
         }
         out
+    }
+}
+
+impl TryFrom<HemJortsSignature> for ValidatorSignature {
+    type Error = SigError;
+
+    fn try_from(sig: HemJortsSignature) -> Result<Self, Self::Error> {
+        let height = sig.merkle_path.len();
+        let profile = AggSigProfile::jorts_with_height(height)?;
+        if sig.wots_chains.len() != WOTS_CHAINS {
+            return Err(SigError::ProfileMismatch);
+        }
+        if (sig.stateful_leaf_idx as usize) >= (1usize << height) {
+            return Err(SigError::EpochOutOfBounds);
+        }
+        Ok(Self {
+            profile,
+            r_rand: sig.r_rand,
+            stateful_leaf_idx: sig.stateful_leaf_idx,
+            fors_openings: Vec::new(),
+            layers: vec![HypertreeLayerSig {
+                tsw_ctr: sig.tsw_ctr,
+                wots_chains: sig.wots_chains,
+                merkle_path: sig.merkle_path,
+            }],
+        })
+    }
+}
+
+impl TryFrom<ValidatorSignature> for HemJortsSignature {
+    type Error = SigError;
+
+    fn try_from(mut sig: ValidatorSignature) -> Result<Self, Self::Error> {
+        let height = sig
+            .profile
+            .jorts_xmss_height()
+            .ok_or(SigError::ProfileMismatch)?;
+        if !sig.fors_openings.is_empty() || sig.layers.len() != 1 {
+            return Err(SigError::ProfileMismatch);
+        }
+        if (sig.stateful_leaf_idx as usize) >= (1usize << height) {
+            return Err(SigError::EpochOutOfBounds);
+        }
+        let layer = sig.layers.pop().ok_or(SigError::ProfileMismatch)?;
+        if layer.wots_chains.len() != WOTS_CHAINS || layer.merkle_path.len() != height {
+            return Err(SigError::ProfileMismatch);
+        }
+        Ok(Self {
+            r_rand: sig.r_rand,
+            stateful_leaf_idx: sig.stateful_leaf_idx,
+            tsw_ctr: layer.tsw_ctr,
+            wots_chains: layer.wots_chains,
+            merkle_path: layer.merkle_path,
+        })
     }
 }
 
@@ -756,18 +981,18 @@ pub(crate) fn verify_individual_signature_with_mu(
         return false;
     }
 
-    match pk.profile {
-        AggSigProfile::JortsPoseidon2 => {
+    match pk.profile.jorts_xmss_height() {
+        Some(jorts_height) => {
             if !sig.fors_openings.is_empty() || sig.layers.len() != 1 {
                 return false;
             }
             let kp_idx = sig.stateful_leaf_idx;
-            if (kp_idx as usize) >= (1usize << JORTS_XMSS_HEIGHT) {
+            if (kp_idx as usize) >= (1usize << jorts_height) {
                 return false;
             }
             let layer_sig = &sig.layers[0];
             if layer_sig.wots_chains.len() != WOTS_CHAINS
-                || layer_sig.merkle_path.len() != JORTS_XMSS_HEIGHT
+                || layer_sig.merkle_path.len() != jorts_height
             {
                 return false;
             }
@@ -800,7 +1025,7 @@ pub(crate) fn verify_individual_signature_with_mu(
                 .merkle_path
                 .iter()
                 .enumerate()
-                .take(JORTS_XMSS_HEIGHT)
+                .take(jorts_height)
             {
                 let parent_idx = idx >> 1;
                 node = if (idx & 1) == 0 {
@@ -834,7 +1059,7 @@ pub(crate) fn verify_individual_signature_with_mu(
             }
             node == pk.pk_root
         }
-        AggSigProfile::CorduroyPoseidon2 => {
+        None => {
             if sig.stateful_leaf_idx != 0 || sig.layers.len() != CORDUROY_NUM_LAYERS {
                 return false;
             }
@@ -946,9 +1171,7 @@ pub(crate) fn verify_individual_signature_with_mu(
 pub fn verify_signature_batch(items: &[(ValidatorPublicKey, &[u8], ValidatorSignature)]) -> bool {
     let mut seen_stateful = BTreeSet::new();
     for (pk, msg, sig) in items {
-        if pk.profile == AggSigProfile::JortsPoseidon2
-            && !seen_stateful.insert((*pk, sig.stateful_leaf_idx))
-        {
+        if pk.profile.is_jorts() && !seen_stateful.insert((*pk, sig.stateful_leaf_idx)) {
             return false;
         }
         if !verify_individual_signature(pk, msg, sig) {
@@ -1313,7 +1536,7 @@ pub struct ValidatorKeypair {
     sk_seed: Digest4,
     sk_prf: Digest4,
     pub pk: ValidatorPublicKey,
-    top_subtree_leaves: Vec<Digest4>,
+    top_subtree_levels: Vec<Vec<Digest4>>,
     latch: MonotonicEpochLatch,
     stateless_sigs_issued: u64,
 }
@@ -1373,14 +1596,12 @@ impl ValidatorKeypair {
         qsag_asm::volatile_fill(&mut raw_sk, 0);
         qsag_asm::volatile_fill(&mut raw_prf, 0);
 
-        let (top_layer, sub_height) = match profile {
-            AggSigProfile::JortsPoseidon2 => (0u32, JORTS_XMSS_HEIGHT),
-            AggSigProfile::CorduroyPoseidon2 => {
-                ((CORDUROY_NUM_LAYERS - 1) as u32, CORDUROY_SUBTREE_HEIGHT)
-            }
+        let (top_layer, sub_height) = match profile.jorts_xmss_height() {
+            Some(jorts_height) => (0u32, jorts_height),
+            None => ((CORDUROY_NUM_LAYERS - 1) as u32, CORDUROY_SUBTREE_HEIGHT),
         };
-        let (top_subtree_leaves, pk_root) =
-            Self::build_xmss_subtree(sk_seed, pk_seed, top_layer, 0, sub_height);
+        let (top_subtree_levels, pk_root) =
+            Self::build_xmss_subtree_levels(sk_seed, pk_seed, top_layer, 0, sub_height);
 
         Self {
             sk_seed,
@@ -1390,7 +1611,7 @@ impl ValidatorKeypair {
                 pk_seed,
                 pk_root,
             },
-            top_subtree_leaves,
+            top_subtree_levels,
             latch: MonotonicEpochLatch::new(0),
             stateless_sigs_issued: 0,
         }
@@ -1398,7 +1619,7 @@ impl ValidatorKeypair {
 
     #[inline]
     pub fn next_unused_epoch(&self) -> u32 {
-        // `sign_stateful` bounds every reserved epoch by `2^JORTS_XMSS_HEIGHT <= u32::MAX`.
+        // `sign_stateful` bounds every reserved epoch by `2^jorts_height <= 2^20 <= u32::MAX`.
         self.latch.next_epoch() as u32
     }
 
@@ -1414,6 +1635,11 @@ impl ValidatorKeypair {
         latched_epoch: u32,
         mu_bytes: [u8; 32],
     ) -> Result<(), SigError> {
+        let jorts_height = self
+            .pk
+            .profile
+            .jorts_xmss_height()
+            .ok_or(SigError::ProfileMismatch)?;
         let recovered_next = u64::from(next_unused_epoch);
         if next_unused_epoch == 0
             || recovered_next < self.latch.next_epoch()
@@ -1423,7 +1649,7 @@ impl ValidatorKeypair {
                     .in_flight()
                     .is_some_and(|(ep, mu)| ep != u64::from(latched_epoch) || mu != mu_bytes))
             || latched_epoch >= next_unused_epoch
-            || (next_unused_epoch as usize) > (1usize << JORTS_XMSS_HEIGHT)
+            || (next_unused_epoch as usize) > (1usize << jorts_height)
         {
             return Err(SigError::WalPersistenceFailed);
         }
@@ -1434,53 +1660,127 @@ impl ValidatorKeypair {
         Ok(())
     }
 
-    fn build_xmss_subtree(
+    #[inline]
+    fn compute_xmss_leaf(
+        sk_seed: Digest4,
+        pk_seed: Digest4,
+        layer: u32,
+        tree_idx: u64,
+        kp: u32,
+    ) -> Digest4 {
+        let mut endpoints = [[Goldilocks::ZERO; 4]; WOTS_CHAINS];
+        for (r, endpoint) in endpoints.iter_mut().enumerate().take(WOTS_CHAINS) {
+            let mut cur = Self::wots_base_secret(sk_seed, pk_seed, layer, tree_idx, kp, r as u32);
+            for step in 0..(WOTS_MAX_STEP as u32) {
+                cur = wots_step_hash_injective(pk_seed, cur, layer, tree_idx, kp, r as u32, step);
+            }
+            *endpoint = cur;
+            qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
+        }
+        compress_wots_endpoints_sponge(pk_seed, layer, tree_idx, kp, &endpoints)
+    }
+
+    fn build_xmss_subtree_levels(
         sk_seed: Digest4,
         pk_seed: Digest4,
         layer: u32,
         tree_idx: u64,
         sub_height: usize,
-    ) -> (Vec<Digest4>, Digest4) {
+    ) -> (Vec<Vec<Digest4>>, Digest4) {
         let num_leaves = 1usize << sub_height;
-        let mut leaves = Vec::with_capacity(num_leaves);
-        for kp in 0..num_leaves {
-            let mut endpoints = [[Goldilocks::ZERO; 4]; WOTS_CHAINS];
-            for (r, endpoint) in endpoints.iter_mut().enumerate().take(WOTS_CHAINS) {
-                let mut cur =
-                    Self::wots_base_secret(sk_seed, pk_seed, layer, tree_idx, kp as u32, r as u32);
-                for step in 0..(WOTS_MAX_STEP as u32) {
-                    cur = wots_step_hash_injective(
-                        pk_seed, cur, layer, tree_idx, kp as u32, r as u32, step,
-                    );
-                }
-                *endpoint = cur;
-                qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
-            }
-            leaves.push(compress_wots_endpoints_sponge(
-                pk_seed, layer, tree_idx, kp as u32, &endpoints,
-            ));
-        }
+        #[cfg(feature = "std")]
+        let leaves: Vec<Digest4> = if num_leaves >= 64 && crate::parallel_workers() > 1 {
+            crate::pool::map_indices(num_leaves, 64, move |kp| {
+                Self::compute_xmss_leaf(sk_seed, pk_seed, layer, tree_idx, kp as u32)
+            })
+        } else {
+            (0..num_leaves)
+                .map(|kp| Self::compute_xmss_leaf(sk_seed, pk_seed, layer, tree_idx, kp as u32))
+                .collect()
+        };
+        #[cfg(not(feature = "std"))]
+        let leaves: Vec<Digest4> = (0..num_leaves)
+            .map(|kp| Self::compute_xmss_leaf(sk_seed, pk_seed, layer, tree_idx, kp as u32))
+            .collect();
 
-        let mut cur_layer = leaves.clone();
+        let mut levels = Vec::with_capacity(sub_height + 1);
+        levels.push(leaves);
         for lvl in 0..sub_height {
-            let mut next = Vec::with_capacity(cur_layer.len() / 2);
-            for p in 0..(cur_layer.len() / 2) {
-                next.push(merkle_node_hash(
-                    DOMAIN_MERKLE_NODE,
-                    pk_seed,
-                    MerkleNodeAddr {
-                        layer,
-                        tree_idx,
-                        level: (lvl + 1) as u32,
-                        node_idx: p as u32,
+            let cur_layer = &levels[lvl];
+            let pair_count = cur_layer.len() / 2;
+            #[cfg(feature = "std")]
+            let next = if pair_count >= 512 && crate::parallel_workers() > 1 {
+                let pairs: Vec<[Digest4; 2]> =
+                    (0..pair_count).map(|p| [cur_layer[2 * p], cur_layer[2 * p + 1]]).collect();
+                crate::map_chunks_bounded_with_limit(
+                    &pairs,
+                    crate::parallel_workers(),
+                    |chunk| {
+                        // Compute exact starting pair index via pointer arithmetic free offset:
+                        let base_p = (chunk.as_ptr() as usize - pairs.as_ptr() as usize)
+                            / core::mem::size_of::<[Digest4; 2]>();
+                        chunk
+                            .iter()
+                            .enumerate()
+                            .map(|(off, pair)| {
+                                merkle_node_hash(
+                                    DOMAIN_MERKLE_NODE,
+                                    pk_seed,
+                                    MerkleNodeAddr {
+                                        layer,
+                                        tree_idx,
+                                        level: (lvl + 1) as u32,
+                                        node_idx: (base_p + off) as u32,
+                                    },
+                                    pair[0],
+                                    pair[1],
+                                )
+                            })
+                            .collect::<Vec<_>>()
                     },
-                    cur_layer[2 * p],
-                    cur_layer[2 * p + 1],
-                ));
-            }
-            cur_layer = next;
+                )
+                .into_iter()
+                .flatten()
+                .collect()
+            } else {
+                (0..pair_count)
+                    .map(|p| {
+                        merkle_node_hash(
+                            DOMAIN_MERKLE_NODE,
+                            pk_seed,
+                            MerkleNodeAddr {
+                                layer,
+                                tree_idx,
+                                level: (lvl + 1) as u32,
+                                node_idx: p as u32,
+                            },
+                            cur_layer[2 * p],
+                            cur_layer[2 * p + 1],
+                        )
+                    })
+                    .collect()
+            };
+            #[cfg(not(feature = "std"))]
+            let next: Vec<Digest4> = (0..pair_count)
+                .map(|p| {
+                    merkle_node_hash(
+                        DOMAIN_MERKLE_NODE,
+                        pk_seed,
+                        MerkleNodeAddr {
+                            layer,
+                            tree_idx,
+                            level: (lvl + 1) as u32,
+                            node_idx: p as u32,
+                        },
+                        cur_layer[2 * p],
+                        cur_layer[2 * p + 1],
+                    )
+                })
+                .collect();
+            levels.push(next);
         }
-        (leaves, cur_layer[0])
+        let root = levels[sub_height][0];
+        (levels, root)
     }
 
     #[inline]
@@ -1566,7 +1866,7 @@ impl ValidatorKeypair {
         validator_idx: u32,
         wal: &dyn EpochWalSink,
     ) -> Result<Self, SigError> {
-        if profile != AggSigProfile::JortsPoseidon2 {
+        if !profile.is_jorts() {
             return Err(SigError::ProfileMismatch);
         }
         let mut key = Self::keygen_deterministic(profile, master_seed, validator_idx);
@@ -1585,7 +1885,7 @@ impl ValidatorKeypair {
         epoch: u32,
         wal: &mut dyn EpochWalSink,
     ) -> Result<ValidatorSignature, SigError> {
-        if self.pk.profile != AggSigProfile::JortsPoseidon2 {
+        if !self.pk.profile.is_jorts() {
             return Err(SigError::ProfileMismatch);
         }
         let root = digest4_to_bytes(&self.pk.pk_root);
@@ -1601,10 +1901,12 @@ impl ValidatorKeypair {
         epoch: u32,
         wal: Option<&mut dyn EpochWalSink>,
     ) -> Result<ValidatorSignature, SigError> {
-        if self.pk.profile != AggSigProfile::JortsPoseidon2 {
-            return Err(SigError::ProfileMismatch);
-        }
-        if (epoch as usize) >= (1usize << JORTS_XMSS_HEIGHT) {
+        let jorts_height = self
+            .pk
+            .profile
+            .jorts_xmss_height()
+            .ok_or(SigError::ProfileMismatch)?;
+        if (epoch as usize) >= (1usize << jorts_height) {
             return Err(SigError::EpochOutOfBounds);
         }
         let (mu_bytes, mu) = compute_message_mu(&self.pk, msg);
@@ -1616,7 +1918,7 @@ impl ValidatorKeypair {
             _ => SigError::EpochOutOfBounds,
         };
         self.latch
-            .check_reserve_epoch_at(u64::from(epoch), JORTS_XMSS_HEIGHT, &mu_bytes)
+            .check_reserve_epoch_at(u64::from(epoch), jorts_height, &mu_bytes)
             .map_err(latch_err)?;
         if let Some(sink) = wal {
             sink.persist_latched_epoch(
@@ -1627,7 +1929,7 @@ impl ValidatorKeypair {
             )?;
         }
         self.latch
-            .reserve_epoch_at(u64::from(epoch), JORTS_XMSS_HEIGHT, &mu_bytes)
+            .reserve_epoch_at(u64::from(epoch), jorts_height, &mu_bytes)
             .map_err(latch_err)?;
         // `r_rand` is a deterministic function of `(sk_prf, mu, epoch)`, so an idempotent retry
         // of the in-flight `(epoch, mu)` recomputes the identical value.
@@ -1659,33 +1961,16 @@ impl ValidatorKeypair {
             qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
         }
 
-        let mut merkle_path = Vec::with_capacity(JORTS_XMSS_HEIGHT);
-        let mut cur_layer = self.top_subtree_leaves.clone();
+        let mut merkle_path = Vec::with_capacity(jorts_height);
         let mut idx = epoch as usize;
-        for lvl in 0..JORTS_XMSS_HEIGHT {
-            merkle_path.push(cur_layer[idx ^ 1]);
-            let mut next = Vec::with_capacity(cur_layer.len() / 2);
-            for p in 0..(cur_layer.len() / 2) {
-                next.push(merkle_node_hash(
-                    DOMAIN_MERKLE_NODE,
-                    self.pk.pk_seed,
-                    MerkleNodeAddr {
-                        layer: 0,
-                        tree_idx: 0,
-                        level: (lvl + 1) as u32,
-                        node_idx: p as u32,
-                    },
-                    cur_layer[2 * p],
-                    cur_layer[2 * p + 1],
-                ));
-            }
-            cur_layer = next;
+        for lvl in 0..jorts_height {
+            merkle_path.push(self.top_subtree_levels[lvl][idx ^ 1]);
             idx >>= 1;
         }
-        debug_assert_eq!(cur_layer[0], self.pk.pk_root);
+        debug_assert_eq!(self.top_subtree_levels[jorts_height][0], self.pk.pk_root);
 
         Ok(ValidatorSignature {
-            profile: AggSigProfile::JortsPoseidon2,
+            profile: self.pk.profile,
             r_rand,
             stateful_leaf_idx: epoch,
             fors_openings: Vec::new(),
@@ -1893,41 +2178,34 @@ impl ValidatorKeypair {
                 qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
             }
 
-            let (sub_leaves, next_root) = if layer + 1 == CORDUROY_NUM_LAYERS {
-                (self.top_subtree_leaves.clone(), self.pk.pk_root)
+            let (merkle_path, next_root) = if layer + 1 == CORDUROY_NUM_LAYERS {
+                let mut path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
+                let mut sub_idx = kp_idx as usize;
+                for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
+                    path.push(self.top_subtree_levels[lvl][sub_idx ^ 1]);
+                    sub_idx >>= 1;
+                }
+                debug_assert_eq!(
+                    self.top_subtree_levels[CORDUROY_SUBTREE_HEIGHT][0],
+                    self.pk.pk_root
+                );
+                (path, self.pk.pk_root)
             } else {
-                Self::build_xmss_subtree(
+                let (sub_levels, root) = Self::build_xmss_subtree_levels(
                     self.sk_seed,
                     self.pk.pk_seed,
                     layer as u32,
                     tree_idx,
                     CORDUROY_SUBTREE_HEIGHT,
-                )
-            };
-            let mut merkle_path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
-            let mut cur_layer = sub_leaves;
-            let mut sub_idx = kp_idx as usize;
-            for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
-                merkle_path.push(cur_layer[sub_idx ^ 1]);
-                let mut next = Vec::with_capacity(cur_layer.len() / 2);
-                for p in 0..(cur_layer.len() / 2) {
-                    next.push(merkle_node_hash(
-                        DOMAIN_MERKLE_NODE,
-                        self.pk.pk_seed,
-                        MerkleNodeAddr {
-                            layer: layer as u32,
-                            tree_idx,
-                            level: (lvl + 1) as u32,
-                            node_idx: p as u32,
-                        },
-                        cur_layer[2 * p],
-                        cur_layer[2 * p + 1],
-                    ));
+                );
+                let mut path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
+                let mut sub_idx = kp_idx as usize;
+                for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
+                    path.push(sub_levels[lvl][sub_idx ^ 1]);
+                    sub_idx >>= 1;
                 }
-                cur_layer = next;
-                sub_idx >>= 1;
-            }
-            debug_assert_eq!(cur_layer[0], next_root);
+                (path, root)
+            };
             cur_root = next_root;
             idx_cursor = tree_idx;
 
@@ -2159,6 +2437,8 @@ mod persistence_and_encoding_tests {
     fn signature_canonical_decoding() {
         for profile in [
             AggSigProfile::JortsPoseidon2,
+            AggSigProfile::JortsPoseidon2H12,
+            AggSigProfile::JortsPoseidon2H20,
             AggSigProfile::CorduroyPoseidon2,
         ] {
             let bytes = vec![0; profile.raw_signature_bytes()];
@@ -2174,17 +2454,16 @@ mod persistence_and_encoding_tests {
             // Every digest limb, including FORS paths and all hypertree layers.
             let mut offsets: Vec<usize> = (0..32).step_by(8).collect();
             let mut pos = 32;
-            if profile == AggSigProfile::JortsPoseidon2 {
+            if profile.is_jorts() {
                 pos += 4;
             } else {
                 let end = pos + FORS_TREES * (1 + FORS_HEIGHT) * 32;
                 offsets.extend((pos..end).step_by(8));
                 pos = end;
             }
-            let (layers, height) = if profile == AggSigProfile::JortsPoseidon2 {
-                (1, JORTS_XMSS_HEIGHT)
-            } else {
-                (CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT)
+            let (layers, height) = match profile.jorts_xmss_height() {
+                Some(h) => (1, h),
+                None => (CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT),
             };
             for _ in 0..layers {
                 pos += 4;
@@ -2200,6 +2479,36 @@ mod persistence_and_encoding_tests {
                 assert!(ValidatorSignature::from_bytes_canonical(profile, &bad).is_err());
             }
         }
+    }
+
+    #[test]
+    fn hem_jorts_public_key_and_signature_zero_copy_bridge() {
+        let mut kp =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x42; 32], 7);
+        let hem_pk: HemJortsPublicKey = kp.pk.into();
+        assert_eq!(hem_pk.to_bytes(), kp.pk.to_bytes());
+        let roundtrip_pk = ValidatorPublicKey::from(hem_pk);
+        assert_eq!(roundtrip_pk, kp.pk);
+        assert_eq!(kp.pk.to_hem_jorts(), Ok(hem_pk));
+
+        let sig = kp.sign_stateful_for_unit_test(b"bridge-kat", 5).unwrap();
+        let hem_sig = HemJortsSignature::try_from(sig.clone()).unwrap();
+        assert_eq!(hem_sig.to_bytes(), sig.to_bytes());
+        let roundtrip_sig = ValidatorSignature::try_from(hem_sig).unwrap();
+        assert_eq!(roundtrip_sig, sig);
+
+        let h20_pk = ValidatorPublicKey::from_hem_jorts_with_height(hem_pk, 20).unwrap();
+        assert_eq!(h20_pk.profile, AggSigProfile::JortsPoseidon2H20);
+        assert_eq!(
+            ValidatorPublicKey::from_hem_jorts_with_height(hem_pk, 5),
+            Err(SigError::InvalidXmssHeight)
+        );
+        assert_eq!(
+            ValidatorPublicKey::from_hem_jorts_with_height(hem_pk, 21),
+            Err(SigError::InvalidXmssHeight)
+        );
+        // Wire byte 6 must be rejected (height 6 uses canonical wire byte 1).
+        assert_eq!(AggSigProfile::from_u8(6), None);
     }
 
     #[test]
