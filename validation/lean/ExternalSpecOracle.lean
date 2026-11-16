@@ -267,7 +267,10 @@ def main : IO Unit := do
     "}"
 
   -- 3. Keccak / SHA3 / SHAKE256 / cSHAKE256 across rate boundaries
-  let spongeLens : List Nat := [0, 1, 63, 64, 65, 71, 72, 73, 135, 136, 137, 271, 272, 273]
+  -- Exercise both sides of the second SHA3-512 rate boundary and the third
+  -- SHAKE256 rate boundary, in addition to the single-block padding cases.
+  let spongeLens : List Nat := [0, 1, 63, 64, 65, 71, 72, 73, 135, 136, 137,
+    143, 144, 145, 271, 272, 273, 407, 408, 409]
   let spongeRows := spongeLens.map fun len =>
     let msg := (List.range len).map fun i => UInt8.ofNat ((i * 29 + 5) % 256)
     let custom := asciiBytes "QSAG.EXTERNAL.SPEC"

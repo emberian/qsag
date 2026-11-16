@@ -908,17 +908,16 @@ theorem singleStageExactWhir_verify_sound (w : Nat) (x : WhirStmt Goldilocks)
     (tr : List (WhirMsg Goldilocks × Nat))
     (hVer : (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x tr = true) :
     whirInLang singleStageExactEnv singleStageExactWhirSched x := by
-  unfold OracleIop.verify at hVer
+  rw [OracleIop.verify_eq] at hVer
   obtain ⟨hLenDec, hVerd⟩ := Bool.and_eq_true_iff.mp hVer
   have hLen : tr.length = 2 := of_decide_eq_true hLenDec
   rcases tr with _ | ⟨⟨m0, c0⟩, _ | ⟨⟨m1, c1⟩, _ | _⟩⟩
   · cases hLen
   · cases hLen
-  · dsimp only [whirOracleIop, OracleIop.pubStmt, OracleIop.pubTr, OracleIop.readValues,
-      whirVerdict, whirQueries, splitStages, singleStageExactWhirSched,
+  · dsimp only [whirOracleIop, whirVerdict, whirQueries, splitStages, singleStageExactWhirSched,
       singleStageExactWhirStage, allStageQueries, stageQueries, whirTable,
       commitRoundIdx, whirCheckStages, sumcheckRun, foldBlock, singleStageExactEnv] at hVerd
-    obtain ⟨hRest1, hLenVals⟩ := Bool.and_eq_true_iff.mp hVerd
+    obtain ⟨hRest1, _⟩ := Bool.and_eq_true_iff.mp hVerd
     obtain ⟨hRest2, hClaimEq⟩ := Bool.and_eq_true_iff.mp hRest1
     obtain ⟨hRest3, hFoldAll⟩ := Bool.and_eq_true_iff.mp hRest2
     obtain ⟨hRest4, _⟩ := Bool.and_eq_true_iff.mp hRest3
@@ -929,28 +928,29 @@ theorem singleStageExactWhir_verify_sound (w : Nat) (x : WhirStmt Goldilocks)
     have hAt : ∀ j ∈ ([0, 1, 2, 3] : List Nat),
         RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat j) = x.table.getD j CommRingOps.zero := by
       intro j hj
-      rcases hj with rfl | rfl | rfl | rfl | hjNil
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hj
+      rcases hj with rfl | rfl | rfl | rfl
       · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (0, x.table.getD 0 CommRingOps.zero) (by decide))
       · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (1, x.table.getD 1 CommRingOps.zero) (by decide))
       · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (2, x.table.getD 2 CommRingOps.zero) (by decide))
       · exact of_decide_eq_true (List.all_eq_true.mp hFoldAll (3, x.table.getD 3 CommRingOps.zero) (by decide))
-      · nomatch hjNil
-    refine ⟨m0.poly, by omega, ?_, hClaim.symm⟩
-    unfold agreeCount singleStageExactWhirStage WhirStage.domainSize singleStageExactEnv
-    dsimp only
-    have hF0 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 0) = x.table.getD 0 CommRingOps.zero) = true :=
-      decide_eq_true (hAt 0 (by decide))
-    have hF1 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 1) = x.table.getD 1 CommRingOps.zero) = true :=
-      decide_eq_true (hAt 1 (by decide))
-    have hF2 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 2) = x.table.getD 2 CommRingOps.zero) = true :=
-      decide_eq_true (hAt 2 (by decide))
-    have hF3 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 3) = x.table.getD 3 CommRingOps.zero) = true :=
-      decide_eq_true (hAt 3 (by decide))
-    have hRange : List.range (1 * 4) = [0, 1, 2, 3] := by decide
-    rw [hRange]
-    simp only [List.filter_cons, List.filter_nil, hF0, hF1, hF2, hF3, ↓reduceIte, List.length_cons,
-      List.length_nil]
-    decide
+    refine ⟨m0.poly, ?_, ?_, hClaim.symm⟩
+    · dsimp only [singleStageExactWhirStage]; omega
+    · unfold agreeCount singleStageExactWhirStage WhirStage.domainSize singleStageExactEnv
+      dsimp only
+      have hF0 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 0) = x.table.getD 0 CommRingOps.zero) = true :=
+        decide_eq_true (hAt 0 (by decide))
+      have hF1 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 1) = x.table.getD 1 CommRingOps.zero) = true :=
+        decide_eq_true (hAt 1 (by decide))
+      have hF2 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 2) = x.table.getD 2 CommRingOps.zero) = true :=
+        decide_eq_true (hAt 2 (by decide))
+      have hF3 : decide (RoundPoly.evalCoeffs m0.poly (Goldilocks.ofNat 3) = x.table.getD 3 CommRingOps.zero) = true :=
+        decide_eq_true (hAt 3 (by decide))
+      have hRange : List.range (1 * 4) = [0, 1, 2, 3] := by decide
+      rw [hRange]
+      simp only [List.filter_cons, List.filter_nil, hF0, hF1, hF2, hF3, ↓reduceIte, List.length_cons,
+        List.length_nil]
+      decide
   · cases hLen
 
 /-- **Constructive Non-Empty `WhirScheduleCert` (`singleStageExactScheduleCert`)**:
@@ -961,18 +961,23 @@ def singleStageExactScheduleCert (w : Nat) :
   cert := {
     state := (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify
     bad := fun _ => 0
-    init := fun _ _ => rfl
+    init := fun x _ => by
+      rw [OracleIop.verify_eq]
+      have hNe : decide (([] : List (WhirMsg Goldilocks × Nat)).length =
+          singleStageExactWhirSched.numRounds) = false := by decide
+      rw [hNe, Bool.false_and]
     accept := fun _ _ hv => hv
     flip := fun x hx _ pref m _ _ => by
       have hZero : ∀ ch : Fin (2 ^ (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).w),
           (if (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-            (pref ++ [(m, ch.1)]) = true then 1 else 0) = 0 := fun ch => by
+            (pref ++ [(m, ch.val)]) = true then 1 else 0) = 0 := fun ch => by
         cases hv : (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-            (pref ++ [(m, ch.1)]) with
+            (pref ++ [(m, ch.val)]) with
         | false => rfl
         | true => exact False.elim (hx (singleStageExactWhir_verify_sound w x _ hv))
-      have hEq : (fun ch => if (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
-            (pref ++ [(m, ch.1)]) = true then 1 else 0) = (fun _ => 0) :=
+      have hEq : (fun ch : Fin (2 ^ (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).w) =>
+            if (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify x
+              (pref ++ [(m, ch.val)]) = true then 1 else 0) = (fun _ => 0) :=
         funext hZero
       rw [hEq, qsum_zero]
       exact Nat.le_refl 0
@@ -990,6 +995,8 @@ theorem singleStageExactWhir_honest_accepts (w : Nat) :
     let m1 : WhirMsg Goldilocks := ⟨[], [], []⟩
     (whirOracleIop singleStageExactEnv singleStageExactWhirSched w).verify xHonest
       [(m0, 0), (m1, 0)] = true := by
+  dsimp only
+  rw [OracleIop.verify_eq]
   decide
 
 /-- False statement `⟨[1, 2, 1, 1], 1⟩` outside `whirInLang`: no degree-`≤ 1` polynomial can equal
@@ -1018,12 +1025,12 @@ theorem singleStageExactWhir_false_not_inLang :
     all_goals simp only [List.filter_cons, List.filter_nil, h0, h1, h2, h3, ↓reduceIte,
       List.length_cons, List.length_nil] at hAgree
     all_goals try omega
-    rcases hp with rfl | rfl | rfl | rfl | hpNil
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
+    rcases hp with rfl | rfl | rfl | rfl
     · exact h0
     · exact h1
     · exact h2
     · exact h3
-    · nomatch hpNil
   have he0 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 0) = Goldilocks.one :=
     of_decide_eq_true (hAllTrue 0 (by decide))
   have he1 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 1) = Goldilocks.ofNat 2 :=
@@ -1031,48 +1038,47 @@ theorem singleStageExactWhir_false_not_inLang :
   have he2 : RoundPoly.evalCoeffs P (Goldilocks.ofNat 2) = Goldilocks.one :=
     of_decide_eq_true (hAllTrue 2 (by decide))
   rcases P with _ | ⟨c0, _ | ⟨c1, _ | _⟩⟩
-  · exact (by decide : Goldilocks.zero ≠ Goldilocks.one) he0
+  · exact (by decide : CommRingOps.zero ≠ Goldilocks.one) he0
   · have hc0 : c0 = Goldilocks.one := by
-      have h : CommRingOps.add c0 (CommRingOps.mul (Goldilocks.ofNat 0) Goldilocks.zero) = c0 := by
-        have hm : CommRingOps.mul (Goldilocks.ofNat 0) Goldilocks.zero = Goldilocks.zero := by decide
-        rw [hm]; exact LawfulCommRing.add_zero c0
-      exact h.symm.trans he0
+      dsimp only [RoundPoly.evalCoeffs] at he0
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he0
+      exact he0
     have hc1 : c0 = Goldilocks.ofNat 2 := by
-      have h : CommRingOps.add c0 (CommRingOps.mul (Goldilocks.ofNat 1) Goldilocks.zero) = c0 := by
-        have hm : CommRingOps.mul (Goldilocks.ofNat 1) Goldilocks.zero = Goldilocks.zero := by decide
-        rw [hm]; exact LawfulCommRing.add_zero c0
-      exact h.symm.trans he1
+      dsimp only [RoundPoly.evalCoeffs] at he1
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he1
+      exact he1
     exact (by decide : Goldilocks.one ≠ Goldilocks.ofNat 2) (hc0.symm.trans hc1)
-  · -- Degree-1 line `c0 + x * c1`: `eval(0) = 1 => c0 = 1`, `eval(1) = 2 => c1 = 1`, so `eval(2) = 3 ≠ 1`!
-    have hz0 : CommRingOps.mul (Goldilocks.ofNat 1) Goldilocks.zero = Goldilocks.zero := by decide
-    have hz2 : CommRingOps.mul (Goldilocks.ofNat 2) Goldilocks.zero = Goldilocks.zero := by decide
-    have h00 : CommRingOps.mul (Goldilocks.ofNat 0) (CommRingOps.add c1 (CommRingOps.mul (Goldilocks.ofNat 0) Goldilocks.zero)) =
-        Goldilocks.zero := LawfulCommRing.zero_mul _
-    have hc0 : c0 = Goldilocks.one := by
-      have hEval0 : RoundPoly.evalCoeffs [c0, c1] (Goldilocks.ofNat 0) = c0 := by
-        dsimp only [RoundPoly.evalCoeffs]
-        rw [h00, LawfulCommRing.add_zero]
-      exact hEval0.symm.trans he0
+  · have hc0 : c0 = Goldilocks.one := by
+      dsimp only [RoundPoly.evalCoeffs] at he0
+      have h0eq : Goldilocks.ofNat 0 = CommRingOps.zero := by decide
+      rw [h0eq, LawfulCommRing.zero_mul, LawfulCommRing.add_zero] at he0
+      exact he0
     subst hc0
-    have hEval1 : RoundPoly.evalCoeffs [Goldilocks.one, c1] (Goldilocks.ofNat 1) =
-        CommRingOps.add Goldilocks.one c1 := by
-      dsimp only [RoundPoly.evalCoeffs]
-      rw [hz0, LawfulCommRing.add_zero]
-      have h1m : CommRingOps.mul (Goldilocks.ofNat 1) c1 = c1 := LawfulCommRing.one_mul c1
-      rw [h1m]
-    have hc1Eq : c1 = Goldilocks.one := by
-      have hSum := hEval1.symm.trans he1
-      have hSub := congrArg (fun z => CommRingOps.sub z Goldilocks.one) hSum
-      have hL : CommRingOps.sub (CommRingOps.add Goldilocks.one c1) Goldilocks.one = c1 := by
-        rw [LawfulCommRing.add_comm Goldilocks.one c1, LawfulCommRing.sub_eq_add_neg,
-            LawfulCommRing.add_assoc, LawfulCommRing.add_neg_cancel, LawfulCommRing.add_zero]
-      have hR : CommRingOps.sub (Goldilocks.ofNat 2) Goldilocks.one = Goldilocks.one := by decide
-      exact hL.symm.trans (hSub.trans hR)
-    subst hc1Eq
-    have hEval2 : RoundPoly.evalCoeffs [Goldilocks.one, Goldilocks.one] (Goldilocks.ofNat 2) =
-        Goldilocks.ofNat 3 := by decide
-    exact (by decide : Goldilocks.ofNat 3 ≠ Goldilocks.one) (hEval2.symm.trans he2)
-  · simp only [List.length_cons] at hLen
+    have hEval1 : CommRingOps.add Goldilocks.one c1 = Goldilocks.ofNat 2 := by
+      dsimp only [RoundPoly.evalCoeffs] at he1
+      have h1eq : Goldilocks.ofNat 1 = CommRingOps.one := by decide
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero, h1eq, LawfulCommRing.one_mul] at he1
+      exact he1
+    have hEval2 : CommRingOps.add Goldilocks.one (CommRingOps.mul (Goldilocks.ofNat 2) c1) =
+        Goldilocks.one := by
+      dsimp only [RoundPoly.evalCoeffs] at he2
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at he2
+      exact he2
+    have hTwoEq : Goldilocks.ofNat 2 = CommRingOps.add Goldilocks.one Goldilocks.one := by decide
+    have hExpand : CommRingOps.add Goldilocks.one (CommRingOps.mul (Goldilocks.ofNat 2) c1) =
+        CommRingOps.add (CommRingOps.add Goldilocks.one c1) c1 := by
+      rw [hTwoEq, LawfulCommRing.right_distrib]
+      have h1eq : Goldilocks.one = CommRingOps.one := rfl
+      rw [h1eq, LawfulCommRing.one_mul, ← LawfulCommRing.add_assoc]
+      rfl
+    rw [hExpand, hEval1] at hEval2
+    have hAddOne := congrArg (CommRingOps.add Goldilocks.one) hEval2
+    rw [← LawfulCommRing.add_assoc, show CommRingOps.add Goldilocks.one (Goldilocks.ofNat 2) =
+        CommRingOps.add (Goldilocks.ofNat 2) Goldilocks.one from LawfulCommRing.add_comm _ _,
+        LawfulCommRing.add_assoc, hEval1] at hAddOne
+    exact (by decide : CommRingOps.add (Goldilocks.ofNat 2) (Goldilocks.ofNat 2) ≠
+      CommRingOps.add Goldilocks.one Goldilocks.one) hAddOne
+  · dsimp only [singleStageExactWhirStage, List.length_cons] at hLen
     omega
 
 #verify_constructive Qsag.ClosedWhir.johnson_core

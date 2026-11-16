@@ -40,6 +40,9 @@ import Qsag.Machine.Tactic.KernelRfl
 public section
 namespace Qsag
 
+attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+  UInt64.instLawfulOrderOrd Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
+
 set_option autoImplicit false
 
 /-! ## §1. SIMT contract of a SPIR-V barrier epoch -/
@@ -740,6 +743,9 @@ microarchitectural `umulh`/`div` model with the production `qsag-asm` binary con
 
 namespace Qsag
 
+attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+  UInt64.instLawfulOrderOrd Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
+
 private theorem bank16_get_ofFn {α : Type} (f : Nat → α) (r : Nat) (hr : r < 16) :
     (Bank16.ofFn f).get r = f r := by
   match r, hr with
@@ -841,10 +847,10 @@ theorem ElfX86CtEntry.entryState_contractInit (e : ElfX86CtEntry)
     obtain ⟨hRegMem, hRegLt⟩ := e.hMemPub rl hRl
     refine ⟨hRegLt, fun off hOff => ?_⟩
     rw [e.entryState_pub_gpr _ d₁ hRegMem, e.entryState_pub_gpr _ d₂ hRegMem]
-    have hHit := inContractPubMem_hit hRl hOff
+    have hHit := inContractPubMem_hit (pub := e.pub) hRl hOff
     show (if inContractPubMem e.contract e.pub _ then _ else _) =
       (if inContractPubMem e.contract e.pub _ then _ else _)
-    rw [hHit]
+    simp only [hHit, ↓reduceIte]
 
 /-- Decoded `x86_64` `StepObs` leakage trace (`PC`, memory-access addresses, `isDoitSafe`). -/
 def elfX86Leakage (mode : Spec.ExecMode) (e : ElfX86CtEntry) (sec : Qsag.X86State) :
@@ -1042,8 +1048,8 @@ private theorem x86ContractEntryWf_framePub {c : FuncContract}
   rcases h3 with ⟨⟨⟨⟨h4Any, hOutAny⟩, hOutLt⟩, _⟩, _⟩
   obtain ⟨r4, hr4Mem, hr4Eq⟩ := List.any_eq_true.mp h4Any
   obtain ⟨ro, hroMem, hroEq⟩ := List.any_eq_true.mp hOutAny
-  rw [← beq_iff_eq.mp hr4Eq]
-  rw [← beq_iff_eq.mp hroEq]
+  rw [beq_iff_eq.mp hr4Eq] at hr4Mem
+  rw [beq_iff_eq.mp hroEq] at hroMem
   exact ⟨hr4Mem, hroMem, hOutLt⟩
 
 /-- Construct the certified `ElfX86CtEntry` for any of the `19` compiled `qsag-asm` `x86_64` `.rlib` symbols. -/
@@ -1180,6 +1186,23 @@ theorem tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected (pub : Arm64State) :
       qsag_asm_tower128_bdoz_mac_pmull_currentInv = false :=
   current_pmull_missing_wipe_rejected
 
+/-- A concrete symbol-index witness for the rejected GFNI epilogue mutation. -/
+theorem tooth_rlib_x86_gfni_mutation_witness :
+    ∃ idx : Fin 19, idx = ⟨2, by decide⟩ ∧
+      checkX86WithInv (patchBytesAt (rlibX86CtEntry idx 0).slice.code 0x72
+        [0x90, 0x90, 0x90, 0x90, 0x90])
+        (rlibX86CtEntry idx 0).contract qsag_asm_gf256_shamir_mul_gfni_currentInv = false :=
+  ⟨⟨2, by decide⟩, rfl, tooth_rlib_x86_gfni_missing_vzeroupper_rejected⟩
+
+/-- A concrete symbol-index witness for the rejected PMULL epilogue mutation. -/
+theorem tooth_rlib_aarch64_pmull_mutation_witness (pub : Arm64State) :
+    ∃ idx : Fin 9, idx = ⟨3, by decide⟩ ∧
+      checkArm64WithInv (patchBytesAt (rlibArm64CtEntry idx 0 pub).slice.code 0x104
+        [0x1F, 0x20, 0x03, 0xD5])
+        (rlibArm64CtEntry idx 0 pub).contract
+        qsag_asm_tower128_bdoz_mac_pmull_currentInv = false :=
+  ⟨⟨3, by decide⟩, rfl, tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected pub⟩
+
 end Qsag
 end
 
@@ -1213,7 +1236,9 @@ end
 #verify_constructive Qsag.tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected
 #tooth_pair Qsag.twoWaveReduction_epochs_wellFormed vs Qsag.twoWaveNoBarrier_not_wellFormed
 #tooth_pair Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent vs Qsag.ConstantTimeIsa.tooth_arm_umulh_leaks_without_dit_mode
-#tooth_pair Qsag.rlib_x86_all19_dit_trace_data_independent vs Qsag.tooth_rlib_x86_gfni_missing_vzeroupper_rejected
-#tooth_pair Qsag.rlib_aarch64_all9_dit_trace_data_independent vs Qsag.tooth_rlib_aarch64_pmull_missing_neon_wipe_rejected
+set_option maxRecDepth 65536 in
+#tooth_pair Qsag.rlib_x86_all19_dit_trace_data_independent vs Qsag.tooth_rlib_x86_gfni_mutation_witness
+set_option maxRecDepth 65536 in
+#tooth_pair Qsag.rlib_aarch64_all9_dit_trace_data_independent vs Qsag.tooth_rlib_aarch64_pmull_mutation_witness
 #verify_inhabited Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent Qsag.ConstantTimeIsa.inhabited_arm_kernel_sequence
 #verify_inhabited Qsag.rlib_x86_all19_dit_trace_data_independent Qsag.inhabited_rlib_x86_dit_sequence
