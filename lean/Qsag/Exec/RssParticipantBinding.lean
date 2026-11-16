@@ -27,7 +27,7 @@ structure LocalSigningMaterial where
   pkSeed : List UInt8
   deriving DecidableEq, Repr
 
-def localSigningMaterial (profile : RssProduction.Profile) (party : Fin 3) : LocalSigningMaterial :=
+@[expose] def localSigningMaterial (profile : RssProduction.Profile) (party : Fin 3) : LocalSigningMaterial :=
   let m := profile.material
   if party.val = 0 then ⟨m.seed.b0, m.seed.b1, m.prf.b0, m.prf.b1, m.pkSeed⟩
   else if party.val = 1 then ⟨m.seed.b1, m.seed.b2, m.prf.b1, m.prf.b2, m.pkSeed⟩
@@ -35,14 +35,14 @@ def localSigningMaterial (profile : RssProduction.Profile) (party : Fin 3) : Loc
 
 /-- Static corruption must expose long-lived local seed/PRF shares, in addition
 to transient Node state and `corruptMaskQuery`. -/
-def corruptSigningMaterial (profile : RssProduction.Profile) (corrupt : Option (Fin 3)) :
+@[expose] def corruptSigningMaterial (profile : RssProduction.Profile) (corrupt : Option (Fin 3)) :
     Option LocalSigningMaterial := corrupt.map (localSigningMaterial profile)
 
 theorem corruptSigningMaterial_exact (profile : RssProduction.Profile) (party : Fin 3) :
     corruptSigningMaterial profile (some party) = some (localSigningMaterial profile party) := by
   simp [corruptSigningMaterial]
 
-def invocationBinding (profile : RssProduction.Profile) (request : SessionScheduleReq)
+@[expose] def invocationBinding (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (invocation : Nat) (phase : List UInt8) : List UInt8 :=
   encodeMultiFrame ["QSAG.RSS.PARTICIPANT/v1".toUTF8.data.toList,
     RssProduction.payload profile request, leb128 invocation, phase]
@@ -71,7 +71,7 @@ theorem invocationBinding_phase (p q : RssProduction.Profile)
 
 /-- Canonical application input to the honest participant driver. Gate evidence
 remains pending in its Nodes result; this is not the ideal service's public cut. -/
-def cshakeForRequest (profile : RssProduction.Profile) (request : SessionScheduleReq)
+@[expose] def cshakeForRequest (profile : RssProduction.Profile) (request : SessionScheduleReq)
     (invocation : Nat) (phase customization : List UInt8) (input : RssByteShares)
     (localTape : Nat → Nat → RssPrfZeroSeeds) : Nodes × Option RssByteShares :=
   cshakeParticipant 32 (invocationBinding profile request invocation phase) customization input localTape

@@ -28,7 +28,7 @@ theorem inverseTape_length (state : RssKState) (rounds : List PassiveRound) (tap
     | nil => rfl
     | cons sample tape => simp only [inverseTape, List.length_cons, ih]
 
-def fixedTapeEquiv (state : RssKState) (rounds : List PassiveRound) (length : Nat) :
+@[expose] def fixedTapeEquiv (state : RssKState) (rounds : List PassiveRound) (length : Nat) :
     SimpleEquiv { tape : List KState // tape.length = length }
       { tape : List KState // tape.length = length } where
   toFun tape := ⟨forwardTape state rounds tape.val, (forwardTape_length _ _ _).trans tape.property⟩

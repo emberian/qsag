@@ -16,10 +16,10 @@ namespace Qsag.RssParticipant.GateChecks
 set_option autoImplicit false
 set_option maxRecDepth 8192
 
-def HistoryGood (nodes : Nodes) : Prop :=
+@[expose] def HistoryGood (nodes : Nodes) : Prop :=
   Aligned3 goodRound nodes.n0.evidence nodes.n1.evidence nodes.n2.evidence
 
-def producedRound (cursor : Nat) (s : RssKState) (rc : UInt64)
+@[expose] def producedRound (cursor : Nat) (s : RssKState) (rc : UInt64)
     (r : Nat → RssPrfZeroSeeds) : RoundEvidence × RoundEvidence × RoundEvidence :=
   let out := roundNetwork s rc r
   (⟨cursor, rc, gateRecords (linearLocal ⟨s.s0, s.s1⟩) (mask0 r), out.s0, out.s1⟩,

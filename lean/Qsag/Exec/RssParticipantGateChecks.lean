@@ -24,7 +24,7 @@ set_option autoImplicit false
 set_option maxRecDepth 8192
 
 /-- Reconstructed Boolean relation belonging to three aligned local records. -/
-def relation (g0 g1 g2 : GateRecord) : Prop :=
+@[expose] def relation (g0 g1 g2 : GateRecord) : Prop :=
   (g0.product ^^^ g1.product ^^^ g2.product) =
     ((g0.lhsOwn ^^^ g1.lhsOwn ^^^ g2.lhsOwn) &&&
       (g0.rhsOwn ^^^ g1.rhsOwn ^^^ g2.rhsOwn))
@@ -64,17 +64,17 @@ structure FinalCommitment where
   c1 : Tower128
 
 /-- `rss_dzk_pass`: `rx + tau*x`, `ry + tau*y`, `c0 + tau*c1 + tau²*claim`. -/
-def finalOpening (c : FinalCommitment) (tau : Tower128) : Tower128 × Tower128 × Tower128 :=
+@[expose] def finalOpening (c : FinalCommitment) (tau : Tower128) : Tower128 × Tower128 × Tower128 :=
   (towerAdd 7 c.rx (towerMul 7 tau c.x),
    towerAdd 7 c.ry (towerMul 7 tau c.y),
    towerAdd 7 (towerAdd 7 c.c0 (towerMul 7 tau c.c1))
      (towerMul 7 (towerMul 7 tau tau) c.claim))
 
-def accepts (c : FinalCommitment) (tau : Tower128) : Bool :=
+@[expose] def accepts (c : FinalCommitment) (tau : Tower128) : Bool :=
   let o := finalOpening c tau
   decide (towerMul 7 o.1 o.2.1 = o.2.2)
 
-def residual (c : FinalCommitment) : List Tower128 :=
+@[expose] def residual (c : FinalCommitment) : List Tower128 :=
   [towerAdd 7 (towerMul 7 c.rx c.ry) c.c0,
    towerAdd 7 (towerAdd 7 (towerMul 7 c.rx c.y) (towerMul 7 c.x c.ry)) c.c1,
    towerAdd 7 (towerMul 7 c.x c.y) c.claim]
@@ -121,7 +121,7 @@ theorem honest_final_complete (c : FinalCommitment)
 
 /-- Explicit bad-challenge event. Coefficients may be malicious but must be fixed.
 The final coefficient is nonzero exactly when the remaining product claim is false. -/
-def badChallenge (c : FinalCommitment) (tau : Tower128) : Bool :=
+@[expose] def badChallenge (c : FinalCommitment) (tau : Tower128) : Bool :=
   decide (c.claim ≠ towerMul 7 c.x c.y) && accepts c tau
 
 theorem accepted_correct_or_bad (c : FinalCommitment) (tau : Tower128)
@@ -149,7 +149,7 @@ theorem false_final_accepting_challenges_le_two (c : FinalCommitment)
 
 /-- Choosing c0 AFTER tau defeats the check at every challenge. This negative
 control makes the pre-challenge commitment order essential, not documentation. -/
-def lateForgery (tau : Tower128) : FinalCommitment :=
+@[expose] def lateForgery (tau : Tower128) : FinalCommitment :=
   ⟨towerZero 7, towerZero 7, towerOne 7, towerZero 7, towerZero 7,
     towerMul 7 tau tau, towerZero 7⟩
 
@@ -164,11 +164,11 @@ theorem late_commitment_forges (tau : Tower128) :
 
 /-- Error propagation in Rust's inverse-challenge halving round. `delta` is
 claim minus the true dot product; eL/eR are the fixed cross-term message errors. -/
-def foldError (delta eL eR gamma : Tower128) : Tower128 :=
+@[expose] def foldError (delta eL eR gamma : Tower128) : Tower128 :=
   towerAdd 7 (towerAdd 7 delta (towerMul 7 (towerInv 7 gamma) eL))
     (towerMul 7 gamma eR)
 
-def foldBad (delta eL eR gamma : Tower128) : Bool :=
+@[expose] def foldBad (delta eL eR gamma : Tower128) : Bool :=
   decide (gamma ≠ towerZero 7) && decide (foldError delta eL eR gamma = towerZero 7)
 
 /-- Pointwise vector-fold identity. Summing it gives the dot-product update;
@@ -213,21 +213,21 @@ theorem fold_zero_rejected (delta eL eR : Tower128) :
   simp [foldBad]
 
 /-- Packed-round weight `1 + gamma * (1 + mu)` from `rss_dzk_pass`. -/
-def packedWeight (mu gamma : Tower128) : Tower128 :=
+@[expose] def packedWeight (mu gamma : Tower128) : Tower128 :=
   towerAdd 7 (towerOne 7) (towerMul 7 gamma (towerAdd 7 (towerOne 7) mu))
 
 /-- Difference between the locked prover quadratic and the true quadratic.
 At Boolean endpoints its weighted sum is exactly the incoming claim error. -/
-def packedResidual (delta mu e1 e2 : Tower128) : List Tower128 :=
+@[expose] def packedResidual (delta mu e1 e2 : Tower128) : List Tower128 :=
   let e0 := towerAdd 7 delta (towerMul 7 mu e1)
   [e0, towerAdd 7 (towerAdd 7 e0 e1) e2, e2]
 
-def packedBad (delta mu e1 e2 gamma : Tower128) : Bool :=
+@[expose] def packedBad (delta mu e1 e2 gamma : Tower128) : Bool :=
   decide (towerMul 7 (packedWeight mu gamma)
     (RoundPoly.evalCoeffs (packedResidual delta mu e1 e2) gamma) = towerZero 7)
 
 /-- Exact scalar update of `rss_dzk_pass`, with `s0` locked from the claim. -/
-def packedNext (claim mu s1 s2 gamma : Tower128) : Tower128 :=
+@[expose] def packedNext (claim mu s1 s2 gamma : Tower128) : Tower128 :=
   let w := packedWeight mu gamma
   let c0 := towerMul 7 w (towerAdd 7 (towerOne 7) gamma)
   let c1 := towerMul 7 w gamma

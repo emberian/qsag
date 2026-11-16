@@ -18,18 +18,18 @@ open Rss256ProductProof
 set_option autoImplicit false
 set_option maxRecDepth 8192
 
-def batchHashes (batch : RssSigning.UnverifiedBatch) : List RssSigning.HashEvidence :=
+@[expose] def batchHashes (batch : RssSigning.UnverifiedBatch) : List RssSigning.HashEvidence :=
   batch.computations.flatMap RssSigning.UnverifiedAnswer.evidence
 
-def treeHashes : {height : Nat} → RssSigning.LeafTree RssSigning.UnverifiedBatch height →
+@[expose] def treeHashes : {height : Nat} → RssSigning.LeafTree RssSigning.UnverifiedBatch height →
     List RssSigning.HashEvidence
   | 0, .leaf batch => batchHashes batch
   | _ + 1, .node left right => treeHashes left ++ treeHashes right
 
-def extractBatch (batch : RssSigning.UnverifiedBatch) : Option (List IndexedGate) :=
+@[expose] def extractBatch (batch : RssSigning.UnverifiedBatch) : Option (List IndexedGate) :=
   extractHashes (batchHashes batch)
 
-def extractTree {height : Nat} (tree : RssSigning.UnverifiedTree height) : Option (List IndexedGate) :=
+@[expose] def extractTree {height : Nat} (tree : RssSigning.UnverifiedTree height) : Option (List IndexedGate) :=
   extractHashes (treeHashes tree.batches)
 
 theorem produceBatch_historyGood (prepared : RssSigning.Prepared) (material : RssProduction.Material)
@@ -72,11 +72,11 @@ theorem produceTree_gate_extraction (prepared : RssSigning.Prepared) (material :
       ∀ g ∈ gates, relation g.records.1 g.records.2.1 g.records.2.2 := by
   exact extractHashes_of_historyGood _ (produceTree_historyGood prepared material tape plan first)
 
-def groupTable (depth : Nat) (hashes : List RssSigning.HashEvidence) : Option (GateTable depth) := do
+@[expose] def groupTable (depth : Nat) (hashes : List RssSigning.HashEvidence) : Option (GateTable depth) := do
   let gates ← extractHashes hashes
   if gates.length ≤ 2 ^ depth then some (indexedTable depth gates) else none
 
-def groupWeightAccept (depth : Nat) (hashes : List RssSigning.HashEvidence)
+@[expose] def groupWeightAccept (depth : Nat) (hashes : List RssSigning.HashEvidence)
     (gs : ChallengeTuple depth) : Bool :=
   match groupTable depth hashes with
   | none => false
