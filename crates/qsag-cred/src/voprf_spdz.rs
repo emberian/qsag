@@ -4,8 +4,10 @@
 //! This is the second backend of [`crate::voprf`]. It computes the same function
 //! `F(k, x)` (the width-12 Poseidon2 keyed sponge of [`crate::voprf::plaintext`]) and
 //! returns the same [`Evaluation`], so issuance code does not care which backend ran.
-//! The replicated five-server backend stays as it is; it needs four of five servers
-//! online and tolerates one corruption. This backend tolerates `t - 1` corrupt servers
+//! The replicated five-server backend stays as it is; it tolerates one corruption but
+//! needs all five servers online during an evaluation, so it gives no availability
+//! with a server offline. This backend is the `t`-of-`n` one: any `t` servers
+//! evaluate while the other `n - t` are offline. It tolerates `t - 1` corrupt servers
 //! among the `t` that are online, which is a dishonest majority, so every value is
 //! authenticated and nothing is released before its MAC check.
 //!

@@ -2,9 +2,18 @@
 //!
 //! # Construction and security boundary
 //! This backend supports exactly threshold t=2, n=5, with at most t'=1 statically
-//! corrupt server, and needs four of the five servers online; other shapes are
-//! rejected here. Any `2 <= t <= n <= 64` with exactly `t` servers online is the
-//! Shamir-SPDZ backend, [`crate::voprf_spdz`], which computes the same F. Private,
+//! corrupt server; other shapes are rejected here. **All five servers must be
+//! online for an evaluation**: the four holders of every input component must
+//! all confirm the client's shares (unanimity, because a majority could admit
+//! inconsistent shares from a malicious client), and the five components
+//! between them involve every server, so one absent server aborts the batch
+//! (`BadDelivery`). The multiplication layers decode by majority of three
+//! senders, but they are only reached after that confirmation. The
+//! threshold is a privacy and correctness bound (one corrupt server learns
+//! nothing and cannot change an output; the client corrects one bad or missing
+//! *output*), not an availability bound. For availability with servers offline
+//! use the Shamir-SPDZ backend, [`crate::voprf_spdz`], which computes the same F
+//! with any `t` of `n` servers online (`2 <= t <= n <= 64`). Private,
 //! authenticated point-to-point channels and a consistent authenticated
 //! broadcast are required; the transport must separate sessions and phases.
 //! This intentionally uses replicated additive sharing instead of Shamir:
@@ -48,8 +57,11 @@
 //! Key binding is honest-majority verifiability against an enrolled DKG root,
 //! not a publicly transferable NIZK. An authenticated output must be associated
 //! with its actual sender; passing attacker-invented sender identities violates
-//! the API's channel contract. Persistent counter reservation precedes all
-//! evaluation messages and burns aborted evaluations. Outputs also bind the
+//! the API's channel contract. Persistent counter reservation precedes every
+//! key-dependent message and burns evaluations aborted after it. It follows the
+//! two key-independent rounds (context agreement and input confirmation), in
+//! which all five servers must deliver, so an absent or silent server makes the
+//! batch fail before any counter or quota is spent. Outputs also bind the
 //! root of the salted request components, preventing cross-input relabeling.
 //! Restore custody only with
 //! the same monotonic store. Every batch consumes one counter and quota equal to
@@ -533,11 +545,28 @@ pub fn blind(
 /// Output arrives over the server's authenticated private channel to the client.
 /// Fields are private so callers deserialize exclusively via [`Output::from_wire`] rather than
 /// mutating unauthenticated components in memory.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Output {
     context: Context,
     components: Vec<[[u64; 5]; 4]>,
 }
+/// The components are secret output shares: equality reads all of them and
+/// does not stop at the first difference.
+impl PartialEq for Output {
+    fn eq(&self, other: &Self) -> bool {
+        let public =
+            (self.context == other.context) & (self.components.len() == other.components.len());
+        let diff = self
+            .components
+            .iter()
+            .flatten()
+            .flatten()
+            .zip(other.components.iter().flatten().flatten())
+            .fold(0u64, |acc, (a, b)| acc | (a ^ b));
+        qsag_accel::ct::ct_eq_u64(diff, 0) & public
+    }
+}
+impl Eq for Output {}
 impl Drop for Output {
     fn drop(&mut self) {
         for item in &mut self.components {
@@ -669,13 +698,6 @@ impl Server {
         if agreement.iter().filter(|c| c.as_slice() == context).count() < 4 {
             return Err(Error::Context);
         }
-        store.reserve(
-            &self.key.commitment,
-            self.party,
-            request.context.counter,
-            request.inputs.len(),
-        )?;
-        self.last_counter = Some(request.context.counter);
         // Bind the client's replicated input before any key-dependent gate.
         // Unanimity among a component's four holders deliberately permits abort:
         // a majority alone could admit inconsistent malicious-client shares.
@@ -707,6 +729,18 @@ impl Server {
         ) {
             return Err(Error::Context);
         }
+        // Every server delivered in both rounds above, and neither round carries
+        // anything derived from the key. The counter and quota are spent here,
+        // after that readiness is confirmed and before the first key-dependent
+        // message, so a server that is offline at the start costs no counter,
+        // while an evaluation aborted from here on stays burned.
+        store.reserve(
+            &self.key.commitment,
+            self.party,
+            request.context.counter,
+            request.inputs.len(),
+        )?;
+        self.last_counter = Some(request.context.counter);
         let mut states = Zeroizing(vec![[[0; 5]; 12]; request.inputs.len()]);
         for (st, input) in states.iter_mut().zip(&request.inputs) {
             st[..4].copy_from_slice(input);
@@ -735,7 +769,6 @@ impl Server {
 }
 /// Client-side TOPRF outputs. `Debug` names only the public context and the
 /// faulty-server evidence; the outputs and receipt tags are wiped on drop.
-#[derive(PartialEq, Eq)]
 #[cfg_attr(test, derive(Clone))]
 pub struct Evaluation {
     values: Vec<[u8; 32]>,
@@ -745,6 +778,26 @@ pub struct Evaluation {
     context: Context,
     receipt_tags: Vec<[u8; 32]>,
 }
+/// The outputs and receipt tags are secret: equality compares every one of
+/// them without data-dependent timing.
+impl PartialEq for Evaluation {
+    fn eq(&self, other: &Self) -> bool {
+        let public = (self.faulty_servers == other.faulty_servers)
+            & (self.key == other.key)
+            & (self.input_digests == other.input_digests)
+            & (self.context == other.context)
+            & (self.values.len() == other.values.len())
+            & (self.receipt_tags.len() == other.receipt_tags.len());
+        let secret = self
+            .values
+            .iter()
+            .zip(&other.values)
+            .chain(self.receipt_tags.iter().zip(&other.receipt_tags))
+            .fold(true, |acc, (a, b)| acc & qsag_accel::ct::ct_eq_bytes(a, b));
+        secret & public
+    }
+}
+impl Eq for Evaluation {}
 impl fmt::Debug for Evaluation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Evaluation")
@@ -1504,6 +1557,113 @@ mod tests {
             dkg(Config, 0, session, [2; 32], &mut transport).unwrap_err(),
             Error::BadDelivery { party: 4 }
         );
+    }
+
+    /// One server is offline: the start round still has four agreeing servers,
+    /// the input confirmation finds its message missing. Nothing durable may
+    /// have been spent by then, and the same counter must stay usable.
+    #[test]
+    fn an_offline_server_fails_the_batch_before_any_counter_or_quota_is_burned() {
+        struct CountingStore {
+            reserved: Vec<(u64, usize)>,
+        }
+        impl CounterStore for CountingStore {
+            fn high_water(&self) -> Result<Option<u64>, Error> {
+                Ok(self.reserved.last().map(|&(counter, _)| counter))
+            }
+            fn reserve(
+                &mut self,
+                _: &[u8; 32],
+                _: usize,
+                counter: u64,
+                items: usize,
+            ) -> Result<(), Error> {
+                self.reserved.push((counter, items));
+                Ok(())
+            }
+        }
+        struct Offline {
+            absent: Option<usize>,
+            step: usize,
+            exchanges: usize,
+            commits: [Vec<u8>; 5],
+        }
+        impl Transport for Offline {
+            fn broadcast(&mut self, _: [u8; 32], message: Vec<u8>) -> Result<[Vec<u8>; 5], Error> {
+                self.step += 1;
+                let mut round = if self.step == 1 {
+                    core::array::from_fn(|_| message.clone())
+                } else {
+                    self.commits.clone()
+                };
+                if let Some(absent) = self.absent {
+                    round[absent] = Vec::new();
+                }
+                Ok(round)
+            }
+            fn exchange(&mut self, _: [u8; 32], _: [Vec<u8>; 5]) -> Result<[Vec<u8>; 5], Error> {
+                self.exchanges += 1;
+                Err(Error::Transport)
+            }
+        }
+        let mut server = Server {
+            party: 0,
+            key: PublicKey::test_key(),
+            seeds: [[3; 32]; 25],
+            key_share: [[4; 5]; 4],
+            last_counter: None,
+        };
+        // Blinding is deterministic in its arguments, so each call yields the
+        // same request for server 0.
+        let key = server.key.clone();
+        let request = || {
+            let (_, requests) = blind(&key, &[b"input"], [1; 32], 0, [2; 32]).unwrap();
+            requests
+        };
+        let requests = request();
+        let commits: [Vec<u8>; 5] = core::array::from_fn(|p| {
+            (0..5)
+                .flat_map(|c| input_commitment(&requests[p], c))
+                .collect()
+        });
+        let mut store = CountingStore {
+            reserved: Vec::new(),
+        };
+        for absent in 1..5 {
+            let mut transport = Offline {
+                absent: Some(absent),
+                step: 0,
+                exchanges: 0,
+                commits: commits.clone(),
+            };
+            assert_eq!(
+                server
+                    .evaluate(request().into_iter().next().unwrap(), &mut store, &mut transport)
+                    .unwrap_err(),
+                Error::BadDelivery { party: absent }
+            );
+            assert_eq!(transport.step, 2);
+            assert_eq!(transport.exchanges, 0);
+            assert!(store.reserved.is_empty());
+            assert_eq!(server.last_counter, None);
+        }
+        // With every server present the same counter is still admissible, and it
+        // is reserved before the first key-dependent exchange.
+        let mut transport = Offline {
+            absent: None,
+            step: 0,
+            exchanges: 0,
+            commits,
+        };
+        assert_eq!(
+            server
+                .evaluate(request().into_iter().next().unwrap(), &mut store, &mut transport)
+                .unwrap_err(),
+            Error::Transport
+        );
+        assert_eq!(transport.exchanges, 1);
+        assert_eq!(store.reserved, vec![(0, 1)]);
+        assert_eq!(server.last_counter, Some(0));
     }
 
     #[test]
