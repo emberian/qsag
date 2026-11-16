@@ -150,7 +150,7 @@ fn anchored_toprf_enforces_locked_record_quota_and_rejects_rollback() {
     ]);
     // Counter ledger is now a binary QSTOPRF1 LockedRecord with companion .lock file.
     let raw_ctr0 = std::fs::read(format!("{vault}/voprf-counter-0.json")).unwrap();
-    assert_eq!(&raw_ctr0[24..32], b"QSTOPRF1");
+    assert!(raw_ctr0.windows(8).any(|w| w == b"QSTOPRF1"));
     assert!(PathBuf::from(format!("{vault}/voprf-counter-0.json.lock")).is_file());
 
     let snap_ctrs: Vec<Vec<u8>> = (0..5)

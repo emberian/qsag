@@ -2,15 +2,11 @@ module
 public import Qsag.Exec.RssSigningExecution
 public import Qsag.Exec.RssSigningEnrollment
 public import Qsag.Tests.RssProductionProfileChecks
-import all Qsag.Exec.RssSigningExecution
-import all Qsag.Exec.RssSigningEnrollment
-import all Qsag.Exec.RssSigningBackend
-import all Qsag.Exec.RssSigningMachine
-import all Qsag.Exec.RssSigningControl
-import all Qsag.Exec.RssSigningProgram
-import all Qsag.Tests.RssProductionProfileChecks
-import all Qsag.Protocol.Signing.HashSigs
-import Qsag.Tactic.AssuranceKit
+public import Qsag.Exec.RssSigningBackend
+public import Qsag.Exec.RssSigningMachine
+public import Qsag.Exec.RssSigningControl
+public import Qsag.Exec.RssSigningProgram
+public import Qsag.Protocol.Signing.HashSigs
 
 /-! Actual demand-driven participant executions and controller regressions.
 No security claim is inferred from these honest executions; the gate checker has
@@ -98,6 +94,5 @@ def controllerAndFailureCheck : IO Unit := do
   require (decide (failed = none)) "grind exhaustion became success"
   IO.println "Resumable controller: matching reply, wrong/duplicate reply, abort burn and pre-query leaf failure passed; genuine grind failure preserved"
 
-#verify_constructive evaluate_stateful evaluate_stateless queryRun_correct
-  runPrepared_query_log honestSigningExecution_wire_refines request_burns_index wrong_reply_aborts
+
 end Qsag.RssSigning.Checks

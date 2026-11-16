@@ -15,10 +15,10 @@ public section
 namespace Qsag.RssParticipant
 set_option autoImplicit false
 
-def Nodes.get (nodes : Nodes) (party : Fin 3) : Node :=
+@[expose] def Nodes.get (nodes : Nodes) (party : Fin 3) : Node :=
   if party.val = 0 then nodes.n0 else if party.val = 1 then nodes.n1 else nodes.n2
 
-def Nodes.set (nodes : Nodes) (party : Fin 3) (node : Node) : Nodes :=
+@[expose] def Nodes.set (nodes : Nodes) (party : Fin 3) (node : Node) : Nodes :=
   if party.val = 0 then { nodes with n0 := node }
   else if party.val = 1 then { nodes with n1 := node } else { nodes with n2 := node }
 
@@ -30,7 +30,7 @@ structure MessageLabel where
   round : Nat
   deriving DecidableEq, Repr
 
-def Envelope.label (m : Envelope) : MessageLabel :=
+@[expose] def Envelope.label (m : Envelope) : MessageLabel :=
   ⟨m.sender, m.receiver, m.binding, m.round⟩
 
 structure Network where
@@ -53,12 +53,12 @@ structure NetworkView where
   visiblePayloads : List Envelope
   deriving DecidableEq, Repr
 
-def incident (corrupt : Option (Fin 3)) (message : Envelope) : Bool :=
+@[expose] def incident (corrupt : Option (Fin 3)) (message : Envelope) : Bool :=
   match corrupt with
   | none => false
   | some party => decide (message.sender = party) || decide (message.receiver = party)
 
-def observe (corrupt : Option (Fin 3)) (network : Network) : NetworkView :=
+@[expose] def observe (corrupt : Option (Fin 3)) (network : Network) : NetworkView :=
   ⟨corrupt.map network.nodes.get, network.emitted.map Envelope.label,
    network.emitted.filter (incident corrupt)⟩
 
@@ -66,7 +66,7 @@ def observe (corrupt : Option (Fin 3)) (network : Network) : NetworkView :=
 permits arbitrary round/lane queries, including future coordinates. Omitting it
 would understate the corrupted participant's knowledge. The actual finite PRF-key
 resource and its distribution replacement are separate instantiations. -/
-def corruptMaskQuery (corrupt : Option (Fin 3))
+@[expose] def corruptMaskQuery (corrupt : Option (Fin 3))
     (localMasks : Fin 3 → Nat → LocalMasks) (round lane : Nat) : Option (UInt64 × UInt64) :=
   corrupt.map (fun party => localMasks party round lane)
 
@@ -76,7 +76,7 @@ theorem corruptMaskQuery_exact (party : Fin 3)
   simp [corruptMaskQuery]
 
 /-- Only the selected party's mask resource is passed into its local transition. -/
-def networkStep (corrupt : Option (Fin 3))
+@[expose] def networkStep (corrupt : Option (Fin 3))
     (localMasks : Fin 3 → Nat → LocalMasks) (network : Network) (command : Command) : Network :=
   match command with
   | .compute party =>
@@ -98,7 +98,7 @@ def networkStep (corrupt : Option (Fin 3))
   | .abort party =>
       { network with nodes := network.nodes.set party (abortNode (network.nodes.get party)) }
 
-def runCommands (corrupt : Option (Fin 3)) (localMasks : Fin 3 → Nat → LocalMasks) :
+@[expose] def runCommands (corrupt : Option (Fin 3)) (localMasks : Fin 3 → Nat → LocalMasks) :
     Network → List Command → Network
   | network, [] => network
   | network, command :: commands =>
@@ -160,7 +160,7 @@ theorem runCommands_emitted_prefix (corrupt : Option (Fin 3))
       obtain ⟨rest, hr⟩ := ih (networkStep corrupt localMasks network command)
       exact ⟨first ++ rest, by simpa [runCommands, hf, List.append_assoc] using hr⟩
 
-def WellAddressed (nodes : Nodes) : Prop :=
+@[expose] def WellAddressed (nodes : Nodes) : Prop :=
   nodes.n0.party = 0 ∧ nodes.n1.party = 1 ∧ nodes.n2.party = 2
 
 theorem wellAddressed_get (nodes : Nodes) (party : Fin 3) (h : WellAddressed nodes) :

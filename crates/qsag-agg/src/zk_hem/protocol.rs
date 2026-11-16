@@ -1836,7 +1836,6 @@ pub struct ShapeHologram {
     val_c: Vec<F>,
     count_x: Vec<F>,
     count_y: Vec<F>,
-    h_pair_monos: [Vec<F>; 2],
     h_state: crate::pcs::HemWhirProverState,
     rec_h: Option<PublicRecursionCommitment>,
 }
@@ -1844,11 +1843,10 @@ pub struct ShapeHologram {
 impl Clone for ShapeHologram {
     fn clone(&self) -> Self {
         let schedule = self.vk.regime.schedule(self.vk.native_pack_vars());
-        let h_full = self.h_super_evals();
-        let half = h_full.len() / 2;
-        let polys = vec![h_full[..half].to_vec(), h_full[half..].to_vec()];
+        let mut h0 = self.h_super_evals();
+        let h1 = h0.split_off(h0.len() / 2);
         let (comm, h_state) =
-            crate::pcs::whir_commit_batch_owned_with_schedule(polys, &[0u8; 32], &schedule);
+            crate::pcs::whir_commit_batch_owned_with_schedule(vec![h0, h1], &[0u8; 32], &schedule);
         debug_assert_eq!(comm, self.vk.hologram_comm);
         Self {
             vk: self.vk.clone(),
@@ -1859,7 +1857,6 @@ impl Clone for ShapeHologram {
             val_c: self.val_c.clone(),
             count_x: self.count_x.clone(),
             count_y: self.count_y.clone(),
-            h_pair_monos: self.h_pair_monos.clone(),
             h_state,
             rec_h: self.rec_h.clone(),
         }
@@ -1995,10 +1992,6 @@ impl ShapeHologram {
         let half_h = 4 * nz_cap;
         let h1 = h_super.split_off(half_h);
         let h0 = h_super;
-        let h_pair_monos = [
-            hypercube_to_monomial_coeffs(&h0),
-            hypercube_to_monomial_coeffs(&h1),
-        ];
         let h_schedule = regime.schedule(ell_nz + 2);
         let (hologram_comm, h_state) = crate::pcs::whir_commit_batch_owned_with_schedule(
             vec![h0, h1],
@@ -2028,7 +2021,6 @@ impl ShapeHologram {
             val_c,
             count_x,
             count_y,
-            h_pair_monos,
             h_state,
             rec_h,
         })
@@ -2301,9 +2293,11 @@ pub struct LogUpGkrLayer {
     pub split: [E; 4],
 }
 
-/// Build the `2^(ell_nz + 2)` leaf numerators and denominators of the 4-way LogUp-GKR tree.
+/// Evaluate leaf `idx in 0..4*2^ell_nz` of the 4-way LogUp-GKR fractional tree on the fly
+/// without materializing the `2.15 GiB` leaf arrays in memory.
+#[inline]
 #[allow(clippy::too_many_arguments)]
-fn build_gkr_leaves(
+fn eval_gkr_leaf(
     holo: &ShapeHologram,
     ex: &[E],
     ey: &[E],
@@ -2313,80 +2307,89 @@ fn build_gkr_leaves(
     gamma_x: E,
     gamma_y: E,
     delta: E,
-) -> (Vec<E>, Vec<E>) {
-    let m = 1usize << holo.vk.ell_nz;
-    let total = 4 * m;
-    let mut p0 = vec![E::ZERO; total];
-    let mut q0 = vec![E::ZERO; total];
-    let chunk = par_chunk(m);
-
-    // Block 0: +1 / (gamma_x - (row[k] + alpha * ex[k]))
-    for_each_chunk_mut(&mut p0[..m], chunk, |_, part| part.fill(E::ONE));
-    for_each_chunk_mut(&mut q0[..m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
+    idx: usize,
+) -> (E, E) {
+    let ell = holo.vk.ell_nz;
+    let m = 1usize << ell;
+    let k = idx & (m - 1);
+    match idx >> ell {
+        0 => {
             let row_f = F::from_u64_reduced(u64::from(holo.row_idx[k]));
-            *slot = gamma_x - (E::from_base(row_f) + alpha_mem * ex[k]);
+            (E::ONE, gamma_x - (E::from_base(row_f) + alpha_mem * ex[k]))
         }
-    });
-
-    // Block 1: -c_x[k] / (gamma_x - (k + alpha * eq_rx_padded[k]))
-    let rx_len = eq_rx.len();
-    for_each_chunk_mut(&mut p0[m..2 * m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = E::ZERO - E::from_base(holo.count_x[base + off]);
-        }
-    });
-    for_each_chunk_mut(&mut q0[m..2 * m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
+        1 => {
             let id_f = F::from_u64_reduced(k as u64);
-            let tbl_ex = eq_rx[k & (rx_len - 1)];
-            *slot = gamma_x - (E::from_base(id_f) + alpha_mem * tbl_ex);
+            let tbl_ex = eq_rx[k & (eq_rx.len() - 1)];
+            (
+                E::ZERO - E::from_base(holo.count_x[k]),
+                gamma_x - (E::from_base(id_f) + alpha_mem * tbl_ex),
+            )
         }
-    });
-
-    // Block 2: +delta / (gamma_y - (col[k] + alpha * ey[k]))
-    for_each_chunk_mut(&mut p0[2 * m..3 * m], chunk, |_, part| part.fill(delta));
-    for_each_chunk_mut(&mut q0[2 * m..3 * m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
+        2 => {
             let col_f = F::from_u64_reduced(u64::from(holo.col_idx[k]));
-            *slot = gamma_y - (E::from_base(col_f) + alpha_mem * ey[k]);
+            (delta, gamma_y - (E::from_base(col_f) + alpha_mem * ey[k]))
         }
-    });
-
-    // Block 3: -delta * c_y[k] / (gamma_y - (k + alpha * eq_ry_padded[k]))
-    let ry_len = eq_ry.len();
-    for_each_chunk_mut(&mut p0[3 * m..4 * m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            *slot = E::ZERO - delta.mul_base(holo.count_y[base + off]);
-        }
-    });
-    for_each_chunk_mut(&mut q0[3 * m..4 * m], chunk, |c_idx, part| {
-        let base = c_idx * chunk;
-        for (off, slot) in part.iter_mut().enumerate() {
-            let k = base + off;
+        _ => {
             let id_f = F::from_u64_reduced(k as u64);
-            let tbl_ey = eq_ry[k & (ry_len - 1)];
-            *slot = gamma_y - (E::from_base(id_f) + alpha_mem * tbl_ey);
+            let tbl_ey = eq_ry[k & (eq_ry.len() - 1)];
+            (
+                E::ZERO - delta.mul_base(holo.count_y[k]),
+                gamma_y - (E::from_base(id_f) + alpha_mem * tbl_ey),
+            )
         }
-    });
-
-    (p0, q0)
+    }
 }
 
-fn build_gkr_tree(p0: Vec<E>, q0: Vec<E>) -> Vec<(Vec<E>, Vec<E>)> {
-    let depth = p0.len().trailing_zeros() as usize;
-    let mut layers = Vec::with_capacity(depth + 1);
-    layers.push((p0, q0));
-    for d in 0..depth {
-        let (p_prev, q_prev) = &layers[d];
+/// Build GKR layers `1..=gkr_depth` (`upper[d - 1]` = GKR layer `d`), streaming layer `0`
+/// directly into layer `1` so peak tree memory is cut by `50%`.
+#[allow(clippy::too_many_arguments)]
+fn build_gkr_upper_tree(
+    holo: &ShapeHologram,
+    ex: &[E],
+    ey: &[E],
+    eq_rx: &[E],
+    eq_ry: &[E],
+    alpha_mem: E,
+    gamma_x: E,
+    gamma_y: E,
+    delta: E,
+) -> Vec<(Vec<E>, Vec<E>)> {
+    let m = 1usize << holo.vk.ell_nz;
+    let half0 = 2 * m;
+    let gkr_depth = holo.vk.ell_nz + 2;
+    let mut p1 = vec![E::ZERO; half0];
+    let mut q1 = vec![E::ZERO; half0];
+    let chunk0 = par_chunk(half0);
+    let mut pairs0: Vec<_> = p1.chunks_mut(chunk0).zip(q1.chunks_mut(chunk0)).collect();
+    for_each_chunk_mut(&mut pairs0, 1, |c_idx, part| {
+        let (pn, qn) = &mut part[0];
+        let base = c_idx * chunk0;
+        for (off, (ps, qs)) in pn.iter_mut().zip(qn.iter_mut()).enumerate() {
+            let u = base + off;
+            let (pl, ql) = eval_gkr_leaf(
+                holo, ex, ey, eq_rx, eq_ry, alpha_mem, gamma_x, gamma_y, delta, 2 * u,
+            );
+            let (pr, qr) = eval_gkr_leaf(
+                holo,
+                ex,
+                ey,
+                eq_rx,
+                eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                2 * u + 1,
+            );
+            *ps = pl * qr + pr * ql;
+            *qs = ql * qr;
+        }
+    });
+
+    let mut upper = Vec::with_capacity(gkr_depth);
+    upper.push((p1, q1));
+    for idx in 0..(gkr_depth - 1) {
+        let (p_prev, q_prev) = &upper[idx];
         let half = p_prev.len() / 2;
         let mut p_next = vec![E::ZERO; half];
         let mut q_next = vec![E::ZERO; half];
@@ -2403,31 +2406,68 @@ fn build_gkr_tree(p0: Vec<E>, q0: Vec<E>) -> Vec<(Vec<E>, Vec<E>)> {
                 *qs = ql * qr;
             }
         });
-        layers.push((p_next, q_next));
+        upper.push((p_next, q_next));
     }
-    layers
+    upper
 }
 
-/// Degree-3 sumcheck over `k in {0,1}^ell_nz` of `ex(k) * ey(k) * v(k)` using generic closures
-/// to drive either `FiatShamirTranscript` or Poseidon2 `RecTranscript`.
-fn run_cubic_triple_sumcheck(
-    mut ta: Vec<E>,
-    mut tb: Vec<E>,
-    mut tc: Vec<E>,
+/// Degree-3 sumcheck over `k in {0,1}^ell_nz` of `ex(k) * ey(k) * v(k)` without cloning
+/// `ex` and `ey` (round 0 reads slices directly and folds into `half`-length buffers).
+fn run_cubic_triple_sumcheck_slices(
+    sa: &[E],
+    sb: &[E],
+    sc: &[E],
     mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
 ) -> (Vec<[E; 4]>, Vec<E>, [E; 3]) {
-    let n = ta.len().trailing_zeros() as usize;
+    let n = sa.len().trailing_zeros() as usize;
     let mut rounds = Vec::with_capacity(n);
     let mut point = Vec::with_capacity(n);
-    for _ in 0..n {
+    let half0 = sa.len() / 2;
+    let evals0 = round_evals::<4>(0..half0, |i| {
+        let (a0, da) = (sa[2 * i], sa[2 * i + 1] - sa[2 * i]);
+        let (b0, db) = (sb[2 * i], sb[2 * i + 1] - sb[2 * i]);
+        let (c0, dc) = (sc[2 * i], sc[2 * i + 1] - sc[2 * i]);
+        let (mut a, mut b, mut c) = (a0, b0, c0);
+        core::array::from_fn(|_| {
+            let val = a * b * c;
+            a += da;
+            b += db;
+            c += dc;
+            val
+        })
+    });
+    let coeffs0: [E; 4] = evals_to_coeffs(&evals0).try_into().unwrap();
+    let chal0 = absorb_and_squeeze(coeffs0);
+    rounds.push(coeffs0);
+    point.push(chal0);
+
+    let mut ta = vec![E::ZERO; half0];
+    let mut tb = vec![E::ZERO; half0];
+    let mut tc = vec![E::ZERO; half0];
+    let chunk0 = par_chunk(half0);
+    let mut triples: Vec<_> = ta
+        .chunks_mut(chunk0)
+        .zip(tb.chunks_mut(chunk0))
+        .zip(tc.chunks_mut(chunk0))
+        .collect();
+    for_each_chunk_mut(&mut triples, 1, |c_idx, part| {
+        let ((fa, fb), fc) = &mut part[0];
+        let base = c_idx * chunk0;
+        for j in 0..fa.len() {
+            let i = base + j;
+            fa[j] = sa[2 * i] + chal0 * (sa[2 * i + 1] - sa[2 * i]);
+            fb[j] = sb[2 * i] + chal0 * (sb[2 * i + 1] - sb[2 * i]);
+            fc[j] = sc[2 * i] + chal0 * (sc[2 * i + 1] - sc[2 * i]);
+        }
+    });
+
+    for _ in 1..n {
         let half = ta.len() / 2;
         let evals = round_evals::<4>(0..half, |i| {
             let (a0, da) = (ta[2 * i], ta[2 * i + 1] - ta[2 * i]);
             let (b0, db) = (tb[2 * i], tb[2 * i + 1] - tb[2 * i]);
             let (c0, dc) = (tc[2 * i], tc[2 * i + 1] - tc[2 * i]);
-            let mut a = a0;
-            let mut b = b0;
-            let mut c = c0;
+            let (mut a, mut b, mut c) = (a0, b0, c0);
             core::array::from_fn(|_| {
                 let val = a * b * c;
                 a += da;
@@ -2436,8 +2476,7 @@ fn run_cubic_triple_sumcheck(
                 val
             })
         });
-        let coeffs_vec = evals_to_coeffs(&evals);
-        let coeffs: [E; 4] = coeffs_vec.try_into().unwrap();
+        let coeffs: [E; 4] = evals_to_coeffs(&evals).try_into().unwrap();
         let chal = absorb_and_squeeze(coeffs);
         rounds.push(coeffs);
         point.push(chal);
@@ -2448,30 +2487,18 @@ fn run_cubic_triple_sumcheck(
     (rounds, point, [ta[0], tb[0], tc[0]])
 }
 
-/// Degree-3 sumcheck for one LogUp-GKR layer `eq(r_hi, u) * (p0*q1 + p1*q0 + beta*q0*q1)`.
-fn run_gkr_layer_sumcheck(
-    p_layer: &[E],
-    q_layer: &[E],
-    r_hi: &[E],
+fn finish_gkr_folded_rounds(
+    mut eq_t: Vec<E>,
+    mut p0: Vec<E>,
+    mut p1: Vec<E>,
+    mut q0: Vec<E>,
+    mut q1: Vec<E>,
     beta: E,
+    mut rounds: Vec<[E; 4]>,
+    mut u_star: Vec<E>,
     mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
 ) -> (Vec<[E; 4]>, Vec<E>, [E; 4]) {
-    let m = r_hi.len();
-    let len = 1usize << m;
-    let mut eq_t = eq_table(r_hi);
-    let mut p0 = vec![E::ZERO; len];
-    let mut p1 = vec![E::ZERO; len];
-    let mut q0 = vec![E::ZERO; len];
-    let mut q1 = vec![E::ZERO; len];
-    for u in 0..len {
-        p0[u] = p_layer[2 * u];
-        p1[u] = p_layer[2 * u + 1];
-        q0[u] = q_layer[2 * u];
-        q1[u] = q_layer[2 * u + 1];
-    }
-    let mut rounds = Vec::with_capacity(m);
-    let mut u_star = Vec::with_capacity(m);
-    for _ in 0..m {
+    while eq_t.len() > 1 {
         let half = eq_t.len() / 2;
         let evals = round_evals::<4>(0..half, |i| {
             let (e0, de) = (eq_t[2 * i], eq_t[2 * i + 1] - eq_t[2 * i]);
@@ -2490,8 +2517,7 @@ fn run_gkr_layer_sumcheck(
                 v
             })
         });
-        let coeffs_vec = evals_to_coeffs(&evals);
-        let coeffs: [E; 4] = coeffs_vec.try_into().unwrap();
+        let coeffs: [E; 4] = evals_to_coeffs(&evals).try_into().unwrap();
         let chal = absorb_and_squeeze(coeffs);
         rounds.push(coeffs);
         u_star.push(chal);
@@ -2502,6 +2528,256 @@ fn run_gkr_layer_sumcheck(
         fold_in_place(&mut q1, chal, false);
     }
     (rounds, u_star, [p0[0], p1[0], q0[0], q1[0]])
+}
+
+/// Degree-3 sumcheck for one LogUp-GKR layer `d >= 1`, folding round 0 directly from
+/// `(p_layer, q_layer)` into `len / 2` buffers without duplicating full-width arrays.
+fn run_gkr_layer_sumcheck(
+    p_layer: &[E],
+    q_layer: &[E],
+    r_hi: &[E],
+    beta: E,
+    mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
+) -> (Vec<[E; 4]>, Vec<E>, [E; 4]) {
+    let m = r_hi.len();
+    assert!(m >= 1);
+    let half0 = 1usize << (m - 1);
+    let eq_hi = eq_table(&r_hi[1..]);
+    let r0 = r_hi[0];
+    let w0 = E::ONE - r0;
+    let w1 = r0;
+
+    let evals0 = round_evals::<4>(0..half0, |i| {
+        let eh = eq_hi[i];
+        let (e0, de) = (eh * w0, eh * (w1 - w0));
+        let (pl0, dpl) = (p_layer[4 * i], p_layer[4 * i + 2] - p_layer[4 * i]);
+        let (pr0, dpr) = (p_layer[4 * i + 1], p_layer[4 * i + 3] - p_layer[4 * i + 1]);
+        let (ql0, dql) = (q_layer[4 * i], q_layer[4 * i + 2] - q_layer[4 * i]);
+        let (qr0, dqr) = (q_layer[4 * i + 1], q_layer[4 * i + 3] - q_layer[4 * i + 1]);
+        let (mut e, mut pl, mut pr, mut ql, mut qr) = (e0, pl0, pr0, ql0, qr0);
+        core::array::from_fn(|_| {
+            let v = e * (pl * qr + pr * ql + beta * ql * qr);
+            e += de;
+            pl += dpl;
+            pr += dpr;
+            ql += dql;
+            qr += dqr;
+            v
+        })
+    });
+    let coeffs0: [E; 4] = evals_to_coeffs(&evals0).try_into().unwrap();
+    let chal0 = absorb_and_squeeze(coeffs0);
+    let mut rounds = Vec::with_capacity(m);
+    let mut u_star = Vec::with_capacity(m);
+    rounds.push(coeffs0);
+    u_star.push(chal0);
+
+    let eq_fold_factor = w0 + chal0 * (w1 - w0);
+    let eq_t: Vec<E> = eq_hi.into_iter().map(|eh| eh * eq_fold_factor).collect();
+    let mut p0 = vec![E::ZERO; half0];
+    let mut p1 = vec![E::ZERO; half0];
+    let mut q0 = vec![E::ZERO; half0];
+    let mut q1 = vec![E::ZERO; half0];
+    let chunk = par_chunk(half0);
+    let mut quads: Vec<_> = p0
+        .chunks_mut(chunk)
+        .zip(p1.chunks_mut(chunk))
+        .zip(q0.chunks_mut(chunk))
+        .zip(q1.chunks_mut(chunk))
+        .collect();
+    for_each_chunk_mut(&mut quads, 1, |c_idx, part| {
+        let (((fp0, fp1), fq0), fq1) = &mut part[0];
+        let base = c_idx * chunk;
+        for j in 0..fp0.len() {
+            let i = base + j;
+            fp0[j] = p_layer[4 * i] + chal0 * (p_layer[4 * i + 2] - p_layer[4 * i]);
+            fp1[j] = p_layer[4 * i + 1] + chal0 * (p_layer[4 * i + 3] - p_layer[4 * i + 1]);
+            fq0[j] = q_layer[4 * i] + chal0 * (q_layer[4 * i + 2] - q_layer[4 * i]);
+            fq1[j] = q_layer[4 * i + 1] + chal0 * (q_layer[4 * i + 3] - q_layer[4 * i + 1]);
+        }
+    });
+
+    finish_gkr_folded_rounds(
+        eq_t,
+        p0,
+        p1,
+        q0,
+        q1,
+        beta,
+        rounds,
+        u_star,
+        absorb_and_squeeze,
+    )
+}
+
+/// Degree-3 sumcheck for GKR leaf layer `d = 0`, evaluating `eval_gkr_leaf` on the fly in
+/// round 0 and folding directly into `m = 2^ell_nz` buffers.
+#[allow(clippy::too_many_arguments)]
+fn run_gkr_leaf_layer_sumcheck(
+    holo: &ShapeHologram,
+    ex: &[E],
+    ey: &[E],
+    eq_rx: &[E],
+    eq_ry: &[E],
+    alpha_mem: E,
+    gamma_x: E,
+    gamma_y: E,
+    delta: E,
+    r_hi: &[E],
+    beta: E,
+    mut absorb_and_squeeze: impl FnMut([E; 4]) -> E,
+) -> (Vec<[E; 4]>, Vec<E>, [E; 4]) {
+    let m = r_hi.len();
+    let half0 = 1usize << (m - 1);
+    let eq_hi = eq_table(&r_hi[1..]);
+    let r0 = r_hi[0];
+    let w0 = E::ONE - r0;
+    let w1 = r0;
+
+    let evals0 = round_evals::<4>(0..half0, |i| {
+        let eh = eq_hi[i];
+        let (e0, de) = (eh * w0, eh * (w1 - w0));
+        let (pl_a, ql_a) =
+            eval_gkr_leaf(holo, ex, ey, eq_rx, eq_ry, alpha_mem, gamma_x, gamma_y, delta, 4 * i);
+        let (pr_a, qr_a) = eval_gkr_leaf(
+            holo,
+            ex,
+            ey,
+            eq_rx,
+            eq_ry,
+            alpha_mem,
+            gamma_x,
+            gamma_y,
+            delta,
+            4 * i + 1,
+        );
+        let (pl_b, ql_b) = eval_gkr_leaf(
+            holo,
+            ex,
+            ey,
+            eq_rx,
+            eq_ry,
+            alpha_mem,
+            gamma_x,
+            gamma_y,
+            delta,
+            4 * i + 2,
+        );
+        let (pr_b, qr_b) = eval_gkr_leaf(
+            holo,
+            ex,
+            ey,
+            eq_rx,
+            eq_ry,
+            alpha_mem,
+            gamma_x,
+            gamma_y,
+            delta,
+            4 * i + 3,
+        );
+        let (dpl, dpr, dql, dqr) = (pl_b - pl_a, pr_b - pr_a, ql_b - ql_a, qr_b - qr_a);
+        let (mut e, mut pl, mut pr, mut ql, mut qr) = (e0, pl_a, pr_a, ql_a, qr_a);
+        core::array::from_fn(|_| {
+            let v = e * (pl * qr + pr * ql + beta * ql * qr);
+            e += de;
+            pl += dpl;
+            pr += dpr;
+            ql += dql;
+            qr += dqr;
+            v
+        })
+    });
+    let coeffs0: [E; 4] = evals_to_coeffs(&evals0).try_into().unwrap();
+    let chal0 = absorb_and_squeeze(coeffs0);
+    let mut rounds = Vec::with_capacity(m);
+    let mut u_star = Vec::with_capacity(m);
+    rounds.push(coeffs0);
+    u_star.push(chal0);
+
+    let eq_fold_factor = w0 + chal0 * (w1 - w0);
+    let eq_t: Vec<E> = eq_hi.into_iter().map(|eh| eh * eq_fold_factor).collect();
+    let mut p0 = vec![E::ZERO; half0];
+    let mut p1 = vec![E::ZERO; half0];
+    let mut q0 = vec![E::ZERO; half0];
+    let mut q1 = vec![E::ZERO; half0];
+    let chunk = par_chunk(half0);
+    let mut quads: Vec<_> = p0
+        .chunks_mut(chunk)
+        .zip(p1.chunks_mut(chunk))
+        .zip(q0.chunks_mut(chunk))
+        .zip(q1.chunks_mut(chunk))
+        .collect();
+    for_each_chunk_mut(&mut quads, 1, |c_idx, part| {
+        let (((fp0, fp1), fq0), fq1) = &mut part[0];
+        let base = c_idx * chunk;
+        for j in 0..fp0.len() {
+            let i = base + j;
+            let (pl_a, ql_a) = eval_gkr_leaf(
+                holo,
+                ex,
+                ey,
+                eq_rx,
+                eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                4 * i,
+            );
+            let (pr_a, qr_a) = eval_gkr_leaf(
+                holo,
+                ex,
+                ey,
+                eq_rx,
+                eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                4 * i + 1,
+            );
+            let (pl_b, ql_b) = eval_gkr_leaf(
+                holo,
+                ex,
+                ey,
+                eq_rx,
+                eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                4 * i + 2,
+            );
+            let (pr_b, qr_b) = eval_gkr_leaf(
+                holo,
+                ex,
+                ey,
+                eq_rx,
+                eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                4 * i + 3,
+            );
+            fp0[j] = pl_a + chal0 * (pl_b - pl_a);
+            fp1[j] = pr_a + chal0 * (pr_b - pr_a);
+            fq0[j] = ql_a + chal0 * (ql_b - ql_a);
+            fq1[j] = qr_a + chal0 * (qr_b - qr_a);
+        }
+    });
+
+    finish_gkr_folded_rounds(
+        eq_t,
+        p0,
+        p1,
+        q0,
+        q1,
+        beta,
+        rounds,
+        u_star,
+        absorb_and_squeeze,
+    )
 }
 
 fn pack_e_super(ex: &[E], ey: &[E]) -> Vec<F> {
@@ -2703,7 +2979,8 @@ impl HologramPublicProof {
 
 fn eval_h_and_e_limbs_at_point(
     holo: &ShapeHologram,
-    e_super: &[F],
+    e0: &[F],
+    e1: &[F],
     pt: &[E],
 ) -> ([E; 7], [E; 8]) {
     let eq_pt = eq_table(pt);
@@ -2718,19 +2995,30 @@ fn eval_h_and_e_limbs_at_point(
             w.mul_base(holo.val_c[k]),
             w.mul_base(holo.count_x[k]),
             w.mul_base(holo.count_y[k]),
-            w.mul_base(e_super[k]),
-            w.mul_base(e_super[m + k]),
-            w.mul_base(e_super[2 * m + k]),
-            w.mul_base(e_super[3 * m + k]),
-            w.mul_base(e_super[4 * m + k]),
-            w.mul_base(e_super[5 * m + k]),
-            w.mul_base(e_super[6 * m + k]),
-            w.mul_base(e_super[7 * m + k]),
+            w.mul_base(e0[k]),
+            w.mul_base(e0[m + k]),
+            w.mul_base(e0[2 * m + k]),
+            w.mul_base(e0[3 * m + k]),
+            w.mul_base(e1[k]),
+            w.mul_base(e1[m + k]),
+            w.mul_base(e1[2 * m + k]),
+            w.mul_base(e1[3 * m + k]),
         ]
     });
     let h: [E; 7] = evals[..7].try_into().unwrap();
     let e_limbs: [E; 8] = evals[7..].try_into().unwrap();
     (h, e_limbs)
+}
+
+fn state_pair_monos(state: &crate::pcs::HemWhirProverState) -> alloc::borrow::Cow<'_, [Vec<F>]> {
+    if state.monomial_coeffs_0.len() == 2 {
+        alloc::borrow::Cow::Borrowed(&state.monomial_coeffs_0)
+    } else {
+        alloc::borrow::Cow::Owned(vec![
+            hypercube_to_monomial_coeffs(&state.hypercube_evals[0]),
+            hypercube_to_monomial_coeffs(&state.hypercube_evals[1]),
+        ])
+    }
 }
 
 fn recompose_ext4_from_limb_evals(limbs: &[E; 4]) -> E {
@@ -2825,14 +3113,8 @@ pub fn prove_public_hologram(
     });
     let [m_sparse_claim] = round_evals::<1>(0..m_nz, |k| [ex[k] * ey[k] * val_comb[k]]);
 
-    let e_super = pack_e_super(&ex, &ey);
-    let half_e = 4 * m_nz;
-    let e0 = e_super[..half_e].to_vec();
-    let e1 = e_super[half_e..].to_vec();
-    let e_pair_monos = [
-        hypercube_to_monomial_coeffs(&e0),
-        hypercube_to_monomial_coeffs(&e1),
-    ];
+    let mut e0 = pack_e_super(&ex, &ey);
+    let e1 = e0.split_off(4 * m_nz);
     let pack_schedule = vk.regime.schedule(vk.native_pack_vars());
     let mut e_salt = [0u8; 32];
     e_salt.copy_from_slice(&cshake256_32(b"QSAG.HEM.HOLOGRAM.ESALT/v1", seed));
@@ -2851,21 +3133,29 @@ pub fn prove_public_hologram(
 
     // 1. Spark cubic matrix sumcheck -> `r_mat`.
     let (mat_rounds, r_mat, _) =
-        run_cubic_triple_sumcheck(ex.clone(), ey.clone(), val_comb, |coeffs| {
+        run_cubic_triple_sumcheck_slices(&ex, &ey, &val_comb, |coeffs| {
             tr.absorb_ext4_slice(b"HOLO_MAT_ROUND", &coeffs);
             tr.squeeze_ext4(b"HOLO_MAT_ROUND")
         });
-    let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(hologram, &e_super, &r_mat);
+    drop(val_comb);
+    let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(
+        hologram,
+        &state_e.hypercube_evals[0],
+        &state_e.hypercube_evals[1],
+        &r_mat,
+    );
     tr.absorb_ext4_slice(b"HOLO_AT_MAT_H", &h_at_mat);
     tr.absorb_ext4_slice(b"HOLO_AT_MAT_E", &e_limbs_at_mat);
 
-    // 2. LogUp-GKR fractional binary tree -> `(r_gkr, b_gkr)`.
-    let (p0, q0) = build_gkr_leaves(
+    // 2. LogUp-GKR fractional binary tree -> `(r_gkr, b_gkr)` (streaming layer 0).
+    let mut upper = build_gkr_upper_tree(
         hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
     );
-    let tree = build_gkr_tree(p0, q0);
     let gkr_depth = vk.ell_nz + 2;
-    let (p_root, q_root) = (tree[gkr_depth].0[0], tree[gkr_depth].1[0]);
+    let (p_root, q_root) = {
+        let (pr, qr) = upper.pop().expect("nonempty GKR root");
+        (pr[0], qr[0])
+    };
     debug_assert_eq!(p_root, E::ZERO);
     if q_root.is_zero() {
         return Err(ZkHemError::MaskRankDeficient);
@@ -2877,17 +3167,35 @@ pub fn prove_public_hologram(
     for d in (0..gkr_depth).rev() {
         let m_vars = gkr_depth - 1 - d;
         let (rounds, u_star, split) = if m_vars == 0 {
-            (
-                Vec::new(),
-                Vec::new(),
-                [tree[d].0[0], tree[d].0[1], tree[d].1[0], tree[d].1[1]],
-            )
-        } else {
+            let (p_top, q_top) = upper.pop().expect("GKR top split");
+            (Vec::new(), Vec::new(), [p_top[0], p_top[1], q_top[0], q_top[1]])
+        } else if d >= 1 {
+            let (p_d, q_d) = upper.pop().expect("GKR internal layer");
             let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
-            run_gkr_layer_sumcheck(&tree[d].0, &tree[d].1, &r_cur, beta, |coeffs| {
+            run_gkr_layer_sumcheck(&p_d, &q_d, &r_cur, beta, |coeffs| {
                 tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", &coeffs);
                 tr.squeeze_ext4(b"HOLO_GKR_ROUND")
             })
+        } else {
+            debug_assert!(upper.is_empty());
+            let beta = tr.squeeze_ext4(b"HOLO_GKR_BETA");
+            run_gkr_leaf_layer_sumcheck(
+                hologram,
+                &ex,
+                &ey,
+                &eq_rx,
+                &eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                &r_cur,
+                beta,
+                |coeffs| {
+                    tr.absorb_ext4_slice(b"HOLO_GKR_ROUND", &coeffs);
+                    tr.squeeze_ext4(b"HOLO_GKR_ROUND")
+                },
+            )
         };
         tr.absorb_ext4_slice(b"HOLO_GKR_SPLIT", &split);
         let c_bit = tr.squeeze_ext4(b"HOLO_GKR_BIT");
@@ -2897,8 +3205,19 @@ pub fn prove_public_hologram(
         r_cur = next_r;
         gkr_layers.push(LogUpGkrLayer { rounds, split });
     }
+    drop(upper);
+    drop(ex);
+    drop(ey);
+    drop(eq_rx);
+    drop(eq_ry);
+
     let r_gkr = &r_cur[..vk.ell_nz];
-    let (h_at_gkr, e_limbs_at_gkr) = eval_h_and_e_limbs_at_point(hologram, &e_super, r_gkr);
+    let (h_at_gkr, e_limbs_at_gkr) = eval_h_and_e_limbs_at_point(
+        hologram,
+        &state_e.hypercube_evals[0],
+        &state_e.hypercube_evals[1],
+        r_gkr,
+    );
     tr.absorb_ext4_slice(b"HOLO_AT_GKR_H", &h_at_gkr);
     tr.absorb_ext4_slice(b"HOLO_AT_GKR_E", &e_limbs_at_gkr);
 
@@ -2909,15 +3228,19 @@ pub fn prove_public_hologram(
     let lambda_open = tr.squeeze_ext4(b"HOLO_OPEN_COMB");
 
     let open_z = crate::pcs::whir_open(&state_z, &ry, eval_z, &mut tr);
+    drop(state_z);
 
     let mut pt_mat = r_mat;
     pt_mat.extend_from_slice(&sel2_mat);
     let mut pt_gkr = r_gkr.to_vec();
     pt_gkr.extend_from_slice(&sel2_gkr);
 
-    let mut kernel_he = vec![E::ZERO; (1usize << vk.native_pack_vars()) + 2];
-    add_point_kernel(&mut kernel_he, E::ONE, &pt_mat);
-    add_point_kernel(&mut kernel_he, lambda_open, &pt_gkr);
+    let build_kernel_he = || {
+        let mut k = vec![E::ZERO; (1usize << vk.native_pack_vars()) + 2];
+        add_point_kernel(&mut k, E::ONE, &pt_mat);
+        add_point_kernel(&mut k, lambda_open, &pt_gkr);
+        k
+    };
 
     let mut h_mat8 = [E::ZERO; 8];
     h_mat8[..7].copy_from_slice(&h_at_mat);
@@ -2929,19 +3252,22 @@ pub fn prove_public_hologram(
         + lambda_open * super8_blend2_claim(&e_limbs_at_gkr, &sel2_gkr, eta_slice);
 
     let scalars = [E::ONE, eta_slice];
+    let h_monos = state_pair_monos(&hologram.h_state);
     let open_h = whir_open_blend(
         &hologram.h_state,
         &scalars,
-        &hologram.h_pair_monos,
-        kernel_he.clone(),
+        &h_monos,
+        build_kernel_he(),
         claim_h,
         &mut tr,
     );
+    drop(h_monos);
+    let e_monos = state_pair_monos(&state_e);
     let open_e = whir_open_blend(
         &state_e,
         &scalars,
-        &e_pair_monos,
-        kernel_he,
+        &e_monos,
+        build_kernel_he(),
         claim_e,
         &mut tr,
     );
@@ -3463,6 +3789,7 @@ pub fn prove_public_for_recursion(
     }
     let (col_rounds, ry, eval_z) =
         col_sumcheck_rec(&mut tr, &mut b, tm, &assignment[..1 << vk.var_bits]);
+    drop(assignment);
     tr.absorb_exts(&mut b, 211, &[RecExt::constant(eval_z)]);
 
     let eq_ry = eq_table(&ry);
@@ -3507,21 +3834,26 @@ pub fn prove_public_for_recursion(
     let delta = tr.ext(&mut b, 217).value(&b);
 
     let (mat_rounds, r_mat, _) =
-        run_cubic_triple_sumcheck(ex.clone(), ey.clone(), val_comb, |coeffs| {
+        run_cubic_triple_sumcheck_slices(&ex, &ey, &val_comb, |coeffs| {
             tr.absorb_exts(&mut b, 218, &coeffs.map(RecExt::constant));
             tr.ext(&mut b, 219).value(&b)
         });
-    let (h_at_mat, e_limbs_at_mat) = eval_h_and_e_limbs_at_point(hologram, &e_super, &r_mat);
+    drop(val_comb);
+    let half_e = 4 * m_nz;
+    let (h_at_mat, e_limbs_at_mat) =
+        eval_h_and_e_limbs_at_point(hologram, &e_super[..half_e], &e_super[half_e..], &r_mat);
     tr.absorb_exts(&mut b, 220, &h_at_mat.map(RecExt::constant));
     tr.absorb_exts(&mut b, 221, &e_limbs_at_mat.map(RecExt::constant));
 
-    let (p0, q0) = build_gkr_leaves(
+    let mut upper = build_gkr_upper_tree(
         hologram, &ex, &ey, &eq_rx, &eq_ry, alpha_mem, gamma_x, gamma_y, delta,
     );
-    let tree = build_gkr_tree(p0, q0);
     let gkr_depth = vk.ell_nz + 2;
-    let q_root = tree[gkr_depth].1[0];
-    debug_assert_eq!(tree[gkr_depth].0[0], E::ZERO);
+    let (p_root, q_root) = {
+        let (pr, qr) = upper.pop().expect("nonempty GKR root");
+        (pr[0], qr[0])
+    };
+    debug_assert_eq!(p_root, E::ZERO);
     if q_root.is_zero() {
         return Err(ZkHemError::MaskRankDeficient);
     }
@@ -3532,17 +3864,35 @@ pub fn prove_public_for_recursion(
     for d in (0..gkr_depth).rev() {
         let m_vars = gkr_depth - 1 - d;
         let (rounds, u_star, split) = if m_vars == 0 {
-            (
-                Vec::new(),
-                Vec::new(),
-                [tree[d].0[0], tree[d].0[1], tree[d].1[0], tree[d].1[1]],
-            )
-        } else {
+            let (p_top, q_top) = upper.pop().expect("GKR top split");
+            (Vec::new(), Vec::new(), [p_top[0], p_top[1], q_top[0], q_top[1]])
+        } else if d >= 1 {
+            let (p_d, q_d) = upper.pop().expect("GKR internal layer");
             let beta = tr.ext(&mut b, 223).value(&b);
-            run_gkr_layer_sumcheck(&tree[d].0, &tree[d].1, &r_cur, beta, |coeffs| {
+            run_gkr_layer_sumcheck(&p_d, &q_d, &r_cur, beta, |coeffs| {
                 tr.absorb_exts(&mut b, 224, &coeffs.map(RecExt::constant));
                 tr.ext(&mut b, 225).value(&b)
             })
+        } else {
+            debug_assert!(upper.is_empty());
+            let beta = tr.ext(&mut b, 223).value(&b);
+            run_gkr_leaf_layer_sumcheck(
+                hologram,
+                &ex,
+                &ey,
+                &eq_rx,
+                &eq_ry,
+                alpha_mem,
+                gamma_x,
+                gamma_y,
+                delta,
+                &r_cur,
+                beta,
+                |coeffs| {
+                    tr.absorb_exts(&mut b, 224, &coeffs.map(RecExt::constant));
+                    tr.ext(&mut b, 225).value(&b)
+                },
+            )
         };
         tr.absorb_exts(&mut b, 226, &split.map(RecExt::constant));
         let c_bit = tr.ext(&mut b, 227).value(&b);
@@ -3552,8 +3902,16 @@ pub fn prove_public_for_recursion(
         r_cur = next_r;
         gkr_layers.push(LogUpGkrLayer { rounds, split });
     }
+    drop(upper);
+    drop(ex);
+    drop(ey);
+    drop(eq_rx);
+    drop(eq_ry);
+
     let r_gkr = &r_cur[..vk.ell_nz];
-    let (h_at_gkr, e_limbs_at_gkr) = eval_h_and_e_limbs_at_point(hologram, &e_super, r_gkr);
+    let (h_at_gkr, e_limbs_at_gkr) =
+        eval_h_and_e_limbs_at_point(hologram, &e_super[..half_e], &e_super[half_e..], r_gkr);
+    drop(e_super);
     tr.absorb_exts(&mut b, 228, &h_at_gkr.map(RecExt::constant));
     tr.absorb_exts(&mut b, 229, &e_limbs_at_gkr.map(RecExt::constant));
 

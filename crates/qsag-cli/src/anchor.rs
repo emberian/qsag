@@ -25,7 +25,7 @@ use qsag_core::anti_rollback::{
 };
 use qsag_core::ceremony_journal::CeremonyContext;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
-use qsag_quorum::directory_anchor::FsDirectoryMonotoneAnchor;
+use qsag_quorum::FsDirectoryMonotoneAnchor;
 
 use crate::cli::{Args, CliError, Secret32, ZeroizingBuf};
 use crate::codec::{Json, from_hex_exact, to_hex};
@@ -114,6 +114,7 @@ fn read_tpm_password(auth_env: Option<&str>) -> Result<ZeroizingBuf, CliError> {
 }
 
 impl AnchorConfig {
+    #[cfg(test)]
     pub fn dir_only(
         anchor_dir: impl Into<String>,
         vault_dir: Option<String>,
@@ -607,7 +608,7 @@ impl AnchorInner {
 /// - mirrored dual-slot [`FsDirectoryMonotoneAnchor`] (`--anchor-dir`),
 /// - hardware TPM 2.0 NV counter [`Tpm2NvMonotoneAnchor<DevTpmRm0>`] (`--anchor-tpm-nv`), and
 /// - hypervisor generation-ID + `boot_id` + inode continuity [`HypervisorGenerationAnchor`] (`--anchor-vmgenid`)
-/// via [`CompositeAntiRollbackAnchor`].
+///   via [`CompositeAntiRollbackAnchor`].
 #[derive(Clone)]
 pub struct FsExternalMountAnchor {
     inner: Arc<AnchorInner>,
@@ -1074,6 +1075,7 @@ impl FsExternalMountAnchor {
 
     /// Atomically consume the single-use ceremony ticket at `expected.generation`.
     /// Rejects replay if `consumed_generation >= expected.generation` (post-issuance clone fence).
+    #[cfg(test)]
     pub fn consume_ceremony_ticket(
         &self,
         expected: LedgerCheckpoint,

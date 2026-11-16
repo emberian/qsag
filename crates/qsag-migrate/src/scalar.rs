@@ -122,6 +122,7 @@ pub(crate) fn encode(value: [u64; 4]) -> [u8; 32] {
 pub(crate) fn add(a: [u64; 4], b: [u64; 4], modulus: [u64; 4]) -> [u64; 4] {
     limbs::add_mod(a, b, modulus)
 }
+#[cfg(test)]
 #[inline]
 pub(crate) fn sub(a: [u64; 4], b: [u64; 4], modulus: [u64; 4]) -> [u64; 4] {
     limbs::sub_mod(a, b, modulus)

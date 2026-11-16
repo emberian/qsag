@@ -5520,15 +5520,13 @@ mod tests {
             })
             .collect();
 
-        // Setup Level-1 (`2` shards -> `1` SubtreePublic) and Level-2 (`2` Level-1s -> `1` Root).
-        let t_setup = Instant::now();
+        // Setup & prove Level-1 (`2` shards -> `1` SubtreePublic), then release `l1_rel` before
+        // constructing Level-2 (`2` Level-1s -> `1` Root) so peak RSS stays `< 14 GiB`.
+        let t_setup1 = Instant::now();
         let l1_rel = SubtreeLeafMergeRelation::new(params.clone(), 2).unwrap();
-        let l2_rel =
-            SubtreeInternalMergeRelation::new(l1_rel.verifier_key().clone(), 2, 1, root_regime)
-                .unwrap();
-        let setup_ms = t_setup.elapsed().as_secs_f64() * 1000.0;
-        let root_vk = l2_rel.verifier_key();
-        assert!(root_vk.to_bytes().len() < 256);
+        let setup1_ms = t_setup1.elapsed().as_secs_f64() * 1000.0;
+        let l1_rows = l1_rel.stats().padded_rows;
+        let l1_vk = l1_rel.verifier_key().clone();
 
         // Level-1 merges (`[0, 1]` and `[2, 3]`).
         let t_l1 = Instant::now();
@@ -5551,8 +5549,15 @@ mod tests {
         )
         .unwrap();
         let l1_ms = t_l1.elapsed().as_secs_f64() * 1000.0;
+        drop(l1_rel);
         assert_eq!(l1_left_pub.total_active_signers.to_canonical_u64(), 3);
         assert_eq!(l1_right_pub.total_active_signers.to_canonical_u64(), 3);
+
+        let t_setup2 = Instant::now();
+        let l2_rel = SubtreeInternalMergeRelation::new(l1_vk, 2, 1, root_regime).unwrap();
+        let setup_ms = setup1_ms + t_setup2.elapsed().as_secs_f64() * 1000.0;
+        let root_vk = l2_rel.verifier_key();
+        assert!(root_vk.to_bytes().len() < 256);
 
         // Level-2 root merge (`2` Level-1 proofs -> `1` constant-size root proof!).
         let t_l2 = Instant::now();
@@ -5582,7 +5587,7 @@ mod tests {
         let ver_ms = t_ver.elapsed().as_secs_f64() * 1000.0;
         std::println!(
             "SUBTREE_2LEVEL shards=4 signers=6 l1_rows={} l2_rows={} vk_bytes={} root_bytes={} setup_ms={setup_ms:.1} l1_prove_ms={l1_ms:.1} l2_prove_ms={l2_ms:.1} root_verify_ms={ver_ms:.2}",
-            l1_rel.stats().padded_rows,
+            l1_rows,
             l2_rel.stats().padded_rows,
             root_vk.to_bytes().len(),
             root_bytes.len(),

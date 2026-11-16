@@ -37,10 +37,10 @@ inductive Output (α : Type) where
   | aborted
   deriving DecidableEq, Repr
 
-def initial {α : Type} (program : Program α) (firstCut : Nat := 0) : State α :=
+@[expose] def initial {α : Type} (program : Program α) (firstCut : Nat := 0) : State α :=
   ⟨firstCut, .ready program⟩
 
-def step {α : Type} (state : State α) (input : Input) : State α × Output α :=
+@[expose] def step {α : Type} (state : State α) (input : Input) : State α × Output α :=
   match input, state.phase with
   | .advance, .ready (.pure result) =>
       (⟨state.nextCut, .finished result⟩, .finished result)
@@ -53,7 +53,7 @@ def step {α : Type} (state : State α) (input : Input) : State α × Output α 
 
 /-- External reference meaning for a controller state; the controller itself
 never receives this oracle or computes the reference interpretation. -/
-def meaning {α : Type} (o : ProductionPqHashMpcOracles) (state : State α) : Option α :=
+@[expose] def meaning {α : Type} (o : ProductionPqHashMpcOracles) (state : State α) : Option α :=
   match state.phase with
   | .ready program => some (evaluate o program)
   | .waiting _ query next => some (evaluate o (next (answer o query)))

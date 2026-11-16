@@ -43,19 +43,23 @@ fn qsag(args: &[&str]) -> Output {
     let mut args = args.to_vec();
     // Tests without an anchor directory use disposable keys and say so, as the CLI
     // requires. Anchored invocations run exactly as written.
-    let enrolls_custody = match (args.first(), args.get(1), args.get(2)) {
-        (Some(&"keygen" | &"sign" | &"aggregate"), _, _) => true,
-        (Some(&"quorum"), Some(&"keygen" | &"sign" | &"refresh" | &"reshare"), _) => true,
-        (
-            Some(&"cred"),
-            Some(&"voprf-keygen" | &"voprf-eval" | &"mldsa-keygen" | &"mldsa-sign"),
-            _,
-        ) => true,
-        (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss"), _) => true,
-        (Some(&"policy"), Some(&"init"), _) => true,
-        (Some(&"policy"), Some(&"biscuit"), Some(&"keygen" | &"mint")) => true,
-        _ => false,
-    };
+    let enrolls_custody = matches!(
+        (args.first(), args.get(1), args.get(2)),
+        (Some(&"keygen" | &"sign" | &"aggregate"), _, _)
+            | (
+                Some(&"quorum"),
+                Some(&"keygen" | &"sign" | &"refresh" | &"reshare"),
+                _
+            )
+            | (
+                Some(&"cred"),
+                Some(&"voprf-keygen" | &"voprf-eval" | &"mldsa-keygen" | &"mldsa-sign"),
+                _
+            )
+            | (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss"), _)
+            | (Some(&"policy"), Some(&"init"), _)
+            | (Some(&"policy"), Some(&"biscuit"), Some(&"keygen" | &"mint"))
+    );
     let has_anchor = args.iter().any(|a| {
         matches!(
             *a,
@@ -2916,7 +2920,6 @@ fn durable_signing_requires_anchor_or_explicit_ephemeral_flag() {
             &biscuit_sk,
             "--public-out",
             &biscuit_pk,
-            "--allow-unencrypted",
         ],
         &[
             "policy",
@@ -2982,28 +2985,8 @@ fn e2e_policy_macaroon_attenuation_third_party_discharge_and_refusal() {
     let tp_id = &"cc".repeat(32);
     let huge_amount = "100000000000000000000"; // 10^20 > u64::MAX
 
-    expect(
-        &[
-            "policy",
-            "macaroon",
-            "keygen",
-            "--out",
-            &root_key,
-            "--allow-unencrypted",
-        ],
-        0,
-    );
-    expect(
-        &[
-            "policy",
-            "macaroon",
-            "keygen",
-            "--out",
-            &tp_key,
-            "--allow-unencrypted",
-        ],
-        0,
-    );
+    expect(&["policy", "macaroon", "keygen", "--out", &root_key], 0);
+    expect(&["policy", "macaroon", "keygen", "--out", &tp_key], 0);
     expect(
         &[
             "policy",
@@ -3190,7 +3173,12 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
         .create(&anchor)
         .unwrap();
     let anchor_s = anchor.to_str().unwrap();
-    let auth_sk = dir.path("auth.sk");
+    let vault_dir = dir.0.join("biscuit-vault");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&vault_dir)
+        .unwrap();
+    let auth_sk = vault_dir.join("auth.sk").to_str().unwrap().to_string();
     let auth_pk = dir.path("auth.pk");
     let tok0 = dir.path("b0.json");
     let step0 = dir.path("step0.sk");
@@ -3214,7 +3202,6 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
             "--anchor-dir",
             anchor_s,
             "--allow-single-disk-anchor",
-            "--allow-unencrypted",
         ],
         0,
     );
@@ -3263,7 +3250,7 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
         ],
         0,
     );
-    assert!(!Path::new(&step0).exists());
+    assert!(std::fs::read_to_string(&step0).unwrap().contains("\"retired\": true"));
     // Reusing retired step0.sk fails!
     expect(
         &[
@@ -3310,7 +3297,7 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
         ],
         0,
     );
-    assert!(!Path::new(&step1).exists());
+    assert!(std::fs::read_to_string(&step1).unwrap().contains("\"retired\": true"));
     expect(
         &[
             "policy",
@@ -3396,7 +3383,7 @@ fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
             "keygen",
             "--scheme",
             "fts-threshold",
-            "--fast-demo",
+            "--accept-trusted-dealer-demo",
             "--tree-height",
             "2",
             "--secret-out",
@@ -3411,7 +3398,18 @@ fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
         assert!(Path::new(&format!("{sk}.party-{p}.reservoir.lock")).is_file());
     }
     expect(
-        &["sign", "--secret", &sk, "--in", &msg, "--out", &sig0],
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &sig0,
+            "--accept-trusted-dealer-demo",
+        ],
         0,
     );
     expect(
@@ -3419,7 +3417,18 @@ fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
         0,
     );
     expect(
-        &["sign", "--secret", &sk, "--in", &other, "--out", &sig1],
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--epoch",
+            "1",
+            "--in",
+            &other,
+            "--out",
+            &sig1,
+            "--accept-trusted-dealer-demo",
+        ],
         0,
     );
     expect(
@@ -3438,10 +3447,13 @@ fn e2e_fts_threshold_persists_reservoirs_and_signs_without_redkg() {
             "sign",
             "--secret",
             &sk,
+            "--epoch",
+            "2",
             "--in",
             &msg,
             "--out",
             &dir.path("corrupt.sig"),
+            "--accept-trusted-dealer-demo",
         ],
         4,
     );

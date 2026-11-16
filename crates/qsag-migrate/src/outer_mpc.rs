@@ -1,6 +1,8 @@
 //! Replicated mixed-domain evaluation with active 1-of-3 malicious multiplication
 //! verification over authenticated confidential pairwise channels.
-use crate::circuit::{Domain, ONE, Value, ZERO};
+#[cfg(test)]
+use crate::circuit::ONE;
+use crate::circuit::{Domain, Value, ZERO};
 use crate::secret::{Secret, SecretVec, Wipe};
 use crate::threshold_mpc::{
     AuthWord, BooleanTriple, DaBitWord, FieldShare, FieldTriple, ThresholdField,

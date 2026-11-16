@@ -1177,7 +1177,11 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
     let vault_pass = crate::envelope::passphrase(&args)?;
     let explicit_out_pass =
         crate::envelope::passphrase_named(&args, "out-passphrase-env", "out-passphrase-file")?;
-    let out_pass = explicit_out_pass.as_ref().or(vault_pass.as_ref());
+    let out_pass = if args.flag("allow-unencrypted") {
+        None
+    } else {
+        explicit_out_pass.as_ref().or(vault_pass.as_ref())
+    };
     if out_pass.is_none() && !args.flag("allow-unencrypted") {
         return Err(CliError::usage(
             "RSS share export requires --out-passphrase-env/--out-passphrase-file, vault passphrase, or --allow-unencrypted",
@@ -1282,7 +1286,7 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
             ("budget_used", Json::num(used_queries)),
             (
                 "share_files",
-                Json::Array(exported_files.iter().map(|p| Json::str(p)).collect()),
+                Json::Array(exported_files.iter().map(Json::str).collect()),
             ),
         ]);
         print!("{}", report.to_pretty());

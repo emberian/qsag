@@ -379,7 +379,6 @@ private theorem extractHonestQuorumViews_deal (L : Nat) (cIdx : Fin 3)
       honestSessionShifts L cIdx (dealHonestRssVault cIdx seedSh prfSh) req
     extractHonestQuorumViews L cIdx (dealHonestRssVault cIdx seedSh prfSh) =
       some (q.views seedSh, q.views prfSh, rawTag0, rawTag1) := by
-  rw [extractHonestQuorumViews.public_eq_1]
   rcases cIdx with ⟨_ | _ | _ | n, hv⟩
   · rfl
   · rfl
@@ -3445,13 +3444,13 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     simp only [BitVec.getLsbD_xor]
     cases a.getLsbD i <;> cases b.getLsbD i <;> cases m.getLsbD i <;> rfl
   have hLeakW0 : computeHonestChiWord 1 ⟨List.replicate 16 0, List.replicate 16 0, List.replicate 16 1, List.replicate 16 0⟩
-      (List.replicate 8 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv.public_eqs]
+      (List.replicate 8 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv_zero, fixedBytesToBv_succ_nil, fixedBytesToBv_succ_cons]
   have hLeakW1 : computeHonestChiWord 1 ⟨List.replicate 16 0, List.replicate 16 0, List.replicate 16 1, List.replicate 16 0⟩
-      ((0x01 : UInt8) :: List.replicate 7 0x00) = 1#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv.public_eqs]
+      ((0x01 : UInt8) :: List.replicate 7 0x00) = 1#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv_zero, fixedBytesToBv_succ_nil, fixedBytesToBv_succ_cons]
   have hZeroW0 : computeHonestChiWord 1 ⟨List.replicate 16 0, List.replicate 16 0, List.replicate 16 0, List.replicate 16 0⟩
-      (List.replicate 8 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv.public_eqs]
+      (List.replicate 8 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv_zero, fixedBytesToBv_succ_nil, fixedBytesToBv_succ_cons]
   have hZeroW1 : computeHonestChiWord 1 ⟨List.replicate 16 0, List.replicate 16 0, List.replicate 16 0, List.replicate 16 0⟩
-      ((0x01 : UInt8) :: List.replicate 7 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv.public_eqs]
+      ((0x01 : UInt8) :: List.replicate 7 0x00) = 0#64 := by simp [computeHonestChiWord.public_eq_1, rssChiLane0.public_eq_1, fixedBytesToBv_zero, fixedBytesToBv_succ_nil, fixedBytesToBv_succ_cons]
   have hReusedLeakAll : distAcceptCount card reusedLeakView reusedMaskWireDistinguisher = card := by
     unfold distAcceptCount
     have hEach : ∀ ω : Fin card, (if reusedMaskWireDistinguisher (reusedLeakView ω) then 1 else 0) = 1 := by
@@ -3511,7 +3510,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
         qsum (2 ^ 64) (fun z => if z = (1#64 : BitVec 64).toFin then 1 else 0) := by
       apply qsum_congr
       intro z
-      have hOfFin : BitVec.ofFin ((finBitVecXorEquiv 64 cA0).toFun z) = BitVec.ofFin z ^^^ cA0 := by rw [finBitVecXorEquiv.public_eq_1]; rfl
+      have hOfFin : BitVec.ofFin ((finBitVecXorEquiv 64 cA0).toFun z) = BitVec.ofFin z ^^^ cA0 := finBitVecXorEquiv_toFun_ofFin 64 cA0 z
       rw [hOfFin]
       have hCancel : (cA0 ^^^ (BitVec.ofFin z ^^^ cA0)) = BitVec.ofFin z := by
         rw [BitVec.xor_comm (BitVec.ofFin z) cA0, ← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]

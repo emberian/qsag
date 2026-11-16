@@ -350,6 +350,21 @@ fn qsag_sha3_512(input: &[u8]) -> [u8; 64] {
 fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     let oracle = load_external_oracle();
     assert!(oracle.generator.contains("ExternalSpecOracle"));
+    for (name, len) in [
+        ("goldilocks_edges", oracle.goldilocks_edges.len()),
+        ("goldilocks_ext4", oracle.goldilocks_ext4.len()),
+        ("poseidon2_12", oracle.poseidon2_12.len()),
+        ("poseidon2_hash32", oracle.poseidon2_hash32.len()),
+        ("sponges", oracle.sponges.len()),
+        ("gf256_tower_gfni", oracle.gf256_tower_gfni.len()),
+        ("tower128", oracle.tower128.len()),
+        ("secp256k1_smul", oracle.secp256k1_smul.len()),
+        ("pallas_orchard_smul", oracle.pallas_orchard_smul.len()),
+        ("bls12_381_g1_smul", oracle.bls12_381_g1_smul.len()),
+        ("ed25519_clamp_slip0010", oracle.ed25519_clamp_slip0010.len()),
+    ] {
+        assert!(len > 0, "oracle section {name} must not become vacuous");
+    }
 
     // 1. Goldilocks edge & non-canonical u64 reduction: Lean <-> qsag-core <-> Plonky3 `p3-goldilocks`
     for row in &oracle.goldilocks_edges {
@@ -1161,7 +1176,10 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     use qsag_core::pors_fp::{PorsFpParams, octopus_positions, pors_fp_select};
     use qsag_core::sponge::keccak::Cshake256Xof;
     use qsag_core::tsw_baggy::{AdrsKind, HashAdrs};
-    use qsag_external_validation::spec_ref::{ExactNat, cshake256_framed_32_nist_ref};
+    use qsag_external_validation::spec_ref::{
+        ExactNat, cshake256_framed_32_nist_ref, frontier_fts_cardinalities_ref,
+        octopus_cover_ref, pors_selection_nist_ref,
+    };
     use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 
     let oracle = load_external_oracle();
@@ -1206,6 +1224,7 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
         assert!(!pors.octopus_vectors.is_empty());
         for ov in &pors.octopus_vectors {
             let got = octopus_positions(ov.tree_height, &ov.indices).expect("octopus_positions");
+            assert_eq!(Some(got.clone()), octopus_cover_ref(ov.tree_height, &ov.indices));
             let got_arr: Vec<[u32; 2]> = got.into_iter().map(|(h, idx)| [h, idx]).collect();
             assert_eq!(got_arr, ov.positions);
         }
@@ -1215,6 +1234,10 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             let mut xof = Cshake256Xof::new(sv.custom_ascii.as_bytes());
             xof.absorb(&seed);
             let got = pors_fp_select(&p, &mut xof);
+            assert_eq!(got, pors_selection_nist_ref(
+                p.tree_height, p.reveal, p.draw_budget(), p.max_auth_nodes,
+                sv.custom_ascii.as_bytes(), &seed,
+            ));
             assert_eq!(got, sv.selected_indices);
             let got_auth_len = got
                 .as_ref()
@@ -1226,6 +1249,9 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     // 2. FrontierSumFts (`Compact1122` & `Full256Bit`) Lean <-> Rust <-> NIST SP 800-185 parity
     {
         assert_eq!(oracle.frontier_sum_fts.len(), 2);
+        let mut profile_names: Vec<_> = oracle.frontier_sum_fts.iter().map(|r| r.profile.as_str()).collect();
+        profile_names.sort_unstable();
+        assert_eq!(profile_names, ["Compact1122", "Full256Bit"]);
         for row in &oracle.frontier_sum_fts {
             let profile = match row.profile.as_str() {
                 "Compact1122" => FrontierFtsProfile::Compact1122,
@@ -1247,6 +1273,12 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             assert_eq!(hex::encode(pid), row.pid_56_hex);
 
             let dp = FrontierDpTable::build(profile);
+            let (n, d, total) = frontier_fts_cardinalities_ref(
+                p.tree_height, p.winternitz_w, p.frontier_len, p.target_sum,
+            );
+            assert_eq!(n.to_decimal_string(), row.frontier_cardinality_dec);
+            assert_eq!(d.to_decimal_string(), row.decoration_cardinality_dec);
+            assert_eq!(total.to_decimal_string(), row.total_cardinality_dec);
             assert_eq!(
                 ExactNat::from_u64_limbs_le(&dp.frontier_cardinality.0).to_decimal_string(),
                 row.frontier_cardinality_dec
@@ -1267,46 +1299,47 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             let hedge = hex::decode(&row.hedge_hex).unwrap();
             let msg = hex::decode(&row.msg_hex).unwrap();
 
-            let d_rust = cshake256_framed_32(
+            let checked_hash = |custom: &[u8], fields: &[&[u8]]| {
+                let actual = cshake256_framed_32(custom, fields);
+                assert_eq!(actual, cshake256_framed_32_nist_ref(custom, fields));
+                actual
+            };
+
+            let d_rust = checked_hash(
                 b"QSAG.FTS.MSG256.V1",
                 &[&pid, &pk_seed, &pk_root, &msg],
             );
-            let d_nist = cshake256_framed_32_nist_ref(
-                b"QSAG.FTS.MSG256.V1",
-                &[&pid, &pk_seed, &pk_root, &msg],
-            );
-            assert_eq!(d_rust, d_nist);
             assert_eq!(hex::encode(d_rust), row.prehash_msg_hex);
 
-            let r_rust = cshake256_framed_32(
+            let r_rust = checked_hash(
                 b"QSAG.FTS.RAND.V1",
                 &[&pid, &sk_prf, &pk_seed, &pk_root, &hedge, &[0u8], &d_rust],
             );
             assert_eq!(hex::encode(r_rust), row.prf_rand_hex);
 
             let ctr_be = row.grind_counter.to_be_bytes();
-            let hmsg_rust = cshake256_framed_32(
+            let hmsg_rust = checked_hash(
                 b"QSAG.FTS.HMSG.V1",
                 &[&pid, &ctr_be, &pk_seed, &pk_root, &r_rust, &d_rust],
             );
             assert_eq!(hex::encode(hmsg_rust), row.squeeze_rank_hex);
 
             let v256_be = 256u64.to_be_bytes();
-            let leaf0 = cshake256_framed_32(
+            let leaf0 = checked_hash(
                 b"QSAG.FTS.LEAF.V1",
                 &[&pid, &pk_seed, &v256_be, &sk_seed],
             );
             assert_eq!(hex::encode(leaf0), row.leaf0_start_hex);
 
             let step0_be = 0u64.to_be_bytes();
-            let leaf0_s1 = cshake256_framed_32(
+            let leaf0_s1 = checked_hash(
                 b"QSAG.FTS.CHAIN.V1",
                 &[&pid, &pk_seed, &v256_be, &step0_be, &leaf0],
             );
             assert_eq!(hex::encode(leaf0_s1), row.leaf0_step1_hex);
 
             let v1_be = 1u64.to_be_bytes();
-            let merged = cshake256_framed_32(
+            let merged = checked_hash(
                 b"QSAG.FTS.MERGE.V1",
                 &[&pid, &pk_seed, &v1_be, &pk_seed, &pk_root],
             );
@@ -1320,10 +1353,13 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
         assert_eq!(whir.max_pcs_num_vars, MAX_PCS_NUM_VARS);
         assert_eq!(whir.max_batch_polys, MAX_BATCH_POLYS);
         assert_eq!(whir.ood_samples, 2);
+        assert_eq!(whir.retired_wire_tags, [0, 1, 3]);
         for &bad_tag in &whir.retired_wire_tags {
             assert_eq!(WhirSecurityRegime::from_u8(bad_tag), None);
         }
-        assert_eq!(whir.stage_geometries.len(), 10);
+        let mut nvs: Vec<_> = whir.stage_geometries.iter().map(|g| g.nv).collect();
+        nvs.sort_unstable();
+        assert_eq!(nvs, [6, 12, 16, 20, 22, 24, 25, 26, 27, 28]);
         for geom in &whir.stage_geometries {
             let sched = WhirSecurityRegime::BciksJohnsonQrom128.schedule(geom.nv);
             let rust_stages: Vec<[usize; 2]> = sched
@@ -1337,6 +1373,9 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             assert_eq!(sum + sched.early_stop_vars, geom.nv);
         }
         assert_eq!(whir.regimes.len(), 6);
+        let mut tags: Vec<_> = whir.regimes.iter().map(|r| r.wire_tag).collect();
+        tags.sort_unstable();
+        assert_eq!(tags, [2, 4, 5, 6, 7, 8]);
         for reg in &whir.regimes {
             let r = WhirSecurityRegime::from_u8(reg.wire_tag).expect("active Lean WHIR regime");
             assert_eq!(r.pow_bits(), u32::from(reg.pow_bits));

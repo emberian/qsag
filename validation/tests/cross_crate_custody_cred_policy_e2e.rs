@@ -37,7 +37,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use fips204::ml_dsa_44;
 use fips204::traits::{SerDes as Fips204SerDes, Verifier as Fips204Verifier};
@@ -71,7 +70,7 @@ use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 use qsag_hd::HdError;
 use qsag_hd::budget::DurableQueryBudget;
 use qsag_policy::{
-    CapabilityError, CapabilityGate, CapabilityRequest, Caveat, Discharge, MacaroonVerifier,
+    AuthorizedSignReleaseToken, CapabilityError, CapabilityGate, CapabilityRequest, Caveat, Discharge, MacaroonVerifier,
     PQ_BISCUIT_HOP_CRYPTO_BYTES, PolicyAuthenticatedOt, PolicyEngine, PolicyGuardDkgRound1,
     PolicySignerGuardShare, PolicyViolation, PqBiscuit, PqBiscuitAuthorityKey, QuorumTierRule,
     SigningPayloadBinding, SpongeMacaroon, TransactionIntent, TransactionPolicy,
@@ -87,16 +86,19 @@ struct TempDirGuard(PathBuf);
 impl TempDirGuard {
     fn new(prefix: &str) -> Self {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "qsag-e7-{prefix}-{}-{nanos}-{seq}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).expect("create temp dir");
+        // Atomically claim a fresh path, including after PID reuse or an interrupted run.
+        // Neither policy timestamps nor test success depend on the wall clock.
+        let dir = loop {
+            let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let candidate = std::env::temp_dir().join(format!(
+                "qsag-e7-{prefix}-{}-{seq}", std::process::id()
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create temp dir: {e}"),
+            }
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -362,6 +364,44 @@ fn provision_dealerless_policy_guards(
     })
 }
 
+/// Check the policy API independently of whether a downstream signer consumes the
+/// party binding. The consumer must call `matches_signing_party` too.
+fn split_and_check_party_bindings(
+    release: AuthorizedSignReleaseToken,
+    key_id: &[u8; 32],
+    msg: &[u8],
+    ctx: &[u8],
+    quorum: &[u16],
+) -> Vec<AuthorizedSignReleaseToken> {
+    assert_eq!(release.party_id(), None);
+    assert_eq!(release.quorum_ids(), quorum);
+    for &party in quorum {
+        assert!(!release.matches_signing_party(party, key_id, msg, ctx, quorum),
+            "unsplit release must not authorize a single party");
+    }
+    let tokens = release.into_quorum_party_tokens();
+    assert_eq!(tokens.len(), quorum.len());
+    tokens.into_iter().zip(quorum).map(|(token, &owner)| {
+        assert_eq!(token.party_id(), Some(owner));
+        for &presenting_party in quorum {
+            assert_eq!(
+                token.matches_signing_party(presenting_party, key_id, msg, ctx, quorum),
+                presenting_party == owner,
+                "party {presenting_party} must not spend party {owner}'s token"
+            );
+        }
+        assert!(!quorum.contains(&0));
+        assert!(!token.matches_signing_party(0, key_id, msg, ctx, quorum));
+        // A child token cannot be expanded back into the entire quorum's authority.
+        let mut again = token.into_quorum_party_tokens();
+        assert_eq!(again.len(), 1);
+        let child = again.remove(0);
+        assert_eq!(child.party_id(), Some(owner));
+        assert!(child.matches_signing_party(owner, key_id, msg, ctx, quorum));
+        child
+    }).collect()
+}
+
 // ============================================================================
 // Journey A: BlindVC Issuance (`qsag-cred`) -> `239 KiB` `zk-Hem` Presentation (`qsag-agg`)
 // ============================================================================
@@ -587,6 +627,9 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
         regime,
         &decoded
     ));
+    let mut forged_scope = zk_statement.clone();
+    forged_scope.scope[0] += AggGoldilocks::ONE;
+    assert!(!verify_presentation(&forged_scope, verifier_ctx, regime, &decoded));
     let mut forged_witness = zk_witness;
     forged_witness.holder_blind[0] += AggGoldilocks::ONE;
     assert_eq!(
@@ -806,8 +849,9 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     assert_eq!(guards[0].accumulated_window_spend(), 0);
     assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 4_500));
 
-    let party_tokens_b1 = release_b1.into_quorum_party_tokens();
-    assert_eq!(party_tokens_b1.len(), 3);
+    let party_tokens_b1 = split_and_check_party_bindings(
+        release_b1, &canonical_key_id, &signing_bytes_b1, signing_ctx, &quorum,
+    );
 
     // Execute real policy-gated 3-of-4 (`2t - 1 = 3`) threshold ML-DSA signing across `[20, 30, 40]`!
     let party_inputs_b1: Vec<_> = mldsa_shares[1..4]
@@ -964,8 +1008,9 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         .expect("PolicyEngine authorize B2 via Compact1122 PqBiscuit");
     assert!(guards[1..4].iter().all(|g| g.accumulated_window_spend() == 5_300));
 
-    let party_tokens_b2 = release_b2.into_quorum_party_tokens();
-    assert_eq!(party_tokens_b2.len(), 3);
+    let party_tokens_b2 = split_and_check_party_bindings(
+        release_b2, &canonical_key_id, &signing_bytes_b2, signing_ctx, &quorum,
+    );
     let party_inputs_b2: Vec<_> = mldsa_shares[1..4]
         .iter_mut()
         .zip(burn_stores[1..4].iter_mut())
@@ -1059,6 +1104,39 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         bad_res.err(),
         Some(ThresholdMlDsaError::PolicyTokenDigestMismatch)
     );
+}
+
+#[test]
+fn e2e_nonce_burn_reopen_preserves_public_replay_contract() {
+    let tmp = TempDirGuard::new("nonce-reopen");
+    let path = tmp.path().join("nonce-burn");
+    let key = [0x31; 32];
+    let mac_key = [0x42; 32];
+    let session = [0x53; 32];
+    let mut store = FsNonceBurnStore::create(&path, key, mac_key).unwrap();
+    assert_eq!(store.next_epoch(&key, 20), Ok(0));
+    assert!(store.reserve(20, 0, &session, 0));
+    assert_eq!(store.next_epoch(&key, 20), Ok(1));
+    drop(store);
+
+    let mut store = FsNonceBurnStore::open(&path, key, mac_key).unwrap();
+    assert_eq!(store.next_epoch(&key, 20), Ok(1));
+    assert!(!store.reserve(20, 0, &session, 0));
+    // A fresh epoch cannot replay an already burned (party, session, attempt).
+    assert!(!store.reserve(20, 1, &session, 0));
+    assert_eq!(store.next_epoch(&key, 20), Ok(1));
+    assert!(store.reserve(20, 1, &session, 1));
+    // Reservations are scoped to the party, so another custodian may reserve its own tuple.
+    assert_eq!(store.next_epoch(&key, 30), Ok(0));
+    assert!(store.reserve(30, 0, &session, 0));
+    assert_eq!(store.next_epoch(&[0xff; 32], 20), Err(ThresholdMlDsaError::NoncePersistenceFailed));
+    drop(store);
+
+    let mut reopened = FsNonceBurnStore::open(&path, key, mac_key).unwrap();
+    assert_eq!(reopened.next_epoch(&key, 20), Ok(2));
+    assert_eq!(reopened.next_epoch(&key, 30), Ok(1));
+    assert!(!reopened.reserve(20, 2, &session, 1));
+    assert!(!reopened.reserve(30, 1, &session, 0));
 }
 
 // ============================================================================
@@ -1640,8 +1718,9 @@ fn e2e_shamir_17_custodian_committee_policy_gated_mldsa_signing() {
     let release = engine
         .authorize_committed_barrier(&intent, session_id, 500, None, &mut guards[1..4], &accel)
         .expect("PolicyEngine authorize Shamir-17");
-    let party_tokens = release.into_quorum_party_tokens();
-    assert_eq!(party_tokens.len(), 3);
+    let party_tokens = split_and_check_party_bindings(
+        release, &canonical_key_id, &signing_bytes, signing_ctx, &quorum,
+    );
 
     // Extract shares for `[50, 110, 170]` (indices `4, 10, 16`) in ascending order!
     let selected_indices = [4usize, 10, 16];

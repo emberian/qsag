@@ -165,7 +165,7 @@ theorem runHonestRounds_represents (rcs : List UInt64) (nodes : Nodes)
     simpa [runHonestRounds, roundsNetwork, hc, Nat.add_assoc, Nat.add_comm,
       Nat.add_left_comm] using hi
 
-def primaryOutput (node : Node) : Option KState :=
+@[expose] def primaryOutput (node : Node) : Option KState :=
   match node.phase with
   | .ready v => some v.own
   | .finished v => some v.own

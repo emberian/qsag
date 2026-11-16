@@ -23,11 +23,11 @@ structure PolyCommitment where
   c0 : BitVec 128
   c1 : BitVec 128
 
-def PolyCommitment.toTower (c : PolyCommitment) : FinalCommitment :=
+@[expose] def PolyCommitment.toTower (c : PolyCommitment) : FinalCommitment :=
   ⟨polyToTower128 c.x, polyToTower128 c.y, polyToTower128 c.claim,
    polyToTower128 c.rx, polyToTower128 c.ry, polyToTower128 c.c0, polyToTower128 c.c1⟩
 
-def polyAccepts (c : PolyCommitment) (tau : BitVec 128) : Bool :=
+@[expose] def polyAccepts (c : PolyCommitment) (tau : BitVec 128) : Bool :=
   decide (rustGf128Mul (c.rx ^^^ rustGf128Mul tau c.x) (c.ry ^^^ rustGf128Mul tau c.y) =
     c.c0 ^^^ rustGf128Mul tau c.c1 ^^^ rustGf128Mul (rustGf128Mul tau tau) c.claim)
 
@@ -65,7 +65,7 @@ theorem poly_false_final_challenges_le_two (c : PolyCommitment)
 
 /-- A 64-bit Boolean relation word embeds below degree64 in the actual degree128
 polynomial field; no coefficient can disappear in this embedding. -/
-def wordToField (w : UInt64) : Tower128 :=
+@[expose] def wordToField (w : UInt64) : Tower128 :=
   polyToTower128 (w.toBitVec.setWidth 128)
 
 theorem wordToField_eq_zero_iff (w : UInt64) :
@@ -87,7 +87,7 @@ theorem wordToField_xor (a b : UInt64) :
   unfold wordToField
   rw [UInt64.toBitVec_xor, BitVec.setWidth_xor, polyToTower128_xor]
 
-def gateError (g0 g1 g2 : GateRecord) : Tower128 :=
+@[expose] def gateError (g0 g1 g2 : GateRecord) : Tower128 :=
   wordToField ((g0.product ^^^ g1.product ^^^ g2.product) ^^^
     ((g0.lhsOwn ^^^ g1.lhsOwn ^^^ g2.lhsOwn) &&&
       (g0.rhsOwn ^^^ g1.rhsOwn ^^^ g2.rhsOwn)))

@@ -350,18 +350,19 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
                 &sched12,
             ));
 
-            let mut bad_s1 = proof.clone();
-            bad_s1.folded_layers[1].stage_ood_evals[slot] += GoldilocksExt4::ONE;
-            let mut tr = pcs_transcript(&sched12);
-            assert!(!whir_verify_with_schedule(
-                &comm,
-                nv,
-                &point,
-                agg_claimed,
-                &bad_s1,
-                &mut tr,
-                &sched12,
-            ));
+            for stage in 0..proof.folded_layers.len() {
+                let mut bad_stage = proof.clone();
+                bad_stage.folded_layers[stage].stage_ood_evals[slot] += GoldilocksExt4::ONE;
+                let mut raw_bad = Vec::new();
+                bad_stage.push_bytes(&mut raw_bad);
+                let (parsed_bad, used) = HemWhirOpeningProof::from_bytes_canonical(&raw_bad)
+                    .expect("OOD mutation remains canonically encoded");
+                assert_eq!(used, raw_bad.len());
+                let mut tr = pcs_transcript(&sched12);
+                assert!(!whir_verify_with_schedule(
+                    &comm, nv, &point, agg_claimed, &parsed_bad, &mut tr, &sched12,
+                ), "tag={} stage={stage} slot={slot}", row.tag);
+            }
         }
     }
 }
@@ -687,6 +688,9 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
     );
 
     // 3. `zk_hem::full_shard` end-to-end 2-shard recursive merge (`QSAGFSM1`) + tamper rejection!
+    // Use the production QROM-128 regime with PoW for the recursive parent;
+    // its smaller query schedule reduces the native verifier circuit's memory.
+    let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
     let fs_params = FullShardParams::new(regime, 2).expect("FullShardParams(slots=2)");
     assert_eq!(fs_params.slots(), 2);
 
@@ -804,7 +808,9 @@ fn zk_hem_hiding_5table_vs_public_1table_and_full_shard_recursion_tamper_rejecti
     let mut flipped_wire = parent_wire;
     let mid = flipped_wire.len() / 2;
     flipped_wire[mid] ^= 0x01;
-    if let Some(bad_decoded) = FullShardMergeProof::from_bytes(&flipped_wire, &relation, regime) {
+    {
+        let bad_decoded = FullShardMergeProof::from_bytes(&flipped_wire, &relation, regime)
+            .expect("payload mutation must reach full-shard verification");
         assert!(!verify_full_shard_merge(
             &relation,
             &[pub0, pub1],
@@ -966,7 +972,9 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     let mut bad_wire = wire;
     let mid = bad_wire.len() / 2;
     bad_wire[mid] ^= 0x01;
-    if let Some(bad_dec) = ZkCapabilityBatchProof::from_bytes(&bad_wire, &cap_rel, regime) {
+    {
+        let bad_dec = ZkCapabilityBatchProof::from_bytes(&bad_wire, &cap_rel, regime)
+            .expect("payload mutation must reach capability verification");
         assert!(!cap_rel.verify(&stmt, ctx, regime, &bad_dec));
     }
 }

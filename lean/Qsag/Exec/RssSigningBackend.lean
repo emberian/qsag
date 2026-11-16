@@ -19,7 +19,7 @@ structure UnverifiedAnswer where
   evidence : List HashEvidence
   shares : RssByteShares
 
-def chain (prepared : Prepared) (pkSeed : Bytes) (cut : Nat) (query : Query)
+@[expose] def chain (prepared : Prepared) (pkSeed : Bytes) (cut : Nat) (query : Query)
     (layer : UInt32) (tree : UInt64) (kp chainIndex : Nat) :
     Nat → Nat → Nat → RssByteShares → ParticipantTape → UnverifiedAnswer
   | _, _, 0, current, _ => ⟨[], current⟩
@@ -68,13 +68,13 @@ theorem chain_correct (profile : RssProduction.Profile) (request : SessionSchedu
 
 /-- Mirrors the actual PRF-msg frame, with the private PRF share between public
 prefix and suffix. No secret bytes are reconstructed during framing. -/
-def prfFrame (prf : RssByteShares) (rand mu : Bytes) : RssByteShares :=
+@[expose] def prfFrame (prf : RssByteShares) (rand mu : Bytes) : RssByteShares :=
   let pubPrefix := leb128 6 ++ encodeListField tagPrfMsg ++ encodeListField [] ++
     encodeListField (encodeAdrs zeroAdrs) ++ leb128 prf.b0.length
   let pubSuffix := encodeListField rand ++ encodeListField mu
   rssAppendShares (rssPublicBytes pubPrefix) (rssAppendShares prf (rssPublicBytes pubSuffix))
 
-def queryRun (prepared : Prepared) (material : RssProduction.Material) (cut : Nat)
+@[expose] def queryRun (prepared : Prepared) (material : RssProduction.Material) (cut : Nat)
     (query : Query) (tape : ParticipantTape) : UnverifiedAnswer :=
   match query with
   | .prfMsg rand mu =>
@@ -180,7 +180,7 @@ theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionSch
     rw [hr.2, hf2.2, hb.2, hf.2, hm.2.2]
     rfl
 
-def HashesFrom (cut : Nat) (query : Query) : Nat → List HashEvidence → Prop
+@[expose] def HashesFrom (cut : Nat) (query : Query) : Nat → List HashEvidence → Prop
   | _, [] => True
   | subcall, e :: es => e.cut = cut ∧ e.query = query ∧ e.subcall = subcall ∧
       HashesFrom cut query (subcall + 1) es
@@ -201,7 +201,7 @@ theorem chain_numbered (prepared : Prepared) (pkSeed : Bytes) (cut : Nat) (query
             ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat chainIndex, UInt32.ofNat step⟩ current) tape).2
       exact ⟨⟨rfl, rfl, rfl, h.1⟩, congrArg Nat.succ h.2⟩
 
-def queryHashCount : Query → Nat
+@[expose] def queryHashCount : Query → Nat
   | .prfMsg _ _ => 1
   | .wotsChain _ _ _ _ steps => steps + 1
   | .forsReveal _ _ _ _ => 1

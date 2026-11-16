@@ -17,7 +17,7 @@ namespace Qsag.RssParticipant
 set_option autoImplicit false
 
 /-- Absorption sees this participant's two local input shares only. -/
-def absorbNode (node : Node) (own next : List UInt8) : Node :=
+@[expose] def absorbNode (node : Node) (own next : List UInt8) : Node :=
   match node.phase, node.remaining with
   | .ready view, [] =>
       { node with
@@ -25,7 +25,7 @@ def absorbNode (node : Node) (own next : List UInt8) : Node :=
         remaining := keccakRoundConstants }
   | _, _ => abortNode node
 
-def absorbNodes (nodes : Nodes) (block : RssByteShares) : Nodes :=
+@[expose] def absorbNodes (nodes : Nodes) (block : RssByteShares) : Nodes :=
   ⟨absorbNode nodes.n0 block.b0 block.b1,
    absorbNode nodes.n1 block.b1 block.b2,
    absorbNode nodes.n2 block.b2 block.b0⟩
@@ -40,7 +40,7 @@ theorem absorbNodes_represents (nodes : Nodes) (binding : List UInt8)
   simp [absorbNodes, absorbNode, h0, h1, h2, hb0, hb1, hb2, hc0, hc1, hc2,
     hr0, hr1, hr2, hp0, hp1, hp2, Represents, mpcXorRate136Rss.public_eq_1]
 
-def absorbParticipantBlocks : Nat → Nodes → RssByteShares →
+@[expose] def absorbParticipantBlocks : Nat → Nodes → RssByteShares →
     (Nat → Nat → RssPrfZeroSeeds) → Nodes
   | 0, nodes, _, _ => nodes
   | n + 1, nodes, rest, tape =>
@@ -50,7 +50,7 @@ def absorbParticipantBlocks : Nat → Nodes → RssByteShares →
 
 /-- Arithmetic specification of the same node driver; no reconstructed state is
 passed into any node transition. -/
-def absorbArithmetic : Nat → Nat → RssKState → RssByteShares →
+@[expose] def absorbArithmetic : Nat → Nat → RssKState → RssByteShares →
     (Nat → Nat → RssPrfZeroSeeds) → RssKState
   | 0, _, s, _, _ => s
   | n + 1, cursor, s, rest, tape =>
@@ -103,11 +103,11 @@ theorem absorbArithmetic_simulates (n cursor : Nat) (s : RssKState) (rest : RssB
       hTakeRec, hDropRec]
 
 /-- Local byte projection remains secret-shared until a later authorized cut. -/
-def localRateOutput (node : Node) (outLen : Nat) : Option (List UInt8) := do
+@[expose] def localRateOutput (node : Node) (outLen : Nat) : Option (List UInt8) := do
   let state ← primaryOutput node
   pure ((rateBlockBytes state).take outLen)
 
-def rateOutputShares (nodes : Nodes) (outLen : Nat) : Option RssByteShares := do
+@[expose] def rateOutputShares (nodes : Nodes) (outLen : Nat) : Option RssByteShares := do
   let a ← localRateOutput nodes.n0 outLen
   let b ← localRateOutput nodes.n1 outLen
   let c ← localRateOutput nodes.n2 outLen
@@ -129,14 +129,14 @@ theorem reconstruct_rateOutput (s : RssKState) (outLen : Nat) :
   dsimp only
   rw [zipXor_take, zipXor_take, rateBlockBytes_xor, rateBlockBytes_xor]
 
-def framedInput (customization : List UInt8) (input : RssByteShares) : RssByteShares :=
+@[expose] def framedInput (customization : List UInt8) (input : RssByteShares) : RssByteShares :=
   if customization = [] then input
   else rssAppendShares (rssPublicBytes (customizationPrefix customization)) input
 
-def paddedInput (customization : List UInt8) (input : RssByteShares) : RssByteShares :=
+@[expose] def paddedInput (customization : List UInt8) (input : RssByteShares) : RssByteShares :=
   rssPadForRate (framedInput customization input) (if customization = [] then 0x1f else 0x04)
 
-def cshakeNodes (binding customization : List UInt8) (input : RssByteShares)
+@[expose] def cshakeNodes (binding customization : List UInt8) (input : RssByteShares)
     (tape : Nat → Nat → RssPrfZeroSeeds) : Nodes :=
   let padded := paddedInput customization input
   absorbParticipantBlocks (padded.b0.length / shake256RateBytes)
@@ -144,7 +144,7 @@ def cshakeNodes (binding customization : List UInt8) (input : RssByteShares)
 
 /-- Total protocol result includes every pending gate witness; output extraction
 is partial and limited to the first rate block. -/
-def cshakeParticipant (outLen : Nat) (binding customization : List UInt8)
+@[expose] def cshakeParticipant (outLen : Nat) (binding customization : List UInt8)
     (input : RssByteShares) (tape : Nat → Nat → RssPrfZeroSeeds) :
     Nodes × Option RssByteShares :=
   let nodes := cshakeNodes binding customization input tape
@@ -182,9 +182,9 @@ theorem small_squeeze_reconstruction (outLen : Nat) (s : RssKState)
     reconstructRssBytes (mpcSqueezeFuelSharedRss outLen outLen 0 s tape) =
       (rateBlockBytes (reconstructRssKState s)).take outLen := by
   cases outLen with
-  | zero => simp [mpcSqueezeFuelSharedRss.public_eq_2, reconstructRssBytes]
+  | zero => simp [mpcSqueezeFuelSharedRss.public_eqs, reconstructRssBytes]
   | succ n =>
-    simp only [mpcSqueezeFuelSharedRss.public_eq_2, h, ↓reduceIte]
+    simp only [mpcSqueezeFuelSharedRss.public_eqs, h, ↓reduceIte]
     exact reconstruct_rateOutput s (n + 1)
 
 /-- Actual participant execution, with its retained local gate witnesses, has the

@@ -26,12 +26,12 @@ pub fn extract_suite_and_public_bytes(path: &str) -> Result<(WitnessSuiteTag, Ve
             let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
             let bytes = if scheme.eq_ignore_ascii_case("hem-jorts-poseidon2") {
                 if json.get("validator_public_key").is_some() {
-                    json.field_hex("validator_public_key")?.0
+                    json.field_hex("validator_public_key")?.0.clone()
                 } else {
-                    json.field_hex("public_key")?.0
+                    json.field_hex("public_key")?.0.clone()
                 }
             } else {
-                let mut key = json.field_hex("pk_seed")?.0;
+                let mut key = json.field_hex("pk_seed")?.0.clone();
                 key.extend_from_slice(&json.field_hex("pk_root")?);
                 key
             };
@@ -40,14 +40,14 @@ pub fn extract_suite_and_public_bytes(path: &str) -> Result<(WitnessSuiteTag, Ve
         "qsag-quorum-coupon-root-v1" => {
             let scheme = json.field_str("scheme")?;
             let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
-            let mut key = json.field_hex("pk_seed")?.0;
+            let mut key = json.field_hex("pk_seed")?.0.clone();
             key.extend_from_slice(&json.field_hex("pk_root")?);
             Ok((tag, key))
         }
         "qsag-cred-mldsa-public-v1" => {
             let scheme = json.field_str("scheme")?;
             let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
-            Ok((tag, json.field_hex("public_key")?.0))
+            Ok((tag, json.field_hex("public_key")?.0.clone()))
         }
         _ => Err(CliError::input(format!("{path} is not a public key file"))),
     }

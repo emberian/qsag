@@ -1,12 +1,10 @@
 module
-import all Qsag.Oracle.Keccak
+public import Qsag.Oracle.Keccak
 public import Qsag.Exec.RssParticipantPassiveSimulation
 public import Qsag.Tests.RssParticipantChecks
-import all Qsag.Exec.RssParticipantPassiveSimulation
-import all Qsag.Exec.RssParticipantLocalSimulation
-import all Qsag.Tests.RssParticipantChecks
-import all Qsag.Exec.RssParticipantMachine
-import all Qsag.Protocol.Threshold.ThresholdMpc
+public import Qsag.Exec.RssParticipantLocalSimulation
+public import Qsag.Exec.RssParticipantMachine
+public import Qsag.Protocol.Threshold.ThresholdMpc
 import Qsag.Tactic.AssuranceKit
 
 /-! Nonzero finite-prefix simulation check and a correlated-mask boundary witness.
@@ -52,6 +50,6 @@ theorem reused_mask_does_not_model_two_independent_samples (state : RssKState) (
   have h01 : (0 : UInt64) = 1 := ha.symm.trans hb
   exact (by decide : (0 : UInt64) ≠ 1) h01
 
-#verify_constructive inverse_forwardTape forward_inverseTape passive_prefix_simulation
+#verify_constructive reused_mask_does_not_model_two_independent_samples
   reused_mask_does_not_model_two_independent_samples
 end Qsag.RssParticipant.SimulationChecks

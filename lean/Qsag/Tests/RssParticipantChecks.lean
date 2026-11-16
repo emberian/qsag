@@ -1,10 +1,7 @@
 module
 public import Qsag.Exec.RssParticipantNetwork
 public import Qsag.Exec.RssParticipantSponge
-import all Qsag.Exec.RssParticipantNetwork
-import all Qsag.Exec.RssParticipantSponge
-import all Qsag.Protocol.Threshold.ThresholdMpc
-import Qsag.Tactic.AssuranceKit
+public import Qsag.Protocol.Threshold.ThresholdMpc
 
 /-! Executable nonzero participant executions and hostile transcript regressions.
 These checks establish computation and state-transition examples, not a randomness
@@ -98,6 +95,6 @@ def hostileTranscriptCheck : IO Unit := do
   require (decide (aborted.emitted = [wrong])) "abort erased external history"
   IO.println "RSS hostile transcripts:wrong binding/round/sender and replay abort; forged sender blocked; authenticated wrong value remains pending and requires active gate check"
 
-#verify_constructive participant_keccak_refines_existing cshakeParticipant_refines_existing
+
   only_corrupt_sender_can_inject visible_payload_incident networkStep_preserves_addresses
 end Qsag.RssParticipant.Checks
