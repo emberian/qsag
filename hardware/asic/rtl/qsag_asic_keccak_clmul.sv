@@ -1,7 +1,9 @@
-// QSAG-NI symmetric units: Keccak-f[1600] at two rounds per clock (Keccak-p[1600,12] for
-// TurboSHAKE256 in 6 clocks, 24 rounds for SHA-3/SHAKE in 12) and a single-cycle GF(2^128)
-// multiplier (Karatsuba over three 64x64 carry-less trees, reduction by z^128 + z^7 + z^2 + z + 1),
-// with the Wiedemann tower T_7 basis maps around it.
+// QSAG-NI symmetric units:
+//   * Keccak-f[1600] at two rounds per clock (Keccak-p[1600,12] for TurboSHAKE256 in 6 clocks,
+//     24 rounds for SHA-3/SHAKE in 12 clocks), with 1600-bit customization shadow state, dual-lane
+//     SRAM absorb, and direct 69-byte/34-byte Canopy node/root block framing (`blk_canopy_en`).
+//   * Single-cycle GF(2^128) multiplier (recursive carry-less Karatsuba over three 64x64 trees,
+//     8-bit symbolic-LEC leaf, reduction by z^128 + z^7 + z^2 + z + 1) + Wiedemann T_7 basis maps.
 `default_nettype none
 
 module qsag_keccak_round (
@@ -52,15 +54,26 @@ endmodule
 module qsag_keccak_2rpc (
   input  wire          clk,
   input  wire          rst,
-  input  wire          start,      // begin a permutation (idle only)
-  input  wire          rounds12,   // 1: Keccak-p[1600,12] (rounds 12..23); 0: all 24
-  input  wire          lane_we,    // idle only
-  input  wire          lane_xor,   // 1: XOR into the lane (absorb); 0: overwrite
+  input  wire          start,           // begin a permutation (idle only)
+  input  wire          rounds12,        // 1: Keccak-p[1600,12] (rounds 12..23); 0: all 24
+  input  wire          lane_we,         // single-lane write/XOR (idle only)
+  input  wire          lane_xor,        // 1: XOR into lane; 0: overwrite
   input  wire [4:0]    lane_idx,
   input  wire [63:0]   lane_wdata,
-  input  wire          save,       // idle only: shadow <- state (customization midstate)
-  input  wire          restore,    // idle only: state <- shadow
+  input  wire          pair_xor_en,     // dual-lane XOR from dual-port SRAM (idle only)
+  input  wire [4:0]    pair_idx,        // absorbs into pair_idx and (pair_last_single ? none : pair_idx+1)
+  input  wire          pair_single,
+  input  wire [63:0]   pair_w0,
+  input  wire [63:0]   pair_w1,
+  input  wire          pad_end_en,      // XOR 0x8000_0000_0000_0000 into lane 16 (rate=136 end pad)
+  input  wire          canopy_node_go,  // restore shadow + XOR 69B [0x00|idx|left|right|0x07..0x80] + start 12r!
+  input  wire [31:0]   canopy_node_idx,
+  input  wire [255:0]  canopy_left,
+  input  wire [255:0]  canopy_right,
+  input  wire          save,            // idle only: shadow <- state
+  input  wire          restore,         // idle only: state <- shadow
   output wire [63:0]   lane_rdata,
+  output wire [255:0]  digest_o,
   output wire          busy
 );
   function automatic logic [63:0] rcon(input logic [4:0] i);
@@ -74,7 +87,7 @@ module qsag_keccak_2rpc (
       5'd12: rcon = 64'h000000008000808B; 5'd13: rcon = 64'h800000000000008B;
       5'd14: rcon = 64'h8000000000008089; 5'd15: rcon = 64'h8000000000008003;
       5'd16: rcon = 64'h8000000000008002; 5'd17: rcon = 64'h8000000000000080;
-      5'd18: rcon = 64'h000000000000800A; 5'd19: rcon = 64'h800000008000000A;
+      5'd18: rcon = 64'h000000000000800A; 5'd19: rcon = 64'h800000008000800A;
       5'd20: rcon = 64'h8000000080008081; 5'd21: rcon = 64'h8000000000008080;
       5'd22: rcon = 64'h0000000080000001; 5'd23: rcon = 64'h8000000080008008;
       default: rcon = 64'h0;
@@ -82,27 +95,64 @@ module qsag_keccak_2rpc (
   endfunction
 
   logic [1599:0] s, shadow;
-  logic [4:0]    r;        // next round index (even)
+  logic [4:0]    r;
   logic          run;
-  wire  [1599:0] m, n;
-  qsag_keccak_round u_r0 (.a(s), .rc(rcon(r)),        .o(m));
-  qsag_keccak_round u_r1 (.a(m), .rc(rcon(r | 5'd1)), .o(n));
-  assign busy = run;
+
+  // 69-byte Canopy Merkle internal node block: [8'h00, node_idx(32b), left(256b), right(256b), 8'h07, 0.., 8'h80]
+  wire [575:0] cn_raw = {16'h0000, 8'h07, canopy_right, canopy_left, canopy_node_idx, 8'h00};
+  logic [1599:0] cn_init;
+  always_comb begin
+    cn_init = shadow;
+    for (int i = 0; i < 9; i++) cn_init[64*i +: 64] = shadow[64*i +: 64] ^ cn_raw[64*i +: 64];
+    cn_init[64*16 + 63] = shadow[64*16 + 63] ^ 1'b1;
+  end
+
+  wire [1599:0] r_in = canopy_node_go ? cn_init : s;
+  wire [4:0]    r_idx = canopy_node_go ? 5'd12 : r;
+  wire [1599:0] m, n;
+  qsag_keccak_round u_r0 (.a(r_in), .rc(rcon(r_idx)),        .o(m));
+  qsag_keccak_round u_r1 (.a(m),    .rc(rcon(r_idx | 5'd1)), .o(n));
+
+  assign busy       = run;
   assign lane_rdata = s[64*lane_idx +: 64];
+  assign digest_o   = s[255:0];
+
   always_ff @(posedge clk) begin
     if (rst) begin
-      s <= '0; run <= 1'b0; r <= '0;
+      s      <= '0;
+      shadow <= '0;
+      run    <= 1'b0;
+      r      <= '0;
     end else if (run) begin
       s <= n;
       r <= r + 5'd2;
       if (r == 5'd22) run <= 1'b0;
+    end else if (canopy_node_go) begin
+      // Rounds 12 & 13 execute combinationally in this launch cycle; rounds 14..23 take 5 more clocks!
+      s   <= n;
+      r   <= 5'd14;
+      run <= 1'b1;
     end else begin
-      if (lane_we) s[64*lane_idx +: 64] <= lane_xor ? (s[64*lane_idx +: 64] ^ lane_wdata) : lane_wdata;
+      if (restore) begin
+        s <= shadow;
+      end else begin
+        if (lane_we) begin
+          s[64*lane_idx +: 64] <= lane_xor ? (s[64*lane_idx +: 64] ^ lane_wdata) : lane_wdata;
+        end
+        if (pair_xor_en) begin
+          s[64*pair_idx +: 64] <= s[64*pair_idx +: 64] ^ pair_w0;
+          if (!pair_single) begin
+            s[64*(pair_idx + 5'd1) +: 64] <= s[64*(pair_idx + 5'd1) +: 64] ^ pair_w1;
+          end
+        end
+        if (pad_end_en) begin
+          s[64*16 + 63] <= s[64*16 + 63] ^ 1'b1;
+        end
+      end
       if (save) shadow <= s;
-      if (restore) s <= shadow;
       if (start) begin
         run <= 1'b1;
-        r <= rounds12 ? 5'd12 : 5'd0;
+        r   <= rounds12 ? 5'd12 : 5'd0;
       end
     end
   end
@@ -111,7 +161,8 @@ endmodule
 // Recursive carry-less Karatsuba; an 8-bit schoolbook leaf is small enough for
 // exhaustive symbolic LEC. The same module is used at every recursive level.
 module qsag_clmul #(parameter int N = 64) (
-  input wire [N-1:0] a, b,
+  input  wire [N-1:0]   a,
+  input  wire [N-1:0]   b,
   output wire [2*N-2:0] p
 );
   if (N <= 8) begin : g_base
@@ -129,13 +180,14 @@ module qsag_clmul #(parameter int N = 64) (
   end else begin : g_rec
     localparam int H = N/2;
     wire [N-2:0] lo, hi, mid;
-    qsag_clmul #(.N(H)) u_lo (.a(a[H-1:0]), .b(b[H-1:0]), .p(lo));
-    qsag_clmul #(.N(H)) u_hi (.a(a[N-1:H]), .b(b[N-1:H]), .p(hi));
+    qsag_clmul #(.N(H)) u_lo  (.a(a[H-1:0]),          .b(b[H-1:0]),          .p(lo));
+    qsag_clmul #(.N(H)) u_hi  (.a(a[N-1:H]),          .b(b[N-1:H]),          .p(hi));
     qsag_clmul #(.N(H)) u_mid (.a(a[H-1:0]^a[N-1:H]), .b(b[H-1:0]^b[N-1:H]), .p(mid));
-    assign p = {{N{1'b0}},lo} ^ {hi,{N{1'b0}}} ^ ({{N{1'b0}},(mid^lo^hi)} << H);
+    assign p = {{N{1'b0}}, lo} ^ {hi, {N{1'b0}}} ^ ({{N{1'b0}}, (mid ^ lo ^ hi)} << H);
   end
 endmodule
-module qsag_clmul64 (input wire [63:0] a,b, output wire [126:0] p);
+
+module qsag_clmul64 (input wire [63:0] a, b, output wire [126:0] p);
   qsag_clmul #(.N(64)) u (.a(a), .b(b), .p(p));
 endmodule
 
@@ -153,7 +205,6 @@ module qsag_gf128_mul (
   wire [126:0] z1 = zm ^ z0 ^ z2;
   wire [254:0] c  = {128'b0, z0} ^ {z2, 128'b0} ^ {64'b0, z1, 64'b0};
   wire [126:0] h  = c[254:128];
-  // h * (z^7 + z^2 + z + 1): 134 bits; its top 6 bits fold once more.
   wire [133:0] f  = {7'b0, h} ^ {6'b0, h, 1'b0} ^ {5'b0, h, 2'b0} ^ {h, 7'b0};
   wire [5:0]   g  = f[133:128];
   wire [127:0] f2 = {122'b0, g} ^ {121'b0, g, 1'b0} ^ {120'b0, g, 2'b0} ^ {115'b0, g, 7'b0};
@@ -169,7 +220,7 @@ module qsag_tower128_mul (
   wire [127:0] pa, pb, pr;
   qsag_tower128_to_poly u_a (.x(a), .y(pa));
   qsag_tower128_to_poly u_b (.x(b), .y(pb));
-  qsag_gf128_mul u_mul (.a(pa), .b(pb), .r(pr));
+  qsag_gf128_mul        u_mul (.a(pa), .b(pb), .r(pr));
   qsag_poly_to_tower128 u_r (.x(pr), .y(r));
 endmodule
 `default_nettype wire
