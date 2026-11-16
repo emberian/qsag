@@ -349,6 +349,7 @@ impl BlindOtPeer {
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.counter), 0);
     }
 
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn fork_stream(&self, label: &[u8], stream_id: u64) -> Self {
         let derive = |col: usize, seed: &[u8; 32]| -> [u8; 32] {
             cshake256_framed_32(
@@ -418,6 +419,7 @@ impl MacKeyShare {
         self.boolean == 0 && self.field == [ZERO; 5] && self.blind_ot.is_empty()
     }
 
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn fork_stream(&self, label: &[u8], stream_id: u64) -> Self {
         Self {
             boolean: self.boolean,
@@ -428,10 +430,6 @@ impl MacKeyShare {
                 .map(|p| p.fork_stream(label, stream_id))
                 .collect(),
         }
-    }
-
-    pub(crate) fn duplicate(&self) -> Self {
-        self.fork_stream(b"DUP", 0)
     }
 
     fn valid_for(&self, config: &ThresholdConfig) -> bool {
@@ -1111,6 +1109,7 @@ impl<T: Transport> SpdzEngine<T> {
 
     /// Commit-then-open coin round that also cross-checks all `m(m - 1)` directed pairwise
     /// edge digests `(out_digests, in_digests)` across the quorum.
+    #[allow(clippy::type_complexity)]
     fn commit_coin_with_edges(
         &mut self,
         label: &[u8],
@@ -1486,8 +1485,8 @@ impl<T: Transport> SpdzEngine<T> {
             self.commit_coin_with_edges(b"blind_kos_chi", &[(&u_out_digests, &u_in_digests)])?;
         let data_bits = w_data * 64;
         let mut psi = [vec![0u128; data_bits], vec![0u128; data_bits]];
-        for pass in 0..2 {
-            for slot in &mut psi[pass] {
+        for pass_psi in &mut psi {
+            for slot in pass_psi {
                 let mut b16 = [0u8; 16];
                 kos_xof.squeeze(&mut b16);
                 *slot = u128::from_le_bytes(b16);
@@ -1513,7 +1512,7 @@ impl<T: Transport> SpdzEngine<T> {
         let mut kos_to_send: Vec<SecretVec<u64>> = Vec::with_capacity(peer_count);
         for peer_t0 in &t0_cols {
             let mut msg = SecretVec::with_capacity(8);
-            for pass in 0..2 {
+            for (pass, pass_psi) in psi.iter().enumerate() {
                 let sac_base = data_bits + pass * 128;
                 let c_mask = (c_own[w_data + 2 * pass] as u128)
                     | ((c_own[w_data + 2 * pass + 1] as u128) << 64);
@@ -1524,11 +1523,11 @@ impl<T: Transport> SpdzEngine<T> {
                 }
                 let mut x_acc = Secret(c_mask);
                 let mut t_acc = Secret(t_mask);
-                for b in 0..data_bits {
+                for (b, &psi_val) in pass_psi.iter().enumerate() {
                     let choose = 0u128.wrapping_sub(c_bit(&c_own, b) as u128);
-                    *x_acc ^= psi[pass][b] & choose;
+                    *x_acc ^= psi_val & choose;
                     let row = Secret(row128_of(peer_t0, b));
-                    *t_acc ^= gf2_128_mul(*row, psi[pass][b]);
+                    *t_acc ^= gf2_128_mul(*row, psi_val);
                 }
                 msg.push(*x_acc as u64);
                 msg.push((*x_acc >> 64) as u64);
@@ -1545,7 +1544,7 @@ impl<T: Transport> SpdzEngine<T> {
         for (i, resp) in kos_received.iter().enumerate() {
             let delta = sender_deltas[i];
             let peer_q = &k_cols[i];
-            for pass in 0..2 {
+            for (pass, pass_psi) in psi.iter().enumerate() {
                 let x_in = (resp[4 * pass] as u128) | ((resp[4 * pass + 1] as u128) << 64);
                 let t_in = (resp[4 * pass + 2] as u128) | ((resp[4 * pass + 3] as u128) << 64);
                 let sac_base = data_bits + pass * 128;
@@ -1554,9 +1553,9 @@ impl<T: Transport> SpdzEngine<T> {
                     let row = Secret(row128_of(peer_q, sac_base + l));
                     *q_acc ^= gf2_128_mul(*row, 1u128 << l);
                 }
-                for b in 0..data_bits {
+                for (b, &psi_val) in pass_psi.iter().enumerate() {
                     let row = Secret(row128_of(peer_q, b));
-                    *q_acc ^= gf2_128_mul(*row, psi[pass][b]);
+                    *q_acc ^= gf2_128_mul(*row, psi_val);
                 }
                 let rhs = Secret(t_in ^ gf2_128_mul(x_in, delta));
                 kos_ok &= ct_eq_bytes_mask(&q_acc.to_le_bytes(), &rhs.to_le_bytes());
@@ -3276,9 +3275,11 @@ pub(crate) mod tests {
         }
         impl Transport for SpyTransport {
             fn exchange_many(&mut self, outgoing: Vec<Envelope>) -> Result<Vec<Envelope>, Error> {
-                let incoming = self.inner.exchange_many(outgoing.clone())?;
-                if outgoing.len() >= 2 && outgoing[0].payload == outgoing[1].payload {
-                    self.recorded.lock().unwrap().push(outgoing[0].payload.clone());
+                let bcast = (outgoing.len() >= 2 && outgoing[0].payload == outgoing[1].payload)
+                    .then(|| outgoing[0].payload.clone());
+                let incoming = self.inner.exchange_many(outgoing)?;
+                if let Some(payload) = bcast {
+                    self.recorded.lock().unwrap().push(payload);
                 }
                 Ok(incoming)
             }

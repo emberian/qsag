@@ -481,10 +481,24 @@ corruption of all quorum members but one:
 Every broadcast is sent pairwise, authenticated by a channel MAC, and folded
 into a transcript chain. Values opened inside the protocol (Beaver
 differences, conversion masks) are *partially* opened: their MAC shares are
-queued. `SpdzEngine::check` settles the queue: the quorum compares
-transcript chains, flips a coin by commit-then-open, each party commits to
-`sigma_i = sum_j chi_j (m_ij - key_i * v_j)` for the coin-derived `chi`, and
-the `sigma_i` are opened and must sum to zero. The check runs before any
+queued. `SpdzEngine::check` settles the queue without ever opening raw MAC
+residuals `sigma_i`: after comparing transcript chains and drawing `chi` by
+commit-then-open, the quorum executes an active 2-pass KOS15 correlated-OT +
+sender-residual OLE + Leftover-Hash-Lemma blinding subprotocol (`b"blind_sigma"`),
+committing to and opening only multiplicatively blinded shares whose sum is
+`W = (sum_i R_i) * (sum_j d_j)` over `GF(2^128)`, Goldilocks quadratic
+extension `GF(p)[u]/(u^2 - 7)` (`u^2 = 7` non-square mod `p`), and the four
+prime curve base fields (`secp256k1`, `Ed25519`, `Pallas`, `BLS12-381`). An
+induced abort reveals only uniform `R * D`, leaking zero bits of any global MAC
+key, and `QuorumKeyEscrow` synchronously poisons and volatile-zeroizes all
+concurrent batch workers' `MacKeyShare`s in RAM upon any worker abort. Shamir
+byte-sharing uses the workspace Wiedemann tower `GF(256)` (`TowerGf256`), with
+constant-time `GFNI_MAT_T3_TO_POLY` / `GFNI_MAT_POLY_TO_T3` basis conversion
+helpers at the `0x11b` boundary. All four legacy ecosystems (`secp256k1`,
+`Ed25519`, Zcash Orchard `Pallas` `ak`/`rk`, and Ethereum Beacon `BLS12-381`
+`BeaconValidatorPubkey` / `UnrevealedBls0x00Credential`) execute 3-custodian
+and general-quorum active `co_zk_mpc` proving without reconstructing the
+spending scalar (or `pk_48` in unrevealed `0x00` mode). The check runs before any
 output opening is sent, again before an opened output is returned to the
 caller, inside every `agree`, and on the root engine before the batch engines
 start. A custodian that flips a wire share, lies in a Beaver opening, uses a

@@ -813,12 +813,12 @@ pub fn project_quorum_keys(
 struct MiniMacTables {
     /// Parity rows for `C`: `gen_c_parity[i]` (`i in 0..56`) holds `L_i(\alpha_{56..128})` (`72` bytes).
     gen_c_parity: [[u8; MINIMAC_PARITY_C]; MINIMAC_DATA_K],
-    /// Fast 8-bit LUT for encoding `bits56` (`7` bytes -> `72` parity bytes).
-    pub_byte_lut: [[[u8; MINIMAC_PARITY_C]; 256]; 7],
+    /// Flattened 8-bit LUT for encoding `bits56` (`7 * 256` entries of `[u8; 72]`).
+    pub_byte_lut: Vec<[u8; MINIMAC_PARITY_C]>,
     /// Parity rows for `C^{*2}`: `gen_c2_parity[k]` (`k in 0..111`) holds `L^{(111)}_k(\alpha_{111..128})` (`17` bytes).
     gen_c2_parity: [[u8; MINIMAC_PARITY_C2]; MINIMAC_C2_K],
-    /// Fast 8-bit LUT for `encode_c2_zero_mask` (`55` coordinates x `256` byte values -> `17` parity bytes).
-    c2_zero_lut: Box<[[[u8; MINIMAC_PARITY_C2]; 256]; MINIMAC_ZERO_MASK_K]>,
+    /// Flattened 8-bit LUT for `encode_batch_c2_zero_mask` (`55 * 256` entries of `[u8; 17]`).
+    c2_zero_lut: Vec<[u8; MINIMAC_PARITY_C2]>,
 }
 
 impl MiniMacTables {
@@ -850,9 +850,10 @@ impl MiniMacTables {
             }
         }
 
-        let mut pub_byte_lut = [[[0u8; MINIMAC_PARITY_C]; 256]; 7];
-        for (byte_idx, lut_group) in pub_byte_lut.iter_mut().enumerate() {
-            for (val, entry) in lut_group.iter_mut().enumerate() {
+        let mut pub_byte_lut = vec![[0u8; MINIMAC_PARITY_C]; 7 * 256];
+        for byte_idx in 0..7 {
+            for val in 0..256usize {
+                let entry = &mut pub_byte_lut[byte_idx * 256 + val];
                 for bit in 0..8 {
                     if ((val >> bit) & 1) == 1 {
                         let row = &gen_c_parity[8 * byte_idx + bit];
@@ -891,13 +892,14 @@ impl MiniMacTables {
             }
         }
 
-        let mut c2_zero_lut = Box::new([[[0u8; MINIMAC_PARITY_C2]; 256]; MINIMAC_ZERO_MASK_K]);
+        let mut c2_zero_lut = vec![[0u8; MINIMAC_PARITY_C2]; MINIMAC_ZERO_MASK_K * 256];
         for idx in 0..MINIMAC_ZERO_MASK_K {
             let row = &gen_c2_parity[MINIMAC_DATA_K + idx];
             for val in 0..256usize {
                 let u = TowerGf256(val as u8);
-                for r_off in 0..MINIMAC_PARITY_C2 {
-                    c2_zero_lut[idx][val][r_off] = u.mul(TowerGf256(row[r_off])).0;
+                let out_entry = &mut c2_zero_lut[idx * 256 + val];
+                for (dst, &r_byte) in out_entry.iter_mut().zip(row.iter()) {
+                    *dst = u.mul(TowerGf256(r_byte)).0;
                 }
             }
         }
@@ -935,7 +937,7 @@ impl MiniMacTables {
         }
         let le = public_bits56.to_le_bytes();
         for (byte_idx, &b_val) in le.iter().enumerate().take(7) {
-            let lut = &self.pub_byte_lut[byte_idx][b_val as usize];
+            let lut = &self.pub_byte_lut[byte_idx * 256 + b_val as usize];
             for p in 0..MINIMAC_PARITY_C {
                 out[MINIMAC_DATA_K + p] ^= lut[p];
             }
@@ -958,7 +960,7 @@ impl MiniMacTables {
         let le = bits56.to_le_bytes();
         let mut exp_parity = [0u8; MINIMAC_PARITY_C];
         for (byte_idx, &b_val) in le.iter().enumerate().take(7) {
-            let lut = &self.pub_byte_lut[byte_idx][b_val as usize];
+            let lut = &self.pub_byte_lut[byte_idx * 256 + b_val as usize];
             for p in 0..MINIMAC_PARITY_C {
                 exp_parity[p] ^= lut[p];
             }
@@ -980,7 +982,7 @@ impl MiniMacTables {
         out[MINIMAC_DATA_K..MINIMAC_C2_K].copy_from_slice(rand55);
         let mut p17 = [0u8; MINIMAC_PARITY_C2];
         for (idx, &uk) in rand55.iter().enumerate() {
-            let lut = &self.c2_zero_lut[idx][uk as usize];
+            let lut = &self.c2_zero_lut[idx * 256 + uk as usize];
             for r_off in 0..MINIMAC_PARITY_C2 {
                 p17[r_off] ^= lut[r_off];
             }
@@ -1550,8 +1552,13 @@ pub struct CnfRssProjectedEngine<'a> {
 }
 
 /// Linear `Theta + Rho + Pi` over a contiguous `1600 * 128`-byte `MiniMAC` state.
-fn keccak_linear_minimac(src: &[u8], dst: &mut [u8]) {
-    let mut col = [0u8; 5 * 64 * MINIMAC_CODE_N];
+fn keccak_linear_minimac(
+    src: &[u8],
+    dst: &mut [u8],
+    col: &mut [u8],
+    d_theta: &mut [u8],
+) {
+    col.fill(0);
     for x in 0..5 {
         for z in 0..64 {
             let c_off = (x * 64 + z) * MINIMAC_CODE_N;
@@ -1565,7 +1572,6 @@ fn keccak_linear_minimac(src: &[u8], dst: &mut [u8]) {
             }
         }
     }
-    let mut d_theta = [0u8; 5 * 64 * MINIMAC_CODE_N];
     for x in 0..5 {
         for z in 0..64 {
             let prev = (((x + 4) % 5) * 64 + z) * MINIMAC_CODE_N;
@@ -1591,8 +1597,6 @@ fn keccak_linear_minimac(src: &[u8], dst: &mut [u8]) {
             }
         }
     }
-    wipe_bytes(&mut col);
-    wipe_bytes(&mut d_theta);
 }
 
 #[inline]
@@ -1754,12 +1758,24 @@ fn eval_minimac_wave_perm(
     tr_xof.absorb(&(wave_idx as u64).to_le_bytes());
 
     let mut residual_shares = SecretBuffer(vec![[0u128; 2]; t]);
+    let mut col_scratch = SecretBuffer(vec![0u8; 5 * 64 * MINIMAC_CODE_N]);
+    let mut d_theta_scratch = SecretBuffer(vec![0u8; 5 * 64 * MINIMAC_CODE_N]);
 
     for (rnd, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
         let r_off = rnd * STATE_CODE_BYTES;
         for u in 0..t {
-            keccak_linear_minimac(&state_sh[u], &mut lin_sh[u]);
-            keccak_linear_minimac(&state_mac[u], &mut lin_mac[u]);
+            keccak_linear_minimac(
+                &state_sh[u],
+                &mut lin_sh[u],
+                &mut col_scratch,
+                &mut d_theta_scratch,
+            );
+            keccak_linear_minimac(
+                &state_mac[u],
+                &mut lin_mac[u],
+                &mut col_scratch,
+                &mut d_theta_scratch,
+            );
         }
 
         for lane in 0..25 {
@@ -3525,7 +3541,7 @@ mod tests {
         // Sign with `{1, 2, 3}` (custodians `0` and `4` completely offline!) using pre-staged bank!
         let msg = b"3-of-5 stateless Baggy via Theorem 4.1 t-of-t MiniMAC projection";
         let mut bank = StagedCnfRssBank::stage_for_quorum(
-            [0xA3; 32], &cfg35, &shares, &[1, 2, 3], 118, 8,
+            [0xA3; 32], &cfg35, &shares, &[1, 2, 3], 240, 48,
         )
         .unwrap();
         let sig = {
@@ -3628,7 +3644,7 @@ mod tests {
 
     #[test]
     fn e2e_3of5_slh_dsa_shake_128f_stock_verify_and_tamper_abort() {
-        let params = Fips205Params::SLH_DSA_SHAKE_128F;
+        let params = Fips205Params::SLH_DSA_SHAKE_COMPACT_TEST;
         let cfg35 = CnfRssConfig::new(3, 5).unwrap();
         let mut dkg_rngs = make_rngs(5, 0x80);
         let (mut shares, pk_seed32) =
@@ -3750,7 +3766,7 @@ mod tests {
             s.bind_scheme_identity(&bind_sm.identity()).unwrap();
         }
         staged_small = StagedCnfRssBank::stage_for_quorum(
-            [0xCD; 32], &cfg35, &small_shares, &[1, 3, 4], 118, 8,
+            [0xCD; 32], &cfg35, &small_shares, &[1, 3, 4], 240, 48,
         )
         .unwrap();
         let t_staged_online = std::time::Instant::now();

@@ -1,7 +1,7 @@
 //! Ownership of the canonical spending scalar, including Taproot output scalars.
 use crate::{
     boolean_hash,
-    circuit::{Builder, Circuit, Domain, ONE, Value, Wire, ZERO, lift4, trunc4},
+    circuit::{Builder, Circuit, Domain, ONE, Value, Wire, ZERO, lift4},
     legacy::LegacyCommitmentKind,
     scalar::{self, ScalarGroup},
     zk_engine::MigrationStatement,
@@ -377,7 +377,7 @@ mod tests {
                         })
                         .collect()
                 };
-                let mut scalar = scalar::encode(trunc4(n));
+                let mut scalar = scalar::encode(crate::circuit::trunc4(n));
                 if ed {
                     let mut enc = encode(&y);
                     enc[31] |= (c.value(x[0])[0] as u8) << 7;
