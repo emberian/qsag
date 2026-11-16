@@ -17,17 +17,17 @@ set_option maxRecDepth 8192
 
 abbrev WeightCoeffs := BTree Tower128
 
-def zeroCoeffs : (n : Nat) → WeightCoeffs n
+@[expose] def zeroCoeffs : (n : Nat) → WeightCoeffs n
   | 0 => .leaf (towerZero 7)
   | n + 1 => .branch (zeroCoeffs n) (zeroCoeffs n)
 
-def weightEval : {n : Nat} → ChallengeTuple n → WeightCoeffs n → Tower128
+@[expose] def weightEval : {n : Nat} → ChallengeTuple n → WeightCoeffs n → Tower128
   | 0, .nil, .leaf c => c
   | _ + 1, .cons mu rest, .branch lo hi =>
       towerAdd 7 (weightEval rest lo) (towerMul 7 mu (weightEval rest hi))
 
 /-- Number-of-roots bound in the full product coin space. -/
-def weightBadBound (cardS : Nat) : Nat → Nat
+@[expose] def weightBadBound (cardS : Nat) : Nat → Nat
   | 0 => 0
   | n + 1 => weightBadBound cardS n * cardS + cardS ^ n
 
@@ -109,11 +109,11 @@ theorem weightEval_nonzero_roots_le (S : List Tower128) (hS : S.Nodup) :
 shape does not itself assert consistency with delivered network envelopes. -/
 abbrev GateTable (n : Nat) := BTree (GateRecord × GateRecord × GateRecord) n
 
-def gateCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
+@[expose] def gateCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
   | 0, .leaf (a, b, c) => .leaf (gateError a b c)
   | _ + 1, .branch lo hi => .branch (gateCoeffs lo) (gateCoeffs hi)
 
-def gateTableValid : {n : Nat} → GateTable n → Prop
+@[expose] def gateTableValid : {n : Nat} → GateTable n → Prop
   | 0, .leaf (a, b, c) => relation a b c
   | _ + 1, .branch lo hi => gateTableValid lo ∧ gateTableValid hi
 
@@ -132,11 +132,11 @@ theorem gateCoeffs_zero_iff : ∀ (n : Nat) (t : GateTable n),
     cases t with | branch lo hi =>
     simp only [gateCoeffs, zeroCoeffs, gateTableValid, BTree.branch.injEq, ih]
 
-def claimedCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
+@[expose] def claimedCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
   | 0, .leaf (a, b, c) => .leaf (wordToField (a.product ^^^ b.product ^^^ c.product))
   | _ + 1, .branch lo hi => .branch (claimedCoeffs lo) (claimedCoeffs hi)
 
-def trueCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
+@[expose] def trueCoeffs : {n : Nat} → GateTable n → WeightCoeffs n
   | 0, .leaf (a, b, c) => .leaf (wordToField
       ((a.lhsOwn ^^^ b.lhsOwn ^^^ c.lhsOwn) &&& (a.rhsOwn ^^^ b.rhsOwn ^^^ c.rhsOwn)))
   | _ + 1, .branch lo hi => .branch (trueCoeffs lo) (trueCoeffs hi)

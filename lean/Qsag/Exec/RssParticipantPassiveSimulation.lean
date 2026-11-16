@@ -22,11 +22,11 @@ structure PassiveRound where
   known0 : KState
   known1 : KState
 
-def nextShared (state : RssKState) (round : PassiveRound) (hidden : KState) : RssKState :=
+@[expose] def nextShared (state : RssKState) (round : PassiveRound) (hidden : KState) : RssKState :=
   roundNetwork state round.constant (roundMasks round.known0 round.known1 hidden)
 
 /-- Map real unknown mask coordinates to the observed incoming-share coordinates. -/
-def forwardTape : RssKState → List PassiveRound → List KState → List KState
+@[expose] def forwardTape : RssKState → List PassiveRound → List KState → List KState
   | _, [], tape => tape
   | _, _ :: _, [] => []
   | state, round :: rounds, hidden :: tape =>
@@ -34,7 +34,7 @@ def forwardTape : RssKState → List PassiveRound → List KState → List KStat
       next.s1 :: forwardTape next rounds tape
 
 /-- Recover the unique hidden mask that produces each simulator sample. -/
-def inverseTape : RssKState → List PassiveRound → List KState → List KState
+@[expose] def inverseTape : RssKState → List PassiveRound → List KState → List KState
   | _, [], samples => samples
   | _, _ :: _, [] => []
   | state, round :: rounds, sample :: samples =>
@@ -69,21 +69,21 @@ theorem forward_inverseTape (state : RssKState) (rounds : List PassiveRound) (sa
             exact (maskTranslation _).right_inv sample
           simp only [inverseTape, forwardTape, h, ih]
 
-def passiveTapeEquiv (state : RssKState) (rounds : List PassiveRound) :
+@[expose] def passiveTapeEquiv (state : RssKState) (rounds : List PassiveRound) :
     SimpleEquiv (List KState) (List KState) where
   toFun := forwardTape state rounds
   invFun := inverseTape state rounds
   left_inv := inverse_forwardTape state rounds
   right_inv := forward_inverseTape state rounds
 
-def runPassiveReal : Nodes → List PassiveRound → List KState → Nodes
+@[expose] def runPassiveReal : Nodes → List PassiveRound → List KState → Nodes
   | nodes, [], _ => nodes
   | nodes, _ :: _, [] => nodes
   | nodes, round :: rounds, hidden :: tape =>
       runPassiveReal (honestRound nodes (roundMasks round.known0 round.known1 hidden)) rounds tape
 
 /-- No global share state or secret key appears in this simulator. -/
-def runPassiveSimulator : Node → List PassiveRound → List KState → Node
+@[expose] def runPassiveSimulator : Node → List PassiveRound → List KState → Node
   | node, [], _ => node
   | node, _ :: _, [] => node
   | node, round :: rounds, sample :: samples =>

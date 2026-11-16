@@ -16,7 +16,7 @@ public section
 namespace Qsag.RssParticipant
 set_option autoImplicit false
 
-def laneWord (s : KState) : Nat → UInt64
+@[expose] def laneWord (s : KState) : Nat → UInt64
   | 0 => s.a0
   | 1 => s.a1
   | 2 => s.a2
@@ -52,7 +52,7 @@ theorem chiLane_hidden_xor (a b bn c cn known hidden : UInt64) :
   simp only [chiLane, productGate, UInt64.xor_zero]
   ac_rfl
 
-def chiOffset (view : LocalView) (known : KState) : KState :=
+@[expose] def chiOffset (view : LocalView) (known : KState) : KState :=
   chiLocal view (fun lane => (laneWord known lane, 0))
 
 theorem chiLocal_hidden_xor (view : LocalView) (known hidden : KState) :
