@@ -1136,3 +1136,781 @@ private theorem fp5ModPoly_no_deg2_factor (h q : UPoly Goldilocks)
 
 /-- **Irreducibility of `T^5 - 3` over `Goldilocks` (`fp5ModPoly_irreducible`)**:
     No factorization `fp5ModPoly = g * s` exists with `1 ≤ g.natDeg` and `1 ≤ s.natDeg`. -/
+theorem fp5ModPoly_irreducible (g s : UPoly Goldilocks)
+    (hMul : fp5ModPoly = CommRingOps.mul g s)
+    (hgPos : 1 ≤ g.natDeg) (hsPos : 1 ≤ s.natDeg) : False := by
+  have hgNe : g ≠ CommRingOps.zero := fun e => by
+    rw [e] at hgPos; unfold UPoly.natDeg at hgPos; rw [UPoly.coeffs_zero] at hgPos; cases hgPos
+  have hsNe : s ≠ CommRingOps.zero := fun e => by
+    rw [e] at hsPos; unfold UPoly.natDeg at hsPos; rw [UPoly.coeffs_zero] at hsPos; cases hsPos
+  have hSum : g.natDeg + s.natDeg = 5 := by
+    have hd := UPoly.natDeg_mul hgNe hsNe
+    rw [← hMul, fp5ModPoly_natDeg] at hd
+    exact hd.symm
+  if hg1 : g.natDeg = 1 then
+    exact fp5ModPoly_no_deg1_factor g s hMul hg1
+  else if hg2 : g.natDeg = 2 then
+    exact fp5ModPoly_no_deg2_factor g s hMul hg2
+  else if hs1 : s.natDeg = 1 then
+    exact fp5ModPoly_no_deg1_factor s g (hMul.trans (LawfulCommRing.mul_comm g s)) hs1
+  else
+    have hs2 : s.natDeg = 2 := by omega
+    exact fp5ModPoly_no_deg2_factor s g (hMul.trans (LawfulCommRing.mul_comm g s)) hs2
+
+/-- Canonical remainder `p mod (T^5 - 3)` of formal length `< 6` (`degree ≤ 4`). -/
+def fp5Rem (p : UPoly Goldilocks) : UPoly Goldilocks :=
+  (UPoly.divMod p fp5ModPoly).2
+
+theorem fp5Rem_length_lt (p : UPoly Goldilocks) : (fp5Rem p).coeffs.length < 6 := by
+  have h := (UPoly.divMod_spec p fp5ModPoly fp5ModPoly_ne_zero).2
+  rw [fp5ModPoly_length] at h
+  exact h
+
+private theorem ring_add_sub_cancel_right {R : Type} [LawfulCommRing R] (x y : R) :
+    CommRingOps.sub (CommRingOps.add x y) y = x := by
+  rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+      LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+
+private theorem ring_add_sub_cancel_left' {R : Type} [LawfulCommRing R] (x y : R) :
+    CommRingOps.sub (CommRingOps.add x y) x = y := by
+  rw [LawfulCommRing.add_comm x y, ring_add_sub_cancel_right]
+
+private theorem ring_neg_add {R : Type} [LawfulCommRing R] (x y : R) :
+    CommRingOps.neg (CommRingOps.add x y) = CommRingOps.add (CommRingOps.neg x) (CommRingOps.neg y) := by
+  apply LawfulCommRing.add_left_cancel (a := CommRingOps.add x y)
+  rw [LawfulCommRing.add_right_neg,
+      LawfulCommRing.add_add_add_comm x y (CommRingOps.neg x) (CommRingOps.neg y),
+      LawfulCommRing.add_right_neg, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+
+private theorem ring_congr_rem_identity {R : Type} [LawfulCommRing R]
+    (qa qb q ra rb m : R) :
+    CommRingOps.sub
+      (CommRingOps.add (CommRingOps.add (CommRingOps.mul qb m) rb) (CommRingOps.mul q m))
+      (CommRingOps.mul qa m) = ra →
+    CommRingOps.sub ra rb =
+      CommRingOps.mul (CommRingOps.sub (CommRingOps.add qb q) qa) m := by
+  intro hEq
+  rw [← hEq]
+  have hRearr :
+      CommRingOps.sub
+        (CommRingOps.sub
+          (CommRingOps.add (CommRingOps.add (CommRingOps.mul qb m) rb) (CommRingOps.mul q m))
+          (CommRingOps.mul qa m))
+        rb =
+      CommRingOps.sub (CommRingOps.add (CommRingOps.mul qb m) (CommRingOps.mul q m))
+        (CommRingOps.mul qa m) := by
+    rw [LawfulCommRing.add_assoc (CommRingOps.mul qb m) rb (CommRingOps.mul q m),
+        LawfulCommRing.add_comm rb (CommRingOps.mul q m),
+        ← LawfulCommRing.add_assoc (CommRingOps.mul qb m) (CommRingOps.mul q m) rb,
+        LawfulCommRing.sub_eq_add_neg, LawfulCommRing.sub_eq_add_neg,
+        LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (CommRingOps.neg (CommRingOps.mul qa m)) (CommRingOps.neg rb),
+        ← LawfulCommRing.add_assoc,
+        ← LawfulCommRing.sub_eq_add_neg _ rb,
+        ring_add_sub_cancel_right,
+        ← LawfulCommRing.sub_eq_add_neg]
+  rw [hRearr, ← LawfulCommRing.right_distrib qb q m, ← LawfulCommRing.sub_mul]
+
+theorem fp5Rem_eq_self {p : UPoly Goldilocks} (hp : p.coeffs.length < 6) :
+    fp5Rem p = p := by
+  obtain ⟨hdiv, _⟩ := UPoly.divMod_spec p fp5ModPoly fp5ModPoly_ne_zero
+  change p = CommRingOps.add (CommRingOps.mul (UPoly.divMod p fp5ModPoly).1 fp5ModPoly) (fp5Rem p) at hdiv
+  if hq0 : (UPoly.divMod p fp5ModPoly).1 = CommRingOps.zero then
+    rw [hq0, LawfulCommRing.zero_mul, LawfulCommRing.zero_add] at hdiv
+    exact hdiv.symm
+  else
+    exfalso
+    have hDiff : CommRingOps.sub p (fp5Rem p) =
+        CommRingOps.mul (UPoly.divMod p fp5ModPoly).1 fp5ModPoly := by
+      conv => lhs; arg 1; rw [hdiv]
+      exact ring_add_sub_cancel_right _ _
+    have hDegGe5 : 5 ≤ (CommRingOps.mul (UPoly.divMod p fp5ModPoly).1 fp5ModPoly).natDeg := by
+      rw [UPoly.natDeg_mul hq0 fp5ModPoly_ne_zero, fp5ModPoly_natDeg]
+      omega
+    rw [← hDiff] at hDegGe5
+    have hSubDegLe4 : (CommRingOps.sub p (fp5Rem p)).natDeg ≤ 4 := by
+      apply UPoly.natDeg_le_of_coeffAt _ 4
+      intro k hk
+      rw [UPoly.coeffAt_sub,
+          p.coeffAt_eq_zero_of_natDeg_lt (by unfold UPoly.natDeg; omega),
+          (fp5Rem p).coeffAt_eq_zero_of_natDeg_lt
+            (by have := fp5Rem_length_lt p; unfold UPoly.natDeg; omega),
+          LawfulCommRing.sub_self]
+    omega
+
+theorem fp5Rem_congr_of_sub_dvd {a b q : UPoly Goldilocks}
+    (h : CommRingOps.sub a b = CommRingOps.mul q fp5ModPoly) :
+    fp5Rem a = fp5Rem b := by
+  obtain ⟨ha, _⟩ := UPoly.divMod_spec a fp5ModPoly fp5ModPoly_ne_zero
+  obtain ⟨hb, _⟩ := UPoly.divMod_spec b fp5ModPoly fp5ModPoly_ne_zero
+  change a = CommRingOps.add (CommRingOps.mul (UPoly.divMod a fp5ModPoly).1 fp5ModPoly) (fp5Rem a) at ha
+  change b = CommRingOps.add (CommRingOps.mul (UPoly.divMod b fp5ModPoly).1 fp5ModPoly) (fp5Rem b) at hb
+  let qDiff := CommRingOps.sub (CommRingOps.add (UPoly.divMod b fp5ModPoly).1 q)
+    (UPoly.divMod a fp5ModPoly).1
+  have hab : a = CommRingOps.add b (CommRingOps.mul q fp5ModPoly) := by
+    have h1 := congrArg (fun z => CommRingOps.add b z) h
+    rw [LawfulCommRing.add_sub_cancel_left] at h1
+    exact h1
+  have haEqRa : CommRingOps.sub
+      (CommRingOps.add (CommRingOps.add (CommRingOps.mul (UPoly.divMod b fp5ModPoly).1 fp5ModPoly) (fp5Rem b))
+        (CommRingOps.mul q fp5ModPoly))
+      (CommRingOps.mul (UPoly.divMod a fp5ModPoly).1 fp5ModPoly) = fp5Rem a := by
+    rw [← hb, ← hab]
+    conv => lhs; arg 1; rw [ha]
+    exact ring_add_sub_cancel_left' _ _
+  have hRemSub : CommRingOps.sub (fp5Rem a) (fp5Rem b) = CommRingOps.mul qDiff fp5ModPoly :=
+    ring_congr_rem_identity _ _ _ _ _ _ haEqRa
+  if hq0 : qDiff = CommRingOps.zero then
+    rw [hq0, LawfulCommRing.zero_mul] at hRemSub
+    exact LawfulCommRing.sub_eq_zero_iff.mp hRemSub
+  else
+    exfalso
+    have hDegGe5 : 5 ≤ (CommRingOps.mul qDiff fp5ModPoly).natDeg := by
+      rw [UPoly.natDeg_mul hq0 fp5ModPoly_ne_zero, fp5ModPoly_natDeg]; omega
+    rw [← hRemSub] at hDegGe5
+    have hDegLe4 : (CommRingOps.sub (fp5Rem a) (fp5Rem b)).natDeg ≤ 4 := by
+      apply UPoly.natDeg_le_of_coeffAt _ 4
+      intro k hk
+      rw [UPoly.coeffAt_sub,
+          (fp5Rem a).coeffAt_eq_zero_of_natDeg_lt (by have := fp5Rem_length_lt a; unfold UPoly.natDeg; omega),
+          (fp5Rem b).coeffAt_eq_zero_of_natDeg_lt (by have := fp5Rem_length_lt b; unfold UPoly.natDeg; omega),
+          LawfulCommRing.sub_self]
+    omega
+
+private theorem ring_add_rem_sub_identity {R : Type} [LawfulCommRing R]
+    (qa qb ra rb m : R) :
+    CommRingOps.sub
+      (CommRingOps.add (CommRingOps.add (CommRingOps.mul qa m) ra)
+        (CommRingOps.add (CommRingOps.mul qb m) rb))
+      (CommRingOps.add ra rb) =
+    CommRingOps.mul (CommRingOps.add qa qb) m := by
+  rw [LawfulCommRing.add_add_add_comm (CommRingOps.mul qa m) ra (CommRingOps.mul qb m) rb,
+      ring_add_sub_cancel_right, ← LawfulCommRing.right_distrib]
+
+theorem fp5Rem_add (a b : UPoly Goldilocks) :
+    fp5Rem (CommRingOps.add a b) = CommRingOps.add (fp5Rem a) (fp5Rem b) := by
+  have hAddLen : (CommRingOps.add (fp5Rem a) (fp5Rem b)).coeffs.length < 6 := by
+    by_cases hz : CommRingOps.add (fp5Rem a) (fp5Rem b) = CommRingOps.zero
+    · rw [hz, UPoly.coeffs_zero]; decide
+    · have hDeg : (CommRingOps.add (fp5Rem a) (fp5Rem b)).natDeg ≤ 4 := by
+        apply UPoly.natDeg_le_of_coeffAt _ 4
+        intro k hk
+        rw [UPoly.coeffAt_add,
+            (fp5Rem a).coeffAt_eq_zero_of_natDeg_lt (by have := fp5Rem_length_lt a; unfold UPoly.natDeg; omega),
+            (fp5Rem b).coeffAt_eq_zero_of_natDeg_lt (by have := fp5Rem_length_lt b; unfold UPoly.natDeg; omega),
+            LawfulCommRing.add_zero]
+      have hPos : 0 < (CommRingOps.add (fp5Rem a) (fp5Rem b)).coeffs.length := by
+        cases hc : (CommRingOps.add (fp5Rem a) (fp5Rem b)).coeffs with
+        | nil => exact absurd (UPoly.ext hc) hz
+        | cons _ _ => simp
+      unfold UPoly.natDeg at hDeg
+      omega
+  rw [← fp5Rem_eq_self hAddLen]
+  obtain ⟨ha, _⟩ := UPoly.divMod_spec a fp5ModPoly fp5ModPoly_ne_zero
+  obtain ⟨hb, _⟩ := UPoly.divMod_spec b fp5ModPoly fp5ModPoly_ne_zero
+  change a = CommRingOps.add (CommRingOps.mul _ fp5ModPoly) (fp5Rem a) at ha
+  change b = CommRingOps.add (CommRingOps.mul _ fp5ModPoly) (fp5Rem b) at hb
+  refine fp5Rem_congr_of_sub_dvd (q := CommRingOps.add (UPoly.divMod a fp5ModPoly).1 (UPoly.divMod b fp5ModPoly).1) ?_
+  conv => lhs; arg 1; rw [ha, hb]
+  exact ring_add_rem_sub_identity _ _ _ _ _
+
+private theorem ring_neg_mul_left {R : Type} [LawfulCommRing R] (x y : R) :
+    CommRingOps.neg (CommRingOps.mul x y) = CommRingOps.mul (CommRingOps.neg x) y := by
+  apply LawfulCommRing.add_left_cancel (a := CommRingOps.mul x y)
+  rw [LawfulCommRing.add_right_neg, ← LawfulCommRing.right_distrib,
+      LawfulCommRing.add_right_neg, LawfulCommRing.zero_mul]
+
+private theorem ring_mul_rem_sub_identity {R : Type} [LawfulCommRing R]
+    (qa ra b m : R) :
+    CommRingOps.sub (CommRingOps.mul ra b)
+      (CommRingOps.mul (CommRingOps.add (CommRingOps.mul qa m) ra) b) =
+    CommRingOps.mul (CommRingOps.neg (CommRingOps.mul qa b)) m := by
+  rw [LawfulCommRing.right_distrib, LawfulCommRing.add_comm (CommRingOps.mul (CommRingOps.mul qa m) b) _,
+      LawfulCommRing.sub_eq_add_neg,
+      ring_neg_add,
+      ← LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.zero_add,
+      LawfulCommRing.mul_assoc qa m b, LawfulCommRing.mul_comm m b, ← LawfulCommRing.mul_assoc qa b m,
+      ← ring_neg_mul_left]
+
+theorem fp5Rem_mul_rem (a b : UPoly Goldilocks) :
+    fp5Rem (CommRingOps.mul (fp5Rem a) b) = fp5Rem (CommRingOps.mul a b) := by
+  obtain ⟨ha, _⟩ := UPoly.divMod_spec a fp5ModPoly fp5ModPoly_ne_zero
+  change a = CommRingOps.add (CommRingOps.mul _ fp5ModPoly) (fp5Rem a) at ha
+  refine fp5Rem_congr_of_sub_dvd (q := CommRingOps.neg (CommRingOps.mul (UPoly.divMod a fp5ModPoly).1 b)) ?_
+  conv => lhs; arg 2; arg 1; rw [ha]
+  exact ring_mul_rem_sub_identity _ _ _ _
+
+/-- Quintic Goldilocks field `BlindVcFp5 = GF(p)[T]/(T^5 - 3)` (`Fp5` in `blind_vc.rs:1588`). -/
+structure BlindVcFp5 where
+  poly : UPoly Goldilocks
+  len_lt : poly.coeffs.length < 6
+  deriving DecidableEq
+
+namespace BlindVcFp5
+
+theorem ext {a b : BlindVcFp5} (h : a.poly = b.poly) : a = b := by
+  cases a; cases b; subst h; rfl
+
+def ofUPoly (p : UPoly Goldilocks) : BlindVcFp5 :=
+  ⟨fp5Rem p, fp5Rem_length_lt p⟩
+
+def zero : BlindVcFp5 := ⟨CommRingOps.zero, by rw [UPoly.coeffs_zero]; decide⟩
+def one : BlindVcFp5 := ⟨CommRingOps.one, by decide +kernel⟩
+def ofBase (c : Goldilocks) : BlindVcFp5 := ofUPoly (UPoly.C c)
+def tBasis : BlindVcFp5 := ofUPoly UPoly.X
+
+instance : Inhabited BlindVcFp5 := ⟨zero⟩
+
+def add (a b : BlindVcFp5) : BlindVcFp5 := ofUPoly (CommRingOps.add a.poly b.poly)
+def neg (a : BlindVcFp5) : BlindVcFp5 := ofUPoly (CommRingOps.neg a.poly)
+def sub (a b : BlindVcFp5) : BlindVcFp5 := ofUPoly (CommRingOps.sub a.poly b.poly)
+def mul (a b : BlindVcFp5) : BlindVcFp5 := ofUPoly (CommRingOps.mul a.poly b.poly)
+
+theorem add_poly (a b : BlindVcFp5) : (add a b).poly = CommRingOps.add a.poly b.poly := by
+  show fp5Rem (CommRingOps.add a.poly b.poly) = _
+  rw [fp5Rem_add, fp5Rem_eq_self a.len_lt, fp5Rem_eq_self b.len_lt]
+
+theorem neg_poly (a : BlindVcFp5) : (neg a).poly = CommRingOps.neg a.poly := by
+  have hLen : (CommRingOps.neg a.poly).coeffs.length < 6 := by
+    by_cases hz : CommRingOps.neg a.poly = CommRingOps.zero
+    · rw [hz, UPoly.coeffs_zero]; decide
+    · have hDeg : (CommRingOps.neg a.poly).natDeg ≤ 4 := by
+        apply UPoly.natDeg_le_of_coeffAt _ 4
+        intro k hk
+        rw [UPoly.coeffAt_neg,
+            a.poly.coeffAt_eq_zero_of_natDeg_lt (by have := a.len_lt; unfold UPoly.natDeg; omega),
+            LawfulCommRing.neg_zero]
+      have hPos : 0 < (CommRingOps.neg a.poly).coeffs.length := by
+        cases hc : (CommRingOps.neg a.poly).coeffs with
+        | nil => exact absurd (UPoly.ext hc) hz
+        | cons _ _ => simp
+      unfold UPoly.natDeg at hDeg; omega
+  exact fp5Rem_eq_self hLen
+
+theorem sub_poly (a b : BlindVcFp5) : (sub a b).poly = CommRingOps.sub a.poly b.poly := by
+  show fp5Rem (CommRingOps.sub a.poly b.poly) = _
+  rw [LawfulCommRing.sub_eq_add_neg, fp5Rem_add, fp5Rem_eq_self a.len_lt,
+      show fp5Rem (CommRingOps.neg b.poly) = (neg b).poly from rfl, neg_poly,
+      ← LawfulCommRing.sub_eq_add_neg]
+
+instance instLawfulCommRing : LawfulCommRing BlindVcFp5 where
+  zero := zero
+  one := one
+  add := add
+  mul := mul
+  neg := neg
+  sub := sub
+  add_assoc x y z := ext (by simp only [add_poly]; exact LawfulCommRing.add_assoc _ _ _)
+  add_comm x y := ext (by simp only [add_poly]; exact LawfulCommRing.add_comm _ _)
+  zero_add x := ext (by rw [add_poly]; exact LawfulCommRing.zero_add x.poly)
+  add_zero x := ext (by rw [add_poly]; exact LawfulCommRing.add_zero x.poly)
+  add_left_neg x := ext (by rw [add_poly, neg_poly]; exact LawfulCommRing.add_left_neg x.poly)
+  sub_eq_add_neg x y := ext (by rw [sub_poly, add_poly, neg_poly]; exact LawfulCommRing.sub_eq_add_neg _ _)
+  mul_comm x y := ext (by
+    show fp5Rem (CommRingOps.mul x.poly y.poly) = fp5Rem (CommRingOps.mul y.poly x.poly)
+    rw [LawfulCommRing.mul_comm])
+  one_mul x := ext (by
+    show fp5Rem (CommRingOps.mul one.poly x.poly) = x.poly
+    rw [show one.poly = CommRingOps.one from rfl, LawfulCommRing.one_mul, fp5Rem_eq_self x.len_lt])
+  mul_one x := ext (by
+    show fp5Rem (CommRingOps.mul x.poly one.poly) = x.poly
+    rw [show one.poly = CommRingOps.one from rfl, LawfulCommRing.mul_one, fp5Rem_eq_self x.len_lt])
+  left_distrib x y z := ext (by
+    show fp5Rem (CommRingOps.mul x.poly (add y z).poly) =
+      (add (mul x y) (mul x z)).poly
+    rw [add_poly, add_poly]
+    show fp5Rem (CommRingOps.mul x.poly (CommRingOps.add y.poly z.poly)) =
+      CommRingOps.add (fp5Rem (CommRingOps.mul x.poly y.poly)) (fp5Rem (CommRingOps.mul x.poly z.poly))
+    rw [← fp5Rem_add, LawfulCommRing.left_distrib])
+  right_distrib x y z := ext (by
+    show fp5Rem (CommRingOps.mul (add x y).poly z.poly) =
+      (add (mul x z) (mul y z)).poly
+    rw [add_poly, add_poly]
+    show fp5Rem (CommRingOps.mul (CommRingOps.add x.poly y.poly) z.poly) =
+      CommRingOps.add (fp5Rem (CommRingOps.mul x.poly z.poly)) (fp5Rem (CommRingOps.mul y.poly z.poly))
+    rw [← fp5Rem_add, LawfulCommRing.right_distrib])
+  mul_assoc x y z := ext (by
+    show fp5Rem (CommRingOps.mul (fp5Rem (CommRingOps.mul x.poly y.poly)) z.poly) =
+      fp5Rem (CommRingOps.mul x.poly (fp5Rem (CommRingOps.mul y.poly z.poly)))
+    rw [fp5Rem_mul_rem, LawfulCommRing.mul_comm x.poly (fp5Rem _), fp5Rem_mul_rem,
+        LawfulCommRing.mul_comm _ x.poly, LawfulCommRing.mul_assoc])
+
+/-- Constructive field inversion via extended Euclid `UPoly.xgcd fp5ModPoly a.poly`. -/
+def inv (a : BlindVcFp5) : BlindVcFp5 :=
+  if a = zero then zero
+  else
+    let res := UPoly.xgcd fp5ModPoly a.poly
+    ofUPoly (CommRingOps.mul (UPoly.C (Goldilocks.inv res.1.lead)) res.2.2)
+
+theorem mul_inv_cancel {a : BlindVcFp5} (ha : a ≠ CommRingOps.zero) :
+    CommRingOps.mul a (inv a) = CommRingOps.one := by
+  have haZ : a ≠ zero := ha
+  unfold inv
+  simp only [haZ, ↓reduceIte]
+  have haPolyNe : a.poly ≠ CommRingOps.zero := fun hp => haZ (ext hp)
+  obtain ⟨hbez, ⟨s, hs⟩, ⟨t, ht⟩⟩ := Poly2.xgcd_spec fp5ModPoly a.poly
+  generalize UPoly.xgcd fp5ModPoly a.poly = res at hbez hs ht ⊢
+  obtain ⟨g, u, v⟩ := res
+  dsimp only at hbez hs ht ⊢
+  have hgNe : g ≠ CommRingOps.zero := fun e => by
+    rw [e, LawfulCommRing.zero_mul] at hs
+    exact fp5ModPoly_ne_zero hs
+  have htNe : t ≠ CommRingOps.zero := fun e => by
+    rw [e, LawfulCommRing.mul_zero] at ht
+    exact haPolyNe ht
+  have haDegLe4 : a.poly.natDeg ≤ 4 := by
+    have := a.len_lt; unfold UPoly.natDeg; omega
+  have hgDegLe4 : g.natDeg ≤ 4 := by
+    have hd := UPoly.natDeg_mul hgNe htNe
+    rw [← ht] at hd
+    omega
+  have hsNe : s ≠ CommRingOps.zero := fun e => by
+    rw [e, LawfulCommRing.mul_zero] at hs
+    exact fp5ModPoly_ne_zero hs
+  have hsDegPos : 1 ≤ s.natDeg := by
+    have hd := UPoly.natDeg_mul hgNe hsNe
+    rw [← hs, fp5ModPoly_natDeg] at hd
+    omega
+  have hgDeg0 : g.natDeg = 0 := by
+    by_cases hg0 : g.natDeg = 0
+    · exact hg0
+    · exact False.elim (fp5ModPoly_irreducible g s hs (by omega) hsDegPos)
+  have hgC : g = UPoly.C g.lead := Poly2.eq_C_lead_of_natDeg_zero hgDeg0
+  have hLeadNe : g.lead ≠ CommRingOps.zero := UPoly.lead_ne_zero hgNe
+  have hUnit : CommRingOps.mul (UPoly.C (Goldilocks.inv g.lead)) g = CommRingOps.one := by
+    conv => lhs; arg 2; rw [hgC]
+    rw [← UPoly.C_mul_eq, LawfulCommRing.mul_comm _ g.lead,
+        Goldilocks.mul_inv_cancel hLeadNe, ← UPoly.one_eq_C]
+  apply ext
+  show fp5Rem (CommRingOps.mul a.poly
+    (fp5Rem (CommRingOps.mul (UPoly.C (Goldilocks.inv g.lead)) v))) = CommRingOps.one
+  rw [LawfulCommRing.mul_comm a.poly _, fp5Rem_mul_rem]
+  have hBezScaled :
+      CommRingOps.sub
+        (CommRingOps.mul (CommRingOps.mul (UPoly.C (Goldilocks.inv g.lead)) v) a.poly)
+        CommRingOps.one =
+      CommRingOps.mul (CommRingOps.neg (CommRingOps.mul (UPoly.C (Goldilocks.inv g.lead)) u)) fp5ModPoly := by
+    rw [← hUnit, ← hbez]
+    have hId : ∀ (IL U G V A M : UPoly Goldilocks),
+        CommRingOps.sub (CommRingOps.mul (CommRingOps.mul IL V) A) (CommRingOps.mul IL (CommRingOps.add (CommRingOps.mul U M) (CommRingOps.mul V A))) =
+          CommRingOps.mul (CommRingOps.neg (CommRingOps.mul IL U)) M := fun IL U _ V A M => by
+      rw [LawfulCommRing.left_distrib IL, LawfulCommRing.mul_assoc IL V A,
+          LawfulCommRing.add_comm (CommRingOps.mul IL (CommRingOps.mul U M)) _,
+          LawfulCommRing.sub_eq_add_neg, ring_neg_add,
+          ← LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.zero_add,
+          ← LawfulCommRing.mul_assoc IL U M, ← ring_neg_mul_left]
+    exact hId _ u g v a.poly fp5ModPoly
+  rw [fp5Rem_congr_of_sub_dvd hBezScaled]
+  have hOneLen : (CommRingOps.one : UPoly Goldilocks).coeffs.length < 6 := by
+    rw [UPoly.one_eq_C]
+    unfold UPoly.C
+    have htr := trimPoly_length_le [(CommRingOps.one : Goldilocks)]
+    have h1 : [(CommRingOps.one : Goldilocks)].length = 1 := rfl
+    rw [UPoly.coeffs_ofList]
+    omega
+  exact fp5Rem_eq_self hOneLen
+
+theorem zero_ne_one : (CommRingOps.zero : BlindVcFp5) ≠ CommRingOps.one := by
+  intro h
+  have hc := congrArg (fun x => coeffAt x.poly.coeffs 0) h
+  have hz : zero.poly = CommRingOps.zero := rfl
+  have ho : one.poly = CommRingOps.one := rfl
+  change coeffAt zero.poly.coeffs 0 = coeffAt one.poly.coeffs 0 at hc
+  rw [hz, ho, UPoly.coeffs_zero, coeffAt_nil, UPoly.one_eq_C, UPoly.coeffAt_C_zero] at hc
+  exact absurd hc (by decide)
+
+instance instLawfulField : LawfulField BlindVcFp5 where
+  inv := inv
+  zero_ne_one := zero_ne_one
+  inv_zero := by
+    show inv zero = zero
+    unfold inv
+    simp
+  mul_inv_cancel := mul_inv_cancel
+
+instance instNoZeroDivisors : NoZeroDivisors BlindVcFp5 :=
+  LawfulField.toNoZeroDivisors BlindVcFp5
+
+/-- Bijection between `BlindVcFp5` and the 5-limb wire carrier `CredentialFp5 = Fin 5 → Goldilocks`. -/
+def toCredFp5 (x : BlindVcFp5) : CredentialFp5 :=
+  fun i => coeffAt x.poly.coeffs i.val
+
+def ofCredFp5 (f : CredentialFp5) : BlindVcFp5 :=
+  ⟨UPoly.ofList [f 0, f 1, f 2, f 3, f 4], by
+    have htr := trimPoly_length_le [f 0, f 1, f 2, f 3, f 4]
+    have hL : [f 0, f 1, f 2, f 3, f 4].length = 5 := rfl
+    rw [UPoly.coeffs_ofList]
+    omega⟩
+
+theorem toCredFp5_zero : toCredFp5 zero = credentialFp5Zero := by
+  funext i
+  unfold toCredFp5 zero
+  rw [UPoly.coeffs_zero, coeffAt_nil, credentialFp5Zero_apply, goldilocks_zero_eq_cring]
+
+theorem toCredFp5_injective {a b : BlindVcFp5} (h : toCredFp5 a = toCredFp5 b) : a = b := by
+  apply ext; apply UPoly.ext_coeffAt; intro k
+  if hk : k < 5 then
+    exact congrFun h ⟨k, hk⟩
+  else
+    have ha0 : coeffAt a.poly.coeffs k = CommRingOps.zero :=
+      a.poly.coeffAt_eq_zero_of_natDeg_lt (by have := a.len_lt; unfold UPoly.natDeg; omega)
+    have hb0 : coeffAt b.poly.coeffs k = CommRingOps.zero :=
+      b.poly.coeffAt_eq_zero_of_natDeg_lt (by have := b.len_lt; unfold UPoly.natDeg; omega)
+    rw [ha0, hb0]
+
+theorem toCredFp5_ofCredFp5 (f : CredentialFp5) : toCredFp5 (ofCredFp5 f) = f := by
+  funext ⟨i, hi⟩
+  unfold toCredFp5 ofCredFp5
+  dsimp only
+  rw [UPoly.coeffAt_ofList]
+  match i, hi with
+  | 0, _ => rfl | 1, _ => rfl | 2, _ => rfl | 3, _ => rfl | 4, _ => rfl
+  | _ + 5, hi => omega
+
+theorem ofBase_coeff0 (c : Goldilocks) : coeffAt (ofBase c).poly.coeffs 0 = c := by
+  have hLen : (UPoly.C c).coeffs.length < 6 := by
+    have h := trimPoly_length_le [c]
+    have h1 : [c].length = 1 := rfl
+    unfold UPoly.C
+    rw [UPoly.coeffs_ofList]
+    omega
+  change coeffAt (fp5Rem (UPoly.C c)).coeffs 0 = c
+  rw [fp5Rem_eq_self hLen]
+  exact UPoly.coeffAt_C_zero c
+
+theorem ofBase_injective {a b : Goldilocks} (h : ofBase a = ofBase b) : a = b := by
+  have h0 := congrArg (fun x => coeffAt x.poly.coeffs 0) h
+  rwa [ofBase_coeff0, ofBase_coeff0] at h0
+
+theorem ofBase_zero : ofBase Goldilocks.zero = zero := by
+  apply ext
+  show fp5Rem (UPoly.C Goldilocks.zero) = CommRingOps.zero
+  rw [goldilocks_zero_eq_cring, UPoly.C_zero_eq]
+  exact fp5Rem_eq_self (by rw [UPoly.coeffs_zero]; decide)
+
+end BlindVcFp5
+
+/-! ### Canonical Symbolic Enumerations of `GF(p^5)` (`allBlindVcFp5`) and `GF(p^5)^×` (`nonzeroBlindVcFp5`) -/
+
+private theorem goldilocksPrime_pos : 0 < goldilocksPrime := by decide
+
+private theorem mem_ofFn_exists {α : Type} :
+    ∀ {m : Nat} (f : Fin m → α) {x : α}, x ∈ List.ofFn f → ∃ i : Fin m, f i = x
+  | 0, _, _, h => nomatch h
+  | m + 1, f, x, h => by
+    rw [List.ofFn_succ] at h
+    rcases List.mem_cons.mp h with rfl | hTail
+    · exact ⟨⟨0, Nat.zero_lt_succ m⟩, rfl⟩
+    · obtain ⟨j, hj⟩ := mem_ofFn_exists (fun i => f i.succ) hTail
+      exact ⟨j.succ, hj⟩
+
+private theorem nodup_ofFn_of_inj {α : Type} :
+    ∀ {m : Nat} (f : Fin m → α), (∀ i j : Fin m, f i = f j → i = j) → (List.ofFn f).Nodup
+  | 0, _, _ => .nil
+  | m + 1, f, hInj => by
+    rw [List.ofFn_succ]
+    refine .cons ?_ (nodup_ofFn_of_inj (fun i => f i.succ) (fun i j hij => Fin.succ_inj.mp (hInj i.succ j.succ hij)))
+    intro y hy hEq
+    obtain ⟨j, rfl⟩ := mem_ofFn_exists (fun i => f i.succ) hy
+    have hEq' : f ⟨0, Nat.zero_lt_succ m⟩ = f j.succ := hEq
+    have h0 := hInj ⟨0, Nat.zero_lt_succ m⟩ j.succ hEq'
+    exact absurd (congrArg Fin.val h0) (Nat.succ_ne_zero j.val).symm
+
+/-- Base-`p` encoding of `idx < goldilocksPrime^5` as a canonical `BlindVcFp5` element (`0` choice). -/
+def natToBlindVcFp5 (n : Nat) : BlindVcFp5 :=
+  let p := goldilocksPrime
+  let d0 : Goldilocks := ⟨n % p, Nat.mod_lt _ goldilocksPrime_pos⟩
+  let d1 : Goldilocks := ⟨(n / p) % p, Nat.mod_lt _ goldilocksPrime_pos⟩
+  let d2 : Goldilocks := ⟨(n / (p * p)) % p, Nat.mod_lt _ goldilocksPrime_pos⟩
+  let d3 : Goldilocks := ⟨(n / (p * p * p)) % p, Nat.mod_lt _ goldilocksPrime_pos⟩
+  let d4 : Goldilocks := ⟨(n / (p * p * p * p)) % p, Nat.mod_lt _ goldilocksPrime_pos⟩
+  BlindVcFp5.ofCredFp5 (fun i =>
+    match i.val with
+    | 0 => d0 | 1 => d1 | 2 => d2 | 3 => d3 | _ => d4)
+
+theorem natToBlindVcFp5_zero : natToBlindVcFp5 0 = BlindVcFp5.zero := by
+  apply BlindVcFp5.toCredFp5_injective
+  unfold natToBlindVcFp5
+  dsimp only
+  rw [BlindVcFp5.toCredFp5_ofCredFp5, BlindVcFp5.toCredFp5_zero]
+  funext ⟨i, hi⟩
+  rw [credentialFp5Zero_apply]
+  have h0 : (⟨0 % goldilocksPrime, Nat.mod_lt 0 goldilocksPrime_pos⟩ : Goldilocks) = Goldilocks.zero := by
+    apply Goldilocks.ext; decide
+  match i, hi with
+  | 0, _ => exact h0
+  | 1, _ => exact h0
+  | 2, _ => exact h0
+  | 3, _ => exact h0
+  | 4, _ => exact h0
+  | _ + 5, hi => omega
+
+theorem natToBlindVcFp5_injective_below {a b : Nat}
+    (ha : a < goldilocksPrime ^ 5) (hb : b < goldilocksPrime ^ 5)
+    (hEq : natToBlindVcFp5 a = natToBlindVcFp5 b) : a = b := by
+  let p := goldilocksPrime
+  have hp : 0 < p := goldilocksPrime_pos
+  have hCred := congrArg BlindVcFp5.toCredFp5 hEq
+  unfold natToBlindVcFp5 at hCred
+  dsimp only at hCred
+  rw [BlindVcFp5.toCredFp5_ofCredFp5, BlindVcFp5.toCredFp5_ofCredFp5] at hCred
+  have hd0 := congrArg Goldilocks.val (congrFun hCred ⟨0, by decide⟩)
+  have hd1 := congrArg Goldilocks.val (congrFun hCred ⟨1, by decide⟩)
+  have hd2 := congrArg Goldilocks.val (congrFun hCred ⟨2, by decide⟩)
+  have hd3 := congrArg Goldilocks.val (congrFun hCred ⟨3, by decide⟩)
+  have hd4 := congrArg Goldilocks.val (congrFun hCred ⟨4, by decide⟩)
+  dsimp only at hd0 hd1 hd2 hd3 hd4
+  change a % p = b % p at hd0
+  change (a / p) % p = (b / p) % p at hd1
+  change (a / (p * p)) % p = (b / (p * p)) % p at hd2
+  change (a / (p * p * p)) % p = (b / (p * p * p)) % p at hd3
+  change (a / (p * p * p * p)) % p = (b / (p * p * p * p)) % p at hd4
+  have hPow5 : p ^ 5 = p * (p * p * p * p) := by
+    simp only [Nat.pow_succ, Nat.pow_zero, Nat.one_mul]
+    ac_rfl
+  have ha4Lt : a / (p * p * p * p) < p := by
+    rw [Nat.div_lt_iff_lt_mul (Nat.mul_pos (Nat.mul_pos (Nat.mul_pos hp hp) hp) hp), ← hPow5]
+    exact ha
+  have hb4Lt : b / (p * p * p * p) < p := by
+    rw [Nat.div_lt_iff_lt_mul (Nat.mul_pos (Nat.mul_pos (Nat.mul_pos hp hp) hp) hp), ← hPow5]
+    exact hb
+  rw [Nat.mod_eq_of_lt ha4Lt, Nat.mod_eq_of_lt hb4Lt] at hd4
+  have hStep : ∀ x y : Nat, x / p = y / p → x % p = y % p → x = y := fun x y hq hr => by
+    have hx := Nat.div_add_mod x p
+    have hy := Nat.div_add_mod y p
+    rw [hq, hr] at hx
+    exact hx.symm.trans hy
+  have hq3 : a / (p * p * p) = b / (p * p * p) := by
+    apply hStep _ _ _ hd3
+    rw [Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul]
+    exact hd4
+  have hq2 : a / (p * p) = b / (p * p) := by
+    apply hStep _ _ _ hd2
+    rw [Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul]
+    exact hq3
+  have hq1 : a / p = b / p := by
+    apply hStep _ _ _ hd1
+    rw [Nat.div_div_eq_div_mul, Nat.div_div_eq_div_mul]
+    exact hq2
+  exact hStep a b hq1 hd0
+
+/-- Symbolic duplicate-free list of all `p^5` elements of `BlindVcFp5`. -/
+def allBlindVcFp5 : List BlindVcFp5 :=
+  List.ofFn (fun i : Fin (goldilocksPrime ^ 5) => natToBlindVcFp5 i.val)
+
+theorem allBlindVcFp5_length : allBlindVcFp5.length = goldilocksPrime ^ 5 :=
+  List.length_ofFn
+
+theorem allBlindVcFp5_nodup : allBlindVcFp5.Nodup :=
+  nodup_ofFn_of_inj _ (fun i j hij => Fin.ext (natToBlindVcFp5_injective_below i.isLt j.isLt hij))
+
+/-- Symbolic duplicate-free list of all `p^5 - 1 = fp5NonzeroCount` nonzero elements of `BlindVcFp5`. -/
+def nonzeroBlindVcFp5 : List BlindVcFp5 :=
+  List.ofFn (fun i : Fin CutAndChoose.fp5NonzeroCount => natToBlindVcFp5 (i.val + 1))
+
+theorem nonzeroBlindVcFp5_length : nonzeroBlindVcFp5.length = CutAndChoose.fp5NonzeroCount :=
+  List.length_ofFn
+
+private theorem fp5NonzeroCount_succ_le : CutAndChoose.fp5NonzeroCount + 1 = goldilocksPrime ^ 5 := by
+  rw [CutAndChoose.fp5NonzeroCount_eq]
+  decide
+
+theorem nonzeroBlindVcFp5_nodup : nonzeroBlindVcFp5.Nodup := by
+  apply nodup_ofFn_of_inj
+  intro i j hij
+  have hiLt : i.val + 1 < goldilocksPrime ^ 5 := by
+    have := i.isLt; have := fp5NonzeroCount_succ_le; omega
+  have hjLt : j.val + 1 < goldilocksPrime ^ 5 := by
+    have := j.isLt; have := fp5NonzeroCount_succ_le; omega
+  exact Fin.ext (Nat.succ.inj (natToBlindVcFp5_injective_below hiLt hjLt hij))
+
+/-! ## 5. Concrete `192 × 192` BlindVC Presentation `DefectChecker` & `AlgebraicSound` (`blind_vc.rs`) -/
+
+/-- `SD_GRID_B = 192` (`blind_vc.rs:1717`). -/
+@[expose] def SD_GRID_B : Nat := 192
+/-- `SD_GRID_L = 192` (`blind_vc.rs:1718`). -/
+@[expose] def SD_GRID_L : Nat := 192
+/-- Total multiplication grid gates `192 × 192 = 36864` (`blind_vc.rs:2327`). -/
+@[expose] def SD_GRID_GATES : Nat := SD_GRID_B * SD_GRID_L
+
+/-- Folding luck bound for `dG = SD_GRID_GATES = 36864` over `GF(p^5)`:
+    `36864 * 2^300 ≤ goldilocksPrime ^ 5` (`< 2^-300`). -/
+theorem blindVc_grid_fold_luck :
+    SD_GRID_GATES * 2 ^ 300 ≤ goldilocksPrime ^ 5 := by
+  decide
+
+private theorem limboEvalDegree_val : CutAndChoose.limboEvalDegree = 384 :=
+  CutAndChoose.limboEvalDegree_eq
+
+private theorem coeffAt_mem_of_lt_len {R : Type} [CommRingOps R] :
+    ∀ (cs : List R) (k : Nat), k < cs.length → coeffAt cs k ∈ cs
+  | [], _, h => absurd h (Nat.not_lt_zero _)
+  | _ :: _, 0, _ => .head _
+  | _ :: tl, k + 1, h => .tail _ (coeffAt_mem_of_lt_len tl k (Nat.lt_of_succ_lt_succ h))
+
+private theorem nodup_filter_local {α : Type} (p : α → Bool) :
+    ∀ {l : List α}, l.Nodup → (l.filter p).Nodup
+  | [], _ => .nil
+  | _ :: _, .cons hrel htail => by
+    simp only [List.filter]
+    split
+    · exact .cons (fun b hb => hrel b (List.mem_filter.mp hb).1) (nodup_filter_local p htail)
+    · exact nodup_filter_local p htail
+
+private theorem countIf_eq_filter_len {α : Type} (p : α → Bool) :
+    ∀ (xs : List α), FrozenChallenge.countIf p xs = (xs.filter p).length
+  | [] => rfl
+  | x :: tl => by
+    simp only [FrozenChallenge.countIf, List.filter]
+    cases p x <;> simp [countIf_eq_filter_len p tl, Nat.add_comm]
+
+/-- Root bound over `BlindVcFp5` from a single nonzero coefficient at `k < cs.length` via `gs_formal_root_bound`. -/
+theorem blindVcFp5_roots_le_of_coeffAt_nonzero
+    (d : Nat) (cs : List BlindVcFp5) (k : Nat)
+    (hLen : cs.length ≤ d + 1) (hkLt : k < cs.length)
+    (hkNe : coeffAt cs k ≠ CommRingOps.zero)
+    (S : List BlindVcFp5) (hS : S.Nodup) :
+    FrozenChallenge.countIf (fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)) S ≤ d := by
+  rw [countIf_eq_filter_len]
+  let p : BlindVcFp5 → Bool := fun r => decide (RoundPoly.evalCoeffs cs r = CommRingOps.zero)
+  have hFiltNd : (S.filter p).Nodup := nodup_filter_local p hS
+  have hFiltRoots : ∀ r ∈ S.filter p, RoundPoly.evalCoeffs cs r = CommRingOps.zero :=
+    fun r hr => of_decide_eq_true (List.mem_filter.mp hr).2
+  exact gs_formal_root_bound d cs (S.filter p) hLen
+    ⟨coeffAt cs k, coeffAt_mem_of_lt_len cs k hkLt, hkNe⟩ hFiltNd hFiltRoots
+
+/-- Committed Round-1 shares of all `256` parties across repetitions (`R1RepState` in `blind_vc.rs:3230`). -/
+structure BlindVcCommittedProof where
+  partyX : Nat → Fin credentialSdParties → Fin SD_GRID_GATES → Goldilocks
+  partyY : Nat → Fin credentialSdParties → Fin SD_GRID_GATES → Goldilocks
+  partyZ : Nat → Fin credentialSdParties → Fin SD_GRID_GATES → Goldilocks
+  partyCPad : Nat → Fin credentialSdParties → BlindVcFp5
+  partyRMask : Nat → Fin credentialSdParties → Fin CutAndChoose.limboEvalDegree → BlindVcFp5
+
+/-- Round-2a prover message (`r_poly_without_b` of length `384 = 2 * SD_GRID_B`, degree `192` omitted!). -/
+structure BlindVcR2aMsg where
+  rPolyWithoutB : Nat → Fin CutAndChoose.limboEvalDegree → BlindVcFp5
+
+/-- Round-2b prover message (online party broadcasts `(α_p, β_p, σ_p)` per repetition). -/
+structure BlindVcR2bMsg where
+  partySigma : Nat → Fin credentialSdParties → BlindVcFp5
+
+/-- Sum a `Goldilocks` quantity across all `256` Limbo parties. -/
+def sumAllPartiesGl (f : Fin credentialSdParties → Goldilocks) : Goldilocks :=
+  (List.finRange credentialSdParties).foldl (fun acc p => CommRingOps.add acc (f p)) Goldilocks.zero
+
+/-- Sum a `BlindVcFp5` quantity across all `256` Limbo parties (zero dependent `Prop` recursion). -/
+def sumAllPartiesFp5 (f : Fin credentialSdParties → BlindVcFp5) : BlindVcFp5 :=
+  (List.finRange credentialSdParties).foldl (fun acc p => CommRingOps.add acc (f p)) BlindVcFp5.zero
+
+/-- Reconstructed gate defect `X_g * Y_g - Z_g` at gate `g < 36864` in repetition `j`. -/
+def blindVcGateDefect (c : BlindVcCommittedProof) (j : Nat) (g : Fin SD_GRID_GATES) : Goldilocks :=
+  let Xg := sumAllPartiesGl (fun p => c.partyX j p g)
+  let Yg := sumAllPartiesGl (fun p => c.partyY j p g)
+  let Zg := sumAllPartiesGl (fun p => c.partyZ j p g)
+  CommRingOps.sub (CommRingOps.mul Xg Yg) Zg
+
+/-- A committed Round-1 repetition `j` is false when at least one gate in the `192 × 192` grid has
+    reconstructed `X_g * Y_g ≠ Z_g`. -/
+def BlindVcRepHasGateFault (c : BlindVcCommittedProof) (j : Nat) : Prop :=
+  ∃ g : Fin SD_GRID_GATES, blindVcGateDefect c j g ≠ Goldilocks.zero
+
+/-- Folding polynomial coefficients of length `SD_GRID_GATES + 1 = 36865`. -/
+def blindVcFoldCoeffs (c : BlindVcCommittedProof) (j : Nat) : List BlindVcFp5 :=
+  sumAllPartiesFp5 (c.partyCPad j) ::
+    List.ofFn (fun g : Fin SD_GRID_GATES => BlindVcFp5.ofBase (blindVcGateDefect c j g))
+
+theorem blindVcFoldCoeffs_length (c : BlindVcCommittedProof) (j : Nat) :
+    (blindVcFoldCoeffs c j).length = SD_GRID_GATES + 1 := by
+  unfold blindVcFoldCoeffs
+  rw [List.length_cons, List.length_ofFn]
+
+private theorem coeffAt_ofFn_eq {m : Nat} (fn : Fin m → BlindVcFp5) (idx : Fin m) :
+    coeffAt (List.ofFn fn) idx.val = fn idx := by
+  obtain ⟨k, hlt⟩ := idx
+  induction m generalizing k with
+  | zero => omega
+  | succ m ih =>
+    cases k with
+    | zero => simp [List.ofFn_succ, coeffAt_cons_zero]
+    | succ k' =>
+      simp only [List.ofFn_succ, coeffAt_cons_succ]
+      exact ih (fun i => fn i.succ) k' (Nat.lt_of_succ_lt_succ hlt)
+
+theorem blindVcFoldCoeffs_coeffAt_succ (c : BlindVcCommittedProof) (j : Nat) (g : Fin SD_GRID_GATES) :
+    coeffAt (blindVcFoldCoeffs c j) (g.val + 1) = BlindVcFp5.ofBase (blindVcGateDefect c j g) := by
+  unfold blindVcFoldCoeffs
+  rw [coeffAt_cons_succ]
+  exact coeffAt_ofFn_eq _ g
+
+/-- Masked degree-`≤ 384` evaluation check polynomial coefficients (`blind_vc.rs:2623, 3444`):
+    coefficient `192 = SD_GRID_B` is locked to `evalCoeffs (blindVcFoldCoeffs c j) γ`
+    (because `r_poly_without_b` omits `X^{SD_GRID_B}`)! -/
+def blindVcEvalDefectCoord (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) (d : Fin (CutAndChoose.limboEvalDegree + 1)) : BlindVcFp5 :=
+  if hdLo : d.val < SD_GRID_B then
+    let idx : Fin CutAndChoose.limboEvalDegree := ⟨d.val, by
+      have h384 := limboEvalDegree_val
+      have h192 : SD_GRID_B = 192 := rfl
+      omega⟩
+    CommRingOps.sub (sumAllPartiesFp5 (fun p => c.partyRMask j p idx)) (b1.rPolyWithoutB j idx)
+  else if _ : d.val = SD_GRID_B then
+    RoundPoly.evalCoeffs (blindVcFoldCoeffs c j) gamma
+  else
+    let idx : Fin CutAndChoose.limboEvalDegree := ⟨d.val - 1, by
+      have := d.isLt
+      have h384 := limboEvalDegree_val
+      have h192 : SD_GRID_B = 192 := rfl
+      omega⟩
+    CommRingOps.sub (sumAllPartiesFp5 (fun p => c.partyRMask j p idx)) (b1.rPolyWithoutB j idx)
+
+def blindVcEvalDefectCoeffs (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) : List BlindVcFp5 :=
+  List.ofFn (blindVcEvalDefectCoord c j gamma b1)
+
+theorem blindVcEvalDefectCoeffs_length (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) :
+    (blindVcEvalDefectCoeffs c j gamma b1).length = CutAndChoose.limboEvalDegree + 1 :=
+  List.length_ofFn
+
+theorem blindVcEvalDefectCoeffs_coeffAt_B (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) :
+    coeffAt (blindVcEvalDefectCoeffs c j gamma b1) SD_GRID_B =
+      RoundPoly.evalCoeffs (blindVcFoldCoeffs c j) gamma := by
+  have hLt : SD_GRID_B < CutAndChoose.limboEvalDegree + 1 := by
+    rw [limboEvalDegree_val]; decide
+  unfold blindVcEvalDefectCoeffs
+  have h := coeffAt_ofFn_eq (blindVcEvalDefectCoord c j gamma b1) ⟨SD_GRID_B, hLt⟩
+  dsimp only [blindVcEvalDefectCoord] at h
+  simp only [Nat.lt_irrefl, ↓reduceDIte] at h
+  exact h
+
+/-- Honest per-party online evaluation share `σ_honest(p, r)` (`blind_vc.rs:4004-4005`). -/
+def blindVcExpectedPartySigma (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) (r : BlindVcFp5)
+    (b2 : BlindVcR2bMsg) (p : Fin credentialSdParties) : BlindVcFp5 :=
+  let totalClaimed := sumAllPartiesFp5 (b2.partySigma j)
+  let evalErr := RoundPoly.evalCoeffs (blindVcEvalDefectCoeffs c j gamma b1) r
+  if p.val = 0 then
+    CommRingOps.add (b2.partySigma j p) (CommRingOps.sub evalErr totalClaimed)
+  else if p.val = 255 then
+    CommRingOps.add (b2.partySigma j p) totalClaimed
+  else
+    b2.partySigma j p
+
+/-- Concrete per-party check value in `CredentialFp5` for `CutAndChoose.DefectChecker`. -/
+def blindVcPartyDefect (c : BlindVcCommittedProof) (j : Nat)
+    (gamma : BlindVcFp5) (b1 : BlindVcR2aMsg) (r : BlindVcFp5)
+    (b2 : BlindVcR2bMsg) (p : Fin credentialSdParties) : CredentialFp5 :=
+  BlindVcFp5.toCredFp5 (CommRingOps.sub (blindVcExpectedPartySigma c j gamma b1 r b2 p) (b2.partySigma j p))
+
+/-- Concrete `CutAndChoose.DefectChecker` on `BlindVcFp5` (`GF(p)[T]/(T^5 - 3)`), `192 × 192` grid,
+    and `256` Limbo parties! -/
+def blindVcRepetitionKernel :
+    CutAndChoose.DefectChecker BlindVcCommittedProof BlindVcFp5 BlindVcR2aMsg BlindVcFp5 BlindVcR2bMsg where
+  foldBad c j gamma :=
+    decide (RoundPoly.evalCoeffs (blindVcFoldCoeffs c j) gamma = CommRingOps.zero)
+  evalBad c j gamma b1 r :=
+    decide (RoundPoly.evalCoeffs (blindVcEvalDefectCoeffs c j gamma b1) r = CommRingOps.zero)
+  defect := blindVcPartyDefect
+
