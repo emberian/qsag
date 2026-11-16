@@ -5,20 +5,25 @@
 //                  - Poseidon2 width-12 state in lanes 0..11 (parallel fast port, zero duplicate FFs!)
 //                  - Verifier registers CH/A/B in lanes 12..23
 //   * sh[0..7]   8 x 64-bit clock-gated transparent-latch register file (addresses 32..39),
-//                using one shared posedge-captured write-data hold register + icgtp_1 high-phase
-//                clock gates driving gf180mcu_fd_sc_mcu7t5v0__latq_1 cells (full-cycle read window,
-//                zero combinational loops, ~35 % smaller cell area than muxed flip-flops).
+//                using one shared posedge-captured write-data hold register + icgtp_2 high-phase
+//                clock gates driving gf180mcu_fd_sc_mcu7t5v0__latq_1 cells.
+//   * GOTCHA #4 1-Clock Shadow Block Absorb (`blk_absorb_xor`):
+//                While Keccak or Poseidon2 permutes `st[0..24]`, incoming words stream concurrently
+//                into `sh[0..7]` with zero port contention, and `blk_absorb_xor` XORs up to 8 words
+//                (`blk_absorb_mask[7:0]`) from `sh[0..7]` into `st[0..7]` in ONE single clock!
 `default_nettype none
 
 module qsag_sponge (
     input  wire              clk,
-    input  wire              wipe,         // synchronous 1-clock zeroization of all lanes & latches
+    input  wire              wipe,
     // scalar read/write port
     input  wire              wr_en,
-    input  wire  [5:0]       wr_addr,      // 0..24 lanes, 32..39 shadow latches
+    input  wire  [5:0]       wr_addr,         // 0..24 lanes, 32..39 shadow latches
     input  wire  [63:0]      wr_data,
     input  wire  [5:0]       rd_addr,
     output logic [63:0]      rd_data,
+    // 1-clock 64-byte shadow-to-sponge parallel block absorb
+    input  wire  [7:0]       blk_absorb_mask, // bit i=1: st[i] <= st[i] ^ sh[i] in 1 clock!
     // parallel state view & fast engine ports (lanes 0..24 and 0..11)
     output wire  [25*64-1:0] st_flat_o,
     input  wire  [24:0]      kc_we,
@@ -35,19 +40,18 @@ module qsag_sponge (
             wire        sc_we = wr_en && (wr_addr == 6'(i));
             wire        p2_w  = (i < 12) ? p2_we[i] : 1'b0;
             wire [63:0] p2_d  = (i < 12) ? p2_wdata[64*i +: 64] : 64'd0;
-            wire        we    = wipe | kc_we[i] | p2_w | sc_we;
+            wire        ab_w  = (i < 8)  ? blk_absorb_mask[i] : 1'b0;
+            wire [63:0] ab_d  = (i < 8)  ? (st[i] ^ sh[i]) : 64'd0;
+            wire        we    = wipe | kc_we[i] | p2_w | ab_w | sc_we;
             wire [63:0] wd    = wipe     ? 64'd0 :
                                 kc_we[i] ? kc_wdata[64*i +: 64] :
-                                p2_w     ? p2_d : wr_data;
+                                p2_w     ? p2_d :
+                                ab_w     ? ab_d : wr_data;
             qsag_ereg_nr #(.W(64)) u_r (.clk(clk), .en(we), .d(wd), .q(st[i]));
             assign st_flat_o[64*i +: 64] = st[i];
         end
     endgenerate
 
-    // Transparent-latch scratchpad sh[0..7] (addresses 32..39):
-    // Write enable is latched by icgtp_1 while clk is low; write data is captured into wd_sh_q at
-    // posedge clk so latq_1 updates immediately at the start of the cycle and closes cleanly at
-    // negedge clk with half-period setup and hold margins.
     wire        sh_sel = wr_en && (wr_addr[5:3] == 3'b100);
     wire [63:0] wd_sh_q;
     qsag_ereg_nr #(.W(64)) u_wd_hold (
