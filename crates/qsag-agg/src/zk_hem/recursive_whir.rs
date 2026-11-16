@@ -27,11 +27,11 @@ const LEAF: u64 = 0x4657_4C45_4146;
 const NODE: u64 = 0x4657_4E4F_4445;
 const MERGE: u64 = 0x4657_4D45_5247;
 
-pub(super) fn f(v: u64) -> F {
+pub(crate) fn f(v: u64) -> F {
     F::from_u64_reduced(v)
 }
 
-pub(super) trait Base: Clone {
+pub(crate) trait Base: Clone {
     fn constant(v: F) -> Self;
     fn plus(&self, rhs: &Self) -> Self;
     fn minus(&self, rhs: &Self) -> Self;
@@ -65,7 +65,7 @@ impl Base for Lc {
         self.scaled(k)
     }
 }
-pub(super) trait Backend {
+pub(crate) trait Backend {
     type W: Base;
     fn alloc(&mut self, v: F) -> Self::W;
     fn value(&self, v: &Self::W) -> F;
@@ -81,8 +81,8 @@ pub(super) trait Backend {
     }
 }
 #[derive(Default)]
-pub(super) struct Native {
-    pub(super) failed: bool,
+pub(crate) struct Native {
+    pub(crate) failed: bool,
 }
 impl Backend for Native {
     type W = F;
@@ -112,13 +112,13 @@ impl Backend for Native {
 /// in synthesis order. In particular `pin` allocates and each permutation records
 /// all 118 S-box outputs. The compiled Shape still checks the whole assignment.
 #[derive(Default)]
-pub(super) struct Assignment {
-    pub(super) values: Vec<F>,
-    pub(super) p2_values: Vec<F>,
-    pub(super) aligned: bool,
+pub(crate) struct Assignment {
+    pub(crate) values: Vec<F>,
+    pub(crate) p2_values: Vec<F>,
+    pub(crate) aligned: bool,
 }
 impl Assignment {
-    pub(super) fn hologram_aligned() -> Self {
+    pub(crate) fn hologram_aligned() -> Self {
         Self {
             values: Vec::new(),
             p2_values: Vec::new(),
@@ -176,18 +176,18 @@ impl Backend for ConstraintSystem {
 
 /// Tower limbs [1, u, v, uv], u²=7, v²=u (polynomial order [1,v²,v,v³]).
 #[derive(Clone)]
-pub(super) struct Ext<W: Base>(pub(super) [W; 4]);
+pub(crate) struct Ext<W: Base>(pub(crate) [W; 4]);
 impl<W: Base> Ext<W> {
-    pub(super) fn constant(v: E) -> Self {
+    pub(crate) fn constant(v: E) -> Self {
         Self(v.to_limbs().map(W::constant))
     }
-    pub(super) fn zero() -> Self {
+    pub(crate) fn zero() -> Self {
         Self::constant(E::ZERO)
     }
-    pub(super) fn one() -> Self {
+    pub(crate) fn one() -> Self {
         Self::constant(E::ONE)
     }
-    pub(super) fn base(v: W) -> Self {
+    pub(crate) fn base(v: W) -> Self {
         Self([
             v,
             W::constant(F::ZERO),
@@ -195,29 +195,29 @@ impl<W: Base> Ext<W> {
             W::constant(F::ZERO),
         ])
     }
-    pub(super) fn alloc<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+    pub(crate) fn alloc<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
         Self(v.to_limbs().map(|v| b.alloc(v)))
     }
     /// A base-field value: only limb zero is a wire, the other limbs are the constant zero.
-    pub(super) fn alloc_base<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
+    pub(crate) fn alloc_base<B: Backend<W = W>>(b: &mut B, v: E) -> Self {
         Self::base(b.alloc(v.to_limbs()[0]))
     }
-    pub(super) fn value<B: Backend<W = W>>(&self, b: &B) -> E {
+    pub(crate) fn value<B: Backend<W = W>>(&self, b: &B) -> E {
         E::from_limbs(core::array::from_fn(|i| b.value(&self.0[i])))
     }
-    pub(super) fn add(&self, v: &Self) -> Self {
+    pub(crate) fn add(&self, v: &Self) -> Self {
         Self(core::array::from_fn(|i| self.0[i].plus(&v.0[i])))
     }
-    pub(super) fn sub(&self, v: &Self) -> Self {
+    pub(crate) fn sub(&self, v: &Self) -> Self {
         Self(core::array::from_fn(|i| self.0[i].minus(&v.0[i])))
     }
-    pub(super) fn scale(&self, k: F) -> Self {
+    pub(crate) fn scale(&self, k: F) -> Self {
         Self(core::array::from_fn(|i| self.0[i].scale(k)))
     }
-    pub(super) fn mul_base<B: Backend<W = W>>(&self, b: &mut B, v: &W) -> Self {
+    pub(crate) fn mul_base<B: Backend<W = W>>(&self, b: &mut B, v: &W) -> Self {
         Self(core::array::from_fn(|i| b.mul(&self.0[i], v)))
     }
-    pub(super) fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
+    pub(crate) fn mul<B: Backend<W = W>>(&self, b: &mut B, v: &Self) -> Self {
         // Regard the tower as F[v]/(v^4 - 7), with polynomial-order
         // limbs [0,2,1,3]. Seven products at 0..6 determine the degree-six
         // product exactly; interpolate and reduce v^4=7. No witness-dependent
@@ -279,7 +279,7 @@ impl<W: Base> Ext<W> {
         }))
     }
 
-    pub(super) fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
+    pub(crate) fn equal<B: Backend<W = W>>(&self, b: &mut B, v: &Self) {
         for i in 0..4 {
             b.equal(&self.0[i], &v.0[i]);
         }
@@ -287,18 +287,18 @@ impl<W: Base> Ext<W> {
 }
 
 #[derive(Clone)]
-pub(super) struct Transcript<W: Base> {
-    pub(super) state: [W; 12],
+pub(crate) struct Transcript<W: Base> {
+    pub(crate) state: [W; 12],
 }
 impl<W: Base> Transcript<W> {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: core::array::from_fn(|_| W::constant(F::ZERO)),
         }
     }
     // Fixed-length, domain-separated duplex frames. Capacity receives tag and length;
     // padding is mandatory even at an exact rate boundary.
-    pub(super) fn absorb<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, msg: &[W]) {
+    pub(crate) fn absorb<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, msg: &[W]) {
         self.state[10] = self.state[10].plus(&W::constant(f(tag)));
         self.state[11] = self.state[11].plus(&W::constant(f(msg.len() as u64)));
         for chunk in msg.chunks(6) {
@@ -315,13 +315,13 @@ impl<W: Base> Transcript<W> {
             b.perm(&mut self.state);
         }
     }
-    pub(super) fn ext<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64) -> Ext<W> {
+    pub(crate) fn ext<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64) -> Ext<W> {
         self.absorb(b, tag, &[]);
         // A challenge enters many products: give it single-variable limbs. The state
         // itself stays a linear form over the permutation's last S-box outputs.
         Ext(core::array::from_fn(|i| b.pin(self.state[i].clone())))
     }
-    pub(super) fn absorb_exts<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, es: &[Ext<W>]) {
+    pub(crate) fn absorb_exts<B: Backend<W = W>>(&mut self, b: &mut B, tag: u64, es: &[Ext<W>]) {
         let words: Vec<_> = es.iter().flat_map(|e| e.0.clone()).collect();
         self.absorb(b, tag, &words);
     }
@@ -329,7 +329,7 @@ impl<W: Base> Transcript<W> {
 
 /// Little-endian Boolean decomposition. Below 64 bits the integer sum cannot reach `p`;
 /// at 64 bits the alias `x + p` is excluded explicitly.
-pub(super) fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
+pub(crate) fn bits<B: Backend>(b: &mut B, value: &B::W, n: usize) -> Vec<B::W> {
     assert!(n <= 64);
     let raw = b.value(value).to_canonical_u64();
     let zero = B::W::constant(F::ZERO);
@@ -659,7 +659,7 @@ fn start<B: Backend>(b: &mut B, params: &FixedPathWhirParams, public: &[B::W]) -
 }
 // All comparisons synthesize the same constraints. Values choose only the assignments
 // of inverse/slack witnesses, never control flow or coefficients of the relation.
-pub(super) fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
+pub(crate) fn equal_bit<B: Backend>(b: &mut B, a: &B::W, c: &B::W) -> B::W {
     let d = a.minus(c);
     let v = b.value(&d);
     let eq = b.alloc(if v == F::ZERO { F::ONE } else { F::ZERO });
@@ -694,7 +694,7 @@ fn bounded<B: Backend>(b: &mut B, v: &B::W, max: u64) {
         }
     }
 }
-pub(super) fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
+pub(crate) fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -> B::W {
     let delta = yes.minus(no);
     let out = b.alloc(b.value(no) + b.value(bit).const_mul(b.value(&delta)));
     b.product(bit, &delta, &out.minus(no));
