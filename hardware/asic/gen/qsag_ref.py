@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bit-exact Python reference for the QSAG-NI primitives.
+"""Bit-exact Python reference for the QSAG-NI primitives and verifier protocols.
 
 Transcribed from the Rust definitions (crates/qsag-accel/src/poseidon2.rs,
 crates/qsag-agg/src/field.rs, crates/qsag-agg/src/sponge.rs,
+crates/qsag-agg/src/pcs.rs, crates/qsag-agg/src/recursive_fold.rs,
 crates/qsag-asm/src/portable.rs). `selfcheck(fixture)` compares every primitive
 against validation/tests/fixtures/lean_external_oracle_vectors.json and hashlib.
 """
@@ -42,7 +43,7 @@ def gl_pow7(x):
 
 # ---------------------------------------------------------------- Ext4
 # Limb order [c0.c0, c0.c1, c1.c0, c1.c1] = coefficients of [v^0, v^2, v^1, v^3]
-# in F_p[v]/(v^4 - 7).
+# in F_p[v]/(v^4 - 7), i.e. tower basis [1, u, v, u*v] with v^2 = u, u^2 = 7.
 LIMB_TO_POLY = [0, 2, 1, 3]  # poly index k -> limb index
 
 
@@ -62,6 +63,24 @@ def ext4_muladd(x, y, z=(0, 0, 0, 0)):
     return [out[0], out[2], out[1], out[3]]
 
 
+def ext4_karatsuba_muladd(x, y, z=(0, 0, 0, 0)):
+    """Tower Karatsuba 9-product Ext4 multiply-add matching qsag_ext4_kara_*."""
+    a = [v % P for v in x]
+    b = [v % P for v in y]
+    c = [v % P for v in z]
+    groups = [[0], [1], [0, 1], [2], [3], [2, 3], [0, 2], [1, 3], [0, 1, 2, 3]]
+    qa = [sum(a[i] for i in g) % P for g in groups]
+    qb = [sum(b[i] for i in g) % P for g in groups]
+    pr = [(qa[m] * qb[m]) % P for m in range(9)]
+    weights = [
+        [1, 7, 0, -7, -7, 7, 0, 0, 0],
+        [-1, -1, 1, 1, 7, 0, 0, 0, 0],
+        [-1, -7, 0, -1, -7, 0, 1, 7, 0],
+        [1, 1, -1, 1, 1, -1, -1, -1, 1],
+    ]
+    return [(c[j] + sum(w * pr[i] for i, w in enumerate(row))) % P for j, row in enumerate(weights)]
+
+
 def ext4_add(x, y):
     return [gl_add(a, b) for a, b in zip(x, y)]
 
@@ -70,8 +89,36 @@ def ext4_sub(x, y):
     return [gl_sub(a, b) for a, b in zip(x, y)]
 
 
+def ext4_mul_base(x, s):
+    s %= P
+    return [(a * s) % P for a in x]
+
+
+def ext4_eval_poly(coeffs, r):
+    """Horner evaluation c_0 + c_1*r + ... + c_d*r^d."""
+    acc = [0, 0, 0, 0]
+    for c in reversed(coeffs):
+        acc = ext4_muladd(acc, r, c)
+    return acc
+
+
+# ---------------------------------------------------------------- [CWYZ26] DuetFold
+def cwyz_duet_step(v0, v1, theta, alpha, beta, inv_two, inv_two_x, x_sq):
+    even = ext4_mul_base(ext4_add(v0, v1), inv_two)
+    odd = ext4_mul_base(ext4_sub(v0, v1), inv_two_x)
+    mixed = ext4_add(even, ext4_muladd(theta, odd))
+    gamma = ext4_add(alpha, ext4_mul_base(beta, x_sq))
+    return ext4_add(odd, ext4_muladd(gamma, mixed))
+
+
 # ---------------------------------------------------------------- Poseidon2-12
 P2_IV = 0x504F53325F474C31
+P2_DOMAIN_CANOPY_SALT = 0x5032434E534C5401
+P2_DOMAIN_CANOPY_LEAF_R0 = 0x5032434E4C463001
+P2_DOMAIN_CANOPY_LEAF_BATCH = 0x5032434E4C464201
+P2_DOMAIN_CANOPY_LEAF_EXT4 = 0x5032434E4C464501
+P2_CANOPY_NODE_HI = 0x50324E4400000000
+P2_DOMAIN_CANOPY_ROOT = 0x5032434E524F4F54
 
 
 def _rc_bij(x):
@@ -133,16 +180,47 @@ def p2_perm(st):
     return st
 
 
-P2_CANOPY_NODE_HI = 0x50324E4400000000
+def p2_sponge_limbs(domain_tag, init_cap, limbs):
+    st = [0] * 8 + [c % P for c in init_cap]
+    stream = [domain_tag % P, len(limbs) % P] + [v % P for v in limbs]
+    for off in range(0, len(stream), 8):
+        blk = stream[off:off + 8]
+        for i, v in enumerate(blk):
+            st[i] = (st[i] + v) % P
+        st = p2_perm(st)
+    return st[:4]
+
+
+def p2_canopy_tree_key(stage_idx, log_leaves, tree_salt=(0, 0, 0, 0)):
+    return p2_sponge_limbs(P2_DOMAIN_CANOPY_SALT, tree_salt, [stage_idx, log_leaves])
 
 
 def p2_canopy_node(left, right, key3, node_idx):
     l = [x % P for x in left]
     r = [x % P for x in right]
     t0 = (P2_CANOPY_NODE_HI | (node_idx & 0xFFFFFFFF)) % P
-    c = [t0] + [k % P for k in key3]
+    c = [t0] + [k % P for k in key3[:3]]
     st = p2_perm(l + r + c)
     return [(st[i] + l[i] + 2 * r[i] + 4 * c[i]) % P for i in range(4)]
+
+
+def p2_canopy_root(stage_idx, log_leaves, top_limbs, tree_salt=(0, 0, 0, 0)):
+    return p2_sponge_limbs(P2_DOMAIN_CANOPY_ROOT, tree_salt, [stage_idx, log_leaves] + list(top_limbs))
+
+
+def p2_round0_leaf(leaf_idx, salt16, num_polys, vals):
+    arity = len(vals) // num_polys
+    salt_limbs = []
+    for off in (0, 7, 14):
+        chunk = salt16[off:min(off + 7, 16)]
+        salt_limbs.append(int.from_bytes(chunk + b"\x00" * (8 - len(chunk)), "little"))
+    dom = P2_DOMAIN_CANOPY_LEAF_R0 if num_polys == 1 else P2_DOMAIN_CANOPY_LEAF_BATCH
+    return p2_sponge_limbs(dom, [leaf_idx, arity, num_polys, 0], salt_limbs + list(vals))
+
+
+def p2_ext4_leaf(stage_idx, leaf_idx, ext4_vals):
+    flat = [w for e in ext4_vals for w in e]
+    return p2_sponge_limbs(P2_DOMAIN_CANOPY_LEAF_EXT4, [leaf_idx, len(ext4_vals), stage_idx, 0], flat)
 
 
 def p2_merkle_2block(left, right, pk_seed, dom, meta0, tree_lo, tree_hi):
@@ -170,7 +248,7 @@ def p2_canopy_path(leaf, siblings, key3, leaf_index):
     return cur
 
 
-# ---------------------------------------------------------------- Keccak
+# ---------------------------------------------------------------- Keccak & TurboSHAKE Canopy
 KECCAK_RC = [
     0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000,
     0x000000000000808B, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
@@ -186,6 +264,13 @@ KECCAK_ROT = [
     [28, 55, 25, 21, 56],
     [27, 20, 39, 8, 14],
 ]  # [x][y]
+
+TAG_MERKLE_INTERNAL = 0x00
+TAG_MERKLE_ROOT = 0x01
+TAG_ROUND0_SALT = 0x02
+TAG_ROUND0_SINGLE = 0x10
+TAG_ROUND0_BATCH = 0x11
+TAG_EXT4_STAGE_LEAF = 0x12
 
 
 def _rol(v, n):
@@ -268,6 +353,39 @@ def turboshake256_midstate(custom):
 
 
 TURBOSHAKE_CANOPY_CUSTOM = b"QSAG.PCS.TURBOCANOPY/v1"
+_TS_MID = None
+
+
+def ts_canopy_32(payload):
+    global _TS_MID
+    if _TS_MID is None:
+        _TS_MID = turboshake256_midstate(TURBOSHAKE_CANOPY_CUSTOM)
+    return turboshake256(payload, 32, 0x07, _TS_MID)
+
+
+def ts_canopy_internal(node_idx, left32, right32):
+    return ts_canopy_32(bytes([TAG_MERKLE_INTERNAL]) + node_idx.to_bytes(4, "little") + bytes(left32) + bytes(right32))
+
+
+def ts_canopy_root(log_leaves, top32):
+    return ts_canopy_32(bytes([TAG_MERKLE_ROOT, log_leaves]) + bytes(top32))
+
+
+def ts_round0_leaf(leaf_idx, salt16, num_polys, vals):
+    arity = len(vals) // num_polys
+    body = b"".join(v.to_bytes(8, "little") for v in vals)
+    if num_polys == 1:
+        hdr = bytes([TAG_ROUND0_SINGLE, arity]) + leaf_idx.to_bytes(4, "little") + bytes(salt16)
+    else:
+        hdr = bytes([TAG_ROUND0_BATCH, arity, num_polys]) + leaf_idx.to_bytes(4, "little") + bytes(salt16)
+    return ts_canopy_32(hdr + body)
+
+
+def ts_ext4_leaf(stage_idx, leaf_idx, ext4_vals):
+    hdr = bytes([TAG_EXT4_STAGE_LEAF, stage_idx, len(ext4_vals)]) + leaf_idx.to_bytes(4, "little")
+    body = b"".join(w.to_bytes(8, "little") for e in ext4_vals for w in e)
+    return ts_canopy_32(hdr + body)
+
 
 # ---------------------------------------------------------------- GF(2^128)
 M128 = 2**128 - 1
@@ -376,6 +494,7 @@ def selfcheck(fixture_path):
         x = [int(v) for v in e["x"]]
         y = [int(v) for v in e["y"]]
         assert ext4_muladd(x, y) == [int(v) for v in e["mul"]]
+        assert ext4_karatsuba_muladd(x, y) == [int(v) for v in e["mul"]]
         n += 1
     for e in fx["poseidon2_12"]:
         assert p2_perm([int(v) for v in e["input"]]) == [int(v) for v in e["perm"]]
