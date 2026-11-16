@@ -742,53 +742,19 @@ fn remove_file_if_present(path: &Path, label: &'static str) -> Result<(), CliErr
     }
 }
 
-/// Remove uncommitted fork-guard and filesystem anchor artifacts for a known, never-committed
-/// enrollment attempt. The caller must hold the destination vault lock and verify that it has
-/// no committed meta.
+/// Remove the local uncommitted `.target` fork-guard marker for a never-committed enrollment
+/// attempt. The caller must hold the destination vault lock and verify that it has no
+/// committed meta. External anti-rollback `.anchor` / `.mirror` state and `.lock` sidecars are
+/// intentionally NEVER unlinked from local recovery metadata (`pending_*` in local vault JSON is
+/// untrusted under the external-anchor threat model); fresh per-attempt `anchor_key_id` nonces
+/// isolate retries without deleting external state.
 pub fn remove_uncommitted_guarded_target(
     vault_dir: &str,
-    anchor_dir: Option<&str>,
     domain: &str,
     key_id: &[u8; 32],
 ) -> Result<(), CliError> {
-    let stem = slot_stem(domain, key_id);
-    for ext in [
-        "target",
-        "anchor",
-        "anchor.lock",
-        "tpm",
-        "tpm.lock",
-        "vmgen",
-        "vmgen.lock",
-    ] {
-        let local = Path::new(vault_dir).join(format!(".qsag-{stem}.{ext}"));
-        remove_file_if_present(&local, "removing uncommitted local anchor artifact")?;
-    }
-    if let Some(dir) = anchor_dir {
-        for ext in [
-            "anchor",
-            "anchor.lock",
-            "tpm",
-            "tpm.lock",
-            "vmgen",
-            "vmgen.lock",
-        ] {
-            let ext_path = Path::new(dir).join(format!("{stem}.{ext}"));
-            remove_file_if_present(&ext_path, "removing uncommitted external anchor artifact")?;
-        }
-        let mirror = anchor_mirror_dir_path(dir, domain, key_id);
-        match std::fs::remove_dir_all(&mirror) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(CliError::io(
-                    "removing uncommitted external mirror directory",
-                    e,
-                ));
-            }
-        }
-    }
-    Ok(())
+    let local = Path::new(vault_dir).join(format!(".qsag-{}.target", slot_stem(domain, key_id)));
+    remove_file_if_present(&local, "removing uncommitted fork-guard target")
 }
 
 fn anchor_record_path(anchor_dir: &str, domain: &str, key_id: &[u8; 32]) -> PathBuf {
