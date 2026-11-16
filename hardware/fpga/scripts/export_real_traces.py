@@ -437,8 +437,8 @@ pub fn ext_mac(a: E, b: E, c: E, out: E) {
         "        st\n    }",
         '''        if crate::fpga_trace::active() {
             let mut tr = [0u64; 24];
-            tr[..12].copy_from_slice(&input.map(|v| Goldilocks::from_u64_reduced(v).to_canonical_u64()));
-            tr[12..].copy_from_slice(&st.map(|v| Goldilocks::from_u64_reduced(v).to_canonical_u64()));
+            tr[..12].copy_from_slice(&input.map(|v| crate::field::Goldilocks::from_u64_reduced(v).to_canonical_u64()));
+            tr[12..].copy_from_slice(&st.map(|v| crate::field::Goldilocks::from_u64_reduced(v).to_canonical_u64()));
             crate::fpga_trace::words("P", &tr);
         }
         st
@@ -836,6 +836,12 @@ mod fpga_export_duet {
     # ------------------------------------------------------------------ 8. recursive.rs (both QSAGSTA1 regimes!)
     rc_p = agg / "recursive.rs"
     rc = rc_p.read_text()
+    rc = replace_once(
+        rc,
+        "                &root_hologram,\n                root_z,\n                SUBTREE_ROOT_LABEL,",
+        "                &root_hologram,\n                root_z.clone(),\n                SUBTREE_ROOT_LABEL,",
+        "clone root_z",
+    )
     needle = '''        assert!(verify_succinct_subtree_aggregate_against_roster_root(
             root_vk, &statement, &proof
         ));'''
