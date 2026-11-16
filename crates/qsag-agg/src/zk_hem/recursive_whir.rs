@@ -1477,22 +1477,75 @@ pub fn verify_fixed_path(
     !b.failed
 }
 
-/// A Reed-Solomon codeword. The first oracle encodes a base-field polynomial and stays in
-/// the base field; later oracles are over the extension.
+/// Encode a base-field monomial coefficient slice into a single owned domain buffer when large,
+/// avoiding 3x transient coset/shifted allocations on 2^22+ domains.
+fn encode_base_single_buf(coeffs: &[F], blowup: usize, reuse: &mut Vec<F>) -> Vec<F> {
+    if coeffs.len() >= (1 << 20) {
+        let domain_len = coeffs.len().checked_mul(blowup).expect("RS domain overflow");
+        let mut buf = core::mem::take(reuse);
+        buf.clear();
+        if buf.capacity() < domain_len {
+            buf.reserve_exact(domain_len - buf.len());
+        }
+        buf.extend_from_slice(coeffs);
+        return crate::field::encode_rs_coset_goldilocks_owned_cpu(buf, blowup);
+    }
+    crate::field::encode_rs_coset_goldilocks(coeffs, blowup)
+}
+
+fn build_merkle_levels_base(codeword: &[F], arity: usize, stage: usize) -> Vec<Vec<Digest>> {
+    let _phase = crate::profile::span("recursion_merkle");
+    let groups = codeword.len() / arity;
+    let mut leaves = vec![[F::ZERO; 4]; groups];
+    crate::pcs::fill_indexed(&mut leaves, |g| {
+        let fiber: Vec<_> = (0..arity)
+            .map(|j| Ext::constant(E::from_base(codeword[g + j * groups])))
+            .collect();
+        leaf(&mut Native::default(), stage, &f(g as u64), &fiber)
+    });
+    finish_merkle_levels(leaves, stage)
+}
+
+fn finish_merkle_levels(leaves: Vec<Digest>, stage: usize) -> Vec<Vec<Digest>> {
+    let mut levels: Vec<Vec<Digest>> = vec![leaves];
+    while levels.last().unwrap().len() > 1 {
+        let depth = levels.len() - 1;
+        let below = &levels[depth];
+        let mut next = vec![[F::ZERO; 4]; below.len() / 2];
+        crate::pcs::fill_indexed(&mut next, |i| {
+            compress(
+                &mut Native::default(),
+                &below[2 * i],
+                &below[2 * i + 1],
+                stage,
+                depth,
+            )
+        });
+        levels.push(next);
+    }
+    levels
+}
+
+/// A Reed-Solomon codeword. Large Stage-0 base-field commitments (`nv >= 22`) drop their
+/// multi-hundred-MiB / multi-GiB codeword immediately after Merkle hashing and re-encode into
+/// a single reusable domain buffer on demand during Stage-0 query extraction.
 enum Codeword {
     Base(Vec<F>),
+    LazyBase { domain_len: usize, blowup: usize },
     Ext(Vec<E>),
 }
 impl Codeword {
     fn len(&self) -> usize {
         match self {
             Self::Base(v) => v.len(),
+            Self::LazyBase { domain_len, .. } => *domain_len,
             Self::Ext(v) => v.len(),
         }
     }
     fn at(&self, i: usize) -> E {
         match self {
             Self::Base(v) => E::from_base(v[i]),
+            Self::LazyBase { .. } => unreachable!("LazyBase queried via queries_base"),
             Self::Ext(v) => v[i],
         }
     }
@@ -1505,8 +1558,25 @@ struct Oracle {
 impl Oracle {
     /// First oracle: `coeffs` are the monomial coefficients of the committed polynomial.
     fn base(coeffs: &[F], blowup: usize, arity: usize) -> Self {
-        let codeword = crate::field::encode_rs_coset_goldilocks(coeffs, blowup);
-        Self::commit(Codeword::Base(codeword), arity, 0)
+        let mut scratch = Vec::new();
+        let mut codeword = encode_base_single_buf(coeffs, blowup, &mut scratch);
+        if coeffs.len() >= (1 << 22) {
+            let domain_len = codeword.len();
+            let levels = build_merkle_levels_base(&codeword, arity, 0);
+            qsag_asm::volatile_fill(&mut codeword, F::ZERO);
+            drop(codeword);
+            return Self {
+                codeword: Codeword::LazyBase { domain_len, blowup },
+                levels,
+                arity,
+            };
+        }
+        let levels = build_merkle_levels_base(&codeword, arity, 0);
+        Self {
+            codeword: Codeword::Base(codeword),
+            levels,
+            arity,
+        }
     }
     fn new(coeffs: &[E], blowup: usize, arity: usize, stage: usize) -> Self {
         let codeword = crate::pcs::affine::encode_overflow(coeffs, blowup);
@@ -1522,22 +1592,7 @@ impl Oracle {
                 .collect();
             leaf(&mut Native::default(), stage, &f(g as u64), &fiber)
         });
-        let mut levels: Vec<Vec<Digest>> = vec![leaves];
-        while levels.last().unwrap().len() > 1 {
-            let depth = levels.len() - 1;
-            let below = &levels[depth];
-            let mut next = vec![[F::ZERO; 4]; below.len() / 2];
-            crate::pcs::fill_indexed(&mut next, |i| {
-                compress(
-                    &mut Native::default(),
-                    &below[2 * i],
-                    &below[2 * i + 1],
-                    stage,
-                    depth,
-                )
-            });
-            levels.push(next);
-        }
+        let levels = finish_merkle_levels(leaves, stage);
         Self {
             codeword,
             levels,
@@ -1565,11 +1620,45 @@ impl Oracle {
                 .collect(),
         }
     }
+    fn queries_base(
+        &self,
+        coeffs_prefix: &[F],
+        indices: &[usize],
+        reuse_cw: &mut Vec<F>,
+    ) -> Vec<FixedPathQuery> {
+        match &self.codeword {
+            Codeword::Base(_) | Codeword::Ext(_) => {
+                indices.iter().map(|&idx| self.query(idx)).collect()
+            }
+            Codeword::LazyBase { blowup, .. } => {
+                let mut cw = encode_base_single_buf(coeffs_prefix, *blowup, reuse_cw);
+                let groups = cw.len() / self.arity;
+                let path_depth = self.levels.len() - 1;
+                let (_, base_level) = canopy_split(path_depth);
+                let out = indices
+                    .iter()
+                    .map(|&index| FixedPathQuery {
+                        values: (0..self.arity)
+                            .map(|j| E::from_base(cw[index + j * groups]))
+                            .collect(),
+                        siblings: (0..base_level)
+                            .map(|d| self.levels[d][(index >> d) ^ 1])
+                            .collect(),
+                    })
+                    .collect();
+                qsag_asm::volatile_fill(&mut cw, F::ZERO);
+                cw.clear();
+                *reuse_cw = cw;
+                out
+            }
+        }
+    }
 }
 impl Drop for Oracle {
     fn drop(&mut self) {
         match &mut self.codeword {
             Codeword::Base(v) => qsag_asm::volatile_fill(v, F::ZERO),
+            Codeword::LazyBase { .. } => {}
             Codeword::Ext(v) => qsag_asm::volatile_fill(v, E::ZERO),
         }
     }
@@ -1625,6 +1714,89 @@ fn dot(a: &[E], b: &[E]) -> E {
     out
 }
 
+/// Parallel chunked univariate evaluation `sum_{i=0}^{len-1} coeff(i) * z^i`, bit-identical
+/// to Horner (`eval_univariate_ext4`) with zero intermediate extension buffer allocation.
+fn eval_univariate_fn(len: usize, z: E, coeff: impl Fn(usize) -> E + Sync) -> E {
+    if len == 0 {
+        return E::ZERO;
+    }
+    let range_horner = |start: usize, end: usize| -> E {
+        let mut acc = E::ZERO;
+        for i in (start..end).rev() {
+            acc = acc * z + coeff(i);
+        }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if len >= 16_384 {
+        let workers = crate::parallel_workers().min(len.div_ceil(4_096));
+        let chunk = len.div_ceil(workers);
+        let range_horner = &range_horner;
+        return std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .filter_map(|w| {
+                    let start = w * chunk;
+                    let end = ((w + 1) * chunk).min(len);
+                    (start < end).then(|| {
+                        let scale = z.pow(start as u64);
+                        crate::spawn_bounded(scope, move || range_horner(start, end) * scale)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .fold(E::ZERO, |acc, h| acc + crate::join_worker(h))
+        });
+    }
+    range_horner(0, len)
+}
+
+/// Stream Round-0 affine monomial fold directly from an implicit polynomial `coeff(i)` of length
+/// `len` into `out` of length `len / 2 + 1`, avoiding allocating the full `len`-element `Ext4`
+/// coefficient table before Round 0!
+fn fold_coeffs_from_fn(len: usize, [theta, alpha, beta]: [E; 3], coeff: impl Fn(usize) -> E + Sync) -> Vec<E> {
+    let m = len / 2;
+    if m == 0 {
+        return vec![E::ZERO];
+    }
+    let mut out = vec![E::ZERO; m + 1];
+    let c0 = coeff(0);
+    let c1 = coeff(1);
+    let mix0 = c0 + theta * c1;
+    out[0] = c1 + alpha * mix0;
+    let fill = |start: usize, dst: &mut [E]| {
+        let mut prev_mix = coeff(2 * (start - 1)) + theta * coeff(2 * (start - 1) + 1);
+        for (offset, slot) in dst.iter_mut().enumerate() {
+            let i = start + offset;
+            let ci0 = coeff(2 * i);
+            let ci1 = coeff(2 * i + 1);
+            let cur_mix = ci0 + theta * ci1;
+            *slot = beta * prev_mix + (ci1 + alpha * cur_mix);
+            prev_mix = cur_mix;
+        }
+    };
+    #[cfg(feature = "std")]
+    if m >= 8_192 {
+        let workers = crate::parallel_workers().min(m.div_ceil(2_048));
+        let chunk = (m - 1).div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (index, dst) in out[1..m].chunks_mut(chunk).enumerate() {
+                let fill = &fill;
+                crate::spawn_bounded(scope, move || fill(1 + index * chunk, dst));
+            }
+        });
+    } else if m > 1 {
+        fill(1, &mut out[1..m]);
+    }
+    #[cfg(not(feature = "std"))]
+    if m > 1 {
+        fill(1, &mut out[1..m]);
+    }
+    let last_mix = coeff(2 * (m - 1)) + theta * coeff(2 * (m - 1) + 1);
+    out[m] = beta * last_mix;
+    out
+}
+
 /// A fixed-path commitment to a base-field evaluation table, kept by the prover until it
 /// opens. Holds the committed polynomial; erased on drop.
 pub struct RecursionCommitment {
@@ -1635,6 +1807,14 @@ impl RecursionCommitment {
     /// The commitment: Merkle root of the first Reed-Solomon oracle.
     pub fn root(&self) -> Digest {
         self.oracle.root()
+    }
+
+    pub(super) fn levels(&self) -> &[Vec<Digest>] {
+        &self.oracle.levels
+    }
+
+    pub(super) fn into_levels(mut self) -> Vec<Vec<Digest>> {
+        core::mem::take(&mut self.oracle.levels)
     }
 }
 
@@ -1696,11 +1876,18 @@ pub fn open_for_recursion(
         coeffs: base_coeffs,
         mut oracle,
     } = committed;
-    let mut coeffs = SecretExts(vec![E::ZERO; base_coeffs.0.len()]);
-    crate::pcs::fill_indexed(&mut coeffs.0, |i| E::from_base(base_coeffs.0[i]));
-    drop(base_coeffs);
-    if point.len() != nv || coeffs.0.len() != (1usize << nv) + 2 {
+    let mut base_opt = Some(base_coeffs);
+    let base_len = base_opt.as_ref().unwrap().0.len();
+    if point.len() != nv || base_len != (1usize << nv) + 2 {
         return Err(RecursiveWhirError::InvalidParameters);
+    }
+    let mut coeffs = SecretExts(vec![E::ZERO; base_len]);
+    {
+        let b_ref = &base_opt.as_ref().unwrap().0;
+        crate::pcs::fill_indexed(&mut coeffs.0, |i| E::from_base(b_ref[i]));
+    }
+    if matches!(oracle.codeword, Codeword::Base(_)) {
+        base_opt = None;
     }
     let mut kernel = crate::pcs::affine::monomial_table(point);
     let mut claim = dot(&coeffs.0, &kernel);
@@ -1830,16 +2017,34 @@ pub fn open_for_recursion(
         let count = groups.min(spec.num_queries);
         let mut shifted = Vec::with_capacity(count);
         let sampled = sample_queries(&mut b, &mut tr, groups, count);
-        for (q, (index, binary)) in sampled.into_iter().enumerate() {
-            let query = oracle.query(index.to_canonical_u64() as usize);
-            let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
-            let x = coset_point(
-                &mut b,
-                &binary,
-                oracle.codeword.len().trailing_zeros() as usize,
-            );
-            shifted.push(fold_fiber(&mut b, &values, x, &chals, stage == 0));
-            proof.queries[stage][q] = query;
+        let domain_log2 = oracle.codeword.len().trailing_zeros() as usize;
+        if stage == 0 {
+            let indices: Vec<usize> = sampled
+                .iter()
+                .map(|(idx, _)| idx.to_canonical_u64() as usize)
+                .collect();
+            let mut reuse_cw = Vec::new();
+            let b_slice = base_opt
+                .as_ref()
+                .map(|s| &s.0[..1usize << nv])
+                .unwrap_or(&[]);
+            let queries = oracle.queries_base(b_slice, &indices, &mut reuse_cw);
+            base_opt = None;
+            drop(reuse_cw);
+            for ((q, (_, binary)), query) in sampled.into_iter().enumerate().zip(queries) {
+                let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &values, x, &chals, true));
+                proof.queries[0][q] = query;
+            }
+        } else {
+            for (q, (index, binary)) in sampled.into_iter().enumerate() {
+                let query = oracle.query(index.to_canonical_u64() as usize);
+                let values: Vec<_> = query.values.iter().copied().map(Ext::constant).collect();
+                let x = coset_point(&mut b, &binary, domain_log2);
+                shifted.push(fold_fiber(&mut b, &values, x, &chals, false));
+                proof.queries[stage][q] = query;
+            }
         }
         if let Some(next) = next {
             let values: Vec<_> = shifted.iter().map(|(_, e)| e.clone()).collect();
@@ -1883,6 +2088,10 @@ impl Clone for PublicRecursionCommitment {
     fn clone(&self) -> Self {
         let codeword = match &self.oracle.codeword {
             Codeword::Base(v) => Codeword::Base(v.clone()),
+            Codeword::LazyBase { domain_len, blowup } => Codeword::LazyBase {
+                domain_len: *domain_len,
+                blowup: *blowup,
+            },
             Codeword::Ext(v) => Codeword::Ext(v.clone()),
         };
         Self {
@@ -1926,6 +2135,16 @@ impl PublicRecursionCommitment {
     #[inline]
     pub fn root(&self) -> Digest {
         self.oracle.root()
+    }
+
+    #[inline]
+    pub(super) fn coeffs(&self) -> &[F] {
+        &self.coeffs
+    }
+
+    #[inline]
+    pub(super) fn levels(&self) -> &[Vec<Digest>] {
+        &self.oracle.levels
     }
 }
 
