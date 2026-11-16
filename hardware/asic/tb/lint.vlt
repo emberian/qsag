@@ -1,0 +1,6 @@
+`verilator_config
+// Several modules per file by design.
+lint_off -rule DECLFILENAME
+// Generated carry-save netlists: carries above the value bound and unused constant rows.
+lint_off -rule UNUSEDSIGNAL -file "*_gen.sv"
+lint_off -rule UNUSEDPARAM  -file "*_gen.sv"
