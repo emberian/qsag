@@ -1,4 +1,5 @@
 module
+public import Qsag.Exec.TwoSlotHwmCrashModel
 /-
 # Qsag.Exec.PosixCrashWal — Conditional storage contracts and crash safety models
 
@@ -66,7 +67,7 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
      burned twice and every burned leaf survives every successful recovery, or the accepted
      file exhibits a `BurnChainSubstitution` (`burnAppendCrash_outcome_complete` shows the crash
      alphabet covers every such file). `openBurnBytes_journalBytes` identifies the byte-level
-     `QSBURN03` decoder with the record model; `openBurnBytes_copied_inode_refused`.
+     `QSBURN05` decoder with the record model; `openBurnBytes_copied_inode_refused`.
    - `qsag-cli/src/vault.rs`: `vault_reserve_crash_old_new_or_fail_closed` (companion MAC
      overwritten in place, then atomic rename) and `vault_state_file_rollback_rejected`.
    - `recoverLedger_intact_slot_never_rolls_back`: two-slot `durable_ledger.rs` recovery with
@@ -9983,17 +9984,17 @@ theorem recoverLedger_missing_genesis (anchor : ExternalMonotoneAnchor) (a b : O
 def burnTag (domain : Bytes) (frames : List Bytes) : Bytes :=
   cshake256Bytes domain (framed64 frames)
 
-/-- `QSBURN03` header body: magic, 32-byte key id, 32-byte genesis salt. -/
+/-- `QSBURN05` header body: magic, 32-byte key id, 32-byte genesis salt. -/
 def burnHeaderBody (keyId genesis : Bytes) : Bytes :=
-  [0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x33] ++ keyId ++ genesis
+  [0x51, 0x53, 0x42, 0x55, 0x52, 0x4e, 0x30, 0x35] ++ keyId ++ genesis
 
 /-- `file_identity`: device and inode of the held descriptor, big-endian. -/
 def burnIdentity (device inode : Nat) : Bytes := encodeU64BeNat device ++ encodeU64BeNat inode
 
-/-- V3 genesis tag: binds the MAC key, the data inode's identity and the 72-byte header body.
+/-- V4 genesis tag (`QSAG.BURN.GENESIS.V4`): binds the MAC key, the data inode's identity and the 72-byte header body.
 It is also the initial `last_tag` of the record chain. -/
 def burnGenesisTag (key identity keyId genesis : Bytes) : Bytes :=
-  burnTag [0x51, 0x53, 0x41, 0x47, 0x2e, 0x42, 0x55, 0x52, 0x4e, 0x2e, 0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x2e, 0x56, 0x33]
+  burnTag [0x51, 0x53, 0x41, 0x47, 0x2e, 0x42, 0x55, 0x52, 0x4e, 0x2e, 0x47, 0x45, 0x4e, 0x45, 0x53, 0x49, 0x53, 0x2e, 0x56, 0x34]
     [key, identity, burnHeaderBody keyId genesis]
 
 def burnHeader (key identity keyId genesis : Bytes) : Bytes :=
@@ -10778,3 +10779,34 @@ end RustDurability
 #tooth_pair burnHost_multi_crash_no_double_burn vs tooth_burnJournal_truncation_is_undetectable_without_anchor
 
 end Qsag
+
+public section
+namespace Qsag.RustDurability
+
+/-- `QSBURN05` page geometry (`crates/qsag-fts/src/wal.rs:31-40`):
+    page 0 (`0..4096`) holds the 104-byte `burnHeader` genesis prefix, page 1 (`4096..8192`)
+    holds 80-byte HWM slot A (`QSAG.BURN.HWM.V4`), page 2 (`8192..12288`) holds 80-byte HWM
+    slot B, and 42-byte burn records start at `HEADER_LEN = 12288`. -/
+def burnHwmPageBytes : Nat := 4096
+def burnHwmSlotOffsetA : Nat := 4096
+def burnHwmSlotOffsetB : Nat := 8192
+def burnPagedHeaderLen : Nat := 12288
+def burnHwmSlotBytes : Nat := 80
+
+/-- `QSAG.BURN.HWM.V4` slot MAC (`wal.rs:210-222`). -/
+def burnHwmSlotMac (key identity keyId genesis : Bytes) (slot : UInt8)
+    (generationBe8 tip32 reserved8 : Bytes) : Bytes :=
+  burnTag [0x51, 0x53, 0x41, 0x47, 0x2e, 0x42, 0x55, 0x52, 0x4e, 0x2e, 0x48, 0x57, 0x4d, 0x2e, 0x56, 0x34]
+    [key, identity, keyId, genesis, [slot], generationBe8, tip32, reserved8]
+
+theorem qsburn05_paged_offsets_match :
+    (Qsag.Exec.TwoSlotHwmCrashModel.qsburn05 512).offA = burnHwmSlotOffsetA ∧
+    (Qsag.Exec.TwoSlotHwmCrashModel.qsburn05 512).offB = burnHwmSlotOffsetB ∧
+    (Qsag.Exec.TwoSlotHwmCrashModel.qsburn05 512).chainOff = burnPagedHeaderLen ∧
+    (Qsag.Exec.TwoSlotHwmCrashModel.qsburn05 512).Separated burnHwmSlotBytes :=
+  ⟨rfl, rfl, rfl, Qsag.Exec.TwoSlotHwmCrashModel.qsburn05_separated (by decide) ⟨8, by decide⟩⟩
+
+#verify_constructive qsburn05_paged_offsets_match
+
+end Qsag.RustDurability
+end
