@@ -154,36 +154,39 @@ structure Deployment.WellFormed (dep : Deployment F C PK D Sig) : Prop where
   corrupt := []
   ledger := (IdealCustodyState.init dep.deploymentId dep.pk dep.quorum).ledger
 
-def setNode (nodes : Nat → Custodian F) (p : Nat) (c : Custodian F) :
+abbrev setNode (nodes : Nat → Custodian F) (p : Nat) (c : Custodian F) :
     Nat → Custodian F :=
   fun q => if q = p then c else nodes q
 
 /-- `m` is a verified approval of `i` by `p` for this deployment. -/
-def supports (dep : Deployment F C PK D Sig) (i : CustodyIntent) (p : Nat)
+abbrev supports (dep : Deployment F C PK D Sig) (i : CustodyIntent) (p : Nat)
     (m : Approval F) : Bool :=
   decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
     decide (m.intent = i) && dep.verifyShare p m.share
 
 /-- The first verified share from `p` for `i` in the buffer. -/
-def approvalShare (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
+abbrev approvalShare (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
     (i : CustodyIntent) (p : Nat) : Option F :=
   (buffer.find? (supports dep i p)).map (fun m => m.share)
 
 /-- The coordinator's quorum check: enough distinct enrolled approvers, each with a verified
     buffered approval of exactly this intent for this deployment. -/
-def quorumReady (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
+abbrev quorumReady (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
     (approvers : List Nat) (i : CustodyIntent) : Bool :=
   decide (dep.quorum.threshold ≤ approvers.length) &&
   decide approvers.Nodup &&
   approvers.all (fun p =>
     decide (p < dep.quorum.numParties) && (approvalShare dep buffer i p).isSome)
 
-/-- Lagrange reconstruction at zero from points and shares. -/
+/-- Lagrange reconstruction at zero from distinct evaluation points and shares (zero on duplicate points). -/
 @[expose] def reconstruct (pts shares : List F) : F :=
-  ringListSum (List.zipWith (fun x s => lagrangeToAdditiveShare pts x s) pts shares)
+  if pts.Nodup then
+    ringListSum (List.zipWith (fun x s => lagrangeToAdditiveShare pts x s) pts shares)
+  else
+    CommRingOps.zero
 
 /-- The key the coordinator reconstructs for `i` from the buffered shares of `approvers`. -/
-def quorumKey (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
+abbrev quorumKey (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
     (approvers : List Nat) (i : CustodyIntent) : F :=
   reconstruct (approvers.map dep.point)
     (approvers.map (fun p => (approvalShare dep buffer i p).getD CommRingOps.zero))
@@ -191,7 +194,7 @@ def quorumKey (dep : Deployment F C PK D Sig) (buffer : List (Approval F))
 /-- Coordinator transition: the ledger's signing transition, signing with the reconstructed key
     and counting the named approvers only when the quorum check passes. A WAL replay needs no
     quorum, exactly as in the ledger. -/
-def executeStep (dep : Deployment F C PK D Sig) (st : State F PK D Sig)
+abbrev executeStep (dep : Deployment F C PK D Sig) (st : State F PK D Sig)
     (d : Nat) (approvers : List Nat) (i : CustodyIntent) (ab : Bool) :
     Option (State F PK D Sig × CustodyOutcome Sig) :=
   (custodyLedgerSign dep.digests (dep.signWith (quorumKey dep st.buffer approvers i)) st.ledger
@@ -435,6 +438,7 @@ theorem reconstruct_dealt_shares (dep : Deployment F C PK D Sig) (hWf : dep.Well
       approvers hNd hEnrolled
   have hLen : (approvers.map dep.point).length = approvers.length := List.length_map _
   unfold reconstruct
+  rw [dc_if_pos hPtsNd]
   have hMap : approvers.map (fun a =>
       lagrangeToAdditiveShare (approvers.map dep.point) (dep.point a) (dep.trueShare a)) =
       (approvers.map dep.point).map (fun x =>
@@ -1040,7 +1044,7 @@ theorem quorumKey_eq_secret_or_collision {F C PK D Sig : Type}
         (fun p hp => (hAll p hp).1)
     have hLen : (approvers.map dep.point).length = approvers.length := List.length_map _
     unfold quorumKey reconstruct
-    rw [hShares, zipWith_map_map]
+    rw [dc_if_pos hPtsNd, hShares, zipWith_map_map]
     have hMap : approvers.map (fun a =>
         lagrangeToAdditiveShare (approvers.map dep.point) (dep.point a) (dep.trueShare a)) =
         (approvers.map dep.point).map (fun x =>
@@ -1131,18 +1135,18 @@ structure ShareOpeningDeployment (Share Contrib Preimage PK SK D Sig : Type) whe
   commitmentOf : Nat → Nat → CustodyIntent → BitVec 256
 
 /-- Enrolled public key derived via `sigScheme.derivePk`. -/
-def ShareOpeningDeployment.pk {Share Contrib Preimage PK SK D Sig : Type}
+abbrev ShareOpeningDeployment.pk {Share Contrib Preimage PK SK D Sig : Type}
     (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) : PK :=
   dep.sigScheme.derivePk dep.dealtSk
 
 /-- Dealt per-request share contribution of custodian `p` for intent `i`. -/
-def ShareOpeningDeployment.trueContrib {Share Contrib Preimage PK SK D Sig : Type}
+abbrev ShareOpeningDeployment.trueContrib {Share Contrib Preimage PK SK D Sig : Type}
     (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
     (p : Nat) (i : CustodyIntent) : Contrib :=
   dep.evalContrib p (dep.dealShare p) dep.deploymentId i
 
 /-- Ideal signing oracle induced by `sigScheme.sign dealtSk`. -/
-def ShareOpeningDeployment.idealOracle {Share Contrib Preimage PK SK D Sig : Type}
+abbrev ShareOpeningDeployment.idealOracle {Share Contrib Preimage PK SK D Sig : Type}
     (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) (d : D) : Sig :=
   (dep.sigScheme.sign dep.dealtSk (dep.epochOfDigest d) (dep.encodeDigest d)).getD dep.fallbackSig
 
@@ -1257,7 +1261,7 @@ structure ShareOpeningDeployment.WellFormed {Share Contrib Preimage PK SK D Sig 
       else none
 
 /-- Reactive `Spec.Machine` for the share-opening threshold custody system. -/
-def shareOpeningMachine {Share Contrib Preimage PK SK D Sig : Type} [DecidableEq D]
+abbrev shareOpeningMachine {Share Contrib Preimage PK SK D Sig : Type} [DecidableEq D]
     (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
     Machine (ShareState Share Contrib PK D Sig) (ShareTurn Contrib) (ShareEvent Share Sig) where
   Init st := st = ShareState.init dep
@@ -1353,6 +1357,28 @@ def observedSharePreimages {Share Contrib Preimage PK SK D Sig : Type}
       dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ::
       observedSharePreimages dep rest
     | _ => observedSharePreimages dep rest
+
+theorem observedSharePreimages_nil {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig) :
+    observedSharePreimages dep ([] : List (ShareTurn Contrib × ShareEvent Share Sig)) = [] := by
+  rfl
+
+theorem observedSharePreimages_cons {Share Contrib Preimage PK SK D Sig : Type}
+    (dep : ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
+    (turn : ShareTurn Contrib) (ev : ShareEvent Share Sig)
+    (rest : List (ShareTurn Contrib × ShareEvent Share Sig)) :
+    observedSharePreimages dep ((turn, ev) :: rest) =
+      match turn with
+      | .approve p d i =>
+        dep.preimageOf p d i (dep.evalContrib p (dep.dealShare p) d i) ::
+        dep.preimageOf p d i (dep.trueContrib p i) ::
+        observedSharePreimages dep rest
+      | .inject m =>
+        dep.preimageOf m.sender m.deploymentId m.intent m.contrib ::
+        dep.preimageOf m.sender m.deploymentId m.intent (dep.trueContrib m.sender m.intent) ::
+        observedSharePreimages dep rest
+      | _ => observedSharePreimages dep rest := by
+  cases turn <;> rfl
 
 /-- Finite-set injectivity (`InjOn`) of `commit` restricted to an observed preimage list `obs`.
     Unlike global injectivity on `Bytes → BitVec 256` (which is mathematically `False`), this
@@ -1524,6 +1550,7 @@ private theorem shareOpeningStep_execute_buffer {Share Contrib Preimage PK SK D 
         | none => rw [hAss] at h; cases h
         | some sig =>
           rw [hAss] at h
+          dsimp only at h
           by_cases hV : dep.sigScheme.verify c.ledger.enrolledPk
               (dep.encodeDigest (dep.digests.digest dep.deploymentId i)) sig = true
           · rw [sh_if_pos hV] at h

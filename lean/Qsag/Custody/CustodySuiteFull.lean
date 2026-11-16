@@ -3336,6 +3336,33 @@ def policyGuardStep (g : StatefulPolicyGuard) (tx : TransactionIntent) :
                burned_intent_nonces := tx.nonce :: g.burned_intent_nonces }
     .accepted g' { intent := tx, canonicalBytes := encodeTransactionIntent tx }
 
+theorem policyGuardStep_accepted_inv {g g' : StatefulPolicyGuard}
+    {tx : TransactionIntent} {env : ApprovedIntentEnvelope}
+    (h : policyGuardStep g tx = .accepted g' env) :
+    tx.nonce ∉ g.burned_intent_nonces ∧
+    g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap ∧
+    g'.accumulated_spend = g.accumulated_spend + tx.amount_units ∧
+    g'.burned_intent_nonces = tx.nonce :: g.burned_intent_nonces ∧
+    g'.velocity_window_cap = g.velocity_window_cap ∧
+    env.intent = tx ∧
+    env.canonicalBytes = encodeTransactionIntent tx := by
+  unfold policyGuardStep at h
+  if c1 : (tx.window_id != g.window_id) = true then simp [c1] at h
+  else if c2 : (tx.policy_digest != g.pinned_policy_digest) = true then simp [c1, c2] at h
+  else if c3 : (tx.authority_digest != g.pinned_authority_digest) = true then simp [c1, c2, c3] at h
+  else if c4 : ¬ (tx.recipient ∈ g.allowed_recipients) then simp [c1, c2, c3, c4] at h
+  else if c5 : ¬ (tx.amount_units ≤ g.per_tx_cap) then simp [c1, c2, c3, c4, c5] at h
+  else if c6 : ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+    simp [c1, c2, c3, c4, c5, c6] at h
+  else if c7 : tx.nonce ∈ g.burned_intent_nonces then simp [c1, c2, c3, c4, c5, c6, c7] at h
+  else
+    simp only [c1, c2, c3, c4, c5, c6, c7, Bool.false_eq_true, ↓reduceIte,
+      CustodyStepOutcome.accepted.injEq] at h
+    rcases h with ⟨rfl, rfl⟩
+    have hCap : g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap :=
+      Nat.le_of_not_lt (fun hLt => c6 (Nat.not_le_of_lt hLt))
+    exact ⟨c7, hCap, rfl, rfl, rfl, rfl, rfl⟩
+
 /-- Compatibility alias for codec-evidence harnesses inside `CustodySuiteFull`. -/
 abbrev policyCodecEvidenceStep :
     StatefulPolicyGuard → TransactionIntent →

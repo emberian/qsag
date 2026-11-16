@@ -2335,6 +2335,62 @@ theorem signingLog_eq (cfg : SigningConfig) (sk : PqSecretKey) (dep i : Nat) (v 
 theorem initial_eq (id : VaultIdentity) : initial id = { identity := id } := by
   rfl
 
+/-- Defining equation of `publicKeys`. -/
+theorem publicKeys_eq (d : Deployment) (i : Nat) :
+    publicKeys d i = derivePublicKey d.signer.suite d.signer.params (d.keys i) := by
+  rfl
+
+/-- Defining equation of `query`. -/
+theorem query_eq (cfg : SigningConfig) (dep party : Nat) (r : Intent) :
+    query cfg dep party r = ⟨payload dep party r, cfg.randomness, r.leaf, cfg.grindLimit⟩ := by
+  rfl
+
+/-- Defining equation of `sign`. -/
+theorem sign_eq (cfg : SigningConfig) (sk : PqSecretKey) (dep party : Nat) (r : Intent) :
+    sign cfg sk dep party r =
+      evalProductionStatefulSign cfg.suite cfg.params sk (payload dep party r)
+        cfg.randomness r.leaf cfg.grindLimit := by
+  rfl
+
+/-- Defining equation of `roundCommitment`. -/
+theorem roundCommitment_eq (dep : Nat) (r : Intent) :
+    roundCommitment dep r = cshake256Bytes roundDomain (payload dep 0 r) := by
+  rfl
+
+/-- Defining equation of `checkRound`. -/
+theorem checkRound_eq (p : RoundPolicy) (dep : Nat) (r : Intent) (digest : List UInt8)
+    (ops : List RoundOpening) :
+    checkRound p dep r digest ops =
+      (decide (digest.length = 32 ∧ digest = p.digest r.session ∧ digest = roundCommitment dep r) &&
+       decide (ops ≠ [] ∧ ops.map (fun o => o.opening.partyId) = p.roster ∧ p.roster.Nodup) &&
+       ops.all (fun o => decide (o.session = r.session ∧ o.round = r.round) &&
+         verifyBdozPairMac (p.keys r.session r.round) o.opening)) := by
+  rfl
+
+/-- Defining equation of `mintGuard`. -/
+theorem mintGuard_eq (p : RoundPolicy) (cap : Nat) (v : Vault) (b : Burn) :
+    mintGuard p cap v b =
+      (decide (v.durable.nextLeaf ≤ b.intent.leaf ∧ b.intent.round = v.durable.nextRound ∧
+         v.durable.spent + b.intent.spend ≤ cap ∧
+         b.intent.session ∉ v.durable.burned.map (fun x => x.intent.session) ∧
+         b.intent.message ≠ []) &&
+       checkRound p v.identity.deploymentId b.intent b.digest b.openings) := by
+  rfl
+
+/-- Defining equation of `holdsIdentity`. -/
+theorem holdsIdentity_eq (cfg : SigningConfig) (sk : PqSecretKey) (party : Nat)
+    (id : VaultIdentity) :
+    holdsIdentity cfg sk party id =
+      decide (party = id.party ∧
+        publicKeyId (derivePublicKey cfg.suite cfg.params sk) = id.keyId) := by
+  rfl
+
+/-- Defining equation of `custodianIdentity`. -/
+theorem custodianIdentity_eq (cfg : SigningConfig) (dep i : Nat) (sk : PqSecretKey) :
+    custodianIdentity cfg dep i sk =
+      ⟨dep, i, publicKeyId (derivePublicKey cfg.suite cfg.params sk)⟩ := by
+  rfl
+
 end Qsag.Custody
 end
 set_option maxRecDepth 4096
