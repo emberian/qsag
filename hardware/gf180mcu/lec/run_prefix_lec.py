@@ -3,11 +3,13 @@
 Run inside the remote container. Negative control mutates the carry merge.
 """
 import sys
+import os
+os.environ["LEC_BUILD"] = "build/lec_prefix"
 sys.argv = [sys.argv[0], 'prefix', '75']
 import run_lec as l
 
 src = l.GL
-for width in (1, 32, 64, 65, 66, 76):
+for width in (1, 32, 35, 64, 65, 66, 76):
     tag = f'prefix{width}'
     rtl = l.smt(src, 'qsag_prefix_add', tag, f'N={width}')
     n = lambda x: f'(|{tag}_n {x}| s)'
