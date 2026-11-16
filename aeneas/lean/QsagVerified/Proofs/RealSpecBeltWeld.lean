@@ -2,7 +2,6 @@ module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.BeltAckProvenance
 public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
-import all Qsag.Custody.JortsBeltLatchAndQuorumSwitching
 
 /-!
 This is the local authenticated guard's certificate-to-mask refinement. It includes
