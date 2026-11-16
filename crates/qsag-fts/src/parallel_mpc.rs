@@ -2339,7 +2339,10 @@ mod pending_opening_tests {
         }
         // The first allocation replaced an empty buffer: nothing to erase yet.
         assert_eq!(pending_probe::counts(), pending_probe::Counts::default());
-        assert_eq!(share.pending_openings.len(), share.pending_openings.capacity());
+        assert_eq!(
+            share.pending_openings.len(),
+            share.pending_openings.capacity()
+        );
         let (opened, wire) = entry(4);
         share.push_pending_opening(opened, wire);
         assert_eq!(

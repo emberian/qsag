@@ -2260,7 +2260,11 @@ mod gilboa_tests {
 mod bound_and_package_tests {
     use super::*;
 
-    fn config(roster: Vec<u16>, power_count: usize, beaver_count: usize) -> ParallelSeededDkgConfig {
+    fn config(
+        roster: Vec<u16>,
+        power_count: usize,
+        beaver_count: usize,
+    ) -> ParallelSeededDkgConfig {
         ParallelSeededDkgConfig {
             params: ParallelSeededParams {
                 tree_height: 2,
@@ -2311,8 +2315,12 @@ mod bound_and_package_tests {
         let mut states: Vec<_> = roster
             .iter()
             .map(|&id| {
-                ParallelSeededDkgRound1State::begin(config(roster.clone(), 4, 0), id, [id as u8; 32])
-                    .unwrap()
+                ParallelSeededDkgRound1State::begin(
+                    config(roster.clone(), 4, 0),
+                    id,
+                    [id as u8; 32],
+                )
+                .unwrap()
             })
             .collect();
         let commits: Vec<_> = states

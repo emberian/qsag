@@ -218,34 +218,32 @@ impl OutputGate {
         spn_rounds: usize,
         mut values: Vec<u128>,
     ) -> Self {
-        let held = if signature_chains
-            && verified_shape(params)
-            && values.len() == 2 * WOTS_CS_CHAINS
-        {
-            let rounds = u8::try_from(spn_rounds).unwrap_or(0);
-            // Sized exactly: the sessions are built in the slots they stay in.
-            let mut sessions = Vec::with_capacity(values.len() / 2);
-            for pair in values.as_chunks::<2>().0 {
-                sessions.push(HeldSession(FtsDeferredMacSession::new_spn48_evaluated(
-                    session, rounds, pair[0], pair[1],
-                )));
-            }
-            ct_zeroize_u128s(&mut values);
-            Held::Verified(sessions)
-        } else {
-            let binding = candidate_binding(&values);
-            Held::Bound {
-                guard: Some(Box::new(ConsumingOpeningGuard2Lane::new(
-                    session,
-                    0,
+        let held =
+            if signature_chains && verified_shape(params) && values.len() == 2 * WOTS_CS_CHAINS {
+                let rounds = u8::try_from(spn_rounds).unwrap_or(0);
+                // Sized exactly: the sessions are built in the slots they stay in.
+                let mut sessions = Vec::with_capacity(values.len() / 2);
+                for pair in values.as_chunks::<2>().0 {
+                    sessions.push(HeldSession(FtsDeferredMacSession::new_spn48_evaluated(
+                        session, rounds, pair[0], pair[1],
+                    )));
+                }
+                ct_zeroize_u128s(&mut values);
+                Held::Verified(sessions)
+            } else {
+                let binding = candidate_binding(&values);
+                Held::Bound {
+                    guard: Some(Box::new(ConsumingOpeningGuard2Lane::new(
+                        session,
+                        0,
+                        binding,
+                        u64::from(spn_rounds == 48 && !values.is_empty()),
+                    ))),
+                    values,
                     binding,
-                    u64::from(spn_rounds == 48 && !values.is_empty()),
-                ))),
-                values,
-                binding,
-                permit: None,
-            }
-        };
+                    permit: None,
+                }
+            };
         Self { session, held }
     }
 
@@ -546,7 +544,11 @@ mod tests {
 
     #[test]
     fn a_destroyed_session_holds_no_candidates_in_any_state() {
-        let fresh = || HeldSession(FtsDeferredMacSession::new_spn48_evaluated([7; 32], 48, 5, 6));
+        let fresh = || {
+            HeldSession(FtsDeferredMacSession::new_spn48_evaluated(
+                [7; 32], 48, 5, 6,
+            ))
+        };
         // Never checked.
         let mut unchecked = fresh();
         unchecked.destroy();
@@ -571,7 +573,11 @@ mod tests {
     /// drop relies on this for any session a refusal has not already destroyed.
     #[test]
     fn dropping_a_live_session_quarantines_it() {
-        let fresh = || HeldSession(FtsDeferredMacSession::new_spn48_evaluated([7; 32], 48, 5, 6));
+        let fresh = || {
+            HeldSession(FtsDeferredMacSession::new_spn48_evaluated(
+                [7; 32], 48, 5, 6,
+            ))
+        };
         // Unchecked candidates.
         probe::reset();
         drop(fresh());

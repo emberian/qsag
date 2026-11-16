@@ -56,7 +56,12 @@ impl CommittedZeroGates {
 
     fn step_void<E>(
         &mut self,
-        mut transition: impl FnMut(HdCommittedZeroTest) -> (HdCommittedZeroTest, Result<E, qsag_verified::CredHdGuardError>),
+        mut transition: impl FnMut(
+            HdCommittedZeroTest,
+        ) -> (
+            HdCommittedZeroTest,
+            Result<E, qsag_verified::CredHdGuardError>,
+        ),
     ) -> Result<(), HdError> {
         let mut failed = self.gates.is_empty();
         let old = core::mem::take(&mut self.gates);
