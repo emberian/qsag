@@ -62,14 +62,14 @@ Base names are unique except for three pairs, which must be cited with their dir
 | `Protocol/Threshold/` | 19 | 58,091 | `ThresholdMpc`, `Preprocessing`, `LatticePreprocessingFull`, `RlweExtraction`, `DensePcgTaps`, `MaliciousSecurity`, `MacBlind`, `SacrificeFreezeSample`, `Rss256TernaryRound`, `Rss256TwoPassProductProof`, `BaggyAndRss256Security`, `RssSlhFullSecurity`, `IdealTsig`, `ThresholdApproval`, `ThresholdMlDsaSecurity`, `ThresholdMlDsaAndToprf`, `MlDsa44Parameters`, `ProductionCoinReduction`, `ParametricThresholdAndUnlinkableQsa`. |
 | `Protocol/Credentials/` | 5 | 11,634 | `AdvancedMpcAndCreds`, `BlindVcQromSecurity`, `BlindVcCollisionFinder`, `RepetitionCutAndChoose`, `ToprfMachine`. |
 | `Protocol/Migration/` | 3 | 10,344 | `ActiveMigrationZeroTest`, `HdToprfAndMigrationSecurity`, `PallasAndBlsMigration`. |
-| `Custody/` | 7 | 26,567 | `CustodySuiteFull`, `SeparatedCustody`, `JortsBeltLatchAndQuorumSwitching`, `ShamirThresholdCustodyRefinement`, `DistributedThresholdCustodyRefinement`, `MacaroonAttenuation`, `VolatileCoupon`. |
+| `Custody/` | 7 | 26,795 | `CustodySuiteFull`, `SeparatedCustody`, `JortsBeltLatchAndQuorumSwitching`, `ShamirThresholdCustodyRefinement`, `DistributedThresholdCustodyRefinement`, `MacaroonAttenuation`, `VolatileCoupon`. |
 | `Exec/` | 45 | 40,874 | Execution models (Section 5): `SimulationSpine`, `RefinesBridges`, `GuardedMachineSim`, `InteractiveUcEngine` and the `Interactive*` contracts, `ThresholdIdealService`, `ThresholdIdealDurableService`, the `RssParticipant*` and `RssSigning*` machines, `RssProductionProfile`, `PosixCrashWal`, `TwoSlotHwmBase`, `TwoSlotHwmCrashModel`, `CeremonyAtomicityAndAbort`, `SeparatedCustodyResource`, `SeparatedCustodyUc`, `WhirKernels`, `SpecOracle`, and `PlatformContractInstances` (storage). |
 | `Exec/Tactic/` | 1 | 638 | `SimulationKit`. |
 | `Machine/` | 44 | 56,493 | Compiled code and extracted MIR: `ConstantTimeIsa`, the `X86*`, `Arm64*` and `Isa*` instruction models, `Elf64Headers`, `Elf64Parse`, `ElfParse`, `ElfBytes`, `ArParse`, `ElfVerify`, `ElfFixtures`, `ElfFixtureVerify`, `ElfInvCerts`, `ElfFunctionalEquiv`, `McRefine`, `McSymbols`, `SydTv`, `ClmulSimd`, `Gf128ClmulLoopAgreement`, `FaultAndSpeculativeSafety`, `IsaCosim`, `SpirvSimt`, `SpirvFixtures`, `MirSpecBridgeCore`, `MirSpecBridge`, `MirSpecBridgeWitnesses`, and `PlatformContractInstances` (SIMT and timing). |
 | `Machine/Tactic/` | 1 | 29 | `KernelRfl`. |
 | `Top/` | 9 | 10,251 | Composed statements (Section 6). |
-| `Tests/` | 43 | 17,131 | Executed instances, `#eval` checks and mutation teeth (`*Teeth`, `*Checks`, `*Run`, `*Tests`, `CompositionInstances`, `GuardedMachineSimInstance`, `MathAndCoding`, `OracleAndQrom`, `EquationExports`). |
-| **Total** | **269** | **410,854** | |
+| `Tests/` | 43 | 17,104 | Executed instances, `#eval` checks and mutation teeth (`*Teeth`, `*Checks`, `*Run`, `*Tests`, `CompositionInstances`, `GuardedMachineSimInstance`, `MathAndCoding`, `OracleAndQrom`, `EquationExports`). |
+| **Total** | **269** | **411,055** | |
 
 The counts are the output of this command on the working tree during the semantic audit
 on 2026-11-16; module counts were stable across the session in which this table was written, while line
