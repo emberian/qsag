@@ -1,11 +1,11 @@
 module
 public import QsagWhirVerified.Arithmetic
-import all QsagWhirVerified.Types
-import all QsagWhirVerified.Funs
-import all QsagWhirVerified.Arithmetic
-import all Aeneas
-import all Aeneas.Std.Types
-import all Aeneas.Std.Containers
+public import QsagWhirVerified.Types
+public import QsagWhirVerified.Funs
+public import QsagWhirVerified.Arithmetic
+public import Aeneas
+public import Aeneas.Std.Types
+public import Aeneas.Std.Containers
 public section
 open Aeneas Aeneas.Std
 namespace qsag_whir_verified.proofs
@@ -18,7 +18,7 @@ set_option maxRecDepth 4096
 
 theorem decode_canonical_u64_spec (x : U64) :
     decode_canonical_u64 x = .ok (if x.val < goldilocksMod then some x else none) := by
-  unfold decode_canonical_u64
+  simp only [decode_canonical_u64.public_eqs]
   by_cases h : x < GOLDILOCKS_P
   · have hv : x.val < goldilocksMod := by
       simpa only [UScalar.lt_iff_val, goldilocks_p_val] using h
@@ -50,7 +50,7 @@ theorem decode_canonical_ext4_spec (a b c d : U64) :
     decode_canonical_ext4 a b c d =
       .ok (if IsCanonical a ∧ IsCanonical b ∧ IsCanonical c ∧ IsCanonical d
            then some ⟨a, b, c, d⟩ else none) := by
-  unfold decode_canonical_ext4
+  simp only [decode_canonical_ext4.public_eqs]
   by_cases ha : a < GOLDILOCKS_P
   · have ha' : IsCanonical a := by simpa only [UScalar.lt_iff_val, goldilocks_p_val] using ha
     by_cases hb : b < GOLDILOCKS_P
@@ -92,7 +92,7 @@ theorem decode_canonical_ext4_none_iff (a b c d : U64) :
 
 theorem ext_eq_spec (x y : Ext4) : ext_eq x y = .ok (decide (x = y)) := by
   cases x; cases y
-  simp only [ext_eq]
+  simp only [ext_eq.public_eqs]
   split <;> simp_all
   split <;> simp_all
   split <;> simp_all
@@ -105,7 +105,7 @@ theorem verify_affine_duet_fold_step_spec (v0 v1 : Ext4) (iy it : U64)
     (alpha claimed : Ext4) :
     verify_affine_duet_fold_step v0 v1 iy it alpha claimed =
       .ok (decide (duetValue v0 v1 iy it alpha = claimed)) := by
-  unfold verify_affine_duet_fold_step
+  simp only [verify_affine_duet_fold_step.public_eqs]
   rw [duet_refines]
   simp [Result.bind, ext_eq_spec]
 
@@ -152,7 +152,7 @@ theorem fold_duet_affine_ext4_spec
     (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) :
     fold_duet_affine_ext4 v0 v1 iy it yy theta alpha beta =
       .ok (cwyzValue v0 v1 iy it yy theta alpha beta) := by
-  exact cwyz_duet_refines v0 v1 iy it yy theta alpha beta
+  simpa only [fold_duet_affine_ext4.public_eqs] using cwyz_duet_refines v0 v1 iy it yy theta alpha beta
 
 /-- Recover the even/odd coset components and apply the three affine challenges. -/
 theorem fold_duet_affine_ext4_coset_sound
@@ -170,7 +170,7 @@ theorem verify_cwyz_duet_fold_step_spec
     (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta claimed : Ext4) :
     verify_cwyz_duet_fold_step v0 v1 iy it yy theta alpha beta claimed =
       .ok (decide (cwyzValue v0 v1 iy it yy theta alpha beta = claimed)) := by
-  unfold verify_cwyz_duet_fold_step
+  simp only [verify_cwyz_duet_fold_step.public_eqs]
   rw [cwyz_duet_refines]
   simp [Result.bind, ext_eq_spec]
 
@@ -197,7 +197,7 @@ theorem verify_cwyz_bridge_claim_step_spec
     (w0 w1 w2 w3 w4 claim phi theta alpha beta claimed_next : Ext4) :
     verify_cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta claimed_next =
       .ok (decide (cwyzBridgeValue w0 w1 w2 w3 w4 claim phi theta alpha beta = claimed_next)) := by
-  unfold verify_cwyz_bridge_claim_step
+  simp only [verify_cwyz_bridge_claim_step.public_eqs]
   rw [cwyz_bridge_claim_step_refines]
   simp [Result.bind, ext_eq_spec]
 
@@ -243,8 +243,9 @@ theorem eval_quadratic_sumcheck_wire_hypercube_spec
 theorem affine_cascade_claim_step_spec
     (acc w0 w1 eval_at_point shifted_eval : Ext4) :
     affine_cascade_claim_step acc w0 w1 eval_at_point shifted_eval =
-      .ok (extAdd (extAdd acc (extMul w0 eval_at_point)) (extMul w1 shifted_eval)) :=
-  affine_cascade_claim_step_refines acc w0 w1 eval_at_point shifted_eval
+      .ok (extAdd (extAdd acc (extMul w0 eval_at_point)) (extMul w1 shifted_eval)) := by
+  simpa only [affineCascadeStepValue.public_eqs] using
+    affine_cascade_claim_step_refines acc w0 w1 eval_at_point shifted_eval
 
 /-! ## 3. Arbitrary-Slice Horner Evaluation & Polynomial Pin Verification -/
 
@@ -271,7 +272,7 @@ private theorem eval_ext4_univariate_loop_fuel
     have hgt : ¬ (rem > 0#usize) := by
       simp [GT.gt, UScalar.lt_iff_val, hrem]
     have hbody : eval_ext4_univariate_at_base_loop.body coeffs z acc rem = .ok (.done acc) := by
-      unfold eval_ext4_univariate_at_base_loop.body
+      simp only [eval_ext4_univariate_at_base_loop.body.public_eqs]
       simp only [hgt, ↓reduceIte, pure_eq_ok]
     rw [loopFuel_succ]
     dsimp only
@@ -297,7 +298,7 @@ private theorem eval_ext4_univariate_loop_fuel
       simp only [Slice.index_usize, hrem1, dite_eq_left hk']
     have hbody : eval_ext4_univariate_at_base_loop.body coeffs z acc rem =
         .ok (.cont (extAdd (extScale acc z) (coeffs.val[k']'hk'), rem1)) := by
-      unfold eval_ext4_univariate_at_base_loop.body
+      simp only [eval_ext4_univariate_at_base_loop.body.public_eqs]
       simp only [hgt, ↓reduceIte, hsub, bind_eq_result_bind, result_bind_ok,
         hidx, ext_scale_refines, ext_add_refines, pure_eq_ok]
     rw [loopFuel_succ]
@@ -312,7 +313,7 @@ private theorem eval_ext4_univariate_loop_fuel
 
 theorem eval_ext4_univariate_at_base_spec (coeffs : Slice Ext4) (z : U64) :
     eval_ext4_univariate_at_base coeffs z = .ok (hornerSpec coeffs.val z extZero) := by
-  unfold eval_ext4_univariate_at_base eval_ext4_univariate_at_base_loop
+  simp only [eval_ext4_univariate_at_base.public_eqs, eval_ext4_univariate_at_base_loop.public_eqs]
   have hfuel : coeffs.val.length + 1 ≤ loopMaxFuel := by
     have hlen : (Slice.len coeffs).val = coeffs.val.length := Slice.len_val coeffs
     rw [← hlen]
@@ -330,7 +331,7 @@ theorem eval_ext4_univariate_at_base_ascending_sound (coeffs : Slice Ext4) (z : 
 /-- The production-named entry point returns the complete ascending-degree polynomial. -/
 theorem eval_univariate_ext4_at_base_spec (coeffs : Slice Ext4) (z : U64) :
     eval_univariate_ext4_at_base coeffs z = .ok (hornerSpec coeffs.val z extZero) := by
-  exact eval_ext4_univariate_at_base_spec coeffs z
+  simpa only [eval_univariate_ext4_at_base.public_eqs] using eval_ext4_univariate_at_base_spec coeffs z
 
 theorem eval_univariate_ext4_at_base_ascending_sound (coeffs : Slice Ext4) (z : U64)
     (hcan : ∀ c ∈ coeffs.val, IsCanonicalExt4 c) :
@@ -341,7 +342,7 @@ theorem verify_ext4_univariate_at_base_pin_spec
     (coeffs : Slice Ext4) (z : U64) (expected : Ext4) :
     verify_ext4_univariate_at_base_pin coeffs z expected =
       .ok (decide (hornerSpec coeffs.val z extZero = expected)) := by
-  unfold verify_ext4_univariate_at_base_pin
+  simp only [verify_ext4_univariate_at_base_pin.public_eqs]
   rw [eval_ext4_univariate_at_base_spec]
   simp [Result.bind, ext_eq_spec]
 
@@ -397,7 +398,7 @@ theorem verify_stage_pow_mask_spec (word : U64) (bits : U32) :
       apply BitVec.eq_of_toNat_eq
       have hm : mask.bv.toNat = shifted.val - 1 := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hge1)
       rw [hm, hsh_val, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
-    simp only [verify_stage_pow_mask, hng, ↓reduceIte, hshl, bind_eq_result_bind,
+    simp only [verify_stage_pow_mask.public_eqs, hng, ↓reduceIte, hshl, bind_eq_result_bind,
       result_bind_ok, hsub, lift_eq_ok, pure_eq_ok]
     congr 1
     by_cases hw : word.bv &&& BitVec.ofNat 64 (2 ^ bits.val - 1) = 0
@@ -414,7 +415,7 @@ theorem verify_stage_pow_mask_spec (word : U64) (bits : U32) :
       simp only [GT.gt, UScalar.lt_iff_val]
       have h32 : (32#u32).val = 32 := rfl
       omega
-    simp [verify_stage_pow_mask, hg, hb]
+    simp [verify_stage_pow_mask.public_eqs, hg, hb]
 
 theorem verify_stage_pow_mask_sound (word : U64) (bits : U32) :
     verify_stage_pow_mask word bits = .ok true ↔
@@ -506,7 +507,7 @@ private theorem verify_ood_pin_eq_loop_fuel
     have hd2 : supplied.val.drop i.val = [] := by
       rw [hi_eq, hlen, List.drop_length]
     have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.done true) := by
-      unfold verify_ood_pin_eq_loop.body
+      simp only [verify_ood_pin_eq_loop.body.public_eqs]
       simp only [hlt, ↓reduceIte]
     rw [loopFuel_succ]
     try dsimp only
@@ -527,7 +528,7 @@ private theorem verify_ood_pin_eq_loop_fuel
     · have hval_ne : (expected.val[i.val]'hilt) ≠ (supplied.val[i.val]'hslt) := by
         simpa [bne_iff_ne] using hne
       have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.done false) := by
-        unfold verify_ood_pin_eq_loop.body
+        simp only [verify_ood_pin_eq_loop.body.public_eqs]
         simp only [hlt_u, ↓reduceIte, hidx_e, hidx_s, bind_eq_result_bind, result_bind_ok, hne]
       rw [loopFuel_succ]
       try dsimp only
@@ -551,7 +552,7 @@ private theorem verify_ood_pin_eq_loop_fuel
         rw [BitVec.toNat_add, Nat.mod_eq_of_lt hadd_lt]
         rfl
       have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.cont i1) := by
-        unfold verify_ood_pin_eq_loop.body
+        simp only [verify_ood_pin_eq_loop.body.public_eqs]
         simp only [hlt_u, ↓reduceIte, hidx_e, hidx_s, bind_eq_result_bind, result_bind_ok,
           hne, Bool.false_eq_true, hadd]
       rw [loopFuel_succ]
@@ -573,9 +574,10 @@ theorem verify_ood_pin_eq_spec (expected supplied : Slice U64) :
     have hloop := verify_ood_pin_eq_loop_fuel expected supplied hlen
       expected.val.length 0#usize (by omega)
     rw [h0, List.drop_zero, List.drop_zero] at hloop
+    rw [verify_ood_pin_eq_loop.public_eqs]
     exact loop_ok_of_loopFuel hfuel hloop
-  unfold verify_ood_pin_eq
-  dsimp only
+  simp only [verify_ood_pin_eq.public_eqs]
+  try dsimp only
   split
   · rename_i hne
     have hlist_ne : expected.val ≠ supplied.val := by
@@ -607,7 +609,7 @@ theorem verify_ood_pin_eq_false_iff (expected supplied : Slice U64) :
 theorem canonical_query_group_idx_spec (raw groups : U64) :
     canonical_query_group_idx raw groups =
       .ok (if groups.val = 0 then none else some (UScalar.ofNat .U64 (raw.val % groups.val))) := by
-  unfold canonical_query_group_idx
+  simp only [canonical_query_group_idx.public_eqs]
   by_cases hg : groups = 0#u64
   · subst hg
     rfl
@@ -664,7 +666,7 @@ theorem step_merkle_pair_order_spec
            else if (idx.val >>> level.val) % 2 = 0
                 then some { tag := 0#u8, left := node, right := sibling }
                 else some { tag := 0#u8, left := sibling, right := node }) := by
-  unfold step_merkle_pair_order
+  simp only [step_merkle_pair_order.public_eqs]
   have h64 : (64#u32).val = 64 := rfl
   by_cases hge : level >= 64#u32
   · have hge' : 64 ≤ level.val := by
@@ -786,7 +788,7 @@ private theorem checked_quorum_sum_loop_fuel
     · have hmin' : total.val < minG.val := by simpa only [UScalar.lt_iff_val] using hmin
       have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
           .ok (.done none) := by
-        unfold checked_quorum_sum_loop.body
+        simp only [checked_quorum_sum_loop.body.public_eqs]
         simp only [hlt, ↓reduceIte, hmin]
       rw [hbody, result_bind_ok]
       simp [hmin']
@@ -796,7 +798,7 @@ private theorem checked_quorum_sum_loop_fuel
         rw [UScalar.val_ofNat, UScalarTy.numBits_u64, Nat.mod_eq_of_lt total.bv.isLt]
       have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
           .ok (.done (some total)) := by
-        unfold checked_quorum_sum_loop.body
+        simp only [checked_quorum_sum_loop.body.public_eqs]
         simp only [hlt, ↓reduceIte, hmin]
       rw [hbody, result_bind_ok]
       simp [hmin', htot]
@@ -821,7 +823,7 @@ private theorem checked_quorum_sum_loop_fuel
     · have hm0' : m.val = 0 := by rw [hm0]; rfl
       have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
           .ok (.done none) := by
-        unfold checked_quorum_sum_loop.body
+        simp only [checked_quorum_sum_loop.body.public_eqs]
         simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok, hm0]
       rw [hbody, result_bind_ok]
       simp [hm0']
@@ -830,7 +832,7 @@ private theorem checked_quorum_sum_loop_fuel
       · have hcm' : c.val < m.val := by simpa only [UScalar.lt_iff_val] using hcm
         have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
              .ok (.done none) := by
-          unfold checked_quorum_sum_loop.body
+          simp only [checked_quorum_sum_loop.body.public_eqs]
           simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
             hm0, hcm]
         rw [hbody, result_bind_ok]
@@ -859,7 +861,7 @@ private theorem checked_quorum_sum_loop_fuel
             omega
           have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
               .ok (.done none) := by
-            unfold checked_quorum_sum_loop.body
+            simp only [checked_quorum_sum_loop.body.public_eqs]
             simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
               hm0, Bool.false_eq_true, hcm, hsub_c, htc]
           rw [hbody, result_bind_ok]
@@ -898,7 +900,7 @@ private theorem checked_quorum_sum_loop_fuel
               omega
             have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
                 .ok (.done none) := by
-              unfold checked_quorum_sum_loop.body
+              simp only [checked_quorum_sum_loop.body.public_eqs]
               simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
                 hm0, Bool.false_eq_true, hcm, hsub_c, htc, hadd_t, hsub_m, htm]
             rw [hbody, result_bind_ok]
@@ -929,7 +931,7 @@ private theorem checked_quorum_sum_loop_fuel
               rfl
             have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
                 .ok (.cont (total1, min_total1, i1)) := by
-              unfold checked_quorum_sum_loop.body
+              simp only [checked_quorum_sum_loop.body.public_eqs]
               simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
                 hm0, Bool.false_eq_true, hcm, hsub_c, htc, hadd_t, hsub_m, htm, hadd_m, hadd_i]
             rw [hbody, result_bind_ok]
@@ -1043,7 +1045,8 @@ private theorem quorumSuffixPure_some_iff
 theorem checked_quorum_sum_total
     (counts minimums : Slice U64) (minimum_global : U64) :
     ∃ out : Option U64, checked_quorum_sum counts minimums minimum_global = .ok out := by
-  unfold checked_quorum_sum core.slice.Slice.is_empty
+  simp only [checked_quorum_sum.public_eqs]
+  simp only [core.slice.Slice.is_empty_eq]
   simp only [bind_eq_result_bind, result_bind_ok]
   by_cases hemp : counts.val.isEmpty
   · exact ⟨none, by simp [hemp]⟩
@@ -1058,7 +1061,7 @@ theorem checked_quorum_sum_total
       by_cases hg0 : minimum_global = 0#u64
       · exact ⟨none, by simp [hg0]⟩
       · simp only [hg0, ↓reduceIte]
-        unfold checked_quorum_sum_loop
+        simp only [checked_quorum_sum_loop.public_eqs]
         have hfuel : counts.val.length + 1 ≤ loopMaxFuel := by
           rw [← Slice.len_val counts]
           exact usize_lt_loopMaxFuel (Slice.len counts)
@@ -1072,7 +1075,8 @@ theorem checked_quorum_sum_sound
     (counts minimums : Slice U64) (minimum_global total : U64) :
     checked_quorum_sum counts minimums minimum_global = .ok (some total) ↔
       QuorumSumSpec counts.val minimums.val minimum_global total.val := by
-  unfold checked_quorum_sum core.slice.Slice.is_empty
+  simp only [checked_quorum_sum.public_eqs]
+  simp only [core.slice.Slice.is_empty_eq]
   simp only [bind_eq_result_bind, result_bind_ok]
   by_cases hemp : counts.val.isEmpty
   · have hnil : counts.val = [] := List.isEmpty_iff.mp hemp
@@ -1103,7 +1107,7 @@ theorem checked_quorum_sum_sound
             hg0 (UScalar.eq_of_val_eq (by change _ = 0; exact hz))
           exact Nat.pos_of_ne_zero hnz
         simp only [hg0, ↓reduceIte]
-        unfold checked_quorum_sum_loop
+        simp only [checked_quorum_sum_loop.public_eqs]
         have hfuel : counts.val.length + 1 ≤ loopMaxFuel := by
           rw [← Slice.len_val counts]
           exact usize_lt_loopMaxFuel (Slice.len counts)
@@ -1167,7 +1171,7 @@ theorem tooth_unchecked_mod_p_accepts_aliased_field_limb :
     (0#u64 % GOLDILOCKS_P : Result U64) = .ok 0#u64 ∧
     (GOLDILOCKS_P % GOLDILOCKS_P : Result U64) = .ok 0#u64 ∧
     decode_canonical_u64 GOLDILOCKS_P = .ok none := by
-  simp only [decode_canonical_u64, GOLDILOCKS_P]
+  simp only [decode_canonical_u64.public_eqs, GOLDILOCKS_P.public_eqs]
   decide
 
 /-- `#tooth`: `decode_canonical_ext4` rejects a non-canonical 4th limb even when limbs 0..2 are canonical,
@@ -1289,7 +1293,8 @@ theorem tooth_coset_inverse_premises_inhabited_and_fold_rejects_perturbation :
        18446744069414584290#u64, 18446744069414584286#u64⟩
       13835058052060938241#u64 9223372034707292161#u64 ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ =
       ⟨28#u64, 42#u64, 54#u64, 78#u64⟩ := by
-    unfold duetValue extAdd extSub extScale extMul
+    simp only [duetValue.public_eqs]
+    unfold extAdd extSub extScale extMul
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide
@@ -1299,7 +1304,8 @@ theorem tooth_coset_inverse_premises_inhabited_and_fold_rejects_perturbation :
       13835058052060938241#u64 9223372034707292161#u64 4#u64
       ⟨2#u64, 0#u64, 0#u64, 0#u64⟩ ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ ⟨7#u64, 0#u64, 0#u64, 0#u64⟩ =
       ⟨970#u64, 1304#u64, 1504#u64, 1904#u64⟩ := by
-    unfold cwyzValue extAdd extSub extScale extMul
+    simp only [cwyzValue.public_eqs]
+    unfold extAdd extSub extScale extMul
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide
@@ -1337,7 +1343,8 @@ theorem tooth_cwyz_bridge_accepts_dual_and_rejects_perturbation :
       ⟨2#u64, 0#u64, 0#u64, 0#u64⟩ ⟨2#u64, 0#u64, 0#u64, 0#u64⟩
       ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ ⟨7#u64, 0#u64, 0#u64, 0#u64⟩ =
       ⟨344#u64, 1089#u64, 0#u64, 0#u64⟩ := by
-    unfold cwyzBridgeValue extAdd extSub extMul
+    simp only [cwyzBridgeValue.public_eqs]
+    unfold extAdd extSub extMul
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide
@@ -1392,19 +1399,22 @@ theorem tooth_quadratic_sumcheck_wire_nontrivial_eval :
   refine ⟨?_, ?_, ?_⟩
   · rw [eval_quadratic_sumcheck_wire_refines]
     congr 1
-    unfold quadraticWireValue extAdd extSub extMul extZero
+    simp only [quadraticWireValue.public_eqs]
+    unfold extAdd extSub extMul extZero
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide
   · rw [eval_quadratic_sumcheck_wire_refines]
     congr 1
-    unfold quadraticWireValue extAdd extSub extMul extOne
+    simp only [quadraticWireValue.public_eqs]
+    unfold extAdd extSub extMul extOne
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide
   · rw [eval_quadratic_sumcheck_wire_refines]
     congr 1
-    unfold quadraticWireValue extAdd extSub extMul
+    simp only [quadraticWireValue.public_eqs]
+    unfold extAdd extSub extMul
     apply eval_ext4_concrete <;>
       simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
       decide

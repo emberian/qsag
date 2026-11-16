@@ -1,4 +1,6 @@
 module
+public import Qsag.Exec.WhirKernels
+public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Aeneas
 public import QsagWhirVerified.Types
 public import QsagWhirVerified.Funs
@@ -49,3 +51,32 @@ abbrev IsCanonicalExt4 (x : Ext4) : Prop :=
   | c :: rest, z => extAdd c (extScale (evalPolyAscending rest z) z)
 
 end qsag_whir_verified.proofs
+
+public section
+namespace qsag_whir_verified.proofs
+def fieldAbs (x : U64) : Qsag.Goldilocks := Qsag.Goldilocks.ofNat x.val
+
+def ext4Abs (x : Ext4) : Qsag.Aggregation.GoldilocksExt4 :=
+  Qsag.Math.aggOfPolynomial ⟨fieldAbs x.a, fieldAbs x.b, fieldAbs x.c, fieldAbs x.d⟩
+
+def canonicalFieldWord (x : Qsag.Goldilocks) : U64 := ⟨BitVec.ofNat 64 x.val⟩
+
+def canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) : Ext4 :=
+  ⟨canonicalFieldWord z.c0.c0, canonicalFieldWord z.c1.c0,
+   canonicalFieldWord z.c0.c1, canonicalFieldWord z.c1.c1⟩
+
+def extInv (x : Ext4) : Ext4 :=
+  canonicalExt4 (Qsag.Aggregation.GoldilocksExt4.inv (ext4Abs x))
+
+def canonicalQuadraticWirePoly (c0 c2 claim : Qsag.Aggregation.GoldilocksExt4) :
+    List Qsag.Aggregation.GoldilocksExt4 :=
+  [c0, Qsag.Aggregation.GoldilocksExt4.sub
+         (Qsag.Aggregation.GoldilocksExt4.sub claim (Qsag.Aggregation.GoldilocksExt4.add c0 c0))
+         c2, c2]
+
+def ext4SliceWords (xs : List Qsag.Aggregation.GoldilocksExt4) : List U64 :=
+  xs.flatMap (fun z =>
+    [canonicalFieldWord z.c0.c0, canonicalFieldWord z.c0.c1,
+     canonicalFieldWord z.c1.c0, canonicalFieldWord z.c1.c1])
+end qsag_whir_verified.proofs
+end

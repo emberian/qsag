@@ -361,3 +361,358 @@ theorem tooth_quadratic_sumcheck_wire_nontrivial_eval :
       .ok ⟨41#u64, 0#u64, 0#u64, 0#u64⟩ := sorry
 
 end qsag_whir_verified.proofs
+
+public section
+namespace qsag_whir_verified.proofs
+
+theorem fieldAbs_add (x y : U64) :
+    fieldAbs (fieldAdd x y) = Qsag.Goldilocks.add (fieldAbs x) (fieldAbs y) := by sorry
+
+theorem fieldAbs_mul (x y : U64) :
+    fieldAbs (fieldMul x y) = Qsag.Goldilocks.mul (fieldAbs x) (fieldAbs y) := by sorry
+
+theorem fieldAbs_sub (x y : U64) :
+    fieldAbs (fieldSub x y) = Qsag.Goldilocks.sub (fieldAbs x) (fieldAbs y) := by sorry
+
+theorem ext4Abs_add (x y : Ext4) :
+    ext4Abs (extAdd x y) = Qsag.Aggregation.GoldilocksExt4.add (ext4Abs x) (ext4Abs y) := by sorry
+
+theorem ext4Abs_sub (x y : Ext4) :
+    ext4Abs (extSub x y) = Qsag.Aggregation.GoldilocksExt4.sub (ext4Abs x) (ext4Abs y) := by sorry
+
+theorem ext4Abs_mul (x y : Ext4) :
+    ext4Abs (extMul x y) = Qsag.Aggregation.GoldilocksExt4.mul (ext4Abs x) (ext4Abs y) := by sorry
+
+theorem ext_mul_refines_exec (x y : Ext4) :
+    (ext4Abs <$> ext_mul x y) =
+      .ok (Qsag.Aggregation.GoldilocksExt4.mul (ext4Abs x) (ext4Abs y)) := by sorry
+
+theorem cwyz_bridge_refines_exec
+    (e0 e1 e2 e3 e4 claim phi theta alpha beta : Ext4) :
+    (ext4Abs <$> cwyz_bridge_claim_step e0 e1 e2 e3 e4 claim phi theta alpha beta) =
+      .ok (Qsag.Exec.hemBridgeClaimStep
+        (ext4Abs e0) (ext4Abs e1) (ext4Abs e2) (ext4Abs e3) (ext4Abs e4)
+        (ext4Abs claim) (ext4Abs phi) (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta)) := by sorry
+
+theorem ext4Abs_scale (x : Ext4) (s : U64) :
+    ext4Abs (extScale x s) = Qsag.Aggregation.GoldilocksExt4.mul (ext4Abs x)
+      (Qsag.Aggregation.GoldilocksExt4.embedBase (fieldAbs s)) := by sorry
+
+theorem fieldAbs_zero : fieldAbs 0#u64 = Qsag.Goldilocks.zero := by sorry
+
+theorem fieldAbs_one : fieldAbs 1#u64 = Qsag.Goldilocks.one := by sorry
+
+theorem ext4Abs_zero : ext4Abs extZero = Qsag.Aggregation.GoldilocksExt4.zero := by sorry
+
+theorem ext4Abs_one : ext4Abs extOne = Qsag.Aggregation.GoldilocksExt4.one := by sorry
+
+theorem duet_fold_refines_exec (v0 v1 : Ext4) (iy it : U64) (alpha : Ext4) :
+    (ext4Abs <$> duet_fold v0 v1 iy it alpha) =
+      .ok (Qsag.Exec.hemDuetFold (ext4Abs v0) (ext4Abs v1)
+        (fieldAbs iy) (fieldAbs it) (ext4Abs alpha)) := by sorry
+
+theorem hornerSpec_refines_exec (coeffs : List Ext4) (z : U64) (init : Ext4) :
+    ext4Abs (hornerSpec coeffs z init) =
+      Qsag.Exec.hemHorner (coeffs.map ext4Abs) (fieldAbs z) (ext4Abs init) := by sorry
+
+theorem eval_ext4_univariate_refines_exec (coeffs : Slice Ext4) (z : U64) :
+    (ext4Abs <$> eval_ext4_univariate_at_base coeffs z) =
+      .ok (Qsag.Exec.hemHorner (coeffs.val.map ext4Abs) (fieldAbs z)) := by sorry
+
+theorem fold_duet_affine_ext4_refines_exec
+    (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) (x : Qsag.Goldilocks)
+    (hit : fieldAbs it = Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2))
+    (hiy : fieldAbs iy = Qsag.Goldilocks.mul (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2))
+      (Qsag.Goldilocks.inv x))
+    (hyy : fieldAbs yy = Qsag.Goldilocks.mul x x) :
+    (ext4Abs <$> fold_duet_affine_ext4 v0 v1 iy it yy theta alpha beta) =
+      .ok (Qsag.Exec.hemAffineDuetFold (ext4Abs v0) (ext4Abs v1) x
+        (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta)) := by sorry
+
+theorem canonicalFieldWord_val (x : Qsag.Goldilocks) :
+    (canonicalFieldWord x).val = x.val := by sorry
+
+theorem isCanonical_canonicalFieldWord (x : Qsag.Goldilocks) :
+    IsCanonical (canonicalFieldWord x) := by sorry
+
+theorem fieldAbs_canonicalFieldWord (x : Qsag.Goldilocks) :
+    fieldAbs (canonicalFieldWord x) = x := by sorry
+
+theorem canonicalFieldWord_fieldAbs {x : U64} (hx : IsCanonical x) :
+    canonicalFieldWord (fieldAbs x) = x := by sorry
+
+theorem fieldAbs_inj {x y : U64} (hx : IsCanonical x) (hy : IsCanonical y) :
+    fieldAbs x = fieldAbs y ↔ x = y := by sorry
+
+theorem isCanonicalExt4_canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) :
+    IsCanonicalExt4 (canonicalExt4 z) := by sorry
+
+theorem ext4Abs_canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) :
+    ext4Abs (canonicalExt4 z) = z := by sorry
+
+theorem canonicalExt4_ext4Abs {x : Ext4} (hx : IsCanonicalExt4 x) :
+    canonicalExt4 (ext4Abs x) = x := by sorry
+
+theorem ext4Abs_inj {x y : Ext4} (hx : IsCanonicalExt4 x) (hy : IsCanonicalExt4 y) :
+    ext4Abs x = ext4Abs y ↔ x = y := by sorry
+
+theorem isCanonicalExt4_extInv (x : Ext4) : IsCanonicalExt4 (extInv x) := by sorry
+
+theorem ext4Abs_inv (x : Ext4) :
+    ext4Abs (extInv x) = Qsag.Aggregation.GoldilocksExt4.inv (ext4Abs x) := by sorry
+
+theorem ext_mul_extInv_ok_one {x : Ext4}
+    (hz : ext4Abs x ≠ Qsag.Aggregation.GoldilocksExt4.zero) :
+    ext_mul x (extInv x) = .ok extOne := by sorry
+
+theorem canonicalFieldWord_two_inv :
+    fieldMul 2#u64 (canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2))) = 1#u64 := by sorry
+
+theorem canonicalFieldWord_two_x_inv {x : Qsag.Goldilocks} (hx : x ≠ Qsag.Goldilocks.zero) :
+    fieldMul (fieldMul 2#u64 (canonicalFieldWord x))
+      (canonicalFieldWord (Qsag.Goldilocks.mul
+        (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x))) = 1#u64 := by sorry
+
+theorem fold_duet_affine_ext4_canonical_twiddles
+    (v0 v1 : Ext4) (x : Qsag.Goldilocks) (theta alpha beta : Ext4) :
+    (ext4Abs <$> fold_duet_affine_ext4 v0 v1
+      (canonicalFieldWord (Qsag.Goldilocks.mul
+        (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x)))
+      (canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)))
+      (canonicalFieldWord (Qsag.Goldilocks.mul x x)) theta alpha beta) =
+      .ok (Qsag.Exec.hemAffineDuetFold (ext4Abs v0) (ext4Abs v1) x
+        (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta)) := by sorry
+
+theorem decode_canonical_u64_refines_qsag (x : U64) :
+    (Option.map fieldAbs <$> decode_canonical_u64 x) =
+      .ok (if x.val < Qsag.goldilocksPrime then some (Qsag.Goldilocks.ofNat x.val) else none) := by sorry
+
+theorem decode_canonical_ext4_refines_qsag (a b c d : U64) :
+    (Option.map ext4Abs <$> decode_canonical_ext4 a b c d) =
+      .ok (if a.val < Qsag.goldilocksPrime ∧ b.val < Qsag.goldilocksPrime ∧
+              c.val < Qsag.goldilocksPrime ∧ d.val < Qsag.goldilocksPrime
+           then some (Qsag.Math.aggOfPolynomial ⟨fieldAbs a, fieldAbs b, fieldAbs c, fieldAbs d⟩)
+           else none) := by sorry
+
+theorem decode_canonical_ext4_canonicalExt4 (z : Qsag.Aggregation.GoldilocksExt4) :
+    decode_canonical_ext4
+      (canonicalFieldWord z.c0.c0) (canonicalFieldWord z.c1.c0)
+      (canonicalFieldWord z.c0.c1) (canonicalFieldWord z.c1.c1) =
+      .ok (some (canonicalExt4 z)) := by sorry
+
+theorem embedBase_inv (a : Qsag.Goldilocks) :
+    Qsag.Aggregation.GoldilocksExt4.embedBase (Qsag.Goldilocks.inv a) =
+      Qsag.LawfulField.inv (Qsag.Aggregation.GoldilocksExt4.embedBase a) := by sorry
+
+theorem hemAffineDuetFold_eq_hemVirtualFoldOracle
+    (v0 v1 theta alpha beta : Qsag.Aggregation.GoldilocksExt4)
+    (x : Qsag.Goldilocks)
+    (curDom foldDom : List Qsag.Aggregation.GoldilocksExt4)
+    (curOracle : Nat → Qsag.Aggregation.GoldilocksExt4) (idx : Nat)
+    (hx : curDom.getD (2 * idx) Qsag.CommRingOps.one =
+      Qsag.Aggregation.GoldilocksExt4.embedBase x)
+    (hy : foldDom.getD idx Qsag.CommRingOps.zero =
+      Qsag.Aggregation.GoldilocksExt4.embedBase (Qsag.Goldilocks.mul x x))
+    (ha : curOracle (2 * idx) = v0)
+    (hb : curOracle (2 * idx + 1) = v1) :
+    Qsag.Exec.hemAffineDuetFold v0 v1 x theta alpha beta =
+      Qsag.hemVirtualFoldOracle theta alpha beta curDom foldDom curOracle idx := by sorry
+
+theorem fold_duet_affine_ext4_refines_hemVirtualFoldOracle
+    (v0 v1 : Ext4) (x : Qsag.Goldilocks) (theta alpha beta : Ext4)
+    (curDom foldDom : List Qsag.Aggregation.GoldilocksExt4)
+    (curOracle : Nat → Qsag.Aggregation.GoldilocksExt4) (idx : Nat)
+    (hx : curDom.getD (2 * idx) Qsag.CommRingOps.one =
+      Qsag.Aggregation.GoldilocksExt4.embedBase x)
+    (hy : foldDom.getD idx Qsag.CommRingOps.zero =
+      Qsag.Aggregation.GoldilocksExt4.embedBase (Qsag.Goldilocks.mul x x))
+    (ha : curOracle (2 * idx) = ext4Abs v0)
+    (hb : curOracle (2 * idx + 1) = ext4Abs v1) :
+    (ext4Abs <$> fold_duet_affine_ext4 v0 v1
+      (canonicalFieldWord (Qsag.Goldilocks.mul
+        (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x)))
+      (canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)))
+      (canonicalFieldWord (Qsag.Goldilocks.mul x x)) theta alpha beta) =
+      .ok (Qsag.hemVirtualFoldOracle
+        (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta) curDom foldDom curOracle idx) := by sorry
+
+theorem verify_cwyz_duet_fold_step_sound_qsag
+    (v0 v1 : Ext4) (x : Qsag.Goldilocks) (theta alpha beta claimed : Ext4)
+    (curDom foldDom : List Qsag.Aggregation.GoldilocksExt4)
+    (curOracle : Nat → Qsag.Aggregation.GoldilocksExt4) (idx : Nat)
+    (hx : curDom.getD (2 * idx) Qsag.CommRingOps.one =
+      Qsag.Aggregation.GoldilocksExt4.embedBase x)
+    (hy : foldDom.getD idx Qsag.CommRingOps.zero =
+      Qsag.Aggregation.GoldilocksExt4.embedBase (Qsag.Goldilocks.mul x x))
+    (ha : curOracle (2 * idx) = ext4Abs v0)
+    (hb : curOracle (2 * idx + 1) = ext4Abs v1) :
+    verify_cwyz_duet_fold_step v0 v1
+      (canonicalFieldWord (Qsag.Goldilocks.mul
+        (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x)))
+      (canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)))
+      (canonicalFieldWord (Qsag.Goldilocks.mul x x))
+      theta alpha beta claimed = .ok true ↔
+      (IsCanonicalExt4 claimed ∧
+       ext4Abs claimed = Qsag.hemVirtualFoldOracle
+         (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta) curDom foldDom curOracle idx) := by sorry
+
+theorem verify_affine_duet_fold_step_sound_qsag
+    (v0 v1 : Ext4) (iy it : U64) (alpha claimed : Ext4) :
+    verify_affine_duet_fold_step v0 v1 iy it alpha claimed = .ok true ↔
+      (IsCanonicalExt4 claimed ∧
+       ext4Abs claimed = Qsag.Exec.hemDuetFold
+         (ext4Abs v0) (ext4Abs v1) (fieldAbs iy) (fieldAbs it) (ext4Abs alpha)) := by sorry
+
+theorem verify_affine_duet_fold_step_roots_le_one
+    (v0 v1 claimed : Ext4) (iy it : U64)
+    (S : List Qsag.Aggregation.GoldilocksExt4) (hS : S.Nodup)
+    (hne : ∃ r : Qsag.Aggregation.GoldilocksExt4,
+      Qsag.Exec.hemDuetFold (ext4Abs v0) (ext4Abs v1) (fieldAbs iy) (fieldAbs it) r ≠
+        ext4Abs claimed) :
+    (S.filter (fun r => decide
+      (verify_affine_duet_fold_step v0 v1 iy it (canonicalExt4 r) claimed = .ok true))).length ≤ 1 := by sorry
+
+theorem hemBridgeClaimStep_eq_hemBridgeFoldClaim
+    (e0 e1 e2 e3 e4 claim phi theta alpha beta : Qsag.Aggregation.GoldilocksExt4) :
+    Qsag.Exec.hemBridgeClaimStep e0 e1 e2 e3 e4 claim phi theta alpha beta =
+      Qsag.hemBridgeFoldClaim claim e0 e1 e2 e3 e4 phi theta alpha beta := by sorry
+
+theorem verify_cwyz_bridge_claim_step_sound_qsag
+    (w0 w1 w2 w3 w4 claim phi theta alpha beta claimed_next : Ext4) :
+    verify_cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta claimed_next = .ok true ↔
+      (IsCanonicalExt4 claimed_next ∧
+       ext4Abs claimed_next = Qsag.hemBridgeFoldClaim
+         (ext4Abs claim) (ext4Abs w0) (ext4Abs w1) (ext4Abs w2) (ext4Abs w3) (ext4Abs w4)
+         (ext4Abs phi) (ext4Abs theta) (ext4Abs alpha) (ext4Abs beta)) := by sorry
+
+theorem affine_cascade_claim_step_refines_evalCascadeClaim
+    (w0 w1 eval_at_point shifted_eval : Ext4)
+    (es ss : List Qsag.Aggregation.GoldilocksExt4)
+    (abs : List (Qsag.Aggregation.GoldilocksExt4 × Qsag.Aggregation.GoldilocksExt4)) :
+    (ext4Abs <$> affine_cascade_claim_step
+      (canonicalExt4 (Qsag.evalCascadeClaim es ss abs)) w0 w1 eval_at_point shifted_eval) =
+      .ok (Qsag.evalCascadeClaim
+        (ext4Abs eval_at_point :: es)
+        (ext4Abs shifted_eval :: ss)
+        ((ext4Abs w0, ext4Abs w1) :: abs)) := by sorry
+
+theorem eval_quadratic_sumcheck_wire_refines_qsag
+    (c0 c2 sum_claim r : Ext4) :
+    (ext4Abs <$> eval_quadratic_sumcheck_wire c0 c2 sum_claim r) =
+      .ok (Qsag.RoundPoly.evalCoeffs
+        (canonicalQuadraticWirePoly (ext4Abs c0) (ext4Abs c2) (ext4Abs sum_claim))
+        (ext4Abs r)) := by sorry
+
+theorem eval_quadratic_sumcheck_wire_bad_challenges_le_two
+    (G S : List Qsag.Aggregation.GoldilocksExt4) (c0 c2 sum_claim : Ext4)
+    (hS : S.Nodup) (hG : G.length ≤ 3)
+    (hFalse : ext4Abs sum_claim ≠ Qsag.CommRingOps.add
+      (Qsag.RoundPoly.evalCoeffs G Qsag.CommRingOps.zero)
+      (Qsag.RoundPoly.evalCoeffs G Qsag.CommRingOps.one)) :
+    (S.filter (fun r => decide
+      ((ext4Abs <$> eval_quadratic_sumcheck_wire c0 c2 sum_claim (canonicalExt4 r)) =
+        .ok (Qsag.RoundPoly.evalCoeffs G r)))).length ≤ 2 := by sorry
+
+theorem hemHorner_zero_eq_evalCoeffs
+    (cs : List Qsag.Aggregation.GoldilocksExt4) (z : Qsag.Goldilocks) :
+    Qsag.Exec.hemHorner cs z Qsag.Aggregation.GoldilocksExt4.zero =
+      Qsag.RoundPoly.evalCoeffs cs (Qsag.Aggregation.GoldilocksExt4.embedBase z) := by sorry
+
+theorem eval_ext4_univariate_at_base_refines_evalCoeffs (coeffs : Slice Ext4) (z : U64) :
+    (ext4Abs <$> eval_ext4_univariate_at_base coeffs z) =
+      .ok (Qsag.RoundPoly.evalCoeffs (coeffs.val.map ext4Abs)
+        (Qsag.Aggregation.GoldilocksExt4.embedBase (fieldAbs z))) := by sorry
+
+theorem verify_ext4_univariate_at_base_pin_sound_qsag
+    (coeffs : Slice Ext4) (z : U64) (expected : Ext4) :
+    verify_ext4_univariate_at_base_pin coeffs z expected = .ok true ↔
+      (IsCanonicalExt4 expected ∧
+       ext4Abs expected = Qsag.RoundPoly.evalCoeffs (coeffs.val.map ext4Abs)
+         (Qsag.Aggregation.GoldilocksExt4.embedBase (fieldAbs z))) := by sorry
+
+theorem verify_ext4_univariate_at_base_pin_roots_le_degree
+    (d : Nat) (candA candB : Slice Ext4) (S : List Qsag.Goldilocks)
+    (hNodup : S.Nodup)
+    (hLenA : candA.val.length ≤ d + 1) (hLenB : candB.val.length ≤ d + 1)
+    (hDiff : ∃ z₀ : Qsag.Aggregation.GoldilocksExt4,
+      Qsag.RoundPoly.evalCoeffs (candA.val.map ext4Abs) z₀ ≠
+        Qsag.RoundPoly.evalCoeffs (candB.val.map ext4Abs) z₀) :
+    (S.filter (fun z =>
+      let pinA := canonicalExt4 (Qsag.RoundPoly.evalCoeffs (candA.val.map ext4Abs)
+        (Qsag.Aggregation.GoldilocksExt4.embedBase z))
+      decide (verify_ext4_univariate_at_base_pin candB (canonicalFieldWord z) pinA = .ok true))).length ≤
+      d := by sorry
+
+theorem ext4SliceWords_injective :
+    ∀ {xs ys : List Qsag.Aggregation.GoldilocksExt4},
+      ext4SliceWords xs = ext4SliceWords ys → xs = ys := by sorry
+
+theorem verify_ood_pin_eq_canonical_ext4_iff
+    (expected supplied : Slice U64)
+    (expPins supPins : List Qsag.Aggregation.GoldilocksExt4)
+    (he : expected.val = ext4SliceWords expPins)
+    (hs : supplied.val = ext4SliceWords supPins) :
+    verify_ood_pin_eq expected supplied = .ok true ↔ expPins = supPins := by sorry
+
+theorem verify_stage_pow_mask_refines_canonical (word : U64) (bits : U32) :
+    verify_stage_pow_mask word bits =
+      .ok (Qsag.Aggregation.whirStagePowMask word.val bits.val) := by sorry
+
+theorem verify_stage_pow_mask_16_iff_verifyWhirStagePow
+    (chal : List UInt8) (powNonce word : U64)
+    (hLen : chal.length = 32)
+    (hLow16 : word.val % 65536 =
+      let dig := Qsag.cshake256Bytes Qsag.Aggregation.whirPowCustomization
+        (chal ++ Qsag.Aggregation.leBytes 8 powNonce.val)
+      (dig.getD 0 0).toNat + 256 * (dig.getD 1 0).toNat) :
+    verify_stage_pow_mask word 16#u32 = .ok true ↔
+      Qsag.Aggregation.verifyWhirStagePow chal powNonce.val 16 = true := by sorry
+
+theorem step_merkle_pair_order_canonical_parity
+    (idx : U64) (level : U32) (node sibling : Array U8 32#usize) (pair : MerklePair)
+    (h : step_merkle_pair_order idx level node sibling = .ok (some pair)) :
+    level.val < 64 ∧
+    pair.tag = 0#u8 ∧
+    Qsag.encodeMultiFrame [pair.left.val.map (fun b => UInt8.ofNat b.val),
+                           pair.right.val.map (fun b => UInt8.ofNat b.val)] =
+      Qsag.encodeMultiFrame
+        (if (idx.val / 2 ^ level.val) % 2 = 0
+         then [node.val.map (fun b => UInt8.ofNat b.val),
+               sibling.val.map (fun b => UInt8.ofNat b.val)]
+         else [sibling.val.map (fun b => UInt8.ofNat b.val),
+               node.val.map (fun b => UInt8.ofNat b.val)]) := by sorry
+
+theorem checked_quorum_sum_sound_qsag
+    (counts minimums : Slice U64) (minimum_global total : U64) :
+    checked_quorum_sum counts minimums minimum_global = .ok (some total) ↔
+      (counts.val ≠ [] ∧
+       counts.val.length = minimums.val.length ∧
+       0 < minimum_global.val ∧
+       (∀ i (hi : i < counts.val.length) (hmi : i < minimums.val.length),
+         0 < (minimums.val[i]'hmi).val ∧ (minimums.val[i]'hmi).val ≤ (counts.val[i]'hi).val) ∧
+       total.val = (counts.val.map UScalar.val).sum ∧
+       minimum_global.val ≤ total.val ∧
+       (counts.val.map UScalar.val).sum < 2 ^ 64) := by sorry
+
+theorem tooth_canonical_cwyz_fold_rejects_wrong_twiddle_and_forged_claim :
+    let x := Qsag.Goldilocks.ofNat 3
+    let v0 := canonicalExt4 Qsag.Aggregation.GoldilocksExt4.one
+    let v1 := canonicalExt4 Qsag.Aggregation.GoldilocksExt4.zero
+    let honest := Qsag.Exec.hemAffineDuetFold
+      Qsag.Aggregation.GoldilocksExt4.one Qsag.Aggregation.GoldilocksExt4.zero
+      x Qsag.Aggregation.GoldilocksExt4.zero
+      Qsag.Aggregation.GoldilocksExt4.zero Qsag.Aggregation.GoldilocksExt4.zero
+    let forged := Qsag.Aggregation.GoldilocksExt4.add honest Qsag.Aggregation.GoldilocksExt4.one
+    let iyGood := canonicalFieldWord (Qsag.Goldilocks.mul
+      (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2)) (Qsag.Goldilocks.inv x))
+    let iyBad := canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2))
+    let it := canonicalFieldWord (Qsag.Goldilocks.inv (Qsag.Goldilocks.ofNat 2))
+    let yy := canonicalFieldWord (Qsag.Goldilocks.mul x x)
+    verify_cwyz_duet_fold_step v0 v1 iyGood it yy extZero extZero extZero
+      (canonicalExt4 honest) = .ok true ∧
+    verify_cwyz_duet_fold_step v0 v1 iyGood it yy extZero extZero extZero
+      (canonicalExt4 forged) = .ok false ∧
+    verify_cwyz_duet_fold_step v0 v1 iyBad it yy extZero extZero extZero
+      (canonicalExt4 honest) = .ok false := by sorry
+end qsag_whir_verified.proofs
+end
