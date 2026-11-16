@@ -1663,7 +1663,7 @@ def gf128PolyMulAux {w v : Nat} (a : BitVec w) (b : BitVec v) : Nat → BitVec w
 def gf128PolyMul {w v : Nat} (a : BitVec w) (b : BitVec v) : BitVec w :=
   gf128PolyMulAux a b v
 
-private theorem gf128XorLeftComm {w : Nat} (a b c : BitVec w) :
+theorem gf128XorLeftComm {w : Nat} (a b c : BitVec w) :
     a ^^^ (b ^^^ c) = b ^^^ (a ^^^ c) := by
   rw [← BitVec.xor_assoc, BitVec.xor_comm a b, BitVec.xor_assoc]
 
@@ -1671,7 +1671,7 @@ private theorem gf128XorCancel {w : Nat} (a b : BitVec w) :
     a ^^^ (a ^^^ b) = b := by
   rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
 
-private theorem gf128XorShuffle {w : Nat} (a b c d : BitVec w) :
+theorem gf128XorShuffle {w : Nat} (a b c d : BitVec w) :
     (a ^^^ b) ^^^ (c ^^^ d) = (a ^^^ c) ^^^ (b ^^^ d) := by
   simp only [BitVec.xor_assoc]
   rw [← BitVec.xor_assoc b c d, BitVec.xor_comm b c, BitVec.xor_assoc]
@@ -2188,7 +2188,7 @@ theorem gf128_clmul_karatsuba_cross (a0 a1 b0 b1 : UInt64) :
     gf128PolyMul_xor_left, gf128PolyMul_xor_right]
   simp [BitVec.xor_assoc, BitVec.xor_comm, gf128XorLeftComm, gf128XorCancel]
 
-private theorem gf128FourWords_shift (p00 p01 p10 p11 : Vec128) :
+theorem gf128FourWords_shift (p00 p01 p10 p11 : Vec128) :
     gf128Words (p11.w0 ^^^ p01.w1 ^^^ p10.w1) p11.w1 ++
       gf128Words p00.w0 (p00.w1 ^^^ p01.w0 ^^^ p10.w0) =
     (gf128Words p00.w0 p00.w1).setWidth 256 ^^^
@@ -2694,5 +2694,10 @@ end Qsag.SydTv
 public section
 namespace Qsag
 #export_eqns ctEq32WordArm
+#export_eqns gf128PolyMulAux gf128PolyMul gf128Modulus gf128ReduceStep gf128ReduceAux gf128Reduce gf128FieldMul
+#export_eqns subBorrow hiLoEps addCarry mulRed gf128Words gf128WordReduce
+
+/-- Kernel-evaluated fixture: `1 · 1 = 1` in the portable GF(2^128) product. -/
+theorem gf128FieldMul_one_one : gf128FieldMul 1#128 1#128 = 1#128 := by decide +kernel
 end Qsag
 end

@@ -7,6 +7,7 @@ public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.ElfFixtureVerify
 public import Qsag.Machine.McRefine
 public import Qsag.Machine.SydTv
+public import Qsag.Machine.Gf128ClmulLoopAgreement
 import Qsag.Tactic.Prelude
 public import Qsag.Machine.ElfFixtures
 public import Qsag.Machine.ElfInvCerts
@@ -33,6 +34,9 @@ attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLa
   Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
 set_option autoImplicit false
 set_option maxRecDepth 65536
+
+/-- Refutes an equation between concrete Keccak states by exhibiting a differing lane. -/
+local macro "kstate_ne" : tactic => `(tactic| first | exact fun h => absurd (congrArg KState.a0 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a1 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a2 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a3 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a4 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a5 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a6 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a7 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a8 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a9 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a10 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a11 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a12 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a13 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a14 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a15 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a16 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a17 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a18 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a19 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a20 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a21 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a22 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a23 h) (by decide +kernel) | exact fun h => absurd (congrArg KState.a24 h) (by decide +kernel))
 
 /-! ## §1. Byte-Decoded `BitVec 64` Operational Value Semantics & Exact-Step `RET` Relation -/
 
@@ -205,7 +209,7 @@ theorem bank32ToU64_get (b : Bank32 (BitVec 64)) (i : Nat) (hi : i < 32) :
     (`rsp=4`) preservation predicate over `BitVec 64` states. -/
 def X86CalleeSavedPreserved (st st' : X86BvState) : Prop :=
   st'.gpr.get 3 = st.gpr.get 3 ∧
-  st'.gpr.get 4 = st.gpr.get 4 ∧
+  st'.gpr.get 4 = st.gpr.get 4 + 8 ∧
   st'.gpr.get 5 = st.gpr.get 5 ∧
   st'.gpr.get 12 = st.gpr.get 12 ∧
   st'.gpr.get 13 = st.gpr.get 13 ∧
@@ -247,6 +251,15 @@ attribute [local simp]
   b16get_8 b16get_9 b16get_10 b16get_11 b16get_12 b16get_13 b16get_14 b16get_15
   b32get_0 b32get_1 b32get_2
 
+/-- Halted-pc transport for an x86 `ret`: the final pc is the return address loaded from the
+    entry stack slot of the final memory. -/
+theorem x86_ret_pc_of_roundtrip (s1 : X86State) (st : X86BvState)
+    (hpc : s1.pc = (readMem64 s1.mem (st.toX86State.gpr.get 4)).toNat) :
+    (X86BvState.ofX86State s1).pc =
+      (readMem64 (X86BvState.ofX86State s1).toX86State.mem (st.toX86State.gpr.get 4)).toNat := by
+  rw [X86BvState.toX86State_ofX86State]
+  exact hpc
+
 private theorem x86_callee_saved_of_roundtrip
     {pc1 : Nat} {r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : BitVec 64}
     {u0 u1 u2 u6 u7 u8 u9 u10 u11 : UInt64}
@@ -256,11 +269,11 @@ private theorem x86_callee_saved_of_roundtrip
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
         y0, cf0, o0, zf0, dy0, false, mem0⟩
       (X86BvState.ofX86State
-        ⟨pc1, ⟨u0, u1, u2, UInt64.ofBitVec r3, UInt64.ofBitVec r4, UInt64.ofBitVec r5,
+        ⟨pc1, ⟨u0, u1, u2, UInt64.ofBitVec r3, UInt64.ofBitVec r4 + 8, UInt64.ofBitVec r5,
           u6, u7, u8, u9, u10, u11,
           UInt64.ofBitVec r12, UInt64.ofBitVec r13, UInt64.ofBitVec r14, UInt64.ofBitVec r15⟩,
           y1, cf1, o1, zf1, dy1, h1, mem1⟩) :=
-  ⟨u64_roundtrip r3, u64_roundtrip r4, u64_roundtrip r5,
+  ⟨u64_roundtrip r3, rfl, u64_roundtrip r5,
    u64_roundtrip r12, u64_roundtrip r13, u64_roundtrip r14, u64_roundtrip r15⟩
 
 private theorem arm64_callee_saved_of_hi_vec
@@ -401,20 +414,20 @@ theorem ExecReachesX86_ret {prog : List (DecodedInstr X86Instr)} {k retPc retLen
     (runX86 prog k s).1 = sRet ∧
     (runX86 prog k s).1.halted = false ∧
     ∀ extra : Nat,
-      (runX86 prog (k + 1 + extra) s).1 = { sRet with halted := true } ∧
+      (runX86 prog (k + 1 + extra) s).1 = { sRet with pc := (readMem64 sRet.mem (sRet.gpr.get 4)).toNat, gpr := sRet.gpr.set 4 (sRet.gpr.get 4 + 8), halted := true } ∧
       (runX86 prog (k + 1 + extra) s).2.length = k + 1 := by
   have h0 := (hPre 0).1
   rw [Nat.add_zero] at h0
   have hs0 : (runX86 prog 0 sRet).1 = sRet := rfl
   have hAtK : (runX86 prog k s).1 = sRet := h0.trans hs0
-  have hRetStep : ExecReachesX86 prog 1 sRet { sRet with halted := true } :=
+  have hRetStep : ExecReachesX86 prog 1 sRet { sRet with pc := (readMem64 sRet.mem (sRet.gpr.get 4)).toNat, gpr := sRet.gpr.set 4 (sRet.gpr.get 4 + 8), halted := true } :=
     ExecReachesX86_step hh hf rfl
   have hFull := ExecReachesX86_trans hPre hRetStep
   refine ⟨hAtK, hAtK.symm ▸ hh, fun extra => ?_⟩
   have ⟨ef, lf⟩ := hFull extra
-  have hHaltFst : (runX86 prog extra { sRet with halted := true }).1 =
-      { sRet with halted := true } := runX86_halted_fst prog extra _ rfl
-  have hHaltSnd : (runX86 prog extra { sRet with halted := true }).2 = [] :=
+  have hHaltFst : (runX86 prog extra { sRet with pc := (readMem64 sRet.mem (sRet.gpr.get 4)).toNat, gpr := sRet.gpr.set 4 (sRet.gpr.get 4 + 8), halted := true }).1 =
+      { sRet with pc := (readMem64 sRet.mem (sRet.gpr.get 4)).toNat, gpr := sRet.gpr.set 4 (sRet.gpr.get 4 + 8), halted := true } := runX86_halted_fst prog extra _ rfl
+  have hHaltSnd : (runX86 prog extra { sRet with pc := (readMem64 sRet.mem (sRet.gpr.get 4)).toNat, gpr := sRet.gpr.set 4 (sRet.gpr.get 4 + 8), halted := true }).2 = [] :=
     runX86_halted_snd prog extra _ rfl
   exact ⟨ef.trans hHaltFst, by rw [lf, hHaltSnd]; simp⟩
 
@@ -510,7 +523,7 @@ theorem execDecodedX86_ret_of_reaches {code : List UInt8} {prog : List (DecodedI
     (∃ stPre trPre, execDecodedX86 code k st = some (stPre, trPre) ∧ stPre.halted = false) ∧
     ∀ extra : Nat, ∃ tr,
       execDecodedX86 code ((k + 1) + extra) st =
-        some (X86BvState.ofX86State ⟨pc1, gpr1, ymm1, cf1, o1, zf1, dy1, true, mem1⟩, tr) ∧
+        some (X86BvState.ofX86State ⟨(readMem64 mem1 (gpr1.get 4)).toNat, gpr1.set 4 (gpr1.get 4 + 8), ymm1, cf1, o1, zf1, dy1, true, mem1⟩, tr) ∧
       tr.length = k + 1 := by
   subst hSt
   have ⟨_, hNotHalt, hPost⟩ := ExecReachesX86_ret hPre hh hf
@@ -1051,6 +1064,7 @@ private theorem ctEq32Arm_reaches (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13
         armGet_31, armGet_0, armGet_1, armGet_2, armGet_3, armGet_4, armGet_5, armGet_6, armGet_7,
         armSet_0, armSet_2, armSet_3, armSet_4, armSet_5, armSet_6, armSet_7]
       rfl
+  rw [ctEq32WordArm.public_eq_1]
   exact StepsArm64.zero _
 
 
@@ -1125,7 +1139,7 @@ theorem elf_ct_select_u64_x86_64_functional_and_ct :
         (∃ st3 tr3, execDecodedX86 slice.code 3 st = some (st3, tr3) ∧ st3.halted = false) ∧
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code (4 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 10 ∧ trace.length = 4 ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 4 ∧
           st'.gpr.get 0 = (if st.gpr.get 7 != 0#64 then st.gpr.get 6 else st.gpr.get 2) ∧
           X86CalleeSavedPreserved st st' ∧
           st'.mem = st.mem := by
@@ -1325,7 +1339,7 @@ theorem elf_ct_eq_u64_x86_64_functional_and_ct :
         (∃ st8 tr8, execDecodedX86 slice.code 8 st = some (st8, tr8) ∧ st8.halted = false) ∧
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code (9 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 24 ∧ trace.length = 9 ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 9 ∧
           st'.gpr.get 0 = (if st.gpr.get 7 = st.gpr.get 6 then 1#64 else 0#64) ∧
           X86CalleeSavedPreserved st st' ∧
           st'.mem = st.mem ∧
@@ -2216,7 +2230,9 @@ private theorem gfniTowerMulByte_gen_eq (mx : UInt8)
     · rw [h1]
       rcases hmx with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
       rcases hmy with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
-      decide +kernel
+      (rw [mulExec_eq_pack_towerMul]
+       simp only [unpackTower, packTower, lowBits.public_eq_1, highBits.public_eq_1, joinBits_eq_append]
+       decide +kernel)
   conv => lhs; rw [u8_basis_decomp y]
   conv => rhs; rw [u8_basis_decomp y]
   simp only [gfniTowerMulByte_xor_right, UInt8.toBitVec_xor, mulExec3_xor_right,
@@ -2253,12 +2269,19 @@ theorem gfniTowerMulByte_eq_mulExec (x y : UInt8) :
     hBit 0x40 (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl rfl))))))),
     hBit 0x80 (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr rfl)))))))]
 
+theorem elfSimulates_unpack (k : Nat) (x : TowerBitVec k) : Simulates k (unpackTower k x) x := by
+  rw [Simulates.public_eq_1]; exact packTower_unpackTower k x
+
+theorem elfSimulates_pack_eq {k : Nat} {a : TowerElem k} {x : TowerBitVec k}
+    (h : Simulates k a x) : packTower k a = x := by
+  rw [Simulates.public_eq_1] at h; exact h
+
 /-- `Spec ↔ Exec` refinement connecting GFNI machine instructions directly to `BinaryTower.towerMul 3`. -/
 theorem gfniTowerMulByte_simulates_binaryTower (x y : UInt8) :
     Simulates 3 (towerMul 3 (unpackTower 3 x.toBitVec) (unpackTower 3 y.toBitVec))
       (gfniTowerMulByte x y).toBitVec := by
   rw [gfniTowerMulByte_eq_mulExec]
-  exact Simulates.mul 3 (packTower_unpackTower 3 x.toBitVec) (packTower_unpackTower 3 y.toBitVec)
+  exact Simulates.mul 3 (elfSimulates_unpack 3 x.toBitVec) (elfSimulates_unpack 3 y.toBitVec)
 
 /-! ### §5.2 `qsag_asm_enable_dit_aarch64` (`N = 3`, `retPc = 8`) -/
 
@@ -3007,8 +3030,9 @@ theorem current_rlib_ct_eq_32_aarch64_functional_and_ct :
       have hiff0 : ctEq32WordArm mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) = 0 ↔
           ∀ i : Nat, i < 32 →
             mU (UInt64.ofBitVec r0 + UInt64.ofNat i) =
-              mU (UInt64.ofBitVec r1 + UInt64.ofNat i) :=
-        xorOr4_eq_zero_iff mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) _ _ _ _ _ _ _ _
+              mU (UInt64.ofBitVec r1 + UInt64.ofNat i) := by
+        rw [ctEq32WordArm.public_eq_1]
+        exact xorOr4_eq_zero_iff mU (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) _ _ _ _ _ _ _ _
           rfl (e8 _) rfl (e24 _) rfl (e8 _) rfl (e24 _)
       have hAddrEq (base : BitVec 64) (i : Nat) :
           (UInt64.ofBitVec base + UInt64.ofNat i).toBitVec = base + BitVec.ofNat 64 i := rfl
@@ -3475,7 +3499,7 @@ theorem current_rlib_gf256_shamir_mul_gfni_functional_and_ct :
         (∃ st24 tr24, execDecodedX86 slice.code 34 st = some (st24, tr24) ∧ st24.halted = false) ∧
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code (35 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 142 ∧ trace.length = 35 ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 35 ∧
           st'.ymmDirty = false ∧
           st'.gpr.get 1 = 0#64 ∧
           st'.gpr.get 7 = 0#64 ∧
@@ -3568,7 +3592,7 @@ theorem current_rlib_gf256_shamir_mul_gfni_loop_functional :
         st.gpr.get 1 = BitVec.ofNat 64 (k + 1) →
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code ((35 + 12 * k) + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 142 ∧ trace.length = 35 + 12 * k ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 35 + 12 * k ∧
           st'.ymmDirty = false ∧
           st'.gpr.get 1 = 0#64 ∧
           st'.gpr.get 7 = 0#64 ∧
@@ -3755,6 +3779,7 @@ private theorem current_pow7_setup_and_b1 (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11
           y, cf', o', zf', dy, false, m⟩ by
     rcases hS with ⟨s2, hs, hp⟩
     exact ⟨s2, hs.toExecReaches, hp⟩
+  simp only [goldMulMc, mulRed.public_eq_1, addCarry.public_eq_1, subBorrow.public_eq_1, hiLoEps.public_eq_1]
   iterate 21
     apply StepsX86_step_ex rfl rfl
     · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
@@ -3785,6 +3810,7 @@ private theorem current_pow7_b2 (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13 r14 r15 
           y, cf', o', zf', dy, false, m⟩ by
     rcases hS with ⟨s2, hs, hp⟩
     exact ⟨s2, hs.toExecReaches, hp⟩
+  simp only [goldMulMc, mulRed.public_eq_1, addCarry.public_eq_1, subBorrow.public_eq_1, hiLoEps.public_eq_1]
   iterate 19
     apply StepsX86_step_ex rfl rfl
     · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
@@ -3815,6 +3841,7 @@ private theorem current_pow7_b3 (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13 r14 r15 
           y, cf', o', zf', dy, false, m⟩ by
     rcases hS with ⟨s2, hs, hp⟩
     exact ⟨s2, hs.toExecReaches, hp⟩
+  simp only [goldMulMc, mulRed.public_eq_1, addCarry.public_eq_1, subBorrow.public_eq_1, hiLoEps.public_eq_1]
   iterate 19
     apply StepsX86_step_ex rfl rfl
     · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
@@ -3834,6 +3861,7 @@ private theorem current_pow7_b4_and_wipe (acc r1 r2 r3 r4 r5 r6 r7 r8 r9 r12 r13
       ⟨285, ⟨goldMulMc acc r7, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, false, m⟩ := by
   apply StepsX86.toExecReaches
+  simp only [goldMulMc, mulRed.public_eq_1, addCarry.public_eq_1, subBorrow.public_eq_1, hiLoEps.public_eq_1]
   iterate 33
     apply StepsX86.cons rfl rfl
     · simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
@@ -3858,7 +3886,7 @@ theorem current_rlib_goldilocks_pow7_ct_x86_64_functional_and_ct (st : X86BvStat
         (∃ st84 tr84, execDecodedX86 slice.code 92 st = some (st84, tr84) ∧ st84.halted = false) ∧
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code (93 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 285 ∧ trace.length = 93 ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 93 ∧
           st'.gpr.get 0 = BitVec.ofNat 64 (((st.gpr.get 7).toNat ^ 7) % GOLDILOCKS_P) ∧
           X86CalleeSavedPreserved st st' ∧
           st'.mem = st.mem ∧
@@ -3914,7 +3942,7 @@ theorem current_rlib_goldilocks_pow7_ct_x86_64_functional_and_ct (st : X86BvStat
     obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl h84 rfl rfl
     refine ⟨hPre, fun extra => ?_⟩
     obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    refine ⟨_, tr, hExec, rfl, x86_ret_pc_of_roundtrip _ st0 (by simp only [b16get_4]; rfl), hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
     · change (goldMulMc (goldMulMc (goldMulMc (goldMulMc u7 u7) u7) (goldMulMc (goldMulMc u7 u7) u7)) u7).toBitVec =
         BitVec.ofNat 64 ((r7.toNat ^ 7) % GOLDILOCKS_P)
       apply bv_ofU64_eq_ofNat _ (mod_goldilocks_lt_u64 _)
@@ -4021,6 +4049,7 @@ private theorem current_goldDot2_part2 (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r1
         r12, r13, r14, r15⟩,
         y, false, false, true, dy, false, m⟩ := by
   apply StepsX86.toExecReaches
+  simp only [mulRed.public_eq_1, addCarry.public_eq_1, subBorrow.public_eq_1, hiLoEps.public_eq_1]
   iterate 38
     apply StepsX86.cons rfl rfl
     · simp only [stepX86_movRR, stepX86_shr64, stepX86_shl64, stepX86_addRR64, stepX86_subRR64,
@@ -4044,7 +4073,7 @@ theorem current_rlib_goldilocks_dot2_adx_x86_64_functional_and_ct (st : X86BvSta
         (∃ st43 tr43, execDecodedX86 slice.code 51 st = some (st43, tr43) ∧ st43.halted = false) ∧
         ∀ extra : Nat, ∃ st' trace,
           execDecodedX86 slice.code (52 + extra) st = some (st', trace) ∧
-          st'.halted = true ∧ st'.pc = 173 ∧ trace.length = 52 ∧
+          st'.halted = true ∧ st'.pc = (readMem64 st'.toX86State.mem (st.toX86State.gpr.get 4)).toNat ∧ trace.length = 52 ∧
           st'.gpr.get 0 = BitVec.ofNat 64
             (((st.gpr.get 7).toNat * (st.gpr.get 6).toNat +
               (st.gpr.get 2).toNat * (st.gpr.get 1).toNat) % GOLDILOCKS_P) ∧
@@ -4085,7 +4114,7 @@ theorem current_rlib_goldilocks_dot2_adx_x86_64_functional_and_ct (st : X86BvSta
     obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl h43 rfl rfl
     refine ⟨hPre, fun extra => ?_⟩
     obtain ⟨tr, hExec, hL⟩ := hPost extra
-    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    refine ⟨_, tr, hExec, rfl, x86_ret_pc_of_roundtrip _ st0 (by simp only [b16get_4]; rfl), hL, ?_, ?_, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
     · change (goldDot2Mc (UInt64.ofBitVec r7) (UInt64.ofBitVec r6)
           (UInt64.ofBitVec r2) (UInt64.ofBitVec r1)).toBitVec =
         BitVec.ofNat 64 ((r7.toNat * r6.toNat + r2.toNat * r1.toNat) % GOLDILOCKS_P)
@@ -4542,7 +4571,7 @@ theorem current_gf256_shamir_mac_gfni_loop_functional
       decodeX86Stream slice.code = some prog ∧
       ∀ extra : Nat,
         let result := runX86 prog (40 + 11 * k + extra) s
-        result.1.halted = true ∧ result.1.pc = 159 ∧
+        result.1.halted = true ∧ result.1.pc = (readMem64 result.1.mem (s.gpr.get 4)).toNat ∧
         result.2.length = 40 + 11 * k ∧ result.1.ymmDirty = false ∧
         result.1.ymm = Bank16.const Vec256.zero ∧
         (∀ idx : Nat, idx < 32 * (k + 1) →
@@ -4579,7 +4608,7 @@ theorem current_gf256_shamir_mac_gfni_loop_functional
     simp only [b16get_7, b16get_6, b16get_2]
     rw [gf256MacGfniIterMem_at (k + 1) mem r7 r6 r2 hk hDisj idx hidx,
       UInt8.toBitVec_xor]
-    exact Simulates.add 3 (packTower_unpackTower 3 _)
+    exact Simulates.add 3 (elfSimulates_unpack 3 _)
       (gfniTowerMulByte_simulates_binaryTower _ _)
   · intro a ha
     exact gf256MacGfniIterMem_outside (k + 1) mem r7 r6 r2 a hk ha
@@ -4624,7 +4653,10 @@ theorem gf256MacGfni_overwrite_tooth :
     (towerMul 3 (unpackTower 3 (1 : UInt8).toBitVec)
       (unpackTower 3 (0 : UInt8).toBitVec)))
     ((runX86 prog 40 gf256MacGfniWitnessState).1.mem 0).toBitVec at hb
-  have hone : ((runX86 prog 40 gf256MacGfniWitnessState).1.mem 0).toBitVec = 1#8 := hb.symm
+  have hone : ((runX86 prog 40 gf256MacGfniWitnessState).1.mem 0).toBitVec = 1#8 :=
+    (elfSimulates_pack_eq hb).symm.trans (by
+      simp only [unpackTower, packTower, towerAdd, towerMul, lowBits.public_eq_1, highBits.public_eq_1, joinBits_eq_append]
+      decide +kernel)
   intro heq
   have hzero := congrArg UInt8.toBitVec heq
   rw [hone] at hzero
@@ -5549,7 +5581,7 @@ theorem current_gf256_shamir_mul_avx2_loop_functional
       decodeX86Stream slice.code = some prog ∧
       ∀ extra : Nat,
         let result := runX86 prog (121 + 84 * k + extra) s
-        result.1.halted = true ∧ result.1.pc = 490 ∧
+        result.1.halted = true ∧ result.1.pc = (readMem64 result.1.mem (s.gpr.get 4)).toNat ∧
         result.2.length = 121 + 84 * k ∧ result.1.ymmDirty = false ∧
         result.1.ymm = Bank16.const Vec256.zero ∧
         (∀ idx : Nat, idx < 32 * (k + 1) →
@@ -5655,7 +5687,10 @@ theorem gf256MulAvx2_xor_tooth :
   change Simulates 3 (towerMul 3 (unpackTower 3 (1 : UInt8).toBitVec)
     (unpackTower 3 (1 : UInt8).toBitVec))
     ((runX86 prog 121 gf256MulAvx2WitnessState).1.mem 384).toBitVec at hb
-  have hone : ((runX86 prog 121 gf256MulAvx2WitnessState).1.mem 384).toBitVec = 1#8 := hb.symm
+  have hone : ((runX86 prog 121 gf256MulAvx2WitnessState).1.mem 384).toBitVec = 1#8 :=
+    (elfSimulates_pack_eq hb).symm.trans (by
+      simp only [unpackTower, packTower, towerAdd, towerMul, lowBits.public_eq_1, highBits.public_eq_1, joinBits_eq_append]
+      decide +kernel)
   intro heq
   have hzero := congrArg UInt8.toBitVec heq
   rw [hone] at hzero
@@ -6008,7 +6043,7 @@ theorem current_gf256_shamir_mac_avx2_loop_functional
       decodeX86Stream slice.code = some prog ∧
       ∀ extra : Nat,
         let result := runX86 prog (135 + 14 * k + extra) s
-        result.1.halted = true ∧ result.1.pc = 554 ∧
+        result.1.halted = true ∧ result.1.pc = (readMem64 result.1.mem (s.gpr.get 4)).toNat ∧
         result.2.length = 135 + 14 * k ∧ result.1.ymmDirty = false ∧
         result.1.ymm = Bank16.const Vec256.zero ∧
         (∀ idx : Nat, idx < 32 * (k + 1) →
@@ -6045,7 +6080,7 @@ theorem current_gf256_shamir_mac_avx2_loop_functional
     simp only [b16get_7, b16get_6, b16get_2]
     rw [gf256MacGfniIterMem_at (k + 1) mem r7 r6 r2 hk hDisj idx hidx,
       UInt8.toBitVec_xor]
-    exact Simulates.add 3 (packTower_unpackTower 3 _)
+    exact Simulates.add 3 (elfSimulates_unpack 3 _)
       (gfniTowerMulByte_simulates_binaryTower _ _)
   · intro a ha
     exact gf256MacGfniIterMem_outside (k + 1) mem r7 r6 r2 a hk ha
@@ -6082,7 +6117,10 @@ theorem gf256MacAvx2_overwrite_tooth :
     (towerMul 3 (unpackTower 3 (1 : UInt8).toBitVec)
       (unpackTower 3 (0 : UInt8).toBitVec)))
     ((runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384).toBitVec at hb
-  have hone : ((runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384).toBitVec = 1#8 := hb.symm
+  have hone : ((runX86 prog 135 gf256MacAvx2WitnessState).1.mem 384).toBitVec = 1#8 :=
+    (elfSimulates_pack_eq hb).symm.trans (by
+      simp only [unpackTower, packTower, towerAdd, towerMul, lowBits.public_eq_1, highBits.public_eq_1, joinBits_eq_append]
+      decide +kernel)
   intro heq
   have hzero := congrArg UInt8.toBitVec heq
   rw [hone] at hzero
@@ -6271,7 +6309,7 @@ theorem keccakChiMpcRow_inhabited :
       q < 4 ∧ keccakChiMpcRowState s0 q = zeroKState ∧
       keccakChiMpcRowState s1 q = zeroKState ∧ keccakChiMpcRowState s2 q = zeroKState := by
   refine ⟨(fun _ _ => 0), (fun _ _ => 0), (fun _ _ => 0),
-    (fun _ _ => 0), (fun _ _ => 0), (fun _ _ => 0), 0, ?_, by decide, rfl, rfl, rfl⟩
+    (fun _ _ => 0), (fun _ _ => 0), (fun _ _ => 0), 0, ?_, by decide, (by rw [zeroKState_eq]; rfl), (by rw [zeroKState_eq]; rfl), (by rw [zeroKState_eq]; rfl)⟩
   intro _ _ _ _
   change (0 : UInt64) ^^^ 0 ^^^ 0 = 0
   decide +kernel
@@ -6492,7 +6530,7 @@ private theorem keccakChiMpc_cleanup
     (y : Bank16 Vec256) (cf o zf : Bool) (m : UInt64 → UInt8) :
     ExecReachesX86 keccakChiMpcProg 24
       ⟨238, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, true, false, m⟩
-      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, m⟩ := by
+      ⟨(readMem64 m r4).toNat, ⟨0, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, m⟩ := by
   apply StepsX86.toExecReaches
   iterate 12
     apply StepsX86.cons rfl rfl
@@ -6515,7 +6553,7 @@ private theorem keccakChiMpc_reaches
     (h : keccakChiMpcSeparated r7 r1) :
     ExecReachesX86 keccakChiMpcProg 74
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩
-      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, (keccakChiMpcOutMem m r7 r6 r2 r1)⟩ := by
+      ⟨(readMem64 (keccakChiMpcOutMem m r7 r6 r2 r1) r4).toNat, ⟨0, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩, Bank16.const Vec256.zero, false, false, true, false, true, (keccakChiMpcOutMem m r7 r6 r2 r1)⟩ := by
   let g : Bank16 UInt64 := ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩
 
   let a0 := readMem256 m (r6 + 0)
@@ -6639,7 +6677,8 @@ theorem keccakChiMpc_current_functional (s : X86State) (h : keccakChiMpcInitial 
     have he := (keccakChiMpc_reaches r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11
       r12 r13 r14 r15 y cf o zf dy mem hdisj extra).1
     let t : X86State :=
-      ⟨318, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 (keccakChiMpcOutMem mem r7 r6 r2 r1) r4).toNat,
+        ⟨0, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         Bank16.const Vec256.zero, false, false, true, false, true,
         keccakChiMpcOutMem mem r7 r6 r2 r1⟩
     rw [runX86_halted_fst keccakChiMpcProg extra t rfl] at he
@@ -6887,7 +6926,7 @@ theorem keccakChiMpc_reconstruct_inhabited :
 /-- The zero-output specification is refuted by a nonzero reconstructed row. -/
 theorem keccakChiMpc_reconstruct_tooth :
     chiS (keccakChiMpcRowState (fun x _ => if x == 2 then 1 else 0) 0) ≠ zeroKState := by
-  decide +kernel
+  rw [zeroKState_eq]; kstate_ne
 
 #tooth_pair keccakChiMpc_current_reconstruct vs keccakChiMpc_reconstruct_tooth
 #verify_inhabited keccakChiMpc_current_reconstruct keccakChiMpc_reconstruct_inhabited
@@ -7515,7 +7554,8 @@ theorem keccakThetaRho_inhabited : ∃ s : Arm64State, keccakThetaRhoInitial s :
 /-- A wrong implementation omitting theta cannot satisfy the full-state specification. -/
 theorem keccakThetaRho_tooth :
     rhoPiS (thetaS { zeroKState with a1 := 1 }) ≠
-      rhoPiS { zeroKState with a1 := 1 } := by decide +kernel
+      rhoPiS { zeroKState with a1 := 1 } := by
+  simp only [zeroKState_eq]; kstate_ne
 
 #tooth_pair keccakThetaRho_current_functional vs keccakThetaRho_tooth
 #verify_inhabited keccakThetaRho_current_functional keccakThetaRho_inhabited
@@ -7918,12 +7958,12 @@ theorem keccak4xRoundVec_reconstruct (v : Nat → Vec256) (rc : UInt64)
 
 theorem keccak4xRoundVec_tooth :
     keccak4xLaneState (keccak4xRoundVec (fun _ => Vec256.zero) 1) 0 ≠ zeroKState := by
-  decide +kernel
+  rw [zeroKState_eq]; kstate_ne
 
 theorem keccak4xRoundVec_inhabited :
     ∃ (v : Nat → Vec256) (rc : UInt64) (q : Nat),
       q < 4 ∧ keccak4xLaneState v q = zeroKState ∧ rc = 0 := by
-  exact ⟨fun _ => Vec256.zero, 0, 0, by decide, rfl, rfl⟩
+  exact ⟨fun _ => Vec256.zero, 0, 0, by decide, (by rw [zeroKState_eq]; rfl), rfl⟩
 
 #tooth_pair keccak4xRoundVec_reconstruct vs keccak4xRoundVec_tooth
 #verify_inhabited keccak4xRoundVec_reconstruct keccak4xRoundVec_inhabited
@@ -9730,7 +9770,8 @@ theorem keccak4x_round_inhabited : ∃ s : X86State, keccak4xRoundEntry s := by
     simp only [UInt64.toNat_add, UInt64.toNat_ofNat, UInt64.toNat_ofNat'] at hn
     omega
 
-theorem keccak4x_round_tooth : roundS zeroKState 1 ≠ zeroKState := by decide +kernel
+theorem keccak4x_round_tooth : roundS zeroKState 1 ≠ zeroKState := by
+  rw [zeroKState_eq]; kstate_ne
 
 #tooth_pair keccak4x_current_round vs keccak4x_round_tooth
 #verify_inhabited keccak4x_current_round keccak4x_round_inhabited
@@ -9843,10 +9884,11 @@ theorem keccak4x_constants_drop (i : Nat) (hi : i < 24) :
       keccakRoundConstants.getD i 0 :: keccakRoundConstants.drop (i+1) := by
   have h : ∀ i : Fin 24, keccakRoundConstants.drop i.val =
       keccakRoundConstants.getD i.val 0 :: keccakRoundConstants.drop (i.val+1) := by
-    decide +kernel
+    rw [keccakRoundConstants_eq]; decide +kernel
   exact h ⟨i, hi⟩
 
-theorem keccak4x_constants_drop24 : keccakRoundConstants.drop 24 = [] := by decide +kernel
+theorem keccak4x_constants_drop24 : keccakRoundConstants.drop 24 = [] := by
+  rw [keccakRoundConstants_eq]; decide +kernel
 
 theorem keccak4xLoopBank_advance (g : Bank16 UInt64) (table : UInt64)
     (i k : Nat) (hi : i < 24) :
@@ -10158,12 +10200,12 @@ theorem keccak4x_wipe_body (s : X86State) (k : Nat) (hk : k < 25)
 
 /-- The scalar ABI result after restoring the caller's stack frame. -/
 def keccak4xRestoredGpr (g : Bank16 UInt64) (m : UInt64 → UInt8) : Bank16 UInt64 :=
-  ⟨0,0,0,g.get 3,g.get 5 + 8,readMem64 m (g.get 5),0,0,0,0,0,0,
+  ⟨0,0,0,g.get 3,g.get 5 + 16,readMem64 m (g.get 5),0,0,0,0,0,0,
     g.get 12,g.get 13,g.get 14,g.get 15⟩
 
 set_option linter.unusedSimpArgs false in
 theorem keccak4x_epilogue_cleanup (s : X86State) (hp : s.pc = 1681) (hh : s.halted = false) :
-    ∃ t, StepsX86 keccak4xProg 25 s t ∧ t.pc = 1761 ∧ t.halted = true ∧
+    ∃ t, StepsX86 keccak4xProg 25 s t ∧ t.pc = (readMem64 t.mem (s.gpr.get 5 + 8)).toNat ∧ t.halted = true ∧
       t.gpr = keccak4xRestoredGpr s.gpr s.mem ∧ t.ymm = Bank16.const Vec256.zero ∧
       t.ymmDirty = false ∧ t.mem = s.mem := by
   rcases s with ⟨pc, ⟨r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15⟩,
@@ -10200,7 +10242,9 @@ theorem keccak4x_epilogue_cleanup (s : X86State) (hp : s.pc = 1681) (hh : s.halt
         simp only [stepX86_xorRR, mask32_xor_self, u64_zero_beq_zero, Bank16.get, Bank16.set]
       all_goals rfl
   apply StepsX86_step_ex rfl rfl rfl
-  exact ⟨_, StepsX86.zero _, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  refine ⟨_, StepsX86.zero _, rfl, rfl, ?_, rfl, rfl, rfl⟩
+  have h16 : r5 + 8 + 8 = r5 + 16 := by rw [UInt64.add_assoc]; rfl
+  simp only [stepX86_ret, b16get_4, b16set_4, keccak4xRestoredGpr, Bank16.get, h16]
 
 /-- Loop invariant after `i` of the fixed 25 scratch-vector stores. -/
 def keccak4xWipeInv (s t : X86State) (i : Nat) : Prop :=
@@ -10261,7 +10305,7 @@ theorem keccak4x_wipe_prefix_steps (s : X86State) (hp : s.pc = 1669)
 and executes all vector/scalar cleanup instructions and RET. -/
 theorem keccak4x_epilogue_steps (s : X86State) (hp : s.pc = 1657) (hh : s.halted = false)
     (hd : keccak4xDisjoint (s.gpr.get 5) 8 (s.gpr.get 4) 800) :
-    ∃ t, StepsX86 keccak4xProg 128 s t ∧ t.pc = 1761 ∧ t.halted = true ∧
+    ∃ t, StepsX86 keccak4xProg 128 s t ∧ t.pc = (readMem64 t.mem (s.gpr.get 5 + 8)).toNat ∧ t.halted = true ∧
       t.gpr = keccak4xRestoredGpr s.gpr s.mem ∧ t.ymm = Bank16.const Vec256.zero ∧
       t.ymmDirty = false ∧ t.mem = keccak4xWipePrefix s.mem (s.gpr.get 4) 25 := by
   obtain ⟨a, ha, hap, hah, hag, hay, ham⟩ := keccak4x_epilogue_init s hp hh
@@ -10270,6 +10314,8 @@ theorem keccak4x_epilogue_steps (s : X86State) (hp : s.pc = 1657) (hh : s.halted
   obtain ⟨b, hb, hib⟩ := keccak4x_wipe_prefix_steps a hap hah hac hay0 25 (by decide)
   have hbp : b.pc = 1681 := hib.1
   obtain ⟨t, ht, htp, hth, htg, hty, htd, htm⟩ := keccak4x_epilogue_cleanup b hbp hib.2.1
+  have hb5 : b.gpr.get 5 = s.gpr.get 5 := by rw [hib.2.2.1, hag]; rfl
+  rw [hb5] at htp
   refine ⟨t, StepsX86_trans (StepsX86_trans ha hb) ht, htp, hth, ?_, hty, htd, ?_⟩
   · rw [htg, hib.2.2.1, hib.2.2.2.2, hag, ham]
     change keccak4xRestoredGpr s.gpr (keccak4xWipePrefix s.mem (s.gpr.get 4) 25) = _
@@ -10322,7 +10368,7 @@ structure keccak4xFullEntry (s : X86State) : Prop where
   constants : keccak4xCanonicalTable s.mem (s.gpr.get 6)
 
 theorem keccak4x_full_steps (s : X86State) (h : keccak4xFullEntry s) :
-    ∃ t, StepsX86 keccak4xProg 6661 s t ∧ t.pc = 1761 ∧ t.halted = true ∧
+    ∃ t, StepsX86 keccak4xProg 6661 s t ∧ t.pc = (readMem64 t.mem (s.gpr.get 4)).toNat ∧ t.halted = true ∧
       t.ymm = Bank16.const Vec256.zero ∧ t.ymmDirty = false ∧
       (∀ q : Nat, q < 4 →
         keccak4xLaneState (keccak4xSource t.mem (s.gpr.get 7)) q =
@@ -10348,6 +10394,11 @@ theorem keccak4x_full_steps (s : X86State) (h : keccak4xFullEntry s) :
     rw [hbg]
     exact h.savedScratch
   obtain ⟨t, ht, htp, hth, htg, hty, htd, htm⟩ := keccak4x_epilogue_steps b hbp hbh hbd
+  have hb5 : b.gpr.get 5 + 8 = g.get 4 := by
+    rw [hbg]
+    change g.get 4 - 8 + 8 = g.get 4
+    rw [UInt64.sub_add_cancel]
+  rw [hb5] at htp
   refine ⟨t, StepsX86_trans (StepsX86_trans ha hb) ht, htp, hth, hty, htd, ?_⟩
   intro q hq
   rw [htm, hbg]
@@ -10369,7 +10420,8 @@ theorem current_rlib_keccak_f1600_avx2_4x_functional (s : X86State)
     ∃ slice prog,
       findSliceByNameBytes currentX86ExtractedSlices keccak4xName = some slice ∧
       decodeX86Stream slice.code = some prog ∧
-      (runX86 prog 6661 s).1.pc = 1761 ∧ (runX86 prog 6661 s).1.halted = true ∧
+      (runX86 prog 6661 s).1.pc = (readMem64 (runX86 prog 6661 s).1.mem (s.gpr.get 4)).toNat ∧
+      (runX86 prog 6661 s).1.halted = true ∧
       (runX86 prog 6661 s).1.ymm = Bank16.const Vec256.zero ∧
       (runX86 prog 6661 s).1.ymmDirty = false ∧
       (∀ q : Nat, q < 4 →
@@ -10396,7 +10448,10 @@ def keccak4xWitnessMem (a : UInt64) : UInt8 :=
 theorem keccak4xWitnessMem_table : keccak4xCanonicalTable keccak4xWitnessMem 0 := by
   have hf : ∀ j : Fin 24,
       readMem64 keccak4xWitnessMem (0 + UInt64.ofNat (8*j.val)) =
-        keccakRoundConstants.getD j.val 0 := by decide +kernel
+        keccakRoundConstants.getD j.val 0 := by
+    delta keccak4xWitnessMem
+    simp only [keccakRoundConstants_eq]
+    decide +kernel
   exact fun j hj => hf ⟨j,hj⟩
 
 theorem keccak4x_full_inhabited : ∃ s : X86State, keccak4xFullEntry s := by
@@ -10435,7 +10490,8 @@ theorem keccak4x_full_inhabited : ∃ s : X86State, keccak4xFullEntry s := by
     omega
   · exact keccak4xWitnessMem_table
 
-theorem keccak4x_full_tooth : keccakF1600 zeroKState ≠ zeroKState := by decide +kernel
+theorem keccak4x_full_tooth : keccakF1600 zeroKState ≠ zeroKState := by
+  rw [keccakF1600_eq, keccakRoundConstants_eq, zeroKState_eq]; kstate_ne
 
 #tooth_pair current_rlib_keccak_f1600_avx2_4x_functional vs keccak4x_full_tooth
 #verify_inhabited current_rlib_keccak_f1600_avx2_4x_functional keccak4x_full_inhabited
@@ -10443,6 +10499,47 @@ theorem keccak4x_full_tooth : keccakF1600 zeroKState ≠ zeroKState := by decide
 end Keccak4xFreshVerification
 
 section Gf128KernelEquivalence
+
+theorem elf_gf128Reduce_zero : gf128Reduce 0 = 0 := by
+  have h := gf128Reduce_xor 0 0
+  simp only [BitVec.xor_self] at h
+  exact h
+
+theorem elf_gf128FieldMul_zero_left (b : BitVec 128) : gf128FieldMul 0#128 b = 0#128 := by
+  have h := gf128FieldMul_xor_left 0 0 b
+  simp only [BitVec.xor_self] at h
+  exact h
+
+theorem elf_gf128Words_one_zero : gf128Words 1 0 = 1#128 := by
+  rw [gf128Words.public_eq_1]; decide
+
+theorem elf_gf128Words_zero_zero : gf128Words 0 0 = 0#128 := by
+  rw [gf128Words.public_eq_1]; decide
+
+/-- `1 · 1 ≠ 0` for one block of the portable GF(2^128) dot product. -/
+theorem elf_gf128_one_block_ne_zero {a0 a1 b0 b1 : UInt64}
+    (ha0 : a0 = 1) (ha1 : a1 = 0) (hb0 : b0 = 1) (hb1 : b1 = 0) :
+    gf128FieldMul (gf128Words a0 a1) (gf128Words b0 b1) ^^^ (0 : BitVec 128) ≠ 0 := by
+  subst ha0 ha1 hb0 hb1
+  rw [elf_gf128Words_one_zero, gf128FieldMul_one_one]
+  decide
+
+/-- `1 · 1 ⊕ 0 · d ≠ 0` for one two-lane block. -/
+theorem elf_gf128_two_lane_block_ne_zero {a0 a1 b0 b1 c0 c1 d0 d1 : UInt64}
+    (ha0 : a0 = 1) (ha1 : a1 = 0) (hb0 : b0 = 1) (hb1 : b1 = 0) (hc0 : c0 = 0) (hc1 : c1 = 0) :
+    (gf128FieldMul (gf128Words a0 a1) (gf128Words b0 b1) ^^^
+      gf128FieldMul (gf128Words c0 c1) (gf128Words d0 d1)) ^^^ (0 : BitVec 128) ≠ 0 := by
+  subst ha0 ha1 hb0 hb1 hc0 hc1
+  rw [elf_gf128Words_one_zero, gf128FieldMul_one_one, elf_gf128Words_zero_zero,
+    elf_gf128FieldMul_zero_left]
+  decide
+
+/-- A zero left block contributes zero. -/
+theorem elf_gf128_zero_block {a0 a1 b0 b1 : UInt64} (ha0 : a0 = 0) (ha1 : a1 = 0) :
+    gf128FieldMul (gf128Words a0 a1) (gf128Words b0 b1) ^^^ (0 : BitVec 128) = 0 := by
+  subst ha0 ha1
+  rw [elf_gf128Words_zero_zero, elf_gf128FieldMul_zero_left]
+  decide
 
 attribute [local irreducible] clmul64
 
@@ -10697,7 +10794,8 @@ def gf128PclmulOutput (y : Bank16 Vec256) (acc : Vec128) : Vec128 :=
 private theorem gf128Pclmul_exit_steps
     (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     StepsX86 gf128PclmulProg 31 ⟨81, g, y, cf, o, zf, dy, false, m⟩
-      ⟨211, {g with r0 := 0},
+      ⟨(readMem64 (writeMem128 m g.r7 (gf128PclmulOutput y (readMem128 m g.r7))) g.r4).toNat,
+        {g with r0 := 0, r4 := g.r4 + 8},
         ⟨Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero,
          Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero,
          clampVecWidth false y.r11, clampVecWidth false y.r12, clampVecWidth false y.r13,
@@ -10867,7 +10965,7 @@ private theorem gf128Pclmul_raw_add
       gf128Words p.w0 (p.w1 ^^^ (r.w0 ^^^ p.w0 ^^^ q.w0))) := by
   apply BitVec.eq_of_getLsbD_eq
   intro i hi
-  simp only [gf128Words, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  simp only [gf128Words.public_eq_1, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
   split <;> split <;> simp only [Bool.xor_assoc, Bool.xor_comm, Bool.xor_left_comm]
 
 private theorem gf128Pclmul_body_polynomial (y : Bank16 Vec256) (a b : Vec256) :
@@ -10910,9 +11008,9 @@ private theorem gf128Pclmul_iter_polynomial (n : Nat) (m : UInt64 → UInt8)
 private theorem gf128Pclmul_sum_reduce (n : Nat) (m : UInt64 → UInt8) (pL pR : UInt64) :
     gf128Reduce (gf128PclmulPolySum n m pL pR) = gf128PclmulFieldSum n m pL pR := by
   induction n generalizing pL pR with
-  | zero => change gf128Reduce 0 = 0; decide +kernel
+  | zero => exact elf_gf128Reduce_zero
   | succ n ih =>
-    simp only [gf128PclmulPolySum, gf128PclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul]
+    simp only [gf128PclmulPolySum, gf128PclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul.public_eq_1]
 
 private theorem gf128Pclmul_output_reduce (y : Bank16 Vec256) (acc : Vec128) :
     gf128Words (gf128PclmulOutput y acc).w0 (gf128PclmulOutput y acc).w1 =
@@ -10924,7 +11022,7 @@ private theorem gf128Pclmul_output_reduce (y : Bank16 Vec256) (acc : Vec128) :
   unfold gf128PclmulRaw
   rw [← gf128WordReduce_eq_reduce]
   simp [gf128PclmulReduce, gf128PclmulXor, gf128PclmulLift,
-    evalVecBin256, evalVecShift256, clampVecWidth, gf128WordReduce,
+    evalVecBin256, evalVecShift256, clampVecWidth, gf128WordReduce.public_eq_1,
     UInt64.xor_assoc, UInt64.xor_comm, gf128Pclmul_xor_left_comm]
 
 /-- The accumulated machine output is the mathematical field sum XOR the initial accumulator. -/
@@ -10936,7 +11034,7 @@ private theorem gf128Pclmul_output_field (n : Nat) (m : UInt64 → UInt8)
       gf128PclmulFieldSum n m pL pR ^^^ gf128Words acc.w0 acc.w1 := by
   rw [gf128Pclmul_output_reduce, gf128Pclmul_iter_polynomial]
   have hz : gf128PclmulRaw (gf128PclmulInitVec y) = 0 := by
-    simp [gf128PclmulRaw, gf128PclmulInitVec, Vec256.zero, gf128Words]
+    simp [gf128PclmulRaw, gf128PclmulInitVec, Vec256.zero, gf128Words.public_eq_1]
   rw [hz]
   simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor, gf128Pclmul_sum_reduce]
 
@@ -10967,8 +11065,8 @@ theorem current_rlib_gf2_128_mul_acc_pclmul_functional
 
 /-- A zero-result specification is refuted on 1·1. -/
 theorem gf128Pclmul_field_zero_tooth :
-    gf128PclmulFieldSum 1 gf128PclmulWitnessState.mem 4096 8192 ≠ 0 := by
-  decide +kernel
+    gf128PclmulFieldSum 1 gf128PclmulWitnessState.mem 4096 8192 ≠ 0 :=
+  elf_gf128_one_block_ne_zero (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
 
 #tooth_pair current_rlib_gf2_128_mul_acc_pclmul_functional vs gf128Pclmul_field_zero_tooth
 #verify_inhabited current_rlib_gf2_128_mul_acc_pclmul_functional gf128Pclmul_execution_inhabited
@@ -11093,7 +11191,8 @@ def gf128VpclmulOutput (y : Bank16 Vec256) (acc : Vec128) : Vec128 :=
 private theorem gf128Vpclmul_exit_steps
     (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     StepsX86 gf128VpclmulProg 37 ⟨81, g, y, cf, o, zf, dy, false, m⟩
-      ⟨241, {g with r0 := 0},
+      ⟨(readMem64 (writeMem128 m g.r7 (gf128VpclmulOutput y (readMem128 m g.r7))) g.r4).toNat,
+        {g with r0 := 0, r4 := g.r4 + 8},
         ⟨Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero,
          Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero,
          clampVecWidth false y.r11, clampVecWidth false y.r12, clampVecWidth false y.r13,
@@ -11210,7 +11309,7 @@ private theorem gf128Vpclmul_raw_linear
     gf128VpclmulRawWords l0 l1 h0 h1 m0 m1 ^^^ gf128VpclmulRawWords L0 L1 H0 H1 M0 M1 := by
   apply BitVec.eq_of_getLsbD_eq
   intro i hi
-  simp only [gf128VpclmulRawWords, gf128Words, BitVec.getLsbD_append,
+  simp only [gf128VpclmulRawWords, gf128Words.public_eq_1, BitVec.getLsbD_append,
     UInt64.toBitVec_xor, BitVec.getLsbD_xor]
   split <;> split <;> simp only [Bool.xor_assoc, Bool.xor_comm, Bool.xor_left_comm]
 
@@ -11280,9 +11379,9 @@ private theorem gf128Vpclmul_iter_polynomial (n : Nat) (m : UInt64 → UInt8)
 private theorem gf128Vpclmul_sum_reduce (n : Nat) (m : UInt64 → UInt8) (pL pR : UInt64) :
     gf128Reduce (gf128VpclmulPolySum n m pL pR) = gf128VpclmulFieldSum n m pL pR := by
   induction n generalizing pL pR with
-  | zero => change gf128Reduce 0 = 0; decide +kernel
+  | zero => exact elf_gf128Reduce_zero
   | succ n ih =>
-    simp only [gf128VpclmulPolySum, gf128VpclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul]
+    simp only [gf128VpclmulPolySum, gf128VpclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul.public_eq_1]
 
 private theorem gf128Vpclmul_output_field (n : Nat) (m : UInt64 → UInt8)
     (pL pR : UInt64) (y : Bank16 Vec256) (acc : Vec128) :
@@ -11296,7 +11395,7 @@ private theorem gf128Vpclmul_output_field (n : Nat) (m : UInt64 → UInt8)
   rw [gf128Vpclmul_iter_polynomial]
   have hz : gf128VpclmulRaw (gf128PclmulInitVec y) = 0 := by
     simp [gf128VpclmulRaw, gf128PclmulRaw, gf128PclmulInitVec, gf128VpclmulCollapse,
-      gf128PclmulXor, evalVecBin256, evalVecShift256, clampVecWidth, Vec256.zero, gf128Words]
+      gf128PclmulXor, evalVecBin256, evalVecShift256, clampVecWidth, Vec256.zero, gf128Words.public_eq_1]
   rw [hz]
   simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor, gf128Vpclmul_sum_reduce]
 
@@ -11327,8 +11426,9 @@ theorem current_rlib_gf2_128_mul_acc_vpclmul_functional
 
 /-- A zero-result specification is refuted on 1·1. -/
 theorem gf128Vpclmul_field_zero_tooth :
-    gf128VpclmulFieldSum 1 gf128PclmulWitnessState.mem 4096 8192 ≠ 0 := by
-  decide +kernel
+    gf128VpclmulFieldSum 1 gf128PclmulWitnessState.mem 4096 8192 ≠ 0 :=
+  elf_gf128_two_lane_block_ne_zero (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel)
 
 #tooth_pair current_rlib_gf2_128_mul_acc_vpclmul_functional vs gf128Vpclmul_field_zero_tooth
 #verify_inhabited current_rlib_gf2_128_mul_acc_vpclmul_functional gf128Pclmul_execution_inhabited
@@ -11393,14 +11493,14 @@ def gf128BdozFreshProg : List (DecodedInstr X86Instr) := [
   ⟨203, 1, .ret⟩
 ]
 
-def gf128BdozExitObs (outPtr : UInt64) : List StepObs :=
+def gf128BdozExitObs (rsp outPtr : UInt64) : List StepObs :=
   [⟨83, [], true⟩, ⟨88, [], true⟩, ⟨93, [], true⟩, ⟨98, [], true⟩, ⟨104, [], true⟩,
    ⟨109, [], true⟩, ⟨114, [], true⟩, ⟨118, [], true⟩, ⟨122, [], true⟩, ⟨128, [], true⟩,
    ⟨132, [(outPtr, 32)], true⟩, ⟨136, [], true⟩, ⟨140, [], true⟩, ⟨144, [], true⟩,
    ⟨148, [], true⟩, ⟨152, [], true⟩, ⟨156, [], true⟩, ⟨160, [], true⟩, ⟨164, [], true⟩,
-   ⟨168, [], true⟩, ⟨173, [], true⟩, ⟨175, [], true⟩, ⟨178, [], true⟩, ⟨181, [], true⟩, ⟨183, [], true⟩, ⟨185, [], true⟩, ⟨187, [], true⟩, ⟨189, [], true⟩, ⟨192, [], true⟩, ⟨195, [], true⟩, ⟨198, [], true⟩, ⟨201, [], true⟩, ⟨203, [], true⟩]
+   ⟨168, [], true⟩, ⟨173, [], true⟩, ⟨175, [], true⟩, ⟨178, [], true⟩, ⟨181, [], true⟩, ⟨183, [], true⟩, ⟨185, [], true⟩, ⟨187, [], true⟩, ⟨189, [], true⟩, ⟨192, [], true⟩, ⟨195, [], true⟩, ⟨198, [], true⟩, ⟨201, [], true⟩, ⟨203, [(rsp, 8)], true⟩]
 
-def gf128BdozAsmFfiRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
+def gf128BdozAsmFfiRun (rsp : UInt64) (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → UInt8) :
     AsmFfiBdozMac × List StepObs :=
   if n = 0 then
     (⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, 0, mem⟩,
@@ -11409,7 +11509,7 @@ def gf128BdozAsmFfiRun (n : Word) (baseL baseR outP : UInt64) (mem : UInt64 → 
     let loop := runCuts asmFfiVpclmulBodyStep n.toNat ⟨baseL, baseR, outP, Vec256.zero, Vec256.zero, n.toNat, mem⟩
     let red := poly87Reduce256 loop.1.accLo loop.1.accHi
     ({ loop.1 with mem := writeMem256 mem outP red },
-     vpclmulEntryObs ++ loop.2 ++ gf128BdozExitObs outP)
+     vpclmulEntryObs ++ loop.2 ++ gf128BdozExitObs rsp outP)
 
 theorem gf128BdozEntry (fetch : Nat → Option (DecodedInstr X86Instr))
     (hf : ∀ d ∈ gf128BdozFreshProg, fetch d.offset = some d)
@@ -11424,7 +11524,7 @@ theorem gf128BdozEntry (fetch : Nat → Option (DecodedInstr X86Instr))
       (u.1, vpclmulEntryObs ++ u.2) := by
   rw [show 2 + fuel = (fuel + 1) + 1 from by omega]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_vbinOp256, b16get_0, vpxor_self, b16set_0]
-  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_vbinOp256, b16get_1, vpxor_self, b16set_1, vpclmulEntryObs]
+  rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_vbinOp256, b16get_1, vpxor_self, b16set_1, vpclmulEntryObs.public_eq_1]
   rfl
 
 theorem gf128BdozBody (fetch : Nat → Option (DecodedInstr X86Instr))
@@ -11457,7 +11557,7 @@ theorem gf128BdozBody (fetch : Nat → Option (DecodedInstr X86Instr))
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_addImm64, b16get_2, b16set_2]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_dec64, b16get_1, b16set_1]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]
-  simp only [stepX86Full_jnz, vpclmulBodyStep, vpclmulBodyObs,
+  simp only [stepX86Full_jnz, vpclmulBodyStep.public_eq_1, vpclmulBodyObs.public_eq_1,
     b16get_0, b16get_1, b16get_2, b16get_6,
     b16set_0, b16set_1, b16set_2, b16set_3, b16set_4, b16set_5, b16set_6, b16set_7]
   rfl
@@ -11477,10 +11577,10 @@ theorem gf128BdozExit (fetch : Nat → Option (DecodedInstr X86Instr))
       ⟨83, ⟨r0, r1, r2, r3, r4, r5, r6, outP, r8, r9, r10, r11, r12, r13, r14, r15⟩,
         ⟨lo, hi, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
         cf, o, zf, dy, false, m⟩ =
-      (⟨203, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      (⟨(readMem64 (writeMem256 m outP (poly87Reduce256 lo hi)) r4).toNat, ⟨0, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         ⟨Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero, Vec256.zero⟩,
         false, false, true, false, true, writeMem256 m outP (poly87Reduce256 lo hi)⟩,
-       gf128BdozExitObs outP) := by
+       gf128BdozExitObs r4 outP) := by
   have h87 : maskGprWidth false 0x87 = 0x87 := rfl
   rw [show 33 + extra = (((((((((((((((((((((((((((((((((extra + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) + 1) from by omega]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_movImm, h87, b16set_0]
@@ -11516,7 +11616,7 @@ theorem gf128BdozExit (fetch : Nat → Option (DecodedInstr X86Instr))
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_xorRR, b16get_11, mask32_xor_self_eq, u64_zero_beq_true, b16set_11]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]; simp only [stepX86Full_xorRR, b16get_0, mask32_xor_self_eq, u64_zero_beq_true, b16set_0]
   rw [runX86Fetch_step_prog fetch _ hf _ _ _ rfl rfl]
-  simp only [stepX86Full_ret, poly87Reduce256, gf128BdozExitObs]
+  simp only [stepX86Full_ret, poly87Reduce256.public_eq_1, gf128BdozExitObs, b16get_4, b16set_4]
   rw [runX86Fetch_halted _ _ _ rfl]
   rfl
 
@@ -11529,7 +11629,7 @@ theorem gf128BdozReplay (fetch : Nat → Option (DecodedInstr X86Instr))
         let u := runX86Fetch fetch fuel loop.1
         (u.1, loop.2 ++ u.2) := by
   induction rem with
-  | zero => intro v a m fuel _ _; simp [runCuts]
+  | zero => intro v a m fuel _ _; simp [runCuts.public_eq_1]
   | succ k ih =>
     intro v a m fuel hv hrel
     have hvn : v < n := by omega
@@ -11549,7 +11649,7 @@ theorem gf128BdozReplay (fetch : Nat → Option (DecodedInstr X86Instr))
     rw [gf128BdozBody fetch hf]
     rw [← ha8]
     rw [ih (v + 1) (vpclmulBodyStep a).1 (asmFfiVpclmulBodyStep m).1 fuel (by omega) hbody.1]
-    simp [runCuts, List.append_assoc]
+    simp [runCuts.public_eq_2, List.append_assoc]
 
 def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     (hf : ∀ d ∈ gf128BdozFreshProg, fetch d.offset = some d)
@@ -11558,7 +11658,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     (hfuel : 17 * n.toNat + 35 ≤ fuel) :
     UnrestrictedLoopCert X86State AsmFfiBdozMac n
       (vpclmulGuardedRun fetch fuel)
-      (fun m => gf128BdozAsmFfiRun n m.lhsPtr m.rhsPtr m.outPtr m.mem)
+      (fun m => gf128BdozAsmFfiRun (s₀.gpr.get 4) n m.lhsPtr m.rhsPtr m.outPtr m.mem)
       vpclmulBodyStep asmFfiVpclmulBodyStep
       s₀ ⟨s₀.gpr.get 6, s₀.gpr.get 2, s₀.gpr.get 7, Vec256.zero, Vec256.zero, n.toNat, s₀.mem⟩
       ⟨8, s₀.gpr.set 1 (UInt64.ofNat n.toNat), (s₀.ymm.set 0 Vec256.zero |>.set 1 Vec256.zero),
@@ -11569,7 +11669,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
   zeroSchedule := [⟨0, [], true⟩]
   entrySchedule := vpclmulEntryObs
   bodySchedule := fun v => vpclmulBodyObs (ptrStride (s₀.gpr.get 6) 32 v) (ptrStride (s₀.gpr.get 2) 32 v)
-  exitSchedule := gf128BdozExitObs (s₀.gpr.get 7)
+  exitSchedule := gf128BdozExitObs (s₀.gpr.get 4) (s₀.gpr.get 7)
   zero_cut := by
     intro hz; subst hz
     have hg0 : (s₀.gpr.get 1 == 0) = true := by simp [hcount]
@@ -11578,7 +11678,7 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
     obtain ⟨_, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, _, _, _, _, _, _, _⟩ := s₀
     have hr1 : r1 = 0 := hcount
     refine ⟨⟨rfl, rfl, rfl, rfl, hr1, rfl, fun h => absurd rfl h, rfl, rfl, rfl, rfl, rfl, rfl, rfl,
-      vpclmulExpected_field 0 (fun _ => 0) 0 0⟩, rfl, rfl⟩
+      vpclmulExpected_field 0 _ _ _⟩, rfl, rfl⟩
   pos_cert := fun hn =>
     vpclmulPosCert s₀ n.toNat (bv64_pos_of_ne_zero n hn) n.isLt
   pos_sched := fun _ => rfl
@@ -11638,8 +11738,8 @@ def gf128BdozFreshCert (fetch : Nat → Option (DecodedInstr X86Instr))
       have h2 := congrArg Prod.snd hacc
       dsimp only at h1 h2
       rw [h1, h2]
-    refine ⟨?_, by simp [List.append_assoc, b16get_7], rfl⟩
-    refine ⟨rfl, rfl, ?_, rfl, rfl, rfl, ?_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, vpclmulExpected_field n m r6 r2⟩
+    refine ⟨?_, by simp only [List.append_assoc, b16get_7]; rfl, rfl⟩
+    refine ⟨rfl, rfl, ?_, rfl, rfl, rfl, ?_, (by rw [ite_eq_right hn]; rfl), rfl, rfl, rfl, rfl, rfl, rfl, vpclmulExpected_field n m r6 r2⟩
     · simp only [b16get_2, b16get_6, b16get_7, ite_eq_right hn, hred]
     · intro _
       exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
@@ -11988,7 +12088,9 @@ def gf128BdozPclmulReduce (lo hi : Vec256) : Vec128 :=
 private theorem gf128BdozPclmul_exit_steps
     (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     StepsX86 gf128BdozPclmulProg 42 ⟨165, g, y, cf, o, zf, dy, false, m⟩
-      ⟨329, {g with r0 := 0, r1 := 0, r2 := 0, r6 := 0, r7 := 0, r8 := 0, r9 := 0, r10 := 0, r11 := 0},
+      ⟨(readMem64 (writeMem128 (writeMem128 m g.r7 (gf128BdozPclmulReduce y.r0 y.r1))
+          (g.r7+16) (gf128BdozPclmulReduce y.r2 y.r3)) g.r4).toNat,
+        {g with r0 := 0, r1 := 0, r2 := 0, r4 := g.r4 + 8, r6 := 0, r7 := 0, r8 := 0, r9 := 0, r10 := 0, r11 := 0},
         Bank16.const Vec256.zero, false, false, true, false, true,
         writeMem128 (writeMem128 m g.r7 (gf128BdozPclmulReduce y.r0 y.r1))
           (g.r7+16) (gf128BdozPclmulReduce y.r2 y.r3)⟩ := by
@@ -12083,7 +12185,7 @@ private theorem gf128BdozPclmul_pair_product (lo hi a b : Vec256) :
     gf128BdozPclmulPair, UInt64.zero_xor, UInt64.xor_zero]
   apply BitVec.eq_of_getLsbD_eq
   intro i hi
-  simp only [gf128Words, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  simp only [gf128Words.public_eq_1, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
   by_cases h0 : i < 128
   · by_cases h1 : i < 64 <;> simp only [h0, h1, ↓reduceIte] <;>
       first | rfl | simp only [Bool.xor_assoc, Bool.xor_comm]
@@ -12136,9 +12238,9 @@ private theorem gf128BdozPclmul_sum_reduce (n : Nat) (m : UInt64 → UInt8)
     gf128Reduce (gf128BdozPclmulPolySum n m pL pR lane) =
       gf128BdozPclmulFieldSum n m pL pR lane := by
   induction n generalizing pL pR with
-  | zero => change gf128Reduce 0 = 0; decide +kernel
+  | zero => exact elf_gf128Reduce_zero
   | succ n ih =>
-    simp only [gf128BdozPclmulPolySum, gf128BdozPclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul]
+    simp only [gf128BdozPclmulPolySum, gf128BdozPclmulFieldSum, gf128Reduce_xor, ih, gf128FieldMul.public_eq_1]
 
 private theorem gf128BdozPclmul_output_reduce (lo hi : Vec256) :
     gf128Words (gf128BdozPclmulReduce lo hi).w0 (gf128BdozPclmulReduce lo hi).w1 =
@@ -12146,7 +12248,7 @@ private theorem gf128BdozPclmul_output_reduce (lo hi : Vec256) :
   unfold gf128BdozPclmulPair
   rw [← gf128WordReduce_eq_reduce]
   simp [gf128BdozPclmulReduce, gf128BdozPclmulLift, gf128BdozPclmulXor,
-    gf128BdozPclmulShiftL, gf128BdozPclmulShiftR, gf128WordReduce,
+    gf128BdozPclmulShiftL, gf128BdozPclmulShiftR, gf128WordReduce.public_eq_1,
     clampVecWidth, evalVecBin256, evalVecShift256, UInt64.xor_comm]
 
 private theorem gf128BdozPclmul_output_field (n : Nat) (m : UInt64 → UInt8)
@@ -12156,7 +12258,8 @@ private theorem gf128BdozPclmul_output_field (n : Nat) (m : UInt64 → UInt8)
     gf128Words output.w0 output.w1 = gf128BdozPclmulFieldSum n m pL pR lane := by
   have hraw := gf128BdozPclmul_iter_polynomial n m pL pR (gf128BdozPclmulInitVec y) lane
   have hz : gf128BdozPclmulRaw (gf128BdozPclmulInitVec y) lane = 0 := by
-    cases lane <;> change (gf128Words 0 0 ++ gf128Words 0 0) = (0 : BitVec 256) <;> decide +kernel
+    cases lane <;> change (gf128Words 0 0 ++ gf128Words 0 0) = (0 : BitVec 256) <;>
+      (rw [elf_gf128Words_zero_zero]; decide)
   rw [hz] at hraw
   simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor] at hraw
   have h := congrArg gf128Reduce hraw
@@ -12197,8 +12300,8 @@ theorem gf128BdozPclmul_inhabited :
   exact ⟨gf128BdozPclmulWitnessState, 0, 0, by decide, rfl, rfl, rfl, rfl⟩
 
 theorem gf128BdozPclmul_zero_spec_tooth :
-    gf128BdozPclmulFieldSum 1 gf128BdozPclmulWitnessState.mem 4096 8192 false ≠ 0 := by
-  decide +kernel
+    gf128BdozPclmulFieldSum 1 gf128BdozPclmulWitnessState.mem 4096 8192 false ≠ 0 :=
+  elf_gf128_one_block_ne_zero (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
 
 #tooth_pair current_rlib_tower128_bdoz_mac_pclmul_functional vs gf128BdozPclmul_zero_spec_tooth
 #verify_inhabited current_rlib_tower128_bdoz_mac_pclmul_functional gf128BdozPclmul_inhabited
@@ -12452,7 +12555,7 @@ private theorem gf128ArmProductPoly_words (lo hi mid : Vec128) :
       gf128Words lo.w0 lo.w1 ^^^ gf128Words hi.w0 hi.w1 := by
     simp only [cross, gf128ArmXor, gf128Words_xor]
   have h := gf128FourWords_shift lo cross Vec128.zero hi
-  have hz : (gf128Words 0 0).setWidth 256 = 0 := by decide +kernel
+  have hz : (gf128Words 0 0).setWidth 256 = 0 := by rw [elf_gf128Words_zero_zero]; decide
   dsimp only [Vec128.zero] at h
   simp only [UInt64.xor_zero] at h
   simp only [hz, BitVec.ofNat_eq_ofNat, BitVec.xor_zero] at h
@@ -12491,7 +12594,7 @@ private theorem gf128ArmIterVec_field (n : Nat) (m : UInt64 → UInt8)
     rw [gf128ArmIterVec, ih]
     simp [gf128ArmBodyVec, Bank32.get_set_eq, Bank32.get_set_ne]
     rw [gf128ArmProductPoly_xor, gf128Reduce_xor, gf128ArmProductPoly_mul]
-    simp only [gf128ArmFieldSum, gf128FieldMul, BitVec.xor_assoc]
+    simp only [gf128ArmFieldSum, gf128FieldMul.public_eq_1, BitVec.xor_assoc]
 
 def gf128ArmReduceVec (lo hi mid : Vec128) : Vec128 :=
   let cross := gf128ArmXor (gf128ArmXor mid lo) hi
@@ -12504,9 +12607,8 @@ def gf128ArmReduceVec (lo hi mid : Vec128) : Vec128 :=
 private theorem gf128ArmReduceVec_field (lo hi mid : Vec128) :
     gf128Words (gf128ArmReduceVec lo hi mid).w0 (gf128ArmReduceVec lo hi mid).w1 =
       gf128Reduce (gf128ArmProductPoly lo hi mid) := by
-  rw [gf128ArmProductPoly_words]
-  exact gf128WordReduce_eq_reduce lo.w0 (lo.w1 ^^^ (mid.w0 ^^^ lo.w0 ^^^ hi.w0))
-    (hi.w0 ^^^ (mid.w1 ^^^ lo.w1 ^^^ hi.w1)) hi.w1
+  rw [gf128ArmProductPoly_words, ← gf128WordReduce_eq_reduce, gf128WordReduce.public_eq_1]
+  rfl
 
 def gf128ArmCleanVec (v : Bank32 Vec128) : Bank32 Vec128 :=
   ((((((((((((v.set 0 Vec128.zero).set 1 Vec128.zero).set 2 Vec128.zero).set 4 Vec128.zero).set
@@ -12608,6 +12710,7 @@ private theorem gf128ArmInitVec_poly_zero (v : Bank32 Vec128) :
     gf128ArmProductPoly ((gf128ArmInitVec v).get 0) ((gf128ArmInitVec v).get 1)
       ((gf128ArmInitVec v).get 2) = 0 := by
   change gf128ArmProductPoly Vec128.zero Vec128.zero Vec128.zero = 0
+  simp only [gf128ArmProductPoly, gf128Words.public_eq_1]
   decide +kernel
 
 /-- Whole-kernel functional equivalence for every positive AArch64 ABI trip count.
@@ -12676,15 +12779,15 @@ theorem current_rlib_gf128_mul_acc_pmull_functional (n : Nat) (hn : 0 < n)
             gf128Words (readMem128 m (g.get 0)).w0 (readMem128 m (g.get 0)).w1 from
           gf128Words_xor _ _ _ _]
         rw [gf128ArmReduceVec_field, gf128ArmIterVec_field, gf128ArmInitVec_poly_zero]
-        have hz : gf128Reduce 0 = 0 := by decide +kernel
+        have hz : gf128Reduce 0 = 0 := elf_gf128Reduce_zero
         rw [hz]
         simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor, BitVec.xor_comm]
 
 
 /-- A specification that discards the input product is refuted by 1·1. -/
 theorem gf128_pmull_discard_product_tooth :
-    gf128ArmFieldSum 1 (fun a => if a == 0 then 1 else 0) 0 0 ≠ 0 := by
-  decide +kernel
+    gf128ArmFieldSum 1 (fun a => if a == 0 then 1 else 0) 0 0 ≠ 0 :=
+  elf_gf128_one_block_ne_zero (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
 
 theorem gf128_pmull_functional_witness :
     ∃ (n : Nat) (s : Arm64State),
@@ -12692,8 +12795,8 @@ theorem gf128_pmull_functional_witness :
       s.gpr.get 3 = UInt64.ofNat n ∧
       gf128ArmFieldSum n s.mem (s.gpr.get 1) (s.gpr.get 2) = 0 := by
   refine ⟨1, ⟨0, (Bank32.const 0).set 3 1, Bank32.const Vec128.zero,
-    false, false, false, false, fun _ => 0⟩, ?_⟩
-  decide +kernel
+    false, false, false, false, fun _ => 0⟩, by decide, by decide, rfl, rfl, by decide +kernel, ?_⟩
+  exact elf_gf128_zero_block (by decide +kernel) (by decide +kernel)
 
 #tooth_pair current_rlib_gf128_mul_acc_pmull_functional vs gf128_pmull_discard_product_tooth
 #verify_inhabited current_rlib_gf128_mul_acc_pmull_functional gf128_pmull_functional_witness
@@ -13013,7 +13116,7 @@ private theorem gf128BdozArm_iter_field0 (n : Nat) (m : UInt64 → UInt8)
   | succ n ih =>
     rw [gf128ArmBdozIterVec, ih, gf128BdozArm_body_get0, gf128BdozArm_body_get1,
       gf128ArmBdozPoly_xor, gf128Reduce_xor, gf128ArmBdozPoly_mul]
-    simp only [gf128ArmBdozFieldSum, gf128FieldMul, BitVec.xor_assoc]
+    simp only [gf128ArmBdozFieldSum, gf128FieldMul.public_eq_1, BitVec.xor_assoc]
 
 private theorem gf128BdozArm_iter_field1 (n : Nat) (m : UInt64 → UInt8)
     (pL pR : UInt64) (v : Bank32 Vec128) :
@@ -13026,7 +13129,7 @@ private theorem gf128BdozArm_iter_field1 (n : Nat) (m : UInt64 → UInt8)
   | succ n ih =>
     rw [gf128ArmBdozIterVec, ih, gf128BdozArm_body_get2, gf128BdozArm_body_get3,
       gf128ArmBdozPoly_xor, gf128Reduce_xor, gf128ArmBdozPoly_mul]
-    simp only [gf128ArmBdozFieldSum, gf128FieldMul, BitVec.xor_assoc]
+    simp only [gf128ArmBdozFieldSum, gf128FieldMul.public_eq_1, BitVec.xor_assoc]
 
 private theorem gf128BdozArm_iter_succ (n : Nat) (m : UInt64 → UInt8)
     (pL pR : UInt64) (v : Bank32 Vec128) :
@@ -13094,8 +13197,9 @@ def gf128BdozArmReduceVec (lo hi : Vec128) : Vec128 :=
 
 private theorem gf128BdozArmReduceVec_field (lo hi : Vec128) :
     gf128Words (gf128BdozArmReduceVec lo hi).w0 (gf128BdozArmReduceVec lo hi).w1 =
-      gf128Reduce (gf128ArmBdozPoly lo hi) :=
-  gf128WordReduce_eq_reduce lo.w0 lo.w1 hi.w0 hi.w1
+      gf128Reduce (gf128ArmBdozPoly lo hi) := by
+  rw [gf128ArmBdozPoly, ← gf128WordReduce_eq_reduce, gf128WordReduce.public_eq_1]
+  rfl
 
 def gf128BdozArmReduceLaneVec (v : Bank32 Vec128) (rLo rHi : Nat) : Bank32 Vec128 :=
   let lo := v.get rLo
@@ -13279,9 +13383,10 @@ private theorem gf128BdozArm_entry_reaches
 private theorem gf128BdozArm_init_zero (v : Bank32 Vec128) :
     gf128ArmBdozPoly ((gf128BdozArmInitVec v).get 0) ((gf128BdozArmInitVec v).get 1) = 0 ∧
     gf128ArmBdozPoly ((gf128BdozArmInitVec v).get 2) ((gf128BdozArmInitVec v).get 3) = 0 := by
-  change gf128ArmBdozPoly Vec128.zero Vec128.zero = 0 ∧
-    gf128ArmBdozPoly Vec128.zero Vec128.zero = 0
-  decide +kernel
+  have h : gf128ArmBdozPoly Vec128.zero Vec128.zero = 0 := by
+    simp only [gf128ArmBdozPoly, gf128Words.public_eq_1]
+    decide +kernel
+  exact ⟨h, h⟩
 
 /-- Fresh-byte two-lane polynomial MAC on AArch64, for every positive 64-bit ABI
 count. The two output lanes are independent XOR sums of field products.
@@ -13341,12 +13446,12 @@ theorem current_rlib_gf128_tower128_bdoz_mac_pmull_functional
         rfl
       · change gf128Words (gf128BdozArmReduceVec _ _).w0 (gf128BdozArmReduceVec _ _).w1 = _
         rw [gf128BdozArmReduceVec_field, gf128BdozArm_iter_field0, (gf128BdozArm_init_zero v).1]
-        have hz : gf128Reduce 0 = 0 := by decide +kernel
+        have hz : gf128Reduce 0 = 0 := elf_gf128Reduce_zero
         rw [hz]
         simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor]
       · change gf128Words (gf128BdozArmReduceVec _ _).w0 (gf128BdozArmReduceVec _ _).w1 = _
         rw [gf128BdozArmReduceVec_field, gf128BdozArm_iter_field1, (gf128BdozArm_init_zero v).2]
-        have hz : gf128Reduce 0 = 0 := by decide +kernel
+        have hz : gf128Reduce 0 = 0 := elf_gf128Reduce_zero
         rw [hz]
         simp only [BitVec.ofNat_eq_ofNat, BitVec.zero_xor]
 
@@ -13369,6 +13474,77 @@ theorem current_rlib_gf128_tower128_bdoz_mac_pmull_inhabited :
 
 #tooth_pair current_rlib_gf128_tower128_bdoz_mac_pmull_functional vs current_rlib_gf128_tower128_bdoz_mac_pmull_tooth
 #verify_inhabited current_rlib_gf128_tower128_bdoz_mac_pmull_functional current_rlib_gf128_tower128_bdoz_mac_pmull_inhabited
+
+/-! ### Kernel runs as Wiedemann-tower dot products -/
+
+/-- Tower-basis dot product of `n` 16-byte block pairs: `Σ ψ⁻¹(L_i) · ψ⁻¹(R_i)` in `Tower128`. -/
+def gf128PclmulTowerSum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Tower128
+  | 0, _, _, _ => towerZero 7
+  | n+1, m, pL, pR =>
+      towerAdd 7
+        (towerMul 7
+          (polyToTower128 (gf128Words (readMem128 m pL).w0 (readMem128 m pL).w1))
+          (polyToTower128 (gf128Words (readMem128 m pR).w0 (readMem128 m pR).w1)))
+        (gf128PclmulTowerSum n m (pL+16) (pR+16))
+
+theorem polyToTower128_gf128PclmulFieldSum (n : Nat) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    polyToTower128 (gf128PclmulFieldSum n m pL pR) = gf128PclmulTowerSum n m pL pR := by
+  induction n generalizing pL pR with
+  | zero => exact polyToTower128_zero
+  | succ n ih =>
+    simp only [gf128PclmulFieldSum, gf128PclmulTowerSum, polyToTower128_gf128FieldMul_xor, ih]
+
+/-- The decoded production `pclmul` kernel run, read in the tower basis: the output block is the
+    initial accumulator plus the `Tower128` dot product of the input blocks. -/
+theorem current_rlib_gf2_128_mul_acc_pclmul_tower_dot
+    (s : X86State) (k extra : Nat) (hk : k+1 < 2^64) (hp : s.pc = 0)
+    (hh : s.halted = false) (hn : s.gpr.r1 = UInt64.ofNat (k+1)) :
+    polyToTower128 (gf128Words
+        (readMem64 (runX86 gf128PclmulProg (34 + 16*(k+1) + extra) s).1.mem s.gpr.r7)
+        (readMem64 (runX86 gf128PclmulProg (34 + 16*(k+1) + extra) s).1.mem (s.gpr.r7+8))) =
+      towerAdd 7
+        (polyToTower128 (gf128Words (readMem64 s.mem s.gpr.r7) (readMem64 s.mem (s.gpr.r7+8))))
+        (gf128PclmulTowerSum (k+1) s.mem s.gpr.r6 s.gpr.r2) := by
+  obtain ⟨_, _, _, _, hout, _⟩ := current_rlib_gf2_128_mul_acc_pclmul_functional s k extra hk hp hh hn
+  rw [hout, polyToTower128_xor, polyToTower128_gf128PclmulFieldSum]
+
+/-- Tower-basis dot product of `n` 32-byte block pairs (two 128-bit lanes per block). -/
+def gf128VpclmulTowerSum : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → Tower128
+  | 0, _, _, _ => towerZero 7
+  | n+1, m, pL, pR =>
+      towerAdd 7
+        (towerMul 7
+          (polyToTower128 (gf128Words (readMem256 m pL).w0 (readMem256 m pL).w1))
+          (polyToTower128 (gf128Words (readMem256 m pR).w0 (readMem256 m pR).w1)))
+        (towerAdd 7
+          (towerMul 7
+            (polyToTower128 (gf128Words (readMem256 m pL).w2 (readMem256 m pL).w3))
+            (polyToTower128 (gf128Words (readMem256 m pR).w2 (readMem256 m pR).w3)))
+          (gf128VpclmulTowerSum n m (pL+32) (pR+32)))
+
+theorem polyToTower128_gf128VpclmulFieldSum (n : Nat) (m : UInt64 → UInt8) (pL pR : UInt64) :
+    polyToTower128 (gf128VpclmulFieldSum n m pL pR) = gf128VpclmulTowerSum n m pL pR := by
+  induction n generalizing pL pR with
+  | zero => exact polyToTower128_zero
+  | succ n ih =>
+    simp only [gf128VpclmulFieldSum, gf128VpclmulTowerSum, BitVec.xor_assoc,
+      polyToTower128_gf128FieldMul_xor, ih]
+
+/-- The decoded production `vpclmulqdq` kernel run, read in the tower basis. -/
+theorem current_rlib_gf2_128_mul_acc_vpclmul_tower_dot
+    (s : X86State) (k extra : Nat) (hk : k+1 < 2^64) (hp : s.pc = 0)
+    (hh : s.halted = false) (hn : s.gpr.r1 = UInt64.ofNat (k+1)) :
+    polyToTower128 (gf128Words
+        (readMem64 (runX86 gf128VpclmulProg (40 + 16*(k+1) + extra) s).1.mem s.gpr.r7)
+        (readMem64 (runX86 gf128VpclmulProg (40 + 16*(k+1) + extra) s).1.mem (s.gpr.r7+8))) =
+      towerAdd 7
+        (polyToTower128 (gf128Words (readMem64 s.mem s.gpr.r7) (readMem64 s.mem (s.gpr.r7+8))))
+        (gf128VpclmulTowerSum (k+1) s.mem s.gpr.r6 s.gpr.r2) := by
+  obtain ⟨_, _, _, _, hout, _⟩ := current_rlib_gf2_128_mul_acc_vpclmul_functional s k extra hk hp hh hn
+  rw [hout, polyToTower128_xor, polyToTower128_gf128VpclmulFieldSum]
+
+#verify_constructive current_rlib_gf2_128_mul_acc_pclmul_tower_dot
+#verify_constructive current_rlib_gf2_128_mul_acc_vpclmul_tower_dot
 
 end Gf128KernelEquivalence
 

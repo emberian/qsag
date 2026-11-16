@@ -157,7 +157,7 @@ theorem flattenDag_sound {S : Type} (g : TvGraph S) (boxes : Boxes S) (env : S) 
   flattenFrom_sound g boxes g.fuel g.entry id env
 
 /-- Counted sequence of DAG cuts emitting `StepObs` leakage traces. -/
-def runCuts {S : Type} (step : S → S × List StepObs) : Nat → S → S × List StepObs
+@[expose] def runCuts {S : Type} (step : S → S × List StepObs) : Nat → S → S × List StepObs
   | 0, s => (s, [])
   | n + 1, s =>
     let t := step s
@@ -2313,9 +2313,9 @@ structure AsmFfiBdozMac where
   remaining : Nat
   mem : UInt64 → UInt8
 
-def vpclmulEntryObs : List StepObs := [⟨0, [], true⟩, ⟨4, [], true⟩]
+@[expose] def vpclmulEntryObs : List StepObs := [⟨0, [], true⟩, ⟨4, [], true⟩]
 
-def vpclmulBodyObs (pL pR : UInt64) : List StepObs :=
+@[expose] def vpclmulBodyObs (pL pR : UInt64) : List StepObs :=
   [⟨8, [(pL, 32)], true⟩, ⟨12, [(pR, 32)], true⟩, ⟨16, [], true⟩, ⟨22, [], true⟩,
    ⟨28, [], true⟩, ⟨34, [], true⟩, ⟨40, [], true⟩, ⟨44, [], true⟩, ⟨49, [], true⟩,
    ⟨54, [], true⟩, ⟨58, [], true⟩, ⟨62, [], true⟩, ⟨66, [], true⟩, ⟨70, [], true⟩,
@@ -2330,7 +2330,7 @@ def vpclmulExitObs (rsp : UInt64) (outPtr : UInt64) : List StepObs :=
    ⟨183, [], true⟩, ⟨185, [], true⟩, ⟨187, [], true⟩, ⟨189, [], true⟩, ⟨192, [], true⟩,
    ⟨195, [], true⟩, ⟨198, [], true⟩, ⟨201, [], true⟩, ⟨203, [(rsp, 8)], true⟩]
 
-def vpclmulBodyStep (s : X86State) : X86State × List StepObs :=
+@[expose] def vpclmulBodyStep (s : X86State) : X86State × List StepObs :=
   let pL := s.gpr.get 6
   let pR := s.gpr.get 2
   let c := s.gpr.get 1
@@ -2355,7 +2355,7 @@ def vpclmulBodyStep (s : X86State) : X86State × List StepObs :=
       ymmDirty := true },
    vpclmulBodyObs pL pR)
 
-def asmFfiVpclmulBodyStep (m : AsmFfiBdozMac) : AsmFfiBdozMac × List StepObs :=
+@[expose] def asmFfiVpclmulBodyStep (m : AsmFfiBdozMac) : AsmFfiBdozMac × List StepObs :=
   let a := readMem256 m.mem m.lhsPtr
   let b := readMem256 m.mem m.rhsPtr
   (⟨m.lhsPtr + 32, m.rhsPtr + 32, m.outPtr,
@@ -2374,7 +2374,7 @@ theorem asmFfiVpclmul_cuts_accum (k : Nat) (pL pR outP : UInt64) (lo hi : Vec256
 
 /-- Symbol execution behind a zero-count guard on `rcx`. The guard branch is a hand-written
 model of the Rust wrapper's early return on empty input, not decoded machine code. -/
-def vpclmulGuardedRun (fetch : Nat → Option (DecodedInstr X86Instr))
+@[expose] def vpclmulGuardedRun (fetch : Nat → Option (DecodedInstr X86Instr))
     (fuel : Nat) (s : X86State) : X86State × List StepObs :=
   if s.gpr.get 1 == 0 then
     ({ s with
@@ -2499,7 +2499,7 @@ theorem vpclmul_exit_full (fetch : Nat → Option (DecodedInstr X86Instr))
   simp only [stepX86Full_ret, b16get_4, b16set_4, poly87Reduce256, vpclmulExitObs]
   rw [runX86Fetch_halted _ _ _ rfl]
 
-def VpclmulRel (s₀ : X86State) (n v : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
+@[expose] def VpclmulRel (s₀ : X86State) (n v : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
   let baseL := s₀.gpr.get 6
   let baseR := s₀.gpr.get 2
   ∃ cf o zf : Bool, ∃ y2 y3 y4 y5 y6 y7 : Vec256,
@@ -2515,7 +2515,7 @@ def VpclmulRel (s₀ : X86State) (n v : Nat) (a : X86State) (m : AsmFfiBdozMac) 
     m.remaining = n - v ∧
     m.mem = s₀.mem
 
-def VpclmulLoopPost (s₀ : X86State) (n : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
+@[expose] def VpclmulLoopPost (s₀ : X86State) (n : Nat) (a : X86State) (m : AsmFfiBdozMac) : Prop :=
   let baseL := s₀.gpr.get 6
   let baseR := s₀.gpr.get 2
   ∃ cf o zf : Bool, ∃ y2 y3 y4 y5 y6 y7 : Vec256,
@@ -2540,7 +2540,7 @@ theorem vpclmulExpected_field (n : Word) (mem : UInt64 → UInt8) (pL pR : UInt6
   · simp only [hn, ↓reduceIte]
     exact gf128_bdozMacAccum_field n.toNat mem pL pR lane hl
 
-def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
+@[expose] def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
   let acc := bdozMacAccum n.toNat s₀.mem (s₀.gpr.get 6) (s₀.gpr.get 2) Vec256.zero Vec256.zero
   let expected := if n = 0 then Vec256.zero else poly87Reduce256 acc.1 acc.2
   out.halted = true ∧
@@ -2562,17 +2562,17 @@ def VpclmulPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac
 /-- What the production epilogue leaves in the vector bank and the caller-saved scratch
 registers after a nonempty call: `vzeroall` clears every `ymm`, and `rdx`, `rsi`, `rdi`,
 `r8`–`r11` are zeroed (`rax` and `rcx` are covered by `VpclmulPost`). -/
-def VpclmulScratchWiped (n : Word) (out : X86State) : Prop :=
+@[expose] def VpclmulScratchWiped (n : Word) (out : X86State) : Prop :=
   n ≠ 0 → (∀ i, i < 16 → out.ymm.get i = Vec256.zero) ∧
     out.gpr.get 2 = 0 ∧ out.gpr.get 6 = 0 ∧ out.gpr.get 7 = 0 ∧ out.gpr.get 8 = 0 ∧
     out.gpr.get 9 = 0 ∧ out.gpr.get 10 = 0 ∧ out.gpr.get 11 = 0
 
 /-- Postcondition of `qsag_asm_tower128_bdoz_mac_vpclmul`: the MAC result (`VpclmulPost`) together
 with the scratch wipe. -/
-def VpclmulMacPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
+@[expose] def VpclmulMacPost (s₀ : X86State) (n : Word) (out : X86State) (m : AsmFfiBdozMac) : Prop :=
   VpclmulPost s₀ n out m ∧ VpclmulScratchWiped n out
 
-def vpclmulPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
+@[expose] def vpclmulPosCert (s₀ : X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64) :
     LoopRelationCert X86State AsmFfiBdozMac n vpclmulBodyStep asmFfiVpclmulBodyStep
       ⟨8, s₀.gpr.set 1 (UInt64.ofNat n), (s₀.ymm.set 0 Vec256.zero |>.set 1 Vec256.zero),
         s₀.cf, s₀.ofFlag, s₀.zf, true, false, s₀.mem⟩
@@ -2924,4 +2924,8 @@ theorem vpclmulPosCert_flattened (s₀ : X86State) (n : Nat) (hn : 0 < n) (hboun
   LoopRelationCert.flattened_refinement (vpclmulPosCert s₀ n hn hbound)
 
 
+end Qsag.SydTv
+
+namespace Qsag.SydTv
+#export_eqns runCuts poly87Reduce256 vpclmulEntryObs vpclmulBodyObs vpclmulExitObs vpclmulBodyStep asmFfiVpclmulBodyStep VpclmulRel
 end Qsag.SydTv

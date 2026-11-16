@@ -273,7 +273,7 @@ theorem clmul64_xor_left (a b c : BitVec 64) :
   intro i _
   split <;> simp [BitVec.shiftLeft_xor_distrib]
 
-def fastRemainder (p : YmmReg) : XmmReg :=
+@[expose] def fastRemainder (p : YmmReg) : XmmReg :=
   gf2_128_reduce_x128_7_2_1_0 ((p >>> 128).setWidth 128) (p.setWidth 128)
 
 theorem xor_rearrange8 (a b c d e f g h : BitVec w) :
@@ -3118,4 +3118,8 @@ theorem narrow_mask_ignores_upper_lane :
 
 #verify_inhabited checkAt_decodes pclmul_boundary_inhabited
 
+end Qsag.SimdBinaryEquiv
+
+namespace Qsag.SimdBinaryEquiv
+#export_eqns xorSum clmul64 pclmulqdq clmul128 polynomialRemainderSteps polynomialRemainder fastRemainder lane128 pmull pmull2 ext evalVec
 end Qsag.SimdBinaryEquiv

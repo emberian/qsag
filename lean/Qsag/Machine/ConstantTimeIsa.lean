@@ -204,7 +204,7 @@ structure LeakageEvent where
   dirtyUpperYmmOnRet : Bool
   deriving DecidableEq, Repr, Inhabited
 
-def LeakageEvent.clean (pc : Nat) (addrs : List (BitVec 64) := []) : LeakageEvent :=
+@[expose] def LeakageEvent.clean (pc : Nat) (addrs : List (BitVec 64) := []) : LeakageEvent :=
   { pc := pc
     branchTaken := none
     memAddrs := addrs
@@ -325,7 +325,7 @@ structure X86State where
   doitEnabled : Bool
   ymmUpperDirty : Bool
 
-def X86State.setGpr (st : X86State) (r : X86Gpr) (v : BitVec 64) : X86State :=
+@[expose] def X86State.setGpr (st : X86State) (r : X86Gpr) (v : BitVec 64) : X86State :=
   { st with gpr := fun q => if q == r then v else st.gpr q }
 
 def X86State.setYmm (st : X86State) (r : YmmReg) (v : Vec256) : X86State :=
@@ -399,7 +399,7 @@ inductive X86Stmt where
   | ret
   deriving DecidableEq, Repr
 
-def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × LeakageEvent :=
+@[expose] def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × LeakageEvent :=
   match ins with
   | .movImm64 dst imm =>
     (st.setGpr dst imm, LeakageEvent.clean pc)
@@ -605,7 +605,7 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
     (st.setYmm dst ⟨st.mem a0, st.mem a1, st.mem a2, st.mem a3⟩,
      LeakageEvent.clean pc [a0, a1, a2, a3])
 
-def execX86Block (blk : List X86Instr) (pc : Nat) (st : X86State) :
+@[expose] def execX86Block (blk : List X86Instr) (pc : Nat) (st : X86State) :
     X86State × List LeakageEvent :=
   match blk with
   | [] => (st, [])
@@ -2989,5 +2989,37 @@ theorem tooth_x86_mulx_without_doit_leaks :
     (execX86Instr (.mulx64 .rax .rcx .rdi) 0 (defaultX86State 0#64)).2 ≠
     (execX86Instr (.mulx64 .rax .rcx .rdi) 0 (defaultX86State 1#64)).2 := by decide
 
+
+/-! ### 9. `UMULH` and `DIV` program fixtures for `Machine.PlatformContractInstances` -/
+
+/-- The fragment `umulh x2, x0, x1; ret` is accepted under the all-secret taint, which assumes
+    `DIT`. -/
+theorem umulhArmProg_checked :
+    (checkArmProg true glAllSecretArmTaint [.instr (.umulh64 .x2 .x0 .x1), .ret]).isSome = true := by
+  rfl
+
+theorem glAllSecretArmTaint_gpr_x0 : glAllSecretArmTaint.gpr .x0 = .sec := by rfl
+
+/-- Without `DIT` the fragment `umulh x2, x0, x1; ret` leaks its first operand. -/
+theorem umulhArmProg_leaks_without_dit (s₁ s₂ : ArmState) (h₁ : s₁.ditEnabled = false)
+    (h₂ : s₂.ditEnabled = false) (hne : ¬ (s₁.gpr .x0 = s₂.gpr .x0)) :
+    ¬ ((execArmProg [.instr (.umulh64 .x2 .x0 .x1), .ret] 0 s₁).2 =
+       (execArmProg [.instr (.umulh64 .x2 .x0 .x1), .ret] 0 s₂).2) := by
+  intro h
+  have hEv : (execArmInstr (.umulh64 .x2 .x0 .x1) 0 s₁).2 =
+      (execArmInstr (.umulh64 .x2 .x0 .x1) 0 s₂).2 := (List.cons.inj h).1
+  have hOps := congrArg LeakageEvent.varLatencyOperands hEv
+  rw [(tooth_arm_umulh_requires_dit s₁ h₁).2, (tooth_arm_umulh_requires_dit s₂ h₂).2] at hOps
+  exact hne (List.cons.inj hOps).1
+
+/-- `div rdi; ret` leaks the dividend whatever the `DOITM` and upper-YMM bits of the state. -/
+theorem div64X86Prog_leaks (doit dirty : Bool) :
+    ¬ ((execX86Prog [.instr (.div64 .rdi), .ret] 0
+          { defaultX86State 3#64 with doitEnabled := doit, ymmUpperDirty := dirty }).2 =
+       (execX86Prog [.instr (.div64 .rdi), .ret] 0
+          { defaultX86State 17#64 with doitEnabled := doit, ymmUpperDirty := dirty }).2) := by
+  cases doit <;> cases dirty <;> decide
+
+#export_eqns execX86Prog
 
 end Qsag.ConstantTimeIsa
