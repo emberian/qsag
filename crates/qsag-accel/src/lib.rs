@@ -5,11 +5,19 @@
 //! and verified kernel digest registry (`VerifiedKernelDigestRegistry`).
 
 #![cfg_attr(
-    not(all(feature = "std", target_os = "linux", target_pointer_width = "64")),
+    not(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    )),
     forbid(unsafe_code)
 )]
 #![cfg_attr(
-    all(feature = "std", target_os = "linux", target_pointer_width = "64"),
+    all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ),
     deny(unsafe_code)
 )]
 
@@ -26,10 +34,23 @@ pub mod poseidon2;
 pub mod sha2;
 pub mod spirv_kernels;
 pub mod vulkan;
-#[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+#[cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos"),
+    target_pointer_width = "64"
+))]
 #[allow(unsafe_code)]
 mod vulkan_ffi;
 
+pub use goldilocks::{
+    EXT4_ONE, EXT4_ZERO, eq_kronecker_1024, ext4_add, ext4_mul, ext4_pow_pub, ext4_sub,
+    geometric_kronecker_1024, mono_kronecker_1024, pair_geometric_kronecker_2048,
+};
+pub use poseidon2::{
+    POSEIDON2_CANOPY_NODE_HI, POSEIDON2_CANOPY_ROOT_DOMAIN, POSEIDON2_CANOPY_SALT_DOMAIN,
+    POSEIDON2_FORS_NODE_DOMAIN, POSEIDON2_MERKLE_NODE_DOMAIN, Poseidon2Merkle2BlockAddr,
+    poseidon2_canopy_root_cpu, poseidon2_canopy_tree_key_cpu,
+};
 pub use vulkan::{
     AIR_MAX_OP_TERMS, AIR_OP_GAMMA_BASE_EXT4, BatchExecution, CpuFallbackEvent, PipelineTelemetry,
     VulkanDeviceInfo, VulkanError, VulkanSpirvBackend, air_op_term_count,
@@ -39,7 +60,11 @@ use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
 use gf2_128::bdoz_gf2_128_batch_dot_cpu;
 use goldilocks::{coset_lde_ext2_cpu, gl_reduce_u64, goldilocks_ntt_cpu};
 use keccak::cshake256_framed_32;
-use poseidon2::{merkle_layer_poseidon2_at_cpu, poseidon2_hash_framed_limbs4, poseidon2_perm12};
+use poseidon2::{
+    merkle_layer_poseidon2_2block_at_cpu, merkle_layer_poseidon2_at_cpu,
+    merkle_layer_poseidon2_canopy_at_cpu, merkle_layer_poseidon2_fixed_tweak_cpu,
+    poseidon2_hash_framed_limbs4, poseidon2_perm12,
+};
 use sha2::sha256;
 
 // Sizes and scheduling depend only on public lengths, never on field values.
@@ -139,6 +164,13 @@ pub enum AccelError {
     /// (required subgroup size, zero scratch, zero spills) for its compiled pipelines. Nothing
     /// was sent to the device.
     SecretSlotUnaudited { slot: KernelSlot },
+    /// A prover receipt was requested for a job descriptor whose slot disagrees with `pin`.
+    ProverKernelSlotMismatch {
+        pin: ProverKernelSlot,
+        descriptor: ProverKernelSlot,
+    },
+    /// The backend refused a prover kernel slot because it holds no driver audit evidence.
+    ProverSlotUnaudited { slot: ProverKernelSlot },
 }
 
 impl core::fmt::Display for AccelError {
@@ -170,6 +202,14 @@ impl core::fmt::Display for AccelError {
             Self::SecretSlotUnaudited { slot } => write!(
                 f,
                 "backend has no pipeline audit evidence and refuses secret-bearing slot {slot:?}"
+            ),
+            Self::ProverKernelSlotMismatch { pin, descriptor } => write!(
+                f,
+                "prover kernel pin is for slot {pin:?} but the job descriptor is for slot {descriptor:?}"
+            ),
+            Self::ProverSlotUnaudited { slot } => write!(
+                f,
+                "backend has no pipeline audit evidence and refuses prover slot {slot:?}"
             ),
         }
     }
@@ -600,6 +640,257 @@ impl ExecutionReceipt {
     }
 }
 
+/// Canonical job descriptor for VRAM-resident [`ProverKernelSlot`] invocations, bound into
+/// [`ProverExecutionReceipt`] with the `0x80 | slot` tag byte separating it from [`BatchJobDescriptor`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ProverJobDescriptor {
+    WhirCommitRound0 {
+        num_polys: usize,
+        num_vars: usize,
+        blowup: usize,
+        group_arity: usize,
+    },
+    WhirCommitStage {
+        stage_idx: usize,
+        coeff_len: usize,
+        domain_len: usize,
+        group_arity: usize,
+    },
+    WhirGatherQueries {
+        stage_idx: usize,
+        group_arity: usize,
+        num_polys: usize,
+        num_groups: usize,
+        num_queries: usize,
+        num_siblings: usize,
+    },
+    WhirFoldSumcheck {
+        op_code: u8,
+        num_elements: usize,
+        aux: u64,
+    },
+    AirRowGroupA {
+        mode: u8,
+        cur_m: usize,
+        cur_r: usize,
+    },
+    AirRowGroupB {
+        is_round0_base: bool,
+        cur_m: usize,
+        cur_r: usize,
+        cur_s: usize,
+    },
+}
+
+impl ProverJobDescriptor {
+    pub const fn slot(&self) -> ProverKernelSlot {
+        match self {
+            Self::WhirCommitRound0 { .. }
+            | Self::WhirCommitStage { .. }
+            | Self::WhirGatherQueries { .. } => ProverKernelSlot::WhirLdeCommitment,
+            Self::WhirFoldSumcheck { .. } => ProverKernelSlot::WhirFoldSumcheck,
+            Self::AirRowGroupA { .. } => ProverKernelSlot::AirRowGroupA,
+            Self::AirRowGroupB { .. } => ProverKernelSlot::AirRowGroupB,
+        }
+    }
+
+    /// Canonical 56-byte big-endian encoding of the prover job descriptor for V5 receipt MACs.
+    pub fn to_canonical_bytes(&self) -> [u8; 56] {
+        let mut out = [0u8; 56];
+        out[0] = 0x80u8 | (self.slot() as u8);
+        match *self {
+            Self::WhirCommitRound0 {
+                num_polys,
+                num_vars,
+                blowup,
+                group_arity,
+            } => {
+                out[1] = 0;
+                out[8..16].copy_from_slice(&(num_polys as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&(num_vars as u64).to_be_bytes());
+                out[24..32].copy_from_slice(&(blowup as u64).to_be_bytes());
+                out[32..40].copy_from_slice(&(group_arity as u64).to_be_bytes());
+            }
+            Self::WhirCommitStage {
+                stage_idx,
+                coeff_len,
+                domain_len,
+                group_arity,
+            } => {
+                out[1] = 1;
+                out[8..16].copy_from_slice(&(stage_idx as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&(coeff_len as u64).to_be_bytes());
+                out[24..32].copy_from_slice(&(domain_len as u64).to_be_bytes());
+                out[32..40].copy_from_slice(&(group_arity as u64).to_be_bytes());
+            }
+            Self::WhirGatherQueries {
+                stage_idx,
+                group_arity,
+                num_polys,
+                num_groups,
+                num_queries,
+                num_siblings,
+            } => {
+                out[1] = 2;
+                out[8..16].copy_from_slice(&(stage_idx as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&(group_arity as u64).to_be_bytes());
+                out[24..32].copy_from_slice(&(num_polys as u64).to_be_bytes());
+                out[32..40].copy_from_slice(&(num_groups as u64).to_be_bytes());
+                out[40..48].copy_from_slice(&(num_queries as u64).to_be_bytes());
+                out[48..56].copy_from_slice(&(num_siblings as u64).to_be_bytes());
+            }
+            Self::WhirFoldSumcheck {
+                op_code,
+                num_elements,
+                aux,
+            } => {
+                out[1] = op_code;
+                out[8..16].copy_from_slice(&(num_elements as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&aux.to_be_bytes());
+            }
+            Self::AirRowGroupA { mode, cur_m, cur_r } => {
+                out[1] = mode;
+                out[8..16].copy_from_slice(&(cur_m as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&(cur_r as u64).to_be_bytes());
+            }
+            Self::AirRowGroupB {
+                is_round0_base,
+                cur_m,
+                cur_r,
+                cur_s,
+            } => {
+                out[1] = is_round0_base as u8;
+                out[8..16].copy_from_slice(&(cur_m as u64).to_be_bytes());
+                out[16..24].copy_from_slice(&(cur_r as u64).to_be_bytes());
+                out[24..32].copy_from_slice(&(cur_s as u64).to_be_bytes());
+            }
+        }
+        out
+    }
+}
+
+/// Keyed V5 execution receipt for a VRAM-resident [`ProverKernelSlot`] dispatch, binding the
+/// backend identity, `ProverKernelSlot::algorithm_domain()`, [`CertifiedProverKernelPin`] SHA-256
+/// and Poseidon2 digests, [`VulkanDeviceInfo::audit_evidence_digest`], `transcript_anchor`, and
+/// host-visible `input_digest` / `output_digest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ProverExecutionReceipt {
+    pub backend_id: [u8; 32],
+    pub arch: KernelTargetArch,
+    pub descriptor: ProverJobDescriptor,
+    pub kernel_sha256: [u8; 32],
+    pub kernel_poseidon2: [u64; 4],
+    pub transcript_anchor: [u8; 32],
+    pub hardware_audit_digest: [u8; 32],
+    pub input_digest: [u8; 32],
+    pub output_digest: [u8; 32],
+    pub mac: [u8; 32],
+}
+
+impl ProverExecutionReceipt {
+    fn mac_over_fields(&self, key: &BackendAttestationKey) -> [u8; 32] {
+        let slot = self.descriptor.slot();
+        let mut p2_bytes = [0u8; 32];
+        for (chunk, limb) in p2_bytes
+            .as_chunks_mut::<8>()
+            .0
+            .iter_mut()
+            .zip(&self.kernel_poseidon2)
+        {
+            *chunk = limb.to_le_bytes();
+        }
+        cshake256_framed_32(
+            b"QSAG.ACCEL.KEYED_RECEIPT.V5",
+            &[
+                key.key.expose(),
+                &self.backend_id,
+                slot.algorithm_domain(),
+                &[self.arch as u8],
+                &self.descriptor.to_canonical_bytes(),
+                &self.kernel_sha256,
+                &p2_bytes,
+                &self.transcript_anchor,
+                &self.hardware_audit_digest,
+                &self.input_digest,
+                &self.output_digest,
+            ],
+        )
+    }
+
+    /// Issue an audited keyed V5 receipt for a prover-stage kernel execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_audited(
+        key: &BackendAttestationKey,
+        pin: &CertifiedProverKernelPin,
+        descriptor: ProverJobDescriptor,
+        transcript_anchor: [u8; 32],
+        input_digest: [u8; 32],
+        output_digest: [u8; 32],
+        hardware_audit_digest: [u8; 32],
+    ) -> Result<Self, AccelError> {
+        if pin.target_arch == KernelTargetArch::SpirV15 && hardware_audit_digest == [0; 32] {
+            return Err(AccelError::ProverSlotUnaudited { slot: pin.slot });
+        }
+        if pin.slot != descriptor.slot() {
+            return Err(AccelError::ProverKernelSlotMismatch {
+                pin: pin.slot,
+                descriptor: descriptor.slot(),
+            });
+        }
+        let mut receipt = Self {
+            backend_id: key.backend_id,
+            arch: pin.target_arch,
+            descriptor,
+            kernel_sha256: pin.sha256_digest,
+            kernel_poseidon2: pin.poseidon2_digest,
+            transcript_anchor,
+            hardware_audit_digest,
+            input_digest,
+            output_digest,
+            mac: [0u8; 32],
+        };
+        receipt.mac = receipt.mac_over_fields(key);
+        Ok(receipt)
+    }
+
+    /// Constant-time verification mask against `key` and approved `pin`.
+    fn verification_mask(
+        &self,
+        key: &BackendAttestationKey,
+        pin: &CertifiedProverKernelPin,
+    ) -> u64 {
+        let mut ok = ct_eq_mask_u64(self.arch as u64, pin.target_arch as u64)
+            & ct_eq_mask_u64(self.descriptor.slot() as u64, pin.slot as u64)
+            & ct_eq_bytes_mask(&self.backend_id, &key.backend_id)
+            & ct_eq_bytes_mask(&self.kernel_sha256, &pin.sha256_digest);
+        for (&actual, &expected) in self.kernel_poseidon2.iter().zip(&pin.poseidon2_digest) {
+            ok &= ct_eq_mask_u64(actual, expected);
+        }
+        ok & ct_eq_bytes_mask(&self.mac, &self.mac_over_fields(key))
+    }
+}
+
+/// Domain-separated `cSHAKE256` digest over length-framed slices under `slot.algorithm_domain()`
+/// (`role_tag`: `0x01` = input digest, `0x02` = output digest).
+pub fn prover_stage_io_digest(
+    slot: ProverKernelSlot,
+    role_tag: u8,
+    op_tag: u8,
+    frames: &[&[u8]],
+) -> [u8; 32] {
+    let mut sp = keccak::init_cshake256(b"", slot.algorithm_domain());
+    sp.absorb(&[role_tag, op_tag]);
+    sp.absorb(&(frames.len() as u64).to_le_bytes());
+    for frame in frames {
+        sp.absorb(&(frame.len() as u64).to_le_bytes());
+        sp.absorb(frame);
+    }
+    keccak::finalize_cshake256(&mut sp, true);
+    let mut out = [0u8; 32];
+    sp.squeeze(&mut out);
+    out
+}
+
 /// Zero-dependency `#![no_std]` hardware/GPU accelerator trait.
 ///
 /// External certified RDNA2 / SPIR-V / FPGA host crates implement this trait without forcing
@@ -718,6 +1009,42 @@ pub trait AcceleratorBackend: Send + Sync {
         out_parents: &mut [[u64; 4]],
     ) -> Result<(), AccelError> {
         self.try_merkle_layer_poseidon2_at(children, pk_seed, layer, start_parent_idx, out_parents)
+    }
+
+    /// Two-block full-`pk_seed[0..4]` `Poseidon2` binary Merkle node sponge (`merkle_node_hash`),
+    /// binding `domain_tag`, `pk_seed`, `layer`, 64-bit `tree_idx`, `level`, and `node_idx`.
+    fn try_merkle_layer_poseidon2_2block_at(
+        &self,
+        children: &[[u64; 4]],
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        addr: Poseidon2Merkle2BlockAddr,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        merkle_layer_poseidon2_2block_at_cpu(children, domain_tag, pk_seed, addr, out_parents)
+    }
+
+    /// `Poseidon2` WHIR Canopy internal node compression (`1`-perm Weighted Jive), binding
+    /// 1-indexed binary heap `node_idx = start_node_idx + parent_idx` and `tree_key[0..3]`.
+    fn try_merkle_layer_poseidon2_canopy_at(
+        &self,
+        children: &[[u64; 4]],
+        tree_key: &[u64; 4],
+        start_node_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        merkle_layer_poseidon2_canopy_at_cpu(children, tree_key, start_node_idx, out_parents)
+    }
+
+    /// Fixed-tweak `Poseidon2` Weighted Jive Merkle compression (`1` permutation), matching
+    /// `qsag_agg::zk_hem::recursive_whir::compress`.
+    fn try_merkle_layer_poseidon2_fixed_tweak(
+        &self,
+        children: &[[u64; 4]],
+        tweak: &[u64; 4],
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        merkle_layer_poseidon2_fixed_tweak_cpu(children, tweak, out_parents)
     }
 
     /// 2-lane BDOZ GF($2^{128}$) inner product over $\mathbb{F}_2[x]/(x^{128} + x^7 + x^2 + x + 1)$
@@ -862,11 +1189,16 @@ impl AcceleratorBackend for CpuReferenceBackend {
 }
 
 /// Fixed-capacity `#![no_std]` registry pinning SHA-256 & Poseidon2 digests of certified
-/// CPU, RDNA2 Wave32, and SPIR-V 1.5 GPU compute kernels (`MAX_PROFILES` architectures).
+/// CPU, RDNA2 Wave32, and SPIR-V 1.5 GPU compute & prover kernels (`MAX_PROFILES` architectures).
 #[derive(Clone, Debug)]
 pub struct VerifiedKernelDigestRegistry<const MAX_PROFILES: usize = 4> {
     profiles: [Option<(KernelTargetArch, [CertifiedKernelPin; KernelSlot::COUNT])>; MAX_PROFILES],
     len: usize,
+    prover_profiles: [Option<(
+        KernelTargetArch,
+        [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
+    )>; MAX_PROFILES],
+    prover_len: usize,
 }
 
 /// Error returned when an external accelerator presents an uncertified or mismatched kernel digest.
@@ -877,6 +1209,9 @@ pub enum KernelRegistryError {
     UnsupportedTargetArch(KernelTargetArch),
     PinMismatch {
         slot: KernelSlot,
+    },
+    ProverPinMismatch {
+        slot: ProverKernelSlot,
     },
     /// The receipt's backend ID, kernel digests, or MAC did not verify under the supplied key.
     ReceiptAuthenticationFailed,
@@ -893,6 +1228,8 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
         Self {
             profiles: [None; MAX_PROFILES],
             len: 0,
+            prover_profiles: [None; MAX_PROFILES],
+            prover_len: 0,
         }
     }
 
@@ -916,7 +1253,7 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
     }
 
     /// Registry pre-populated with both the portable CPU reference profile and the deterministic
-    /// embedded `KernelTargetArch::SpirV15` compute shader pins (`MAX_PROFILES >= 2`).
+    /// embedded `KernelTargetArch::SpirV15` batch + prover compute shader pins (`MAX_PROFILES >= 2`).
     ///
     /// # Panics
     /// Panics if fewer than two profiles fit in this registry.
@@ -927,6 +1264,11 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
             spirv_kernels::canonical_spirv_pins(),
         )
         .expect("CPU and SPIR-V registry requires at least two profiles");
+        reg.register_prover_arch_pins(
+            KernelTargetArch::SpirV15,
+            spirv_kernels::canonical_prover_spirv_pins(),
+        )
+        .expect("SPIR-V prover profile fits within MAX_PROFILES");
         reg
     }
 
@@ -1041,6 +1383,90 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
         }
         Ok(())
     }
+
+    /// Register approved [`CertifiedProverKernelPin`]s for `arch`.
+    pub fn register_prover_arch_pins(
+        &mut self,
+        arch: KernelTargetArch,
+        pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
+    ) -> Result<(), KernelRegistryError> {
+        for (idx, pin) in pins.iter().enumerate() {
+            if pin.target_arch != arch || (pin.slot as usize) != idx {
+                return Err(KernelRegistryError::ProverPinMismatch {
+                    slot: ProverKernelSlot::ALL[idx],
+                });
+            }
+        }
+        for (existing_arch, existing_pins) in self
+            .prover_profiles
+            .iter_mut()
+            .take(self.prover_len)
+            .flatten()
+        {
+            if *existing_arch == arch {
+                *existing_pins = pins;
+                return Ok(());
+            }
+        }
+        if self.prover_len >= MAX_PROFILES {
+            return Err(KernelRegistryError::RegistryFull);
+        }
+        self.prover_profiles[self.prover_len] = Some((arch, pins));
+        self.prover_len += 1;
+        Ok(())
+    }
+
+    /// Look up the approved [`CertifiedProverKernelPin`] for `(arch, slot)`.
+    pub fn lookup_prover_pin(
+        &self,
+        arch: KernelTargetArch,
+        slot: ProverKernelSlot,
+    ) -> Result<&CertifiedProverKernelPin, KernelRegistryError> {
+        for entry in self.prover_profiles.iter().take(self.prover_len).flatten() {
+            if entry.0 == arch {
+                return Ok(&entry.1[slot as usize]);
+            }
+        }
+        Err(KernelRegistryError::UnsupportedTargetArch(arch))
+    }
+
+    /// Compare loader-measured prover shader pins against approved prover pins in constant time.
+    pub fn verify_loaded_prover_profile(
+        &self,
+        arch: KernelTargetArch,
+        measured: &[CertifiedProverKernelPin; ProverKernelSlot::COUNT],
+    ) -> Result<(), KernelRegistryError> {
+        for (slot, actual) in ProverKernelSlot::ALL.iter().zip(measured) {
+            let expected = self.lookup_prover_pin(arch, *slot)?;
+            let mut digests_ok = ct_eq_bytes_mask(&expected.sha256_digest, &actual.sha256_digest);
+            for (&e, &a) in expected
+                .poseidon2_digest
+                .iter()
+                .zip(&actual.poseidon2_digest)
+            {
+                digests_ok &= ct_eq_mask_u64(e, a);
+            }
+            if actual.slot != *slot || actual.target_arch != arch || digests_ok != u64::MAX {
+                return Err(KernelRegistryError::ProverPinMismatch { slot: *slot });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify a keyed V5 [`ProverExecutionReceipt`] against this registry's approved prover pin
+    /// for `(receipt.arch, receipt.descriptor.slot())` and against `key`.
+    pub fn verify_prover_keyed_receipt(
+        &self,
+        receipt: &ProverExecutionReceipt,
+        key: &BackendAttestationKey,
+    ) -> Result<(), KernelRegistryError> {
+        let pin = self.lookup_prover_pin(receipt.arch, receipt.descriptor.slot())?;
+        if receipt.verification_mask(key, pin) == u64::MAX {
+            Ok(())
+        } else {
+            Err(KernelRegistryError::ReceiptAuthenticationFailed)
+        }
+    }
 }
 
 /// Wrapper checking approved metadata and, for external hardware, loader measurements.
@@ -1142,6 +1568,45 @@ impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
             out_parents,
         )
     }
+    fn try_merkle_layer_poseidon2_2block_at(
+        &self,
+        children: &[[u64; 4]],
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        addr: Poseidon2Merkle2BlockAddr,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        self.inner.try_merkle_layer_poseidon2_2block_at(
+            children,
+            domain_tag,
+            pk_seed,
+            addr,
+            out_parents,
+        )
+    }
+    fn try_merkle_layer_poseidon2_canopy_at(
+        &self,
+        children: &[[u64; 4]],
+        tree_key: &[u64; 4],
+        start_node_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        self.inner.try_merkle_layer_poseidon2_canopy_at(
+            children,
+            tree_key,
+            start_node_idx,
+            out_parents,
+        )
+    }
+    fn try_merkle_layer_poseidon2_fixed_tweak(
+        &self,
+        children: &[[u64; 4]],
+        tweak: &[u64; 4],
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        self.inner
+            .try_merkle_layer_poseidon2_fixed_tweak(children, tweak, out_parents)
+    }
     fn bdoz_gf2_128_batch_dot(
         &self,
         shares: &[(u128, u128)],
@@ -1171,6 +1636,9 @@ impl core::fmt::Display for KernelRegistryError {
                 )
             }
             Self::PinMismatch { slot } => write!(f, "kernel pin mismatch for slot {slot:?}"),
+            Self::ProverPinMismatch { slot } => {
+                write!(f, "prover kernel pin mismatch for slot {slot:?}")
+            }
             Self::ReceiptAuthenticationFailed => {
                 f.write_str("execution receipt failed keyed authentication")
             }
