@@ -117,8 +117,8 @@ structure TweakableHashSuite where
   rawHash     : Hash
   rawHash_len : ∀ msg : List UInt8, (rawHash msg).length = 32
 
-def pqCshakeSuiteCustom : List UInt8 := "QSAG.PQ.SUITE.CSHAKE256/v1".toUTF8.toList
-def pqPoseidon2SuiteId  : List UInt8 := "QSAG.PQ.SUITE.POSEIDON2/v1".toUTF8.toList
+def pqCshakeSuiteCustom : List UInt8 := "QSAG.PQ.SUITE.CSHAKE256/v1".toByteArray.toList
+def pqPoseidon2SuiteId  : List UInt8 := "QSAG.PQ.SUITE.POSEIDON2/v1".toByteArray.toList
 
 /-- NIST SP 800-185 `cSHAKE256` instantiation (`Corduroy` / `Baggy-cSHAKE256`). -/
 @[expose] def cshake256Suite : TweakableHashSuite where
@@ -132,14 +132,14 @@ def pqPoseidon2SuiteId  : List UInt8 := "QSAG.PQ.SUITE.POSEIDON2/v1".toUTF8.toLi
   rawHash := poseidon2Hash32
   rawHash_len := poseidon2Hash32_length
 
-def tagPrfMsg : List UInt8 := "QSAG.PQ.PRFMSG/v1".toUTF8.toList
+def tagPrfMsg : List UInt8 := "QSAG.PQ.PRFMSG/v1".toByteArray.toList
 def tagHMsg   : List UInt8 := [81, 83, 65, 71, 46, 80, 81, 46, 72, 77, 83, 71, 47, 118, 49]
-def tagPrf    : List UInt8 := "QSAG.PQ.PRF/v1".toUTF8.toList
-def tagThF    : List UInt8 := "QSAG.PQ.TH_F/v1".toUTF8.toList
-def tagThH    : List UInt8 := "QSAG.PQ.TH_H/v1".toUTF8.toList
-theorem tagThH_eq : tagThH = "QSAG.PQ.TH_H/v1".toUTF8.toList := by rfl
-def tagThTl   : List UInt8 := "QSAG.PQ.TH_TL/v1".toUTF8.toList
-def tagHPre   : List UInt8 := "QSAG.PQ.PRE/v1".toUTF8.toList
+def tagPrf    : List UInt8 := "QSAG.PQ.PRF/v1".toByteArray.toList
+def tagThF    : List UInt8 := "QSAG.PQ.TH_F/v1".toByteArray.toList
+def tagThH    : List UInt8 := "QSAG.PQ.TH_H/v1".toByteArray.toList
+theorem tagThH_eq : tagThH = "QSAG.PQ.TH_H/v1".toByteArray.toList := by rfl
+def tagThTl   : List UInt8 := "QSAG.PQ.TH_TL/v1".toByteArray.toList
+def tagHPre   : List UInt8 := "QSAG.PQ.PRE/v1".toByteArray.toList
 
 /- QSAG.PQ.HINT/v1 -/
 def tagHInternal : List UInt8 := [81, 83, 65, 71, 46, 80, 81, 46, 72, 73, 78, 84, 47, 118, 49]
@@ -1794,7 +1794,7 @@ theorem empty_jorts_batch_rejected (params : PqHashParams) :
 
 /-! ## 5. Committed-Identity Hybrid Combiner (`HybridPinnedSig`) & Tri-State `VerifyReply` -/
 
-def hybridIdCustom : List UInt8 := "QSAG.PQ.HYBRID.ID/v1".toUTF8.toList
+def hybridIdCustom : List UInt8 := "QSAG.PQ.HYBRID.ID/v1".toByteArray.toList
 
 /-- Enrolled identity digest `idCommit = cSHAKE256("QSAG.PQ.HYBRID.ID/v1", encodeMultiFrame [pk₁, pk₂])`. -/
 @[expose] def computeHybridIdCommit (pk1Bytes pk2Bytes : List UInt8) : List UInt8 :=
@@ -1831,7 +1831,7 @@ structure HybridWireSig (Sig₁ PK₂ Sig₂ : Type) where
 
 /-- Exact multi-key message envelope signed by both hybrid components. -/
 def buildHybridBoundMessage (idCommit pk1 pk2 msg : List UInt8) : List UInt8 :=
-  encodeMultiFrame ["QSAG.PQ.HYBRID.MSG/v1".toUTF8.toList, idCommit, pk1, pk2, msg]
+  encodeMultiFrame ["QSAG.PQ.HYBRID.MSG/v1".toByteArray.toList, idCommit, pk1, pk2, msg]
 
 theorem hybrid_bound_message_injective {id₁ pk₁ pq₁ m₁ id₂ pk₂ pq₂ m₂ : List UInt8}
     (h : buildHybridBoundMessage id₁ pk₁ pq₁ m₁ = buildHybridBoundMessage id₂ pk₂ pq₂ m₂) :
@@ -4089,5 +4089,103 @@ theorem evalProductionStatefulSign_def (suite : TweakableHashSuite) (params : Pq
     signProductionHypertreeCore suite params sk pk msg mu rRand epoch none maxGrind
   ) := by rfl
 
+#export_eqns tagPrf tagThF tagThTl tagThH
+
+private def zero32 : List UInt8 := List.replicate 32 0x00
+private def crumb32 : List UInt8 := List.replicate 32 0x1B
+
+private def seedZeroBadInputs : List (List UInt8) :=
+  ((List.range 255).map (fun k =>
+    thPreimage tagPrf [] ⟨0, 0, .wotsPrf, 0, 0, 0⟩ [[UInt8.ofNat (k + 1)]])) ++
+  [thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 0⟩ [zero32],
+   thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 1⟩ [zero32],
+   thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 2⟩ [zero32],
+   thPreimage tagThTl [] ⟨0, 0, .wotsPk, 0, 0, 0⟩ (zero32 :: List.replicate 127 crumb32),
+   thPreimage tagThH [] ⟨0, 0, .tree, 0, 1, 0⟩ [zero32, crumb32]]
+
+/-- Concrete 1-byte secret-key-indexed tweakable hash suite: secret seed `[0x00]` derives public
+    root `0x1B…1B` (matching `prodToyForgery`), while every nonzero secret seed `[b]` (`b ≠ 0`)
+    derives public root `0x00…00` (rejecting `prodToyForgery`). -/
+def seedZeroRootSuite : TweakableHashSuite where
+  suiteId := []
+  rawHash inp := if inp ∈ seedZeroBadInputs then zero32 else crumb32
+  rawHash_len inp := by
+    split <;> exact List.length_replicate
+
+theorem seedZeroRootSuite_rawHash_eq (inp : List UInt8) :
+    seedZeroRootSuite.rawHash inp =
+      if inp ∈ (((List.range 255).map (fun k =>
+    thPreimage tagPrf [] ⟨0, 0, .wotsPrf, 0, 0, 0⟩ [[UInt8.ofNat (k + 1)]])) ++
+  [thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 0⟩ [List.replicate 32 0x00],
+   thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 1⟩ [List.replicate 32 0x00],
+   thPreimage tagThF [] ⟨0, 0, .wotsHash, 0, 0, 2⟩ [List.replicate 32 0x00],
+   thPreimage tagThTl [] ⟨0, 0, .wotsPk, 0, 0, 0⟩ (List.replicate 32 0x00 :: List.replicate 127 (List.replicate 32 0x1B)),
+   thPreimage tagThH [] ⟨0, 0, .tree, 0, 1, 0⟩ [List.replicate 32 0x00, List.replicate 32 0x1B]]) then List.replicate 32 0x00 else List.replicate 32 0x1B := by
+  unfold seedZeroRootSuite seedZeroBadInputs zero32 crumb32
+  rfl
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+theorem seedZeroRootSuite_verifyToy_crumb :
+    verifyProductionPqHashSig seedZeroRootSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+      ⟨[], List.replicate 32 0x1B⟩ []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+  decide +kernel
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 16000000 in
+theorem seedZeroRootSuite_verifyToy_zero :
+    verifyProductionPqHashSig seedZeroRootSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+      ⟨[], List.replicate 32 0x00⟩ []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = false := by
+  decide +kernel
+
+#verify_constructive seedZeroRootSuite_verifyToy_crumb seedZeroRootSuite_verifyToy_zero
+
+
+#export_eqns buildMerkleAuthPathKp derivePublicKey compactJortsProdParams
+  PqHashParams.productionWellFormed PqHashParams.productionLeafIdxInRange
+
+end Qsag
+end
+
+public section
+namespace Qsag
+#export_eqns forsIndexedSecretLeaf forsIndexedLeafFn grindTswInternalCounterAux grindTswLeafCounterAux
+#export_eqns zeroToyParams
+theorem zeroToySuite_rawHash (m : List UInt8) :
+    zeroToySuite.rawHash m = List.replicate 32 0 := by rfl
+end Qsag
+
+public section
+namespace Qsag
+/-- The constant suite with output `0x1B…1B` accepts, under the one-layer stateful parameters
+    `⟨4, 128, 1, 1, 0, 0, 1, true⟩` and on every message, the production signature whose `128`
+    chain values and whose authentication node are empty. -/
+theorem constantSuite1B_production_forgery_accepted (msg : List UInt8) :
+    verifyProductionPqHashSig
+      ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩
+      ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+      (derivePublicKey ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩
+        ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩) msg
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+  have h0 : verifyProductionPqHashSig
+      ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩
+      ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+      (derivePublicKey ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩
+        ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[], [], []⟩) []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+    decide +kernel
+  have hmu : ∀ seed root : List UInt8,
+      thPreHash ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ seed root msg =
+        thPreHash ⟨[], fun _ => List.replicate 32 0x1B, fun _ => List.length_replicate⟩ seed root
+          [] := fun _ _ => rfl
+  rw [verifyProductionPqHashSig_eq] at h0 ⊢
+  rw [hmu]
+  exact h0
 end Qsag
 end

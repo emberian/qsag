@@ -108,6 +108,12 @@ impl PorsFpParams {
 }
 
 /// `floor(1000 * log2(x))` for `x >= 1`, by repeated squaring of the mantissa.
+///
+/// Kept out of line. Inlined into the loop of [`PorsFpParams::forgery_bits_milli`], the
+/// twenty squarings become a chain in which every value feeds the next one twice, all
+/// derived from the loop counter; LLVM's loop vectorizer walks that chain once per path
+/// (`vputils::onlyFirstLaneUsed`), which took the thin-LTO test build past ten minutes.
+#[inline(never)]
 fn log2_milli_floor(x: u64) -> u64 {
     debug_assert!(x >= 1);
     let int = u64::from(63 - x.leading_zeros());

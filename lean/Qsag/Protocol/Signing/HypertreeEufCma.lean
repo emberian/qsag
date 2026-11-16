@@ -7300,8 +7300,20 @@ theorem prodEufCmaWin_eq (suite : TweakableHashSuite) (params : PqHashParams)
         decide (o.msgStar ∉ (productionSigningLog suite params o.sk o.queries).map Prod.fst)) := by
   rfl
 
+#export_eqns prodToyStatefulParams prodToyForgery
+
 end Qsag
 end
 
 #tooth_pair Qsag.production_forgery_break_of_signingLog vs Qsag.prodForsItsrBreak_empty_log
 #tooth_pair Qsag.production_euf_cma_advantage_bound vs Qsag.prodEufCmaWin_rejects_signed_message
+
+public section
+namespace Qsag
+/-- The constant toy suite accepts `prodToyForgery` on every message. -/
+theorem prodToyForgery_accepted_on (msg : List UInt8) :
+    verifyProductionPqHashSig crumbToySuite prodToyStatefulParams
+      (derivePublicKey crumbToySuite prodToyStatefulParams ⟨[], [], []⟩) msg prodToyForgery = true :=
+  constantSuite1B_production_forgery_accepted msg
+end Qsag
+end

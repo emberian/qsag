@@ -2011,6 +2011,7 @@ mod tests {
 
     #[test]
     fn mpc_signature_equals_reference_verifies_and_rejects_tampering() {
+        let _memory = crate::test_budget::reserve_mb(370);
         let params = BaggyParams::TEST_SMALL;
         assert!(params.is_well_formed() && BaggyParams::SHA3_128F.is_well_formed());
         let big = BaggyParams::SHA3_128F;
@@ -2087,6 +2088,7 @@ mod tests {
     /// aborting never buys a new draw of the PORS indices.
     #[test]
     fn retries_with_fresh_session_randomness_give_the_identical_signature() {
+        let _memory = crate::test_budget::reserve_mb(450);
         let params = BaggyParams::TEST_SMALL;
         let msg = b"retry me";
         let mut sigs = Vec::new();
@@ -2128,6 +2130,7 @@ mod tests {
 
     #[test]
     fn waistband_precompute_and_lazy_fill_skip_cached_layers_without_changing_signatures() {
+        let _memory = crate::test_budget::reserve_mb(620);
         let params = BaggyParams::TEST_SMALL;
         let chains = params.wots.chains as u64;
         let (mut engine, sk) = test_engine(0xC3, 1);
@@ -2218,6 +2221,7 @@ mod tests {
     /// root were rewritten together, is rejected before the sweep: only `R` is open.
     #[test]
     fn a_poisoned_top_layer_waistband_entry_aborts_before_the_sweep() {
+        let _memory = crate::test_budget::reserve_mb(380);
         let params = BaggyParams::TEST_SMALL;
         let (mut engine, sk) = test_engine(0xC5, 1);
         let (pk, binding) = keyed(&mut engine, &params, &sk);
@@ -2297,6 +2301,7 @@ mod tests {
     /// record must end up being the digits of the true child root.
     #[test]
     fn a_corrupted_intermediate_entry_under_an_uncached_parent_aborts_before_any_opening() {
+        let _memory = crate::test_budget::reserve_mb(400);
         let params = BaggyParams::TEST_SMALL;
         let d = params.num_layers;
         let (mid, top) = (d - 2, d - 1);
@@ -2412,6 +2417,7 @@ mod tests {
 
     #[test]
     fn a_cache_or_binding_for_another_key_or_parameter_set_is_refused_before_any_mpc_work() {
+        let _memory = crate::test_budget::reserve_mb(400);
         let params = BaggyParams::TEST_SMALL;
         // Every field moves the digest.
         let edits: [fn(&mut BaggyParams); 9] = [
@@ -2575,6 +2581,7 @@ mod tests {
 
     #[test]
     fn a_second_digit_vector_for_a_recorded_static_key_is_refused_before_the_node_round() {
+        let _memory = crate::test_budget::reserve_mb(400);
         let params = BaggyParams::TEST_SMALL;
         let d = params.num_layers;
         let (mut engine, sk) = test_engine(0xCB, 1);
@@ -2674,6 +2681,7 @@ mod tests {
 
     #[test]
     fn beaver_bank_mode_signs_identically_and_never_reuses_a_triple() {
+        let _memory = crate::test_budget::reserve_mb(1000);
         let params = BaggyParams::TEST_SMALL;
         let (mut engine, sk) = test_engine(0xC6, 1);
         let (pk, binding) = keyed(&mut engine, &params, &sk);
@@ -2722,6 +2730,7 @@ mod tests {
     /// opened (a randomiser fault opens nothing at all, a sweep fault only `R`).
     #[test]
     fn active_faults_in_either_phase_abort_before_any_wots_or_pors_share_is_opened() {
+        let _memory = crate::test_budget::reserve_mb(460);
         let params = BaggyParams::TEST_SMALL;
         let cases: [(u64, usize, usize, usize, [u64; 4], u64); 6] = [
             // (wave, round, plane, sender, mask, opened bytes allowed). Once phase 1 has
@@ -2921,6 +2930,7 @@ mod tests {
 
     #[test]
     fn mpc_signature_on_the_replicated_engine_equals_the_reference() {
+        let _memory = crate::test_budget::reserve_mb(370);
         let params = BaggyParams::TEST_SMALL;
         let (mut engine, sk) = test_engine(0x61, 0x62);
         let (pk, binding) =
