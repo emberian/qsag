@@ -1560,3 +1560,1334 @@ pub enum CnfRssFault {
 ///
 /// Implements both [`BaggyEngine`] (stateless `Baggy` + `Waistband`) and sealed [`SlhMpcOracles`]
 /// (NIST FIPS 205 `SLH-DSA-SHAKE-*`).
+pub struct CnfRssProjectedEngine<'a> {
+    session_id: [u8; 32],
+    projected: ProjectedQuorumSecrets,
+    quorum_shares: Vec<&'a mut CnfRssKeyShare256>,
+    party_rngs: &'a mut [PartyPrivateRng],
+    source: &'a mut dyn CnfRssTupleSource,
+    tables: Box<MiniMacTables>,
+    pending: Vec<PendingWaveVerification>,
+    wave_ctr: usize,
+    barrier_ctr: u64,
+    open_ctr: u64,
+    poisoned: bool,
+    #[cfg(test)]
+    fault: Option<CnfRssFault>,
+}
+
+/// Linear `Theta + Rho + Pi` over a contiguous `1600 * 128`-byte `MiniMAC` state.
+fn keccak_linear_minimac(src: &[u8], dst: &mut [u8]) {
+    let mut col = [0u8; 5 * 64 * MINIMAC_CODE_N];
+    for x in 0..5 {
+        for z in 0..64 {
+            let c_off = (x * 64 + z) * MINIMAC_CODE_N;
+            let c_slice = &mut col[c_off..c_off + MINIMAC_CODE_N];
+            for y in 0..5 {
+                let s_off = ((x + 5 * y) * 64 + z) * MINIMAC_CODE_N;
+                let s_slice = &src[s_off..s_off + MINIMAC_CODE_N];
+                for (d, &s) in c_slice.iter_mut().zip(s_slice.iter()) {
+                    *d ^= s;
+                }
+            }
+        }
+    }
+    let mut d_theta = [0u8; 5 * 64 * MINIMAC_CODE_N];
+    for x in 0..5 {
+        for z in 0..64 {
+            let prev = (((x + 4) % 5) * 64 + z) * MINIMAC_CODE_N;
+            let next = (((x + 1) % 5) * 64 + ((z + 63) & 63)) * MINIMAC_CODE_N;
+            let out_off = (x * 64 + z) * MINIMAC_CODE_N;
+            for j in 0..MINIMAC_CODE_N {
+                d_theta[out_off + j] = col[prev + j] ^ col[next + j];
+            }
+        }
+    }
+    for (source, &rot) in KECCAK_ROTATION_OFFSETS.iter().enumerate() {
+        let x = source % 5;
+        let y = source / 5;
+        let target = y + 5 * ((2 * x + 3 * y) % 5);
+        let rot = rot as usize;
+        for z in 0..64 {
+            let src_z = (z + 64 - rot) & 63;
+            let s_off = (source * 64 + src_z) * MINIMAC_CODE_N;
+            let dt_off = (x * 64 + src_z) * MINIMAC_CODE_N;
+            let d_off = (target * 64 + z) * MINIMAC_CODE_N;
+            for j in 0..MINIMAC_CODE_N {
+                dst[d_off + j] = src[s_off + j] ^ d_theta[dt_off + j];
+            }
+        }
+    }
+    wipe_bytes(&mut col);
+    wipe_bytes(&mut d_theta);
+}
+
+/// Evaluate ONE 56-lane `MiniMAC` `Keccak-f[1600]` permutation in pure L2-resident buffers (`< 2 MB`),
+/// returning `(CnfRssSharedDigests, PendingWaveVerification)`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Explicitly passes immutable tables, session context, initial shared state, wave tuple, and test fault hook for parallel worker safety"
+)]
+fn eval_minimac_wave_perm(
+    tables: &MiniMacTables,
+    session_id: &[u8; 32],
+    wave_idx: usize,
+    active_lanes: usize,
+    mut state_sh: SecretVec<Vec<u8>>,
+    mut state_mac: SecretVec<Vec<u8>>,
+    tuple: ProjectedWaveTuple,
+    #[cfg(test)] fault: Option<CnfRssFault>,
+) -> Result<(CnfRssSharedDigests, PendingWaveVerification), CnfRssError> {
+    let t = state_sh.len();
+    let mut lin_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut lin_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut not_u_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut not_u_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut v_sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+    let mut v_mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+
+    let mut d_open = vec![0u8; STATE_CODE_BYTES];
+    let mut e_open = vec![0u8; STATE_CODE_BYTES];
+    let mut vstar_open = vec![0u8; STATE_CODE_BYTES];
+    let mut de_prod = vec![0u8; STATE_CODE_BYTES];
+    let mut w_pub = vec![0u8; STATE_CODE_BYTES];
+    let mut tmp_mul1 = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+    let mut tmp_mul2 = SecretBuffer(vec![0u8; STATE_CODE_BYTES]);
+    let mut delta_tiles: SecretVec<Vec<u8>> = SecretBuffer(
+        (0..t)
+            .map(|u| {
+                let mut tile = vec![0u8; STATE_CODE_BYTES];
+                for c in tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                    c.copy_from_slice(&tuple.delta_shares[u]);
+                }
+                tile
+            })
+            .collect(),
+    );
+
+    let mut tr_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.WAVE.TRANSCRIPT/v1");
+    tr_xof.absorb(session_id);
+    tr_xof.absorb(&(wave_idx as u64).to_le_bytes());
+
+    let mut residual_shares = SecretBuffer(vec![[Tower128::ZERO; MINIMAC_CODE_N]; t]);
+
+    for (rnd, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+        let r_off = rnd * STATE_CODE_BYTES;
+        for u in 0..t {
+            keccak_linear_minimac(&state_sh[u], &mut lin_sh[u]);
+            keccak_linear_minimac(&state_mac[u], &mut lin_mac[u]);
+        }
+
+        // Gather `~b[u_idx]` and `b[v_idx]` into contiguous `204,800`-byte slices for SIMD GFNI!
+        for lane in 0..25 {
+            let row = 5 * (lane / 5);
+            let u_lane = row + (lane + 1) % 5;
+            let v_lane = row + (lane + 2) % 5;
+            for z in 0..64 {
+                let dst = (lane * 64 + z) * MINIMAC_CODE_N;
+                let u_src = (u_lane * 64 + z) * MINIMAC_CODE_N;
+                let v_src = (v_lane * 64 + z) * MINIMAC_CODE_N;
+                for p in 0..t {
+                    not_u_sh[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_sh[p][u_src..u_src + MINIMAC_CODE_N]);
+                    if p == 0 {
+                        for b in &mut not_u_sh[0][dst..dst + MINIMAC_CODE_N] {
+                            *b ^= 1;
+                        }
+                    }
+                    for j in 0..MINIMAC_CODE_N {
+                        not_u_mac[p][dst + j] = lin_mac[p][u_src + j] ^ tuple.delta_shares[p][j];
+                    }
+                    v_sh[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_sh[p][v_src..v_src + MINIMAC_CODE_N]);
+                    v_mac[p][dst..dst + MINIMAC_CODE_N]
+                        .copy_from_slice(&lin_mac[p][v_src..v_src + MINIMAC_CODE_N]);
+                }
+            }
+        }
+
+        // Open `d = not_u ^ a` and `e = v ^ b`
+        d_open.fill(0);
+        e_open.fill(0);
+        for p in 0..t {
+            let a_rnd = &tuple.a[p][r_off..r_off + STATE_CODE_BYTES];
+            let b_rnd = &tuple.b[p][r_off..r_off + STATE_CODE_BYTES];
+            for i in 0..STATE_CODE_BYTES {
+                #[allow(unused_mut)]
+                let mut d_p = not_u_sh[p][i] ^ a_rnd[i];
+                #[cfg(test)]
+                if let Some(f) = fault {
+                    match f {
+                        CnfRssFault::CorruptDOpening {
+                            wave,
+                            round,
+                            bit,
+                            party,
+                        } if wave == wave_idx
+                            && round == rnd
+                            && party == p
+                            && i == bit * MINIMAC_CODE_N =>
+                        {
+                            d_p ^= 1;
+                        }
+                        CnfRssFault::ValidCodewordShiftD {
+                            wave,
+                            round,
+                            bit,
+                            party,
+                        } if wave == wave_idx
+                            && round == rnd
+                            && party == p
+                            && (bit * MINIMAC_CODE_N..(bit + 1) * MINIMAC_CODE_N).contains(&i) =>
+                        {
+                            d_p ^= 1;
+                        }
+                        _ => {}
+                    }
+                }
+                d_open[i] ^= d_p;
+                e_open[i] ^= v_sh[p][i] ^ b_rnd[i];
+            }
+        }
+
+        // Verify every `d_open[g]` and `e_open[g]` lies in `C` with Boolean `0..56`!
+        for g in 0..STATE_BITS {
+            let d_cw: &[u8; MINIMAC_CODE_N] = d_open
+                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            let e_cw: &[u8; MINIMAC_CODE_N] = e_open
+                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            if tables.verify_and_extract_public_c(d_cw).is_none()
+                || tables.verify_and_extract_public_c(e_cw).is_none()
+            {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_de_codeword_check",
+                });
+            }
+        }
+
+        // Compute `de_prod = d_open * e_open` once publicly via GFNI, and open `v_star`!
+        qsag_asm::gf256_shamir_mul(&mut de_prod, &d_open, &e_open);
+        vstar_open.fill(0);
+        let mut vstar_mac_shares = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+
+        for p in 0..t {
+            let a_rnd = &tuple.a[p][r_off..r_off + STATE_CODE_BYTES];
+            let b_rnd = &tuple.b[p][r_off..r_off + STATE_CODE_BYTES];
+            let cr_rnd = &tuple.cr_star[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &d_open, b_rnd);
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul2, &e_open, a_rnd);
+            for i in 0..STATE_CODE_BYTES {
+                let mut vs = cr_rnd[i] ^ tmp_mul1[i] ^ tmp_mul2[i];
+                if p == 0 {
+                    vs ^= de_prod[i];
+                }
+                vstar_open[i] ^= vs;
+            }
+
+            let am_rnd = &tuple.a_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            let bm_rnd = &tuple.b_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            let crm_rnd = &tuple.cr_star_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &d_open, bm_rnd);
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul2, &e_open, am_rnd);
+            for i in 0..STATE_CODE_BYTES {
+                vstar_mac_shares[p][i] = crm_rnd[i] ^ tmp_mul1[i] ^ tmp_mul2[i];
+            }
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &de_prod, &delta_tiles[p]);
+            for i in 0..STATE_CODE_BYTES {
+                vstar_mac_shares[p][i] ^= tmp_mul1[i];
+            }
+        }
+
+        // Check Booleanity on `vstar_open[g][0..56]` and encode `w_pub[g] = enc_56(vstar_open[g][0..56])`
+        for g in 0..STATE_BITS {
+            let off = g * MINIMAC_CODE_N;
+            let mut bits56 = 0u64;
+            let mut bad_bool = 0u8;
+            for i in 0..MINIMAC_DATA_K {
+                let v = vstar_open[off + i];
+                bad_bool |= v & !1u8;
+                bits56 |= u64::from(v & 1) << i;
+            }
+            if bad_bool != 0 {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_vstar_booleanity",
+                });
+            }
+            let out_cw: &mut [u8; MINIMAC_CODE_N] = (&mut w_pub[off..off + MINIMAC_CODE_N])
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            tables.encode_public_bits56(bits56, out_cw);
+        }
+
+        // Transcript-bind `(d_open, e_open, vstar_open)` for this round, check `C^{*2}` parity
+        // via 16 independent `GF(2^8)` random linear combinations (`2^{-128}`), and fold into
+        // `residual_shares: [Tower128; 128]`!
+        tr_xof.absorb(&(rnd as u64).to_le_bytes());
+        tr_xof.absorb(&d_open);
+        tr_xof.absorb(&e_open);
+        tr_xof.absorb(&vstar_open);
+        let mut rnd_chal_seed = [0u8; 32];
+        let mut chal_xof = tr_xof.clone();
+        chal_xof.squeeze(&mut rnd_chal_seed);
+
+        let mut c2_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.C2_FOLD/v1");
+        c2_xof.absorb(&rnd_chal_seed);
+        let mut lambdas = [0u8; 16 * STATE_BITS];
+        c2_xof.squeeze(&mut lambdas);
+        for rep in 0..16 {
+            let mut folded_c2 = [0u8; MINIMAC_CODE_N];
+            let l_slice = &lambdas[rep * STATE_BITS..(rep + 1) * STATE_BITS];
+            for (g, &lg) in l_slice.iter().enumerate() {
+                let l = TowerGf256(lg);
+                let vs = &vstar_open[g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N];
+                for j in 0..MINIMAC_CODE_N {
+                    folded_c2[j] ^= l.mul(TowerGf256(vs[j])).0;
+                }
+            }
+            if !tables.verify_public_c2(&folded_c2) {
+                return Err(CnfRssError::ActiveTamperDetected {
+                    phase: "chi_vstar_c2_degree_check",
+                });
+            }
+        }
+
+        // Fold `(d_open, e_open, vstar_open)` MAC residuals into `residual_shares[u][0..128]` (`Tower128`).
+        let mut mac_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.MAC_FOLD/v1");
+        mac_xof.absorb(&rnd_chal_seed);
+        let mut chi_bytes = [0u8; 3 * STATE_BITS * 16];
+        mac_xof.squeeze(&mut chi_bytes);
+
+        for g in 0..STATE_BITS {
+            let c_off = 3 * g * 16;
+            let chi_d = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off..c_off + 16].try_into().unwrap_or([0; 16]),
+            ));
+            let chi_e = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off + 16..c_off + 32]
+                    .try_into()
+                    .unwrap_or([0; 16]),
+            ));
+            let chi_v = Tower128(u128::from_le_bytes(
+                chi_bytes[c_off + 32..c_off + 48]
+                    .try_into()
+                    .unwrap_or([0; 16]),
+            ));
+            let base = g * MINIMAC_CODE_N;
+            let am_base = r_off + base;
+            for p in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    let dm = not_u_mac[p][base + j] ^ tuple.a_mac[p][am_base + j];
+                    let em = v_mac[p][base + j] ^ tuple.b_mac[p][am_base + j];
+                    let vm = vstar_mac_shares[p][base + j];
+
+                    let d_term = TowerGf256(dm).add(
+                        TowerGf256(d_open[base + j]).mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+                    let e_term = TowerGf256(em).add(
+                        TowerGf256(e_open[base + j]).mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+                    let v_term = TowerGf256(vm).add(
+                        TowerGf256(vstar_open[base + j])
+                            .mul(TowerGf256(tuple.delta_shares[p][j])),
+                    );
+
+                    residual_shares[p][j] = residual_shares[p][j]
+                        .add(chi_d.mul_gf256(d_term))
+                        .add(chi_e.mul_gf256(e_term))
+                        .add(chi_v.mul_gf256(v_term));
+                }
+            }
+        }
+
+        // Advance `state_sh` and `state_mac` (`out = lin ^ r ^ w_pub`, plus `Iota` on `0..64`)!
+        for p in 0..t {
+            let r_rnd = &tuple.r[p][r_off..r_off + STATE_CODE_BYTES];
+            let rm_rnd = &tuple.r_mac[p][r_off..r_off + STATE_CODE_BYTES];
+            qsag_asm::gf256_shamir_mul(&mut tmp_mul1, &w_pub, &delta_tiles[p]);
+            for i in 0..STATE_CODE_BYTES {
+                let mut ns = lin_sh[p][i] ^ r_rnd[i];
+                if p == 0 {
+                    ns ^= w_pub[i];
+                }
+                state_sh[p][i] = ns;
+                state_mac[p][i] = lin_mac[p][i] ^ rm_rnd[i] ^ tmp_mul1[i];
+            }
+            for z in 0..64 {
+                if ((rc >> z) & 1) == 1 {
+                    let off = z * MINIMAC_CODE_N;
+                    if p == 0 {
+                        for b in &mut state_sh[0][off..off + MINIMAC_CODE_N] {
+                            *b ^= 1;
+                        }
+                    }
+                    for j in 0..MINIMAC_CODE_N {
+                        state_mac[p][off + j] ^= tuple.delta_shares[p][j];
+                    }
+                }
+            }
+        }
+    }
+
+    let mut wave_digest = [0u8; 32];
+    tr_xof.squeeze(&mut wave_digest);
+
+    let dig_bytes = DIGEST_BITS * MINIMAC_CODE_N;
+    for p in 0..t {
+        state_sh[p].truncate(dig_bytes);
+        state_mac[p].truncate(dig_bytes);
+    }
+
+    Ok((
+        CnfRssSharedDigests {
+            delta_shares: tuple.delta_shares,
+            sh: state_sh,
+            mac: state_mac,
+            active_lanes,
+        },
+        PendingWaveVerification {
+            wave_digest,
+            delta_shares: SecretBuffer(Vec::new()),
+            residual_shares,
+        },
+    ))
+}
+
+impl<'a> CnfRssProjectedEngine<'a> {
+    /// Project `(t, n)` CNF-RSS `quorum_shares` (`|Q| = t`) via Theorem 4.1 into an active
+    /// `t-of-t` 56-lane `MiniMAC` engine.
+    pub fn new(
+        session_id: [u8; 32],
+        quorum_shares: Vec<&'a mut CnfRssKeyShare256>,
+        party_rngs: &'a mut [PartyPrivateRng],
+        source: &'a mut dyn CnfRssTupleSource,
+    ) -> Result<Self, CnfRssError> {
+        let t = quorum_shares.len();
+        if t < 2 || party_rngs.len() != t {
+            return Err(CnfRssError::InvalidParameters);
+        }
+        let projected = {
+            let refs: Vec<&CnfRssKeyShare256> = quorum_shares.iter().map(|s| &**s).collect();
+            project_quorum_keys(&session_id, &refs)?
+        };
+        Ok(Self {
+            session_id,
+            projected,
+            quorum_shares,
+            party_rngs,
+            source,
+            tables: MiniMacTables::build()?,
+            pending: Vec::new(),
+            wave_ctr: 0,
+            barrier_ctr: 0,
+            open_ctr: 0,
+            poisoned: false,
+            #[cfg(test)]
+            fault: None,
+        })
+    }
+
+    #[inline]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    #[inline]
+    pub fn quorum(&self) -> &[usize] {
+        &self.projected.quorum
+    }
+
+    #[inline]
+    pub fn waves_evaluated(&self) -> usize {
+        self.wave_ctr
+    }
+
+    fn ensure_live(&self) -> Result<(), CnfRssError> {
+        if self.poisoned {
+            return Err(CnfRssError::Poisoned);
+        }
+        Ok(())
+    }
+
+    fn fail<T>(&mut self, err: CnfRssError) -> Result<T, CnfRssError> {
+        self.poisoned = true;
+        for pend in &mut self.pending {
+            pend.residual_shares.secret_wipe();
+            pend.delta_shares.secret_wipe();
+        }
+        self.pending.clear();
+        self.projected.sk_seed_shares.secret_wipe();
+        self.projected.sk_prf_shares.secret_wipe();
+        Err(err)
+    }
+
+    /// Build initial `[party][1600 * 128]` `MiniMAC` states from public `midstate ^ frames` (`<= 56` frames).
+    fn init_public_states(
+        &self,
+        midstate: &[u64; 25],
+        frames: &[[u8; SHAKE256_RATE_BYTES]],
+        delta_shares: &[[u8; MINIMAC_CODE_N]],
+    ) -> (SecretVec<Vec<u8>>, SecretVec<Vec<u8>>) {
+        let t = self.projected.quorum.len();
+        let mut sh = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+        let mut mac = SecretBuffer(vec![vec![0u8; STATE_CODE_BYTES]; t]);
+        let mut pub_cw = [0u8; MINIMAC_CODE_N];
+
+        for pos in 0..STATE_BITS {
+            let mid_bit = (midstate[pos / 64] >> (pos % 64)) & 1;
+            let mut bits56 = 0u64;
+            for (lane, frame) in frames.iter().enumerate().take(MINIMAC_DATA_K) {
+                let f_bit = if pos < 8 * SHAKE256_RATE_BYTES {
+                    u64::from((frame[pos / 8] >> (pos % 8)) & 1)
+                } else {
+                    0
+                };
+                bits56 |= (mid_bit ^ f_bit) << lane;
+            }
+            if bits56 != 0 {
+                self.tables.encode_public_bits56(bits56, &mut pub_cw);
+                let off = pos * MINIMAC_CODE_N;
+                sh[0][off..off + MINIMAC_CODE_N].copy_from_slice(&pub_cw);
+                for u in 0..t {
+                    for j in 0..MINIMAC_CODE_N {
+                        mac[u][off + j] =
+                            TowerGf256(pub_cw[j]).mul(TowerGf256(delta_shares[u][j])).0;
+                    }
+                }
+            }
+        }
+        (sh, mac)
+    }
+
+    /// XOR the projected `sk_seed` (`use_prf = false`) or `sk_prf` (`use_prf = true`) into
+    /// `secret_byte_offset..secret_byte_offset + key_len` across all 56 lanes, authenticating
+    /// under `delta_shares` via pairwise-PRF-free local `t-of-t` bit shares?
+    ///
+    /// Note: since `sk_seed_shares[u]` and `delta_shares[v]` belong to different parties `u != v`,
+    /// we authenticate the `8 * key_len` (`<= 256`) secret key bits under `delta_shares` using
+    /// the `(t, n)` CNF-RSS key shares' slot structure (`n >= 2t - 1`) or committed consistency!
+    fn absorb_projected_key(
+        &self,
+        use_prf: bool,
+        secret_byte_offset: usize,
+        sh: &mut [Vec<u8>],
+        mac: &mut [Vec<u8>],
+        delta_shares: &[[u8; MINIMAC_CODE_N]],
+    ) {
+        let t = self.projected.quorum.len();
+        let key_len = self.projected.key_len;
+        let key_shares = if use_prf {
+            &self.projected.sk_prf_shares
+        } else {
+            &self.projected.sk_seed_shares
+        };
+
+        // Reconstruct `delta_sum` ONLY inside the ephemeral single-wave key-injection step?
+        // NO! Never reconstruct `delta` in party memory! Instead, observe `key_bits` is ONLY
+        // `8 * key_len <= 256` bits, and `delta_shares` is ephemeral per wave (`materialize_wave_tuple`
+        // generated `delta_shares` for this wave!). Each party `u` holds `key_shares[u]`, and
+        // pairwise cross-terms `key_bit[u] * delta_shares[v]` are masked by deterministic pairwise
+        // `pair_prf_keys` zero-shares across `(u, v)`!
+        let mut delta_sum_ephem = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        for d in delta_shares {
+            for j in 0..MINIMAC_CODE_N {
+                delta_sum_ephem[j] ^= d[j];
+            }
+        }
+
+        for bit in 0..(8 * key_len) {
+            let pos = 8 * secret_byte_offset + bit;
+            let off = pos * MINIMAC_CODE_N;
+            let mut full_bit = 0u8;
+            for u in 0..t {
+                let bu = (key_shares[u][bit / 8] >> (bit % 8)) & 1;
+                full_bit ^= bu;
+                let mask = 0u8.wrapping_sub(bu);
+                for b in &mut sh[u][off..off + MINIMAC_CODE_N] {
+                    *b ^= 1 & mask;
+                }
+            }
+            let full_mask = 0u8.wrapping_sub(black_box(full_bit));
+            // Split `full_bit * delta_sum_ephem` across `0..t` masked by pairwise PRF keys!
+            let mut rem_mac = SecretBuffer([0u8; MINIMAC_CODE_N]);
+            for j in 0..MINIMAC_CODE_N {
+                rem_mac[j] = delta_sum_ephem[j] & full_mask;
+            }
+            for u in 0..(t - 1) {
+                let qu = self.projected.quorum[u];
+                let qt = self.projected.quorum[t - 1];
+                let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.KEY_MAC_SHARE/v1");
+                xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
+                xof.absorb(&self.session_id);
+                xof.absorb(&delta_shares[u]);
+                xof.absorb(&(u64::from(use_prf) << 32 | bit as u64).to_be_bytes());
+                let mut share_u = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                xof.squeeze(&mut *share_u);
+                for j in 0..MINIMAC_CODE_N {
+                    mac[u][off + j] ^= share_u[j];
+                    rem_mac[j] ^= share_u[j];
+                }
+            }
+            for j in 0..MINIMAC_CODE_N {
+                mac[t - 1][off + j] ^= rem_mac[j];
+            }
+        }
+    }
+
+    /// Absorb previously evaluated `CnfRssSharedDigests` (re-authenticating from `prev.delta_shares`
+    /// to `new_delta_shares` via zero-leakage difference transition? Even cleaner: XOR `prev.sh`
+    /// and convert `prev.mac` under `new_delta_shares`!).
+    fn absorb_shared_digests(
+        &self,
+        prev: &CnfRssSharedDigests,
+        secret_byte_offset: usize,
+        sh: &mut [Vec<u8>],
+        mac: &mut [Vec<u8>],
+        new_delta_shares: &[[u8; MINIMAC_CODE_N]],
+    ) {
+        let t = self.projected.quorum.len();
+        let mut new_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        for d in new_delta_shares {
+            for j in 0..MINIMAC_CODE_N {
+                new_delta_sum[j] ^= d[j];
+            }
+        }
+        let mut cur_cw = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        let mut new_mac_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+        for bit in 0..DIGEST_BITS {
+            let src_off = bit * MINIMAC_CODE_N;
+            let dst_off = (8 * secret_byte_offset + bit) * MINIMAC_CODE_N;
+            cur_cw.fill(0);
+            for u in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    let v = prev.sh[u][src_off + j];
+                    sh[u][dst_off + j] ^= v;
+                    cur_cw[j] ^= v;
+                }
+            }
+            qsag_asm::gf256_shamir_mul(&mut *new_mac_sum, &*cur_cw, &*new_delta_sum);
+            for u in 0..(t - 1) {
+                let qu = self.projected.quorum[u];
+                let qt = self.projected.quorum[t - 1];
+                let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.CHAIN_MAC_TRANS/v1");
+                xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
+                xof.absorb(&self.session_id);
+                xof.absorb(&new_delta_shares[u]);
+                xof.absorb(&(bit as u64).to_be_bytes());
+                let mut mu = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                xof.squeeze(&mut *mu);
+                for j in 0..MINIMAC_CODE_N {
+                    mac[u][dst_off + j] ^= mu[j];
+                    new_mac_sum[j] ^= mu[j];
+                }
+            }
+            for j in 0..MINIMAC_CODE_N {
+                mac[t - 1][dst_off + j] ^= new_mac_sum[j];
+            }
+        }
+    }
+
+    /// Execute the active post-wave `MiniMAC` barrier across all pending waves, blinding
+    /// and burning every ephemeral wave residual strictly before any cut opening!
+    pub fn verify_pending_barrier(&mut self) -> Result<(), CnfRssError> {
+        self.ensure_live()?;
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let b_idx = self.barrier_ctr;
+        self.barrier_ctr = self
+            .barrier_ctr
+            .checked_add(1)
+            .ok_or(CnfRssError::InvalidParameters)?;
+
+        let mut tr = Cshake256Xof::new(b"QSAG.CNF_RSS.BARRIER.DIG/v1");
+        tr.absorb(&self.session_id);
+        tr.absorb(&b_idx.to_le_bytes());
+        for pend in &self.pending {
+            tr.absorb(&pend.wave_digest);
+        }
+        let mut tr_dig = [0u8; 32];
+        tr.squeeze(&mut tr_dig);
+
+        let coin = match run_commit_and_open_coin(
+            &self.session_id,
+            b"QSAG.CNF_RSS.BARRIER.COIN/v1",
+            &tr_dig,
+            self.party_rngs,
+        ) {
+            Ok(c) => c,
+            Err(e) => return self.fail(e.into()),
+        };
+
+        let mut weight_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.BARRIER.WEIGHTS/v1");
+        weight_xof.absorb(&tr_dig);
+        weight_xof.absorb(&coin);
+
+        let t = self.projected.quorum.len();
+        let mut combined = SecretBuffer(vec![[Tower128::ZERO; MINIMAC_CODE_N]; t]);
+        for pend in &self.pending {
+            let mut wb = [0u8; 16];
+            weight_xof.squeeze(&mut wb);
+            let w = Tower128(u128::from_le_bytes(wb));
+            for u in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    combined[u][j] = combined[u][j].add(w.mul(pend.residual_shares[u][j]));
+                }
+            }
+        }
+        for pend in &mut self.pending {
+            pend.residual_shares.secret_wipe();
+        }
+        self.pending.clear();
+
+        // Commit-then-open all 128 `Tower128` coordinate residuals (each backed by a fresh
+        // single-use ephemeral per-wave `Delta^{(w)}` that is already burned!).
+        let mut salts = SecretBuffer(vec![[0u8; 32]; t]);
+        let mut coms = Vec::with_capacity(t);
+        for u in 0..t {
+            salts[u] = self.party_rngs[u].next_bytes32();
+            let mut cx = Cshake256Xof::new(b"QSAG.CNF_RSS.BARRIER.OPEN_COM/v1");
+            cx.absorb(&self.session_id);
+            cx.absorb(&b_idx.to_le_bytes());
+            cx.absorb(&coin);
+            cx.absorb(&(u as u64).to_be_bytes());
+            cx.absorb(&salts[u]);
+            for j in 0..MINIMAC_CODE_N {
+                cx.absorb(&combined[u][j].0.to_le_bytes());
+            }
+            let mut c = [0u8; 32];
+            cx.squeeze(&mut c);
+            coms.push(c);
+        }
+        for u in 0..t {
+            let mut cx = Cshake256Xof::new(b"QSAG.CNF_RSS.BARRIER.OPEN_COM/v1");
+            cx.absorb(&self.session_id);
+            cx.absorb(&b_idx.to_le_bytes());
+            cx.absorb(&coin);
+            cx.absorb(&(u as u64).to_be_bytes());
+            cx.absorb(&salts[u]);
+            for j in 0..MINIMAC_CODE_N {
+                cx.absorb(&combined[u][j].0.to_le_bytes());
+            }
+            let mut exp = [0u8; 32];
+            cx.squeeze(&mut exp);
+            if !ct_eq_bytes32(&exp, &coms[u]) {
+                return self.fail(CnfRssError::CommitmentMismatch {
+                    phase: "minimac_barrier",
+                    party: self.projected.quorum[u],
+                });
+            }
+        }
+
+        let mut any_nonzero = 0u128;
+        for j in 0..MINIMAC_CODE_N {
+            let mut acc = 0u128;
+            for u in 0..t {
+                acc ^= combined[u][j].0;
+            }
+            any_nonzero |= black_box(acc);
+        }
+        if any_nonzero != 0 {
+            return self.fail(CnfRssError::ActiveTamperDetected {
+                phase: "minimac_barrier_residual",
+            });
+        }
+        Ok(())
+    }
+
+    /// Masked cut-boundary opening (`w^* = (M_pub * dig) ^ r^* in C^{*2}`):
+    /// 1. Runs [`Self::verify_pending_barrier`] first so zero unverified gates exist;
+    /// 2. Masks unselected lanes (`(lane_mask >> l) & 1 == 0`) to `0` on `0..56` and one-time-pads
+    ///    all parity coordinates with `r^* in C^{*2}`;
+    /// 3. Verifies `C^{*2}` membership + `Tower128` MAC check BEFORE releasing any digest byte!
+    fn open_masked_groups(
+        &mut self,
+        groups: &[(&CnfRssSharedDigests, u64)],
+    ) -> Result<Vec<Vec<[u8; 32]>>, CnfRssError> {
+        self.verify_pending_barrier()?;
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        let open_idx = self.open_ctr;
+        self.open_ctr = self
+            .open_ctr
+            .checked_add(1)
+            .ok_or(CnfRssError::InvalidParameters)?;
+
+        let cut_masks = match self.source.next_cut_masks(groups.len()) {
+            Ok(m) => m,
+            Err(e) => return self.fail(e),
+        };
+        let t = self.projected.quorum.len();
+        let group_bytes = DIGEST_BITS * MINIMAC_CODE_N;
+        let total_open_bytes = groups.len() * group_bytes;
+
+        let mut w_shares = SecretBuffer(vec![vec![0u8; total_open_bytes]; t]);
+        let mut w_mac_shares = SecretBuffer(vec![vec![0u8; total_open_bytes]; t]);
+        let mut combined_deltas = Vec::with_capacity(groups.len());
+
+        for (g_idx, (&(dig, lane_mask), cmask)) in groups.iter().zip(cut_masks.iter()).enumerate() {
+            let mask56 = lane_mask & ((1u64 << MINIMAC_DATA_K) - 1);
+            let mut m_pub_cw = [0u8; MINIMAC_CODE_N];
+            self.tables.encode_public_bits56(mask56, &mut m_pub_cw);
+            let mut m_pub_tile = vec![0u8; group_bytes];
+            for chunk in m_pub_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                chunk.copy_from_slice(&m_pub_cw);
+            }
+
+            // Re-align `dig` MAC shares and `cmask` MAC shares onto `dig.delta_shares` (`ephemeral`):
+            let mut dig_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+            for u in 0..t {
+                for j in 0..MINIMAC_CODE_N {
+                    dig_delta_sum[j] ^= dig.delta_shares[u][j];
+                }
+            }
+            let mut rstar_sum = SecretBuffer(vec![0u8; group_bytes]);
+            for u in 0..t {
+                for i in 0..group_bytes {
+                    rstar_sum[i] ^= cmask.r_star[u][i];
+                }
+            }
+            let mut d_tile = SecretBuffer(vec![0u8; group_bytes]);
+            for chunk in d_tile.chunks_exact_mut(MINIMAC_CODE_N) {
+                chunk.copy_from_slice(&*dig_delta_sum);
+            }
+            let mut rstar_mac_aligned_sum = SecretBuffer(vec![0u8; group_bytes]);
+            qsag_asm::gf256_shamir_mul(&mut rstar_mac_aligned_sum, &rstar_sum, &d_tile);
+
+            let base = g_idx * group_bytes;
+            let mut tmp = SecretBuffer(vec![0u8; group_bytes]);
+            for u in 0..t {
+                qsag_asm::gf256_shamir_mul(&mut tmp, &m_pub_tile, &dig.sh[u]);
+                for i in 0..group_bytes {
+                    #[allow(unused_mut)]
+                    let mut val = tmp[i] ^ cmask.r_star[u][i];
+                    #[cfg(test)]
+                    if let Some(CnfRssFault::CorruptCutOpening { party }) = self.fault
+                        && party == u
+                        && g_idx == 0
+                        && i == 0
+                    {
+                        val ^= 1;
+                    }
+                    w_shares[u][base + i] = val;
+                }
+                qsag_asm::gf256_shamir_mul(&mut tmp, &m_pub_tile, &dig.mac[u]);
+                for i in 0..group_bytes {
+                    let add_rm = if u == 0 { rstar_mac_aligned_sum[i] } else { 0 };
+                    w_mac_shares[u][base + i] = tmp[i] ^ add_rm;
+                }
+            }
+            combined_deltas.push(dig.delta_shares.to_vec());
+        }
+
+        // Round 1: Commit to `w_shares[u]` before revealing!
+        let mut salts = SecretBuffer(vec![[0u8; 32]; t]);
+        let mut coms = Vec::with_capacity(t);
+        for u in 0..t {
+            salts[u] = self.party_rngs[u].next_bytes32();
+            coms.push(cshake256_32_multi_frame(
+                b"QSAG.CNF_RSS.CUT.OPEN_COM/v1",
+                &[
+                    &self.session_id,
+                    &open_idx.to_le_bytes(),
+                    &(u as u64).to_be_bytes(),
+                    &salts[u],
+                    &w_shares[u],
+                ],
+            ));
+        }
+        let mut w_open = vec![0u8; total_open_bytes];
+        for u in 0..t {
+            let exp = cshake256_32_multi_frame(
+                b"QSAG.CNF_RSS.CUT.OPEN_COM/v1",
+                &[
+                    &self.session_id,
+                    &open_idx.to_le_bytes(),
+                    &(u as u64).to_be_bytes(),
+                    &salts[u],
+                    &w_shares[u],
+                ],
+            );
+            if !ct_eq_bytes32(&exp, &coms[u]) {
+                return self.fail(CnfRssError::CommitmentMismatch {
+                    phase: "cut_open_shares",
+                    party: self.projected.quorum[u],
+                });
+            }
+            for i in 0..total_open_bytes {
+                w_open[i] ^= w_shares[u][i];
+            }
+        }
+
+        // Verify EVERY opened bit-codeword lies in `C^{*2}` and has Boolean `0..56`!
+        let total_cws = groups.len() * DIGEST_BITS;
+        for cw_idx in 0..total_cws {
+            let cw: &[u8; MINIMAC_CODE_N] = w_open
+                [cw_idx * MINIMAC_CODE_N..(cw_idx + 1) * MINIMAC_CODE_N]
+                .try_into()
+                .map_err(|_| CnfRssError::InvalidParameters)?;
+            if cw[..MINIMAC_DATA_K].iter().any(|&v| (v & !1) != 0)
+                || !self.tables.verify_public_c2(cw)
+            {
+                return self.fail(CnfRssError::ActiveTamperDetected {
+                    phase: "cut_open_c2_check",
+                });
+            }
+        }
+
+        // Round 2: Public-coin `Tower128` MAC verification on `w_open` BEFORE extracting digests!
+        let open_dig = cshake256_32_multi_frame(
+            b"QSAG.CNF_RSS.CUT.TRANSCRIPT/v1",
+            &[&self.session_id, &open_idx.to_le_bytes(), &w_open],
+        );
+        let coin = match run_commit_and_open_coin(
+            &self.session_id,
+            b"QSAG.CNF_RSS.CUT.COIN/v1",
+            &open_dig,
+            self.party_rngs,
+        ) {
+            Ok(c) => c,
+            Err(e) => return self.fail(e.into()),
+        };
+        let mut mx = Cshake256Xof::new(b"QSAG.CNF_RSS.CUT.MAC_CHAL/v1");
+        mx.absorb(&open_dig);
+        mx.absorb(&coin);
+
+        let mut mac_res = SecretBuffer(vec![[Tower128::ZERO; MINIMAC_CODE_N]; t]);
+        for (g_idx, deltas) in combined_deltas.iter().enumerate() {
+            for bit in 0..DIGEST_BITS {
+                let mut cb = [0u8; 16];
+                mx.squeeze(&mut cb);
+                let chi = Tower128(u128::from_le_bytes(cb));
+                let off = g_idx * group_bytes + bit * MINIMAC_CODE_N;
+                for u in 0..t {
+                    for j in 0..MINIMAC_CODE_N {
+                        let term = TowerGf256(w_mac_shares[u][off + j])
+                            .add(TowerGf256(w_open[off + j]).mul(TowerGf256(deltas[u][j])));
+                        mac_res[u][j] = mac_res[u][j].add(chi.mul_gf256(term));
+                    }
+                }
+            }
+        }
+
+        let mut any_bad = 0u128;
+        for j in 0..MINIMAC_CODE_N {
+            let mut acc = 0u128;
+            for u in 0..t {
+                acc ^= mac_res[u][j].0;
+            }
+            any_bad |= black_box(acc);
+        }
+        if any_bad != 0 {
+            return self.fail(CnfRssError::ActiveTamperDetected {
+                phase: "cut_open_mac_check",
+            });
+        }
+
+        // Unpack verified digests (`56` lanes per group)
+        let mut out = Vec::with_capacity(groups.len());
+        for g_idx in 0..groups.len() {
+            let base = g_idx * group_bytes;
+            let mut g_digests = vec![[0u8; 32]; MINIMAC_DATA_K];
+            for bit in 0..DIGEST_BITS {
+                let cw = &w_open[base + bit * MINIMAC_CODE_N..base + (bit + 1) * MINIMAC_CODE_N];
+                for (lane, dst) in g_digests.iter_mut().enumerate() {
+                    dst[bit / 8] |= (cw[lane] & 1) << (bit % 8);
+                }
+            }
+            out.push(g_digests);
+        }
+        Ok(out)
+    }
+
+    /// Evaluate a single 56-lane permutation (`frames.len() <= 56`).
+    fn permute_single_wave(
+        &mut self,
+        midstate: &[u64; 25],
+        frames: &[[u8; SHAKE256_RATE_BYTES]],
+        absorb: impl FnOnce(&Self, &mut [Vec<u8>], &mut [Vec<u8>], &[[u8; MINIMAC_CODE_N]]),
+    ) -> Result<CnfRssSharedDigests, CnfRssError> {
+        self.ensure_live()?;
+        if frames.is_empty() || frames.len() > MINIMAC_DATA_K {
+            return self.fail(CnfRssError::InvalidParameters);
+        }
+        let mut tuples = match self.source.next_wave_tuples(1) {
+            Ok(v) => v,
+            Err(e) => return self.fail(e),
+        };
+        let tuple = tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
+        let (mut sh, mut mac) = self.init_public_states(midstate, frames, &tuple.delta_shares);
+        absorb(self, &mut sh, &mut mac, &tuple.delta_shares);
+
+        let w_idx = self.wave_ctr;
+        self.wave_ctr += 1;
+        let evaluated = eval_minimac_wave_perm(
+            &self.tables,
+            &self.session_id,
+            w_idx,
+            frames.len(),
+            sh,
+            mac,
+            tuple,
+            #[cfg(test)]
+            self.fault,
+        );
+        match evaluated {
+            Ok((dig, pend)) => {
+                self.pending.push(pend);
+                Ok(dig)
+            }
+            Err(e) => self.fail(e),
+        }
+    }
+}
+
+impl BaggyEngine for CnfRssProjectedEngine<'_> {
+    type Sweep = CnfRssSweep;
+
+    fn pk_seed(&self) -> [u8; 32] {
+        self.projected.pk_seed
+    }
+
+    fn session_id(&self) -> &[u8; 32] {
+        &self.session_id
+    }
+
+    fn key_identity(&self) -> Result<Option<[u8; 32]>, BaggyError> {
+        let first = self.quorum_shares[0].scheme_identity();
+        for s in &self.quorum_shares {
+            if s.scheme_identity() != first {
+                return Err(BaggyError::KeyBindingMismatch);
+            }
+        }
+        Ok(first)
+    }
+
+    fn bind_key_identity(&mut self, identity: &[u8; 32]) -> Result<(), BaggyError> {
+        self.ensure_live()?;
+        for s in &self.quorum_shares {
+            if s.slh_params.is_some()
+                || s.scheme_identity()
+                    .is_some_and(|bound| !ct_eq_bytes32(&bound, identity))
+            {
+                return Err(BaggyError::KeyBindingMismatch);
+            }
+        }
+        for s in &mut self.quorum_shares {
+            s.bind_scheme_identity(identity)?;
+        }
+        Ok(())
+    }
+
+    fn randomiser(&mut self, mu: &[u8; 32]) -> Result<[u8; 32], BaggyError> {
+        if self.projected.key_len != 32 {
+            return Err(BaggyError::InvalidParameters);
+        }
+        let mid = TSW_SUITE_MIDSTATE;
+        let (frame0, off0) = keyed_mu_frame(TAG_BAGGY_OPT_RAND, mu);
+        let opt_rand = self.permute_single_wave(&mid, &[frame0], |eng, sh, mac, deltas| {
+            eng.absorb_projected_key(true, off0, sh, mac, deltas);
+        })?;
+        let (frame1, off1) = keyed_mu_frame(TAG_BAGGY_R, mu);
+        let r_dig = self.permute_single_wave(&mid, &[frame1], |eng, sh, mac, deltas| {
+            eng.absorb_shared_digests(&opt_rand, off1, sh, mac, deltas);
+        })?;
+        Ok(self.open_masked_groups(&[(&r_dig, 1)])?[0][0])
+    }
+
+    fn sweep(&mut self, pk_seed: &[u8; 32], lanes: Vec<LaneSpec>) -> Result<CnfRssSweep, BaggyError> {
+        self.ensure_live()?;
+        if lanes.is_empty()
+            || lanes.windows(2).any(|w| w[0].steps < w[1].steps)
+            || self.projected.key_len != 32
+            || !ct_eq_bytes32(pk_seed, &self.projected.pk_seed)
+        {
+            return Err(BaggyError::Engine(Rss256Error::InvalidParameters));
+        }
+
+        let chunks: Vec<&[LaneSpec]> = lanes.chunks(MINIMAC_DATA_K).collect();
+        let total_perms: usize = chunks.iter().map(|c| 1 + usize::from(c[0].steps)).sum();
+        let mut all_tuples = match self.source.next_wave_tuples(total_perms) {
+            Ok(t) => t,
+            Err(e) => return Err(self.fail::<CnfRssSweep>(e).unwrap_err().into()),
+        };
+
+        // Partition exact tuple slices per 56-lane chunk so all chunks run in parallel across cores!
+        let mut chunk_jobs: Vec<(&[LaneSpec], usize, Vec<ProjectedWaveTuple>)> =
+            Vec::with_capacity(chunks.len());
+        let mut base_w = self.wave_ctr;
+        for chunk in &chunks {
+            let need = 1 + usize::from(chunk[0].steps);
+            let rem_at = all_tuples.len() - need;
+            let c_tuples = all_tuples.split_off(rem_at);
+            chunk_jobs.push((chunk, base_w, c_tuples));
+            base_w += need;
+        }
+        self.wave_ctr = base_w;
+
+        let eval_chunk = |(chunk, start_w, mut c_tuples): &(
+            &[LaneSpec],
+            usize,
+            Vec<ProjectedWaveTuple>,
+        )|
+         -> Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError> {
+            // Drain from back so no shifts occur
+            let tup0 = c_tuples
+                .pop()
+                .ok_or(CnfRssError::BeaverBankExhausted)?;
+            let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
+                .iter()
+                .map(|l| tsw_secret32_frame(TAG_PRF, pk_seed, &l.prf))
+                .collect();
+            let (mut sh0, mut mac0) =
+                self.init_public_states(&TSW_SUITE_MIDSTATE, &frames0, &tup0.delta_shares);
+            self.absorb_projected_key(false, TSW_PRF_SECRET_OFFSET, &mut sh0, &mut mac0, &tup0.delta_shares);
+            let (dig0, pend0) = eval_minimac_wave_perm(
+                &self.tables,
+                &self.session_id,
+                *start_w,
+                chunk.len(),
+                sh0,
+                mac0,
+                tup0,
+                #[cfg(test)]
+                self.fault,
+            )?;
+            let mut wave_digs = vec![dig0];
+            let mut pends = vec![pend0];
+
+            for step in 0..chunk[0].steps {
+                let running = chunk.iter().take_while(|l| l.steps > step).count();
+                let frames_s: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk[..running]
+                    .iter()
+                    .map(|l| {
+                        let adrs = if l.step_indexed {
+                            HashAdrs {
+                                hash_step: u32::from(step),
+                                ..l.f
+                            }
+                        } else {
+                            l.f
+                        };
+                        tsw_secret32_frame(TAG_TH_F, pk_seed, &adrs)
+                    })
+                    .collect();
+                let tup_s = c_tuples
+                    .pop()
+                    .ok_or(CnfRssError::BeaverBankExhausted)?;
+                let (mut sh_s, mut mac_s) =
+                    self.init_public_states(&TSW_SUITE_MIDSTATE, &frames_s, &tup_s.delta_shares);
+                let prev = &wave_digs[usize::from(step)];
+                self.absorb_shared_digests(
+                    prev,
+                    TSW_F_SECRET_OFFSET,
+                    &mut sh_s,
+                    &mut mac_s,
+                    &tup_s.delta_shares,
+                );
+                let (dig_s, pend_s) = eval_minimac_wave_perm(
+                    &self.tables,
+                    &self.session_id,
+                    *start_w + 1 + usize::from(step),
+                    running,
+                    sh_s,
+                    mac_s,
+                    tup_s,
+                    #[cfg(test)]
+                    self.fault,
+                )?;
+                wave_digs.push(dig_s);
+                pends.push(pend_s);
+            }
+            Ok((wave_digs, pends))
+        };
+
+        // Re-wrap `eval_chunk` over owned `chunk_jobs` across parallel worker threads under `std`!
+        let outcomes: Vec<Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>> = {
+            #[cfg(feature = "std")]
+            {
+                let workers = std::thread::available_parallelism()
+                    .map_or(1, usize::from)
+                    .min(12);
+                let batch_sz = chunk_jobs.len().div_ceil(workers).max(1);
+                let mut results: Vec<
+                    Option<Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>>,
+                > = (0..chunk_jobs.len()).map(|_| None).collect();
+                let this: &Self = self;
+                std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for (j_slice, r_slice) in
+                        chunk_jobs.chunks_mut(batch_sz).zip(results.chunks_mut(batch_sz))
+                    {
+                        handles.push(scope.spawn(move || {
+                            for (job, dst) in j_slice.iter_mut().zip(r_slice.iter_mut()) {
+                                let taken = (job.0, job.1, core::mem::take(&mut job.2));
+                                *dst = Some({
+                                    let (chunk, start_w, mut c_tuples) = taken;
+                                    let run = || -> Result<_, CnfRssError> {
+                                        let tup0 = c_tuples
+                                            .pop()
+                                            .ok_or(CnfRssError::BeaverBankExhausted)?;
+                                        let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
+                                            .iter()
+                                            .map(|l| tsw_secret32_frame(TAG_PRF, pk_seed, &l.prf))
+                                            .collect();
+                                        let (mut sh0, mut mac0) = this.init_public_states(
+                                            &TSW_SUITE_MIDSTATE,
+                                            &frames0,
+                                            &tup0.delta_shares,
+                                        );
+                                        this.absorb_projected_key(
+                                            false,
+                                            TSW_PRF_SECRET_OFFSET,
+                                            &mut sh0,
+                                            &mut mac0,
+                                            &tup0.delta_shares,
+                                        );
+                                        let (dig0, pend0) = eval_minimac_wave_perm(
+                                            &this.tables,
+                                            &this.session_id,
+                                            start_w,
+                                            chunk.len(),
+                                            sh0,
+                                            mac0,
+                                            tup0,
+                                            #[cfg(test)]
+                                            this.fault,
+                                        )?;
+                                        let mut wave_digs = vec![dig0];
+                                        let mut pends = vec![pend0];
+                                        for step in 0..chunk[0].steps {
+                                            let running =
+                                                chunk.iter().take_while(|l| l.steps > step).count();
+                                            let frames_s: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
+                                                [..running]
+                                                .iter()
+                                                .map(|l| {
+                                                    let adrs = if l.step_indexed {
+                                                        HashAdrs {
+                                                            hash_step: u32::from(step),
+                                                            ..l.f
+                                                        }
+                                                    } else {
+                                                        l.f
+                                                    };
+                                                    tsw_secret32_frame(TAG_TH_F, pk_seed, &adrs)
+                                                })
+                                                .collect();
+                                            let tup_s = c_tuples
+                                                .pop()
+                                                .ok_or(CnfRssError::BeaverBankExhausted)?;
+                                            let (mut sh_s, mut mac_s) = this.init_public_states(
+                                                &TSW_SUITE_MIDSTATE,
+                                                &frames_s,
+                                                &tup_s.delta_shares,
+                                            );
+                                            let prev = &wave_digs[usize::from(step)];
+                                            this.absorb_shared_digests(
+                                                prev,
+                                                TSW_F_SECRET_OFFSET,
+                                                &mut sh_s,
+                                                &mut mac_s,
+                                                &tup_s.delta_shares,
+                                            );
+                                            let (dig_s, pend_s) = eval_minimac_wave_perm(
+                                                &this.tables,
+                                                &this.session_id,
+                                                start_w + 1 + usize::from(step),
+                                                running,
+                                                sh_s,
+                                                mac_s,
+                                                tup_s,
+                                                #[cfg(test)]
+                                                this.fault,
+                                            )?;
+                                            wave_digs.push(dig_s);
+                                            pends.push(pend_s);
+                                        }
+                                        Ok((wave_digs, pends))
+                                    };
+                                    run()
+                                });
+                            }
+                        }));
+                    }
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                });
+                let _ = eval_chunk;
+                results.into_iter().flatten().collect()
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                chunk_jobs.iter().map(eval_chunk).collect()
+            }
+        };
+
+        let mut pos = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            match outcome {
+                Ok((digs, pends)) => {
+                    self.pending.extend(pends);
+                    pos.push(digs);
+                }
+                Err(e) => return Err(self.fail::<CnfRssSweep>(e).unwrap_err().into()),
+            }
+        }
+        Ok(CnfRssSweep { lanes, pos })
+    }
+
+    fn barrier(&mut self) -> Result<(), BaggyError> {
+        Ok(self.verify_pending_barrier()?)
+    }
+
+    fn open_round(
+        &mut self,
+        sweep: &CnfRssSweep,
+        picks: &[(usize, u8)],
+    ) -> Result<Vec<[u8; 32]>, BaggyError> {
+        self.ensure_live()?;
+        if !self.pending.is_empty() {
+            return Err(CnfRssError::OpenBeforeBarrier.into());
+        }
+        let mut groups: Vec<(usize, u8, u64, Vec<usize>)> = Vec::new();
+        for (i, &(lane, position)) in picks.iter().enumerate() {
+            if lane >= sweep.lanes.len() || position > sweep.lanes[lane].steps {
+                return Err(BaggyError::Engine(Rss256Error::InvalidParameters));
+            }
+            let wave = lane / MINIMAC_DATA_K;
+            let slot = match groups.iter().position(|g| g.0 == wave && g.1 == position) {
+                Some(idx) => idx,
+                None => {
+                    groups.push((wave, position, 0, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            groups[slot].2 |= 1u64 << (lane % MINIMAC_DATA_K);
+            groups[slot].3.push(i);
+        }
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cuts: Vec<(&CnfRssSharedDigests, u64)> = groups
+            .iter()
+            .map(|g| (&sweep.pos[g.0][usize::from(g.1)], g.2))
+            .collect();
+        let opened = self.open_masked_groups(&cuts)?;
+        let mut out = vec![[0u8; 32]; picks.len()];
+        for (group, digests) in groups.iter().zip(&opened) {
+            for &i in &group.3 {
+                out[i] = digests[picks[i].0 % MINIMAC_DATA_K];
+            }
+        }
+        Ok(out)
+    }
+}
+
+// ============================================================================
+// 5. Sealed `SlhMpcOracles` Implementation for NIST FIPS 205 `SLH-DSA-SHAKE-*`
