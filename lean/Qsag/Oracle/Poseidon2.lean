@@ -1174,7 +1174,7 @@ theorem pack7BytesLimb_lt_two_pow_56 (bs : List UInt8) :
   have hPow : (256 : Nat) ^ 7 = 2 ^ 56 := rfl
   exact hPow ▸ hLt
 
-private theorem be_foldl_acc :
+theorem be_foldl_acc :
     ∀ (bs : List UInt8) (w acc : Nat),
       be (w + bs.length) (bs.foldl (fun a b => a * 256 + b.toNat) acc) = be w acc ++ bs
   | [], w, acc => by simp
@@ -1425,6 +1425,15 @@ def poseidon2WeightedFeedForward (s : Poseidon2State12) : Lane4 :=
 
 def poseidon2CompressWeighted (s : Poseidon2State12) : Lane4 :=
   lane4Add (poseidon2Perm12 s).b0 (poseidon2WeightedFeedForward s)
+
+theorem poseidon2WeightedFeedForward_eq (s : Poseidon2State12) :
+    poseidon2WeightedFeedForward s =
+      lane4Add (lane4Add s.b0 (lane4Scale (Goldilocks.ofNat 2) s.b1))
+        (lane4Scale (Goldilocks.ofNat 4) s.b2) := by rfl
+
+theorem poseidon2CompressWeighted_eq (s : Poseidon2State12) :
+    poseidon2CompressWeighted s =
+      lane4Add (poseidon2Perm12 s).b0 (poseidon2WeightedFeedForward s) := by rfl
 
 end Qsag
 end
@@ -5175,8 +5184,8 @@ private theorem pow_lt_pow_of_lt_base (u v k : Nat) (hu : 1 ≤ u) (huv : u < v)
     `p^-12`, which rules out that product as a universal bound for those events. Linear trail
     contributions are signed Fourier quantities, not such events, and can multiply without
     stochastic independence. Here neither the component character-sum estimate underlying
-    `36/p` nor the Fourier trail/hull connection is formalized. Historical name retained. -/
-theorem poseidon2_width12_wide_trail_and_characteristic_bounds :
+    `36/p` nor the Fourier trail/hull connection is formalized. -/
+theorem poseidon2_width12_active_sboxes_ge_28_and_exponent_arithmetic :
     (∀ a b : Poseidon2State12, a ≠ b → 28 ≤ poseidon2Perm12ActiveSboxes a b) ∧
     (∀ active : Nat, 28 ≤ active →
       6 ^ active * 2 ^ 256 < goldilocksPrime ^ active ∧
@@ -5647,8 +5656,8 @@ private theorem binomCoeff_mono_both (a a' b b' : Nat) (ha : a ≤ a') (hb : b �
     semi-regularity, Macaulay rank, a minimum number of monomials, or attack running-time lower
     bounds. In particular a large upper bound, or the size of one possible algorithm's matrix,
     is not a lower bound on every solving algorithm. No cited attack is formalized by these
-    numerical expressions. Historical theorem name retained for compatibility. -/
-theorem poseidon2_width12_cico_groebner_and_interpolation_bounds :
+    numerical expressions. -/
+theorem poseidon2_width12_symbolic_eval_degree_le_7pow30_and_parameter_arithmetic :
     (∀ (v : Nat → Goldilocks) (st : SymbolicState12),
       (symbolicPerm12 st).eval v = poseidon2Perm12 (st.eval v)) ∧
     (∀ st : SymbolicState12, st.maxDeg ≤ 1 → (symbolicPerm12 st).maxDeg ≤ 7 ^ 30) ∧
@@ -6085,5 +6094,171 @@ theorem width12_fiber_cardinality (ds : List Block4)
   exact ⟨hf.trans he, hi.trans he⟩
 
 
+/-! ### Exports for lane threshold-a -/
+
+theorem _root_.Qsag.chunk7Exact_cons7 (b0 b1 b2 b3 b4 b5 b6 : UInt8) (rest : List UInt8) :
+    chunk7Exact (b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: rest) =
+      pack7BytesLimb [b0, b1, b2, b3, b4, b5, b6] :: chunk7Exact rest := by rfl
+
+theorem _root_.Qsag.chunk7Exact_of_length_lt :
+    ∀ (bs : List UInt8), bs.length < 7 → chunk7Exact bs = []
+  | [], _ => rfl
+  | [_], _ => rfl
+  | [_, _], _ => rfl
+  | [_, _, _], _ => rfl
+  | [_, _, _, _], _ => rfl
+  | [_, _, _, _, _], _ => rfl
+  | [_, _, _, _, _, _], _ => rfl
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ :: _, h => by
+    simp only [List.length_cons] at h
+    omega
+
+theorem _root_.Qsag.pack7BytesLimb_val (bs : List UInt8) :
+    (pack7BytesLimb bs).val = ofBE ((bs ++ List.replicate (7 - bs.length) (0 : UInt8)).take 7) := by
+  rfl
+
+theorem _root_.Qsag.bytesToLimbs56_def (msg : List UInt8) :
+    bytesToLimbs56 msg =
+      chunk7Exact ((msg ++ [(0x01 : UInt8)]) ++
+        List.replicate ((7 - (msg ++ [(0x01 : UInt8)]).length % 7) % 7) (0x00 : UInt8)) := by rfl
+
+theorem _root_.Qsag.poseidon2PadBytes_def (msg : List UInt8) :
+    poseidon2PadBytes msg = poseidon2Pad (bytesToLimbs56 msg) := by rfl
+
+theorem _root_.Qsag.absorbRate8Block_def (st : Poseidon2State12) (r0 r1 : Lane4) :
+    absorbRate8Block st r0 r1 = poseidon2Perm12 ⟨lane4Add st.b0 r0, lane4Add st.b1 r1, st.b2⟩ := by
+  rfl
+
+theorem _root_.Qsag.absorbLimbStream_cons8 (st : Poseidon2State12)
+    (m0 m1 m2 m3 m4 m5 m6 m7 : Goldilocks) (rest : List Goldilocks) :
+    absorbLimbStream st (m0 :: m1 :: m2 :: m3 :: m4 :: m5 :: m6 :: m7 :: rest) =
+      absorbLimbStream (absorbRate8Block st ⟨m0, m1, m2, m3⟩ ⟨m4, m5, m6, m7⟩) rest := by
+  simp only [absorbLimbStream]
+
+theorem _root_.Qsag.absorbLimbStream_of_length_lt (st : Poseidon2State12) :
+    ∀ (ms : List Goldilocks), ms.length < 8 → absorbLimbStream st ms = st
+  | [], _ => rfl
+  | [_], _ => rfl
+  | [_, _], _ => rfl
+  | [_, _, _], _ => rfl
+  | [_, _, _, _], _ => rfl
+  | [_, _, _, _, _], _ => rfl
+  | [_, _, _, _, _, _], _ => rfl
+  | [_, _, _, _, _, _, _], _ => rfl
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: _, h => by
+    simp only [List.length_cons] at h
+    omega
+
+theorem _root_.Qsag.squeeze32Bytes_def (st : Poseidon2State12) :
+    squeeze32Bytes st =
+      be 8 st.b0.x0.val ++ be 8 st.b0.x1.val ++ be 8 st.b0.x2.val ++ be 8 st.b0.x3.val := by rfl
+
+theorem _root_.Qsag.poseidon2InitState_def :
+    poseidon2InitState =
+      ⟨lane4Zero, lane4Zero,
+        ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 4, Goldilocks.ofNat 32,
+          Goldilocks.ofNat 0x504F53325F474C31⟩⟩ := by rfl
+
+
+/-! ### Exports for lane agg-core -/
+
+theorem rawTrunc_eq {D : Type} (p : SimpleEquiv (State D) (State D)) (x : State D) :
+    rawTrunc p x = (p.toFun x).1 := by rfl
+
+theorem jiveCompress_eq {D : Type} [LawfulCommRing D] (extra : State D → D)
+    (p : SimpleEquiv (State D) (State D)) (x : State D) :
+    jiveCompress extra p x =
+      CommRingOps.add (p.toFun x).1 (CommRingOps.add x.1 (extra x)) := by rfl
+
+theorem consistent_iff {S : Type} (p : SimpleEquiv S S) (t : List (S × S)) :
+    Consistent p t ↔ ∀ x y, (x, y) ∈ t → p.toFun x = y := Iff.rfl
+theorem _root_.Qsag.poseidon2InternalConsts_length : poseidon2InternalConsts.length = 22 := by
+  unfold poseidon2InternalConsts
+  rw [List.length_map, List.length_range]
+
+theorem _root_.Qsag.poseidon2InitialExtConsts_length : poseidon2InitialExtConsts.length = 4 := by
+  unfold poseidon2InitialExtConsts
+  rw [List.length_map, List.length_range]
+
+theorem _root_.Qsag.lane4Sum_def (a : Lane4) :
+    lane4Sum a = Goldilocks.add (Goldilocks.add a.x0 a.x1) (Goldilocks.add a.x2 a.x3) := by rfl
+
+theorem _root_.Qsag.applyM4_def (b : Lane4) :
+    applyM4 b =
+      ⟨Goldilocks.add (lane4Sum b) (Goldilocks.add b.x0 (Goldilocks.mul (Goldilocks.ofNat 2) b.x1)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x1 (Goldilocks.mul (Goldilocks.ofNat 2) b.x2)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x2 (Goldilocks.mul (Goldilocks.ofNat 2) b.x3)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x3 (Goldilocks.mul (Goldilocks.ofNat 2) b.x0))⟩ := by
+  rfl
+
+theorem _root_.Qsag.sboxLane4_def (b : Lane4) :
+    sboxLane4 b = ⟨sbox7 b.x0, sbox7 b.x1, sbox7 b.x2, sbox7 b.x3⟩ := by rfl
+
+theorem _root_.Qsag.poseidon2Transpose4x3_def (s : Poseidon2State12) :
+    poseidon2Transpose4x3 s =
+      ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
+       ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
+       ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩ := by rfl
+
+theorem _root_.Qsag.poseidon2Transpose3x4_def (s : Poseidon2State12) :
+    poseidon2Transpose3x4 s =
+      ⟨⟨s.b0.x0, s.b1.x0, s.b2.x0, s.b0.x1⟩,
+       ⟨s.b1.x1, s.b2.x1, s.b0.x2, s.b1.x2⟩,
+       ⟨s.b2.x2, s.b0.x3, s.b1.x3, s.b2.x3⟩⟩ := by rfl
+
+theorem _root_.Qsag.state12Sum_def (st : Poseidon2State12) :
+    state12Sum st =
+      Goldilocks.add (Goldilocks.add (lane4Sum st.b0) (lane4Sum st.b1)) (lane4Sum st.b2) := by rfl
+
+
 end Qsag.CrossProtocol
+end
+
+public section
+namespace Qsag
+
+theorem lane4Sub_eq (a b : Lane4) : lane4Sub a b =
+    ⟨Goldilocks.sub a.x0 b.x0, Goldilocks.sub a.x1 b.x1,
+     Goldilocks.sub a.x2 b.x2, Goldilocks.sub a.x3 b.x3⟩ := by unfold lane4Sub; rfl
+
+theorem state12Sub_eq (a b : Poseidon2State12) : state12Sub a b =
+    ⟨lane4Sub a.b0 b.b0, lane4Sub a.b1 b.b1, lane4Sub a.b2 b.b2⟩ := by unfold state12Sub; rfl
+
+theorem Poseidon2State12.toList_eq (s : Poseidon2State12) : s.toList =
+    [s.b0.x0, s.b0.x1, s.b0.x2, s.b0.x3, s.b1.x0, s.b1.x1, s.b1.x2, s.b1.x3,
+     s.b2.x0, s.b2.x1, s.b2.x2, s.b2.x3] := by unfold Poseidon2State12.toList; rfl
+
+theorem Poseidon2State12.toList_length (s : Poseidon2State12) : s.toList.length = 12 := by
+  rw [Poseidon2State12.toList_eq]
+  rfl
+
+theorem poseidon2TerminalExtConsts_length : poseidon2TerminalExtConsts.length = 4 := by
+  unfold poseidon2TerminalExtConsts
+  rw [List.length_map, List.length_range]
+
+theorem poseidon2InitialExtConsts_eq : poseidon2InitialExtConsts =
+    [poseidon2ExtRoundConst 0 0, poseidon2ExtRoundConst 0 1,
+     poseidon2ExtRoundConst 0 2, poseidon2ExtRoundConst 0 3] := by
+  unfold poseidon2InitialExtConsts
+  rfl
+
+theorem poseidon2_initial_sbox_zero_nonzero :
+    (sboxState12 (state12Add (applyME state12Zero) (poseidon2ExtRoundConst 0 0))).b0.x0 ≠
+      Goldilocks.zero := by decide +kernel
+
+end Qsag
+end
+
+public section
+namespace Qsag
+
+/-- The four limbs of a `Lane4` / `Digest4` as a residual list. -/
+@[expose] def Lane4.toList (l : Lane4) : List Goldilocks :=
+  [l.x0, l.x1, l.x2, l.x3]
+
+theorem Lane4.toList_eq (s : Lane4) : s.toList = [s.x0, s.x1, s.x2, s.x3] := by
+  unfold Lane4.toList
+  rfl
+
+end Qsag
 end

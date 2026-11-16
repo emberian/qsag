@@ -406,4 +406,76 @@ namespace Qsag
 @[simp] theorem listHasElem_nil {α : Type} [DecidableEq α] (x : α) : listHasElem x [] = false := by rfl
 theorem listHasElem_cons {α : Type} [DecidableEq α] (x y : α) (ys : List α) :
     listHasElem x (y::ys) = if x=y then true else listHasElem x ys := by rfl
+/-! ### Exports for lane agg-recursive -/
+
+/-- Fiat–Shamir replay of the messages `ms` after the prefix `pre`: every prover message is paired
+    with the challenge `derive` computes from the message prefix ending in that message. The result
+    has the shape of a `PublicCoinIop` transcript, with challenges in any type `C`. -/
+def fsReplayAux {Msg C : Type} (derive : List Msg → C) : List Msg → List Msg → List (Msg × C)
+  | _, [] => []
+  | pre, m :: rest => (m, derive (pre ++ [m])) :: fsReplayAux derive (pre ++ [m]) rest
+
+/-- Fiat–Shamir replay of a full message list (empty initial prefix). -/
+def fsReplay {Msg C : Type} (derive : List Msg → C) (ms : List Msg) : List (Msg × C) :=
+  fsReplayAux derive [] ms
+
+theorem fsReplayAux_nil {Msg C : Type} (derive : List Msg → C) (pre : List Msg) :
+    fsReplayAux derive pre [] = [] := by rfl
+
+theorem fsReplayAux_cons {Msg C : Type} (derive : List Msg → C) (pre : List Msg) (m : Msg)
+    (rest : List Msg) :
+    fsReplayAux derive pre (m :: rest) =
+      (m, derive (pre ++ [m])) :: fsReplayAux derive (pre ++ [m]) rest := by rfl
+
+theorem fsReplay_eq {Msg C : Type} (derive : List Msg → C) (ms : List Msg) :
+    fsReplay derive ms = fsReplayAux derive [] ms := by rfl
+
+theorem fsReplayAux_length {Msg C : Type} (derive : List Msg → C) :
+    ∀ (ms pre : List Msg), (fsReplayAux derive pre ms).length = ms.length
+  | [], _ => by rfl
+  | m :: rest, pre => by
+    rw [fsReplayAux_cons, List.length_cons, List.length_cons, fsReplayAux_length derive rest]
+
+theorem fsReplay_length {Msg C : Type} (derive : List Msg → C) (ms : List Msg) :
+    (fsReplay derive ms).length = ms.length :=
+  fsReplayAux_length derive ms []
+
+theorem fsReplayAux_map_fst {Msg C : Type} (derive : List Msg → C) :
+    ∀ (ms pre : List Msg), (fsReplayAux derive pre ms).map Prod.fst = ms
+  | [], _ => by rfl
+  | m :: rest, pre => by
+    rw [fsReplayAux_cons, List.map_cons, fsReplayAux_map_fst derive rest]
+
+/-- The replay keeps the prover messages, in order. -/
+theorem fsReplay_map_fst {Msg C : Type} (derive : List Msg → C) (ms : List Msg) :
+    (fsReplay derive ms).map Prod.fst = ms :=
+  fsReplayAux_map_fst derive ms []
+
+theorem fsReplayAux_challenge {Msg C : Type} (derive : List Msg → C) :
+    ∀ (ms pre : List Msg) (i : Nat), i < ms.length →
+      ((fsReplayAux derive pre ms).map Prod.snd)[i]? = some (derive (pre ++ ms.take (i + 1)))
+  | [], _, _, h => absurd h (Nat.not_lt_zero _)
+  | m :: rest, pre, 0, _ => by
+    rw [fsReplayAux_cons, List.map_cons, List.getElem?_cons_zero]
+    rfl
+  | m :: rest, pre, i + 1, h => by
+    rw [fsReplayAux_cons, List.map_cons, List.getElem?_cons_succ,
+      fsReplayAux_challenge derive rest (pre ++ [m]) i (Nat.lt_of_succ_lt_succ h),
+      List.append_assoc]
+    rfl
+
+/-- **The challenge of round `i` is `derive` of the first `i + 1` prover messages.** -/
+theorem fsReplay_challenge {Msg C : Type} (derive : List Msg → C) (ms : List Msg) (i : Nat)
+    (hi : i < ms.length) :
+    ((fsReplay derive ms).map Prod.snd)[i]? = some (derive (ms.take (i + 1))) := by
+  rw [fsReplay_eq, fsReplayAux_challenge derive ms [] i hi, List.nil_append]
+
+/-- **Each challenge is a function of the message prefix only**: two message lists that agree
+    on their first `i + 1` messages receive the same round-`i` challenge, whatever follows. -/
+theorem fsReplay_challenge_prefix_only {Msg C : Type} (derive : List Msg → C)
+    (ms ms' : List Msg) (i : Nat) (hi : i < ms.length) (hi' : i < ms'.length)
+    (hPre : ms.take (i + 1) = ms'.take (i + 1)) :
+    ((fsReplay derive ms).map Prod.snd)[i]? = ((fsReplay derive ms').map Prod.snd)[i]? := by
+  rw [fsReplay_challenge derive ms i hi, fsReplay_challenge derive ms' i hi', hPre]
+
 end Qsag

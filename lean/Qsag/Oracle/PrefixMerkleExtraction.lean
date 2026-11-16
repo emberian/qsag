@@ -606,3 +606,614 @@ theorem prefixTargets_reprogram_of_fresh (L : MerkleAddressLayout cardX w)
     evaluated an address outside `xs` whose answer lies in the targets fixed by `xs`, or two
     distinct addresses of `xs` received the same answer. `xs` is any list: below it is the
     Phase-1 log, not the final one. -/
+theorem prefix_opening_classification (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (xs : List (Fin cardX)) (rt : BitVec w) :
+    ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w),
+    lvl + path.length ≤ L.levels → idx < L.nodes →
+    pathRoot L H lvl idx cur path = rt →
+    extractOnlineMerkleOpening rt (records L H xs) lvl path.length idx = some (cur, path) ∨
+    (∃ a, a ∈ pathPoints L H lvl idx cur path ∧ ¬ (a ∈ xs) ∧
+      H a ∈ prefixTargets L H xs rt) ∨
+    (∃ x x', x ∈ xs ∧ x' ∈ xs ∧ x ≠ x' ∧ H x = H x')
+  | [], lvl, idx, cur, _, _, hRoot => by
+    have hEq : cur = rt := hRoot
+    subst hEq
+    exact Or.inl rfl
+  | sib :: rest, lvl, idx, cur, hLvl, hIdx, hRoot => by
+    have hLen : (sib :: rest).length = rest.length + 1 := rfl
+    have hl : lvl < L.levels := by omega
+    have hn : idx / 2 < L.nodes := Nat.lt_of_le_of_lt (Nat.div_le_self idx 2) hIdx
+    let lCh := if idx % 2 = 0 then cur else sib
+    let rCh := if idx % 2 = 0 then sib else cur
+    let a := L.encode lvl (idx / 2) lCh rCh
+    let parent := H a
+    have hRoot' : pathRoot L H (lvl + 1) (idx / 2) parent rest = rt := hRoot
+    have hDecA : L.decode a = some (lvl, idx / 2, lCh, rCh) :=
+      L.decode_encode lvl (idx / 2) lCh rCh hl hn
+    have hParentTarget : extractOnlineMerkleOpening rt (records L H xs) (lvl + 1)
+        rest.length (idx / 2) = some (parent, rest) →
+        parent ∈ prefixTargets L H xs rt := by
+      intro hExtUp
+      cases rest with
+      | nil =>
+        have hPar : parent = rt := by
+          simp only [List.length_nil, extractOnlineMerkleOpening, Option.some.injEq,
+            Prod.mk.injEq] at hExtUp
+          exact hExtUp.1.symm
+        rw [hPar]
+        exact .head _
+      | cons s tl =>
+        exact .tail _ (List.mem_append.mpr (Or.inl
+          (extract_succ_child rt (records L H xs) (lvl + 1) tl.length (idx / 2) parent _
+            hExtUp)))
+    rcases prefix_opening_classification L H xs rt rest (lvl + 1) (idx / 2) parent
+        (by omega) hn hRoot' with hExtUp | ⟨a', ha', hFresh, hHit⟩ | hColl
+    · let pred := fun q : RecordedMerkleQuery (BitVec w) =>
+        decide (q.lvl = lvl) && decide (q.node = idx / 2) && decide (q.out = parent)
+      cases hFind : findFirst pred (records L H xs) with
+      | none =>
+        have hFreshA : ¬ (a ∈ xs) := by
+          intro haMem
+          have hMemRec := mem_records_of L H xs a _ haMem
+            (recordOf_of_decode L H a lvl (idx / 2) lCh rCh hDecA)
+          have hFalse := findFirst_none_spec pred hFind _ hMemRec
+          simp only [pred, parent, decide_true, Bool.and_self, Bool.true_eq_false] at hFalse
+        exact Or.inr (Or.inl ⟨a, .head _, hFreshA, hParentTarget hExtUp⟩)
+      | some q =>
+        obtain ⟨hqMem, hqPred⟩ := findFirst_some_spec pred hFind
+        simp only [pred, Bool.and_eq_true, decide_eq_true_eq] at hqPred
+        obtain ⟨⟨hqLvl, hqNode⟩, hqOut⟩ := hqPred
+        obtain ⟨x, hxMem, hxRec⟩ := mem_records L H xs q hqMem
+        obtain ⟨hDecX, hOutX⟩ := recordOf_some L H x q hxRec
+        have hAns : H x = H a := hOutX.symm.trans hqOut
+        by_cases hxa : x = a
+        · rw [hxa, hDecA] at hDecX
+          have hTup := Option.some.inj hDecX
+          have hqL : q.left = lCh := (congrArg (fun τ => τ.2.2.1) hTup).symm
+          have hqR : q.right = rCh := (congrArg (fun τ => τ.2.2.2) hTup).symm
+          refine Or.inl ?_
+          show extractOnlineMerkleOpening rt (records L H xs) lvl (rest.length + 1) idx =
+            some (cur, sib :: rest)
+          unfold extractOnlineMerkleOpening
+          rw [hExtUp]
+          dsimp only
+          rw [hFind]
+          dsimp only
+          by_cases hp : idx % 2 = 0
+          · dsimp only [lCh, rCh] at hqL hqR
+            simp only [hp, ↓reduceIte] at hqL hqR ⊢
+            rw [hqL, hqR]
+          · dsimp only [lCh, rCh] at hqL hqR
+            simp only [hp, ↓reduceIte] at hqL hqR ⊢
+            rw [hqL, hqR]
+        · cases hc : listHasElem a xs with
+          | true =>
+            exact Or.inr (Or.inr ⟨x, a, hxMem, (listHasElem_eq_true_iff a xs).mp hc, hxa, hAns⟩)
+          | false =>
+            refine Or.inr (Or.inl ⟨a, .head _, not_mem_of_listHasElem_false hc, ?_⟩)
+            refine .tail _ (List.mem_append.mpr (Or.inr ?_))
+            show H a ∈ xs.map H
+            rw [← hAns]
+            exact List.mem_map_of_mem hxMem
+    · exact Or.inr (Or.inl ⟨a', .tail _ ha', hFresh, hHit⟩)
+    · exact Or.inr (Or.inr hColl)
+
+/-- The verifier as a program: `d` compression evaluations along the path. A path shorter
+    than `d` is padded with evaluations whose result is discarded. -/
+def verifyProg (L : MerkleAddressLayout cardX w) : (d : Nat) → Nat → Nat → BitVec w →
+    List (BitVec w) → QueryProg (Fin cardX) (BitVec w) (BitVec w) d
+  | 0, _, _, cur, _ => .ret cur
+  | d + 1, lvl, idx, cur, [] =>
+    .ask (stepAddr L lvl idx cur cur) (fun _ => verifyProg L d (lvl + 1) (idx / 2) cur [])
+  | d + 1, lvl, idx, cur, sib :: rest =>
+    .ask (stepAddr L lvl idx cur sib) (fun y => verifyProg L d (lvl + 1) (idx / 2) y rest)
+
+theorem verifyProg_log (L : MerkleAddressLayout cardX w) (H : Fin cardX → BitVec w) :
+    ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w),
+      (verifyProg L path.length lvl idx cur path).log H = pathPoints L H lvl idx cur path
+  | [], _, _, _ => rfl
+  | sib :: rest, lvl, idx, cur => by
+    show stepAddr L lvl idx cur sib ::
+      (verifyProg L rest.length (lvl + 1) (idx / 2) (H (stepAddr L lvl idx cur sib)) rest).log H
+        = stepAddr L lvl idx cur sib ::
+          pathPoints L H (lvl + 1) (idx / 2) (H (stepAddr L lvl idx cur sib)) rest
+    rw [verifyProg_log L H rest]
+
+theorem verifyProg_eval (L : MerkleAddressLayout cardX w) (H : Fin cardX → BitVec w) :
+    ∀ (path : List (BitVec w)) (lvl idx : Nat) (cur : BitVec w),
+      (verifyProg L path.length lvl idx cur path).eval H = pathRoot L H lvl idx cur path
+  | [], _, _, _ => rfl
+  | sib :: rest, lvl, idx, cur =>
+    verifyProg_eval L H rest (lvl + 1) (idx / 2) (H (stepAddr L lvl idx cur sib))
+
+end Merkle
+
+/-! ## §6. The two-phase commitment / challenge experiment -/
+
+/-- An opening as output after the challenge. It carries no root: the root is the one
+    emitted by `commit` before the challenge. -/
+structure PrefixOpening (w : Nat) where
+  idx : Nat
+  leaf : BitVec w
+  path : List (BitVec w)
+
+/-- Phase 1 emits a root and a state after exactly `Q₁` queries; Phase 2 receives the state
+    and the challenge and emits an opening after exactly `Q₂` queries. -/
+structure TwoPhaseAdversary (cardX w Q₁ Q₂ : Nat) (St Chal : Type) where
+  commit : QueryProg (Fin cardX) (BitVec w) (BitVec w × St) Q₁
+  respond : St → Chal → QueryProg (Fin cardX) (BitVec w) (PrefixOpening w) Q₂
+
+section Experiment
+variable {cardX w Q₁ Q₂ : Nat} {St Chal : Type}
+
+/-- The root emitted before the challenge. -/
+def committedRoot (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (H : Fin cardX → BitVec w) :
+    BitVec w := (A.commit.eval H).1
+
+/-- The Phase-1 query log. -/
+def commitLog (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (H : Fin cardX → BitVec w) :
+    List (Fin cardX) := A.commit.log H
+
+/-- The opening emitted after the challenge. -/
+def opening (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (H : Fin cardX → BitVec w)
+    (ch : Chal) : PrefixOpening w := (A.respond (A.commit.eval H).2 ch).eval H
+
+/-- The Phase-2 query log. -/
+def responseLog (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (H : Fin cardX → BitVec w)
+    (ch : Chal) : List (Fin cardX) := (A.respond (A.commit.eval H).2 ch).log H
+
+/-- The whole run as one program: Phase 1, Phase 2, then the verifier's `d` evaluations. -/
+def experiment (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (ch : Chal) : QueryProg (Fin cardX) (BitVec w) (BitVec w) (d + Q₂ + Q₁) :=
+  A.commit.bind (fun cs => (A.respond cs.2 ch).bind
+    (fun op => verifyProg L d lvl op.idx op.leaf op.path))
+
+theorem experiment_log (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (ch : Chal) (H : Fin cardX → BitVec w) :
+    (experiment A L lvl d ch).log H = commitLog A H ++ (responseLog A H ch ++
+      (verifyProg L d lvl (opening A H ch).idx (opening A H ch).leaf
+        (opening A H ch).path).log H) := by
+  show (A.commit.bind _).log H = _
+  rw [QueryProg.log_bind, QueryProg.log_bind]
+  rfl
+
+theorem commitLog_length (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (H : Fin cardX → BitVec w) : (commitLog A H).length = Q₁ :=
+  QueryProg.log_length H A.commit
+
+/-- The verifier accepts: the path has the tree depth, the position is in range, and the
+    path recomputes the root emitted in Phase 1. -/
+@[expose] def accepts (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (H : Fin cardX → BitVec w) (ch : Chal) : Bool :=
+  decide ((opening A H ch).path.length = d) && decide ((opening A H ch).idx < L.nodes) &&
+  decide (pathRoot L H lvl (opening A H ch).idx (opening A H ch).leaf (opening A H ch).path =
+    committedRoot A H)
+
+/-- **The pre-challenge commitment.** The opening table extracted from the Phase-1 root and
+    the records of the Phase-1 log. There is no challenge argument. -/
+@[expose] def prefixCommitted (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl : Nat) (H : Fin cardX → BitVec w)
+    (idx len : Nat) : Option (BitVec w × List (BitVec w)) :=
+  extractOnlineMerkleOpening (committedRoot A H) (records L H (commitLog A H)) lvl len idx
+
+/-- Extraction from the final log, as in `Qrom.lean`: Phase-2 records are also consulted.
+    This is the extractor the temporal experiment must not use. -/
+@[expose] def finalLogExtract (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl : Nat) (H : Fin cardX → BitVec w) (ch : Chal)
+    (idx len : Nat) : Option (BitVec w × List (BitVec w)) :=
+  extractOnlineMerkleOpening (committedRoot A H)
+    (records L H (commitLog A H ++ responseLog A H ch)) lvl len idx
+
+/-- Prefix-extraction failure: the verifier accepts an opening that is not the one committed
+    before the challenge. -/
+@[expose] def prefixFailure (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (H : Fin cardX → BitVec w) (ch : Chal) :
+    Bool :=
+  accepts A L lvl d H ch &&
+  !decide (prefixCommitted A L lvl H (opening A H ch).idx (opening A H ch).path.length =
+    some ((opening A H ch).leaf, (opening A H ch).path))
+
+/-- The commitment is a function of the Phase-1 transcript: reprogramming the oracle outside
+    the Phase-1 log changes neither the root nor the extracted table. -/
+theorem prefixCommitted_reprogram_of_fresh (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl : Nat) (H : Fin cardX → BitVec w) (a : Fin cardX)
+    (c : BitVec w) (h : ¬ (a ∈ commitLog A H)) :
+    committedRoot A (reprogramOracle H a c) = committedRoot A H ∧
+    prefixCommitted A L lvl (reprogramOracle H a c) = prefixCommitted A L lvl H := by
+  obtain ⟨hE, hLg⟩ := eval_log_reprogram H a c A.commit h
+  have hRoot : committedRoot A (reprogramOracle H a c) = committedRoot A H :=
+    congrArg Prod.fst hE
+  have hLog : commitLog A (reprogramOracle H a c) = commitLog A H := hLg
+  refine ⟨hRoot, ?_⟩
+  funext idx len
+  show extractOnlineMerkleOpening (committedRoot A (reprogramOracle H a c))
+    (records L (reprogramOracle H a c) (commitLog A (reprogramOracle H a c))) lvl len idx =
+    extractOnlineMerkleOpening (committedRoot A H) (records L H (commitLog A H)) lvl len idx
+  rw [hRoot, hLog, records_reprogram_of_fresh L H a c (commitLog A H) h]
+
+theorem bool_not_eq_false {b : Bool} (h : (!b) = false) : b = true := by
+  cases b
+  · cases h
+  · rfl
+
+/-- An accepted opening outside the failure event is the pre-challenge commitment. -/
+theorem accepted_opening_is_prefixCommitted (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (H : Fin cardX → BitVec w) (ch : Chal)
+    (hAcc : accepts A L lvl d H ch = true) (hOk : prefixFailure A L lvl d H ch = false) :
+    prefixCommitted A L lvl H (opening A H ch).idx (opening A H ch).path.length =
+      some ((opening A H ch).leaf, (opening A H ch).path) := by
+  unfold prefixFailure at hOk
+  rw [hAcc, Bool.true_and] at hOk
+  exact of_decide_eq_true (bool_not_eq_false hOk)
+
+/-- **Binding across challenges.** Two challenges answered with accepted openings of the same
+    position and depth give the same leaf and path, unless one of the runs is a failure. -/
+theorem two_challenge_binding (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (H : Fin cardX → BitVec w) (ch ch' : Chal)
+    (hAcc : accepts A L lvl d H ch = true) (hAcc' : accepts A L lvl d H ch' = true)
+    (hOk : prefixFailure A L lvl d H ch = false) (hOk' : prefixFailure A L lvl d H ch' = false)
+    (hIdx : (opening A H ch).idx = (opening A H ch').idx)
+    (hLen : (opening A H ch).path.length = (opening A H ch').path.length) :
+    (opening A H ch).leaf = (opening A H ch').leaf ∧
+    (opening A H ch).path = (opening A H ch').path := by
+  have h1 := accepted_opening_is_prefixCommitted A L lvl d H ch hAcc hOk
+  have h2 := accepted_opening_is_prefixCommitted A L lvl d H ch' hAcc' hOk'
+  rw [hIdx, hLen] at h1
+  exact Prod.mk.inj (Option.some.inj (h1.symm.trans h2))
+
+/-! ### Step events -/
+
+/-- Targets for step `s` of the run. A Phase-1 step is charged against the answers already
+    received (collision); every later step is charged against the targets fixed by Phase 1. -/
+def stepTargets (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (ch : Chal) (s : Nat) (H : Fin cardX → BitVec w) : List (BitVec w) :=
+  if s < Q₁ then (((experiment A L lvl d ch).log H).take s).map H
+  else prefixTargets L H (commitLog A H) (committedRoot A H)
+
+/-- Step `s` exists and asks an address not asked before. -/
+def stepFresh (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (ch : Chal) (s : Nat) (H : Fin cardX → BitVec w) : Bool :=
+  match ((experiment A L lvl d ch).log H)[s]? with
+  | none => false
+  | some a => !listHasElem a (((experiment A L lvl d ch).log H).take s)
+
+/-- Step `s` asks a fresh address and its answer lands in the step's targets. -/
+def stepHit (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal) (L : MerkleAddressLayout cardX w)
+    (lvl d : Nat) (ch : Chal) (s : Nat) (H : Fin cardX → BitVec w) : Bool :=
+  match ((experiment A L lvl d ch).log H)[s]? with
+  | none => false
+  | some a => !listHasElem a (((experiment A L lvl d ch).log H).take s) &&
+      listHasElem (H a) (stepTargets A L lvl d ch s H)
+
+theorem stepHit_of (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (ch : Chal) (s : Nat)
+    (H : Fin cardX → BitVec w) (a : Fin cardX)
+    (hs : ((experiment A L lvl d ch).log H)[s]? = some a)
+    (hFresh : ¬ (a ∈ ((experiment A L lvl d ch).log H).take s))
+    (hHit : H a ∈ stepTargets A L lvl d ch s H) :
+    stepHit A L lvl d ch s H = true := by
+  unfold stepHit
+  rw [hs]
+  show (!listHasElem a (((experiment A L lvl d ch).log H).take s) &&
+    listHasElem (H a) (stepTargets A L lvl d ch s H)) = true
+  rw [listHasElem_false_of_not_mem hFresh, (listHasElem_eq_true_iff _ _).mpr hHit]
+  rfl
+
+theorem stepHit_lt (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (ch : Chal) (s : Nat)
+    (H : Fin cardX → BitVec w) (h : stepHit A L lvl d ch s H = true) : s < d + Q₂ + Q₁ := by
+  unfold stepHit at h
+  cases hs : ((experiment A L lvl d ch).log H)[s]? with
+  | none => rw [hs] at h; cases h
+  | some a =>
+    have hlt := getElem?_lt_length _ s a hs
+    rw [QueryProg.log_length] at hlt
+    exact hlt
+
+/-- **Cover of the failure event.** If the verifier accepts an opening that differs from the
+    pre-challenge commitment, some step of the run asked a fresh address whose answer landed
+    in that step's targets. Phase-2 queries enter only as such steps. -/
+theorem prefixFailure_cover (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (hLvl : lvl + d ≤ L.levels)
+    (H : Fin cardX → BitVec w) (ch : Chal) (hFail : prefixFailure A L lvl d H ch = true) :
+    ∃ s : Fin (d + Q₂ + Q₁), stepHit A L lvl d ch s.1 H = true := by
+  suffices hEx : ∃ s : Nat, stepHit A L lvl d ch s H = true by
+    obtain ⟨s, hs⟩ := hEx
+    exact ⟨⟨s, stepHit_lt A L lvl d ch s H hs⟩, hs⟩
+  simp only [prefixFailure, accepts, Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true',
+    decide_eq_false_iff_not] at hFail
+  obtain ⟨⟨⟨hLen, hIdx⟩, hRoot⟩, hNot⟩ := hFail
+  subst hLen
+  have hFull := experiment_log A L lvl (opening A H ch).path.length ch H
+  rw [verifyProg_log] at hFull
+  have hQ := commitLog_length A H
+  rcases prefix_opening_classification L H (commitLog A H) (committedRoot A H)
+      (opening A H ch).path lvl (opening A H ch).idx (opening A H ch).leaf hLvl hIdx hRoot with
+    hExt | ⟨a, haPts, haFresh, haHit⟩ | ⟨x, x', hx, hx', hne, hEq⟩
+  · exact absurd hExt hNot
+  · -- an address outside the Phase-1 log: charge its first occurrence in the run
+    have haFull : a ∈ (experiment A L lvl (opening A H ch).path.length ch).log H := by
+      rw [hFull]
+      exact List.mem_append.mpr (Or.inr (List.mem_append.mpr (Or.inr haPts)))
+    obtain ⟨s, hs, hsFresh⟩ := first_occurrence a _ haFull
+    have hGe : ¬ (s < Q₁) := by
+      have h := hs
+      rw [hFull] at h
+      have := append_index_ge _ a (commitLog A H) s h haFresh
+      rwa [hQ] at this
+    refine ⟨s, stepHit_of A L lvl _ ch s H a hs hsFresh ?_⟩
+    unfold stepTargets
+    rw [ite_eq_right hGe]
+    exact haHit
+  · -- two Phase-1 addresses with one answer: charge the later first occurrence
+    have key : ∀ (i j : Nat) (y y' : Fin cardX), (commitLog A H)[i]? = some y →
+        (commitLog A H)[j]? = some y' → ¬ (y' ∈ (commitLog A H).take j) → i < j →
+        H y' = H y → ∃ s : Nat, stepHit A L lvl (opening A H ch).path.length ch s H = true := by
+      intro i j y y' hi hj hjFresh hij hAns
+      have hApp := append_getElem?_take (responseLog A H ch ++
+        pathPoints L H lvl (opening A H ch).idx (opening A H ch).leaf (opening A H ch).path)
+        (commitLog A H) j y' hj
+      rw [← hFull] at hApp
+      have hjLt : j < Q₁ := by
+        have := getElem?_lt_length _ j y' hj
+        rwa [hQ] at this
+      refine ⟨j, stepHit_of A L lvl _ ch j H y' hApp.1 (by rw [hApp.2]; exact hjFresh) ?_⟩
+      unfold stepTargets
+      rw [ite_eq_left hjLt, hApp.2, hAns]
+      exact List.mem_map_of_mem (mem_take_of_getElem? _ i j y hi hij)
+    obtain ⟨i, hi, hiFresh⟩ := first_occurrence x _ hx
+    obtain ⟨j, hj, hjFresh⟩ := first_occurrence x' _ hx'
+    rcases Nat.lt_or_ge i j with hij | hji
+    · exact key i j x x' hi hj hjFresh hij hEq.symm
+    · rcases Nat.lt_or_eq_of_le hji with hlt | heq
+      · exact key j i x' x hj hi hiFresh hlt hEq
+      · rw [heq] at hj
+        exact absurd (Option.some.inj (hi.symm.trans hj)) hne
+
+/-- **One step of the union bound.** Over a uniform oracle, the oracles for which step `s`
+    asks a fresh address whose answer lands in the step's targets are at most
+    `(3 * Q₁ + 1) / 2 ^ w` of all oracles. -/
+theorem stepHit_bound (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (ch : Chal) (s : Nat) :
+    2 ^ w * uniformOracleSum w cardX
+        (fun H => if stepHit A L lvl d ch s H = true then 1 else 0) ≤
+      (3 * Q₁ + 1) * uniformOracleSum w cardX (fun _ => 1) := by
+  cases h0 : ((experiment A L lvl d ch).log (fun _ => 0#w))[s]? with
+  | none =>
+    have hLen := length_le_of_getElem?_none _ s h0
+    rw [QueryProg.log_length] at hLen
+    have hz : ∀ H : Fin cardX → BitVec w,
+        (if stepHit A L lvl d ch s H = true then 1 else 0) = 0 * 1 := by
+      intro H
+      have hNone : ((experiment A L lvl d ch).log H)[s]? = none :=
+        getElem?_none_of_length_le _ s (by rw [QueryProg.log_length]; exact hLen)
+      unfold stepHit
+      rw [hNone]
+      rfl
+    rw [uniformOracleSum_congr w cardX _ _ hz, uniformOracleSum_mul, Nat.zero_mul, Nat.mul_zero]
+    exact Nat.zero_le _
+  | some x0 =>
+    let lg : (Fin cardX → BitVec w) → List (Fin cardX) := fun H => (experiment A L lvl d ch).log H
+    let p : (Fin cardX → BitVec w) → Fin cardX := fun H => ((lg H)[s]?).getD x0
+    have hShape : ∀ H, stepHit A L lvl d ch s H =
+        (stepFresh A L lvl d ch s H && listHasElem (H (p H)) (stepTargets A L lvl d ch s H)) := by
+      intro H
+      unfold stepHit stepFresh
+      show _ = ((match (lg H)[s]? with
+        | none => false
+        | some a => !listHasElem a ((lg H).take s)) &&
+        listHasElem (H (((lg H)[s]?).getD x0)) (stepTargets A L lvl d ch s H))
+      cases (lg H)[s]? <;> rfl
+    -- consequences of freshness at step `s`
+    have hLoc : ∀ (H : Fin cardX → BitVec w) (c : BitVec w), stepFresh A L lvl d ch s H = true →
+        ∃ a, (lg H)[s]? = some a ∧ p H = a ∧ listHasElem a ((lg H).take s) = false ∧
+          (lg (reprogramOracle H a c)).take s = (lg H).take s ∧
+          (lg (reprogramOracle H a c))[s]? = some a := by
+      intro H c hF
+      unfold stepFresh at hF
+      cases hs : (lg H)[s]? with
+      | none =>
+        have hs' : ((experiment A L lvl d ch).log H)[s]? = none := hs
+        rw [hs'] at hF
+        cases hF
+      | some a =>
+        have hs' : ((experiment A L lvl d ch).log H)[s]? = some a := hs
+        rw [hs'] at hF
+        have hFr : listHasElem a ((lg H).take s) = false := bool_not_eq_true hF
+        have hT := take_of_take_succ s _ _ (log_take_reprogram H a c (experiment A L lvl d ch) s
+          (not_mem_of_listHasElem_false hFr))
+        refine ⟨a, rfl, ?_, hFr, hT.1, hT.2.trans hs⟩
+        show ((lg H)[s]?).getD x0 = a
+        rw [hs]
+        rfl
+    have hRes := conditional_fresh_point_bound w cardX p (stepFresh A L lvl d ch s)
+      (stepTargets A L lvl d ch s) (3 * Q₁ + 1) ?_ ?_ ?_ ?_
+    · rw [uniformOracleSum_congr w cardX _ _ (fun H => by rw [hShape H])]
+      exact hRes
+    · intro H c hF
+      obtain ⟨a, _, hpa, _, _, hsa⟩ := hLoc H c hF
+      rw [hpa]
+      show ((lg (reprogramOracle H a c))[s]?).getD x0 = a
+      rw [hsa]
+      rfl
+    · intro H c hF
+      obtain ⟨a, _, hpa, hFr, hTake, hsa⟩ := hLoc H c hF
+      rw [hpa]
+      unfold stepFresh
+      have hsa' : ((experiment A L lvl d ch).log (reprogramOracle H a c))[s]? = some a := hsa
+      have hTake' : ((experiment A L lvl d ch).log (reprogramOracle H a c)).take s =
+          (lg H).take s := hTake
+      rw [hsa']
+      show (!listHasElem a (((experiment A L lvl d ch).log (reprogramOracle H a c)).take s)) = true
+      rw [hTake', hFr]
+      rfl
+    · intro H c hF
+      obtain ⟨a, _, hpa, hFr, hTake, _⟩ := hLoc H c hF
+      rw [hpa]
+      unfold stepTargets
+      by_cases hlt : s < Q₁
+      · rw [ite_eq_left hlt, ite_eq_left hlt]
+        have hTake' : ((experiment A L lvl d ch).log (reprogramOracle H a c)).take s =
+            ((experiment A L lvl d ch).log H).take s := hTake
+        rw [hTake']
+        exact map_reprogram_of_fresh H a c _ hFr
+      · rw [ite_eq_right hlt, ite_eq_right hlt]
+        have hNotCommit : ¬ (a ∈ commitLog A H) := by
+          intro hm
+          have hge : ¬ (s < (commitLog A H).length) := by rw [commitLog_length]; exact hlt
+          have hIn := mem_take_append_of_ge (responseLog A H ch ++
+            (verifyProg L d lvl (opening A H ch).idx (opening A H ch).leaf
+              (opening A H ch).path).log H) (commitLog A H) s hge a hm
+          rw [← experiment_log A L lvl d ch H] at hIn
+          exact not_mem_of_listHasElem_false hFr hIn
+        obtain ⟨hE, hLg⟩ := eval_log_reprogram H a c A.commit hNotCommit
+        have hRoot : committedRoot A (reprogramOracle H a c) = committedRoot A H :=
+          congrArg Prod.fst hE
+        have hLog : commitLog A (reprogramOracle H a c) = commitLog A H := hLg
+        rw [hRoot, hLog]
+        exact prefixTargets_reprogram_of_fresh L H a c _ _ hNotCommit
+    · intro H _
+      unfold stepTargets
+      by_cases hlt : s < Q₁
+      · rw [ite_eq_left hlt, List.length_map]
+        have := length_take_le_self s ((experiment A L lvl d ch).log H)
+        omega
+      · rw [ite_eq_right hlt]
+        have := prefixTargets_length L H (commitLog A H) (committedRoot A H)
+        rw [commitLog_length] at this
+        exact this
+
+/-- **Prefix extraction bound.** For every adversary, every fixed challenge and a uniformly
+    random oracle `Fin cardX → BitVec w`: the oracles under which the verifier accepts an
+    opening other than the one extracted from the Phase-1 log are at most
+    `(d + Q₂ + Q₁) * (3 * Q₁ + 1) / 2 ^ w` of all `(2 ^ w) ^ cardX` oracles. The `Q₂` Phase-2
+    queries and the `d` verifier evaluations are separate terms of the union; the extractor
+    reads none of them. -/
+theorem prefix_extraction_failure_bound (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (hLvl : lvl + d ≤ L.levels) (ch : Chal) :
+    2 ^ w * uniformOracleSum w cardX
+        (fun H => if prefixFailure A L lvl d H ch = true then 1 else 0) ≤
+      ((d + Q₂ + Q₁) * (3 * Q₁ + 1)) * (2 ^ w) ^ cardX := by
+  have hCover : ∀ H : Fin cardX → BitVec w,
+      (if prefixFailure A L lvl d H ch = true then 1 else 0) ≤
+        qsum (d + Q₂ + Q₁) (fun s => if stepHit A L lvl d ch s.1 H = true then 1 else 0) := by
+    intro H
+    cases hF : prefixFailure A L lvl d H ch with
+    | false => exact Nat.zero_le _
+    | true =>
+      obtain ⟨s, hs⟩ := prefixFailure_cover A L lvl d hLvl H ch hF
+      have hTerm := le_qsum_term
+        (fun s : Fin (d + Q₂ + Q₁) => if stepHit A L lvl d ch s.1 H = true then 1 else 0) s
+      have h1 : (if stepHit A L lvl d ch s.1 H = true then 1 else 0) = 1 := ite_eq_left hs
+      rw [h1] at hTerm
+      exact hTerm
+  have hSum := uniformOracleSum_le w cardX _ _ hCover
+  rw [uniformOracleSum_qsum w cardX (d + Q₂ + Q₁)
+    (fun H s => if stepHit A L lvl d ch s.1 H = true then 1 else 0)] at hSum
+  have hSteps : 2 ^ w * qsum (d + Q₂ + Q₁) (fun s => uniformOracleSum w cardX
+      (fun H => if stepHit A L lvl d ch s.1 H = true then 1 else 0)) ≤
+      (d + Q₂ + Q₁) * ((3 * Q₁ + 1) * uniformOracleSum w cardX (fun _ => 1)) := by
+    rw [← qsum_mul_left, ← qsum_const (d + Q₂ + Q₁)]
+    exact qsum_le_qsum (fun s => stepHit_bound A L lvl d ch s.1)
+  refine Nat.le_trans (Nat.mul_le_mul_left (2 ^ w) hSum) (Nat.le_trans hSteps (Nat.le_of_eq ?_))
+  rw [uniformOracleSum_const, Nat.mul_one, Nat.mul_assoc]
+
+/-- The same bound averaged over `cardC` challenges chosen independently of the oracle. -/
+theorem prefix_extraction_failure_bound_challenges (A : TwoPhaseAdversary cardX w Q₁ Q₂ St Chal)
+    (L : MerkleAddressLayout cardX w) (lvl d : Nat) (hLvl : lvl + d ≤ L.levels)
+    (cardC : Nat) (chal : Fin cardC → Chal) :
+    2 ^ w * qsum cardC (fun c => uniformOracleSum w cardX
+        (fun H => if prefixFailure A L lvl d H (chal c) = true then 1 else 0)) ≤
+      cardC * (((d + Q₂ + Q₁) * (3 * Q₁ + 1)) * (2 ^ w) ^ cardX) := by
+  rw [← qsum_mul_left, ← qsum_const cardC]
+  exact qsum_le_qsum (fun c => prefix_extraction_failure_bound A L lvl d hLvl (chal c))
+
+end Experiment
+
+/-! ## §7. Final-log extraction accepts an uncommitted root -/
+
+section LateOpen
+variable {cardX w : Nat}
+
+theorem findFirst_nil {β : Type} (p : β → Bool) : findFirst p [] = none := by
+  cases h : findFirst p [] with
+  | none => rfl
+  | some x => exact nomatch (findFirst_some_spec p h).1
+
+theorem findFirst_singleton {β : Type} (p : β → Bool) (q : β) (hq : p q = true) :
+    findFirst p [q] = some q := by
+  cases h : findFirst p [q] with
+  | none => exact Bool.noConfusion ((findFirst_none_spec p h q (.head _)).symm.trans hq)
+  | some x =>
+    have hm := (findFirst_some_spec p h).1
+    cases hm with
+    | head => rfl
+    | tail _ h' => exact nomatch h'
+
+/-- The adversary that commits to a root without any query and asks the single compression
+    input only after the challenge. -/
+def lateOpenAdversary (L : MerkleAddressLayout cardX w) (rt u v : BitVec w) (Chal : Type) :
+    TwoPhaseAdversary cardX w 0 1 Unit Chal where
+  commit := .ret (rt, ())
+  respond _ _ := .ask (L.encode 0 0 u v) (fun _ => .ret ⟨0, u, [v]⟩)
+
+/-- **Final-log extraction is not pre-challenge extraction.** Against the late-opening
+    adversary, under any oracle that maps the compression input `(u, v)` to the announced
+    root, the verifier accepts, extraction from the final log returns the opening `(u, [v])`,
+    and extraction from the Phase-1 log returns `none`: nothing was committed before the
+    challenge, and the run is counted as a failure by `prefixFailure`. -/
+theorem lateOpen_final_log_extracts_uncommitted (L : MerkleAddressLayout cardX w)
+    (hLv : 0 < L.levels) (hNd : 0 < L.nodes) (H : Fin cardX → BitVec w) (rt u v : BitVec w)
+    (hH : H (L.encode 0 0 u v) = rt) {Chal : Type} (ch : Chal) :
+    accepts (lateOpenAdversary L rt u v Chal) L 0 1 H ch = true ∧
+    finalLogExtract (lateOpenAdversary L rt u v Chal) L 0 H ch 0 1 = some (u, [v]) ∧
+    prefixCommitted (lateOpenAdversary L rt u v Chal) L 0 H 0 1 = none ∧
+    prefixFailure (lateOpenAdversary L rt u v Chal) L 0 1 H ch = true := by
+  have hAcc : accepts (lateOpenAdversary L rt u v Chal) L 0 1 H ch = true := by
+    have hOp : opening (lateOpenAdversary L rt u v Chal) H ch = ⟨0, u, [v]⟩ := rfl
+    have hRt : committedRoot (lateOpenAdversary L rt u v Chal) H = rt := rfl
+    have hPath : pathRoot L H 0 0 u [v] = rt := by
+      rw [pathRoot_cons, pathRoot_nil]
+      exact hH
+    unfold accepts
+    rw [hOp, hRt]
+    show (decide (([v] : List (BitVec w)).length = 1) && decide (0 < L.nodes) &&
+      decide (pathRoot L H 0 0 u [v] = rt)) = true
+    rw [decide_eq_true hNd, decide_eq_true hPath]
+    rfl
+  have hPre : prefixCommitted (lateOpenAdversary L rt u v Chal) L 0 H 0 1 = none := by
+    show extractOnlineMerkleOpening rt [] 0 (0 + 1) 0 = none
+    unfold extractOnlineMerkleOpening
+    have hUp : extractOnlineMerkleOpening rt ([] : List (RecordedMerkleQuery (BitVec w)))
+        (0 + 1) 0 (0 / 2) = some (rt, []) := rfl
+    rw [hUp]
+    dsimp only
+    rw [findFirst_nil]
+  have hFin : finalLogExtract (lateOpenAdversary L rt u v Chal) L 0 H ch 0 1 = some (u, [v]) := by
+    have hRec : records L H [L.encode 0 0 u v] = [⟨0, 0, u, v, rt⟩] := by
+      rw [records_cons_some L H _ [] ⟨0, 0, u, v, H (L.encode 0 0 u v)⟩
+        (recordOf_of_decode L H _ 0 0 u v (L.decode_encode 0 0 u v hLv hNd)), hH]
+      rfl
+    show extractOnlineMerkleOpening rt (records L H [L.encode 0 0 u v]) 0 (0 + 1) 0 =
+      some (u, [v])
+    rw [hRec]
+    unfold extractOnlineMerkleOpening
+    have hUp : extractOnlineMerkleOpening rt
+        [(⟨0, 0, u, v, rt⟩ : RecordedMerkleQuery (BitVec w))] (0 + 1) 0 (0 / 2) =
+        some (rt, []) := rfl
+    rw [hUp]
+    dsimp only
+    rw [findFirst_singleton _ (⟨0, 0, u, v, rt⟩ : RecordedMerkleQuery (BitVec w))
+      (by simp only [decide_true, Bool.and_self])]
+    rfl
+  refine ⟨hAcc, hFin, hPre, ?_⟩
+  unfold prefixFailure
+  rw [hAcc, Bool.true_and]
+  show (!decide (prefixCommitted (lateOpenAdversary L rt u v Chal) L 0 H 0 1 =
+    some (u, [v]))) = true
+  rw [hPre]
+  rfl
+
+end LateOpen
+
+end Qsag.PrefixMerkleExtraction

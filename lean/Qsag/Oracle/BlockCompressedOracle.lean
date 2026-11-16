@@ -520,3 +520,521 @@ theorem BlockGate.map_add {n w cardAnc : Nat} (U : BlockGate n w cardAnc)
   dsimp only [qsub, zsub] at hr hi
   apply GaussInt.ext <;> dsimp only [qadd, zadd] <;> omega
 
+theorem BlockGate.map_dblPow {n w cardAnc : Nat} (U : BlockGate n w cardAnc)
+    (ψ : QVec n w cardAnc) : ∀ k, U.apply (qdblPow k ψ) = qdblPow k (U.apply ψ)
+  | 0 => rfl
+  | k + 1 => by
+    show U.apply (qadd (qdblPow k ψ) (qdblPow k ψ)) =
+      qadd (qdblPow k (U.apply ψ)) (qdblPow k (U.apply ψ))
+    rw [U.map_add, BlockGate.map_dblPow U ψ k]
+
+/-- A gate commutes with the block transform of the oracle register. -/
+theorem bitWalsh_local {n w cardAnc : Nat} (U : BlockGate n w cardAnc) : ∀ (k : Nat)
+    (ψ : OracleBitTable k → QVec n w cardAnc) (e : OracleBitTable k),
+    U.apply (fun x y a => bitWalsh k (fun b => ψ b x y a) e) =
+      fun x y a => bitWalsh k (fun b => U.apply (ψ b) x y a) e
+  | 0, _, _ => rfl
+  | k + 1, ψ, (b, e) => by
+    cases b
+    · show U.apply (qadd (fun x y a => bitWalsh k (fun h => ψ (false, h) x y a) e)
+        (fun x y a => bitWalsh k (fun h => ψ (true, h) x y a) e)) = _
+      rw [U.map_add, bitWalsh_local U k (fun h => ψ (false, h)) e,
+        bitWalsh_local U k (fun h => ψ (true, h)) e]
+      rfl
+    · show U.apply (qsub (fun x y a => bitWalsh k (fun h => ψ (false, h) x y a) e)
+        (fun x y a => bitWalsh k (fun h => ψ (true, h) x y a) e)) = _
+      rw [U.map_sub, bitWalsh_local U k (fun h => ψ (false, h)) e,
+        bitWalsh_local U k (fun h => ψ (true, h)) e]
+      rfl
+
+/-- A gate commutes with the table transform: nothing acts on the oracle register but the
+    query. -/
+theorem blockWalsh_local {n w cardAnc : Nat} (U : BlockGate n w cardAnc) : ∀ (m : Nat)
+    (ψ : BlockTable w m → QVec n w cardAnc) (d : BlockTable w m),
+    U.apply (fun x y a => blockWalsh w m (fun h => ψ h x y a) d) =
+      fun x y a => blockWalsh w m (fun h => U.apply (ψ h) x y a) d
+  | 0, _, _ => rfl
+  | m + 1, ψ, (e, d) => by
+    refine (bitWalsh_local U w
+      (fun b => fun x y a => blockWalsh w m (fun h => ψ (b, h) x y a) d) e).trans ?_
+    funext x y a
+    show bitWalsh w (fun b => U.apply
+        (fun x y a => blockWalsh w m (fun h => ψ (b, h) x y a) d) x y a) e =
+      bitWalsh w (fun b => blockWalsh w m (fun h => U.apply (ψ (b, h)) x y a) d) e
+    exact congrArg (fun F => bitWalsh w F e) (funext fun b =>
+      congrFun (congrFun (congrFun (blockWalsh_local U m (fun h => ψ (b, h)) d) x) y) a)
+
+/-- The value of a block as a `w`-bit answer. -/
+def blockValue : (k : Nat) → OracleBitTable k → BitVec k
+  | 0, _ => BitVec.nil
+  | k + 1, (b, e) => BitVec.cons b (blockValue k e)
+
+/-- The oracle `Fin n → BitVec w` whose truth table is `h`. -/
+def blockOracle (w n : Nat) (h : BlockTable w n) : Fin n → BitVec w :=
+  fun x => blockValue w (blockAt w n h x)
+
+theorem blockOracle_apply (w n : Nat) (h : BlockTable w n) (x : Fin n) :
+    blockOracle w n h x = blockValue w (blockAt w n h x) := by rfl
+
+/-- The XOR query `|x, y, a⟩ ↦ |x, y ⊕ H x, a⟩` on amplitudes, with the body of
+    `Qsag.oracleXor`. -/
+def blockQuery {n w cardAnc : Nat} (H : Fin n → BitVec w) (ψ : QVec n w cardAnc) :
+    QVec n w cardAnc :=
+  fun x y a => ψ x (xorFin y (H x)) a
+
+theorem blockQuery_apply {n w cardAnc : Nat} (H : Fin n → BitVec w) (ψ : QVec n w cardAnc)
+    (x : Fin n) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    blockQuery H ψ x y a = ψ x (xorFin y (H x)) a := by rfl
+
+@[expose] def fourierBlockState {w n cardAnc : Nat} (ψ : CoherentBlockState w n cardAnc) :
+    CoherentBlockState w n cardAnc :=
+  fun d x y a => blockWalsh w n (fun h => ψ h x y a) d
+
+def doubleBlockState {w n cardAnc : Nat} (k : Nat) (ψ : CoherentBlockState w n cardAnc) :
+    CoherentBlockState w n cardAnc :=
+  fun h => qdblPow k (ψ h)
+
+theorem fourierBlockState_apply {w n cardAnc : Nat} (ψ : CoherentBlockState w n cardAnc)
+    (d : BlockTable w n) (x : Fin n) (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    fourierBlockState ψ d x y a = blockWalsh w n (fun h => ψ h x y a) d := by rfl
+
+theorem fourierBlockState_square {w n cardAnc : Nat} (ψ : CoherentBlockState w n cardAnc) :
+    fourierBlockState (fourierBlockState ψ) = doubleBlockState (n * w) ψ := by
+  funext h x y a
+  exact blockWalsh_square w n _ h
+
+theorem fourierBlockState_double {w n cardAnc : Nat} (k : Nat)
+    (ψ : CoherentBlockState w n cardAnc) :
+    fourierBlockState (doubleBlockState k ψ) = doubleBlockState k (fourierBlockState ψ) := by
+  funext h x y a
+  exact blockWalsh_dbl w n _ h k
+
+theorem doubleBlockState_add {w n cardAnc : Nat} (k l : Nat)
+    (ψ : CoherentBlockState w n cardAnc) :
+    doubleBlockState k (doubleBlockState l ψ) = doubleBlockState (k + l) ψ := by
+  funext h x y a
+  exact zdblPow_add_exp k l _
+
+/-- **A full `w`-bit XOR query only mixes labels that differ in the queried block.** If the
+    Fourier register vanishes on every label obtained from `d` by rewriting one block, it
+    still vanishes at `d` after the query, for every superposition of addresses. -/
+theorem fourier_block_query_zero {w n cardAnc : Nat} (ψ : CoherentBlockState w n cardAnc)
+    (d : BlockTable w n)
+    (hz : ∀ x e, fourierBlockState ψ (setBlock w n d x e) = qzero n w cardAnc) :
+    fourierBlockState (fun h => blockQuery (blockOracle w n h) (ψ h)) d = qzero n w cardAnc := by
+  funext x y a
+  show blockWalsh w n (fun h => ψ h x (xorFin y (blockValue w (blockAt w n h x))) a) d = zzero
+  refine blockWalsh_query w n (fun h v => ψ h x (xorFin y (blockValue w v)) a) d x
+    (fun v e => ?_)
+  exact congrFun (congrFun (congrFun (hz x e) x) (xorFin y (blockValue w v))) a
+
+/-! ## §6. Block-valued adversaries and the three support theorems -/
+
+/-- A `Q`-query adversary against an oracle with `w`-bit answers. -/
+structure BlockAdv (n w cardAnc Q : Nat) where
+  init : QVec n w cardAnc
+  steps : Fin Q → BlockGate n w cardAnc
+
+/-- State before query `t`, with the recursion of `Qsag.advStateAt`. -/
+def blockAdvStateAt {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q)
+    (H : Fin n → BitVec w) : (t : Nat) → t ≤ Q → QVec n w cardAnc
+  | 0, _ => A.init
+  | t + 1, ht =>
+    (A.steps ⟨t, ht⟩).apply (blockQuery H (blockAdvStateAt A H t (Nat.le_of_succ_le ht)))
+
+theorem blockAdvStateAt_zero {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q)
+    (H : Fin n → BitVec w) (h0 : 0 ≤ Q) : blockAdvStateAt A H 0 h0 = A.init := by rfl
+
+theorem blockAdvStateAt_succ {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q)
+    (H : Fin n → BitVec w) (t : Nat) (ht : t + 1 ≤ Q) :
+    blockAdvStateAt A H (t + 1) ht =
+      (A.steps ⟨t, ht⟩).apply (blockQuery H (blockAdvStateAt A H t (Nat.le_of_succ_le ht))) := by
+  rfl
+
+/-- **Coherent sparsity for `w`-bit answers.** After `t` queries the Fourier register has no
+    amplitude on a database with more than `t` nonzero blocks. Queries are in superposition;
+    no address is measured and no cover premise is assumed. -/
+theorem block_fourier_coherent_support {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q) :
+    ∀ (t : Nat) (ht : t ≤ Q) (d : BlockTable w n), t < blockWeight w n d →
+      fourierBlockState (fun h => blockAdvStateAt A (blockOracle w n h) t ht) d =
+        qzero n w cardAnc
+  | 0, _, d, hd => by
+    funext x y a
+    exact blockWalsh_const w n (A.init x y a) d (by omega)
+  | t + 1, ht, d, hd => by
+    have hT : ∀ x e, fourierBlockState
+        (fun h => blockAdvStateAt A (blockOracle w n h) t (Nat.le_of_succ_le ht))
+        (setBlock w n d x e) = qzero n w cardAnc := by
+      intro x e
+      have hw := blockWeight_setBlock_le w n d x e
+      exact block_fourier_coherent_support A t (Nat.le_of_succ_le ht) _ (by omega)
+    have hz := fourier_block_query_zero
+      (fun h => blockAdvStateAt A (blockOracle w n h) t (Nat.le_of_succ_le ht)) d hT
+    have hl := blockWalsh_local (A.steps ⟨t, ht⟩) n
+      (fun h => blockQuery (blockOracle w n h)
+        (blockAdvStateAt A (blockOracle w n h) t (Nat.le_of_succ_le ht))) d
+    show (fun x y a => blockWalsh w n
+      (fun h => (A.steps ⟨t, ht⟩).apply (blockQuery (blockOracle w n h)
+        (blockAdvStateAt A (blockOracle w n h) t (Nat.le_of_succ_le ht))) x y a) d) = _
+    rw [← hl]
+    show (A.steps ⟨t, ht⟩).apply (fourierBlockState
+      (fun h => blockQuery (blockOracle w n h)
+        (blockAdvStateAt A (blockOracle w n h) t (Nat.le_of_succ_le ht))) d) = _
+    rw [hz, BlockGate.apply_zero]
+
+/-- One coherent query to the block table, then the oracle-independent gate. -/
+def coherentBlockStep {w n cardAnc : Nat} (U : BlockGate n w cardAnc)
+    (ψ : CoherentBlockState w n cardAnc) : CoherentBlockState w n cardAnc :=
+  fun h => U.apply (blockQuery (blockOracle w n h) (ψ h))
+
+/-- The same step conjugated into the Fourier basis of the oracle register. The unnormalized
+    transform multiplies amplitudes by `2 ^ (n * w)` per step. -/
+def fourierBlockStep {w n cardAnc : Nat} (U : BlockGate n w cardAnc)
+    (ψ : CoherentBlockState w n cardAnc) : CoherentBlockState w n cardAnc :=
+  fourierBlockState (coherentBlockStep U (fourierBlockState ψ))
+
+theorem coherentBlockStep_double {w n cardAnc : Nat} (U : BlockGate n w cardAnc) (k : Nat)
+    (ψ : CoherentBlockState w n cardAnc) :
+    coherentBlockStep U (doubleBlockState k ψ) = doubleBlockState k (coherentBlockStep U ψ) := by
+  funext h
+  exact U.map_dblPow (blockQuery (blockOracle w n h) (ψ h)) k
+
+/-- The runtime stepped entirely in the Fourier basis, started on the Fourier encoding of the
+    uniform superposition of oracles. -/
+@[expose] def fourierBlockAdvStateAt {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q) :
+    (t : Nat) → t ≤ Q → CoherentBlockState w n cardAnc
+  | 0, _ => fourierBlockState (fun _ => A.init)
+  | t + 1, ht => fourierBlockStep (A.steps ⟨t, ht⟩)
+      (fourierBlockAdvStateAt A t (Nat.le_of_succ_le ht))
+
+/-- The Fourier runtime is the transform of the ordinary coherent execution, up to the known
+    oracle-independent scale `2 ^ ((n * w) * t)`. -/
+theorem fourierBlockAdvStateAt_eq {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q) :
+    ∀ (t : Nat) (ht : t ≤ Q), fourierBlockAdvStateAt A t ht =
+      doubleBlockState ((n * w) * t)
+        (fourierBlockState (fun h => blockAdvStateAt A (blockOracle w n h) t ht))
+  | 0, _ => rfl
+  | t + 1, ht => by
+    show fourierBlockState (coherentBlockStep (A.steps ⟨t, ht⟩)
+      (fourierBlockState (fourierBlockAdvStateAt A t (Nat.le_of_succ_le ht)))) = _
+    rw [fourierBlockAdvStateAt_eq A t (Nat.le_of_succ_le ht), fourierBlockState_double,
+      fourierBlockState_square, doubleBlockState_add, coherentBlockStep_double,
+      fourierBlockState_double, Nat.mul_succ]
+    rfl
+
+/-- **Runtime support for `w`-bit answers.** The independently stepped Fourier runtime obeys
+    the same cap: at most `t` nonzero blocks after `t` queries. -/
+theorem block_fourier_runtime_support {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q)
+    (t : Nat) (ht : t ≤ Q) (d : BlockTable w n) (hd : t < blockWeight w n d) :
+    fourierBlockAdvStateAt A t ht d = qzero n w cardAnc := by
+  rw [fourierBlockAdvStateAt_eq]
+  show qdblPow ((n * w) * t) (fourierBlockState
+    (fun h => blockAdvStateAt A (blockOracle w n h) t ht) d) = _
+  rw [block_fourier_coherent_support A t ht d hd]
+  funext x y a
+  exact zdblPow_zzero _
+
+/-- Squared modulus, with the body of `Qsag.GaussInt.normSq`. -/
+def znormSq (z : GaussInt) : Nat := z.re.natAbs * z.re.natAbs + z.im.natAbs * z.im.natAbs
+
+/-- Squared norm of a state, with the body of `Qsag.QVec.stateNormSq`. The response register
+    is summed by `qsum (2 ^ w)`; nothing below evaluates that sum. -/
+def qnormSq {n w cardAnc : Nat} (ψ : QVec n w cardAnc) : Nat :=
+  qsum n (fun x => qsum (2 ^ w) (fun y => qsum cardAnc (fun a => znormSq (ψ x y a))))
+
+theorem qnormSq_qzero (n w cardAnc : Nat) : qnormSq (qzero n w cardAnc) = 0 := by
+  show qsum n (fun _ => qsum (2 ^ w) (fun _ => qsum cardAnc (fun _ => 0))) = 0
+  rw [qsum_const cardAnc 0, qsum_const (2 ^ w) (cardAnc * 0), qsum_const,
+    Nat.mul_zero, Nat.mul_zero, Nat.mul_zero]
+
+/-- Sum over every database label, one block at a time. -/
+def blockTableSum (w : Nat) : (n : Nat) → (BlockTable w n → Nat) → Nat
+  | 0, f => f ()
+  | n + 1, f => oracleTableSum w (fun e => blockTableSum w n (fun d => f (e, d)))
+
+theorem blockTableSum_zero_fun (w : Nat) : ∀ n, blockTableSum w n (fun _ => 0) = 0
+  | 0 => rfl
+  | n + 1 => by
+    show oracleTableSum w (fun _ => blockTableSum w n (fun _ => 0)) = 0
+    exact (oracleTableSum_congr w _ (fun _ => 0 * 0) (fun _ => blockTableSum_zero_fun w n)).trans
+      ((oracleTableSum_mul w 0 (fun _ => 0)).trans (Nat.zero_mul _))
+
+/-- **Database overflow has zero mass for `w`-bit answers.** A terminal measurement of the
+    Fourier label never reports more than `Q` nonzero blocks. -/
+theorem block_fourier_database_overflow_mass_zero {n w cardAnc Q : Nat}
+    (A : BlockAdv n w cardAnc Q) :
+    blockTableSum w n (fun d => if Q < blockWeight w n d then
+      qnormSq (fourierBlockAdvStateAt A Q (Nat.le_refl Q) d) else 0) = 0 := by
+  have h : (fun d : BlockTable w n => if Q < blockWeight w n d then
+      qnormSq (fourierBlockAdvStateAt A Q (Nat.le_refl Q) d) else 0) = fun _ => 0 := by
+    funext d
+    by_cases hd : Q < blockWeight w n d
+    · rw [ite_eq_left hd, block_fourier_runtime_support A Q (Nat.le_refl Q) d hd, qnormSq_qzero]
+    · exact ite_eq_right hd
+  exact (congrArg (blockTableSum w n) h).trans (blockTableSum_zero_fun w n)
+
+/-! ### Sharpness at the empty database -/
+
+/-- Before any query the empty database carries the whole initial state, scaled by
+    `2 ^ (n * w)`. The hypothesis `t < blockWeight w n d` of the support theorems therefore
+    cannot be weakened to `t ≤ blockWeight w n d`. -/
+theorem fourier_block_initial_zeroLabel {n w cardAnc Q : Nat} (A : BlockAdv n w cardAnc Q)
+    (h0 : 0 ≤ Q) :
+    fourierBlockState (fun h => blockAdvStateAt A (blockOracle w n h) 0 h0) (zeroLabel w n) =
+      qdblPow (n * w) A.init := by
+  funext x y a
+  exact blockWalsh_const_zeroLabel w n (A.init x y a)
+
+theorem fourierBlockAdvStateAt_initial_zeroLabel {n w cardAnc Q : Nat}
+    (A : BlockAdv n w cardAnc Q) (h0 : 0 ≤ Q) :
+    fourierBlockAdvStateAt A 0 h0 (zeroLabel w n) = qdblPow (n * w) A.init :=
+  fourier_block_initial_zeroLabel A h0
+
+/-- A state with a nonzero amplitude is not the zero state after doubling. -/
+theorem qdblPow_ne_qzero {n w cardAnc : Nat} (k : Nat) (ψ : QVec n w cardAnc)
+    (x : Fin n) (y : Fin (2 ^ w)) (a : Fin cardAnc) (hne : ¬ (ψ x y a = zzero)) :
+    ¬ (qdblPow k ψ = qzero n w cardAnc) :=
+  fun h => hne (zdblPow_eq_zzero k _ (congrFun (congrFun (congrFun h x) y) a))
+
+/-! ## §7. The deployed digest width, `w = 256`
+
+These are instantiations of the parametric theorems. Their types mention `Fin (2 ^ 256)` as
+an index type only; no term is reduced and no sum over it is evaluated. -/
+
+theorem block256_fourier_coherent_support {n cardAnc Q : Nat} (A : BlockAdv n 256 cardAnc Q)
+    (t : Nat) (ht : t ≤ Q) (d : BlockTable 256 n) (hd : t < blockWeight 256 n d) :
+    fourierBlockState (fun h => blockAdvStateAt A (blockOracle 256 n h) t ht) d =
+      qzero n 256 cardAnc :=
+  block_fourier_coherent_support A t ht d hd
+
+theorem block256_fourier_runtime_support {n cardAnc Q : Nat} (A : BlockAdv n 256 cardAnc Q)
+    (t : Nat) (ht : t ≤ Q) (d : BlockTable 256 n) (hd : t < blockWeight 256 n d) :
+    fourierBlockAdvStateAt A t ht d = qzero n 256 cardAnc :=
+  block_fourier_runtime_support A t ht d hd
+
+theorem block256_fourier_database_overflow_mass_zero {n cardAnc Q : Nat}
+    (A : BlockAdv n 256 cardAnc Q) :
+    blockTableSum 256 n (fun d => if Q < blockWeight 256 n d then
+      qnormSq (fourierBlockAdvStateAt A Q (Nat.le_refl Q) d) else 0) = 0 :=
+  block_fourier_database_overflow_mass_zero A
+
+/-- A one-address database whose single block has exactly its top bit set. -/
+def hotLabel (k : Nat) : BlockTable (k + 1) 1 := ((true, bitsZero k), ())
+
+theorem blockWeight_hotLabel (k : Nat) : blockWeight (k + 1) 1 (hotLabel k) = 1 := by rfl
+
+/-- A two-address database with both blocks nonzero. -/
+def hotLabel₂ (k : Nat) : BlockTable (k + 1) 2 := ((true, bitsZero k), ((true, bitsZero k), ()))
+
+theorem blockWeight_hotLabel₂ (k : Nat) : blockWeight (k + 1) 2 (hotLabel₂ k) = 2 := by rfl
+
+/-! ## §8. Transport to `Qsag.QuantumAdv` and the one-bit statement
+
+The fields below are the defining equations of constants whose bodies `Qrom.lean` keeps
+private to its own module. Each is closed by `rfl` in a module that can see those bodies. -/
+
+/-- Defining equations of the `Qrom` runtime for an arbitrary answer width. -/
+structure QromRuntimeLaws : Prop where
+  qvec_zero : ∀ (n w cardAnc : Nat), QVec.zero n w cardAnc = qzero n w cardAnc
+  qvec_sub : ∀ {n w cardAnc : Nat} (ψ φ : QVec n w cardAnc), QVec.sub ψ φ = qsub ψ φ
+  oracle_xor : ∀ {n w cardAnc : Nat} (H : Fin n → BitVec w) (ψ : QVec n w cardAnc),
+    oracleXor H ψ = blockQuery H ψ
+  adv_zero : ∀ {n w cardAnc q : Nat} (A : QuantumAdv n w cardAnc q) (H : Fin n → BitVec w)
+    (h0 : 0 ≤ q), advStateAt A H 0 h0 = A.init
+  adv_succ : ∀ {n w cardAnc q : Nat} (A : QuantumAdv n w cardAnc q) (H : Fin n → BitVec w)
+    (t : Nat) (ht : t + 1 ≤ q), advStateAt A H (t + 1) ht =
+      (A.steps ⟨t, ht⟩).apply (oracleXor H (advStateAt A H t (Nat.le_of_succ_le ht)))
+
+/-- Every scaled unitary is a block gate. -/
+def QromRuntimeLaws.toBlockGate (L : QromRuntimeLaws) {n w cardAnc : Nat}
+    (U : ScaledUnitary n w cardAnc) : BlockGate n w cardAnc where
+  apply := U.apply
+  map_sub ψ φ := by rw [← L.qvec_sub, ← L.qvec_sub]; exact U.map_sub ψ φ
+
+/-- Every `Qrom` adversary is a block adversary with the same initial state and gates. -/
+def QromRuntimeLaws.toBlockAdv (L : QromRuntimeLaws) {n w cardAnc Q : Nat}
+    (A : QuantumAdv n w cardAnc Q) : BlockAdv n w cardAnc Q where
+  init := A.init
+  steps i := L.toBlockGate (A.steps i)
+
+theorem QromRuntimeLaws.advStateAt_eq (L : QromRuntimeLaws) {n w cardAnc Q : Nat}
+    (A : QuantumAdv n w cardAnc Q) (H : Fin n → BitVec w) :
+    ∀ (t : Nat) (ht : t ≤ Q), advStateAt A H t ht = blockAdvStateAt (L.toBlockAdv A) H t ht
+  | 0, h0 => L.adv_zero A H h0
+  | t + 1, ht => by
+    rw [L.adv_succ A H t ht, L.oracle_xor, QromRuntimeLaws.advStateAt_eq L A H t
+      (Nat.le_of_succ_le ht)]
+    rfl
+
+/-- `fourier_coherent_support` of `Qrom.lean` for `QuantumAdv n w …` with `w` arbitrary. -/
+theorem qrom_block_fourier_coherent_support (L : QromRuntimeLaws) {n w cardAnc Q : Nat}
+    (A : QuantumAdv n w cardAnc Q) (t : Nat) (ht : t ≤ Q) (d : BlockTable w n)
+    (hd : t < blockWeight w n d) :
+    fourierBlockState (fun h => advStateAt A (blockOracle w n h) t ht) d =
+      QVec.zero n w cardAnc := by
+  have hfun : (fun h => advStateAt A (blockOracle w n h) t ht) =
+      fun h => blockAdvStateAt (L.toBlockAdv A) (blockOracle w n h) t ht :=
+    funext fun h => L.advStateAt_eq A (blockOracle w n h) t ht
+  rw [hfun, L.qvec_zero]
+  exact block_fourier_coherent_support (L.toBlockAdv A) t ht d hd
+
+/-- The deployed width: the support cap for `Qrom` adversaries with 256-bit answers. -/
+theorem qrom_block256_fourier_coherent_support (L : QromRuntimeLaws) {n cardAnc Q : Nat}
+    (A : QuantumAdv n 256 cardAnc Q) (t : Nat) (ht : t ≤ Q) (d : BlockTable 256 n)
+    (hd : t < blockWeight 256 n d) :
+    fourierBlockState (fun h => advStateAt A (blockOracle 256 n h) t ht) d =
+      QVec.zero n 256 cardAnc :=
+  qrom_block_fourier_coherent_support L A t ht d hd
+
+/-- Defining equations of the one-bit Fourier objects of `Qrom.lean`. -/
+structure QromBitTableLaws : Prop where
+  walsh_zero : ∀ (f : OracleBitTable 0 → GaussInt) (u : OracleBitTable 0),
+    oracleWalsh 0 f u = f ()
+  walsh_succ : ∀ (n : Nat) (f : OracleBitTable (n + 1) → GaussInt) (b : Bool)
+    (d : OracleBitTable n), oracleWalsh (n + 1) f (b, d) =
+      if b then zsub (oracleWalsh n (fun h => f (false, h)) d)
+        (oracleWalsh n (fun h => f (true, h)) d)
+      else zadd (oracleWalsh n (fun h => f (false, h)) d)
+        (oracleWalsh n (fun h => f (true, h)) d)
+  fourier_state : ∀ {n cardAnc : Nat} (ψ : CoherentBitState n cardAnc) (d : OracleBitTable n),
+    fourierOracleState ψ d = fun x y a => oracleWalsh n (fun h => ψ h x y a) d
+  weight_zero : ∀ u : OracleBitTable 0, tableWeight 0 u = 0
+  weight_succ : ∀ (n : Nat) (b : Bool) (d : OracleBitTable n),
+    tableWeight (n + 1) (b, d) = (if b then 1 else 0) + tableWeight n d
+  bit_oracle_succ : ∀ (n : Nat) (b : Bool) (h : OracleBitTable n) (x : Fin (n + 1)),
+    tableBitOracle (n + 1) (b, h) x =
+      Fin.cases (if b then 1#1 else 0#1) (tableBitOracle n h) x
+
+/-- A one-bit table as a table of one-bit blocks. -/
+def liftBits : (n : Nat) → OracleBitTable n → BlockTable 1 n
+  | 0, _ => ()
+  | n + 1, (b, h) => ((b, ()), liftBits n h)
+
+def lowerBits : (n : Nat) → BlockTable 1 n → OracleBitTable n
+  | 0, _ => ()
+  | n + 1, ((b, _), h) => (b, lowerBits n h)
+
+theorem lowerBits_liftBits : ∀ (n : Nat) (h : OracleBitTable n), lowerBits n (liftBits n h) = h
+  | 0, () => rfl
+  | n + 1, (b, h) => by
+    show (b, lowerBits n (liftBits n h)) = (b, h)
+    rw [lowerBits_liftBits n h]
+
+theorem liftBits_lowerBits : ∀ (n : Nat) (h : BlockTable 1 n), liftBits n (lowerBits n h) = h
+  | 0, () => rfl
+  | n + 1, ((b, ()), h) => by
+    show ((b, ()), liftBits n (lowerBits n h)) = ((b, ()), h)
+    rw [liftBits_lowerBits n h]
+
+theorem QromBitTableLaws.walsh_eq (B : QromBitTableLaws) : ∀ (n : Nat)
+    (f : OracleBitTable n → GaussInt) (d : OracleBitTable n),
+    oracleWalsh n f d = blockWalsh 1 n (fun h => f (lowerBits n h)) (liftBits n d)
+  | 0, f, u => B.walsh_zero f u
+  | n + 1, f, (b, d) => by
+    rw [B.walsh_succ, QromBitTableLaws.walsh_eq B n (fun h => f (false, h)) d,
+      QromBitTableLaws.walsh_eq B n (fun h => f (true, h)) d]
+    cases b <;> rfl
+
+theorem QromBitTableLaws.weight_eq (B : QromBitTableLaws) : ∀ (n : Nat) (d : OracleBitTable n),
+    tableWeight n d = blockWeight 1 n (liftBits n d)
+  | 0, u => B.weight_zero u
+  | n + 1, (b, d) => by
+    rw [B.weight_succ, QromBitTableLaws.weight_eq B n d]
+    cases b <;> rfl
+
+theorem QromBitTableLaws.bit_oracle_eq (B : QromBitTableLaws) : ∀ (n : Nat)
+    (h : OracleBitTable n) (x : Fin n), tableBitOracle n h x = blockOracle 1 n (liftBits n h) x
+  | 0, _, x => x.elim0
+  | n + 1, (b, h), x => by
+    rw [B.bit_oracle_succ]
+    refine Fin.cases ?_ (fun j => ?_) x
+    · cases b <;> rfl
+    · exact QromBitTableLaws.bit_oracle_eq B n h j
+
+/-- **The one-bit statement is the `w = 1` instance.** This has the statement of
+    `Qsag.fourier_coherent_support` and is derived from `block_fourier_coherent_support` at
+    `w = 1`, not from the `Qrom` proof. -/
+theorem qrom_fourier_coherent_support_recovered (L : QromRuntimeLaws) (B : QromBitTableLaws)
+    {n cardAnc Q : Nat} (A : QuantumAdv n 1 cardAnc Q) (t : Nat) (ht : t ≤ Q)
+    (d : OracleBitTable n) (hd : t < tableWeight n d) :
+    fourierOracleState (fun h => advStateAt A (tableBitOracle n h) t ht) d =
+      QVec.zero n 1 cardAnc := by
+  rw [B.weight_eq] at hd
+  have hBlock := qrom_block_fourier_coherent_support L A t ht (liftBits n d) hd
+  rw [B.fourier_state, ← hBlock]
+  funext x y a
+  rw [B.walsh_eq]
+  show blockWalsh 1 n (fun h => advStateAt A (tableBitOracle n (lowerBits n h)) t ht x y a)
+      (liftBits n d) =
+    blockWalsh 1 n (fun h => advStateAt A (blockOracle 1 n h) t ht x y a) (liftBits n d)
+  have hO : ∀ h : BlockTable 1 n, tableBitOracle n (lowerBits n h) = blockOracle 1 n h := by
+    intro h
+    funext x'
+    rw [B.bit_oracle_eq, liftBits_lowerBits]
+  exact congrArg (fun F => blockWalsh 1 n F (liftBits n d))
+    (funext fun h => by rw [hO h])
+
+/-! ## §9 The law structures hold for `Qsag.Oracle.Qrom` -/
+
+theorem gaussZero_eq : GaussInt.zero = zzero := by rw [GaussInt.zero_def, zzero_eq]
+theorem gaussAdd_eq (z v : GaussInt) : GaussInt.add z v = zadd z v := by
+  rw [GaussInt.add_def, zadd_eq]
+theorem gaussSub_eq (z v : GaussInt) : GaussInt.sub z v = zsub z v := by
+  rw [GaussInt.sub_def, zsub_eq]
+
+theorem qromRuntimeLaws : QromRuntimeLaws where
+  qvec_zero n w cardAnc := by
+    funext x y a
+    rw [QVec.zero_apply, qzero_apply, gaussZero_eq]
+  qvec_sub ψ φ := by
+    funext x y a
+    rw [QVec.sub_apply, qsub_apply, gaussSub_eq]
+  oracle_xor H ψ := by
+    funext x y a
+    rw [oracleXor_apply, blockQuery_apply]
+  adv_zero A H h0 := advStateAt_zero A H h0
+  adv_succ A H t ht := advStateAt_succ A H t ht
+
+theorem qromBitTableLaws : QromBitTableLaws where
+  walsh_zero f u := oracleWalsh_zero f u
+  walsh_succ n f b d := by
+    rw [oracleWalsh_succ, gaussSub_eq, gaussAdd_eq]
+  fourier_state ψ d := by
+    funext x y a
+    exact fourierOracleState_apply ψ d x y a
+  weight_zero u := tableWeight_zero u
+  weight_succ n b d := tableWeight_succ n b d
+  bit_oracle_succ n b h x := tableBitOracle_succ n b h x
+
+/-- Block support for `Qsag.QuantumAdv`, any answer width. -/
+theorem quantumAdv_block_fourier_coherent_support {n w cardAnc Q : Nat}
+    (A : QuantumAdv n w cardAnc Q) (t : Nat) (ht : t ≤ Q) (d : BlockTable w n)
+    (hd : t < blockWeight w n d) :
+    fourierBlockState (fun h => advStateAt A (blockOracle w n h) t ht) d =
+      QVec.zero n w cardAnc :=
+  qrom_block_fourier_coherent_support qromRuntimeLaws A t ht d hd
+
+/-- The one-bit statement, from the block theorem at `w = 1`. -/
+theorem quantumAdv_fourier_coherent_support_from_block {n cardAnc Q : Nat}
+    (A : QuantumAdv n 1 cardAnc Q) (t : Nat) (ht : t ≤ Q) (d : OracleBitTable n)
+    (hd : t < tableWeight n d) :
+    fourierOracleState (fun h => advStateAt A (tableBitOracle n h) t ht) d =
+      QVec.zero n 1 cardAnc :=
+  qrom_fourier_coherent_support_recovered qromRuntimeLaws qromBitTableLaws A t ht d hd
+
+/-- The deployed answer width `w = 256`, for `Qsag.QuantumAdv`. -/
+theorem quantumAdv_block256_fourier_coherent_support {n cardAnc Q : Nat}
+    (A : QuantumAdv n 256 cardAnc Q) (t : Nat) (ht : t ≤ Q) (d : BlockTable 256 n)
+    (hd : t < blockWeight 256 n d) :
+    fourierBlockState (fun h => advStateAt A (blockOracle 256 n h) t ht) d =
+      QVec.zero n 256 cardAnc :=
+  qrom_block256_fourier_coherent_support qromRuntimeLaws A t ht d hd
+
+#verify_constructive
+  Qsag.BlockCompressedOracle.qromRuntimeLaws
+  Qsag.BlockCompressedOracle.qromBitTableLaws
+  Qsag.BlockCompressedOracle.quantumAdv_block_fourier_coherent_support
+  Qsag.BlockCompressedOracle.quantumAdv_block256_fourier_coherent_support
+  Qsag.BlockCompressedOracle.quantumAdv_fourier_coherent_support_from_block
+
+end Qsag.BlockCompressedOracle

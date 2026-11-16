@@ -54,6 +54,11 @@ def leb128Aux : Nat → Nat → List UInt8
     if n < 128 then [UInt8.ofNat n]
     else UInt8.ofNat (128 + n % 128) :: leb128Aux fuel (n / 128)
 
+theorem leb128Aux_zero (n : Nat) : leb128Aux 0 n = [UInt8.ofNat (n % 128)] := by rfl
+theorem leb128Aux_succ (fuel n : Nat) : leb128Aux (fuel + 1) n =
+    if n < 128 then [UInt8.ofNat n]
+    else UInt8.ofNat (128 + n % 128) :: leb128Aux fuel (n / 128) := by rfl
+
 /-- Canonical unsigned LEB128 encoding matching `push_leb128` in Rust. -/
 @[expose] def leb128 (n : Nat) : List UInt8 :=
   leb128Aux n n
@@ -244,12 +249,12 @@ structure KState where
 def zeroKState : KState :=
   ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩
 
-@[inline] def rotlK (x k j : UInt64) : UInt64 :=
+@[inline, expose] def rotlK (x k j : UInt64) : UInt64 :=
   (x <<< k) ||| (x >>> j)
 
 theorem rotlK_eq (x k j : UInt64) : rotlK x k j = ((x <<< k) ||| (x >>> j)) := by rfl
 
-@[inline] def thetaS (s : KState) : KState :=
+@[inline, expose] def thetaS (s : KState) : KState :=
   let c0 := s.a0 ^^^ s.a5 ^^^ s.a10 ^^^ s.a15 ^^^ s.a20
   let c1 := s.a1 ^^^ s.a6 ^^^ s.a11 ^^^ s.a16 ^^^ s.a21
   let c2 := s.a2 ^^^ s.a7 ^^^ s.a12 ^^^ s.a17 ^^^ s.a22
@@ -266,14 +271,14 @@ theorem rotlK_eq (x k j : UInt64) : rotlK x k j = ((x <<< k) ||| (x >>> j)) := b
    s.a15 ^^^ d0, s.a16 ^^^ d1, s.a17 ^^^ d2, s.a18 ^^^ d3, s.a19 ^^^ d4,
    s.a20 ^^^ d0, s.a21 ^^^ d1, s.a22 ^^^ d2, s.a23 ^^^ d3, s.a24 ^^^ d4⟩
 
-@[inline] def rhoPiS (s : KState) : KState :=
+@[inline, expose] def rhoPiS (s : KState) : KState :=
   ⟨s.a0, rotlK s.a6 44 20, rotlK s.a12 43 21, rotlK s.a18 21 43, rotlK s.a24 14 50,
    rotlK s.a3 28 36, rotlK s.a9 20 44, rotlK s.a10 3 61, rotlK s.a16 45 19, rotlK s.a22 61 3,
    rotlK s.a1 1 63, rotlK s.a7 6 58, rotlK s.a13 25 39, rotlK s.a19 8 56, rotlK s.a20 18 46,
    rotlK s.a4 27 37, rotlK s.a5 36 28, rotlK s.a11 10 54, rotlK s.a17 15 49, rotlK s.a23 56 8,
    rotlK s.a2 62 2, rotlK s.a8 55 9, rotlK s.a14 39 25, rotlK s.a15 41 23, rotlK s.a21 2 62⟩
 
-@[inline] def chiS (s : KState) : KState :=
+@[inline, expose] def chiS (s : KState) : KState :=
   ⟨s.a0 ^^^ ((~~~s.a1) &&& s.a2),
    s.a1 ^^^ ((~~~s.a2) &&& s.a3),
    s.a2 ^^^ ((~~~s.a3) &&& s.a4),
@@ -312,7 +317,7 @@ theorem chiWordBit_eq_keccakChiBit (w0 w1 w2 : UInt64) (i : Nat) (hi : i < 64) :
     BitVec.getLsbD_xor, BitVec.getLsbD_and, Constructive.getLsbD_not,
     hi, decide_true, Bool.true_and, keccakChiBit]
 
-@[inline] def roundS (s : KState) (rc : UInt64) : KState :=
+@[inline, expose] def roundS (s : KState) (rc : UInt64) : KState :=
   let m := chiS (rhoPiS (thetaS s))
   { m with a0 := m.a0 ^^^ rc }
 
@@ -326,7 +331,7 @@ def keccakRoundConstants : List UInt64 := [
 ]
 
 /-- Full 24-round `Keccak-f[1600]` permutation. -/
-def keccakF1600 (s : KState) : KState :=
+@[expose] def keccakF1600 (s : KState) : KState :=
   keccakRoundConstants.foldl roundS s
 
 theorem zeroKState_eq : zeroKState = ⟨0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩ := by rfl
@@ -377,6 +382,15 @@ theorem roundS_eq (s : KState) (rc : UInt64) :
     roundS s rc = let m := chiS (rhoPiS (thetaS s)); { m with a0 := m.a0 ^^^ rc } := by rfl
 
 theorem keccakF1600_eq (s : KState) : keccakF1600 s = keccakRoundConstants.foldl roundS s := by rfl
+
+theorem keccakRoundConstants_eq : keccakRoundConstants = ([
+  0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+  0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+  0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+  0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+  0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+  0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
+] : List UInt64) := by rfl
 
 theorem keccakRoundConstants_length : keccakRoundConstants.length = 24 := by rfl
 
@@ -1008,6 +1022,17 @@ theorem encodeString_length_short {s : List UInt8} (h : s.length < 32) :
     (encodeString s).length = 2 + s.length := by
   unfold encodeString
   rw [List.length_append, leftEncode_length_short (by omega)]
+
+/-! ### Exports for lane signing -/
+
+/-- An LEB128 encoding has at least one byte. -/
+theorem leb128_length_pos (n : Nat) : 0 < (leb128 n).length := by
+  unfold leb128
+  cases n with
+  | zero => exact Nat.zero_lt_one
+  | succ k =>
+    unfold leb128Aux
+    split <;> exact Nat.succ_pos _
 
 end Qsag
 end

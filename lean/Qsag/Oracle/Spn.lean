@@ -582,19 +582,19 @@ set_option autoImplicit false
 
 /-! ## 1. Rust arithmetic model -/
 
-/-- `pow7_plain` (`parallel_mpc.rs:510`): `x2 = x·x`, `x4 = x2·x2`, `(x·x2)·x4`. -/
+/-- `pow7_plain`: `x2 = x·x`, `x4 = x2·x2`, `(x·x2)·x4`. -/
 def rustPow7 (x : BitVec 128) : BitVec 128 :=
   let x2 := rustGf128Mul x x
   let x4 := rustGf128Mul x2 x2
   rustGf128Mul (rustGf128Mul x x2) x4
 
-/-- One iteration of the loop in `algebraic_step_plain` (`parallel_mpc.rs:529-538`). -/
+/-- One iteration of the loop in `algebraic_step_plain`. -/
 def rustSpnRound (rc st : BitVec 128 × BitVec 128) : BitVec 128 × BitVec 128 :=
   let x7 := rustPow7 (st.1 ^^^ rc.1)
   let y7 := rustPow7 (st.2 ^^^ rc.2)
   (x7 ^^^ rustGf128Mul y7 gf128MdsAPolyBits, y7 ^^^ rustGf128Mul x7 gf128MdsBPolyBits)
 
-/-- The first `r` loop iterations; `rcs round` is `round_constants(c0, c1, round)`. -/
+/-- The first `r` loop iterations; `rcs round` is `round_constants(c0, c1)[round]`. -/
 def rustSpnIter (rcs : Nat → BitVec 128 × BitVec 128) :
     Nat → BitVec 128 × BitVec 128 → BitVec 128 × BitVec 128
   | 0, st => st
@@ -946,12 +946,12 @@ theorem rustU128ToLeBytes_fromLeBytes (bs : List UInt8) (hLen : bs.length = 16) 
   rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hLt]
   exact hRound
 
-/-- `bytes32_to_lanes` (`parallel_mpc.rs:495`): lane 0 from bytes `0..16`, lane 1 from
+/-- `bytes32_to_lanes`: lane 0 from bytes `0..16`, lane 1 from
     bytes `16..32`. -/
 def rustBytes32ToLanes (b : List UInt8) : BitVec 128 × BitVec 128 :=
   (rustU128FromLeBytes (b.take 16), rustU128FromLeBytes (b.drop 16))
 
-/-- `lanes_to_bytes32` (`parallel_mpc.rs:503`). -/
+/-- `lanes_to_bytes32`. -/
 def rustLanesToBytes32 (l : BitVec 128 × BitVec 128) : List UInt8 :=
   rustU128ToLeBytes l.1 ++ rustU128ToLeBytes l.2
 
@@ -992,61 +992,77 @@ theorem rustLanesToBytes32_bytes32ToLanes (b : List UInt8) (hLen : b.length = 32
 
 /-! ## 6. `round_constants`, `derive_chain_tweak` and `parallel_chain_step` framing
 
-The 32-byte hash is a parameter `hash32 customization frames`. Rust uses
-`cshake256_framed_32`, modelled by `cshake256FramedBytes` in `ThresholdMlDsaAndToprf`; that
-module is not imported here and nothing below depends on properties of the hash. -/
+The framed extendable-output function is a parameter `framedXof customization frames outLen`.
+Rust uses `cshake256_framed_xof` (`qsag-accel/src/keccak.rs`); `cshake256_framed_32` is the same
+function at `outLen = 32`. Nothing below depends on properties of the function.
 
-/-- ASCII `QSAG.PSFTS.POW7_ROUND.V4`. -/
-def spnPow7RoundCustomization : List UInt8 :=
+Round constants (`round_constants`, label `POW7_ROUNDS.V5`): ONE stream of `SPN_ROUNDS * 32`
+bytes is squeezed from the frames `c0`, `c1`, `SPN_ROUNDS as u32`, and round `i` reads bytes
+`[32 i, 32 i + 32)` of it. The round index is not absorbed. -/
+
+/-- ASCII `QSAG.PSFTS.POW7_ROUNDS.V5` (25 bytes). -/
+def spnPow7RoundsCustomization : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2e, 0x50, 0x4f, 0x57, 0x37,
-   0x5f, 0x52, 0x4f, 0x55, 0x4e, 0x44, 0x2e, 0x56, 0x34]
+   0x5f, 0x52, 0x4f, 0x55, 0x4e, 0x44, 0x53, 0x2e, 0x56, 0x35]
+
+/-- The `SPN_ROUNDS * 32`-byte stream of `round_constants(c0, c1)`. -/
+def rustSpnRoundConstantStream (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (c : BitVec 128 × BitVec 128) : List UInt8 :=
+  framedXof spnPow7RoundsCustomization
+    [rustU128ToLeBytes c.1, rustU128ToLeBytes c.2, be 4 spnRounds] (spnRounds * 32)
 
 /-- ASCII `QSAG.PSFTS.CHAIN_TWK.V2`. -/
 def spnChainTweakCustomization : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2e, 0x43, 0x48, 0x41, 0x49,
    0x4e, 0x5f, 0x54, 0x57, 0x4b, 0x2e, 0x56, 0x32]
 
-/-- `round_constants(c0, c1, round)` (`parallel_mpc.rs:516`): frames `c0.to_le_bytes()`,
-    `c1.to_le_bytes()`, `(round as u32).to_be_bytes()`. -/
-def rustSpnRoundConstants (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+/-- `round_constants(c0, c1)[round]`: the `round`-th 32-byte chunk of the stream, read as two
+    little-endian lanes. -/
+def rustSpnRoundConstants (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (c : BitVec 128 × BitVec 128) (round : Nat) : BitVec 128 × BitVec 128 :=
-  rustBytes32ToLanes (hash32 spnPow7RoundCustomization
-    [rustU128ToLeBytes c.1, rustU128ToLeBytes c.2, be 4 round])
+  rustBytes32ToLanes (((rustSpnRoundConstantStream framedXof c).drop (32 * round)).take 32)
 
-/-- `derive_chain_tweak` (`parallel_mpc.rs:552`): frames `pk_seed`, `epoch` (u32 BE),
-    `chain_idx` (u16 BE), `[step]`. -/
-def rustDeriveChainTweak (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+theorem rustSpnRoundConstants_eq (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (c : BitVec 128 × BitVec 128) (round : Nat) :
+    rustSpnRoundConstants framedXof c round =
+      rustBytes32ToLanes (((framedXof spnPow7RoundsCustomization
+        [rustU128ToLeBytes c.1, rustU128ToLeBytes c.2, be 4 spnRounds]
+        (spnRounds * 32)).drop (32 * round)).take 32) := by rfl
+
+/-- `derive_chain_tweak`: frames `pk_seed`, `epoch` (u32 BE), `chain_idx` (u16 BE), `[step]`;
+    32 output bytes. -/
+def rustDeriveChainTweak (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) : BitVec 128 × BitVec 128 :=
-  rustBytes32ToLanes (hash32 spnChainTweakCustomization
-    [pkSeed, be 4 epoch, be 2 chainIdx, [step]])
+  rustBytes32ToLanes (framedXof spnChainTweakCustomization
+    [pkSeed, be 4 epoch, be 2 chainIdx, [step]] 32)
 
-/-- `parallel_chain_step` (`parallel_mpc.rs:585`) on 32-byte chain nodes. -/
-def rustParallelChainStep (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+/-- `parallel_chain_step` on 32-byte chain nodes. -/
+def rustParallelChainStep (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) (cur : List UInt8) :
     List UInt8 :=
   rustLanesToBytes32
     (rustAlgebraicStep
-      (rustSpnRoundConstants hash32 (rustDeriveChainTweak hash32 pkSeed epoch chainIdx step))
+      (rustSpnRoundConstants framedXof (rustDeriveChainTweak framedXof pkSeed epoch chainIdx step))
       (rustBytes32ToLanes cur))
 
-/-- **Byte-level chain step = framed tower Davies–Meyer**, for any hash and any bytes. -/
+/-- **Byte-level chain step = framed tower Davies–Meyer**, for any framed XOF and any bytes. -/
 theorem rustParallelChainStep_eq_tower
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) (cur : List UInt8) :
-    rustParallelChainStep hash32 pkSeed epoch chainIdx step cur =
+    rustParallelChainStep framedXof pkSeed epoch chainIdx step cur =
       rustLanesToBytes32 (psiTower128Pair
         (spnDaviesMeyer48 gf128MdsATower gf128MdsBTower
           (fun i => polyToTower128Pair
-            (rustSpnRoundConstants hash32
-              (rustDeriveChainTweak hash32 pkSeed epoch chainIdx step) i))
+            (rustSpnRoundConstants framedXof
+              (rustDeriveChainTweak framedXof pkSeed epoch chainIdx step) i))
           (polyToTower128Pair (rustBytes32ToLanes cur)))) := by
   unfold rustParallelChainStep
   rw [rustAlgebraicStep_eq_tower]
 
 theorem rustParallelChainStep_length
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) (cur : List UInt8) :
-    (rustParallelChainStep hash32 pkSeed epoch chainIdx step cur).length = 32 :=
+    (rustParallelChainStep framedXof pkSeed epoch chainIdx step cur).length = 32 :=
   rustLanesToBytes32_length _
 
 
@@ -3099,41 +3115,41 @@ structure PublicChainAddress where
 /-- The family is indexed by the DERIVED tweak. Different addresses need not produce
 independent permutations, nor even different tweaks. cSHAKE remains an explicit parameter. -/
 def publicChainPermutation
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (address : PublicChainAddress) : PublicPermutation PublicSpnState :=
-  rustPublicSpn (rustSpnRoundConstants hash32
-    (rustDeriveChainTweak hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step))
+  rustPublicSpn (rustSpnRoundConstants framedXof
+    (rustDeriveChainTweak framedXof address.pkSeed address.epoch.val address.chainIdx.val address.step))
 
 /-- Exact lane framing and full-output connection to the deployed chain transcription. -/
 theorem rustParallelChainStep_eq_publicFeedForward
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (address : PublicChainAddress) (cur : List UInt8) :
-    rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step cur =
-      rustLanesToBytes32 (publicSpnFeedForward (publicChainPermutation hash32 address)
+    rustParallelChainStep framedXof address.pkSeed address.epoch.val address.chainIdx.val address.step cur =
+      rustLanesToBytes32 (publicSpnFeedForward (publicChainPermutation framedXof address)
         (rustBytes32ToLanes cur)) := by
   simp only [rustParallelChainStep, publicSpnFeedForward, publicChainPermutation, rustPublicSpn, rustAlgebraicStep]
 
 /-- Chain composition preserves the per-position public address. There is no implicit
 fixed-permutation iteration: each step may derive different round constants. -/
 def publicChainRun
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8) :
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8) :
     List PublicChainAddress → PublicSpnState → PublicSpnState
   | [], x => x
-  | address :: rest, x => publicChainRun hash32 rest
-      (publicSpnFeedForward (publicChainPermutation hash32 address) x)
+  | address :: rest, x => publicChainRun framedXof rest
+      (publicSpnFeedForward (publicChainPermutation framedXof address) x)
 
 def rustPublicChainRun
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8) :
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8) :
     List PublicChainAddress → List UInt8 → List UInt8
   | [], bytes => bytes
-  | address :: rest, bytes => rustPublicChainRun hash32 rest
-      (rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step bytes)
+  | address :: rest, bytes => rustPublicChainRun framedXof rest
+      (rustParallelChainStep framedXof address.pkSeed address.epoch.val address.chainIdx.val address.step bytes)
 
 theorem publicChainRun_bytes
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8)
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
     (addresses : List PublicChainAddress) (x : PublicSpnState) :
-    rustPublicChainRun hash32 addresses (rustLanesToBytes32 x) =
-      rustLanesToBytes32 (publicChainRun hash32 addresses x) := by
+    rustPublicChainRun framedXof addresses (rustLanesToBytes32 x) =
+      rustLanesToBytes32 (publicChainRun framedXof addresses x) := by
   induction addresses generalizing x with
   | nil => rfl
   | cons address rest ih =>
@@ -3149,9 +3165,9 @@ theorem publicSpnFeedForward_fixedPoint (p : PublicPermutation PublicSpnState) :
   simp only [BitVec.zero_xor]
 
 theorem publicChain_fixedPoint_bytes
-    (hash32 : List UInt8 → List (List UInt8) → List UInt8) (address : PublicChainAddress) :
-    let node := rustLanesToBytes32 ((publicChainPermutation hash32 address).inverse (0#128, 0#128))
-    rustParallelChainStep hash32 address.pkSeed address.epoch.val address.chainIdx.val address.step node = node := by
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8) (address : PublicChainAddress) :
+    let node := rustLanesToBytes32 ((publicChainPermutation framedXof address).inverse (0#128, 0#128))
+    rustParallelChainStep framedXof address.pkSeed address.epoch.val address.chainIdx.val address.step node = node := by
   dsimp only
   rw [rustParallelChainStep_eq_publicFeedForward, rustBytes32ToLanes_lanesToBytes32,
     publicSpnFeedForward_fixedPoint]
