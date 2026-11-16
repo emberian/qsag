@@ -52,6 +52,11 @@ def unit_vectors(fx, out):
         for _ in range(3000):
             a, b = rnd.getrandbits(128), rnd.getrandbits(128)
             f.write(f"{a:032x} {b:032x} {R.gf128_mul(a, b):032x}\n")
+        # every pair of basis elements: with the multiplier bilinear by construction (AND gates only
+        # between an XOR of a-bits and an XOR of b-bits), agreement here is agreement everywhere
+        for i in range(128):
+            for j in range(128):
+                f.write(f"{1 << i:032x} {1 << j:032x} {R.gf128_mul(1 << i, 1 << j):032x}\n")
         for a, b in [(0, 5), (1, 2**127), (2**127, 2**127), (2**128 - 1, 2**128 - 1), (2, 2**127)]:
             f.write(f"{a:032x} {b:032x} {R.gf128_mul(a, b):032x}\n")
     with open(f"{out}/gftower.hex", "w") as f:
