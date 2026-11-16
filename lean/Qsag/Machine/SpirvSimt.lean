@@ -1035,3 +1035,953 @@ def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
   | 254, [v] => .ok (.opReturnValue v)
   | _, _ => .error (.malformedSection "unknown body instruction")
 
+theorem decodeInstRaw_encode (i : SpirvInst) :
+    decodeInstRaw (encodeInstRaw i) = .ok i := by
+  cases i with
+  | opVariable ty res sc init =>
+    cases sc <;> cases init <;> rfl
+  | _ => rfl
+
+def encodeParamRaw (p : UInt32 × UInt32) : RawSpirvInst := ⟨55, [p.1, p.2]⟩
+
+def decodeParamRaw (r : RawSpirvInst) : Except SpirvDecodeError (UInt32 × UInt32) :=
+  match r.opcode, r.operands with
+  | 55, [ty, res] => .ok (ty, res)
+  | _, _ => .error (.malformedSection "expected OpFunctionParameter")
+
+theorem decodeParamRaw_encode (p : UInt32 × UInt32) :
+    decodeParamRaw (encodeParamRaw p) = .ok p := by
+  cases p; rfl
+
+/-- Lower function definitions into raw instructions in binary order. -/
+def encodeFunctionsRaw : List SpirvFunction → List RawSpirvInst
+  | [] => []
+  | f :: fs =>
+    ⟨54, [f.resultTyId, f.funcId, f.control, f.funcTyId]⟩ ::
+      (f.params.map encodeParamRaw ++
+        (f.body.map encodeInstRaw ++ (⟨56, []⟩ :: encodeFunctionsRaw fs)))
+
+/-- Lower a `SpirvModule` into its sequence of `RawSpirvInst`s following the 5-word header. -/
+def moduleToRawInsts (m : SpirvModule) : List RawSpirvInst :=
+  m.capabilities.map encodeCapabilityRaw ++
+  (m.extInstImports.map encodeExtInstImportRaw ++
+  (⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ ::
+   ⟨15, spirvExecModelGLCompute :: m.entryFuncId :: spirvMainWord0 :: spirvMainWord1 ::
+     m.interfaceIds⟩ ::
+  (m.execModes.map (encodeExecModeRaw m.entryFuncId) ++
+  (m.debug.map encodeDebugRaw ++
+  (m.annotations.map encodeAnnotationRaw ++
+  (m.tyGlobals.map encodeTyGlobalRaw ++
+   encodeFunctionsRaw m.functions))))))
+
+/-- Decidable well-formedness of a `SpirvModule`: non-zero id bound and every instruction
+    fits lossless 16-bit word-count framing. -/
+def WellFormedSpirvModule (m : SpirvModule) : Bool :=
+  decide (0 < m.idBound.toNat) && (moduleToRawInsts m).all RawSpirvInst.wf
+
+/-- Encode a `SpirvModule` into its exact binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
+def encodeSpirvModuleWords (m : SpirvModule) : List UInt32 :=
+  [spirvMagic, m.version.toWord, m.generator, m.idBound, 0] ++
+  encodeRawInstList (moduleToRawInsts m)
+
+def encodeSpirvModule (m : SpirvModule) : Array UInt32 :=
+  (encodeSpirvModuleWords m).toArray
+
+private def splitByOp (pred : Nat → Bool) : List RawSpirvInst → List RawSpirvInst × List RawSpirvInst
+  | [] => ([], [])
+  | r :: rs =>
+    if pred r.opcode then
+      let (ys, zs) := splitByOp pred rs
+      (r :: ys, zs)
+    else
+      ([], r :: rs)
+
+private theorem splitByOp_append {pred : Nat → Bool} {xs ys : List RawSpirvInst}
+    (hxs : ∀ x ∈ xs, pred x.opcode = true)
+    (hys : match ys with | [] => True | y :: _ => pred y.opcode = false) :
+    splitByOp pred (xs ++ ys) = (xs, ys) := by
+  induction xs with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys =>
+      simp only [List.nil_append, splitByOp]
+      simp [hys]
+  | cons x xs ih =>
+    have hx : pred x.opcode = true := hxs x (.head _)
+    have hrest : ∀ z ∈ xs, pred z.opcode = true := fun z hz => hxs z (.tail _ hz)
+    simp only [List.cons_append, splitByOp, hx, ↓reduceIte, ih hrest]
+
+private def mapExcept {α β : Type} (f : α → Except SpirvDecodeError β) :
+    List α → Except SpirvDecodeError (List β)
+  | [] => .ok []
+  | x :: xs =>
+    match f x, mapExcept f xs with
+    | .ok y, .ok ys => .ok (y :: ys)
+    | .error e, _ => .error e
+    | .ok _, .error e => .error e
+
+private theorem mapExcept_map_ok {α β : Type} (enc : β → α)
+    (dec : α → Except SpirvDecodeError β) (hRound : ∀ b, dec (enc b) = .ok b) :
+    ∀ bs : List β, mapExcept dec (bs.map enc) = .ok bs
+  | [] => rfl
+  | b :: bs => by
+    simp [mapExcept, hRound b, mapExcept_map_ok enc dec hRound bs]
+
+/-- Split the maximal `pred`-prefix off a raw instruction list and decode every member. -/
+private def takeSection {β : Type} (pred : Nat → Bool)
+    (dec : RawSpirvInst → Except SpirvDecodeError β) (raws : List RawSpirvInst) :
+    Except SpirvDecodeError (List β × List RawSpirvInst) :=
+  match mapExcept dec (splitByOp pred raws).1 with
+  | .ok ys => .ok (ys, (splitByOp pred raws).2)
+  | .error e => .error e
+
+/-- The head (if any) of a raw instruction list fails `pred`. -/
+private def HeadFails (pred : Nat → Bool) : List RawSpirvInst → Prop
+  | [] => True
+  | y :: _ => pred y.opcode = false
+
+private theorem headFails_append {pred : Nat → Bool} {xs ys : List RawSpirvInst}
+    (hxs : ∀ x ∈ xs, pred x.opcode = false) (hys : HeadFails pred ys) :
+    HeadFails pred (xs ++ ys) := by
+  cases xs with
+  | nil => exact hys
+  | cons x xs => exact hxs x (.head _)
+
+private theorem headFails_map {β : Type} {pred : Nat → Bool} (enc : β → RawSpirvInst)
+    (h : ∀ b, pred (enc b).opcode = false) (bs : List β) {ys : List RawSpirvInst}
+    (hys : HeadFails pred ys) : HeadFails pred (bs.map enc ++ ys) :=
+  headFails_append (by intro x hx; obtain ⟨b, _, rfl⟩ := List.mem_map.mp hx; exact h b) hys
+
+private theorem takeSection_encode {β : Type} {pred : Nat → Bool}
+    {dec : RawSpirvInst → Except SpirvDecodeError β} (enc : β → RawSpirvInst)
+    (hPred : ∀ b, pred (enc b).opcode = true) (hRound : ∀ b, dec (enc b) = .ok b)
+    (bs : List β) {ys : List RawSpirvInst} (hys : HeadFails pred ys) :
+    takeSection pred dec (bs.map enc ++ ys) = .ok (bs, ys) := by
+  have hSplit : splitByOp pred (bs.map enc ++ ys) = (bs.map enc, ys) :=
+    splitByOp_append
+      (by intro x hx; obtain ⟨b, _, rfl⟩ := List.mem_map.mp hx; exact hPred b)
+      (by cases ys <;> first | trivial | exact hys)
+  simp [takeSection, hSplit, mapExcept_map_ok enc dec hRound bs]
+
+/-- Fuel-totalized parser for the function-definition section. -/
+def parseFunctionsAux : Nat → List RawSpirvInst → Except SpirvDecodeError (List SpirvFunction)
+  | _, [] => .ok []
+  | 0, _ :: _ => .error (.malformedSection "function section fuel exhausted")
+  | fuel + 1, hd :: rest =>
+    match hd.opcode, hd.operands with
+    | 54, [retTy, fnId, ctrl, fnTy] =>
+      match takeSection (· == 55) decodeParamRaw rest with
+      | .error e => .error e
+      | .ok (params, r1) =>
+        match takeSection isBodyOpcode decodeInstRaw r1 with
+        | .error e => .error e
+        | .ok (body, r2) =>
+          match r2 with
+          | ⟨56, []⟩ :: r3 =>
+            match parseFunctionsAux fuel r3 with
+            | .ok fs => .ok (⟨retTy, fnId, ctrl, fnTy, params, body⟩ :: fs)
+            | .error e => .error e
+          | _ => .error (.malformedSection "expected OpFunctionEnd")
+    | _, _ => .error (.malformedSection "expected OpFunction")
+
+private theorem parseFunctionsAux_encode :
+    ∀ (fs : List SpirvFunction) (fuel : Nat), (encodeFunctionsRaw fs).length ≤ fuel →
+      parseFunctionsAux fuel (encodeFunctionsRaw fs) = .ok fs
+  | [], fuel, _ => by cases fuel <;> rfl
+  | f :: fs, fuel, hFuel => by
+    cases fuel with
+    | zero => simp [encodeFunctionsRaw] at hFuel
+    | succ fuel =>
+      have hLen : (encodeFunctionsRaw fs).length ≤ fuel := by
+        simp only [encodeFunctionsRaw, List.length_cons, List.length_append,
+          List.length_map] at hFuel
+        omega
+      have hParams := takeSection_encode (pred := (· == 55)) (dec := decodeParamRaw)
+        encodeParamRaw (fun _ => rfl) decodeParamRaw_encode f.params
+        (ys := f.body.map encodeInstRaw ++ (⟨56, []⟩ :: encodeFunctionsRaw fs))
+        (headFails_map encodeInstRaw (by intro i; cases i <;> rfl) f.body
+          (ys := ⟨56, []⟩ :: encodeFunctionsRaw fs) rfl)
+      have hBody := takeSection_encode (pred := isBodyOpcode) (dec := decodeInstRaw)
+        encodeInstRaw (by intro i; cases i <;> rfl) decodeInstRaw_encode f.body
+        (ys := ⟨56, []⟩ :: encodeFunctionsRaw fs) rfl
+      simp only [encodeFunctionsRaw, parseFunctionsAux, hParams, hBody,
+        parseFunctionsAux_encode fs fuel hLen]
+
+/-- Decode a `SpirvModule` from its binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
+def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError SpirvModule :=
+  match words with
+  | magic :: ver :: gen :: bound :: schema :: instWords =>
+    if magic != spirvMagic then
+      .error (.badMagic magic)
+    else
+      match SpirvVersion.ofWord? ver with
+      | none => .error (.badVersion ver)
+      | some parsedVer =>
+        if schema != 0 then
+          .error (.badSchema schema)
+        else if bound.toNat == 0 then
+          .error .zeroIdBound
+        else
+          match parseRawInstStream instWords with
+          | .error e => .error e
+          | .ok raws =>
+            match takeSection (· == 17) decodeCapabilityRaw raws with
+            | .error e => .error e
+            | .ok (caps, r0) =>
+            match takeSection (· == 11) decodeExtInstImportRaw r0 with
+            | .error e => .error e
+            | .ok (exts, r1) =>
+            match r1 with
+            | ⟨14, [addrW, memW]⟩ :: ⟨15, epModel :: entryFuncId :: m0 :: m1 :: ifaceIds⟩ :: r2 =>
+              if epModel != spirvExecModelGLCompute || m0 != spirvMainWord0 || m1 != spirvMainWord1 then
+                .error (.malformedSection "bad OpEntryPoint header")
+              else
+                match SpirvAddressingModel.ofWord? addrW, SpirvMemoryModelKind.ofWord? memW with
+                | some addrM, some memM =>
+                  match takeSection (· == 16) (decodeExecModeRaw entryFuncId) r2 with
+                  | .error e => .error e
+                  | .ok (ems, r3) =>
+                  match takeSection isDebugOpcode decodeDebugRaw r3 with
+                  | .error e => .error e
+                  | .ok (dbg, r4) =>
+                  match takeSection isAnnotationOpcode decodeAnnotationRaw r4 with
+                  | .error e => .error e
+                  | .ok (anns, r5) =>
+                  match takeSection isTyGlobalOpcode decodeTyGlobalRaw r5 with
+                  | .error e => .error e
+                  | .ok (tgs, r6) =>
+                  match parseFunctionsAux r6.length r6 with
+                  | .error e => .error e
+                  | .ok fns =>
+                    .ok {
+                      version := parsedVer
+                      generator := gen
+                      idBound := bound
+                      capabilities := caps
+                      extInstImports := exts
+                      addrModel := addrM
+                      memModel := memM
+                      entryFuncId := entryFuncId
+                      interfaceIds := ifaceIds
+                      execModes := ems
+                      debug := dbg
+                      annotations := anns
+                      tyGlobals := tgs
+                      functions := fns
+                    }
+                | _, _ => .error (.malformedSection "bad OpMemoryModel operands")
+            | _ => .error (.malformedSection "expected OpMemoryModel; OpEntryPoint")
+  | _ => .error .truncatedHeader
+
+def decodeSpirvModule (words : Array UInt32) : Except SpirvDecodeError SpirvModule :=
+  decodeSpirvModuleWords words.toList
+
+private theorem headFails_functions {pred : Nat → Bool} (h54 : pred 54 = false)
+    (fs : List SpirvFunction) : HeadFails pred (encodeFunctionsRaw fs) := by
+  cases fs with
+  | nil => trivial
+  | cons f fs => exact h54
+
+/-- Lossless roundtrip of binary SPIR-V 1.5/1.6 encoding for well-formed compute modules. -/
+theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
+    (hm : WellFormedSpirvModule m = true) :
+    decodeSpirvModule (encodeSpirvModule m) = .ok m := by
+  unfold WellFormedSpirvModule at hm
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hm
+  have hBoundNe0 : (m.idBound.toNat == 0) = false := by
+    have := hm.1; simp; omega
+  change decodeSpirvModuleWords (encodeSpirvModuleWords m) = .ok m
+  unfold encodeSpirvModuleWords decodeSpirvModuleWords
+  simp only [List.cons_append, List.nil_append, bne_self_eq_false, Bool.false_eq_true,
+    ↓reduceIte, SpirvVersion.ofWord?_toWord, hBoundNe0]
+  rw [parseRawInstStream_encodeRawInstList hm.2]
+  dsimp only
+  unfold moduleToRawInsts
+  have hFn : ∀ pred : Nat → Bool, pred 54 = false →
+      HeadFails pred (encodeFunctionsRaw m.functions) :=
+    fun pred h => headFails_functions h m.functions
+  have hTg : ∀ pred : Nat → Bool, pred 54 = false →
+      (∀ x : SpirvTyGlobal, pred (encodeTyGlobalRaw x).opcode = false) →
+      HeadFails pred (m.tyGlobals.map encodeTyGlobalRaw ++ encodeFunctionsRaw m.functions) :=
+    fun pred h54 h => headFails_map encodeTyGlobalRaw h m.tyGlobals (hFn pred h54)
+  have hAnnOp : ∀ a : SpirvAnnotation, (encodeAnnotationRaw a).opcode = 71 ∨
+      (encodeAnnotationRaw a).opcode = 72 := by
+    intro a; cases a with
+    | decorate d => exact .inl rfl
+    | memberDecorate _ _ _ => exact .inr rfl
+  have hDbgOp : ∀ d : SpirvDebugDecl, isDebugOpcode (encodeDebugRaw d).opcode = true := by
+    intro d; cases d <;> rfl
+  rw [takeSection_encode (pred := fun x => x == 17) encodeCapabilityRaw (fun _ => rfl) decodeCapabilityRaw_encode
+    m.capabilities
+    (headFails_map (pred := fun x => x == 17) encodeExtInstImportRaw (fun _ => rfl) m.extInstImports (ys := ⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ :: _) rfl)]
+  dsimp only
+  rw [takeSection_encode (pred := fun x => x == 11) encodeExtInstImportRaw (fun _ => rfl) decodeExtInstImportRaw_encode
+    m.extInstImports (ys := ⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ :: _) rfl]
+  simp only [bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
+    SpirvAddressingModel.ofWord?_toWord, SpirvMemoryModelKind.ofWord?_toWord]
+  rw [takeSection_encode (encodeExecModeRaw m.entryFuncId)
+    (by intro em; cases em <;> rfl) (decodeExecModeRaw_encode m.entryFuncId) m.execModes
+    (headFails_map encodeDebugRaw (by intro d; cases d <;> rfl) m.debug
+      (headFails_map encodeAnnotationRaw
+        (by intro a; rcases hAnnOp a with h | h <;> simp [h]) m.annotations
+        (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl))))]
+  dsimp only
+  rw [takeSection_encode encodeDebugRaw hDbgOp decodeDebugRaw_encode m.debug
+    (headFails_map encodeAnnotationRaw
+      (by intro a; rcases hAnnOp a with h | h <;> simp [h, isDebugOpcode]) m.annotations
+      (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl)))]
+  dsimp only
+  rw [takeSection_encode encodeAnnotationRaw
+    (by intro a; rcases hAnnOp a with h | h <;> simp [h, isAnnotationOpcode])
+    decodeAnnotationRaw_encode m.annotations (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl))]
+  dsimp only
+  rw [takeSection_encode encodeTyGlobalRaw
+    (by intro x; cases x with
+        | ty t => cases t <;> rfl
+        | glob g => cases g <;> rfl)
+    decodeTyGlobalRaw_encode m.tyGlobals (hFn _ rfl)]
+  dsimp only
+  rw [parseFunctionsAux_encode m.functions _ (Nat.le_refl _)]
+
+/-- Injectivity of `encodeSpirvModule` on well-formed SPIR-V compute modules. -/
+theorem encodeSpirvModule_injective {m₁ m₂ : SpirvModule}
+    (h₁ : WellFormedSpirvModule m₁ = true) (h₂ : WellFormedSpirvModule m₂ = true)
+    (hEq : encodeSpirvModule m₁ = encodeSpirvModule m₂) : m₁ = m₂ := by
+  have d₁ := decodeSpirvModule_encodeSpirvModule h₁
+  have d₂ := decodeSpirvModule_encodeSpirvModule h₂
+  rw [hEq] at d₁
+  have hOk : Except.ok m₁ = (Except.ok m₂ : Except SpirvDecodeError SpirvModule) :=
+    d₁.symm.trans d₂
+  injection hOk
+
+
+/-! ## §2. Genuine Multi-Wave Wave32 Workgroup Operational Semantics (`64 KiB` Shared LDS) -/
+
+/-- Native RDNA2 Wave32 subgroup width (`32` SIMD lanes per wave). -/
+def wave32Lanes : Nat := 32
+
+/-- Full RDNA2 WGP `Workgroup` LDS capacity: `65,536` bytes (`64 KiB` = `16,384` `UInt32` dwords). -/
+def ldsCapacityBytes : Nat := 65536
+def ldsCapacityDwords : Nat := 16384
+
+theorem ldsCapacityBytes_eq_four_mul_dwords : ldsCapacityBytes = 4 * ldsCapacityDwords := by rfl
+
+/-- Multi-wave workgroup geometry (`numWaves * 32` threads, e.g. `numWaves = 8` -> `256` threads). -/
+structure WorkgroupConfig where
+  workgroupId : Nat
+  numWaves : Nat
+  wavesPos : 0 < numWaves
+  workgroupCount : Nat := 1
+
+def WorkgroupConfig.totalThreads (cfg : WorkgroupConfig) : Nat :=
+  cfg.numWaves * wave32Lanes
+
+def WorkgroupConfig.localTid (_cfg : WorkgroupConfig) (wave lane : Nat) : Nat :=
+  wave * wave32Lanes + lane
+
+def WorkgroupConfig.globalTid (cfg : WorkgroupConfig) (wave lane : Nat) : Nat :=
+  cfg.workgroupId * cfg.totalThreads + cfg.localTid wave lane
+
+/-- Typed runtime SSA values per SIMT lane. -/
+inductive SpirvVal where
+  | vUndef
+  | vBool (b : Bool)
+  | vU32 (v : UInt32)
+  | vU64 (v : UInt64)
+  | vPair32 (lo hi : UInt32)
+  | vPair64 (lo hi : UInt64)
+  | vPtr (sc : SpirvStorageClass) (binding : Nat) (elemIdx : Nat) (width : SpirvIntWidth)
+  deriving DecidableEq, Repr
+
+/-- Shared memory state across ALL waves of a workgroup:
+    - `lds` : persistent `64 KiB` (`16,384`-dword) `Workgroup` shared memory (never wiped between waves!)
+    - `ssbo` : global `StorageBuffer` descriptor bindings (`binding -> dwordOffset -> UInt32`)
+    - `pushConsts` : immutable public `PushConstant` dwords (`dwordOffset -> UInt32`). -/
+structure GpuMemState where
+  lds : Nat → UInt32
+  ssbo : Nat → Nat → UInt32
+  pushConsts : Nat → UInt32
+
+def writeFn {α : Type} (m : Nat → α) (idx : Nat) (val : α) : Nat → α :=
+  fun k => if k = idx then val else m k
+
+def writeSsboDword (ssbo : Nat → Nat → UInt32) (binding addr : Nat) (val : UInt32) :
+    Nat → Nat → UInt32 :=
+  fun b k => if b = binding ∧ k = addr then val else ssbo b k
+
+theorem writeFn_same {α : Type} (m : Nat → α) (idx : Nat) (val : α) :
+    writeFn m idx val idx = val := by
+  simp [writeFn]
+
+theorem writeFn_other {α : Type} (m : Nat → α) {idx k : Nat} (val : α) (hne : k ≠ idx) :
+    writeFn m idx val k = m k := by
+  simp [writeFn, hne]
+
+theorem writeFn_comm {α : Type} (m : Nat → α) {i₁ i₂ : Nat} (v₁ v₂ : α) (hne : i₁ ≠ i₂) :
+    writeFn (writeFn m i₁ v₁) i₂ v₂ = writeFn (writeFn m i₂ v₂) i₁ v₁ := by
+  funext k
+  unfold writeFn
+  by_cases h2 : k = i₂
+  · subst h2; simp [hne.symm]
+  · by_cases h1 : k = i₁
+    · subst h1; simp [h2]
+    · simp [h1, h2]
+
+theorem writeSsboDword_comm (ssbo : Nat → Nat → UInt32) {b₁ a₁ b₂ a₂ : Nat} (v₁ v₂ : UInt32)
+    (hne : (b₁, a₁) ≠ (b₂, a₂)) :
+    writeSsboDword (writeSsboDword ssbo b₁ a₁ v₁) b₂ a₂ v₂ =
+      writeSsboDword (writeSsboDword ssbo b₂ a₂ v₂) b₁ a₁ v₁ := by
+  funext b k
+  unfold writeSsboDword
+  split
+  · split
+    · rename_i h2 h1
+      exact False.elim (hne (Prod.ext (h1.1.symm.trans h2.1) (h1.2.symm.trans h2.2)))
+    · rfl
+  · split <;> rfl
+
+def readU64Dwords (f : Nat → UInt32) (elemIdx : Nat) : UInt64 :=
+  u64OfLoHi32 (f (2 * elemIdx)) (f (2 * elemIdx + 1))
+
+def writeU64Dwords (f : Nat → UInt32) (elemIdx : Nat) (v : UInt64) : Nat → UInt32 :=
+  writeFn (writeFn f (2 * elemIdx) (u64Lo32 v)) (2 * elemIdx + 1) (u64Hi32 v)
+
+theorem readU64Dwords_writeU64Dwords_same (f : Nat → UInt32) (idx : Nat) (v : UInt64) :
+    readU64Dwords (writeU64Dwords f idx v) idx = v := by
+  unfold readU64Dwords writeU64Dwords
+  rw [writeFn_other _ _ (by omega), writeFn_same, writeFn_same, u64OfLoHi32_lo_hi]
+
+theorem readU64Dwords_writeU64Dwords_other (f : Nat → UInt32) {idx k : Nat} (v : UInt64)
+    (hne : k ≠ idx) :
+    readU64Dwords (writeU64Dwords f idx v) k = readU64Dwords f k := by
+  unfold readU64Dwords writeU64Dwords
+  rw [writeFn_other _ _ (by omega), writeFn_other _ _ (by omega),
+      writeFn_other _ _ (by omega), writeFn_other _ _ (by omega)]
+
+def writeSsboU64 (ssbo : Nat → Nat → UInt32) (binding elemIdx : Nat) (v : UInt64) :
+    Nat → Nat → UInt32 :=
+  writeSsboDword (writeSsboDword ssbo binding (2 * elemIdx) (u64Lo32 v))
+    binding (2 * elemIdx + 1) (u64Hi32 v)
+
+theorem readSsboU64_writeSsboU64_same (ssbo : Nat → Nat → UInt32) (b idx : Nat) (v : UInt64) :
+    readU64Dwords (writeSsboU64 ssbo b idx v b) idx = v := by
+  unfold readU64Dwords writeSsboU64 writeSsboDword
+  have h : ¬ (2 * idx = 2 * idx + 1) := by omega
+  simp only [h, true_and, ite_false, ite_true, u64OfLoHi32_lo_hi]
+
+theorem readSsboU64_writeSsboU64_other_idx (ssbo : Nat → Nat → UInt32) (b : Nat) {idx k : Nat}
+    (v : UInt64) (hne : k ≠ idx) :
+    readU64Dwords (writeSsboU64 ssbo b idx v b) k = readU64Dwords (ssbo b) k := by
+  unfold readU64Dwords writeSsboU64 writeSsboDword
+  have h1 : ¬ (2 * k = 2 * idx + 1) := by omega
+  have h2 : ¬ (2 * k = 2 * idx) := by omega
+  have h4 : ¬ (2 * k + 1 = 2 * idx) := by omega
+  simp [h1, h2, h4]
+
+/-- Resolved static metadata of a `SpirvModule` for operational execution. -/
+structure SpirvModuleEnv where
+  intWidths : Nat → Option SpirvIntWidth
+  ptrInfo : Nat → Option (SpirvStorageClass × Nat × SpirvIntWidth)
+  initConst : Nat → SpirvVal
+  builtIns : Nat → Option SpirvBuiltIn
+
+/-- Initialize a lane's SSA register file with module constants and built-in invocation IDs. -/
+def initLaneRegs (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (wave lane : Nat) :
+    Nat → SpirvVal :=
+  fun ssaId =>
+    match env.builtIns ssaId with
+    | some .numWorkgroups => .vU32 (UInt32.ofNat cfg.workgroupCount)
+    | some .workgroupSize => .vU32 (UInt32.ofNat cfg.totalThreads)
+    | some .workgroupId => .vU32 (UInt32.ofNat cfg.workgroupId)
+    | some .localInvocationId => .vU32 (UInt32.ofNat (cfg.localTid wave lane))
+    | some .globalInvocationId => .vU32 (UInt32.ofNat (cfg.globalTid wave lane))
+    | some .localInvocationIndex => .vU32 (UInt32.ofNat (cfg.localTid wave lane))
+    | some .subgroupSize => .vU32 32
+    | some .subgroupId => .vU32 (UInt32.ofNat wave)
+    | some .subgroupLocalInvocationId => .vU32 (UInt32.ofNat lane)
+    | none =>
+      match env.ptrInfo ssaId with
+      | some (sc, binding, w) => .vPtr sc binding 0 w
+      | none => env.initConst ssaId
+
+/-- Runtime errors during multi-wave `SPIR-V` execution. -/
+inductive SimtExecError where
+  | typeMismatch
+  | ldsOutOfBounds (dwordAddr : Nat)
+  | unexpectedBarrierInEpoch
+  | barrierDivergence
+  deriving DecidableEq, Repr
+
+/-- Resolve a SPIR-V 32-bit constant `<id>` from `SpirvModuleEnv` (or treat `w` as an inline word
+    when `env.initConst w.toNat = .vUndef`). -/
+def resolveSpirvU32Const (env : SpirvModuleEnv) (w : UInt32) : UInt32 :=
+  match env.initConst w.toNat with
+  | .vU32 c => c
+  | _ => w
+
+def isWorkgroupAcqRelBarrier (env : SpirvModuleEnv) (es ms sem : UInt32) : Bool :=
+  resolveSpirvU32Const env es == SpirvScope.workgroup.toWord &&
+  resolveSpirvU32Const env ms == SpirvScope.workgroup.toWord &&
+  resolveSpirvU32Const env sem == spirvSemWorkgroupAcqRel
+
+/-- Pure per-lane ALU + `OpAccessChain` + `OpLoad` evaluation (excluding `OpStore` / `OpControlBarrier`). -/
+def evalLanePureInst (env : SpirvModuleEnv) (mem : GpuMemState) (regs : Nat → SpirvVal)
+    (inst : SpirvInst) : Except SimtExecError (Nat × SpirvVal) :=
+  match inst with
+  | .opAccessChain tyId resId baseId [idxId] =>
+    match regs baseId.toNat, regs idxId.toNat with
+    | .vPtr sc binding baseOff elemW, .vU32 idx =>
+      let w := (env.ptrInfo tyId.toNat).map (·.2.2) |>.getD elemW
+      .ok (resId.toNat, .vPtr sc binding (baseOff + idx.toNat) w)
+    | .vPtr sc binding baseOff elemW, .vU64 idx =>
+      let w := (env.ptrInfo tyId.toNat).map (·.2.2) |>.getD elemW
+      .ok (resId.toNat, .vPtr sc binding (baseOff + idx.toNat) w)
+    | _, _ => .error .typeMismatch
+  | .opLoad _ resId ptrId =>
+    match regs ptrId.toNat with
+    | .vPtr .workgroup _ elemIdx .w32 =>
+      if elemIdx < ldsCapacityDwords then
+        .ok (resId.toNat, .vU32 (mem.lds elemIdx))
+      else
+        .error (.ldsOutOfBounds elemIdx)
+    | .vPtr .workgroup _ elemIdx .w64 =>
+      if 2 * elemIdx + 1 < ldsCapacityDwords then
+        .ok (resId.toNat, .vU64 (readU64Dwords mem.lds elemIdx))
+      else
+        .error (.ldsOutOfBounds (2 * elemIdx + 1))
+    | .vPtr .storageBuffer binding elemIdx .w32 =>
+      .ok (resId.toNat, .vU32 (mem.ssbo binding elemIdx))
+    | .vPtr .storageBuffer binding elemIdx .w64 =>
+      .ok (resId.toNat, .vU64 (readU64Dwords (mem.ssbo binding) elemIdx))
+    | .vPtr .pushConstant _ elemIdx .w32 =>
+      .ok (resId.toNat, .vU32 (mem.pushConsts elemIdx))
+    | .vPtr .pushConstant _ elemIdx .w64 =>
+      .ok (resId.toNat, .vU64 (readU64Dwords mem.pushConsts elemIdx))
+    | _ => .error .typeMismatch
+  | .opCompositeExtract _ resId compId fieldIdx =>
+    match regs compId.toNat, fieldIdx.toNat with
+    | .vPair32 lo _, 0 => .ok (resId.toNat, .vU32 lo)
+    | .vPair32 _ hi, 1 => .ok (resId.toNat, .vU32 hi)
+    | .vPair64 lo _, 0 => .ok (resId.toNat, .vU64 lo)
+    | .vPair64 _ hi, 1 => .ok (resId.toNat, .vU64 hi)
+    | _, _ => .error .typeMismatch
+  | .opUConvert tyId resId valId =>
+    match env.intWidths tyId.toNat, regs valId.toNat with
+    | some .w64, .vU32 v => .ok (resId.toNat, .vU64 (UInt64.ofNat v.toNat))
+    | some .w32, .vU64 v => .ok (resId.toNat, .vU32 (UInt32.ofNat (v.toNat % 4294967296)))
+    | _, _ => .error .typeMismatch
+  | .opIAdd _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a + b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a + b))
+    | _, _ => .error .typeMismatch
+  | .opISub _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a - b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a - b))
+    | _, _ => .error .typeMismatch
+  | .opIMul _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a * b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a * b))
+    | _, _ => .error .typeMismatch
+  | .opUDiv _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (if b == 0 then 0 else a / b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (if b == 0 then 0 else a / b))
+    | _, _ => .error .typeMismatch
+  | .opUMod _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (if b == 0 then 0 else a % b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (if b == 0 then 0 else a % b))
+    | _, _ => .error .typeMismatch
+  | .opUMulExtended _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b =>
+      let prod := a.toNat * b.toNat
+      .ok (resId.toNat, .vPair32 (UInt32.ofNat (prod % 4294967296)) (UInt32.ofNat (prod / 4294967296)))
+    | .vU64 a, .vU64 b =>
+      let prod := a.toNat * b.toNat
+      .ok (resId.toNat, .vPair64 (UInt64.ofNat (prod % (2 ^ 64))) (UInt64.ofNat (prod / (2 ^ 64))))
+    | _, _ => .error .typeMismatch
+  | .opLogicalOr _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vBool a, .vBool b => .ok (resId.toNat, .vBool (a || b))
+    | _, _ => .error .typeMismatch
+  | .opLogicalAnd _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vBool a, .vBool b => .ok (resId.toNat, .vBool (a && b))
+    | _, _ => .error .typeMismatch
+  | .opLogicalNot _ resId aId =>
+    match regs aId.toNat with
+    | .vBool a => .ok (resId.toNat, .vBool (!a))
+    | _ => .error .typeMismatch
+  | .opSelect _ resId condId tId fId =>
+    match regs condId.toNat, regs tId.toNat, regs fId.toNat with
+    | .vBool c, .vU32 t, .vU32 f => .ok (resId.toNat, .vU32 (if c then t else f))
+    | .vBool c, .vU64 t, .vU64 f => .ok (resId.toNat, .vU64 (if c then t else f))
+    | _, _, _ => .error .typeMismatch
+  | .opIEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (a == b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (a == b))
+    | _, _ => .error .typeMismatch
+  | .opINotEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (a != b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (a != b))
+    | _, _ => .error .typeMismatch
+  | .opUGreaterThan _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (b.toNat < a.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (b.toNat < a.toNat)))
+    | _, _ => .error .typeMismatch
+  | .opUGreaterThanEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (b.toNat ≤ a.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (b.toNat ≤ a.toNat)))
+    | _, _ => .error .typeMismatch
+  | .opULessThan _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (a.toNat < b.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (a.toNat < b.toNat)))
+    | _, _ => .error .typeMismatch
+  | .opULessThanEqual _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vBool (decide (a.toNat ≤ b.toNat)))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vBool (decide (a.toNat ≤ b.toNat)))
+    | _, _ => .error .typeMismatch
+  | .opShiftRightLogical _ resId baseId shId =>
+    match regs baseId.toNat, regs shId.toNat with
+    | .vU32 a, .vU32 sh => .ok (resId.toNat, .vU32 (UInt32.ofNat (a.toNat / 2 ^ (sh.toNat % 32))))
+    | .vU64 a, .vU64 sh => .ok (resId.toNat, .vU64 (UInt64.ofNat (a.toNat / 2 ^ (sh.toNat % 64))))
+    | _, _ => .error .typeMismatch
+  | .opShiftLeftLogical _ resId baseId shId =>
+    match regs baseId.toNat, regs shId.toNat with
+    | .vU32 a, .vU32 sh =>
+      .ok (resId.toNat, .vU32 (UInt32.ofNat ((a.toNat * 2 ^ (sh.toNat % 32)) % 4294967296)))
+    | .vU64 a, .vU64 sh =>
+      .ok (resId.toNat, .vU64 (UInt64.ofNat ((a.toNat * 2 ^ (sh.toNat % 64)) % (2 ^ 64))))
+    | _, _ => .error .typeMismatch
+  | .opBitwiseOr _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a ||| b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a ||| b))
+    | _, _ => .error .typeMismatch
+  | .opBitwiseXor _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a ^^^ b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a ^^^ b))
+    | _, _ => .error .typeMismatch
+  | .opBitwiseAnd _ resId aId bId =>
+    match regs aId.toNat, regs bId.toNat with
+    | .vU32 a, .vU32 b => .ok (resId.toNat, .vU32 (a &&& b))
+    | .vU64 a, .vU64 b => .ok (resId.toNat, .vU64 (a &&& b))
+    | _, _ => .error .typeMismatch
+  | .opNot _ resId aId =>
+    match regs aId.toNat with
+    | .vU32 a => .ok (resId.toNat, .vU32 (~~~a))
+    | .vU64 a => .ok (resId.toNat, .vU64 (~~~a))
+    | _ => .error .typeMismatch
+  | _ => .error .typeMismatch
+
+/-- Apply a single lane's `OpStore` to `GpuMemState` with `64 KiB` LDS bounds enforcement. -/
+def applyLaneStore (mem : GpuMemState) (regs : Nat → SpirvVal) (ptrId valId : UInt32) :
+    Except SimtExecError GpuMemState :=
+  match regs ptrId.toNat, regs valId.toNat with
+  | .vPtr .workgroup _ elemIdx .w32, .vU32 v =>
+    if elemIdx < ldsCapacityDwords then
+      .ok { mem with lds := writeFn mem.lds elemIdx v }
+    else
+      .error (.ldsOutOfBounds elemIdx)
+  | .vPtr .workgroup _ elemIdx .w64, .vU64 v =>
+    if 2 * elemIdx + 1 < ldsCapacityDwords then
+      .ok { mem with lds := writeU64Dwords mem.lds elemIdx v }
+    else
+      .error (.ldsOutOfBounds (2 * elemIdx + 1))
+  | .vPtr .storageBuffer binding elemIdx .w32, .vU32 v =>
+    .ok { mem with ssbo := writeSsboDword mem.ssbo binding elemIdx v }
+  | .vPtr .storageBuffer binding elemIdx .w64, .vU64 v =>
+    .ok { mem with ssbo := writeSsboU64 mem.ssbo binding elemIdx v }
+  | _, _ => .error .typeMismatch
+
+/-- State of one Wave32 subgroup (`32` SIMD lanes + `EXEC_LO` active mask + barrier latch). -/
+structure Wave32State where
+  pc : Nat
+  execMask : Nat → Bool
+  laneRegs : Nat → Nat → SpirvVal
+  atBarrier : Bool
+
+def allActive32 : Nat → Bool := fun lane => decide (lane < wave32Lanes)
+
+/-- Execute all active lanes `0 .. k - 1` of a Wave32 store instruction sequentially across active lanes. -/
+def execWaveStoreLanes (execMask : Nat → Bool) (laneRegs : Nat → Nat → SpirvVal)
+    (ptrId valId : UInt32) : Nat → GpuMemState → Except SimtExecError GpuMemState
+  | 0, mem => .ok mem
+  | k + 1, mem =>
+    match execWaveStoreLanes execMask laneRegs ptrId valId k mem with
+    | .error e => .error e
+    | .ok mem' =>
+      if execMask k then applyLaneStore mem' (laneRegs k) ptrId valId else .ok mem'
+
+/-- Check that all active lanes `0 .. k - 1` evaluate a pure instruction without runtime error. -/
+def checkWavePureLanesErr (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) : Nat → Option SimtExecError
+  | 0 => none
+  | k + 1 =>
+    match checkWavePureLanesErr env mem execMask laneRegs inst k with
+    | some e => some e
+    | none =>
+      if execMask k then
+        match evalLanePureInst env mem (laneRegs k) inst with
+        | .error e => some e
+        | .ok _ => none
+      else
+        none
+
+/-- Parallel SIMT per-lane pure register update (`O(1)` lookup depth per lane, zero cross-lane wrapper chain). -/
+def stepLanePureRegs (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) (lane : Nat) : Nat → SpirvVal :=
+  if lane < wave32Lanes ∧ execMask lane = true then
+    match evalLanePureInst env mem (laneRegs lane) inst with
+    | .ok (dst, v) => writeFn (laneRegs lane) dst v
+    | .error _ => laneRegs lane
+  else
+    laneRegs lane
+
+/-- Evaluate a pure instruction across all active lanes `0 .. k - 1` of a Wave32 subgroup. -/
+def evalWavePureLanes (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) (k : Nat) :
+    Except SimtExecError (Nat → Nat → SpirvVal) :=
+  match checkWavePureLanesErr env mem execMask laneRegs inst k with
+  | some e => .error e
+  | none => .ok (stepLanePureRegs env mem execMask laneRegs inst)
+
+/-- Step one Wave32 subgroup by one instruction inside a `SpirvInst` sequence.
+    When a wave reaches `OpControlBarrier(.workgroup, .workgroup, spirvSemWorkgroupAcqRel)`,
+    it sets `atBarrier := true` and blocks until all waves in the workgroup arrive. -/
+def stepWave32One (env : SpirvModuleEnv) (prog : List SpirvInst) (wSt : Wave32State)
+    (mem : GpuMemState) : Except SimtExecError (Wave32State × GpuMemState) :=
+  if wSt.atBarrier then
+    .ok (wSt, mem)
+  else
+    match prog[wSt.pc]? with
+    | none => .ok (wSt, mem)
+    | some (.opControlBarrier es ms sem) =>
+      if isWorkgroupAcqRelBarrier env es ms sem then
+        .ok ({ wSt with atBarrier := true }, mem)
+      else
+        .error .typeMismatch
+    | some (.opStore ptrId valId) =>
+      match execWaveStoreLanes wSt.execMask wSt.laneRegs ptrId valId wave32Lanes mem with
+      | .error e => .error e
+      | .ok mem' => .ok ({ wSt with pc := wSt.pc + 1 }, mem')
+    | some (.opLabel _) =>
+      .ok ({ wSt with pc := wSt.pc + 1 }, mem)
+    | some inst =>
+      match evalWavePureLanes env mem wSt.execMask wSt.laneRegs inst wave32Lanes with
+      | .error e => .error e
+      | .ok regs' => .ok ({ wSt with pc := wSt.pc + 1, laneRegs := regs' }, mem)
+
+/-- Multi-wave workgroup execution state: all `numWaves` Wave32 states + shared `64 KiB` LDS & SSBOs. -/
+structure WorkgroupExecState where
+  waves : Nat → Wave32State
+  mem : GpuMemState
+
+def initWorkgroupExecState (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (initMem : GpuMemState) :
+    WorkgroupExecState :=
+  { waves := fun w =>
+      { pc := 0
+        execMask := allActive32
+        laneRegs := fun lane => initLaneRegs env cfg w lane
+        atBarrier := false }
+    mem := initMem }
+
+/-- Step wave `w` once inside the multi-wave workgroup (no-op if `w ≥ cfg.numWaves`). -/
+def stepWorkgroupWave (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (prog : List SpirvInst)
+    (w : Nat) (st : WorkgroupExecState) : Except SimtExecError WorkgroupExecState :=
+  if w < cfg.numWaves then
+    match stepWave32One env prog (st.waves w) st.mem with
+    | .error e => .error e
+    | .ok (wSt', mem') => .ok { waves := writeFn st.waves w wSt', mem := mem' }
+  else
+    .ok st
+
+/-- Execute an arbitrary cross-wave instruction-interleaving schedule `sched : List Nat` within one
+    barrier epoch. -/
+def runInterleavedSchedule (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (prog : List SpirvInst) :
+    List Nat → WorkgroupExecState → Except SimtExecError WorkgroupExecState
+  | [], st => .ok st
+  | w :: ws, st =>
+    match stepWorkgroupWave env cfg prog w st with
+    | .error e => .error e
+    | .ok st' => runInterleavedSchedule env cfg prog ws st'
+
+/-- Check whether all `numWaves` Wave32 subgroups have arrived at `OpControlBarrier`. -/
+def allWavesAtBarrier (cfg : WorkgroupConfig) (waves : Nat → Wave32State) : Bool :=
+  (List.range cfg.numWaves).all fun w => (waves w).atBarrier
+
+/-- Lockstep workgroup-wide `OpControlBarrier` release: advances every wave past the barrier ONLY
+    when all `numWaves` waves in the workgroup have reached the barrier, preserving 100% of shared
+    `Workgroup` LDS and global `StorageBuffer` writes! -/
+def releaseWorkgroupBarrier (cfg : WorkgroupConfig) (st : WorkgroupExecState) :
+    Except SimtExecError WorkgroupExecState :=
+  if allWavesAtBarrier cfg st.waves then
+    .ok { waves := fun w =>
+            if w < cfg.numWaves then
+              let ws := st.waves w
+              { ws with pc := ws.pc + 1, atBarrier := false }
+            else
+              st.waves w
+          mem := st.mem }
+  else
+    .error .barrierDivergence
+
+/-- A barrier-segmented kernel consists of barrier-free epochs `epochs : List (List SpirvInst)`,
+    where adjacent epochs are separated by `OpControlBarrier(.workgroup, .workgroup, 0x108)`. -/
+def BarrierEpoch := List SpirvInst
+
+/-- Run one barrier epoch under wave schedule `sched : List Nat` (every wave steps through `epoch`
+    and arrives at the trailing `OpControlBarrier`). -/
+def runOneBarrierEpoch (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (epoch : List SpirvInst)
+    (hasTrailingBarrier : Bool) (sched : List Nat) (st : WorkgroupExecState) :
+    Except SimtExecError WorkgroupExecState :=
+  let prog := if hasTrailingBarrier then
+      epoch ++ [.opControlBarrier SpirvScope.workgroup.toWord SpirvScope.workgroup.toWord spirvSemWorkgroupAcqRel]
+    else
+      epoch
+  let resetWaves : WorkgroupExecState :=
+    { waves := fun w => { (st.waves w) with pc := 0, atBarrier := false }, mem := st.mem }
+  match runInterleavedSchedule env cfg prog sched resetWaves with
+  | .error e => .error e
+  | .ok stAfter =>
+    if hasTrailingBarrier then releaseWorkgroupBarrier cfg stAfter else .ok stAfter
+
+/-- Execute a multi-epoch multi-wave workgroup kernel across per-epoch schedules `scheds`.
+    Shared `Workgroup` LDS (`st.mem.lds`) persists intact across ALL epochs and ALL waves! -/
+def runMultiWaveEpochs (env : SpirvModuleEnv) (cfg : WorkgroupConfig) :
+    List (List SpirvInst) → List (List Nat) → WorkgroupExecState →
+    Except SimtExecError WorkgroupExecState
+  | [], _, st => .ok st
+  | [lastEpoch], scheds, st =>
+    runOneBarrierEpoch env cfg lastEpoch false (scheds.headD []) st
+  | ep :: nextEp :: rest, scheds, st =>
+    match runOneBarrierEpoch env cfg ep true (scheds.headD []) st with
+    | .error e => .error e
+    | .ok st' => runMultiWaveEpochs env cfg (nextEp :: rest) (scheds.tail) st'
+
+/-- Canonical wave schedule for an epoch of length `L` (with optional +1 barrier instruction):
+    runs Wave `0` for `steps` instructions, then Wave `1`, ..., up to Wave `numWaves - 1`. -/
+def canonicalEpochSchedule (numWaves steps : Nat) : List Nat :=
+  (List.range numWaves).flatMap (fun w => List.replicate steps w)
+
+/-! ## §3. Compositional `Faial` MAP Data-Race Freedom & `SIMT-CT` Side-Channel Immunity -/
+
+/-- Per-thread (`tid = wave * 32 + lane`) memory footprint of one barrier epoch (`Faial` MAP). -/
+structure EpochAccessProtocol where
+  ldsRead : Nat → Nat → Bool
+  ldsWrite : Nat → Nat → Bool
+  ssboRead : Nat → Nat → Nat → Bool
+  ssboWrite : Nat → Nat → Nat → Bool
+
+/-- **`Faial` Memory-Access-Protocol Data-Race Freedom (`FaialMapRaceFree`)**:
+    Within the barrier epoch, for every pair of distinct threads `t₁ ≠ t₂` in the workgroup,
+    `t₁`'s shared `Workgroup` LDS and global `StorageBuffer` write sets are strictly disjoint
+    from `t₂`'s write AND read sets (`W(t₁) ∩ (W(t₂) ∪ R(t₂)) = ∅`). -/
+def FaialMapRaceFree (numThreads : Nat) (proto : EpochAccessProtocol) : Prop :=
+  ∀ t₁ t₂ : Nat, t₁ < numThreads → t₂ < numThreads → t₁ ≠ t₂ →
+    (∀ a : Nat, proto.ldsWrite t₁ a = true →
+      proto.ldsWrite t₂ a = false ∧ proto.ldsRead t₂ a = false) ∧
+    (∀ b a : Nat, proto.ssboWrite t₁ b a = true →
+      proto.ssboWrite t₂ b a = false ∧ proto.ssboRead t₂ b a = false)
+
+/-- Two `GpuMemState`s agree on all locations in wave `w`'s read/write footprint under `proto`. -/
+def MemAgreesOnWaveFootprint (w : Nat) (proto : EpochAccessProtocol) (m₁ m₂ : GpuMemState) : Prop :=
+  m₁.pushConsts = m₂.pushConsts ∧
+  (∀ lane a : Nat, lane < wave32Lanes →
+    (proto.ldsRead (w * wave32Lanes + lane) a = true ∨
+     proto.ldsWrite (w * wave32Lanes + lane) a = true) →
+    m₁.lds a = m₂.lds a) ∧
+  (∀ lane b a : Nat, lane < wave32Lanes →
+    (proto.ssboRead (w * wave32Lanes + lane) b a = true ∨
+     proto.ssboWrite (w * wave32Lanes + lane) b a = true) →
+    m₁.ssbo b a = m₂.ssbo b a)
+
+/-- Per-wave state invariant lifted across all `numWaves` Wave32 subgroups of a workgroup. -/
+def AllWavesInv (cfg : WorkgroupConfig) (waveInv : Nat → Wave32State → Prop)
+    (st : WorkgroupExecState) : Prop :=
+  ∀ w : Nat, w < cfg.numWaves → waveInv w (st.waves w)
+
+/-- Semantic soundness of an `EpochAccessProtocol` on a program `prog` under wave invariant `waveInv`:
+    1. `inv_preserved` & `step_total`: reachable wave states step cleanly and preserve `waveInv`;
+    2. `read_locality`: wave `w`'s step outcome (`wSt'`) and write footprint depend ONLY on `w`'s
+       footprint, and wave `w` modifies ONLY addresses inside `w`'s write set (`ldsWrite`, `ssboWrite`). -/
+structure WaveRespectsProtocol (env : SpirvModuleEnv) (cfg : WorkgroupConfig)
+    (prog : List SpirvInst) (waveInv : Nat → Wave32State → Prop)
+    (proto : EpochAccessProtocol) : Prop where
+  inv_preserved :
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt wSt' : Wave32State) (m m' : GpuMemState),
+      waveInv w wSt →
+      stepWave32One env prog wSt m = .ok (wSt', m') →
+      waveInv w wSt'
+  step_total :
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt : Wave32State) (m : GpuMemState),
+      waveInv w wSt →
+      ∃ wSt' m', stepWave32One env prog wSt m = .ok (wSt', m')
+  read_locality :
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt : Wave32State),
+      waveInv w wSt →
+      ∀ (m₁ m₂ : GpuMemState),
+        MemAgreesOnWaveFootprint w proto m₁ m₂ →
+        (match stepWave32One env prog wSt m₁, stepWave32One env prog wSt m₂ with
+         | .error e₁, .error e₂ => e₁ = e₂
+         | .ok (wSt₁, m₁'), .ok (wSt₂, m₂') =>
+           wSt₁ = wSt₂ ∧
+           m₁'.pushConsts = m₁.pushConsts ∧
+           m₂'.pushConsts = m₂.pushConsts ∧
+           (∀ a : Nat,
+             (∃ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = true) →
+               m₁'.lds a = m₂'.lds a) ∧
+           (∀ a : Nat,
+             (∀ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = false) →
+               m₁'.lds a = m₁.lds a ∧ m₂'.lds a = m₂.lds a) ∧
+           (∀ b a : Nat,
+             (∃ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = true) →
+               m₁'.ssbo b a = m₂'.ssbo b a) ∧
+           (∀ b a : Nat,
+             (∀ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = false) →
+               m₁'.ssbo b a = m₁.ssbo b a ∧ m₂'.ssbo b a = m₂.ssbo b a)
+         | _, _ => False)
+
+private theorem wave_threads_ne {w₁ w₂ l₁ l₂ : Nat} (hw : w₁ ≠ w₂)
+    (hl₁ : l₁ < wave32Lanes) (hl₂ : l₂ < wave32Lanes) :
+    w₁ * wave32Lanes + l₁ ≠ w₂ * wave32Lanes + l₂ := by
+  unfold wave32Lanes at *
+  omega
+
+theorem stepWorkgroupWave_total_and_inv {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
+    (w : Nat) {st : WorkgroupExecState} (hInv : AllWavesInv cfg waveInv st) :
+    ∃ st', stepWorkgroupWave env cfg prog w st = .ok st' ∧ AllWavesInv cfg waveInv st' := by
+  unfold stepWorkgroupWave
+  by_cases hw : w < cfg.numWaves
+  · simp only [hw, ↓reduceIte]
+    obtain ⟨wSt', m', hStep⟩ := hResp.step_total w hw (st.waves w) st.mem (hInv w hw)
+    refine ⟨{ waves := writeFn st.waves w wSt', mem := m' }, by simp [hStep], ?_⟩
+    intro w' hw'
+    unfold writeFn
+    by_cases hww : w' = w
+    · subst hww; simp [hResp.inv_preserved w' hw' _ _ _ _ (hInv w' hw') hStep]
+    · simp [hww, hInv w' hw']
+  · simp [hw]; exact hInv
+
+/-- **Cross-Wave Diamond Commutativity Lemma (`stepWorkgroupWave_comm`)**:
+    Under `FaialMapRaceFree`, stepping two distinct Wave32 subgroups `w₁ ≠ w₂` strictly commutes! -/
