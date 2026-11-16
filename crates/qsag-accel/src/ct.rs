@@ -107,21 +107,24 @@ pub fn ct_eq_bytes_mask(a: &[u8], b: &[u8]) -> u64 {
 #[inline]
 pub const fn ct_lt_mask_u64(a: u64, b: u64) -> u64 {
     // Borrow-out of `a - b`, computed from the operands and the wrapped difference.
+    let (a, b) = (black_box(a), black_box(b));
     let borrow = ((!a & b) | ((!a | b) & a.wrapping_sub(b))) >> 63;
-    borrow.wrapping_neg()
+    black_box(borrow.wrapping_neg())
 }
 
 /// Strict unsigned less-than mask over `u128`: `u64::MAX` iff `a < b`, else `0`.
 #[inline]
 pub const fn ct_lt_mask_u128(a: u128, b: u128) -> u64 {
+    let (a, b) = (black_box(a), black_box(b));
     let borrow = ((!a & b) | ((!a | b) & a.wrapping_sub(b))) >> 127;
-    (borrow as u64).wrapping_neg()
+    black_box((borrow as u64).wrapping_neg())
 }
 
 /// Mask-driven selection: `if_true` when `mask == u64::MAX`, `if_false` when `mask == 0`.
 #[inline]
 pub const fn ct_select_mask_u64(mask: u64, if_true: u64, if_false: u64) -> u64 {
-    (if_true & mask) | (if_false & !mask)
+    let m = black_box(mask);
+    black_box((if_true & m) | (if_false & !m))
 }
 
 /// Mask-driven conditional copy of `src` into `dst` (`mask == 0xFF` copies, `mask == 0x00` keeps).
@@ -172,8 +175,8 @@ pub const fn ct_select_u64(choice: bool, if_true: u64, if_false: u64) -> u64 {
 /// Branchless conditional selection over `u128`.
 #[inline]
 pub const fn ct_select_u128(choice: bool, if_true: u128, if_false: u128) -> u128 {
-    let m = ct_mask_u128(choice);
-    (if_true & m) | (if_false & !m)
+    let m = black_box(ct_mask_u128(choice));
+    black_box((if_true & m) | (if_false & !m))
 }
 
 /// Branchless conditional copy of `src` into `dst` iff `choice == true`.

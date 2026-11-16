@@ -629,10 +629,14 @@ impl ExecutionReceipt {
     /// All-ones mask iff the receipt names `key`'s backend, carries `pin`'s kernel digests, and its
     /// MAC verifies under `key`. Every comparison is evaluated; none short-circuits.
     fn verification_mask(&self, key: &BackendAttestationKey, pin: &CertifiedKernelPin) -> u64 {
+        let audit_zero = ct_eq_bytes_mask(&self.hardware_audit_digest, &[0u8; 32]);
+        let spirv = ct_eq_mask_u64(self.arch as u64, KernelTargetArch::SpirV15 as u64);
+        let audit_ok = !(spirv & audit_zero);
         let mut ok = ct_eq_mask_u64(self.arch as u64, pin.target_arch as u64)
             & ct_eq_mask_u64(self.descriptor.slot() as u64, pin.slot as u64)
             & ct_eq_bytes_mask(&self.backend_id, &key.backend_id)
-            & ct_eq_bytes_mask(&self.kernel_sha256, &pin.sha256_digest);
+            & ct_eq_bytes_mask(&self.kernel_sha256, &pin.sha256_digest)
+            & audit_ok;
         for (&actual, &expected) in self.kernel_poseidon2.iter().zip(&pin.poseidon2_digest) {
             ok &= ct_eq_mask_u64(actual, expected);
         }
@@ -865,10 +869,14 @@ impl ProverExecutionReceipt {
         key: &BackendAttestationKey,
         pin: &CertifiedProverKernelPin,
     ) -> u64 {
+        let audit_zero = ct_eq_bytes_mask(&self.hardware_audit_digest, &[0u8; 32]);
+        let spirv = ct_eq_mask_u64(self.arch as u64, KernelTargetArch::SpirV15 as u64);
+        let audit_ok = !(spirv & audit_zero);
         let mut ok = ct_eq_mask_u64(self.arch as u64, pin.target_arch as u64)
             & ct_eq_mask_u64(self.descriptor.slot() as u64, pin.slot as u64)
             & ct_eq_bytes_mask(&self.backend_id, &key.backend_id)
-            & ct_eq_bytes_mask(&self.kernel_sha256, &pin.sha256_digest);
+            & ct_eq_bytes_mask(&self.kernel_sha256, &pin.sha256_digest)
+            & audit_ok;
         for (&actual, &expected) in self.kernel_poseidon2.iter().zip(&pin.poseidon2_digest) {
             ok &= ct_eq_mask_u64(actual, expected);
         }
@@ -1297,11 +1305,15 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
     ) -> Result<(), KernelRegistryError> {
         for (slot, actual) in KernelSlot::ALL.iter().zip(measured) {
             let expected = self.lookup_pin(arch, *slot)?;
-            if actual.slot != *slot
-                || actual.target_arch != arch
-                || ct_eq_bytes_mask(&expected.sha256_digest, &actual.sha256_digest) == 0
-                || expected.poseidon2_digest != actual.poseidon2_digest
+            let mut digests_ok = ct_eq_bytes_mask(&expected.sha256_digest, &actual.sha256_digest);
+            for (&e, &a) in expected
+                .poseidon2_digest
+                .iter()
+                .zip(&actual.poseidon2_digest)
             {
+                digests_ok &= ct_eq_mask_u64(e, a);
+            }
+            if actual.slot != *slot || actual.target_arch != arch || digests_ok != u64::MAX {
                 return Err(KernelRegistryError::PinMismatch { slot: *slot });
             }
         }
@@ -1666,24 +1678,79 @@ pub fn spot_check_merkle_layer(
     challenge: &[u8; 32],
     checks: usize,
 ) -> bool {
-    if parents.is_empty()
-        || children.len() != parents.len().saturating_mul(2)
+    let n = parents.len();
+    if n == 0
+        || children.len() != n.saturating_mul(2)
         || checks == 0
-        || start_parent_idx.checked_add(parents.len() as u64).is_none()
+        || start_parent_idx.checked_add(n as u64).is_none()
     {
         return false;
     }
-    for sample in 0..checks.min(parents.len()) {
-        let idx = if checks >= parents.len() {
-            sample
-        } else {
+    let target = checks.min(n);
+    // Partial Fisher-Yates without replacement using a fixed 64-entry swap window when `alloc`
+    // is absent (or exact map/vec when `alloc` is present), with unbiased rejection sampling.
+    let draw_unbiased = |sample: usize, span: u64| -> usize {
+        if span <= 1 {
+            return 0;
+        }
+        let zone = u64::MAX - (u64::MAX % span);
+        let mut ctr = 0u64;
+        loop {
             let digest = cshake256_framed_32(
                 b"QSAG.ACCEL.MERKLE_SAMPLE.V1",
-                &[challenge, &(sample as u64).to_be_bytes()],
+                &[challenge, &(sample as u64).to_be_bytes(), &ctr.to_be_bytes()],
             );
             let mut word = [0u8; 8];
             word.copy_from_slice(&digest[..8]);
-            (u64::from_le_bytes(word) % parents.len() as u64) as usize
+            let v = u64::from_le_bytes(word);
+            if ctr > 0 || span.is_power_of_two() || v < zone {
+                if v < zone || span.is_power_of_two() {
+                    return (v % span) as usize;
+                }
+            } else if v < zone {
+                return (v % span) as usize;
+            }
+            ctr = ctr.wrapping_add(1);
+        }
+    };
+    #[cfg(feature = "alloc")]
+    let mut swaps: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    #[cfg(not(feature = "alloc"))]
+    let mut swaps = [(0usize, 0usize); 64];
+    #[cfg(not(feature = "alloc"))]
+    let mut swap_len = 0usize;
+
+    for sample in 0..target {
+        let idx = if checks >= n {
+            sample
+        } else {
+            let rem = n - sample;
+            let r = sample + draw_unbiased(sample, rem as u64);
+            #[cfg(feature = "alloc")]
+            let lookup = |k: usize, tbl: &[(usize, usize)]| -> usize {
+                tbl.iter().rev().find(|&&(a, _)| a == k).map_or(k, |&(_, b)| b)
+            };
+            #[cfg(not(feature = "alloc"))]
+            let lookup = |k: usize, tbl: &[(usize, usize)]| -> usize {
+                tbl.iter().rev().find(|&&(a, _)| a == k).map_or(k, |&(_, b)| b)
+            };
+            #[cfg(feature = "alloc")]
+            let (chosen, cur_slot) = (lookup(r, &swaps), lookup(sample, &swaps));
+            #[cfg(not(feature = "alloc"))]
+            let (chosen, cur_slot) = (
+                lookup(r, &swaps[..swap_len]),
+                lookup(sample, &swaps[..swap_len]),
+            );
+            #[cfg(feature = "alloc")]
+            if r != sample {
+                swaps.push((r, cur_slot));
+            }
+            #[cfg(not(feature = "alloc"))]
+            if r != sample && swap_len < swaps.len() {
+                swaps[swap_len] = (r, cur_slot);
+                swap_len += 1;
+            }
+            chosen
         };
         let mut expected = [[0; 4]; 1];
         if merkle_layer_poseidon2_at_cpu(
@@ -1694,8 +1761,14 @@ pub fn spot_check_merkle_layer(
             &mut expected,
         )
         .is_err()
-            || expected[0] != parents[idx]
         {
+            return false;
+        }
+        let mut ok = u64::MAX;
+        for l in 0..4 {
+            ok &= ct_eq_mask_u64(expected[0][l], parents[idx][l]);
+        }
+        if ok != u64::MAX {
             return false;
         }
     }

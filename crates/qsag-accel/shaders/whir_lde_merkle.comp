@@ -3,8 +3,9 @@
 
 // Certified SPIR-V 1.5 compute kernel for `ProverKernelSlot::WhirLdeCommitment`.
 // VRAM-resident Mobius basis conversion, 4-way coset-decomposed base-field Reed-Solomon LDE,
-// intermediate-stage `Ext4` overflow LDE, Canopy `cSHAKE256` Merkle leaf + internal layer
-// reductions, and selective Steiner multi-proof + fiber gathering.
+// intermediate-stage `Ext4` overflow LDE, Canopy `cSHAKE256` (24-round) and `TurboSHAKE256`
+// (RFC 9861 12-round, `pc.mode & 0x80u`) Merkle leaf + internal layer reductions, and selective
+// Steiner multi-proof + fiber gathering.
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -61,6 +62,17 @@ const uint64_t CANOPY_MID[25] = uint64_t[25](
     0x14E16D5699388C63ul, 0x8D68335C54A43AE4ul, 0x74A909E5002C19F7ul, 0x48A12FAC4EEC8F3Dul,
     0x797C9923EA11DFB5ul, 0x2121D5B260157781ul, 0x704AA293B550C49Aul, 0xDDCB710A40908D75ul,
     0x856C96F5DC9851AAul
+);
+
+// Precomputed post-prefix 12-round `TurboSHAKE256` midstate for `b"QSAG.PCS.TURBOCANOPY/v1"`.
+const uint64_t TURBOSHAKE_CANOPY_MID[25] = uint64_t[25](
+    0x460887F1CBA4A839ul, 0x980803A3BFC02E65ul, 0x68BDDB54EF8D20A8ul, 0x0B3372687F85BCAFul,
+    0xCC2727C2077077DFul, 0xEC41D86C9B5F8D09ul, 0xFB5F5D561424CAE1ul, 0x3268A335444CAD6Dul,
+    0x1946744824D4F99Bul, 0xF0CC17364ABB8F7Bul, 0x6555BD65801754F9ul, 0xFB65EA5772915117ul,
+    0x7ABF03D078F82EFAul, 0xE40B7E6F749E0F48ul, 0xA878894CF5A786FBul, 0xAF50E05198F19F90ul,
+    0xE428425CB9274F77ul, 0x7CC9AFDB9D39179Eul, 0x68EB6CD4B52D2C93ul, 0x777F4FB40734C256ul,
+    0xB61FE57E44CDE167ul, 0x1F19E1E1F1A15293ul, 0x6EE7751CA38082BCul, 0x1790FC47C8FCF771ul,
+    0xD6BF84556451E94Dul
 );
 
 // Bank-conflict-free 16 KiB LDS supporting both `512` `u64`s and `512` `Ext4`s.
@@ -248,9 +260,10 @@ uint64_t rotl64(uint64_t x, uint r) {
     return (x << r) | (x >> (64u - r));
 }
 
-void keccak_f1600(inout uint64_t st[25]) {
+void keccak_perm(inout uint64_t st[25], bool turbo) {
     uint64_t bc[5];
-    for (uint rnd = 0u; rnd < 24u; ++rnd) {
+    uint start_rnd = turbo ? 12u : 0u;
+    for (uint rnd = start_rnd; rnd < 24u; ++rnd) {
         for (uint i = 0u; i < 5u; ++i) {
             bc[i] = st[i] ^ st[i + 5u] ^ st[i + 10u] ^ st[i + 15u] ^ st[i + 20u];
         }
@@ -285,9 +298,15 @@ void keccak_f1600(inout uint64_t st[25]) {
     }
 }
 
-void init_canopy_state(out uint64_t st[25]) {
-    for (uint i = 0u; i < 25u; ++i) {
-        st[i] = CANOPY_MID[i];
+void init_canopy_state(out uint64_t st[25], bool turbo) {
+    if (turbo) {
+        for (uint i = 0u; i < 25u; ++i) {
+            st[i] = TURBOSHAKE_CANOPY_MID[i];
+        }
+    } else {
+        for (uint i = 0u; i < 25u; ++i) {
+            st[i] = CANOPY_MID[i];
+        }
     }
 }
 
@@ -319,41 +338,45 @@ void sponge_feed_u64(
     inout uint lane,
     inout uint64_t carry,
     uint bit_off,
-    uint64_t w
+    uint64_t w,
+    bool turbo
 ) {
     uint64_t full_lane = carry | (w << bit_off);
     carry = w >> (64u - bit_off);
     xor_rate_lane(st, lane, full_lane);
     lane += 1u;
     if (lane == 17u) {
-        keccak_f1600(st);
+        keccak_perm(st, turbo);
         lane = 0u;
     }
 }
 
-u64vec4 sponge_finalize_32(inout uint64_t st[25], uint lane, uint64_t carry, uint bit_off) {
-    xor_rate_lane(st, lane, carry | (0x04ul << bit_off));
+u64vec4 sponge_finalize_32(inout uint64_t st[25], uint lane, uint64_t carry, uint bit_off, bool turbo) {
+    uint64_t suffix = turbo ? 0x07ul : 0x04ul;
+    xor_rate_lane(st, lane, carry | (suffix << bit_off));
     st[16] ^= 0x8000000000000000ul;
-    keccak_f1600(st);
+    keccak_perm(st, turbo);
     return u64vec4(st[0], st[1], st[2], st[3]);
 }
 
-u64vec2 derive_round0_salt_gpu(uint g) {
+u64vec2 derive_round0_salt_gpu(uint g, bool turbo) {
     uint64_t st[25];
-    init_canopy_state(st);
+    init_canopy_state(st, turbo);
+    uint64_t suffix = turbo ? 0x07ul : 0x04ul;
     st[0] ^= 0x02ul | (pc.scalar0 << 8u);
     st[1] ^= (pc.scalar0 >> 56u) | (pc.scalar1 << 8u);
     st[2] ^= (pc.scalar1 >> 56u) | (pc.scalar2 << 8u);
     st[3] ^= (pc.scalar2 >> 56u) | (pc.scalar3 << 8u);
-    st[4] ^= (pc.scalar3 >> 56u) | (uint64_t(g) << 8u) | (0x04ul << 40u);
+    st[4] ^= (pc.scalar3 >> 56u) | (uint64_t(g) << 8u) | (suffix << 40u);
     st[16] ^= 0x8000000000000000ul;
-    keccak_f1600(st);
+    keccak_perm(st, turbo);
     return u64vec2(st[0], st[1]);
 }
 
-u64vec4 hash_merkle_internal_gpu(uint idx, u64vec4 left, u64vec4 right) {
+u64vec4 hash_merkle_internal_gpu(uint idx, u64vec4 left, u64vec4 right, bool turbo) {
     uint64_t st[25];
-    init_canopy_state(st);
+    init_canopy_state(st, turbo);
+    uint64_t suffix = turbo ? 0x07ul : 0x04ul;
     st[0] ^= (uint64_t(idx) << 8u) | (left.x << 40u);
     st[1] ^= (left.x >> 24u) | (left.y << 40u);
     st[2] ^= (left.y >> 24u) | (left.z << 40u);
@@ -362,16 +385,18 @@ u64vec4 hash_merkle_internal_gpu(uint idx, u64vec4 left, u64vec4 right) {
     st[5] ^= (right.x >> 24u) | (right.y << 40u);
     st[6] ^= (right.y >> 24u) | (right.z << 40u);
     st[7] ^= (right.z >> 24u) | (right.w << 40u);
-    st[8] ^= (right.w >> 24u) | (0x04ul << 40u);
+    st[8] ^= (right.w >> 24u) | (suffix << 40u);
     st[16] ^= 0x8000000000000000ul;
-    keccak_f1600(st);
+    keccak_perm(st, turbo);
     return u64vec4(st[0], st[1], st[2], st[3]);
 }
 
 void main() {
     uint lid = gl_LocalInvocationID.x;
+    bool turbo = (pc.mode & 0x80u) != 0u;
+    uint mode = pc.mode & 0x7Fu;
 
-    if (pc.mode == 0u) {
+    if (mode == 0u) {
         // Fused <=9-bit LDS Mobius transform across `num_polys = pc.aux1`.
         uint len = pc.len;
         uint log_c = pc.aux0;
@@ -409,7 +434,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 1u) {
+    if (mode == 1u) {
         // Global single-bit Mobius transform (`bit = pc.aux0 >= 9`).
         uint half_len = pc.len >> 1u;
         uint bit = pc.aux0;
@@ -428,7 +453,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 2u) {
+    if (mode == 2u) {
         // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`) with Kronecker LDS powers.
         uint coset_y = gl_WorkGroupID.y;
         if (coset_y >= pc.aux4) {
@@ -453,7 +478,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 3u) {
+    if (mode == 3u) {
         // 4-coset fused <=9-stage LDS base-field NTT (`b1` in-place, twiddles preloaded into `s_lds[2..3]`).
         uint coset_y = gl_WorkGroupID.y;
         uint len = pc.len;
@@ -492,7 +517,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 4u) {
+    if (mode == 4u) {
         // 4-coset global single-stage base-field NTT (`b1` in-place, `stage = pc.aux0 >= 10`).
         uint coset_y = gl_WorkGroupID.y;
         if (coset_y >= pc.aux4) {
@@ -520,7 +545,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 5u) {
+    if (mode == 5u) {
         // Coalesced 4-coset scatter from `b1` into `b2` (`vram_cw0`).
         uint q = pc.aux3 + gl_GlobalInvocationID.x;
         if (q >= pc.len) {
@@ -538,7 +563,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 6u) {
+    if (mode == 6u) {
         // Intermediate stage `Ext4` `encode_overflow` shifted bit-reverse copy (`b0 -> b1`).
         lds_kron4_init(lid, 7ul);
         barrier();
@@ -558,7 +583,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 7u) {
+    if (mode == 7u) {
         // Fused <=9-stage LDS `Ext4` NTT (`b1` in-place starting at `Ext4` offset `pc.aux2`).
         uint len = pc.len;
         uint log_d = pc.aux0;
@@ -596,7 +621,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 8u) {
+    if (mode == 8u) {
         // Global single-stage `Ext4` NTT (`b1` in-place starting at `Ext4` offset `pc.aux2`).
         uint half_len = pc.len >> 1u;
         uint pair_idx = pc.aux3 + gl_GlobalInvocationID.x;
@@ -620,7 +645,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 9u) {
+    if (mode == 9u) {
         // Round-0 Canopy salted leaf hashing (`Single` & `Batch`, `b2 -> b4`).
         uint g = pc.aux3 + gl_GlobalInvocationID.x;
         uint num_groups = pc.len;
@@ -632,32 +657,32 @@ void main() {
         uint tree_base = pc.aux2;
         uint domain_len = num_groups * arity;
 
-        u64vec2 salt = derive_round0_salt_gpu(g);
+        u64vec2 salt = derive_round0_salt_gpu(g, turbo);
 
         uint64_t st[25];
-        init_canopy_state(st);
+        init_canopy_state(st, turbo);
         uint lane = 0u;
         uint bit_off = (num_polys == 1u) ? 48u : 56u;
         uint64_t carry = (num_polys == 1u)
-            ? (0x10ul | (uint64_t(arity) << 8u) | (uint64_t(g) << 16u))
-            : (0x11ul | (uint64_t(arity) << 8u) | (uint64_t(num_polys) << 16u) | (uint64_t(g) << 24u));
+            ? (0x10ul | ((uint64_t(arity) & 0xFFul) << 8u) | (uint64_t(g) << 16u))
+            : (0x11ul | ((uint64_t(arity) & 0xFFul) << 8u) | ((uint64_t(num_polys) & 0xFFul) << 16u) | (uint64_t(g) << 24u));
 
-        sponge_feed_u64(st, lane, carry, bit_off, salt.x);
-        sponge_feed_u64(st, lane, carry, bit_off, salt.y);
+        sponge_feed_u64(st, lane, carry, bit_off, salt.x, turbo);
+        sponge_feed_u64(st, lane, carry, bit_off, salt.y, turbo);
 
         for (uint p = 0u; p < num_polys; ++p) {
             uint p_base = p * domain_len + g;
             for (uint k = 0u; k < arity; ++k) {
                 uint64_t w = b2.words[p_base + k * num_groups];
-                sponge_feed_u64(st, lane, carry, bit_off, w);
+                sponge_feed_u64(st, lane, carry, bit_off, w, turbo);
             }
         }
-        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off);
+        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off, turbo);
         store_ext4_b4(tree_base + num_groups + g, dig);
         return;
     }
 
-    if (pc.mode == 10u) {
+    if (mode == 10u) {
         // Stage >= 1 Canopy `Ext4` leaf hashing (`b1 -> b4`).
         uint g = pc.aux3 + gl_GlobalInvocationID.x;
         uint num_groups = pc.len;
@@ -670,27 +695,27 @@ void main() {
         uint tree_base = pc.aux4;
 
         uint64_t st[25];
-        init_canopy_state(st);
+        init_canopy_state(st, turbo);
         uint lane = 0u;
         uint bit_off = 56u;
         uint64_t carry = 0x12ul
-            | (uint64_t(stage_idx) << 8u)
-            | (uint64_t(arity) << 16u)
+            | ((uint64_t(stage_idx) & 0xFFul) << 8u)
+            | ((uint64_t(arity) & 0xFFul) << 16u)
             | (uint64_t(g) << 24u);
 
         for (uint k = 0u; k < arity; ++k) {
             u64vec4 v = load_ext4_b1(cw_base + g + k * num_groups);
-            sponge_feed_u64(st, lane, carry, bit_off, v.x);
-            sponge_feed_u64(st, lane, carry, bit_off, v.y);
-            sponge_feed_u64(st, lane, carry, bit_off, v.z);
-            sponge_feed_u64(st, lane, carry, bit_off, v.w);
+            sponge_feed_u64(st, lane, carry, bit_off, v.x, turbo);
+            sponge_feed_u64(st, lane, carry, bit_off, v.y, turbo);
+            sponge_feed_u64(st, lane, carry, bit_off, v.z, turbo);
+            sponge_feed_u64(st, lane, carry, bit_off, v.w, turbo);
         }
-        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off);
+        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off, turbo);
         store_ext4_b4(tree_base + num_groups + g, dig);
         return;
     }
 
-    if (pc.mode == 11u) {
+    if (mode == 11u) {
         // Single internal Canopy Merkle layer (`half = pc.len`, `tree_base = pc.aux2`).
         uint off = pc.aux3 + gl_GlobalInvocationID.x;
         uint half_nodes = pc.len;
@@ -701,11 +726,11 @@ void main() {
         uint idx = half_nodes + off;
         u64vec4 left  = load_ext4_b4(tree_base + 2u * idx);
         u64vec4 right = load_ext4_b4(tree_base + 2u * idx + 1u);
-        store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right));
+        store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right, turbo));
         return;
     }
 
-    if (pc.mode == 12u) {
+    if (mode == 12u) {
         // Fused top-tree Merkle reduction (`half <= 256` down to `nodes[1]`) in 1 workgroup.
         if (gl_WorkGroupID.x != 0u) {
             return;
@@ -716,7 +741,7 @@ void main() {
                 uint idx = h + lid;
                 u64vec4 left  = load_ext4_b4(tree_base + 2u * idx);
                 u64vec4 right = load_ext4_b4(tree_base + 2u * idx + 1u);
-                store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right));
+                store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right, turbo));
             }
             memoryBarrierBuffer();
             barrier();
@@ -724,7 +749,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 13u) {
+    if (mode == 13u) {
         // Selective query fiber + salt + Steiner sibling gather.
         // `b3` holds `[q_indices[0..num_queries], sib_indices[0..num_sibs]]` as `u64`s.
         // `b5` receives `[salts (if stage 0), fiber_words, sibling_words]`.
@@ -758,7 +783,7 @@ void main() {
         if (tid < num_queries) {
             uint g = uint(b3.words[tid]);
             if (is_ext4 == 0u) {
-                u64vec2 salt = derive_round0_salt_gpu(g);
+                u64vec2 salt = derive_round0_salt_gpu(g, turbo);
                 b5.words[2u * tid]      = salt.x;
                 b5.words[2u * tid + 1u] = salt.y;
                 uint domain_len = num_groups * arity;
@@ -786,7 +811,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 14u) {
+    if (mode == 14u) {
         // Initialize `vram_twiddles_24` (`b3.words[gid] = omega_24^{gid}`).
         uint gid = pc.aux3 + gl_GlobalInvocationID.x;
         if (gid < pc.len) {
@@ -795,7 +820,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 15u) {
+    if (mode == 15u) {
         // 4-coset 3-stage fused radix-8 LDS base-field NTT (`stages s0..=s0+2`, `10 <= s0 <= 22`).
         uint s0 = pc.aux0;
         uint d_stride = 1u << (s0 - 1u);
@@ -840,7 +865,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 16u) {
+    if (mode == 16u) {
         // 3-stage fused radix-8 LDS `Ext4` NTT (`stages s0..=s0+2`, `10 <= s0 <= 22`).
         uint s0 = pc.aux0;
         uint dst_base = pc.aux2;
@@ -886,7 +911,7 @@ void main() {
         return;
     }
 
-    if (pc.mode == 17u) {
+    if (mode == 17u) {
         // 3-bit register-fused radix-8 Mobius pass (`bits b, b+1, b+2 >= 9`) across `num_polys = pc.aux1`.
         uint octs_per_poly = pc.len >> 3u;
         uint bit = pc.aux0;
