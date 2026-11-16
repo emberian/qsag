@@ -4376,6 +4376,184 @@ pub fn retry_hem_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
     )
 }
 
+/// SPDZ-authenticated release of the `Hem` PRF-check digest of a four-lane `Goldilocks`
+/// secret held as additive lanes among exactly the `eval_points.len()` active parties.
+///
+/// 1. Party `p` reshares each of its own additive lanes with a fresh degree-`< t` polynomial
+///    drawn from `party_rngs[p]`; the per-recipient sums are Shamir shares of the secret.
+/// 2. A fresh dealerless MAC key authenticates the four shared lanes (`Π_MAC`, which also
+///    checks degree-`< t` consistency), and one permutation of `Π_pow7` tuples is produced
+///    under the same key.
+/// 3. `poseidon2_compress12_ff(secret, pk_seed, PRF_CHECK tweak)` is evaluated on the
+///    authenticated wires; every S-box opening and the output digest pass `MacCheck`.
+///
+/// Only the digest is opened. No party's lane and no sum of lanes is formed anywhere.
+/// An input substituted *before* step 1 is a different input, not a MAC failure: the
+/// caller must compare the returned digest with its enrolled commitment.
+///
+/// `session_id` must be unique per ceremony. Sub-sessions reuse the `QSAG.POS2.*` labels
+/// of key authentication on a session identifier that is first re-framed with the
+/// `QPRELMPC` prefix under plain `SHAKE256`, so they never coincide with a DKG session.
+pub fn release_additive_hem_prf_check_mpc(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    pk_seed: HemDigest4,
+    additive_lanes: &[SecretBuffer<[Goldilocks; 4]>],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<HemDigest4, Poseidon2MpcError> {
+    release_additive_hem_prf_check_inner(
+        session_id,
+        t,
+        eval_points,
+        pk_seed,
+        additive_lanes,
+        ot_mesh,
+        party_rngs,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Public release arguments plus the post-authentication fault used by the abort test"
+)]
+fn release_additive_hem_prf_check_inner(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[Goldilocks],
+    pk_seed: HemDigest4,
+    additive_lanes: &[SecretBuffer<[Goldilocks; 4]>],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+    corrupt_share_after_auth: Option<usize>,
+) -> Result<HemDigest4, Poseidon2MpcError> {
+    let m = eval_points.len();
+    if t < 2 || t > m || additive_lanes.len() != m || party_rngs.len() != m || ot_mesh.n != m {
+        return Err(Poseidon2MpcError::InvalidQuorum { t, n: m });
+    }
+    validate_all_eval_points_goldilocks(eval_points)?;
+    let mut framed = [0u8; 40];
+    framed[..8].copy_from_slice(b"QPRELMPC");
+    framed[8..].copy_from_slice(&session_id);
+    let sid = crate::sponge::keccak::shake256_32(&framed);
+
+    // 1. Additive lanes -> degree-`< t` Shamir shares, one private polynomial per lane.
+    let mut x = SecretBuffer(vec![vec![Goldilocks::ZERO; 4]; m]);
+    let mut coeffs = SecretBuffer(vec![Goldilocks::ZERO; t]);
+    for p in 0..m {
+        for lane in 0..4 {
+            coeffs[0] = additive_lanes[p][lane];
+            for c in coeffs.iter_mut().skip(1) {
+                *c = party_rngs[p].next_goldilocks();
+            }
+            for (q, &point) in eval_points.iter().enumerate() {
+                let mut acc = SecretBuffer(Goldilocks::ZERO);
+                for &c in coeffs.iter().rev() {
+                    *acc = *acc * point + c;
+                }
+                x[q][lane] += *acc;
+            }
+        }
+    }
+    drop(coeffs);
+
+    // 2. One MAC key for the inputs and the S-box tuples.
+    let alpha_sid = cshake256_32(b"QSAG.POS2.UNIFIED.ALPHA/v1", &sid);
+    let (alpha_contribs_raw, alpha_shamir_raw) =
+        spdz_setup_alpha_goldilocks(&alpha_sid, t, eval_points, party_rngs)?;
+    let alpha_contribs = SecretBuffer(alpha_contribs_raw);
+    let alpha_shamir = SecretBuffer(alpha_shamir_raw);
+    let auth_sid = cshake256_32(b"QSAG.POS2.KEY.AUTH/v1", &sid);
+    let macs = SecretBuffer(spdz_authenticate_goldilocks_batch_ext2(
+        &auth_sid,
+        t,
+        eval_points,
+        ot_mesh,
+        &alpha_contribs,
+        &alpha_shamir,
+        &x,
+        party_rngs,
+    )?);
+    let vault_sid = cshake256_32(b"QSAG.POS2.VAULT.POW7/v1", &sid);
+    let mut vaults = run_dealerless_pi_pow7_with_alpha(
+        vault_sid,
+        t,
+        eval_points,
+        POSEIDON2_SBOXES_PER_PERM,
+        0,
+        0,
+        &alpha_contribs,
+        &alpha_shamir,
+        ot_mesh,
+        party_rngs,
+    )?;
+    drop(alpha_contribs);
+    drop(alpha_shamir);
+
+    let mut inputs = SecretBuffer(
+        (0..m)
+            .map(|p| {
+                vec![core::array::from_fn(|lane| AuthGlWire {
+                    val: x[p][lane],
+                    mac: macs[p][lane],
+                })]
+            })
+            .collect::<Vec<Vec<[AuthGlWire; 4]>>>(),
+    );
+    drop(x);
+    drop(macs);
+    if let Some(p) = corrupt_share_after_auth
+        && p < m
+    {
+        inputs[p][0][0].val += Goldilocks::ONE;
+    }
+
+    // 3. Authenticated evaluation; open only the digest.
+    let tweak = [[
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ]];
+    let mut vault_refs: Vec<&mut PreprocessedPoseidonPartyVault> = vaults.iter_mut().collect();
+    let mut pending = SpdzGoldilocksPendingChecks::new(m);
+    let digests = SecretBuffer(
+        match eval_spdz_hem_compress12_ff_batch(
+            t,
+            eval_points,
+            &inputs,
+            pk_seed,
+            &tweak,
+            &mut vault_refs,
+            &mut pending,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                poison_all_on_abort(&mut [], &mut vault_refs);
+                return Err(Poseidon2MpcError::Preprocess(e));
+            }
+        },
+    );
+    drop(inputs);
+    let opened = flush_verify_and_open_hem_digests4(
+        &sid,
+        "personal_release_cut",
+        t,
+        eval_points,
+        &digests,
+        &mut pending,
+        &mut [],
+        &mut vault_refs,
+        party_rngs,
+    )?;
+    opened
+        .first()
+        .copied()
+        .ok_or(Poseidon2MpcError::InvalidParams)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -4825,6 +5003,7 @@ mod tests {
     /// for the online protocol. Dealerless material generation has separate integration tests.
     #[test]
     fn test_poseidon2_mpc_cached_top_subtree_signature_byte_identical() {
+        let _memory = crate::test_budget::reserve_mb(1100);
         let params = PqHashParams {
             w: 4,
             ell1: 128,
@@ -5583,6 +5762,7 @@ mod tests {
 
     #[test]
     fn test_stateful_jorts_poseidon2_mpc_exact_parity_latch_and_dishonest_majority_abort() {
+        let _memory = crate::test_budget::reserve_mb(1900);
         // Compact stateful `JortsPoseidon2` parameter set (`w = 4, ell1 = 128, target_sum = 192, h = 2, d = 2`)
         let params = PqHashParams {
             w: 4,
@@ -5753,6 +5933,7 @@ mod tests {
 
     #[test]
     fn multilayer_corduroy_poseidon2_mpc_end_to_end() {
+        let _memory = crate::test_budget::reserve_mb(1200);
         let params = PqHashParams {
             w: 4,
             ell1: 128,
@@ -5820,6 +6001,7 @@ mod tests {
     /// not cover any other payload, key, context or quorum.
     #[test]
     fn multilayer_corduroy_policy_gated_sign_and_verify_end_to_end() {
+        let _memory = crate::test_budget::reserve_mb(1200);
         use crate::corduroy::Corduroy;
         use crate::sponge::keccak::cshake256_32;
         use qsag_accel::CpuReferenceBackend;
@@ -6011,6 +6193,7 @@ mod tests {
 
     #[test]
     fn test_uncached_signing_and_keygen_reject_unenrolled_or_forged_pk_and_params() {
+        let _memory = crate::test_budget::reserve_mb(450);
         let stateful_params = PqHashParams {
             w: 4,
             ell1: 128,
@@ -6425,5 +6608,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reshared_seed.len(), new_n);
+    }
+
+    #[test]
+    fn additive_lane_release_matches_clear_digest_and_mac_catches_a_changed_share() {
+        let m = 3usize;
+        let pts: Vec<Goldilocks> = (1..=m as u64).map(Goldilocks::from_u64_reduced).collect();
+        let secret: HemDigest4 =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(77 + i as u64));
+        let pk_seed: HemDigest4 =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(900 + i as u64));
+        let lanes = |tag: u64| -> Vec<SecretBuffer<[Goldilocks; 4]>> {
+            let a: HemDigest4 =
+                core::array::from_fn(|i| Goldilocks::from_u64_reduced(tag + i as u64));
+            let b: HemDigest4 =
+                core::array::from_fn(|i| Goldilocks::from_u64_reduced(3 * tag + i as u64));
+            let c: HemDigest4 = core::array::from_fn(|i| secret[i] - a[i] - b[i]);
+            vec![SecretBuffer(a), SecretBuffer(b), SecretBuffer(c)]
+        };
+        let mut rngs = make_rngs(m, 0x51);
+        let mut mesh = OtMesh::establish_ideal_for_test([0x52; 32], &mut rngs);
+        let opened = release_additive_hem_prf_check_mpc(
+            [0x53; 32],
+            m,
+            &pts,
+            pk_seed,
+            &lanes(11),
+            &mut mesh,
+            &mut rngs,
+        )
+        .unwrap();
+        assert_eq!(opened, hem_prf_check_digest_clear(secret, pk_seed));
+        // A share changed after authentication never reaches an opened digest.
+        assert!(matches!(
+            release_additive_hem_prf_check_inner(
+                [0x54; 32],
+                m,
+                &pts,
+                pk_seed,
+                &lanes(19),
+                &mut mesh,
+                &mut rngs,
+                Some(1),
+            ),
+            Err(Poseidon2MpcError::Preprocess(_))
+        ));
+        // Malformed quorums are refused before any protocol message.
+        assert!(matches!(
+            release_additive_hem_prf_check_mpc(
+                [0x55; 32],
+                1,
+                &pts,
+                pk_seed,
+                &lanes(23),
+                &mut mesh,
+                &mut rngs,
+            ),
+            Err(Poseidon2MpcError::InvalidQuorum { .. })
+        ));
     }
 }
