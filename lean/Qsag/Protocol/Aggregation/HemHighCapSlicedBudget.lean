@@ -1052,3 +1052,107 @@ theorem highCap_sliced_three_challenge_stage_supported_budget
 
 end Qsag
 end
+
+/-! ### Exports for lane agg -/
+public section
+namespace Qsag
+
+#export_eqns hemPcsHighCapTableRow slicedPcsHighCapRow hemPcsHighCapWitnessRows
+  slicedPcsHighCapTable
+
+/- Bit floors of the three stage bounds, restated on the evaluable twins of §2 and §4. -/
+
+private theorem binaryBits_iff_T (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) (k b : Nat) :
+    k * (slicedBinaryStageBound g r w).num * 2 ^ b ≤ (slicedBinaryStageBound g r w).den ↔
+      k * (r.2.2.2.2 +
+          restT g.n g.d r.2.2.1 w.2.2.1 (r.2.2.2.1 * r.2.2.1 - r.2.2.2.2) r.2.2.2.2
+            (goldilocksPrime ^ 4)) * 2 ^ b ≤
+        goldilocksPrime ^ 4 * goldilocksPrime ^ 4 := by
+  rw [bridge_slicedBinaryStageBound_num, bridge_slicedBinaryStageBound_den,
+    slicedStageCount_def, bridge_goldilocksExt4Card_def, restT_eq]
+
+private theorem multiFoldBits_iff_T (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) (k b : Nat) :
+    k * (slicedMultiFoldStageBound g r w).num * 2 ^ b ≤ (slicedMultiFoldStageBound g r w).den ↔
+      k * mfNumT g r w * 2 ^ b ≤ (goldilocksPrime ^ 4) ^ 4 := by
+  rw [mfNumT_eq, bridge_slicedMultiFoldStageBound_den, bridge_goldilocksExt4Card_def]
+
+private theorem threeChallengeBits_iff_T (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) (k b : Nat) :
+    k * (highCapSlicedThreeChallengeStageBound g r w).num * 2 ^ b ≤
+        (highCapSlicedThreeChallengeStageBound g r w).den ↔
+      k * threeT g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2 (goldilocksPrime ^ 4) *
+          2 ^ b ≤
+        goldilocksPrime ^ 4 * (goldilocksPrime ^ 4 * goldilocksPrime ^ 4) := by
+  rw [highCapSlicedThreeChallengeStageBound_num, highCapSlicedThreeChallengeStageBound_den,
+    bridge_goldilocksExt4Card_def, threeT_eq]
+
+private theorem atLeastBits_iff_one_mul (b : Nat) (x : RatBound) :
+    atLeastBits b x ↔ 1 * x.num * 2 ^ b ≤ x.den := by
+  rw [Nat.one_mul]
+  exact Iff.rfl
+
+private theorem dfm_atLeastBits_iff (Q : Nat) (x : RatBound) :
+    atLeastBits 128 (dfmRoundScale Q x) ↔ (2 * Q + 1) ^ 2 * x.num * 2 ^ 128 ≤ x.den :=
+  Iff.rfl
+
+/-- `nv = 28`, stage `0`: the binary bound does not have `184` bits, and its DFM scale at
+    `Q + 1 = 2^27` does not have `128` bits. -/
+theorem highCap_nv28_stage0_binary_tight :
+    ¬ atLeastBits 184 (slicedBinaryStageBound { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (slicedBinaryStageBound
+        { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · exact absurd ((binaryBits_iff_T _ _ _ _ _).mp ((atLeastBits_iff_one_mul _ _).mp h))
+      (by decide +kernel)
+  · exact absurd ((binaryBits_iff_T _ _ _ _ _).mp ((dfm_atLeastBits_iff _ _).mp h))
+      (by decide +kernel)
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 28`, stage `0`: the multi-fold bound does not have `178` bits, and its DFM scale at
+    `Q + 1 = 2^24` does not have `128` bits. -/
+theorem highCap_nv28_stage0_multifold_tight :
+    ¬ atLeastBits 178 (slicedMultiFoldStageBound { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 24 - 1) (slicedMultiFoldStageBound
+        { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · exact absurd ((multiFoldBits_iff_T _ _ _ _ _).mp ((atLeastBits_iff_one_mul _ _).mp h))
+      (by decide +kernel)
+  · exact absurd ((multiFoldBits_iff_T _ _ _ _ _).mp ((dfm_atLeastBits_iff _ _).mp h))
+      (by decide +kernel)
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 25`, stage `1`: the multi-fold bound does not have `194` bits. -/
+theorem highCap_nv25_stage1_multifold_tight :
+    ¬ atLeastBits 194 (slicedMultiFoldStageBound { stageIdx := 1, logBlowup := 4, stepVars := 4, n := 524288, d := 32770 }
+        (25, 1, 133941, 32, 1732) (25, 1, 131078, 196)) := fun h =>
+  absurd ((multiFoldBits_iff_T _ _ _ _ _).mp ((atLeastBits_iff_one_mul _ _).mp h))
+    (by decide +kernel)
+
+/-- `nv = 28`, stage `0`: the 3-challenge bound does not have `184` bits, and its DFM scale at
+    `Q + 1 = 2^27` does not have `128` bits. -/
+theorem highCap_nv28_stage0_three_challenge_tight :
+    ¬ atLeastBits 184 (highCapSlicedThreeChallengeStageBound
+        { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (highCapSlicedThreeChallengeStageBound
+        { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+        (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · exact absurd ((threeChallengeBits_iff_T _ _ _ _ _).mp ((atLeastBits_iff_one_mul _ _).mp h))
+      (by decide +kernel)
+  · exact absurd ((threeChallengeBits_iff_T _ _ _ _ _).mp ((dfm_atLeastBits_iff _ _).mp h))
+      (by decide +kernel)
+
+#verify_constructive Qsag.highCap_nv28_stage0_binary_tight
+#verify_constructive Qsag.highCap_nv28_stage0_multifold_tight
+#verify_constructive Qsag.highCap_nv25_stage1_multifold_tight
+#verify_constructive Qsag.highCap_nv28_stage0_three_challenge_tight
+
+end Qsag
+end

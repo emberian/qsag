@@ -2082,4 +2082,23 @@ public section
 #verify_constructive Qsag.SlicedJet.cover_count
 #verify_constructive Qsag.SlicedJet.leaf_bound_arith
 
+namespace Qsag
+open CommRingOps
+
+/- Public forms of the degree, evaluation and root-count lemmas used by the incidence tests. -/
+
+theorem UPoly.natDeg_sub_le_max_export {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (p q : UPoly R) (B : Nat) (hp : p.natDeg ≤ B) (hq : q.natDeg ≤ B) :
+    (sub p q).natDeg ≤ B := natDeg_sub_le_max p q B hp hq
+
+theorem UPoly.eval_sub_eq_export {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (p q : UPoly R) (z : R) : (sub p q).eval z = sub (p.eval z) (q.eval z) := eval_sub_eq p q z
+
+theorem UPoly.roots_le_natDeg_export {F : Type} [LawfulField F] [DecidableEq F]
+    (P : UPoly F) (hP : P ≠ zero) (zs : List F)
+    (hNd : zs.Nodup) (hRoot : ∀ z ∈ zs, P.eval z = zero) :
+    zs.length ≤ P.natDeg := uPoly_roots_le_natDeg P hP zs hNd hRoot
+
+end Qsag
+
 end

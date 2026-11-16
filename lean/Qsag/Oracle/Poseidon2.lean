@@ -6512,14 +6512,14 @@ theorem poseidon2Duplex_swapped_rounds_kat :
         [⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
          ⟨⟨Goldilocks.ofNat 2, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
-         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩]
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩];
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
        (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
         ⟨lane4Zero, lane4Zero, lane4Zero⟩
         [⟨⟨Goldilocks.ofNat 2, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 1⟩⟩,
-         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩]
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩];
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val])) := by
   decide +kernel
 
@@ -6540,7 +6540,7 @@ theorem poseidon2Duplex_swapped_sumcheck_kat :
          ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 12, Goldilocks.ofNat 0⟩⟩,
-         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩]
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩];
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val]) =
        (let s := List.foldl (fun s a => poseidon2Perm12 (state12Add s a))
         ⟨lane4Zero, lane4Zero, lane4Zero⟩
@@ -6554,7 +6554,7 @@ theorem poseidon2Duplex_swapped_sumcheck_kat :
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 10, Goldilocks.ofNat 4⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 11, Goldilocks.ofNat 0⟩⟩,
          ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 12, Goldilocks.ofNat 0⟩⟩,
-         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩]
+         ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 13, Goldilocks.ofNat 0⟩⟩];
       [s.b0.x0.val, s.b0.x1.val, s.b0.x2.val, s.b0.x3.val])) := by
   decide +kernel
 
