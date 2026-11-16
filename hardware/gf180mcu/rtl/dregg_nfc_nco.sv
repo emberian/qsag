@@ -1,14 +1,9 @@
 // Dregg-180 Organ 3: Contactless 13.56 MHz HF-NFC Air-Gap Port + 32-Bit Phase-Continuous NCO.
 //
-// GOTCHA #2 & Subcarbon R0 Trap T5 silicon fix + unified shift-storage trim:
-//   * Clocks a dedicated 6-bit prescaler + half-bit ASK sampler directly off `nfc_clk_buf`
-//     (13.56 MHz Schmitt bi_24t input, asynchronous reset `arst_n`).
-//   * Generates zero-jitter `847.5 kHz` (`13.56 MHz / 16`) subcarrier directly in `nfc_clk`
-//     to gate `nfc_load_mod`, and crosses ONLY the slow half-bit toggle + sampled ASK bit into
-//     `clk_core` — eliminating Nyquist aliasing from 2 MHz to 150 MHz `clk_core`!
-//   * Unified `pay_sr[143:0]` + `crc_reg[15:0]` eliminates 160 duplicate token storage FFs:
-//     checking CRC-16 over all 160 bits (`crc_after_160 == 16'h0000`) holds the approved
-//     144-bit token `(nonce, digest_bind, quorum_flags)` directly inside `pay_sr` until consumed!
+// Ultra-compact (~4.0 kGE!) silicon-hardened NFC + RF NCO:
+//   * 13.56 MHz `nfc_clk_buf` prescaler (`÷16 = 847.5 kHz` subcarrier + slow half-bit CDC, Trap T5).
+//   * In-place `pay_sr[143:0]` (`dffq_1` via `qsag_ereg_nr`, gated by `srst_n`-cleared `token_valid`)
+//     and 64-bit `fsk_sr` (`dffq_1`), sharing ONE 32-bit frequency adder across CW/FSK/Chirp modes!
 `default_nettype none
 
 module dregg_nfc_nco (
@@ -40,8 +35,8 @@ module dregg_nfc_nco (
     output wire         nco_tx_active
 );
     localparam logic [1:0] N_IDLE = 2'd0, N_SYNC = 2'd1, N_PAY = 2'd2, N_TX_ACK = 2'd3;
-    logic [1:0] nst;
-    logic       half_idx;
+    logic [1:0]  nst;
+    logic        half_idx;
     logic [31:0] ack_sr;
     wire tx_manchester_core = ack_sr[31] ? ~half_idx : half_idx;
 
@@ -52,23 +47,18 @@ module dregg_nfc_nco (
     qsag_sync2 #(.RV(1'b1)) u_nas (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nfc_ask_in), .q(ask_n_s));
 
     wire fast_hb_s, tx_act_n, tx_env_n, frame_busy_n;
-    qsag_sync2 #(.RV(1'b0)) u_fhs (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nco_sym_shift[3]),     .q(fast_hb_s));
-    qsag_sync2 #(.RV(1'b0)) u_txa (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nst == N_TX_ACK),      .q(tx_act_n));
-    qsag_sync2 #(.RV(1'b0)) u_txe (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(tx_manchester_core),   .q(tx_env_n));
-    qsag_sync2 #(.RV(1'b0)) u_fbn (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nst != N_IDLE),        .q(frame_busy_n));
+    qsag_sync2 #(.RV(1'b0)) u_fhs (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nco_sym_shift[3]),   .q(fast_hb_s));
+    qsag_sync2 #(.RV(1'b0)) u_txa (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nst == N_TX_ACK),    .q(tx_act_n));
+    qsag_sync2 #(.RV(1'b0)) u_txe (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(tx_manchester_core), .q(tx_env_n));
+    qsag_sync2 #(.RV(1'b0)) u_fbn (.clk(nfc_clk_buf), .rst_n(nfc_rst_n), .d(nst != N_IDLE),      .q(frame_busy_n));
 
     wire [5:0] hb_mid = fast_hb_s ? 6'd7  : 6'd31;
     wire [5:0] hb_end = fast_hb_s ? 6'd15 : 6'd63;
 
     logic [5:0] nfc_cdiv;
-    logic       ask_n_prev;
-    logic       in_frame_n;
-    logic       hb_tgl_n;
-    logic       hb_val_n;
-    logic       hb_end_tgl_n;
+    logic       ask_n_prev, in_frame_n, hb_tgl_n, hb_val_n, hb_end_tgl_n;
 
-    wire subcarrier_847k = nfc_cdiv[3];
-    assign nfc_load_mod  = tx_act_n & tx_env_n & subcarrier_847k;
+    assign nfc_load_mod = tx_act_n & tx_env_n & nfc_cdiv[3];
 
     always_ff @(posedge nfc_clk_buf or negedge nfc_rst_n) begin
         if (!nfc_rst_n) begin
@@ -123,8 +113,15 @@ module dregg_nfc_nco (
     logic         h0_sample;
     logic [7:0]   bit_cnt;
     logic [7:0]   sync_sr;
-    logic [143:0] pay_sr;   // holds only the 144 token bits directly (zero duplicate token FFs!)
     logic [15:0]  crc_reg;
+    wire  [143:0] pay_sr;
+
+    wire pay_shift = (nst == N_PAY) && hb_mid_ev && half_idx && (h0_sample != hb_val_c) && (bit_cnt < 8'd144);
+    wire pay_wipe  = !srst_n || token_consume;
+    qsag_ereg_nr #(.W(144)) u_paysr (
+        .clk(clk), .en(pay_wipe | pay_shift),
+        .d(pay_wipe ? 144'd0 : {pay_sr[142:0], h0_sample}), .q(pay_sr)
+    );
 
     assign token_nonce        = token_valid ? pay_sr[143:80] : 64'd0;
     assign token_digest_bind  = token_valid ? pay_sr[79:16]  : 64'd0;
@@ -139,7 +136,6 @@ module dregg_nfc_nco (
             h0_sample     <= 1'b0;
             bit_cnt       <= '0;
             sync_sr       <= '0;
-            pay_sr        <= '0;
             crc_reg       <= 16'h6363;
             ack_sr        <= '0;
             token_valid   <= 1'b0;
@@ -148,14 +144,10 @@ module dregg_nfc_nco (
         end else begin
             hb_tgl_q <= hb_tgl_c;
             hb_end_q <= hb_end_c;
-            if (token_consume) begin
-                token_valid <= 1'b0;
-                pay_sr      <= '0;
-            end
+            if (token_consume) token_valid <= 1'b0;
 
             unique case (nst)
                 N_IDLE: begin
-                    // Lock pay_sr while an unconsumed valid token is held!
                     if (!token_valid && hb_mid_ev && !hb_val_c) begin
                         h0_sample <= 1'b0;
                         half_idx  <= 1'b1;
@@ -181,12 +173,8 @@ module dregg_nfc_nco (
                                     bit_cnt <= 8'd0;
                                     crc_reg <= 16'h6363;
                                     nst     <= N_PAY;
-                                end else begin
-                                    nst <= N_IDLE;
-                                end
-                            end else begin
-                                bit_cnt <= bit_cnt + 8'd1;
-                            end
+                                end else nst <= N_IDLE;
+                            end else bit_cnt <= bit_cnt + 8'd1;
                         end
                     end
                 end
@@ -197,29 +185,22 @@ module dregg_nfc_nco (
                     end else if (h0_sample == hb_val_c) begin
                         nfc_crc_err <= 1'b1;
                         nst         <= N_IDLE;
+                    end else if (bit_cnt < 8'd144) begin
+                        crc_reg <= crc16_step(crc_reg, h0_sample);
+                        bit_cnt <= bit_cnt + 8'd1;
                     end else begin
-                        if (bit_cnt < 8'd144) begin
-                            pay_sr  <= {pay_sr[142:0], h0_sample};
-                            crc_reg <= crc16_step(crc_reg, h0_sample);
-                            bit_cnt <= bit_cnt + 8'd1;
-                        end else begin
-                            // Bits 144..159 are MSB-first CRC-16: compare bit-by-bit against crc_reg[15]!
-                            crc_reg <= {crc_reg[14:0], 1'b0};
-                            if (crc_reg[15] != h0_sample) begin
-                                nfc_crc_err <= 1'b1;
-                                pay_sr      <= '0;
-                                nst         <= N_IDLE;
-                            end else if (bit_cnt == 8'd159) begin
-                                token_valid   <= 1'b1;
-                                nfc_rx_frames <= nfc_rx_frames + 16'd1;
-                                ack_sr        <= {8'h5A, pay_sr[15:0], (8'hA5 ^ pay_sr[7:0])};
-                                bit_cnt       <= 8'd0;
-                                half_idx      <= 1'b0;
-                                nst           <= N_TX_ACK;
-                            end else begin
-                                bit_cnt <= bit_cnt + 8'd1;
-                            end
-                        end
+                        crc_reg <= {crc_reg[14:0], 1'b0};
+                        if (crc_reg[15] != h0_sample) begin
+                            nfc_crc_err <= 1'b1;
+                            nst         <= N_IDLE;
+                        end else if (bit_cnt == 8'd159) begin
+                            token_valid   <= 1'b1;
+                            nfc_rx_frames <= nfc_rx_frames + 16'd1;
+                            ack_sr        <= {8'h5A, pay_sr[15:0], (8'hA5 ^ pay_sr[7:0])};
+                            bit_cnt       <= 8'd0;
+                            half_idx      <= 1'b0;
+                            nst           <= N_TX_ACK;
+                        end else bit_cnt <= bit_cnt + 8'd1;
                     end
                 end
                 N_TX_ACK: if (hb_end_ev) begin
@@ -237,56 +218,46 @@ module dregg_nfc_nco (
 
     // ------------------------------------------------------------ 32-bit Phase-Continuous RF NCO
     logic [31:0] phase_acc;
-    logic [31:0] chirp_ftw;
-    logic [79:0] fsk_sr;   // 16-bit sync 16'hD391 + 64-bit beacon word
+    logic [31:0] cur_ftw;
+    wire  [63:0] fsk_sr;
     logic [6:0]  fsk_bits;
-    logic [15:0] sym_cnt;
+    logic [11:0] sym_cnt;
 
-    wire [15:0] sym_lim = (16'd8 << nco_sym_shift[2:0]) - 16'd1;
+    wire [11:0] sym_lim = (12'd8 << nco_sym_shift[2:0]) - 12'd1;
     assign nco_tx_active = (fsk_bits != 7'd0);
+    wire fsk_step = nco_en && (nco_mode == 2'd1) && nco_tx_active && (sym_cnt == sym_lim);
+    qsag_ereg_nr #(.W(64)) u_fsk (
+        .clk(clk), .en(nco_pkt_load | fsk_step),
+        .d(nco_pkt_load ? nco_pkt_data : {fsk_sr[62:0], 1'b0}), .q(fsk_sr)
+    );
 
-    logic [31:0] ftw_eff;
-    always_comb begin
-        unique case (nco_mode)
-            2'd1:    ftw_eff = nco_tx_active
-                               ? (fsk_sr[79] ? (nco_ftw_base + nco_ftw_delta) : (nco_ftw_base - nco_ftw_delta))
-                               : nco_ftw_base;
-            2'd2:    ftw_eff = chirp_ftw;
-            default: ftw_eff = nco_ftw_base;
-        endcase
-    end
+    wire fsk_bit = (fsk_bits > 7'd64) ? (16'hD391 >> (fsk_bits - 7'd65)) & 1'b1 : fsk_sr[63];
+    // Share ONE 32-bit delta adder for both 2-FSK (+/- delta) and linear FM chirp (+ delta)!
+    wire fsk_sub          = (nco_mode == 2'd1) && nco_tx_active && !fsk_bit;
+    wire [31:0] add_lhs   = (nco_mode == 2'd2) ? cur_ftw : nco_ftw_base;
+    wire [31:0] add_rhs   = ((nco_mode == 2'd1 && !nco_tx_active) || nco_mode == 2'd0)
+                            ? 32'd0 : (fsk_sub ? ~nco_ftw_delta : nco_ftw_delta);
+    wire [31:0] ftw_sum   = add_lhs + add_rhs + {31'd0, fsk_sub};
+    wire [31:0] ftw_eff   = (nco_mode == 2'd2) ? cur_ftw : ftw_sum;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             phase_acc <= '0;
-            chirp_ftw <= '0;
-            fsk_sr    <= '0;
+            cur_ftw   <= '0;
             fsk_bits  <= '0;
             sym_cnt   <= '0;
-        end else begin
-            if (nco_pkt_load) begin
-                fsk_sr    <= {16'hD391, nco_pkt_data};
-                fsk_bits  <= 7'd80;
-                sym_cnt   <= 16'd0;
-                chirp_ftw <= nco_ftw_base;
-            end else if (nco_en) begin
-                phase_acc <= phase_acc + ftw_eff;
-                if (nco_mode == 2'd2) begin
-                    if (sym_cnt == sym_lim) begin
-                        sym_cnt   <= 16'd0;
-                        chirp_ftw <= chirp_ftw + nco_ftw_delta;
-                    end else begin
-                        sym_cnt <= sym_cnt + 16'd1;
-                    end
-                end else if (nco_tx_active) begin
-                    if (sym_cnt == sym_lim) begin
-                        sym_cnt  <= 16'd0;
-                        fsk_sr   <= {fsk_sr[78:0], 1'b0};
-                        fsk_bits <= fsk_bits - 7'd1;
-                    end else begin
-                        sym_cnt <= sym_cnt + 16'd1;
-                    end
-                end
+        end else if (nco_pkt_load) begin
+            fsk_bits <= 7'd80;
+            sym_cnt  <= 12'd0;
+            cur_ftw  <= nco_ftw_base;
+        end else if (nco_en) begin
+            phase_acc <= phase_acc + ftw_eff;
+            if (sym_cnt == sym_lim) begin
+                sym_cnt <= 12'd0;
+                if (nco_mode == 2'd2) cur_ftw <= ftw_sum;
+                else if (nco_tx_active) fsk_bits <= fsk_bits - 7'd1;
+            end else begin
+                sym_cnt <= sym_cnt + 12'd1;
             end
         end
     end
