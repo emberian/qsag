@@ -108,23 +108,35 @@ module qsag_keccak_2rpc (
   end
 endmodule
 
-// 64 x 64 -> 127-bit carry-less product: every output bit is one balanced XOR reduction.
-module qsag_clmul64 (
-  input  wire [63:0]  a,
-  input  wire [63:0]  b,
-  output wire [126:0] p
+// Recursive carry-less Karatsuba; an 8-bit schoolbook leaf is small enough for
+// exhaustive symbolic LEC. The same module is used at every recursive level.
+module qsag_clmul #(parameter int N = 64) (
+  input wire [N-1:0] a, b,
+  output wire [2*N-2:0] p
 );
-  for (genvar k = 0; k < 127; k++) begin : g_col
-    wire [63:0] v;
-    for (genvar i = 0; i < 64; i++) begin : g_pp
-      if (k - i >= 0 && k - i < 64) begin : g_in
-        assign v[i] = a[i] & b[k - i];
-      end else begin : g_z
-        assign v[i] = 1'b0;
+  if (N <= 8) begin : g_base
+    for (genvar k = 0; k < 2*N-1; k++) begin : g_col
+      wire [N-1:0] v;
+      for (genvar i = 0; i < N; i++) begin : g_pp
+        if (k-i >= 0 && k-i < N) begin : g_in
+          assign v[i] = a[i] & b[k-i];
+        end else begin : g_zero
+          assign v[i] = 1'b0;
+        end
       end
+      assign p[k] = ^v;
     end
-    assign p[k] = ^v;
+  end else begin : g_rec
+    localparam int H = N/2;
+    wire [N-2:0] lo, hi, mid;
+    qsag_clmul #(.N(H)) u_lo (.a(a[H-1:0]), .b(b[H-1:0]), .p(lo));
+    qsag_clmul #(.N(H)) u_hi (.a(a[N-1:H]), .b(b[N-1:H]), .p(hi));
+    qsag_clmul #(.N(H)) u_mid (.a(a[H-1:0]^a[N-1:H]), .b(b[H-1:0]^b[N-1:H]), .p(mid));
+    assign p = {{N{1'b0}},lo} ^ {hi,{N{1'b0}}} ^ ({{N{1'b0}},(mid^lo^hi)} << H);
   end
+endmodule
+module qsag_clmul64 (input wire [63:0] a,b, output wire [126:0] p);
+  qsag_clmul #(.N(64)) u (.a(a), .b(b), .p(p));
 endmodule
 
 // a * b in F_2[z] / (z^128 + z^7 + z^2 + z + 1), structured as clmul128_wide_portable +
