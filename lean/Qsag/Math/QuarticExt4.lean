@@ -1,7 +1,7 @@
 module
 public import Qsag.Math.Goldilocks
 public import Qsag.Spec.Encoding
-public import Qsag.Tactic.Prelude
+public import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -1670,4 +1670,9 @@ theorem ring_add (x y : QuarticGoldilocks) : CommRingOps.add x y = add x y := rf
 theorem ring_sub (x y : QuarticGoldilocks) : CommRingOps.sub x y = sub x y := rfl
 theorem ring_mul (x y : QuarticGoldilocks) : CommRingOps.mul x y = mul x y := rfl
 end Qsag.QuarticGoldilocks
+end
+
+public section
+#export_eqns Qsag.Goldilocks.wordMultiplicity Qsag.ext4WordMultiplicity
+#verify_constructive Qsag.GoldilocksField.GoldilocksExt4.towerToPoly_mul_hom Qsag.wordQuadPool_fiber_length
 end

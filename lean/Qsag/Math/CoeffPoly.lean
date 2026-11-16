@@ -52,6 +52,10 @@ def subCoeffs {R : Type} [CommRingOps R] : List R → List R → List R
   | [], d :: ds => CommRingOps.neg d :: subCoeffs [] ds
   | c :: cs, d :: ds => CommRingOps.sub c d :: subCoeffs cs ds
 
+theorem subCoeffs_cons_cons {R : Type} [CommRingOps R] (c d : R) (cs ds : List R) :
+    subCoeffs (c :: cs) (d :: ds) = CommRingOps.sub c d :: subCoeffs cs ds := by
+  conv => lhs; unfold subCoeffs
+
 theorem subCoeffs_length :
     ∀ {R : Type} [CommRingOps R] (cs ds : List R),
       (subCoeffs cs ds).length = Nat.max cs.length ds.length

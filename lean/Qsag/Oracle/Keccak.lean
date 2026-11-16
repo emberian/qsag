@@ -16,6 +16,7 @@ Self-contained Lean 4.35 sponge and byte-framing foundation (`Init` only, 0 Math
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Spec.Encoding
+public import Qsag.Oracle.ByteFraming
 
 public section
 namespace Qsag
@@ -45,150 +46,6 @@ structure HashCollisionWitness (H : Hash) where
 
 theorem HashCollisionWitness.toCollision {H : Hash} (w : HashCollisionWitness H) : Collision H :=
   ⟨w.m1, w.m2, w.ne, w.eq⟩
-
-/-! ## 2. Unsigned LEB128 & Self-Delimiting Multi-Field Byte Framing (`encodeMultiFrame_injective`) -/
-
-def leb128Aux : Nat → Nat → List UInt8
-  | 0, n => [UInt8.ofNat (n % 128)]
-  | fuel + 1, n =>
-    if n < 128 then [UInt8.ofNat n]
-    else UInt8.ofNat (128 + n % 128) :: leb128Aux fuel (n / 128)
-
-theorem leb128Aux_zero (n : Nat) : leb128Aux 0 n = [UInt8.ofNat (n % 128)] := by rfl
-theorem leb128Aux_succ (fuel n : Nat) : leb128Aux (fuel + 1) n =
-    if n < 128 then [UInt8.ofNat n]
-    else UInt8.ofNat (128 + n % 128) :: leb128Aux fuel (n / 128) := by rfl
-
-/-- Canonical unsigned LEB128 encoding matching `push_leb128` in Rust. -/
-@[expose] def leb128 (n : Nat) : List UInt8 :=
-  leb128Aux n n
-
-private theorem leb128Aux_prefix_inj :
-    ∀ {f₁ f₂ n₁ n₂ : Nat} {r₁ r₂ : List UInt8},
-      n₁ ≤ f₁ → n₂ ≤ f₂ →
-      leb128Aux f₁ n₁ ++ r₁ = leb128Aux f₂ n₂ ++ r₂ →
-      n₁ = n₂ ∧ r₁ = r₂
-  | 0, 0, n₁, n₂, r₁, r₂, hn₁, hn₂, hEq => by
-    have z₁ : n₁ = 0 := by omega
-    have z₂ : n₂ = 0 := by omega
-    subst z₁ z₂
-    simp only [leb128Aux, List.singleton_append, List.cons.injEq] at hEq
-    exact ⟨rfl, hEq.2⟩
-  | 0, f₂ + 1, n₁, n₂, r₁, r₂, hn₁, _, hEq => by
-    have z₁ : n₁ = 0 := by omega
-    subst z₁
-    simp only [leb128Aux] at hEq
-    if hlt : n₂ < 128 then
-      simp only [hlt, ↓reduceIte, List.singleton_append, List.cons.injEq] at hEq
-      have hb := congrArg UInt8.toNat hEq.1
-      simp only [UInt8.toNat_ofNat'] at hb
-      have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8] at hb
-      exact ⟨by omega, hEq.2⟩
-    else
-      simp only [hlt, ↓reduceIte, List.cons_append, List.cons.injEq] at hEq
-      have hb := congrArg UInt8.toNat hEq.1
-      simp only [UInt8.toNat_ofNat'] at hb
-      have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8] at hb
-      omega
-  | f₁ + 1, 0, n₁, n₂, r₁, r₂, _, hn₂, hEq => by
-    have z₂ : n₂ = 0 := by omega
-    subst z₂
-    simp only [leb128Aux] at hEq
-    if hlt : n₁ < 128 then
-      simp only [hlt, ↓reduceIte, List.singleton_append, List.cons.injEq] at hEq
-      have hb := congrArg UInt8.toNat hEq.1
-      simp only [UInt8.toNat_ofNat'] at hb
-      have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8] at hb
-      exact ⟨by omega, hEq.2⟩
-    else
-      simp only [hlt, ↓reduceIte, List.cons_append, List.cons.injEq] at hEq
-      have hb := congrArg UInt8.toNat hEq.1
-      simp only [UInt8.toNat_ofNat'] at hb
-      have h8 : (2 : Nat) ^ 8 = 256 := rfl
-      rw [h8] at hb
-      omega
-  | f₁ + 1, f₂ + 1, n₁, n₂, r₁, r₂, hn₁, hn₂, hEq => by
-    simp only [leb128Aux] at hEq
-    if h₁ : n₁ < 128 then
-      if h₂ : n₂ < 128 then
-        simp only [h₁, h₂, ↓reduceIte, List.singleton_append, List.cons.injEq] at hEq
-        have hb := congrArg UInt8.toNat hEq.1
-        simp only [UInt8.toNat_ofNat'] at hb
-        have h8 : (2 : Nat) ^ 8 = 256 := rfl
-        rw [h8] at hb
-        exact ⟨by omega, hEq.2⟩
-      else
-        simp only [h₁, h₂, ↓reduceIte, List.cons_append, List.cons.injEq] at hEq
-        have hb := congrArg UInt8.toNat hEq.1
-        simp only [UInt8.toNat_ofNat'] at hb
-        have h8 : (2 : Nat) ^ 8 = 256 := rfl
-        rw [h8] at hb
-        omega
-    else
-      if h₂ : n₂ < 128 then
-        simp only [h₁, h₂, ↓reduceIte, List.cons_append, List.cons.injEq] at hEq
-        have hb := congrArg UInt8.toNat hEq.1
-        simp only [UInt8.toNat_ofNat'] at hb
-        have h8 : (2 : Nat) ^ 8 = 256 := rfl
-        rw [h8] at hb
-        omega
-      else
-        simp only [h₁, h₂, ↓reduceIte, List.cons_append, List.cons.injEq] at hEq
-        have hb := congrArg UInt8.toNat hEq.1
-        simp only [UInt8.toNat_ofNat'] at hb
-        have h8 : (2 : Nat) ^ 8 = 256 := rfl
-        rw [h8] at hb
-        have hRem : n₁ % 128 = n₂ % 128 := by omega
-        obtain ⟨hDiv, hRest⟩ := leb128Aux_prefix_inj (by omega) (by omega) hEq.2
-        exact ⟨by omega, hRest⟩
-
-theorem leb128_prefix_inj {n₁ n₂ : Nat} {r₁ r₂ : List UInt8}
-    (h : leb128 n₁ ++ r₁ = leb128 n₂ ++ r₂) : n₁ = n₂ ∧ r₁ = r₂ :=
-  leb128Aux_prefix_inj (Nat.le_refl n₁) (Nat.le_refl n₂) h
-
-/-- Length-prefixed byte field `leb128(|x|) || x`. -/
-def encodeListField (x : List UInt8) : List UInt8 :=
-  leb128 x.length ++ x
-
-theorem encodeListField_eq (x : List UInt8) : encodeListField x = leb128 x.length ++ x := by rfl
-
-theorem encodeListField_prefix_inj {x y r₁ r₂ : List UInt8}
-    (h : encodeListField x ++ r₁ = encodeListField y ++ r₂) : x = y ∧ r₁ = r₂ := by
-  simp only [encodeListField, List.append_assoc] at h
-  obtain ⟨hLen, hTail⟩ := leb128_prefix_inj h
-  exact List.append_inj hTail hLen
-
-def encodeByteFields : List (List UInt8) → List UInt8
-  | [] => []
-  | x :: xs => encodeListField x ++ encodeByteFields xs
-
-theorem encodeByteFields_nil : encodeByteFields [] = [] := by rfl
-theorem encodeByteFields_cons (x : List UInt8) (xs : List (List UInt8)) :
-    encodeByteFields (x :: xs) = encodeListField x ++ encodeByteFields xs := by rfl
-
-/-- Self-delimiting multi-field byte frame `leb128(count) || leb128(|f₀|) || f₀ || ...`. -/
-@[expose] def encodeMultiFrame (fields : List (List UInt8)) : List UInt8 :=
-  leb128 fields.length ++ encodeByteFields fields
-
-private theorem encodeByteFields_inj_of_len :
-    ∀ {xs ys : List (List UInt8)},
-      xs.length = ys.length → encodeByteFields xs = encodeByteFields ys → xs = ys
-  | [], [], _, _ => rfl
-  | x :: xs, y :: ys, hLen, hEq => by
-    simp only [List.length_cons, Nat.add_right_cancel_iff] at hLen
-    simp only [encodeByteFields] at hEq
-    obtain ⟨hx, hRest⟩ := encodeListField_prefix_inj hEq
-    have hTail := encodeByteFields_inj_of_len hLen hRest
-    subst hx hTail; rfl
-
-/-- **`encodeMultiFrame_injective`**: self-delimiting field framing is unconditionally injective. -/
-theorem encodeMultiFrame_injective {xs ys : List (List UInt8)}
-    (h : encodeMultiFrame xs = encodeMultiFrame ys) : xs = ys := by
-  obtain ⟨hLen, hBody⟩ := leb128_prefix_inj h
-  exact encodeByteFields_inj_of_len hLen hBody
 
 /-! ## 3. NIST SP 800-185 Framing (`left_encode`, `encode_string`, `bytepad`) -/
 
@@ -1025,14 +882,76 @@ theorem encodeString_length_short {s : List UInt8} (h : s.length < 32) :
 
 /-! ### Exports for lane signing -/
 
-/-- An LEB128 encoding has at least one byte. -/
-theorem leb128_length_pos (n : Nat) : 0 < (leb128 n).length := by
-  unfold leb128
-  cases n with
-  | zero => exact Nat.zero_lt_one
-  | succ k =>
-    unfold leb128Aux
-    split <;> exact Nat.succ_pos _
+
+end Qsag
+end
+
+public section
+namespace Qsag
+set_option maxRecDepth 16384
+set_option maxHeartbeats 16000000
+/-- Byte-level cSHAKE KAT for the aggregation stage PoW transcript fixture. -/
+theorem cshake_stage_pow_fixture_70035 :
+    ((cshake256Bytes [81, 83, 65, 71, 46, 80, 67, 83, 46, 80, 79, 87, 50, 47, 118, 49] ((cshake256Bytes [81, 83, 65, 71, 46, 65, 71, 71, 46, 70, 83, 95, 84, 82, 65, 78, 83, 67, 82, 73, 80, 84, 47, 118, 49] [87, 72, 73, 82, 95, 83, 84, 65, 71, 69, 95, 80, 79, 87]) ++ [147, 17, 1, 0, 0, 0, 0, 0])).take 2).all (· == 0) = true := by decide +kernel
+/-- Changing the fixture nonce to zero fails its two-zero-byte target. -/
+theorem cshake_stage_pow_fixture_0 :
+    ((cshake256Bytes [81, 83, 65, 71, 46, 80, 67, 83, 46, 80, 79, 87, 50, 47, 118, 49] ((cshake256Bytes [81, 83, 65, 71, 46, 65, 71, 71, 46, 70, 83, 95, 84, 82, 65, 78, 83, 67, 82, 73, 80, 84, 47, 118, 49] [87, 72, 73, 82, 95, 83, 84, 65, 71, 69, 95, 80, 79, 87]) ++ [0, 0, 0, 0, 0, 0, 0, 0])).take 2).all (· == 0) = false := by decide +kernel
+#verify_constructive cshake_stage_pow_fixture_70035 cshake_stage_pow_fixture_0
+end Qsag
+end
+
+/-! ### Exports for lane oracle -/
+
+public section
+namespace Qsag
+
+/-- Defining equation of `loadLe64`. -/
+theorem loadLe64_eq (block : List UInt8) (laneIdx : Nat) :
+    loadLe64 block laneIdx =
+      ((block.getD (8 * laneIdx) 0).toUInt64 |||
+        (block.getD (8 * laneIdx + 1) 0).toUInt64 <<< 8 |||
+        (block.getD (8 * laneIdx + 2) 0).toUInt64 <<< 16 |||
+        (block.getD (8 * laneIdx + 3) 0).toUInt64 <<< 24 |||
+        (block.getD (8 * laneIdx + 4) 0).toUInt64 <<< 32 |||
+        (block.getD (8 * laneIdx + 5) 0).toUInt64 <<< 40 |||
+        (block.getD (8 * laneIdx + 6) 0).toUInt64 <<< 48 |||
+        (block.getD (8 * laneIdx + 7) 0).toUInt64 <<< 56) := by
+  unfold loadLe64
+  rfl
+
+/-- FIPS 202 `SHA3-256("")`: rate-136 sponge with domain suffix `0x06`, 32-byte squeeze. -/
+theorem sha3_256_empty_squeeze_kat :
+    squeezeXofAux 32 (absorbPadded (padForRate [] 0x06)) =
+      [0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66,
+       0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61, 0xd6, 0x62,
+       0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa,
+       0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8, 0x43, 0x4a] := by
+  decide +kernel
+
+/-- Original `Keccak-256("")`: rate-136 sponge with domain suffix `0x01`, 32-byte squeeze. -/
+theorem keccak256_empty_squeeze_kat :
+    squeezeXofAux 32 (absorbPadded (padForRate [] 0x01)) =
+      [0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
+       0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
+       0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
+       0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70] := by
+  decide +kernel
+
+/-- FIPS 202 `SHA3-512("")`: one permutation of the rate-72 padded empty block
+    (lane 0 is the `0x06` suffix, lane 8 carries the final `0x80` pad byte), 64-byte squeeze. -/
+theorem sha3_512_empty_squeeze_kat :
+    squeezeXofAux 64 (keccakF1600
+      ⟨0x06, 0, 0, 0, 0, 0, 0, 0, 0x8000000000000000, 0, 0, 0, 0,
+       0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩) =
+      [0xa6, 0x9f, 0x73, 0xcc, 0xa2, 0x3a, 0x9a, 0xc5,
+       0xc8, 0xb5, 0x67, 0xdc, 0x18, 0x5a, 0x75, 0x6e,
+       0x97, 0xc9, 0x82, 0x16, 0x4f, 0xe2, 0x58, 0x59,
+       0xe0, 0xd1, 0xdc, 0xc1, 0x47, 0x5c, 0x80, 0xa6,
+       0x15, 0xb2, 0x12, 0x3a, 0xf1, 0xf5, 0xf9, 0x4c,
+       0x11, 0xe3, 0xe9, 0x40, 0x2c, 0x3a, 0xc5, 0x58,
+       0xf5, 0x00, 0x19, 0x9d, 0x95, 0xb6, 0xd3, 0xe3,
+       0x01, 0x75, 0x85, 0x86, 0x28, 0x1d, 0xcd, 0x26] := by
+  decide +kernel
 
 end Qsag
 end

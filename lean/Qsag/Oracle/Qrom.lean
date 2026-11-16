@@ -7364,3 +7364,14 @@ theorem verifyCanopyMultiproof_depth1_leaf0 {D : Type} [DecidableEq D]
 
 end Qsag
 end
+
+public section
+namespace Qsag
+/-- One-level canopy proof evaluates to the ordered leaf/sibling root equality. -/
+theorem verifyCanopyMultiproof_one {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D) (commitment leaf sibling : D) :
+    verifyCanopyMultiproof nodeHash rootHash 1 commitment [(0, leaf)] [sibling] =
+      decide (rootHash 1 (nodeHash 1 leaf sibling) = commitment) := by
+  simp [verifyCanopyMultiproof, canopyIndicesOk, canopyLevels, canopyLevelStep, canopyParentHash]
+end Qsag
+end
