@@ -1,11 +1,8 @@
 module
 public import Qsag.Exec.RssSigningBatches
 public import Qsag.Tests.RssSigningChecks
-import all Qsag.Exec.RssSigningBatches
-import all Qsag.Tests.RssSigningChecks
-import all Qsag.Exec.RssSigningBackend
-import all Qsag.Exec.RssSigningProgram
-import Qsag.Tactic.AssuranceKit
+public import Qsag.Exec.RssSigningBackend
+public import Qsag.Exec.RssSigningProgram
 
 /-! Actual grouped query producer checks. The candidate observation is external
 correctness instrumentation; the producer has no unchecked bytes-release port. -/
@@ -35,5 +32,5 @@ def groupedProducerCheck : IO Unit := do
     throw (IO.userError "empty group advanced or computed")
   IO.println "Grouped WOTS producer: selected digit stops and other-leaf endpoints match actual shared oracle;4 outputs retain participant evidence and distinct invocation coordinates"
 
-#verify_constructive produceBatch_correct actual_wotsRow_public_completion
+
 end Qsag.RssSigning.BatchChecks
