@@ -214,6 +214,10 @@ R_PR_VHI_D VDD_SOUTH DVDD_VHI 20m
 R_PR_VHI_S VSS_SOUTH DVSS_VHI 20m
 X_VIC_CLK_HI DVDD_VHI DVSS_VHI CLK_HI_PAD VSS_CORE VSS_CORE VDD_CORE VSS_CORE CLK_HI_Y gf180mcu_fd_io__in_s
 
+* Initial DC guesses only; nodes remain solved by KCL (not forced voltages).
+.nodeset v(VDD_CORE)={vdd_val} v(VDD_SOUTH)={vdd_val}
++ v(VDD_EAST)={vdd_val} v(VDD_NORTH)={vdd_val} v(VDD_WEST)={vdd_val}
++ v(VSS_CORE)=0 v(VSS_SOUTH)=0 v(VSS_EAST)=0 v(VSS_NORTH)=0 v(VSS_WEST)=0
 .tran 10p 25n
 
 .param vmid='0.5*vdd_val'
