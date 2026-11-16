@@ -1320,9 +1320,9 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         ))]
         {
-            if !self.secret_slots_audited && !self.portability_public_enabled {
+            if !self.secret_slots_audited {
                 return Err(VulkanError::PipelineAuditFailed(
-                    "prover session requires audited or Wave32 portability pipelines",
+                    "prover session requires audited zero-spill pipelines",
                 ));
             }
             if self
@@ -1378,9 +1378,9 @@ impl VulkanSpirvBackend {
         target_pointer_width = "64"
     ))]
     fn check_prover_session_active(&self) -> Result<(), VulkanError> {
-        if !self.secret_slots_audited && !self.portability_public_enabled {
+        if !self.secret_slots_audited {
             return Err(VulkanError::PipelineAuditFailed(
-                "prover session requires audited or Wave32 portability pipelines",
+                "prover session requires audited zero-spill pipelines",
             ));
         }
         if !self.prover_session_in_use.load(Ordering::Acquire) {
