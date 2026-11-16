@@ -233,6 +233,22 @@ theorem approved_request_can_start (p : RssProduction.Profile) (release : Releas
     let s := (stepWith c release (initial c) (.honest (.approve 0 fixtureRequest))).1
     (stepWith c release s (.adversary (.start fixtureRequest))).2 =
       .queued 0 fixtureRequest := by
+  intro c s
+  have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
+    dsimp only [s, c, stepWith, initial, fixtureConfig]
+    rw [if_pos ⟨by decide, by decide⟩]
+  rw [hs]
+  have hAuth : authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ fixtureRequest = true := by
+    unfold authorized
+    exact decide_eq_true (by
+      dsimp only [c, fixtureConfig, fixtureRequest]
+      refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, ?_, by decide⟩
+      intro q hq
+      simp only [List.mem_singleton] at hq
+      subst hq
+      exact ⟨by decide, by decide, List.mem_singleton.mpr rfl⟩)
+  dsimp only [stepWith]
+  rw [if_pos hAuth, if_pos (by dsimp only [c, fixtureConfig]; decide)]
   rfl
 
 /-- The same approval cannot be replayed to authorize changed randomness. -/
@@ -243,7 +259,21 @@ theorem approval_does_not_authorize_changed_request
     (stepWith c release s
       (.adversary (.start { fixtureRequest with optRand := [1] }))).2 =
       .rejected .unauthorized := by
-  rfl
+  intro c s
+  have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
+    dsimp only [s, c, stepWith, initial, fixtureConfig]
+    rw [if_pos ⟨by decide, by decide⟩]
+  rw [hs]
+  have hNotAuth : ¬ (authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩
+      { fixtureRequest with optRand := [1] } = true) := by
+    unfold authorized
+    rw [decide_eq_true_iff]
+    intro h
+    have h0 := h.2.2.2.2.2.2.2.1 0 (by simp [fixtureRequest])
+    simp only [List.mem_singleton, Prod.mk.injEq, fixtureRequest, SessionScheduleReq.mk.injEq] at h0
+    exact absurd h0.2.2.2.1 (by decide)
+  dsimp only [stepWith]
+  rw [if_neg hNotAuth]
 
 /-- Honest authorization does not override the explicit attempt budget. -/
 theorem exhausted_attempts_reject (p : RssProduction.Profile) (release : Release) :
@@ -251,6 +281,21 @@ theorem exhausted_attempts_reject (p : RssProduction.Profile) (release : Release
     let s := (stepWith c release (initial c) (.honest (.approve 0 fixtureRequest))).1
     (stepWith c release s (.adversary (.start fixtureRequest))).2 =
       .rejected .exhausted := by
-  rfl
+  intro c s
+  have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
+    dsimp only [s, c, stepWith, initial, fixtureConfig]
+    rw [if_pos ⟨by decide, by decide⟩]
+  rw [hs]
+  have hAuth : authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ fixtureRequest = true := by
+    unfold authorized
+    exact decide_eq_true (by
+      dsimp only [c, fixtureConfig, fixtureRequest]
+      refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, ?_, by decide⟩
+      intro q hq
+      simp only [List.mem_singleton] at hq
+      subst hq
+      exact ⟨by decide, by decide, List.mem_singleton.mpr rfl⟩)
+  dsimp only [stepWith]
+  rw [if_pos hAuth, if_neg (by dsimp only [c, fixtureConfig]; omega)]
 
 end Qsag.ThresholdIdealService
