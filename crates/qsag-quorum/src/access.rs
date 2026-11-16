@@ -187,6 +187,13 @@ impl AsymmetricQuorumSystem {
         }
         Ok(())
     }
+    /// Digest of the whole validated policy under `key_epoch_context`: a `QPOL0001`
+    /// frame over the same injective encoding that keys the latch acknowledgements.
+    pub fn policy_digest(&self, key_epoch_context: &[u8; 32]) -> [u8; 32] {
+        let mut framed = b"QPOL0001".to_vec();
+        framed.extend_from_slice(&self.context(key_epoch_context));
+        qsag_core::sponge::keccak::shake256_32(&framed)
+    }
     fn context(&self, key_epoch_context: &[u8; 32]) -> Vec<u8> {
         let mut bytes = key_epoch_context.to_vec();
         fn put_set(out: &mut Vec<u8>, set: &PartySet) {
@@ -509,6 +516,15 @@ impl<W: DurableWal> PersonalBeltLatch<W> {
             signers,
         })
     }
+    pub fn party(&self) -> u16 {
+        self.party
+    }
+    pub fn system(&self) -> &AsymmetricQuorumSystem {
+        &self.system
+    }
+    pub fn key_epoch_context(&self) -> &[u8; 32] {
+        &self.context
+    }
     pub fn into_latch(self) -> BeltLatch<W> {
         self.latch
     }
@@ -557,6 +573,38 @@ mod tests {
             )
             .is_err()
         );
+        let mut unavailable = s.personal.clone();
+        unavailable[0].quorums = vec![s.participants.clone()];
+        assert!(matches!(
+            AsymmetricQuorumSystem::new(s.participants.clone(), unavailable),
+            Err(QuorumPolicyError::Unavailable { observer: 0, .. })
+        ));
+        // Cross-observer safety uses COMMON possible faults, not their union.
+        // The extra quorums {0,1} and {1,2} intersect at 1: possibly faulty to
+        // observer 0, but not to observer 1. Their common fault model is empty.
+        let asymmetric = AsymmetricQuorumSystem::new(
+            PartySet::from([0, 1, 2]),
+            vec![
+                PersonalQuorumSlice {
+                    observer: 0,
+                    quorums: vec![PartySet::from([0, 2]), PartySet::from([0, 1])],
+                    fail_prone: vec![PartySet::from([1])],
+                },
+                PersonalQuorumSlice {
+                    observer: 1,
+                    quorums: vec![PartySet::from([0, 1]), PartySet::from([1, 2])],
+                    fail_prone: vec![PartySet::from([2])],
+                },
+                PersonalQuorumSlice {
+                    observer: 2,
+                    quorums: vec![PartySet::from([0, 1, 2])],
+                    fail_prone: vec![PartySet::new()],
+                },
+            ],
+        )
+        .unwrap();
+        assert!(asymmetric.accepts(0, &PartySet::from([0, 1])));
+        assert!(asymmetric.accepts(1, &PartySet::from([1, 2])));
         assert!(verify_handoff_safety(&s, &s, &[PartySet::from([0])]).is_ok());
         assert!(verify_handoff_safety(&s, &s, &[PartySet::from([0, 1, 2])]).is_err());
     }

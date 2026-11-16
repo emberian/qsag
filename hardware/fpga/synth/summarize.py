@@ -19,7 +19,7 @@ if fam == "xcup":
             ("  of which LUT6", cells.get("LUT6", 0)),
             ("MUXF7/F8/F9", tot(lambda k: k.startswith("MUXF"))),
             ("FF (FDRE/FDSE/FDCE/FDPE)", tot(lambda k: re.fullmatch(r"FD[RSCP]E", k))),
-            ("CARRY8", cells.get("CARRY8", 0)),
+            ("CARRY8", cells.get("CARRY8", 0)), ("CARRY4", cells.get("CARRY4", 0)),
             ("DSP48E2", cells.get("DSP48E2", 0)),
             ("RAMB36E2", cells.get("RAMB36E2", 0)), ("RAMB18E2", cells.get("RAMB18E2", 0)),
             ("SRL16E/SRLC32E", tot(lambda k: k.startswith("SRL"))),
@@ -36,4 +36,4 @@ depths = [int(x) for x in re.findall(r"Longest topological path in \S+ \(length=
 print(f"== {tag} [{fam}]")
 for k, v in rows:
     print(f"  {k:28s} {v}")
-print(f"  {'max logic depth (cells, ltp)':28s} {max(depths) if depths else 'n/a'}")
+print(f"  {'reg-to-reg depth (LUT+carry cells)':28s} {max(depths) if depths else 'n/a'}")

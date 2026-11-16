@@ -291,7 +291,7 @@ abbrev Vec128 (n : Nat) := BTree Tower128 n
 abbrev TernaryTab (b : Nat) := TTree Tower128 b
 
 /-- Enumerate all `|S|^b` challenge tuples over `S` (outer `rest`, inner `g` for univariate slicing). -/
-def challengeTuples (S : List Tower128) : (b : Nat) → List (ChallengeTuple b)
+@[expose] def challengeTuples (S : List Tower128) : (b : Nat) → List (ChallengeTuple b)
   | 0 => [.nil]
   | b + 1 => (challengeTuples S b).flatMap (fun rest => S.map (fun g => .cons g rest))
 

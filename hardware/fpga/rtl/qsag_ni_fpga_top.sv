@@ -43,6 +43,8 @@
 // Stream beats are 512 bits: a sponge block (8 lanes), a sibling digest (low 256 bits) or a
 // fold-table entry (low 256 bits), written at the STREAM pointer, which then increments.
 module qsag_ni_fpga_top #(
+    parameter bit PROFILE_COMPACT = 0,
+    parameter bit P2_UNROLLED = 0,
     parameter int FOLD_TAW   = 16,   // log2 of fold-table entries
     parameter int KECCAK_RPC = 2,
     parameter int AW = 26,
@@ -88,19 +90,48 @@ module qsag_ni_fpga_top #(
 
     logic        wr_fire, rd_fire, cmd_fire;
     logic [9:0]  wr_word, rd_word;
-    assign wr_fire = s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid;
-    assign rd_fire = s_axil_arvalid && !s_axil_rvalid;
-    assign wr_word = s_axil_awaddr[11:2];
+    // Independent one-entry AW/W skid buffers. No combinational input-to-output
+    // path, and each accepted address/data pair retires exactly once.
+    logic aw_full, w_full;
+    logic [9:0] aw_word;
+    logic [31:0] wr_data;
+    logic [3:0] wr_strb;
+    logic wr_error;
+    assign s_axil_awready = !rst && !aw_full;
+    assign s_axil_wready  = !rst && !w_full;
+    assign s_axil_arready = !rst && !s_axil_rvalid;
+    assign wr_fire = aw_full && w_full && !s_axil_bvalid && !rst;
+    assign rd_fire = s_axil_arvalid && s_axil_arready;
+    assign wr_word = aw_word;
     assign rd_word = s_axil_araddr[11:2];
-    assign s_axil_awready = wr_fire;
-    assign s_axil_wready  = wr_fire;
-    assign s_axil_arready = rd_fire;
-    assign s_axil_bresp   = 2'b00;
-    assign s_axil_rresp   = 2'b00;
-    assign cmd_fire = wr_fire && (wr_word == 10'h000) && !op_busy;
-
+    // Zero strobes are a legal no-op; command writes must otherwise be complete.
+    assign wr_error = (|wr_strb) && ((wr_word == 10'h000 &&
+                        (wr_strb != 4'hf || op_busy)) ||
+                        (op_busy && wr_word[9:6] == 4'h1));
+    assign s_axil_rresp = 2'b00;
+    assign cmd_fire = wr_fire && !wr_error && (&wr_strb) && (wr_word == 10'h000);
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            aw_full <= 1'b0;
+            w_full <= 1'b0;
+        end else begin
+            if (s_axil_awvalid && s_axil_awready) begin
+                aw_full <= 1'b1;
+                aw_word <= s_axil_awaddr[11:2];
+            end
+            if (s_axil_wvalid && s_axil_wready) begin
+                w_full <= 1'b1;
+                wr_data <= s_axil_wdata;
+                wr_strb <= s_axil_wstrb;
+            end
+            if (wr_fire) begin
+                aw_full <= 1'b0;
+                w_full <= 1'b0;
+            end
+        end
+    end
     logic unused_ok;
-    assign unused_ok = &{1'b0, s_axil_wstrb, s_axil_awaddr[1:0], s_axil_araddr[1:0]};
+    assign unused_ok = &{1'b0, s_axil_awaddr[1:0], s_axil_araddr[1:0]};
 
     logic [7:0]  cmd_op_q, cmd_a0_q;
     logic [15:0] cmd_a1_q;
@@ -123,17 +154,80 @@ module qsag_ni_fpga_top #(
     logic [255:0]     expect_q;
     logic [31:0]      chain_busy, chain_done, chain_ok;
 
-    assign p2_in_valid = eng_job_valid || op_job_valid;
-    assign p2_in_state = eng_job_valid ? eng_job_state : x_q[11:0];
-    assign p2_in_jive  = eng_job_valid ? eng_job_jive : op_job_jive;
-    assign p2_in_tag   = eng_job_valid ? {1'b1, eng_job_last, eng_job_slot} : '0;
+    // Hold the selected source while the permutation engine applies backpressure.
+    logic arb_locked, arb_owner, select_eng;
+    assign select_eng = arb_locked ? arb_owner : eng_job_valid;
+    always_ff @(posedge clk) begin
+        if (rst) begin arb_locked <= 1'b0; arb_owner <= 1'b0; end
+        else if (p2_in_valid) begin
+            arb_locked <= !p2_in_ready;
+            if (!p2_in_ready) arb_owner <= select_eng;
+        end
+    end
+    assign p2_in_valid = select_eng ? eng_job_valid : op_job_valid;
+    assign p2_in_state = select_eng ? eng_job_state : x_q[11:0];
+    assign p2_in_jive  = select_eng ? eng_job_jive : op_job_jive;
+    assign p2_in_tag   = select_eng ? {1'b1, eng_job_last, eng_job_slot} : '0;
 
+    logic cm_p_valid, cm_p_ready, cm_p_done, cm_e_valid, cm_e_ready, cm_e_done;
+    logic [63:0] cm_pa, cm_pb, cm_ea, cm_eb, cm_r;
+    if (PROFILE_COMPACT) begin : g_compact_p2
+        qsag_p2_compact #(.TAGW(TAGW)) u_p2 (
+            .mul_valid(cm_p_valid), .mul_ready(cm_p_ready), .mul_a(cm_pa), .mul_b(cm_pb),
+            .mul_done(cm_p_done), .mul_r(cm_r),
+        .clk(clk), .rst(rst),
+        .in_valid(p2_in_valid), .in_ready(p2_in_ready), .in_state(p2_in_state),
+        .in_jive(p2_in_jive), .in_tag(p2_in_tag),
+        .out_valid(p2_out_valid), .out_state(p2_out_state), .out_jive(p2_out_jive),
+        .out_tag(p2_out_tag), .busy(p2_busy));
+
+        localparam int ML = qsag_ni_pkg::GL_MUL_LAT;
+        logic [ML-1:0] vp, ve;
+        assign cm_p_ready = !rst;
+        assign cm_e_ready = !rst && !cm_p_valid;
+        qsag_gl64_dsp_mul #(.AW(AW),.BW(BW)) u_shared (
+            .clk(clk), .a(cm_p_valid ? cm_pa : cm_ea), .b(cm_p_valid ? cm_pb : cm_eb), .r(cm_r));
+        always_ff @(posedge clk) begin
+            if (rst) begin vp <= '0; ve <= '0; end
+            else begin
+                vp <= {vp[ML-2:0], cm_p_valid && cm_p_ready};
+                ve <= {ve[ML-2:0], cm_e_valid && cm_e_ready};
+            end
+        end
+        assign cm_p_done = vp[ML-1];
+        assign cm_e_done = ve[ML-1];
+    end else begin : g_parallel_p2
+        assign {cm_p_valid, cm_pa, cm_pb, cm_p_ready, cm_e_ready, cm_p_done, cm_e_done, cm_r} = '0;
+        if (P2_UNROLLED) begin : g_pipe
+            qsag_poseidon2_12_pipe #(.TAGW(TAGW),.AW(AW),.BW(BW)) u_p2 (
+                .clk(clk),.rst(rst),.in_valid(p2_in_valid && !rst),.in_state(p2_in_state),
+                .in_jive(p2_in_jive),.in_tag(p2_in_tag),.out_valid(p2_out_valid),
+                .out_state(p2_out_state),.out_jive(p2_out_jive),.out_tag(p2_out_tag));
+            localparam int PW = $clog2(qsag_ni_pkg::P2_PIPE_LAT+2);
+            logic [PW-1:0] active;
+            always_ff @(posedge clk) begin
+                if (rst) active <= '0;
+                else case ({p2_in_valid,p2_out_valid})
+                    2'b10: active <= active+1'b1;
+                    2'b01: active <= active-1'b1;
+                    default: ;
+                endcase
+            end
+            assign p2_in_ready = !rst;
+            assign p2_busy = (active != 0) || p2_out_valid;
+        end else begin : g_ring
     qsag_poseidon2_12_fpga #(.TAGW(TAGW), .AW(AW), .BW(BW)) u_p2 (
         .clk(clk), .rst(rst),
         .in_valid(p2_in_valid), .in_ready(p2_in_ready), .in_state(p2_in_state),
         .in_jive(p2_in_jive), .in_tag(p2_in_tag),
         .out_valid(p2_out_valid), .out_state(p2_out_state), .out_jive(p2_out_jive),
         .out_tag(p2_out_tag), .busy(p2_busy));
+
+        end
+    end
+    logic unused_compact;
+    assign unused_compact = &{1'b0,cm_p_valid,cm_p_ready,cm_p_done,cm_e_valid,cm_e_ready,cm_e_done,
+                              cm_pa,cm_pb,cm_ea,cm_eb,cm_r};
 
     logic stream_fire, stream_tbl;
     assign stream_tbl = stream_q[31];
@@ -147,7 +241,7 @@ module qsag_ni_fpga_top #(
         .start_heap(arg32_q), .start_state(x_q[11:0]),
         .rd_valid(eng_rd_valid), .rd_slot(cmd_a0_q[SLOTW-1:0]),
         .rd_done(eng_rd_done), .rd_state(eng_rd_state),
-        .job_valid(eng_job_valid), .job_ready(p2_in_ready), .job_state(eng_job_state),
+        .job_valid(eng_job_valid), .job_ready(p2_in_ready && select_eng), .job_state(eng_job_state),
         .job_jive(eng_job_jive), .job_last(eng_job_last), .job_slot(eng_job_slot),
         .res_valid(p2_out_valid && p2_out_tag[TAGW-1]), .res_last(p2_out_tag[SLOTW]),
         .res_slot(p2_out_tag[SLOTW-1:0]), .res_state(p2_out_state),
@@ -160,6 +254,20 @@ module qsag_ni_fpga_top #(
     logic [2:0]   fold_idx;
     logic [3:0]   fold_left;
 
+    if (PROFILE_COMPACT) begin : g_compact_ext4
+        qsag_ext4_compact_bfly #(.TAW(FOLD_TAW)) u_ext4 (
+            .mul_valid(cm_e_valid), .mul_ready(cm_e_ready), .mul_a(cm_ea), .mul_b(cm_eb),
+            .mul_done(cm_e_done), .mul_r(cm_r),
+        .clk(clk), .rst(rst),
+        .tw_en(stream_fire && stream_tbl), .tw_idx(stream_q[FOLD_TAW-1:0]),
+        .tw_data(s_axis_tdata[255:0]),
+        .fold_start(fold_start), .fold_log2n(fold_log2n_q), .fold_r(x_q[{fold_idx, 2'b00} +: 4]),
+        .fold_busy(fold_busy), .fold_done(fold_done), .fold_res(fold_res),
+        .mac_valid(mac_valid), .mac_a(mac_a), .mac_b(mac_b), .mac_c(mac_c),
+        .mac_done(mac_done), .mac_y(mac_y));
+
+    end else begin : g_parallel_ext4
+        assign {cm_e_valid,cm_ea,cm_eb} = '0;
     qsag_ext4_mac_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
         .clk(clk), .rst(rst),
         .tw_en(stream_fire && stream_tbl), .tw_idx(stream_q[FOLD_TAW-1:0]),
@@ -169,8 +277,10 @@ module qsag_ni_fpga_top #(
         .mac_valid(mac_valid), .mac_a(mac_a), .mac_b(mac_b), .mac_c(mac_c),
         .mac_done(mac_done), .mac_y(mac_y));
 
+    end
+
     // Stream: canonical-range check on every limb that will be used.
-    assign s_axis_tready = !rst && !(stream_tbl && fold_busy);
+    assign s_axis_tready = !rst && (stream_tbl ? (!fold_busy && !fold_start) : !chain_busy[stream_q[SLOTW+STEPW-1:STEPW]]);
     assign stream_fire   = s_axis_tvalid && s_axis_tready;
     logic [7:0] limb_bad;
     for (genvar i = 0; i < 8; i++) begin : g_canon
@@ -251,6 +361,7 @@ module qsag_ni_fpga_top #(
             stream_q     <= '0;
             arg32_q      <= '0;
             s_axil_bvalid <= 1'b0;
+            s_axil_bresp <= 2'b00;
             s_axil_rvalid <= 1'b0;
         end else begin
             // ---- AXI4-Lite
@@ -258,12 +369,17 @@ module qsag_ni_fpga_top #(
             if (s_axil_rvalid && s_axil_rready) s_axil_rvalid <= 1'b0;
             if (wr_fire) begin
                 s_axil_bvalid <= 1'b1;
-                if (wr_word == 10'h000 && op_busy) err_cmd <= 1'b1;
-                if (wr_word == 10'h005) arg32_q  <= s_axil_wdata;
-                if (wr_word == 10'h008) stream_q <= s_axil_wdata;
-                if (wr_word[9:6] == 4'h1) begin
-                    if (wr_word[0]) x_q[wr_word[5:1]][63:32] <= s_axil_wdata;
-                    else            x_q[wr_word[5:1]][31:0]  <= s_axil_wdata;
+                s_axil_bresp <= wr_error ? 2'b10 : 2'b00;
+                if (wr_error) err_cmd <= 1'b1;
+                if (!wr_error) begin
+                    for (int byte_idx = 0; byte_idx < 4; byte_idx++) begin
+                        if (wr_strb[byte_idx]) begin
+                            if (wr_word == 10'h005) arg32_q[8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
+                            if (wr_word == 10'h008) stream_q[8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
+                            if (wr_word[9:6] == 4'h1)
+                                x_q[wr_word[5:1]][32*int'(wr_word[0])+8*byte_idx +: 8] <= wr_data[8*byte_idx +: 8];
+                        end
+                    end
                 end
             end
             if (rd_fire) begin
@@ -309,24 +425,31 @@ module qsag_ni_fpga_top #(
             case (op_st)
                 O_IDLE: begin
                     if (cmd_fire) begin
-                        cmd_op_q    <= s_axil_wdata[7:0];
-                        cmd_a0_q    <= s_axil_wdata[15:8];
-                        cmd_a1_q    <= s_axil_wdata[31:16];
+                        cmd_op_q    <= wr_data[7:0];
+                        cmd_a0_q    <= wr_data[15:8];
+                        cmd_a1_q    <= wr_data[31:16];
                         op_busy     <= 1'b1;
                         op_done     <= 1'b0;
                         op_ok       <= 1'b1;
                         op_cycles_q <= '0;
-                        case (s_axil_wdata[7:0])
+                        case (wr_data[7:0])
                             8'h01, 8'h02: op_st <= O_P2_OFFER;
                             8'h03: begin
-                                if (!s_axil_wdata[9]) begin
+                                if (|chain_busy) begin
+                                    err_cmd <= 1'b1; op_ok <= 1'b0;
+                                end else if (!wr_data[9]) begin
                                     tree_key_q <= x_q[2:0];
                                     expect_q   <= x_q[7:4];
                                 end
-                                eng_clr    <= s_axil_wdata[8];
+                                eng_clr    <= wr_data[8] && !(|chain_busy);
                                 op_st      <= O_FIN;
                             end
-                            8'h04: op_st <= O_CH_START;
+                            8'h04: begin
+                                if (chain_busy[wr_data[12:8]] ||
+                                    (arg32_q <= 32'd1 && wr_data[21:16] == 6'd0)) begin
+                                    err_cmd <= 1'b1; op_ok <= 1'b0; op_st <= O_FIN;
+                                end else op_st <= O_CH_START;
+                            end
                             8'h05: op_st <= O_CH_WAIT;
                             8'h06: op_st <= O_CH_READ;
                             8'h10: begin
@@ -349,13 +472,13 @@ module qsag_ni_fpga_top #(
                                 op_st      <= O_FOLD;
                             end
                             8'h15: begin
-                                if (s_axil_wdata[21:16] != 6'd0) fold_log2n_q <= s_axil_wdata[21:16];
+                                if (wr_data[21:16] != 6'd0) fold_log2n_q <= wr_data[21:16];
                                 fold_idx   <= 3'd0;
-                                fold_left  <= s_axil_wdata[11:8];
+                                fold_left  <= wr_data[11:8];
                                 op_st      <= O_FOLD_NEXT;
                             end
                             8'h14: begin
-                                fold_log2n_q <= s_axil_wdata[13:8];
+                                fold_log2n_q <= wr_data[13:8];
                                 op_st        <= O_FIN;
                             end
                             8'h20: begin
@@ -384,7 +507,7 @@ module qsag_ni_fpga_top #(
                         endcase
                     end
                 end
-                O_P2_OFFER: if (p2_in_ready && !eng_job_valid) op_st <= O_P2_WAIT;
+                O_P2_OFFER: if (p2_in_ready && !select_eng) op_st <= O_P2_WAIT;
                 O_P2_WAIT: begin
                     if (p2_out_valid && !p2_out_tag[TAGW-1]) begin
                         y_q   <= p2_out_state;

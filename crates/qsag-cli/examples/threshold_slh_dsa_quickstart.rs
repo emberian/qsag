@@ -1,13 +1,19 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-//! Full FIPS 205 SLH-DSA-SHAKE-128f signing with 2-of-3 RSS and 3-of-5 CNF-RSS.
+//! Threshold FIPS 205 SLH-DSA-SHAKE-128f: 2-of-3 RSS, and optionally 3-of-5 CNF-RSS.
 //!
 //! Run: `cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart --locked`
 //!
-//! Both workflows include dealerless key generation, a full 17,088-byte signature,
-//! stock verification, tampered-message rejection, and an RFC 9814 SPKI roundtrip.
-//! The 3-of-5 workflow changes the online quorum between keygen and signing.
-//! CNF-RSS currently uses a trusted coordinator holding all shares; this example
-//! does not demonstrate privacy against that coordinator or isolated custodians.
+//! The default run is the 2-of-3 workflow (a few seconds): dealerless key
+//! generation, a full 17,088-byte signature, stock verification, tampered-message
+//! rejection, and an RFC 9814 SPKI roundtrip.
+//!
+//! Pass `-- --cnf-rss-3of5` to also run the same workflow for a 3-of-5 quorum that
+//! changes its online members between keygen and signing. That stage takes about
+//! eight minutes: it evaluates all 22 hypertree layers over projected CNF-RSS
+//! correlations. CNF-RSS currently uses a trusted coordinator holding all shares;
+//! the stage does not demonstrate privacy against that coordinator or isolated
+//! custodians.
+//!
 //! Fixed seeds are reproducible demonstration inputs, never deployment entropy.
 
 use qsag_core::cnf_rss::{
@@ -18,9 +24,22 @@ use qsag_core::keccak_mpc::{RssSlhMpcCluster, run_dealerless_rss_dkg_2of3};
 use qsag_core::preprocessing::PartyPrivateRng;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cnf_rss = match std::env::args().nth(1).as_deref() {
+        None => false,
+        Some("--cnf-rss-3of5") => true,
+        Some(other) => {
+            return Err(format!("unknown argument {other:?}; expected --cnf-rss-3of5").into());
+        }
+    };
     let started = std::time::Instant::now();
     run_rss_example()?;
-    run_cnf_example()?;
+    if cnf_rss {
+        run_cnf_example()?;
+    } else {
+        println!(
+            "\n(3-of-5 CNF-RSS stage skipped; rerun with `-- --cnf-rss-3of5`, about 8 minutes)"
+        );
+    }
     println!("Total: {:?}", started.elapsed());
     Ok(())
 }

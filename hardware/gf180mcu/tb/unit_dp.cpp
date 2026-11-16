@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     std::ifstream f(argv[1]);
     std::string line;
     int n = 0, bad = 0;
-    uint64_t cyc_perm = 0, cyc_emul = 0;
+    uint64_t cyc_perm = 0, cyc_emul = 0, cyc_keccak[2] = {0, 0};
     while (std::getline(f, line)) {
         std::istringstream ss(line);
         std::string tag, tok;
@@ -114,12 +114,13 @@ int main(int argc, char** argv) {
         } else if (t == 'K') {
             int rounds = (int)w[0];
             for (int i = 0; i < 25; i++) wr(i, w[1 + i]);
-            for (int r = 24 - rounds; r < 24; r++) {
-                top->k_en = 1;
-                top->k_idx = r;
-                tick();
-            }
-            top->k_en = 0;
+            top->k_turbo = rounds == 12;
+            top->k_start = 1;
+            tick();
+            top->k_start = 0;
+            uint64_t c0 = cycles;
+            while (!top->k_done) tick();
+            cyc_keccak[rounds == 12] = cycles - c0;
             for (int i = 0; i < 25; i++) ok &= rd(i) == w[26 + i];
         } else
             continue;
@@ -134,8 +135,8 @@ int main(int argc, char** argv) {
             }
         }
     }
-    printf("unit_dp: %d vectors, %d mismatches; PERM = %" PRIu64 " cycles, EMUL = %" PRIu64 " cycles\n", n, bad,
-           cyc_perm, cyc_emul);
+    printf("unit_dp: %d vectors, %d mismatches; PERM = %" PRIu64 " cycles, EMUL = %" PRIu64 ", Keccak-f = %" PRIu64 ", Keccak-p12 = %" PRIu64 " cycles\n",
+           n, bad, cyc_perm, cyc_emul, cyc_keccak[0], cyc_keccak[1]);
     delete top;
     return bad != 0 || n == 0;
 }

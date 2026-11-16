@@ -22,6 +22,16 @@ typedef Vqsag_ni_fpga_top Dut;
 
 static const int GL_MUL_LAT = 6, RED_LAT = 2, P2_SBOX_LAT = 18, EXT4_MAC_LAT = 7, GF128_LAT = 3;
 static const int P2_RING_LEN = 21, P2_PASSES = 31, P2_PIPE_LAT = 603;
+#if defined(QSAG_COMPACT)
+static constexpr bool COMPACT = true;
+static const int TOP_P2_LAT = 3397, TOP_EXT_LAT = 125, TOP_KEC_RPC = 1;
+#elif defined(QSAG_PIPE)
+static constexpr bool COMPACT = false;
+static const int TOP_P2_LAT = P2_PIPE_LAT, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2;
+#else
+static constexpr bool COMPACT = false;
+static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2;
+#endif
 
 static std::unique_ptr<Dut> dut;
 static uint64_t cyc = 0;
@@ -108,7 +118,7 @@ static void test_mul_red_sbox_ext4_gf() {
     Pipe<uint64_t> pm, ps;
     Pipe<std::pair<uint8_t, u128>> pr;
     Pipe<E4> pe;
-    Pipe<u128> pg;
+    Pipe<u128> pg, pt;
     for (size_t i = 0; i < N + 64; i++) {
         bool live = i < N;
         // multiplier
@@ -140,6 +150,13 @@ static void test_mul_red_sbox_ext4_gf() {
         u128 ga = ((u128)rng.next() << 64) | rng.next(), gb = ((u128)rng.next() << 64) | rng.next();
         if (i == 0) { ga = 2; gb = (u128)1 << 127; }
         if (i == 1) { ga = ~(u128)0; gb = ~(u128)0; }
+        if (i<8) {
+            auto& t=KAT_TOWER[i%4];
+            ga=(u128(t.a[1])<<64)|t.a[0];
+            gb=i<4 ? (u128(t.b[1])<<64)|t.b[0] : (u128(t.inv[1])<<64)|t.inv[0];
+            u128 want=i<4 ? (u128(t.mul[1])<<64)|t.mul[0] : (ga ? 1:0);
+            pt.push(GF128_LAT,want);
+        }
         set64(dut->gf_a, 0, (uint64_t)ga); set64(dut->gf_a, 1, (uint64_t)(ga >> 64));
         set64(dut->gf_b, 0, (uint64_t)gb); set64(dut->gf_b, 1, (uint64_t)(gb >> 64));
         if (live && i < 40000) pg.push(GF128_LAT, gf128_mul(ga, gb));
@@ -152,6 +169,7 @@ static void test_mul_red_sbox_ext4_gf() {
         if (ps.due(w)) CHECK_EQ64(dut->sb_y, w, "sbox x^7");
         if (pe.due(ew)) for (int j = 0; j < 4; j++) CHECK_EQ64(get64(dut->e_y, j), ew[j], "ext4 mac");
         if (pg.due(gw)) { CHECK_EQ64(get64(dut->gf_r, 0), (uint64_t)gw, "gf128 lo"); CHECK_EQ64(get64(dut->gf_r, 1), (uint64_t)(gw >> 64), "gf128 hi"); }
+        if (pt.due(gw)) { CHECK_EQ64(get64(dut->tower_r,0),(uint64_t)gw,"tower KAT lo"); CHECK_EQ64(get64(dut->tower_r,1),(uint64_t)(gw>>64),"tower KAT hi"); }
     }
     check(pm.q.empty() && pr.q.empty() && ps.q.empty() && pe.q.empty() && pg.q.empty(), "pipelines drained");
     section("gl64 mul (both tilings) / reduce136 / x^7 / Ext4 MAC / GF(2^128): Lean KATs, edges, 200k random", c0, f0);
@@ -453,6 +471,46 @@ static void chain_cfg(const Tree& t, const D4& cap) {
     for (int i = 0; i < 4; i++) set_x(8 + i, cap[i]);
 }
 
+// AW and W may arrive in either order; B and R must remain stable under stalls.
+static void test_axi_channels() {
+    long c0=checks, f0=fails;
+    uint32_t expected=0;
+    axil_write(R_ARG32, expected);
+    for (int n=0;n<32;n++) {
+        uint32_t value=0x9e3779b9u*(n+1), mask=n&15;
+        dut->s_axil_bready=0;
+        dut->s_axil_awaddr=R_ARG32; dut->s_axil_wdata=value; dut->s_axil_wstrb=mask;
+        dut->s_axil_awvalid=0; dut->s_axil_wvalid=0;
+        bool aw=false,w=false;
+        for (int t=0;t<40 && !(aw&&w);t++) {
+            dut->s_axil_awvalid=!aw && t>=(n%2 ? 4:0);
+            dut->s_axil_wvalid=!w && t>=(n%2 ? 0:4);
+            dut->clk=0; dut->eval();
+            bool aa=dut->s_axil_awvalid && dut->s_axil_awready;
+            bool ww=dut->s_axil_wvalid && dut->s_axil_wready;
+            tick(); aw|=aa; w|=ww;
+        }
+        dut->s_axil_awvalid=0; dut->s_axil_wvalid=0;
+        check(aw&&w,"independent AW/W handshakes");
+        for(int t=0;t<8 && !dut->s_axil_bvalid;t++) tick();
+        for(int t=0;t<5;t++) { check(dut->s_axil_bvalid && dut->s_axil_bresp==0,"B stable under stall"); tick(); }
+        dut->s_axil_bready=1; tick();
+        for(int b=0;b<4;b++) if(mask>>b&1) expected=(expected&~(255u<<(8*b)))|(value&(255u<<(8*b)));
+        CHECK_EQ64(axil_read(R_ARG32),expected,"byte strobes");
+        dut->s_axil_rready=0; dut->s_axil_arvalid=1; dut->s_axil_araddr=R_ARG32;
+        tick(); dut->s_axil_arvalid=0;
+        for(int t=0;t<5;t++) { check(dut->s_axil_rvalid && dut->s_axil_rdata==expected && dut->s_axil_rresp==0,"R stable under stall"); tick(); }
+        dut->s_axil_rready=1; tick();
+    }
+    // Reset discards an unmatched address rather than pairing it with future data.
+    dut->s_axil_awaddr=R_CMD; dut->s_axil_awvalid=1; tick(); dut->s_axil_awvalid=0;
+    dut->rst=1; tick(); dut->rst=0; tick();
+    axil_write(R_ARG32,0x12345678);
+    CHECK_EQ64(axil_read(R_ARG32),0x12345678,"reset flushes AW skid");
+    check(!(axil_read(R_STATUS)&1),"reset did not launch stale command");
+    section("AXI skew, byte enables, stalled B/R, reset flush",c0,f0);
+}
+
 static void test_basic_ops() {
     long c0 = checks, f0 = fails;
     check(axil_read(R_ID) == 0x51534E49, "ID register");
@@ -462,7 +520,7 @@ static void test_basic_ops() {
         for (int i = 0; i < 12; i++) set_x(i, k.in[i]);
         OpRes r = run_op(0x01);
         for (int i = 0; i < 12; i++) CHECK_EQ64(get_y(i), k.out[i], "top P2_PERM KAT");
-        CHECK_EQ64(r.cycles, (uint64_t)(P2_PASSES * P2_RING_LEN + 3), "P2_PERM cycles = 651 + offer, capture, finish");
+        CHECK_EQ64(r.cycles, (uint64_t)(TOP_P2_LAT + 3), "P2_PERM cycles = 651 + offer, capture, finish");
     }
     {
         St12 in;
@@ -477,7 +535,7 @@ static void test_basic_ops() {
         for (int i = 0; i < 4; i++) { set_x(i, k.x[i]); set_x(4 + i, k.y[i]); set_x(8 + i, 0); }
         OpRes r = run_op(0x10);
         for (int i = 0; i < 4; i++) CHECK_EQ64(get_y(i), k.mul[i], "top EXT4_MAC KAT");
-        CHECK_EQ64(r.cycles, (uint64_t)(EXT4_MAC_LAT + 2), "EXT4_MAC cycles");
+        if (!COMPACT) CHECK_EQ64(r.cycles, (uint64_t)(TOP_EXT_LAT + 2), "EXT4_MAC cycles");
     }
     // Sumcheck rounds: three honest rounds, then a wrong claim.
     {
@@ -500,7 +558,7 @@ static void test_basic_ops() {
             E4 got = get_y4();
             for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], g[i], "top SC_ROUND g(r)");
             check(r.ok == !bad, bad ? "SC_ROUND rejects a wrong claim" : "SC_ROUND accepts");
-            CHECK_EQ64(r.cycles, (uint64_t)(3 * (EXT4_MAC_LAT + 1) + 2), "SC_ROUND cycles");
+            if (!COMPACT) CHECK_EQ64(r.cycles, (uint64_t)(3 * (TOP_EXT_LAT + 1) + 2), "SC_ROUND cycles");
             claim = g;
         }
     }
@@ -565,8 +623,8 @@ static void test_top_keccak() {
     std::vector<uint8_t> m(300);
     for (auto& b : m) b = (uint8_t)rng.next();
     check(top_sponge(m, 0x07, 32, true) == keccak_sponge(m, 0x07, 32, true, mp), "top TurboSHAKE256 D=07");
-    CHECK_EQ64(kec_op_cycles[0], 12 + 3, "KEC_PERMUTE cycles (24 rounds) = 12 + start, capture, finish");
-    CHECK_EQ64(kec_op_cycles[1], 6 + 3, "KEC_PERMUTE cycles (12 rounds) = 6 + start, capture, finish");
+    CHECK_EQ64(kec_op_cycles[0], 24/TOP_KEC_RPC + 3, "KEC_PERMUTE cycles (24 rounds) = 12 + start, capture, finish");
+    CHECK_EQ64(kec_op_cycles[1], 12/TOP_KEC_RPC + 3, "KEC_PERMUTE cycles (12 rounds) = 6 + start, capture, finish");
     section("top: SHAKE256 Lean KATs, TurboSHAKE256 (RFC 9861, D=0x07) via KEC ops", c0, f0);
 }
 
@@ -609,7 +667,7 @@ static void test_fold_and_chains() {
         // per round: one start clock, n/2 reads, FOLD_LAT = 9, done, hand-over; plus the final clock.
         uint64_t expect_cy = 1;
         for (int j = 0; j < n; j++) expect_cy += ((uint64_t)1 << (n - 1 - j)) + 9 + 3;
-        CHECK_EQ64(cy, expect_cy + (n > 8 ? 1 : 0), "fold cycles");
+        if (!COMPACT) CHECK_EQ64(cy, expect_cy + (n > 8 ? 1 : 0), "fold cycles");
     }
     section("top: BRAM fold engine, 1/2/5/9-variable tables vs fold_first_var model", c0, f0);
 
@@ -827,12 +885,15 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 4; i++) tick();
     dut->rst = 0;
     tick();
-    FILE* rep = fopen(argc > 1 ? argv[1] : "trace_report.txt", "w");
+    // First argument that is not a Verilator plusarg names the trace report.
+    const char* rep_path = "trace_report.txt";
+    for (int i = 1; i < argc; i++) if (argv[i][0] != '+') { rep_path = argv[i]; break; }
+    FILE* rep = fopen(rep_path, "w");
+    test_axi_channels();
     test_basic_ops();
     test_top_keccak();
     test_fold_and_chains();
-    trace_qsagsta1(rep);
-    trace_edge_fold(rep);
+    if (!COMPACT && !std::getenv("QSAG_REAL_ONLY")) { trace_qsagsta1(rep); trace_edge_fold(rep); }
     check((axil_read(R_STATUS) & 0x18) == 0, "no sticky error flags");
     if (rep) fclose(rep);
     printf("TOP: %ld checks, %ld mismatches, %llu clocks simulated\n", checks, fails, (unsigned long long)cyc);

@@ -4789,6 +4789,8 @@ pub struct OtMesh {
     receivers: Vec<Vec<Option<OtExtReceiverChannel>>>,
     /// Chain over every extension batch run on this mesh, in the order they were run.
     transcript: [u8; 32],
+    /// Pre-staged single-use multiplicative blinding triples for retained-mesh MAC checks.
+    blind_pool: mac_blind::BlindPool,
 }
 
 type OtChannelSetup = fn(
@@ -4918,6 +4920,7 @@ impl OtMesh {
                 b"QSAG.OT.MESH.TRANSCRIPT/v1",
                 &[&session_id, &(n as u64).to_be_bytes()],
             ),
+            blind_pool: mac_blind::BlindPool::default(),
         })
     }
 
@@ -14673,6 +14676,7 @@ mod silent_pcg_vault_integration_tests {
 
     #[test]
     fn silent_pcg_keccak_vaults_honest_2p_3p_and_tamper_rejection() {
+        let _memory = crate::test_budget::reserve_mb(1000);
         // 1. 2-of-2 silent seed burn + local expansion + blinded-check materialization.
         let sid0 = [0x71; 32];
         let sid1 = [0x72; 32];

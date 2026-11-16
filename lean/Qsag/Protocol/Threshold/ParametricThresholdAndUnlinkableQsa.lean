@@ -732,7 +732,7 @@ theorem lagrangeBasisFromOthers_length_le {F : Type} [LawfulField F] (xi : F) :
       (Nat.add_le_add_right (lagrangeBasisFromOthers_length_le xi rest) 1)
 
 /-- Executable scalar Lagrange-at-zero weight `λ_{i, S} = ∏_{x_j ∈ S, x_j ≠ x_i} (-x_j) * (x_i - x_j)⁻¹`. -/
-def lagrangeScalarFromOthers {F : Type} [LawfulField F] (xi : F) : List F → F
+@[expose] def lagrangeScalarFromOthers {F : Type} [LawfulField F] (xi : F) : List F → F
   | [] => CommRingOps.one
   | xj :: rest =>
     let invDiff := LawfulField.inv (CommRingOps.sub xi xj)
@@ -740,7 +740,7 @@ def lagrangeScalarFromOthers {F : Type} [LawfulField F] (xi : F) : List F → F
       (lagrangeScalarFromOthers xi rest)
 
 /-- Lagrange-at-zero coefficient `λ_{i, S}` for evaluation point `xi` in quorum `S`. -/
-def lagrangeWeightAtZero {F : Type} [LawfulField F] [DecidableEq F] (S : List F) (xi : F) : F :=
+@[expose] def lagrangeWeightAtZero {F : Type} [LawfulField F] [DecidableEq F] (S : List F) (xi : F) : F :=
   lagrangeScalarFromOthers xi (S.filter (fun xj => decide (xj ≠ xi)))
 
 /-- Local non-interactive Lagrange-to-additive share conversion `a_i := λ_{i, S} · s_i` for Co-ZK / MPC. -/

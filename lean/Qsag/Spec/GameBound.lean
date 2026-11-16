@@ -45,7 +45,7 @@ inductive Code (E : Iface) (R : Type) : Type 1 where
   | call (q : E.Query) (k : E.Resp q → Code E R) : Code E R
 
 /-- Monadic sequential composition for `Code E`. -/
-def Code.bind {E : Iface} {A B : Type} : Code E A → (A → Code E B) → Code E B
+@[expose] def Code.bind {E : Iface} {A B : Type} : Code E A → (A → Code E B) → Code E B
   | .ret a, f => f a
   | .call q k, f => .call q (fun r => Code.bind (k r) f)
 
@@ -173,12 +173,12 @@ structure FinGame (n : Nat) where
   win : Fin n → Bool
 
 /-- Exact structural finite sum `∑_{i < n} f i` over `Fin n`. -/
-def sampleSum : (n : Nat) → (Fin n → Nat) → Nat
+@[expose] def sampleSum : (n : Nat) → (Fin n → Nat) → Nat
   | 0, _ => 0
   | n + 1, f => f ⟨0, Nat.zero_lt_succ n⟩ + sampleSum n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
 
 /-- Exact count of winning sample points `|{ω ∈ Fin n | G.win ω = true}|`. -/
-def FinGame.winCount {n : Nat} (G : FinGame n) : Nat :=
+@[expose] def FinGame.winCount {n : Nat} (G : FinGame n) : Nat :=
   sampleSum n (fun ω => if G.win ω then 1 else 0)
 
 /-- Exact rational winning probability `winCount / n` in canonical `Spec.RatBound`. -/
@@ -444,6 +444,23 @@ private theorem sampleSum_const_zero : ∀ (n : Nat), sampleSum n (fun _ => 0) =
     unfold sampleSum
     rw [sampleSum_const_zero n]
 
+/-- Three constructive reductions, with their individual probability bounds composed. -/
+theorem event_le_three_reductions {n : Nat} (G R₁ R₂ R₃ : FinGame n)
+    (hExtract : ∀ ω, G.win ω = true → R₁.win ω = true ∨ R₂.win ω = true ∨ R₃.win ω = true)
+    {ε₁ ε₂ ε₃ : RatBound}
+    (h₁ : GameBound R₁.winProb ε₁) (h₂ : GameBound R₂.winProb ε₂)
+    (h₃ : GameBound R₃.winProb ε₃) : GameBound G.winProb ((ε₁.add ε₂).add ε₃) := by
+  let U : FinGame n := ⟨G.samplePos, fun ω => R₁.win ω || R₂.win ω⟩
+  have hU : GameBound U.winProb (ε₁.add ε₂) :=
+    GameBound.trans (event_le_two_reductions U R₁ R₂ (fun ω h => Bool.or_eq_true_iff.mp h))
+      (RatBound.add_le_add h₁ h₂)
+  apply GameBound.trans (event_le_two_reductions G U R₃ ?_) (RatBound.add_le_add hU h₃)
+  intro ω h
+  rcases hExtract ω h with h | h | h
+  · exact .inl (Bool.or_eq_true_iff.mpr (.inl h))
+  · exact .inl (Bool.or_eq_true_iff.mpr (.inr h))
+  · exact .inr h
+
 /-- A game won on every sample point has win count `n`. -/
 theorem FinGame.winCount_of_forall_win {n : Nat} (G : FinGame n)
     (h : ∀ ω : Fin n, G.win ω = true) : G.winCount = n := by
@@ -543,6 +560,27 @@ theorem Pkg.par_handle_inr {I₁ I₂ E : Iface} {σ₁ σ₂ : Type} (P₁ : Pk
     (P₂ : Pkg I₂ E σ₂) (st : σ₁ × σ₂) (q₂ : I₂.Query) :
     (P₁.par P₂).handle st (PSum.inr q₂) =
       Code.bind (P₂.handle st.2 q₂) (fun x => Code.ret (x.1, (st.1, x.2))) := by rfl
+
+/-- Cardinality `base ^ k` of a `k`-draw random-oracle coin space. -/
+@[expose, reducible] def roCoinPow (base : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => base * roCoinPow base k
+
+theorem roCoinPow_zero (base : Nat) : roCoinPow base 0 = 1 := rfl
+
+theorem roCoinPow_succ (base k : Nat) : roCoinPow base (k + 1) = base * roCoinPow base k := rfl
+
+theorem roCoinPow_pos {base : Nat} (h : 0 < base) : ∀ k : Nat, 0 < roCoinPow base k
+  | 0 => Nat.one_pos
+  | k + 1 => Nat.mul_pos h (roCoinPow_pos h k)
+
+/-- Random-oracle interface mapping queries in `Dom` to uniform digests in `Fin cardD`. -/
+@[expose, reducible] def roOracleIface (Dom : Type) (cardD : Nat) : Iface where
+  Query := Dom
+  Resp _ := Fin cardD
+
+theorem roOracleIface_query (Dom : Type) (cardD : Nat) :
+    (roOracleIface Dom cardD).Query = Dom := rfl
 
 end Qsag.Spec
 end

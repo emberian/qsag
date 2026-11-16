@@ -132,7 +132,7 @@ def Fips205Params.ell  (p : Fips205Params) : Nat := 2 * p.n + 3
 def Fips205Params.mdBytes (p : Fips205Params) : Nat := (p.k * p.a + 7) / 8
 def Fips205Params.treeBytes (p : Fips205Params) : Nat := (p.h - p.hp + 7) / 8
 def Fips205Params.leafBytes (p : Fips205Params) : Nat := (p.hp + 7) / 8
-def Fips205Params.sigBytes (p : Fips205Params) : Nat :=
+@[expose] def Fips205Params.sigBytes (p : Fips205Params) : Nat :=
   p.n + p.k * (1 + p.a) * p.n + p.d * (p.ell + p.hp) * p.n
 
 def Fips205Params.wellFormed (p : Fips205Params) : Bool :=
@@ -221,11 +221,11 @@ theorem witness_slhDsaShake128s_m30_wellFormed :
   ⟨slhDsaShake128s, slhDsaShake128s_wellFormed⟩
 
 /-- §11.2.1 `PRF_msg(SK.prf, opt_rand, M') = SHAKE256(SK.prf || opt_rand || M', 8n)`. -/
-def fipsPrfMsg (n : Nat) (skPrf optRand msgPrime : List UInt8) : List UInt8 :=
+@[expose] def fipsPrfMsg (n : Nat) (skPrf optRand msgPrime : List UInt8) : List UInt8 :=
   shake256Xof n (skPrf ++ optRand ++ msgPrime)
 
 /-- §11.2.1 `H_msg(R, PK.seed, PK.root, M') = SHAKE256(R || PK.seed || PK.root || M', 8m)`. -/
-def fipsHMsg (m : Nat) (rRand pkSeed pkRoot msgPrime : List UInt8) : List UInt8 :=
+@[expose] def fipsHMsg (m : Nat) (rRand pkSeed pkRoot msgPrime : List UInt8) : List UInt8 :=
   shake256Xof m (rRand ++ pkSeed ++ pkRoot ++ msgPrime)
 
 /-- §11.2.1 `PRF(PK.seed, SK.seed, ADRS) = SHAKE256(PK.seed || ADRS || SK.seed, 8n)`. -/

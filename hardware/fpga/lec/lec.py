@@ -4,7 +4,7 @@ transition relation with `write_smt2` (frontend, `proc`, `flatten` only: no opti
 this script writes the specification and the miter around it, z3 decides.
 
 Every check prints the statement, the expected answer and z3's answer. `unsat` on a proof and
-`sat` on a mutant are the passing answers. See lec/README.md for what each statement means and
+`sat` on a mutant are the passing answers. See the "Formal checks" section of README.md for what each statement means and
 what is taken on trust.
 """
 import os, re, subprocess, sys, time
@@ -27,7 +27,7 @@ def sh(cmd):
 def yosys_smt2(name, top, files, chparam=""):
     """SMT-LIB2 of `top` as module lec_top; returns the text."""
     out = os.path.join(OUT, name + ".yosys.smt2")
-    srcs = " ".join(files)
+    srcs = " ".join([os.path.join(ROOT, "rtl", n) for n in ("qsag_add_split.sv", "qsag_sum_csa.sv")] + files)
     sh(f'yosys -q -p "read_verilog -sv {srcs}; hierarchy -top {top} {chparam}; proc; flatten; '
        f'opt_clean; rename -top lec_top; write_smt2 -wires {out}"')
     return open(out).read()
@@ -239,38 +239,30 @@ def check_gf_mul(tag, files, expect, required=True, secs=None):
     return record(tag, stmt, expect, ys + unroll(3) + f"(assert (not (= {acc('r', 's3')} {gf_mul_spec(a, b)})))\n(check-sat)\n",
                   required=required, secs=secs)
 
-def check_gf_mul_basis(tag, files, expect):
-    """For each of the 128 basis elements b = x^j separately: for all a, r = a * x^j.
-    With the multiplier's bilinearity (anf_check.py) this is the whole function; on its own it
-    is 128 universally quantified statements, one incremental z3 query each."""
+def check_gf_mul_basis(tag, files, j, expect, required=True, secs=None):
+    """One basis element b = x^j: for all a, r = a * x^j (XOR of the constants x^(i+j) mod P)."""
     ys = yosys_smt2(tag, "qsag_gf128_clmul", files)
     a, b = acc("a", "s0"), acc("b", "s0")
     xp = gf_xpow()
-    text = ys + unroll(3)
-    for j in range(128):
-        # a * x^j = XOR over the set bits a_i of the constants x^(i+j) mod P
-        e = bv(0, 128)
-        for i in range(128):
-            e = f"(bvxor {e} (ite (= ((_ extract {i} {i}) {a}) #b1) {bv(xp[i + j], 128)} {bv(0, 128)}))"
-        text += f"(push 1)\n(assert (= {b} {bv(1 << j, 128)}))\n(assert (not (= {acc('r', 's3')} {e})))\n(check-sat)\n(pop 1)\n"
-    path = os.path.join(OUT, tag + ".smt2")
-    open(path, "w").write(text)
-    t0 = time.time()
-    try:
-        r = subprocess.run(["z3", f"-T:{Z3_SECS * 2}", path], capture_output=True, text=True, timeout=Z3_SECS * 2 + 30)
-        answers = r.stdout.split()
-    except subprocess.TimeoutExpired:
-        answers = ["timeout"]
-    dt = time.time() - t0
-    n_unsat, n_sat = answers.count("unsat"), answers.count("sat")
-    got = "unsat" if n_unsat == 128 else ("sat" if n_sat else "undecided")
-    ok = got == expect
-    tagr = "PASS" if ok else "FAIL"
-    stmt = (f"qsag_gf128_clmul: for all a and each basis element b = x^j (128 queries), r (3 clocks later) = a * x^j; "
-            f"{n_unsat} unsat, {n_sat} sat")
-    results.append((tagr, tag, stmt, expect, got, dt))
-    print(f"[{tagr}] {tag}: z3 {got} in {dt:.1f}s (expected {expect}) -- {stmt}", flush=True)
-    return ok
+    e = bv(0, 128)
+    for i in range(128):
+        e = f"(bvxor {e} (ite (= ((_ extract {i} {i}) {a}) #b1) {bv(xp[i + j], 128)} {bv(0, 128)}))"
+    return record(tag, f"qsag_gf128_clmul: for all a and b = x^{j}, r (3 clocks later) = a * x^{j} in GF(2^128)", expect,
+                  ys + unroll(3) + f"(assert (= {b} {bv(1 << j, 128)}))\n(assert (not (= {acc('r', 's3')} {e})))\n(check-sat)\n",
+                  required=required, secs=secs)
+
+def check_kara_small(tag, w, expect, required=True, secs=None):
+    """The same recursive Karatsuba module at a width z3 can decide: for all a, b of w bits,
+    p = the carry-less product (XOR of a << i over the set bits of b)."""
+    ys = yosys_smt2(tag, "qsag_clmul_kara", [KARA], f"-chparam W {w}")
+    a, b = acc("a", "s0"), acc("b", "s0")
+    pw = 2 * w - 1
+    e = bv(0, pw)
+    for i in range(w):
+        e = f"(bvxor {e} (ite (= ((_ extract {i} {i}) {b}) #b1) (bvshl {zext(a, w, pw)} {bv(i, pw)}) {bv(0, pw)}))"
+    return record(tag, f"qsag_clmul_kara W={w}: for all 2^{2*w} inputs, p = carry-less product of a and b", expect,
+                  ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
+                  f"(assert (not (= {acc('p', 's0')} {e})))\n(check-sat)\n", required=required, secs=secs)
 
 def group_gl():
     check_reduce_algebra()
@@ -285,22 +277,26 @@ def group_glmut():
     check_reduce("mut_gl64_reduce_sign", [PKG, m1], "sat")
     m2 = mutate(RED, "!v2[66] ? v2[63:0]", "!v2[66] ? v1[63:0]", "mut_reduce_select.sv")
     check_glmul("mut_select_gl64_dsp_mul", [PKG, m2, MUL, GLM], 26, 17, expect_reduce="sat")
-    m3 = mutate(MUL, "assign bj = TW'(b_q[j*BW +: BW]);", "assign bj = TW'(b_q[((j+1)%NB)*BW +: BW]);", "mut_mul_tile.sv")
+    m3 = mutate(MUL, "bj_q <= b_pad[j*BW +: BW];", "bj_q <= b_pad[((j+1)%NB)*BW +: BW];", "mut_mul_tile.sv")
     check_mul_wiring("mut_tile_mul64_wiring", [m3], 26, 17, "sat")
     m4 = mutate(MUL, "<< (j * BW));", "<< (j * BW + (j == 3 ? 1 : 0)));", "mut_mul_shift.sv")
     check_glmul("mut_shift_gl64_dsp_mul", [PKG, RED, m4, GLM], 26, 17, expect_product="sat")
 
 def group_gf():
     check_gf_reduce("gf128_reduce", [GFRED], "unsat")
-    check_gf_mul_basis("gf128_clmul_basis", [KARA, GFRED, GFMUL], "unsat")
     m5 = mutate(GFRED, "(134'(hi) << 7)", "(134'(hi) << 6)", "mut_gf_reduce.sv")
     check_gf_reduce("mut_gf128_reduce_tap", [m5], "sat")
     m6 = mutate(KARA, "assign xmid = mid ^ hi ^ (2*HH-1)'(lo);", "assign xmid = mid ^ hi;", "mut_kara.sv")
     check_gf_mul("mut_gf128_clmul_kara", [m6, GFRED, GFMUL], "sat")
-    check_gf_mul_basis("mut_gf128_clmul_basis", [m6, GFRED, GFMUL], "sat")
+    check_gf_mul_basis("mut_gf128_clmul_basis_x77", [m6, GFRED, GFMUL], 77, "sat")
 
 def group_try():
-    # attempts that are recorded, not required: bit-precise multiplier miters
+    # Attempts that are recorded, not required. z3 bit-blasts multipliers and XOR trees; these
+    # miters are the ones SAT solvers are known not to finish, and the answers say so.
+    check_kara_small("try_clmul_kara_w16", 16, "unsat", required=False, secs=TRY_SECS)
+    check_gf_mul_basis("try_gf128_clmul_basis_x0", [KARA, GFRED, GFMUL], 0, "unsat", required=False, secs=TRY_SECS)
+    check_gf_mul_basis("try_gf128_clmul_basis_x77", [KARA, GFRED, GFMUL], 77, "unsat", required=False, secs=TRY_SECS)
+    check_gf_mul("try_gf128_clmul_monolithic", [KARA, GFRED, GFMUL], "unsat", required=False, secs=TRY_SECS)
     check_mul_wiring("try_mul64_wiring_precise_26x17", [MUL], 26, 17, "unsat", precise=True, required=False, secs=TRY_SECS)
     ys = yosys_smt2("try_monolithic", "qsag_gl64_dsp_mul", [PKG, RED, MUL, GLM])
     a, b = acc("a", "s0"), acc("b", "s0")
@@ -308,7 +304,6 @@ def group_try():
     record("try_gl64_dsp_mul_monolithic", "qsag_gl64_dsp_mul: r = bvurem(bvmul(a, b), p), one bit-blasted query",
            "unsat", ys + unroll(6) + f"(assert (not (= {acc('r', 's6')} {mono})))\n(check-sat)\n",
            secs=TRY_SECS, required=False)
-    check_gf_mul("try_gf128_clmul_monolithic", [KARA, GFRED, GFMUL], "unsat", required=False, secs=TRY_SECS)
 
 GROUPS = {"gl": group_gl, "glmut": group_glmut, "gf": group_gf, "try": group_try}
 

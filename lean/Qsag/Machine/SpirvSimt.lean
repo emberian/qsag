@@ -36,6 +36,7 @@ runtime backend's architecture-enum name.
 -/
 
 import Qsag.Tactic.AssuranceKit
+import Qsag.Machine.Tactic.KernelRfl
 public import Qsag.Tactic.Prelude
 import Qsag.Tactic.Prelude
 public import Qsag.Math.Goldilocks
@@ -306,7 +307,7 @@ inductive SpirvStorageClass where
   | storageBuffer
   deriving DecidableEq, Repr
 
-def SpirvStorageClass.toWord : SpirvStorageClass → UInt32
+@[expose] def SpirvStorageClass.toWord : SpirvStorageClass → UInt32
   | .input => 1
   | .workgroup => 4
   | .function => 7
@@ -4121,5 +4122,141 @@ theorem twoWaveReductionEnv_epoch2_output_binding :
 
 #tooth_pair decoded_spirv_words_simt_ct_noninterference vs tooth_decoded_entry_cannot_substitute_empty_program
 #verify_constructive twoWaveReductionEnv_epoch2_output_binding
+end Qsag
+end
+
+public section
+namespace Qsag
+
+/-! ## Public equations and two-wave reduction fixtures for `Machine.PlatformContractInstances` -/
+
+theorem wave32Lanes_eq : wave32Lanes = 32 := by rfl
+
+theorem WorkgroupConfig.totalThreads_eq (cfg : WorkgroupConfig) :
+    cfg.totalThreads = cfg.numWaves * wave32Lanes := by rfl
+
+theorem twoWaveCfg_numWaves : twoWaveCfg.numWaves = 2 := by rfl
+
+#export_eqns initWorkgroupExecState FaialMapRaceFree MemLowEq checkProgSimtCt productionLdsIndex
+  productionButterflyIndex twoWavePhase0WriteLds twoWavePhase1CrossWaveRead
+
+/-- The constants of the two-wave reduction environment are scalars. -/
+theorem twoWaveReductionEnv_scalarConst : ScalarConstEnv twoWaveReductionEnv := by
+  intro id sc b off w h
+  simp only [twoWaveReductionEnv] at h
+  split at h <;> cases h
+
+/-- The first reduction epoch passes the `SIMT-CT` checker when the loaded word `%11`, the
+    storage buffers and the LDS are secret and every other register is public. -/
+theorem twoWavePhase0_simtCt_secretData :
+    checkProgSimtCt twoWaveReductionEnv
+      ⟨fun _ => .sec, .sec, fun id => if id == 11 then .sec else .pub⟩
+      twoWavePhase0WriteLds = true := by
+  decide +kernel
+
+/-- The second reduction epoch passes the `SIMT-CT` checker when the loaded words `%14`, `%17`,
+    their sum `%18`, the storage buffers and the LDS are secret and every other register is
+    public. -/
+theorem twoWavePhase1_simtCt_secretData :
+    checkProgSimtCt twoWaveReductionEnv
+      ⟨fun _ => .sec, .sec, fun id => if id == 14 || id == 17 || id == 18 then .sec else .pub⟩
+      twoWavePhase1CrossWaveRead = true := by
+  decide +kernel
+
+/-- An access chain `%19 = &outBuf[tid]` typed with the input-buffer pointer type `%7` is rejected
+    by the `SIMT-CT` checker under every policy: `twoWaveReductionEnv.ptrInfo` binds `%7` to
+    storage buffer `0` while `%4` and `%19` are bound to storage buffer `1`. -/
+theorem twoWaveReductionEnv_mistyped_output_accessChain_rejected (pol : SimtCtPolicy) :
+    checkInstSimtCtStrict twoWaveReductionEnv pol (.opAccessChain 7 19 4 [1]) = false := by
+  simp [checkInstSimtCtStrict, twoWaveReductionEnv]
+
+/-- Observation trace of wave `w` of the first reduction epoch, on every memory: invocation
+    `w * 32 + l` loads `inBuf[w * 32 + l]` and stores `lds[w * 32 + l]`. -/
+theorem twoWavePhase0_waveObs (mem : GpuMemState) (w : Nat) (hw : w < 2) :
+    runWaveWithObs twoWaveReductionEnv twoWavePhase0WriteLds 4
+        ((initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem).waves w) mem =
+      [ { pc := 0, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 1, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.storageBuffer, 0, w * 32 + l) },
+        { pc := 2, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 3, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, w * 32 + l) } ] :=
+  match w, hw with
+  | 0, _ => by kernel_rfl
+  | 1, _ => by kernel_rfl
+
+/-- Observation trace of wave `w` of the second reduction epoch, on every memory: invocation
+    `tid = w * 32 + l` loads `lds[tid]` and `lds[tid ^ 32]` and stores `outBuf[tid]`. -/
+theorem twoWavePhase1_waveObs (mem : GpuMemState) (w : Nat) (hw : w < 2) :
+    runWaveWithObs twoWaveReductionEnv twoWavePhase1CrossWaveRead 8
+        ((initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem).waves w) mem =
+      [ { pc := 0, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 1, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, w * 32 + l) },
+        { pc := 2, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 3, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 4, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, (w * 32 + l) ^^^ 32) },
+        { pc := 5, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 6, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 7, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.storageBuffer, 1, w * 32 + l) } ] :=
+  match w, hw with
+  | 0, _ => by kernel_rfl
+  | 1, _ => by kernel_rfl
+
+/-- Observation trace of wave `w` when the two reduction epochs run as one epoch without the
+    barrier, on every memory. -/
+theorem twoWaveNoBarrier_waveObs (mem : GpuMemState) (w : Nat) (hw : w < 2) :
+    runWaveWithObs twoWaveReductionEnv (twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead) 12
+        ((initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem).waves w) mem =
+      [ { pc := 0, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 1, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.storageBuffer, 0, w * 32 + l) },
+        { pc := 2, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 3, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, w * 32 + l) },
+        { pc := 4, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 5, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, w * 32 + l) },
+        { pc := 6, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 7, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 8, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.workgroup, 0, (w * 32 + l) ^^^ 32) },
+        { pc := 9, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 10, activeMask := List.replicate 32 true, memTraces := List.replicate 32 none },
+        { pc := 11, activeMask := List.replicate 32 true,
+          memTraces := (List.range 32).map fun l =>
+            some (SpirvStorageClass.storageBuffer, 1, w * 32 + l) } ] :=
+  match w, hw with
+  | 0, _ => by kernel_rfl
+  | 1, _ => by kernel_rfl
+
+/-- Without the barrier the two reduction epochs race across waves: two schedules of their
+    concatenation write different values to `outBuf[0]`. -/
+theorem tooth_missing_barrier_causes_cross_wave_lds_race :
+    ∃ (mem : GpuMemState) (s₁ s₂ : List Nat),
+      ¬ (peekSsboDword 1 0 (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg
+            (twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead) s₁
+            (initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem)) =
+         peekSsboDword 1 0 (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg
+            (twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead) s₂
+            (initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem))) :=
+  ⟨{ lds := fun _ => 0
+     ssbo := fun b idx => if b == 0 then (if idx < 32 then 10 else 42) else 0
+     pushConsts := fun _ => 0 },
+   List.replicate 12 0 ++ List.replicate 12 1,
+   List.replicate 4 0 ++ List.replicate 4 1 ++ List.replicate 8 0 ++ List.replicate 8 1,
+   by decide +kernel⟩
+
 end Qsag
 end

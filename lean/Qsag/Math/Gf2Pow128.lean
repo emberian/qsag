@@ -1,6 +1,7 @@
 module
 public import Qsag.Math.Algebra
 public import Qsag.Tactic.Prelude
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -1676,4 +1677,13 @@ theorem gf128_linear_layer_basis_certificate :
 theorem MigrationExecution.rustGf128MulX_twoPow_succ (j : Nat) (hj : j < 127) :
     MigrationExecution.rustGf128MulX (BitVec.twoPow 128 j) = BitVec.twoPow 128 (j + 1) :=
   MigrationExecution.rustGf128MulX_twoPow j hj
+end Qsag
+
+namespace Qsag
+/-- Public unfolding of `joinBits` (its compiler equation mentions a private proof). -/
+theorem joinBits_eq_append (k : Nat) (lo hi : TowerBitVec k) :
+    joinBits k lo hi = (hi ++ lo).cast (Nat.two_pow_succ k).symm := by
+  unfold joinBits; rfl
+#export_eqns lowBits highBits Simulates rustGf128MulXIter
+#export_eqns MigrationExecution.rustGf128MulX MigrationExecution.rustGf128MulLoop MigrationExecution.rustGf128Mul MigrationExecution.rustPolyAct
 end Qsag

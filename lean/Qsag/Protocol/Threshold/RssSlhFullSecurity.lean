@@ -59,40 +59,40 @@ set_option maxHeartbeats 2000000
 def xorByteStream (xs ys : List UInt8) : List UInt8 :=
   List.zipWith (· ^^^ ·) xs ys
 
-private theorem xorByteStream_length : ∀ {xs ys : List UInt8},
+theorem xorByteStream_length : ∀ {xs ys : List UInt8},
     xs.length = ys.length → (xorByteStream xs ys).length = xs.length
   | [], [], _ => rfl
   | _ :: xs, _ :: ys, h => by
     simp only [xorByteStream, List.zipWith_cons_cons, List.length_cons]
     exact congrArg Nat.succ (xorByteStream_length (Nat.succ.inj h))
 
-private theorem uint8_xor_comm (a b : UInt8) : (a ^^^ b) = (b ^^^ a) := by
+theorem uint8_xor_comm (a b : UInt8) : (a ^^^ b) = (b ^^^ a) := by
   apply UInt8.eq_of_toBitVec_eq
   exact BitVec.xor_comm a.toBitVec b.toBitVec
 
-private theorem uint8_xor_assoc (a b c : UInt8) : ((a ^^^ b) ^^^ c) = (a ^^^ (b ^^^ c)) := by
+theorem uint8_xor_assoc (a b c : UInt8) : ((a ^^^ b) ^^^ c) = (a ^^^ (b ^^^ c)) := by
   apply UInt8.eq_of_toBitVec_eq
   simp only [UInt8.toBitVec_xor, BitVec.xor_assoc]
 
-private theorem uint8_xor_self (a : UInt8) : (a ^^^ a) = 0 := by
+theorem uint8_xor_self (a : UInt8) : (a ^^^ a) = 0 := by
   apply UInt8.eq_of_toBitVec_eq
   simp
 
-private theorem uint8_xor_zero (a : UInt8) : (a ^^^ 0) = a := by
+theorem uint8_xor_zero (a : UInt8) : (a ^^^ 0) = a := by
   apply UInt8.eq_of_toBitVec_eq
   simp
 
-private theorem uint8_zero_xor (a : UInt8) : ((0 : UInt8) ^^^ a) = a := by
+theorem uint8_zero_xor (a : UInt8) : ((0 : UInt8) ^^^ a) = a := by
   rw [uint8_xor_comm, uint8_xor_zero]
 
-private theorem xorByteStream_comm : ∀ {xs ys : List UInt8},
+theorem xorByteStream_comm : ∀ {xs ys : List UInt8},
     xs.length = ys.length → xorByteStream xs ys = xorByteStream ys xs
   | [], [], _ => rfl
   | x :: xs, y :: ys, h => by
     simp only [xorByteStream, List.zipWith_cons_cons, List.cons.injEq]
     exact ⟨uint8_xor_comm x y, xorByteStream_comm (Nat.succ.inj h)⟩
 
-private theorem xorByteStream_assoc : ∀ {xs ys zs : List UInt8},
+theorem xorByteStream_assoc : ∀ {xs ys zs : List UInt8},
     xs.length = ys.length → ys.length = zs.length →
     xorByteStream (xorByteStream xs ys) zs = xorByteStream xs (xorByteStream ys zs)
   | [], [], [], _, _ => rfl
@@ -100,21 +100,21 @@ private theorem xorByteStream_assoc : ∀ {xs ys zs : List UInt8},
     simp only [xorByteStream, List.zipWith_cons_cons, List.cons.injEq]
     exact ⟨uint8_xor_assoc x y z, xorByteStream_assoc (Nat.succ.inj h1) (Nat.succ.inj h2)⟩
 
-private theorem xorByteStream_self : ∀ (xs : List UInt8),
+theorem xorByteStream_self : ∀ (xs : List UInt8),
     xorByteStream xs xs = List.replicate xs.length 0
   | [] => rfl
   | x :: xs => by
     simp only [xorByteStream, List.zipWith_cons_cons, List.length_cons, List.replicate_succ, List.cons.injEq]
     exact ⟨uint8_xor_self x, xorByteStream_self xs⟩
 
-private theorem xorByteStream_replicate_zero : ∀ (xs : List UInt8),
+theorem xorByteStream_replicate_zero : ∀ (xs : List UInt8),
     xorByteStream xs (List.replicate xs.length 0) = xs
   | [] => rfl
   | x :: xs => by
     simp only [xorByteStream, List.length_cons, List.replicate_succ, List.zipWith_cons_cons, List.cons.injEq]
     exact ⟨uint8_xor_zero x, xorByteStream_replicate_zero xs⟩
 
-private theorem xorByteStream_cancel_right {xs m : List UInt8} (hLen : xs.length = m.length) :
+theorem xorByteStream_cancel_right {xs m : List UInt8} (hLen : xs.length = m.length) :
     xorByteStream (xorByteStream xs m) m = xs := by
   rw [xorByteStream_assoc hLen rfl, xorByteStream_self m, ← hLen, xorByteStream_replicate_zero]
 
@@ -132,13 +132,13 @@ def fixedBytesToBv : (L : Nat) → List UInt8 → BitVec (8 * L)
   | L + 1, b :: bs =>
     ((fixedBytesToBv L bs) ++ b.toBitVec).cast (by omega)
 
-private theorem bvToFixedBytes_length : ∀ (L : Nat) (bv : BitVec (8 * L)),
+theorem bvToFixedBytes_length : ∀ (L : Nat) (bv : BitVec (8 * L)),
     (bvToFixedBytes L bv).length = L
   | 0, _ => rfl
   | L + 1, bv => by
     simp only [bvToFixedBytes, List.length_cons, bvToFixedBytes_length L]
 
-private theorem bvToFixedBytes_xor : ∀ (L : Nat) (u v : BitVec (8 * L)),
+theorem bvToFixedBytes_xor : ∀ (L : Nat) (u v : BitVec (8 * L)),
     bvToFixedBytes L (u ^^^ v) = xorByteStream (bvToFixedBytes L u) (bvToFixedBytes L v)
   | 0, _, _ => rfl
   | L + 1, u, v => by
@@ -155,7 +155,7 @@ private theorem bvToFixedBytes_xor : ∀ (L : Nat) (u v : BitVec (8 * L)),
       rw [hTail, bvToFixedBytes_xor L]
       rfl
 
-private theorem bvToFixedBytes_fixedBytesToBv : ∀ (L : Nat) (bs : List UInt8),
+theorem bvToFixedBytes_fixedBytesToBv : ∀ (L : Nat) (bs : List UInt8),
     bs.length = L → bvToFixedBytes L (fixedBytesToBv L bs) = bs
   | 0, [], _ => rfl
   | L + 1, b :: bs, h => by
@@ -195,7 +195,7 @@ theorem finBitVecXorEquiv_toFun (W : Nat) (delta : BitVec W) (i : Fin (2 ^ W)) :
   rfl
 
 /-- Constructive product index `(a, b) ↦ a * B + b` in `Fin (A * B)`. -/
-def pairFin {A B : Nat} (a : Fin A) (b : Fin B) : Fin (A * B) :=
+@[expose] def pairFin {A B : Nat} (a : Fin A) (b : Fin B) : Fin (A * B) :=
   ⟨a.val * B + b.val, by
     have h1 : a.val + 1 ≤ A := a.isLt
     have h2 : (a.val + 1) * B ≤ A * B := Nat.mul_le_mul_right B h1
@@ -203,10 +203,10 @@ def pairFin {A B : Nat} (a : Fin A) (b : Fin B) : Fin (A * B) :=
     have h3 : b.val < B := b.isLt
     omega⟩
 
-def splitFinLeft {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin A :=
+@[expose] def splitFinLeft {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin A :=
   ⟨x.val / B, (Nat.div_lt_iff_lt_mul hB).mpr x.isLt⟩
 
-def splitFinRight {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin B :=
+@[expose] def splitFinRight {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin B :=
   ⟨x.val % B, Nat.mod_lt x.val hB⟩
 
 theorem pairFin_splitFin {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) :
@@ -232,7 +232,7 @@ theorem splitFinRight_pairFin {A B : Nat} (_hB : 0 < B) (a : Fin A) (b : Fin B) 
 /-- Dependent (fibered) product bijection on `Fin (A * B)`:
     maps `a ↦ bijA a` and `b ↦ (bijB a) b`, enabling adaptive multi-session pad bijections
     where later session shifts depend on the entire transcript of earlier sessions! -/
-def depProdFinEquiv {A B : Nat} (hB : 0 < B)
+@[expose] def depProdFinEquiv {A B : Nat} (hB : 0 < B)
     (bijA : SimpleEquiv (Fin A) (Fin A))
     (bijB : Fin A → SimpleEquiv (Fin B) (Fin B)) :
     SimpleEquiv (Fin (A * B)) (Fin (A * B)) where
@@ -263,12 +263,12 @@ theorem depProdFinEquiv_toFun {A B : Nat} (hB : 0 < B)
         ((bijB (splitFinLeft hB x)).toFun (splitFinRight hB x)) := by
   rfl
 
-private theorem qsum_cast_eq {m n : Nat} (h : m = n) (f : Fin m → Nat) :
+theorem qsum_cast_eq {m n : Nat} (h : m = n) (f : Fin m → Nat) :
     qsum m f = qsum n (fun k => f ⟨k.val, h ▸ k.isLt⟩) := by
   subst h
   exact qsum_congr (fun _ => rfl)
 
-private theorem qsum_add_split : ∀ (m n : Nat) (f : Fin (m + n) → Nat),
+theorem qsum_add_split : ∀ (m n : Nat) (f : Fin (m + n) → Nat),
     qsum (m + n) f =
       qsum m (fun i => f ⟨i.val, by omega⟩) +
       qsum n (fun j => f ⟨m + j.val, by omega⟩)
@@ -330,7 +330,7 @@ theorem qsum_prod_eq : ∀ (A B : Nat) (f : Fin (A * B) → Nat),
       omega
     rw [hHead, hTail]
 
-private theorem qsum_indicator_le_card : ∀ (n : Nat) (p : Fin n → Bool),
+theorem qsum_indicator_le_card : ∀ (n : Nat) (p : Fin n → Bool),
     qsum n (fun i => if p i then 1 else 0) ≤ n
   | 0, _ => by rw [qsum_zero]; exact Nat.le_refl 0
   | n + 1, p => by
@@ -338,14 +338,14 @@ private theorem qsum_indicator_le_card : ∀ (n : Nat) (p : Fin n → Bool),
     have ih := qsum_indicator_le_card n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
     cases p ⟨0, Nat.zero_lt_succ n⟩ <;> simp <;> omega
 
-private def collectTrueFin : (n : Nat) → (Fin n → Bool) → List (Fin n)
+def collectTrueFin : (n : Nat) → (Fin n → Bool) → List (Fin n)
   | 0, _ => []
   | n + 1, p =>
     let rest := (collectTrueFin n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)).map
                   (fun i => (⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ : Fin (n + 1)))
     if p ⟨0, Nat.zero_lt_succ n⟩ then ⟨0, Nat.zero_lt_succ n⟩ :: rest else rest
 
-private theorem qsum_eq_collectTrueFin_length : ∀ (n : Nat) (p : Fin n → Bool),
+theorem qsum_eq_collectTrueFin_length : ∀ (n : Nat) (p : Fin n → Bool),
     qsum n (fun i => if p i then 1 else 0) = (collectTrueFin n p).length
   | 0, _ => by rw [qsum_zero]; rfl
   | n + 1, p => by
@@ -353,7 +353,7 @@ private theorem qsum_eq_collectTrueFin_length : ∀ (n : Nat) (p : Fin n → Boo
     have ih := qsum_eq_collectTrueFin_length n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
     cases p ⟨0, Nat.zero_lt_succ n⟩ <;> simp [ih] <;> omega
 
-private theorem nodup_map_injective {α β : Type} {f : α → β}
+theorem nodup_map_injective {α β : Type} {f : α → β}
     (hInj : ∀ x y, f x = f y → x = y) :
     ∀ {xs : List α}, xs.Nodup → (xs.map f).Nodup
   | [], _ => .nil
@@ -365,7 +365,7 @@ private theorem nodup_map_injective {α β : Type} {f : α → β}
     obtain ⟨z, hzMem, rfl⟩ := hy
     exact hxNot z hzMem (hInj x z hEq)
 
-private theorem collectTrueFin_nodup : ∀ (n : Nat) (p : Fin n → Bool),
+theorem collectTrueFin_nodup : ∀ (n : Nat) (p : Fin n → Bool),
     (collectTrueFin n p).Nodup
   | 0, _ => .nil
   | n + 1, p => by
@@ -385,7 +385,7 @@ private theorem collectTrueFin_nodup : ∀ (n : Nat) (p : Fin n → Bool),
       dsimp at hv
       omega
 
-private theorem mem_collectTrueFin_true : ∀ (n : Nat) (p : Fin n → Bool) (x : Fin n),
+theorem mem_collectTrueFin_true : ∀ (n : Nat) (p : Fin n → Bool) (x : Fin n),
     x ∈ collectTrueFin n p → p x = true
   | 0, _, x, _ => Fin.elim0 x
   | n + 1, p, x, hMem => by
@@ -452,12 +452,12 @@ def splitByteChunks (chunkSize : Nat) : Nat → List UInt8 → List (List UInt8)
   | 0, _ => []
   | count + 1, bs => bs.take chunkSize :: splitByteChunks chunkSize count (bs.drop chunkSize)
 
-private theorem splitByteChunks_length (c : Nat) :
+theorem splitByteChunks_length (c : Nat) :
     ∀ (k : Nat) (bs : List UInt8), (splitByteChunks c k bs).length = k
   | 0, _ => rfl
   | k + 1, bs => by simp [splitByteChunks, splitByteChunks_length c k]
 
-private theorem splitByteChunks_each_length {c : Nat} :
+theorem splitByteChunks_each_length {c : Nat} :
     ∀ (k : Nat) (bs : List UInt8),
       k * c ≤ bs.length →
       ∀ x ∈ splitByteChunks c k bs, x.length = c
@@ -471,7 +471,7 @@ private theorem splitByteChunks_each_length {c : Nat} :
       · rw [List.length_drop]; rw [Nat.succ_mul] at hLe; omega
       · exact hTl
 
-private theorem splitByteChunks_flatten (c : Nat) :
+theorem splitByteChunks_flatten (c : Nat) :
     ∀ (xs : List (List UInt8)) (rest : List UInt8),
       (∀ x ∈ xs, x.length = c) →
       splitByteChunks c xs.length (xs.flatten ++ rest) = xs ∧
@@ -502,7 +502,7 @@ def SlhSignature.WellTyped (p : Fips205Params) (sig : SlhSignature) : Prop :=
     x.authPath.length = p.hp ∧ (∀ u ∈ x.authPath, u.length = p.n))
 
 /-- Exact NIST FIPS 205 Figure 15 flat byte decoder (`decodeSlhSig`), inverse to `encodeSlhSig`. -/
-@[expose] def decodeSlhSig (p : Fips205Params) (raw : List UInt8) : Option SlhSignature :=
+def decodeSlhSig (p : Fips205Params) (raw : List UInt8) : Option SlhSignature :=
   if raw.length ≠ p.sigBytes then none
   else
     let rRand := raw.take p.n
@@ -735,10 +735,10 @@ theorem slhSignInternal_wellTyped (p : Fips205Params) (msgPrime : List UInt8)
     exact fun x hx => hHtMem p.d 0 _ _ _ x hx
 
 /-- Pack a `List UInt8` onto a network `ByteArray` wire and unpack back (`unpackWireBytes (packWireBytes bs) = bs`). -/
-@[expose] def packWireBytes (bs : List UInt8) : ByteArray :=
+def packWireBytes (bs : List UInt8) : ByteArray :=
   ByteArray.mk bs.toArray
 
-@[expose] def unpackWireBytes (ba : ByteArray) : List UInt8 :=
+def unpackWireBytes (ba : ByteArray) : List UInt8 :=
   ba.data.toList
 
 @[simp] theorem unpackWireBytes_packWireBytes (bs : List UInt8) :
@@ -756,13 +756,13 @@ structure RssPartyKeyShare where
 
 /-- The two honest parties `(hA, hB)` complementary to a single static corrupt party `cIdx : Fin 3`,
     and the corresponding `RssQuorum` (`p12` for `cIdx = 0`, `p20` for `cIdx = 1`, `p01` for `cIdx = 2`). -/
-def honestPairForCorrupt (cIdx : Fin 3) : Nat × Nat × RssQuorum :=
+@[expose] def honestPairForCorrupt (cIdx : Fin 3) : Nat × Nat × RssQuorum :=
   if cIdx.val == 0 then (1, 2, .p12)
   else if cIdx.val == 1 then (2, 0, .p20)
   else (0, 1, .p01)
 
 /-- Deal honest key shares into `Nat → Option RssPartyKeyShare` (corrupt party receives `none` in honest vault). -/
-def dealHonestRssVault (cIdx : Fin 3) (seedSh prfSh : RssByteShares) : Nat → Option RssPartyKeyShare :=
+@[expose] def dealHonestRssVault (cIdx : Fin 3) (seedSh prfSh : RssByteShares) : Nat → Option RssPartyKeyShare :=
   fun pid =>
     if pid == cIdx.val then none
     else if pid == 0 then some ⟨seedSh.b0, seedSh.b1, prfSh.b0, prfSh.b1⟩
@@ -792,16 +792,16 @@ structure RssSlhSessionTape (sigBytes : Nat) where
   deriving DecidableEq, Repr
 
 /-- Cardinality of the per-session pad space (excluding the `2^128` challenge `gammaBits`). -/
-def rssPadSessionCard (sigBytes : Nat) : Nat :=
+@[expose] def rssPadSessionCard (sigBytes : Nat) : Nat :=
   (2 ^ 128) * ((2 ^ 192) *
     ((2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * sigBytes)) * (2 ^ (8 * sigBytes))))))))
 
 /-- Cardinality of one full session tape (`padSessionCard * 2^128`). -/
-def rssFullSessionCard (sigBytes : Nat) : Nat :=
+abbrev rssFullSessionCard (sigBytes : Nat) : Nat :=
   rssPadSessionCard sigBytes * (2 ^ 128)
 
 /-- Cardinality of the `Q_s`-session multi-round random tape space. -/
-def rssMultiSessionCard (sigBytes : Nat) : Nat → Nat
+@[expose] def rssMultiSessionCard (sigBytes : Nat) : Nat → Nat
   | 0 => 1
   | s + 1 => rssFullSessionCard sigBytes * rssMultiSessionCard sigBytes s
 
@@ -822,7 +822,7 @@ theorem rssMultiSessionCard_pos (sigBytes : Nat) : ∀ (s : Nat), 0 < rssMultiSe
   | s + 1 => Nat.mul_pos (rssFullSessionCard_pos sigBytes) (rssMultiSessionCard_pos sigBytes s)
 
 /-- Decode a `Fin (rssPadSessionCard L)` index + `Fin (2 ^ 128)` challenge into `RssSlhSessionTape L`. -/
-def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : Fin (2 ^ 128)) :
+@[expose] def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : Fin (2 ^ 128)) :
     RssSlhSessionTape L :=
   let B5 := (2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * L)) * (2 ^ (8 * L)))))
   have hB5 : 0 < B5 := Nat.mul_pos (Nat.two_pow_pos _)
@@ -861,11 +861,10 @@ def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : 
     gammaBits := BitVec.ofFin gIdx }
 
 /-- The challenge index only fills the `gammaBits` field. -/
-private theorem decodeRssSessionTape_gamma (L : Nat) (padIdx : Fin (rssPadSessionCard L))
+theorem decodeRssSessionTape_gamma (L : Nat) (padIdx : Fin (rssPadSessionCard L))
     (gIdx : Fin (2 ^ 128)) :
     decodeRssSessionTape L padIdx gIdx =
-      { decodeRssSessionTape L padIdx ⟨0, Nat.two_pow_pos 128⟩ with gammaBits := BitVec.ofFin gIdx } :=
-  rfl
+      { decodeRssSessionTape L padIdx ⟨0, Nat.two_pow_pos 128⟩ with gammaBits := BitVec.ofFin gIdx } := by rfl
 
 def encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
     (nA nB cA cB : BitVec 64) (m0 m1 : BitVec (8 * L)) : Fin (rssPadSessionCard L) :=
@@ -877,7 +876,7 @@ def encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
             (pairFin cB.toFin
               (pairFin m0.toFin m1.toFin))))))
 
-private theorem decodeRssSessionTape_encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
+theorem decodeRssSessionTape_encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
     (nA nB cA cB : BitVec 64) (m0 m1 : BitVec (8 * L)) (gIdx : Fin (2 ^ 128)) :
     decodeRssSessionTape L (encodeRssPadIdx L kB sd nA nB cA cB m0 m1) gIdx =
       { coinB := kB, prgSeeds := sd,
@@ -898,7 +897,7 @@ def defaultRssSessionTape (L : Nat) : RssSlhSessionTape L :=
     nonceA := 0#64, nonceB := 0#64, chiMaskA := 0#64, chiMaskB := 0#64,
     cutMask0 := 0#(8 * L), cutMask1 := 0#(8 * L), gammaBits := 0#128 }
 
-def decodeMultiSessionTapes (L : Nat) :
+@[expose] def decodeMultiSessionTapes (L : Nat) :
     (s : Nat) → Fin (rssMultiSessionCard L s) → (Nat → RssSlhSessionTape L)
   | 0, _, _ => defaultRssSessionTape L
   | s + 1, ω, 0 =>
@@ -910,7 +909,7 @@ def decodeMultiSessionTapes (L : Nat) :
     let rest := splitFinRight (rssMultiSessionCard_pos L s) ω
     decodeMultiSessionTapes L s rest k
 
-private theorem fixedBytesToBv_bvToFixedBytes : ∀ (L : Nat) (bv : BitVec (8 * L)),
+theorem fixedBytesToBv_bvToFixedBytes : ∀ (L : Nat) (bv : BitVec (8 * L)),
     fixedBytesToBv L (bvToFixedBytes L bv) = bv
   | 0, _ => by apply BitVec.eq_of_getLsbD_eq; intro i hi; simp at hi
   | L + 1, bv => by
@@ -1021,7 +1020,7 @@ theorem tooth_round2_trailing_bytes_rejected (deg : Nat) (wire : ByteArray)
   simp only [List.length_append, hLen]
   rw [ite_eq_left (Or.inr (by omega))]
 
-private theorem leb128_inj {n₁ n₂ : Nat} (h : leb128 n₁ = leb128 n₂) : n₁ = n₂ := by
+theorem leb128_inj {n₁ n₂ : Nat} (h : leb128 n₁ = leb128 n₂) : n₁ = n₂ := by
   have hApp : leb128 n₁ ++ [] = leb128 n₂ ++ [] := by simpa using h
   exact (leb128_prefix_inj hApp).1
 
@@ -1073,19 +1072,19 @@ def zipXorTower (k : Nat) : List (TowerElem k) → List (TowerElem k) → List (
   | _, [] => []
   | x :: xs, y :: ys => towerAdd k x y :: zipXorTower k xs ys
 
-private theorem zipXorTower_length_le_left (k : Nat) :
+theorem zipXorTower_length_le_left (k : Nat) :
     ∀ (xs ys : List (TowerElem k)), (zipXorTower k xs ys).length ≤ xs.length
   | [], _ => Nat.le_refl 0
   | _ :: _, [] => Nat.zero_le _
   | _ :: xs, _ :: ys => Nat.succ_le_succ (zipXorTower_length_le_left k xs ys)
 
-private theorem tower_eq_of_add_eq_zero (k : Nat) {a b : TowerElem k}
+theorem tower_eq_of_add_eq_zero (k : Nat) {a b : TowerElem k}
     (h : towerAdd k a b = towerZero k) : a = b := by
   have h1 := congrArg (towerAdd k a) h
   rw [towerAdd_cancel, towerAdd_zero] at h1
   exact h1.symm
 
-private theorem eq_of_zipXorTower_any_false (k : Nat) :
+theorem eq_of_zipXorTower_any_false (k : Nat) :
     ∀ {xs ys : List (TowerElem k)},
       xs.length = ys.length →
       (zipXorTower k xs ys).any (fun d => decide (d ≠ towerZero k)) = false →
@@ -1101,7 +1100,7 @@ private theorem eq_of_zipXorTower_any_false (k : Nat) :
       · exact False.elim (Bool.noConfusion ((decide_eq_true hEq).symm.trans hAny.1))
     rw [tower_eq_of_add_eq_zero k hxy, eq_of_zipXorTower_any_false k (Nat.succ.inj hL) hAny.2]
 
-private theorem evalCoeffs_zipXorTower (k : Nat) (gamma : TowerElem k) :
+theorem evalCoeffs_zipXorTower (k : Nat) (gamma : TowerElem k) :
     ∀ {xs ys : List (TowerElem k)},
       xs.length = ys.length →
       RoundPoly.evalCoeffs (zipXorTower k xs ys) gamma =
@@ -1124,7 +1123,7 @@ def bbcggiWireAccumulatorGen (k : Nat) (wires : List (TowerElem k)) (gamma : Tow
 abbrev bbcggiWireAccumulator (wires : List Tower128) (gamma : Tower128) : Tower128 :=
   bbcggiWireAccumulatorGen 7 wires gamma
 
-private theorem batchDeviationPoly_zipXorTower_eq (k : Nat)
+theorem batchDeviationPoly_zipXorTower_eq (k : Nat)
     {sentWires expectedWires : List (TowerElem k)}
     (hLen : sentWires.length = expectedWires.length) (gamma : TowerElem k) :
     batchDeviationPoly (zipXorTower k sentWires expectedWires) gamma =
@@ -1171,24 +1170,24 @@ def evalReplicatedGateCrossByte : List UInt8 → List Tower128 → List Tower128
   | b :: bs, sw :: sws, ew :: ews =>
     (b &&& towerLowByte (towerAdd 7 sw ew)) ^^^ evalReplicatedGateCrossByte bs sws ews
 
-private theorem evalReplicatedGateCrossByte_self :
+theorem evalReplicatedGateCrossByte_self :
     ∀ (bs : List UInt8) (ws : List Tower128),
       evalReplicatedGateCrossByte bs ws ws = 0
   | [], _ => rfl
   | _ :: _, [] => rfl
   | b :: bs, w :: ws => by
     simp only [evalReplicatedGateCrossByte, towerAdd_self_zero]
-    have hZ : towerLowByte (towerZero 7) = 0 := rfl
+    have hZ : towerLowByte (towerZero 7) = 0 := by rfl
     rw [hZ, evalReplicatedGateCrossByte_self bs ws]
     have hAnd0 : (b &&& 0) = 0 := by apply UInt8.eq_of_toBitVec_eq; simp
     rw [hAnd0]
     rfl
 
-private theorem evalReplicatedGateCrossByte_nil_wires (bs : List UInt8) :
+theorem evalReplicatedGateCrossByte_nil_wires (bs : List UInt8) :
     evalReplicatedGateCrossByte bs [] [] = 0 := by
   cases bs <;> rfl
 
-private theorem evalReplicatedGateCrossByte_one_headD (bs : List UInt8) (exp0 : Tower128) :
+theorem evalReplicatedGateCrossByte_one_headD (bs : List UInt8) (exp0 : Tower128) :
     evalReplicatedGateCrossByte bs [towerAdd 7 exp0 (towerOne 7)] [exp0] =
       (bs.headD 0 &&& 1) := by
   cases bs with
@@ -1197,10 +1196,10 @@ private theorem evalReplicatedGateCrossByte_one_headD (bs : List UInt8) (exp0 : 
     simp only [evalReplicatedGateCrossByte, List.headD_cons]
     have hShift : towerAdd 7 (towerAdd 7 exp0 (towerOne 7)) exp0 = towerOne 7 := by
       rw [towerAdd_comm 7 _ exp0, towerAdd_cancel]
-    have hOne : towerLowByte (towerOne 7) = 1 := rfl
+    have hOne : towerLowByte (towerOne 7) = 1 := by rfl
     rw [hShift, hOne, evalReplicatedGateCrossByte_nil_wires rest, uint8_xor_zero]
 
-private theorem xorByteStream_zero_head_replicate {xs : List UInt8} {L : Nat}
+theorem xorByteStream_zero_head_replicate {xs : List UInt8} {L : Nat}
     (hLen : xs.length = L) :
     xorByteStream xs ((0 : UInt8) :: List.replicate (L - 1) 0) = xs := by
   subst hLen
@@ -1211,21 +1210,21 @@ private theorem xorByteStream_zero_head_replicate {xs : List UInt8} {L : Nat}
                List.zipWith_cons_cons, uint8_xor_zero]
     exact congrArg (List.cons x) (xorByteStream_replicate_zero rest)
 
-private theorem byteArray_bne_self (b : ByteArray) : (b != b) = false := by
+theorem byteArray_bne_self (b : ByteArray) : (b != b) = false := by
   unfold bne
   change (!(b.data == b.data)) = false
   rw [beq_self_eq_true]
   rfl
 
-private theorem ite_bne_self_false {α : Type} (b : ByteArray) (t e : α) :
+theorem ite_bne_self_false {α : Type} (b : ByteArray) (t e : α) :
     (if (b != b) = true then t else e) = e := by
   rw [byteArray_bne_self]; rfl
 
-private theorem ite_not_beq_self_false {α β : Type} [BEq β] [ReflBEq β] (x : β) (t e : α) :
+theorem ite_not_beq_self_false {α β : Type} [BEq β] [ReflBEq β] (x : β) (t e : α) :
     (if (!(x == x)) = true then t else e) = e := by
   rw [beq_self_eq_true]; rfl
 
-private theorem drop_append_of_length_eq {α : Type} {xs ys : List α} {n : Nat}
+theorem drop_append_of_length_eq {α : Type} {xs ys : List α} {n : Nat}
     (h : xs.length = n) : (xs ++ ys).drop n = ys := by
   subst h
   exact List.drop_left
@@ -1412,7 +1411,7 @@ theorem openingCoin_coinOpeningBytes (coin : BitVec 128) (blind : BitVec 64) :
   exact fixedBytesToBv_bvToFixedBytes 16 coin
 
 /-- Extract the two honest parties' `(seedViews, prfViews)` and secret-dependent cut tag from the vault. -/
-def extractHonestQuorumViews (L : Nat) (cIdx : Fin 3)
+@[expose] def extractHonestQuorumViews (L : Nat) (cIdx : Fin 3)
     (shares : Nat → Option RssPartyKeyShare) :
     Option (((List UInt8 × List UInt8) × (List UInt8 × List UInt8)) ×
             ((List UInt8 × List UInt8) × (List UInt8 × List UInt8)) ×
@@ -1511,7 +1510,7 @@ theorem checkRound3ActiveOpen_output (L : Nat) (cIdx : Fin 3) (cutSh : RssByteSh
           rfl
         · cases h
 
-private theorem reconstructRssBytes_masked_eq :
+theorem reconstructRssBytes_masked_eq :
     ∀ {s b0 b1 : List UInt8},
       s.length = b0.length →
       b0.length = b1.length →
@@ -1572,7 +1571,7 @@ def sessionFullTapeXorEquiv (L : Nat)
     (sessionPadXorEquiv L wA wB rawTag0 rawTag1)
     (fun _ => idFinEquiv (2 ^ 128))
 
-private theorem decodeSingleFullTape_sessionFullTapeXorEquiv (L : Nat)
+theorem decodeSingleFullTape_sessionFullTapeXorEquiv (L : Nat)
     (wA wB : BitVec 64) (rawTag0 rawTag1 : BitVec (8 * L))
     (cur : Fin (rssFullSessionCard L)) :
     let t := decodeSingleFullTape L cur
@@ -1603,7 +1602,7 @@ private theorem decodeSingleFullTape_sessionFullTapeXorEquiv (L : Nat)
   rw [BitVec.xor_comm _ wA, BitVec.xor_comm _ wB,
       BitVec.xor_comm _ rawTag0, BitVec.xor_comm _ rawTag1]
 
-private theorem qsum_le_add_qsum : ∀ (n : Nat) (f g h : Fin n → Nat),
+theorem qsum_le_add_qsum : ∀ (n : Nat) (f g h : Fin n → Nat),
     (∀ i, f i ≤ g i + h i) → qsum n f ≤ qsum n g + qsum n h
   | 0, _, _, _, _ => by simp only [qsum_zero]; exact Nat.le_refl 0
   | n + 1, f, g, h, hLe => by
@@ -1616,7 +1615,7 @@ private theorem qsum_le_add_qsum : ∀ (n : Nat) (f g h : Fin n → Nat),
     have h0 := hLe ⟨0, Nat.zero_lt_succ n⟩
     omega
 
-private theorem qsum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
+theorem qsum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
     qsum n (fun i => f i * c) = qsum n f * c
   | 0, _, _ => by simp [qsum_zero]
   | n + 1, c, f => by simp only [qsum_succ, qsum_mul_right_local n c, Nat.add_mul]
@@ -1626,7 +1625,7 @@ def towerPadSpaceCard (B : Nat) : Nat → Nat
   | 0 => 1
   | t + 1 => B * towerPadSpaceCard B t
 
-private theorem towerPadSpaceCard_pos {B : Nat} (hB : 0 < B) : ∀ (t : Nat), 0 < towerPadSpaceCard B t
+theorem towerPadSpaceCard_pos {B : Nat} (hB : 0 < B) : ∀ (t : Nat), 0 < towerPadSpaceCard B t
   | 0 => Nat.zero_lt_one
   | t + 1 => Nat.mul_pos hB (towerPadSpaceCard_pos hB t)
 
@@ -1635,7 +1634,7 @@ theorem towerPadSpaceCard_eq_pow (B : Nat) : ∀ (t : Nat), towerPadSpaceCard B 
   | t + 1 => by
     simp only [towerPadSpaceCard, towerPadSpaceCard_eq_pow B t, Nat.pow_succ, Nat.mul_comm]
 
-private def decodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+def decodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
     (dec1 : Fin B → R) : (t : Nat) → Fin (towerPadSpaceCard B t) → ShamirPadPoly R t
   | 0, _ => ⟨[], rfl⟩
   | t + 1, idx =>
@@ -1644,13 +1643,13 @@ private def decodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < 
     let rest := decodeGenericPadPoly B hB dec1 t (splitFinRight hRest idx)
     ⟨c0 :: rest.1, congrArg Nat.succ rest.2⟩
 
-private def encodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat)
+def encodeGenericPadPoly {R : Type} [CommRingOps R] (B : Nat)
     (enc1 : R → Fin B) : (t : Nat) → ShamirPadPoly R t → Fin (towerPadSpaceCard B t)
   | 0, _ => ⟨0, Nat.zero_lt_one⟩
   | t + 1, ⟨c0 :: cs, hLen⟩ =>
     pairFin (enc1 c0) (encodeGenericPadPoly B enc1 t ⟨cs, Nat.succ.inj hLen⟩)
 
-private theorem decode_encode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+theorem decode_encode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
     (dec1 : Fin B → R) (enc1 : R → Fin B) (hLeft : ∀ x : R, dec1 (enc1 x) = x) :
     ∀ (t : Nat) (P : ShamirPadPoly R t),
       decodeGenericPadPoly B hB dec1 t (encodeGenericPadPoly B enc1 t P) = P
@@ -1660,7 +1659,7 @@ private theorem decode_encode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat
                splitFinLeft_pairFin, splitFinRight_pairFin, hLeft,
                decode_encode_genericPadPoly B hB dec1 enc1 hLeft t ⟨cs, Nat.succ.inj hLen⟩]
 
-private theorem encode_decode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
+theorem encode_decode_genericPadPoly {R : Type} [CommRingOps R] (B : Nat) (hB : 0 < B)
     (dec1 : Fin B → R) (enc1 : R → Fin B) (hRight : ∀ i : Fin B, enc1 (dec1 i) = i) :
     ∀ (t : Nat) (idx : Fin (towerPadSpaceCard B t)),
       encodeGenericPadPoly B enc1 t (decodeGenericPadPoly B hB dec1 t idx) = idx
@@ -1727,39 +1726,39 @@ inductive WotsChainSmTcrBreak (p : Fips205Params) (sk : SlhSecretKey) : Type whe
 structure PrfMsgBreak (p : Fips205Params) where
   coll : Fips205ShakeCollision p.m
 
-private theorem wellFormed_props {p : Fips205Params} (hWf : p.wellFormed = true) :
+theorem wellFormed_props {p : Fips205Params} (hWf : p.wellFormed = true) :
     0 < p.n ∧ p.n ≤ 32 ∧ 0 < p.d ∧ p.h = p.d * p.hp ∧ 0 < p.k ∧ 0 < p.a := by
   rw [Fips205Params.wellFormed_def] at hWf
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
   exact ⟨hWf.1.1.1.1.1.1, hWf.1.1.1.1.1.2, hWf.1.1.1.1.2, hWf.1.1.1.2, hWf.1.1.2, hWf.1.2⟩
 
-private theorem fipsXmssNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (layer tree : Nat) :
+theorem fipsXmssNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (layer tree : Nat) :
     ∀ (z nodeIdx : Nat), (fipsXmssNode p skSeed pkSeed layer tree z nodeIdx).length = p.n
   | 0, nodeIdx => by simp [fipsXmssNode_zero, fipsWotsPkGen_def]
   | z + 1, nodeIdx => by simp [fipsXmssNode_succ]
 
-private theorem fipsForsNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
+theorem fipsForsNode_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
     ∀ (z nodeIdx : Nat), (fipsForsNode p skSeed pkSeed tree idxLeaf z nodeIdx).length = p.n
   | 0, nodeIdx => by simp [fipsForsNode_zero]
   | z + 1, nodeIdx => by simp [fipsForsNode_succ]
 
-private theorem fipsForsPkGen_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
+theorem fipsForsPkGen_length (p : Fips205Params) (skSeed pkSeed : List UInt8) (tree idxLeaf : Nat) :
     (fipsForsPkGen p skSeed pkSeed tree idxLeaf).length = p.n := by
   simp [fipsForsPkGen_def]
 
-private theorem fipsForsPkFromSig_length (p : Fips205Params) (fsig : List FipsForsTreeSig)
+theorem fipsForsPkFromSig_length (p : Fips205Params) (fsig : List FipsForsTreeSig)
     (md pkSeed : List UInt8) (tree idxLeaf : Nat) :
     (fipsForsPkFromSig p fsig md pkSeed tree idxLeaf).length = p.n := by
   simp [fipsForsPkFromSig_def]
 
-private theorem honestSlhWotsMsg_length (p : Fips205Params) (skSeed pkSeed : List UInt8)
+theorem honestSlhWotsMsg_length (p : Fips205Params) (skSeed pkSeed : List UInt8)
     (layer tree leaf : Nat) :
     (honestSlhWotsMsg p skSeed pkSeed layer tree leaf).length = p.n := by
   cases layer with
   | zero => exact fipsForsPkGen_length p skSeed pkSeed tree leaf
   | succ l => exact fipsXmssNode_length p skSeed pkSeed l _ p.hp 0
 
-private theorem fipsWalkBottomUp_length (n : Nat) (pkSeed : List UInt8) (layer tree kp : Nat)
+theorem fipsWalkBottomUp_length (n : Nat) (pkSeed : List UInt8) (layer tree kp : Nat)
     (ty : FipsAdrsType) :
     ∀ (path : List (List UInt8)) (z idx : Nat) (node : List UInt8),
       node.length = n →
@@ -1773,13 +1772,13 @@ private theorem fipsWalkBottomUp_length (n : Nat) (pkSeed : List UInt8) (layer t
     · rw [ite_eq_right hPar]
       exact fipsWalkBottomUp_length n pkSeed layer tree kp ty rest (z + 1) (idx / 2) _ (fipsH_length _ _ _ _ _)
 
-private theorem fipsXmssPkFromSig_length (p : Fips205Params) (idx : Nat) (xsig : FipsXmssSig)
+theorem fipsXmssPkFromSig_length (p : Fips205Params) (idx : Nat) (xsig : FipsXmssSig)
     (msg pkSeed : List UInt8) (layer tree : Nat) :
     (fipsXmssPkFromSig p idx xsig msg pkSeed layer tree).length = p.n := by
   simp only [fipsXmssPkFromSig_def]
   exact fipsWalkBottomUp_length p.n pkSeed layer tree 0 .tree xsig.authPath 0 idx _ (by simp [fipsWotsPkFromSig_def])
 
-private theorem flatten_inj_fixed {n : Nat} (hn : 0 < n) :
+theorem flatten_inj_fixed {n : Nat} (hn : 0 < n) :
     ∀ {xs ys : List (List UInt8)},
       xs.length = ys.length →
       (∀ x ∈ xs, x.length = n) →
@@ -1798,7 +1797,7 @@ private theorem flatten_inj_fixed {n : Nat} (hn : 0 < n) :
 /-- Constructive bottom-up Merkle collision finder (`0 Classical.choice`) shared by `.tree` (XMSS)
     and `.forsTree` (FORS): walks `path` until `nextNode = nodeF (z + 1) (idx / 2)` while
     `curNode ≠ nodeF z idx`, extracting an explicit `SHAKE256` collision prefixed by `pkSeed`. -/
-private def extractMerkleWalkCollision (n : Nat) (pkSeed : List UInt8)
+def extractMerkleWalkCollision (n : Nat) (pkSeed : List UInt8)
     (layer tree kp : Nat) (ty : FipsAdrsType)
     (nodeF : Nat → Nat → List UInt8)
     (hNodeLen : ∀ z ni, (nodeF z ni).length = n)
@@ -1884,7 +1883,7 @@ private def extractMerkleWalkCollision (n : Nat) (pkSeed : List UInt8)
 /-- Single-layer XMSS forgery splitter (`0 Classical.choice`): given `curNode ≠ honestSlhWotsMsg`
     verifying against `fipsXmssNode p sk.skSeed sk.pkSeed layer tree p.hp 0`, extracts EITHER
     `XmssMerkleTcrBreak` OR `WotsChainSmTcrBreak`! -/
-private def extractSingleXmssLayerBreak (p : Fips205Params)
+def extractSingleXmssLayerBreak (p : Fips205Params)
     (hnPos : 0 < p.n) (hnLe : p.n ≤ 128)
     (sk : SlhSecretKey) (layer tree leaf : Nat)
     (hLayerLt : layer < p.d) (hLeafLt : leaf < 2 ^ p.hp)
@@ -1928,7 +1927,7 @@ private def extractSingleXmssLayerBreak (p : Fips205Params)
     .inr ⟨coll, hPref⟩
 
 /-- Multi-layer hypertree extractor (`0 Classical.choice`) walking `rem` remaining layers `layer .. p.d - 1`. -/
-private def extractHypertreeBreakAux (p : Fips205Params)
+def extractHypertreeBreakAux (p : Fips205Params)
     (hnPos : 0 < p.n) (hnLe : p.n ≤ 128) (sk : SlhSecretKey) :
     (rem : Nat) → (hRemPos : 0 < rem) →
     (layer idxTree idxLeaf : Nat) →
@@ -2002,7 +2001,7 @@ private def extractHypertreeBreakAux (p : Fips205Params)
           (by simpa [fipsHtVerifyAux_nil, fipsHtVerifyAux_cons, nextNode, nextLeaf, nextTree] using hTopVerify)
 
 /-- Constructive list scanner (`0 Classical.choice`) finding the first element satisfying decidable `P`. -/
-private def findDecidableElem {α : Type} (P : α → Prop) [∀ x, Decidable (P x)] :
+def findDecidableElem {α : Type} (P : α → Prop) [∀ x, Decidable (P x)] :
     (xs : List α) →
     PSum { x : α // x ∈ xs ∧ P x } (PLift (∀ x ∈ xs, ¬ P x))
   | [] => .inr ⟨fun _ hMem => by cases hMem⟩
@@ -2017,7 +2016,7 @@ private def findDecidableElem {α : Type} (P : α → Prop) [∀ x, Decidable (P
           · exact hPx
           · exact hNone z hTl⟩
 
-private theorem map_eq_on_mem {α β : Type} {f g : α → β} :
+theorem map_eq_on_mem {α β : Type} {f g : α → β} :
     ∀ {xs : List α}, xs.map f = xs.map g → ∀ x ∈ xs, f x = g x
   | [], _, _, hx => by cases hx
   | a :: xs, hEq, x, hx => by
@@ -2028,7 +2027,7 @@ private theorem map_eq_on_mem {α β : Type} {f g : α → β} :
 
 /-- Scan FORS trees `0 .. count - 1` (`0 Classical.choice`) to verify either a Merkle/`.forsTree`
     `SHAKE256` collision OR that EVERY `j < count` satisfies `(sigStar.forsSig.getD j).skVal = honSkVal j`! -/
-private def verifyOrExtractForsTrees (p : Fips205Params) (sk : SlhSecretKey)
+def verifyOrExtractForsTrees (p : Fips205Params) (sk : SlhSecretKey)
     (md : List UInt8) (idxTree idxLeaf : Nat)
     (sigStar : SlhSignature)
     (hFLen : sigStar.forsSig.length = p.k)
@@ -2125,12 +2124,12 @@ theorem buildHonestRound3Msgs_ne_nil (cIdx : Fin 3) (cutSh : RssByteShares) :
   · intro h; cases h
   · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
 
-private theorem isEmpty_false_of_ne_nil {α : Type} : ∀ {l : List α}, l ≠ [] → l.isEmpty = false
+theorem isEmpty_false_of_ne_nil {α : Type} : ∀ {l : List α}, l ≠ [] → l.isEmpty = false
   | [], h => absurd rfl h
   | _ :: _, _ => rfl
 
 /-- Forgery-count transfer through the root-hit event, with the commitment-hop gap explicit. -/
-private theorem count_transfer_with_coin_gap {cR cI bR bD card num : Nat} (hCard : 0 < card)
+theorem count_transfer_with_coin_gap {cR cI bR bD card num : Nat} (hCard : 0 < card)
     (hT : cR * card ≤ cI * card + bR * card) (hDecoy : bD * 2 ^ 128 ≤ num * card) :
     cR * 2 ^ 128 ≤ cI * 2 ^ 128 + num * card + natAbsDiff bR bD * 2 ^ 128 := by
   have h1 : cR ≤ cI + bR := by
@@ -2149,7 +2148,7 @@ private theorem count_transfer_with_coin_gap {cR cI bR bD card num : Nat} (hCard
 
 /-! ## 5. Honest Round-3 Echo, Small Horner Facts & the Horner Tag as a Tag Scheme -/
 
-private theorem encodeSlhSig_length {p : Fips205Params} {sig : SlhSignature}
+theorem encodeSlhSig_length {p : Fips205Params} {sig : SlhSignature}
     (hWt : sig.WellTyped p) :
     (encodeSlhSig sig).length = p.sigBytes := by
   have hDec := decodeSlhSig_encodeSlhSig hWt
@@ -2168,7 +2167,7 @@ def echoHonestRound3 (L : Nat) (honR3 : List (Nat × ByteArray)) : ByteArray :=
   | _ => ByteArray.empty
 
 /-- The echo reads only the two cut-opening messages; the coin openings after them are ignored. -/
-private theorem echoHonestRound3_append (L : Nat) (cIdx : Fin 3) (cutSh : RssByteShares)
+theorem echoHonestRound3_append (L : Nat) (cIdx : Fin 3) (cutSh : RssByteShares)
     (extra : List (Nat × ByteArray)) :
     echoHonestRound3 L (buildHonestRound3Msgs cIdx cutSh ++ extra) =
       echoHonestRound3 L (buildHonestRound3Msgs cIdx cutSh) := by
@@ -2178,7 +2177,7 @@ private theorem echoHonestRound3_append (L : Nat) (cIdx : Fin 3) (cutSh : RssByt
   · rfl
   · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
 
-private theorem checkRound3ActiveOpen_echoHonestRound3 (L : Nat) (cIdx : Fin 3)
+theorem checkRound3ActiveOpen_echoHonestRound3 (L : Nat) (cIdx : Fin 3)
     (cutSh : RssByteShares)
     (h0 : cutSh.b0.length = L) (h1 : cutSh.b1.length = L) (h2 : cutSh.b2.length = L) :
     checkRound3ActiveOpen L cIdx cutSh
@@ -2209,7 +2208,7 @@ private theorem checkRound3ActiveOpen_echoHonestRound3 (L : Nat) (cIdx : Fin 3)
     have hd1 : (cutSh.b1 ++ cutSh.b2).drop L = cutSh.b2 := by rw [← h1, List.drop_left]
     rw [ht1, hd1]
     simp [h0, h1, h2]
-  · have hc : (⟨0 + 1 + 1, hv⟩ : Fin 3) = ⟨2, by decide⟩ := rfl
+  · have hc : (⟨0 + 1 + 1, hv⟩ : Fin 3) = ⟨2, by decide⟩ := by rfl
     rw [hc]
     simp only [buildHonestRound3Msgs, echoHonestRound3, checkRound3ActiveOpen,
                verifyRssActiveOpenBytes, Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte,
@@ -2223,13 +2222,13 @@ private theorem checkRound3ActiveOpen_echoHonestRound3 (L : Nat) (cIdx : Fin 3)
     simp [h0, h1, h2]
   · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
 
-private theorem batchDeviationPoly_nil (x : Tower128) :
+theorem batchDeviationPoly_nil (x : Tower128) :
     batchDeviationPoly ([] : List Tower128) x = towerZero 7 := by
   simp only [batchDeviationPoly, RoundPoly.evalCoeffs,
              LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   rfl
 
-private theorem batchDeviationPoly_singleton_one (x : Tower128) :
+theorem batchDeviationPoly_singleton_one (x : Tower128) :
     batchDeviationPoly [towerOne 7] x = x := by
   simp only [batchDeviationPoly, RoundPoly.evalCoeffs,
              LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
@@ -2247,7 +2246,7 @@ def extractPublicRound3HeadByte (L : Nat) (honR3 : List (Nat × ByteArray)) : Op
     (reconstructRssBytes ⟨b0, b1, b2⟩).head?
   | _ => none
 
-private theorem parseCorruptRound2Wire_one_wire (w : Tower128) :
+theorem parseCorruptRound2Wire_one_wire (w : Tower128) :
     parseCorruptRound2Wire 1
       (packWireBytes (List.replicate 24 0 ++ encodeTower128Wire w)) =
       some (List.replicate 24 0, [w]) := by
@@ -2278,7 +2277,7 @@ theorem tooth_known_challenge_admits_nonzero_deviation (gamma : Tower128) :
   have hMulOne : towerMul 7 gamma (towerOne 7) = gamma := LawfulCommRing.mul_one gamma
   rw [hMulZero, towerAdd_zero, hMulOne, towerAdd_self_zero, hMulZero, towerAdd_self_zero]
 
-private theorem evalCoeffs_all_zero (x : Tower128) : ∀ (ds : List Tower128),
+theorem evalCoeffs_all_zero (x : Tower128) : ∀ (ds : List Tower128),
     ds.any (fun d => decide (d ≠ towerZero 7)) = false →
     RoundPoly.evalCoeffs ds x = towerZero 7
   | [], _ => rfl
@@ -2628,7 +2627,7 @@ theorem round1NonceCommit_binding_or_collision
 /-- Deviations fixed by the public Round-2 wire and the private expected stream,
     before either honest coin share is opened. The same function is used by the
     protocol barrier theorem and the execution game's bad-event extractor. -/
-@[expose] def preCutNonzeroDeltas (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey)
+def preCutNonzeroDeltas (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey)
     (req : SessionScheduleReq) (cursor : Nat) (corrR1Commit : ByteArray)
     (expectedWires : List Tower128) (corrR2 : List (Nat × ByteArray)) : Option (List Tower128) :=
   match corrR2.find? (fun pr => pr.1 == cIdx.val) with
@@ -2695,6 +2694,57 @@ theorem sharedPreCutBarrier_extract_eq (cIdx : Fin 3) (deg : Nat) (pk : SlhPubli
           rw [hDs]
       · rw [hCmt] at hBar; simp at hBar
 
+
+
+theorem decodeMultiSessionTapes_zero (L : Nat) (ω : Fin (rssMultiSessionCard L 0)) (k : Nat) :
+    decodeMultiSessionTapes L 0 ω k = defaultRssSessionTape L := by rfl
+
+theorem decodeMultiSessionTapes_succ (L s : Nat) (ω : Fin (rssMultiSessionCard L (s + 1))) (k : Nat) :
+    decodeMultiSessionTapes L (s + 1) ω k =
+      let cur := splitFinLeft (rssMultiSessionCard_pos L s) ω
+      let rest := splitFinRight (rssMultiSessionCard_pos L s) ω
+      match k with
+      | 0 => decodeSingleFullTape L cur
+      | k' + 1 => decodeMultiSessionTapes L s rest k' := by
+  cases k <;> rfl
+
+theorem decodeSingleFullTape_def (L : Nat) (cur : Fin (rssFullSessionCard L)) :
+    decodeSingleFullTape L cur =
+      decodeRssSessionTape L (splitFinLeft (Nat.two_pow_pos 128) cur) (splitFinRight (Nat.two_pow_pos 128) cur) := by rfl
+
+theorem idFinEquiv_toFun (N : Nat) (x : Fin N) : (idFinEquiv N).toFun x = x := by rfl
+
+theorem decodeTower128PadPoly_def (t : Nat) :
+    decodeTower128PadPoly t =
+      decodeGenericPadPoly (2 ^ 128) (Nat.two_pow_pos 128) (fun i => unpackTower 7 (BitVec.ofFin i)) t := by rfl
+
+theorem encodeTower128PadPoly_def (t : Nat) :
+    encodeTower128PadPoly t =
+      encodeGenericPadPoly (2 ^ 128) (fun x => (packTower 7 x).toFin) t := by rfl
+
+theorem SlhSignature.wellTyped_def (p : Fips205Params) (sig : SlhSignature) :
+    sig.WellTyped p ↔
+      sig.rRand.length = p.n ∧
+      sig.forsSig.length = p.k ∧
+      (∀ f ∈ sig.forsSig, f.skVal.length = p.n ∧ f.authPath.length = p.a ∧ (∀ u ∈ f.authPath, u.length = p.n)) ∧
+      sig.htSig.length = p.d ∧
+      (∀ x ∈ sig.htSig, x.wotsSig.length = p.ell ∧ (∀ w ∈ x.wotsSig, w.length = p.n) ∧
+        x.authPath.length = p.hp ∧ (∀ u ∈ x.authPath, u.length = p.n)) := Iff.rfl
+
+#export_eqns committedCoin honestCoinOpeningMsgs corruptOpenedCoin round1NonceCommit
+  buildHonestRound3Msgs extractPublicRound3HeadByte preCutNonzeroDeltas
+  computeHonestChiWord evalReplicatedGateCrossByte reusedFirstSessionTapes
+  zipXorTower verifyPrivateChiWires honestSlhWotsMsg
+
+@[simp] theorem fixedBytesToBv_zero (bs : List UInt8) : fixedBytesToBv 0 bs = 0#0 := by rfl
+@[simp] theorem fixedBytesToBv_succ_nil (L : Nat) : fixedBytesToBv (L + 1) [] = 0#(8 * (L + 1)) := by rfl
+@[simp] theorem fixedBytesToBv_succ_cons (L : Nat) (b : UInt8) (bs : List UInt8) :
+    fixedBytesToBv (L + 1) (b :: bs) = ((fixedBytesToBv L bs) ++ b.toBitVec).cast (by omega) := by rfl
+
+theorem finBitVecXorEquiv_toFun_ofFin (W : Nat) (delta : BitVec W) (z : Fin (2 ^ W)) :
+    BitVec.ofFin ((finBitVecXorEquiv W delta).toFun z) = BitVec.ofFin z ^^^ delta := by rfl
+
+#export_eqns RssRound3State.deltas xorByteStream
 
 end Qsag
 end

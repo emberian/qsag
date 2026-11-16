@@ -26,9 +26,9 @@ module qsag_poseidon2_12_pipe #(
     localparam int FF_LAT = P2_PIPE_LAT - P2_LIN_LAT;
 
     logic [P2_PIPE_LAT-1:0]    v_sr;
-    logic [P2_PIPE_LAT*MW-1:0] m_sr;
-    logic [FF_LAT*FFW-1:0]     ff_sr;
-    logic [FFW-1:0]            in_ff;
+    logic [FFW-1:0]            in_ff, ff_at;
+    logic                      jive_at;
+    logic [TAGW-1:0]           unused_tag_at;
     for (genvar i = 0; i < 4; i++) begin : g_ff
         assign in_ff[67*i +: 67] = 67'(in_state[64*i +: 64])
                                  + (67'(in_state[64*(4 + i) +: 64]) << 1)
@@ -39,10 +39,15 @@ module qsag_poseidon2_12_pipe #(
     always_ff @(posedge clk) begin
         if (rst) v_sr <= '0;
         else     v_sr <= {v_sr[P2_PIPE_LAT-2:0], in_valid};
-        m_sr  <= {m_sr[(P2_PIPE_LAT-1)*MW-1:0], in_jive, in_tag};
-        ff_sr <= {ff_sr[(FF_LAT-1)*FFW-1:0], in_ff};
         st0   <= in_state;
     end
+
+    // Job metadata and the feed-forward ride block-RAM delay lines beside the datapath: the
+    // feed-forward to the input of the last linear layer, the tag and mode to the output.
+    qsag_bram_delay #(.W(FFW + MW), .N(FF_LAT)) u_ff_dly (
+        .clk(clk), .d({in_ff, in_jive, in_tag}), .q({ff_at, jive_at, unused_tag_at}));
+    qsag_bram_delay #(.W(MW), .N(P2_PIPE_LAT)) u_meta_dly (
+        .clk(clk), .d({in_jive, in_tag}), .q({out_jive, out_tag}));
 
     logic [31*768-1:0] st;
     for (genvar p = 0; p < 31; p++) begin : g_pass
@@ -50,9 +55,7 @@ module qsag_poseidon2_12_pipe #(
         logic [12*67-1:0] addend;
         logic [767:0]     sin;
         if (p == 30) begin : g_last
-            logic jive_at;
-            assign jive_at = m_sr[(FF_LAT-1)*MW + TAGW];
-            assign addend  = {{(8*67){1'b0}}, jive_at ? ff_sr[(FF_LAT-1)*FFW +: FFW] : {FFW{1'b0}}};
+            assign addend = {{(8*67){1'b0}}, jive_at ? ff_at : {FFW{1'b0}}};
         end else begin : g_rc
             logic [767:0] rc;
             qsag_p2_rc u_rc (.pass(5'(p)), .rc(rc));
@@ -72,6 +75,7 @@ module qsag_poseidon2_12_pipe #(
 
     assign out_valid = v_sr[P2_PIPE_LAT-1];
     assign out_state = st[30*768 +: 768];
-    assign out_jive  = m_sr[(P2_PIPE_LAT-1)*MW + TAGW];
-    assign out_tag   = m_sr[(P2_PIPE_LAT-1)*MW +: TAGW];
+
+    logic unused_ok;
+    assign unused_ok = &{1'b0, unused_tag_at};
 endmodule

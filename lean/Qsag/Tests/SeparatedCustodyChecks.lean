@@ -1,12 +1,20 @@
 module
 public import Qsag.Protocol.Signing.HypertreeEufCma
+meta import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Custody.CustodySuiteFull
+meta import Qsag.Custody.CustodySuiteFull
 public import Qsag.Oracle.Keccak
+meta import Qsag.Oracle.Keccak
 public import Qsag.Spec.Encoding
+meta import Qsag.Spec.Encoding
 public import Qsag.Custody.SeparatedCustody
+meta import Qsag.Custody.SeparatedCustody
 public import Qsag.Protocol.Signing.HashSigs
+meta import Qsag.Protocol.Signing.HashSigs
 public import Qsag.Protocol.Threshold.MaliciousSecurity
+meta import Qsag.Protocol.Threshold.MaliciousSecurity
 public import Qsag.Math.Gf2Pow128
+meta import Qsag.Math.Gf2Pow128
 import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag.Custody.Checks
@@ -64,19 +72,25 @@ def legacyRelease (cfg : SigningConfig) (sk : PqSecretKey) (party anchor : Nat)
       (legacySign cfg sk 0 party r).map (fun sig => ⟨party, r, sig⟩))
   else (v, none)
 
+/-- The approval bytes of `(d, i, r)` and `(d', j, s)` coincide under the encoding `enc`. The
+deployment-framed `payload` and the old `legacyPayload` are compared through this one relation. -/
+def SameApprovalBytes (enc : Nat → Nat → Intent → List UInt8) (d d' i j : Nat) (r s : Intent) :
+    Prop :=
+  enc d i r = enc d' j s
+
 theorem payload_binds_deployment_audited {d d' i j : Nat} {r s : Intent}
-    (h : payload d i r = payload d' j s) : d = d' ∧ i = j ∧ r = s :=
+    (h : SameApprovalBytes payload d d' i j r s) : d = d' ∧ i = j ∧ r = s :=
   payload_injective h
 
 theorem inhabited_equal_payloads :
-    ∃ (d d' i j : Nat) (r s : Intent), payload d i r = payload d' j s :=
+    ∃ (d d' i j : Nat) (r s : Intent), SameApprovalBytes payload d d' i j r s :=
   ⟨dep, dep, 0, 0, request, request, rfl⟩
 
 /-- Old shape: the approval bytes of two different deployments coincide, where the
 deployment-framed bytes differ. -/
 theorem tooth_legacy_payload_deployment_blind :
     ∃ (d d' i : Nat) (r : Intent), d ≠ d' ∧
-      legacyPayload d i r = legacyPayload d' i r ∧ payload d i r ≠ payload d' i r :=
+      SameApprovalBytes legacyPayload d d' i i r r ∧ ¬ SameApprovalBytes payload d d' i i r r :=
   ⟨0, 1, 0, request, by decide, rfl, payload_ne_of_deployment_ne (by decide) 0 0 request request⟩
 
 #verify_inhabited payload_binds_deployment_audited inhabited_equal_payloads
@@ -103,8 +117,16 @@ def toyIntent : Intent := ⟨0, 0, 0, 0, []⟩
 
 theorem toy_cross_deployment_approval_accepted :
     verify toyCfg (derivePublicKey toyCfg.suite toyCfg.params ⟨[], [], []⟩) 1 0 toyIntent
-      prodToyForgery = true := by
-  decide +kernel
+      prodToyForgery = true :=
+  prodToyForgery_accepted_on (payload 1 0 toyIntent)
+
+theorem toyCfg_radix : toyCfg.params.w = 4 := by
+  show prodToyStatefulParams.w = 4
+  rw [prodToyStatefulParams.public_eq_1]
+
+theorem toyCfg_stateful : toyCfg.params.statefulJorts = true := by
+  show prodToyStatefulParams.statefulJorts = true
+  rw [prodToyStatefulParams.public_eq_1]
 
 theorem inhabited_cross_deployment_forgery :
     ∃ (cfg : SigningConfig) (sk : PqSecretKey) (p : RoundPolicy) (cap : Nat) (v : Vault)
@@ -113,7 +135,8 @@ theorem inhabited_cross_deployment_forgery :
       cfg.params.statefulJorts = true ∧ v.identity.deploymentId ≠ d' ∧
       verify cfg (derivePublicKey cfg.suite cfg.params sk) d' j r sig = true :=
   ⟨toyCfg, ⟨[], [], []⟩, policy, 0, initial ⟨0, 0, []⟩, 1, 0, toyIntent, prodToyForgery,
-    initial_safe policy 0 _, .inl rfl, rfl, by decide, toy_cross_deployment_approval_accepted⟩
+    initial_safe policy 0 _, .inl toyCfg_radix, toyCfg_stateful, by decide,
+    toy_cross_deployment_approval_accepted⟩
 
 theorem legacySign_verifies (cfg : SigningConfig) (sk : PqSecretKey) (d d' party : Nat)
     (r : Intent) (sig : PqHashSig) (h : legacySign cfg sk d party r = some sig) :
@@ -171,7 +194,13 @@ def toyCertificate : Certificate := ⟨0, toyIntent, prodToyForgery⟩
 theorem toy_foreign_deployment_accepts :
     (submitRecorded (toyDeployment 1) ⟨{ capacity := 0 }, []⟩ toyIntent [toyCertificate]).2 =
       true := by
-  decide +kernel
+  rw [submitRecorded_verdict]
+  refine (submit_accepted_iff _ _ _ _ _ _ _ _).mpr
+    ⟨(acceptQuorum_spec _ _ _ _ _ _ _ _).mpr ⟨by decide, by decide, by decide, by decide,
+      by decide, ?_⟩, by decide⟩
+  intro c hc
+  rw [List.mem_singleton.mp hc]
+  exact ⟨rfl, toy_cross_deployment_approval_accepted⟩
 
 theorem inhabited_foreign_deployment_acceptance :
     ∃ (d d' : Deployment) (s' : SharedHistory) (r : Intent) (cs : List Certificate)
@@ -181,7 +210,8 @@ theorem inhabited_foreign_deployment_acceptance :
       d'.signer = d.signer ∧ publicKeys d' c.party = publicKeys d c.party ∧
       (submitRecorded d' s' r cs).2 = true :=
   ⟨toyDeployment 0, toyDeployment 1, ⟨{ capacity := 0 }, []⟩, toyIntent, [toyCertificate],
-    toyCertificate, List.mem_singleton.mpr rfl, .inl rfl, rfl, by decide, rfl, rfl,
+    toyCertificate, List.mem_singleton.mpr rfl, .inl toyCfg_radix, toyCfg_stateful, by decide,
+    rfl, rfl,
     toy_foreign_deployment_accepts⟩
 
 #verify_inhabited foreign_deployment_acceptance_forges_audited inhabited_foreign_deployment_acceptance
@@ -193,10 +223,15 @@ theorem release_foreign_identity_rejected_audited (cfg : SigningConfig) (sk : Pq
     (release cfg sk party anchor v r).2 = none :=
   release_foreign_identity_rejected cfg sk party anchor v r h
 
+theorem ident_eq :
+    ident = ⟨dep, 0, publicKeyId (derivePublicKey cfg.suite cfg.params key)⟩ := by
+  unfold ident
+  rw [custodianIdentity.public_eq_1]
+
 theorem inhabited_foreign_caller :
     ∃ (cfg : SigningConfig) (sk : PqSecretKey) (party : Nat) (v : Vault),
       holdsIdentity cfg sk party v.identity = false :=
-  ⟨cfg, key, 1, vault0, holdsIdentity_wrong_party cfg key 1 ident (by decide)⟩
+  ⟨cfg, key, 1, vault0, holdsIdentity_wrong_party cfg key 1 ident (by rw [ident_eq]; decide)⟩
 
 /-- Old shape: with a live grant, release returns the signer's output for whatever party index
 and key the caller supplies; the vault has no say. -/
@@ -217,15 +252,20 @@ and a nonzero share. This is not an all-zero field witness. -/
 theorem legal_round : checkRound policy dep request burn.digest burn.openings = true := by
   have hd : burn.digest.length = 32 ∧ burn.digest = policy.digest request.session ∧
       burn.digest = roundCommitment dep request :=
-    ⟨cshake256Bytes_length _ _, rfl, rfl⟩
-  unfold checkRound
-  rw [decide_eq_true hd, Bool.true_and]
+    ⟨by
+      show (roundCommitment dep request).length = 32
+      rw [roundCommitment.public_eq_1]
+      exact cshake256Bytes_length _ _, rfl, rfl⟩
+  rw [checkRound.public_eq_1, decide_eq_true hd, Bool.true_and]
   decide +kernel
 
 theorem legal_burn : mintGuard policy 10 vault0 burn = true := by
+  have hid : vault0.identity.deploymentId = dep := by
+    show ident.deploymentId = dep
+    rw [ident_eq]
   unfold mintGuard
-  rw [show checkRound policy vault0.identity.deploymentId burn.intent burn.digest burn.openings =
-    true from legal_round, Bool.and_true]
+  rw [hid, show checkRound policy dep burn.intent burn.digest burn.openings = true from legal_round,
+    Bool.and_true]
   decide +kernel
 
 theorem nonzero_share : opening.opening.shareX ≠ towerZero 7 := by
@@ -249,7 +289,7 @@ theorem burned_before_release :
     (mint policy 10 0 vault0 burn).active = some request := by
   unfold mint
   rw [legal_burn]
-  decide +kernel
+  exact ⟨by decide +kernel, by decide +kernel, rfl⟩
 
 theorem forget_cannot_refund :
     (forget (mint policy 10 0 vault0 burn)).durable.spent = 3 ∧

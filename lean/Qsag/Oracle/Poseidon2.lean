@@ -6262,3 +6262,116 @@ theorem Lane4.toList_eq (s : Lane4) : s.toList = [s.x0, s.x1, s.x2, s.x3] := by
 
 end Qsag
 end
+
+/-! ### Exports for lane mir -/
+
+public section
+namespace Qsag
+
+/-- Defining equation of `poseidon2Transpose4x3`. -/
+theorem poseidon2Transpose4x3_eq (s : Poseidon2State12) :
+    poseidon2Transpose4x3 s =
+      ⟨⟨s.b0.x0, s.b0.x3, s.b1.x2, s.b2.x1⟩,
+       ⟨s.b0.x1, s.b1.x0, s.b1.x3, s.b2.x2⟩,
+       ⟨s.b0.x2, s.b1.x1, s.b2.x0, s.b2.x3⟩⟩ := by
+  unfold poseidon2Transpose4x3
+  rfl
+
+/-- Defining equation of `poseidon2Transpose3x4`. -/
+theorem poseidon2Transpose3x4_eq (s : Poseidon2State12) :
+    poseidon2Transpose3x4 s =
+      ⟨⟨s.b0.x0, s.b1.x0, s.b2.x0, s.b0.x1⟩,
+       ⟨s.b1.x1, s.b2.x1, s.b0.x2, s.b1.x2⟩,
+       ⟨s.b2.x2, s.b0.x3, s.b1.x3, s.b2.x3⟩⟩ := by
+  unfold poseidon2Transpose3x4
+  rfl
+
+/-- Defining equation of `lane4Sum`. -/
+theorem lane4Sum_eq (a : Lane4) :
+    lane4Sum a = Goldilocks.add (Goldilocks.add a.x0 a.x1) (Goldilocks.add a.x2 a.x3) := by
+  unfold lane4Sum
+  rfl
+
+/-- Defining equation of `applyM4`. -/
+theorem applyM4_eq (b : Lane4) :
+    applyM4 b =
+      ⟨Goldilocks.add (lane4Sum b) (Goldilocks.add b.x0 (Goldilocks.mul (Goldilocks.ofNat 2) b.x1)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x1 (Goldilocks.mul (Goldilocks.ofNat 2) b.x2)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x2 (Goldilocks.mul (Goldilocks.ofNat 2) b.x3)),
+       Goldilocks.add (lane4Sum b) (Goldilocks.add b.x3 (Goldilocks.mul (Goldilocks.ofNat 2) b.x0))⟩ := by
+  unfold applyM4
+  rfl
+
+end Qsag
+
+/-! ### Exports for lane oracle -/
+
+public section
+namespace Qsag
+
+/-- Defining equation of `sboxLane4`. -/
+theorem sboxLane4_eq (b : Lane4) :
+    sboxLane4 b = ⟨sbox7 b.x0, sbox7 b.x1, sbox7 b.x2, sbox7 b.x3⟩ := by
+  unfold sboxLane4
+  rfl
+
+/-- Defining equation of `sboxLane4Inv`. -/
+theorem sboxLane4Inv_eq (b : Lane4) :
+    sboxLane4Inv b = ⟨sbox7Inv b.x0, sbox7Inv b.x1, sbox7Inv b.x2, sbox7Inv b.x3⟩ := by
+  unfold sboxLane4Inv
+  rfl
+
+theorem runRoundsInv_nil {α σ : Type} (stepInv : α → σ → σ) (s : σ) :
+    runRoundsInv stepInv [] s = s := by
+  unfold runRoundsInv
+  rfl
+
+theorem runRoundsInv_cons {α σ : Type} (stepInv : α → σ → σ) (c : α) (cs : List α) (s : σ) :
+    runRoundsInv stepInv (c :: cs) s = stepInv c (runRoundsInv stepInv cs s) := by
+  rw [runRoundsInv]
+
+/-- Defining equation of `state16Zero`. -/
+theorem state16Zero_eq : state16Zero = ⟨lane4Zero, lane4Zero, lane4Zero, lane4Zero⟩ := by
+  unfold state16Zero
+  rfl
+
+/-- Defining equation of `applyME16`, with the block sum written out. -/
+theorem applyME16_eq (st : Poseidon2State16) :
+    applyME16 st =
+      ⟨lane4Add (applyM4 st.b0)
+          (lane4Add (lane4Add (lane4Add (applyM4 st.b0) (applyM4 st.b1)) (applyM4 st.b2))
+            (applyM4 st.b3)),
+       lane4Add (applyM4 st.b1)
+          (lane4Add (lane4Add (lane4Add (applyM4 st.b0) (applyM4 st.b1)) (applyM4 st.b2))
+            (applyM4 st.b3)),
+       lane4Add (applyM4 st.b2)
+          (lane4Add (lane4Add (lane4Add (applyM4 st.b0) (applyM4 st.b1)) (applyM4 st.b2))
+            (applyM4 st.b3)),
+       lane4Add (applyM4 st.b3)
+          (lane4Add (lane4Add (lane4Add (applyM4 st.b0) (applyM4 st.b1)) (applyM4 st.b2))
+            (applyM4 st.b3))⟩ := by
+  unfold applyME16
+  rfl
+
+/-- Defining equation of the SplitMix64 finalizer used by the round-constant generator. -/
+theorem splitMix64Mix_eq (x : UInt64) :
+    splitMix64Mix x =
+      (let z0 := x + 0x9E3779B97F4A7C15
+       let z1 := (z0 ^^^ (z0 >>> 30)) * 0xBF58476D1CE4E5B9
+       let z2 := (z1 ^^^ (z1 >>> 27)) * 0x94D049BB133111EB
+       z2 ^^^ (z2 >>> 31)) := by
+  unfold splitMix64Mix
+  rfl
+
+/-- Defining equation of `poseidon2ConstAt`, down to the SplitMix64 finalizer. -/
+theorem poseidon2ConstAt_eq (tag round lane : Nat) :
+    poseidon2ConstAt tag round lane =
+      Goldilocks.ofNat
+        (splitMix64Mix
+          (splitMix64Mix (splitMix64Mix ((0x504F53325F474C31 : UInt64) ^^^ UInt64.ofNat tag) ^^^
+            UInt64.ofNat round) ^^^ UInt64.ofNat lane)).toNat := by
+  unfold poseidon2ConstAt poseidon2ConstWord poseidon2ConstIV
+  rfl
+
+end Qsag
+end

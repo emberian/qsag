@@ -37,14 +37,16 @@ module qsag_ext4_mac #(
 
     for (genvar k = 0; k < 4; k++) begin : g_k
         logic [135:0] acc_d, acc_q;
-        always_comb begin
-            acc_d = 136'(c_sr[(MUL64_LAT-1)*256 + 64*pidx(k) +: 64]);
-            for (int i = 0; i < 4; i++) begin
-                if (i <= k) acc_d = acc_d + 136'(prod[128*(4*i + (k - i)) +: 128]);
-                else        acc_d = acc_d + (136'(prod[128*(4*i + (k + 4 - i)) +: 128]) << 3)
-                                          - 136'(prod[128*(4*i + (k + 4 - i)) +: 128]);
-            end
+        logic [13*136-1:0] terms;
+        assign terms[0 +: 136] = 136'(c_sr[(MUL64_LAT-1)*256 + 64*pidx(k) +: 64]);
+        for (genvar i = 0; i < 4; i++) begin : g_term
+            localparam int J = (k + 4 - i) % 4;
+            wire [135:0] v = 136'(prod[128*(4*i+J) +: 128]);
+            assign terms[(1+3*i)*136 +: 136] = v;
+            assign terms[(2+3*i)*136 +: 136] = (i > k) ? (v << 1) : 136'd0;
+            assign terms[(3+3*i)*136 +: 136] = (i > k) ? (v << 2) : 136'd0;
         end
+        qsag_sum_csa #(.W(136), .N(13)) u_sum (.x(terms), .y(acc_d));
         always_ff @(posedge clk) acc_q <= acc_d;
         qsag_gl64_reduce u_red (.clk(clk), .x(acc_q), .r(y[64*pidx(k) +: 64]));
     end

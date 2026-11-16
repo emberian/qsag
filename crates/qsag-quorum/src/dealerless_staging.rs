@@ -3326,6 +3326,7 @@ mod tests {
 
     #[test]
     fn dealerless_qs_a_stages_signs_refreshes_and_unlinks_epochs() {
+        let _memory = crate::test_budget::reserve_mb(5900);
         let mut rngs = make_party_rngs(3, 0x21);
         let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0x41; 32], &mut rngs)
             .expect("QS-A MPC");
@@ -3378,6 +3379,7 @@ mod tests {
 
     #[test]
     fn dealerless_qs_b_stages_signs_switches_quorums_and_refreshes() {
+        let _memory = crate::test_budget::reserve_mb(250);
         for t in [2usize, 3] {
             let cfg = QuorumConfig::tight(t).expect("tight config");
             let mut rngs = make_party_rngs(cfg.parties(), 0x30 + t as u8);
@@ -3489,6 +3491,7 @@ mod tests {
 
     #[test]
     fn dealerless_qsa_rejects_beaver_corruption() {
+        let _memory = crate::test_budget::reserve_mb(550);
         let mut rngs = make_party_rngs(2, 0x62);
         let result = stage_single_committee_subtree_mpc(
             0,
@@ -3506,6 +3509,7 @@ mod tests {
 
     #[test]
     fn dealerless_qsa_rejects_endpoint_corruption() {
+        let _memory = crate::test_budget::reserve_mb(1800);
         let mut rngs = make_party_rngs(2, 0x63);
         let mut writes = 0;
         let res = stage_single_committee_into(
@@ -3539,6 +3543,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
     #[test]
     fn volatile_subset_second_half_abort_publishes_no_pages() {
+        let _memory = crate::test_budget::reserve_mb(3800);
         let mut rngs = make_party_rngs(2, 0x6f);
         let mut writes = 0;
         let result = stage_volatile_subset_into_inner(
@@ -3714,6 +3719,7 @@ mod tests {
     /// between wire sessions (including a rejected one) keeps them signing under one key.
     #[test]
     fn dealerless_qs_a_material_signs_over_the_wire_across_refresh() {
+        let _memory = crate::test_budget::reserve_mb(5900);
         let mut rngs = make_party_rngs(3, 0xb1);
         let staged = stage_committee_partitioned_dealerless_mpc(2, 3, 2, [0xb2; 32], &mut rngs)
             .expect("QS-A MPC");
@@ -3911,8 +3917,15 @@ mod tests {
                 })]
             })
             .collect();
+        // Offline: stage single-use blinding triples for every timed check. Online: the
+        // check itself, which pops two triples and never touches the OT channels.
+        const CHECKS: usize = 64;
+        let refill = std::time::Instant::now();
+        mesh.prestage_blinded_checks(CHECKS, &mut rngs).unwrap();
+        let refill_ms = refill.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(mesh.staged_blinded_checks(), CHECKS);
         let mut times = Vec::new();
-        for step in 0..10 {
+        for step in 0..CHECKS {
             let before = std::time::Instant::now();
             run_committed_spdz_mac_check_words(
                 0, step, &sid, &deltas, &opened, &macs, &mut mesh, &mut rngs,
@@ -3920,13 +3933,90 @@ mod tests {
             .unwrap();
             times.push(before.elapsed().as_secs_f64() * 1000.0);
         }
+        assert_eq!(mesh.staged_blinded_checks(), 0);
         times.sort_by(f64::total_cmp);
+        let online_mean = times.iter().sum::<f64>() / CHECKS as f64;
+        // Unstaged use: every eighth check pays an automatic refill inline.
+        let mut inline = Vec::new();
+        for step in CHECKS..2 * CHECKS {
+            let before = std::time::Instant::now();
+            run_committed_spdz_mac_check_words(
+                0, step, &sid, &deltas, &opened, &macs, &mut mesh, &mut rngs,
+            )
+            .unwrap();
+            inline.push(before.elapsed().as_secs_f64() * 1000.0);
+        }
+        let inline_mean = inline.iter().sum::<f64>() / CHECKS as f64;
+        inline.sort_by(f64::total_cmp);
         std::eprintln!(
-            "[BENCH retained QS-A mesh] setup={setup_ms:.3} ms; n=10 min={:.3} median={:.3} max={:.3} ms",
+            "[BENCH retained QS-A mesh] setup={setup_ms:.3} ms; offline refill of {CHECKS} checks={refill_ms:.3} ms \
+             ({:.3} ms amortized per check); online check n={CHECKS} min={:.3} median={:.3} max={:.3} mean={online_mean:.3} ms; \
+             online + amortized refill={:.3} ms per check; unstaged (auto-refill inline) n={CHECKS} \
+             median={:.3} max={:.3} mean={inline_mean:.3} ms",
+            refill_ms / CHECKS as f64,
             times[0],
-            times[5],
-            times[9]
+            times[CHECKS / 2],
+            times[CHECKS - 1],
+            online_mean + refill_ms / CHECKS as f64,
+            inline[CHECKS / 2],
+            inline[CHECKS - 1],
         );
+    }
+
+    #[test]
+    fn qsa_pooled_mac_check_rejects_corrupt_lanes_and_fails_closed() {
+        let m = 3usize;
+        let sid = [0x93; 32];
+        let mut rngs = make_party_rngs(m, 0xa7);
+        let mut mesh = OtMesh::try_establish(sid, &mut rngs).expect("establish mesh");
+        let deltas = [0x1357_9bdf_0246_8aceu128 << 64 | 0x77, 0x99, 0xaa];
+        let opened = [0x0123_4567_89ab_cdefu64, 0xfeed_face_cafe_f00d];
+        let mut macs = vec![vec![[0u128; 64]; opened.len()]; m];
+        for (u, party_macs) in macs.iter_mut().enumerate() {
+            for (w, word) in party_macs.iter_mut().enumerate() {
+                for (bit, slot) in word.iter_mut().enumerate() {
+                    if (opened[w] >> bit) & 1 == 1 {
+                        *slot = deltas[u];
+                    }
+                }
+            }
+        }
+        mesh.prestage_blinded_checks(2, &mut rngs)
+            .expect("prestage");
+        let mut step = 0usize;
+        let mut check = |opened: &[u64],
+                         macs: &[Vec<[u128; 64]>],
+                         mesh: &mut OtMesh,
+                         rngs: &mut [PartyPrivateRng]| {
+            step += 1;
+            run_committed_spdz_mac_check_words(0, step, &sid, &deltas, opened, macs, mesh, rngs)
+                .map_err(|e| (step, e))
+        };
+        // Honest checks pass from the staged pool and across an automatic refill.
+        for _ in 0..4 {
+            check(&opened, &macs, &mut mesh, &mut rngs).expect("honest pooled check");
+        }
+        // A flipped opened bit in either word, and a shifted MAC share at any party.
+        for w in 0..opened.len() {
+            let mut bad = opened;
+            bad[w] ^= 1 << 17;
+            let (step, err) = check(&bad, &macs, &mut mesh, &mut rngs).unwrap_err();
+            assert_eq!(
+                err,
+                DealerlessStagingError::MacCheckFailed { committee: 0, step }
+            );
+        }
+        for u in 0..m {
+            let mut bad = macs.clone();
+            bad[u][1][5] ^= 1;
+            let (step, err) = check(&opened, &bad, &mut mesh, &mut rngs).unwrap_err();
+            assert_eq!(
+                err,
+                DealerlessStagingError::MacCheckFailed { committee: 0, step }
+            );
+        }
+        check(&opened, &macs, &mut mesh, &mut rngs).expect("honest check after rejections");
+        assert!(!mesh.blinding_poisoned());
     }
 
     #[test]

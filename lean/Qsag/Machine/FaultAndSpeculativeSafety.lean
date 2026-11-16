@@ -241,6 +241,7 @@ theorem lowerWalk_honest (suite : TweakableHashSuite) (params : PqHashParams) (s
     params.subtreeHeight 0 (g % 2 ^ params.subtreeHeight)
     (Nat.mod_lt _ (Nat.two_pow_pos _))
   simp only [Nat.zero_mul, Nat.zero_add] at hWalk
+  rw [computeXmssSubtreeRoot_eq]
   exact hWalk
 
 /-- Without a fault the recomputed lower root is the real layer-0 subtree root. -/
@@ -287,7 +288,7 @@ theorem faultedAssemble_no_fault_eq_honest (suite : TweakableHashSuite) (params 
       signHypertreeLayers suite params sk pkRoot rRand maxGrind 0 g mu 2 := by
   unfold faultedAssemble
   rw [faultedLowerWires_none]
-  simp only [signHypertreeLayers, faultUpperChains, lowerAuthPath]
+  simp only [signHypertreeLayers_succ, signHypertreeLayers_zero, faultUpperChains, lowerAuthPath]
   cases hG0 : grindTswCounterAux suite params.w params.ell1 params.targetSum rRand sk.pkSeed
       pkRoot mu (UInt32.ofNat 0) (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
       (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) 0 maxGrind with
@@ -310,18 +311,20 @@ theorem computeMerkleNode_length (suite : TweakableHashSuite) (pkSeed : List UIn
     (hLeaf : ∀ i, (leafFn i).length = 32) (h idx : Nat) :
     (computeMerkleNode suite pkSeed layer tree kind leafFn h idx).length = 32 := by
   cases h with
-  | zero => exact hLeaf idx
-  | succ n => exact thCall_length _ _ _ _ _
+  | zero => rw [computeMerkleNode_zero]; exact hLeaf idx
+  | succ n => simp only [computeMerkleNode_succ, thNodeH_eq, thCall_length]
 
 theorem computeWotsPk_length (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat) :
-    (computeWotsPk suite params sk layer tree kp).length = 32 :=
-  thCall_length _ _ _ _ _
+    (computeWotsPk suite params sk layer tree kp).length = 32 := by
+  rw [computeWotsPk_eq, thTweakTl_eq]
+  exact thCall_length _ _ _ _ _
 
 theorem computeXmssSubtreeRoot_length (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) :
-    (computeXmssSubtreeRoot suite params sk layer tree).length = 32 :=
-  computeMerkleNode_length suite sk.pkSeed layer tree .tree _
+    (computeXmssSubtreeRoot suite params sk layer tree).length = 32 := by
+  rw [computeXmssSubtreeRoot_eq]
+  exact computeMerkleNode_length suite sk.pkSeed layer tree .tree _
     (computeWotsPk_length suite params sk layer tree) _ _
 
 /-- Two WOTS+C signatures that the real verifier accepts at one upper leaf, on two different
@@ -469,15 +472,15 @@ theorem two_wots_signatures_forge_any_dominated_codeword
     recoverWotsPkFromSig suite params pkSeed layer tree kp target
         (graftForgeChains suite params pkSeed layer tree kp d₁ d₂ c₁ c₂ target) =
       recoverWotsPkFromSig suite params pkSeed layer tree kp d₁ c₁ := by
-  unfold recoverWotsPkFromSig
+  rw [recoverWotsPkFromSig_eq, recoverWotsPkFromSig_eq]
   congr 1
-  unfold recoverWotsEndpoints
+  rw [recoverWotsEndpoints_eq, recoverWotsEndpoints_eq]
   apply List.map_congr_left
   intro r hrMem
   have hr : r < params.ell1 := List.mem_range.mp hrMem
   obtain ⟨hLo, hHi⟩ := hDom r hr
   have hPoint := congrArg (fun l => l.getD r []) hSame
-  simp only [recoverWotsEndpoints, list_getD_map_range params.ell1 _ [] hr] at hPoint
+  simp only [recoverWotsEndpoints_eq, list_getD_map_range params.ell1 _ [] hr] at hPoint
   simp only [graftForgeChains, list_getD_map_range params.ell1 _ [] hr]
   by_cases hLe : d₁.getD r 0 ≤ d₂.getD r 0
   · simp only [hLe, ↓reduceIte]
@@ -513,7 +516,7 @@ theorem honest_wots_chains_open_real_endpoints (suite : TweakableHashSuite)
       computeWotsEndpoints suite params sk layer tree kp := by
   obtain ⟨hLen, hBound, _⟩ :=
     (checkTargetSum_iff params.w params.ell1 params.targetSum digits).mp hValid
-  unfold recoverWotsEndpoints computeWotsEndpoints
+  rw [recoverWotsEndpoints_eq, computeWotsEndpoints_eq]
   apply List.map_congr_left
   intro r hrMem
   have hr : r < params.ell1 := List.mem_range.mp hrMem
@@ -555,6 +558,110 @@ theorem honest_key_two_signatures_forge_dominated_codewords (suite : TweakableHa
     target hDom]
   exact recoverWotsPkFromSig_eq_computeWotsPk suite params sk layer tree kp d₁ hValid₁
 
+/-! ### Closed forms on the all-zero toy suite -/
+
+theorem zeroToy_thCall (t p : List UInt8) (a : HashAdrs) (xs : List (List UInt8)) :
+    thCall zeroToySuite t p a xs = List.replicate 32 0 := by
+  rw [thCall_eq, zeroToySuite_rawHash]
+
+theorem zeroToy_digits (r pk pr mu : List UInt8) (l : UInt32) (t : UInt64) (k : UInt32)
+    (c : Nat) :
+    extractBaseWDigits 2 1 (thHashMsg zeroToySuite r pk pr mu l t k c) = [0] := by
+  rw [thHashMsg_eq, zeroToy_thCall, zeroToy_thCall, extractBaseWDigits_eq]
+  decide
+
+theorem checkTargetSum_zeroToy : checkTargetSum 2 1 ((1 * (2 - 1)) / 2) [0] = true := by
+  simp [checkTargetSum, sumDigits_cons, sumDigits_nil]
+
+theorem zeroToy_walk (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) (kind : AdrsKind) :
+    ∀ (h nodeIdx localIdx : Nat) (path : List (List UInt8)), path.length = h →
+      walkMerkleAuthPath zeroToySuite pkSeed layer tree kind h nodeIdx localIdx
+        (List.replicate 32 0) path = some (List.replicate 32 0)
+  | 0, _, _, [], _ => rfl
+  | 0, _, _, _ :: _, hl => absurd hl (Nat.succ_ne_zero _)
+  | h + 1, _, _, [], hl => absurd hl.symm (Nat.succ_ne_zero _)
+  | h + 1, n, l, sib :: rest, hl => by
+    have hl' : rest.length = h := Nat.succ.inj hl
+    simp only [walkMerkleAuthPath]
+    by_cases hlt : l < 2 ^ h <;>
+      simp only [hlt, ↓reduceIte, zeroToy_walk pkSeed layer tree kind h _ _ rest hl', thNodeH_eq,
+        zeroToy_thCall]
+
+/-- On the toy suite every chain of identical layer openings with a full-length auth path
+    verifies to the all-zero root. -/
+theorem zeroToy_verify_replicate (params : PqHashParams) (hw : params.w = 2)
+    (hl : params.ell1 = 1) (pkSeed pkRoot c : List UInt8) (path : List (List UInt8))
+    (hp : path.length = params.subtreeHeight) :
+    ∀ (d : Nat) (rand : List UInt8) (layer g : Nat) (cur : List UInt8),
+      verifyHypertreeLayers zeroToySuite params pkSeed pkRoot rand layer g cur
+        (List.replicate (d + 1) ⟨0, [c], path⟩) = some (List.replicate 32 0)
+  | 0, rand, layer, g, cur => by
+    rw [List.replicate_succ, verifyHypertreeLayers_cons]
+    simp only [hw, hl, PqHashParams.targetSum_eq, zeroToy_digits, checkTargetSum_zeroToy,
+      recoverWotsPkFromSig_eq, thTweakTl_eq, zeroToy_thCall,
+      zeroToy_walk _ _ _ _ _ _ _ _ hp, List.replicate_zero, verifyHypertreeLayers_nil,
+      List.length_singleton, Bool.not_true, Bool.false_eq_true, ↓reduceIte, ne_eq,
+      not_true_eq_false]
+  | d + 1, rand, layer, g, cur => by
+    rw [List.replicate_succ, verifyHypertreeLayers_cons]
+    simp only [hw, hl, PqHashParams.targetSum_eq, zeroToy_digits, checkTargetSum_zeroToy,
+      recoverWotsPkFromSig_eq, thTweakTl_eq, zeroToy_thCall,
+      zeroToy_walk _ _ _ _ _ _ _ _ hp,
+      zeroToy_verify_replicate params hw hl pkSeed pkRoot c path hp d,
+      List.length_singleton, Bool.not_true, Bool.false_eq_true, ↓reduceIte, ne_eq,
+      not_true_eq_false]
+
+/-- On the toy suite the one-layer signer always emits exactly one layer signature. -/
+theorem zeroToy_sign_single (params : PqHashParams) (hw : params.w = 2) (hl : params.ell1 = 1)
+    (sk : PqSecretKey) (pkRoot rand : List UInt8) (mg layer g : Nat) (cur : List UInt8) :
+    ∃ s, signHypertreeLayers zeroToySuite params sk pkRoot rand (mg + 1) layer g cur 1 =
+      some [s] := by
+  simp only [signHypertreeLayers_succ, signHypertreeLayers_zero, grindTswCounterAux_succ, hw, hl,
+    PqHashParams.targetSum_eq, zeroToy_digits, checkTargetSum_zeroToy, ↓reduceIte]
+  exact ⟨_, rfl⟩
+
+/-- The stateful verifier accepts identical layer openings on the toy suite. -/
+theorem zeroToy_stateful_verifies (params : PqHashParams) (hw : params.w = 2)
+    (hl : params.ell1 = 1) (hwf : params.wellFormed = true) (hst : params.statefulJorts = true)
+    (c : List UInt8) (path : List (List UInt8)) (hp : path.length = params.subtreeHeight)
+    (d : Nat) (hd : d + 1 = params.numLayers) (pkSeed msg rand : List UInt8) :
+    verifyPqHashSig zeroToySuite params ⟨pkSeed, List.replicate 32 0⟩ msg
+      ⟨rand, 0, 0, [], List.replicate (d + 1) ⟨0, [c], path⟩⟩ = true := by
+  have hpos : 0 < 2 ^ ((d + 1) * params.subtreeHeight) := Nat.two_pow_pos _
+  unfold verifyPqHashSig
+  simp only [hwf, hst, ← hd, hpos, List.length_replicate,
+    zeroToy_verify_replicate params hw hl pkSeed (List.replicate 32 0) c path hp d,
+    Bool.not_true, Bool.false_eq_true, ↓reduceIte, ne_eq, not_true_eq_false, decide_true,
+    decide_false, List.isEmpty_nil, Bool.or_self]
+
+theorem faultedAssemble_eq_some (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pkRoot rRand : List UInt8) (maxGrind : Nat) (mu : List UInt8) (g : Nat)
+    (fault : Option CorruptedWire) (lower upper : LayerXmssSig) (wires : LowerWires)
+    (h0 : signHypertreeLayers suite params sk pkRoot rRand maxGrind 0 g mu 1 = some [lower])
+    (hWires : faultedLowerWires suite params sk g fault = some wires)
+    (h1 : signHypertreeLayers suite params sk pkRoot [] maxGrind 1
+      (g / 2 ^ params.subtreeHeight) wires.root 1 = some [upper]) :
+    faultedAssemble suite params sk pkRoot rRand maxGrind mu g fault =
+      some { rootWire := wires.root
+             layerSigs :=
+               [ { lower with authPath := wires.authPath }
+               , { upper with wotsChains := faultUpperChains fault upper.wotsChains } ] } := by
+  unfold faultedAssemble
+  rw [h0, hWires]
+  simp only [h1]
+
+/-- A fault on the lower root wire replaces the recomputed root and leaves the path alone. -/
+theorem faultedLowerWires_rootFault (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (g : Nat) (c : List UInt8 → List UInt8) :
+    faultedLowerWires suite params sk g (some ⟨.lowerRootNode, c⟩) =
+      some { authPath := lowerAuthPath suite params sk g
+             root := c (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+               (UInt64.ofNat (g / 2 ^ params.subtreeHeight))) } := by
+  unfold faultedLowerWires
+  simp only [faultLeaf, faultPath, faultRoot]
+  rw [lowerWalk_honest]
+  rfl
+
 /-- Inhabitedness of the tooth's premises: on the toy suite both the fault-free and the
     root-flipped run of the unguarded signer emit a signature, on different root wires. -/
 theorem tooth_graft_premises_inhabited :
@@ -564,7 +671,25 @@ theorem tooth_graft_premises_inhabited :
     (faultedAssemble zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1 [] 0 none).map (·.rootWire) ≠
       (faultedAssemble zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1 [] 0
         (some ⟨.lowerRootNode, flipBit 0⟩)).map (·.rootWire) := by
-  decide
+  have hw : zeroToyParams.w = 2 := by rw [zeroToyParams.public_eq_1]
+  have hl : zeroToyParams.ell1 = 1 := by rw [zeroToyParams.public_eq_1]
+  obtain ⟨lower, h0⟩ := zeroToy_sign_single zeroToyParams hw hl ⟨[], [], []⟩ [] [] 0 0 0 []
+  have hA : ∀ (fault : Option CorruptedWire) (wires : LowerWires),
+      faultedLowerWires zeroToySuite zeroToyParams ⟨[], [], []⟩ 0 fault = some wires →
+      ∃ asm, faultedAssemble zeroToySuite zeroToyParams ⟨[], [], []⟩ [] [] 1 [] 0 fault =
+        some asm ∧ asm.rootWire = wires.root := by
+    intro fault wires hWires
+    obtain ⟨upper, h1⟩ := zeroToy_sign_single zeroToyParams hw hl ⟨[], [], []⟩ [] [] 0 1
+      (0 / 2 ^ zeroToyParams.subtreeHeight) wires.root
+    exact ⟨_, faultedAssemble_eq_some _ _ _ _ _ _ _ _ _ lower upper wires h0 hWires h1, rfl⟩
+  obtain ⟨a₁, he₁, hr₁⟩ := hA none _ (faultedLowerWires_none zeroToySuite zeroToyParams _ 0)
+  obtain ⟨a₂, he₂, hr₂⟩ := hA (some ⟨.lowerRootNode, flipBit 0⟩) _
+    (faultedLowerWires_rootFault zeroToySuite zeroToyParams _ 0 (flipBit 0))
+  rw [he₁, he₂]
+  refine ⟨rfl, rfl, ?_⟩
+  simp only [Option.map_some, hr₁, hr₂]
+  intro h
+  exact flipBit_ne 0 _ (by rw [computeXmssSubtreeRoot_length]; decide) (Option.some.inj h).symm
 
 /-! ## 2. Verify-Before-Release with a Write-Once One-Time-Key Cache -/
 
@@ -635,12 +760,12 @@ theorem wots_openings_unique_or_collision
   by_cases hPk : recoverWotsPkFromSig suite params pkSeed layer tree kp digits c₁ =
       recoverWotsPkFromSig suite params pkSeed layer tree kp digits c₂
   · by_cases hPath : p₁ = p₂
-    · unfold recoverWotsPkFromSig thTweakTl at hPk
+    · rw [recoverWotsPkFromSig_eq, recoverWotsPkFromSig_eq, thTweakTl_eq, thTweakTl_eq] at hPk
       rcases thCall_binds_or_collision suite hPk with ⟨_, _, _, hArgs⟩ | col
       · by_cases hEx : ∃ r, r < params.ell1 ∧ c₁.getD r [] ≠ c₂.getD r []
         · obtain ⟨r, hr, hNe⟩ := hEx
           have hPoint := congrArg (fun l => l.getD r []) hArgs
-          simp only [recoverWotsEndpoints, list_getD_map_range params.ell1 _ [] hr] at hPoint
+          simp only [recoverWotsEndpoints_eq, list_getD_map_range params.ell1 _ [] hr] at hPoint
           exact Or.inr (extractChainCollision suite pkSeed layer tree kp r _ _ _ _ hNe
             hPoint).toCollision
         · left
@@ -1028,7 +1153,7 @@ theorem lower_layer_verifies_on_walked_path (suite : TweakableHashSuite) (params
       path = some root) :
     verifyHypertreeLayers suite params sk.pkSeed pkRoot rRand 0 g mu
       [{ lower with authPath := path }] = some root := by
-  rw [signHypertreeLayers] at hLower
+  simp only [signHypertreeLayers_succ] at hLower
   cases hGrind : grindTswCounterAux suite params.w params.ell1 params.targetSum
       rRand sk.pkSeed pkRoot mu (UInt32.ofNat 0)
       (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
@@ -1037,10 +1162,10 @@ theorem lower_layer_verifies_on_walked_path (suite : TweakableHashSuite) (params
   | some triple =>
     rcases triple with ⟨ctr, digits, hmsgG⟩
     rw [hGrind] at hLower
-    simp only [signHypertreeLayers, Option.some.injEq, List.cons.injEq, and_true] at hLower
+    simp only [signHypertreeLayers_zero, Option.some.injEq, List.cons.injEq, and_true] at hLower
     subst hLower
     obtain ⟨hMsgEq, hDigEq, hChk⟩ := grindTswCounterAux_sound hGrind
-    simp only [verifyHypertreeLayers]
+    simp only [verifyHypertreeLayers_cons, verifyHypertreeLayers_nil]
     rw [← hMsgEq, ← hDigEq, hChk]
     have hChainsLen : ((List.range params.ell1).map fun r =>
         wotsChainSteps suite sk.pkSeed (UInt32.ofNat 0)
@@ -1354,6 +1479,11 @@ inductive SpecObs where
   | transient (ev : LeakageEvent)
   deriving DecidableEq, Repr
 
+/-- Memory addresses carried by an observation, committed or transient. -/
+def SpecObs.memAddrs : SpecObs → List (BitVec 64)
+  | .arch ev => ev.memAddrs
+  | .transient ev => ev.memAddrs
+
 def branchEvent (pc : Nat) (taken : Bool) : LeakageEvent :=
   { pc := pc
     branchTaken := some taken
@@ -1484,17 +1614,17 @@ theorem straightline_speculation_is_architectural (pred : PredictorOracle) (W : 
   | [], code, pc, hist, st, h => by
     simp only [compileStraight, Option.some.injEq] at h
     subst h
-    simp [specRun, execX86Prog]
+    simp [specRun, execX86Prog.public_eq_1]
   | .instr i :: rest, code, pc, hist, st, h => by
     simp only [compileStraight, Option.map_eq_some_iff] at h
     obtain ⟨tl, hTl, rfl⟩ := h
     have ih := straightline_speculation_is_architectural pred W rest tl (pc + 1) hist
       (execX86Instr i pc st).1 hTl
-    simp only [specRun, execX86Prog, ih, List.map_cons]
+    simp only [specRun, execX86Prog.public_eq_2, ih, List.map_cons]
   | .ret :: _, code, pc, hist, st, h => by
     simp only [compileStraight, Option.some.injEq] at h
     subst h
-    simp [specRun, execX86Prog, retEvent]
+    simp [specRun, execX86Prog.public_eq_5, retEvent]
   | .jccNz _ _ _ :: _, _, _, _, _, h => by simp [compileStraight] at h
   | .pubLoop _ _ :: _, _, _, _, _, h => by simp [compileStraight] at h
 
@@ -1783,7 +1913,8 @@ theorem tooth_unmasked_bounds_branch_leaks_under_speculation :
     unfold unmaskedBoundsProg
     rw [guardedBlock_window_saturates boundsCheckPre .aboveEq boundsLookupBody _ _ W hW,
       guardedBlock_window_saturates boundsCheckPre .aboveEq boundsLookupBody _ _ W hW]
-    decide
+    intro h
+    exact absurd (congrArg (List.map SpecObs.memAddrs) h) (by decide)
 
 /-- **`lfence` after the bounds branch restores non-interference** for every window and every
     predictor: the barrier ends the transient window before the first load. -/
@@ -1818,7 +1949,8 @@ theorem tooth_slh_mask_leaks_on_empty_array :
     unfold slhMaskedBoundsProg
     rw [guardedBlock_window_saturates slhPre .aboveEq slhBody _ _ W hW,
       guardedBlock_window_saturates slhPre .aboveEq slhBody _ _ W hW]
-    decide
+    intro h
+    exact absurd (congrArg (List.map SpecObs.memAddrs) h) (by decide)
 
 
 /-! ## 5. All-layer release cache with canonical `HashAdrs` non-aliasing
@@ -1903,7 +2035,9 @@ theorem tooth_unbounded_nat_position_aliases_u64_adrs :
   · intro h
     have hT := congrArg OtsPosition.treeIdx h
     simp at hT
-  · decide
+  · have h1 : UInt64.ofNat ((2 ^ 64) / 2 ^ 0) = UInt64.ofNat (0 / 2 ^ 0) := by decide
+    have h2 : UInt32.ofNat ((2 ^ 64) % 2 ^ 0) = UInt32.ofNat (0 % 2 ^ 0) := by decide
+    simp only [OtsPosition.toEncodedAdrs, OtsPosition.toWotsPkAdrs, h1, h2]
   · decide
 
 structure LayerRelease where
@@ -2221,7 +2355,7 @@ theorem adrsGateValid_of_verifyPqHashSig (suite : TweakableHashSuite) (params : 
         have hDec : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) = true := by
           cases hx : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) <;> simp_all
         exact of_decide_eq_true hDec
-  unfold PqHashParams.wellFormed at hWf
+  rw [PqHashParams.wellFormed_eq] at hWf
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
   have hSubLe30 : params.subtreeHeight ≤ 30 := hWf.1.1.1.1.2
   have hProdLe62 : params.numLayers * params.subtreeHeight ≤ 62 := hWf.1.2
@@ -2396,6 +2530,45 @@ def counterCodeword (suite : TweakableHashSuite) (params : PqHashParams)
       (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
       (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) ctr)
 
+theorem encodeByteFields_append_singleton (fs : List (List UInt8)) (f : List UInt8) :
+    encodeByteFields (fs ++ [f]) = encodeByteFields fs ++ (leb128 f.length ++ f) := by
+  induction fs with
+  | nil => simp [encodeByteFields_cons, encodeByteFields_nil, encodeListField_eq]
+  | cons x xs ih => simp [encodeByteFields_cons, ih]
+
+theorem encodeMultiFrame_getLastD_be (fs : List (List UInt8)) (ctr : Nat) :
+    (encodeMultiFrame (fs ++ [be 4 ctr])).getLastD 0 = UInt8.ofNat (ctr % 256) := by
+  have hb : be 4 ctr = be 3 (ctr / 256) ++ [UInt8.ofNat (ctr % 256)] := rfl
+  rw [encodeMultiFrame, encodeByteFields_append_singleton, hb]
+  simp [List.getLastD_eq_getLast?, List.getLast?_append]
+
+/-- The counter-tooth hash sees only the low byte of the grinding counter. -/
+theorem counterTooth_thHashMsg (r pk pr mu : List UInt8) (l : UInt32) (t : UInt64) (k : UInt32)
+    (ctr : Nat) :
+    thHashMsg counterToothSuite r pk pr mu l t k ctr =
+      ((if UInt8.ofNat (ctr % 256) = 0 then 128 else 64) :: List.replicate 31 0) ++
+      ((if UInt8.ofNat (ctr % 256) = 0 then 128 else 64) :: List.replicate 31 0) := by
+  have h : ∀ (a : HashAdrs), thCall counterToothSuite tagHMsg pk a [r, pr, mu, be 4 ctr] =
+      (if UInt8.ofNat (ctr % 256) = 0 then 128 else 64) :: List.replicate 31 0 := by
+    intro a
+    rw [thCall_eq, thPreimage_eq]
+    show counterToothSuite.rawHash
+      (encodeMultiFrame ([tagHMsg, pk, encodeAdrs a, r, pr, mu] ++ [be 4 ctr])) = _
+    simp only [counterToothSuite, encodeMultiFrame_getLastD_be]
+  rw [thHashMsg_eq, h, h]
+
+theorem counterCodeword_zero :
+    counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 0 = [1, 0] := by
+  show extractBaseWDigits 2 2 (thHashMsg counterToothSuite [] [] [] [] _ _ _ 0) = _
+  rw [counterTooth_thHashMsg, extractBaseWDigits_eq]
+  decide
+
+theorem counterCodeword_one :
+    counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 1 = [0, 1] := by
+  show extractBaseWDigits 2 2 (thHashMsg counterToothSuite [] [] [] [] _ _ _ 1) = _
+  rw [counterTooth_thHashMsg, extractBaseWDigits_eq]
+  decide
+
 def counterToothOpening (ctr : Nat) : LayerXmssSig :=
   let digits := counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr
   { tswCtr := ctr
@@ -2418,14 +2591,23 @@ theorem counterToothOpening_accepts (ctr : Nat)
     rootOnlyCacheRelease counterToothSuite counterToothParams [] [] 1 0 [] []
       (computeWotsPk counterToothSuite counterToothParams ⟨[], [], []⟩ 1 0 0)
       (counterToothOpening ctr) = true := by
-  have hp := congrArg
-    (thTweakTl counterToothSuite [] ⟨1, 0, .wotsPk, 0, 0, 0⟩)
-    (honest_wots_chains_open_real_endpoints counterToothSuite counterToothParams
-      ⟨[], [], []⟩ 1 0 0 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) hv)
+  have hTarget : counterToothParams.targetSum = 1 := by
+    rw [PqHashParams.targetSum_eq]; rfl
+  have hv' : checkTargetSum counterToothParams.w counterToothParams.ell1
+      counterToothParams.targetSum
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) = true := by
+    rw [hTarget]; exact hv
+  have hp : recoverWotsPkFromSig counterToothSuite counterToothParams [] 1 0 0
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr)
+      (counterToothOpening ctr).wotsChains =
+        computeWotsPk counterToothSuite counterToothParams ⟨[], [], []⟩ 1 0 0 :=
+    recoverWotsPkFromSig_eq_computeWotsPk counterToothSuite counterToothParams ⟨[], [], []⟩ 1 0 0
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) hv'
   unfold rootOnlyCacheRelease
   apply decide_eq_true
   refine ⟨rfl, ?_⟩
   rw [verifyHypertreeLayers_cons]
+  simp only [hTarget]
   change (if !checkTargetSum 2 2 1
       (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr) then none else
       if (counterToothOpening ctr).wotsChains.length ≠ 2 then none else _) = _
@@ -2433,16 +2615,13 @@ theorem counterToothOpening_accepts (ctr : Nat)
   simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
   have hl : (counterToothOpening ctr).wotsChains.length = 2 := by
     simp [counterToothOpening]
-  simp only [hl, ne_eq, not_true_eq_false, ↓reduceIte]
+  simp only [hl, ne_eq, not_true_eq_false, ↓reduceIte, verifyHypertreeLayers_nil]
   change (match walkMerkleAuthPath counterToothSuite [] 1 0 .tree 0 0 0
       (recoverWotsPkFromSig counterToothSuite counterToothParams [] 1 0 0
         (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr)
         (counterToothOpening ctr).wotsChains) [] with
     | none => none
     | some next => some next) = _
-  change recoverWotsPkFromSig counterToothSuite counterToothParams [] 1 0 0
-      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 ctr)
-      (counterToothOpening ctr).wotsChains = _ at hp
   rw [hp]
   rfl
 
@@ -2463,9 +2642,16 @@ set_option maxHeartbeats 2000000 in
     checkTargetSum 2 2 1 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 0) = true ∧
     checkTargetSum 2 2 1 (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 1) = true ∧
     (OtsMessage.mk [] 0) ≠ ⟨[], 1⟩ := by
-  refine ⟨counterToothOpening_accepts 0 (by decide +kernel),
-    counterToothOpening_accepts 1 (by decide +kernel), ?_⟩
-  decide +kernel
+  have h0 : checkTargetSum 2 2 1
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 0) = true := by
+    rw [counterCodeword_zero]; simp [checkTargetSum, sumDigits_cons, sumDigits_nil]
+  have h1 : checkTargetSum 2 2 1
+      (counterCodeword counterToothSuite counterToothParams [] [] [] 1 0 1) = true := by
+    rw [counterCodeword_one]; simp [checkTargetSum, sumDigits_cons, sumDigits_nil]
+  refine ⟨counterToothOpening_accepts 0 h0, counterToothOpening_accepts 1 h1, by decide, ?_,
+    h0, h1, by decide⟩
+  rw [counterCodeword_zero, counterCodeword_one]
+  decide
 
 /-! ### Speculation on the byte-decoded compiled kernels
 
@@ -2864,7 +3050,29 @@ set_option maxHeartbeats 2000000 in
       (deepToyTurn 7)).map (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 6) ∧
     (verifyBeforeReleaseAll zeroToySuite (deepToyParams 22) ⟨[], List.replicate 32 0⟩ []
       (deepToyTurn 22)).map (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 21) := by
-  decide +kernel
+  have hw : ∀ d, (deepToyParams d).w = 2 := by
+    intro d; show zeroToyParams.w = 2; rw [zeroToyParams.public_eq_1]
+  have hl : ∀ d, (deepToyParams d).ell1 = 1 := by
+    intro d; show zeroToyParams.ell1 = 1; rw [zeroToyParams.public_eq_1]
+  have hh : ∀ d, (deepToyParams d).subtreeHeight = 1 := by
+    intro d; show zeroToyParams.subtreeHeight = 1; rw [zeroToyParams.public_eq_1]
+  have hwf : ∀ d, d = 7 ∨ d = 22 → (deepToyParams d).wellFormed = true := by
+    intro d hd
+    rw [PqHashParams.wellFormed_eq]
+    simp only [deepToyParams, zeroToyParams.public_eq_1]
+    rcases hd with rfl | rfl <;> decide
+  have key : ∀ d, d + 1 = 7 ∨ d + 1 = 22 →
+      ∃ es, verifyBeforeReleaseAll zeroToySuite (deepToyParams (d + 1))
+          ⟨[], List.replicate 32 0⟩ [] (deepToyTurn (d + 1)) = some es ∧
+        es.map (fun e => e.key.layer) = List.range' 1 d := by
+    intro d hd
+    exact all_depth_gate_complete zeroToySuite (deepToyParams (d + 1)) ⟨[], List.replicate 32 0⟩
+      (deepToyTurn (d + 1)) (by rw [hh]; decide)
+      (zeroToy_stateful_verifies (deepToyParams (d + 1)) (hw _) (hl _) (hwf _ hd) rfl
+        (List.replicate 32 0) [List.replicate 32 0] (by rw [hh]; rfl) d rfl [] [] [])
+  obtain ⟨es₇, he₇, hm₇⟩ := key 6 (Or.inl rfl)
+  obtain ⟨es₂₂, he₂₂, hm₂₂⟩ := key 21 (Or.inr rfl)
+  exact ⟨by rw [he₇]; exact congrArg some hm₇, by rw [he₂₂]; exact congrArg some hm₂₂⟩
 
 /-- Hypertree-level input, after the enclosing signature scheme has authenticated its initial
     digest/FORS root. This API does not impose the full `HashSigs` format's total-height cap. -/
@@ -3063,7 +3271,19 @@ set_option maxHeartbeats 4000000 in
       ⟨0, [], [], List.replicate 22
         ⟨0, [List.replicate 32 0], List.replicate 3 (List.replicate 32 0)⟩⟩).map
         (fun es => es.map (fun e => e.key.layer)) = some (List.range' 1 21) := by
-  decide +kernel
+  have hw : ({ deepToyParams 22 with subtreeHeight := 3 } : PqHashParams).w = 2 := by
+    show zeroToyParams.w = 2; rw [zeroToyParams.public_eq_1]
+  have hl : ({ deepToyParams 22 with subtreeHeight := 3 } : PqHashParams).ell1 = 1 := by
+    show zeroToyParams.ell1 = 1; rw [zeroToyParams.public_eq_1]
+  obtain ⟨es, he, hm⟩ := hypertree_gate_complete zeroToySuite
+    { deepToyParams 22 with subtreeHeight := 3 } ⟨[], List.replicate 32 0⟩
+    ⟨0, [], [], List.replicate 22
+      ⟨0, [List.replicate 32 0], List.replicate 3 (List.replicate 32 0)⟩⟩
+    (by decide) (by rfl)
+    (zeroToy_verify_replicate _ hw hl [] (List.replicate 32 0) (List.replicate 32 0)
+      (List.replicate 3 (List.replicate 32 0)) (by rfl) 21 [] 0 0 [])
+  rw [he]
+  exact congrArg some hm
 
 /-- The next upper key consumes the tree index of the current key as its global index. -/
 def nextOtsPosition (params : PqHashParams) (key : OtsPosition) : OtsPosition :=
@@ -3386,7 +3606,7 @@ theorem verifyProductionHypertreeLayers_upper_rand_irrel (suite : TweakableHashS
       verifyProductionHypertreeLayers suite params pkSeed pkRoot rand layer g cur sigs =
         verifyProductionHypertreeLayers suite params pkSeed pkRoot [] layer g cur sigs := by
   induction sigs with
-  | nil => intro layer g cur _; rfl
+  | nil => intro layer g cur _; rw [verifyProductionHypertreeLayers_nil, verifyProductionHypertreeLayers_nil]
   | cons l rest ih =>
     intro layer g cur hLay
     have hNe0 : decide (layer = 0) = false := decide_eq_false (by omega)

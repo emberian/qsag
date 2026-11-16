@@ -43,6 +43,18 @@ elif [[ $mode == top ]]; then
     tee -o synth/logs/top_$2.hier.stat stat -top qsag_ni_asic_top -liberty $lib
   " > /dev/null 2>&1
   echo "top $2: exit $? $(grep -i 'chip area for top' synth/logs/top_$2.hier.stat 2>/dev/null | tr -s ' ')"
+elif [[ $mode == topfast ]]; then
+  # whole flat top with ABC's fast script (strash; dretime; map): the delay-driven script above does not
+  # finish on the ~400k-gate flat netlist inside the 600 s build cap. Area only.
+  lib="$(libs "$2")"; log="synth/logs/topfast_$2.log"
+  $RUN yosys -l "$log" -p "
+    read_rtlil synth/netlists/top_pre.il
+    dfflibmap -liberty $lib
+    abc -liberty $lib -script +strash;dretime;map
+    opt_clean
+    tee -o synth/logs/topfast_$2.stat stat -top qsag_ni_asic_top -liberty $lib
+  " > /dev/null 2>&1
+  echo "topfast $2: exit $? $(grep -i 'chip area for' synth/logs/topfast_$2.stat 2>/dev/null | tail -1 | tr -s ' ') $(grep -i 'sequential' synth/logs/topfast_$2.stat 2>/dev/null | tail -1 | tr -s ' ')"
 elif [[ $mode == stage ]]; then
   # optional 4th argument "ks": Kogge-Stone carry networks (yosys +/choices/kogge-stone.v) instead of Brent-Kung
   lib="$(libs "$2")"; st="$3"; var="${4:-bk}"; log="synth/logs/stage_${st}_$2_${var}.log"

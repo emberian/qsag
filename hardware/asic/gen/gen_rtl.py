@@ -30,7 +30,7 @@ def gen_mul_tree():
     ys = [csa.cols[w][1] if len(csa.cols.get(w, [])) > 1 else "1'b0" for w in range(128)]
     m.raw(f"assign s = {{{', '.join(reversed(xs))}}};")
     m.raw(f"assign c = {{{', '.join(reversed(ys))}}};")
-    stats["mul_tree_fa"] = csa.fas
+    stats["mul_tree (fa, ha, stages)"] = (csa.fas, csa.has, csa.stages)
     return m.text()
 
 
@@ -46,7 +46,7 @@ def gen_fold():
     m.raw(f"assign y = {y};")
     m.ports[2] = f"output wire [{w - 1}:0] x"
     m.ports[3] = f"output wire [{w - 1}:0] y"
-    stats["fold"] = (w, q, csa.fas)
+    stats["fold (W, quot, fa, ha, stages)"] = (w, q, csa.fas, csa.has, csa.stages)
     return m.text(), w, q
 
 
@@ -97,6 +97,43 @@ def gen_ext4_coef(k):
     return m.text()
 
 
+def gen_ext4_karatsuba():
+    """Nine products in the actual [1,u,v,uv] basis, u=v^2 and u^2=7.
+    Product operands are canonical; reconstruction consumes the shared canonical
+    products. Pre-add and reconstruction are combinational (one Ext4 clock).
+    """
+    m = Mod("qsag_ext4_kara_inputs", ["input wire [255:0] a", "output wire [575:0] q"])
+    groups = [[0], [1], [0,1], [2], [3], [2,3], [0,2], [1,3], [0,1,2,3]]
+    for i in range(4):
+        m.raw(f"wire [63:0] a{i} = a[{64*i} +: 64];")
+    for j, group in enumerate(groups):
+        if len(group) == 1:
+            m.raw(f"assign q[{64*j} +: 64] = a{group[0]};")
+        else:
+            c = Csa(m)
+            for i in group: c.term_exact(f"a{i}",64)
+            x,y,w,q = c.rows(f"s{j}_")
+            final(m,f"f{j}",x,y,w,q,f"q[{64*j} +: 64]",False)
+    text = m.text()
+    m = Mod("qsag_ext4_kara_combine", ["input wire [575:0] p", "input wire [255:0] z", "output wire [255:0] r"])
+    for i in range(9): m.raw(f"wire [63:0] p{i} = p[{64*i} +: 64];")
+    weights = [[1,7,0,-7,-7,7,0,0,0], [-1,-1,1,1,7,0,0,0,0],
+               [-1,-7,0,-1,-7,0,1,7,0], [1,1,-1,1,1,-1,-1,-1,1]]
+    for j, row in enumerate(weights):
+        m.raw(f"wire [63:0] z{j} = z[{64*j} +: 64];")
+        c = Csa(m)
+        for i,wt in enumerate(row):
+            # 7=8-1 avoids three copies of the product bits.
+            if abs(wt)==7:
+                c.term_exact(f"p{i}",64,3,1 if wt>0 else -1)
+                c.term_exact(f"p{i}",64,0,-1 if wt>0 else 1)
+            elif wt: c.term_exact(f"p{i}",64,0,wt)
+        c.term_exact(f"z{j}",64)
+        x,y,w,q=c.rows(f"r{j}_")
+        final(m,f"f{j}",x,y,w,q,f"r[{64*j} +: 64]",False)
+    return text + m.text()
+
+
 def weighted_exact(csa, sig, width, weight):
     """weight * sig as unfolded integer bits (no modular folding, no constant)."""
     b = 0
@@ -108,7 +145,7 @@ def weighted_exact(csa, sig, width, weight):
 
 
 def gen_me():
-    """M_E(x) + rc. lane(b, i) = 3i + b; y(b,i) = 2x(b,i) + 3x(b,i+1) + x(b,i+2) + x(b,i+3);
+    """M_E(x) + rc, as an exact integer carry-save sum followed by one reduction. lane(b, i) = 3i + b; y(b,i) = 2x(b,i) + 3x(b,i+1) + x(b,i+2) + x(b,i+3);
     out(b,i) = y(b,i) + sum_b' y(b',i)."""
     m = Mod("qsag_p2_me", ["input  wire [767:0] x", "input  wire [767:0] rc", "output wire [767:0] y"])
     lane = lambda b, i: 3 * (i % 4) + b
@@ -136,8 +173,8 @@ def gen_me():
             csa = Csa(m)
             for bb in range(3):
                 for r in ("x", "y"):
-                    csa.term(f"m4{r}_{bb}_{i}", yrows[(bb, i)], 1 if bb == b else 0)
-            csa.term(f"rc{lane(b, i)}", 64)
+                    csa.term_exact(f"m4{r}_{bb}_{i}", yrows[(bb, i)], 1 if bb == b else 0)
+            csa.term_exact(f"rc{lane(b, i)}", 64)
             x, y, w, q = csa.rows(f"o{b}_{i}_", None)
             final(m, f"u_f{b}_{i}", x, y, w, q, f"y[{64 * lane(b, i) + 63}:{64 * lane(b, i)}]", False)
             fas += csa.fas
@@ -169,18 +206,18 @@ def gen_mi(fused, fw):
     s0 = [("sx", fw), ("sy", fw)] if fused else [("x0", 64)]
     for l in range(12):
         csa = Csa(m)
-        csa.term("su", uw)
-        csa.term("sv", uw)
-        csa.term(f"rc{l}", 64)
+        csa.term_exact("su", uw)
+        csa.term_exact("sv", uw)
+        csa.term_exact(f"rc{l}", 64)
         if l > 0:
-            csa.term(f"x{l}", 64, l - 1)  # diag 2^(l-1)
+            csa.term_exact(f"x{l}", 64, l - 1)  # diag 2^(l-1)
         csa.compress()  # early-arriving register terms first
         for sig, w in s0:
             if l == 0:  # (1 - 64) * s0
-                csa.term(sig, w)
-                csa.term(sig, w, 6, -1)
+                csa.term_exact(sig, w)
+                csa.term_exact(sig, w, 6, -1)
             else:
-                csa.term(sig, w)
+                csa.term_exact(sig, w)
         x, y, w, q = csa.rows(f"o{l}_", None)
         final(m, f"u_f{l}", x, y, w, q, f"y[{64 * l + 63}:{64 * l}]", False)
         fas += csa.fas
@@ -195,9 +232,9 @@ def gen_canopy_ff():
         m.raw(f"wire [63:0] x{l} = x[{64 * l + 63}:{64 * l}];")
     for i in range(4):
         csa = Csa(m)
-        csa.term(f"x{i}", 64)
-        csa.term(f"x{4 + i}", 64, 1)
-        csa.term(f"x{8 + i}", 64, 2)
+        csa.term_exact(f"x{i}", 64)
+        csa.term_exact(f"x{4 + i}", 64, 1)
+        csa.term_exact(f"x{8 + i}", 64, 2)
         x, y, w, q = csa.rows(f"o{i}_", None)
         final(m, f"u_f{i}", x, y, w, q, f"ff[{64 * i + 63}:{64 * i}]", False)
     return m.text()
@@ -238,7 +275,7 @@ def main(outdir):
     fold_txt, fw, fq = gen_fold()
     gl = HDR + gen_mul_tree() + "\n" + fold_txt + "\n" + gen_mul(fw, fq) + "\n" + gen_reduce128()
     open(os.path.join(outdir, "qsag_asic_gl64_csa_gen.sv"), "w").write(gl)
-    p2 = HDR + "\n".join(gen_ext4_coef(k) for k in range(4)) + "\n" + gen_me() + "\n" + gen_mi(False, fw) + "\n" + \
+    p2 = HDR + gen_ext4_karatsuba() + "\n".join(gen_ext4_coef(k) for k in range(4)) + "\n" + gen_me() + "\n" + gen_mi(False, fw) + "\n" + \
         gen_mi(True, fw) + "\n" + gen_canopy_ff() + "\n" + gen_rc()
     open(os.path.join(outdir, "qsag_asic_ext4_p2_gen.sv"), "w").write(p2)
     open(os.path.join(outdir, "qsag_asic_tower_maps_gen.sv"), "w").write(HDR + gen_tower_maps())

@@ -17,6 +17,36 @@
 // width (see lec/); the chip instantiates W = 32, GB = 12.
 `default_nettype none
 
+// Kogge-Stone parallel-prefix carry network. N need not be a power of two.
+// Keep the prefix levels visible to synthesis; no serial carry recurrence.
+module qsag_prefix_add #(parameter int N = 64) (
+    input wire [N-1:0] a, b,
+    input wire cin,
+    output wire [N-1:0] sum
+);
+    localparam int L = $clog2(N);
+    wire [N-1:0] p0 = a ^ b;
+    (* keep *) wire [N-1:0] pp [L+1];
+    (* keep *) wire [N-1:0] gg [L+1];
+    assign pp[0] = p0;
+    assign gg[0] = a & b;
+    for (genvar l = 0; l < L; l++) begin : g_level
+        for (genvar i = 0; i < N; i++) begin : g_bit
+            if (i >= (1 << l)) begin : g_merge
+                assign gg[l+1][i] = gg[l][i] | (pp[l][i] & gg[l][i-(1 << l)]);
+                assign pp[l+1][i] = pp[l][i] & pp[l][i-(1 << l)];
+            end else begin : g_pass
+                assign gg[l+1][i] = gg[l][i];
+                assign pp[l+1][i] = pp[l][i];
+            end
+        end
+    end
+    assign sum[0] = p0[0] ^ cin;
+    for (genvar i = 1; i < N; i++) begin : g_sum
+        assign sum[i] = p0[i] ^ (gg[L][i-1] | (pp[L][i-1] & cin));
+    end
+endmodule
+
 module qsag_mul33 #(
     parameter int W = 32
 ) (
@@ -24,7 +54,53 @@ module qsag_mul33 #(
     input  wire [W:0]     b,
     output wire [2*W+1:0] p
 );
-    assign p = a * b;
+    localparam int N = W + 1;
+    localparam int PW = 2*N;
+    localparam int R = (N+2)/2;
+    wire [N+1:0] ap = {2'b0, a};
+    wire [N+1:0] an;
+    qsag_prefix_add #(.N(N+2)) u_neg (.a(~ap), .b({(N+2){1'b0}}), .cin(1'b1), .sum(an));
+    wire [2*R:0] bx = {{(2*R-N){1'b0}}, b, 1'b0};
+    wire [R*PW-1:0] rows;
+    for (genvar j = 0; j < R; j++) begin : g_booth
+        logic [N+1:0] digit;
+        always_comb begin
+            case (bx[2*j +: 3])
+                3'b001, 3'b010: digit = ap;
+                3'b011: digit = ap << 1;
+                3'b100: digit = an << 1;
+                3'b101, 3'b110: digit = an;
+                default: digit = '0;
+            endcase
+        end
+        assign rows[j*PW +: PW] = {{(PW-N-2){digit[N+1]}}, digit} << (2*j);
+    end
+    qsag_mul_csa_tree #(.N(PW), .ROWS(R)) u_tree (.rows(rows), .sum(p));
+endmodule
+
+// Balanced 3:2 compression down to two rows, followed by one prefix adder.
+module qsag_mul_csa_tree #(parameter int N = 66, parameter int ROWS = 17) (
+    input wire [ROWS*N-1:0] rows,
+    output wire [N-1:0] sum
+);
+    if (ROWS == 1) begin : g_one
+        assign sum = rows;
+    end else if (ROWS == 2) begin : g_final
+        qsag_prefix_add #(.N(N)) u_add (.a(rows[0 +: N]), .b(rows[N +: N]), .cin(1'b0), .sum(sum));
+    end else begin : g_reduce
+        localparam int GROUPS = ROWS/3;
+        localparam int NEXT = 2*GROUPS + ROWS%3;
+        wire [NEXT*N-1:0] next_rows;
+        for (genvar j=0; j<GROUPS; j++) begin : g_group
+            qsag_csa32 #(.N(N)) u_csa (
+                .a(rows[(3*j)*N +: N]), .b(rows[(3*j+1)*N +: N]), .c(rows[(3*j+2)*N +: N]),
+                .s(next_rows[(2*j)*N +: N]), .cy(next_rows[(2*j+1)*N +: N]));
+        end
+        for (genvar j=0; j<ROWS%3; j++) begin : g_tail
+            assign next_rows[(2*GROUPS+j)*N +: N] = rows[(3*GROUPS+j)*N +: N];
+        end
+        qsag_mul_csa_tree #(.N(N), .ROWS(NEXT)) u_next (.rows(next_rows), .sum(sum));
+    end
 endmodule
 
 module qsag_csa32 #(
@@ -36,7 +112,9 @@ module qsag_csa32 #(
     output wire [N-1:0] s,
     output wire [N-1:0] cy
 );
-    wire [N-1:0] m = (a & b) | (a & c) | (b & c);
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [N-1:0] m = (a & b) | (a & c) | (b & c);   // the carry out of the top bit is always 0
+    /* verilator lint_on UNUSEDSIGNAL */
     assign s  = a ^ b ^ c;
     assign cy = {m[N-2:0], 1'b0};
 endmodule
@@ -118,11 +196,16 @@ module qsag_gl64_canon #(
     localparam int LW = 2 * W;
     localparam int AW = LW + GB;
     localparam logic [LW-1:0] EPS = {{W{1'b0}}, {W{1'b1}}};
-    wire [AW-1:0] t  = x + y;
+    wire [AW-1:0] t;
+    qsag_prefix_add #(.N(AW)) u_t (.a(x), .b(y), .cin(1'b0), .sum(t));
     wire [GB-1:0] q  = t[AW-1:LW];
     wire [LW+1:0] qs = (LW + 2)'(q) << W;
-    wire [LW+1:0] u  = (LW + 2)'(t[LW-1:0]) + qs - (LW + 2)'(q);
-    wire [LW:0]   v  = {1'b0, u[LW-1:0]} + {1'b0, EPS};
+    wire [LW+1:0] u, us, uc;
+    qsag_csa32 #(.N(LW+2)) u_fold_rows (
+        .a((LW+2)'(t[LW-1:0])), .b(qs), .c(~((LW+2)'(q))), .s(us), .cy(uc));
+    qsag_prefix_add #(.N(LW+2)) u_fold (.a(us), .b(uc), .cin(1'b1), .sum(u));
+    wire [LW:0] v;
+    qsag_prefix_add #(.N(LW+1)) u_v (.a({1'b0, u[LW-1:0]}), .b({1'b0, EPS}), .cin(1'b0), .sum(v));
     assign r = (u[LW] | v[LW]) ? v[LW-1:0] : u[LW-1:0];
 endmodule
 

@@ -4,7 +4,7 @@
 A `Csa` holds bits in columns of weight 2^w. `bit()` folds any weight 2^k into
 columns 0..63 with 2^64 = 2^32 - 1 and 2^96 = -1 (mod p); a negative bit -x*2^w
 becomes (~x)*2^w with -2^w added to a constant, which is reduced mod p and
-entered as constant bits. `compress()` is a level-synchronous 3:2 tree that
+entered as constant bits. `compress()` is a Dadda tree (full and half adders) that
 keeps every carry (exact integer sum), so the two output rows X, Y satisfy
 X + Y = (sum of all entered terms) + n*p for a known n, as integers.
 `bound` is an exact upper bound of that integer.
@@ -44,6 +44,7 @@ def fold(k, sign):
 class Csa:
     def __init__(self, m):
         self.m, self.cols, self.const, self.fas = m, defaultdict(list), 0, 0
+        self.has, self.stages = 0, 0
 
     def raw(self, expr, w):
         self.cols[w].append(expr)
@@ -60,6 +61,16 @@ class Csa:
         for b in range(width):
             self.bit(f"{sig}[{b}]", shift + b, sign)
 
+    def term_exact(self, sig, width, shift=0, sign=1):
+        """sign * sig * 2^shift as integer bits, no modular folding (the rows stay an exact integer
+        sum up to the constant); a negative term enters as its complement plus a constant."""
+        for b in range(width):
+            if sign > 0:
+                self.cols[shift + b].append(f"{sig}[{b}]")
+            else:
+                self.cols[shift + b].append(f"(~{sig}[{b}])")
+                self.const -= 1 << (shift + b)
+
     def flush_const(self):
         k = self.const % P
         self.const = 0
@@ -72,20 +83,45 @@ class Csa:
         return sum(len(v) << w for w, v in self.cols.items())
 
     def compress(self):
-        while max((len(v) for v in self.cols.values()), default=0) > 2:
+        """Dadda reduction to height 2. Height targets 2, 3, 4, 6, 9, 13, ...; each stage brings every
+        column (old bits plus the carries this stage sends into it) down to the target with full and
+        half adders on the old bits only, so a stage is one adder deep. Every adder preserves the
+        integer sum (a + b + c = s + 2*carry, a + b = s + 2*carry)."""
+        while True:
+            maxh = max((len(v) for v in self.cols.values()), default=0)
+            if maxh <= 2:
+                return
+            d = 2
+            while d * 3 // 2 < maxh:
+                d = d * 3 // 2
             new = defaultdict(list)
-            for w in sorted(self.cols):
-                bits = self.cols[w]
+            w = min(self.cols)
+            top = max(self.cols)
+            while w <= top or len(new.get(w, [])) > 0:
+                bits = self.cols.get(w, [])
+                cin = new[w]
+                h = len(bits) + len(cin)
                 i = 0
                 made = []
-                while len(bits) - i >= 3:
-                    a, b, c = bits[i:i + 3]
-                    made.append(self.m.w(f"{a} ^ {b} ^ {c}"))
-                    new[w + 1].append(self.m.w(f"({a} & {b}) | ({a} & {c}) | ({b} & {c})"))
-                    self.fas += 1
-                    i += 3
-                new[w] = bits[i:] + new[w] + made
-            self.cols = new
+                while h > d and len(bits) - i >= 2:
+                    if h - d >= 2 and len(bits) - i >= 3:
+                        a, b, c = bits[i:i + 3]
+                        made.append(self.m.w(f"{a} ^ {b} ^ {c}"))
+                        new[w + 1].append(self.m.w(f"({a} & {b}) | ({a} & {c}) | ({b} & {c})"))
+                        self.fas += 1
+                        i += 3
+                        h -= 2
+                    else:
+                        a, b = bits[i:i + 2]
+                        made.append(self.m.w(f"{a} ^ {b}"))
+                        new[w + 1].append(self.m.w(f"{a} & {b}"))
+                        self.has += 1
+                        i += 2
+                        h -= 1
+                new[w] = bits[i:] + cin + made
+                w += 1
+            self.cols = defaultdict(list, {k: v for k, v in new.items() if v})
+            self.stages += 1
 
     def refold_high(self):
         hi = {w: v for w, v in self.cols.items() if w >= 64}

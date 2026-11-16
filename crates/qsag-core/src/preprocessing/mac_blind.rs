@@ -322,9 +322,11 @@ pub(crate) fn blind_open_tower128(
             n: party_rngs.len(),
         });
     }
+    // A retained mesh answers from its pre-staged single-use triple pool. A mesh that
+    // exists only for this one opening has nothing to amortize and multiplies directly.
     let mut owned_mesh;
     let mesh = match mesh {
-        Some(mesh) => mesh,
+        Some(mesh) => return mesh.blind_open_pooled(session_id, phase, residual, party_rngs),
         None => {
             owned_mesh = blinding_mesh(session_id, phase, party_rngs)?;
             &mut owned_mesh
@@ -378,6 +380,255 @@ pub fn blind_open_additive_gf128_poly(
     flat.0[0] = opened.0;
     qsag_asm::tower128_to_poly128_x64_ct(&mut flat.0);
     Ok(flat.0[0])
+}
+
+/// One single-use multiplicative blinding triple: per-party additive shares of a joint
+/// randomizer `r`, a one-time mask `a`, and `c = r * a`. Not `Clone`; wiped on drop.
+struct BlindTriple {
+    /// Position in the mesh's lifetime triple sequence, bound into both openings that use it.
+    serial: u64,
+    r: SecretBuffer<Vec<Tower128>>,
+    a: SecretBuffer<Vec<Tower128>>,
+    c: SecretBuffer<Vec<Tower128>>,
+}
+
+/// Single-use blinding triples staged on a retained [`OtMesh`].
+#[derive(Default)]
+pub(super) struct BlindPool {
+    triples: Vec<BlindTriple>,
+    /// Number of triples ever staged; the next refill starts its serials here.
+    staged: u64,
+    refills: u64,
+    /// Set by a failed refill or a rejected opening commitment. Never cleared.
+    poisoned: bool,
+    #[cfg(test)]
+    fail_next_refill: bool,
+}
+
+const BLIND_POOL_POISONED: PreprocessError = PreprocessError::VaultPoisoned {
+    kind: "blinding_pool",
+};
+const BLIND_POOL_EXHAUSTED: PreprocessError = PreprocessError::VaultExhausted {
+    kind: "blinding_pool",
+};
+
+/// Independent blinding rounds per check; see [`blind_open_tower128`].
+const BLIND_ROUNDS: usize = 2;
+/// Checks staged by an automatic refill when a check finds the pool empty.
+const BLIND_AUTO_REFILL_CHECKS: usize = 8;
+
+impl OtMesh {
+    /// Number of blinded MAC checks the staged pool can answer without a refill.
+    pub fn staged_blinded_checks(&self) -> usize {
+        self.blind_pool.triples.len() / BLIND_ROUNDS
+    }
+
+    /// Make the next refill fail before it stages anything.
+    #[cfg(test)]
+    pub(crate) fn fail_next_blinding_refill(&mut self) {
+        self.blind_pool.fail_next_refill = true;
+    }
+
+    /// Joint randomizer of the triple the next pooled round will consume.
+    #[cfg(test)]
+    pub(super) fn next_blinding_randomizer(&self) -> Option<Tower128> {
+        self.blind_pool
+            .triples
+            .last()
+            .map(|t| t.r.iter().fold(Tower128::ZERO, |sum, &r| sum.add(r)))
+    }
+
+    /// Serials of the staged triples, oldest first.
+    #[cfg(test)]
+    pub(crate) fn staged_blinding_serials(&self) -> Vec<u64> {
+        self.blind_pool.triples.iter().map(|t| t.serial).collect()
+    }
+
+    /// Whether a failed refill or opening has permanently disabled pooled checks on this mesh.
+    pub fn blinding_poisoned(&self) -> bool {
+        self.blind_pool.poisoned
+    }
+
+    /// Stage single-use blinding material for `checks` further MAC checks.
+    ///
+    /// Runs one batched entropy-amplified Tower OLE over the mesh with fresh per-party
+    /// randomizers and masks. Each refill batch is bound to the mesh session, the party
+    /// count, its refill index and the first triple serial it produces. A failure poisons
+    /// the pool: staged triples are wiped and every later pooled check is refused.
+    pub fn prestage_blinded_checks(
+        &mut self,
+        checks: usize,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), PreprocessError> {
+        if self.blind_pool.poisoned {
+            return Err(BLIND_POOL_POISONED);
+        }
+        let n = self.n;
+        if party_rngs.len() != n {
+            return Err(PreprocessError::InvalidThreshold {
+                t: n,
+                n: party_rngs.len(),
+            });
+        }
+        if checks == 0 {
+            return Ok(());
+        }
+        let staged = self.refill_blind_pool(checks, party_rngs);
+        if staged.is_err() {
+            self.poison_blind_pool();
+        }
+        staged
+    }
+
+    fn poison_blind_pool(&mut self) {
+        self.blind_pool.poisoned = true;
+        // Dropping each triple wipes its shares.
+        self.blind_pool.triples.clear();
+    }
+
+    fn refill_blind_pool(
+        &mut self,
+        checks: usize,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), PreprocessError> {
+        let n = self.n;
+        let count = checks
+            .checked_mul(BLIND_ROUNDS)
+            .ok_or(BLIND_POOL_EXHAUSTED)?;
+        let first_serial = self.blind_pool.staged;
+        let next_staged = first_serial
+            .checked_add(count as u64)
+            .ok_or(BLIND_POOL_EXHAUSTED)?;
+        let refill = self.blind_pool.refills;
+        self.blind_pool.refills = refill.checked_add(1).ok_or(BLIND_POOL_EXHAUSTED)?;
+        #[cfg(test)]
+        if core::mem::take(&mut self.blind_pool.fail_next_refill) {
+            return Err(BLIND_POOL_POISONED);
+        }
+        // Four more frames than any per-check round label, so a refill batch can never
+        // share a session with an opening whatever phase string a caller supplies.
+        let refill_sid = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BLIND.T128.ROUND/v1",
+            &[
+                &self.session_id,
+                b"blind_pool_refill",
+                &(n as u64).to_be_bytes(),
+                &refill.to_be_bytes(),
+                &first_serial.to_be_bytes(),
+                &(count as u64).to_be_bytes(),
+                &self.transcript,
+            ],
+        );
+        let draw = |rngs: &mut [PartyPrivateRng]| {
+            SecretBuffer(
+                rngs.iter_mut()
+                    .map(|rng| (0..count).map(|_| rng.next_tower128()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let masks = draw(party_rngs);
+        let randomizers = draw(party_rngs);
+        // The mask is the OLE sender input and the randomizer the receiver input, exactly
+        // the roles the residual and the randomizer take in the direct multiplication.
+        let products = SecretBuffer(pairwise_ole_tower128(
+            &refill_sid,
+            self,
+            &masks,
+            &randomizers,
+            party_rngs,
+        )?);
+        self.blind_pool.triples.reserve(count);
+        for k in 0..count {
+            let column = |rows: &[Vec<Tower128>]| {
+                SecretBuffer(rows.iter().map(|row| row[k]).collect::<Vec<_>>())
+            };
+            self.blind_pool.triples.push(BlindTriple {
+                serial: first_serial + k as u64,
+                r: column(&randomizers),
+                a: column(&masks),
+                c: column(&products),
+            });
+        }
+        self.blind_pool.staged = next_staged;
+        Ok(())
+    }
+
+    /// Pooled multiplicative blinding of an additive residual `d`.
+    ///
+    /// Each of the two rounds pops one triple `(r, a, c = r * a)` that no other round or
+    /// check ever sees, opens the one-time-padded `e = d + a` behind commitments, and then
+    /// opens `w = r * e + c = r * d` behind commitments. The residual shares never leave a
+    /// party except under the uniform mask `a`, and `w` is a field permutation of `d` under
+    /// the uniform `r`, as in the direct multiplication. An empty pool refills itself; if
+    /// that fails, or an opening commitment is rejected, the pool is poisoned.
+    fn blind_open_pooled(
+        &mut self,
+        session_id: &[u8; 32],
+        phase: &'static str,
+        residual: &[Tower128],
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<Tower128, PreprocessError> {
+        if self.blind_pool.poisoned {
+            return Err(BLIND_POOL_POISONED);
+        }
+        let n = self.n;
+        for round in 0..BLIND_ROUNDS as u64 {
+            if self.blind_pool.triples.is_empty() {
+                self.prestage_blinded_checks(BLIND_AUTO_REFILL_CHECKS, party_rngs)?;
+            }
+            // Moved out of the pool before anything is sent; wiped when this round ends,
+            // whether it returns, fails or continues.
+            let Some(triple) = self.blind_pool.triples.pop() else {
+                self.poison_blind_pool();
+                return Err(BLIND_POOL_POISONED);
+            };
+            let serial = triple.serial.to_be_bytes();
+            let round_be = round.to_be_bytes();
+            let opening_sid = |stage: &[u8]| {
+                cshake256_32_multi_frame(
+                    b"QSAG.SPDZ.BLIND.T128.ROUND/v1",
+                    &[
+                        session_id,
+                        phase.as_bytes(),
+                        &round_be,
+                        &self.session_id,
+                        &serial,
+                        stage,
+                    ],
+                )
+            };
+            let (mask_sid, product_sid) = (opening_sid(b"mask"), opening_sid(b"product"));
+            let masked = SecretBuffer(
+                (0..n)
+                    .map(|p| residual[p].add(triple.a[p]))
+                    .collect::<Vec<_>>(),
+            );
+            let e = match commit_and_open_additive_tower128(&mask_sid, phase, &masked, party_rngs) {
+                Ok(e) => e,
+                Err(err) => {
+                    self.poison_blind_pool();
+                    return Err(err);
+                }
+            };
+            let shares = SecretBuffer(
+                (0..n)
+                    .map(|p| blinding_tower_product(triple.r[p], e).add(triple.c[p]))
+                    .collect::<Vec<_>>(),
+            );
+            let opened =
+                match commit_and_open_additive_tower128(&product_sid, phase, &shares, party_rngs) {
+                    Ok(w) => w,
+                    Err(err) => {
+                        self.poison_blind_pool();
+                        return Err(err);
+                    }
+                };
+            if !opened.ct_eq(Tower128::ZERO) {
+                return Ok(opened);
+            }
+        }
+        Ok(Tower128::ZERO)
+    }
 }
 
 // Keep the large portable field circuit out of the basis-table loop's
@@ -555,6 +806,120 @@ mod tests {
             .into_iter()
             .map(|seed| PartyPrivateRng::from_seed([seed; 32], b"mac-blind-regression"))
             .collect()
+    }
+
+    fn tower_rngs(n: usize, tape: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|p| PartyPrivateRng::from_seed([tape ^ (p as u8); 32], b"mac-blind-pool"))
+            .collect()
+    }
+
+    #[test]
+    fn pooled_blinding_consumes_each_triple_once_and_blinds_nonzero_residuals() {
+        let n = 3;
+        let sid = [0x4c; 32];
+        let mut rngs = tower_rngs(n, 0x71);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        assert_eq!(mesh.staged_blinded_checks(), 0);
+        mesh.prestage_blinded_checks(3, &mut rngs).unwrap();
+        assert_eq!(mesh.staged_blinded_checks(), 3);
+        let serials = mesh.staged_blinding_serials();
+        assert_eq!(serials, (0..6).collect::<Vec<u64>>());
+
+        // Every staged triple is a correct product of independent, nonzero values.
+        let sum = |v: &[Tower128]| v.iter().fold(Tower128::ZERO, |a, &b| a.add(b));
+        let mut seen = Vec::new();
+        for triple in &mesh.blind_pool.triples {
+            let (r, a, c) = (sum(&triple.r), sum(&triple.a), sum(&triple.c));
+            assert!(c.ct_eq(r.mul(a)));
+            assert!(!seen.contains(&r.0) && !seen.contains(&a.0));
+            seen.push(r.0);
+            seen.push(a.0);
+        }
+
+        // A zero residual, split additively, opens to zero and spends exactly two triples.
+        let zero = [Tower128(0x55), Tower128(0x11), Tower128(0x44)];
+        let w = blind_open_tower128(&sid, "pool_zero", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(w.ct_eq(Tower128::ZERO));
+        assert_eq!(mesh.staged_blinding_serials(), (0..4).collect::<Vec<u64>>());
+
+        // A nonzero residual stops at its first round, spending one more triple, and the
+        // same residual opens to a different nonzero value under the next triple.
+        let d = Tower128(0x1234_5678_9abc_def0_0fed_cba9_8765_4321);
+        let bad = [d.add(Tower128(7)), Tower128(7), Tower128::ZERO];
+        let w1 = blind_open_tower128(&sid, "pool_bad", &bad, Some(&mut mesh), &mut rngs).unwrap();
+        assert_eq!(mesh.staged_blinding_serials(), (0..3).collect::<Vec<u64>>());
+        let w2 = blind_open_tower128(&sid, "pool_bad", &bad, Some(&mut mesh), &mut rngs).unwrap();
+        assert_eq!(mesh.staged_blinding_serials(), (0..2).collect::<Vec<u64>>());
+        assert!(!w1.ct_eq(Tower128::ZERO) && !w2.ct_eq(Tower128::ZERO));
+        assert!(!w1.ct_eq(w2) && !w1.ct_eq(d) && !w2.ct_eq(d));
+
+        // An empty pool refills itself with serials that were never issued before.
+        let w = blind_open_tower128(&sid, "pool_zero", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(w.ct_eq(Tower128::ZERO));
+        assert!(mesh.staged_blinding_serials().is_empty());
+        let w = blind_open_tower128(&sid, "pool_zero", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(w.ct_eq(Tower128::ZERO));
+        let refilled = mesh.staged_blinding_serials();
+        assert_eq!(
+            refilled.len(),
+            BLIND_ROUNDS * BLIND_AUTO_REFILL_CHECKS - BLIND_ROUNDS
+        );
+        assert!(refilled.iter().all(|&s| s >= 6));
+    }
+
+    #[test]
+    fn pooled_blinding_matches_direct_verdict_and_fails_closed_on_refill_failure() {
+        let n = 3;
+        let sid = [0x4d; 32];
+        let mut rngs = tower_rngs(n, 0x72);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        let zero = [Tower128(9), Tower128(8), Tower128(1)];
+        let bad = [Tower128(9), Tower128(8), Tower128(3)];
+        for (residual, expect_zero) in [(&zero, true), (&bad, false)] {
+            let pooled =
+                blind_open_tower128(&sid, "pool_cmp", residual, Some(&mut mesh), &mut rngs)
+                    .unwrap();
+            let direct = blind_open_tower128(&sid, "pool_cmp", residual, None, &mut rngs).unwrap();
+            assert_eq!(pooled.ct_eq(Tower128::ZERO), expect_zero);
+            assert_eq!(direct.ct_eq(Tower128::ZERO), expect_zero);
+        }
+
+        // Wrong shapes are refused before any triple is spent.
+        let before = mesh.staged_blinding_serials();
+        assert!(
+            blind_open_tower128(&sid, "pool_shape", &zero[..2], Some(&mut mesh), &mut rngs)
+                .is_err()
+        );
+        assert_eq!(mesh.staged_blinding_serials(), before);
+
+        // Drain the pool, then make the automatic refill fail: the check is refused, the
+        // pool is poisoned, and neither a later check nor a later refill is served.
+        while mesh.staged_blinded_checks() > 0 {
+            blind_open_tower128(&sid, "pool_drain", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        }
+        mesh.fail_next_blinding_refill();
+        assert_eq!(
+            blind_open_tower128(&sid, "pool_fail", &zero, Some(&mut mesh), &mut rngs),
+            Err(BLIND_POOL_POISONED)
+        );
+        assert!(mesh.blinding_poisoned());
+        assert_eq!(
+            blind_open_tower128(&sid, "pool_fail", &zero, Some(&mut mesh), &mut rngs),
+            Err(BLIND_POOL_POISONED)
+        );
+        assert_eq!(
+            mesh.prestage_blinded_checks(1, &mut rngs),
+            Err(BLIND_POOL_POISONED)
+        );
+        assert_eq!(mesh.staged_blinded_checks(), 0);
+
+        // A failed explicit refill discards what was already staged.
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        mesh.prestage_blinded_checks(2, &mut rngs).unwrap();
+        mesh.fail_next_blinding_refill();
+        assert!(mesh.prestage_blinded_checks(1, &mut rngs).is_err());
+        assert!(mesh.blinding_poisoned() && mesh.staged_blinded_checks() == 0);
     }
 
     #[test]

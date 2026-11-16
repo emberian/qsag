@@ -1234,7 +1234,7 @@ pub struct FullShardRelationStats {
 }
 
 /// The relation "each of `children` recursive shard proofs verifies", precompiled with a
-/// deterministic Spark [`ShapeHologram`] for `< 15 ms` sublinear verification.
+/// deterministic Spark [`ShapeHologram`] so the verifier needs only its key.
 #[derive(Clone)]
 pub struct FullShardMergeRelation {
     params: FullShardParams,
@@ -1394,8 +1394,8 @@ fn populate(
     }
 }
 
-/// One parent proof for the shards named by its statement, verified in `< 15 ms` via Spark
-/// [`ShapeHologram`].
+/// One parent proof for the shards named by its statement, verified against the relation's
+/// [`ShapeVerifierKey`] without reading the relation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FullShardMergeProof {
     pub proof: HologramPublicProof,
@@ -1418,7 +1418,7 @@ impl FullShardMergeProof {
             let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, relation.verifier_key())?;
             Some(Self { proof })
         } else {
-            let alt = ShapeHologram::compile(&relation.shape, regime).ok()?;
+            let alt = ShapeHologram::compile_native(&relation.shape, regime).ok()?;
             let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, alt.verifier_key())?;
             Some(Self { proof })
         }
@@ -1452,14 +1452,14 @@ pub fn prove_full_shard_merge(
         protocol::prove_public_hologram(&relation.shape, &relation.hologram, z, PROOF_LABEL, seed)
             .map_err(map_err)?
     } else {
-        let alt = ShapeHologram::compile(&relation.shape, regime).map_err(map_err)?;
+        let alt = ShapeHologram::compile_native(&relation.shape, regime).map_err(map_err)?;
         protocol::prove_public_hologram(&relation.shape, &alt, z, PROOF_LABEL, seed)
             .map_err(map_err)?
     };
     Ok(FullShardMergeProof { proof })
 }
 
-/// Verify a parent proof against the shards' public statements alone (`< 15 ms` sublinear!).
+/// Verify a parent proof against the shards' public statements alone.
 pub fn verify_full_shard_merge(
     relation: &FullShardMergeRelation,
     shards: &[ShardPublic],
@@ -1478,7 +1478,7 @@ pub fn verify_full_shard_merge(
             &proof.proof,
         )
     } else {
-        let Ok(alt) = ShapeHologram::compile(&relation.shape, regime) else {
+        let Ok(alt) = ShapeHologram::compile_native(&relation.shape, regime) else {
             return false;
         };
         protocol::verify_public_hologram(alt.verifier_key(), &public, PROOF_LABEL, &proof.proof)

@@ -1,5 +1,5 @@
 // QSAG-NI coprocessor top: command-driven (RoCC-style valid/ready) macro for the QSAG verifier and
-// edge-prover kernels. One command at a time; `cmd_ready` is low while a command runs and
+// edge-prover kernels. Single-cycle commands accept consecutive valid beats; `cmd_ready` is low while a command runs and
 // `rsp_valid` pulses for one cycle when it completes (`rsp_data` carries read results).
 //
 //   op    name         operands                      effect
@@ -28,7 +28,8 @@
 `default_nettype none
 
 module qsag_ni_asic_top #(
-  parameter int AW = 14
+  parameter int AW = 14,
+  parameter bit FAST_PARTIAL = 1'b1
 ) (
   input  wire        clk,
   input  wire        rst,
@@ -68,7 +69,7 @@ module qsag_ni_asic_top #(
   logic [767:0] wr_data;
   wire  [767:0] st;
   wire          f_busy, f_done;
-  qsag_asic_ext4_p2_shared u_field (
+  qsag_asic_ext4_p2_shared #(.FAST_PARTIAL(FAST_PARTIAL)) u_field (
     .clk(clk), .rst(rst), .op_perm(op_perm), .op_canopy(op_canopy), .op_emuladd(op_emuladd),
     .op_eadd(op_eadd), .op_esub(op_esub), .op_glmul(op_glmul), .wr_en(wr_en), .wr_data(wr_data),
     .st_o(st), .busy(f_busy), .done(f_done));
@@ -85,9 +86,11 @@ module qsag_ni_asic_top #(
   // ------------------------------------------------------------ GF(2^128)
   wire [127:0] gf_a = {st[127:64], st[63:0]};
   wire [127:0] gf_b = {st[255:192], st[191:128]};
-  wire [127:0] gf_poly, gf_tower;
-  qsag_gf128_mul    u_gf    (.a(gf_a), .b(gf_b), .r(gf_poly));
-  qsag_tower128_mul u_tower (.a(gf_a), .b(gf_b), .r(gf_tower));
+  wire [127:0] gf_poly, gf_tower, gf_pa, gf_pb;
+  qsag_tower128_to_poly u_gfa (.x(gf_a), .y(gf_pa));
+  qsag_tower128_to_poly u_gfb (.x(gf_b), .y(gf_pb));
+  qsag_gf128_mul u_gf (.a(r_poly ? gf_a : gf_pa), .b(r_poly ? gf_b : gf_pb), .r(gf_poly));
+  qsag_poly_to_tower128 u_gfr (.x(gf_poly), .y(gf_tower));
 
   // ------------------------------------------------------------ SRAM macro
   logic          a_en, a_we, b_en, b_we;
@@ -215,12 +218,13 @@ module qsag_ni_asic_top #(
           r_idx  <= cmd_idx;
           r_base <= cmd_addr[AW-1:0];
           unique case (cmd_op)
-            8'h01, 8'h03, 8'h20, 8'h21, 8'h22, 8'h23, 8'h30, 8'h31, 8'h35, 8'h36: ts <= T_RSP;
             8'h13: begin r_cnt <= 2'd0; ts <= T_A0; end
             8'h02: begin rsp_data <= st[64*cmd_idx[3:0] +: 64]; rsp_valid <= 1'b1; end
             8'h32: begin rsp_data <= k_rdata; rsp_valid <= 1'b1; end
             8'h04: ts <= T_RDMEM;
-            8'h05: begin key[cmd_idx[1:0]] <= cmd_data; ts <= T_RSP; end
+            8'h05: begin key[cmd_idx[1:0]] <= cmd_data; rsp_valid <= 1'b1; end
+            8'h01, 8'h03, 8'h20, 8'h21, 8'h22, 8'h23,
+            8'h30, 8'h31, 8'h35, 8'h36: rsp_valid <= 1'b1;
             8'h06: ts <= T_LD0;
             8'h07: ts <= T_SV0;
             8'h10, 8'h11: ts <= T_WAITF;

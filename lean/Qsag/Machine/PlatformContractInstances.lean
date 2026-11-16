@@ -131,8 +131,11 @@ theorem simtEpochContract_uniformControlFlow (env : SpirvModuleEnv) (cfg : Workg
   rw [hij']
   have hAll : ∀ o ∈ waveEpochObs env cfg prog fuel mem (j / wave32Lanes),
       o.activeMask = List.replicate 32 true :=
-    fun o ho => simt_ct_zero_exec_divergence env prog fuel _ mem rfl o ho
-  have hLane : ∀ k : Nat, k % wave32Lanes < 32 := fun k => Nat.mod_lt k (by decide)
+    fun o ho => simt_ct_zero_exec_divergence env prog fuel _ mem
+      (by rw [initWorkgroupExecState.public_eq_1]) o ho
+  have hLane : ∀ k : Nat, k % wave32Lanes < 32 := fun k => by
+    rw [wave32Lanes_eq]
+    exact Nat.mod_lt k (by decide)
   rw [laneBlockTrace_all_active _ (hLane i) _ hAll, laneBlockTrace_all_active _ (hLane j) _ hAll]
 
 /-- For a kernel accepted by `checkProgSimtCt`, the block traces and write sets of the contract
@@ -146,7 +149,10 @@ theorem simtEpochContract_memory_independent {env : SpirvModuleEnv} {pol : SimtC
     (simtEpochContract env cfg prog fuel m₁).writeSet =
       (simtEpochContract env cfg prog fuel m₂).writeSet := by
   have hObs : ∀ w : Nat, waveEpochObs env cfg prog fuel m₁ w = waveEpochObs env cfg prog fuel m₂ w :=
-    fun w => simt_ct_noninterference hCt fuel (initWave_lowEq env pol cfg hScalar w) hMem
+    fun w => by
+      unfold waveEpochObs
+      rw [initWorkgroupExecState.public_eq_1, initWorkgroupExecState.public_eq_1]
+      exact simt_ct_noninterference hCt fuel (initWave_lowEq env pol cfg hScalar w) hMem
   constructor
   · funext i
     show laneBlockTrace _ (waveEpochObs env cfg prog fuel m₁ _) =
@@ -189,8 +195,9 @@ theorem simtEpochContract_wellFormed_of_ownerCheck {env : SpirvModuleEnv} {cfg :
         have hi32 := hi
         rw [cfg.totalThreads_eq, wave32Lanes_eq] at hi32
         omega
+      rw [wave32Lanes_eq]
       exact h32
-    have hl : i % wave32Lanes < wave32Lanes := Nat.mod_lt i (by decide)
+    have hl : i % wave32Lanes < wave32Lanes := Nat.mod_lt i (by rw [wave32Lanes_eq]; decide)
     have h1 := List.all_eq_true.mp hCheck (i / wave32Lanes) (List.mem_range.mpr hw)
     have h2 := List.all_eq_true.mp h1 o ho
     have h3 := List.all_eq_true.mp h2 (i % wave32Lanes) (List.mem_range.mpr hl)
@@ -237,15 +244,45 @@ def twoWaveLdsCell (cell : Nat) : Bool := cell % 524288 == 4
 /-- Cell codes of the output buffer words: the cells the second epoch stores. -/
 def twoWaveOutCell (cell : Nat) : Bool := cell % 524288 == 20
 
+theorem twoWaveCfg_totalThreads : twoWaveCfg.totalThreads = 64 := by
+  have h := twoWaveCfg.totalThreads_eq
+  rw [twoWaveCfg_numWaves, wave32Lanes_eq] at h
+  exact h
+
 theorem twoWavePhase0_ownerCheck (mem : GpuMemState) :
     simtEpochOwnerCheck twoWaveReductionEnv twoWaveCfg twoWavePhase0WriteLds 4 mem twoWaveLdsCell
       simtCellIndex = true := by
-  kernel_rfl
+  simp only [simtEpochOwnerCheck, waveEpochObs, twoWaveCfg_numWaves, wave32Lanes_eq,
+    show List.range 2 = [0, 1] from rfl, List.all_cons, List.all_nil, Bool.and_true,
+    twoWavePhase0_waveObs mem 0 (by decide), twoWavePhase0_waveObs mem 1 (by decide)]
+  rw [twoWavePhase0WriteLds.public_eq_1]
+  decide +kernel
 
 theorem twoWavePhase1_ownerCheck (mem : GpuMemState) :
     simtEpochOwnerCheck twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8 mem
       twoWaveOutCell simtCellIndex = true := by
-  kernel_rfl
+  simp only [simtEpochOwnerCheck, waveEpochObs, twoWaveCfg_numWaves, wave32Lanes_eq,
+    show List.range 2 = [0, 1] from rfl, List.all_cons, List.all_nil, Bool.and_true,
+    twoWavePhase1_waveObs mem 0 (by decide), twoWavePhase1_waveObs mem 1 (by decide)]
+  rw [twoWavePhase1CrossWaveRead.public_eq_1]
+  decide +kernel
+
+private theorem mem_writeSet_of_mem {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
+    {prog : List SpirvInst} {fuel : Nat} {mem : GpuMemState} {i : Nat}
+    {c : SpirvStorageClass × Nat × Nat}
+    (h : c ∈ laneStoreCells prog (i % 32) (waveEpochObs env cfg prog fuel mem (i / 32))) :
+    simtCellCode c ∈ (simtEpochContract env cfg prog fuel mem).writeSet i := by
+  show simtCellCode c ∈ (laneStoreCells prog (i % wave32Lanes)
+    (waveEpochObs env cfg prog fuel mem (i / wave32Lanes))).map simtCellCode
+  rw [wave32Lanes_eq]
+  exact List.mem_map_of_mem h
+
+private theorem twoWave_lt_workgroupSize {prog : List SpirvInst} {fuel : Nat} {mem : GpuMemState}
+    {i : Nat} (hi : i < 64) :
+    i < (simtEpochContract twoWaveReductionEnv twoWaveCfg prog fuel mem).workgroupSize := by
+  show i < twoWaveCfg.totalThreads
+  rw [twoWaveCfg_totalThreads]
+  exact hi
 
 /-- Both barrier epochs of the reduction kernel satisfy the SIMT contract on every memory:
     invocation `tid` stores `lds[tid]` in the first epoch and `outBuf[tid]` in the second; the
@@ -274,9 +311,11 @@ theorem twoWaveReduction_write_race_free (mem : GpuMemState) (i j : Nat) (hi : i
           (waveEpochObs twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8 mem (j / 32)) →
       i = j) :=
   ⟨fun hci hcj => (twoWaveReduction_epochs_wellFormed mem).1.write_race_free i j (simtCellCode c)
-      hi hj (List.mem_map_of_mem hci) (List.mem_map_of_mem hcj),
+      (twoWave_lt_workgroupSize hi) (twoWave_lt_workgroupSize hj) (mem_writeSet_of_mem hci)
+      (mem_writeSet_of_mem hcj),
    fun hci hcj => (twoWaveReduction_epochs_wellFormed mem).2.write_race_free i j (simtCellCode c)
-      hi hj (List.mem_map_of_mem hci) (List.mem_map_of_mem hcj)⟩
+      (twoWave_lt_workgroupSize hi) (twoWave_lt_workgroupSize hj) (mem_writeSet_of_mem hci)
+      (mem_writeSet_of_mem hcj)⟩
 
 /-- Secret-data policy of the first reduction epoch: the loaded word `%11`, the input buffer and
     the LDS are secret; pointers and indices are public. -/
@@ -293,23 +332,50 @@ theorem twoWavePhase0_contract_memory_independent (m₁ m₂ : GpuMemState)
       (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase0WriteLds 4 m₂).blockTrace ∧
     (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase0WriteLds 4 m₁).writeSet =
       (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase0WriteLds 4 m₂).writeSet := by
-  have hScalar : ScalarConstEnv twoWaveReductionEnv := by
-    intro id sc b off w h
-    simp only [twoWaveReductionEnv] at h
-    split at h <;> cases h
-  exact simtEpochContract_memory_independent (pol := twoWaveSecretDataPolicy) hScalar (by decide)
-    twoWaveCfg 4 ⟨hPush, (fun h => SecLabel.noConfusion h), (fun _ h => SecLabel.noConfusion h)⟩
+  exact simtEpochContract_memory_independent (pol := twoWaveSecretDataPolicy)
+    twoWaveReductionEnv_scalarConst twoWavePhase0_simtCt_secretData twoWaveCfg 4
+    (by rw [MemLowEq.public_eq_1]
+        exact ⟨hPush, fun h => SecLabel.noConfusion h, fun _ h => SecLabel.noConfusion h⟩)
 
-/-- The second reduction epoch is rejected by the `SIMT-CT` checker under every policy: its
-    access chain `%19 = &outBuf[tid]` is typed with pointer type `%7`, which
-    `twoWaveReductionEnv.ptrInfo` binds to storage buffer `0` while `%4` and `%19` are bound to
-    storage buffer `1`. `simt_ct_noninterference` therefore does not apply to it. -/
-theorem twoWavePhase1_rejected_by_simtCt (pol : SimtCtPolicy) :
-    checkProgSimtCt twoWaveReductionEnv pol twoWavePhase1CrossWaveRead = false := by
-  have h : checkInstSimtCtStrict twoWaveReductionEnv pol (.opAccessChain 7 19 4 [1]) = false := by
-    simp [checkInstSimtCtStrict, twoWaveReductionEnv]
-  unfold checkProgSimtCt twoWavePhase1CrossWaveRead
-  simp only [List.all_cons, h, Bool.and_false, Bool.false_and]
+/-- Secret-data policy of the second reduction epoch: the loaded words `%14` and `%17`, their sum
+    `%18`, the storage buffers and the LDS are secret; pointers and indices are public. -/
+def twoWavePhase1SecretDataPolicy : SimtCtPolicy where
+  ssboSec _ := .sec
+  ldsSec := .sec
+  regSec id := if id == 14 || id == 17 || id == 18 then .sec else .pub
+
+/-- The second reduction epoch is accepted by the `SIMT-CT` checker under the secret-data policy:
+    its access chain `%19 = &outBuf[tid]` is typed with pointer type `%9`, which
+    `twoWaveReductionEnv.ptrInfo` binds to storage buffer `1` like `%4` and `%19`. -/
+theorem twoWavePhase1_accepted_by_simtCt :
+    checkProgSimtCt twoWaveReductionEnv twoWavePhase1SecretDataPolicy
+      twoWavePhase1CrossWaveRead = true :=
+  twoWavePhase1_simtCt_secretData
+
+/-- The contract of the second reduction epoch is the same for all LDS and storage-buffer
+    contents. -/
+theorem twoWavePhase1_contract_memory_independent (m₁ m₂ : GpuMemState)
+    (hPush : m₁.pushConsts = m₂.pushConsts) :
+    (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8 m₁).blockTrace =
+      (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8
+        m₂).blockTrace ∧
+    (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8 m₁).writeSet =
+      (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWavePhase1CrossWaveRead 8
+        m₂).writeSet := by
+  exact simtEpochContract_memory_independent (pol := twoWavePhase1SecretDataPolicy)
+    twoWaveReductionEnv_scalarConst twoWavePhase1_accepted_by_simtCt twoWaveCfg 8
+    (by rw [MemLowEq.public_eq_1]
+        exact ⟨hPush, fun h => SecLabel.noConfusion h, fun _ h => SecLabel.noConfusion h⟩)
+
+/-- A kernel whose output access chain `%19 = &outBuf[tid]` is typed with the input-buffer
+    pointer type `%7` is rejected by the `SIMT-CT` checker under every policy:
+    `twoWaveReductionEnv.ptrInfo` binds `%7` to storage buffer `0` while `%4` and `%19` are bound
+    to storage buffer `1`. `simt_ct_noninterference` does not apply to such a kernel. -/
+theorem twoWave_mistyped_output_rejected_by_simtCt (pol : SimtCtPolicy)
+    (pre post : List SpirvInst) :
+    checkProgSimtCt twoWaveReductionEnv pol (pre ++ .opAccessChain 7 19 4 [1] :: post) = false := by
+  rw [checkProgSimtCt.public_eq_1, List.all_append, List.all_cons,
+    twoWaveReductionEnv_mistyped_output_accessChain_rejected, Bool.false_and, Bool.and_false]
 
 theorem twoWaveNoBarrier_cross_wave_cell (mem : GpuMemState) :
     List.elem 16777220
@@ -318,7 +384,15 @@ theorem twoWaveNoBarrier_cross_wave_cell (mem : GpuMemState) :
       List.elem 16777220
         ((simtEpochContract twoWaveReductionEnv twoWaveCfg twoWaveNoBarrierEpoch 12 mem).readSet
           0) = true := by
-  constructor <;> kernel_rfl
+  constructor
+  · simp only [simtEpochContract, waveEpochObs, twoWaveNoBarrierEpoch, wave32Lanes_eq,
+      Nat.reduceDiv, twoWaveNoBarrier_waveObs mem 1 (by decide)]
+    rw [twoWavePhase0WriteLds.public_eq_1, twoWavePhase1CrossWaveRead.public_eq_1]
+    decide +kernel
+  · simp only [simtEpochContract, waveEpochObs, twoWaveNoBarrierEpoch, wave32Lanes_eq,
+      Nat.reduceDiv, twoWaveNoBarrier_waveObs mem 0 (by decide)]
+    rw [twoWavePhase0WriteLds.public_eq_1, twoWavePhase1CrossWaveRead.public_eq_1]
+    decide +kernel
 
 /-- **The barrier-free concatenation of the two reduction epochs is not well formed**, on any
     memory: invocation `32` stores `lds[32]` and invocation `0` loads it in the same epoch. The
@@ -328,9 +402,9 @@ theorem twoWaveNoBarrier_not_wellFormed (mem : GpuMemState) :
       (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWaveNoBarrierEpoch 12 mem) := by
   intro w
   have hi : 32 < (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWaveNoBarrierEpoch 12
-      mem).workgroupSize := (by decide : 32 < 64)
+      mem).workgroupSize := twoWave_lt_workgroupSize (by decide)
   have hj : 0 < (simtEpochContract twoWaveReductionEnv twoWaveCfg twoWaveNoBarrierEpoch 12
-      mem).workgroupSize := (by decide : 0 < 64)
+      mem).workgroupSize := twoWave_lt_workgroupSize (by decide)
   have h := w.read_write_race_free 32 0 16777220 hi hj
     (List.mem_of_elem_eq_true (twoWaveNoBarrier_cross_wave_cell mem).1)
     (List.mem_of_elem_eq_true (twoWaveNoBarrier_cross_wave_cell mem).2)
@@ -344,12 +418,7 @@ theorem twoWaveNoBarrier_schedule_dependent :
             twoWaveNoBarrierEpoch s₁ (initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem)) =
          peekSsboDword 1 0 (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg
             twoWaveNoBarrierEpoch s₂ (initWorkgroupExecState twoWaveReductionEnv twoWaveCfg mem))) :=
-  ⟨{ lds := fun _ => 0
-     ssbo := fun b idx => if b == 0 then (if idx < 32 then 10 else 42) else 0
-     pushConsts := fun _ => 0 },
-   List.replicate 12 0 ++ List.replicate 12 1,
-   List.replicate 4 0 ++ List.replicate 4 1 ++ List.replicate 8 0 ++ List.replicate 8 1,
-   by decide⟩
+  tooth_missing_barrier_causes_cross_wave_lds_race
 
 /-! ## §2. Access protocols -/
 
@@ -387,6 +456,7 @@ theorem faial_disjointStorageBindings {cfg : WorkgroupConfig} {proto : EpochAcce
     (blockTrace : Nat → List Nat) :
     (protocolSimtContract cfg proto ldsLen bindings ssboLen blockTrace).DisjointStorageBindings := by
   intro i j hi hj hne cell hci
+  rw [FaialMapRaceFree.public_eq_1] at hDrf
   have hF := hDrf i j hi hj hne
   have hKey : ∀ (wr rd : Nat → Nat → Bool) (wr2 rd2 : Nat → Nat → Nat → Bool),
       (∀ a : Nat, wr i a = true → wr j a = false ∧ rd j a = false) →
@@ -467,6 +537,8 @@ private theorem productionNttWriter_checked :
     ∀ stage : Fin 9, ∀ lid : Fin 256,
       (productionNttStageWrites stage lid).all
         (fun cell => productionNttWriter stage cell == lid.val) = true := by
+  simp only [productionNttStageWrites, productionNttWriter, productionLdsIndex.public_eq_1,
+    productionButterflyIndex.public_eq_1]
   decide +kernel
 
 /-- In each of the nine fused stages the address formulas assign no LDS cell to two of the
@@ -475,8 +547,12 @@ private theorem productionNttWriter_checked :
 theorem nttStageAddressModel_disjointStorageBindings (stage : Fin 9) :
     (nttStageAddressModel stage).DisjointStorageBindings := by
   intro i j hi hj hne cell hci
-  have hi' : i < 256 := hi
-  have hj' : j < 256 := hj
+  have hT : productionNttCfg.totalThreads = 256 := by
+    have h := productionNttCfg.totalThreads_eq
+    rw [wave32Lanes_eq] at h
+    exact h
+  have hi' : i < 256 := hT ▸ hi
+  have hj' : j < 256 := hT ▸ hj
   have h1 := Nat.eq_of_beq_eq_true
     (List.all_eq_true.mp (productionNttWriter_checked stage ⟨i, hi'⟩) cell hci)
   have hNot : cell ∉ productionNttStageWrites stage j := fun hcj =>
@@ -573,31 +649,25 @@ def x86DitContract : Spec.DitHardwareContract X86CtEntry X86State (List LeakageE
     exact (x86_ct_checker_sound e.memPol e.secHeap e.hPol e.prog e.τ τOut 0 hOut _ _
       (e.entryState_lowEq d₁ d₂)).1
 
-/-! ### Kernel entries of `qsag-asm` -/
+/-! ### A checker-accepted entry
 
-def goldilocksMulArmEntry (pub : ArmState) : ArmCtEntry :=
-  { prog := goldilocksMulCtArmProg, τ := glAllSecretArmTaint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
+`Machine.ConstantTimeIsa` models no `qsag-asm` kernel in its hand-written AST (the kernels are
+proved on their decoded bytes in `Machine.McRefine`, `Machine.ElfFunctionalEquiv` and
+`Machine.SydTv`). The entry below is the fragment `umulh x2, x0, x1; ret`, whose timing depends
+on `DIT`. -/
 
-def ctEq32ArmEntry (pub : ArmState) : ArmCtEntry :=
-  { prog := ctEq32ArmProg, τ := aapcsPtrArgs3Taint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
+def umulhArmEntry (pub : ArmState) : ArmCtEntry :=
+  { prog := [.instr (.umulh64 .x2 .x0 .x1), .ret], τ := glAllSecretArmTaint,
+    memPol := fun _ => .sec, secHeap := true, hPol := fun _ _ => rfl,
+    hCheck := umulhArmProg_checked, pub := pub }
 
-def keccakSha3NeonEntry (pub : ArmState) : ArmCtEntry :=
-  { prog := keccakSha3NeonProg, τ := aapcsPtrArgs3Taint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
-
-def goldilocksMulX86Entry (pub : X86State) : X86CtEntry :=
-  { prog := goldilocksMulCtX86Prog, τ := glAllSecretX86Taint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
-
-def ctEq32X86Entry (pub : X86State) : X86CtEntry :=
-  { prog := ctEq32X86Prog, τ := sysvPtrArgs4Taint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
-
-def keccakChiMpcAvx2Entry (pub : X86State) : X86CtEntry :=
-  { prog := keccakChiMpcAvx2Prog, τ := sysvPtrArgs4Taint, memPol := fun _ => .sec,
-    secHeap := true, hPol := fun _ _ => rfl, hCheck := rfl, pub := pub }
+/-- State with operands `a`, `b` in `x0`, `x1`. -/
+def umulhArmState (a b : BitVec 64) : ArmState :=
+  { gpr := fun r => if r == .x0 then a else if r == .x1 then b else 0#64
+    neon := fun _ => Vec128.zero
+    flags := { z := false, c := false }
+    mem := fun _ => 0#64
+    ditEnabled := false }
 
 /-- Any sequence of `aarch64` kernel invocations with the same entries leaks the same traces,
     whatever the secret-labelled data. -/
@@ -622,17 +692,23 @@ theorem inhabited_arm_kernel_sequence :
       ¬ (tr₁.map (fun e => e.2.gpr .x0) = tr₂.map (fun e => e.2.gpr .x0)) ∧
       tr₁.map (fun e => armLeakage Spec.ExecMode.constantTimeSafe e.1 e.2) =
         tr₂.map (fun e => armLeakage Spec.ExecMode.constantTimeSafe e.1 e.2) :=
-  ⟨[(goldilocksMulArmEntry (initGlArmState 0#64 0#64), initGlArmState 3#64 5#64)],
-   [(goldilocksMulArmEntry (initGlArmState 0#64 0#64), initGlArmState 7#64 5#64)], rfl, by decide,
+  ⟨[(umulhArmEntry (umulhArmState 0#64 0#64), umulhArmState 3#64 5#64)],
+   [(umulhArmEntry (umulhArmState 0#64 0#64), umulhArmState 7#64 5#64)], rfl, by decide,
    arm_kernel_sequence_leakage_data_independent _ _ rfl⟩
 
-/-- `#tooth`: the mode bit is needed. With `ditEnabled = false` the Goldilocks `aarch64` kernel
-    leaks its `UMULH` operands. -/
-theorem tooth_arm_goldilocks_leaks_without_dit_mode :
+/-- `#tooth`: the mode bit is needed. With `ditEnabled = false` the `umulh` entry leaks its
+    operand. -/
+theorem tooth_arm_umulh_leaks_without_dit_mode :
     ¬ (armLeakage { Spec.ExecMode.constantTimeSafe with ditEnabled := false }
-          (goldilocksMulArmEntry (initGlArmState 0#64 0#64)) (initGlArmState 3#64 5#64) =
+          (umulhArmEntry (umulhArmState 0#64 0#64)) (umulhArmState 3#64 5#64) =
        armLeakage { Spec.ExecMode.constantTimeSafe with ditEnabled := false }
-          (goldilocksMulArmEntry (initGlArmState 0#64 0#64)) (initGlArmState 7#64 5#64)) := by
+          (umulhArmEntry (umulhArmState 0#64 0#64)) (umulhArmState 7#64 5#64)) := by
+  refine umulhArmProg_leaks_without_dit _ _ rfl rfl ?_
+  show ¬ ((if glAllSecretArmTaint.gpr .x0 = .pub then (umulhArmState 0#64 0#64).gpr .x0
+      else (umulhArmState 3#64 5#64).gpr .x0) =
+    (if glAllSecretArmTaint.gpr .x0 = .pub then (umulhArmState 0#64 0#64).gpr .x0
+      else (umulhArmState 7#64 5#64).gpr .x0))
+  rw [glAllSecretArmTaint_gpr_x0]
   decide
 
 /-- `#tooth`: the contract needs checker-accepted entries. Over all `x86_64` programs and all
@@ -646,7 +722,7 @@ theorem tooth_x86_unrestricted_programs_have_no_dit_contract :
   have h := c.dataIndependent [.instr (.div64 .rdi), .ret] (defaultX86State 3#64)
     (defaultX86State 17#64)
   rw [hObs] at h
-  exact absurd h (by decide)
+  exact div64X86Prog_leaks _ _ h
 
 end Qsag.ConstantTimeIsa
 end
@@ -658,7 +734,9 @@ end
 #verify_constructive Qsag.twoWaveReduction_write_race_free
 #verify_constructive Qsag.twoWavePhase0_contract_memory_independent
 #verify_constructive Qsag.twoWaveNoBarrier_not_wellFormed
-#verify_constructive Qsag.twoWavePhase1_rejected_by_simtCt
+#verify_constructive Qsag.twoWavePhase1_accepted_by_simtCt
+#verify_constructive Qsag.twoWavePhase1_contract_memory_independent
+#verify_constructive Qsag.twoWave_mistyped_output_rejected_by_simtCt
 #verify_constructive Qsag.twoWaveNoBarrier_schedule_dependent
 #verify_constructive Qsag.faial_disjointStorageBindings
 #verify_constructive Qsag.nttStageAddressModel_disjointStorageBindings
@@ -666,8 +744,8 @@ end
 #verify_constructive Qsag.ConstantTimeIsa.X86CtEntry.entryState_lowEq
 #verify_constructive Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent
 #verify_constructive Qsag.ConstantTimeIsa.x86_kernel_sequence_leakage_data_independent
-#verify_constructive Qsag.ConstantTimeIsa.tooth_arm_goldilocks_leaks_without_dit_mode
+#verify_constructive Qsag.ConstantTimeIsa.tooth_arm_umulh_leaks_without_dit_mode
 #verify_constructive Qsag.ConstantTimeIsa.tooth_x86_unrestricted_programs_have_no_dit_contract
 #tooth_pair Qsag.twoWaveReduction_epochs_wellFormed vs Qsag.twoWaveNoBarrier_not_wellFormed
-#tooth_pair Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent vs Qsag.ConstantTimeIsa.tooth_arm_goldilocks_leaks_without_dit_mode
+#tooth_pair Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent vs Qsag.ConstantTimeIsa.tooth_arm_umulh_leaks_without_dit_mode
 #verify_inhabited Qsag.ConstantTimeIsa.arm_kernel_sequence_leakage_data_independent Qsag.ConstantTimeIsa.inhabited_arm_kernel_sequence

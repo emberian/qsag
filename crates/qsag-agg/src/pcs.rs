@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 use crate::field::GoldilocksOps as _;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks_with_secret, eq_poly_ext4, eval_univariate_base_at_ext4_pair,
+    encode_rs_coset_goldilocks_owned_cpu, encode_rs_coset_goldilocks_with_secret, eq_poly_ext4, eval_univariate_base_at_ext4_pair,
     eval_univariate_ext4, eval_univariate_ext4_at_base, fold_first_var_in_place_ext4,
     pow2_point_ext4,
 };
@@ -2398,6 +2398,8 @@ pub struct HemWhirProverState {
     pub(crate) secret: bool,
     pub salt_seed: [u8; 32],
     pub tree_0: MerkleCanopyTree,
+    /// GPU commits retain only a top-node stub; CPU commits retain opening-capable nodes.
+    round0_tree_on_cpu: bool,
     #[cfg(feature = "vulkan")]
     pub(crate) gpu_session: Option<crate::acceleration::GpuWhirSession>,
 }
@@ -3604,6 +3606,7 @@ fn whir_commit_batch_owned_with_schedule_inner(
                         secret,
                         salt_seed: *salt_seed,
                         tree_0,
+                        round0_tree_on_cpu: false,
                         gpu_session: Some(session),
                     },
                 );
@@ -3636,6 +3639,7 @@ fn whir_commit_batch_owned_with_schedule_inner(
             secret,
             salt_seed: *salt_seed,
             tree_0,
+            round0_tree_on_cpu: true,
             #[cfg(feature = "vulkan")]
             gpu_session: None,
         },
@@ -3650,19 +3654,41 @@ fn build_cpu_round0(
     group_arity_0: usize,
     secret: bool,
 ) -> (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>, MerkleCanopyTree) {
+    let (monomial_coeffs_0, codewords_0) =
+        build_cpu_round0_codewords(polys, blowup, secret, true);
+    let tree_0 = build_cpu_round0_tree(&codewords_0, salt_seed, regime, group_arity_0);
+    (monomial_coeffs_0, codewords_0, tree_0)
+}
+
+fn build_cpu_round0_codewords(
+    polys: &[Vec<Goldilocks>],
+    blowup: usize,
+    secret: bool,
+    cache_coefficients: bool,
+) -> (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>) {
     let encode = |evals: &Vec<Goldilocks>| {
+        if evals.len() >= (1 << 22) {
+            let domain_len = evals.len().checked_mul(blowup).expect("RS domain size overflow");
+            let mut coeffs = Vec::with_capacity(domain_len);
+            coeffs.extend_from_slice(evals);
+            hypercube_to_monomial_in_place(&mut coeffs, 1 << 14);
+            return (Vec::new(), encode_rs_coset_goldilocks_owned_cpu(coeffs, blowup));
+        }
         let mut coeffs = hypercube_to_monomial_coeffs(evals);
         let codeword = encode_rs_coset_goldilocks_with_secret(&coeffs, blowup, secret);
-        if secret {
-            qsag_asm::volatile_fill(&mut coeffs, Goldilocks::ZERO);
+        if !cache_coefficients || secret {
+            if secret {
+                qsag_asm::volatile_fill(&mut coeffs, Goldilocks::ZERO);
+            }
             (Vec::new(), codeword)
         } else {
             (coeffs, codeword)
         }
     };
+    // Large polynomials use one owned domain buffer each and encode sequentially.
     #[cfg(feature = "std")]
     let pairs: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> =
-        if polys.len() > 1 && crate::parallel_workers() > 1 {
+        if polys.len() > 1 && polys[0].len() < (1 << 22) && crate::parallel_workers() > 1 {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = polys
                     .iter()
@@ -3675,27 +3701,36 @@ fn build_cpu_round0(
         };
     #[cfg(not(feature = "std"))]
     let pairs: Vec<(Vec<Goldilocks>, Vec<Goldilocks>)> = polys.iter().map(encode).collect();
-    let mut monomial_coeffs_0 = if secret {
+    let mut monomial_coeffs_0 = if secret || !cache_coefficients || polys[0].len() >= (1 << 22) {
         Vec::new()
     } else {
         Vec::with_capacity(pairs.len())
     };
     let mut codewords_0 = Vec::with_capacity(pairs.len());
     for (coeffs, cw) in pairs {
-        if !secret {
+        if !coeffs.is_empty() {
             monomial_coeffs_0.push(coeffs);
         }
         codewords_0.push(cw);
     }
+    (monomial_coeffs_0, codewords_0)
+}
+
+fn build_cpu_round0_tree(
+    codewords_0: &[Vec<Goldilocks>],
+    salt_seed: &[u8; 32],
+    regime: WhirSecurityRegime,
+    group_arity_0: usize,
+) -> MerkleCanopyTree {
     let domain_len = codewords_0[0].len();
     let num_groups = domain_len / group_arity_0;
     let turbo = regime.uses_turboshake_canopy();
 
     let _phase = crate::profile::span("round0_merkle_tree");
-    let tree_0 = if regime.uses_poseidon2_canopy() {
+    if regime.uses_poseidon2_canopy() {
         MerkleCanopyTree::build_poseidon2(num_groups, 0, |g| {
             poseidon2_round0_leaf_from_codewords(
-                &codewords_0,
+                codewords_0,
                 salt_seed,
                 g,
                 num_groups,
@@ -3706,7 +3741,7 @@ fn build_cpu_round0(
         MerkleCanopyTree::build_from_fn_x8_mode(turbo, num_groups, |base_g| {
             round0_leaf_hash_x8_mode(
                 turbo,
-                &codewords_0,
+                codewords_0,
                 salt_seed,
                 base_g,
                 num_groups,
@@ -3717,15 +3752,14 @@ fn build_cpu_round0(
         MerkleCanopyTree::build_from_fn_x4_mode(turbo, num_groups, |base_g| {
             round0_leaf_hash_x4_mode(
                 turbo,
-                &codewords_0,
+                codewords_0,
                 salt_seed,
                 base_g,
                 num_groups,
                 group_arity_0,
             )
         })
-    };
-    (monomial_coeffs_0, codewords_0, tree_0)
+    }
 }
 
 /// Produce a `[P0-01]`-hardened `Hem` WHIR opening proof over `GoldilocksExt4` for one evaluation
@@ -4011,7 +4045,11 @@ where
 type ActiveStageOracle = (Vec<GoldilocksExt4>, MerkleCanopyTree, [GoldilocksExt4; 2]);
 
 /// Core multi-stage `Hem` WHIR rate-escalated opening over `GoldilocksExt4`.
-type CpuRound0Artifacts = (Vec<Vec<Goldilocks>>, Vec<Vec<Goldilocks>>, MerkleCanopyTree);
+/// Table length from which a public opening folds its coefficient and kernel tables in
+/// their own storage instead of through a second buffer of the same size.
+const COMPACT_FOLD_MIN_LEN: usize = 1 << 22;
+
+type CpuRound0Artifacts = (Vec<Vec<Goldilocks>>, Option<MerkleCanopyTree>);
 
 fn whir_open_core(
     state: &HemWhirProverState,
@@ -4026,20 +4064,27 @@ fn whir_open_core(
     // `2^step_vars`-fold, so the codewords never coexist with the full-size tables.
     let mut lazy_cpu_r0: Option<CpuRound0Artifacts> = None;
     let rebuild_round0 = || {
-        build_cpu_round0(
+        let (_, codewords) = build_cpu_round0_codewords(
             &state.hypercube_evals,
-            &state.salt_seed,
-            state.schedule.regime,
             state.schedule.stages[0].blowup,
-            state.group_arity_0,
             state.secret,
-        )
+            false,
+        );
+        let tree = (!state.round0_tree_on_cpu).then(|| {
+            build_cpu_round0_tree(
+                &codewords,
+                &state.salt_seed,
+                state.schedule.regime,
+                state.group_arity_0,
+            )
+        });
+        (codewords, tree)
     };
     let release_round0 = |lazy: &mut Option<CpuRound0Artifacts>| {
-        if let Some((mut monos, mut cws, _)) = lazy.take()
+        if let Some((mut cws, _)) = lazy.take()
             && state.secret
         {
-            for secret_vec in monos.iter_mut().chain(cws.iter_mut()) {
+            for secret_vec in &mut cws {
                 qsag_asm::volatile_fill(secret_vec, Goldilocks::ZERO);
             }
         }
@@ -4055,8 +4100,9 @@ fn whir_open_core(
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
-    let pre_monos = precomputed_monomial_polys.or((state.monomial_coeffs_0.len() == num_polys)
-        .then_some(state.monomial_coeffs_0.as_slice()));
+    let pre_monos = precomputed_monomial_polys
+        .or((state.monomial_coeffs_0.len() == num_polys)
+            .then_some(state.monomial_coeffs_0.as_slice()));
 
     let direct_unit_base =
         !state.secret && single && weights[0] == [GoldilocksExt4::ONE, GoldilocksExt4::ZERO];
@@ -4163,6 +4209,7 @@ fn whir_open_core(
 
         let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
         for (fold_in_stage, slot) in stage_chals.iter_mut().take(st.step_vars).enumerate() {
+            let compact = !state.secret && cur_coeffs.len() >= COMPACT_FOLD_MIN_LEN;
             let (wire, fold_pow_nonce, chals) = if stage_idx == 0
                 && fold_in_stage == 0
                 && let Some(c0) = unit_c0
@@ -4183,6 +4230,7 @@ fn whir_open_core(
                     &mut k_scratch,
                     &mut cur_sum_claim,
                     transcript,
+                    compact,
                 )
             };
             fold_sumcheck_polys.push(wire);
@@ -4231,7 +4279,7 @@ fn whir_open_core(
                 }
                 let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
                     match &lazy_cpu_r0 {
-                        Some((_, codewords, tree)) => (codewords.as_slice(), tree),
+                        Some((codewords, tree)) => (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0)),
                         None => (state.codewords_0.as_slice(), &state.tree_0),
                     };
                 let num_groups_0 = state.num_groups_0();
@@ -4384,7 +4432,7 @@ fn whir_open_core(
                 }
                 let (codewords_0, tree_0): (&[Vec<Goldilocks>], &MerkleCanopyTree) =
                     match &lazy_cpu_r0 {
-                        Some((_, codewords, tree)) => (codewords.as_slice(), tree),
+                        Some((codewords, tree)) => (codewords.as_slice(), tree.as_ref().unwrap_or(&state.tree_0)),
                         None => (state.codewords_0.as_slice(), &state.tree_0),
                     };
                 let num_groups_0 = state.num_groups_0();

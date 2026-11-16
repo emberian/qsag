@@ -11251,3 +11251,16 @@ theorem stepOp256RowResiduals_def (profile : AggSigProfile) (slot : StepOpSlot) 
 
 end Qsag
 end
+
+public section
+namespace Qsag
+/-- Computational projection without exposing the subtype's private proof helper. -/
+theorem canopyNodeHashOf_val (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32) (i : Nat) (l r : CanopyDigest32) :
+    (canopyNodeHashOf H hOut i l r).val = H (canopyNodeFrame i l r) := by rfl
+theorem canopyRootHashOf_val (H : ByteArray → ByteArray)
+    (hOut : ∀ x, (H x).data.toList.length = 32) (i : Nat) (top : CanopyDigest32) :
+    (canopyRootHashOf H hOut i top).val = H (canopyRootFrame i top) := by rfl
+#export_eqns canopyNodeFrame canopyRootFrame
+end Qsag
+end

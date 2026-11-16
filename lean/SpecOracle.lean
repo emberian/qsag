@@ -310,22 +310,22 @@ def eval (args : List String) : Except String String := do
   | ["poseidon16", words] =>
     let ns ← nums words
     if ns.length != 16 then throw "state width"
-    let st := Qsag.SpecOracle.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
-    return csv ((Qsag.SpecOracle.Poseidon2State16.toList (Qsag.SpecOracle.poseidon2Perm16 st)).map (·.val))
+    let st := Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
+    return csv ((Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.toList (Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16 st)).map (·.val))
   | ["poseidon16inv", words] =>
     let ns ← nums words
     if ns.length != 16 then throw "state width"
-    let st := Qsag.SpecOracle.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
-    return csv ((Qsag.SpecOracle.Poseidon2State16.toList (Qsag.SpecOracle.poseidon2Perm16Inv st)).map (·.val))
+    let st := Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
+    return csv ((Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.toList (Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16Inv st)).map (·.val))
   | ["poseidon16me", op, words] =>
     let ns ← nums words
     if ns.length != 16 then throw "state width"
-    let st := Qsag.SpecOracle.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
+    let st := Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.ofList (ns.map Goldilocks.ofNat)
     let out ← match op with
       | "fwd" => pure (applyME16 st)
       | "inv" => pure (applyME16Inv st)
       | _ => throw "unknown me16 op"
-    return csv ((Qsag.SpecOracle.Poseidon2State16.toList out).map (·.val))
+    return csv ((Qsag.SpecOracle.LegacyPoseidon16.Poseidon2State16.toList out).map (·.val))
   | _ => throw "unknown operation or arity"
 
 end SpecOracle

@@ -2763,18 +2763,22 @@ impl PersonalMspInput {
         })
     }
 
-    /// Consume one input only after the personal BeltLatch authorizes the exact
-    /// record. The returned four additive field lanes feed Cut-the-Hash inputs.
-    pub fn release<W: DurableWal>(
+    pub fn party(&self) -> u16 {
+        self.party
+    }
+
+    pub fn program(&self) -> &crate::access::MonotoneSpanProgram {
+        &self.program
+    }
+
+    /// Collapse under an already issued permit for this party. The weights are those of
+    /// the permit's signer set, so every releasing party must hold a permit for the SAME
+    /// set: lanes collapsed for different sets do not sum to the secret.
+    pub fn release_with_permit(
         self,
-        latch: &mut crate::access::PersonalBeltLatch<W>,
-        record: &qsag_core::belt_latch::BeltLatchRecord,
-        certificate: &crate::access::PersonalLatchCertificate,
+        permit: &crate::access::PersonalReleasePermit,
     ) -> Result<SecretBuffer<[qsag_core::field::goldilocks::Goldilocks; 4]>, PersonalMspInputError>
     {
-        let permit = latch
-            .authorize(record, certificate)
-            .map_err(PersonalMspInputError::Policy)?;
         if permit.party() != self.party || !permit.signers().contains(&self.party) {
             return Err(PersonalMspInputError::Access(
                 crate::access::AccessError::Unauthorized,
@@ -2789,5 +2793,48 @@ impl PersonalMspInput {
         self.program
             .collapse_to_additive_share(self.party, &weights, &self.rows)
             .map_err(PersonalMspInputError::Access)
+    }
+
+    /// [`Self::release`] for a ceremony whose signer set was fixed in advance. The
+    /// certificate must be signed by exactly `expected_signers`; a certificate that is
+    /// valid for the policy but names any other set is refused before anything is
+    /// collapsed, because its weights would belong to a different reconstruction.
+    pub fn release_for_signers<W: DurableWal>(
+        self,
+        latch: &mut crate::access::PersonalBeltLatch<W>,
+        record: &qsag_core::belt_latch::BeltLatchRecord,
+        certificate: &crate::access::PersonalLatchCertificate,
+        expected_signers: &crate::access::PartySet,
+    ) -> Result<SecretBuffer<[qsag_core::field::goldilocks::Goldilocks; 4]>, PersonalMspInputError>
+    {
+        let permit = latch
+            .authorize(record, certificate)
+            .map_err(PersonalMspInputError::Policy)?;
+        if permit.signers() != expected_signers {
+            return Err(PersonalMspInputError::Access(
+                crate::access::AccessError::Unauthorized,
+            ));
+        }
+        self.release_with_permit(&permit)
+    }
+
+    /// Consume one input only after the personal BeltLatch authorizes the exact
+    /// record. The returned four additive field lanes feed Cut-the-Hash inputs.
+    ///
+    /// The collapse uses the signer set of THIS party's certificate. Certificates are
+    /// receiver-specific, so two parties can hold valid certificates for different
+    /// sets; their lanes then do not sum to the secret. Use
+    /// [`Self::release_for_signers`] whenever more than one party releases.
+    pub fn release<W: DurableWal>(
+        self,
+        latch: &mut crate::access::PersonalBeltLatch<W>,
+        record: &qsag_core::belt_latch::BeltLatchRecord,
+        certificate: &crate::access::PersonalLatchCertificate,
+    ) -> Result<SecretBuffer<[qsag_core::field::goldilocks::Goldilocks; 4]>, PersonalMspInputError>
+    {
+        let permit = latch
+            .authorize(record, certificate)
+            .map_err(PersonalMspInputError::Policy)?;
+        self.release_with_permit(&permit)
     }
 }

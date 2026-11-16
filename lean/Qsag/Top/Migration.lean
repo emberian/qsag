@@ -586,6 +586,61 @@ def rawSettlementVis {LegacyPk Witness Authorization : Type}
     (Spec.MigrationClaim LegacyPk × Witness) × Spec.MigrationReceipt LegacyPk :=
   ((io.2.claim, D.extractWitness io.1.witness), io.2)
 
+/-- Interface-abstracting refinement of raw settlement into `IdealMigrate`. Accepted inputs use
+only the wire decoder and witness extraction; malformed inputs cannot be accepted, and rejected
+submissions stutter. The circuit/authorization obligation remains explicit in `S`. -/
+def rawSettlement_dataRefines_idealMigrate {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk) :
+    Spec.DataRefines (rawSettlementMachine D snapshot verifyAuthorization compile)
+      (Spec.idealMigrateMachine scheme snapshot) D.decode id where
+  Rel ledger a := ledger.spent = a.spentNullifiers
+  absInit _ := Spec.IdealMigrateState.init
+  init_ok := by
+    intro ledger hInit
+    cases hInit
+    exact ⟨rfl, rfl⟩
+  sim_visible := by
+    intro ledger ledger' a sub out j hRel hStep hVis
+    obtain ⟨hDec, _, hClaim, _, _, _, hFresh, hIns⟩ :=
+      rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep
+    have hJ := Option.some.inj (hVis.symm.trans hDec)
+    subst j
+    obtain ⟨hValid, _, _⟩ := rawSettlement_accepted_ownership S snapshot hStep
+    have hClaimNull : out.claim.nullifier = sub.statement.nullifier := by rw [hClaim]; rfl
+    rw [← hClaimNull, hRel] at hFresh hIns
+    refine ⟨{ totalMigrated := a.totalMigrated + out.amount
+              spentNullifiers := out.claim.nullifier :: a.spentNullifiers
+              settledClaims := out :: a.settledClaims }, ?_, hIns⟩
+    exact (Spec.idealMigrateMachine_step_eq_some_iff scheme snapshot a _ out.claim
+      (D.extractWitness sub.witness) out).mpr ⟨hValid, hFresh, rfl, rfl⟩
+  sim_internal := by
+    intro ledger ledger' a sub out _ hStep hVis
+    have hDec := (rawSettlement_accepted_decodes D snapshot verifyAuthorization compile hStep).1
+    rw [hVis] at hDec
+    cases hDec
+  sim_reject := by
+    intro ledger a sub hRel hNone
+    rw [rawSettlement_rejected_ledger_unchanged D snapshot verifyAuthorization compile hNone]
+    exact hRel
+
+theorem rawSettlement_refinement_exists {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness} {scheme : Spec.LegacyOwnershipScheme LegacyPk Witness}
+    {verifyAuthorization : MigrationExecution.Statement → Authorization → Bool}
+    {compile : MigrationExecution.Statement → List MigrationExecution.Gate}
+    (S : SettlementCircuitSound D scheme verifyAuthorization compile)
+    (snapshot : Spec.EnrolledSnapshot LegacyPk) :
+    Nonempty (Spec.DataRefines (rawSettlementMachine D snapshot verifyAuthorization compile)
+      (Spec.idealMigrateMachine scheme snapshot) D.decode id) :=
+  ⟨rawSettlement_dataRefines_idealMigrate S snapshot⟩
+
+#verify_constructive rawSettlement_refinement_exists
+
 /-- Forward simulation with an input map. `Spec.Refines` needs one input alphabet and equal
     accept/reject verdicts; here the concrete input is a raw submission, the ideal input is its
     decoding, and a raw submission may be rejected for a reason the ideal machine does not see

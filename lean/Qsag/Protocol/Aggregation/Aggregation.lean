@@ -414,7 +414,7 @@ inductive WhirSecurityRegime where
 def WhirSecurityRegime.defaultRegime : WhirSecurityRegime := .bciksJohnsonQrom128
 
 /-- `WhirSecurityRegime::ALL`. -/
-def WhirSecurityRegime.all : List WhirSecurityRegime :=
+@[expose] def WhirSecurityRegime.all : List WhirSecurityRegime :=
   [.bciksJohnsonClassical128, .bciksJohnsonQrom128, .cdhz25JohnsonQrom128,
    .cdhz25ZeroPowQrom128, .poseidon2Cdhz25JohnsonQrom128, .poseidon2Cdhz25ZeroPowQrom128]
 
@@ -430,7 +430,7 @@ def WhirSecurityRegime.tagByte : WhirSecurityRegime → UInt8
   | .poseidon2Cdhz25ZeroPowQrom128 => 8
 
 /-- `WhirSecurityRegime::from_u8`: accepts exactly the wire tags `2, 4, 5, 6, 7, 8`. -/
-def WhirSecurityRegime.decodeTag? (tag : UInt8) : Option WhirSecurityRegime :=
+@[expose] def WhirSecurityRegime.decodeTag? (tag : UInt8) : Option WhirSecurityRegime :=
   if tag = 2 then some .bciksJohnsonClassical128
   else if tag = 4 then some .bciksJohnsonQrom128
   else if tag = 5 then some .cdhz25JohnsonQrom128
@@ -493,7 +493,7 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
   · rintro (h | h | h | h | h | h) <;> rw [h] <;> rfl
 
 /-- `WhirSecurityRegime::pow_bits`. -/
-def WhirSecurityRegime.powBits : WhirSecurityRegime → Nat
+@[expose] def WhirSecurityRegime.powBits : WhirSecurityRegime → Nat
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 0
   | _ => 16
 
@@ -506,12 +506,12 @@ def WhirSecurityRegime.powBits : WhirSecurityRegime → Nat
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 214
 
 /-- `WhirSecurityRegime::classical_fs_round_bits`: query target plus PoW bits. -/
-def WhirSecurityRegime.classicalFsRoundBits (r : WhirSecurityRegime) : Nat :=
+@[expose] def WhirSecurityRegime.classicalFsRoundBits (r : WhirSecurityRegime) : Nat :=
   r.pureQueryTargetBits + r.powBits
 
 /-- `WhirSecurityRegime::qrom_grover_round_bits`: nominal single-round Grover search work.
     A per-round estimate, not a composed QROM security bound. -/
-def WhirSecurityRegime.qromGroverRoundBits (r : WhirSecurityRegime) : Nat :=
+@[expose] def WhirSecurityRegime.qromGroverRoundBits (r : WhirSecurityRegime) : Nat :=
   r.classicalFsRoundBits / 2
 
 /-- `WhirSecurityRegime::meets_unconditional_grover_128_floor`. -/
@@ -6774,5 +6774,27 @@ theorem verifyWhirStagePow_zero_iff (chal : List UInt8) (nonce : Nat) :
     verifyWhirStagePow chal nonce 0 = true ↔ nonce = 0 := by
   simp [verifyWhirStagePow]
 #export_eqns whirStagePowMask
+end Qsag.Aggregation
+end
+
+public section
+namespace Qsag.Aggregation
+#export_eqns WhirStageProof.oodChallenge WhirStageProof.oodChallenge2 deriveStageOodChallenge whirOodSamples
+#export_eqns merkleNodeFrame
+/-- Kernel KAT for the stage PoW fixture; it does not assert transcript parity. -/
+theorem stage_pow_fixture_accepts :
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 70035 16 = true := by
+  apply (verifyWhirStagePow_16_iff _ _ (stagePowDigest_length _) (by decide)).mpr
+  exact cshake_stage_pow_fixture_70035
+theorem stage_pow_fixture_rejects_zero :
+    verifyWhirStagePow (stagePowDigest powWitnessSeed) 0 16 = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  have hx := (verifyWhirStagePow_16_iff _ _ (stagePowDigest_length _) (by decide)).mp h
+  have hf := cshake_stage_pow_fixture_0
+  exact Bool.false_ne_true (hf.symm.trans hx)
+#verify_constructive squeezed_event_count_le whirRegime_positive_slack
+  whirRegime_bounded_query_profiles whirRegime_bounded_query_search_accounting
+  verifyWhirStagePow_16_iff stage_pow_fixture_accepts stage_pow_fixture_rejects_zero
 end Qsag.Aggregation
 end

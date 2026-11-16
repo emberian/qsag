@@ -1985,6 +1985,27 @@ impl ShapeHologram {
                 .iter()
                 .filter(|&&r| (r as usize) < shape.num_sbox)
                 .count();
+            // Slots held by multiplication rows, by row width.
+            let mut by_width = alloc::collections::BTreeMap::<usize, (usize, usize)>::new();
+            let mut start = sbox_slots;
+            while start < row_idx.len() {
+                let end = start
+                    + row_idx[start..]
+                        .iter()
+                        .take_while(|&&r| r == row_idx[start])
+                        .count();
+                let width = end - start;
+                let bucket = if width <= 12 {
+                    width
+                } else {
+                    13 + (width - 13) / 8 * 8
+                };
+                let entry = by_width.entry(bucket).or_default();
+                entry.0 += 1;
+                entry.1 += width;
+                start = end;
+            }
+            std::eprintln!("hologram_mul_row_widths (width -> rows, slots) {by_width:?}");
             std::eprintln!(
                 "hologram_geometry rows={} sbox_rows={} vars={} slots={} sbox_slots={} mul_slots={} csr_nnz={} nz_cap={} pack_vars={} recursive={}",
                 num_rows,
@@ -2743,12 +2764,7 @@ fn prove_logup_gkr(
                 0 => run_gkr_layer_sumcheck(&leaf, &r_cur, beta, &mut round),
                 1 => {
                     debug_assert!(upper.is_empty());
-                    run_gkr_layer_sumcheck(
-                        |u| gkr_layer1_node(&leaf, u),
-                        &r_cur,
-                        beta,
-                        &mut round,
-                    )
+                    run_gkr_layer_sumcheck(|u| gkr_layer1_node(&leaf, u), &r_cur, beta, &mut round)
                 }
                 _ => {
                     let (p_d, q_d) = upper.pop().expect("GKR internal layer");
@@ -3522,9 +3538,9 @@ pub fn verify_public_hologram(
 
 const REC_HOLO_VERSION: u64 = 0x5248_4F4C_0000_0001;
 
-/// Field-native Poseidon2 recursive public proof for internal nodes of arbitrary-depth
-/// `Merge -> Merge` aggregation trees. Verified both natively ([`verify_public_for_recursion`])
-/// and inside a parent [`super::relation::ConstraintSystem`] ([`verify_public_gadget`]).
+/// Field-native Poseidon2 recursive public proof of a relation, for a parent relation to
+/// verify. Verified both natively ([`verify_public_for_recursion`]) and inside a parent
+/// [`super::relation::ConstraintSystem`] ([`verify_public_gadget`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecursivePublicHemProof {
     pub comm_z: RecDigest,
@@ -3985,8 +4001,56 @@ fn super8_claim_gadget<B: RecBackend>(
     acc
 }
 
-/// Complete fixed-topology verifier for [`RecursivePublicHemProof`], executable natively
-/// (`RecNative`) and inside a parent [`super::relation::ConstraintSystem`].
+/// The exact boundary between the algebraic IOP and correlated WHIR verification.
+/// All transcript lanes, roots, points, claim presence bits and values are committed.
+/// In particular, a digest of roots alone would not bind the IOP's evaluation claims.
+#[derive(Clone)]
+pub(crate) struct DeferredPcsClaim<W: RecBase> {
+    pub(crate) regime: WhirSecurityRegime,
+    pub(crate) num_vars: usize,
+    pub(crate) transcript: [W; 12],
+    pub(crate) roots: [[W; 4]; 3],
+    pub(crate) points: [Vec<RecExt<W>>; 3],
+    pub(crate) claims: [[Option<RecExt<W>>; 3]; 3],
+}
+
+impl<W: RecBase> DeferredPcsClaim<W> {
+    pub(crate) fn digest<B: RecBackend<W = W>>(&self, b: &mut B) -> [W; 4] {
+        let mut words = vec![W::constant(rec_f(self.regime as u64)), W::constant(rec_f(self.num_vars as u64))];
+        words.extend_from_slice(&self.transcript);
+        words.extend(self.roots.iter().flatten().cloned());
+        for point in &self.points {
+            words.push(W::constant(rec_f(point.len() as u64)));
+            words.extend(point.iter().flat_map(|v| v.0.clone()));
+        }
+        for claim in self.claims.iter().flatten() {
+            words.push(W::constant(rec_f(u64::from(claim.is_some()))));
+            words.extend(claim.clone().unwrap_or_else(RecExt::zero).0);
+        }
+        let mut tr = RecTranscript::new();
+        tr.absorb(b, 0x4450_4353_0001, &words);
+        core::array::from_fn(|i| b.pin(tr.state[i].clone()))
+    }
+}
+
+impl DeferredPcsClaim<F> {
+    pub(crate) fn verify(&self, opening: &Correlated3WhirProof) -> bool {
+        let Ok(params) = FixedPathWhirParams::new(self.regime, self.num_vars) else {
+            return false;
+        };
+        if self.points.iter().any(|p| p.len() != self.num_vars)
+            || !params.well_formed_correlated3(opening)
+        {
+            return false;
+        }
+        let mut b = RecNative::default();
+        let mut tr = RecTranscript { state: self.transcript };
+        verify_correlated3_gadget(&mut b, &params, &mut tr, &self.roots, &self.points, &self.claims, opening);
+        !b.failed
+    }
+}
+
+/// Complete fixed-topology verifier. Existing callers still discharge the PCS in-circuit.
 pub(crate) fn verify_public_gadget<B: RecBackend>(
     b: &mut B,
     vk: &ShapeVerifierKey,
@@ -3994,13 +4058,27 @@ pub(crate) fn verify_public_gadget<B: RecBackend>(
     public: &[B::W],
     proof: &RecursivePublicHemProof,
 ) {
+    let obligation = verify_public_algebraic_gadget(b, vk, statement_tag, public, proof);
+    let params = FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
+    let mut tr = RecTranscript { state: obligation.transcript };
+    verify_correlated3_gadget(b, &params, &mut tr, &obligation.roots, &obligation.points, &obligation.claims, &proof.opening);
+}
+
+/// Verify the algebraic IOP and return its remaining PCS obligation. This is NOT an
+/// acceptance predicate: a caller must bind this obligation into its public output and
+/// discharge it with the full WHIR verifier before accepting the enclosing proof.
+pub(crate) fn verify_public_algebraic_gadget<B: RecBackend>(
+    b: &mut B,
+    vk: &ShapeVerifierKey,
+    statement_tag: [u8; 32],
+    public: &[B::W],
+    proof: &RecursivePublicHemProof,
+) -> DeferredPcsClaim<B::W> {
     assert_eq!(public.len(), vk.num_public);
     let rec_root = vk
         .rec_hologram_root
         .expect("Poseidon2 recursion verifier key")
         .map(B::W::constant);
-    let rec_params =
-        FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
 
     super::recursive_whir::census("sumchecks");
     let comm_z: [B::W; 4] = proof.comm_z.map(|x| b.alloc(x));
@@ -4220,15 +4298,14 @@ pub(crate) fn verify_public_gadget<B: RecBackend>(
         [None, Some(claim_h_mat), Some(claim_h_gkr)],
         [None, Some(claim_e_mat), Some(claim_e_gkr)],
     ];
-    verify_correlated3_gadget(
-        b,
-        &rec_params,
-        &mut tr,
-        &[comm_z, rec_root, comm_e],
-        &[p_z, p_mat, p_gkr],
-        &expected_claims,
-        &proof.opening,
-    );
+    DeferredPcsClaim {
+        regime: vk.regime,
+        num_vars: vk.pack_vars(),
+        transcript: tr.state,
+        roots: [comm_z, rec_root, comm_e],
+        points: [p_z, p_mat, p_gkr],
+        claims: expected_claims,
+    }
 }
 
 /// Native verification of a [`RecursivePublicHemProof`].

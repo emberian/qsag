@@ -50,15 +50,16 @@ uniform on the other, so the two views are identically distributed.
     `batched_base_companion_perfectly_simulated`: four base-field companion words batched
     with a challenge outside `F_{p^2}` mask a word over `F_{p^4}` perfectly.
 §10 Boolean-cube multilinear extensions and the degree-9/degree-2 honest sumcheck prover.
-§11 Public Hem uses one assignment table on `varBits`. Its matrix multiplication, row
-    constraint sumcheck, and variable-subcube column sumcheck are connected by proved claim
-    identities and degree-specific flip counts. Twelve base-field masking cells in three
-    four-corner groups jointly pad the revealed row triple; the group determinant is
-    `k₁ k₂ k₃`, with an explicit inverse and inhabited full-rank corner bases.
-    `five_table_kernel_view_perfectly_simulated` jointly simulates the blended word and
-    all four companion claims against a fixed public reference assignment with the same
-    kernel value. The column transcript lemma omits the two unexposed terminal operands.
-    These results do not yet construct the deployed five-table joint HVZK simulator.
+§11 Public Hem uses one assignment table on `varBits`, combining `(A, B, C)` with three
+    independent `ZKHEM_COMBINE` challenges `(c₀, c₁, c₂)` and binding `Z[0] = 1` plus all
+    public-input cells under `λ = HEM_PUBLIC_CELLS`. Twelve base-field masking cells in three
+    four-corner groups jointly pad the revealed row triple with determinant `k₁ k₂ k₃`.
+§12 Deployed five-table `(Z, C_0..C_3)` `zk-Hem` joint HVZK simulator composition (`simulateZkHem5Table`,
+    `zkHem5Table_joint_hvzk_perfect`, `zkHem5Table_salted_ro_hvzk_bound`): composes fast
+    Möbius-to-monomial transport, Stage-0 Vandermonde blinding, finite row/column Libra blocks
+    with per-round constants, 12-cell rank-checked `MaskRankDeficient`-aware row padding,
+    adaptive Fiat–Shamir challenges, Welch–Berlekamp Gaussian `publicReferenceAssignment`,
+    primitive quartic `β` companion translation, and salted Stage-0 Merkle RO coupling.
 -/
 
 public import Init.Data.List.FinRange
@@ -565,12 +566,12 @@ structure WitnessRounds (F : Type) where
 def WitnessRounds.msg (w : WitnessRounds F) (d i : Nat) : List F :=
   w.const i :: coefList d (w.coef i)
 
-def WitnessRounds.claim (w : WitnessRounds F) (d : Nat) (c : Nat → F) : Nat → F
+@[expose] def WitnessRounds.claim (w : WitnessRounds F) (d : Nat) (c : Nat → F) : Nat → F
   | 0 => w.H
   | i + 1 => evalCoeffs (w.msg d i) (c i)
 
 /-- The messages telescope: `s_i(0) + s_i(1)` is the running claim. -/
-def WitnessRounds.Honest (w : WitnessRounds F) (n d : Nat) (c : Nat → F) : Prop :=
+@[expose] def WitnessRounds.Honest (w : WitnessRounds F) (n d : Nat) (c : Nat → F) : Prop :=
   ∀ i : Nat, i < n →
     add (evalCoeffs (w.msg d i) zero) (evalCoeffs (w.msg d i) one) = w.claim d c i
 
@@ -1104,7 +1105,7 @@ structure LinForm (ι F : Type) [LawfulField F] where
     app (fun i => add (mul a (u i)) (mul b (v i))) = add (mul a (app u)) (mul b (app v))
 
 /-- Evaluation at one index. -/
-def LinForm.evalAt (i : ι) : LinForm ι F := ⟨fun u => u i, fun _ _ _ _ => rfl⟩
+@[expose] def LinForm.evalAt (i : ι) : LinForm ι F := ⟨fun u => u i, fun _ _ _ _ => rfl⟩
 
 /-- Weighted sum `∑_j t_j · u(i_j)`. -/
 def dotAt (ts : List (ι × F)) (u : ι → F) : F :=
@@ -1830,7 +1831,7 @@ theorem honest_linear_round {F : Type} [LawfulField F] (f0 f1 : F) (c : Nat → 
   constructive_ring
 
 /-- Field structure of the certified tower, kept local to this module. -/
-@[reducible] def fp4Field : LawfulField Fp4 := inferInstance
+@[expose, reducible] def fp4Field : LawfulField Fp4 := inferInstance
 
 theorem fp4_two_ne_zero : add (one : Fp4) one ≠ zero := fun h => by
   have h1 := congrArg (fun z : Fp4 => z.c0.c0) h
@@ -2835,10 +2836,10 @@ def publicCellTableWeight (k numCells : Nat) (lam : F) (col : List Bool) : F :=
 def publicCellEqSum (k numCells : Nat) (lam : F) (ry : List F) : F :=
   hornerCells lam (fun cell => eqCell k cell ry) numCells 0
 
-/-- Verifier's public-cell initial claim `λ · 1 + ∑_{i < |public|} λ^{i+2} · public[i]`
+/-- Verifier's public-cell initial claim `λ · 1 + ∑_{i < |pubCells|} λ^{i+2} · pubCells[i]`
     (`zk_hem/protocol.rs:1653-1656`). -/
-def publicCellClaim (public : List F) (lam : F) : F :=
-  RoundPoly.evalCoeffs (zero :: one :: public) lam
+def publicCellClaim (pubCells : List F) (lam : F) : F :=
+  RoundPoly.evalCoeffs (zero :: one :: pubCells) lam
 
 /-- First `m` committed cells `[Z(0), ..., Z(m - 1)]` on `s.varBits`. -/
 def HemPublicShape.truePublicCells (s : HemPublicShape F) (Z : List Bool → F) (m : Nat) : List F :=
@@ -2850,10 +2851,10 @@ theorem truePublicCells_length (s : HemPublicShape F) (Z : List Bool → F) (m :
   unfold HemPublicShape.truePublicCells
   rw [List.length_map, List.length_range]
 
-/-- `Z(0) = 1` and `Z(1 ..= public.length) = public`. -/
+/-- `Z(0) = 1` and `Z(1 ..= pubCells.length) = pubCells`. -/
 def HemPublicShape.PublicCellsMatch (s : HemPublicShape F) (Z : List Bool → F)
-    (public : List F) : Prop :=
-  s.truePublicCells Z (public.length + 1) = one :: public
+    (pubCells : List F) : Prop :=
+  s.truePublicCells Z (pubCells.length + 1) = one :: pubCells
 
 /-- Three-challenge linear combination `c0 A(rx, ·) + c1 B(rx, ·) + c2 C(rx, ·)`
     (`zk_hem/protocol.rs:1593, 1597`). -/
@@ -2881,9 +2882,9 @@ def HemPublicShape.columnClaim (s : HemPublicShape F) (Z : List Bool → F)
 
 /-- `verify_public` initial column-sumcheck claim (`zk_hem/protocol.rs:1651-1656`). -/
 def HemPublicShape.verifierColumnClaim (_s : HemPublicShape F)
-    (combine : HemCombine F) (a b c : F) (public : List F) (lam : F) : F :=
+    (combine : HemCombine F) (a b c : F) (pubCells : List F) (lam : F) : F :=
   add (add (add (mul combine.c0 a) (mul combine.c1 b)) (mul combine.c2 c))
-    (publicCellClaim public lam)
+    (publicCellClaim pubCells lam)
 
 /-- `verify_public` terminal matrix evaluation at `(rx, ry)` (`zk_hem/protocol.rs:1666-1679`). -/
 def HemPublicShape.verifierMatrixAt (s : HemPublicShape F) (rx ry : List F)
@@ -2924,13 +2925,14 @@ theorem publicHem_column_claim (s : HemPublicShape F) (Z : List Bool → F)
       RoundPoly.evalCoeffs (zero :: s.truePublicCells Z (numPublic + 1)) lam := by
     unfold publicCellTableWeight
     rw [bitSum_hornerCells_cellIndicator_mul]
-    have hlen := (truePublicCells_length s Z (numPublic + 1)).symm
-    rw [hlen]
-    apply hornerCells_eq_evalCoeffs
-    intro j hj
-    rw [Nat.zero_add]
-    rw [truePublicCells_length] at hj
-    exact (getD_map_range zero (fun cell => Z (cellBits s.varBits cell)) (numPublic + 1) j hj).symm
+    have hEq := hornerCells_eq_evalCoeffs lam (s.truePublicCells Z (numPublic + 1)) 0
+      (fun cell => Z (cellBits s.varBits cell)) (fun j hj => by
+        rw [Nat.zero_add]
+        rw [truePublicCells_length] at hj
+        exact (getD_map_range zero (fun cell => Z (cellBits s.varBits cell))
+          (numPublic + 1) j hj).symm)
+    rw [truePublicCells_length] at hEq
+    exact hEq
   have hBase : bitSum s.varBits (fun col => mul (s.baseColumnMatrix rx combine col) (Z col)) =
       add (add
         (mul combine.c0 (mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx))
@@ -2975,18 +2977,18 @@ theorem publicHem_column_prover_correct (s : HemPublicShape F) (Z : List Bool �
         (mle s.varBits Z (chalPrefix c s.varBits)) := h.terminal
   rw [ht, publicHem_verifierMatrixAt_eq_mle]
 
-/-- Honest completeness against `verify_public`: when `Z(0) = 1` and `Z(1..=numPublic) = public`,
+/-- Honest completeness against `verify_public`: when `Z(0) = 1` and `Z(1..=numPublic) = pubCells`,
     the prover's column sumcheck claim equals `verifierColumnClaim`. -/
 theorem publicHem_verifier_column_complete (s : HemPublicShape F) (Z : List Bool → F)
-    (public : List F) (hPub : s.PublicCellsMatch Z public)
+    (pubCells : List F) (hPub : s.PublicCellsMatch Z pubCells)
     (rx : List F) (combine : HemCombine F) (lam : F) (c : Nat → F) :
     let a := mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx
     let b := mle s.rowBits (matrixProduct s.varBits s.matrixB Z) rx
     let cv := mle s.rowBits (matrixProduct s.varBits s.matrixC Z) rx
-    (s.columnProver Z rx combine public.length lam c).H =
-      s.verifierColumnClaim combine a b cv public lam ∧
-    (s.columnProver Z rx combine public.length lam c).Honest s.varBits 2 c := by
-  have hc := publicHem_column_prover_correct s Z rx combine public.length lam c
+    (s.columnProver Z rx combine pubCells.length lam c).H =
+      s.verifierColumnClaim combine a b cv pubCells lam ∧
+    (s.columnProver Z rx combine pubCells.length lam c).Honest s.varBits 2 c := by
+  have hc := publicHem_column_prover_correct s Z rx combine pubCells.length lam c
   refine ⟨hc.1.trans ?_, hc.2.1⟩
   unfold HemPublicShape.columnClaim HemPublicShape.verifierColumnClaim publicCellClaim
   rw [hPub]
@@ -3027,6 +3029,7 @@ theorem roots_le_of_exists_nonzero [DecidableEq F] (d : Nat) (cs : List F)
       rw [← interp_evalAll xs cs hxsNd hxsLen.symm, hAllZero,
         interp_evalAll xs (List.replicate cs.length zero) hxsNd
           (List.length_replicate.trans hxsLen.symm)]
+      rw [List.length_replicate]
     obtain ⟨c, hcMem, hcNe⟩ := hnz
     rw [hEqCs] at hcMem
     exact hcNe (List.eq_of_mem_replicate hcMem)
@@ -3038,6 +3041,7 @@ theorem subCoeffs_exists_nonzero_of_ne [DecidableEq F] :
   | [], _ :: _, hlen, _ => by cases hlen
   | _ :: _, [], hlen, _ => by cases hlen
   | a :: ps, b :: qs, hlen, hne => by
+    rw [RoundPoly.subCoeffs_cons_cons]
     by_cases hab : a = b
     · subst hab
       have hneTail : ps ≠ qs := fun h => hne (congrArg (List.cons a) h)
@@ -3049,61 +3053,61 @@ theorem subCoeffs_exists_nonzero_of_ne [DecidableEq F] :
 /-- **Soundness of `HEM_PUBLIC_CELLS` (`λ`) batching (`zk_hem/protocol.rs:1594-1596, 1650-1656`)**:
     Because `(a, b, c)` and `combine` are absorbed before `λ` is squeezed, any mismatch in either
     the combined row claim `c0 a + c1 b + c2 c` OR any public/constant cell `Z(0) = 1`,
-    `Z(1..=numPublic) = public` makes `verifierColumnClaim - columnClaim` a nonzero polynomial of
-    degree `≤ public.length + 1` in `λ` (erroneous `row_values` sit in `λ^0` and cannot cancel
+    `Z(1..=numPublic) = pubCells` makes `verifierColumnClaim - columnClaim` a nonzero polynomial of
+    degree `≤ pubCells.length + 1` in `λ` (erroneous `row_values` sit in `λ^0` and cannot cancel
     erroneous public cells in `λ^1 .. λ^{numPublic+1}`). -/
 theorem publicHem_lambda_batch_soundness [DecidableEq F]
     (s : HemPublicShape F) (Z : List Bool → F) (rx : List F)
-    (combine : HemCombine F) (a b c : F) (public : List F)
+    (combine : HemCombine F) (a b c : F) (pubCells : List F)
     (hBad : ¬ (add (add (mul combine.c0 a) (mul combine.c1 b)) (mul combine.c2 c) =
         add (add
           (mul combine.c0 (mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx))
           (mul combine.c1 (mle s.rowBits (matrixProduct s.varBits s.matrixB Z) rx)))
           (mul combine.c2 (mle s.rowBits (matrixProduct s.varBits s.matrixC Z) rx)) ∧
-      s.PublicCellsMatch Z public))
+      s.PublicCellsMatch Z pubCells))
     (S : List F) (hS : S.Nodup) :
     (S.filter (fun lam =>
-      decide (s.verifierColumnClaim combine a b c public lam =
-        s.columnClaim Z rx combine public.length lam))).length ≤ public.length + 1 := by
+      decide (s.verifierColumnClaim combine a b c pubCells lam =
+        s.columnClaim Z rx combine pubCells.length lam))).length ≤ pubCells.length + 1 := by
   let lhsBase := add (add (mul combine.c0 a) (mul combine.c1 b)) (mul combine.c2 c)
   let rhsBase := add (add
     (mul combine.c0 (mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx))
     (mul combine.c1 (mle s.rowBits (matrixProduct s.varBits s.matrixB Z) rx)))
     (mul combine.c2 (mle s.rowBits (matrixProduct s.varBits s.matrixC Z) rx))
-  let pPoly : List F := lhsBase :: one :: public
-  let qPoly : List F := rhsBase :: s.truePublicCells Z (public.length + 1)
-  have hpLen : pPoly.length = public.length + 2 := rfl
-  have hqLen : qPoly.length = public.length + 2 :=
-    congrArg Nat.succ (truePublicCells_length s Z (public.length + 1))
+  let pPoly : List F := lhsBase :: one :: pubCells
+  let qPoly : List F := rhsBase :: s.truePublicCells Z (pubCells.length + 1)
+  have hpLen : pPoly.length = pubCells.length + 2 := rfl
+  have hqLen : qPoly.length = pubCells.length + 2 :=
+    congrArg Nat.succ (truePublicCells_length s Z (pubCells.length + 1))
   have hpqNe : pPoly ≠ qPoly := by
     intro hEq
     obtain ⟨hBase, hCells⟩ := List.cons.inj hEq
     exact hBad ⟨hBase, hCells.symm⟩
-  have hSubLen : (RoundPoly.subCoeffs pPoly qPoly).length ≤ (public.length + 1) + 1 := by
-    rw [RoundPoly.subCoeffs_length, hpLen, hqLen, Nat.max_self]
-    exact Nat.le_refl _
+  have hSubLen : (RoundPoly.subCoeffs pPoly qPoly).length ≤ (pubCells.length + 1) + 1 := by
+    rw [RoundPoly.subCoeffs_length, hpLen, hqLen]
+    exact Nat.le_of_eq (Nat.max_self _)
   have hNz := subCoeffs_exists_nonzero_of_ne pPoly qPoly (hpLen.trans hqLen.symm) hpqNe
-  have hRoots := roots_le_of_exists_nonzero (public.length + 1)
+  have hRoots := roots_le_of_exists_nonzero (pubCells.length + 1)
     (RoundPoly.subCoeffs pPoly qPoly) hSubLen hNz S hS
   have hFilt : S.filter (fun lam =>
-        decide (s.verifierColumnClaim combine a b c public lam =
-          s.columnClaim Z rx combine public.length lam)) =
+        decide (s.verifierColumnClaim combine a b c pubCells lam =
+          s.columnClaim Z rx combine pubCells.length lam)) =
       S.filter (fun lam =>
         decide (RoundPoly.evalCoeffs (RoundPoly.subCoeffs pPoly qPoly) lam = zero)) := by
     apply List.filter_congr
     intro lam _
     have hEval : RoundPoly.evalCoeffs (RoundPoly.subCoeffs pPoly qPoly) lam =
-        sub (s.verifierColumnClaim combine a b c public lam)
-          (s.columnClaim Z rx combine public.length lam) := by
+        sub (s.verifierColumnClaim combine a b c pubCells lam)
+          (s.columnClaim Z rx combine pubCells.length lam) := by
       rw [RoundPoly.evalCoeffs_sub]
-      show sub (add lhsBase (mul lam (RoundPoly.evalCoeffs (one :: public) lam)))
-          (add rhsBase (mul lam (RoundPoly.evalCoeffs (s.truePublicCells Z (public.length + 1)) lam))) =
-        sub (add lhsBase (add zero (mul lam (RoundPoly.evalCoeffs (one :: public) lam))))
-          (add rhsBase (add zero (mul lam (RoundPoly.evalCoeffs (s.truePublicCells Z (public.length + 1)) lam))))
+      show sub (add lhsBase (mul lam (RoundPoly.evalCoeffs (one :: pubCells) lam)))
+          (add rhsBase (mul lam (RoundPoly.evalCoeffs (s.truePublicCells Z (pubCells.length + 1)) lam))) =
+        sub (add lhsBase (add zero (mul lam (RoundPoly.evalCoeffs (one :: pubCells) lam))))
+          (add rhsBase (add zero (mul lam (RoundPoly.evalCoeffs (s.truePublicCells Z (pubCells.length + 1)) lam))))
       constructive_ring
     rw [hEval]
-    by_cases h : s.verifierColumnClaim combine a b c public lam =
-        s.columnClaim Z rx combine public.length lam
+    by_cases h : s.verifierColumnClaim combine a b c pubCells lam =
+        s.columnClaim Z rx combine pubCells.length lam
     · rw [decide_eq_true h, decide_eq_true (LawfulCommRing.sub_eq_zero_iff.mpr h)]
     · rw [decide_eq_false h, decide_eq_false (fun h0 => h (LawfulCommRing.sub_eq_zero_iff.mp h0))]
   rw [hFilt]
@@ -3114,32 +3118,33 @@ def combineTriples (S : List F) : List (HemCombine F) :=
   S.flatMap fun c0 => S.flatMap fun c1 => S.flatMap fun c2 => [⟨c0, c1, c2⟩]
 
 omit [LawfulField F] in
-theorem combineTriples_length (S : List F) :
-    (combineTriples S).length = S.length * (S.length * S.length) := by
-  unfold combineTriples
-  have h1 : ∀ c0 c1 : F, (S.flatMap fun c2 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).length = S.length := by
-    intro c0 c1
-    induction S with
-    | nil => rfl
-    | cons _ tl ih => simp only [List.flatMap_cons, List.length_append, List.length_singleton, ih, Nat.add_comm]
-  have h2 : ∀ c0 : F, (S.flatMap fun c1 => S.flatMap fun c2 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).length =
-      S.length * S.length := by
-    intro c0
-    generalize hM : S.length = M
-    have h1' : ∀ c1 : F, (S.flatMap fun c2 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).length = M :=
-      fun c1 => (h1 c0 c1).trans hM
-    clear h1 hM
-    induction S with
-    | nil => simp
-    | cons x tl ih =>
-      simp only [List.flatMap_cons, List.length_append, h1' x, ih, List.length_cons,
-        Nat.add_mul, Nat.one_mul, Nat.add_comm]
-  generalize hN : S.length * S.length = N at h2
-  induction S with
+private theorem flatMap_uniform_length {α β : Type} (L : List α) (f : α → List β)
+    (k : Nat) (hk : ∀ x, (f x).length = k) : (L.flatMap f).length = L.length * k := by
+  induction L with
   | nil => simp
-  | cons x tl ih =>
-    simp only [List.flatMap_cons, List.length_append, h2 x, ih, List.length_cons,
+  | cons x xs ih =>
+    simp only [List.flatMap_cons, List.length_append, hk, ih, List.length_cons,
       Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+omit [LawfulField F] in
+theorem combineTriples_length (S : List F) :
+    (combineTriples S).length = S.length * S.length * S.length := by
+  unfold combineTriples
+  rw [flatMap_uniform_length S _ (S.length * S.length)
+    (fun _ => flatMap_uniform_length S _ S.length
+      (fun _ => (flatMap_uniform_length S _ 1 (fun _ => rfl)).trans (Nat.mul_one _)))]
+  exact (Nat.mul_assoc _ _ _).symm
+
+omit [LawfulField F] in
+private theorem length_filter_flatMap_congr {α β : Type} (p : β → Bool) :
+    ∀ (A : List α) (f₁ f₂ : α → List β),
+      (∀ x ∈ A, ((f₁ x).filter p).length = ((f₂ x).filter p).length) →
+      ((A.flatMap f₁).filter p).length = ((A.flatMap f₂).filter p).length
+  | [], _, _, _ => rfl
+  | x :: xs, f₁, f₂, h => by
+    simp only [List.flatMap_cons, List.filter_append, List.length_append]
+    rw [h x List.mem_cons_self,
+      length_filter_flatMap_congr p xs f₁ f₂ (fun y hy => h y (List.mem_cons_of_mem _ hy))]
 
 omit [LawfulField F] in
 private theorem length_filter_flatMap_le {α β : Type} (p : β → Bool) (B : Nat) :
@@ -3189,15 +3194,18 @@ private theorem affine_filter_le_one [DecidableEq F] (S : List F) (hS : S.Nodup)
     (hp : ∀ x : F, pred x = true → add k (mul x d) = zero) :
     ((S.flatMap fun x => [x]).filter pred).length ≤ 1 := by
   have hMap : (S.flatMap fun x => [x]) = S := by
+    clear hS
     induction S with
     | nil => rfl
     | cons a tl ih => simp only [List.flatMap_cons, List.singleton_append, ih]
   rw [hMap]
   apply length_le_one_of_all_eq _ (hS.filter _)
   intro x hx y hy
-  exact affine_root_unique d k x y hd
-    (by have h := hp x (List.mem_filter.mp hx).2; rw [LawfulCommRing.add_comm, LawfulCommRing.mul_comm] at h; exact h)
-    (by have h := hp y (List.mem_filter.mp hy).2; rw [LawfulCommRing.add_comm, LawfulCommRing.mul_comm] at h; exact h)
+  by_cases hxy : x = y
+  · exact hxy
+  · exact False.elim (hd (affine_two_roots_zero k d x y hxy
+      (hp x (List.mem_filter.mp hx).2) (hp y (List.mem_filter.mp hy).2)).2)
+
 
 private theorem length_filter_singleton_map {α β : Type} (p : β → Bool) (f : α → β) :
     ∀ (S : List α), ((S.flatMap fun x => [f x]).filter p).length =
@@ -3247,17 +3255,10 @@ theorem publicHem_combine_three_challenge_soundness [DecidableEq F]
             ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length := by
         unfold combineTriples
         rw [length_filter_flatMap_comm pred S S]
-        have hInner : ∀ c1 : F,
-            ((S.flatMap fun c0 => S.flatMap fun c2 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length =
-            ((S.flatMap fun c2 => S.flatMap fun c0 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length :=
-          fun c1 => length_filter_flatMap_comm pred S S _
-        clear hLin hWrong hda hdb hdc
-        induction S with
-        | nil => rfl
-        | cons x tl ih =>
-          simp only [List.flatMap_cons, List.filter_append, List.length_append, hInner x, ih]
+        exact length_filter_flatMap_congr pred S _ _
+          (fun c1 _ => length_filter_flatMap_comm pred S S _)
       rw [hSwap1]
-      have hb1 := length_filter_flatMap_le pred S.length S
+      exact length_filter_flatMap_le pred S.length S
         (fun c1 => S.flatMap fun c2 => S.flatMap fun c0 => [⟨c0, c1, c2⟩])
         (fun c1 _ => by
           have hb2 := length_filter_flatMap_le pred 1 S
@@ -3271,20 +3272,12 @@ theorem publicHem_combine_three_challenge_soundness [DecidableEq F]
                       add (add (mul c0 da) (mul c1 db)) (mul c2 dc) := by constructive_ring
                   exact e.trans hl))
           simpa only [Nat.mul_one] using hb2)
-      exact hb1
     · have hSwap : ((combineTriples S).filter pred).length =
           ((S.flatMap fun c0 => S.flatMap fun c2 => S.flatMap fun c1 =>
             ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length := by
         unfold combineTriples
-        have hInner : ∀ c0 : F,
-            ((S.flatMap fun c1 => S.flatMap fun c2 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length =
-            ((S.flatMap fun c2 => S.flatMap fun c1 => ([⟨c0, c1, c2⟩] : List (HemCombine F))).filter pred).length :=
-          fun c0 => length_filter_flatMap_comm pred S S _
-        clear hLin hWrong hdb hdc
-        induction S with
-        | nil => rfl
-        | cons x tl ih =>
-          simp only [List.flatMap_cons, List.filter_append, List.length_append, hInner x, ih]
+        exact length_filter_flatMap_congr pred S _ _
+          (fun c0 _ => length_filter_flatMap_comm pred S S _)
       rw [hSwap]
       exact length_filter_flatMap_le pred S.length S _
         (fun c0 _ => by
@@ -3310,7 +3303,7 @@ theorem publicHem_combine_three_challenge_soundness [DecidableEq F]
               (fun c2 hp => hLin ⟨c0, c1, c2⟩ hp))
         simpa only [Nat.mul_one] using hb2)
 
-/-- Concretesumcheck flip bound against the constructed honest round polynomial.
+/-- Concrete sumcheck flip bound against the constructed honest round polynomial.
     This gives degree 9 for `rowLineRep`, degree 2 for `colLineRep`. -/
 theorem cubeProver_round_flip_bound [DecidableEq F] {g : List F → F} {d : Nat}
     (L : LineRep g d) (n : Nat) (cs : List F) (hcs : cs.length < n)
@@ -3335,42 +3328,41 @@ theorem cubeProver_round_flip_bound [DecidableEq F] {g : List F → F} {d : Nat}
   exact hb
 end PublicHem
 
-/-- **Tooth (`λ = 0` unbinds `Z[0] = 1` and `public`)**:
+/-- **Tooth (`λ = 0` unbinds `Z[0] = 1` and `pubCells`)**:
     When `lam = zero`, `verifierColumnClaim` agrees with `columnClaim` even on an all-zero table
-    `Z = 0` that violates `Z[0] = 1` and `public = [1]`. -/
+    `Z = 0` that violates `Z[0] = 1` and `pubCells = [1]`. -/
 theorem tooth_publicHem_zero_lambda_unbinds_public_cells :
-    let s : HemPublicShape Fp4 :=
-      ⟨1, 1, fun _ => zero, fun _ _ => zero, fun _ _ => zero, fun _ _ => zero⟩
-    let Z : List Bool → Fp4 := fun _ => zero
-    let combine : HemCombine Fp4 := ⟨one, one, one⟩
+    ∃ (s : HemPublicShape Fp4) (Z : List Bool → Fp4) (combine : HemCombine Fp4),
     ¬ s.PublicCellsMatch Z [one] ∧
     s.verifierColumnClaim combine zero zero zero [one] zero =
       s.columnClaim Z [zero] combine 1 zero := by
+  refine ⟨⟨1, 1, fun _ => zero, fun _ _ => zero, fun _ _ => zero, fun _ _ => zero⟩,
+    (fun _ => zero), ⟨one, one, one⟩, ?_⟩
   refine ⟨fun h => ?_, ?_⟩
   · have h0 : (zero : Fp4) = one := (List.cons.inj h).1
     exact LawfulField.zero_ne_one h0
   · unfold HemPublicShape.verifierColumnClaim HemPublicShape.columnClaim publicCellClaim
       HemPublicShape.truePublicCells matrixProduct
     simp only [List.range, List.range.loop, List.map_cons, List.map_nil, mle_cons, mle_zero_dim,
-      bitSum, LawfulCommRing.zero_mul, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+      bitSum, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
     rfl
 
 theorem inhabited_publicHem_lambda_batch_soundness :
     ∃ (s : HemPublicShape Fp4) (Z : List Bool → Fp4) (rx : List Fp4)
-      (combine : HemCombine Fp4) (a b c : Fp4) (public : List Fp4) (S : List Fp4),
+      (combine : HemCombine Fp4) (a b c : Fp4) (pubCells : List Fp4) (S : List Fp4),
       ¬ (add (add (mul combine.c0 a) (mul combine.c1 b)) (mul combine.c2 c) =
           add (add
             (mul combine.c0 (mle s.rowBits (matrixProduct s.varBits s.matrixA Z) rx))
             (mul combine.c1 (mle s.rowBits (matrixProduct s.varBits s.matrixB Z) rx)))
             (mul combine.c2 (mle s.rowBits (matrixProduct s.varBits s.matrixC Z) rx)) ∧
-        s.PublicCellsMatch Z public) ∧
+        s.PublicCellsMatch Z pubCells) ∧
       S.Nodup := by
   refine ⟨⟨1, 1, fun _ => zero, fun _ _ => zero, fun _ _ => zero, fun _ _ => zero⟩,
     fun _ => zero, [zero], ⟨one, one, one⟩, zero, zero, zero, [one], [zero, one], ?_, ?_⟩
   · intro h
     have h0 : (zero : Fp4) = one := (List.cons.inj h.2).1
     exact LawfulField.zero_ne_one h0
-  · refine List.nodup_cons.mpr ⟨fun h => ?_, List.nodup_singleton one⟩
+  · refine List.nodup_cons.mpr ⟨fun h => ?_, (by simp)⟩
     rcases List.mem_singleton.mp h with h0
     exact LawfulField.zero_ne_one h0
 
@@ -4394,8 +4386,6 @@ theorem cube_sumcheck_state_restoration_soundness {g : List F → F} {d : Nat}
 
 #verify_constructive Qsag.ZkHem.cube_sumcheck_state_restoration_soundness
 end CubeSumcheckSoundness
-
-/-! ## §12. Audit gates -/
 
 #verify_constructive Qsag.ZkHem.quartic_primitive_pad_bijection Qsag.ZkHem.pad_full_rank_iff
   Qsag.ZkHem.padded_evaluation_perfectly_simulated

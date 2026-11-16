@@ -575,6 +575,35 @@ pub(crate) fn encode_rs_coset_goldilocks_with_secret(
     encode_rs_coset_goldilocks_cpu_inner(coeffs, blowup, secret)
 }
 
+/// Consume coefficients into a single CPU encoding buffer. Large round-zero encodings
+/// use this path to avoid retaining both a coset-major and a domain-major table.
+/// The only secret-bearing allocation is returned to the caller, which owns its wipe.
+pub(crate) fn encode_rs_coset_goldilocks_owned_cpu(
+    mut coeffs: Vec<Goldilocks>,
+    blowup: usize,
+) -> Vec<Goldilocks> {
+    let _phase = crate::profile::span("encode_rs_coset_goldilocks_owned_cpu");
+    let n = coeffs.len();
+    assert!(n.is_power_of_two());
+    assert!(blowup.is_power_of_two() && blowup >= 2);
+    let domain_len = n.checked_mul(blowup).expect("RS domain size overflow");
+    assert!(
+        domain_len.trailing_zeros() <= 32,
+        "RS domain exceeds Goldilocks two-adicity"
+    );
+    // Grow before writing coefficients: the caller reserves domain capacity before
+    // constructing secret coefficients, so no secret allocation is freed by growth.
+    assert!(coeffs.capacity() >= domain_len);
+    let mut power = Goldilocks::ONE;
+    for c in &mut coeffs {
+        *c = c.const_mul(power);
+        power = power.const_mul(Goldilocks::NON_RESIDUE);
+    }
+    coeffs.resize(domain_len, Goldilocks::ZERO);
+    ntt_goldilocks_cpu(&mut coeffs);
+    coeffs
+}
+
 /// [`encode_rs_coset_goldilocks`] on the host only.
 #[cfg(test)]
 #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
@@ -2167,6 +2196,17 @@ mod base_ntt_tests {
             assert_eq!(got, expected);
             intt_goldilocks(&mut got);
             assert_eq!(got, input);
+        }
+    }
+
+    #[test]
+    fn owned_coset_encoding_matches_decomposed_encoder() {
+        for (log_c, blowup) in [(3, 2), (13, 4), (15, 8), (10, 32)] {
+            let coeffs = sample(1 << log_c, 481 + log_c as u64);
+            let expected = encode_rs_coset_goldilocks_cpu(&coeffs, blowup);
+            let mut owned = Vec::with_capacity(coeffs.len() * blowup);
+            owned.extend_from_slice(&coeffs);
+            assert_eq!(encode_rs_coset_goldilocks_owned_cpu(owned, blowup), expected);
         }
     }
 

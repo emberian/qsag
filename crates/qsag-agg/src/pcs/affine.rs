@@ -218,6 +218,7 @@ pub(super) fn prove_fold_in_place(
     k_scratch: &mut Vec<E>,
     claim: &mut E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
+    compact: bool,
 ) -> ([E; 5], u64, [E; 3]) {
     let _phase = crate::profile::span("prove_affine_fold");
     let mut wire = [E::ZERO; 5];
@@ -274,8 +275,12 @@ pub(super) fn prove_fold_in_place(
     }
 
     let phi = bridge_prefix(&wire, tr);
-    fold_kernel_into(k, phi, k_scratch);
-    core::mem::swap(k, k_scratch);
+    if compact {
+        fold_kernel_in_place(k, phi);
+    } else {
+        fold_kernel_into(k, phi, k_scratch);
+        core::mem::swap(k, k_scratch);
+    }
 
     let pairs_c = c.len() / 2;
     let shift_range = |c_ref: &[E], k_ref: &[E], i0: usize, i1: usize| -> [E; 2] {
@@ -324,8 +329,12 @@ pub(super) fn prove_fold_in_place(
 
     let (fold_pow_nonce, next, chals) = bridge_finish(&wire, *claim, phi, tr);
     *claim = next;
-    fold_coeffs_into(c, chals, c_scratch);
-    core::mem::swap(c, c_scratch);
+    if compact {
+        fold_coeffs_in_place(c, chals);
+    } else {
+        fold_coeffs_into(c, chals, c_scratch);
+        core::mem::swap(c, c_scratch);
+    }
     debug_assert_eq!(dot_ext4_fast(c, k), next);
     (wire, fold_pow_nonce, chals)
 }
@@ -497,7 +506,7 @@ pub(super) fn prove_fold(
 ) -> ([E; 5], u64, [E; 3]) {
     let mut c_scratch = Vec::new();
     let mut k_scratch = Vec::new();
-    prove_fold_in_place(c, k, &mut c_scratch, &mut k_scratch, claim, tr)
+    prove_fold_in_place(c, k, &mut c_scratch, &mut k_scratch, claim, tr, false)
 }
 
 /// Encode the power-of-two core using the existing fast NTT, then add the

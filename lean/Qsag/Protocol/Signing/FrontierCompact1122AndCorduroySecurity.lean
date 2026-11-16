@@ -964,10 +964,10 @@ theorem encodeCshakeFramesBody_injective :
   | [], [], _, _, _ => rfl
   | [], f₂ :: fs₂, _, _, hEq => by
     have hL := congrArg List.length hEq
-    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL
+    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL <;> omega
   | f₁ :: fs₁, [], _, _, hEq => by
     have hL := congrArg List.length hEq
-    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL
+    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL <;> omega
   | f₁ :: fs₁, f₂ :: fs₂, hB₁, hB₂, hEq => by
     simp only [encodeCshakeFramesBody, List.append_assoc] at hEq
     obtain ⟨hLenBytes, hRest⟩ := append_inj_left_len
@@ -1022,12 +1022,12 @@ def ftsMergeNodeFrames (p : FrontierFtsParams) (pkSeed : BitVec 256) (v : Nat) (
 theorem ftsSqueezeRankFrames_eq (p : FrontierFtsParams) (pkSeed pkRoot rand d : BitVec 256) (ctr : UInt16) :
     ftsSqueezeRankFrames p pkSeed pkRoot rand d ctr =
       encodeCshakeFrames [encodeFrontierPid p, u16BytesBE ctr, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
-        bv256BytesBE rand, bv256BytesBE d] := rfl
+        bv256BytesBE rand, bv256BytesBE d] := by unfold ftsSqueezeRankFrames; rfl
 
 theorem ftsPrfRandFrames_eq (p : FrontierFtsParams) (skPrf pkSeed pkRoot hedge d : BitVec 256) :
     ftsPrfRandFrames p skPrf pkSeed pkRoot hedge d =
       encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE skPrf, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
-        bv256BytesBE hedge, [0], bv256BytesBE d] := rfl
+        bv256BytesBE hedge, [0], bv256BytesBE d] := by unfold ftsPrfRandFrames; rfl
 
 /-- Real `cSHAKE256` (`Keccak-f[1600]`, `cshake256_framed_xof`) instantiation of `FrontierHashSuite`
     matching `crates/qsag-fts/src/frontier.rs:748-812, 1077-1089` bit-for-bit. -/
@@ -1717,7 +1717,7 @@ private theorem sum_replicate_eq : ∀ (n c : Nat), (List.replicate n c).sum = n
        (`1615 < 34 * 95 = 3230`), forcing a strictly backward hash-chain step in any 0-query forgery! -/
 theorem compact1122_target_sum_antichain :
     (∀ (d d' : List Nat),
-      d.length = 34 → d'.length = 34 →
+      ∀ (hLen : d.length = 34) (hLen' : d'.length = 34),
       (∀ x ∈ d, x < 96) → (∀ x ∈ d', x < 96) →
       d.sum = 1615 → d'.sum = 1615 → d' ≠ d →
       (∃ i : Fin d'.length,
@@ -1742,8 +1742,9 @@ theorem compact1122_target_sum_antichain :
     refine ⟨w.1, ?_⟩
     have hMem : maxVec.get ⟨w.1.1, Nat.lt_of_lt_of_eq w.1.2 (hL'.trans hMaxLen.symm)⟩ ∈ maxVec :=
       List.get_mem _ _
-    rw [(List.mem_replicate.mp hMem).2] at w
-    exact w.2
+    have hw := w.2
+    rw [(List.mem_replicate.mp hMem).2] at hw
+    exact hw
 
 /-- Constructive 0-query (`EUF-NMA`) forgery break extractor for `FrontierSumFts` whenever
     `p.targetSum < p.frontierLen * (p.winternitzW - 1)` (satisfied by both `Compact1122` and `Full256Bit`). -/
@@ -1794,10 +1795,10 @@ def extractCompact1122ZeroQueryBreak (H : FrontierHashSuite) (p : FrontierFtsPar
     have hEndSum : endVec.sum = p.frontierLen * (p.winternitzW - 1) :=
       sum_replicate_eq p.frontierLen (p.winternitzW - 1)
     have hW2 : 2 ≤ p.winternitzW := by
-      cases p.winternitzW with
-      | zero => simp at hSlack
+      cases hw : p.winternitzW with
+      | zero => simp [hw] at hSlack
       | succ w' => cases w' with
-        | zero => simp at hSlack
+        | zero => simp [hw] at hSlack
         | succ _ => omega
     have hEndBnd : ∀ a ∈ endVec, a < p.winternitzW := fun a ha => by
       rw [(List.mem_replicate.mp ha).2]; omega
@@ -1923,7 +1924,7 @@ theorem compact1122_closed_euf_cma_gameBound {n : Nat} (hPos : 0 < n)
         exact ⟨extractCompact1122ZeroQueryBreak H compact1122Params hSl (game ω).sk
           (game ω).msgStar (game ω).sigStar hVer⟩
       | some sig₁ =>
-        rw [hPr, hSign] at hFrBool
+        simp only [hPr, hSign] at hFrBool
         exact ⟨extractCompact1122ForgeryBreak H compact1122Params hL (game ω).sk hg ctr m₁ sig₁
           hSign (game ω).msgStar (game ω).sigStar (of_decide_eq_true hFrBool) hVer⟩
   obtain ⟨brk⟩ := hBrk

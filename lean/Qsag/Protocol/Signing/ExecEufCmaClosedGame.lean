@@ -897,7 +897,7 @@ def keygenFromByteOracle (f : Spec.Bytes → Spec.Bytes) : PqSecretKey :=
   ⟨f [0], f [1], f [2]⟩
 
 theorem keygenFromByteOracle_eq (f : Spec.Bytes → Spec.Bytes) :
-    keygenFromByteOracle f = ⟨f [0], f [1], f [2]⟩ := rfl
+    keygenFromByteOracle f = ⟨f [0], f [1], f [2]⟩ := by unfold keygenFromByteOracle; rfl
 
 /-- Explicit 3-query `Within 3` oracle distinguisher simulating `ExecEufCmaGame` under PRF-derived
     vs random-function-derived secret keys, discharging `hReal` and `hIdeal` of
@@ -914,8 +914,9 @@ def execKeygenDistinguisher {qHash qSign : Nat} (suite : TweakableHashSuite)
 
 theorem execKeygenDistinguisher_within {qHash qSign : Nat} (suite : TweakableHashSuite)
     (params : PqHashParams) (A : SeedWithheldEufCmaAdv qHash qSign) :
-    Spec.Within 3 (execKeygenDistinguisher suite params A) :=
-  .call [0] _ (fun _ => .call [1] _ (fun _ => .call [2] _ (fun _ => .ret 0 _)))
+    Spec.Within 3 (execKeygenDistinguisher suite params A) := by
+  unfold execKeygenDistinguisher
+  exact .call (E := Spec.byteOracleIface) [0] _ (fun _ => .call (E := Spec.byteOracleIface) [1] _ (fun _ => .call (E := Spec.byteOracleIface) [2] _ (fun _ => .ret 0 _)))
 
 private theorem execKeygenDistinguisher_play {qHash qSign : Nat} (suite : TweakableHashSuite)
     (params : PqHashParams) (A : SeedWithheldEufCmaAdv qHash qSign)
@@ -928,20 +929,12 @@ private theorem execKeygenDistinguisher_play {qHash qSign : Nat} (suite : Tweaka
   have h0 : 0 < qPrf := by omega
   have h1 : 1 < qPrf := by omega
   have h2 : 2 < qPrf := by omega
-  have s0 : Spec.budgetedFunOracle f qPrf 0 [0] = (f [0], 1) := if_pos h0
-  have s1 : Spec.budgetedFunOracle f qPrf 1 [1] = (f [1], 2) := if_pos h1
-  have s2 : Spec.budgetedFunOracle f qPrf 2 [2] = (f [2], 3) := if_pos h2
+  have s0 : Spec.budgetedFunOracle f qPrf 0 [0] = (f [0], 1) := by rw [Spec.budgetedFunOracle.public_eqs, ite_eq_left h0]
+  have s1 : Spec.budgetedFunOracle f qPrf 1 [1] = (f [1], 2) := by rw [Spec.budgetedFunOracle.public_eqs, ite_eq_left h1]
+  have s2 : Spec.budgetedFunOracle f qPrf 2 [2] = (f [2], 3) := by rw [Spec.budgetedFunOracle.public_eqs, ite_eq_left h2]
   unfold execKeygenDistinguisher
-  show (Spec.Code.play (Spec.budgetedFunOracle f qPrf) _
-    (Spec.budgetedFunOracle f qPrf 0 [0]).2).1 = _
-  rw [s0]
-  show (Spec.Code.play (Spec.budgetedFunOracle f qPrf) _
-    (Spec.budgetedFunOracle f qPrf 1 [1]).2).1 = _
-  rw [s1]
-  show (Spec.Code.play (Spec.budgetedFunOracle f qPrf) _
-    (Spec.budgetedFunOracle f qPrf 2 [2]).2).1 = _
-  rw [s2]
-  rfl
+  rw [Spec.Code.play_call, s0, Spec.Code.play_call, s1, Spec.Code.play_call, s2]
+  simp only [Spec.Code.play_ret, keygenFromByteOracle_eq]
 
 /-- **Concrete Key-Generation Hop Theorem (`0` Open Simulation Obligations).** Instantiates
     `jorts_baggy_closed_euf_cma_keygen_hop` with `execKeygenDistinguisher` (`Within 3`) for any
@@ -969,10 +962,14 @@ theorem jorts_baggy_closed_euf_cma_keygen_hop_concrete {n nC nA qHash qSign : Na
   exact jorts_baggy_closed_euf_cma_keygen_hop hPos suite params hw keygenReal keygenIdeal advCoin
     prf keyLen inLen outLen qPrf hPrf π sample hU
     (fun a => execKeygenDistinguisher suite params (adv a)) hD
-    (fun ω => (execKeygenDistinguisher_play suite params (adv (π.advc ω))
-      (prf (sample (π.chal ω)).1) hqPrf).symm)
-    (fun ω => (execKeygenDistinguisher_play suite params (adv (π.advc ω))
-      (sample (π.chal ω)).2 hqPrf).symm)
+    (fun ω => by
+      rw [Spec.prfRealGame.public_eqs]
+      exact (execKeygenDistinguisher_play suite params (adv (π.advc ω))
+        (prf (sample (π.chal ω)).1) hqPrf).symm)
+    (fun ω => by
+      rw [Spec.prfIdealGame.public_eqs]
+      exact (execKeygenDistinguisher_play suite params (adv (π.advc ω))
+        (sample (π.chal ω)).2 hqPrf).symm)
 
 /-- **Constructive Reduction Embedding from `ExecEufCmaGame` into `Spec.Assumptions`.**
     Witnesses that every winning coin of the executable latched EUF-CMA experiment lifts to a
@@ -1056,16 +1053,6 @@ private def seedZeroBadInputs : List (List UInt8) :=
    thPreimage tagThTl [] ⟨0, 0, .wotsPk, 0, 0, 0⟩ (zero32 :: List.replicate 127 crumb32),
    thPreimage tagThH [] ⟨0, 0, .tree, 0, 1, 0⟩ [zero32, crumb32]]
 
-/-- Concrete 1-byte secret-key-indexed tweakable hash suite: secret seed `[0x00]` derives public
-    root `0x1B…1B` (matching `prodToyForgery`), while every nonzero secret seed `[b]` (`b ≠ 0`)
-    derives public root `0x00…00` (rejecting `prodToyForgery`). -/
-def seedZeroRootSuite : TweakableHashSuite where
-  suiteId := []
-  rawHash inp := if inp ∈ seedZeroBadInputs then zero32 else crumb32
-  rawHash_len inp := by
-    dsimp only
-    split <;> exact List.length_replicate
-
 /-- Uniform 256-key challenger sampler placing the 1-byte secret strictly in `skSeed`. -/
 def seed256Keygen (ω : Fin 256) : PqSecretKey :=
   ⟨[UInt8.ofNat ω.1], [], []⟩
@@ -1076,14 +1063,14 @@ theorem seed256Keygen_uniform :
   mem _ := ⟨rfl, rfl, rfl⟩
   injective i j h := by
     injection h with hS _ _
-    exact Spec.uniformOn_byte1Seed.injective i j hS
+    exact Spec.uniformOn_byte1Seed.injective i j (by simpa only [Spec.byte1SeedSampler.public_eqs] using hS)
   surjective sk hSk := by
     obtain ⟨h1, h2, h3⟩ := hSk
     obtain ⟨i, hi⟩ := Spec.uniformOn_byte1Seed.surjective sk.skSeed h1
     refine ⟨i, ?_⟩
     cases sk
     dsimp only at hi h2 h3
-    rw [← hi, h2, h3]
+    rw [← hi, h2, h3, Spec.byte1SeedSampler.public_eqs]
     rfl
 
 /-- Seed-withheld `0`-query forger guessing `prodToyForgery` on message `[]`. -/
@@ -1094,7 +1081,8 @@ def seedWithheldZeroGuessAdv : SeedWithheldEufCmaAdv 0 0 where
 private theorem tagPrf_ne_others :
     tagPrf ≠ tagThF ∧ tagPrf ≠ tagThTl ∧ tagPrf ≠ tagThH ∧
     tagThF ≠ tagThTl ∧ tagThF ≠ tagThH ∧ tagThTl ≠ tagThH := by
-  decide
+  simp only [tagPrf.public_eqs, tagThF.public_eqs, tagThTl.public_eqs, tagThH.public_eqs]
+  decide +kernel
 
 private theorem zero32_ne_crumb32 : zero32 ≠ crumb32 := by decide
 
@@ -1143,8 +1131,8 @@ private theorem seedZeroRootSuite_thCall_crumb {role : List UInt8} {adrs : HashA
     (hNoTl : role = tagThTl → args ≠ (zero32 :: List.replicate 127 crumb32))
     (hNoH : role = tagThH → args ≠ [zero32, crumb32]) :
     thCall seedZeroRootSuite role [] adrs args = crumb32 := by
-  rw [thCall_eq]
-  exact if_neg (seedZeroRootSuite_not_bad_of_not_prf0 hNoPrf hNoF hNoTl hNoH)
+  rw [thCall_eq, seedZeroRootSuite_rawHash_eq]
+  exact ite_eq_right (seedZeroRootSuite_not_bad_of_not_prf0 hNoPrf hNoF hNoTl hNoH)
 
 private theorem seedZeroRootSuite_chain3_crumb (kp chain : Nat) :
     wotsChainSteps seedZeroRootSuite [] 0 0 kp chain 0 3 crumb32 = crumb32 := by
@@ -1155,22 +1143,21 @@ private theorem seedZeroRootSuite_chain3_crumb (kp chain : Nat) :
     exact seedZeroRootSuite_thCall_crumb
       (fun h => absurd h tagPrf_ne_others.1.symm)
       (fun _ h => zero32_ne_crumb32 (by injection h with h1; exact h1.symm))
-      (fun h => absurd h tagPrf_ne_others.2.2.1)
       (fun h => absurd h tagPrf_ne_others.2.2.2.1)
-  rw [wotsChainSteps_succ, hStep 0, wotsChainSteps_succ, hStep 1,
-    wotsChainSteps_succ, hStep 2, wotsChainSteps_zero]
+      (fun h => absurd h tagPrf_ne_others.2.2.2.2.1)
+  simp only [wotsChainSteps_succ, hStep, wotsChainSteps_zero]
 
 private theorem seedZeroRootSuite_chain3_zero :
     wotsChainSteps seedZeroRootSuite [] 0 0 0 0 0 3 zero32 = zero32 := by
   have h0 : thChainF seedZeroRootSuite [] ⟨0, 0, .wotsHash, 0, 0, 0⟩ zero32 = zero32 := by
-    rw [thChainF_eq, thCall_eq]
-    exact if_pos (List.mem_append_right _ (List.Mem.head _))
+    rw [thChainF_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
+    exact ite_eq_left (List.mem_append_right _ (List.Mem.head _))
   have h1 : thChainF seedZeroRootSuite [] ⟨0, 0, .wotsHash, 0, 0, 1⟩ zero32 = zero32 := by
-    rw [thChainF_eq, thCall_eq]
-    exact if_pos (List.mem_append_right _ (List.Mem.tail _ (List.Mem.head _)))
+    rw [thChainF_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
+    exact ite_eq_left (List.mem_append_right _ (List.Mem.tail _ (List.Mem.head _)))
   have h2 : thChainF seedZeroRootSuite [] ⟨0, 0, .wotsHash, 0, 0, 2⟩ zero32 = zero32 := by
-    rw [thChainF_eq, thCall_eq]
-    exact if_pos (List.mem_append_right _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))
+    rw [thChainF_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
+    exact ite_eq_left (List.mem_append_right _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))
   rw [wotsChainSteps_succ]; change wotsChainSteps _ _ _ _ _ _ 1 2 (thChainF _ _ ⟨0, 0, .wotsHash, 0, 0, 0⟩ zero32) = zero32
   rw [h0, wotsChainSteps_succ]; change wotsChainSteps _ _ _ _ _ _ 2 1 (thChainF _ _ ⟨0, 0, .wotsHash, 0, 0, 1⟩ zero32) = zero32
   rw [h1, wotsChainSteps_succ]; change wotsChainSteps _ _ _ _ _ _ 3 0 (thChainF _ _ ⟨0, 0, .wotsHash, 0, 0, 2⟩ zero32) = zero32
@@ -1182,7 +1169,8 @@ private theorem range128_split : List.range 128 = 0 :: (List.range 127).map (· 
 private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
     derivePublicKey seedZeroRootSuite prodToyStatefulParams (seed256Keygen ω) =
       if ω.1 = 0 then ⟨[], crumb32⟩ else ⟨[], zero32⟩ := by
-  unfold derivePublicKey seed256Keygen prodToyStatefulParams
+  rw [prodToyStatefulParams.public_eqs]
+  unfold derivePublicKey seed256Keygen
   dsimp only
   rw [computeXmssSubtreeRoot_eq, computeMerkleNode_succ, computeMerkleNode_zero,
     computeMerkleNode_zero]
@@ -1210,14 +1198,14 @@ private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
     rw [hMap1, thTweakTl_eq]
     exact seedZeroRootSuite_thCall_crumb
       (fun h => absurd h tagPrf_ne_others.2.1.symm)
-      (fun h => absurd h tagPrf_ne_others.2.2.1.symm)
+      (fun h => absurd h tagPrf_ne_others.2.2.2.1.symm)
       (fun _ h => by
         injection h with hHead _
         exact zero32_ne_crumb32 hHead.symm)
       (fun h => absurd h tagPrf_ne_others.2.2.2.2.2)
   have hRPos : ∀ k ∈ List.range 127,
       wotsChainSteps seedZeroRootSuite [] 0 0 0 (k + 1) 0 3
-        (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 (k + 1)) = crumb32 := by
+        (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 (k + 1)) = crumb32 := by
     intro k hk
     have hkLt : k < 127 := List.mem_range.mp hk
     have hBase : wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 (k + 1) =
@@ -1236,18 +1224,17 @@ private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
     rw [hBase, seedZeroRootSuite_chain3_crumb 0 (k + 1)]
   have hTail127 : ((List.range 127).map (· + 1)).map (fun r =>
       wotsChainSteps seedZeroRootSuite [] 0 0 0 r 0 3
-        (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 r)) =
+        (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 r)) =
       List.replicate 127 crumb32 := by
     rw [List.map_map]
     have hEqC : List.map (fun k =>
         wotsChainSteps seedZeroRootSuite [] 0 0 0 (k + 1) 0 3
-          (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 (k + 1)))
+          (wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 (k + 1)))
         (List.range 127) = List.map (fun _ => crumb32) (List.range 127) :=
       List.map_congr_left hRPos
-    rw [hEqC]
-    decide
+    exact hEqC.trans (by decide)
   by_cases hω0 : ω.1 = 0
-  · rw [if_pos hω0]
+  · rw [ite_eq_left hω0]
     have hB0 : UInt8.ofNat ω.1 = 0x00 := by rw [hω0]; rfl
     have hBase0 : wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 0 = crumb32 := by
       rw [hB0, wotsSecretBase_eq, thSecretPrf_eq]
@@ -1264,7 +1251,7 @@ private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
         thTweakTl_eq]
       exact seedZeroRootSuite_thCall_crumb
         (fun h => absurd h tagPrf_ne_others.2.1.symm)
-        (fun h => absurd h tagPrf_ne_others.2.2.1.symm)
+        (fun h => absurd h tagPrf_ne_others.2.2.2.1.symm)
         (fun _ h => by injection h with hHd _; exact zero32_ne_crumb32 hHd.symm)
         (fun h => absurd h tagPrf_ne_others.2.2.2.2.2)
     change PqPublicKey.mk [] (thNodeH seedZeroRootSuite [] ⟨0, 0, .tree, 0, 1, 0⟩
@@ -1274,13 +1261,13 @@ private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
     congr 1
     exact seedZeroRootSuite_thCall_crumb
       (fun h => absurd h tagPrf_ne_others.2.2.1.symm)
-      (fun h => absurd h tagPrf_ne_others.2.2.2.1.symm)
+      (fun h => absurd h tagPrf_ne_others.2.2.2.2.1.symm)
       (fun h => absurd h tagPrf_ne_others.2.2.2.2.2.symm)
       (fun _ h => by injection h with hHd _; exact zero32_ne_crumb32 hHd.symm)
-  · rw [if_neg hω0]
+  · rw [ite_eq_right hω0]
     have hBaseZ : wotsSecretBase seedZeroRootSuite ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0 0 = zero32 := by
-      rw [wotsSecretBase_eq, thSecretPrf_eq, thCall_eq]
-      refine if_pos (List.mem_append_left _ (List.mem_map.mpr ⟨ω.1 - 1, ?_, ?_⟩))
+      rw [wotsSecretBase_eq, thSecretPrf_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
+      refine ite_eq_left (List.mem_append_left _ (List.mem_map.mpr ⟨ω.1 - 1, ?_, ?_⟩))
       · exact List.mem_range.mpr (by have := ω.2; omega)
       · have hEq : ω.1 - 1 + 1 = ω.1 := by omega
         rw [hEq]; rfl
@@ -1289,26 +1276,28 @@ private theorem derivePublicKey_seedZeroRootSuite (ω : Fin 256) :
       rw [computeWotsPk_eq]
       dsimp only
       rw [range128_split, List.map_cons, hTail127, hBaseZ, seedZeroRootSuite_chain3_zero,
-        thTweakTl_eq, thCall_eq]
-      exact if_pos (List.mem_append_right _
+        thTweakTl_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
+      exact ite_eq_left (List.mem_append_right _
         (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _)))))
     change PqPublicKey.mk [] (thNodeH seedZeroRootSuite [] ⟨0, 0, .tree, 0, 1, 0⟩
       (computeWotsPk seedZeroRootSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 0)
       (computeWotsPk seedZeroRootSuite ⟨4, 128, 1, 1, 0, 0, 1, true⟩ ⟨[UInt8.ofNat ω.1], [], []⟩ 0 0 1)) = _
-    rw [hKp0, hKp1, thNodeH_eq, thCall_eq]
+    rw [hKp0, hKp1, thNodeH_eq, thCall_eq, seedZeroRootSuite_rawHash_eq]
     congr 1
-    exact if_pos (List.mem_append_right _
+    exact ite_eq_left (List.mem_append_right _
       (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.tail _ (List.Mem.head _))))))
 
 private theorem verify_seedZeroRootSuite_crumb_pk :
     verifyProductionPqHashSig seedZeroRootSuite prodToyStatefulParams
       ⟨[], crumb32⟩ [] prodToyForgery = true := by
-  decide +kernel
+  rw [prodToyStatefulParams.public_eqs, prodToyForgery.public_eqs]
+  exact seedZeroRootSuite_verifyToy_crumb
 
 private theorem verify_seedZeroRootSuite_zero_pk :
     verifyProductionPqHashSig seedZeroRootSuite prodToyStatefulParams
       ⟨[], zero32⟩ [] prodToyForgery = false := by
-  decide +kernel
+  rw [prodToyStatefulParams.public_eqs, prodToyForgery.public_eqs]
+  exact seedZeroRootSuite_verifyToy_zero
 
 /-- Exact win characterization over all 256 uniform secret keys: the seed-withheld guess wins
     on coin `0` (`skSeed = [0x00]`) and loses on all 255 nonzero coins (`winProb = 1 / 256`). -/
@@ -1319,9 +1308,9 @@ theorem seedZeroRoot_execEufCmaGame_win_iff (ω : Fin 256) :
     ⟨seed256Keygen ω, [], [], prodToyForgery⟩ = decide (ω.1 = 0)
   rw [prodEufCmaWin_eq, productionSigningLog_nil, derivePublicKey_seedZeroRootSuite]
   by_cases h0 : ω.1 = 0
-  · rw [if_pos h0, decide_eq_true h0, verify_seedZeroRootSuite_crumb_pk]
+  · rw [ite_eq_left h0, decide_eq_true h0, verify_seedZeroRootSuite_crumb_pk]
     rfl
-  · rw [if_neg h0, decide_eq_false h0, verify_seedZeroRootSuite_zero_pk]
+  · rw [ite_eq_right h0, decide_eq_false h0, verify_seedZeroRootSuite_zero_pk]
     rfl
 
 /-- Uniform `(256 * 256)`-coin keygen reading the second `Fin 256` coordinate (`advc` of
@@ -1385,29 +1374,9 @@ def concreteExecEufCmaReductionEmbedding :
         ([UInt8.ofNat ((Spec.CoinSplit.prod 256 256).chal z).1], [[0x00]]) := by
       rw [Spec.byte1SeedAndPreSampler_eq, hz0]
       rfl
-    show Spec.smDtPreWin Spec.poly257Hash
-      (Spec.Code.play (Spec.smDtPreOracle Spec.poly257Hash 1
-          (fun i => (Spec.byte1SeedAndPreSampler z).2.getD i []))
-        (Spec.boundedPreAdv Spec.poly257Hash [] [[0x00]])
-        ⟨(Spec.byte1SeedAndPreSampler z).1, [], false⟩).2
-      (Spec.Code.play (Spec.smDtPreOracle Spec.poly257Hash 1
-          (fun i => (Spec.byte1SeedAndPreSampler z).2.getD i []))
-        (Spec.boundedPreAdv Spec.poly257Hash [] [[0x00]])
-        ⟨(Spec.byte1SeedAndPreSampler z).1, [], false⟩).1 = true
+    simp only [Spec.smDtPreGame.public_eqs, Spec.smDtPreRun.public_eqs, Spec.CoinSplit.challengerOnly_chal]
     rw [hSampleZ]
-    have hStep0 : Spec.smDtPreOracle Spec.poly257Hash 1
-        (fun i => ([[0x00]] : List Spec.Bytes).getD i [])
-        ⟨[UInt8.ofNat ((Spec.CoinSplit.prod 256 256).chal z).1], [], false⟩ (.target [] []) =
-        (some (Spec.poly257Hash [UInt8.ofNat ((Spec.CoinSplit.prod 256 256).chal z).1] [] [0x00]),
-          ⟨[UInt8.ofNat ((Spec.CoinSplit.prod 256 256).chal z).1], [([], [0x00])], false⟩) := rfl
-    unfold Spec.boundedPreAdv
-    rw [Spec.Code.play_call, hStep0, Spec.Code.play_call]
-    dsimp only [Spec.smDtPreOracle, Option.getD, Spec.firstByteString]
-    rw [decide_eq_true (rfl : some (Spec.poly257Hash _ [] [0x00]) = some (Spec.poly257Hash _ [] [0x00]))]
-    dsimp only [cond, Spec.Code.play, Spec.smDtPreWin, List.any]
-    rw [decide_eq_true (rfl : ([] : Spec.Bytes) = []),
-      decide_eq_true (rfl : Spec.poly257Hash _ [] [0x00] = Spec.poly257Hash _ [] [0x00])]
-    rfl
+    exact Spec.boundedPreAdv_singleton_hidden_wins _ _ _ _ _ rfl
 
 /-- **Unconditional Non-Vacuous `< 1` Forger Bound via `concreteExecEufCmaReductionEmbedding`.**
     Composes `concreteExecEufCmaReductionEmbedding.forger_bound` with our three proved
@@ -1423,7 +1392,7 @@ theorem concreteExecEufCma_forger_bound :
       (((⟨2, 256, by decide⟩ : Spec.RatBound).add ⟨2, 256, by decide⟩).add ⟨2, 256, by decide⟩) ∧
     (((⟨2, 256, by decide⟩ : Spec.RatBound).add ⟨2, 256, by decide⟩).add ⟨2, 256, by decide⟩).lt
       Spec.RatBound.one :=
-  ⟨by rw [seedPair_execEufCmaGame_win_iff]; rfl,
+  ⟨by rw [seedPair_execEufCmaGame_win_iff, Spec.CoinSplit.prod_advc_val]; rfl,
    concreteExecEufCmaReductionEmbedding.forger_bound
      (Spec.byteIdxHmsg_itsrHard_within 1 1)
      (Spec.poly257Hash_smDtTcrHard_within 2 1)

@@ -11,7 +11,7 @@ cat > build/synth_$TAG.ys <<YS
 read_liberty -lib -ignore_miss_dir -setattr blackbox $LIB
 read_verilog -sv -DSYNTHESIS -DQSAG_GF180_CELLS -DQSAG_ICG $DEFS $FILES
 hierarchy -check -top $TOP
-synth -top $TOP ${FLATTEN:--flatten}
+synth -top $TOP -booth ${FLATTEN:--flatten}
 opt -purge
 dfflibmap -liberty $LIB
 abc -liberty $LIB ${ABC_OPTS:--D 20000}

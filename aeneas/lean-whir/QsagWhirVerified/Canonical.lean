@@ -1061,9 +1061,8 @@ theorem verify_stage_pow_mask_16_iff_verifyWhirStagePow
       rfl
 
 /-- A returned pair has `level < 64`, tag `0`, and frames `(left, right)` in the order chosen
-    by the parity of `idx / 2^level`. The right-hand side restates the body of
-    `Qsag.Aggregation.merkleNodeFrame (idx / 2^level)`; that definition exports no equation,
-    so it is not named here. -/
+    by the parity of `idx / 2^level`: the framed pair is
+    `Qsag.Aggregation.merkleNodeFrame (idx / 2^level) node sibling`. -/
 theorem step_merkle_pair_order_canonical_parity
     (idx : U64) (level : U32) (node sibling : Array U8 32#usize) (pair : MerklePair)
     (h : step_merkle_pair_order idx level node sibling = .ok (some pair)) :
@@ -1071,15 +1070,13 @@ theorem step_merkle_pair_order_canonical_parity
     pair.tag = 0#u8 ∧
     Qsag.encodeMultiFrame [pair.left.val.map (fun b => UInt8.ofNat b.val),
                            pair.right.val.map (fun b => UInt8.ofNat b.val)] =
-      Qsag.encodeMultiFrame
-        (if (idx.val / 2 ^ level.val) % 2 = 0
-         then [node.val.map (fun b => UInt8.ofNat b.val),
-               sibling.val.map (fun b => UInt8.ofNat b.val)]
-         else [sibling.val.map (fun b => UInt8.ofNat b.val),
-               node.val.map (fun b => UInt8.ofNat b.val)]) := by
+      Qsag.Aggregation.merkleNodeFrame (idx.val / 2 ^ level.val)
+        (node.val.map (fun b => UInt8.ofNat b.val))
+        (sibling.val.map (fun b => UInt8.ofNat b.val)) := by
   obtain ⟨hlt, htag, hord⟩ := (step_merkle_pair_order_some_iff idx level node sibling pair).mp h
   refine ⟨hlt, htag, ?_⟩
   rw [Nat.shiftRight_eq_div_pow] at hord
+  rw [Qsag.Aggregation.merkleNodeFrame.public_eq_1]
   by_cases hpar : (idx.val / 2 ^ level.val) % 2 = 0
   · simp only [hpar, ↓reduceIte] at hord ⊢
     rw [hord.1, hord.2]

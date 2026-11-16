@@ -89,8 +89,21 @@ theorem quorum_privacy (t n f q : Nat) (h : quorumAccepts t n f q = true) : f < 
   simp only [quorumAccepts, decide_eq_true_eq] at h
   exact h.2.2.2.2.2.1
 
+private theorem sumDigits_eq_sum : ∀ ds : List Nat, sumDigits ds = ds.sum
+  | [] => by rw [sumDigits_nil, List.sum_nil]
+  | d :: ds => by rw [sumDigits_cons, List.sum_cons, sumDigits_eq_sum ds]
+
+private theorem checkTargetSum_eq_sum (w ell1 target : Nat) (digits : List Nat) :
+    checkTargetSum w ell1 target digits =
+      (decide (digits.length = ell1) && digits.all (fun d => decide (d < w)) &&
+        decide (digits.sum = target)) := by
+  simp only [checkTargetSum, sumDigits_eq_sum]
+
 theorem generic_zero_digest_rejected :
-    wotsGenericAccepts (List.replicate 32 0) = false := by decide
+    wotsGenericAccepts (List.replicate 32 0) = false := by
+  simp only [wotsGenericAccepts, extractBaseWDigitsChecked_eq, extractBaseWDigits_eq,
+    checkTargetSum_eq_sum]
+  decide
 
 /-- Production-profile digit guard used by differential WOTS vectors. -/
 def wots128Accepts (digest : List UInt8) : Bool :=
@@ -98,7 +111,9 @@ def wots128Accepts (digest : List UInt8) : Bool :=
 
 /-- Removing the constant-sum guard accepts the all-zero digest. -/
 theorem tooth_zero_digest_rejected :
-    wots128Accepts (List.replicate 32 0) = false := by decide
+    wots128Accepts (List.replicate 32 0) = false := by
+  simp only [wots128Accepts, extractBaseWDigits_eq, checkTargetSum_eq_sum]
+  decide
 
 /-- Exact WOTS128 digest acceptance, including its wire size. -/
 def ValidWots128Digest (digest : List UInt8) : Prop :=
@@ -114,6 +129,7 @@ theorem accepted_digest_has_target_sum (digest : List UInt8)
 theorem witness_valid_digest : ∃ digest, ValidWots128Digest digest := by
   refine ⟨List.replicate 32 0x66, ?_⟩
   unfold ValidWots128Digest
+  simp only [wots128Accepts, extractBaseWDigits_eq, checkTargetSum_eq_sum]
   decide
 
 theorem tooth_zero_digest_invalid : ¬ ValidWots128Digest (List.replicate 32 0) := by
@@ -262,8 +278,17 @@ theorem sha3_256Bytes_empty_nist :
       [0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66,
        0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61, 0xd6, 0x62,
        0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa,
-       0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8, 0x43, 0x4a] := by
-  decide +kernel
+       0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8, 0x43, 0x4a] :=
+  sha3_256_empty_squeeze_kat
+
+/-- Original `Keccak-256("")` digest. -/
+theorem keccak256Bytes_empty :
+    keccak256Bytes [] =
+      [0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c,
+       0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03, 0xc0,
+       0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b,
+       0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85, 0xa4, 0x70] :=
+  keccak256_empty_squeeze_kat
 
 /-- Official NIST FIPS 202 `SHA3-512("")` conformance theorem. -/
 theorem sha3_512Bytes_empty_nist :
@@ -276,7 +301,20 @@ theorem sha3_512Bytes_empty_nist :
        0x11, 0xe3, 0xe9, 0x40, 0x2c, 0x3a, 0xc5, 0x58,
        0xf5, 0x00, 0x19, 0x9d, 0x95, 0xb6, 0xd3, 0xe3,
        0x01, 0x75, 0x85, 0x86, 0x28, 0x1d, 0xcd, 0x26] := by
-  decide +kernel
+  have hPad : padRate72 [] 0x06 = 0x06 :: (List.replicate 70 0 ++ [0x80]) := by decide
+  have hState : absorbPadded72 (padRate72 [] 0x06) =
+      keccakF1600 ⟨0x06, 0, 0, 0, 0, 0, 0, 0, 0x8000000000000000, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0⟩ := by
+    rw [hPad]
+    change absorbBlocks72 1 zeroKState _ = _
+    simp only [absorbBlocks72]
+    congr 1
+    rw [zeroKState_eq]
+    simp only [xorRate72, loadLe64_eq]
+    rfl
+  unfold sha3_512Bytes
+  rw [hState]
+  exact sha3_512_empty_squeeze_kat
 
 def Sha3_256Matches (msg digest : List UInt8) : Prop :=
   sha3_256Bytes msg = digest
@@ -288,7 +326,8 @@ theorem sha3_256Matches_width_and_keccak_sep (msg digest : List UInt8)
   subst h
   refine ⟨sha3_256Bytes_length msg, fun hm => ?_⟩
   subst hm
-  decide +kernel
+  rw [sha3_256Bytes_empty_nist, keccak256Bytes_empty]
+  decide
 
 theorem witness_sha3_256Matches_empty :
     ∃ (msg digest : List UInt8), Sha3_256Matches msg digest :=
@@ -298,7 +337,8 @@ theorem witness_sha3_256Matches_empty :
 theorem tooth_sha3_256_rejects_keccak256_pad :
     ¬ Sha3_256Matches [] (keccak256Bytes []) := by
   unfold Sha3_256Matches
-  decide +kernel
+  rw [sha3_256Bytes_empty_nist, keccak256Bytes_empty]
+  decide
 
 /-! ## 3. Width-16 Goldilocks `Poseidon2` Permutation ($R_F = 8, R_P = 22$) -/
 
@@ -331,18 +371,20 @@ def sboxState16Inv (st : Poseidon2State16) : Poseidon2State16 :=
 
 private theorem sboxState16Inv_sboxState16 (st : Poseidon2State16) :
     sboxState16Inv (sboxState16 st) = st := by
-  unfold sboxState16Inv sboxState16 sboxLane4Inv sboxLane4
+  unfold sboxState16Inv sboxState16
+  simp only [sboxLane4Inv_eq, sboxLane4_eq]
   apply Poseidon2State16.ext <;> apply Lane4.ext <;> exact sbox7Inv_sbox7 _
 
 private theorem sboxState16_sboxState16Inv (st : Poseidon2State16) :
     sboxState16 (sboxState16Inv st) = st := by
-  unfold sboxState16 sboxState16Inv sboxLane4 sboxLane4Inv
+  unfold sboxState16 sboxState16Inv
+  simp only [sboxLane4Inv_eq, sboxLane4_eq]
   apply Poseidon2State16.ext <;> apply Lane4.ext <;> exact sbox7_sbox7Inv _
 
 private theorem state16Sub_add_right (a c : Poseidon2State16) :
     state16Sub (state16Add a c) c = a := by
   have h4 : ∀ x y : Lane4, lane4Sub (lane4Add x y) y = x := fun x y => by
-    unfold lane4Sub lane4Add
+    simp only [lane4Sub_eq, lane4Add_eq]
     apply Lane4.ext <;> exact ring_add_sub_cancel_right _ _
   unfold state16Sub state16Add
   exact Poseidon2State16.ext (h4 _ _) (h4 _ _) (h4 _ _) (h4 _ _)
@@ -350,7 +392,7 @@ private theorem state16Sub_add_right (a c : Poseidon2State16) :
 private theorem state16Add_sub_right (a c : Poseidon2State16) :
     state16Add (state16Sub a c) c = a := by
   have h4 : ∀ x y : Lane4, lane4Add (lane4Sub x y) y = x := fun x y => by
-    unfold lane4Add lane4Sub
+    simp only [lane4Add_eq, lane4Sub_eq]
     apply Lane4.ext <;> exact ring_sub_add_cancel_right _ _
   unfold state16Add state16Sub
   exact Poseidon2State16.ext (h4 _ _) (h4 _ _) (h4 _ _) (h4 _ _)
@@ -440,8 +482,8 @@ def applyMI16Inv (y : Poseidon2State16) : Poseidon2State16 :=
 
 private theorem weightedSumMI16_applyMI16 (st : Poseidon2State16) :
     weightedSumMI16 (applyMI16 st) = Goldilocks.mul (Goldilocks.ofNat 40959) (state16Sum st) := by
-  unfold weightedSumMI16 applyMI16 state16Sum lane4Sum
-  dsimp only
+  unfold weightedSumMI16 applyMI16 state16Sum
+  simp only [lane4Sum_def]
   rw [← goldOfInt_nat st.b0.x0, ← goldOfInt_nat st.b0.x1, ← goldOfInt_nat st.b0.x2, ← goldOfInt_nat st.b0.x3,
       ← goldOfInt_nat st.b1.x0, ← goldOfInt_nat st.b1.x1, ← goldOfInt_nat st.b1.x2, ← goldOfInt_nat st.b1.x3,
       ← goldOfInt_nat st.b2.x0, ← goldOfInt_nat st.b2.x1, ← goldOfInt_nat st.b2.x2, ← goldOfInt_nat st.b2.x3,
@@ -519,8 +561,8 @@ private theorem mi16_lane_forward (v w : Int) (hv : v * w = 16384) (yi s : Goldi
 private theorem state16Sum_makeMI16InvRaw (y : Poseidon2State16) (inv16384 s : Goldilocks) :
     state16Sum (makeMI16InvRaw y inv16384 s) =
       Goldilocks.mul inv16384 (Goldilocks.sub (weightedSumMI16 y) (Goldilocks.mul (goldOfInt 24575) s)) := by
-  unfold state16Sum makeMI16InvRaw lane4Sum weightedSumMI16
-  dsimp only
+  unfold state16Sum makeMI16InvRaw weightedSumMI16
+  simp only [lane4Sum_def]
   rw [← goldOfInt_nat inv16384, ← goldOfInt_nat s,
       ← goldOfInt_nat y.b0.x0, ← goldOfInt_nat y.b0.x1, ← goldOfInt_nat y.b0.x2, ← goldOfInt_nat y.b0.x3,
       ← goldOfInt_nat y.b1.x0, ← goldOfInt_nat y.b1.x1, ← goldOfInt_nat y.b1.x2, ← goldOfInt_nat y.b1.x3,
@@ -662,15 +704,15 @@ private theorem runRoundsInv_runRounds16 {α σ : Type} (step stepInv : α → �
     (hInv : ∀ c s, stepInv c (step c s) = s) (cs : List α) :
     ∀ (s : σ), runRoundsInv stepInv cs (runRounds step cs s) = s := by
   induction cs with
-  | nil => intro _; rfl
-  | cons c cs ih => intro s; simp only [runRounds, runRoundsInv, ih (step c s), hInv]
+  | nil => intro _; rw [runRounds_nil, runRoundsInv_nil]
+  | cons c cs ih => intro s; simp only [runRounds_cons, runRoundsInv_cons, ih (step c s), hInv]
 
 private theorem runRounds_runRoundsInv16 {α σ : Type} (step stepInv : α → σ → σ)
     (hInv : ∀ c s, step c (stepInv c s) = s) (cs : List α) :
     ∀ (s : σ), runRounds step cs (runRoundsInv stepInv cs s) = s := by
   induction cs with
-  | nil => intro _; rfl
-  | cons c cs ih => intro s; simp only [runRoundsInv, runRounds, hInv, ih s]
+  | nil => intro _; rw [runRoundsInv_nil, runRounds_nil]
+  | cons c cs ih => intro s; simp only [runRoundsInv_cons, runRounds_cons, hInv, ih s]
 
 theorem poseidon2Perm16Inv_left_inv (st : Poseidon2State16) :
     poseidon2Perm16Inv (poseidon2Perm16 st) = st := by
@@ -707,11 +749,71 @@ theorem witness_poseidon2Perm16_pair :
     ∃ (inp out : Poseidon2State16), Poseidon16Pair inp out :=
   ⟨state16Zero, poseidon2Perm16 state16Zero, rfl⟩
 
+/-! Kernel-transparent forms of the round functions. Each one is obtained by rewriting the
+round with the public defining equations of the `Qsag.Oracle.Poseidon2` operations it calls, so
+the kernel can evaluate the permutation on a concrete state. -/
+
+private def applyME16K :
+    { f : Poseidon2State16 → Poseidon2State16 // ∀ st, applyME16 st = f st } :=
+  ⟨_, fun st => by
+    simp only [applyME16_eq, applyM4_eq, lane4Add_eq, lane4Sum_def]
+    rfl⟩
+
+private def externalRound16K :
+    { f : Poseidon2State16 → Poseidon2State16 → Poseidon2State16 //
+      ∀ rc st, externalRound16 rc st = f rc st } :=
+  ⟨_, fun rc st => by
+    simp only [externalRound16, sboxState16, state16Add, applyME16_eq, applyM4_eq, lane4Add_eq,
+      lane4Sum_def, sboxLane4_eq]
+    rfl⟩
+
+private def internalRound16K :
+    { f : Goldilocks → Poseidon2State16 → Poseidon2State16 //
+      ∀ rc st, internalRound16 rc st = f rc st } :=
+  ⟨_, fun rc st => by
+    simp only [internalRound16, applyMI16, state16Sum, lane4Sum_def]
+    rfl⟩
+
+private def poseidon2ConstAtK :
+    { f : Nat → Nat → Nat → Goldilocks // ∀ tag round lane, poseidon2ConstAt tag round lane = f tag round lane } :=
+  ⟨_, fun tag round lane => by
+    simp only [poseidon2ConstAt_eq, splitMix64Mix_eq]
+    rfl⟩
+
+private theorem applyME16_eqK (st : Poseidon2State16) : applyME16 st = applyME16K.val st :=
+  applyME16K.property st
+
+private theorem externalRound16_eqK (rc st : Poseidon2State16) :
+    externalRound16 rc st = externalRound16K.val rc st :=
+  externalRound16K.property rc st
+
+private theorem internalRound16_eqK (rc : Goldilocks) (st : Poseidon2State16) :
+    internalRound16 rc st = internalRound16K.val rc st :=
+  internalRound16K.property rc st
+
+private theorem poseidon2ConstAt_eqK (tag round lane : Nat) :
+    poseidon2ConstAt tag round lane = poseidon2ConstAtK.val tag round lane :=
+  poseidon2ConstAtK.property tag round lane
+
 /-- `#tooth`: Round constants make `poseidon2Perm16` non-fixing on `state16Zero`. -/
 theorem tooth_poseidon2Perm16_zero_not_fixed :
     ¬ Poseidon16Pair state16Zero state16Zero := by
   unfold Poseidon16Pair
-  decide +kernel
+  intro h
+  have hE : poseidon2InitialExtConsts16 =
+      [poseidon2ExtRoundConst16 0 0, poseidon2ExtRoundConst16 0 1,
+       poseidon2ExtRoundConst16 0 2, poseidon2ExtRoundConst16 0 3] := rfl
+  have hI : poseidon2InternalConsts16 =
+      [poseidon2ConstAt 1 0 0, poseidon2ConstAt 1 1 0, poseidon2ConstAt 1 2 0, poseidon2ConstAt 1 3 0, poseidon2ConstAt 1 4 0, poseidon2ConstAt 1 5 0, poseidon2ConstAt 1 6 0, poseidon2ConstAt 1 7 0, poseidon2ConstAt 1 8 0, poseidon2ConstAt 1 9 0, poseidon2ConstAt 1 10 0, poseidon2ConstAt 1 11 0, poseidon2ConstAt 1 12 0, poseidon2ConstAt 1 13 0, poseidon2ConstAt 1 14 0, poseidon2ConstAt 1 15 0, poseidon2ConstAt 1 16 0, poseidon2ConstAt 1 17 0, poseidon2ConstAt 1 18 0, poseidon2ConstAt 1 19 0, poseidon2ConstAt 1 20 0, poseidon2ConstAt 1 21 0] := rfl
+  have hT : poseidon2TerminalExtConsts16 =
+      [poseidon2ExtRoundConst16 2 0, poseidon2ExtRoundConst16 2 1,
+       poseidon2ExtRoundConst16 2 2, poseidon2ExtRoundConst16 2 3] := rfl
+  unfold poseidon2Perm16 at h
+  rw [hE, hI, hT] at h
+  simp only [runRounds_cons, runRounds_nil, externalRound16_eqK, internalRound16_eqK,
+    applyME16_eqK, poseidon2ExtRoundConst16, poseidon2ConstAt_eqK, state16Zero_eq,
+    lane4Zero_eq] at h
+  exact absurd (congrArg (fun s => s.b0.x0.val) h) (by decide +kernel)
 
 end LegacyPoseidon16
 
@@ -785,6 +887,7 @@ theorem tooth_hemAffineDuetFold_theta_drop_rejected :
   unfold HemFoldClaim
   intro h
   have hEq := h.2
+  simp only [hemAffineDuetFold, Exec.hemAffineDuetFold, foldDuetExt4.public_eq_1] at hEq
   revert hEq
   decide +kernel
 
