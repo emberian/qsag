@@ -1049,3 +1049,1482 @@ theorem hypertreeLayersWithCands_fst (suite : TweakableHashSuite) (params : PqHa
                 (layerIdx + 1) (globalIdx / 2 ^ params.subtreeHeight) nextRoot rest
     · simp [hCtr]
 
+theorem hypertreeLayersWithCands_cands_length_le (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot rRand : List UInt8) (log : List (List UInt8 × PqHashSig)) :
+    ∀ (layerIdx globalIdx : Nat) (curRoot : List UInt8) (sigs : List LayerXmssSig),
+      (hypertreeLayersWithCands suite params pkSeed pkRoot rRand log layerIdx globalIdx curRoot sigs).2.length ≤
+        sigs.length * (log.length + 1 + params.ell1 * (params.w - 1) + params.subtreeHeight)
+  | _, _, _, [] => by simp [hypertreeLayersWithCands]
+  | layerIdx, globalIdx, curRoot, lsig :: rest => by
+    unfold hypertreeLayersWithCands
+    rw [List.length_cons, Nat.succ_mul]
+    by_cases hCtr : decide (lsig.tswCtr < 2 ^ 32) = true
+    · simp only [hCtr, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      cases extractBaseWDigitsChecked params.w params.ell1 _ with
+      | none => simp only [List.length_map]; omega
+      | some digits =>
+        dsimp only
+        split
+        · simp only [List.length_map]; omega
+        · split
+          · simp only [List.length_map]; omega
+          · have hCh := allWotsChainsWithCands_cands_length_le suite params pkSeed
+              (UInt32.ofNat layerIdx) (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
+              (globalIdx % 2 ^ params.subtreeHeight) digits lsig.wotsChains params.ell1
+            have hMw := walkMerkleKpWithCands_cands_length_le suite pkSeed (UInt32.ofNat layerIdx)
+              (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0 0 0
+              (globalIdx % 2 ^ params.subtreeHeight)
+              (suite.rawHash (thPreimage tagThTl pkSeed
+                ⟨UInt32.ofNat layerIdx, UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight),
+                 .wotsPk, UInt32.ofNat (globalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
+                (allWotsChainsWithCands suite params pkSeed (UInt32.ofNat layerIdx)
+                  (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
+                  (globalIdx % 2 ^ params.subtreeHeight) digits lsig.wotsChains params.ell1).1))
+              lsig.authPath
+            cases hW : (walkMerkleKpWithCands suite pkSeed (UInt32.ofNat layerIdx)
+                (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0 0 0
+                (globalIdx % 2 ^ params.subtreeHeight)
+                (suite.rawHash (thPreimage tagThTl pkSeed
+                  ⟨UInt32.ofNat layerIdx, UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight),
+                   .wotsPk, UInt32.ofNat (globalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
+                  (allWotsChainsWithCands suite params pkSeed (UInt32.ofNat layerIdx)
+                    (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight))
+                    (globalIdx % 2 ^ params.subtreeHeight) digits lsig.wotsChains params.ell1).1))
+                lsig.authPath).1 with
+            | none =>
+              simp only [List.length_append, List.length_cons, List.length_map]
+              omega
+            | some nextRoot =>
+              have ih' := hypertreeLayersWithCands_cands_length_le suite params pkSeed pkRoot
+                rRand log (layerIdx + 1) (globalIdx / 2 ^ params.subtreeHeight) nextRoot rest
+              simp only [List.length_append, List.length_cons, List.length_map]
+              omega
+    · simp [hCtr]
+
+theorem advHypertreeLayersWithCands_within (params : PqHashParams)
+    (pkSeed pkRoot rRand : List UInt8) (log : List (List UInt8 × PqHashSig)) :
+    ∀ (layerIdx globalIdx : Nat) (curRoot : List UInt8) (sigs : List LayerXmssSig),
+      (advHypertreeLayersWithCands params pkSeed pkRoot rRand log layerIdx globalIdx curRoot sigs).Within
+        (sigs.length * prodLayerHashBudget params) 0
+  | _, _, _, [] => trivial
+  | layerIdx, globalIdx, curRoot, lsig :: rest => by
+    unfold advHypertreeLayersWithCands prodLayerHashBudget
+    rw [List.length_cons, Nat.succ_mul]
+    by_cases hCtr : decide (lsig.tswCtr < 2 ^ 32) = true
+    · simp only [hCtr, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      let remB := params.ell1 * (params.w - 1) + 1 + params.subtreeHeight +
+        rest.length * prodLayerHashBudget params
+      refine HashSignAdv.Within.bind_le (qh₂ := remB) (qs₂ := 0) (advRawHash_within _)
+        (fun hmsg => ?_) (by unfold remB prodLayerHashBudget; omega) (by omega)
+      cases extractBaseWDigitsChecked params.w params.ell1 hmsg with
+      | none => exact HashSignAdv.Within.done _ _ 0
+      | some digits =>
+        dsimp only
+        split
+        · exact HashSignAdv.Within.done _ _ 0
+        · split
+          · exact HashSignAdv.Within.done _ _ 0
+          · refine HashSignAdv.Within.bind_le
+              (qh₂ := 1 + params.subtreeHeight + rest.length * prodLayerHashBudget params)
+              (qs₂ := 0)
+              (advAllWotsChainsWithCands_within _ _ _ _ _ _ _ _)
+              (fun _ => ?_) (by unfold remB; omega) (by omega)
+            refine HashSignAdv.Within.bind_le
+              (qh₂ := params.subtreeHeight + rest.length * prodLayerHashBudget params)
+              (qs₂ := 0)
+              (advRawHash_within _) (fun _ => ?_) (by omega) (by omega)
+            refine HashSignAdv.Within.bind_le
+              (qh₂ := rest.length * prodLayerHashBudget params) (qs₂ := 0)
+              (advWalkMerkleKpWithCands_within _ _ _ _ _ _ _ _ _ _ _ _)
+              (fun mw => ?_) (by omega) (by omega)
+            cases mw.1 with
+            | none => exact HashSignAdv.Within.done _ _ 0
+            | some nextRoot =>
+              exact HashSignAdv.Within.map _
+                (advHypertreeLayersWithCands_within params pkSeed pkRoot rRand log
+                  (layerIdx + 1) (globalIdx / 2 ^ params.subtreeHeight) nextRoot rest)
+    · simp only [hCtr, Bool.not_false, ↓reduceIte]
+      exact HashSignAdv.Within.done _ _ 0
+
+theorem runHashSignAdv_advHypertreeLayersWithCands (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey)
+    (pkSeed pkRoot rRand : List UInt8) (log : List (List UInt8 × PqHashSig)) :
+    ∀ (layerIdx globalIdx : Nat) (curRoot : List UInt8) (sigs : List LayerXmssSig)
+      (qs : List ProdSigningQuery),
+      runHashSignAdv suite params sk qs
+          (advHypertreeLayersWithCands params pkSeed pkRoot rRand log layerIdx globalIdx curRoot sigs) =
+        (hypertreeLayersWithCands suite params pkSeed pkRoot rRand log layerIdx globalIdx curRoot sigs, qs)
+  | _, _, _, [], _ => rfl
+  | layerIdx, globalIdx, curRoot, lsig :: rest, qs => by
+    unfold advHypertreeLayersWithCands hypertreeLayersWithCands
+    by_cases hCtr : decide (lsig.tswCtr < 2 ^ 32) = true
+    · simp only [hCtr, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+      rw [runHashSignAdv_bind]
+      dsimp only [advRawHash, runHashSignAdv]
+      cases extractBaseWDigitsChecked params.w params.ell1 _ with
+      | none => rfl
+      | some digits =>
+        dsimp only
+        split
+        · rfl
+        · split
+          · rfl
+          · rw [runHashSignAdv_bind, runHashSignAdv_advAllWotsChainsWithCands]
+            dsimp only
+            rw [runHashSignAdv_bind]
+            dsimp only [advRawHash, runHashSignAdv]
+            rw [runHashSignAdv_bind, runHashSignAdv_advWalkMerkleKpWithCands]
+            dsimp only
+            cases (walkMerkleKpWithCands suite pkSeed (UInt32.ofNat layerIdx)
+                (UInt64.ofNat (globalIdx / 2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0 0 0
+                (globalIdx % 2 ^ params.subtreeHeight) _ lsig.authPath).1 with
+            | none => rfl
+            | some nextRoot =>
+              dsimp only [HashSignAdv.map]
+              rw [runHashSignAdv_bind, runHashSignAdv_advHypertreeLayersWithCands]
+              rfl
+    · simp [hCtr, runHashSignAdv]
+
+/-- Full public verifier + TCR candidate collector (pure specification, `pk`-only, `0` `sk` access). -/
+def publicVerifierWithTcrCands (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msg : List UInt8) (sig : PqHashSig) :
+    Bool × List (ProdTargetIdx × List UInt8) :=
+  if !params.productionWellFormed || !params.productionLeafIdxInRange sig.leafGlobalIdx then
+    (false, [])
+  else if sig.layerSigs.length ≠ params.numLayers || sig.msgTswCtr ≠ 0 then
+    (false, [])
+  else
+    let preHashInput := thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, msg]
+    let mu := suite.rawHash preHashInput
+    let preHashCands := log.map fun e => (ProdTargetIdx.preHash e, preHashInput)
+    if params.statefulJorts then
+      if !sig.forsOpenings.isEmpty then (false, preHashCands)
+      else
+        let ht := hypertreeLayersWithCands suite params pk.pkSeed pk.pkRoot sig.rRand log
+          0 sig.leafGlobalIdx mu sig.layerSigs
+        let ok := match ht.1 with
+          | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
+          | none => false
+        (ok, preHashCands ++ ht.2)
+    else
+      if sig.forsOpenings.length ≠ params.forsTrees then (false, preHashCands)
+      else
+        match deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot mu with
+        | none => (false, preHashCands)
+        | some (derivedLeafIdx, idxs) =>
+          if sig.leafGlobalIdx ≠ derivedLeafIdx then (false, preHashCands)
+          else
+            let subLeaves := 2 ^ params.subtreeHeight
+            let kp0 := sig.leafGlobalIdx % subLeaves
+            let tree0 := UInt64.ofNat (sig.leafGlobalIdx / subLeaves)
+            let fr := forsRootsWithCands suite params pk.pkSeed tree0 kp0 idxs sig.forsOpenings
+              0 params.forsTrees
+            match fr.1 with
+            | none => (false, preHashCands ++ fr.2)
+            | some roots =>
+              let forsPre := thPreimage tagThTl pk.pkSeed
+                ⟨0, tree0, .forsRoots, UInt32.ofNat kp0, 0, 0⟩ roots
+              let forsPk := suite.rawHash forsPre
+              let forsCand := (ProdTargetIdx.forsRoots, forsPre)
+              let ht := hypertreeLayersWithCands suite params pk.pkSeed pk.pkRoot sig.rRand log
+                0 sig.leafGlobalIdx forsPk sig.layerSigs
+              let ok := match ht.1 with
+                | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
+                | none => false
+              (ok, preHashCands ++ (forsCand :: (fr.2 ++ ht.2)))
+
+/-- Seed-withheld `HashSignAdv` execution of `publicVerifierWithTcrCands`. -/
+def advVerifyWithTcrCands (params : PqHashParams) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msg : List UInt8) (sig : PqHashSig) :
+    HashSignAdv (Bool × List (ProdTargetIdx × List UInt8)) :=
+  if !params.productionWellFormed || !params.productionLeafIdxInRange sig.leafGlobalIdx then
+    .done (false, [])
+  else if sig.layerSigs.length ≠ params.numLayers || sig.msgTswCtr ≠ 0 then
+    .done (false, [])
+  else
+    let preHashInput := thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, msg]
+    let preHashCands := log.map fun e => (ProdTargetIdx.preHash e, preHashInput)
+    (advRawHash preHashInput).bind fun mu =>
+      if params.statefulJorts then
+        if !sig.forsOpenings.isEmpty then .done (false, preHashCands)
+        else
+          (advHypertreeLayersWithCands params pk.pkSeed pk.pkRoot sig.rRand log
+            0 sig.leafGlobalIdx mu sig.layerSigs).map fun ht =>
+            let ok := match ht.1 with
+              | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
+              | none => false
+            (ok, preHashCands ++ ht.2)
+      else
+        if sig.forsOpenings.length ≠ params.forsTrees then .done (false, preHashCands)
+        else
+          (advDeriveProductionStatelessInputs params sig.rRand pk.pkSeed pk.pkRoot mu).bind fun dOpt =>
+            match dOpt with
+            | none => .done (false, preHashCands)
+            | some (derivedLeafIdx, idxs) =>
+              if sig.leafGlobalIdx ≠ derivedLeafIdx then .done (false, preHashCands)
+              else
+                let subLeaves := 2 ^ params.subtreeHeight
+                let kp0 := sig.leafGlobalIdx % subLeaves
+                let tree0 := UInt64.ofNat (sig.leafGlobalIdx / subLeaves)
+                (advForsRootsWithCands params pk.pkSeed tree0 kp0 idxs sig.forsOpenings
+                  0 params.forsTrees).bind fun fr =>
+                  match fr.1 with
+                  | none => .done (false, preHashCands ++ fr.2)
+                  | some roots =>
+                    let forsPre := thPreimage tagThTl pk.pkSeed
+                      ⟨0, tree0, .forsRoots, UInt32.ofNat kp0, 0, 0⟩ roots
+                    let forsCand := (ProdTargetIdx.forsRoots, forsPre)
+                    (advRawHash forsPre).bind fun forsPk =>
+                      (advHypertreeLayersWithCands params pk.pkSeed pk.pkRoot sig.rRand log
+                        0 sig.leafGlobalIdx forsPk sig.layerSigs).map fun ht =>
+                        let ok := match ht.1 with
+                          | some computedTopRoot => decide (computedTopRoot = pk.pkRoot)
+                          | none => false
+                        (ok, preHashCands ++ (forsCand :: (fr.2 ++ ht.2)))
+
+def advVerifyProductionPqHashSig (params : PqHashParams) (pk : PqPublicKey)
+    (msg : List UInt8) (sig : PqHashSig) : HashSignAdv Bool :=
+  (advVerifyWithTcrCands params pk [] msg sig).map Prod.fst
+
+theorem publicVerifierWithTcrCands_fst (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msg : List UInt8) (sig : PqHashSig) :
+    (publicVerifierWithTcrCands suite params pk log msg sig).1 =
+      verifyProductionPqHashSig suite params pk msg sig := by
+  unfold publicVerifierWithTcrCands
+  rw [verifyProductionPqHashSig_eq]
+  split
+  · rfl
+  · split
+    · rfl
+    · dsimp only
+      have hMu : suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, msg]) =
+          thPreHash suite pk.pkSeed pk.pkRoot msg := by rw [thPreHash_eq, thCall_eq]
+      rw [hMu]
+      cases hSt : params.statefulJorts
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        split
+        · rfl
+        · cases hD : deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
+              (thPreHash suite pk.pkSeed pk.pkRoot msg) with
+          | none => rfl
+          | some pr =>
+            rcases pr with ⟨derivedLeafIdx, idxs⟩
+            have hIdxsLen : idxs.length = params.forsTrees :=
+              (deriveProductionStatelessInputs_bounds suite params sig.rRand pk.pkSeed pk.pkRoot
+                (thPreHash suite pk.pkSeed pk.pkRoot msg) derivedLeafIdx idxs hD).2.2.2.1
+            dsimp only
+            split
+            · rfl
+            · rw [recoverProductionForsPk_eq]
+              have hLenEq : sig.forsOpenings.length = params.forsTrees := by
+                rename_i hNotNe _
+                exact Decidable.of_not_not hNotNe
+              simp only [hLenEq, hIdxsLen, ne_eq, not_true_eq_false, decide_false, Bool.or_self,
+                Bool.false_eq_true, ↓reduceIte]
+              rw [forsRootsWithCands_fst]
+              cases recoverProductionForsTreeRoots suite params pk.pkSeed
+                  (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+                  (sig.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sig.forsOpenings
+                  0 params.forsTrees with
+              | none => rfl
+              | some roots =>
+                dsimp only
+                have hFpk : suite.rawHash (thPreimage tagThTl pk.pkSeed
+                    ⟨0, UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight),
+                     .forsRoots, UInt32.ofNat (sig.leafGlobalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
+                    roots) =
+                  thTweakTl suite pk.pkSeed
+                    ⟨0, UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight),
+                     .forsRoots, UInt32.ofNat (sig.leafGlobalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
+                    roots := by rw [thTweakTl_eq, thCall_eq]
+                rw [hFpk, hypertreeLayersWithCands_fst]
+                rfl
+      · simp only [↓reduceIte]
+        split
+        · rfl
+        · dsimp only
+          rw [hypertreeLayersWithCands_fst]
+          rfl
+
+theorem publicVerifierWithTcrCands_cands_length_le (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msg : List UInt8) (sig : PqHashSig) :
+    (publicVerifierWithTcrCands suite params pk log msg sig).2.length ≤
+      prodPathTargetCount params log.length := by
+  simp only [publicVerifierWithTcrCands, prodPathTargetCount_eq]
+  split
+  · exact Nat.zero_le _
+  · split
+    · exact Nat.zero_le _
+    · rename_i hG2
+      have hLsLen : sig.layerSigs.length = params.numLayers := by
+        simp only [Bool.or_eq_true, decide_eq_true_eq, not_or] at hG2
+        exact Decidable.of_not_not hG2.1
+      have hMulDist :
+          params.numLayers * (log.length + 1 + params.ell1 * (params.w - 1) + params.subtreeHeight) =
+          log.length * params.numLayers + params.numLayers +
+            params.numLayers * (params.ell1 * (params.w - 1)) +
+            params.numLayers * params.subtreeHeight := by
+        have d1 := Nat.mul_add params.numLayers (log.length + 1 + params.ell1 * (params.w - 1))
+          params.subtreeHeight
+        have d2 := Nat.mul_add params.numLayers (log.length + 1) (params.ell1 * (params.w - 1))
+        have d3 := Nat.mul_add params.numLayers log.length 1
+        have d4 := Nat.mul_comm params.numLayers log.length
+        omega
+      cases hSt : params.statefulJorts
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        split
+        · simp only [List.length_map]; omega
+        · cases deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot _ with
+          | none => simp only [List.length_map]; omega
+          | some pr =>
+            rcases pr with ⟨derivedLeafIdx, idxs⟩
+            dsimp only
+            split
+            · simp only [List.length_map]; omega
+            · have hFr := forsRootsWithCands_cands_length_le suite params pk.pkSeed
+                (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+                (sig.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sig.forsOpenings
+                0 params.forsTrees
+              cases (forsRootsWithCands suite params pk.pkSeed
+                  (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+                  (sig.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sig.forsOpenings
+                  0 params.forsTrees).1 with
+              | none =>
+                simp only [List.length_append, List.length_map]
+                omega
+              | some roots =>
+                have hHt := hypertreeLayersWithCands_cands_length_le suite params pk.pkSeed
+                  pk.pkRoot sig.rRand log 0 sig.leafGlobalIdx
+                  (suite.rawHash (thPreimage tagThTl pk.pkSeed
+                    ⟨0, UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight),
+                     .forsRoots, UInt32.ofNat (sig.leafGlobalIdx % 2 ^ params.subtreeHeight), 0, 0⟩
+                    roots)) sig.layerSigs
+                rw [hLsLen, hMulDist] at hHt
+                simp only [List.length_append, List.length_cons, List.length_map]
+                omega
+      · simp only [↓reduceIte]
+        split
+        · simp only [List.length_map]; omega
+        · have hHt := hypertreeLayersWithCands_cands_length_le suite params pk.pkSeed
+            pk.pkRoot sig.rRand log 0 sig.leafGlobalIdx
+            (suite.rawHash (thPreimage tagHPre pk.pkSeed zeroAdrs [pk.pkRoot, msg])) sig.layerSigs
+          rw [hLsLen, hMulDist] at hHt
+          simp only [List.length_append, List.length_map]
+          omega
+
+theorem advVerifyWithTcrCands_within (params : PqHashParams) (pk : PqPublicKey)
+    (log : List (List UInt8 × PqHashSig)) (msg : List UInt8) (sig : PqHashSig) :
+    (advVerifyWithTcrCands params pk log msg sig).Within (prodVerifierHashBudget params) 0 := by
+  unfold advVerifyWithTcrCands prodVerifierHashBudget
+  split
+  · exact HashSignAdv.Within.done _ _ 0
+  · split
+    · exact HashSignAdv.Within.done _ _ 0
+    · rename_i hG2
+      have hLsLen : sig.layerSigs.length = params.numLayers := by
+        simp only [Bool.or_eq_true, decide_eq_true_eq, not_or] at hG2
+        exact Decidable.of_not_not hG2.1
+      refine HashSignAdv.Within.bind_le
+        (qh₂ := prodXofHashBudget params + prodForsHashBudget params +
+          params.numLayers * prodLayerHashBudget params) (qs₂ := 0)
+        (advRawHash_within _) (fun mu => ?_) (by omega) (by omega)
+      cases hSt : params.statefulJorts
+      · simp only [Bool.false_eq_true, ↓reduceIte, prodXofHashBudget, prodForsHashBudget, hSt]
+        split
+        · exact HashSignAdv.Within.done _ _ 0
+        · have hXof : (advDeriveProductionStatelessInputs params sig.rRand pk.pkSeed pk.pkRoot mu).Within
+              (((params.forsTrees * params.forsHeight + 7) / 8 +
+                (params.numLayers * params.subtreeHeight + 7) / 8 + 31) / 32) 0 := by
+            have h := advDeriveProductionStatelessInputs_within params sig.rRand pk.pkSeed pk.pkRoot mu
+            simpa only [prodXofHashBudget, hSt, Bool.false_eq_true, ↓reduceIte] using h
+          refine HashSignAdv.Within.bind_le
+            (qh₂ := (params.forsTrees * (1 + params.forsHeight) + 1) +
+              params.numLayers * prodLayerHashBudget params) (qs₂ := 0)
+            hXof (fun dOpt => ?_) (by omega) (by omega)
+          cases dOpt with
+          | none => exact HashSignAdv.Within.done _ _ 0
+          | some pr =>
+            rcases pr with ⟨derivedLeafIdx, idxs⟩
+            dsimp only
+            split
+            · exact HashSignAdv.Within.done _ _ 0
+            · refine HashSignAdv.Within.bind_le
+                (qh₂ := 1 + params.numLayers * prodLayerHashBudget params) (qs₂ := 0)
+                (advForsRootsWithCands_within _ _ _ _ _ _ _ _) (fun fr => ?_) (by omega) (by omega)
+              cases fr.1 with
+              | none => exact HashSignAdv.Within.done _ _ 0
+              | some _ =>
+                refine HashSignAdv.Within.bind_le
+                  (qh₂ := params.numLayers * prodLayerHashBudget params) (qs₂ := 0)
+                  (advRawHash_within _) (fun forsPk => ?_) (by omega) (by omega)
+                have hHt := advHypertreeLayersWithCands_within params pk.pkSeed pk.pkRoot sig.rRand log
+                  0 sig.leafGlobalIdx forsPk sig.layerSigs
+                rw [hLsLen] at hHt
+                exact HashSignAdv.Within.map _ hHt
+      · simp only [↓reduceIte, prodXofHashBudget, prodForsHashBudget, hSt]
+        split
+        · exact HashSignAdv.Within.done _ _ 0
+        · have hHt := advHypertreeLayersWithCands_within params pk.pkSeed pk.pkRoot sig.rRand log
+            0 sig.leafGlobalIdx mu sig.layerSigs
+          rw [hLsLen] at hHt
+          exact (HashSignAdv.Within.map _ hHt).mono (by omega) (by omega)
+
+theorem runHashSignAdv_advVerifyWithTcrCands (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pk : PqPublicKey) (log : List (List UInt8 × PqHashSig))
+    (msg : List UInt8) (sig : PqHashSig) (qs : List ProdSigningQuery) :
+    runHashSignAdv suite params sk qs (advVerifyWithTcrCands params pk log msg sig) =
+      (publicVerifierWithTcrCands suite params pk log msg sig, qs) := by
+  unfold advVerifyWithTcrCands publicVerifierWithTcrCands
+  split
+  · rfl
+  · split
+    · rfl
+    · rw [runHashSignAdv_bind]
+      dsimp only [advRawHash, runHashSignAdv]
+      cases hSt : params.statefulJorts
+      · simp only [Bool.false_eq_true, ↓reduceIte]
+        split
+        · rfl
+        · rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+          dsimp only
+          cases deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot _ with
+          | none => rfl
+          | some pr =>
+            rcases pr with ⟨derivedLeafIdx, idxs⟩
+            dsimp only
+            split
+            · rfl
+            · rw [runHashSignAdv_bind, runHashSignAdv_advForsRootsWithCands]
+              dsimp only
+              cases (forsRootsWithCands suite params pk.pkSeed
+                  (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+                  (sig.leafGlobalIdx % 2 ^ params.subtreeHeight) idxs sig.forsOpenings
+                  0 params.forsTrees).1 with
+              | none => rfl
+              | some roots =>
+                dsimp only
+                rw [runHashSignAdv_bind]
+                dsimp only [advRawHash, runHashSignAdv, HashSignAdv.map]
+                rw [runHashSignAdv_bind, runHashSignAdv_advHypertreeLayersWithCands]
+                rfl
+      · simp only [↓reduceIte]
+        split
+        · rfl
+        · dsimp only [HashSignAdv.map]
+          rw [runHashSignAdv_bind, runHashSignAdv_advHypertreeLayersWithCands]
+          rfl
+
+theorem advVerifyProductionPqHashSig_within (params : PqHashParams) (pk : PqPublicKey)
+    (msg : List UInt8) (sig : PqHashSig) :
+    (advVerifyProductionPqHashSig params pk msg sig).Within (prodVerifierHashBudget params) 0 :=
+  HashSignAdv.Within.map _ (advVerifyWithTcrCands_within params pk [] msg sig)
+
+theorem runHashSignAdv_advVerifyProductionPqHashSig (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (pk : PqPublicKey)
+    (msg : List UInt8) (sig : PqHashSig) (qs : List ProdSigningQuery) :
+    runHashSignAdv suite params sk qs (advVerifyProductionPqHashSig params pk msg sig) =
+      (verifyProductionPqHashSig suite params pk msg sig, qs) := by
+  unfold advVerifyProductionPqHashSig HashSignAdv.map
+  rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands, ← publicVerifierWithTcrCands_fst]
+  rfl
+
+/-! ## 4. Completeness of `publicVerifierWithTcrCands` on `prodTcrOutput` -/
+
+private theorem prodWalkMerkleExtract_mem_cands (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (leafFn : Nat → List UInt8)
+    (U H : Nat) (C : Type)
+    (mkCol : ∀ (h n : Nat) (a b : List UInt8),
+      h + 1 ≤ H → n * 2 ^ (h + 1) ≤ U → U < (n + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩ [a, b] ≠
+        thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+           computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)] →
+      suite.rawHash
+          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+            [a, b]) =
+        suite.rawHash
+          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+            [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+             computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)]) → C)
+    (proj : C → Nat × Nat × List UInt8)
+    (hProj : ∀ h n a b hLe hLo hHi hNe hHash,
+      proj (mkCol h n a b hLe hLo hHi hNe hHash) =
+        (h, n, thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩ [a, b])) :
+    ∀ (h d nodeIdx localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
+      (hLe : h ≤ H) (hLt : localIdx < 2 ^ h) (hU : nodeIdx * 2 ^ h + localIdx = U)
+      (hW : walkMerkleAuthPath suite pkSeed layer tree kind h nodeIdx localIdx leaf path =
+        some (computeMerkleNode suite pkSeed layer tree kind leafFn h nodeIdx)) (c : C),
+      prodWalkMerkleExtract suite pkSeed layer tree kind leafFn U H C mkCol
+        h nodeIdx localIdx leaf path hLe hLt hU hW = .inr c →
+      ∃ d', (proj c).1 = (proj c).1 ∧
+        ((proj c).1, d', (proj c).2.1, (proj c).2.2) ∈
+          (walkMerkleKpWithCands suite pkSeed layer tree kind 0 h d nodeIdx nodeIdx localIdx leaf path).2
+  | 0, _, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
+  | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
+  | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
+  | h + 1, d, nodeIdx, localIdx, leaf, sib :: rest, hLe, hLt, hU, hW, c, hEx => by
+    simp only [prodWalkMerkleExtract] at hEx
+    unfold walkMerkleKpWithCands
+    by_cases hHalf : localIdx < 2 ^ h
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
+      split at hEx
+      · rename_i hSub
+        exfalso
+        have hW' := hW
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
+        cases hW'
+      · rename_i sub hSub
+        have hSubKp : (walkMerkleKpWithCands suite pkSeed layer tree kind 0 h (d + 1)
+            (2 * nodeIdx) (2 * nodeIdx) localIdx leaf rest).1 = some sub := by
+          rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq]; exact hSub
+        rw [hSubKp]
+        dsimp only at hEx ⊢
+        split at hEx
+        · obtain ⟨d', _, hMem⟩ := prodWalkMerkleExtract_mem_cands suite pkSeed layer tree kind
+            leafFn U H C mkCol proj hProj h (d + 1) (2 * nodeIdx) localIdx leaf rest
+            _ _ _ _ c hEx
+          exact ⟨d', trivial, List.mem_cons_of_mem _ hMem⟩
+        · injection hEx with hC
+          subst hC
+          rw [hProj]
+          exact ⟨d, trivial, List.mem_cons_self⟩
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
+      split at hEx
+      · rename_i hSub
+        exfalso
+        have hW' := hW
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
+        cases hW'
+      · rename_i sub hSub
+        have hSubKp : (walkMerkleKpWithCands suite pkSeed layer tree kind 0 h (d + 1)
+            (2 * nodeIdx + 1) (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest).1 = some sub := by
+          rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq]; exact hSub
+        rw [hSubKp]
+        dsimp only at hEx ⊢
+        split at hEx
+        · obtain ⟨d', _, hMem⟩ := prodWalkMerkleExtract_mem_cands suite pkSeed layer tree kind
+            leafFn U H C mkCol proj hProj h (d + 1) (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest
+            _ _ _ _ c hEx
+          exact ⟨d', trivial, List.mem_cons_of_mem _ hMem⟩
+        · injection hEx with hC
+          subst hC
+          rw [hProj]
+          exact ⟨d, trivial, List.mem_cons_self⟩
+
+private theorem prodWalkMerkleExtract_inr_prop (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (leafFn : Nat → List UInt8)
+    (U H : Nat) (C : Type)
+    (mkCol : ∀ (h n : Nat) (a b : List UInt8),
+      h + 1 ≤ H → n * 2 ^ (h + 1) ≤ U → U < (n + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩ [a, b] ≠
+        thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+          [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+           computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)] →
+      suite.rawHash
+          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+            [a, b]) =
+        suite.rawHash
+          (thPreimage tagThH pkSeed ⟨layer, tree, kind, 0, UInt32.ofNat (h + 1), UInt32.ofNat n⟩
+            [computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n),
+             computeMerkleNode suite pkSeed layer tree kind leafFn h (2 * n + 1)]) → C)
+    (P : C → Prop)
+    (hMk : ∀ h n a b hLe hLo hHi hNe hHash, P (mkCol h n a b hLe hLo hHi hNe hHash)) :
+    ∀ (h nodeIdx localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
+      (hLe : h ≤ H) (hLt : localIdx < 2 ^ h) (hU : nodeIdx * 2 ^ h + localIdx = U)
+      (hW : walkMerkleAuthPath suite pkSeed layer tree kind h nodeIdx localIdx leaf path =
+        some (computeMerkleNode suite pkSeed layer tree kind leafFn h nodeIdx)) (c : C),
+      prodWalkMerkleExtract suite pkSeed layer tree kind leafFn U H C mkCol
+        h nodeIdx localIdx leaf path hLe hLt hU hW = .inr c → P c
+  | 0, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
+  | 0, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
+  | _ + 1, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPath] at hW
+  | h + 1, nodeIdx, localIdx, leaf, sib :: rest, hLe, hLt, hU, hW, c, hEx => by
+    simp only [prodWalkMerkleExtract] at hEx
+    by_cases hHalf : localIdx < 2 ^ h
+    · simp only [hHalf, ↓reduceDIte] at hEx
+      split at hEx
+      · rename_i hSub
+        exfalso; have hW' := hW
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
+        · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
+            h (2 * nodeIdx) localIdx leaf rest _ _ _ _ c hEx
+        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
+    · simp only [hHalf, ↓reduceDIte] at hEx
+      split at hEx
+      · rename_i hSub
+        exfalso; have hW' := hW
+        simp only [walkMerkleAuthPath, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
+        · exact prodWalkMerkleExtract_inr_prop suite pkSeed layer tree kind leafFn U H C mkCol P hMk
+            h (2 * nodeIdx + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
+        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _
+
+private theorem prodWalkMerkleKpExtract_mem_cands (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (kp : UInt32)
+    (leafFn : Nat → List UInt8) (root U H : Nat) (C : Type)
+    (mkCol : ∀ (h d b : Nat) (x y : List UInt8),
+      d + (h + 1) = H → b * 2 ^ (h + 1) ≤ U → U < (b + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y] ≠
+        thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
+          [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+             (2 * (root * 2 ^ d + b)) (2 * b),
+           computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+             (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)] →
+      suite.rawHash
+          (thPreimage tagThH pkSeed
+            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y]) =
+        suite.rawHash
+          (thPreimage tagThH pkSeed
+            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
+            [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+               (2 * (root * 2 ^ d + b)) (2 * b),
+             computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+               (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)]) → C)
+    (proj : C → Nat × Nat × Nat × List UInt8)
+    (hProj : ∀ h d b x y hD hLo hHi hNe hHash,
+      proj (mkCol h d b x y hD hLo hHi hNe hHash) =
+        (h, d, b, thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y])) :
+    ∀ (h d localBase localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
+      (hD : d + h = H) (hLt : localIdx < 2 ^ h) (hU : localBase * 2 ^ h + localIdx = U)
+      (hW : walkMerkleAuthPathKp suite pkSeed layer tree kind kp h (root * 2 ^ d + localBase)
+        localIdx leaf path =
+        some (computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+          (root * 2 ^ d + localBase) localBase)) (c : C),
+      prodWalkMerkleKpExtract suite pkSeed layer tree kind kp leafFn root U H C mkCol
+        h d localBase localIdx leaf path hD hLt hU hW = .inr c →
+      proj c ∈ (walkMerkleKpWithCands suite pkSeed layer tree kind kp h d
+        (root * 2 ^ d + localBase) localBase localIdx leaf path).2
+  | 0, _, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
+  | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
+  | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
+  | h + 1, d, localBase, localIdx, leaf, sib :: rest, hD, hLt, hU, hW, c, hEx => by
+    have hPow : root * 2 ^ (d + 1) = 2 * (root * 2 ^ d) := by
+      rw [Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm]
+    have hL : 2 * (root * 2 ^ d + localBase) = root * 2 ^ (d + 1) + 2 * localBase := by
+      rw [hPow, Nat.mul_add]
+    have hR : 2 * (root * 2 ^ d + localBase) + 1 = root * 2 ^ (d + 1) + (2 * localBase + 1) := by
+      rw [hPow, Nat.mul_add, Nat.add_assoc]
+    simp only [prodWalkMerkleKpExtract] at hEx
+    unfold walkMerkleKpWithCands
+    by_cases hHalf : localIdx < 2 ^ h
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
+      split at hEx
+      · rename_i hSub
+        exfalso
+        have hW' := hW
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
+        cases hW'
+      · rename_i sub hSub
+        have hSubW : (walkMerkleKpWithCands suite pkSeed layer tree kind kp h (d + 1)
+            (2 * (root * 2 ^ d + localBase)) (2 * localBase) localIdx leaf rest).1 = some sub := by
+          rw [walkMerkleKpWithCands_fst]; exact hSub
+        rw [hSubW]
+        dsimp only at hEx ⊢
+        split at hEx
+        · apply List.mem_cons_of_mem
+          rw [hL]
+          exact prodWalkMerkleKpExtract_mem_cands suite pkSeed layer tree kind kp leafFn root U H C
+            mkCol proj hProj h (d + 1) (2 * localBase) localIdx leaf rest _ _ _ _ c hEx
+        · injection hEx with hC
+          subst hC
+          rw [hProj]
+          exact List.mem_cons_self
+    · simp only [hHalf, ↓reduceDIte, ↓reduceIte] at hEx ⊢
+      split at hEx
+      · rename_i hSub
+        exfalso
+        have hW' := hW
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'
+        cases hW'
+      · rename_i sub hSub
+        have hSubW : (walkMerkleKpWithCands suite pkSeed layer tree kind kp h (d + 1)
+            (2 * (root * 2 ^ d + localBase) + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest).1 =
+            some sub := by
+          rw [walkMerkleKpWithCands_fst]; exact hSub
+        rw [hSubW]
+        dsimp only at hEx ⊢
+        split at hEx
+        · apply List.mem_cons_of_mem
+          rw [hR]
+          exact prodWalkMerkleKpExtract_mem_cands suite pkSeed layer tree kind kp leafFn root U H C
+            mkCol proj hProj h (d + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
+        · injection hEx with hC
+          subst hC
+          rw [hProj]
+          exact List.mem_cons_self
+
+private theorem prodWalkMerkleKpExtract_inr_prop (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kind : AdrsKind) (kp : UInt32)
+    (leafFn : Nat → List UInt8) (root U H : Nat) (C : Type)
+    (mkCol : ∀ (h d b : Nat) (x y : List UInt8),
+      d + (h + 1) = H → b * 2 ^ (h + 1) ≤ U → U < (b + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y] ≠
+        thPreimage tagThH pkSeed
+          ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
+          [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+             (2 * (root * 2 ^ d + b)) (2 * b),
+           computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+             (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)] →
+      suite.rawHash
+          (thPreimage tagThH pkSeed
+            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩ [x, y]) =
+        suite.rawHash
+          (thPreimage tagThH pkSeed
+            ⟨layer, tree, kind, kp, UInt32.ofNat (h + 1), UInt32.ofNat (root * 2 ^ d + b)⟩
+            [computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+               (2 * (root * 2 ^ d + b)) (2 * b),
+             computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+               (2 * (root * 2 ^ d + b) + 1) (2 * b + 1)]) → C)
+    (P : C → Prop)
+    (hMk : ∀ h d b x y hD hLo hHi hNe hHash, P (mkCol h d b x y hD hLo hHi hNe hHash)) :
+    ∀ (h d localBase localIdx : Nat) (leaf : List UInt8) (path : List (List UInt8))
+      (hD : d + h = H) (hLt : localIdx < 2 ^ h) (hU : localBase * 2 ^ h + localIdx = U)
+      (hW : walkMerkleAuthPathKp suite pkSeed layer tree kind kp h (root * 2 ^ d + localBase)
+        localIdx leaf path =
+        some (computeMerkleNodeKp suite pkSeed layer tree kind kp leafFn h
+          (root * 2 ^ d + localBase) localBase)) (c : C),
+      prodWalkMerkleKpExtract suite pkSeed layer tree kind kp leafFn root U H C mkCol
+        h d localBase localIdx leaf path hD hLt hU hW = .inr c → P c
+  | 0, _, _, _, _, [], _, _, _, _, _, hEx => by cases hEx
+  | 0, _, _, _, _, _ :: _, _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
+  | _ + 1, _, _, _, _, [], _, _, _, hW, _, _ => by simp [walkMerkleAuthPathKp] at hW
+  | h + 1, d, localBase, localIdx, leaf, sib :: rest, hD, hLt, hU, hW, c, hEx => by
+    simp only [prodWalkMerkleKpExtract] at hEx
+    by_cases hHalf : localIdx < 2 ^ h
+    · simp only [hHalf, ↓reduceDIte] at hEx
+      split at hEx
+      · rename_i hSub
+        exfalso; have hW' := hW
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
+        · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
+            mkCol P hMk h (d + 1) (2 * localBase) localIdx leaf rest _ _ _ _ c hEx
+        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
+    · simp only [hHalf, ↓reduceDIte] at hEx
+      split at hEx
+      · rename_i hSub
+        exfalso; have hW' := hW
+        simp only [walkMerkleAuthPathKp, hHalf, ↓reduceIte] at hW'
+        rw [hSub] at hW'; cases hW'
+      · split at hEx
+        · exact prodWalkMerkleKpExtract_inr_prop suite pkSeed layer tree kind kp leafFn root U H C
+            mkCol P hMk h (d + 1) (2 * localBase + 1) (localIdx - 2 ^ h) leaf rest _ _ _ _ c hEx
+        · injection hEx with hC; subst hC; exact hMk _ _ _ _ _ _ _ _ _ _
+
+private theorem prodChainExtract_mem_cands (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (layer : UInt32) (tree : UInt64) (kp r top : Nat) (C : Type)
+    (mkCol : ∀ (s : Nat) (x : List UInt8), s + 1 ≤ top →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (proj : C → Nat × List UInt8)
+    (hProj : ∀ s x hs hNe hHash,
+      proj (mkCol s x hs hNe hHash) =
+        (s, thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x])) :
+    ∀ (k s : Nat) (x : List UInt8) (hTop : s + k = top)
+      (hStep : wotsChainSteps suite sk.pkSeed layer tree kp r s k x =
+        honestChainNode suite sk layer tree kp r (s + k)) (c : C),
+      prodChainExtract suite sk layer tree kp r top C mkCol k s x hTop hStep = .inr c →
+      proj c ∈ (wotsChainWithCands suite sk.pkSeed layer tree kp r s k x).2
+  | 0, _, _, _, _, _, hEx => by cases hEx
+  | k + 1, s, x, hTop, hStep, c, hEx => by
+    unfold prodChainExtract at hEx
+    unfold wotsChainWithCands
+    dsimp only at hEx ⊢
+    split at hEx
+    · rename_i c' hRec
+      injection hEx with hEq
+      subst hEq
+      apply List.mem_cons_of_mem
+      simpa only [thChainF_eq, thCall_eq] using
+        (prodChainExtract_mem_cands suite sk layer tree kp r top C
+          mkCol proj hProj k (s + 1) _ _ _ c' hRec)
+    · split at hEx
+      · cases hEx
+      · injection hEx with hEq
+        subst hEq
+        rw [hProj]
+        exact List.mem_cons_self
+
+private theorem prodChainExtract_inr_prop (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (layer : UInt32) (tree : UInt64) (kp r top : Nat) (C : Type)
+    (mkCol : ∀ (s : Nat) (x : List UInt8), s + 1 ≤ top →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (P : C → Prop)
+    (hMk : ∀ s x hs hNe hHash, P (mkCol s x hs hNe hHash)) :
+    ∀ (k s : Nat) (x : List UInt8) (hTop : s + k = top)
+      (hStep : wotsChainSteps suite sk.pkSeed layer tree kp r s k x =
+        honestChainNode suite sk layer tree kp r (s + k)) (c : C),
+      prodChainExtract suite sk layer tree kp r top C mkCol k s x hTop hStep = .inr c → P c
+  | 0, _, _, _, _, _, hEx => by cases hEx
+  | k + 1, s, x, hTop, hStep, c, hEx => by
+    unfold prodChainExtract at hEx
+    dsimp only at hEx
+    split at hEx
+    · rename_i c' hRec
+      injection hEx with hEq
+      subst hEq
+      exact prodChainExtract_inr_prop suite sk layer tree kp r top C mkCol P hMk k (s + 1) _ _ _
+        c' hRec
+    · split at hEx
+      · cases hEx
+      · injection hEx with hEq
+        subst hEq
+        exact hMk _ _ _ _ _
+
+private theorem prodAllChainsExtract_inr_prop (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digF : List Nat) (chains : List (List UInt8)) (C : Type)
+    (mkCol : ∀ (r s : Nat) (x : List UInt8), r < params.ell1 → s + 1 ≤ params.w - 1 →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (P : C → Prop)
+    (hMk : ∀ r s x hr hs hNe hHash, P (mkCol r s x hr hs hNe hHash))
+    (hEnds : recoverWotsEndpoints suite params sk.pkSeed layer tree kp digF chains =
+      (List.range params.ell1).map fun r => honestChainNode suite sk layer tree kp r (params.w - 1))
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true) :
+    ∀ (m : Nat) (hmLe : m ≤ params.ell1) (c : C),
+      prodAllChainsExtract suite params sk layer tree kp digF chains C mkCol hEnds hTsw m hmLe =
+        .inr c → P c
+  | 0, _, _, hEx => by cases hEx
+  | m + 1, hmLe, c, hEx => by
+    unfold prodAllChainsExtract at hEx
+    dsimp only at hEx
+    split at hEx
+    · rename_i c' hPrev
+      injection hEx with hEq
+      subst hEq
+      exact prodAllChainsExtract_inr_prop suite params sk layer tree kp digF chains C mkCol P hMk
+        hEnds hTsw m _ c' hPrev
+    · split at hEx
+      · rename_i c' hCh
+        injection hEx with hEq
+        subst hEq
+        exact prodChainExtract_inr_prop suite sk layer tree kp m (params.w - 1) C
+          (fun s x hs hNe hHash => mkCol m s x hmLe hs hNe hHash) P
+          (fun s x hs hNe hHash => hMk m s x hmLe hs hNe hHash)
+          (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
+      · cases hEx
+
+private theorem prodAllChainsExtract_mem_cands (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digF : List Nat) (chains : List (List UInt8)) (C : Type)
+    (mkCol : ∀ (r s : Nat) (x : List UInt8), r < params.ell1 → s + 1 ≤ params.w - 1 →
+      thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x] ≠
+        thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+          [honestChainNode suite sk layer tree kp r s] →
+      suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]) =
+        suite.rawHash
+          (thPreimage tagThF sk.pkSeed
+            ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩
+            [honestChainNode suite sk layer tree kp r s]) → C)
+    (proj : C → Nat × Nat × List UInt8)
+    (hProj : ∀ r s x hr hs hNe hHash,
+      proj (mkCol r s x hr hs hNe hHash) =
+        (r, s, thPreimage tagThF sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat s⟩ [x]))
+    (hEnds : recoverWotsEndpoints suite params sk.pkSeed layer tree kp digF chains =
+      (List.range params.ell1).map fun r => honestChainNode suite sk layer tree kp r (params.w - 1))
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true) :
+    ∀ (m : Nat) (hmLe : m ≤ params.ell1) (c : C),
+      prodAllChainsExtract suite params sk layer tree kp digF chains C mkCol hEnds hTsw m hmLe =
+        .inr c →
+      proj c ∈ (allWotsChainsWithCands suite params sk.pkSeed layer tree kp digF chains m).2
+  | 0, _, _, hEx => by cases hEx
+  | m + 1, hmLe, c, hEx => by
+    unfold prodAllChainsExtract at hEx
+    unfold allWotsChainsWithCands
+    dsimp only at hEx ⊢
+    split at hEx
+    · rename_i c' hPrev
+      injection hEx with hEq
+      subst hEq
+      exact List.mem_append_left _ (prodAllChainsExtract_mem_cands suite params sk layer tree kp
+        digF chains C mkCol proj hProj hEnds hTsw m _ c' hPrev)
+    · split at hEx
+      · rename_i c' hCh
+        injection hEx with hEq
+        subst hEq
+        apply List.mem_append_right
+        have hMem := prodChainExtract_mem_cands suite sk layer tree kp m (params.w - 1) C
+          (fun s x hs hNe hHash => mkCol m s x hmLe hs hNe hHash)
+          (fun c0 => ((proj c0).2.1, (proj c0).2.2))
+          (fun s x hs hNe hHash => by rw [hProj])
+          (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
+        have hFst : (proj c').1 = m :=
+          prodChainExtract_inr_prop suite sk layer tree kp m (params.w - 1) C
+            (fun s x hs hNe hHash => mkCol m s x hmLe hs hNe hHash)
+            (fun c0 => (proj c0).1 = m)
+            (fun s x hs hNe hHash => by rw [hProj])
+            (params.w - 1 - digF.getD m 0) (digF.getD m 0) (chains.getD m []) _ _ c' hCh
+        exact List.mem_map.mpr ⟨((proj c').2.1, (proj c').2.2), hMem, by
+          rcases hp : proj c' with ⟨a, b, d⟩
+          rw [hp] at hFst
+          dsimp only at hFst ⊢
+          subst hFst
+          rfl⟩
+      · cases hEx
+
+private theorem prodForsRootsExtract_mem_cands (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) (hStateless : params.statefulJorts = false)
+    (tree0 : UInt64) (kp0 : Nat) (idxs : List Nat) (ops : List ForsTreeOpening)
+    (hIdxs : ∀ J, J < params.forsTrees → idxs.getD J 0 < 2 ^ params.forsHeight)
+    (mkCol : ∀ (j h d b : Nat) (x y : List UInt8),
+      j < params.forsTrees → d + (h + 1) = params.forsHeight →
+      b * 2 ^ (h + 1) ≤ idxs.getD j 0 → idxs.getD j 0 < (b + 1) * 2 ^ (h + 1) →
+      thPreimage tagThH sk.pkSeed
+          ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+            UInt32.ofNat (j * 2 ^ d + b)⟩ [x, y] ≠
+        thPreimage tagThH sk.pkSeed
+          ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+            UInt32.ofNat (j * 2 ^ d + b)⟩
+          [computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+             (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b)) (2 * b),
+           computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+             (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b) + 1) (2 * b + 1)] →
+      suite.rawHash
+          (thPreimage tagThH sk.pkSeed
+            ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+              UInt32.ofNat (j * 2 ^ d + b)⟩ [x, y]) =
+        suite.rawHash
+          (thPreimage tagThH sk.pkSeed
+            ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+              UInt32.ofNat (j * 2 ^ d + b)⟩
+            [computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+               (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b)) (2 * b),
+             computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+               (forsIndexedLeafFn suite sk tree0 kp0 j) h (2 * (j * 2 ^ d + b) + 1)
+               (2 * b + 1)]) → ProdTcrWitness suite params sk log msgStar sigStar)
+    (hMk : ∀ j h d b x y hj hD hLo hHi hNe hHash,
+      ((mkCol j h d b x y hj hD hLo hHi hNe hHash).target,
+       (mkCol j h d b x y hj hD hLo hHi hNe hHash).forged) =
+        (.forsNode j h d b, thPreimage tagThH sk.pkSeed
+          ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat (h + 1),
+            UInt32.ofNat (j * 2 ^ d + b)⟩ [x, y])) :
+    ∀ (rem j : Nat) (rootsF : List (List UInt8)) (hB : j + rem ≤ params.forsTrees)
+      (hRec : recoverProductionForsTreeRoots suite params sk.pkSeed tree0 kp0 idxs ops j rem =
+        some rootsF)
+      (hEq : rootsF = (List.range rem).map (fun off =>
+        computeMerkleNodeKp suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+          (forsIndexedLeafFn suite sk tree0 kp0 (j + off)) params.forsHeight (j + off) 0))
+      (w : ProdTcrWitness suite params sk log msgStar sigStar),
+      prodForsRootsExtract suite params sk tree0 kp0 idxs ops
+        (ProdTcrWitness suite params sk log msgStar sigStar) mkCol hIdxs rem j rootsF hB hRec hEq =
+        .inr w →
+      (w.target, w.forged) ∈ (forsRootsWithCands suite params sk.pkSeed tree0 kp0 idxs ops j rem).2
+  | 0, _, _, _, _, _, _, hEx => by
+    have _ := hStateless
+    cases hEx
+  | rem + 1, j, rootsF, hB, hRec, hEq, w, hEx => by
+    have hInv := prod_recoverForsTreeRoots_succ_inv suite params sk.pkSeed tree0 kp0 idxs ops j rem
+      rootsF hRec
+    unfold prodForsRootsExtract at hEx
+    unfold forsRootsWithCands
+    dsimp only at hEx ⊢
+    split at hEx
+    · rename_i hWalk
+      obtain ⟨_, _, hW0, _, _⟩ := hInv
+      rw [hWalk] at hW0
+      cases hW0
+    · rename_i rJ hWalk
+      have hW1 : (walkMerkleKpWithCands suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+          params.forsHeight 0 j 0 (idxs.getD j 0)
+          (forsIndexedLeafHash suite sk.pkSeed tree0 kp0 j (idxs.getD j 0)
+            (ops.getD j ⟨[], []⟩).secretVal)
+          (ops.getD j ⟨[], []⟩).authPath).1 = some rJ := by
+        rw [walkMerkleKpWithCands_fst]; exact hWalk
+      rw [hW1]
+      dsimp only at hEx ⊢
+      split at hEx
+      · rename_i hRest
+        obtain ⟨_, _, _, hR0, _⟩ := hInv
+        rw [hRest] at hR0
+        cases hR0
+      · rename_i rsF hRest
+        have hR1 : (forsRootsWithCands suite params sk.pkSeed tree0 kp0 idxs ops (j + 1) rem).1 =
+            some rsF := by
+          rw [forsRootsWithCands_fst]; exact hRest
+        rw [hR1]
+        dsimp only at hEx ⊢
+        split at hEx
+        · rename_i w' hKpEx
+          injection hEx with hw
+          subst hw
+          apply List.mem_append_left
+          have hj : j < params.forsTrees :=
+            Nat.lt_of_lt_of_le (Nat.lt_add_of_pos_right (Nat.succ_pos rem)) hB
+          have hj0 : j * 2 ^ 0 + 0 = j := by rw [Nat.pow_zero, Nat.mul_one, Nat.add_zero]
+          let projKp : ProdTcrWitness suite params sk log msgStar sigStar →
+              Nat × Nat × Nat × List UInt8 := fun c0 =>
+            match c0.target with
+            | .forsNode _ h d b => (h, d, b, c0.forged)
+            | _ => (0, 0, 0, c0.forged)
+          have hMem := prodWalkMerkleKpExtract_mem_cands suite sk.pkSeed 0 tree0 .forsTree
+            (UInt32.ofNat kp0) (forsIndexedLeafFn suite sk tree0 kp0 j) j (idxs.getD j 0)
+            params.forsHeight (ProdTcrWitness suite params sk log msgStar sigStar)
+            (fun h d b x y hD hLo hHi hNe hHash => mkCol j h d b x y hj hD hLo hHi hNe hHash)
+            projKp
+            (fun h d b x y hD hLo hHi hNe hHash => by
+              have hm := hMk j h d b x y hj hD hLo hHi hNe hHash
+              have ht := congrArg Prod.fst hm
+              have hf := congrArg Prod.snd hm
+              dsimp only [projKp] at ht hf ⊢
+              rw [ht, hf])
+            params.forsHeight 0 0 (idxs.getD j 0) _ _ _ _ _ _ w' hKpEx
+          rw [hj0] at hMem
+          have hTag : ∃ h d b, w'.target = .forsNode j h d b :=
+            prodWalkMerkleKpExtract_inr_prop suite sk.pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0)
+              (forsIndexedLeafFn suite sk tree0 kp0 j) j (idxs.getD j 0) params.forsHeight
+              (ProdTcrWitness suite params sk log msgStar sigStar)
+              (fun h d b x y hD hLo hHi hNe hHash => mkCol j h d b x y hj hD hLo hHi hNe hHash)
+              (fun c0 => ∃ h d b, c0.target = .forsNode j h d b)
+              (fun h d b x y hD hLo hHi hNe hHash =>
+                ⟨h, d, b, congrArg Prod.fst (hMk j h d b x y hj hD hLo hHi hNe hHash)⟩)
+              params.forsHeight 0 0 (idxs.getD j 0) _ _ _ _ _ _ w' hKpEx
+          obtain ⟨h, d, b, hT⟩ := hTag
+          dsimp only [projKp] at hMem
+          rw [hT] at hMem ⊢
+          exact List.mem_map.mpr ⟨(h, d, b, w'.forged), hMem, rfl⟩
+        · split at hEx
+          · rename_i w' hRecEx
+            injection hEx with hw
+            subst hw
+            exact List.mem_append_right _ (prodForsRootsExtract_mem_cands suite params sk log
+              msgStar sigStar hStateless tree0 kp0 idxs ops hIdxs mkCol hMk rem (j + 1) rsF _
+              hRest _ w' hRecEx)
+          · cases hEx
+
+private theorem prodLayerExtract_mem_cands (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (i : Nat) (hi : i < params.numLayers) (cur : List UInt8)
+    (lsig : LayerXmssSig) (rest : List LayerXmssSig)
+    (hLs : lsig = sigStar.layerSigs.getD i ⟨0, [], []⟩)
+    (hCtr : lsig.tswCtr < 2 ^ 32)
+    (digF : List Nat)
+    (hDigF : digF = extractBaseWDigits params.w params.ell1
+      (productionLayerDigest suite params sigStar.rRand sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot cur i
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight))
+        (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+          2 ^ params.subtreeHeight))
+        (sigStar.layerSigs.getD i ⟨0, [], []⟩).tswCtr))
+    (hExt : extractBaseWDigitsChecked params.w params.ell1
+      (productionLayerDigest suite params sigStar.rRand sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot cur i
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight))
+        (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+          2 ^ params.subtreeHeight)) lsig.tswCtr) = some digF)
+    (hChainsLen : lsig.wotsChains.length = params.ell1)
+    (hDiff : ∀ e ∈ log,
+      e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) =
+        sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) →
+      cur ≠ prodHonestLayerMsg suite params sk e i)
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight)) .tree params.subtreeHeight 0
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+        (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+          digF (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains)
+        (sigStar.layerSigs.getD i ⟨0, [], []⟩).authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight))))
+    (w : ProdTcrWitness suite params sk log msgStar sigStar)
+    (hEx : prodLayerExtract suite params sk log msgStar sigStar hw hPwf hLog hCons i hi cur digF
+      hDigF hDiff hTsw hWalk = .inl w) :
+    (w.target, w.forged) ∈
+      (hypertreeLayersWithCands suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+        sigStar.rRand log i (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)) cur
+        (lsig :: rest)).2 := by
+  unfold hypertreeLayersWithCands
+  simp only [hCtr, decide_true, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  rw [← productionLayerDigest_rawHash, hExt]
+  dsimp only
+  simp only [hTsw, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hChainsLen, ne_eq,
+    not_true_eq_false]
+  have hWotsEq :
+      suite.rawHash (thPreimage tagThTl sk.pkSeed
+        ⟨UInt32.ofNat i,
+         UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+           2 ^ params.subtreeHeight),
+         .wotsPk,
+         UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+           2 ^ params.subtreeHeight), 0, 0⟩
+        (allWotsChainsWithCands suite params sk.pkSeed (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+          digF lsig.wotsChains params.ell1).1) =
+      recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+        digF lsig.wotsChains := by
+    rw [allWotsChainsWithCands_fst, recoverWotsPkFromSig_eq, recoverWotsEndpoints_eq,
+      thTweakTl_eq, thCall_eq]
+  have hMw1 : (walkMerkleKpWithCands suite sk.pkSeed (UInt32.ofNat i)
+      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+        2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0 0 0
+      (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+      (suite.rawHash (thPreimage tagThTl sk.pkSeed
+        ⟨UInt32.ofNat i,
+         UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+           2 ^ params.subtreeHeight),
+         .wotsPk,
+         UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+           2 ^ params.subtreeHeight), 0, 0⟩
+        (allWotsChainsWithCands suite params sk.pkSeed (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+          digF lsig.wotsChains params.ell1).1))
+      lsig.authPath).1 =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight))) := by
+    rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq, hWotsEq, hLs]
+    exact hWalk
+  rw [hMw1]
+  dsimp only
+  apply List.mem_append_left
+  subst hLs
+  unfold prodLayerExtract at hEx
+  dsimp only at hEx
+  split at hEx
+  · rename_i w' hWkEx
+    injection hEx with hwEq
+    subst hwEq
+    apply List.mem_append_right
+    apply List.mem_cons_of_mem
+    apply List.mem_append_right
+    let projM : ProdTcrWitness suite params sk log msgStar sigStar → Nat × Nat × List UInt8 :=
+      fun c0 => match c0.target with
+        | .xmssNode _ h n => (h, n, c0.forged)
+        | _ => (0, 0, c0.forged)
+    obtain ⟨d', _, hMem⟩ := prodWalkMerkleExtract_mem_cands suite sk.pkSeed (UInt32.ofNat i)
+      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+        2 ^ params.subtreeHeight)) .tree
+      (computeWotsPk suite params sk (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight)))
+      (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+      params.subtreeHeight (ProdTcrWitness suite params sk log msgStar sigStar)
+      (fun h n a b hH hLo hHi hNe hHash =>
+        ⟨.xmssNode i h n, _, ⟨hi, hH, hLo, hHi⟩, ⟨a, b, rfl⟩, (by simpa only [ProdTargetIdx.input_xmssNode] using hNe), (by simpa only [ProdTargetIdx.input_xmssNode] using hHash)⟩)
+      projM (fun _ _ _ _ _ _ _ _ _ => rfl)
+      params.subtreeHeight 0 0
+      (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+      _ _ _ _ _ _ w' hWkEx
+    have hTag : ∃ h n, w'.target = .xmssNode i h n :=
+      prodWalkMerkleExtract_inr_prop suite sk.pkSeed (UInt32.ofNat i)
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+          2 ^ params.subtreeHeight)) .tree
+        (computeWotsPk suite params sk (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight)))
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+        params.subtreeHeight (ProdTcrWitness suite params sk log msgStar sigStar)
+        (fun h n a b hH hLo hHi hNe hHash =>
+          ⟨.xmssNode i h n, _, ⟨hi, hH, hLo, hHi⟩, ⟨a, b, rfl⟩, (by simpa only [ProdTargetIdx.input_xmssNode] using hNe), (by simpa only [ProdTargetIdx.input_xmssNode] using hHash)⟩)
+        (fun c0 => ∃ h n, c0.target = .xmssNode i h n)
+        (fun h n _ _ _ _ _ _ _ => ⟨h, n, rfl⟩)
+        params.subtreeHeight 0
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+        _ _ _ _ _ _ w' hWkEx
+    obtain ⟨h, n, hT⟩ := hTag
+    dsimp only [projM] at hMem
+    rw [hT] at hMem ⊢
+    rw [← hWotsEq] at hMem
+    exact List.mem_map.mpr ⟨(h, d', n, w'.forged), hMem, rfl⟩
+  · split at hEx
+    · injection hEx with hwEq
+      subst hwEq
+      apply List.mem_append_right
+      rw [allWotsChainsWithCands_fst, ← recoverWotsEndpoints_eq]
+      exact List.mem_cons_self
+    · split at hEx
+      · rename_i w' hChEx
+        injection hEx with hwEq
+        subst hwEq
+        apply List.mem_append_right
+        apply List.mem_cons_of_mem
+        apply List.mem_append_left
+        let projCh : ProdTcrWitness suite params sk log msgStar sigStar → Nat × Nat × List UInt8 :=
+          fun c0 => match c0.target with
+            | .chainStep _ r s => (r, s, c0.forged)
+            | _ => (0, 0, c0.forged)
+        have hMem := prodAllChainsExtract_mem_cands suite params sk (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+          digF (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains
+          (ProdTcrWitness suite params sk log msgStar sigStar)
+          (fun r s x hr hs hNe hHash =>
+            ⟨.chainStep i r s, _, ⟨hi, hr, hs⟩, ⟨x, rfl⟩, (by simpa only [ProdTargetIdx.input_chainStep] using hNe), (by simpa only [ProdTargetIdx.input_chainStep] using hHash)⟩)
+          projCh (fun _ _ _ _ _ _ _ => rfl) _ hTsw params.ell1 (Nat.le_refl _) w' hChEx
+        have hTag : ∃ r s, w'.target = .chainStep i r s :=
+          prodAllChainsExtract_inr_prop suite params sk (UInt32.ofNat i)
+            (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+              2 ^ params.subtreeHeight))
+            (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+            digF (sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains
+            (ProdTcrWitness suite params sk log msgStar sigStar)
+            (fun r s x hr hs hNe hHash =>
+              ⟨.chainStep i r s, _, ⟨hi, hr, hs⟩, ⟨x, rfl⟩, (by simpa only [ProdTargetIdx.input_chainStep] using hNe), (by simpa only [ProdTargetIdx.input_chainStep] using hHash)⟩)
+            (fun w0 => ∃ r s, w0.target = .chainStep i r s)
+            (fun r s _ _ _ _ _ => ⟨r, s, rfl⟩) _ hTsw params.ell1 (Nat.le_refl _) w' hChEx
+        obtain ⟨r, s, hT⟩ := hTag
+        dsimp only [projCh] at hMem
+        rw [hT] at hMem ⊢
+        exact List.mem_map.mpr ⟨(r, s, w'.forged), hMem, rfl⟩
+      · split at hEx
+        · cases hEx
+        · rename_i e he hPos _
+          split at hEx
+          · split at hEx
+            · rename_i hPre
+              exfalso
+              simp only [ProdTargetIdx.input_signedDigest] at hPre
+              rw [hPos] at hPre
+              exact hDiff e he hPos (prodLayerPreimage_cur_inj hPre)
+            · injection hEx with hwEq
+              subst hwEq
+              apply List.mem_append_left
+              exact List.mem_map.mpr ⟨e, he, rfl⟩
+          · cases hEx
+
+private theorem prodHypertreeWalkExtract_mem_cands (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log) :
+    ∀ (sigs : List LayerXmssSig) (i : Nat) (cur : List UInt8) (hNe : sigs ≠ [])
+      (hAlign : ∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩)
+      (hLenEq : i + sigs.length = params.numLayers)
+      (hVer : verifyProductionHypertreeLayers suite params sk.pkSeed
+        (derivePublicKey suite params sk).pkRoot sigStar.rRand i
+        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)) cur sigs =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight)))))
+      (w : ProdTcrWitness suite params sk log msgStar sigStar),
+      prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf hLog hCons
+        sigs i cur hNe hAlign hLenEq hVer = .tcr w →
+      (w.target, w.forged) ∈
+        (hypertreeLayersWithCands suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot
+          sigStar.rRand log i (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)) cur sigs).2
+  | [], _, _, hNe, _, _, _, _, _ => absurd rfl hNe
+  | lsig :: rest, i, cur, _, hAlign, hLenEq, hVer, w, hEx => by
+    have hLs : lsig = sigStar.layerSigs.getD i ⟨0, [], []⟩ := by
+      have h := hAlign 0
+      rw [List.getD_cons_zero, Nat.add_zero] at h
+      exact h
+    have hStep : sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight =
+        sigStar.leafGlobalIdx / 2 ^ ((i + 1) * params.subtreeHeight) := by
+      have h := div_pow_mul_pow_mul sigStar.leafGlobalIdx i 1 params.subtreeHeight
+      rw [Nat.one_mul] at h
+      exact h
+    have hVerRaw := hVer
+    rw [verifyProductionHypertreeLayers_cons] at hVerRaw
+    dsimp only at hVerRaw
+    cases hCtrB : decide (lsig.tswCtr < 2 ^ 32)
+    · simp [hCtrB] at hVerRaw
+    · simp only [hCtrB, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVerRaw
+      cases hExt : extractBaseWDigitsChecked params.w params.ell1
+          (productionLayerDigest suite params sigStar.rRand sk.pkSeed
+            (derivePublicKey suite params sk).pkRoot cur i
+            (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+              2 ^ params.subtreeHeight))
+            (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+              2 ^ params.subtreeHeight)) lsig.tswCtr) with
+      | none => rw [hExt] at hVerRaw; cases hVerRaw
+      | some digits =>
+        rw [hExt] at hVerRaw
+        dsimp only at hVerRaw
+        have hDg := (extractBaseWDigitsChecked_some hExt).symm
+        cases hTswB : checkTargetSum params.w params.ell1 params.targetSum digits
+        · simp [hTswB] at hVerRaw
+        · simp only [hTswB, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVerRaw
+          by_cases hChLen : lsig.wotsChains.length = params.ell1
+          · simp only [hChLen, ne_eq, not_true_eq_false, ↓reduceIte] at hVerRaw
+            have hInv := verifyProductionHypertreeLayers_cons_inv suite params _ _ _ _ _ _ _ _ _ hVer
+            unfold prodHypertreeWalkExtract at hEx
+            dsimp only at hEx
+            split at hEx
+            · rename_i hNextW
+              obtain ⟨_, _, _, hW0, _⟩ := hInv
+              rw [hLs, hNextW] at hW0
+              cases hW0
+            · rename_i next hNextW
+              cases hR : rest with
+              | nil =>
+                subst hR
+                dsimp only at hEx
+                split at hEx
+                · cases hEx
+                · split at hEx
+                  · rename_i w' hLay
+                    injection hEx with hwEq
+                    subst hwEq
+                    exact prodLayerExtract_mem_cands suite params sk log msgStar sigStar hw hPwf
+                      hLog hCons i _ cur lsig [] hLs (of_decide_eq_true hCtrB) _ rfl
+                      (by rw [← hLs]; exact hDg ▸ hExt) hChLen _ _ _ w' hLay
+                  · cases hEx
+              | cons r0 rs =>
+                subst hR
+                dsimp only at hEx
+                split at hEx
+                · rename_i w' hStepEq
+                  injection hEx with hwEq
+                  subst hwEq
+                  have hUp : prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf
+                      hLog hCons (r0 :: rs) (i + 1) next
+                      (List.cons_ne_nil _ _)
+                      (fun j => by
+                        have h := hAlign (j + 1)
+                        rw [List.getD_cons_succ] at h
+                        rw [h, show i + (j + 1) = i + 1 + j by omega])
+                      (by rw [← hLenEq]; simp only [List.length_cons]; omega)
+                      (by
+                        obtain ⟨_, _, n', hW, hR0⟩ := hInv
+                        rw [hLs, hNextW] at hW
+                        have hn : next = n' := Option.some.inj hW
+                        rw [← hn, hStep] at hR0
+                        exact hR0) = .tcr w' := by
+                    split at hStepEq
+                    · cases hStepEq
+                    · injection hStepEq with h1
+                      injection h1 with h2
+                      subst h2
+                      assumption
+                    · cases hStepEq
+                  have hSubMem := prodHypertreeWalkExtract_mem_cands suite params sk log msgStar
+                    sigStar hw hPwf hLog hCons (r0 :: rs) (i + 1) next _ _ _ _ w' hUp
+                  unfold hypertreeLayersWithCands
+                  simp only [hCtrB, Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                    ← productionLayerDigest_rawHash, hExt, hTswB, hChLen, ne_eq, not_true_eq_false]
+                  have hWotsEq :
+                      suite.rawHash (thPreimage tagThTl sk.pkSeed
+                        ⟨UInt32.ofNat i,
+                         UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                           2 ^ params.subtreeHeight),
+                         .wotsPk,
+                         UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                           2 ^ params.subtreeHeight), 0, 0⟩
+                        (allWotsChainsWithCands suite params sk.pkSeed (UInt32.ofNat i)
+                          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                            2 ^ params.subtreeHeight))
+                          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                            2 ^ params.subtreeHeight)
+                          digits lsig.wotsChains params.ell1).1) =
+                      recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i)
+                        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                           2 ^ params.subtreeHeight))
+                        (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                          2 ^ params.subtreeHeight)
+                        digits lsig.wotsChains := by
+                    rw [allWotsChainsWithCands_fst, recoverWotsPkFromSig_eq,
+                      recoverWotsEndpoints_eq, thTweakTl_eq, thCall_eq]
+                  have hMw1 : (walkMerkleKpWithCands suite sk.pkSeed (UInt32.ofNat i)
+                      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                        2 ^ params.subtreeHeight)) .tree 0 params.subtreeHeight 0 0 0
+                      (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                        2 ^ params.subtreeHeight)
+                      (suite.rawHash (thPreimage tagThTl sk.pkSeed
+                        ⟨UInt32.ofNat i,
+                         UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                           2 ^ params.subtreeHeight),
+                         .wotsPk,
+                         UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                           2 ^ params.subtreeHeight), 0, 0⟩
+                        (allWotsChainsWithCands suite params sk.pkSeed (UInt32.ofNat i)
+                          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+                            2 ^ params.subtreeHeight))
+                          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+                            2 ^ params.subtreeHeight)
+                          digits lsig.wotsChains params.ell1).1))
+                      lsig.authPath).1 = some next := by
+                    rw [walkMerkleKpWithCands_fst, walkMerkleAuthPathKp_zero_eq, hWotsEq, ← hDg,
+                      hLs]
+                    exact hNextW
+                  rw [hMw1, hStep]
+                  exact List.mem_append_right _ hSubMem
+                · cases hEx
+                · split at hEx
+                  · cases hEx
+                  · split at hEx
+                    · rename_i w' hLay
+                      injection hEx with hwEq
+                      subst hwEq
+                      exact prodLayerExtract_mem_cands suite params sk log msgStar sigStar hw hPwf
+                        hLog hCons i _ cur lsig (r0 :: rs) hLs (of_decide_eq_true hCtrB) _ rfl
+                        (by rw [← hLs]; exact hDg ▸ hExt) hChLen _ _ _ w' hLay
+                    · cases hEx
+          · simp [hChLen] at hVerRaw
+
+/-- **Completeness of the Public Candidate Collector (`prodTcrOutput_mem_publicVerifierCands`):**
+    Whenever `prodTcrOutput` extracts `(t, forged)` on outcome `o`, that exact pair appears in the
+    public oracle candidate list `publicVerifierWithTcrCands` computed from `(pk, log, msgStar, sigStar)`
+    without `sk.skSeed` or `sk.skPrf`. -/
