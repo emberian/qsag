@@ -39,7 +39,7 @@ impl<'a> Lane<'a> {
             signature: sig,
         } = input;
         let p = pk.profile.params();
-        if dp.params != p {
+        if dp.params != p || pk.root.len() != p.node_bytes {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         }
         if sig.randomizer.len() != p.node_bytes
@@ -441,6 +441,25 @@ mod tests {
                 }),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn malformed_public_roots_fail_before_any_batch_hashing() {
+        let profile = FrontierFtsProfile::Compact1122;
+        let dp = FrontierDpTable::build(profile);
+        let signature = FrontierFtsSignature {
+            randomizer: vec![0; 32], grind_counter: 0, chain_values: vec![0; 1088],
+        };
+        for len in [0, 16, 31, 33, 4096] {
+            let pk = FrontierFtsPublicKey { profile, pk_seed: [0; 32], root: vec![0; len] };
+            let inputs: Vec<_> = (0..17).map(|_| FrontierVerifyInput {
+                pk: &pk, dp: &dp, message: b"root length", signature: &signature,
+            }).collect();
+            let expected = verify_frontier_fts(&pk, &dp, b"root length", &signature);
+            assert_eq!(expected, Err(FrontierFtsError::SignatureVerificationFailed));
+            assert_eq!(verify_batch_with_permutation(&inputs, |_| panic!("malformed root hashed")),
+                vec![expected; 17]);
         }
     }
 

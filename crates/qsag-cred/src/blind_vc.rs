@@ -634,6 +634,7 @@ impl Drop for HolderCredentialSecret {
     fn drop(&mut self) {
         ct_zeroize_u64s(&mut self.attrs);
         ct_zeroize_u64s(&mut self.holder_blind);
+        self.seen_challenges.get_mut().secret_wipe();
     }
 }
 
@@ -752,12 +753,12 @@ pub fn holder_prepare_blind_issuance_with_profile(
     let mut holder_blind =
         SecretBuffer(vec![blind_vec[0], blind_vec[1], blind_vec[2], blind_vec[3]]);
     drop(blind_vec);
-    let holder_blind_arr = [
+    let holder_blind_arr = SecretBuffer([
         holder_blind[0],
         holder_blind[1],
         holder_blind[2],
         holder_blind[3],
-    ];
+    ]);
     let attr_commit = compute_vc_poseidon2_commit(
         schema_id,
         issuer_attested_attrs,
@@ -3019,6 +3020,7 @@ pub fn prove_selective_disclosure_with_profile(
     presentation_entropy: [u8; 32],
     profile: ZkSoundnessProfile,
 ) -> Result<SelectiveDisclosurePresentation, BlindVcError> {
+    let mut ent = SecretBuffer(presentation_entropy);
     let PresentationRequest {
         verifier_scope,
         verifier_challenge,
@@ -3092,7 +3094,6 @@ pub fn prove_selective_disclosure_with_profile(
     seen.push(*verifier_challenge);
     drop(seen);
 
-    let mut ent = presentation_entropy;
     let mut nonce_bind = Vec::with_capacity(64 + sorted_idx.len() * 12);
     nonce_bind.extend_from_slice(&cred.issuer_epoch.to_le_bytes());
     nonce_bind.extend_from_slice(&cred.schema_id.to_le_bytes());
@@ -3111,7 +3112,7 @@ pub fn prove_selective_disclosure_with_profile(
     }
     let presentation_nonce = cshake256_framed_32(
         b"QSAG.VC.PRES_NONCE.V1",
-        &[&ent, verifier_scope, verifier_challenge, &nonce_bind],
+        &[&ent[..], verifier_scope, verifier_challenge, &nonce_bind],
     );
     let verifier_scope_limbs = presentation_scope(
         verifier_scope,
@@ -3138,7 +3139,7 @@ pub fn prove_selective_disclosure_with_profile(
         Ok(commit) => commit,
         Err(err) => {
             ct_zeroize_u64s(&mut pres_blind);
-            ct_zeroize_bytes(&mut ent);
+            ct_zeroize_bytes(&mut ent[..]);
             return Err(err);
         }
     };
@@ -3192,7 +3193,7 @@ pub fn prove_selective_disclosure_with_profile(
         &secret_vals,
     );
     if trace.final_outs != expected_final_outs {
-        ct_zeroize_bytes(&mut ent);
+        ct_zeroize_bytes(&mut ent[..]);
         return Err(BlindVcError::CredentialBindingMismatch);
     }
 
@@ -3217,9 +3218,9 @@ pub fn prove_selective_disclosure_with_profile(
     inst_bytes.extend_from_slice(profile_tag);
 
     let statement_digest = cshake256_framed_32(b"QSAG.VC.SD_STMT_DIGEST.V2", &[&inst_bytes]);
-    let mut hedged_zk_seed =
-        cshake256_framed_32(b"QSAG.VC.SD_ZK_SEED.V2", &[&statement_digest, &ent]);
-    ct_zeroize_bytes(&mut ent);
+    let mut hedged_zk_seed = SecretBuffer(
+        cshake256_framed_32(b"QSAG.VC.SD_ZK_SEED.V2", &[&statement_digest, &ent[..]]));
+    ct_zeroize_bytes(&mut ent[..]);
 
     let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.SD_LIMBO.V1", &inst_bytes);
     tr.absorb(b"VC_SOUNDNESS_PROFILE", profile_tag);
@@ -3238,6 +3239,9 @@ pub fn prove_selective_disclosure_with_profile(
         c_plain: Fp5,
         m_sum: SecretBuffer<Vec<Fp5>>,
     }
+
+    // Box::new only moves small headers and two field elements, even without optimization.
+    const _: () = assert!(core::mem::size_of::<R1RepState>() < 256);
 
     impl R1RepState {
         fn zeroed(num_secret_wires: usize) -> Self {
@@ -3272,7 +3276,7 @@ pub fn prove_selective_disclosure_with_profile(
             b"QSAG.VC.SD_GGM_ROOT.V1",
             &[
                 &statement_digest,
-                &hedged_zk_seed,
+                &hedged_zk_seed[..],
                 &presentation_nonce,
                 &rep_u32.to_le_bytes(),
             ],
@@ -3368,7 +3372,7 @@ pub fn prove_selective_disclosure_with_profile(
         state
     });
 
-    ct_zeroize_bytes(&mut hedged_zk_seed);
+    ct_zeroize_bytes(&mut hedged_zk_seed[..]);
     drop(secret_vals);
 
     let mut r1_bundle = Vec::with_capacity(tau * VC_SD_LIMBO_PARTIES * 32);
@@ -3389,14 +3393,14 @@ pub fn prove_selective_disclosure_with_profile(
         let r1 = &r1_reps[rep];
         let (theta, eta) = expand_gamma_weights(&gamma_seed, rep as u32);
         const MASK64: u128 = 0xffff_ffff_ffff_ffff;
-        let mut poly_lo = [[0u128; 5]; 2 * SD_GRID_B + 1];
-        let mut poly_hi = [[0u128; 5]; 2 * SD_GRID_B + 1];
-        let mut poly_v = [Fp5::ZERO; 2 * SD_GRID_B + 1];
+        let mut poly_lo = SecretBuffer([[0u128; 5]; 2 * SD_GRID_B + 1]);
+        let mut poly_hi = SecretBuffer([[0u128; 5]; 2 * SD_GRID_B + 1]);
+        let mut poly_v = SecretBuffer([Fp5::ZERO; 2 * SD_GRID_B + 1]);
 
         for (l, &eta_l) in eta.iter().enumerate() {
             // P_l(X) = u_l + sum_{b=0}^{B-1} (theta_b * eta_l * x_{b,l}) * X^{b+1}
             // Q_l(X) = sum_{k=0}^{B-1} y_{B-1-k, l} * X^k + v_l * X^B
-            let mut p_coeffs = [Fp5::ZERO; SD_GRID_B + 1];
+            let mut p_coeffs = SecretBuffer([Fp5::ZERO; SD_GRID_B + 1]);
             p_coeffs[0] = r1.u_sum[l];
             for (b, &theta_b) in theta.iter().enumerate() {
                 let xv = trace.x[b * SD_GRID_L + l];
@@ -3404,7 +3408,7 @@ pub fn prove_selective_disclosure_with_profile(
                     p_coeffs[b + 1] = theta_b.mul(eta_l).scale_fp(xv);
                 }
             }
-            let mut y_col = [0u128; SD_GRID_B];
+            let mut y_col = SecretBuffer([0u128; SD_GRID_B]);
             for (k, y_slot) in y_col.iter_mut().enumerate() {
                 *y_slot = trace.y[(SD_GRID_B - 1 - k) * SD_GRID_L + l] as u128;
             }
@@ -3428,7 +3432,7 @@ pub fn prove_selective_disclosure_with_profile(
                 poly_v[j + SD_GRID_B] = poly_v[j + SD_GRID_B].add(pj.mul(v_l));
             }
         }
-        let mut poly_full = [Fp5::ZERO; 2 * SD_GRID_B + 1];
+        let mut poly_full = SecretBuffer([Fp5::ZERO; 2 * SD_GRID_B + 1]);
         for d in 0..=(2 * SD_GRID_B) {
             poly_full[d] = reduce_fp5_split(&poly_lo[d], &poly_hi[d]).add(poly_v[d]);
         }
@@ -3496,10 +3500,10 @@ pub fn prove_selective_disclosure_with_profile(
         let mut sigma_sum = Fp5::ZERO;
         let mut h_online = [[0u8; 32]; VC_SD_LIMBO_PARTIES];
 
-        let mut batch_tapes: [Vec<u64>; 8] = core::array::from_fn(|_| Vec::new());
-        let mut x_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
-        let mut y_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
-        let mut z_grid = vec![0u64; SD_GRID_B * SD_GRID_L];
+        let mut batch_tapes = SecretBuffer(core::array::from_fn::<_, 8, _>(|_| Vec::with_capacity(total_party_limbs)));
+        let mut x_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
+        let mut y_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
+        let mut z_grid = SecretBuffer(vec![0u64; SD_GRID_B * SD_GRID_L]);
         let x_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = x_grid.as_mut_slice().try_into().unwrap();
         let y_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = y_grid.as_mut_slice().try_into().unwrap();
         let z_arr: &mut [u64; SD_GRID_B * SD_GRID_L] = z_grid.as_mut_slice().try_into().unwrap();
@@ -3508,15 +3512,17 @@ pub fn prove_selective_disclosure_with_profile(
 
         for batch in 0..(VC_SD_LIMBO_PARTIES / 8) {
             let base_p = batch * 8;
-            let seeds_8: [[u8; 32]; 8] =
-                core::array::from_fn(|lane| r1.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]);
+            let seeds_8 = SecretBuffer(core::array::from_fn::<_, 8, _>(|lane|
+                r1.ggm_tree.0[VC_SD_LIMBO_PARTIES + base_p + lane]));
             let mut prg = Shake256PartyBatch8::new(&presentation_nonce, rep_u32, base_p, &seeds_8);
             let _ = prg.extract_salts_1();
             prg.squeeze_canonical_gl([true; 8], &mut batch_tapes, total_party_limbs);
 
             for (lane, tape) in batch_tapes.iter_mut().enumerate() {
                 let p = base_p + lane;
-                let (u_p, v_p, mut c_p, m_p) = unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]);
+                let party_masks = SecretBuffer(unpack_party_ext_masks(&tape[..PARTY_EXT_LIMBS]));
+                let (u_p, v_p, c_p, m_p) = &*party_masks;
+                let mut c_p = SecretBuffer(*c_p);
                 let w_raw = &tape[PARTY_EXT_LIMBS..PARTY_EXT_LIMBS + num_secret_wires];
                 let z_raw = &tape[PARTY_EXT_LIMBS + num_secret_wires..];
 
@@ -3527,7 +3533,7 @@ pub fn prove_selective_disclosure_with_profile(
                     for ((dst, &zr), &dz) in z_buf.0.iter_mut().zip(z_raw).zip(r1.delta_z.iter()) {
                         *dst = gl_add(zr, dz);
                     }
-                    c_p = c_p.add(r1.delta_c);
+                    *c_p = c_p.add(r1.delta_c);
                     eval_sd_party_shares(
                         p,
                         holder_arity,
@@ -3559,21 +3565,22 @@ pub fn prove_selective_disclosure_with_profile(
                     );
                 }
 
-                let (alpha_i, beta_i, sigma_i) = eval_party_polynomial_shares(
-                    &u_p, &v_p, c_p, &m_p, x_arr, y_arr, z_arr, &tables,
-                );
+                let evaluated = SecretBuffer(eval_party_polynomial_shares(
+                    u_p, v_p, *c_p, m_p, x_arr, y_arr, z_arr, &tables,
+                ));
+                let (alpha_i, beta_i, sigma_i) = &*evaluated;
                 for l in 0..SD_GRID_L {
                     alpha_sum[l] = alpha_sum[l].add(alpha_i[l]);
                     beta_sum[l] = beta_sum[l].add(beta_i[l]);
                 }
-                sigma_sum = sigma_sum.add(sigma_i);
+                sigma_sum = sigma_sum.add(*sigma_i);
                 h_online[p] = hash_limbo_party_online(
                     &presentation_nonce,
                     rep_u32,
                     p as u16,
-                    &alpha_i,
-                    &beta_i,
-                    sigma_i,
+                    alpha_i,
+                    beta_i,
+                    *sigma_i,
                 );
                 ct_zeroize_u64s(tape);
             }

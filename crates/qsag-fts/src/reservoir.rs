@@ -8,8 +8,9 @@ use super::*;
 /// sign one message), then refill before the next operation when needed. Tree
 /// height changes the number of refills, not the preprocessing allocation.
 ///
-/// This is an in-memory protocol state, not a crash-recovery format. Persist burn
-/// state as usual; never restore a snapshot of a consumed preprocessing pool.
+/// Secret snapshots require encrypted storage and external monotonic burn state.
+/// Never restore a snapshot of a consumed preprocessing pool. The wire digest is
+/// an unkeyed corruption check, not authentication against a malicious writer.
 pub struct ParallelSeededDkgReservoir {
     output: ParallelSeededDkgOutput,
     generation: u64,
@@ -65,6 +66,10 @@ impl ParallelSeededDkgReservoir {
             || !share.committee.windows(2).all(|w| w[0] < w[1])
             || !share.committee.contains(&share.party_id)
             || share.pairwise_zero_seeds.len() + 1 != share.committee.len()
+            || !share.pairwise_zero_seeds.iter().map(|(peer, _)| *peer).eq(
+                share.committee.iter().copied().filter(|&id| id != share.party_id)
+            )
+            || share.epoch_uses.iter().any(|&used| used > 1)
             || share.beaver_cursor > share.beaver_pool.len()
         {
             return Err(ParallelSeededError::InvalidThresholdParameters);
@@ -158,7 +163,12 @@ impl ParallelSeededDkgReservoir {
     /// Rehydrate an activated reservoir serialized with [`Self::to_secret_bytes`].
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, ParallelSeededError> {
         let invalid = ParallelSeededError::InvalidThresholdParameters;
-        if bytes.len() < 8 + 8 + 32 + 2 + 16 + 2 + 256 + 2 + 4 + 4 + 4 + 32
+        // Maximum canonical snapshot: 255 parties, height 20, both bounded pools.
+        const MAX_WIRE_BYTES: usize = 68 + 255 * 2 + 256 + 2 + 254 * 34
+            + 4 + (1 << 20) + 4 + DEFAULT_BEAVER_TRIPLE_POOL * 336
+            + 4 + DEFAULT_BEAVER_TRIPLE_POOL * 144 + 32;
+        if bytes.len() > MAX_WIRE_BYTES
+            || bytes.len() < 8 + 8 + 32 + 2 + 16 + 2 + 256 + 2 + 4 + 4 + 4 + 32
             || &bytes[..8] != b"QSFTSRS1"
         {
             return Err(invalid);
@@ -225,31 +235,36 @@ impl ParallelSeededDkgReservoir {
         if !committee.windows(2).all(|w| w[0] < w[1]) || !committee.contains(&party_id) {
             return Err(invalid);
         }
-        let sk_seed_lanes = SecretBuffer([read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?]);
-        let sk_seed_macs = SecretBuffer([
-            [read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?],
-            [read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?],
-        ]);
-        let sk_prf_lanes = SecretBuffer([read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?]);
-        let sk_prf_macs = SecretBuffer([
-            [read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?],
-            [read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?],
-        ]);
-        let bdoz_alpha_share =
-            SecretBuffer([read_u128_le(&mut cursor)?, read_u128_le(&mut cursor)?]);
+        // Install guards before reading any secret: a later `?` must wipe even a
+        // partially decoded array, rather than abandoning initializer temporaries.
+        let mut sk_seed_lanes = SecretBuffer([0u128; 2]);
+        let mut sk_seed_macs = SecretBuffer([[0u128; 2]; 2]);
+        let mut sk_prf_lanes = SecretBuffer([0u128; 2]);
+        let mut sk_prf_macs = SecretBuffer([[0u128; 2]; 2]);
+        let mut bdoz_alpha_share = SecretBuffer([0u128; 2]);
+        for dst in sk_seed_lanes.iter_mut()
+            .chain(sk_seed_macs.iter_mut().flatten())
+            .chain(sk_prf_lanes.iter_mut())
+            .chain(sk_prf_macs.iter_mut().flatten())
+            .chain(bdoz_alpha_share.iter_mut())
+        {
+            *dst = read_u128_le(&mut cursor)?;
+        }
         let local_salt_seed = SecretBytes::new(read_bytes32(&mut cursor)?);
         let pairwise_len = read_u16(&mut cursor)? as usize;
         if pairwise_len + 1 != committee_len {
             return Err(invalid);
         }
-        let mut pairwise_zero_seeds: Vec<(u16, [u8; 32])> = Vec::with_capacity(pairwise_len);
+        // Verify the complete section before allocation, then guard every entry
+        // across all subsequent parsing failures (including truncation via `?`).
+        if pairwise_len > (body.len() - cursor) / 34 {
+            return Err(invalid);
+        }
+        let mut pairwise_zero_seeds = SecretBuffer(Vec::with_capacity(pairwise_len));
         let mut expected_peers = committee.iter().copied().filter(|&id| id != party_id);
         for _ in 0..pairwise_len {
             let peer = read_u16(&mut cursor)?;
             if expected_peers.next() != Some(peer) {
-                for (_, s) in &mut pairwise_zero_seeds {
-                    ct_zeroize_bytes(s);
-                }
                 return Err(invalid);
             }
             let seed = SecretBytes::new(read_bytes32(&mut cursor)?);
@@ -258,25 +273,18 @@ impl ParallelSeededDkgReservoir {
         let epoch_uses_len = read_u32(&mut cursor)? as usize;
         let expected_leaves = 1usize << params.tree_height;
         if epoch_uses_len != expected_leaves {
-            for (_, s) in &mut pairwise_zero_seeds {
-                ct_zeroize_bytes(s);
-            }
             return Err(invalid);
         }
         let epoch_uses_slice = take(&mut cursor, epoch_uses_len)?;
         if epoch_uses_slice.iter().any(|&u| u > 1) {
-            for (_, s) in &mut pairwise_zero_seeds {
-                ct_zeroize_bytes(s);
-            }
             return Err(invalid);
         }
         let epoch_uses = epoch_uses_slice.to_vec();
 
         let unspent_powers_len = read_u32(&mut cursor)? as usize;
-        if unspent_powers_len > DEFAULT_BEAVER_TRIPLE_POOL {
-            for (_, s) in &mut pairwise_zero_seeds {
-                ct_zeroize_bytes(s);
-            }
+        if unspent_powers_len > DEFAULT_BEAVER_TRIPLE_POOL
+            || unspent_powers_len > (body.len() - cursor) / 336
+        {
             return Err(invalid);
         }
         let mut beaver_pool = Vec::with_capacity(unspent_powers_len);
@@ -294,28 +302,26 @@ impl ParallelSeededDkgReservoir {
         }
 
         let beaver_triples_len = read_u32(&mut cursor)? as usize;
-        if beaver_triples_len > DEFAULT_BEAVER_TRIPLE_POOL {
-            for (_, s) in &mut pairwise_zero_seeds {
-                ct_zeroize_bytes(s);
-            }
+        if beaver_triples_len > DEFAULT_BEAVER_TRIPLE_POOL
+            || beaver_triples_len > (body.len() - cursor) / 144
+        {
             return Err(invalid);
         }
         let mut beaver_triples = Vec::with_capacity(beaver_triples_len);
         for _ in 0..beaver_triples_len {
-            let mut values = [0u128; 3];
-            let mut macs = [[0u128; 2]; 3];
+            let mut triple = ParallelSeededDkgBeaverShare {
+                values: [0; 3],
+                macs: [[0; 2]; 3],
+            };
             for idx in 0..3 {
-                values[idx] = read_u128_le(&mut cursor)?;
-                macs[idx][0] = read_u128_le(&mut cursor)?;
-                macs[idx][1] = read_u128_le(&mut cursor)?;
+                triple.values[idx] = read_u128_le(&mut cursor)?;
+                triple.macs[idx][0] = read_u128_le(&mut cursor)?;
+                triple.macs[idx][1] = read_u128_le(&mut cursor)?;
             }
-            beaver_triples.push(ParallelSeededDkgBeaverShare { values, macs });
+            beaver_triples.push(triple);
         }
 
         if cursor != body.len() {
-            for (_, s) in &mut pairwise_zero_seeds {
-                ct_zeroize_bytes(s);
-            }
             return Err(invalid);
         }
 
@@ -330,7 +336,7 @@ impl ParallelSeededDkgReservoir {
             sk_prf_macs: *sk_prf_macs,
             bdoz_alpha_share: *bdoz_alpha_share,
             local_salt_seed: *local_salt_seed,
-            pairwise_zero_seeds,
+            pairwise_zero_seeds: core::mem::take(&mut *pairwise_zero_seeds),
             beaver_pool,
             beaver_cursor: 0,
             epoch_uses,
@@ -539,10 +545,42 @@ mod tests {
             .iter()
             .map(|r| r.to_secret_bytes().unwrap())
             .collect();
+        // A nonzero cursor persists only unspent tuples; malformed cursors and
+        // noncanonical peer/epoch metadata must never be emitted.
+        let original_powers = reservoirs[0].remaining_powers();
+        reservoirs[0].output.share.beaver_cursor = 1;
+        let unspent = reservoirs[0].to_secret_bytes().unwrap();
+        assert_eq!(ParallelSeededDkgReservoir::from_secret_bytes(&unspent).unwrap().remaining_powers(), original_powers - 1);
+        reservoirs[0].output.share.beaver_cursor = reservoirs[0].output.share.beaver_pool.len() + 1;
+        assert!(reservoirs[0].to_secret_bytes().is_err());
+        reservoirs[0].output.share.beaver_cursor = 0;
+        reservoirs[0].output.share.epoch_uses[0] = 2;
+        assert!(reservoirs[0].to_secret_bytes().is_err());
+        reservoirs[0].output.share.epoch_uses[0] = 0;
+        reservoirs[0].output.share.pairwise_zero_seeds[0].0 = reservoirs[0].party_id();
+        assert!(reservoirs[0].to_secret_bytes().is_err());
         drop(reservoirs);
 
+        // The wire digest is unkeyed. Recompute it to exercise structural parse
+        // failures after secret fields, rather than only the digest rejection.
+        let raw = &encoded[0][..encoded[0].len() - 32];
+        for cut in (0..512.min(raw.len())).chain([raw.len() - 1]) {
+            let mut truncated = SecretBuffer(raw[..cut].to_vec());
+            let tag = cshake256_framed_32(b"QSAG.FTS.RESERVOIR.TAG.V1", &[&truncated]);
+            truncated.extend_wiping(&tag);
+            assert!(ParallelSeededDkgReservoir::from_secret_bytes(&truncated).is_err());
+        }
+        let power_count_offset = 68 + 2 * 2 + 256 + 2 + 34 + 4 + 4;
+        for count in [DEFAULT_BEAVER_TRIPLE_POOL as u32, u32::MAX] {
+            let mut short = SecretBuffer(raw[..power_count_offset + 4].to_vec());
+            short[power_count_offset..].copy_from_slice(&count.to_be_bytes());
+            let tag = cshake256_framed_32(b"QSAG.FTS.RESERVOIR.TAG.V1", &[&short]);
+            short.extend_wiping(&tag);
+            assert!(ParallelSeededDkgReservoir::from_secret_bytes(&short).is_err());
+        }
+
         // Tampered or truncated bytes must fail closed.
-        let mut bad = encoded[0].0.clone();
+        let mut bad = SecretBuffer(encoded[0].0.clone());
         let last = bad.len() - 1;
         bad[last] ^= 0x01;
         assert!(ParallelSeededDkgReservoir::from_secret_bytes(&bad).is_err());
