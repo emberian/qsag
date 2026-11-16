@@ -41,6 +41,7 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
      unopened prefixes, and MAC-free `SHAKE256` endpoint self-verification.
 -/
 
+public import Qsag.Spec.IdealCustody
 public import Qsag.Spec.Encoding
 public import Qsag.Tactic.Prelude
 public import Qsag.Spec.Refines
@@ -1116,7 +1117,7 @@ structure BeltLatchNetworkState (n : Nat) where
   certifiedReleases : List (CustodiansMask n × Fin n × BeltLatchRecord)
 
 /-- Fresh distributed `BeltLatch` network at epoch `0` across all `n` custodians. -/
-def BeltLatchNetworkState.init (n height maxWindow : Nat) : BeltLatchNetworkState n where
+@[expose] def BeltLatchNetworkState.init (n height maxWindow : Nat) : BeltLatchNetworkState n where
   nodes := fun _ => BeltLatchNodeState.init height maxWindow
   honestBoundLogs := fun _ => []
   emittedHonestEchoes := []
@@ -1135,7 +1136,7 @@ inductive BeltNetworkTurn (n : Nat) where
       (rec : BeltLatchRecord) (echoes : List (AuthenticatedBeltEcho n))
 
 /-- Execute one open-world step on `BeltLatchNetworkState n` with quorum threshold `q`. -/
-def stepBeltNetwork {n : Nat}
+@[expose] def stepBeltNetwork {n : Nat}
     (H : List UInt8 → Digest256)
     (MAC : Digest256 → List UInt8 → Digest256)
     (macKeys : Fin n → Fin n → Digest256)
@@ -1548,6 +1549,48 @@ private def findMatchingEcho {n : Nat}
         exact h
       let ⟨e', hm', hv'⟩ := findMatchingEcho H MAC key s v rec es hTail
       ⟨e', .tail e hm', hv'⟩
+
+/-- The crash/recovery network's cumulative honest logs instantiate ABQS latch safety.
+This network is scoped to one deployed key (`Unit`); the leaf index is the record epoch. -/
+theorem beltLatch_network_history_safe {n q height maxWindow : Nat}
+    (H : List UInt8 → Digest256) (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (trace : List (BeltNetworkTurn n)) :
+    let net := runBeltNetworkTrace H MAC macKeys Corrupt q
+      (BeltLatchNetworkState.init n height maxWindow) trace
+    Spec.BeltLatchHistorySafe (fun p => Corrupt.mem p = true)
+      (fun p (_pk : Unit) leaf_idx rec =>
+        rec ∈ net.honestBoundLogs p ∧ rec.epoch.toNat = leaf_idx) := by
+  dsimp only
+  unfold Spec.BeltLatchHistorySafe
+  intro p hp _ leaf_idx rec₁ rec₂ h₁ h₂
+  have hpF : Corrupt.mem p = false := Bool.not_eq_true _ |>.mp hp
+  have hInv := runBeltNetworkTrace_preserves_inv H MAC macKeys Corrupt q height maxWindow trace
+  exact diskUniq_of_diskCovers (hInv.1 p hpF).1 rec₁ h₁.1 rec₂ h₂.1
+    (UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (h₁.2.trans h₂.2.symm)))
+
+/-- Personal quorum certificates justified by honest bindings anywhere in the durable network
+history agree, including bindings preceding crash/recovery or later latch consumption. -/
+theorem abqs_beltLatch_network_unique_msg {n q height maxWindow : Nat}
+    (H : List UInt8 → Digest256) (MAC : Digest256 → List UInt8 → Digest256)
+    (macKeys : Fin n → Fin n → Digest256) (Corrupt : CustodiansMask n)
+    (trace : List (BeltNetworkTurn n)) (S : Spec.AsymmetricQuorumSystem (Fin n))
+    (i j : Fin n) (Q₁ Q₂ : List (Fin n)) (leaf_idx : Nat) (rec₁ rec₂ : BeltLatchRecord)
+    (hQ₁ : S.quorumsOf i Q₁) (hQ₂ : S.quorumsOf j Q₂)
+    (hF : S.faultSets i j (fun p => Corrupt.mem p = true))
+    (hCert₁ : ∀ p ∈ Q₁, Corrupt.mem p ≠ true →
+      rec₁ ∈ (runBeltNetworkTrace H MAC macKeys Corrupt q
+        (BeltLatchNetworkState.init n height maxWindow) trace).honestBoundLogs p ∧
+        rec₁.epoch.toNat = leaf_idx)
+    (hCert₂ : ∀ p ∈ Q₂, Corrupt.mem p ≠ true →
+      rec₂ ∈ (runBeltNetworkTrace H MAC macKeys Corrupt q
+        (BeltLatchNetworkState.init n height maxWindow) trace).honestBoundLogs p ∧
+        rec₂.epoch.toNat = leaf_idx) : rec₁.msgDigest = rec₂.msgDigest := by
+  exact congrArg BeltLatchRecord.msgDigest
+    (Spec.abqs_belt_latch_unique_msg S _ i j Q₁ Q₂ _ () leaf_idx rec₁ rec₂ hQ₁ hQ₂ hF
+      (beltLatch_network_history_safe H MAC macKeys Corrupt trace) hCert₁ hCert₂)
+
+#verify_constructive beltLatch_network_history_safe abqs_beltLatch_network_unique_msg
 
 /-- **Crown Jewel 1A — `(t, n, f)` BFT Quorum-Switching `BeltLatch` Global Uniqueness
     (`beltLatch_quorum_intersection_global_uniqueness`)**:
@@ -5041,7 +5084,7 @@ theorem towerOne_ne_towerX (k : Nat) : towerOne (k + 1) ≠ towerX (k + 1) := by
   exact towerOne_ne_zero k (congrArg Prod.fst hEq)
 
 /-- Exact 2-point Lagrange weights at zero `[x₁ · (x₀ + x₁)⁻¹, x₀ · (x₀ + x₁)⁻¹]` over `TowerElem k`. -/
-def lagrange2WeightsTower (k : Nat) (x₀ x₁ : TowerElem k) : List (TowerElem k) :=
+@[expose] def lagrange2WeightsTower (k : Nat) (x₀ x₁ : TowerElem k) : List (TowerElem k) :=
   let denom := towerInv k (towerAdd k x₀ x₁)
   [towerMul k x₁ denom, towerMul k x₀ denom]
 
@@ -7070,6 +7113,8 @@ theorem QsBQuorumConfig.valid_iff (c : QsBQuorumConfig) :
       2 * c.q > c.n + c.f ∧ c.n ≥ 3 * c.f + 1 ∧ c.q ≤ c.n - c.f) := by
   unfold QsBQuorumConfig.valid
   exact decide_eq_true_iff
+
+#export_eqns beltLatchBindStep BeltLatchNodeState.init verifyQuorumEchoCertificate verifyAuthenticatedBeltEcho beltLatchEmitEcho stepBeltNetwork
 
 end Qsag
 end

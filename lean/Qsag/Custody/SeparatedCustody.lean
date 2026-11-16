@@ -59,7 +59,7 @@ structure SigningConfig where
   randomness : List UInt8
   grindLimit : Nat
 
-def query (cfg : SigningConfig) (dep party : Nat) (r : Intent) : ProdSigningQuery :=
+@[expose] def query (cfg : SigningConfig) (dep party : Nat) (r : Intent) : ProdSigningQuery :=
   ⟨payload dep party r, cfg.randomness, r.leaf, cfg.grindLimit⟩
 
 /-- The actual production specification, including its self-verification. -/
@@ -68,7 +68,7 @@ def sign (cfg : SigningConfig) (sk : PqSecretKey) (dep party : Nat) (r : Intent)
   evalProductionStatefulSign cfg.suite cfg.params sk (payload dep party r)
     cfg.randomness r.leaf cfg.grindLimit
 
-def verify (cfg : SigningConfig) (pk : PqPublicKey) (dep party : Nat)
+@[expose] def verify (cfg : SigningConfig) (pk : PqPublicKey) (dep party : Nat)
     (r : Intent) (sig : PqHashSig) : Bool :=
   verifyProductionPqHashSig cfg.suite cfg.params pk (payload dep party r) sig
 
@@ -254,10 +254,10 @@ structure Vault where
   attempted : List Intent := []
   poisoned : Bool := false
 
-def initial (id : VaultIdentity) : Vault := { identity := id }
+@[expose] def initial (id : VaultIdentity) : Vault := { identity := id }
 
 /-- The round is checked against the commitment of the vault's own deployment. -/
-def mintGuard (p : RoundPolicy) (cap : Nat) (v : Vault) (b : Burn) : Bool :=
+@[expose] def mintGuard (p : RoundPolicy) (cap : Nat) (v : Vault) (b : Burn) : Bool :=
   decide (v.durable.nextLeaf ≤ b.intent.leaf ∧ b.intent.round = v.durable.nextRound ∧
     v.durable.spent + b.intent.spend ≤ cap ∧
     b.intent.session ∉ v.durable.burned.map (fun x => x.intent.session) ∧
@@ -266,7 +266,7 @@ def mintGuard (p : RoundPolicy) (cap : Nat) (v : Vault) (b : Burn) : Bool :=
 
 /-- The new external anchor and all burned cursors are returned together. A
 permit is the exact stored request, not merely a forgeable generation number. -/
-def mint (p : RoundPolicy) (cap anchor : Nat) (v : Vault) (b : Burn) : Vault :=
+@[expose] def mint (p : RoundPolicy) (cap anchor : Nat) (v : Vault) (b : Burn) : Vault :=
   if v.poisoned || decide (v.durable.anchor ≠ anchor) then
     { v with poisoned := true, active := none }
   else if mintGuard p cap v b then
@@ -339,7 +339,7 @@ theorem issue_some (cfg : SigningConfig) (sk : PqSecretKey) (party : Nat)
 leaf or the spend. Every oracle call, including a failed call, is recorded. A caller without
 the vault identity also consumes the grant and receives nothing: the state change does not
 depend on who asks, only the output does. -/
-def release (cfg : SigningConfig) (sk : PqSecretKey) (party anchor : Nat)
+@[expose] def release (cfg : SigningConfig) (sk : PqSecretKey) (party anchor : Nat)
     (v : Vault) (r : Intent) : Vault × Option Certificate :=
   if v.poisoned || decide (v.durable.anchor ≠ anchor) then
     ({ v with poisoned := true, active := none }, none)
@@ -626,7 +626,7 @@ theorem release_wrong_request (cfg : SigningConfig) (sk : PqSecretKey) (party an
       intro he; exact hne (Option.some.inj (he.symm.trans ha))
     simp only [hn, ↓reduceIte]
 
-def queries (cfg : SigningConfig) (dep party : Nat) (v : Vault) : List ProdSigningQuery :=
+@[expose] def queries (cfg : SigningConfig) (dep party : Nat) (v : Vault) : List ProdSigningQuery :=
   v.attempted.map (query cfg dep party)
 
 theorem queries_one_time (cfg : SigningConfig) (dep party : Nat) (p : RoundPolicy)
@@ -784,7 +784,7 @@ structure Coordinator where
 
 /-- The public coordinator records consumption on acceptance. Callers cannot
 replay a session merely by supplying a different valid certificate set. -/
-def submit (cfg : SigningConfig) (pks : Nat → PqPublicKey) (dep n t : Nat)
+@[expose] def submit (cfg : SigningConfig) (pks : Nat → PqPublicKey) (dep n t : Nat)
     (st : Coordinator) (r : Intent) (cs : List Certificate) : Coordinator × Bool :=
   if acceptQuorum cfg pks dep n t st.consumedSessions r cs then
     if st.spent + r.spend ≤ st.capacity then
@@ -901,7 +901,7 @@ theorem stateAfter_identity (cfg : SigningConfig) (dep : Nat) (keys : Nat → Pq
       custodianIdentity cfg dep i (keys i) :=
   run_identity cfg (keys i) i (policies i) (caps i) (traces i) _
 
-def signingLog (cfg : SigningConfig) (sk : PqSecretKey) (dep i : Nat) (v : Vault) :=
+@[expose] def signingLog (cfg : SigningConfig) (sk : PqSecretKey) (dep i : Nat) (v : Vault) :=
   productionSigningLog cfg.suite cfg.params sk (queries cfg dep i v)
 
 /-- `BurnedApproval` is concrete data membership plus the real MAC checker on the commitment of
@@ -1374,11 +1374,11 @@ structure Deployment where
   threshold : Nat
   capacity : Nat
 
-def publicKeys (d : Deployment) (i : Nat) : PqPublicKey :=
+@[expose] def publicKeys (d : Deployment) (i : Nat) : PqPublicKey :=
   derivePublicKey d.signer.suite d.signer.params (d.keys i)
 
 /-- Identity of custodian `i`'s vault in deployment `d`. -/
-def vaultIdentity (d : Deployment) (i : Nat) : VaultIdentity :=
+@[expose] def vaultIdentity (d : Deployment) (i : Nat) : VaultIdentity :=
   custodianIdentity d.signer d.deploymentId i (d.keys i)
 
 structure Invocation where
@@ -2391,9 +2391,17 @@ theorem custodianIdentity_eq (cfg : SigningConfig) (dep i : Nat) (sk : PqSecretK
       ⟨dep, i, publicKeyId (derivePublicKey cfg.suite cfg.params sk)⟩ := by
   rfl
 
+#export_eqns checkRound roundCommitment mintGuard initial mint payload
+
 end Qsag.Custody
 end
 set_option maxRecDepth 4096
 #verify_constructive Qsag.Custody.returned_break_implies_hash_break
 #verify_constructive Qsag.Custody.accepted_quorum_approval_or_returned_break
 #verify_constructive Qsag.Custody.generated_submit_provenance_returned
+
+public section
+namespace Qsag
+#export_eqns Custody.acceptQuorum Custody.verifyCertificate
+#export_eqns Custody.custodianIdentity Custody.checkRound Custody.roundCommitment
+end Qsag

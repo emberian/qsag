@@ -9275,3 +9275,36 @@ theorem authenticatedPolicyGuardStep_eq (g : AuthenticatedPolicyState) (tx : Tra
 
 end Qsag
 end
+
+/-! ### Exports for lane mir -/
+
+public section
+namespace Qsag
+#export_eqns CustodyStepOutcome.toStepOutcome
+
+/-- Defining equation of `policyGuardStep`. -/
+theorem policyGuardStep_eq (g : StatefulPolicyGuard) (tx : TransactionIntent) :
+    policyGuardStep g tx =
+      if tx.window_id != g.window_id then
+        .rejected g .windowMismatch
+      else if tx.policy_digest != g.pinned_policy_digest then
+        .rejected g .policyDigestMismatch
+      else if tx.authority_digest != g.pinned_authority_digest then
+        .rejected g .authorityDigestMismatch
+      else if ¬ (tx.recipient ∈ g.allowed_recipients) then
+        .rejected g .recipientNotAllowlisted
+      else if ¬ (tx.amount_units ≤ g.per_tx_cap) then
+        .rejected g .perTxCapExceeded
+      else if ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+        .rejected g .velocityWindowExceeded
+      else if tx.nonce ∈ g.burned_intent_nonces then
+        .rejected g .duplicateIntentNonce
+      else
+        .accepted
+          { g with accumulated_spend := g.accumulated_spend + tx.amount_units
+                   burned_intent_nonces := tx.nonce :: g.burned_intent_nonces }
+          { intent := tx, canonicalBytes := encodeTransactionIntent tx } := by
+  unfold policyGuardStep
+  rfl
+
+end Qsag

@@ -74,6 +74,8 @@ public import Qsag.Exec.InteractiveUcEngine
 public import Qsag.Protocol.Threshold.BaggyAndRss256Security
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Exec.PlatformContractInstances
+public import Qsag.Exec.TwoSlotHwmCrashModel
+public import Qsag.Exec.GuardedMachineSim
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1102,13 +1104,25 @@ theorem threshold_durable_feedback_and_resource_burn_chain
     Qsag.Custody.RequestPolicy.returned_production_sound profile d corrupt cmds retReq retBytes hRet
   exact ⟨hPref, hAccEq, hNextLeaf, hAuth, hBurn, ⟨sig, hSign, hDec⟩⟩
 
+/-- The commit and rollback boundary of any platform satisfying the explicit fsync contract.
+The record survives every subsequent event trace, and a retained external anchor remains a
+lower bound on the recovered durable log. -/
+theorem posix_wal_commit_and_anchor_rollback_fence
+    {M : Qsag.Spec.FsyncStorageModel} (platform : Qsag.Spec.PosixFsyncContract M)
+    (s : M.State) (rec : Qsag.Spec.Bytes) (post : List Qsag.Spec.FsyncOp)
+    (hAnchor : M.anchor s ≤ (M.durable s).length) :
+    rec ∈ M.durable (M.run s (Qsag.Spec.walCommitOps rec ++ post)) ∧
+    M.anchor s ≤ (M.durable (M.run s (Qsag.Spec.walCommitOps rec ++ post))).length :=
+  ⟨platform.committed_survives s rec post,
+    platform.anchor_excludes_stale_snapshot s (Qsag.Spec.walCommitOps rec ++ post) hAnchor⟩
+
 /-! ## 5. POSIX Crash-Consistent WAL + Monotone External Anchor + Whole-Device Rollback Fence -/
 
 /-- **POSIX Crash-Consistent Atomic WAL Commit & Anti-Rollback Anchor Fence
     (`posix_wal_commit_and_anchor_rollback_fence`)**:
     Composes `SeparatedCustodyUcBridge.posixWalCommit_refines_walCommitBeforeRelease` with
     `CeremonyAtomicityAndAbort.whole_device_rollback_below_anchor_fails_closed`. -/
-theorem posix_wal_commit_and_anchor_rollback_fence
+theorem posix_atomic_commit_and_two_slot_rollback_fence
     {fs fs' : Qsag.PosixFsState} {lockIno : Qsag.InodeId} {genesisNonce : List UInt8}
     {macFn : Qsag.KeyedMacFn} (hMacWf : Qsag.WellFormedMacFn macFn) {macKey : List UInt8}
     {absWal wal' : Qsag.WalLatchState} {oldLedger newLedger : Qsag.Custody.Ledger}

@@ -129,7 +129,7 @@ structure ShamirCustodianShareOpening (n L : Nat) where
   chainShares : Fin L → Option (TowerElem 7 × TowerElem 7)
 
 /-- Compute custodian `party`'s pre-stepped `GF(2^128)²` Shamir share opening at `evalPt`. -/
-def computeShamirCustodianOpening {n L d : Nat}
+@[expose] def computeShamirCustodianOpening {n L d : Nat}
     (H : List UInt8 → Digest256) (masterSeed : Digest256)
     (polyTape : UInt64 → PreSteppedDigest256ShamirTape d L)
     (evalPt : TowerElem 7) (party : Fin n)
@@ -588,7 +588,7 @@ def ShamirValidatorDeployment.vaultIdentity {n L d : Nat}
 
 /-- Initial `(t, n)` Shamir + `BeltLatch` custody network state at epoch `0`: every vault is empty
     and carries the identity of its custodian in this deployment. -/
-def ShamirCustodyNetworkState.init {n L d : Nat} (dep : ShamirValidatorDeployment n L d) :
+@[expose] def ShamirCustodyNetworkState.init {n L d : Nat} (dep : ShamirValidatorDeployment n L d) :
     ShamirCustodyNetworkState n L where
   beltTrace := []
   beltNet := BeltLatchNetworkState.init n dep.height dep.maxWindow
@@ -598,7 +598,7 @@ def ShamirCustodyNetworkState.init {n L d : Nat} (dep : ShamirValidatorDeploymen
   combinedSignatures := []
 
 /-- Execute one open-world network transition on `ShamirCustodyNetworkState n L`. -/
-def stepShamirCustody {n L d : Nat}
+@[expose] def stepShamirCustody {n L d : Nat}
     (dep : ShamirValidatorDeployment n L d)
     (st : ShamirCustodyNetworkState n L)
     (turn : ShamirCustodyTurn n L) : ShamirCustodyNetworkState n L :=
@@ -659,7 +659,7 @@ def stepShamirCustody {n L d : Nat}
         if i = p && !dep.Corrupt.mem p then Custody.forget (st.vaults p) else st.vaults i }
 
 /-- Execute a multi-turn open-world schedule `List (ShamirCustodyTurn n L)`. -/
-def runShamirCustodyTrace {n L d : Nat}
+@[expose] def runShamirCustodyTrace {n L d : Nat}
     (dep : ShamirValidatorDeployment n L d)
     (st : ShamirCustodyNetworkState n L) :
     List (ShamirCustodyTurn n L) → ShamirCustodyNetworkState n L
@@ -1240,7 +1240,7 @@ theorem ShamirValidatorDeployment.WellFormed.corrupt_shares_independent_of_secre
 
 /-- Predicate stating that every honest member of `t`-quorum `S` (`S.mem p = true`,
     `Corrupt.mem p = false`) released its Shamir share for `intent` during `st`. -/
-def HonestQuorumReleasedIntent {n L : Nat}
+@[expose] def HonestQuorumReleasedIntent {n L : Nat}
     (Corrupt : CustodiansMask n) (st : ShamirCustodyNetworkState n L)
     (S : CustodiansMask n) (intent : Custody.Intent) : Prop :=
   ∀ p : Fin n, S.mem p = true → Corrupt.mem p = false →
@@ -1911,6 +1911,8 @@ theorem shamir_custody_wellFormed_quorum_invariance {n L d : Nat}
     (fun c₀ tail => wellFormed_lagrange_reconstructs hWf parties₂ hNd₂ hThr₂ c₀ tail)
 
 
+#export_eqns checkLatchCertifiedBurn releaseShamirShareFromVault ShamirValidatorDeployment.vaultIdentity intentCanonicalPayload ShamirValidatorDeployment.lagrangeWeights
+
 end Qsag
 end
 
@@ -1923,3 +1925,5 @@ set_option maxRecDepth 4096
 #verify_constructive Qsag.shamir_custody_epoch_non_equivocation
 #verify_constructive Qsag.shamir_custody_combined_sig_verifies_or_collision
 #verify_constructive Qsag.shamir_custody_single_validator_pq_bridge
+
+#verify_constructive Qsag.wellFormed_lagrange_reconstructs Qsag.shamir_custody_wellFormed_quorum_signs Qsag.shamir_custody_wellFormed_quorum_invariance
