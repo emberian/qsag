@@ -645,22 +645,31 @@ def group_tower():
                       "unsat", base + "(assert (not (and " + " ".join(assertions) + ")))\n(check-sat)\n"):
             raise SystemExit("failed tower_map Z3 proof")
 
-    # 2. Universal Z3 round-trip bijection over GF(2)^128 (`inv(fwd(x)) == x` and `fwd(inv(x)) == x`):
-    #    combines proved RTL map specs (`tower_map_dir0`, `tower_map_dir1`) with flat XOR cancellation in Z3.
-    for direction, (m_outer, m_inner, label) in enumerate([(inv, rows, "inv(fwd(x))"), (rows, inv, "fwd(inv(x))")]):
-        decl = "(declare-const x (_ BitVec 128))\n"
-        eqs = []
-        for k in range(128):
-            flat_terms = [f"(= ((_ extract {j} {j}) x) #b1)"
-                          for i in range(128) if (m_outer[k] >> i) & 1
-                          for j in range(128) if (m_inner[i] >> j) & 1]
-            lhs = "(xor " + " ".join(flat_terms) + ")"
-            rhs = f"(= ((_ extract {k} {k}) x) #b1)"
-            eqs.append(f"(= {lhs} {rhs})")
-        if not record(f"tower_map_bijection_dir{direction}",
-                      f"universal Z3 GF(2)^128 bijection: {label} == x for all 2^128 inputs",
-                      "unsat", decl + "(assert (not (and " + " ".join(eqs) + ")))\n(check-sat)\n"):
-            raise SystemExit("failed tower roundtrip Z3 proof")
+    # 2. Universal Z3 round-trip bijection directly on composed RTL (`qsag_tower_rt`):
+    #    since u_f0/u_i0/u_i1/u_f1 are pure XOR-linear maps (proved in tower_map_dir0/1 and anf_check.py),
+    #    proving inv(fwd(e_b)) == e_b and fwd(inv(e_b)) == e_b for all 128 basis vectors b in [0, 127]
+    #    in Z3 on the composed RTL (paired with universal 2^128 ANF identity in anf_check.py) closes
+    #    round-trip bijectivity with zero SAT blowup.
+    rt_sv = os.path.join(OUT, "tower_roundtrip.sv")
+    open(rt_sv, "w").write("""
+module qsag_tower_rt (input logic [127:0] x, output logic [127:0] y01, output logic [127:0] y10);
+    logic [127:0] m0, m1;
+    qsag_gf128_tower_map #(.INVERSE(0)) u_f0 (.x(x),  .y(m0));
+    qsag_gf128_tower_map #(.INVERSE(1)) u_i0 (.x(m0), .y(y01));
+    qsag_gf128_tower_map #(.INVERSE(1)) u_i1 (.x(x),  .y(m1));
+    qsag_gf128_tower_map #(.INVERSE(0)) u_f1 (.x(m1), .y(y10));
+endmodule
+""")
+    ys_rt = yosys_smt2("tower_roundtrip", "qsag_tower_rt", [TMAP, rt_sv], use_contracts=False)
+    x = acc("x", "s0")
+    basis_q = (ys_rt +
+               "(declare-fun s0 () |lec_top_s|)\n(declare-const b (_ BitVec 7))\n(assert (|lec_top_h| s0))\n"
+               f"(assert (= {x} (bvshl (_ bv1 128) ((_ zero_extend 121) b))))\n"
+               f"(assert (not (and (= {acc('y01','s0')} {x}) (= {acc('y10','s0')} {x}))))\n(check-sat)\n")
+    if not record("tower_map_bijection",
+                  "composed RTL qsag_tower_rt: inv(fwd(e_b)) == e_b and fwd(inv(e_b)) == e_b for all 128 basis inputs",
+                  "unsat", basis_q):
+        raise SystemExit("failed tower roundtrip Z3 proof")
 
     # 3. Mutant tooth on qsag_gf128_tower_map: flip 1 mask bit in INVERSE=0 row 0 -> must return sat!
     m_tow = mutate(TMAP, "128'hd353a5afc268871ad268eb72003a04ad",
