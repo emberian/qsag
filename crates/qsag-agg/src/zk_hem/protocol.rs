@@ -4160,6 +4160,7 @@ pub(crate) fn verify_public_gadget<B: RecBackend>(
     let rec_params =
         FixedPathWhirParams::new(vk.regime, vk.pack_vars()).expect("validated recursion params");
 
+    super::recursive_whir::census("sumchecks");
     let comm_z: [B::W; 4] = proof.comm_z.map(|x| b.alloc(x));
     let mut tr = start_rec_hologram_transcript(b, vk, statement_tag, public, &comm_z);
     let tau: Vec<RecExt<B::W>> = (0..vk.log_rows).map(|_| tr.ext(b, 203)).collect();
@@ -4255,6 +4256,7 @@ pub(crate) fn verify_public_gadget<B: RecBackend>(
     mat_final.equal(b, &expected_mat);
 
     // 2. LogUp-GKR fractional binary tree + nonzero root check (`q_root * q_root_inv == 1`).
+    super::recursive_whir::census("gkr");
     let q_root = RecExt::alloc(b, proof.q_root);
     let q_root_inv = RecExt::alloc(b, q_root.value(b).inv());
     q_root.mul(b, &q_root_inv).equal(b, &one);
@@ -5002,6 +5004,91 @@ mod tests {
         for count in 0..=32 {
             let want = eq[..count].iter().fold(E::ZERO, |a, &b| a + b);
             assert_eq!(prefix_indicator(&point, count), want, "count {count}");
+        }
+    }
+
+    /// Verifier key with the geometry of a relation that was never compiled: enough for a
+    /// row census of [`verify_public_gadget`] on a placeholder proof.
+    fn census_vk(
+        regime: WhirSecurityRegime,
+        log_rows: usize,
+        var_bits: usize,
+        ell_nz: usize,
+    ) -> ShapeVerifierKey {
+        let stage = regime.schedule(ell_nz + 2).stages[0];
+        let vk = ShapeVerifierKey {
+            shape_digest: [0; 32],
+            log_rows,
+            num_sbox: 1 << (log_rows - 1),
+            num_vars: 1 << var_bits,
+            num_public: 14,
+            var_bits,
+            ell_nz,
+            hologram_meta: HologramMeta {
+                poseidon2_perms: 1 << (log_rows - 8),
+                pub_var_blocks: 1,
+            },
+            regime,
+            hologram_comm: CanopyCommitment {
+                root: [0; 32],
+                log_leaves: (ell_nz + 2 + stage.blowup.trailing_zeros() as usize - stage.step_vars)
+                    as u8,
+            },
+            rec_hologram_root: Some([F::ZERO; 4]),
+        };
+        assert!(vk.is_well_formed());
+        vk
+    }
+
+    /// Rows one in-circuit child verifier costs its parent, by child geometry.
+    #[test]
+    #[ignore = "measurement: prints the in-circuit verifier row census"]
+    fn recursive_verifier_row_census() {
+        use super::super::recursive_whir::Counter;
+        for regime in [
+            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+        ] {
+            for (log_rows, var_bits, ell_nz) in [(21, 21, 22), (21, 21, 23), (23, 23, 24)] {
+                let vk = census_vk(regime, log_rows, var_bits, ell_nz);
+                let proof = RecursivePublicHemProof::placeholder(&vk).unwrap();
+                let mut whole = Counter::default();
+                let public = [F::ZERO; 14];
+                verify_public_gadget(&mut whole, &vk, [0; 32], &public, &proof);
+                let params = FixedPathWhirParams::new(regime, vk.pack_vars()).unwrap();
+                let mut opening = Counter::default();
+                let mut tr = RecTranscript::new();
+                let zero = RecExt::<F>::zero();
+                let point = vec![zero.clone(); vk.pack_vars()];
+                verify_correlated3_gadget(
+                    &mut opening,
+                    &params,
+                    &mut tr,
+                    &[[F::ZERO; 4]; 3],
+                    &[point.clone(), point.clone(), point],
+                    &[[None, None, None], [None, None, None], [None, None, None]],
+                    &proof.opening,
+                );
+                std::println!("VERIFIER_SECTIONS {:?}", whole.sections);
+                std::println!(
+                    "VERIFIER_CENSUS regime={} log_rows={log_rows} var_bits={var_bits} ell_nz={ell_nz} pack_vars={} total_rows={} perms={} mul_rows={} vars={} | opening: rows={} perms={} mul_rows={} | schedule={:?}",
+                    regime as u8,
+                    vk.pack_vars(),
+                    whole.total_rows(),
+                    whole.perms,
+                    whole.rows,
+                    whole.vars,
+                    opening.total_rows(),
+                    opening.perms,
+                    opening.rows,
+                    params
+                        .schedule
+                        .stages
+                        .iter()
+                        .map(|s| (s.blowup, s.step_vars, s.num_queries))
+                        .collect::<Vec<_>>(),
+                );
+            }
         }
     }
 

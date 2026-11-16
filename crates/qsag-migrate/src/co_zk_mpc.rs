@@ -496,8 +496,6 @@ impl CoZkCustodianShare {
                     &mut *e,
                     &pre_circuit,
                     &own,
-                    &self.entropy,
-                    &self.session,
                     &req_bytes,
                 )?;
                 let stmt_bytes = statement.to_transcript_bytes();
@@ -533,8 +531,6 @@ impl CoZkCustodianShare {
                     &mut *e,
                     &pre_circuit,
                     &own,
-                    &self.entropy,
-                    &self.session,
                     &req_bytes,
                 )?;
                 let stmt_bytes = statement.to_transcript_bytes();
@@ -692,8 +688,6 @@ impl CoZkCustodianShare {
                     &mut *e,
                     &pre_circuit,
                     &own,
-                    &self.entropy,
-                    &self.session,
                     &req_bytes,
                 )?;
                 let stmt_bytes = statement.to_transcript_bytes();
@@ -724,8 +718,6 @@ impl CoZkCustodianShare {
                     &mut *e,
                     &pre_circuit,
                     &own,
-                    &self.entropy,
-                    &self.session,
                     &req_bytes,
                 )?;
                 let stmt_bytes = statement.to_transcript_bytes();
@@ -1616,8 +1608,6 @@ fn derive_nullifier_in_mpc<E: Core>(
     e: &mut E,
     pre_circuit: &Circuit,
     own_witness: &[u64],
-    entropy: &[u8; 32],
-    session: &[u8; 32],
     req_bytes: &[u8],
 ) -> Result<[u64; 4], Error> {
     if pre_circuit.outputs.len() < 4 {
@@ -1628,31 +1618,9 @@ fn derive_nullifier_in_mpc<E: Core>(
         &[req_bytes],
     ))?;
     let witness = e.share_uniform_lanes(own_witness)?;
-    let mut seeds = Vec::with_capacity(3);
-    for head in 0..3u8 {
-        let mut lane_seeds: Vec<_> = (0..64u64)
-            .map(|lane| {
-                cshake256_framed_32(
-                    b"QSAG.OUTER.NULLIFIER.SEED.V1",
-                    &[entropy, session, req_bytes, &lane.to_le_bytes(), &[head]],
-                )
-            })
-            .collect();
-        let mut own_seed: Vec<_> = (0..256)
-            .map(|i| {
-                lane_seeds.iter().enumerate().fold(0, |v, (lane, s)| {
-                    v | (((s[i / 8] >> (i % 8)) & 1) as u64) << lane
-                })
-            })
-            .collect();
-        for s in &mut lane_seeds {
-            ct_zeroize_bytes(s);
-        }
-        let shared = e.share(&own_seed);
-        ct_zeroize_u64s(&mut own_seed);
-        seeds.push(shared?);
-    }
-    let eval = evaluate_wires(e, pre_circuit, &witness, &seeds)?;
+    // No virtual head of this evaluation is ever opened, so its tapes are
+    // public zeros: the outer sharing alone hides every wire.
+    let eval = evaluate_wires(e, pre_circuit, &witness, None)?;
     let split = pre_circuit.outputs.len() - 4;
     // Verify scalar canonicality + public commitment match BEFORE opening the nullifier!
     check_outputs_zero(e, pre_circuit, &eval.wires, &pre_circuit.outputs[..split])?;
@@ -1689,11 +1657,14 @@ fn evaluate<E: Core>(
     evaluate_inner(e, c, witness, seeds, false)
 }
 
+/// Evaluate `c` over the three virtual heads. `seeds` are the heads' shared
+/// tape seeds; `None` gives every head an all-zero public tape, which is only
+/// sound when no head view or commitment of this evaluation is opened.
 fn evaluate_wires<E: Core>(
     e: &mut E,
     c: &Circuit,
     witness: &[E::Bit],
-    seeds: &[Word<E::Bit>],
+    seeds: Option<&[Word<E::Bit>]>,
 ) -> Result<EvaluatedWires<E::Bit>, Error> {
     // Keep field-fault regressions aimed at circuit evaluation, even when tape
     // conversion itself uses arithmetic multiplications for carry correction.
@@ -1785,97 +1756,109 @@ fn evaluate_wires<E: Core>(
     }
 
     // 2. Initialize all 3 `Tape` sponges and squeeze their exact streams in lockstep.
-    let mut tape_sponges = Vec::with_capacity(3);
-    for seed in seeds {
-        let mut sp = Sponge::new(e);
-        sp.public(e, b"QSAG.MIGRATE.TAPE.V3")?;
-        sp.absorb(e, seed)?;
-        sp.pad_only(e, 0x1f);
-        tape_sponges.push(sp);
-    }
-    {
-        let (s0, rest) = tape_sponges.split_first_mut().unwrap();
-        let (s1, rest2) = rest.split_first_mut().unwrap();
-        let s2 = &mut rest2[0];
-        e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
-    }
-    let mut squeezed = outer_mpc::squeeze_sponges_lockstep(
-        e,
-        &mut tape_sponges,
-        &[
-            cursors[0].sponge_bits,
-            cursors[1].sponge_bits,
-            cursors[2].sponge_bits,
-        ],
-    )?;
+    let zero_bit = e.constant(0);
+    let (squeezed, raw_draw_words) = if let Some(seeds) = seeds {
+        let mut tape_sponges = Vec::with_capacity(3);
+        for seed in seeds {
+            let mut sp = Sponge::new(e);
+            sp.public(e, b"QSAG.MIGRATE.TAPE.V3")?;
+            sp.absorb(e, seed)?;
+            sp.pad_only(e, 0x1f);
+            tape_sponges.push(sp);
+        }
+        {
+            let (s0, rest) = tape_sponges.split_first_mut().unwrap();
+            let (s1, rest2) = rest.split_first_mut().unwrap();
+            let s2 = &mut rest2[0];
+            e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
+        }
+        let mut squeezed = outer_mpc::squeeze_sponges_lockstep(
+            e,
+            &mut tape_sponges,
+            &[
+                cursors[0].sponge_bits,
+                cursors[1].sponge_bits,
+                cursors[2].sponge_bits,
+            ],
+        )?;
 
-    // 3. Batch-check `< modulus` across rejection-sampled domains (`Gold`, `Secp`, `Ed`)
-    // and open `valid` upfront; `PallasFp` and `BlsFp` use wide zero-rejection draws.
-    let mut valid_groups: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
-    let mut raw_draw_words: Vec<Word<E::Bit>> = field_draws
-        .iter()
-        .map(|fd| {
-            if matches!(fd.domain, Domain::PallasFp | Domain::BlsFp) {
-                SecretVec::new()
-            } else {
-                squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
+        // 3. Batch-check `< modulus` across rejection-sampled domains (`Gold`, `Secp`, `Ed`)
+        // and open `valid` upfront; `PallasFp` and `BlsFp` use wide zero-rejection draws.
+        let mut valid_groups: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
+        let mut raw_draw_words: Vec<Word<E::Bit>> = field_draws
+            .iter()
+            .map(|fd| {
+                if matches!(fd.domain, Domain::PallasFp | Domain::BlsFp) {
+                    SecretVec::new()
+                } else {
+                    squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
+                        .iter()
+                        .copied()
+                        .collect()
+                }
+            })
+            .collect();
+
+        for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            let mut dom_words = Vec::new();
+            let mut dom_heads = Vec::new();
+            for (idx, fd) in field_draws.iter().enumerate() {
+                if fd.domain == dom {
+                    dom_words.push(raw_draw_words[idx].clone());
+                    dom_heads.push(fd.head);
+                }
+            }
+            if !dom_words.is_empty() {
+                let lt_bits = e.less_than_modulus_many(&dom_words, dom)?;
+                for (h, lt) in dom_heads.into_iter().zip(lt_bits) {
+                    valid_groups[h].push(lt);
+                }
+            }
+        }
+        let valid = fold_valid_bits(e, valid_groups)?;
+        if e.open(&valid)?.iter().any(|&v| v != u64::MAX) {
+            let counts = core::array::from_fn(|h| cursors[h].sponge_bits);
+            let mut attempts = 2usize;
+            loop {
+                let required = tape_counts(&field_draws, counts, attempts)?;
+                let additional: Vec<_> = required
                     .iter()
-                    .copied()
-                    .collect()
+                    .zip(&squeezed)
+                    .map(|(&n, s)| n - s.len())
+                    .collect();
+                let more = outer_mpc::squeeze_sponges_lockstep(e, &mut tape_sponges, &additional)?;
+                for (stream, tail) in squeezed.iter_mut().zip(&more) {
+                    stream.extend_from_slice(tail);
+                }
+                if let Some(repaired) =
+                    canonical_tape_attempt(e, &squeezed, &field_draws, counts, attempts)?
+                {
+                    squeezed = repaired;
+                    break;
+                }
+                if attempts >= MAX_TAPE_ATTEMPTS {
+                    return Err(Error::InvalidTape);
+                }
+                attempts *= 2;
             }
-        })
-        .collect();
-
-    for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
-        let mut dom_words = Vec::new();
-        let mut dom_heads = Vec::new();
-        for (idx, fd) in field_draws.iter().enumerate() {
-            if fd.domain == dom {
-                dom_words.push(raw_draw_words[idx].clone());
-                dom_heads.push(fd.head);
-            }
-        }
-        if !dom_words.is_empty() {
-            let lt_bits = e.less_than_modulus_many(&dom_words, dom)?;
-            for (h, lt) in dom_heads.into_iter().zip(lt_bits) {
-                valid_groups[h].push(lt);
-            }
-        }
-    }
-    let valid = fold_valid_bits(e, valid_groups)?;
-    if e.open(&valid)?.iter().any(|&v| v != u64::MAX) {
-        let counts = core::array::from_fn(|h| cursors[h].sponge_bits);
-        let mut attempts = 2usize;
-        loop {
-            let required = tape_counts(&field_draws, counts, attempts)?;
-            let additional: Vec<_> = required
-                .iter()
-                .zip(&squeezed)
-                .map(|(&n, s)| n - s.len())
-                .collect();
-            let more = outer_mpc::squeeze_sponges_lockstep(e, &mut tape_sponges, &additional)?;
-            for (stream, tail) in squeezed.iter_mut().zip(&more) {
-                stream.extend_from_slice(tail);
-            }
-            if let Some(repaired) =
-                canonical_tape_attempt(e, &squeezed, &field_draws, counts, attempts)?
-            {
-                squeezed = repaired;
-                break;
-            }
-            if attempts >= MAX_TAPE_ATTEMPTS {
-                return Err(Error::InvalidTape);
-            }
-            attempts *= 2;
-        }
-        for (word, draw) in raw_draw_words.iter_mut().zip(&field_draws) {
-            if !matches!(draw.domain, Domain::PallasFp | Domain::BlsFp) {
-                word.copy_from_slice(
-                    &squeezed[draw.head][draw.start..draw.start + draw.domain.width()],
-                );
+            for (word, draw) in raw_draw_words.iter_mut().zip(&field_draws) {
+                if !matches!(draw.domain, Domain::PallasFp | Domain::BlsFp) {
+                    word.copy_from_slice(
+                        &squeezed[draw.head][draw.start..draw.start + draw.domain.width()],
+                    );
+                }
             }
         }
-    }
+        (squeezed, raw_draw_words)
+    } else {
+        let squeezed: Vec<Word<E::Bit>> = cursors
+            .iter()
+            .map(|cursor| (0..cursor.sponge_bits).map(|_| zero_bit).collect())
+            .collect();
+        let raw_draw_words = field_draws.iter().map(|_| SecretVec::new()).collect();
+        (squeezed, raw_draw_words)
+    };
+    let mut raw_draw_words: Vec<Word<E::Bit>> = raw_draw_words;
 
     // Only single-word `NodeTape::InputField` draws (`Gold`/`Secp`/`Ed`) are read again in Step 7.
     let mut keep_raw_draw = vec![false; field_draws.len()];
@@ -1887,8 +1870,16 @@ fn evaluate_wires<E: Core>(
     }
 
     // 4. Batch-convert all validated field tape draws (`bits_to_field_many` per domain).
-    let mut draw_fields: Vec<Option<FieldWord>> = (0..field_draws.len()).map(|_| None).collect();
-    for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
+    let mut draw_fields: Vec<Option<FieldWord>> = field_draws
+        .iter()
+        .map(|fd| seeds.is_none().then(|| e.fconstant(ZERO, fd.domain)))
+        .collect();
+    let converted_domains: &[Domain] = if seeds.is_some() {
+        &[Domain::Gold, Domain::Secp, Domain::Ed]
+    } else {
+        &[]
+    };
+    for &dom in converted_domains {
         let mut idxs = Vec::new();
         let mut dom_words = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
@@ -1908,7 +1899,6 @@ fn evaluate_wires<E: Core>(
             }
         }
     }
-    let zero_bit = e.constant(0);
     for (dom, limb_bits, hi_offset, two_pow) in [
         (
             Domain::PallasFp,
@@ -1926,7 +1916,7 @@ fn evaluate_wires<E: Core>(
         let mut idxs = Vec::new();
         let mut wide_words: Vec<Word<E::Bit>> = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
-            if fd.domain == dom {
+            if fd.domain == dom && seeds.is_some() {
                 idxs.push(idx);
                 let mut lo: Word<E::Bit> = squeezed[fd.head][fd.start..fd.start + limb_bits]
                     .iter()
@@ -2271,7 +2261,7 @@ fn evaluate_inner<E: Core>(
         raw_draw_words,
         mut encodings,
         node_tapes,
-    } = evaluate_wires(e, c, witness, seeds)?;
+    } = evaluate_wires(e, c, witness, Some(seeds))?;
 
     // 5g. Mandatory in-MPC output-residual zero check (`P0-1`): verify that every
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
@@ -3541,121 +3531,133 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn complete_distributed_pallas_ak_and_rk_proofs_verify() {
-        use crate::pallas::PallasOwnershipWitness;
+    /// Run one three-custodian ceremony over audited networks and report its wall time.
+    fn run_full_ceremony<R: Send>(
+        label: &str,
+        prove: impl Fn(usize, outer_mpc::tests::Network) -> R + Sync,
+    ) -> Vec<(R, outer_mpc::tests::AuditHandle)> {
         let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
-        let target = zk_engine::tests::request(
-            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x42; 20]),
-        )
-        .target;
-        let domain = cshake256_framed_32(b"QSAG.PALLAS.CAMPAIGN.V1", &[&77u64.to_le_bytes()]);
+        let start = std::time::Instant::now();
+        let prove = &prove;
+        let outcomes = std::thread::scope(|scope| {
+            let handles: Vec<_> = audited_networks()
+                .into_iter()
+                .enumerate()
+                .map(|(p, (net, audit))| scope.spawn(move || (prove(p, net), audit)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        std::eprintln!("distributed 438-rep {label}: {:?}", start.elapsed());
+        outcomes
+    }
 
-        // 1. Direct Zcash Orchard `OrchardSpendAuthKey` (`ak = [ask] SpendAuthG`) via `prove_pallas`.
+    fn xor_shares(secret: [u8; 32], s0: [u8; 32], s1: [u8; 32]) -> [[u8; 32]; 3] {
+        let mut s2 = secret;
+        for i in 0..32 {
+            s2[i] ^= s0[i] ^ s1[i];
+        }
+        [s0, s1, s2]
+    }
+
+    struct PallasFixture {
+        target: qsag_addr::QsagAddress,
+        domain: [u8; 32],
+        ask_le: [u8; 32],
+        ask_shares: [[u8; 32]; 3],
+    }
+    fn pallas_fixture() -> PallasFixture {
         let mut ask_le = [0u8; 32];
         ask_le[0] = 0x5d;
         ask_le[7] = 0xa3;
         ask_le[19] = 0x11;
-        let wit_ak = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
-        let ak_comm = wit_ak.compute_spend_auth_key().unwrap();
-        let (_, _, rsk_ak) = wit_ak.effective_scalar(&ak_comm).unwrap();
-        let stmt_ak = PallasMigrationStatement {
-            commitment: ak_comm,
-            target_pq_address: target.clone(),
+        PallasFixture {
+            target: zk_engine::tests::request(
+                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x42; 20]),
+            )
+            .target,
+            domain: cshake256_framed_32(b"QSAG.PALLAS.CAMPAIGN.V1", &[&77u64.to_le_bytes()]),
+            ask_le,
+            ask_shares: xor_shares(ask_le, [0x91; 32], [0x64; 32]),
+        }
+    }
+
+    // Orchard `ak = [ask] SpendAuthG` through `prove_pallas`.
+    #[test]
+    #[ignore = "full 438-repetition ceremony; run by name"]
+    fn complete_distributed_pallas_ak_proof_verifies() {
+        use crate::pallas::PallasOwnershipWitness;
+        let PallasFixture {
+            target,
+            domain,
+            ask_le,
+            ask_shares,
+        } = pallas_fixture();
+        let witness = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
+        let commitment = witness.compute_spend_auth_key().unwrap();
+        let (_, _, rsk) = witness.effective_scalar(&commitment).unwrap();
+        let statement = PallasMigrationStatement {
+            commitment,
+            target_pq_address: target,
             epoch_anchor: 77,
             migration_domain: domain,
-            migration_nullifier: rsk_ak.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &domain),
+            migration_nullifier: rsk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &domain),
         };
-        let s0 = [0x91u8; 32];
-        let s1 = [0x64u8; 32];
-        let mut s2 = ask_le;
-        for i in 0..32 {
-            s2[i] ^= s0[i] ^ s1[i];
-        }
-        let ask_shares = [s0, s1, s2];
-        let session_ak = [0x81u8; 32];
-        let outcomes_ak = std::thread::scope(|scope| {
-            let handles: Vec<_> = audited_networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, (net, audit))| {
-                    let st = stmt_ak.clone();
-                    scope.spawn(move || {
-                        let share = CoZkCustodianShare::new(
-                            p,
-                            session_ak,
-                            ask_shares[p],
-                            [0x30 + p as u8; 32],
-                            keys(p),
-                        )
-                        .unwrap();
-                        (share.prove_pallas(&st, net), audit)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        let outcomes = run_full_ceremony("Pallas ak", |p, net| {
+            CoZkCustodianShare::new(p, [0x81; 32], ask_shares[p], [0x30 + p as u8; 32], keys(p))
+                .unwrap()
+                .prove_pallas(&statement, net)
         });
-        for (party, (res, audit)) in outcomes_ak.into_iter().enumerate() {
+        for (party, (res, audit)) in outcomes.into_iter().enumerate() {
             let proof = res.expect("distributed Pallas ak proof must succeed");
-            pallas::verify_pallas_migration(&stmt_ak, &proof, &domain, 77).unwrap();
+            pallas::verify_pallas_migration(&statement, &proof, &domain, 77).unwrap();
             let candidates = audit.candidates();
             assert!(!candidates.is_empty());
             for recovered in candidates {
                 assert_ne!(recovered, ask_le, "custodian {party} leaked Pallas ask");
             }
         }
+    }
 
-        // 2. Rerandomized RedPallas `OrchardRedPallasRk` (`rk = [ask + alpha] SpendAuthG`)
-        //    via `prove_pallas_request` (jointly computing `migration_nullifier` inside MPC!).
+    // RedPallas `rk = [ask + alpha] SpendAuthG` through `prove_pallas_request`,
+    // which derives the nullifier inside the MPC.
+    #[test]
+    #[ignore = "full 438-repetition ceremony; run by name"]
+    fn complete_distributed_pallas_rk_request_proof_verifies() {
+        use crate::pallas::PallasOwnershipWitness;
+        let PallasFixture {
+            target,
+            domain,
+            ask_le,
+            ask_shares,
+        } = pallas_fixture();
         let mut alpha_le = [0u8; 32];
         alpha_le[0] = 0x77;
         alpha_le[13] = 0x29;
-        let wit_rk = PallasOwnershipWitness::from_rerandomized_le(ask_le, alpha_le).unwrap();
-        let rk_comm = wit_rk.compute_rerandomized_rk().unwrap();
-        let (_, _, rsk_rk) = wit_rk.effective_scalar(&rk_comm).unwrap();
-        let expected_rk_nul =
-            rsk_rk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_RK, &domain);
-        let a0 = [0x17u8; 32];
-        let a1 = [0xc2u8; 32];
-        let mut a2 = alpha_le;
-        for i in 0..32 {
-            a2[i] ^= a0[i] ^ a1[i];
-        }
-        let alpha_shares = [a0, a1, a2];
-        let req_rk = PallasMigrationRequest {
-            commitment: rk_comm,
+        let witness = PallasOwnershipWitness::from_rerandomized_le(ask_le, alpha_le).unwrap();
+        let commitment = witness.compute_rerandomized_rk().unwrap();
+        let (_, _, rsk) = witness.effective_scalar(&commitment).unwrap();
+        let expected_nullifier = rsk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_RK, &domain);
+        let alpha_shares = xor_shares(alpha_le, [0x17; 32], [0xc2; 32]);
+        let request = PallasMigrationRequest {
+            commitment,
             target,
             epoch: 77,
             domain,
         };
-        let session_rk = [0x82u8; 32];
-        let outcomes_rk = std::thread::scope(|scope| {
-            let handles: Vec<_> = audited_networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, (net, audit))| {
-                    let req = req_rk.clone();
-                    scope.spawn(move || {
-                        let share = CoZkCustodianShare::new(
-                            p,
-                            session_rk,
-                            ask_shares[p],
-                            [0x40 + p as u8; 32],
-                            keys(p),
-                        )
-                        .unwrap()
-                        .with_rerandomizer(alpha_shares[p])
-                        .unwrap();
-                        (share.prove_pallas_request(req, net), audit)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        let outcomes = run_full_ceremony("Pallas rk request", |p, net| {
+            CoZkCustodianShare::new(p, [0x82; 32], ask_shares[p], [0x40 + p as u8; 32], keys(p))
+                .unwrap()
+                .with_rerandomizer(alpha_shares[p])
+                .unwrap()
+                .prove_pallas_request(request.clone(), net)
         });
-        for (party, (res, audit)) in outcomes_rk.into_iter().enumerate() {
-            let (stmt_rk, proof) = res.expect("distributed Pallas rk request proof must succeed");
-            assert_eq!(stmt_rk.migration_nullifier, expected_rk_nul);
-            pallas::verify_pallas_migration(&stmt_rk, &proof, &domain, 77).unwrap();
+        for (party, (res, audit)) in outcomes.into_iter().enumerate() {
+            let (statement, proof) = res.expect("distributed Pallas rk request proof must succeed");
+            assert_eq!(statement.migration_nullifier, expected_nullifier);
+            pallas::verify_pallas_migration(&statement, &proof, &domain, 77).unwrap();
             for recovered in audit.candidates() {
                 assert_ne!(recovered, ask_le, "custodian {party} leaked Pallas ask");
                 assert_ne!(recovered, alpha_le, "custodian {party} leaked Pallas alpha");
@@ -3663,285 +3665,273 @@ mod tests {
         }
     }
 
-    #[test]
-    fn complete_distributed_bls12_381_pubkey_and_unrevealed_0x00_proofs_verify() {
-        use crate::bls12_381::BlsOwnershipWitness;
-        let _ceremony_guard = CeremonySlot::acquire(outer_mpc::tests::parallel_batches());
-        let target = zk_engine::tests::request(
-            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x55; 20]),
-        )
-        .target;
-        let domain = cshake256_framed_32(b"QSAG.BLS12_381.CAMPAIGN.V1", &[&99u64.to_le_bytes()]);
-
+    struct BlsFixture {
+        target: qsag_addr::QsagAddress,
+        domain: [u8; 32],
+        witness: crate::bls12_381::BlsOwnershipWitness,
+        sk_le: [u8; 32],
+        sk_shares: [[u8; 32]; 3],
+        nullifier: [u64; 4],
+    }
+    fn bls_fixture() -> BlsFixture {
         let mut sk_be = [0u8; 32];
         sk_be[31] = 0x4b;
         sk_be[24] = 0x9e;
         sk_be[12] = 0x17;
-        let wit = BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
-        let sk_scalar = wit.scalar().unwrap();
-        let sk_le = sk_scalar.to_le_bytes();
-        let expected_nul = sk_scalar.compute_nullifier(&domain);
-
-        let s0 = [0x3au8; 32];
-        let s1 = [0x8fu8; 32];
-        let mut s2 = sk_le;
-        for i in 0..32 {
-            s2[i] ^= s0[i] ^ s1[i];
-        }
-        let sk_shares = [s0, s1, s2];
-
-        // 1. Active `BeaconValidatorPubkey` (`0x01` credentials) via `prove_bls`.
-        let pub_comm = wit.compute_beacon_commitment().unwrap();
-        let mut wc_0x01 = [0x11u8; 32];
-        wc_0x01[0] = 0x01;
-        let stmt_pub = BlsMigrationStatement {
-            commitment: pub_comm,
-            validator_index: 123_456,
-            withdrawal_credentials: wc_0x01,
-            target_pq_address: target.clone(),
-            epoch_anchor: 99,
-            migration_domain: domain,
-            migration_nullifier: expected_nul,
-        };
-        let session_pub = [0x83u8; 32];
-        let outcomes_pub = std::thread::scope(|scope| {
-            let handles: Vec<_> = audited_networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, (net, audit))| {
-                    let st = stmt_pub.clone();
-                    scope.spawn(move || {
-                        let share = CoZkCustodianShare::new(
-                            p,
-                            session_pub,
-                            sk_shares[p],
-                            [0x70 + p as u8; 32],
-                            keys(p),
-                        )
-                        .unwrap();
-                        (share.prove_bls(&st, net), audit)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
-        });
-        for (party, (res, audit)) in outcomes_pub.into_iter().enumerate() {
-            let proof = res.expect("distributed BLS BeaconValidatorPubkey proof must succeed");
-            bls12_381::verify_bls_migration(&stmt_pub, &proof, &domain, 99).unwrap();
-            for recovered in audit.candidates() {
-                assert_ne!(recovered, sk_le, "custodian {party} leaked BLS sk");
-            }
-        }
-
-        // 2. Unrevealed legacy `0x00` `BLS_WITHDRAWAL_PREFIX` credential via `prove_bls_request`:
-        //    neither `sk` NOR `pk_48` is reconstructed even among the 3 custodians!
-        let unrev_comm = wit.compute_unrevealed_0x00_commitment().unwrap();
-        let BlsValidatorCommitment::UnrevealedBls0x00Credential(wc_0x00) = unrev_comm else {
-            unreachable!()
-        };
-        let req_unrev = BlsMigrationRequest {
-            commitment: unrev_comm,
-            validator_index: 654_321,
-            withdrawal_credentials: wc_0x00,
-            target,
-            epoch: 99,
+        let witness = crate::bls12_381::BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
+        let domain = cshake256_framed_32(b"QSAG.BLS12_381.CAMPAIGN.V1", &[&99u64.to_le_bytes()]);
+        let scalar = witness.scalar().unwrap();
+        let sk_le = scalar.to_le_bytes();
+        BlsFixture {
+            target: zk_engine::tests::request(
+                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x55; 20]),
+            )
+            .target,
             domain,
+            nullifier: scalar.compute_nullifier(&domain),
+            witness,
+            sk_le,
+            sk_shares: xor_shares(sk_le, [0x3a; 32], [0x8f; 32]),
+        }
+    }
+
+    // Revealed `BeaconValidatorPubkey` (`0x01` credentials) through `prove_bls`.
+    #[test]
+    #[ignore = "full 438-repetition ceremony; run by name"]
+    fn complete_distributed_bls12_381_pubkey_proof_verifies() {
+        let fixture = bls_fixture();
+        let mut withdrawal_credentials = [0x11u8; 32];
+        withdrawal_credentials[0] = 0x01;
+        let statement = BlsMigrationStatement {
+            commitment: fixture.witness.compute_beacon_commitment().unwrap(),
+            validator_index: 123_456,
+            withdrawal_credentials,
+            target_pq_address: fixture.target.clone(),
+            epoch_anchor: 99,
+            migration_domain: fixture.domain,
+            migration_nullifier: fixture.nullifier,
         };
-        let session_unrev = [0x84u8; 32];
-        let outcomes_unrev = std::thread::scope(|scope| {
-            let handles: Vec<_> = audited_networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, (net, audit))| {
-                    let req = req_unrev.clone();
-                    scope.spawn(move || {
-                        let share = CoZkCustodianShare::new(
-                            p,
-                            session_unrev,
-                            sk_shares[p],
-                            [0x80 + p as u8; 32],
-                            keys(p),
-                        )
-                        .unwrap();
-                        (share.prove_bls_request(req, net), audit)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+        let outcomes = run_full_ceremony("BLS12-381 revealed pubkey", |p, net| {
+            CoZkCustodianShare::new(
+                p,
+                [0x83; 32],
+                fixture.sk_shares[p],
+                [0x70 + p as u8; 32],
+                keys(p),
+            )
+            .unwrap()
+            .prove_bls(&statement, net)
         });
-        for (party, (res, audit)) in outcomes_unrev.into_iter().enumerate() {
-            let (stmt_unrev, proof) =
-                res.expect("distributed BLS UnrevealedBls0x00Credential proof must succeed");
-            assert_eq!(stmt_unrev.migration_nullifier, expected_nul);
-            bls12_381::verify_bls_migration(&stmt_unrev, &proof, &domain, 99).unwrap();
+        for (party, (res, audit)) in outcomes.into_iter().enumerate() {
+            let proof = res.expect("distributed BLS BeaconValidatorPubkey proof must succeed");
+            bls12_381::verify_bls_migration(&statement, &proof, &fixture.domain, 99).unwrap();
             for recovered in audit.candidates() {
-                assert_ne!(recovered, sk_le, "custodian {party} leaked BLS sk");
+                assert_ne!(recovered, fixture.sk_le, "custodian {party} leaked BLS sk");
             }
         }
     }
 
+    // Unrevealed `0x00` withdrawal credential through `prove_bls_request`: the
+    // compressed public key is hashed inside the circuit and never opened.
     #[test]
-    fn active_pallas_and_bls12_381_faults_and_bad_shares_abort_cleanly() {
-        use crate::{bls12_381::BlsOwnershipWitness, pallas::PallasOwnershipWitness};
-        let _ceremony_guard = CeremonySlot::acquire(1);
-        let target = zk_engine::tests::request(
-            crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x66; 20]),
-        )
-        .target;
-
-        // 1. Active `Domain::PallasFp` field-mul fault in `prove_pallas` aborts with zero openings.
-        let mut ask_le = [0u8; 32];
-        ask_le[0] = 0x19;
-        let wit_p = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
-        let ak_comm = wit_p.compute_spend_auth_key().unwrap();
-        let (_, _, rsk) = wit_p.effective_scalar(&ak_comm).unwrap();
-        let dom_p = [0x21u8; 32];
-        let stmt_p = PallasMigrationStatement {
-            commitment: ak_comm,
-            target_pq_address: target.clone(),
-            epoch_anchor: 5,
-            migration_domain: dom_p,
-            migration_nullifier: rsk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &dom_p),
-        };
-        let p_shares = [[0x11; 32], [0x22; 32], {
-            let mut s = ask_le;
-            for byte in &mut s {
-                *byte ^= 0x11 ^ 0x22;
-            }
-            s
-        }];
-        let leaked_p: [Arc<AtomicBool>; 3] =
-            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
-        let res_p = std::thread::scope(|scope| {
-            let handles: Vec<_> = outer_mpc::tests::networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, net)| {
-                    let st = stmt_p.clone();
-                    let flag = leaked_p[p].clone();
-                    scope.spawn(move || {
-                        let spy = ZkbooFaultSpy {
-                            inner: net,
-                            is_root: true,
-                            single_stream: true,
-                            fault: (p == 1).then_some(FaultInjection::FieldMul {
-                                domain: Domain::PallasFp,
-                                call_countdown: 3,
-                                lane: 17,
-                            }),
-                            precommit_or_view_opened: flag,
-                        };
-                        CoZkCustodianShare::new(p, [0x95; 32], p_shares[p], [p as u8; 32], keys(p))
-                            .unwrap()
-                            .prove_pallas(&st, spy)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
-        });
-        for (p, r) in res_p.into_iter().enumerate() {
-            assert_eq!(r, Err(Error::MultiplicationCheck));
-            assert!(!leaked_p[p].load(Ordering::SeqCst));
-        }
-
-        // 2. Active `Domain::BlsFp` field-mul fault in `prove_bls` + bad-share substitution in `prove_bls_request`.
-        let mut sk_be = [0u8; 32];
-        sk_be[31] = 0x2f;
-        let wit_b = BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
-        let sk_le = wit_b.scalar().unwrap().to_le_bytes();
-        let dom_b = [0x31u8; 32];
-        let pub_comm = wit_b.compute_beacon_commitment().unwrap();
-        let mut wc = [0u8; 32];
-        wc[0] = 0x02;
-        let stmt_b = BlsMigrationStatement {
-            commitment: pub_comm,
-            validator_index: 9,
-            withdrawal_credentials: wc,
-            target_pq_address: target.clone(),
-            epoch_anchor: 6,
-            migration_domain: dom_b,
-            migration_nullifier: wit_b.scalar().unwrap().compute_nullifier(&dom_b),
-        };
-        let b_shares = [[0x44; 32], [0x88; 32], {
-            let mut s = sk_le;
-            for byte in &mut s {
-                *byte ^= 0x44 ^ 0x88;
-            }
-            s
-        }];
-        let leaked_b: [Arc<AtomicBool>; 3] =
-            core::array::from_fn(|_| Arc::new(AtomicBool::new(false)));
-        let res_b = std::thread::scope(|scope| {
-            let handles: Vec<_> = outer_mpc::tests::networks()
-                .into_iter()
-                .enumerate()
-                .map(|(p, net)| {
-                    let st = stmt_b.clone();
-                    let flag = leaked_b[p].clone();
-                    scope.spawn(move || {
-                        let spy = ZkbooFaultSpy {
-                            inner: net,
-                            is_root: true,
-                            single_stream: true,
-                            fault: (p == 2).then_some(FaultInjection::FieldMul {
-                                domain: Domain::BlsFp,
-                                call_countdown: 3,
-                                lane: 9,
-                            }),
-                            precommit_or_view_opened: flag,
-                        };
-                        CoZkCustodianShare::new(p, [0x96; 32], b_shares[p], [p as u8; 32], keys(p))
-                            .unwrap()
-                            .prove_bls(&st, spy)
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
-        });
-        for (p, r) in res_b.into_iter().enumerate() {
-            assert_eq!(r, Err(Error::MultiplicationCheck));
-            assert!(!leaked_b[p].load(Ordering::SeqCst));
-        }
-
-        // Corrupted witness share in `prove_bls_request` must abort BEFORE opening the nullifier!
-        let mut bad_shares = b_shares;
-        bad_shares[0][0] ^= 0x01;
-        let unrev = wit_b.compute_unrevealed_0x00_commitment().unwrap();
-        let BlsValidatorCommitment::UnrevealedBls0x00Credential(wc0) = unrev else {
+    #[ignore = "full 438-repetition ceremony; run by name"]
+    fn complete_distributed_bls12_381_unrevealed_0x00_request_proof_verifies() {
+        let fixture = bls_fixture();
+        let commitment = fixture.witness.compute_unrevealed_0x00_commitment().unwrap();
+        let BlsValidatorCommitment::UnrevealedBls0x00Credential(withdrawal_credentials) =
+            commitment
+        else {
             unreachable!()
         };
-        let req_bad = BlsMigrationRequest {
-            commitment: unrev,
-            validator_index: 9,
-            withdrawal_credentials: wc0,
-            target,
-            epoch: 6,
-            domain: dom_b,
+        let request = BlsMigrationRequest {
+            commitment,
+            validator_index: 654_321,
+            withdrawal_credentials,
+            target: fixture.target.clone(),
+            epoch: 99,
+            domain: fixture.domain,
         };
-        let res_bad = std::thread::scope(|scope| {
+        let outcomes = run_full_ceremony("BLS12-381 unrevealed 0x00 request", |p, net| {
+            CoZkCustodianShare::new(
+                p,
+                [0x84; 32],
+                fixture.sk_shares[p],
+                [0x80 + p as u8; 32],
+                keys(p),
+            )
+            .unwrap()
+            .prove_bls_request(request.clone(), net)
+        });
+        for (party, (res, audit)) in outcomes.into_iter().enumerate() {
+            let (statement, proof) =
+                res.expect("distributed BLS UnrevealedBls0x00Credential proof must succeed");
+            assert_eq!(statement.migration_nullifier, fixture.nullifier);
+            bls12_381::verify_bls_migration(&statement, &proof, &fixture.domain, 99).unwrap();
+            for recovered in audit.candidates() {
+                assert_ne!(recovered, fixture.sk_le, "custodian {party} leaked BLS sk");
+            }
+        }
+    }
+
+    /// Single-stream ceremony in which custodian `faulty` injects `fault`.
+    /// Returns every custodian's outcome and whether it saw any opening.
+    fn run_single_stream_with_fault<R: Send>(
+        fault: Option<(usize, FaultInjection)>,
+        prove: impl Fn(usize, ZkbooFaultSpy) -> R + Sync,
+    ) -> Vec<(R, bool)> {
+        let _ceremony_guard = CeremonySlot::acquire(1);
+        let prove = &prove;
+        std::thread::scope(|scope| {
             let handles: Vec<_> = outer_mpc::tests::networks()
                 .into_iter()
                 .enumerate()
                 .map(|(p, net)| {
-                    let req = req_bad.clone();
                     scope.spawn(move || {
+                        let opened = Arc::new(AtomicBool::new(false));
                         let spy = ZkbooFaultSpy {
                             inner: net,
                             is_root: true,
                             single_stream: true,
-                            fault: None,
-                            precommit_or_view_opened: Arc::new(AtomicBool::new(false)),
+                            fault: fault.and_then(|(faulty, fault)| (p == faulty).then_some(fault)),
+                            precommit_or_view_opened: opened.clone(),
                         };
-                        CoZkCustodianShare::new(p, [0x97; 32], bad_shares[p], [p as u8; 32], keys(p))
-                            .unwrap()
-                            .prove_bls_request(req, spy)
+                        (prove(p, spy), opened.load(Ordering::SeqCst))
                     })
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn active_pallas_field_fault_aborts_before_commitments_or_views_open() {
+        use crate::pallas::PallasOwnershipWitness;
+        let mut ask_le = [0u8; 32];
+        ask_le[0] = 0x19;
+        let witness = PallasOwnershipWitness::from_spend_auth_scalar_le(ask_le).unwrap();
+        let commitment = witness.compute_spend_auth_key().unwrap();
+        let (_, _, rsk) = witness.effective_scalar(&commitment).unwrap();
+        let domain = [0x21u8; 32];
+        let statement = PallasMigrationStatement {
+            commitment,
+            target_pq_address: zk_engine::tests::request(
+                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x66; 20]),
+            )
+            .target,
+            epoch_anchor: 5,
+            migration_domain: domain,
+            migration_nullifier: rsk.compute_nullifier(pallas::NULLIFIER_TAG_PALLAS_AK, &domain),
+        };
+        let shares = xor_shares(ask_le, [0x11; 32], [0x22; 32]);
+        let fault = FaultInjection::FieldMul {
+            domain: Domain::PallasFp,
+            call_countdown: 3,
+            lane: 17,
+        };
+        let outcomes = run_single_stream_with_fault(Some((1, fault)), |p, spy| {
+            CoZkCustodianShare::new(p, [0x95; 32], shares[p], [p as u8; 32], keys(p))
+                .unwrap()
+                .prove_pallas(&statement, spy)
         });
-        for r in res_bad {
-            assert_eq!(r, Err(Error::InvalidProof));
+        for (result, opened) in outcomes {
+            assert_eq!(result, Err(Error::MultiplicationCheck));
+            assert!(!opened);
+        }
+    }
+
+    struct BlsFaultFixture {
+        witness: crate::bls12_381::BlsOwnershipWitness,
+        target: qsag_addr::QsagAddress,
+        domain: [u8; 32],
+        shares: [[u8; 32]; 3],
+    }
+    fn bls_fault_fixture() -> BlsFaultFixture {
+        let mut sk_be = [0u8; 32];
+        sk_be[31] = 0x2f;
+        let witness = crate::bls12_381::BlsOwnershipWitness::from_secret_scalar_be(sk_be).unwrap();
+        let sk_le = witness.scalar().unwrap().to_le_bytes();
+        BlsFaultFixture {
+            witness,
+            target: zk_engine::tests::request(
+                crate::legacy::LegacyCommitmentKind::BitcoinHash160([0x66; 20]),
+            )
+            .target,
+            domain: [0x31; 32],
+            shares: xor_shares(sk_le, [0x44; 32], [0x88; 32]),
+        }
+    }
+
+    #[test]
+    fn active_bls12_381_field_fault_aborts_before_commitments_or_views_open() {
+        let BlsFaultFixture {
+            witness,
+            target,
+            domain,
+            shares,
+        } = bls_fault_fixture();
+        let mut withdrawal_credentials = [0u8; 32];
+        withdrawal_credentials[0] = 0x02;
+        let statement = BlsMigrationStatement {
+            commitment: witness.compute_beacon_commitment().unwrap(),
+            validator_index: 9,
+            withdrawal_credentials,
+            target_pq_address: target,
+            epoch_anchor: 6,
+            migration_domain: domain,
+            migration_nullifier: witness.scalar().unwrap().compute_nullifier(&domain),
+        };
+        let fault = FaultInjection::FieldMul {
+            domain: Domain::BlsFp,
+            call_countdown: 3,
+            lane: 9,
+        };
+        let outcomes = run_single_stream_with_fault(Some((2, fault)), |p, spy| {
+            CoZkCustodianShare::new(p, [0x96; 32], shares[p], [p as u8; 32], keys(p))
+                .unwrap()
+                .prove_bls(&statement, spy)
+        });
+        for (result, opened) in outcomes {
+            assert_eq!(result, Err(Error::MultiplicationCheck));
+            assert!(!opened);
+        }
+    }
+
+    // A substituted witness share fails the in-MPC commitment check, so the
+    // nullifier never opens.
+    #[test]
+    fn bls12_381_request_with_a_substituted_share_aborts_before_the_nullifier_opens() {
+        let BlsFaultFixture {
+            witness,
+            target,
+            domain,
+            mut shares,
+        } = bls_fault_fixture();
+        shares[0][0] ^= 0x01;
+        let commitment = witness.compute_unrevealed_0x00_commitment().unwrap();
+        let BlsValidatorCommitment::UnrevealedBls0x00Credential(withdrawal_credentials) =
+            commitment
+        else {
+            unreachable!()
+        };
+        let request = BlsMigrationRequest {
+            commitment,
+            validator_index: 9,
+            withdrawal_credentials,
+            target,
+            epoch: 6,
+            domain,
+        };
+        let outcomes = run_single_stream_with_fault(None, |p, spy| {
+            CoZkCustodianShare::new(p, [0x97; 32], shares[p], [p as u8; 32], keys(p))
+                .unwrap()
+                .prove_bls_request(request.clone(), spy)
+        });
+        for (result, opened) in outcomes {
+            assert!(matches!(result, Err(Error::InvalidProof)));
+            assert!(!opened);
         }
     }
 }

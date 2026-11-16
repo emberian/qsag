@@ -12,7 +12,7 @@ module qsag_clmul_kara #(
         always_comb begin
             p = '0;
             for (int i = 0; i < W; i++)
-                if (b[i]) p = p ^ ((2*W-1)'(a) << i);
+                p = p ^ (({(2*W-1){b[i]}} & (2*W-1)'(a)) << i);
         end
     end else begin : g_kara
         localparam int H  = W / 2;       // low half

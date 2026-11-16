@@ -426,8 +426,9 @@ static const uint64_t LEAF_DOMAIN = 0x5153414746504741ULL % GLP;
 
 // Load one chain into a slot: sponge blocks of the leaf data, then the siblings bottom-up.
 // Returns the number of Poseidon2 permutations the chain needs.
+// The chain's initial sponge state [0 x 8, cap] must already be in X[0..11] (chain_init).
 static int load_chain(int slot, const Tree& t, uint32_t leaf, const std::vector<uint64_t>& leaf_limbs,
-                      const D4& cap, bool corrupt = false) {
+                      bool corrupt = false) {
     auto blocks = p2_sponge_blocks(LEAF_DOMAIN, leaf_limbs);
     axil_write(R_STREAM, (uint32_t)slot << 6);
     for (auto& b : blocks) stream_beat(b.data(), 8);
@@ -438,17 +439,18 @@ static int load_chain(int slot, const Tree& t, uint32_t leaf, const std::vector<
         stream_beat(sib.data(), 4);
         n >>= 1;
     }
-    for (int i = 0; i < 8; i++) set_x(i, 0);
-    for (int i = 0; i < 4; i++) set_x(8 + i, cap[i]);
     axil_write(R_ARG32, ((uint32_t)1 << t.depth) + leaf);
     OpRes r = run_op(0x04, (uint8_t)slot, (uint16_t)blocks.size());
     check(r.ok, "chain start");
     return (int)blocks.size() + t.depth;
 }
-static void chain_cfg(const Tree& t, bool clear) {
+// Tree key and expected top node, then the common initial sponge state of every chain.
+static void chain_cfg(const Tree& t, const D4& cap) {
     for (int i = 0; i < 3; i++) set_x(i, t.key[i]);
     for (int i = 0; i < 4; i++) set_x(4 + i, t.node[1][i]);
-    run_op(0x03, clear ? 1 : 0);
+    run_op(0x03, 1);
+    for (int i = 0; i < 8; i++) set_x(i, 0);
+    for (int i = 0; i < 4; i++) set_x(8 + i, cap[i]);
 }
 
 static void test_basic_ops() {
@@ -460,7 +462,7 @@ static void test_basic_ops() {
         for (int i = 0; i < 12; i++) set_x(i, k.in[i]);
         OpRes r = run_op(0x01);
         for (int i = 0; i < 12; i++) CHECK_EQ64(get_y(i), k.out[i], "top P2_PERM KAT");
-        check(r.cycles == (uint32_t)(P2_PASSES * P2_RING_LEN + 2), "P2_PERM cycles");
+        CHECK_EQ64(r.cycles, (uint64_t)(P2_PASSES * P2_RING_LEN + 3), "P2_PERM cycles = 651 + offer, capture, finish");
     }
     {
         St12 in;
@@ -475,7 +477,7 @@ static void test_basic_ops() {
         for (int i = 0; i < 4; i++) { set_x(i, k.x[i]); set_x(4 + i, k.y[i]); set_x(8 + i, 0); }
         OpRes r = run_op(0x10);
         for (int i = 0; i < 4; i++) CHECK_EQ64(get_y(i), k.mul[i], "top EXT4_MAC KAT");
-        check(r.cycles == (uint32_t)(EXT4_MAC_LAT + 2), "EXT4_MAC cycles");
+        CHECK_EQ64(r.cycles, (uint64_t)(EXT4_MAC_LAT + 2), "EXT4_MAC cycles");
     }
     // Sumcheck rounds: three honest rounds, then a wrong claim.
     {
@@ -498,7 +500,7 @@ static void test_basic_ops() {
             E4 got = get_y4();
             for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], g[i], "top SC_ROUND g(r)");
             check(r.ok == !bad, bad ? "SC_ROUND rejects a wrong claim" : "SC_ROUND accepts");
-            check(r.cycles == (uint32_t)(3 * (EXT4_MAC_LAT + 1) + 2), "SC_ROUND cycles");
+            CHECK_EQ64(r.cycles, (uint64_t)(3 * (EXT4_MAC_LAT + 1) + 2), "SC_ROUND cycles");
             claim = g;
         }
     }
@@ -563,20 +565,24 @@ static void test_top_keccak() {
     std::vector<uint8_t> m(300);
     for (auto& b : m) b = (uint8_t)rng.next();
     check(top_sponge(m, 0x07, 32, true) == keccak_sponge(m, 0x07, 32, true, mp), "top TurboSHAKE256 D=07");
-    check(kec_op_cycles[0] == 12 + 2 && kec_op_cycles[1] == 6 + 2, "KEC_PERMUTE cycles");
+    CHECK_EQ64(kec_op_cycles[0], 12 + 3, "KEC_PERMUTE cycles (24 rounds) = 12 + start, capture, finish");
+    CHECK_EQ64(kec_op_cycles[1], 6 + 3, "KEC_PERMUTE cycles (12 rounds) = 6 + start, capture, finish");
     section("top: SHAKE256 Lean KATs, TurboSHAKE256 (RFC 9861, D=0x07) via KEC ops", c0, f0);
 }
 
-// Fold a 2^n table with n challenges; returns the core's cycles summed over the rounds.
-static uint64_t fold_table(const std::vector<E4>& table, const std::vector<E4>& r, E4& result) {
-    int n = (int)r.size();
+// Fold a 2^n table by r.size() challenges with FOLD_MULTI (up to 8 rounds per command);
+// returns the core's cycles summed over the commands. `preloaded` skips writing the challenges
+// (the caller already put them in X).
+static uint64_t fold_table(const std::vector<E4>& table, const std::vector<E4>& r, E4& result, bool preloaded = false) {
+    int n = 0;
+    while (((size_t)1 << n) < table.size()) n++;
     axil_write(R_STREAM, 0x80000000u);
     for (auto& e : table) stream_beat(e.data(), 4);
-    run_op(0x14, (uint8_t)n);
     uint64_t cycles = 0;
-    for (int j = 0; j < n; j++) {
-        set_x4(0, r[j]);
-        cycles += run_op(0x13).cycles;
+    for (size_t done = 0; done < r.size(); done += 8) {
+        int m = (int)(r.size() - done < 8 ? r.size() - done : 8);
+        if (!preloaded || done) for (int j = 0; j < m; j++) set_x4(4 * j, r[done + j]);
+        cycles += run_op(0x15, (uint8_t)m, done == 0 ? (uint16_t)n : 0).cycles;
     }
     result = get_y4();
     return cycles;
@@ -600,15 +606,15 @@ static void test_fold_and_chains() {
         E4 got, want = fold_model(t, r);
         uint64_t cy = fold_table(t, r, got);
         for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "fold result");
-        uint64_t expect_cy = 0;
+        // per round: one start clock, n/2 reads, FOLD_LAT = 9, done, hand-over; plus the final clock.
+        uint64_t expect_cy = 1;
         for (int j = 0; j < n; j++) expect_cy += ((uint64_t)1 << (n - 1 - j)) + 9 + 3;
-        check(cy == expect_cy, "fold cycles = sum(n/2 + 12)");
+        CHECK_EQ64(cy, expect_cy + (n > 8 ? 1 : 0), "fold cycles");
     }
     section("top: BRAM fold engine, 1/2/5/9-variable tables vs fold_first_var model", c0, f0);
 
     c0 = checks; f0 = fails;
     Tree t(7, rng);
-    t.build();
     D4 cap = {rng.gl(), rng.gl(), rng.gl(), rng.gl()};
     // 32 chains at once: leaf sponge (20 limbs = 3 blocks) then 7 levels; slot 13 gets a bad sibling.
     std::vector<uint32_t> leaf(32);
@@ -621,11 +627,11 @@ static void test_fold_and_chains() {
         t.node[128 + leaf[s]] = p2_sponge_with_cap(LEAF_DOMAIN, cap, data[s]);
     }
     t.build();
-    chain_cfg(t, true);
+    chain_cfg(t, cap);
     uint32_t perms0 = axil_read(R_PERMS);
     uint64_t t0 = cyc;
     int perms = 0;
-    for (int s = 0; s < 32; s++) perms += load_chain(s, t, leaf[s], data[s], cap, s == 13);
+    for (int s = 0; s < 32; s++) perms += load_chain(s, t, leaf[s], data[s], s == 13);
     OpRes r = run_op(0x05);
     uint64_t wall = cyc - t0;
     uint32_t done = axil_read(R_CH_DONE), okm = axil_read(R_CH_OK), busy = axil_read(R_CH_BUSY);
@@ -716,13 +722,14 @@ static void trace_qsagsta1(FILE* rep) {
         }
         t.build();
         uint64_t tq = cyc;
+        chain_cfg(t, cap);
         for (int base = 0; base < sg.queries; base += 32) {
             int n = sg.queries - base < 32 ? sg.queries - base : 32;
-            chain_cfg(t, true);
+            if (base) run_op(0x03, 3);   // clear DONE/OK only; key and top node stay
             for (int i = 0; i < n; i++) {
                 std::vector<uint64_t> limbs;
                 for (auto& e : evals[base + i]) for (auto v : e) limbs.push_back(v);
-                n_perm_chain += load_chain(i, t, leaf[base + i], limbs, cap);
+                n_perm_chain += load_chain(i, t, leaf[base + i], limbs);
             }
             OpRes r = run_op(0x05);
             check(r.ok, "trace: every query path reaches the committed top node");
@@ -733,9 +740,10 @@ static void trace_qsagsta1(FILE* rep) {
         uint64_t tf = cyc;
         std::vector<E4> r(sg.fold_k);
         for (auto& e : r) e = rng.e4();
+        for (int j = 0; j < sg.fold_k; j++) set_x4(4 * j, r[j]);   // one challenge set per stage
         for (int q = 0; q < sg.queries; q++) {
             E4 got, want = fold_model(evals[q], r);
-            core_fold += fold_table(evals[q], r, got);
+            core_fold += fold_table(evals[q], r, got, true);
             n_bfly += leaf_elems - 1;
             for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "trace query fold");
         }
@@ -794,21 +802,15 @@ static void trace_edge_fold(FILE* rep) {
     for (auto& e : r) e = rng.e4();
     E4 want = fold_model(t, r), got;
     uint64_t t0 = cyc;
-    axil_write(R_STREAM, 0x80000000u);
-    for (auto& e : t) stream_beat(e.data(), 4);
-    uint64_t t_load = cyc - t0;
-    run_op(0x14, (uint8_t)n);
-    uint64_t t1 = cyc, core = 0;
-    for (int j = 0; j < n; j++) { set_x4(0, r[j]); core += run_op(0x13).cycles; }
-    uint64_t t_fold = cyc - t1;
-    got = get_y4();
+    uint64_t core = fold_table(t, r, got);
+    uint64_t t_all = cyc - t0, t_load = ((uint64_t)1 << n) + 2, t_fold = t_all - t_load;
     for (int i = 0; i < 4; i++) CHECK_EQ64(got[i], want[i], "edge fold result");
     for (FILE* f : {stdout, rep}) {
         if (!f) continue;
         fprintf(f, "16-variable Ext4 edge fold (65,535 butterflies, in place in block RAM)\n"
-                   "  table load over AXI4-Stream : %llu clocks\n"
-                   "  16 fold rounds, core-busy   : %llu clocks\n"
-                   "  16 fold rounds, wall        : %llu clocks (incl. writing each challenge over AXI4-Lite)\n",
+                   "  table load over AXI4-Stream : %llu clocks (one entry per clock)\n"
+                   "  16 fold rounds, core-busy   : %llu clocks (two FOLD_MULTI commands of 8 rounds)\n"
+                   "  16 fold rounds, wall        : %llu clocks (incl. 16 challenges over AXI4-Lite)\n",
                 (unsigned long long)t_load, (unsigned long long)core, (unsigned long long)t_fold);
     }
     section("16-variable hyperweb edge fold vs fold_first_var model", c0, f0);
