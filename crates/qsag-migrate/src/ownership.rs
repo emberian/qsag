@@ -1,7 +1,7 @@
 //! Ownership of the canonical spending scalar, including Taproot output scalars.
 use crate::{
     boolean_hash,
-    circuit::{Builder, Circuit, Domain, Value, Wire, ZERO},
+    circuit::{Builder, Circuit, Domain, ONE, Value, Wire, ZERO, lift4, trunc4},
     legacy::LegacyCommitmentKind,
     scalar::{self, ScalarGroup},
     zk_engine::MigrationStatement,
@@ -36,12 +36,12 @@ fn ed_add(c: &Builder, a: Point, b: Point) -> Point {
     let bb = c.mul(c.add(a[1], a[0]), c.add(b[1], b[0]));
     let twice_d = c.constant(
         Domain::Ed,
-        [
+        lift4([
             0xebd6_9b94_26b2_f159,
             0x00e0_149a_8283_b156,
             0x198e_80f2_eef3_d130,
             0x2406_d9dc_56df_fce7,
-        ],
+        ]),
     );
     let cc = c.mul(c.mul(a[3], b[3]), twice_d);
     let dd = c.scale(c.mul(a[2], b[2]), 2);
@@ -56,9 +56,9 @@ fn ed_add(c: &Builder, a: Point, b: Point) -> Point {
 fn window_tables(ed: bool) -> Vec<[[Value; 4]; 16]> {
     let d = if ed { Domain::Ed } else { Domain::Secp };
     let native = if ed {
-        crate::ed25519_ct::circuit_base_table()
+        crate::ed25519_ct::circuit_base_table().map(|row| row.map(lift4))
     } else {
-        crate::secp256k1_ct::GENERATOR_TABLE.map(|p| [p[0], p[1], p[2], ZERO])
+        crate::secp256k1_ct::GENERATOR_TABLE.map(|p| [lift4(p[0]), lift4(p[1]), lift4(p[2]), ZERO])
     };
     let constants = Builder::default();
     let add = |a, b| {
@@ -85,7 +85,7 @@ fn window_tables(ed: bool) -> Vec<[[Value; 4]; 16]> {
         }
     }
     let mut prefixes = Vec::with_capacity(64 * 15);
-    let mut product = [1, 0, 0, 0];
+    let mut product = ONE;
     for table in &tables {
         for p in &table[1..] {
             prefixes.push(product);
@@ -99,7 +99,7 @@ fn window_tables(ed: bool) -> Vec<[[Value; 4]; 16]> {
             inverse = d.mul(inverse, p[2]);
             p[0] = d.mul(p[0], z_inv);
             p[1] = d.mul(p[1], z_inv);
-            p[2] = [1, 0, 0, 0];
+            p[2] = ONE;
             if ed {
                 p[3] = d.mul(p[0], p[1]);
             }
@@ -139,12 +139,10 @@ fn curve(c: &Builder, bits: &[Wire], ed: bool) -> (Vec<Wire>, Vec<Wire>) {
         let point = core::array::from_fn(|i| {
             if i == 2 {
                 if ed {
-                    debug_assert!(table.iter().all(|p| p[2] == [1, 0, 0, 0]));
+                    debug_assert!(table.iter().all(|p| p[2] == ONE));
                     return one;
                 }
-                debug_assert!(
-                    table[0][2] == ZERO && table[1..].iter().all(|p| p[2] == [1, 0, 0, 0])
-                );
+                debug_assert!(table[0][2] == ZERO && table[1..].iter().all(|p| p[2] == ONE));
                 return c.sub(one, sel[0]);
             }
             if !ed && i == 3 {
@@ -175,7 +173,7 @@ fn curve(c: &Builder, bits: &[Wire], ed: bool) -> (Vec<Wire>, Vec<Wire>) {
     y.resize(256, c.small(Domain::Bit, 0));
     (x, y)
 }
-fn big_endian(bits: &[Wire]) -> Vec<Wire> {
+pub(crate) fn big_endian(bits: &[Wire]) -> Vec<Wire> {
     bits.chunks_exact(8).rev().flatten().copied().collect()
 }
 fn me(c: &Builder, st: &mut [Wire; 12]) {
@@ -232,7 +230,7 @@ fn perm(c: &Builder, st: &mut [Wire; 12]) {
         me(c, st);
     }
 }
-fn sponge(c: &Builder, domain: u64, input: &[Wire]) -> [Wire; 4] {
+pub(crate) fn sponge(c: &Builder, domain: u64, input: &[Wire]) -> [Wire; 4] {
     let mut st = [c.small(Domain::Gold, 0); 12];
     for (i, v) in [(8, 8), (9, 4), (10, domain), (11, POSEIDON2_CONST_IV)] {
         st[i] = c.small(Domain::Gold, v);
@@ -251,7 +249,7 @@ fn sponge(c: &Builder, domain: u64, input: &[Wire]) -> [Wire; 4] {
     perm(c, &mut st);
     [st[0], st[1], st[2], st[3]]
 }
-fn pack56(c: &Builder, bytes: &[Wire]) -> Vec<Wire> {
+pub(crate) fn pack56(c: &Builder, bytes: &[Wire]) -> Vec<Wire> {
     let mut marked = bytes.to_vec();
     marked.extend(boolean_hash::bytes(c, &[1, 0, 0]));
     marked
@@ -278,7 +276,7 @@ pub(crate) fn build(statement: &MigrationStatement, secret: &[u8; 32]) -> Circui
     } else {
         ScalarGroup::Secp256k1
     };
-    c.require_scalar(&bits, group.order());
+    c.require_scalar(&bits, lift4(group.order()));
     let (x, y) = curve(&c, &bits, ed);
     let (actual, expected) = match statement.legacy_commitment {
         LegacyCommitmentKind::BitcoinHash160(h) => {
@@ -332,30 +330,32 @@ mod tests {
     fn complete_curve_circuits_match_native_including_zero() {
         for n in [
             ZERO,
-            [1, 0, 0, 0],
-            [2, 0, 0, 0],
-            [15, 0, 0, 0],
-            [16, 0, 0, 0],
-            [17, 0, 0, 0],
-            [
+            [1, 0, 0, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0],
+            [15, 0, 0, 0, 0, 0],
+            [16, 0, 0, 0, 0, 0],
+            [17, 0, 0, 0, 0, 0],
+            lift4([
                 0x0123_4567_89ab_cdef,
                 0xfedc_ba98_7654_3210,
                 u64::MAX,
                 0x0800_0000_0000_0000,
-            ],
-            [0, 0, 0, 0x8000_0000_0000_0000],
+            ]),
+            lift4([0, 0, 0, 0x8000_0000_0000_0000]),
         ] {
             for ed in [false, true] {
                 let c = Builder::default();
                 let b = c.constant_bits(n, 256);
                 c.require_scalar(
                     &b,
-                    if ed {
-                        ScalarGroup::Ed25519
-                    } else {
-                        ScalarGroup::Secp256k1
-                    }
-                    .order(),
+                    lift4(
+                        if ed {
+                            ScalarGroup::Ed25519
+                        } else {
+                            ScalarGroup::Secp256k1
+                        }
+                        .order(),
+                    ),
                 );
                 let (x, y) = curve(&c, &b, ed);
                 if n == ZERO {
@@ -377,7 +377,7 @@ mod tests {
                         })
                         .collect()
                 };
-                let mut scalar = scalar::encode(n);
+                let mut scalar = scalar::encode(trunc4(n));
                 if ed {
                     let mut enc = encode(&y);
                     enc[31] |= (c.value(x[0])[0] as u8) << 7;

@@ -1,6 +1,6 @@
 //! Ordered-pair ZKBoo with exact mixed-domain replay across 438 repetitions.
 use crate::{
-    circuit::{Circuit, Domain, Op, Value, ZERO, local},
+    circuit::{Circuit, Domain, Op, Value, ZERO, lift4, local, trunc4},
     legacy::{LegacyCommitmentKind, LegacyOwnershipWitness},
 };
 use alloc::vec::Vec;
@@ -166,15 +166,49 @@ impl Tape {
             let bit = self.bit_buf & 1;
             self.bit_buf >>= 1;
             self.bit_rem -= 1;
-            return [bit, 0, 0, 0];
+            return [bit, 0, 0, 0, 0, 0];
         }
         if d == Domain::Gold {
-            return [self.sponge.gold(), 0, 0, 0];
+            return [self.sponge.gold(), 0, 0, 0, 0, 0];
+        }
+        if d == Domain::PallasFp {
+            let mut raw = [0u8; 64];
+            self.sponge.squeeze(&mut raw);
+            let mut lo_b = [0u8; 32];
+            let mut hi_b = [0u8; 32];
+            lo_b.copy_from_slice(&raw[..32]);
+            hi_b.copy_from_slice(&raw[32..]);
+            ct_zeroize_bytes(&mut raw);
+            lo_b[31] &= 0x3f;
+            hi_b[31] &= 0x3f;
+            let lo = crate::pallas::FpPallas(crate::limbs::from_le_bytes(&lo_b));
+            let hi = crate::pallas::FpPallas(crate::limbs::from_le_bytes(&hi_b));
+            ct_zeroize_bytes(&mut lo_b);
+            ct_zeroize_bytes(&mut hi_b);
+            let two254 = crate::pallas::FpPallas([0, 0, 0, 1u64 << 62]);
+            return lift4((lo + hi * two254).0);
+        }
+        if d == Domain::BlsFp {
+            let mut raw = [0u8; 96];
+            self.sponge.squeeze(&mut raw);
+            let mut lo_b = [0u8; 48];
+            let mut hi_b = [0u8; 48];
+            lo_b.copy_from_slice(&raw[..48]);
+            hi_b.copy_from_slice(&raw[48..]);
+            ct_zeroize_bytes(&mut raw);
+            lo_b[47] &= 0x0f;
+            hi_b[47] &= 0x0f;
+            let lo = crate::bls12_381::FpBls381(crate::limbs::from_le_bytes(&lo_b));
+            let hi = crate::bls12_381::FpBls381(crate::limbs::from_le_bytes(&hi_b));
+            ct_zeroize_bytes(&mut lo_b);
+            ct_zeroize_bytes(&mut hi_b);
+            let two380 = crate::bls12_381::FpBls381([0, 0, 0, 0, 0, 1u64 << 60]);
+            return (lo + hi * two380).0;
         }
         loop {
             let mut raw = [0; 32];
-            self.sponge.squeeze(&mut raw[..d.width().div_ceil(8)]);
-            let mut v = crate::scalar::decode(&raw);
+            self.sponge.squeeze(&mut raw[..d.byte_len()]);
+            let mut v = lift4(crate::scalar::decode(&raw));
             ct_zeroize_bytes(&mut raw);
             if d == Domain::Ed {
                 v[3] &= 0x7fff_ffff_ffff_ffff;
@@ -187,20 +221,18 @@ impl Tape {
 }
 #[inline]
 pub(crate) fn put(out: &mut Vec<u8>, d: Domain, v: Value) {
-    if d == Domain::Bit {
-        out.push((v[0] & 1) as u8);
-        return;
+    match d {
+        Domain::Bit => out.push((v[0] & 1) as u8),
+        Domain::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
+        Domain::BlsFp => out.extend_from_slice(&crate::limbs::to_le_bytes::<6, 48>(v)),
+        Domain::Secp | Domain::Ed | Domain::PallasFp => {
+            out.extend_from_slice(&crate::limbs::to_le_bytes::<4, 32>(trunc4(v)));
+        }
     }
-    if d == Domain::Gold {
-        out.extend_from_slice(&v[0].to_le_bytes());
-        return;
-    }
-    let bytes = crate::scalar::encode(v);
-    out.extend_from_slice(&bytes[..d.width().div_ceil(8)]);
 }
 #[inline]
 pub(crate) fn take(input: &mut &[u8], d: Domain) -> Result<Value, MigrateError> {
-    let len = d.width().div_ceil(8);
+    let len = d.byte_len();
     if input.len() < len {
         return Err(MigrateError::MalformedProofStructure);
     }
@@ -214,12 +246,16 @@ pub(crate) fn take(input: &mut &[u8], d: Domain) -> Result<Value, MigrateError> 
         if (d == Domain::Bit && v > 1) || (d == Domain::Gold && v >= GOLDILOCKS_PRIME) {
             return Err(MigrateError::MalformedProofStructure);
         }
-        return Ok([v, 0, 0, 0]);
+        return Ok([v, 0, 0, 0, 0, 0]);
     }
-    let mut raw = [0; 32];
-    raw[..len].copy_from_slice(&input[..len]);
+    let v = if d == Domain::BlsFp {
+        crate::limbs::from_le_bytes::<6, 48>(input[..48].try_into().unwrap())
+    } else {
+        lift4(crate::limbs::from_le_bytes::<4, 32>(
+            input[..32].try_into().unwrap(),
+        ))
+    };
     *input = &input[len..];
-    let v = crate::scalar::decode(&raw);
     if !d.canonical(v) {
         return Err(MigrateError::MalformedProofStructure);
     }
@@ -268,7 +304,7 @@ impl<'a> PackedReader<'a> {
             .input
             .first()
             .ok_or(MigrateError::MalformedProofStructure)?;
-        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0];
+        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0, 0, 0];
         self.bit = (self.bit + 1) % 8;
         if self.bit == 0 {
             self.input = &self.input[1..];
@@ -294,6 +330,8 @@ pub(crate) fn gate(d: Domain, a: [Value; 2], b: [Value; 2], r: [Value; 2]) -> Va
     if d == Domain::Bit {
         return [
             (a[0][0] & b[0][0]) ^ (a[0][0] & b[1][0]) ^ (a[1][0] & b[0][0]) ^ r[0][0] ^ r[1][0],
+            0,
+            0,
             0,
             0,
             0,
@@ -516,7 +554,7 @@ fn replay(c: &Circuit, rep: usize, view: &OpenedRepetitionView) -> Result<(), Mi
 
 /// Every gate overwrites its slot before later gates read it. Keeping the full length
 /// ensures the entire allocation is wiped on drop, including after an early rejection.
-fn replay_with_scratch(
+pub(crate) fn replay_with_scratch(
     c: &Circuit,
     rep: usize,
     view: &OpenedRepetitionView,
@@ -716,17 +754,24 @@ pub(crate) mod tests {
             stream.squeeze(&mut block);
             let bits = u64::from_le_bytes(block);
             for i in 0..64 {
-                assert_eq!(tape.sample(Domain::Bit), [(bits >> i) & 1, 0, 0, 0]);
+                assert_eq!(tape.sample(Domain::Bit), [(bits >> i) & 1, 0, 0, 0, 0, 0]);
                 if i == 17 {
                     stream.squeeze(&mut block);
                     let gold = u64::from_le_bytes(block);
                     assert!(gold < GOLDILOCKS_PRIME);
-                    assert_eq!(tape.sample(Domain::Gold), [gold, 0, 0, 0]);
+                    assert_eq!(tape.sample(Domain::Gold), [gold, 0, 0, 0, 0, 0]);
                 }
             }
         }
-        for d in [Domain::Bit, Domain::Gold, Domain::Secp, Domain::Ed] {
-            let last = crate::scalar::sub(d.modulus(), [1, 0, 0, 0], d.modulus());
+        for d in [
+            Domain::Bit,
+            Domain::Gold,
+            Domain::Secp,
+            Domain::Ed,
+            Domain::PallasFp,
+            Domain::BlsFp,
+        ] {
+            let last = crate::limbs::sub_mod(d.modulus(), [1, 0, 0, 0, 0, 0], d.modulus());
             for value in [ZERO, last] {
                 let mut bytes = Vec::new();
                 put(&mut bytes, d, value);
@@ -736,8 +781,8 @@ pub(crate) mod tests {
                 let mut short = &bytes[..bytes.len() - 1];
                 assert!(take(&mut short, d).is_err());
             }
-            let bytes = crate::scalar::encode(d.modulus());
-            let mut input = &bytes[..d.width().div_ceil(8)];
+            let bytes = crate::limbs::to_le_bytes::<6, 48>(d.modulus());
+            let mut input = &bytes[..d.byte_len()];
             assert!(take(&mut input, d).is_err());
         }
     }
@@ -747,7 +792,7 @@ pub(crate) mod tests {
         let mut bytes = Vec::new();
         let mut bit = 0;
         for value in [1, 0, 1, 1, 0, 0, 1, 0, 1] {
-            put_packed(&mut bytes, &mut bit, Domain::Bit, [value, 0, 0, 0]);
+            put_packed(&mut bytes, &mut bit, Domain::Bit, [value, 0, 0, 0, 0, 0]);
         }
         assert_eq!(bytes, [0x4d, 0x01]);
 
@@ -803,7 +848,7 @@ pub(crate) mod tests {
 
     #[test]
     fn inverse_witnesses_are_constrained_in_every_opening() {
-        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+        for d in Domain::ALL_FIELDS {
             let c = Builder::default();
             let bit = c.input(1);
             let a = c.scale(c.lift(bit, d), 7);
@@ -893,7 +938,14 @@ pub(crate) mod tests {
         let c = Builder::default();
         let a = c.input(1);
         let b = c.input(0);
-        for d in [Domain::Bit, Domain::Gold, Domain::Secp, Domain::Ed] {
+        for d in [
+            Domain::Bit,
+            Domain::Gold,
+            Domain::Secp,
+            Domain::Ed,
+            Domain::PallasFp,
+            Domain::BlsFp,
+        ] {
             let aa = if d == Domain::Bit { a } else { c.lift(a, d) };
             let bb = if d == Domain::Bit { b } else { c.lift(b, d) };
             c.equal(c.mul(aa, aa), aa);
