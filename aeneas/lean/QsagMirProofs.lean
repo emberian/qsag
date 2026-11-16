@@ -22,12 +22,20 @@ namespace QsagMirProofs
 export qsag_verified.proofs (
   sponge_squeeze_prefix
   sponge_squeeze32_refines
+  spongeRateByte_spec136
+  keccakIter
+  keccakIter_succ_right
+  squeezeXofAux_getD
+  sponge_squeeze_refines
+  shake256_squeeze_refines
   shake256_32_refines
+  sp800_185_left_encode_u128_refines
+  sponge_new_cshake256_nonempty_absorbed
   cshake256_32_empty_refines
   cshake256_32_refines_of_prefix
-  sponge_new_cshake256_short_nonempty_absorbed
-  cshake256_32_short_nonempty_refines
-  cshake256_short_nonempty_xof_from_extracted_state
+  cshake256_32_refines
+  cshake256_squeeze_refines
+  tooth_multiblock_squeeze_permuted_beyond_136
   GoldilocksP
   bdoz_authenticate_open_total
   bdoz_authenticate_open_spec

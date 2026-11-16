@@ -102,13 +102,15 @@ Guards (multi-turn, arbitrary request sequences including refusals).
 
 ## Sponge boundary
 
-`shake256_32_refines` proves byte equality with `Qsag.shake256Xof 32` for arbitrary input.
-`sponge_squeeze_prefix` identifies every written byte of a complete short squeeze;
-`sponge_squeeze32_refines` identifies those bytes with `Qsag.squeezeXofAux 32`.
-`cshake256_32_refines_of_prefix` composes the same output proof with cSHAKE absorb/padding.
-Its constructor premise remains open: `new_cshake256` must establish `customizationPrefix`,
-including `left_encode`, zero filling and the prefix flush. Unconditional cSHAKE equality
-is not claimed. Rust bit-length encoding now widens to u128 instead of saturating u64.
+`shake256_32_refines` and `cshake256_32_refines` prove byte equality of the extracted 32-byte
+entry points with `Qsag.shake256Xof 32` and `Qsag.cshake256Xof 32`, for every input and every
+customization. `sp800_185_left_encode_u128_refines` covers `left_encode` on all of `u128`, and
+`sponge_new_cshake256_nonempty_absorbed` shows the constructor absorbs exactly
+`Qsag.customizationPrefix` for a nonempty customization of any length.
+`sponge_squeeze_refines` identifies a squeeze of any length from offset zero with
+`Qsag.squeezeXofAux`; `shake256_squeeze_refines` and `cshake256_squeeze_refines` compose it
+with absorption of any chunk split. A squeeze resumed at a nonzero offset has no general
+theorem.
 
 ## Sponge phase discipline
 
