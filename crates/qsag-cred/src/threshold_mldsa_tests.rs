@@ -1145,7 +1145,8 @@ fn a_shamir_share_is_not_restored_against_a_malformed_pack() {
         let mut pack = good.clone();
         mutate(&mut pack);
         assert_eq!(
-            ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack, 2).map(|share| share.party_id),
+            ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack, 2)
+                .map(|share| share.party_id),
             Err(ThresholdMlDsaError::ProtocolInvariantViolated),
             "mutation {index}"
         );
@@ -1794,9 +1795,27 @@ fn pending_ciphertext_tag_is_the_framed_cshake_of_its_components() {
     );
     assert_eq!(PendingResponse::ciphertext_tag(&sh, &context, 7), expected);
     let variants = [
-        (Sh { c: vec![vec![1], vec![2, 3]] }, context, 7),
-        (Sh { c: vec![vec![1, 2, 3]] }, context, 7),
-        (Sh { c: vec![vec![1, 2], vec![3], vec![]] }, context, 7),
+        (
+            Sh {
+                c: vec![vec![1], vec![2, 3]],
+            },
+            context,
+            7,
+        ),
+        (
+            Sh {
+                c: vec![vec![1, 2, 3]],
+            },
+            context,
+            7,
+        ),
+        (
+            Sh {
+                c: vec![vec![1, 2], vec![3], vec![]],
+            },
+            context,
+            7,
+        ),
         (sh.clone(), context, 8),
         (sh.clone(), [8; 32], 7),
     ];
@@ -2748,28 +2767,33 @@ fn signing_with_a_file_ledger_checks_key_and_epoch_first() {
             FsNonceBurnStore::create(dir.join(std::format!("good-{me}")), key_id, mac).unwrap();
         assert!(store.reserve(me as u16 + 1, 6, &[0x99; 32], 0));
     }
-    let attempt = |shares: &mut Vec<ThresholdMlDsaSignerShare>, name: &str, ledger_key: [u8; 32]| {
-        let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
-        run(states, Vec::new(), |me, share, net| {
-            let path = dir.join(std::format!("{name}-{me}"));
-            let mut store = FsNonceBurnStore::open(&path, ledger_key, mac).unwrap();
-            let before = store.generation();
-            let result = threshold_sign_mldsa_party(
-                share,
-                &request,
-                b"m",
-                b"",
-                &[me as u8 + 5; 32],
-                &mut store,
-                net,
-            );
-            (result, store.generation() - before)
-        })
-    };
+    let attempt =
+        |shares: &mut Vec<ThresholdMlDsaSignerShare>, name: &str, ledger_key: [u8; 32]| {
+            let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+            run(states, Vec::new(), |me, share, net| {
+                let path = dir.join(std::format!("{name}-{me}"));
+                let mut store = FsNonceBurnStore::open(&path, ledger_key, mac).unwrap();
+                let before = store.generation();
+                let result = threshold_sign_mldsa_party(
+                    share,
+                    &request,
+                    b"m",
+                    b"",
+                    &[me as u8 + 5; 32],
+                    &mut store,
+                    net,
+                );
+                (result, store.generation() - before)
+            })
+        };
     for (name, ledger_key) in [("wrong", wrong_key), ("good", key_id)] {
         let (results, log) = attempt(&mut shares, name, ledger_key);
         for (result, written) in results {
-            assert_eq!(result, Err(ThresholdMlDsaError::NoncePersistenceFailed), "{name}");
+            assert_eq!(
+                result,
+                Err(ThresholdMlDsaError::NoncePersistenceFailed),
+                "{name}"
+            );
             assert_eq!(written, 0, "{name}");
         }
         assert!(log.is_empty(), "{name}");

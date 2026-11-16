@@ -1170,7 +1170,9 @@ fn expand_secret_lanes<S, const L: usize>(
     for block in 0..blocks {
         permute(state);
         for (lane, lane_prefix) in prefix.iter_mut().enumerate().take(count) {
-            let rate = lane_prefix[136 * block..136 * (block + 1)].as_chunks_mut::<8>().0;
+            let rate = lane_prefix[136 * block..136 * (block + 1)]
+                .as_chunks_mut::<8>()
+                .0;
             for (chunk, word) in rate.iter_mut().zip(words(state).iter()) {
                 *chunk = word[lane].to_le_bytes();
             }
@@ -1178,7 +1180,11 @@ fn expand_secret_lanes<S, const L: usize>(
     }
     let mut polys: [Poly256; L] = core::array::from_fn(|_| Poly256::zero());
     let mut filled = [MLDSA_N; L];
-    for ((poly, fill), lane_prefix) in polys.iter_mut().zip(&mut filled).zip(prefix.iter()).take(count)
+    for ((poly, fill), lane_prefix) in polys
+        .iter_mut()
+        .zip(&mut filled)
+        .zip(prefix.iter())
+        .take(count)
     {
         *fill = rej_eta_fill_from_prefix_ct(&lane_prefix[..136 * blocks], eta, &mut poly.coeffs);
     }
@@ -1188,7 +1194,12 @@ fn expand_secret_lanes<S, const L: usize>(
         permute(state);
         for (lane, (poly, fill)) in polys.iter_mut().zip(&mut filled).enumerate() {
             if *fill < MLDSA_N {
-                for (chunk, word) in buf.0.as_chunks_mut::<8>().0.iter_mut().zip(words(state).iter())
+                for (chunk, word) in buf
+                    .0
+                    .as_chunks_mut::<8>()
+                    .0
+                    .iter_mut()
+                    .zip(words(state).iter())
                 {
                     *chunk = word[lane].to_le_bytes();
                 }
@@ -1988,12 +1999,28 @@ mod constant_time_sampling_tests {
     #[test]
     fn barrett_reduction_of_u64_matches_the_remainder() {
         let q = MLDSA_Q as u64;
-        let mut samples = vec![0, 1, q - 1, q, q + 1, 2 * q - 1, 2 * q, u64::MAX, u64::MAX - 1];
+        let mut samples = vec![
+            0,
+            1,
+            q - 1,
+            q,
+            q + 1,
+            2 * q - 1,
+            2 * q,
+            u64::MAX,
+            u64::MAX - 1,
+        ];
         for k in [1u64 << 23, 1 << 32, 1 << 46, 1 << 62, 1 << 63] {
             samples.extend([k - 1, k, k + 1, (k / q) * q, (k / q) * q - 1]);
         }
         let bytes = stream(5, 8 * 4096);
-        samples.extend(bytes.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)));
+        samples.extend(
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c)),
+        );
         for x in samples {
             assert_eq!(fq_reduce_u64(x) as u64, x % q, "x={x}");
         }
