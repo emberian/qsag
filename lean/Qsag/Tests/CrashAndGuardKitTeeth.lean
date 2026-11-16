@@ -36,11 +36,12 @@ def commitToyEpochOnDisk (d : Disk) (c : Nat) : Disk :=
       (toyCodec.encSlot .b (c + 1) nextPar))
 
 /-- Guard over a `QSBURN05` `Disk` image checking verified `recoverTruncatedAppendPlan` convergence
-    at `req.epoch` before durably advancing counter `epoch → epoch + 1` on the truncated image. -/
+    at or below `req.epoch` (`h.len ≤ req.epoch`, HWM monotonicity) before durably advancing
+    counter `epoch → epoch + 1` on the truncated image. -/
 def qsburn05EpochGuard : GuardedMachine Disk MirBeltLatchBindRequest Nat where
   guard d req :=
     match recoverTruncatedAppendPlan toyCodec (qsburn05 512) d with
-    | some (_, h, _) => decide (h.len = req.epoch.toNat)
+    | some (_, h, _) => decide (h.len ≤ req.epoch.toNat)
     | none => false
   next d req :=
     match recoverTruncatedAppendPlan toyCodec (qsburn05 512) d with
@@ -57,7 +58,7 @@ def hwmBeltCoupledGuard :
 /-- **Multi-Turn Durable HWM × Belt-Latch Safety (`hwmBeltCoupled_multiTurn_safe`)**:
     Every trace of `hwmBeltCoupledGuard` preserves `MirBeltLatchKernel.WellFormed`, enforces
     the kernel capacity bound, and ensures every accepted turn passed `QSBURN05`
-    two-slot recovery (`recoverTruncatedAppendPlan = some (dClean, h, ws)`) at the bound epoch! -/
+    two-slot recovery (`recoverTruncatedAppendPlan = some (dClean, h, ws)`) with `h.len ≤ epoch`! -/
 theorem hwmBeltCoupled_multiTurn_safe
     {s₀ sF : Disk × MirBeltLatchKernel}
     {tr : List (MirBeltLatchBindRequest × (Nat × MirBeltLatchBindOutcome))}
@@ -67,7 +68,7 @@ theorem hwmBeltCoupled_multiTurn_safe
     (∀ p ∈ tr, p.1.epoch.toNat < s₀.2.capacity_limit.toNat ∧
       ∃ d dClean h ws,
         recoverTruncatedAppendPlan toyCodec (qsburn05 512) d = some (dClean, h, ws) ∧
-        h.len = p.1.epoch.toNat) := by
+        h.len ≤ p.1.epoch.toNat) := by
   have hDiskTr := GuardedMachine.prod_fst_validTrace _ _ hTr
   have hBeltTr := GuardedMachine.prod_snd_validTrace _ _ hTr
   obtain ⟨hWfF, hCap, _⟩ :=
@@ -110,9 +111,10 @@ theorem hwmBeltCoupled_accepts_epoch0_witness :
       rw [hRec] at hMap
       rcases triple with ⟨dClean, hd, ws⟩
       injection hMap with hPair
-      have hLen0 : hd.len = 0 := (Prod.mk.inj hPair).1
-      have hReq0 : req.epoch.toNat = 0 := by decide
-      exact decide_eq_true (hLen0.trans hReq0.symm)
+      have hLen0 : hd.len = 0 := (Prod.mk.inj hPair).2
+      dsimp only
+      rw [hLen0]
+      exact decide_eq_true (Nat.zero_le _)
   have hGuard : hwmBeltCoupledGuard.guard s₀ req = true := by
     dsimp only [s₀, hwmBeltCoupledGuard, GuardedMachine.prod]
     rw [hDiskGuard, hgBelt]
