@@ -206,6 +206,523 @@ pub const POW_CUSTOM: &[u8] = b"QSAG.PCS.POW2/v1";
 /// Precomputed compile-time `cSHAKE256` midstate for [`POW_CUSTOM`].
 pub const POW_MIDSTATE: [u64; 25] = cshake256_static_midstate(POW_CUSTOM);
 
+/// RFC 9861 12-round `Keccak-p[1600, 12]` permutation (rounds `12..24` of `KECCAK_RC`).
+/// Preserves 256-bit preimage, 128-bit collision, and 128-bit Grover QROM security for Role-1
+/// outer WHIR commitments and PoW grinding (zero AIR constraints) at 2x throughput.
+#[inline(always)]
+pub const fn keccak_p1600_12(state: &mut [u64; 25]) {
+    let mut s0 = state[0];
+    let mut s1 = state[1];
+    let mut s2 = state[2];
+    let mut s3 = state[3];
+    let mut s4 = state[4];
+    let mut s5 = state[5];
+    let mut s6 = state[6];
+    let mut s7 = state[7];
+    let mut s8 = state[8];
+    let mut s9 = state[9];
+    let mut s10 = state[10];
+    let mut s11 = state[11];
+    let mut s12 = state[12];
+    let mut s13 = state[13];
+    let mut s14 = state[14];
+    let mut s15 = state[15];
+    let mut s16 = state[16];
+    let mut s17 = state[17];
+    let mut s18 = state[18];
+    let mut s19 = state[19];
+    let mut s20 = state[20];
+    let mut s21 = state[21];
+    let mut s22 = state[22];
+    let mut s23 = state[23];
+    let mut s24 = state[24];
+
+    let mut r = 12usize;
+    while r < 24 {
+        let c0 = s0 ^ s5 ^ s10 ^ s15 ^ s20;
+        let c1 = s1 ^ s6 ^ s11 ^ s16 ^ s21;
+        let c2 = s2 ^ s7 ^ s12 ^ s17 ^ s22;
+        let c3 = s3 ^ s8 ^ s13 ^ s18 ^ s23;
+        let c4 = s4 ^ s9 ^ s14 ^ s19 ^ s24;
+
+        let d0 = c4 ^ c1.rotate_left(1);
+        let d1 = c0 ^ c2.rotate_left(1);
+        let d2 = c1 ^ c3.rotate_left(1);
+        let d3 = c2 ^ c4.rotate_left(1);
+        let d4 = c3 ^ c0.rotate_left(1);
+
+        s0 ^= d0;
+        s5 ^= d0;
+        s10 ^= d0;
+        s15 ^= d0;
+        s20 ^= d0;
+        s1 ^= d1;
+        s6 ^= d1;
+        s11 ^= d1;
+        s16 ^= d1;
+        s21 ^= d1;
+        s2 ^= d2;
+        s7 ^= d2;
+        s12 ^= d2;
+        s17 ^= d2;
+        s22 ^= d2;
+        s3 ^= d3;
+        s8 ^= d3;
+        s13 ^= d3;
+        s18 ^= d3;
+        s23 ^= d3;
+        s4 ^= d4;
+        s9 ^= d4;
+        s14 ^= d4;
+        s19 ^= d4;
+        s24 ^= d4;
+
+        let b0 = s0;
+        let b1 = s6.rotate_left(44);
+        let b2 = s12.rotate_left(43);
+        let b3 = s18.rotate_left(21);
+        let b4 = s24.rotate_left(14);
+        let b5 = s3.rotate_left(28);
+        let b6 = s9.rotate_left(20);
+        let b7 = s10.rotate_left(3);
+        let b8 = s16.rotate_left(45);
+        let b9 = s22.rotate_left(61);
+        let b10 = s1.rotate_left(1);
+        let b11 = s7.rotate_left(6);
+        let b12 = s13.rotate_left(25);
+        let b13 = s19.rotate_left(8);
+        let b14 = s20.rotate_left(18);
+        let b15 = s4.rotate_left(27);
+        let b16 = s5.rotate_left(36);
+        let b17 = s11.rotate_left(10);
+        let b18 = s17.rotate_left(15);
+        let b19 = s23.rotate_left(56);
+        let b20 = s2.rotate_left(62);
+        let b21 = s8.rotate_left(55);
+        let b22 = s14.rotate_left(39);
+        let b23 = s15.rotate_left(41);
+        let b24 = s21.rotate_left(2);
+
+        s0 = (b0 ^ ((!b1) & b2)) ^ KECCAK_RC[r];
+        s1 = b1 ^ ((!b2) & b3);
+        s2 = b2 ^ ((!b3) & b4);
+        s3 = b3 ^ ((!b4) & b0);
+        s4 = b4 ^ ((!b0) & b1);
+        s5 = b5 ^ ((!b6) & b7);
+        s6 = b6 ^ ((!b7) & b8);
+        s7 = b7 ^ ((!b8) & b9);
+        s8 = b8 ^ ((!b9) & b5);
+        s9 = b9 ^ ((!b5) & b6);
+        s10 = b10 ^ ((!b11) & b12);
+        s11 = b11 ^ ((!b12) & b13);
+        s12 = b12 ^ ((!b13) & b14);
+        s13 = b13 ^ ((!b14) & b10);
+        s14 = b14 ^ ((!b10) & b11);
+        s15 = b15 ^ ((!b16) & b17);
+        s16 = b16 ^ ((!b17) & b18);
+        s17 = b17 ^ ((!b18) & b19);
+        s18 = b18 ^ ((!b19) & b15);
+        s19 = b19 ^ ((!b15) & b16);
+        s20 = b20 ^ ((!b21) & b22);
+        s21 = b21 ^ ((!b22) & b23);
+        s22 = b22 ^ ((!b23) & b24);
+        s23 = b23 ^ ((!b24) & b20);
+        s24 = b24 ^ ((!b20) & b21);
+        r += 1;
+    }
+
+    state[0] = s0;
+    state[1] = s1;
+    state[2] = s2;
+    state[3] = s3;
+    state[4] = s4;
+    state[5] = s5;
+    state[6] = s6;
+    state[7] = s7;
+    state[8] = s8;
+    state[9] = s9;
+    state[10] = s10;
+    state[11] = s11;
+    state[12] = s12;
+    state[13] = s13;
+    state[14] = s14;
+    state[15] = s15;
+    state[16] = s16;
+    state[17] = s17;
+    state[18] = s18;
+    state[19] = s19;
+    state[20] = s20;
+    state[21] = s21;
+    state[22] = s22;
+    state[23] = s23;
+    state[24] = s24;
+}
+
+/// Vectorized `N`-way (`N = 4` AVX2/NEON or `N = 8` AVX-512 ZMM) 12-round `Keccak-p[1600, 12]`.
+#[inline(always)]
+fn keccak_p1600_12_lanes<const N: usize>(st: &mut [[u64; N]; 25]) {
+    #[inline(always)]
+    fn xor<const N: usize>(a: [u64; N], b: [u64; N]) -> [u64; N] {
+        core::array::from_fn(|k| a[k] ^ b[k])
+    }
+    #[inline(always)]
+    fn xor5<const N: usize>(
+        a: [u64; N],
+        b: [u64; N],
+        c: [u64; N],
+        d: [u64; N],
+        e: [u64; N],
+    ) -> [u64; N] {
+        core::array::from_fn(|k| a[k] ^ b[k] ^ c[k] ^ d[k] ^ e[k])
+    }
+    #[inline(always)]
+    fn rol<const N: usize, const R: u32>(a: [u64; N]) -> [u64; N] {
+        core::array::from_fn(|k| a[k].rotate_left(R))
+    }
+    #[inline(always)]
+    fn chi<const N: usize>(a: [u64; N], b: [u64; N], c: [u64; N]) -> [u64; N] {
+        core::array::from_fn(|k| a[k] ^ ((!b[k]) & c[k]))
+    }
+
+    for &rc in &KECCAK_RC[12..24] {
+        let c0 = xor5(st[0], st[5], st[10], st[15], st[20]);
+        let c1 = xor5(st[1], st[6], st[11], st[16], st[21]);
+        let c2 = xor5(st[2], st[7], st[12], st[17], st[22]);
+        let c3 = xor5(st[3], st[8], st[13], st[18], st[23]);
+        let c4 = xor5(st[4], st[9], st[14], st[19], st[24]);
+
+        let d0 = xor(c4, rol::<N, 1>(c1));
+        let d1 = xor(c0, rol::<N, 1>(c2));
+        let d2 = xor(c1, rol::<N, 1>(c3));
+        let d3 = xor(c2, rol::<N, 1>(c4));
+        let d4 = xor(c3, rol::<N, 1>(c0));
+
+        for row in [0, 5, 10, 15, 20] {
+            st[row] = xor(st[row], d0);
+        }
+        for row in [1, 6, 11, 16, 21] {
+            st[row] = xor(st[row], d1);
+        }
+        for row in [2, 7, 12, 17, 22] {
+            st[row] = xor(st[row], d2);
+        }
+        for row in [3, 8, 13, 18, 23] {
+            st[row] = xor(st[row], d3);
+        }
+        for row in [4, 9, 14, 19, 24] {
+            st[row] = xor(st[row], d4);
+        }
+
+        let b0 = st[0];
+        let b1 = rol::<N, 44>(st[6]);
+        let b2 = rol::<N, 43>(st[12]);
+        let b3 = rol::<N, 21>(st[18]);
+        let b4 = rol::<N, 14>(st[24]);
+        let b5 = rol::<N, 28>(st[3]);
+        let b6 = rol::<N, 20>(st[9]);
+        let b7 = rol::<N, 3>(st[10]);
+        let b8 = rol::<N, 45>(st[16]);
+        let b9 = rol::<N, 61>(st[22]);
+        let b10 = rol::<N, 1>(st[1]);
+        let b11 = rol::<N, 6>(st[7]);
+        let b12 = rol::<N, 25>(st[13]);
+        let b13 = rol::<N, 8>(st[19]);
+        let b14 = rol::<N, 18>(st[20]);
+        let b15 = rol::<N, 27>(st[4]);
+        let b16 = rol::<N, 36>(st[5]);
+        let b17 = rol::<N, 10>(st[11]);
+        let b18 = rol::<N, 15>(st[17]);
+        let b19 = rol::<N, 56>(st[23]);
+        let b20 = rol::<N, 62>(st[2]);
+        let b21 = rol::<N, 55>(st[8]);
+        let b22 = rol::<N, 39>(st[14]);
+        let b23 = rol::<N, 41>(st[15]);
+        let b24 = rol::<N, 2>(st[21]);
+
+        let s0 = chi(b0, b1, b2);
+        st[0] = core::array::from_fn(|k| s0[k] ^ rc);
+        st[1] = chi(b1, b2, b3);
+        st[2] = chi(b2, b3, b4);
+        st[3] = chi(b3, b4, b0);
+        st[4] = chi(b4, b0, b1);
+        st[5] = chi(b5, b6, b7);
+        st[6] = chi(b6, b7, b8);
+        st[7] = chi(b7, b8, b9);
+        st[8] = chi(b8, b9, b5);
+        st[9] = chi(b9, b5, b6);
+        st[10] = chi(b10, b11, b12);
+        st[11] = chi(b11, b12, b13);
+        st[12] = chi(b12, b13, b14);
+        st[13] = chi(b13, b14, b10);
+        st[14] = chi(b14, b10, b11);
+        st[15] = chi(b15, b16, b17);
+        st[16] = chi(b16, b17, b18);
+        st[17] = chi(b17, b18, b19);
+        st[18] = chi(b18, b19, b15);
+        st[19] = chi(b19, b15, b16);
+        st[20] = chi(b20, b21, b22);
+        st[21] = chi(b21, b22, b23);
+        st[22] = chi(b22, b23, b24);
+        st[23] = chi(b23, b24, b20);
+        st[24] = chi(b24, b20, b21);
+    }
+}
+
+/// Precompute a compile-time 12-round `TurboSHAKE256` customization midstate (`1..=128` byte customization).
+pub const fn turboshake256_static_midstate(custom: &[u8]) -> [u64; 25] {
+    assert!(!custom.is_empty() && custom.len() <= 128);
+    let mut blk = [0u8; SHAKE256_RATE];
+    blk[0] = 1;
+    blk[1] = SHAKE256_RATE as u8;
+    blk[2] = 1;
+    blk[3] = 0;
+    let bit_len = (custom.len() as u64) * 8;
+    let mut p = 4usize;
+    if bit_len < 256 {
+        blk[p] = 1;
+        blk[p + 1] = bit_len as u8;
+        p += 2;
+    } else {
+        blk[p] = 2;
+        blk[p + 1] = (bit_len >> 8) as u8;
+        blk[p + 2] = (bit_len & 0xFF) as u8;
+        p += 3;
+    }
+    let mut i = 0;
+    while i < custom.len() {
+        blk[p + i] = custom[i];
+        i += 1;
+    }
+    let mut state = [0u64; 25];
+    let mut lane = 0;
+    while lane < 17 {
+        let mut word = [0u8; 8];
+        let mut b = 0;
+        while b < 8 {
+            word[b] = blk[8 * lane + b];
+            b += 1;
+        }
+        state[lane] = u64::from_le_bytes(word);
+        lane += 1;
+    }
+    keccak_p1600_12(&mut state);
+    state
+}
+
+/// RFC 9861 `TurboSHAKE256` domain byte (`0x07` in `0x01..=0x7F`, distinct from SHAKE `0x1F` & cSHAKE `0x04`).
+const TURBOSHAKE_SUFFIX: u8 = 0x07;
+
+/// Canonical `TurboSHAKE256` customization string for Role-1 outer WHIR Merkle-Canopy commitments.
+pub const TURBOSHAKE_CANOPY_CUSTOM: &[u8] = b"QSAG.PCS.TURBOCANOPY/v1";
+/// Precomputed compile-time 12-round `TurboSHAKE256` midstate for [`TURBOSHAKE_CANOPY_CUSTOM`].
+pub const TURBOSHAKE_CANOPY_MIDSTATE: [u64; 25] =
+    turboshake256_static_midstate(TURBOSHAKE_CANOPY_CUSTOM);
+
+/// Canonical `TurboSHAKE256` customization string for Role-1 WHIR Proof-of-Work grinding.
+pub const TURBOSHAKE_POW_CUSTOM: &[u8] = b"QSAG.PCS.TURBOPOW/v1";
+/// Precomputed compile-time 12-round `TurboSHAKE256` midstate for [`TURBOSHAKE_POW_CUSTOM`].
+pub const TURBOSHAKE_POW_MIDSTATE: [u64; 25] =
+    turboshake256_static_midstate(TURBOSHAKE_POW_CUSTOM);
+
+#[inline]
+pub fn turboshake256_from_midstate_into(midstate: &[u64; 25], input: &[u8], out: &mut [u8]) {
+    let mut state = *midstate;
+    let (chunks, rem) = input.as_chunks::<SHAKE256_RATE>();
+    for blk in chunks {
+        xor_slice_136(&mut state, blk);
+        keccak_p1600_12(&mut state);
+    }
+    let mut block = [0u8; SHAKE256_RATE];
+    block[..rem.len()].copy_from_slice(rem);
+    block[rem.len()] ^= TURBOSHAKE_SUFFIX;
+    block[SHAKE256_RATE - 1] ^= 0x80;
+    xor_slice_136(&mut state, &block);
+    keccak_p1600_12(&mut state);
+
+    let mut written = 0usize;
+    while written < out.len() {
+        let rem_out = out.len() - written;
+        if rem_out <= 32 {
+            for (lane, &lane_val) in state.iter().enumerate().take(4) {
+                let start = written + 8 * lane;
+                if start >= out.len() {
+                    break;
+                }
+                let lb = lane_val.to_le_bytes();
+                let take = (out.len() - start).min(8);
+                out[start..start + take].copy_from_slice(&lb[..take]);
+            }
+            break;
+        }
+        let mut rate_bytes = [0u8; SHAKE256_RATE];
+        for lane in 0..17 {
+            rate_bytes[8 * lane..8 * (lane + 1)].copy_from_slice(&state[lane].to_le_bytes());
+        }
+        let take = rem_out.min(SHAKE256_RATE);
+        out[written..written + take].copy_from_slice(&rate_bytes[..take]);
+        written += take;
+        if written < out.len() {
+            keccak_p1600_12(&mut state);
+        }
+    }
+}
+
+#[inline]
+pub fn turboshake256_from_midstate_32(midstate: &[u64; 25], input: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    turboshake256_from_midstate_into(midstate, input, &mut out);
+    out
+}
+
+#[inline]
+fn turboshake256_from_midstate_32_lanes<const N: usize>(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; N],
+) -> [[u8; 32]; N] {
+    let min_len = inputs.iter().map(|s| s.len()).min().unwrap_or(0);
+    let same_len = inputs.iter().all(|s| s.len() == min_len);
+    let mut st = [[0u64; N]; 25];
+    for (dst_lane, &ms_val) in st.iter_mut().zip(midstate.iter()) {
+        *dst_lane = [ms_val; N];
+    }
+    let mut off = 0usize;
+    while off + SHAKE256_RATE <= min_len {
+        for (lane, st_lane) in st.iter_mut().enumerate().take(17) {
+            let b = off + 8 * lane;
+            for (dst, inp) in st_lane.iter_mut().zip(inputs.iter()) {
+                let s = &inp[b..b + 8];
+                *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+            }
+        }
+        keccak_p1600_12_lanes(&mut st);
+        off += SHAKE256_RATE;
+    }
+    if !same_len {
+        let mut out = [[0u8; 32]; N];
+        for (k, inp) in inputs.iter().enumerate() {
+            let mut lane_state = [0u64; 25];
+            for (lane, st_lane) in st.iter().enumerate() {
+                lane_state[lane] = st_lane[k];
+            }
+            let (chunks, rem) = inp[off..].as_chunks::<SHAKE256_RATE>();
+            for blk in chunks {
+                xor_slice_136(&mut lane_state, blk);
+                keccak_p1600_12(&mut lane_state);
+            }
+            let mut block = [0u8; SHAKE256_RATE];
+            block[..rem.len()].copy_from_slice(rem);
+            block[rem.len()] ^= TURBOSHAKE_SUFFIX;
+            block[SHAKE256_RATE - 1] ^= 0x80;
+            xor_slice_136(&mut lane_state, &block);
+            keccak_p1600_12(&mut lane_state);
+            for lane in 0..4 {
+                out[k][8 * lane..8 * (lane + 1)].copy_from_slice(&lane_state[lane].to_le_bytes());
+            }
+        }
+        return out;
+    }
+    let rem = min_len - off;
+    let mut blocks = [[0u8; SHAKE256_RATE]; N];
+    for (blk, inp) in blocks.iter_mut().zip(inputs.iter()) {
+        blk[..rem].copy_from_slice(&inp[off..]);
+        blk[rem] ^= TURBOSHAKE_SUFFIX;
+        blk[SHAKE256_RATE - 1] ^= 0x80;
+    }
+    for (lane, st_lane) in st.iter_mut().enumerate().take(17) {
+        let b = 8 * lane;
+        for (dst, blk) in st_lane.iter_mut().zip(blocks.iter()) {
+            let s = &blk[b..b + 8];
+            *dst ^= u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        }
+    }
+    keccak_p1600_12_lanes(&mut st);
+    let mut out = [[0u8; 32]; N];
+    for (lane, st_lane) in st.iter().enumerate().take(4) {
+        for (dst, &word) in out.iter_mut().zip(st_lane.iter()) {
+            dst[8 * lane..8 * (lane + 1)].copy_from_slice(&word.to_le_bytes());
+        }
+    }
+    out
+}
+
+#[inline]
+pub fn turboshake256_from_midstate_32_x4(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; 4],
+) -> [[u8; 32]; 4] {
+    turboshake256_from_midstate_32_lanes::<4>(midstate, inputs)
+}
+
+#[inline]
+pub fn turboshake256_from_midstate_32_x8(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; 8],
+) -> [[u8; 32]; 8] {
+    turboshake256_from_midstate_32_lanes::<8>(midstate, inputs)
+}
+
+#[inline]
+pub fn turboshake256_from_midstate_16_x4(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; 4],
+) -> [[u8; 16]; 4] {
+    let full = turboshake256_from_midstate_32_x4(midstate, inputs);
+    let mut out = [[0u8; 16]; 4];
+    for (dst, src) in out.iter_mut().zip(full.iter()) {
+        dst.copy_from_slice(&src[..16]);
+    }
+    out
+}
+
+#[inline]
+pub fn turboshake256_from_midstate_16_x8(
+    midstate: &[u64; 25],
+    inputs: [&[u8]; 8],
+) -> [[u8; 16]; 8] {
+    let full = turboshake256_from_midstate_32_x8(midstate, inputs);
+    let mut out = [[0u8; 16]; 8];
+    for (dst, src) in out.iter_mut().zip(full.iter()) {
+        dst.copy_from_slice(&src[..16]);
+    }
+    out
+}
+
+#[inline]
+pub fn turboshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u64) -> [u64; 8] {
+    let mut st = [[0u64; 8]; 25];
+    for (dst_lane, &ms_val) in st.iter_mut().zip(midstate.iter()) {
+        *dst_lane = [ms_val; 8];
+    }
+    for (lane, st_lane) in st.iter_mut().enumerate().take(4) {
+        let s = &chal[8 * lane..8 * (lane + 1)];
+        let w = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+        for dst in st_lane.iter_mut() {
+            *dst ^= w;
+        }
+    }
+    for (k, dst) in st[4].iter_mut().enumerate() {
+        *dst ^= base_nonce.wrapping_add(k as u64);
+    }
+    for dst in &mut st[5] {
+        *dst ^= TURBOSHAKE_SUFFIX as u64;
+    }
+    for dst in &mut st[16] {
+        *dst ^= 0x8000_0000_0000_0000;
+    }
+    keccak_p1600_12_lanes(&mut st);
+    st[0]
+}
+
+#[inline]
+pub fn turboshake256_pow_u64_single(midstate: &[u64; 25], chal: &[u8; 32], nonce: u64) -> u64 {
+    let mut buf = [0u8; 40];
+    buf[0..32].copy_from_slice(chal);
+    buf[32..40].copy_from_slice(&nonce.to_le_bytes());
+    let mut out = [0u8; 8];
+    turboshake256_from_midstate_into(midstate, &buf, &mut out);
+    u64::from_le_bytes(out)
+}
+
 #[inline]
 fn absorb_and_squeeze_from_state(mut state: [u64; 25], input: &[u8], suffix: u8, out: &mut [u8]) {
     let (chunks, rem) = input.as_chunks::<SHAKE256_RATE>();
@@ -1216,6 +1733,7 @@ enum TranscriptBackend {
 pub struct FiatShamirTranscript<P: TranscriptPhase> {
     chain_digest: [u8; 32],
     backend: TranscriptBackend,
+    turboshake_pow: bool,
     pow_bits: u32,
     counter: u64,
     _phase: PhantomData<P>,
@@ -1227,6 +1745,7 @@ impl<P: TranscriptPhase> Clone for FiatShamirTranscript<P> {
         Self {
             chain_digest: self.chain_digest,
             backend: self.backend,
+            turboshake_pow: self.turboshake_pow,
             pow_bits: self.pow_bits,
             counter: self.counter,
             _phase: PhantomData,
@@ -1244,6 +1763,7 @@ impl FiatShamirTranscript<Unbound> {
         Self {
             chain_digest: init,
             backend: TranscriptBackend::Cshake256,
+            turboshake_pow: false,
             pow_bits: crate::pcs::PCS_POW_BITS,
             counter: 0,
             _phase: PhantomData,
@@ -1258,6 +1778,7 @@ impl FiatShamirTranscript<Unbound> {
         schedule: &crate::pcs::WhirSchedule,
     ) -> FiatShamirTranscript<RelationBound> {
         let pow_bits = schedule.regime.pow_bits();
+        let turboshake_pow = schedule.regime.uses_turboshake_canopy();
         let sched_bytes = schedule.to_bytes();
         if schedule.regime.uses_poseidon2_canopy() {
             let mut limbs = Vec::with_capacity(
@@ -1279,6 +1800,7 @@ impl FiatShamirTranscript<Unbound> {
             return FiatShamirTranscript {
                 chain_digest: limbs4_to_le_bytes32(p2_chain),
                 backend: TranscriptBackend::Poseidon2 { p2_chain },
+                turboshake_pow,
                 pow_bits,
                 counter: 0,
                 _phase: PhantomData,
@@ -1297,6 +1819,7 @@ impl FiatShamirTranscript<Unbound> {
         FiatShamirTranscript {
             chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
             backend: TranscriptBackend::Cshake256,
+            turboshake_pow,
             pow_bits,
             counter: 0,
             _phase: PhantomData,
@@ -1340,6 +1863,7 @@ impl FiatShamirTranscript<RelationBound> {
                     backend: TranscriptBackend::Poseidon2 {
                         p2_chain: next_chain,
                     },
+                    turboshake_pow: self.turboshake_pow,
                     pow_bits: self.pow_bits,
                     counter: 0,
                     _phase: PhantomData,
@@ -1351,6 +1875,7 @@ impl FiatShamirTranscript<RelationBound> {
                 FiatShamirTranscript {
                     chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
                     backend: TranscriptBackend::Cshake256,
+                    turboshake_pow: self.turboshake_pow,
                     pow_bits: self.pow_bits,
                     counter: 0,
                     _phase: PhantomData,
@@ -1365,6 +1890,12 @@ impl FiatShamirTranscript<InstanceBound> {
     #[inline]
     pub fn pow_bits(&self) -> u32 {
         self.pow_bits
+    }
+
+    /// Whether Proof-of-Work grinding uses 12-round `TurboSHAKE256` (`TURBOSHAKE_POW_MIDSTATE`).
+    #[inline]
+    pub fn uses_turboshake_pow(&self) -> bool {
+        self.turboshake_pow
     }
 
     /// Whether this transcript operates in algebraic `Poseidon2` mode.
@@ -1915,6 +2446,52 @@ mod internal_matrix_tests {
             assert_eq!(
                 cshake256_pow_u64_single(&POW_MIDSTATE, &chal, 100 + k),
                 exp_u64
+            );
+        }
+    }
+
+    #[test]
+    fn turboshake256_x1_x4_x8_and_pow_match_bit_for_bit() {
+        for len in [0usize, 1, 37, 69, 135, 136, 137, 272, 534] {
+            let bufs: [Vec<u8>; 8] = core::array::from_fn(|k| {
+                (0..len)
+                    .map(|i| ((i * 53 + k * 97 + len * 19) & 0xFF) as u8)
+                    .collect()
+            });
+            let got_x8 = turboshake256_from_midstate_32_x8(
+                &TURBOSHAKE_CANOPY_MIDSTATE,
+                bufs.each_ref().map(Vec::as_slice),
+            );
+            let got_x4_lo = turboshake256_from_midstate_32_x4(
+                &TURBOSHAKE_CANOPY_MIDSTATE,
+                [&bufs[0], &bufs[1], &bufs[2], &bufs[3]],
+            );
+            let got_x4_hi = turboshake256_from_midstate_32_x4(
+                &TURBOSHAKE_CANOPY_MIDSTATE,
+                [&bufs[4], &bufs[5], &bufs[6], &bufs[7]],
+            );
+            let got_16_x8 = turboshake256_from_midstate_16_x8(
+                &TURBOSHAKE_CANOPY_MIDSTATE,
+                bufs.each_ref().map(Vec::as_slice),
+            );
+            for k in 0..8 {
+                let single = turboshake256_from_midstate_32(&TURBOSHAKE_CANOPY_MIDSTATE, &bufs[k]);
+                assert_eq!(got_x8[k], single, "x8 mismatch len={len} lane={k}");
+                assert_eq!(got_16_x8[k], single[..16]);
+                if k < 4 {
+                    assert_eq!(got_x4_lo[k], single);
+                } else {
+                    assert_eq!(got_x4_hi[k - 4], single);
+                }
+                assert_ne!(single, cshake256_from_midstate_32(&CANOPY_MIDSTATE, &bufs[k]));
+            }
+        }
+        let chal = [0xA5u8; 32];
+        let pow8 = turboshake256_pow_u64_x8(&TURBOSHAKE_POW_MIDSTATE, &chal, 1_000);
+        for (k, &word) in pow8.iter().enumerate() {
+            assert_eq!(
+                word,
+                turboshake256_pow_u64_single(&TURBOSHAKE_POW_MIDSTATE, &chal, 1_000 + k as u64)
             );
         }
     }
