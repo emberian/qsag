@@ -67,7 +67,7 @@ use crate::{KernelSlot, ProverKernelSlot};
 const RTLD_NOW: i32 = 2;
 const RTLD_LOCAL: i32 = 0;
 
-#[link(name = "dl")]
+#[cfg_attr(target_os = "linux", link(name = "dl"))]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
@@ -108,6 +108,19 @@ const VK_STRUCTURE_TYPE_MEMORY_BARRIER: u32 = 46;
 
 const VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: u32 = 1;
 const VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: u32 = 2;
+const VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: u32 = 3;
+
+const VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x0000_0001;
+const VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: u32 = 1_000_094_000;
+
+/// Canonical runtime search order for the Vulkan loader / MoltenVK ICD on macOS Apple Silicon.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const MACOS_VULKAN_LIB_CANDIDATES: [&core::ffi::CStr; 4] = [
+    c"libvulkan.1.dylib",
+    c"/opt/homebrew/lib/libvulkan.1.dylib",
+    c"/opt/homebrew/lib/libMoltenVK.dylib",
+    c"/usr/local/lib/libMoltenVK.dylib",
+];
 
 const VK_QUEUE_GRAPHICS_BIT: u32 = 1;
 const VK_QUEUE_COMPUTE_BIT: u32 = 2;
@@ -568,10 +581,14 @@ struct MerklePushConsts {
     num_parents: u64,
     in_offset_u64: u64,
     out_offset_u64: u64,
+    domain_tag: u64,
+    tree_idx: u64,
     layer: u32,
     base_parent: u32,
+    level: u32,
+    mode: u32,
 }
-const _: () = assert!(size_of::<MerklePushConsts>() == 72);
+const _: () = assert!(size_of::<MerklePushConsts>() == 96);
 
 #[repr(C)]
 struct BdozDotPushConsts {
@@ -721,6 +738,16 @@ struct SubgroupProperties {
     max_compute_subgroups: u32,
     required_stages: u32,
 }
+#[repr(C)]
+struct CoreSubgroupProperties {
+    s_type: u32,
+    p_next: *mut c_void,
+    subgroup_size: u32,
+    supported_stages: u32,
+    supported_operations: u32,
+    quad_operations_in_all_stages: u32,
+}
+const _: () = assert!(size_of::<CoreSubgroupProperties>() == 32);
 #[repr(C)]
 struct RequiredSubgroup {
     s_type: u32,
@@ -1167,14 +1194,12 @@ struct ProverArena {
     desc_pool: VkDescriptorPool,
     ds_lde_r0: VkDescriptorSet,
     ds_gather_r0: VkDescriptorSet,
-    ds_lde_stage: VkDescriptorSet,
-    ds_gather_stage: VkDescriptorSet,
+    ds_lde_stage: [VkDescriptorSet; 2],
+    ds_gather_stage: [VkDescriptorSet; 2],
     ds_fold_kronecker: VkDescriptorSet,
     ds_fold_mono: VkDescriptorSet,
     ds_fold_witness: VkDescriptorSet,
     ds_air: VkDescriptorSet,
-    stage_cw_stride_ext4: u32,
-    stage_tree_stride_ext4: u32,
     twiddles_24: GpuBuffer,
     vram_witness: GpuBuffer,
     vram_mono: GpuBuffer,
@@ -1182,8 +1207,8 @@ struct ProverArena {
     vram_tree0: GpuBuffer,
     vram_work_a: GpuBuffer,
     vram_work_b: GpuBuffer,
-    vram_cw_stage: GpuBuffer,
-    vram_tree_stage: GpuBuffer,
+    vram_cw_stage: [GpuBuffer; 2],
+    vram_tree_stage: [GpuBuffer; 2],
     vram_aux_in: GpuBuffer,
     vram_aux_b: GpuBuffer,
     vram_partials: GpuBuffer,
@@ -1199,6 +1224,8 @@ pub(crate) struct RawVulkanEngine {
     queue: VkQueue,
     mem_props: VkPhysicalDeviceMemoryProperties,
     wave32: bool,
+    core_subgroup_size: Option<u32>,
+    require_exec_telemetry: bool,
     executable_fns: Option<(GetExecutables, GetStatistics)>,
     telemetry: [crate::vulkan::PipelineTelemetry; KernelSlot::COUNT],
     prover_telemetry: [crate::vulkan::PipelineTelemetry; ProverKernelSlot::COUNT],
@@ -1228,6 +1255,7 @@ pub(crate) struct RawVulkanEngine {
     ds_1buf_a: VkDescriptorSet,
     ds_2buf_ab: VkDescriptorSet,
     ds_2buf_ba: VkDescriptorSet,
+    ds_2buf_aa: VkDescriptorSet,
     ds_3buf_abc: VkDescriptorSet,
     cmd_pool: VkCommandPool,
     cmd_buf: VkCommandBuffer,
@@ -1338,38 +1366,143 @@ fn contains_ascii_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack[..end].windows(needle.len()).any(|w| w == needle)
 }
 
+fn has_extension_named(exts: &[ExtensionProperties], target: &core::ffi::CStr) -> bool {
+    exts.iter()
+        .any(|e| e.name.starts_with(target.to_bytes_with_nul()))
+}
+
+pub(crate) const fn is_accepted_gpu_device_type(
+    device_type: u32,
+    allow_portability_virtual_gpu: bool,
+) -> bool {
+    device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+        || device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+        || (allow_portability_virtual_gpu && device_type == VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)
+}
+
+unsafe fn loader_supports_portability_enumeration(gipa: PfnVkGetInstanceProcAddr) -> bool {
+    type PfnEnumInstExts =
+        unsafe extern "C" fn(*const c_char, *mut u32, *mut ExtensionProperties) -> i32;
+    let Ok(enum_inst_exts) = (unsafe {
+        load_inst_fn::<PfnEnumInstExts>(
+            gipa,
+            null_mut(),
+            c"vkEnumerateInstanceExtensionProperties",
+            "vkEnumerateInstanceExtensionProperties",
+        )
+    }) else {
+        return false;
+    };
+    let mut count = 0u32;
+    if unsafe { enum_inst_exts(null(), &mut count, null_mut()) } != VK_SUCCESS || count == 0 {
+        return false;
+    }
+    let mut exts =
+        std::vec![ExtensionProperties { name: [0; 256], version: 0 }; count.min(512) as usize];
+    count = exts.len() as u32;
+    let rc = unsafe { enum_inst_exts(null(), &mut count, exts.as_mut_ptr()) };
+    if rc != VK_SUCCESS && rc != 5 {
+        return false;
+    }
+    exts.truncate(count as usize);
+    has_extension_named(&exts, c"VK_KHR_portability_enumeration")
+}
+
 impl RawVulkanEngine {
     pub(crate) fn try_new() -> Result<(Self, VulkanDeviceInfo), VulkanError> {
+        Self::try_new_with_policy(true)
+    }
+
+    pub(crate) fn try_new_portability() -> Result<(Self, VulkanDeviceInfo), VulkanError> {
+        Self::try_new_with_policy(false)
+    }
+
+    fn try_new_with_policy(
+        require_exec_telemetry: bool,
+    ) -> Result<(Self, VulkanDeviceInfo), VulkanError> {
         if cfg!(target_endian = "big") {
             return Err(VulkanError::UnsupportedPlatform);
         }
 
-        // Determine whether an explicit Vulkan ICD environment override is active.
-        // On dual-ICD Linux AMD hosts (`amdvlk64.so` + Mesa `libvulkan_radeon.so`), AMDVLK's
-        // `/etc/vulkan/implicit_layer.d/amd_icd64.json` (`VK_LAYER_AMD_switchable_graphics_64`)
-        // intercepts `libvulkan.so.1` and hides Mesa RADV Wave32 devices unless negotiated
-        // directly via the Khronos ICD v5 ABI (`vk_icdNegotiateLoaderICDInterfaceVersion`).
-        let icd_override = std::env::var_os("VK_ICD_FILENAMES")
-            .or_else(|| std::env::var_os("VK_DRIVER_FILES"))
-            .or_else(|| std::env::var_os("VK_ADD_DRIVER_FILES"));
-        let allow_direct_radv = match &icd_override {
-            None => true,
-            Some(v) => v.to_string_lossy().contains("radeon_icd"),
-        };
-        let mut radv_err: Option<VulkanError> = None;
-        if allow_direct_radv {
-            match unsafe { Self::try_new_with_radv_icd() } {
-                Some(Ok((eng, info))) => return Ok((eng, info)),
-                Some(Err(VulkanError::NoDiscreteGpuFound)) | None => {}
-                Some(Err(e)) => radv_err = Some(e),
+        #[cfg(target_os = "macos")]
+        {
+            let mut any_loaded = false;
+            let mut last_err = VulkanError::LibraryLoadFailed;
+            for cand in MACOS_VULKAN_LIB_CANDIDATES {
+                let lib_handle = unsafe { dlopen(cand.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+                if lib_handle.is_null() {
+                    continue;
+                }
+                any_loaded = true;
+                match unsafe {
+                    Self::try_open_with_loaded_lib(lib_handle, true, require_exec_telemetry)
+                } {
+                    Ok(ok) => return Ok(ok),
+                    Err(e @ VulkanError::NoDiscreteGpuFound) => {
+                        last_err = e;
+                    }
+                    Err(e) => {
+                        last_err = e;
+                    }
+                }
             }
+            return Err(if any_loaded {
+                last_err
+            } else {
+                VulkanError::LibraryLoadFailed
+            });
         }
 
-        let lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
-        if lib_handle.is_null() {
-            return Err(VulkanError::LibraryLoadFailed);
-        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Determine whether an explicit Vulkan ICD environment override is active.
+            // On dual-ICD Linux AMD hosts (`amdvlk64.so` + Mesa `libvulkan_radeon.so`), AMDVLK's
+            // `/etc/vulkan/implicit_layer.d/amd_icd64.json` (`VK_LAYER_AMD_switchable_graphics_64`)
+            // intercepts `libvulkan.so.1` and hides Mesa RADV Wave32 devices unless negotiated
+            // directly via the Khronos ICD v5 ABI (`vk_icdNegotiateLoaderICDInterfaceVersion`).
+            let icd_override = std::env::var_os("VK_ICD_FILENAMES")
+                .or_else(|| std::env::var_os("VK_DRIVER_FILES"))
+                .or_else(|| std::env::var_os("VK_ADD_DRIVER_FILES"));
+            let allow_direct_radv = match &icd_override {
+                None => true,
+                Some(v) => v.to_string_lossy().contains("radeon_icd"),
+            };
+            let mut radv_err: Option<VulkanError> = None;
+            if allow_direct_radv {
+                match unsafe { Self::try_new_with_radv_icd(require_exec_telemetry) } {
+                    Some(Ok((eng, info))) => return Ok((eng, info)),
+                    Some(Err(VulkanError::NoDiscreteGpuFound)) | None => {}
+                    Some(Err(e)) => radv_err = Some(e),
+                }
+            }
 
+            let lib_handle =
+                unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+            if lib_handle.is_null() {
+                if let Some(e) = radv_err {
+                    return Err(e);
+                }
+                return Err(VulkanError::LibraryLoadFailed);
+            }
+
+            let default_res = unsafe {
+                Self::try_open_with_loaded_lib(lib_handle, false, require_exec_telemetry)
+            };
+            if default_res.is_err()
+                && let Some(e) = radv_err
+            {
+                return Err(e);
+            }
+            default_res
+        }
+    }
+
+    /// Consumes `lib_handle` (storing it inside `RawVulkanEngine` on `Ok`, or `dlclose`ing on `Err`).
+    unsafe fn try_open_with_loaded_lib(
+        lib_handle: *mut c_void,
+        enable_portability: bool,
+        require_exec_telemetry: bool,
+    ) -> Result<(Self, VulkanDeviceInfo), VulkanError> {
         let gipa_raw = unsafe { dlsym(lib_handle, c"vkGetInstanceProcAddr".as_ptr()) };
         if gipa_raw.is_null() {
             unsafe {
@@ -1406,6 +1539,9 @@ impl RawVulkanEngine {
             }
         }
 
+        let use_portability_enum =
+            enable_portability && unsafe { loader_supports_portability_enumeration(gipa) };
+        let port_ext_name: *const c_char = c"VK_KHR_portability_enumeration".as_ptr();
         let app_info = VkApplicationInfo {
             s_type: VK_STRUCTURE_TYPE_APPLICATION_INFO,
             p_next: null(),
@@ -1418,12 +1554,20 @@ impl RawVulkanEngine {
         let inst_info = VkInstanceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
             p_next: null(),
-            flags: 0,
+            flags: if use_portability_enum {
+                VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+            } else {
+                0
+            },
             p_application_info: &app_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: null(),
+            enabled_extension_count: u32::from(use_portability_enum),
+            pp_enabled_extension_names: if use_portability_enum {
+                &port_ext_name
+            } else {
+                null()
+            },
         };
         let mut instance: VkInstance = null_mut();
         let rc = unsafe { create_instance(&inst_info, null(), &mut instance) };
@@ -1440,6 +1584,7 @@ impl RawVulkanEngine {
                             gipa,
                             &mut instance,
                             destroy_instance,
+                            require_exec_telemetry,
                         )
                     };
                     if let Ok((mut eng, info)) = res {
@@ -1467,13 +1612,13 @@ impl RawVulkanEngine {
         unsafe {
             let _ = dlclose(lib_handle);
         }
-        if let Some(e) = radv_err {
-            return Err(e);
-        }
         default_res
     }
 
-    unsafe fn try_new_with_radv_icd() -> Option<Result<(Self, VulkanDeviceInfo), VulkanError>> {
+    #[cfg(not(target_os = "macos"))]
+    unsafe fn try_new_with_radv_icd(
+        require_exec_telemetry: bool,
+    ) -> Option<Result<(Self, VulkanDeviceInfo), VulkanError>> {
         let radv_paths = [
             c"/usr/lib/x86_64-linux-gnu/libvulkan_radeon.so",
             c"/usr/lib64/libvulkan_radeon.so",
@@ -1593,6 +1738,7 @@ impl RawVulkanEngine {
                 icd_gipa,
                 &mut instance,
                 destroy_instance,
+                require_exec_telemetry,
             )
         } {
             Ok((mut eng, info)) => {
@@ -1619,6 +1765,7 @@ impl RawVulkanEngine {
         gipa: PfnVkGetInstanceProcAddr,
         instance_slot: &mut VkInstance,
         destroy_instance: PfnVkDestroyInstance,
+        require_exec_telemetry: bool,
     ) -> Result<(Self, VulkanDeviceInfo), VulkanError> {
         let instance = *instance_slot;
         let enum_devs: PfnVkEnumeratePhysicalDevices = unsafe {
@@ -1755,8 +1902,8 @@ impl RawVulkanEngine {
                 get_props(pd, &mut props);
                 get_feats(pd, &mut feats);
             }
-            let is_hw_gpu = props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
-                || props.device_type == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+            let is_hw_gpu =
+                is_accepted_gpu_device_type(props.device_type, cfg!(target_os = "macos"));
             if is_hw_gpu {
                 if feats.flags[FEATURE_SHADER_INT64_INDEX] == 0 {
                     saw_hw_gpu_without_int64 = true;
@@ -1886,6 +2033,7 @@ impl RawVulkanEngine {
         };
         let has_exec = has(c"VK_KHR_pipeline_executable_properties");
         let has_subgroup = has(c"VK_EXT_subgroup_size_control");
+        let has_portability_subset = has(c"VK_KHR_portability_subset");
         let mut executable = FeatureChain {
             s_type: 1000269000,
             p_next: null_mut(),
@@ -1921,32 +2069,47 @@ impl RawVulkanEngine {
         unsafe {
             get_features2(phys_dev, &mut features2);
         }
+        let mut core_sg = CoreSubgroupProperties {
+            s_type: VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+            p_next: null_mut(),
+            subgroup_size: 0,
+            supported_stages: 0,
+            supported_operations: 0,
+            quad_operations_in_all_stages: 0,
+        };
         let mut sg_props = SubgroupProperties {
             s_type: 1000225000,
-            p_next: null_mut(),
+            p_next: (&mut core_sg as *mut CoreSubgroupProperties).cast(),
             min: 0,
             max: 0,
             max_compute_subgroups: 0,
             required_stages: 0,
         };
-        if has_subgroup {
-            let get_properties2: unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2) = unsafe {
-                load_inst_fn(
-                    gipa,
-                    instance,
-                    c"vkGetPhysicalDeviceProperties2",
-                    "vkGetPhysicalDeviceProperties2",
-                )?
-            };
+        let get_properties2: unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2) = unsafe {
+            load_inst_fn(
+                gipa,
+                instance,
+                c"vkGetPhysicalDeviceProperties2",
+                "vkGetPhysicalDeviceProperties2",
+            )?
+        };
+        {
             let mut p2 = Properties2 {
                 s_type: 1000059001,
-                p_next: (&mut sg_props as *mut SubgroupProperties).cast(),
+                p_next: if has_subgroup {
+                    (&mut sg_props as *mut SubgroupProperties).cast()
+                } else {
+                    (&mut core_sg as *mut CoreSubgroupProperties).cast()
+                },
                 properties: unsafe { core::mem::zeroed() },
             };
             unsafe {
                 get_properties2(phys_dev, &mut p2);
             }
         }
+        let core_subgroup_size = (core_sg.subgroup_size > 0
+            && (core_sg.supported_stages & VK_SHADER_STAGE_COMPUTE_BIT) != 0)
+            .then_some(core_sg.subgroup_size);
         let wave32 = has_subgroup
             && subgroup.enabled != 0
             && sg_props.min <= 32
@@ -1961,6 +2124,9 @@ impl RawVulkanEngine {
         executable.p_next = null_mut();
         let mut enabled_extensions = std::vec::Vec::new();
         let mut device_chain: *mut c_void = null_mut();
+        if has_portability_subset {
+            enabled_extensions.push(c"VK_KHR_portability_subset".as_ptr());
+        }
         if capture {
             enabled_extensions.push(c"VK_KHR_pipeline_executable_properties".as_ptr());
             device_chain = (&mut executable as *mut FeatureChain).cast();
@@ -2108,6 +2274,8 @@ impl RawVulkanEngine {
             queue,
             mem_props,
             wave32,
+            core_subgroup_size,
+            require_exec_telemetry,
             executable_fns: None,
             telemetry: [crate::vulkan::PipelineTelemetry::default(); KernelSlot::COUNT],
             prover_telemetry: [crate::vulkan::PipelineTelemetry::default();
@@ -2142,6 +2310,7 @@ impl RawVulkanEngine {
             ds_1buf_a: 0,
             ds_2buf_ab: 0,
             ds_2buf_ba: 0,
+            ds_2buf_aa: 0,
             ds_3buf_abc: 0,
             cmd_pool: 0,
             cmd_buf: null_mut(),
@@ -2449,6 +2618,25 @@ impl RawVulkanEngine {
         slot: KernelSlot,
         pipeline: VkPipeline,
     ) -> Result<(), VulkanError> {
+        if !self.require_exec_telemetry && self.executable_fns.is_none() {
+            let sg = if self.wave32 {
+                32
+            } else {
+                self.core_subgroup_size.unwrap_or(0)
+            };
+            if sg != 32 {
+                return Err(VulkanError::UnexpectedSubgroupSize {
+                    slot,
+                    required: 32,
+                    reported: sg,
+                });
+            }
+            self.telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
+                subgroup_size: Some(32),
+                ..Default::default()
+            };
+            return Ok(());
+        }
         let (subgroup_size, tel) = unsafe { self.query_pipeline_telemetry(pipeline)? };
         if !self.wave32 || subgroup_size != 32 {
             return Err(VulkanError::UnexpectedSubgroupSize {
@@ -2466,6 +2654,25 @@ impl RawVulkanEngine {
         slot: ProverKernelSlot,
         pipeline: VkPipeline,
     ) -> Result<(), VulkanError> {
+        if !self.require_exec_telemetry && self.executable_fns.is_none() {
+            let sg = if self.wave32 {
+                32
+            } else {
+                self.core_subgroup_size.unwrap_or(0)
+            };
+            if sg != 32 {
+                return Err(VulkanError::UnexpectedProverSubgroupSize {
+                    slot,
+                    required: 32,
+                    reported: sg,
+                });
+            }
+            self.prover_telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
+                subgroup_size: Some(32),
+                ..Default::default()
+            };
+            return Ok(());
+        }
         let (subgroup_size, tel) = unsafe { self.query_pipeline_telemetry(pipeline)? };
         if !self.wave32 || subgroup_size != 32 {
             return Err(VulkanError::UnexpectedProverSubgroupSize {
@@ -2667,16 +2874,16 @@ impl RawVulkanEngine {
             }
         }
 
-        // Descriptor pool: 4 sets (1 + 2 + 2 + 3 = 8 storage buffer descriptors).
+        // Descriptor pool: 5 sets (1 + 2 + 2 + 2 + 3 = 10 storage buffer descriptors).
         let pool_size = VkDescriptorPoolSize {
             ty: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            descriptor_count: 8,
+            descriptor_count: 10,
         };
         let dp_info = VkDescriptorPoolCreateInfo {
             s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             p_next: null(),
             flags: 0,
-            max_sets: 4,
+            max_sets: 5,
             pool_size_count: 1,
             p_pool_sizes: &pool_size,
         };
@@ -2684,13 +2891,19 @@ impl RawVulkanEngine {
             (self.fns.create_descriptor_pool)(self.device, &dp_info, null(), &mut self.desc_pool)
         })?;
 
-        let set_layouts = [self.dsl_1buf, self.dsl_2buf, self.dsl_2buf, self.dsl_3buf];
-        let mut sets = [0u64; 4];
+        let set_layouts = [
+            self.dsl_1buf,
+            self.dsl_2buf,
+            self.dsl_2buf,
+            self.dsl_2buf,
+            self.dsl_3buf,
+        ];
+        let mut sets = [0u64; 5];
         let dsa_info = VkDescriptorSetAllocateInfo {
             s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             p_next: null(),
             descriptor_pool: self.desc_pool,
-            descriptor_set_count: 4,
+            descriptor_set_count: 5,
             p_set_layouts: set_layouts.as_ptr(),
         };
         check_vk("vkAllocateDescriptorSets", unsafe {
@@ -2699,7 +2912,8 @@ impl RawVulkanEngine {
         self.ds_1buf_a = sets[0];
         self.ds_2buf_ab = sets[1];
         self.ds_2buf_ba = sets[2];
-        self.ds_3buf_abc = sets[3];
+        self.ds_2buf_aa = sets[3];
+        self.ds_3buf_abc = sets[4];
 
         let cp_info = VkCommandPoolCreateInfo {
             s_type: VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -3229,6 +3443,8 @@ impl RawVulkanEngine {
             mk_write(self.ds_2buf_ab, 1, &info_b),
             mk_write(self.ds_2buf_ba, 0, &info_b),
             mk_write(self.ds_2buf_ba, 1, &info_a),
+            mk_write(self.ds_2buf_aa, 0, &info_a),
+            mk_write(self.ds_2buf_aa, 1, &info_a),
             mk_write(self.ds_3buf_abc, 0, &info_a),
             mk_write(self.ds_3buf_abc, 1, &info_b),
             mk_write(self.ds_3buf_abc, 2, &info_c),
@@ -3355,12 +3571,20 @@ impl RawVulkanEngine {
                     self.prover.vram_work_b.capacity,
                 ),
                 (
-                    self.prover.vram_cw_stage.buffer,
-                    self.prover.vram_cw_stage.capacity,
+                    self.prover.vram_cw_stage[0].buffer,
+                    self.prover.vram_cw_stage[0].capacity,
                 ),
                 (
-                    self.prover.vram_tree_stage.buffer,
-                    self.prover.vram_tree_stage.capacity,
+                    self.prover.vram_cw_stage[1].buffer,
+                    self.prover.vram_cw_stage[1].capacity,
+                ),
+                (
+                    self.prover.vram_tree_stage[0].buffer,
+                    self.prover.vram_tree_stage[0].capacity,
+                ),
+                (
+                    self.prover.vram_tree_stage[1].buffer,
+                    self.prover.vram_tree_stage[1].capacity,
                 ),
                 (
                     self.prover.vram_aux_in.buffer,
@@ -3404,8 +3628,10 @@ impl RawVulkanEngine {
                 span(&self.prover.vram_tree0),
                 span(&self.prover.vram_work_a),
                 span(&self.prover.vram_work_b),
-                span(&self.prover.vram_cw_stage),
-                span(&self.prover.vram_tree_stage),
+                span(&self.prover.vram_cw_stage[0]),
+                span(&self.prover.vram_cw_stage[1]),
+                span(&self.prover.vram_tree_stage[0]),
+                span(&self.prover.vram_tree_stage[1]),
                 span(&self.prover.vram_aux_in),
                 span(&self.prover.vram_aux_b),
                 span(&self.prover.vram_partials),
@@ -3422,8 +3648,10 @@ impl RawVulkanEngine {
             self.prover.vram_tree0.used = 0;
             self.prover.vram_work_a.used = 0;
             self.prover.vram_work_b.used = 0;
-            self.prover.vram_cw_stage.used = 0;
-            self.prover.vram_tree_stage.used = 0;
+            self.prover.vram_cw_stage[0].used = 0;
+            self.prover.vram_cw_stage[1].used = 0;
+            self.prover.vram_tree_stage[0].used = 0;
+            self.prover.vram_tree_stage[1].used = 0;
             self.prover.vram_aux_in.used = 0;
             self.prover.vram_aux_b.used = 0;
             self.prover.vram_partials.used = 0;
@@ -4336,13 +4564,20 @@ impl RawVulkanEngine {
         Ok(())
     }
 
-    unsafe fn dispatch_merkle_layer_cmd(
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn dispatch_merkle_layer_cmd_ext(
         &self,
         pl: VkPipelineLayout,
         ds: VkDescriptorSet,
         pk_seed: &[u64; 4],
         layer: u32,
+        level: u32,
+        domain_tag: u64,
+        tree_idx: u64,
+        mode: u32,
         start_parent_idx: u64,
+        in_offset_u64: u64,
+        out_offset_u64: u64,
         num_parents: u32,
     ) {
         unsafe {
@@ -4368,10 +4603,14 @@ impl RawVulkanEngine {
                 s3: pk_seed[3],
                 start_parent_idx,
                 num_parents: u64::from(num_parents),
-                in_offset_u64: 0,
-                out_offset_u64: 0,
+                in_offset_u64,
+                out_offset_u64,
+                domain_tag,
+                tree_idx,
                 layer,
                 base_parent: wg_done * 64,
+                level,
+                mode,
             };
             unsafe {
                 (self.fns.cmd_push_constants)(
@@ -4385,6 +4624,33 @@ impl RawVulkanEngine {
                 (self.fns.cmd_dispatch)(self.cmd_buf, chunk, 1, 1);
             }
             wg_done += chunk;
+        }
+    }
+
+    unsafe fn dispatch_merkle_layer_cmd(
+        &self,
+        pl: VkPipelineLayout,
+        ds: VkDescriptorSet,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        start_parent_idx: u64,
+        num_parents: u32,
+    ) {
+        unsafe {
+            self.dispatch_merkle_layer_cmd_ext(
+                pl,
+                ds,
+                pk_seed,
+                layer,
+                0,
+                0,
+                0,
+                0,
+                start_parent_idx,
+                0,
+                0,
+                num_parents,
+            );
         }
     }
 
@@ -4639,6 +4905,473 @@ impl RawVulkanEngine {
             let mut root = [0u64; 4];
             self.read_staging_u64s(0, &mut root);
             Ok(root)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_merkle_layer_mode(
+        &mut self,
+        children: &[[u64; 4]],
+        s_words: &[u64; 4],
+        layer: u32,
+        level: u32,
+        domain_tag: u64,
+        tree_idx: u64,
+        mode: u32,
+        start_parent_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        self.run_job(|engine| {
+            engine.job_merkle_layer_mode(
+                children,
+                s_words,
+                layer,
+                level,
+                domain_tag,
+                tree_idx,
+                mode,
+                start_parent_idx,
+                out_parents,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn job_merkle_layer_mode(
+        &mut self,
+        children: &[[u64; 4]],
+        s_words: &[u64; 4],
+        layer: u32,
+        level: u32,
+        domain_tag: u64,
+        tree_idx: u64,
+        mode: u32,
+        start_parent_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        let num_parents = out_parents.len();
+        if num_parents.checked_mul(2) != Some(children.len()) {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        if mode == 1 && (layer > 0xFFFE || level > 0xFFFF) {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let (_, in_bytes) = self.kernel_extent(children.len(), 4 * WORD_BYTES)?;
+        let (parents32, out_bytes) = self.kernel_extent(num_parents, 4 * WORD_BYTES)?;
+        let max_parent_idx = if num_parents == 0 {
+            start_parent_idx
+        } else {
+            start_parent_idx
+                .checked_add((num_parents - 1) as u64)
+                .ok_or(VulkanError::Accel(crate::AccelError::LengthOverflow))?
+        };
+        if max_parent_idx > u32::MAX as u64 {
+            return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
+        }
+        if num_parents == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            self.reserve_job_staging(in_bytes)?;
+            self.ensure_vram_buffers(in_bytes, out_bytes, 0)?;
+            self.kernel_buffers_fit(in_bytes, out_bytes, 0)?;
+
+            let flat_in =
+                core::slice::from_raw_parts(children.as_ptr().cast::<u64>(), children.len() * 4);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: in_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            self.dispatch_merkle_layer_cmd_ext(
+                kp.pipeline_layout,
+                self.ds_2buf_ab,
+                s_words,
+                layer,
+                level,
+                domain_tag,
+                tree_idx,
+                mode,
+                start_parent_idx,
+                0,
+                0,
+                parents32,
+            );
+
+            let copy_out = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: out_bytes,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_b.buffer,
+                self.staging.buffer,
+                1,
+                &copy_out,
+            );
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, in_bytes),
+                (self.vram_b.buffer, out_bytes),
+            ]);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let flat_out = core::slice::from_raw_parts_mut(
+                out_parents.as_mut_ptr().cast::<u64>(),
+                num_parents * 4,
+            );
+            self.read_staging_u64s(0, flat_out);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_merkle_full_tree_2block(
+        &mut self,
+        leaves: &[[u64; 4]],
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        tree_idx: u64,
+        base_level: u32,
+    ) -> Result<[u64; 4], VulkanError> {
+        self.run_job(|engine| {
+            engine.job_merkle_full_tree_2block(
+                leaves, domain_tag, pk_seed, layer, tree_idx, base_level,
+            )
+        })
+    }
+
+    fn job_merkle_full_tree_2block(
+        &mut self,
+        leaves: &[[u64; 4]],
+        domain_tag: u64,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        tree_idx: u64,
+        base_level: u32,
+    ) -> Result<[u64; 4], VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        let num_leaves = leaves.len();
+        if !num_leaves.is_power_of_two() || layer > 0xFFFE {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let (leaves32, leaf_bytes) = self.kernel_extent(num_leaves, 4 * WORD_BYTES)?;
+        if num_leaves == 1 {
+            if base_level > 0xFFFF {
+                return Err(length_overflow());
+            }
+            return Ok([
+                gl_reduce_u64(leaves[0][0]),
+                gl_reduce_u64(leaves[0][1]),
+                gl_reduce_u64(leaves[0][2]),
+                gl_reduce_u64(leaves[0][3]),
+            ]);
+        }
+        let height = num_leaves.trailing_zeros();
+        let Some(max_lvl) = base_level.checked_add(height - 1) else {
+            return Err(length_overflow());
+        };
+        if max_lvl > 0xFFFF {
+            return Err(length_overflow());
+        }
+        let half_bytes = leaf_bytes / 2;
+
+        unsafe {
+            self.reserve_job_staging(leaf_bytes)?;
+            self.ensure_vram_buffers(leaf_bytes, half_bytes, 0)?;
+            self.kernel_buffers_fit(leaf_bytes, half_bytes, 0)?;
+
+            let flat_in =
+                core::slice::from_raw_parts(leaves.as_ptr().cast::<u64>(), num_leaves * 4);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: leaf_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+
+            for lvl in 0..height {
+                if lvl > 0 {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                }
+                let ds = if lvl % 2 == 0 {
+                    self.ds_2buf_ab
+                } else {
+                    self.ds_2buf_ba
+                };
+                let cur_parents = leaves32 >> (lvl + 1);
+                self.dispatch_merkle_layer_cmd_ext(
+                    kp.pipeline_layout,
+                    ds,
+                    pk_seed,
+                    layer,
+                    base_level + lvl,
+                    domain_tag,
+                    tree_idx,
+                    1,
+                    0,
+                    0,
+                    0,
+                    cur_parents,
+                );
+            }
+
+            let root_buf = if (height - 1).is_multiple_of(2) {
+                self.vram_b.buffer
+            } else {
+                self.vram_a.buffer
+            };
+            let copy_root = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: 32,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, root_buf, self.staging.buffer, 1, &copy_root);
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, leaf_bytes),
+                (self.vram_b.buffer, half_bytes),
+            ]);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let mut root = [0u64; 4];
+            self.read_staging_u64s(0, &mut root);
+            Ok(root)
+        }
+    }
+
+    /// Build a complete 1-indexed binary heap Canopy Merkle tree (`out_nodes.len() == 2 * leaves.len()`)
+    /// in `vram_a` within ONE `VkCommandBuffer` submission (`mode == 2`: Poseidon2 WHIR Canopy Jive;
+    /// `mode == 1`: 2-block Poseidon2 node sponge).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_canopy_tree_poseidon2(
+        &mut self,
+        leaves: &[[u64; 4]],
+        s_words: &[u64; 4],
+        layer: u32,
+        domain_tag: u64,
+        tree_idx: u64,
+        mode: u32,
+        out_nodes: &mut [[u64; 4]],
+    ) -> Result<[u64; 4], VulkanError> {
+        self.run_job(|engine| {
+            engine.job_canopy_tree_poseidon2(
+                leaves, s_words, layer, domain_tag, tree_idx, mode, out_nodes,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn job_canopy_tree_poseidon2(
+        &mut self,
+        leaves: &[[u64; 4]],
+        s_words: &[u64; 4],
+        layer: u32,
+        domain_tag: u64,
+        tree_idx: u64,
+        mode: u32,
+        out_nodes: &mut [[u64; 4]],
+    ) -> Result<[u64; 4], VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        let num_leaves = leaves.len();
+        if !num_leaves.is_power_of_two() || num_leaves == 0 {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        let total_nodes = num_leaves
+            .checked_mul(2)
+            .ok_or(crate::AccelError::LengthOverflow)?;
+        if out_nodes.len() != total_nodes {
+            return Err(crate::AccelError::LengthMismatch {
+                what: "Canopy tree nodes",
+                expected: total_nodes,
+                actual: out_nodes.len(),
+            }
+            .into());
+        }
+        let log_leaves = num_leaves.trailing_zeros();
+        if mode == 1 && (layer > 0xFFFE || log_leaves > 0x10000) {
+            return Err(length_overflow());
+        }
+        let (_, total_bytes) = self.kernel_extent(total_nodes, 4 * WORD_BYTES)?;
+        let (_, leaf_bytes) = self.kernel_extent(num_leaves, 4 * WORD_BYTES)?;
+        out_nodes[0] = [0u64; 4];
+        if num_leaves == 1 {
+            let top = [
+                gl_reduce_u64(leaves[0][0]),
+                gl_reduce_u64(leaves[0][1]),
+                gl_reduce_u64(leaves[0][2]),
+                gl_reduce_u64(leaves[0][3]),
+            ];
+            out_nodes[1] = top;
+            return Ok(top);
+        }
+
+        unsafe {
+            self.reserve_job_staging(total_bytes)?;
+            self.ensure_vram_buffers(total_bytes, 0, 0)?;
+            self.kernel_buffers_fit(total_bytes, 0, 0)?;
+
+            let flat_leaves =
+                core::slice::from_raw_parts(leaves.as_ptr().cast::<u64>(), num_leaves * 4);
+            self.write_staging_u64s(0, flat_leaves);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: leaf_bytes,
+                size: leaf_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+
+            for depth in (0..log_leaves).rev() {
+                if depth + 1 < log_leaves {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                }
+                let half = 1u32 << depth;
+                let level = log_leaves - 1 - depth;
+                let start_idx = if mode == 2 { u64::from(half) } else { 0 };
+                self.dispatch_merkle_layer_cmd_ext(
+                    kp.pipeline_layout,
+                    self.ds_2buf_aa,
+                    s_words,
+                    layer,
+                    level,
+                    domain_tag,
+                    tree_idx,
+                    mode,
+                    start_idx,
+                    u64::from(half) * 8,
+                    u64::from(half) * 4,
+                    half,
+                );
+            }
+
+            let copy_all = VkBufferCopy {
+                src_offset: 32,
+                dst_offset: 32,
+                size: total_bytes - 32,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy_all,
+            );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, total_bytes)]);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let flat_out = core::slice::from_raw_parts_mut(
+                out_nodes[1..].as_mut_ptr().cast::<u64>(),
+                (total_nodes - 1) * 4,
+            );
+            self.read_staging_u64s(32, flat_out);
+            Ok(out_nodes[1])
         }
     }
 
@@ -4943,8 +5676,10 @@ impl RawVulkanEngine {
         req_tree0: u64,
         req_work_a: u64,
         req_work_b: u64,
-        req_cw_stage: u64,
-        req_tree_stage: u64,
+        req_cw_stage_0: u64,
+        req_cw_stage_1: u64,
+        req_tree_stage_0: u64,
+        req_tree_stage_1: u64,
         req_aux_in: u64,
         req_aux_b: u64,
         req_partials: u64,
@@ -4956,13 +5691,13 @@ impl RawVulkanEngine {
         if !self.prover.initialized {
             let pool_size = VkDescriptorPoolSize {
                 ty: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                descriptor_count: 48,
+                descriptor_count: 60,
             };
             let dp_info = VkDescriptorPoolCreateInfo {
                 s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
                 p_next: null(),
                 flags: 0,
-                max_sets: 8,
+                max_sets: 10,
                 pool_size_count: 1,
                 p_pool_sizes: &pool_size,
             };
@@ -4974,13 +5709,13 @@ impl RawVulkanEngine {
                     &mut self.prover.desc_pool,
                 )
             })?;
-            let layouts = [self.dsl_6buf; 8];
-            let mut sets = [0u64; 8];
+            let layouts = [self.dsl_6buf; 10];
+            let mut sets = [0u64; 10];
             let dsa = VkDescriptorSetAllocateInfo {
                 s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
                 p_next: null(),
                 descriptor_pool: self.prover.desc_pool,
-                descriptor_set_count: 8,
+                descriptor_set_count: 10,
                 p_set_layouts: layouts.as_ptr(),
             };
             if let Err(e) = check_vk("vkAllocateDescriptorSets(prover)", unsafe {
@@ -4994,12 +5729,12 @@ impl RawVulkanEngine {
             }
             self.prover.ds_lde_r0 = sets[0];
             self.prover.ds_gather_r0 = sets[1];
-            self.prover.ds_lde_stage = sets[2];
-            self.prover.ds_gather_stage = sets[3];
-            self.prover.ds_fold_kronecker = sets[4];
-            self.prover.ds_fold_mono = sets[5];
-            self.prover.ds_fold_witness = sets[6];
-            self.prover.ds_air = sets[7];
+            self.prover.ds_lde_stage = [sets[2], sets[3]];
+            self.prover.ds_gather_stage = [sets[4], sets[5]];
+            self.prover.ds_fold_kronecker = sets[6];
+            self.prover.ds_fold_mono = sets[7];
+            self.prover.ds_fold_witness = sets[8];
+            self.prover.ds_air = sets[9];
             self.prover.initialized = true;
             first_init = true;
         }
@@ -5017,8 +5752,12 @@ impl RawVulkanEngine {
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree0, req_tree0)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_a, req_work_a)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_work_b, req_work_b)?;
-            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage, req_cw_stage)?;
-            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage, req_tree_stage)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[0], req_cw_stage_0)?;
+            changed |= self.ensure_one_prover_buf(|p| &mut p.vram_cw_stage[1], req_cw_stage_1)?;
+            changed |=
+                self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[0], req_tree_stage_0)?;
+            changed |=
+                self.ensure_one_prover_buf(|p| &mut p.vram_tree_stage[1], req_tree_stage_1)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_in, req_aux_in)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_aux_b, req_aux_b)?;
             changed |= self.ensure_one_prover_buf(|p| &mut p.vram_partials, req_partials)?;
@@ -5032,7 +5771,7 @@ impl RawVulkanEngine {
         Ok(())
     }
 
-    /// Rewrite all eight prover descriptor sets. Updating a set that a pending command buffer
+    /// Rewrite all ten prover descriptor sets. Updating a set that a pending command buffer
     /// uses is undefined, so this refuses unless the engine is `Ready`.
     unsafe fn refresh_prover_descriptor_sets(&self) -> Result<(), VulkanError> {
         if self.exec_state != EngineExecState::Ready {
@@ -5056,13 +5795,15 @@ impl RawVulkanEngine {
         let i_tr0 = mk_info(&p.vram_tree0);
         let i_wa = mk_info(&p.vram_work_a);
         let i_wb = mk_info(&p.vram_work_b);
-        let i_cws = mk_info(&p.vram_cw_stage);
-        let i_trs = mk_info(&p.vram_tree_stage);
+        let i_cws0 = mk_info(&p.vram_cw_stage[0]);
+        let i_cws1 = mk_info(&p.vram_cw_stage[1]);
+        let i_trs0 = mk_info(&p.vram_tree_stage[0]);
+        let i_trs1 = mk_info(&p.vram_tree_stage[1]);
         let i_ain = mk_info(&p.vram_aux_in);
         let i_ab = mk_info(&p.vram_aux_b);
         let i_part = mk_info(&p.vram_partials);
 
-        let table: [(VkDescriptorSet, [*const VkDescriptorBufferInfo; 6]); 8] = [
+        let table: [(VkDescriptorSet, [*const VkDescriptorBufferInfo; 6]); 10] = [
             (
                 p.ds_lde_r0,
                 [&i_mono, &i_wa, &i_cw0, &i_tw, &i_tr0, &i_part],
@@ -5072,12 +5813,20 @@ impl RawVulkanEngine {
                 [&i_mono, &i_wa, &i_cw0, &i_ain, &i_tr0, &i_part],
             ),
             (
-                p.ds_lde_stage,
-                [&i_wb, &i_cws, &i_wa, &i_tw, &i_trs, &i_part],
+                p.ds_lde_stage[0],
+                [&i_wb, &i_cws0, &i_wa, &i_tw, &i_trs0, &i_part],
             ),
             (
-                p.ds_gather_stage,
-                [&i_wb, &i_cws, &i_wa, &i_ain, &i_trs, &i_part],
+                p.ds_lde_stage[1],
+                [&i_wb, &i_cws1, &i_wa, &i_tw, &i_trs1, &i_part],
+            ),
+            (
+                p.ds_gather_stage[0],
+                [&i_wb, &i_cws0, &i_wa, &i_ain, &i_trs0, &i_part],
+            ),
+            (
+                p.ds_gather_stage[1],
+                [&i_wb, &i_cws1, &i_wa, &i_ain, &i_trs1, &i_part],
             ),
             (
                 p.ds_fold_kronecker,
@@ -5105,7 +5854,7 @@ impl RawVulkanEngine {
             p_image_info: null(),
             p_buffer_info: null(),
             p_texel_buffer_view: null(),
-        }; 48];
+        }; 60];
         let mut cursor = 0usize;
         for (ds, infos) in table {
             for (binding, info_ptr) in infos.into_iter().enumerate() {
@@ -5116,7 +5865,7 @@ impl RawVulkanEngine {
             }
         }
         unsafe {
-            (self.fns.update_descriptor_sets)(self.device, 48, writes.as_ptr(), 0, null());
+            (self.fns.update_descriptor_sets)(self.device, 60, writes.as_ptr(), 0, null());
         }
         Ok(())
     }
@@ -5300,18 +6049,27 @@ impl RawVulkanEngine {
         } else {
             tpw
         };
-        let work_a_ext4 = ((c + 2) * 2).max(batch_sc_ext4);
+        // Ping-pong WHIR folding needs `(c + 2)` elements for the Stage-0 polynomial/kernel and
+        // `((c / 2) + 2)` elements for the folded half (fits `<= 3.00 GiB < 4 GiB` at `nv = 26`).
+        let ping_pong_fold_ext4 = cadd(cadd(c, 2)?, cadd(c / 2, 2)?)?;
+        let work_a_ext4 = ping_pong_fold_ext4.max(batch_sc_ext4);
         let req_work_a = cmul(work_a_ext4, EXT4_BYTES)?.max(cmul(4 * c, WORD_BYTES)?);
         let max_shard_half = (extra / 256 / 2).max(1);
-        let work_b_ext4 = ((c + 2) * 2)
+        let work_b_ext4 = ping_pong_fold_ext4
             .max(batch_sc_ext4)
             .max(cmul(cmul(8, max_shard_half)?, 12)?);
         let req_work_b = cmul(work_b_ext4, EXT4_BYTES)?;
 
-        let stg_cw_stride = to_u32(max_stage1_domain_ext4.max(1024))?;
-        let stg_tr_stride = to_u32(cmul(2, to_u64(max_stage1_groups.max(512)))?)?;
-        let req_cw_stage = cmul(cmul(2, u64::from(stg_cw_stride))?, EXT4_BYTES)?;
-        let req_tree_stage = cmul(cmul(2, u64::from(stg_tr_stride))?, EXT4_BYTES)?;
+        // Odd stages (`stage_idx = 1, 3, ...`, slot 1) fit in `max_stage1_*`; even stages
+        // (`stage_idx = 2, 4, ...`, slot 0) fold at least one variable beyond Stage 1 (`<= / 2`).
+        let stg_cw1 = to_u64(max_stage1_domain_ext4.max(1024));
+        let stg_cw0 = (to_u64(max_stage1_domain_ext4) / 2).max(1024);
+        let stg_tr1 = cmul(2, to_u64(max_stage1_groups.max(512)))?;
+        let stg_tr0 = cmul(2, (to_u64(max_stage1_groups) / 2).max(512))?;
+        let req_cw_stage_0 = cmul(stg_cw0, EXT4_BYTES)?;
+        let req_cw_stage_1 = cmul(stg_cw1, EXT4_BYTES)?;
+        let req_tree_stage_0 = cmul(stg_tr0, EXT4_BYTES)?;
+        let req_tree_stage_1 = cmul(stg_tr1, EXT4_BYTES)?;
         let req_aux_in = 8 * 1024 * 1024;
         let req_aux_b = cmul(cmul(6, (extra / 256).max(1024))?, EXT4_BYTES)?.max(8 * 1024 * 1024);
         let req_partials = 4 * 1024 * 1024;
@@ -5324,15 +6082,15 @@ impl RawVulkanEngine {
                 req_tree0,
                 req_work_a,
                 req_work_b,
-                req_cw_stage,
-                req_tree_stage,
+                req_cw_stage_0,
+                req_cw_stage_1,
+                req_tree_stage_0,
+                req_tree_stage_1,
                 req_aux_in,
                 req_aux_b,
                 req_partials,
             )?;
         }
-        self.prover.stage_cw_stride_ext4 = stg_cw_stride;
-        self.prover.stage_tree_stride_ext4 = stg_tr_stride;
         for (i, slot) in self.prover.salt_seed_words.iter_mut().enumerate() {
             let mut b = [0u8; 8];
             b.copy_from_slice(&salt_seed[i * 8..(i + 1) * 8]);
@@ -5946,15 +6704,44 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Extends a 3-byte (`768`-entry) geometric Kronecker table `[xi * z^k0, z^(256*k1), z^(65536*k2)]`
+    /// to a 4-byte (`1024`-entry) table `[..., z^(16777216*k3)]` in staging at `byte_offset`.
+    /// Entry `768` (`k3 = 0`) is always `[1, 0, 0, 0]`, so arbitrary non-geometric test tables
+    /// evaluated at `gid < 2^24` (`k3 = 0`) also remain bit-identical.
+    unsafe fn write_geometric_kronecker_as_1024(&self, byte_offset: usize, src: &[[u64; 4]]) {
+        debug_assert!(src.len() == 768 || src.len() == 1024);
+        unsafe {
+            if src.len() == 1024 {
+                let flat = core::slice::from_raw_parts(src.as_ptr().cast::<u64>(), 1024 * 4);
+                self.write_staging_u64s(byte_offset, flat);
+            } else {
+                let flat_lo = core::slice::from_raw_parts(src.as_ptr().cast::<u64>(), 768 * 4);
+                self.write_staging_u64s(byte_offset, flat_lo);
+                let z_23 = src[512 + 128];
+                let z_24 = Self::fp4_mul_arr(z_23, z_23);
+                let mut byte3 = [[0u64; 4]; 256];
+                let mut cur = [1u64, 0, 0, 0];
+                for slot in &mut byte3 {
+                    *slot = cur;
+                    cur = Self::fp4_mul_arr(cur, z_24);
+                }
+                let flat_hi = core::slice::from_raw_parts(byte3.as_ptr().cast::<u64>(), 256 * 4);
+                self.write_staging_u64s(byte_offset + 768 * 32, flat_hi);
+            }
+        }
+    }
+
     pub(crate) fn exec_prover_whir_batch_sumcheck_init(
         &mut self,
-        eq_kronecker_768: &[[u64; 4]],
+        eq_kronecker: &[[u64; 4]],
         lambda_pows: &[[u64; 4]],
         num_vars: usize,
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
             let num_polys = lambda_pows.len();
-            if num_polys == 0 || num_polys.checked_mul(768) != Some(eq_kronecker_768.len()) {
+            let is_768 = num_polys.checked_mul(768) == Some(eq_kronecker.len());
+            let is_1024 = num_polys.checked_mul(1024) == Some(eq_kronecker.len());
+            if num_polys == 0 || (!is_768 && !is_1024) || (is_768 && num_vars > 24) {
                 return Err(crate::AccelError::LengthOverflow.into());
             }
             let c_len = pow2_len(num_vars, 26)?;
@@ -5978,7 +6765,8 @@ impl RawVulkanEngine {
             // One workgroup row per polynomial table.
             engine.check_wg_count(np)?;
             let need_work = cmul(cadd(cmul(np, c)?, cmul(np, c / 2)?)?, EXT4_BYTES)?;
-            let eq_bytes = cmul(to_u64(eq_kronecker_768.len()), EXT4_BYTES)?;
+            let eq_entries_1024 = cmul(np, 1024)?;
+            let eq_bytes = cmul(eq_entries_1024, EXT4_BYTES)?;
             let lam_bytes = cmul(np, EXT4_BYTES)?;
             let stg_bytes = cadd(eq_bytes, lam_bytes)?;
             // Round 0 reads the committed witness as `num_polys` tables of `c_len` words.
@@ -5993,15 +6781,30 @@ impl RawVulkanEngine {
                 engine.refresh_prover_descriptor_sets()?;
                 engine.reserve_job_staging(stg_bytes)?;
 
-                let eq_flat = core::slice::from_raw_parts(
-                    eq_kronecker_768.as_ptr().cast::<u64>(),
-                    eq_kronecker_768.len() * 4,
-                );
+                if is_1024 {
+                    let eq_flat = core::slice::from_raw_parts(
+                        eq_kronecker.as_ptr().cast::<u64>(),
+                        eq_kronecker.len() * 4,
+                    );
+                    engine.write_staging_u64s(0, eq_flat);
+                } else {
+                    let one_768 = [1u64, 0, 0, 0];
+                    let zero_pad = [0u64; 255 * 4];
+                    for p in 0..num_polys {
+                        let dst_off = p * 1024 * 32;
+                        let flat_lo = core::slice::from_raw_parts(
+                            eq_kronecker[p * 768..].as_ptr().cast::<u64>(),
+                            768 * 4,
+                        );
+                        engine.write_staging_u64s(dst_off, flat_lo);
+                        engine.write_staging_u64s(dst_off + 768 * 32, &one_768);
+                        engine.write_staging_u64s(dst_off + 769 * 32, &zero_pad);
+                    }
+                }
                 let lam_flat = core::slice::from_raw_parts(
                     lambda_pows.as_ptr().cast::<u64>(),
                     lambda_pows.len() * 4,
                 );
-                engine.write_staging_u64s(0, eq_flat);
                 engine.write_staging_u64s(eq_bytes as usize, lam_flat);
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
@@ -6385,18 +7188,21 @@ impl RawVulkanEngine {
 
     pub(crate) fn exec_prover_whir_expand_monomial_and_dot(
         &mut self,
-        mono_kronecker_768: &[[u64; 4]; 768],
+        mono_kronecker: &[[u64; 4]],
         num_vars: usize,
         dot_k_offset: u32,
         out_dots: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
+            if mono_kronecker.len() != 768 && mono_kronecker.len() != 1024 {
+                return Err(crate::AccelError::LengthOverflow.into());
+            }
             let core_len = pow2_len(num_vars, 26)?;
             engine.prover_session()?;
             engine.prover.air = None;
             let k_len = core_len + 2;
             let num_dots = out_dots.len();
-            let kron_bytes = 768u64 * 32;
+            let kron_bytes = 1024u64 * 32;
             let wg_k = to_u32(k_len.div_ceil(256))?;
             let wg_dot = to_u32(core_len.div_ceil(256))?;
             let nd = to_u64(num_dots);
@@ -6405,7 +7211,7 @@ impl RawVulkanEngine {
                 engine.check_wg_count(nd)?;
             }
             let part_bytes = cmul(cmul(nd, u64::from(wg_dot))?, EXT4_BYTES)?.max(32);
-            // Mode 0 reads the 768-entry table from `vram_aux_in` and writes `k_len` kernel
+            // Mode 0 reads the 1024-entry table from `vram_aux_in` and writes `k_len` kernel
             // entries at the start of `vram_work_a`.
             engine
                 .prover
@@ -6431,9 +7237,7 @@ impl RawVulkanEngine {
                     engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(kron_bytes.max(part_bytes))?;
-                let flat_in =
-                    core::slice::from_raw_parts(mono_kronecker_768.as_ptr().cast::<u64>(), 768 * 4);
-                engine.write_staging_u64s(0, flat_in);
+                engine.write_geometric_kronecker_as_1024(0, mono_kronecker);
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -6595,23 +7399,25 @@ impl RawVulkanEngine {
         num_vars: usize,
         is_single: bool,
         weights: &[[[u64; 4]; 2]],
-        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+        z_ood_kronecker: &[[u64; 4]],
     ) -> Result<[[u64; 4]; 2], VulkanError> {
         self.run_prover_job(|engine| {
+            let stride = match z_ood_kronecker.len() {
+                1536 => 768usize,
+                2048 => 1024usize,
+                _ => return Err(crate::AccelError::LengthOverflow.into()),
+            };
             let core_len = pow2_len(num_vars, 26)?;
             engine.prover_session()?;
             engine.prover.air = None;
             let coeff_len = core_len + 2;
-            let gpu_eval_len = coeff_len.min(1usize << 24);
-            let has_top_overflow = coeff_len > (1usize << 24) && !is_single;
             let num_polys = weights.len();
             to_u32(num_polys)?;
             let w_bytes = cmul(cmul(2, to_u64(num_polys.max(1)))?, EXT4_BYTES)?;
-            let z_bytes = 1536u64 * 32;
+            let z_bytes = 2048u64 * 32;
             let wg_build = to_u32(coeff_len.div_ceil(256))?;
-            let wg_c = to_u32(gpu_eval_len.div_ceil(256))?;
+            let wg_c = to_u32(coeff_len.div_ceil(256))?;
             let part_bytes = cmul(2 * u64::from(wg_c), EXT4_BYTES)?;
-            let read_bytes = part_bytes + if has_top_overflow { 32 } else { 0 };
             // Mode 2 reads `p * core_len + gid` words of `vram_mono` (one polynomial when
             // `is_single`) and writes `core_len + 2` coefficients at the start of `vram_work_b`.
             let mono_polys = if is_single { 1 } else { to_u64(num_polys) };
@@ -6631,7 +7437,7 @@ impl RawVulkanEngine {
                 if engine.ensure_one_prover_buf(|p| &mut p.vram_partials, part_bytes)? {
                     engine.refresh_prover_descriptor_sets()?;
                 }
-                engine.reserve_job_staging((w_bytes + z_bytes).max(read_bytes))?;
+                engine.reserve_job_staging((w_bytes + z_bytes).max(part_bytes))?;
                 if !is_single && !weights.is_empty() {
                     let flat_w = core::slice::from_raw_parts(
                         weights.as_ptr().cast::<u64>(),
@@ -6639,11 +7445,14 @@ impl RawVulkanEngine {
                     );
                     engine.write_staging_u64s(0, flat_w);
                 }
-                let flat_z = core::slice::from_raw_parts(
-                    z_ood_kronecker_2x768.as_ptr().cast::<u64>(),
-                    1536 * 4,
+                engine.write_geometric_kronecker_as_1024(
+                    w_bytes as usize,
+                    &z_ood_kronecker[0..stride],
                 );
-                engine.write_staging_u64s(w_bytes as usize, flat_z);
+                engine.write_geometric_kronecker_as_1024(
+                    (w_bytes as usize) + 1024 * 32,
+                    &z_ood_kronecker[stride..2 * stride],
+                );
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -6744,7 +7553,7 @@ impl RawVulkanEngine {
                         c1: [0; 4],
                         c2: [0; 4],
                         mode: 0,
-                        len: gpu_eval_len as u32,
+                        len: coeff_len as u32,
                         aux0: 2,
                         aux1: 2,
                         aux2: 0,
@@ -6782,23 +7591,6 @@ impl RawVulkanEngine {
                     1,
                     &co,
                 );
-                if has_top_overflow {
-                    let ctop = checked_copy(
-                        "vram_work_b (top opening coefficient)",
-                        &engine.prover.vram_work_b,
-                        cmul(to_u64(core_len), EXT4_BYTES)?,
-                        engine.staging.capacity,
-                        part_bytes,
-                        32,
-                    )?;
-                    (engine.fns.cmd_copy_buffer)(
-                        engine.cmd_buf,
-                        engine.prover.vram_work_b.buffer,
-                        engine.staging.buffer,
-                        1,
-                        &ctop,
-                    );
-                }
                 engine.cmd_barrier(
                     VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK_PIPELINE_STAGE_HOST_BIT,
@@ -6826,15 +7618,6 @@ impl RawVulkanEngine {
                     done += chunk as u32;
                     base += 2 * chunk;
                 }
-                if has_top_overflow {
-                    let mut c_top = [0u64; 4];
-                    engine.read_staging_u64s(part_bytes as usize, &mut c_top);
-                    for (t, dst) in evals.iter_mut().enumerate() {
-                        let z_23 = z_ood_kronecker_2x768[t * 768 + 512 + 128];
-                        let z_24 = Self::fp4_mul_arr(z_23, z_23);
-                        *dst = Self::fp4_add_arr(*dst, Self::fp4_mul_arr(c_top, z_24));
-                    }
-                }
                 Ok(evals)
             }
         })
@@ -6844,19 +7627,22 @@ impl RawVulkanEngine {
         &mut self,
         k_len: usize,
         k_base: u32,
-        xi_z_kronecker_2x768: &[[u64; 4]; 1536],
+        xi_z_kronecker: &[[u64; 4]],
     ) -> Result<(), VulkanError> {
         self.run_prover_job(|engine| {
+            let stride = match xi_z_kronecker.len() {
+                1536 => 768usize,
+                2048 => 1024usize,
+                _ => return Err(crate::AccelError::LengthOverflow.into()),
+            };
             engine.prover_session()?;
             engine.prover.air = None;
-            let one_bytes = 768u64 * 32;
-            let both_bytes = 1536u64 * 32;
-            let gpu_k_len = k_len.min(1usize << 24);
-            let tail_count = k_len.saturating_sub(1usize << 24);
-            let tail_bytes = cmul(to_u64(tail_count), EXT4_BYTES)?;
-            let wg = to_u32(gpu_k_len.div_ceil(256))?;
+            to_u32(k_len)?;
+            let one_bytes = 1024u64 * 32;
+            let both_bytes = 2048u64 * 32;
+            let wg = to_u32(k_len.div_ceil(256))?;
             // Mode 0 accumulates into `k_base + gid` for `gid < k_len`; the kernel must already
-            // be session data. Checked before the tail vector below is sized from `k_len`.
+            // be session data.
             engine.prover.vram_work_a.check_read(
                 "vram_work_a (OOD kernel)",
                 span_end(u64::from(k_base), to_u64(k_len), 1, EXT4_BYTES)?,
@@ -6866,32 +7652,12 @@ impl RawVulkanEngine {
                 .vram_aux_in
                 .reserve_write("vram_aux_in (OOD Kronecker table)", one_bytes)?;
             unsafe {
-                engine.reserve_job_staging(cadd(both_bytes, tail_bytes)?)?;
-                let flat = core::slice::from_raw_parts(
-                    xi_z_kronecker_2x768.as_ptr().cast::<u64>(),
-                    1536 * 4,
+                engine.reserve_job_staging(both_bytes)?;
+                engine.write_geometric_kronecker_as_1024(0, &xi_z_kronecker[0..stride]);
+                engine.write_geometric_kronecker_as_1024(
+                    1024 * 32,
+                    &xi_z_kronecker[stride..2 * stride],
                 );
-                engine.write_staging_u64s(0, flat);
-                if tail_count > 0 {
-                    let mut tail_words = std::vec![0u64; tail_count * 4];
-                    for idx in 0..2usize {
-                        let base_t = idx * 768;
-                        let z_23 = xi_z_kronecker_2x768[base_t + 512 + 128];
-                        let z_24 = Self::fp4_mul_arr(z_23, z_23);
-                        for j in 0..tail_count.min(256) {
-                            let term = Self::fp4_mul_arr(xi_z_kronecker_2x768[base_t + j], z_24);
-                            let cur = [
-                                tail_words[j * 4],
-                                tail_words[j * 4 + 1],
-                                tail_words[j * 4 + 2],
-                                tail_words[j * 4 + 3],
-                            ];
-                            let sum = Self::fp4_add_arr(cur, term);
-                            tail_words[j * 4..j * 4 + 4].copy_from_slice(&sum);
-                        }
-                    }
-                    engine.write_staging_u64s(both_bytes as usize, &tail_words);
-                }
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -6948,7 +7714,7 @@ impl RawVulkanEngine {
                             c1: [0; 4],
                             c2: [0; 4],
                             mode: 0,
-                            len: gpu_k_len as u32,
+                            len: k_len as u32,
                             aux0: 1,
                             aux1: 1,
                             aux2: 0,
@@ -6956,20 +7722,6 @@ impl RawVulkanEngine {
                             aux4: 0,
                             aux5: 0,
                         },
-                    );
-                }
-                if tail_count > 0 {
-                    let ctail = VkBufferCopy {
-                        src_offset: both_bytes,
-                        dst_offset: ((k_base as u64) + (1u64 << 24)) * 32,
-                        size: tail_bytes,
-                    };
-                    (engine.fns.cmd_copy_buffer)(
-                        engine.cmd_buf,
-                        engine.staging.buffer,
-                        engine.prover.vram_work_a.buffer,
-                        1,
-                        &ctail,
                     );
                 }
                 engine.submit_and_wait()
@@ -7355,23 +8107,23 @@ impl RawVulkanEngine {
             to_u32(domain_len)?;
             to_u32(coeff_len)?;
             to_u32(stage_idx)?;
-            let slot = (stage_idx & 1) as u32;
-            let cw_base = slot * engine.prover.stage_cw_stride_ext4;
-            let tree_base = slot * engine.prover.stage_tree_stride_ext4;
+            let slot_idx = stage_idx & 1;
+            let cw_base = 0u32;
+            let tree_base = 0u32;
             // Mode 6 reads `coeff_len` coefficients from the start of `vram_work_b` and writes
-            // `domain_len` codeword entries at `cw_base`; modes 10-12 write tree nodes
-            // `tree_base + 1 .. tree_base + 2 * num_groups`.
+            // `domain_len` codeword entries into `vram_cw_stage[slot_idx]`; modes 10-12 write
+            // tree nodes `1 .. 2 * num_groups` into `vram_tree_stage[slot_idx]`.
             engine.prover.vram_work_b.check_read(
                 "vram_work_b (stage coefficients)",
                 cmul(to_u64(coeff_len), EXT4_BYTES)?,
             )?;
-            engine.prover.vram_cw_stage.reserve_write(
+            engine.prover.vram_cw_stage[slot_idx].reserve_write(
                 "vram_cw_stage (stage codeword)",
-                span_end(u64::from(cw_base), to_u64(domain_len), 1, EXT4_BYTES)?,
+                span_end(0, to_u64(domain_len), 1, EXT4_BYTES)?,
             )?;
-            engine.prover.vram_tree_stage.reserve_write(
+            engine.prover.vram_tree_stage[slot_idx].reserve_write(
                 "vram_tree_stage (stage Merkle tree)",
-                span_end(u64::from(tree_base), to_u64(num_groups), 2, EXT4_BYTES)?,
+                span_end(0, to_u64(num_groups), 2, EXT4_BYTES)?,
             )?;
 
             unsafe {
@@ -7389,7 +8141,7 @@ impl RawVulkanEngine {
                     kp.pipeline_layout,
                     0,
                     1,
-                    &engine.prover.ds_lde_stage,
+                    &engine.prover.ds_lde_stage[slot_idx],
                     0,
                     null(),
                 );
@@ -7595,8 +8347,8 @@ impl RawVulkanEngine {
 
                 let copy_top = checked_copy(
                     "vram_tree_stage (stage top node)",
-                    &engine.prover.vram_tree_stage,
-                    cmul(cadd(u64::from(tree_base), 1)?, EXT4_BYTES)?,
+                    &engine.prover.vram_tree_stage[slot_idx],
+                    EXT4_BYTES,
                     engine.staging.capacity,
                     0,
                     32,
@@ -7609,7 +8361,7 @@ impl RawVulkanEngine {
                 );
                 (engine.fns.cmd_copy_buffer)(
                     engine.cmd_buf,
-                    engine.prover.vram_tree_stage.buffer,
+                    engine.prover.vram_tree_stage[slot_idx].buffer,
                     engine.staging.buffer,
                     1,
                     &copy_top,
@@ -7637,13 +8389,18 @@ impl RawVulkanEngine {
         &mut self,
         coeff_len: usize,
         c_base: u32,
-        z_ood_kronecker_2x768: &[[u64; 4]; 1536],
+        z_ood_kronecker: &[[u64; 4]],
     ) -> Result<[[u64; 4]; 2], VulkanError> {
         self.run_prover_job(|engine| {
+            let stride = match z_ood_kronecker.len() {
+                1536 => 768usize,
+                2048 => 1024usize,
+                _ => return Err(crate::AccelError::LengthOverflow.into()),
+            };
             engine.prover_session()?;
             engine.prover.air = None;
             to_u32(coeff_len)?;
-            let z_bytes = 1536u64 * 32;
+            let z_bytes = 2048u64 * 32;
             let wg = to_u32(coeff_len.div_ceil(256).max(1))?;
             let part_bytes = cmul(2 * u64::from(wg), EXT4_BYTES)?;
             // Mode 0 (`sub_op == 2`) reads `c_base + gid` for `gid < coeff_len`.
@@ -7660,11 +8417,11 @@ impl RawVulkanEngine {
                     engine.refresh_prover_descriptor_sets()?;
                 }
                 engine.reserve_job_staging(z_bytes.max(part_bytes))?;
-                let flat_z = core::slice::from_raw_parts(
-                    z_ood_kronecker_2x768.as_ptr().cast::<u64>(),
-                    1536 * 4,
+                engine.write_geometric_kronecker_as_1024(0, &z_ood_kronecker[0..stride]);
+                engine.write_geometric_kronecker_as_1024(
+                    1024 * 32,
+                    &z_ood_kronecker[stride..2 * stride],
                 );
-                engine.write_staging_u64s(0, flat_z);
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirFoldSumcheck as usize];
                 engine.begin_cmd()?;
@@ -7821,17 +8578,9 @@ impl RawVulkanEngine {
             let in_words = num_q + num_s;
             let in_bytes = cmul(to_u64(in_words.max(1)), WORD_BYTES)?;
             let out_bytes = cmul(expected_out, WORD_BYTES)?;
-            let slot = (stage_idx & 1) as u32;
-            let t_base = if is_ext4 {
-                (slot * engine.prover.stage_tree_stride_ext4) as u64
-            } else {
-                0
-            };
-            let c_base = if is_ext4 {
-                (slot * engine.prover.stage_cw_stride_ext4) as u64
-            } else {
-                0
-            };
+            let slot_idx = stage_idx & 1;
+            let t_base = 0u64;
+            let c_base = 0u64;
             let max_threads = num_q.max(num_s).max(1);
             // Mode 13 indexes the codeword and the tree through the uploaded index lists, so
             // their contents are validated here: a query names a group, a sibling names a node.
@@ -7844,13 +8593,13 @@ impl RawVulkanEngine {
             }
             if is_ext4 {
                 if num_q > 0 {
-                    engine.prover.vram_cw_stage.check_read(
+                    engine.prover.vram_cw_stage[slot_idx].check_read(
                         "vram_cw_stage (query fibers)",
                         span_end(c_base, arity, ng, EXT4_BYTES)?,
                     )?;
                 }
                 if num_s > 0 {
-                    engine.prover.vram_tree_stage.check_read(
+                    engine.prover.vram_tree_stage[slot_idx].check_read(
                         "vram_tree_stage (query siblings)",
                         span_end(t_base, nodes, 1, EXT4_BYTES)?,
                     )?;
@@ -7883,7 +8632,7 @@ impl RawVulkanEngine {
 
                 let kp = engine.prover_pipelines[ProverKernelSlot::WhirLdeCommitment as usize];
                 let ds = if is_ext4 {
-                    engine.prover.ds_gather_stage
+                    engine.prover.ds_gather_stage[slot_idx]
                 } else {
                     engine.prover.ds_gather_r0
                 };
@@ -8865,8 +9614,8 @@ impl RawVulkanEngine {
                 let mut p_t0 = core::mem::take(&mut self.prover.vram_tree0);
                 let mut p_wa = core::mem::take(&mut self.prover.vram_work_a);
                 let mut p_wb = core::mem::take(&mut self.prover.vram_work_b);
-                let mut p_cs = core::mem::take(&mut self.prover.vram_cw_stage);
-                let mut p_ts = core::mem::take(&mut self.prover.vram_tree_stage);
+                let [mut p_cs0, mut p_cs1] = core::mem::take(&mut self.prover.vram_cw_stage);
+                let [mut p_ts0, mut p_ts1] = core::mem::take(&mut self.prover.vram_tree_stage);
                 let mut p_ai = core::mem::take(&mut self.prover.vram_aux_in);
                 let mut p_ab = core::mem::take(&mut self.prover.vram_aux_b);
                 let mut p_pt = core::mem::take(&mut self.prover.vram_partials);
@@ -8877,8 +9626,10 @@ impl RawVulkanEngine {
                 self.destroy_gpu_buffer(&mut p_t0);
                 self.destroy_gpu_buffer(&mut p_wa);
                 self.destroy_gpu_buffer(&mut p_wb);
-                self.destroy_gpu_buffer(&mut p_cs);
-                self.destroy_gpu_buffer(&mut p_ts);
+                self.destroy_gpu_buffer(&mut p_cs0);
+                self.destroy_gpu_buffer(&mut p_cs1);
+                self.destroy_gpu_buffer(&mut p_ts0);
+                self.destroy_gpu_buffer(&mut p_ts1);
                 self.destroy_gpu_buffer(&mut p_ai);
                 self.destroy_gpu_buffer(&mut p_ab);
                 self.destroy_gpu_buffer(&mut p_pt);
@@ -9291,8 +10042,10 @@ mod tests {
             &p.vram_tree0,
             &p.vram_work_a,
             &p.vram_work_b,
-            &p.vram_cw_stage,
-            &p.vram_tree_stage,
+            &p.vram_cw_stage[0],
+            &p.vram_cw_stage[1],
+            &p.vram_tree_stage[0],
+            &p.vram_tree_stage[1],
             &p.vram_aux_in,
             &p.vram_aux_b,
             &p.vram_partials,
@@ -9714,6 +10467,38 @@ mod tests {
         }
         // Dimensions other than the committed ones.
         clean(engine.exec_prover_whir_batch_sumcheck_init(&eq, &lam, 11));
+        // 3-byte 768-entry equality table cannot represent `num_vars > 24`.
+        clean(engine.exec_prover_whir_batch_sumcheck_init(&eq, &lam, 25));
         engine.exec_state = EngineExecState::Ready;
+    }
+
+    #[test]
+    fn macos_portability_candidates_and_device_type_policy() {
+        let names: std::vec::Vec<&str> = MACOS_VULKAN_LIB_CANDIDATES
+            .iter()
+            .map(|c| c.to_str().expect("utf8 dylib path"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "libvulkan.1.dylib",
+                "/opt/homebrew/lib/libvulkan.1.dylib",
+                "/opt/homebrew/lib/libMoltenVK.dylib",
+                "/usr/local/lib/libMoltenVK.dylib",
+            ]
+        );
+        assert_eq!(VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR, 0x0000_0001);
+        // Linux: accepts integrated & discrete hardware GPUs; rejects virtual & CPU ICDs (`llvmpipe = 4`).
+        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, false));
+        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, false));
+        assert!(!is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU, false));
+        assert!(!is_accepted_gpu_device_type(4, false));
+        assert!(!is_accepted_gpu_device_type(0, false));
+        // macOS MoltenVK: accepts integrated, discrete, and virtualized Apple Silicon GPUs; still rejects CPU (`4`).
+        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU, true));
+        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, true));
+        assert!(is_accepted_gpu_device_type(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU, true));
+        assert!(!is_accepted_gpu_device_type(4, true));
+        assert!(!is_accepted_gpu_device_type(0, true));
     }
 }
