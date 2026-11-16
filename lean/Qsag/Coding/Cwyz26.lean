@@ -1,4 +1,5 @@
 module
+public import Qsag.Coding.WhirProfiles
 public import Qsag.Coding.AffineProximity
 public import Qsag.Math.QuarticExt4
 public section
@@ -255,111 +256,6 @@ open RoundPoly
 set_option exponentiation.threshold 2048
 /-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule -/
 
-/-- Explicit finite witness for `[CWYZ26]` Theorem 4.8 (finite MCA bound) + Theorem 5.1 (`Eq. 5.7`
-    equal-degree affine folding with linear evaluation claims across `sFolds` binary folds). -/
-structure WhirAffineWitness where
-  /-- Number of coset fibers of the stage oracle (`n = blowup * 2^rem`, the folded evaluation
-      domain the proximity gap is applied on; `rem` = variables left after the stage's folds). -/
-  n : Nat
-  /-- Folded univariate degree bound `d = n / blowup + 2` (carrying the `+2` overflow monomials). -/
-  d : Nat
-  /-- Number of binary affine folds `s_i` executed in this WHIR stage (= agreement loss). -/
-  sFolds : Nat
-  /-- Agreement threshold `A` (`|S_{θ,α,β}(P)| ≥ A`). -/
-  A : Nat
-  /-- Intermediate persistent-agreement threshold `B` (`n * (d + 1) < B^2`, `B < A`). -/
-  B : Nat
-  /-- Multiplicity parameter `m ≥ 1` in `[CWYZ26]` Lemma 4.2 / Theorem 4.8. -/
-  m : Nat
-  /-- Total `(Y, Z)`-degree bound `D ≥ 1` of the explainer polynomial `Q(X, Y, Z)`. -/
-  D : Nat
-  /-- Stage query count `q_i` (distinct fibers, sampled without replacement). -/
-  queries : Nat
-  /-- Pure query soundness target bits (`128` classical, `256` QROM Grover pre-square-root). -/
-  queryTargetBits : Nat
-  deriving Repr, DecidableEq
-
-/-- Primitive-recursive accumulator for the unknown count `∑_{j=0}^M (m A - D - d j) (D - j + 1)`
-    in `[CWYZ26]` Equation `(4.5)` (`0` `WellFounded.fix`). -/
-def interpUnknownsAux (mA_sub_D d D : Nat) : Nat → Nat
-  | 0 => mA_sub_D * (D + 1)
-  | j + 1 => interpUnknownsAux mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1)
-
-/-- Primitive-recursive accumulator for the per-point equation count
-    `∑_{s=0}^K (m - s) (D - s + 1)` in `[CWYZ26]` Equation `(4.2)` / `(4.5)`. -/
-def interpEquationsAux (m D : Nat) : Nat → Nat
-  | 0 => m * (D + 1)
-  | s + 1 => interpEquationsAux m D s + (m - (s + 1)) * (D - (s + 1) + 1)
-
-/-- Exact ceiling `⌈a / b⌉` for `b > 0`. -/
-def natCeilDiv (a b : Nat) : Nat :=
-  (a + b - 1) / b
-
-/-- Conservative `1/q`-scaled numerator `s_i * (ℓ + 2 ℓ₀ + 1)` for `[CWYZ26]` Theorem 4.8 + Theorem 5.1
-    (`Eq. 5.7`, equal-degree affine folding **with linear claims** across `s_i` binary folds), valid
-    whenever `checkWhirAffineWitness w q = true` (`nonpersCeil ≤ q` and `n(n-1)/2 ≤ q`). This is the
-    quantity `loss * (list + 2 * list0 + 1)` of `affine_schedule.rs`. -/
-def whirAffineStageSimpleNum (w : WhirAffineWitness) : Nat :=
-  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
-  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
-  w.sFolds * (ell + 2 * ell0 + 1)
-
-/-- Exact `q^2`-scaled numerator from `[CWYZ26]` Theorem 4.8 (`Eq. 4.13`) + Theorem 5.1 (`Eq. 5.7`)
-    across `w.sFolds` folds over a field of cardinality `q`. -/
-def whirAffineStageExactNumQ2 (w : WhirAffineWitness) (q : Nat) : Nat :=
-  let M := Nat.min w.D ((w.m * w.A - w.D - 1) / w.d)
-  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
-  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
-  let maxQChoose := Nat.max q (w.n * (w.n - 1) / 2)
-  let nonpersCeil := w.D * w.D +
-    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
-               ((w.A - w.B) * (w.A - w.B))
-  w.sFolds * (ell * maxQChoose + 2 * ell0 * q + nonpersCeil)
-
-/-- Decidable verifier checking **every** side condition of `[CWYZ26]` Theorem 4.8 + Theorem 5.1
-    exactly as stated in the paper (`m, D ≥ 1`, `M = min {D, ⌊(mA - D - 1)/d⌋} ≥ 1`) and as
-    asserted by `affine_schedule.rs::finite_johnson_witnesses_cover_every_canonical_stage`, plus
-    the exact `s_i`-loss distinct-fiber query soundness:
-    1. `sFolds ≥ 1`, `n ≥ 2`, `d ≥ 1`, `d + 2 ≤ B < A`, `A + sFolds ≤ n`, `m ≥ 1`, `D ≥ 1`,
-    2. `D + 1 + d ≤ m * A` and `M ≥ 1` (every term `m * A - D - d * j ≥ 1`, `D - j + 1 ≥ 1`
-       for `j ≤ M`, so the truncated `Nat` sums equal the integer sums of Equation `(4.5)`),
-    3. Exact Equation `(4.5)` interpolation dimension inequality `unknowns > n * equations`,
-    4. Johnson denominator positivity `B^2 > n * (d + 1)` and `(A - 1)^2 > n * d`,
-    5. Field-size domination `n * (n - 1) / 2 ≤ q` and `nonpersCeil ≤ q`,
-    6. `queries ≤ n` and the EXACT hypergeometric bound
-       `affineFallingFactorial (A + sFolds) queries * 2^queryTargetBits < affineFallingFactorial n queries`
-       (implied by the upward-rounded dyadic check `query_error_below_2pow_minus256`; the
-       with-replacement bound `((A + s)/n)^q` is strictly weaker and REJECTS the deployed table). -/
-def checkWhirAffineWitness (w : WhirAffineWitness) (q : Nat) : Bool :=
-  let mA := w.m * w.A
-  let M := Nat.min w.D ((mA - w.D - 1) / w.d)
-  let K := Nat.min (w.m - 1) M
-  let unknowns := interpUnknownsAux (mA - w.D) w.d w.D M
-  let eqsPerPoint := interpEquationsAux w.m w.D K
-  let nonpersCeil := w.D * w.D +
-    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
-               ((w.A - w.B) * (w.A - w.B))
-  decide (
-    1 ≤ w.sFolds ∧
-    2 ≤ w.n ∧
-    1 ≤ w.d ∧
-    w.d + 2 ≤ w.B ∧
-    w.B < w.A ∧
-    w.A + w.sFolds ≤ w.n ∧
-    1 ≤ w.m ∧
-    1 ≤ w.D ∧
-    w.D + 1 + w.d ≤ mA ∧
-    1 ≤ M ∧
-    w.n * eqsPerPoint < unknowns ∧
-    w.n * (w.d + 1) < w.B * w.B ∧
-    w.n * w.d < (w.A - 1) * (w.A - 1) ∧
-    w.n * (w.n - 1) / 2 ≤ q ∧
-    nonpersCeil ≤ q ∧
-    w.queries ≤ w.n ∧
-    affineFallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
-      affineFallingFactorial w.n w.queries
-  )
-
 /-- **Exact-to-Simple Bound Reduction (`whirAffineStageExactNumQ2_le_simple_mul_q`)**:
     Whenever `checkWhirAffineWitness w q = true`, the exact `q^2`-scaled Theorem 4.8 + Theorem 5.1
     numerator is bounded above by `whirAffineStageSimpleNum w * q`, certifying that
@@ -380,71 +276,6 @@ theorem whirAffineStageExactNumQ2_le_simple_mul_q (w : WhirAffineWitness) (q : N
   exact Nat.add_le_add_left hNonpersQ _
 
 /-! ### §5.1 Mirror of the Deployed Folding Geometry (`pcs.rs::stage_geometry`) -/
-
-/-- Mirror of `pcs.rs::stage_geometry`: `(log₂ blowup, step_vars)` of every WHIR stage. -/
-def hemStageGeometry (nv : Nat) : List (Nat × Nat) :=
-  if nv ≤ 6 then
-    let es := if nv ≤ 3 then 1 else 2
-    [(4, nv - es)]
-  else if nv ≤ 11 then
-    let es := if nv ≤ 8 then 3 else 4
-    let rem := nv - es
-    let s0 := (rem + 1) / 2
-    [(2, s0), (4, rem - s0)]
-  else if nv ≤ 16 then
-    let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
-    let rem := nv - es
-    let s0 := Nat.min 4 (rem - 4)
-    let s1 := (rem - s0) / 2
-    [(2, s0), (4, s1), (6, rem - s0 - s1)]
-  else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
-  else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
-  else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
-  else [(2, 6), (4, 4), (6, 3), (8, 3)]
-
-/-- Mirror of the `early_stop_vars` field produced by `pcs.rs::stage_geometry`. -/
-def hemEarlyStopVars (nv : Nat) : Nat :=
-  if nv ≤ 3 then 1 else if nv ≤ 6 then 2 else if nv ≤ 8 then 3 else if nv ≤ 13 then 4
-  else if nv ≤ 15 then 5 else if nv ≤ 16 then 6 else if nv ≤ 20 then nv - 12
-  else if nv = 23 then 7 else 8
-
-/-- Mirror of `WhirSecurityRegime::minimum_queries` for the two unconditional Johnson regimes:
-    `BciksJohnsonQrom128` uses `⌈512 / log₂ B⌉ + 2`, `BciksJohnsonClassical128` uses
-    `⌈256 / log₂ B⌉ + 1`. -/
-def hemJohnsonMinQueries (isQrom : Bool) (logBlowup : Nat) : Nat :=
-  if isQrom then natCeilDiv 512 logBlowup + 2 else natCeilDiv 256 logBlowup + 1
-
-/-- Resolved per-stage geometry: `n = blowup * 2^rem` coset fibers and folded degree bound
-    `d = 2^rem + 2`, where `rem` counts the variables left AFTER this stage's `stepVars` folds
-    (exactly the `n`, `d` computed inside `affine_schedule.rs`). -/
-structure HemStageGeom where
-  stageIdx : Nat
-  logBlowup : Nat
-  stepVars : Nat
-  n : Nat
-  d : Nat
-  deriving Repr, DecidableEq
-
-def hemStageGeomsAux : Nat → Nat → List (Nat × Nat) → List HemStageGeom
-  | _, _, [] => []
-  | idx, rem, (lb, sv) :: rest =>
-    { stageIdx := idx, logBlowup := lb, stepVars := sv,
-      n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
-      hemStageGeomsAux (idx + 1) (rem - sv) rest
-
-def hemStageGeoms (nv : Nat) : List HemStageGeom :=
-  hemStageGeomsAux 0 nv (hemStageGeometry nv)
-
-/-- Mirror of `WhirSchedule::validate` on the canonical geometry: at most `4` stages, blowups in
-    `{4, 16, 64, 256}`, every stage folds `1..6` variables and strictly fewer than remain, and
-    `early_stop_vars + ∑ step_vars = num_vars` with `1 ≤ early_stop_vars ≤ 8`. -/
-def hemStageGeometryValid (nv : Nat) : Bool :=
-  let g := hemStageGeometry nv
-  decide (1 ≤ g.length ∧ g.length ≤ 4) &&
-  g.all (fun p => (p.1 == 2 || p.1 == 4 || p.1 == 6 || p.1 == 8) &&
-    decide (1 ≤ p.2 ∧ p.2 ≤ 6)) &&
-  decide (hemEarlyStopVars nv + (g.map (·.2)).sum = nv) &&
-  decide (1 ≤ hemEarlyStopVars nv ∧ hemEarlyStopVars nv ≤ 8)
 
 /-- Every supported `num_vars ∈ 2..=24` has a schedule accepted by the `validate` mirror, and
     every stage's Johnson QROM query count fits the wire cap `NUM_PCS_QUERIES = 512`. -/
@@ -719,7 +550,7 @@ theorem whirAffineStageWitnesses_qrom_eq_deployed :
           m := 16, D := 5228, queries := 88, queryTargetBits := 256 },
         { n := 65536, d := 258, sFolds := 3, A := 4482, B := 4481,
           m := 16, D := 2067, queries := 66, queryTargetBits := 256 } ] := by
-  constructor <;> decide +kernel
+  constructor <;> rfl
 
 set_option maxRecDepth 100000 in
 set_option maxHeartbeats 2000000 in
@@ -973,7 +804,7 @@ theorem sumTo_le_of_le (f : Nat → Nat) {a b : Nat} (h : a ≤ b) : sumTo f a �
 
 /-- The proved residual count of `nonExcludedDecompBound_sliced`, as a function of the domain
     size `n` and the size `s` of the challenge set. -/
-def slicedRest (n d A B Wx Dy s : Nat) : Nat :=
+@[expose] def slicedRest (n d A B Wx Dy s : Nat) : Nat :=
   ((n * (B - (d + 1))) / (B * B - n * (d + 1))) * Nat.max s (n * (n - 1) / 2) +
     s * ((Nat.min Dy ((Wx + Dy - 1) / d)) *
       (Dy * (n * ((Nat.min Dy ((Wx + Dy - 1) / d)) * (2 * d * Dy)) / (A - B) + 1)))
@@ -981,7 +812,7 @@ def slicedRest (n d A B Wx Dy s : Nat) : Nat :=
 /-- The numerical hypotheses of `nonExcludedDecompBound_sliced` at `Wx = m·A - Dy`. The
     interpolation count (4.5) is checked on a truncation of its left-hand sum, which only
     drops zero terms. -/
-def slicedParamsOk (n d A B m Dy : Nat) : Bool :=
+@[expose] def slicedParamsOk (n d A B m Dy : Nat) : Bool :=
   decide (1 ≤ d ∧ 1 ≤ Dy ∧ d + 1 ≤ B ∧ B < A ∧ n * (d + 1) < B * B ∧ Dy ≤ m * A ∧
     Dy < goldilocksPrime ∧
     n * sumTo (fun j => (Dy + 1 - j) * (m - 1 * j)) m <
@@ -1062,7 +893,7 @@ def slicedStageRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat) :=
 
 /-- The bad-challenge count proved for one binary fold of a stage, at challenge-set size `q`:
     `r` is the deployed row `(num_vars, stage, A, m, D)`, `w` the row of `slicedStageTable`. -/
-def slicedStageCount (q : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+@[expose] def slicedStageCount (q : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
     (w : Nat × Nat × Nat × Nat) : Nat :=
   r.2.2.2.2 + slicedRest g.n g.d r.2.2.1 w.2.2.1 (r.2.2.2.1 * r.2.2.1 - r.2.2.2.2) r.2.2.2.2 q
 
@@ -1146,5 +977,424 @@ theorem sliced_rest_exceeds_simple_budget :
   exact List.all_eq_true.mp h1 g hg
 
 
+/-! ### Exports for lane agg-budget -/
+
+/-- The last two conjuncts of `checkWhirAffineWitness`: the query count fits the fiber count and
+    the exact distinct-fiber query bound is below `2^-queryTargetBits`. -/
+theorem checkWhirAffineWitness_query_bound (w : WhirAffineWitness) (q : Nat)
+    (hok : checkWhirAffineWitness w q = true) :
+    w.queries ≤ w.n ∧
+      affineFallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
+        affineFallingFactorial w.n w.queries := by
+  unfold checkWhirAffineWitness at hok
+  have hProps := of_decide_eq_true hok
+  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, hqn, hQuery⟩
+  exact ⟨hqn, hQuery⟩
+
+/-- Every deployed `BciksJohnsonQrom128` witness row (`num_vars ∈ 2..=24`) passes
+    `checkWhirAffineWitness` over `GoldilocksExt4`, has folding numerator `+ 1 < 2000`, and carries
+    the `256`-bit query target. -/
+theorem whirAffineStageWitnesses_qrom_checked :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ w ∈ whirAffineStageWitnesses nv true,
+      checkWhirAffineWitness w (goldilocksPrime ^ 4) = true ∧
+      whirAffineStageSimpleNum w + 1 < 2000 ∧ w.queryTargetBits = 256 := by
+  intro nv h2 h24 w hw
+  unfold whirAffineStageWitnesses at hw
+  rw [ite_eq_left rfl] at hw
+  obtain ⟨g, hg, hgw⟩ := List.mem_filterMap.mp hw
+  have hc := (hem_johnson_qrom_witnesses_cover_every_canonical_stage).1 nv h2 h24 g hg
+  unfold hemJohnsonQromStageCovered at hc
+  by_cases hex : hemJohnsonQromStageExhaustive g = true
+  · rw [ite_eq_left hex] at hgw
+    exact absurd hgw (fun h => nomatch h)
+  · rw [ite_eq_right hex] at hgw
+    rw [ite_eq_right hex, hgw] at hc
+    dsimp only at hc
+    rw [Bool.and_eq_true] at hc
+    refine ⟨hc.1, of_decide_eq_true hc.2, ?_⟩
+    unfold hemJohnsonQromStageWitness at hgw
+    obtain ⟨r, _, hr⟩ := Option.map_eq_some_iff.mp hgw
+    rw [← hr]
+
+/-- The resolved `num_vars = 24` stage geometry of `pcs.rs::stage_geometry`. -/
+theorem hemStageGeoms_24_eq :
+    hemStageGeoms 24 =
+      [ { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 1048576, d := 262146 },
+        { stageIdx := 1, logBlowup := 4, stepVars := 4, n := 262144, d := 16386 },
+        { stageIdx := 2, logBlowup := 6, stepVars := 3, n := 131072, d := 2050 },
+        { stageIdx := 3, logBlowup := 8, stepVars := 3, n := 65536, d := 258 } ] := by
+  rfl
+
+/-- The resolved `num_vars = 20` stage geometry of `pcs.rs::stage_geometry`. -/
+theorem hemStageGeoms_20_eq :
+    hemStageGeoms 20 =
+      [ { stageIdx := 0, logBlowup := 2, stepVars := 5, n := 131072, d := 32770 },
+        { stageIdx := 1, logBlowup := 4, stepVars := 3, n := 65536, d := 4098 },
+        { stageIdx := 2, logBlowup := 6, stepVars := 4, n := 16384, d := 258 } ] := by
+  rfl
+
+theorem natCeilDiv_def (a b : Nat) : natCeilDiv a b = (a + b - 1) / b := by rfl
+
+theorem hemJohnsonMinQueries_def (isQrom : Bool) (logBlowup : Nat) :
+    hemJohnsonMinQueries isQrom logBlowup =
+      if isQrom then natCeilDiv 512 logBlowup + 2 else natCeilDiv 256 logBlowup + 1 := by rfl
+
+theorem whirAffineStageSimpleNum_def (w : WhirAffineWitness) :
+    whirAffineStageSimpleNum w =
+      w.sFolds * ((w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1)) +
+        2 * ((w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)) + 1) := by rfl
+/-- Deployed per-stage query counts of the two Johnson regimes (`pcs.rs::minimum_queries` at
+    `log₂ B ∈ {2, 4, 6, 8}`). -/
+theorem hemJohnsonMinQueries_deployed :
+    (hemJohnsonMinQueries true 2 = 258 ∧ hemJohnsonMinQueries true 4 = 130 ∧
+      hemJohnsonMinQueries true 6 = 88 ∧ hemJohnsonMinQueries true 8 = 66) ∧
+    (hemJohnsonMinQueries false 2 = 129 ∧ hemJohnsonMinQueries false 4 = 65 ∧
+      hemJohnsonMinQueries false 6 = 44 ∧ hemJohnsonMinQueries false 8 = 33) := by
+  decide +kernel
+
+theorem interpUnknownsAux_zero (mA_sub_D d D : Nat) :
+    interpUnknownsAux mA_sub_D d D 0 = mA_sub_D * (D + 1) := by rfl
+
+theorem interpUnknownsAux_succ (mA_sub_D d D j : Nat) :
+    interpUnknownsAux mA_sub_D d D (j + 1) =
+      interpUnknownsAux mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1) := by rfl
+
+theorem interpEquationsAux_zero (m D : Nat) : interpEquationsAux m D 0 = m * (D + 1) := by rfl
+
+theorem interpEquationsAux_succ (m D s : Nat) :
+    interpEquationsAux m D (s + 1) =
+      interpEquationsAux m D s + (m - (s + 1)) * (D - (s + 1) + 1) := by rfl
+
+theorem checkWhirAffineWitness_def (w : WhirAffineWitness) (q : Nat) :
+    checkWhirAffineWitness w q =
+    (let mA := w.m * w.A
+      let M := Nat.min w.D ((mA - w.D - 1) / w.d)
+      let K := Nat.min (w.m - 1) M
+      let unknowns := interpUnknownsAux (mA - w.D) w.d w.D M
+      let eqsPerPoint := interpEquationsAux w.m w.D K
+      let nonpersCeil := w.D * w.D +
+        natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+                   ((w.A - w.B) * (w.A - w.B))
+      decide (
+        1 ≤ w.sFolds ∧
+        2 ≤ w.n ∧
+        1 ≤ w.d ∧
+        w.d + 2 ≤ w.B ∧
+        w.B < w.A ∧
+        w.A + w.sFolds ≤ w.n ∧
+        1 ≤ w.m ∧
+        1 ≤ w.D ∧
+        w.D + 1 + w.d ≤ mA ∧
+        1 ≤ M ∧
+        w.n * eqsPerPoint < unknowns ∧
+        w.n * (w.d + 1) < w.B * w.B ∧
+        w.n * w.d < (w.A - 1) * (w.A - 1) ∧
+        w.n * (w.n - 1) / 2 ≤ q ∧
+        nonpersCeil ≤ q ∧
+        w.queries ≤ w.n ∧
+        affineFallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
+          affineFallingFactorial w.n w.queries
+      )) := by rfl
+
+theorem hemStageGeometry_def (nv : Nat) :
+    hemStageGeometry nv =
+    (if nv ≤ 6 then
+        let es := if nv ≤ 3 then 1 else 2
+        [(4, nv - es)]
+      else if nv ≤ 11 then
+        let es := if nv ≤ 8 then 3 else 4
+        let rem := nv - es
+        let s0 := (rem + 1) / 2
+        [(2, s0), (4, rem - s0)]
+      else if nv ≤ 16 then
+        let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
+        let rem := nv - es
+        let s0 := Nat.min 4 (rem - 4)
+        let s1 := (rem - s0) / 2
+        [(2, s0), (4, s1), (6, rem - s0 - s1)]
+      else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
+      else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
+      else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
+      else [(2, 6), (4, 4), (6, 3), (8, 3)]) := by rfl
+
+theorem hemJohnsonQromTableRow_def (nv stage : Nat) :
+    hemJohnsonQromTableRow nv stage =
+      hemJohnsonQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage) := by rfl
+
+theorem hemJohnsonQromWitnessTable_def :
+    hemJohnsonQromWitnessTable =
+    [ (9, 1, 127, 1, 20),
+        (10, 0, 329, 1, 14),
+        (10, 1, 126, 1, 20),
+        (11, 0, 328, 1, 14),
+        (11, 1, 126, 1, 20),
+        (12, 0, 579, 4, 75),
+        (12, 1, 310, 4, 59),
+        (12, 2, 174, 8, 139),
+        (13, 0, 1091, 8, 143),
+        (13, 1, 570, 16, 351),
+        (13, 2, 173, 8, 135),
+        (14, 0, 2119, 32, 863),
+        (14, 1, 1092, 32, 860),
+        (14, 2, 308, 32, 706),
+        (15, 0, 4178, 64, 2079),
+        (15, 1, 1091, 32, 844),
+        (15, 2, 308, 32, 706),
+        (16, 0, 8296, 128, 5567),
+        (16, 1, 2137, 64, 2392),
+        (16, 2, 580, 64, 1921),
+        (17, 0, 8295, 128, 5503),
+        (17, 1, 2137, 64, 2392),
+        (17, 2, 307, 32, 691),
+        (18, 0, 16531, 128, 7295),
+        (18, 1, 4229, 64, 3418),
+        (18, 2, 579, 64, 1890),
+        (19, 0, 33003, 128, 10879),
+        (19, 1, 8413, 64, 5471),
+        (19, 2, 1124, 32, 1305),
+        (20, 0, 65948, 128, 18111),
+        (20, 1, 16782, 32, 3286),
+        (20, 2, 2215, 32, 2149),
+        (21, 0, 65947, 128, 18047),
+        (21, 1, 16782, 32, 3286),
+        (21, 2, 2215, 32, 2149),
+        (22, 0, 131836, 128, 32511),
+        (22, 1, 16781, 32, 3270),
+        (22, 2, 2215, 32, 2149),
+        (23, 0, 263614, 64, 14494),
+        (23, 1, 33518, 32, 5870),
+        (23, 2, 8759, 16, 2733),
+        (23, 3, 2254, 32, 2672),
+        (24, 0, 527170, 64, 27164),
+        (24, 1, 66992, 32, 11069),
+        (24, 2, 17484, 16, 5228),
+        (24, 3, 4482, 16, 2067) ] := by rfl
+
+/-- **Three-challenge table certificate.** Kernel-decided over the deployed tables: every
+    non-exhaustive canonical `BciksJohnsonQrom128` stage (`num_vars ∈ 2..=24`) has a deployed row
+    `r` and a `slicedStageTable` row `w` passing `slicedParamsOk`, and the three-challenge count
+    `q·(Dy + slicedRest) + J(d)²·q² + J(d+1)²·q²` at `d = g.d - 1`, `A = r.A - 1` is at most
+    `q³ / 2^184`. `jb` is the Johnson bound `n (B - t) / (B² - n t)` and `q = p⁴`; both are
+    parameters constrained by their defining equations, so a downstream module can instantiate
+    them with its own names for these two quantities. -/
+theorem sliced_three_challenge_table_certificate
+    (jb : Nat → Nat → Nat → Nat)
+    (hjb : ∀ n B t : Nat, jb n B t = (n * (B - t)) / (B * B - n * t))
+    (q : Nat) (hq : q = goldilocksPrime ^ 4)
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemJohnsonQromTableRow nv g.stageIdx = some r ∧
+      slicedStageRow nv g.stageIdx = some w ∧
+      2 ≤ g.d ∧ g.d + 1 ≤ r.2.2.1 - 1 ∧
+      slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 = true ∧
+      ((q * (r.2.2.2.2 + slicedRest g.n ((g.d - 1) + 1) ((r.2.2.1 - 1) + 1) w.2.2.1
+              (r.2.2.2.1 * ((r.2.2.1 - 1) + 1) - r.2.2.2.2) r.2.2.2.2 q) +
+            (jb g.n (r.2.2.1 - 1) (g.d - 1) * jb g.n (r.2.2.1 - 1) (g.d - 1)) * (q * q) +
+            (jb g.n (r.2.2.1 - 1) ((g.d - 1) + 1) * jb g.n (r.2.2.1 - 1) ((g.d - 1) + 1)) * (q * q)) * 2 ^ 184 ≤
+          q * (q * q)) := by
+  obtain rfl : jb = (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) :=
+    funext fun n => funext fun B => funext fun t => hjb n B t
+  subst hq
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all (fun g =>
+        if hemJohnsonQromStageExhaustive g = true then true
+        else
+          match hemJohnsonQromTableRow (i + 2) g.stageIdx, slicedStageRow (i + 2) g.stageIdx with
+          | some r, some w =>
+            decide (2 ≤ g.d) && decide (g.d + 1 ≤ r.2.2.1 - 1) &&
+            slicedParamsOk g.n g.d r.2.2.1 w.2.2.1 r.2.2.2.1 r.2.2.2.2 &&
+            decide (((goldilocksPrime ^ 4) * (r.2.2.2.2 + slicedRest g.n ((g.d - 1) + 1) ((r.2.2.1 - 1) + 1) w.2.2.1
+              (r.2.2.2.1 * ((r.2.2.1 - 1) + 1) - r.2.2.2.2) r.2.2.2.2 (goldilocksPrime ^ 4)) +
+            ((fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) g.n (r.2.2.1 - 1) (g.d - 1) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) g.n (r.2.2.1 - 1) (g.d - 1)) * ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4)) +
+            ((fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) g.n (r.2.2.1 - 1) ((g.d - 1) + 1) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) g.n (r.2.2.1 - 1) ((g.d - 1) + 1)) * ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4))) * 2 ^ 184 ≤
+          (goldilocksPrime ^ 4) * ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4)))
+          | _, _ => false)) = true := by
+    decide +kernel
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  have hc := List.all_eq_true.mp h1 g hg
+  simp only [hne, Bool.false_eq_true, ↓reduceIte] at hc
+  split at hc
+  · next r w hr hw =>
+    rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hc
+    exact ⟨r, w, hr, hw, of_decide_eq_true hc.1.1.1, of_decide_eq_true hc.1.1.2, hc.1.2,
+      of_decide_eq_true hc.2⟩
+  · exact absurd hc Bool.false_ne_true
+
+/-- **Multi-fold table certificate.** Kernel-decided over the deployed tables: every
+    non-exhaustive canonical `BciksJohnsonQrom128` stage (`num_vars ∈ 2..=24`) has `1..6` binary
+    folds, passes `slicedParamsOk` at every intermediate fold geometry
+    `(2^t n, 2^t (d - 2) + 1, 2^t (A - 2) + 2, stepB B t)`, and the sum over its folds of the
+    four-challenge counts `q²·(Dy + slicedRest) + (3 J(d)² + J(d+1)²)·q³` is at most `q⁴ / 2^175`,
+    and at most `q⁴ / 2^186` when the stage has at most four folds. `jb` (Johnson bound), `stepB`
+    (intermediate persistent-agreement threshold) and `q = p⁴` are parameters constrained by
+    their defining equations. -/
+theorem sliced_multifold_table_certificate
+    (jb : Nat → Nat → Nat → Nat)
+    (hjb : ∀ n B t : Nat, jb n B t = (n * (B - t)) / (B * B - n * t))
+    (stepB : Nat → Nat → Nat)
+    (hStepB : ∀ B t : Nat, stepB B t = if t = 0 then B else 2 ^ t * (B - 2) + 3)
+    (q : Nat) (hq : q = goldilocksPrime ^ 4)
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (g : HemStageGeom) (hg : g ∈ hemStageGeoms nv)
+    (hne : hemJohnsonQromStageExhaustive g = false) :
+    ∃ (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat),
+      hemJohnsonQromTableRow nv g.stageIdx = some r ∧
+      slicedStageRow nv g.stageIdx = some w ∧
+      (1 ≤ g.stepVars ∧ g.stepVars ≤ 6) ∧
+      (1 ≤ g.d - 2 ∧ (g.d - 2) + 3 ≤ r.2.2.1) ∧
+      (∀ t : Nat, t < g.stepVars →
+        slicedParamsOk (2 ^ t * g.n) (2 ^ t * (g.d - 2) + 1)
+            (2 ^ t * (r.2.2.1 - 2) + 2) (stepB w.2.2.1 t) r.2.2.2.1 r.2.2.2.2 = true) ∧
+      ((List.range g.stepVars).map (fun t =>
+            (q * q) * (r.2.2.2.2 + slicedRest (2 ^ t * g.n) ((2 ^ t * (g.d - 2)) + 1) ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) (stepB w.2.2.1 t)
+                (r.2.2.2.1 * ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) - r.2.2.2.2) r.2.2.2.2 q) +
+              (3 * (jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2)) * jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2))) +
+                jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1) * jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1)) * (q ^ 3))).sum * 2 ^ 175 ≤ q ^ 4 ∧
+      (g.stepVars ≤ 4 →
+        ((List.range g.stepVars).map (fun t =>
+            (q * q) * (r.2.2.2.2 + slicedRest (2 ^ t * g.n) ((2 ^ t * (g.d - 2)) + 1) ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) (stepB w.2.2.1 t)
+                (r.2.2.2.1 * ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) - r.2.2.2.2) r.2.2.2.2 q) +
+              (3 * (jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2)) * jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2))) +
+                jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1) * jb (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1)) * (q ^ 3))).sum * 2 ^ 186 ≤ q ^ 4) := by
+  obtain rfl : jb = (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) :=
+    funext fun n => funext fun B => funext fun t => hjb n B t
+  obtain rfl : stepB = (fun B t : Nat => if t = 0 then B else 2 ^ t * (B - 2) + 3) :=
+    funext fun B => funext fun t => hStepB B t
+  subst hq
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all (fun g =>
+        if hemJohnsonQromStageExhaustive g = true then true
+        else
+          match hemJohnsonQromTableRow (i + 2) g.stageIdx, slicedStageRow (i + 2) g.stageIdx with
+          | some r, some w =>
+            decide (1 ≤ g.stepVars ∧ g.stepVars ≤ 6) &&
+            decide (1 ≤ g.d - 2 ∧ (g.d - 2) + 3 ≤ r.2.2.1) &&
+            (List.range g.stepVars).all (fun t =>
+              slicedParamsOk (2 ^ t * g.n) (2 ^ t * (g.d - 2) + 1)
+            (2 ^ t * (r.2.2.1 - 2) + 2) ((fun B t : Nat => if t = 0 then B else 2 ^ t * (B - 2) + 3) w.2.2.1 t) r.2.2.2.1 r.2.2.2.2) &&
+            decide (((List.range g.stepVars).map (fun t =>
+            ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4)) * (r.2.2.2.2 + slicedRest (2 ^ t * g.n) ((2 ^ t * (g.d - 2)) + 1) ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) ((fun B t : Nat => if t = 0 then B else 2 ^ t * (B - 2) + 3) w.2.2.1 t)
+                (r.2.2.2.1 * ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) - r.2.2.2.2) r.2.2.2.2 (goldilocksPrime ^ 4)) +
+              (3 * ((fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2)) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2))) +
+                (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1)) * ((goldilocksPrime ^ 4) ^ 3))).sum * 2 ^ 175 ≤ (goldilocksPrime ^ 4) ^ 4) &&
+            decide (g.stepVars ≤ 4 →
+              ((List.range g.stepVars).map (fun t =>
+            ((goldilocksPrime ^ 4) * (goldilocksPrime ^ 4)) * (r.2.2.2.2 + slicedRest (2 ^ t * g.n) ((2 ^ t * (g.d - 2)) + 1) ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) ((fun B t : Nat => if t = 0 then B else 2 ^ t * (B - 2) + 3) w.2.2.1 t)
+                (r.2.2.2.1 * ((2 ^ t * (r.2.2.1 - 2) + 1) + 1) - r.2.2.2.2) r.2.2.2.2 (goldilocksPrime ^ 4)) +
+              (3 * ((fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2)) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) (2 ^ t * (g.d - 2))) +
+                (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1) * (fun n B t : Nat => (n * (B - t)) / (B * B - n * t)) (2 ^ t * g.n) (2 ^ t * (r.2.2.1 - 2) + 1) ((2 ^ t * (g.d - 2)) + 1)) * ((goldilocksPrime ^ 4) ^ 3))).sum * 2 ^ 186 ≤ (goldilocksPrime ^ 4) ^ 4)
+          | _, _ => false)) = true := by
+    decide +kernel
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  have hc := List.all_eq_true.mp h1 g hg
+  simp only [hne, Bool.false_eq_true, ↓reduceIte] at hc
+  split at hc
+  · next r w hr hw =>
+    rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at hc
+    exact ⟨r, w, hr, hw, of_decide_eq_true hc.1.1.1.1, of_decide_eq_true hc.1.1.1.2,
+      fun t ht => List.all_eq_true.mp hc.1.1.2 t (List.mem_range.mpr ht),
+      of_decide_eq_true hc.1.2, of_decide_eq_true hc.2⟩
+  · exact absurd hc Bool.false_ne_true
+
+-- (end exports for lane agg-budget)
+
+/-! ### Exports for lane agg-whir-cert -/
+
+theorem hemStageGeomsAux_nil (idx rem : Nat) : hemStageGeomsAux idx rem [] = [] := by rfl
+
+theorem hemStageGeomsAux_cons (idx rem lb sv : Nat) (rest : List (Nat × Nat)) :
+    hemStageGeomsAux idx rem ((lb, sv) :: rest) =
+      { stageIdx := idx, logBlowup := lb, stepVars := sv,
+        n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
+        hemStageGeomsAux (idx + 1) (rem - sv) rest := by rfl
+
+theorem hemStageGeoms_def (nv : Nat) :
+    hemStageGeoms nv = hemStageGeomsAux 0 nv (hemStageGeometry nv) := by rfl
+
+theorem hemJohnsonQromStageExhaustive_def (g : HemStageGeom) :
+    hemJohnsonQromStageExhaustive g = decide (g.n ≤ hemJohnsonMinQueries true g.logBlowup) := by rfl
+
+theorem slicedRest_def (n d A B Wx Dy s : Nat) :
+    slicedRest n d A B Wx Dy s =
+      ((n * (B - (d + 1))) / (B * B - n * (d + 1))) * Nat.max s (n * (n - 1) / 2) +
+        s * ((Nat.min Dy ((Wx + Dy - 1) / d)) *
+          (Dy * (n * ((Nat.min Dy ((Wx + Dy - 1) / d)) * (2 * d * Dy)) / (A - B) + 1))) := by rfl
+
+theorem slicedParamsOk_def (n d A B m Dy : Nat) :
+    slicedParamsOk n d A B m Dy =
+      decide (1 ≤ d ∧ 1 ≤ Dy ∧ d + 1 ≤ B ∧ B < A ∧ n * (d + 1) < B * B ∧ Dy ≤ m * A ∧
+        Dy < goldilocksPrime ∧
+        n * sumTo (fun j => (Dy + 1 - j) * (m - 1 * j)) m <
+          sumTo (fun j => (Dy + 1 - j) * (m * A - Dy - d * j))
+            (Nat.min (Dy + 1) ((m * A - Dy) / d + 1))) := by rfl
+
+theorem slicedStageCount_def (q : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) :
+    slicedStageCount q g r w =
+      r.2.2.2.2 +
+        slicedRest g.n g.d r.2.2.1 w.2.2.1 (r.2.2.2.1 * r.2.2.1 - r.2.2.2.2) r.2.2.2.2 q := by rfl
+-- (end exports for lane agg-whir-cert)
+
+end Qsag
+end
+
+public section
+namespace Qsag
+theorem slicedStageRow_def (nv stage : Nat) :
+    slicedStageRow nv stage = slicedStageTable.find? (fun r => r.1 == nv && r.2.1 == stage) := by rfl
+theorem slicedStageTable_def : slicedStageTable =
+  [
+    (9, 1, 70, 234),
+    (10, 0, 259, 235),
+    (10, 1, 70, 234),
+    (11, 0, 259, 235),
+    (11, 1, 70, 234),
+    (12, 0, 515, 224),
+    (12, 1, 262, 224),
+    (12, 2, 140, 219),
+    (13, 0, 1027, 218),
+    (13, 1, 518, 213),
+    (13, 2, 140, 219),
+    (14, 0, 2051, 207),
+    (14, 1, 1030, 207),
+    (14, 2, 268, 208),
+    (15, 0, 4099, 201),
+    (15, 1, 1030, 207),
+    (15, 2, 268, 208),
+    (16, 0, 8195, 194),
+    (16, 1, 2054, 200),
+    (16, 2, 524, 202),
+    (17, 0, 8195, 194),
+    (17, 1, 2054, 200),
+    (17, 2, 268, 208),
+    (18, 0, 16387, 192),
+    (18, 1, 4102, 198),
+    (18, 2, 524, 202),
+    (19, 0, 32771, 190),
+    (19, 1, 8198, 195),
+    (19, 2, 1036, 204),
+    (20, 0, 65539, 187),
+    (20, 1, 16390, 198),
+    (20, 2, 2060, 201),
+    (21, 0, 65539, 187),
+    (21, 1, 16390, 198),
+    (21, 2, 2060, 201),
+    (22, 0, 131075, 184),
+    (22, 1, 16390, 198),
+    (22, 2, 2060, 201),
+    (23, 0, 262147, 187),
+    (23, 1, 32774, 195),
+    (23, 2, 8204, 201),
+    (23, 3, 2072, 199),
+    (24, 0, 524291, 185),
+    (24, 1, 65542, 192),
+    (24, 2, 16396, 198),
+    (24, 3, 4120, 201) ] := by rfl
 end Qsag
 end
