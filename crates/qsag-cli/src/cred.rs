@@ -998,6 +998,19 @@ fn preflight_voprf_party_files(vault_dir: &str, parties: usize) -> Result<(), Cl
     Ok(())
 }
 
+/// The `--deterministic` ML-DSA DKG session identifier. Threshold and party count enter as
+/// separate full-width frames, so no two committee shapes share a session.
+fn mldsa_deterministic_dkg_session(level_name: &str, threshold: usize, parties: usize) -> [u8; 32] {
+    cshake256_framed_32(
+        b"QSAG.CLI.TMLDSA.DET.DKG_SESSION.V1",
+        &[
+            level_name.as_bytes(),
+            &(threshold as u64).to_le_bytes(),
+            &(parties as u64).to_le_bytes(),
+        ],
+    )
+}
+
 /// Dealerless Shamir-SPDZ enrollment for any `2 <= threshold <= parties <= 64`.
 #[allow(clippy::too_many_arguments)]
 fn voprf_spdz_keygen(
@@ -2323,14 +2336,7 @@ fn mldsa_keygen(raw: &[String]) -> Result<(), CliError> {
 
     let deterministic = args.flag("deterministic");
     let session_id = if deterministic {
-        cshake256_framed_32(
-            b"QSAG.CLI.TMLDSA.DET.DKG_SESSION.V1",
-            &[
-                level_name.as_bytes(),
-                &(threshold as u64).to_le_bytes(),
-                &(parties as u64).to_le_bytes(),
-            ],
-        )
+        mldsa_deterministic_dkg_session(level_name, threshold, parties)
     } else {
         os_random_32()?
     };
@@ -3008,6 +3014,22 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
 #[cfg(test)]
 mod local_share_tests {
     use super::*;
+
+    #[test]
+    fn mldsa_deterministic_session_separates_counts_that_agree_modulo_256() {
+        // Party counts up to 65535 are accepted, so 258 parties must not share 2 parties' session.
+        let base = mldsa_deterministic_dkg_session("ml-dsa-65", 2, 2);
+        for (threshold, parties) in [(2, 258), (258, 258), (2, 514)] {
+            assert_ne!(
+                mldsa_deterministic_dkg_session("ml-dsa-65", threshold, parties),
+                base
+            );
+        }
+        assert_ne!(
+            mldsa_deterministic_dkg_session("ml-dsa-65", 258, 300),
+            mldsa_deterministic_dkg_session("ml-dsa-65", 2, 300)
+        );
+    }
 
     #[test]
     fn toprf_abort_refuses_future_phases() {

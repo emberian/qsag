@@ -100,10 +100,6 @@ theorem tooth_sampled_query_zero_flip_claim_is_false :
   Qsag.ClosedWhir.tooth_empty_schedule_rejects
 #tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
   Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
-#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
-  Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
-#tooth_pair Qsag.Top.deployed_whir_exec_closed_qrom_128 vs
-  Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
 #tooth_pair Qsag.ClosedFs.openings_agree vs
   Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 

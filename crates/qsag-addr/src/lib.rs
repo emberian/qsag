@@ -24,13 +24,13 @@ use qsag_accel::poseidon2::poseidon2_hash_framed_limbs4;
 // items is re-exported. The hybrid kernels are reachable only through the typed wrappers
 // [`hybrid_domain_framing_ok`] / [`hybrid_transcript_digest`], and the verified intent namespace
 // only through [`intent_from_verified`] / [`decode_verified_intent_128`].
-pub use qsag_verified::{HybridRoleTag, INTENT_V1_MAGIC};
 use qsag_verified::{
     CanonicalIntent128 as VerifiedCanonicalIntent128,
     IntentAddressVersion as VerifiedIntentAddressVersion,
     IntentIdentityKind as VerifiedIntentIdentityKind, IntentSuiteTag as VerifiedIntentSuiteTag,
     check_hybrid_domain_framing, derive_hybrid_transcript_digest,
 };
+pub use qsag_verified::{HybridRoleTag, INTENT_V1_MAGIC};
 
 pub use bech32m::{
     AddrError, BECH32_LEGACY_CONST, BECH32M_CONST, HybridComponent, bech32_hrp_expand,
@@ -368,7 +368,9 @@ pub const fn intent_suite_from_verified(
 ///
 /// Single and threshold keys are one canonical kind, so that they stay indistinguishable. The
 /// verified namespace has no conjunctive-hybrid kind.
-pub const fn intent_identity_kind_from_verified(kind: VerifiedIntentIdentityKind) -> KeyIdentityKind {
+pub const fn intent_identity_kind_from_verified(
+    kind: VerifiedIntentIdentityKind,
+) -> KeyIdentityKind {
     match kind {
         VerifiedIntentIdentityKind::SingleKey | VerifiedIntentIdentityKind::ThresholdCommittee => {
             KeyIdentityKind::SingleOrThreshold

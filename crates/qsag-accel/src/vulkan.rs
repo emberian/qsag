@@ -508,7 +508,8 @@ pub struct VulkanSpirvBackend {
 #[must_use = "keep the guard alive while using the prover arena"]
 pub struct ProverSessionGuard<'a> {
     backend: &'a VulkanSpirvBackend,
-    _thread_bound: core::marker::PhantomData<*mut ()>,
+    #[cfg(feature = "std")]
+    _thread_bound: core::marker::PhantomData<std::sync::MutexGuard<'a, ()>>,
 }
 
 impl Drop for ProverSessionGuard<'_> {
@@ -4812,6 +4813,33 @@ mod tests {
         gpu.try_batch_poseidon2_perm12_pinned(&mut states).unwrap();
         assert_eq!(states, expected);
         gpu.release_prover_session();
+    }
+
+    #[cfg(all(feature = "std", any(target_os = "linux", target_os = "macos"), target_pointer_width = "64"))]
+    #[test]
+    fn prover_guard_scrubs_on_unwind_and_rejects_another_thread() {
+        let gpu = match VulkanSpirvBackend::try_new_audited() {
+            Ok(gpu) => gpu,
+            Err(e) => {
+                assert!(std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(), "required GPU: {e}");
+                return;
+            }
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _session = gpu.try_acquire_prover_session().unwrap();
+            gpu.prover_whir_commit_round0(&[&[1; 16]], &[2; 32], 4, 4, 4, 0, 0, 0).unwrap();
+            std::thread::scope(|scope| scope.spawn(|| {
+                assert!(matches!(gpu.try_acquire_prover_session(), Err(VulkanError::WorkspacePoisoned)));
+                assert_eq!(gpu.check_prover_session_active(), Err(VulkanError::WorkspacePoisoned));
+            }).join().unwrap());
+            // Poison the engine mutex too: guard cleanup must recover it and still scrub.
+            let _engine = gpu.engine.lock().unwrap();
+            panic!("exercise unwind cleanup");
+        }));
+        assert!(outcome.is_err());
+        assert!(!gpu.prover_session_in_use.load(Ordering::Acquire));
+        assert!(gpu.prover_session_owner.lock().unwrap().is_none());
+        assert_eq!(gpu.check_prover_session_active(), Err(VulkanError::WorkspacePoisoned));
     }
 
     #[test]

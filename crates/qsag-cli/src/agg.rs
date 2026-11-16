@@ -182,27 +182,40 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
             .or_else(|| json.get("public_key"))
             .and_then(Json::as_str)
         {
-            if let Some(fmt) = json.get("format")
-                && fmt.as_str() != Some(PUBLIC_FORMAT)
-            {
-                return Err(CliError::input(format!(
-                    "{path} is not a {PUBLIC_FORMAT} validator public key file"
-                )));
-            }
-            if let Some(scheme_val) = json.get("scheme") {
-                let Some(scheme_str) = scheme_val.as_str() else {
-                    return Err(CliError::input(
-                        "validator public key scheme must be a string",
-                    ));
-                };
-                if !matches!(
-                    scheme_str,
-                    crate::quorum_hem::HEM_SCHEME_NAME | "agg-jorts-poseidon2" | "jorts-poseidon2"
-                ) {
+            let scheme = match json.get("scheme") {
+                Some(value) => Some(value.as_str().ok_or_else(|| {
+                    CliError::input("validator public key scheme must be a string")
+                })?),
+                None => None,
+            };
+            // A quorum public key file is the Hem quorum's own format; a bare or
+            // single-key file may carry no format at all. Anything else is not a key file.
+            match json.get("format").map(Json::as_str) {
+                None => {}
+                Some(Some(crate::quorum::PUBLIC_FORMAT)) => {
+                    if scheme != Some(crate::quorum_hem::HEM_SCHEME_NAME) {
+                        return Err(CliError::input(format!(
+                            "{path}: quorum public key is not a {} validator key",
+                            crate::quorum_hem::HEM_SCHEME_NAME
+                        )));
+                    }
+                }
+                Some(Some(PUBLIC_FORMAT)) => {}
+                Some(_) => {
                     return Err(CliError::input(format!(
-                        "{path}: unsupported validator public key scheme '{scheme_str}'"
+                        "{path} is not a validator or quorum public key file"
                     )));
                 }
+            }
+            if let Some(scheme_str) = scheme
+                && !matches!(
+                    scheme_str,
+                    crate::quorum_hem::HEM_SCHEME_NAME | "agg-jorts-poseidon2" | "jorts-poseidon2"
+                )
+            {
+                return Err(CliError::input(format!(
+                    "{path}: unsupported validator public key scheme '{scheme_str}'"
+                )));
             }
             let bytes: [u8; 65] = from_hex_exact(pk_hex, "validator_public_key")?;
             let pk = ValidatorPublicKey::from_bytes_canonical(&bytes).ok_or_else(|| {
@@ -916,6 +929,22 @@ mod tests {
             ]),
         ] {
             std::fs::write(path, bad_single.to_pretty()).unwrap();
+            assert!(load_public_validators(path).is_err());
+        }
+        // A Hem quorum public key file is a validator key; the same file under another
+        // scheme, or a quorum-format file of the 2-of-3 scheme, is not.
+        let quorum_public = |scheme: &str| {
+            Json::object(vec![
+                ("format", Json::str(crate::quorum::PUBLIC_FORMAT)),
+                ("scheme", Json::str(scheme)),
+                ("validator_public_key", Json::hex(&pk.to_bytes())),
+            ])
+            .to_pretty()
+        };
+        std::fs::write(path, quorum_public(crate::quorum_hem::HEM_SCHEME_NAME)).unwrap();
+        assert_eq!(load_public_validators(path).unwrap(), vec![pk]);
+        for wrong in [scheme, "jorts-poseidon2", "fts-compact-1122"] {
+            std::fs::write(path, quorum_public(wrong)).unwrap();
             assert!(load_public_validators(path).is_err());
         }
         for (format, root_hash) in [

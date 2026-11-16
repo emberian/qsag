@@ -376,7 +376,10 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
     ];
     let mut accepted = 0;
     for (verified_suite, canonical_suite) in suites {
-        assert_eq!(intent_suite_from_verified(verified_suite).ok(), canonical_suite);
+        assert_eq!(
+            intent_suite_from_verified(verified_suite).ok(),
+            canonical_suite
+        );
         // Every verified wire word names a different canonical suite, or none.
         let colliding = WitnessSuiteTag::from_u16(verified_suite.to_u16()).ok();
         assert!(colliding.is_some());
@@ -402,7 +405,11 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
             assert_eq!(canonical.address_version, AddressVersion::V2Poseidon2);
             assert_eq!(canonical.validate(), Ok(()));
             assert_eq!(
-                (canonical.chain_id, canonical.nonce, canonical.timestamp_secs),
+                (
+                    canonical.chain_id,
+                    canonical.nonce,
+                    canonical.timestamp_secs
+                ),
                 (7, 9, 11)
             );
             assert_eq!(
@@ -424,7 +431,9 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
 
     // The pair the verified decoder admits and the audit named: hybrid suite, single key.
     let invalid = verified_intent(VS::HybridEd25519MlDsa65, VK::SingleKey);
-    assert!(qsag_verified::decode_intent_128(&qsag_verified::encode_intent_128(&invalid)).is_some());
+    assert!(
+        qsag_verified::decode_intent_128(&qsag_verified::encode_intent_128(&invalid)).is_some()
+    );
     assert_eq!(
         intent_from_verified(&invalid),
         Err(AddrError::InconsistentSuiteIdentityKind {
@@ -436,10 +445,8 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
         intent_from_verified(&verified_intent(VS::HybridSecp256k1SlhDsa, VK::SingleKey)),
         Err(AddrError::UnsupportedSuiteTag(0x0502))
     );
-    let mut bad_magic = qsag_verified::encode_intent_128(&verified_intent(
-        VS::JortsPoseidon2,
-        VK::SingleKey,
-    ));
+    let mut bad_magic =
+        qsag_verified::encode_intent_128(&verified_intent(VS::JortsPoseidon2, VK::SingleKey));
     assert!(decode_verified_intent_128(&bad_magic).is_some());
     bad_magic[0] ^= 1;
     assert!(decode_verified_intent_128(&bad_magic).is_none());

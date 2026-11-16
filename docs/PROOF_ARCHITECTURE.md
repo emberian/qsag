@@ -71,8 +71,8 @@ Base names are unique except for three pairs, which must be cited with their dir
 | `Tests/` | 43 | 17,131 | Executed instances, `#eval` checks and mutation teeth (`*Teeth`, `*Checks`, `*Run`, `*Tests`, `CompositionInstances`, `GuardedMachineSimInstance`, `MathAndCoding`, `OracleAndQrom`, `EquationExports`). |
 | **Total** | **269** | **410,854** | |
 
-The counts are the output of this command on the working tree at commit `0644c9e` plus the
-uncommitted changes present on 2026-11-16; module counts were stable across the session in which this table was written, while line
+The counts are the output of this command on the working tree during the semantic audit
+on 2026-11-16; module counts were stable across the session in which this table was written, while line
 counts moved by hundreds of lines within minutes as other work landed. Treat the line figures
 as a snapshot and re-run the command:
 
@@ -235,7 +235,7 @@ The keyed random-oracle hiding game of `Oracle/Qrom.lean` as probabilistic packa
 - **`aggregate_merge_and_simt_gpu_noninterference`**: `Spec.mergeWitnessMaps_valid`, merge-tree quorum weight (`ComposedQsAgAndMergeSecurity`) and decoded SPIR-V SIMT noninterference (`Machine/SpirvSimt.lean`).
 - **`multifold_salted_qrom_and_committee_boundary_chain`**: multifold stage budgets (`Cwyz26EqualDegreeAndMultiFold`), the salted-Merkle `nv = 24` budget (`QromSaltedMerkleStateRestoration`) and the committee opening-batch boundary with the merged quorum reduction (`HemCommitteeBoundary`, `ComposedQsAgAndMergeSecurity`).
 - **`aggregate_extractor_sound_quorum_reduction`, `aggregate_extractor_sound_quorum_bound`**: for an aggregate verifier satisfying `Spec.AggregateExtractorSound` with error `ε`, the probability of an accepted aggregate naming an active validator with neither a transcript collision, nor a verifying extracted signature, nor quorum participation is at most `ε`. Runs whose extractor output is a verifying signature of a non-participating validator are not bounded here: that is single-signature unforgeability.
-- **`xmssStepOpAggregate_straightLine_extractorSound`, `xmssStepOpAggregate_dataRefines_ideal`**: instantiates the contract with a `Spec.StraightLineExtractor` on the non-transparent 256-column `StepOp` AIR committee verifier and lifts it to `Spec.DataRefines` against `Spec.idealAggregateMachine`. Succinct WHIR/Canopy compilation factors through `Top/ClosedProtocolReductions.lean`.
+- **Aggregate instantiation remains open in `Top/Aggregation`.** The current file constructs neither `Spec.AggregateExtractorSound` nor a `DataRefines` instance for the `StepOp` committee verifier; the former `xmssStepOpAggregate_*` declarations are absent. `stepOp256TableOk_xmss_extract` is a per-slot extraction lemma, not the packaged contract. The generic machinery in `Spec/IdealAggregate.lean` and the conditional WHIR reduction in `Top/ClosedProtocolReductions.lean` do not discharge that obligation.
 - The rest of the module restates component results under `Qsag.Top` names for the comparator roster (field laws, framing injectivity, `whir_bciksJohnsonQrom128_total_error_bound`, the `sbox7` WHIR chain, `tooth_whir_*` rejections).
 
 ### 6.4 `Top/Signing.lean` (841 lines)

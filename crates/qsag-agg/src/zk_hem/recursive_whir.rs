@@ -3031,8 +3031,9 @@ fn collect_active_folded_claims(edges: &[FoldedEdgeSpec]) -> Vec<(usize, Vec<E>,
 /// Construct one succinct [`FoldedLevelWhirProof`] across all `M` homogeneous edges at `level`.
 ///
 /// Streams one base-field polynomial (`1 << nv` `Goldilocks` elements) at a time during both
-/// the Split-Eq point-reduction sumcheck and Stage-0 RS fiber extraction so prover memory stays
-/// `O(2^nv)` independent of the level width `M`!
+/// the Split-Eq point-reduction sumcheck and Stage-0 RS fiber extraction. The working polynomial
+/// buffer is `O(2^nv)`; this excludes the caller's retained Merkle trees and the output fibers,
+/// whose memory grows with the level width `M`.
 pub(crate) fn prove_folded_level_for_recursion<'a>(
     level: usize,
     top_accumulator_root: Digest,

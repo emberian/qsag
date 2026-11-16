@@ -3941,7 +3941,7 @@ theorem separatedCustody_forgery_eufCma_gameBound {n : Nat}
 
 end SeparatedCustodyIdeal
 
-/-! ## 9. Distributed `(t, n)` Custody and the Shamir + `BeltLatch` Validator Network -/
+/-! ## 9. Distributed `(t, n)` Custody, the Authenticated Custodian Network, and the Shamir + `BeltLatch` Validator Network -/
 
 /-- **Distributed threshold custody refines the ideal custody functionality** for its own
     `deploymentId`. The concrete machine is `DistCustody.distMachine`: Shamir custodians with

@@ -76,7 +76,7 @@ use qsag_core::rss256::Rss256Error;
 use qsag_core::sponge::keccak::Cshake256Xof;
 use qsag_core::tsw_baggy::{HashAdrs, TAG_PRF, TAG_TH_F};
 use qsag_core::wipe::{
-    ct_eq_bytes, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
+    SecretBuffer, ct_eq_bytes, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
 };
 use qsag_core::wots_c::{LaneSpec, WOTS_STEPS};
 
@@ -553,8 +553,8 @@ fn dkg_inner<T: WireTransport>(
     let me = topo.me;
     let held = topo.held.len();
     // Item `held` is the public `pk_seed` coin; items `0..held` are this party's slots.
-    let mut salts = vec![[0u8; 32]; held + 1];
-    let mut contribs = vec![[0u8; 32]; held + 1];
+    let mut salts = SecretBuffer(vec![[0u8; 32]; held + 1]);
+    let mut contribs = SecretBuffer(vec![[0u8; 32]; held + 1]);
     for i in 0..=held {
         salts[i] = rng.bytes32();
         contribs[i] = rng.bytes32();
@@ -584,7 +584,7 @@ fn dkg_inner<T: WireTransport>(
     }
     // `coms[item][party]` and `opened[item][party]`.
     let mut coms = vec![vec![[0u8; 32]; topo.n]; held + 1];
-    let mut opened = vec![vec![[0u8; 32]; topo.n]; held + 1];
+    let mut opened = SecretBuffer(vec![vec![[0u8; 32]; topo.n]; held + 1]);
     for i in 0..=held {
         coms[i][me] = my_coms[i];
         opened[i][me] = contribs[i];
@@ -653,12 +653,12 @@ fn dkg_inner<T: WireTransport>(
     let mut pk = [0u8; 32];
     derive(held, &mut pk);
     keys.pk_seed[..key_len].copy_from_slice(&pk[..key_len]);
-    for row in &mut opened {
+    for row in opened.iter_mut() {
         for c in row {
             wipe_bytes32(c);
         }
     }
-    for c in contribs.iter_mut().chain(&mut salts) {
+    for c in contribs.iter_mut().chain(salts.iter_mut()) {
         wipe_bytes32(c);
     }
 
@@ -2156,9 +2156,8 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             for l in 0..held {
                 let rl = self.r[l];
                 for k in 0..128 {
-                    if ((rl >> k) & 1) == 1 {
-                        state.rand[l][k * count + sp] = pub_st;
-                    }
+                    let mask = 0u64.wrapping_sub(core::hint::black_box(((rl >> k) & 1) as u64));
+                    state.rand[l][k * count + sp] = pub_st.map(|w| w & mask);
                 }
             }
         }
@@ -2185,9 +2184,8 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             for l in 0..held {
                 let rl = self.r[l];
                 for k in 0..128 {
-                    if ((rl >> k) & 1) == 1 {
-                        state.rand[l][k * count + sp][lane] ^= word;
-                    }
+                    let mask = 0u64.wrapping_sub(core::hint::black_box(((rl >> k) & 1) as u64));
+                    state.rand[l][k * count + sp][lane] ^= word & mask;
                 }
             }
         }
@@ -2251,7 +2249,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                 }
                 let rl = self.r[l];
                 for k in 0..128 {
-                    let r_mask = if ((rl >> k) & 1) == 1 { u64::MAX } else { 0 };
+                    let r_mask = 0u64.wrapping_sub(core::hint::black_box(((rl >> k) & 1) as u64));
                     for sp in 0..count {
                         let idx = k * count + sp;
                         let br = linear_bits(&state.rand[l][idx]);
@@ -2304,10 +2302,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                 }
                 let rl = self.r[l];
                 for k in 0..128 {
-                    if ((rl >> k) & 1) == 1 {
-                        for sp in 0..count {
-                            state.rand[l][k * count + sp][0] ^= rc;
-                        }
+                    let mask = 0u64.wrapping_sub(core::hint::black_box(((rl >> k) & 1) as u64));
+                    for sp in 0..count {
+                        state.rand[l][k * count + sp][0] ^= rc & mask;
                     }
                 }
                 wipe_u64s(&mut z_bits[l]);
