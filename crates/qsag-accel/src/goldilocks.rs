@@ -723,7 +723,10 @@ pub fn mono_kronecker_1024(point: &[[u64; 4]]) -> [[u64; 4]; 1024] {
 }
 
 fn multilinear_kronecker_1024(point: &[[u64; 4]], equality: bool) -> [[u64; 4]; 1024] {
-    assert!(point.len() <= 32, "Kronecker tables support at most 32 variables");
+    assert!(
+        point.len() <= 32,
+        "Kronecker tables support at most 32 variables"
+    );
     let mut out = [EXT4_ZERO; 1024];
     for (byte_idx, table) in out.as_chunks_mut::<256>().0.iter_mut().enumerate() {
         table[0] = EXT4_ONE;
@@ -799,4 +802,50 @@ pub fn pair_geometric_kronecker_2048(
     out[0..1024].copy_from_slice(&geometric_kronecker_1024(s0, z0));
     out[1024..2048].copy_from_slice(&geometric_kronecker_1024(s1, z1));
     out
+}
+
+#[cfg(test)]
+mod kronecker_tests {
+    use super::*;
+
+    #[test]
+    fn shared_products_match_independent_factors_at_every_byte_boundary() {
+        let point: [[u64; 4]; 32] = core::array::from_fn(|i| [i as u64 + 2, u64::MAX, 7, 11]);
+        for n in [0, 1, 7, 8, 9, 16, 23, 24, 25, 26, 31, 32] {
+            let eq = eq_kronecker_1024(&point[..n]);
+            let mono = mono_kronecker_1024(&point[..n]);
+            for byte in 0..4 {
+                for k in 0..256 {
+                    let mut want_eq = EXT4_ONE;
+                    let mut want_mono = EXT4_ONE;
+                    for bit in 0..8 {
+                        let idx = byte * 8 + bit;
+                        if idx < n {
+                            if k & (1 << bit) != 0 {
+                                want_eq = ext4_mul(want_eq, point[idx]);
+                                want_mono = ext4_mul(want_mono, point[idx]);
+                            } else {
+                                want_eq = ext4_mul(want_eq, ext4_sub(EXT4_ONE, point[idx]));
+                            }
+                        } else if k & (1 << bit) != 0 {
+                            want_eq = EXT4_ZERO;
+                            want_mono = EXT4_ZERO;
+                        }
+                    }
+                    assert_eq!(eq[byte * 256 + k], want_eq, "eq n={n} byte={byte} k={k}");
+                    assert_eq!(
+                        mono[byte * 256 + k],
+                        want_mono,
+                        "mono n={n} byte={byte} k={k}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "at most 32")]
+    fn oversized_points_are_not_silently_truncated() {
+        eq_kronecker_1024(&[EXT4_ONE; 33]);
+    }
 }
