@@ -333,6 +333,9 @@ fn normalize_hrp(hrp: &str) -> Result<String, AddrError> {
 
 /// Canonical 256-bit policy signing-key identifier binding `(suite as u16_be, public_key)`
 /// under `cSHAKE256("QSAG.POLICY.KEY.V1")`.
+/// This total KDF does not validate a suite's public-key encoding. Empty input has
+/// a deterministic, domain-separated identifier; callers must validate the key
+/// before authorizing it. An identifier alone is not evidence of a valid key.
 pub fn policy_signing_key_id(suite: WitnessSuiteTag, public_key: &[u8]) -> [u8; 32] {
     cshake256_framed_32(
         b"QSAG.POLICY.KEY.V1",
@@ -1786,6 +1789,43 @@ mod tests {
         let mut bad_suite = wire128;
         bad_suite[4] = 0xFF;
         assert!(decode_intent_128(&bad_suite).is_none());
+    }
+
+    #[test]
+    fn new_suite_addresses_reject_noncanonical_wire_forms() {
+        for suite in [WitnessSuiteTag::Baggy, WitnessSuiteTag::Jorts,
+            WitnessSuiteTag::QuorumJorts, WitnessSuiteTag::JortsPoseidon2,
+            WitnessSuiteTag::CorduroyPoseidon2] {
+            let empty = policy_signing_key_id(suite, &[]);
+            assert_ne!(empty, policy_signing_key_id(suite, &[0]));
+            assert_ne!(empty, policy_signing_key_id(WitnessSuiteTag::MlDsa65, &[]));
+            for poseidon in [false, true] {
+                let address = if poseidon {
+                    QsagAddress::from_pubkey_poseidon2("qsp", suite, KeyIdentityKind::SingleOrThreshold, b"key")
+                } else {
+                    QsagAddress::from_pubkey_cshake256("qsp", suite, KeyIdentityKind::SingleOrThreshold, b"key")
+                }.unwrap();
+                let encoded = address.encode().unwrap();
+                assert_eq!(QsagAddress::decode(&encoded.to_ascii_uppercase()).unwrap(), address);
+                let mixed = alloc::format!("Q{}", &encoded[1..]);
+                assert_eq!(QsagAddress::decode(&mixed), Err(AddrError::MixedCase));
+                let (_, symbols) = bech32m_decode_5bit(&encoded).unwrap();
+                for version in [0, 3, 16, 31] {
+                    let mut bad = symbols.clone(); bad[0] = version;
+                    assert!(QsagAddress::decode(&bech32m_encode_5bit("qsp", &bad).unwrap()).is_err());
+                }
+                for extra in [0, 1, 31] {
+                    let mut bad = symbols.clone(); bad.push(extra);
+                    assert!(QsagAddress::decode(&bech32m_encode_5bit("qsp", &bad).unwrap()).is_err());
+                }
+                let mut program = convert_bits(&symbols[1..], 5, 8, false).unwrap();
+                program[..2].copy_from_slice(&0x0216u16.to_be_bytes());
+                let mut bad = alloc::vec![symbols[0]];
+                bad.extend(convert_bits(&program, 8, 5, true).unwrap());
+                assert_eq!(QsagAddress::decode(&bech32m_encode_5bit("qsp", &bad).unwrap()),
+                    Err(AddrError::UnsupportedSuiteTag(0x0216)));
+            }
+        }
     }
 
     #[test]

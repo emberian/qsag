@@ -119,14 +119,14 @@ impl Scheme {
                 )
             }
             Scheme::ThresholdFts => (
-                "ParallelSeededFts (threshold few-time, in-process ceremony with dealer setup)",
+                "ParallelSeededFts (threshold few-time, dealerless Gilboa + BDOZ reservoir)",
                 format!(
                     "32-byte chain nodes, {} one-time epochs per key",
                     1u32 << THRESHOLD_FTS_PARAMS.tree_height
                 ),
                 64,
                 ParallelSeededSignature::encoded_len(&THRESHOLD_FTS_PARAMS),
-                "stateful: epoch burn journal persisted before each signature",
+                "stateful: epoch burn journal + persisted reservoir updated before each signature",
             ),
             Scheme::AggCommittee => (
                 "Jorts-Poseidon2 validator committee for succinct K-to-1 aggregation",
@@ -147,6 +147,21 @@ impl Scheme {
             ("signature_bytes", Json::num(signature_bytes)),
             ("state", Json::str(state)),
         ])
+    }
+}
+
+/// Canonical [`WitnessSuiteTag`] for any CLI scheme or threshold custody family name.
+pub fn suite_tag_for_cli_scheme(scheme: &str) -> Result<WitnessSuiteTag, CliError> {
+    match scheme.to_ascii_lowercase().as_str() {
+        "jorts-2of3-sha3" => Ok(WitnessSuiteTag::QuorumJorts),
+        "hem-jorts-poseidon2" => Ok(WitnessSuiteTag::JortsPoseidon2),
+        "baggy-volatile-coupon" => Ok(WitnessSuiteTag::Baggy),
+        "ml-dsa-44" => Ok(WitnessSuiteTag::MlDsa44),
+        "ml-dsa-65" => Ok(WitnessSuiteTag::MlDsa65),
+        "ml-dsa-87" => Ok(WitnessSuiteTag::MlDsa87),
+        other => Scheme::by_name(other)?
+            .suite_tag()
+            .ok_or_else(|| CliError::usage("this scheme has no address encoding")),
     }
 }
 

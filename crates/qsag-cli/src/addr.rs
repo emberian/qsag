@@ -9,6 +9,44 @@ use crate::cli::{Args, CliError, read_text};
 use crate::codec::{Json, from_hex};
 use crate::keys::public_key_of;
 
+/// Extract `(WitnessSuiteTag, canonical_public_key_bytes)` from any supported CLI public key file.
+pub fn extract_suite_and_public_bytes(path: &str) -> Result<(WitnessSuiteTag, Vec<u8>), CliError> {
+    let text = read_text(path)?;
+    let json = Json::parse(&text)?;
+    match json.field_str("format")? {
+        crate::keys::PUBLIC_FORMAT => {
+            let (scheme, public_key) = public_key_of(path)?;
+            let tag = scheme
+                .suite_tag()
+                .ok_or_else(|| CliError::usage("this scheme has no address encoding"))?;
+            Ok((tag, public_key))
+        }
+        crate::quorum::PUBLIC_FORMAT => {
+            let scheme = json.field_str("scheme")?;
+            let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
+            let bytes = if scheme.eq_ignore_ascii_case("hem-jorts-poseidon2") {
+                json.field_hex("public_key")?.0
+            } else {
+                let mut key = json.field_hex("pk_seed")?.0;
+                key.extend_from_slice(&json.field_hex("pk_root")?);
+                key
+            };
+            Ok((tag, bytes))
+        }
+        "qsag-quorum-coupon-root-v1" => {
+            let scheme = json.field_str("scheme")?;
+            let tag = crate::schemes::suite_tag_for_cli_scheme(scheme)?;
+            Ok((tag, json.field_hex("public_key")?.0))
+        }
+        "qsag-cred-mldsa-public-v1" => {
+            let param = json.field_str("parameter_set")?;
+            let tag = crate::schemes::suite_tag_for_cli_scheme(param)?;
+            Ok((tag, json.field_hex("public_key")?.0))
+        }
+        _ => Err(CliError::input(format!("{path} is not a public key file"))),
+    }
+}
+
 const ADDR_HELP: &str = "\
 qsag addr encode --public <path> [--hrp <hrp>] [--v2]
 qsag addr decode <address> [--hrp <expected-hrp>]
@@ -82,10 +120,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
     };
     match (verb, args.positional.len()) {
         (Some("encode"), 1) => {
-            let (scheme, public_key) = public_key_of(args.require("public")?)?;
-            let tag = scheme
-                .suite_tag()
-                .ok_or_else(|| CliError::usage("this scheme has no address encoding"))?;
+            let (tag, public_key) = extract_suite_and_public_bytes(args.require("public")?)?;
             emit(
                 &args,
                 address_json(&derive(
