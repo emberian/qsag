@@ -3121,6 +3121,7 @@ mod tests {
 
     #[test]
     fn e2e_dynamic_quorum_switch_2of3_to_3of5_aggregates_in_hem_bciks_qrom128() {
+        let _memory = crate::test_budget::reserve_mb(180);
         // 1. Validator 0: QS-B Dynamic Shamir Quorum starts at (2, 3), signs Epoch 0,
         //    switches via Π_reshare to (3, 5) WITHOUT changing its 65B ValidatorPublicKey,
         //    proactively refreshes via Π_refresh, then signs Epoch 1!
@@ -3238,6 +3239,7 @@ mod tests {
 
     #[test]
     fn negative_proactive_security_old_shares_tamper_and_epoch_mismatch_rejected() {
+        let _memory = crate::test_budget::reserve_mb(190);
         let mut qsb = HemDynamicShamirQuorum::stage([0x81; 32], 2, 3, 4).unwrap();
         // Save detached snapshots of Epoch-0 `(2, 3)` shares BEFORE resharing!
         let saved_old_0 = HemShamirCustodianShare::from_vault_bytes(
@@ -3606,6 +3608,7 @@ mod tests {
 
     #[test]
     fn spdz_rejected_reshare_and_failed_sign_keep_state_coherent() {
+        let _memory = crate::test_budget::reserve_mb(220);
         let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
             [0xc1; 32],
             2,
@@ -3724,6 +3727,7 @@ mod tests {
 
     #[test]
     fn e2e_dealerless_spdz_seed_quorum_sign_reshare_and_hem_aggregate() {
+        let _memory = crate::test_budget::reserve_mb(250);
         // 100% dealerless Goldilocks DKG -> Gilboa byte auth -> SPDZ MPC leaf keygen (`active_leaves = 2`)
         let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
             [0x91; 32],
@@ -3814,6 +3818,7 @@ mod tests {
 
     #[test]
     fn test_hem_spdz_seed_quorum_durable_latch_certificate_subset_sign() {
+        let _memory = crate::test_budget::reserve_mb(360);
         use qsag_core::dkg::{FsWalEpochLatch, QuorumEpochLatchCluster};
 
         let mut spdz = HemSpdzSeedQuorum::keygen_dealerless_online_fixture(
@@ -3911,6 +3916,7 @@ mod tests {
 
     #[test]
     fn hem_qsb_reshare_and_proactive_refresh_above_64_custodians() {
+        let _memory = crate::test_budget::reserve_mb(220);
         let mut qsb = HemDynamicShamirQuorum::stage([0x61; 32], 2, 3, 2).expect("stage 2-of-3");
         let pk_initial = qsb.public_key();
         let agg_pk = ValidatorPublicKey::from_bytes_canonical(&pk_initial.to_bytes()).unwrap();
