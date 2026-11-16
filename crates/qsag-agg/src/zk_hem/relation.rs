@@ -209,6 +209,22 @@ impl Csr {
 /// the assignment.
 pub const MASK_ROWS: usize = 12;
 
+/// Tag marking a variable allocated inside the 128-stride Poseidon2 S-box arena of a
+/// hologram-aligned [`ConstraintSystem`].
+const P2_VAR_TAG: u32 = 1u32 << 31;
+
+/// Alignment metadata enabling $O(\log P)$ closed-form evaluation of the 106 interior S-box rows
+/// (`rows 12..118`) of every aligned width-12 Poseidon2 permutation in a [`Shape`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HologramMeta {
+    /// Number of 128-row / 128-var aligned Poseidon2 permutations at row prefix `[0..128*P)`.
+    /// Zero for shapes built via [`ConstraintSystem::new`].
+    pub poseidon2_perms: usize,
+    /// Number of 128-variable blocks reserved for `[1, public_inputs...]` before the aligned
+    /// Poseidon2 variable arena `[128 * pub_var_blocks .. 128 * (pub_var_blocks + P))`.
+    pub pub_var_blocks: usize,
+}
+
 /// Public structure of a relation: row matrices over `num_vars` variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shape {
@@ -226,6 +242,7 @@ pub struct Shape {
     pub a: Csr,
     pub b: Csr,
     pub c: Csr,
+    hologram_meta: HologramMeta,
     digest: [u8; 32],
 }
 
@@ -246,6 +263,26 @@ impl Shape {
     #[inline]
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// Block-alignment metadata for Spark hologram factorization (`poseidon2_perms == 0` when
+    /// constructed via [`ConstraintSystem::new`]).
+    #[inline]
+    pub fn hologram_meta(&self) -> HologramMeta {
+        self.hologram_meta
+    }
+
+    /// Whether row `i` belongs to the residual sparse hologram (excluding the 106 universal
+    /// interior S-box rows `12..118` and 10 zero padding rows `118..128` of aligned Poseidon2
+    /// blocks, which are evaluated in $O(\log P)$ closed form).
+    #[inline]
+    pub fn is_residual_row(&self, row: usize) -> bool {
+        let p = self.hologram_meta.poseidon2_perms;
+        if p > 0 && row < 128 * p {
+            (row & 127) < 12
+        } else {
+            true
+        }
     }
 
     fn compute_digest(&self) -> [u8; 32] {
@@ -289,6 +326,10 @@ pub struct ConstraintSystem {
     values: Vec<F>,
     record_rows: bool,
     num_public: usize,
+    hologram_aligned: bool,
+    p2_perms: usize,
+    p2_values: Vec<F>,
+    p2_sbox: Vec<(Lc, Lc)>,
     sbox: Vec<(Lc, Lc)>,
     mul: Vec<(Lc, Lc, Lc)>,
 }
@@ -305,9 +346,22 @@ impl ConstraintSystem {
             values: vec![F::ONE],
             record_rows: true,
             num_public: 0,
+            hologram_aligned: false,
+            p2_perms: 0,
+            p2_values: Vec::new(),
+            p2_sbox: Vec::new(),
             sbox: Vec::new(),
             mul: Vec::new(),
         }
+    }
+
+    /// Relation builder that places [`poseidon2_perm`] S-box rows and S-box output variables on
+    /// 128-row / 128-variable boundaries so [`super::protocol::ShapeHologram`] evaluates 90%+ of
+    /// Poseidon2 matrix entries in $O(\log P)$ closed form.
+    pub fn new_hologram_aligned() -> Self {
+        let mut cs = Self::new();
+        cs.hologram_aligned = true;
+        cs
     }
 
     /// Re-evaluate a compiled relation's assignment without rebuilding its matrices.
@@ -319,7 +373,7 @@ impl ConstraintSystem {
     }
 
     pub(crate) fn finish_assignment(mut self, shape: &Shape) -> Option<Vec<F>> {
-        assert!(!self.record_rows);
+        assert!(!self.record_rows && !self.hologram_aligned);
         if self.num_public != shape.num_public || self.values.len() != shape.mask_var_base {
             return None;
         }
@@ -331,10 +385,15 @@ impl ConstraintSystem {
 
     pub(crate) fn fork_public_inputs(&self) -> Self {
         assert_eq!(self.values.len(), self.num_public + 1);
+        assert!(self.p2_values.is_empty());
         Self {
             values: self.values.clone(),
             record_rows: self.record_rows,
             num_public: self.num_public,
+            hologram_aligned: self.hologram_aligned,
+            p2_perms: 0,
+            p2_values: Vec::new(),
+            p2_sbox: Vec::new(),
             sbox: Vec::new(),
             mul: Vec::new(),
         }
@@ -345,20 +404,35 @@ impl ConstraintSystem {
     pub(crate) fn append(&mut self, mut other: Self) {
         assert_eq!(self.num_public, other.num_public);
         assert_eq!(self.record_rows, other.record_rows);
+        assert_eq!(self.hologram_aligned, other.hologram_aligned);
         assert_eq!(
             &self.values[..=self.num_public],
             &other.values[..=other.num_public]
         );
         let offset = u32::try_from(self.values.len() - self.num_public - 1)
             .expect("relation variable limit");
+        let p2_offset = u32::try_from(self.p2_values.len()).expect("poseidon2 variable limit");
         let relocate = |mut lc: Lc| {
             for (v, _) in &mut lc.0 {
-                if *v as usize > self.num_public {
-                    *v = v.checked_add(offset).expect("relation variable limit");
+                if *v & P2_VAR_TAG != 0 {
+                    let raw = (*v & !P2_VAR_TAG)
+                        .checked_add(p2_offset)
+                        .expect("poseidon2 variable limit");
+                    assert!(raw < P2_VAR_TAG, "poseidon2 variable limit");
+                    *v = P2_VAR_TAG | raw;
+                } else if *v as usize > self.num_public {
+                    let next = v.checked_add(offset).expect("relation variable limit");
+                    assert!(next < P2_VAR_TAG, "relation variable limit");
+                    *v = next;
                 }
             }
             lc
         };
+        self.p2_sbox.extend(
+            core::mem::take(&mut other.p2_sbox)
+                .into_iter()
+                .map(|(a, c)| (relocate(a), relocate(c))),
+        );
         self.sbox.extend(
             core::mem::take(&mut other.sbox)
                 .into_iter()
@@ -369,6 +443,9 @@ impl ConstraintSystem {
                 .into_iter()
                 .map(|(a, b, c)| (relocate(a), relocate(b), relocate(c))),
         );
+        self.p2_perms += other.p2_perms;
+        qsag_core::wipe::secret_vec_extend_from_slice(&mut self.p2_values, &other.p2_values);
+        qsag_asm::volatile_fill(&mut other.p2_values, F::ZERO);
         qsag_core::wipe::secret_vec_extend_from_slice(
             &mut self.values,
             &other.values[self.num_public + 1..],
@@ -383,6 +460,7 @@ impl ConstraintSystem {
             1 + self.num_public,
             "public inputs are allocated first"
         );
+        assert!(self.p2_values.is_empty(), "public inputs are allocated first");
         self.num_public += 1;
         self.alloc(value)
     }
@@ -391,12 +469,19 @@ impl ConstraintSystem {
     pub fn alloc(&mut self, value: F) -> Var {
         // Hiding callers allocate witness values here: growth erases the old storage.
         qsag_core::wipe::secret_vec_push(&mut self.values, value);
-        Var((self.values.len() - 1) as u32)
+        let idx = self.values.len() - 1;
+        assert!(idx < P2_VAR_TAG as usize, "relation variable limit");
+        Var(idx as u32)
     }
 
     pub fn eval(&self, lc: &Lc) -> F {
         lc.terms().iter().fold(F::ZERO, |acc, &(v, c)| {
-            acc + c.const_mul(self.values[v as usize])
+            let val = if v & P2_VAR_TAG != 0 {
+                self.p2_values[(v & !P2_VAR_TAG) as usize]
+            } else {
+                self.values[v as usize]
+            };
+            acc + c.const_mul(val)
         })
     }
 
@@ -407,6 +492,35 @@ impl ConstraintSystem {
             self.sbox.push((a.clone(), y.into()));
         }
         y
+    }
+
+    fn p2_sbox7(&mut self, a: &Lc) -> Var {
+        if !self.hologram_aligned {
+            return self.sbox7(a);
+        }
+        let val = poseidon2_sbox7(self.eval(a));
+        qsag_core::wipe::secret_vec_push(&mut self.p2_values, val);
+        let idx = self.p2_values.len() - 1;
+        assert!(idx < P2_VAR_TAG as usize, "poseidon2 variable limit");
+        let y = Var(P2_VAR_TAG | (idx as u32));
+        if self.record_rows {
+            self.p2_sbox.push((a.clone(), y.into()));
+        }
+        y
+    }
+
+    fn finish_p2_perm_block(&mut self) {
+        if !self.hologram_aligned {
+            return;
+        }
+        for _ in 0..10 {
+            qsag_core::wipe::secret_vec_push(&mut self.p2_values, F::ZERO);
+            if self.record_rows {
+                self.p2_sbox.push((Lc::zero(), Lc::zero()));
+            }
+        }
+        self.p2_perms += 1;
+        debug_assert_eq!(self.p2_values.len(), 128 * self.p2_perms);
     }
 
     /// Fresh variable `y` with the row `a * b = y`.
@@ -452,7 +566,7 @@ impl ConstraintSystem {
 
     #[inline]
     pub fn num_rows(&self) -> usize {
-        self.sbox.len() + self.mul.len()
+        self.p2_sbox.len() + self.sbox.len() + self.mul.len()
     }
 
     /// Close the relation: append the masking variables and rows, pad the row count to a
@@ -460,36 +574,122 @@ impl ConstraintSystem {
     /// until the prover overwrites them.
     pub fn finish(mut self) -> (Shape, Vec<F>) {
         assert!(self.record_rows);
-        let mask_var_base = self.values.len();
-        let mask: Vec<Var> = (0..MASK_ROWS).map(|_| self.alloc(F::ZERO)).collect();
+        let one = Lc::constant(F::ONE);
+        let two = Lc::constant(F::TWO);
+        let empty = Lc::zero();
+
+        if !self.hologram_aligned {
+            let mask_var_base = self.values.len();
+            let mask: Vec<Var> = (0..MASK_ROWS).map(|_| self.alloc(F::ZERO)).collect();
+            let used = self.num_rows();
+            let log_rows = (used + MASK_ROWS)
+                .next_power_of_two()
+                .trailing_zeros()
+                .max(4) as usize;
+            let total = 1usize << log_rows;
+
+            let (mut a, mut b, mut c) = (Csr::new(), Csr::new(), Csr::new());
+            for (ra, rc) in &self.sbox {
+                a.push_row(ra);
+                b.push_row(&empty);
+                c.push_row(rc);
+            }
+            for (ra, rb, rc) in &self.mul {
+                a.push_row(ra);
+                b.push_row(rb);
+                c.push_row(rc);
+            }
+            for _ in used..total - MASK_ROWS {
+                a.push_row(&empty);
+                b.push_row(&empty);
+                c.push_row(&empty);
+            }
+            for (k, &p) in mask.iter().enumerate() {
+                let p: Lc = p.into();
+                match k / 4 {
+                    0 => {
+                        a.push_row(&p);
+                        b.push_row(&one);
+                        c.push_row(&p);
+                    }
+                    1 => {
+                        a.push_row(&one);
+                        b.push_row(&p);
+                        c.push_row(&p);
+                    }
+                    _ => {
+                        a.push_row(&p);
+                        b.push_row(&two);
+                        c.push_row(&p.scaled(F::TWO));
+                    }
+                }
+            }
+            let mut shape = Shape {
+                log_rows,
+                num_sbox: self.sbox.len(),
+                num_vars: self.values.len(),
+                num_public: self.num_public,
+                mask_var_base,
+                a,
+                b,
+                c,
+                hologram_meta: HologramMeta::default(),
+                digest: [0; 32],
+            };
+            shape.digest = shape.compute_digest();
+            return (shape, core::mem::take(&mut self.values));
+        }
+
+        let pub_prefix = 1 + self.num_public;
+        let pub_var_blocks = pub_prefix.div_ceil(128);
+        let p2_var_base = 128 * pub_var_blocks;
+        let misc_var_base = p2_var_base + self.p2_values.len();
+        let misc_len = self.values.len() - pub_prefix;
+        let mask_var_base = misc_var_base + misc_len;
+        let num_vars = mask_var_base + MASK_ROWS;
+
+        let remap_var = |v: u32| -> u32 {
+            if v & P2_VAR_TAG != 0 {
+                (p2_var_base as u32) + (v & !P2_VAR_TAG)
+            } else if (v as usize) < pub_prefix {
+                v
+            } else {
+                (misc_var_base as u32) + (v - (pub_prefix as u32))
+            }
+        };
+        let remap_lc = |lc: &Lc| -> Lc {
+            let mut terms: Vec<(u32, F)> =
+                lc.0.iter().map(|&(v, coeff)| (remap_var(v), coeff)).collect();
+            terms.sort_unstable_by_key(|&(v, _)| v);
+            Lc(terms)
+        };
+
         let used = self.num_rows();
+        let num_sbox = self.p2_sbox.len() + self.sbox.len();
         let log_rows = (used + MASK_ROWS)
             .next_power_of_two()
             .trailing_zeros()
             .max(4) as usize;
         let total = 1usize << log_rows;
-        let one = Lc::constant(F::ONE);
-        let two = Lc::constant(F::TWO);
-        let empty = Lc::zero();
 
         let (mut a, mut b, mut c) = (Csr::new(), Csr::new(), Csr::new());
-        for (ra, rc) in &self.sbox {
-            a.push_row(ra);
+        for (ra, rc) in self.p2_sbox.iter().chain(&self.sbox) {
+            a.push_row(&remap_lc(ra));
             b.push_row(&empty);
-            c.push_row(rc);
+            c.push_row(&remap_lc(rc));
         }
         for (ra, rb, rc) in &self.mul {
-            a.push_row(ra);
-            b.push_row(rb);
-            c.push_row(rc);
+            a.push_row(&remap_lc(ra));
+            b.push_row(&remap_lc(rb));
+            c.push_row(&remap_lc(rc));
         }
         for _ in used..total - MASK_ROWS {
             a.push_row(&empty);
             b.push_row(&empty);
             c.push_row(&empty);
         }
-        for (k, &p) in mask.iter().enumerate() {
-            let p: Lc = p.into();
+        for k in 0..MASK_ROWS {
+            let p = Lc::term(Var((mask_var_base + k) as u32), F::ONE);
             match k / 4 {
                 0 => {
                     a.push_row(&p);
@@ -508,19 +708,34 @@ impl ConstraintSystem {
                 }
             }
         }
+
+        let mut z = Vec::new();
+        qsag_core::wipe::secret_vec_reserve(&mut z, num_vars);
+        qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.values[..pub_prefix]);
+        z.resize(p2_var_base, F::ZERO);
+        qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.p2_values);
+        qsag_core::wipe::secret_vec_extend_from_slice(&mut z, &self.values[pub_prefix..]);
+        z.resize(num_vars, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.values, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.p2_values, F::ZERO);
+
         let mut shape = Shape {
             log_rows,
-            num_sbox: self.sbox.len(),
-            num_vars: self.values.len(),
+            num_sbox,
+            num_vars,
             num_public: self.num_public,
             mask_var_base,
             a,
             b,
             c,
+            hologram_meta: HologramMeta {
+                poseidon2_perms: self.p2_perms,
+                pub_var_blocks,
+            },
             digest: [0; 32],
         };
         shape.digest = shape.compute_digest();
-        (shape, core::mem::take(&mut self.values))
+        (shape, z)
     }
 }
 
@@ -529,6 +744,7 @@ impl ConstraintSystem {
 impl Drop for ConstraintSystem {
     fn drop(&mut self) {
         qsag_asm::volatile_fill(&mut self.values, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.p2_values, F::ZERO);
     }
 }
 
@@ -585,7 +801,7 @@ pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
         if tag == 1 {
             for r in 0..POSEIDON2_INT_ROUNDS {
                 let x = form(&basis, &lanes[0], poseidon2_const_at(1, r as u64, 0));
-                basis.push(cs.sbox7(&x).into());
+                basis.push(cs.p2_sbox7(&x).into());
                 let n = basis.len();
                 for lane in &mut lanes {
                     lane.resize(n, F::ZERO);
@@ -611,7 +827,7 @@ pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
                 let outputs: Vec<Lc> = (0..12)
                     .map(|lane| {
                         let rc = poseidon2_const_at(tag, r as u64, lane as u64);
-                        cs.sbox7(&form(&basis, &lanes[lane], rc)).into()
+                        cs.p2_sbox7(&form(&basis, &lanes[lane], rc)).into()
                     })
                     .collect();
                 basis = outputs;
@@ -621,6 +837,59 @@ pub fn poseidon2_perm(cs: &mut ConstraintSystem, st: &mut [Lc; 12]) {
     }
     for (slot, lane) in st.iter_mut().zip(&lanes) {
         *slot = form(&basis, lane, F::ZERO);
+    }
+    cs.finish_p2_perm_block();
+}
+
+/// Universal 106-row (`12..118`) interior matrix coefficients of [`poseidon2_perm`].
+pub(crate) struct Poseidon2InteriorTemplate {
+    /// For each interior row `r_off in 0..106` (`row = 12 + r_off`), list of `(w, coeff)` in `A`
+    /// where `w in 0..118` is the S-box output offset within the permutation's 128-var block.
+    pub rows_a: Vec<Vec<(u8, F)>>,
+    /// Round-constant (`Var::ONE`, col `0`) coefficient in `A` for each `r_off in 0..106`.
+    pub const_a: [F; 106],
+}
+
+impl Poseidon2InteriorTemplate {
+    fn build() -> Self {
+        let mut cs = ConstraintSystem::new();
+        let mut st: [Lc; 12] = core::array::from_fn(|_| cs.alloc(F::ZERO).into());
+        poseidon2_perm(&mut cs, &mut st);
+        assert_eq!(cs.sbox.len(), 118);
+        let mut rows_a = Vec::with_capacity(106);
+        let mut const_a = [F::ZERO; 106];
+        for (r_off, (ra, rc)) in cs.sbox[12..118].iter().enumerate() {
+            let mut terms = Vec::new();
+            for &(v, coeff) in ra.terms() {
+                if v == 0 {
+                    const_a[r_off] = coeff;
+                } else {
+                    assert!(
+                        (13..13 + 118).contains(&v),
+                        "interior Poseidon2 row touched non-local variable {v}"
+                    );
+                    terms.push(((v - 13) as u8, coeff));
+                }
+            }
+            assert_eq!(rc.terms(), &[((13 + 12 + r_off) as u32, F::ONE)]);
+            rows_a.push(terms);
+        }
+        Self { rows_a, const_a }
+    }
+
+    #[inline]
+    pub fn with<R>(run: impl FnOnce(&Self) -> R) -> R {
+        #[cfg(feature = "std")]
+        {
+            static TEMPLATE: std::sync::OnceLock<Poseidon2InteriorTemplate> =
+                std::sync::OnceLock::new();
+            run(TEMPLATE.get_or_init(Self::build))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            let built = Self::build();
+            run(&built)
+        }
     }
 }
 

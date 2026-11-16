@@ -539,6 +539,7 @@ pub fn derive_rss_child_share_2of3(
     }
     let pos = config
         .position(seeds.party_id())
+        .filter(|&pos| pos < 3)
         .ok_or(HdError::InvalidThresholdParameters)?;
     let mut subset_primary = CustodianSet::default();
     subset_primary.insert(pos);
@@ -563,7 +564,7 @@ pub fn derive_rss_child_share_2of3(
         let mut raw = seeds
             .prf32(subset, domain, &[&master_pk_seed, &idx_be])
             .ok_or(HdError::InvalidThresholdParameters)?;
-        raw[16..].fill(0);
+        qsag_asm::wipe::wipe(&mut raw[16..]);
         Ok(raw)
     };
     let sk_seed_pri = derive_16(subset_primary, b"QSAG.HD.INV.RSS.SKSEED.V1")?;
@@ -860,6 +861,34 @@ mod signature_tests {
             derive_inventory_vault(&seeds[0], [5; 32], 3).err(),
             Some(HdError::InvalidBatchSize)
         );
+    }
+
+    #[test]
+    fn rss_projection_validates_committee_and_separates_children() {
+        for members in [&[(1, 1), (1, 2), (3, 3)][..], &[(2, 1), (1, 2), (3, 3)][..]] {
+            assert!(CommitteeConfig::new(2, members, [1; 32]).is_err());
+        }
+        let unsupported = committee(2, 4);
+        let seeds = run_seed_ceremony(&unsupported, 0x87);
+        assert_eq!(derive_rss_child_share_2of3(&seeds[0], [1; 32], 0).err(),
+            Some(HdError::UnsupportedCommittee));
+        // Party IDs need not equal their zero-based RSS positions.
+        let config = CommitteeConfig::new(2, &[(7, 1), (42, 2), (u16::MAX, 3)], [2; 32]).unwrap();
+        let seeds = run_seed_ceremony(&config, 0x89);
+        let mut outputs = Vec::new();
+        for child in [0, 1, u32::MAX] {
+            let mut public = None;
+            for party in &seeds {
+                let (share, pk_seed) = derive_rss_child_share_2of3(party, [3; 32], child).unwrap();
+                assert!(public.is_none_or(|p| p == pk_seed));
+                public = Some(pk_seed);
+                let raw = share.to_secret_bytes();
+                let (again, _) = derive_rss_child_share_2of3(party, [3; 32], child).unwrap();
+                assert_eq!(&*raw, &*again.to_secret_bytes());
+            }
+            assert!(!outputs.contains(&public.unwrap()));
+            outputs.push(public.unwrap());
+        }
     }
 
     #[test]

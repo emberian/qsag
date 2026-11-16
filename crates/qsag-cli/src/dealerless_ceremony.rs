@@ -13,7 +13,8 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::preprocessing::{PartyPrivateRng, try_establish_rlwe_ot_ext_channel};
 use qsag_fts::ot::{AuthenticatedOtWire, CommittedCorrelatedOt, CommittedOtMessage};
 use qsag_fts::{
-    LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
+     DEFAULT_BEAVER_TRIPLE_POOL, LeafBurnPersistence, ParallelSeededDkgConfig,
+    ParallelSeededDkgOutput, ParallelSeededDkgRefillUnverified, ParallelSeededDkgReservoir,
     ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage, ParallelSeededError,
     ParallelSeededGilboaProducts, ParallelSeededMerkleLayers, ParallelSeededParams,
     ParallelSeededPublicKey, ParallelSeededSignRequest, ParallelSeededSignResult,
@@ -223,20 +224,149 @@ pub fn provision_distributed_policy_guards_with_capacity(
     })
 }
 
-/// Dealerless `ParallelSeededFts` threshold ceremony + distributed `ParallelSeededSignSession` driver.
+/// Dealerless `ParallelSeededFts` threshold ceremony + bounded `ParallelSeededDkgReservoir`
+/// persistence/refill + distributed `ParallelSeededSignSession` driver.
 pub struct DealerlessThresholdFtsSetup {
     pub pk: ParallelSeededPublicKey,
     pub public_tree_layers: ParallelSeededMerkleLayers,
-    /// Activated DKG outputs. Each key share stays inside its output and is reached only through
-    /// `ParallelSeededDkgOutput::share_mut`.
-    outputs: Vec<ParallelSeededDkgOutput>,
+    /// Activated per-custodian reservoirs. Each key share stays inside its reservoir and is
+    /// reached only through `ParallelSeededDkgReservoir::share_mut`.
+    reservoirs: Vec<ParallelSeededDkgReservoir>,
     roster: Vec<u16>,
 }
 
+fn refill_reservoirs(
+    reservoirs: &mut Vec<ParallelSeededDkgReservoir>,
+    session: [u8; 32],
+    power_count: usize,
+) -> Result<(), ParallelSeededError> {
+    let parties = reservoirs.len();
+    if parties < 2 || power_count == 0 || power_count > DEFAULT_BEAVER_TRIPLE_POOL {
+        return Err(ParallelSeededError::InvalidThresholdParameters);
+    }
+    let roster = reservoirs[0].committee().to_vec();
+    let old = core::mem::take(reservoirs);
+    let mut states = Vec::with_capacity(parties);
+    for res in old {
+        let ent = fresh_entropy()?;
+        states.push(res.into_refill(session, power_count, 0, ent)?);
+    }
+
+    let commits: Vec<_> = states.iter().map(|s| s.commitment()).collect();
+    let mut openings = Vec::with_capacity(parties);
+    for st in &mut states {
+        openings.push(st.open(&commits)?);
+    }
+
+    let mut inboxes: Vec<Vec<ParallelSeededDkgSharePackage>> =
+        (0..parties).map(|_| Vec::new()).collect();
+    for st in &mut states {
+        for pkg in st.private_packages()? {
+            let pos = roster
+                .binary_search(&pkg.recipient)
+                .map_err(|_| ParallelSeededError::InvalidThresholdParameters)?;
+            inboxes[pos].push(pkg);
+        }
+    }
+
+    let ot_sid = cshake256_framed_32(
+        b"QSAG.CLI.FTS.REFILL.OT.V1",
+        &[&session, &(power_count as u64).to_be_bytes()],
+    );
+    let backends = ot_endpoints(&roster, ot_sid)?
+        .into_iter()
+        .zip(&roster)
+        .map(|(ot, &id)| {
+            let entropy = fresh_entropy().map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            Ok(ParallelSeededGilboaProducts::new(id, entropy, ot))
+        })
+        .collect::<Result<Vec<_>, ParallelSeededError>>()?;
+
+    let openings_ref = &openings;
+    let mut pending: Vec<ParallelSeededDkgRefillUnverified> =
+        thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+            let handles: Vec<_> = states
+                .into_iter()
+                .zip(inboxes)
+                .zip(backends)
+                .map(|((st, pkgs), mut backend)| {
+                    scope.spawn(move || st.finalize(openings_ref, pkgs, &mut backend))
+                })
+                .collect();
+            let mut res = Vec::with_capacity(parties);
+            for h in handles {
+                res.push(
+                    h.join()
+                        .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+                );
+            }
+            Ok(res)
+        })?;
+
+    let check_commits: Vec<_> = pending.iter().map(|p| p.check_commitment()).collect();
+    let mut coins = Vec::with_capacity(parties);
+    for p in &mut pending {
+        coins.push(p.reveal_check_coin(&check_commits)?);
+    }
+    let coins_ref = &coins;
+    let masked = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+        let handles: Vec<_> = pending
+            .iter_mut()
+            .map(|p| scope.spawn(move || p.masked_shares(coins_ref)))
+            .collect();
+        let mut res = Vec::with_capacity(parties);
+        for h in handles {
+            res.push(
+                h.join()
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+            );
+        }
+        Ok(res)
+    })?;
+    let masked_ref = &masked;
+    let tag_commits = thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+        let handles: Vec<_> = pending
+            .iter_mut()
+            .map(|p| scope.spawn(move || p.tag_commitment(masked_ref)))
+            .collect();
+        let mut res = Vec::with_capacity(parties);
+        for h in handles {
+            res.push(
+                h.join()
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??,
+            );
+        }
+        Ok(res)
+    })?;
+    let mut tags = Vec::with_capacity(parties);
+    for p in &mut pending {
+        tags.push(p.open_tags(&tag_commits)?);
+    }
+    let tags_ref = &tags;
+    let mut activated: Vec<ParallelSeededDkgReservoir> =
+        thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
+            let handles: Vec<_> = pending
+                .into_iter()
+                .map(|p| scope.spawn(move || p.activate(tags_ref)))
+                .collect();
+            let mut res = Vec::with_capacity(parties);
+            for h in handles {
+                let mut r = h
+                    .join()
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)??;
+                let _ = r.take_beaver_triples();
+                res.push(r);
+            }
+            Ok(res)
+        })?;
+    *reservoirs = core::mem::take(&mut activated);
+    Ok(())
+}
+
 impl DealerlessThresholdFtsSetup {
-    /// Compute the deterministic authenticated power-tuple budget required for `params`:
-    /// `2^h` leaf preparations plus `2^h` epoch signatures. The underlying single-tree
-    /// protocol still materializes these tuples; callers must budget memory accordingly.
+    /// Compute the total power-tuple work across `2^h` leaf preparations plus `2^h` signatures.
+    /// Streaming [`ParallelSeededDkgReservoir`] refills cap each DKG/refill flight to
+    /// [`DEFAULT_BEAVER_TRIPLE_POOL`] (`131_072`) tuples regardless of tree height.
     pub fn required_power_count(
         params: &ParallelSeededParams,
     ) -> Result<usize, ParallelSeededError> {
@@ -244,8 +374,8 @@ impl DealerlessThresholdFtsSetup {
         let leaves = 1usize
             .checked_shl(params.tree_height as u32)
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        let per_leaf = 2 * 48 * params.num_chains * params.winternitz_w;
-        let per_sign = 2 * 48 * (1 + params.num_chains + params.target_sum);
+        let per_leaf = params.leaf_preparation_power_count();
+        let per_sign = params.signing_power_count();
         let total = leaves
             .checked_mul(per_leaf.saturating_add(per_sign))
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
@@ -255,20 +385,55 @@ impl DealerlessThresholdFtsSetup {
         Ok(total)
     }
 
-    /// Execute the full dealerless `ParallelSeededDkgRound1State` -> `finalize_parallel_seeded_dkg_party`
-    /// -> 5-round BDOZ `activate` ceremony, followed by distributed `begin_leaf_preparation` (or verified
-    /// cached Merkle layers when resuming an existing vault).
+    fn bounded_initial_power_budget(
+        params: &ParallelSeededParams,
+        has_cached_tree: bool,
+    ) -> Result<usize, ParallelSeededError> {
+        params.validate()?;
+        let per_leaf = params.leaf_preparation_power_count();
+        let per_sign = params.signing_power_count();
+        if per_leaf == 0
+            || per_sign == 0
+            || per_leaf > DEFAULT_BEAVER_TRIPLE_POOL
+            || per_sign > DEFAULT_BEAVER_TRIPLE_POOL
+        {
+            return Err(ParallelSeededError::InvalidThresholdParameters);
+        }
+        if has_cached_tree {
+            return Ok(per_sign);
+        }
+        let num_leaves = 1usize
+            .checked_shl(params.tree_height as u32)
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+        let max_leaves_per_batch = (DEFAULT_BEAVER_TRIPLE_POOL / per_leaf).max(1);
+        let initial_leaves = num_leaves.min(max_leaves_per_batch);
+        let leaf_budget = initial_leaves
+            .checked_mul(per_leaf)
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+        if initial_leaves == num_leaves
+            && let Some(with_sign) = leaf_budget.checked_add(per_sign)
+            && with_sign <= DEFAULT_BEAVER_TRIPLE_POOL
+        {
+            return Ok(with_sign);
+        }
+        Ok(leaf_budget)
+    }
+
+    /// Execute the bounded dealerless `ParallelSeededDkgRound1State` -> `finalize_parallel_seeded_dkg_party`
+    /// -> 5-round BDOZ `activate` ceremony, streaming leaf-preparation refills (`into_refill`)
+    /// across arbitrary tree heights and pre-populating one signing batch in each custodian's
+    /// [`ParallelSeededDkgReservoir`].
     pub fn run_ceremony(
         params: ParallelSeededParams,
         parties: usize,
         mut ceremony_seed: [u8; 32],
         cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
     ) -> Result<Self, ParallelSeededError> {
-        if parties < 2 || parties > usize::from(u16::MAX) {
+        if parties < 2 || parties > 255 {
             ct_zeroize_bytes(&mut ceremony_seed);
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
-        let power_count = match Self::required_power_count(&params) {
+        let power_count = match Self::bounded_initial_power_budget(&params, cached_tree.is_some()) {
             Ok(c) => c,
             Err(e) => {
                 ct_zeroize_bytes(&mut ceremony_seed);
@@ -394,7 +559,7 @@ impl DealerlessThresholdFtsSetup {
             tags.push(p.open_tags(&tag_commits)?);
         }
         let tags_ref = &tags;
-        let mut outputs: Vec<ParallelSeededDkgOutput> =
+        let outputs: Vec<ParallelSeededDkgOutput> =
             thread::scope(|scope| -> Result<Vec<_>, ParallelSeededError> {
                 let handles: Vec<_> = pending
                     .into_iter()
@@ -411,11 +576,15 @@ impl DealerlessThresholdFtsSetup {
             })?;
 
         let pk_seed_bytes = outputs[0].pk_seed_bytes;
-        // This driver never consumes the DKG's output Beaver triples: drop (and so wipe) them
-        // here, where the outputs were previously consumed for their shares.
-        for out in &mut outputs {
+        let mut reservoirs = Vec::with_capacity(parties);
+        for mut out in outputs {
             out.beaver_triples.clear();
+            reservoirs.push(ParallelSeededDkgReservoir::new(out)?);
         }
+
+        let per_leaf = params.leaf_preparation_power_count();
+        let per_sign = params.signing_power_count();
+        let max_leaves_per_batch = (DEFAULT_BEAVER_TRIPLE_POOL / per_leaf).max(1);
 
         let (pk, public_tree_layers) = if let Some((cached_pk, cached_layers)) = cached_tree {
             if cached_pk.pk_seed_bytes != pk_seed_bytes || cached_layers.is_empty() {
@@ -428,17 +597,38 @@ impl DealerlessThresholdFtsSetup {
             }
             (rebuilt_pk, rebuilt_layers)
         } else {
-            let num_leaves = 1u32 << params.tree_height;
-            let mut leaves = Vec::with_capacity(num_leaves as usize);
-            for epoch in 0..num_leaves {
+            let num_leaves = 1usize << params.tree_height;
+            let mut leaves = Vec::with_capacity(num_leaves);
+            for ep_idx in 0..num_leaves {
+                if reservoirs.iter().any(|r| r.remaining_powers() < per_leaf) {
+                    let rem_leaves = num_leaves - ep_idx;
+                    let batch_leaves = rem_leaves.min(max_leaves_per_batch);
+                    let leaf_budget = batch_leaves
+                        .checked_mul(per_leaf)
+                        .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+                    let batch_powers = if batch_leaves == rem_leaves
+                        && let Some(with_sign) = leaf_budget.checked_add(per_sign)
+                        && with_sign <= DEFAULT_BEAVER_TRIPLE_POOL
+                    {
+                        with_sign
+                    } else {
+                        leaf_budget
+                    };
+                    let refill_sid = cshake256_framed_32(
+                        b"QSAG.CLI.FTS.LEAF_REFILL.V1",
+                        &[&dkg_session, &(ep_idx as u32).to_be_bytes()],
+                    );
+                    refill_reservoirs(&mut reservoirs, refill_sid, batch_powers)?;
+                }
+                let epoch = ep_idx as u32;
                 let leaf_sid = cshake256_framed_32(
                     b"QSAG.CLI.FTS.LEAF_PREP.V1",
                     &[&dkg_session, &epoch.to_be_bytes()],
                 );
                 let mut sessions = Vec::with_capacity(parties);
-                for out in &mut outputs {
+                for res in &mut reservoirs {
                     sessions.push(ParallelSeededSignSession::begin_leaf_preparation(
-                        out.share_mut(),
+                        res.share_mut(),
                         epoch,
                         leaf_sid,
                         &roster,
@@ -452,19 +642,95 @@ impl DealerlessThresholdFtsSetup {
                     _ => return Err(ParallelSeededError::SignatureVerificationFailed),
                 }
             }
+            // Pre-populate at least one full signing power batch so the first `qsag sign`
+            // executes directly from persisted reservoirs with zero DKG / zero OT!
+            if reservoirs.iter().any(|r| r.remaining_powers() < per_sign) {
+                let topup_sid =
+                    cshake256_framed_32(b"QSAG.CLI.FTS.SIGN_TOPUP.V1", &[&dkg_session]);
+                refill_reservoirs(&mut reservoirs, topup_sid, per_sign)?;
+            }
             assemble_parallel_seeded_public_key(params, pk_seed_bytes, &leaves)?
         };
 
         Ok(Self {
             pk,
             public_tree_layers,
-            outputs,
+            reservoirs,
+            roster,
+        })
+    }
+
+    /// Serialize every custodian's activated [`ParallelSeededDkgReservoir`] (`QSFTSRS1`)
+    /// along with the shared monotonic reservoir generation.
+    pub fn serialize_reservoirs(
+        &self,
+    ) -> Result<(u64, Vec<qsag_core::wipe::SecretVec<u8>>), ParallelSeededError> {
+        let generation = self
+            .reservoirs
+            .first()
+            .ok_or(ParallelSeededError::InvalidThresholdParameters)?
+            .generation();
+        let mut blobs = Vec::with_capacity(self.reservoirs.len());
+        for r in &self.reservoirs {
+            if r.generation() != generation {
+                return Err(ParallelSeededError::InvalidThresholdParameters);
+            }
+            blobs.push(r.to_secret_bytes()?);
+        }
+        Ok((generation, blobs))
+    }
+
+    /// Rehydrate a [`DealerlessThresholdFtsSetup`] directly from persisted per-custodian
+    /// [`ParallelSeededDkgReservoir`] bytes (`0` re-DKG!).
+    pub fn from_persisted_reservoirs<B: AsRef<[u8]>>(
+        pk: ParallelSeededPublicKey,
+        public_tree_layers: ParallelSeededMerkleLayers,
+        expected_generation: u64,
+        blobs: &[B],
+    ) -> Result<Self, ParallelSeededError> {
+        pk.params.validate()?;
+        if blobs.len() < 2 || blobs.len() > 255 {
+            return Err(ParallelSeededError::InvalidThresholdParameters);
+        }
+        let (rebuilt_pk, rebuilt_layers) = assemble_parallel_seeded_public_key(
+            pk.params,
+            pk.pk_seed_bytes,
+            public_tree_layers
+                .first()
+                .ok_or(ParallelSeededError::InvalidAuthenticationPath)?,
+        )?;
+        if rebuilt_pk != pk || rebuilt_layers != public_tree_layers {
+            return Err(ParallelSeededError::InvalidAuthenticationPath);
+        }
+        let mut reservoirs = Vec::with_capacity(blobs.len());
+        let mut roster = Vec::with_capacity(blobs.len());
+        for raw in blobs {
+            let r = ParallelSeededDkgReservoir::from_secret_bytes(raw.as_ref())?;
+            if r.pk_seed_bytes() != pk.pk_seed_bytes
+                || r.params() != pk.params
+                || r.generation() != expected_generation
+            {
+                return Err(ParallelSeededError::InvalidThresholdParameters);
+            }
+            roster.push(r.party_id());
+            reservoirs.push(r);
+        }
+        if !roster.windows(2).all(|w| w[0] < w[1])
+            || reservoirs.iter().any(|r| r.committee() != roster.as_slice())
+        {
+            return Err(ParallelSeededError::InvalidThresholdParameters);
+        }
+        Ok(Self {
+            pk,
+            public_tree_layers,
+            reservoirs,
             roster,
         })
     }
 
     /// Sign `msg` at one-time `epoch` across all `ParallelSeededSignSession`s in lockstep,
-    /// burning `epoch` in `persistence` for every party prior to opening any share.
+    /// burning `epoch` in `persistence` for every party prior to opening any share and
+    /// automatically running a bounded `into_refill` if the persisted pool is depleted.
     pub fn threshold_sign<P: LeafBurnPersistence>(
         &mut self,
         epoch: u32,
@@ -477,6 +743,18 @@ impl DealerlessThresholdFtsSetup {
             .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
         if epoch >= num_leaves {
             return Err(ParallelSeededError::EpochOutOfRange);
+        }
+        let per_sign = self.pk.params.signing_power_count();
+        if self
+            .reservoirs
+            .iter()
+            .any(|r| r.remaining_powers() < per_sign)
+        {
+            let refill_sid = cshake256_framed_32(
+                b"QSAG.CLI.FTS.SIGN_REFILL.V1",
+                &[&session_id, &self.pk.pk_seed_bytes, &epoch.to_be_bytes()],
+            );
+            refill_reservoirs(&mut self.reservoirs, refill_sid, per_sign)?;
         }
         let siblings: Vec<[u64; 4]> = (0..self.pk.params.tree_height)
             .map(|lvl| self.public_tree_layers[lvl][((epoch as usize) >> lvl) ^ 1])
@@ -491,10 +769,10 @@ impl DealerlessThresholdFtsSetup {
             siblings: &siblings,
         };
 
-        let mut sessions = Vec::with_capacity(self.outputs.len());
-        for out in &mut self.outputs {
+        let mut sessions = Vec::with_capacity(self.reservoirs.len());
+        for res in &mut self.reservoirs {
             sessions.push(ParallelSeededSignSession::begin(
-                out.share_mut(),
+                res.share_mut(),
                 &req,
                 persistence,
             )?);
@@ -544,6 +822,95 @@ mod tests {
             )
             .is_ok()
         );
+        let init = DealerlessThresholdFtsSetup::bounded_initial_power_budget(
+            &ParallelSeededParams::CUSTODY_H10_W5,
+            false,
+        )
+        .unwrap();
+        assert!(init <= DEFAULT_BEAVER_TRIPLE_POOL);
+    }
+
+    #[test]
+    fn reservoir_persistence_signs_without_redkg_and_refills_cleanly() {
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            ..ParallelSeededParams::CUSTODY_H10_W5
+        };
+        let setup = DealerlessThresholdFtsSetup::run_ceremony(params, 2, [0x37; 32], None).unwrap();
+        let pk = setup.pk.clone();
+        let layers = setup.public_tree_layers.clone();
+        let (gen0, blobs0) = setup.serialize_reservoirs().unwrap();
+        drop(setup);
+
+        // Stale or wrong generation must be rejected.
+        assert!(
+            DealerlessThresholdFtsSetup::from_persisted_reservoirs(
+                pk.clone(),
+                layers.clone(),
+                gen0 + 1,
+                &blobs0,
+            )
+            .is_err()
+        );
+
+        // Epoch 0 signs directly from the persisted reservoirs with 0 DKG!
+        let mut restored0 = DealerlessThresholdFtsSetup::from_persisted_reservoirs(
+            pk.clone(),
+            layers.clone(),
+            gen0,
+            &blobs0,
+        )
+        .unwrap();
+        struct MemLatch(std::collections::BTreeSet<(u16, u32)>);
+        impl LeafBurnPersistence for MemLatch {
+            fn burn_epoch_before_sign(
+                &mut self,
+                _key: &[u8; 32],
+                party_id: u16,
+                epoch: u32,
+                use_count: u8,
+            ) -> Result<(), ParallelSeededError> {
+                if use_count != 1 || !self.0.insert((party_id, epoch)) {
+                    return Err(ParallelSeededError::PersistenceFailed);
+                }
+                Ok(())
+            }
+        }
+        let mut latch = MemLatch(std::collections::BTreeSet::new());
+        let sig0 = restored0
+            .threshold_sign(0, b"first-persisted-sign", [0xAA; 32], &mut latch)
+            .unwrap();
+        qsag_fts::verify_parallel_seeded_fts(
+            &pk,
+            b"first-persisted-sign",
+            &sig0,
+            &qsag_accel::CpuReferenceBackend::new(),
+        )
+        .unwrap();
+        let (gen1, blobs1) = restored0.serialize_reservoirs().unwrap();
+        assert_eq!(gen1, gen0, "first sign consumed pre-populated reservoir without DKG");
+        drop(restored0);
+
+        // Epoch 1 triggers automatic bounded `into_refill` because reservoir powers were spent.
+        let mut restored1 = DealerlessThresholdFtsSetup::from_persisted_reservoirs(
+            pk.clone(),
+            layers,
+            gen1,
+            &blobs1,
+        )
+        .unwrap();
+        let sig1 = restored1
+            .threshold_sign(1, b"second-refill-sign", [0xBB; 32], &mut latch)
+            .unwrap();
+        qsag_fts::verify_parallel_seeded_fts(
+            &pk,
+            b"second-refill-sign",
+            &sig1,
+            &qsag_accel::CpuReferenceBackend::new(),
+        )
+        .unwrap();
+        let (gen2, _) = restored1.serialize_reservoirs().unwrap();
+        assert_eq!(gen2, gen1 + 1, "second sign automatically refilled reservoir");
     }
 
     #[test]

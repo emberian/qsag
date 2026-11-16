@@ -112,7 +112,8 @@ pub struct MpcTransportError;
 /// `private[j]` must reach only party `j` over an authenticated confidential
 /// channel (the caller's own slot is ignored). `broadcast` must reach every
 /// party identically (authenticated consistent broadcast). The call returns
-/// once every party's messages for this round have arrived.
+/// once every party's messages for this round have arrived. The implementation
+/// owns outgoing buffers and must erase private payloads on success and failure.
 pub trait MpcTransport {
     fn exchange(
         &mut self,
@@ -740,9 +741,9 @@ impl Prss {
 
     pub(crate) fn elements(&mut self, count: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(count);
-        let mut buf = [0u8; 408];
+        let mut buf = SecretBuffer([0u8; 408]);
         while out.len() < count {
-            self.xof.squeeze(&mut buf);
+            self.xof.squeeze(&mut buf[..]);
             for chunk in buf.as_chunks::<3>().0 {
                 let v = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], 0]) & 0x7F_FFFF;
                 if v < MLDSA_Q && out.len() < count {
@@ -750,12 +751,11 @@ impl Prss {
                 }
             }
         }
-        ct_zeroize_bytes(&mut buf);
         out
     }
 
     fn bits(&mut self, count: usize) -> Vec<u32> {
-        let mut bytes = vec![0u8; count.div_ceil(8)];
+        let mut bytes = SecretBuffer(vec![0u8; count.div_ceil(8)]);
         self.xof.squeeze(&mut bytes);
         let out = (0..count)
             .map(|i| ((bytes[i / 8] >> (i % 8)) & 1) as u32)
@@ -765,7 +765,7 @@ impl Prss {
     }
 
     fn u64s(&mut self, count: usize) -> Vec<u64> {
-        let mut bytes = vec![0u8; count * 8];
+        let mut bytes = SecretBuffer(vec![0u8; count * 8]);
         self.xof.squeeze(&mut bytes);
         let out = bytes
             .as_chunks::<8>()
@@ -778,7 +778,7 @@ impl Prss {
     }
 
     fn u128s(&mut self, count: usize) -> Vec<u128> {
-        let mut bytes = vec![0u8; count * 16];
+        let mut bytes = SecretBuffer(vec![0u8; count * 16]);
         self.xof.squeeze(&mut bytes);
         let out = bytes
             .as_chunks::<16>()
@@ -890,7 +890,12 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         context: &[u8; 32],
         entropy: &[u8; 32],
     ) -> Result<Self, MpcError> {
-        assert!(me < st.parties);
+        if me >= st.parties || Structure::new(st.parties, st.threshold)? != st {
+            return Err(MpcError::UnsupportedStructure {
+                parties: st.parties,
+                threshold: st.threshold,
+            });
+        }
         let comps = st.subsets_of(me);
         let mut correction_subset = Vec::with_capacity(st.parties);
         let mut load = vec![0usize; st.subsets.len()];
@@ -1019,13 +1024,15 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
     /// Compares one 32-byte digest per subset across all of its holders.
     /// `mine` and each broadcast list the sender's subsets in ascending order.
     fn check_holder_digests(&self, mine: &[u8], broadcast: &[Vec<u8>]) -> Result<(), usize> {
+        let mut ranks = vec![0usize; self.st.parties];
         for s in 0..self.st.subsets.len() {
             let mut reference: Option<&[u8]> = None;
             for (party, received) in broadcast.iter().enumerate() {
                 if !self.st.holds(s, party) {
                     continue;
                 }
-                let rank = (0..s).filter(|&e| self.st.holds(e, party)).count();
+                let rank = ranks[party];
+                ranks[party] += 1;
                 let source = if party == self.me {
                     mine
                 } else {
@@ -2619,6 +2626,28 @@ pub(crate) mod test_support {
         assert!(Structure::new(17, 2).is_err());
         assert!(Structure::new(usize::MAX, 2).is_err());
         assert!(Structure::new(16, 9).is_err());
+    }
+
+    #[test]
+    fn malformed_public_structures_fail_before_transport() {
+        struct NoTransport;
+        impl MpcTransport for NoTransport {
+            fn exchange(&mut self, _: RoundInfo, _: Vec<Vec<u8>>, _: Vec<u8>)
+                -> Result<RoundInbox, MpcTransportError> {
+                panic!("invalid structure must fail before entropy or transport is used")
+            }
+        }
+        let valid = Structure::new(3, 2).unwrap();
+        assert!(matches!(Engine::setup(&mut NoTransport, valid.clone(), 3, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })));
+        let mut invalid = valid;
+        invalid.subsets.pop();
+        assert!(matches!(Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })));
+        let mut invalid = Structure::new(3, 2).unwrap();
+        invalid.subsets[0][0] = usize::MAX;
+        assert!(matches!(Engine::setup(&mut NoTransport, invalid, 0, &[0; 32], &[1; 32]),
+            Err(MpcError::UnsupportedStructure { .. })));
     }
 
     #[test]

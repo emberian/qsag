@@ -1354,7 +1354,8 @@ mod tests {
         drop(reopened);
 
         // Replacing the `.anchor.lock` sidecar with a copy at a new inode fails `lock_identity_seal`!
-        let rec_path = anchor_record_path(cfg.anchor_dir.as_str(), "ceremony", &key_id);
+        let rec_path =
+            anchor_record_path(cfg.anchor_dir.as_deref().unwrap(), "ceremony", &key_id);
         let lock_path = side_path(&rec_path, ".lock");
         let saved_lock = std::fs::read(&lock_path).unwrap();
         let _keep_old_ino = File::open(&lock_path).unwrap();
@@ -1396,11 +1397,11 @@ mod tests {
             let vault = root.join("vault");
             private_dir(vault.to_str().unwrap(), true).unwrap();
             Self {
-                cfg: AnchorConfig {
-                    anchor_dir: root.join("anchor").to_str().unwrap().to_owned(),
-                    vault_dir: Some(vault.to_str().unwrap().to_owned()),
-                    allow_single_disk: true,
-                },
+                cfg: AnchorConfig::dir_only(
+                    root.join("anchor").to_str().unwrap(),
+                    Some(vault.to_str().unwrap().to_owned()),
+                    true,
+                ),
                 sk: vault.join("sk").to_str().unwrap().to_owned(),
                 root,
             }
@@ -1427,7 +1428,7 @@ mod tests {
             )
         }
         fn record(&self, domain: &str, key_id: &[u8; 32]) -> PathBuf {
-            anchor_record_path(&self.cfg.anchor_dir, domain, key_id)
+            anchor_record_path(self.cfg.anchor_dir.as_deref().unwrap(), domain, key_id)
         }
     }
 
@@ -1451,22 +1452,14 @@ mod tests {
         private_dir(custody.to_str().unwrap(), true).unwrap();
         let sk = custody.join("sk");
         for anchor in [custody.join("anchor"), root.clone()] {
-            let cfg = AnchorConfig {
-                anchor_dir: anchor.to_str().unwrap().to_owned(),
-                vault_dir: None,
-                allow_single_disk: true,
-            };
+            let cfg = AnchorConfig::dir_only(anchor.to_str().unwrap(), None, true);
             let err = cfg
                 .validate_isolation(&[sk.to_str().unwrap()], &[], true)
                 .err()
                 .unwrap();
             assert!(err.message.contains("overlap or nest"), "{}", err.message);
         }
-        let sibling = AnchorConfig {
-            anchor_dir: root.join("anchor").to_str().unwrap().to_owned(),
-            vault_dir: None,
-            allow_single_disk: true,
-        };
+        let sibling = AnchorConfig::dir_only(root.join("anchor").to_str().unwrap(), None, true);
         sibling
             .validate_isolation(&[sk.to_str().unwrap()], &[], true)
             .unwrap();
@@ -1766,5 +1759,168 @@ mod tests {
         assert!(!leftover.exists());
         assert!(unrelated.exists());
         assert_eq!(anchor.load().unwrap(), Some(ckpt(2, 0xBB)));
+    }
+
+    #[test]
+    fn mirrored_directory_anchor_survives_loss_of_either_slot() {
+        for lost in ["slot_a", "slot_b"] {
+            let slot = Slot::new(&format!("mirror-{lost}"));
+            let key_id = [0x71; 32];
+            let anchor = slot.provision("ceremony", key_id);
+            anchor.advance(ckpt(1, 0x11)).unwrap();
+            anchor.advance(ckpt(4, 0x44)).unwrap();
+            drop(anchor);
+
+            let mirror_dir = anchor_mirror_dir_path(
+                slot.cfg.anchor_dir.as_deref().unwrap(),
+                "ceremony",
+                &key_id,
+            );
+            std::fs::write(mirror_dir.join(lost), b"corrupt-slot").unwrap();
+
+            let reopened = slot.open("ceremony", key_id).unwrap();
+            assert_eq!(reopened.load().unwrap(), Some(ckpt(4, 0x44)));
+            assert!(reopened.advance(ckpt(3, 0x33)).is_err());
+            drop(reopened);
+
+            let reopened = slot.open("ceremony", key_id).unwrap();
+            reopened.advance(ckpt(5, 0x55)).unwrap();
+            assert_eq!(reopened.load().unwrap(), Some(ckpt(5, 0x55)));
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestTpm2Device {
+        nv_index: u32,
+        counter: Arc<Mutex<u64>>,
+    }
+
+    impl Tpm2Transport for TestTpm2Device {
+        fn transmit(
+            &self,
+            cmd: &[u8],
+        ) -> Result<Vec<u8>, qsag_core::anti_rollback::AntiRollbackError> {
+            use qsag_core::anti_rollback::{
+                AntiRollbackError, TPM_CC_NV_INCREMENT, TPM_CC_NV_READ, TPM_RC_SUCCESS,
+                TPM_ST_SESSIONS,
+            };
+            if cmd.len() < 18 {
+                return Err(AntiRollbackError::ProtocolFramingError("short cmd"));
+            }
+            let cc = u32::from_be_bytes([cmd[6], cmd[7], cmd[8], cmd[9]]);
+            let nv = u32::from_be_bytes([cmd[14], cmd[15], cmd[16], cmd[17]]);
+            if nv != self.nv_index {
+                return Err(AntiRollbackError::Tpm2ResponseError(0x0000_018B));
+            }
+            let params: Vec<u8> = match cc {
+                TPM_CC_NV_READ => {
+                    let val = *self.counter.lock().unwrap();
+                    let mut p = Vec::with_capacity(10);
+                    p.extend_from_slice(&8u16.to_be_bytes());
+                    p.extend_from_slice(&val.to_be_bytes());
+                    p
+                }
+                TPM_CC_NV_INCREMENT => {
+                    *self.counter.lock().unwrap() += 1;
+                    Vec::new()
+                }
+                _ => return Err(AntiRollbackError::Tpm2ResponseError(0x0000_0143)),
+            };
+            let total_len = (10 + 4 + params.len() + 5) as u32;
+            let mut rsp = Vec::with_capacity(total_len as usize);
+            rsp.extend_from_slice(&TPM_ST_SESSIONS.to_be_bytes());
+            rsp.extend_from_slice(&total_len.to_be_bytes());
+            rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
+            rsp.extend_from_slice(&(params.len() as u32).to_be_bytes());
+            rsp.extend_from_slice(&params);
+            rsp.extend_from_slice(&0u16.to_be_bytes());
+            rsp.push(0x01);
+            rsp.extend_from_slice(&0u16.to_be_bytes());
+            Ok(rsp)
+        }
+    }
+
+    #[test]
+    fn composite_tpm2_vmgenid_and_u128_ceremony_context_roundtrip_and_detect_rollback() {
+        let args = Args::parse(
+            &[
+                "--anchor-tpm-nv".into(),
+                "0x01800007".into(),
+                "--anchor-vmgenid".into(),
+                "--spend-amount".into(),
+                "340282366920938463463374607431768211455".into(),
+            ],
+            &["anchor-tpm-nv", "spend-amount"],
+            &["anchor-vmgenid"],
+        )
+        .unwrap();
+        let ctx = parse_ceremony_context(&args, 9).unwrap();
+        assert_eq!(ctx.spend_amount, u128::MAX);
+        assert_eq!(ctx.mpc_nonce_epoch, 9);
+
+        let parsed_cfg = AnchorConfig::from_args(&args).unwrap().unwrap();
+        assert_eq!(parsed_cfg.tpm_nv_index, Some(0x0180_0007));
+        assert!(parsed_cfg.vmgenid);
+        assert!(parsed_cfg.anchor_dir.is_none());
+
+        let root = temp_root("tpm-vmgen");
+        let vault = root.join("vault");
+        private_dir(vault.to_str().unwrap(), true).unwrap();
+        let sk_path = vault.join("sk");
+        let sk_str = sk_path.to_str().unwrap();
+
+        let tpm = TestTpm2Device {
+            nv_index: 0x0180_0007,
+            counter: Arc::new(Mutex::new(41)),
+        };
+        let key_id = [0x88; 32];
+        let mac_key = [0x99; 32];
+
+        let anchor = FsExternalMountAnchor::provision_fresh_with_tpm(
+            &parsed_cfg,
+            &[sk_str],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+            tpm.clone(),
+        )
+        .unwrap();
+        assert_eq!(anchor.load().unwrap(), None);
+        anchor.advance(ckpt(1, 0xA1)).unwrap();
+        assert_eq!(*tpm.counter.lock().unwrap(), 42);
+        anchor.advance(ckpt(2, 0xB2)).unwrap();
+        assert_eq!(*tpm.counter.lock().unwrap(), 43);
+        drop(anchor);
+
+        let reopened = FsExternalMountAnchor::open_existing_with_tpm(
+            &parsed_cfg,
+            &[sk_str],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+            tpm.clone(),
+        )
+        .unwrap();
+        assert_eq!(reopened.load().unwrap(), Some(ckpt(2, 0xB2)));
+        drop(reopened);
+
+        // Simulate local disk snapshot rollback while hardware TPM2 counter remains at 43:
+        // bump hardware counter to 44 (as if another signature occurred before snapshot restore).
+        *tpm.counter.lock().unwrap() = 44;
+        assert!(
+            FsExternalMountAnchor::open_existing_with_tpm(
+                &parsed_cfg,
+                &[sk_str],
+                &[],
+                "ceremony",
+                key_id,
+                mac_key,
+                tpm,
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

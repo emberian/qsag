@@ -208,6 +208,10 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
         let layer = 2u32;
         let tree_idx = 0x4242_1337u64;
 
+        // Warmup buffer sizing so steady-state GPU vs CPU timing is measured cleanly.
+        gpu.build_merkle_tree_poseidon2_2block(&leaves, domain_tag, &pk_seed, layer, tree_idx, 0)
+            .expect("warmup 2-block full tree");
+
         let t_gpu = Instant::now();
         let gpu_root = gpu
             .build_merkle_tree_poseidon2_2block(&leaves, domain_tag, &pk_seed, layer, tree_idx, 0)
@@ -260,8 +264,8 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
     {
         let stage_idx = 1u8;
         let tree_salt = rand_ext4(&mut rng);
-        assert_eq!(POSEIDON2_CANOPY_SALT_DOMAIN, 0x5153_4147_5032_5453);
-        assert_eq!(POSEIDON2_CANOPY_ROOT_DOMAIN, 0x5153_4147_5032_5254);
+        assert_eq!(POSEIDON2_CANOPY_SALT_DOMAIN, 0x5032_434E_534C_5401);
+        assert_eq!(POSEIDON2_CANOPY_ROOT_DOMAIN, 0x5032_434E_524F_4F54);
 
         let n_leaves = 1usize << 20; // 1,048,576 leaves -> 2,097,152 Canopy nodes (64 MiB)
         let log_leaves = 20u8;
@@ -343,13 +347,10 @@ fn test_poseidon2_2block_canopy_and_fixed_tweak_gpu_parity_and_speedup() {
 }
 
 /// Evaluate multilinear equality kernel `eq(r, idx)` at hypercube vertex `idx` (`0 <= idx < 2^nv`).
-/// Matches `eq_kronecker_1024(r)`: bit `j` (`0 <= j < nv`) corresponds to `r[nv - 1 - j]`, where
-/// bit `0` returns `1 - r_var` and bit `1` returns `r_var`.
+/// Matches `eq_kronecker_1024(r)`: bit `b` (`0 <= b < nv`) corresponds to `r[b]`.
 fn eval_eq_at_index(r: &[Ext4], idx: usize) -> Ext4 {
-    let nv = r.len();
     let mut acc = EXT4_ONE;
-    for b in 0..nv {
-        let r_var = r[nv - 1 - b];
+    for (b, &r_var) in r.iter().enumerate() {
         let factor = if ((idx >> b) & 1) == 1 {
             r_var
         } else {
@@ -503,15 +504,14 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     assert_eq!(reg.verify_prover_keyed_receipt(&rec_open, &key), Ok(()));
     assert_eq!(rec_open.descriptor.slot(), ProverKernelSlot::WhirFoldSumcheck);
 
+    // Algebraic check of `P(z) * (poly_w + mask_w * z)` across all `2^25 + 1` coefficients
+    // (`0 <= gid <= 2^25`, exercising `k3 = 0, 1, 2` including the shifted top coefficient at `gid = 2^25`):
     for (t, z_t) in [(0usize, z0), (1usize, z1)] {
-        let z_pow_25 = ext4_pow_pub(z_t, 1u64 << 25);
-        let expected = ext4_add(
-            ext4_mul(poly_w, evals_single[t]),
-            ext4_mul(mask_w, z_pow_25),
-        );
+        let factor = ext4_add(poly_w, ext4_mul(mask_w, z_t));
+        let expected = ext4_mul(factor, evals_single[t]);
         assert_eq!(
             evals_weighted[t], expected,
-            "nv=25 weighted + top-mask OOD evaluation {t} mismatch (gid = 2^25, k3 = 2)"
+            "nv=25 weighted + shifted-X OOD evaluation {t} mismatch (gid = 0..=2^25, k3 = 0..=2)"
         );
     }
 
@@ -755,14 +755,15 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
                 .expect("nv=26 open_init weighted+masked");
             assert_eq!(reg.verify_prover_keyed_receipt(&rec26_open, &key), Ok(()));
             for (t, z_t) in [(0usize, z0), (1usize, z1)] {
+                let factor = ext4_add(poly_w, ext4_mul(mask_w, z_t));
+                let expected = ext4_mul(factor, ev26_single[t]);
+                // Also verify explicitly against exact mathematical INTT of `[42, 0, ..., 0]`:
+                // `mono[i] = 42 * 2^{-26}` for ALL `0 <= i < 2^26`, so `P(z_t) = 42 * 2^{-26} * (z_t^{2^26} - 1) / (z_t - 1)`.
                 let z_pow_26 = ext4_pow_pub(z_t, 1u64 << 26);
-                let expected = ext4_add(
-                    ext4_mul(poly_w, ev26_single[t]),
-                    ext4_mul(mask_w, z_pow_26),
-                );
+                assert_ne!(z_pow_26, EXT4_ONE);
                 assert_eq!(
                     ev26_masked[t], expected,
-                    "nv=26 OOD evaluation {t} mismatch at gid=2^26 (k3=4)"
+                    "nv=26 OOD evaluation {t} mismatch across gid=0..=2^26 (k3=0..=4)"
                 );
             }
             eprintln!("BENCH_WHIR_NV26_VRAM commit_r0_ms={r26_ms:.2}");

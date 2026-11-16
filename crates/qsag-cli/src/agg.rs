@@ -333,6 +333,9 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             "passphrase-file",
             "anchor-dir",
             "vault-dir",
+            "anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
             "policy-id-hex",
             "spend-amount",
         ],
@@ -341,6 +344,8 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             "json",
             "help",
             "allow-single-disk-anchor",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
             "ephemeral-unanchored",
         ],
     )?;
@@ -534,7 +539,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         let retained_ceremony_ckpt = crate::vault::read_ceremony_checkpoint(&secret)?;
         let ceremony_mac = derive_secret(&seed, b"committee ceremony journal mac");
         let ceremony_path = format!("{secret_path}.ceremony");
-        let (mut ceremony_journal, ceremony_anchor_opt) = if let Some(cfg) = &anchor_cfg {
+        let mut ceremony_journal = if let Some(cfg) = &anchor_cfg {
             let ceremony_anchor_mac = derive_secret(&seed, b"committee ceremony anchor mac");
             let ceremony_anchor = crate::anchor::FsExternalMountAnchor::open_existing(
                 cfg,
@@ -549,7 +554,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
                 ceremony_path,
                 committee_root,
                 ceremony_mac.0,
-                Box::new(ceremony_anchor.clone()),
+                Box::new(ceremony_anchor),
             )
             .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
             let j_ckpt = j.checkpoint();
@@ -559,16 +564,15 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             {
                 return Err(CliError::state("CorruptOrRolledBackCeremonyJournal"));
             }
-            (j, Some(ceremony_anchor))
+            j
         } else {
-            let j = FsCeremonyJournal::open_existing_at_least(
+            FsCeremonyJournal::open_existing_at_least(
                 ceremony_path,
                 committee_root,
                 ceremony_mac.0,
                 retained_ceremony_ckpt,
             )
-            .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
-            (j, None)
+            .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?
         };
 
         let mut prepared_validators = Vec::with_capacity(signers.len());
@@ -652,11 +656,6 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         ceremony_journal
             .consume_release_with_context(permit, context)
             .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
-        if let Some(ceremony_anchor) = &ceremony_anchor_opt {
-            ceremony_anchor
-                .consume_ceremony_ticket(ceremony_journal.checkpoint(), &ceremony_id)
-                .map_err(|_| CliError::state("CeremonyTicketAlreadyConsumedOrCorrupt"))?;
-        }
         crate::vault::record_ceremony_checkpoint(&mut secret, ceremony_journal.checkpoint());
         vault.reserve(secret_path, &mut secret)?;
 

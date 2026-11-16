@@ -17,25 +17,27 @@
 //!    `pk_48` on-chain**, protecting legacy `0x00` validators against quantum harvest-now-decrypt-later.
 
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::fmt;
 
 use qsag_accel::{
     AcceleratorBackend,
     ct::{RedactedSecret, ct_zeroize_bytes, ct_zeroize_u64s},
-    goldilocks::{GOLDILOCKS_PRIME, gl_add, gl_mul, gl_sub, pack_bytes32_to_limbs56},
+    goldilocks::{GOLDILOCKS_PRIME, pack_bytes32_to_limbs56},
     keccak::{InterleavedTranscript, cshake256_framed_32},
-    poseidon2::{POSEIDON2_CONST_IV, poseidon2_const_at, poseidon2_hash_limbs},
+    poseidon2::poseidon2_hash_limbs,
     sha2::sha256,
 };
 use qsag_addr::QsagAddress;
 
 use crate::{
+    boolean_hash,
+    circuit::{Builder, Circuit, Domain, Wire, ZERO, lift4},
     limbs,
+    ownership::{big_endian, pack56, sponge},
     scalar::NULLIFIER_DOMAIN,
     zk_engine::{
-        MIT_REPETITIONS, MigrateError, MigrationZkProof, OpenedRepetitionView, PartyView,
-        challenges, rep_root,
+        MIT_REPETITIONS, MigrateError, MigrationZkProof, OpenedRepetitionView, Wires, challenges,
+        rep_root, replay_with_scratch, simulate,
     },
 };
 
@@ -742,288 +744,15 @@ impl BlsMigrationStatement {
 }
 
 // ============================================================================
-// Self-Contained Mixed-Domain (`GF(2)` + `Goldilocks` + `FpBls381`) ZKBoo Engine
+// Unified Mixed-Domain (`GF(2)` + `Goldilocks` + `FpBls381`) ZKBoo Circuit
 // ============================================================================
 
-type Wire = usize;
 type Val6 = [u64; 6];
-const ZERO6: Val6 = [0; 6];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BlsDom {
-    Bit,
-    Gold,
-    BlsFp,
-}
-
-impl BlsDom {
-    #[inline]
-    fn byte_len(self) -> usize {
-        match self {
-            Self::Bit => 1,
-            Self::Gold => 8,
-            Self::BlsFp => 48,
-        }
-    }
-
-    #[inline]
-    fn canonical(self, x: Val6) -> bool {
-        match self {
-            Self::Bit => limbs::lt(x, [2, 0, 0, 0, 0, 0]),
-            Self::Gold => limbs::lt(x, [GOLDILOCKS_PRIME, 0, 0, 0, 0, 0]),
-            Self::BlsFp => limbs::lt(x, BLS_P),
-        }
-    }
-
-    #[inline]
-    fn add(self, a: Val6, b: Val6) -> Val6 {
-        match self {
-            Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0, 0, 0],
-            Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0, 0, 0],
-            Self::BlsFp => limbs::add_mod(a, b, BLS_P),
-        }
-    }
-
-    #[inline]
-    fn sub(self, a: Val6, b: Val6) -> Val6 {
-        match self {
-            Self::Bit => [(a[0] ^ b[0]) & 1, 0, 0, 0, 0, 0],
-            Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0, 0, 0],
-            Self::BlsFp => limbs::sub_mod(a, b, BLS_P),
-        }
-    }
-
-    #[inline]
-    fn mul(self, a: Val6, b: Val6) -> Val6 {
-        match self {
-            Self::Bit => [(a[0] & b[0]) & 1, 0, 0, 0, 0, 0],
-            Self::Gold => [gl_mul(a[0], b[0]), 0, 0, 0, 0, 0],
-            Self::BlsFp => (FpBls381(a) * FpBls381(b)).0,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum BlsOp {
-    Input,
-    Constant(Val6),
-    Add(Wire, Wire),
-    Sub(Wire, Wire),
-    Scale(Wire, Val6),
-    Mul(Wire, Wire),
-    Lift(Wire, usize),
-}
-
-struct BlsNode {
-    domain: BlsDom,
-    op: BlsOp,
-    value: Val6,
-}
-
-impl Drop for BlsNode {
-    fn drop(&mut self) {
-        ct_zeroize_u64s(&mut self.value);
-    }
-}
 
 /// Mixed-domain ZKBoo circuit for Ethereum Beacon validator `BLS12-381` ownership.
-pub struct BlsOwnershipCircuit {
-    nodes: Vec<BlsNode>,
-    outputs: Vec<Wire>,
-}
+pub struct BlsOwnershipCircuit(pub(crate) Circuit);
 
-#[derive(Default)]
-struct BlsBuilder {
-    nodes: RefCell<Vec<BlsNode>>,
-    outputs: RefCell<Vec<Wire>>,
-}
-
-impl BlsBuilder {
-    fn push(&self, domain: BlsDom, op: BlsOp, value: Val6) -> Wire {
-        let mut ns = self.nodes.borrow_mut();
-        let w = ns.len();
-        if ns.len() == ns.capacity() {
-            let mut grown = Vec::with_capacity(ns.capacity().saturating_mul(2).max(64));
-            grown.extend(ns.iter().map(|n| BlsNode {
-                domain: n.domain,
-                op: n.op,
-                value: n.value,
-            }));
-            *ns = grown;
-        }
-        ns.push(BlsNode { domain, op, value });
-        w
-    }
-
-    fn finish(self) -> BlsOwnershipCircuit {
-        BlsOwnershipCircuit {
-            nodes: self.nodes.into_inner(),
-            outputs: self.outputs.into_inner(),
-        }
-    }
-
-    fn value(&self, w: Wire) -> Val6 {
-        self.nodes.borrow()[w].value
-    }
-
-    fn domain(&self, w: Wire) -> BlsDom {
-        self.nodes.borrow()[w].domain
-    }
-
-    fn known(&self, w: Wire) -> Option<Val6> {
-        match self.nodes.borrow()[w].op {
-            BlsOp::Constant(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    fn constant(&self, d: BlsDom, x: Val6) -> Wire {
-        self.push(d, BlsOp::Constant(x), x)
-    }
-
-    fn small(&self, d: BlsDom, x: u64) -> Wire {
-        self.constant(d, [x, 0, 0, 0, 0, 0])
-    }
-
-    fn input_bit(&self, bit: u8) -> Wire {
-        self.push(
-            BlsDom::Bit,
-            BlsOp::Input,
-            [u64::from(bit & 1), 0, 0, 0, 0, 0],
-        )
-    }
-
-    fn input_fp(&self, x: FpBls381) -> Wire {
-        self.push(BlsDom::BlsFp, BlsOp::Input, x.0)
-    }
-
-    fn add(&self, a: Wire, b: Wire) -> Wire {
-        let d = self.domain(a);
-        assert_eq!(d, self.domain(b));
-        match (self.known(a), self.known(b)) {
-            (Some(x), Some(y)) => self.constant(d, d.add(x, y)),
-            (Some(ZERO6), _) => b,
-            (_, Some(ZERO6)) => a,
-            _ => self.push(d, BlsOp::Add(a, b), d.add(self.value(a), self.value(b))),
-        }
-    }
-
-    fn sub(&self, a: Wire, b: Wire) -> Wire {
-        let d = self.domain(a);
-        assert_eq!(d, self.domain(b));
-        if a == b {
-            return self.constant(d, ZERO6);
-        }
-        match (self.known(a), self.known(b)) {
-            (Some(x), Some(y)) => self.constant(d, d.sub(x, y)),
-            (_, Some(ZERO6)) => a,
-            _ => self.push(d, BlsOp::Sub(a, b), d.sub(self.value(a), self.value(b))),
-        }
-    }
-
-    fn scale_val(&self, a: Wire, c: Val6) -> Wire {
-        let d = self.domain(a);
-        if c == ZERO6 {
-            return self.constant(d, ZERO6);
-        }
-        if c == [1, 0, 0, 0, 0, 0] {
-            return a;
-        }
-        let v = d.mul(self.value(a), c);
-        if self.known(a).is_some() {
-            self.constant(d, v)
-        } else {
-            self.push(d, BlsOp::Scale(a, c), v)
-        }
-    }
-
-    fn scale(&self, a: Wire, c: u64) -> Wire {
-        self.scale_val(a, [c, 0, 0, 0, 0, 0])
-    }
-
-    fn mul(&self, a: Wire, b: Wire) -> Wire {
-        let d = self.domain(a);
-        assert_eq!(d, self.domain(b));
-        match (self.known(a), self.known(b)) {
-            (Some(x), Some(y)) => self.constant(d, d.mul(x, y)),
-            (Some(x), _) => self.scale_val(b, x),
-            (_, Some(y)) => self.scale_val(a, y),
-            _ => self.push(d, BlsOp::Mul(a, b), d.mul(self.value(a), self.value(b))),
-        }
-    }
-
-    fn not(&self, a: Wire) -> Wire {
-        self.add(a, self.small(BlsDom::Bit, 1))
-    }
-
-    fn output(&self, a: Wire) {
-        self.outputs.borrow_mut().push(a);
-    }
-
-    fn equal(&self, a: Wire, b: Wire) {
-        self.output(self.sub(a, b));
-    }
-
-    fn lift(&self, a: Wire, d: BlsDom) -> Wire {
-        assert_eq!(self.domain(a), BlsDom::Bit);
-        let parts: [Wire; 3] = core::array::from_fn(|p| {
-            self.push(
-                d,
-                BlsOp::Lift(a, p),
-                if p == 0 { self.value(a) } else { ZERO6 },
-            )
-        });
-        let xor = |x, y| self.sub(self.add(x, y), self.scale(self.mul(x, y), 2));
-        xor(xor(parts[0], parts[1]), parts[2])
-    }
-
-    fn pack_domain(&self, bits_le: &[Wire], d: BlsDom) -> Wire {
-        bits_le.iter().rev().fold(self.small(d, 0), |a, &b| {
-            self.add(self.scale(a, 2), self.lift(b, d))
-        })
-    }
-
-    fn add_bits(&self, a: &[Wire], b: &[Wire], carry: Wire) -> (Vec<Wire>, Wire) {
-        let mut c = carry;
-        let out = a
-            .iter()
-            .zip(b)
-            .map(|(&x, &y)| {
-                let xc = self.add(x, c);
-                let yc = self.add(y, c);
-                let s = self.add(xc, y);
-                c = self.add(c, self.mul(xc, yc));
-                s
-            })
-            .collect();
-        (out, c)
-    }
-
-    fn constant_bits(&self, limbs: &[u64], width: usize) -> Vec<Wire> {
-        (0..width)
-            .map(|i| self.small(BlsDom::Bit, (limbs[i / 64] >> (i % 64)) & 1))
-            .collect()
-    }
-
-    fn require_canonical(&self, bits: &[Wire], order_limbs: &[u64]) {
-        let comp: Vec<_> = self
-            .constant_bits(order_limbs, bits.len())
-            .into_iter()
-            .map(|b| self.not(b))
-            .collect();
-        let (_, ge) = self.add_bits(bits, &comp, self.small(BlsDom::Bit, 1));
-        self.output(ge);
-    }
-
-    fn require_nonzero(&self, bits: &[Wire]) {
-        let all_zero = bits
-            .iter()
-            .fold(self.small(BlsDom::Bit, 1), |a, &b| self.mul(a, self.not(b)));
-        self.output(all_zero);
-    }
-}
-
-fn bls_rcb_add(c: &BlsBuilder, a: [Wire; 3], b: [Wire; 3]) -> [Wire; 3] {
+fn bls_rcb_add(c: &Builder, a: [Wire; 3], b: [Wire; 3]) -> [Wire; 3] {
     let mut t0 = c.mul(a[0], b[0]);
     let mut t1 = c.mul(a[1], b[1]);
     let zz = c.mul(a[2], b[2]);
@@ -1082,7 +811,7 @@ fn bls_g1_window_tables() -> Vec<[[Val6; 3]; 16]> {
     tables
 }
 
-fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
+fn fixed_base_bls_g1_mul(c: &Builder, bits: &[Wire]) -> [Wire; 3] {
     #[cfg(any(feature = "std", test))]
     let tables = {
         static TABLES: std::sync::OnceLock<Vec<[[Val6; 3]; 16]>> = std::sync::OnceLock::new();
@@ -1090,7 +819,7 @@ fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
     };
     #[cfg(not(any(feature = "std", test)))]
     let tables = &bls_g1_window_tables();
-    let one = c.small(BlsDom::BlsFp, 1);
+    let one = c.small(Domain::BlsFp, 1);
     let pairs = |a, b| {
         let ab = c.mul(a, b);
         let a_only = c.sub(a, ab);
@@ -1099,10 +828,10 @@ fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
     };
     let mut acc: Option<[Wire; 3]> = None;
     for (nibble, table) in bits.chunks_exact(4).zip(tables) {
-        let b: [Wire; 4] = core::array::from_fn(|i| c.lift(nibble[i], BlsDom::BlsFp));
+        let b: [Wire; 4] = core::array::from_fn(|i| c.lift(nibble[i], Domain::BlsFp));
         let lo = pairs(b[0], b[1]);
         let hi = pairs(b[2], b[3]);
-        let mut sel = [c.small(BlsDom::BlsFp, 0); 16];
+        let mut sel = [c.small(Domain::BlsFp, 0); 16];
         for j in 0..3 {
             for i in 0..3 {
                 sel[j * 4 + i] = c.mul(lo[i], hi[j]);
@@ -1121,8 +850,8 @@ fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
             }
             sel.iter()
                 .zip(table)
-                .fold(c.small(BlsDom::BlsFp, 0), |sum, (&w, p)| {
-                    c.add(sum, c.scale_val(w, p[coord]))
+                .fold(c.small(Domain::BlsFp, 0), |sum, (&w, p)| {
+                    c.add(sum, c.scale_value(w, p[coord]))
                 })
         });
         acc = Some(match acc {
@@ -1133,320 +862,43 @@ fn fixed_base_bls_g1_mul(c: &BlsBuilder, bits: &[Wire]) -> [Wire; 3] {
     acc.unwrap()
 }
 
-// --- GF(2) single-block SHA-256 for unrevealed `0x00` BLS withdrawal credentials ---
-
-type ShaWord = [Wire; 32];
-
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-fn sha_word(c: &BlsBuilder, x: u32) -> ShaWord {
-    core::array::from_fn(|i| c.small(BlsDom::Bit, u64::from((x >> i) & 1)))
-}
-
-fn sha_xor(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
-    core::array::from_fn(|i| c.add(a[i], b[i]))
-}
-
-fn sha_and(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
-    core::array::from_fn(|i| c.mul(a[i], b[i]))
-}
-
-fn sha_rotr(a: ShaWord, n: usize) -> ShaWord {
-    core::array::from_fn(|i| a[(i + n) % 32])
-}
-
-fn sha_shr(c: &BlsBuilder, a: ShaWord, n: usize) -> ShaWord {
-    core::array::from_fn(|i| {
-        if i + n < 32 {
-            a[i + n]
-        } else {
-            c.small(BlsDom::Bit, 0)
-        }
-    })
-}
-
-fn sha_add(c: &BlsBuilder, a: ShaWord, b: ShaWord) -> ShaWord {
-    let mut carry = c.small(BlsDom::Bit, 0);
-    core::array::from_fn(|i| {
-        let xc = c.add(a[i], carry);
-        let s = c.add(xc, b[i]);
-        if i < 31 {
-            let yc = c.add(b[i], carry);
-            carry = c.add(carry, c.mul(xc, yc));
-        }
-        s
-    })
-}
-
-fn sha_csa(c: &BlsBuilder, x: ShaWord, y: ShaWord, z: ShaWord) -> (ShaWord, ShaWord) {
-    let xy = sha_xor(c, x, y);
-    let s = sha_xor(c, xy, z);
-    let xz = sha_xor(c, x, z);
-    let zero = c.small(BlsDom::Bit, 0);
-    let carry = core::array::from_fn(|i| {
-        if i == 0 {
-            zero
-        } else {
-            c.add(x[i - 1], c.mul(xy[i - 1], xz[i - 1]))
-        }
-    });
-    (s, carry)
-}
-
-fn sha_sum(c: &BlsBuilder, words: &[ShaWord]) -> ShaWord {
-    let mut rows = words.to_vec();
-    while rows.len() > 2 {
-        let mut next = Vec::with_capacity((rows.len() / 3) * 2 + (rows.len() % 3));
-        for triple in rows.chunks_exact(3) {
-            let (s, carry) = sha_csa(c, triple[0], triple[1], triple[2]);
-            next.push(s);
-            next.push(carry);
-        }
-        next.extend_from_slice(&rows[(rows.len() / 3) * 3..]);
-        rows = next;
-    }
-    if rows.len() == 1 {
-        rows[0]
-    } else {
-        sha_add(c, rows[0], rows[1])
-    }
-}
-
-fn sha256_48_bytes(c: &BlsBuilder, msg_384_bits: &[Wire]) -> Vec<Wire> {
-    assert_eq!(msg_384_bits.len(), 384);
-    let mut block = msg_384_bits.to_vec();
-    let mut pad = [0u8; 16];
-    pad[0] = 0x80;
-    pad[8..16].copy_from_slice(&(384u64).to_be_bytes());
-    for &b in &pad {
-        for i in 0..8 {
-            block.push(c.small(BlsDom::Bit, u64::from((b >> i) & 1)));
-        }
-    }
-    assert_eq!(block.len(), 512);
-    let mut w: Vec<ShaWord> = block
-        .chunks_exact(32)
-        .map(|chunk| core::array::from_fn(|i| chunk[(3 - i / 8) * 8 + i % 8]))
-        .collect();
-    while w.len() < 64 {
-        let i = w.len();
-        let s0 = sha_xor(
-            c,
-            sha_xor(c, sha_rotr(w[i - 15], 7), sha_rotr(w[i - 15], 18)),
-            sha_shr(c, w[i - 15], 3),
-        );
-        let s1 = sha_xor(
-            c,
-            sha_xor(c, sha_rotr(w[i - 2], 17), sha_rotr(w[i - 2], 19)),
-            sha_shr(c, w[i - 2], 10),
-        );
-        w.push(sha_sum(c, &[w[i - 16], s0, w[i - 7], s1]));
-    }
-    let iv = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ]
-    .map(|x| sha_word(c, x));
-    let [mut a, mut b, mut cc, mut d, mut e, mut f, mut g, mut h] = iv;
-    for (&k, &ww) in SHA256_K.iter().zip(&w) {
-        let s1 = sha_xor(
-            c,
-            sha_xor(c, sha_rotr(e, 6), sha_rotr(e, 11)),
-            sha_rotr(e, 25),
-        );
-        let ch = sha_xor(c, g, sha_and(c, e, sha_xor(c, f, g)));
-        let t1 = sha_sum(c, &[h, s1, ch, sha_word(c, k), ww]);
-        let s0 = sha_xor(
-            c,
-            sha_xor(c, sha_rotr(a, 2), sha_rotr(a, 13)),
-            sha_rotr(a, 22),
-        );
-        let maj = sha_xor(c, a, sha_and(c, sha_xor(c, a, b), sha_xor(c, a, cc)));
-        let t2 = sha_add(c, s0, maj);
-        h = g;
-        g = f;
-        f = e;
-        e = sha_add(c, d, t1);
-        d = cc;
-        cc = b;
-        b = a;
-        a = sha_add(c, t1, t2);
-    }
-    let final_words: [ShaWord; 8] = core::array::from_fn(|idx| {
-        let delta = [a, b, cc, d, e, f, g, h][idx];
-        sha_add(c, iv[idx], delta)
-    });
-    final_words
-        .iter()
-        .flat_map(|wd| (0..32).map(move |i| wd[(3 - i / 8) * 8 + i % 8]))
-        .collect()
-}
-
-// --- Poseidon2 Goldilocks nullifier gadget ---
-
-fn big_endian_bits(bits: &[Wire]) -> Vec<Wire> {
-    bits.chunks_exact(8).rev().flatten().copied().collect()
-}
-
-fn poseidon_me(c: &BlsBuilder, st: &mut [Wire; 12]) {
-    // Conjugate P3 tensor M4 by the lane transpose.
-    *st = [
-        st[0], st[3], st[6], st[9], st[1], st[4], st[7], st[10], st[2], st[5], st[8], st[11],
-    ];
-    let mut ys = *st;
-    for row in ys.chunks_exact_mut(4) {
-        let old: [Wire; 4] = core::array::from_fn(|i| row[i]);
-        let s = old.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
-        for (i, x) in row.iter_mut().enumerate() {
-            *x = c.add(s, c.add(old[i], c.scale(old[(i + 1) % 4], 2)));
-        }
-    }
-    for (i, x) in st.iter_mut().enumerate() {
-        *x = c.add(ys[i], c.add(c.add(ys[i % 4], ys[i % 4 + 4]), ys[i % 4 + 8]));
-    }
-    *st = [
-        st[0], st[4], st[8], st[1], st[5], st[9], st[2], st[6], st[10], st[3], st[7], st[11],
-    ];
-}
-
-fn poseidon_mi(c: &BlsBuilder, st: &mut [Wire; 12]) {
-    let s = st.iter().copied().reduce(|a, b| c.add(a, b)).unwrap();
-    st[0] = c.sub(s, c.scale(st[0], 64));
-    st[1] = c.add(s, st[1]);
-    for (i, x) in st.iter_mut().enumerate().skip(2) {
-        *x = c.add(s, c.scale(*x, 1 << (i - 1)));
-    }
-}
-
-fn poseidon_sbox(c: &BlsBuilder, x: Wire, rc: u64) -> Wire {
-    let x = c.add(x, c.small(BlsDom::Gold, rc));
-    let x2 = c.mul(x, x);
-    let x3 = c.mul(x2, x);
-    let x4 = c.mul(x2, x2);
-    c.mul(x3, x4)
-}
-
-fn poseidon_perm(c: &BlsBuilder, st: &mut [Wire; 12]) {
-    poseidon_me(c, st);
-    for r in 0..4 {
-        for (i, x) in st.iter_mut().enumerate() {
-            *x = poseidon_sbox(c, *x, poseidon2_const_at(0, r, i as u64));
-        }
-        poseidon_me(c, st);
-    }
-    for r in 0..22 {
-        st[0] = poseidon_sbox(c, st[0], poseidon2_const_at(1, r, 0));
-        poseidon_mi(c, st);
-    }
-    for r in 0..4 {
-        for (i, x) in st.iter_mut().enumerate() {
-            *x = poseidon_sbox(c, *x, poseidon2_const_at(2, r, i as u64));
-        }
-        poseidon_me(c, st);
-    }
-}
-
-fn poseidon_sponge(c: &BlsBuilder, domain: u64, input: &[Wire]) -> [Wire; 4] {
-    let mut st = [c.small(BlsDom::Gold, 0); 12];
-    for (i, v) in [(8, 8), (9, 4), (10, domain), (11, POSEIDON2_CONST_IV)] {
-        st[i] = c.small(BlsDom::Gold, v);
-    }
-    let mut pos = 0;
-    for &x in input {
-        st[pos] = c.add(st[pos], x);
-        pos += 1;
-        if pos == 8 {
-            poseidon_perm(c, &mut st);
-            pos = 0;
-        }
-    }
-    st[pos] = c.add(st[pos], c.small(BlsDom::Gold, 1));
-    st[7] = c.add(st[7], c.small(BlsDom::Gold, 1 << 56));
-    poseidon_perm(c, &mut st);
-    [st[0], st[1], st[2], st[3]]
-}
-
-fn pack56_gold(c: &BlsBuilder, bytes_bits: &[Wire]) -> Vec<Wire> {
-    let mut marked = bytes_bits.to_vec();
-    for &b in &[1u8, 0, 0] {
-        for i in 0..8 {
-            marked.push(c.small(BlsDom::Bit, u64::from((b >> i) & 1)));
-        }
-    }
-    marked
-        .chunks_exact(56)
-        .map(|chunk| {
-            let little: Vec<_> = chunk.chunks_exact(8).rev().flatten().copied().collect();
-            c.pack_domain(&little, BlsDom::Gold)
-        })
-        .collect()
-}
-
 /// Build the mixed-domain ZKBoo circuit for `statement`.
 pub fn build_bls_ownership_circuit(
     statement: &BlsMigrationStatement,
     public_affine: Option<(FpBls381, FpBls381)>,
     sk_le: &[u8; 32],
 ) -> BlsOwnershipCircuit {
-    let c = BlsBuilder::default();
+    let c = Builder::default();
     let sk_bits: Vec<_> = sk_le
         .iter()
         .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
-        .map(|b| c.input_bit(b))
+        .map(|b| c.input(b))
         .collect();
-    c.require_canonical(&sk_bits, &BLS_R);
-    c.require_nonzero(&sk_bits);
+    c.require_scalar(&sk_bits, lift4(BLS_R));
 
     let proj = fixed_base_bls_g1_mul(&c, &sk_bits);
-    let z_val = FpBls381(c.value(proj[2]));
-    let z_inv_val = z_val.inv_or_zero();
-    let z_inv = c.input_fp(z_inv_val);
-    c.equal(c.mul(proj[2], z_inv), c.small(BlsDom::BlsFp, 1));
+    let z_inv = c.inverse(proj[2]);
 
     match (&statement.commitment, public_affine) {
         (BlsValidatorCommitment::BeaconValidatorPubkey(_), Some((x_pub, y_pub))) => {
-            c.equal(proj[0], c.scale_val(proj[2], x_pub.0));
-            c.equal(proj[1], c.scale_val(proj[2], y_pub.0));
+            c.equal(proj[0], c.scale_value(proj[2], x_pub.0));
+            c.equal(proj[1], c.scale_value(proj[2], y_pub.0));
         }
         (BlsValidatorCommitment::UnrevealedBls0x00Credential(cred), None) => {
-            let mut x_le = (FpBls381(c.value(proj[0])) * z_inv_val).to_le_bytes();
-            let mut y_le = (FpBls381(c.value(proj[1])) * z_inv_val).to_le_bytes();
-            let x_bits: Vec<_> = x_le
-                .iter()
-                .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
-                .map(|b| c.input_bit(b))
-                .collect();
-            let y_bits: Vec<_> = y_le
-                .iter()
-                .flat_map(|&b| (0..8).map(move |i| (b >> i) & 1))
-                .map(|b| c.input_bit(b))
-                .collect();
-            ct_zeroize_bytes(&mut x_le);
-            ct_zeroize_bytes(&mut y_le);
-
-            c.require_canonical(&x_bits, &BLS_P);
-            c.require_canonical(&y_bits, &BLS_P);
-            let x_fp = c.pack_domain(&x_bits, BlsDom::BlsFp);
-            let y_fp = c.pack_domain(&y_bits, BlsDom::BlsFp);
-            c.equal(proj[0], c.mul(x_fp, proj[2]));
-            c.equal(proj[1], c.mul(y_fp, proj[2]));
+            // Decompose affine `(x, y) = (proj[0] * z_inv, proj[1] * z_inv)` directly via
+            // `Op::Digit` so multi-custodian `co_zk_mpc` never reconstructs `pk_48` in the clear.
+            let mut x_bits = c.bits(c.mul(proj[0], z_inv));
+            let mut y_bits = c.bits(c.mul(proj[1], z_inv));
+            x_bits.resize(384, c.small(Domain::Bit, 0));
+            y_bits.resize(384, c.small(Domain::Bit, 0));
 
             // `a_flag = (y >= (p + 1) / 2)`
             let comp_half: Vec<_> = c
-                .constant_bits(&BLS_P_HALF_CEIL, 384)
+                .constant_bits(BLS_P_HALF_CEIL, 384)
                 .into_iter()
                 .map(|b| c.not(b))
                 .collect();
-            let (_, a_flag) = c.add_bits(&y_bits, &comp_half, c.small(BlsDom::Bit, 1));
+            let (_, a_flag) = c.add_bits(&y_bits, &comp_half, c.small(Domain::Bit, 1));
 
             // Assemble 48-byte big-endian IETF compressed `G_1` bit stream:
             // Byte 0: bits `0..=4` = `x_bits[376..=380]`, bit 5 = `a_flag`, bit 6 = `0`, bit 7 = `1`.
@@ -1454,19 +906,19 @@ pub fn build_bls_ownership_circuit(
             let mut pk_bits = Vec::with_capacity(384);
             pk_bits.extend_from_slice(&x_bits[376..381]);
             pk_bits.push(a_flag);
-            pk_bits.push(c.small(BlsDom::Bit, 0));
-            pk_bits.push(c.small(BlsDom::Bit, 1));
+            pk_bits.push(c.small(Domain::Bit, 0));
+            pk_bits.push(c.small(Domain::Bit, 1));
             for k in 1..48 {
                 let base = 8 * (47 - k);
                 pk_bits.extend_from_slice(&x_bits[base..base + 8]);
             }
-            let digest_bits = sha256_48_bytes(&c, &pk_bits);
+            let digest_bits = boolean_hash::sha256(&c, &pk_bits);
             for (byte_idx, &expected_byte) in cred[1..32].iter().enumerate() {
                 for bit_idx in 0..8 {
                     let expected_bit = u64::from((expected_byte >> bit_idx) & 1);
                     c.equal(
                         digest_bits[(byte_idx + 1) * 8 + bit_idx],
-                        c.small(BlsDom::Bit, expected_bit),
+                        c.small(Domain::Bit, expected_bit),
                     );
                 }
             }
@@ -1474,347 +926,22 @@ pub fn build_bls_ownership_circuit(
         _ => unreachable!("commitment mode and public_affine invariant violated"),
     }
 
-    let mut nul_in = alloc::vec![c.small(BlsDom::Gold, NULLIFIER_TAG_BLS12_381_G1)];
-    nul_in.extend(pack56_gold(&c, &big_endian_bits(&sk_bits)));
+    let mut nul_in = alloc::vec![c.small(Domain::Gold, NULLIFIER_TAG_BLS12_381_G1)];
+    nul_in.extend(pack56(&c, &big_endian(&sk_bits)));
     nul_in.extend(
-        pack_bytes32_to_limbs56(&statement.migration_domain).map(|v| c.small(BlsDom::Gold, v)),
+        pack_bytes32_to_limbs56(&statement.migration_domain).map(|v| c.small(Domain::Gold, v)),
     );
-    let nul = poseidon_sponge(&c, NULLIFIER_DOMAIN, &nul_in);
+    let nul = sponge(&c, NULLIFIER_DOMAIN, &nul_in);
     for (w, expected) in nul.into_iter().zip(statement.migration_nullifier) {
-        c.equal(w, c.small(BlsDom::Gold, expected));
+        c.equal(w, c.small(Domain::Gold, expected));
     }
-    c.finish()
+    BlsOwnershipCircuit(c.finish())
 }
 
-struct BlsTape {
-    sponge: crate::tape_sponge::TapeSponge,
-    bit_buf: u64,
-    bit_rem: u8,
-}
-
-impl Drop for BlsTape {
-    fn drop(&mut self) {
-        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_buf), 0);
-        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
-    }
-}
-
-impl BlsTape {
-    fn new(seed: &[u8; 32]) -> Self {
-        Self {
-            sponge: crate::tape_sponge::TapeSponge::new(seed),
-            bit_buf: 0,
-            bit_rem: 0,
-        }
-    }
-
-    fn sample(&mut self, d: BlsDom) -> Val6 {
-        match d {
-            BlsDom::Bit => {
-                if self.bit_rem == 0 {
-                    let mut raw = [0u8; 8];
-                    self.sponge.squeeze(&mut raw);
-                    self.bit_buf = u64::from_le_bytes(raw);
-                    self.bit_rem = 64;
-                }
-                let b = self.bit_buf & 1;
-                self.bit_buf >>= 1;
-                self.bit_rem -= 1;
-                [b, 0, 0, 0, 0, 0]
-            }
-            BlsDom::Gold => [self.sponge.gold(), 0, 0, 0, 0, 0],
-            BlsDom::BlsFp => loop {
-                let mut raw = [0u8; 48];
-                self.sponge.squeeze(&mut raw);
-                let mut v: Val6 = limbs::from_le_bytes(&raw);
-                ct_zeroize_bytes(&mut raw);
-                v[5] &= 0x1fff_ffff_ffff_ffff;
-                if limbs::lt(v, BLS_P) {
-                    return v;
-                }
-            },
-        }
-    }
-}
-
-fn bls_put(out: &mut Vec<u8>, d: BlsDom, v: Val6) {
-    match d {
-        BlsDom::Bit => out.push((v[0] & 1) as u8),
-        BlsDom::Gold => out.extend_from_slice(&v[0].to_le_bytes()),
-        BlsDom::BlsFp => out.extend_from_slice(&limbs::to_le_bytes::<6, 48>(v)),
-    }
-}
-
-fn bls_take(input: &mut &[u8], d: BlsDom) -> Result<Val6, MigrateError> {
-    let len = d.byte_len();
-    if input.len() < len {
-        return Err(MigrateError::MalformedProofStructure);
-    }
-    let v = match d {
-        BlsDom::Bit => [u64::from(input[0]), 0, 0, 0, 0, 0],
-        BlsDom::Gold => [
-            u64::from_le_bytes(input[..8].try_into().unwrap()),
-            0,
-            0,
-            0,
-            0,
-            0,
-        ],
-        BlsDom::BlsFp => limbs::from_le_bytes::<6, 48>(input[..48].try_into().unwrap()),
-    };
-    *input = &input[len..];
-    if !d.canonical(v) {
-        return Err(MigrateError::MalformedProofStructure);
-    }
-    Ok(v)
-}
-
-fn bls_put_packed(out: &mut Vec<u8>, bit: &mut u8, d: BlsDom, v: Val6) {
-    if d == BlsDom::Bit {
-        if *bit == 0 {
-            out.push(0);
-        }
-        *out.last_mut().unwrap() |= (v[0] as u8 & 1) << *bit;
-        *bit = (*bit + 1) % 8;
-    } else {
-        *bit = 0;
-        bls_put(out, d, v);
-    }
-}
-
-struct BlsPackedReader<'a> {
-    input: &'a [u8],
-    bit: u8,
-}
-
-impl<'a> BlsPackedReader<'a> {
-    fn new(input: &'a [u8]) -> Self {
-        Self { input, bit: 0 }
-    }
-
-    fn align(&mut self) -> Result<(), MigrateError> {
-        if self.bit != 0 {
-            if self.input[0] >> self.bit != 0 {
-                return Err(MigrateError::MalformedProofStructure);
-            }
-            self.input = &self.input[1..];
-            self.bit = 0;
-        }
-        Ok(())
-    }
-
-    fn take(&mut self, d: BlsDom) -> Result<Val6, MigrateError> {
-        if d != BlsDom::Bit {
-            self.align()?;
-            return bls_take(&mut self.input, d);
-        }
-        let byte = self
-            .input
-            .first()
-            .ok_or(MigrateError::MalformedProofStructure)?;
-        let v = [u64::from((byte >> self.bit) & 1), 0, 0, 0, 0, 0];
-        self.bit = (self.bit + 1) % 8;
-        if self.bit == 0 {
-            self.input = &self.input[1..];
-        }
-        Ok(v)
-    }
-
-    fn finish(&mut self) -> Result<(), MigrateError> {
-        self.align()?;
-        if !self.input.is_empty() {
-            return Err(MigrateError::MalformedProofStructure);
-        }
-        Ok(())
-    }
-}
-
-struct BlsWires(Vec<Val6>);
-impl Drop for BlsWires {
-    fn drop(&mut self) {
-        ct_zeroize_u64s(self.0.as_mut_slice().as_flattened_mut());
-    }
-}
-
-#[inline]
-fn bls_local(node: &BlsNode, party: usize, wires: &[Val6]) -> Val6 {
-    let d = node.domain;
-    match node.op {
-        BlsOp::Constant(v) => {
-            if party == 0 {
-                v
-            } else {
-                ZERO6
-            }
-        }
-        BlsOp::Add(a, b) => d.add(wires[a], wires[b]),
-        BlsOp::Sub(a, b) => d.sub(wires[a], wires[b]),
-        BlsOp::Scale(a, v) => d.mul(wires[a], v),
-        BlsOp::Lift(a, owner) => {
-            if party == owner {
-                wires[a]
-            } else {
-                ZERO6
-            }
-        }
-        BlsOp::Input | BlsOp::Mul(_, _) => ZERO6,
-    }
-}
-
-#[inline]
-fn bls_gate(d: BlsDom, a: [Val6; 2], b: [Val6; 2], r: [Val6; 2]) -> Val6 {
-    if d == BlsDom::Bit {
-        return [
-            ((a[0][0] & b[0][0]) ^ (a[0][0] & b[1][0]) ^ (a[1][0] & b[0][0]) ^ r[0][0] ^ r[1][0])
-                & 1,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ];
-    }
-    d.add(
-        d.add(
-            d.add(d.mul(a[0], b[0]), d.mul(a[0], b[1])),
-            d.mul(a[1], b[0]),
-        ),
-        d.sub(r[0], r[1]),
-    )
-}
-
-fn simulate_bls(c: &BlsOwnershipCircuit, seeds: [[u8; 32]; 3]) -> [PartyView; 3] {
-    let mut tapes = seeds.map(|s| BlsTape::new(&s));
-    let mut views = seeds.map(|seed| PartyView {
-        seed,
-        inputs: Vec::new(),
-        products: Vec::new(),
-        outputs: Vec::new(),
-    });
-    let mut wires: [BlsWires; 3] =
-        core::array::from_fn(|_| BlsWires(Vec::with_capacity(c.nodes.len())));
-    let mut prod_bits = [0u8; 3];
-    for node in &c.nodes {
-        let d = node.domain;
-        let shares = match node.op {
-            BlsOp::Input => {
-                let a = tapes[0].sample(d);
-                let b = tapes[1].sample(d);
-                let s = [a, b, d.sub(node.value, d.add(a, b))];
-                for (view, v) in views.iter_mut().zip(s) {
-                    bls_put(&mut view.inputs, d, v);
-                }
-                s
-            }
-            BlsOp::Mul(a, b) => {
-                let masks = core::array::from_fn::<_, 3, _>(|p| tapes[p].sample(d));
-                let s = core::array::from_fn(|p| {
-                    let n = (p + 1) % 3;
-                    bls_gate(
-                        d,
-                        [wires[p].0[a], wires[n].0[a]],
-                        [wires[p].0[b], wires[n].0[b]],
-                        [masks[p], masks[n]],
-                    )
-                });
-                for ((view, bit), v) in views.iter_mut().zip(&mut prod_bits).zip(s) {
-                    bls_put_packed(&mut view.products, bit, d, v);
-                }
-                s
-            }
-            _ => core::array::from_fn(|p| bls_local(node, p, &wires[p].0)),
-        };
-        for (w, v) in wires.iter_mut().zip(shares) {
-            w.0.push(v);
-        }
-    }
-    for (v, w) in views.iter_mut().zip(&wires) {
-        let mut bit = 0;
-        for &i in &c.outputs {
-            bls_put_packed(&mut v.outputs, &mut bit, c.nodes[i].domain, w.0[i]);
-        }
-    }
-    views
-}
-
-fn replay_bls(
-    c: &BlsOwnershipCircuit,
-    rep: usize,
-    view: &OpenedRepetitionView,
-) -> Result<(), MigrateError> {
-    let e = view.opened_e as usize;
-    let mut tapes = view.pair.each_ref().map(|v| BlsTape::new(&v.seed));
-    let mut inputs = view.pair.each_ref().map(|v| v.inputs.as_slice());
-    let mut products = view
-        .pair
-        .each_ref()
-        .map(|v| BlsPackedReader::new(&v.products));
-    let mut wires: [BlsWires; 2] =
-        core::array::from_fn(|_| BlsWires(Vec::with_capacity(c.nodes.len())));
-    for (gate_idx, node) in c.nodes.iter().enumerate() {
-        let d = node.domain;
-        let values = match node.op {
-            BlsOp::Input => {
-                let mut vals = [ZERO6; 2];
-                for (j, slot) in vals.iter_mut().enumerate() {
-                    *slot = bls_take(&mut inputs[j], d)?;
-                    if (e + j) % 3 != 2 && *slot != tapes[j].sample(d) {
-                        return Err(MigrateError::MalformedProofStructure);
-                    }
-                }
-                vals
-            }
-            BlsOp::Mul(a, b) => {
-                let masks = [tapes[0].sample(d), tapes[1].sample(d)];
-                let claimed = products[0].take(d)?;
-                let next = products[1].take(d)?;
-                let actual = bls_gate(
-                    d,
-                    [wires[0].0[a], wires[1].0[a]],
-                    [wires[0].0[b], wires[1].0[b]],
-                    masks,
-                );
-                if claimed != actual {
-                    return Err(MigrateError::OpenedPartyGateFailed {
-                        rep,
-                        gate: gate_idx,
-                    });
-                }
-                [claimed, next]
-            }
-            _ => core::array::from_fn(|j| bls_local(node, (e + j) % 3, &wires[j].0)),
-        };
-        for (w, v) in wires.iter_mut().zip(values) {
-            w.0.push(v);
-        }
-    }
-    for p in &mut products {
-        p.finish()?;
-    }
-    if inputs.iter().any(|s| !s.is_empty()) {
-        return Err(MigrateError::MalformedProofStructure);
-    }
-    let mut outputs = view
-        .pair
-        .each_ref()
-        .map(|v| BlsPackedReader::new(&v.outputs));
-    let mut hidden = BlsPackedReader::new(&view.hidden_outputs);
-    for &w in &c.outputs {
-        let d = c.nodes[w].domain;
-        let a = outputs[0].take(d)?;
-        let b = outputs[1].take(d)?;
-        let h = hidden.take(d)?;
-        if a != wires[0].0[w] || b != wires[1].0[w] || d.add(d.add(a, b), h) != ZERO6 {
-            return Err(MigrateError::PublicOutputShareMismatch);
-        }
-    }
-    for out in outputs.iter_mut().chain(core::iter::once(&mut hidden)) {
-        out.finish()?;
-    }
-    Ok(())
-}
-
-fn bls_transcript(statement: &BlsMigrationStatement, root: &[u8; 32]) -> InterleavedTranscript {
+pub(crate) fn bls_transcript(
+    statement: &BlsMigrationStatement,
+    root: &[u8; 32],
+) -> InterleavedTranscript {
     let mut t = InterleavedTranscript::new(
         b"QSAG.BLS12_381.MIGRATE.V1",
         &statement.to_transcript_bytes(),
@@ -1900,9 +1027,10 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
         let mut sk_le = sk.to_le_bytes();
         let circuit = build_bls_ownership_circuit(&statement, public_affine, &sk_le);
         if circuit
+            .0
             .outputs
             .iter()
-            .any(|&w| circuit.nodes[w].value != ZERO6)
+            .any(|&w| circuit.0.nodes[w].value != ZERO)
         {
             ct_zeroize_bytes(&mut sk_le);
             return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
@@ -1912,7 +1040,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
         ct_zeroize_bytes(&mut sk_le);
 
         let views = crate::parallel::map(MIT_REPETITIONS, |rep| {
-            simulate_bls(&circuit, bls_seeds(&entropy, &stmt_bytes, rep))
+            simulate(&circuit.0, bls_seeds(&entropy, &stmt_bytes, rep))
         });
         let commitments = crate::batch_hash::commit_views(accel, &views);
         let mut all_views = Vec::with_capacity(MIT_REPETITIONS);
@@ -2043,8 +1171,14 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
     let mut dummy_one = [0u8; 32];
     dummy_one[0] = 1;
     let circuit = build_bls_ownership_circuit(statement, public_affine, &dummy_one);
-    for res in crate::parallel::map(MIT_REPETITIONS, |rep| {
-        replay_bls(&circuit, rep, &proof.repetitions[rep])
+    let workers = crate::parallel::workers(MIT_REPETITIONS);
+    let chunk = MIT_REPETITIONS.div_ceil(workers);
+    for res in crate::parallel::map(workers, |worker| {
+        let mut wires = core::array::from_fn(|_| Wires(alloc::vec![ZERO; circuit.0.nodes.len()]));
+        for rep in worker * chunk..((worker + 1) * chunk).min(MIT_REPETITIONS) {
+            replay_with_scratch(&circuit.0, rep, &proof.repetitions[rep], &mut wires)?;
+        }
+        Ok::<(), MigrateError>(())
     }) {
         res?;
     }
@@ -2229,25 +1363,10 @@ mod poseidon2_canonical_kat {
     use super::*;
     #[test]
     fn migration_poseidon2_circuit_matches_canonical_kat() {
-        let c = BlsBuilder::default();
-        let mut st = core::array::from_fn(|i| c.small(BlsDom::Gold, i as u64));
-        poseidon_perm(&c, &mut st);
-        assert_eq!(
-            st.map(|w| c.value(w)[0]),
-            [
-                13782584570844608145,
-                13136387643152332171,
-                7171133015474200819,
-                7643370872200861694,
-                14144755201299840503,
-                16470027036684692562,
-                1748465969625202405,
-                1718729118078964347,
-                6141020819996733037,
-                16322330185628708898,
-                11650380702735067362,
-                2734959974607798415
-            ]
-        );
+        let c = Builder::default();
+        let input: [Wire; 8] = core::array::from_fn(|i| c.small(Domain::Gold, i as u64));
+        let out = sponge(&c, NULLIFIER_DOMAIN, &input);
+        let expected = poseidon2_hash_limbs(NULLIFIER_DOMAIN, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(out.map(|w| c.value(w)[0]), expected);
     }
 }

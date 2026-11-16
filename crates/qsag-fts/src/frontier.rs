@@ -818,7 +818,7 @@ fn squeeze_target_index(
 fn framed_hash8<const F: usize>(tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [[u8; 32]; 8]) {
     const RATE: usize = 136;
     assert!(tag.len() < 32);
-    let mut messages = [[0u8; 512]; 8];
+    let mut messages = SecretBuffer([[0u8; 512]; 8]);
     let mut len = 0;
     for (message, fields) in messages.iter_mut().zip(frames) {
         // bytepad(encode_string("") || encode_string(tag), 136).
@@ -840,9 +840,9 @@ fn framed_hash8<const F: usize>(tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [
         message[cursor] ^= 0x04;
         message[(cursor / RATE + 1) * RATE - 1] ^= 0x80;
     }
-    let mut states = [[0u64; 25]; 8];
+    let mut states = SecretBuffer([[0u64; 25]; 8]);
     for block in 0..=len / RATE {
-        for (state, message) in states.iter_mut().zip(&messages) {
+        for (state, message) in states.iter_mut().zip(messages.iter()) {
             for (word, bytes) in state
                 .iter_mut()
                 .zip(message[block * RATE..][..RATE].as_chunks::<8>().0.iter())
@@ -850,18 +850,12 @@ fn framed_hash8<const F: usize>(tag: &[u8], frames: [[&[u8]; F]; 8], out: &mut [
                 *word ^= u64::from_le_bytes(*bytes);
             }
         }
-        qsag_core::sponge::keccak::keccak_f1600_batch(&mut states);
+        qsag_core::sponge::keccak::keccak_f1600_batch(&mut states[..]);
     }
-    for (output, state) in out.iter_mut().zip(&states) {
+    for (output, state) in out.iter_mut().zip(states.iter()) {
         for (bytes, word) in output.as_chunks_mut::<8>().0.iter_mut().zip(state) {
             bytes.copy_from_slice(&word.to_le_bytes());
         }
-    }
-    for message in &mut messages {
-        ct_zeroize_bytes(message);
-    }
-    for state in &mut states {
-        qsag_accel::ct::ct_zeroize_u64s(state);
     }
 }
 
@@ -1131,7 +1125,7 @@ impl FrontierFtsSigningKey {
         let mut chain_values = vec![0u8; p.frontier_len * n];
         if let Some(ref cbuf) = self.cached_chains {
             // Constant-time scan across all `j in 0..w` for each frontier node `v`.
-            let mut slot_val = [0u8; 32];
+            let mut slot_val = SecretBuffer([0u8; 32]);
             for (idx, (&v, &a_pos)) in frontier.iter().zip(offsets.iter()).enumerate() {
                 slot_val.fill(0);
                 for j in 0..w {
@@ -1146,15 +1140,13 @@ impl FrontierFtsSigningKey {
                 }
                 chain_values[idx * n..(idx + 1) * n].copy_from_slice(&slot_val[..n]);
             }
-            ct_zeroize_bytes(&mut slot_val);
         } else {
             // Uncached subtree evaluation for arbitrary frontier nodes.
-            let mut tmp = [0u8; 32];
+            let mut tmp = SecretBuffer([0u8; 32]);
             for (idx, (&v, &a_pos)) in frontier.iter().zip(offsets.iter()).enumerate() {
                 self.eval_node_at_pos(&pid, v, a_pos as usize, &mut tmp[..n])?;
                 chain_values[idx * n..(idx + 1) * n].copy_from_slice(&tmp[..n]);
             }
-            ct_zeroize_bytes(&mut tmp);
         }
         #[cfg(test)]
         if let Some(FrontierFaultInjection::ChainByteFlip { index, mask }) = self.test_fault
@@ -1258,8 +1250,8 @@ impl FrontierFtsSigningKey {
         if out.len() != n {
             return Err(FrontierFtsError::ProfileMismatch);
         }
-        let mut cur = [0u8; 32];
-        let mut next = [0u8; 32];
+        let mut cur = SecretBuffer([0u8; 32]);
+        let mut next = SecretBuffer([0u8; 32]);
         if v >= first_leaf {
             fts_leaf_start(
                 pid,
@@ -1269,8 +1261,8 @@ impl FrontierFtsSigningKey {
                 &mut cur[..n],
             );
         } else {
-            let mut l_end = [0u8; 32];
-            let mut r_end = [0u8; 32];
+            let mut l_end = SecretBuffer([0u8; 32]);
+            let mut r_end = SecretBuffer([0u8; 32]);
             self.eval_node_at_pos(pid, 2 * v, w - 1, &mut l_end[..n])?;
             self.eval_node_at_pos(pid, 2 * v + 1, w - 1, &mut r_end[..n])?;
             fts_merge(
@@ -1281,8 +1273,6 @@ impl FrontierFtsSigningKey {
                 &r_end[..n],
                 &mut cur[..n],
             );
-            ct_zeroize_bytes(&mut l_end);
-            ct_zeroize_bytes(&mut r_end);
         }
         // Fixed `w - 1` iterations with constant-time conditional capture at `step == target_pos`!
         out.copy_from_slice(&cur[..n]);
@@ -1293,8 +1283,6 @@ impl FrontierFtsSigningKey {
             ct_conditional_assign_bytes(hit, out, &cur[..n])
                 .map_err(|_| FrontierFtsError::ProfileMismatch)?;
         }
-        ct_zeroize_bytes(&mut cur);
-        ct_zeroize_bytes(&mut next);
         Ok(())
     }
 }
@@ -1307,7 +1295,7 @@ pub fn verify_frontier_fts(
     sig: &FrontierFtsSignature,
 ) -> Result<(), FrontierFtsError> {
     let p = pk.profile.params();
-    if dp.params != p {
+    if dp.params != p || pk.root.len() != p.node_bytes {
         return Err(FrontierFtsError::SignatureVerificationFailed);
     }
     let n = p.node_bytes;

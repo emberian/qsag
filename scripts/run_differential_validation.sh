@@ -84,7 +84,12 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
         # installed nightly can predate our dependencies' minimum Rust version.
         HOST_TRIPLE="$(rustc -vV | awk '/^host:/ { print $2 }')"
         RUSTFLAGS="${SANCOV_RUSTFLAGS}" cargo build --release --locked --target "${HOST_TRIPLE}"
-        for target in fuzz_whir_agg_verify fuzz_fips205_and_fts_decode fuzz_diff_hashes_and_ntt; do
+        for target in \
+            fuzz_whir_agg_verify \
+            fuzz_blind_vc_and_agg_decode \
+            fuzz_fips205_and_fts_decode \
+            fuzz_diff_hashes_and_ntt \
+            fuzz_quorum_frames; do
             echo "--- Fuzzing ${target} (${FUZZ_SECS}s) ---"
             CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
             ARTIFACT_DIR="${REPO_ROOT}/fuzz/artifacts/${target}"
@@ -92,7 +97,7 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
             RUN_LOG="${ARTIFACT_DIR}/last_run.log"
             "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \
                 -max_total_time="${FUZZ_SECS}" \
-                -max_len=65536 -timeout=20 -rss_limit_mb=4096 \
+                -max_len=1048576 -timeout=20 -rss_limit_mb=4096 \
                 -artifact_prefix="${ARTIFACT_DIR}/" \
                 -print_final_stats=1 2>&1 | tee "${RUN_LOG}"
             # An uninstrumented binary still runs and exits 0; it just never reports

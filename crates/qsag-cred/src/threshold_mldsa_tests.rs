@@ -1697,12 +1697,150 @@ fn compact_fs_nonce_burn_store_updates_rejection_attempts_in_place() {
         assert!(store.reserve(1, 100 + u64::from(idx), &s, 0));
     }
     let bounded_len = std::fs::metadata(&path).unwrap().len();
-    assert!(bounded_len <= 4096, "bounded_len={bounded_len}");
+    assert!(bounded_len <= (RETIRED_BURN_FILTER_BYTES + 4096) as u64, "bounded_len={bounded_len}");
     assert_eq!(store.next_epoch(&key_id, 1).unwrap(), 300);
+    // The old epoch and a fresh epoch must both refuse an evicted attempt.
+    assert!(!store.reserve(1, 0, &sess, 0));
+    assert!(!store.reserve(1, 300, &sess, 0));
+    assert!(!store.reserve(1, 300, &sess, 99));
+    assert_eq!(store.generation(), 300);
     drop(store);
 
-    let reopened = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 300).unwrap();
+    let mut reopened = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 300).unwrap();
     assert_eq!(reopened.next_epoch(&key_id, 1).unwrap(), 300);
+    assert!(!reopened.reserve(1, 300, &sess, 0));
+    assert!(!reopened.reserve(1, 300, &sess, 99));
+    // Another attempt in that old session remains usable; reentering the ring
+    // must still not forget its retired attempts.
+    assert!(reopened.reserve(1, 300, &sess, 100));
+    assert!(!reopened.reserve(1, 301, &sess, 0));
     drop(reopened);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn nonce_attempt_boundaries_and_retired_high_attempts_survive_restart() {
+    let dir = std::env::temp_dir().join(std::format!("qsag-cred-nonce-bounds-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let key = [0x31; 32];
+    let mac = [0x32; 32];
+    let session = [0x33; 32];
+    let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    for attempt in 0..DEFAULT_MAX_REJECTION_ATTEMPTS {
+        assert!(store.reserve(1, u64::from(attempt), &session, attempt));
+        assert!(!store.reserve(1, u64::from(attempt) + 1, &session, attempt));
+    }
+    // Full high-attempt storage fails closed without shifting or mutating state.
+    assert!(!store.reserve(1, 256, &session, u32::MAX));
+    assert_eq!(store.generation(), 256);
+    let other = [0x34; 32];
+    assert!(store.reserve(1, 256, &other, u32::MAX));
+    assert!(!store.reserve(1, 257, &other, u32::MAX));
+    for index in 0..64u8 {
+        let mut fresh = [0x99; 32];
+        fresh[0] = index;
+        assert!(store.reserve(1, 257 + u64::from(index), &fresh, 127));
+    }
+    drop(store);
+    let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 321).unwrap();
+    for attempt in [0, 127, 128, 255] {
+        assert!(!store.reserve(1, 321, &session, attempt));
+    }
+    assert!(!store.reserve(1, 321, &other, u32::MAX));
+    assert!(!store.reserve(1, u64::MAX, &[0xfe; 32], 0));
+    assert_eq!(store.generation(), 321);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn nonce_legacy_upgrade_and_live_snapshot_substitution() {
+    let dir = std::env::temp_dir().join(std::format!("qsag-cred-nonce-legacy-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let key = [0x41; 32];
+    let mac = [0x42; 32];
+    for version in [2, 3] {
+        let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+        assert!(store.reserve(7, 10, &[5; 32], 128));
+        let mut legacy = store.encode();
+        legacy.truncate(64);
+        legacy[..8].copy_from_slice(if version == 2 { b"QSCBURN2" } else { b"QSCBURN3" });
+        if version == 2 {
+            legacy.extend_from_slice(&7u16.to_le_bytes());
+            legacy.extend_from_slice(&10u64.to_le_bytes());
+            legacy.extend_from_slice(&[5; 32]);
+            legacy.extend_from_slice(&128u32.to_le_bytes());
+        } else {
+            let encoded = store.encode();
+            legacy.extend_from_slice(&encoded[64..encoded.len() - 32 - RETIRED_BURN_FILTER_BYTES]);
+        }
+        let domain: &[u8] = if version == 2 { b"QSAG.MLDSA.NONCE_BURN.V2" } else { b"QSAG.MLDSA.NONCE_BURN.V3" };
+        let tag = cshake256_framed_32(domain, &[&mac, &store.lock_id, &legacy]);
+        legacy.extend_from_slice(&tag);
+        store.record.replace(&legacy).unwrap();
+        drop(store);
+        let old_disk = std::fs::read(&path).unwrap();
+        let mut store = FsNonceBurnStore::open_at_least(&path, key, mac, 1).unwrap();
+        assert_eq!(store.next_epoch(&key, 7).unwrap(), 11);
+        assert_eq!(&store.record.read().unwrap()[..8], b"QSCBURN4");
+        assert!(!store.reserve(7, 11, &[5; 32], 128));
+        assert!(store.reserve(7, 11, &[5; 32], 129));
+        // An authentic historical V2 snapshot must not bypass live validation.
+        std::fs::write(&path, &old_disk).unwrap();
+        assert_eq!(store.next_epoch(&key, 7), Err(ThresholdMlDsaError::NoncePersistenceFailed));
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn nonce_v3_with_evicted_history_fails_closed() {
+    let dir = std::env::temp_dir().join(std::format!("qsag-cred-nonce-v3-loss-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let key = [0x51; 32];
+    let mac = [0x52; 32];
+    let mut store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    assert!(store.reserve(1, 2, &[3; 32], 0));
+    let mut bytes = store.encode();
+    bytes.truncate(bytes.len() - 32 - RETIRED_BURN_FILTER_BYTES);
+    bytes[..8].copy_from_slice(b"QSCBURN3");
+    bytes[48..56].copy_from_slice(&2u64.to_le_bytes()); // one earlier burn was evicted
+    let tag = cshake256_framed_32(b"QSAG.MLDSA.NONCE_BURN.V3", &[&mac, &store.lock_id, &bytes]);
+    bytes.extend_from_slice(&tag);
+    store.record.replace(&bytes).unwrap();
+    drop(store);
+    assert!(FsNonceBurnStore::open(&path, key, mac).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(all(feature = "std", unix))]
+#[test]
+fn nonce_ledger_and_lock_must_remain_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(std::format!("qsag-cred-nonce-perms-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let key = [0x61; 32];
+    let mac = [0x62; 32];
+    let store = FsNonceBurnStore::create(&path, key, mac).unwrap();
+    drop(store);
+    for file in [&path, &dir.join("burns.lock")] {
+        assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(FsNonceBurnStore::open(&path, key, mac).is_err());
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut store = FsNonceBurnStore::open(&path, key, mac).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!store.reserve(1, 0, &[1; 32], 0));
+    assert!(store.next_epoch(&key, 1).is_err());
+    drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }

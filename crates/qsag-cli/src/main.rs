@@ -19,6 +19,7 @@ mod keys;
 mod migrate;
 mod persist;
 mod policy;
+mod policy_caps;
 mod policy_ledger;
 mod quorum;
 mod quorum_coupon;
@@ -47,8 +48,8 @@ commands:
   cred              dealerless Poseidon2 TOPRF (replicated or Shamir-SPDZ) & threshold FIPS 204 ML-DSA ceremonies
   hd                dealerless post-quantum HD inventory & 0-round watch-only child derivation
   migrate           zero-knowledge classical-to-post-quantum ownership migration (438-rep ZKBoo)
-  policy            persistent custody policy ledger: init, propose, approve, status;
-                    without a subcommand, a stateless evaluation of fixed transfer scenarios
+  policy            persistent custody policy ledger (init, propose, approve, status) and
+                    attenuated capabilities (macaroon, biscuit)
   kat               run the built-in known-answer tests
 
 exit codes:

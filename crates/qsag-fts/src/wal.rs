@@ -303,8 +303,10 @@ impl DurableBurnJournal {
             let mut bytes = std::vec::Vec::new();
             bytes.try_reserve_exact(cap).map_err(|_| invalid())?;
             journal.file.seek(SeekFrom::Start(0))?;
-            journal.file.read_to_end(&mut bytes)?;
-            if bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC || !ct_eq_bytes(&bytes[8..40], &key)
+            // Bound the read itself as well as the initial fstat: an external
+            // writer must not turn a growth race into an unbounded allocation.
+            (&mut journal.file).take(held_len + 1).read_to_end(&mut bytes)?;
+            if bytes.len() != cap || bytes.len() < HEADER_LEN || &bytes[..8] != MAGIC || !ct_eq_bytes(&bytes[8..40], &key)
             {
                 return Err(invalid());
             }
@@ -418,6 +420,9 @@ impl DurableBurnJournal {
         self.failed = true;
         self.check_identity()?;
         let append_offset = (HEADER_LEN + RECORD_LEN * self.entries.len()) as u64;
+        if append_offset + RECORD_LEN as u64 > MAX_JOURNAL_BYTES {
+            return Err(invalid());
+        }
         let mut record = [0; RECORD_LEN];
         record[..2].copy_from_slice(&party.to_be_bytes());
         record[2..10].copy_from_slice(&epoch.to_be_bytes());
@@ -967,6 +972,38 @@ mod tests {
         tail.extend_from_slice(&journal.next);
         let bytes = journal.with_tail(&tail);
         journal.assert_fails_closed(&bytes);
+    }
+
+    #[test]
+    fn lone_lagging_slot_with_every_torn_tail_length() {
+        let journal = TwoBurns::new("lone-lag-tail");
+        for damaged in [HWM_SLOT_A_OFFSET, HWM_SLOT_B_OFFSET] {
+            for tail_len in 1..=RECORD_LEN {
+                let mut bytes = journal.committed.clone();
+                bytes.extend_from_slice(&journal.next);
+                bytes.extend_from_slice(&junk(tail_len, 71));
+                bytes[damaged..damaged + HWM_SLOT_LEN].fill(0xa5);
+                std::fs::write(&journal.path, &bytes).unwrap();
+                let recovered = journal.open().unwrap();
+                assert_eq!(recovered.checkpoint().generation, 3);
+                drop(recovered);
+                assert_eq!(fs::read(&journal.path).unwrap(), journal.advanced);
+            }
+        }
+        // A valid survivor two records behind cannot justify truncating a tail.
+        let mut live = journal.open().unwrap();
+        live.reserve(&[1; 32], 0, 3).unwrap();
+        drop(live);
+        let advanced_twice = fs::read(&journal.path).unwrap();
+        for tail_len in 1..=RECORD_LEN {
+            let mut bytes = advanced_twice.clone();
+            bytes[HWM_SLOT_A_OFFSET..HWM_SLOT_A_OFFSET + HWM_SLOT_LEN].fill(0xa5);
+            bytes[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]
+                .copy_from_slice(&journal.committed[HWM_SLOT_B_OFFSET..HWM_SLOT_B_OFFSET + HWM_SLOT_LEN]);
+            bytes.extend_from_slice(&junk(tail_len, 72));
+            std::fs::write(&journal.path, &bytes).unwrap();
+            journal.assert_fails_closed(&bytes);
+        }
     }
 
     #[test]

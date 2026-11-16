@@ -9081,7 +9081,7 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
     clippy::too_many_arguments,
     reason = "Reuse ceremony OT channels without changing the public opening API"
 )]
-fn commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
+pub fn commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
     session_id: &[u8; 32],
     phase: &'static str,
     t: usize,

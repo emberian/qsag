@@ -14,14 +14,18 @@ use crate::dealerless_ceremony::provision_distributed_policy_guards;
 
 const POLICY_HELP: &str = "\
 qsag policy <init|propose|approve|status> --ledger-dir <dir> [options]
+qsag policy macaroon <keygen|issue|attenuate|issue-discharge|bind-discharge|verify> [options]
+qsag policy biscuit <keygen|mint|attenuate|seal|verify> [options]
 qsag policy [--ephemeral] [--scenario <name>] [--json]
 
-Persistent custody policy ledger (every subcommand accepts --help):
+Persistent custody policy ledger & attenuated capabilities (every subcommand accepts --help):
 
   init      create a ledger directory from a policy document
   propose   evaluate and record a transfer intent; writes the exact message to sign
   approve   record one approver's approval of a proposed intent
   status    authenticate the ledger and report its window spend and intents
+  macaroon  256-bit cSHAKE256 bearer capabilities & bound third-party discharges
+  biscuit   post-quantum Compact1122 public-key attenuated capability chains
 
 A proposed and fully approved intent is released by signing its message with
 `qsag sign` or `qsag quorum sign` under --policy-ledger-dir and --policy-intent. Signing
@@ -88,7 +92,7 @@ fn policy() -> Result<TransactionPolicy, CliError> {
 }
 
 fn key_id() -> [u8; 32] {
-    cshake256_framed_32(b"QSAG.POLICY.KEY.V1", &[b"demo signing key"])
+    qsag_policy::policy_signing_key_id(WitnessSuiteTag::SlhDsa128s, b"demo signing key")
 }
 
 /// The parameters a scenario may vary.
@@ -335,10 +339,15 @@ pub fn evaluate_all() -> Result<([u8; 32], Vec<Json>, bool), CliError> {
 }
 
 pub fn run(raw: &[String]) -> Result<(), CliError> {
-    if let Some((verb, rest)) = raw.split_first()
-        && let Some(result) = crate::policy_ledger::run(verb, rest)
-    {
-        return result;
+    if let Some((verb, rest)) = raw.split_first() {
+        match verb.as_str() {
+            "macaroon" => return crate::policy_caps::run_macaroon(rest),
+            "biscuit" => return crate::policy_caps::run_biscuit(rest),
+            _ => {}
+        }
+        if let Some(result) = crate::policy_ledger::run(verb, rest) {
+            return result;
+        }
     }
     if raw.iter().any(|arg| arg.starts_with("--ledger-dir")) {
         return Err(CliError::usage(

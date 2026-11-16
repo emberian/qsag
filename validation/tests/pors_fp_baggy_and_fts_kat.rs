@@ -33,12 +33,12 @@
 //!      batches and adversarial faulted lanes.
 
 use proptest::prelude::*;
-use qsag_accel::{AcceleratorBackend, CpuReferenceBackend, HostSimdBackend};
+use qsag_accel::CpuReferenceBackend;
 use qsag_core::baggy::{
     BaggyError, BaggyParams, BaggySig, MemoryFirstSigned, WaistbandCache, baggy_keygen_mpc,
     baggy_msg_digest, baggy_reference_keygen, baggy_reference_sign, baggy_sign_mpc, baggy_verify,
 };
-use qsag_core::keccak_mpc::run_dealerless_rss_dkg_2of3;
+use qsag_core::keccak_mpc::{RssKeyShare256, run_dealerless_rss_dkg_2of3};
 use qsag_core::pors_fp::{
     PorsFpOpening, PorsFpParams, octopus_positions, pors_fp_auth, pors_fp_root, pors_fp_select,
     pors_leaf_adrs, pors_leaf_hash, pors_prf_adrs, pors_reference_tree,
@@ -411,15 +411,20 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
         PartyPrivateRng::from_seed([0x90 + p as u8; 32], b"VALIDATION.BAGGY.DKG/v1")
     });
     let (rss_keys, _) = run_dealerless_rss_dkg_2of3(sid, 32, &mut dkg_rngs).unwrap();
+    let serialized_shares: [_; 3] = core::array::from_fn(|p| rss_keys[p].to_secret_bytes());
+    drop(rss_keys);
 
     let mk_engine = |sess_byte: u8| {
+        let restored: [RssKeyShare256; 3] = core::array::from_fn(|p| {
+            RssKeyShare256::from_secret_bytes(&serialized_shares[p]).expect("QSRSSK01 decode")
+        });
         let sess_rngs: [PartyPrivateRng; 3] = core::array::from_fn(|p| {
             PartyPrivateRng::from_seed(
                 [sess_byte.wrapping_add((p as u8) * 17); 32],
                 b"VALIDATION.BAGGY.SESS/v1",
             )
         });
-        Rss256Engine::new([sess_byte; 32], rss_keys.clone(), sess_rngs).unwrap()
+        Rss256Engine::new([sess_byte; 32], restored, sess_rngs).unwrap()
     };
 
     let mut kg_engine = mk_engine(0xA1);
@@ -427,15 +432,14 @@ fn baggy_sha3_128f_wire_budget_reference_and_rss256_mpc_parity() {
     let (mpc_pk, binding) = baggy_keygen_mpc(&mut kg_engine, &small, &mut waistband).unwrap();
     assert!(binding.matches(&small, &mpc_pk));
 
-    // Reconstruct the underlying secret in the test oracle solely to check byte-exact MPC parity.
-    let k_ref = kg_engine.keys();
+    // Reconstruct the underlying secret from canonical `QSRSSK01` primary slots (`[44..76]` =
+    // `sk_seed_primary`, `[108..140]` = `sk_prf_primary`) solely to check byte-exact MPC parity.
     let mut sk_seed = [0u8; 32];
     let mut sk_prf = [0u8; 32];
-    for p in 0..3 {
-        let (s_share, prf_share) = k_ref[p].own_share_bytes();
+    for share_bytes in &serialized_shares {
         for i in 0..32 {
-            sk_seed[i] ^= s_share[i];
-            sk_prf[i] ^= prf_share[i];
+            sk_seed[i] ^= share_bytes[44 + i];
+            sk_prf[i] ^= share_bytes[108 + i];
         }
     }
     let reconstructed_sk = PqSecretKey {
@@ -579,10 +583,9 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
     }
     assert_eq!(pid_1122, expected_pid);
 
-    // 4. Cached vs uncached signer byte-exactness + 9-signature SIMD batch vs scalar verifier equivalence
-    //    (9 items straddles an 8-lane AVX-512 Keccak batch + 1-lane remainder!).
+    // 4. Cached vs uncached signer byte-exactness + 11-signature SIMD batch vs scalar verifier equivalence
+    //    (9 `Compact1122` + 2 `Full256Bit` items straddling an 8-lane AVX-512 Keccak batch + 3-lane remainder!).
     let cpu_accel = CpuReferenceBackend::new();
-    let simd_accel = HostSimdBackend::detect();
     let dp_1122 = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
     let dp_full = FrontierDpTable::build(FrontierFtsProfile::Full256Bit);
 
@@ -646,7 +649,7 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         );
         verify_frontier_fts(&sk_cached.pk, &dp_1122, &msg, &sig_c).unwrap();
 
-        pks_1122.push(sk_cached.pk);
+        pks_1122.push(sk_cached.pk.clone());
         msgs_1122.push(msg);
         sigs_1122.push(sig_c);
     }
@@ -670,17 +673,27 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         let sig = sk.sign(&dp_full, &msg, &[0xC1 + idx; 32]).unwrap();
         assert_eq!(sig.to_bytes(FrontierFtsProfile::Full256Bit).len(), 2338);
         verify_frontier_fts(&sk.pk, &dp_full, &msg, &sig).unwrap();
-        pks_full.push(sk.pk);
+        pks_full.push(sk.pk.clone());
         msgs_full.push(msg);
         sigs_full.push(sig);
     }
 
-    let build_batch = |sigs_a: &[FrontierFtsSignature], sigs_b: &[FrontierFtsSignature]| {
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_batch<'a>(
+        pks_1122: &'a [qsag_fts::FrontierFtsPublicKey],
+        dp_1122: &'a FrontierDpTable,
+        msgs_1122: &'a [Vec<u8>],
+        sigs_a: &'a [FrontierFtsSignature],
+        pks_full: &'a [qsag_fts::FrontierFtsPublicKey],
+        dp_full: &'a FrontierDpTable,
+        msgs_full: &'a [Vec<u8>],
+        sigs_b: &'a [FrontierFtsSignature],
+    ) -> Vec<FrontierVerifyInput<'a>> {
         let mut inputs = Vec::with_capacity(11);
         for i in 0..9 {
             inputs.push(FrontierVerifyInput {
                 pk: &pks_1122[i],
-                dp: &dp_1122,
+                dp: dp_1122,
                 message: &msgs_1122[i],
                 signature: &sigs_a[i],
             });
@@ -688,42 +701,61 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
         for i in 0..2 {
             inputs.push(FrontierVerifyInput {
                 pk: &pks_full[i],
-                dp: &dp_full,
+                dp: dp_full,
                 message: &msgs_full[i],
                 signature: &sigs_b[i],
             });
         }
         inputs
-    };
-
-    for accel_ref in [&cpu_accel as &dyn AcceleratorBackend, &simd_accel as &dyn AcceleratorBackend]
-    {
-        let valid_inputs = build_batch(&sigs_1122, &sigs_full);
-        assert_eq!(verify_frontier_fts_batch(&valid_inputs, accel_ref), Ok(()));
-
-        // Corrupt exactly one lane at index 0, index 7 (end of first 8-lane SIMD block),
-        // index 8 (remainder block), and index 10 (`Full256Bit`): batch must reject every time!
-        for bad_lane in [0usize, 7, 8] {
-            let mut mutated = sigs_1122.clone();
-            mutated[bad_lane].chain_values[19] ^= 0x01;
-            let scalar_res = verify_frontier_fts(
-                &pks_1122[bad_lane],
-                &dp_1122,
-                &msgs_1122[bad_lane],
-                &mutated[bad_lane],
-            );
-            assert!(scalar_res.is_err());
-            let batch_inputs = build_batch(&mutated, &sigs_full);
-            assert_eq!(
-                verify_frontier_fts_batch(&batch_inputs, accel_ref),
-                scalar_res
-            );
-        }
-        let mut mutated_full = sigs_full.clone();
-        mutated_full[1].randomizer[0] ^= 0x40;
-        let batch_inputs = build_batch(&sigs_1122, &mutated_full);
-        assert!(verify_frontier_fts_batch(&batch_inputs, accel_ref).is_err());
     }
+
+    let valid_inputs = assemble_batch(
+        &pks_1122, &dp_1122, &msgs_1122, &sigs_1122, &pks_full, &dp_full, &msgs_full, &sigs_full,
+    );
+    let batch_ok = verify_frontier_fts_batch(&valid_inputs);
+    assert_eq!(batch_ok.len(), 11);
+    assert!(batch_ok.iter().all(Result::is_ok));
+
+    // Corrupt exactly one lane at index 0, index 7 (end of first 8-lane SIMD block),
+    // index 8 (remainder block), and index 10 (`Full256Bit`): ONLY the corrupted lane
+    // must fail, matching scalar `verify_frontier_fts` lane-by-lane!
+    for bad_lane in [0usize, 7, 8] {
+        let mut mutated = sigs_1122.clone();
+        mutated[bad_lane].chain_values[19] ^= 0x01;
+        let scalar_res = verify_frontier_fts(
+            &pks_1122[bad_lane],
+            &dp_1122,
+            &msgs_1122[bad_lane],
+            &mutated[bad_lane],
+        );
+        assert!(scalar_res.is_err());
+        let batch_inputs = assemble_batch(
+            &pks_1122, &dp_1122, &msgs_1122, &mutated, &pks_full, &dp_full, &msgs_full, &sigs_full,
+        );
+        let batch_res = verify_frontier_fts_batch(&batch_inputs);
+        for (lane, res) in batch_res.into_iter().enumerate() {
+            if lane == bad_lane {
+                assert_eq!(res, scalar_res);
+            } else {
+                assert_eq!(res, Ok(()), "honest lane {lane} must stay valid");
+            }
+        }
+    }
+    let mut mutated_full = sigs_full.clone();
+    mutated_full[1].randomizer[0] ^= 0x40;
+    let batch_inputs = assemble_batch(
+        &pks_1122,
+        &dp_1122,
+        &msgs_1122,
+        &sigs_1122,
+        &pks_full,
+        &dp_full,
+        &msgs_full,
+        &mutated_full,
+    );
+    let batch_res = verify_frontier_fts_batch(&batch_inputs);
+    assert!(batch_res[..10].iter().all(Result::is_ok));
+    assert!(batch_res[10].is_err());
 
     // 5. `RotatedEpochVote` (`1,194 B`) forward-secure chain + `verify_rotated_epoch_votes_batch`.
     let chain_id = [0xE1; 32];
@@ -783,7 +815,10 @@ fn frontier_sum_fts_compact1122_and_full256bit_dp_bijection_antichain_and_batch_
             vote: &votes[ep],
         })
         .collect();
-    let next_pks = verify_rotated_epoch_votes_batch(&vote_inputs, &simd_accel).unwrap();
+    let next_pks: Vec<_> = verify_rotated_epoch_votes_batch(&vote_inputs)
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
     assert_eq!(next_pks, epoch_pks[1..4]);
 }
 

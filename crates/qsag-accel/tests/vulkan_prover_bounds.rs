@@ -356,6 +356,9 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject!(gpu.prover_whir_batch_sumcheck_fold(0, C_LEN, NUM_POLYS, u32::MAX, 0, fx.chal));
     reject!(gpu.prover_whir_batch_sumcheck_fold(0, 1 << 33, NUM_POLYS, 0, 0, fx.chal));
     reject!(gpu.prover_whir_batch_sumcheck_fold(0, C_LEN, 1 << 40, 0, 0, fx.chal));
+    // In-bounds ranges can still race if parallel invocations overwrite unread inputs.
+    reject!(gpu.prover_whir_batch_sumcheck_fold(0, C_LEN, NUM_POLYS, 0, 0, fx.chal));
+    reject!(gpu.prover_whir_batch_sumcheck_fold(1, C_LEN, NUM_POLYS, 0, C_LEN as u32, fx.chal));
 
     // Opening and fold passes.
     reject!(gpu.prover_whir_expand_monomial_and_dot(&kron, 64, 1, &mut []));
@@ -371,6 +374,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject!(gpu.prover_whir_fold_pass_b(8, 0, 0, 8, u32::MAX, fx.chal));
     reject!(gpu.prover_whir_fold_pass_b(8, 0, 0, u32::MAX, 0, fx.chal));
     reject!(gpu.prover_whir_fold_pass_b(8, u32::MAX, 0, 16, 64, fx.chal));
+    reject!(gpu.prover_whir_fold_pass_b(8, 0, 0, 8, 15, fx.chal));
+    reject!(gpu.prover_whir_fold_pass_c(8, 0, 15, fx.chal, fx.chal, fx.chal, false, 0));
     reject!(gpu.prover_whir_fold_pass_c(8, 0, u32::MAX, fx.chal, fx.chal, fx.chal, false, 0));
     reject!(gpu.prover_whir_fold_pass_c(8, u32::MAX, 0, fx.chal, fx.chal, fx.chal, false, 0));
     reject!(gpu.prover_whir_fold_pass_c(usize::MAX, 0, 0, fx.chal, fx.chal, fx.chal, false, 0));
@@ -379,6 +384,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject!(gpu.prover_whir_commit_stage(1, 16, 1 << 31, 4));
     reject!(gpu.prover_whir_commit_stage(1, 1 << 30, 64, 4));
     reject!(gpu.prover_whir_commit_stage(1, 16, 1 << 40, 4));
+    reject!(gpu.prover_whir_commit_stage(0, 16, 64, 4));
+    reject!(gpu.prover_whir_commit_stage(1, 65, 64, 4));
     reject!(gpu.prover_whir_eval_univariate_2(1 << 30, 0, &kron2));
     reject!(gpu.prover_whir_eval_univariate_2(16, u32::MAX, &kron2));
     // Stage-0 gather: 1024 groups of 16 in the committed codeword.
@@ -388,6 +395,14 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject!(gpu.prover_whir_gather_queries(0, 16, NUM_POLYS, 1 << 20, &[0], &[], &mut [0; 34]));
     reject!(gpu.prover_whir_gather_queries(0, 1 << 20, NUM_POLYS, 1024, &[0], &[], &mut [0; 34]));
     reject!(gpu.prover_whir_gather_queries(3, 4, 1, 16, &[], &[40], &mut [0; 4]));
+    reject!(gpu.prover_whir_gather_queries(1, 4, 1, 16, &[], &[1], &mut [0; 4]));
+    reject!(gpu.prover_whir_gather_queries(0, 16, NUM_POLYS, 512, &[], &[1], &mut [0; 4]));
+    // Reusing a parity slot must not let an old stage read the new stage's tree.
+    fx.commit(&gpu);
+    gpu.prover_whir_commit_stage(1, 16, 64, 4).expect("stage 1");
+    gpu.prover_whir_commit_stage(3, 16, 64, 4).expect("stage 3");
+    gpu.prover_whir_gather_queries(3, 4, 1, 16, &[], &[1], &mut [0; 4]).expect("current stage");
+    assert_clean(gpu.prover_whir_gather_queries(1, 4, 1, 16, &[], &[1], &mut [0; 4]));
     reject!(gpu.prover_whir_accumulate_shift_claims(16, u32::MAX, &[1; 256], &[[0; 8]]));
     reject!(gpu.prover_whir_accumulate_shift_claims(usize::MAX, 0, &[1; 256], &[[0; 8]]));
     reject!(gpu.prover_whir_accumulate_shift_claims(16, 0, &[1; 255], &[[0; 8]]));
@@ -404,6 +419,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject!(gpu.prover_air_init_shard(0, cols_base, 3, &shifts[..9], &statics));
     reject!(gpu.prover_air_init_shard(0, cols_base, 1 << 40, &shifts, &statics));
     reject!(gpu.prover_air_init_shard(0, cols_base, usize::MAX, &shifts, &statics));
+    reject!(gpu.prover_air_init_shard(0, 0, AIR_ROWS, &shifts, &statics));
+    reject!(gpu.prover_air_init_shard(0, (AIR_ROWS * 256 - 1) as u32, AIR_ROWS, &shifts, &statics));
     reject!(gpu.prover_air_read_tail(u32::MAX, 0, &mut one, &mut []));
     reject!(gpu.prover_air_read_tail(0, u32::MAX, &mut [], &mut two));
     // Rounds without an initialised shard.
@@ -558,6 +575,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     reject_air!(gpu.prover_air_fold_round(true, AIR_ROWS, cols_base, 0, 0, u32::MAX, fx.chal));
     reject_air!(gpu.prover_air_fold_round(true, 1 << 33, cols_base, 0, 0, 48, fx.chal));
     reject_air!(gpu.prover_air_fold_round(false, AIR_ROWS, 1 << 27, 0, 0, 48, fx.chal));
+    reject_air!(gpu.prover_air_fold_round(false, AIR_ROWS, 0, 0, 0, 48, fx.chal));
+    reject_air!(gpu.prover_air_fold_round(true, AIR_ROWS, cols_base, 0, 0, 47, fx.chal));
     // A WHIR job that rewrites `vram_aux_in` invalidates the shard's tables.
     reject_air!({
         gpu.prover_whir_expand_monomial_and_dot(&kron, NUM_VARS, 1, &mut [])

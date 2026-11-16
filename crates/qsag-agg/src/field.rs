@@ -577,6 +577,7 @@ pub(crate) fn encode_rs_coset_goldilocks_with_secret(
 
 /// [`encode_rs_coset_goldilocks`] on the host only.
 #[cfg(test)]
+#[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
 pub(crate) fn encode_rs_coset_goldilocks_cpu(
     coeffs: &[Goldilocks],
     blowup: usize,

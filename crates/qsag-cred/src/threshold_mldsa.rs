@@ -193,7 +193,11 @@ pub trait NonceBurnPersistence {
 #[cfg(feature = "std")]
 const MAX_RETAINED_SESSIONS_PER_PARTY: usize = 64;
 #[cfg(feature = "std")]
-const MAX_HIGH_ATTEMPTS_PER_SESSION: usize = 32;
+const MAX_HIGH_ATTEMPTS_PER_SESSION: usize = 128;
+// Seven independent 19-bit positions in a fixed 64-KiB filter. Only evicted
+// attempts enter it; active sessions retain exact bitmasks. No false negatives.
+#[cfg(feature = "std")]
+const RETIRED_BURN_FILTER_BYTES: usize = 1 << 16;
 
 #[cfg(feature = "std")]
 struct SessionBurnEntry {
@@ -211,9 +215,16 @@ struct PartyBurnState {
 
 /// Key-bound, MAC-authenticated, exclusively locked, crash-atomic attempt ledger.
 ///
-/// Compact `QSCBURN3` layout stores bounded $O(1)$ per-party state (`max_epoch` +
-/// a fixed-capacity ring of recent per-session attempt bitmasks), updating rejection-sampling
-/// retries in place with zero file growth while seamlessly reading legacy `QSCBURN2` files.
+/// `QSCBURN4` stores bounded per-party state (`max_epoch` and 64 recent sessions)
+/// plus a fixed 64-KiB Bloom filter of evicted attempts. Eviction never permits
+/// reuse of a `(party, session, attempt)` at a later epoch. Filter collisions
+/// conservatively refuse fresh attempts; after 20,000 retired attempts the
+/// estimated false-positive probability is about 0.004%, and it grows with use.
+/// Saturation requires a new key/ledger, never clearing the filter for this key.
+/// Attempts 0..128 use a bitmap; up to 128 larger attempts per active session
+/// are supported (including the full default 256-attempt rejection budget).
+/// Complete `QSCBURN2` and `QSCBURN3` ledgers migrate atomically on open;
+/// V3 ledgers that already discarded burn history are refused.
 /// Provision once with [`Self::create`]; after restart use [`Self::open`] or
 /// [`Self::open_at_least`] (supplying an externally retained monotonic generation floor)
 /// and recover the signer's epoch.
@@ -225,6 +236,7 @@ pub struct FsNonceBurnStore {
     mac_key: qsag_accel::ct::RedactedSecret<32>,
     generation: u64,
     parties: Vec<PartyBurnState>,
+    retired_burns: Vec<u8>,
     poisoned: bool,
 }
 
@@ -235,11 +247,11 @@ impl FsNonceBurnStore {
         key_id: [u8; 32],
         mut storage_mac_key: [u8; 32],
     ) -> std::io::Result<Self> {
+        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
+        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let path = path.into();
         let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
         let lock_id = record.lock_inode();
-        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
-        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let store = Self {
             lock_id,
             record,
@@ -247,6 +259,7 @@ impl FsNonceBurnStore {
             mac_key,
             generation: 0,
             parties: Vec::new(),
+            retired_burns: vec![0; RETIRED_BURN_FILTER_BYTES],
             poisoned: false,
         };
         store.record.replace(&store.encode())?;
@@ -267,11 +280,11 @@ impl FsNonceBurnStore {
         mut storage_mac_key: [u8; 32],
         min_expected_generation: u64,
     ) -> std::io::Result<Self> {
+        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
+        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let path = path.into();
         let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
         let lock_id = record.lock_inode();
-        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
-        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let bytes = record.read()?;
         let invalid =
             || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid nonce ledger");
@@ -279,9 +292,10 @@ impl FsNonceBurnStore {
             return Err(invalid());
         }
         let (body, tag) = bytes.split_at(bytes.len() - 32);
-        if &body[..8] == b"QSCBURN3" {
+        if &body[..8] == b"QSCBURN3" || &body[..8] == b"QSCBURN4" {
+            let legacy = &body[..8] == b"QSCBURN3";
             let expected_tag = cshake256_framed_32(
-                b"QSAG.MLDSA.NONCE_BURN.V3",
+                if legacy { b"QSAG.MLDSA.NONCE_BURN.V3" } else { b"QSAG.MLDSA.NONCE_BURN.V4" },
                 &[mac_key.expose(), &lock_id, body],
             );
             if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag)
@@ -356,18 +370,41 @@ impl FsNonceBurnStore {
                     sessions,
                 });
             }
+            let retained: u64 = parties.iter().flat_map(|p| &p.sessions)
+                .map(|s| u64::from(s.low_mask.count_ones()) + s.high_attempts.len() as u64)
+                .sum();
+            if retained > generation || (legacy && retained != generation) {
+                // V3 forgot evicted sessions. An epoch floor cannot recover the
+                // independent session/attempt replay history: refuse that upgrade.
+                return Err(invalid());
+            }
+            let retired_burns = if legacy {
+                vec![0; RETIRED_BURN_FILTER_BYTES]
+            } else {
+                let filter = body.get(cursor..cursor + RETIRED_BURN_FILTER_BYTES).ok_or_else(invalid)?;
+                cursor += RETIRED_BURN_FILTER_BYTES;
+                if generation == 0 && filter.iter().any(|&byte| byte != 0) {
+                    return Err(invalid());
+                }
+                filter.to_vec()
+            };
             if cursor != body.len() {
                 return Err(invalid());
             }
-            Ok(Self {
+            let store = Self {
                 lock_id,
                 record,
                 key_id,
                 mac_key,
                 generation,
                 parties,
+                retired_burns,
                 poisoned: false,
-            })
+            };
+            if legacy {
+                store.record.replace(&store.encode())?;
+            }
+            Ok(store)
         } else if &body[..8] == b"QSCBURN2" {
             let expected_tag = cshake256_framed_32(
                 b"QSAG.MLDSA.NONCE_BURN.V2",
@@ -395,6 +432,7 @@ impl FsNonceBurnStore {
                 mac_key,
                 generation,
                 parties: Vec::new(),
+                retired_burns: vec![0; RETIRED_BURN_FILTER_BYTES],
                 poisoned: false,
             };
             for row in body[64..].as_chunks::<46>().0 {
@@ -407,6 +445,7 @@ impl FsNonceBurnStore {
                 }
                 store.apply_burn_in_memory(party, epoch, session, attempt);
             }
+            store.record.replace(&store.encode())?;
             Ok(store)
         } else {
             Err(invalid())
@@ -418,8 +457,11 @@ impl FsNonceBurnStore {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(96 + self.parties.len() * 64);
-        bytes.extend_from_slice(b"QSCBURN3");
+        let encoded_len = 96 + RETIRED_BURN_FILTER_BYTES + self.parties.iter()
+            .map(|p| 12 + p.sessions.iter().map(|s| 50 + 4 * s.high_attempts.len()).sum::<usize>())
+            .sum::<usize>();
+        let mut bytes = Vec::with_capacity(encoded_len);
+        bytes.extend_from_slice(b"QSCBURN4");
         bytes.extend_from_slice(&self.record.lock_seal());
         bytes.extend_from_slice(&self.key_id);
         bytes.extend_from_slice(&self.generation.to_le_bytes());
@@ -437,8 +479,9 @@ impl FsNonceBurnStore {
                 }
             }
         }
+        bytes.extend_from_slice(&self.retired_burns);
         let tag = cshake256_framed_32(
-            b"QSAG.MLDSA.NONCE_BURN.V3",
+            b"QSAG.MLDSA.NONCE_BURN.V4",
             &[self.mac_key.expose(), &self.lock_id, &bytes],
         );
         bytes.extend_from_slice(&tag);
@@ -447,6 +490,11 @@ impl FsNonceBurnStore {
 
     fn available(&self, party: u16, epoch: u64, session: &[u8; 32], attempt: u32) -> bool {
         if self.poisoned || epoch == u64::MAX {
+            return false;
+        }
+        if Self::retired_positions(party, session, attempt).iter()
+            .all(|&bit| self.retired_burns[bit / 8] & (1 << (bit % 8)) != 0)
+        {
             return false;
         }
         match self.parties.binary_search_by_key(&party, |p| p.party_id) {
@@ -468,6 +516,16 @@ impl FsNonceBurnStore {
             }
             Err(_) => self.parties.len() < MAX_THRESHOLD_MLDSA_PARTIES,
         }
+    }
+
+    fn retired_positions(party: u16, session: &[u8; 32], attempt: u32) -> [usize; 7] {
+        let digest = cshake256_framed_32(b"QSAG.MLDSA.RETIRED_BURN.V1",
+            &[&party.to_le_bytes(), session, &attempt.to_le_bytes()]);
+        core::array::from_fn(|i| {
+            let offset = 4 * i;
+            let word = u32::from_le_bytes(digest[offset..offset + 4].try_into().unwrap());
+            word as usize & (RETIRED_BURN_FILTER_BYTES * 8 - 1)
+        })
     }
 
     fn apply_burn_in_memory(
@@ -503,7 +561,14 @@ impl FsNonceBurnStore {
             }
         } else {
             if state.sessions.len() >= MAX_RETAINED_SESSIONS_PER_PARTY {
-                state.sessions.remove(0);
+                let retired = state.sessions.remove(0);
+                let attempts = (0..128u32).filter(|&a| retired.low_mask & (1u128 << a) != 0)
+                    .chain(retired.high_attempts.iter().copied());
+                for attempt in attempts {
+                    for bit in Self::retired_positions(party, &retired.session_id, attempt) {
+                        self.retired_burns[bit / 8] |= 1 << (bit % 8);
+                    }
+                }
             }
             let mut low_mask = 0u128;
             let mut high_attempts = Vec::new();
@@ -550,24 +615,7 @@ impl NonceBurnPersistence for FsNonceBurnStore {
             .read()
             .is_ok_and(|bytes| qsag_accel::ct::ct_eq_bytes(&bytes, &expected));
         if !matches_disk {
-            // Also accept an untouched legacy `QSCBURN2` file before its first `reserve()` upgrade!
-            let reopened = self.record.read().map_err(|_| {
-                ThresholdMlDsaError::NoncePersistenceFailed
-            })?;
-            if reopened.len() < 96 || &reopened[..8] != b"QSCBURN2" {
-                return Err(ThresholdMlDsaError::NoncePersistenceFailed);
-            }
-            let (body, tag) = reopened.split_at(reopened.len() - 32);
-            let expected_v2 = cshake256_framed_32(
-                b"QSAG.MLDSA.NONCE_BURN.V2",
-                &[self.mac_key.expose(), &self.lock_id, body],
-            );
-            if !qsag_accel::ct::ct_eq_bytes(&expected_v2, tag)
-                || body[8..16] != self.record.lock_seal()
-                || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &self.key_id)
-            {
-                return Err(ThresholdMlDsaError::NoncePersistenceFailed);
-            }
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
         }
         Ok(self
             .parties
@@ -798,6 +846,11 @@ pub(crate) fn flatten(polys: &[Poly256]) -> Vec<u32> {
         .iter()
         .flat_map(|p| p.coeffs.iter().copied())
         .collect()
+}
+
+/// Flatten both secret vectors into one allocation, with no unwiped intermediates.
+pub(crate) fn flatten_key(s1: &[Poly256], s2: &[Poly256]) -> SecretBuffer<Vec<u32>> {
+    SecretBuffer(s1.iter().chain(s2).flat_map(|p| p.coeffs.iter().copied()).collect())
 }
 
 fn ntt_all(mut polys: Vec<Poly256>) -> Vec<Poly256> {
@@ -1991,8 +2044,7 @@ fn shamir_session_key<T: MpcTransport>(
         .map(|&id| shamir_point(pack, id))
         .collect::<Option<Vec<u32>>>()
         .ok_or(ThresholdMlDsaError::ProtocolInvariantViolated)?;
-    let mut mine = SecretBuffer(flatten(&share.s1_hat));
-    mine.extend_from_slice(&flatten(&share.s2_hat));
+    let mine = flatten_key(&share.s1_hat, &share.s2_hat);
     let inputs = engine.input_all(&mine)?;
     let combine = |weights: &[u32]| {
         inputs[1..t]
@@ -2109,9 +2161,7 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
             let key = session_key(share, &quorum, &structure, engine.comps(), &params)?;
             let mut s_hat_sh = engine.zeros(z_len + w_len)?;
             for i in 0..comps {
-                let mut flat_s = flatten(&key.s1_hat[i]);
-                flat_s.extend_from_slice(&flatten(&key.s2_hat[i]));
-                s_hat_sh.c[i] = flat_s;
+                s_hat_sh.c[i] = flatten_key(&key.s1_hat[i], &key.s2_hat[i]).into_inner();
             }
             s_hat_sh
         }
@@ -2185,7 +2235,7 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let mut cs1_sh = engine.zeros(z_len)?;
         let mut cs2_sh = engine.zeros(w_len)?;
         for i in 0..comps {
-            let cs_coeff = flatten(&inv_ntt_all(to_polys(&cs_hat_sh.c[i])));
+            let cs_coeff = SecretBuffer(flatten(&inv_ntt_all(to_polys(&cs_hat_sh.c[i]))));
             cs1_sh.c[i] = cs_coeff[..z_len].to_vec();
             cs2_sh.c[i] = cs_coeff[z_len..].to_vec();
         }

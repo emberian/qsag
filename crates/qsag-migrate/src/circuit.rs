@@ -11,33 +11,63 @@ use qsag_accel::{
 };
 
 pub(crate) type Wire = usize;
-pub(crate) type Value = [u64; 4];
-pub(crate) const ZERO: Value = [0; 4];
+pub(crate) type Value = [u64; 6];
+pub(crate) const ZERO: Value = [0; 6];
+pub(crate) const ONE: Value = [1, 0, 0, 0, 0, 0];
+
+#[inline(always)]
+pub(crate) const fn lift4(x: [u64; 4]) -> Value {
+    [x[0], x[1], x[2], x[3], 0, 0]
+}
+
+#[inline(always)]
+pub(crate) const fn trunc4(x: Value) -> [u64; 4] {
+    [x[0], x[1], x[2], x[3]]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Domain {
     Bit,
     Gold,
     Secp,
     Ed,
+    PallasFp,
+    BlsFp,
 }
 impl Domain {
+    pub(crate) const ALL_FIELDS: [Self; 5] = [
+        Self::Gold,
+        Self::Secp,
+        Self::Ed,
+        Self::PallasFp,
+        Self::BlsFp,
+    ];
+
     pub(crate) fn inverse(self, a: Value) -> Value {
-        let exp = limbs::sub_mod(self.modulus(), [2, 0, 0, 0], self.modulus());
-        let mut out = [1, 0, 0, 0];
-        for i in (0..self.width()).rev() {
-            out = self.mul(out, out);
-            if (exp[i / 64] >> (i % 64)) & 1 != 0 {
-                out = self.mul(out, a);
+        match self {
+            Self::PallasFp => lift4(crate::pallas::FpPallas(trunc4(a)).inv_or_zero().0),
+            Self::BlsFp => crate::bls12_381::FpBls381(a).inv_or_zero().0,
+            _ => {
+                let exp = limbs::sub_mod(self.modulus(), [2, 0, 0, 0, 0, 0], self.modulus());
+                let mut out = ONE;
+                for i in (0..self.width()).rev() {
+                    out = self.mul(out, out);
+                    if (exp[i / 64] >> (i % 64)) & 1 != 0 {
+                        out = self.mul(out, a);
+                    }
+                }
+                out
             }
         }
-        out
     }
     pub(crate) fn modulus(self) -> Value {
         match self {
-            Self::Bit => [2, 0, 0, 0],
-            Self::Gold => [GOLDILOCKS_PRIME, 0, 0, 0],
-            Self::Secp => SECP_P,
-            Self::Ed => scalar::ED_PRIME,
+            Self::Bit => [2, 0, 0, 0, 0, 0],
+            Self::Gold => [GOLDILOCKS_PRIME, 0, 0, 0, 0, 0],
+            Self::Secp => lift4(SECP_P),
+            Self::Ed => lift4(scalar::ED_PRIME),
+            Self::PallasFp => lift4(crate::pallas::PALLAS_P),
+            Self::BlsFp => crate::bls12_381::BLS_P,
         }
     }
     pub(crate) fn width(self) -> usize {
@@ -46,6 +76,29 @@ impl Domain {
             Self::Gold => 64,
             Self::Secp => 256,
             Self::Ed => 255,
+            Self::PallasFp => 255,
+            Self::BlsFp => 381,
+        }
+    }
+    #[inline(always)]
+    pub(crate) fn limbs_len(self) -> usize {
+        self.width().div_ceil(64)
+    }
+    #[inline(always)]
+    pub(crate) fn byte_len(self) -> usize {
+        self.width().div_ceil(8)
+    }
+    #[inline(always)]
+    pub(crate) fn tape_draw_bits(self) -> usize {
+        match self {
+            Self::Bit => 1,
+            Self::Gold => 64,
+            Self::Secp | Self::Ed => 256,
+            // Zero-rejection wide reductions:
+            // - `PallasFp`: 512 bits (`lo + 2^254 * hi mod p`, `< 2^-253.8` bias, 0% rejection)
+            // - `BlsFp`:    768 bits (`lo + 2^380 * hi mod p`, `< 2^-379` bias, 0% rejection)
+            Self::PallasFp => 512,
+            Self::BlsFp => 768,
         }
     }
     #[inline(always)]
@@ -55,28 +108,44 @@ impl Domain {
     #[inline(always)]
     pub(crate) fn add(self, a: Value, b: Value) -> Value {
         match self {
-            Self::Bit => [a[0] ^ b[0], 0, 0, 0],
-            Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0],
-            Self::Secp => (Fp256(a) + Fp256(b)).0,
-            Self::Ed => limbs::add_mod(a, b, scalar::ED_PRIME),
+            Self::Bit => [a[0] ^ b[0], 0, 0, 0, 0, 0],
+            Self::Gold => [gl_add(a[0], b[0]), 0, 0, 0, 0, 0],
+            Self::Secp => lift4((Fp256(trunc4(a)) + Fp256(trunc4(b))).0),
+            Self::Ed => lift4(limbs::add_mod(trunc4(a), trunc4(b), scalar::ED_PRIME)),
+            Self::PallasFp => lift4(limbs::add_mod(
+                trunc4(a),
+                trunc4(b),
+                crate::pallas::PALLAS_P,
+            )),
+            Self::BlsFp => limbs::add_mod(a, b, crate::bls12_381::BLS_P),
         }
     }
     #[inline(always)]
     pub(crate) fn sub(self, a: Value, b: Value) -> Value {
         match self {
             Self::Bit => self.add(a, b),
-            Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0],
-            Self::Secp => (Fp256(a) - Fp256(b)).0,
-            Self::Ed => limbs::sub_mod(a, b, scalar::ED_PRIME),
+            Self::Gold => [gl_sub(a[0], b[0]), 0, 0, 0, 0, 0],
+            Self::Secp => lift4((Fp256(trunc4(a)) - Fp256(trunc4(b))).0),
+            Self::Ed => lift4(limbs::sub_mod(trunc4(a), trunc4(b), scalar::ED_PRIME)),
+            Self::PallasFp => lift4(limbs::sub_mod(
+                trunc4(a),
+                trunc4(b),
+                crate::pallas::PALLAS_P,
+            )),
+            Self::BlsFp => limbs::sub_mod(a, b, crate::bls12_381::BLS_P),
         }
     }
     #[inline(always)]
     pub(crate) fn mul(self, a: Value, b: Value) -> Value {
         match self {
-            Self::Bit => [a[0] & b[0], 0, 0, 0],
-            Self::Gold => [gl_mul(a[0], b[0]), 0, 0, 0],
-            Self::Secp => (Fp256(a) * Fp256(b)).0,
-            Self::Ed => crate::ed25519_ct::multiply_limbs(a, b),
+            Self::Bit => [a[0] & b[0], 0, 0, 0, 0, 0],
+            Self::Gold => [gl_mul(a[0], b[0]), 0, 0, 0, 0, 0],
+            Self::Secp => lift4((Fp256(trunc4(a)) * Fp256(trunc4(b))).0),
+            Self::Ed => lift4(crate::ed25519_ct::multiply_limbs(trunc4(a), trunc4(b))),
+            Self::PallasFp => lift4(
+                (crate::pallas::FpPallas(trunc4(a)) * crate::pallas::FpPallas(trunc4(b))).0,
+            ),
+            Self::BlsFp => (crate::bls12_381::FpBls381(a) * crate::bls12_381::FpBls381(b)).0,
         }
     }
 }
@@ -143,10 +212,10 @@ impl Builder {
         self.push(d, Op::Constant(x), x)
     }
     pub(crate) fn small(&self, d: Domain, x: u64) -> Wire {
-        self.constant(d, [x, 0, 0, 0])
+        self.constant(d, [x, 0, 0, 0, 0, 0])
     }
     pub(crate) fn input(&self, x: u8) -> Wire {
-        self.push(Domain::Bit, Op::Input, [u64::from(x), 0, 0, 0])
+        self.push(Domain::Bit, Op::Input, [u64::from(x & 1), 0, 0, 0, 0, 0])
     }
     fn known(&self, w: Wire) -> Option<Value> {
         match self.nodes.borrow()[w].op {
@@ -186,12 +255,12 @@ impl Builder {
             _ => self.push(d, Op::Mul(a, b), d.mul(self.value(a), self.value(b))),
         }
     }
-    fn scale_value(&self, a: Wire, x: Value) -> Wire {
+    pub(crate) fn scale_value(&self, a: Wire, x: Value) -> Wire {
         let d = self.domain(a);
         if x == ZERO {
             return self.constant(d, ZERO);
         }
-        if x == [1, 0, 0, 0] {
+        if x == ONE {
             return a;
         }
         let v = d.mul(self.value(a), x);
@@ -202,7 +271,7 @@ impl Builder {
         }
     }
     pub(crate) fn scale(&self, a: Wire, x: u64) -> Wire {
-        self.scale_value(a, [x, 0, 0, 0])
+        self.scale_value(a, [x, 0, 0, 0, 0, 0])
     }
     pub(crate) fn not(&self, a: Wire) -> Wire {
         self.add(a, self.small(Domain::Bit, 1))
@@ -277,7 +346,7 @@ impl Builder {
                     } else {
                         0
                     };
-                    self.push(Domain::Bit, Op::Digit(a, p, i), [v, 0, 0, 0])
+                    self.push(Domain::Bit, Op::Digit(a, p, i), [v, 0, 0, 0, 0, 0])
                 })
                 .collect()
         });
@@ -287,18 +356,24 @@ impl Builder {
             d,
         )
     }
-    pub(crate) fn require_scalar(&self, bits: &[Wire], order: Value) {
+    pub(crate) fn require_canonical(&self, bits: &[Wire], order: Value) {
         let complement: Vec<_> = self
-            .constant_bits(order, 256)
+            .constant_bits(order, bits.len())
             .iter()
             .map(|&b| self.not(b))
             .collect();
         let (_, ge) = self.add_bits(bits, &complement, self.small(Domain::Bit, 1));
         self.output(ge);
+    }
+    pub(crate) fn require_nonzero(&self, bits: &[Wire]) {
         let all_zero = bits
             .iter()
             .fold(self.small(Domain::Bit, 1), |a, &b| self.mul(a, self.not(b)));
         self.output(all_zero);
+    }
+    pub(crate) fn require_scalar(&self, bits: &[Wire], order: Value) {
+        self.require_canonical(bits, order);
+        self.require_nonzero(bits);
     }
     pub(crate) fn inverse(&self, a: Wire) -> Wire {
         let d = self.domain(a);
@@ -333,7 +408,7 @@ pub(crate) fn local(node: &Node, party: usize, wires: &[Value]) -> Value {
         }
         Op::Digit(a, owner, bit) => {
             if party == owner {
-                [(wires[a][bit / 64] >> (bit % 64)) & 1, 0, 0, 0]
+                [(wires[a][bit / 64] >> (bit % 64)) & 1, 0, 0, 0, 0, 0]
             } else {
                 ZERO
             }

@@ -130,6 +130,10 @@ impl Vault {
             .checked_add(1)
             .ok_or_else(corrupt)?;
         set(secret, "uses_completed", Json::num(used));
+        self.commit_state(path, secret)
+    }
+
+    pub fn commit_state(&mut self, path: &str, secret: &mut Json) -> Result<(), CliError> {
         self.seal(secret)?;
         let bytes = ZeroizingBuf::new(secret.to_pretty().into_bytes());
         replace_secret(path, &bytes.0)?;

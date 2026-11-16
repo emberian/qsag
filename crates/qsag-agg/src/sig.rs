@@ -2181,8 +2181,8 @@ impl ValidatorKeypair {
             let (merkle_path, next_root) = if layer + 1 == CORDUROY_NUM_LAYERS {
                 let mut path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
                 let mut sub_idx = kp_idx as usize;
-                for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
-                    path.push(self.top_subtree_levels[lvl][sub_idx ^ 1]);
+                for level_nodes in &self.top_subtree_levels[..CORDUROY_SUBTREE_HEIGHT] {
+                    path.push(level_nodes[sub_idx ^ 1]);
                     sub_idx >>= 1;
                 }
                 debug_assert_eq!(
@@ -2200,8 +2200,8 @@ impl ValidatorKeypair {
                 );
                 let mut path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
                 let mut sub_idx = kp_idx as usize;
-                for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
-                    path.push(sub_levels[lvl][sub_idx ^ 1]);
+                for level_nodes in &sub_levels[..CORDUROY_SUBTREE_HEIGHT] {
+                    path.push(level_nodes[sub_idx ^ 1]);
                     sub_idx >>= 1;
                 }
                 (path, root)

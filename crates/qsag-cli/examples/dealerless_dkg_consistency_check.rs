@@ -238,12 +238,12 @@ fn main() {
     );
 
     println!("\n=== 2. One custodian reports a wrong share in one pairwise product ===");
-    // Endpoint products 0..12 build the power tuples, 12..16 the Beaver triples, 16..24 the MACs.
+    // Shared-operand + stream-folded Gilboa calls: 0..8 power tuples, 8..12 Beaver triples, 12..20 MACs.
     for (what, call) in [
         ("power tuple", 1),
-        ("Beaver triple", 13),
-        ("MAC lane 0", 17),
-        ("MAC lane 1", 22),
+        ("Beaver triple", 9),
+        ("MAC lane 0", 13),
+        ("MAC lane 1", 18),
     ] {
         let results = check_and_activate(setup(Some((2, call))));
         assert!(

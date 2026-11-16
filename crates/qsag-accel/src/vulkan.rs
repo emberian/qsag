@@ -36,7 +36,6 @@ use crate::goldilocks::{check_goldilocks_twiddles, coset_lde_shape, ntt_log2_len
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
 use crate::poseidon2::{
     Poseidon2Merkle2BlockAddr, merkle_layer_2block_shape, merkle_layer_shape,
-    poseidon2_canopy_root_cpu, poseidon2_canopy_tree_key_cpu,
 };
 use crate::spirv_kernels::{
     canonical_prover_spirv_pin, canonical_prover_spirv_pins, canonical_spirv_pin,
@@ -45,9 +44,19 @@ use crate::spirv_kernels::{
 use crate::{
     AccelError, AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedKernelPin,
     CertifiedProverKernelPin, ExecutionReceipt, KernelSlot, KernelTargetArch,
-    ProverExecutionReceipt, ProverJobDescriptor, ProverKernelSlot, hash_counted_u64s,
-    hash_u64_rows, merkle_layer_input_digest, merkle_layer_output_digest, prover_stage_io_digest,
+    ProverExecutionReceipt, ProverKernelSlot, hash_counted_u64s, hash_u64_rows,
+    merkle_layer_input_digest, merkle_layer_output_digest,
 };
+
+#[cfg(any(
+    test,
+    all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    )
+))]
+use crate::{ProverJobDescriptor, prover_stage_io_digest};
 
 #[cfg(all(
     feature = "std",
@@ -55,6 +64,12 @@ use crate::{
     target_pointer_width = "64"
 ))]
 use crate::CpuReferenceBackend;
+#[cfg(all(
+    feature = "std",
+    any(target_os = "linux", target_os = "macos"),
+    target_pointer_width = "64"
+))]
+use crate::poseidon2::{poseidon2_canopy_root_cpu, poseidon2_canopy_tree_key_cpu};
 #[cfg(all(
     feature = "std",
     any(target_os = "linux", target_os = "macos"),
@@ -1025,7 +1040,7 @@ impl VulkanSpirvBackend {
         ntt_log2_len("Merkle tree leaves", leaves.len())?;
         // Level `l` is tweaked with `base_layer + l`; a wrapped tweak would alias another layer.
         if base_layer
-            .checked_add(leaves.len().trailing_zeros())
+            .checked_add(leaves.len().trailing_zeros().saturating_sub(1))
             .is_none()
         {
             return Err(AccelError::LengthOverflow.into());
@@ -1568,7 +1583,20 @@ impl VulkanSpirvBackend {
             finalize_cshake256(&mut witness_sp, true);
             let mut witness_digest = [0u8; 32];
             witness_sp.squeeze(&mut witness_digest);
-            let input_digest = prover_stage_io_digest(slot, 0x01, 0, &[salt_seed, &witness_digest]);
+            let capacity_args = [
+                (max_stage1_domain_ext4 as u64).to_le_bytes(),
+                (max_stage1_groups as u64).to_le_bytes(),
+                (extra_witness_words as u64).to_le_bytes(),
+            ];
+            let input_digest = prover_stage_io_digest(
+                slot,
+                0x01,
+                0,
+                &[
+                    salt_seed, &witness_digest,
+                    &capacity_args[0], &capacity_args[1], &capacity_args[2],
+                ],
+            );
             let output_digest = prover_stage_io_digest(slot, 0x02, 0, &[&top_node]);
             let receipt = self.issue_prover_receipt(
                 key,
@@ -3025,7 +3053,7 @@ impl VulkanSpirvBackend {
                 op_ent_off,
                 sorted_u64_off,
             )?;
-            let mut meta = [0u8; 34];
+            let mut meta = [0u8; 42];
             meta[0] = is_round0_base as u8;
             meta[1] = folding_signer as u8;
             meta[2..6].copy_from_slice(&col_src.to_le_bytes());
@@ -3036,6 +3064,9 @@ impl VulkanSpirvBackend {
             meta[22..26].copy_from_slice(&op_hdr_off.to_le_bytes());
             meta[26..30].copy_from_slice(&op_ent_off.to_le_bytes());
             meta[30..34].copy_from_slice(&sorted_u64_off.to_le_bytes());
+            // Group A's public descriptor has no cur_s field, but its receipt must still
+            // bind every argument of the paired dispatch independently of Group B's MAC.
+            meta[34..42].copy_from_slice(&(cur_s as u64).to_le_bytes());
             let slot_a = ProverKernelSlot::AirRowGroupA;
             let slot_b = ProverKernelSlot::AirRowGroupB;
             let dyn_da = Self::hash_u64_slice_for_prover(slot_a, dyn_words);

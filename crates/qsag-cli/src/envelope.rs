@@ -48,7 +48,7 @@ fn secret_field_name(json: &Json) -> Result<&'static str, CliError> {
 
 /// Everything the envelope tag does not cover: the envelope's own fields, the secret
 /// itself (covered as ciphertext), and the vault state that moves with every use.
-const MUTABLE_FIELDS: [&str; 13] = [
+const MUTABLE_FIELDS: &[&str] = &[
     "envelope",
     "salt",
     "envelope_tag",
@@ -61,6 +61,8 @@ const MUTABLE_FIELDS: [&str; 13] = [
     "ceremony_checkpoint_tag",
     "belt_checkpoint_gen",
     "belt_checkpoint_tag",
+    "reservoir_generation",
+    "reservoir_commit",
     "state_mac",
 ];
 

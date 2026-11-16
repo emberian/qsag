@@ -56,8 +56,8 @@
 //!
 //! Preprocessing generates the full requested batch of `sboxes` power tuples and
 //! `triples` Beaver triples in a single dealerless `run_dealerless_pi_pow7_with_alpha`
-//! ceremony; `qsag_core::preprocessing` authenticates batches in linear `BLOCK = 32`
-//! flights while keeping the full statistical soundness of the protocol.
+//! ceremony and retains the monotone [`OtMesh`] inside the reservoir so online
+//! `MacCheck` openings run in single-digit milliseconds with zero Ring-LWE base-OT setups.
 //!
 //! A tuple is consumed by advancing a vault cursor before the tuple is read, so no
 //! path hands one out twice. A request the session refuses (wrong context, a
@@ -85,9 +85,9 @@ use qsag_core::field::goldilocks::{
     Goldilocks, GoldilocksExt2, eval_poly_goldilocks, lagrange_weights_zero_goldilocks,
 };
 use qsag_core::preprocessing::{
-    AuthenticatedPower7Share, GoldilocksBeaverShare, OtMesh, PartyPrivateRng, PreprocessError,
-    PreprocessedPoseidonPartyVault, commit_and_open_spdz_goldilocks_batch_quorum,
-    open_and_check_degree_goldilocks, run_dealerless_pi_pow7_with_alpha,
+    AuthenticatedPower7Share, GoldilocksBeaverShare, GoldilocksOpeningTables, OtMesh, PartyPrivateRng, PreprocessError,
+    PreprocessedPoseidonPartyVault, commit_and_open_spdz_goldilocks_batch_quorum_with_mesh,
+    run_dealerless_pi_pow7_with_alpha,
     spdz_authenticate_goldilocks_batch_ext2, spdz_setup_alpha_goldilocks,
 };
 use qsag_core::sponge::poseidon2::{
@@ -694,10 +694,10 @@ struct Pending {
     macs: Vec<Vec<GoldilocksExt2>>,
 }
 impl Pending {
-    fn new(quorum: usize) -> Self {
+    fn with_capacity(quorum: usize, capacity: usize) -> Self {
         Self {
-            shares: vec![Vec::new(); quorum],
-            macs: vec![Vec::new(); quorum],
+            shares: (0..quorum).map(|_| Vec::with_capacity(capacity)).collect(),
+            macs: (0..quorum).map(|_| Vec::with_capacity(capacity)).collect(),
         }
     }
     fn record(&mut self, wires: &[Vec<Wire>]) {
@@ -863,9 +863,11 @@ pub struct SpdzSession {
     items: usize,
     parties: Vec<usize>,
     points: Vec<Goldilocks>,
+    opening_tables: GoldilocksOpeningTables,
     rngs: Vec<PartyPrivateRng>,
     /// The quorum's degree-`< t` shares of the MAC key.
     alpha: Vec<GoldilocksExt2>,
+    mesh: Option<OtMesh>,
     pool: TuplePool,
     key: Vec<[Wire; LANES]>,
     masks: Vec<Vec<Wire>>,
@@ -877,6 +879,7 @@ impl fmt::Debug for SpdzSession {
 }
 impl Drop for SpdzSession {
     fn drop(&mut self) {
+        self.mesh = None;
         self.alpha.secret_wipe();
         self.key.secret_wipe();
         self.masks.secret_wipe();
@@ -888,23 +891,24 @@ impl SpdzSession {
         SecretBuffer(self.alpha.clone())
     }
 
-    /// Open a batch of wires under the SPDZ MAC check.
+    /// Open a batch of wires under the SPDZ MAC check, reusing the reservoir's monotone OT mesh.
     fn checked_open(
         &mut self,
         phase: &'static str,
         shares: &[Vec<Goldilocks>],
         macs: &[Vec<GoldilocksExt2>],
     ) -> Result<Vec<Goldilocks>, Error> {
-        let alphas = self.alphas();
-        commit_and_open_spdz_goldilocks_batch_quorum(
+        let mesh = self.mesh.as_mut().ok_or(Error::MacCheck)?;
+        commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
             &self.sid,
             phase,
             self.threshold,
             &self.points,
             shares,
             macs,
-            &alphas,
+            &self.alpha,
             &mut self.rngs,
+            Some(mesh),
         )
         .map_err(preprocess_error)
     }
@@ -914,7 +918,7 @@ impl SpdzSession {
         phase: &'static str,
         wires: &[Vec<Wire>],
     ) -> Result<Vec<Goldilocks>, Error> {
-        let mut pending = Pending::new(wires.len());
+        let mut pending = Pending::with_capacity(wires.len(), wires.first().map_or(0, Vec::len));
         pending.record(wires);
         self.checked_open(phase, &pending.shares, &pending.macs)
     }
@@ -988,13 +992,9 @@ impl SpdzSession {
             for (share, wires) in shares.iter_mut().zip(masked.iter()) {
                 *share = wires[gate].val;
             }
-            let y = open_and_check_degree_goldilocks(
-                self.threshold,
-                &self.points,
-                &shares,
-                "toprf_spdz_sbox",
-            )
-            .map_err(preprocess_error)?;
+            let y = self.opening_tables
+                .open(&shares, "toprf_spdz_sbox")
+                .map_err(preprocess_error)?;
             // powers[k] = y^(6 - k)
             let mut powers = [Goldilocks::ONE; 7];
             for k in (0..6).rev() {
@@ -1158,7 +1158,7 @@ impl SpdzSession {
                 })
                 .collect(),
         );
-        let mut pending = Pending::new(m);
+        let mut pending = Pending::with_capacity(m, self.items * SBOXES_PER_ITEM);
         self.permute(&mut states, &mut pending)?;
         // Every S-box opening is authenticated before any output share is opened.
         let shares = SecretBuffer(core::mem::take(&mut pending.shares));
@@ -1311,7 +1311,7 @@ impl SpdzReservoir {
                 .map(|(share, &weight)| share.mul_base(weight))
                 .collect(),
         );
-        let mut mesh = OtMesh::try_establish(sid, &mut rngs).map_err(preprocess_error)?;
+        let mesh = OtMesh::try_establish(sid, &mut rngs).map_err(preprocess_error)?;
 
         let mut this = SpdzSession {
             threshold,
@@ -1322,9 +1322,12 @@ impl SpdzReservoir {
             counter: 0,
             items,
             parties,
+            opening_tables: GoldilocksOpeningTables::new(threshold, &points)
+                .map_err(preprocess_error)?,
             points,
             rngs,
             alpha: alpha_shares.to_vec(),
+            mesh: Some(mesh),
             pool: TuplePool::new(),
             key: quorum.iter().map(|server| server.key).collect(),
             masks: Vec::new(),
@@ -1333,19 +1336,22 @@ impl SpdzReservoir {
         // Check the stored key shares against their MACs before the long step: each
         // limb is opened under a fresh authenticated mask.
         let check_sid = hash(b"QSAG.TOPRF.SPDZ.KEYCHECK.V1", &[&sid]);
-        let mut check = run_dealerless_pi_pow7_with_alpha(
-            check_sid,
-            threshold,
-            &this.points,
-            0,
-            LANES,
-            0,
-            &alpha_contribs,
-            &alpha_shares,
-            &mut mesh,
-            &mut this.rngs,
-        )
-        .map_err(preprocess_error)?;
+        let mut check = {
+            let mesh_ref = this.mesh.as_mut().ok_or(Error::MacCheck)?;
+            run_dealerless_pi_pow7_with_alpha(
+                check_sid,
+                threshold,
+                &this.points,
+                0,
+                LANES,
+                0,
+                &alpha_contribs,
+                &alpha_shares,
+                mesh_ref,
+                &mut this.rngs,
+            )
+            .map_err(preprocess_error)?
+        };
         let mut blinded = SecretBuffer(vec![Vec::with_capacity(LANES); m]);
         for ((wires, vault), key) in blinded.iter_mut().zip(&mut check).zip(&this.key) {
             let triples = vault.reserve_beaver(LANES).map_err(preprocess_error)?;
@@ -1365,7 +1371,8 @@ impl SpdzReservoir {
         // `BLOCK = 32` flights without quadratic whole-batch overhead.
         let triples = MASKS_PER_ITEM * items + LANES * sessions;
         let run_sid = hash(b"QSAG.TOPRF.SPDZ.CHUNK.V1", &[&sid, &0u64.to_le_bytes()]);
-        this.pool.chunks.push(
+        let chunk = {
+            let mesh_ref = this.mesh.as_mut().ok_or(Error::MacCheck)?;
             run_dealerless_pi_pow7_with_alpha(
                 run_sid,
                 threshold,
@@ -1375,11 +1382,12 @@ impl SpdzReservoir {
                 0,
                 &alpha_contribs,
                 &alpha_shares,
-                &mut mesh,
+                mesh_ref,
                 &mut this.rngs,
             )
-            .map_err(preprocess_error)?,
-        );
+            .map_err(preprocess_error)?
+        };
+        this.pool.chunks.push(chunk);
         Ok(Self {
             state: this,
             sessions_remaining: sessions,
@@ -1502,8 +1510,12 @@ impl SpdzReservoir {
     }
 
     fn poison(&mut self) {
+        self.state.mesh = None;
         self.state.pool.poison();
         self.state.alpha.secret_wipe();
+        self.state.key.secret_wipe();
+        self.state.masks.secret_wipe();
+        self.state.masks.clear();
     }
 }
 
@@ -1944,6 +1956,7 @@ mod tests {
         let mut altered = honest.clone();
         altered.differences[0][0][0] ^= 1;
         assert_eq!(session.evaluate(&altered).unwrap_err(), Error::Context);
+        assert!(pool.state.mesh.is_some());
 
         // One limb masked two different ways, under a digest that matches.
         let (session, grants) = pool.begin(&mut quorum, &mut refs, sid, 1, 1).unwrap();
@@ -1962,6 +1975,8 @@ mod tests {
             Error::InconsistentShares
         );
 
+        assert!(pool.state.mesh.is_some());
+
         // Each refusal spent its own reservation; the next session is unaffected.
         let (session, grants) = pool.begin(&mut quorum, &mut refs, sid, 2, 1).unwrap();
         let (client, request) = spdz_blind(&public, &inputs, sid, 2, &grants).unwrap();
@@ -1973,6 +1988,7 @@ mod tests {
             &[plaintext(&key, inputs[0])]
         );
         assert_eq!(pool.state.pool.remaining_pow7(), 2 * SBOXES_PER_ITEM);
+        assert!(pool.state.mesh.is_some());
 
         // A quorum member that deviates fails a MAC check, which spends everything.
         let (session, grants) = pool.begin(&mut quorum, &mut refs, sid, 3, 1).unwrap();
@@ -1980,6 +1996,7 @@ mod tests {
         session.pool.state.key[1][0].val += Goldilocks::ONE;
         assert_eq!(session.evaluate(&request).unwrap_err(), Error::MacCheck);
         assert_eq!(pool.state.pool.remaining_pow7(), 0);
+        assert!(pool.state.mesh.is_none());
         assert!(matches!(
             pool.begin(&mut quorum, &mut refs, sid, 4, 1),
             Err(Error::Quota)

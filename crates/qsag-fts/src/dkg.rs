@@ -293,7 +293,9 @@ pub trait ParallelSeededDkgProducts {
         sender_operand: &[u128],
         receiver_operand: &[u128],
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        if width == 0 || receiver_operand.len().checked_mul(width) != Some(sender_operand.len()) {
+        if width == 0 || receiver_operand.len().checked_mul(width) != Some(sender_operand.len())
+            || !valid_product_roster(roster, self.party_id())
+        {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
         let id = self.party_id();
@@ -423,6 +425,14 @@ pub trait ParallelSeededDkgOt {
         context: [u8; 32],
         choices: &[u128],
     ) -> Result<SecretVec<u128>, ParallelSeededError>;
+}
+
+// Product adapters are public entry points too: duplicate peers would reuse OT
+// contexts, and noncanonical ordering can deadlock a pairwise transport.
+fn valid_product_roster(roster: &[u16], party_id: u16) -> bool {
+    !roster.is_empty() && roster.len() <= 255
+        && roster.windows(2).all(|w| w[0] < w[1])
+        && roster.binary_search(&party_id).is_ok()
 }
 
 /// Field products per chosen-message OT call of [`ParallelSeededDkgProducts::product_shares`].
@@ -715,7 +725,7 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
         if width == 0
             || width > 3
             || receiver_operand.len().checked_mul(width) != Some(sender_operand.len())
-            || !roster.contains(&self.party_id)
+            || !valid_product_roster(roster, self.party_id)
         {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
@@ -811,7 +821,7 @@ impl<T: ParallelSeededDkgOt> ParallelSeededDkgProducts for ParallelSeededGilboaP
         key: u128,
         values: &[u128],
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        if !roster.contains(&self.party_id) {
+        if !valid_product_roster(roster, self.party_id) {
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
         let mut shares = SecretBuffer(vec![0u128; values.len()]);
@@ -2221,6 +2231,10 @@ mod gilboa_tests {
             invalid
         );
         assert_eq!(party.keyed_products([0; 32], &[2, 3], 1, &[0]), invalid);
+        for roster in [&[1, 1][..], &[2, 1][..], &[1, 2, 2][..], &[][..]] {
+            assert_eq!(party.cross_products([0; 32], roster, 1, &[0], &[0]), invalid);
+            assert_eq!(party.keyed_products([0; 32], roster, 1, &[0]), invalid);
+        }
         assert!(mailbox.is_empty());
     }
 }

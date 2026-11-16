@@ -61,7 +61,7 @@ use qsag_core::sponge::keccak::{cshake256_32, encode_multi_frame};
 use qsag_core::sponge::poseidon2::{POSEIDON2_CONST_IV, poseidon2_hash32};
 use qsag_core::tsw_baggy::MonotonicEpochLatch;
 use qsag_core::wipe::{
-    SecretBuffer, SecretWipe, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks,
+    SecretBuffer, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_ext2, wipe_goldilocks,
 };
 
 use crate::hash::{mac32, mac32_verify};
