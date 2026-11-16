@@ -643,3 +643,642 @@ structure ResponseGate (Y : Type) (cardY : Nat) where
   right_inv : ∀ v y, act v (actInv v y) = y
 
 /-- Reprogram a classical oracle at one point. -/
+def pointUpdate {cardX : Nat} {Y : Type} (H : Fin cardX → Y) (xStar : Fin cardX) (v : Y) :
+    Fin cardX → Y :=
+  fun x => if x = xStar then v else H x
+
+/-- The number of indices on which a Boolean predicate holds. -/
+def finCountTrue : (n : Nat) → (Fin n → Bool) → Nat
+  | 0, _ => 0
+  | n + 1, p =>
+    if p ⟨0, Nat.zero_lt_succ n⟩ = true then
+      finCountTrue n (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) + 1
+    else finCountTrue n (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+theorem ringSum_indicator_mul {R : Type} [LawfulCommRing R] (c : R) : ∀ (n : Nat) (p : Fin n → Bool),
+    ringSum n (fun j => if p j = true then c else zero) = mul (natCastR (finCountTrue n p)) c
+  | 0, _ => by
+    show (zero : R) = mul zero c
+    rw [LawfulCommRing.zero_mul]
+  | n + 1, p => by
+    have ih := ringSum_indicator_mul c n (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    simp only [ringSum, finCountTrue]
+    rw [ih]
+    cases p ⟨0, Nat.zero_lt_succ n⟩
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      constructive_ring
+    · simp only [↓reduceIte, natCastR]
+      constructive_ring
+
+section QueryRegister
+variable {R A : Type} [OrderedCommRing R] [ConstructiveAmplitudeRing R A]
+variable {cardX cardY cardAnc : Nat}
+open OrderedCommRing ConstructiveAmplitudeRing
+
+def qvZero : QVecOver A cardX cardY cardAnc := fun _ _ _ => zero
+def qvAdd (ψ φ : QVecOver A cardX cardY cardAnc) : QVecOver A cardX cardY cardAnc :=
+  fun x y a => add (ψ x y a) (φ x y a)
+def qvSub (ψ φ : QVecOver A cardX cardY cardAnc) : QVecOver A cardX cardY cardAnc :=
+  fun x y a => sub (ψ x y a) (φ x y a)
+def qvNeg (ψ : QVecOver A cardX cardY cardAnc) : QVecOver A cardX cardY cardAnc :=
+  fun x y a => neg (ψ x y a)
+
+def qvListSum : List (QVecOver A cardX cardY cardAnc) → QVecOver A cardX cardY cardAnc
+  | [] => qvZero
+  | v :: vs => qvAdd v (qvListSum vs)
+
+theorem qvListSum_apply (x : Fin cardX) (y : Fin cardY) (a : Fin cardAnc) :
+    ∀ vs : List (QVecOver A cardX cardY cardAnc),
+      qvListSum vs x y a = ampListSum (vs.map (fun v => v x y a))
+  | [] => by rfl
+  | v :: vs => by
+    show add (v x y a) (qvListSum vs x y a) = add (v x y a) (ampListSum (vs.map (fun v => v x y a)))
+    rw [qvListSum_apply x y a vs]
+
+/-- Squared amplitude mass on one query value. -/
+def queryWeightOver (ψ : QVecOver A cardX cardY cardAnc) (x : Fin cardX) : R :=
+  ringSum cardY (fun y => ringSum cardAnc (fun a => normSq (ψ x y a)))
+
+/-- Total squared norm. -/
+def stateNormSqOver (ψ : QVecOver A cardX cardY cardAnc) : R :=
+  ringSum cardX (fun x => queryWeightOver ψ x)
+
+/-- Unnormalised Born mass of the event `S` on the query/output register. -/
+def queryMassOnOver (S : Fin cardX → Bool) (ψ : QVecOver A cardX cardY cardAnc) : R :=
+  ringSum cardX (fun x => if S x = true then queryWeightOver ψ x else zero)
+
+theorem queryWeightOver_nonneg (ψ : QVecOver A cardX cardY cardAnc) (x : Fin cardX) :
+    le zero (queryWeightOver ψ x) :=
+  ringSum_nonneg (fun _ => ringSum_nonneg (fun _ => normSq_nonneg _))
+
+theorem queryMassOnOver_nonneg (S : Fin cardX → Bool) (ψ : QVecOver A cardX cardY cardAnc) :
+    le zero (queryMassOnOver S ψ) := by
+  apply ringSum_nonneg
+  intro x
+  cases S x
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    exact le_refl _
+  · simp only [↓reduceIte]
+    exact queryWeightOver_nonneg ψ x
+
+theorem queryMassOnOver_le_stateNormSqOver (S : Fin cardX → Bool)
+    (ψ : QVecOver A cardX cardY cardAnc) : le (queryMassOnOver S ψ) (stateNormSqOver ψ) := by
+  apply ringSum_le
+  intro x
+  cases S x
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    exact queryWeightOver_nonneg ψ x
+  · simp only [↓reduceIte]
+    exact le_refl _
+
+theorem qvNeg_normSq (ψ : QVecOver A cardX cardY cardAnc) :
+    stateNormSqOver (qvNeg ψ) = stateNormSqOver ψ := by
+  unfold stateNormSqOver queryWeightOver qvNeg
+  apply ringSum_congr; intro x
+  apply ringSum_congr; intro y
+  apply ringSum_congr; intro a
+  exact normSq_neg _
+
+/-- The query gate `|x, y, a⟩ ↦ |x, G_{H x}(y), a⟩` of a classical oracle `H`. -/
+def oracleGate {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (ψ : QVecOver A cardX cardY cardAnc) : QVecOver A cardX cardY cardAnc :=
+  fun x y a => ψ x (G.act (H x) y) a
+
+theorem oracleGate_sub {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (ψ φ : QVecOver A cardX cardY cardAnc) :
+    oracleGate G H (qvSub ψ φ) = qvSub (oracleGate G H ψ) (oracleGate G H φ) := by rfl
+
+theorem oracleGate_queryWeight {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (ψ : QVecOver A cardX cardY cardAnc) (x : Fin cardX) :
+    queryWeightOver (oracleGate G H ψ) x = queryWeightOver ψ x :=
+  ringSum_bijection (G.act (H x)) (G.actInv (H x)) (G.left_inv _) (G.right_inv _)
+    (fun y => ringSum cardAnc (fun a => normSq (ψ x y a)))
+
+/-- Every oracle gate is an exact isometry. -/
+theorem oracleGate_isometry {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (ψ : QVecOver A cardX cardY cardAnc) :
+    stateNormSqOver (oracleGate G H ψ) = stateNormSqOver ψ :=
+  ringSum_congr (oracleGate_queryWeight G H ψ)
+
+/-- Projection onto one query value. -/
+def projSingleOver (xStar : Fin cardX) (ψ : QVecOver A cardX cardY cardAnc) :
+    QVecOver A cardX cardY cardAnc :=
+  fun x y a => if x = xStar then ψ x y a else zero
+
+theorem projSingleOver_normSq (xStar : Fin cardX) (ψ : QVecOver A cardX cardY cardAnc) :
+    stateNormSqOver (projSingleOver xStar ψ) = queryWeightOver ψ xStar := by
+  have hPt : ∀ x : Fin cardX, queryWeightOver (projSingleOver xStar ψ) x =
+      if x = xStar then queryWeightOver ψ xStar else zero := by
+    intro x
+    by_cases hx : x = xStar
+    · subst hx
+      simp only [queryWeightOver, projSingleOver, ↓reduceIte]
+    · simp only [queryWeightOver, projSingleOver, hx, ↓reduceIte]
+      have h0 : ∀ y : Fin cardY, ringSum cardAnc (fun _ => normSq (zero : A)) = (zero : R) := by
+        intro _
+        rw [ringSum_congr (fun _ => normSq_zero), ringSum_zero]
+      rw [ringSum_congr h0, ringSum_zero]
+  unfold stateNormSqOver
+  rw [ringSum_congr hPt, ringSum_ite_eq]
+
+/-- Two oracles that agree away from `xStar` act identically except on the `xStar` component. -/
+theorem oracleGate_diff_localizes {Y : Type} (G : ResponseGate Y cardY)
+    (H H' : Fin cardX → Y) (xStar : Fin cardX) (hAgree : ∀ x, x ≠ xStar → H' x = H x)
+    (ψ : QVecOver A cardX cardY cardAnc) :
+    qvSub (oracleGate G H' ψ) (oracleGate G H ψ) =
+      qvSub (oracleGate G H' (projSingleOver xStar ψ)) (oracleGate G H (projSingleOver xStar ψ)) := by
+  funext x y a
+  by_cases hx : x = xStar
+  · subst hx
+    simp only [qvSub, oracleGate, projSingleOver, ↓reduceIte]
+  · simp only [qvSub, oracleGate, projSingleOver, hx, ↓reduceIte, hAgree x hx]
+    rw [LawfulCommRing.sub_self, LawfulCommRing.sub_self]
+
+/-- A difference-preserving operator that scales every squared norm by `scaleSq`. Exact
+    unitaries have `scaleSq = 1`; over `ℚ[i]` or `ℚ[√2, i]` every rational or Clifford+T circuit
+    is one. -/
+structure ScaledUnitaryOver (R A : Type) [OrderedCommRing R] [ConstructiveAmplitudeRing R A]
+    (cardX cardY cardAnc : Nat) where
+  apply : QVecOver A cardX cardY cardAnc → QVecOver A cardX cardY cardAnc
+  scaleSq : R
+  map_sub : ∀ ψ φ, apply (qvSub ψ φ) = qvSub (apply ψ) (apply φ)
+  normSq_eq : ∀ ψ, stateNormSqOver (apply ψ) = mul scaleSq (stateNormSqOver ψ)
+
+/-- Multiplication of every amplitude by `u`; an exact unitary when `normSq u = 1`. -/
+def ScaledUnitaryOver.phase (u : A) : ScaledUnitaryOver R A cardX cardY cardAnc where
+  apply ψ := fun x y a => mul u (ψ x y a)
+  scaleSq := normSq u
+  map_sub ψ φ := by
+    funext x y a
+    show mul u (sub (ψ x y a) (φ x y a)) = sub (mul u (ψ x y a)) (mul u (φ x y a))
+    constructive_ring
+  normSq_eq ψ := by
+    unfold stateNormSqOver queryWeightOver
+    rw [← ringSum_mul_left]
+    apply ringSum_congr; intro x
+    rw [← ringSum_mul_left]
+    apply ringSum_congr; intro y
+    rw [← ringSum_mul_left]
+    apply ringSum_congr; intro a
+    exact normSq_mul u _
+
+/-- A `Q`-query adversary: an initial state and `Q` layers, each applied after an oracle
+    query. `Q` is `steps.length`. -/
+structure QuantumAdvOver (R A : Type) [OrderedCommRing R] [ConstructiveAmplitudeRing R A]
+    (cardX cardY cardAnc : Nat) where
+  init : QVecOver A cardX cardY cardAnc
+  steps : List (ScaledUnitaryOver R A cardX cardY cardAnc)
+
+/-- Query, apply a layer, repeat. -/
+def runStepsOver {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y) :
+    List (ScaledUnitaryOver R A cardX cardY cardAnc) →
+      QVecOver A cardX cardY cardAnc → QVecOver A cardX cardY cardAnc
+  | [], ψ => ψ
+  | U :: rest, ψ => runStepsOver G H rest (U.apply (oracleGate G H ψ))
+
+/-- The final state of the adversary against the oracle `H`. -/
+def runQuantumAdvOver {Y : Type} (G : ResponseGate Y cardY)
+    (Adv : QuantumAdvOver R A cardX cardY cardAnc) (H : Fin cardX → Y) :
+    QVecOver A cardX cardY cardAnc :=
+  runStepsOver G H Adv.steps Adv.init
+
+/-- The product of the squared-norm scales of a list of layers. -/
+def stepsScaleOver : List (ScaledUnitaryOver R A cardX cardY cardAnc) → R
+  | [] => one
+  | U :: rest => mul U.scaleSq (stepsScaleOver rest)
+
+theorem runStepsOver_sub {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ φ : QVecOver A cardX cardY cardAnc),
+      runStepsOver G H steps (qvSub ψ φ) =
+        qvSub (runStepsOver G H steps ψ) (runStepsOver G H steps φ)
+  | [], _, _ => by rfl
+  | U :: rest, ψ, φ => by
+    show runStepsOver G H rest (U.apply (oracleGate G H (qvSub ψ φ))) =
+      qvSub (runStepsOver G H rest (U.apply (oracleGate G H ψ)))
+        (runStepsOver G H rest (U.apply (oracleGate G H φ)))
+    rw [oracleGate_sub, U.map_sub, runStepsOver_sub G H rest]
+
+/-- The norm of the final state does not depend on the oracle. -/
+theorem runStepsOver_normSq {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc),
+      stateNormSqOver (runStepsOver G H steps ψ) =
+        mul (stepsScaleOver steps) (stateNormSqOver ψ)
+  | [], ψ => (LawfulCommRing.one_mul _).symm
+  | U :: rest, ψ => by
+    show stateNormSqOver (runStepsOver G H rest (U.apply (oracleGate G H ψ))) =
+      mul (mul U.scaleSq (stepsScaleOver rest)) (stateNormSqOver ψ)
+    rw [runStepsOver_normSq G H rest, U.normSq_eq, oracleGate_isometry]
+    constructive_ring
+
+theorem runQuantumAdvOver_normSq {Y : Type} (G : ResponseGate Y cardY)
+    (Adv : QuantumAdvOver R A cardX cardY cardAnc) (H : Fin cardX → Y) :
+    stateNormSqOver (runQuantumAdvOver G Adv H) =
+      mul (stepsScaleOver Adv.steps) (stateNormSqOver Adv.init) :=
+  runStepsOver_normSq G H Adv.steps Adv.init
+
+/-! ## 5. Measure-and-reprogram over an arbitrary amplitude ring -/
+
+/-- The `2Q + 1` branches of the reprogrammed run: for every query, the reprogrammed and the
+    original oracle applied to the `xStar` component of the unreprogrammed state and continued
+    with the reprogrammed oracle; and last the unreprogrammed run itself. -/
+def dfmBranchesOver {Y : Type} (G : ResponseGate Y cardY) (H H' : Fin cardX → Y)
+    (xStar : Fin cardX) :
+    List (ScaledUnitaryOver R A cardX cardY cardAnc) → QVecOver A cardX cardY cardAnc →
+      List (QVecOver A cardX cardY cardAnc)
+  | [], ψ => [ψ]
+  | U :: rest, ψ =>
+    runStepsOver G H' rest (U.apply (oracleGate G H' (projSingleOver xStar ψ))) ::
+    qvNeg (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ)))) ::
+    dfmBranchesOver G H H' xStar rest (U.apply (oracleGate G H ψ))
+
+/-- The number of branches, `2Q + 1`, by structural recursion. -/
+def dfmCount {α : Type} : List α → Nat
+  | [] => 1
+  | _ :: rest => dfmCount rest + 2
+
+theorem dfmCount_eq {α : Type} : ∀ l : List α, dfmCount l = 2 * l.length + 1
+  | [] => by rfl
+  | _ :: rest => by
+    show dfmCount rest + 2 = 2 * (rest.length + 1) + 1
+    rw [dfmCount_eq rest, Nat.mul_succ]
+
+theorem dfmBranchesOver_length {Y : Type} (G : ResponseGate Y cardY) (H H' : Fin cardX → Y)
+    (xStar : Fin cardX) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc),
+      (dfmBranchesOver G H H' xStar steps ψ).length = dfmCount steps
+  | [], _ => by rfl
+  | U :: rest, ψ => by
+    show (dfmBranchesOver G H H' xStar rest (U.apply (oracleGate G H ψ))).length + 1 + 1 =
+      dfmCount rest + 2
+    rw [dfmBranchesOver_length G H H' xStar rest]
+
+private theorem add_neg_add_of_sub_eq {p q r s : A} (h : sub p q = sub r s) :
+    add r (add (neg s) q) = p := by
+  have e : p = add (sub p q) q := by constructive_ring
+  rw [e, h]
+  constructive_ring
+
+/-- **Branch decomposition.** If `H'` agrees with `H` away from `xStar`, the run against `H'`
+    is the sum of the `2Q + 1` branches. -/
+theorem dfmBranchesOver_sum {Y : Type} (G : ResponseGate Y cardY) (H H' : Fin cardX → Y)
+    (xStar : Fin cardX) (hAgree : ∀ x, x ≠ xStar → H' x = H x) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc),
+      qvListSum (dfmBranchesOver G H H' xStar steps ψ) = runStepsOver G H' steps ψ
+  | [], ψ => by
+    funext x y a
+    show add (ψ x y a) zero = ψ x y a
+    exact LawfulCommRing.add_zero _
+  | U :: rest, ψ => by
+    have ih := dfmBranchesOver_sum G H H' xStar hAgree rest (U.apply (oracleGate G H ψ))
+    have hlin : qvSub (runStepsOver G H' rest (U.apply (oracleGate G H' ψ)))
+        (runStepsOver G H' rest (U.apply (oracleGate G H ψ))) =
+        qvSub (runStepsOver G H' rest (U.apply (oracleGate G H' (projSingleOver xStar ψ))))
+          (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ)))) := by
+      rw [← runStepsOver_sub, ← U.map_sub, oracleGate_diff_localizes G H H' xStar hAgree ψ,
+        U.map_sub, runStepsOver_sub]
+    funext x y a
+    have h := congrFun (congrFun (congrFun hlin x) y) a
+    show add (runStepsOver G H' rest (U.apply (oracleGate G H' (projSingleOver xStar ψ))) x y a)
+        (add (neg (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ))) x y a))
+          (qvListSum (dfmBranchesOver G H H' xStar rest (U.apply (oracleGate G H ψ))) x y a)) =
+      runStepsOver G H' rest (U.apply (oracleGate G H' ψ)) x y a
+    rw [ih]
+    exact add_neg_add_of_sub_eq h
+
+/-- Event mass of a sum of `m` states is at most `m` times the sum of their event masses. -/
+theorem queryMassOnOver_qvListSum_le (T : Fin cardX → Bool)
+    (vs : List (QVecOver A cardX cardY cardAnc)) :
+    le (queryMassOnOver T (qvListSum vs))
+      (mul (natCastR vs.length) (ampListSum (vs.map (queryMassOnOver T)))) := by
+  have hW : ∀ x : Fin cardX, le (queryWeightOver (qvListSum vs) x)
+      (mul (natCastR vs.length) (ampListSum (vs.map (fun v => queryWeightOver v x)))) := by
+    intro x
+    have hPt : le (queryWeightOver (qvListSum vs) x)
+        (ringSum cardY (fun y => ringSum cardAnc (fun a =>
+          mul (natCastR vs.length) (ampListSum (vs.map (fun v => normSq (v x y a))))))) := by
+      apply ringSum_le; intro y
+      apply ringSum_le; intro a
+      rw [qvListSum_apply]
+      exact normSq_ampListSum_map_le (fun v => v x y a) vs
+    have hEq : ringSum cardY (fun y => ringSum cardAnc (fun a =>
+          mul (natCastR vs.length) (ampListSum (vs.map (fun v => normSq (v x y a)))))) =
+        mul (natCastR vs.length) (ampListSum (vs.map (fun v => queryWeightOver v x))) := by
+      have hA : ∀ y : Fin cardY, ringSum cardAnc (fun a =>
+          mul (natCastR vs.length) (ampListSum (vs.map (fun v => normSq (v x y a))))) =
+          mul (natCastR vs.length)
+            (ampListSum (vs.map (fun v => ringSum cardAnc (fun a => normSq (v x y a))))) := by
+        intro y
+        rw [ringSum_mul_left, ringSum_ampListSum cardAnc (fun v a => normSq (v x y a)) vs]
+      rw [ringSum_congr hA, ringSum_mul_left,
+        ringSum_ampListSum cardY (fun v y => ringSum cardAnc (fun a => normSq (v x y a))) vs]
+      rfl
+    rw [hEq] at hPt
+    exact hPt
+  have hX : le (queryMassOnOver T (qvListSum vs))
+      (ringSum cardX (fun x => mul (natCastR vs.length)
+        (ampListSum (vs.map (fun v => if T x = true then queryWeightOver v x else zero))))) := by
+    apply ringSum_le
+    intro x
+    cases T x
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      rw [ampListSum_map_zero, LawfulCommRing.mul_zero]
+      exact le_refl _
+    · simp only [↓reduceIte]
+      exact hW x
+  rw [ringSum_mul_left, ringSum_ampListSum cardX
+    (fun v x => if T x = true then queryWeightOver v x else zero) vs] at hX
+  exact hX
+
+/-- Challenge-independent envelope: twice the scaled mass that each intermediate state of the
+    unreprogrammed run puts on `xStar`, plus the event mass of the unreprogrammed output. -/
+def dfmEnvelopeOver {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (xStar : Fin cardX) (T : Fin cardX → Bool) :
+    List (ScaledUnitaryOver R A cardX cardY cardAnc) → QVecOver A cardX cardY cardAnc → R
+  | [], ψ => queryMassOnOver T ψ
+  | U :: rest, ψ =>
+    add (add (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar))
+        (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar)))
+      (dfmEnvelopeOver G H xStar T rest (U.apply (oracleGate G H ψ)))
+
+theorem branch_mass_le {Y : Type} (G : ResponseGate Y cardY) (H₁ H₂ : Fin cardX → Y)
+    (xStar : Fin cardX) (T : Fin cardX → Bool) (U : ScaledUnitaryOver R A cardX cardY cardAnc)
+    (rest : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+    (ψ : QVecOver A cardX cardY cardAnc) :
+    le (queryMassOnOver T
+        (runStepsOver G H₁ rest (U.apply (oracleGate G H₂ (projSingleOver xStar ψ)))))
+      (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar)) := by
+  have h := queryMassOnOver_le_stateNormSqOver T
+    (runStepsOver G H₁ rest (U.apply (oracleGate G H₂ (projSingleOver xStar ψ))))
+  rw [runStepsOver_normSq, U.normSq_eq, oracleGate_isometry, projSingleOver_normSq] at h
+  have e : mul (stepsScaleOver rest) (mul U.scaleSq (queryWeightOver ψ xStar)) =
+      mul (mul U.scaleSq (stepsScaleOver rest)) (queryWeightOver ψ xStar) := by constructive_ring
+  rw [e] at h
+  exact h
+
+theorem dfmEnvelopeOver_nonneg {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (xStar : Fin cardX) (T : Fin cardX → Bool) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc), le zero (dfmEnvelopeOver G H xStar T steps ψ)
+  | [], ψ => queryMassOnOver_nonneg T ψ
+  | U :: rest, ψ => by
+    have hb := le_trans (queryMassOnOver_nonneg T _) (branch_mass_le G H H xStar T U rest ψ)
+    exact add_nonneg (add_nonneg hb hb) (dfmEnvelopeOver_nonneg G H xStar T rest _)
+
+theorem dfmBranchesOver_mass_le {Y : Type} (G : ResponseGate Y cardY) (H H' : Fin cardX → Y)
+    (xStar : Fin cardX) (T : Fin cardX → Bool) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc),
+      le (ampListSum ((dfmBranchesOver G H H' xStar steps ψ).map (queryMassOnOver T)))
+        (dfmEnvelopeOver G H xStar T steps ψ)
+  | [], ψ => by
+    show le (add (queryMassOnOver T ψ) zero) (queryMassOnOver T ψ)
+    rw [LawfulCommRing.add_zero]
+    exact le_refl _
+  | U :: rest, ψ => by
+    have ih := dfmBranchesOver_mass_le G H H' xStar T rest (U.apply (oracleGate G H ψ))
+    have h1 := branch_mass_le G H' H' xStar T U rest ψ
+    have h2 := branch_mass_le G H' H xStar T U rest ψ
+    have hneg : queryMassOnOver T
+        (qvNeg (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ))))) =
+        queryMassOnOver T
+          (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ)))) := by
+      unfold queryMassOnOver queryWeightOver qvNeg
+      apply ringSum_congr; intro x
+      cases T x
+      · rfl
+      · simp only [↓reduceIte]
+        apply ringSum_congr; intro y
+        apply ringSum_congr; intro a
+        exact normSq_neg _
+    show le (add (queryMassOnOver T
+          (runStepsOver G H' rest (U.apply (oracleGate G H' (projSingleOver xStar ψ)))))
+        (add (queryMassOnOver T
+            (qvNeg (runStepsOver G H' rest (U.apply (oracleGate G H (projSingleOver xStar ψ))))))
+          (ampListSum ((dfmBranchesOver G H H' xStar rest (U.apply (oracleGate G H ψ))).map
+            (queryMassOnOver T)))))
+      (add (add (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar))
+          (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar)))
+        (dfmEnvelopeOver G H xStar T rest (U.apply (oracleGate G H ψ))))
+    rw [hneg, ← LawfulCommRing.add_assoc]
+    exact add_le_add (add_le_add h1 h2) ih
+
+/-- **Reprogramming one point costs a factor `2Q + 1` against the envelope**, for every
+    challenge value and every output event. -/
+theorem queryMassOnOver_reprogram_le {Y : Type} (G : ResponseGate Y cardY)
+    (H H' : Fin cardX → Y) (xStar : Fin cardX) (hAgree : ∀ x, x ≠ xStar → H' x = H x)
+    (T : Fin cardX → Bool) (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+    (ψ : QVecOver A cardX cardY cardAnc) :
+    le (queryMassOnOver T (runStepsOver G H' steps ψ))
+      (mul (natCastR (dfmCount steps)) (dfmEnvelopeOver G H xStar T steps ψ)) := by
+  rw [← dfmBranchesOver_sum G H H' xStar hAgree steps ψ]
+  have h1 := queryMassOnOver_qvListSum_le T (dfmBranchesOver G H H' xStar steps ψ)
+  rw [dfmBranchesOver_length] at h1
+  exact le_trans h1 (mul_le_mul_of_nonneg_left (dfmBranchesOver_mass_le G H H' xStar T steps ψ)
+    (natCastR_nonneg (amplitude_one_nonneg A) _))
+
+theorem queryMassOnOver_fiber_sum (proj : Fin cardX → Fin cardX)
+    (ψ : QVecOver A cardX cardY cardAnc) :
+    ringSum cardX (fun xStar => queryMassOnOver (fun x => decide (xStar = proj x)) ψ) =
+      stateNormSqOver ψ := by
+  unfold queryMassOnOver stateNormSqOver
+  rw [ringSum_comm]
+  apply ringSum_congr
+  intro x
+  have h : ringSum cardX (fun xs =>
+      if decide (xs = proj x) = true then queryWeightOver ψ x else zero) =
+      ringSum cardX (fun xs => if xs = proj x then queryWeightOver ψ x else zero) := by
+    apply ringSum_congr
+    intro xs
+    simp only [decide_eq_true_eq]
+  rw [h, ringSum_ite_eq]
+
+/-- Summed over the reprogrammed point, with the disjoint output events `proj x = xStar`, the
+    envelopes add up to `(2Q + 1) ‖ψ_final‖²`. -/
+theorem dfmEnvelopeOver_fiber_sum {Y : Type} (G : ResponseGate Y cardY) (H : Fin cardX → Y)
+    (proj : Fin cardX → Fin cardX) :
+    ∀ (steps : List (ScaledUnitaryOver R A cardX cardY cardAnc))
+      (ψ : QVecOver A cardX cardY cardAnc),
+      ringSum cardX (fun xStar =>
+        dfmEnvelopeOver G H xStar (fun x => decide (xStar = proj x)) steps ψ) =
+        mul (natCastR (dfmCount steps)) (stateNormSqOver (runStepsOver G H steps ψ))
+  | [], ψ => by
+    show ringSum cardX (fun xStar => queryMassOnOver (fun x => decide (xStar = proj x)) ψ) =
+      mul (add zero one) (stateNormSqOver ψ)
+    rw [queryMassOnOver_fiber_sum]
+    constructive_ring
+  | U :: rest, ψ => by
+    have ih := dfmEnvelopeOver_fiber_sum G H proj rest (U.apply (oracleGate G H ψ))
+    have hN := runStepsOver_normSq G H (U :: rest) ψ
+    show ringSum cardX (fun xStar =>
+        add (add (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar))
+            (mul (stepsScaleOver (U :: rest)) (queryWeightOver ψ xStar)))
+          (dfmEnvelopeOver G H xStar (fun x => decide (xStar = proj x)) rest
+            (U.apply (oracleGate G H ψ)))) =
+      mul (add (add (natCastR (dfmCount rest)) one) one)
+        (stateNormSqOver (runStepsOver G H rest (U.apply (oracleGate G H ψ))))
+    rw [ringSum_add, ringSum_add, ringSum_mul_left, ih]
+    have hN' : mul (stepsScaleOver (U :: rest)) (ringSum cardX (fun x => queryWeightOver ψ x)) =
+        stateNormSqOver (runStepsOver G H rest (U.apply (oracleGate G H ψ))) := hN.symm
+    rw [hN']
+    constructive_ring
+
+/-- **Projected measure-and-reprogram round-by-round step over any amplitude ring.**
+
+    `Adv` is an arbitrary adversary with amplitudes in `A` making `Q = Adv.steps.length`
+    superposition queries through any response gate `G`; `H` is any background oracle;
+    `chal : Fin cardC → Y` lists the challenge values; `proj` maps the adversary's output to the
+    query point it must be consistent with. If every doomed point has at most `badCard`
+    challenge indices that flip it to live, then the Born mass of outputs whose projected point
+    is doomed and was reprogrammed to a flipping challenge, summed over points and challenge
+    indices, is at most `(2Q + 1)² · badCard · ‖ψ_final‖²`.
+
+    Dividing by `cardC · ‖ψ_final‖²` gives the probability bound `(2Q + 1)² · badCard / cardC`
+    for a uniformly random challenge; the statement is cross-multiplied so that it needs no
+    division, and the adversary may use any exact unitaries over `A`. -/
+theorem qrom_measure_reprogram_rbr_step_over {Y : Type} (G : ResponseGate Y cardY)
+    (Adv : QuantumAdvOver R A cardX cardY cardAnc) (H : Fin cardX → Y)
+    (proj : Fin cardX → Fin cardX) {cardC : Nat} (chal : Fin cardC → Y)
+    (isDoomed : Fin cardX → Bool) (flipsToLive : Fin cardX → Fin cardC → Bool) (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true → finCountTrue cardC (flipsToLive x) ≤ badCard) :
+    le (ringSum cardX (fun xStar =>
+        if isDoomed xStar = true then
+          ringSum cardC (fun j =>
+            if flipsToLive xStar j = true then
+              queryMassOnOver (fun x => decide (xStar = proj x))
+                (runQuantumAdvOver G Adv (pointUpdate H xStar (chal j)))
+            else zero)
+        else zero))
+      (mul (natCastR ((2 * Adv.steps.length + 1) ^ 2 * badCard))
+        (stateNormSqOver (runQuantumAdvOver G Adv H))) := by
+  have h1nn : le (zero : R) one := amplitude_one_nonneg A
+  have hc : le (zero : R) (natCastR (dfmCount Adv.steps)) := natCastR_nonneg h1nn _
+  have hPer : ∀ xStar : Fin cardX,
+      le (if isDoomed xStar = true then
+          ringSum cardC (fun j =>
+            if flipsToLive xStar j = true then
+              queryMassOnOver (fun x => decide (xStar = proj x))
+                (runQuantumAdvOver G Adv (pointUpdate H xStar (chal j)))
+            else zero)
+        else zero)
+        (mul (natCastR badCard) (mul (natCastR (dfmCount Adv.steps))
+          (dfmEnvelopeOver G H xStar (fun x => decide (xStar = proj x)) Adv.steps Adv.init))) := by
+    intro xStar
+    have hEnv := dfmEnvelopeOver_nonneg G H xStar (fun x => decide (xStar = proj x))
+      Adv.steps Adv.init
+    cases hD : isDoomed xStar
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      exact mul_nonneg (natCastR_nonneg h1nn _) (mul_nonneg hc hEnv)
+    · simp only [↓reduceIte]
+      have hIn : le (ringSum cardC (fun j =>
+            if flipsToLive xStar j = true then
+              queryMassOnOver (fun x => decide (xStar = proj x))
+                (runQuantumAdvOver G Adv (pointUpdate H xStar (chal j)))
+            else zero))
+          (ringSum cardC (fun j =>
+            if flipsToLive xStar j = true then
+              mul (natCastR (dfmCount Adv.steps))
+                (dfmEnvelopeOver G H xStar (fun x => decide (xStar = proj x)) Adv.steps Adv.init)
+            else zero)) := by
+        apply ringSum_le
+        intro j
+        cases flipsToLive xStar j
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          exact le_refl _
+        · simp only [↓reduceIte]
+          exact queryMassOnOver_reprogram_le G H (pointUpdate H xStar (chal j)) xStar
+            (fun x hx => by unfold pointUpdate; rw [ite_eq_right hx]) _ Adv.steps Adv.init
+      rw [ringSum_indicator_mul] at hIn
+      exact le_trans hIn (mul_le_mul_of_nonneg_right (natCastR_le h1nn (hRbr xStar hD))
+        (mul_nonneg hc hEnv))
+  have hSum := ringSum_le hPer
+  rw [ringSum_mul_left, ringSum_mul_left, dfmEnvelopeOver_fiber_sum] at hSum
+  have hScalar : (natCastR ((2 * Adv.steps.length + 1) ^ 2 * badCard) : R) =
+      mul (natCastR badCard) (mul (natCastR (dfmCount Adv.steps)) (natCastR (dfmCount Adv.steps))) := by
+    rw [dfmCount_eq, Nat.pow_two, natCastR_mul, natCastR_mul]
+    constructive_ring
+  have hFinal : mul (natCastR badCard) (mul (natCastR (dfmCount Adv.steps))
+      (mul (natCastR (dfmCount Adv.steps)) (stateNormSqOver (runStepsOver G H Adv.steps Adv.init)))) =
+      mul (natCastR ((2 * Adv.steps.length + 1) ^ 2 * badCard))
+        (stateNormSqOver (runQuantumAdvOver G Adv H)) := by
+    rw [hScalar]
+    show _ = mul _ (stateNormSqOver (runStepsOver G H Adv.steps Adv.init))
+    constructive_ring
+  rw [hFinal] at hSum
+  exact hSum
+
+/-- The unprojected step: the output register is the reprogrammed point itself. -/
+theorem qrom_measure_reprogram_rbr_step_over_point {Y : Type} (G : ResponseGate Y cardY)
+    (Adv : QuantumAdvOver R A cardX cardY cardAnc) (H : Fin cardX → Y)
+    {cardC : Nat} (chal : Fin cardC → Y)
+    (isDoomed : Fin cardX → Bool) (flipsToLive : Fin cardX → Fin cardC → Bool) (badCard : Nat)
+    (hRbr : ∀ x : Fin cardX, isDoomed x = true → finCountTrue cardC (flipsToLive x) ≤ badCard) :
+    le (ringSum cardX (fun xStar =>
+        if isDoomed xStar = true then
+          ringSum cardC (fun j =>
+            if flipsToLive xStar j = true then
+              queryWeightOver (runQuantumAdvOver G Adv (pointUpdate H xStar (chal j))) xStar
+            else zero)
+        else zero))
+      (mul (natCastR ((2 * Adv.steps.length + 1) ^ 2 * badCard))
+        (stateNormSqOver (runQuantumAdvOver G Adv H))) := by
+  have hPoint : ∀ (ψ : QVecOver A cardX cardY cardAnc) (xStar : Fin cardX),
+      queryMassOnOver (fun x => decide (xStar = x)) ψ = queryWeightOver ψ xStar := by
+    intro ψ xStar
+    unfold queryMassOnOver
+    have hEq : ringSum cardX (fun x =>
+        if decide (xStar = x) = true then queryWeightOver ψ x else zero) =
+        ringSum cardX (fun x => if x = xStar then queryWeightOver ψ xStar else zero) := by
+      apply ringSum_congr
+      intro x
+      by_cases hx : x = xStar
+      · subst hx
+        simp only [decide_true, ↓reduceIte]
+      · have hx' : ¬ xStar = x := fun h => hx h.symm
+        simp only [hx, hx', decide_false, Bool.false_eq_true, ↓reduceIte]
+    rw [hEq, ringSum_ite_eq]
+  have h := qrom_measure_reprogram_rbr_step_over G Adv H id chal isDoomed flipsToLive badCard hRbr
+  refine le_trans (le_of_eq ?_) h
+  apply ringSum_congr
+  intro xStar
+  cases isDoomed xStar
+  · rfl
+  · simp only [↓reduceIte]
+    apply ringSum_congr
+    intro j
+    cases flipsToLive xStar j
+    · rfl
+    · simp only [↓reduceIte]
+      exact (hPoint _ xStar).symm
+
+end QueryRegister
+
+#verify_constructive
+  Qsag.ringSum_bijection
+  Qsag.ringSum_eq_zero_of_nonneg
+  Qsag.amplitude_one_nonneg
+  Qsag.hvInner_self
+  Qsag.normSqVec_eq_zero
+  Qsag.lagrange_identity
+  Qsag.cauchy_schwarz_normSq
+  Qsag.OrthoProjector.inner_complement
+  Qsag.OrthoProjector.pythagoras
+  Qsag.matVec_inner
+  Qsag.matVec_normSq
+  Qsag.list_sum_of_squares_identity
+  Qsag.normSq_ampListSum_le
+  Qsag.oracleGate_isometry
+  Qsag.oracleGate_diff_localizes
+  Qsag.runQuantumAdvOver_normSq
+  Qsag.dfmBranchesOver_sum
+  Qsag.queryMassOnOver_qvListSum_le
+  Qsag.queryMassOnOver_reprogram_le
+  Qsag.dfmEnvelopeOver_fiber_sum
+  Qsag.qrom_measure_reprogram_rbr_step_over
+  Qsag.qrom_measure_reprogram_rbr_step_over_point
+
+end Qsag
+end

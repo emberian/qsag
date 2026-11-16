@@ -598,3 +598,594 @@ instance commRingOps [CommRingOps R] (d : R) : CommRingOps (QuadExt R d) where
 
 section Coordinates
 variable [CommRingOps R] {d : R}
+theorem zero_a : (zero : QuadExt R d).a = zero := by rfl
+theorem zero_b : (zero : QuadExt R d).b = zero := by rfl
+theorem one_a : (one : QuadExt R d).a = one := by rfl
+theorem one_b : (one : QuadExt R d).b = zero := by rfl
+theorem add_a (x y : QuadExt R d) : (add x y).a = add x.a y.a := by rfl
+theorem add_b (x y : QuadExt R d) : (add x y).b = add x.b y.b := by rfl
+theorem mul_a (x y : QuadExt R d) :
+    (mul x y).a = add (mul x.a y.a) (mul d (mul x.b y.b)) := by rfl
+theorem mul_b (x y : QuadExt R d) : (mul x y).b = add (mul x.a y.b) (mul x.b y.a) := by rfl
+theorem neg_a (x : QuadExt R d) : (neg x).a = neg x.a := by rfl
+theorem neg_b (x : QuadExt R d) : (neg x).b = neg x.b := by rfl
+theorem sub_a (x y : QuadExt R d) : (sub x y).a = sub x.a y.a := by rfl
+theorem sub_b (x y : QuadExt R d) : (sub x y).b = sub x.b y.b := by rfl
+end Coordinates
+
+instance lawfulCommRing [LawfulCommRing R] (d : R) : LawfulCommRing (QuadExt R d) where
+  add_assoc _ _ _ := by apply ext' <;> simp only [add_a, add_b] <;> constructive_ring
+  add_comm _ _ := by apply ext' <;> simp only [add_a, add_b] <;> constructive_ring
+  zero_add _ := by apply ext' <;> simp only [add_a, add_b, zero_a, zero_b] <;> constructive_ring
+  add_zero _ := by apply ext' <;> simp only [add_a, add_b, zero_a, zero_b] <;> constructive_ring
+  add_left_neg _ := by
+    apply ext' <;> simp only [add_a, add_b, neg_a, neg_b, zero_a, zero_b] <;> constructive_ring
+  sub_eq_add_neg _ _ := by
+    apply ext' <;> simp only [add_a, add_b, neg_a, neg_b, sub_a, sub_b] <;> constructive_ring
+  mul_assoc _ _ _ := by
+    apply ext' <;> simp only [mul_a, mul_b] <;> constructive_ring
+  mul_comm _ _ := by apply ext' <;> simp only [mul_a, mul_b] <;> constructive_ring
+  one_mul _ := by apply ext' <;> simp only [mul_a, mul_b, one_a, one_b] <;> constructive_ring
+  mul_one _ := by apply ext' <;> simp only [mul_a, mul_b, one_a, one_b] <;> constructive_ring
+  left_distrib _ _ _ := by
+    apply ext' <;> simp only [mul_a, mul_b, add_a, add_b] <;> constructive_ring
+  right_distrib _ _ _ := by
+    apply ext' <;> simp only [mul_a, mul_b, add_a, add_b] <;> constructive_ring
+
+/-- The embedding `r ↦ r + 0 √d`. -/
+def ofBase [CommRingOps R] {d : R} (r : R) : QuadExt R d := ⟨r, zero⟩
+
+/-- The adjoined root `√d`. -/
+def sqrtd [CommRingOps R] {d : R} : QuadExt R d := ⟨zero, one⟩
+
+theorem sqrtd_mul_self [LawfulCommRing R] (d : R) :
+    mul (sqrtd : QuadExt R d) sqrtd = ofBase d := by
+  apply ext' <;> simp only [mul_a, mul_b, sqrtd, ofBase] <;> constructive_ring
+
+end QuadExt
+
+/-- The radicand of a real quadratic extension is strictly positive. -/
+class PosRadicand {R : Type} [LinearOrderedDomain R] (d : R) : Prop where
+  pos : IsPos d
+
+namespace QuadExt
+variable {R : Type} [LinearOrderedDomain R] {d : R} [PosRadicand d]
+open OrderedCommRing LinearOrderedDomain
+
+/-- Total positivity: `a + b√d` is nonnegative under both embeddings `√d ↦ ±√d`. -/
+def nonneg (x : QuadExt R d) : Prop :=
+  le zero x.a ∧ le (mul d (mul x.b x.b)) (mul x.a x.a)
+
+theorem radicand_sq_nonneg (b : R) : le zero (mul d (mul b b)) :=
+  mul_nonneg (PosRadicand.pos (d := d)).nonneg (sq_nonneg' b)
+
+omit [PosRadicand d] in
+theorem nonneg_zero : nonneg (zero : QuadExt R d) := by
+  unfold nonneg
+  simp only [zero_a, zero_b]
+  rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero]
+  exact ⟨le_refl _, le_refl _⟩
+
+theorem cross_le {x y : QuadExt R d} (hx : nonneg x) (hy : nonneg y) :
+    le (mul d (mul x.b y.b)) (mul x.a y.a) := by
+  apply le_of_sq_le_sq (mul_nonneg hx.1 hy.1)
+  have h := mul_le_mul_nonneg hx.2 hy.2 (radicand_sq_nonneg x.b) (sq_nonneg' y.a)
+  have e1 : mul (mul d (mul x.b y.b)) (mul d (mul x.b y.b)) =
+      mul (mul d (mul x.b x.b)) (mul d (mul y.b y.b)) := by constructive_ring
+  have e2 : mul (mul x.a y.a) (mul x.a y.a) = mul (mul x.a x.a) (mul y.a y.a) := by
+    constructive_ring
+  rw [e1, e2]
+  exact h
+
+theorem neg_cross_le {x y : QuadExt R d} (hx : nonneg x) (hy : nonneg y) :
+    le (neg (mul d (mul x.b y.b))) (mul x.a y.a) := by
+  apply le_of_sq_le_sq (mul_nonneg hx.1 hy.1)
+  have h := mul_le_mul_nonneg hx.2 hy.2 (radicand_sq_nonneg x.b) (sq_nonneg' y.a)
+  have e1 : mul (neg (mul d (mul x.b y.b))) (neg (mul d (mul x.b y.b))) =
+      mul (mul d (mul x.b x.b)) (mul d (mul y.b y.b)) := by constructive_ring
+  have e2 : mul (mul x.a y.a) (mul x.a y.a) = mul (mul x.a x.a) (mul y.a y.a) := by
+    constructive_ring
+  rw [e1, e2]
+  exact h
+
+theorem nonneg_add {x y : QuadExt R d} (hx : nonneg x) (hy : nonneg y) : nonneg (add x y) := by
+  refine ⟨?_, ?_⟩
+  · rw [add_a]
+    exact add_nonneg hx.1 hy.1
+  · rw [add_a, add_b]
+    have c := cross_le hx hy
+    have e1 : mul d (mul (add x.b y.b) (add x.b y.b)) =
+        add (add (mul d (mul x.b x.b)) (mul d (mul y.b y.b)))
+          (add (mul d (mul x.b y.b)) (mul d (mul x.b y.b))) := by constructive_ring
+    have e2 : mul (add x.a y.a) (add x.a y.a) =
+        add (add (mul x.a x.a) (mul y.a y.a)) (add (mul x.a y.a) (mul x.a y.a)) := by
+      constructive_ring
+    rw [e1, e2]
+    exact add_le_add (add_le_add hx.2 hy.2) (add_le_add c c)
+
+theorem nonneg_mul {x y : QuadExt R d} (hx : nonneg x) (hy : nonneg y) : nonneg (mul x y) := by
+  refine ⟨?_, ?_⟩
+  · rw [mul_a]
+    have h := sub_nonneg_of_le (neg_cross_le hx hy)
+    have e : sub (mul x.a y.a) (neg (mul d (mul x.b y.b))) =
+        add (mul x.a y.a) (mul d (mul x.b y.b)) := by constructive_ring
+    rw [e] at h
+    exact h
+  · rw [mul_a, mul_b]
+    apply le_of_sub_nonneg
+    have h := mul_nonneg (sub_nonneg_of_le hx.2) (sub_nonneg_of_le hy.2)
+    have e : mul (sub (mul x.a x.a) (mul d (mul x.b x.b)))
+        (sub (mul y.a y.a) (mul d (mul y.b y.b))) =
+        sub (mul (add (mul x.a y.a) (mul d (mul x.b y.b))) (add (mul x.a y.a) (mul d (mul x.b y.b))))
+          (mul d (mul (add (mul x.a y.b) (mul x.b y.a)) (add (mul x.a y.b) (mul x.b y.a)))) := by
+      constructive_ring
+    rw [e] at h
+    exact h
+
+theorem eq_zero_of_nonneg_of_neg_nonneg {x : QuadExt R d} (hx : nonneg x)
+    (hn : nonneg (neg x)) : x = zero := by
+  have ha : x.a = zero := by
+    have h1 := hn.1
+    rw [neg_a] at h1
+    exact le_antisymm (nonpos_of_neg_nonneg h1) hx.1
+  have hb : x.b = zero := by
+    have h2 := hx.2
+    rw [ha, LawfulCommRing.mul_zero] at h2
+    rcases mul_eq_zero (le_antisymm h2 (radicand_sq_nonneg x.b)) with h0 | h0
+    · exact absurd h0 (PosRadicand.pos (d := d)).ne_zero
+    · exact sq_eq_zero' h0
+  exact ext' (by rw [ha, zero_a]) (by rw [hb, zero_b])
+
+instance orderedCommRing : OrderedCommRing (QuadExt R d) where
+  le x y := nonneg (sub y x)
+  le_refl x := by
+    rw [LawfulCommRing.sub_self]
+    exact nonneg_zero
+  le_trans {x y z} hxy hyz := by
+    have h := nonneg_add hyz hxy
+    have e : add (sub z y) (sub y x) = sub z x := by constructive_ring
+    rw [e] at h
+    exact h
+  le_antisymm {x y} hxy hyx := by
+    have e : sub x y = neg (sub y x) := by constructive_ring
+    rw [e] at hyx
+    have h0 := eq_zero_of_nonneg_of_neg_nonneg hxy hyx
+    exact (LawfulCommRing.sub_eq_zero_iff.mp h0).symm
+  add_le_add_left {x y} c h := by
+    have e : sub (add c y) (add c x) = sub y x := by constructive_ring
+    rw [e]
+    exact h
+  mul_nonneg {x y} hx hy := by
+    rw [LawfulCommRing.sub_zero] at hx hy ⊢
+    exact nonneg_mul hx hy
+
+theorem nonneg_sq (x : QuadExt R d) : nonneg (mul x x) := by
+  refine ⟨?_, ?_⟩
+  · rw [mul_a]
+    exact add_nonneg (sq_nonneg' x.a) (radicand_sq_nonneg x.b)
+  · rw [mul_a, mul_b]
+    apply le_of_sub_nonneg
+    have h := sq_nonneg' (sub (mul x.a x.a) (mul d (mul x.b x.b)))
+    have e : mul (sub (mul x.a x.a) (mul d (mul x.b x.b))) (sub (mul x.a x.a) (mul d (mul x.b x.b))) =
+        sub (mul (add (mul x.a x.a) (mul d (mul x.b x.b))) (add (mul x.a x.a) (mul d (mul x.b x.b))))
+          (mul d (mul (add (mul x.a x.b) (mul x.b x.a)) (add (mul x.a x.b) (mul x.b x.a)))) := by
+      constructive_ring
+    rw [e] at h
+    exact h
+
+instance formallyRealRing : FormallyRealRing (QuadExt R d) where
+  sq_nonneg x := by
+    show nonneg (sub (mul x x) zero)
+    rw [LawfulCommRing.sub_zero]
+    exact nonneg_sq x
+  sq_eq_zero {x} h := by
+    have h1 := congrArg QuadExt.a h
+    rw [mul_a, zero_a] at h1
+    have ha := sq_eq_zero' (eq_zero_of_add_eq_zero_left (sq_nonneg' x.a) (radicand_sq_nonneg x.b) h1)
+    have hb0 := eq_zero_of_add_eq_zero_right (sq_nonneg' x.a) (radicand_sq_nonneg x.b) h1
+    have hb : x.b = zero := by
+      rcases mul_eq_zero hb0 with h0 | h0
+      · exact absurd h0 (PosRadicand.pos (d := d)).ne_zero
+      · exact sq_eq_zero' h0
+    exact ext' (by rw [ha, zero_a]) (by rw [hb, zero_b])
+
+end QuadExt
+
+/-! ## 5. Complexification and the amplitude-ring class -/
+
+/-- `re + im · i` over `R`. -/
+structure Complexified (R : Type) where
+  re : R
+  im : R
+  deriving DecidableEq
+
+namespace Complexified
+variable {R : Type}
+
+theorem ext' {z w : Complexified R} (hr : z.re = w.re) (hi : z.im = w.im) : z = w := by
+  cases z; cases w; cases hr; cases hi; rfl
+
+instance commRingOps [CommRingOps R] : CommRingOps (Complexified R) where
+  zero := ⟨zero, zero⟩
+  one := ⟨one, zero⟩
+  add z w := ⟨add z.re w.re, add z.im w.im⟩
+  mul z w := ⟨sub (mul z.re w.re) (mul z.im w.im), add (mul z.re w.im) (mul z.im w.re)⟩
+  neg z := ⟨neg z.re, neg z.im⟩
+  sub z w := ⟨sub z.re w.re, sub z.im w.im⟩
+
+section Coordinates
+variable [CommRingOps R]
+theorem zero_re : (zero : Complexified R).re = zero := by rfl
+theorem zero_im : (zero : Complexified R).im = zero := by rfl
+theorem one_re : (one : Complexified R).re = one := by rfl
+theorem one_im : (one : Complexified R).im = zero := by rfl
+theorem add_re (z w : Complexified R) : (add z w).re = add z.re w.re := by rfl
+theorem add_im (z w : Complexified R) : (add z w).im = add z.im w.im := by rfl
+theorem mul_re (z w : Complexified R) :
+    (mul z w).re = sub (mul z.re w.re) (mul z.im w.im) := by rfl
+theorem mul_im (z w : Complexified R) :
+    (mul z w).im = add (mul z.re w.im) (mul z.im w.re) := by rfl
+theorem neg_re (z : Complexified R) : (neg z).re = neg z.re := by rfl
+theorem neg_im (z : Complexified R) : (neg z).im = neg z.im := by rfl
+theorem sub_re (z w : Complexified R) : (sub z w).re = sub z.re w.re := by rfl
+theorem sub_im (z w : Complexified R) : (sub z w).im = sub z.im w.im := by rfl
+end Coordinates
+
+instance lawfulCommRing [LawfulCommRing R] : LawfulCommRing (Complexified R) where
+  add_assoc _ _ _ := by apply ext' <;> simp only [add_re, add_im] <;> constructive_ring
+  add_comm _ _ := by apply ext' <;> simp only [add_re, add_im] <;> constructive_ring
+  zero_add _ := by
+    apply ext' <;> simp only [add_re, add_im, zero_re, zero_im] <;> constructive_ring
+  add_zero _ := by
+    apply ext' <;> simp only [add_re, add_im, zero_re, zero_im] <;> constructive_ring
+  add_left_neg _ := by
+    apply ext' <;> simp only [add_re, add_im, neg_re, neg_im, zero_re, zero_im] <;>
+      constructive_ring
+  sub_eq_add_neg _ _ := by
+    apply ext' <;> simp only [add_re, add_im, neg_re, neg_im, sub_re, sub_im] <;>
+      constructive_ring
+  mul_assoc _ _ _ := by apply ext' <;> simp only [mul_re, mul_im] <;> constructive_ring
+  mul_comm _ _ := by apply ext' <;> simp only [mul_re, mul_im] <;> constructive_ring
+  one_mul _ := by
+    apply ext' <;> simp only [mul_re, mul_im, one_re, one_im] <;> constructive_ring
+  mul_one _ := by
+    apply ext' <;> simp only [mul_re, mul_im, one_re, one_im] <;> constructive_ring
+  left_distrib _ _ _ := by
+    apply ext' <;> simp only [mul_re, mul_im, add_re, add_im] <;> constructive_ring
+  right_distrib _ _ _ := by
+    apply ext' <;> simp only [mul_re, mul_im, add_re, add_im] <;> constructive_ring
+
+/-- The imaginary unit. -/
+def I [CommRingOps R] : Complexified R := ⟨zero, one⟩
+
+theorem I_mul_I [LawfulCommRing R] : mul (I : Complexified R) I = neg one := by
+  apply ext' <;> simp only [mul_re, mul_im, neg_re, neg_im, one_re, one_im, I] <;>
+    constructive_ring
+
+end Complexified
+
+/-- **Constructive amplitude ring.** A commutative `*`-ring `A` over an ordered commutative
+    ring `R`: an involution `star`, a ring embedding `ofReal : R → A` and a squared modulus
+    `normSq : A → R` with `z * star z = ofReal (normSq z)`, nonnegative and definite. No square
+    root, no division and no decidable equality is assumed. -/
+class ConstructiveAmplitudeRing (R : outParam Type) (A : Type) [OrderedCommRing R]
+    extends LawfulCommRing A where
+  star : A → A
+  ofReal : R → A
+  normSq : A → R
+  star_add : ∀ z w : A, star (add z w) = add (star z) (star w)
+  star_mul : ∀ z w : A, star (mul z w) = mul (star z) (star w)
+  star_star : ∀ z : A, star (star z) = z
+  ofReal_add : ∀ r s : R, ofReal (CommRingOps.add r s) = add (ofReal r) (ofReal s)
+  ofReal_mul : ∀ r s : R, ofReal (CommRingOps.mul r s) = mul (ofReal r) (ofReal s)
+  ofReal_one : ofReal CommRingOps.one = one
+  ofReal_injective : ∀ {r s : R}, ofReal r = ofReal s → r = s
+  star_ofReal : ∀ r : R, star (ofReal r) = ofReal r
+  mul_star_self : ∀ z : A, mul z (star z) = ofReal (normSq z)
+  normSq_nonneg : ∀ z : A, OrderedCommRing.le CommRingOps.zero (normSq z)
+  normSq_eq_zero : ∀ {z : A}, normSq z = CommRingOps.zero → z = zero
+
+namespace ConstructiveAmplitudeRing
+variable {R A : Type} [OrderedCommRing R] [ConstructiveAmplitudeRing R A]
+open OrderedCommRing
+
+theorem ofReal_zero : (ofReal (zero : R) : A) = zero := by
+  have h := ofReal_add (A := A) (zero : R) zero
+  rw [LawfulCommRing.add_zero] at h
+  apply LawfulCommRing.add_left_cancel (a := (ofReal (zero : R) : A))
+  rw [LawfulCommRing.add_zero]
+  exact h.symm
+
+theorem ofReal_neg (r : R) : (ofReal (neg r) : A) = neg (ofReal r) := by
+  apply LawfulCommRing.add_left_cancel (a := (ofReal r : A))
+  rw [← ofReal_add, LawfulCommRing.add_right_neg, ofReal_zero, LawfulCommRing.add_right_neg]
+
+theorem ofReal_sub (r s : R) : (ofReal (sub r s) : A) = sub (ofReal r) (ofReal s) := by
+  rw [LawfulCommRing.sub_eq_add_neg, ofReal_add, ofReal_neg, ← LawfulCommRing.sub_eq_add_neg]
+
+theorem star_zero : star (zero : A) = zero := by
+  have h := star_add (R := R) (zero : A) zero
+  rw [LawfulCommRing.add_zero] at h
+  apply LawfulCommRing.add_left_cancel (a := star (zero : A))
+  rw [LawfulCommRing.add_zero]
+  exact h.symm
+
+theorem star_neg (z : A) : star (neg z) = neg (star z) := by
+  apply LawfulCommRing.add_left_cancel (a := star z)
+  rw [← star_add, LawfulCommRing.add_right_neg, star_zero (R := R),
+    LawfulCommRing.add_right_neg]
+
+theorem star_sub (z w : A) : star (sub z w) = sub (star z) (star w) := by
+  rw [LawfulCommRing.sub_eq_add_neg, star_add, star_neg, ← LawfulCommRing.sub_eq_add_neg]
+
+theorem star_one : star (one : A) = one := by
+  have h := star_mul (R := R) (one : A) (star one)
+  rw [LawfulCommRing.one_mul, star_star, LawfulCommRing.mul_one] at h
+  exact h.symm
+
+/-- The squared modulus is multiplicative. -/
+theorem normSq_mul (z w : A) : normSq (mul z w) = mul (normSq z) (normSq w) := by
+  apply ofReal_injective (A := A)
+  rw [ofReal_mul, ← mul_star_self, ← mul_star_self, ← mul_star_self, star_mul]
+  constructive_ring
+
+theorem normSq_zero : normSq (zero : A) = (zero : R) := by
+  apply ofReal_injective (A := A)
+  rw [← mul_star_self, ofReal_zero, LawfulCommRing.zero_mul]
+
+/-- Definiteness. -/
+theorem normSq_eq_zero_iff (z : A) : normSq z = (zero : R) ↔ z = zero :=
+  ⟨fun h => normSq_eq_zero h, fun h => by rw [h, normSq_zero]⟩
+
+theorem normSq_one : normSq (one : A) = (one : R) := by
+  apply ofReal_injective (A := A)
+  rw [← mul_star_self, ofReal_one, star_one (R := R), LawfulCommRing.mul_one]
+
+theorem normSq_star (z : A) : normSq (star z) = normSq z := by
+  apply ofReal_injective (A := A)
+  rw [← mul_star_self, ← mul_star_self, star_star, LawfulCommRing.mul_comm]
+
+theorem normSq_neg (z : A) : normSq (neg z) = normSq z := by
+  apply ofReal_injective (A := A)
+  rw [← mul_star_self, ← mul_star_self, star_neg]
+  constructive_ring
+
+theorem normSq_ofReal (r : R) : normSq (ofReal r : A) = mul r r := by
+  apply ofReal_injective (A := A)
+  rw [← mul_star_self, star_ofReal, ofReal_mul]
+
+/-- **Parallelogram law** `|u + v|² + |u - v|² = (|u|² + |v|²) + (|u|² + |v|²)`. -/
+theorem normSq_parallelogram (u v : A) :
+    add (normSq (add u v)) (normSq (sub u v)) =
+      add (add (normSq u) (normSq v)) (add (normSq u) (normSq v)) := by
+  apply ofReal_injective (A := A)
+  rw [ofReal_add, ofReal_add, ofReal_add, ← mul_star_self, ← mul_star_self, ← mul_star_self,
+    ← mul_star_self, star_add, star_sub]
+  constructive_ring
+
+/-- The parallelogram law with the factor two spelled as `1 + 1`. -/
+theorem normSq_parallelogram_two (u v : A) :
+    add (normSq (add u v)) (normSq (sub u v)) =
+      mul (add one one) (add (normSq u) (normSq v)) := by
+  rw [normSq_parallelogram]
+  constructive_ring
+
+theorem normSq_add_le (u v : A) :
+    le (normSq (add u v)) (add (add (normSq u) (normSq v)) (add (normSq u) (normSq v))) := by
+  rw [← normSq_parallelogram]
+  exact le_add_of_nonneg_right (normSq_nonneg _)
+
+theorem normSq_sub_le (u v : A) :
+    le (normSq (sub u v)) (add (add (normSq u) (normSq v)) (add (normSq u) (normSq v))) := by
+  rw [← normSq_parallelogram, LawfulCommRing.add_comm]
+  exact le_add_of_nonneg_right (normSq_nonneg _)
+
+end ConstructiveAmplitudeRing
+
+namespace Complexified
+variable {R : Type} [FormallyRealRing R]
+open OrderedCommRing
+
+/-- `R[i]` is an amplitude ring over every formally real `R`. -/
+instance amplitudeRing : ConstructiveAmplitudeRing R (Complexified R) where
+  star z := ⟨z.re, neg z.im⟩
+  ofReal r := ⟨r, zero⟩
+  normSq z := add (mul z.re z.re) (mul z.im z.im)
+  star_add _ _ := by apply ext' <;> simp only [add_re, add_im] <;> constructive_ring
+  star_mul _ _ := by apply ext' <;> simp only [mul_re, mul_im] <;> constructive_ring
+  star_star _ := by apply ext' <;> simp only <;> constructive_ring
+  ofReal_add _ _ := by apply ext' <;> simp only [add_re, add_im] <;> constructive_ring
+  ofReal_mul _ _ := by apply ext' <;> simp only [mul_re, mul_im] <;> constructive_ring
+  ofReal_one := by rfl
+  ofReal_injective h := congrArg Complexified.re h
+  star_ofReal _ := by apply ext' <;> simp only <;> constructive_ring
+  mul_star_self _ := by apply ext' <;> simp only [mul_re, mul_im] <;> constructive_ring
+  normSq_nonneg z := add_nonneg (FormallyRealRing.sq_nonneg z.re) (FormallyRealRing.sq_nonneg z.im)
+  normSq_eq_zero {z} h := by
+    have hr := FormallyRealRing.sq_eq_zero (eq_zero_of_add_eq_zero_left
+      (FormallyRealRing.sq_nonneg z.re) (FormallyRealRing.sq_nonneg z.im) h)
+    have hi := FormallyRealRing.sq_eq_zero (eq_zero_of_add_eq_zero_right
+      (FormallyRealRing.sq_nonneg z.re) (FormallyRealRing.sq_nonneg z.im) h)
+    exact ext' (by rw [hr, zero_re]) (by rw [hi, zero_im])
+
+theorem star_re (z : Complexified R) : (ConstructiveAmplitudeRing.star z).re = z.re := by rfl
+theorem star_im (z : Complexified R) : (ConstructiveAmplitudeRing.star z).im = neg z.im := by rfl
+theorem ofReal_re (r : R) : (ConstructiveAmplitudeRing.ofReal r : Complexified R).re = r := by rfl
+theorem ofReal_im (r : R) :
+    (ConstructiveAmplitudeRing.ofReal r : Complexified R).im = zero := by rfl
+theorem normSq_eq (z : Complexified R) :
+    ConstructiveAmplitudeRing.normSq z = add (mul z.re z.re) (mul z.im z.im) := by rfl
+
+end Complexified
+
+/-- Real amplitudes: a formally real ring is an amplitude ring over itself with the trivial
+    involution and `normSq z = z²`. Not a global instance; use it locally for real registers
+    such as exact Hadamard circuits over `ℚ[√2]`. -/
+@[reducible] def realAmplitudeRing (R : Type) [FormallyRealRing R] :
+    ConstructiveAmplitudeRing R R where
+  star z := z
+  ofReal r := r
+  normSq z := mul z z
+  star_add _ _ := by rfl
+  star_mul _ _ := by rfl
+  star_star _ := by rfl
+  ofReal_add _ _ := by rfl
+  ofReal_mul _ _ := by rfl
+  ofReal_one := by rfl
+  ofReal_injective h := h
+  star_ofReal _ := by rfl
+  mul_star_self _ := by rfl
+  normSq_nonneg z := FormallyRealRing.sq_nonneg z
+  normSq_eq_zero h := FormallyRealRing.sq_eq_zero h
+
+/-! ## 6. Concrete amplitude rings: `ℤ[i]`, `ℚ[i]`, `ℚ[√2]`, `ℚ[√2, i]` -/
+
+/-- `ℚ` as the fraction field of `ℤ`. -/
+abbrev RatQ : Type := PosFrac Int
+
+/-- The Gaussian integers `ℤ[i]` as an amplitude ring over `ℤ`. -/
+abbrev GaussIntRing : Type := Complexified Int
+
+/-- The Gaussian rationals `ℚ[i]` as an amplitude ring over `ℚ`. -/
+abbrev RatComplex : Type := Complexified RatQ
+
+theorem isPos_int_of_pos {d : Int} (h : 0 < d) : IsPos d :=
+  ⟨Int.le_of_lt h, fun e => by
+    have h0 : (0 : Int) < 0 := by
+      rw [e] at h
+      exact h
+    exact Int.lt_irrefl 0 h0⟩
+
+/-- The rational `n / d` for a positive integer `d`. -/
+def ratOfInts (n d : Int) (h : 0 < d) : RatQ := PosFrac.frac n d (isPos_int_of_pos h)
+
+theorem ratOfInts_eq_iff (n d n' d' : Int) (h : 0 < d) (h' : 0 < d') :
+    ratOfInts n d h = ratOfInts n' d' h' ↔ n * d' = n' * d :=
+  PosFrac.frac_eq_iff n d n' d' _ _
+
+/-- The exact unit-modulus amplitude `3/5 + 4/5 i ∈ ℚ[i]`. -/
+def unitThreeFourFifths : RatComplex :=
+  ⟨ratOfInts 3 5 (by decide), ratOfInts 4 5 (by decide)⟩
+
+/-- `|3/5 + 4/5 i|² = 1` exactly: a rational phase with no square root and no rescaling. -/
+theorem unitThreeFourFifths_normSq :
+    ConstructiveAmplitudeRing.normSq unitThreeFourFifths = (one : RatQ) := by
+  rw [Complexified.normSq_eq]
+  exact PosFrac.sound (by unfold PosPreFrac.rel; decide)
+
+/-- Its inverse is its conjugate. -/
+theorem unitThreeFourFifths_mul_star :
+    mul unitThreeFourFifths (ConstructiveAmplitudeRing.star unitThreeFourFifths) = one := by
+  rw [ConstructiveAmplitudeRing.mul_star_self, unitThreeFourFifths_normSq,
+    ConstructiveAmplitudeRing.ofReal_one]
+
+theorem two_pow_emod_five_ne_zero (k : Nat) : (2 : Int) ^ k % 5 ≠ 0 := by
+  induction k with
+  | zero => decide
+  | succ k ih =>
+    rw [Int.pow_succ]
+    generalize (2 : Int) ^ k = x at ih
+    omega
+
+/-- A rational `3 · 2^k / 5` is never an integer. -/
+theorem three_fifths_not_dyadic (a : Int) (k : Nat) :
+    ¬ (PosFrac.ofBase a = mul (PosFrac.ofBase ((2 : Int) ^ k)) (ratOfInts 3 5 (by decide))) := by
+  intro h
+  have h1 : a * (1 * 5) = (2 : Int) ^ k * 3 * 1 := PosFrac.exact h
+  have h2 := two_pow_emod_five_ne_zero k
+  generalize (2 : Int) ^ k = x at h1 h2
+  omega
+
+/-- **`ℚ[i]` strictly extends the dyadic Gaussian amplitudes.** No power of two clears the
+    denominator of `3/5 + 4/5 i`: there are no Gaussian integer `z` and exponent `k` with
+    `z = 2^k · (3/5 + 4/5 i)`, i.e. the amplitude is not of the form `z / 2^k`. -/
+theorem unitThreeFourFifths_not_dyadic :
+    ¬ ∃ (z : GaussIntRing) (k : Nat),
+      (⟨PosFrac.ofBase z.re, PosFrac.ofBase z.im⟩ : RatComplex) =
+        mul (ConstructiveAmplitudeRing.ofReal (PosFrac.ofBase ((2 : Int) ^ k)))
+          unitThreeFourFifths := by
+  rintro ⟨z, k, h⟩
+  have hre := congrArg Complexified.re h
+  rw [Complexified.mul_re, Complexified.ofReal_re, Complexified.ofReal_im,
+    LawfulCommRing.zero_mul, LawfulCommRing.sub_zero] at hre
+  exact three_fifths_not_dyadic z.re k hre
+
+/-- `2` is a positive radicand in `ℚ`. -/
+instance ratTwoPosRadicand : PosRadicand (PosFrac.ofBase (2 : Int) : RatQ) where
+  pos := ⟨(PosFrac.ofBase_le_iff (0 : Int) 2).mpr (by show (0 : Int) ≤ 2; decide),
+    fun h => absurd (PosFrac.ofBase_injective (s := (0 : Int)) h) (by decide)⟩
+
+/-- `ℚ[√2]`, ordered by total positivity. -/
+abbrev RatSqrt2 : Type := QuadExt RatQ (PosFrac.ofBase (2 : Int))
+
+/-- `ℚ[√2, i] = ℚ(ζ₈)`: contains every Clifford+T amplitude and every rational phase. -/
+abbrev CyclotomicEight : Type := Complexified RatSqrt2
+
+/-- The exact Hadamard amplitude `1/√2 = √2 / 2 ∈ ℚ[√2]`. -/
+def invSqrtTwo : RatSqrt2 := ⟨zero, ratOfInts 1 2 (by decide)⟩
+
+/-- `(1/√2)² + (1/√2)² = 1`: the Hadamard gate is an exact scale-one unitary over `ℚ[√2]`. -/
+theorem invSqrtTwo_sq_add_sq : add (mul invSqrtTwo invSqrtTwo) (mul invSqrtTwo invSqrtTwo) = one := by
+  apply QuadExt.ext'
+  · rw [QuadExt.add_a, QuadExt.mul_a, QuadExt.one_a]
+    exact PosFrac.sound (by unfold PosPreFrac.rel; decide)
+  · rw [QuadExt.add_b, QuadExt.mul_b, QuadExt.one_b]
+    exact PosFrac.sound (by unfold PosPreFrac.rel; decide)
+
+/-- The primitive eighth root of unity `ζ₈ = (1 + i)/√2`, the phase of the `T` gate. -/
+def zetaEight : CyclotomicEight := ⟨invSqrtTwo, invSqrtTwo⟩
+
+theorem zetaEight_normSq : ConstructiveAmplitudeRing.normSq zetaEight = (one : RatSqrt2) := by
+  rw [Complexified.normSq_eq]
+  exact invSqrtTwo_sq_add_sq
+
+/-- `ζ₈² = i`. -/
+theorem zetaEight_sq : mul zetaEight zetaEight = Complexified.I := by
+  apply Complexified.ext'
+  · rw [Complexified.mul_re]
+    show sub (mul invSqrtTwo invSqrtTwo) (mul invSqrtTwo invSqrtTwo) = zero
+    exact LawfulCommRing.sub_self _
+  · rw [Complexified.mul_im]
+    exact invSqrtTwo_sq_add_sq
+
+/-- The embedding `ℚ[i] → ℚ[√2, i]`. -/
+def ratComplexToCyclotomic (z : RatComplex) : CyclotomicEight :=
+  ⟨QuadExt.ofBase z.re, QuadExt.ofBase z.im⟩
+
+/-- The rational phase keeps unit modulus inside `ℚ[√2, i]`, next to `ζ₈`. -/
+theorem ratComplexToCyclotomic_unit_normSq :
+    ConstructiveAmplitudeRing.normSq (ratComplexToCyclotomic unitThreeFourFifths) =
+      (one : RatSqrt2) := by
+  rw [Complexified.normSq_eq]
+  apply QuadExt.ext'
+  · rw [QuadExt.add_a, QuadExt.mul_a, QuadExt.mul_a, QuadExt.one_a]
+    exact PosFrac.sound (by unfold PosPreFrac.rel; decide)
+  · rw [QuadExt.add_b, QuadExt.mul_b, QuadExt.mul_b, QuadExt.one_b]
+    exact PosFrac.sound (by unfold PosPreFrac.rel; decide)
+
+#verify_constructive
+  Qsag.LinearOrderedDomain.le_of_sq_le_sq
+  Qsag.PosPreFrac.ple_congr
+  Qsag.PosFrac.ofBase_mul_frac
+  Qsag.PosFrac.ofBase_injective
+  Qsag.QuadExt.nonneg_add
+  Qsag.QuadExt.nonneg_mul
+  Qsag.QuadExt.nonneg_sq
+  Qsag.QuadExt.sqrtd_mul_self
+  Qsag.Complexified.I_mul_I
+  Qsag.ConstructiveAmplitudeRing.normSq_mul
+  Qsag.ConstructiveAmplitudeRing.normSq_eq_zero_iff
+  Qsag.ConstructiveAmplitudeRing.normSq_parallelogram
+  Qsag.ConstructiveAmplitudeRing.normSq_parallelogram_two
+  Qsag.ConstructiveAmplitudeRing.normSq_add_le
+  Qsag.unitThreeFourFifths_normSq
+  Qsag.unitThreeFourFifths_mul_star
+  Qsag.three_fifths_not_dyadic
+  Qsag.unitThreeFourFifths_not_dyadic
+  Qsag.invSqrtTwo_sq_add_sq
+  Qsag.zetaEight_normSq
+  Qsag.zetaEight_sq
+  Qsag.ratComplexToCyclotomic_unit_normSq
+
+end Qsag
+end
