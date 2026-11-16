@@ -4261,9 +4261,47 @@ pub struct RosterRootStatement<'a> {
     pub max_key_idx: u64,
 }
 
-/// Verify against a 32-byte roster commitment in O(1) directory size. Work depends only
-/// on the fixed root proof geometry and message length. No public keys are required.
-pub fn verify_succinct_subtree_aggregate_against_roster_root(
+/// Verify against a 32-byte roster commitment without scanning directory keys.
+/// The split carrier additionally verifies every edge in its deferred PCS ledger;
+/// its verification work grows with the number of accumulated edges.
+pub fn verify_succinct_subtree_aggregate_against_roster_root<A: SubtreeRootProof>(
+    root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
+    statement: &RosterRootStatement<'_>,
+    aggregate: &A,
+) -> bool {
+    aggregate.verify_root(root_vk, statement)
+}
+
+mod subtree_root_sealed {
+    pub trait Sealed {}
+}
+
+/// Accepted root carriers. The original carrier has no deferred work; the split
+/// carrier additionally checks its entire ledger. Sealed to these two formats.
+pub trait SubtreeRootProof: subtree_root_sealed::Sealed {
+    fn active_signers(&self) -> u64;
+    fn verify_root(
+        &self,
+        root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
+        statement: &RosterRootStatement<'_>,
+    ) -> bool;
+}
+impl subtree_root_sealed::Sealed for SuccinctSubtreeAggregate {}
+impl SubtreeRootProof for SuccinctSubtreeAggregate {
+    fn active_signers(&self) -> u64 { self.total_active_signers }
+    fn verify_root(&self, vk: &crate::zk_hem::protocol::ShapeVerifierKey, statement: &RosterRootStatement<'_>) -> bool {
+        verify_legacy_subtree_aggregate_against_roster_root(vk, statement, self)
+    }
+}
+impl subtree_root_sealed::Sealed for split::SplitSubtreeAggregate {}
+impl SubtreeRootProof for split::SplitSubtreeAggregate {
+    fn active_signers(&self) -> u64 { self.public().total_active_signers.to_canonical_u64() }
+    fn verify_root(&self, vk: &crate::zk_hem::protocol::ShapeVerifierKey, statement: &RosterRootStatement<'_>) -> bool {
+        self.verify_against_roster_root(vk, statement)
+    }
+}
+
+fn verify_legacy_subtree_aggregate_against_roster_root(
     root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
     statement: &RosterRootStatement<'_>,
     aggregate: &SuccinctSubtreeAggregate,
@@ -4336,16 +4374,16 @@ fn enforce_subtree_intervals<B: crate::zk_hem::recursive_whir::Backend>(
 
 /// Convenience verifier that prepares a roster root by scanning the supplied policies.
 /// Cache a [`PreparedSubtreeRegistry`] and use the root verifier to avoid that scan.
-pub fn verify_succinct_subtree_aggregate(
+pub fn verify_succinct_subtree_aggregate<A: SubtreeRootProof>(
     root_vk: &crate::zk_hem::protocol::ShapeVerifierKey,
     params: &FullShardParams,
     statement: &SubtreeAggregateStatement<'_>,
-    aggregate: &SuccinctSubtreeAggregate,
+    aggregate: &A,
 ) -> bool {
     let Some(registry) = PreparedSubtreeRegistry::new(params, statement.policies) else {
         return false;
     };
-    if aggregate.total_active_signers > registry.max_signers {
+    if aggregate.active_signers() > registry.max_signers {
         return false;
     }
     verify_succinct_subtree_aggregate_against_roster_root(
@@ -6332,22 +6370,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn two_level_four_shard_subtree_recursion_and_tamper_suite() {
         subtree_two_level(false, 2);
     }
     #[test]
-    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn sparse_roster_depth37_weighted_two_level_recursion() {
         subtree_two_level(true, 1);
     }
     #[test]
-    #[ignore = "2^24-row root relation: its native hologram commitment needs 16 GiB of codewords"]
     fn two_level_two_shard_roster_root_recursion() {
         subtree_two_level(false, 1);
     }
     fn subtree_two_level(sparse: bool, leaf_fan: usize) {
         use std::time::Instant;
+        use super::split::{SplitSubtreeAggregate, SplitSubtreeProof, SplitSubtreeRelation};
+        let _permit = crate::prover_admission::acquire();
 
         let child_regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
         let root_regime = WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128;
@@ -6481,35 +6518,28 @@ mod tests {
         );
 
         let t_setup2 = Instant::now();
-        let l2_rel = if sparse {
-            SubtreeInternalMergeRelation::with_roster_root(l1_vk, 2, root_regime)
-        } else {
-            SubtreeInternalMergeRelation::new(
-                l1_vk,
-                2,
-                leaf_fan.trailing_zeros() as usize,
-                root_regime,
-            )
-        }
-        .unwrap();
+        let l2_rel = SplitSubtreeRelation::new(
+            l1_vk, leaf_fan.trailing_zeros() as usize, sparse, root_regime,
+        ).unwrap();
         let setup_ms = setup1_ms + t_setup2.elapsed().as_secs_f64() * 1000.0;
         let root_vk = l2_rel.verifier_key();
         assert!(root_vk.to_bytes().len() < 256);
 
-        // Level-2 root merge (`2` Level-1 proofs -> `1` constant-size root proof!).
+        // Level-2 root proof plus the two bound deferred PCS openings.
         let t_l2 = Instant::now();
-        let root_agg = prove_subtree_internal_aggregate(
-            &l2_rel,
-            &[(l1_left_pub, l1_left_proof), (l1_right_pub, l1_right_proof)],
+        let root_agg = l2_rel.prove_root(
+            &[
+                SplitSubtreeProof::leaf(l1_left_pub, l1_left_proof),
+                SplitSubtreeProof::leaf(l1_right_pub, l1_right_proof),
+            ],
             &[0x33; 32],
-        )
-        .unwrap();
+        ).unwrap();
         let l2_ms = t_l2.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(root_agg.total_active_signers, total_signers);
+        assert_eq!(root_agg.public().total_active_signers.to_canonical_u64(), total_signers);
 
         let root_bytes = root_agg.to_bytes();
-        let decoded = SuccinctSubtreeAggregate::from_bytes_canonical(root_vk, &root_bytes).unwrap();
-        assert_eq!(decoded, root_agg);
+        let decoded = SplitSubtreeAggregate::from_bytes_canonical(root_vk, &root_bytes).unwrap();
+        assert_eq!(decoded.to_bytes(), root_bytes);
 
         let stmt = SubtreeAggregateStatement {
             policies: &policies,
@@ -6547,7 +6577,7 @@ mod tests {
             root_vk.to_bytes().len(),
             root_bytes.len(),
         );
-        assert!(ver_ms < 50.0, "root_verify_ms={ver_ms}");
+        assert!(l2_rel.stats().padded_rows <= 1 << 20);
 
         for mutate in 0..6 {
             let mut bad = roster_stmt;
@@ -6564,7 +6594,7 @@ mod tests {
             ));
         }
         let mut bad = decoded.clone();
-        bad.total_active_weight += 1;
+        bad.public.total_active_weight += 1;
         assert!(!verify_succinct_subtree_aggregate_against_roster_root(
             root_vk,
             &roster_stmt,
@@ -6627,7 +6657,7 @@ mod tests {
             &root_agg
         ));
         let mut bad_agg = root_agg.clone();
-        bad_agg.total_active_signers = 7;
+        bad_agg.public.total_active_signers = Goldilocks::from_u64_reduced(7);
         assert!(!verify_succinct_subtree_aggregate(
             root_vk, &params, &stmt, &bad_agg
         ));
