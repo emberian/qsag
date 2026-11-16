@@ -222,8 +222,8 @@ theorem abort_preserves_wal (c : Config) (release : Release) (s : State) (n : Na
 
 
 /-- Concrete request fixture; the profile remains arbitrary and fixed. -/
-def fixtureRequest : SessionScheduleReq := ⟨7, 0, [11], [], [0]⟩
-def fixtureConfig (p : RssProduction.Profile) : Config := ⟨p, 3, 2, [2], 2⟩
+@[expose] def fixtureRequest : SessionScheduleReq := ⟨7, 0, [11], [], [0]⟩
+@[expose] def fixtureConfig (p : RssProduction.Profile) : Config := ⟨p, 3, 2, [2], 2⟩
 
 /-- Positive reachability: an actual honest input enables a 2-of-3 request.
 This exercises the authorization/scheduling boundary without asserting a
@@ -236,7 +236,7 @@ theorem approved_request_can_start (p : RssProduction.Profile) (release : Releas
   intro c s
   have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
     dsimp only [s, c, stepWith, initial, fixtureConfig]
-    rw [if_pos ⟨by decide, by decide⟩]
+    rw [ite_eq_left ⟨by decide, by decide⟩]
   rw [hs]
   have hAuth : authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ fixtureRequest = true := by
     unfold authorized
@@ -248,7 +248,7 @@ theorem approved_request_can_start (p : RssProduction.Profile) (release : Releas
       subst hq
       exact ⟨by decide, by decide, List.mem_singleton.mpr rfl⟩)
   dsimp only [stepWith]
-  rw [if_pos hAuth, if_pos (by dsimp only [c, fixtureConfig]; decide)]
+  rw [ite_eq_left hAuth, ite_eq_left (by dsimp only [c, fixtureConfig]; decide)]
   rfl
 
 /-- The same approval cannot be replayed to authorize changed randomness. -/
@@ -262,18 +262,19 @@ theorem approval_does_not_authorize_changed_request
   intro c s
   have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
     dsimp only [s, c, stepWith, initial, fixtureConfig]
-    rw [if_pos ⟨by decide, by decide⟩]
+    rw [ite_eq_left ⟨by decide, by decide⟩]
   rw [hs]
   have hNotAuth : ¬ (authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩
       { fixtureRequest with optRand := [1] } = true) := by
     unfold authorized
     rw [decide_eq_true_iff]
     intro h
-    have h0 := h.2.2.2.2.2.2.2.1 0 (by simp [fixtureRequest])
-    simp only [List.mem_singleton, Prod.mk.injEq, fixtureRequest, SessionScheduleReq.mk.injEq] at h0
-    exact absurd h0.2.2.2.1 (by decide)
+    have h0 := (h.2.2.2.2.2.2.2.1 0 (by simp [fixtureRequest])).2.2
+    simp only [List.mem_singleton, Prod.mk.injEq] at h0
+    have hOpt := congrArg SessionScheduleReq.optRand h0.2
+    simp [fixtureRequest] at hOpt
   dsimp only [stepWith]
-  rw [if_neg hNotAuth]
+  rw [ite_eq_right hNotAuth]
 
 /-- Honest authorization does not override the explicit attempt budget. -/
 theorem exhausted_attempts_reject (p : RssProduction.Profile) (release : Release) :
@@ -284,7 +285,7 @@ theorem exhausted_attempts_reject (p : RssProduction.Profile) (release : Release
   intro c s
   have hs : s = ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ := by
     dsimp only [s, c, stepWith, initial, fixtureConfig]
-    rw [if_pos ⟨by decide, by decide⟩]
+    rw [ite_eq_left ⟨by decide, by decide⟩]
   rw [hs]
   have hAuth : authorized c ⟨[(0, fixtureRequest)], [], RssProduction.initial p⟩ fixtureRequest = true := by
     unfold authorized
@@ -296,6 +297,17 @@ theorem exhausted_attempts_reject (p : RssProduction.Profile) (release : Release
       subst hq
       exact ⟨by decide, by decide, List.mem_singleton.mpr rfl⟩)
   dsimp only [stepWith]
-  rw [if_pos hAuth, if_neg (by dsimp only [c, fixtureConfig]; omega)]
+  rw [ite_eq_left hAuth, ite_eq_right (by dsimp only [c, fixtureConfig]; omega)]
+
+theorem fixtureRequest_authorized (p : RssProduction.Profile) (w : WalLatchState) :
+    authorized (fixtureConfig p) ⟨[(0, fixtureRequest)], [], w⟩ fixtureRequest = true := by
+  unfold authorized
+  exact decide_eq_true (by
+    dsimp only [fixtureConfig, fixtureRequest]
+    refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, ?_, by decide⟩
+    intro q hq
+    simp only [List.mem_singleton] at hq
+    subst hq
+    exact ⟨by decide, by decide, List.mem_singleton.mpr rfl⟩)
 
 end Qsag.ThresholdIdealService

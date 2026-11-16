@@ -154,7 +154,23 @@ theorem start_then_crash_burns (p : RssProduction.Profile) (compute : Compute) :
     let reserved := (stepWith c compute s (.start req)).1
     (stepWith c compute reserved .crash).1.nextLeaf = 1 ∧
       (stepWith c compute reserved .crash).1.reserved = [req] := by
-  exact ⟨rfl,rfl⟩
+  intro c req s reserved
+  have hs : s = ⟨[(0, req)], 0, [], [], []⟩ := by
+    dsimp only [s, c, req, stepWith, initial, ThresholdIdealService.fixtureConfig]
+    rw [ite_eq_left ⟨by decide, by decide⟩]
+  have hAuth : ThresholdIdealService.authorized c (approvalState c s) req = true := by
+    rw [hs]
+    exact ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p)
+  have hRes : reserved = ⟨[(0, req)], 1, [req], [], [⟨req, .reserved⟩]⟩ := by
+    dsimp only [reserved]
+    rw [hs]
+    dsimp only [stepWith]
+    rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
+    rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
+    dsimp only [List.find?]
+    rw [ite_eq_left (by dsimp only [req, ThresholdIdealService.fixtureRequest])]
+  rw [hRes]
+  exact ⟨rfl, rfl⟩
 
 /-- A successful signature cannot be returned before durable caching. -/
 theorem buffered_not_deliverable (c : Config) (compute : Compute)
@@ -171,7 +187,6 @@ theorem disclosed_uncommitted_not_cached (c : Config) (compute : Compute)
     (stepWith c compute (stepWith c compute s (.execute 0)).1 .crash).1.cached = s.cached := by
   simp [stepWith, h]
 
-
 /-- A crash cannot make an uncommitted reserved leaf available again. -/
 theorem crash_cannot_reuse_reserved_leaf (p : RssProduction.Profile) (compute : Compute) :
     let c := ThresholdIdealService.fixtureConfig p
@@ -180,7 +195,28 @@ theorem crash_cannot_reuse_reserved_leaf (p : RssProduction.Profile) (compute : 
     let reserved := (stepWith c compute s (.start req)).1
     let crashed := (stepWith c compute reserved .crash).1
     (stepWith c compute crashed (.start req)).2 = .rejected .wrongPhase := by
-  rfl
+  intro c req s reserved crashed
+  have hs : s = ⟨[(0, req)], 0, [], [], []⟩ := by
+    dsimp only [s, c, req, stepWith, initial, ThresholdIdealService.fixtureConfig]
+    rw [ite_eq_left ⟨by decide, by decide⟩]
+  have hRes : reserved = ⟨[(0, req)], 1, [req], [], [⟨req, .reserved⟩]⟩ := by
+    dsimp only [reserved]
+    rw [hs]
+    dsimp only [stepWith]
+    rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
+    rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
+    dsimp only [List.find?]
+    rw [ite_eq_left (by dsimp only [req, ThresholdIdealService.fixtureRequest])]
+  have hCrash : crashed = ⟨[(0, req)], 1, [req], [], [⟨req, .closed⟩]⟩ := by
+    dsimp only [crashed]
+    rw [hRes]
+    rfl
+  rw [hCrash]
+  dsimp only [stepWith]
+  rw [ite_eq_left (ThresholdIdealService.fixtureRequest_authorized p (RssProduction.initial p))]
+  rw [ite_eq_left (by dsimp only [c, ThresholdIdealService.fixtureConfig]; decide)]
+  dsimp only [List.find?]
+  rw [ite_eq_right (by dsimp only [req, ThresholdIdealService.fixtureRequest]; decide)]
 
 /-- Retry execution is independent of the signing algorithm and its coins. -/
 theorem replay_does_not_recompute (c : Config) (first second : Compute)
@@ -188,5 +224,10 @@ theorem replay_does_not_recompute (c : Config) (first second : Compute)
     (h : s.slots = [⟨req, .replay raw⟩]) :
     stepWith c first s (.execute 0) = stepWith c second s (.execute 0) := by
   simp [stepWith, h]
+
+#verify_constructive shared_step_eq_ideal shared_ideal_interactive_correctness
+  crash_preserves_durable abort_preserves_durable start_then_crash_burns
+  buffered_not_deliverable disclosed_uncommitted_not_cached
+  crash_cannot_reuse_reserved_leaf replay_does_not_recompute
 
 end Qsag.ThresholdIdealDurableService
