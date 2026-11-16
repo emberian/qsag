@@ -286,6 +286,48 @@ module qsag_gf128_compact (
 
     always_ff @(posedge clk) begin
         rom_col <= tower_col_rom[rom_addr];
+        case (st)
+            S_IDLE: if (!rst && start) begin
+                tower_q <= tower;
+                acc     <= 128'd0;
+                pb      <= b;
+                if (tower) vec <= a;
+                else       pa  <= a;
+            end
+            S_MAP_A, S_MAP_B, S_MAP_R: begin
+                if (cnt == 8'd0) begin
+                    bit_q <= vec[0];
+                    vec   <= {1'b0, vec[127:1]};
+                end else if (cnt < 8'd128) begin
+                    acc   <= map_res;
+                    bit_q <= vec[0];
+                    vec   <= {1'b0, vec[127:1]};
+                end else begin
+                    acc <= 128'd0;
+                    if (st == S_MAP_A) begin
+                        pa  <= map_res;
+                        vec <= pb;
+                    end else if (st == S_MAP_B) begin
+                        pb <= map_res;
+                    end else begin
+                        r <= map_res;
+                    end
+                end
+            end
+            S_MUL: begin
+                if (cnt < 8'd127) begin
+                    acc <= mul_acc_next;
+                    pa  <= {pa[126:0], 1'b0} ^ (pa[127] ? 128'h87 : 128'd0);
+                    pb  <= {1'b0, pb[127:1]};
+                end else if (tower_q) begin
+                    vec <= mul_acc_next;
+                    acc <= 128'd0;
+                end else begin
+                    r <= mul_acc_next;
+                end
+            end
+            default: ;
+        endcase
     end
 
     always_ff @(posedge clk) begin
@@ -295,58 +337,26 @@ module qsag_gf128_compact (
         end else begin
             case (st)
                 S_IDLE: if (start) begin
-                    tower_q <= tower;
-                    acc     <= 128'd0;
-                    cnt     <= 8'd0;
-                    pb      <= b;
-                    if (tower) begin
-                        vec <= a;
-                        st  <= S_MAP_A;
-                    end else begin
-                        pa <= a;
-                        st <= S_MUL;
-                    end
+                    cnt <= 8'd0;
+                    st  <= tower ? S_MAP_A : S_MUL;
                 end
                 S_MAP_A, S_MAP_B, S_MAP_R: begin
-                    if (cnt == 8'd0) begin
-                        bit_q <= vec[0];
-                        vec   <= {1'b0, vec[127:1]};
-                        cnt   <= 8'd1;
-                    end else if (cnt < 8'd128) begin
-                        acc   <= map_res;
-                        bit_q <= vec[0];
-                        vec   <= {1'b0, vec[127:1]};
-                        cnt   <= cnt + 8'd1;
+                    if (cnt < 8'd128) begin
+                        cnt <= cnt + 8'd1;
                     end else begin
-                        acc <= 128'd0;
                         cnt <= 8'd0;
-                        if (st == S_MAP_A) begin
-                            pa  <= map_res;
-                            vec <= pb;
-                            st  <= S_MAP_B;
-                        end else if (st == S_MAP_B) begin
-                            pb <= map_res;
-                            st <= S_MUL;
-                        end else begin
-                            r    <= map_res;
-                            done <= 1'b1;
-                            st   <= S_IDLE;
-                        end
+                        if (st == S_MAP_A)      st <= S_MAP_B;
+                        else if (st == S_MAP_B) st <= S_MUL;
+                        else begin              done <= 1'b1; st <= S_IDLE; end
                     end
                 end
                 S_MUL: begin
                     if (cnt < 8'd127) begin
-                        acc <= mul_acc_next;
-                        pa  <= {pa[126:0], 1'b0} ^ (pa[127] ? 128'h87 : 128'd0);
-                        pb  <= {1'b0, pb[127:1]};
                         cnt <= cnt + 8'd1;
                     end else if (tower_q) begin
-                        vec <= mul_acc_next;
-                        acc <= 128'd0;
                         cnt <= 8'd0;
                         st  <= S_MAP_R;
                     end else begin
-                        r    <= mul_acc_next;
                         done <= 1'b1;
                         st   <= S_IDLE;
                     end

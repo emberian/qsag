@@ -297,7 +297,7 @@ module qsag_ni_fpga_top #(
 
     assign s_axil_awready = !rst && !aw_full;
     assign s_axil_wready  = !rst && !w_full;
-    assign s_axil_arready = !rst && !s_axil_rvalid;
+    assign s_axil_arready = !rst && !s_axil_rvalid && !(aw_full && w_full);
     assign wr_fire  = aw_full && w_full && !s_axil_bvalid && !rst;
     assign rd_fire  = s_axil_arvalid && s_axil_arready;
     assign wr_word  = aw_word;
@@ -540,7 +540,7 @@ module qsag_ni_fpga_top #(
     for (genvar i = 0; i < 4; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
         wire [63:0] b_l = sc_add_b[64*i +: 64];
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(22)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(34)) u_s1 (
             .x({sc_add_c0 ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
             .y(sc_raw_d[66*i +: 66]));
 
@@ -551,8 +551,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_on UNUSEDSIGNAL */
         wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r1 (.x(tr1), .y(r1));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
     end
 
@@ -599,6 +599,20 @@ module qsag_ni_fpga_top #(
             mid_rom_q <= mid_rom_mem[{mid_rom_sel, mid_rom_idx}];
         end
 
+        // Store the 1,024-bit KEC_STREAM_SPONGE rate buffer in BRAM instead of 1,024 shift FFs.
+        logic [511:0] ksp_bram_rd;
+        wire  [4:0]   ksp_next_idx = kcmp_idx + 5'd1;
+        wire          ksp_bram_ra  = (op_st == O_KSP_CMP_XOR)
+                                   ? (kcmd_ready ? ksp_next_idx[3] : kcmp_idx[3])
+                                   : 1'b0;
+        qsag_sdp_bram #(.AW(1), .DW(512)) u_ksp_bram (
+            .clk(clk),
+            .we((op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat < 2'd2)),
+            .wa(ksp_beat[0]),
+            .wd(s_axis_tdata),
+            .ra(ksp_bram_ra),
+            .rd(ksp_bram_rd));
+
         logic        top_kcmd_valid, top_kcmd_nr12;
         logic [1:0]  top_kcmd_op;
         logic [4:0]  top_kcmd_idx;
@@ -635,7 +649,7 @@ module qsag_ni_fpga_top #(
                 O_KSP_CMP_XOR: begin
                     top_kcmd_valid = 1'b1;
                     top_kcmd_op    = 2'd1;
-                    top_kcmd_wdata = (kcmp_idx < 5'd16) ? ksp_buf_q[63:0] : ksp_lane16_q;
+                    top_kcmd_wdata = (kcmp_idx < 5'd16) ? ksp_bram_rd[64*kcmp_idx[2:0] +: 64] : ksp_lane16_q;
                 end
                 O_KSP_CMP_PERM: begin
                     top_kcmd_valid = 1'b1;
@@ -778,12 +792,13 @@ module qsag_ni_fpga_top #(
 
     wire engines_busy = op_busy || p2_busy || (|chain_busy) || fold_busy || kec_busy || ts_busy;
 
-    // Word-level CE write path for `x_q` (2,048 FFs): avoids per-byte enable LUT4 bloat on ECP5.
-    wire [31:0] x_cur32 = wr_word[0] ? x_q[wr_word[5:1]][63:32] : x_q[wr_word[5:1]][31:0];
+    // Shared 64:1 read mux on `x_q` for both AXI4-Lite reads and partial-strobe writes.
+    wire [5:0]  x_rw_idx = wr_fire ? wr_word[5:0] : rd_word[5:0];
+    wire [31:0] x_rw_val = x_rw_idx[0] ? x_q[x_rw_idx[5:1]][63:32] : x_q[x_rw_idx[5:1]][31:0];
     logic [31:0] x_new32;
     always_comb begin
         for (int b = 0; b < 4; b++)
-            x_new32[8*b +: 8] = wr_strb[b] ? wr_data[8*b +: 8] : x_cur32[8*b +: 8];
+            x_new32[8*b +: 8] = wr_strb[b] ? wr_data[8*b +: 8] : x_rw_val[8*b +: 8];
     end
     always_ff @(posedge clk) begin
         if (wr_fire && !wr_error && (|wr_strb) && wr_word[9:6] == 4'h1) begin
@@ -861,8 +876,7 @@ module qsag_ni_fpga_top #(
                     10'h00B: s_axil_rdata <= perms_q;
                     default: begin
                         if (rd_word[9:6] == 4'h1)
-                            s_axil_rdata <= rd_word[0] ? x_q[rd_word[5:1]][63:32]
-                                                       : x_q[rd_word[5:1]][31:0];
+                            s_axil_rdata <= x_rw_val;
                         else if (rd_word[9:6] == 4'h2 && rd_word[5:1] < 5'd12)
                             s_axil_rdata <= rd_word[0] ? y_q[rd_word[4:1]][63:32]
                                                        : y_q[rd_word[4:1]][31:0];
@@ -1151,15 +1165,22 @@ module qsag_ni_fpga_top #(
                 O_EBATCH: begin
                     if (stream_fire) begin
                         if (!eb_half) begin
-                            eb_a_q  <= s_axis_tdata[255:0];
-                            eb_b_q  <= s_axis_tdata[511:256];
+                            if (PROFILE_COMPACT) begin
+                                mac_a_fsm <= s_axis_tdata[255:0];
+                                mac_b_fsm <= s_axis_tdata[511:256];
+                            end else begin
+                                eb_a_q <= s_axis_tdata[255:0];
+                                eb_b_q <= s_axis_tdata[511:256];
+                            end
                             eb_half <= 1'b1;
                         end else begin
                             eb_half       <= 1'b0;
                             eb_exp_cmp_q  <= s_axis_tdata[511:256];
                             mac_valid_fsm <= 1'b1;
-                            mac_a_fsm     <= eb_a_q;
-                            mac_b_fsm     <= eb_b_q;
+                            if (!PROFILE_COMPACT) begin
+                                mac_a_fsm <= eb_a_q;
+                                mac_b_fsm <= eb_b_q;
+                            end
                             mac_c_fsm     <= s_axis_tdata[255:0];
                             if (PROFILE_COMPACT) eb_wait_cmp <= 1'b1;
                             if (eb_rem == 16'd1) begin
@@ -1216,11 +1237,11 @@ module qsag_ni_fpga_top #(
                 O_KSP_COLLECT: begin
                     if (stream_fire) begin
                         if (ksp_beat == 2'd0) begin
-                            ksp_buf_q[511:0] <= s_axis_tdata;
-                            ksp_beat         <= 2'd1;
+                            if (!PROFILE_COMPACT) ksp_buf_q[511:0] <= s_axis_tdata;
+                            ksp_beat <= 2'd1;
                         end else if (ksp_beat == 2'd1) begin
-                            ksp_buf_q[1023:512] <= s_axis_tdata;
-                            ksp_beat            <= 2'd2;
+                            if (!PROFILE_COMPACT) ksp_buf_q[1023:512] <= s_axis_tdata;
+                            ksp_beat <= 2'd2;
                         end else begin
                             ksp_lane16_q <= s_axis_tdata[63:0];
                             ksp_flags_q  <= s_axis_tdata[127:64];
@@ -1262,7 +1283,6 @@ module qsag_ni_fpga_top #(
                 end
                 O_KSP_CMP_XOR: begin
                     if (kcmd_ready) begin
-                        if (kcmp_idx < 5'd16) ksp_buf_q <= {64'd0, ksp_buf_q[1023:64]};
                         if (kcmp_idx == 5'd16) op_st <= O_KSP_CMP_PERM;
                         else                   kcmp_idx <= kcmp_idx + 5'd1;
                     end
@@ -1325,6 +1345,7 @@ module qsag_ni_fpga_top #(
     logic unused_top;
     assign unused_top = &{1'b0, s_axil_awaddr[1:0], s_axil_araddr[1:0],
                           stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, sc_h_sub[3],
-                          chain_busy, chain_done, chain_ok, kec_y_out};
+                          chain_busy, chain_done, chain_ok, kec_y_out,
+                          eb_a_q, eb_b_q, ksp_buf_q};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule

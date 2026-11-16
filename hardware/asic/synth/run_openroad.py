@@ -74,9 +74,13 @@ def write_sram_lef(path, metal_pin, site_w, site_h, macro_w, macro_h):
     path.write_text("\n".join(lines))
 
 
-def run_pdk_pnr(cfg):
+def run_pdk_pnr(cfg, force=False):
     lib = cfg["lib"]
     out = ROOT / "synth" / "hier" / lib / "openroad"
+    sum_path = out / "openroad_summary.json"
+    if sum_path.exists() and not force:
+        print(f"[OpenROAD {lib}] cached OK -> {sum_path}", flush=True)
+        return json.loads(sum_path.read_text())
     out.mkdir(parents=True, exist_ok=True)
     sram_lef = out / "sram_dp_64x16384_bank.lef"
     write_sram_lef(sram_lef, cfg["pin_metal"], cfg["site_w"], cfg["site_h"], cfg["macro_w"], cfg["macro_h"])
@@ -130,7 +134,6 @@ check_placement -verbose
 estimate_parasitics -placement
 
 report_design_area
-report_clock_min_period -digits 4
 report_worst_slack -max -digits 4
 report_worst_slack -min -digits 4
 report_tns -digits 4
@@ -152,15 +155,17 @@ exit
     if p.returncode != 0 or "Error:" in txt:
         raise RuntimeError(f"OpenROAD {lib} failed:\n" + "\n".join(txt.splitlines()[-35:]))
 
-    m_per = re.search(r"period_min\s*=\s*([0-9.]+)\s+fmax\s*=\s*([0-9.]+)", txt)
     m_area = re.search(r"Design area\s+([0-9.]+)\s+u\^2\s+([0-9.]+)%\s+utilization", txt)
-    m_wns = re.search(r"worst slack max\s+([0-9.eE+-]+)", txt)
+    m_wns = re.search(r"worst slack(?:\s+max)?\s+([0-9.eE+-]+)", txt)
     m_pwr = re.search(r"^Total\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)", txt, re.M)
     macro_area = 4.0 * cfg["macro_w"] * cfg["macro_h"]
     std_area = (float(m_area.group(1)) - macro_area) if m_area else None
+    wns_ns = float(m_wns.group(1)) if m_wns else None
+    min_per_ns = round(period_ns - wns_ns, 4) if wns_ns is not None else None
+    fmax_mhz = round(1000.0 / min_per_ns, 2) if min_per_ns else None
     summary = {
         "pdk": lib,
-        "stage": "post-detailed-placement + repair_design/repair_timing + Manhattan RC parasitics (OpenROAD)",
+        "stage": "post-detailed-placement + repair_design + Manhattan RC parasitics (OpenROAD)",
         "die_um": f"{die_w} x {die_h} ({round(die_w * die_h / 1e6, 3)} mm^2)",
         "sram_banks_placed": 4,
         "design_area_um2": float(m_area.group(1)) if m_area else None,
@@ -168,9 +173,9 @@ exit
         "post_repair_stdcell_kGE": round(std_area / cfg["nand2_um2"] / 1000.0, 2) if std_area else None,
         "utilization_pct": float(m_area.group(2)) if m_area else None,
         "target_period_ns": period_ns,
-        "post_place_wns_ns": float(m_wns.group(1)) if m_wns else None,
-        "post_place_min_period_ns": float(m_per.group(1)) if m_per else None,
-        "post_place_fmax_mhz": float(m_per.group(2)) if m_per else None,
+        "post_place_wns_ns": round(wns_ns, 4) if wns_ns is not None else None,
+        "post_place_min_period_ns": min_per_ns,
+        "post_place_fmax_mhz": fmax_mhz,
         "post_place_total_power_mw": round(float(m_pwr.group(4)) * 1e3, 3) if m_pwr else None,
         "post_place_leakage_mw": round(float(m_pwr.group(3)) * 1e3, 4) if m_pwr else None,
     }
@@ -231,9 +236,8 @@ CONFIGS = [
 
 
 if __name__ == "__main__":
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        all_res = list(ex.map(run_pdk_pnr, CONFIGS))
+    force = "--force" in sys.argv
+    all_res = [run_pdk_pnr(c, force=force) for c in CONFIGS]
     out_all = ROOT / "synth" / "hier" / "openroad_all_summary.json"
     out_all.write_text(json.dumps(all_res, indent=2) + "\n")
     print(json.dumps(all_res, indent=2), flush=True)
