@@ -1,0 +1,4 @@
+# cargo build output and libFuzzer run state (scripts/run_differential_validation.sh --fuzz)
+target/
+corpus/
+artifacts/
