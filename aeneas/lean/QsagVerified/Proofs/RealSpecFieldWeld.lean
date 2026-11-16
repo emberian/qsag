@@ -5,7 +5,6 @@ public import QsagVerified.Proofs.Goldilocks
 public import QsagVerified.Proofs.MirRefinementKit
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Math.Goldilocks
-import all Qsag.Math.Goldilocks
 
 /-!
 # Field-kernel weld between the Aeneas extraction and `Qsag.Goldilocks`

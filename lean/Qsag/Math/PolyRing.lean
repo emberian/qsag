@@ -2510,3 +2510,19 @@ theorem affineCombine_def {F : Type} [CommRingOps F] (θ α β : F) (F_poly G_po
 -- (end exports for lane agg-budget)
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.UPoly.degFn_wdeg
+#verify_constructive Qsag.Mat.map_det
+#verify_constructive Qsag.Mat.det_col0_unit
+#verify_constructive Qsag.Mat.det_lower_tri_one
+#verify_constructive Qsag.Mat.det_idMat
+#verify_constructive Qsag.Mat.degFn_det_weighted_le
+#verify_constructive Qsag.Mat.det_perm_rows
+#verify_constructive Qsag.Mat.det_matMul
+#verify_constructive Qsag.Frac.of_injective
+#verify_constructive Qsag.UPoly.d5_split
+
+end

@@ -788,6 +788,10 @@ fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
 /// `zk_hem::full_shard` recursive merge (`QSAGFSM1`) of `children` two-slot shards under one
 /// parent, with child, statement and wire tamper rejection.
 fn full_shard_merge_and_tamper_rejection(children: usize) {
+    // These two tests each retain a large verifier key across proving and tamper checks.
+    // Serializing them prevents their independent peaks from exceeding the 16 GiB gate.
+    static FULL_SHARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = FULL_SHARD_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
     let fs_params = FullShardParams::new(regime, 2).expect("FullShardParams(slots=2)");
     assert_eq!(fs_params.slots(), 2);

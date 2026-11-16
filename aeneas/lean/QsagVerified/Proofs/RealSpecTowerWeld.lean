@@ -2,7 +2,6 @@ module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.TowerBdoz
 public import Qsag.Math.Gf2Pow128
-import all Qsag.Math.Gf2Pow128
 
 /-!
 # Binary-tower weld between the Aeneas extraction and `Qsag.Math.Gf2Pow128`
@@ -34,8 +33,8 @@ theorem pureGf256Mul_eq_qsag (a b : Std.U8) :
   change i < 8 at hi
   match i, hi with
   | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ =>
-    simp only [Qsag.mulExec.eq_1, Qsag.mulExec.eq_2, Qsag.scaleXExec.eq_1,
-      Qsag.scaleXExec.eq_2, Qsag.joinBits.eq_def, Qsag.lowBits.eq_def, Qsag.highBits.eq_def]
+    simp only [Qsag.mulExec.public_eq_1, Qsag.mulExec.public_eq_2, Qsag.scaleXExec.public_eq_1,
+      Qsag.scaleXExec.public_eq_2, Qsag.joinBits_eq_append, Qsag.lowBits.public_eq_1, Qsag.highBits.public_eq_1]
     simp [-BitVec.setWidth_setWidth, pureGf256Mul, pureMulT2, pureMulT1, pureScaleXT1, pureScaleXT2,
       UScalar.bv_and, UScalar.bv_or, UScalar.bv_xor, UScalarTy.numBits,
       BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_xor,
@@ -107,14 +106,14 @@ private theorem towerLow (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     (a &&& m).setWidth (2 ^ k) = Qsag.lowBits k a := by
   apply BitVec.eq_of_toNat_eq
-  simp only [Qsag.lowBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
+  simp only [Qsag.lowBits.public_eq_1, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
     BitVec.extractLsb'_toNat, and_lowMask, Nat.shiftRight_zero, Nat.mod_mod]
 
 private theorem towerHigh (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     ((a >>> (2 ^ k)) &&& m).setWidth (2 ^ k) = Qsag.highBits k a := by
   apply BitVec.eq_of_toNat_eq
-  simp only [Qsag.highBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
+  simp only [Qsag.highBits.public_eq_1, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
     BitVec.extractLsb'_toNat, and_lowMask, BitVec.toNat_ushiftRight,
     Nat.mod_mod]
 
@@ -124,7 +123,7 @@ private theorem towerJoin (k : Nat) (lo hi : BitVec (2 ^ k)) :
   have hw : 2 ^ (k + 1) = 2 ^ k + 2 ^ k := by rw [Nat.pow_succ]; omega
   apply BitVec.eq_of_getLsbD_eq
   intro i hi'
-  simp only [Qsag.joinBits, BitVec.getLsbD_or, BitVec.getLsbD_setWidth,
+  simp only [Qsag.joinBits_eq_append, BitVec.getLsbD_or, BitVec.getLsbD_setWidth,
     BitVec.getLsbD_shiftLeft, BitVec.getLsbD_cast, BitVec.getLsbD_append]
   by_cases h : i < 2 ^ k
   · simp [h, hi']
@@ -142,13 +141,13 @@ private theorem mulExec_succ (k : Nat) (a b : Qsag.TowerBitVec (k + 1)) :
           (Qsag.mulExec k (Qsag.lowBits k a) (Qsag.lowBits k b) ^^^
             Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b)) ^^^
           Qsag.scaleXExec k (Qsag.mulExec k (Qsag.highBits k a) (Qsag.highBits k b))) := by
-  simp only [Qsag.mulExec]
+  simp only [Qsag.mulExec.public_eq_2]
 
 private theorem scaleXExec_succ (k : Nat) (a : Qsag.TowerBitVec (k + 1)) :
     Qsag.scaleXExec (k + 1) a =
       Qsag.joinBits k (Qsag.highBits k a)
         (Qsag.lowBits k a ^^^ Qsag.scaleXExec k (Qsag.highBits k a)) := by
-  simp only [Qsag.scaleXExec]
+  simp only [Qsag.scaleXExec.public_eq_2]
 
 /-- One Karatsuba level: if `mulS`/`sxS` compute the canonical packed product and `X`-scaling
 at level `k`, the mask/shift/zero-extend shape used by the Rust source computes the canonical
@@ -195,8 +194,8 @@ theorem pureScaleXT3_eq_qsag (a : Std.U8) :
   change i < 8 at hi
   match i, hi with
   | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ =>
-    simp only [Qsag.scaleXExec.eq_1, Qsag.scaleXExec.eq_2, Qsag.joinBits.eq_def,
-      Qsag.lowBits.eq_def, Qsag.highBits.eq_def]
+    simp only [Qsag.scaleXExec.public_eq_1, Qsag.scaleXExec.public_eq_2, Qsag.joinBits_eq_append,
+      Qsag.lowBits.public_eq_1, Qsag.highBits.public_eq_1]
     simp [-BitVec.setWidth_setWidth, pureScaleXT3, pureScaleXT2, pureScaleXT1,
       UScalar.bv_and, UScalar.bv_or, UScalar.bv_xor, UScalarTy.numBits,
       BitVec.getLsbD_and, BitVec.getLsbD_or, BitVec.getLsbD_xor,

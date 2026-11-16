@@ -23,39 +23,40 @@ example : shake256Xof 32 [] =
     [0x46, 0xb9, 0xdd, 0x2b, 0x0b, 0xa8, 0x8d, 0x13,
      0x23, 0x3b, 0x3f, 0xeb, 0x74, 0x3e, 0xeb, 0x24,
      0x3f, 0xcd, 0x52, 0xea, 0x62, 0xb8, 0x1b, 0x82,
-     0xb5, 0x0c, 0x27, 0x64, 0x6e, 0xd5, 0x76, 0x2f] := by decide +kernel
+     0xb5, 0x0c, 0x27, 0x64, 0x6e, 0xd5, 0x76, 0x2f] := shake256_empty_kat
 
 -- NIST FIPS 202 SHAKE256("abc", 256) = 483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739
 example : shake256Xof 32 [0x61, 0x62, 0x63] =
     [0x48, 0x33, 0x66, 0x60, 0x13, 0x60, 0xa8, 0x77,
      0x1c, 0x68, 0x63, 0x08, 0x0c, 0xc4, 0x11, 0x4d,
      0x8d, 0xb4, 0x45, 0x30, 0xf8, 0xf1, 0xe1, 0xee,
-     0x4f, 0x94, 0xea, 0x37, 0xe7, 0x8b, 0x57, 0x39] := by decide +kernel
+     0x4f, 0x94, 0xea, 0x37, 0xe7, 0x8b, 0x57, 0x39] := shake256_abc_kat
 
 
 /-! ## 5. Build-Time Conformance Vectors Matching `poseidon2.rs` -/
 
 example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩).toList.map (·.val) =
-    [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := by decide +kernel
+    [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := poseidon2Perm12_zero_kat
 
 example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
-    [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := by decide +kernel
+    [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := poseidon2Perm12_iota_kat
 
 example : poseidon2Hash32 [] =
-    [182, 168, 65, 106, 0, 54, 23, 124, 22, 116, 119, 199, 75, 253, 202, 145, 123, 13, 115, 200, 186, 143, 207, 66, 162, 161, 198, 9, 220, 37, 176, 162] := by decide +kernel
+    [182, 168, 65, 106, 0, 54, 23, 124, 22, 116, 119, 199, 75, 253, 202, 145, 123, 13, 115, 200, 186, 143, 207, 66, 162, 161, 198, 9, 220, 37, 176, 162] := poseidon2Hash32_empty_kat
 
 example : poseidon2Hash32 [0] =
-    [116, 79, 15, 95, 17, 248, 202, 240, 45, 126, 192, 181, 89, 193, 185, 161, 98, 167, 199, 38, 214, 141, 4, 22, 97, 34, 223, 133, 16, 3, 170, 104] := by decide +kernel
+    [116, 79, 15, 95, 17, 248, 202, 240, 45, 126, 192, 181, 89, 193, 185, 161, 98, 167, 199, 38, 214, 141, 4, 22, 97, 34, 223, 133, 16, 3, 170, 104] := poseidon2Hash32_zero_byte_kat
 
 example : poseidon2Hash32 [1, 2, 3] =
-    [149, 79, 171, 160, 0, 49, 166, 60, 204, 121, 241, 71, 102, 130, 24, 17, 35, 162, 114, 249, 194, 254, 120, 46, 18, 111, 254, 27, 106, 81, 178, 227] := by decide +kernel
+    [149, 79, 171, 160, 0, 49, 166, 60, 204, 121, 241, 71, 102, 130, 24, 17, 35, 162, 114, 249, 194, 254, 120, 46, 18, 111, 254, 27, 106, 81, 178, 227] := poseidon2Hash32_123_kat
 
 example : poseidon2Hash32 [113, 115, 97, 103, 45, 112, 111, 115, 101, 105, 100, 111, 110, 50, 45, 107, 97, 116] =
-    [228, 156, 140, 147, 124, 10, 100, 197, 103, 106, 168, 7, 254, 196, 250, 183, 212, 130, 17, 26, 2, 139, 235, 15, 219, 46, 193, 238, 148, 50, 236, 229] := by decide +kernel
+    [228, 156, 140, 147, 124, 10, 100, 197, 103, 106, 168, 7, 254, 196, 250, 183, 212, 130, 17, 26, 2, 139, 235, 15, 219, 46, 193, 238, 148, 50, 236, 229] := poseidon2Hash32_ascii_kat
 
 example : (let out := poseidon2CompressWeighted ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩;
     [out.x0.val, out.x1.val, out.x2.val, out.x3.val]) =
-    [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755] := by decide +kernel
+    [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755] :=
+  poseidon2CompressWeighted_iota_kat
 
 
 /-! ## 4. `#tooth` Cryptanalytic Refutations & Assurance Gates -/
@@ -96,29 +97,32 @@ theorem tooth_oversized_tag_midstate_single_block_fails :
       S = List.replicate 131 0x41 ∧
       ¬ ((encodeString [] ++ encodeString S).length ≤ 134) ∧
       (cshakePrefix [] S).length = 272 ∧ (cshakePrefix [] S).length ≠ 136 := by
-  have hB0 : natBytesBE 0 = [0] := by decide
-  have hB136 : natBytesBE 136 = [136] := by decide
-  have hB1048 : natBytesBE 1048 = [4, 24] := by decide
+  have hB0 : natBytesBE 0 = [0] := natBytesBE_small_kats.1
+  have hB136 : natBytesBE 136 = [136] := natBytesBE_small_kats.2.1
+  have hB1048 : natBytesBE 1048 = [4, 24] := natBytesBE_small_kats.2.2
   have hEncLen : (encodeString [] ++ encodeString (List.replicate 131 0x41)).length = 136 := by
-    simp only [encodeString, leftEncode, List.length_append, List.length_replicate,
+    simp only [encodeString_eq, leftEncode_eq, List.length_append, List.length_replicate,
       List.length_nil, Nat.mul_zero, hB0, hB1048, List.length_cons]
   have hPfxLen : (cshakePrefix [] (List.replicate 131 0x41)).length = 272 := by
-    unfold cshakePrefix bytepad
+    unfold cshakePrefix
+    rw [bytepad_eq]
     simp only [show (136 : Nat) ≠ 0 from by decide, ↓reduceIte, List.length_append,
-      List.length_replicate, hEncLen, leftEncode, hB136, List.length_cons, List.length_nil]
+      List.length_replicate, hEncLen, leftEncode_eq, hB136, List.length_cons, List.length_nil]
   exact ⟨List.replicate 131 0x41, rfl, by rw [hEncLen]; decide, hPfxLen, by rw [hPfxLen]; decide⟩
 
 theorem witness_pad10star1_valid_domain :
     ∃ (r : Nat) (d : UInt8) (m₁ m₂ : List UInt8),
       0 < r ∧ ValidDomByte d ∧ absorbPayload r d m₁ = absorbPayload r d m₂ :=
-  ⟨136, domShake256, [0x61, 0x62], [0x61, 0x62], by decide, ⟨by decide, by decide⟩, rfl⟩
+  ⟨136, domShake256, [0x61, 0x62], [0x61, 0x62], by decide,
+    by rw [domShake256_eq]; decide, rfl⟩
 
 theorem witness_cross_domain_pair :
     ∃ (r : Nat) (d₁ d₂ : UInt8) (m₁ m₂ : List UInt8),
       m₁ = [0x01] ∧ m₂ = [0x02] ∧
       0 < r ∧ ValidDomByte d₁ ∧ ValidDomByte d₂ ∧ d₁ ≠ d₂ :=
   ⟨136, domShake256, domCshake256, [0x01], [0x02], rfl, rfl,
-   by decide, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, by decide⟩
+   by decide, by rw [domShake256_eq]; decide, by rw [domCshake256_eq]; decide,
+   by rw [domShake256_eq, domCshake256_eq]; decide⟩
 
 /-- `cshakePrefix_prefix_free` applied at the Canopy leaf tag: its hypotheses are jointly
 dischargeable. The equation forces repeated components, which the positional
@@ -127,14 +131,22 @@ theorem witness_cshakePrefix_canopy :
     ([] : List UInt8) = [] ∧ qsagTagCanopyLeaf = qsagTagCanopyLeaf ∧ ([0x01] : List UInt8) = [0x01] :=
   cshakePrefix_prefix_free (N₁ := []) (S₁ := qsagTagCanopyLeaf) (N₂ := []) (S₂ := qsagTagCanopyLeaf)
     (m₁ := [0x01]) (m₂ := [0x01])
-    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide))
-    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide)) rfl
+    (bitlen_lt_sp800_bound (by decide))
+    (bitlen_lt_sp800_bound (by rw [qsagTagCanopyLeaf_eq]; decide))
+    (bitlen_lt_sp800_bound (by decide))
+    (bitlen_lt_sp800_bound (by rw [qsagTagCanopyLeaf_eq]; decide)) rfl
 
 theorem witness_keccak_midstate_canopy :
     ∃ (S msg : List UInt8) (outLen : Nat),
       S ≠ [] ∧ (encodeString [] ++ encodeString S).length ≤ 134 ∧
       (cshake256Xof outLen S msg).length = 32 :=
-  ⟨qsagTagCanopyLeaf, [0xde, 0xad, 0xbe, 0xef], 32, by decide, by decide, by simp⟩
+  ⟨qsagTagCanopyLeaf, [0xde, 0xad, 0xbe, 0xef], 32,
+    by rw [qsagTagCanopyLeaf_eq]; decide,
+    by
+      rw [List.length_append, encodeString_length_short (by decide),
+        encodeString_length_short (by rw [qsagTagCanopyLeaf_eq]; decide), qsagTagCanopyLeaf_eq]
+      decide,
+    by simp⟩
 
 #verify_constructive Qsag.pad10star1_joint_injective Qsag.pad10star1_injective
   Qsag.absorbPayload_cross_domain_encodings_ne Qsag.evalSponge_keccak_eq_shake256Xof
@@ -174,7 +186,7 @@ theorem tooth_frobenius_sbox_x2_differential_probability_one :
           towerMul 7 delta delta) ∧
       RatBound.lt sbox7MaxDiffProb128 badBound ∧
       ¬ strictlyMoreThanBits 125 badBound := by
-  refine ⟨RatBound.one, by decide, fun x delta => ?_, by decide, by decide⟩
+  refine ⟨RatBound.one, binaryPopcount_two, fun x delta => ?_, by decide, by decide⟩
   rw [towerSq_add, towerAdd_comm 7 (towerMul 7 x x), towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
 
 theorem tooth_zero_round_constants_preserve_zero_subspace (mdsA mdsB : Tower128) :
@@ -189,8 +201,8 @@ theorem tooth_zero_round_constants_preserve_zero_subspace (mdsA mdsB : Tower128)
       (towerZero 7, towerZero 7) = (towerZero 7, towerZero 7) from hAll spnRounds
   intro r
   induction r with
-  | zero => rfl
-  | succ r ih => simp only [spnIterRounds128, ih, hStep]
+  | zero => exact spnIterRounds128_zero _ _ _ _
+  | succ r ih => rw [spnIterRounds128_succ, ih, hStep]
 
 #tooth_pair Qsag.spnLinearMix_branch_number_three vs Qsag.tooth_degenerate_mds_ab_eq_one_collapses_branch_number
 #tooth_pair Qsag.sbox7MaxDiffProb128_eq_three_div_two_pow_127 vs Qsag.tooth_frobenius_sbox_x2_differential_probability_one
@@ -222,8 +234,8 @@ theorem rust_spn_poly_basis_kats :
     rustPow7 3#128 = 0xff#128 ∧
     rustSpnRound (7#128, 11#128) (3#128, 5#128) =
       (0x7e449a0c3042bf1c84c9783f54d336e9#128, 0x11db4739396e6534126ec4cc445b09a2#128) ∧
-    rustSpnRound (0#128, 0#128) (1#128, 0#128) = (1#128, gf128MdsBPolyBits) := by
-  decide +kernel
+    rustSpnRound (0#128, 0#128) (1#128, 0#128) = (1#128, gf128MdsBPolyBits) :=
+  rust_spn_poly_basis_kat
 
 /-- Positive control for the framing: the little-endian bytes of `GF128_MDS_A`; byte 0 bit 0
     is the constant coefficient and byte 15 bit 7 is `x^127`. -/
@@ -234,6 +246,8 @@ theorem rust_le_lane_framing_kats :
     rustU128FromLeBytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80] =
       BitVec.twoPow 128 127 ∧
     rustU128ToLeBytes 2#128 = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] := by
+  rw [rustU128FromLeBytes_eq, rustU128FromLeBytes_eq, rustU128FromLeBytes_eq,
+    rustU128ToLeBytes_eq, gf128MdsAPolyBits_eq]
   decide +kernel
 
 /-- Negative control: reading the same sixteen bytes big-endian gives a different field
@@ -241,6 +255,7 @@ theorem rust_le_lane_framing_kats :
 theorem tooth_big_endian_lane_framing_differs :
     BitVec.ofNat 128 (ofBE [0x35, 0xc8, 0xed, 0x5c, 0x60, 0xc0, 0x9c, 0xf3,
       0x15, 0x7c, 0x4a, 0x7f, 0xb9, 0x79, 0x37, 0x9e]) ≠ gf128MdsAPolyBits := by
+  rw [gf128MdsAPolyBits_eq]
   decide +kernel
 
 set_option maxRecDepth 4096 in
@@ -251,7 +266,7 @@ theorem tooth_swapped_mds_constants_change_round :
         (let x7 := rustPow7 st.1
          let y7 := rustPow7 st.2
          (x7 ^^^ rustGf128Mul y7 gf128MdsBPolyBits, y7 ^^^ rustGf128Mul x7 gf128MdsAPolyBits)) :=
-  ⟨(1#128, 0#128), by decide +kernel⟩
+  ⟨(1#128, 0#128), rustSpnRound_swapped_mds_ne⟩
 
 set_option maxRecDepth 4096 in
 /-- Negative control: with tower constants read as raw `packTower` words instead of their
@@ -265,14 +280,14 @@ theorem tooth_untranslated_tower_constant_breaks_round :
       (gf128MdsAPolyBits, 1#128) := by
   have hEq : psiTower128Pair (spnRound128 gf128MdsATower gf128MdsBTower
         (towerZero 7, towerZero 7) (towerZero 7, towerOne 7)) = (gf128MdsAPolyBits, 1#128) := by
-    rw [psiTower128Pair_spnRound128]
+    rw [psiTower128Pair_spnRound128, psiTower128Pair_eq, psiTower128Pair_eq]
     show rustSpnRound (psiTower128ToPoly (towerZero 7), psiTower128ToPoly (towerZero 7))
       (psiTower128ToPoly (towerZero 7), psiTower128ToPoly (towerOne 7)) = _
     rw [psiTower128ToPoly_zero, psiTower128ToPoly_one]
-    decide +kernel
+    exact rustSpnRound_zero_one_kat.1
   refine ⟨?_, hEq⟩
   rw [hEq]
-  decide +kernel
+  exact rustSpnRound_zero_one_kat.2
 
 
 /-- **Invertibility is not collision or preimage resistance.** Xor with a constant is a
@@ -282,12 +297,12 @@ theorem tooth_untranslated_tower_constant_breaks_round :
 theorem tooth_xor_constant_permutation_davies_meyer_collapses (c : Tower128 × Tower128) :
     IsBijective (fun x => pairXor x c) ∧ ∀ x, pairXor (pairXor x c) x = c := by
   have hInv : ∀ x, pairXor (pairXor x c) c = x := fun x => by
-    unfold pairXor
+    rw [pairXor_eq, pairXor_eq]
     apply Prod.ext <;> simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
   refine ⟨⟨fun a b h => ?_, fun b => ⟨pairXor b c, hInv b⟩⟩, fun x => ?_⟩
   · have h2 := congrArg (fun z => pairXor z c) h
     simpa only [hInv] using h2
-  · unfold pairXor
+  · rw [pairXor_eq, pairXor_eq]
     apply Prod.ext
     · show towerAdd 7 (towerAdd 7 x.1 c.1) x.1 = c.1
       rw [towerAdd_comm 7 x.1 c.1, towerAdd_assoc, towerAdd_comm 7 x.1 x.1, towerAdd_self_zero,
@@ -307,7 +322,8 @@ def boolWalsh : WalshSpace Bool where
   complete := fun x => by cases x <;> decide
   dot_symm := fun a b => by cases a <;> cases b <;> rfl
   dot_add := fun u a b => by cases u <;> cases a <;> cases b <;> rfl
-  orth := fun y y' => by cases y <;> cases y' <;> rfl
+  orth := fun y y' => by
+    cases y <;> cases y' <;> simp only [isum_cons, isum_nil, wsgn_eq] <;> decide
 
 /-- Two rounds over `Bool`: the identity, then the constant map. With output and input mask
     `true`, the trail through the intermediate mask `false` contributes `2 · 2 = 4`, the trail
@@ -319,6 +335,8 @@ theorem tooth_walsh_single_trail_is_not_the_hull :
     walsh boolWalsh (fun x => !x) true true * walsh boolWalsh (fun x => x) true true = -4 ∧
     walsh boolWalsh (fun x => x) true true * walsh boolWalsh (fun x => x) true true = 4 ∧
     walshTrailSum boolWalsh [fun x => x, fun _ => true] true true = 0 := by
+  simp only [walshTrailSum_cons, walshTrailSum_nil, walsh_eq, boolWalsh, isum_cons, isum_nil,
+    wsgn_eq]
   decide
 
 #verify_constructive tooth_big_endian_lane_framing_differs
@@ -357,9 +375,18 @@ theorem rustSpnIter_add (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
       rustSpnIter rcs (m + n) st = rustSpnIterFrom rcs m n (rustSpnIter rcs m st)
   | 0, _ => rfl
   | n + 1, st => by
-    show rustSpnRound (rcs (m + n)) (rustSpnIter rcs (m + n) st) =
+    show rustSpnIter rcs (m + n + 1) st =
       rustSpnRound (rcs (m + n)) (rustSpnIterFrom rcs m n (rustSpnIter rcs m st))
-    rw [rustSpnIter_add rcs m n st]
+    rw [rustSpnIter_succ, rustSpnIter_add rcs m n st]
+
+/-- A segment of the loop is the loop over the shifted round-constant schedule. -/
+theorem rustSpnIterFrom_eq_shift (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
+    ∀ (n : Nat) (st : BitVec 128 × BitVec 128),
+      rustSpnIterFrom rcs m n st = rustSpnIter (fun r => rcs (m + r)) n st
+  | 0, st => (rustSpnIter_zero _ st).symm
+  | n + 1, st => by
+    show rustSpnRound (rcs (m + n)) (rustSpnIterFrom rcs m n st) = _
+    rw [rustSpnIter_succ, rustSpnIterFrom_eq_shift rcs m n st]
 
 /-- `pk_seed = 00 01 … 1f`. -/
 def chainStepKatPkSeed : List UInt8 :=
@@ -529,16 +556,24 @@ def chainStepKatState : Nat → BitVec 128 × BitVec 128
 set_option maxRecDepth 8192 in
 theorem chainStepKat_tweak :
     rustDeriveChainTweak spnCshake256FramedXof chainStepKatPkSeed 7 3 2 = chainStepKatTweak := by
+  have hXof : spnCshake256FramedXof spnChainTweakCustomization
+      [chainStepKatPkSeed, be 4 7, be 2 3, [2]] 32 = _ := by
+    rw [spnChainTweakCustomization_eq]
+    exact cshake256_chain_tweak_kat
+  rw [rustDeriveChainTweak_eq, hXof, rustBytes32ToLanes_eq]
   decide +kernel
 
 theorem chainStepKat_lanes : rustBytes32ToLanes chainStepKatCur = chainStepKatState 0 := by
+  rw [rustBytes32ToLanes_eq]
   decide +kernel
 
 set_option maxRecDepth 65536 in
 /-- The Lean cSHAKE256 model reproduces the whole Rust round-constant stream. -/
 theorem chainStepKat_stream :
     rustSpnRoundConstantStream spnCshake256FramedXof chainStepKatTweak = chainStepKatRustStream := by
-  decide +kernel
+  rw [rustSpnRoundConstantStream_eq, rustU128ToLeBytes_eq, rustU128ToLeBytes_eq,
+    spnPow7RoundsCustomization_eq]
+  exact cshake256_pow7_round_stream_kat
 
 /-- Round constants read from the Rust stream. -/
 def chainStepKatRcs (round : Nat) : BitVec 128 × BitVec 128 :=
@@ -547,44 +582,60 @@ def chainStepKatRcs (round : Nat) : BitVec 128 × BitVec 128 :=
 theorem chainStepKat_rcs :
     rustSpnRoundConstants spnCshake256FramedXof chainStepKatTweak = chainStepKatRcs := by
   funext round
-  unfold rustSpnRoundConstants chainStepKatRcs
-  rw [chainStepKat_stream]
+  unfold chainStepKatRcs
+  rw [rustSpnRoundConstants_eq_stream, chainStepKat_stream]
+
+/-- The six eight-round segments, from the kernel-evaluated field arithmetic of
+    `rustSpnIter_chain_kat`; the hypothesis discharged here is that the 48 chunks of the Rust
+    stream decode to its round-constant lanes. -/
+theorem chainStepKat_segments :=
+  rustSpnIter_chain_kat _ rfl chainStepKatRustStream (by
+    intro r hr
+    rw [rustBytes32ToLanes_eq]
+    revert r
+    decide +kernel)
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_0_8 :
     rustSpnIterFrom chainStepKatRcs 0 8
       (chainStepKatState 0) = chainStepKatState 1 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.1
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_8_16 :
     rustSpnIterFrom chainStepKatRcs 8 8
       (chainStepKatState 1) = chainStepKatState 2 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.2.1
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_16_24 :
     rustSpnIterFrom chainStepKatRcs 16 8
       (chainStepKatState 2) = chainStepKatState 3 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.2.2.1
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_24_32 :
     rustSpnIterFrom chainStepKatRcs 24 8
       (chainStepKatState 3) = chainStepKatState 4 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.2.2.2.1
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_32_40 :
     rustSpnIterFrom chainStepKatRcs 32 8
       (chainStepKatState 4) = chainStepKatState 5 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.2.2.2.2.1
 
 set_option maxRecDepth 8192 in
 theorem chainStepKat_rounds_40_48 :
     rustSpnIterFrom chainStepKatRcs 40 8
       (chainStepKatState 5) = chainStepKatState 6 := by
-  decide +kernel
+  rw [rustSpnIterFrom_eq_shift]
+  exact chainStepKat_segments.2.2.2.2.2
 
 theorem chainStepKat_rounds_0_48 :
     rustSpnIter chainStepKatRcs spnRounds
@@ -595,7 +646,7 @@ theorem chainStepKat_rounds_0_48 :
       rustSpnIter rcs (m + 8) (chainStepKatState 0) = chainStepKatState (k + 1) :=
     fun m k hPrev hChunk =>
       (rustSpnIter_add rcs m 8 _).trans ((congrArg (rustSpnIterFrom rcs m 8) hPrev).trans hChunk)
-  have h8 := step 0 0 rfl chainStepKat_rounds_0_8
+  have h8 := step 0 0 (rustSpnIter_zero _ _) chainStepKat_rounds_0_8
   have h16 := step 8 1 h8 chainStepKat_rounds_8_16
   have h24 := step 16 2 h16 chainStepKat_rounds_16_24
   have h32 := step 24 3 h24 chainStepKat_rounds_24_32
@@ -611,13 +662,9 @@ theorem rust_parallel_chain_step_executed_kat :
   have hStep : rustAlgebraicStep chainStepKatRcs (chainStepKatState 0) =
       ((chainStepKatState 6).1 ^^^ (chainStepKatState 0).1,
        (chainStepKatState 6).2 ^^^ (chainStepKatState 0).2) := by
-    show ((rustSpnIter chainStepKatRcs spnRounds (chainStepKatState 0)).1 ^^^
-          (chainStepKatState 0).1,
-        (rustSpnIter chainStepKatRcs spnRounds (chainStepKatState 0)).2 ^^^
-          (chainStepKatState 0).2) = _
-    rw [chainStepKat_rounds_0_48]
-  unfold rustParallelChainStep
-  rw [chainStepKat_tweak, chainStepKat_rcs, chainStepKat_lanes, hStep]
+    rw [rustAlgebraicStep_eq, chainStepKat_rounds_0_48]
+  rw [rustParallelChainStep_eq, chainStepKat_tweak, chainStepKat_rcs, chainStepKat_lanes, hStep,
+    rustLanesToBytes32_eq]
   decide +kernel
 
 

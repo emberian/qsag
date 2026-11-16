@@ -2403,5 +2403,5 @@ set_option maxRecDepth 4096
 public section
 namespace Qsag
 #export_eqns Custody.acceptQuorum Custody.verifyCertificate
-#export_eqns Custody.custodianIdentity Custody.checkRound Custody.roundCommitment
+#export_eqns Custody.custodianIdentity
 end Qsag

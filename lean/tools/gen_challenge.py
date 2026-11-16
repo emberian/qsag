@@ -41,7 +41,7 @@ IMPORTS = [
     'Qsag.Protocol.Threshold.ThresholdMpc',
     'Qsag.Protocol.Aggregation.Aggregation',
     'Qsag.Machine.ElfParse',
-    'Qsag.Machine.ElfBinaryVerify',
+    'Qsag.Machine.ElfVerify',
     'Qsag.Machine.ElfFixtureVerify',
     'Qsag.Machine.McRefine',
     'Qsag.Exec.InteractiveUcEngine',

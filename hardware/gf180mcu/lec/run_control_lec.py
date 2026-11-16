@@ -5,6 +5,8 @@ Does not claim resistance to faults in the detector itself or >=4 flips.
 """
 import re
 import sys
+import os
+os.environ["LEC_BUILD"] = "build/lec_control"
 sys.argv = [sys.argv[0], 'control', '75']
 import run_lec as l
 

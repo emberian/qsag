@@ -575,3 +575,25 @@ theorem qsag_tags_sponge_domains_disjoint (m₁ m₂ : List UInt8) :
   qsag_tags_sponge_encodings_ne m₁ m₂
 end Qsag
 end
+
+/-! ### Exports for lane oracle -/
+
+public section
+namespace Qsag
+
+theorem domShake256_eq : domShake256 = 0x1F := by rfl
+theorem domCshake256_eq : domCshake256 = 0x04 := by rfl
+
+theorem qsagTagCanopyLeaf_eq :
+    qsagTagCanopyLeaf =
+      [81, 83, 65, 71, 46, 87, 72, 73, 82, 46, 67, 65, 78, 79, 80, 89, 46, 76, 69, 65, 70, 47, 118, 49] := by
+  rfl
+
+#verify_constructive pad10star1_joint_injective pad10star1_injective
+  absorbPayload_cross_domain_encodings_ne evalSponge_keccak_eq_shake256Xof
+  cshakePrefix_prefix_free cshakePrefix_injective cshake256_encodings_ne
+  cshake_precomputed_midstate_eq keccak_cshake256_precomputed_midstate_eq
+  cshakePrefix_single_block_length
+
+end Qsag
+end

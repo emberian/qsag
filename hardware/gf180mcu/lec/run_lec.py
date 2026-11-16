@@ -43,7 +43,7 @@ import sys
 
 what = sys.argv[1] if len(sys.argv) > 1 else "all"
 TO = int(sys.argv[2]) if len(sys.argv) > 2 else 120
-B = "build/lec"
+B = os.environ.get("LEC_BUILD", "build/lec")
 os.makedirs(B, exist_ok=True)
 GL = "rtl/qsag_gl64_karatsuba_csa.sv"
 GF = "rtl/qsag_gf128_clmul.sv"

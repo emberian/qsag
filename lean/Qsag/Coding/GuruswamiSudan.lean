@@ -1170,3 +1170,20 @@ variable {F : Type} [LawfulField F] [DecidableEq F]
 theorem liftK_apply (q : Poly3 F) : (liftK (F := F)).toFun q = (mapHom (mapHom Frac.of)).toFun q := by unfold liftK; rfl
 theorem lineSpec_apply (Q : Poly3 F) (α β : F) : lineSpec Q α β = (mapHom (evalHom (line α β))).toFun Q := by unfold lineSpec; rfl
 end Qsag.Poly3
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.Poly3.exists_trivariate_affine_explainer
+#verify_constructive Qsag.Poly3.explainer_spec
+#verify_constructive Qsag.Poly3.explainer_vanishes
+#verify_constructive Qsag.Poly3.evalAffineLine_eq_zero_of_agree
+#verify_constructive Qsag.Poly3.excluded_pairs_card_le
+#verify_constructive Qsag.Poly3.simple_root_of_not_excluded
+#verify_constructive Qsag.Poly3.sepElim_ne_zero
+#verify_constructive Qsag.Poly3.natDeg_sepElim_le
+#verify_constructive Qsag.Poly3.simple_root_of_hasse
+#verify_constructive Qsag.Poly3.exists_multiplicity
+#verify_constructive Qsag.Poly3.lineSpec_zero_card_le
+
+end

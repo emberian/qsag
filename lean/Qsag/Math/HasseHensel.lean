@@ -3028,3 +3028,32 @@ theorem ptHom_apply (x y z : F) (q : Poly3 F) : (ptHom x y z).toFun q = UPoly.ev
 theorem evalAffineLine_zero (α β : F) (p : UPoly F) : evalAffineLine zero α β p = zero := (affineLineHom α β p).map_zero
 end Poly3
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.Poly3.deg_evalAffineLine_le
+#verify_constructive Qsag.UPoly.coeffAt_taylorShift
+#verify_constructive Qsag.UPoly.eval_taylorShift
+#verify_constructive Qsag.UPoly.eval_hasse
+#verify_constructive Qsag.Poly3.jet_cover
+#verify_constructive Qsag.Poly3.jet_hyps
+#verify_constructive Qsag.UPoly.mapHom_hasse
+#verify_constructive Qsag.Poly3.henselNum_spec
+#verify_constructive Qsag.Poly3.deg_henselNum_le
+#verify_constructive Qsag.Poly3.reconCoeff_spec
+#verify_constructive Qsag.Poly3.deg_reconCoeff_le
+#verify_constructive Qsag.UPoly.trunc_cancel
+#verify_constructive Qsag.UPoly.hensel_unique
+#verify_constructive Qsag.UPoly.taylorShift_neg_cancel
+#verify_constructive Qsag.Poly3.root_unique_of_jet
+#verify_constructive Qsag.Poly3.inPow_affine_of_cons
+#verify_constructive Qsag.Poly3.unshift_shift
+#verify_constructive Qsag.Hensel.num_spec
+#verify_constructive Qsag.Hensel.delta_num_le
+#verify_constructive Qsag.Hensel.phi_contract
+#verify_constructive Qsag.Hensel.evG_eq
+#verify_constructive Qsag.Hensel.map_num
+#verify_constructive Qsag.UPoly.hasse_one_hasse
+
+end

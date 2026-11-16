@@ -1,13 +1,13 @@
-// QSAG-NI-180 technology cell wrappers.
+// Dregg-180 (QSAG-NI-180) technology cell wrappers for gf180mcu_fd_sc_mcu7t5v0.
 //
-// Every place where the design depends on a specific gate (clock gates, clock muxes, delay
-// stages, C-elements, synchronizers) goes through one of these modules. Two views:
+// Every place where the design depends on a specific physical gate (clock gates, clock muxes,
+// delay stages, C-elements, synchronizers, Vernier TDC taps, rapid-bit responder mux, shield
+// buffers) goes through one of these modules.
 //   * default            behavioural, simulated by Verilator (delays under QSAG_SIM_DELAYS);
 //   * QSAG_GF180_CELLS   direct gf180mcu_fd_sc_mcu7t5v0 instances, kept through synthesis.
 `default_nettype none
 `timescale 1ps / 1ps
 /* verilator lint_off UNUSEDPARAM */
-// the timed views below are simulation delay models, not synthesizable RTL
 /* verilator lint_off SYNCASYNCNET */
 /* verilator lint_off ZERODLY */
 
@@ -30,15 +30,32 @@ module qsag_clkgate (
 `endif
 endmodule
 
+module qsag_clkgate_1 (
+    input  wire clk,
+    input  wire en,
+    output wire gclk
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_1 u_icg (.CLK(clk), .E(en), .TE(1'b0), .Q(gclk));
+`else
+    logic lat;
+    /* verilator lint_off LATCH */
+    /* verilator lint_off COMBDLY */
+    always_latch if (!clk) lat <= en;
+    /* verilator lint_on COMBDLY */
+    /* verilator lint_on LATCH */
+    assign gclk = clk & lat;
+`endif
+endmodule
+
 // Enable register with asynchronous active-low clear (secret-bearing state).
-// QSAG_ICG: one clock gate per register word instead of a recirculating mux per bit.
 module qsag_ereg #(
     parameter int W = 64
 ) (
-    input  wire         clk,
-    input  wire         rst_n,
-    input  wire         en,
-    input  wire [W-1:0] d,
+    input  wire          clk,
+    input  wire          rst_n,
+    input  wire          en,
+    input  wire  [W-1:0] d,
     output logic [W-1:0] q
 );
 `ifdef QSAG_ICG
@@ -54,13 +71,13 @@ module qsag_ereg #(
 `endif
 endmodule
 
-// Enable register without reset (public datapath state).
+// Enable register without reset (public / wiped datapath state).
 module qsag_ereg_nr #(
     parameter int W = 64
 ) (
-    input  wire         clk,
-    input  wire         en,
-    input  wire [W-1:0] d,
+    input  wire          clk,
+    input  wire          en,
+    input  wire  [W-1:0] d,
     output logic [W-1:0] q
 );
 `ifdef QSAG_ICG
@@ -72,20 +89,25 @@ module qsag_ereg_nr #(
 `endif
 endmodule
 
-// Level-sensitive bank element; its gate is a gated inverted core clock.
-// Only use with a shared edge-captured write-data/address port (qsag_sponge).
+// Level-sensitive transparent latch word (gf180mcu_fd_sc_mcu7t5v0__latq_1).
+// Used with posedge-captured write data + icgtp_1 high-phase clock gate so reads see a full
+// clock cycle and no combinational loop exists across read/write ports.
 module qsag_latch_word #(parameter int W = 64) (
-    input wire gate,
-    input wire [W-1:0] d,
+    input  wire         gate,
+    input  wire [W-1:0] d,
     output wire [W-1:0] q
 );
 `ifdef QSAG_GF180_CELLS
     for (genvar i = 0; i < W; i++) begin : g_bit
-        gf180mcu_fd_sc_mcu7t5v0__latq_1 u_l (.D(d[i]), .E(gate), .Q(q[i]));
+        (* keep *) gf180mcu_fd_sc_mcu7t5v0__latq_1 u_l (.D(d[i]), .E(gate), .Q(q[i]));
     end
 `else
     logic [W-1:0] qr;
-    always_latch if (gate) qr = d;
+    /* verilator lint_off LATCH */
+    /* verilator lint_off COMBDLY */
+    always_latch if (gate) qr <= d;
+    /* verilator lint_on COMBDLY */
+    /* verilator lint_on LATCH */
     assign q = qr;
 `endif
 endmodule
@@ -121,8 +143,7 @@ module qsag_rst_sync (
     qsag_sync2 #(.RV(1'b0)) u_s (.clk(clk), .rst_n(arst_n), .d(1'b1), .q(rst_n));
 endmodule
 
-// Static (strap-selected) clock multiplexer. The select must only change while both clocks
-// are low or the downstream domain is in reset.
+// Static (strap-selected) clock multiplexer.
 module qsag_clkmux2 (
     input  wire a,
     input  wire b,
@@ -131,6 +152,27 @@ module qsag_clkmux2 (
 );
 `ifdef QSAG_GF180_CELLS
     (* keep *) gf180mcu_fd_sc_mcu7t5v0__mux2_2 u_mux (.I0(a), .I1(b), .S(sel), .Z(y));
+`else
+    assign y = sel ? b : a;
+`endif
+endmodule
+
+// High-drive single-gate 2:1 mux for < 6 ns Brands-Chaum pad-to-pad turnaround.
+module qsag_fast_mux2 #(
+    parameter int TD = 240
+) (
+    input  wire a,
+    input  wire b,
+    input  wire sel,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__mux2_4 u_fast_mux (.I0(a), .I1(b), .S(sel), .Z(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) (sel ? b : a);
+    always @(a or b or sel) yr <= #(TD) (sel ? b : a);
+    assign y = yr;
 `else
     assign y = sel ? b : a;
 `endif
@@ -171,7 +213,6 @@ module qsag_clkor2 (
 `endif
 endmodule
 
-// Inverting delay stage with enable: y = ~(a & en). TD is the simulated propagation delay.
 module qsag_dly_nand #(
     parameter int TD = 180
 ) (
@@ -183,7 +224,7 @@ module qsag_dly_nand #(
     (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1 u_nand (.A1(a), .A2(en), .ZN(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
-    initial yr = #(TD) ~(a & en);   // settle from the initial input values
+    initial yr = #(TD) ~(a & en);
     always @(a or en) yr <= #(TD) ~(a & en);
     assign y = yr;
 `else
@@ -191,7 +232,6 @@ module qsag_dly_nand #(
 `endif
 endmodule
 
-// Non-inverting delay stage (two-gate buffer).
 module qsag_dly_buf #(
     parameter int TD = 400
 ) (
@@ -210,7 +250,44 @@ module qsag_dly_buf #(
 `endif
 endmodule
 
-// Delay-line multiplexer stage.
+// Fast Vernier stop-line stage (~220 ps vs ~450 ps dlya_1 -> ~230 ps differential Vernier step).
+module qsag_vernier_fast #(
+    parameter int TD = 220
+) (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__buf_2 u_vf (.I(a), .Z(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) a;
+    always @(a) yr <= #(TD) a;
+    assign y = yr;
+`else
+    assign y = a;
+`endif
+endmodule
+
+// Active Metal5 serpentine shield spine buffer.
+module qsag_shield_buf #(
+    parameter int TD = 200
+) (
+    input  wire a,
+    output wire y
+);
+`ifdef QSAG_GF180_CELLS
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__buf_4 u_sh (.I(a), .Z(y));
+`elsif QSAG_SIM_DELAYS
+    logic yr;
+    initial yr = #(TD) a;
+    always @(a) yr <= #(TD) a;
+    assign y = yr;
+`else
+    assign y = a;
+`endif
+endmodule
+
 module qsag_dly_mux2 #(
     parameter int TD = 220
 ) (
@@ -231,7 +308,6 @@ module qsag_dly_mux2 #(
 `endif
 endmodule
 
-// Small non-inverting delay (fine DCRO step): one plain buffer.
 module qsag_dly_fine #(
     parameter int TD = 130
 ) (
@@ -250,8 +326,6 @@ module qsag_dly_fine #(
 `endif
 endmodule
 
-// Flip-flop with asynchronous active-low set and reset (reset wins), for clock-select state
-// that must come out of reset already matching a strap.
 module qsag_dffsr (
     input  wire clk,
     input  wire rn,
@@ -265,9 +339,6 @@ module qsag_dffsr (
         else q <= d;
 endmodule
 
-// Enable NAND of a ring oscillator. Identical to qsag_dly_nand in silicon and in the timed
-// simulation; in the zero-delay functional view the ring is held (an oscillator has no
-// zero-delay model), so the DCRO and the TRNG rings need QSAG_SIM_DELAYS to run.
 module qsag_osc_nand #(
     parameter int TD = 180
 ) (
@@ -279,7 +350,7 @@ module qsag_osc_nand #(
     (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1 u_nand (.A1(a), .A2(en), .ZN(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
-    initial yr = #(TD) ~(a & en);   // settle from the initial input values
+    initial yr = #(TD) ~(a & en);
     always @(a or en) yr <= #(TD) ~(a & en);
     assign y = yr;
 `else
@@ -288,7 +359,6 @@ module qsag_osc_nand #(
 `endif
 endmodule
 
-// Clock buffer marking the root of a derived clock (a stable pin name for the constraints).
 module qsag_clkbuf (
     input  wire a,
     output wire y
@@ -300,9 +370,6 @@ module qsag_clkbuf (
 `endif
 endmodule
 
-// Set/reset latch with active-low inputs (reset wins; the two are never low together here).
-// In silicon it is a set/reset flip-flop with its clock and data tied off, so that it works
-// with no clock at all.
 module qsag_srlatch (
     input  wire rn,
     input  wire sn,
@@ -319,8 +386,6 @@ module qsag_srlatch (
 `endif
 endmodule
 
-// Inverting delay stage: a NAND2 with its inputs tied together, so that it matches the gated
-// stages of a ring or replica chain without needing a constant on the second pin.
 module qsag_dly_inv #(
     parameter int TD = 180
 ) (

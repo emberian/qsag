@@ -267,6 +267,7 @@ theorem tooth_compact_fanout_strips_codeword_restriction :
     c.foldl (· + ·) 0 = 3 ∧ ¬ Reachable a c ∧ ¬ Reachable b c ∧
     Reachable [0, 0, 1] c := by
   dsimp
+  rw [Reachable.public_eq_1, Reachable.public_eq_1, Reachable.public_eq_1]
   refine ⟨rfl, rfl, rfl, ?_, ?_, rfl, ?_⟩
   · intro h; have h1 := h.2 1; simp at h1
   · intro h; have h0 := h.2 0; simp at h0
@@ -296,13 +297,19 @@ theorem tooth_threshold_coupon_partition :
   simp
 
 theorem tooth_live_ram_clone_releases_twice :
-    (consume true true 0).2 = some 0 ∧ (consume true true 1).2 = some 1 := by decide
+    (consume true true 0).2 = some 0 ∧ (consume true true 1).2 = some 1 := by
+  rw [consume.public_eq_1, consume.public_eq_1]
+  decide
 
 theorem tooth_no_request_authentication_depletes_pool :
-    (consume true true 0).1 = false ∧ (consume true false 0).1 = true := by decide
+    (consume true true 0).1 = false ∧ (consume true false 0).1 = true := by
+  rw [consume.public_eq_1, consume.public_eq_1]
+  decide
 
 theorem tooth_public_coin_adaptive_grinding_bias :
-    ([false, true].filter (fun coin => coinWins (!coin) coin)).length = 2 := by decide
+    ([false, true].filter (fun coin => coinWins (!coin) coin)).length = 2 := by
+  simp only [coinWins.public_eq_1]
+  decide
 
 /-! ### Request authentication -/
 
@@ -320,7 +327,7 @@ theorem inhabited_request_binding :
     ∃ (commit : Request → Nat) (mac : Nat → Nat) (committed received : Request),
       RequestAuthenticated commit mac committed received ∧ Collides mac :=
   ⟨fun r => r.counter, fun _ : Nat => 0, demoCommitted, demoReceived,
-    ⟨rfl⟩, ⟨0, 1, by decide, rfl⟩⟩
+    ⟨rfl⟩, by rw [Collides.public_eq_1]; exact ⟨0, 1, by decide, rfl⟩⟩
 
 /-- Without the equal-tag premise nothing is bound: with injective commitment and tag functions
 two different requests satisfy none of the three alternatives. -/
@@ -329,8 +336,12 @@ theorem tooth_unequal_tags_bind_nothing :
       ¬ (received = committed ∨ Collides (fun r : Request => r) ∨
         Collides (fun r : Request => r)) :=
   ⟨demoCommitted, demoReceived, fun h =>
-    h.elim (fun he => absurd he (by decide))
-      (fun h => h.elim (fun ⟨_, _, hne, he⟩ => hne he) (fun ⟨_, _, hne, he⟩ => hne he))⟩
+    have hinj : ¬ Collides (fun r : Request => r) := fun hc => by
+      rw [Collides.public_eq_1] at hc
+      obtain ⟨_, _, hne, he⟩ := hc
+      exact hne he
+    h.elim (fun he => absurd (congrArg Request.counter he) (by decide))
+      (fun h => h.elim hinj hinj)⟩
 
 #verify_inhabited authenticated_request_binding_audited inhabited_request_binding
 #tooth_pair authenticated_request_binding_audited vs tooth_unequal_tags_bind_nothing
@@ -352,11 +363,13 @@ theorem capability_release_authorized_audited [DecidableEq B] [DecidableEq T] (S
 
 theorem demo_registry : ∀ d ∈ [(⟨demoBound, 6⟩ : Discharge Nat DemoTag)],
     d.rootKey = demoDeployment.registry d.token.identifier :=
-  fun d hd => by rw [List.mem_singleton.mp hd]; rfl
+  fun d hd => by rw [List.mem_singleton.mp hd]; exact (demo_registry_const _).symm
 
 theorem demo_parent_releases :
     (consumeUnderCapability demoSuite demoDeployment demoParent demoRequest [⟨demoBound, 6⟩]
-      true (7 : Nat)).2 = some 7 := by decide
+      true (7 : Nat)).2 = some 7 := by
+  rw [consumeUnderCapability.public_eq_1, demo_parent_verifier_accepted, consume.public_eq_1]
+  decide
 
 theorem inhabited_capability_release :
     ∃ (S : MacSuite Nat DemoTag) (dep : Deployment Nat) (tok : Token Nat DemoTag)
@@ -372,7 +385,7 @@ deployment does not grant the request. -/
 theorem tooth_ungated_slot_releases_unauthorized :
     ∃ tok : Token Nat DemoTag, (consume true true (7 : Nat)).2 = some 7 ∧
       ¬ Authorized demoSuite tok demoDeployment demoRequest :=
-  ⟨demoExpired, by decide, demo_expired_not_authorized⟩
+  ⟨demoExpired, by rw [consume.public_eq_1]; decide, demo_expired_not_authorized⟩
 
 #verify_inhabited capability_release_authorized_audited inhabited_capability_release
 #tooth_pair capability_release_authorized_audited vs tooth_ungated_slot_releases_unauthorized
@@ -406,7 +419,11 @@ theorem tooth_attenuated_capability_release_strict :
         (false, some 7) ∧
       (consumeUnderCapability demoSuite demoDeployment tok' demoRequest [] true (7 : Nat)).2 =
         none :=
-  ⟨demoScoped, demoExpired, demo_attenuate_expiry, by decide, by decide⟩
+  ⟨demoScoped, demoExpired, demo_attenuate_expiry,
+    by rw [consumeUnderCapability.public_eq_1, demo_scoped_verifier_accepted, consume.public_eq_1]
+       decide,
+    by rw [consumeUnderCapability.public_eq_1, demo_expired_verifier_rejected, consume.public_eq_1]
+       decide⟩
 
 #verify_inhabited attenuated_capability_release_narrows_audited inhabited_attenuated_release
 #tooth_pair attenuated_capability_release_narrows_audited vs tooth_attenuated_capability_release_strict
@@ -426,7 +443,8 @@ theorem inhabited_failed_caveat :
       attenuate S tok c = .ok tok' ∧ Genuine S dep tok ∧ c.isThirdParty = false ∧
       c.holds r = false ∧ (∀ d ∈ ds, d.rootKey = dep.registry d.token.identifier) :=
   ⟨demoSuite, demoDeployment, demoScoped, demoExpired, .expiresAt 5#64, demoRequest, [],
-    demo_attenuate_expiry, demo_scoped_genuine, rfl, by decide, fun _ hd => nomatch hd⟩
+    demo_attenuate_expiry, demo_scoped_genuine, demo_expiry_caveat_firstParty,
+    demo_expiry_caveat_fails, fun _ hd => nomatch hd⟩
 
 def demoNotBefore : Token Nat DemoTag :=
   ⟨false, 4, 2, [.resource 3, .notBefore 1#64], ⟨1, false, 4, 2, [.resource 3, .notBefore 1#64]⟩⟩
@@ -437,7 +455,10 @@ theorem tooth_satisfied_caveat_does_not_block :
       attenuate demoSuite demoScoped (.notBefore 1#64) = .ok tok' ∧
       ¬ ((consumeUnderCapability demoSuite demoDeployment tok' demoRequest [] true (7 : Nat)).2 =
         none) :=
-  ⟨demoNotBefore, rfl, by decide⟩
+  ⟨demoNotBefore, demo_attenuate_notBefore, by
+    unfold demoNotBefore
+    rw [consumeUnderCapability.public_eq_1, demo_notBefore_verifier_accepted, consume.public_eq_1]
+    decide⟩
 
 #verify_inhabited failed_caveat_blocks_capability_release_audited inhabited_failed_caveat
 #tooth_pair failed_caveat_blocks_capability_release_audited vs tooth_satisfied_caveat_does_not_block
@@ -456,7 +477,9 @@ theorem capability_release_discharge_not_transplantable_audited [DecidableEq B] 
 same third-party caveat. -/
 theorem tooth_transplanted_discharge_releases_nothing :
     (consumeUnderCapability demoSuite demoDeployment demoSibling demoRequest [⟨demoBound, 6⟩]
-      true (7 : Nat)).2 = none := by decide
+      true (7 : Nat)).2 = none := by
+  rw [consumeUnderCapability.public_eq_1, demo_transplant_verifier_rejected, consume.public_eq_1]
+  decide
 
 theorem tooth_transplanted_discharge_cannot_release :
     (consumeUnderCapability demoSuite demoDeployment demoSibling demoRequest [⟨demoBound, 6⟩]

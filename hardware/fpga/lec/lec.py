@@ -16,6 +16,7 @@ P = 2**64 - 2**32 + 1
 Z3_SECS = int(os.environ.get("LEC_SECS", "150"))
 TRY_SECS = int(os.environ.get("LEC_TRY_SECS", "60"))
 results = []
+CONTRACTS_READY = False
 
 def sh(cmd):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -27,7 +28,10 @@ def sh(cmd):
 def yosys_smt2(name, top, files, chparam=""):
     """SMT-LIB2 of `top` as module lec_top; returns the text."""
     out = os.path.join(OUT, name + ".yosys.smt2")
-    srcs = " ".join([os.path.join(ROOT, "rtl", n) for n in ("qsag_add_split.sv", "qsag_sum_csa.sv")] + files)
+    helpers = [os.path.join(ROOT, "rtl", n) for n in ("qsag_add_split.sv", "qsag_sum_csa.sv")]
+    if CONTRACTS_READY and top in ("qsag_mul64_dsp", "qsag_gl64_dsp_mul"):
+        helpers = [os.path.join(OUT, "proved_adder_contracts.sv")]
+    srcs = " ".join(helpers + files)
     sh(f'yosys -q -p "read_verilog -sv {srcs}; hierarchy -top {top} {chparam}; proc; flatten; '
        f'opt_clean; rename -top lec_top; write_smt2 -wires {out}"')
     return open(out).read()
@@ -264,14 +268,83 @@ def check_kara_small(tag, w, expect, required=True, secs=None):
                   ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
                   f"(assert (not (= {acc('p', 's0')} {e})))\n(check-sat)\n", required=required, secs=secs)
 
+def check_adder_contracts():
+    """Discharge every helper instance used by BOTH multiplier tilings before
+    replacing its body with its proven arithmetic contract. Fail closed."""
+    global CONTRACTS_READY
+    CONTRACTS_READY = False
+    for top, w, n in [("qsag_add_split", 95, 2), ("qsag_add_split", 80, 2),
+                      ("qsag_sum_csa", 128, 4)]:
+        ys = yosys_smt2(f"contract_{top}_{w}", top, [], f"-chparam W {w}" +
+                       (f" -chparam N {n}" if top.endswith("csa") else ""))
+        if top.endswith("split"):
+            spec = f"(bvadd {acc('a','s0')} {acc('b','s0')})"
+        else:
+            spec = bv(0,w)
+            for i in range(n):
+                spec = f"(bvadd {spec} ((_ extract {(i+1)*w-1} {i*w}) {acc('x','s0')}))"
+        body = ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
+        if not record(f"contract_{top}_{w}", "universal equivalence of actual RTL helper to modular sum", "unsat",
+                      body + f"(assert (not (= {acc('y','s0')} {spec})))\n(check-sat)\n"):
+            raise SystemExit("refusing unproved helper abstraction")
+    open(os.path.join(OUT,"proved_adder_contracts.sv"),"w").write("""
+module qsag_add_split #(parameter W=128, CHUNK=32)(input [W-1:0] a,b,output [W-1:0] y);
+assign y=a+b;
+endmodule
+module qsag_sum_csa #(parameter W=128,N=4)(input [N*W-1:0] x,output reg [W-1:0] y);
+integer i;
+always @* begin y=0; for(i=0;i<N;i=i+1) y=y+x[i*W+:W]; end
+endmodule
+""")
+    CONTRACTS_READY = True
+
+def check_glue(aw,bw):
+    tag=f"glue_{aw}x{bw}"
+    ys=yosys_smt2(tag,"qsag_gl64_dsp_mul",[PKG,RED,MUL,GLM],f"-chparam AW {aw} -chparam BW {bw}")
+    spec,n,tw,hyps,_=tile_sum(aw,bw,acc("a","s0"),acc("b","s0"),"qtile")
+    ys=abstract_tiles(ys,n,tw)
+    # Establish the reducer contract at EXACTLY the product output cycle in the
+    # same six-cycle transition relation. There is no extra cutpoint assumption.
+    cut=reduce_spec(zext(acc("prod","s4"),128,136),acc("r","s6"))
+    ok=record(tag+"_temporal_join", "actual full pipeline: reducer consumes prod at cycle 4 and emits its canonical residue at cycle 6", "unsat",
+              ys+unroll(6)+f"(assert (not {cut}))\n(check-sat)\n")
+    if not ok: raise SystemExit("failed temporal join")
+    # Explicit application of the TWO already-proved universal contracts.
+    combined=reduce_spec(zext(spec,128,136),acc("r","s6"))
+    ok=record(tag+"_compose", "cycle-4 product contract and cycle-6 reducer contract entail the end-to-end residue contract", "unsat",
+              ys+unroll(6)+hyps+f"(assert (= {acc('prod','s4')} {spec}))\n(assert {cut})\n(assert (not {combined}))\n(check-sat)\n")
+    if not ok: raise SystemExit("failed composition")
+
+def check_remainder_glue():
+    # Integer interpretation of packed limbs and bounded bit-vector sums. Product
+    # contract + tiling identity supply X=a*b, reduction contract supplies V=r+kp.
+    decl="".join(f"(declare-const {n} Int)\n" for n in ["a","b","X","lo","m","h","r","k"])
+    v=f"(- (+ lo (* {2**32} m) {P}) m h)"
+    body=decl+f"""(assert (and (<= 0 a) (< a {2**64}) (<= 0 b) (< b {2**64})))
+(assert (= X (* a b)))
+(assert (= X (+ lo (* {2**64} m) (* {2**96} h))))
+(assert (and (<= 0 lo) (< lo {2**64}) (<= 0 m) (< m {2**32}) (<= 0 h) (< h {2**32})))
+(assert (= {v} (+ r (* k {P}))))
+(assert (and (<= 0 r) (< r {P}) (<= 0 k) (<= k 2)))
+(assert (not (= r (mod (* a b) {P}))))
+(check-sat)
+"""
+    if not record("glue_canonical_remainder", "all 2^128 operand pairs: tiled product and bounded reduction entail r=(a*b) mod p, uniquely", "unsat",body):
+        raise SystemExit("failed integer remainder join")
+
 def group_gl():
+    check_adder_contracts()
     check_reduce_algebra()
     check_reduce("gl64_reduce", [PKG, RED], "unsat")
     for aw, bw in ((26, 17), (16, 16)):
         check_tiling_identity(aw, bw)
-        check_glmul(f"gl64_dsp_mul_{aw}x{bw}", [PKG, RED, MUL, GLM], aw, bw)
+        if not check_glmul(f"gl64_dsp_mul_{aw}x{bw}", [PKG, RED, MUL, GLM], aw, bw):
+            raise SystemExit("refusing composition with failed premise")
+        check_glue(aw,bw)
+    check_remainder_glue()
 
 def group_glmut():
+    check_adder_contracts()
     # mutants: each must be refuted with a counterexample
     m1 = mutate(RED, "- {34'b0, h}", "+ {34'b0, h}", "mut_reduce_sign.sv")
     check_reduce("mut_gl64_reduce_sign", [PKG, m1], "sat")

@@ -48,7 +48,7 @@ def link(lib):
     lf,ge,period=LIBS[lib]; out=pathlib.Path('synth/astra')/lib
     script=f'read_liberty -lib {PDK+lf}\nread_verilog -sv rtl/sram_dp_blackbox.sv\n'
     script+='\n'.join('read_verilog '+str(out/(m+'.v')) for m in MACROS+['qsag_ni_asic_top'])
-    script+=f'\nhierarchy -check -top qsag_ni_asic_top\ncheck\ntee -o {out}/linked.json stat -json -liberty {PDK+lf}\nwrite_verilog -noattr {out}/linked.v\n'
+    script+=f'\nhierarchy -check -top qsag_ni_asic_top\ncheck\ntee -o {out}/linked.json stat -json -liberty {PDK+lf}\nsetparam -unset AW t:sram_dp_64x16384\nwrite_verilog -noattr -noexpr {out}/linked.v\n'
     (out/'link.ys').write_text(script)
     with (out/'link.log').open('w') as f:
         subprocess.run(RUN+['yosys','-T','-s',str(out/'link.ys')],stdout=f,stderr=subprocess.STDOUT,check=True)

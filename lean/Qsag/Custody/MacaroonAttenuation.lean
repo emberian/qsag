@@ -1272,3 +1272,45 @@ theorem demo_chain_scoped :
   raw_tag_binding_exposes_bearer
 
 end Qsag.MacaroonAttenuation
+
+/-! ### Exports for lane cust -/
+
+public section
+namespace Qsag.MacaroonAttenuation
+
+/-- The demonstration registry answers key 6 for every third-party identifier. -/
+theorem demo_registry_const (i : Nat) : demoDeployment.registry i = 6 := by rfl
+
+theorem demo_parent_verifier_accepted :
+    verifierVerify demoSuite demoDeployment demoParent demoRequest [⟨demoBound, 6⟩] = .ok () := by
+  decide
+
+theorem demo_scoped_verifier_accepted :
+    verifierVerify demoSuite demoDeployment demoScoped demoRequest [] = .ok () := by decide
+
+theorem demo_expired_verifier_rejected :
+    verifierVerify demoSuite demoDeployment demoExpired demoRequest [] = .error .denied := by decide
+
+/-- The deployment's verifier refuses the discharge of `demoParent` under `demoSibling`. -/
+theorem demo_transplant_verifier_rejected :
+    verifierVerify demoSuite demoDeployment demoSibling demoRequest [⟨demoBound, 6⟩] =
+      .error .denied := by decide
+
+theorem demo_expiry_caveat_fails : Caveat.holds demoRequest (.expiresAt 5#64) = false := by decide
+
+theorem demo_expiry_caveat_firstParty :
+    (Caveat.expiresAt 5#64 : Caveat Nat).isThirdParty = false := by rfl
+
+/-- `demoScoped` attenuated by a `notBefore` bound the demonstration request has reached. -/
+theorem demo_attenuate_notBefore :
+    attenuate demoSuite demoScoped (.notBefore 1#64) =
+      .ok ⟨false, 4, 2, [.resource 3, .notBefore 1#64],
+        ⟨1, false, 4, 2, [.resource 3, .notBefore 1#64]⟩⟩ := by rfl
+
+theorem demo_notBefore_verifier_accepted :
+    verifierVerify demoSuite demoDeployment
+      ⟨false, 4, 2, [.resource 3, .notBefore 1#64],
+        ⟨1, false, 4, 2, [.resource 3, .notBefore 1#64]⟩⟩ demoRequest [] = .ok () := by decide
+
+end Qsag.MacaroonAttenuation
+end

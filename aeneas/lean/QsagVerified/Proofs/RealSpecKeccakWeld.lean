@@ -2,7 +2,6 @@ module
 import all QsagVerified.Funs
 public import QsagVerified.Proofs.Sponge
 public import Qsag.Oracle.Keccak
-import all Qsag.Oracle.Keccak
 
 /-!
 The universal theorem here covers the extracted 24-round permutation. The phase laws
@@ -658,7 +657,7 @@ theorem keccak_round_refines_qsag (s : Qsag.KState) (rc : Std.U64) :
 theorem keccak_f1600_refines_qsag (s : Qsag.KState) :
     keccak.keccak_f1600 (keccakArrayOfState s) =
       .ok (keccakArrayOfState (Qsag.keccakF1600 s)) := by
-  rw [Qsag.keccakF1600_eq, Qsag.keccakRoundConstants.eq_def]
+  rw [Qsag.keccakF1600_eq, Qsag.keccakRoundConstants_eq]
   let s1 := Qsag.roundS s 1
   let s2 := Qsag.roundS s1 32898
   let s3 := Qsag.roundS s2 9223372036854808714

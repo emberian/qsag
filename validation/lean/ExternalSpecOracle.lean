@@ -15,6 +15,7 @@ import Qsag.Protocol.Aggregation.CorduroyAndHemAirCompleteness
 import Qsag.Math.Gf2Pow128
 import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 import Qsag.Machine.ConstantTimeIsa
+import Qsag.Machine.ElfFunctionalEquiv
 
 namespace ExternalSpecOracle
 
@@ -280,7 +281,7 @@ def main : IO Unit := do
       s!"\"cshake256_64_hex\":\"{bytesToHex (cshake256Xof 64 custom msg)}\"" ++
     "}"
 
-  -- 4. Binary tower (`Qsag.Math.Gf2Pow128`) T_3 (GF(2^8)) + ConstantTimeIsa GFNI isomorphism & T_7 (GF(2^128))
+  -- 4. Binary tower (`Qsag.Math.Gf2Pow128`) T_3 (GF(2^8)) + GFNI isomorphism (`Machine.ElfFunctionalEquiv`) & T_7 (GF(2^128))
   let gf256Pairs : List (Nat × Nat) := [
     (0x00, 0x53), (0x01, 0xCA), (0x53, 0xCA), (0xFF, 0xFF), (0x80, 0x80), (0xA5, 0x3C)
   ]
@@ -289,9 +290,9 @@ def main : IO Unit := do
     let tb := unpackTower 3 (BitVec.ofNat 8 b)
     let tMul := (packTower 3 (towerMul 3 ta tb)).toNat
     let tInv := (packTower 3 (towerInv 3 ta)).toNat
-    let isaMul := (Qsag.ConstantTimeIsa.gfniT3MulByte (BitVec.ofNat 8 a) (BitVec.ofNat 8 b)).toNat
-    let phiA := (Qsag.ConstantTimeIsa.gfniPhi (BitVec.ofNat 8 a)).toNat
-    let phiB := (Qsag.ConstantTimeIsa.gfniPhi (BitVec.ofNat 8 b)).toNat
+    let isaMul := (Qsag.gfniTowerMulByte (UInt8.ofNat a) (UInt8.ofNat b)).toNat
+    let phiA := (Qsag.gfniAffineByte (UInt8.ofNat a) Qsag.gfniTowerToRijndaelMat 0).toNat
+    let phiB := (Qsag.gfniAffineByte (UInt8.ofNat b) Qsag.gfniTowerToRijndaelMat 0).toNat
     if tMul != isaMul then
       throw (IO.userError "GFNI T3 isomorphism mismatch in Lean spec")
     pure ("{" ++

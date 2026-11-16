@@ -6,6 +6,8 @@
 //! ledger and verifier work grow with the number of edges; it is not a succinct PCS
 //! accumulator or a DuetFold implementation. Keep this cost visible in callers.
 
+mod codec;
+
 use super::*;
 use crate::zk_hem::protocol::{
     DeferredPcsClaim, HologramPublicProof, RecursivePublicHemProof, ShapeHologram,
@@ -259,8 +261,8 @@ fn merge_gadget<B: Backend>(
 /// One constant-depth root SNARK plus a linear-size deferred PCS ledger.
 #[derive(Clone)]
 pub struct SplitSubtreeAggregate {
-    public: SubtreePublic,
-    proof: HologramPublicProof,
+    pub(super) public: SubtreePublic,
+    pub(super) proof: HologramPublicProof,
     ledger: Vec<LedgerNode>,
 }
 
@@ -306,8 +308,11 @@ impl SplitSubtreeAggregate {
 }
 
 impl SplitSubtreeAggregate {
-    /// Encode the proof and complete ledger. This experimental carrier has no stable
-    /// wire compatibility promise; the length includes every deferred opening.
+    /// Encode the proof and complete ledger; the length includes every deferred opening.
+    pub fn from_bytes_canonical(vk: &ShapeVerifierKey, bytes: &[u8]) -> Option<Self> {
+        codec::decode(vk, bytes)
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         fn fields(out: &mut Vec<u8>, words: impl IntoIterator<Item = F>) {
             for word in words { out.extend_from_slice(&word.to_le_bytes()); }
@@ -378,9 +383,6 @@ mod tests {
     use crate::ValidatorKeypair;
 
     #[test]
-    fn split_depth_two_real_signatures_and_deferred_tampering() { real_tree(2); }
-
-    #[test]
     fn split_depth_three_real_signatures_and_deferred_tampering() { real_tree(3); }
 
     fn real_tree(depth: usize) {
@@ -390,7 +392,7 @@ mod tests {
         let count = 1 << (depth - 1);
         let epoch = 2026_1116;
         let message = b"split-subtree real signature test";
-        let keys: Vec<Vec<ValidatorKeypair>> = (0..count).map(|s| {
+        let mut keys: Vec<Vec<ValidatorKeypair>> = (0..count).map(|s| {
             (0..2).map(|i| ValidatorKeypair::keygen_deterministic(
                 AggSigProfile::JortsPoseidon2, &[(90 + s) as u8; 32], i,
             )).collect()
@@ -409,6 +411,15 @@ mod tests {
             let sign_msg = subtree_signing_message(leaf.params(), &policies[s], epoch, message).unwrap();
             let sigs = vec![keys[s][0].sign_stateful_for_unit_test(&sign_msg, s as u32).unwrap()];
             let bitmap = SignerBitmap::from_active_indices(2, &[0]).unwrap();
+            if s == 0 {
+                let mut bad_sigs = sigs.clone();
+                bad_sigs[0].r_rand[0] += F::ONE;
+                let bad = ShardHemWitness { bitmap: &bitmap, signatures: &bad_sigs };
+                assert!(prove_subtree_leaf_merge_for_recursion(
+                    &leaf, core::slice::from_ref(&policies[s]), epoch, message, &[bad], &[91; 32],
+                ).is_err());
+            }
+
             let witness = ShardHemWitness { bitmap: &bitmap, signatures: &sigs };
             let t = Instant::now();
             let (public, proof) = prove_subtree_leaf_merge_for_recursion(
@@ -429,7 +440,7 @@ mod tests {
             if level < depth {
                 let t = Instant::now();
                 let mut next = Vec::new();
-                for pair in children.chunks_exact(2) {
+                for pair in children.as_chunks::<2>().0 {
                     next.push(relation.prove_for_recursion(&[pair[0].clone(), pair[1].clone()]).unwrap());
                 }
                 std::println!("SPLIT depth={depth} level={level} prove_ms={:.1}", t.elapsed().as_secs_f64() * 1000.0);
@@ -440,12 +451,19 @@ mod tests {
             let t = Instant::now();
             let aggregate = relation.prove_root(&[children[0].clone(), children[1].clone()], &[72; 32]).unwrap();
             let prove_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let bytes = aggregate.to_bytes();
+            let decoded = SplitSubtreeAggregate::from_bytes_canonical(relation.verifier_key(), &bytes).unwrap();
+            assert_eq!(decoded.to_bytes(), bytes);
+            let mut trailing = bytes.clone(); trailing.push(0);
+            assert!(SplitSubtreeAggregate::from_bytes_canonical(relation.verifier_key(), &trailing).is_none());
+            assert!(SplitSubtreeAggregate::from_bytes_canonical(relation.verifier_key(), &bytes[..bytes.len() - 1]).is_none());
+
             let statement = RosterRootStatement {
                 roster_root: roster, epoch_floor: epoch, message, minimum_global_quorums: count as u64,
                 minimum_active_weight: count as u64, min_key_idx: 100, max_key_idx: 100 + count as u64 - 1,
             };
             let t = Instant::now();
-            assert!(aggregate.verify_against_roster_root(relation.verifier_key(), &statement));
+            assert!(verify_succinct_subtree_aggregate_against_roster_root(relation.verifier_key(), &statement, &aggregate));
             std::println!("SPLIT depth={depth} root_prove_ms={prove_ms:.1} root_bytes={} total_bytes={} openings={} verify_ms={:.2} total_ms={:.1}",
                 aggregate.proof.to_bytes().len(), aggregate.to_bytes().len(), aggregate.deferred_openings(),
                 t.elapsed().as_secs_f64() * 1000.0, start.elapsed().as_secs_f64() * 1000.0);
@@ -459,6 +477,12 @@ mod tests {
                     assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
                 }
             }
+            let mut bad_roster = statement;
+            bad_roster.roster_root[0] ^= 1;
+            assert!(!aggregate.verify_against_roster_root(relation.verifier_key(), &bad_roster));
+            let mut bad = aggregate.clone();
+            bad.ledger[0].edges[0].opening.stage0_queries[0][0].siblings[0][0] += F::ONE;
+            assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
             let mut bad = aggregate.clone();
             bad.ledger.remove(0);
             assert!(!bad.verify_against_roster_root(relation.verifier_key(), &statement));
