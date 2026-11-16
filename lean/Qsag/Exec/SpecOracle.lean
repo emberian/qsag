@@ -1,18 +1,17 @@
 module
-import all Qsag.Oracle.Keccak
-import all Qsag.Protocol.Aggregation.Aggregation
-import all Qsag.Math.QuarticExt4
-import all Qsag.Math.GoldilocksBase
+public import Qsag.Exec.WhirKernels
+public import Qsag.Oracle.Keccak
+public import Qsag.Protocol.Aggregation.Aggregation
+public import Qsag.Math.QuarticExt4
+public import Qsag.Math.GoldilocksBase
 
 
 public import Qsag.Exec.PosixCrashWal
 public import Qsag.Protocol.Signing.HashSigs
-import all Qsag.Protocol.Signing.HashSigs
 public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
 public import Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
-import all Qsag.Math.Primality
-import all Qsag.Oracle.Poseidon2
-import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
+public import Qsag.Math.Primality
+public import Qsag.Oracle.Poseidon2
 import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Tactic.MaskBijection
 
@@ -302,6 +301,11 @@ theorem tooth_sha3_256_rejects_keccak256_pad :
   decide +kernel
 
 /-! ## 3. Width-16 Goldilocks `Poseidon2` Permutation ($R_F = 8, R_P = 22$) -/
+
+/-! Legacy width-16 invertibility model. Production uses canonical Poseidon2-12 from
+`Qsag.Oracle.Poseidon2`; these historical helpers are retained only for the explicit legacy
+oracle commands and make no production permutation claim. -/
+namespace LegacyPoseidon16
 
 def Poseidon2State16.toList (s : Poseidon2State16) : List Goldilocks :=
   [s.b0.x0, s.b0.x1, s.b0.x2, s.b0.x3,
@@ -709,36 +713,13 @@ theorem tooth_poseidon2Perm16_zero_not_fixed :
   unfold Poseidon16Pair
   decide +kernel
 
+end LegacyPoseidon16
+
 /-! ## 4. `Hem` Affine Duet Fold & CWYZ Sumcheck Bridge (`aeneas/qsag-whir-verified/src/lib.rs`) -/
 
-/-- Extracted `qsag_whir_verified::duet_fold`: `odd + alpha * even`. -/
-def hemDuetFold (v0 v1 : GoldilocksExt4) (invTwoY0 invTwo : Goldilocks)
-    (alpha : GoldilocksExt4) : GoldilocksExt4 :=
-  let even := GoldilocksExt4.mul (GoldilocksExt4.add v0 v1) (GoldilocksExt4.embedBase invTwo)
-  let odd := GoldilocksExt4.mul (GoldilocksExt4.sub v0 v1) (GoldilocksExt4.embedBase invTwoY0)
-  GoldilocksExt4.add odd (GoldilocksExt4.mul alpha even)
-
-/-- Extracted `qsag_whir_verified::fold_duet_affine_ext4` (`cwyz_duet_fold`), defined directly
-    via `Qsag.Aggregation.foldDuetExt4` on the asymmetric `even + theta * odd` coset combination. -/
-def hemAffineDuetFold (v0 v1 : GoldilocksExt4) (x : Goldilocks)
-    (theta alpha beta : GoldilocksExt4) : GoldilocksExt4 :=
-  let half := Goldilocks.inv (Goldilocks.ofNat 2)
-  let invTwoX := Goldilocks.mul half (Goldilocks.inv x)
-  let odd := GoldilocksExt4.mul (GoldilocksExt4.sub v0 v1) (GoldilocksExt4.embedBase invTwoX)
-  let mixed := foldDuetExt4 v0 v1 invTwoX half theta
-  let chal := GoldilocksExt4.add alpha
-    (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase (Goldilocks.mul x x)))
-  GoldilocksExt4.add odd (GoldilocksExt4.mul chal mixed)
-
-/-- Extracted `qsag_whir_verified::cwyz_bridge_claim_step` dual linear-functional sumcheck bridge. -/
-def hemBridgeClaimStep
-    (eval0 eval1 eval2 eval3 eval4 claim phi theta alpha beta : GoldilocksExt4) : GoldilocksExt4 :=
-  let f := GoldilocksExt4.add eval0 (GoldilocksExt4.mul phi eval1)
-  let g := GoldilocksExt4.add eval2 (GoldilocksExt4.mul phi (GoldilocksExt4.sub claim eval0))
-  let core := GoldilocksExt4.add g (GoldilocksExt4.mul alpha
-    (GoldilocksExt4.add f (GoldilocksExt4.mul theta g)))
-  let shift := GoldilocksExt4.mul beta (GoldilocksExt4.add eval3 (GoldilocksExt4.mul theta eval4))
-  GoldilocksExt4.add core shift
+abbrev hemDuetFold := Qsag.Exec.hemDuetFold
+abbrev hemAffineDuetFold := Qsag.Exec.hemAffineDuetFold
+abbrev hemBridgeClaimStep := Qsag.Exec.hemBridgeClaimStep
 
 def HemFoldClaim (v0 v1 : GoldilocksExt4) (x : Goldilocks)
     (theta alpha beta claimed : GoldilocksExt4) : Prop :=
@@ -809,7 +790,7 @@ theorem tooth_hemAffineDuetFold_theta_drop_rejected :
 
 /-! ## 5. POSIX Crash WAL Schedules (`DurableBurnJournal` & `FsBeltWal`) -/
 
-/-- Events exercised against the byte-level `QSBURN03` `DurableBurnJournal` (`crates/qsag-fts/src/wal.rs`)
+/-- Events exercised against the byte-level `QSBURN05` `DurableBurnJournal` (`crates/qsag-fts/src/wal.rs`)
     and `RustDurability.openBurnBytes` (`lean/Qsag/PosixCrashWal.lean`). -/
 inductive PosixBurnEvent where
   | reserve (party epoch : Nat)
@@ -1135,8 +1116,8 @@ end Qsag.SpecOracle
 #tooth_pair Qsag.SpecOracle.sha3_256Matches_width_and_keccak_sep vs Qsag.SpecOracle.tooth_sha3_256_rejects_keccak256_pad
 #verify_inhabited Qsag.SpecOracle.sha3_256Matches_width_and_keccak_sep Qsag.SpecOracle.witness_sha3_256Matches_empty
 
-#tooth_pair Qsag.SpecOracle.poseidon2Perm16_pair_invertible vs Qsag.SpecOracle.tooth_poseidon2Perm16_zero_not_fixed
-#verify_inhabited Qsag.SpecOracle.poseidon2Perm16_pair_invertible Qsag.SpecOracle.witness_poseidon2Perm16_pair
+#tooth_pair Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16_pair_invertible vs Qsag.SpecOracle.LegacyPoseidon16.tooth_poseidon2Perm16_zero_not_fixed
+#verify_inhabited Qsag.SpecOracle.LegacyPoseidon16.poseidon2Perm16_pair_invertible Qsag.SpecOracle.LegacyPoseidon16.witness_poseidon2Perm16_pair
 
 #tooth_pair Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound vs Qsag.SpecOracle.tooth_hemAffineDuetFold_theta_drop_rejected
 #verify_inhabited Qsag.SpecOracle.hemAffineDuetFold_symmetric_sound Qsag.SpecOracle.witness_hemAffineDuetFold_claim
@@ -1146,3 +1127,11 @@ end Qsag.SpecOracle
 
 #tooth_pair Qsag.SpecOracle.fsBeltWal_rollback_refused vs Qsag.SpecOracle.tooth_fsBeltWal_corrupt_and_rmlock_refused
 #verify_inhabited Qsag.SpecOracle.fsBeltWal_rollback_refused Qsag.SpecOracle.witness_fsBeltWalRollbackArmed
+
+public section
+namespace Qsag.SpecOracle
+abbrev hemHorner := Qsag.Exec.hemHorner
+abbrev hemHorner_nil := Qsag.Exec.hemHorner_nil
+abbrev hemHorner_cons := Qsag.Exec.hemHorner_cons
+end Qsag.SpecOracle
+end

@@ -1,7 +1,6 @@
 module
 
 public import Qsag.Exec.InteractiveUcEngine
-import all Qsag.Exec.InteractiveUcEngine
 
 /-!
 # Ideal output and retry boundary
