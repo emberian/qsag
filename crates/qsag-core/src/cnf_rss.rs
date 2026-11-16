@@ -735,6 +735,29 @@ pub fn compute_slh_profile_digest(params: &Fips205Params) -> [u64; 4] {
     crate::keccak_mpc::slh_profile_digest_u64x4(params)
 }
 
+#[doc(hidden)]
+pub const BAGGY_SUITE_MIDSTATE: [u64; 25] = TSW_SUITE_MIDSTATE;
+#[doc(hidden)]
+pub const BAGGY_PRF_SECRET_OFFSET: usize = TSW_PRF_SECRET_OFFSET;
+#[doc(hidden)]
+pub const BAGGY_F_SECRET_OFFSET: usize = TSW_F_SECRET_OFFSET;
+
+#[doc(hidden)]
+#[inline]
+pub fn baggy_mu_frame(tag: &[u8], mu: &[u8; 32]) -> ([u8; SHAKE256_RATE_BYTES], usize) {
+    keyed_mu_frame(tag, mu)
+}
+
+#[doc(hidden)]
+#[inline]
+pub fn baggy_secret32_frame(
+    role_tag: &[u8],
+    pk_seed: &[u8; 32],
+    adrs: &HashAdrs,
+) -> [u8; SHAKE256_RATE_BYTES] {
+    tsw_secret32_frame(role_tag, pk_seed, adrs)
+}
+
 /// Verified isolated-party backend driving NIST FIPS 205 `SLH-DSA` ceremonies without
 /// reconstructing `SK.seed`, `SK.prf`, or any intermediate WOTS+/FORS chain wire.
 ///
