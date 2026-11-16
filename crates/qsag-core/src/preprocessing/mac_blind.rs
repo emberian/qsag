@@ -130,69 +130,114 @@ fn blinding_mesh(
     OtMesh::establish(sid, party_rngs)
 }
 
-pub(super) fn blind_open_ext2(
+///Multiplicatively blind and open an additive `GoldilocksExt2` MAC residual (`1 / p^2 \approx 2^{-128}`
+/// soundness, `0` choice-bit leakage).
+///
+/// When `mesh` is `Some`, consumes one single-use `(r, a, c = r * a)` triple from the mesh's
+/// pre-staged `GoldilocksExt2` blinding pool (auto-refilling if empty); when `None`, establishes
+/// a dedicated one-shot Ring-LWE OT mesh and multiplies directly.
+pub fn blind_open_ext2(
     session_id: &[u8; 32],
     phase: &'static str,
     residual: &[GoldilocksExt2],
     mesh: Option<&mut OtMesh>,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<GoldilocksExt2, PreprocessError> {
+    if residual.is_empty()
+        || residual.len() != party_rngs.len()
+        || mesh.as_ref().is_some_and(|m| m.n != residual.len())
+    {
+        return Err(PreprocessError::InvalidThreshold {
+            t: residual.len(),
+            n: party_rngs.len(),
+        });
+    }
     let mut owned_mesh;
     let mesh = match mesh {
-        Some(mesh) => mesh,
+        Some(mesh) => return mesh.blind_open_ext2_pooled(session_id, phase, residual, party_rngs),
         None => {
             owned_mesh = blinding_mesh(session_id, phase, party_rngs)?;
             &mut owned_mesh
         }
     };
-    let n = residual.len();
     // Multiply in the EXTENSION field directly. Splitting into four base-field
     // OLEs would let a malicious peer use inconsistent correlations in the four
     // columns, weakening the extension-field soundness to a base-field event.
-    let r = SecretBuffer(
+    let randomizers = SecretBuffer(
         party_rngs
             .iter_mut()
-            .map(PartyPrivateRng::next_ext2)
+            .map(|rng| vec![rng.next_ext2()])
             .collect::<Vec<_>>(),
     );
-    let w = SecretBuffer(ole_blind_ext2(session_id, mesh, &r, residual, party_rngs)?);
+    let senders = SecretBuffer(residual.iter().map(|&d| vec![d]).collect::<Vec<_>>());
+    let products = SecretBuffer(ole_blind_ext2_batch(
+        session_id,
+        mesh,
+        &randomizers,
+        &senders,
+        party_rngs,
+    )?);
+    let w = SecretBuffer(products.iter().map(|row| row[0]).collect::<Vec<_>>());
+    commit_and_open_additive_ext2(session_id, phase, &w, party_rngs)
+}
+
+fn commit_and_open_additive_ext2(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    shares: &[GoldilocksExt2],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<GoldilocksExt2, PreprocessError> {
+    let n = shares.len();
+    if n == 0 || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t: n, n });
+    }
     // Represent additive shares as n-of-n Shamir shares using PUBLIC inverse weights.
     let points = (1..=n)
         .map(|p| Goldilocks::from_u64_reduced(p as u64))
         .collect::<Vec<_>>();
     let lambdas = lagrange_weights_zero_goldilocks(&points)
         .ok_or(PreprocessError::DuplicateOrZeroEvalPoint)?;
-    let shares = SecretBuffer(
+    let shamir = SecretBuffer(
         (0..n)
-            .map(|p| w[p].mul_base(lambdas[p].inv()))
+            .map(|p| shares[p].mul_base(lambdas[p].inv()))
             .collect::<Vec<_>>(),
     );
-    commit_and_open_degree_ext2(session_id, phase, n, &points, &shares, party_rngs)
+    commit_and_open_degree_ext2(session_id, phase, n, &points, &shamir, party_rngs)
 }
 
-/// Native-field OLE. The only receiver choices are 640 disposable random bits;
-/// neither the residual nor its coordinates ever supply a choice bit. The post-OT
-/// hash retains a 384-bit entropy budget after a field-sized error observation
-/// and the 128-bit extracted randomizer. Sender errors therefore cannot turn the
-/// final opening into probes of residual bits. The public correction derandomizes
-/// the extracted mask to the fresh receiver randomizer; it never opens a residual.
-fn ole_blind_ext2(
+/// Native-field batched `GoldilocksExt2` OLE. The only receiver choices are `640 * count`
+/// disposable random bits; neither the sender payload nor its coordinates ever supply a choice bit.
+/// Each item retains a 384-bit post-OT LHL entropy budget after a field-sized error observation
+/// and the 128-bit extracted randomizer. Sender errors therefore cannot turn the final opening
+/// into probes of secret bits. The public correction derandomizes each extracted mask to the
+/// fresh receiver randomizer; it never opens a sender input.
+fn ole_blind_ext2_batch(
     session_id: &[u8; 32],
     mesh: &mut OtMesh,
-    randomizers: &[GoldilocksExt2],
-    residuals: &[GoldilocksExt2],
+    randomizers: &[Vec<GoldilocksExt2>],
+    senders: &[Vec<GoldilocksExt2>],
     party_rngs: &mut [PartyPrivateRng],
-) -> Result<Vec<GoldilocksExt2>, PreprocessError> {
-    const WORDS: usize = 10;
-    const BITS: usize = 64 * WORDS;
-    let n = residuals.len();
+) -> Result<Vec<Vec<GoldilocksExt2>>, PreprocessError> {
+    const WORDS_PER_ITEM: usize = 10;
+    const BITS_PER_ITEM: usize = 64 * WORDS_PER_ITEM;
+    let n = senders.len();
+    let count = senders[0].len();
+    if count == 0 {
+        return Ok(vec![Vec::new(); n]);
+    }
+    let total_words = count
+        .checked_mul(WORDS_PER_ITEM)
+        .ok_or(BLIND_POOL_EXHAUSTED)?;
+    let total_bits = count
+        .checked_mul(BITS_PER_ITEM)
+        .ok_or(BLIND_POOL_EXHAUSTED)?;
     let choices = SecretBuffer(
         party_rngs
             .iter_mut()
-            .map(|rng| (0..WORDS).map(|_| rng.next_u64()).collect::<Vec<_>>())
+            .map(|rng| (0..total_words).map(|_| rng.next_u64()).collect::<Vec<_>>())
             .collect::<Vec<_>>(),
     );
-    let mut raw = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; BITS]; n]);
+    let mut raw = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; total_bits]; n]);
     let mut bind = Cshake256Xof::new(b"QSAG.SPDZ.BLIND.EXT2.CT/v1");
     for receiver in 0..n {
         for sender in 0..n {
@@ -201,32 +246,39 @@ fn ole_blind_ext2(
             }
             let (send, recv) =
                 mesh.run_correlated_ot_words(sender, receiver, &choices[receiver], party_rngs)?;
-            for bit in 0..BITS {
-                let decode = |pad: &[u8; 48]| {
-                    GoldilocksExt2::new(
-                        Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| pad[i])),
-                        Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| pad[24 + i])),
-                    )
-                };
-                let mask = party_rngs[sender].next_ext2();
-                let ct0 = decode(&send[bit].0) - mask;
-                let ct1 = decode(&send[bit].1) + residuals[sender] - mask;
-                bind.absorb(&ct0.to_be_bytes());
-                bind.absorb(&ct1.to_be_bytes());
-                let choice = (choices[receiver][bit / 64] >> (bit % 64)) & 1;
-                let select = 0u64.wrapping_sub(black_box(choice));
-                let selected = GoldilocksExt2::new(
-                    Goldilocks::from_u64_reduced(
-                        ct0.c0.to_canonical_u64()
-                            ^ (select & (ct0.c0.to_canonical_u64() ^ ct1.c0.to_canonical_u64())),
-                    ),
-                    Goldilocks::from_u64_reduced(
-                        ct0.c1.to_canonical_u64()
-                            ^ (select & (ct0.c1.to_canonical_u64() ^ ct1.c1.to_canonical_u64())),
-                    ),
-                );
-                raw[sender][bit] += mask;
-                raw[receiver][bit] += selected - decode(&recv[bit]);
+            for k in 0..count {
+                let s_val = senders[sender][k];
+                let base_bit = k * BITS_PER_ITEM;
+                for b in 0..BITS_PER_ITEM {
+                    let bit = base_bit + b;
+                    let decode = |pad: &[u8; 48]| {
+                        GoldilocksExt2::new(
+                            Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| pad[i])),
+                            Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| {
+                                pad[24 + i]
+                            })),
+                        )
+                    };
+                    let mask = party_rngs[sender].next_ext2();
+                    let ct0 = decode(&send[bit].0) - mask;
+                    let ct1 = decode(&send[bit].1) + s_val - mask;
+                    bind.absorb(&ct0.to_be_bytes());
+                    bind.absorb(&ct1.to_be_bytes());
+                    let choice = (choices[receiver][bit / 64] >> (bit % 64)) & 1;
+                    let select = 0u64.wrapping_sub(black_box(choice));
+                    let selected = GoldilocksExt2::new(
+                        Goldilocks::from_u64_reduced(
+                            ct0.c0.to_canonical_u64()
+                                ^ (select & (ct0.c0.to_canonical_u64() ^ ct1.c0.to_canonical_u64())),
+                        ),
+                        Goldilocks::from_u64_reduced(
+                            ct0.c1.to_canonical_u64()
+                                ^ (select & (ct0.c1.to_canonical_u64() ^ ct1.c1.to_canonical_u64())),
+                        ),
+                    );
+                    raw[sender][bit] += mask;
+                    raw[receiver][bit] += selected - decode(&recv[bit]);
+                }
             }
         }
     }
@@ -236,35 +288,42 @@ fn ole_blind_ext2(
     let coin = run_commit_and_open_coin(session_id, b"SPDZ_BLIND_EXT2_LHL", &digest, party_rngs)?;
     let mut xof = Cshake256Xof::new(b"QSAG.SPDZ.BLIND.EXT2.H/v1");
     xof.absorb(&coin);
-    let mut extracted = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
-    let mut w = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
-    for bit in 0..BITS {
-        let mut bytes = [0u8; 48];
-        xof.squeeze(&mut bytes);
-        let g = GoldilocksExt2::new(
-            Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[i])),
-            Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[24 + i])),
-        );
-        for party in 0..n {
-            let select = 0u64.wrapping_sub(black_box((choices[party][bit / 64] >> (bit % 64)) & 1));
-            extracted[party] += GoldilocksExt2::new(
-                Goldilocks::from_u64_reduced(select & g.c0.to_canonical_u64()),
-                Goldilocks::from_u64_reduced(select & g.c1.to_canonical_u64()),
+    let mut extracted = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; count]; n]);
+    let mut w = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; count]; n]);
+    for k in 0..count {
+        let base_bit = k * BITS_PER_ITEM;
+        for b in 0..BITS_PER_ITEM {
+            let bit = base_bit + b;
+            let mut bytes = [0u8; 48];
+            xof.squeeze(&mut bytes);
+            let g = GoldilocksExt2::new(
+                Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[i])),
+                Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[24 + i])),
             );
-            w[party] += g * raw[party][bit];
+            for party in 0..n {
+                let select =
+                    0u64.wrapping_sub(black_box((choices[party][bit / 64] >> (bit % 64)) & 1));
+                extracted[party][k] += GoldilocksExt2::new(
+                    Goldilocks::from_u64_reduced(select & g.c0.to_canonical_u64()),
+                    Goldilocks::from_u64_reduced(select & g.c1.to_canonical_u64()),
+                );
+                w[party][k] += g * raw[party][bit];
+            }
         }
     }
-    let diffs = SecretBuffer(
-        (0..n)
-            .map(|p| randomizers[p] - extracted[p])
-            .collect::<Vec<_>>(),
-    );
-    let sum_diff = diffs
-        .iter()
-        .copied()
-        .fold(GoldilocksExt2::ZERO, |a, b| a + b);
-    for party in 0..n {
-        w[party] += residuals[party] * (randomizers[party] + sum_diff - diffs[party]);
+    for k in 0..count {
+        let diffs = SecretBuffer(
+            (0..n)
+                .map(|p| randomizers[p][k] - extracted[p][k])
+                .collect::<Vec<_>>(),
+        );
+        let sum_diff = diffs
+            .iter()
+            .copied()
+            .fold(GoldilocksExt2::ZERO, |a, b| a + b);
+        for party in 0..n {
+            w[party][k] += senders[party][k] * (randomizers[party][k] + sum_diff - diffs[party]);
+        }
     }
     Ok(w.into_inner())
 }
@@ -392,6 +451,16 @@ struct BlindTriple {
     c: SecretBuffer<Vec<Tower128>>,
 }
 
+/// One single-use multiplicative `GoldilocksExt2` blinding triple: per-party additive shares
+/// of a joint randomizer `r`, a one-time mask `a`, and `c = r * a` in $\mathbb{F}_{p^2}$.
+/// Not `Clone`; wiped on drop.
+struct Ext2BlindTriple {
+    serial: u64,
+    r: SecretBuffer<Vec<GoldilocksExt2>>,
+    a: SecretBuffer<Vec<GoldilocksExt2>>,
+    c: SecretBuffer<Vec<GoldilocksExt2>>,
+}
+
 /// Single-use blinding triples staged on a retained [`OtMesh`].
 #[derive(Default)]
 pub(super) struct BlindPool {
@@ -403,6 +472,12 @@ pub(super) struct BlindPool {
     poisoned: bool,
     #[cfg(test)]
     fail_next_refill: bool,
+    ext2_triples: Vec<Ext2BlindTriple>,
+    ext2_staged: u64,
+    ext2_refills: u64,
+    ext2_poisoned: bool,
+    #[cfg(test)]
+    fail_next_ext2_refill: bool,
 }
 
 const BLIND_POOL_POISONED: PreprocessError = PreprocessError::VaultPoisoned {
@@ -410,6 +485,12 @@ const BLIND_POOL_POISONED: PreprocessError = PreprocessError::VaultPoisoned {
 };
 const BLIND_POOL_EXHAUSTED: PreprocessError = PreprocessError::VaultExhausted {
     kind: "blinding_pool",
+};
+const EXT2_BLIND_POOL_POISONED: PreprocessError = PreprocessError::VaultPoisoned {
+    kind: "ext2_blinding_pool",
+};
+const EXT2_BLIND_POOL_EXHAUSTED: PreprocessError = PreprocessError::VaultExhausted {
+    kind: "ext2_blinding_pool",
 };
 
 /// Independent blinding rounds per check; see [`blind_open_tower128`].
@@ -423,10 +504,21 @@ impl OtMesh {
         self.blind_pool.triples.len() / BLIND_ROUNDS
     }
 
+    /// Number of `GoldilocksExt2` blinded MAC checks the staged pool can answer without a refill.
+    pub fn staged_ext2_blinded_checks(&self) -> usize {
+        self.blind_pool.ext2_triples.len()
+    }
+
     /// Make the next refill fail before it stages anything.
     #[cfg(test)]
     pub(crate) fn fail_next_blinding_refill(&mut self) {
         self.blind_pool.fail_next_refill = true;
+    }
+
+    /// Make the next `GoldilocksExt2` refill fail before it stages anything.
+    #[cfg(test)]
+    pub(crate) fn fail_next_ext2_blinding_refill(&mut self) {
+        self.blind_pool.fail_next_ext2_refill = true;
     }
 
     /// Joint randomizer of the triple the next pooled round will consume.
@@ -438,15 +530,200 @@ impl OtMesh {
             .map(|t| t.r.iter().fold(Tower128::ZERO, |sum, &r| sum.add(r)))
     }
 
+    /// Joint randomizer of the `GoldilocksExt2` triple the next pooled check will consume.
+    #[cfg(test)]
+    pub(super) fn next_ext2_blinding_randomizer(&self) -> Option<GoldilocksExt2> {
+        self.blind_pool
+            .ext2_triples
+            .last()
+            .map(|t| t.r.iter().copied().fold(GoldilocksExt2::ZERO, |s, r| s + r))
+    }
+
     /// Serials of the staged triples, oldest first.
     #[cfg(test)]
     pub(crate) fn staged_blinding_serials(&self) -> Vec<u64> {
         self.blind_pool.triples.iter().map(|t| t.serial).collect()
     }
 
+    /// Serials of the staged `GoldilocksExt2` triples, oldest first.
+    #[cfg(test)]
+    pub(crate) fn staged_ext2_blinding_serials(&self) -> Vec<u64> {
+        self.blind_pool
+            .ext2_triples
+            .iter()
+            .map(|t| t.serial)
+            .collect()
+    }
+
     /// Whether a failed refill or opening has permanently disabled pooled checks on this mesh.
     pub fn blinding_poisoned(&self) -> bool {
         self.blind_pool.poisoned
+    }
+
+    /// Whether a failed refill or opening has permanently disabled pooled `GoldilocksExt2` checks.
+    pub fn ext2_blinding_poisoned(&self) -> bool {
+        self.blind_pool.ext2_poisoned
+    }
+
+    /// Stage single-use `GoldilocksExt2` blinding material for `checks` further MAC checks.
+    ///
+    /// Runs one batched LHL-amplified native-field `GoldilocksExt2` OLE over the mesh with fresh
+    /// per-party randomizers and masks. Each refill batch is bound to the mesh session, party
+    /// count, refill index, first triple serial and running OT transcript. A failure permanently
+    /// poisons and wipes the `GoldilocksExt2` pool.
+    pub fn prestage_ext2_blinded_checks(
+        &mut self,
+        checks: usize,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), PreprocessError> {
+        if self.blind_pool.ext2_poisoned {
+            return Err(EXT2_BLIND_POOL_POISONED);
+        }
+        let n = self.n;
+        if party_rngs.len() != n {
+            return Err(PreprocessError::InvalidThreshold {
+                t: n,
+                n: party_rngs.len(),
+            });
+        }
+        if checks == 0 {
+            return Ok(());
+        }
+        let staged = self.refill_ext2_blind_pool(checks, party_rngs);
+        if staged.is_err() {
+            self.poison_ext2_blind_pool();
+        }
+        staged
+    }
+
+    fn poison_ext2_blind_pool(&mut self) {
+        self.blind_pool.ext2_poisoned = true;
+        self.blind_pool.ext2_triples.clear();
+    }
+
+    fn refill_ext2_blind_pool(
+        &mut self,
+        checks: usize,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), PreprocessError> {
+        let n = self.n;
+        let first_serial = self.blind_pool.ext2_staged;
+        let next_staged = first_serial
+            .checked_add(checks as u64)
+            .ok_or(EXT2_BLIND_POOL_EXHAUSTED)?;
+        let refill = self.blind_pool.ext2_refills;
+        self.blind_pool.ext2_refills = refill.checked_add(1).ok_or(EXT2_BLIND_POOL_EXHAUSTED)?;
+        #[cfg(test)]
+        if core::mem::take(&mut self.blind_pool.fail_next_ext2_refill) {
+            return Err(EXT2_BLIND_POOL_POISONED);
+        }
+        // Seven frames vs three in `blind_open_degree_ext2` and five in `blind_open_ext2_pooled`,
+        // so frame-count length prefixing guarantees complete domain disjointness with zero new labels.
+        let refill_sid = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BLIND.EXT2.DEG/v1",
+            &[
+                &self.session_id,
+                b"ext2_blind_pool_refill",
+                &(n as u64).to_be_bytes(),
+                &refill.to_be_bytes(),
+                &first_serial.to_be_bytes(),
+                &(checks as u64).to_be_bytes(),
+                &self.transcript,
+            ],
+        );
+        let draw = |rngs: &mut [PartyPrivateRng]| {
+            SecretBuffer(
+                rngs.iter_mut()
+                    .map(|rng| (0..checks).map(|_| rng.next_ext2()).collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let masks = draw(party_rngs);
+        let randomizers = draw(party_rngs);
+        let products = SecretBuffer(ole_blind_ext2_batch(
+            &refill_sid,
+            self,
+            &randomizers,
+            &masks,
+            party_rngs,
+        )?);
+        self.blind_pool.ext2_triples.reserve(checks);
+        for k in 0..checks {
+            let column = |rows: &[Vec<GoldilocksExt2>]| {
+                SecretBuffer(rows.iter().map(|row| row[k]).collect::<Vec<_>>())
+            };
+            self.blind_pool.ext2_triples.push(Ext2BlindTriple {
+                serial: first_serial + k as u64,
+                r: column(&randomizers),
+                a: column(&masks),
+                c: column(&products),
+            });
+        }
+        self.blind_pool.ext2_staged = next_staged;
+        Ok(())
+    }
+
+    /// Pooled multiplicative blinding of an additive `GoldilocksExt2` residual `d`.
+    ///
+    /// Pops one single-use triple `(r, a, c = r * a)`, commit-opens `e = d + a`, and then
+    /// commit-opens `w = r * e - c = r * d`. An empty pool refills itself; any failed refill or
+    /// rejected commitment permanently poisons and wipes the pool.
+    fn blind_open_ext2_pooled(
+        &mut self,
+        session_id: &[u8; 32],
+        phase: &'static str,
+        residual: &[GoldilocksExt2],
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<GoldilocksExt2, PreprocessError> {
+        if self.blind_pool.ext2_poisoned {
+            return Err(EXT2_BLIND_POOL_POISONED);
+        }
+        if self.blind_pool.ext2_triples.is_empty() {
+            self.prestage_ext2_blinded_checks(BLIND_AUTO_REFILL_CHECKS, party_rngs)?;
+        }
+        let Some(triple) = self.blind_pool.ext2_triples.pop() else {
+            self.poison_ext2_blind_pool();
+            return Err(EXT2_BLIND_POOL_POISONED);
+        };
+        let n = self.n;
+        let serial = triple.serial.to_be_bytes();
+        let opening_sid = |stage: &[u8]| {
+            cshake256_32_multi_frame(
+                b"QSAG.SPDZ.BLIND.EXT2.DEG/v1",
+                &[
+                    session_id,
+                    phase.as_bytes(),
+                    &self.session_id,
+                    &serial,
+                    stage,
+                ],
+            )
+        };
+        let (mask_sid, product_sid) = (opening_sid(b"mask"), opening_sid(b"product"));
+        let masked = SecretBuffer(
+            (0..n)
+                .map(|p| residual[p] + triple.a[p])
+                .collect::<Vec<_>>(),
+        );
+        let e = match commit_and_open_additive_ext2(&mask_sid, phase, &masked, party_rngs) {
+            Ok(e) => e,
+            Err(err) => {
+                self.poison_ext2_blind_pool();
+                return Err(err);
+            }
+        };
+        let shares = SecretBuffer(
+            (0..n)
+                .map(|p| blinding_ext2_product(triple.r[p], e) - triple.c[p])
+                .collect::<Vec<_>>(),
+        );
+        match commit_and_open_additive_ext2(&product_sid, phase, &shares, party_rngs) {
+            Ok(w) => Ok(w),
+            Err(err) => {
+                self.poison_ext2_blind_pool();
+                Err(err)
+            }
+        }
     }
 
     /// Stage single-use blinding material for `checks` further MAC checks.
@@ -636,6 +913,11 @@ impl OtMesh {
 #[inline(never)]
 fn blinding_tower_product(a: Tower128, b: Tower128) -> Tower128 {
     a.mul(b)
+}
+
+#[inline(never)]
+fn blinding_ext2_product(a: GoldilocksExt2, b: GoldilocksExt2) -> GoldilocksExt2 {
+    a * b
 }
 
 /// Entropy-amplified native-field Tower OLE with six independent 128-bit receiver masks.
@@ -1164,6 +1446,99 @@ mod tests {
     }
 
     #[test]
+    fn pooled_ext2_blinding_consumes_each_triple_once_and_fails_closed() {
+        let n = 3;
+        let sid = [0x4e; 32];
+        let mut rngs = tower_rngs(n, 0x73);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+        assert_eq!(mesh.staged_ext2_blinded_checks(), 0);
+        mesh.prestage_ext2_blinded_checks(3, &mut rngs).unwrap();
+        assert_eq!(mesh.staged_ext2_blinded_checks(), 3);
+        assert_eq!(
+            mesh.staged_ext2_blinding_serials(),
+            (0..3).collect::<Vec<u64>>()
+        );
+
+        let sum = |v: &[GoldilocksExt2]| v.iter().copied().fold(GoldilocksExt2::ZERO, |a, b| a + b);
+        let mut seen = Vec::new();
+        for triple in &mesh.blind_pool.ext2_triples {
+            let (r, a, c) = (sum(&triple.r), sum(&triple.a), sum(&triple.c));
+            assert!(c.ct_eq(r * a));
+            assert!(!seen.contains(&r) && !seen.contains(&a));
+            seen.push(r);
+            seen.push(a);
+        }
+
+        let g1 = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(55),
+            Goldilocks::from_u64_reduced(11),
+        );
+        let g2 = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(23),
+            Goldilocks::from_u64_reduced(99),
+        );
+        let zero = [g1, g2, -(g1 + g2)];
+        let w = blind_open_ext2(&sid, "ext2_pool_zero", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(w.ct_eq(GoldilocksExt2::ZERO));
+        assert_eq!(
+            mesh.staged_ext2_blinding_serials(),
+            (0..2).collect::<Vec<u64>>()
+        );
+
+        let d = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(0x1234_5678),
+            Goldilocks::from_u64_reduced(0x9abc_def0),
+        );
+        let bad = [d + g1, -g1, GoldilocksExt2::ZERO];
+        let w1 = blind_open_ext2(&sid, "ext2_pool_bad", &bad, Some(&mut mesh), &mut rngs).unwrap();
+        assert_eq!(mesh.staged_ext2_blinding_serials(), vec![0]);
+        let w2 = blind_open_ext2(&sid, "ext2_pool_bad", &bad, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(mesh.staged_ext2_blinding_serials().is_empty());
+        assert!(!w1.ct_eq(GoldilocksExt2::ZERO) && !w2.ct_eq(GoldilocksExt2::ZERO));
+        assert!(!w1.ct_eq(w2) && !w1.ct_eq(d) && !w2.ct_eq(d));
+
+        // Automatic refill issues strictly fresh monotone serials >= 3.
+        let w = blind_open_ext2(&sid, "ext2_pool_zero", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        assert!(w.ct_eq(GoldilocksExt2::ZERO));
+        let refilled = mesh.staged_ext2_blinding_serials();
+        assert_eq!(refilled.len(), BLIND_AUTO_REFILL_CHECKS - 1);
+        assert!(refilled.iter().all(|&s| s >= 3));
+
+        // Wrong shapes are refused before spending a triple.
+        let before = mesh.staged_ext2_blinding_serials();
+        assert!(
+            blind_open_ext2(
+                &sid,
+                "ext2_pool_shape",
+                &zero[..2],
+                Some(&mut mesh),
+                &mut rngs
+            )
+            .is_err()
+        );
+        assert_eq!(mesh.staged_ext2_blinding_serials(), before);
+
+        // Failed refill poisons permanently and wipes all staged triples.
+        while mesh.staged_ext2_blinded_checks() > 0 {
+            blind_open_ext2(&sid, "ext2_drain", &zero, Some(&mut mesh), &mut rngs).unwrap();
+        }
+        mesh.fail_next_ext2_blinding_refill();
+        assert_eq!(
+            blind_open_ext2(&sid, "ext2_fail", &zero, Some(&mut mesh), &mut rngs),
+            Err(EXT2_BLIND_POOL_POISONED)
+        );
+        assert!(mesh.ext2_blinding_poisoned());
+        assert_eq!(
+            blind_open_ext2(&sid, "ext2_fail", &zero, Some(&mut mesh), &mut rngs),
+            Err(EXT2_BLIND_POOL_POISONED)
+        );
+        assert_eq!(
+            mesh.prestage_ext2_blinded_checks(1, &mut rngs),
+            Err(EXT2_BLIND_POOL_POISONED)
+        );
+    }
+
+    #[test]
     fn repeated_aborts_with_fixed_alpha_open_fresh_field_permutations() {
         let sid = [0x4b; 32];
         let alpha = GoldilocksExt2::new(
@@ -1176,9 +1551,9 @@ mod tests {
         for tape in 1..=16 {
             let mut private = rngs(tape);
             let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut private);
-            let mut reference = rngs(tape);
-            let _ = OtMesh::establish_ideal_for_test(sid, &mut reference);
-            let r = reference[0].next_ext2() + reference[1].next_ext2();
+            mesh.prestage_ext2_blinded_checks(1, &mut private).unwrap();
+            let r = mesh.next_ext2_blinding_randomizer().unwrap();
+            assert_eq!(mesh.staged_ext2_blinding_serials(), vec![0]);
             let w = blind_open_ext2(
                 &sid,
                 "fixed_alpha_abort",
@@ -1187,7 +1562,8 @@ mod tests {
                 &mut private,
             )
             .unwrap();
-            assert_eq!(w, r * d, "OLE must open exactly the blinded residual");
+            assert!(mesh.staged_ext2_blinding_serials().is_empty());
+            assert_eq!(w, r * d, "pooled OLE must open exactly r * d");
             assert!(!w.ct_eq(GoldilocksExt2::ZERO));
             assert!(!w.ct_eq(d), "raw -delta*alpha residual escaped");
             assert!(!seen.contains(&w), "random tapes reused a check value");
@@ -1204,6 +1580,58 @@ mod tests {
                 assert_eq!((honest_r + corrupt_r) * residual, target);
             }
         }
+    }
+
+    #[test]
+    #[ignore = "retained OtMesh GoldilocksExt2 pooled vs direct blinding latency"]
+    fn bench_ext2_retained_mesh_mac_latency() {
+        let n = 3;
+        let sid = [0x4f; 32];
+        let mut rngs = tower_rngs(n, 0x81);
+        let t_setup = std::time::Instant::now();
+        let mut mesh = OtMesh::establish(sid, &mut rngs).unwrap();
+        let setup_ms = t_setup.elapsed().as_secs_f64() * 1e3;
+
+        let checks = 64usize;
+        let t_refill = std::time::Instant::now();
+        mesh.prestage_ext2_blinded_checks(checks, &mut rngs)
+            .unwrap();
+        let refill_ms = t_refill.elapsed().as_secs_f64() * 1e3;
+
+        let g1 = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(101),
+            Goldilocks::from_u64_reduced(202),
+        );
+        let g2 = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(303),
+            Goldilocks::from_u64_reduced(404),
+        );
+        let zero = [g1, g2, -(g1 + g2)];
+        let mut samples = Vec::with_capacity(checks);
+        for i in 0..checks {
+            let call_sid = [i as u8; 32];
+            let t0 = std::time::Instant::now();
+            let w = blind_open_ext2(
+                &call_sid,
+                "bench_ext2_pool",
+                &zero,
+                Some(&mut mesh),
+                &mut rngs,
+            )
+            .unwrap();
+            samples.push(t0.elapsed().as_secs_f64() * 1e3);
+            assert!(w.ct_eq(GoldilocksExt2::ZERO));
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        std::eprintln!(
+            "GoldilocksExt2 retained mesh (n={n}): setup={setup_ms:.2} ms, \
+             refill({checks})={refill_ms:.2} ms ({:.3} ms/check), \
+             online min={:.3} / median={:.3} / max={:.3} ms",
+            refill_ms / checks as f64,
+            samples[0],
+            samples[checks / 2],
+            samples[checks - 1],
+        );
     }
 
     #[test]

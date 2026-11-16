@@ -51,7 +51,8 @@ use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::keccak_mpc::DkgCachedSubtrees;
 use crate::preprocessing::{
     OtMesh, PartyPrivateRng, PreprocessError, PreprocessedPoseidonPartyVault,
-    commit_and_open_spdz_goldilocks_batch_quorum, run_dealerless_pi_pow7_with_alpha,
+    commit_and_open_spdz_goldilocks_batch_quorum,
+    commit_and_open_spdz_goldilocks_batch_quorum_with_mesh, run_dealerless_pi_pow7_with_alpha,
     spdz_authenticate_goldilocks_batch_ext2, spdz_setup_alpha_goldilocks,
     validate_all_eval_points_goldilocks,
 };
@@ -3555,11 +3556,41 @@ fn flush_verify_and_open_hem_digests4(
     vaults: &mut [&mut PreprocessedPoseidonPartyVault],
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<HemDigest4>, Poseidon2MpcError> {
+    flush_verify_and_open_hem_digests4_with_mesh(
+        session_id,
+        phase,
+        t,
+        quorum_pts,
+        cut_digests_per_party,
+        pending,
+        key_shares,
+        vaults,
+        party_rngs,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Two-stage cut barrier binds session, phase, quorum, cut digests, pending checks, party state and optional retained OT mesh"
+)]
+fn flush_verify_and_open_hem_digests4_with_mesh(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    t: usize,
+    quorum_pts: &[Goldilocks],
+    cut_digests_per_party: &[Vec<[AuthGlWire; 4]>],
+    pending: &mut SpdzGoldilocksPendingChecks,
+    key_shares: &mut [&mut Poseidon2SpdzAuthenticatedKeyShare],
+    vaults: &mut [&mut PreprocessedPoseidonPartyVault],
+    party_rngs: &mut [PartyPrivateRng],
+    mut mesh: Option<&mut OtMesh>,
+) -> Result<Vec<HemDigest4>, Poseidon2MpcError> {
     let m = quorum_pts.len();
     let num_digests = cut_digests_per_party[0].len();
     let alpha = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
 
-    let intermediate = commit_and_open_spdz_goldilocks_batch_quorum(
+    let intermediate = commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
         session_id,
         "hem_pre_cut_intermediate_mac",
         t,
@@ -3568,6 +3599,7 @@ fn flush_verify_and_open_hem_digests4(
         &pending.macs_per_party,
         &alpha,
         party_rngs,
+        mesh.as_deref_mut(),
     );
     pending.clear_and_wipe();
     match intermediate {
@@ -3590,8 +3622,8 @@ fn flush_verify_and_open_hem_digests4(
         }
     }
 
-    let opened_res = commit_and_open_spdz_goldilocks_batch_quorum(
-        session_id, phase, t, quorum_pts, &all_sh, &all_mac, &alpha, party_rngs,
+    let opened_res = commit_and_open_spdz_goldilocks_batch_quorum_with_mesh(
+        session_id, phase, t, quorum_pts, &all_sh, &all_mac, &alpha, party_rngs, mesh,
     );
     drop(all_sh);
     drop(all_mac);
@@ -4537,7 +4569,7 @@ fn release_additive_hem_prf_check_inner(
         },
     );
     drop(inputs);
-    let opened = flush_verify_and_open_hem_digests4(
+    let opened = flush_verify_and_open_hem_digests4_with_mesh(
         &sid,
         "personal_release_cut",
         t,
@@ -4547,6 +4579,7 @@ fn release_additive_hem_prf_check_inner(
         &mut [],
         &mut vault_refs,
         party_rngs,
+        Some(ot_mesh),
     )?;
     opened
         .first()

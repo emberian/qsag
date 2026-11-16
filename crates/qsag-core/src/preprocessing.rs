@@ -55,9 +55,9 @@ use crate::wipe::{
 
 mod mac_blind;
 mod triple_f2;
-pub use mac_blind::blind_open_additive_gf128_poly;
+pub use mac_blind::{blind_open_additive_gf128_poly, blind_open_ext2};
 pub(crate) use mac_blind::blind_open_tower128;
-use mac_blind::{blind_open_degree_ext2, blind_open_degree_tower128, blind_open_ext2};
+use mac_blind::{blind_open_degree_ext2, blind_open_degree_tower128};
 
 // ============================================================================
 // 0. Preprocessing Errors & Identifiable Cheater Attribution
