@@ -3908,15 +3908,15 @@ mod tests {
             &[0, 2],
             3,
             100,
-            &mut test_party_rngs(200, 3),
-            &mut test_party_rngs(210, 100),
+            &mut test_party_rngs(10, 3),
+            &mut test_party_rngs(20, 100),
         )
         .expect("reshare to 3-of-100");
         assert_eq!(qsb.public_key(), pk_initial);
         assert_eq!(qsb.threshold_and_size(), (3, 100));
 
         // Proactive refresh across all 100 custodians.
-        qsb.proactive_refresh([0x63; 32], &mut test_party_rngs(320, 100))
+        qsb.proactive_refresh([0x63; 32], &mut test_party_rngs(140, 100))
             .expect("proactive refresh on 3-of-100");
         assert_eq!(qsb.public_key(), pk_initial);
 

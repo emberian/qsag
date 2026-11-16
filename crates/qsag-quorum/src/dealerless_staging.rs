@@ -3898,10 +3898,10 @@ mod tests {
         // Honest zero residual passes cleanly without revealing raw `sigmas[u]`.
         let opened = [0xdead_beef_cafe_babeu64];
         let mut honest_macs = vec![vec![[0u128; 64]; 1]; m];
-        for bit in 0..64 {
-            if ((opened[0] >> bit) & 1) == 1 {
-                for u in 0..m {
-                    honest_macs[u][0][bit] = deltas_a[u];
+        for (u, party_macs) in honest_macs.iter_mut().enumerate() {
+            for (bit, slot) in party_macs[0].iter_mut().enumerate() {
+                if ((opened[0] >> bit) & 1) == 1 {
+                    *slot = deltas_a[u];
                 }
             }
         }

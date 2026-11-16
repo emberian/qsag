@@ -4777,7 +4777,13 @@ mod tests {
                     party == owner
                 );
             }
-            assert!(!child.matches_signing_party(owner, &[0; 32], b"other", b"context", &[1, 2, 4]));
+            assert!(!child.matches_signing_party(
+                owner,
+                &[0; 32],
+                b"other",
+                b"context",
+                &[1, 2, 4]
+            ));
             let again = child.into_quorum_party_tokens();
             assert_eq!(again.len(), 1);
             assert_eq!(again[0].party_id(), Some(owner));
