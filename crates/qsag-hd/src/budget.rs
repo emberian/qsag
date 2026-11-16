@@ -137,6 +137,42 @@ fn checkpoint_at_least(current: LedgerCheckpoint, minimum: LedgerCheckpoint) -> 
         || (current.generation == minimum.generation && ct_eq_bytes(&current.tag, &minimum.tag))
 }
 
+// Shared by live reservations and recovery immediately before any repair writes.
+fn verify_data_identity(
+    path: &Path,
+    file: &File,
+    data_seal: &[u8; 16],
+    expected_len: u64,
+) -> Result<(), HdError> {
+        let path_meta = storage(fs::symlink_metadata(path))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if path_meta.permissions().mode() & 0o077 != 0 {
+                return Err(HdError::BudgetStorageFailed);
+            }
+        }
+        if !path_meta.is_file() || !ct_eq_bytes(&file_identity(&path_meta), data_seal) {
+            return Err(HdError::BudgetStorageFailed);
+        }
+        let fd_meta = storage(file.metadata())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if fd_meta.permissions().mode() & 0o077 != 0 {
+                return Err(HdError::BudgetStorageFailed);
+            }
+        }
+        if !fd_meta.is_file()
+            || !ct_eq_bytes(&file_identity(&fd_meta), data_seal)
+            || path_meta.len() != expected_len
+            || fd_meta.len() != expected_len
+        {
+            return Err(HdError::BudgetStorageFailed);
+        }
+        Ok(())
+}
+
 impl DurableQueryBudget {
     pub fn checkpoint(&self) -> LedgerCheckpoint {
         LedgerCheckpoint {
@@ -354,9 +390,8 @@ impl DurableQueryBudget {
             .ok_or(HdError::BudgetStorageFailed)?;
         let tail_len = records_slice.len() - verified * RECORD;
         // An interrupted `reserve` leaves at most one record's worth of unauthenticated
-        // bytes after the chain, with every readable slot still on the chain's count.
-        // Nothing else is a torn append: a longer tail, or a tail behind a record the
-        // slots have not reached, is refused before anything is written.
+        // bytes after the chain. Every readable slot must be on the chain's count
+        // or one behind it; a longer tail or wider lag is refused before writing.
         if tail_len > RECORD {
             return Err(HdError::BudgetStorageFailed);
         }
@@ -365,6 +400,10 @@ impl DurableQueryBudget {
         let slot_b =
             &payload[HWM_SLOT_B_PAYLOAD_OFFSET..HWM_SLOT_B_PAYLOAD_OFFSET + HWM_SLOT_BYTES];
 
+        // The bounded reader opens its own descriptor; recheck the held descriptor,
+        // path, and permanent lock after reading, before healing either HWM slot.
+        storage(record.verify_lock_identity(&record.lock_identity_seal()))?;
+        verify_data_identity(&path_buf, &file, &data_seal, file_meta.len())?;
         // Rejects tail truncation and unexplained gaps; heals the crash states (record
         // synced before slot A, slot A synced before slot B, one slot torn mid-write).
         storage(binding.with_hwm(|hwm| {
@@ -390,6 +429,8 @@ impl DurableQueryBudget {
             storage(binding.with_hwm(|hwm| hwm.commit(&file, used, &prev_mac)))?;
         }
 
+        verify_data_identity(&path_buf, &file, &data_seal,
+            (FILE_PREFIX_BYTES + verified * RECORD) as u64)?;
         let lock_identity = record.lock_identity_seal();
         Ok(Self {
             path: path_buf,
@@ -425,34 +466,8 @@ impl DurableQueryBudget {
 
     fn verify_live_journal_integrity(&self) -> Result<(), HdError> {
         storage(self.record.verify_lock_identity(&self.lock_identity))?;
-        let path_meta = storage(fs::symlink_metadata(&self.path))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if path_meta.permissions().mode() & 0o077 != 0 {
-                return Err(HdError::BudgetStorageFailed);
-            }
-        }
-        if !path_meta.is_file() || !ct_eq_bytes(&file_identity(&path_meta), &self.data_seal) {
-            return Err(HdError::BudgetStorageFailed);
-        }
         let expected_len = (FILE_PREFIX_BYTES + ((self.used as usize) + 1) * RECORD) as u64;
-        let fd_meta = storage(self.file.metadata())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if fd_meta.permissions().mode() & 0o077 != 0 {
-                return Err(HdError::BudgetStorageFailed);
-            }
-        }
-        if !fd_meta.is_file()
-            || !ct_eq_bytes(&file_identity(&fd_meta), &self.data_seal)
-            || path_meta.len() != expected_len
-            || fd_meta.len() != expected_len
-        {
-            return Err(HdError::BudgetStorageFailed);
-        }
-        Ok(())
+        verify_data_identity(&self.path, &self.file, &self.data_seal, expected_len)
     }
 
     /// Burns even if later protocol work aborts. Any I/O or path-integrity error
@@ -941,6 +956,73 @@ mod tests {
         tail.extend_from_slice(&budget.next);
         let bytes = budget.with_tail(&tail);
         budget.assert_fails_closed(&bytes);
+    }
+
+    #[test]
+    fn failed_reservation_stays_poisoned_before_and_after_append() {
+        struct FailingAnchor;
+        impl ExternalMonotoneAnchor for FailingAnchor {
+            fn load(&self) -> io::Result<Option<LedgerCheckpoint>> { Ok(None) }
+            fn advance(&self, _: LedgerCheckpoint) -> io::Result<()> {
+                Err(io::Error::other("injected anchor failure"))
+            }
+        }
+        let fixture = TwoUses::new("failed-reserve");
+        std::fs::write(&fixture.path, &fixture.committed).unwrap();
+        let mut live = fixture.open().unwrap();
+        // Same inode and length, but the held descriptor cannot write.
+        live.file = File::open(&fixture.path).unwrap();
+        assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
+        assert_eq!(live.used(), 2);
+        live.file = OpenOptions::new().read(true).write(true).open(&fixture.path).unwrap();
+        assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.committed);
+        drop(live);
+        // Fail after record + slots have reached disk: that use must remain burned.
+        let mut live = fixture.open().unwrap();
+        live.anchor = Some(Box::new(FailingAnchor));
+        assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
+        assert_eq!(live.used(), 3);
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.advanced);
+        live.anchor = None;
+        assert_eq!(live.reserve(), Err(HdError::BudgetStorageFailed));
+        drop(live);
+        let mut recovered = fixture.open().unwrap();
+        assert_eq!(recovered.used(), 3);
+        recovered.reserve().unwrap();
+        assert_eq!(recovered.used(), 4);
+    }
+
+    #[test]
+    fn lone_lagging_slot_with_every_torn_tail_length() {
+        let journal = TwoUses::new("lone-lag-tail");
+        for damaged in [HWM_PAGE_BYTES as usize, 2 * HWM_PAGE_BYTES as usize] {
+            for tail_len in 1..=RECORD {
+                let mut bytes = journal.committed.clone();
+                bytes.extend_from_slice(&journal.next);
+                bytes.extend_from_slice(&junk(tail_len, 71));
+                bytes[damaged..damaged + HWM_SLOT_BYTES].fill(0xa5);
+                std::fs::write(&journal.path, &bytes).unwrap();
+                let recovered = journal.open().unwrap();
+                assert_eq!(recovered.used(), 3);
+                drop(recovered);
+                assert_eq!(std::fs::read(&journal.path).unwrap(), journal.advanced);
+            }
+        }
+        // A valid survivor two records behind cannot justify truncating a tail.
+        let mut live = journal.open().unwrap();
+        live.reserve().unwrap();
+        drop(live);
+        let advanced_twice = std::fs::read(&journal.path).unwrap();
+        for tail_len in 1..=RECORD {
+            let mut bytes = advanced_twice.clone();
+            bytes[HWM_PAGE_BYTES as usize..HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES].fill(0xa5);
+            bytes[2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES]
+                .copy_from_slice(&journal.committed[2 * HWM_PAGE_BYTES as usize..2 * HWM_PAGE_BYTES as usize + HWM_SLOT_BYTES]);
+            bytes.extend_from_slice(&junk(tail_len, 72));
+            std::fs::write(&journal.path, &bytes).unwrap();
+            journal.assert_fails_closed(&bytes);
+        }
     }
 
     #[test]
