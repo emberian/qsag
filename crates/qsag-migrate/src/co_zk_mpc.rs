@@ -746,8 +746,6 @@ impl CoZkCustodianShare {
         transcript_fn: impl FnOnce(&[u8; 32]) -> InterleavedTranscript,
         verify_fn: impl FnOnce(&MigrationZkProof) -> Result<(), Error>,
     ) -> Result<MigrationZkProof, Error> {
-        #[cfg(test)]
-        let phase_start = std::time::Instant::now();
         e.agree(cshake256_framed_32(
             b"QSAG.OUTER.STATEMENT.V1",
             &[
@@ -848,11 +846,6 @@ impl CoZkCustodianShare {
         let mut computed_batches =
             compute_batches(e, circuit, witness, &local_batches, children, &self.entropy)?;
 
-        #[cfg(test)]
-        std::eprintln!(
-            "BENCH cozk phase=evaluate elapsed_ns={}",
-            phase_start.elapsed().as_nanos()
-        );
         // Cross-batch barrier: all custodians confirm every batch passed active
         // multiplication verification before ANY view commitment or output opens.
         e.agree(cshake256_framed_32(
@@ -874,11 +867,6 @@ impl CoZkCustodianShare {
             public.extend(rounds);
         }
 
-        #[cfg(test)]
-        std::eprintln!(
-            "BENCH cozk phase=commit elapsed_ns={}",
-            phase_start.elapsed().as_nanos()
-        );
         let roots: Vec<_> = public
             .iter()
             .enumerate()
@@ -1084,18 +1072,7 @@ impl CoZkCustodianShare {
             views_merkle_root: root,
             repetitions,
         };
-        #[cfg(test)]
-        std::eprintln!(
-            "BENCH cozk phase=open elapsed_ns={}",
-            phase_start.elapsed().as_nanos()
-        );
         verify_fn(&proof)?;
-        #[cfg(test)]
-        std::eprintln!(
-            "BENCH cozk repetitions={} proof_bytes={}",
-            proof.repetitions.len(),
-            crate::benchmarks::proof_bytes(&proof)
-        );
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
         e.audit(self, witness, &audit_inputs, &proof);
