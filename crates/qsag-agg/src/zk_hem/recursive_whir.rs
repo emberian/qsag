@@ -268,14 +268,14 @@ impl<W: Base> Ext<W> {
         };
         let products: [W; 7] =
             core::array::from_fn(|i| b.mul(&evaluate(self, i as u64), &evaluate(v, i as u64)));
-        // Each output is a seven-term form over fresh product wires. Keep it
-        // linear: allocating four redundant equality wires would push the merge
-        // over the next power-of-two commitment domain.
+        // Materialize the interpolated limbs once. Reusing seven-term output forms
+        // in later products inflates the sparse hologram even when row counts look small.
         Self(core::array::from_fn(|i| {
-            products
+            let limb = products
                 .iter()
                 .zip(REDUCE[i])
-                .fold(W::constant(F::ZERO), |a, (p, c)| a.plus(&p.scale(f(c))))
+                .fold(W::constant(F::ZERO), |a, (p, c)| a.plus(&p.scale(f(c))));
+            b.pin(limb)
         }))
     }
 
@@ -829,10 +829,7 @@ fn sample_queries<B: Backend>(
 
     // 3. Allocate strictly ordered address table `0 <= a_0 < a_1 < ... < a_{K-1} < groups`
     //    and final `(val, ts)` entries, plus causal step `(rep_val, rep_ts, idx_val, idx_ts)`.
-    let ts_bits = (2 * count + 1)
-        .next_power_of_two()
-        .trailing_zeros()
-        .max(1) as usize;
+    let ts_bits = (2 * count + 1).next_power_of_two().trailing_zeros().max(1) as usize;
     assert!(depth <= 30 && ts_bits <= 10);
     let one = B::W::constant(F::ONE);
 
@@ -1514,6 +1511,12 @@ impl Drop for Oracle {
         }
     }
 }
+struct SecretBases(Vec<F>);
+impl Drop for SecretBases {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, F::ZERO);
+    }
+}
 struct SecretExts(Vec<E>);
 impl Drop for SecretExts {
     fn drop(&mut self) {
@@ -1562,7 +1565,7 @@ fn dot(a: &[E], b: &[E]) -> E {
 /// A fixed-path commitment to a base-field evaluation table, kept by the prover until it
 /// opens. Holds the committed polynomial; erased on drop.
 pub struct RecursionCommitment {
-    coeffs: SecretExts,
+    coeffs: SecretBases,
     oracle: Oracle,
 }
 impl RecursionCommitment {
@@ -1591,10 +1594,11 @@ pub fn commit_for_recursion(
     // The two overflow coefficients of the first oracle are zero, so its codeword is the
     // base-field encoding of the committed coefficients.
     let oracle = Oracle::base(&base, spec.blowup, 1 << spec.step_vars);
-    let mut coeffs = SecretExts(vec![E::ZERO; base.len() + 2]);
-    crate::pcs::fill_indexed(&mut coeffs.0[..base.len()], |i| E::from_base(base[i]));
-    qsag_asm::volatile_fill(&mut base, F::ZERO);
-    Ok(RecursionCommitment { coeffs, oracle })
+    base.extend([F::ZERO; 2]);
+    Ok(RecursionCommitment {
+        coeffs: SecretBases(base),
+        oracle,
+    })
 }
 
 /// Commit to a base-field evaluation table and prove its multilinear evaluation using
@@ -1626,9 +1630,12 @@ pub fn open_for_recursion(
         .ok_or(RecursiveWhirError::InvalidParameters)?;
     let _phase = crate::profile::span("recursion_open");
     let RecursionCommitment {
-        mut coeffs,
+        coeffs: base_coeffs,
         mut oracle,
     } = committed;
+    let mut coeffs = SecretExts(vec![E::ZERO; base_coeffs.0.len()]);
+    crate::pcs::fill_indexed(&mut coeffs.0, |i| E::from_base(base_coeffs.0[i]));
+    drop(base_coeffs);
     if point.len() != nv || coeffs.0.len() != (1usize << nv) + 2 {
         return Err(RecursiveWhirError::InvalidParameters);
     }
@@ -1784,7 +1791,11 @@ pub fn open_for_recursion(
             let mut weight = gamma;
             for (z, e) in shifted {
                 claim += weight * e.value(&b);
-                crate::pcs::affine::add_geometric_scaled_in_place(&mut kernel, weight, E::from_base(z));
+                crate::pcs::affine::add_geometric_scaled_in_place(
+                    &mut kernel,
+                    weight,
+                    E::from_base(z),
+                );
                 weight *= gamma;
             }
             oracle = next;
@@ -1801,7 +1812,7 @@ pub fn open_for_recursion(
 /// Reusable non-hiding recursion commitment (used for deterministic public [`ShapeHologram`]
 /// commitments so one compiled hologram can open across any number of recursive proofs).
 pub struct PublicRecursionCommitment {
-    coeffs: Vec<E>,
+    coeffs: Vec<F>,
     oracle: Oracle,
 }
 
@@ -1842,11 +1853,10 @@ impl PublicRecursionCommitment {
         if evaluations.len() != 1usize << nv {
             return Err(RecursiveWhirError::InvalidParameters);
         }
-        let base = hypercube_to_monomial_coeffs(evaluations);
+        let mut coeffs = hypercube_to_monomial_coeffs(evaluations);
         let spec = params.schedule.stages[0];
-        let oracle = Oracle::base(&base, spec.blowup, 1 << spec.step_vars);
-        let mut coeffs = vec![E::ZERO; base.len() + 2];
-        crate::pcs::fill_indexed(&mut coeffs[..base.len()], |i| E::from_base(base[i]));
+        let oracle = Oracle::base(&coeffs, spec.blowup, 1 << spec.step_vars);
+        coeffs.extend([F::ZERO; 2]);
         Ok(Self { coeffs, oracle })
     }
 
@@ -1988,11 +1998,20 @@ pub(super) fn open_correlated3_for_recursion(
         return Err(RecursiveWhirError::InvalidParameters);
     }
     let mut b = Native::default();
-    let point_kernels: [Vec<E>; 3] =
-        core::array::from_fn(|j| crate::pcs::affine::monomial_table(&points[j]));
-    let coeffs_ref: [&[E]; 3] = [&w0.coeffs.0, &w1.coeffs, &w2.coeffs.0];
-    let cross_evals: [[E; 3]; 3] =
-        core::array::from_fn(|m| core::array::from_fn(|j| dot(coeffs_ref[m], &point_kernels[j])));
+    let coeffs_ref: [&[F]; 3] = [&w0.coeffs.0, &w1.coeffs, &w2.coeffs.0];
+    let mut cross_evals = [[E::ZERO; 3]; 3];
+    // Evaluate through square-root-sized Kronecker factors, without materializing
+    // a full extension table for each of the three points.
+    for (j, point) in points.iter().enumerate() {
+        let (lo, hi) = crate::pcs::split_monomial_table(point);
+        let values = sum_indexed(want_len - 2, |i| {
+            let kernel = lo[i % lo.len()] * hi[i / lo.len()];
+            core::array::from_fn::<_, 3, _>(|m| kernel.mul_base(coeffs_ref[m][i]))
+        });
+        for m in 0..3 {
+            cross_evals[m][j] = values[m];
+        }
+    }
 
     let mut proof = params.placeholder_correlated3();
     proof.cross_evals = cross_evals;
@@ -2017,12 +2036,14 @@ pub(super) fn open_correlated3_for_recursion(
 
     let mut coeffs = SecretExts(vec![E::ZERO; want_len]);
     crate::pcs::fill_indexed(&mut coeffs.0, |i| {
-        w0.coeffs.0[i] + mu * w1.coeffs[i] + mu2 * w2.coeffs.0[i]
+        E::from_base(w0.coeffs.0[i]) + mu.mul_base(w1.coeffs[i]) + mu2.mul_base(w2.coeffs.0[i])
     });
+    drop(w0.coeffs);
+    drop(w2.coeffs);
     let mut kernel = vec![E::ZERO; want_len];
-    crate::pcs::fill_indexed(&mut kernel, |i| {
-        point_kernels[0][i] + zeta * point_kernels[1][i] + zeta2 * point_kernels[2][i]
-    });
+    for (point, weight) in points.iter().zip(zeta_pows) {
+        crate::pcs::add_point_kernel(&mut kernel, weight, point);
+    }
     let mut claim = E::ZERO;
     for j in 0..3 {
         let mut col_sum = E::ZERO;
@@ -2077,8 +2098,12 @@ pub(super) fn open_correlated3_for_recursion(
                     .collect::<Vec<_>>(),
             );
             let phi = tr.ext(&mut b, 11);
-            crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
-            core::mem::swap(&mut kernel, &mut scratch_k);
+            if kernel.len() >= 1 << 20 {
+                crate::pcs::affine::fold_kernel_in_place(&mut kernel, phi.value(&b));
+            } else {
+                crate::pcs::affine::fold_kernel_into(&kernel, phi.value(&b), &mut scratch_k);
+                core::mem::swap(&mut kernel, &mut scratch_k);
+            }
             {
                 let (c, k) = (&coeffs.0, &kernel);
                 let tail = sum_indexed(c.len() / 2, |i| {
@@ -2107,9 +2132,13 @@ pub(super) fn open_correlated3_for_recursion(
             )
             .value(&b);
             let chal_values = core::array::from_fn(|i| chal[i].value(&b));
-            crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
-            qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
-            core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            if coeffs.0.len() >= 1 << 20 {
+                crate::pcs::affine::fold_coeffs_in_place(&mut coeffs.0, chal_values);
+            } else {
+                crate::pcs::affine::fold_coeffs_into(&coeffs.0, chal_values, &mut scratch_c.0);
+                qsag_asm::volatile_fill(&mut coeffs.0, E::ZERO);
+                core::mem::swap(&mut coeffs.0, &mut scratch_c.0);
+            }
             debug_assert_eq!(dot(&coeffs.0, &kernel), claim);
             proof.fold_polys[cursor] = wire;
             proof.fold_nonces[cursor] = nonce;
@@ -2133,7 +2162,12 @@ pub(super) fn open_correlated3_for_recursion(
             None
         } else {
             let next_spec = params.schedule.stages[stage + 1];
-            let next = Oracle::new(&coeffs.0, next_spec.blowup, 1 << next_spec.step_vars, stage + 1);
+            let next = Oracle::new(
+                &coeffs.0,
+                next_spec.blowup,
+                1 << next_spec.step_vars,
+                stage + 1,
+            );
             proof.later_stage_roots[stage] = next.root();
             proof.later_canopy_leaves[stage] = next.canopy_leaves();
             tr.absorb(&mut b, 3, &next.root());
@@ -2276,7 +2310,10 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
     }
     tr.absorb(b, 53, &roots0_words);
     let zs = [tr.ext(b, 4), tr.ext(b, 4)];
-    let ood0: Vec<_> = proof.ood_evals[0].iter().map(|&v| Ext::alloc(b, v)).collect();
+    let ood0: Vec<_> = proof.ood_evals[0]
+        .iter()
+        .map(|&v| Ext::alloc(b, v))
+        .collect();
     tr.absorb_exts(b, 5, &ood0);
     let mut cursor = 0usize;
     let mut remaining = nv;
@@ -2339,8 +2376,7 @@ pub(super) fn verify_correlated3_gadget<B: Backend>(
         let mut shifted = Vec::with_capacity(count);
         let sampled = sample_queries(b, tr, groups, count);
         if stage == 0 {
-            let mut canopies: [Canopy<B::W>; 3] =
-                core::array::from_fn(|_| Canopy::new(path_depth));
+            let mut canopies: [Canopy<B::W>; 3] = core::array::from_fn(|_| Canopy::new(path_depth));
             for (q, (index, binary)) in sampled.into_iter().enumerate() {
                 let triple = &proof.stage0_queries[q];
                 let tree_vals: [Vec<Ext<B::W>>; 3] = core::array::from_fn(|m| {
@@ -3099,7 +3135,11 @@ mod tests {
         proof7.queries[0][0].siblings[0][0] += F::ONE;
         assert!(!verify_fixed_path(&params7, &stmt7, &proof7));
         let (_, z7) = relation_for_child(&params7, &stmt7, &proof7);
-        assert!(!relation_for_child(&params7, &stmt7, &child(&params7, 9).1).0.is_satisfied(&z7));
+        assert!(
+            !relation_for_child(&params7, &stmt7, &child(&params7, 9).1)
+                .0
+                .is_satisfied(&z7)
+        );
 
         // Solve the affine bridge for a fake input claim after changing a polynomial.
         // Keeping the original challenges can make the final algebraic equation true,
@@ -3201,7 +3241,8 @@ mod tests {
         let w1 = PublicRecursionCommitment::commit(&params, &t1).unwrap();
         let w2 = commit_for_recursion(&params, &t2).unwrap();
         let roots0 = [w0.root(), w1.root(), w2.root()];
-        let pts: [Vec<E>; 3] = core::array::from_fn(|j| (0..nv).map(|i| sample(j * 11 + i)).collect());
+        let pts: [Vec<E>; 3] =
+            core::array::from_fn(|j| (0..nv).map(|i| sample(j * 11 + i)).collect());
         let claims = [
             [
                 Some(crate::field::mle_eval_base_at_ext4(&t0, &pts[0])),
@@ -3229,7 +3270,9 @@ mod tests {
             core::array::from_fn(|j| pts[j].iter().copied().map(Ext::constant).collect());
         let claims_c: [[Option<Ext<F>>; 3]; 3] =
             core::array::from_fn(|m| core::array::from_fn(|j| claims[m][j].map(Ext::constant)));
-        verify_correlated3_gadget(&mut b_v, &params, &mut tr_v, &roots0, &pts_c, &claims_c, &proof);
+        verify_correlated3_gadget(
+            &mut b_v, &params, &mut tr_v, &roots0, &pts_c, &claims_c, &proof,
+        );
         assert!(!b_v.failed);
 
         let mut cs = ConstraintSystem::new();
@@ -3250,7 +3293,13 @@ mod tests {
         let mut b_bad = Native::default();
         let mut tr_bad = Transcript::new();
         verify_correlated3_gadget(
-            &mut b_bad, &params, &mut tr_bad, &roots0, &pts_c, &claims_c, &bad_proof,
+            &mut b_bad,
+            &params,
+            &mut tr_bad,
+            &roots0,
+            &pts_c,
+            &claims_c,
+            &bad_proof,
         );
         assert!(b_bad.failed);
     }

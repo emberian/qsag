@@ -460,7 +460,10 @@ impl ConstraintSystem {
             1 + self.num_public,
             "public inputs are allocated first"
         );
-        assert!(self.p2_values.is_empty(), "public inputs are allocated first");
+        assert!(
+            self.p2_values.is_empty(),
+            "public inputs are allocated first"
+        );
         self.num_public += 1;
         self.alloc(value)
     }
@@ -659,7 +662,9 @@ impl ConstraintSystem {
         };
         let remap_lc = |lc: &Lc| -> Lc {
             let mut terms: Vec<(u32, F)> =
-                lc.0.iter().map(|&(v, coeff)| (remap_var(v), coeff)).collect();
+                lc.0.iter()
+                    .map(|&(v, coeff)| (remap_var(v), coeff))
+                    .collect();
             terms.sort_unstable_by_key(|&(v, _)| v);
             Lc(terms)
         };
