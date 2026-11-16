@@ -186,7 +186,8 @@ theorem tooth_frobenius_sbox_x2_differential_probability_one :
           towerMul 7 delta delta) ∧
       RatBound.lt sbox7MaxDiffProb128 badBound ∧
       ¬ strictlyMoreThanBits 125 badBound := by
-  refine ⟨RatBound.one, binaryPopcount_two, fun x delta => ?_, by decide, by decide⟩
+  refine ⟨RatBound.one, binaryPopcount_two, fun x delta => ?_,
+    by rw [RatBound.one_eq]; decide, by rw [RatBound.one_eq]; decide⟩
   rw [towerSq_add, towerAdd_comm 7 (towerMul 7 x x), towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
 
 theorem tooth_zero_round_constants_preserve_zero_subspace (mdsA mdsB : Tower128) :
@@ -556,11 +557,9 @@ def chainStepKatState : Nat → BitVec 128 × BitVec 128
 set_option maxRecDepth 8192 in
 theorem chainStepKat_tweak :
     rustDeriveChainTweak spnCshake256FramedXof chainStepKatPkSeed 7 3 2 = chainStepKatTweak := by
-  have hXof : spnCshake256FramedXof spnChainTweakCustomization
-      [chainStepKatPkSeed, be 4 7, be 2 3, [2]] 32 = _ := by
-    rw [spnChainTweakCustomization_eq]
-    exact cshake256_chain_tweak_kat
-  rw [rustDeriveChainTweak_eq, hXof, rustBytes32ToLanes_eq]
+  rw [rustDeriveChainTweak_eq, spnChainTweakCustomization_eq]
+  rw [show spnCshake256FramedXof _ [chainStepKatPkSeed, be 4 7, be 2 3, [2]] 32 = _ from
+    cshake256_chain_tweak_kat, rustBytes32ToLanes_eq]
   decide +kernel
 
 theorem chainStepKat_lanes : rustBytes32ToLanes chainStepKatCur = chainStepKatState 0 := by
@@ -588,7 +587,13 @@ theorem chainStepKat_rcs :
 /-- The six eight-round segments, from the kernel-evaluated field arithmetic of
     `rustSpnIter_chain_kat`; the hypothesis discharged here is that the 48 chunks of the Rust
     stream decode to its round-constant lanes. -/
-theorem chainStepKat_segments :=
+theorem chainStepKat_segments :
+    rustSpnIter (fun r => chainStepKatRcs (0 + r)) 8 (chainStepKatState 0) = chainStepKatState 1 ∧
+    rustSpnIter (fun r => chainStepKatRcs (8 + r)) 8 (chainStepKatState 1) = chainStepKatState 2 ∧
+    rustSpnIter (fun r => chainStepKatRcs (16 + r)) 8 (chainStepKatState 2) = chainStepKatState 3 ∧
+    rustSpnIter (fun r => chainStepKatRcs (24 + r)) 8 (chainStepKatState 3) = chainStepKatState 4 ∧
+    rustSpnIter (fun r => chainStepKatRcs (32 + r)) 8 (chainStepKatState 4) = chainStepKatState 5 ∧
+    rustSpnIter (fun r => chainStepKatRcs (40 + r)) 8 (chainStepKatState 5) = chainStepKatState 6 :=
   rustSpnIter_chain_kat _ rfl chainStepKatRustStream (by
     intro r hr
     rw [rustBytes32ToLanes_eq]
@@ -689,10 +694,20 @@ theorem lazyRo_query_regime_characterization (cardB : Nat) (hPos : 0 < cardB) (c
      QueryBounded 1 (oneQueryGuesser cardB hPos)) ∧
     2 * 1 < natAbsDiff (keyedPrfRealAccept 8 (fun _ => false) (fun _ => true) (buildFullTableReader 8 8 (Nat.le_refl 8)))
                        (keyedPrfIdealAccept 8 (fun _ => false) (buildFullTableReader 8 8 (Nat.le_refl 8))) := by
-  refine ⟨?_, ⟨?_, fun _ => trivial⟩, by decide⟩
-  · unfold keyedPrfRealAccept keyedPrfIdealAccept zeroQueryHardcoder evalOracleComp
-    simp [natAbsDiff]
-  · unfold keyedPrfRealAccept keyedPrfIdealAccept oneQueryGuesser evalOracleComp
+  refine ⟨?_, ⟨?_, ?_⟩, ?_⟩
+  · rw [keyedPrfRealAccept_def, keyedPrfIdealAccept_def]
+    unfold zeroQueryHardcoder evalOracleComp
+    simp [natAbsDiff_eq]
+  rotate_left
+  · unfold oneQueryGuesser
+    rw [QueryBounded_succ_query]
+    intro y
+    rw [QueryBounded_pure]
+    exact True.intro
+  · rw [keyedPrfRealAccept_def, keyedPrfIdealAccept_def, natAbsDiff_eq]
+    decide
+  · rw [keyedPrfRealAccept_def, keyedPrfIdealAccept_def]
+    unfold oneQueryGuesser evalOracleComp
     have hIdeal0 : qsum cardB (fun _ => (0 : Nat)) = 0 := by rw [qsum_const]; omega
     have hReal1 :
         qsum cardB (fun kStar : Fin cardB =>
@@ -712,7 +727,7 @@ theorem lazyRo_query_regime_characterization (cardB : Nat) (hPos : 0 < cardB) (c
       (qsum cardB (fun kStar : Fin cardB =>
         if (if (⟨0, hPos⟩ : Fin cardB) = kStar then true else false) = true then 1 else 0))
       (qsum cardB (fun _ => 0))
-    rw [hReal1, hIdeal0]
+    rw [hReal1, hIdeal0, natAbsDiff_eq]
     decide
 
 /-- **`#tooth` BHT 256-Bit Unrestricted Collision Ceiling (`~85.3` Quantum Bits)**:
@@ -725,10 +740,11 @@ theorem tooth_bht_256bit_unrestricted_collision_ceiling_85bits :
     exceedsBitBudget 128 (quantumBhtPureCubicBound 256 (2 ^ 43)) ∧
     (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 84 →
       atLeastBits 129 (quantumBhtCollisionBound 384 qHash)) := by
-  refine ⟨by unfold exceedsBitBudget quantumBhtPureCubicBound; decide,
-          by unfold exceedsBitBudget quantumBhtPureCubicBound; decide, ?_⟩
+  refine ⟨by unfold exceedsBitBudget; rw [quantumBhtPureCubicBound_eq]; decide,
+          by unfold exceedsBitBudget; rw [quantumBhtPureCubicBound_eq]; decide, ?_⟩
   intro qHash hq
-  unfold atLeastBits quantumBhtCollisionBound
+  unfold atLeastBits
+  rw [quantumBhtCollisionBound_def]
   dsimp only
   have hCube : (qHash + 1) ^ 3 ≤ (2 ^ 84) ^ 3 := Nat.pow_le_pow_left hq 3
   have hPow : 8 * (2 ^ 84) ^ 3 * 2 ^ 129 ≤ 2 ^ 384 := by decide
@@ -743,9 +759,10 @@ theorem tooth_merkle_right_blind_compression_collides :
     merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [1] =
       merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [2] ∧
     MerkleTweakCollision (fun _ _ (a : Nat) _ => a) := by
-  refine ⟨rfl, ?_⟩
-  unfold MerkleTweakCollision
-  exact ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
+  have hRoot : ∀ s : Nat, merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [s] = 7 := fun s =>
+    (merkleRootFromPath_cons _ _ _ _ _ _).trans (merkleRootFromPath_nil _ _ _ _)
+  refine ⟨(hRoot 1).trans (hRoot 2).symm, ?_⟩
+  exact (MerkleTweakCollision_iff _).mpr ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
 
 #verify_constructive tooth_bht_256bit_unrestricted_collision_ceiling_85bits
 #verify_constructive tooth_merkle_right_blind_compression_collides
@@ -791,17 +808,23 @@ def canopyToyProof : List Nat :=
 
 theorem canopyToy_honest_accepted :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-      canopyToyLeaves canopyToyProof = true := by decide
+      canopyToyLeaves canopyToyProof = true :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).1
 
 theorem canopyToy_sibling_count :
-    steinerSiblingCount 3 [1, 2, 6] = 4 := by decide
+    steinerSiblingCount 3 [1, 2, 6] = 4 :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.1
 
 /-- A flipped sibling digest (leaf `7` replaced) is rejected. -/
 theorem canopyToy_flipped_sibling_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       canopyToyLeaves
       [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
-       canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)] = false := by decide
+       canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)] = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.1
 
 /-- `#tooth`: a proof differing from the honest one in a single sibling digest is rejected. -/
 theorem tooth_canopy_sibling_mutation :
@@ -829,35 +852,47 @@ theorem inhabited_canopy_nonempty_opening :
 theorem canopyToy_flipped_leaf_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2 + 1), (6, canopyToyLeaf 6)]
-      canopyToyProof = false := by decide
+      canopyToyProof = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.1
 
 /-- The proof with its last sibling removed is rejected. -/
 theorem canopyToy_missing_sibling_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-      canopyToyLeaves canopyToyProof.dropLast = false := by decide
+      canopyToyLeaves canopyToyProof.dropLast = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.1
 
 /-- The proof with one trailing digest appended is rejected. -/
 theorem canopyToy_extra_sibling_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+      canopyToyLeaves (canopyToyProof ++ [999]) = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.1
 
 /-- A duplicated index is rejected. -/
 theorem canopyToy_duplicate_index_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       [(1, canopyToyLeaf 1), (1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (6, canopyToyLeaf 6)]
-      canopyToyProof = false := by decide
+      canopyToyProof = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.2.1
 
 /-- An unsorted index list is rejected. -/
 theorem canopyToy_unsorted_index_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       [(2, canopyToyLeaf 2), (1, canopyToyLeaf 1), (6, canopyToyLeaf 6)]
-      canopyToyProof = false := by decide
+      canopyToyProof = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.2.2.1
 
 /-- An index `≥ 2^logLeaves` is rejected. -/
 theorem canopyToy_out_of_range_index_rejected :
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (8, canopyToyLeaf 6)]
-      canopyToyProof = false := by decide
+      canopyToyProof = false :=
+  (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.2.2.2.1
 
 /-- **The exact-consumption check is load-bearing.** The relaxed verifier, which differs from
     `verifyCanopyMultiproof` only by ignoring unconsumed digests, accepts the honest proof with a
@@ -866,7 +901,11 @@ theorem canopyToy_relaxed_accepts_extra_sibling :
     verifyCanopyMultiproofRelaxed canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
       canopyToyLeaves (canopyToyProof ++ [999]) = true ∧
     verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
-      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+      canopyToyLeaves (canopyToyProof ++ [999]) = false :=
+  ⟨(canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.2.2.2.2,
+   (canopy_toy_kats canopyToyNodeHash canopyToyRootHash rfl rfl canopyToyLeaf rfl
+    canopyToyCommitment rfl canopyToyLeaves rfl canopyToyProof rfl).2.2.2.2.2.1⟩
 
 /-- Non-vacuity witness for §3: the honest toy opening is accepted, carries exactly
     `steinerSiblingCount` siblings, and every other opening of the same indices against the same
@@ -898,7 +937,8 @@ theorem tooth_onlineMerkle_empty_queries_unqueried_root :
     ¬ ∃ lp : Nat × List Nat,
       extractOnlineMerkleOpening 10 ([] : List (RecordedMerkleQuery Nat)) 0 1 0 = some lp := by
   rintro ⟨_, h⟩
-  unfold extractOnlineMerkleOpening findFirst at h
+  unfold extractOnlineMerkleOpening at h
+  simp only [findFirst_nil] at h
   cases h
 
 
@@ -907,7 +947,8 @@ theorem tooth_onlineMerkle_empty_queries_unqueried_root :
 private def witnessInitVec : QVec 2 2 1 :=
   fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero
 
-private theorem witnessInitVec_pos : 0 < QVec.stateNormSq witnessInitVec := by decide
+private theorem witnessInitVec_pos : 0 < QVec.stateNormSq witnessInitVec :=
+  qrom_witness_init_kat witnessInitVec rfl
 
 private def witnessQuantumAdv : QuantumAdv 2 2 1 0 :=
   { init := witnessInitVec, h_init_pos := witnessInitVec_pos, steps := fun t => Fin.elim0 t }
@@ -930,22 +971,24 @@ private theorem witnessCoverProof (H : Fin 2 → BitVec 2) :
     intro ψ ⟨i, hi⟩
     match i, hi with
     | 0, _ =>
-      unfold QVec.queryMassOn qsum; dsimp only
+      rw [QVec.queryMassOn_def]; unfold qsum; dsimp only
       simp only [decide_true, ↓reduceIte]
       exact Nat.le_add_right _ _
     | 1, _ =>
-      unfold QVec.queryMassOn
+      rw [QVec.queryMassOn_def]
       simp only [qsum, Fin.ext_iff, Nat.one_ne_zero, Nat.zero_add, decide_false, decide_true,
         Bool.false_eq_true, ↓reduceIte]
       omega
   have hLe : QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
       qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj ⟨0, by omega⟩) (fun _ _ => true)
         (fun O x => listHasElem (O x) (witnessTargetSet ⟨0, by omega⟩ O x)) := by
-    unfold QVec.queryMassOn qromOrdinaryFlipMass witnessFailExtract witnessProj witnessTargetSet
+    rw [QVec.queryMassOn_def, qromOrdinaryFlipMass_def]
+    unfold witnessFailExtract witnessProj witnessTargetSet
     apply qsum_le_qsum; intro x
     by_cases h0 : (H x).toNat = 0
     · have hBv : H x = 0#2 := BitVec.eq_of_toNat_eq h0
-      have hElem : listHasElem (H x) [0#2] = true := by rw [hBv]; rfl
+      have hElem : listHasElem (H x) [0#2] = true := by
+        rw [hBv]; exact (listHasElem_eq_true_iff _ _).mpr List.mem_cons_self
       simp only [h0, decide_true, Bool.true_and, hElem, ↓reduceIte]
       exact hPt (runQuantumAdv witnessQuantumAdv H) x
     · simp only [h0, decide_false, Bool.false_eq_true, ↓reduceIte]
@@ -986,11 +1029,13 @@ theorem tooth_qrom_self_target_not_local :
       qromSelfTarget (reprogramOracle H x ch) x = qromSelfTarget H x) := by
   constructor
   · intro H x
-    simp [qromSelfTarget, listHasElem]
+    simp [qromSelfTarget, listHasElem_eq_true_iff]
   · intro h
     have h01 := h (fun _ => 0#1) 0 1#1
     have hne : qromSelfTarget (reprogramOracle (fun _ : Fin 1 => 0#1) 0 1#1) 0 ≠
-        qromSelfTarget (fun _ : Fin 1 => 0#1) 0 := by decide
+        qromSelfTarget (fun _ : Fin 1 => 0#1) 0 := by
+      rw [reprogramOracle_def]
+      decide
     exact hne h01
 
 /-- Uniform query register, phase-kickback response, and a blank record register. -/
@@ -1003,7 +1048,7 @@ def qromParityOracle (x : Fin 2) : BitVec 1 := BitVec.ofFin x
 /-- One coherent oracle call followed by a query-register Hadamard. -/
 def qromParityAdv : QuantumAdv 2 1 2 1 where
   init := qromParityInit
-  h_init_pos := by decide
+  h_init_pos := (qrom_parity_kats qromParityInit _ rfl rfl).1
   steps := fun _ => hadamardQuery2 1 2
 
 /-- The same initial state after copying the query address to an orthogonal record.
@@ -1013,7 +1058,7 @@ def qromRecordedParityInit : QVec 2 1 2 := fun x y a =>
 
 def qromRecordedParityAdv : QuantumAdv 2 1 2 1 where
   init := qromRecordedParityInit
-  h_init_pos := by decide
+  h_init_pos := (qrom_parity_kats _ qromRecordedParityInit rfl rfl).2.1
   steps := fun _ => hadamardQuery2 1 2
 
 /-- A classical record of the queried address destroys interference even for one query.
@@ -1027,8 +1072,9 @@ theorem tooth_qrom_query_record_changes_born_probability :
     QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
       (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
     QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
-      (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 4 := by
-  decide
+      (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 4 :=
+  ((qrom_parity_kats qromParityInit qromRecordedParityInit rfl rfl).2.2
+    qromParityAdv qromRecordedParityAdv rfl rfl rfl rfl qromParityOracle rfl).1
 
 
 /-! ## Executed example: the experiment is not the coherent run -/
@@ -1042,8 +1088,9 @@ theorem measured_parity_execution :
     sumLogs 2 1 (fun xs => QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
       (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 4 ∧
     sumLogs 2 1 (fun xs => QVec.stateNormSq
-      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 8 := by
-  decide
+      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 8 :=
+  ((qrom_parity_kats qromParityInit qromRecordedParityInit rfl rfl).2.2
+    qromParityAdv qromRecordedParityAdv rfl rfl rfl rfl qromParityOracle rfl).2
 
 
 
@@ -1068,8 +1115,10 @@ theorem identityPublicPermutation_quantum_preimage_mass {anc q : Nat}
     (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
     publicSpnPreimageMass identityPublicPermutation adversary challenge =
       QVec.stateNormSq (publicSpnPreimageFinalState identityPublicPermutation adversary challenge) := by
-  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
-  simp only [publicSpnFeedForward, identityPublicPermutation, id_eq, BitVec.xor_self, ↓reduceIte]
+  rw [publicSpnPreimageMass_def]
+  unfold QVec.stateNormSq
+  simp only [QVec.queryWeight_def, publicSpnFeedForward_eq, identityPublicPermutation_forward,
+    BitVec.xor_self, ↓reduceIte]
 
 
 end Qsag
@@ -1082,24 +1131,16 @@ open RoundPoly
 theorem tooth_d3_not_permutation_on_goldilocks :
     goldilocksOmega3 ≠ Goldilocks.one ∧ goldilocksOmega3 ≠ Goldilocks.zero ∧
     goldilocksPow goldilocksOmega3 3 = goldilocksPow Goldilocks.one 3 ∧
-    3 ∣ goldilocksPrime - 1 := by
-  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
-    ⟨6148914689804861440, by decide⟩⟩
-  apply Goldilocks.ext
-  rw [goldilocksPow_val, goldilocksPow_val]
-  decide
+    3 ∣ goldilocksPrime - 1 :=
+  goldilocksOmega3_cube_collision
 
 
 /-- `x ↦ x ^ 5` identifies `ω₅ ≠ 1` with `1`, because `5 ∣ p - 1`. -/
 theorem tooth_d5_not_permutation_on_goldilocks :
     goldilocksOmega5 ≠ Goldilocks.one ∧ goldilocksOmega5 ≠ Goldilocks.zero ∧
     goldilocksPow goldilocksOmega5 5 = goldilocksPow Goldilocks.one 5 ∧
-    5 ∣ goldilocksPrime - 1 := by
-  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
-    ⟨3689348813882916864, by decide⟩⟩
-  apply Goldilocks.ext
-  rw [goldilocksPow_val, goldilocksPow_val]
-  decide
+    5 ∣ goldilocksPrime - 1 :=
+  goldilocksOmega5_fifth_power_collision
 
 
 /-- The univariate degree alone stays below `2 ^ 85`: `7 ^ 30 > 2 ^ 128` is false, and `46`
@@ -1138,16 +1179,16 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
     lane4Add (lane4Add U0 X) (lane4Neg X) = U0 := by
   have hLinSub : applyMEStd ⟨X, lane4Neg X, lane4Zero⟩ =
       ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
-    unfold applyMEStd lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
+    unfold applyMEStd
+    simp only [lane4Neg_eq, applyM4_eq, lane4Add_eq, lane4Sub_eq, lane4Sum_eq, lane4Zero_eq]
     apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
   have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
       state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
-    unfold state12Add lane4Add lane4Neg lane4Sub lane4Zero
+    simp only [state12Add_eq, lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
     apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
   refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
   · rw [hDecomp, applyMEStd_add, hLinSub]
-    unfold state12Add sboxState12 sboxLane4
-    dsimp only
+    simp only [state12Add_eq, sboxState12_eq, sboxLane4_eq]
     have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
         lane4Add M0 C0 = lane4Neg (lane4Add M1 C1) →
         lane4Add (lane4Add M1 (lane4Neg A)) C1 = lane4Neg (lane4Add (lane4Add M0 A) C0) := by
@@ -1156,8 +1197,7 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
       have h1 := congrArg Lane4.x1 hEq
       have h2 := congrArg Lane4.x2 hEq
       have h3 := congrArg Lane4.x3 hEq
-      unfold lane4Add lane4Neg lane4Sub lane4Zero at h0 h1 h2 h3 ⊢
-      dsimp only at h0 h1 h2 h3 ⊢
+      simp only [lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq] at h0 h1 h2 h3 ⊢
       have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
         fun _ => by gold_cring
       apply Lane4.ext
@@ -1200,16 +1240,14 @@ theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
     have hSumAnti := hHelper (applyMEStd ⟨U0, lane4Zero, U2⟩).b0 (applyMEStd ⟨U0, lane4Zero, U2⟩).b1
       (applyM4 X) C.b0 C.b1 hAnti
     rw [hSumAnti]
-    unfold lane4Neg lane4Sub lane4Zero
-    dsimp only
+    simp only [lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
     exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
   · rw [hDecomp, applyMEStd_add, hLinSub]
-    unfold state12Add sboxState12
-    dsimp only
+    simp only [state12Add_eq, sboxState12_eq]
     have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
-      unfold lane4Add lane4Zero; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
+      rw [lane4Add_eq, lane4Zero_eq]; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
     rw [hAddZ]
-  · unfold lane4Add lane4Neg lane4Sub lane4Zero
+  · simp only [lane4Add_eq, lane4Neg_eq, lane4Sub_eq, lane4Zero_eq]
     apply Lane4.ext <;> gold_cring
 
 
@@ -1249,7 +1287,8 @@ theorem tooth_current_mi_has_rational_eigenvector :
     applyMIFirstEntryNegTwo miRationalEigvec0 =
       state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0 ∧
     ¬ (applyMI miRationalEigvec0 =
-      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0) := by decide
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0) :=
+  superseded_mi_rational_eigenvector_kat applyMIFirstEntryNegTwo rfl miRationalEigvec0 rfl
 
 
 /-- `#tooth` **Reduced-Round `(R_F = 4, R_P = 10)` & Single-Initial-Round GSR Failure (`tooth_reduced_poseidon2_fails_cico_and_gsr`)**:
@@ -1326,6 +1365,9 @@ def toyQueryAdv (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) : 
   h_init_pos := h
   steps := fun _ => ScaledUnitary.id 4 1 1
 
+theorem toyBasisInit_pos (x₀ : Fin 4) : 0 < QVec.stateNormSq (toyBasisInit x₀) :=
+  (qrom_toy_merkle_kats toyBasisInit rfl).1 x₀
+
 /-- Every output claims: root `0`, index `0`, leaf `0`, sibling `1`. The verifier therefore
     evaluates the oracle at address `2 * 0 + 1 = 1`. -/
 def toyOpening (_ : Fin 4) : MerkleOpeningReadout 1 := ⟨0#1, 0, 0#1, [1#1]⟩
@@ -1336,8 +1378,8 @@ def toyAccepted (H : Fin 4 → BitVec 1) (o : Fin 4) : Bool :=
     (toyOpening o).path = (toyOpening o).rt)
 
 theorem toy_measured_merkle_execution :
-    let honest := toyQueryAdv ⟨1, by decide⟩ (by decide)
-    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    let honest := toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_pos _)
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_pos _)
     -- both are accepted on 8 of the 16 oracles
     uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
       QVec.queryMassOn (toyAccepted H) (measuredStateAt honest H 1 (Nat.le_refl 1) xs))) = 8 ∧
@@ -1350,13 +1392,16 @@ theorem toy_measured_merkle_execution :
     uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
       QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs)
         (measuredStateAt guesser H 1 (Nat.le_refl 1) xs))) = 8 ∧
-    (2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init) = 16 := by
-  decide +kernel
+    (2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init) = 16 :=
+  ((qrom_toy_merkle_kats toyBasisInit rfl).2 toyMerkleLayout rfl rfl rfl rfl
+    (toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_pos _))
+    (toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_pos _)) rfl rfl rfl rfl toyOpening rfl toyAccepted rfl).1
 
 /-- The toy adversaries are classical-address adversaries, so `ClassicalQueryAddresses` is
     satisfiable and the transfer theorem applies to them. -/
 theorem toyQueryAdv_classical (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) :
     ClassicalQueryAddresses (toyQueryAdv x₀ h) (fun _ _ => x₀) := by
+  unfold ClassicalQueryAddresses
   intro H t ht x y a hx
   have ht0 : t = 0 := by omega
   subst ht0
@@ -1367,14 +1412,16 @@ theorem toyQueryAdv_classical (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasis
     log `[0]`, has failure mass 8 of 16: the value the measured experiment gave, as the
     transfer theorem states, and within the general bound `(1 * 4 + 0) / 2`. -/
 theorem toy_classical_run_execution :
-    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_pos _)
     uniformOracleSum 1 4 (fun H =>
       QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H
           (classicalQueryLog (fun _ _ => (⟨0, by decide⟩ : Fin 4)) H 1))
         (runQuantumAdv guesser H)) = 8 ∧
     2 ^ 1 * 8 ≤ (1 * (3 * 1 + 1) + triangleSum 1) *
-      ((2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init)) := by
-  decide +kernel
+      ((2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init)) :=
+  ((qrom_toy_merkle_kats toyBasisInit rfl).2 toyMerkleLayout rfl rfl rfl rfl
+    (toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_pos _))
+    (toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_pos _)) rfl rfl rfl rfl toyOpening rfl toyAccepted rfl).2
 
 #verify_constructive
   Qsag.toy_measured_merkle_execution
@@ -1393,7 +1440,8 @@ theorem raw_vs_feedforward_tooth :
     ∃ p : SimpleEquiv (State Goldilocks) (State Goldilocks),
       rawTrunc p (p.invFun (one, zero, zero)) = one ∧
       jiveCompress (fun _ => zero) p (p.invFun (one, zero, zero)) ≠ one := by
-  refine ⟨SimpleEquiv.refl _, rfl, ?_⟩
+  refine ⟨SimpleEquiv.refl _, raw_inverse _ _ _ _, ?_⟩
+  rw [jiveCompress_eq]
   decide
 
 
@@ -1402,14 +1450,15 @@ theorem identity_collision_tooth :
     ∃ x y : State Goldilocks, x ≠ y ∧
       jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x =
       jiveCompress (fun _ => zero) (SimpleEquiv.refl _) y := by
-  exact ⟨(zero, zero, zero), (zero, one, zero), by decide, rfl⟩
+  exact ⟨(zero, zero, zero), (zero, one, zero), by decide,
+    by rw [jiveCompress_eq, jiveCompress_eq]; rfl⟩
 
 
 /-- A zero-query guess can succeed; verification must extend the charged transcript. -/
 theorem unchecked_preimage_tooth : ∃ x : State Goldilocks,
     jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x = zero ∧
     ¬ ∃ y, (x, y) ∈ ([] : List (State Goldilocks × State Goldilocks)) := by
-  exact ⟨(zero, zero, zero), by decide, by intro ⟨_, h⟩; cases h⟩
+  exact ⟨(zero, zero, zero), by rw [jiveCompress_eq]; decide, by intro ⟨_, h⟩; cases h⟩
 
 
 #verify_constructive raw_vs_feedforward_tooth
@@ -1441,15 +1490,15 @@ theorem storedCollision_wins (H : Fin 3 → BitVec 1) :
   have hpigeon : ∀ a b c : BitVec 1, a = b ∨ a = c ∨ b = c := by decide
   have hp := hpigeon (H 0) (H 1) (H 2)
   by_cases h01 : H 0 = H 1
-  · simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
-      Program.run, storedCollisionPair, collisionWin, h01]
+  · simp [ClassicalAdvice.run_def, storedCollision, storedCollisionAdvice,
+      Program.run_done, storedCollisionPair, collisionWin_def, h01]
   · by_cases h02 : H 0 = H 2
     · have h21 : H 2 ≠ H 1 := by intro he; exact h01 (h02.trans he)
-      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
-        Program.run, storedCollisionPair, collisionWin, h02, h21]
+      simp [ClassicalAdvice.run_def, storedCollision, storedCollisionAdvice,
+      Program.run_done, storedCollisionPair, collisionWin_def, h02, h21]
     · have h12 : H 1 = H 2 := hp.resolve_left h01 |>.resolve_left h02
-      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
-        Program.run, storedCollisionPair, collisionWin, h02, h12]
+      simp [ClassicalAdvice.run_def, storedCollision, storedCollisionAdvice,
+      Program.run_done, storedCollisionPair, collisionWin_def, h02, h12]
 
 theorem storedCollision_count :
     adviceWinCount storedCollision (fun H _ pair => collisionWin H pair) = 8 := by
@@ -1463,8 +1512,7 @@ theorem storedCollision_count :
       rw [hs, storedCollision_wins]
       rfl
     rw [qsum_congr hTerms, qsum_const]
-  unfold adviceWinCount
-  rw [uniformOracleSum_congr 1 3 _ _ hEach, uniformOracleSum_const]
+  rw [adviceWinCount_def, uniformOracleSum_congr 1 3 _ _ hEach, uniformOracleSum_const]
 
 
 end Qsag.PreprocessingGame
@@ -1478,9 +1526,7 @@ set_option autoImplicit false
 /-- With advice fixed independently of H, each chosen pair collides on 4 of 8 oracles. -/
 theorem fixedAdvice_collision_count (a : BitVec 2) :
     fixedAdviceWinCount storedCollision.online (fun H _ pair => collisionWin H pair) a = 4 := by
-  cases a with | ofFin a =>
-  revert a
-  decide +kernel
+  exact (stored_collision_kats storedCollisionAdvice rfl storedCollisionPair rfl).1 a
 
 /-- A witness that the oracle-dependent preprocessing really changes the experiment:
 8 successes with two bits of advice versus 4 for every fixed advice, and zero online calls. -/
@@ -1490,7 +1536,8 @@ theorem storedCollision_execution :
     ∀ H : Fin 3 → BitVec 1, (storedCollision.run H 0).2 = 0 := by
   refine ⟨storedCollision_count, fixedAdvice_collision_count 0, ?_⟩
   intro H
-  rfl
+  rw [ClassicalAdvice.run_def]
+  exact congrArg Prod.snd (Program.run_done H _)
 
 /-- Two disjoint three-address slices of the same six-address oracle. -/
 def saltSlice (H : Fin 6 → BitVec 1) (s : Fin 2) : Fin 3 → BitVec 1 :=
@@ -1515,8 +1562,10 @@ theorem freshSalt_chronology_execution :
       (tableWin (fun s pair => collisionWin (saltSlice H s) pair) (oneSaltTable H))) = 64 ∧
     uniformOracleSum 1 6 (fun H => qsum 2 (fun s =>
       tableWin (fun t pair => collisionWin (saltSlice H t) pair) (challengeAwareTable H s) s)) = 128 ∧
-    (2 ^ 1) ^ 6 * 2 = 128 := by
-  decide +kernel
+    (2 ^ 1) ^ 6 * 2 = 128 :=
+  ⟨((stored_collision_kats storedCollisionAdvice rfl storedCollisionPair rfl).2 saltSlice rfl).1,
+   ((stored_collision_kats storedCollisionAdvice rfl storedCollisionPair rfl).2 saltSlice rfl).2,
+   by decide⟩
 
 /-- Reuses the general proved theorem, not only an executed enumeration. -/
 theorem oneSaltTable_bound :
@@ -1531,8 +1580,8 @@ def twiceQuery (x : Fin 3) : Program (Fin 3) (BitVec 1) (BitVec 1) 2 :=
 
 theorem twiceQuery_execution (H : Fin 3 → BitVec 1) (x : Fin 3) :
     (twiceQuery x).run H = (H x, 2) := by
-  unfold twiceQuery Program.run
-  rfl
+  unfold twiceQuery
+  rw [Program.run_query, Program.run_query, Program.run_done]
 
 #verify_constructive
   Qsag.PreprocessingGame.fixedAdvice_collision_count
@@ -1560,8 +1609,8 @@ theorem coherent_parity_runtime_execution :
     oracleTableSum 2 (fun d => if tableWeight 2 d = 1 then
       QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 2048 ∧
     oracleTableSum 2 (fun d => if 1 < tableWeight 2 d then
-      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 0 := by
-  decide +kernel
+      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 0 :=
+  (qrom_parity_fourier_kats qromParityAdv rfl rfl paritySuccess rfl).1
 
 /-- Measuring the Fourier label before decoding changes oracle/output correlations. The
     coherent success mass 8192 falls to 4096 while total mass stays 8192. This refutes treating
@@ -1572,8 +1621,8 @@ theorem tooth_fourier_database_measurement_disturbs :
     oracleTableSum 2 (fun d => coherentTableEventMass (fun _ _ => true)
       (fourierOracleState (projectFourierLabel d (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))))) = 8192 ∧
     uniformOracleSum 1 2 (fun H => sumLogs 2 1 (fun xs =>
-      QVec.queryMassOn (paritySuccess H) (measuredStateAt qromParityAdv H 1 (Nat.le_refl 1) xs))) = 16 := by
-  decide +kernel
+      QVec.queryMassOn (paritySuccess H) (measuredStateAt qromParityAdv H 1 (Nat.le_refl 1) xs))) = 16 :=
+  (qrom_parity_fourier_kats qromParityAdv rfl rfl paritySuccess rfl).2
 
 
 #verify_constructive tooth_fourier_database_measurement_disturbs
@@ -1587,8 +1636,7 @@ open MigrationExecution
 theorem towerToRust_differs_from_psi_on_mds_constant :
     towerToRust 7 gf128MdsATower ≠ gf128MdsAPolyBits ∧
     psiTower128ToPoly gf128MdsATower = gf128MdsAPolyBits := by
-  refine ⟨?_, gf128_mds_constants_certified.1⟩
-  decide +kernel
+  exact ⟨towerToRust_gf128MdsATower_ne, gf128_mds_constants_certified.1⟩
 
 end Qsag
 end
