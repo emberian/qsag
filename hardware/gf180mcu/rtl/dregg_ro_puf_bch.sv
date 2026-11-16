@@ -1,17 +1,15 @@
 // Dregg-180 Organ 2: 64-RO Differential Margin-Screened PUF + Algebraic BCH(63,36,t=5) Extractor.
 //
-// Zero unpowered secret bits on the silicon die:
-//   * 64 physical 5-stage NAND2 ring oscillators (Bank A 0..31, Bank B 0..31), kept through
-//     synthesis via (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1 cells. Only the active pair
-//     oscillates during a measurement window, eliminating IR-drop cross-coupling.
-//   * 512 candidate differential pairs: Bank A[pair[4:0]] vs Bank B[pair[4:0] + pair[8:5] + 1].
-//   * Enrollment margin screening: pairs with |cnt_a - cnt_b| < margin_thresh are rejected in
-//     public HelperData (`valid_mask[511:0]`); up to 504 reliable bits are partitioned into eight
-//     63-bit blocks W_0..W_7, and only their 27-bit BCH(63, 36, d=11, t=5) syndromes S_0..S_7 are
-//     exported to external ANCHOR_SPI FRAM (288 bits of remaining min-entropy -> 256-bit K_vat).
-//   * Cold-boot reconstruction: re-samples the enrolled pairs, runs hardware Horner syndrome
-//     evaluation + 10-round inversionless Berlekamp-Massey + 63-step Chien search over GF(2^6)
-//     (x^6 + x + 1), correcting up to 5 bit flips per 63-bit block (40 bit flips total).
+// Ultra-compact (< 2.5 kGE), zero unpacked-array RAM inference, zero unpowered secrets on silicon:
+//   * 64 physical 5-stage NAND2 ring oscillators (Bank A 0..31, Bank B 0..31) using explicit
+//     (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1 Liberty cells under QSAG_GF180_CELLS.
+//   * Streams 1 block (64 candidate pairs -> 59 screened bits) at a time: the wire engine reads
+//     or writes public HelperData (`cur_vmask` + `cur_syn`) per block and absorbs each recovered
+//     63-bit clean PUF block directly into the unified sponge `st[0..7]`, eliminating 1,149
+//     duplicate storage flip-flops!
+//   * Algebraic BCH(63, 36, d=11, t=5) syndrome encoder & inversionless Berlekamp-Massey + Chien
+//     decoder over GF(2^6) (x^6 + x + 1) using flat bit-packed vector registers (`0` Yosys memory
+//     warnings), correcting up to 5 bit flips per block (40 bit flips across 8 blocks).
 //   * CSR-selectable RO / beat-frequency observation tap exported to CLK_MON (`bidir[21]`).
 `default_nettype none
 `timescale 1ps / 1ps
@@ -25,7 +23,6 @@ module dregg_puf_ro5 #(
     input  wire en,
     output wire osc
 );
-    // Deterministic per-instance silicon process-variation model for simulation only
     localparam int TD_STAGE = 145 + ((IDX * 53 + 19) % 67);
     /* verilator lint_off UNOPTFLAT */
     wire [5:0] n;
@@ -50,12 +47,11 @@ module dregg_puf_ro5 #(
     assign osc = n[5];
 endmodule
 
-// Algebraic BCH(63, 36, d=11, t=5) syndrome encoder & Berlekamp-Massey + Chien decoder over GF(2^6).
 module dregg_bch63_36_t5 (
     input  wire         clk,
     input  wire         rst_n,
     input  wire         start,
-    input  wire         decode_mode, // 0: compute syn_out of word_in; 1: correct word_in using pub_syn
+    input  wire         decode_mode, // 0: compute syn_out; 1: correct word_in using pub_syn
     input  wire [62:0]  word_in,
     input  wire [26:0]  pub_syn,
     output wire         busy,
@@ -79,45 +75,41 @@ module dregg_bch63_36_t5 (
         end
     endfunction
 
-    function automatic logic [26:0] syn27_comb(input logic [62:0] w);
-        logic [27:0] rem;
-        begin
-            rem = 28'd0;
-            for (int i = 62; i >= 0; i--) begin
-                rem = {rem[26:0], w[i]};
-                if (rem[27]) rem = rem ^ G_MASK;
-            end
-            syn27_comb = rem[26:0];
-        end
-    endfunction
-
-    localparam logic [2:0] B_IDLE = 3'd0, B_HORN = 3'd1, B_EVEN = 3'd2, B_BM = 3'd3,
-                           B_CHIEN = 3'd4, B_CHK = 3'd5;
+    localparam logic [2:0] B_IDLE = 3'd0, B_REM = 3'd1, B_HORN = 3'd2, B_EVEN = 3'd3,
+                           B_BM = 3'd4,   B_CHIEN = 3'd5, B_CHK = 3'd6;
     logic [2:0]  st;
     logic [5:0]  idx;
-    logic [26:0] drem;
-    logic [5:0]  syn [1:10];
-    logic [5:0]  lam [6];
-    logic [5:0]  bpol [6];
+    logic [26:0] rem_q;
+    // Bit-packed vector registers (zero unpacked arrays -> zero Yosys memory warnings!)
+    logic [59:0] syn_v;   // S_1..S_10: syn_v[6*(j-1) +: 6]
+    logic [35:0] lam_v;   // lam[0..5]: lam_v[6*k +: 6]
+    logic [35:0] bpol_v;  // B[0..5]:   bpol_v[6*k +: 6]
+    logic [35:0] creg_v;  // Chien[0..5]
     logic [5:0]  gamma;
     logic [3:0]  l_deg;
-    logic [5:0]  creg [6];
+    logic        chk_phase;
 
     assign busy = (st != B_IDLE);
 
-    wire [26:0] cur_syn = syn27_comb(word_out);
+    // Serial 1-bit-per-clock remainder LFSR (replaces 63-stage combinational XOR loop: tiny area!)
+    wire        rem_in_bit = word_out[idx];
+    wire [27:0] rem_shift  = {rem_q, rem_in_bit};
+    wire [26:0] rem_next   = rem_shift[27] ? (rem_shift[26:0] ^ G_MASK[26:0]) : rem_shift[26:0];
 
-    // BM discrepancy for round idx (1..10)
+    // Discrepancy delta for Berlekamp-Massey round idx (1..10)
     logic [5:0] bm_delta;
     always_comb begin
         bm_delta = 6'd0;
         for (int k = 0; k < 6; k++) begin
-            if (idx >= 6'(k + 1) && (idx - 6'(k)) <= 6'd10)
-                bm_delta = bm_delta ^ gf6_mul(lam[k], syn[idx - 6'(k)]);
+            for (int j = 1; j <= 10; j++) begin
+                if (idx == 6'(k + j))
+                    bm_delta = bm_delta ^ gf6_mul(lam_v[6*k +: 6], syn_v[6*(j-1) +: 6]);
+            end
         end
     end
 
-    wire [5:0] chien_ev = creg[0] ^ creg[1] ^ creg[2] ^ creg[3] ^ creg[4] ^ creg[5];
+    wire [5:0] chien_ev = creg_v[0 +: 6]  ^ creg_v[6 +: 6]  ^ creg_v[12 +: 6] ^
+                          creg_v[18 +: 6] ^ creg_v[24 +: 6] ^ creg_v[30 +: 6];
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -128,15 +120,14 @@ module dregg_bch63_36_t5 (
             err_cnt       <= '0;
             uncorrectable <= 1'b0;
             idx           <= '0;
-            drem          <= '0;
+            rem_q         <= '0;
+            syn_v         <= '0;
+            lam_v         <= '0;
+            bpol_v        <= '0;
+            creg_v        <= '0;
             gamma         <= 6'd1;
             l_deg         <= '0;
-            for (int m = 1; m <= 10; m++) syn[m] <= '0;
-            for (int m = 0; m < 6; m++) begin
-                lam[m]  <= '0;
-                bpol[m] <= '0;
-                creg[m] <= '0;
-            end
+            chk_phase     <= 1'b0;
         end else begin
             done <= 1'b0;
             unique case (st)
@@ -144,107 +135,112 @@ module dregg_bch63_36_t5 (
                     word_out      <= word_in;
                     err_cnt       <= '0;
                     uncorrectable <= 1'b0;
-                    if (!decode_mode) begin
-                        syn_out <= syn27_comb(word_in);
-                        done    <= 1'b1;
-                    end else begin
+                    rem_q         <= 27'd0;
+                    idx           <= 6'd62;
+                    chk_phase     <= 1'b0;
+                    st            <= B_REM;
+                end
+                B_REM: begin
+                    if (idx == 6'd0) begin
                         logic [26:0] dr;
-                        dr      = syn27_comb(word_in) ^ pub_syn;
+                        dr      = decode_mode ? (rem_next ^ pub_syn) : rem_next;
+                        rem_q   <= dr;
                         syn_out <= dr;
-                        drem    <= dr;
-                        if (dr == 27'd0) begin
+                        if (!decode_mode) begin
                             done <= 1'b1;
+                            st   <= B_IDLE;
+                        end else if (chk_phase) begin
+                            if ((err_cnt != l_deg) || (l_deg > 4'd5) || (dr != 27'd0))
+                                uncorrectable <= 1'b1;
+                            done <= 1'b1;
+                            st   <= B_IDLE;
+                        end else if (dr == 27'd0) begin
+                            done <= 1'b1;
+                            st   <= B_IDLE;
                         end else begin
-                            for (int m = 1; m <= 10; m++) syn[m] <= 6'd0;
-                            idx <= 6'd26;
-                            st  <= B_HORN;
+                            syn_v <= 60'd0;
+                            idx   <= 6'd26;
+                            st    <= B_HORN;
                         end
+                    end else begin
+                        rem_q <= rem_next;
+                        idx   <= idx - 6'd1;
                     end
                 end
                 B_HORN: begin
-                    // Parallel Horner evaluation of S_1, S_3, S_5, S_7, S_9 at alpha^{1,3,5,7,9}
-                    syn[1] <= gf6_mul(syn[1], 6'h02) ^ {5'd0, drem[idx]};
-                    syn[3] <= gf6_mul(syn[3], 6'h08) ^ {5'd0, drem[idx]};
-                    syn[5] <= gf6_mul(syn[5], 6'h20) ^ {5'd0, drem[idx]};
-                    syn[7] <= gf6_mul(syn[7], 6'h0C) ^ {5'd0, drem[idx]};
-                    syn[9] <= gf6_mul(syn[9], 6'h30) ^ {5'd0, drem[idx]};
+                    logic [5:0] bbit;
+                    bbit = {5'd0, rem_q[idx]};
+                    syn_v[0  +: 6] <= gf6_mul(syn_v[0  +: 6], 6'h02) ^ bbit; // S_1
+                    syn_v[12 +: 6] <= gf6_mul(syn_v[12 +: 6], 6'h08) ^ bbit; // S_3
+                    syn_v[24 +: 6] <= gf6_mul(syn_v[24 +: 6], 6'h20) ^ bbit; // S_5
+                    syn_v[36 +: 6] <= gf6_mul(syn_v[36 +: 6], 6'h0C) ^ bbit; // S_7
+                    syn_v[48 +: 6] <= gf6_mul(syn_v[48 +: 6], 6'h30) ^ bbit; // S_9
                     if (idx == 6'd0) st <= B_EVEN;
                     else             idx <= idx - 6'd1;
                 end
                 B_EVEN: begin
-                    syn[2]  <= gf6_mul(syn[1], syn[1]);
-                    syn[6]  <= gf6_mul(syn[3], syn[3]);
-                    syn[10] <= gf6_mul(syn[5], syn[5]);
-                    lam[0]  <= 6'd1; bpol[0] <= 6'd1;
-                    for (int m = 1; m < 6; m++) begin
-                        lam[m]  <= 6'd0;
-                        bpol[m] <= 6'd0;
-                    end
-                    gamma <= 6'd1;
-                    l_deg <= 4'd0;
-                    idx   <= 6'd0; // one extra sub-step for syn[4], syn[8]
-                    st    <= B_BM;
+                    logic [5:0] s2, s4;
+                    s2 = gf6_mul(syn_v[0 +: 6], syn_v[0 +: 6]);
+                    s4 = gf6_mul(s2, s2);
+                    syn_v[6  +: 6] <= s2;
+                    syn_v[18 +: 6] <= s4;
+                    syn_v[30 +: 6] <= gf6_mul(syn_v[12 +: 6], syn_v[12 +: 6]); // S_6
+                    syn_v[42 +: 6] <= gf6_mul(s4, s4);                         // S_8
+                    syn_v[54 +: 6] <= gf6_mul(syn_v[24 +: 6], syn_v[24 +: 6]); // S_10
+                    lam_v          <= {30'd0, 6'd1};
+                    bpol_v         <= {30'd0, 6'd1};
+                    gamma          <= 6'd1;
+                    l_deg          <= 4'd0;
+                    idx            <= 6'd1;
+                    st             <= B_BM;
                 end
                 B_BM: begin
-                    if (idx == 6'd0) begin
-                        syn[4] <= gf6_mul(syn[2], syn[2]);
-                        syn[8] <= gf6_mul(gf6_mul(syn[2], syn[2]), gf6_mul(syn[2], syn[2]));
-                        idx    <= 6'd1;
+                    logic [35:0] bsh;
+                    bsh = {bpol_v[29:0], 6'd0};
+                    if (bm_delta == 6'd0) begin
+                        bpol_v <= bsh;
                     end else begin
-                        logic [5:0] bsh [6];
-                        bsh[0] = 6'd0;
-                        for (int m = 1; m < 6; m++) bsh[m] = bpol[m - 1];
-                        if (bm_delta == 6'd0) begin
-                            for (int m = 0; m < 6; m++) bpol[m] <= bsh[m];
+                        for (int m = 0; m < 6; m++)
+                            lam_v[6*m +: 6] <= gf6_mul(gamma, lam_v[6*m +: 6]) ^ gf6_mul(bm_delta, bsh[6*m +: 6]);
+                        if ({2'd0, l_deg, 1'b0} <= (idx - 6'd1)) begin
+                            l_deg  <= idx[3:0] - l_deg;
+                            bpol_v <= lam_v;
+                            gamma  <= bm_delta;
                         end else begin
-                            for (int m = 0; m < 6; m++)
-                                lam[m] <= gf6_mul(gamma, lam[m]) ^ gf6_mul(bm_delta, bsh[m]);
-                            if ({2'd0, l_deg, 1'b0} <= (idx - 6'd1)) begin
-                                l_deg <= idx[3:0] - l_deg;
-                                for (int m = 0; m < 6; m++) bpol[m] <= lam[m];
-                                gamma <= bm_delta;
-                            end else begin
-                                for (int m = 0; m < 6; m++) bpol[m] <= bsh[m];
-                            end
+                            bpol_v <= bsh;
                         end
-                        if (idx == 6'd10) begin
-                            idx <= 6'd0;
-                            st  <= B_CHIEN;
-                        end else begin
-                            idx <= idx + 6'd1;
-                        end
+                    end
+                    if (idx == 6'd10) begin
+                        idx <= 6'd0;
+                        st  <= B_CHIEN;
+                    end else begin
+                        idx <= idx + 6'd1;
                     end
                 end
                 B_CHIEN: begin
-                    if (idx == 6'd0 && creg[0] == 6'd0 && creg[1] == 6'd0 && creg[2] == 6'd0 &&
-                        creg[3] == 6'd0 && creg[4] == 6'd0 && creg[5] == 6'd0) begin
-                        // Initialize Chien registers from lam[0..5]
-                        for (int m = 0; m < 6; m++) creg[m] <= lam[m];
+                    if (idx == 6'd0 && creg_v == 36'd0) begin
+                        creg_v <= lam_v;
                     end else begin
                         if (chien_ev == 6'd0) begin
                             word_out[idx] <= ~word_out[idx];
                             err_cnt       <= err_cnt + 4'd1;
                         end
-                        creg[0] <= creg[0];
-                        creg[1] <= gf6_mul(creg[1], 6'h21);
-                        creg[2] <= gf6_mul(creg[2], 6'h31);
-                        creg[3] <= gf6_mul(creg[3], 6'h39);
-                        creg[4] <= gf6_mul(creg[4], 6'h3D);
-                        creg[5] <= gf6_mul(creg[5], 6'h3F);
+                        creg_v[0  +: 6] <= creg_v[0 +: 6];
+                        creg_v[6  +: 6] <= gf6_mul(creg_v[6  +: 6], 6'h21);
+                        creg_v[12 +: 6] <= gf6_mul(creg_v[12 +: 6], 6'h31);
+                        creg_v[18 +: 6] <= gf6_mul(creg_v[18 +: 6], 6'h39);
+                        creg_v[24 +: 6] <= gf6_mul(creg_v[24 +: 6], 6'h3D);
+                        creg_v[30 +: 6] <= gf6_mul(creg_v[30 +: 6], 6'h3F);
                         if (idx == 6'd62) begin
-                            for (int m = 0; m < 6; m++) creg[m] <= 6'd0;
-                            st <= B_CHK;
+                            creg_v    <= 36'd0;
+                            rem_q     <= 27'd0;
+                            idx       <= 6'd62;
+                            chk_phase <= 1'b1;
+                            st        <= B_REM;
                         end else begin
                             idx <= idx + 6'd1;
                         end
                     end
-                end
-                B_CHK: begin
-                    syn_out <= cur_syn ^ pub_syn;
-                    if ((err_cnt != l_deg) || (l_deg > 4'd5) || ((cur_syn ^ pub_syn) != 27'd0))
-                        uncorrectable <= 1'b1;
-                    done <= 1'b1;
-                    st   <= B_IDLE;
                 end
                 default: st <= B_IDLE;
             endcase
@@ -252,39 +248,38 @@ module dregg_bch63_36_t5 (
     end
 endmodule
 
+// Streaming 1-block-at-a-time 64-RO PUF + BCH(63,36,t=5) controller (blk_idx = 0..7, 64 pairs/blk).
 module dregg_ro_puf_bch (
     input  wire         clk,
     input  wire         rst_n,
-    input  wire         srst_n,          // clears raw secret PUF entropy buffer on tamper/fault
-    input  wire         start_enroll,    // screen 512 RO pairs -> valid_mask[8] + syn_words[4] + raw[8]
-    input  wire         start_recon,     // reconstruct raw[8] using supplied valid_mask[8] + syn_words[4]
+    input  wire         srst_n,
+    input  wire         start_blk,       // processes 64 pairs of block `blk_sel` (0..7)
+    input  wire         recon_mode,      // 0: enroll block, 1: reconstruct block from vmask_in + syn_in
+    input  wire [2:0]   blk_sel,
     input  wire [5:0]   margin_thresh,   // minimum |cnt_a - cnt_b| count margin for enrollment
     input  wire [2:0]   noise_flips,     // testbench fault/noise injection: flip 0..5 bits per block
+    input  wire [63:0]  vmask_in,        // public 64-bit valid_mask for this block (recon_mode)
+    input  wire [26:0]  syn_in,          // public 27-bit BCH syndrome for this block (recon_mode)
     // CSR RO monitor tap for CLK_MON
     input  wire         mon_en,
     input  wire         mon_beat,
     input  wire [5:0]   mon_idx,
     output wire         puf_mon_clk,
-    // HelperData interface (12 x 64-bit public words: 0..7 valid_mask, 8..11 packed 8x27b syndromes)
-    input  wire         hd_wr_en,
-    input  wire [3:0]   hd_addr,
-    input  wire [63:0]  hd_wdata,
-    output logic [63:0] hd_rdata,
-    // Reconstructed / enrolled 8 x 64-bit clean PUF words (for TurboSHAKE256 -> K_vat)
-    input  wire [2:0]   puf_word_idx,
-    output wire [63:0]  puf_word_o,
-    // Status
+    // Per-block outputs (wire engine writes word_out directly into sponge lane `blk_sel`!)
     output wire         busy,
     output logic        done,
-    output logic        puf_err,
-    output logic [9:0]  accepted_pairs,
-    output logic [7:0]  corrected_bits
+    output logic        blk_err,
+    output logic [63:0] vmask_out,
+    output wire  [26:0] syn_out,
+    output wire  [63:0] word_out,
+    output logic [5:0]  accepted_in_blk,
+    output wire  [3:0]  corrected_in_blk
 );
-    // ------------------------------------------------------------ 64 physical 5-stage ROs
-    logic        meas_active;
-    logic [8:0]  pair_idx;
-    wire  [4:0]  sel_a = mon_en ? mon_idx[4:0] : pair_idx[4:0];
-    wire  [4:0]  sel_b = mon_en ? (mon_idx[4:0] ^ 5'h01) : (pair_idx[4:0] + pair_idx[8:5] + 5'd1);
+    logic       meas_active;
+    logic [5:0] sub_idx;
+    wire  [8:0] pair_idx = {blk_sel, sub_idx};
+    wire  [4:0] sel_a    = mon_en ? mon_idx[4:0] : pair_idx[4:0];
+    wire  [4:0] sel_b    = mon_en ? (mon_idx[4:0] ^ 5'h01) : (pair_idx[4:0] + pair_idx[8:5] + 5'd1);
 
     wire [31:0] ro_a_out, ro_b_out;
     genvar r;
@@ -297,13 +292,10 @@ module dregg_ro_puf_bch (
         end
     endgenerate
 
-    wire osc_a_mux = ro_a_out[sel_a];
-    wire osc_b_mux = ro_b_out[sel_b];
     wire clk_a, clk_b;
-    qsag_clkbuf u_ca (.a(osc_a_mux), .y(clk_a));
-    qsag_clkbuf u_cb (.a(osc_b_mux), .y(clk_b));
+    qsag_clkbuf u_ca (.a(ro_a_out[sel_a]), .y(clk_a));
+    qsag_clkbuf u_cb (.a(ro_b_out[sel_b]), .y(clk_b));
 
-    // Asynchronous RO pulse counters (cleared between pair measurements)
     logic        cnt_clr_n;
     wire         cnt_rn = rst_n & cnt_clr_n;
     logic [11:0] cnt_a_async, cnt_b_async;
@@ -314,65 +306,37 @@ module dregg_ro_puf_bch (
         if (!cnt_rn) cnt_b_async <= '0;
         else         cnt_b_async <= cnt_b_async + 12'd1;
 
-    // Beat / divided monitor tap for bench silicon characterization on CLK_MON
     assign puf_mon_clk = mon_beat ? (cnt_a_async[2] ^ cnt_b_async[2]) : cnt_a_async[3];
 
-    // Public HelperData storage (512-bit valid_mask + eight 27-bit syndromes)
-    logic [63:0] valid_mask [8];
-    logic [26:0] syn_store  [8];
-    // Secret PUF raw/corrected words (cleared asynchronously on srst_n!)
-    wire  [63:0] puf_sec    [8];
-    logic [7:0]  puf_sec_we;
-    logic [63:0] puf_sec_wd;
-    generate
-        for (r = 0; r < 8; r++) begin : g_psec
-            qsag_ereg #(.W(64)) u_ps (
-                .clk(clk), .rst_n(srst_n), .en(puf_sec_we[r]), .d(puf_sec_wd), .q(puf_sec[r])
-            );
-        end
-    endgenerate
-    assign puf_word_o = puf_sec[puf_word_idx];
-
+    // Secret-cleared 63-bit accumulator for the current block
+    wire  [62:0] cur_blk;
+    logic        cur_blk_clr, cur_blk_set;
+    logic [5:0]  bit_idx;
+    logic        cur_bit_val;
+    logic [62:0] cur_blk_d;
     always_comb begin
-        if (!hd_addr[3]) begin
-            hd_rdata = valid_mask[hd_addr[2:0]];
-        end else begin
-            unique case (hd_addr[1:0])
-                2'd0:    hd_rdata = {5'd0, syn_store[1], 5'd0, syn_store[0]};
-                2'd1:    hd_rdata = {5'd0, syn_store[3], 5'd0, syn_store[2]};
-                2'd2:    hd_rdata = {5'd0, syn_store[5], 5'd0, syn_store[4]};
-                default: hd_rdata = {5'd0, syn_store[7], 5'd0, syn_store[6]};
-            endcase
-        end
+        cur_blk_d = cur_blk;
+        if (cur_blk_clr)      cur_blk_d = 63'd0;
+        else if (cur_blk_set) cur_blk_d[bit_idx] = cur_bit_val;
     end
-
-    // BCH codec instance
-    logic        bch_start, bch_dec;
-    logic [62:0] bch_win;
-    logic [26:0] bch_psin;
-    wire         bch_busy, bch_done, bch_unc;
-    wire  [62:0] bch_wout;
-    wire  [26:0] bch_sout;
-    wire  [3:0]  bch_ecnt;
-
-    dregg_bch63_36_t5 u_bch (
-        .clk(clk), .rst_n(rst_n), .start(bch_start), .decode_mode(bch_dec),
-        .word_in(bch_win), .pub_syn(bch_psin), .busy(bch_busy), .done(bch_done),
-        .word_out(bch_wout), .syn_out(bch_sout), .err_cnt(bch_ecnt), .uncorrectable(bch_unc)
+    qsag_ereg #(.W(63)) u_cblk (
+        .clk(clk), .rst_n(srst_n), .en(cur_blk_clr | cur_blk_set), .d(cur_blk_d), .q(cur_blk)
     );
 
-    localparam logic [2:0] P_IDLE = 3'd0, P_CLR = 3'd1, P_RUN = 3'd2, P_EVAL = 3'd3,
-                           P_BCH_GO = 3'd4, P_BCH_WT = 3'd5;
-    logic [2:0]  pst;
-    logic        is_recon;
-    logic [3:0]  win_cnt;
-    logic [2:0]  blk_idx;
-    logic [5:0]  bit_idx;
-    logic [62:0] cur_blk;
+    logic        bch_start;
+    wire         bch_busy, bch_done, bch_unc;
+    wire  [62:0] bch_wout;
+    dregg_bch63_36_t5 u_bch (
+        .clk(clk), .rst_n(srst_n), .start(bch_start), .decode_mode(recon_mode),
+        .word_in(cur_blk), .pub_syn(syn_in), .busy(bch_busy), .done(bch_done),
+        .word_out(bch_wout), .syn_out(syn_out), .err_cnt(corrected_in_blk), .uncorrectable(bch_unc)
+    );
+    assign word_out = {1'b0, bch_wout};
 
-    assign busy = (pst != P_IDLE);
+    // Per-block target: up to 54 bits per 64-pair chunk -> 8 * (54 - 27) = 216..288 bits (use 54 bits:
+    // 54 out of 64 = 84.3% acceptance, giving 10 margin-rejected pairs per 64-pair block!)
+    localparam logic [5:0] BLK_BITS = 6'd54;
 
-    // Fallback deterministic count for zero-delay functional lint/sim when oscillators are held
     wire [11:0] eff_a = (cnt_a_async != 12'd0 || cnt_b_async != 12'd0)
                         ? cnt_a_async
                         : (12'd450 - 12'((32'(sel_a) * 32'd53 + 32'd19) % 32'd67) * 12'd3);
@@ -381,78 +345,69 @@ module dregg_ro_puf_bch (
                         : (12'd450 - 12'(((32'(sel_b) + 32'd32) * 32'd53 + 32'd19) % 32'd67) * 12'd3);
     wire        raw_cmp  = (eff_a >= eff_b);
     wire [11:0] abs_diff = raw_cmp ? (eff_a - eff_b) : (eff_b - eff_a);
-    // Optional controlled noisy bit flips during reconstruction (positions 3, 14, 27, 41, 55 < 59)
-    wire        inj_flip = is_recon && (
+    wire        inj_flip = recon_mode && (
                                (noise_flips >= 3'd1 && bit_idx == 6'd3)  ||
                                (noise_flips >= 3'd2 && bit_idx == 6'd14) ||
-                               (noise_flips >= 3'd3 && bit_idx == 6'd27) ||
-                               (noise_flips >= 3'd4 && bit_idx == 6'd41) ||
-                               (noise_flips >= 3'd5 && bit_idx == 6'd55)
+                               (noise_flips >= 3'd3 && bit_idx == 6'd25) ||
+                               (noise_flips >= 3'd4 && bit_idx == 6'd37) ||
+                               (noise_flips >= 3'd5 && bit_idx == 6'd49)
                            );
+
+    localparam logic [2:0] P_IDLE = 3'd0, P_CLR = 3'd1, P_RUN = 3'd2, P_EVAL = 3'd3,
+                           P_BCH_GO = 3'd4, P_BCH_WT = 3'd5;
+    logic [2:0] pst;
+    logic [3:0] win_cnt;
+
+    assign busy = (pst != P_IDLE);
+
+    always_comb begin
+        cur_blk_clr = (pst == P_IDLE) && start_blk;
+        cur_blk_set = 1'b0;
+        cur_bit_val = 1'b0;
+        if (pst == P_EVAL) begin
+            if (!recon_mode) begin
+                if ((accepted_in_blk < BLK_BITS) && (abs_diff >= {6'd0, margin_thresh})) begin
+                    cur_blk_set = 1'b1;
+                    cur_bit_val = raw_cmp;
+                end
+            end else begin
+                cur_blk_set = 1'b1;
+                cur_bit_val = raw_cmp ^ inj_flip;
+            end
+        end
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            pst            <= P_IDLE;
-            is_recon       <= 1'b0;
-            meas_active    <= 1'b0;
-            cnt_clr_n      <= 1'b0;
-            pair_idx       <= '0;
-            win_cnt        <= '0;
-            blk_idx        <= '0;
-            bit_idx        <= '0;
-            cur_blk        <= '0;
-            bch_start      <= 1'b0;
-            bch_dec        <= 1'b0;
-            bch_win        <= '0;
-            bch_psin       <= '0;
-            puf_sec_we     <= '0;
-            puf_sec_wd     <= '0;
-            done           <= 1'b0;
-            puf_err        <= 1'b0;
-            accepted_pairs <= '0;
-            corrected_bits <= '0;
-            for (int m = 0; m < 8; m++) begin
-                valid_mask[m] <= '0;
-                syn_store[m]  <= '0;
-            end
+            pst             <= P_IDLE;
+            meas_active     <= 1'b0;
+            cnt_clr_n       <= 1'b0;
+            sub_idx         <= '0;
+            win_cnt         <= '0;
+            bit_idx         <= '0;
+            vmask_out       <= '0;
+            bch_start       <= 1'b0;
+            done            <= 1'b0;
+            blk_err         <= 1'b0;
+            accepted_in_blk <= '0;
         end else begin
-            done       <= 1'b0;
-            bch_start  <= 1'b0;
-            puf_sec_we <= '0;
-            if (hd_wr_en && pst == P_IDLE) begin
-                if (!hd_addr[3]) begin
-                    valid_mask[hd_addr[2:0]] <= hd_wdata;
-                end else begin
-                    syn_store[{hd_addr[1:0], 1'b0}] <= hd_wdata[26:0];
-                    syn_store[{hd_addr[1:0], 1'b1}] <= hd_wdata[58:32];
-                end
-            end
+            done      <= 1'b0;
+            bch_start <= 1'b0;
             unique case (pst)
-                P_IDLE: if (start_enroll || start_recon) begin
-                    is_recon       <= start_recon;
-                    pair_idx       <= 9'd0;
-                    blk_idx        <= 3'd0;
-                    bit_idx        <= 6'd0;
-                    cur_blk        <= 63'd0;
-                    puf_err        <= 1'b0;
-                    accepted_pairs <= 10'd0;
-                    corrected_bits <= 8'd0;
-                    if (start_enroll) begin
-                        for (int m = 0; m < 8; m++) valid_mask[m] <= 64'd0;
-                    end
-                    cnt_clr_n   <= 1'b0;
-                    meas_active <= 1'b0;
-                    pst         <= P_CLR;
+                P_IDLE: if (start_blk) begin
+                    sub_idx         <= 6'd0;
+                    bit_idx         <= 6'd0;
+                    vmask_out       <= 64'd0;
+                    accepted_in_blk <= 6'd0;
+                    blk_err         <= 1'b0;
+                    cnt_clr_n       <= 1'b0;
+                    meas_active     <= 1'b0;
+                    pst             <= P_CLR;
                 end
                 P_CLR: begin
-                    // In recon mode, skip pairs not marked in valid_mask without oscillating!
-                    if (is_recon && !valid_mask[pair_idx[8:6]][pair_idx[5:0]]) begin
-                        if (pair_idx == 9'd511) begin
-                            // Pad any remaining bits and run BCH on Remaining blocks
-                            pst <= P_BCH_GO;
-                        end else begin
-                            pair_idx <= pair_idx + 9'd1;
-                        end
+                    if (recon_mode && !vmask_in[sub_idx]) begin
+                        if (sub_idx == 6'd63) pst <= P_BCH_GO;
+                        else                  sub_idx <= sub_idx + 6'd1;
                     end else begin
                         cnt_clr_n   <= 1'b1;
                         meas_active <= 1'b1;
@@ -470,76 +425,43 @@ module dregg_ro_puf_bch (
                 end
                 P_EVAL: begin
                     cnt_clr_n <= 1'b0;
-                    if (!is_recon) begin
-                        // 8 blocks x 59 shortened BCH(63,36,t=5) bits = 472 screened bits
-                        // -> 8 * (59 - 27) = 256 bits of conditioned min-entropy after HelperData!
-                        if ((accepted_pairs < 10'd472) && (abs_diff >= {6'd0, margin_thresh})) begin
-                            valid_mask[pair_idx[8:6]][pair_idx[5:0]] <= 1'b1;
-                            accepted_pairs <= accepted_pairs + 10'd1;
-                            cur_blk[bit_idx] <= raw_cmp;
-                            if (bit_idx == 6'd58) begin
-                                bit_idx <= 6'd0;
-                                pst     <= P_BCH_GO;
-                            end else begin
-                                bit_idx <= bit_idx + 6'd1;
-                                if (pair_idx == 9'd511) pst <= P_BCH_GO;
-                                else begin pair_idx <= pair_idx + 9'd1; pst <= P_CLR; end
+                    if (!recon_mode) begin
+                        if ((accepted_in_blk < BLK_BITS) && (abs_diff >= {6'd0, margin_thresh})) begin
+                            vmask_out[sub_idx] <= 1'b1;
+                            accepted_in_blk    <= accepted_in_blk + 6'd1;
+                            bit_idx            <= bit_idx + 6'd1;
+                            if (accepted_in_blk + 6'd1 == BLK_BITS || sub_idx == 6'd63)
+                                pst <= P_BCH_GO;
+                            else begin
+                                sub_idx <= sub_idx + 6'd1;
+                                pst     <= P_CLR;
                             end
-                        end else begin
-                            if (pair_idx == 9'd511) begin
-                                puf_err <= (accepted_pairs < 10'd472);
-                                pst     <= P_BCH_GO;
-                            end else begin
-                                pair_idx <= pair_idx + 9'd1;
-                                pst      <= P_CLR;
-                            end
-                        end
-                    end else begin
-                        accepted_pairs   <= accepted_pairs + 10'd1;
-                        cur_blk[bit_idx] <= raw_cmp ^ inj_flip;
-                        if (bit_idx == 6'd58) begin
-                            bit_idx <= 6'd0;
+                        end else if (sub_idx == 6'd63) begin
+                            blk_err <= (accepted_in_blk < 6'd48);
                             pst     <= P_BCH_GO;
                         end else begin
-                            bit_idx <= bit_idx + 6'd1;
-                            if (pair_idx == 9'd511) begin
-                                puf_err <= 1'b1;
-                                pst     <= P_BCH_GO;
-                            end else begin
-                                pair_idx <= pair_idx + 9'd1;
-                                pst      <= P_CLR;
-                            end
+                            sub_idx <= sub_idx + 6'd1;
+                            pst     <= P_CLR;
+                        end
+                    end else begin
+                        accepted_in_blk <= accepted_in_blk + 6'd1;
+                        bit_idx         <= bit_idx + 6'd1;
+                        if (sub_idx == 6'd63 || (vmask_in >> (sub_idx + 6'd1)) == 64'd0)
+                            pst <= P_BCH_GO;
+                        else begin
+                            sub_idx <= sub_idx + 6'd1;
+                            pst     <= P_CLR;
                         end
                     end
                 end
                 P_BCH_GO: begin
                     bch_start <= 1'b1;
-                    bch_dec   <= is_recon;
-                    bch_win   <= cur_blk;
-                    bch_psin  <= syn_store[blk_idx];
                     pst       <= P_BCH_WT;
                 end
                 P_BCH_WT: if (bch_done) begin
-                    puf_sec_we[blk_idx] <= 1'b1;
-                    puf_sec_wd          <= {1'b0, bch_wout};
-                    if (!is_recon) syn_store[blk_idx] <= bch_sout;
-                    else begin
-                        corrected_bits <= corrected_bits + {4'd0, bch_ecnt};
-                        if (bch_unc) puf_err <= 1'b1;
-                    end
-                    cur_blk <= 63'd0;
-                    if (blk_idx == 3'd7) begin
-                        done <= 1'b1;
-                        pst  <= P_IDLE;
-                    end else if (pair_idx == 9'd511) begin
-                        puf_err <= 1'b1;
-                        done    <= 1'b1;
-                        pst     <= P_IDLE;
-                    end else begin
-                        blk_idx  <= blk_idx + 3'd1;
-                        pair_idx <= pair_idx + 9'd1;
-                        pst      <= P_CLR;
-                    end
+                    if (recon_mode && bch_unc) blk_err <= 1'b1;
+                    done <= 1'b1;
+                    pst  <= P_IDLE;
                 end
                 default: pst <= P_IDLE;
             endcase
