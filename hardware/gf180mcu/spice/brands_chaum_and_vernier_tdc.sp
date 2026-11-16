@@ -1,12 +1,12 @@
 * ==============================================================================
 * Dregg-180 Foundry BSIM4 Characterization Deck 2:
-*   1) < 5 ns Speed-of-Light Brands-Chaum Rapid-Bit Pad-to-Pad Turnaround
+*   1) Measured against 5 ns Speed-of-Light Brands-Chaum Rapid-Bit Pad-to-Pad Turnaround
 *      (gf180mcu_fd_io__bi_24t CS=0 + 1.8nH QFN-64 bondwire + mux2_4 + bi_24t SL=0 + 15pF)
 *   2) Standard-Cell Vernier TDC (dlya_1 slow vs buf_2 + clkbuf_2 + dffrnq_1 fast)
 *   3) Schmitt Input Penalty Witness (CS=1 vs CS=0 on bi_24t) + in_s Thresholds (VT+, VT-)
 *
 * Foundry PDK: GlobalFoundries 180nm (gf180mcuD, 5.0V 7-track mcu7t5v0 + fd_io)
-* Swept across SS (4.5V, 125C), TT (5.0V, 25C), FF (5.5V, -40C) by run_all_spice.py.
+* run_corners.py sweeps TT/SS/FF x -40/27/125 C at 5.0/4.5/5.5 V.
 * ==============================================================================
 
 .include "/spice/pdk/ngspice/design.ngspice"
@@ -14,10 +14,12 @@
 .lib "/spice/pdk/ngspice/sm141064.ngspice" typical
 .lib "/spice/pdk/ngspice/sm141064.ngspice" diode_typical
 .lib "/spice/pdk/ngspice/sm141064.ngspice" res_typical
-.lib "/spice/pdk/ngspice/sm141064.ngspice" moscap_typical
+.param cap_nmos_06v0_corner=1
 .param vdd_val=5.00
-.temp 25
+.temp 27
 * __CORNER_END__
+.include "moscap_with_esr.inc"
+.options klu method=gear reltol=1e-4
 
 .include "/spice/pdk/gf180mcu_fd_sc_mcu7t5v0.spice"
 .include "/spice/pdk/gf180mcu_fd_io.spice"
@@ -33,12 +35,12 @@ VVSS VSS 0 0.0
 * ==============================================================================
 
 * External Verifier Challenge Pulse on 50-ohm / SMA port (0 -> VDD -> 0, tr=tf=250ps)
-V_CHAL_SRC  CHAL_SRC 0 PULSE(0 {vdd_val} 2.0n 0.25n 0.25n 10.0n 24.0n)
+V_CHAL_SRC  CHAL_SRC 0 PWL(0 0 2n 0 2.25n {vdd_val} 12n {vdd_val} 12.25n 0 22n 0 22.25n {vdd_val} 28n {vdd_val} 28.25n 0 38n 0 38.25n {vdd_val} 48n {vdd_val})
 R_SRC_MATCH CHAL_SRC PCB_CHAL 15.0
 C_SMA_IN    PCB_CHAL 0        1.2p
 
-* Inbound QFN-64 bondwire (1.8 nH + 80 mOhm) to bidir[13] (DB_CHAL_IN, CS=0, IE=1, OE=0)
-R_BW_CIN  PCB_CHAL BW_CIN1 80m
+* Inbound QFN-64 bondwire (1.8 nH + 125 mOhm) to bidir[13] (DB_CHAL_IN, CS=0, IE=1, OE=0)
+R_BW_CIN  PCB_CHAL BW_CIN1 125m
 L_BW_CIN  BW_CIN1  PAD_CHAL_DIE 1.8n
 
 * gf180mcu_fd_io__bi_24t pin order: A CS DVDD DVSS IE OE PAD PD PU SL VDD VSS Y
@@ -52,10 +54,26 @@ C_W_IN   CHAL_CORE VSS       6.0f
 X_CSISO     CHAL_CORE     CHAL_SIDE_ISO VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__buf_2
 C_SYNC_LOAD CHAL_SIDE_ISO VSS           8.0f
 
+* Two rounds, alternating public idle polarity. This encodes a transition;
+* arbitrary zero/one challenge data requires a separate valid strobe/protocol.
+* The lock holds across the hostile reversal at 12/38 ns; rearm is explicit.
+V_REARM REARM VSS PWL(0 {vdd_val} 1n {vdd_val} 1.1n 0 24n 0 24.1n {vdd_val} 25n {vdd_val} 25.1n 0)
+V_IDLE IDLE VSS PWL(0 0 23n 0 23.1n {vdd_val})
+X_CAPTURE CHAL_CORE OPEN CHAL_HELD VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__latq_1
+X_EDGE CHAL_HELD IDLE NONIDLE VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__xor2_1
+X_D1 NONIDLE D1 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_D2 D1 D2 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_D3 D2 D3 VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_D4 D3 SET_LOCK VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__inv_1
+X_LOCK SET_LOCK LOCKED OPEN VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__nor2_1
+X_LOCKB REARM OPEN LOCKED VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__nor2_1
+C_PKG_IN PAD_CHAL_DIE VSS 0.5p
+C_PKG_OUT PAD_RESP_DIE VSS 0.5p
+
 * Pre-staged R0=0, R1=1 isolation buffers (u_mi0, u_mi1) + u_rapid_mux (mux2_4)
 X_MI0       VSS    MUX_I0    VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__buf_2
 X_MI1       VDD    MUX_I1    VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__buf_2
-X_RAPID_MUX MUX_I0 MUX_I1 CHAL_CORE MUX_Y_RAW VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__mux2_4
+X_RAPID_MUX MUX_I0 MUX_I1 CHAL_HELD MUX_Y_RAW VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__mux2_4
 
 R_W_OUT  MUX_Y_RAW DB_RESP_A 9.0
 C_W_OUT  DB_RESP_A VSS       6.0f
@@ -63,28 +81,28 @@ C_W_OUT  DB_RESP_A VSS       6.0f
 * Outbound bidir[14] (DB_RESP_OUT, SL=0 fast slew, OE=1, IE=0 during responder round)
 X_PAD_RESP DB_RESP_A VSS VDD VSS VSS VDD PAD_RESP_DIE VSS VSS VSS VDD VSS DB_RESP_Y_UN gf180mcu_fd_io__bi_24t
 
-* Outbound QFN-64 bondwire (1.8 nH + 80 mOhm) + 15 pF PCB/probe load!
+* Outbound QFN-64 bondwire (1.8 nH + 125 mOhm) + 15 pF PCB/probe load!
 L_BW_ROUT  PAD_RESP_DIE BW_ROUT1 1.8n
-R_BW_ROUT  BW_ROUT1     PCB_RESP 80m
+R_BW_ROUT  BW_ROUT1     PCB_RESP 125m
 C_PCB_RESP PCB_RESP     0        15.0p
 
 * --- Channel 2: Inverting Data Polarity (R0=1, R1=0) ---
-X_RAPID_MUX_INV MUX_I1 MUX_I0 CHAL_CORE MUX_Y_INV VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__mux2_4
+X_RAPID_MUX_INV MUX_I1 MUX_I0 CHAL_HELD MUX_Y_INV VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__mux2_4
 R_W_OUT_I  MUX_Y_INV DB_RESP_A_I 9.0
 C_W_OUT_I  DB_RESP_A_I VSS       6.0f
 X_PAD_RESP_INV DB_RESP_A_I VSS VDD VSS VSS VDD PAD_RESP_DIE_I VSS VSS VSS VDD VSS DB_RESP_YI_UN gf180mcu_fd_io__bi_24t
 L_BW_ROUT_I  PAD_RESP_DIE_I BW_ROUT1_I   1.8n
-R_BW_ROUT_I  BW_ROUT1_I     PCB_RESP_INV 80m
+R_BW_ROUT_I  BW_ROUT1_I     PCB_RESP_INV 125m
 C_PCB_RESP_I PCB_RESP_INV   0            15.0p
 
 * --- Channel 3: Trap Witness (CS=1 Schmitt Input Penalty on DB_CHAL_IN) ---
-R_BW_CINS  PCB_CHAL BW_CINS1     80m
+R_BW_CINS  PCB_CHAL BW_CINS1     125m
 L_BW_CINS  BW_CINS1 PAD_CHAL_SCH 1.8n
 X_PAD_CHAL_SCH VSS VDD VDD VSS VDD VSS PAD_CHAL_SCH VSS VSS VDD VDD VSS DB_CHAL_Y_SCH gf180mcu_fd_io__bi_24t
 X_RAPID_MUX_SCH MUX_I0 MUX_I1 DB_CHAL_Y_SCH DB_RESP_A_SCH VDD VDD VSS VSS gf180mcu_fd_sc_mcu7t5v0__mux2_4
 X_PAD_RESP_SCH DB_RESP_A_SCH VSS VDD VSS VSS VDD PAD_RESP_SCH VSS VSS VSS VDD VSS DB_RESP_YS_UN gf180mcu_fd_io__bi_24t
 L_BW_ROUTS  PAD_RESP_SCH BW_ROUTS1    1.8n
-R_BW_ROUTS  BW_ROUTS1    PCB_RESP_SCH 80m
+R_BW_ROUTS  BW_ROUTS1    PCB_RESP_SCH 125m
 C_PCB_RESPS PCB_RESP_SCH 0            15.0p
 
 * --- Reference Schmitt Trigger Threshold Characterizer (gf180mcu_fd_io__in_s) ---
@@ -133,7 +151,7 @@ X_VT11 S11 S12 F11 F12 QT11 TAP_RN VDD VSS vernier_tap
 X_VT12 S12 S13 F12 F13 QT12 TAP_RN VDD VSS vernier_tap
 X_VT13 S13 S14 F13 F14 QT13 TAP_RN VDD VSS vernier_tap
 
-.tran 10p 22n
+.tran 10p 48n 0 10p
 
 .param vmid='0.5*vdd_val'
 
@@ -142,9 +160,9 @@ X_VT13 S13 S14 F13 F14 QT13 TAP_RN VDD VSS vernier_tap
 .meas tran t_mux_core_rise  TRIG v(DB_CHAL_Y)    VAL=vmid RISE=1 TARG v(DB_RESP_A)    VAL=vmid RISE=1
 .meas tran t_out_pad_rise   TRIG v(DB_RESP_A)    VAL=vmid RISE=1 TARG v(PCB_RESP)     VAL=vmid RISE=1
 .meas tran t_db_rr_total    TRIG v(PCB_CHAL)     VAL=vmid RISE=1 TARG v(PCB_RESP)     VAL=vmid RISE=1
-.meas tran t_db_ff_total    TRIG v(PCB_CHAL)     VAL=vmid FALL=1 TARG v(PCB_RESP)     VAL=vmid FALL=1
+.meas tran t_db_ff_total    TRIG v(PCB_CHAL)     VAL=vmid FALL=2 TARG v(PCB_RESP)     VAL=vmid FALL=1
 .meas tran t_db_rf_inv      TRIG v(PCB_CHAL)     VAL=vmid RISE=1 TARG v(PCB_RESP_INV) VAL=vmid FALL=1
-.meas tran t_db_fr_inv      TRIG v(PCB_CHAL)     VAL=vmid FALL=1 TARG v(PCB_RESP_INV) VAL=vmid RISE=1
+.meas tran t_db_fr_inv      TRIG v(PCB_CHAL)     VAL=vmid FALL=2 TARG v(PCB_RESP_INV) VAL=vmid RISE=1 TD=26n
 .meas tran t_db_schmitt_rr  TRIG v(PCB_CHAL)     VAL=vmid RISE=1 TARG v(PCB_RESP_SCH) VAL=vmid RISE=1
 
 * --- Schmitt Trigger Hysteresis Thresholds (gf180mcu_fd_io__in_s) ---
@@ -173,4 +191,15 @@ X_VT13 S13 S14 F13 F14 QT13 TAP_RN VDD VSS vernier_tap
 .meas tran q10_v FIND v(QT10) AT=20n
 .meas tran q11_v FIND v(QT11) AT=20n
 
+.meas tran hold_high MIN v(PCB_RESP) FROM=18n TO=23n
+.meas tran hold_low MAX v(PCB_RESP) FROM=42n TO=47n
+.meas tran gate_closed MAX v(OPEN) FROM=18n TO=23n
+.meas tran t_lock TRIG v(CHAL_HELD) VAL=vmid RISE=1 TARG v(OPEN) VAL=vmid FALL=1
+.meas tran pass_delay PARAM='(t_db_rr_total>0)*(t_db_rr_total<5n)*(t_db_ff_total>0)*(t_db_ff_total<5n)*(t_db_rf_inv>0)*(t_db_rf_inv<5n)*(t_db_fr_inv>0)*(t_db_fr_inv<5n)'
+.meas tran pass_lock PARAM='(hold_high>0.8*vdd_val)*(hold_low<0.2*vdd_val)*(gate_closed<0.2*vdd_val)'
+.meas tran pass_tdc PARAM='(delta_tau>0)*(delta_tau<1n)'
+.control
+run
+quit
+.endc
 .end

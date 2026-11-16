@@ -478,6 +478,8 @@ pub struct VulkanSpirvBackend {
         target_pointer_width = "64"
     ))]
     prover_session_in_use: AtomicBool,
+    #[cfg(all(feature = "std", any(target_os = "linux", target_os = "macos"), target_pointer_width = "64"))]
+    prover_session_owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
     /// `info.secret_slot_audit().is_ok()`, fixed at construction.
     #[cfg(all(
         feature = "std",
@@ -500,6 +502,19 @@ pub struct VulkanSpirvBackend {
         target_pointer_width = "64"
     )))]
     _uninhabited: core::convert::Infallible,
+}
+
+/// Exclusive thread-bound ownership of the secret prover arena. Drop scrubs its buffers.
+#[must_use = "keep the guard alive while using the prover arena"]
+pub struct ProverSessionGuard<'a> {
+    backend: &'a VulkanSpirvBackend,
+    _thread_bound: core::marker::PhantomData<*mut ()>,
+}
+
+impl Drop for ProverSessionGuard<'_> {
+    fn drop(&mut self) {
+        self.backend.release_prover_session();
+    }
 }
 
 impl core::fmt::Debug for VulkanSpirvBackend {
@@ -613,12 +628,10 @@ fn gpu_or_explicit_cpu_fallback<S: ?Sized>(
 
 impl VulkanSpirvBackend {
     /// Runtime library search paths probed on macOS (`libvulkan.1.dylib` loader and `libMoltenVK.dylib`).
-    pub const fn macos_library_search_paths() -> [&'static str; 4] {
+    pub const fn macos_library_search_paths() -> [&'static str; 2] {
         [
-            "libvulkan.1.dylib",
             "/opt/homebrew/lib/libvulkan.1.dylib",
             "/opt/homebrew/lib/libMoltenVK.dylib",
-            "/usr/local/lib/libMoltenVK.dylib",
         ]
     }
 
@@ -646,6 +659,7 @@ impl VulkanSpirvBackend {
                 cpu_fallbacks: AtomicU64::new(0),
                 last_cpu_fallback: std::sync::Mutex::new(None),
                 prover_session_in_use: AtomicBool::new(false),
+                prover_session_owner: std::sync::Mutex::new(None),
                 secret_slots_audited: info.secret_slot_audit().is_ok(),
                 portability_public_enabled: false,
             })
@@ -694,6 +708,7 @@ impl VulkanSpirvBackend {
                 cpu_fallbacks: AtomicU64::new(0),
                 last_cpu_fallback: std::sync::Mutex::new(None),
                 prover_session_in_use: AtomicBool::new(false),
+                prover_session_owner: std::sync::Mutex::new(None),
                 secret_slots_audited,
                 portability_public_enabled: true,
             })
@@ -1289,7 +1304,7 @@ impl VulkanSpirvBackend {
 
     /// Acquire exclusive prover session ownership strictly for secret-bearing witness execution
     /// (requires `is_secret_slots_audited() == true`; unaudited portability drivers are rejected).
-    pub fn try_acquire_secret_prover_session(&self) -> Result<(), VulkanError> {
+    pub fn try_acquire_secret_prover_session(&self) -> Result<ProverSessionGuard<'_>, VulkanError> {
         #[cfg(all(
             feature = "std",
             any(target_os = "linux", target_os = "macos"),
@@ -1313,7 +1328,7 @@ impl VulkanSpirvBackend {
         }
     }
 
-    pub fn try_acquire_prover_session(&self) -> Result<(), VulkanError> {
+    pub fn try_acquire_prover_session(&self) -> Result<ProverSessionGuard<'_>, VulkanError> {
         #[cfg(all(
             feature = "std",
             any(target_os = "linux", target_os = "macos"),
@@ -1325,6 +1340,7 @@ impl VulkanSpirvBackend {
                     "prover session requires audited zero-spill pipelines",
                 ));
             }
+            let mut owner = self.prover_session_owner.lock().map_err(|_| VulkanError::WorkspacePoisoned)?;
             if self
                 .prover_session_in_use
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1332,7 +1348,8 @@ impl VulkanSpirvBackend {
             {
                 return Err(VulkanError::WorkspacePoisoned);
             }
-            Ok(())
+            *owner = Some(std::thread::current().id());
+            Ok(ProverSessionGuard { backend: self, _thread_bound: core::marker::PhantomData })
         }
         #[cfg(not(all(
             feature = "std",
@@ -1347,18 +1364,23 @@ impl VulkanSpirvBackend {
     /// Scrub all prover session VRAM buffers (`vkCmdFillBuffer`) and release session ownership.
     /// Recovers poisoned engine locks so unwinds still zero VRAM; if scrubbing itself fails,
     /// `prover_session_in_use` remains latched so subsequent callers fail closed.
-    pub fn release_prover_session(&self) {
+    fn release_prover_session(&self) {
         #[cfg(all(
             feature = "std",
             any(target_os = "linux", target_os = "macos"),
             target_pointer_width = "64"
         ))]
         {
+            let mut owner = self.prover_session_owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *owner != Some(std::thread::current().id()) {
+                return;
+            }
             let mut guard = self
                 .engine
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if guard.scrub_prover_session().is_ok() {
+                *owner = None;
                 self.prover_session_in_use.store(false, Ordering::Release);
             }
         }
@@ -1383,7 +1405,8 @@ impl VulkanSpirvBackend {
                 "prover session requires audited zero-spill pipelines",
             ));
         }
-        if !self.prover_session_in_use.load(Ordering::Acquire) {
+        if !self.prover_session_in_use.load(Ordering::Acquire)
+            || *self.prover_session_owner.lock().map_err(|_| VulkanError::WorkspacePoisoned)? != Some(std::thread::current().id()) {
             return Err(VulkanError::WorkspacePoisoned);
         }
         Ok(())
@@ -4687,10 +4710,8 @@ mod tests {
     #[test]
     fn macos_moltenvk_search_paths_and_wave32_portability_gate() {
         let paths = VulkanSpirvBackend::macos_library_search_paths();
-        assert_eq!(paths[0], "libvulkan.1.dylib");
-        assert_eq!(paths[1], "/opt/homebrew/lib/libvulkan.1.dylib");
-        assert_eq!(paths[2], "/opt/homebrew/lib/libMoltenVK.dylib");
-        assert_eq!(paths[3], "/usr/local/lib/libMoltenVK.dylib");
+        assert_eq!(paths, ["/opt/homebrew/lib/libvulkan.1.dylib", "/opt/homebrew/lib/libMoltenVK.dylib"]);
+        assert!(paths.iter().all(|p| p.starts_with('/')));
 
         let mut portability_info = audited_device_info();
         portability_info.wave32_required = false;
@@ -4731,7 +4752,10 @@ mod tests {
         gpu.portability_public_enabled = true;
         let key = BackendAttestationKey::derive(&[7; 32], b"portability-gate-test");
         let reject = |slot| VulkanError::Accel(AccelError::ProverSlotUnaudited { slot });
-        gpu.try_acquire_prover_session().unwrap();
+        assert!(matches!(gpu.try_acquire_prover_session(), Err(VulkanError::PipelineAuditFailed(_))));
+        assert!(matches!(gpu.try_acquire_secret_prover_session(), Err(VulkanError::PipelineAuditFailed(_))));
+        assert!(matches!(gpu.prover_whir_commit_round0_with(1, &[0; 32], 2, 4, 4, 0, 0, 0,
+            |_, _, _| panic!("unaudited prover read a witness")), Err(VulkanError::PipelineAuditFailed(_))));
         assert_eq!(
             gpu.prover_whir_commit_round0_with_receipt(
                 &key,

@@ -1389,21 +1389,40 @@ struct TypedView<B: ShareBit> {
 }
 impl<B: ShareBit> TypedView<B> {
     fn new() -> Self {
-        Self { subseeds: SecretVec::new(), inputs: Vec::new(), products: Vec::new(), outputs: Vec::new(), #[cfg(test)] audit_inputs: SecretVec::new() }
+        Self {
+            subseeds: SecretVec::new(),
+            inputs: Vec::new(),
+            products: Vec::new(),
+            outputs: Vec::new(),
+            #[cfg(test)]
+            audit_inputs: SecretVec::new(),
+        }
     }
 }
 
 /// Retain field-valued view entries in their original domain. All circuit
 /// conversions still execute in evaluate_wires; only serialization conversions
 /// are deferred until the masked values or challenged lanes are public.
-fn evaluate_typed_views<E: Core>(e: &mut E, c: &Circuit, witness: &[E::Bit], seeds: &LocalBatchSeeds, require_zero: bool) -> Result<Vec<TypedView<E::Bit>>, Error> {
+fn evaluate_typed_views<E: Core>(
+    e: &mut E,
+    c: &Circuit,
+    witness: &[E::Bit],
+    seeds: &LocalBatchSeeds,
+    require_zero: bool,
+) -> Result<Vec<TypedView<E::Bit>>, Error> {
     let empty: [Word<E::Bit>; 3] = core::array::from_fn(|_| SecretVec::new());
-    let EvaluatedWires { mut wires, .. } = evaluate_wires(e, c, witness, Some(&empty), Some(seeds))?;
-    if require_zero { check_outputs_zero(e, c, &wires, &c.outputs)?; }
+    let EvaluatedWires { mut wires, .. } =
+        evaluate_wires(e, c, witness, Some(&empty), Some(seeds))?;
+    if require_zero {
+        check_outputs_zero(e, c, &wires, &c.outputs)?;
+    }
     let mut views: Vec<TypedView<E::Bit>> = (0..3).map(|_| TypedView::new()).collect();
     for &idx in &c.outputs {
         for (h, view) in views.iter_mut().enumerate() {
-            view.outputs.push(TypedValue { domain: c.nodes[idx].domain, share: wires[idx].as_ref().unwrap()[h].clone() });
+            view.outputs.push(TypedValue {
+                domain: c.nodes[idx].domain,
+                share: wires[idx].as_ref().unwrap()[h].clone(),
+            });
         }
     }
     for (idx, node) in c.nodes.iter().enumerate() {
@@ -1414,9 +1433,21 @@ fn evaluate_typed_views<E: Core>(e: &mut E, c: &Circuit, witness: &[E::Bit], see
                         // The existing concrete key-recovery audit uses the
                         // initial byte-padded witness-bit inputs, unchanged.
                         #[cfg(test)]
-                        if node.domain == Domain::Bit { outer_mpc::encode(&mut views[h].audit_inputs, &[value.bit()]); }
-                        if h == 2 { views[h].inputs.push(TypedValue { domain: node.domain, share: value }); }
-                    } else { views[h].products.push(TypedValue { domain: node.domain, share: value }); }
+                        if node.domain == Domain::Bit {
+                            outer_mpc::encode(&mut views[h].audit_inputs, &[value.bit()]);
+                        }
+                        if h == 2 {
+                            views[h].inputs.push(TypedValue {
+                                domain: node.domain,
+                                share: value,
+                            });
+                        }
+                    } else {
+                        views[h].products.push(TypedValue {
+                            domain: node.domain,
+                            share: value,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -1428,36 +1459,75 @@ fn evaluate_typed_views<E: Core>(e: &mut E, c: &Circuit, witness: &[E::Bit], see
 /// One independent mask contribution per custodian, sampled in each entry's
 /// additive group (XOR for bits). No private field entry is serialized/opened
 /// merely to hash it. Fixed seeds and the public circuit fix every mask.
-fn mask_shared_views<E: Core>(e: &mut E, batch: usize, seeds: &LocalBatchSeeds, views: &[TypedView<E::Bit>]) -> Result<Vec<TypedView<E::Bit>>, Error> {
+fn mask_shared_views<E: Core>(
+    e: &mut E,
+    batch: usize,
+    seeds: &LocalBatchSeeds,
+    views: &[TypedView<E::Bit>],
+) -> Result<Vec<TypedView<E::Bit>>, Error> {
     let mut result = Vec::with_capacity(3);
     for (h, view) in views.iter().enumerate() {
-        let values: Vec<_> = view.inputs.iter().chain(&view.products).chain(&view.outputs).collect();
-        let bit_indices: Vec<_> = values.iter().enumerate().filter_map(|(i, v)| (v.domain == Domain::Bit).then_some(i)).collect();
-        let field_indices: Vec<_> = values.iter().enumerate().filter_map(|(i, v)| (v.domain != Domain::Bit).then_some(i)).collect();
+        let values: Vec<_> = view
+            .inputs
+            .iter()
+            .chain(&view.products)
+            .chain(&view.outputs)
+            .collect();
+        let bit_indices: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| (v.domain == Domain::Bit).then_some(i))
+            .collect();
+        let field_indices: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| (v.domain != Domain::Bit).then_some(i))
+            .collect();
         let mut own_bits: SecretVec<u64> = vec![0; bit_indices.len()].into();
         let mut own_fields: SecretVec<Value> = vec![ZERO; field_indices.len() * 64].into();
         for (lane, seed) in seeds.subseeds[h].iter().enumerate() {
-            let mask_seed = Secret(crate::batch_hash::view_mask_seed(seed, batch * 64 + lane, h));
+            let mask_seed = Secret(crate::batch_hash::view_mask_seed(
+                seed,
+                batch * 64 + lane,
+                h,
+            ));
             let mut tape = zk_engine::Tape::new(&mask_seed);
             let (mut bit_idx, mut field_idx) = (0, 0);
             for v in &values {
                 let value = Secret(tape.sample(v.domain));
-                if v.domain == Domain::Bit { own_bits[bit_idx] |= value[0] << lane; bit_idx += 1; }
-                else { own_fields[field_idx * 64 + lane] = *value; field_idx += 1; }
+                if v.domain == Domain::Bit {
+                    own_bits[bit_idx] |= value[0] << lane;
+                    bit_idx += 1;
+                } else {
+                    own_fields[field_idx * 64 + lane] = *value;
+                    field_idx += 1;
+                }
             }
         }
         let mut masked: Vec<Option<TypedValue<E::Bit>>> = (0..values.len()).map(|_| None).collect();
         let bits = e.share_masked(&own_bits)?;
         for (&idx, &bit) in bit_indices.iter().zip(bits.iter()) {
-            masked[idx] = Some(TypedValue { domain: Domain::Bit, share: SharedValue::Bit(values[idx].share.bit() ^ bit) });
+            masked[idx] = Some(TypedValue {
+                domain: Domain::Bit,
+                share: SharedValue::Bit(values[idx].share.bit() ^ bit),
+            });
         }
         for d in Domain::ALL_FIELDS {
-            let indices: Vec<_> = field_indices.iter().enumerate().filter_map(|(f, &idx)| (values[idx].domain == d).then_some((f, idx))).collect();
+            let indices: Vec<_> = field_indices
+                .iter()
+                .enumerate()
+                .filter_map(|(f, &idx)| (values[idx].domain == d).then_some((f, idx)))
+                .collect();
             let mut own = SecretVec::with_capacity(indices.len() * 64);
-            for &(f, _) in &indices { own.extend_from_slice(&own_fields[f * 64..(f + 1) * 64]); }
+            for &(f, _) in &indices {
+                own.extend_from_slice(&own_fields[f * 64..(f + 1) * 64]);
+            }
             let shares = e.fshare_many(&own, d)?;
             for ((_, idx), mask) in indices.into_iter().zip(shares) {
-                masked[idx] = Some(TypedValue { domain: d, share: SharedValue::Field(e.fadd(values[idx].share.field(), &mask, d)) });
+                masked[idx] = Some(TypedValue {
+                    domain: d,
+                    share: SharedValue::Field(e.fadd(values[idx].share.field(), &mask, d)),
+                });
             }
         }
         let mut entries = masked.into_iter().map(Option::unwrap);
@@ -1473,38 +1543,79 @@ fn mask_shared_views<E: Core>(e: &mut E, batch: usize, seeds: &LocalBatchSeeds, 
 /// Open only selected lanes, scaling unselected field lanes to zero before
 /// the backend's mandatory authenticated opening. Encoding then operates on
 /// public values, with the same canonical packed format used by the verifier.
-fn open_typed_values<E: Core>(e: &mut E, values: &[TypedValue<E::Bit>], mask: u64) -> Result<Vec<Vec<u8>>, Error> {
-    if values.is_empty() { return Ok(vec![Vec::new(); 64]); }
+fn open_typed_values<E: Core>(
+    e: &mut E,
+    values: &[TypedValue<E::Bit>],
+    mask: u64,
+) -> Result<Vec<Vec<u8>>, Error> {
+    if values.is_empty() {
+        return Ok(vec![Vec::new(); 64]);
+    }
     let mut clear: SecretVec<Value> = vec![ZERO; values.len() * 64].into();
-    let bit_indices: Vec<_> = values.iter().enumerate().filter_map(|(i, v)| (v.domain == Domain::Bit).then_some(i)).collect();
+    let bit_indices: Vec<_> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| (v.domain == Domain::Bit).then_some(i))
+        .collect();
     let bits: Word<E::Bit> = bit_indices.iter().map(|&i| values[i].share.bit()).collect();
     let opened = e.open_lanes(&bits, mask)?;
     for (&idx, &word) in bit_indices.iter().zip(&opened) {
-        for lane in 0..64 { clear[idx * 64 + lane][0] = (word >> lane) & 1; }
+        for lane in 0..64 {
+            clear[idx * 64 + lane][0] = (word >> lane) & 1;
+        }
     }
     let selectors: [Value; 64] = core::array::from_fn(|lane| [(mask >> lane) & 1, 0, 0, 0, 0, 0]);
     for d in Domain::ALL_FIELDS {
-        let indices: Vec<_> = values.iter().enumerate().filter_map(|(i, v)| (v.domain == d).then_some(i)).collect();
-        if indices.is_empty() { continue; }
-        let words: Vec<_> = indices.iter().map(|&i| e.fscale_lanes(values[i].share.field(), &selectors, d)).collect();
+        let indices: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| (v.domain == d).then_some(i))
+            .collect();
+        if indices.is_empty() {
+            continue;
+        }
+        let words: Vec<_> = indices
+            .iter()
+            .map(|&i| e.fscale_lanes(values[i].share.field(), &selectors, d))
+            .collect();
         let opened = e.fopen_many(&words, d)?;
-        for (idx, word) in indices.into_iter().zip(opened) { clear[idx * 64..(idx + 1) * 64].copy_from_slice(&word); }
+        for (idx, word) in indices.into_iter().zip(opened) {
+            clear[idx * 64..(idx + 1) * 64].copy_from_slice(&word);
+        }
     }
-    let bytes = values.iter().map(|v| v.domain.width()).sum::<usize>().div_ceil(8);
-    Ok((0..64).map(|lane| {
-        let mut packer = zk_engine::BitPacker::with_capacity(bytes);
-        for (idx, v) in values.iter().enumerate() { packer.push_value(v.domain, clear[idx * 64 + lane]); }
-        packer.into_bytes()
-    }).collect())
+    let bytes = values
+        .iter()
+        .map(|v| v.domain.width())
+        .sum::<usize>()
+        .div_ceil(8);
+    Ok((0..64)
+        .map(|lane| {
+            let mut packer = zk_engine::BitPacker::with_capacity(bytes);
+            for (idx, v) in values.iter().enumerate() {
+                packer.push_value(v.domain, clear[idx * 64 + lane]);
+            }
+            packer.into_bytes()
+        })
+        .collect())
 }
 
-fn open_batch_public_rounds<E: Core>(e: &mut E, batch: usize, masked_views: &[TypedView<E::Bit>], views: &[TypedView<E::Bit>], seed_commitments: &[Vec<u8>]) -> Result<Vec<PublicRound>, Error> {
+fn open_batch_public_rounds<E: Core>(
+    e: &mut E,
+    batch: usize,
+    masked_views: &[TypedView<E::Bit>],
+    views: &[TypedView<E::Bit>],
+    seed_commitments: &[Vec<u8>],
+) -> Result<Vec<PublicRound>, Error> {
     #[cfg(test)]
     e.on_public_or_view_open();
     let mut masked = Vec::with_capacity(3);
     let mut outputs = Vec::with_capacity(3);
     for (masked_view, view) in masked_views.iter().zip(views) {
-        masked.push((open_typed_values(e, &masked_view.inputs, u64::MAX)?, open_typed_values(e, &masked_view.products, u64::MAX)?, open_typed_values(e, &masked_view.outputs, u64::MAX)?));
+        masked.push((
+            open_typed_values(e, &masked_view.inputs, u64::MAX)?,
+            open_typed_values(e, &masked_view.products, u64::MAX)?,
+            open_typed_values(e, &masked_view.outputs, u64::MAX)?,
+        ));
         outputs.push(open_typed_values(e, &view.outputs, u64::MAX)?);
     }
     let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
@@ -1512,10 +1623,24 @@ fn open_batch_public_rounds<E: Core>(e: &mut E, batch: usize, masked_views: &[Ty
         let rep = batch * 64 + lane;
         let commits = core::array::from_fn(|h| {
             let offset = (rep * 3 + h) * 64 + 32;
-            let seeds: Vec<[u8; 32]> = seed_commitments.iter().map(|v| v[offset..offset + 32].try_into().unwrap()).collect();
-            crate::batch_hash::commit_cozk_tree_one(&COZK_VIEW_MAGIC_V5, rep, h, &seeds, &masked[h].0[lane], &masked[h].1[lane], &masked[h].2[lane])
+            let seeds: Vec<[u8; 32]> = seed_commitments
+                .iter()
+                .map(|v| v[offset..offset + 32].try_into().unwrap())
+                .collect();
+            crate::batch_hash::commit_cozk_tree_one(
+                &COZK_VIEW_MAGIC_V5,
+                rep,
+                h,
+                &seeds,
+                &masked[h].0[lane],
+                &masked[h].1[lane],
+                &masked[h].2[lane],
+            )
         });
-        PublicRound { commits, outputs: core::array::from_fn(|h| outputs[h][lane].clone()) }
+        PublicRound {
+            commits,
+            outputs: core::array::from_fn(|h| outputs[h][lane].clone()),
+        }
     }))
 }
 
@@ -3468,10 +3593,15 @@ mod tests {
         // Field openings must erase every unchallenged lane before the
         // authenticated open, on both replicated and Shamir backends.
         let selected = (1u64 << 17) | (1u64 << 63);
-        let selected_products: Vec<_> = typed.iter().map(|v| open_typed_values(e, &v.products, selected).unwrap()).collect();
+        let selected_products: Vec<_> = typed
+            .iter()
+            .map(|v| open_typed_values(e, &v.products, selected).unwrap())
+            .collect();
         for products in &selected_products {
             for (lane, bytes) in products.iter().enumerate() {
-                if (selected >> lane) & 1 == 0 { assert!(bytes.iter().all(|&b| b == 0)); }
+                if (selected >> lane) & 1 == 0 {
+                    assert!(bytes.iter().all(|&b| b == 0));
+                }
             }
         }
         let opened_commits: Vec<_> = commitments.iter().map(|w| e.open(w).unwrap()).collect();
@@ -3504,10 +3634,16 @@ mod tests {
                 };
                 assert_eq!(
                     v5_rounds[lane].commits[h],
-                    crate::batch_hash::commit_cozk_v5_indexed(&[indexed], &crate::batch_hash::CozkViewLayout::new(&c)).unwrap()[0]
+                    crate::batch_hash::commit_cozk_v5_indexed(
+                        &[indexed],
+                        &crate::batch_hash::CozkViewLayout::new(&c)
+                    )
+                    .unwrap()[0]
                 );
                 assert_eq!(v5_rounds[lane].outputs[h], native[h].outputs);
-                if (selected >> lane) & 1 != 0 { assert_eq!(selected_products[h][lane], native[h].products); }
+                if (selected >> lane) & 1 != 0 {
+                    assert_eq!(selected_products[h][lane], native[h].products);
+                }
                 assert_eq!(outer_mpc::lane_bytes(&opened_views[h].0, lane), input);
                 assert_eq!(
                     outer_mpc::lane_bytes(&opened_views[h].1, lane),

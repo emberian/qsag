@@ -1495,6 +1495,10 @@ impl RawVulkanEngine {
 
         #[cfg(target_os = "macos")]
         {
+            // Homebrew prefixes are user-writable; loading code from them requires opt-in.
+            if std::env::var_os("QSAG_ALLOW_USER_VULKAN_LOADER").is_none() {
+                return Err(VulkanError::LibraryLoadFailed);
+            }
             // A loader with no usable ICD falls through to the next candidate; the error
             // reported is that of the last library that loaded at all.
             let mut last_err = VulkanError::LibraryLoadFailed;

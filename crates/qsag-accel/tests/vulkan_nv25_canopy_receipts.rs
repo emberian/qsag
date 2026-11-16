@@ -590,7 +590,7 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     let hw_digest = gpu.hardware_audit_digest();
     let mut rng = 0x2526_A11C_E5EE_D001u64;
 
-    gpu.try_acquire_prover_session()
+    let session = gpu.try_acquire_prover_session()
         .expect("acquire prover session");
 
     // =========================================================================
@@ -976,8 +976,8 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
     );
 
     // Scrub `nv = 25` arena before allocating the `~9.9 GiB` `nv = 26` arena on 12 GiB RX 6750 XT.
-    gpu.release_prover_session();
-    gpu.try_acquire_prover_session()
+    drop(session);
+    let session = gpu.try_acquire_prover_session()
         .expect("re-acquire for nv=26");
 
     // =========================================================================
@@ -1068,5 +1068,5 @@ fn test_whir_nv25_and_nv26_vram_session_and_prover_v5_receipts() {
         Err(other) => panic!("unexpected nv=26 error: {other}"),
     }
 
-    gpu.release_prover_session();
+    drop(session);
 }

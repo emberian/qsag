@@ -4204,6 +4204,56 @@ mod tests {
         );
         out
     }
+    #[test]
+    fn folded_level_checks_each_opening_component_without_outer_snark() {
+        // Exercise the PCS verifier directly, so an outer digest/SNARK cannot mask a missing check.
+        let nv = 12;
+        let params = FixedPathWhirParams::new(REGIME, nv).unwrap();
+        let polys: Vec<Vec<F>> = (0..5).map(|k| (0..1 << nv)
+            .map(|i| f((i * i + 37 * k + 11) as u64)).collect()).collect();
+        let commits: Vec<_> = polys.iter().map(|p| commit_for_recursion(&params, p).unwrap()).collect();
+        let edges: Vec<_> = (0..2).map(|u| {
+            let points: [Vec<E>; 3] = core::array::from_fn(|j| (0..nv).map(|i| sample(i + 17*j + 31*u)).collect());
+            let indices = [2*u+1, 0, 2*u+2];
+            let claims = core::array::from_fn(|m| core::array::from_fn(|j|
+                Some(crate::field::mle_eval_base_at_ext4(&polys[indices[m]], &points[j]))));
+            FoldedEdgeSpec { regime: REGIME, num_vars: nv, claim_digest: [f(100 + u as u64); 4],
+                roots: indices.map(|i| commits[i].root()), points, claims }
+        }).collect();
+        let top = [f(777); 4];
+        let proof = prove_folded_level_for_recursion(0, top, &edges,
+            |k, dst| { dst.clear(); dst.extend_from_slice(&polys[k]); },
+            |k| commits[k].levels()).unwrap();
+        assert!(verify_folded_level(0, top, &edges, &proof));
+        let reject = |bad: &FoldedLevelWhirProof| assert!(!verify_folded_level(0, top, &edges, bad));
+        for k in 0..polys.len() {
+            let mut bad = proof.clone(); bad.stage0_fibers[k][0] += F::ONE; reject(&bad);
+            let mut bad = proof.clone(); bad.stage0_siblings[k].push([F::ZERO; 4]); reject(&bad);
+            let mut bad = proof.clone(); bad.poly_evals[k] += E::ONE; reject(&bad);
+        }
+        for stage in 0..proof.later_fibers.len() {
+            let mut bad = proof.clone(); bad.later_fibers[stage][0] += E::ONE; reject(&bad);
+            let mut bad = proof.clone(); bad.later_stage_roots[stage][0] += F::ONE; reject(&bad);
+            let mut bad = proof.clone(); bad.later_siblings[stage].push([F::ZERO; 4]); reject(&bad);
+        }
+        assert!(!proof.later_fibers.is_empty(), "fixture must exercise a multistage opening");
+        for round in 0..proof.point_rounds.len() {
+            let mut bad = proof.clone(); bad.point_rounds[round][0] += E::ONE; reject(&bad);
+        }
+        for round in 0..proof.fold_polys.len() {
+            for coefficient in 0..5 {
+                let mut bad = proof.clone(); bad.fold_polys[round][coefficient] += E::ONE; reject(&bad);
+            }
+        }
+        for stage in 0..proof.ood_evals.len() {
+            let mut bad = proof.clone(); bad.ood_evals[stage][0] += E::ONE; reject(&bad);
+        }
+        let mut bad = proof.clone(); bad.final_coeffs[0] += E::ONE; reject(&bad);
+        let mut bad = proof.clone(); bad.stage0_fibers.pop(); reject(&bad);
+        assert!(!verify_folded_level(1, top, &edges, &proof));
+        assert!(!verify_folded_level(0, [f(778); 4], &edges, &proof));
+    }
+
     fn relation_for_child(
         params: &FixedPathWhirParams,
         child: &ChildWhirStatement,

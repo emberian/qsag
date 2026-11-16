@@ -325,7 +325,7 @@ fn check_succinct(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
 /// `seed` with sparse `(offset: u32 LE, xor: u8)` edits applied.
 fn edited(seed: &[u8], edits: &[u8]) -> Vec<u8> {
     let mut candidate = seed.to_vec();
-    for edit in edits.chunks_exact(5) {
+    for edit in edits.as_chunks::<5>().0 {
         let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
         let index = offset % candidate.len();
         candidate[index] ^= edit[4];

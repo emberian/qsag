@@ -78,8 +78,30 @@ mod linux {
     const WAISTBAND_ENTRIES: usize = 1024;
     const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
 
+    /// Read one request frame, buffering at most `MAX_REQUEST_LINE_BYTES + 2` bytes of it.
     fn read_request_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<usize> {
         std::io::Read::take(input, (MAX_REQUEST_LINE_BYTES + 2) as u64).read_until(b'\n', line)
+    }
+
+    /// Consume the unread remainder of an oversized frame, through its newline or the end of
+    /// input, without buffering it, so that the remainder is never parsed as a request.
+    fn discard_request_tail(input: &mut impl BufRead) -> std::io::Result<()> {
+        loop {
+            let buffered = input.fill_buf()?;
+            if buffered.is_empty() {
+                return Ok(());
+            }
+            match buffered.iter().position(|&byte| byte == b'\n') {
+                Some(newline) => {
+                    input.consume(newline + 1);
+                    return Ok(());
+                }
+                None => {
+                    let skipped = buffered.len();
+                    input.consume(skipped);
+                }
+            }
+        }
     }
 
     const KEYGEN_HELP: &str = "\
@@ -729,8 +751,11 @@ signature stops verifying when its coupon expires.
             if read == 0 {
                 break;
             }
-            // Stop after reporting an oversized frame: its remainder is not a new request.
             let oversized = line.len() > MAX_REQUEST_LINE_BYTES;
+            if oversized && line.last() != Some(&b'\n') {
+                discard_request_tail(&mut stdin)
+                    .map_err(|e| CliError::io("reading a request from standard input", e))?;
+            }
             let text = std::str::from_utf8(&line);
             if !oversized && text.is_ok_and(|text| text.trim().is_empty()) {
                 continue;
@@ -758,9 +783,6 @@ signature stops verifying when its coupon expires.
                 }
             }
             emit(&mut stdout, &Json::object(fields))?;
-            if oversized {
-                break;
-            }
         }
         match first_refusal {
             Some(error) => Err(error),
@@ -871,6 +893,29 @@ signature stops verifying when its coupon expires.
             line.clear();
             read_request_line(&mut input, &mut line).unwrap();
             assert_eq!(line, b"first\n");
+        }
+
+        #[test]
+        fn oversized_request_tail_is_discarded_not_reparsed() {
+            // The tail spans several BufReader refills and ends in the frame's own newline.
+            let mut stream = vec![b'a'; MAX_REQUEST_LINE_BYTES * 3];
+            stream.extend_from_slice(b"\nnext\n");
+            let mut input = std::io::BufReader::with_capacity(4096, std::io::Cursor::new(stream));
+            let mut line = Vec::new();
+            read_request_line(&mut input, &mut line).unwrap();
+            assert_eq!(line.len(), MAX_REQUEST_LINE_BYTES + 2);
+            assert_ne!(line.last(), Some(&b'\n'));
+            discard_request_tail(&mut input).unwrap();
+            line.clear();
+            read_request_line(&mut input, &mut line).unwrap();
+            assert_eq!(line, b"next\n");
+            // An unterminated oversized frame at the end of input leaves nothing behind.
+            let mut input = std::io::Cursor::new(vec![b'a'; MAX_REQUEST_LINE_BYTES * 2]);
+            line.clear();
+            read_request_line(&mut input, &mut line).unwrap();
+            discard_request_tail(&mut input).unwrap();
+            line.clear();
+            assert_eq!(read_request_line(&mut input, &mut line).unwrap(), 0);
         }
 
         #[test]

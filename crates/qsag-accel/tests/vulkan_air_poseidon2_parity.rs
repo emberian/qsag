@@ -968,7 +968,7 @@ fn air_row_group_kernels_match_the_canonical_poseidon2_and_weighted_wots_referen
     let fx = fixture();
     let tables = static_tables(&fx);
 
-    gpu.try_acquire_prover_session().expect("prover session");
+    let session = gpu.try_acquire_prover_session().expect("prover session");
     // The witness enters VRAM through the Round-0 commitment, row-major, with room behind it
     // for the column-major transpose.
     let witness_words = ROWS * NUM_COLS;
@@ -1110,5 +1110,5 @@ fn air_row_group_kernels_match_the_canonical_poseidon2_and_weighted_wots_referen
     // The folded rows are no longer honest rows: the constraint part is live at every point.
     assert_ne!(host_round1[0], fx.round_evals(CANONICAL, &st1, true)[0]);
 
-    gpu.release_prover_session();
+    drop(session);
 }

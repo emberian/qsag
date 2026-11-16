@@ -212,7 +212,7 @@ fuzz_target!(init: {
     // minimal-counter scan. Only the unedited signature may verify.
     if let Some(edits) = data.strip_prefix(&SEEDED_EDIT_PREFIX) {
         let mut candidate = fx.seeded_sig.clone();
-        for edit in edits.chunks_exact(5) {
+        for edit in edits.as_chunks::<5>().0 {
             let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
             let index = offset % candidate.len();
             candidate[index] ^= edit[4];

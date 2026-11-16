@@ -68,12 +68,13 @@ fn device() -> Option<&'static Device> {
 /// device. Releases the lease back to the engine on `Drop`, then drops the admission permit.
 pub(crate) struct GpuWhirSession {
     device: &'static Device,
+    session: Option<qsag_accel::vulkan::ProverSessionGuard<'static>>,
     _admission: crate::prover_admission::Permit,
 }
 
 impl Drop for GpuWhirSession {
     fn drop(&mut self) {
-        self.device.backend.inner().release_prover_session();
+        drop(self.session.take());
         if let Ok(mut owner) = self.device.session_owner.lock() {
             *owner = None;
             self.device.session_cv.notify_all();
@@ -115,10 +116,11 @@ pub(crate) fn try_acquire_whir_session_for(secret: bool) -> Option<GpuWhirSessio
     } else {
         d.backend.inner().try_acquire_prover_session()
     };
-    if acquired.is_ok() {
+    if let Ok(session) = acquired {
         *owner = Some(cur_tid);
         Some(GpuWhirSession {
             device: d,
+            session: Some(session),
             _admission: admission,
         })
     } else {

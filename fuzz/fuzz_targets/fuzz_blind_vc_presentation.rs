@@ -281,7 +281,7 @@ fuzz_target!(init: {
     if let [0xed, kind, edits @ ..] = data {
         let window = if kind & 1 == 0 { fx.wire.len() } else { fx.wire.len().min(4096) };
         let mut candidate = fx.wire.clone();
-        for edit in edits.chunks_exact(5) {
+        for edit in edits.as_chunks::<5>().0 {
             let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
             candidate[offset % window] ^= edit[4];
         }

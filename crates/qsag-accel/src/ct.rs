@@ -211,7 +211,6 @@ pub const fn ct_lt_u128(a: u128, b: u128) -> bool {
 
 /// Fixed-size secret byte container with `<REDACTED>` `fmt::Debug`, constant-time equality,
 /// and mandatory `write_volatile` zeroization on `Drop`.
-#[derive(Clone)]
 pub struct RedactedSecret<const N: usize>([u8; N]);
 
 impl<const N: usize> RedactedSecret<N> {

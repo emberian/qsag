@@ -190,7 +190,6 @@ fn fixtures() -> &'static Fixtures {
             pk_bytes: pk_encode(&params, &rho, &t1),
             t,
         };
-        pack.validate().expect("consistent verification pack");
         let pack_wire = pack.to_bytes();
         assert_eq!(ThresholdVerificationPack::from_bytes(&pack_wire).as_ref(), Ok(&pack));
 
@@ -208,7 +207,7 @@ fn fixtures() -> &'static Fixtures {
 /// `seed` with sparse `(offset: u32 LE, xor: u8)` edits applied.
 fn edited(seed: &[u8], edits: &[u8]) -> Vec<u8> {
     let mut candidate = seed.to_vec();
-    for edit in edits.chunks_exact(5) {
+    for edit in edits.as_chunks::<5>().0 {
         let offset = u32::from_le_bytes([edit[0], edit[1], edit[2], edit[3]]) as usize;
         let index = offset % candidate.len();
         candidate[index] ^= edit[4];

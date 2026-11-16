@@ -43,8 +43,9 @@ checked by `scripts/check_extraction_provenance.py`:
   Production also decides acceptance through the four wrappers
   `verify_affine_duet_fold_step`, `verify_cwyz_duet_fold_step`,
   `verify_cwyz_bridge_claim_step` and `verify_ext4_univariate_at_base_pin`, and evaluates
-  terminal polynomials with `eval_univariate_ext4_at_base` / `eval_ext4_univariate_at_base`
-  (call sites in `pcs.rs`, `pcs/affine.rs`, `field.rs` and `recursive_fold.rs`),
+  terminal polynomials through extracted `eval_ext4_univariate_at_base` in `pcs.rs`.
+  The similarly named `eval_univariate_ext4_at_base` in production `field.rs` is a separate
+  Horner loop (also used by `pcs/affine.rs`), not a call to the extracted function; the verifier uses the extracted kernels,
   converting tower limbs with the `[0, 2, 1, 3]` basis adapter (`towerToPoly_mul_hom`).
   `fold_duet_affine_ext4` and `duet_fold` are proved in `Proofs.lean` but have no call site
   in `crates/qsag-agg`: they are library-only. The prover's own folding, as opposed to the
@@ -85,15 +86,15 @@ The manifest on disk classifies **235** functions, each with exactly one status:
 | `direct-lexical` | 14 | Only `.method(` call sites, in files whose `use` imports the receiver type. |
 | `reached` | 13 | Not called from `crates/**`, but called transitively inside `qsag-verified` by a function that is. |
 | **Production-called** | **63** | |
-| `spec-welded` | 16 | No production path; a Lean weld module refers to the extracted definition, so production is related to it only through the shared specification and its own separate implementation. |
+| `spec-welded` | 16 | No production path; a Lean weld refers to the definition. Relating a separate production implementation requires its own refinement to that specification. |
 | `proof-only` | 68 | No production path and no weld; only Lean proofs refer to it. |
 | `test-only` | 56 | Referred to by tests alone. |
 | `unreferenced` | 32 | Nothing refers to it. |
 | **Standalone library** | **172** | |
 | **Total** | **235** | `pub fn`s with no definition in `Funs.lean`: 0. |
 
-So 63 of 235 extracted functions (27%) lie on a production call path, and 172 (73%) are
-standalone library code whose theorems do not, by themselves, constrain the shipped binaries.
+Thus the manifest classifies 63 of 235 functions (27%) as production-called (including
+lexical over-approximations), and 172 (73%) as standalone library code whose theorems do not, by themselves, constrain the shipped binaries.
 The 50 `direct` and `direct-lexical` functions have 84 recorded production call sites, in
 `qsag-addr`, `qsag-core`, `qsag-cred`, `qsag-fts`, `qsag-hd`, `qsag-policy` and `qsag-quorum`.
 
@@ -113,11 +114,11 @@ The 50 `direct` and `direct-lexical` functions have 84 recorded production call 
 | `threshold.rs` | 0 | 0 | 0 | 0 | 17 | 9 | 2 | 28 |
 | `tower.rs` | 1 | 0 | 0 | 6 | 9 | 7 | 0 | 23 |
 
-Two consequences are worth stating plainly. No Goldilocks function and no Shamir, DKG or
-`EpochLatch` function of `threshold.rs` is called by production: the Goldilocks and binary-tower
-arithmetic (`gf256_*`, `tower128_*`, `tower256_*`) reaches production only as `spec-welded`
-(production has its own implementation of the same specification; the one `direct` function
-of `tower.rs` is `ct_eq_bytes32`), and the `threshold.rs` theorems in the export inventory
+The manifest finds no production call to the extracted Goldilocks functions or to the Shamir,
+DKG and `EpochLatch` functions of `threshold.rs`. Selected Goldilocks and binary-tower
+arithmetic functions (`gf256_*`, `tower128_*`, `tower256_*`) are `spec-welded`; production
+has separate implementations, and a shared specification alone does not prove their equality
+(the one `direct` function of `tower.rs` is `ct_eq_bytes32`), and the `threshold.rs` theorems in the export inventory
 below are about library code. Conversely the session guards (`cred_and_hd_guards.rs`,
 `pants_and_quorum_guards.rs`, `policy_and_addr.rs`, `fts_spn_guard.rs`, `opening_guard.rs`) and
 the Keccak sponge are where extracted code runs in production.
@@ -144,8 +145,10 @@ Both `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` are zero-dependency
 | `aeneas/qsag-whir-verified` (WHIR verifier & quorum kernels) | Canonical Goldilocks/`Ext4` decoding; `duet_fold`, `cwyz_duet_fold`, `fold_duet_affine_ext4`, `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, `affine_cascade_claim_step`; arbitrary-slice Horner `eval_ext4_univariate_at_base` & `eval_univariate_ext4_at_base`; `verify_*` acceptance checks; `verify_ood_pin_eq`, `verify_stage_pow_mask`, `canonical_query_group_idx`, `step_merkle_pair_order`, `checked_quorum_sum` | Directly linked by `crates/qsag-agg` for canonical decoding, bridge/sumcheck/cascade steps, the four `verify_*` acceptance wrappers, Horner evaluation, OOD equality, PoW mask, query reduction, Merkle sibling ordering, and overflow-free quorum summation. `fold_duet_affine_ext4` and `duet_fold` are proved in `aeneas/lean-whir` and exercised in `tests/production_entrypoints.rs` but not called by production. |
 
 Goldilocks inversion has an exact modular-exponent specification and canonical output
-bound. The seven-input witness checks one multiplicative inverse; these statements do
-not establish primality or a universal nonzero inverse law. The Keccak zero-state
+bound. Beyond the seven-input witness, `RealSpecFieldWeld.lean` proves the universal nonzero
+residue law `goldilocks_inverse_mul_eq_one`, the exact zero-residue option behavior
+`goldilocks_inv_none_iff_zero`, and `goldilocks_inv_some_mul_eq_one`, using the canonical
+Goldilocks field laws. The Keccak zero-state
 witness excludes a constant-zero implementation, without excluding every constant
 function or establishing cryptographic security.
 
@@ -187,8 +190,9 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
     `squeezing = true` and any input, `keccak.Shake256Sponge.absorb s data = .fail
     .assertionFailure`: the extracted `absorb` asserts `!self.squeezing`
     (`aeneas/qsag-verified/src/keccak.rs`), as production `Cshake256Xof::absorb` panics, so a
-    late absorb is never a successful no-op. `shake256_absorb_ok_iff_absorbing` gives the
-    converse and `shake256_finalize_after_squeezing` that repeated finalization leaves the
+    late absorb is never a successful no-op. `shake256_absorb_ok_iff_absorbing`, despite its name, proves only
+    success implies `squeezing = false`; it does not prove success for every arbitrary
+    state with that flag. `shake256_finalize_after_squeezing` proves that repeated finalization leaves the
     state unchanged.
   - **`Proofs/SpongeFraming.lean`** (1,961 lines) closes the byte-level gap that the
     permutation weld leaves open: `shake256_absorb_pad_refines` (any split of the input into
@@ -198,8 +202,8 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
     `Qsag.cshake256Xof` of the concatenated input, for every customization), with the teeth
     `tooth_squeezing_not_absorbed`, `tooth_last_block_suffix_sensitive` and
     `tooth_multiblock_squeeze_permuted_beyond_136`.
-  - **`Proofs/RealSpecTowerWeld.lean`** (457 lines) identifies every extracted Wiedemann-tower
-    operation with the recursive field `Qsag.TowerElem k` of `Qsag.Math.Gf2Pow128` under
+  - **`Proofs/RealSpecTowerWeld.lean`** (457 lines) identifies the following extracted Wiedemann-tower
+    additions and multiplications with the recursive field `Qsag.TowerElem k` of `Qsag.Math.Gf2Pow128` under
     `Qsag.unpackTower`: `gf256_add_refines_qsag`, `gf256_mul_refines_qsag` (`k = 3`),
     `tower128_add_refines_qsag`, `tower128_mul_refines_qsag`, `tower128_mul_eq_zero_iff`
     (`k = 7`), `tower256_add_refines_qsag`, `tower256_mul_refines_qsag` (`k = 8`), and
@@ -208,6 +212,12 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
     enumeration. These statements concern the functions of the verified crate and say nothing
     about a separately compiled implementation that does not call them (in the coverage
     manifest the tower arithmetic is `spec-welded`, not `direct`).
+  - **`Proofs/ElfMirTriangles.lean`** binds seven MIR/specification/decoded-archive triangles, exported and gated by `QsagCustodyWeld.lean`. Each retains the archive symbol lookup and byte decoder; these are functional refinements under the stated entry conditions, not a compiler-correctness theorem:
+    - `elf_mir_goldilocks_add_x86_64`, `elf_mir_goldilocks_sub_x86_64`, `elf_mir_goldilocks_mul_x86_64`: canonical field operands in `rdi/rsi`, `pc = 0`, not halted, and fuel at least 25/31/33; termination, unchanged memory and return value equal to the extracted result.
+    - `elf_mir_goldilocks_mul_aarch64`: canonical operands in `x0/x1`, the same entry flags and fuel at least 30, with the corresponding result and memory guarantee.
+    - `elf_mir_keccak_f1600_avx2_4x`: all four lanes equal the full 24-round `Qsag.keccakF1600` and extracted permutation after 6,661 modeled steps, with zero YMM state and clean upper-state flag. `keccak4xFullEntry` requires canonical round constants and disjoint state, constant-table, stack-scratch and saved-frame-pointer regions.
+    - `elf_mir_gf256_gfni`: one 32-byte block (`rcx = 1`), 35 decoded steps, byte-for-byte agreement with `tower.gf256_mul`, termination and a clean upper-YMM flag, alongside the slice noninterference certificate.
+    - `elf_mir_tower128_pclmul`: one product (`rcx = 1`), 50 steps, with the output equal to the initial accumulator plus the extracted `tower128_mul` result through the proved basis isomorphism. This is the `gf2_128_mul_acc_pclmul` symbol, not a complete BDOZ protocol theorem.
 - In `aeneas/lean-whir`, `QsagWhirVerified/Arithmetic.lean` establishes constructive
   Goldilocks and quartic extension (`Ext4 = F_p[u]/(u^4 - 7)`) commutative ring laws
   via a structural Horner normalizer (`0 Classical.choice`), the `[0, 2, 1, 3]`

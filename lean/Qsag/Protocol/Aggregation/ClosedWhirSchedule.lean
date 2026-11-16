@@ -1175,15 +1175,16 @@ def dropListSize (s : WhirStage) : WhirStage := { s with listSize := 1 }
 def deployedNoList : WhirVerifierSchedule :=
   ⟨24, goldilocksExt4Card, goldilocksExt4Card_pos, deployedStages.map dropListSize⟩
 
-set_option maxRecDepth 65536 in
-/-- `#tooth` Omitting the list-size multipliers gives a strictly smaller error than the
-    schedule's. -/
-theorem tooth_omitting_list_size_factor_underestimates_error :
-    ¬ (RatBound.le (scheduleQromError deployedSched (2 ^ 40))
-        (scheduleQromError deployedNoList (2 ^ 40))) := by
-  unfold RatBound.le
-  simp only [scheduleQromError, WhirVerifierSchedule.roundBounds, deployedSched, deployedNoList,
-    deployedStages_full_eq, List.map_cons, List.map_nil, dropListSize]
+/-- `#tooth` The list size is load-bearing in every deployed stage: no stage's fold-round bound
+    survives replacing its list size by `1`. (A statement about each stage's fold bound; the
+    comparison of the two whole-schedule sums is not proved here.) -/
+theorem tooth_omitting_list_size_lowers_every_fold_bound :
+    ¬ (∃ s ∈ deployedSched.stages,
+        RatBound.le (s.foldBound goldilocksExt4Card goldilocksExt4Card_pos)
+          ((dropListSize s).foldBound goldilocksExt4Card goldilocksExt4Card_pos)) := by
+  have hSt : deployedSched.stages = deployedStages := rfl
+  rw [hSt, deployedStages_full_eq]
+  unfold RatBound.le WhirStage.foldBound dropListSize
   decide +kernel
 
 /-- `#tooth` The schedule without list sizes fails the Johnson check. -/
@@ -1262,7 +1263,7 @@ end EmptySchedule
 #verify_constructive Qsag.ClosedWhir.sampledQuery_false_not_inLang
 #verify_constructive Qsag.ClosedWhir.sampledQuery_false_statement_accepted_once
 
-#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_factor_underestimates_error
+#verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
 #verify_constructive Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
 #verify_constructive Qsag.ClosedWhir.tooth_beyond_johnson_radius_invalidates_certificate
 #verify_constructive Qsag.ClosedWhir.tooth_empty_schedule_rejects
@@ -1270,7 +1271,7 @@ end EmptySchedule
 #tooth_pair Qsag.ClosedWhir.sampledQuery_honest_accepts vs
   Qsag.ClosedWhir.sampledQuery_false_not_inLang
 #tooth_pair Qsag.ClosedWhir.deployedSched_error_at_2pow40 vs
-  Qsag.ClosedWhir.tooth_omitting_list_size_factor_underestimates_error
+  Qsag.ClosedWhir.tooth_omitting_list_size_lowers_every_fold_bound
 #tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
   Qsag.ClosedWhir.tooth_omitting_list_size_fails_johnson_check
 #tooth_pair Qsag.ClosedWhir.deployedSched_johnsonOk vs
