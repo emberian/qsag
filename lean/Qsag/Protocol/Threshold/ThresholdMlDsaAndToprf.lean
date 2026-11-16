@@ -16346,3 +16346,57 @@ theorem centeredDiffNormVec4_eq (r : PolyVec4) (w1 : Fin 4 → NatTree 8) :
   rfl
 
 end Qsag
+
+/-! ### Exports for lane cust -/
+
+public section
+namespace Qsag
+
+theorem Vec.toList_replicate {α : Type} : ∀ (n : Nat) (x : α),
+    (Vec.replicate n x).toList = List.replicate n x
+  | 0, _ => by rfl
+  | n + 1, x => by
+    show x :: (Vec.replicate n x).toList = List.replicate (n + 1) x
+    rw [Vec.toList_replicate n x]
+    rfl
+
+/-- The three holders of the cross-term `(0, 1)`, ascending. -/
+theorem toprfHolders_zero_one : toprfHolders 0 1 = [2, 3, 4] := by decide
+
+theorem vcSmallMaxAttrs_eq : vcSmallMaxAttrs = 6 := by rfl
+
+theorem vcCommitPartyView_eq (H : List UInt8 → List UInt8) (presNonce : Vec UInt8 32)
+    (repIdx : Nat) (partyIdx : Fin 3) (v : PartyVcRepView) (fo : VcPartyFinalOut) :
+    vcCommitPartyView H presNonce repIdx partyIdx v fo =
+      H (vcCommitPartyViewPreimage presNonce repIdx partyIdx (vcViewDigest H v fo)
+        v.commitSalt) := by rfl
+
+/-- A valid witness has a strictly ascending, in-range list of disclosed attribute indices. -/
+theorem BlindVcWitnessValid.disclosed_strictAsc {stmt : BlindVcPublicStatement}
+    {wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth}
+    (h : BlindVcWitnessValid stmt wit) :
+    vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true := h.1
+
+/-- A disclosed-attribute list that repeats its first index is refused. -/
+theorem vcCheckDisclosedStrictAsc_repeated_index (arity i : Nat) (a b : Goldilocks)
+    (rest : List (Nat × Goldilocks)) :
+    vcCheckDisclosedStrictAsc arity ((i, a) :: (i, b) :: rest) = false := by
+  show (decide (i < arity) &&
+    (decide (i < i) && decide (i < arity) && vcCheckDisclosedStrictAscAux arity i rest)) = false
+  rw [decide_eq_false (Nat.lt_irrefl i), Bool.false_and, Bool.false_and, Bool.and_false]
+
+/-- Gate `0 * 0 = 1` with triple error `1`, under the zero challenge: refused. -/
+theorem sacAccept204_zero_challenge_shifted_gate_rejected :
+    sacAccept204 ext6Zero
+      ⟨Fq204.zero, Fq204.zero, Fq204.one, ext6Zero, Fq204.zero,
+        ext6Add (ext6Scale ext6Zero Fq204.zero) (ext6EmbedFq Fq204.one)⟩ = false := by decide
+
+/-- Gate `0 * 0 = 1` with a correct triple, under the zero challenge: accepted. The zero
+challenge is the bad challenge of this gate. -/
+theorem sacAccept204_zero_challenge_shifted_gate_accepted :
+    sacAccept204 ext6Zero
+      ⟨Fq204.zero, Fq204.zero, Fq204.one, ext6Zero, Fq204.zero,
+        ext6Add (ext6Scale ext6Zero Fq204.zero) ext6Zero⟩ = true := by decide
+
+end Qsag
+end
