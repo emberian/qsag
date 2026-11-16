@@ -1332,3 +1332,13 @@ theorem filter_any_length_le_mul {α β : Type} (items : List α) (pred : α →
 -- (end exports for lane agg-budget)
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.JohnsonBound.nat_cauchy_schwarz
+#verify_constructive Qsag.JohnsonBound.count_partition_le
+#verify_constructive Qsag.JohnsonBound.johnson_set_system_mul_le
+#verify_constructive Qsag.JohnsonBound.johnson_set_system_card_le
+
+end

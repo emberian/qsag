@@ -1328,3 +1328,16 @@ theorem secp256k1OrderPrime_isPrime :
 
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.verifyPrimeCert_sound
+#verify_constructive Qsag.secp256k1FieldPrime_isPrime
+#verify_constructive Qsag.secp256k1OrderPrime_isPrime
+#verify_constructive Qsag.goldilocksPrime_is_prime
+#verify_constructive Qsag.goldilocks_lucas_fermat_witnesses
+#verify_constructive Qsag.goldilocks_seven_primitive_root
+#verify_constructive Qsag.checkLucasBlsCert_sound
+
+end

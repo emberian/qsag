@@ -1448,3 +1448,18 @@ theorem slicedStageTable_def : slicedStageTable =
     (24, 3, 4120, 201) ] := by rfl
 end Qsag
 end
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.cwyz26_whir_nv20_and_nv24_all_stages_valid
+#verify_constructive Qsag.hem_gs_interpolation_dimensions
+#verify_constructive Qsag.cwyz26_affineMcaBound_of_nonExcluded
+#verify_constructive Qsag.cwyz26_affineMcaBound_sliced
+#verify_constructive Qsag.sumTo_le_of_le
+#verify_constructive Qsag.slicedParamsOk_sound
+#verify_constructive Qsag.sliced_stage_table_covers_every_canonical_stage
+#verify_constructive Qsag.sliced_stage_decomp_bound
+#verify_constructive Qsag.sliced_rest_exceeds_simple_budget
+
+end

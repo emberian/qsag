@@ -2065,3 +2065,21 @@ end Poly3
 end Qsag
 
 end
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.affineMcaBound_ge_card
+#verify_constructive Qsag.affineMcaBound_without_field_term_fails
+#verify_constructive Qsag.Poly3.roots_on_line_card_le
+#verify_constructive Qsag.poleWords_far
+#verify_constructive Qsag.poleWords_accept
+#verify_constructive Qsag.Poly3.jetEq_pt
+#verify_constructive Qsag.Poly3.deg_jetEq_le
+#verify_constructive Qsag.Poly3.primY_liftK_eval
+#verify_constructive Qsag.Poly3.slice_card_le
+#verify_constructive Qsag.Poly3.nonExcluded_pairs_card_le
+#verify_constructive Qsag.SlicedJet.cover_count
+#verify_constructive Qsag.SlicedJet.leaf_bound_arith
+
+end

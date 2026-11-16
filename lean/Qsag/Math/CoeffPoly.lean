@@ -2592,3 +2592,10 @@ theorem filter_overlap_len {α : Type} (p q : α → Bool) :
 
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.UPoly.natDeg_mul
+
+end

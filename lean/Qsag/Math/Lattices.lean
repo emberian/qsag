@@ -1091,3 +1091,13 @@ theorem regularBlockXorOneProb_cons (t : ExactRat) (ts : List ExactRat) :
     regularBlockXorOneProb (t :: ts) = xorStepProb t (regularBlockXorOneProb ts) := by rfl
 end Qsag
 end
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128
+#verify_constructive Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256
+#verify_constructive Qsag.acceptProbExact_safe_cancels_shift
+#verify_constructive Qsag.rlwe_accept_box_preimage_in_proposal_box
+
+end

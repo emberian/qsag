@@ -1486,3 +1486,14 @@ theorem ScalarGroup.nullifierTag_injective {g₁ g₂ : ScalarGroup}
   cases g₁ <;> cases g₂ <;> first | rfl | (exact absurd (congrArg Goldilocks.val h) (by decide))
 
 end Qsag
+
+/-! ### Exports for lane math -/
+public section
+
+#verify_constructive Qsag.TaprootCurveProjection.compressed_injective
+#verify_constructive Qsag.taproot_even_y_parity_restores_canonical_injectivity
+#verify_constructive Qsag.slip0010_ed25519_clamped_canonical_nonzero
+#verify_constructive Qsag.checkPrattStep_sound
+#verify_constructive Qsag.bls381G1_onCurve_and_prime_subgroup_order
+
+end
