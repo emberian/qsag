@@ -114,17 +114,17 @@ theorem cacheRoot_build (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
     cacheRoot pkSeed layer tree (buildLeafTree leaf height base) index =
       computeMerkleNodeKp cshake256Suite pkSeed layer tree .tree 0 leaf height index base := by
   induction height generalizing index base with
-  | zero => rfl
-  | succ height ih => simp only [buildLeafTree, cacheRoot, computeMerkleNodeKp, ih]
+  | zero => rw [computeMerkleNodeKp_zero]; rfl
+  | succ height ih => simp only [buildLeafTree, cacheRoot, computeMerkleNodeKp_succ, ih]
 
 theorem cachePath_build (pkSeed : Bytes) (layer : UInt32) (tree : UInt64)
     (leaf : Nat → Bytes) (height index base selected : Nat) :
     cachePath pkSeed layer tree (buildLeafTree leaf height base) index selected =
       buildMerkleAuthPathKp cshake256Suite pkSeed layer tree .tree 0 leaf height index base selected := by
   induction height generalizing index base selected with
-  | zero => rfl
+  | zero => rw [buildMerkleAuthPathKp.public_eq_1]; rfl
   | succ height ih =>
-    simp only [buildLeafTree, cachePath, buildMerkleAuthPathKp, cacheRoot_build, ih]
+    simp only [buildLeafTree, cachePath, buildMerkleAuthPathKp.public_eqs, cacheRoot_build, ih]
 
 @[expose] def wotsTreePlan (params : PqHashParams) (layer : UInt32) (tree : UInt64)
     (selected : Nat) (digits : List Nat) : LeafTree (List Query) params.subtreeHeight :=
@@ -167,8 +167,7 @@ theorem actual_wots_cache_root_and_path (profile : RssProduction.Profile) (reque
   dsimp only
   rw [actual_wots_cache profile request tape first layer tree selected digits hCheck]
   constructor
-  · rw [cacheRoot_build, computeMerkleNodeKp_zero_eq]
-    rfl
+  · rw [cacheRoot_build, computeMerkleNodeKp_zero_eq, mpcComputeXmssSubtreeRoot.public_eq_1]
   · exact cachePath_build _ _ _ _ _ _ _ _
 
 #verify_constructive mapLeafTree_build mapIndexedTree_build produceTree_counter produceTree_correct

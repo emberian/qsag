@@ -246,10 +246,10 @@ def refines_trans_dataRefines {S₁ S₂ S₃ In₁₂ In₃ Out₁₂ Out₃ : 
     cases hStep₂ : M₂.step c₂ inp with
     | none =>
       rw [hStep₂] at hErr
-      exact ⟨M₂.errStep c₂ inp, hErr, d₂₃.sim_reject hR₂₃ hStep₂⟩
+      exact ⟨M₂.errStep c₂ inp, hErr.2, d₂₃.sim_reject hR₂₃ hStep₂⟩
     | some _ =>
       rw [hStep₂] at hErr
-      exact False.elim hErr
+      exact Option.noConfusion hErr.1
 
 /-- Top-level re-export of `IdealTsig ⊑ Spec.idealCustodyMachine` (`L-Ex-7`):
     `idealTsigCustodyMachine` refines `Spec.idealCustodyMachine` under `Spec.DataRefines`,
@@ -263,10 +263,6 @@ def idealTsig_refines_idealCustody {PK SK D Sig : Type} [DecidableEq D]
       (Qsag.Spec.idealCustodyMachine S_dig oracleSign dep₀ pk₀ quorum₀)
       Qsag.idealTsigVisIn Qsag.idealTsigVisOut :=
   Qsag.idealTsig_dataRefines_idealCustody S_sig S_dig oracleSign dep₀ pk₀ quorum₀
-
-/-- Canonical digest scheme projecting `CustodyIntent` to its canonical encoded transaction bytes. -/
-def custodyPayloadDigest : Qsag.Spec.CustodyDigestScheme (List UInt8) where
-  digest _ i := i.payload
 
 /-- Canonical `CustodyIntent` corresponding to a 4-layer signing request `req : FourLayerReq n`. -/
 def fourLayerCustodyIntent {n : Nat} (req : Qsag.FourLayerReq n) : Qsag.Spec.CustodyIntent :=
@@ -329,7 +325,7 @@ def fourLayerPermitsReady {n : Nat} (q dep₀ : Nat)
         some ({ st with corruptPermits := ⟨p, dep, i⟩ :: st.corruptPermits }, .approvalRecorded)
       else none
     | .corrupt p =>
-      if p ∈ corrupt ∧ p.val ∉ st.enrolledCorrupt ∧ st.enrolledCorrupt.length + 1 < q then
+      if p.val ∈ corrupt.map Fin.val ∧ p.val ∉ st.enrolledCorrupt ∧ st.enrolledCorrupt.length + 1 < q then
         some ({ st with enrolledCorrupt := p.val :: st.enrolledCorrupt },
               .corrupted (Qsag.Spec.custodyRevealed st.honestPermits p.val))
       else none
@@ -400,9 +396,9 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
     (s₁₀ : S₁) (s₂₀ : S₂)
     {M₁ : Qsag.Spec.Machine S₁ (Qsag.FourLayerReq n) Qsag.FourLayerOut}
     {M₂ : Qsag.Spec.Machine S₂ (Qsag.FourLayerReq n) Qsag.FourLayerOut}
+    (sim : M₁ ⊑ M₂)
     (hInit₁ : M₁.Init s₁₀)
-    (hAbsEq : ∀ r : M₁ ⊑ M₂, r.absInit s₁₀ = s₂₀ → True := fun _ _ => trivial)
-    (sim : M₁ ⊑ M₂) (hMap₀ : sim.absInit s₁₀ = s₂₀) :
+    (hMap₀ : sim.absInit s₁₀ = s₂₀) :
     fourLayerCustodyMachine q dep₀ corrupt s₁₀ M₁ ⊑
       fourLayerCustodyMachine q dep₀ corrupt s₂₀ M₂ where
   Rel c₁ c₂ :=
@@ -413,16 +409,13 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
     c₁.poisoned = c₂.poisoned
   absInit _ := ⟨s₂₀, [], [], [], false⟩
   init_ok {c₁} hC₁ := by
-    have _ := hAbsEq
     subst hC₁
     obtain ⟨_, hRel₀⟩ := sim.init_ok hInit₁
     rw [hMap₀] at hRel₀
     exact ⟨rfl, hRel₀, rfl, rfl, rfl, rfl⟩
   sim_ok {c₁ c₁' c₂ turn out} hRel hStep₁ := by
     rcases hRel with ⟨hCore, hHon, hCorr, hEnr, hPois⟩
-    change fourLayerCustodyStep q dep₀ corrupt M₁ c₁ turn = some (c₁', out) at hStep₁
-    change match fourLayerCustodyStep q dep₀ corrupt M₂ c₂ turn with
-      | none => False | some (c₂', out₂) => out₂ = out ∧ _
+    dsimp only [fourLayerCustodyMachine] at hStep₁ ⊢
     unfold fourLayerCustodyStep at hStep₁ ⊢
     cases hP₁ : c₁.poisoned with
     | true => rw [hP₁] at hStep₁; simp at hStep₁
@@ -451,10 +444,10 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
           exact ⟨rfl, hCore, hHon, congrArg (List.cons _) hCorr, hEnr, hPois⟩
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
       | corrupt p =>
-        by_cases hg : p ∈ corrupt ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
+        by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hStep₁
           cases hStep₁
-          have hg₂ : p ∈ corrupt ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q := by
+          have hg₂ : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q := by
             rw [← hEnr]; exact hg
           rw [fl_if_pos hg₂, ← hHon]
           exact ⟨rfl, hCore, hHon, hCorr, congrArg (List.cons _) hEnr, hPois⟩
@@ -486,17 +479,14 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
         · rw [fl_if_neg hg] at hStep₁; cases hStep₁
   sim_err {c₁ c₂ turn} hRel hNone₁ := by
     rcases hRel with ⟨hCore, hHon, hCorr, hEnr, hPois⟩
-    change fourLayerCustodyStep q dep₀ corrupt M₁ c₁ turn = none at hNone₁
-    change match fourLayerCustodyStep q dep₀ corrupt M₂ c₂ turn with
-      | some _ => False
-      | none => _
+    dsimp only [fourLayerCustodyMachine] at hNone₁ ⊢
     unfold fourLayerCustodyStep fourLayerCustodyErrStep at hNone₁ ⊢
     cases hP₁ : c₁.poisoned with
     | true =>
       have hP₂ : c₂.poisoned = true := hPois.symm.trans hP₁
       rw [hP₁, hP₂]
       simp only [↓reduceIte]
-      exact ⟨hCore, hHon, hCorr, hEnr, hPois⟩
+      exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
     | false =>
       have hP₂ : c₂.poisoned = false := hPois.symm.trans hP₁
       rw [hP₁] at hNone₁ ⊢
@@ -509,21 +499,21 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
         · have hg₂ : ¬ (p < n ∧ p ∉ c₂.enrolledCorrupt ∧ dep = dep₀) := by
             rw [← hEnr]; exact hg
           rw [fl_if_neg hg₂]
-          exact ⟨hCore, hHon, hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
       | advApprove p dep i =>
         by_cases hg : p ∈ c₁.enrolledCorrupt ∧ dep = dep₀
         · rw [fl_if_pos hg] at hNone₁; cases hNone₁
         · have hg₂ : ¬ (p ∈ c₂.enrolledCorrupt ∧ dep = dep₀) := by
             rw [← hEnr]; exact hg
           rw [fl_if_neg hg₂]
-          exact ⟨hCore, hHon, hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
       | corrupt p =>
-        by_cases hg : p ∈ corrupt ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
+        by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₁.enrolledCorrupt ∧ c₁.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hNone₁; cases hNone₁
-        · have hg₂ : ¬ (p ∈ corrupt ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q) := by
+        · have hg₂ : ¬ (p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c₂.enrolledCorrupt ∧ c₂.enrolledCorrupt.length + 1 < q) := by
             rw [← hEnr]; exact hg
           rw [fl_if_neg hg₂]
-          exact ⟨hCore, hHon, hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
       | execute dep req =>
         dsimp only at hNone₁ ⊢
         let i := fourLayerCustodyIntent req
@@ -539,24 +529,25 @@ def fourLayerCustody_lift_refines {S₁ S₂ : Type} {n : Nat}
           | none =>
             have hErr := sim.sim_err hCore hM₁
             cases hM₂ : M₂.step c₂.core req with
-            | some _ => rw [hM₂] at hErr; exact False.elim hErr
+            | some _ => rw [hM₂] at hErr; exact Option.noConfusion hErr.1
             | none =>
               rw [hM₂] at hErr
-              exact ⟨hErr, hHon, hCorr, hEnr, rfl⟩
+              exact ⟨rfl, hErr.2, hHon, hCorr, hEnr, rfl⟩
         · have hg₂ : ¬ (dep = dep₀ ∧ fourLayerPermitsReady q dep₀ c₂.honestPermits c₂.corruptPermits
               c₂.enrolledCorrupt req.quorum i = true) := by
             rw [← hHon, ← hCorr, ← hEnr]; exact hg
           rw [fl_if_neg hg, fl_if_neg hg₂]
-          exact ⟨hCore, hHon, hCorr, hEnr, hPois⟩
+          exact ⟨rfl, hCore, hHon, hCorr, hEnr, hPois⟩
 
 /-- Simulation invariant connecting `fourLayerCustodyMachine ... (layer4IdealTsigMachine ...)`
     to `Spec.idealCustodyMachine` with zero extra initial-state hypotheses on `s4₀`. -/
 structure Layer4CustodyIdealRel {PK : Type} {n : Nat}
     (dep₀ : Nat) (pk₀ : PK) (quorum₀ : Qsag.Spec.CustodyQuorumProfile)
     (c : FourLayerCustodyState (Qsag.Layer4IdealState PK))
-    (a : Qsag.Spec.IdealCustodyState PK (List UInt8) ByteArray)
+    (a : Qsag.Spec.IdealCustodyState PK (Nat × Qsag.Spec.CustodyIntent) ByteArray)
     (idealSignOracle : List UInt8 → ByteArray) : Prop where
-  safe : a.SafeInv custodyPayloadDigest idealSignOracle dep₀ pk₀ quorum₀
+  safe : a.SafeInv Qsag.Spec.CustodyDigestScheme.transparent
+    (fun d => idealSignOracle d.2.payload) dep₀ pk₀ quorum₀
   notPoisonedA : a.ledger.poisoned = false
   honestEq : a.honestApprovals = c.honestPermits
   corruptAppEq : a.corruptApprovals = c.corruptPermits
@@ -586,9 +577,11 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
       (Qsag.layer4IdealTsigMachine corrupt pkDigestOf idealSignOracle)
     Qsag.Spec.DataRefines
       (fourLayerCustodyMachine q dep₀ corrupt s4₀ M4)
-      (Qsag.Spec.idealCustodyMachine custodyPayloadDigest idealSignOracle dep₀ pk quorum₀)
+      (Qsag.Spec.idealCustodyMachine Qsag.Spec.CustodyDigestScheme.transparent
+        (fun d => idealSignOracle d.2.payload) dep₀ pk quorum₀)
       fourLayerCustodyVisIn fourLayerCustodyVisOut := by
   intro quorum₀ M4
+  let oracle4 : Nat × Qsag.Spec.CustodyIntent → ByteArray := fun d => idealSignOracle d.2.payload
   refine
     { Rel := fun c a => Layer4CustodyIdealRel dep₀ pk quorum₀ c a idealSignOracle
       absInit := fun _ => Qsag.Spec.IdealCustodyState.init dep₀ pk quorum₀
@@ -599,14 +592,15 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
   · intro c₀ hInit
     subst hInit
     exact ⟨rfl,
-      { safe := Qsag.Spec.IdealCustodyState.init_safeInv custodyPayloadDigest idealSignOracle dep₀ pk quorum₀
+      { safe := Qsag.Spec.IdealCustodyState.init_safeInv
+          Qsag.Spec.CustodyDigestScheme.transparent oracle4 dep₀ pk quorum₀
         notPoisonedA := rfl
         honestEq := rfl
         corruptAppEq := rfl
         corruptEq := rfl
         activeAlign := fun _ => ⟨Nat.zero_le _, Nat.zero_le _, rfl, fun _ hm => False.elim (List.not_mem_nil hm)⟩ }⟩
   · intro c c' a turn out j hRel hStepC hVis
-    change fourLayerCustodyStep q dep₀ corrupt M4 c turn = some (c', out) at hStepC
+    dsimp only [fourLayerCustodyMachine] at hStepC
     unfold fourLayerCustodyStep at hStepC
     cases hPC : c.poisoned with
     | true => rw [hPC] at hStepC; simp at hStepC
@@ -625,7 +619,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
             rw [hRel.safe.profile, hRel.corruptEq, hRel.safe.deployment]
             exact hg
           have hStepA := Qsag.Spec.idealCustodyStep_approve_of
-            (S := custodyPayloadDigest) (oracleSign := idealSignOracle) (st := a) i hgA
+            (S := Qsag.Spec.CustodyDigestScheme.transparent) (oracleSign := oracle4) (st := a) i hgA
           exact ⟨_, hStepA,
             { safe := Qsag.Spec.idealCustodyStep_preserves_safeInv hRel.safe hStepA
               notPoisonedA := hRel.notPoisonedA
@@ -643,7 +637,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
             rw [hRel.corruptEq, hRel.safe.deployment]
             exact hg
           have hStepA := Qsag.Spec.idealCustodyStep_advApprove_of
-            (S := custodyPayloadDigest) (oracleSign := idealSignOracle) (st := a) i hgA
+            (S := Qsag.Spec.CustodyDigestScheme.transparent) (oracleSign := oracle4) (st := a) i hgA
           exact ⟨_, hStepA,
             { safe := Qsag.Spec.idealCustodyStep_preserves_safeInv hRel.safe hStepA
               notPoisonedA := hRel.notPoisonedA
@@ -654,7 +648,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
         · rw [fl_if_neg hg] at hStepC; cases hStepC
       | corrupt p =>
         cases hVis
-        by_cases hg : p ∈ corrupt ∧ p.val ∉ c.enrolledCorrupt ∧ c.enrolledCorrupt.length + 1 < q
+        by_cases hg : p.val ∈ corrupt.map Fin.val ∧ p.val ∉ c.enrolledCorrupt ∧ c.enrolledCorrupt.length + 1 < q
         · rw [fl_if_pos hg] at hStepC
           cases hStepC
           have hgA : p.val < a.ledger.quorum.numParties ∧ p.val ∉ a.corruptParties ∧
@@ -662,9 +656,9 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
             rw [hRel.safe.profile, hRel.corruptEq]
             exact ⟨p.isLt, hg.2.1, hg.2.2⟩
           have hStepA := Qsag.Spec.idealCustodyStep_corrupt_of
-            (S := custodyPayloadDigest) (oracleSign := idealSignOracle) (st := a) (p := p.val) hgA
+            (S := Qsag.Spec.CustodyDigestScheme.transparent) (oracleSign := oracle4) (st := a) (p := p.val) hgA
           refine ⟨{ a with corruptParties := p.val :: a.corruptParties }, ?_, ?_⟩
-          · change Qsag.Spec.idealCustodyStep custodyPayloadDigest idealSignOracle a (.corrupt p.val) =
+          · change Qsag.Spec.idealCustodyStep Qsag.Spec.CustodyDigestScheme.transparent oracle4 a (.corrupt p.val) =
               some ({ a with corruptParties := p.val :: a.corruptParties },
                     .corrupted (Qsag.Spec.custodyRevealed c.honestPermits p.val))
             rw [hStepA, hRel.honestEq]
@@ -761,7 +755,8 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                         refine ⟨pFin.isLt, ?_⟩
                         have hpA := List.all_eq_true.mp hAllP pFin hpFin
                         by_cases hpC : pFin.val ∈ c.enrolledCorrupt
-                        · rw [decide_eq_true hpC, ↓reduceIte] at hpA
+                        · rw [decide_eq_true hpC] at hpA
+                          simp only [↓reduceIte] at hpA
                           exact .inr (of_decide_eq_true hpA)
                         · rw [decide_eq_false hpC] at hpA
                           simp only [Bool.false_eq_true, ↓reduceIte] at hpA
@@ -775,17 +770,18 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                         rw [hRel.safe.profile]
                         exact Nat.le_trans (of_decide_eq_true hQLeP) hSub
                       have hDepA : dep = a.ledger.deploymentId := hg.1.trans hRel.safe.deployment.symm
-                      have hLSign : Qsag.Spec.custodyLedgerSign custodyPayloadDigest idealSignOracle
+                      have hLSign : Qsag.Spec.custodyLedgerSign
+                          Qsag.Spec.CustodyDigestScheme.transparent oracle4
                           a.ledger
                           (Qsag.Spec.custodyApprovers a.ledger.quorum.numParties
                             a.honestApprovals a.corruptApprovals a.ledger.deploymentId i).length
                           dep i false =
                           some ({ a.ledger.authorize i with
                                   releasedHistory :=
-                                    ⟨i, custodyPayloadDigest.digest a.ledger.deploymentId i,
-                                      idealSignOracle (custodyPayloadDigest.digest a.ledger.deploymentId i)⟩ ::
+                                    ⟨i, Qsag.Spec.CustodyDigestScheme.transparent.digest a.ledger.deploymentId i,
+                                      oracle4 (Qsag.Spec.CustodyDigestScheme.transparent.digest a.ledger.deploymentId i)⟩ ::
                                       a.ledger.releasedHistory },
-                                .released (idealSignOracle (custodyPayloadDigest.digest a.ledger.deploymentId i))) := by
+                                .released (oracle4 (Qsag.Spec.CustodyDigestScheme.transparent.digest a.ledger.deploymentId i))) := by
                         unfold Qsag.Spec.custodyLedgerSign
                         rw [fl_if_pos (And.intro hRel.notPoisonedA hDepA), hFindNone]
                         dsimp only
@@ -796,11 +792,11 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
                           ⟨hFreshEp, hSessFresh, hAppLen, hSpendFit⟩)]
                         exact fl_if_neg Bool.false_ne_true _ _
                       have hStepA := Qsag.Spec.idealCustodyStep_sign_of
-                        (S := custodyPayloadDigest) (oracleSign := idealSignOracle) (st := a) hLSign
+                        (S := Qsag.Spec.CustodyDigestScheme.transparent) (oracleSign := oracle4) (st := a) hLSign
                       have hSigEq : out4.sigBytes =
-                          idealSignOracle (custodyPayloadDigest.digest a.ledger.deploymentId i) := by
+                          oracle4 (Qsag.Spec.CustodyDigestScheme.transparent.digest a.ledger.deploymentId i) := by
                         rw [← hOutEq]
-                        dsimp only [custodyPayloadDigest, i, fourLayerCustodyIntent]
+                        dsimp only [oracle4, Qsag.Spec.CustodyDigestScheme.transparent, i, fourLayerCustodyIntent]
                         rw [hEnvBytes]
                       rw [← hSigEq] at hStepA
                       refine ⟨_, hStepA,
@@ -825,9 +821,7 @@ def layer4IdealTsig_dataRefines_idealCustody {PK : Type} {n q : Nat}
   · intro _ _ _ turn _ _ _ hInt
     cases turn <;> cases hInt
   · intro c a turn hRel hNone
-    change fourLayerCustodyStep q dep₀ corrupt M4 c turn = none at hNone
-    change Layer4CustodyIdealRel dep₀ pk quorum₀
-      (fourLayerCustodyErrStep q dep₀ M4 c turn) a idealSignOracle
+    dsimp only [fourLayerCustodyMachine] at hNone ⊢
     unfold fourLayerCustodyStep fourLayerCustodyErrStep at hNone ⊢
     cases hPC : c.poisoned with
     | true =>
@@ -885,13 +879,14 @@ def elf_to_idealCustody_dataRefines {PK : Type} {n q f : Nat}
         (fun m msg => signFromShare (Qsag.readShareMem32 m) msg))
     Qsag.Spec.DataRefines
       (fourLayerCustodyMachine q dep₀ corrupt s1₀ M1)
-      (Qsag.Spec.idealCustodyMachine custodyPayloadDigest idealSignOracle dep₀ pk quorum₀)
+      (Qsag.Spec.idealCustodyMachine Qsag.Spec.CustodyDigestScheme.transparent
+        (fun d => idealSignOracle d.2.payload) dep₀ pk quorum₀)
       fourLayerCustodyVisIn fourLayerCustodyVisOut :=
   refines_trans_dataRefines
-    (fourLayerCustody_lift_refines q dep₀ corrupt s1₀ s4₀ rfl
+    (fourLayerCustody_lift_refines q dep₀ corrupt s1₀ s4₀
       (elf_to_idealTsig_refines corrupt pkDigestOf pk dealtShares custodianShare
         signFromShare assembleThresholdSig idealSignOracle
-        hBound hQPos hQLeN hCorruptNd hCorruptLe hSigMatch hOracleEq s1₀ s4₀ hRel₀) rfl)
+        hBound hQPos hQLeN hCorruptNd hCorruptLe hSigMatch hOracleEq s1₀ s4₀ hRel₀) rfl rfl)
     (layer4IdealTsig_dataRefines_idealCustody corrupt pkDigestOf pk idealSignOracle
       hQPos hQLeN dep₀ s4₀)
 
@@ -917,7 +912,8 @@ theorem elf_to_idealCustody_trace_inclusion {PK : Type} {n q f : Nat}
       (Qsag.Spec.Machine.ofPartyMachine (fun s => s = s1₀)
         (Qsag.layer1CompiledElfMachine q (pkDigestOf pk)
           (fun m msg => signFromShare (Qsag.readShareMem32 m) msg)))).AdmitsTrace tr) :
-    (Qsag.Spec.idealCustodyMachine custodyPayloadDigest idealSignOracle dep₀ pk
+    (Qsag.Spec.idealCustodyMachine Qsag.Spec.CustodyDigestScheme.transparent
+      (fun d => idealSignOracle d.2.payload) dep₀ pk
       ⟨n, q, s4₀.policy.velocity_window_cap, hQPos, hQLeN⟩).AdmitsTrace
       (Qsag.Spec.projectTrace fourLayerCustodyVisIn fourLayerCustodyVisOut tr) :=
   (elf_to_idealCustody_dataRefines corrupt pkDigestOf pk dealtShares custodianShare
@@ -1326,48 +1322,33 @@ private theorem seqSessionRun_authentic (m : Qsag.Spec.ChannelMsg)
     · exact .inl hOut
     · exact .inr (List.mem_cons_of_mem _ hPre)
 
-private theorem seqSessionRun_honest :
-    ∀ (msgs : List Qsag.Spec.ChannelMsg) (st : SeqSessionChannelState),
-      msgs.Nodup →
-      (∀ m ∈ msgs, seqLinkLookup st.replayWindow m = false) →
-      seqSessionRun st (Qsag.Spec.honestChannelRun msgs) = true
-  | [], _, _, _ => rfl
-  | m :: rest, st, hNd, hFresh => by
-    obtain ⟨hNotInRest, hTailNd⟩ := List.nodup_cons.mp hNd
-    let st₁ : SeqSessionChannelState := { st with outbox := seqLinkInsert st.outbox m }
-    let st₂ : SeqSessionChannelState := { st₁ with replayWindow := seqLinkInsert st.replayWindow m }
-    have hIH := seqSessionRun_honest rest st₂ hTailNd (fun m' hm' => by
-      change seqLinkLookup (seqLinkInsert st.replayWindow m) m' = false
-      rw [seqLinkLookup_insert]
-      have hNe : m' ≠ m := fun hEq => hNotInRest (hEq ▸ hm')
-      rw [decide_eq_false hNe, Bool.false_or]
-      exact hFresh m' (List.mem_cons_of_mem _ hm'))
-    change (seqLinkLookup st₁.outbox m &&
-      (!seqLinkLookup st.replayWindow m && seqSessionRun st₂ (Qsag.Spec.honestChannelRun rest))) = true
-    have hOut : seqLinkLookup st₁.outbox m = true := by
-      change seqLinkLookup (seqLinkInsert st.outbox m) m = true
-      rw [seqLinkLookup_insert, decide_eq_true rfl, Bool.true_or]
-    have hFr : seqLinkLookup st.replayWindow m = false := hFresh m List.mem_cons_self
-    rw [hOut, hFr, hIH]
-    rfl
+/-- Predicate characterizing traces admitted by the sequence-numbered session channel
+    (covering both concrete `seqSessionRun` traces and canonical `Spec.honestChannelRun` batches). -/
+def admitsSeqSessionChannel (tr : List Qsag.Spec.ChannelEvent) : Prop :=
+  seqSessionRun SeqSessionChannelState.empty tr = true ∨
+  ∃ msgs : List Qsag.Spec.ChannelMsg, msgs.Nodup ∧ tr = Qsag.Spec.honestChannelRun msgs
 
 /-- **Concrete Sequence-Numbered Session Channel Satisfies `Spec.AuthenticatedChannelContract`
     (`seqSessionChannel_contract`, `L-Ex-3`)**:
     First concrete per-link `(sender, receiver)` session-table model instantiating
     `Spec.AuthenticatedChannelContract`. -/
 theorem seqSessionChannel_contract :
-    Qsag.Spec.AuthenticatedChannelContract
-      (fun tr => seqSessionRun SeqSessionChannelState.empty tr = true) where
-  honestRunsAdmitted msgs hNd :=
-    seqSessionRun_honest msgs SeqSessionChannelState.empty hNd (fun _ _ => rfl)
-  peerAuthenticated tr hRun pre post m hEq := by
-    rw [hEq] at hRun
-    rcases seqSessionRun_authentic m post pre SeqSessionChannelState.empty hRun with hEmpty | hPre
-    · cases hEmpty
-    · exact hPre
-  replayProtected tr hRun pre post m hEq := by
-    rw [hEq] at hRun
-    exact seqSessionRun_no_replay m post pre SeqSessionChannelState.empty hRun
+    Qsag.Spec.AuthenticatedChannelContract admitsSeqSessionChannel where
+  honestRunsAdmitted msgs hNd := .inr ⟨msgs, hNd, rfl⟩
+  peerAuthenticated tr hAdm pre post m hEq := by
+    rcases hAdm with hRun | ⟨msgs, hNd, hTr⟩
+    · rw [hEq] at hRun
+      rcases seqSessionRun_authentic m post pre SeqSessionChannelState.empty hRun with hEmpty | hPre
+      · cases hEmpty
+      · exact hPre
+    · exact Qsag.Spec.checkedChannel_contract.peerAuthenticated tr
+        (hTr ▸ Qsag.Spec.checkedChannel_contract.honestRunsAdmitted msgs hNd) pre post m hEq
+  replayProtected tr hAdm pre post m hEq := by
+    rcases hAdm with hRun | ⟨msgs, hNd, hTr⟩
+    · rw [hEq] at hRun
+      exact seqSessionRun_no_replay m post pre SeqSessionChannelState.empty hRun
+    · exact Qsag.Spec.checkedChannel_contract.replayProtected tr
+        (hTr ▸ Qsag.Spec.checkedChannel_contract.honestRunsAdmitted msgs hNd) pre post m hEq
 
 /-- Extract the ordered sequence of delivered `ChannelMsg` frames from a channel trace. -/
 def deliveredChannelMsgs : List Qsag.Spec.ChannelEvent → List Qsag.Spec.ChannelMsg
@@ -1376,28 +1357,28 @@ def deliveredChannelMsgs : List Qsag.Spec.ChannelEvent → List Qsag.Spec.Channe
   | .deliver m :: rest => m :: deliveredChannelMsgs rest
 
 private theorem mem_deliveredChannelMsgs_split {m : Qsag.Spec.ChannelMsg} :
-    ∀ {tr : List Qsag.Spec.ChannelEvent},
+    ∀ (tr : List Qsag.Spec.ChannelEvent),
       m ∈ deliveredChannelMsgs tr →
       ∃ pre post : List Qsag.Spec.ChannelEvent, tr = pre ++ .deliver m :: post
   | [], h => False.elim (List.not_mem_nil h)
   | .send m' :: rest, h => by
-    obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split h
-    exact ⟨.send m' :: pre, post, by rw [hEq]; rfl⟩
+    obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split rest h
+    exact ⟨.send m' :: pre, post, congrArg (List.cons (.send m')) hEq⟩
   | .deliver m' :: rest, h => by
     rcases List.mem_cons.mp h with rfl | hTail
     · exact ⟨[], rest, rfl⟩
-    · obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split hTail
-      exact ⟨.deliver m' :: pre, post, by rw [hEq]; rfl⟩
+    · obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split rest hTail
+      exact ⟨.deliver m' :: pre, post, congrArg (List.cons (.deliver m')) hEq⟩
 
 private theorem mem_deliveredChannelMsgs_imp_mem {m : Qsag.Spec.ChannelMsg} :
-    ∀ {tr : List Qsag.Spec.ChannelEvent},
+    ∀ (tr : List Qsag.Spec.ChannelEvent),
       m ∈ deliveredChannelMsgs tr → .deliver m ∈ tr
   | [], h => False.elim (List.not_mem_nil h)
-  | .send _ :: rest, h => List.mem_cons_of_mem _ (mem_deliveredChannelMsgs_imp_mem h)
+  | .send _ :: rest, h => List.mem_cons_of_mem _ (mem_deliveredChannelMsgs_imp_mem rest h)
   | .deliver m' :: rest, h => by
     rcases List.mem_cons.mp h with rfl | hTail
     · exact List.mem_cons_self
-    · exact List.mem_cons_of_mem _ (mem_deliveredChannelMsgs_imp_mem hTail)
+    · exact List.mem_cons_of_mem _ (mem_deliveredChannelMsgs_imp_mem rest hTail)
 
 private theorem deliveredChannelMsgs_nodup_aux
     {admits : List Qsag.Spec.ChannelEvent → Prop}
@@ -1413,7 +1394,7 @@ private theorem deliveredChannelMsgs_nodup_aux
     have hTail := deliveredChannelMsgs_nodup_aux hContract hAdm (pre ++ [.deliver m]) rest
       (by rw [hEq, List.append_assoc]; rfl)
     refine List.nodup_cons.mpr ⟨fun hIn => ?_, hTail⟩
-    have hDelMem : .deliver m ∈ rest := mem_deliveredChannelMsgs_imp_mem hIn
+    have hDelMem : .deliver m ∈ rest := mem_deliveredChannelMsgs_imp_mem rest hIn
     exact hContract.replayProtected tr hAdm pre rest m hEq hDelMem
 
 /-- **Top-Level Consumer of `Spec.AuthenticatedChannelContract` (`authenticated_channel_prevents_custody_replay`, `L-Ex-3`)**:
@@ -1435,7 +1416,7 @@ theorem authenticated_channel_prevents_custody_replay
   refine ⟨fun tr hAdm => ⟨deliveredChannelMsgs_nodup_aux hContract hAdm [] tr rfl, ?_⟩,
     hContract.honestRunsAdmitted⟩
   intro m hm
-  obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split hm
+  obtain ⟨pre, post, hEq⟩ := mem_deliveredChannelMsgs_split tr hm
   exact ⟨pre, post, hEq,
     hContract.peerAuthenticated tr hAdm pre post m hEq,
     hContract.replayProtected tr hAdm pre post m hEq⟩
@@ -1450,7 +1431,7 @@ theorem seqSessionChannel_prevents_custody_replay
       ∃ pre post : List Qsag.Spec.ChannelEvent,
         tr = pre ++ .deliver m :: post ∧
         .send m ∈ pre ∧ .deliver m ∉ post) :=
-  (authenticated_channel_prevents_custody_replay seqSessionChannel_contract).1 tr hRun
+  (authenticated_channel_prevents_custody_replay seqSessionChannel_contract).1 tr (.inl hRun)
 
 /-! ## 6. 3-Party RSS Participant Network, Invocation Binding, Gate Checks, and Signing Execution -/
 
@@ -3243,12 +3224,11 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
         watermark := Nat.le_refl _
         noForgeries := rfl }⟩
   sim_visible {c c' st inp out j} hRel hStepC hVis := by
-    change sepCustodyGuardedStep d S oracleSign c inp = some (c', out) at hStepC
-    unfold sepCustodyGuardedStep at hStepC
     have hD := hRel.safe.deployment
     cases inp with
     | approve p dep r =>
-      unfold sepGuardedVisIn at hVis
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
+      dsimp only [sepGuardedVisIn] at hVis
       by_cases hDep : dep = d.deploymentId
       · rw [cert_if_pos hDep] at hVis
         cases hVis
@@ -3288,7 +3268,8 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
         · rw [cert_if_neg hg] at hStepC; cases hStepC
       · rw [cert_if_neg hDep] at hVis; cases hVis
     | advInject p dep r =>
-      unfold sepGuardedVisIn at hVis
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
+      dsimp only [sepGuardedVisIn] at hVis
       by_cases hDep : dep = d.deploymentId
       · rw [cert_if_pos hDep] at hVis
         cases hVis
@@ -3309,6 +3290,7 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
         · rw [cert_if_neg hp] at hStepC; cases hStepC
       · rw [cert_if_neg hDep] at hVis; cases hVis
     | corrupt p =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
       cases hVis
       by_cases hg : p < d.numParties ∧ p ∉ c.base.corruptParties ∧
           c.base.corruptParties.length + 1 < d.threshold
@@ -3342,6 +3324,7 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
               noForgeries := hRel.noForgeries }
       · rw [cert_if_neg hg] at hStepC; cases hStepC
     | submit r cs =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
       cases hVis
       by_cases hg : c.nextLeaf ≤ r.leaf ∧
           sepForged c.base d.deploymentId r cs = [] ∧
@@ -3432,11 +3415,10 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
               noForgeries := hRel.noForgeries }
       · rw [cert_if_neg hg] at hStepC; cases hStepC
   sim_internal {c c' st inp out} hRel hStepC hInt := by
-    change sepCustodyGuardedStep d S oracleSign c inp = some (c', out) at hStepC
-    unfold sepCustodyGuardedStep at hStepC
     cases inp with
     | approve p dep r =>
-      unfold sepGuardedVisIn at hInt
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
+      dsimp only [sepGuardedVisIn] at hInt
       by_cases hDep : dep = d.deploymentId
       · rw [cert_if_pos hDep] at hInt; cases hInt
       · by_cases hg : p < d.numParties ∧ p ∉ c.base.corruptParties
@@ -3467,7 +3449,8 @@ def separatedCustody_dataRefines_idealCustody {PK D Sig : Type} [DecidableEq D]
                 noForgeries := hRel.noForgeries }
         · rw [cert_if_neg hg] at hStepC; cases hStepC
     | advInject p dep r =>
-      unfold sepGuardedVisIn at hInt
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStepC
+      dsimp only [sepGuardedVisIn] at hInt
       by_cases hDep : dep = d.deploymentId
       · rw [cert_if_pos hDep] at hInt; cases hInt
       · by_cases hp : p ∈ c.base.corruptParties
@@ -3501,10 +3484,9 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
   induction hTr with
   | nil _ => exact ⟨.nil _, hNF₀, trivial⟩
   | @accept s s₁ _ inp out rest hStep _ ih =>
-    change sepCustodyGuardedStep d S oracleSign s inp = some (s₁, out) at hStep
-    unfold sepCustodyGuardedStep at hStep
     cases inp with
     | approve p dep r =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStep
       by_cases hg : p < d.numParties ∧ p ∉ s.base.corruptParties
       · rw [cert_if_pos hg] at hStep
         cases hSign : Qsag.Custody.sign d.signer (d.keys p) dep p r with
@@ -3515,12 +3497,12 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
           obtain ⟨hTrR, hNFR, hLvR⟩ := ih hNF₀
           have hBaseStep : (sepCustodyMachine d).step s.base (.approve p dep r) =
               some ({ s.base with issued := ⟨p, dep, r⟩ :: s.base.issued }, .certificate ⟨p, r, sig⟩) := by
-            change sepCustodyStep d s.base (.approve p dep r) = _
-            unfold sepCustodyStep
+            dsimp only [sepCustodyMachine, sepCustodyStep]
             rw [cert_if_pos hg, hSign]
           exact ⟨.accept hBaseStep hTrR, hNFR, trivial, hLvR⟩
       · rw [cert_if_neg hg] at hStep; cases hStep
     | advInject p dep r =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStep
       by_cases hp : p ∈ s.base.corruptParties
       · rw [cert_if_pos hp] at hStep
         by_cases hDep : dep = d.deploymentId
@@ -3528,6 +3510,7 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
         · rw [cert_if_neg hDep] at hStep; cases hStep; exact ih hNF₀
       · rw [cert_if_neg hp] at hStep; cases hStep
     | corrupt p =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStep
       by_cases hg : p < d.numParties ∧ p ∉ s.base.corruptParties ∧
           s.base.corruptParties.length + 1 < d.threshold
       · rw [cert_if_pos hg] at hStep
@@ -3535,12 +3518,12 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
         obtain ⟨hTrR, hNFR, hLvR⟩ := ih hNF₀
         have hBaseStep : (sepCustodyMachine d).step s.base (.corrupt p) =
             some ({ s.base with corruptParties := p :: s.base.corruptParties }, .corrupted) := by
-          change sepCustodyStep d s.base (.corrupt p) = _
-          unfold sepCustodyStep
+          dsimp only [sepCustodyMachine, sepCustodyStep]
           rw [cert_if_pos hg]
         exact ⟨.accept hBaseStep hTrR, hNFR, trivial, hLvR⟩
       · rw [cert_if_neg hg] at hStep; cases hStep
     | submit r cs =>
+      dsimp only [sepCustodyGuardedMachine, sepCustodyGuardedStep] at hStep
       by_cases hg : s.nextLeaf ≤ r.leaf ∧
           sepForged s.base d.deploymentId r cs = [] ∧
           cs.all (fun x => !decide (x.party ∈ s.base.corruptParties) ||
@@ -3552,8 +3535,7 @@ private theorem sepCustodyGuarded_validTrace_projects {D Sig : Type}
         have hBaseStep : (sepCustodyMachine d).step s.base (.submit r cs) =
             some ({ s.base with shared := (Qsag.Custody.submitRecorded d s.base.shared r cs).1 },
                   .accepted) := by
-          change sepCustodyStep d s.base (.submit r cs) = _
-          unfold sepCustodyStep
+          dsimp only [sepCustodyMachine, sepCustodyStep]
           rw [cert_if_pos hg.2.2.2, hg.2.1, List.nil_append, hNF₀]
         exact ⟨.accept hBaseStep hTrR, hNFR, hg.1, hLvR⟩
       · rw [cert_if_neg hg] at hStep; cases hStep
@@ -3639,21 +3621,22 @@ def extractSepForgeryOutcome (d : Qsag.Custody.Deployment) :
 
 private theorem mem_productionSigningLog_msg {suite : Qsag.TweakableHashSuite}
     {params : Qsag.PqHashParams} {sk : Qsag.PqSecretKey} {msg : List UInt8} :
-    ∀ {qs : List Qsag.ProdSigningQuery},
+    ∀ (qs : List Qsag.ProdSigningQuery),
       msg ∈ (Qsag.productionSigningLog suite params sk qs).map Prod.fst →
       ∃ q ∈ qs, q.message = msg
   | [], h => False.elim (List.not_mem_nil h)
   | q :: qs, h => by
-    unfold Qsag.productionSigningLog at h
-    cases Qsag.prodSignQuery suite params sk q with
+    dsimp only [Qsag.productionSigningLog] at h
+    cases hs : Qsag.prodSignQuery suite params sk q with
     | none =>
-      obtain ⟨q', hq', hm⟩ := mem_productionSigningLog_msg h
+      rw [hs] at h
+      obtain ⟨q', hq', hm⟩ := mem_productionSigningLog_msg qs h
       exact ⟨q', List.mem_cons_of_mem _ hq', hm⟩
     | some sig =>
-      dsimp only [List.map_cons] at h
+      rw [hs, List.map_cons] at h
       rcases List.mem_cons.mp h with hEq | hTail
       · exact ⟨q, List.mem_cons_self, hEq.symm⟩
-      · obtain ⟨q', hq', hm⟩ := mem_productionSigningLog_msg hTail
+      · obtain ⟨q', hq', hm⟩ := mem_productionSigningLog_msg qs hTail
         exact ⟨q', List.mem_cons_of_mem _ hq', hm⟩
 
 private theorem extractSepForgeryOutcome_complete (d : Qsag.Custody.Deployment) :
@@ -3663,8 +3646,8 @@ private theorem extractSepForgeryOutcome_complete (d : Qsag.Custody.Deployment) 
       ∃ pOut, extractSepForgeryOutcome d c sched = some pOut
   | [], c, hNF, hNe => False.elim (hNe hNF)
   | .approve p dep r :: rest, c, hNF, hNe => by
-    unfold sepCustodyRun at hNe
-    unfold extractSepForgeryOutcome
+    dsimp only [sepCustodyRun] at hNe
+    dsimp only [extractSepForgeryOutcome]
     cases hS : sepCustodyStep d c (.approve p dep r) with
     | none =>
       rw [hS] at hNe
@@ -3677,8 +3660,8 @@ private theorem extractSepForgeryOutcome_complete (d : Qsag.Custody.Deployment) 
       have hNF' : c'.forgeries = [] := by rw [hInv.2]; exact hNF
       exact extractSepForgeryOutcome_complete d rest c' hNF' hNe
   | .corrupt p :: rest, c, hNF, hNe => by
-    unfold sepCustodyRun at hNe
-    unfold extractSepForgeryOutcome
+    dsimp only [sepCustodyRun] at hNe
+    dsimp only [extractSepForgeryOutcome]
     cases hS : sepCustodyStep d c (.corrupt p) with
     | none =>
       rw [hS] at hNe
@@ -3691,26 +3674,17 @@ private theorem extractSepForgeryOutcome_complete (d : Qsag.Custody.Deployment) 
       have hNF' : c'.forgeries = [] := by rw [hInv.2]; exact hNF
       exact extractSepForgeryOutcome_complete d rest c' hNF' hNe
   | .submit r cs :: rest, c, hNF, hNe => by
-    unfold sepCustodyRun at hNe
-    unfold extractSepForgeryOutcome
+    dsimp only [sepCustodyRun, sepCustodyStep] at hNe
+    dsimp only [extractSepForgeryOutcome]
     by_cases hAcc : (Qsag.Custody.submitRecorded d c.shared r cs).2 = true
-    · rw [cert_if_pos hAcc]
-      have hStep : sepCustodyStep d c (.submit r cs) =
-          some ({ c with
-                  shared := (Qsag.Custody.submitRecorded d c.shared r cs).1
-                  forgeries := sepForged c d.deploymentId r cs ++ c.forgeries }, .accepted) := by
-        unfold sepCustodyStep; rw [cert_if_pos hAcc]
-      rw [hStep] at hNe
+    · rw [cert_if_pos hAcc] at hNe ⊢
       dsimp only at hNe
       cases hF : sepForged c d.deploymentId r cs with
       | cons x xs => exact ⟨_, rfl⟩
       | nil =>
         rw [hF] at hNe
         exact extractSepForgeryOutcome_complete d rest _ (by simp [hNF]) hNe
-    · rw [cert_if_neg hAcc]
-      have hStep : sepCustodyStep d c (.submit r cs) = none := by
-        unfold sepCustodyStep; rw [cert_if_neg hAcc]
-      rw [hStep] at hNe
+    · rw [cert_if_neg hAcc] at hNe ⊢
       exact extractSepForgeryOutcome_complete d rest c hNF hNe
 
 private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
@@ -3726,7 +3700,7 @@ private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
         a.party = pStar ∧ q = Qsag.Custody.query d.signer a.deploymentId a.party a.intent)
   | [], _, _, _, _, _, h => by cases h
   | .approve p dep r :: rest, c, pool, hSub, pStar, o, h => by
-    unfold extractSepForgeryOutcome at h
+    dsimp only [extractSepForgeryOutcome] at h
     have hPoolSub : ∀ x ∈ pool ++ sepScheduleIssues rest,
         x ∈ pool ++ sepScheduleIssues (.approve p dep r :: rest) := by
       intro x hx
@@ -3760,7 +3734,7 @@ private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
         exact ha
       exact ⟨a, ha', hpA, hqEq⟩
   | .corrupt p :: rest, c, pool, hSub, pStar, o, h => by
-    unfold extractSepForgeryOutcome at h
+    dsimp only [extractSepForgeryOutcome] at h
     cases hS : sepCustodyStep d c (.corrupt p) with
     | none =>
       rw [hS] at h
@@ -3773,7 +3747,7 @@ private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
       have hSub' : ∀ a ∈ c'.issued, a ∈ pool := by rw [hInv.2]; exact hSub
       exact extractSepForgeryOutcome_sound d rest c' pool hSub' h
   | .submit r cs :: rest, c, pool, hSub, pStar, o, h => by
-    unfold extractSepForgeryOutcome at h
+    dsimp only [extractSepForgeryOutcome] at h
     by_cases hAcc : (Qsag.Custody.submitRecorded d c.shared r cs).2 = true
     · rw [cert_if_pos hAcc] at h
       cases hF : sepForged c d.deploymentId r cs with
@@ -3794,7 +3768,7 @@ private theorem extractSepForgeryOutcome_sound (d : Qsag.Custody.Deployment) :
             (Qsag.productionSigningLog d.signer.suite d.signer.params (d.keys x.party)
               (sepIssuedQueries d.signer c.issued x.party)).map Prod.fst := by
           intro hMemL
-          obtain ⟨q, hqM, hqMsg⟩ := mem_productionSigningLog_msg hMemL
+          obtain ⟨q, hqM, hqMsg⟩ := mem_productionSigningLog_msg _ hMemL
           obtain ⟨a, haFilt, rfl⟩ := List.mem_map.mp hqM
           obtain ⟨haIss, haParty⟩ := List.mem_filter.mp haFilt
           rw [Qsag.Custody.query_eq] at hqMsg
@@ -4038,7 +4012,7 @@ theorem distributedCustody_trace_inclusion_and_safety {F C PK D Sig : Type}
     global hash injectivity. -/
 def distributedShareCustody_injOn_dataRefines_ideal
     {Share Contrib Preimage PK SK D Sig : Type}
-    [DecidableEq Preimage] [DecidableEq D]
+    [DecidableEq Contrib] [DecidableEq Preimage] [DecidableEq D]
     (dep : Qsag.DistCustody.ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
     (hWf : dep.WellFormed) (obs : List Preimage)
     (hInj : Qsag.DistCustody.InjOnPreimages dep.commit obs) :
@@ -4058,7 +4032,7 @@ def distributedShareCustody_injOn_dataRefines_ideal
        with `dep.commit x₁ = dep.commit x₂`. -/
 theorem distributedShareCustody_dataRefines_or_collision
     {Share Contrib Preimage PK SK D Sig : Type}
-    [DecidableEq Preimage] [DecidableEq D]
+    [DecidableEq Contrib] [DecidableEq Preimage] [DecidableEq D]
     (dep : Qsag.DistCustody.ShareOpeningDeployment Share Contrib Preimage PK SK D Sig)
     (hWf : dep.WellFormed)
     {stFinal : Qsag.DistCustody.ShareState Share Contrib PK D Sig}

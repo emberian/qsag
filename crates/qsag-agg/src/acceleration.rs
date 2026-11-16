@@ -269,7 +269,9 @@ pub(crate) fn build_poseidon2_canopy_tree(
         device
             .fallbacks
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        std::eprintln!("qsag_accel: Poseidon2 Canopy tree non-canonical output; recomputing on CPU");
+        std::eprintln!(
+            "qsag_accel: Poseidon2 Canopy tree non-canonical output; recomputing on CPU"
+        );
         return None;
     }
     let mut nodes = alloc::vec![[0u8; 32]; 2 * leaves.len()];
@@ -467,6 +469,49 @@ mod tests {
                 .rev()
                 .fold(Goldilocks::ZERO, |a, &c| a * x + c);
             assert_eq!(shifted[i], expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod canopy_parity_tests {
+    use super::*;
+    #[test]
+    fn gpu_poseidon2_canopy_matches_cpu_zero_salt() {
+        use crate::pcs::{
+            poseidon2_canopy_commitment_root, poseidon2_canopy_key, poseidon2_canopy_node,
+        };
+        if device().is_none() {
+            return;
+        }
+        let n = 1 << 14;
+        let leaves: Vec<[u8; 32]> = (0..n)
+            .map(|i| {
+                crate::sponge::limbs4_to_le_bytes32(core::array::from_fn(|j| {
+                    Goldilocks::from_u64_reduced((i * 17 + j) as u64)
+                }))
+            })
+            .collect();
+        for stage in [0, 1, 7] {
+            let start = std::time::Instant::now();
+            let (nodes, root) =
+                build_poseidon2_canopy_tree(&leaves, stage).expect("GPU canopy failed");
+            let gpu_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let start = std::time::Instant::now();
+            let mut cpu = alloc::vec![[0u8;32];2*n];
+            cpu[n..].copy_from_slice(&leaves);
+            let key = poseidon2_canopy_key(stage, 14);
+            for i in (1..n).rev() {
+                cpu[i] =
+                    poseidon2_canopy_node(key, i as u32, &cpu[2 * i], &cpu[2 * i + 1]).unwrap();
+            }
+            let cpu_root = poseidon2_canopy_commitment_root(stage, 14, &cpu[1]).unwrap();
+            assert_eq!(root, cpu_root);
+            assert_eq!(nodes[1..], cpu[1..]);
+            std::println!(
+                "CANOPY_PARITY n={n} stage={stage} gpu_ms={gpu_ms:.2} cpu_ms={:.2}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
         }
     }
 }

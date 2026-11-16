@@ -209,7 +209,7 @@ theorem stepAppend_eq (ly : WalLayout) (h : WalHost) (rec : List UInt8) :
     stepAppend ly h rec =
       { h with fs := appendFs ly h.fs (encodeLog (visLog ly h.fs ++ [rec])),
                staged := some h.fs.nextFd, synced := false } := by
-  simp [stepAppend, posixCreateExclNoFollow, posixUnlinkIfPresent, posixPwriteAll, resolveOpenFd,
+  simp [stepAppend, posixCreateExclNoFollow.public_eq_1, posixUnlinkIfPresent.public_eq_1, posixPwriteAll.public_eq_1, resolveOpenFd,
     assocLookup_erase, appendFs]
 
 /-- Filesystem after a successful `posixSyncAllMedia` of inode `ino` holding `bs`. -/
@@ -226,7 +226,7 @@ theorem posixSyncAllMedia_eq {fs : PosixFsState} {pid : Pid} {fd : FdId}
     (hSticky : desc.stickyFsyncErr = false)
     (hRead : readInodeHierarchy fs desc.inode = some bs) :
     posixSyncAllMedia fs pid fd = (syncedFs fs desc.inode bs, .ok ()) := by
-  simp [posixSyncAllMedia, hRes, hSticky, hRead, syncedFs]
+  simp [posixSyncAllMedia.public_eq_1, hRes, hSticky, hRead, syncedFs]
 
 /-- Filesystem after `rename(tmp, log)` when `tmp` names inode `ino`. -/
 def renamedFs (ly : WalLayout) (fs : PosixFsState) (ino : InodeId) : PosixFsState :=
@@ -239,7 +239,7 @@ def renamedFs (ly : WalLayout) (fs : PosixFsState) (ino : InodeId) : PosixFsStat
 theorem posixRename_eq (ly : WalLayout) {fs : PosixFsState} {ino : InodeId}
     (hTmp : assocLookup fs.kernel.dirInode.unsyncedEntries ly.tmp = some (.regular ino)) :
     posixRename fs ly.tmp ly.log = .ok (renamedFs ly fs ino) := by
-  simp [posixRename, hTmp, ly.distinct, renamedFs]
+  simp [posixRename.public_eq_1, hTmp, ly.distinct, renamedFs]
 
 /-- Filesystem after `posixSyncParentDir`. -/
 def dirSyncedFs (fs : PosixFsState) : PosixFsState :=
@@ -249,7 +249,7 @@ def dirSyncedFs (fs : PosixFsState) : PosixFsState :=
 
 theorem stepFsyncDir_eq (h : WalHost) :
     stepFsyncDir h = { h with fs := dirSyncedFs h.fs, dirClean := true } := by
-  simp [stepFsyncDir, posixSyncParentDir, dirSyncedFs]
+  simp [stepFsyncDir, posixSyncParentDir.public_eq_1, dirSyncedFs]
 
 /-! ## 4. Host invariant -/
 
@@ -537,14 +537,9 @@ theorem crashStep_facts {fs fs' : PosixFsState} (hC : fs.driveCache.cachedDirEnt
     (∀ j, pendingVolatileWrite fs' j = none) := by
   cases hCrash with
   | kernelPanic _ =>
-    refine ⟨.inl ?_, rfl, rfl, rfl, fun _ => rfl⟩
-    simp [KernelPanicCrash, hC]
+    simp [KernelPanicCrash.public_eqs, pendingVolatileWrite, hC]
   | powerLoss dirPick tearFn _ =>
-    cases dirPick with
-    | revertToNand => exact ⟨.inl rfl, rfl, rfl, rfl, fun _ => rfl⟩
-    | flushPendingDir =>
-      refine ⟨.inr ?_, rfl, rfl, rfl, fun _ => rfl⟩
-      simp [PowerLossCrash, hC]
+    cases dirPick <;> simp [PowerLossCrash.public_eqs, pendingVolatileWrite, hC]
 
 /-- A crash followed by a process restart: the recovered log is the old NAND log or the log
     under the kernel directory view at the crash. -/

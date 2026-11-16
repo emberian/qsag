@@ -189,7 +189,7 @@ theorem waistbandCache_preserves_multiturn_traces
 
 /-- **Customization-Tag Encoding Separation + Polynomial-Basis SPN + Five-Way `𝔽_{2^{128}}`
     Agreement (`sponge_and_spn_poly_basis_composition`)**:
-    Connects `Qsag.qsag_tags_sponge_domains_disjoint` (`Oracle.Sponge`),
+    Connects `Qsag.qsag_tags_sponge_encodings_ne` (`Oracle.Sponge`),
     `Qsag.rustParallelChainStep_eq_tower` (`Oracle.Spn`), and
     `Math.gf2Pow128_five_way_mul_agreement`. The first two conjuncts say that the complete
     padded `cSHAKE256` block sequences absorbed under the `CANOPY.LEAF`, `CANOPY.NODE` and
@@ -214,7 +214,7 @@ theorem sponge_and_spn_poly_basis_composition
           (Qsag.polyToTower128Pair (Qsag.rustBytes32ToLanes cur)))) ∧
     (Qsag.Math.Gf2Pow128.mul ⟨a⟩ ⟨b⟩).bits =
       Qsag.SimdBinaryEquiv.fastRemainder (Qsag.pclmulqdqFourProduct256 a b) := by
-  obtain ⟨hD1, hD2, _⟩ := Qsag.qsag_tags_sponge_domains_disjoint m₁ m₂
+  obtain ⟨hD1, hD2, _⟩ := Qsag.qsag_tags_sponge_encodings_ne m₁ m₂
   have hSpn := Qsag.rustParallelChainStep_eq_tower hash32 pkSeed epoch chainIdx step cur
   obtain ⟨_, _, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
   exact ⟨hD1, hD2, hSpn, hClmul⟩
@@ -237,6 +237,26 @@ theorem isa_zeroize_and_ret_ct_composition
       (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 :=
   ⟨Qsag.SydTv.ctMemzeroX86PosCert_flattened sLoop n hn hbound,
    (Qsag.ConstantTimeIsa.checkX86RetStackPop_sound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub).1⟩
+
+/-- ISA zeroization/return composition with an explicit hardware timing contract (`L-Ex-3`). -/
+theorem isa_zeroize_ret_and_hardware_ct
+    (sLoop : Qsag.X86State) (n : Nat) (hn : 0 < n) (hbound : n < 2 ^ 64)
+    (memPol : BitVec 64 → Qsag.ConstantTimeIsa.SecLabel)
+    (τ τ' : Qsag.ConstantTimeIsa.X86TaintState) (pc : Nat)
+    (hCheck : Qsag.ConstantTimeIsa.checkX86RetStackPop τ = some τ')
+    (s₁ s₂ : Qsag.ConstantTimeIsa.X86State)
+    (hLow : Qsag.ConstantTimeIsa.X86LowEq memPol τ s₁ s₂)
+    (hRetPub : memPol (s₁.gpr .rsp) = .pub)
+    {Op Data Obs : Type} (hardware : Qsag.Spec.DitHardwareContract Op Data Obs)
+    (tr₁ tr₂ : List (Op × Data)) (hOps : tr₁.map Prod.fst = tr₂.map Prod.fst) :
+    Qsag.SydTv.FlattenedLoopRefines (Qsag.SydTv.ctMemzeroX86PosCert sLoop n hn hbound) ∧
+    (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₁).2 =
+      (Qsag.ConstantTimeIsa.execX86RetStackPop pc s₂).2 ∧
+    tr₁.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) =
+      tr₂.map (fun e => hardware.observe Qsag.Spec.ExecMode.constantTimeSafe e.1 e.2) := by
+  obtain ⟨hz, hr⟩ := isa_zeroize_and_ret_ct_composition
+    sLoop n hn hbound memPol τ τ' pc hCheck s₁ s₂ hLow hRetPub
+  exact ⟨hz, hr, hardware.trace_data_independent _ rfl tr₁ tr₂ hOps⟩
 
 /-! ## 4. Adaptive Tree Query Budgets, Prefix-Free Frontier FTS, and Production Coin Toss -/
 

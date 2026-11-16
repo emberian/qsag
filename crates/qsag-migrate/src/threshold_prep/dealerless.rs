@@ -107,9 +107,10 @@ const ONE: Value = [1, 0, 0, 0, 0, 0];
 pub const CROSS_REPS: usize = 128;
 /// Sacrificed Boolean candidates that form one uniform `GF(2^128)` mask.
 pub const MASK_BITS: usize = 128;
-/// Largest number of doubly authenticated bits per field in one ceremony.
-/// Keeps every integer of the cross-domain check far below each modulus.
-const MAX_DABITS: usize = 1 << 32;
+/// Largest number of 64-bit daBit words per field in one ceremony.
+/// The 2^32-bit algebraic bound is expressed in words so it also fits a
+/// 32-bit `usize` (including wasm32).
+const MAX_DABIT_WORDS: usize = 1 << 26;
 
 /// Components of `a` per raw triple (see the module documentation).
 pub const fn tau(field: ThresholdField) -> usize {
@@ -659,24 +660,30 @@ struct Layout {
     total: usize,
 }
 impl Layout {
-    fn new(demand: &Demand) -> Self {
+    fn new(demand: &Demand) -> Result<Self, Abort> {
         let mut at = [0; 5];
         let mut retained = [0; 5];
-        let mut next = 0;
+        let mut next = 0usize;
         for i in 0..5 {
+            if demand.dabits[i] > MAX_DABIT_WORDS {
+                return Err(Abort::Config);
+            }
             at[i] = next;
-            retained[i] = 64 * demand.dabits[i];
+            retained[i] = demand.dabits[i].checked_mul(64).ok_or(Abort::Config)?;
             if retained[i] != 0 {
-                next += retained[i] + CROSS_REPS;
+                next = next
+                    .checked_add(retained[i])
+                    .and_then(|n| n.checked_add(CROSS_REPS))
+                    .ok_or(Abort::Config)?;
             }
         }
-        Self {
+        Ok(Self {
             retained,
             at,
             input_mask: next,
-            key_mask: next + MASK_BITS,
-            total: next + 2 * MASK_BITS,
-        }
+            key_mask: next.checked_add(MASK_BITS).ok_or(Abort::Config)?,
+            total: next.checked_add(2 * MASK_BITS).ok_or(Abort::Config)?,
+        })
     }
 }
 
@@ -2099,17 +2106,18 @@ impl<'a> Ceremony<'a> {
 
     fn run(mut self, demand: &Demand) -> Result<Vec<(MacKeyShare, PartyPreprocessing)>, Abort> {
         let parties = self.parties;
-        if demand.dabits.iter().any(|&words| words > MAX_DABITS / 64) {
-            return Err(Abort::Config);
-        }
+        let layout = Layout::new(demand)?;
         let dabits = demand.dabits.iter().any(|&words| words != 0);
         let word_triples = demand.auth_words.div_ceil(2);
-        let boolean_count = demand.boolean_triples + word_triples + usize::from(dabits);
+        let boolean_count = demand
+            .boolean_triples
+            .checked_add(word_triples)
+            .and_then(|n| n.checked_add(usize::from(dabits)))
+            .ok_or(Abort::Config)?;
         let mut boolean = self.boolean_stage(boolean_count)?;
         self.sample_field_keys();
         self.establish_pairs()?;
 
-        let layout = Layout::new(demand);
         let candidates = if dabits {
             Some(self.boolean_candidates(&layout)?)
         } else {
@@ -2128,9 +2136,8 @@ impl<'a> Ceremony<'a> {
 
         // Establish per-peer 128-column active KOS15 + OLE correlation seeds for
         // multiplicatively blinding online `SpdzEngine::check()` MAC openings.
-        let slot_of = |owner: usize, peer: usize| -> usize {
-            if peer < owner { peer } else { peer - 1 }
-        };
+        let slot_of =
+            |owner: usize, peer: usize| -> usize { if peer < owner { peer } else { peer - 1 } };
         let mut blind_ot: Vec<Vec<BlindOtPeer>> = (0..parties)
             .map(|_| {
                 (0..parties.saturating_sub(1))
@@ -2281,6 +2288,23 @@ mod tests {
         ThresholdConfig::new(3, 5, vec![0, 2, 4]).unwrap()
     }
 
+    #[test]
+    fn oversized_dabit_layout_fails_before_allocation() {
+        for words in [MAX_DABIT_WORDS + 1, usize::MAX / 64 + 1, usize::MAX] {
+            let mut demand = Demand::default();
+            demand.dabits[0] = words;
+            assert!(matches!(Layout::new(&demand), Err(Abort::Config)));
+        }
+        let demand = Demand {
+            dabits: [MAX_DABIT_WORDS; 5],
+            ..Demand::default()
+        };
+        #[cfg(target_pointer_width = "32")]
+        assert!(matches!(Layout::new(&demand), Err(Abort::Config)));
+        #[cfg(target_pointer_width = "64")]
+        assert!(Layout::new(&demand).is_ok());
+    }
+
     /// Real OT mesh over three quorum members and their private generators.
     fn setup(seed: u8) -> (OtMesh, Vec<PartyPrivateRng>) {
         let mut rngs: Vec<_> = (0..3u8)
@@ -2316,8 +2340,16 @@ mod tests {
                 if sender == receiver {
                     continue;
                 }
-                let s_slot = if receiver < sender { receiver } else { receiver - 1 };
-                let r_slot = if sender < receiver { sender } else { sender - 1 };
+                let s_slot = if receiver < sender {
+                    receiver
+                } else {
+                    receiver - 1
+                };
+                let r_slot = if sender < receiver {
+                    sender
+                } else {
+                    sender - 1
+                };
                 let delta = parties[sender].0.blind_ot[s_slot].sender_delta;
                 for col in 0..128 {
                     let bit = ((delta >> col) & 1) as usize;
@@ -2494,7 +2526,11 @@ mod tests {
         *value = mac_add(
             d,
             *value,
-            if d == Domain::Gold { [1, 1, 0, 0, 0, 0] } else { ONE },
+            if d == Domain::Gold {
+                [1, 1, 0, 0, 0, 0]
+            } else {
+                ONE
+            },
         );
     }
 

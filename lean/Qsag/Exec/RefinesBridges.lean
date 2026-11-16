@@ -206,3 +206,49 @@ theorem Refines.toInteractiveCoupledAcceptBits {S_c S_a In Out E : Type}
 
 end Qsag.Spec
 end
+
+public section
+namespace Qsag.Spec
+
+/-- Postcomposition preserves the stuttering behavior of an interface abstraction.
+Rejected and internal concrete steps retain the same intermediate and final abstract states. -/
+def DataRefines.postcompose {Sc Sm Sa Ic Ia Oc Oa : Type}
+    {C : Machine Sc Ic Oc} {M : Machine Sm Ia Oa} {A : Machine Sa Ia Oa}
+    {visIn : Ic → Option Ia} {visOut : Oc → Oa}
+    (cm : DataRefines C M visIn visOut) (ma : M ⊑ A) :
+    DataRefines C A visIn visOut where
+  Rel c a := ∃ m, cm.Rel c m ∧ ma.Rel m a
+  absInit c := ma.absInit (cm.absInit c)
+  init_ok hc := by
+    obtain ⟨hm, hcm⟩ := cm.init_ok hc
+    obtain ⟨ha, hma⟩ := ma.init_ok hm
+    exact ⟨ha, cm.absInit _, hcm, hma⟩
+  sim_visible hrel hstep hvis := by
+    obtain ⟨m, hcm, hma⟩ := hrel
+    obtain ⟨m', hmstep, hcm'⟩ := cm.sim_visible hcm hstep hvis
+    have h := ma.sim_ok hma hmstep
+    split at h
+    · contradiction
+    · rename_i a' out he
+      obtain ⟨hout, hma'⟩ := h
+      subst out
+      exact ⟨a', he, m', hcm', hma'⟩
+  sim_internal hrel hstep hvis := by
+    obtain ⟨m, hcm, hma⟩ := hrel
+    exact ⟨m, cm.sim_internal hcm hstep hvis, hma⟩
+  sim_reject hrel hstep := by
+    obtain ⟨m, hcm, hma⟩ := hrel
+    exact ⟨m, cm.sim_reject hcm hstep, hma⟩
+
+/-- The composed simulation carries every projected accepted trace to the final machine. -/
+theorem DataRefines.postcompose_admits {Sc Sm Sa Ic Ia Oc Oa : Type}
+    {C : Machine Sc Ic Oc} {M : Machine Sm Ia Oa} {A : Machine Sa Ia Oa}
+    {visIn : Ic → Option Ia} {visOut : Oc → Oa}
+    (cm : DataRefines C M visIn visOut) (ma : M ⊑ A)
+    {tr : List (Ic × Oc)} (h : C.AdmitsTrace tr) :
+    A.AdmitsTrace (projectTrace visIn visOut tr) :=
+  (cm.postcompose ma).preserve_admitsTrace h
+
+#verify_constructive DataRefines.postcompose_admits
+end Qsag.Spec
+end

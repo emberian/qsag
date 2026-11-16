@@ -47,7 +47,8 @@ theorem reused_mask_does_not_model_two_independent_samples (state : RssKState) (
   intro observed h
   have ha := congrArg (fun pair : KState × KState => pair.1.a0) h
   have hb := congrArg (fun pair : KState × KState => pair.2.a0) h
-  have h01 : (0 : UInt64) = 1 := ha.symm.trans hb
+  have h01 : (0 : UInt64) = 1 := by
+    simpa only [zeroKState_eq] using ha.symm.trans hb
   exact (by decide : (0 : UInt64) ≠ 1) h01
 
 #verify_constructive reused_mask_does_not_model_two_independent_samples

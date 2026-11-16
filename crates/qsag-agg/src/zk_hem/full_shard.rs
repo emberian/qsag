@@ -50,8 +50,7 @@ use crate::sig::{
 };
 use crate::sponge::{POSEIDON2_CONST_IV, poseidon2_apply_me, poseidon2_apply_mi, poseidon2_sbox7};
 use crate::trace::{
-    LOG_TRACE_COLS, NUM_TRACE_COLS, RowPublicEval, TraceField,
-    eval_batched_row_constraints_generic,
+    LOG_TRACE_COLS, NUM_TRACE_COLS, RowPublicEval, TraceField, eval_batched_row_constraints_generic,
 };
 use alloc::{vec, vec::Vec};
 use core::cell::RefCell;
@@ -331,7 +330,7 @@ impl AirTape {
                 Node::Add(a, b) | Node::Sub(a, b) => width[*a as usize] + width[*b as usize],
                 Node::Scale(a, _) => width[*a as usize],
                 Node::Lin(terms) => terms.iter().map(|&(_, a)| width[a as usize]).sum(),
-                Node::Mul(..) | Node::Sbox(_) => 7,
+                Node::Mul(..) | Node::Sbox(_) => 1,
             };
             pinned.push(w > MAX_FORM_TERMS);
             width.push(if w > MAX_FORM_TERMS { 1 } else { w });
@@ -691,7 +690,12 @@ pub(crate) fn shard_gadget<B: Backend>(
             .fold(last.clone(), |acc, c| mul_pin(b, &acc, &challenge).add(c));
         challenges.push(challenge);
     }
-    let cols: Vec<Ext<B::W>> = w.proof.col_evals.iter().map(|&v| Ext::alloc(b, v)).collect();
+    let cols: Vec<Ext<B::W>> = w
+        .proof
+        .col_evals
+        .iter()
+        .map(|&v| Ext::alloc(b, v))
+        .collect();
     tr.absorb_exts(b, T_COLUMNS, &cols);
     let mut rx = challenges;
     rx.reverse();
@@ -981,9 +985,7 @@ impl RecursiveShardStatement {
         ShardWitness {
             keys,
             size: self.keys.len(),
-            active: (0..params.slots)
-                .map(|i| self.bitmap.contains(i))
-                .collect(),
+            active: (0..params.slots).map(|i| self.bitmap.contains(i)).collect(),
             proof,
         }
     }
@@ -1006,7 +1008,10 @@ impl RecursiveShardProof {
     pub(crate) fn placeholder(params: &FullShardParams) -> Self {
         Self {
             commitment: [F::ZERO; 4],
-            row_sumcheck_polys: vec![[E::ZERO; ROW_SUMCHECK_WIRE_COEFFS]; params.circuit.log_rows()],
+            row_sumcheck_polys: vec![
+                [E::ZERO; ROW_SUMCHECK_WIRE_COEFFS];
+                params.circuit.log_rows()
+            ],
             col_evals: vec![E::ZERO; NUM_TRACE_COLS],
             opening: params.whir.placeholder(),
         }
@@ -1116,9 +1121,7 @@ impl RowTranscript for NativeRows {
     fn row_round(&mut self, wire: &[E; ROW_SUMCHECK_WIRE_COEFFS]) -> E {
         let wire: Vec<_> = wire.iter().copied().map(Ext::constant).collect();
         self.tr.absorb_exts(&mut self.b, T_ROUND, &wire);
-        self.tr
-            .ext(&mut self.b, T_ROUND_CHALLENGE)
-            .value(&self.b)
+        self.tr.ext(&mut self.b, T_ROUND_CHALLENGE).value(&self.b)
     }
     fn row_col_evals(&mut self, col_evals: &[E]) {
         let cols: Vec<_> = col_evals.iter().copied().map(Ext::constant).collect();
@@ -1178,7 +1181,8 @@ pub fn prove_recursive_shard(
         .collect();
     let tr = bind_statement(&mut b, params, &public.words(), &signer_bits, &commitment);
     let mut rows = NativeRows { b, tr };
-    let (row_proof, point, value) = prove_shard_rows(&mut rows, &params.circuit, &signers, &witness);
+    let (row_proof, point, value) =
+        prove_shard_rows(&mut rows, &params.circuit, &signers, &witness);
     drop(witness);
     let (opened, opening) = open_for_recursion(&params.whir, OPENING_HEADER, committed, &point)
         .map_err(FullShardError::Whir)?;
@@ -1411,8 +1415,7 @@ impl FullShardMergeProof {
             return None;
         }
         if regime == relation.verifier_key().regime {
-            let proof =
-                HologramPublicProof::from_bytes(bytes.get(8..)?, relation.verifier_key())?;
+            let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, relation.verifier_key())?;
             Some(Self { proof })
         } else {
             let alt = ShapeHologram::compile(&relation.shape, regime).ok()?;
@@ -1468,7 +1471,12 @@ pub fn verify_full_shard_merge(
     }
     let public: Vec<F> = shards.iter().flat_map(ShardPublic::words).collect();
     if regime == relation.verifier_key().regime {
-        protocol::verify_public_hologram(relation.verifier_key(), &public, PROOF_LABEL, &proof.proof)
+        protocol::verify_public_hologram(
+            relation.verifier_key(),
+            &public,
+            PROOF_LABEL,
+            &proof.proof,
+        )
     } else {
         let Ok(alt) = ShapeHologram::compile(&relation.shape, regime) else {
             return false;
@@ -1530,21 +1538,22 @@ mod tests {
 
     #[test]
     fn message_representative_gadget_matches_the_signature_scheme() {
-        for profile in [
-            AggSigProfile::JortsPoseidon2,
-            AggSigProfile::jorts_with_height(10).unwrap(),
-            AggSigProfile::jorts_with_height(20).unwrap(),
-        ] {
+        for height in 6..=20 {
+            let profile = AggSigProfile::jorts_with_height(height).unwrap();
             for (tag, message) in [(3u8, [0u8; 32]), (9, [0xFF; 32]), (200, [0x5A; 32])] {
                 let mut message = message;
                 message[7] ^= tag;
                 for i in 0..3 {
-                    let key = ValidatorKeypair::keygen_deterministic(profile, &[tag; 32], i);
+                    let key = ValidatorPublicKey {
+                        profile,
+                        pk_seed: [f(u64::from(tag)); 4],
+                        pk_root: [f(i); 4],
+                    };
                     let mut b = Native::default();
                     let words: Vec<F> = message.iter().map(|&x| f(u64::from(x))).collect();
-                    let mu = message_mu(&mut b, key.pk.profile, &key_limbs(&key.pk), &words);
+                    let mu = message_mu(&mut b, key.profile, &key_limbs(&key), &words);
                     assert!(!b.failed);
-                    assert_eq!(mu, compute_message_mu(&key.pk, &message).1);
+                    assert_eq!(mu, compute_message_mu(&key, &message).1);
                 }
             }
         }
@@ -1577,7 +1586,8 @@ mod tests {
                 shift_tau: draw(),
             };
             let gamma = draw();
-            let expected = eval_batched_row_constraints_ext4(&circuit.unique_ops, &cols, &public, gamma);
+            let expected =
+                eval_batched_row_constraints_ext4(&circuit.unique_ops, &cols, &public, gamma);
             let lift = |v: E| Ext::<F>::constant(v);
             let inputs = tape.inputs(
                 &cols.map(lift),
@@ -1742,14 +1752,17 @@ mod tests {
         assert!(!relation.shape().is_satisfied(&miscounted));
 
         // The parent proof.
-        let parent = prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[5; 32]).unwrap();
+        let parent =
+            prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[5; 32]).unwrap();
         let publics: Vec<ShardPublic> = statements
             .iter()
             .map(|s| s.public(&params).unwrap())
             .collect();
         assert_eq!(publics[0].signers, 2);
         assert_eq!(publics[1].signers, 1);
-        assert!(verify_full_shard_merge(&relation, &publics, REGIME, &parent));
+        assert!(verify_full_shard_merge(
+            &relation, &publics, REGIME, &parent
+        ));
         let bytes = parent.to_bytes();
         assert_eq!(
             FullShardMergeProof::from_bytes(&bytes, &relation, REGIME).unwrap(),
@@ -1798,7 +1811,8 @@ mod tests {
             bitmap: SignerBitmap::from_active_indices(2, &[0, 1]).unwrap(),
             message: msg,
         };
-        let child_proof = prove_recursive_shard(&params, &stmt, &[sig0, sig1], &[0x55; 32]).unwrap();
+        let child_proof =
+            prove_recursive_shard(&params, &stmt, &[sig0, sig1], &[0x55; 32]).unwrap();
         assert!(verify_recursive_shard(&params, &stmt, &child_proof));
         let wire = child_proof.to_bytes();
         assert_eq!(
@@ -1824,6 +1838,7 @@ mod tests {
             &parent
         ));
         let ver_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        std::println!("HEIGHT10_HOLOGRAM verify_ms={ver_ms:.3}");
         assert!(ver_ms < 25.0, "verify_ms={ver_ms}");
     }
 
@@ -1872,14 +1887,17 @@ mod tests {
             proofs.push(proof);
         }
         let start = Instant::now();
-        let parent = prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[9; 32]).unwrap();
+        let parent =
+            prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[9; 32]).unwrap();
         let prove_ms = start.elapsed().as_secs_f64() * 1000.;
         let publics: Vec<ShardPublic> = statements
             .iter()
             .map(|s| s.public(&params).unwrap())
             .collect();
         let start = Instant::now();
-        assert!(verify_full_shard_merge(&relation, &publics, REGIME, &parent));
+        assert!(verify_full_shard_merge(
+            &relation, &publics, REGIME, &parent
+        ));
         let verify_ms = start.elapsed().as_secs_f64() * 1000.;
         std::println!(
             "FULL_SHARD_MERGE slots={slots} children={children} signers={} parent_bytes={} prove_ms={prove_ms:.0} verify_ms={verify_ms:.1}",

@@ -14,9 +14,9 @@ axioms, purely constructive extractors):
      `compact1122_one_time_euf_cma_reduction`), paired with `tooth_drop_target_sum_allows_one_sig_forgery`.
 2. **`RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`)**:
    - Models `EpochKeyLink` / `RotatedEpochVote` (`crates/qsag-fts/src/frontier.rs`) with injective
-     104-byte big-endian framing (`encodeEpochVoteInput_injective`) under `cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")`
+     `cshake256_framed_xof` framing (`encodeEpochVoteInput_injective`) under `cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")`
      (`cshakeEpochVoteHasher`), proving by induction across historical epochs that an accepted
-     divergent chain yields an explicit `cSHAKE256` framing collision on distinct 104-byte inputs or
+     divergent chain yields an explicit `cSHAKE256` framing collision on distinct framed inputs or
      a historical-key primitive break (`rotatedEpochVote_cshake_chain_reduction`), contrasted with
      `tooth_static_key_compromise_forges_historical_epoch`.
 3. **`Corduroy` Width-12 `Poseidon2` Stateless Hypertree + `(t, n)` Shamir Power-7 EUF-CMA
@@ -31,6 +31,7 @@ axioms, purely constructive extractors):
 -/
 
 public import Qsag.Tactic.Prelude
+public import Qsag.Spec.GameBound
 public import Qsag.Math.Goldilocks
 public import Qsag.Oracle.Poseidon2
 public import Qsag.Oracle.Keccak
@@ -876,11 +877,13 @@ def FtsDomainRole.tag : FtsDomainRole → List UInt8
   | .hmsg => ftsTagHmsg
   | .epochVote => ftsTagEpochVote
 
-/-- Every pair of distinct `FrontierSumFts` / `RotatedEpochVote` customization tags maps to strictly
-    disjoint 136-byte padded `cSHAKE256` sponge block sequences for all payloads `m₁, m₂`. -/
-theorem fts_cshake_domains_disjoint (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ r₂) (m₁ m₂ : List UInt8) :
-    absorbPayload 136 domCshake256 (cshakePrefix [] r₁.tag ++ m₁) ≠
-      absorbPayload 136 domCshake256 (cshakePrefix [] r₂.tag ++ m₂) := by
+/-- Inequality of full `cSHAKE256` padded 136-byte block sequences (`cshake256_encodings_ne` form)
+    for any distinct `FrontierSumFts` / `RotatedEpochVote` customization tags `r₁ ≠ r₂`. -/
+theorem fts_cshake_encodings_ne (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ r₂) (m₁ m₂ : List UInt8) :
+    (if ([] : List UInt8) = [] ∧ r₁.tag = [] then absorbPayload 136 domShake256 m₁
+     else absorbPayload 136 domCshake256 (cshakePrefix [] r₁.tag ++ m₁)) ≠
+    (if ([] : List UInt8) = [] ∧ r₂.tag = [] then absorbPayload 136 domShake256 m₂
+     else absorbPayload 136 domCshake256 (cshakePrefix [] r₂.tag ++ m₂)) := by
   have hTagNe : r₁.tag ≠ r₂.tag := by
     cases r₁ <;> cases r₂ <;> first | exact False.elim (hNe rfl) | decide +kernel
   have hN : 8 * ([] : List UInt8).length < 256 ^ 255 := bitlen_lt_sp800_bound (s := []) (by decide)
@@ -888,12 +891,16 @@ theorem fts_cshake_domains_disjoint (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ 
     cases r₁ <;> exact bitlen_lt_sp800_bound (by decide)
   have hS₂ : 8 * r₂.tag.length < 256 ^ 255 := by
     cases r₂ <;> exact bitlen_lt_sp800_bound (by decide)
-  have hTagNeNil₁ : r₁.tag ≠ [] := by
-    cases r₁ <;> decide
-  have hTagNeNil₂ : r₂.tag ≠ [] := by
-    cases r₂ <;> decide
-  have hDisj := cshake256_encodings_ne m₁ m₂ hN hS₁ hN hS₂ (fun hPair => hTagNe (Prod.mk.inj hPair).2)
-  simpa [hTagNeNil₁, hTagNeNil₂] using hDisj
+  exact cshake256_encodings_ne m₁ m₂ hN hS₁ hN hS₂ (fun hPair => hTagNe (Prod.mk.inj hPair).2)
+
+/-- Every pair of distinct `FrontierSumFts` / `RotatedEpochVote` customization tags maps to
+    unequal 136-byte padded `cSHAKE256` sponge block sequences for all payloads `m₁, m₂`. -/
+theorem fts_cshake_domains_disjoint (r₁ r₂ : FtsDomainRole) (hNe : r₁ ≠ r₂) (m₁ m₂ : List UInt8) :
+    absorbPayload 136 domCshake256 (cshakePrefix [] r₁.tag ++ m₁) ≠
+      absorbPayload 136 domCshake256 (cshakePrefix [] r₂.tag ++ m₂) := by
+  have hTagNeNil₁ : r₁.tag ≠ [] := by cases r₁ <;> decide
+  have hTagNeNil₂ : r₂.tag ≠ [] := by cases r₂ <;> decide
+  simpa [hTagNeNil₁, hTagNeNil₂] using fts_cshake_encodings_ne r₁ r₂ hNe m₁ m₂
 
 def evalFtsCshake256_32 (tag payload : List UInt8) : BitVec 256 :=
   bytes32ToBv256BE (evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] tag payload 32)
@@ -903,25 +910,269 @@ def encodeFrontierPid (p : FrontierFtsParams) : List UInt8 :=
   fixedBytesBE 8 p.frontierLen ++ fixedBytesBE 8 p.targetSum ++ fixedBytesBE 8 p.indexBits ++
   fixedBytesBE 8 p.counterBits
 
-/-- Real `cSHAKE256` (`Keccak-f[1600]`) instantiation of `FrontierHashSuite` matching `frontier.rs`. -/
-def cshakeFrontierHashSuite (p : FrontierFtsParams) : FrontierHashSuite :=
-  let pid := encodeFrontierPid p
-  { prehashMsg  := fun pkSeed pkRoot msg =>
-      evalFtsCshake256_32 ftsTagMsgPre (pid ++ bv256BytesBE pkSeed ++ bv256BytesBE pkRoot ++ msg)
-    squeezeRank := fun pkSeed pkRoot rand d ctr =>
-      evalFtsCshake256_32 ftsTagHmsg (pid ++ bv256BytesBE pkSeed ++ bv256BytesBE pkRoot ++
-        bv256BytesBE rand ++ bv256BytesBE d ++ u16BytesBE ctr)
-    prfRand     := fun skPrf pkSeed pkRoot hedge d =>
-      evalFtsCshake256_32 ftsTagRand (pid ++ bv256BytesBE skPrf ++ bv256BytesBE pkSeed ++
-        bv256BytesBE pkRoot ++ bv256BytesBE hedge ++ bv256BytesBE d)
-    leafStart   := fun pkSeed skSeed v =>
-      evalFtsCshake256_32 ftsTagLeaf (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++ bv256BytesBE skSeed)
-    chainStep   := fun pkSeed v step cur =>
-      evalFtsCshake256_32 ftsTagChain (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++
-        fixedBytesBE 8 step ++ bv256BytesBE cur)
-    mergeNode   := fun pkSeed v l r =>
-      evalFtsCshake256_32 ftsTagMerge (pid ++ bv256BytesBE pkSeed ++ fixedBytesBE 8 v ++
-        bv256BytesBE l ++ bv256BytesBE r) }
+theorem encodeFrontierPid_length (p : FrontierFtsParams) : (encodeFrontierPid p).length = 56 := by
+  simp [encodeFrontierPid, fixedBytesBE_length]
+
+/-- Length-framed `cshake256_framed_xof` body `(u64_le(f.len()) || f)*`
+    (`crates/qsag-accel/src/keccak.rs:274-284`). -/
+def encodeCshakeFramesBody : List (List UInt8) → List UInt8
+  | [] => []
+  | f :: fs => fixedBytesLE 8 f.length ++ f ++ encodeCshakeFramesBody fs
+
+/-- Exact preimage framing absorbed by `cshake256_framed_xof(tag, frames)`
+    (`crates/qsag-accel/src/keccak.rs:274-284`):
+    `u64_le(frames.len()) || (u64_le(f.len()) || f)*`. -/
+def encodeCshakeFrames (frames : List (List UInt8)) : List UInt8 :=
+  fixedBytesLE 8 frames.length ++ encodeCshakeFramesBody frames
+
+theorem encodeCshakeFramesBody_eq_flatMap :
+    ∀ frames : List (List UInt8),
+      encodeCshakeFramesBody frames = frames.flatMap (fun f => fixedBytesLE 8 f.length ++ f)
+  | [] => rfl
+  | f :: fs => by
+    simp only [encodeCshakeFramesBody, List.flatMap_cons, List.append_assoc,
+      encodeCshakeFramesBody_eq_flatMap fs]
+
+theorem encodeCshakeFrames_eq_flatMap (frames : List (List UInt8)) :
+    encodeCshakeFrames frames =
+      fixedBytesLE 8 frames.length ++ frames.flatMap (fun f => fixedBytesLE 8 f.length ++ f) := by
+  rw [encodeCshakeFrames, encodeCshakeFramesBody_eq_flatMap]
+
+theorem fixedBytesLE_injective {k n₁ n₂ : Nat} (h₁ : n₁ < 256 ^ k) (h₂ : n₂ < 256 ^ k)
+    (hEq : fixedBytesLE k n₁ = fixedBytesLE k n₂) : n₁ = n₂ := by
+  have hDec := congrArg decodeBytesLE hEq
+  rw [decodeBytesLE_fixedBytesLE k n₁ h₁, decodeBytesLE_fixedBytesLE k n₂ h₂] at hDec
+  exact hDec
+
+private theorem append_inj_left_len {α : Type} :
+    ∀ {xs₁ xs₂ ys₁ ys₂ : List α}, xs₁.length = xs₂.length →
+      xs₁ ++ ys₁ = xs₂ ++ ys₂ → xs₁ = xs₂ ∧ ys₁ = ys₂
+  | [], [], _, _, _, h => ⟨rfl, h⟩
+  | _ :: _, [], _, _, hL, _ => nomatch hL
+  | [], _ :: _, _, _, hL, _ => nomatch hL
+  | a₁ :: xs₁, a₂ :: xs₂, ys₁, ys₂, hL, hEq => by
+    obtain ⟨rfl, hTl⟩ := List.cons.inj hEq
+    obtain ⟨hX, hY⟩ := append_inj_left_len (Nat.succ.inj hL) hTl
+    exact ⟨congrArg (a₁ :: ·) hX, hY⟩
+
+theorem encodeCshakeFramesBody_injective :
+    ∀ {fs₁ fs₂ : List (List UInt8)},
+      (∀ f ∈ fs₁, f.length < 256 ^ 8) →
+      (∀ f ∈ fs₂, f.length < 256 ^ 8) →
+      encodeCshakeFramesBody fs₁ = encodeCshakeFramesBody fs₂ →
+      fs₁ = fs₂
+  | [], [], _, _, _ => rfl
+  | [], f₂ :: fs₂, _, _, hEq => by
+    have hL := congrArg List.length hEq
+    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL
+  | f₁ :: fs₁, [], _, _, hEq => by
+    have hL := congrArg List.length hEq
+    simp [encodeCshakeFramesBody, fixedBytesLE_length] at hL
+  | f₁ :: fs₁, f₂ :: fs₂, hB₁, hB₂, hEq => by
+    simp only [encodeCshakeFramesBody, List.append_assoc] at hEq
+    obtain ⟨hLenBytes, hRest⟩ := append_inj_left_len
+      ((fixedBytesLE_length 8 f₁.length).trans (fixedBytesLE_length 8 f₂.length).symm) hEq
+    have hFLen : f₁.length = f₂.length :=
+      fixedBytesLE_injective (hB₁ f₁ (.head fs₁)) (hB₂ f₂ (.head fs₂)) hLenBytes
+    obtain ⟨hF, hTail⟩ := append_inj_left_len hFLen hRest
+    rw [hF, encodeCshakeFramesBody_injective
+      (fun f hf => hB₁ f (.tail f₁ hf)) (fun f hf => hB₂ f (.tail f₂ hf)) hTail]
+
+/-- **Tuple-Level Frame Injectivity of `cshake256_framed_xof` (`encodeCshakeFrames_injective`)**:
+    Distinct lists of `< 2^64`-byte frames never collide prior to sponge absorption. -/
+theorem encodeCshakeFrames_injective {fs₁ fs₂ : List (List UInt8)}
+    (hB₁ : ∀ f ∈ fs₁, f.length < 256 ^ 8)
+    (hB₂ : ∀ f ∈ fs₂, f.length < 256 ^ 8)
+    (hEq : encodeCshakeFrames fs₁ = encodeCshakeFrames fs₂) :
+    fs₁ = fs₂ := by
+  unfold encodeCshakeFrames at hEq
+  obtain ⟨_, hBody⟩ := append_inj_left_len
+    ((fixedBytesLE_length 8 fs₁.length).trans (fixedBytesLE_length 8 fs₂.length).symm) hEq
+  exact encodeCshakeFramesBody_injective hB₁ hB₂ hBody
+
+theorem u16BytesBE_injective {c₁ c₂ : UInt16} (hEq : u16BytesBE c₁ = u16BytesBE c₂) : c₁ = c₂ := by
+  have h16 : (2 : Nat) ^ 16 = 256 ^ 2 := by decide +kernel
+  exact UInt16.eq_of_toBitVec_eq
+    (BitVec.eq_of_toNat_eq (fixedBytesBE_injective (h16 ▸ c₁.toBitVec.isLt) (h16 ▸ c₂.toBitVec.isLt) hEq))
+
+/-- Exact framed `cSHAKE256` preimage builders for the six `FrontierSumFts` roles
+    (`crates/qsag-fts/src/frontier.rs:748-812, 1077-1089`). -/
+def ftsPrehashFrames (p : FrontierFtsParams) (pkSeed pkRoot : BitVec 256) (msg : List UInt8) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE pkSeed, bv256BytesBE pkRoot, msg]
+
+def ftsSqueezeRankFrames (p : FrontierFtsParams) (pkSeed pkRoot rand d : BitVec 256) (ctr : UInt16) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, u16BytesBE ctr, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
+    bv256BytesBE rand, bv256BytesBE d]
+
+def ftsPrfRandFrames (p : FrontierFtsParams) (skPrf pkSeed pkRoot hedge d : BitVec 256) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE skPrf, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
+    bv256BytesBE hedge, [0], bv256BytesBE d]
+
+def ftsLeafStartFrames (p : FrontierFtsParams) (pkSeed skSeed : BitVec 256) (v : Nat) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE pkSeed, fixedBytesBE 8 v, bv256BytesBE skSeed]
+
+def ftsChainStepFrames (p : FrontierFtsParams) (pkSeed : BitVec 256) (v step : Nat) (cur : BitVec 256) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE pkSeed, fixedBytesBE 8 v, fixedBytesBE 8 step,
+    bv256BytesBE cur]
+
+def ftsMergeNodeFrames (p : FrontierFtsParams) (pkSeed : BitVec 256) (v : Nat) (l r : BitVec 256) : List UInt8 :=
+  encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE pkSeed, fixedBytesBE 8 v,
+    bv256BytesBE l, bv256BytesBE r]
+
+theorem ftsSqueezeRankFrames_eq (p : FrontierFtsParams) (pkSeed pkRoot rand d : BitVec 256) (ctr : UInt16) :
+    ftsSqueezeRankFrames p pkSeed pkRoot rand d ctr =
+      encodeCshakeFrames [encodeFrontierPid p, u16BytesBE ctr, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
+        bv256BytesBE rand, bv256BytesBE d] := rfl
+
+theorem ftsPrfRandFrames_eq (p : FrontierFtsParams) (skPrf pkSeed pkRoot hedge d : BitVec 256) :
+    ftsPrfRandFrames p skPrf pkSeed pkRoot hedge d =
+      encodeCshakeFrames [encodeFrontierPid p, bv256BytesBE skPrf, bv256BytesBE pkSeed, bv256BytesBE pkRoot,
+        bv256BytesBE hedge, [0], bv256BytesBE d] := rfl
+
+/-- Real `cSHAKE256` (`Keccak-f[1600]`, `cshake256_framed_xof`) instantiation of `FrontierHashSuite`
+    matching `crates/qsag-fts/src/frontier.rs:748-812, 1077-1089` bit-for-bit. -/
+def cshakeFrontierHashSuite (p : FrontierFtsParams) : FrontierHashSuite where
+  prehashMsg  pkSeed pkRoot msg := evalFtsCshake256_32 ftsTagMsgPre (ftsPrehashFrames p pkSeed pkRoot msg)
+  squeezeRank pkSeed pkRoot rand d ctr := evalFtsCshake256_32 ftsTagHmsg (ftsSqueezeRankFrames p pkSeed pkRoot rand d ctr)
+  prfRand     skPrf pkSeed pkRoot hedge d := evalFtsCshake256_32 ftsTagRand (ftsPrfRandFrames p skPrf pkSeed pkRoot hedge d)
+  leafStart   pkSeed skSeed v := evalFtsCshake256_32 ftsTagLeaf (ftsLeafStartFrames p pkSeed skSeed v)
+  chainStep   pkSeed v step cur := evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v step cur)
+  mergeNode   pkSeed v l r := evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v l r)
+
+private theorem len_pid_lt_u64 (p : FrontierFtsParams) : (encodeFrontierPid p).length < 256 ^ 8 := by
+  rw [encodeFrontierPid_length]; decide +kernel
+
+private theorem len_bv256_lt_u64 (x : BitVec 256) : (bv256BytesBE x).length < 256 ^ 8 := by
+  rw [bv256BytesBE, fixedBytesBE_length]; decide +kernel
+
+private theorem len_be8_lt_u64 (n : Nat) : (fixedBytesBE 8 n).length < 256 ^ 8 := by
+  rw [fixedBytesBE_length]; decide +kernel
+
+private theorem len_u16_lt_u64 (c : UInt16) : (u16BytesBE c).length < 256 ^ 8 := by
+  rw [u16BytesBE, fixedBytesBE_length]; decide +kernel
+
+theorem ftsPrehashFrames_injective (p : FrontierFtsParams)
+    {pkS₁ pkR₁ pkS₂ pkR₂ : BitVec 256} {m₁ m₂ : List UInt8}
+    (hm₁ : m₁.length < 256 ^ 8) (hm₂ : m₂.length < 256 ^ 8)
+    (hEq : ftsPrehashFrames p pkS₁ pkR₁ m₁ = ftsPrehashFrames p pkS₂ pkR₂ m₂) :
+    pkS₁ = pkS₂ ∧ pkR₁ = pkR₂ ∧ m₁ = m₂ := by
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₁
+        · exact len_bv256_lt_u64 pkR₁
+        · exact hm₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₂
+        · exact len_bv256_lt_u64 pkR₂
+        · exact hm₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
+  exact ⟨bv256BytesBE_injective hL.2.1, bv256BytesBE_injective hL.2.2.1, hL.2.2.2⟩
+
+theorem ftsSqueezeRankFrames_injective (p : FrontierFtsParams)
+    {pkS₁ pkR₁ r₁ d₁ pkS₂ pkR₂ r₂ d₂ : BitVec 256} {c₁ c₂ : UInt16}
+    (hEq : ftsSqueezeRankFrames p pkS₁ pkR₁ r₁ d₁ c₁ = ftsSqueezeRankFrames p pkS₂ pkR₂ r₂ d₂ c₂) :
+    c₁ = c₂ ∧ pkS₁ = pkS₂ ∧ pkR₁ = pkR₂ ∧ r₁ = r₂ ∧ d₁ = d₂ := by
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_u16_lt_u64 c₁
+        · exact len_bv256_lt_u64 pkS₁
+        · exact len_bv256_lt_u64 pkR₁
+        · exact len_bv256_lt_u64 r₁
+        · exact len_bv256_lt_u64 d₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_u16_lt_u64 c₂
+        · exact len_bv256_lt_u64 pkS₂
+        · exact len_bv256_lt_u64 pkR₂
+        · exact len_bv256_lt_u64 r₂
+        · exact len_bv256_lt_u64 d₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
+  exact ⟨u16BytesBE_injective hL.2.1, bv256BytesBE_injective hL.2.2.1,
+    bv256BytesBE_injective hL.2.2.2.1, bv256BytesBE_injective hL.2.2.2.2.1,
+    bv256BytesBE_injective hL.2.2.2.2.2⟩
+
+theorem ftsPrfRandFrames_injective (p : FrontierFtsParams)
+    {skP₁ pkS₁ pkR₁ h₁ d₁ skP₂ pkS₂ pkR₂ h₂ d₂ : BitVec 256}
+    (hEq : ftsPrfRandFrames p skP₁ pkS₁ pkR₁ h₁ d₁ = ftsPrfRandFrames p skP₂ pkS₂ pkR₂ h₂ d₂) :
+    skP₁ = skP₂ ∧ pkS₁ = pkS₂ ∧ pkR₁ = pkR₂ ∧ h₁ = h₂ ∧ d₁ = d₂ := by
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 skP₁
+        · exact len_bv256_lt_u64 pkS₁
+        · exact len_bv256_lt_u64 pkR₁
+        · exact len_bv256_lt_u64 h₁
+        · decide +kernel
+        · exact len_bv256_lt_u64 d₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 skP₂
+        · exact len_bv256_lt_u64 pkS₂
+        · exact len_bv256_lt_u64 pkR₂
+        · exact len_bv256_lt_u64 h₂
+        · decide +kernel
+        · exact len_bv256_lt_u64 d₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
+  exact ⟨bv256BytesBE_injective hL.2.1, bv256BytesBE_injective hL.2.2.1,
+    bv256BytesBE_injective hL.2.2.2.1, bv256BytesBE_injective hL.2.2.2.2.1,
+    bv256BytesBE_injective hL.2.2.2.2.2.2⟩
+
+theorem ftsChainStepFrames_injective (p : FrontierFtsParams)
+    {pkS₁ pkS₂ cur₁ cur₂ : BitVec 256} {v₁ s₁ v₂ s₂ : Nat}
+    (hv₁ : v₁ < 256 ^ 8) (hs₁ : s₁ < 256 ^ 8) (hv₂ : v₂ < 256 ^ 8) (hs₂ : s₂ < 256 ^ 8)
+    (hEq : ftsChainStepFrames p pkS₁ v₁ s₁ cur₁ = ftsChainStepFrames p pkS₂ v₂ s₂ cur₂) :
+    pkS₁ = pkS₂ ∧ v₁ = v₂ ∧ s₁ = s₂ ∧ cur₁ = cur₂ := by
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₁
+        · exact len_be8_lt_u64 v₁
+        · exact len_be8_lt_u64 s₁
+        · exact len_bv256_lt_u64 cur₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₂
+        · exact len_be8_lt_u64 v₂
+        · exact len_be8_lt_u64 s₂
+        · exact len_bv256_lt_u64 cur₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
+  exact ⟨bv256BytesBE_injective hL.2.1, fixedBytesBE_injective hv₁ hv₂ hL.2.2.1,
+    fixedBytesBE_injective hs₁ hs₂ hL.2.2.2.1, bv256BytesBE_injective hL.2.2.2.2⟩
+
+theorem ftsMergeNodeFrames_injective (p : FrontierFtsParams)
+    {pkS₁ pkS₂ l₁ r₁ l₂ r₂ : BitVec 256} {v₁ v₂ : Nat}
+    (hv₁ : v₁ < 256 ^ 8) (hv₂ : v₂ < 256 ^ 8)
+    (hEq : ftsMergeNodeFrames p pkS₁ v₁ l₁ r₁ = ftsMergeNodeFrames p pkS₂ v₂ l₂ r₂) :
+    pkS₁ = pkS₂ ∧ v₁ = v₂ ∧ l₁ = l₂ ∧ r₁ = r₂ := by
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₁
+        · exact len_be8_lt_u64 v₁
+        · exact len_bv256_lt_u64 l₁
+        · exact len_bv256_lt_u64 r₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl | rfl
+        · exact len_pid_lt_u64 p
+        · exact len_bv256_lt_u64 pkS₂
+        · exact len_be8_lt_u64 v₂
+        · exact len_bv256_lt_u64 l₂
+        · exact len_bv256_lt_u64 r₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
+  exact ⟨bv256BytesBE_injective hL.2.1, fixedBytesBE_injective hv₁ hv₂ hL.2.2.1,
+    bv256BytesBE_injective hL.2.2.2.1, bv256BytesBE_injective hL.2.2.2.2⟩
 
 structure FrontierPublicKey where
   pkSeed : BitVec 256
@@ -1449,6 +1700,295 @@ theorem compact1122_one_time_euf_cma_reduction (H : FrontierHashSuite) (p : Fron
     Nonempty (FrontierForgeryBreak H sk.pkSeed sk.skSeed p.winternitzW) :=
   ⟨extractCompact1122ForgeryBreak H p hL sk hedge₁ ctr₁ m₁ sig₁ hHonest m₂ sig₂ hFresh hForged⟩
 
+/-! ### §1b. Mechanized `Compact1122` (`w = 96, L = 34, S = 1615`) Target-Sum Antichain & `≤ 1`-Query ROM/QROM EUF-CMA Reduction -/
+
+private theorem sum_replicate_eq : ∀ (n c : Nat), (List.replicate n c).sum = n * c
+  | 0, _ => by simp
+  | n + 1, c => by
+    simp only [List.replicate_succ, List.sum_cons, sum_replicate_eq n c, Nat.succ_mul]
+    omega
+
+/-- **Explicit `Compact1122` (`w = 96, L = 34, S = 1615`) Bidirectional Target-Sum Antichain
+    (`compact1122_target_sum_antichain`)**:
+    1. Any two distinct length-`34` digit vectors `d, d'` in `[0, 96)` with target sum `1615` are
+       incomparable (`∃ i < 34, d'[i] < d[i]` and `∃ j < 34, d[j] < d'[j]`), constructively
+       forcing at least one strictly backward hash-chain step in every same-antichain forgery, and
+    2. Any single length-`34` digit vector `d'` with target sum `1615` satisfies `∃ i < 34, d'[i] < 95`
+       (`1615 < 34 * 95 = 3230`), forcing a strictly backward hash-chain step in any 0-query forgery! -/
+theorem compact1122_target_sum_antichain :
+    (∀ (d d' : List Nat),
+      d.length = 34 → d'.length = 34 →
+      (∀ x ∈ d, x < 96) → (∀ x ∈ d', x < 96) →
+      d.sum = 1615 → d'.sum = 1615 → d' ≠ d →
+      (∃ i : Fin d'.length,
+        d'.get i < d.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (by omega)⟩ ∧
+        d.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 (by omega)⟩ < 96) ∧
+      (∃ j : Fin d.length,
+        d.get j < d'.get ⟨j.1, Nat.lt_of_lt_of_eq j.2 (by omega)⟩ ∧
+        d'.get ⟨j.1, Nat.lt_of_lt_of_eq j.2 (by omega)⟩ < 96)) ∧
+    (∀ (d' : List Nat),
+      d'.length = 34 → d'.sum = 1615 →
+      ∃ i : Fin d'.length, d'.get i < 95) := by
+  refine ⟨fun d d' hL hL' hBd hBd' hS hS' hNe => ?_, fun d' hL' hS' => ?_⟩
+  · let w₁ := findSmallerOffsetIdx d' d (hL'.trans hL.symm) (by omega) hNe
+    let w₂ := findSmallerOffsetIdx d d' (hL.trans hL'.symm) (by omega) (fun e => hNe e.symm)
+    exact ⟨⟨w₁.1, w₁.2, hBd _ (List.get_mem _ _)⟩,
+           ⟨w₂.1, w₂.2, hBd' _ (List.get_mem _ _)⟩⟩
+  · let maxVec := List.replicate 34 95
+    have hMaxLen : maxVec.length = 34 := List.length_replicate
+    have hMaxSum : maxVec.sum = 3230 := (sum_replicate_eq 34 95).trans (by decide)
+    have hNeMax : d' ≠ maxVec := fun hEq => by rw [hEq, hMaxSum] at hS'; cases hS'
+    let w := findSmallerOffsetIdx d' maxVec (hL'.trans hMaxLen.symm) (by omega) hNeMax
+    refine ⟨w.1, ?_⟩
+    have hMem : maxVec.get ⟨w.1.1, Nat.lt_of_lt_of_eq w.1.2 (hL'.trans hMaxLen.symm)⟩ ∈ maxVec :=
+      List.get_mem _ _
+    rw [(List.mem_replicate.mp hMem).2] at w
+    exact w.2
+
+/-- Constructive 0-query (`EUF-NMA`) forgery break extractor for `FrontierSumFts` whenever
+    `p.targetSum < p.frontierLen * (p.winternitzW - 1)` (satisfied by both `Compact1122` and `Full256Bit`). -/
+def extractCompact1122ZeroQueryBreak (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (hSlack : p.targetSum < p.frontierLen * (p.winternitzW - 1))
+    (sk : FrontierSecretKey) (m₂ : List UInt8) (sig₂ : FrontierSignature)
+    (hForged : verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true) :
+    FrontierForgeryBreak H sk.pkSeed sk.skSeed p.winternitzW :=
+  let pk := deriveFrontierPk H p sk
+  let d₂ := H.prehashMsg pk.pkSeed pk.root m₂
+  let rk₂ := (H.squeezeRank pk.pkSeed pk.root sig₂.randomizer d₂ sig₂.grindCounter).toNat
+  match hU₂ : unrankFrontierFts p rk₂ with
+  | none => False.elim (by
+      unfold verifyFrontierFts at hForged
+      if hCL : (sig₂.chainValues.length != p.frontierLen) = true then
+        simp [hCL] at hForged
+      else
+        have hCLF : (sig₂.chainValues.length != p.frontierLen) = false := Bool.eq_false_iff.mpr hCL
+        if hC₂ : sig₂.grindCounter.toNat >= 2 ^ p.counterBits then
+          simp [hCLF, hC₂] at hForged
+        else
+          simp [hCLF, hC₂, pk, d₂, rk₂, hU₂] at hForged)
+  | some (tr₂, paths₂, offs₂) =>
+    have hLt₂ := unrankFrontierFts_rank_lt hU₂
+    have hP₂ : paths₂ = tr₂.frontierNodes 1 ∧ tr₂.Valid p.treeHeight = true ∧
+        tr₂.size = p.frontierLen ∧ 2 ≤ p.frontierLen ∧
+        offs₂.length = p.frontierLen ∧ offs₂.sum = p.targetSum ∧
+        (∀ a ∈ offs₂, a < p.winternitzW) := by
+      obtain ⟨_, _, _, hu, hp, hv, hs, h2L, hl, hsm, hb, _⟩ := unrankFrontierFts_bijective p rk₂ hLt₂
+      rw [hU₂] at hu; injection hu with e; obtain ⟨rfl, e'⟩ := Prod.mk.inj e; obtain ⟨rfl, rfl⟩ := Prod.mk.inj e'
+      exact ⟨hp, hv, hs, h2L, hl, hsm, hb⟩
+    have hVer : sig₂.chainValues.length = p.frontierLen ∧
+        evalAntichainTree H sk.pkSeed p.winternitzW 1 tr₂ offs₂ sig₂.chainValues = pk.root := by
+      unfold verifyFrontierFts at hForged
+      by_cases hCL : sig₂.chainValues.length != p.frontierLen; · simp [hCL] at hForged
+      have hCLEq : sig₂.chainValues.length = p.frontierLen := eq_of_bne_false hCL
+      by_cases hC₂ : sig₂.grindCounter.toNat >= 2 ^ p.counterBits; · simp [hCL, hC₂] at hForged
+      simp only [hCL, Bool.false_eq_true, ↓reduceIte, hC₂, pk, d₂, rk₂, hU₂] at hForged
+      have hLp := runFrontierStackLoop_tree_eq H sk.pkSeed p.winternitzW tr₂ 1 offs₂ sig₂.chainValues
+        [] [] [] [] (by decide) (hP₂.2.2.2.2.1.trans hP₂.2.2.1.symm) (hCLEq.trans hP₂.2.2.1.symm)
+      simp only [List.append_nil] at hLp
+      have hPkSeedEq : pk.pkSeed = sk.pkSeed := rfl
+      rw [hPkSeedEq, hP₂.1, hLp] at hForged
+      unfold runFrontierStackLoop collapseFrontierStack at hForged
+      exact ⟨hCLEq, of_decide_eq_true hForged⟩
+    let endVec := List.replicate p.frontierLen (p.winternitzW - 1)
+    have hEndLen : endVec.length = p.frontierLen := List.length_replicate
+    have hEndSum : endVec.sum = p.frontierLen * (p.winternitzW - 1) :=
+      sum_replicate_eq p.frontierLen (p.winternitzW - 1)
+    have hW2 : 2 ≤ p.winternitzW := by
+      cases p.winternitzW with
+      | zero => simp at hSlack
+      | succ w' => cases w' with
+        | zero => simp at hSlack
+        | succ _ => omega
+    have hEndBnd : ∀ a ∈ endVec, a < p.winternitzW := fun a ha => by
+      rw [(List.mem_replicate.mp ha).2]; omega
+    have hNeEnd : offs₂ ≠ endVec := fun hEq => by
+      have hS := hP₂.2.2.2.2.2.1
+      rw [hEq, hEndSum] at hS; omega
+    let idxWit := findSmallerOffsetIdx offs₂ endVec
+      (hP₂.2.2.2.2.1.trans hEndLen.symm) (by rw [hP₂.2.2.2.2.2.1, hEndSum]; exact Nat.le_of_lt hSlack) hNeEnd
+    extractOffsetDiffBreak H sk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 tr₂ endVec offs₂ sig₂.chainValues
+      (by decide) (fun hLf => by subst hLf; have := hP₂.2.2.1; unfold AntichainTree.size at this; omega)
+      hP₂.2.1 (hEndLen.trans hP₂.2.2.1.symm) (hP₂.2.2.2.2.1.trans hP₂.2.2.1.symm)
+      (hVer.1.trans hP₂.2.2.1.symm) hEndBnd idxWit.1 idxWit.2 hVer.2
+
+/-- Unified `≤ 1`-query (`0` or `1` signing query) constructive `FrontierSumFts` EUF-CMA extractor. -/
+def extractCompact1122AtMostOneQueryBreak (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (hL : 2 ≤ p.frontierLen) (hSlack : p.targetSum < p.frontierLen * (p.winternitzW - 1))
+    (sk : FrontierSecretKey)
+    (priorQuery : Option (BitVec 256 × UInt16 × List UInt8 × FrontierSignature))
+    (hPriorHonest : match priorQuery with
+      | none => True
+      | some (hedge₁, ctr₁, m₁, sig₁) => signFrontierFts H p sk hedge₁ ctr₁ m₁ = some sig₁)
+    (mStar : List UInt8) (sigStar : FrontierSignature)
+    (hFresh : match priorQuery with
+      | none => True
+      | some (_, _, m₁, _) => mStar ≠ m₁)
+    (hForged : verifyFrontierFts H p (deriveFrontierPk H p sk) mStar sigStar = true) :
+    FrontierForgeryBreak H sk.pkSeed sk.skSeed p.winternitzW :=
+  match priorQuery, hPriorHonest, hFresh with
+  | none, _, _ => extractCompact1122ZeroQueryBreak H p hSlack sk mStar sigStar hForged
+  | some (hedge₁, ctr₁, m₁, sig₁), hHon, hFr =>
+    extractCompact1122ForgeryBreak H p hL sk hedge₁ ctr₁ m₁ sig₁ hHon mStar sigStar hFr hForged
+
+/-- Classification of `FrontierForgeryBreak` into its three ROM/QROM reduction events:
+    1. `isMsgOrRankTcr`: `TAG_MSG_PRE` TCR collision or `TAG_HMSG` target-rank collision,
+    2. `isTreeOrChainCollision`: `TAG_MERGE` Merkle node collision or `TAG_CHAIN` step second-preimage/collision,
+    3. `isOneWayPreimage`: `TAG_CHAIN` chain-step inversion at a strictly smaller digit `d'_i < d_i`
+       or `TAG_MERGE` unrevealed-subtree preimage. -/
+def FrontierForgeryBreak.isMsgOrRankTcr {H : FrontierHashSuite} {pkS skS : BitVec 256} {w : Nat} :
+    FrontierForgeryBreak H pkS skS w → Bool
+  | .prehashTcrCollision .. | .targetIndexCollision .. => true
+  | _ => false
+
+def FrontierForgeryBreak.isTreeOrChainCollision {H : FrontierHashSuite} {pkS skS : BitVec 256} {w : Nat} :
+    FrontierForgeryBreak H pkS skS w → Bool
+  | .merkleCollision .. | .chainStepCollision .. => true
+  | _ => false
+
+def FrontierForgeryBreak.isOneWayPreimage {H : FrontierHashSuite} {pkS skS : BitVec 256} {w : Nat} :
+    FrontierForgeryBreak H pkS skS w → Bool
+  | .unrevealedSubtreeMergePreimage .. | .chainPreimageInversion .. => true
+  | _ => false
+
+theorem FrontierForgeryBreak.exhausts_three_events {H : FrontierHashSuite}
+    {pkS skS : BitVec 256} {w : Nat} (b : FrontierForgeryBreak H pkS skS w) :
+    b.isMsgOrRankTcr = true ∨ b.isTreeOrChainCollision = true ∨ b.isOneWayPreimage = true := by
+  cases b <;> simp [FrontierForgeryBreak.isMsgOrRankTcr,
+    FrontierForgeryBreak.isTreeOrChainCollision, FrontierForgeryBreak.isOneWayPreimage]
+
+/-- Closed `≤ 1`-query `FrontierSumFts` (`Compact1122` / `Full256Bit`) EUF-CMA outcome record. -/
+structure FrontierOneUseEufCmaOutcome where
+  sk : FrontierSecretKey
+  prior : Option (BitVec 256 × UInt16 × List UInt8)
+  msgStar : List UInt8
+  sigStar : FrontierSignature
+
+def frontierOneUseEufCmaWin (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (o : FrontierOneUseEufCmaOutcome) : Bool :=
+  let fresh := match o.prior with
+    | none => true
+    | some (hg, ctr, m₁) =>
+      match signFrontierFts H p o.sk hg ctr m₁ with
+      | none => true
+      | some _ => decide (o.msgStar ≠ m₁)
+  fresh && verifyFrontierFts H p (deriveFrontierPk H p o.sk) o.msgStar o.sigStar
+
+theorem frontierOneUseEufCmaWin_none (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (sk : FrontierSecretKey) (msgStar : List UInt8) (sigStar : FrontierSignature) :
+    frontierOneUseEufCmaWin H p ⟨sk, none, msgStar, sigStar⟩ =
+      verifyFrontierFts H p (deriveFrontierPk H p sk) msgStar sigStar := by
+  unfold frontierOneUseEufCmaWin
+  exact Bool.true_and _
+
+/-- **Closed `Spec.GameBound` `Compact1122` Target-Sum EUF-CMA Reduction (`compact1122_closed_euf_cma_gameBound`)**:
+    Over any finite coin space `Fin n` (supporting both classical ROM and QROM measurement
+    distributions), the `≤ 1`-query `Compact1122` EUF-CMA winning probability is bounded by the
+    sum `εTcr + εCol + εPre` of:
+    - `TAG_MSG_PRE` / `TAG_HMSG` target-collision probability (`εTcr`),
+    - `TAG_MERGE` / `TAG_CHAIN` second-preimage / collision probability (`εCol`), and
+    - `TAG_CHAIN` / `TAG_MERGE` one-way chain-inversion / unrevealed-node preimage probability (`εPre`). -/
+theorem compact1122_closed_euf_cma_gameBound {n : Nat} (hPos : 0 < n)
+    (H : FrontierHashSuite) (game : Fin n → FrontierOneUseEufCmaOutcome)
+    (isTcr isCol isPre : Fin n → Bool)
+    {εTcr εCol εPre : Spec.RatBound}
+    (hClassify : ∀ (ω : Fin n) (brk : FrontierForgeryBreak H (game ω).sk.pkSeed (game ω).sk.skSeed 96),
+      (brk.isMsgOrRankTcr = true → isTcr ω = true) ∧
+      (brk.isTreeOrChainCollision = true → isCol ω = true) ∧
+      (brk.isOneWayPreimage = true → isPre ω = true))
+    (hBTcr : Spec.GameBound (Spec.FinGame.mk hPos isTcr).winProb εTcr)
+    (hBCol : Spec.GameBound (Spec.FinGame.mk hPos isCol).winProb εCol)
+    (hBPre : Spec.GameBound (Spec.FinGame.mk hPos isPre).winProb εPre) :
+    Spec.GameBound
+      (Spec.FinGame.mk hPos (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω))).winProb
+      ((εTcr.add εCol).add εPre) := by
+  refine Spec.event_le_three_reductions
+    (Spec.FinGame.mk hPos (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω)))
+    (Spec.FinGame.mk hPos isTcr) (Spec.FinGame.mk hPos isCol) (Spec.FinGame.mk hPos isPre)
+    (fun ω hWin => ?_) hBTcr hBCol hBPre
+  have hWinU : frontierOneUseEufCmaWin H compact1122Params (game ω) = true := hWin
+  unfold frontierOneUseEufCmaWin at hWinU
+  obtain ⟨hFrBool, hVer⟩ := band_eq_true hWinU
+  have hL : 2 ≤ compact1122Params.frontierLen := by decide
+  have hSl : compact1122Params.targetSum <
+      compact1122Params.frontierLen * (compact1122Params.winternitzW - 1) := by decide
+  have hBrk : Nonempty (FrontierForgeryBreak H (game ω).sk.pkSeed (game ω).sk.skSeed 96) := by
+    cases hPr : (game ω).prior with
+    | none =>
+      exact ⟨extractCompact1122ZeroQueryBreak H compact1122Params hSl (game ω).sk
+        (game ω).msgStar (game ω).sigStar hVer⟩
+    | some q =>
+      obtain ⟨hg, ctr, m₁⟩ := q
+      cases hSign : signFrontierFts H compact1122Params (game ω).sk hg ctr m₁ with
+      | none =>
+        exact ⟨extractCompact1122ZeroQueryBreak H compact1122Params hSl (game ω).sk
+          (game ω).msgStar (game ω).sigStar hVer⟩
+      | some sig₁ =>
+        rw [hPr, hSign] at hFrBool
+        exact ⟨extractCompact1122ForgeryBreak H compact1122Params hL (game ω).sk hg ctr m₁ sig₁
+          hSign (game ω).msgStar (game ω).sigStar (of_decide_eq_true hFrBool) hVer⟩
+  obtain ⟨brk⟩ := hBrk
+  obtain ⟨c1, c2, c3⟩ := hClassify ω brk
+  rcases brk.exhausts_three_events with e1 | e2 | e3
+  · exact .inl (c1 e1)
+  · exact .inr (.inl (c2 e2))
+  · exact .inr (.inr (c3 e3))
+
+/-- Concrete `Keccak-f[1600]` `cshake256_framed_xof` lifting of `FrontierForgeryBreak` under
+    `cshakeFrontierHashSuite p`: every collision case yields distinct length-framed `cSHAKE256`
+    preimages with equal 256-bit sponge digests (under `v, step < 2^64`, `msg.length < 2^64`). -/
+theorem compact1122_cshake256_concrete_break_lift (p : FrontierFtsParams) (pkSeed skSeed : BitVec 256)
+    (brk : FrontierForgeryBreak (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW) :
+    (match brk with
+     | .prehashTcrCollision pkR m₁ m₂ _ _ =>
+       m₁.length < 256 ^ 8 → m₂.length < 256 ^ 8 →
+         ftsPrehashFrames p pkSeed pkR m₂ ≠ ftsPrehashFrames p pkSeed pkR m₁ ∧
+         evalFtsCshake256_32 ftsTagMsgPre (ftsPrehashFrames p pkSeed pkR m₂) =
+           evalFtsCshake256_32 ftsTagMsgPre (ftsPrehashFrames p pkSeed pkR m₁)
+     | .targetIndexCollision pkR r₁ d₁ c₁ r₂ d₂ c₂ _ _ =>
+       ftsSqueezeRankFrames p pkSeed pkR r₂ d₂ c₂ ≠ ftsSqueezeRankFrames p pkSeed pkR r₁ d₁ c₁ ∧
+       evalFtsCshake256_32 ftsTagHmsg (ftsSqueezeRankFrames p pkSeed pkR r₂ d₂ c₂) =
+         evalFtsCshake256_32 ftsTagHmsg (ftsSqueezeRankFrames p pkSeed pkR r₁ d₁ c₁)
+     | .merkleCollision v l₁ r₁ l₂ r₂ _ _ =>
+       v < 256 ^ 8 →
+         ftsMergeNodeFrames p pkSeed v l₁ r₁ ≠ ftsMergeNodeFrames p pkSeed v l₂ r₂ ∧
+         evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v l₁ r₁) =
+           evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v l₂ r₂)
+     | .chainStepCollision v step x₁ x₂ _ _ =>
+       v < 256 ^ 8 → step < 256 ^ 8 →
+         ftsChainStepFrames p pkSeed v step x₁ ≠ ftsChainStepFrames p pkSeed v step x₂ ∧
+         evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v step x₁) =
+           evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v step x₂)
+     | .unrevealedSubtreeMergePreimage t v lEnd rEnd _ _ _ =>
+       evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v lEnd rEnd) =
+         honestNodeBase (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW t v
+     | .chainPreimageInversion t v revStep pre _ _ _ =>
+       evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v (revStep - 1) pre) =
+         chainAdvance (cshakeFrontierHashSuite p) pkSeed v 0 revStep
+           (honestNodeBase (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW t v)) := by
+  cases brk with
+  | prehashTcrCollision pkR m₁ m₂ hNe hEq =>
+    intro hm₁ hm₂
+    exact ⟨fun hF => hNe (ftsPrehashFrames_injective p hm₂ hm₁ hF).2.2, hEq⟩
+  | targetIndexCollision pkR r₁ d₁ c₁ r₂ d₂ c₂ hDiff hToNat =>
+    refine ⟨fun hF => ?_, BitVec.eq_of_toNat_eq hToNat⟩
+    obtain ⟨hc, _, _, hr, hd⟩ := ftsSqueezeRankFrames_injective p hF
+    rcases hDiff with h | h | h
+    · exact h hr
+    · exact h hd
+    · exact h hc
+  | merkleCollision v l₁ r₁ l₂ r₂ hDiff hEq =>
+    intro hv
+    refine ⟨fun hF => ?_, hEq⟩
+    obtain ⟨_, _, hl, hr⟩ := ftsMergeNodeFrames_injective p hv hv hF
+    rcases hDiff with h | h
+    · exact h hl
+    · exact h hr
+  | chainStepCollision v step x₁ x₂ hNe hEq =>
+    intro hv hs
+    exact ⟨fun hF => hNe (ftsChainStepFrames_injective p hv hs hv hs hF).2.2.2, hEq⟩
+  | unrevealedSubtreeMergePreimage _ _ _ _ _ _ hEq => exact hEq
+  | chainPreimageInversion _ _ _ _ _ _ hEq => exact hEq
+
 /-! ## §2. `RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`) -/
 
 structure EpochKeyLink where
@@ -1463,35 +2003,35 @@ structure RotatedEpochVote where
   deriving DecidableEq, Repr
 abbrev EpochVoteHasher := BitVec 256 → UInt64 → BitVec 256 → BitVec 256 → List UInt8
 
-/-- Exact 104-byte big-endian `EpochKeyLink::message` preimage (`crates/qsag-fts/src/frontier.rs:686-699`). -/
+/-- Exact length-framed `EpochKeyLink::message` preimage (`crates/qsag-fts/src/frontier.rs:649-661`):
+    `cshake256_framed_xof("QSAG.FTS.EPOCH.VOTE.V1", &[chain_id, &epoch.to_be_bytes(), vote_digest, &next_epoch_pk_root])`. -/
 def encodeEpochVoteInput (chainId : BitVec 256) (ep : UInt64) (voteDigest nextPkRoot : BitVec 256) : List UInt8 :=
-  bv256BytesBE chainId ++ u64BytesBE ep ++ bv256BytesBE voteDigest ++ bv256BytesBE nextPkRoot
-
-private theorem append_eq_of_eq_length {α : Type} :
-    ∀ {xs₁ xs₂ ys₁ ys₂ : List α}, xs₁.length = xs₂.length → xs₁ ++ ys₁ = xs₂ ++ ys₂ → xs₁ = xs₂ ∧ ys₁ = ys₂
-  | [], [], _, _, _, h => ⟨rfl, h⟩
-  | _ :: _, [], _, _, hL, _ => nomatch hL
-  | [], _ :: _, _, _, hL, _ => nomatch hL
-  | a₁ :: xs₁, a₂ :: xs₂, ys₁, ys₂, hL, hEq => by
-    obtain ⟨rfl, hTail⟩ := List.cons.inj hEq
-    obtain ⟨hX, hY⟩ := append_eq_of_eq_length (Nat.succ.inj hL) hTail
-    exact ⟨congrArg (a₁ :: ·) hX, hY⟩
+  encodeCshakeFrames [bv256BytesBE chainId, u64BytesBE ep, bv256BytesBE voteDigest, bv256BytesBE nextPkRoot]
 
 theorem encodeEpochVoteInput_injective {c₁ c₂ : BitVec 256} {ep₁ ep₂ : UInt64}
     {d₁ d₂ r₁ r₂ : BitVec 256}
     (hEq : encodeEpochVoteInput c₁ ep₁ d₁ r₁ = encodeEpochVoteInput c₂ ep₂ d₂ r₂) :
     c₁ = c₂ ∧ ep₁ = ep₂ ∧ d₁ = d₂ ∧ r₁ = r₂ := by
-  unfold encodeEpochVoteInput at hEq
-  simp only [List.append_assoc] at hEq
-  have hLen32 : ∀ x : BitVec 256, (bv256BytesBE x).length = 32 := fun x => fixedBytesBE_length 32 x.toNat
-  have hLen8 : ∀ x : UInt64, (u64BytesBE x).length = 8 := fun x => fixedBytesBE_length 8 x.toNat
-  obtain ⟨hcB, hRest1⟩ := append_eq_of_eq_length ((hLen32 c₁).trans (hLen32 c₂).symm) hEq
-  obtain ⟨hepB, hRest2⟩ := append_eq_of_eq_length ((hLen8 ep₁).trans (hLen8 ep₂).symm) hRest1
-  obtain ⟨hdB, hrB⟩ := append_eq_of_eq_length ((hLen32 d₁).trans (hLen32 d₂).symm) hRest2
+  have hLen8 : ∀ x : UInt64, (u64BytesBE x).length < 256 ^ 8 := fun x => by
+    rw [u64BytesBE, fixedBytesBE_length]; decide +kernel
+  have hL := encodeCshakeFrames_injective
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl
+        · exact len_bv256_lt_u64 c₁
+        · exact hLen8 ep₁
+        · exact len_bv256_lt_u64 d₁
+        · exact len_bv256_lt_u64 r₁)
+    (by intro f hf; simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+        rcases hf with rfl | rfl | rfl | rfl
+        · exact len_bv256_lt_u64 c₂
+        · exact hLen8 ep₂
+        · exact len_bv256_lt_u64 d₂
+        · exact len_bv256_lt_u64 r₂) hEq
+  simp only [List.cons.injEq, and_true] at hL
   have h64 : (2 : Nat) ^ 64 = 256 ^ 8 := by decide +kernel
-  have hepNat := fixedBytesBE_injective (h64 ▸ ep₁.toBitVec.isLt) (h64 ▸ ep₂.toBitVec.isLt) hepB
-  exact ⟨bv256BytesBE_injective hcB, UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hepNat),
-    bv256BytesBE_injective hdB, bv256BytesBE_injective hrB⟩
+  have hepNat := fixedBytesBE_injective (h64 ▸ ep₁.toBitVec.isLt) (h64 ▸ ep₂.toBitVec.isLt) hL.2.1
+  exact ⟨bv256BytesBE_injective hL.1, UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq hepNat),
+    bv256BytesBE_injective hL.2.2.1, bv256BytesBE_injective hL.2.2.2⟩
 
 /-- Real `cSHAKE256("QSAG.FTS.EPOCH.VOTE.V1")` 32-byte vote message hasher matching `EpochKeyLink::message`. -/
 def cshakeEpochVoteHasher : EpochVoteHasher := fun chainId ep voteDigest nextPkRoot =>
@@ -2027,12 +2567,22 @@ attribute [local irreducible]
 set_option maxRecDepth 32768
 
 #verify_constructive Qsag.compact1122_rank_domain_gt_2pow256
+  Qsag.fts_cshake_encodings_ne
   Qsag.fts_cshake_domains_disjoint
+  Qsag.encodeCshakeFrames_injective
+  Qsag.ftsPrehashFrames_injective
+  Qsag.ftsSqueezeRankFrames_injective
+  Qsag.ftsPrfRandFrames_injective
+  Qsag.ftsChainStepFrames_injective
+  Qsag.ftsMergeNodeFrames_injective
   Qsag.encodeEpochVoteInput_injective
   Qsag.unrankFrontierFts_bijective
   Qsag.unrankFrontierFts_injective
   Qsag.verifyFrontierFts_signFrontierFts
+  Qsag.compact1122_target_sum_antichain
   Qsag.compact1122_one_time_euf_cma_reduction
+  Qsag.compact1122_closed_euf_cma_gameBound
+  Qsag.compact1122_cshake256_concrete_break_lift
   Qsag.rotatedEpochVote_forward_secure_chain
   Qsag.rotatedEpochVote_cshake_chain_reduction
   Qsag.corduroy_real_profiles_audit

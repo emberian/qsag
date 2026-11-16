@@ -96,9 +96,10 @@ const CAVEAT_OPTIONS: &[&str] = &[
 
 fn map_cap_err(err: CapabilityError) -> CliError {
     match err {
-        CapabilityError::Malformed | CapabilityError::InvalidTag => {
-            CliError::new(exit::VERIFY_FAILED, format!("capability verification failed: {err:?}"))
-        }
+        CapabilityError::Malformed | CapabilityError::InvalidTag => CliError::new(
+            exit::VERIFY_FAILED,
+            format!("capability verification failed: {err:?}"),
+        ),
         CapabilityError::TooManyCaveats
         | CapabilityError::Denied
         | CapabilityError::MissingDischarge
@@ -369,11 +370,7 @@ fn macaroon_attenuate(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn macaroon_bind_discharge(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(
-        raw,
-        &["parent", "discharge", "out"],
-        &["json", "help"],
-    )?;
+    let args = Args::parse(raw, &["parent", "discharge", "out"], &["json", "help"])?;
     if args.flag("help") {
         print!("{MACAROON_HELP}");
         return Ok(());
@@ -382,9 +379,7 @@ fn macaroon_bind_discharge(raw: &[String]) -> Result<(), CliError> {
     let parent = load_macaroon_token(args.require("parent")?)?;
     let mut discharge = load_macaroon_token(args.require("discharge")?)?;
     let out_path = args.require("out")?;
-    parent
-        .bind_discharge(&mut discharge)
-        .map_err(map_cap_err)?;
+    parent.bind_discharge(&mut discharge).map_err(map_cap_err)?;
     let _ = save_macaroon_token(out_path, &discharge)?;
     let summary = Json::object(vec![
         ("parent_identifier", Json::hex(parent.identifier())),
@@ -505,37 +500,58 @@ pub fn run_biscuit(raw: &[String]) -> Result<(), CliError> {
 }
 
 fn save_step_key(path: &str, step: &PqBiscuitStepKey) -> Result<(), CliError> {
+    let mut vault = Vault::acquire(path, true)?;
+    let enrollment = Secret32::new(os_random_32()?);
     let raw = step.to_secret_bytes();
     let hex = crate::codec::to_hex_zeroizing(&raw);
     let hex_str = String::from_utf8(hex.0.clone())
         .map_err(|_| CliError::state("encoding step key hex failed"))?;
-    let doc = Json::object(vec![
+    let mut doc = Json::object(vec![
         ("format", Json::str(BISCUIT_STEP_SK_FORMAT)),
+        ("enrollment_nonce", Json::hex(&enrollment[..16])),
         ("spent", Json::Bool(false)),
         ("hop_index", Json::num(step.hop_index())),
         ("pk_root", Json::hex(step.pk_root())),
         ("secret_key", Json::Str(hex_str)),
     ]);
+    vault.set_key_material(&crate::envelope::open(&doc, None)?);
+    vault.bind(&mut doc)?;
+    vault.seal(&mut doc)?;
     let bytes = ZeroizingBuf::new(doc.to_pretty().into_bytes());
     write_new(path, &bytes, true)
 }
 
 fn consume_step_key(path: &str) -> Result<PqBiscuitStepKey, CliError> {
+    // Keep the inode-bound vault lock from the initial read through durable
+    // retirement: competing attenuate/seal processes must not spend one key twice.
+    let mut vault = Vault::acquire(path, false)?;
     let doc = load_json_checked(path, BISCUIT_STEP_SK_FORMAT)?;
     if matches!(doc.get("spent"), Some(Json::Bool(true))) {
         return Err(CliError::state(
             "PqBiscuit step key was already spent (one-time Compact1122 key cannot be reused)",
         ));
     }
-    let raw = from_hex(doc.field_str("secret_key")?)?;
-    let step = PqBiscuitStepKey::from_secret_bytes(&raw).map_err(map_cap_err)?;
+    let opened = crate::envelope::open(&doc, None)?;
+    vault.set_key_material(&opened);
+    vault.authenticate(&doc)?;
+    let step = PqBiscuitStepKey::from_secret_bytes(opened.secret_key()?).map_err(map_cap_err)?;
     // Retire and wipe the one-time step key on disk BEFORE signing/releasing the hop!
-    let tombstone = Json::object(vec![
+    let mut tombstone = Json::object(vec![
         ("format", Json::str(BISCUIT_STEP_SK_FORMAT)),
+        (
+            "enrollment_nonce",
+            Json::str(doc.field_str("enrollment_nonce")?),
+        ),
+        ("secret_key", Json::str("")),
         ("spent", Json::Bool(true)),
+        ("retired", Json::Bool(true)),
         ("hop_index", Json::num(step.hop_index())),
         ("pk_root", Json::hex(step.pk_root())),
     ]);
+    vault.bind(&mut tombstone)?;
+    // Advance the companion MAC before replacing the secret. Any interrupted
+    // update fails closed, as does restoring only the old secret file.
+    vault.seal(&mut tombstone)?;
     replace(Path::new(path), tombstone.to_pretty().as_bytes(), || Ok(()))
         .map_err(|e| CliError::io("retiring one-time biscuit step key", e))?;
     Ok(step)
@@ -547,7 +563,10 @@ fn save_biscuit_token(path: &str, token: &PqBiscuit) -> Result<Json, CliError> {
         ("format", Json::str(BISCUIT_TOKEN_FORMAT)),
         ("token_id", Json::hex(token.token_id())),
         ("audience", Json::hex(token.audience())),
-        ("authority_leaf_index", Json::num(token.authority_leaf_index())),
+        (
+            "authority_leaf_index",
+            Json::num(token.authority_leaf_index()),
+        ),
         ("hops", Json::num(token.blocks().len())),
         ("sealed", Json::Bool(token.is_sealed())),
         ("request_bound", Json::Bool(token.is_request_bound())),
@@ -965,4 +984,63 @@ fn biscuit_verify(raw: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn biscuit_step_retirement_serializes_competing_spenders_and_rejects_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "qsag-biscuit-step-{}-{}",
+            std::process::id(),
+            to_hex(&os_random_32().unwrap()),
+        ));
+        crate::persist::private_dir(root.to_str().unwrap(), true).unwrap();
+        let path = root.join("step.json");
+        let path = path.to_str().unwrap();
+        let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+        let mut authority =
+            PqBiscuitAuthorityKey::keygen([31; 32], [32; 32], 1, &CpuReferenceBackend).unwrap();
+        let (_, step) = authority
+            .mint(
+                &dp,
+                [33; 32],
+                [34; 32],
+                &[],
+                [35; 32],
+                &[36; 32],
+                &CpuReferenceBackend,
+            )
+            .unwrap();
+        save_step_key(path, &step).unwrap();
+        let snapshot = std::fs::read(path).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        let successes = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        consume_step_key(path).is_ok()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(successes, 1);
+        let tombstone = std::fs::read_to_string(path).unwrap();
+        assert!(tombstone.contains("\"retired\": true"));
+        assert!(!tombstone.contains(&to_hex(&step.to_secret_bytes())));
+        std::fs::write(path, snapshot).unwrap();
+        assert!(
+            consume_step_key(path).is_err(),
+            "the companion state must reject a restored step key"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

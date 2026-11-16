@@ -107,7 +107,7 @@
         "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1599 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1574 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -231,8 +231,10 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1849 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1896 (path)"
+        "crates/qsag-quorum/src/access.rs:447 (path)",
+        "crates/qsag-quorum/src/access.rs:474 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1819 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1866 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -252,8 +254,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1622 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1796 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1594 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1766 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -374,7 +376,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/belt_latch.rs:1050 (path)"
+        "crates/qsag-core/src/belt_latch.rs:1126 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -583,7 +585,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-cred/src/threshold_mldsa.rs:1663 (assoc)"
+        "crates/qsag-cred/src/threshold_mldsa.rs:1959 (assoc)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -615,7 +617,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-cred/src/threshold_mldsa.rs:2166 (method-lexical)"
+        "crates/qsag-cred/src/threshold_mldsa.rs:2461 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
@@ -636,7 +638,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-cred/src/threshold_mldsa.rs:1691 (method-lexical)"
+        "crates/qsag-cred/src/threshold_mldsa.rs:1987 (method-lexical)"
       ],
       "same_named_production_fns": [],
       "status": "direct-lexical",
@@ -656,8 +658,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-cred/src/fips204_ntt.rs:900 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1370 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1397 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1348 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1375 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -677,8 +679,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-cred/src/fips204_ntt.rs:901 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1371 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1398 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1349 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1376 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -697,12 +699,12 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-cred/src/fips204_ntt.rs:1039 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1019 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-cred/src/fips204_ntt.rs:1011 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:991 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -735,7 +737,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:292 (path)"
+        "crates/qsag-core/src/fips205.rs:293 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -756,7 +758,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:288 (path)"
+        "crates/qsag-core/src/fips205.rs:289 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -794,7 +796,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:304 (path)"
+        "crates/qsag-core/src/fips205.rs:305 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -815,7 +817,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/fips205.rs:292 (path)"
+        "crates/qsag-core/src/fips205.rs:293 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -836,7 +838,7 @@
       "lean_weld_modules": [],
       "production_call_sites": [],
       "same_named_production_fns": [
-        "crates/qsag-core/src/fips205.rs:1273"
+        "crates/qsag-core/src/fips205.rs:1033"
       ],
       "status": "proof-only",
       "test_call_sites": [],
@@ -1164,7 +1166,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-fts/src/parallel_mpc.rs:1138 (path)",
+        "crates/qsag-fts/src/parallel_mpc.rs:1147 (path)",
         "crates/qsag-fts/src/sign_session.rs:146 (path)"
       ],
       "same_named_production_fns": [],
@@ -1664,8 +1666,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [],
       "same_named_production_fns": [
-        "crates/qsag-agg/src/sponge.rs:541",
-        "crates/qsag-core/src/sponge/keccak.rs:699"
+        "crates/qsag-agg/src/sponge.rs:1108",
+        "crates/qsag-core/src/sponge/keccak.rs:670"
       ],
       "status": "proof-only",
       "test_call_sites": [],
@@ -1694,7 +1696,7 @@
       "same_named_production_fns": [
         "crates/qsag-accel/src/keccak.rs:32",
         "crates/qsag-agg/src/sponge.rs:38",
-        "crates/qsag-core/src/sponge/keccak.rs:79"
+        "crates/qsag-core/src/sponge/keccak.rs:50"
       ],
       "status": "reached",
       "test_call_sites": [],
@@ -1742,14 +1744,14 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:802 (path)"
+        "crates/qsag-addr/src/lib.rs:832 (path)"
       ],
       "same_named_production_fns": [
-        "crates/qsag-core/src/sponge/keccak.rs:709"
+        "crates/qsag-core/src/sponge/keccak.rs:680"
       ],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1700 (path)",
+        "crates/qsag-addr/src/lib.rs:1730 (path)",
         "crates/qsag-hd/tests/hybrid_framing.rs:29 (path)"
       ],
       "verified_crate_tests": [
@@ -1818,8 +1820,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-fts/src/release_gate.rs:183 (assoc)",
-        "crates/qsag-policy/src/lib.rs:1027 (path)",
-        "crates/qsag-quorum/src/party_node.rs:1500 (path)"
+        "crates/qsag-policy/src/lib.rs:1074 (path)",
+        "crates/qsag-quorum/src/party_node.rs:1575 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2221,7 +2223,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/party_node.rs:896 (path)"
+        "crates/qsag-quorum/src/party_node.rs:932 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2239,7 +2241,7 @@
       "lean_proof_modules": [],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/party_node.rs:905 (path)"
+        "crates/qsag-quorum/src/party_node.rs:941 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2260,8 +2262,8 @@
       "production_call_sites": [
         "crates/qsag-core/src/rss256.rs:1577 (path)",
         "crates/qsag-core/src/rss256.rs:1656 (path)",
-        "crates/qsag-quorum/src/party_node.rs:856 (path)",
-        "crates/qsag-quorum/src/party_node.rs:860 (path)"
+        "crates/qsag-quorum/src/party_node.rs:892 (path)",
+        "crates/qsag-quorum/src/party_node.rs:896 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2489,7 +2491,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-core/src/baggy.rs:1754 (path)"
+        "crates/qsag-core/src/baggy.rs:1473 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2538,7 +2540,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:302 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:303 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2587,13 +2589,13 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1360 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1341 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:3227 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:3236 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:3195 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:3204 (path)"
       ],
       "verified_crate_tests": []
     },
@@ -2845,8 +2847,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-policy/src/durable.rs:656 (path)",
-        "crates/qsag-policy/src/lib.rs:474 (path)",
-        "crates/qsag-policy/src/lib.rs:1372 (path)"
+        "crates/qsag-policy/src/lib.rs:519 (path)",
+        "crates/qsag-policy/src/lib.rs:1471 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2927,16 +2929,16 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-addr/src/lib.rs:18 (re-export)",
-        "crates/qsag-addr/src/lib.rs:687 (call)",
-        "crates/qsag-addr/src/lib.rs:695 (call)",
-        "crates/qsag-addr/src/lib.rs:718 (call)",
-        "crates/qsag-addr/src/lib.rs:787 (call)"
+        "crates/qsag-addr/src/lib.rs:717 (call)",
+        "crates/qsag-addr/src/lib.rs:725 (call)",
+        "crates/qsag-addr/src/lib.rs:748 (call)",
+        "crates/qsag-addr/src/lib.rs:817 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1701 (call)",
-        "crates/qsag-addr/src/lib.rs:1713 (call)"
+        "crates/qsag-addr/src/lib.rs:1731 (call)",
+        "crates/qsag-addr/src/lib.rs:1743 (call)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2952,8 +2954,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-policy/src/lib.rs:200 (path)",
-        "crates/qsag-policy/src/lib.rs:790 (path)"
+        "crates/qsag-policy/src/lib.rs:244 (path)",
+        "crates/qsag-policy/src/lib.rs:837 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -2975,9 +2977,9 @@
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1744 (call)",
-        "crates/qsag-addr/src/lib.rs:1758 (call)",
-        "crates/qsag-addr/src/lib.rs:1761 (call)"
+        "crates/qsag-addr/src/lib.rs:1774 (call)",
+        "crates/qsag-addr/src/lib.rs:1788 (call)",
+        "crates/qsag-addr/src/lib.rs:1791 (call)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -2994,8 +2996,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-addr/src/lib.rs:18 (re-export)",
-        "crates/qsag-addr/src/lib.rs:728 (call)",
-        "crates/qsag-addr/src/lib.rs:794 (call)"
+        "crates/qsag-addr/src/lib.rs:758 (call)",
+        "crates/qsag-addr/src/lib.rs:824 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3021,7 +3023,7 @@
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1742 (call)"
+        "crates/qsag-addr/src/lib.rs:1772 (call)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3807,19 +3809,17 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:399 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:506 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:521 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1305 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1808 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1903 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1953 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1973 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:2263 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:400 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:507 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:522 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1286 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1778 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1873 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1923 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1943 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2231 (path)"
       ],
-      "same_named_production_fns": [
-        "crates/qsag-core/src/wipe.rs:114"
-      ],
+      "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [],
       "verified_crate_tests": [

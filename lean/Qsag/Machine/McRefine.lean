@@ -7,6 +7,7 @@ with the `ElfBinaryVerify` decoders, and relates the final state of the bounded-
 (`runX86` / `runArm64`) to a specification stated over the initial registers and memory only.
 -/
 
+public import Qsag.Machine.McSymbols
 public import Qsag.Machine.ElfVerify
 public import Qsag.Machine.IsaCt
 public import Qsag.Machine.ElfParse
@@ -39,10 +40,6 @@ theorem slice_decode_arm64 {slices : List ElfFuncSlice} {nm : List UInt8}
 
 /-! ## §6. `qsag_asm_ct_eq_32_x86_64`: 32-byte equality, straight-line -/
 
-/-- ASCII bytes of the symbol name `qsag_asm_ct_eq_32_x86_64`. -/
-@[expose] def ctEq32X86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x63, 0x74, 0x5f, 0x65, 0x71, 0x5f, 0x33,
-   0x32, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
 /-- The OR of the four XOR-ed words as the x86 kernel computes it. -/
@@ -57,12 +54,8 @@ theorem ct_eq_32_x86_64_pre_inhabited : ∃ s : X86State, s.pc = 0 ∧ s.halted 
 
 /-! ## §7. `qsag_asm_ct_eq_32_aarch64` -/
 
-/-- ASCII bytes of the symbol name `qsag_asm_ct_eq_32_aarch64`. -/
-@[expose] def ctEq32ArmName : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x63, 0x74, 0x5f, 0x65, 0x71, 0x5f, 0x33,
-   0x32, 0x5f, 0x61, 0x61, 0x72, 0x63, 0x68, 0x36, 0x34]
 
-def ctEq32ArmProg : List (DecodedInstr Arm64Instr) := [
+@[expose] def ctEq32ArmProg : List (DecodedInstr Arm64Instr) := [
   ⟨0, 4, .ldp64 2 3 0 0⟩,
   ⟨4, 4, .ldp64 4 5 1 0⟩,
   ⟨8, 4, .aluReg .eor true 2 2 4 0 0⟩,
@@ -240,10 +233,6 @@ theorem u64_ne_zero_of_toNat_succ (c : UInt64) (k : Nat) (hc : c.toNat = k + 1) 
 
 theorem u64_one_sub_one : (1 : UInt64) - 1 = 0 := by decide
 
-/-- ASCII bytes of the symbol name `qsag_asm_ct_memzero_x86_64`. -/
-@[expose] def ctMemzeroX86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x63, 0x74, 0x5f, 0x6d, 0x65, 0x6d, 0x7a,
-   0x65, 0x72, 0x6f, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
 /-- The preconditions of `current_ct_memzero_x86_64_mc_refines` are satisfiable (length 1). -/
@@ -252,10 +241,6 @@ theorem ct_memzero_x86_64_pre_inhabited :
   ⟨⟨0, Bank16.const 1, Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩,
     rfl, rfl, by decide⟩
 
-/-- ASCII bytes of the symbol name `qsag_asm_ct_memzero_aarch64`. -/
-@[expose] def ctMemzeroArmName : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x63, 0x74, 0x5f, 0x6d, 0x65, 0x6d, 0x7a,
-   0x65, 0x72, 0x6f, 0x5f, 0x61, 0x61, 0x72, 0x63, 0x68, 0x36, 0x34]
 
 def ctMemzeroArmProg : List (DecodedInstr Arm64Instr) := [
   ⟨0, 4, .strbPost 31 0 1⟩,
@@ -432,10 +417,6 @@ theorem eqTail_spec (A : UInt64) (hA : A.toNat < 256) :
     show _ / 2147483648 % 4294967296 = 0
     omega
 
-/-- ASCII bytes of the symbol name `qsag_asm_ct_eq_bytes_x86_64`. -/
-@[expose] def ctEqBytesX86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x63, 0x74, 0x5f, 0x65, 0x71, 0x5f, 0x62,
-   0x79, 0x74, 0x65, 0x73, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
 /-- The preconditions of `current_ct_eq_bytes_x86_64_mc_refines` are satisfiable (length 1). -/
@@ -559,12 +540,12 @@ theorem sbb64_self (v : UInt64) (cf : Bool) :
   cases cf <;> decide
 
 /-- Add `2^32 - 1` (the residue of `2^64`) when a carry is pending; report the new carry. -/
-def foldCarry (s : UInt64) (c : Bool) : UInt64 × Bool :=
+@[expose] def foldCarry (s : UInt64) (c : Bool) : UInt64 × Bool :=
   (s + (if c then 0xFFFFFFFF else 0),
     decide (s.toNat + (if c then (0xFFFFFFFF : UInt64) else 0).toNat ≥ 0x10000000000000000))
 
 /-- Branch-free conditional subtraction of `p`, as `add r8, r9; sbb rcx, rcx; and rcx, r9; add`. -/
-def goldCanon (s : UInt64) : UInt64 :=
+@[expose] def goldCanon (s : UInt64) : UInt64 :=
   s + ((if decide (s.toNat + (maskGprWidth false 4294967295).toNat ≥ 0x10000000000000000)
         then 0xFFFFFFFFFFFFFFFF else 0) &&& maskGprWidth false 4294967295)
 
@@ -622,7 +603,7 @@ theorem foldCarry2_mod (s : UInt64) (c : Bool) :
       omega
 
 /-- The value `goldilocks_add_ct` leaves in `rax`. -/
-def goldAddMc (a b : UInt64) : UInt64 :=
+@[expose] def goldAddMc (a b : UInt64) : UInt64 :=
   goldCanon (foldCarry (foldCarry (a + b) (decide (a.toNat + b.toNat ≥ 0x10000000000000000))).1
     (foldCarry (a + b) (decide (a.toNat + b.toNat ≥ 0x10000000000000000))).2).1
 
@@ -642,7 +623,7 @@ theorem goldAddMc_toNat (a b : UInt64) :
     omega
 
 /-- The value `goldilocks_sub_ct` leaves in `rax`. -/
-def goldSubMc (a b : UInt64) : UInt64 :=
+@[expose] def goldSubMc (a b : UInt64) : UInt64 :=
   (goldCanon a - goldCanon b) +
     ((if decide ((goldCanon a).toNat < (goldCanon b).toNat) then 0xFFFFFFFFFFFFFFFF else 0) &&&
       18446744069414584321)
@@ -669,16 +650,8 @@ theorem goldSubMc_toNat (a b : UInt64) :
     rw [decide_eq_false h, ite_eq_right (by decide), hand, UInt64.toNat_add, UInt64.toNat_sub, h0, h64]
     omega
 
-/-- ASCII bytes of the symbol name `qsag_asm_goldilocks_add_ct_x86_64`. -/
-@[expose] def goldAddX86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f,
-   0x63, 0x6b, 0x73, 0x5f, 0x61, 0x64, 0x64, 0x5f, 0x63, 0x74, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
-/-- ASCII bytes of the symbol name `qsag_asm_goldilocks_sub_ct_x86_64`. -/
-@[expose] def goldSubX86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f,
-   0x63, 0x6b, 0x73, 0x5f, 0x73, 0x75, 0x62, 0x5f, 0x63, 0x74, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
 /-! ### Goldilocks multiplication: `2^64 ≡ 2^32 - 1` and `2^96 ≡ -1` reduction of a 128-bit product -/
@@ -757,7 +730,7 @@ theorem mulRed_mod (lo hi : UInt64) :
   omega
 
 /-- The value `goldilocks_mul_ct` leaves in `rax`. -/
-def goldMulMc (a b : UInt64) : UInt64 :=
+@[expose] def goldMulMc (a b : UInt64) : UInt64 :=
   goldCanon (mulRed (UInt64.ofNat ((a.toNat * b.toNat) % 0x10000000000000000))
     (UInt64.ofNat ((a.toNat * b.toNat) / 0x10000000000000000)))
 
@@ -781,10 +754,6 @@ theorem goldMulMc_toNat (a b : UInt64) :
     omega
   rw [h1, h2, h3]
 
-/-- ASCII bytes of the symbol name `qsag_asm_goldilocks_mul_ct_x86_64`. -/
-@[expose] def goldMulX86Name : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f,
-   0x63, 0x6b, 0x73, 0x5f, 0x6d, 0x75, 0x6c, 0x5f, 0x63, 0x74, 0x5f, 0x78, 0x38, 0x36, 0x5f, 0x36, 0x34]
 
 
 /-! ### Goldilocks multiplication on `AArch64` -/
@@ -815,7 +784,7 @@ theorem condNone_and_eps (c : Bool) :
   cases c <;> decide
 
 /-- `x - y`, then subtract `2^32 - 1` when the AArch64 carry flag reports a borrow. -/
-def armSubBorrow (x y : UInt64) : UInt64 :=
+@[expose] def armSubBorrow (x y : UInt64) : UInt64 :=
   (x - y) - (if decide (x.toNat ≥ y.toNat) then 0 else 0xFFFFFFFF)
 
 theorem armSubBorrow_eq (x y : UInt64) : armSubBorrow x y = subBorrow x y := by
@@ -828,7 +797,7 @@ theorem armSubBorrow_eq (x y : UInt64) : armSubBorrow x y = subBorrow x y := by
       ite_eq_right (by decide)]
 
 /-- The word `goldilocks_mul_ct_aarch64` holds in `x2` before the final conditional subtraction. -/
-def goldMulArmPre (a b : UInt64) : UInt64 :=
+@[expose] def goldMulArmPre (a b : UInt64) : UInt64 :=
   addCarry
     (armSubBorrow (UInt64.ofNat ((a.toNat * b.toNat) % 0x10000000000000000))
       (UInt64.ofNat ((a.toNat * b.toNat) / 0x10000000000000000) >>> UInt64.ofNat 32))
@@ -844,7 +813,7 @@ theorem goldMulArmPre_eq (a b : UInt64) :
   rfl
 
 /-- Conditional subtraction of `p` as `adds; adc; sub; and; add`. -/
-def armCanon (s : UInt64) : UInt64 :=
+@[expose] def armCanon (s : UInt64) : UInt64 :=
   s + (if decide (s.toNat + (0xFFFFFFFF : UInt64).toNat ≥ 0x10000000000000000) then 0xFFFFFFFF else 0)
 
 theorem armCanon_toNat (s : UInt64) : (armCanon s).toNat = s.toNat % goldilocksPrime := by
@@ -870,11 +839,6 @@ theorem goldMulArm_toNat (a b : UInt64) :
   rw [armCanon_toNat, goldMulArmPre_eq]
   exact h
 
-/-- ASCII bytes of the symbol name `qsag_asm_goldilocks_mul_ct_aarch64`. -/
-@[expose] def goldMulArmName : List UInt8 :=
-  [0x71, 0x73, 0x61, 0x67, 0x5f, 0x61, 0x73, 0x6d, 0x5f, 0x67, 0x6f, 0x6c, 0x64, 0x69, 0x6c, 0x6f,
-   0x63, 0x6b, 0x73, 0x5f, 0x6d, 0x75, 0x6c, 0x5f, 0x63, 0x74, 0x5f, 0x61, 0x61, 0x72, 0x63, 0x68,
-   0x36, 0x34]
 
 
 /-- The entry preconditions of the Goldilocks refinements are satisfiable (non-canonical inputs
@@ -994,8 +958,8 @@ theorem current_ctEq32X86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r
     (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     (runX86 current_ctEq32X86Prog (k + 28)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨82, ⟨maskGprWidth false (((ctEq32WordX86 m r7 r6 ||| (0 - ctEq32WordX86 m r7 r6)) >>>
-              UInt64.ofNat 63) ^^^ 1), 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 m r4).toNat, ⟨maskGprWidth false (((ctEq32WordX86 m r7 r6 ||| (0 - ctEq32WordX86 m r7 r6)) >>>
+              UInt64.ofNat 63) ^^^ 1), 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, m⟩ := by
   iterate 28
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
@@ -1077,12 +1041,12 @@ theorem current_goldAddX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 
     (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     (runX86 current_goldAddX86Prog (k + 25)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨70, ⟨goldAddMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 m r4).toNat, ⟨goldAddMc r7 r6, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, m⟩ := by
   iterate 25
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_movRR, stepX86_addRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm,
-      stepX86_xorRR, stepX86_ret, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+      stepX86_xorRR, stepX86_ret, b16get_4, b16set_4, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
       sbb32_self, sbb64_self, uint64_evalAdd_eq,
       b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
       b16set_2, b16set_6, b16set_7, b16set_11, b16get_2, b16get_11, b16set_0, b16set_1, b16set_8, b16set_9, b16set_10]
@@ -1152,12 +1116,12 @@ theorem current_goldSubX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 
     (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     (runX86 current_goldSubX86Prog (k + 31)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨94, ⟨goldSubMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 m r4).toNat, ⟨goldSubMc r7 r6, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, m⟩ := by
   iterate 31
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_movRR, stepX86_addRR64, stepX86_subRR64, stepX86_sbbRR, stepX86_andRR,
-      stepX86_movImm, stepX86_xorRR, stepX86_ret, maskGprWidth_true, mask32_xor_self,
+      stepX86_movImm, stepX86_xorRR, stepX86_ret, b16get_4, b16set_4, maskGprWidth_true, mask32_xor_self,
       u64_zero_beq_zero, sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
       b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
       b16set_2, b16set_7, b16set_11, b16get_2, b16get_11, b16set_0, b16set_1, b16set_6, b16set_8, b16set_9, b16set_10]
@@ -1231,12 +1195,12 @@ theorem current_goldMulX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 
     (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
     (runX86 current_goldMulX86Prog (k + 33)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨96, ⟨goldMulMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 m r4).toNat, ⟨goldMulMc r7 r6, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, m⟩ := by
   iterate 33
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
-      stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm, stepX86_xorRR, stepX86_ret,
+      stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm, stepX86_xorRR, stepX86_ret, b16get_4, b16set_4,
       maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero, sbb32_self, sbb64_self,
       uint64_evalAdd_eq, uint64_evalSub_eq,
       b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8, b16get_9,
@@ -1467,7 +1431,7 @@ theorem ctCurrentMemzeroX86_run {r0 r1 r7 : UInt64} {o zf : Bool} (m : UInt64 �
     (hn : r6.toNat = k + 1) :
     (runX86 ctCurrentMemzeroX86Prog (4 * (k + 1) + 13 + j)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨40, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+      ⟨(readMem64 (zeroRange (k + 1) m r7) r4).toNat, ⟨0, 0, 0, r3, r4 + 8, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, zeroRange (k + 1) m r7⟩ := by
   rw [show 4 * (k + 1) + 13 + j = (4 * (k + 1) + (j + 11)) + 2 from by omega]
   iterate 2
@@ -1477,7 +1441,7 @@ theorem ctCurrentMemzeroX86_run {r0 r1 r7 : UInt64} {o zf : Bool} (m : UInt64 �
   rw [ctCurrentMemzeroX86_loop k r6 r7 false true m (j + 11) hn]
   iterate 11
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
-    simp only [stepX86_mfence, stepX86_ret, stepX86_xorRR, mask32_xor_self, u64_zero_beq_zero, b16set_0, b16set_1, b16set_2, b16set_6, b16set_7, b16set_8, b16set_9, b16set_10, b16set_11]
+    simp only [stepX86_mfence, stepX86_ret, b16get_4, b16set_4, stepX86_xorRR, mask32_xor_self, u64_zero_beq_zero, b16set_0, b16set_1, b16set_2, b16set_6, b16set_7, b16set_8, b16set_9, b16set_10, b16set_11]
   exact runX86_halted_fst _ _ _ rfl
 
 end CurrentMemzeroX86
@@ -1600,10 +1564,10 @@ theorem ctCurrentEqBytesX86_run {r0 r1 r6 r7 r8 r9 : UInt64} {cf o zf : Bool} (k
     (hn : r2.toNat = k + 1) :
     (runX86 ctCurrentEqBytesX86Prog (8 * (k + 1) + 15 + j)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨62, ⟨maskGprWidth false (maskGprWidth false (maskGprWidth false (UInt64.ofNat
+      ⟨(readMem64 m r4).toNat, ⟨maskGprWidth false (maskGprWidth false (maskGprWidth false (UInt64.ofNat
             (((maskGprWidth false (eqAcc (k + 1) m r7 r6 0)).toNat + 0x100000000 -
               (maskGprWidth false 1).toNat) % 0x100000000))) >>> UInt64.ofNat (31 % 32)),
-          0, 0, r3, r4, r5, 0, 0, 0, 0,
+          0, 0, r3, r4 + 8, r5, 0, 0, 0, 0,
           0, 0, r12, r13, r14, r15⟩,
         y, false, false, true, dy, true, m⟩ := by
   rw [show 8 * (k + 1) + 15 + j = (8 * (k + 1) + (j + 13)) + 2 from by omega]
@@ -1617,7 +1581,7 @@ theorem ctCurrentEqBytesX86_run {r0 r1 r6 r7 r8 r9 : UInt64} {cf o zf : Bool} (k
   rw [h]
   iterate 13
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
-    simp only [stepX86_subImm32, stepX86_shr32, stepX86_xorRR, stepX86_ret, mask32_xor_self,
+    simp only [stepX86_subImm32, stepX86_shr32, stepX86_xorRR, stepX86_ret, b16get_4, b16set_4, mask32_xor_self,
       u64_zero_beq_zero, b16get_0, b16get_8, b16get_9, b16set_0, b16set_1, b16set_2, b16set_6, b16set_7, b16set_8, b16set_9, b16set_10, b16set_11]
   exact runX86_halted_fst _ _ _ rfl
 
@@ -2726,3 +2690,9 @@ theorem vpclmulBdozMacProg_eq : vpclmulBdozMacProg = [
   ⟨203, 1, .ret⟩
 ] := by rfl
 end Qsag.SydTv
+
+public section
+namespace Qsag
+#export_eqns ctEq32WordArm
+end Qsag
+end

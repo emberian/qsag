@@ -568,8 +568,10 @@ theorem gate_participant_input_or_forgery (profile : RssProduction.Profile)
   obtain ⟨c, hcm, hci⟩ := List.mem_map.mp hids
   rw [submitRecorded_verdict] at ha
   have hq := (submit_accepted _ _ _ _ _ _ _ _ ha).1
+  rw [acceptQuorum.public_eq_1] at hq
   have hvall := (Bool.and_eq_true_iff.mp hq).2
   have hv := List.all_eq_true.mp hvall c hcm
+  rw [verifyCertificate.public_eq_1] at hv
   obtain ⟨hintent, hverify⟩ := Bool.and_eq_true_iff.mp hv
   have he : c.intent = intent profile a := of_decide_eq_true hintent
   rcases candidate_origin profile d commands c hw hst hverify with horigin | hforge
@@ -603,8 +605,10 @@ theorem gate_approved_participant_input_or_forgery (profile : RssProduction.Prof
   obtain ⟨c, hcm, hci⟩ := List.mem_map.mp hids
   rw [submitRecorded_verdict] at ha
   have hq := (submit_accepted _ _ _ _ _ _ _ _ ha).1
+  rw [acceptQuorum.public_eq_1] at hq
   have hvall := (Bool.and_eq_true_iff.mp hq).2
   have hv := List.all_eq_true.mp hvall c hcm
+  rw [verifyCertificate.public_eq_1] at hv
   obtain ⟨hintent, hverify⟩ := Bool.and_eq_true_iff.mp hv
   have he : c.intent = intent profile a := of_decide_eq_true hintent
   rcases candidate_origin profile d commands c hw hst hverify with horigin | hforge

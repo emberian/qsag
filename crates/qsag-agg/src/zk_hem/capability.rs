@@ -29,11 +29,11 @@
 //! - The lineage shares one `token_id`: one revocation entry revokes all of it, and one
 //!   batch cannot contain two members of it.
 //!
-//! This is not offline delegation. A hash chain alone cannot give that here: a prover that
-//! knows enough of the chain to link `final_tag` to an enrolled leaf can also recompute the
-//! chain with fewer caveats, so the leaf has to bind the caveats. Attenuation that needs no
-//! contact with the authority requires each hop to be authenticated by the previous
-//! holder, with a one-time signature verified in the relation or a recursive proof.
+//! For offline delegation, [`DelegatedBearerCapability`] authenticates every attenuation
+//! with an ephemeral Poseidon2 WOTS+C key. [`DelegatedCapabilityRelation`] verifies the
+//! chain and possession of its terminal secret in zero knowledge. Only the initial key
+//! is enrolled; later hops need no contact with the issuer. The registered mode above
+//! remains available for smaller presentation circuits.
 //!
 //! # Relation
 //!
@@ -64,6 +64,11 @@ use super::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm, sponge12, spo
 use crate::field::{GOLDILOCKS_PRIME, Goldilocks};
 use crate::pcs::WhirSecurityRegime;
 use crate::sponge::{POSEIDON2_CONST_IV, cshake256_32, poseidon2_compress12_ff};
+
+mod offline;
+pub use offline::{
+    DelegatedBearerCapability, DelegatedCapabilityRelation, DelegatedPresentationInput,
+};
 
 type F = Goldilocks;
 
@@ -852,6 +857,7 @@ struct HopSlot {
 
 #[derive(Clone)]
 struct CapSlot {
+    delegation: Option<offline::DelegationSlot>,
     token_id: TokenId,
     root_tag: Digest,
     final_tag: Digest,
@@ -881,6 +887,7 @@ impl Drop for CapSlot {
 impl CapSlot {
     fn placeholder(params: CapabilityParams) -> Self {
         Self {
+            delegation: None,
             token_id: [F::ZERO, F::ZERO, F::ZERO, F::ONE],
             root_tag: [F::ZERO; 4],
             final_tag: [F::ZERO; 4],
@@ -933,6 +940,7 @@ impl CapSlot {
             },
         );
         Ok(Self {
+            delegation: None,
             token_id: item.capability.token_id,
             root_tag: item.capability.root_tag,
             final_tag: item.capability.final_tag,
@@ -1238,14 +1246,32 @@ fn slot_gadget(
         // Chained Poseidon2 tag step: `next_tag = sponge12(cur_tag || kind || payload || [CAP_STEP_TAG, hop])[0..4]`.
         let mut step_msg: Vec<Lc> = Vec::with_capacity(11);
         step_msg.extend_from_slice(&cur_tag);
-        step_msg.push(kind_lc);
+        step_msg.push(kind_lc.clone());
         step_msg.extend_from_slice(&payload);
         step_msg.push(Lc::constant(f(CAP_STEP_TAG_DOM)));
         step_msg.push(Lc::constant(f(hop_idx as u64)));
         let stepped = first4_lc(&sponge12(cs, &step_msg));
-        cur_tag = select4(cs, &active, &stepped, &cur_tag);
+        cur_tag = if let Some(delegation) = &slot.delegation {
+            offline::hop_gadget(
+                cs,
+                &active,
+                &cur_tag,
+                &token_id,
+                req_audience,
+                &kind_lc,
+                &payload,
+                hop_idx,
+                &delegation.hops[hop_idx],
+            )
+        } else {
+            select4(cs, &active, &stepped, &cur_tag)
+        };
     }
     enforce_equal4(cs, &cur_tag, &final_tag);
+    if let Some(delegation) = &slot.delegation {
+        let terminal_pk = offline::secret_public_gadget(cs, &delegation.secret);
+        enforce_equal4(cs, &terminal_pk, &final_tag);
+    }
 
     // 2. Enrollment: the leaf binding `(token_id, audience, root_tag, final_tag, hops)` opens
     //    under `issuer_root`.
@@ -1253,9 +1279,13 @@ fn slot_gadget(
     mint_msg.extend_from_slice(&token_id);
     mint_msg.extend_from_slice(req_audience);
     mint_msg.extend_from_slice(&root_tag);
-    mint_msg.extend_from_slice(&final_tag);
-    mint_msg.push(actual_hops);
-    mint_msg.push(Lc::constant(f(CAP_MINT_LEAF_TAG)));
+    if slot.delegation.is_some() {
+        mint_msg.push(Lc::constant(f(offline::MINT_DOMAIN)));
+    } else {
+        mint_msg.extend_from_slice(&final_tag);
+        mint_msg.push(actual_hops);
+        mint_msg.push(Lc::constant(f(CAP_MINT_LEAF_TAG)));
+    }
     let mut mint_node = first4_lc(&sponge12(cs, &mint_msg));
 
     let iss_idx_bits = alloc_bits(cs, slot.issuer_index as u64, params.issuer_depth);

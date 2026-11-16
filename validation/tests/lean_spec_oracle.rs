@@ -14,12 +14,12 @@
 use blstrs::{G1Affine as BlsRefG1Affine, G1Projective as BlsRefG1Proj, Scalar as BlsRefScalar};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT;
 use curve25519_dalek::scalar::Scalar as DalekScalar;
-use fips205::{slh_dsa_shake_128f, slh_dsa_shake_128s};
 use fips205::traits::{KeyGen, SerDes, Verifier};
+use fips205::{slh_dsa_shake_128f, slh_dsa_shake_128s};
 use ghash::universal_hash::{KeyInit, UniversalHash};
 use group::{Group, GroupEncoding};
-use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::SecretKey as K256SecretKey;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::{AbstractExtensionField, AbstractField, Field as P3Field, PrimeField64};
 use p3_goldilocks::Goldilocks as P3Goldilocks;
@@ -35,8 +35,8 @@ use qsag_core::fips205::{
     fips205_prf_msg, format_pure_m_prime, slh_keygen_internal, slh_sign, slh_verify,
     split_digest_indices, try_wots_base16_digits_and_csum,
 };
-use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
 use qsag_core::poseidon2_mpc::hem_poseidon2_compress12_ff;
+use qsag_core::sponge::keccak::{cshake256_xof, keccak_f1600, shake256_xof};
 use qsag_core::sponge::poseidon2::{poseidon2_hash32, poseidon2_perm12};
 use qsag_external_validation::{
     GOLDILOCKS_P, gf2_128_poly87_mul_ref, gf256_poly11b_inv, gf256_poly11b_mul, gfni_affine_byte,
@@ -49,7 +49,9 @@ use qsag_migrate::{
 };
 use serde::Deserialize;
 use sha3::Digest as Sha3Digest;
-use tiny_keccak::{CShake, Hasher as TinyHasher, Keccak as TinyKeccak, Sha3 as TinySha3, Shake as TinyShake, Xof};
+use tiny_keccak::{
+    CShake, Hasher as TinyHasher, Keccak as TinyKeccak, Sha3 as TinySha3, Shake as TinyShake, Xof,
+};
 
 type P3Ext2 = BinomialExtensionField<P3Goldilocks, 2>;
 
@@ -361,7 +363,10 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         ("secp256k1_smul", oracle.secp256k1_smul.len()),
         ("pallas_orchard_smul", oracle.pallas_orchard_smul.len()),
         ("bls12_381_g1_smul", oracle.bls12_381_g1_smul.len()),
-        ("ed25519_clamp_slip0010", oracle.ed25519_clamp_slip0010.len()),
+        (
+            "ed25519_clamp_slip0010",
+            oracle.ed25519_clamp_slip0010.len(),
+        ),
     ] {
         assert!(len > 0, "oracle section {name} must not become vacuous");
     }
@@ -448,8 +453,14 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     }
     for row in &oracle.poseidon2_hash32 {
         let msg = hex::decode(&row.msg_hex).unwrap();
-        assert_eq!(hex::encode(poseidon2_ref::hash32(&msg)), row.poseidon2_hash32_hex);
-        assert_eq!(hex::encode(poseidon2_hash32(&msg)), row.poseidon2_hash32_hex);
+        assert_eq!(
+            hex::encode(poseidon2_ref::hash32(&msg)),
+            row.poseidon2_hash32_hex
+        );
+        assert_eq!(
+            hex::encode(poseidon2_hash32(&msg)),
+            row.poseidon2_hash32_hex
+        );
     }
 
     // 4. Sponges (`SHA3-256`, `SHA3-512`, `Keccak-256`, `SHAKE256`, `cSHAKE256`):
@@ -514,14 +525,8 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     // 5. Wiedemann Binary Tower `GF(2^8)` (`T_3`) <-> Intel `GFNI` AES `0x11B` isomorphism & `Tower128` (`T_7`):
     for row in &oracle.gf256_tower_gfni {
         assert_eq!(TowerGf256(row.a).mul(TowerGf256(row.b)).0, row.t3_mul);
-        assert_eq!(
-            gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.a, 0),
-            row.phi_a
-        );
-        assert_eq!(
-            gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.b, 0),
-            row.phi_b
-        );
+        assert_eq!(gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.a, 0), row.phi_a);
+        assert_eq!(gfni_affine_byte(GFNI_MAT_T3_TO_POLY, row.b, 0), row.phi_b);
         let poly_prod = gf256_poly11b_mul(row.phi_a, row.phi_b);
         assert_eq!(
             gfni_affine_byte(GFNI_MAT_POLY_TO_T3, poly_prod, 0),
@@ -692,14 +697,12 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
     assert_eq!(oracle_sig.len(), slh_dsa_shake_128f::SIG_LEN);
 
     let params_128f = &Fips205Params::SLH_DSA_SHAKE_128F;
-    let (q_sk, q_pk) =
-        slh_keygen_internal(params_128f, &sk_seed, &sk_prf, &pk_seed).unwrap();
+    let (q_sk, q_pk) = slh_keygen_internal(params_128f, &sk_seed, &sk_prf, &pk_seed).unwrap();
     assert_eq!(q_pk.to_bytes(), oracle_pk);
     assert_eq!(q_sk.to_bytes(), oracle_sk);
     let q_sig = slh_sign(params_128f, &msg, &ctx, &q_sk, Some(&opt_rand)).unwrap();
     assert_eq!(
-        q_sig,
-        oracle_sig,
+        q_sig, oracle_sig,
         "Lean 4 Fips205.lean signature must match qsag_core::fips205 byte-for-byte"
     );
     assert!(slh_verify(params_128f, &msg, &q_sig, &ctx, &q_pk));
@@ -793,19 +796,27 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
         q_pk_128s.to_bytes().as_slice(),
         up_pk_128s.clone().into_bytes().as_slice()
     );
-    let q_sig_128s =
-        slh_sign(params_128s, &s_msg, &s_ctx, &q_sk_128s, Some(&s_opt_rand)).unwrap();
+    let q_sig_128s = slh_sign(params_128s, &s_msg, &s_ctx, &q_sk_128s, Some(&s_opt_rand)).unwrap();
     assert_eq!(q_sig_128s.len(), slh_dsa_shake_128s::SIG_LEN);
     let q_sig_128s_arr: [u8; slh_dsa_shake_128s::SIG_LEN] = q_sig_128s.clone().try_into().unwrap();
     assert!(up_pk_128s.verify(&s_msg, &q_sig_128s_arr, &s_ctx));
-    assert!(slh_verify(params_128s, &s_msg, &q_sig_128s, &s_ctx, &q_pk_128s));
+    assert!(slh_verify(
+        params_128s,
+        &s_msg,
+        &q_sig_128s,
+        &s_ctx,
+        &q_pk_128s
+    ));
     let _ = up_sk_128s;
 
     // 9. Ed25519 RFC 8032 clamping & SLIP-0010 scalar normalization (`ActiveMigrationZeroTest.lean`
     //    vs `qsag_migrate::ed25519_ct`, `SpendingScalar`, and `curve25519-dalek`!):
     for row in &oracle.ed25519_clamp_slip0010 {
         let raw_le: [u8; 32] = hex::decode(&row.raw_le_hex).unwrap().try_into().unwrap();
-        let lean_clamped: [u8; 32] = hex::decode(&row.clamped_le_hex).unwrap().try_into().unwrap();
+        let lean_clamped: [u8; 32] = hex::decode(&row.clamped_le_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let lean_norm: [u8; 32] = hex::decode(&row.normalized_mod_l_le_hex)
             .unwrap()
             .try_into()
@@ -823,7 +834,9 @@ fn lean_external_spec_oracle_agrees_with_qsag_rust_and_upstream_crates() {
             .expect("normalized SLIP-0010 scalar must be canonical nonzero mod L");
         assert_eq!(*spend_scalar.as_le_bytes(), lean_norm);
 
-        let dalek_pk = (ED25519_BASEPOINT_POINT * dalek_scalar).compress().to_bytes();
+        let dalek_pk = (ED25519_BASEPOINT_POINT * dalek_scalar)
+            .compress()
+            .to_bytes();
         assert_eq!(public_key_from_clamped_scalar(&rust_clamped), dalek_pk);
         assert_eq!(public_key_from_clamped_scalar(&lean_norm), dalek_pk);
     }
@@ -878,14 +891,8 @@ fn lean_cross_kat_277_records_and_canonical_snapshot_match_rust_and_upstream() {
                     CoreGoldilocks::from_u64_reduced(y_limbs[0]),
                     CoreGoldilocks::from_u64_reduced(y_limbs[1]),
                 );
-                let px = P3Ext2::from_base_slice(&[
-                    p3_gl(x_limbs[0]),
-                    p3_gl(x_limbs[1]),
-                ]);
-                let py = P3Ext2::from_base_slice(&[
-                    p3_gl(y_limbs[0]),
-                    p3_gl(y_limbs[1]),
-                ]);
+                let px = P3Ext2::from_base_slice(&[p3_gl(x_limbs[0]), p3_gl(x_limbs[1])]);
+                let py = P3Ext2::from_base_slice(&[p3_gl(y_limbs[0]), p3_gl(y_limbs[1])]);
                 let (qz, pz) = match parts[1] {
                     "add" => (qx + qy, px + py),
                     "sub" => (qx - qy, px - py),
@@ -1177,8 +1184,8 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     use qsag_core::sponge::keccak::Cshake256Xof;
     use qsag_core::tsw_baggy::{AdrsKind, HashAdrs};
     use qsag_external_validation::spec_ref::{
-        ExactNat, cshake256_framed_32_nist_ref, frontier_fts_cardinalities_ref,
-        octopus_cover_ref, pors_selection_nist_ref,
+        ExactNat, cshake256_framed_32_nist_ref, frontier_fts_cardinalities_ref, octopus_cover_ref,
+        pors_selection_nist_ref,
     };
     use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 
@@ -1224,7 +1231,10 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
         assert!(!pors.octopus_vectors.is_empty());
         for ov in &pors.octopus_vectors {
             let got = octopus_positions(ov.tree_height, &ov.indices).expect("octopus_positions");
-            assert_eq!(Some(got.clone()), octopus_cover_ref(ov.tree_height, &ov.indices));
+            assert_eq!(
+                Some(got.clone()),
+                octopus_cover_ref(ov.tree_height, &ov.indices)
+            );
             let got_arr: Vec<[u32; 2]> = got.into_iter().map(|(h, idx)| [h, idx]).collect();
             assert_eq!(got_arr, ov.positions);
         }
@@ -1234,10 +1244,17 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             let mut xof = Cshake256Xof::new(sv.custom_ascii.as_bytes());
             xof.absorb(&seed);
             let got = pors_fp_select(&p, &mut xof);
-            assert_eq!(got, pors_selection_nist_ref(
-                p.tree_height, p.reveal, p.draw_budget(), p.max_auth_nodes,
-                sv.custom_ascii.as_bytes(), &seed,
-            ));
+            assert_eq!(
+                got,
+                pors_selection_nist_ref(
+                    p.tree_height,
+                    p.reveal,
+                    p.draw_budget(),
+                    p.max_auth_nodes,
+                    sv.custom_ascii.as_bytes(),
+                    &seed,
+                )
+            );
             assert_eq!(got, sv.selected_indices);
             let got_auth_len = got
                 .as_ref()
@@ -1249,7 +1266,11 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
     // 2. FrontierSumFts (`Compact1122` & `Full256Bit`) Lean <-> Rust <-> NIST SP 800-185 parity
     {
         assert_eq!(oracle.frontier_sum_fts.len(), 2);
-        let mut profile_names: Vec<_> = oracle.frontier_sum_fts.iter().map(|r| r.profile.as_str()).collect();
+        let mut profile_names: Vec<_> = oracle
+            .frontier_sum_fts
+            .iter()
+            .map(|r| r.profile.as_str())
+            .collect();
         profile_names.sort_unstable();
         assert_eq!(profile_names, ["Compact1122", "Full256Bit"]);
         for row in &oracle.frontier_sum_fts {
@@ -1274,7 +1295,10 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
 
             let dp = FrontierDpTable::build(profile);
             let (n, d, total) = frontier_fts_cardinalities_ref(
-                p.tree_height, p.winternitz_w, p.frontier_len, p.target_sum,
+                p.tree_height,
+                p.winternitz_w,
+                p.frontier_len,
+                p.target_sum,
             );
             assert_eq!(n.to_decimal_string(), row.frontier_cardinality_dec);
             assert_eq!(d.to_decimal_string(), row.decoration_cardinality_dec);
@@ -1305,10 +1329,7 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
                 actual
             };
 
-            let d_rust = checked_hash(
-                b"QSAG.FTS.MSG256.V1",
-                &[&pid, &pk_seed, &pk_root, &msg],
-            );
+            let d_rust = checked_hash(b"QSAG.FTS.MSG256.V1", &[&pid, &pk_seed, &pk_root, &msg]);
             assert_eq!(hex::encode(d_rust), row.prehash_msg_hex);
 
             let r_rust = checked_hash(
@@ -1325,10 +1346,7 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             assert_eq!(hex::encode(hmsg_rust), row.squeeze_rank_hex);
 
             let v256_be = 256u64.to_be_bytes();
-            let leaf0 = checked_hash(
-                b"QSAG.FTS.LEAF.V1",
-                &[&pid, &pk_seed, &v256_be, &sk_seed],
-            );
+            let leaf0 = checked_hash(b"QSAG.FTS.LEAF.V1", &[&pid, &pk_seed, &v256_be, &sk_seed]);
             assert_eq!(hex::encode(leaf0), row.leaf0_start_hex);
 
             let step0_be = 0u64.to_be_bytes();
@@ -1367,7 +1385,11 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
                 .iter()
                 .map(|s| [s.blowup.trailing_zeros() as usize, s.step_vars])
                 .collect();
-            assert_eq!(rust_stages, geom.stages, "nv={} Lean <-> Rust stage geometry", geom.nv);
+            assert_eq!(
+                rust_stages, geom.stages,
+                "nv={} Lean <-> Rust stage geometry",
+                geom.nv
+            );
             let sum: usize = sched.stages.iter().map(|s| s.step_vars).sum();
             assert_eq!(sum, geom.folding_sum);
             assert_eq!(sum + sched.early_stop_vars, geom.nv);
@@ -1401,7 +1423,10 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
             jp.raw_signature_bytes,
             AggSigProfile::JortsPoseidon2.raw_signature_bytes()
         );
-        assert_eq!(jp.domain_prf_msg_u64.parse::<u64>().unwrap(), DOMAIN_PRF_MSG);
+        assert_eq!(
+            jp.domain_prf_msg_u64.parse::<u64>().unwrap(),
+            DOMAIN_PRF_MSG
+        );
 
         let cp = &agg.corduroy_poseidon2;
         assert_eq!(cp.wire_tag, AggSigProfile::CorduroyPoseidon2 as u8);
@@ -1411,11 +1436,17 @@ fn lean_external_oracle_stage3_pors_fts_whir_and_corduroy_vectors() {
         assert_eq!(cp.subtree_height, CORDUROY_SUBTREE_HEIGHT);
         assert_eq!(cp.fors_trees, FORS_TREES);
         assert_eq!(cp.fors_height, FORS_HEIGHT);
-        assert_eq!(1u64 << cp.max_sigs_log2, CORDUROY_MAX_STATELESS_SIGS_PER_KEY);
+        assert_eq!(
+            1u64 << cp.max_sigs_log2,
+            CORDUROY_MAX_STATELESS_SIGS_PER_KEY
+        );
         assert_eq!(
             cp.raw_signature_bytes,
             AggSigProfile::CorduroyPoseidon2.raw_signature_bytes()
         );
-        assert_eq!(cp.domain_prf_msg_u64.parse::<u64>().unwrap(), DOMAIN_PRF_MSG);
+        assert_eq!(
+            cp.domain_prf_msg_u64.parse::<u64>().unwrap(),
+            DOMAIN_PRF_MSG
+        );
     }
 }

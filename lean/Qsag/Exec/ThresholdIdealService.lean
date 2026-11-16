@@ -80,7 +80,7 @@ structure State where
 
 /-- There is no adversarial command for writing this input ledger. The service
 checks complete request equality, including randomness and intended roster. -/
-def authorized (c : Config) (s : State) (r : SessionScheduleReq) : Bool :=
+@[expose] def authorized (c : Config) (s : State) (r : SessionScheduleReq) : Bool :=
   decide (0 < c.threshold ∧ c.threshold ≤ c.parties ∧
     c.corrupt.Nodup ∧ (∀ p ∈ c.corrupt, p < c.parties) ∧
     c.corrupt.length < c.threshold ∧ r.honestApprovers ≠ [] ∧

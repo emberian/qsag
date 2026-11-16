@@ -1021,12 +1021,7 @@ pub(crate) fn verify_individual_signature_with_mu(
             }
             let mut node = compress_wots_endpoints_sponge(pk.pk_seed, 0, 0, kp_idx, &endpoints);
             let mut idx = kp_idx;
-            for (lvl, &sib) in layer_sig
-                .merkle_path
-                .iter()
-                .enumerate()
-                .take(jorts_height)
-            {
+            for (lvl, &sib) in layer_sig.merkle_path.iter().enumerate().take(jorts_height) {
                 let parent_idx = idx >> 1;
                 node = if (idx & 1) == 0 {
                     merkle_node_hash(
@@ -1710,35 +1705,32 @@ impl ValidatorKeypair {
             let pair_count = cur_layer.len() / 2;
             #[cfg(feature = "std")]
             let next = if pair_count >= 512 && crate::parallel_workers() > 1 {
-                let pairs: Vec<[Digest4; 2]> =
-                    (0..pair_count).map(|p| [cur_layer[2 * p], cur_layer[2 * p + 1]]).collect();
-                crate::map_chunks_bounded_with_limit(
-                    &pairs,
-                    crate::parallel_workers(),
-                    |chunk| {
-                        // Compute exact starting pair index via pointer arithmetic free offset:
-                        let base_p = (chunk.as_ptr() as usize - pairs.as_ptr() as usize)
-                            / core::mem::size_of::<[Digest4; 2]>();
-                        chunk
-                            .iter()
-                            .enumerate()
-                            .map(|(off, pair)| {
-                                merkle_node_hash(
-                                    DOMAIN_MERKLE_NODE,
-                                    pk_seed,
-                                    MerkleNodeAddr {
-                                        layer,
-                                        tree_idx,
-                                        level: (lvl + 1) as u32,
-                                        node_idx: (base_p + off) as u32,
-                                    },
-                                    pair[0],
-                                    pair[1],
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    },
-                )
+                let pairs: Vec<[Digest4; 2]> = (0..pair_count)
+                    .map(|p| [cur_layer[2 * p], cur_layer[2 * p + 1]])
+                    .collect();
+                crate::map_chunks_bounded_with_limit(&pairs, crate::parallel_workers(), |chunk| {
+                    // Compute exact starting pair index via pointer arithmetic free offset:
+                    let base_p = (chunk.as_ptr() as usize - pairs.as_ptr() as usize)
+                        / core::mem::size_of::<[Digest4; 2]>();
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(off, pair)| {
+                            merkle_node_hash(
+                                DOMAIN_MERKLE_NODE,
+                                pk_seed,
+                                MerkleNodeAddr {
+                                    layer,
+                                    tree_idx,
+                                    level: (lvl + 1) as u32,
+                                    node_idx: (base_p + off) as u32,
+                                },
+                                pair[0],
+                                pair[1],
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .into_iter()
                 .flatten()
                 .collect()

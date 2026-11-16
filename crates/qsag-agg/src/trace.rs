@@ -50,11 +50,7 @@ pub const ST_WOTS_U2: usize = 43; // 43 (`u2` in WOTS)
 /// Fixed row count per signer (`512` for all `JortsPoseidon2` heights `6..=20`, `8,192` for `CorduroyPoseidon2`).
 #[inline]
 pub const fn rows_per_signer(profile: AggSigProfile) -> usize {
-    if profile.is_jorts() {
-        512
-    } else {
-        8192
-    }
+    if profile.is_jorts() { 512 } else { 8192 }
 }
 
 /// Deterministic step opcodes defining the per-signer state machine (`max aux = 38`).

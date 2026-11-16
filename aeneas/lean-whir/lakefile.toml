@@ -14,3 +14,7 @@ name = "QsagWhirVerifiedChallenge"
 [[lean_exe]]
 name = "audit-whir-mir-axioms"
 root = "AuditWhirMirAxioms"
+
+[[require]]
+name = "qsag"
+path = "../../lean"

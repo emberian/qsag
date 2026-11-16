@@ -41,3 +41,5 @@ path = "../../lean"
 [[lean_exe]]
 name = "audit-mir-axioms"
 root = "AuditMirAxiomsMain"
+# The runtime loads this module dynamically; keep its compiled audit fresh.
+needs = ["AuditMirAxioms"]

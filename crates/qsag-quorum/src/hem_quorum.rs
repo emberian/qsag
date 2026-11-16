@@ -72,7 +72,8 @@ const HEM_QSB_CHALLENGE_TAG: &[u8] = b"QSAG.HEM.QSB.CHAL/v1";
 const HEM_PUB_DIR_MAGIC: &[u8; 8] = b"QSAGHDIR";
 const HEM_CUSTODIAN_SHARE_MAGIC: &[u8; 8] = b"QSAGHSHR";
 
-/// Maximum custodian roster size supported by `HemDynamicShamirQuorum` and `HemSpdzSeedQuorum`.
+/// Exclusive roster bound for `HemDynamicShamirQuorum`: accept at most 255 custodians.
+/// Kept at 256 for API compatibility; `HemSpdzSeedQuorum` retains its stricter bound.
 pub const MAX_HEM_QUORUM_PARTIES: usize = 256;
 
 // A session identifier is public protocol context, never key material. Each
@@ -1211,7 +1212,7 @@ impl HemShamirCustodianShare {
         let quorum_epoch = read_u64(bytes, &mut pos)?;
         let t = read_u32(bytes, &mut pos)? as usize;
         let n = read_u32(bytes, &mut pos)? as usize;
-        if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES || party_id >= n {
+        if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES || party_id >= n {
             return Err(HemQuorumError::MalformedVaultBytes);
         }
         let eval_point = read_gl(bytes, &mut pos)?;
@@ -1378,7 +1379,7 @@ impl HemDynamicShamirQuorum {
         n: usize,
         active_leaves: usize,
     ) -> Result<Self, HemQuorumError> {
-        if t < 2 || t > n || n > MAX_HEM_QUORUM_PARTIES {
+        if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES {
             return Err(HemQuorumError::InvalidQuorum { t, n });
         }
         if active_leaves == 0 || active_leaves > HEM_JORTS_MAX_LEAVES {
@@ -1823,7 +1824,7 @@ impl HemDynamicShamirQuorum {
         new_party_rngs: &mut [PartyPrivateRng],
         fault: ReshareFaultInjection,
     ) -> Result<(), HemQuorumError> {
-        if new_t < 2 || new_t > new_n || new_n > MAX_HEM_QUORUM_PARTIES {
+        if new_t < 2 || new_t > new_n || new_n >= MAX_HEM_QUORUM_PARTIES {
             return Err(HemQuorumError::InvalidQuorum { t: new_t, n: new_n });
         }
         check_randomness_count(old_party_rngs, self.n)?;
@@ -1865,8 +1866,10 @@ impl HemDynamicShamirQuorum {
         // blinding evaluations `mask_eval` to `0..new_n` and broadcasts Poseidon2 commitments.
         let mut sub_alpha = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; new_n]; self.t]);
         let mut sub_mask = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; new_n]; self.t]);
-        let mut sub_vals =
-            SecretBuffer(vec![vec![vec![Goldilocks::ZERO; total_scalars]; new_n]; self.t]);
+        let mut sub_vals = SecretBuffer(vec![
+            vec![vec![Goldilocks::ZERO; total_scalars]; new_n];
+            self.t
+        ]);
         let mut sub_macs = SecretBuffer(vec![
             vec![vec![GoldilocksExt2::ZERO; total_scalars]; new_n];
             self.t
@@ -3897,6 +3900,16 @@ mod tests {
     }
 
     #[test]
+    fn hem_roster_bound_is_exclusive_and_party_254_roundtrips() {
+        assert!(HemDynamicShamirQuorum::stage([0x21; 32], 2, MAX_HEM_QUORUM_PARTIES, 1).is_err());
+        let quorum = HemDynamicShamirQuorum::stage([0x22; 32], 2, 255, 1).unwrap();
+        let bytes = quorum.shares[254].to_vault_bytes().unwrap();
+        let decoded = HemShamirCustodianShare::from_vault_bytes(&bytes).unwrap();
+        assert_eq!(decoded.party_id, 254);
+        assert_eq!(decoded.n, 255);
+    }
+
+    #[test]
     fn hem_qsb_reshare_and_proactive_refresh_above_64_custodians() {
         let mut qsb = HemDynamicShamirQuorum::stage([0x61; 32], 2, 3, 2).expect("stage 2-of-3");
         let pk_initial = qsb.public_key();
@@ -3927,9 +3940,11 @@ mod tests {
             .sign_quorum(&[5, 67, 99], &ackers, msg)
             .expect("sign on 3-of-100");
         assert_eq!(ep, 0);
-        let agg_sig =
-            ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig.to_bytes())
-                .unwrap();
+        let agg_sig = ValidatorSignature::from_bytes_canonical(
+            AggSigProfile::JortsPoseidon2,
+            &sig.to_bytes(),
+        )
+        .unwrap();
         assert!(verify_individual_signature(&agg_pk, msg, &agg_sig));
     }
 }

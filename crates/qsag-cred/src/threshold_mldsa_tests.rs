@@ -2129,3 +2129,163 @@ fn nonce_ledger_and_lock_must_remain_private() {
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn policy_swapped_party_tokens_fail_before_nonce_burn() {
+    use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
+    use qsag_policy::{
+        PolicyAuthenticatedOt, PolicyGuardDkgRound1, PolicyViolation, QuorumTierRule,
+        SigningPayloadBinding, TransactionIntent, TransactionPolicy,
+        evaluate_policy_committed_barrier_authenticated, finalize_distributed_policy_guard,
+    };
+    use std::sync::mpsc;
+
+    // Ideal OT functionality only for this policy-token regression test. It
+    // provisions real guard correlations through the public DKG API without
+    // enabling a production dependency's test-dealer feature.
+    struct IdealOt {
+        tx: mpsc::Sender<([u8; 32], Vec<[u128; 2]>)>,
+        rx: mpsc::Receiver<([u8; 32], Vec<[u128; 2]>)>,
+    }
+    impl PolicyAuthenticatedOt for IdealOt {
+        fn exchange(
+            &mut self,
+            local: u16,
+            peer: u16,
+            domain: [u8; 32],
+            alternatives: &[[u128; 2]],
+            choices: &[bool],
+        ) -> Result<Vec<u128>, PolicyViolation> {
+            assert!(matches!((local, peer), (20, 30) | (30, 20)));
+            self.tx.send((domain, alternatives.to_vec())).unwrap();
+            let (received_domain, values) = self
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            assert_eq!(domain, received_domain);
+            assert_eq!(values.len(), choices.len());
+            Ok(values
+                .iter()
+                .zip(choices)
+                .map(|(v, &b)| v[b as usize])
+                .collect())
+        }
+    }
+    let ids = [20, 30];
+    let (a, ca) = PolicyGuardDkgRound1::new_with_capacity(20, &ids, [71; 32], [72; 32], 1).unwrap();
+    let (b, cb) = PolicyGuardDkgRound1::new_with_capacity(30, &ids, [71; 32], [73; 32], 1).unwrap();
+    let (a, oa) = a.round2_open_seeds(&cb).unwrap();
+    let (b, ob) = b.round2_open_seeds(&ca).unwrap();
+    let (tx_a, rx_b) = mpsc::channel();
+    let (tx_b, rx_a) = mpsc::channel();
+    let mut guards = std::thread::scope(|scope| {
+        let a = scope.spawn(move || {
+            finalize_distributed_policy_guard(a, &ob, &mut IdealOt { tx: tx_a, rx: rx_a }).unwrap()
+        });
+        let b = scope.spawn(move || {
+            finalize_distributed_policy_guard(b, &oa, &mut IdealOt { tx: tx_b, rx: rx_b }).unwrap()
+        });
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    let mut shares = dkg(&[10, 20, 30], 2, 74);
+    let key_id = shares[0].verification_pack().policy_signing_key_id();
+    let recipient = QsagAddress::from_pubkey_cshake256(
+        "qsp",
+        WitnessSuiteTag::MlDsa44,
+        KeyIdentityKind::SingleOrThreshold,
+        &shares[0].verification_pack().pk_bytes,
+    )
+    .unwrap();
+    let policy = TransactionPolicy {
+        chain_id: 1,
+        pinned_suite: WitnessSuiteTag::MlDsa44,
+        recipient_allowlist: vec![recipient.commitment_256],
+        max_single_tx_amount: 10,
+        velocity_window_cap: 20,
+        valid_not_before_secs: 1,
+        valid_not_after_secs: 100,
+        forbid_initiator_self_approval: false,
+        hardware_guardian_party: None,
+        quorum_tiers: vec![QuorumTierRule {
+            max_amount_units: 10,
+            min_approvers: 1,
+            require_hardware_guardian: false,
+        }],
+    };
+    let (mut intent, _) = TransactionIntent::builder(1, WitnessSuiteTag::MlDsa44, recipient, 1)
+        .timestamp_secs(50)
+        .initiator_and_approvers(20, &ids)
+        .bind_signing_payload(
+            &SigningPayloadBinding {
+                key_id,
+                payload: b"party-bound release",
+                ctx: b"ctx",
+                session_id: [75; 32],
+                policy_revision: 1,
+                quorum: &ids,
+                authority_pk: [76; 32],
+            },
+            &policy,
+        )
+        .unwrap();
+    let msg = guards[0]
+        .authenticate_initiated_intent(&policy, &mut intent)
+        .unwrap();
+    let token = evaluate_policy_committed_barrier_authenticated(
+        &policy,
+        &intent,
+        intent.session_id,
+        50,
+        &mut guards,
+        &qsag_accel::CpuReferenceBackend::new(),
+    )
+    .unwrap();
+    let intent_digest = *token.intent_digest();
+    let mut tokens = token.into_quorum_party_tokens();
+    for (&party, token) in ids.iter().zip(&tokens) {
+        assert!(token.matches_signing_party(party, &key_id, &msg, b"ctx", &ids));
+    }
+    tokens.swap(0, 1);
+
+    struct CountBurn(usize);
+    impl NonceBurnPersistence for CountBurn {
+        fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
+            self.0 += 1;
+            true
+        }
+    }
+    struct NoNetwork;
+    impl MpcTransport for NoNetwork {
+        fn exchange(
+            &mut self,
+            _: RoundInfo,
+            _: Vec<Vec<u8>>,
+            _: Vec<u8>,
+        ) -> Result<RoundInbox, MpcTransportError> {
+            panic!("a swapped policy token must fail before any MPC traffic");
+        }
+    }
+    for (share, token) in shares[1..].iter_mut().zip(tokens) {
+        // Every old binding is valid: only the individual token owner differs.
+        assert!(token.matches_signing(&key_id, &msg, b"ctx", &ids));
+        assert_ne!(token.party_id(), Some(share.party_id));
+        let epoch_before = share.next_epoch;
+        let mut burn = CountBurn(0);
+        let result = threshold_sign_mldsa_party_policy_gated(
+            share,
+            ThresholdPolicyGate {
+                token,
+                expected_intent_digest: &intent_digest,
+                quorum: &ids,
+            },
+            &msg,
+            b"ctx",
+            &[77; 32],
+            &mut burn,
+            &mut NoNetwork,
+        );
+        assert_eq!(result, Err(ThresholdMlDsaError::PolicyTokenDigestMismatch));
+        assert_eq!(burn.0, 0);
+        assert_eq!(share.next_epoch, epoch_before);
+    }
+}

@@ -521,8 +521,7 @@ pub const TURBOSHAKE_CANOPY_MIDSTATE: [u64; 25] =
 /// Canonical `TurboSHAKE256` customization string for Role-1 WHIR Proof-of-Work grinding.
 pub const TURBOSHAKE_POW_CUSTOM: &[u8] = b"QSAG.PCS.TURBOPOW/v1";
 /// Precomputed compile-time 12-round `TurboSHAKE256` midstate for [`TURBOSHAKE_POW_CUSTOM`].
-pub const TURBOSHAKE_POW_MIDSTATE: [u64; 25] =
-    turboshake256_static_midstate(TURBOSHAKE_POW_CUSTOM);
+pub const TURBOSHAKE_POW_MIDSTATE: [u64; 25] = turboshake256_static_midstate(TURBOSHAKE_POW_CUSTOM);
 
 #[inline]
 pub fn turboshake256_from_midstate_into(midstate: &[u64; 25], input: &[u8], out: &mut [u8]) {
@@ -742,7 +741,11 @@ fn turboshake256_pow_lanes<const N: usize>(
 }
 
 #[inline]
-pub fn turboshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u64) -> [u64; 8] {
+pub fn turboshake256_pow_u64_x8(
+    midstate: &[u64; 25],
+    chal: &[u8; 32],
+    base_nonce: u64,
+) -> [u64; 8] {
     #[cfg(target_feature = "avx512f")]
     {
         turboshake256_pow_lanes::<8>(midstate, chal, base_nonce)
@@ -2533,7 +2536,10 @@ mod internal_matrix_tests {
                 } else {
                     assert_eq!(got_x4_hi[k - 4], single);
                 }
-                assert_ne!(single, cshake256_from_midstate_32(&CANOPY_MIDSTATE, &bufs[k]));
+                assert_ne!(
+                    single,
+                    cshake256_from_midstate_32(&CANOPY_MIDSTATE, &bufs[k])
+                );
             }
         }
         let chal = [0xA5u8; 32];

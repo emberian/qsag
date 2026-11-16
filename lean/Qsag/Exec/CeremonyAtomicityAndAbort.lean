@@ -3023,7 +3023,7 @@ private theorem qsum_two (f : Fin 2 → Nat) :
   simp [qsum]
 
 private theorem natAbsDiff_zero_left (n : Nat) : natAbsDiff 0 n = n := by
-  simp [natAbsDiff]
+  simp [natAbsDiff_eq]
 
 private theorem optSomeIndicator_ite {α : Type} (b : Bool) (x : α) :
     optSomeIndicator (if b then none else some x) = if b then 0 else 1 := by
@@ -3244,7 +3244,7 @@ theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w
     intro sIdx
     dsimp only
     rw [hCrossEq ((enumBitVec w).toFun sIdx)]
-    simp [natAbsDiff]
+    simp [natAbsDiff_eq]
   rw [hAllZero, qsum_const, Nat.mul_zero]
 
 /-! ### Leaky Pre-`OPEN` Protocols & `#tooth` Distribution-Skew Witnesses -/
@@ -3883,7 +3883,7 @@ private theorem natAbsDiff_qsum_le_const {n : Nat} (f g : Fin n → Nat) (c : Na
     (Nat.le_trans (qsum_le_qsum h) (Nat.le_of_eq (qsum_const n c)))
 
 private theorem natAbsDiff_comm (a b : Nat) : natAbsDiff a b = natAbsDiff b a := by
-  unfold natAbsDiff
+  simp only [natAbsDiff_eq]
   split <;> split <;> omega
 
 private theorem ite_decide_eq_ite {p : Prop} (i₁ i₂ : Decidable p) (a b : Nat) :
@@ -5815,11 +5815,11 @@ def loopTailCount {N : Nat} {X Ch Out : Type}
 
 private theorem natAbsDiff_le_of_le {a b c : Nat} (ha : a ≤ c) (hb : b ≤ c) :
     natAbsDiff a b ≤ c := by
-  unfold natAbsDiff
+  simp only [natAbsDiff_eq]
   split <;> omega
 
 private theorem natAbsDiff_self (a : Nat) : natAbsDiff a a = 0 := by
-  unfold natAbsDiff
+  simp only [natAbsDiff_eq]
   split <;> omega
 
 /-- **Multi-attempt ROM reprogramming bound (`multiAttempt_reprogramming_bound`)**: for `k`
@@ -5982,7 +5982,7 @@ theorem tooth_rom_commit_without_framed_blind_exceeds_bound :
           (romRealCount spec adv () () () (Nat.zero_lt_succ 0) tape (fun out => out) tagFresh)
           (2 ^ 1 * romIdealCount adv tape (fun out => out) tagFresh) :=
   ⟨toothRomSpec, toothRomAdv, fun _ => true, false,
-   ⟨fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩, by decide⟩
+   ⟨fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩, by rw [natAbsDiff_eq]; decide⟩
 
 theorem l1Norm_prefix_ones : ∀ (n t : Nat), t ≤ n →
     l1Norm n (fun i : Fin n => if i.val < t then (1 : Int) else 0) = t
@@ -6053,7 +6053,7 @@ theorem tooth_reprogramming_needs_commitment_entropy :
         natAbsDiff
           (qsum 2 (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
           (qsum 2 (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) :=
-  ⟨fun _ => (), fun _ c => c, [((), true)], false, fun r => r.1, by decide⟩
+  ⟨fun _ => (), fun _ c => c, [((), true)], false, fun r => r.1, by rw [natAbsDiff_eq]; decide⟩
 
 /-- The ML-DSA transcript of one attempt under challenge `c`: the published `w₁`, and `z` when
     both rejection checks pass. A rejected attempt publishes `w₁` alone. -/
@@ -7153,7 +7153,7 @@ theorem post_round3_rushing_abort_unbiased
       intro sIdx
       dsimp only
       rw [hDetSig ((enumBitVec w).toFun sIdx)]
-      simp [natAbsDiff]
+      simp [natAbsDiff_eq]
     rw [hAllZ, qsum_const, Nat.mul_zero]
   exact ⟨hBind, coinTossRand_exact_fiber_one inp.rShare, hTotEq, hCrossUnbiased, hSdZero,
     hDetSurv, hDetSdZero⟩

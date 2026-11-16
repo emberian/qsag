@@ -83,7 +83,7 @@ private theorem enrolledStateful_of_key (enrollment : PublicEnrollment)
     evaluate o (enrolledStateful enrollment msg optRand epoch) =
       mpcEvalProductionStatefulSign cshake256Suite enrollment.params o enrollment.key.pkSeed
         msg optRand epoch enrollment.grindLimit := by
-  simp only [enrolledStateful, mpcEvalProductionStatefulSign]
+  simp only [enrolledStateful, mpcEvalProductionStatefulSign.public_eq_1]
   split
   · rfl
   · rw [hk]
@@ -96,7 +96,7 @@ private theorem enrolledStateless_of_key (enrollment : PublicEnrollment)
     evaluate o (enrolledStateless enrollment msg optRand) =
       mpcEvalProductionStatelessSign cshake256Suite enrollment.params o enrollment.key.pkSeed
         msg optRand enrollment.grindLimit := by
-  simp only [enrolledStateless, mpcEvalProductionStatelessSign]
+  simp only [enrolledStateless, mpcEvalProductionStatelessSign.public_eq_1]
   split
   · rfl
   · rw [hk]
@@ -108,16 +108,26 @@ theorem evaluate_enrolledStateful (profile : RssProduction.Profile) (msg optRand
       (enrolledStateful (sharedEnrollment profile) msg optRand epoch) =
       mpcEvalProductionStatefulSign cshake256Suite profile.params (RssProduction.sharedOracle profile)
         profile.material.pkSeed msg optRand epoch profile.grindLimit :=
-  enrolledStateful_of_key (sharedEnrollment profile) (RssProduction.sharedOracle profile)
-    msg optRand epoch (by rfl)
+  by
+    have hs : (sharedEnrollment profile).key.pkSeed = profile.material.pkSeed := by
+      simp only [sharedEnrollment, derivePublicKeyMpc.public_eq_1]
+    have h := enrolledStateful_of_key (sharedEnrollment profile) (RssProduction.sharedOracle profile)
+      msg optRand epoch (by rw [hs]; rfl)
+    simpa only [hs, show (sharedEnrollment profile).params = profile.params from rfl,
+      show (sharedEnrollment profile).grindLimit = profile.grindLimit from rfl] using h
 
 theorem evaluate_enrolledStateless (profile : RssProduction.Profile) (msg optRand : Bytes) :
     evaluate (RssProduction.sharedOracle profile)
       (enrolledStateless (sharedEnrollment profile) msg optRand) =
       mpcEvalProductionStatelessSign cshake256Suite profile.params (RssProduction.sharedOracle profile)
         profile.material.pkSeed msg optRand profile.grindLimit :=
-  enrolledStateless_of_key (sharedEnrollment profile) (RssProduction.sharedOracle profile)
-    msg optRand (by rfl)
+  by
+    have hs : (sharedEnrollment profile).key.pkSeed = profile.material.pkSeed := by
+      simp only [sharedEnrollment, derivePublicKeyMpc.public_eq_1]
+    have h := enrolledStateless_of_key (sharedEnrollment profile) (RssProduction.sharedOracle profile)
+      msg optRand (by rw [hs]; rfl)
+    simpa only [hs, show (sharedEnrollment profile).params = profile.params from rfl,
+      show (sharedEnrollment profile).grindLimit = profile.grindLimit from rfl] using h
 
 @[expose] def enrolledSigningProgram (enrollment : PublicEnrollment) (request : SessionScheduleReq) :
     Program (Option PqHashSig) :=

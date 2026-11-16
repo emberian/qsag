@@ -306,13 +306,22 @@ fn commit_and_open_additive_tower128(
     Ok(sum)
 }
 
-pub(super) fn blind_open_tower128(
+pub(crate) fn blind_open_tower128(
     session_id: &[u8; 32],
     phase: &'static str,
     residual: &[Tower128],
     mesh: Option<&mut OtMesh>,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Tower128, PreprocessError> {
+    if residual.is_empty()
+        || residual.len() != party_rngs.len()
+        || mesh.as_ref().is_some_and(|m| m.n != residual.len())
+    {
+        return Err(PreprocessError::InvalidThreshold {
+            t: residual.len(),
+            n: party_rngs.len(),
+        });
+    }
     let mut owned_mesh;
     let mesh = match mesh {
         Some(mesh) => mesh,

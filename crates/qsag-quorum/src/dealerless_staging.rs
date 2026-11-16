@@ -418,7 +418,13 @@ fn establish_dealerless_pairwise_mac_keys(
             let shared_key = h32(
                 TAG_PAIR_KEY,
                 &[
-                    session_id, &a_be, &b_be, &com_a, &com_b, &*contrib_a, &*contrib_b,
+                    session_id,
+                    &a_be,
+                    &b_be,
+                    &com_a,
+                    &com_b,
+                    &*contrib_a,
+                    &*contrib_b,
                 ],
             );
             keys[a][b] = shared_key;
@@ -3886,6 +3892,43 @@ mod tests {
         assert!(verify_jorts_signature(&pk, b"wire after refresh", &sig));
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "retained mesh online MAC latency benchmark"]
+    fn bench_qsa_retained_mesh_mac_latency() {
+        let mut rngs = make_party_rngs(3, 0x5b);
+        let sid = [0xa9; 32];
+        let setup = std::time::Instant::now();
+        let mut mesh = OtMesh::try_establish(sid, &mut rngs).unwrap();
+        let setup_ms = setup.elapsed().as_secs_f64() * 1000.0;
+        let deltas = [0x11u128, 0x22, 0x33];
+        let opened = [0xdead_beefu64];
+        let macs: Vec<_> = deltas
+            .iter()
+            .map(|&d| {
+                vec![core::array::from_fn(|b| {
+                    if opened[0] >> b & 1 == 1 { d } else { 0 }
+                })]
+            })
+            .collect();
+        let mut times = Vec::new();
+        for step in 0..10 {
+            let before = std::time::Instant::now();
+            run_committed_spdz_mac_check_words(
+                0, step, &sid, &deltas, &opened, &macs, &mut mesh, &mut rngs,
+            )
+            .unwrap();
+            times.push(before.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        std::eprintln!(
+            "[BENCH retained QS-A mesh] setup={setup_ms:.3} ms; n=10 min={:.3} median={:.3} max={:.3} ms",
+            times[0],
+            times[5],
+            times[9]
+        );
+    }
+
     #[test]
     fn qsa_mac_check_blinds_nonzero_residual_against_delta_leakage() {
         let m = 3usize;
@@ -3941,10 +3984,12 @@ mod tests {
         let residual_shares = SecretBuffer(vec![delta_sum_a ^ 0x55, 0x55, 0]);
         let mut rngs_1 = make_party_rngs(m, 0xb1);
         let mut rngs_2 = make_party_rngs(m, 0xb2);
-        let w1 = blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_1)
-            .expect("blind open 1");
-        let w2 = blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_2)
-            .expect("blind open 2");
+        let w1 =
+            blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_1)
+                .expect("blind open 1");
+        let w2 =
+            blind_open_additive_gf128_poly(&sid, "test_blind", &residual_shares, None, &mut rngs_2)
+                .expect("blind open 2");
         assert_ne!(w1, 0);
         assert_ne!(w2, 0);
         assert_ne!(w1, w2);

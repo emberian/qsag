@@ -2450,7 +2450,9 @@ pub fn threshold_sign_mldsa_party_policy_gated<T: MpcTransport>(
     net: &mut T,
 ) -> Result<ThresholdSignOutput, ThresholdMlDsaError> {
     let key_id = share.pack.policy_signing_key_id();
-    if !gate.token.matches_signing(&key_id, msg, ctx, gate.quorum)
+    if !gate
+        .token
+        .matches_signing_party(share.party_id, &key_id, msg, ctx, gate.quorum)
         || !ct_eq_bytes(gate.token.intent_digest(), gate.expected_intent_digest)
     {
         return Err(ThresholdMlDsaError::PolicyTokenDigestMismatch);

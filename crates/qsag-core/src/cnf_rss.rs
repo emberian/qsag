@@ -1,30 +1,25 @@
-//! Generalized `(t, n)` CNF Replicated Secret Sharing (`CNF-RSS`) with Theorem 4.1
-//! Deterministic + Authenticated `t-of-t` Online Projection onto a 56-Lane `GFNI`-Accelerated
-//! `[128, 56, 73]` Systematic Reed–Solomon `MiniMAC` `Keccak-f[1600]` Engine (`< 2^{-128}` Active Security).
+//! Generalized `(t, n)` CNF replicated secret sharing and a trusted-coordinator
+//! prototype of its `t-of-t` online projection into a 56-lane MiniMAC Keccak engine.
 //!
-//! ### Overview
-//! 1. **Dealerless `(t, n)` CNF-RSS Custody (`2 <= t <= n <= 10`, $\binom{n}{t-1}$ Share Slots):**
-//!    - Splits 256-bit `sk_seed` and `sk_prf` into $M = \binom{n}{t-1}$ replicated share slots
-//!      (`3` for `2-of-3`, `10` for `3-of-5`, `15` for `3-of-6`/`5-of-6`, `20` for `4-of-6`,
-//!      `35` for `4-of-7`), where custodian $i \in [n]$ holds slot $S_m \iff i \notin S_m$.
-//!    - Any $t - 1$ colluding custodians $C$ miss slot $S^\star = C$, whose complement
-//!      $H_{S^\star} = [n] \setminus C$ consists exclusively of honest custodians.
-//! 2. **Theorem 4.1 Zero-Communication Authenticated `t-of-t` Online Projection:**
-//!    - Any online $t$-custodian quorum $Q = \{q_0 < \dots < q_{t-1}\} \subset [n]$ partitions
-//!      all $M = \binom{n}{t-1}$ slots via $\mathsf{owner}(Q, S) = \min(Q \setminus S) \in Q$
-//!      (cross-checking all overlapping slots $|Q \setminus S| \ge 2$ via committed digests) and
-//!      re-randomizes into fresh uniform `t-of-t` additive shares via pairwise `cSHAKE256` zero-masks.
-//! 3. **56-Lane `AVX-512 GFNI` `[128, 56, 73]` `MiniMAC` `Keccak-f[1600]` Sweep (`BaggyEngine` + `SlhMpcOracles`):**
-//!    - Packs `56` parallel Boolean `Keccak-f[1600]` lanes into `[u8; 128]` codewords of the
-//!      systematic `[128, 56, 73]` Reed–Solomon code $C$ over [`TowerGf256`], whose Schur square
-//!      $C^{\ast 2} = [128, 111, 18]$ has minimum distance $d_{\min}(C^{\ast 2}) = 18$ bytes
-//!      ($2^{-144} < 2^{-128}$ unconditional active forgery soundness against up to $t - 1$
-//!      malicious online signers).
-//!    - Evaluates all `1,600` `Chi` gates of each round in a single contiguous `204,800`-byte
-//!      [`qsag_asm::gf256_shamir_mul`] (`AVX-512 GFNI` / `AVX2` / portable constant-time) call,
-//!      masks unselected cut-boundary lanes via $(\mathbf{M}_{\text{pub}} \ast \mathbf{dig}) \oplus \mathbf{r}^\ast \in C^{\ast 2}$
-//!      (zero leakage of unrevealed WOTS/PORS/FORS nodes), and blinds/burns ephemeral per-window
-//!      MAC keys $\boldsymbol{\Delta}^{(w)}$ at every barrier.
+//! Custody uses one slot for each `(t - 1)`-party subset `S`; party `i` holds that
+//! slot exactly when `i` is not in `S`. Any `(t - 1)`-party coalition misses its own
+//! slot. An active quorum `Q` assigns each slot to `min(Q \ S)`, checks overlapping
+//! replicas, and rerandomizes the resulting additive shares. Supported custody
+//! configurations satisfy `2 <= t <= n <= 10`.
+//!
+//! The arithmetic uses systematic `[128, 56, 73]` Reed–Solomon codewords over
+//! [`TowerGf256`] and their `[128, 111, 18]` Schur square. It packs 56 Boolean
+//! Keccak lanes and calls [`qsag_asm::gf256_shamir_mul`] on contiguous gate buffers.
+//! Code distances and fault-injection tests describe algebraic checks; they are
+//! not a security proof for the concrete correlation source or party isolation.
+//!
+//! ### Trust boundary
+//! This module currently executes all parties in one address space. Tuple generation
+//! combines every slot seed, and MAC transitions reconstruct both the shared value and
+//! MAC key inside that coordinator. It is therefore a trusted-coordinator prototype,
+//! NOT an isolated-party malicious-secure MPC deployment. The codeword and fault tests
+//! do not establish privacy against the coordinator. Never hand this coordinator the
+//! custody shares when that process is outside the trusted boundary.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -32,9 +27,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::hint::black_box;
 
-use crate::baggy::{
-    BaggyEngine, BaggyError, TAG_BAGGY_OPT_RAND, TAG_BAGGY_R, keyed_mu_frame,
-};
+use crate::baggy::{BaggyEngine, BaggyError, TAG_BAGGY_OPT_RAND, TAG_BAGGY_R, keyed_mu_frame};
 use crate::field::tower::{Tower128, TowerGf256};
 use crate::fips205::{
     CutBoundaryMacToken, Fips205Adrs, Fips205AdrsType, Fips205Error, Fips205Params, ForsMpcOutput,
@@ -113,9 +106,9 @@ impl From<CnfRssError> for KeccakMpcError {
         match e {
             CnfRssError::InvalidParameters => Self::InvalidParameters,
             CnfRssError::Preprocess(p) => Self::Preprocess(p),
-            CnfRssError::CommitmentMismatch { party, .. } => {
-                Self::RssCommitMismatch { accused_party: party }
-            }
+            CnfRssError::CommitmentMismatch { party, .. } => Self::RssCommitMismatch {
+                accused_party: party,
+            },
             CnfRssError::KeyBindingMismatch => Self::KeyBindingMismatch,
             CnfRssError::Poisoned => Self::Poisoned,
             CnfRssError::SlotOverlapMismatch { .. }
@@ -134,8 +127,7 @@ impl From<CnfRssError> for BaggyError {
             CnfRssError::OpenBeforeBarrier => Self::Engine(Rss256Error::OpenBeforeCheck),
             CnfRssError::KeyBindingMismatch => Self::KeyBindingMismatch,
             CnfRssError::Poisoned => Self::Engine(Rss256Error::Poisoned),
-            CnfRssError::ActiveTamperDetected { .. }
-            | CnfRssError::SlotOverlapMismatch { .. } => {
+            CnfRssError::ActiveTamperDetected { .. } | CnfRssError::SlotOverlapMismatch { .. } => {
                 Self::Engine(Rss256Error::MultiplicationCheckFailed)
             }
             CnfRssError::CommitmentMismatch { party, .. } => {
@@ -155,7 +147,10 @@ impl fmt::Display for CnfRssError {
                 write!(f, "CNF-RSS commitment mismatch in {phase} by party {party}")
             }
             Self::SlotOverlapMismatch { slot_idx } => {
-                write!(f, "CNF-RSS replicated slot {slot_idx} mismatch across quorum")
+                write!(
+                    f,
+                    "CNF-RSS replicated slot {slot_idx} mismatch across quorum"
+                )
             }
             Self::ActiveTamperDetected { phase } => {
                 write!(f, "CNF-RSS active MiniMAC verification failed in {phase}")
@@ -300,7 +295,7 @@ pub struct CnfRssKeyShare256 {
     slot_prg_seeds: SecretVec<[u8; 32]>,
     pair_prf_keys: SecretVec<[u8; 32]>,
     scheme_identity: Option<[u8; 32]>,
-    slh_params: Option<Fips205Params>,
+    slh_profile_digest: Option<[u64; 4]>,
 }
 
 impl fmt::Debug for CnfRssKeyShare256 {
@@ -334,7 +329,7 @@ impl CnfRssKeyShare256 {
 
     /// Bind this share once to a `BaggyKeyBinding::identity()` digest (idempotent on same digest).
     pub fn bind_scheme_identity(&mut self, identity: &[u8; 32]) -> Result<(), CnfRssError> {
-        if self.slh_params.is_some() {
+        if self.slh_profile_digest.is_some() {
             return Err(CnfRssError::KeyBindingMismatch);
         }
         match &self.scheme_identity {
@@ -363,12 +358,12 @@ impl CnfRssKeyShare256 {
         if self.scheme_identity.is_some() {
             return Err(Fips205Error::InvalidParameterSet);
         }
-        match &self.slh_params {
+        match &self.slh_profile_digest {
             None => {
-                self.slh_params = Some(*params);
+                self.slh_profile_digest = Some(crate::keccak_mpc::slh_profile_digest_u64x4(params));
                 Ok(())
             }
-            Some(bound) if bound == params => Ok(()),
+            Some(bound) if *bound == crate::keccak_mpc::slh_profile_digest_u64x4(params) => Ok(()),
             Some(_) => Err(Fips205Error::InvalidParameterSet),
         }
     }
@@ -377,11 +372,18 @@ impl CnfRssKeyShare256 {
         self.slot_indices.binary_search(&global_slot_idx).ok()
     }
 
-    /// Canonical secret byte serialization (`QSCNFK01` header).
+    /// Canonical secret byte serialization (`QSCNFK01` header). Legacy encodings
+    /// stay unchanged; byte 13 equal to 1 appends the 32-byte SLH profile lock.
     pub fn to_secret_bytes(&self) -> SecretVec<u8> {
         let k = self.slot_indices.len();
         let n = self.cfg.n;
-        let cap = 16 + 32 + 32 + 2 * k + 96 * k + 32 * n;
+        let cap = 16
+            + 32
+            + 32
+            + 2 * k
+            + 96 * k
+            + 32 * n
+            + 32 * usize::from(self.slh_profile_digest.is_some());
         let mut out = SecretBuffer(Vec::with_capacity(cap));
         out.extend_from_slice(CNF_KEY_SHARE_MAGIC);
         out.push(self.cfg.t as u8);
@@ -393,7 +395,7 @@ impl CnfRssKeyShare256 {
             None => (0u8, [0u8; 32]),
         };
         out.push(has_id);
-        out.push(0u8);
+        out.push(u8::from(self.slh_profile_digest.is_some()));
         out.extend_from_slice(&(k as u16).to_le_bytes());
         out.extend_from_slice(&self.pk_seed);
         out.extend_from_slice(&id_bytes);
@@ -412,6 +414,11 @@ impl CnfRssKeyShare256 {
         for s in self.pair_prf_keys.iter() {
             out.extend_from_slice(s);
         }
+        if let Some(profile) = self.slh_profile_digest {
+            for word in profile {
+                out.extend_from_slice(&word.to_le_bytes());
+            }
+        }
         out
     }
 
@@ -425,9 +432,13 @@ impl CnfRssKeyShare256 {
         let party_id = bytes[10] as usize;
         let key_len = bytes[11] as usize;
         let has_id = bytes[12];
-        let reserved = bytes[13];
+        let profile_flag = bytes[13];
         let k = u16::from_le_bytes([bytes[14], bytes[15]]) as usize;
-        if !matches!(key_len, 16 | 24 | 32) || has_id > 1 || reserved != 0 {
+        if !matches!(key_len, 16 | 24 | 32)
+            || has_id > 1
+            || profile_flag > 1
+            || (has_id != 0 && profile_flag != 0)
+        {
             return Err(CnfRssError::InvalidParameters);
         }
         let cfg = CnfRssConfig::new(t, n)?;
@@ -435,10 +446,16 @@ impl CnfRssKeyShare256 {
         if k != expected_slots.len() {
             return Err(CnfRssError::InvalidParameters);
         }
-        let expected_len = 80 + 2 * k + 96 * k + 32 * n;
+        let base_len = 80 + 2 * k + 96 * k + 32 * n;
+        let expected_len = base_len + 32 * usize::from(profile_flag);
         if bytes.len() != expected_len {
             return Err(CnfRssError::InvalidParameters);
         }
+        let slh_profile_digest = (profile_flag == 1).then(|| {
+            core::array::from_fn(|i| {
+                u64::from_le_bytes(core::array::from_fn(|b| bytes[base_len + 8 * i + b]))
+            })
+        });
         let mut pk_seed = [0u8; 32];
         pk_seed.copy_from_slice(&bytes[16..48]);
         if pk_seed[key_len..].iter().any(|&b| b != 0) {
@@ -495,7 +512,7 @@ impl CnfRssKeyShare256 {
             slot_prg_seeds,
             pair_prf_keys,
             scheme_identity,
-            slh_params: None,
+            slh_profile_digest,
         })
     }
 }
@@ -616,9 +633,8 @@ pub fn run_dealerless_cnf_rss_dkg(
     }
 
     // 3. Pairwise PRF keys `K_{a, b}` (`0 <= a < b < n`)
-    let mut pair_keys: Vec<SecretVec<[u8; 32]>> = (0..n)
-        .map(|_| SecretBuffer(vec![[0u8; 32]; n]))
-        .collect();
+    let mut pair_keys: Vec<SecretVec<[u8; 32]>> =
+        (0..n).map(|_| SecretBuffer(vec![[0u8; 32]; n])).collect();
     for a in 0..n {
         for b in (a + 1)..n {
             let a_be = (a as u64).to_be_bytes();
@@ -651,7 +667,10 @@ pub fn run_dealerless_cnf_rss_dkg(
         .zip(p_prg)
         .zip(pair_keys)
         .map(
-            |(((((party_id, slot_indices), sk_seed_slots), sk_prf_slots), slot_prg_seeds), pair_prf_keys)| {
+            |(
+                ((((party_id, slot_indices), sk_seed_slots), sk_prf_slots), slot_prg_seeds),
+                pair_prf_keys,
+            )| {
                 CnfRssKeyShare256 {
                     cfg: cfg.clone(),
                     party_id,
@@ -663,7 +682,7 @@ pub fn run_dealerless_cnf_rss_dkg(
                     slot_prg_seeds,
                     pair_prf_keys,
                     scheme_identity: None,
-                    slh_params: None,
+                    slh_profile_digest: None,
                 }
             },
         )
@@ -1231,6 +1250,62 @@ fn materialize_cut_mask_tuple(
     ProjectedCutMaskTuple { r_star }
 }
 
+// Validate complete custody input before deriving any correlation seed. The caller
+// is a trusted coordinator; comparisons here detect mismatched/malformed inputs,
+// not malicious behavior by that coordinator.
+fn correlation_root(
+    tag: &[u8],
+    session_id: &[u8; 32],
+    cfg: &CnfRssConfig,
+    shares: &[CnfRssKeyShare256],
+    quorum: &[usize],
+) -> Result<SecretBuffer<[u8; 32]>, CnfRssError> {
+    cfg.validate_quorum(quorum)?;
+    if shares.len() != cfg.n
+        || shares.iter().enumerate().any(|(p, s)| {
+            s.party_id != p
+                || s.cfg != *cfg
+                || s.key_len != shares[0].key_len
+                || s.pk_seed != shares[0].pk_seed
+                || s.scheme_identity != shares[0].scheme_identity
+                || s.slh_profile_digest != shares[0].slh_profile_digest
+        })
+    {
+        return Err(CnfRssError::InvalidParameters);
+    }
+    let mut xof = Cshake256Xof::new(tag);
+    xof.absorb(session_id);
+    for slot_idx in 0..cfg.total_slots() {
+        let mut first: Option<(&[u8; 32], &[u8; 32], &[u8; 32])> = None;
+        for share in shares {
+            if let Some(pos) = share.local_slot_pos(slot_idx) {
+                let current = (
+                    &share.slot_prg_seeds[pos],
+                    &share.sk_seed_slots[pos],
+                    &share.sk_prf_slots[pos],
+                );
+                if let Some(previous) = first {
+                    if !(ct_eq_bytes32(previous.0, current.0)
+                        & ct_eq_bytes32(previous.1, current.1)
+                        & ct_eq_bytes32(previous.2, current.2))
+                    {
+                        return Err(CnfRssError::SlotOverlapMismatch { slot_idx });
+                    }
+                } else {
+                    first = Some(current);
+                }
+            }
+        }
+        xof.absorb(first.ok_or(CnfRssError::InvalidParameters)?.0);
+    }
+    for &q in quorum {
+        xof.absorb(&(q as u64).to_be_bytes());
+    }
+    let mut root = SecretBuffer([0; 32]);
+    xof.squeeze(&mut root.0);
+    Ok(root)
+}
+
 /// Pre-staged single-use `(t, n)` CNF-RSS bank projected onto an online $t$-signer quorum.
 pub struct StagedCnfRssBank {
     waves: Vec<ProjectedWaveTuple>,
@@ -1249,50 +1324,38 @@ impl StagedCnfRssBank {
         num_waves: usize,
         num_cuts: usize,
     ) -> Result<Self, CnfRssError> {
-        cfg.validate_quorum(quorum)?;
-        if all_shares.len() != cfg.n {
-            return Err(CnfRssError::InvalidParameters);
-        }
-        // Fold all `M = \binom{n}{t-1}` slot PRG seeds into a committee correlation root;
-        // every slot is held by `n - t + 1 >= 1` custodians, and `S* = C` is held exclusively
-        // by honest custodians `[n] \ C`.
-        let mut root_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.BANK.ROOT/v1");
-        root_xof.absorb(&session_id);
-        for slot_idx in 0..cfg.total_slots() {
-            let holder = all_shares
-                .iter()
-                .find_map(|s| s.local_slot_pos(slot_idx).map(|pos| s.slot_prg_seeds[pos]))
-                .ok_or(CnfRssError::InvalidParameters)?;
-            root_xof.absorb(&holder);
-        }
-        for &q in quorum {
-            root_xof.absorb(&(q as u64).to_be_bytes());
-        }
-        let mut master = SecretBuffer([0u8; 32]);
-        root_xof.squeeze(&mut *master);
+        let master = correlation_root(
+            b"QSAG.CNF_RSS.BANK.ROOT/v1",
+            &session_id,
+            cfg,
+            all_shares,
+            quorum,
+        )?;
 
         let tables = MiniMacTables::build()?;
-        let wave_seeds: Vec<[u8; 32]> = (0..num_waves)
-            .map(|w| {
-                cshake256_32_multi_frame(
-                    b"QSAG.CNF_RSS.BANK.WAVE_SEED/v1",
-                    &[&*master, &(w as u64).to_le_bytes()],
-                )
-            })
-            .collect();
+        let wave_seeds = SecretBuffer(
+            (0..num_waves)
+                .map(|w| {
+                    cshake256_32_multi_frame(
+                        b"QSAG.CNF_RSS.BANK.WAVE_SEED/v1",
+                        &[&*master, &(w as u64).to_le_bytes()],
+                    )
+                })
+                .collect::<Vec<[u8; 32]>>(),
+        );
         #[cfg(feature = "std")]
         let waves: Vec<ProjectedWaveTuple> = {
             let workers = std::thread::available_parallelism()
                 .map_or(1, usize::from)
-                .min(12);
+                .min(4);
             let chunk_sz = wave_seeds.len().div_ceil(workers).max(1);
             let mut slots: Vec<Option<ProjectedWaveTuple>> =
                 (0..wave_seeds.len()).map(|_| None).collect();
             std::thread::scope(|scope| {
                 let mut handles = Vec::new();
                 for (c_idx, out_slice) in slots.chunks_mut(chunk_sz).enumerate() {
-                    let seeds = &wave_seeds[c_idx * chunk_sz
-                        ..((c_idx + 1) * chunk_sz).min(wave_seeds.len())];
+                    let seeds = &wave_seeds
+                        [c_idx * chunk_sz..((c_idx + 1) * chunk_sz).min(wave_seeds.len())];
                     let tables_ref = &*tables;
                     let t = cfg.t;
                     handles.push(scope.spawn(move || {
@@ -1301,10 +1364,12 @@ impl StagedCnfRssBank {
                         }
                     }));
                 }
-                for h in handles {
-                    let _ = h.join();
+                let joined: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+                if joined.into_iter().any(|r| r.is_err()) {
+                    return Err(CnfRssError::InvalidParameters);
                 }
-            });
+                Ok(())
+            })?;
             slots.into_iter().flatten().collect()
         };
         #[cfg(not(feature = "std"))]
@@ -1315,10 +1380,10 @@ impl StagedCnfRssBank {
 
         let cuts: Vec<ProjectedCutMaskTuple> = (0..num_cuts)
             .map(|c| {
-                let c_seed = cshake256_32_multi_frame(
+                let c_seed = SecretBuffer(cshake256_32_multi_frame(
                     b"QSAG.CNF_RSS.BANK.CUT_SEED/v1",
                     &[&*master, &(c as u64).to_le_bytes()],
-                );
+                ));
                 materialize_cut_mask_tuple(&tables, cfg.t, &c_seed)
             })
             .collect();
@@ -1350,7 +1415,7 @@ impl CnfRssTupleSource for StagedCnfRssBank {
     }
 }
 
-/// Bounded-memory (`< 24 MB` L3-resident) streaming `(t, n)` CNF-RSS tuple source materializing
+/// Bounded-batch (up to several GiB) streaming `(t, n)` CNF-RSS tuple source materializing
 /// `t-of-t` projected `MiniMAC` windows on demand across parallel cores without multi-GB heap banks.
 pub struct StreamingCnfRssSource {
     t: usize,
@@ -1370,24 +1435,13 @@ impl StreamingCnfRssSource {
         all_shares: &[CnfRssKeyShare256],
         quorum: &[usize],
     ) -> Result<Self, CnfRssError> {
-        cfg.validate_quorum(quorum)?;
-        if all_shares.len() != cfg.n {
-            return Err(CnfRssError::InvalidParameters);
-        }
-        let mut root_xof = Cshake256Xof::new(b"QSAG.CNF_RSS.STREAM.ROOT/v1");
-        root_xof.absorb(&session_id);
-        for slot_idx in 0..cfg.total_slots() {
-            let holder = all_shares
-                .iter()
-                .find_map(|s| s.local_slot_pos(slot_idx).map(|pos| s.slot_prg_seeds[pos]))
-                .ok_or(CnfRssError::InvalidParameters)?;
-            root_xof.absorb(&holder);
-        }
-        for &q in quorum {
-            root_xof.absorb(&(q as u64).to_be_bytes());
-        }
-        let mut master_seed = SecretBuffer([0u8; 32]);
-        root_xof.squeeze(&mut *master_seed);
+        let master_seed = correlation_root(
+            b"QSAG.CNF_RSS.STREAM.ROOT/v1",
+            &session_id,
+            cfg,
+            all_shares,
+            quorum,
+        )?;
         Ok(Self {
             t: cfg.t,
             master_seed,
@@ -1407,16 +1461,18 @@ impl CnfRssTupleSource for StreamingCnfRssSource {
             .wave_ctr
             .checked_add(count as u64)
             .ok_or(CnfRssError::InvalidParameters)?;
-        let seeds: Vec<(u64, [u8; 32])> = (0..count)
-            .map(|i| {
-                let idx = base + i as u64;
-                let s = cshake256_32_multi_frame(
-                    b"QSAG.CNF_RSS.STREAM.WAVE/v1",
-                    &[&*self.master_seed, &idx.to_le_bytes()],
-                );
-                (idx, s)
-            })
-            .collect();
+        let seeds = SecretBuffer(
+            (0..count)
+                .map(|i| {
+                    let idx = base + i as u64;
+                    let s = cshake256_32_multi_frame(
+                        b"QSAG.CNF_RSS.STREAM.WAVE/v1",
+                        &[&*self.master_seed, &idx.to_le_bytes()],
+                    );
+                    (idx, s)
+                })
+                .collect::<Vec<(u64, [u8; 32])>>(),
+        );
         #[cfg(test)]
         let corrupt = self.corrupt_wave;
         #[cfg(not(test))]
@@ -1426,7 +1482,7 @@ impl CnfRssTupleSource for StreamingCnfRssSource {
         if count > 1 {
             let workers = std::thread::available_parallelism()
                 .map_or(1, usize::from)
-                .min(12);
+                .min(4);
             let chunk_sz = seeds.len().div_ceil(workers).max(1);
             let mut slots: Vec<Option<ProjectedWaveTuple>> =
                 (0..seeds.len()).map(|_| None).collect();
@@ -1443,10 +1499,12 @@ impl CnfRssTupleSource for StreamingCnfRssSource {
                         }
                     }));
                 }
-                for h in handles {
-                    let _ = h.join();
+                let joined: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+                if joined.into_iter().any(|r| r.is_err()) {
+                    return Err(CnfRssError::InvalidParameters);
                 }
-            });
+                Ok(())
+            })?;
             return Ok(slots.into_iter().flatten().collect());
         }
 
@@ -1503,7 +1561,8 @@ struct PendingWaveVerification {
     residual_shares: SecretVec<[u128; 2]>,
 }
 
-type SweepJobOutcome = Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>;
+type SweepJobOutcome =
+    Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError>;
 type SlhChainChunk<'a> = &'a [(Fips205Adrs, Vec<Fips205Adrs>)];
 type SlhJobInput<'a> = (SlhChainChunk<'a>, usize, usize, Vec<ProjectedWaveTuple>);
 type SlhJobOutcome = Result<(CnfRssSharedDigests, Vec<PendingWaveVerification>), CnfRssError>;
@@ -1552,12 +1611,7 @@ pub struct CnfRssProjectedEngine<'a> {
 }
 
 /// Linear `Theta + Rho + Pi` over a contiguous `1600 * 128`-byte `MiniMAC` state.
-fn keccak_linear_minimac(
-    src: &[u8],
-    dst: &mut [u8],
-    col: &mut [u8],
-    d_theta: &mut [u8],
-) {
+fn keccak_linear_minimac(src: &[u8], dst: &mut [u8], col: &mut [u8], d_theta: &mut [u8]) {
     col.fill(0);
     for x in 0..5 {
         for z in 0..64 {
@@ -1672,7 +1726,10 @@ fn verify_and_fold_round_gfni(
         vec![0u128; words],
     ];
     for (idx, col) in chi_cols.iter_mut().enumerate() {
-        bytes_to_u128_vec(&raw_chi[idx * STATE_CODE_BYTES..(idx + 1) * STATE_CODE_BYTES], col);
+        bytes_to_u128_vec(
+            &raw_chi[idx * STATE_CODE_BYTES..(idx + 1) * STATE_CODE_BYTES],
+            col,
+        );
     }
 
     let t = delta_tiles.len();
@@ -1849,12 +1906,10 @@ fn eval_minimac_wave_perm(
         }
 
         for g in 0..STATE_BITS {
-            let d_cw: &[u8; MINIMAC_CODE_N] = d_open
-                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+            let d_cw: &[u8; MINIMAC_CODE_N] = d_open[g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
                 .try_into()
                 .map_err(|_| CnfRssError::InvalidParameters)?;
-            let e_cw: &[u8; MINIMAC_CODE_N] = e_open
-                [g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
+            let e_cw: &[u8; MINIMAC_CODE_N] = e_open[g * MINIMAC_CODE_N..(g + 1) * MINIMAC_CODE_N]
                 .try_into()
                 .map_err(|_| CnfRssError::InvalidParameters)?;
             if tables.verify_and_extract_public_c(d_cw).is_none()
@@ -2618,7 +2673,7 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
     fn bind_key_identity(&mut self, identity: &[u8; 32]) -> Result<(), BaggyError> {
         self.ensure_live()?;
         for s in &self.quorum_shares {
-            if s.slh_params.is_some()
+            if s.slh_profile_digest.is_some()
                 || s.scheme_identity()
                     .is_some_and(|bound| !ct_eq_bytes32(&bound, identity))
             {
@@ -2647,7 +2702,11 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
         Ok(self.open_masked_groups(&[(&r_dig, 1)])?[0][0])
     }
 
-    fn sweep(&mut self, pk_seed: &[u8; 32], lanes: Vec<LaneSpec>) -> Result<CnfRssSweep, BaggyError> {
+    fn sweep(
+        &mut self,
+        pk_seed: &[u8; 32],
+        lanes: Vec<LaneSpec>,
+    ) -> Result<CnfRssSweep, BaggyError> {
         self.ensure_live()?;
         if lanes.is_empty()
             || lanes.windows(2).any(|w| w[0].steps < w[1].steps)
@@ -2662,7 +2721,10 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
 
         // Process in bounded 6-chunk batches (`<= 24` wave tuples live at once = `< 2.8 GB` peak RAM)
         for chunk_batch in all_chunks.chunks(6) {
-            let batch_perms: usize = chunk_batch.iter().map(|c| 1 + usize::from(c[0].steps)).sum();
+            let batch_perms: usize = chunk_batch
+                .iter()
+                .map(|c| 1 + usize::from(c[0].steps))
+                .sum();
             let mut batch_tuples = match self.source.next_wave_tuples(batch_perms) {
                 Ok(t) => t,
                 Err(e) => {
@@ -2688,7 +2750,10 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
                 usize,
                 Vec<ProjectedWaveTuple>,
             )|
-             -> Result<(Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>), CnfRssError> {
+             -> Result<
+                (Vec<CnfRssSharedDigests>, Vec<PendingWaveVerification>),
+                CnfRssError,
+            > {
                 let tup0 = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
                 let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
                     .iter()
@@ -2734,8 +2799,11 @@ impl BaggyEngine for CnfRssProjectedEngine<'_> {
                         })
                         .collect();
                     let tup_s = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
-                    let (mut sh_s, mut mac_s) =
-                        self.init_public_states(&TSW_SUITE_MIDSTATE, &frames_s, &tup_s.delta_shares);
+                    let (mut sh_s, mut mac_s) = self.init_public_states(
+                        &TSW_SUITE_MIDSTATE,
+                        &frames_s,
+                        &tup_s.delta_shares,
+                    );
                     let prev = &wave_digs[usize::from(step)];
                     self.absorb_shared_digests(
                         prev,
@@ -2965,135 +3033,147 @@ impl CnfRssProjectedEngine<'_> {
             }
             self.wave_ctr = base_w;
 
-            let run_job = |(chunk, max_s, start_w, mut c_tuples): SlhJobInput<'_>|
-             -> SlhJobOutcome {
-                let tup0 = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
-                let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
-                    .iter()
-                    .map(|(prf_a, _)| fips205_prf_frame(n, pk_seed, prf_a))
-                    .collect();
-                let (mut sh0, mut mac0) =
-                    self.init_public_states(&zero_mid, &frames0, &tup0.delta_shares);
-                self.absorb_projected_key(false, n + 32, &mut sh0, &mut mac0, &tup0.delta_shares);
-                let (mut cur_dig, pend0) = eval_minimac_wave_perm(
-                    &self.tables,
-                    &self.session_id,
-                    start_w,
-                    chunk.len(),
-                    true,
-                    sh0,
-                    mac0,
-                    tup0,
-                    #[cfg(test)]
-                    self.fault,
-                )?;
-                let mut pends = vec![pend0];
-
-                for step in 0..max_s {
-                    let mut frames_s = Vec::with_capacity(chunk.len());
-                    let mut active_step_mask = [false; MINIMAC_DATA_K];
-                    for (lane, (_, steps_a)) in chunk.iter().enumerate() {
-                        if let Some(a) = steps_a.get(step) {
-                            frames_s.push(fips205_prf_frame(n, pk_seed, a));
-                            active_step_mask[lane] = true;
-                        } else {
-                            frames_s.push(fips205_prf_frame(n, pk_seed, &Fips205Adrs::ZERO));
-                        }
-                    }
-                    let tup_s = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
-                    let (mut sh_s, mut mac_s) =
-                        self.init_public_states(&zero_mid, &frames_s, &tup_s.delta_shares);
-                    self.absorb_shared_digests_prefix(
-                        n,
-                        &cur_dig,
+            let run_job =
+                |(chunk, max_s, start_w, mut c_tuples): SlhJobInput<'_>| -> SlhJobOutcome {
+                    let tup0 = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
+                    let frames0: Vec<[u8; SHAKE256_RATE_BYTES]> = chunk
+                        .iter()
+                        .map(|(prf_a, _)| fips205_prf_frame(n, pk_seed, prf_a))
+                        .collect();
+                    let (mut sh0, mut mac0) =
+                        self.init_public_states(&zero_mid, &frames0, &tup0.delta_shares);
+                    self.absorb_projected_key(
+                        false,
                         n + 32,
-                        &mut sh_s,
-                        &mut mac_s,
-                        &tup_s.delta_shares,
+                        &mut sh0,
+                        &mut mac0,
+                        &tup0.delta_shares,
                     );
-                    let (next_dig, pend_s) = eval_minimac_wave_perm(
+                    let (mut cur_dig, pend0) = eval_minimac_wave_perm(
                         &self.tables,
                         &self.session_id,
-                        start_w + 1 + step,
+                        start_w,
                         chunk.len(),
                         true,
-                        sh_s,
-                        mac_s,
-                        tup_s,
+                        sh0,
+                        mac0,
+                        tup0,
                         #[cfg(test)]
                         self.fault,
                     )?;
-                    pends.push(pend_s);
+                    let mut pends = vec![pend0];
 
-                    let all_active = active_step_mask[..chunk.len()].iter().all(|&b| b);
-                    if all_active {
-                        cur_dig = next_dig;
-                    } else {
-                        let t = self.projected.quorum.len();
-                        let mut next_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
-                        for d in next_dig.delta_shares.iter() {
-                            for j in 0..MINIMAC_CODE_N {
-                                next_delta_sum[j] ^= d[j];
+                    for step in 0..max_s {
+                        let mut frames_s = Vec::with_capacity(chunk.len());
+                        let mut active_step_mask = [false; MINIMAC_DATA_K];
+                        for (lane, (_, steps_a)) in chunk.iter().enumerate() {
+                            if let Some(a) = steps_a.get(step) {
+                                frames_s.push(fips205_prf_frame(n, pk_seed, a));
+                                active_step_mask[lane] = true;
+                            } else {
+                                frames_s.push(fips205_prf_frame(n, pk_seed, &Fips205Adrs::ZERO));
                             }
                         }
-                        let mut merged_sh =
-                            SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
-                        let mut merged_mac =
-                            SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
-                        for bit in 0..(8 * n) {
-                            let off = bit * MINIMAC_CODE_N;
-                            let mut full_bits56 = 0u64;
-                            for (lane, &is_act) in
-                                active_step_mask.iter().enumerate().take(chunk.len())
-                            {
-                                let mut b_val = 0u8;
-                                for u in 0..t {
-                                    b_val ^= if is_act {
-                                        next_dig.sh[u][off + lane]
-                                    } else {
-                                        cur_dig.sh[u][off + lane]
-                                    };
-                                }
-                                full_bits56 |= u64::from(b_val & 1) << lane;
-                            }
-                            let mut full_cw = SecretBuffer([0u8; MINIMAC_CODE_N]);
-                            self.tables.encode_secret_bits56(full_bits56, &mut full_cw);
-                            let mut full_mac = SecretBuffer([0u8; MINIMAC_CODE_N]);
-                            qsag_asm::gf256_shamir_mul(&mut *full_mac, &*full_cw, &*next_delta_sum);
-                            let mut rem_cw = *full_cw;
-                            let mut rem_mac = *full_mac;
-                            for u in 0..(t - 1) {
-                                let qu = self.projected.quorum[u];
-                                let qt = self.projected.quorum[t - 1];
-                                let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.SLH_MUX/v1");
-                                xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
-                                xof.absorb(&(qu as u64).to_be_bytes());
-                                xof.absorb(&(qt as u64).to_be_bytes());
-                                xof.absorb(&self.session_id);
-                                xof.absorb(&next_dig.delta_shares[u]);
-                                xof.absorb(&((step as u64) << 16 | bit as u64).to_be_bytes());
-                                let mut m_sh = SecretBuffer([0u8; 2 * MINIMAC_CODE_N]);
-                                xof.squeeze(&mut *m_sh);
+                        let tup_s = c_tuples.pop().ok_or(CnfRssError::BeaverBankExhausted)?;
+                        let (mut sh_s, mut mac_s) =
+                            self.init_public_states(&zero_mid, &frames_s, &tup_s.delta_shares);
+                        self.absorb_shared_digests_prefix(
+                            n,
+                            &cur_dig,
+                            n + 32,
+                            &mut sh_s,
+                            &mut mac_s,
+                            &tup_s.delta_shares,
+                        );
+                        let (next_dig, pend_s) = eval_minimac_wave_perm(
+                            &self.tables,
+                            &self.session_id,
+                            start_w + 1 + step,
+                            chunk.len(),
+                            true,
+                            sh_s,
+                            mac_s,
+                            tup_s,
+                            #[cfg(test)]
+                            self.fault,
+                        )?;
+                        pends.push(pend_s);
+
+                        let all_active = active_step_mask[..chunk.len()].iter().all(|&b| b);
+                        if all_active {
+                            cur_dig = next_dig;
+                        } else {
+                            let t = self.projected.quorum.len();
+                            let mut next_delta_sum = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                            for d in next_dig.delta_shares.iter() {
                                 for j in 0..MINIMAC_CODE_N {
-                                    merged_sh[u][off + j] = m_sh[j];
-                                    rem_cw[j] ^= m_sh[j];
-                                    merged_mac[u][off + j] = m_sh[MINIMAC_CODE_N + j];
-                                    rem_mac[j] ^= m_sh[MINIMAC_CODE_N + j];
+                                    next_delta_sum[j] ^= d[j];
                                 }
                             }
-                            merged_sh[t - 1][off..off + MINIMAC_CODE_N].copy_from_slice(&rem_cw);
-                            merged_mac[t - 1][off..off + MINIMAC_CODE_N].copy_from_slice(&rem_mac);
+                            let mut merged_sh =
+                                SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
+                            let mut merged_mac =
+                                SecretBuffer(vec![vec![0u8; DIGEST_BITS * MINIMAC_CODE_N]; t]);
+                            for bit in 0..(8 * n) {
+                                let off = bit * MINIMAC_CODE_N;
+                                let mut full_bits56 = 0u64;
+                                for (lane, &is_act) in
+                                    active_step_mask.iter().enumerate().take(chunk.len())
+                                {
+                                    let mut b_val = 0u8;
+                                    for u in 0..t {
+                                        b_val ^= if is_act {
+                                            next_dig.sh[u][off + lane]
+                                        } else {
+                                            cur_dig.sh[u][off + lane]
+                                        };
+                                    }
+                                    full_bits56 |= u64::from(b_val & 1) << lane;
+                                }
+                                let mut full_cw = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                                self.tables.encode_secret_bits56(full_bits56, &mut full_cw);
+                                let mut full_mac = SecretBuffer([0u8; MINIMAC_CODE_N]);
+                                qsag_asm::gf256_shamir_mul(
+                                    &mut *full_mac,
+                                    &*full_cw,
+                                    &*next_delta_sum,
+                                );
+                                let mut rem_cw = *full_cw;
+                                let mut rem_mac = *full_mac;
+                                for u in 0..(t - 1) {
+                                    let qu = self.projected.quorum[u];
+                                    let qt = self.projected.quorum[t - 1];
+                                    let mut xof = Cshake256Xof::new(b"QSAG.CNF_RSS.SLH_MUX/v1");
+                                    xof.absorb(&self.quorum_shares[u].pair_prf_keys[qt]);
+                                    xof.absorb(&(qu as u64).to_be_bytes());
+                                    xof.absorb(&(qt as u64).to_be_bytes());
+                                    xof.absorb(&self.session_id);
+                                    xof.absorb(&next_dig.delta_shares[u]);
+                                    xof.absorb(&((step as u64) << 16 | bit as u64).to_be_bytes());
+                                    let mut m_sh = SecretBuffer([0u8; 2 * MINIMAC_CODE_N]);
+                                    xof.squeeze(&mut *m_sh);
+                                    for j in 0..MINIMAC_CODE_N {
+                                        merged_sh[u][off + j] = m_sh[j];
+                                        rem_cw[j] ^= m_sh[j];
+                                        merged_mac[u][off + j] = m_sh[MINIMAC_CODE_N + j];
+                                        rem_mac[j] ^= m_sh[MINIMAC_CODE_N + j];
+                                    }
+                                }
+                                merged_sh[t - 1][off..off + MINIMAC_CODE_N]
+                                    .copy_from_slice(&rem_cw);
+                                merged_mac[t - 1][off..off + MINIMAC_CODE_N]
+                                    .copy_from_slice(&rem_mac);
+                            }
+                            cur_dig = CnfRssSharedDigests {
+                                delta_shares: next_dig.delta_shares,
+                                sh: merged_sh,
+                                mac: merged_mac,
+                                active_lanes: chunk.len(),
+                            };
                         }
-                        cur_dig = CnfRssSharedDigests {
-                            delta_shares: next_dig.delta_shares,
-                            sh: merged_sh,
-                            mac: merged_mac,
-                            active_lanes: chunk.len(),
-                        };
                     }
-                }
-                Ok((cur_dig, pends))
-            };
+                    Ok((cur_dig, pends))
+                };
 
             let outcomes: Vec<SlhJobOutcome> = {
                 #[cfg(feature = "std")]
@@ -3183,7 +3263,10 @@ impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
         }
         if n != self.projected.key_len
             || opt_rand.len() != n
-            || self.quorum_shares.iter().any(|s| s.scheme_identity().is_some())
+            || self
+                .quorum_shares
+                .iter()
+                .any(|s| s.scheme_identity().is_some())
         {
             return Err(Fips205Error::InvalidParameterSet);
         }
@@ -3329,7 +3412,11 @@ impl SlhMpcOracles for CnfRssProjectedEngine<'_> {
         for i in 0..params.k {
             fors_all_leaves.push(flat_leaves[i * t_leaves..(i + 1) * t_leaves].to_vec());
         }
-        Ok((revealed_sks, fors_all_leaves, CutBoundaryMacToken::mint_verified()))
+        Ok((
+            revealed_sks,
+            fors_all_leaves,
+            CutBoundaryMacToken::mint_verified(),
+        ))
     }
 
     fn eval_wots_pkgen_subtree_mpc(
@@ -3505,6 +3592,87 @@ mod tests {
     }
 
     #[test]
+    fn cnf_secret_codec_preserves_slh_profile_lock() {
+        let cfg = CnfRssConfig::new(3, 5).unwrap();
+        let mut rngs = make_rngs(5, 0x27);
+        let (mut shares, pk) = run_dealerless_cnf_rss_dkg([0x64; 32], &cfg, 32, &mut rngs).unwrap();
+        shares[0]
+            .bind_slh_params(&Fips205Params::SLH_DSA_SHAKE_256F, &pk)
+            .unwrap();
+        let encoded = shares[0].to_secret_bytes();
+        let mut restored = CnfRssKeyShare256::from_secret_bytes(&encoded).unwrap();
+        assert!(
+            restored
+                .bind_slh_params(&Fips205Params::SLH_DSA_SHAKE_256F, &pk)
+                .is_ok()
+        );
+        assert!(
+            restored
+                .bind_slh_params(&Fips205Params::SLH_DSA_SHAKE_256S, &pk)
+                .is_err()
+        );
+        assert!(restored.bind_scheme_identity(&[3; 32]).is_err());
+        assert!(CnfRssKeyShare256::from_secret_bytes(&encoded[..encoded.len() - 32]).is_err());
+    }
+
+    #[test]
+    fn staged_bank_randomizer_matches_streaming_and_exhausts() {
+        let cfg = CnfRssConfig::new(3, 5).unwrap();
+        let mut rngs = make_rngs(5, 0x61);
+        let (mut shares, _) = run_dealerless_cnf_rss_dkg([0x65; 32], &cfg, 32, &mut rngs).unwrap();
+        let mut bank =
+            StagedCnfRssBank::stage_for_quorum([0x66; 32], &cfg, &shares, &[0, 1, 2], 2, 1)
+                .unwrap();
+        let r_staged = {
+            let [s0, s1, s2, _, _] = shares.as_mut_slice() else {
+                unreachable!()
+            };
+            let mut rngs = make_rngs(3, 0x62);
+            let mut engine =
+                CnfRssProjectedEngine::new([0x66; 32], vec![s0, s1, s2], &mut rngs, &mut bank)
+                    .unwrap();
+            engine.randomiser(&[0x42; 32]).unwrap()
+        };
+        assert_eq!(bank.remaining_waves(), 0);
+        assert!(matches!(
+            bank.next_wave_tuples(1),
+            Err(CnfRssError::BeaverBankExhausted)
+        ));
+        assert!(matches!(
+            bank.next_cut_masks(1),
+            Err(CnfRssError::BeaverBankExhausted)
+        ));
+        let mut stream =
+            StreamingCnfRssSource::establish([0x67; 32], &cfg, &shares, &[0, 1, 2]).unwrap();
+        let [s0, s1, s2, _, _] = shares.as_mut_slice() else {
+            unreachable!()
+        };
+        let mut rngs = make_rngs(3, 0x63);
+        let mut engine =
+            CnfRssProjectedEngine::new([0x67; 32], vec![s0, s1, s2], &mut rngs, &mut stream)
+                .unwrap();
+        assert_eq!(engine.randomiser(&[0x42; 32]).unwrap(), r_staged);
+    }
+
+    #[test]
+    fn bank_rejects_mixed_and_inconsistent_custody_inputs() {
+        let cfg = CnfRssConfig::new(3, 5).unwrap();
+        let mut rngs = make_rngs(5, 0x33);
+        let (mut shares, _) = run_dealerless_cnf_rss_dkg([0x49; 32], &cfg, 32, &mut rngs).unwrap();
+        assert!(
+            StagedCnfRssBank::stage_for_quorum([0x51; 32], &cfg, &shares, &[0, 1, 2], 0, 0).is_ok()
+        );
+        shares.swap(0, 1);
+        assert!(StreamingCnfRssSource::establish([0x51; 32], &cfg, &shares, &[0, 1, 2]).is_err());
+        shares.swap(0, 1);
+        shares[0].slot_prg_seeds[0][0] ^= 1;
+        assert!(matches!(
+            StagedCnfRssBank::stage_for_quorum([0x51; 32], &cfg, &shares, &[0, 1, 2], 0, 0),
+            Err(CnfRssError::SlotOverlapMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn e2e_3of5_and_4of6_baggy_and_active_fault_abort() {
         let params = BaggyParams::TEST_SMALL;
 
@@ -3538,12 +3706,12 @@ mod tests {
             s.bind_scheme_identity(&binding.identity()).unwrap();
         }
 
-        // Sign with `{1, 2, 3}` (custodians `0` and `4` completely offline!) using pre-staged bank!
+        // Sign with `{1, 2, 3}` (custodians `0` and `4` completely offline).
+        // Keep the ordinary suite bounded in memory; the ignored latency benchmark
+        // covers the complete pre-staged bank and its verified full signature.
         let msg = b"3-of-5 stateless Baggy via Theorem 4.1 t-of-t MiniMAC projection";
-        let mut bank = StagedCnfRssBank::stage_for_quorum(
-            [0xA3; 32], &cfg35, &shares, &[1, 2, 3], 240, 48,
-        )
-        .unwrap();
+        let mut bank =
+            StreamingCnfRssSource::establish([0xA3; 32], &cfg35, &shares, &[1, 2, 3]).unwrap();
         let sig = {
             let [_, s1, s2, s3, _] = shares.as_mut_slice() else {
                 unreachable!()
@@ -3565,6 +3733,7 @@ mod tests {
         };
         assert!(baggy_verify(&params, &pk, msg, &sig));
         assert_eq!(Some(sig), baggy_reference_sign(&params, &ref_sk, &pk, msg));
+        drop(bank);
 
         // 2. Active-fault-abort tests:
         //    (a) 1-bit `d` tamper rejected immediately by `[128, 56, 73]` codeword check;
@@ -3639,7 +3808,12 @@ mod tests {
             b"4-of-6 stateless Baggy",
         )
         .unwrap();
-        assert!(baggy_verify(&params, &pk46, b"4-of-6 stateless Baggy", &sig46));
+        assert!(baggy_verify(
+            &params,
+            &pk46,
+            b"4-of-6 stateless Baggy",
+            &sig46
+        ));
     }
 
     #[test]
@@ -3720,13 +3894,9 @@ mod tests {
         let mut cache = WaistbandCache::new(15, 65_536);
 
         let (pk_b, bind_b) = {
-            let mut src = StreamingCnfRssSource::establish(
-                [0xD2; 32],
-                &cfg35,
-                &shares_b,
-                &[0, 1, 2],
-            )
-            .unwrap();
+            let mut src =
+                StreamingCnfRssSource::establish([0xD2; 32], &cfg35, &shares_b, &[0, 1, 2])
+                    .unwrap();
             let [s0, s1, s2, _, _] = shares_b.as_mut_slice() else {
                 unreachable!()
             };
@@ -3739,21 +3909,18 @@ mod tests {
             s.bind_scheme_identity(&bind_b.identity()).unwrap();
         }
         // Measure streaming bounded-memory `3-of-5` `BaggyParams::SHA3_128F` release
-        // AND pre-staged `StagedCnfRssBank` online release (`< 3.5 GB` RAM)!
-        let mut staged_small;
+        // AND pre-staged `StagedCnfRssBank` online release (`~12.6 GiB` staged tuple storage)!
         let small_params = BaggyParams::TEST_SMALL;
         let mut small_shares = {
             let mut r = make_rngs(5, 0xAF);
-            run_dealerless_cnf_rss_dkg([0xCF; 32], &cfg35, 32, &mut r).unwrap().0
+            run_dealerless_cnf_rss_dkg([0xCF; 32], &cfg35, 32, &mut r)
+                .unwrap()
+                .0
         };
         let (pk_sm, bind_sm) = {
-            let mut src = StreamingCnfRssSource::establish(
-                [0xCE; 32],
-                &cfg35,
-                &small_shares,
-                &[0, 1, 2],
-            )
-            .unwrap();
+            let mut src =
+                StreamingCnfRssSource::establish([0xCE; 32], &cfg35, &small_shares, &[0, 1, 2])
+                    .unwrap();
             let [s0, s1, s2, _, _] = small_shares.as_mut_slice() else {
                 unreachable!()
             };
@@ -3765,8 +3932,13 @@ mod tests {
         for s in &mut small_shares {
             s.bind_scheme_identity(&bind_sm.identity()).unwrap();
         }
-        staged_small = StagedCnfRssBank::stage_for_quorum(
-            [0xCD; 32], &cfg35, &small_shares, &[1, 3, 4], 240, 48,
+        let mut staged_small = StagedCnfRssBank::stage_for_quorum(
+            [0xCD; 32],
+            &cfg35,
+            &small_shares,
+            &[1, 3, 4],
+            114,
+            144,
         )
         .unwrap();
         let t_staged_online = std::time::Instant::now();
@@ -3775,13 +3947,9 @@ mod tests {
                 unreachable!()
             };
             let mut r = make_rngs(3, 0xAD);
-            let mut eng = CnfRssProjectedEngine::new(
-                [0xCD; 32],
-                vec![s1, s3, s4],
-                &mut r,
-                &mut staged_small,
-            )
-            .unwrap();
+            let mut eng =
+                CnfRssProjectedEngine::new([0xCD; 32], vec![s1, s3, s4], &mut r, &mut staged_small)
+                    .unwrap();
             baggy_sign_mpc(
                 &mut eng,
                 &small_params,
@@ -3794,6 +3962,7 @@ mod tests {
             .unwrap()
         };
         let baggy_staged_online_ms = t_staged_online.elapsed().as_secs_f64() * 1000.0;
+        std::eprintln!("[BENCH staged TEST_SMALL] {baggy_staged_online_ms:.2} ms");
         assert!(baggy_verify(
             &small_params,
             &pk_sm,
@@ -3804,13 +3973,9 @@ mod tests {
 
         let t_baggy_full = std::time::Instant::now();
         let sig_b = {
-            let mut src = StreamingCnfRssSource::establish(
-                [0xD4; 32],
-                &cfg35,
-                &shares_b,
-                &[1, 3, 4],
-            )
-            .unwrap();
+            let mut src =
+                StreamingCnfRssSource::establish([0xD4; 32], &cfg35, &shares_b, &[1, 3, 4])
+                    .unwrap();
             let [_, s1, _, s3, s4] = shares_b.as_mut_slice() else {
                 unreachable!()
             };
@@ -3829,6 +3994,7 @@ mod tests {
             .unwrap()
         };
         let baggy_full_ms = t_baggy_full.elapsed().as_secs_f64() * 1000.0;
+        std::eprintln!("[BENCH Baggy SHA3_128F stream] {baggy_full_ms:.2} ms");
         assert!(baggy_verify(
             &baggy_params,
             &pk_b,
@@ -3845,13 +4011,9 @@ mod tests {
                 .unwrap();
         let pk_seed = &pk_seed32[..slh_params.n];
         let pk_s = {
-            let mut src = StreamingCnfRssSource::establish(
-                [0xE2; 32],
-                &cfg35,
-                &shares_s,
-                &[0, 1, 2],
-            )
-            .unwrap();
+            let mut src =
+                StreamingCnfRssSource::establish([0xE2; 32], &cfg35, &shares_s, &[0, 1, 2])
+                    .unwrap();
             let [s0, s1, s2, _, _] = shares_s.as_mut_slice() else {
                 unreachable!()
             };
@@ -3865,13 +4027,9 @@ mod tests {
         }
         let t_slh_online = std::time::Instant::now();
         let sig_s = {
-            let mut src_s = StreamingCnfRssSource::establish(
-                [0xE3; 32],
-                &cfg35,
-                &shares_s,
-                &[0, 2, 3],
-            )
-            .unwrap();
+            let mut src_s =
+                StreamingCnfRssSource::establish([0xE3; 32], &cfg35, &shares_s, &[0, 2, 3])
+                    .unwrap();
             let [s0, _, s2, s3, _] = shares_s.as_mut_slice() else {
                 unreachable!()
             };

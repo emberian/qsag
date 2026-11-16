@@ -116,7 +116,7 @@ theorem completeWotsRow_correct (profile : RssProduction.Profile)
     rw [hValues]
     exact selectedLeaf_from_actual_cut profile layer tree kp digits hCheck
   · rw [completeWotsRow, ite_eq_right h]
-    unfold mpcComputeWotsPk
+    rw [mpcComputeWotsPk.public_eq_1]
     congr 1
     simp only [wotsRowQueries, List.map_map]
     apply List.map_congr_left

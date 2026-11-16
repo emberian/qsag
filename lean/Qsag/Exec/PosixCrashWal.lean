@@ -606,7 +606,7 @@ def FdTable.lookupDescId (ft : FdTable) (pid : Pid) (fd : FdId) : Option OpenDes
   assocLookup ft.fdRefs (pid, fd)
 
 /-- Resolve `(pid, fd)` through `FdTable` to `(OpenDescriptionId, OpenFileDesc)`. -/
-def resolveOpenFd (t : OpenFdTable) (pid : Pid) (fd : FdId) :
+@[expose] def resolveOpenFd (t : OpenFdTable) (pid : Pid) (fd : FdId) :
     Option (OpenDescriptionId × OpenFileDesc) :=
   match assocLookup t.fdRefs (pid, fd) with
   | none => none
@@ -723,17 +723,17 @@ structure PosixFsState where
   deriving Repr, DecidableEq
 
 /-- Fresh formatted empty POSIX directory state. -/
-def PosixFsState.empty : PosixFsState := {}
+@[expose] def PosixFsState.empty : PosixFsState := {}
 
 /-- Pending volatile write for `ino` (kernel `InodePageCache` shadows `DriveWriteCache`). -/
-def pendingVolatileWrite (st : PosixFsState) (ino : InodeId) : Option (List UInt8) :=
+@[expose] def pendingVolatileWrite (st : PosixFsState) (ino : InodeId) : Option (List UInt8) :=
   match assocLookup st.kernel.pageCache.dirtyFiles ino with
   | some dirty => some dirty
   | none => assocLookup st.driveCache.cachedFiles ino
 
 /-- Effective coherent file bytes visible to `read`/`pread` across the 3-tier hierarchy:
     `InodePageCache` → `DriveWriteCache` → `NandBlocks`. -/
-def readInodeHierarchy (st : PosixFsState) (ino : InodeId) : Option (List UInt8) :=
+@[expose] def readInodeHierarchy (st : PosixFsState) (ino : InodeId) : Option (List UInt8) :=
   match pendingVolatileWrite st ino with
   | some pending => some pending
   | none => assocLookup st.nand.fileBlocks ino
@@ -1784,7 +1784,7 @@ def computeWalMac (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody)
   macFn macKey (encodeWalBody b)
 
 /-- Attach a 256-bit `keyedMac` tag to `WalRecordBody`. -/
-def signWalRecord (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody) : WalRecord :=
+@[expose] def signWalRecord (macFn : KeyedMacFn) (macKey : List UInt8) (b : WalRecordBody) : WalRecord :=
   { body := b, keyedMac := computeWalMac macFn macKey b }
 
 /-- Verify a `WalRecord`'s 256-bit `keyedMac`. -/
@@ -10810,3 +10810,8 @@ theorem qsburn05_paged_offsets_match :
 
 end Qsag.RustDurability
 end
+
+public section
+namespace Qsag
+#export_eqns KernelPanicCrash PowerLossCrash posixCreateExclNoFollow posixPwriteAll posixSyncAllMedia posixSyncParentDir posixUnlinkIfPresent posixRename
+end Qsag

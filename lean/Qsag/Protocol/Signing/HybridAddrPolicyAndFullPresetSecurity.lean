@@ -515,9 +515,11 @@ theorem all_fips_profiles (f : FipsSet) :
       Fips205Params.treeBytes_eq, Fips205Params.leafBytes_eq] <;>
     decide
 
+/-- Deployed 32-byte-node `FrontierFtsProfile` presets (`crates/qsag-fts/src/frontier.rs:39-53`;
+    the retired 16-byte FTS profiles have been removed). -/
 inductive FrontierProfile where
-  | compact514 | compact770 | compact1314 | compact1122 | full256Bit
-  deriving DecidableEq
+  | compact1122 | full256Bit
+  deriving DecidableEq, Repr
 structure FrontierParams where
   nodeBytes : Nat
   height : Nat
@@ -528,25 +530,19 @@ structure FrontierParams where
   counterBits : Nat
   maxSafeUses : Nat
 @[expose] def frontierParams : FrontierProfile → FrontierParams
-  | .compact514 => ⟨16, 14, 5, 31, 62, 128, 16, 1⟩
-  | .compact770 => ⟨16, 15, 5, 47, 118, 190, 16, 2⟩
-  | .compact1314 => ⟨16, 15, 5, 81, 162, 335, 16, 2⟩
   | .compact1122 => ⟨32, 8, 96, 34, 1615, 256, 16, 1⟩
   | .full256Bit => ⟨32, 8, 5, 72, 144, 256, 16, 1⟩
 def frontierWireBytes : FrontierProfile → Nat
-  | .compact514 => 514 | .compact770 => 770 | .compact1314 => 1314
   | .compact1122 => 1122 | .full256Bit => 2338
 def useBudget : FrontierProfile → Nat
-  | .compact770 | .compact1314 => 2
-  | _ => 1
+  | .compact1122 | .full256Bit => 1
 
 theorem all_frontier_profiles (f : FrontierProfile) :
     let p := frontierParams f
     (p.len + 1) * p.nodeBytes + (p.counterBits + 7) / 8 = frontierWireBytes f ∧
-    p.maxSafeUses = useBudget f ∧ p.counterBits = 16 ∧ p.len ≤ 2 ^ p.height ∧
-    p.target ≤ p.len * (p.w - 1) ∧ p.indexBits ≤ 384 ∧
-    ((p.nodeBytes = 32 ∧ p.indexBits = 256 ∧ 8 * p.nodeBytes = 256 ∧ 4 * p.nodeBytes = 128) ∨
-     (p.nodeBytes = 16 ∧ 8 * p.nodeBytes = 128 ∧ 4 * p.nodeBytes = 64)) := by
+    p.maxSafeUses = useBudget f ∧ p.maxSafeUses = 1 ∧ p.counterBits = 16 ∧
+    p.len ≤ 2 ^ p.height ∧ p.target ≤ p.len * (p.w - 1) ∧ p.indexBits ≤ 384 ∧
+    p.nodeBytes = 32 ∧ p.indexBits = 256 ∧ 8 * p.nodeBytes = 256 ∧ 4 * p.nodeBytes = 128 := by
   cases f <;> dsimp [frontierParams, frontierWireBytes, useBudget] <;> decide
 
 /-- N(t,l) row: coefficient of x^l in P_0=x, P_(t+1)=x+P_t^2.
@@ -657,15 +653,21 @@ theorem wide_code_domains :
     2 ^ 256 < codeSize (frontierParams .full256Bit) := by
   decide
 
+def FrontierParams.isFullWidth256 (p : FrontierParams) : Prop :=
+  p.nodeBytes = 32 ∧ p.indexBits = 256 ∧ p.maxSafeUses = 1 ∧ 2 ^ 256 < codeSize p ∧
+    4 * p.nodeBytes = 128
+
 theorem security_regime_separation (f : FrontierProfile) :
-    (f = .compact1122 ∨ f = .full256Bit) ↔
-    ((frontierParams f).nodeBytes = 32 ∧ (frontierParams f).indexBits = 256 ∧
-      2 ^ 256 < codeSize (frontierParams f) ∧ 4 * (frontierParams f).nodeBytes = 128) := by
-  constructor
-  · intro hf; rcases hf with rfl | rfl
-    · exact ⟨rfl, rfl, wide_code_domains.1, rfl⟩
-    · exact ⟨rfl, rfl, wide_code_domains.2, rfl⟩
-  · intro hf; cases f <;> simp_all [frontierParams]
+    (f = .compact1122 ∨ f = .full256Bit) ∧ (frontierParams f).isFullWidth256 := by
+  cases f
+  · exact ⟨.inl rfl, rfl, rfl, rfl, wide_code_domains.1, rfl⟩
+  · exact ⟨.inr rfl, rfl, rfl, rfl, wide_code_domains.2, rfl⟩
+
+/-- Tooth: a narrow 16-byte / 128-bit index parameter set is excluded by `FrontierParams.isFullWidth256`. -/
+theorem tooth_narrow_16byte_frontier_excluded :
+    ¬ (FrontierParams.mk 16 14 5 31 62 128 16 1).isFullWidth256 := by
+  rintro ⟨hNode, _⟩
+  cases hNode
 
 /-- Equal sums plus coordinate domination force equality, constructively. -/
 theorem equal_sum_dominated {n : Nat} (a b : Fin n → Nat)
@@ -778,5 +780,6 @@ namespace Qsag.HybridSecurity
 #tooth_pair rogue_partner_resistance vs naive_rogue_rebinding
 #tooth_pair authenticated_window_required vs unauthenticated_window_reset_attack
 #tooth_pair ledger_trace_safety vs unauthenticated_window_reset_attack
+#tooth_pair security_regime_separation vs tooth_narrow_16byte_frontier_excluded
 
 end Qsag.HybridSecurity

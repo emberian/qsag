@@ -91,6 +91,33 @@ def Cheats (T : List (Gate F)) : Prop := ∃ g ∈ T, gateError g ≠ zero
 def Honest (T : List (Gate F)) : Prop :=
   ∀ g ∈ T, gateError g = zero ∧ ∀ j, tripleError g j = zero
 
+theorem gateError_eq (g : Gate F) : gateError g = sub g.z (mul g.x g.y) := by
+  unfold gateError; rfl
+
+theorem tripleError_eq (g : Gate F) (j : Nat) :
+    tripleError g j = sub (g.c j) (mul (g.a j) (g.b j)) := by
+  unfold tripleError; rfl
+
+theorem gatePasses_eq [DecidableEq F] (g : Gate F) (j : Nat) (chi : F) :
+    gatePasses g j chi = decide (openTau g j chi = zero) := by
+  unfold gatePasses; rfl
+
+theorem transcriptPasses_eq [DecidableEq F] (T : List (Gate F)) (j : Nat) (chi : F) :
+    transcriptPasses T j chi = T.all (fun g => gatePasses g j chi) := by
+  unfold transcriptPasses; rfl
+
+theorem sacConfig_reps [DecidableEq F] (reps : Nat) :
+    (sacConfig (F := F) reps).reps = reps := by
+  unfold sacConfig; rfl
+
+theorem sacConfig_check [DecidableEq F] (reps : Nat) :
+    (sacConfig (F := F) reps).check = transcriptPasses (F := F) := by
+  unfold sacConfig; rfl
+
+theorem cheats_iff (T : List (Gate F)) :
+    Cheats T ↔ ∃ g ∈ T, gateError g ≠ zero := by
+  unfold Cheats; exact Iff.rfl
+
 /-- A wrong gate passes under at most one challenge. -/
 theorem wrong_gate_challenge_unique (g : Gate F) (j : Nat) (hd : gateError g ≠ zero)
     {chi1 chi2 : F} (h1 : openTau g j chi1 = zero) (h2 : openTau g j chi2 = zero) :

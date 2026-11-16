@@ -38,7 +38,7 @@ structure Profile where
   grindLimit : Nat
   tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds
 
-def referenceKey (p : Profile) : PqSecretKey :=
+@[expose] def referenceKey (p : Profile) : PqSecretKey :=
   ⟨reconstructRssBytes p.material.seed, reconstructRssBytes p.material.prf, p.material.pkSeed⟩
 
 def sharedOracle (p : Profile) : ProductionPqHashMpcOracles :=
@@ -91,7 +91,7 @@ theorem encodeParameters_injective {a b : PqHashParams}
 
 /-- Bind public enrollment, every parameter field, application context and resource
     limit, plus every SessionScheduleReq field. There is no separate retry counter. -/
-def payload (p : Profile) (req : SessionScheduleReq) : List UInt8 :=
+@[expose] def payload (p : Profile) (req : SessionScheduleReq) : List UInt8 :=
   encodeMultiFrame ["QSAG.RSS.PRODUCTION.REQUEST/v1".toUTF8.data.toList,
     encodeUcPqPublicKey (enrolledKey p), encodeParameters p.params, p.context,
     leb128 p.grindLimit, encodeUcSigningRequest req]
@@ -147,7 +147,7 @@ def enrollmentDigest_binding_or_collision (p q : Profile)
     exact .inr ⟨enrollmentEncoding p, enrollmentEncoding q, he, h⟩
 
 /-- Partial shared-circuit signing. Stateful epochs select actual production leaves. -/
-def sharedSign (p : Profile) (req : SessionScheduleReq) : Option PqHashSig :=
+@[expose] def sharedSign (p : Profile) (req : SessionScheduleReq) : Option PqHashSig :=
   if p.params.statefulJorts then
     mpcEvalProductionStatefulSign cshake256Suite p.params (sharedOracle p)
       p.material.pkSeed (payload p req) req.optRand req.reqEpoch p.grindLimit
@@ -195,7 +195,7 @@ def encodeResult (params : PqHashParams) : Option PqHashSig → Except Failure (
     | .error reason => .error (.encoding reason)
     | .ok raw => .ok raw
 
-def partialOutput (p : Profile) (req : SessionScheduleReq) : Except Failure (List UInt8) :=
+@[expose] def partialOutput (p : Profile) (req : SessionScheduleReq) : Except Failure (List UInt8) :=
   encodeResult p.params (sharedSign p req)
 
 def referenceOutput (p : Profile) (req : SessionScheduleReq) : Except Failure (List UInt8) :=

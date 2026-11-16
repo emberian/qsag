@@ -84,9 +84,7 @@ pub fn parse_tpm_nv_index(raw: &str) -> Result<u32, CliError> {
     } else {
         trimmed.parse::<u32>()
     }
-    .map_err(|_| {
-        CliError::usage("--anchor-tpm-nv must be a 32-bit NV index (e.g. 0x01800001)")
-    })?;
+    .map_err(|_| CliError::usage("--anchor-tpm-nv must be a 32-bit NV index (e.g. 0x01800001)"))?;
     if !is_valid_tpm2_nv_index(parsed) {
         return Err(CliError::usage(
             "--anchor-tpm-nv must lie in TPM_HT_NV_INDEX (0x01000000..=0x01FFFFFF)",
@@ -132,7 +130,10 @@ impl AnchorConfig {
         let anchor_dir = args.get("anchor-dir").map(str::to_owned);
         let vault_dir = args.get("vault-dir").map(str::to_owned);
         let allow_single_disk = args.flag("allow-single-disk-anchor");
-        let tpm_nv_index = args.get("anchor-tpm-nv").map(parse_tpm_nv_index).transpose()?;
+        let tpm_nv_index = args
+            .get("anchor-tpm-nv")
+            .map(parse_tpm_nv_index)
+            .transpose()?;
         let tpm_device_path = args.get("anchor-tpm-device").map(str::to_owned);
         let tpm_auth_env = args.get("anchor-tpm-auth-env").map(str::to_owned);
         let vmgenid = args.flag("anchor-vmgenid");
@@ -704,7 +705,11 @@ fn sanitize_domain_prefix(domain: &str) -> String {
 
 fn slot_stem(domain: &str, key_id: &[u8; 32]) -> String {
     let slot_digest = cshake256_framed_32(b"QSAG.CLI.ANCHOR.SLOT.V1", &[domain.as_bytes(), key_id]);
-    format!("{}-{}", sanitize_domain_prefix(domain), to_hex(&slot_digest))
+    format!(
+        "{}-{}",
+        sanitize_domain_prefix(domain),
+        to_hex(&slot_digest)
+    )
 }
 
 fn anchor_record_path(anchor_dir: &str, domain: &str, key_id: &[u8; 32]) -> PathBuf {
@@ -890,7 +895,28 @@ impl FsExternalMountAnchor {
             })?
         };
 
-        let domain_hash = cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
+        // Authenticate the enrolled hardware/fork-guard requirements in the
+        // existing record header. Otherwise reopening a TPM+directory anchor
+        // with only --anchor-dir silently removes the hardware rollback fence.
+        // Preserve the existing directory-only encoding.
+        let domain_hash = if config.tpm_nv_index.is_none() && !config.vmgenid {
+            cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()])
+        } else {
+            let backend_flags = [
+                u8::from(config.anchor_dir.is_some()),
+                u8::from(config.tpm_nv_index.is_some()),
+                u8::from(config.vmgenid),
+                u8::from(config.vmgenid_strict),
+            ];
+            cshake256_framed_32(
+                b"QSAG.CLI.ANCHOR.DOMAIN.V1",
+                &[
+                    domain.as_bytes(),
+                    &backend_flags,
+                    &config.tpm_nv_index.unwrap_or_default().to_be_bytes(),
+                ],
+            )
+        };
         let inner = Arc::new(AnchorInner {
             record,
             poisoned: AtomicBool::new(false),
@@ -1028,19 +1054,18 @@ impl FsExternalMountAnchor {
                 VmGenPolicy::PINNED_BOOT_SESSION
             };
             let vmgen_mac = derive_sub_mac(&root_mac.0, b"vmgenid", domain, &key_id);
-            let vmgen_anchor =
-                HypervisorGenerationAnchor::<LinuxSysfsVmGenSource>::open_or_create(
-                    &vmgen_seal_path,
-                    &guarded_target,
-                    vmgen_mac.0,
-                    policy,
-                )
-                .map_err(|e| {
-                    CliError::state(format!(
-                        "ExternalAnchorUnavailableOrCorrupt (VMGENID {domain}): {}",
-                        e.into_io_error()
-                    ))
-                })?;
+            let vmgen_anchor = HypervisorGenerationAnchor::<LinuxSysfsVmGenSource>::open_or_create(
+                &vmgen_seal_path,
+                &guarded_target,
+                vmgen_mac.0,
+                policy,
+            )
+            .map_err(|e| {
+                CliError::state(format!(
+                    "ExternalAnchorUnavailableOrCorrupt (VMGENID {domain}): {}",
+                    e.into_io_error()
+                ))
+            })?;
             chain = DynExternalAnchor(Arc::new(CompositeAntiRollbackAnchor::new(
                 chain,
                 vmgen_anchor,
@@ -1368,8 +1393,7 @@ mod tests {
         drop(reopened);
 
         // Replacing the `.anchor.lock` sidecar with a copy at a new inode fails `lock_identity_seal`!
-        let rec_path =
-            anchor_record_path(cfg.anchor_dir.as_deref().unwrap(), "ceremony", &key_id);
+        let rec_path = anchor_record_path(cfg.anchor_dir.as_deref().unwrap(), "ceremony", &key_id);
         let lock_path = side_path(&rec_path, ".lock");
         let saved_lock = std::fs::read(&lock_path).unwrap();
         let _keep_old_ino = File::open(&lock_path).unwrap();
@@ -1852,6 +1876,66 @@ mod tests {
             rsp.extend_from_slice(&0u16.to_be_bytes());
             Ok(rsp)
         }
+    }
+
+    #[test]
+    fn hardware_anchor_cannot_be_reopened_with_weaker_backend_requirements() {
+        let slot = Slot::new("hardware-no-downgrade");
+        let config = AnchorConfig {
+            tpm_nv_index: Some(0x0180_0007),
+            vmgenid: true,
+            ..slot.cfg.clone()
+        };
+        let tpm = TestTpm2Device {
+            nv_index: 0x0180_0007,
+            counter: Arc::new(Mutex::new(41)),
+        };
+        let key_id = [0x87; 32];
+        let mac_key = [0x98; 32];
+        let anchor = FsExternalMountAnchor::provision_fresh_with_tpm(
+            &config,
+            &[&slot.sk],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+            tpm.clone(),
+        )
+        .unwrap();
+        anchor.advance(ckpt(1, 0xA1)).unwrap();
+        drop(anchor);
+        for (nv, vmgenid) in [(None, false), (None, true), (config.tpm_nv_index, false)] {
+            let weaker = AnchorConfig {
+                tpm_nv_index: nv,
+                vmgenid,
+                ..config.clone()
+            };
+            let result = FsExternalMountAnchor::open_existing_with_tpm(
+                &weaker,
+                &[&slot.sk],
+                &[],
+                "ceremony",
+                key_id,
+                mac_key,
+                tpm.clone(),
+            );
+            assert!(
+                result.is_err(),
+                "removing an enrolled backend must fail closed"
+            );
+            assert_eq!(*tpm.counter.lock().unwrap(), 42);
+        }
+        let reopened = FsExternalMountAnchor::open_existing_with_tpm(
+            &config,
+            &[&slot.sk],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+            tpm.clone(),
+        )
+        .unwrap();
+        assert_eq!(reopened.load().unwrap(), Some(ckpt(1, 0xA1)));
     }
 
     #[test]

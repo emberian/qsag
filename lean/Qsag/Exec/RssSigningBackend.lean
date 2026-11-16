@@ -135,6 +135,7 @@ theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionSch
     reconstructRssBytes (queryRun (preparePublic profile request) profile.material cut query tape).shares =
       answer (RssProduction.sharedOracle profile) query := by
   have hm := RssProduction.sharedOracle_matches profile
+  rw [ProductionPqHashMpcOracles.MatchesKey_iff, PqHashMpcOracles.MatchesKey.public_eq_1] at hm
   cases query with
   | prfMsg rand mu =>
     dsimp only [queryRun, answer]
@@ -164,6 +165,7 @@ theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionSch
       (rssFrameSingleSecretCall tagPrf profile.material.pkSeed adrs profile.material.seed) tape hf.1
     refine ⟨hr.1, ?_⟩
     rw [hr.2, hf.2, hm.2.1]
+    rw [forsIndexedSecretLeaf.public_eq_1, thSecretPrf_eq, thCall_eq]
     rfl
   | forsLeaf tree kp j u =>
     dsimp only [queryRun, answer]
@@ -177,7 +179,8 @@ theorem queryRun_correct (profile : RssProduction.Profile) (request : SessionSch
     have hr := preparedHash_correct profile request cut 1 (.forsLeaf tree kp j u)
       (rssFrameSingleSecretCall tagThF profile.material.pkSeed treeAdrs _) tape hf2.1
     refine ⟨hr.1, ?_⟩
-    rw [hr.2, hf2.2, hb.2, hf.2, hm.2.2]
+    rw [hr.2, hf2.2, hb.2, hf.2, hm.2.2, forsIndexedLeafFn_eq,
+      forsIndexedLeafHash_eq, forsIndexedSecretLeaf.public_eq_1, thSecretPrf_eq, thChainF_eq, thCall_eq, thCall_eq]
     rfl
 
 @[expose] def HashesFrom (cut : Nat) (query : Query) : Nat → List HashEvidence → Prop

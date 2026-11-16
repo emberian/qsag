@@ -226,3 +226,8 @@ theorem keccak_refines_existing (s : RssKState) (tape : Nat → Nat → RssPrfZe
 #verify_constructive productGate_matches_unmasked_rust_formula chiLane_reconstruct reconstruct_chiNetwork reconstruct_roundNetwork round_refines_existing reconstruct_roundsNetwork keccak_refines_existing
 
 end Qsag.RssParticipant
+
+public section
+namespace Qsag.RssParticipant
+#export_eqns gateRecords
+end Qsag.RssParticipant

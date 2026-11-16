@@ -28,10 +28,17 @@ distribution.
    sealed-`w₁` view simulation to rectangular `(k, ℓ) = (4, 4), (6, 5), (8, 7)`
    (`threshold_mldsa_rect_abort_transcript_zk`, `threshold_mldsa65_abort_transcript_zk`,
    `threshold_mldsa87_abort_transcript_zk`).
+5. **`SacrificeFreezeSample` ↔ `rssSacrificedSignStep` Freeze-Before-Coin Bridge (`L-Ex-15`)**:
+   Connects the `FrozenChallenge` / `SacrificeFreeze` freeze-before-sample transition directly to
+   `sacAccept204` (`sacAccept204_iff_freezeGate_six_reps`) and `rssSacrificedSignStep`
+   (`rssSacrificedSignStep_frozen_ext6_soundness`, `rssSacrificedSignStep_mldsaQ6_frozen_soundness`),
+   proving `≤ 1 / |F|` (`≤ 1` out of `mldsaQ^6`, `< 2^-137`) forged-product acceptance when frozen
+   before coin sampling, paired with `tooth_rssSacrificedSignStep_swapped_order_forges`.
 -/
 
 public import Qsag.Protocol.Threshold.ThresholdMpc
 public import Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
+public import Qsag.Protocol.Threshold.SacrificeFreezeSample
 public import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Tactic.MaskBijection
 import Qsag.Protocol.Aggregation.UcGames
@@ -1877,5 +1884,428 @@ theorem threshold_mldsa87_rect_abort_zk_witness :
 #tooth_pair threshold_mldsa87_abort_transcript_zk vs
   tooth_unsealed_w1_or_irwin_hall_abort_leaks_secret
 #verify_inhabited threshold_mldsa87_abort_transcript_zk threshold_mldsa87_rect_abort_zk_witness
+
+/-! ## §5. `SacrificeFreezeSample` ↔ `rssSacrificedSignStep` Freeze-Before-Coin Soundness (`L-Ex-15`) -/
+
+def rssStepOutcomeIsOk :
+    StepOutcome RssMlDsaSignerState (RssSignPublicAbortView × Option ThresholdSignSig)
+      RssPreOpenAbortReason → Bool
+  | .ok _ _ => true
+  | .err _ _ => false
+
+/-- True iff `rssSacrificedSignStep` accepts the multiplication sacrifice and transitions to `.ok`
+    (neither `.attemptReplay` nor `.mpcSacrificeFailed`). -/
+def rssSignStepAcceptsSacrifice
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (chi : Ext6Fq204) (T : RssSacrificeTranscript204) : Bool :=
+  rssStepOutcomeIsOk (rssSacrificedSignStep chalHash sampleInBall st inp chi T)
+
+theorem rssSignStepAcceptsSacrifice_eq
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (chi : Ext6Fq204) (T : RssSacrificeTranscript204) :
+    rssSignStepAcceptsSacrifice chalHash sampleInBall st inp chi T =
+      (decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) &&
+       rssSacrificedProductsValid chalHash sampleInBall st inp chi T) := by
+  unfold rssSignStepAcceptsSacrifice rssSacrificedSignStep
+  cases decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
+  | false => rfl
+  | true =>
+    cases rssSacrificedProductsValid chalHash sampleInBall st inp chi T with
+    | false => rfl
+    | true =>
+      obtain ⟨out, hOk⟩ := rssSignCore_is_ok chalHash { st with nextAttempt := st.nextAttempt + 1 } inp
+      rw [hOk]
+      rfl
+
+def ext6Coord (e : Ext6Fq204) : Nat → Fq204
+  | 0 => e.a0
+  | 1 => e.a1
+  | 2 => e.a2
+  | 3 => e.a3
+  | 4 => e.a4
+  | _ => e.a5
+
+def ext6OfList (chis : List Fq204) : Ext6Fq204 :=
+  ⟨chis.getD 0 Fq204.zero,
+   chis.getD 1 Fq204.zero,
+   chis.getD 2 Fq204.zero,
+   chis.getD 3 Fq204.zero,
+   chis.getD 4 Fq204.zero,
+   chis.getD 5 Fq204.zero⟩
+
+/-- Embeds a degree-6 extension `SacGate204` into `SacrificeFreeze.Gate Fq204` with its 6
+    coordinate sacrificial triples `(a_j, b, c_j)`. -/
+def sacGate204ToFreezeGate (g : SacGate204) : SacrificeFreeze.Gate Fq204 where
+  x := g.x
+  y := g.y
+  z := g.z
+  a := ext6Coord g.a
+  b := fun _ => g.b
+  c := ext6Coord g.c
+
+def rssTranscriptToFreezeGates (T : RssSacrificeTranscript204) : List (SacrificeFreeze.Gate Fq204) :=
+  (rssTranscriptAllGates204 T).map sacGate204ToFreezeGate
+
+/-- Exact coordinatewise equivalence between `sacAccept204` over `Ext6Fq204` and all 6 base-field
+    repetitions of `SacrificeFreeze.gatePasses` over `Fq204`. -/
+theorem sacAccept204_iff_freezeGate_six_reps
+    (k0 k1 k2 k3 k4 k5 : Fq204) (g : SacGate204) :
+    sacAccept204 ⟨k0, k1, k2, k3, k4, k5⟩ g = true ↔
+      ∀ j : Nat, j < 6 →
+        SacrificeFreeze.gatePasses (sacGate204ToFreezeGate g) j
+          ([k0, k1, k2, k3, k4, k5].getD j Fq204.zero) = true := by
+  simp only [sacAccept204_iff_tau_eq, sacGateError204_eq, sacTripleError204_eq,
+    ext6Sub_eq, ext6Scale_eq, ext6Zero_eq, Ext6Fq204.mk.injEq]
+  constructor
+  · rintro ⟨h0, h1, h2, h3, h4, h5⟩ j hj
+    rw [SacrificeFreeze.gatePasses_eq, decide_eq_true_eq, SacrificeFreeze.openTau_eq,
+        SacrificeFreeze.gateError_eq, SacrificeFreeze.tripleError_eq]
+    have hCases : j = 0 ∨ j = 1 ∨ j = 2 ∨ j = 3 ∨ j = 4 ∨ j = 5 := by omega
+    rcases hCases with rfl | rfl | rfl | rfl | rfl | rfl
+    · exact h0
+    · exact h1
+    · exact h2
+    · exact h3
+    · exact h4
+    · exact h5
+  · intro hAll
+    have hp : ∀ j : Nat, j < 6 →
+        CommRingOps.sub
+          (CommRingOps.mul ([k0, k1, k2, k3, k4, k5].getD j Fq204.zero)
+            (CommRingOps.sub g.z (CommRingOps.mul g.x g.y)))
+          (CommRingOps.sub (ext6Coord g.c j) (CommRingOps.mul (ext6Coord g.a j) g.b)) =
+        CommRingOps.zero := by
+      intro j hj
+      have hjPass := hAll j hj
+      rw [SacrificeFreeze.gatePasses_eq, decide_eq_true_eq, SacrificeFreeze.openTau_eq,
+          SacrificeFreeze.gateError_eq, SacrificeFreeze.tripleError_eq] at hjPass
+      exact hjPass
+    exact ⟨hp 0 (by decide), hp 1 (by decide), hp 2 (by decide),
+           hp 3 (by decide), hp 4 (by decide), hp 5 (by decide)⟩
+
+private theorem countIf_vectors_le {α : Type} (xs : List α) :
+    ∀ (t : Nat) {p q : List α → Bool},
+      (∀ v, v.length = t → p v = true → q v = true) →
+      FrozenChallenge.countIf p (FrozenChallenge.vectors xs t) ≤
+        FrozenChallenge.countIf q (FrozenChallenge.vectors xs t)
+  | 0, p, q, h => by
+    show (if p [] then 1 else 0) + 0 ≤ (if q [] then 1 else 0) + 0
+    cases hp : p [] with
+    | false => simp
+    | true => rw [h [] rfl hp]; simp
+  | t + 1, p, q, h => by
+    show FrozenChallenge.countIf p (FrozenChallenge.extendAll xs (FrozenChallenge.vectors xs t)) ≤
+      FrozenChallenge.countIf q (FrozenChallenge.extendAll xs (FrozenChallenge.vectors xs t))
+    rw [FrozenChallenge.countIf_extendAll, FrozenChallenge.countIf_extendAll]
+    exact FrozenChallenge.sumOver_le (fun x =>
+      countIf_vectors_le xs t (fun v hv => h (x :: v) (by rw [List.length_cons, hv]))) xs
+
+/-- Single-draw `FrozenChallenge.Config` over `Ext6Fq204` gating `rssSacrificedSignStep` on a
+    frozen `(inp, T)` commitment before challenge sampling. -/
+def rssSignFreezeExt6Config
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) :
+    FrozenChallenge.Config (RssMlDsaAttemptInput × RssSacrificeTranscript204) Ext6Fq204 where
+  reps := 1
+  check p _ chi := rssSignStepAcceptsSacrifice chalHash sampleInBall st p.1 chi p.2
+
+/-- **`rssSacrificedSignStep` Freeze-Before-Sample Soundness Over Any `Ext6Fq204` Pool
+    (`rssSacrificedSignStep_frozen_ext6_soundness`, `L-Ex-15`)**:
+    When `(inp, T)` is frozen before sampling `chi` from any duplicate-free pool
+    `chisExt : List Ext6Fq204` (`|F| = chisExt.length`), any forged multiplication claim
+    `inp.products ≠ rssComputeProducts ...` is accepted by `rssSacrificedSignStep` on **at most
+    `1` out of `chisExt.length`** challenges (cheat probability `≤ 1 / |F|`). -/
+theorem rssSacrificedSignStep_frozen_ext6_soundness
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState)
+    (A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Ext6Fq204)
+    (chisExt : List Ext6Fq204) (hNd : chisExt.Nodup)
+    (hForged : (A.commit []).1.products ≠
+      rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets) :
+    FrozenChallenge.countIf
+      (FrozenChallenge.frozenWins (rssSignFreezeExt6Config chalHash sampleInBall st) A)
+      (FrozenChallenge.vectors chisExt 1) ≤ 1 ∧
+    (FrozenChallenge.vectors chisExt 1).length = chisExt.length := by
+  have hBound := FrozenChallenge.frozen_win_count_le
+    (rssSignFreezeExt6Config chalHash sampleInBall st) A chisExt 1 ?_
+  · exact ⟨by simpa [rssSignFreezeExt6Config] using hBound.1, hBound.2.trans (Nat.pow_one _)⟩
+  · intro _
+    apply FrozenChallenge.countIf_le_one_of_unique hNd
+    intro chi₁ chi₂ h1 h2
+    dsimp only [rssSignFreezeExt6Config] at h1 h2
+    rw [rssSignStepAcceptsSacrifice_eq, Bool.and_eq_true] at h1 h2
+    rcases rssSacrificedProductsValid_forged_exists_bad_gate
+        chalHash sampleInBall st (A.commit []).1 (A.commit []).2 hForged with hNone | ⟨g, _, _, hUniq, _⟩
+    · rw [hNone chi₁] at h1
+      cases h1.2
+    · exact (hUniq chi₁ h1.2).2.trans (hUniq chi₂ h2.2).2.symm
+
+/-- **Direct `SacrificeFreezeSample` ↔ `rssSacrificedSignStep` 6-Coordinate Bridge
+    (`rssSacrificedSignStep_freeze_before_sample_six_coords_sound`, `L-Ex-15`)**:
+    Reduces any forged `(inp, T)` accepted by `rssSacrificedSignStep` directly to
+    `SacrificeFreeze.sacrifice_frozen_soundness` (`SacrificeFreeze.sacConfig 6`), proving that
+    over any duplicate-free base-field list `xs : List Fq204`, `rssSacrificedSignStep` accepts
+    on **at most `1` out of `xs.length ^ 6`** challenge 6-tuples `chis`. -/
+theorem rssSacrificedSignStep_freeze_before_sample_six_coords_sound
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState)
+    (A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Fq204)
+    (xs : List Fq204) (hNd : xs.Nodup)
+    (hForged : (A.commit []).1.products ≠
+      rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets) :
+    FrozenChallenge.countIf
+      (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (ext6OfList chis) (A.commit []).2)
+      (FrozenChallenge.vectors xs 6) ≤ 1 ∧
+    (FrozenChallenge.vectors xs 6).length = xs.length ^ 6 := by
+  refine ⟨?_, FrozenChallenge.length_vectors xs 6⟩
+  let inp := (A.commit []).1
+  let T := (A.commit []).2
+  rcases rssSacrificedProductsValid_forged_exists_bad_gate
+      chalHash sampleInBall st inp T hForged with hNone | ⟨g, hgMem, hgNz, _, hAllGates⟩
+  · have hZero : FrozenChallenge.countIf
+        (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st inp (ext6OfList chis) T)
+        (FrozenChallenge.vectors xs 6) = 0 := by
+      apply FrozenChallenge.countIf_eq_zero_of_forall
+      intro chis _
+      rw [rssSignStepAcceptsSacrifice_eq, hNone (ext6OfList chis), Bool.and_false]
+    rw [hZero]
+    exact Nat.zero_le 1
+  · have hCheat : SacrificeFreeze.Cheats (rssTranscriptToFreezeGates T) := by
+      rw [SacrificeFreeze.cheats_iff]
+      refine ⟨sacGate204ToFreezeGate g, List.mem_map_of_mem hgMem, ?_⟩
+      rw [SacrificeFreeze.gateError_eq]
+      rw [sacGateError204_eq] at hgNz
+      exact hgNz
+    let Afreeze : FrozenChallenge.Adversary (List (SacrificeFreeze.Gate Fq204)) Fq204 :=
+      ⟨fun _ => rssTranscriptToFreezeGates T⟩
+    have hLe :
+        FrozenChallenge.countIf
+          (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st inp (ext6OfList chis) T)
+          (FrozenChallenge.vectors xs 6) ≤
+        FrozenChallenge.countIf
+          (FrozenChallenge.frozenWins (SacrificeFreeze.sacConfig 6) Afreeze)
+          (FrozenChallenge.vectors xs 6) := by
+      refine countIf_vectors_le xs 6 (fun chis hLen hStep => ?_)
+      match chis, hLen with
+      | [k0, k1, k2, k3, k4, k5], _ =>
+        rw [rssSignStepAcceptsSacrifice_eq, Bool.and_eq_true] at hStep
+        have hVal : rssSacrificedProductsValid chalHash sampleInBall st inp
+            ⟨k0, k1, k2, k3, k4, k5⟩ T = true := hStep.2
+        refine FrozenChallenge.frozenWins_of_allReps
+          (SacrificeFreeze.sacConfig 6) Afreeze [k0, k1, k2, k3, k4, k5]
+          (by rw [SacrificeFreeze.sacConfig_reps]; decide)
+          (by rw [SacrificeFreeze.sacConfig_reps]; rfl) ?_
+        refine FrozenChallenge.allReps_of_getElem _ [k0, k1, k2, k3, k4, k5] 0 ?_
+        intro j x hx
+        have hj : j < 6 := (List.getElem?_eq_some_iff.mp hx).1
+        have hxGetD : [k0, k1, k2, k3, k4, k5].getD j Fq204.zero = x := by
+          rw [List.getD_eq_getElem?_getD, hx]
+          rfl
+        rw [SacrificeFreeze.sacConfig_check, Nat.zero_add,
+            SacrificeFreeze.transcriptPasses_eq, List.all_eq_true]
+        intro fg hfg
+        obtain ⟨g', hg'In, rfl⟩ := List.mem_map.mp hfg
+        have hPass := (sacAccept204_iff_freezeGate_six_reps k0 k1 k2 k3 k4 k5 g').mp
+          (hAllGates ⟨k0, k1, k2, k3, k4, k5⟩ hVal g' hg'In) j hj
+        rwa [hxGetD] at hPass
+    have hSac := SacrificeFreeze.sacrifice_frozen_soundness 6 Afreeze xs hNd hCheat
+    have hSub :
+        FrozenChallenge.countIf
+          (FrozenChallenge.frozenWins (SacrificeFreeze.sacConfig 6) Afreeze)
+          (FrozenChallenge.vectors xs 6) ≤ 1 := by
+      simpa [SacrificeFreeze.sacConfig_reps] using hSac.1
+    exact Nat.le_trans hLe hSub
+
+/-- **Full `Ext6Fq204` (`mldsaQ ^ 6`, `< 2^-137`) Freeze-Before-Sample Soundness of
+    `rssSacrificedSignStep` (`rssSacrificedSignStep_mldsaQ6_frozen_soundness`, `L-Ex-15`)**:
+    Over the full FIPS 204 extension field `Ext6Fq204` (`mldsaQ ^ 6` elements), any frozen
+    forged attempt `(inp, T)` is accepted by `rssSacrificedSignStep` on **at most `1` out of
+    `mldsaQ ^ 6`** challenges (`< 2^-137`). -/
+theorem rssSacrificedSignStep_mldsaQ6_frozen_soundness
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState)
+    (A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Fq204)
+    (hForged : (A.commit []).1.products ≠
+      rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets) :
+    FrozenChallenge.countIf
+      (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (ext6OfList chis) (A.commit []).2)
+      (FrozenChallenge.vectors SacrificeFreeze.fq204Elems 6) ≤ 1 ∧
+    FrozenChallenge.countIf
+      (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (ext6OfList chis) (A.commit []).2)
+      (FrozenChallenge.vectors SacrificeFreeze.fq204Elems 6) * 2 ^ 137 < mldsaQ ^ 6 ∧
+    (FrozenChallenge.vectors SacrificeFreeze.fq204Elems 6).length = mldsaQ ^ 6 := by
+  have h := rssSacrificedSignStep_freeze_before_sample_six_coords_sound
+    chalHash sampleInBall st A SacrificeFreeze.fq204Elems SacrificeFreeze.fq204Elems_nodup hForged
+  have hMul : FrozenChallenge.countIf
+      (fun chis => rssSignStepAcceptsSacrifice chalHash sampleInBall st
+        (A.commit []).1 (ext6OfList chis) (A.commit []).2)
+      (FrozenChallenge.vectors SacrificeFreeze.fq204Elems 6) * 2 ^ 137 ≤ 1 * 2 ^ 137 :=
+    Nat.mul_le_mul_right _ h.1
+  rw [Nat.one_mul] at hMul
+  exact ⟨h.1,
+    Nat.lt_of_le_of_lt hMul SacrificeFreeze.two_pow_137_lt_mldsaQ_pow_six,
+    h.2.trans (by rw [SacrificeFreeze.fq204Elems_length])⟩
+
+private def flipFirstLeaf : {d : Nat} → PolyTree d → PolyTree d
+  | 0, .leaf a => .leaf (if a = Fq204.zero then Fq204.one else Fq204.zero)
+  | _ + 1, .branch p0 p1 => .branch (flipFirstLeaf p0) p1
+
+private theorem flipFirstLeaf_ne_self :
+    ∀ {d : Nat} (p : PolyTree d), flipFirstLeaf p ≠ p
+  | 0, .leaf a => by
+    unfold flipFirstLeaf
+    if ha : a = Fq204.zero then
+      subst ha
+      simp only [↓reduceIte]
+      intro h
+      have h10 : Fq204.one = Fq204.zero := by injection h
+      exact absurd h10 (by decide)
+    else
+      simp only [ha, ↓reduceIte]
+      intro h
+      have haEq : Fq204.zero = a := by injection h
+      exact ha haEq.symm
+  | _ + 1, .branch p0 _ => by
+    unfold flipFirstLeaf
+    intro h
+    cases h
+    exact flipFirstLeaf_ne_self p0 rfl
+
+/-- Forged signing attempt flipping leaf 0 of `cs1` (`products ≠ rssComputeProducts`). -/
+def rssForgedAttemptInput
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) : RssMlDsaAttemptInput :=
+  let exp := rssComputeProducts chalHash sampleInBall st [] []
+  { epoch := st.epoch
+    sessionId := []
+    attempt := st.nextAttempt
+    mu := []
+    ySubsets := []
+    maskW := rssZeroVec4
+    maskZ := rssZeroVec4
+    maskLow := rssZeroVec4
+    products :=
+      { w := matVecMul4 st.A (rssSumVec4List [])
+        cs1 := fun i => flipFirstLeaf (exp.cs1 i)
+        cs2 := exp.cs2
+        ct0 := exp.ct0 } }
+
+theorem rssForgedAttemptInput_ne_computed
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) :
+    (rssForgedAttemptInput chalHash sampleInBall st).products ≠
+      rssComputeProducts chalHash sampleInBall st
+        (rssForgedAttemptInput chalHash sampleInBall st).mu
+        (rssForgedAttemptInput chalHash sampleInBall st).ySubsets := by
+  intro hEq
+  have hCs1 := congrArg (fun p => p.cs1 ⟨0, by decide⟩) hEq
+  exact flipFirstLeaf_ne_self _ hCs1
+
+/-- **`#tooth` (`tooth_rssSacrificedSignStep_swapped_order_forges`, `L-Ex-15`)**:
+    If `chi : Ext6Fq204` is sampled BEFORE freezing `(inp, T)` (`FrozenChallenge.swappedWins`),
+    an explicit adversary forges `inp.products ≠ rssComputeProducts ...` and fits `T` via
+    `rssFittedSacrifice204`, causing `rssSacrificedSignStep` to accept the forged products on
+    **100% of all `chisExt.length` challenges**! -/
+theorem tooth_rssSacrificedSignStep_swapped_order_forges
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (chisExt : List Ext6Fq204) :
+    ∃ A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Ext6Fq204,
+      (∀ chis, (A.commit chis).1.products ≠
+        rssComputeProducts chalHash sampleInBall st (A.commit chis).1.mu (A.commit chis).1.ySubsets) ∧
+      FrozenChallenge.countIf
+        (FrozenChallenge.swappedWins (rssSignFreezeExt6Config chalHash sampleInBall st) A)
+        (FrozenChallenge.vectors chisExt 1) = chisExt.length := by
+  let inp := rssForgedAttemptInput chalHash sampleInBall st
+  let A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Ext6Fq204 :=
+    ⟨fun chis => (inp, rssFittedSacrifice204 chalHash sampleInBall st inp (chis.getD 0 ext6Zero))⟩
+  refine ⟨A, fun _ => rssForgedAttemptInput_ne_computed chalHash sampleInBall st, ?_⟩
+  have hSwapped := FrozenChallenge.swapped_win_count_all
+    (rssSignFreezeExt6Config chalHash sampleInBall st) A chisExt (Nat.le_refl 1) ?_
+  · exact hSwapped.trans (Nat.pow_one _)
+  · intro chis hLen
+    match chis, hLen with
+    | [chi], _ =>
+      rw [FrozenChallenge.allReps_cons, FrozenChallenge.allReps_nil, Bool.and_true]
+      dsimp only [rssSignFreezeExt6Config, A, List.getD]
+      rw [rssSignStepAcceptsSacrifice_eq]
+      have hEp : decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) = true :=
+        decide_eq_true ⟨rfl, rfl⟩
+      have hFit : rssSacrificedProductsValid chalHash sampleInBall st inp chi
+          (rssFittedSacrifice204 chalHash sampleInBall st inp chi) = true :=
+        rssSacrificedProductsValid_fitted_accepts chalHash sampleInBall st inp chi rfl
+      rw [hEp, hFit]
+      rfl
+
+theorem inhabited_rssSacrificedSignStep_frozen_ext6_soundness :
+    ∃ (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+      (sampleInBall : List UInt8 → Poly256)
+      (st : RssMlDsaSignerState)
+      (A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Ext6Fq204)
+      (chisExt : List Ext6Fq204),
+      chisExt.Nodup ∧
+      (A.commit []).1.products ≠
+        rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets := by
+  let chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8 := fun _ _ => []
+  let sampleInBall : List UInt8 → Poly256 := fun _ => PolyTree.zero 8
+  let st : RssMlDsaSignerState := { epoch := 0, nextAttempt := 0, A := idMat4, s1Subsets := [], s2Subsets := [] }
+  let inp := rssForgedAttemptInput chalHash sampleInBall st
+  let T : RssSacrificeTranscript204 := { cs1 := fun _ => [], cs2 := fun _ => [], ct0 := fun _ => [] }
+  let c0 : Ext6Fq204 := ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩
+  let c1 : Ext6Fq204 := ⟨Fq204.one, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩
+  have hNd : [c0, c1].Nodup :=
+    .cons (fun x hx heq => by
+      subst heq
+      have hMem := List.mem_singleton.mp hx
+      have hv := congrArg (fun z : Ext6Fq204 => z.a0.val) hMem
+      exact absurd hv (by decide))
+      (.cons (fun _ h => nomatch h) .nil)
+  exact ⟨chalHash, sampleInBall, st, ⟨fun _ => (inp, T)⟩, [c0, c1], hNd,
+    rssForgedAttemptInput_ne_computed chalHash sampleInBall st⟩
+
+theorem inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness :
+    ∃ (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+      (sampleInBall : List UInt8 → Poly256)
+      (st : RssMlDsaSignerState)
+      (A : FrozenChallenge.Adversary (RssMlDsaAttemptInput × RssSacrificeTranscript204) Fq204),
+      (A.commit []).1.products ≠
+        rssComputeProducts chalHash sampleInBall st (A.commit []).1.mu (A.commit []).1.ySubsets := by
+  let chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8 := fun _ _ => []
+  let sampleInBall : List UInt8 → Poly256 := fun _ => PolyTree.zero 8
+  let st : RssMlDsaSignerState := { epoch := 0, nextAttempt := 0, A := idMat4, s1Subsets := [], s2Subsets := [] }
+  let inp := rssForgedAttemptInput chalHash sampleInBall st
+  let T : RssSacrificeTranscript204 := { cs1 := fun _ => [], cs2 := fun _ => [], ct0 := fun _ => [] }
+  exact ⟨chalHash, sampleInBall, st, ⟨fun _ => (inp, T)⟩,
+    rssForgedAttemptInput_ne_computed chalHash sampleInBall st⟩
+
+#verify_constructive
+  rssSignStepAcceptsSacrifice_eq
+  sacAccept204_iff_freezeGate_six_reps
+  rssSacrificedSignStep_frozen_ext6_soundness
+  rssSacrificedSignStep_freeze_before_sample_six_coords_sound
+  rssSacrificedSignStep_mldsaQ6_frozen_soundness
+  tooth_rssSacrificedSignStep_swapped_order_forges
+
+#tooth_pair rssSacrificedSignStep_frozen_ext6_soundness vs
+  tooth_rssSacrificedSignStep_swapped_order_forges
+#tooth_pair rssSacrificedSignStep_mldsaQ6_frozen_soundness vs
+  tooth_rssSacrificedSignStep_swapped_order_forges
+#verify_inhabited rssSacrificedSignStep_frozen_ext6_soundness
+  inhabited_rssSacrificedSignStep_frozen_ext6_soundness
+#verify_inhabited rssSacrificedSignStep_mldsaQ6_frozen_soundness
+  inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness
 
 end Qsag
