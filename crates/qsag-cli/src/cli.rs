@@ -514,7 +514,9 @@ mod custody_buffer_tests {
         for arch in ["arm", "aarch64", "powerpc", "powerpc64"] {
             assert_eq!(open_nofollow_nonblock_flags("linux", arch), Some(0x8800));
         }
-        assert_eq!(open_nofollow_nonblock_flags("linux", "m68k"), Some(0x4800));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "mips64"), Some(0x20080));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "sparc64"), Some(0x24000));
+        assert_eq!(open_nofollow_nonblock_flags("linux", "m68k"), None);
         for arch in [
             "x86",
             "x86_64",

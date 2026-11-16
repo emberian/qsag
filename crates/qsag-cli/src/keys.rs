@@ -3,7 +3,6 @@
 use qsag_accel::CpuReferenceBackend;
 use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress};
-use qsag_core::ExternalMonotoneAnchor;
 use qsag_core::ceremony_journal::{CeremonyContext, CeremonyReservation, FsCeremonyJournal};
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify,
@@ -343,11 +342,12 @@ fn load_or_setup_threshold(
     if !qsag_accel::ct::ct_eq_bytes(&actual_commit, &expected_commit) {
         return Err(CliError::state("CorruptOrRolledBackThresholdReservoir"));
     }
+    let decrypted_slices: Vec<&[u8]> = decrypted.iter().map(|b| b.0.as_slice()).collect();
     let setup = DealerlessThresholdFtsSetup::from_persisted_reservoirs(
         cached_pk,
         cached_layers,
         expected_gen,
-        &decrypted,
+        &decrypted_slices,
     )
     .map_err(|_| CliError::state("CorruptOrRolledBackThresholdReservoir"))?;
     Ok((setup, true))
@@ -505,7 +505,11 @@ fn burn_stateful_ceremony_with_checkpoint(
         retained_ledger_ckpt,
     )
     .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
-    if seed_burns.checkpoint().generation < ceremony_journal.checkpoint().generation {
+    let min_seed_burn_cursor = ceremony_journal
+        .last_committed()
+        .map_or(0, |c| c.seed_burn_cursor)
+        .max(ceremony_journal.checkpoint().generation.saturating_sub(1));
+    if seed_burns.checkpoint().generation < min_seed_burn_cursor {
         return Err(CliError::state("CorruptOrRolledBackLedgerCheckpoint"));
     }
 

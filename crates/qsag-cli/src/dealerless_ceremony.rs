@@ -12,14 +12,14 @@ use qsag_accel::ct::ct_zeroize_bytes;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_core::preprocessing::{PartyPrivateRng, try_establish_rlwe_ot_ext_channel};
 use qsag_fts::ot::{AuthenticatedOtWire, CommittedCorrelatedOt, CommittedOtMessage};
+use qsag_fts::parallel_mpc::DEFAULT_BEAVER_TRIPLE_POOL;
 use qsag_fts::{
-     DEFAULT_BEAVER_TRIPLE_POOL, LeafBurnPersistence, ParallelSeededDkgConfig,
-    ParallelSeededDkgOutput, ParallelSeededDkgRefillUnverified, ParallelSeededDkgReservoir,
-    ParallelSeededDkgRound1State, ParallelSeededDkgSharePackage, ParallelSeededError,
-    ParallelSeededGilboaProducts, ParallelSeededMerkleLayers, ParallelSeededParams,
-    ParallelSeededPublicKey, ParallelSeededSignRequest, ParallelSeededSignResult,
-    ParallelSeededSignSession, ParallelSeededSignature, assemble_parallel_seeded_public_key,
-    finalize_parallel_seeded_dkg_party,
+    LeafBurnPersistence, ParallelSeededDkgConfig, ParallelSeededDkgOutput,
+    ParallelSeededDkgRefillUnverified, ParallelSeededDkgReservoir, ParallelSeededDkgRound1State,
+    ParallelSeededDkgSharePackage, ParallelSeededError, ParallelSeededGilboaProducts,
+    ParallelSeededMerkleLayers, ParallelSeededParams, ParallelSeededPublicKey,
+    ParallelSeededSignRequest, ParallelSeededSignResult, ParallelSeededSignSession,
+    ParallelSeededSignature, assemble_parallel_seeded_public_key, finalize_parallel_seeded_dkg_party,
 };
 use qsag_policy::{
     PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation,
@@ -364,27 +364,6 @@ fn refill_reservoirs(
 }
 
 impl DealerlessThresholdFtsSetup {
-    /// Compute the total power-tuple work across `2^h` leaf preparations plus `2^h` signatures.
-    /// Streaming [`ParallelSeededDkgReservoir`] refills cap each DKG/refill flight to
-    /// [`DEFAULT_BEAVER_TRIPLE_POOL`] (`131_072`) tuples regardless of tree height.
-    pub fn required_power_count(
-        params: &ParallelSeededParams,
-    ) -> Result<usize, ParallelSeededError> {
-        params.validate()?;
-        let leaves = 1usize
-            .checked_shl(params.tree_height as u32)
-            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        let per_leaf = params.leaf_preparation_power_count();
-        let per_sign = params.signing_power_count();
-        let total = leaves
-            .checked_mul(per_leaf.saturating_add(per_sign))
-            .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
-        if total == 0 {
-            return Err(ParallelSeededError::InvalidThresholdParameters);
-        }
-        Ok(total)
-    }
-
     fn bounded_initial_power_budget(
         params: &ParallelSeededParams,
         has_cached_tree: bool,
@@ -429,7 +408,7 @@ impl DealerlessThresholdFtsSetup {
         mut ceremony_seed: [u8; 32],
         cached_tree: Option<(ParallelSeededPublicKey, ParallelSeededMerkleLayers)>,
     ) -> Result<Self, ParallelSeededError> {
-        if parties < 2 || parties > 255 {
+        if !(2..=255).contains(&parties) {
             ct_zeroize_bytes(&mut ceremony_seed);
             return Err(ParallelSeededError::InvalidThresholdParameters);
         }
@@ -816,18 +795,21 @@ mod tests {
     fn power_budget_accepts_production_single_tree_height() {
         // Guard against reintroducing the old height-four CLI cap. This checks
         // the budget only: it does not pretend an eager single tree is a hypertree.
-        assert!(
-            DealerlessThresholdFtsSetup::required_power_count(
-                &ParallelSeededParams::CUSTODY_H10_W5,
-            )
-            .is_ok()
-        );
         let init = DealerlessThresholdFtsSetup::bounded_initial_power_budget(
             &ParallelSeededParams::CUSTODY_H10_W5,
             false,
         )
         .unwrap();
         assert!(init <= DEFAULT_BEAVER_TRIPLE_POOL);
+        let init_cached = DealerlessThresholdFtsSetup::bounded_initial_power_budget(
+            &ParallelSeededParams::CUSTODY_H10_W5,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            init_cached,
+            ParallelSeededParams::CUSTODY_H10_W5.signing_power_count()
+        );
     }
 
     #[test]
@@ -840,6 +822,7 @@ mod tests {
         let pk = setup.pk.clone();
         let layers = setup.public_tree_layers.clone();
         let (gen0, blobs0) = setup.serialize_reservoirs().unwrap();
+        let slices0: Vec<&[u8]> = blobs0.iter().map(|b| b.as_slice()).collect();
         drop(setup);
 
         // Stale or wrong generation must be rejected.
@@ -848,7 +831,7 @@ mod tests {
                 pk.clone(),
                 layers.clone(),
                 gen0 + 1,
-                &blobs0,
+                &slices0,
             )
             .is_err()
         );
@@ -858,7 +841,7 @@ mod tests {
             pk.clone(),
             layers.clone(),
             gen0,
-            &blobs0,
+            &slices0,
         )
         .unwrap();
         struct MemLatch(std::collections::BTreeSet<(u16, u32)>);
@@ -888,6 +871,7 @@ mod tests {
         )
         .unwrap();
         let (gen1, blobs1) = restored0.serialize_reservoirs().unwrap();
+        let slices1: Vec<&[u8]> = blobs1.iter().map(|b| b.as_slice()).collect();
         assert_eq!(gen1, gen0, "first sign consumed pre-populated reservoir without DKG");
         drop(restored0);
 
@@ -896,7 +880,7 @@ mod tests {
             pk.clone(),
             layers,
             gen1,
-            &blobs1,
+            &slices1,
         )
         .unwrap();
         let sig1 = restored1
