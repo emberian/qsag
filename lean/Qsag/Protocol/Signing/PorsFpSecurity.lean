@@ -49,6 +49,11 @@ Model notes. Indices are `Nat`, not `u32`. One level of the reconstruction is `a
 over the grouping `plan`; the Rust loop carries index and node as a pair.
 -/
 
+public import Qsag.Spec.Parameters
+public import Qsag.Spec.GameBound
+public import Qsag.Spec.Assumptions
+public import Qsag.Protocol.Signing.HashSigs
+public import Qsag.Protocol.Signing.HypertreeEufCma
 public import Qsag.Tactic.AssuranceKit
 
 public section
@@ -1828,6 +1833,1813 @@ theorem sha3_128f_ff_bits_one :
 theorem sha3_128f_ff_pos_one : 0 < ffTop (1 * sha3_128f.reveal) sha3_128f.reveal :=
   sha3_128f_ff_pos.1
 
+/-! ## 12. `PorsFpOpening` Wire Codec, `AdrsKind.porsPrf`/`porsTree`, and `BaggySha3_128f` Hypertree EUF-CMA
+
+Connects `PORS+FP` directly to `HashSigs` (`AdrsKind.porsPrf = 7`, `AdrsKind.porsTree = 8`),
+`crates/qsag-core/src/pors_fp.rs:189-265`, and `crates/qsag-core/src/baggy.rs`:
+1. `porsAdrs`, `porsPrfAdrs`, `porsLeafAdrs`, `porsNodeAdrs`, and `porsTweakableSuite` with
+   domain-separation from all WOTS+C / XMSS / FORS address roles and collision lifting to
+   `HashCollisionWitness suite.rawHash`.
+2. `PorsFpOpening` canonical wire codec (`secrets || be 2 auth.length || auth`), prefix-free
+   round-trip `PorsFpOpening.fromWireBytes_toWireBytes_append`, and `≤ 4,994 B` bound at `sha3_128f`.
+3. `BaggyParams`, `BaggySha3_128f` (`d = 16, h' = 2`, `PORS+FP` `sha3_128f` bottom + 16 `WOTS+C`
+   layers, `TAG_BAGGY_HMSG = "QSAG.BAGGY.HMSG/v2"`), `BaggySig` wire codec round-trip, and exact
+   worst-case wire byte bound `≤ 71,654 B` matching `Spec.baggySha3_128fProfile.maxSigBytes`.
+4. Executable `baggyVerify`, path-completeness `baggyHonestPathNode_top`, and constructive
+   (`0 Classical.choice`) multi-query hypertree-over-`PORS+FP` EUF-CMA reduction (`extractBaggyForgery`,
+   `baggy_sha3_128f_multi_query_euf_cma_reduction`, `baggy_sha3_128f_euf_cma_gameBound`). -/
+
+/-- `pors_adrs` (`crates/qsag-core/src/pors_fp.rs:229-238`). -/
+def porsAdrs (kind : AdrsKind) (tree : UInt64) (keyPair height index : UInt32) : HashAdrs :=
+  ⟨0, tree, kind, keyPair, height, index⟩
+
+/-- `pors_prf_adrs` (`AdrsKind::PorsPrf = 7`, `pors_fp.rs:241-243`). -/
+def porsPrfAdrs (tree : UInt64) (keyPair leaf : UInt32) : HashAdrs :=
+  porsAdrs .porsPrf tree keyPair 0 leaf
+
+/-- `pors_leaf_adrs` (`AdrsKind::PorsTree = 8`, `pors_fp.rs:246-248`). -/
+def porsLeafAdrs (tree : UInt64) (keyPair leaf : UInt32) : HashAdrs :=
+  porsAdrs .porsTree tree keyPair 0 leaf
+
+/-- Internal node address at height `height ≥ 1` (`AdrsKind::PorsTree = 8`, `pors_fp.rs:273`). -/
+def porsNodeAdrs (tree : UInt64) (keyPair height index : UInt32) : HashAdrs :=
+  porsAdrs .porsTree tree keyPair height index
+
+theorem porsPrfAdrs_encode_ne_porsLeafAdrs (t₁ t₂ : UInt64) (kp₁ l₁ kp₂ l₂ : UInt32) :
+    encodeAdrs (porsPrfAdrs t₁ kp₁ l₁) ≠ encodeAdrs (porsLeafAdrs t₂ kp₂ l₂) := by
+  intro hEq
+  have hKind := congrArg HashAdrs.kind (encodeAdrs_injective hEq)
+  nomatch hKind
+
+theorem porsPrfAdrs_eq (tree : UInt64) (keyPair leaf : UInt32) :
+    porsPrfAdrs tree keyPair leaf = ⟨0, tree, .porsPrf, keyPair, 0, leaf⟩ := rfl
+
+theorem porsLeafAdrs_eq (tree : UInt64) (keyPair leaf : UInt32) :
+    porsLeafAdrs tree keyPair leaf = ⟨0, tree, .porsTree, keyPair, 0, leaf⟩ := rfl
+
+theorem honestTree_succ (suite : HashSuite S D) (sec : Nat → S) (l i : Nat) :
+    honestTree suite sec (l + 1) i =
+      suite.node (l + 1) i (honestTree suite sec l (2 * i)) (honestTree suite sec l (2 * i + 1)) :=
+  rfl
+
+theorem select_range28_sha3_128f :
+    select sha3_128f (List.range 28) = some (List.range 28) := by
+  decide
+
+theorem sha3_128f_eq : sha3_128f = ⟨11, 28, 128, 256⟩ := rfl
+
+theorem porsAdrs_encode_disjoint_from_nonPors (kind : AdrsKind)
+    (hPors : kind = .porsPrf ∨ kind = .porsTree)
+    (t : UInt64) (kp h idx : UInt32) (other : HashAdrs)
+    (hOther : other.kind ≠ .porsPrf ∧ other.kind ≠ .porsTree) :
+    encodeAdrs (porsAdrs kind t kp h idx) ≠ encodeAdrs other := by
+  intro hEq
+  have hK := congrArg HashAdrs.kind (encodeAdrs_injective hEq)
+  dsimp only [porsAdrs] at hK
+  rcases hPors with rfl | rfl
+  · exact hOther.1 hK.symm
+  · exact hOther.2 hK.symm
+
+/-- Secret derivation for leaf `i` of `PORS+FP` instance `(tree, keyPair)` (`AdrsKind.porsPrf`). -/
+def porsSecretLeaf (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (tree : UInt64) (keyPair : UInt32) (i : Nat) : List UInt8 :=
+  thSecretPrf suite sk.pkSeed sk.skSeed (porsPrfAdrs tree keyPair (UInt32.ofNat i))
+
+/-- Concrete `PORS+FP` `HashSuite` instantiated over `TweakableHashSuite` (`pors_fp.rs:251-274`). -/
+def porsTweakableSuite (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) : HashSuite (List UInt8) (List UInt8) where
+  leaf i sec := thChainF suite pkSeed (porsLeafAdrs tree keyPair (UInt32.ofNat i)) sec
+  node lvl idx l r :=
+    thNodeH suite pkSeed (porsNodeAdrs tree keyPair (UInt32.ofNat lvl) (UInt32.ofNat idx)) l r
+
+theorem porsTweakableSuite_honestTree_length (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) (sec : Nat → List UInt8) :
+    ∀ (lvl idx : Nat),
+      (honestTree (porsTweakableSuite suite pkSeed tree keyPair) sec lvl idx).length = 32
+  | 0, idx => by
+    show (thChainF suite pkSeed (porsLeafAdrs tree keyPair (UInt32.ofNat idx)) (sec idx)).length = 32
+    rw [thChainF_eq]
+    exact thCall_length suite _ _ _ _
+  | lvl + 1, idx => by
+    show (thNodeH suite pkSeed
+      (porsNodeAdrs tree keyPair (UInt32.ofNat (lvl + 1)) (UInt32.ofNat idx)) _ _).length = 32
+    rw [thNodeH_eq]
+    exact thCall_length suite _ _ _ _
+
+/-- Constructive collision lift: any leaf or node collision in `porsTweakableSuite` yields a
+    concrete `HashCollisionWitness suite.rawHash`. -/
+def liftPorsLeafCollision (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) (i : Nat) {s s' : List UInt8}
+    (hNe : s ≠ s')
+    (hEq : (porsTweakableSuite suite pkSeed tree keyPair).leaf i s =
+      (porsTweakableSuite suite pkSeed tree keyPair).leaf i s') :
+    HashCollisionWitness suite.rawHash := by
+  dsimp only [porsTweakableSuite] at hEq
+  rw [thChainF_eq, thChainF_eq] at hEq
+  exact match thCall_binds_or_collision suite hEq with
+    | .inl ⟨_, _, _, hArgs⟩ => False.elim (hNe (List.cons.inj hArgs).1)
+    | .inr col => col
+
+def liftPorsNodeCollision (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) (lvl idx : Nat) {a b a' b' : List UInt8}
+    (hNe : a ≠ a' ∨ b ≠ b')
+    (hEq : (porsTweakableSuite suite pkSeed tree keyPair).node lvl idx a b =
+      (porsTweakableSuite suite pkSeed tree keyPair).node lvl idx a' b') :
+    HashCollisionWitness suite.rawHash := by
+  dsimp only [porsTweakableSuite] at hEq
+  rw [thNodeH_eq, thNodeH_eq] at hEq
+  exact match thCall_binds_or_collision suite hEq with
+    | .inl ⟨_, _, _, hArgs⟩ => False.elim (by
+        have h1 := (List.cons.inj hArgs).1
+        have h2 := (List.cons.inj (List.cons.inj hArgs).2).1
+        exact hNe.elim (fun ha => ha h1) (fun hb => hb h2))
+    | .inr col => col
+
+/-! ### 12.1 `PorsFpOpening` Wire Codec (`secrets || be 2 auth.length || auth`) -/
+
+/-- Split the leading `32 * k` bytes of `bs` into `k` 32-byte chunks. -/
+def takeChunks32 : Nat → List UInt8 → List (List UInt8)
+  | 0, _ => []
+  | k + 1, bs => bs.take 32 :: takeChunks32 k (bs.drop 32)
+
+private theorem flatten_length_32 :
+    ∀ (xs : List (List UInt8)), (∀ x ∈ xs, x.length = 32) → xs.flatten.length = 32 * xs.length
+  | [], _ => rfl
+  | x :: xs, h => by
+    rw [List.flatten_cons, List.length_append, h x List.mem_cons_self,
+      flatten_length_32 xs (fun y hy => h y (List.mem_cons_of_mem _ hy)), List.length_cons]
+    omega
+
+private theorem take_append_exact {α : Type} :
+    ∀ (xs rest : List α) (n : Nat), xs.length = n → (xs ++ rest).take n = xs ∧ (xs ++ rest).drop n = rest
+  | [], rest, 0, _ => ⟨rfl, rfl⟩
+  | [], _, _ + 1, h => nomatch h
+  | _ :: _, _, 0, h => nomatch h
+  | x :: xs, rest, n + 1, h => by
+    obtain ⟨hT, hD⟩ := take_append_exact xs rest n (Nat.succ.inj h)
+    exact ⟨congrArg (x :: ·) hT, hD⟩
+
+private theorem takeChunks32_flatten :
+    ∀ (xs : List (List UInt8)), (∀ x ∈ xs, x.length = 32) → ∀ (rest : List UInt8),
+      takeChunks32 xs.length (xs.flatten ++ rest) = xs ∧
+      (xs.flatten ++ rest).drop (32 * xs.length) = rest
+  | [], _, rest => ⟨rfl, rfl⟩
+  | x :: xs, h, rest => by
+    have hx := h x List.mem_cons_self
+    have hxs : ∀ y ∈ xs, y.length = 32 := fun y hy => h y (List.mem_cons_of_mem _ hy)
+    rw [List.flatten_cons, List.append_assoc, List.length_cons]
+    obtain ⟨hTakeX, hDropX⟩ := take_append_exact x (xs.flatten ++ rest) 32 hx
+    obtain ⟨ihChunks, ihDrop⟩ := takeChunks32_flatten xs hxs rest
+    refine ⟨?_, ?_⟩
+    · show (x ++ (xs.flatten ++ rest)).take 32 ::
+        takeChunks32 xs.length ((x ++ (xs.flatten ++ rest)).drop 32) = x :: xs
+      rw [hTakeX, hDropX, ihChunks]
+    · have hMul : 32 * (xs.length + 1) = 32 + 32 * xs.length := by omega
+      rw [hMul, ← List.drop_drop, hDropX, ihDrop]
+
+private theorem takeChunks32_shape :
+    ∀ (k : Nat) (bs : List UInt8), 32 * k ≤ bs.length →
+      (takeChunks32 k bs).length = k ∧
+      (∀ c ∈ takeChunks32 k bs, c.length = 32) ∧
+      (takeChunks32 k bs).flatten = bs.take (32 * k)
+  | 0, _, _ => ⟨rfl, fun _ h => nomatch h, rfl⟩
+  | k + 1, bs, hLe => by
+    have h32 : 32 ≤ bs.length := by omega
+    have hDrop : 32 * k ≤ (bs.drop 32).length := by rw [List.length_drop]; omega
+    obtain ⟨ihL, ihAll, ihFlat⟩ := takeChunks32_shape k (bs.drop 32) hDrop
+    refine ⟨congrArg Nat.succ ihL, ?_, ?_⟩
+    · intro c hc
+      rcases List.mem_cons.mp hc with rfl | hTl
+      · exact List.length_take_of_le h32
+      · exact ihAll c hTl
+    · show bs.take 32 ++ (takeChunks32 k (bs.drop 32)).flatten = bs.take (32 * (k + 1))
+      rw [ihFlat]
+      have hMul : 32 * (k + 1) = 32 + 32 * k := by omega
+      rw [hMul]
+      clear ihL ihAll ihFlat hLe h32 hDrop
+      suffices ∀ (a b : Nat) (l : List UInt8), l.take a ++ (l.drop a).take b = l.take (a + b) from
+        this 32 (32 * k) bs
+      intro a
+      induction a with
+      | zero => intro b l; rw [Nat.zero_add]; rfl
+      | succ a ihA =>
+        intro b l
+        cases l with
+        | nil => rfl
+        | cons hd tl =>
+          rw [Nat.succ_add]
+          exact congrArg (hd :: ·) (ihA b tl)
+
+/-- Revealed leaf secrets and canonical multiproof (`crates/qsag-core/src/pors_fp.rs:189-192`). -/
+structure PorsFpOpening where
+  secrets : List (List UInt8)
+  auth : List (List UInt8)
+  deriving DecidableEq, Repr
+
+/-- Shape predicate for a serializable `PorsFpOpening` under `p : Params`. -/
+@[expose] def PorsFpOpening.WellShaped (p : Params) (o : PorsFpOpening) : Prop :=
+  o.secrets.length = p.reveal ∧
+  (∀ s ∈ o.secrets, s.length = 32) ∧
+  o.auth.length ≤ p.maxAuthNodes ∧
+  (∀ a ∈ o.auth, a.length = 32)
+
+/-- `PorsFpOpening::to_wire_bytes` (`secrets || be16(auth.len()) || auth`, `pors_fp.rs:196-202`). -/
+@[expose] def PorsFpOpening.toWireBytes (o : PorsFpOpening) : List UInt8 :=
+  o.secrets.flatten ++ be 2 o.auth.length ++ o.auth.flatten
+
+/-- `PorsFpOpening::from_wire_bytes` (`pors_fp.rs:206-226`). -/
+def PorsFpOpening.fromWireBytes (p : Params) (raw : List UInt8) : Option (PorsFpOpening × Nat) :=
+  if !p.wellFormed then none
+  else
+    let secretBytes := 32 * p.reveal
+    if raw.length < secretBytes + 2 then none
+    else
+      let count := ofBE ((raw.drop secretBytes).take 2)
+      if p.maxAuthNodes < count then none
+      else
+        let used := secretBytes + 2 + 32 * count
+        if raw.length < used then none
+        else
+          some (⟨takeChunks32 p.reveal (raw.take secretBytes),
+                 takeChunks32 count ((raw.drop (secretBytes + 2)).take (32 * count))⟩, used)
+
+theorem PorsFpOpening.toWireBytes_length (p : Params) (o : PorsFpOpening)
+    (hShape : o.WellShaped p) :
+    o.toWireBytes.length = 32 * p.reveal + 2 + 32 * o.auth.length ∧
+    o.toWireBytes.length ≤ p.openingBytesMax := by
+  obtain ⟨hSL, hS32, hAL, hA32⟩ := hShape
+  unfold PorsFpOpening.toWireBytes Params.openingBytesMax
+  rw [List.length_append, List.length_append, flatten_length_32 _ hS32, hSL,
+    length_be, flatten_length_32 _ hA32]
+  exact ⟨rfl, by omega⟩
+
+theorem sha3_128f_opening_wire_le_4994 (o : PorsFpOpening) (hShape : o.WellShaped sha3_128f) :
+    o.toWireBytes.length ≤ 4994 :=
+  (o.toWireBytes_length sha3_128f hShape).2
+
+private theorem maxAuthNodes_lt_65536 (p : Params) (hw : p.wellFormed = true) :
+    p.maxAuthNodes < 256 ^ 2 := by
+  simp only [Params.wellFormed, Bool.and_eq_true, decide_eq_true_eq] at hw
+  have h1 : p.treeHeight ≤ 20 := hw.1.1.1.1.1.2
+  have h2 : p.reveal ≤ 1024 := hw.1.1.1.2
+  have h3 : p.maxAuthNodes ≤ p.reveal * p.treeHeight := hw.2
+  have hProd : p.reveal * p.treeHeight ≤ 1024 * 20 := Nat.mul_le_mul h2 h1
+  omega
+
+/-- **Prefix-Free Round-Trip for `PorsFpOpening` (`fromWireBytes_toWireBytes_append`).** -/
+theorem PorsFpOpening.fromWireBytes_toWireBytes_append (p : Params) (hw : p.wellFormed = true)
+    (o : PorsFpOpening) (hShape : o.WellShaped p) (rest : List UInt8) :
+    PorsFpOpening.fromWireBytes p (o.toWireBytes ++ rest) = some (o, o.toWireBytes.length) := by
+  obtain ⟨hSL, hS32, hAL, hA32⟩ := hShape
+  have hSecLen : o.secrets.flatten.length = 32 * p.reveal :=
+    (flatten_length_32 _ hS32).trans (congrArg (32 * ·) hSL)
+  have hAuthLen : o.auth.flatten.length = 32 * o.auth.length := flatten_length_32 _ hA32
+  have hWireLen := (o.toWireBytes_length p ⟨hSL, hS32, hAL, hA32⟩).1
+  have hCntLt : o.auth.length < 256 ^ 2 := Nat.lt_of_le_of_lt hAL (maxAuthNodes_lt_65536 p hw)
+  unfold PorsFpOpening.fromWireBytes
+  rw [hw]
+  dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+  have hRawEq : o.toWireBytes ++ rest =
+      o.secrets.flatten ++ (be 2 o.auth.length ++ (o.auth.flatten ++ rest)) := by
+    unfold PorsFpOpening.toWireBytes
+    simp only [List.append_assoc]
+  have hLen1 : ¬ (o.toWireBytes ++ rest).length < 32 * p.reveal + 2 := by
+    rw [List.length_append, hWireLen]; omega
+  rw [if_neg hLen1]
+  obtain ⟨hTakeSec, hDropSec⟩ :=
+    take_append_exact o.secrets.flatten (be 2 o.auth.length ++ (o.auth.flatten ++ rest))
+      (32 * p.reveal) hSecLen
+  obtain ⟨hTakeCnt, hDropCnt⟩ :=
+    take_append_exact (be 2 o.auth.length) (o.auth.flatten ++ rest) 2 (length_be 2 _)
+  have hDrop1 : (o.toWireBytes ++ rest).drop (32 * p.reveal) =
+      be 2 o.auth.length ++ (o.auth.flatten ++ rest) := by
+    rw [hRawEq]; exact hDropSec
+  have hCountEq : ofBE (((o.toWireBytes ++ rest).drop (32 * p.reveal)).take 2) = o.auth.length := by
+    rw [hDrop1, hTakeCnt, ofBE_be hCntLt]
+  rw [hCountEq, if_neg (Nat.not_lt_of_ge hAL)]
+  have hLen2 : ¬ (o.toWireBytes ++ rest).length < 32 * p.reveal + 2 + 32 * o.auth.length := by
+    rw [List.length_append, hWireLen]; omega
+  rw [if_neg hLen2]
+  have hDrop2 : (o.toWireBytes ++ rest).drop (32 * p.reveal + 2) = o.auth.flatten ++ rest := by
+    rw [← List.drop_drop, hDrop1, hDropCnt]
+  obtain ⟨hTakeAuth, _⟩ := take_append_exact o.auth.flatten rest (32 * o.auth.length) hAuthLen
+  have hSecChunks : takeChunks32 p.reveal ((o.toWireBytes ++ rest).take (32 * p.reveal)) =
+      o.secrets := by
+    rw [hRawEq, hTakeSec, ← hSL]
+    have h := (takeChunks32_flatten o.secrets hS32 []).1
+    rwa [List.append_nil] at h
+  have hAuthChunks : takeChunks32 o.auth.length
+      (((o.toWireBytes ++ rest).drop (32 * p.reveal + 2)).take (32 * o.auth.length)) = o.auth := by
+    rw [hDrop2, hTakeAuth]
+    have h := (takeChunks32_flatten o.auth hA32 []).1
+    rwa [List.append_nil] at h
+  rw [hSecChunks, hAuthChunks, hWireLen]
+  cases o; rfl
+
+theorem PorsFpOpening.toWireBytes_prefix_injective (p : Params) (hw : p.wellFormed = true)
+    {o₁ o₂ : PorsFpOpening} (h₁ : o₁.WellShaped p) (h₂ : o₂.WellShaped p)
+    {rest₁ rest₂ : List UInt8}
+    (hEq : o₁.toWireBytes ++ rest₁ = o₂.toWireBytes ++ rest₂) :
+    o₁ = o₂ ∧ rest₁ = rest₂ := by
+  have hDec := congrArg (PorsFpOpening.fromWireBytes p) hEq
+  rw [o₁.fromWireBytes_toWireBytes_append p hw h₁ rest₁,
+      o₂.fromWireBytes_toWireBytes_append p hw h₂ rest₂] at hDec
+  injection hDec with hPair
+  obtain ⟨rfl, _⟩ := Prod.mk.inj hPair
+  exact ⟨rfl, List.append_cancel_left hEq⟩
+
+/-! ### 12.2 `Baggy` Role Tags, `BaggySha3_128f` Parameters & `BaggySig` `≤ 71,654 B` Wire Codec -/
+
+def tagBaggyOptRand : List UInt8 := "QSAG.BAGGY.OPTRAND/v1".toUTF8.toList
+def tagBaggyR       : List UInt8 := "QSAG.BAGGY.R/v1".toUTF8.toList
+/-- Message hash XOF tag of the `PORS+FP` `Baggy` suite (`baggy.rs:110`). -/
+def TAG_BAGGY_HMSG  : List UInt8 := "QSAG.BAGGY.HMSG/v2".toUTF8.toList
+abbrev tagBaggyHmsg : List UInt8 := TAG_BAGGY_HMSG
+def tagBaggyDigest  : List UInt8 := "QSAG.BAGGY.DIGEST/v1".toUTF8.toList
+def tagBaggyParams  : List UInt8 := "QSAG.BAGGY.PARAMS/v1".toUTF8.toList
+def tagBaggyKeyId   : List UInt8 := "QSAG.BAGGY.KEYID/v1".toUTF8.toList
+
+theorem tag_baggy_hmsg_eq : TAG_BAGGY_HMSG = "QSAG.BAGGY.HMSG/v2".toUTF8.toList := rfl
+
+/-- `WotsCParams` (`crates/qsag-core/src/wots_c.rs:44-70`). -/
+structure WotsCParams where
+  chains : Nat
+  zeroDigits : Nat
+  targetSum : Nat
+  deriving DecidableEq, Repr
+
+def WotsCParams.v128 : WotsCParams := ⟨128, 0, 192⟩
+
+def WotsCParams.wellFormed (w : WotsCParams) : Bool :=
+  decide (w = WotsCParams.v128)
+
+/-- `BaggyParams` (`crates/qsag-core/src/baggy.rs:131-140`). -/
+structure BaggyParams where
+  wots : WotsCParams
+  subtreeHeight : Nat
+  numLayers : Nat
+  maxGrind : Nat
+  pors : Params
+
+def BaggyParams.totalHeight (bp : BaggyParams) : Nat :=
+  bp.subtreeHeight * bp.numLayers
+
+def BaggyParams.wellFormed (bp : BaggyParams) : Bool :=
+  bp.wots.wellFormed &&
+  decide (1 ≤ bp.subtreeHeight) && decide (bp.subtreeHeight ≤ 8) &&
+  decide (1 ≤ bp.numLayers) && decide (bp.numLayers ≤ 62) &&
+  decide (bp.totalHeight ≤ 62) &&
+  decide (bp.maxGrind ≤ 2 ^ 32) && decide (0 < bp.maxGrind) &&
+  bp.pors.wellFormed
+
+/-- Exact worst-case signature byte bound `BaggyParams::sig_bytes_checked` (`baggy.rs:189-213`). -/
+def BaggyParams.sigBytesMax (bp : BaggyParams) : Nat :=
+  36 + bp.pors.openingBytesMax +
+    bp.numLayers * (4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight)
+
+/-- `BaggyParams::path_at` (`baggy.rs:259-265`): `(keyPair, tree)` at `layer`. -/
+def BaggyParams.pathAt (bp : BaggyParams) (leafIdx layer : Nat) : UInt32 × UInt64 :=
+  let shifted := leafIdx / 2 ^ (bp.subtreeHeight * layer)
+  (UInt32.ofNat (shifted % 2 ^ bp.subtreeHeight), UInt64.ofNat (shifted / 2 ^ bp.subtreeHeight))
+
+/-- **`BaggyParams::SHA3_128F`** (`baggy.rs:145-151`): `d = 16, h' = 2`, `WOTS+C` `V128`,
+    `max_grind = 2^26`, `PORS+FP` `SHA3_128F` (`h = 11, k = 28, m = 128`), max `71,654` bytes. -/
+@[expose] def BaggySha3_128f : BaggyParams where
+  wots := WotsCParams.v128
+  subtreeHeight := 2
+  numLayers := 16
+  maxGrind := 2 ^ 26
+  pors := sha3_128f
+
+abbrev BaggyParams.sha3_128f : BaggyParams := BaggySha3_128f
+
+def BaggyParams.testSmall : BaggyParams where
+  wots := WotsCParams.v128
+  subtreeHeight := 2
+  numLayers := 3
+  maxGrind := 2 ^ 26
+  pors := testSmall
+
+theorem baggySha3_128f_parity :
+    BaggySha3_128f.wellFormed = true ∧
+    BaggySha3_128f.totalHeight = 32 ∧
+    BaggySha3_128f.sigBytesMax = 71654 ∧
+    BaggySha3_128f.sigBytesMax = Spec.baggySha3_128fProfile.maxSigBytes ∧
+    BaggyParams.testSmall.wellFormed = true := by
+  decide
+
+/-- One hypertree layer signature (`BaggyLayerSig`, `baggy.rs:571-575`). -/
+structure BaggyLayerSig where
+  ctr : Nat
+  chains : List (List UInt8)
+  auth : List (List UInt8)
+  deriving DecidableEq, Repr
+
+@[expose] def BaggyLayerSig.WellShaped (bp : BaggyParams) (l : BaggyLayerSig) : Prop :=
+  l.ctr < bp.maxGrind ∧
+  l.chains.length = bp.wots.chains ∧
+  (∀ c ∈ l.chains, c.length = 32) ∧
+  l.auth.length = bp.subtreeHeight ∧
+  (∀ a ∈ l.auth, a.length = 32)
+
+def BaggyLayerSig.toWireBytes (l : BaggyLayerSig) : List UInt8 :=
+  be 4 l.ctr ++ l.chains.flatten ++ l.auth.flatten
+
+/-- Full `Baggy` signature (`BaggySig`, `baggy.rs:579-585`). -/
+structure BaggySig where
+  r : List UInt8
+  msgCtr : Nat
+  pors : PorsFpOpening
+  layers : List BaggyLayerSig
+  deriving DecidableEq, Repr
+
+@[expose] def BaggySig.WellShaped (bp : BaggyParams) (sig : BaggySig) : Prop :=
+  sig.r.length = 32 ∧
+  sig.msgCtr < bp.maxGrind ∧
+  sig.pors.WellShaped bp.pors ∧
+  sig.layers.length = bp.numLayers ∧
+  (∀ l ∈ sig.layers, l.WellShaped bp)
+
+/-- `BaggySig::to_wire_bytes` (`r || be32(msg_ctr) || pors || layers`, `baggy.rs:590-601`). -/
+@[expose] def BaggySig.toWireBytes (sig : BaggySig) : List UInt8 :=
+  sig.r ++ be 4 sig.msgCtr ++ sig.pors.toWireBytes ++
+    (sig.layers.map BaggyLayerSig.toWireBytes).flatten
+
+private def parseBaggyLayers (bp : BaggyParams) :
+    Nat → List UInt8 → Option (List BaggyLayerSig × List UInt8)
+  | 0, rest => some ([], rest)
+  | n + 1, rest =>
+    let layerBytes := 4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight
+    if rest.length < layerBytes then none
+    else
+      let ctr := ofBE (rest.take 4)
+      if bp.maxGrind ≤ ctr then none
+      else
+        let chains := takeChunks32 bp.wots.chains ((rest.drop 4).take (32 * bp.wots.chains))
+        let auth := takeChunks32 bp.subtreeHeight
+          ((rest.drop (4 + 32 * bp.wots.chains)).take (32 * bp.subtreeHeight))
+        match parseBaggyLayers bp n (rest.drop layerBytes) with
+        | none => none
+        | some (ls, rem) => some (⟨ctr, chains, auth⟩ :: ls, rem)
+
+/-- `BaggySig::from_wire_bytes` (`baggy.rs:606-639`). -/
+def BaggySig.fromWireBytes (bp : BaggyParams) (raw : List UInt8) : Option BaggySig :=
+  if !bp.wellFormed || decide (bp.sigBytesMax < raw.length) || decide (raw.length < 36) then none
+  else
+    let r := raw.take 32
+    let msgCtr := ofBE ((raw.drop 32).take 4)
+    if bp.maxGrind ≤ msgCtr then none
+    else
+      match PorsFpOpening.fromWireBytes bp.pors (raw.drop 36) with
+      | none => none
+      | some (pors, used) =>
+        match parseBaggyLayers bp bp.numLayers ((raw.drop 36).drop used) with
+        | some (layers, []) => some ⟨r, msgCtr, pors, layers⟩
+        | _ => none
+
+private theorem layers_wire_length (bp : BaggyParams) :
+    ∀ (ls : List BaggyLayerSig), (∀ l ∈ ls, l.WellShaped bp) →
+      (ls.map BaggyLayerSig.toWireBytes).flatten.length =
+        ls.length * (4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight)
+  | [], _ => rfl
+  | l :: ls, h => by
+    obtain ⟨_, hCL, hC32, hAL, hA32⟩ := h l List.mem_cons_self
+    have hOne : l.toWireBytes.length = 4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight := by
+      unfold BaggyLayerSig.toWireBytes
+      rw [List.length_append, List.length_append, length_be,
+        flatten_length_32 _ hC32, hCL, flatten_length_32 _ hA32, hAL]
+    rw [List.map_cons, List.flatten_cons, List.length_append, hOne,
+      layers_wire_length bp ls (fun x hx => h x (List.mem_cons_of_mem _ hx)),
+      List.length_cons, Nat.succ_mul, Nat.add_comm]
+
+/-- **Exact Wire Byte Bound for `BaggySig` (`≤ 71,654 B` at `BaggySha3_128f`).** -/
+theorem BaggySig.toWireBytes_length_le (bp : BaggyParams) (sig : BaggySig)
+    (hShape : sig.WellShaped bp) :
+    sig.toWireBytes.length =
+      36 + sig.pors.toWireBytes.length +
+        bp.numLayers * (4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight) ∧
+    sig.toWireBytes.length ≤ bp.sigBytesMax := by
+  obtain ⟨hRL, _, hPors, hLL, hLAll⟩ := hShape
+  have hPorsB := sig.pors.toWireBytes_length bp.pors hPors
+  have hLayLen := layers_wire_length bp sig.layers hLAll
+  rw [hLL] at hLayLen
+  unfold BaggySig.toWireBytes BaggyParams.sigBytesMax
+  rw [List.length_append, List.length_append, List.length_append, hRL, length_be, hLayLen]
+  exact ⟨by omega, by omega⟩
+
+theorem baggySha3_128f_sig_wire_le_71654 (sig : BaggySig)
+    (hShape : sig.WellShaped BaggySha3_128f) :
+    sig.toWireBytes.length ≤ 71654 :=
+  (sig.toWireBytes_length_le BaggySha3_128f hShape).2
+
+private theorem maxGrind_lt_u32 (bp : BaggyParams) (hw : bp.wellFormed = true) :
+    bp.maxGrind ≤ 256 ^ 4 := by
+  simp only [BaggyParams.wellFormed, Bool.and_eq_true, decide_eq_true_eq] at hw
+  have h : bp.maxGrind ≤ 2 ^ 32 := hw.1.2
+  have hPow : (2 : Nat) ^ 32 = 256 ^ 4 := by decide
+  omega
+
+private theorem parseBaggyLayers_roundtrip (bp : BaggyParams) (hw : bp.wellFormed = true) :
+    ∀ (ls : List BaggyLayerSig), (∀ l ∈ ls, l.WellShaped bp) → ∀ (rem : List UInt8),
+      parseBaggyLayers bp ls.length ((ls.map BaggyLayerSig.toWireBytes).flatten ++ rem) =
+        some (ls, rem)
+  | [], _, rem => rfl
+  | l :: ls, hAll, rem => by
+    obtain ⟨hCtr, hCL, hC32, hAL, hA32⟩ := hAll l List.mem_cons_self
+    have hTailAll : ∀ x ∈ ls, x.WellShaped bp := fun x hx => hAll x (List.mem_cons_of_mem _ hx)
+    have hCtrU32 : l.ctr < 256 ^ 4 := Nat.lt_of_lt_of_le hCtr (maxGrind_lt_u32 bp hw)
+    have hCLen : l.chains.flatten.length = 32 * bp.wots.chains :=
+      (flatten_length_32 _ hC32).trans (congrArg (32 * ·) hCL)
+    have hALen : l.auth.flatten.length = 32 * bp.subtreeHeight :=
+      (flatten_length_32 _ hA32).trans (congrArg (32 * ·) hAL)
+    let tailBytes := (ls.map BaggyLayerSig.toWireBytes).flatten ++ rem
+    have hStream : ((l :: ls).map BaggyLayerSig.toWireBytes).flatten ++ rem =
+        be 4 l.ctr ++ (l.chains.flatten ++ (l.auth.flatten ++ tailBytes)) := by
+      simp only [List.map_cons, List.flatten_cons, BaggyLayerSig.toWireBytes, List.append_assoc,
+        tailBytes]
+    rw [List.length_cons, hStream]
+    unfold parseBaggyLayers
+    have hNotShort : ¬ (be 4 l.ctr ++ (l.chains.flatten ++ (l.auth.flatten ++ tailBytes))).length <
+        4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight := by
+      rw [List.length_append, List.length_append, List.length_append, length_be, hCLen, hALen]
+      omega
+    rw [if_neg hNotShort]
+    obtain ⟨hTakeCtr, hDropCtr⟩ :=
+      take_append_exact (be 4 l.ctr) (l.chains.flatten ++ (l.auth.flatten ++ tailBytes)) 4
+        (length_be 4 _)
+    rw [hTakeCtr, ofBE_be hCtrU32, if_neg (Nat.not_le_of_lt hCtr)]
+    obtain ⟨hTakeC, hDropC⟩ :=
+      take_append_exact l.chains.flatten (l.auth.flatten ++ tailBytes) (32 * bp.wots.chains) hCLen
+    obtain ⟨hTakeA, hDropA⟩ :=
+      take_append_exact l.auth.flatten tailBytes (32 * bp.subtreeHeight) hALen
+    have hDrop2 : (be 4 l.ctr ++ (l.chains.flatten ++ (l.auth.flatten ++ tailBytes))).drop
+        (4 + 32 * bp.wots.chains) = l.auth.flatten ++ tailBytes := by
+      rw [← List.drop_drop, hDropCtr, hDropC]
+    have hDrop3 : (be 4 l.ctr ++ (l.chains.flatten ++ (l.auth.flatten ++ tailBytes))).drop
+        (4 + 32 * bp.wots.chains + 32 * bp.subtreeHeight) = tailBytes := by
+      rw [← List.drop_drop, hDrop2, hDropA]
+    have hCChunks : takeChunks32 bp.wots.chains l.chains.flatten = l.chains := by
+      rw [← hCL]
+      have h := (takeChunks32_flatten l.chains hC32 []).1
+      rwa [List.append_nil] at h
+    have hAChunks : takeChunks32 bp.subtreeHeight l.auth.flatten = l.auth := by
+      rw [← hAL]
+      have h := (takeChunks32_flatten l.auth hA32 []).1
+      rwa [List.append_nil] at h
+    rw [hDropCtr, hTakeC, hCChunks, hDrop2, hTakeA, hAChunks, hDrop3,
+      parseBaggyLayers_roundtrip bp hw ls hTailAll rem]
+    cases l; rfl
+
+/-- **Exact Wire Codec Round-Trip for `BaggySig` (`fromWireBytes_toWireBytes`).** -/
+theorem BaggySig.fromWireBytes_toWireBytes (bp : BaggyParams) (hw : bp.wellFormed = true)
+    (sig : BaggySig) (hShape : sig.WellShaped bp) :
+    BaggySig.fromWireBytes bp sig.toWireBytes = some sig := by
+  obtain ⟨hLenEq, hLenMax⟩ := sig.toWireBytes_length_le bp hShape
+  obtain ⟨hRL, hCtr, hPors, hLL, hLAll⟩ := hShape
+  have hCtrU32 : sig.msgCtr < 256 ^ 4 := Nat.lt_of_lt_of_le hCtr (maxGrind_lt_u32 bp hw)
+  unfold BaggySig.fromWireBytes
+  have hGuard : (!bp.wellFormed || decide (bp.sigBytesMax < sig.toWireBytes.length) ||
+      decide (sig.toWireBytes.length < 36)) = false := by
+    rw [hw, decide_eq_false (Nat.not_lt_of_ge hLenMax),
+      decide_eq_false (by rw [hLenEq]; omega)]
+    rfl
+  rw [hGuard]
+  dsimp only [Bool.false_eq_true, ↓reduceIte]
+  let tailAfterHdr := sig.pors.toWireBytes ++ (sig.layers.map BaggyLayerSig.toWireBytes).flatten
+  have hWireSplit : sig.toWireBytes = sig.r ++ (be 4 sig.msgCtr ++ tailAfterHdr) := by
+    unfold BaggySig.toWireBytes
+    simp only [List.append_assoc, tailAfterHdr]
+  obtain ⟨hTakeR, hDropR⟩ :=
+    take_append_exact sig.r (be 4 sig.msgCtr ++ tailAfterHdr) 32 hRL
+  obtain ⟨hTakeCtr, hDropCtr⟩ :=
+    take_append_exact (be 4 sig.msgCtr) tailAfterHdr 4 (length_be 4 _)
+  have hDrop36 : sig.toWireBytes.drop 36 = tailAfterHdr := by
+    have h36 : (36 : Nat) = 32 + 4 := rfl
+    rw [h36, ← List.drop_drop, hWireSplit, hDropR, hDropCtr]
+  have hDrop32Take4 : (sig.toWireBytes.drop 32).take 4 = be 4 sig.msgCtr := by
+    rw [hWireSplit, hDropR, hTakeCtr]
+  have hTake32 : sig.toWireBytes.take 32 = sig.r := by
+    rw [hWireSplit, hTakeR]
+  rw [hTake32, hDrop32Take4, ofBE_be hCtrU32, if_neg (Nat.not_le_of_lt hCtr), hDrop36]
+  dsimp only [tailAfterHdr]
+  rw [sig.pors.fromWireBytes_toWireBytes_append bp.pors
+      (by simp only [BaggyParams.wellFormed, Bool.and_eq_true] at hw; exact hw.2) hPors]
+  obtain ⟨_, hDropPors⟩ :=
+    take_append_exact sig.pors.toWireBytes (sig.layers.map BaggyLayerSig.toWireBytes).flatten
+      sig.pors.toWireBytes.length rfl
+  rw [hDropPors]
+  have hLayEq : parseBaggyLayers bp bp.numLayers
+      ((sig.layers.map BaggyLayerSig.toWireBytes).flatten ++ []) = some (sig.layers, []) := by
+    rw [← hLL]
+    exact parseBaggyLayers_roundtrip bp hw sig.layers hLAll []
+  rw [List.append_nil] at hLayEq
+  rw [hLayEq]
+  cases sig; rfl
+
+theorem BaggySig.fromWireBytes_oversized_none (bp : BaggyParams) (raw : List UInt8)
+    (hOver : bp.sigBytesMax < raw.length) :
+    BaggySig.fromWireBytes bp raw = none := by
+  unfold BaggySig.fromWireBytes
+  rw [decide_eq_true hOver, Bool.or_true, Bool.true_or]
+  rfl
+
+theorem PorsFpOpening.fromWireBytes_oversized_auth_none (p : Params) (raw : List UInt8)
+    (hOver : p.maxAuthNodes < ofBE ((raw.drop (32 * p.reveal)).take 2)) :
+    PorsFpOpening.fromWireBytes p raw = none := by
+  unfold PorsFpOpening.fromWireBytes
+  cases !p.wellFormed
+  · dsimp only [Bool.false_eq_true, ↓reduceIte]
+    split
+    · rfl
+    · exact if_pos hOver
+  · rfl
+
+theorem porsSecretLeaf_length (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (tree : UInt64) (keyPair : UInt32) (i : Nat) :
+    (porsSecretLeaf suite sk tree keyPair i).length = 32 := by
+  unfold porsSecretLeaf
+  rw [thSecretPrf_eq]
+  exact thCall_length suite _ _ _ _
+
+theorem porsHonestAuth_length_le (p : Params) (suite : HashSuite S D) (sec : Nat → S)
+    (idx : List Nat) (hAdm : Admissible p idx) :
+    (honestAuth suite sec p.treeHeight idx).length ≤ p.maxAuthNodes := by
+  unfold honestAuth
+  rw [List.length_map]
+  exact hAdm.pruned
+
+theorem porsTweakableSuite_honestAuth_all_len32 (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) (sec : Nat → List UInt8) (h : Nat) (idx : List Nat) :
+    ∀ a ∈ honestAuth (porsTweakableSuite suite pkSeed tree keyPair) sec h idx, a.length = 32 := by
+  intro a ha
+  unfold honestAuth at ha
+  obtain ⟨q, _, rfl⟩ := List.mem_map.mp ha
+  exact porsTweakableSuite_honestTree_length suite pkSeed tree keyPair sec q.1 q.2
+
+theorem porsTweakableSuite_node_eq (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (tree : UInt64) (keyPair : UInt32) (lvl idx : Nat) (l r : List UInt8) :
+    (porsTweakableSuite suite pkSeed tree keyPair).node lvl idx l r =
+      thNodeH suite pkSeed (porsNodeAdrs tree keyPair (UInt32.ofNat lvl) (UInt32.ofNat idx)) l r :=
+  rfl
+
+theorem BaggyParams.pathAt_zero (bp : BaggyParams) (lvl : Nat) :
+    bp.pathAt 0 lvl = (0, 0) := by
+  unfold BaggyParams.pathAt
+  simp [Nat.zero_div, Nat.zero_mod]
+
+/-! ### 12.3 `Baggy` Hypertree-over-`PORS+FP` Verifier, Completeness & Multi-Query EUF-CMA Reduction -/
+
+/-- `PqHashParams` projection of `BaggyParams`'s `WOTS+C` (`w = 4, ell1 = 128`) layer geometry. -/
+def baggyWotsPqParams (bp : BaggyParams) : PqHashParams :=
+  ⟨4, 128, bp.subtreeHeight, bp.numLayers, 0, 0, 1, false⟩
+
+/-- `wots_c_digest_adrs` + `TAG_BAGGY_DIGEST` layer hash (`baggy.rs:916-929`). -/
+def baggyLayerDigest (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (keyPair : UInt32) (node : List UInt8) (ctr : Nat) :
+    List UInt8 :=
+  thCall suite tagBaggyDigest pkSeed
+    ⟨layer, tree, .wotsHash, keyPair, 0, UInt32.ofNat ctr⟩ [node, be 4 ctr]
+
+/-- Abstract/instantiable `select_at` XOF stream reader (`TAG_BAGGY_HMSG` on
+    `encodeMultiFrame [r, pkSeed, pkRoot, mu, be 4 msgCtr]`, `baggy.rs:829-848`):
+    returns `(32-bit words for pors_fp_select, 64-bit word for leaf_idx)`. -/
+def BaggyHmsgStream := List UInt8 → List Nat × Nat
+
+/-- Concrete `select_at` (`baggy.rs:829-848`) parameterized by the `TAG_BAGGY_HMSG` XOF stream. -/
+def baggySelectAt (hmsgXof : BaggyHmsgStream) (bp : BaggyParams) (pk : PqPublicKey)
+    (r mu : List UInt8) (msgCtr : Nat) : Option (List Nat × Nat) :=
+  let frame := encodeMultiFrame [r, pk.pkSeed, pk.pkRoot, mu, be 4 msgCtr]
+  let (words, leafWord) := hmsgXof frame
+  match select bp.pors words with
+  | none => none
+  | some idxs => some (idxs, leafWord % 2 ^ bp.totalHeight)
+
+theorem baggySelectAt_admissible (hmsgXof : BaggyHmsgStream) (bp : BaggyParams)
+    (pk : PqPublicKey) (r mu : List UInt8) (msgCtr : Nat) {idxs : List Nat} {leafIdx : Nat}
+    (h : baggySelectAt hmsgXof bp pk r mu msgCtr = some (idxs, leafIdx)) :
+    Admissible bp.pors idxs ∧ leafIdx < 2 ^ bp.totalHeight := by
+  unfold baggySelectAt at h
+  cases hSel : select bp.pors (hmsgXof (encodeMultiFrame [r, pk.pkSeed, pk.pkRoot, mu, be 4 msgCtr])).1 with
+  | none => rw [hSel] at h; cases h
+  | some s =>
+    rw [hSel] at h
+    injection h with hPair
+    obtain ⟨rfl, rfl⟩ := Prod.mk.inj hPair
+    exact ⟨select_admissible bp.pors _ s hSel, Nat.mod_lt _ (Nat.two_pow_pos _)⟩
+
+/-- Recompute one `Baggy` hypertree layer root (`layer_root`, `baggy.rs:932-968`). -/
+def baggyLayerRoot (suite : TweakableHashSuite) (bp : BaggyParams) (pkSeed : List UInt8)
+    (layer : Nat) (tree : UInt64) (kp : UInt32) (node : List UInt8)
+    (lsig : BaggyLayerSig) : Option (List UInt8) :=
+  if !decide (lsig.ctr < bp.maxGrind) || !decide (lsig.chains.length = 128) ||
+      !lsig.chains.all (fun c => decide (c.length = 32)) ||
+      !decide (lsig.auth.length = bp.subtreeHeight) ||
+      !lsig.auth.all (fun a => decide (a.length = 32)) then
+    none
+  else
+    let dg := baggyLayerDigest suite pkSeed (UInt32.ofNat layer) tree kp node lsig.ctr
+    let digits := extractBaseWDigits 4 128 dg
+    if !checkTargetSum 4 128 192 digits then none
+    else
+      let wotsLeaf := recoverWotsPkFromSig suite (baggyWotsPqParams bp) pkSeed
+        (UInt32.ofNat layer) tree kp.toNat digits lsig.chains
+      walkMerkleAuthPath suite pkSeed (UInt32.ofNat layer) tree .tree
+        bp.subtreeHeight 0 kp.toNat wotsLeaf lsig.auth
+
+/-- Climb `layers` starting at layer `lvl` from bottom PORS+FP root `curNode`. -/
+def baggyClimbLayers (suite : TweakableHashSuite) (bp : BaggyParams) (pkSeed : List UInt8)
+    (leafIdx : Nat) : Nat → List UInt8 → List BaggyLayerSig → Option (List UInt8)
+  | _, curNode, [] => some curNode
+  | lvl, curNode, lsig :: rest =>
+    let (kp, tree) := bp.pathAt leafIdx lvl
+    match baggyLayerRoot suite bp pkSeed lvl tree kp curNode lsig with
+    | none => none
+    | some nextNode => baggyClimbLayers suite bp pkSeed leafIdx (lvl + 1) nextNode rest
+
+/-- **`baggy_verify` (`crates/qsag-core/src/baggy.rs:971-1010`).** -/
+@[expose] def baggyVerify (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (bp : BaggyParams) (pk : PqPublicKey) (msg : List UInt8) (sig : BaggySig) : Bool :=
+  if !bp.wellFormed || !decide (sig.r.length = 32) ||
+      !decide (sig.layers.length = bp.numLayers) ||
+      !decide (sig.msgCtr < bp.maxGrind) ||
+      !sig.pors.secrets.all (fun s => decide (s.length = 32)) ||
+      !sig.pors.auth.all (fun a => decide (a.length = 32)) then
+    false
+  else
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    match baggySelectAt hmsgXof bp pk sig.r mu sig.msgCtr with
+    | none => false
+    | some (idxs, leafIdx) =>
+      let (kp0, tree0) := bp.pathAt leafIdx 0
+      match porsFpRoot bp.pors (porsTweakableSuite suite pk.pkSeed tree0 kp0)
+          idxs sig.pors.secrets sig.pors.auth with
+      | none => false
+      | some node0 =>
+        match baggyClimbLayers suite bp pk.pkSeed leafIdx 0 node0 sig.layers with
+        | none => false
+        | some topRoot => decide (topRoot = pk.pkRoot)
+
+/-- Honest PORS+FP root at hypertree bottom leaf `(tree0, kp0)`. -/
+def baggyHonestPorsRoot (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey)
+    (tree0 : UInt64) (kp0 : UInt32) : List UInt8 :=
+  honestTree (porsTweakableSuite suite sk.pkSeed tree0 kp0)
+    (porsSecretLeaf suite sk tree0 kp0) bp.pors.treeHeight 0
+
+/-- Honest subtree root at hypertree layer `layer` (`0 ≤ layer < bp.numLayers`). -/
+def baggyHonestSubtreeRoot (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey)
+    (layer : Nat) (tree : UInt64) : List UInt8 :=
+  computeXmssSubtreeRoot suite (baggyWotsPqParams bp) sk (UInt32.ofNat layer) tree
+
+/-- Derive canonical `Baggy` `PqPublicKey` from top subtree `(numLayers - 1, 0)`. -/
+def baggyDerivePublicKey (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey) :
+    PqPublicKey :=
+  ⟨sk.pkSeed, baggyHonestSubtreeRoot suite bp sk (bp.numLayers - 1) 0⟩
+
+theorem baggyVerify_high_ctr_false (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (bp : BaggyParams) (pk : PqPublicKey) (msg : List UInt8) (sig : BaggySig)
+    (hCtr : bp.maxGrind ≤ sig.msgCtr) :
+    baggyVerify suite hmsgXof bp pk msg sig = false := by
+  unfold baggyVerify
+  rw [decide_eq_false (Nat.not_lt_of_ge hCtr)]
+  simp only [Bool.not_false, Bool.or_true, Bool.true_or, ↓reduceIte]
+
+theorem baggyDerivePublicKey_eq (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey) :
+    baggyDerivePublicKey suite bp sk =
+      ⟨sk.pkSeed, computeXmssSubtreeRoot suite (baggyWotsPqParams bp) sk
+        (UInt32.ofNat (bp.numLayers - 1)) 0⟩ := rfl
+
+theorem baggyWotsPqParams_eq (bp : BaggyParams) :
+    baggyWotsPqParams bp = ⟨4, 128, bp.subtreeHeight, bp.numLayers, 0, 0, 1, false⟩ := rfl
+
+theorem baggySelectAt_eq (hmsgXof : BaggyHmsgStream) (bp : BaggyParams) (pk : PqPublicKey)
+    (r mu : List UInt8) (msgCtr : Nat) :
+    baggySelectAt hmsgXof bp pk r mu msgCtr =
+      let frame := encodeMultiFrame [r, pk.pkSeed, pk.pkRoot, mu, be 4 msgCtr]
+      let (words, leafWord) := hmsgXof frame
+      match select bp.pors words with
+      | none => none
+      | some idxs => some (idxs, leafWord % 2 ^ bp.totalHeight) := rfl
+
+theorem baggyClimbLayers_nil (suite : TweakableHashSuite) (bp : BaggyParams) (pkSeed : List UInt8)
+    (leafIdx lvl : Nat) (curNode : List UInt8) :
+    baggyClimbLayers suite bp pkSeed leafIdx lvl curNode [] = some curNode := rfl
+
+theorem baggyClimbLayers_cons (suite : TweakableHashSuite) (bp : BaggyParams) (pkSeed : List UInt8)
+    (leafIdx lvl : Nat) (curNode : List UInt8) (lsig : BaggyLayerSig) (rest : List BaggyLayerSig) :
+    baggyClimbLayers suite bp pkSeed leafIdx lvl curNode (lsig :: rest) =
+      let (kp, tree) := bp.pathAt leafIdx lvl
+      match baggyLayerRoot suite bp pkSeed lvl tree kp curNode lsig with
+      | none => none
+      | some nextNode => baggyClimbLayers suite bp pkSeed leafIdx (lvl + 1) nextNode rest := rfl
+
+theorem baggyLayerRoot_eq (suite : TweakableHashSuite) (bp : BaggyParams) (pkSeed : List UInt8)
+    (layer : Nat) (tree : UInt64) (kp : UInt32) (node : List UInt8) (lsig : BaggyLayerSig) :
+    baggyLayerRoot suite bp pkSeed layer tree kp node lsig =
+      if !decide (lsig.ctr < bp.maxGrind) || !decide (lsig.chains.length = 128) ||
+          !lsig.chains.all (fun c => decide (c.length = 32)) ||
+          !decide (lsig.auth.length = bp.subtreeHeight) ||
+          !lsig.auth.all (fun a => decide (a.length = 32)) then
+        none
+      else
+        let dg := thCall suite tagBaggyDigest pkSeed
+          ⟨UInt32.ofNat layer, tree, .wotsHash, kp, 0, UInt32.ofNat lsig.ctr⟩ [node, be 4 lsig.ctr]
+        let digits := extractBaseWDigits 4 128 dg
+        if !checkTargetSum 4 128 192 digits then none
+        else
+          let wotsLeaf := recoverWotsPkFromSig suite (baggyWotsPqParams bp) pkSeed
+            (UInt32.ofNat layer) tree kp.toNat digits lsig.chains
+          walkMerkleAuthPath suite pkSeed (UInt32.ofNat layer) tree .tree
+            bp.subtreeHeight 0 kp.toNat wotsLeaf lsig.auth := rfl
+
+/-- Honest node expected on `leafIdx`'s path before climbing layer `lvl`:
+    at `lvl = 0` it is the honest `PORS+FP` root; at `lvl = l + 1` it is the honest subtree root
+    of layer `l`. -/
+def baggyHonestPathNode (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey)
+    (leafIdx : Nat) : Nat → List UInt8
+  | 0 =>
+    let (kp0, tree0) := bp.pathAt leafIdx 0
+    baggyHonestPorsRoot suite bp sk tree0 kp0
+  | l + 1 =>
+    let (_, tree) := bp.pathAt leafIdx l
+    baggyHonestSubtreeRoot suite bp sk l tree
+
+theorem baggyHonestPathNode_top (suite : TweakableHashSuite) (bp : BaggyParams) (sk : PqSecretKey)
+    (hw : bp.wellFormed = true) {leafIdx : Nat} (hLeaf : leafIdx < 2 ^ bp.totalHeight) :
+    baggyHonestPathNode suite bp sk leafIdx bp.numLayers =
+      (baggyDerivePublicKey suite bp sk).pkRoot := by
+  simp only [BaggyParams.wellFormed, Bool.and_eq_true, decide_eq_true_eq] at hw
+  have hdPos : 1 ≤ bp.numLayers := hw.1.1.1.1.1.2.1
+  have hdSplit : bp.numLayers = (bp.numLayers - 1) + 1 := (Nat.sub_add_cancel hdPos).symm
+  rw [hdSplit]
+  unfold baggyHonestPathNode baggyDerivePublicKey
+  dsimp only [Nat.add_sub_cancel]
+  have hTree0 : (bp.pathAt leafIdx (bp.numLayers - 1)).2 = 0 := by
+    unfold BaggyParams.pathAt
+    dsimp only
+    have hTot : bp.totalHeight = bp.subtreeHeight * (bp.numLayers - 1) + bp.subtreeHeight := by
+      unfold BaggyParams.totalHeight
+      rw [hdSplit, Nat.mul_add, Nat.mul_one]
+    rw [hTot, Nat.pow_add] at hLeaf
+    have hDiv1 : leafIdx / 2 ^ (bp.subtreeHeight * (bp.numLayers - 1)) < 2 ^ bp.subtreeHeight :=
+      (Nat.div_lt_iff_lt_mul (Nat.two_pow_pos _)).mpr
+        (by rw [Nat.mul_comm] at hLeaf; exact hLeaf)
+    have hDiv2 : (leafIdx / 2 ^ (bp.subtreeHeight * (bp.numLayers - 1))) / 2 ^ bp.subtreeHeight = 0 :=
+      Nat.div_eq_of_lt hDiv1
+    rw [hDiv2]
+    rfl
+  rw [hTree0]
+
+/-- Signed query record in an honest `FirstSignedLedger`-guarded `Baggy` transcript:
+    stores the signed message, its `BaggySig`, and proof that it was honestly generated under `sk`. -/
+structure HonestBaggySignedEntry (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (bp : BaggyParams) (sk : PqSecretKey) where
+  msg : List UInt8
+  sig : BaggySig
+  idxs : List Nat
+  leafIdx : Nat
+  selected : baggySelectAt hmsgXof bp (baggyDerivePublicKey suite bp sk) sig.r
+    (thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot msg) sig.msgCtr =
+    some (idxs, leafIdx)
+  layers_len : sig.layers.length = bp.numLayers
+  honest_layers : ∀ l : Nat, (hl : l < sig.layers.length) →
+    let (kp, tree) := bp.pathAt leafIdx l
+    let lsig := sig.layers[l]'hl
+    let dg := baggyLayerDigest suite sk.pkSeed (UInt32.ofNat l) tree kp
+      (baggyHonestPathNode suite bp sk leafIdx l) lsig.ctr
+    let digits := extractBaseWDigits 4 128 dg
+    checkTargetSum 4 128 192 digits = true ∧
+    lsig.chains = (List.range 128).map (fun r =>
+      wotsChainSteps suite sk.pkSeed (UInt32.ofNat l) tree kp.toNat r 0 (digits.getD r 0)
+        (wotsSecretBase suite sk (UInt32.ofNat l) tree kp.toNat r))
+
+/-- `FirstSignedLedger` invariant (`baggy.rs:361-389`): any two honest signatures traversing the
+    same static key `(layer, tree, kp)` sign the same node `baggyHonestPathNode` with the same
+    counter `ctr` (hence open the exact same digit vector). -/
+def FirstSignedConsistent {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk)) : Prop :=
+  ∀ e₁ ∈ log, ∀ e₂ ∈ log, ∀ l : Nat, (hl₁ : l < e₁.sig.layers.length) →
+    (hl₂ : l < e₂.sig.layers.length) →
+    bp.pathAt e₁.leafIdx l = bp.pathAt e₂.leafIdx l →
+    (e₁.sig.layers[l]'hl₁).ctr = (e₂.sig.layers[l]'hl₂).ctr
+
+/-- Constructive (`Type`-valued, `0 Classical.choice`) forgery break witness for `Baggy`:
+    every valid forgery against an honestly signed multi-query `Baggy` log constructively yields
+    (1) a fresh `TAG_BAGGY_HMSG` `PORS+FP` subset cover (`porsItsr`),
+    (2) an explicit byte-hash collision (`hashCollision`), or
+    (3) an unopened `PORS+FP` leaf preimage or `WOTS+C` chain backward-inversion preimage
+        (`secretPreimage`). -/
+inductive BaggyForgeryBreak (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (bp : BaggyParams) (sk : PqSecretKey)
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk)) : Type where
+  | porsItsr
+      (rStar muStar : List UInt8) (ctrStar leafIdx : Nat) (idxsStar : List Nat)
+      (hSel : baggySelectAt hmsgXof bp (baggyDerivePublicKey suite bp sk) rStar muStar ctrStar =
+        some (idxsStar, leafIdx))
+      (hFreshHmsg : ∀ e ∈ log,
+        encodeMultiFrame [rStar, sk.pkSeed, (baggyDerivePublicKey suite bp sk).pkRoot,
+          muStar, be 4 ctrStar] ≠
+        encodeMultiFrame [e.sig.r, sk.pkSeed, (baggyDerivePublicKey suite bp sk).pkRoot,
+          thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot e.msg,
+          be 4 e.sig.msgCtr])
+      (hCovered : ∀ u ∈ idxsStar,
+        ∃ e ∈ log, bp.pathAt e.leafIdx 0 = bp.pathAt leafIdx 0 ∧ u ∈ e.idxs)
+  | hashCollision (col : HashCollisionWitness suite.rawHash)
+  | porsUnopenedPreimage
+      (tree0 : UInt64) (kp0 : UInt32) (leafPos : Nat) (candSecret : List UInt8)
+      (hUnopened : ∀ e ∈ log, bp.pathAt e.leafIdx 0 = (kp0, tree0) → leafPos ∉ e.idxs)
+      (hPre : thChainF suite sk.pkSeed (porsLeafAdrs tree0 kp0 (UInt32.ofNat leafPos)) candSecret =
+        (porsTweakableSuite suite sk.pkSeed tree0 kp0).leaf leafPos
+          (porsSecretLeaf suite sk tree0 kp0 leafPos))
+  | wotsBackwardPreimage (inv : WotsBackwardInversionWitness suite sk.pkSeed)
+
+private def findLtThree : List Nat → Nat → Option Nat
+  | [], _ => none
+  | d :: ds, idx => if d < 3 then some idx else findLtThree ds (idx + 1)
+
+private theorem findLtThree_spec :
+    ∀ (ds : List Nat) (idx r : Nat),
+      findLtThree ds idx = some r → idx ≤ r ∧ ds.getD (r - idx) 0 < 3
+  | [], _, _, h => nomatch h
+  | d :: ds, idx, r, h => by
+    unfold findLtThree at h
+    by_cases hd : d < 3
+    · rw [if_pos hd] at h
+      injection h with hEq; subst hEq
+      rw [Nat.sub_self]
+      exact ⟨Nat.le_refl _, hd⟩
+    · rw [if_neg hd] at h
+      obtain ⟨hLe, hLt⟩ := findLtThree_spec ds (idx + 1) r h
+      have hSub : r - idx = (r - (idx + 1)) + 1 := by omega
+      rw [hSub]
+      exact ⟨by omega, hLt⟩
+
+private theorem findLtThree_exists_of_sumDigits_lt :
+    ∀ (ds : List Nat) (idx : Nat),
+      sumDigits ds < 3 * ds.length → ∃ r, findLtThree ds idx = some r
+  | [], _, h => by rw [sumDigits_nil] at h; exact absurd h (Nat.lt_irrefl 0)
+  | d :: ds, idx, h => by
+    unfold findLtThree
+    by_cases hd : d < 3
+    · exact ⟨idx, if_pos hd⟩
+    · rw [if_neg hd]
+      rw [sumDigits_cons, List.length_cons] at h
+      exact findLtThree_exists_of_sumDigits_lt ds (idx + 1) (by omega)
+
+private theorem findLtThree_lt_len :
+    ∀ (ds : List Nat) (idx r : Nat), findLtThree ds idx = some r → r < idx + ds.length
+  | [], _, _, h => nomatch h
+  | d :: ds, idx, r, h => by
+    unfold findLtThree at h
+    by_cases hd : d < 3
+    · rw [if_pos hd] at h; injection h with hEq; subst hEq; rw [List.length_cons]; omega
+    · rw [if_neg hd] at h
+      have ih := findLtThree_lt_len ds (idx + 1) r h
+      rw [List.length_cons]; omega
+
+private theorem list_getD_range_map {α : Type} (n : Nat) (f : Nat → α) (d : α) {r : Nat}
+    (hr : r < n) : ((List.range n).map f).getD r d = f r := by
+  have hLen : ((List.range n).map f).length = n := by rw [List.length_map, List.length_range]
+  have hrL : r < ((List.range n).map f).length := hLen ▸ hr
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hrL]
+  simp
+
+private def extractUnopenedWotsLayer (suite : TweakableHashSuite) (bp : BaggyParams)
+    (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digits : List Nat) (forgedChains : List (List UInt8))
+    (hValid : checkTargetSum 4 128 192 digits = true)
+    (hSamePk : recoverWotsPkFromSig suite (baggyWotsPqParams bp) sk.pkSeed layer tree kp
+        digits forgedChains =
+      computeWotsPk suite (baggyWotsPqParams bp) sk layer tree kp) :
+    PSum (WotsBackwardInversionWitness suite sk.pkSeed) (HashCollisionWitness suite.rawHash) :=
+  let endF := recoverWotsEndpoints suite (baggyWotsPqParams bp) sk.pkSeed layer tree kp digits forgedChains
+  let endH := computeWotsEndpoints suite (baggyWotsPqParams bp) sk layer tree kp
+  if hEndNe : endF ≠ endH then
+    have hTlEq : thTweakTl suite sk.pkSeed ⟨layer, tree, .wotsPk, UInt32.ofNat kp, 0, 0⟩ endF =
+        thTweakTl suite sk.pkSeed ⟨layer, tree, .wotsPk, UInt32.ofNat kp, 0, 0⟩ endH := by
+      rw [recoverWotsPkFromSig_eq] at hSamePk
+      rw [computeWotsPk_eq, ← computeWotsEndpoints_eq] at hSamePk
+      exact hSamePk
+    match thCall_binds_or_collision suite (by rwa [thTweakTl_eq, thTweakTl_eq] at hTlEq) with
+    | .inl ⟨_, _, _, hEq⟩ => False.elim (hEndNe hEq)
+    | .inr col => .inr col
+  else
+    have hEndEq : endF = endH := Decidable.of_not_not hEndNe
+    obtain ⟨hLenD, _, hSumD⟩ := (checkTargetSum_iff 4 128 192 digits).mp hValid
+    have hEx : ∃ r, findLtThree digits 0 = some r := by
+      refine findLtThree_exists_of_sumDigits_lt digits 0 ?_
+      rw [hSumD, hLenD]
+      decide
+    match hFind : findLtThree digits 0 with
+    | none => False.elim (by obtain ⟨_, hr⟩ := hEx; rw [hFind] at hr; cases hr)
+    | some r =>
+      have hSpec := findLtThree_spec digits 0 r hFind
+      have hsLt : digits.getD r 0 < 3 := by simpa using hSpec.2
+      have hrLt128 : r < 128 := by
+        have hLt := findLtThree_lt_len digits 0 r hFind
+        omega
+      let s₂ := digits.getD r 0
+      let sig₂ := forgedChains.getD r []
+      let preVal := wotsChainSteps suite sk.pkSeed layer tree kp r s₂ (2 - s₂) sig₂
+      let endVal := endH.getD r []
+      have hInv : thChainF suite sk.pkSeed
+          ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, UInt32.ofNat 2⟩ preVal =
+          endVal := by
+        have hEndFR : endF.getD r [] =
+            wotsChainSteps suite sk.pkSeed layer tree kp r s₂ (3 - s₂) sig₂ := by
+          dsimp only [endF]
+          rw [recoverWotsEndpoints_eq]
+          exact list_getD_range_map 128 _ [] hrLt128
+        have hSplit3 : 3 - s₂ = (2 - s₂) + 1 := by omega
+        have hAdd2 : s₂ + (2 - s₂) = 2 := by omega
+        have hComp := wotsChainSteps_add suite sk.pkSeed layer tree kp r (2 - s₂) 1 s₂ sig₂
+        rw [hAdd2, ← hSplit3] at hComp
+        rw [wotsChainSteps_succ, wotsChainSteps_zero] at hComp
+        exact hComp.trans (hEndFR.symm.trans (congrArg (fun l => l.getD r []) hEndEq))
+      .inl
+        { layer := layer
+          tree := tree
+          kp := kp
+          chain := r
+          step := 2
+          revealedStep := 3
+          step_lt := by decide
+          preimage := preVal
+          revealedVal := endVal
+          invertsChain := hInv }
+
+/-- Constructive `Type`-valued PORS+FP binding extractor (`0 Classical.choice`) lifting
+    `opening_against_honest_root` directly to `PSum` over `HashCollisionWitness suite.rawHash`. -/
+def extractPorsOpeningOrCollision (p : Params) (suite : TweakableHashSuite) (sk : PqSecretKey)
+    (tree0 : UInt64) (kp0 : UInt32) (idxs : List Nat) (o : PorsFpOpening)
+    (hRoot : porsFpRoot p (porsTweakableSuite suite sk.pkSeed tree0 kp0) idxs o.secrets o.auth =
+      some (baggyHonestPorsRoot suite ⟨WotsCParams.v128, 2, 16, 2 ^ 26, p⟩ sk tree0 kp0)) :
+    PSum
+      (o.secrets = idxs.map (porsSecretLeaf suite sk tree0 kp0) ∧
+        o.auth = honestAuth (porsTweakableSuite suite sk.pkSeed tree0 kp0)
+          (porsSecretLeaf suite sk tree0 kp0) p.treeHeight idxs)
+      (HashCollisionWitness suite.rawHash) := by
+  let tSuite := porsTweakableSuite suite sk.pkSeed tree0 kp0
+  let sec := porsSecretLeaf suite sk tree0 kp0
+  if hEq : o.secrets = idxs.map sec ∧ o.auth = honestAuth tSuite sec p.treeHeight idxs then
+    exact .inl hEq
+  else
+    have hShape := porsFpRoot_some_shape p tSuite idxs o.secrets o.auth _ hRoot
+    have hHon := porsFpRoot_complete p tSuite sec idxs hShape.1 hShape.2.1
+    -- Walk `o.secrets` vs `idxs.map sec` first; if equal, walk `climb` constructively!
+    if hSecEq : o.secrets = idxs.map sec then
+      have hAuthNe : o.auth ≠ honestAuth tSuite sec p.treeHeight idxs :=
+        fun hA => hEq ⟨hSecEq, hA⟩
+      -- Constructively locate the colliding node in `climb`:
+      have h1 := ((porsFpRoot_eq_some_iff p tSuite idxs o.secrets o.auth _).mp hRoot).2
+      have h2 := ((porsFpRoot_eq_some_iff p tSuite idxs (idxs.map sec)
+        (honestAuth tSuite sec p.treeHeight idxs) _).mp hHon).2
+      rw [hSecEq] at h1
+      suffices ∀ (n lvl : Nat) (ix : List Nat) (nodes nodes' auth auth' top rem : List (List UInt8)),
+          (nodes ≠ nodes' ∨ auth ≠ auth') →
+          climb tSuite.node n lvl ix nodes auth = some (top, rem) →
+          climb tSuite.node n lvl ix nodes' auth' = some (top, rem) →
+          HashCollisionWitness suite.rawHash from
+        .inr (this p.treeHeight 0 idxs _ _ o.auth _ _ [] (.inr hAuthNe) h1 h2)
+      intro n
+      induction n with
+      | zero =>
+        intro lvl ix nodes nodes' auth auth' top rem hNe hC1 hC2
+        cases hC1; cases hC2
+        exact False.elim (hNe.elim (fun h => h rfl) (fun h => h rfl))
+      | succ n ih =>
+        intro lvl ix nodes nodes' auth auth' top rem hNe hC1 hC2
+        rw [climb_succ] at hC1 hC2
+        cases hA1 : applyPlan (tSuite.node (lvl + 1)) (plan ix) nodes auth with
+        | none => rw [hA1] at hC1; cases hC1
+        | some r1 =>
+          cases hA2 : applyPlan (tSuite.node (lvl + 1)) (plan ix) nodes' auth' with
+          | none => rw [hA2] at hC2; cases hC2
+          | some r2 =>
+            rw [hA1] at hC1; rw [hA2] at hC2
+            if hRNe : r1.1 ≠ r2.1 ∨ r1.2 ≠ r2.2 then
+              exact ih (lvl + 1) (parents ix) r1.1 r2.1 r1.2 r2.2 top rem hRNe hC1 hC2
+            else
+              have hR1Eq : r1.1 = r2.1 := Decidable.of_not_not (fun h => hRNe (.inl h))
+              have hR2Eq : r1.2 = r2.2 := Decidable.of_not_not (fun h => hRNe (.inr h))
+              have hREq : r2 = r1 := Prod.ext hR1Eq.symm hR2Eq.symm
+              rw [hREq] at hA2
+              clear hC1 hC2 ih hRNe hR1Eq hR2Eq hREq
+              obtain ⟨outM, remM⟩ := r1
+              suffices ∀ (ps : List (Nat × Bool)) (ns ns' as_ as' oM rM : List (List UInt8)),
+                  (ns ≠ ns' ∨ as_ ≠ as') →
+                  applyPlan (tSuite.node (lvl + 1)) ps ns as_ = some (oM, rM) →
+                  applyPlan (tSuite.node (lvl + 1)) ps ns' as' = some (oM, rM) →
+                  HashCollisionWitness suite.rawHash from
+                this (plan ix) nodes nodes' auth auth' outM remM hNe hA1 hA2
+              intro ps
+              induction ps with
+              | nil =>
+                intro ns ns' as_ as' oM rM hN hp1 hp2
+                obtain ⟨hn1, _, hr1⟩ := (applyPlan_nil _ ns as_ oM rM).mp hp1
+                obtain ⟨hn2, _, hr2⟩ := (applyPlan_nil _ ns' as' oM rM).mp hp2
+                exact False.elim (hN.elim (fun h => h (hn1.trans hn2.symm))
+                  (fun h => h (hr1.symm.trans hr2)))
+              | cons g ps ihP =>
+                intro ns ns' as_ as' oM rM hN hp1 hp2
+                obtain ⟨x, b⟩ := g
+                cases b with
+                | true =>
+                  match ns, ns' with
+                  | n1 :: m1 :: t1, n2 :: m2 :: t2 =>
+                    change consOut (tSuite.node (lvl + 1) (x / 2) n1 m1)
+                      (applyPlan (tSuite.node (lvl + 1)) ps t1 as_) = some (oM, rM) at hp1
+                    change consOut (tSuite.node (lvl + 1) (x / 2) n2 m2)
+                      (applyPlan (tSuite.node (lvl + 1)) ps t2 as') = some (oM, rM) at hp2
+                    cases hSub1 : applyPlan (tSuite.node (lvl + 1)) ps t1 as_ with
+                    | none => rw [hSub1] at hp1; cases hp1
+                    | some s1 =>
+                      cases hSub2 : applyPlan (tSuite.node (lvl + 1)) ps t2 as' with
+                      | none => rw [hSub2] at hp2; cases hp2
+                      | some s2 =>
+                        rw [hSub1] at hp1; rw [hSub2] at hp2
+                        injection hp1 with hp1'
+                        injection hp2 with hp2'
+                        have hEqO := (Prod.mk.inj hp1').1.trans (Prod.mk.inj hp2').1.symm
+                        have hEqR := (Prod.mk.inj hp1').2.trans (Prod.mk.inj hp2').2.symm
+                        have hHead := (List.cons.inj hEqO).1
+                        have hTail := (List.cons.inj hEqO).2
+                        have hsEq : s2 = s1 := Prod.ext hTail.symm hEqR.symm
+                        rw [hsEq] at hSub2
+                        if hChildNe : n1 ≠ n2 ∨ m1 ≠ m2 then
+                          exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                            hChildNe hHead
+                        else
+                          have hnEq : n1 = n2 := Decidable.of_not_not (fun h => hChildNe (.inl h))
+                          have hmEq : m1 = m2 := Decidable.of_not_not (fun h => hChildNe (.inr h))
+                          have hSubNe : t1 ≠ t2 ∨ as_ ≠ as' := by
+                            rcases hN with hNs | hAs
+                            · exact .inl (fun ht => hNs (by rw [hnEq, hmEq, ht]))
+                            · exact .inr hAs
+                          exact ihP t1 t2 as_ as' s1.1 s1.2 hSubNe hSub1 hSub2
+                  | [], _ => cases hp1
+                  | [_], _ => cases hp1
+                  | _ :: _ :: _, [] => cases hp2
+                  | _ :: _ :: _, [_] => cases hp2
+                | false =>
+                  match ns, as_, ns', as' with
+                  | n1 :: t1, a1 :: at1, n2 :: t2, a2 :: at2 =>
+                    change consOut (combine (tSuite.node (lvl + 1)) x n1 a1)
+                      (applyPlan (tSuite.node (lvl + 1)) ps t1 at1) = some (oM, rM) at hp1
+                    change consOut (combine (tSuite.node (lvl + 1)) x n2 a2)
+                      (applyPlan (tSuite.node (lvl + 1)) ps t2 at2) = some (oM, rM) at hp2
+                    cases hSub1 : applyPlan (tSuite.node (lvl + 1)) ps t1 at1 with
+                    | none => rw [hSub1] at hp1; cases hp1
+                    | some s1 =>
+                      cases hSub2 : applyPlan (tSuite.node (lvl + 1)) ps t2 at2 with
+                      | none => rw [hSub2] at hp2; cases hp2
+                      | some s2 =>
+                        rw [hSub1] at hp1; rw [hSub2] at hp2
+                        injection hp1 with hp1'
+                        injection hp2 with hp2'
+                        have hEqO := (Prod.mk.inj hp1').1.trans (Prod.mk.inj hp2').1.symm
+                        have hEqR := (Prod.mk.inj hp1').2.trans (Prod.mk.inj hp2').2.symm
+                        have hHead := (List.cons.inj hEqO).1
+                        have hTail := (List.cons.inj hEqO).2
+                        have hsEq : s2 = s1 := Prod.ext hTail.symm hEqR.symm
+                        rw [hsEq] at hSub2
+                        if hChildNe : n1 ≠ n2 ∨ a1 ≠ a2 then
+                          if hxOdd : x % 2 = 1 then
+                            rw [combine_odd _ _ _ hxOdd, combine_odd _ _ _ hxOdd] at hHead
+                            exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                              (hChildNe.elim .inr .inl) hHead
+                          else
+                            rw [combine_even _ _ _ hxOdd, combine_even _ _ _ hxOdd] at hHead
+                            exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                              hChildNe hHead
+                        else
+                          have hnEq : n1 = n2 := Decidable.of_not_not (fun h => hChildNe (.inl h))
+                          have haEq : a1 = a2 := Decidable.of_not_not (fun h => hChildNe (.inr h))
+                          have hSubNe : t1 ≠ t2 ∨ at1 ≠ at2 := by
+                            rcases hN with hNs | hAs
+                            · exact .inl (fun ht => hNs (by rw [hnEq, ht]))
+                            · exact .inr (fun hat => hAs (by rw [haEq, hat]))
+                          exact ihP t1 t2 at1 at2 s1.1 s1.2 hSubNe hSub1 hSub2
+                  | [], _, _, _ => cases hp1
+                  | _ :: _, [], _, _ => cases hp1
+                  | _ :: _, _ :: _, [], _ => cases hp2
+                  | _ :: _, _ :: _, _ :: _, [] => cases hp2
+    else
+      -- `o.secrets ≠ idxs.map sec`: either leaf hashes match (find colliding index) or `climb` differs!
+      if hZEq : List.zipWith tSuite.leaf idxs o.secrets =
+          List.zipWith tSuite.leaf idxs (idxs.map sec) then
+        have hLenS := hShape.2.2.1.trans hShape.2.1.length.symm
+        suffices ∀ (ix : List Nat) (ss : List (List UInt8)),
+            ss.length = ix.length → ss ≠ ix.map sec →
+            List.zipWith tSuite.leaf ix ss = List.zipWith tSuite.leaf ix (ix.map sec) →
+            HashCollisionWitness suite.rawHash from
+          .inr (this idxs o.secrets hLenS hSecEq hZEq)
+        intro ix
+        induction ix with
+        | nil =>
+          intro ss hL hNe _; cases ss with | nil => exact False.elim (hNe rfl) | cons _ _ => cases hL
+        | cons u us ih =>
+          intro ss hL hNe hZ
+          cases ss with
+          | nil => cases hL
+          | cons s0 st =>
+            rw [List.map_cons, List.zipWith_cons_cons, List.zipWith_cons_cons] at hZ
+            if hs0 : s0 = sec u then
+              exact ih st (Nat.succ.inj hL) (fun hSt => hNe (by rw [List.map_cons, hs0, hSt]))
+                (List.cons.inj hZ).2
+            else
+              exact liftPorsLeafCollision suite sk.pkSeed tree0 kp0 u hs0 (List.cons.inj hZ).1
+      else
+        have h1 := ((porsFpRoot_eq_some_iff p tSuite idxs o.secrets o.auth _).mp hRoot).2
+        have h2 := ((porsFpRoot_eq_some_iff p tSuite idxs (idxs.map sec)
+          (honestAuth tSuite sec p.treeHeight idxs) _).mp hHon).2
+        suffices ∀ (n lvl : Nat) (ix : List Nat) (nodes nodes' auth auth' top rem : List (List UInt8)),
+            (nodes ≠ nodes' ∨ auth ≠ auth') →
+            climb tSuite.node n lvl ix nodes auth = some (top, rem) →
+            climb tSuite.node n lvl ix nodes' auth' = some (top, rem) →
+            HashCollisionWitness suite.rawHash from
+          .inr (this p.treeHeight 0 idxs _ _ o.auth _ _ [] (.inl hZEq) h1 h2)
+        intro n
+        induction n with
+        | zero =>
+          intro lvl ix nodes nodes' auth auth' top rem hNe hC1 hC2
+          cases hC1; cases hC2
+          exact False.elim (hNe.elim (fun h => h rfl) (fun h => h rfl))
+        | succ n ih =>
+          intro lvl ix nodes nodes' auth auth' top rem hNe hC1 hC2
+          rw [climb_succ] at hC1 hC2
+          cases hA1 : applyPlan (tSuite.node (lvl + 1)) (plan ix) nodes auth with
+          | none => rw [hA1] at hC1; cases hC1
+          | some r1 =>
+            cases hA2 : applyPlan (tSuite.node (lvl + 1)) (plan ix) nodes' auth' with
+            | none => rw [hA2] at hC2; cases hC2
+            | some r2 =>
+              rw [hA1] at hC1; rw [hA2] at hC2
+              if hRNe : r1.1 ≠ r2.1 ∨ r1.2 ≠ r2.2 then
+                exact ih (lvl + 1) (parents ix) r1.1 r2.1 r1.2 r2.2 top rem hRNe hC1 hC2
+              else
+                have hR1Eq : r1.1 = r2.1 := Decidable.of_not_not (fun h => hRNe (.inl h))
+                have hR2Eq : r1.2 = r2.2 := Decidable.of_not_not (fun h => hRNe (.inr h))
+                have hREq : r2 = r1 := Prod.ext hR1Eq.symm hR2Eq.symm
+                rw [hREq] at hA2
+                clear hC1 hC2 ih hRNe hR1Eq hR2Eq hREq
+                obtain ⟨outM, remM⟩ := r1
+                suffices ∀ (ps : List (Nat × Bool)) (ns ns' as_ as' oM rM : List (List UInt8)),
+                    (ns ≠ ns' ∨ as_ ≠ as') →
+                    applyPlan (tSuite.node (lvl + 1)) ps ns as_ = some (oM, rM) →
+                    applyPlan (tSuite.node (lvl + 1)) ps ns' as' = some (oM, rM) →
+                    HashCollisionWitness suite.rawHash from
+                  this (plan ix) nodes nodes' auth auth' outM remM hNe hA1 hA2
+                intro ps
+                induction ps with
+                | nil =>
+                  intro ns ns' as_ as' oM rM hN hp1 hp2
+                  obtain ⟨hn1, _, hr1⟩ := (applyPlan_nil _ ns as_ oM rM).mp hp1
+                  obtain ⟨hn2, _, hr2⟩ := (applyPlan_nil _ ns' as' oM rM).mp hp2
+                  exact False.elim (hN.elim (fun h => h (hn1.trans hn2.symm))
+                    (fun h => h (hr1.symm.trans hr2)))
+                | cons g ps ihP =>
+                  intro ns ns' as_ as' oM rM hN hp1 hp2
+                  obtain ⟨x, b⟩ := g
+                  cases b with
+                  | true =>
+                    match ns, ns' with
+                    | n1 :: m1 :: t1, n2 :: m2 :: t2 =>
+                      change consOut (tSuite.node (lvl + 1) (x / 2) n1 m1)
+                        (applyPlan (tSuite.node (lvl + 1)) ps t1 as_) = some (oM, rM) at hp1
+                      change consOut (tSuite.node (lvl + 1) (x / 2) n2 m2)
+                        (applyPlan (tSuite.node (lvl + 1)) ps t2 as') = some (oM, rM) at hp2
+                      cases hSub1 : applyPlan (tSuite.node (lvl + 1)) ps t1 as_ with
+                      | none => rw [hSub1] at hp1; cases hp1
+                      | some s1 =>
+                        cases hSub2 : applyPlan (tSuite.node (lvl + 1)) ps t2 as' with
+                        | none => rw [hSub2] at hp2; cases hp2
+                        | some s2 =>
+                          rw [hSub1] at hp1; rw [hSub2] at hp2
+                          injection hp1 with hp1'
+                          injection hp2 with hp2'
+                          have hEqO := (Prod.mk.inj hp1').1.trans (Prod.mk.inj hp2').1.symm
+                          have hEqR := (Prod.mk.inj hp1').2.trans (Prod.mk.inj hp2').2.symm
+                          have hHead := (List.cons.inj hEqO).1
+                          have hTail := (List.cons.inj hEqO).2
+                          have hsEq : s2 = s1 := Prod.ext hTail.symm hEqR.symm
+                          rw [hsEq] at hSub2
+                          if hChildNe : n1 ≠ n2 ∨ m1 ≠ m2 then
+                            exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                              hChildNe hHead
+                          else
+                            have hnEq : n1 = n2 := Decidable.of_not_not (fun h => hChildNe (.inl h))
+                            have hmEq : m1 = m2 := Decidable.of_not_not (fun h => hChildNe (.inr h))
+                            have hSubNe : t1 ≠ t2 ∨ as_ ≠ as' := by
+                              rcases hN with hNs | hAs
+                              · exact .inl (fun ht => hNs (by rw [hnEq, hmEq, ht]))
+                              · exact .inr hAs
+                            exact ihP t1 t2 as_ as' s1.1 s1.2 hSubNe hSub1 hSub2
+                    | [], _ => cases hp1
+                    | [_], _ => cases hp1
+                    | _ :: _ :: _, [] => cases hp2
+                    | _ :: _ :: _, [_] => cases hp2
+                  | false =>
+                    match ns, as_, ns', as' with
+                    | n1 :: t1, a1 :: at1, n2 :: t2, a2 :: at2 =>
+                      change consOut (combine (tSuite.node (lvl + 1)) x n1 a1)
+                        (applyPlan (tSuite.node (lvl + 1)) ps t1 at1) = some (oM, rM) at hp1
+                      change consOut (combine (tSuite.node (lvl + 1)) x n2 a2)
+                        (applyPlan (tSuite.node (lvl + 1)) ps t2 at2) = some (oM, rM) at hp2
+                      cases hSub1 : applyPlan (tSuite.node (lvl + 1)) ps t1 at1 with
+                      | none => rw [hSub1] at hp1; cases hp1
+                      | some s1 =>
+                        cases hSub2 : applyPlan (tSuite.node (lvl + 1)) ps t2 at2 with
+                        | none => rw [hSub2] at hp2; cases hp2
+                        | some s2 =>
+                          rw [hSub1] at hp1; rw [hSub2] at hp2
+                          injection hp1 with hp1'
+                          injection hp2 with hp2'
+                          have hEqO := (Prod.mk.inj hp1').1.trans (Prod.mk.inj hp2').1.symm
+                          have hEqR := (Prod.mk.inj hp1').2.trans (Prod.mk.inj hp2').2.symm
+                          have hHead := (List.cons.inj hEqO).1
+                          have hTail := (List.cons.inj hEqO).2
+                          have hsEq : s2 = s1 := Prod.ext hTail.symm hEqR.symm
+                          rw [hsEq] at hSub2
+                          if hChildNe : n1 ≠ n2 ∨ a1 ≠ a2 then
+                            if hxOdd : x % 2 = 1 then
+                              rw [combine_odd _ _ _ hxOdd, combine_odd _ _ _ hxOdd] at hHead
+                              exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                                (hChildNe.elim .inr .inl) hHead
+                            else
+                              rw [combine_even _ _ _ hxOdd, combine_even _ _ _ hxOdd] at hHead
+                              exact liftPorsNodeCollision suite sk.pkSeed tree0 kp0 (lvl + 1) (x / 2)
+                                hChildNe hHead
+                          else
+                            have hnEq : n1 = n2 := Decidable.of_not_not (fun h => hChildNe (.inl h))
+                            have haEq : a1 = a2 := Decidable.of_not_not (fun h => hChildNe (.inr h))
+                            have hSubNe : t1 ≠ t2 ∨ at1 ≠ at2 := by
+                              rcases hN with hNs | hAs
+                              · exact .inl (fun ht => hNs (by rw [hnEq, ht]))
+                              · exact .inr (fun hat => hAs (by rw [haEq, hat]))
+                            exact ihP t1 t2 at1 at2 s1.1 s1.2 hSubNe hSub1 hSub2
+                    | [], _, _, _ => cases hp1
+                    | _ :: _, [], _, _ => cases hp1
+                    | _ :: _, _ :: _, [], _ => cases hp2
+                    | _ :: _, _ :: _, _ :: _, [] => cases hp2
+
+private def findSignedAtKey {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    (lvl : Nat) (kp : UInt32) (tree : UInt64) :
+    List (HonestBaggySignedEntry suite hmsgXof bp sk) →
+      Option (HonestBaggySignedEntry suite hmsgXof bp sk)
+  | [] => none
+  | e :: es => if bp.pathAt e.leafIdx lvl = (kp, tree) then some e else findSignedAtKey lvl kp tree es
+
+private theorem findSignedAtKey_some {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    {lvl : Nat} {kp : UInt32} {tree : UInt64} :
+    ∀ {log : List (HonestBaggySignedEntry suite hmsgXof bp sk)}
+      {e : HonestBaggySignedEntry suite hmsgXof bp sk},
+      findSignedAtKey lvl kp tree log = some e → e ∈ log ∧ bp.pathAt e.leafIdx lvl = (kp, tree)
+  | [], _, h => nomatch h
+  | x :: xs, e, h => by
+    unfold findSignedAtKey at h
+    by_cases hp : bp.pathAt x.leafIdx lvl = (kp, tree)
+    · rw [if_pos hp] at h; injection h with hEq; subst hEq; exact ⟨List.Mem.head _, hp⟩
+    · rw [if_neg hp] at h
+      obtain ⟨hM, hP⟩ := findSignedAtKey_some h
+      exact ⟨List.Mem.tail _ hM, hP⟩
+
+private def extractBaggyLayers {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} (hw : bp.wellFormed = true) {sk : PqSecretKey}
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk))
+    (leafIdx : Nat) (hLeafLt : leafIdx < 2 ^ bp.totalHeight) :
+    ∀ (lvl : Nat) (curNode : List UInt8) (layers : List BaggyLayerSig) (topRoot : List UInt8),
+      lvl + layers.length = bp.numLayers →
+      baggyClimbLayers suite bp sk.pkSeed leafIdx lvl curNode layers = some topRoot →
+      topRoot = baggyHonestPathNode suite bp sk leafIdx bp.numLayers →
+      PSum (curNode = baggyHonestPathNode suite bp sk leafIdx lvl)
+        (PSum (WotsBackwardInversionWitness suite sk.pkSeed) (HashCollisionWitness suite.rawHash))
+  | lvl, curNode, [], topRoot, hSum, hClimb, hTop => by
+    injection hClimb with hEq
+    rw [Nat.add_zero] at hSum
+    rw [hEq, hTop, ← hSum]
+    exact .inl rfl
+  | lvl, curNode, lsig :: rest, topRoot, hSum, hClimb, hTop => by
+    unfold baggyClimbLayers at hClimb
+    let (kp, tree) := bp.pathAt leafIdx lvl
+    cases hRootL : baggyLayerRoot suite bp sk.pkSeed lvl tree kp curNode lsig with
+    | none => rw [hRootL] at hClimb; cases hClimb
+    | some nextNode =>
+      rw [hRootL] at hClimb
+      have hSum' : (lvl + 1) + rest.length = bp.numLayers := by
+        rw [List.length_cons] at hSum; omega
+      match extractBaggyLayers hw log leafIdx hLeafLt (lvl + 1) nextNode rest topRoot hSum' hClimb hTop with
+      | .inr brk => exact .inr brk
+      | .inl hNextHonest =>
+        if hCurEq : curNode = baggyHonestPathNode suite bp sk leafIdx lvl then
+          exact .inl hCurEq
+        else
+          have hwUnpack := hw
+          simp only [BaggyParams.wellFormed, Bool.and_eq_true, decide_eq_true_eq] at hwUnpack
+          have hSubLe8 : bp.subtreeHeight ≤ 8 := hwUnpack.1.1.1.1.1.1.2
+          have hTotLe62 : bp.totalHeight ≤ 62 := hwUnpack.1.1.1.2
+          unfold baggyLayerRoot at hRootL
+          cases hShapeG : (!decide (lsig.ctr < bp.maxGrind) || !decide (lsig.chains.length = 128) ||
+              !lsig.chains.all (fun c => decide (c.length = 32)) ||
+              !decide (lsig.auth.length = bp.subtreeHeight) ||
+              !lsig.auth.all (fun a => decide (a.length = 32)))
+          · rw [hShapeG] at hRootL
+            dsimp only [Bool.false_eq_true, ↓reduceIte] at hRootL
+            let dg := baggyLayerDigest suite sk.pkSeed (UInt32.ofNat lvl) tree kp curNode lsig.ctr
+            let digits := extractBaseWDigits 4 128 dg
+            cases hTS : checkTargetSum 4 128 192 digits
+            · simp only [dg, digits, hTS] at hRootL; cases hRootL
+            · simp only [dg, digits, hTS, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hRootL
+              let wotsLeaf := recoverWotsPkFromSig suite (baggyWotsPqParams bp) sk.pkSeed
+                (UInt32.ofNat lvl) tree kp.toNat digits lsig.chains
+              let honestLeaf := computeWotsPk suite (baggyWotsPqParams bp) sk
+                (UInt32.ofNat lvl) tree kp.toNat
+              let honestPath := buildMerkleAuthPath suite sk.pkSeed (UInt32.ofNat lvl) tree .tree
+                (computeWotsPk suite (baggyWotsPqParams bp) sk (UInt32.ofNat lvl) tree)
+                bp.subtreeHeight 0 kp.toNat
+              have hPow32 : 2 ^ bp.subtreeHeight < 2 ^ 32 :=
+                Nat.pow_lt_pow_right (by decide) (by omega)
+              have hKpLt : kp.toNat < 2 ^ bp.subtreeHeight := by
+                have hMod : (leafIdx / 2 ^ (bp.subtreeHeight * lvl)) % 2 ^ bp.subtreeHeight <
+                    2 ^ bp.subtreeHeight := Nat.mod_lt _ (Nat.two_pow_pos _)
+                have hKpEq : kp = UInt32.ofNat ((leafIdx / 2 ^ (bp.subtreeHeight * lvl)) %
+                    2 ^ bp.subtreeHeight) := rfl
+                rw [hKpEq, UInt32.toNat_ofNat', Nat.mod_eq_of_lt (Nat.lt_trans hMod hPow32)]
+                exact hMod
+              have hHonWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat lvl) tree .tree
+                  bp.subtreeHeight 0 kp.toNat honestLeaf honestPath =
+                  some (baggyHonestPathNode suite bp sk leafIdx (lvl + 1)) := by
+                have hW := walkMerkleAuthPath_buildMerkleAuthPath suite sk.pkSeed
+                  (UInt32.ofNat lvl) tree .tree
+                  (computeWotsPk suite (baggyWotsPqParams bp) sk (UInt32.ofNat lvl) tree)
+                  bp.subtreeHeight 0 kp.toNat hKpLt
+                simp only [Nat.zero_mul, Nat.zero_add] at hW
+                have hNodeEq : baggyHonestPathNode suite bp sk leafIdx (lvl + 1) =
+                    computeMerkleNode suite sk.pkSeed (UInt32.ofNat lvl) tree .tree
+                      (computeWotsPk suite (baggyWotsPqParams bp) sk (UInt32.ofNat lvl) tree)
+                      bp.subtreeHeight 0 := by
+                  unfold baggyHonestPathNode baggyHonestSubtreeRoot
+                  change computeXmssSubtreeRoot _ _ _ _ tree = _
+                  exact computeXmssSubtreeRoot_eq _ _ _ _ _
+                rw [hNodeEq]
+                exact hW
+              rw [hNextHonest] at hRootL
+              if hLeafNe : wotsLeaf ≠ honestLeaf ∨ lsig.auth ≠ honestPath then
+                exact .inr (.inr (walkMerkleAuthPath_collision_extract suite sk.pkSeed
+                  (UInt32.ofNat lvl) tree .tree bp.subtreeHeight 0 kp.toNat hLeafNe hRootL hHonWalk))
+              else
+                have hSameWotsPk : wotsLeaf = honestLeaf :=
+                  Decidable.of_not_not (fun h => hLeafNe (.inl h))
+                match hSigned : findSignedAtKey lvl kp tree log with
+                | none =>
+                  exact .inr (extractUnopenedWotsLayer suite bp sk (UInt32.ofNat lvl) tree kp.toNat
+                    digits lsig.chains hTS hSameWotsPk)
+                | some entry =>
+                  obtain ⟨_, hPathEq⟩ := findSignedAtKey_some hSigned
+                  have hEntryLeafLt := (baggySelectAt_admissible hmsgXof bp _ _ _ _ entry.selected).2
+                  have hlEntry : lvl < entry.sig.layers.length := by
+                    rw [entry.layers_len]; omega
+                  have hEntryHon := entry.honest_layers lvl hlEntry
+                  dsimp only at hEntryHon
+                  have hPathSym : bp.pathAt entry.leafIdx lvl = (kp, tree) := hPathEq
+                  rw [hPathSym] at hEntryHon
+                  let dgHon := baggyLayerDigest suite sk.pkSeed (UInt32.ofNat lvl) tree kp
+                    (baggyHonestPathNode suite bp sk entry.leafIdx lvl)
+                    (entry.sig.layers[lvl]'hlEntry).ctr
+                  let digitsHon := extractBaseWDigits 4 128 dgHon
+                  have hNodeSame : baggyHonestPathNode suite bp sk entry.leafIdx lvl =
+                      baggyHonestPathNode suite bp sk leafIdx lvl := by
+                    cases lvl with
+                    | zero =>
+                      unfold baggyHonestPathNode
+                      change (let p := bp.pathAt entry.leafIdx 0; baggyHonestPorsRoot suite bp sk p.2 p.1) =
+                        baggyHonestPorsRoot suite bp sk tree kp
+                      rw [hPathSym]
+                    | succ l' =>
+                      unfold baggyHonestPathNode
+                      have hTreeSame : (bp.pathAt entry.leafIdx l').2 = (bp.pathAt leafIdx l').2 := by
+                        unfold BaggyParams.pathAt at hPathSym ⊢
+                        dsimp only at hPathSym ⊢
+                        have hMulS : bp.subtreeHeight * (l' + 1) =
+                            bp.subtreeHeight * l' + bp.subtreeHeight := Nat.mul_succ _ _
+                        have hDivE : entry.leafIdx / 2 ^ (bp.subtreeHeight * l') / 2 ^ bp.subtreeHeight =
+                            entry.leafIdx / 2 ^ (bp.subtreeHeight * (l' + 1)) := by
+                          rw [hMulS, Nat.pow_add, Nat.div_div_eq_div_mul]
+                        have hDivL : leafIdx / 2 ^ (bp.subtreeHeight * l') / 2 ^ bp.subtreeHeight =
+                            leafIdx / 2 ^ (bp.subtreeHeight * (l' + 1)) := by
+                          rw [hMulS, Nat.pow_add, Nat.div_div_eq_div_mul]
+                        rw [hDivE, hDivL]
+                        let sE := entry.leafIdx / 2 ^ (bp.subtreeHeight * (l' + 1))
+                        let sL := leafIdx / 2 ^ (bp.subtreeHeight * (l' + 1))
+                        have hsE64 : sE < 2 ^ 64 :=
+                          Nat.lt_of_le_of_lt (Nat.div_le_self _ _)
+                            (Nat.lt_of_lt_of_le hEntryLeafLt
+                              (Nat.pow_le_pow_right (by decide) (by omega)))
+                        have hsL64 : sL < 2 ^ 64 :=
+                          Nat.lt_of_le_of_lt (Nat.div_le_self _ _)
+                            (Nat.lt_of_lt_of_le hLeafLt
+                              (Nat.pow_le_pow_right (by decide) (by omega)))
+                        have h1N := congrArg UInt32.toNat (congrArg Prod.fst hPathSym)
+                        have h2N := congrArg UInt64.toNat (congrArg Prod.snd hPathSym)
+                        change (UInt32.ofNat (sE % 2 ^ bp.subtreeHeight)).toNat =
+                          (UInt32.ofNat (sL % 2 ^ bp.subtreeHeight)).toNat at h1N
+                        change (UInt64.ofNat (sE / 2 ^ bp.subtreeHeight)).toNat =
+                          (UInt64.ofNat (sL / 2 ^ bp.subtreeHeight)).toNat at h2N
+                        rw [UInt32.toNat_ofNat', UInt32.toNat_ofNat',
+                          Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (Nat.two_pow_pos _)) hPow32),
+                          Nat.mod_eq_of_lt (Nat.lt_trans (Nat.mod_lt _ (Nat.two_pow_pos _)) hPow32)] at h1N
+                        rw [UInt64.toNat_ofNat', UInt64.toNat_ofNat',
+                          Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hsE64),
+                          Nat.mod_eq_of_lt (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hsL64)] at h2N
+                        have hsEq : sE = sL := by
+                          have d1 := Nat.div_add_mod sE (2 ^ bp.subtreeHeight)
+                          have d2 := Nat.div_add_mod sL (2 ^ bp.subtreeHeight)
+                          rw [h1N, h2N] at d1
+                          exact d1.symm.trans d2
+                        exact congrArg UInt64.ofNat hsEq
+                      rw [hTreeSame]
+                  if hDigitsEq : digits = digitsHon then
+                    have hDgEq : dg = dgHon :=
+                      production_digits_inj prodToyStatefulParams (.inl rfl) (by decide)
+                        (thCall_length _ _ _ _ _) (thCall_length _ _ _ _ _) hDigitsEq
+                    exact .inr (.inr (match thCall_binds_or_collision suite hDgEq with
+                      | .inl ⟨_, _, _, hArgs⟩ =>
+                        False.elim (hCurEq ((List.cons.inj hArgs).1.trans hNodeSame))
+                      | .inr col => col))
+                  else
+                    have hHonPkEq : recoverWotsPkFromSig suite (baggyWotsPqParams bp) sk.pkSeed
+                        (UInt32.ofNat lvl) tree kp.toNat digitsHon
+                        (entry.sig.layers[lvl]'hlEntry).chains = honestLeaf := by
+                      rw [hEntryHon.2]
+                      exact recoverWotsPkFromSig_eq_computeWotsPk suite (baggyWotsPqParams bp) sk
+                        (UInt32.ofNat lvl) tree kp.toNat digitsHon hEntryHon.1
+                    exact .inr (extractPqHashForgery suite (baggyWotsPqParams bp) sk.pkSeed
+                      (UInt32.ofNat lvl) tree kp.toNat digitsHon digits
+                      (entry.sig.layers[lvl]'hlEntry).chains lsig.chains
+                      hEntryHon.1 hTS (Ne.symm hDigitsEq) (hSameWotsPk.trans hHonPkEq.symm))
+          · rw [hShapeG] at hRootL; cases hRootL
+
+private def findPreHashCollision {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey} (msgStar : List UInt8) :
+    List (HonestBaggySignedEntry suite hmsgXof bp sk) →
+      Option (HonestBaggySignedEntry suite hmsgXof bp sk)
+  | [] => none
+  | e :: es =>
+    let pk := baggyDerivePublicKey suite bp sk
+    if thPreHash suite sk.pkSeed pk.pkRoot msgStar = thPreHash suite sk.pkSeed pk.pkRoot e.msg then
+      some e
+    else
+      findPreHashCollision msgStar es
+
+private theorem findPreHashCollision_spec {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey} (msgStar : List UInt8) :
+    ∀ (log : List (HonestBaggySignedEntry suite hmsgXof bp sk)),
+      match findPreHashCollision msgStar log with
+      | some e =>
+        e ∈ log ∧
+        thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot msgStar =
+          thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot e.msg
+      | none =>
+        ∀ e ∈ log,
+          thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot msgStar ≠
+            thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot e.msg
+  | [] => fun _ h => nomatch h
+  | e :: es => by
+    unfold findPreHashCollision
+    dsimp only
+    by_cases hEq : thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot msgStar =
+        thPreHash suite sk.pkSeed (baggyDerivePublicKey suite bp sk).pkRoot e.msg
+    · rw [if_pos hEq]; exact ⟨List.Mem.head _, hEq⟩
+    · rw [if_neg hEq]
+      have ih := findPreHashCollision_spec msgStar es
+      cases findPreHashCollision msgStar es with
+      | some e' => exact ⟨List.Mem.tail _ ih.1, ih.2⟩
+      | none =>
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hTl
+        · exact hEq
+        · exact ih x hTl
+
+private def findUnopenedPorsPos {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk))
+    (kp0 : UInt32) (tree0 : UInt64) : List Nat → Option Nat
+  | [] => none
+  | u :: us =>
+    if log.any (fun e => decide (bp.pathAt e.leafIdx 0 = (kp0, tree0) ∧ u ∈ e.idxs)) then
+      findUnopenedPorsPos log kp0 tree0 us
+    else
+      some u
+
+private theorem findUnopenedPorsPos_spec {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk))
+    (kp0 : UInt32) (tree0 : UInt64) :
+    ∀ (idxs : List Nat),
+      match findUnopenedPorsPos log kp0 tree0 idxs with
+      | some u => u ∈ idxs ∧ ∀ e ∈ log, bp.pathAt e.leafIdx 0 = (kp0, tree0) → u ∉ e.idxs
+      | none => ∀ u ∈ idxs, ∃ e ∈ log, bp.pathAt e.leafIdx 0 = (kp0, tree0) ∧ u ∈ e.idxs
+  | [] => fun _ h => nomatch h
+  | u :: us => by
+    unfold findUnopenedPorsPos
+    cases hAny : log.any (fun e => decide (bp.pathAt e.leafIdx 0 = (kp0, tree0) ∧ u ∈ e.idxs))
+    · refine ⟨List.Mem.head _, fun e he hPath hu => ?_⟩
+      have hTrue : log.any (fun e => decide (bp.pathAt e.leafIdx 0 = (kp0, tree0) ∧ u ∈ e.idxs)) =
+          true := List.any_eq_true.mpr ⟨e, he, decide_eq_true ⟨hPath, hu⟩⟩
+      rw [hTrue] at hAny; cases hAny
+    · have ih := findUnopenedPorsPos_spec log kp0 tree0 us
+      cases findUnopenedPorsPos log kp0 tree0 us with
+      | some u' => exact ⟨List.Mem.tail _ ih.1, ih.2⟩
+      | none =>
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hTl
+        · obtain ⟨e, he, hDec⟩ := List.any_eq_true.mp hAny
+          exact ⟨e, he, of_decide_eq_true hDec⟩
+        · exact ih x hTl
+
+/-- **Constructive Multi-Query Hypertree-over-`PORS+FP` EUF-CMA Extractor (`0 Classical.choice`).**
+    Given any multi-query honestly signed `Baggy` transcript `log` and any fresh message `msgStar`
+    (`msgStar ∉ log.map (·.msg)`) accepted by `baggyVerify`, constructively extracts a typed
+    `BaggyForgeryBreak` (`porsItsr`, `hashCollision`, `porsUnopenedPreimage`, or
+    `wotsBackwardPreimage`). -/
+def extractBaggyForgery (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (bp : BaggyParams) (sk : PqSecretKey)
+    (log : List (HonestBaggySignedEntry suite hmsgXof bp sk))
+    (msgStar : List UInt8) (sigStar : BaggySig)
+    (hFresh : ∀ e ∈ log, e.msg ≠ msgStar)
+    (hAccept : baggyVerify suite hmsgXof bp (baggyDerivePublicKey suite bp sk) msgStar sigStar =
+      true) :
+    BaggyForgeryBreak suite hmsgXof bp sk log := by
+  let pk := baggyDerivePublicKey suite bp sk
+  unfold baggyVerify at hAccept
+  cases hHdr : (!bp.wellFormed || !decide (sigStar.r.length = 32) ||
+      !decide (sigStar.layers.length = bp.numLayers) ||
+      !decide (sigStar.msgCtr < bp.maxGrind) ||
+      !sigStar.pors.secrets.all (fun s => decide (s.length = 32)) ||
+      !sigStar.pors.auth.all (fun a => decide (a.length = 32)))
+  · rw [hHdr] at hAccept
+    dsimp only [Bool.false_eq_true, ↓reduceIte] at hAccept
+    have hw : bp.wellFormed = true := by
+      cases h : bp.wellFormed
+      · simp [h] at hHdr
+      · rfl
+    have hLayLen : sigStar.layers.length = bp.numLayers := by
+      by_cases h : sigStar.layers.length = bp.numLayers
+      · exact h
+      · simp [hw, h] at hHdr
+    let muStar := thPreHash suite pk.pkSeed pk.pkRoot msgStar
+    cases hSel : baggySelectAt hmsgXof bp pk sigStar.r muStar sigStar.msgCtr with
+    | none => simp only [muStar, hSel] at hAccept; cases hAccept
+    | some selPair =>
+      rw [hSel] at hAccept
+      obtain ⟨idxsStar, leafIdx⟩ := selPair
+      have hLeafLt := (baggySelectAt_admissible hmsgXof bp pk sigStar.r muStar sigStar.msgCtr hSel).2
+      let (kp0, tree0) := bp.pathAt leafIdx 0
+      cases hPors : porsFpRoot bp.pors (porsTweakableSuite suite pk.pkSeed tree0 kp0)
+          idxsStar sigStar.pors.secrets sigStar.pors.auth with
+      | none => simp only [kp0, tree0, hPors] at hAccept; cases hAccept
+      | some node0 =>
+        rw [hPors] at hAccept
+        cases hClimb : baggyClimbLayers suite bp pk.pkSeed leafIdx 0 node0 sigStar.layers with
+        | none => rw [hClimb] at hAccept; cases hAccept
+        | some topRoot =>
+          rw [hClimb] at hAccept
+          have hTopEq : topRoot = baggyHonestPathNode suite bp sk leafIdx bp.numLayers :=
+            (of_decide_eq_true hAccept).trans (baggyHonestPathNode_top suite bp sk hw hLeafLt).symm
+          have hSum0 : 0 + sigStar.layers.length = bp.numLayers := by rw [Nat.zero_add, hLayLen]
+          match extractBaggyLayers hw log leafIdx hLeafLt 0 node0 sigStar.layers topRoot
+              hSum0 hClimb hTopEq with
+          | .inr (.inl inv) => exact .wotsBackwardPreimage inv
+          | .inr (.inr col) => exact .hashCollision col
+          | .inl hNode0Honest =>
+            have hPorsHon : porsFpRoot bp.pors (porsTweakableSuite suite sk.pkSeed tree0 kp0)
+                idxsStar sigStar.pors.secrets sigStar.pors.auth =
+                some (baggyHonestPorsRoot suite ⟨WotsCParams.v128, 2, 16, 2 ^ 26, bp.pors⟩ sk
+                  tree0 kp0) := by
+              rw [hPors, hNode0Honest]
+              rfl
+            match extractPorsOpeningOrCollision bp.pors suite sk tree0 kp0 idxsStar
+                sigStar.pors hPorsHon with
+            | .inr col => exact .hashCollision col
+            | .inl ⟨hSecretsEq, _⟩ =>
+              have hPreSpec := findPreHashCollision_spec (hmsgXof := hmsgXof) msgStar log
+              cases hPreFind : findPreHashCollision msgStar log with
+              | some eCol =>
+                rw [hPreFind] at hPreSpec
+                have hPreEq := hPreSpec.2
+                rw [thPreHash_eq, thPreHash_eq] at hPreEq
+                exact match thCall_binds_or_collision suite hPreEq with
+                  | .inl ⟨_, _, _, hArgs⟩ =>
+                    False.elim (hFresh eCol hPreSpec.1
+                      (List.cons.inj (List.cons.inj hArgs).2).1.symm)
+                  | .inr col => .hashCollision col
+              | none =>
+                rw [hPreFind] at hPreSpec
+                have hPosSpec := findUnopenedPorsPos_spec log kp0 tree0 idxsStar
+                cases hPosFind : findUnopenedPorsPos log kp0 tree0 idxsStar with
+                | some u =>
+                  rw [hPosFind] at hPosSpec
+                  exact .porsUnopenedPreimage tree0 kp0 u
+                    (porsSecretLeaf suite sk tree0 kp0 u) hPosSpec.2 rfl
+                | none =>
+                  rw [hPosFind] at hPosSpec
+                  exact .porsItsr sigStar.r muStar sigStar.msgCtr leafIdx idxsStar hSel
+                    (fun e he hFrameEq => by
+                      have hListEq := encodeMultiFrame_injective hFrameEq
+                      have hMuEq := (List.cons.inj (List.cons.inj (List.cons.inj hListEq).2).2).1
+                      exact hPreSpec e he hMuEq)
+                    (fun u hu => hPosSpec u hu)
+  · rw [hHdr] at hAccept; cases hAccept
+
+/-- Decidable check for whether a `BaggyForgeryBreak` falls into the `PORS+FP` ITSR branch,
+    collision branch, or secret-preimage branch (`PORS+FP` leaf or `WOTS+C` chain). -/
+def BaggyForgeryBreak.branch {suite : TweakableHashSuite} {hmsgXof : BaggyHmsgStream}
+    {bp : BaggyParams} {sk : PqSecretKey}
+    {log : List (HonestBaggySignedEntry suite hmsgXof bp sk)} :
+    BaggyForgeryBreak suite hmsgXof bp sk log → Fin 3
+  | .porsItsr .. => ⟨0, by decide⟩
+  | .hashCollision _ => ⟨1, by decide⟩
+  | .porsUnopenedPreimage .. => ⟨2, by decide⟩
+  | .wotsBackwardPreimage _ => ⟨2, by decide⟩
+
+/-- **`BaggySha3_128f` Multi-Query EUF-CMA Pointwise Reduction Theorem.**
+    Every fresh verifying `BaggySha3_128f` signature against a multi-query transcript `log`
+    constructively yields a `BaggyForgeryBreak` (`porsItsr`, `hashCollision`,
+    `porsUnopenedPreimage`, or `wotsBackwardPreimage`). -/
+theorem baggy_sha3_128f_multi_query_euf_cma_reduction
+    (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream) (sk : PqSecretKey)
+    (log : List (HonestBaggySignedEntry suite hmsgXof BaggySha3_128f sk))
+    (msgStar : List UInt8) (sigStar : BaggySig)
+    (hFresh : ∀ e ∈ log, e.msg ≠ msgStar)
+    (hAccept : baggyVerify suite hmsgXof BaggySha3_128f
+      (baggyDerivePublicKey suite BaggySha3_128f sk) msgStar sigStar = true) :
+    Nonempty (BaggyForgeryBreak suite hmsgXof BaggySha3_128f sk log) :=
+  ⟨extractBaggyForgery suite hmsgXof BaggySha3_128f sk log msgStar sigStar hFresh hAccept⟩
+
+/-- **`BaggySha3_128f` Multi-Query EUF-CMA Reduction Theorem (`Spec.GameBound` Form).**
+    Over any finite coin space `Fin n`, every coin on which a multi-query `BaggySha3_128f` run
+    produces a fresh verifying signature constructively triggers `itsrEvent` (`PORS+FP` subset
+    cover under `TAG_BAGGY_HMSG`), `colEvent` (`HashCollisionWitness suite.rawHash`), or
+    `preEvent` (unopened `PORS+FP` leaf or `WOTS+C` backward-chain preimage), bounding
+    `forgerGame.winProb ≤ (εItsr + εCol) + εPre`. -/
+theorem baggy_sha3_128f_euf_cma_gameBound {n : Nat} (hPos : 0 < n)
+    (suite : TweakableHashSuite) (hmsgXof : BaggyHmsgStream)
+    (skOf : Fin n → PqSecretKey)
+    (logOf : (ω : Fin n) → List (HonestBaggySignedEntry suite hmsgXof BaggySha3_128f (skOf ω)))
+    (forgerOut : Fin n → List UInt8 × BaggySig)
+    (itsrEvent colEvent preEvent : Fin n → Bool)
+    {εItsr εCol εPre : Spec.RatBound}
+    (hItsr : ∀ ω (rStar muStar : List UInt8) (ctrStar leafIdx : Nat) (idxsStar : List Nat),
+      baggySelectAt hmsgXof BaggySha3_128f (baggyDerivePublicKey suite BaggySha3_128f (skOf ω))
+        rStar muStar ctrStar = some (idxsStar, leafIdx) →
+      (∀ u ∈ idxsStar, ∃ e ∈ logOf ω,
+        BaggySha3_128f.pathAt e.leafIdx 0 = BaggySha3_128f.pathAt leafIdx 0 ∧ u ∈ e.idxs) →
+      itsrEvent ω = true)
+    (hCol : ∀ ω, Nonempty (HashCollisionWitness suite.rawHash) → colEvent ω = true)
+    (hPre : ∀ ω,
+      (∃ tree0 kp0 u cand,
+        (∀ e ∈ logOf ω, BaggySha3_128f.pathAt e.leafIdx 0 = (kp0, tree0) → u ∉ e.idxs) ∧
+        thChainF suite (skOf ω).pkSeed (porsLeafAdrs tree0 kp0 (UInt32.ofNat u)) cand =
+          (porsTweakableSuite suite (skOf ω).pkSeed tree0 kp0).leaf u
+            (porsSecretLeaf suite (skOf ω) tree0 kp0 u)) ∨
+      Nonempty (WotsBackwardInversionWitness suite (skOf ω).pkSeed) →
+      preEvent ω = true)
+    (hBItsr : Spec.GameBound (Spec.FinGame.mk hPos itsrEvent).winProb εItsr)
+    (hBCol : Spec.GameBound (Spec.FinGame.mk hPos colEvent).winProb εCol)
+    (hBPre : Spec.GameBound (Spec.FinGame.mk hPos preEvent).winProb εPre) :
+    let forgerGame : Spec.FinGame n :=
+      ⟨hPos, fun ω =>
+        baggyVerify suite hmsgXof BaggySha3_128f
+          (baggyDerivePublicKey suite BaggySha3_128f (skOf ω))
+          (forgerOut ω).1 (forgerOut ω).2 &&
+        decide ((forgerOut ω).1 ∉ (logOf ω).map HonestBaggySignedEntry.msg)⟩
+    Spec.GameBound forgerGame.winProb ((εItsr.add εCol).add εPre) := by
+  intro forgerGame
+  refine Spec.event_le_three_reductions forgerGame
+    (Spec.FinGame.mk hPos itsrEvent)
+    (Spec.FinGame.mk hPos colEvent)
+    (Spec.FinGame.mk hPos preEvent)
+    (fun ω hWin => ?_) hBItsr hBCol hBPre
+  have hAnd : (baggyVerify suite hmsgXof BaggySha3_128f
+      (baggyDerivePublicKey suite BaggySha3_128f (skOf ω))
+      (forgerOut ω).1 (forgerOut ω).2 &&
+    decide ((forgerOut ω).1 ∉ (logOf ω).map HonestBaggySignedEntry.msg)) = true := hWin
+  obtain ⟨hVer, hNotMem⟩ := Bool.and_eq_true _ _ |>.mp hAnd
+  have hFresh : ∀ e ∈ logOf ω, e.msg ≠ (forgerOut ω).1 := fun e he hEq =>
+    of_decide_eq_true hNotMem (List.mem_map.mpr ⟨e, he, hEq⟩)
+  match extractBaggyForgery suite hmsgXof BaggySha3_128f (skOf ω) (logOf ω)
+      (forgerOut ω).1 (forgerOut ω).2 hFresh hVer with
+  | .porsItsr rS muS ctrS lI idxsS hSel _ hCov =>
+    exact .inl (hItsr ω rS muS ctrS lI idxsS hSel hCov)
+  | .hashCollision col =>
+    exact .inr (.inl (hCol ω ⟨col⟩))
+  | .porsUnopenedPreimage t0 kp0 u cand hUn hPr =>
+    exact .inr (.inr (hPre ω (.inl ⟨t0, kp0, u, cand, hUn, hPr⟩)))
+  | .wotsBackwardPreimage inv =>
+    exact .inr (.inr (hPre ω (.inr ⟨inv⟩)))
+
 #verify_constructive porsFpRoot_some_shape unsorted_rejected oversized_rejected
   noncanonical_length_rejected porsFpRoot_complete porsFpRoot_binding
   opening_against_honest_root select_admissible selected_subset_opens mem_subsetsFrom
@@ -1837,5 +3649,13 @@ theorem sha3_128f_ff_pos_one : 0 < ffTop (1 * sha3_128f.reveal) sha3_128f.reveal
   sha3_128f_forgery_bound sha3_128f_millibits sha3_128f_rust_estimate
   sha3_128f_rust_estimate_sound sha3_128f_bound_fails_without_distinctness
   demo_honest_opening_accepted demo_unsorted_rejected demo_unsorted_accepted_by_lax
+  porsPrfAdrs_encode_ne_porsLeafAdrs porsAdrs_encode_disjoint_from_nonPors
+  porsTweakableSuite_honestTree_length PorsFpOpening.toWireBytes_length
+  sha3_128f_opening_wire_le_4994 PorsFpOpening.fromWireBytes_toWireBytes_append
+  PorsFpOpening.toWireBytes_prefix_injective baggySha3_128f_parity
+  BaggySig.toWireBytes_length_le baggySha3_128f_sig_wire_le_71654
+  BaggySig.fromWireBytes_toWireBytes baggySelectAt_admissible
+  baggyHonestPathNode_top extractBaggyForgery
+  baggy_sha3_128f_multi_query_euf_cma_reduction baggy_sha3_128f_euf_cma_gameBound
 
 end Qsag.PorsFpSecurity
