@@ -584,10 +584,12 @@ fn threshold_few_time_signature_burns_each_epoch_once() {
 fn aggregate_merge_verify_and_tamper() {
     let dir = Workdir::new("agg");
     let wal = dir.path("wal");
+    let pass = dir.path("pass");
+    std::fs::write(&pass, b"sealed committee password").unwrap();
     keygen(
         &dir,
         "agg-jorts-poseidon2",
-        &["--validators", "4", "--wal-dir", &wal],
+        &["--validators", "4", "--wal-dir", &wal, "--passphrase-file", &pass],
     );
     let (sk, pk, msg, other) = (
         dir.path("sk"),
@@ -606,6 +608,8 @@ fn aggregate_merge_verify_and_tamper() {
                 "aggregate",
                 "--secret",
                 &sk,
+                "--passphrase-file",
+                &pass,
                 "--signers",
                 signers,
                 "--epoch",
@@ -2595,6 +2599,8 @@ fn e2e_cred_hd_and_migrate_subcommands() {
             &msg,
             "--out",
             &mldsa_sig,
+            "--context-hex",
+            "abcd",
             "--deterministic",
         ],
         0,
@@ -2609,8 +2615,38 @@ fn e2e_cred_hd_and_migrate_subcommands() {
             &msg,
             "--sig",
             &mldsa_sig,
+            "--context-hex",
+            "abcd",
         ],
         0,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-verify",
+            "--public",
+            &mldsa_pk,
+            "--in",
+            &msg,
+            "--sig",
+            &mldsa_sig,
+        ],
+        2,
+    );
+    expect(
+        &[
+            "cred",
+            "mldsa-verify",
+            "--public",
+            &mldsa_pk,
+            "--in",
+            &msg,
+            "--sig",
+            &mldsa_sig,
+            "--context-hex",
+            "abce",
+        ],
+        2,
     );
     // Replaying epoch 0 or signing with < 2t - 1 (= 3) signers fails with exit 4.
     expect(
@@ -2657,6 +2693,8 @@ fn e2e_cred_hd_and_migrate_subcommands() {
             &other,
             "--sig",
             &mldsa_sig,
+            "--context-hex",
+            "abcd",
         ],
         2,
     );
@@ -2779,6 +2817,7 @@ fn e2e_cred_hd_and_migrate_subcommands() {
     .unwrap();
     let mig_claim = dir.path("mig-claim.json");
     let mig_proof = dir.path("mig.proof");
+    let migration_domain = "42".repeat(32);
     expect(
         &[
             "migrate",
@@ -2806,6 +2845,8 @@ fn e2e_cred_hd_and_migrate_subcommands() {
             "42",
             "--out",
             &mig_proof,
+            "--domain-hex",
+            &migration_domain,
             "--deterministic",
         ],
         0,
@@ -2816,6 +2857,8 @@ fn e2e_cred_hd_and_migrate_subcommands() {
             "verify",
             "--proof",
             &mig_proof,
+            "--domain-hex",
+            &migration_domain,
             "--target",
             &target_pq_addr,
             "--epoch",
@@ -2823,13 +2866,34 @@ fn e2e_cred_hd_and_migrate_subcommands() {
         ],
         0,
     );
+    // A foreign campaign requires an explicit verifier-selected domain.
+    expect(&["migrate", "verify", "--proof", &mig_proof], 2);
     // Wrong epoch or tampered proof fails verification with exit code 2.
     expect(
-        &["migrate", "verify", "--proof", &mig_proof, "--epoch", "43"],
+        &[
+            "migrate",
+            "verify",
+            "--proof",
+            &mig_proof,
+            "--domain-hex",
+            &migration_domain,
+            "--epoch",
+            "43",
+        ],
         2,
     );
     flip_hex_digit(&mig_proof, "zk_proof");
-    expect(&["migrate", "verify", "--proof", &mig_proof], 2);
+    expect(
+        &[
+            "migrate",
+            "verify",
+            "--proof",
+            &mig_proof,
+            "--domain-hex",
+            &migration_domain,
+        ],
+        2,
+    );
 }
 
 #[test]
@@ -3250,7 +3314,11 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
         ],
         0,
     );
-    assert!(std::fs::read_to_string(&step0).unwrap().contains("\"retired\": true"));
+    assert!(
+        std::fs::read_to_string(&step0)
+            .unwrap()
+            .contains("\"retired\": true")
+    );
     // Reusing retired step0.sk fails!
     expect(
         &[
@@ -3297,7 +3365,11 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
         ],
         0,
     );
-    assert!(std::fs::read_to_string(&step1).unwrap().contains("\"retired\": true"));
+    assert!(
+        std::fs::read_to_string(&step1)
+            .unwrap()
+            .contains("\"retired\": true")
+    );
     expect(
         &[
             "policy",
@@ -3555,4 +3627,220 @@ fn e2e_policy_ledger_u128_amount_above_u64_max() {
     );
     assert_eq!(json_member(&signed, "spend_amount"), huge);
     assert_eq!(window_spend(&ledger), huge);
+}
+
+#[cfg(unix)]
+#[test]
+fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("sealed-biscuit-mints");
+    for name in ["vault", "anchor"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.path(name))
+            .unwrap();
+    }
+    let sk = dir.path("vault/authority.sk");
+    let pk = dir.path("authority.pk");
+    let anchor = dir.path("anchor");
+    let pass = dir.path("pass");
+    std::fs::write(&pass, b"correct biscuit password").unwrap();
+    let audience = "12".repeat(32);
+    let resource = "34".repeat(32);
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "keygen",
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+            "--tree-height",
+            "2",
+            "--passphrase-file",
+            &pass,
+            "--anchor-dir",
+            &anchor,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    for mint in 0..3 {
+        let token = dir.path(&format!("token-{mint}"));
+        let step = dir.path(&format!("step-{mint}"));
+        let sealed = dir.path(&format!("sealed-{mint}"));
+        let args = [
+            "policy",
+            "biscuit",
+            "mint",
+            "--secret",
+            &sk,
+            "--audience-hex",
+            &audience,
+            "--resource-hex",
+            &resource,
+            "--token-out",
+            &token,
+            "--step-key-out",
+            &step,
+            "--passphrase-file",
+            &pass,
+            "--anchor-dir",
+            &anchor,
+            "--allow-single-disk-anchor",
+        ];
+        let before = std::fs::read(&sk).unwrap();
+        std::fs::write(&pass, b"wrong password").unwrap();
+        expect(&args, 1);
+        assert_eq!(std::fs::read(&sk).unwrap(), before);
+        assert!(!Path::new(&token).exists());
+        std::fs::write(&pass, b"correct biscuit password").unwrap();
+        expect(&args, 0);
+        let updated = std::fs::read_to_string(&sk).unwrap();
+        assert!(updated.contains(&format!("\"uses_completed\": {}", mint + 1)));
+        for field in ["envelope", "salt", "envelope_tag"] {
+            assert_eq!(updated.matches(&format!("\"{field}\":")).count(), 1);
+        }
+        expect(
+            &[
+                "policy",
+                "biscuit",
+                "seal",
+                "--in",
+                &token,
+                "--step-key",
+                &step,
+                "--out",
+                &sealed,
+            ],
+            0,
+        );
+        expect(
+            &[
+                "policy",
+                "biscuit",
+                "verify",
+                "--public",
+                &pk,
+                "--in",
+                &sealed,
+                "--audience-hex",
+                &audience,
+                "--resource-hex",
+                &resource,
+            ],
+            0,
+        );
+    }
+}
+
+#[test]
+fn migration_rejects_sealed_or_damaged_envelope_legacy_seeds() {
+    let dir = Workdir::new("migration-sealed-seed");
+    let key = dir.path("legacy.json");
+    let output = dir.path("claim.json");
+    for header in ["envelope", "salt", "envelope_tag"] {
+        std::fs::write(&key, format!("{{\"seed\":\"{SEED}\",\"{header}\":\"00\"}}")).unwrap();
+        let rejected = qsag(&[
+            "migrate",
+            "commit",
+            "--kind",
+            "btc-taproot",
+            "--legacy-secret",
+            &key,
+            "--out",
+            &output,
+        ]);
+        assert_eq!(code(&rejected), 1);
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("sealed legacy keys"));
+        assert!(!Path::new(&output).exists());
+    }
+}
+
+#[test]
+fn hd_rejects_threshold_truncation_before_enrollment() {
+    let dir = Workdir::new("hd-threshold-overflow");
+    let vault = dir.path("vault");
+    let watch = dir.path("watch.json");
+    expect(
+        &[
+            "hd",
+            "keygen",
+            "--threshold",
+            "65538",
+            "--parties",
+            "3",
+            "--count",
+            "2",
+            "--vault-dir",
+            &vault,
+            "--watch-out",
+            &watch,
+            "--deterministic",
+        ],
+        1,
+    );
+    assert!(!Path::new(&watch).exists());
+    assert!(!Path::new(&vault).join("hd-meta.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn enrollment_preflights_party_files_before_external_anchor_provisioning() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("preflight-party-files");
+    for name in ["hd", "mldsa-share", "mldsa-burn", "anchor"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.path(name))
+            .unwrap();
+    }
+    let anchor = dir.path("anchor");
+    for (vault_name, filename, command) in [
+        ("hd", "hd-custodian-0.share", "hd"),
+        ("mldsa-share", "mldsa-party-0.share", "cred"),
+        ("mldsa-burn", "mldsa-party-0.burn", "cred"),
+    ] {
+        let vault = dir.path(vault_name);
+        let occupied = Path::new(&vault).join(filename);
+        std::fs::write(&occupied, b"existing custody artifact").unwrap();
+        let mut args = vec![
+            command,
+            if command == "hd" {
+                "keygen"
+            } else {
+                "mldsa-keygen"
+            },
+            "--vault-dir",
+            &vault,
+            "--threshold",
+            "2",
+            "--parties",
+            "3",
+            "--deterministic",
+            "--anchor-dir",
+            &anchor,
+            "--allow-single-disk-anchor",
+        ];
+        let public = dir.path(&format!("{vault_name}.public"));
+        if command == "hd" {
+            args.extend(["--count", "2", "--watch-out", &public]);
+        } else {
+            args.extend(["--public-out", &public]);
+        }
+        let output = qsag(&args);
+        assert_eq!(
+            code(&output),
+            1,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
+        assert_eq!(
+            std::fs::read(&occupied).unwrap(),
+            b"existing custody artifact"
+        );
+        assert_eq!(std::fs::read_dir(&anchor).unwrap().count(), 0);
+    }
 }

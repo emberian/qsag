@@ -181,7 +181,7 @@ impl AnchorConfig {
 
     /// The anchor of a vault directory the command already names, read from the option
     /// `dir_option` and the flag `single_disk_flag` (plus hardware TPM2/VMGENID options when
-    /// `dir_option == "anchor-dir"`).
+    /// `dir_option` is "anchor-dir" or "policy-anchor-dir").
     pub fn for_vault(
         args: &Args,
         vault_dir: &str,
@@ -195,30 +195,45 @@ impl AnchorConfig {
                 "--{single_disk_flag} requires --{dir_option}"
             )));
         }
-        let (tpm_nv_index, tpm_device_path, tpm_auth_env, vmgenid, vmgenid_strict) =
-            if dir_option == "anchor-dir" {
-                let tpm_nv = args
-                    .get("anchor-tpm-nv")
-                    .map(parse_tpm_nv_index)
-                    .transpose()?;
-                let tpm_dev = args.get("anchor-tpm-device").map(str::to_owned);
-                let tpm_auth = args.get("anchor-tpm-auth-env").map(str::to_owned);
-                let vmg = args.flag("anchor-vmgenid");
-                let vmg_strict = args.flag("anchor-vmgenid-strict");
-                if tpm_nv.is_none() && (tpm_dev.is_some() || tpm_auth.is_some()) {
-                    return Err(CliError::usage(
-                        "--anchor-tpm-device and --anchor-tpm-auth-env require --anchor-tpm-nv",
-                    ));
-                }
-                if vmg_strict && !vmg {
-                    return Err(CliError::usage(
-                        "--anchor-vmgenid-strict requires --anchor-vmgenid",
-                    ));
-                }
-                (tpm_nv, tpm_dev, tpm_auth, vmg, vmg_strict)
+        let (tpm_nv_option, tpm_device_option, tpm_auth_option, vmgenid_flag, vmgenid_strict_flag) =
+            if dir_option == "policy-anchor-dir" {
+                (
+                    "policy-anchor-tpm-nv",
+                    "policy-anchor-tpm-device",
+                    "policy-anchor-tpm-auth-env",
+                    "policy-vmgenid",
+                    "policy-vmgenid-strict",
+                )
+            } else if dir_option == "anchor-dir" {
+                (
+                    "anchor-tpm-nv",
+                    "anchor-tpm-device",
+                    "anchor-tpm-auth-env",
+                    "anchor-vmgenid",
+                    "anchor-vmgenid-strict",
+                )
             } else {
-                (None, None, None, false, false)
+                // An independently named output anchor has no implicit hardware settings.
+                ("", "", "", "", "")
             };
+        let tpm_nv_index = args
+            .get(tpm_nv_option)
+            .map(parse_tpm_nv_index)
+            .transpose()?;
+        let tpm_device_path = args.get(tpm_device_option).map(str::to_owned);
+        let tpm_auth_env = args.get(tpm_auth_option).map(str::to_owned);
+        let vmgenid = args.flag(vmgenid_flag);
+        let vmgenid_strict = args.flag(vmgenid_strict_flag);
+        if tpm_nv_index.is_none() && (tpm_device_path.is_some() || tpm_auth_env.is_some()) {
+            return Err(CliError::usage(format!(
+                "--{tpm_device_option} and --{tpm_auth_option} require --{tpm_nv_option}"
+            )));
+        }
+        if vmgenid_strict && !vmgenid {
+            return Err(CliError::usage(format!(
+                "--{vmgenid_strict_flag} requires --{vmgenid_flag}"
+            )));
+        }
 
         if anchor_dir.is_none() && tpm_nv_index.is_none() && !vmgenid {
             return Ok(None);
@@ -440,8 +455,14 @@ pub fn require_anchor_or_waiver(
 }
 
 /// Compute a deterministic 256-bit monotonic floor checkpoint tag for integer watermarks.
-pub fn floor_checkpoint(domain: &[u8], key_id: &[u8; 32], floor_value: u64) -> LedgerCheckpoint {
-    let generation = floor_value.saturating_add(1);
+pub fn floor_checkpoint(
+    domain: &[u8],
+    key_id: &[u8; 32],
+    floor_value: u64,
+) -> Result<LedgerCheckpoint, CliError> {
+    let generation = floor_value
+        .checked_add(1)
+        .ok_or_else(|| CliError::state("external anchor floor exhausted"))?;
     let tag = cshake256_framed_32(
         b"QSAG.CLI.ANCHOR.FLOOR.V1",
         &[
@@ -451,7 +472,7 @@ pub fn floor_checkpoint(domain: &[u8], key_id: &[u8; 32], floor_value: u64) -> L
             &floor_value.to_be_bytes(),
         ],
     );
-    LedgerCheckpoint { generation, tag }
+    Ok(LedgerCheckpoint { generation, tag })
 }
 
 fn invalid_anchor(msg: &'static str) -> io::Error {
@@ -710,6 +731,21 @@ fn slot_stem(domain: &str, key_id: &[u8; 32]) -> String {
         sanitize_domain_prefix(domain),
         to_hex(&slot_digest)
     )
+}
+
+/// Remove the fork-guard target for a known, never-committed enrollment attempt.
+/// The caller must hold the destination vault lock and verify that it has no committed meta.
+pub fn remove_uncommitted_guarded_target(
+    vault_dir: &str,
+    domain: &str,
+    key_id: &[u8; 32],
+) -> Result<(), CliError> {
+    let path = Path::new(vault_dir).join(format!(".qsag-{}.target", slot_stem(domain, key_id)));
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(CliError::io("removing uncommitted fork-guard target", e)),
+    }
 }
 
 fn anchor_record_path(anchor_dir: &str, domain: &str, key_id: &[u8; 32]) -> PathBuf {
@@ -1038,7 +1074,13 @@ impl FsExternalMountAnchor {
             let guarded_dir = resolve_custody_dir(config, custody_files, explicit_dirs)?;
             let guarded_target = guarded_dir.join(format!(".qsag-{stem}.target"));
             if fresh {
-                crate::cli::write_new(&guarded_target.to_string_lossy(), &domain_hash, true)?;
+                crate::cli::write_new(
+                    guarded_target.to_str().ok_or_else(|| {
+                        CliError::usage("guarded custody target must be a UTF-8 path")
+                    })?,
+                    &domain_hash,
+                    true,
+                )?;
             } else if !std::fs::symlink_metadata(&guarded_target)
                 .map(|m| m.is_file())
                 .unwrap_or(false)
@@ -1164,7 +1206,7 @@ impl FsExternalMountAnchor {
             return Err(CliError::state("ExternalAnchorDetectedRollback"));
         }
         if observed_floor == min_floor {
-            let expected = floor_checkpoint(domain, &self.inner.key_id, min_floor);
+            let expected = floor_checkpoint(domain, &self.inner.key_id, min_floor)?;
             if !ct_eq_bytes(&current.tag, &expected.tag) {
                 return Err(CliError::state("ExternalAnchorFloorTagMismatch"));
             }
@@ -1174,7 +1216,7 @@ impl FsExternalMountAnchor {
 
     /// Ratchet a monotonic integer floor forward on the external anchor.
     pub fn advance_floor(&self, domain: &[u8], next_floor: u64) -> Result<(), CliError> {
-        let ckpt = floor_checkpoint(domain, &self.inner.key_id, next_floor);
+        let ckpt = floor_checkpoint(domain, &self.inner.key_id, next_floor)?;
         self.advance(ckpt)
             .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))
     }
@@ -1193,6 +1235,74 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floor_checkpoint_rejects_generation_overflow() {
+        assert_eq!(
+            floor_checkpoint(b"test", &[1; 32], u64::MAX - 1)
+                .unwrap()
+                .generation,
+            u64::MAX
+        );
+        assert!(floor_checkpoint(b"test", &[1; 32], u64::MAX).is_err());
+    }
+
+    #[test]
+    fn policy_hardware_anchor_options_reach_vault_config() {
+        let raw: Vec<String> = [
+            "--policy-anchor-tpm-nv",
+            "0x01800001",
+            "--policy-anchor-tpm-device",
+            "/dev/test-tpm",
+            "--policy-anchor-tpm-auth-env",
+            "TEST_AUTH",
+            "--policy-vmgenid",
+            "--policy-vmgenid-strict",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let args = Args::parse(
+            &raw,
+            &crate::policy_ledger::GATE_VALUE_OPTIONS,
+            &crate::policy_ledger::GATE_FLAG_OPTIONS,
+        )
+        .unwrap();
+        let config = AnchorConfig::for_vault(
+            &args,
+            "/vault",
+            "policy-anchor-dir",
+            "policy-allow-single-disk-anchor",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.tpm_nv_index, Some(0x01800001));
+        assert_eq!(config.tpm_device_path.as_deref(), Some("/dev/test-tpm"));
+        assert_eq!(config.tpm_auth_env.as_deref(), Some("TEST_AUTH"));
+        assert!(config.vmgenid && config.vmgenid_strict);
+        for raw in [
+            vec!["--policy-vmgenid-strict"],
+            vec!["--policy-anchor-tpm-device", "/dev/test-tpm"],
+        ] {
+            let raw: Vec<_> = raw.into_iter().map(str::to_owned).collect();
+            let args = Args::parse(
+                &raw,
+                &crate::policy_ledger::GATE_VALUE_OPTIONS,
+                &crate::policy_ledger::GATE_FLAG_OPTIONS,
+            )
+            .unwrap();
+            assert!(
+                AnchorConfig::for_vault(
+                    &args,
+                    "/vault",
+                    "policy-anchor-dir",
+                    "policy-allow-single-disk-anchor"
+                )
+                .is_err()
+            );
+        }
+    }
+
     use crate::cli::os_random_32;
     use qsag_asm::durable::RECORD_HEADER_BYTES;
     use std::fs::{File, OpenOptions};

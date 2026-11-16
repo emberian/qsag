@@ -625,6 +625,8 @@ struct PendingReshare {
     target: String,
     /// The quorum epoch the new vault starts at.
     quorum_epoch: u64,
+    /// Identifies only this attempt's uncommitted fork-guard target.
+    anchor_key_id: Option<[u8; 32]>,
 }
 
 /// The committed state of a v2 vault.
@@ -644,6 +646,8 @@ struct Meta {
     pending: Option<PendingReshare>,
     envelope: Option<HemEnvelopeMeta>,
     anchor_info: Option<([u8; 24], [u8; 32])>,
+    // Absent for older vaults whose anchor identity used only the lock inode.
+    anchor_key_id: Option<[u8; 32]>,
 }
 
 const HEM_ANCHOR_DOMAIN: &str = "hem_quorum";
@@ -693,6 +697,7 @@ impl Meta {
             pending: None,
             envelope: None,
             anchor_info: None,
+            anchor_key_id: None,
         }
     }
 
@@ -762,6 +767,10 @@ impl Meta {
                 frames.push(vec![1]);
                 frames.push(pending.target.as_bytes().to_vec());
                 frames.push(pending.quorum_epoch.to_le_bytes().to_vec());
+                if let Some(key_id) = pending.anchor_key_id {
+                    frames.push(b"QSAG.HEM.PENDING.ANCHOR.KEYID.V2".to_vec());
+                    frames.push(key_id.to_vec());
+                }
             }
         }
         if let Some(env) = &self.envelope {
@@ -774,6 +783,10 @@ impl Meta {
             frames.push(b"QSAG.HEM.ANCHOR.V1".to_vec());
             frames.push(seal.to_vec());
             frames.push(anchor_nonce.to_vec());
+        }
+        if let Some(key_id) = self.anchor_key_id {
+            frames.push(b"QSAG.HEM.ANCHOR.KEYID.V2".to_vec());
+            frames.push(key_id.to_vec());
         }
         let refs: Vec<&[u8]> = frames.iter().map(Vec::as_slice).collect();
         let digest = cshake256_framed_32(b"QSAG.CLI.HEM.META_DIGEST.V2", &refs);
@@ -843,6 +856,9 @@ impl Meta {
             members.push(("anchor_ceremony_seal", Json::hex(seal)));
             members.push(("anchor_nonce", Json::hex(anchor_nonce)));
         }
+        if let Some(key_id) = self.anchor_key_id {
+            members.push(("anchor_key_id", Json::hex(&key_id)));
+        }
         if let Some(env) = &self.envelope {
             members.push(("envelope", Json::str(HEM_ENVELOPE_FORMAT)));
             members.push(("envelope_salt", Json::hex(&env.salt)));
@@ -852,6 +868,9 @@ impl Meta {
         if let Some(pending) = &self.pending {
             members.push(("pending_reshare_target", Json::str(pending.target.clone())));
             members.push(("pending_reshare_epoch", Json::num(pending.quorum_epoch)));
+            if let Some(key_id) = pending.anchor_key_id {
+                members.push(("pending_reshare_anchor_key_id", Json::hex(&key_id)));
+            }
         }
         members.push(("meta_digest", Json::hex(&self.digest())));
         Json::object(members)
@@ -876,6 +895,15 @@ impl Meta {
             Some(target) => Some(PendingReshare {
                 target: target.as_str().ok_or_else(corrupt)?.to_owned(),
                 quorum_epoch: json.field_u64("pending_reshare_epoch")?,
+                anchor_key_id: json
+                    .get("pending_reshare_anchor_key_id")
+                    .map(|value| {
+                        from_hex_exact(
+                            value.as_str().ok_or_else(corrupt)?,
+                            "pending_reshare_anchor_key_id",
+                        )
+                    })
+                    .transpose()?,
             }),
         };
         let latch_disk: [u8; 32] = from_hex_exact(json.field_str("latch_seed")?, "latch_seed")?;
@@ -921,11 +949,15 @@ impl Meta {
             Some(_) => return Err(corrupt()),
         };
         let meta = Self {
-            t: json.field_u64("threshold")? as usize,
-            n: json.field_u64("parties")? as usize,
+            t: usize::try_from(json.field_u64("threshold")?)
+                .map_err(|_| CliError::input("threshold out of range"))?,
+            n: usize::try_from(json.field_u64("parties")?)
+                .map_err(|_| CliError::input("parties out of range"))?,
             quorum_epoch: json.field_u64("quorum_epoch")?,
-            high_water_leaf: json.field_u64("high_water_leaf")? as usize,
-            active_leaves: json.field_u64("active_leaves")? as usize,
+            high_water_leaf: usize::try_from(json.field_u64("high_water_leaf")?)
+                .map_err(|_| CliError::input("high_water_leaf out of range"))?,
+            active_leaves: usize::try_from(json.field_u64("active_leaves")?)
+                .map_err(|_| CliError::input("active_leaves out of range"))?,
             invalidated: json
                 .get("invalidated")
                 .and_then(Json::as_bool)
@@ -948,6 +980,10 @@ impl Meta {
             pending,
             envelope,
             anchor_info,
+            anchor_key_id: json
+                .get("anchor_key_id")
+                .map(|value| from_hex_exact(value.as_str().ok_or_else(corrupt)?, "anchor_key_id"))
+                .transpose()?,
         };
         let recorded: [u8; 32] = from_hex_exact(json.field_str("meta_digest")?, "meta_digest")?;
         if !qsag_accel::ct::ct_eq_bytes(&recorded, &meta.digest()) {
@@ -1221,10 +1257,13 @@ fn load_legacy(
     {
         return Err(retired());
     }
-    let t = json.field_u64("threshold")? as usize;
-    let n = json.field_u64("parties")? as usize;
+    let t = usize::try_from(json.field_u64("threshold")?)
+        .map_err(|_| CliError::input("threshold out of range"))?;
+    let n = usize::try_from(json.field_u64("parties")?)
+        .map_err(|_| CliError::input("parties out of range"))?;
     let expected_qe = json.field_u64("quorum_epoch")?;
-    let meta_hw = json.field_u64("high_water_leaf")? as usize;
+    let meta_hw = usize::try_from(json.field_u64("high_water_leaf")?)
+        .map_err(|_| CliError::input("high_water_leaf out of range"))?;
     let expected_pk: [u8; HEM_JORTS_PK_BYTES] = from_hex_exact(
         json.field_str("validator_public_key")?,
         "validator_public_key",
@@ -1339,6 +1378,14 @@ fn settle_interrupted_reshare(
             None
         };
         remove_stale(&target, Keep::Nothing)?;
+        let target_anchor_key_id = match (pending.anchor_key_id, &_target_lock) {
+            (Some(key_id), _) => Some(key_id),
+            (None, Some(lock)) => Some(hem_anchor_key_id(&meta.pk, lock_identity(lock)?)),
+            (None, None) => None,
+        };
+        if let Some(key_id) = target_anchor_key_id {
+            crate::anchor::remove_uncommitted_guarded_target(&target, HEM_ANCHOR_DOMAIN, &key_id)?;
+        }
         for leftover in [directory_path(&target), lock_path(&target)] {
             if exists(&leftover)? {
                 std::fs::remove_file(&leftover)
@@ -1411,7 +1458,9 @@ fn open_vault_anchored(
         }
         (None, None) => None,
         (Some((expected_seal, anchor_nonce)), Some(cfg)) => {
-            let key_id = hem_anchor_key_id(&meta.pk, meta.lock_id);
+            let key_id = meta
+                .anchor_key_id
+                .unwrap_or_else(|| hem_anchor_key_id(&meta.pk, meta.lock_id));
             let mac = hem_anchor_mac(&anchor_nonce, &key_id);
             let ext_anchor = FsExternalMountAnchor::open_existing(
                 cfg,
@@ -1495,7 +1544,11 @@ fn create_vault_anchored(
     let anchor = match anchor_cfg {
         Some(cfg) => {
             let anchor_nonce = os_random_32()?;
-            let key_id = hem_anchor_key_id(&meta.pk, lock_id);
+            let key_id = cshake256_framed_32(
+                b"QSAG.CLI.HEM.ANCHOR.KEYID.V2",
+                &[&hem_anchor_key_id(&meta.pk, lock_id), &anchor_nonce],
+            );
+            meta.anchor_key_id = Some(key_id);
             let mac = hem_anchor_mac(&anchor_nonce, &key_id);
             let ext_anchor = FsExternalMountAnchor::provision_fresh(
                 cfg,
@@ -1783,10 +1836,22 @@ fn reshare_tx_anchored(
     ensure_no_vault_files(&target)?;
     let new_lock_id = lock_identity(&new_lock)?;
     let mut new_meta = Meta::new(&quorum, new_latch_seed, new_lock_id);
+    let anchor_nonce = os_random_32()?;
+    let key_id = cshake256_framed_32(
+        b"QSAG.CLI.HEM.ANCHOR.KEYID.V2",
+        &[&hem_anchor_key_id(&new_meta.pk, new_lock_id), &anchor_nonce],
+    );
+    // Record recovery information before provisioning any external state.
+    old_meta.pending = Some(PendingReshare {
+        target: target.clone(),
+        quorum_epoch: quorum.quorum_epoch(),
+        anchor_key_id: new_anchor_cfg.map(|_| key_id),
+    });
+    old_meta.write(old_vault_dir, false)?;
+    hook(Step::IntentRecorded)?;
     let new_anchor = match new_anchor_cfg {
         Some(cfg) => {
-            let anchor_nonce = os_random_32()?;
-            let key_id = hem_anchor_key_id(&new_meta.pk, new_lock_id);
+            new_meta.anchor_key_id = Some(key_id);
             let mac = hem_anchor_mac(&anchor_nonce, &key_id);
             let ext_anchor = FsExternalMountAnchor::provision_fresh(
                 cfg,
@@ -1802,13 +1867,6 @@ fn reshare_tx_anchored(
         None => None,
     };
     hook(Step::TargetPrepared)?;
-
-    old_meta.pending = Some(PendingReshare {
-        target: target.clone(),
-        quorum_epoch: quorum.quorum_epoch(),
-    });
-    old_meta.write(old_vault_dir, false)?;
-    hook(Step::IntentRecorded)?;
 
     write_new(
         &directory_path(&target),
@@ -1850,9 +1908,12 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
     )?;
     ensure_absent(public_out)?;
 
-    let t = args.get_u64("threshold")?.unwrap_or(2) as usize;
-    let n = args.get_u64("parties")?.unwrap_or(3) as usize;
-    let active_leaves = args.get_u64("leaves")?.unwrap_or(8) as usize;
+    let t = usize::try_from(args.get_u64("threshold")?.unwrap_or(2))
+        .map_err(|_| CliError::usage("--threshold out of range"))?;
+    let n = usize::try_from(args.get_u64("parties")?.unwrap_or(3))
+        .map_err(|_| CliError::usage("--parties out of range"))?;
+    let active_leaves = usize::try_from(args.get_u64("leaves")?.unwrap_or(8))
+        .map_err(|_| CliError::usage("--leaves out of range"))?;
     if t < 2 || t > n || n >= MAX_HEM_QUORUM_PARTIES {
         return Err(CliError::usage(
             "--threshold must be >= 2 and <= --parties (<= 255 nonzero GF(256) evaluation points)",
@@ -2104,14 +2165,16 @@ pub fn reshare(raw: &[String]) -> Result<(), CliError> {
     let old_passphrase = crate::envelope::passphrase(&args)?;
     let new_passphrase =
         crate::envelope::passphrase_named(&args, "new-passphrase-env", "new-passphrase-file")?;
-    let new_t = args
-        .get_u64("new-threshold")?
-        .ok_or_else(|| CliError::usage("missing required option --new-threshold"))?
-        as usize;
-    let new_n = args
-        .get_u64("new-parties")?
-        .ok_or_else(|| CliError::usage("missing required option --new-parties"))?
-        as usize;
+    let new_t = usize::try_from(
+        args.get_u64("new-threshold")?
+            .ok_or_else(|| CliError::usage("missing required option --new-threshold"))?,
+    )
+    .map_err(|_| CliError::usage("--new-threshold out of range"))?;
+    let new_n = usize::try_from(
+        args.get_u64("new-parties")?
+            .ok_or_else(|| CliError::usage("missing required option --new-parties"))?,
+    )
+    .map_err(|_| CliError::usage("--new-parties out of range"))?;
     if let Some(pub_out) = args.get("public-out") {
         ensure_absent(pub_out)?;
     }
@@ -2244,6 +2307,77 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn interrupted_anchored_reshares_use_fresh_identities_and_remove_targets() {
+        let scratch = Scratch::new("anchored-reshare-retry");
+        let old = scratch.path("old");
+        let target = scratch.path("target");
+        let anchor_dir = scratch.path("anchor");
+        private_dir(&anchor_dir, true).unwrap();
+        let cfg = AnchorConfig::dir_only(&anchor_dir, Some(target.clone()), true);
+        new_vault(&old, 2);
+        let mut previous_id = None;
+        // Interrupt twice on the same target after provisioning. Both attempts must
+        // provision distinct identities, and recovery must remove only their targets.
+        for _ in 0..2 {
+            let mut stop = |step| {
+                if step == Step::TargetPrepared {
+                    Err(CliError::state("simulated interruption"))
+                } else {
+                    Ok(())
+                }
+            };
+            assert!(
+                reshare_tx_anchored(
+                    &old,
+                    &target,
+                    None,
+                    2,
+                    3,
+                    false,
+                    None,
+                    None,
+                    None,
+                    Some(&cfg),
+                    &mut stop
+                )
+                .is_err()
+            );
+            let meta = Meta::read(&old).unwrap();
+            let key_id = meta.pending.as_ref().unwrap().anchor_key_id.unwrap();
+            assert_ne!(Some(key_id), previous_id);
+            previous_id = Some(key_id);
+            // Model the VMGenID artifact without depending on host hypervisor support.
+            let digest = cshake256_framed_32(
+                b"QSAG.CLI.ANCHOR.SLOT.V1",
+                &[HEM_ANCHOR_DOMAIN.as_bytes(), &key_id],
+            );
+            let artifact = join(
+                &target,
+                &format!(".qsag-hem_quorum-{}.target", to_hex(&digest)),
+            );
+            std::fs::write(&artifact, b"uncommitted target").unwrap();
+            drop(open_vault(&old, None, &mut no_crash).unwrap());
+            assert!(!exists(&artifact).unwrap());
+            assert!(!exists(&meta_path(&target)).unwrap());
+        }
+        reshare_tx_anchored(
+            &old,
+            &target,
+            None,
+            2,
+            3,
+            false,
+            None,
+            None,
+            None,
+            Some(&cfg),
+            &mut no_crash,
+        )
+        .unwrap();
+        drop(open_vault_anchored(&target, None, Some(&cfg), &mut no_crash).unwrap());
     }
 
     #[test]
@@ -2585,8 +2719,8 @@ mod tests {
         assert_eq!(
             boundaries,
             [
-                Step::TargetPrepared,
                 Step::IntentRecorded,
+                Step::TargetPrepared,
                 Step::ShareStaged,
                 Step::ShareStaged,
                 Step::ShareStaged,
