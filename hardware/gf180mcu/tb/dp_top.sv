@@ -22,8 +22,9 @@ module dp_top (
     input  wire [63:0]  tb_wdata,
     output wire [63:0]  tb_rdata,
     // Keccak
-    input  wire         k_en,
-    input  wire [4:0]   k_idx
+    input  wire         k_start,
+    input  wire         k_turbo,
+    output wire         k_done
 );
     wire [5:0]  fe_rd, fe_wa;
     wire        fe_we;
@@ -33,7 +34,9 @@ module dp_top (
     wire        krc, acc_clr, acc_we, ld_opa, ld_opb, ld_res, mul_start, mul_asel, mul_bsel;
     wire        mul_last, mul_busy, cv_zero;
     wire [6:0]  rc_idx;
-    wire [63:0] rc, cv, port, krcw;
+    wire [63:0] rc, cv, port, k_wd;
+    wire [5:0]  k_rd, k_wa;
+    wire        k_we, k_busy;
 
     qsag_field_engine u_fe (
         .clk, .rst_n, .start, .op, .d, .s1, .s2, .n, .dir, .busy, .done, .eq,
@@ -42,17 +45,21 @@ module dp_top (
         .mul_start, .mul_asel, .mul_bsel, .mul_last, .cv_zero, .rc_idx
     );
     qsag_p2_rc u_rc (.idx(rc_idx), .rc(rc));
-    qsag_keccak_rc u_krc (.idx(k_idx), .rc(krcw));
     qsag_gl64_karatsuba_csa u_alu (
         .clk, .rst_n, .port, .xw, .rc, .pm, .pk, .rm, .rk, .krc, .acc_clr, .acc_we,
         .ld_opa, .ld_opb, .ld_res, .mul_start, .mul_asel, .mul_bsel,
         .mul_busy, .mul_last, .cv, .cv_zero, .res
     );
+    qsag_keccak_serial u_kc (
+        .clk, .rst_n, .srst_n(rst_n), .start(k_start), .turbo(k_turbo), .busy(k_busy), .done(k_done),
+        .rd_addr(k_rd), .port, .wr_en(k_we), .wr_addr(k_wa), .wr_data(k_wd)
+    );
     qsag_sponge u_sp (
-        .clk, .rst_n, .k_en, .k_rc(krcw),
-        .wr_en(busy ? fe_we : tb_we), .wr_addr(busy ? fe_wa : tb_addr),
-        .wr_data(busy ? cv : tb_wdata),
-        .rd_addr(busy ? fe_rd : tb_addr), .rd_data(port)
+        .clk, .wipe(1'b0),
+        .wr_en(busy ? fe_we : k_busy ? k_we : tb_we),
+        .wr_addr(busy ? fe_wa : k_busy ? k_wa : tb_addr),
+        .wr_data(busy ? cv : k_busy ? k_wd : tb_wdata),
+        .rd_addr(busy ? fe_rd : k_busy ? k_rd : tb_addr), .rd_data(port)
     );
     assign tb_rdata = port;
     wire unused = &{1'b0, mul_busy};
