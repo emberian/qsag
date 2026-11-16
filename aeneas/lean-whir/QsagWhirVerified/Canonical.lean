@@ -4,7 +4,7 @@ public import Qsag.Exec.WhirKernels
 public import Qsag.Protocol.Aggregation.HemRbrSoundness
 import Qsag.Tactic.AssuranceKit
 /-!
-# Canonical `Qsag` Soundness & Refinement Welds for `qsag-whir-verified` (`L-Ex-1`)
+# Canonical `Qsag` soundness and refinement welds for `qsag-whir-verified`
 
 Transports the polynomial-basis MIR functions and refinement theorems in
 `QsagWhirVerified.{Arithmetic,Proofs}` directly to the canonical `Qsag` mathematical
@@ -623,8 +623,7 @@ private theorem isCanonicalExt4_cwyzBridgeValue
   rw [cwyzBridgeValue.public_eqs]
   exact extAdd_canonical _ _
 
-/-- **Production `verify_cwyz_duet_fold_step` Canonical Soundness (`L-Ex-1`)**:
-    With canonical inverse twiddles and coset square, `verify_cwyz_duet_fold_step` accepts
+/-- With canonical inverse twiddles and coset square, `verify_cwyz_duet_fold_step` accepts
     `claimed` if and only if `claimed` has canonical limbs (`< p`) AND `ext4Abs claimed`
     equals `Qsag.hemVirtualFoldOracle` in `Protocol.Aggregation.HemRbrSoundness`. -/
 theorem verify_cwyz_duet_fold_step_sound_qsag
@@ -759,8 +758,7 @@ theorem hemBridgeClaimStep_eq_hemBridgeFoldClaim
     ← Qsag.QuarticGoldilocks.ring_mul]
   constructive_ring
 
-/-- **Production `verify_cwyz_bridge_claim_step` Canonical Soundness (`L-Ex-1`)**:
-    Accepts `claimed_next` if and only if `claimed_next` is limb-canonical and `ext4Abs claimed_next`
+/-- Accepts `claimed_next` if and only if `claimed_next` is limb-canonical and `ext4Abs claimed_next`
     equals `Qsag.hemBridgeFoldClaim` in `Protocol.Aggregation.MultiRoundFsQrom`. -/
 theorem verify_cwyz_bridge_claim_step_sound_qsag
     (w0 w1 w2 w3 w4 claim phi theta alpha beta claimed_next : Ext4) :
@@ -899,16 +897,14 @@ theorem hemHorner_zero_eq_evalCoeffs
     rw [Qsag.LawfulCommRing.mul_comm _ (Qsag.Aggregation.GoldilocksExt4.embedBase z),
       Qsag.LawfulCommRing.add_comm]
 
-/-- **Production `eval_ext4_univariate_at_base` Canonical Refinement (`L-Ex-1`)**:
-    Refines `Qsag.RoundPoly.evalCoeffs` at `embedBase (fieldAbs z)` unconditionally. -/
+/-- Refines `Qsag.RoundPoly.evalCoeffs` at `embedBase (fieldAbs z)` unconditionally. -/
 theorem eval_ext4_univariate_at_base_refines_evalCoeffs (coeffs : Slice Ext4) (z : U64) :
     (ext4Abs <$> eval_ext4_univariate_at_base coeffs z) =
       .ok (Qsag.RoundPoly.evalCoeffs (coeffs.val.map ext4Abs)
         (Qsag.Aggregation.GoldilocksExt4.embedBase (fieldAbs z))) := by
   rw [eval_ext4_univariate_refines_exec, hemHorner_zero_eq_evalCoeffs]
 
-/-- **Production `verify_ext4_univariate_at_base_pin` Canonical Soundness (`L-Ex-1`)**:
-    Accepts `expected` iff `expected` is limb-canonical and `ext4Abs expected` equals
+/-- Accepts `expected` iff `expected` is limb-canonical and `ext4Abs expected` equals
     `Qsag.RoundPoly.evalCoeffs (coeffs.val.map ext4Abs) (embedBase (fieldAbs z))`. -/
 theorem verify_ext4_univariate_at_base_pin_sound_qsag
     (coeffs : Slice Ext4) (z : U64) (expected : Ext4) :
@@ -1003,9 +999,8 @@ theorem ext4SliceWords_injective :
     subst hxy htail
     rfl
 
-/-- **Production `verify_ood_pin_eq` Canonical Soundness (`L-Ex-1`)**:
-    Over canonical `GoldilocksExt4` OOD pin word slices, `verify_ood_pin_eq` accepts if and only
-    if the underlying `List GoldilocksExt4` OOD vectors are equal (matching `verifyHemStages`). -/
+/-- Over canonical `GoldilocksExt4` OOD pin word slices, `verify_ood_pin_eq` accepts if and only
+    if the underlying `List GoldilocksExt4` OOD vectors are equal. -/
 theorem verify_ood_pin_eq_canonical_ext4_iff
     (expected supplied : Slice U64)
     (expPins supPins : List Qsag.Aggregation.GoldilocksExt4)
@@ -1026,8 +1021,7 @@ theorem verify_stage_pow_mask_refines_canonical (word : U64) (bits : U32) :
   apply congrArg Result.ok
   exact decide_eq_decide.mpr h
 
-/-- **Production 16-Bit `verify_stage_pow_mask` ↔ `verifyWhirStagePow` Weld (`L-Ex-1`)**:
-    For any 32-byte challenge `chal` and `u64` `powNonce`, when `word` carries the little-endian
+/-- For any 32-byte challenge `chal` and `u64` `powNonce`, when `word` carries the little-endian
     low 16 bits of `cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)`,
     `verify_stage_pow_mask word 16#u32 = .ok true` is equivalent to
     `Qsag.Aggregation.verifyWhirStagePow chal powNonce.val 16 = true`. -/
@@ -1066,10 +1060,10 @@ theorem verify_stage_pow_mask_16_iff_verifyWhirStagePow
     · rintro ⟨rfl, rfl⟩
       rfl
 
-/-- **Production `step_merkle_pair_order` Canonical Parity & Framing Weld (`L-Ex-1`)**:
-    At any valid tree level `level < 64`, `step_merkle_pair_order` enforces internal-node tag `0`
-    and selects `(left, right)` identically to the `(idx / 2^level) % 2` parity convention of
-    `Qsag.Aggregation.merkleNodeFrame`, preserving injectivity in the active child digest. -/
+/-- A returned pair has `level < 64`, tag `0`, and frames `(left, right)` in the order chosen
+    by the parity of `idx / 2^level`. The right-hand side restates the body of
+    `Qsag.Aggregation.merkleNodeFrame (idx / 2^level)`; that definition exports no equation,
+    so it is not named here. -/
 theorem step_merkle_pair_order_canonical_parity
     (idx : U64) (level : U32) (node sibling : Array U8 32#usize) (pair : MerklePair)
     (h : step_merkle_pair_order idx level node sibling = .ok (some pair)) :
@@ -1100,8 +1094,7 @@ private theorem foldl_add_u64_eq_sum :
     simp only [List.foldl_cons, List.map_cons, List.sum_cons, foldl_add_u64_eq_sum xs]
     omega
 
-/-- **Production `checked_quorum_sum` Overflow-Free Validator Quorum Weld (`L-Ex-1`)**:
-    `checked_quorum_sum` returns `some total` iff `counts` and `minimums` are non-empty,
+/-- `checked_quorum_sum` returns `some total` iff `counts` and `minimums` are non-empty,
     equal-length slices, `0 < minimum_global`, every shard meets its per-shard threshold
     `minimums[i] ≤ counts[i]`, and the exact mathematical natural-number sum `∑ counts[i]`
     satisfies `minimum_global ≤ ∑ counts[i] < 2^64` with `total.val = ∑ counts[i]`. -/
@@ -1131,8 +1124,7 @@ theorem checked_quorum_sum_sound_qsag
 
 /-! ## 7. `#tooth` Mutation-Sensitivity & Inhabitedness Witness for Canonical Welds -/
 
-/-- **`#tooth` Canonical `verify_cwyz_duet_fold_step` Premise Inhabitedness & Perturbation Rejection**:
-    1. Exhibits a concrete nonzero coset point `x = 3 ∈ F_p^*` where `verify_cwyz_duet_fold_step`
+/-- 1. Exhibits a concrete nonzero coset point `x = 3 ∈ F_p^*` where `verify_cwyz_duet_fold_step`
        with canonical twiddles accepts `canonicalExt4 (hemVirtualFoldOracle ...)`;
     2. Perturbing the claimed `GoldilocksExt4` fold evaluation by `+1` causes `.ok false`;
     3. Replacing the canonical coset inverse twiddle `(2 * x)^-1` with `2^-1` causes `.ok false`. -/

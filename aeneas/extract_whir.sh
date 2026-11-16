@@ -91,9 +91,18 @@ for name in ("Types.lean", "Funs.lean"):
             raise SystemExit(f"Unexpected generated header in {path}: {stripped}")
     if not imports:
         raise SystemExit(f"Missing generated imports in {path}")
+    body_text = "".join(body)
+    if name == "Funs.lean":
+        # Publish kernel-checked equations rather than importing private bodies in clients.
+        imports.append("Qsag.Tactic.AssuranceKit")
+        definitions = re.findall(r"(?m)^(?:@\[[^]]*\]\s*)?def\s+([A-Za-z_][A-Za-z0-9_'.]*)", body_text)
+        if len(definitions) != 37 or len(set(definitions)) != 37:
+            raise SystemExit("Unexpected WHIR extraction API inventory")
+        body_text += ("\npublic section\n#export_eqns " +
+                      " ".join("qsag_whir_verified." + n for n in definitions) + "\nend\n")
     path.write_text("".join(comments) + "module\n"
                     + "".join(f"public import {module}\n" for module in imports)
-                    + "public section\n" + "".join(body))
+                    + "public section\n" + body_text)
 PY_HEADERS
 
 echo "[4/5] Verifying Aeneas prelude, extracted MIR functions, and refinement theorems via Lake..."
