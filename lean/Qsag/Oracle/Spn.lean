@@ -3265,3 +3265,272 @@ theorem polyToTower128_mds_constants :
 
 end Qsag
 end
+
+/-! ### Exports for lane oracle -/
+
+public section
+namespace Qsag
+open MigrationExecution
+
+/-! Defining equations (bodies stay unexposed). -/
+
+theorem spnIterRounds128_zero (mdsA mdsB : Tower128) (rcs : Nat → Tower128 × Tower128)
+    (st : Tower128 × Tower128) : spnIterRounds128 mdsA mdsB rcs 0 st = st := by rfl
+
+theorem spnIterRounds128_succ (mdsA mdsB : Tower128) (rcs : Nat → Tower128 × Tower128)
+    (r : Nat) (st : Tower128 × Tower128) :
+    spnIterRounds128 mdsA mdsB rcs (r + 1) st =
+      spnRound128 mdsA mdsB (rcs r) (spnIterRounds128 mdsA mdsB rcs r st) := by rfl
+
+theorem pairXor_eq (a b : Tower128 × Tower128) :
+    pairXor a b = (towerAdd 7 a.1 b.1, towerAdd 7 a.2 b.2) := by rfl
+
+theorem wsgn_eq (b : Bool) : wsgn b = if b then -1 else 1 := by rfl
+
+theorem isum_nil {α : Type} (f : α → Int) : isum f [] = 0 := by rfl
+
+theorem isum_cons {α : Type} (f : α → Int) (x : α) (xs : List α) :
+    isum f (x :: xs) = f x + isum f xs := by rfl
+
+theorem walsh_eq {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α) (u w : α) :
+    walsh W f u w = isum (fun x => wsgn (W.dot u (f x)) * wsgn (W.dot w x)) W.elems := by rfl
+
+theorem walshTrailSum_nil {α : Type} [DecidableEq α] (W : WalshSpace α) (u w : α) :
+    walshTrailSum W [] u w = if u = w then (W.elems.length : Int) else 0 := by rfl
+
+theorem walshTrailSum_cons {α : Type} [DecidableEq α] (W : WalshSpace α) (f : α → α)
+    (fs : List (α → α)) (u w : α) :
+    walshTrailSum W (f :: fs) u w =
+      isum (fun v => walshTrailSum W fs u v * walsh W f v w) W.elems := by rfl
+
+theorem gf128MdsAPolyBits_eq : gf128MdsAPolyBits = 0x9E3779B97F4A7C15F39CC0605CEDC835#128 := by rfl
+theorem gf128MdsBPolyBits_eq : gf128MdsBPolyBits = 0xBF58476D1CE4E5B994D049BB133111EB#128 := by rfl
+theorem gf128MdsATowerBits_eq : gf128MdsATowerBits = 0x6938822d2669c41b597c42deeb84a0bb#128 := by rfl
+
+theorem rustPow7_eq (x : BitVec 128) :
+    rustPow7 x =
+      rustGf128Mul (rustGf128Mul x (rustGf128Mul x x))
+        (rustGf128Mul (rustGf128Mul x x) (rustGf128Mul x x)) := by rfl
+
+theorem rustSpnRound_eq (rc st : BitVec 128 × BitVec 128) :
+    rustSpnRound rc st =
+      (rustPow7 (st.1 ^^^ rc.1) ^^^ rustGf128Mul (rustPow7 (st.2 ^^^ rc.2)) gf128MdsAPolyBits,
+       rustPow7 (st.2 ^^^ rc.2) ^^^ rustGf128Mul (rustPow7 (st.1 ^^^ rc.1)) gf128MdsBPolyBits) := by
+  rfl
+
+theorem rustSpnIter_zero (rcs : Nat → BitVec 128 × BitVec 128) (st : BitVec 128 × BitVec 128) :
+    rustSpnIter rcs 0 st = st := by rfl
+
+theorem rustSpnIter_succ (rcs : Nat → BitVec 128 × BitVec 128) (r : Nat)
+    (st : BitVec 128 × BitVec 128) :
+    rustSpnIter rcs (r + 1) st = rustSpnRound (rcs r) (rustSpnIter rcs r st) := by rfl
+
+theorem rustAlgebraicStep_eq (rcs : Nat → BitVec 128 × BitVec 128)
+    (inp : BitVec 128 × BitVec 128) :
+    rustAlgebraicStep rcs inp =
+      ((rustSpnIter rcs spnRounds inp).1 ^^^ inp.1, (rustSpnIter rcs spnRounds inp).2 ^^^ inp.2) := by
+  rfl
+
+theorem psiTower128Pair_eq (p : Tower128 × Tower128) :
+    psiTower128Pair p = (psiTower128ToPoly p.1, psiTower128ToPoly p.2) := by rfl
+
+theorem rustU128FromLeBytes_eq (bs : List UInt8) :
+    rustU128FromLeBytes bs = BitVec.ofNat 128 (decodeNatLeBytes bs) := by rfl
+
+theorem rustU128ToLeBytes_eq (v : BitVec 128) :
+    rustU128ToLeBytes v = encodeNatLeBytes 16 v.toNat := by rfl
+
+theorem rustBytes32ToLanes_eq (b : List UInt8) :
+    rustBytes32ToLanes b =
+      (BitVec.ofNat 128 (decodeNatLeBytes (b.take 16)),
+       BitVec.ofNat 128 (decodeNatLeBytes (b.drop 16))) := by rfl
+
+theorem rustLanesToBytes32_eq (l : BitVec 128 × BitVec 128) :
+    rustLanesToBytes32 l = encodeNatLeBytes 16 l.1.toNat ++ encodeNatLeBytes 16 l.2.toNat := by rfl
+
+theorem spnPow7RoundsCustomization_eq :
+    spnPow7RoundsCustomization =
+      [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2e, 0x50, 0x4f, 0x57, 0x37,
+       0x5f, 0x52, 0x4f, 0x55, 0x4e, 0x44, 0x53, 0x2e, 0x56, 0x35] := by rfl
+
+theorem spnChainTweakCustomization_eq :
+    spnChainTweakCustomization =
+      [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x53, 0x46, 0x54, 0x53, 0x2e, 0x43, 0x48, 0x41, 0x49,
+       0x4e, 0x5f, 0x54, 0x57, 0x4b, 0x2e, 0x56, 0x32] := by rfl
+
+theorem rustSpnRoundConstantStream_eq
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (c : BitVec 128 × BitVec 128) :
+    rustSpnRoundConstantStream framedXof c =
+      framedXof spnPow7RoundsCustomization
+        [rustU128ToLeBytes c.1, rustU128ToLeBytes c.2, be 4 spnRounds] (spnRounds * 32) := by rfl
+
+theorem rustSpnRoundConstants_eq_stream
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (c : BitVec 128 × BitVec 128) (round : Nat) :
+    rustSpnRoundConstants framedXof c round =
+      rustBytes32ToLanes (((rustSpnRoundConstantStream framedXof c).drop (32 * round)).take 32) := by
+  rfl
+
+theorem rustDeriveChainTweak_eq
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) :
+    rustDeriveChainTweak framedXof pkSeed epoch chainIdx step =
+      rustBytes32ToLanes (framedXof spnChainTweakCustomization
+        [pkSeed, be 4 epoch, be 2 chainIdx, [step]] 32) := by rfl
+
+theorem rustParallelChainStep_eq
+    (framedXof : List UInt8 → List (List UInt8) → Nat → List UInt8)
+    (pkSeed : List UInt8) (epoch chainIdx : Nat) (step : UInt8) (cur : List UInt8) :
+    rustParallelChainStep framedXof pkSeed epoch chainIdx step cur =
+      rustLanesToBytes32
+        (rustAlgebraicStep
+          (rustSpnRoundConstants framedXof
+            (rustDeriveChainTweak framedXof pkSeed epoch chainIdx step))
+          (rustBytes32ToLanes cur)) := by rfl
+
+/-! Kernel-evaluated values. The field multiplications are evaluated in
+`Qsag.Math.Gf2Pow128` (`rustGf128_spn_round_kats`, `rustGf128_spn_chain_kat`). -/
+
+theorem binaryPopcount_two : binaryPopcount 2 = 1 := by decide
+
+/-- Values of the Rust model, cross-checked against an independent transcription of
+    `gf2_128_mul` / `pow7_plain` / the round body outside Lean. -/
+theorem rust_spn_poly_basis_kat :
+    rustPow7 2#128 = 0x80#128 ∧
+    rustPow7 3#128 = 0xff#128 ∧
+    rustSpnRound (7#128, 11#128) (3#128, 5#128) =
+      (0x7e449a0c3042bf1c84c9783f54d336e9#128, 0x11db4739396e6534126ec4cc445b09a2#128) ∧
+    rustSpnRound (0#128, 0#128) (1#128, 0#128) = (1#128, gf128MdsBPolyBits) :=
+  (rustGf128_spn_round_kats rustPow7 rustSpnRound rfl rfl).1
+
+/-- Exchanging `GF128_MDS_A` and `GF128_MDS_B` changes the round on `(1, 0)`. -/
+theorem rustSpnRound_swapped_mds_ne :
+    rustSpnRound (0#128, 0#128) (1#128, 0#128) ≠
+      (rustPow7 1#128 ^^^ rustGf128Mul (rustPow7 0#128) gf128MdsBPolyBits,
+       rustPow7 0#128 ^^^ rustGf128Mul (rustPow7 1#128) gf128MdsAPolyBits) :=
+  (rustGf128_spn_round_kats rustPow7 rustSpnRound rfl rfl).2.1
+
+/-- The zero-constant round on `(0, 1)`, and the raw tower word of `GF128_MDS_A` not being
+    its polynomial-basis image. -/
+theorem rustSpnRound_zero_one_kat :
+    rustSpnRound (0#128, 0#128) (0#128, 1#128) = (gf128MdsAPolyBits, 1#128) ∧
+    (gf128MdsAPolyBits, 1#128) ≠ (rustGf128Mul 1#128 gf128MdsATowerBits, 1#128) :=
+  (rustGf128_spn_round_kats rustPow7 rustSpnRound rfl rfl).2.2
+
+theorem towerToRust_gf128MdsATower_ne :
+    towerToRust 7 gf128MdsATower ≠ gf128MdsAPolyBits :=
+  towerToRust_mdsA_tower_bits_ne
+
+theorem rustSpnIter_eq_natRec (rcs : Nat → BitVec 128 × BitVec 128) (n : Nat)
+    (st : BitVec 128 × BitVec 128) :
+    rustSpnIter rcs n st =
+      Nat.rec (motive := fun _ => BitVec 128 × BitVec 128) st
+        (fun r acc => rustSpnRound (rcs r) acc) n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => exact congrArg (rustSpnRound (rcs n)) ih
+
+theorem rustSpnIter_congr (f g : Nat → BitVec 128 × BitVec 128) (n : Nat)
+    (st : BitVec 128 × BitVec 128) (h : ∀ r, r < n → f r = g r) :
+    rustSpnIter f n st = rustSpnIter g n st := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [rustSpnIter_succ, rustSpnIter_succ, h n (Nat.lt_succ_self n),
+      ih (fun r hr => h r (Nat.lt_succ_of_lt hr))]
+
+/-- Six eight-round segments of the Rust SPN loop on the `parallel_chain_step` vector
+    `(pk_seed = 00..1f, epoch 7, chain_idx 3, step 2, cur = a0..bf)`, for any 1536-byte stream
+    whose 32-byte chunks decode to the 48 listed round-constant lane pairs. -/
+theorem rustSpnIter_chain_kat (rcLit : List (BitVec 128 × BitVec 128))
+    (hLit : rcLit =
+      [(0x8a3a4ed72bfa6598588d0c1c604ccd42#128, 0x7d891adb3cf60047614f737c0a9d04fd#128),
+       (0x877e8c121be7979bf02fa637c67cc061#128, 0x31a626c35fe62cfc7fb21bd82e3d5e3b#128),
+       (0x9d827ea09cead245db428e04a60479f9#128, 0x525bfc56be6dc26a251e2dd2a9017d3c#128),
+       (0xa2987a542704b7da4c3705c1b1604967#128, 0x85aed0244f949cd758578ad881bdbff9#128),
+       (0xa34fcdb5b316812356035a24ca99b1c7#128, 0xd52b7966c787310b0159ffeb1081e004#128),
+       (0xb825b06587a17a31a757c2b06dd7d6a6#128, 0x9b6aed7b335fdc893296cb5cfb382634#128),
+       (0x3c4afabd527a5f2c5b0100bb69d923ec#128, 0xcd366241c2df8002e134de980b843c9b#128),
+       (0x394da38b56456f767db3be2dea100609#128, 0x6414d039ad922acfdf40044bdce0b3f3#128),
+       (0x49ccef84f04bd61a54b9dc80edbf80d1#128, 0x10078e0a8c680ac3ffa4ab38aabb675f#128),
+       (0x8508171e0b7fce311d61c72702d487f0#128, 0xde897507f9ecb0399e3194026326c5e7#128),
+       (0x3d646c60ffb32936b9bc24ff4bf4f2ca#128, 0x33cd782071ed1ce45c762e463e963403#128),
+       (0xeaf18f60a1cdcc1175cad88aabcd2f11#128, 0xbc6636d509e3398cbf3e2458381f74f3#128),
+       (0x2b4c2f1cf7bec3e941f9a341e038189b#128, 0x7326bce7ca8b4a43d96cf0756b92aa1c#128),
+       (0xc9a1b6ce3c690618785222750ab8cfe2#128, 0x869f6bcef68af7d6b61d76e242cbdd74#128),
+       (0x3582ea94524fcb588230a3a59d311afd#128, 0xd29bbad7862553d6753843dde809324c#128),
+       (0x2b7ee82ec2e6c701dc0a36cad50cfc59#128, 0x34d6fd19db819a39a51debab19548928#128),
+       (0x3b5b24be8022e7de6139e1ece4b3ba46#128, 0xe628a59623ec02a85d22e270bf8ff5c2#128),
+       (0x2223cfa325211a66596d5eeaf5dfa542#128, 0x017275b264e5fa044cb2b30f22176f43#128),
+       (0x80fcb255d1e00485f352a6532c683068#128, 0xdec141ee39a1665b37112f70a8cbf821#128),
+       (0x4c88d94900a8fa233c8cbf9b4569c1fe#128, 0x0a78e49c32d6251c89dc6d9c9fd280ee#128),
+       (0xe491ba4d1e860577b22d30faaceef5c3#128, 0xbaba5ee2a295dbf2c5744db00d2c9eb4#128),
+       (0xa14a13d87e7e93374169e299b28336ba#128, 0x17f52fb09e149343b49f2db27b0732a7#128),
+       (0xac41fa72387281a738fd9e1a1effb4cf#128, 0x4bd38080cb43fa361fb76ea28891835a#128),
+       (0x7ed3e8f2fed5be8e5677b9c8ac98aa7c#128, 0x5f0950c4a05a766029d88c1d430cdc74#128),
+       (0x74a258eac491a0b92e0d50a5d4e776b6#128, 0x799fed063453dcb7d41a994944d999fc#128),
+       (0x0a147dc46b38f0a25d78865744bdf501#128, 0xb8447bf9e3467a59ebf0dd09d6da65e3#128),
+       (0x340534dbb0d06678b5ddfa6943eff4df#128, 0x6b34bcc39901c5147f443bbe4c65989e#128),
+       (0x61caefac5d049e87471245c129d720f8#128, 0xa9b5581c52240cf057febe6e0545fce4#128),
+       (0x9fda12534371e941c94bbdab537e1408#128, 0xe3e68394223d2fd50f62c4c57e076a3a#128),
+       (0x339e20cd122379a3b5cb2ec84e81a002#128, 0x51915861a168b0895cf67321fbc97b0b#128),
+       (0x9bd10ebeea257a3b87185cc66718650e#128, 0xb79938bb8d634ccefbb0ceae2d265c5e#128),
+       (0x410e7239ea72312f4ff5cb662d1ca0f8#128, 0x2ebaa11198353673aad81212a8581c5d#128),
+       (0xaa30b05c21563559b9a1c3e6455be179#128, 0xa03358f896ff53270136b9de2d97e042#128),
+       (0x0318c11069ffaa9c3220643b808e4c85#128, 0xc5ba5699f21481c795fbf3432cf68d96#128),
+       (0x56989532c716e0b00d72caee4ac39bbe#128, 0xf24d311ce76711ff7bb120a4a0f61b62#128),
+       (0xe6c09903a622d2de7c70184481940bb0#128, 0xc7ddf51b0f9d48fd2cabf7705df94ab0#128),
+       (0x18c9f1404daf77be1f80fca68caa867b#128, 0x66c891f8905e8b6670736c8fd9d605f7#128),
+       (0xd277e1659c46a847ddb4b55eeae23a3f#128, 0xc77747012dfa7179ed342b264b3d4d8f#128),
+       (0x0b7cc14feacf2759740a51faf35ce7a7#128, 0x524d1ad2c835eaaad1dee2d66fbc8846#128),
+       (0x2c116be86155f903237745e3e8bef3d3#128, 0x41dd688cb196a2c0c741307a217d6dcd#128),
+       (0xf74ba7a3ec3f7ec573cebb3b08c7f184#128, 0xf548503656cd7e0e3a0c6663c5b6bc65#128),
+       (0x124e6584900ca865ca6558b29a719d0b#128, 0x05f8eec038579dfc6cfe4e3e672bd8ef#128),
+       (0xd90fa9ce378320e89ea82e2c683fc8fc#128, 0xcea1b2c28fe1a3aac83806786b1732be#128),
+       (0x7f96b0f2088ec8c2c81552c92ec8a65f#128, 0x912c28a95d37e87dd3abfa934bd8095a#128),
+       (0x36547df8a43404eebdbf6c92794ba5af#128, 0xf7c531752f26d0d4a7984c72295d20fd#128),
+       (0xa78a901f1dd3833482e83a837f76afcc#128, 0x1498904ea157c2517b106c4c51677a0c#128),
+       (0xbdaf4c953e59c4c0293bb1d03234bc24#128, 0x7cf5727b878d74cfe5af57ed061384e9#128),
+       (0xa2c8998eaaa61e1ae167cb221bbc0527#128, 0x484421ea8b3681527a31e2d65d04e6da#128)])
+    (stream : List UInt8)
+    (hLanes : ∀ r, r < 48 →
+      rustBytes32ToLanes ((stream.drop (32 * r)).take 32) = rcLit.getD r (0#128, 0#128)) :
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (0 + r))).take 32)) 8
+        (0xafaeadacabaaa9a8a7a6a5a4a3a2a1a0#128, 0xbfbebdbcbbbab9b8b7b6b5b4b3b2b1b0#128) =
+      (0xcfe875a4c42ae20e39e3c0d879d92e23#128, 0x12aeeead5a863c075f0e3f5781c8fc65#128) ∧
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (8 + r))).take 32)) 8
+        (0xcfe875a4c42ae20e39e3c0d879d92e23#128, 0x12aeeead5a863c075f0e3f5781c8fc65#128) =
+      (0xaacba03cdc94eed5475d40f589cf70fb#128, 0xb27b201c28f45aa3898908dee0c22324#128) ∧
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (16 + r))).take 32)) 8
+        (0xaacba03cdc94eed5475d40f589cf70fb#128, 0xb27b201c28f45aa3898908dee0c22324#128) =
+      (0x1b9c5eddf208544c6359ba10c764c7ac#128, 0x81b4b555b012a19261fa327c17c19872#128) ∧
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (24 + r))).take 32)) 8
+        (0x1b9c5eddf208544c6359ba10c764c7ac#128, 0x81b4b555b012a19261fa327c17c19872#128) =
+      (0x33f373b7052ea3949bede8944c3727b0#128, 0xaf021355ca2d3f1bb60e2305d46ec3a2#128) ∧
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (32 + r))).take 32)) 8
+        (0x33f373b7052ea3949bede8944c3727b0#128, 0xaf021355ca2d3f1bb60e2305d46ec3a2#128) =
+      (0x4b7e30eded2d6a0e4cef9f0814972739#128, 0x66fa18039a7600e5ea17dea95196c3a1#128) ∧
+    rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (40 + r))).take 32)) 8
+        (0x4b7e30eded2d6a0e4cef9f0814972739#128, 0x66fa18039a7600e5ea17dea95196c3a1#128) =
+      (0xef601c0bc20ee4214f7f8c8f36091e0d#128, 0xde7ac0d98f896efe1bc0e5a94c5ee753#128) := by
+  have step : ∀ (m : Nat) (st : BitVec 128 × BitVec 128), m + 8 ≤ 48 →
+      rustSpnIter (fun r => rustBytes32ToLanes ((stream.drop (32 * (m + r))).take 32)) 8 st =
+        Nat.rec (motive := fun _ => BitVec 128 × BitVec 128) st
+          (fun r acc => rustSpnRound ((fun r => rcLit.getD r (0#128, 0#128)) (m + r)) acc) 8 := by
+    intro m st hm
+    rw [rustSpnIter_congr _ (fun r => rcLit.getD (m + r) (0#128, 0#128)) 8 st
+      (fun r hr => hLanes (m + r) (Nat.lt_of_lt_of_le (Nat.add_lt_add_left hr m) hm))]
+    exact rustSpnIter_eq_natRec _ 8 st
+  have K := rustGf128_spn_chain_kat rustPow7 rustSpnRound rfl rfl
+    (fun r => rcLit.getD r (0#128, 0#128)) (by rw [hLit])
+  exact ⟨(step 0 _ (by decide)).trans K.1, (step 8 _ (by decide)).trans K.2.1,
+    (step 16 _ (by decide)).trans K.2.2.1, (step 24 _ (by decide)).trans K.2.2.2.1,
+    (step 32 _ (by decide)).trans K.2.2.2.2.1, (step 40 _ (by decide)).trans K.2.2.2.2.2⟩
+
+#verify_constructive spnLinearMix_branch_number_three
+  sbox7MaxDiffProb128_eq_three_div_two_pow_127 spnRound128_nonzero_rc_breaks_zero_fixpoint
+  spn48_active_sboxes_ge_72
+
+end Qsag
+end

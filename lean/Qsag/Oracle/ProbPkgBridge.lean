@@ -1236,3 +1236,52 @@ theorem OracleComp.toProbPkg_multiSession (𝒞 : DistClass) {n : Nat} {Dom Cod 
 
 end Qsag.Spec
 end
+
+/-! ### Exports for lane misc -/
+
+public section
+namespace Qsag.Spec
+
+theorem ProbPkg.par_sample {n m : Nat} {I₁ I₂ E : Iface} {σ₁ σ₂ : Type} (P : ProbPkg n I₁ E σ₁)
+    (Q : ProbPkg m I₂ E σ₂) (ω : Fin (n * m)) :
+    (P.par Q).sample ω = (P.sample (coinFst ω)).par (Q.sample (coinSnd ω)) := by rfl
+
+theorem Pkg.ofOracle_init {Dom Cod : Type} (O : Dom → Cod) : (Pkg.ofOracle O).init = () := by rfl
+
+theorem Machine.toPkg_init {S In Out : Type} (M : Machine S In Out) (s₀ : S) :
+    (M.toPkg s₀).init = s₀ := by rfl
+
+theorem Machine.toProbPkg_sample {S In Out : Type} (M : Machine S In Out) {n : Nat}
+    (init : Fin n → S) (ω : Fin n) : (M.toProbPkg init).sample ω = M.toPkg (init ω) := by rfl
+
+theorem Code.callSession_eq {I : Iface} {R : Type} (K : Nat) (sid : Fin K) (q : I.Query)
+    (k : I.Resp q → Code (Iface.sessions I K) R) :
+    Code.callSession K sid q k =
+      Code.call (Iface.sessQuery K sid q) (fun r => k (Iface.sessResp K sid q r)) := by rfl
+
+theorem sessCoin_zero {n : Nat} (K : Nat) (ω : Fin (coinPow n (K + 1))) (h : 0 < K + 1) :
+    sessCoin (K + 1) ω ⟨0, h⟩ = coinFst ω := by rfl
+
+theorem sessCoin_succ {n : Nat} (K : Nat) (ω : Fin (coinPow n (K + 1))) (j : Nat)
+    (h : j + 1 < K + 1) :
+    sessCoin (K + 1) ω ⟨j + 1, h⟩ = sessCoin K (coinSnd ω) ⟨j, Nat.lt_of_succ_lt_succ h⟩ := by
+  rfl
+
+/-- A distinguisher's call to session `sid` of `multiSession K P` continues with the answer
+    of `P` on that session's coin and state; only that session's state is replaced. -/
+theorem ProbPkg.multiSession_evalState_callSession {n : Nat} {I : Iface} {σ R : Type}
+    (P : ProbPkg n I Iface.empty σ) (K : Nat) (ω : Fin (coinPow n K)) (st : SessState σ K)
+    (sid : Fin K) (q : I.Query) (k : I.Resp q → Code (Iface.sessions I K) R) :
+    Code.evalState ((P.multiSession K).sample ω).closedHandler (Code.callSession K sid q k) st =
+      Code.evalState ((P.multiSession K).sample ω).closedHandler
+        (k ((P.sample (sessCoin K ω sid)).closedHandler (SessState.get K st sid) q).1)
+        (SessState.set K st sid
+          ((P.sample (sessCoin K ω sid)).closedHandler (SessState.get K st sid) q).2) := by
+  have h := ProbPkg.multiSession_step P K ω st sid q
+  rw [Code.callSession_eq, Code.evalState_call, h.1, h.2]
+
+#verify_constructive
+  Qsag.Spec.ProbPkg.multiSession_evalState_callSession
+
+end Qsag.Spec
+end

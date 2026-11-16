@@ -7375,3 +7375,26 @@ theorem verifyCanopyMultiproof_one {D : Type} [DecidableEq D]
   simp [verifyCanopyMultiproof, canopyIndicesOk, canopyLevels, canopyLevelStep, canopyParentHash]
 end Qsag
 end
+
+/-! ### Exports for lane math -/
+public section
+namespace Qsag
+
+theorem GaussInt.mul_def (z w : GaussInt) :
+    GaussInt.mul z w = ⟨z.re * w.re - z.im * w.im, z.re * w.im + z.im * w.re⟩ := by rfl
+
+end Qsag
+end
+
+/-! ### Exports for lane agg -/
+public section
+namespace Qsag
+
+theorem hadamardQuery2_apply (w cardAnc : Nat) (ψ : QVec 2 w cardAnc) (x : Fin 2)
+    (y : Fin (2 ^ w)) (a : Fin cardAnc) :
+    (hadamardQuery2 w cardAnc).apply ψ x y a =
+      if x.val == 0 then GaussInt.add (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+      else GaussInt.sub (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a) := by rfl
+
+end Qsag
+end
