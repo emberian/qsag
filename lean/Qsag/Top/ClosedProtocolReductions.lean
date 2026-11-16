@@ -14,8 +14,12 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
    that both inputs are recorded prover queries (`Spec.TranscriptBreak`), which this reduction
    does not state.
    `deployed_whir_exec_closed_qrom_128` instantiates the `nv = 24` schedule at `Q ≤ 2^40`.
-2. `jorts_baggy_closed_euf_cma`: `Pr[ExecEufCmaGame wins] ≤ Pr[R_itsr] + (Pr[R_tcr] + Pr[R_pre])`
-   for the adversary-driven experiment with the epoch latch.
+2. `jorts_baggy_closed_euf_cma_keyed_target_bound`: for the adversary-driven experiment with
+   the epoch latch, `Pr[ExecEufCmaGame wins] ≤ εI + prodPathTargetCount · εT +
+   prodPreCandidateCount · εP`, where the three `ε` bound games played by explicit adversaries
+   that receive the public key and the hash and signing oracles only.
+   `jorts_baggy_closed_euf_cma_same_trace_classification` is the partition of the winning coins
+   by the extractor run on the whole outcome.
 
 Standing assumptions, stated where they enter:
 * the WHIR theorems take a `ClosedWhir.WhirScheduleCert` (a Boolean round-by-round state
@@ -23,8 +27,11 @@ Standing assumptions, stated where they enter:
   constructed for a schedule with stages;
 * the adversary's output carries the committed tables, and the Fiat–Shamir oracle is queried
   on whole message prefixes (`ClosedFs` module header);
-* the signature theorem bounds the forger by the win probabilities of the three extractor
-  games; those are not bounded here.
+* the signature bound takes hardness of the subset-cover game and of two keyed games
+  (`ExecSubsetCoverHard`, `ExecKeyedPathCollisionHard`, `ExecKeyedSecretPreimageHard`) as
+  hypotheses, for classes containing the reduction adversaries. The keyed games have the
+  signer's own hash inputs as targets; they are not the `SM-DT-TCR` / `SM-DT-PRE` experiments
+  of `Spec.Assumptions`, and no reduction to those is proved.
 -/
 
 public import Qsag.Spec.GameBound
@@ -154,10 +161,11 @@ theorem whirCollisionReduction_validBreak {F : Type} [CommRingOps F] [DecidableE
 
 /-! ## 2. Closed adaptive EUF-CMA experiment with the epoch latch -/
 
-/-- **Closed EUF-CMA reduction.** The adversary-driven experiment `ExecEufCmaGame` (executable
-    signer behind a monotone epoch latch, executable verifier on a fresh message) is bounded by
-    the win probabilities of the three explicit extractor games built from its own trace. -/
-theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
+/-- **Same-trace classification of the closed EUF-CMA experiment.** The adversary-driven
+    experiment `ExecEufCmaGame` (executable signer behind a monotone epoch latch, executable
+    verifier on a fresh message) is bounded by the probabilities of the three extractor events
+    on its own trace. The events are computed from the whole outcome, secret key included. -/
+theorem jorts_baggy_closed_euf_cma_same_trace_classification {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
     (hw : params.w = 4 ∨ params.w = 16)
     (keygen : Fin n → Qsag.PqSecretKey)
@@ -166,13 +174,49 @@ theorem jorts_baggy_closed_euf_cma {n qHash qSign : Nat} (hPos : 0 < n)
       ((Qsag.execEufCmaItsrReduction hPos suite params hw keygen adv).winProb.add
         ((Qsag.execEufCmaTcrReduction hPos suite params hw keygen adv).winProb.add
           (Qsag.execEufCmaPreReduction hPos suite params hw keygen adv).winProb)) :=
-  _root_.Qsag.jorts_baggy_closed_euf_cma hPos suite params hw keygen adv
+  _root_.Qsag.jorts_baggy_closed_euf_cma_same_trace_classification hPos suite params hw keygen adv
+
+/-- **Closed EUF-CMA bound by three games played without the secret key.** The key is uniform
+    on `KeyOk` and read from the challenger coordinate; the forger reads the adversary
+    coordinate. The reduction adversaries (`adv a` itself, `execCollisionReductionAdv params
+    slot (adv a)`, `execPreimageReductionAdv params slot (adv a)`) receive the public key and
+    the oracles, and carry their query budgets in their types. Hardness of the subset-cover
+    game and of the two keyed games against classes containing them bounds the forger. -/
+theorem jorts_baggy_closed_euf_cma_keyed_target_bound {n nK nA qHash qSign : Nat} (hPos : 0 < n)
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (π : Qsag.Spec.CoinSplit n nK nA)
+    (keygen : Fin nK → Qsag.PqSecretKey) {KeyOk : Qsag.PqSecretKey → Prop}
+    (hKey : Qsag.Spec.UniformOn KeyOk keygen)
+    (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜I : (Qsag.PqPublicKey → Qsag.ProdAdaptiveTree (List UInt8 × Qsag.PqHashSig)) → Prop}
+    {𝒜T : (Qsag.PqPublicKey → Qsag.ProdAdaptiveTree (Option Qsag.SmDtTcrSubmission)) → Prop}
+    {𝒜P : (Qsag.PqPublicKey → Qsag.ProdAdaptiveTree (Option Qsag.SmDtPreSubmission)) → Prop}
+    (hAI : ∀ a : Fin nA, 𝒜I (adv a).run)
+    (hAT : ∀ (slot : Nat) (a : Fin nA),
+      𝒜T (Qsag.execCollisionReductionAdv params slot (adv a)).run)
+    (hAP : ∀ (slot : Nat) (a : Fin nA),
+      𝒜P (Qsag.execPreimageReductionAdv params slot (adv a)).run)
+    {εI εT εP : Qsag.Spec.RatBound}
+    (hI : Qsag.ExecSubsetCoverHard 𝒜I suite params KeyOk qHash qSign εI)
+    (hT : Qsag.ExecKeyedPathCollisionHard 𝒜T suite params KeyOk
+      (qHash + Qsag.prodTcrReductionHashBudget params) qSign εT)
+    (hP : Qsag.ExecKeyedSecretPreimageHard 𝒜P suite params KeyOk
+      (qHash + (1 + Qsag.prodXofHashBudget params)) qSign εP) :
+    Qsag.Spec.GameBound
+      (Qsag.ExecEufCmaGame hPos suite params (fun ω => keygen (π.chal ω))
+        (fun ω => adv (π.advc ω))).winProb
+      ((εI.add (Qsag.Spec.RatBound.scale (Qsag.prodPathTargetCount params qSign) εT)).add
+        (Qsag.Spec.RatBound.scale (Qsag.prodPreCandidateCount params) εP)) :=
+  _root_.Qsag.jorts_baggy_closed_euf_cma_keyed_target_bound hPos suite params hw π keygen hKey adv
+    hAI hAT hAP hI hT hP
 
 #verify_constructive
   Qsag.Top.whir_exec_closed_qrom_soundness
   Qsag.Top.deployed_whir_exec_closed_qrom_128
   Qsag.Top.whirCollisionReduction_validBreak
-  Qsag.Top.jorts_baggy_closed_euf_cma
+  Qsag.Top.jorts_baggy_closed_euf_cma_same_trace_classification
+  Qsag.Top.jorts_baggy_closed_euf_cma_keyed_target_bound
 
 end Qsag.Top
 end

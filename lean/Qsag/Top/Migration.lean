@@ -12,8 +12,11 @@ Top-level composition module (zero `import all`) connecting:
 3. `ZKBoo` 2-of-3 special-soundness scalar extraction, Zcash Orchard `RedPallas` rerandomized key
    extraction, and active field-check bounds across `secp256k1`, `Ed25519`, `BLS12-381`, `Pallas`,
    and `Goldilocks³` (`PallasAndBlsMigration`),
-4. Unconditional 438-repetition circuit-to-sacrifice ceremony defect bounds, QROM soundness scaling,
-   and five-way `𝔽_{2^{128}}` multiplication equivalence (`ActiveMigrationZeroTest`, `Math.Gf2Pow128`),
+4. 438-repetition circuit-to-sacrifice ceremony defect bounds for the `D0_BITS = 16` bit-check
+   packing, the staged bit-check count at the `outer_mpc.rs` geometry (`BIT_CHECK_NUMERATOR = 63`,
+   with the soundness of the stages ahead of the halving rounds as a hypothesis), QROM scaling
+   arithmetic, and five-way `𝔽_{2^{128}}` multiplication equivalence (`ActiveMigrationZeroTest`,
+   `Math.Gf2Pow128`),
 5. The discrete-log instance `dlogOwnershipScheme` of `Spec.LegacyOwnershipScheme` over a
    `PrimeSubgroup`, and acceptance by the ideal machine of the scalar extracted by `ZKBoo`,
 6. The settlement registry as a machine over RAW `MigrationExecution.Submission`s
@@ -171,6 +174,38 @@ theorem active_migration_ceremony_qrom_and_gf2pow128_chain
   have hToprfPriv := Qsag.rss3_client_blind_perfect_privacy pSrv srvView hViewZero blindInput
   obtain ⟨_, hRustMul, _, hClmul, _⟩ := Qsag.Math.gf2Pow128_five_way_mul_agreement a b
   exact ⟨hCer, hQrom, hToprfPriv, ⟨hRustMul, hClmul⟩⟩
+
+/-! ### Bit-check count at the `outer_mpc.rs` geometry (`BIT_CHECK_NUMERATOR = 63`)
+
+The ceremony theorem above models the `D0_BITS = 16` packing (numerator `54`). The current
+`verify_pending_bits_slice` runs seven weight stages, six ternary sumcheck rounds, eighteen
+halving rounds and the base sacrifice. -/
+
+open Qsag.MigrationExecution in
+/-- **Staged bit-check count, one instance.** If each stage ahead of the halving rounds is
+    sound with its degree (`StagesSound`, a hypothesis: the weighted embedding and the ternary
+    sumcheck of `outer_mpc.rs` are not modelled), an adaptive prover starting from a false claim
+    is accepted on at most `stagedBadCoinBound` coin vectors through the stages, `r` halving
+    rounds and the base sacrifice. At the Rust stage list (`7` stages of degree `1`, `6` of
+    degree `3`), `18` halving rounds, fold coins over `GF(2^128)` and a nonzero base coin, that
+    count is at most `63 / (2^128 - 1)` of the coin space, and `7 + 18 + 36 + 2 = 63`. -/
+theorem migration_bit_check_staged_count_numerator_63 {Cl Msg : Type}
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat)
+    (stage : Nat → Cl → Msg → RustGf128 → Cl) (embed : Cl → IpClaim) (ds : List Nat)
+    (hStages : StagesSound S stage (fun s => decide ((embed s).err ≠ 0#128)) ds)
+    (p : StagedProver Msg (FoldProver r) ds) (s : Cl) (hErr : (embed s).err ≠ 0#128) :
+    ((stagedCoinVectors S (coinVectors S Sb r) ds).filter
+      (stagedAccepts stage (fun q c coins => sacrificeAccepts r q (embed c) coins) ds p s)).length ≤
+      stagedBadCoinBound S.length (S.length ^ r * Sb.length)
+        (sacrificeBadCoinBound S.length Sb.length r) ds ∧
+    rustBitCheckStageNumerators.sum + 2 * rustBitCheckHalvingRounds + 2 = 63 ∧
+    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
+      63 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) :=
+  ⟨staged_sacrifice_false_claim_accepting_coins_bound S Sb hS hSb r stage embed ds hStages p s hErr,
+    rust_bit_check_numerator_63_bound.2.1, rust_bit_check_numerator_63_bound.2.2.1⟩
 
 /-! ## 3. Discrete-Log Ownership Instance of `Spec.LegacyOwnershipScheme` -/
 
@@ -861,6 +896,7 @@ theorem tooth_migrationToy_forged_nullifier_rejected
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
   Qsag.Top.active_migration_ceremony_qrom_and_gf2pow128_chain
+  Qsag.Top.migration_bit_check_staged_count_numerator_63
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
   Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement
   Qsag.Top.rawSettlement_accepted_decodes

@@ -1,4 +1,5 @@
 module
+import all Qsag.Oracle.Keccak
 public import Qsag.Exec.RssParticipantPassiveSimulation
 public import Qsag.Tests.RssParticipantChecks
 import all Qsag.Exec.RssParticipantPassiveSimulation

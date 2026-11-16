@@ -220,7 +220,7 @@ theorem cshakeParticipant_refines_existing (outLen : Nat) (binding customization
     some (reconstructRssBytes (mpcSqueezeFuelSharedRss outLen outLen 0
       (mpcAbsorbPaddedRss (paddedInput customization input) (fun b => oldTape (2 * b)))
       (fun q => oldTape (2 * q + 1))))
-  rw [small_squeeze_reconstruction _ _ _ hLen]
+  rw [small_squeeze_reconstruction _ _ _ (by simpa only [shake256RateBytes_eq] using hLen)]
   rw [absorbArithmetic_simulates _ _ _ _ _ hp]
   unfold mpcAbsorbPaddedRss
   rw [mpcAbsorbBlocksRss_simulates _ _ _ _ _ hp]

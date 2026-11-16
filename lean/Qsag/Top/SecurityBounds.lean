@@ -5,10 +5,8 @@ module
 Top-level summary module (zero `import all`) collecting, under the canonical `Spec.RatBound`, the
 statement `qsag_unified_concrete_security_summary`. What that theorem states, exactly:
 - **Clause I (facts with no cryptographic hypothesis)**:
-  1. Dual-LPN regular-block parity bias `strictlyMoreThanBits 256` (`< 2^{-256}`) for any 64 block
-     weights satisfying the balance premise `hLpnBal` (`|32768 - 2w| ≤ 2047`). This is a hypothesis of the
-     theorem; `Protocol.Threshold.DensePcgTapLinearTests` shows the production tap row does not satisfy it,
-     so this conjunct does not speak about the deployed tap generator.
+  1. The production tap-row parity bias lies strictly between `2^{-118}` and `2^{-117}`,
+     from the exact heterogeneous 64-block calculation in `Math/TapRowParityBias`.
   2. The arithmetic inequality `8 (q+1)^2 2^438 2^128 ≤ 3^438` behind the 438-repetition ZKBoo count,
      for `q + 1 ≤ 2^56`.
   3. Trace inclusion of the RSS shared-release machine in its reference machine, and prefix equivalence
@@ -27,6 +25,7 @@ The platform-contract instances for the real storage, GPU and constant-time mode
 clause of the summary theorem below consumes a platform contract.
 -/
 
+public import Qsag.Math.TapRowParityBias
 public import Qsag.Top.Aggregation
 public import Qsag.Exec.RefinesBridges
 public import Qsag.Oracle.SpecRatBridges
@@ -44,7 +43,7 @@ namespace Qsag.Top
 set_option autoImplicit false
 
 /-- **Two-clause summary (`qsag_unified_concrete_security_summary`)**: Clause I collects facts with no
-    cryptographic hypothesis (one of them under the balance premise `hLpnBal`); Clause II evaluates
+    cryptographic hypothesis; Clause II evaluates
     bound formulas at the stated query ceilings. See the module header for what is not claimed. -/
 theorem qsag_unified_concrete_security_summary
     -- Portfolio & query-ceiling parameters
@@ -52,16 +51,12 @@ theorem qsag_unified_concrete_security_summary
     (hqRlwe : budget.qHash + 1 ≤ 2 ^ 66)
     (qQrom : Nat) (hqQrom : qQrom + 1 ≤ 2 ^ 40)
     (qMig : Nat) (hqMig : qMig + 1 ≤ 2 ^ 56)
-    -- Dual-LPN regular-block balanced weights
-    (lpnWeights : List Nat) (hLpnLen : lpnWeights.length = 64)
-    (hLpnBal : ∀ w ∈ lpnWeights, ((32768 : Int) - 2 * (w : Int)).natAbs ≤ 2047)
     -- Custody & cache refinement parameters
     (rssProf : Qsag.RssProduction.Profile)
     (durCfg : Qsag.ThresholdIdealService.Config) :
     -- === Clause I: Unconditional Algebraic, Statistical, and Simulation Guarantees ===
-    ((Qsag.Spec.RatBound.clampExactRat
-        (Qsag.ExactRat.abs
-          (Qsag.parityBias (Qsag.regularBlockXorOneProb (lpnWeights.map Qsag.depth15TreeRate))))).strictlyMoreThanBits 256 ∧
+    ((Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 117 < 32768 ^ 64 ∧
+      32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 118) ∧
      8 * (qMig + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 ≤ 3 ^ 438 ∧
      (∀ tr, (rssSharedReleaseMachine rssProf).AdmitsTrace tr →
        (rssReferenceReleaseMachine rssProf).AdmitsTrace tr) ∧
@@ -85,8 +80,7 @@ theorem qsag_unified_concrete_security_summary
          Qsag.hemV6FiveRoundRbrBounds
          (Qsag.hemOptimizedQueryBounds .unitaryPow16 24))).atLeastBits 128) := by
   -- Clause I
-  have hBias := Qsag.Spec.RatBound.clampExactRat_strictlyMoreThanBits_of_lt_twoNegPow
-    (Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 lpnWeights hLpnLen hLpnBal)
+  have hBias := Qsag.TapRowBias.prodRow0_bias_bracket
   obtain ⟨hMigQrom, _⟩ := Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness qMig hqMig
   have hRssTr : ∀ tr, (rssSharedReleaseMachine rssProf).AdmitsTrace tr →
       (rssReferenceReleaseMachine rssProf).AdmitsTrace tr :=

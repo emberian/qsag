@@ -1,4 +1,5 @@
 module
+public import Qsag.Custody.VolatileCoupon
 /-
 # Qsag.Top.Custody — End-to-End Composed Separated Threshold Custody Refinements and Mediation
 
@@ -7,8 +8,10 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
 `Qsag.Spec.IdealCustody`:
 1. Vertical `Spec.Refines.trans` composition of the 4-layer `ELF → MIR → Protocol → IdealTsig`
    machine hierarchy (`MirSpecBridgeCore`, `MirSpecBridge`),
-2. `Spec.Refines` lockstep equivalence between distributed RSS threshold release
-   (`RssProduction.release`) and reference release (`RssProduction.referenceRelease`),
+2. Equality of the shared-evaluation RSS release machine and the reference release machine
+   (`rssSharedReleaseMachine_eq_reference`), and of the shared and ideal threshold services
+   (`thresholdServiceShared_eq_ideal`, `thresholdDurableShared_eq_ideal`); the `*_refines_*`
+   witnesses of the same names are transports of reflexivity along these equalities,
 3. End-to-end authenticated custody quorum submission → `validThresholdApproval` → `IdealTsig`
    execution + policy-mediation provenance / `prodEufCmaWin` reduction (`SeparatedCustodyUcBridge`,
    `CompleteMediationBoundary`, `SeparatedCustodyCollision`), and
@@ -23,8 +26,14 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
    corruption (`sepCustodyMachine`), related to `Spec.idealCustodyMachine` on runs satisfying
    `SeparatedCustodyRunAssumptions` (`separatedCustody_refines_idealCustody_of`). The ELF, MIR,
    `IdealTsig`, RSS and WAL machines of items 1–4 are not connected to `Spec.idealCustodyMachine`.
+7. Distributed `(t, n)` Shamir custody (`DistCustody.distMachine`: custodians, network buffer,
+   adaptive corruption, coordinator ledger) refines `Spec.idealCustodyMachine` for its own
+   `deploymentId` (`distributedCustody_refines_idealCustody`), and the Shamir + `BeltLatch`
+   validator network: per-custodian refinement to the mediation vault and network non-equivocation
+   (`shamirCustodian_refines_mediationVault`, `shamir_custody_network_non_equivocation`).
 -/
 
+public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
 public import Qsag.Spec.Primitives
 public import Qsag.Spec.Parameters
 public import Qsag.Spec.Refines
@@ -33,14 +42,14 @@ public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealCustody
 public import Qsag.Top.Signing
-public import Qsag.Custody.SeparatedCustodyUcBridge
-public import Qsag.Custody.SeparatedCustodyCollision
-public import Qsag.Custody.SeparatedCustodyUcResource
-public import Qsag.Custody.SeparatedCustodyResourceSoundness
+public import Qsag.Exec.SeparatedCustodyUc
+public import Qsag.Custody.SeparatedCustody
+public import Qsag.Exec.SeparatedCustodyResource
 public import Qsag.Custody.JortsBeltLatchAndQuorumSwitching
+public import Qsag.Custody.ShamirThresholdCustodyRefinement
+public import Qsag.Custody.DistributedThresholdCustodyRefinement
 public import Qsag.Exec.ThresholdIdealService
 public import Qsag.Exec.ThresholdIdealDurableService
-public import Qsag.Custody.ThresholdIdealServiceCustodyBridge
 public import Qsag.Exec.CeremonyAtomicityAndAbort
 public import Qsag.Exec.RssParticipantMachine
 public import Qsag.Exec.RssParticipantSponge
@@ -56,7 +65,14 @@ public import Qsag.Exec.RssSigningEnrollment
 public import Qsag.Exec.RssSigningExecution
 public import Qsag.Exec.RssSigningPublicCompletion
 public import Qsag.Exec.RssProductionProfile
-public import Qsag.Exec.MirSpecBridge
+public import Qsag.Machine.MirSpecBridge
+public import Qsag.Protocol.Threshold.IdealTsig
+public import Qsag.Protocol.Aggregation.UcGames
+public import Qsag.Protocol.Threshold.MaliciousSecurity
+public import Qsag.Protocol.Threshold.Preprocessing
+public import Qsag.Exec.InteractiveUcEngine
+public import Qsag.Protocol.Threshold.BaggyAndRss256Security
+public import Qsag.Exec.PosixCrashWal
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -66,7 +82,7 @@ open scoped Qsag.Spec
 
 set_option autoImplicit false
 
-/-! ## 1. Distributed RSS Release Refines Reference Release (`rssSharedMachine ⊑ rssReferenceMachine`) -/
+/-! ## 1. Shared RSS Release Equals Reference Release -/
 
 /-- Reactive `Spec.Machine` wrapping distributed shared-circuit `RssProduction.release`. -/
 def rssSharedReleaseMachine (p : Qsag.RssProduction.Profile) :
@@ -84,26 +100,30 @@ def rssReferenceReleaseMachine (p : Qsag.RssProduction.Profile) :
     (fun w => w = Qsag.RssProduction.initial p)
     (fun w req => Qsag.RssProduction.referenceRelease p req w)
 
-/-- **Distributed RSS Release Forward Refinement (`rssSharedRelease_refines_reference`)**:
-    Distributed threshold evaluation + atomic WAL gating (`rssSharedReleaseMachine p`) refines
-    `rssReferenceReleaseMachine p` across all multi-turn request schedules, including exact retry
-    replays and sticky quarantine on signing/encoding failures! -/
+/-- The shared-evaluation release machine and the reference release machine are the same
+    machine: `RssProduction.release` computes the reference output. The state is the WAL latch
+    alone, so this is an equality of functions and not a statement about distributed shares. -/
+theorem rssSharedReleaseMachine_eq_reference (p : Qsag.RssProduction.Profile) :
+    rssSharedReleaseMachine p = rssReferenceReleaseMachine p := by
+  have h : (fun (w : Qsag.WalLatchState) (req : Qsag.SessionScheduleReq) =>
+        Qsag.RssProduction.release p req w) =
+      (fun w req => Qsag.RssProduction.referenceRelease p req w) :=
+    funext fun w => funext fun req => Qsag.RssProduction.release_eq_reference p req w
+  unfold rssSharedReleaseMachine rssReferenceReleaseMachine
+  rw [h]
+
+/-- Reflexivity transported along `rssSharedReleaseMachine_eq_reference`. It carries no more
+    content than the equality. -/
 def rssSharedRelease_refines_reference (p : Qsag.RssProduction.Profile) :
-    rssSharedReleaseMachine p ⊑ rssReferenceReleaseMachine p :=
-  Qsag.Spec.LockstepSim.toRefines
-    { Inv := fun _ => True
-      abs := id
-      init_inv := fun hInit => ⟨trivial, hInit⟩
-      step_eq := fun {w} req _ => by
-        dsimp only [rssSharedReleaseMachine, rssReferenceReleaseMachine, Qsag.Spec.Machine.ofTotal, id]
-        rw [Qsag.RssProduction.release_eq_reference p req w]
-        exact ⟨trivial, rfl⟩ }
+    rssSharedReleaseMachine p ⊑ rssReferenceReleaseMachine p := by
+  rw [rssSharedReleaseMachine_eq_reference p]
+  exact Qsag.Spec.Refines.refl _
 
 theorem rssSharedRelease_preserves_traces (p : Qsag.RssProduction.Profile)
     {tr : List (Qsag.SessionScheduleReq × Except Qsag.RssProduction.Failure (List UInt8))}
     (hAdmits : (rssSharedReleaseMachine p).AdmitsTrace tr) :
     (rssReferenceReleaseMachine p).AdmitsTrace tr :=
-  (rssSharedRelease_refines_reference p).preserve_admitsTrace hAdmits
+  rssSharedReleaseMachine_eq_reference p ▸ hAdmits
 
 /-! ## 2. Vertical 4-Layer `ELF ⊑ MIR ⊑ Protocol ⊑ IdealTsig` Refinement via `Spec.Refines.trans` -/
 
@@ -222,13 +242,16 @@ theorem separated_custody_provenance_and_release_chain {PK SK Sig ShareT : Type}
     (∃ c ∈ certs, c.party ∈ hon ∧ c.party ∉ st.corruptParties ∧
       (Qsag.Custody.ProducedPolicyApproval d hist c.party r ∨
        (Qsag.prodEufCmaWin d.signer.suite d.signer.params
-          ⟨d.keys c.party, Qsag.Custody.queries d.signer c.party (hist.parties c.party).vault,
-            Qsag.Custody.payload c.party r, c.signature⟩ = true ∧
+          ⟨d.keys c.party,
+            Qsag.Custody.queries d.signer d.deploymentId c.party (hist.parties c.party).vault,
+            Qsag.Custody.payload d.deploymentId c.party r, c.signature⟩ = true ∧
         (Qsag.ProdSmTcrBreak d.signer.suite d.signer.params (d.keys c.party)
-           (Qsag.Custody.signingLog d.signer (d.keys c.party) c.party (hist.parties c.party).vault) ∨
+           (Qsag.Custody.signingLog d.signer (d.keys c.party) d.deploymentId c.party
+             (hist.parties c.party).vault) ∨
          Qsag.ProdPreimageBreak d.signer.suite d.signer.params (d.keys c.party)
-           (Qsag.Custody.signingLog d.signer (d.keys c.party) c.party (hist.parties c.party).vault)
-           (Qsag.Custody.payload c.party r) c.signature)))) ∧
+           (Qsag.Custody.signingLog d.signer (d.keys c.party) d.deploymentId c.party
+             (hist.parties c.party).vault)
+           (Qsag.Custody.payload d.deploymentId c.party r) c.signature)))) ∧
     (∃ sig : Qsag.PqHashSig,
       Qsag.decodeProductionSigWire b.params (Qsag.unpackWire sigBytes) = .ok sig ∧
       Qsag.verifyProductionPqHashSig Qsag.cshake256Suite b.params b.enrolledPk
@@ -242,47 +265,48 @@ theorem separated_custody_provenance_and_release_chain {PK SK Sig ShareT : Type}
   obtain ⟨hWipe, _⟩ := Qsag.quarantinePartyNodes_isolates_and_wipes nodes targetPid targetPid
   exact ⟨hHonNe, hVal, hCap, hProv, ⟨sig, hDec, hVer⟩, hWipe⟩
 
-/-! ## 4. Unified Interactive & Durable Threshold Service Refinement (`ThresholdIdeal* ⊑ Ideal`) -/
+/-! ## 4. Interactive and Durable Threshold Services: Shared Evaluation Equals Ideal -/
 
-/-- **Threshold Interactive Service Forward Refinement (`thresholdServiceShared_refines_ideal`)**:
-    Folds `ThresholdIdealService.shared` and `ThresholdIdealService.ideal` into canonical
-    `Spec.Refines` (`Machine.ofInteractive ... ⊑ Machine.ofInteractive ...`). -/
+private theorem interactiveMachine_ext {I O S : Type} :
+    ∀ (m n : Qsag.InteractiveService.Machine I O S), m.step = n.step → m = n
+  | ⟨_⟩, ⟨_⟩, rfl => rfl
+
+/-- The shared interactive threshold service is the ideal service: their step functions agree
+    on every state and input. An equality of machines over one state type. -/
+theorem thresholdServiceShared_eq_ideal (c : Qsag.ThresholdIdealService.Config) :
+    Qsag.ThresholdIdealService.shared c = Qsag.ThresholdIdealService.ideal c :=
+  interactiveMachine_ext _ _
+    (funext fun s => funext fun i => Qsag.ThresholdIdealService.shared_step_eq_ideal c s i)
+
+/-- The shared durable threshold service is the ideal durable service. -/
+theorem thresholdDurableShared_eq_ideal (c : Qsag.ThresholdIdealService.Config) :
+    Qsag.ThresholdIdealDurableService.shared c = Qsag.ThresholdIdealDurableService.ideal c :=
+  interactiveMachine_ext _ _
+    (funext fun s => funext fun i => Qsag.ThresholdIdealDurableService.shared_step_eq_ideal c s i)
+
+/-- Reflexivity transported along `thresholdServiceShared_eq_ideal`. It carries no more content
+    than the equality. -/
 def thresholdServiceShared_refines_ideal (c : Qsag.ThresholdIdealService.Config) :
     Qsag.Spec.Machine.ofInteractive
       (fun s => s = Qsag.ThresholdIdealService.initial c)
       (Qsag.ThresholdIdealService.shared c) ⊑
     Qsag.Spec.Machine.ofInteractive
       (fun s => s = Qsag.ThresholdIdealService.initial c)
-      (Qsag.ThresholdIdealService.ideal c) :=
-  Qsag.Spec.LockstepSim.toRefines
-    { Inv := fun _ => True
-      abs := id
-      init_inv := fun hInit => ⟨trivial, hInit⟩
-      step_eq := fun {s} inp _ => by
-        change True ∧ some ((Qsag.ThresholdIdealService.ideal c).step s inp) =
-          some ((Qsag.ThresholdIdealService.shared c).step s inp)
-        rw [Qsag.ThresholdIdealService.shared_step_eq_ideal c s inp]
-        exact ⟨trivial, rfl⟩ }
+      (Qsag.ThresholdIdealService.ideal c) := by
+  rw [thresholdServiceShared_eq_ideal c]
+  exact Qsag.Spec.Refines.refl _
 
-/-- **Threshold Durable Service Forward Refinement (`thresholdDurableShared_refines_ideal`)**:
-    Folds `ThresholdIdealDurableService.shared` and `ThresholdIdealDurableService.ideal` into
-    canonical `Spec.Refines` (`Machine.ofInteractive ... ⊑ Machine.ofInteractive ...`). -/
+/-- Reflexivity transported along `thresholdDurableShared_eq_ideal`, used to reach the
+    `InteractiveService` feedback lemmas. It carries no more content than the equality. -/
 def thresholdDurableShared_refines_ideal (c : Qsag.ThresholdIdealService.Config) :
     Qsag.Spec.Machine.ofInteractive
       (fun s => s = Qsag.ThresholdIdealDurableService.initial)
       (Qsag.ThresholdIdealDurableService.shared c) ⊑
     Qsag.Spec.Machine.ofInteractive
       (fun s => s = Qsag.ThresholdIdealDurableService.initial)
-      (Qsag.ThresholdIdealDurableService.ideal c) :=
-  Qsag.Spec.LockstepSim.toRefines
-    { Inv := fun _ => True
-      abs := id
-      init_inv := fun hInit => ⟨trivial, hInit⟩
-      step_eq := fun {s} cmd _ => by
-        change True ∧ some ((Qsag.ThresholdIdealDurableService.ideal c).step s cmd) =
-          some ((Qsag.ThresholdIdealDurableService.shared c).step s cmd)
-        rw [Qsag.ThresholdIdealDurableService.shared_step_eq_ideal c s cmd]
-        exact ⟨trivial, rfl⟩ }
+      (Qsag.ThresholdIdealDurableService.ideal c) := by
+  rw [thresholdDurableShared_eq_ideal c]
+  exact Qsag.Spec.Refines.refl _
 
 /-- **Interactive Feedback Emulation, Durable Crash Safety, and Resource Burn Soundness
     (`threshold_durable_feedback_and_resource_burn_chain`)**:
@@ -1399,9 +1423,9 @@ theorem sepIntent_injective {r s : Qsag.Custody.Intent} (h : sepIntent r = sepIn
   cases h
   rfl
 
-/-- A successful signing by custodian `party` of `intent`, with the deployment the custodian was
-    acting for. `Custody.payload` does not contain the deployment, so the certificate produced is
-    the same for every `deploymentId`. -/
+/-- A successful signing by custodian `party` of `intent` for deployment `deploymentId`.
+    `Custody.payload` frames the deployment first, so the certificate is a signature on that
+    deployment's approval bytes and on no other deployment's. -/
 structure SepIssue where
   party : Nat
   deploymentId : Nat
@@ -1427,23 +1451,26 @@ inductive SepCustodyOutput where
   | corrupted
   | accepted
 
-def sepIssuedBy (issued : List SepIssue) (p : Nat) (r : Qsag.Custody.Intent) : Bool :=
-  issued.any (fun a => decide (a.party = p ∧ a.intent = r))
+def sepIssuedBy (issued : List SepIssue) (p dep : Nat) (r : Qsag.Custody.Intent) : Bool :=
+  issued.any (fun a => decide (a.party = p ∧ a.deploymentId = dep ∧ a.intent = r))
 
-/-- The forgery event of one accepted submission: the certificates of uncorrupted parties that
-    never signed the submitted intent (for any deployment). -/
-def sepForged (c : SepCustodyState) (r : Qsag.Custody.Intent)
+/-- The forgery event of one accepted submission to the coordinator of deployment `dep`: the
+    certificates of uncorrupted parties that never signed the submitted intent for `dep`. A
+    signing of the same intent for another deployment does not count: it is a signature on
+    different bytes (`Custody.payload_ne_of_deployment_ne`). -/
+def sepForged (c : SepCustodyState) (dep : Nat) (r : Qsag.Custody.Intent)
     (cs : List Qsag.Custody.Certificate) : List Qsag.Custody.Certificate :=
-  cs.filter (fun x => decide (x.party ∉ c.corruptParties) && !sepIssuedBy c.issued x.party r)
+  cs.filter (fun x => decide (x.party ∉ c.corruptParties) && !sepIssuedBy c.issued x.party dep r)
 
-/-- Transition of the separated-custody world. An uncorrupted enrolled custodian signs with the
-    production signer `Custody.sign` under its own key; a failed signing is no event. Corruption is
+/-- Transition of the separated-custody world. An uncorrupted enrolled custodian signs, for the
+    deployment named in the request, with the production signer `Custody.sign` under its own key
+    (the same key may serve several deployments); a failed signing is no event. Corruption is
     budgeted below the threshold. A submission is the real `Custody.submitRecorded`. -/
 def sepCustodyStep (d : Qsag.Custody.Deployment) (c : SepCustodyState) :
     SepCustodyInput → Option (SepCustodyState × SepCustodyOutput)
   | .approve p dep r =>
     if p < d.numParties ∧ p ∉ c.corruptParties then
-      match Qsag.Custody.sign d.signer (d.keys p) p r with
+      match Qsag.Custody.sign d.signer (d.keys p) dep p r with
       | some sig => some ({ c with issued := ⟨p, dep, r⟩ :: c.issued }, .certificate ⟨p, r, sig⟩)
       | none => none
     else none
@@ -1455,7 +1482,7 @@ def sepCustodyStep (d : Qsag.Custody.Deployment) (c : SepCustodyState) :
     if (Qsag.Custody.submitRecorded d c.shared r cs).2 = true then
       some ({ c with
               shared := (Qsag.Custody.submitRecorded d c.shared r cs).1
-              forgeries := sepForged c r cs ++ c.forgeries }, .accepted)
+              forgeries := sepForged c d.deploymentId r cs ++ c.forgeries }, .accepted)
     else none
 
 def sepCustodyMachine (d : Qsag.Custody.Deployment) :
@@ -1488,19 +1515,21 @@ structure SepDeploymentProfile (d : Qsag.Custody.Deployment) (q : CustodyQuorumP
 /-- What `Qsag.Custody.*` does not provide, as conditions on one run `tr` ending in `c`.
 
 * `noForgery`: no accepted submission contained a verifying certificate of an uncorrupted party
-  for an intent that party never signed. Its probability is not bounded here.
-* `singleDeployment`: custodians signed only for deployment `dep₀`. `Custody.payload` omits the
-  deployment, so a certificate signed for another deployment under the same key verifies here.
+  for an intent that party never signed for this deployment. Its probability is not bounded here.
 * `leavesIncrease`: accepted submissions use strictly increasing leaves. The coordinator
-  `Custody.submit` checks session freshness only; it has no epoch watermark and no WAL. -/
-structure SeparatedCustodyRunAssumptions (dep₀ : Nat)
+  `Custody.submit` checks session freshness only; it has no epoch watermark and no WAL.
+
+There is no single-deployment condition: custodians may sign for any deployment, and the
+approval bytes carry the deployment. -/
+structure SeparatedCustodyRunAssumptions
     (tr : List (SepCustodyInput × SepCustodyOutput)) (c : SepCustodyState) : Prop where
   noForgery : c.forgeries = []
-  singleDeployment : ∀ a ∈ c.issued, a.deploymentId = dep₀
   leavesIncrease : sepLeavesFresh 0 tr
 
-/-- Correspondence between a state of the separated-custody world and an ideal custody state. -/
-structure SepCustodyIdealRel {PK D Sig : Type} (quorum₀ : CustodyQuorumProfile)
+/-- Correspondence between a state of the separated-custody world for deployment `dep₀` and an
+    ideal custody state. The ideal honest permits are the signings for `dep₀`; signings for other
+    deployments have no ideal counterpart. -/
+structure SepCustodyIdealRel {PK D Sig : Type} (dep₀ : Nat) (quorum₀ : CustodyQuorumProfile)
     (c : SepCustodyState) (st : IdealCustodyState PK D Sig) : Prop where
   poisoned : st.ledger.poisoned = false
   spent : st.ledger.spent = c.shared.coordinator.spent
@@ -1508,7 +1537,8 @@ structure SepCustodyIdealRel {PK D Sig : Type} (quorum₀ : CustodyQuorumProfile
   sessions : st.ledger.usedSessions = c.shared.coordinator.consumedSessions
   corrupt : st.corruptParties = c.corruptParties
   honest : st.honestApprovals =
-    c.issued.map (fun a => CustodyApproval.mk a.party a.deploymentId (sepIntent a.intent))
+    (c.issued.filter (fun a => decide (a.deploymentId = dep₀))).map
+      (fun a => CustodyApproval.mk a.party a.deploymentId (sepIntent a.intent))
   authorized : st.ledger.authorized = c.shared.accepted.map (fun a => sepIntent a.intent)
 
 private theorem sep_append_nil {α : Type} : ∀ {l m : List α}, l ++ m = [] → l = [] ∧ m = []
@@ -1530,8 +1560,9 @@ private theorem sep_filter_nil {α : Type} {p : α → Bool} :
         exact hp
       · exact sep_filter_nil h x ht
 
-private theorem sepIssuedBy_spec {issued : List SepIssue} {p : Nat} {r : Qsag.Custody.Intent}
-    (h : sepIssuedBy issued p r = true) : ∃ a ∈ issued, a.party = p ∧ a.intent = r := by
+private theorem sepIssuedBy_spec {issued : List SepIssue} {p dep : Nat}
+    {r : Qsag.Custody.Intent} (h : sepIssuedBy issued p dep r = true) :
+    ∃ a ∈ issued, a.party = p ∧ a.deploymentId = dep ∧ a.intent = r := by
   unfold sepIssuedBy at h
   obtain ⟨a, ha, hd⟩ := List.any_eq_true.mp h
   exact ⟨a, ha, of_decide_eq_true hd⟩
@@ -1558,14 +1589,14 @@ private theorem sepCustodyStep_inv {d : Qsag.Custody.Deployment} {c c1 : SepCust
       (Qsag.Custody.submitRecorded d c.shared r cs).2 = true ∧
       c1 = { c with
              shared := (Qsag.Custody.submitRecorded d c.shared r cs).1
-             forgeries := sepForged c r cs ++ c.forgeries } := by
+             forgeries := sepForged c d.deploymentId r cs ++ c.forgeries } := by
   cases inp with
   | approve p dep r =>
     unfold sepCustodyStep at h
     dsimp only at h ⊢
     by_cases hg : p < d.numParties ∧ p ∉ c.corruptParties
     · rw [cert_if_pos hg] at h
-      cases hs : Qsag.Custody.sign d.signer (d.keys p) p r with
+      cases hs : Qsag.Custody.sign d.signer (d.keys p) dep p r with
       | none =>
         rw [hs] at h
         cases h
@@ -1726,17 +1757,17 @@ private theorem idealCustody_advApprove_all
     custodian's `.approve`, a corruption by `.corrupt`, an accepted submission by the adversary's
     permits for the corrupted signers followed by `.sign`. -/
 private theorem sepCustodyStep_sim
-    {d : Qsag.Custody.Deployment} {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {d : Qsag.Custody.Deployment} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
     (hP : SepDeploymentProfile d quorum₀)
     {c c1 : SepCustodyState} {inp : SepCustodyInput} {out : SepCustodyOutput} {w : Nat}
     {st : IdealCustodyState PK D Sig}
     (hStep : sepCustodyStep d c inp = some (c1, out))
-    (hNF : c1.forgeries = []) (hSD : ∀ a ∈ c1.issued, a.deploymentId = dep₀)
+    (hNF : c1.forgeries = [])
     (hLeaf : sepLeafOk w inp)
-    (hSafe : st.SafeInv S oracleSign dep₀ pk₀ quorum₀)
-    (hRel : SepCustodyIdealRel quorum₀ c st) (hW : st.ledger.nextFreshEpoch ≤ w) :
-    ∃ st1 itr, (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).ValidTrace st itr st1 ∧
-      SepCustodyIdealRel quorum₀ c1 st1 ∧ st1.ledger.nextFreshEpoch ≤ sepNextLeaf w inp := by
+    (hSafe : st.SafeInv S oracleSign d.deploymentId pk₀ quorum₀)
+    (hRel : SepCustodyIdealRel d.deploymentId quorum₀ c st) (hW : st.ledger.nextFreshEpoch ≤ w) :
+    ∃ st1 itr, (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).ValidTrace st itr st1 ∧
+      SepCustodyIdealRel d.deploymentId quorum₀ c1 st1 ∧ st1.ledger.nextFreshEpoch ≤ sepNextLeaf w inp := by
   have h1 := sepCustodyStep_inv hStep
   have hD := hSafe.deployment
   cases inp with
@@ -1744,29 +1775,53 @@ private theorem sepCustodyStep_sim
     dsimp only at h1
     obtain ⟨hg, hc⟩ := h1
     subst hc
-    have hDep : dep = dep₀ := hSD ⟨p, dep, r⟩ List.mem_cons_self
-    have hg' : p < st.ledger.quorum.numParties ∧ p ∉ st.corruptParties ∧
-        dep = st.ledger.deploymentId := by
-      rw [hSafe.profile, hRel.corrupt, ← hP.parties, hD]
-      exact ⟨hg.1, hg.2, hDep⟩
-    have hI : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).step st
-        (.approve p dep (sepIntent r)) =
-        some ({ st with
-                honestApprovals := CustodyApproval.mk p dep (sepIntent r) :: st.honestApprovals },
-              .approvalRecorded) := by
-      change idealCustodyStep S oracleSign st (.approve p dep (sepIntent r)) = _
-      unfold idealCustodyStep
-      dsimp only
-      exact cert_if_pos hg' _ _
-    refine ⟨_, _, .accept hI (.nil _), ?_, hW⟩
-    exact
-      { poisoned := hRel.poisoned
-        spent := hRel.spent
-        capacity := hRel.capacity
-        sessions := hRel.sessions
-        corrupt := hRel.corrupt
-        honest := congrArg (fun l => CustodyApproval.mk p dep (sepIntent r) :: l) hRel.honest
-        authorized := hRel.authorized }
+    by_cases hDep : dep = d.deploymentId
+    · have hg' : p < st.ledger.quorum.numParties ∧ p ∉ st.corruptParties ∧
+          dep = st.ledger.deploymentId := by
+        rw [hSafe.profile, hRel.corrupt, ← hP.parties, hD]
+        exact ⟨hg.1, hg.2, hDep⟩
+      have hI : (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).step st
+          (.approve p dep (sepIntent r)) =
+          some ({ st with
+                  honestApprovals := CustodyApproval.mk p dep (sepIntent r) :: st.honestApprovals },
+                .approvalRecorded) := by
+        change idealCustodyStep S oracleSign st (.approve p dep (sepIntent r)) = _
+        unfold idealCustodyStep
+        dsimp only
+        exact cert_if_pos hg' _ _
+      refine ⟨_, _, .accept hI (.nil _), ?_, hW⟩
+      have hf : (SepIssue.mk p dep r :: c.issued).filter
+            (fun a => decide (a.deploymentId = d.deploymentId)) =
+          SepIssue.mk p dep r ::
+            c.issued.filter (fun a => decide (a.deploymentId = d.deploymentId)) :=
+        List.filter_cons_of_pos (decide_eq_true hDep)
+      exact
+        { poisoned := hRel.poisoned
+          spent := hRel.spent
+          capacity := hRel.capacity
+          sessions := hRel.sessions
+          corrupt := hRel.corrupt
+          honest := by
+            show CustodyApproval.mk p dep (sepIntent r) :: st.honestApprovals = _
+            rw [hf, List.map_cons, hRel.honest]
+          authorized := hRel.authorized }
+    · -- A signing for another deployment is no event of this deployment's ideal functionality.
+      refine ⟨st, [], .nil _, ?_, hW⟩
+      have hf : (SepIssue.mk p dep r :: c.issued).filter
+            (fun a => decide (a.deploymentId = d.deploymentId)) =
+          c.issued.filter (fun a => decide (a.deploymentId = d.deploymentId)) :=
+        List.filter_cons_of_neg (fun hd => hDep (of_decide_eq_true hd))
+      exact
+        { poisoned := hRel.poisoned
+          spent := hRel.spent
+          capacity := hRel.capacity
+          sessions := hRel.sessions
+          corrupt := hRel.corrupt
+          honest := by
+            show st.honestApprovals = _
+            rw [hf]
+            exact hRel.honest
+          authorized := hRel.authorized }
   | corrupt p =>
     dsimp only at h1
     obtain ⟨hg, hc⟩ := h1
@@ -1775,7 +1830,7 @@ private theorem sepCustodyStep_sim
         st.corruptParties.length + 1 < st.ledger.quorum.threshold := by
       rw [hSafe.profile, hRel.corrupt, ← hP.parties, ← hP.threshold]
       exact hg
-    have hI : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).step st (.corrupt p) =
+    have hI : (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).step st (.corrupt p) =
         some ({ st with corruptParties := p :: st.corruptParties },
               .corrupted (custodyRevealed st.honestApprovals p)) := by
       change idealCustodyStep S oracleSign st (.corrupt p) = _
@@ -1797,8 +1852,8 @@ private theorem sepCustodyStep_sim
     subst hc
     obtain ⟨hAcc, hCap, hEq⟩ := Qsag.Custody.submitRecorded_accepted d c.shared r cs hv
     obtain ⟨hSess, _, hTle, hNd, hRange, _⟩ :=
-      (Qsag.Custody.acceptQuorum_spec _ _ _ _ _ _ _).mp hAcc
-    have hNo : sepForged c r cs = [] := (sep_append_nil hNF).1
+      (Qsag.Custody.acceptQuorum_spec _ _ _ _ _ _ _ _).mp hAcc
+    have hNo : sepForged c d.deploymentId r cs = [] := (sep_append_nil hNF).1
     unfold sepForged at hNo
     have hLeaf' : w ≤ r.leaf := hLeaf
     obtain ⟨st2, itrA, hTA, hL2, hC2, hH2, _, hAdv⟩ :=
@@ -1818,20 +1873,20 @@ private theorem sepCustodyStep_sim
         have hpc' : x.party ∉ c.corruptParties := by
           rw [hxp, ← hRel.corrupt]
           exact hpc
-        have hIss : sepIssuedBy c.issued x.party r = true := by
-          cases hI : sepIssuedBy c.issued x.party r with
+        have hIss : sepIssuedBy c.issued x.party d.deploymentId r = true := by
+          cases hI : sepIssuedBy c.issued x.party d.deploymentId r with
           | true => rfl
           | false =>
             have hf : (decide (x.party ∉ c.corruptParties) &&
-                !sepIssuedBy c.issued x.party r) = false := sep_filter_nil hNo x hx
+                !sepIssuedBy c.issued x.party d.deploymentId r) = false := sep_filter_nil hNo x hx
             rw [hI, decide_eq_true hpc'] at hf
             exact absurd hf (by decide)
-        obtain ⟨a, ha, hap, hai⟩ := sepIssuedBy_spec hIss
+        obtain ⟨a, ha, hap, had, hai⟩ := sepIssuedBy_spec hIss
         have hm : CustodyApproval.mk a.party a.deploymentId (sepIntent a.intent) ∈
-            c.issued.map (fun a =>
+            (c.issued.filter (fun a => decide (a.deploymentId = d.deploymentId))).map (fun a =>
               CustodyApproval.mk a.party a.deploymentId (sepIntent a.intent)) :=
-          List.mem_map_of_mem ha
-        rw [hap, hai, hSD a ha, hxp] at hm
+          List.mem_map_of_mem (List.mem_filter.mpr ⟨ha, decide_eq_true had⟩)
+        rw [hap, hai, had, hxp] at hm
         rw [hH2, hRel.honest]
         exact hm
     have hQ : st.ledger.quorum.threshold ≤
@@ -1845,14 +1900,14 @@ private theorem sepCustodyStep_sim
       rw [ht]
       exact Nat.le_trans hTle hLen
     have hLS := sep_ledgerSign_fresh (S := S) (oracleSign := oracleSign) (L := st.ledger)
-      (dep := dep₀) (i := sepIntent r) hRel.poisoned hD.symm
+      (dep := d.deploymentId) (i := sepIntent r) hRel.poisoned hD.symm
       (sep_findReleased_none hSafe.walFresh (Nat.le_trans hW hLeaf'))
       (Nat.le_trans hW hLeaf')
       (by rw [hRel.sessions]; exact hSess)
       hQ
       (by rw [hRel.spent, hSafe.profile, ← hRel.capacity]; exact hCap)
-    have hI : (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).step st2
-        (.sign dep₀ (sepIntent r) false) =
+    have hI : (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).step st2
+        (.sign d.deploymentId (sepIntent r) false) =
         some ({ st2 with
                 ledger :=
                   { st.ledger.authorize (sepIntent r) with
@@ -1863,7 +1918,7 @@ private theorem sepCustodyStep_sim
               .released (oracleSign (S.digest st.ledger.deploymentId (sepIntent r)))) := by
       change Option.map _ (custodyLedgerSign S oracleSign st2.ledger
         (custodyApprovers st2.ledger.quorum.numParties st2.honestApprovals st2.corruptApprovals
-          st2.ledger.deploymentId (sepIntent r)).length dep₀ (sepIntent r) false) = _
+          st2.ledger.deploymentId (sepIntent r)).length d.deploymentId (sepIntent r) false) = _
       rw [hL2, hLS]
       rfl
     refine ⟨_, _, sep_validTrace_append hTA (.accept hI (.nil _)), ?_, Nat.le_refl _⟩
@@ -1884,16 +1939,16 @@ private theorem sepCustodyStep_sim
             hEq).symm }
 
 private theorem sepCustody_validTrace_sim
-    {d : Qsag.Custody.Deployment} {dep₀ : Nat} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
+    {d : Qsag.Custody.Deployment} {pk₀ : PK} {quorum₀ : CustodyQuorumProfile}
     (hP : SepDeploymentProfile d quorum₀)
     {c c' : SepCustodyState} {tr : List (SepCustodyInput × SepCustodyOutput)}
     (hTr : (sepCustodyMachine d).ValidTrace c tr c')
-    (hNF : c'.forgeries = []) (hSD : ∀ a ∈ c'.issued, a.deploymentId = dep₀) :
+    (hNF : c'.forgeries = []) :
     ∀ (w : Nat) (st : IdealCustodyState PK D Sig), sepLeavesFresh w tr →
-      st.SafeInv S oracleSign dep₀ pk₀ quorum₀ → SepCustodyIdealRel quorum₀ c st →
+      st.SafeInv S oracleSign d.deploymentId pk₀ quorum₀ → SepCustodyIdealRel d.deploymentId quorum₀ c st →
       st.ledger.nextFreshEpoch ≤ w →
-      ∃ st' itr, (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).ValidTrace st itr st' ∧
-        SepCustodyIdealRel quorum₀ c' st' := by
+      ∃ st' itr, (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).ValidTrace st itr st' ∧
+        SepCustodyIdealRel d.deploymentId quorum₀ c' st' := by
   induction hTr with
   | nil _ =>
     intro _ st _ _ hRel _
@@ -1904,11 +1959,11 @@ private theorem sepCustody_validTrace_sim
     have hMono := sepCustody_validTrace_mono hRest
     have hLv' : sepLeafOk w inp ∧ sepLeavesFresh (sepNextLeaf w inp) _ := hLv
     obtain ⟨st1, itr1, hT1, hRel1, hW1⟩ := sepCustodyStep_sim hP hStep' (hMono.1 hNF)
-      (fun a ha => hSD a (hMono.2 a ha)) hLv'.1 hSafe hRel hW
-    obtain ⟨st', itr, hT, hRel'⟩ := ih hNF hSD _ st1 hLv'.2
+      hLv'.1 hSafe hRel hW
+    obtain ⟨st', itr, hT, hRel'⟩ := ih hNF _ st1 hLv'.2
       (idealCustody_validTrace_safeInv hSafe hT1) hRel1 hW1
     exact ⟨st', itr1 ++ itr, sep_validTrace_append hT1 hT, hRel'⟩
-  | reject _ _ _ ih => exact ih hNF hSD
+  | reject _ _ _ ih => exact ih hNF
 
 /-- **The real separated-custody coordinator against the ideal custody functionality.** Take any
     run of the separated-custody world for deployment `d` from its initial state: custodians sign
@@ -1920,31 +1975,32 @@ private theorem sepCustody_validTrace_sim
     accepted intents as the authorized intents.
 
     Proved here: the quorum step. An accepted `submitRecorded` has `threshold` distinct enrolled
-    signers (`Custody.acceptQuorum_spec`), each a corrupted party or, by `noForgery` and
-    `singleDeployment`, a custodian with a recorded permit, so the ideal `.sign` is accepted.
+    signers (`Custody.acceptQuorum_spec`), each a corrupted party or, by `noForgery`, a custodian
+    that signed this intent for this deployment and so holds a recorded permit, so the ideal
+    `.sign` is accepted. A custodian's signing for another deployment is matched by no ideal step.
 
     Assumed (fields of `SeparatedCustodyRunAssumptions`, none provable from `Qsag.Custody.*`):
-    `noForgery`, `singleDeployment`, `leavesIncrease`. Not covered: the ideal machine's signature
+    `noForgery`, `leavesIncrease`. Not covered: the ideal machine's signature
     output and WAL replay (the coordinator outputs a verdict only, so `S` and `oracleSign` are
     arbitrary), and any bound on the probability of the forgery event. No run with an accepted
     submission is exhibited in the tree; that needs an evaluated production signature. -/
 theorem separatedCustody_refines_idealCustody_of
     (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
-    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
+    (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
     (hProfile : SepDeploymentProfile d quorum₀)
     {c₀ c : SepCustodyState} {tr : List (SepCustodyInput × SepCustodyOutput)}
     (hInit : (sepCustodyMachine d).Init c₀)
     (hTr : (sepCustodyMachine d).ValidTrace c₀ tr c)
-    (hRun : SeparatedCustodyRunAssumptions dep₀ tr c) :
+    (hRun : SeparatedCustodyRunAssumptions tr c) :
     ∃ st : IdealCustodyState PK D Sig,
-      (idealCustodyMachine S oracleSign dep₀ pk₀ quorum₀).Reachable st ∧
-      SepCustodyIdealRel quorum₀ c st := by
+      (idealCustodyMachine S oracleSign d.deploymentId pk₀ quorum₀).Reachable st ∧
+      SepCustodyIdealRel d.deploymentId quorum₀ c st := by
   have h0 : c₀ = ⟨⟨⟨[], 0, d.capacity⟩, []⟩, [], [], []⟩ := hInit
   subst h0
   obtain ⟨st', itr, hT, hRel⟩ := sepCustody_validTrace_sim (S := S) (oracleSign := oracleSign)
-    (pk₀ := pk₀) hProfile hTr hRun.noForgery hRun.singleDeployment 0
-    (IdealCustodyState.init dep₀ pk₀ quorum₀) hRun.leavesIncrease
-    (IdealCustodyState.init_safeInv (PK := PK) S oracleSign dep₀ pk₀ quorum₀)
+    (pk₀ := pk₀) hProfile hTr hRun.noForgery 0
+    (IdealCustodyState.init d.deploymentId pk₀ quorum₀) hRun.leavesIncrease
+    (IdealCustodyState.init_safeInv (PK := PK) S oracleSign d.deploymentId pk₀ quorum₀)
     { poisoned := rfl
       spent := rfl
       capacity := hProfile.capacity
@@ -1961,16 +2017,16 @@ end Sim
     deployment**, on runs satisfying `SeparatedCustodyRunAssumptions`. Obtained through the ideal
     functionality's honest-approval theorem. -/
 theorem separatedCustody_accepted_honestly_approved
-    (d : Qsag.Custody.Deployment) (dep₀ : Nat) (quorum₀ : CustodyQuorumProfile)
+    (d : Qsag.Custody.Deployment) (quorum₀ : CustodyQuorumProfile)
     (hProfile : SepDeploymentProfile d quorum₀)
     {c₀ c : SepCustodyState} {tr : List (SepCustodyInput × SepCustodyOutput)}
     (hInit : (sepCustodyMachine d).Init c₀)
     (hTr : (sepCustodyMachine d).ValidTrace c₀ tr c)
-    (hRun : SeparatedCustodyRunAssumptions dep₀ tr c) :
+    (hRun : SeparatedCustodyRunAssumptions tr c) :
     ∀ a ∈ c.shared.accepted, ∃ b ∈ c.issued,
-      b.party < d.numParties ∧ b.deploymentId = dep₀ ∧ b.intent = a.intent := by
+      b.party < d.numParties ∧ b.deploymentId = d.deploymentId ∧ b.intent = a.intent := by
   obtain ⟨st, hR, hRel⟩ := separatedCustody_refines_idealCustody_of d
-    CustodyDigestScheme.transparent id dep₀ () quorum₀ hProfile hInit hTr hRun
+    CustodyDigestScheme.transparent id () quorum₀ hProfile hInit hTr hRun
   obtain ⟨_, _, hAuth, _⟩ := idealCustody_reachable_spend_accounting hR
   intro a ha
   have hMem : sepIntent a.intent ∈ st.ledger.authorized := by
@@ -1978,17 +2034,683 @@ theorem separatedCustody_accepted_honestly_approved
     exact List.mem_map_of_mem (f := fun a : Qsag.Custody.AcceptedSubmission => sepIntent a.intent) ha
   obtain ⟨p, hp, hm⟩ := hAuth _ hMem
   rw [hRel.honest] at hm
-  obtain ⟨b, hb, hbe⟩ := List.mem_map.mp hm
+  obtain ⟨b, hbf, hbe⟩ := List.mem_map.mp hm
+  have hb : b ∈ c.issued := (List.mem_filter.mp hbf).1
   have h1 : b.party = p := congrArg CustodyApproval.party hbe
-  have h2 : b.deploymentId = dep₀ := congrArg CustodyApproval.deploymentId hbe
+  have h2 : b.deploymentId = d.deploymentId := congrArg CustodyApproval.deploymentId hbe
   have h3 : sepIntent b.intent = sepIntent a.intent := congrArg CustodyApproval.intent hbe
   refine ⟨b, hb, ?_, h2, sepIntent_injective h3⟩
   rw [h1, hProfile.parties]
   exact hp
 
+/-- **The forgery event is a signature on bytes its custodian never signed, in any deployment.**
+    A certificate counted by `sepForged` in an accepted submission verifies under the uncorrupted
+    custodian's own key on `Custody.payload d.deploymentId party r`, and every signing that
+    custodian performed, for whatever deployment and intent, was on different bytes. -/
+theorem sepForged_fresh_verifying_signature (d : Qsag.Custody.Deployment) (c : SepCustodyState)
+    (r : Qsag.Custody.Intent) (cs : List Qsag.Custody.Certificate)
+    (hAcc : (Qsag.Custody.submitRecorded d c.shared r cs).2 = true)
+    (x : Qsag.Custody.Certificate) (hx : x ∈ sepForged c d.deploymentId r cs) :
+    x.party ∉ c.corruptParties ∧
+    Qsag.Custody.verify d.signer (Qsag.Custody.publicKeys d x.party) d.deploymentId x.party r
+      x.signature = true ∧
+    ∀ a ∈ c.issued, a.party = x.party →
+      ¬ (Qsag.Custody.payload a.deploymentId a.party a.intent =
+          Qsag.Custody.payload d.deploymentId x.party r) := by
+  unfold sepForged at hx
+  obtain ⟨hMem, hCond⟩ := List.mem_filter.mp hx
+  obtain ⟨hHon, hNotIssued⟩ := Bool.and_eq_true_iff.mp hCond
+  refine ⟨of_decide_eq_true hHon,
+    (Qsag.Custody.submitRecorded_accepted_deployment d c.shared r cs hAcc x hMem).2, ?_⟩
+  intro a ha _ hPay
+  obtain ⟨hDep, hParty, hIntent⟩ := Qsag.Custody.payload_injective hPay
+  have hIss : sepIssuedBy c.issued x.party d.deploymentId r = true := by
+    unfold sepIssuedBy
+    exact List.any_eq_true.mpr ⟨a, ha, decide_eq_true ⟨hParty, hDep, hIntent⟩⟩
+  rw [hIss] at hNotIssued
+  exact absurd hNotIssued (by decide)
+
 end SeparatedCustodyIdeal
 
+/-! ## 9. Distributed `(t, n)` Custody and the Shamir + `BeltLatch` Validator Network -/
+
+/-- **Distributed threshold custody refines the ideal custody functionality** for its own
+    `deploymentId`. The concrete machine is `DistCustody.distMachine`: Shamir custodians with
+    durable latches and volatile coupons, an adversarially scheduled network buffer, adaptive
+    corruption below the threshold, and a coordinator that runs `Spec.custodyLedgerSign` with the
+    Lagrange reconstruction of the buffered verified shares. `approve`, `inject` (for this
+    deployment), `corrupt` and `execute` implement the four ideal ports. -/
+def distributedCustody_refines_idealCustody {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    (dep : Qsag.DistCustody.Deployment F C PK D Sig) (hWf : dep.WellFormed) :
+    Qsag.Spec.DataRefines (Qsag.DistCustody.distMachine dep)
+      (Qsag.Spec.idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum)
+      (Qsag.DistCustody.visIn dep) Qsag.DistCustody.visOut :=
+  Qsag.DistCustody.distCustody_refines_ideal dep hWf
+
+/-- **Trace inclusion, reachable-state safety, completeness and share secrecy of distributed
+    custody.**
+    1. Every execution, under any interleaving of approvals, corruptions, injected messages, drops
+       and crashes, projects to an execution of `Spec.idealCustodyMachine`.
+    2. In every reachable state fewer than `threshold` custodians are corrupted, the spend is
+       within the cap, and each WAL record carries the dealt key's signature on
+       `digest deploymentId intent` and lies in the durable log of an enrolled custodian whose
+       latch has advanced past it; no custodian has latched two intents at one epoch.
+    3. Any duplicate-free list of at least `threshold` enrolled custodians reconstructs the dealt
+       key from the dealt shares.
+    4. The shares of fewer than `threshold` enrolled custodians are unchanged under a bijection
+       of the dealer polynomials that shifts the key by any `w`. -/
+theorem distributedCustody_trace_inclusion_and_safety {F C PK D Sig : Type}
+    [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
+    (dep : Qsag.DistCustody.Deployment F C PK D Sig) (hWf : dep.WellFormed) :
+    (∀ tr : List (Qsag.DistCustody.Turn F × Qsag.DistCustody.Event F Sig),
+      (Qsag.DistCustody.distMachine dep).AdmitsTrace tr →
+      (Qsag.Spec.idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).AdmitsTrace
+        (Qsag.Spec.projectTrace (Qsag.DistCustody.visIn dep) Qsag.DistCustody.visOut tr)) ∧
+    (∀ st : Qsag.DistCustody.State F PK D Sig, (Qsag.DistCustody.distMachine dep).Reachable st →
+      st.corrupt.length < dep.quorum.threshold ∧
+      st.ledger.spent ≤ dep.quorum.spendCap ∧
+      (∀ r : Qsag.Spec.CustodyRelease D Sig, r ∈ st.ledger.releasedHistory →
+        r.sig = dep.signWith dep.secret (dep.digests.digest dep.deploymentId r.intent) ∧
+        ∃ p : Nat, p < dep.quorum.numParties ∧ r.intent ∈ (st.nodes p).latched ∧
+          r.intent.epoch < (st.nodes p).latch) ∧
+      (∀ p : Nat, ((st.nodes p).latched.map Qsag.Spec.CustodyIntent.epoch).Nodup)) ∧
+    (∀ approvers : List Nat, approvers.Nodup →
+      (∀ p, p ∈ approvers → p < dep.quorum.numParties) →
+      dep.quorum.threshold ≤ approvers.length →
+      Qsag.DistCustody.reconstruct (approvers.map dep.point) (approvers.map dep.trueShare) =
+        dep.secret) ∧
+    (∀ (corrupt : List Nat) (w : F), (∀ p, p ∈ corrupt → p < dep.quorum.numParties) →
+      corrupt.length < dep.quorum.threshold →
+      ∃ e : Qsag.SimpleEquiv (Qsag.ShamirPadPoly F dep.quorum.threshold)
+          (Qsag.ShamirPadPoly F dep.quorum.threshold),
+        ∀ P : Qsag.ShamirPadPoly F dep.quorum.threshold,
+          Qsag.RoundPoly.evalCoeffs (e.toFun P).1 Qsag.CommRingOps.zero =
+            Qsag.CommRingOps.add w (Qsag.RoundPoly.evalCoeffs P.1 Qsag.CommRingOps.zero) ∧
+          ∀ p : Nat, p ∈ corrupt →
+            Qsag.RoundPoly.evalCoeffs (e.toFun P).1 (dep.point p) =
+              Qsag.RoundPoly.evalCoeffs P.1 (dep.point p)) := by
+  refine ⟨fun _ h => Qsag.DistCustody.distCustody_trace_inclusion dep hWf h, ?_,
+    fun approvers hNd hEnr hThr =>
+      Qsag.DistCustody.reconstruct_dealt_shares dep hWf approvers hNd hEnr hThr,
+    fun corrupt w hEnr hFew =>
+      Qsag.DistCustody.corrupt_shares_independent_of_secret dep hWf corrupt hEnr hFew w⟩
+  intro st hReach
+  obtain ⟨hCor, hSpent, hWal⟩ := Qsag.DistCustody.distCustody_reachable_safe dep hWf hReach
+  exact ⟨hCor, hSpent, hWal,
+    fun p => Qsag.DistCustody.distCustody_latch_unique dep hWf hReach p⟩
+
+/-- **A Shamir custodian refines the complete-mediation vault machine.** Concrete state is the
+    custodian's `BeltLatchNodeState` and `Custody.Vault`; both machines start in any
+    `Custody.Safe` vault, and the alphabet covers certified mints (for `deploymentId`), one-time
+    share releases, forgets and crashes. -/
+def shamirCustodian_refines_mediationVault {n L d : Nat}
+    (H : List UInt8 → Qsag.Digest256)
+    (MAC : Qsag.Digest256 → List UInt8 → Qsag.Digest256)
+    (macKeys : Fin n → Fin n → Qsag.Digest256)
+    (masterSeed : Qsag.Digest256)
+    (polyTape : UInt64 → Qsag.PreSteppedDigest256ShamirTape d L)
+    (evalPt : Qsag.TowerElem 7) (party : Fin n)
+    (q deploymentId : Nat) (policy : Qsag.Custody.RoundPolicy) (cap : Nat) :
+    Qsag.shamirCustodianMachine H MAC macKeys masterSeed polyTape evalPt party q deploymentId
+        policy cap ⊑
+      Qsag.abstractMediationVaultMachine H MAC macKeys masterSeed polyTape evalPt party q
+        deploymentId policy cap :=
+  Qsag.shamirCustodianRefines H MAC macKeys masterSeed polyTape evalPt party q deploymentId
+    policy cap
+
+/-- **Multi-turn Shamir custody network: spend caps, leaf uniqueness, epoch non-equivocation and
+    deployment-bound vaults.** Over any open-world schedule of belt turns, certified mints, share
+    releases, combines, forgets and crashes: every vault stays within its cap and keeps the
+    identity of its custodian in this deployment, no honest custodian releases shares for two
+    intents at one leaf, and two threshold subsets that obtain releases at one leaf agree on the
+    intent unless a pairwise echo MAC is forged or `dep.H` collides. -/
+theorem shamir_custody_network_non_equivocation {n L d : Nat}
+    (dep : Qsag.ShamirValidatorDeployment n L d)
+    (hCorrupt : Qsag.maskCard dep.Corrupt ≤ dep.f)
+    (hFltT : dep.f < dep.t)
+    (hLatchQuorum : 2 * dep.q > n + dep.f)
+    (trace : List (Qsag.ShamirCustodyTurn n L)) :
+    let st := Qsag.runShamirCustodyTrace dep (Qsag.ShamirCustodyNetworkState.init dep) trace
+    (∀ p : Fin n, (st.vaults p).durable.spent ≤ dep.caps p) ∧
+    (∀ p : Fin n, (st.vaults p).identity = dep.vaultIdentity p) ∧
+    (∀ op₁ ∈ st.honestShareReleases, ∀ op₂ ∈ st.honestShareReleases,
+      op₁.party = op₂.party → op₁.intent.leaf = op₂.intent.leaf → op₁.intent = op₂.intent) ∧
+    (∀ (S₁ S₂ : Qsag.CustodiansMask n) (r₁ r₂ : Qsag.Custody.Intent),
+      dep.t ≤ Qsag.maskCard S₁ →
+      dep.t ≤ Qsag.maskCard S₂ →
+      Qsag.HonestQuorumReleasedIntent dep.Corrupt st S₁ r₁ →
+      Qsag.HonestQuorumReleasedIntent dep.Corrupt st S₂ r₂ →
+      r₁.leaf = r₂.leaf →
+      r₁ = r₂ ∨
+        Nonempty (Qsag.PairwiseEchoMacForgery dep.MAC dep.macKeys dep.Corrupt
+          st.beltNet.emittedHonestEchoes) ∨
+        Nonempty (Qsag.HashCollision256 dep.H)) := by
+  intro st
+  obtain ⟨h1, h2, h3⟩ :=
+    Qsag.shamir_custody_epoch_non_equivocation dep hCorrupt hFltT hLatchQuorum trace
+  exact ⟨h1, fun p => Qsag.runShamirCustodyTrace_identity dep trace p, h2, h3⟩
+
+
+/-! ## 10. Roster: library theorems restated verbatim at the top level
+
+Each theorem below restates a theorem of the imported modules with its full type and is
+proved by citing it. The block between the markers is the comparator roster: the statements a
+challenge-file generator copies out to be re-proved against the library. -/
+
+/-- A well-formed Shamir deployment reconstructs from every distinct quorum of threshold size. -/
+theorem shamir_wellformed_lagrange_reconstructs {n L d : Nat}
+    {dep : Qsag.ShamirValidatorDeployment n L d} (hWf : dep.WellFormed)
+    (parties : List (Fin n)) (hNd : parties.Nodup) (hThr : dep.t ≤ parties.length)
+    (c₀ : Qsag.TowerElem 7) (tail : Qsag.ShamirPadPoly (Qsag.TowerElem 7) d) :
+    Qsag.ringDot (dep.lagrangeWeights parties)
+      ((parties.map dep.evalPts).map (fun x => Qsag.RoundPoly.evalCoeffs (c₀ :: tail.1) x)) = c₀ :=
+  Qsag.wellFormed_lagrange_reconstructs hWf parties hNd hThr c₀ tail
+
+section Roster
+open Qsag
+
+open CommRingOps
+open Qsag.RustDurability
+
+-- BEGIN COMPARATOR ROSTER
+
+/-! ### Threshold approval, BDOZ MAC-before-open and key-recovery alternative, KOS correlation check -/
+
+open CommRingOps in
+theorem thresholdApproval_requires_honest_party {PK Msg : Type}
+    (st : IdealTsigState PK Msg) (honestApprovers : List Nat)
+    (_hDishonestBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hValid : validThresholdApproval st honestApprovers = true) :
+    ∃ h ∈ honestApprovers, h < st.numParties ∧ h ∉ st.corruptParties :=
+  _root_.Qsag.thresholdApproval_requires_honest_party st honestApprovers _hDishonestBound hValid
+
+open CommRingOps in
+theorem unilateral_empty_quorum_rejected {PK Msg : Type}
+    (st : IdealTsigState PK Msg)
+    (hThreshold : 0 < st.threshold ∧ st.threshold ≤ st.numParties)
+    (hCorruptNd : st.corruptParties.Nodup)
+    (hCorruptRange : ∀ c ∈ st.corruptParties, c < st.numParties)
+    (hCorruptFull : st.corruptParties.length = st.threshold) :
+    let mutantAllowFullCorruptQuorum (s : IdealTsigState PK Msg) (hon : List Nat) : Bool :=
+      decide (0 < s.threshold ∧ s.threshold ≤ s.numParties) &&
+      decide s.corruptParties.Nodup &&
+      s.corruptParties.all (fun c => decide (c < s.numParties)) &&
+      decide hon.Nodup &&
+      decide (s.threshold ≤ s.corruptParties.length + hon.length)
+    validThresholdApproval st [] = false ∧
+    mutantAllowFullCorruptQuorum st [] = true :=
+  _root_.Qsag.unilateral_empty_quorum_rejected st hThreshold hCorruptNd hCorruptRange hCorruptFull
+
+open CommRingOps in
+theorem duplicate_corrupt_parties_rejected {PK Msg : Type}
+    (st : IdealTsigState PK Msg) (honestApprovers : List Nat)
+    (hDup : ¬ st.corruptParties.Nodup) :
+    validThresholdApproval st honestApprovers = false :=
+  _root_.Qsag.duplicate_corrupt_parties_rejected st honestApprovers hDup
+
+open CommRingOps in
+theorem out_of_range_corrupt_parties_rejected {PK Msg : Type}
+    (st : IdealTsigState PK Msg) (honestApprovers : List Nat)
+    (c : Nat) (hc : c ∈ st.corruptParties) (hRange : ¬ c < st.numParties) :
+    validThresholdApproval st honestApprovers = false :=
+  _root_.Qsag.out_of_range_corrupt_parties_rejected st honestApprovers c hc hRange
+
+open CommRingOps in
+theorem ratLe_zero_den_false (a b c : Nat) : ¬ ratLe (a, 0) (b, c) ∧ ¬ ratLe (a, c) (b, 0) :=
+  _root_.Qsag.ratLe_zero_den_false a b c
+
+theorem bdoz_pair_key_recovery
+    (vk : BdozVerifierKeys) (opHon opAdv : BdozPairOpening)
+    (hPid : opHon.partyId = opAdv.partyId)
+    (hNe : opHon.shareX ≠ opAdv.shareX)
+    (hVerH : verifyBdozPairMac vk opHon = true)
+    (hVerA : verifyBdozPairMac vk opAdv = true) :
+    let dxInv := towerInv 7 (towerAdd 7 opAdv.shareX opHon.shareX)
+    towerMul 7 (towerAdd 7 opAdv.mac0 opHon.mac0) dxInv = vk.alpha0 ∧
+    towerMul 7 (towerAdd 7 opAdv.mac1 opHon.mac1) dxInv = vk.alpha1 :=
+  _root_.Qsag.bdoz_pair_key_recovery vk opHon opAdv hPid hNe hVerH hVerA
+
+theorem bdoz_2lane_mac_soundness
+    (L : Nat) (deltas : List Tower128) (S : List Tower128)
+    (hNodup : S.Nodup) (hLen : deltas.length ≤ L) (hDom : L + 1 ≤ S.length)
+    (hNonzero : ∃ d ∈ deltas, d ≠ towerZero 7) :
+    (S.filter (fun r => decide (batchDeviationPoly deltas r = towerZero 7))).length ≤ L ∧
+    (∀ (vk : BdozVerifierKeys) (opHon opAdv : BdozPairOpening),
+      opHon.partyId = opAdv.partyId →
+      opHon.shareX ≠ opAdv.shareX →
+      verifyBdozPairMac vk opHon = true →
+      verifyBdozPairMac vk opAdv = true →
+      let dxInv := towerInv 7 (towerAdd 7 opAdv.shareX opHon.shareX)
+      towerMul 7 (towerAdd 7 opAdv.mac0 opHon.mac0) dxInv = vk.alpha0 ∧
+      towerMul 7 (towerAdd 7 opAdv.mac1 opHon.mac1) dxInv = vk.alpha1) :=
+  _root_.Qsag.bdoz_2lane_mac_soundness L deltas S hNodup hLen hDom hNonzero
+
+theorem mac_before_open_released_origin
+    (vk : BdozVerifierKeys) (turns : List CutCandidateOpening) (initialEpoch : Nat) :
+    ∀ pair ∈ (runMacBeforeOpenTrace vk ⟨initialEpoch, [], 0, false⟩ turns).releasedHistory,
+      ∃ t ∈ turns, pair = (t.epoch, t.candidateBytes) ∧
+        verifyBdozPairMac vk t.opening = true :=
+  _root_.Qsag.mac_before_open_released_origin vk turns initialEpoch
+
+theorem mac_before_open_blocks_faulted_cut_leakage
+    (vk : BdozVerifierKeys) (turns : List CutCandidateOpening) (initialEpoch : Nat)
+    (honestOpening : CutCandidateOpening → BdozPairOpening)
+    (hHonest : ∀ t ∈ turns, verifyBdozPairMac vk (honestOpening t) = true)
+    (hParty : ∀ t ∈ turns, (honestOpening t).partyId = t.opening.partyId)
+    (hBind : ∀ t ∈ turns, t.candidateBytes ≠ t.trueCutBytes →
+      (honestOpening t).shareX ≠ t.opening.shareX) :
+    ∀ pair ∈ (runMacBeforeOpenTrace vk ⟨initialEpoch, [], 0, false⟩ turns).releasedHistory,
+      ∃ t ∈ turns, pair = (t.epoch, t.candidateBytes) ∧
+        verifyBdozPairMac vk t.opening = true ∧
+        (t.candidateBytes = t.trueCutBytes ∨
+          let dxInv := towerInv 7 (towerAdd 7 t.opening.shareX (honestOpening t).shareX)
+          towerMul 7 (towerAdd 7 t.opening.mac0 (honestOpening t).mac0) dxInv = vk.alpha0 ∧
+          towerMul 7 (towerAdd 7 t.opening.mac1 (honestOpening t).mac1) dxInv = vk.alpha1) :=
+  _root_.Qsag.mac_before_open_blocks_faulted_cut_leakage vk turns initialEpoch honestOpening hHonest hParty hBind
+
+theorem kos_interactive_check_sound (k : Nat) (deltaU secretDelta : TowerBitVec k)
+    (chi : TowerElem k) (hChi : chi ≠ towerZero k) :
+    kosColumnResidual k deltaU secretDelta (towerZero k) chi = towerZero k ↔
+      unpackTower k (deltaU &&& secretDelta) = towerZero k :=
+  _root_.Qsag.kos_interactive_check_sound k deltaU secretDelta chi hChi
+
+theorem kos_single_bit_does_not_pin_key :
+    (0#128 : TowerBitVec 7) ≠ 2#128 ∧
+    kosColumnResidual 7 1#128 0#128 (towerZero 7) (towerOne 7) = towerZero 7 ∧
+    kosColumnResidual 7 1#128 2#128 (towerZero 7) (towerOne 7) = towerZero 7 :=
+  _root_.Qsag.kos_single_bit_does_not_pin_key
+
+/-! ### Concrete UC simulator over 128-bit BinaryTower -/
+
+open CommRingOps in
+theorem shamir_share_pad_rebalance {R : Type} [LawfulCommRing R]
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (d : Nat) (corruptPts : List R) (w : R)
+    (hCard : corruptPts.length + 1 ≤ d + 1)
+    (hNonZero : ∀ c ∈ corruptPts, c ≠ zero)
+    (A : ShamirPadPoly R d) (P : ShamirPadPoly R (d + 1)) :
+    let A' := (shamirShare_rebalanceEquiv inv d corruptPts w hCard).toFun A
+    let P' := (shamir_rebalanceEquiv inv (d + 1) corruptPts w hCard).toFun P
+    (∀ xc ∈ corruptPts,
+      RoundPoly.evalCoeffs (zero :: A'.1) xc = RoundPoly.evalCoeffs (w :: A.1) xc) ∧
+    (∀ xc ∈ corruptPts, RoundPoly.evalCoeffs P'.1 xc = RoundPoly.evalCoeffs P.1 xc) ∧
+    (∀ x : R,
+      add (RoundPoly.evalCoeffs (zero :: A'.1) x) (RoundPoly.evalCoeffs P'.1 x) =
+        add (RoundPoly.evalCoeffs (w :: A.1) x) (RoundPoly.evalCoeffs P.1 x)) :=
+  _root_.Qsag.shamir_share_pad_rebalance inv hInv d corruptPts w hCard hNonZero A P
+
+theorem bdoz_tampered_opening_accepting_keys_le_one
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (hon : Nat → Tower128 × Tower128 × Tower128) (op : BdozPairOpening)
+    (hNe : op.shareX ≠ (hon op.partyId).1) :
+    qsum CK (fun i =>
+      if verifyBdozPairMac (bdozKeyFromView (keyDec i) hon) op then 1 else 0) ≤ 1 :=
+  _root_.Qsag.bdoz_tampered_opening_accepting_keys_le_one CK keyDec hInj hon op hNe
+
+theorem bdoz_tag_tamper_rejected (vk : BdozVerifierKeys) (op : BdozPairOpening)
+    (hAcc : verifyBdozPairMac vk op = true) (delta : Tower128) (hDelta : delta ≠ towerZero 7) :
+    verifyBdozPairMac vk { op with mac0 := towerAdd 7 op.mac0 delta } = false :=
+  _root_.Qsag.bdoz_tag_tamper_rejected vk op hAcc delta hDelta
+
+open CommRingOps in
+theorem ucSimulatorTsig_hop1_perfect {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (pk : PK) (corrupt honest : List (Nat × R))
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (macKey : Tower128 × Tower128) (D : Option (TsigAdvView R pp.k) → Bool) :
+    qsum Ct (fun i =>
+      if D (some (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m)
+        (padEnum.toFun i))) then 1 else 0) =
+    qsum Ct (fun i =>
+      if D (ucSimulatorTsig pp
+        ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
+        ⟨padEnum.toFun i, macKey⟩) then 1 else 0) :=
+  _root_.Qsag.ucSimulatorTsig_hop1_perfect S pp wireVals outVal hCircuit inv hInv pk corrupt honest hCard hNonZero corruptVk corruptTags sk m Ct padEnum macKey D
+
+open CommRingOps in
+theorem tsig_real_eq_ideal_or_forgery {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) :
+    tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ =
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv
+        ⟨(tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m)).toFun τ, κ⟩ ∨
+    ∃ op ∈ Adv.openings
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ),
+      BdozMacForgeryWitness
+        (tsigVerifierKey κ corruptTags
+          (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ))
+        (bdozViewOpening (fun s =>
+          (tsigShareAt (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) s,
+            corruptTags s)) op.partyId) op ∧
+      κ = bdozKeyGuess (fun s =>
+          (tsigShareAt (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) s,
+            corruptTags s)) op :=
+  _root_.Qsag.tsig_real_eq_ideal_or_forgery S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt honest hIds hCard hNonZero hRecon corruptVk corruptTags sk m approvers Adv τ κ
+
+open CommRingOps in
+theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hInj : ∀ i j, keyDec i = keyDec j → i = j) :
+    ∀ (es : List (Nat × Tower128)) (s : Nat) (ops : List BdozPairOpening)
+      (hon : Nat → Tower128 × Tower128 × Tower128),
+      (∀ i, (hon (s + i)).1 = tsigShareAt es i) →
+      qsum CK (fun i =>
+        if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s es ops).isSome then 1 else 0) ≤
+        es.length :=
+  _root_.Qsag.tsigForgery_keys_le CK keyDec hInj
+
+open CommRingOps in
+theorem ucSimulatorTsig_advantage_bound {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hThreshold : st.threshold = pp.d + 1)
+    (hBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape R pp.d pp.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let real := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ
+    let ideal := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩
+    natAbsDiff (acceptPairs Cs Co prg ot real * (Ct * CK))
+               (acceptPairs Ct CK padEnum.toFun keyDec ideal * (Cs * Co)) ≤
+      Cs * Co * (Ct * ((pp.k + 1) * corrupt.length))
+        + CK * prgReductionAdvNum Cs Ct Co prg padEnum.toFun ot real
+        + Cs * otReductionAdvNum Ct Co CK padEnum.toFun ot keyDec real :=
+  _root_.Qsag.ucSimulatorTsig_advantage_bound S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt honest hIds hThreshold hBound hNonZero hRecon corruptVk corruptTags sk m approvers Adv Ct padEnum CK keyDec hKeyInj Cs prg Co ot
+
+open CommRingOps in
+theorem ucSimulatorTsig_distinguisher_breaks_generator {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hThreshold : st.threshold = pp.d + 1)
+    (hBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape R pp.d pp.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let real := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ
+    let ideal := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩
+    Cs * Co * (Ct * ((pp.k + 1) * corrupt.length)) <
+        natAbsDiff (acceptPairs Cs Co prg ot real * (Ct * CK))
+                   (acceptPairs Ct CK padEnum.toFun keyDec ideal * (Cs * Co)) →
+    0 < prgReductionAdvNum Cs Ct Co prg padEnum.toFun ot real ∨
+    0 < otReductionAdvNum Ct Co CK padEnum.toFun ot keyDec real :=
+  _root_.Qsag.ucSimulatorTsig_distinguisher_breaks_generator S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt honest hIds hThreshold hBound hNonZero hRecon corruptVk corruptTags sk m approvers Adv Ct padEnum CK keyDec hKeyInj Cs prg Co ot
+
+open CommRingOps in
+theorem ucSimulatorTsig_advantage_bound_tower128
+    (Adv : TsigAdversary Tower128 Tower128 tower128Params.k)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape Tower128 tower128Params.d tower128Params.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    let real := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+        tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ
+    let ideal := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigIdealExec tower128BeaverSig tower128Params tower128State tower128Corrupt tower128Honest
+        corruptVk corruptTags sk m [0] Adv ⟨τ, κ⟩
+    validThresholdApproval tower128State [0] = true ∧
+    natAbsDiff
+      (acceptPairs Cs Co prg ot real * (tower128PadCard * tower128KeyCard))
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec ideal * (Cs * Co)) ≤
+      Cs * Co * (tower128PadCard * ((tower128Params.k + 1) * tower128Corrupt.length))
+        + tower128KeyCard * prgReductionAdvNum Cs tower128PadCard Co prg tower128PadEnum.toFun ot real
+        + Cs * otReductionAdvNum tower128PadCard Co tower128KeyCard tower128PadEnum.toFun ot tower128KeyDec real :=
+  _root_.Qsag.ucSimulatorTsig_advantage_bound_tower128 Adv corruptVk corruptTags a b skPad aPad bPad cPad sk m Cs prg Co ot
+
+open CommRingOps in
+theorem ucSimulatorTsig_nonvacuous_sub_unity_tower128
+    (Adv : TsigAdversary Tower128 Tower128 tower128Params.k)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    let real := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+        tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ
+    let ideal := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigIdealExec tower128BeaverSig tower128Params tower128State tower128Corrupt tower128Honest
+        corruptVk corruptTags sk m [0] Adv ⟨τ, κ⟩
+    let sampleSpace := tower128PadCard * tower128KeyCard
+    let advGap := natAbsDiff
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec real)
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec ideal)
+    ratLe (advGap, sampleSpace) (3, tower128KeyCard) ∧
+    3 < tower128KeyCard :=
+  _root_.Qsag.ucSimulatorTsig_nonvacuous_sub_unity_tower128 Adv corruptVk corruptTags a b skPad aPad bPad cPad sk m
+
+open CommRingOps in
+theorem tsigRealOutcome_tower128_signs_and_rejects
+    (corruptVk : Nat → BdozVerifierKeys) (tags : Nat → Tower128 × Tower128)
+    (alpha : Tower128 × Tower128) (a b sk m : Tower128)
+    (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k) (ops : List BdozPairOpening) :
+    let w := tower128SharedWireVals a b skPad aPad bPad cPad sk m
+    let y := tower128SharedOutVal a b skPad aPad bPad cPad sk m
+    tsigRealOutcome tower128Params tower128Corrupt.length
+        (tsigVerifierKey alpha tags
+          (tsigSessionExpected tower128Params tower128Corrupt w y τ))
+        (tsigSessionExpected tower128Params tower128Corrupt w y τ)
+        (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest w y τ).outHonestOpenings
+        (tsigDealtOpenings
+          (fun s => (tsigShareAt
+            (tsigSessionExpected tower128Params tower128Corrupt w y τ) s, tags s))
+          0 (tsigSessionExpected tower128Params tower128Corrupt w y τ).length) =
+      .signed (towerMul 7 sk (towerAdd 7 sk m)) ∧
+    tsigRealOutcome tower128Params tower128Corrupt.length
+        (tsigVerifierKey alpha tags
+          (tsigSessionExpected tower128Params tower128Corrupt w y τ))
+        (tsigSessionExpected tower128Params tower128Corrupt w y τ)
+        (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest w y τ).outHonestOpenings
+        ({ bdozViewOpening (fun s => (tsigShareAt
+            (tsigSessionExpected tower128Params tower128Corrupt w y τ) s,
+              tags s)) 0 with
+            mac0 := towerAdd 7 (tags 0).1 (towerOne 7) } :: ops) = .abortedBy 2 :=
+  _root_.Qsag.tsigRealOutcome_tower128_signs_and_rejects corruptVk tags alpha a b sk m skPad aPad bPad cPad τ ops
+
+theorem rss3_toprf_honest {F : Type} [LawfulCommRing F] [DecidableEq F] (shares : Fin 3 → F)
+    (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) :=
+  _root_.Qsag.rss3_toprf_honest shares responses h
+
+theorem rss3_toprf_single_byzantine_detected {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (shares : Fin 3 → F) (liar : Fin 3) (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) ∨
+      reconstructRss3Toprf responses = none :=
+  _root_.Qsag.rss3_toprf_single_byzantine_detected shares liar responses h
+
+theorem rss3_two_server_reconstruct {F : Type} [LawfulCommRing F]
+    (a b : Fin 3) (hab : a ≠ b) (shares : Fin 3 → F) :
+    (fun c => if c = a then rss3ServerView b shares c else rss3ServerView a shares c) =
+      shares :=
+  _root_.Qsag.rss3_two_server_reconstruct a b hab shares
+
+theorem rss3_client_blind_perfect_privacy {F : Type} [LawfulCommRing F]
+    (p : Fin 3) (view : Fin 3 → F) (hview : view p = CommRingOps.zero) (x : F) :
+    ∃ c : Fin 3 → F, (sum3 c = x ∧ rss3ServerView p c = view) ∧
+      ∀ c' : Fin 3 → F, sum3 c' = x → rss3ServerView p c' = view → c' = c :=
+  _root_.Qsag.rss3_client_blind_perfect_privacy p view hview x
+
+theorem tooth_rss3_single_silent_server_aborts :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = none :=
+  _root_.Qsag.tooth_rss3_single_silent_server_aborts
+
+theorem toprf_2of5_byzantine_unique_decoding (key slope : Goldilocks)
+    (ys : Fin 5 → Option Goldilocks) (h : ToprfOneByzantine toprfPoint ys (key, slope)) :
+    (∀ l : Goldilocks × Goldilocks,
+      3 ≤ count5 (toprfAgree toprfPoint ys l) → l = (key, slope)) ∧
+    extractUniqueToprfEval Goldilocks.inv toprfPoint ys = some key ∧
+    lineAt (key, slope) CommRingOps.zero = key :=
+  _root_.Qsag.toprf_2of5_byzantine_unique_decoding key slope ys h
+
+theorem replicated_toprf_any_single_byzantine {F : Type} [LawfulCommRing F] [DecidableEq F]
+    (shares : Fin 5 → F) (liar : Fin 5) (responses : Fin 5 → Fin 5 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructReplicatedToprf2of5 responses = some (sum5 shares) :=
+  _root_.Qsag.replicated_toprf_any_single_byzantine shares liar responses h
+
+/-! ### Production hypertree verifier, UC threshold bridge, StepOp256 extraction, TOPRF & crash-durable WAL -/
+
+theorem productionThresholdSignOracle_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) :
+    productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser =
+      fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit) :=
+  _root_.Qsag.productionThresholdSignOracle_eq suite params o sk hm grindLimit ser
+
+theorem productionForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (tr : ExecTranscript AdvState)
+    (hWin : productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    ProductionTranscriptBreak suite params sk grindLimit forgeOut tr :=
+  _root_.Qsag.productionForgeryBreak_of_wins suite params sk grindLimit hw hStateless forgeOut tr hWin
+
+theorem uc_production_threshold_forgery_transfer
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card
+      (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2) card
+      (fun ω => (IdealFunctionalityExec
+        (productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser)
+        sim A Q_s (simTapes ω) icl advSt).2)
+      (productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView := fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView := fun ω => (IdealFunctionalityExec oracle sim A Q_s (simTapes ω) icl advSt).2
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) :=
+  _root_.Qsag.uc_production_threshold_forgery_transfer suite params sk o hm grindLimit ser
+    hw hStateless proto sim A Q_s card realTapes simTapes cl icl advSt forgeOut eps hUc
+
+theorem baggy_multiturn_durable_and_non_equivocating (identity : BaggyLedgerIdentity)
+    (ops : List BaggyReleaseOp) :
+    let final := baggyReleaseTrace (BaggyReleaseState.init identity) ops
+    (∀ r ∈ final.released,
+      lookupDurableDigits final.durable r.layer r.tree r.kp = some r.digits) ∧
+    (∀ r₁ ∈ final.released, ∀ r₂ ∈ final.released,
+      r₁.layer = r₂.layer → r₁.tree = r₂.tree → r₁.kp = r₂.kp → r₁.digits = r₂.digits) :=
+  _root_.Qsag.baggy_multiturn_durable_and_non_equivocating identity ops
+
+theorem rss256_recorded_trace_integrity (ops : List Rss256EngineOp) :
+    (rss256TraceHardened Rss256EngineState.init ops).1.Checked ∧
+    (∀ out ∈ (rss256TraceHardened Rss256EngineState.init ops).2,
+      ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+        out = rss256GateOutput w.input w.gates ∧
+        (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b)) :=
+  _root_.Qsag.rss256_recorded_trace_integrity ops
+
+open RustDurability in
+theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : RustDurability.Bytes)
+    (s : BurnAppendState) (f : BurnJournalFile) (party epoch : Nat)
+    (hOpen : openBurnJournal (burnRecordTag key keyId genesis)
+      (burnGenesisTag key identity keyId genesis) f = some (s.bodies, s.lastTag))
+    (hPending : s.pending = some (burnRecord key keyId genesis s.lastTag party epoch))
+    (hVisible : s.visible = s.disk ++ burnRecord key keyId genesis s.lastTag party epoch)
+    (hFailed : s.failed = false)
+    (hFresh : burnRecordBody party epoch ∉ s.bodies) :
+    BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile s f)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) ∧
+    BurnHostInv (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) :=
+  _root_.Qsag.RustDurability.burnAppend_sync_welds_host_reserve key identity keyId genesis s f party epoch
+    hOpen hPending hVisible hFailed hFresh
+
+-- END COMPARATOR ROSTER
+
+end Roster
+
 #verify_constructive
+  Qsag.Top.rssSharedReleaseMachine_eq_reference
+  Qsag.Top.thresholdServiceShared_eq_ideal
+  Qsag.Top.thresholdDurableShared_eq_ideal
+  Qsag.Top.sepForged_fresh_verifying_signature
+  Qsag.Top.distributedCustody_trace_inclusion_and_safety
+  Qsag.Top.shamir_custody_network_non_equivocation
   Qsag.Top.rssSharedRelease_preserves_traces
   Qsag.Top.elf_to_idealTsig_trace_inclusion
   Qsag.Top.separated_custody_provenance_and_release_chain

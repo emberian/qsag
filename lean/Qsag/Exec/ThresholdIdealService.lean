@@ -1,4 +1,5 @@
 module
+import all Qsag.Spec.Sessions
 
 public import Qsag.Exec.InteractiveServiceContext
 public import Qsag.Exec.RssProductionProfile

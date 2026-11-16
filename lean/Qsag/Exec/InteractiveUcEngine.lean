@@ -1,4 +1,5 @@
 module
+public import Qsag.Spec.Sessions
 /-
 # Qsag.Exec.InteractiveUcEngine — Multi-Round, Multi-Session Rushing-Adversary UC Execution Engine
 
@@ -382,32 +383,6 @@ theorem tooth_poisoned_vault_erases_share_and_blocks {ShareT Out : Type}
   simp [walPoisonVault, walQuarantine, consumeVaultMaskSlot, walCommitBeforeRelease, walPreSignStep]
 
 /-! ## 3. Multi-Round, Multi-Session Rushing-Adversary Network Execution -/
-
-/-- Exact observable abort classification emitted by real and ideal threshold signing sessions. -/
-inductive AbortReason where
-  | quorumRejected
-  | walPoisoned
-  | walPkMismatch
-  | walEpochRejected
-  | round1CommitMismatch (culprit : Nat)
-  | activeConsistencyFailed
-  | cutOpenMismatch (culprit : Nat)
-  deriving DecidableEq, Repr
-
-/-- Exact observable outcome of a signing session delivered to the rushing adversary. -/
-inductive SessionOutcome where
-  | signOk (sigBytes : ByteArray)
-  | abort (reason : AbortReason)
-  deriving DecidableEq
-
-/-- Adaptive session scheduling directive chosen by `UcRushingAdversary`. -/
-structure SessionScheduleReq where
-  sessionId       : Nat
-  reqEpoch        : Nat
-  msg             : List UInt8
-  optRand         : List UInt8
-  honestApprovers : List Nat
-  deriving DecidableEq, Repr
 
 /-- Complete, domain-separated WAL intent. There is no profile field in
     `SessionScheduleReq`; the version tag identifies this encoding, not a profile.

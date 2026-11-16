@@ -2,6 +2,7 @@ module
 
 public import Qsag.Tactic.Prelude
 public import Qsag.Spec.Encoding
+public import Qsag.Spec.Refines
 
 /-!
 # Qsag.Exec.SimulationSpine — Compositional Forward Simulation, Rushing-Network Lifter & Canonical Codecs
@@ -32,61 +33,6 @@ namespace Qsag
 set_option autoImplicit false
 
 /-! ## 1. Canonical `PartyMachine`, `LockstepSim` & Vertical `ForwardSim` (`0 Classical.choice`) -/
-
-/-- Explicit step outcome when failed attempts mutate persistent state (quarantine, MAC burn, WAL). -/
-inductive StepOutcome (S Out Err : Type) where
-  | ok (nextState : S) (output : Out)
-  | err (nextState : S) (error : Err)
-  deriving Repr, DecidableEq
-
-/-- Canonical per-party protocol state machine.
-    `step` handles accepted transitions `some (s', out)`; when `step s inp = none`,
-    `errStep s inp` updates the persistent state (defaulting to `s` for pure partial transitions). -/
-structure PartyMachine (S In Out : Type) where
-  step : S → In → Option (S × Out)
-  errStep : S → In → S := fun s _ => s
-
-/-- Construct a `PartyMachine` from a pure partial transition `S → In → Option (S × Out)`. -/
-@[expose]
-def PartyMachine.ofOption {S In Out : Type} (f : S → In → Option (S × Out)) :
-    PartyMachine S In Out :=
-  { step := f, errStep := fun s _ => s }
-
-/-- Construct a `PartyMachine` from an error-mutating `StepOutcome` transition. -/
-@[expose]
-def PartyMachine.ofOutcome {S In Out Err : Type} (f : S → In → StepOutcome S Out Err) :
-    PartyMachine S In Out where
-  step s inp :=
-    match f s inp with
-    | .ok s' out => some (s', out)
-    | .err _ _ => none
-  errStep s inp :=
-    match f s inp with
-    | .ok s' _ => s'
-    | .err s' _ => s'
-
-/-- Execute one total step of `M`, returning `(nextState, some out)` on accept or
-    `(M.errStep s inp, none)` on rejection. -/
-@[expose]
-def PartyMachine.runStep {S In Out : Type} (M : PartyMachine S In Out)
-    (s : S) (inp : In) : S × Option Out :=
-  match M.step s inp with
-  | some (s', out) => (s', some out)
-  | none => (M.errStep s inp, none)
-
-/-- Inductive multi-turn valid trace of accepted `(In × Out)` pairs for `PartyMachine`,
-    retaining rejected transitions via `M.errStep`. -/
-inductive PartyMachine.ValidTrace {S In Out : Type} (M : PartyMachine S In Out) :
-    S → List (In × Out) → S → Prop where
-  | nil (s : S) : M.ValidTrace s [] s
-  | accept {s s' s_final : S} {inp : In} {out : Out} {rest : List (In × Out)} :
-      M.step s inp = some (s', out) →
-      M.ValidTrace s' rest s_final →
-      M.ValidTrace s ((inp, out) :: rest) s_final
-  | reject {s s_final : S} (inp : In) {rest : List (In × Out)} :
-      M.step s inp = none →
-      M.ValidTrace (M.errStep s inp) rest s_final →
-      M.ValidTrace s rest s_final
 
 /-- Compositional forward simulation: concrete machine `C` forward-simulates abstract machine `A`.
     Uses deterministic `match A.step a inp` rather than `Exists` so `0 Classical.choice` is used. -/
