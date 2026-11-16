@@ -497,3 +497,498 @@ theorem corrupt_shares_independent_of_secret (dep : Deployment F C PK D Sig) (hW
   exact ⟨(LawfulCommRing.zero_add _).symm.trans h.1,
     fun p hp => h.2 _ (List.mem_map_of_mem hp)⟩
 
+/-! ## 5. Invariant preservation -/
+
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+theorem init_inv (dep : Deployment F C PK D Sig) :
+    Inv dep (State.init dep : State F PK D Sig) where
+  deployment := rfl
+  enrolled := rfl
+  profile := rfl
+  shares _ := rfl
+  latchBound _ _ h := absurd h List.not_mem_nil
+  latchNodup _ := List.nodup_nil
+
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+/-- Replacing one node by a node with the same share and a sound latch preserves the invariant;
+    the buffer and the corruption set are not constrained by it. -/
+private theorem inv_of_node_update (dep : Deployment F C PK D Sig) (st : State F PK D Sig)
+    (p : Nat) (c : Custodian F) (buffer' : List (Approval F)) (corrupt' : List Nat)
+    (hInv : Inv dep st)
+    (hShare : c.share = (st.nodes p).share)
+    (hBound : ∀ e : CustodyIntent, e ∈ c.latched → e.epoch < c.latch)
+    (hNd : (c.latched.map CustodyIntent.epoch).Nodup) :
+    Inv dep { st with nodes := setNode st.nodes p c, buffer := buffer', corrupt := corrupt' } where
+  deployment := hInv.deployment
+  enrolled := hInv.enrolled
+  profile := hInv.profile
+  shares q := by
+    show (setNode st.nodes p c q).share = dep.trueShare q
+    by_cases hqp : q = p
+    · subst hqp
+      rw [setNode_self, hShare]
+      exact hInv.shares q
+    · rw [setNode_ne _ _ _ _ hqp]
+      exact hInv.shares q
+  latchBound q e he := by
+    show e.epoch < (setNode st.nodes p c q).latch
+    have he' : e ∈ (setNode st.nodes p c q).latched := he
+    by_cases hqp : q = p
+    · subst hqp
+      rw [setNode_self] at he' ⊢
+      exact hBound e he'
+    · rw [setNode_ne _ _ _ _ hqp] at he' ⊢
+      exact hInv.latchBound q e he'
+  latchNodup q := by
+    show ((setNode st.nodes p c q).latched.map CustodyIntent.epoch).Nodup
+    by_cases hqp : q = p
+    · subst hqp
+      rw [setNode_self]
+      exact hNd
+    · rw [setNode_ne _ _ _ _ hqp]
+      exact hInv.latchNodup q
+
+/-- Inversion of the coordinator's transition. -/
+theorem executeStep_inv {dep : Deployment F C PK D Sig} {st st' : State F PK D Sig}
+    {d : Nat} {approvers : List Nat} {i : CustodyIntent} {ab : Bool} {out : CustodyOutcome Sig}
+    (h : executeStep dep st d approvers i ab = some (st', out)) :
+    ∃ L', custodyLedgerSign dep.digests (dep.signWith (quorumKey dep st.buffer approvers i))
+        st.ledger (if quorumReady dep st.buffer approvers i then approvers.length else 0)
+        d i ab = some (L', out) ∧ st' = { st with ledger := L' } := by
+  unfold executeStep at h
+  cases hL : custodyLedgerSign dep.digests (dep.signWith (quorumKey dep st.buffer approvers i))
+      st.ledger (if quorumReady dep st.buffer approvers i then approvers.length else 0)
+      d i ab with
+  | none => rw [hL] at h; cases h
+  | some r =>
+    obtain ⟨L', o⟩ := r
+    rw [hL] at h
+    cases h
+    exact ⟨L', rfl, rfl⟩
+
+/-- An accepted coordinator transition is the ledger's transition under the dealt key's oracle
+    with the same approval count. -/
+theorem executeStep_ledger_ideal (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : State F PK D Sig} {d : Nat} {approvers : List Nat} {i : CustodyIntent} {ab : Bool}
+    {L' : CustodyLedger PK D Sig} {out : CustodyOutcome Sig}
+    (h : custodyLedgerSign dep.digests (dep.signWith (quorumKey dep st.buffer approvers i))
+        st.ledger (if quorumReady dep st.buffer approvers i then approvers.length else 0)
+        d i ab = some (L', out)) :
+    custodyLedgerSign dep.digests dep.idealOracle st.ledger
+        (if quorumReady dep st.buffer approvers i then approvers.length else 0)
+        d i ab = some (L', out) := by
+  cases hQ : quorumReady dep st.buffer approvers i with
+  | true =>
+    rw [quorumKey_eq_secret dep hWf st.buffer approvers i hQ] at h
+    rw [hQ] at h
+    exact h
+  | false =>
+    rw [hQ] at h
+    rw [dc_if_neg Bool.false_ne_true] at h ⊢
+    obtain ⟨_, _, hCase⟩ := custodyLedgerSign_inv h
+    rcases hCase with ⟨r, hF, _, _, _⟩ | ⟨_, _, _, hThr, _, _⟩
+    · rw [← custodyLedgerSign_replay_irrelevant
+        (o := dep.signWith (quorumKey dep st.buffer approvers i)) (n := 0) hF]
+      exact h
+    · exact absurd (Nat.lt_of_lt_of_le st.ledger.quorum.h_pos hThr) (Nat.lt_irrefl 0)
+
+/-! ## 6. The refinement -/
+
+omit [DecidableEq F] [DecidableEq C] [DecidableEq D] in
+theorem init_rel (dep : Deployment F C PK D Sig) :
+    Rel dep (State.init dep : State F PK D Sig)
+      (IdealCustodyState.init dep.deploymentId dep.pk dep.quorum) where
+  inv := init_inv dep
+  ledger := rfl
+  corrupt := rfl
+  latched _ := rfl
+  buffered _ h _ := absurd h List.not_mem_nil
+
+/-- One accepted concrete turn that implements an ideal port is an accepted step of the ideal
+    functionality on that port with the mapped output, and the relation is preserved. -/
+theorem step_sim_visible (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {c c' : State F PK D Sig} {a : IdealCustodyState PK D Sig} {turn : Turn F}
+    {ev : Event F Sig} {j : CustodyInput}
+    (hRel : Rel dep c a) (hStep : step dep c turn = some (c', ev))
+    (hVis : visIn dep turn = some j) :
+    ∃ a' : IdealCustodyState PK D Sig,
+      idealCustodyStep dep.digests dep.idealOracle a j = some (a', visOut ev) ∧ Rel dep c' a' := by
+  have hNum : a.ledger.quorum.numParties = dep.quorum.numParties := by
+    rw [hRel.ledger, hRel.inv.profile]
+  have hThr : a.ledger.quorum.threshold = dep.quorum.threshold := by
+    rw [hRel.ledger, hRel.inv.profile]
+  have hDep : a.ledger.deploymentId = dep.deploymentId := by
+    rw [hRel.ledger, hRel.inv.deployment]
+  cases turn with
+  | approve p d i =>
+    have hj : CustodyInput.approve p d i = j := Option.some.inj hVis
+    subst hj
+    unfold step at hStep
+    dsimp only at hStep
+    by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧ d = dep.deploymentId ∧
+        (c.nodes p).latch ≤ i.epoch ∧ i.sessionId ∉ (c.nodes p).coupons
+    · rw [dc_if_pos hg] at hStep
+      cases hStep
+      obtain ⟨hLt, hHon, hD, hLatch, _⟩ := hg
+      refine ⟨_, idealCustodyStep_approve_of i
+        ⟨hNum ▸ hLt, hRel.corrupt ▸ hHon, hD.trans hDep.symm⟩, ?_⟩
+      refine
+        { inv := inv_of_node_update dep c p _ _ _ hRel.inv rfl ?_ ?_
+          ledger := hRel.ledger
+          corrupt := hRel.corrupt
+          latched := ?_
+          buffered := ?_ }
+      · intro e he
+        show e.epoch < i.epoch + 1
+        rcases List.mem_cons.mp he with hEq | hOld
+        · rw [hEq]
+          exact Nat.lt_succ_self _
+        · exact Nat.lt_succ_of_lt (Nat.lt_of_lt_of_le (hRel.inv.latchBound p e hOld) hLatch)
+      · show ((i :: (c.nodes p).latched).map CustodyIntent.epoch).Nodup
+        rw [List.map_cons, List.nodup_cons]
+        refine ⟨?_, hRel.inv.latchNodup p⟩
+        intro hMem
+        obtain ⟨e, he, hEq⟩ := List.mem_map.mp hMem
+        have hLtE := hRel.inv.latchBound p e he
+        rw [hEq] at hLtE
+        exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hLtE hLatch)
+      · intro q
+        show (setNode c.nodes p _ q).latched =
+          custodyRevealed (CustodyApproval.mk p d i :: a.honestApprovals) q
+        by_cases hqp : q = p
+        · subst hqp
+          rw [setNode_self, custodyRevealed_cons_self]
+          exact congrArg _ (hRel.latched q)
+        · rw [setNode_ne _ _ _ _ hqp, custodyRevealed_cons_ne _ _ _ (fun h => hqp h.symm)]
+          exact hRel.latched q
+      · intro m hm hmD
+        rcases List.mem_cons.mp hm with hEq | hOld
+        · refine .inl ?_
+          rw [hEq]
+          exact List.mem_cons_self
+        · exact (hRel.buffered m hOld hmD).imp (List.mem_cons_of_mem _) id
+    · rw [dc_if_neg hg] at hStep
+      cases hStep
+  | inject m =>
+    unfold visIn at hVis
+    dsimp only at hVis
+    by_cases hmD : m.deploymentId = dep.deploymentId
+    · rw [dc_if_pos hmD] at hVis
+      have hj : CustodyInput.advApprove m.sender m.deploymentId m.intent = j :=
+        Option.some.inj hVis
+      subst hj
+      unfold step at hStep
+      dsimp only at hStep
+      by_cases hg : m.sender ∈ c.corrupt
+      · rw [dc_if_pos hg] at hStep
+        cases hStep
+        refine ⟨_, idealCustodyStep_advApprove_of m.intent
+          ⟨hRel.corrupt ▸ hg, hmD.trans hDep.symm⟩, ?_⟩
+        exact
+          { inv :=
+              { deployment := hRel.inv.deployment
+                enrolled := hRel.inv.enrolled
+                profile := hRel.inv.profile
+                shares := hRel.inv.shares
+                latchBound := hRel.inv.latchBound
+                latchNodup := hRel.inv.latchNodup }
+            ledger := hRel.ledger
+            corrupt := hRel.corrupt
+            latched := hRel.latched
+            buffered := fun m' hm' hm'D => by
+              rcases List.mem_cons.mp hm' with hEq | hOld
+              · refine .inr ?_
+                rw [hEq]
+                exact List.mem_cons_self
+              · exact (hRel.buffered m' hOld hm'D).imp id (List.mem_cons_of_mem _) }
+      · rw [dc_if_neg hg] at hStep
+        cases hStep
+    · rw [dc_if_neg hmD] at hVis
+      cases hVis
+  | corrupt p =>
+    have hj : CustodyInput.corrupt p = j := Option.some.inj hVis
+    subst hj
+    unfold step at hStep
+    dsimp only at hStep
+    by_cases hg : p < dep.quorum.numParties ∧ p ∉ c.corrupt ∧
+        c.corrupt.length + 1 < dep.quorum.threshold
+    · rw [dc_if_pos hg] at hStep
+      cases hStep
+      have hStepA := idealCustodyStep_corrupt_of (S := dep.digests) (oracleSign := dep.idealOracle)
+        (st := a) (p := p) ⟨hNum ▸ hg.1, hRel.corrupt ▸ hg.2.1, by
+          rw [hRel.corrupt, hThr]
+          exact hg.2.2⟩
+      refine ⟨{ a with corruptParties := p :: a.corruptParties }, ?_, ?_⟩
+      · rw [hStepA]
+        show some (_, CustodyOutcome.corrupted (custodyRevealed a.honestApprovals p)) =
+          some (_, CustodyOutcome.corrupted (c.nodes p).latched)
+        rw [hRel.latched p]
+      · exact
+          { inv :=
+              { deployment := hRel.inv.deployment
+                enrolled := hRel.inv.enrolled
+                profile := hRel.inv.profile
+                shares := hRel.inv.shares
+                latchBound := hRel.inv.latchBound
+                latchNodup := hRel.inv.latchNodup }
+            ledger := hRel.ledger
+            corrupt := congrArg (List.cons p) hRel.corrupt
+            latched := hRel.latched
+            buffered := hRel.buffered }
+    · rw [dc_if_neg hg] at hStep
+      cases hStep
+  | crash _ => cases hVis
+  | dropMsg _ => cases hVis
+  | execute d approvers i ab =>
+    have hj : CustodyInput.sign d i ab = j := Option.some.inj hVis
+    subst hj
+    have hStep' : (executeStep dep c d approvers i ab).map (fun r => (r.1, Event.custody r.2)) =
+        some (c', ev) := hStep
+    cases hEx : executeStep dep c d approvers i ab with
+    | none => rw [hEx] at hStep'; cases hStep'
+    | some r =>
+      obtain ⟨c₁, o⟩ := r
+      rw [hEx] at hStep'
+      cases hStep'
+      obtain ⟨L', hL, hc₁⟩ := executeStep_inv hEx
+      subst hc₁
+      have hIdeal := executeStep_ledger_ideal dep hWf hL
+      have hCount : (if quorumReady dep c.buffer approvers i then approvers.length else 0) ≤
+          (custodyApprovers a.ledger.quorum.numParties a.honestApprovals a.corruptApprovals
+            a.ledger.deploymentId i).length := by
+        cases hQ : quorumReady dep c.buffer approvers i with
+        | false =>
+          rw [dc_if_neg Bool.false_ne_true]
+          exact Nat.zero_le _
+        | true =>
+          rw [dc_if_pos rfl]
+          obtain ⟨_, hNd, hAll⟩ := quorumReady_spec dep c.buffer approvers i hQ
+          refine custodyApprovers_length_le_of_subset hNd (fun p hp => ?_)
+          obtain ⟨hLt, s, hs⟩ := hAll p hp
+          obtain ⟨m, hmBuf, hmS, hmD, hmI, _, _⟩ := approvalShare_sound dep c.buffer i p s hs
+          have hB := hRel.buffered m hmBuf hmD
+          rw [hmS, hmD, hmI] at hB
+          rw [hDep]
+          exact ⟨hNum ▸ hLt, hB⟩
+      have hA := custodyLedgerSign_mono hIdeal hCount
+      rw [← hRel.ledger] at hA
+      refine ⟨_, idealCustodyStep_sign_of hA, ?_⟩
+      obtain ⟨hD', hPk', hQ'⟩ := custodyLedgerSign_static hL
+      exact
+        { inv :=
+            { deployment := hD'.trans hRel.inv.deployment
+              enrolled := hPk'.trans hRel.inv.enrolled
+              profile := hQ'.trans hRel.inv.profile
+              shares := hRel.inv.shares
+              latchBound := hRel.inv.latchBound
+              latchNodup := hRel.inv.latchNodup }
+          ledger := rfl
+          corrupt := hRel.corrupt
+          latched := hRel.latched
+          buffered := hRel.buffered }
+
+/-- Internal turns preserve the relation with the same ideal state. -/
+theorem step_sim_internal (dep : Deployment F C PK D Sig)
+    {c c' : State F PK D Sig} {a : IdealCustodyState PK D Sig} {turn : Turn F}
+    {ev : Event F Sig}
+    (hRel : Rel dep c a) (hStep : step dep c turn = some (c', ev))
+    (hInt : visIn dep turn = none) : Rel dep c' a := by
+  cases turn with
+  | approve _ _ _ => cases hInt
+  | inject m =>
+    unfold visIn at hInt
+    dsimp only at hInt
+    by_cases hmD : m.deploymentId = dep.deploymentId
+    · rw [dc_if_pos hmD] at hInt
+      cases hInt
+    · unfold step at hStep
+      dsimp only at hStep
+      by_cases hg : m.sender ∈ c.corrupt
+      · rw [dc_if_pos hg] at hStep
+        cases hStep
+        exact
+          { inv :=
+              { deployment := hRel.inv.deployment
+                enrolled := hRel.inv.enrolled
+                profile := hRel.inv.profile
+                shares := hRel.inv.shares
+                latchBound := hRel.inv.latchBound
+                latchNodup := hRel.inv.latchNodup }
+            ledger := hRel.ledger
+            corrupt := hRel.corrupt
+            latched := hRel.latched
+            buffered := fun m' hm' hm'D => by
+              rcases List.mem_cons.mp hm' with hEq | hOld
+              · exact absurd (hEq ▸ hm'D) hmD
+              · exact hRel.buffered m' hOld hm'D }
+      · rw [dc_if_neg hg] at hStep
+        cases hStep
+  | corrupt _ => cases hInt
+  | crash p =>
+    unfold step at hStep
+    cases hStep
+    exact
+      { inv := inv_of_node_update dep c p _ _ _ hRel.inv rfl
+          (fun e he => hRel.inv.latchBound p e he) (hRel.inv.latchNodup p)
+        ledger := hRel.ledger
+        corrupt := hRel.corrupt
+        latched := fun q => by
+          show (setNode c.nodes p _ q).latched = custodyRevealed a.honestApprovals q
+          by_cases hqp : q = p
+          · subst hqp
+            rw [setNode_self]
+            exact hRel.latched q
+          · rw [setNode_ne _ _ _ _ hqp]
+            exact hRel.latched q
+        buffered := hRel.buffered }
+  | dropMsg idx =>
+    unfold step at hStep
+    cases hStep
+    exact
+      { inv :=
+          { deployment := hRel.inv.deployment
+            enrolled := hRel.inv.enrolled
+            profile := hRel.inv.profile
+            shares := hRel.inv.shares
+            latchBound := hRel.inv.latchBound
+            latchNodup := hRel.inv.latchNodup }
+        ledger := hRel.ledger
+        corrupt := hRel.corrupt
+        latched := hRel.latched
+        buffered := fun m hm hmD => by
+          rcases List.mem_append.mp hm with hT | hDr
+          · exact hRel.buffered m (List.mem_of_mem_take hT) hmD
+          · exact hRel.buffered m (List.mem_of_mem_drop hDr) hmD }
+  | execute _ _ _ _ => cases hInt
+
+/-- **Distributed `(t, n)` custody refines `Spec.idealCustodyMachine`** for the deployment's own
+    `deploymentId`, with the dealt key's signature as the ideal oracle. -/
+def distCustody_refines_ideal (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed) :
+    DataRefines (distMachine dep)
+      (idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk dep.quorum)
+      (visIn dep) visOut where
+  Rel := Rel dep
+  absInit := fun _ => IdealCustodyState.init dep.deploymentId dep.pk dep.quorum
+  init_ok {c₀} hInit := by
+    have h0 : c₀ = State.init dep := hInit
+    subst h0
+    exact ⟨rfl, init_rel dep⟩
+  sim_visible hRel hStepC hVis := step_sim_visible dep hWf hRel hStepC hVis
+  sim_internal hRel hStepC hVis := step_sim_internal dep hRel hStepC hVis
+  sim_reject hRel _ := hRel
+
+/-- Every execution of the distributed system projects to an execution of the ideal
+    functionality on its `approve`, `inject`, `corrupt` and `execute` turns. -/
+theorem distCustody_trace_inclusion (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {tr : List (Turn F × Event F Sig)} (hAdmits : (distMachine dep).AdmitsTrace tr) :
+    (idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).AdmitsTrace (projectTrace (visIn dep) visOut tr) :=
+  (distCustody_refines_ideal dep hWf).preserve_admitsTrace hAdmits
+
+/-! ## 7. Consequences on reachable states -/
+
+/-- **Safety of every reachable distributed state.** Fewer than `threshold` custodians are
+    corrupted; cumulative spend is within the cap; every WAL record carries the dealt key's
+    signature on `digest deploymentId intent`, and its intent is in the durable log of an enrolled
+    custodian, whose latch has moved past its epoch. -/
+theorem distCustody_reachable_safe (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : State F PK D Sig} (hReach : (distMachine dep).Reachable st) :
+    st.corrupt.length < dep.quorum.threshold ∧
+    st.ledger.spent ≤ dep.quorum.spendCap ∧
+    (∀ r : CustodyRelease D Sig, r ∈ st.ledger.releasedHistory →
+      r.sig = dep.signWith dep.secret (dep.digests.digest dep.deploymentId r.intent) ∧
+      ∃ p : Nat, p < dep.quorum.numParties ∧ r.intent ∈ (st.nodes p).latched ∧
+        r.intent.epoch < (st.nodes p).latch) := by
+  obtain ⟨a, hReachA, hRel⟩ := (distCustody_refines_ideal dep hWf).reachable_rel hReach
+  have hRel' : Rel dep st a := hRel
+  have hSafe := idealCustody_reachable_safeInv hReachA
+  refine ⟨hRel'.corrupt ▸ hSafe.corruptBudget, hRel'.ledger ▸ hSafe.budget, ?_⟩
+  intro r hr
+  obtain ⟨hSig, p, hLt, hMem⟩ :=
+    idealCustody_reachable_release_honestly_approved hReachA (hRel'.ledger ▸ hr)
+  refine ⟨hSig, p, hLt, ?_⟩
+  have hLat : r.intent ∈ (st.nodes p).latched := by
+    rw [hRel'.latched p]
+    unfold custodyRevealed
+    exact List.mem_map.mpr ⟨_, List.mem_filter.mpr ⟨hMem, decide_eq_true rfl⟩, rfl⟩
+  exact ⟨hLat, hRel'.inv.latchBound p _ hLat⟩
+
+/-- **Honest custodians do not equivocate.** In every reachable state a custodian has latched at
+    most one intent per epoch. -/
+theorem distCustody_latch_unique (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : State F PK D Sig} (hReach : (distMachine dep).Reachable st) (p : Nat) :
+    ((st.nodes p).latched.map CustodyIntent.epoch).Nodup := by
+  obtain ⟨_, _, hRel⟩ := (distCustody_refines_ideal dep hWf).reachable_rel hReach
+  have hRel' : Rel dep st _ := hRel
+  exact hRel'.inv.latchNodup p
+
+/-- **The durable latch survives a crash; the coupons do not.** After custodian `p` crashes its
+    coupons are gone, and it still refuses to approve any intent at an epoch it has latched. -/
+theorem latched_epoch_rejected_after_crash (dep : Deployment F C PK D Sig)
+    {st st' : State F PK D Sig} {ev : Event F Sig} (hInv : Inv dep st) (p : Nat)
+    (hCrash : step dep st (.crash p) = some (st', ev))
+    (d : Nat) (i e : CustodyIntent) (hEpoch : e.epoch = i.epoch)
+    (hLatched : e ∈ (st.nodes p).latched) :
+    (st'.nodes p).coupons = [] ∧ step dep st' (.approve p d i) = none := by
+  unfold step at hCrash
+  cases hCrash
+  have hLt : i.epoch < (st.nodes p).latch := hEpoch ▸ hInv.latchBound p _ hLatched
+  refine ⟨?_, ?_⟩
+  · show (setNode st.nodes p _ p).coupons = []
+    rw [setNode_self]
+  · unfold step
+    dsimp only
+    refine dc_if_neg (fun hg => ?_) _ _
+    have hLe : (setNode st.nodes p
+        { share := (st.nodes p).share, latch := (st.nodes p).latch,
+          latched := (st.nodes p).latched, coupons := [] } p).latch ≤ i.epoch := hg.2.2.2.1
+    rw [setNode_self] at hLe
+    exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hLt hLe)
+
+/-- **Conditional liveness of the coordinator.** If the quorum check passes for `approvers` and
+    `i`, the ledger is not quarantined, has no committed record at `i.epoch`, the epoch and session
+    are fresh and `i.spend` fits the budget, then `execute` releases the dealt key's signature on
+    `digest deploymentId i`. -/
+theorem execute_ready_fresh_releases (dep : Deployment F C PK D Sig) (hWf : dep.WellFormed)
+    {st : State F PK D Sig} (hInv : Inv dep st) (approvers : List Nat) (i : CustodyIntent)
+    (hReady : quorumReady dep st.buffer approvers i = true)
+    (hP : st.ledger.poisoned = false)
+    (hF : findReleasedEpoch st.ledger.releasedHistory i.epoch = none)
+    (hEp : st.ledger.nextFreshEpoch ≤ i.epoch) (hSess : i.sessionId ∉ st.ledger.usedSessions)
+    (hCap : st.ledger.spent + i.spend ≤ dep.quorum.spendCap) :
+    (step dep st (.execute dep.deploymentId approvers i false)).map Prod.snd =
+      some (.custody (.released
+        (dep.signWith dep.secret (dep.digests.digest dep.deploymentId i)))) := by
+  obtain ⟨hThr, _, _⟩ := quorumReady_spec dep st.buffer approvers i hReady
+  have hL := custodyLedgerSign_fresh_release (S := dep.digests)
+    (oracleSign := dep.signWith (quorumKey dep st.buffer approvers i))
+    (L := st.ledger) (n := approvers.length) (dep := dep.deploymentId) (i := i)
+    hP hInv.deployment.symm hF hEp hSess (hInv.profile ▸ hThr) (hInv.profile ▸ hCap)
+  rw [quorumKey_eq_secret dep hWf st.buffer approvers i hReady, hInv.deployment] at hL
+  show ((executeStep dep st dep.deploymentId approvers i false).map
+    (fun r => (r.1, Event.custody r.2))).map Prod.snd = _
+  unfold executeStep
+  rw [hReady, dc_if_pos rfl, quorumKey_eq_secret dep hWf st.buffer approvers i hReady, hL]
+  rfl
+
+end Defs
+
+#verify_constructive
+  Qsag.DistCustody.Deployment.WellFormed.point_inj
+  Qsag.DistCustody.verifyShare_dealt_or_collision
+  Qsag.DistCustody.verifyShare_sound
+  Qsag.DistCustody.reconstruct_dealt_shares
+  Qsag.DistCustody.quorumKey_eq_secret
+  Qsag.DistCustody.corrupt_shares_independent_of_secret
+  Qsag.DistCustody.init_inv
+  Qsag.DistCustody.executeStep_ledger_ideal
+  Qsag.DistCustody.step_sim_visible
+  Qsag.DistCustody.step_sim_internal
+  Qsag.DistCustody.distCustody_trace_inclusion
+  Qsag.DistCustody.distCustody_reachable_safe
+  Qsag.DistCustody.distCustody_latch_unique
+  Qsag.DistCustody.latched_epoch_rejected_after_crash
+  Qsag.DistCustody.execute_ready_fresh_releases
+
+end Qsag.DistCustody
+end
