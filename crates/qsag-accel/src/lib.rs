@@ -1686,6 +1686,10 @@ pub fn spot_check_merkle_layer(
     {
         return false;
     }
+    // With no allocator, requests exceeding the swap capacity verify every parent.
+    // Silently dropping swaps would repeat indices and weaken the requested coverage.
+    #[cfg(not(feature = "alloc"))]
+    let checks = if checks > 64 { n } else { checks };
     let target = checks.min(n);
     // Partial Fisher-Yates without replacement using a fixed 64-entry swap window when `alloc`
     // is absent (or exact map/vec when `alloc` is present), with unbiased rejection sampling.
@@ -1703,11 +1707,7 @@ pub fn spot_check_merkle_layer(
             let mut word = [0u8; 8];
             word.copy_from_slice(&digest[..8]);
             let v = u64::from_le_bytes(word);
-            if ctr > 0 || span.is_power_of_two() || v < zone {
-                if v < zone || span.is_power_of_two() {
-                    return (v % span) as usize;
-                }
-            } else if v < zone {
+            if span.is_power_of_two() || v < zone {
                 return (v % span) as usize;
             }
             ctr = ctr.wrapping_add(1);
@@ -2092,6 +2092,38 @@ mod tests {
         assert_eq!(receipt.verification_mask(&key, &pin), u64::MAX);
         receipt.hardware_audit_digest[0] ^= 1;
         assert_eq!(receipt.verification_mask(&key, &pin), 0);
+    }
+
+    #[test]
+    fn correctly_maced_spirv_receipts_without_audit_are_rejected() {
+        let key = BackendAttestationKey::derive(&[29; 32], b"missing-audit");
+        let pin = spirv_kernels::canonical_spirv_pin(KernelSlot::BatchKeccakF1600);
+        let mut receipt = ExecutionReceipt::compute_audited(&key, &pin,
+            BatchJobDescriptor::KeccakF1600 { num_states: 1 }, [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        receipt.hardware_audit_digest = [0; 32];
+        receipt.mac = receipt.mac_over_fields(&key);
+        assert_eq!(receipt.verification_mask(&key, &pin), 0);
+        let pin = spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::WhirLdeCommitment);
+        let mut receipt = ProverExecutionReceipt::compute_audited(&key, &pin,
+            ProverJobDescriptor::WhirCommitRound0 { num_polys: 1, num_vars: 4, blowup: 4, group_arity: 4 },
+            [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        receipt.hardware_audit_digest = [0; 32];
+        receipt.mac = receipt.mac_over_fields(&key);
+        assert_eq!(receipt.verification_mask(&key, &pin), 0);
+    }
+
+    #[cfg(not(feature = "alloc"))]
+    #[test]
+    fn no_alloc_large_merkle_sample_cannot_silently_drop_swaps() {
+        let children = [[7u64; 4]; 256];
+        let mut parents = [[0u64; 4]; 128];
+        merkle_layer_poseidon2_at_cpu(&children, &[1; 4], 0, 0, &mut parents).unwrap();
+        assert!(spot_check_merkle_layer(&children, &parents, &[1; 4], 0, 0, &[2; 32], 65));
+        for i in 0..parents.len() {
+            parents[i][0] ^= 1;
+            assert!(!spot_check_merkle_layer(&children, &parents, &[1; 4], 0, 0, &[2; 32], 65));
+            parents[i][0] ^= 1;
+        }
     }
 
     #[test]

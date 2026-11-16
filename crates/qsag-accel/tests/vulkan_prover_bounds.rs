@@ -293,7 +293,7 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
         Err(VulkanError::WorkspacePoisoned)
     ));
 
-    gpu.try_acquire_prover_session().expect("acquire");
+    let session = gpu.try_acquire_prover_session().expect("acquire");
 
     // An acquired session that never committed: there is no arena to read.
     assert_clean(gpu.prover_whir_batch_sumcheck_read_tail(1, 1, 0, &mut one, &mut two));
@@ -319,8 +319,8 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     let top = fx.round_trip(&gpu);
 
     // After release and re-acquire the previous session's buffers are not readable.
-    gpu.release_prover_session();
-    gpu.try_acquire_prover_session().expect("re-acquire");
+    drop(session);
+    let session = gpu.try_acquire_prover_session().expect("re-acquire");
     assert_clean(gpu.prover_whir_batch_sumcheck_read_tail(1, 1, cols_base, &mut one, &mut two));
 
     // Each case starts from a fresh commit: a rejected call ends the session it was made on.
@@ -637,7 +637,7 @@ fn out_of_range_prover_calls_fail_cleanly_and_leave_the_backend_correct() {
     // commitment and the same host-checked data.
     assert_eq!(fx.round_trip(&gpu), top);
     assert_eq!(fx.round_trip(&gpu), top);
-    gpu.release_prover_session();
+    drop(session);
     assert!(matches!(
         gpu.prover_whir_batch_sumcheck_read_tail(1, 1, 0, &mut one, &mut two),
         Err(VulkanError::WorkspacePoisoned)
@@ -654,7 +654,7 @@ fn audit_hardening_bounds_receipts_and_turboshake_canopy() {
     // H3: Audited discrete backend exposes `is_secret_slots_audited() == true` and acquires a
     // secret prover session cleanly.
     assert!(gpu.is_secret_slots_audited());
-    gpu.try_acquire_secret_prover_session()
+    let session = gpu.try_acquire_secret_prover_session()
         .expect("secret prover session");
 
     // H1: Canopy leaf header 8-bit field bounds (`arity >= 256`, `num_polys >= 256`, `stage_idx >= 256`)
@@ -728,5 +728,5 @@ fn audit_hardening_bounds_receipts_and_turboshake_canopy() {
     gpu.prover_whir_gather_queries(0, 16, NUM_POLYS, 1024, &[0], &[1], &mut raw_q)
         .expect("TurboSHAKE256 round0 gather");
 
-    gpu.release_prover_session();
+    drop(session);
 }
