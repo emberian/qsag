@@ -144,8 +144,15 @@ pub const BLS_G1_GY: [u64; 6] = [
 pub const NULLIFIER_TAG_BLS12_381_G1: u64 = 5;
 
 /// Canonical element of the `BLS12-381` base field `F_p` (`0 <= self < p`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct FpBls381(pub [u64; 6]);
+
+impl PartialEq for FpBls381 {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        limbs::ct_eq(self.0, other.0)
+    }
+}
 
 impl FpBls381 {
     pub const ZERO: Self = Self([0; 6]);
@@ -267,8 +274,15 @@ impl core::ops::Neg for FpBls381 {
 }
 
 /// Canonical `BLS12-381` scalar `0 <= sk < r`, zeroized on `Drop`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq)]
 pub struct FrBls381(pub [u64; 4]);
+
+impl PartialEq for FrBls381 {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        limbs::ct_eq(self.0, other.0)
+    }
+}
 
 impl fmt::Debug for FrBls381 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -572,13 +586,13 @@ impl BlsG1Point {
 
 impl PartialEq for BlsG1Point {
     fn eq(&self, other: &Self) -> bool {
-        match (self.z.is_zero(), other.z.is_zero()) {
-            (true, true) => true,
-            (true, false) | (false, true) => false,
-            (false, false) => {
-                (self.x * other.z == other.x * self.z) && (self.y * other.z == other.y * self.z)
-            }
-        }
+        let z1_zero = self.z.is_zero();
+        let z2_zero = other.z.is_zero();
+        let both_inf = z1_zero & z2_zero;
+        let neither_inf = (!z1_zero) & (!z2_zero);
+        let x_eq = self.x * other.z == other.x * self.z;
+        let y_eq = self.y * other.z == other.y * self.z;
+        both_inf | (neither_inf & x_eq & y_eq)
     }
 }
 impl Eq for BlsG1Point {}
@@ -677,9 +691,14 @@ impl BlsOwnershipWitness {
             return false;
         };
         let ok = match commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(expected) => &pk == expected,
+            BlsValidatorCommitment::BeaconValidatorPubkey(expected) => {
+                qsag_accel::ct::ct_eq_bytes(&pk, expected)
+            }
             BlsValidatorCommitment::UnrevealedBls0x00Credential(cred) => {
-                cred[0] == 0x00 && &compute_bls_0x00_withdrawal_credentials(&pk) == cred
+                let mut actual = compute_bls_0x00_withdrawal_credentials(&pk);
+                let eq = cred[0] == 0x00 && qsag_accel::ct::ct_eq_bytes(&actual, cred);
+                ct_zeroize_bytes(&mut actual);
+                eq
             }
         };
         ct_zeroize_bytes(&mut pk);

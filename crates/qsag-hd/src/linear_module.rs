@@ -120,9 +120,19 @@ pub fn mod_q_inv_or_zero(a: u32) -> u32 {
 }
 
 /// Element of $\mathcal{R}_q = \mathbb{Z}_q[X]/(X^{256} + 1)$ in canonical coefficient form `[0, q)`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq)]
 pub struct RingPoly {
     pub coeffs: [u32; MODULE_N],
+}
+
+impl PartialEq for RingPoly {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff = 0u32;
+        for (a, b) in self.coeffs.iter().zip(other.coeffs.iter()) {
+            diff |= a ^ b;
+        }
+        core::hint::black_box(diff) == 0
+    }
 }
 
 impl SecretWipe for RingPoly {

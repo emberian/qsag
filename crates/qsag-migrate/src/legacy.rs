@@ -363,12 +363,42 @@ impl LegacyOwnershipWitness {
 
     /// Verify locally that `self` matches `target` before running the PQ-ZK prover.
     pub fn matches_commitment(&self, target: &LegacyCommitmentKind) -> bool {
-        let actual = match target {
-            LegacyCommitmentKind::BitcoinHash160(_) => self.compute_bitcoin_hash160(),
-            LegacyCommitmentKind::BitcoinTaprootXOnly(_) => self.compute_taproot_tweaked_xonly(),
-            LegacyCommitmentKind::EthereumKeccak20(_) => self.compute_ethereum_keccak20(),
-            LegacyCommitmentKind::Slip0010Ed25519(_) => Some(self.compute_slip0010_commitment()),
-        };
-        actual.as_ref() == Some(target)
+        match *target {
+            LegacyCommitmentKind::BitcoinHash160(ref expected) => {
+                if let Some(LegacyCommitmentKind::BitcoinHash160(a)) =
+                    self.compute_bitcoin_hash160()
+                {
+                    qsag_accel::ct::ct_eq_bytes(&a, expected)
+                } else {
+                    false
+                }
+            }
+            LegacyCommitmentKind::BitcoinTaprootXOnly(ref expected) => {
+                if let Some(LegacyCommitmentKind::BitcoinTaprootXOnly(a)) =
+                    self.compute_taproot_tweaked_xonly()
+                {
+                    qsag_accel::ct::ct_eq_bytes(&a, expected)
+                } else {
+                    false
+                }
+            }
+            LegacyCommitmentKind::EthereumKeccak20(ref expected) => {
+                if let Some(LegacyCommitmentKind::EthereumKeccak20(a)) =
+                    self.compute_ethereum_keccak20()
+                {
+                    qsag_accel::ct::ct_eq_bytes(&a, expected)
+                } else {
+                    false
+                }
+            }
+            LegacyCommitmentKind::Slip0010Ed25519(ref expected) => {
+                if let LegacyCommitmentKind::Slip0010Ed25519(a) = self.compute_slip0010_commitment()
+                {
+                    qsag_accel::ct::ct_eq_bytes(&a, expected)
+                } else {
+                    false
+                }
+            }
+        }
     }
 }

@@ -132,8 +132,15 @@ pub const NULLIFIER_TAG_PALLAS_AK: u64 = 3;
 pub const NULLIFIER_TAG_PALLAS_RK: u64 = 4;
 
 /// Canonical element of the Pallas base field `F_p` (`0 <= self < p`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq)]
 pub struct FpPallas(pub [u64; 4]);
+
+impl PartialEq for FpPallas {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        limbs::ct_eq(self.0, other.0)
+    }
+}
 
 impl FpPallas {
     pub const ZERO: Self = Self([0; 4]);
@@ -265,8 +272,15 @@ impl core::ops::Neg for FpPallas {
 }
 
 /// Canonical element of the Pallas scalar field `F_q` (`0 <= self < q`), wiped on `Drop`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq)]
 pub struct FqPallas(pub [u64; 4]);
+
+impl PartialEq for FqPallas {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        limbs::ct_eq(self.0, other.0)
+    }
+}
 
 impl fmt::Debug for FqPallas {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -539,13 +553,13 @@ impl PallasPoint {
 
 impl PartialEq for PallasPoint {
     fn eq(&self, other: &Self) -> bool {
-        match (self.z.is_zero(), other.z.is_zero()) {
-            (true, true) => true,
-            (true, false) | (false, true) => false,
-            (false, false) => {
-                (self.x * other.z == other.x * self.z) && (self.y * other.z == other.y * self.z)
-            }
-        }
+        let z1_zero = self.z.is_zero();
+        let z2_zero = other.z.is_zero();
+        let both_inf = z1_zero & z2_zero;
+        let neither_inf = (!z1_zero) & (!z2_zero);
+        let x_eq = self.x * other.z == other.x * self.z;
+        let y_eq = self.y * other.z == other.y * self.z;
+        both_inf | (neither_inf & x_eq & y_eq)
     }
 }
 impl Eq for PallasPoint {}
@@ -679,7 +693,10 @@ impl PallasOwnershipWitness {
             return false;
         };
         let pt = PallasPoint::spend_auth_mul_ct(&rsk);
-        &pt.to_compressed_bytes() == target.compressed_bytes()
+        let mut actual = pt.to_compressed_bytes();
+        let ok = qsag_accel::ct::ct_eq_bytes(&actual, target.compressed_bytes());
+        ct_zeroize_bytes(&mut actual);
+        ok
     }
 }
 

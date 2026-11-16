@@ -575,9 +575,9 @@ pub fn decompose_ct(r: u32, gamma2: u32) -> (u32, i32) {
     let r_minus_r0 = (r as i32) - r0_base;
 
     // Corner wrap at `r - r0 == q - 1`: set `r1 = 0, r0 = r0_base - 1`
-    let is_top = r_minus_r0 == (MLDSA_Q - 1) as i32;
-    let base_r1 = q_quot + (gt_g2 as u32);
-    let r1 = ct_select_u64(is_top, 0, base_r1 as u64) as u32;
+    let is_top = ct_eq_u64(r_minus_r0 as u64, (MLDSA_Q - 1) as u64);
+    let base_r1 = ct_select_u64(gt_g2, (q_quot + 1) as u64, q_quot as u64);
+    let r1 = ct_select_u64(is_top, 0, base_r1) as u32;
     let r0 = ct_select_u64(is_top, (r0_base - 1) as u64, r0_base as u64) as i32;
     (r1, r0)
 }
@@ -1208,7 +1208,9 @@ fn expand_secret_lanes<S, const L: usize>(
         }
     }
     qsag_asm::volatile_fill(words(state), [0u64; L]);
-    out.extend(polys.into_iter().take(count));
+    for poly in polys.iter_mut().take(count) {
+        out.push(poly.clone());
+    }
 }
 
 /// FIPS 204 `ExpandS` (`Algorithm 33`) batch sampler across `total_polys` (`ell + k`) `SHAKE256` streams.
