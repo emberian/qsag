@@ -39,15 +39,13 @@
 //! The engine is straight-line code for ONE party. Control flow depends only
 //! on opened values, so all honest parties execute the same rounds.
 
-use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_sub};
+use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_reduce_u64, fq_sub};
 use alloc::vec;
 use alloc::vec::Vec;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
 use qsag_asm::wipe::{secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve};
 use qsag_core::wipe::{SecretBuffer, SecretWipe};
-
-const Q64: u64 = MLDSA_Q as u64;
 
 /// RSS enumerates C(n, t-1) subsets; bound the combinatorial allocation.
 pub const MAX_MPC_PARTIES: usize = 16;
@@ -653,7 +651,7 @@ impl KAcc {
         self.pending += 1;
         if self.pending == 8192 {
             for limb in &mut self.limbs {
-                *limb %= Q64;
+                *limb = fq_reduce_u64(*limb) as u64;
             }
             self.pending = 0;
         }
@@ -661,13 +659,13 @@ impl KAcc {
 
     fn reduce(&self) -> Kx {
         core::array::from_fn(|i| {
-            let low = self.limbs[i] % Q64;
+            let low = fq_reduce_u64(self.limbs[i]) as u64;
             let high = if i + EXT_DEGREE < self.limbs.len() {
-                self.limbs[i + EXT_DEGREE] % Q64
+                fq_reduce_u64(self.limbs[i + EXT_DEGREE]) as u64
             } else {
                 0
             };
-            ((low + EXT_NONRESIDUE * high) % Q64) as u32
+            fq_reduce_u64(low + EXT_NONRESIDUE * high)
         })
     }
 }
@@ -1632,10 +1630,10 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     for &j in others {
                         sum += b.c[j][k] as u64;
                     }
-                    acc[k] += (left[k] as u64) * (sum % Q64);
+                    acc[k] += (left[k] as u64) * (fq_reduce_u64(sum) as u64);
                 }
             }
-            let value: Vec<u32> = acc.iter().map(|&v| (v % Q64) as u32).collect();
+            let value: Vec<u32> = acc.iter().map(|&v| fq_reduce_u64(v)).collect();
             #[cfg(test)]
             let value = test_support::apply_armed_fault(self.phase, value);
             let z = self.reshare(value, RoundKind::Multiply)?;
@@ -1821,7 +1819,12 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
     }
 
     fn reshare_k(&mut self, values: &[Kx]) -> Result<Vec<Vec<Kx>>, MpcError> {
-        let flat: Vec<u32> = values.iter().flat_map(|v| v.iter().copied()).collect();
+        // Sized once: `collect` over `flat_map` grows by reallocation and would
+        // leave copies of the secret limbs in freed heap blocks.
+        let mut flat: Vec<u32> = Vec::with_capacity(EXT_DEGREE * values.len());
+        for value in values {
+            flat.extend_from_slice(value);
+        }
         let share = self.reshare(flat, RoundKind::VerifyReshare)?;
         Ok(share.c.iter().map(|comp| unflatten(comp)).collect())
     }
@@ -2392,7 +2395,7 @@ fn eval_groups(values: &[Kx], row: &[u32; FOLD], groups: usize) -> Vec<Kx> {
                     *limb += (weight as u64) * (v as u64);
                 }
             }
-            core::array::from_fn(|i| (limbs[i] % Q64) as u32)
+            core::array::from_fn(|i| fq_reduce_u64(limbs[i]))
         })
         .collect()
 }

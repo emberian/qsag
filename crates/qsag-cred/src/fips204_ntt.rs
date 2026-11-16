@@ -5,7 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use qsag_accel::ct::{ct_eq_bytes, ct_lt_u64, ct_select_u64, ct_zeroize_u32s};
+use qsag_accel::ct::{ct_eq_bytes, ct_eq_u64, ct_lt_u64, ct_select_u64, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake128, Shake256};
 use qsag_core::wipe::{SecretBuffer, SecretBytes};
 
@@ -46,6 +46,23 @@ pub const fn fq_mul(a: u32, b: u32) -> u32 {
     let prod = (a as u64) * (b as u64);
     let q_est = (((prod as u128) * BARRETT_M64) >> 64) as u64;
     let rem = prod - q_est * (MLDSA_Q as u64);
+    let ge = !ct_lt_u64(rem, MLDSA_Q as u64);
+    ct_select_u64(ge, rem.wrapping_sub(MLDSA_Q as u64), rem) as u32
+}
+
+/// Branchless, division-free reduction of any `u64` modulo $q$, for unreduced
+/// accumulators of secret products.
+///
+/// With $M_{64} = \lfloor 2^{64} / q \rfloor$ and $x < 2^{64}$, the estimate
+/// $\lfloor x M_{64} / 2^{64} \rfloor$ is $\lfloor x/q \rfloor$ or one less (the
+/// error is below $x / 2^{64} + 1 < 2$), so `x - q_est * q` lies in `[0, 2q)` and
+/// one conditional subtraction finishes. The hardware `div` that `%` compiles
+/// to has operand-dependent latency on most cores; this has none.
+#[inline]
+pub const fn fq_reduce_u64(x: u64) -> u32 {
+    const BARRETT_M64: u128 = (1u128 << 64) / (MLDSA_Q as u128);
+    let q_est = (((x as u128) * BARRETT_M64) >> 64) as u64;
+    let rem = x - q_est * (MLDSA_Q as u64);
     let ge = !ct_lt_u64(rem, MLDSA_Q as u64);
     ct_select_u64(ge, rem.wrapping_sub(MLDSA_Q as u64), rem) as u32
 }
@@ -184,10 +201,25 @@ impl MlDsaLevel {
 }
 
 /// Polynomial in $\mathcal{R}_q$ (standard coefficient order or NTT evaluation order).
-#[derive(Clone, PartialEq, Eq)]
+/// Equality reads every coefficient whatever the values are: secret polynomials
+/// (`s1`, `s2`, key shares) have this type.
+#[derive(Clone)]
 pub struct Poly256 {
     pub coeffs: [u32; MLDSA_N],
 }
+
+impl PartialEq for Poly256 {
+    fn eq(&self, other: &Self) -> bool {
+        let diff = self
+            .coeffs
+            .iter()
+            .zip(&other.coeffs)
+            .fold(0u32, |acc, (a, b)| acc | (a ^ b));
+        ct_eq_u64(diff as u64, 0)
+    }
+}
+
+impl Eq for Poly256 {}
 
 impl Drop for Poly256 {
     fn drop(&mut self) {
@@ -558,8 +590,10 @@ pub fn high_bits_ct(r: u32, gamma2: u32) -> u32 {
 #[inline]
 pub fn low_bits_abs_ct(r: u32, gamma2: u32) -> u32 {
     let (_, r0) = decompose_ct(r, gamma2);
-    let neg = r0 < 0;
-    ct_select_u64(neg, (-r0) as u64, r0 as u64) as u32
+    // |r0| from the sign mask, with no comparison on the secret `r0`
+    // (`|r0| <= gamma2`, so the negation cannot overflow).
+    let sign = r0 >> 31;
+    ((r0 ^ sign) - sign) as u32
 }
 
 /// FIPS 204 `MakeHint(z, r)` (`Algorithm 39`).
@@ -1003,6 +1037,88 @@ fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
     poly
 }
 
+/// SHAKE256 blocks squeezed for every secret polynomial before any acceptance
+/// count is looked at. `RejBoundedPoly` accepts a nibble with probability
+/// `15/16` (`eta = 2`) or `9/16` (`eta = 4`); the chance that the 544 or 816
+/// nibbles of this prefix hold fewer than 256 accepted ones is below `2^-600`
+/// and `2^-149` (the Chernoff bound `exp(-N * KL(256/N || p))`).
+const fn rej_eta_fixed_blocks(eta: u32) -> usize {
+    if eta == 2 { 2 } else { 3 }
+}
+const REJ_ETA_MAX_FIXED_BLOCKS: usize = 3;
+const REJ_ETA_PREFIX_BYTES: usize = 136 * REJ_ETA_MAX_FIXED_BLOCKS;
+const REJ_ETA_MAX_FIXED_NIBBLES: usize = 2 * REJ_ETA_PREFIX_BYTES;
+
+/// The `RejBoundedPoly` coefficient of one nibble and whether it is accepted
+/// (`1`) or rejected (`0`), with no branch or table lookup on the nibble.
+/// `eta` is public. The value of a rejected nibble is meaningless.
+#[inline]
+fn rej_eta_nibble_ct(nibble: u32, eta: u32) -> (u32, u32) {
+    if eta == 2 {
+        // `floor(n / 5)` for `n < 16` as a multiply and shift.
+        let rem = nibble - 5 * ((nibble * 205) >> 10);
+        (fq_sub(2, rem), ct_lt_u64(nibble as u64, 15) as u32)
+    } else {
+        (fq_sub(eta, nibble), ct_lt_u64(nibble as u64, 9) as u32)
+    }
+}
+
+/// Fills `coeffs` with the first accepted coefficients of a fixed stream prefix
+/// and returns how many it placed (`MLDSA_N` unless the prefix ran short).
+///
+/// Which nibbles are rejected is secret: it is a function of `s1`/`s2`. Every
+/// nibble of the prefix is mapped, and the accepted ones are then moved to the
+/// front, in order, by a fixed sequence of conditional moves (each element
+/// travels left by the number of rejected nibbles before it, one binary digit
+/// of that distance per pass). The memory accesses and the work done depend on
+/// the prefix length only. Moving in ascending order within a pass never lands
+/// on an accepted element that stays: two accepted elements keep their order
+/// and their remaining distances are multiples of the pass's step, the later
+/// one never having less left to travel.
+///
+/// The returned count is compared with `MLDSA_N` by the caller; that reveals
+/// only the event that the prefix ran short.
+fn rej_eta_fill_from_prefix_ct(prefix: &[u8], eta: u32, coeffs: &mut [u32; MLDSA_N]) -> usize {
+    let n = 2 * prefix.len();
+    assert!((MLDSA_N..=REJ_ETA_MAX_FIXED_NIBBLES).contains(&n));
+    let mut values = SecretBuffer([0u32; REJ_ETA_MAX_FIXED_NIBBLES]);
+    let mut keep = SecretBuffer([0u32; REJ_ETA_MAX_FIXED_NIBBLES]);
+    let mut dist = SecretBuffer([0u32; REJ_ETA_MAX_FIXED_NIBBLES]);
+    let mut accepted = 0u32;
+    for (i, &byte) in prefix.iter().enumerate() {
+        for (half, nibble) in [byte & 15, byte >> 4].into_iter().enumerate() {
+            let idx = 2 * i + half;
+            let (value, accept) = rej_eta_nibble_ct(nibble as u32, eta);
+            values[idx] = value;
+            keep[idx] = accept;
+            dist[idx] = idx as u32 - accepted;
+            accepted += accept;
+        }
+    }
+    let mut digit = 0u32;
+    while (1usize << digit) < n {
+        let step = 1usize << digit;
+        for i in step..n {
+            let j = i - step;
+            let moves = ct_eq_u64((keep[i] & (dist[i] >> digit) & 1) as u64, 1);
+            values[j] = ct_select_u64(moves, values[i] as u64, values[j] as u64) as u32;
+            dist[j] = ct_select_u64(moves, dist[i] as u64, dist[j] as u64) as u32;
+            keep[j] = ct_select_u64(moves, 1, keep[j] as u64) as u32;
+            keep[i] = ct_select_u64(moves, 0, keep[i] as u64) as u32;
+        }
+        digit += 1;
+    }
+    for (slot, (&value, &kept)) in coeffs.iter_mut().zip(values.iter().zip(keep.iter())) {
+        *slot = value & kept.wrapping_neg();
+    }
+    (accepted as usize).min(MLDSA_N)
+}
+
+/// Sequential rejection sampling of one more stream block. It branches on the
+/// nibbles, so it is used only for the blocks after the fixed prefix, which
+/// are reached with the negligible probability given at
+/// [`rej_eta_fixed_blocks`] (FIPS 204 leaves the stream length unbounded, so
+/// an exact sampler needs some continuation).
 #[inline]
 fn rej_eta_ingest_block(
     buf: &[u8; 136],
@@ -1030,8 +1146,61 @@ fn rej_eta_ingest_block(
     }
 }
 
+/// Samples up to `L` secret polynomials, one per nonce, from `L` parallel
+/// `SHAKE256` streams held in `state`.
+fn expand_secret_lanes<S, const L: usize>(
+    seed_w: &[u64; 8],
+    nonces: core::ops::Range<usize>,
+    eta: u32,
+    state: &mut S,
+    words: fn(&mut S) -> &mut [[u64; L]; 25],
+    permute: fn(&mut S),
+    out: &mut Vec<Poly256>,
+) {
+    for (word, &seed) in words(state).iter_mut().zip(seed_w) {
+        *word = [seed; L];
+    }
+    let count = nonces.len();
+    for (lane, nonce) in nonces.enumerate() {
+        words(state)[8][lane] = (nonce as u16 as u64) | (0x1Fu64 << 16);
+        words(state)[16][lane] = 1u64 << 63;
+    }
+    let blocks = rej_eta_fixed_blocks(eta);
+    let mut prefix = SecretBuffer([[0u8; REJ_ETA_PREFIX_BYTES]; L]);
+    for block in 0..blocks {
+        permute(state);
+        for (lane, lane_prefix) in prefix.iter_mut().enumerate().take(count) {
+            let rate = lane_prefix[136 * block..136 * (block + 1)].as_chunks_mut::<8>().0;
+            for (chunk, word) in rate.iter_mut().zip(words(state).iter()) {
+                *chunk = word[lane].to_le_bytes();
+            }
+        }
+    }
+    let mut polys: [Poly256; L] = core::array::from_fn(|_| Poly256::zero());
+    let mut filled = [MLDSA_N; L];
+    for ((poly, fill), lane_prefix) in polys.iter_mut().zip(&mut filled).zip(prefix.iter()).take(count)
+    {
+        *fill = rej_eta_fill_from_prefix_ct(&lane_prefix[..136 * blocks], eta, &mut poly.coeffs);
+    }
+    drop(prefix);
+    let mut buf = SecretBytes::new([0u8; 136]);
+    while filled.iter().any(|&f| f < MLDSA_N) {
+        permute(state);
+        for (lane, (poly, fill)) in polys.iter_mut().zip(&mut filled).enumerate() {
+            if *fill < MLDSA_N {
+                for (chunk, word) in buf.0.as_chunks_mut::<8>().0.iter_mut().zip(words(state).iter())
+                {
+                    *chunk = word[lane].to_le_bytes();
+                }
+                rej_eta_ingest_block(&buf.0, eta, &mut poly.coeffs, fill);
+            }
+        }
+    }
+    qsag_asm::volatile_fill(words(state), [0u64; L]);
+    out.extend(polys.into_iter().take(count));
+}
+
 /// FIPS 204 `ExpandS` (`Algorithm 33`) batch sampler across `total_polys` (`ell + k`) `SHAKE256` streams.
-#[allow(clippy::needless_range_loop)]
 fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> Vec<Poly256> {
     let seed_w = SecretBuffer(pack_u64_words_64(seed));
     let mut out = Vec::with_capacity(total_polys);
@@ -1039,75 +1208,25 @@ fn expand_secret_polys_batch(seed: &[u8; 64], total_polys: usize, eta: u32) -> V
     for base in (0..total_polys).step_by(8) {
         let count = (total_polys - base).min(8);
         if count > 4 {
-            let mut state = qsag_asm::KeccakState8x::default();
-            for w in 0..8 {
-                state.0[w] = [seed_w[w]; 8];
-            }
-            for lane in 0..count {
-                let nonce = (base + lane) as u16;
-                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
-                state.0[16][lane] = 1u64 << 63;
-            }
-            let mut polys: [Poly256; 8] = core::array::from_fn(|_| Poly256::zero());
-            let mut filled = [0usize; 8];
-            for slot in filled.iter_mut().skip(count) {
-                *slot = MLDSA_N;
-            }
-            let mut buf = SecretBytes::new([0u8; 136]);
-            while filled.iter().any(|&f| f < MLDSA_N) {
-                qsag_asm::keccak_f1600_x8(&mut state);
-                for lane in 0..count {
-                    if filled[lane] < MLDSA_N {
-                        for w in 0..17 {
-                            buf.0[8 * w..8 * w + 8]
-                                .copy_from_slice(&state.0[w][lane].to_le_bytes());
-                        }
-                        rej_eta_ingest_block(
-                            &buf.0,
-                            eta,
-                            &mut polys[lane].coeffs,
-                            &mut filled[lane],
-                        );
-                    }
-                }
-            }
-            qsag_asm::volatile_fill(&mut state.0, [0; 8]);
-            out.extend(polys.into_iter().take(count));
+            expand_secret_lanes(
+                &seed_w,
+                base..base + count,
+                eta,
+                &mut qsag_asm::KeccakState8x::default(),
+                |state| &mut state.0,
+                qsag_asm::keccak_f1600_x8,
+                &mut out,
+            );
         } else {
-            let mut state = qsag_asm::KeccakState4x::default();
-            for w in 0..8 {
-                state.0[w] = [seed_w[w]; 4];
-            }
-            for lane in 0..count {
-                let nonce = (base + lane) as u16;
-                state.0[8][lane] = (nonce as u64) | (0x1Fu64 << 16);
-                state.0[16][lane] = 1u64 << 63;
-            }
-            let mut polys: [Poly256; 4] = core::array::from_fn(|_| Poly256::zero());
-            let mut filled = [0usize; 4];
-            for slot in filled.iter_mut().skip(count) {
-                *slot = MLDSA_N;
-            }
-            let mut buf = SecretBytes::new([0u8; 136]);
-            while filled.iter().any(|&f| f < MLDSA_N) {
-                qsag_asm::keccak_f1600_x4(&mut state);
-                for lane in 0..count {
-                    if filled[lane] < MLDSA_N {
-                        for w in 0..17 {
-                            buf.0[8 * w..8 * w + 8]
-                                .copy_from_slice(&state.0[w][lane].to_le_bytes());
-                        }
-                        rej_eta_ingest_block(
-                            &buf.0,
-                            eta,
-                            &mut polys[lane].coeffs,
-                            &mut filled[lane],
-                        );
-                    }
-                }
-            }
-            qsag_asm::volatile_fill(&mut state.0, [0; 4]);
-            out.extend(polys.into_iter().take(count));
+            expand_secret_lanes(
+                &seed_w,
+                base..base + count,
+                eta,
+                &mut qsag_asm::KeccakState4x::default(),
+                |state| &mut state.0,
+                qsag_asm::keccak_f1600_x4,
+                &mut out,
+            );
         }
     }
 
@@ -1763,6 +1882,143 @@ mod malformed_parameter_tests {
                 for bytes in [&[][..], &alloc::vec![0; p.sig_bytes][..]] {
                     assert!(sig_decode(&bad, bytes).is_none());
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod constant_time_sampling_tests {
+    use super::*;
+
+    fn stream(seed: u64, len: usize) -> Vec<u8> {
+        let mut xof = Shake256::new();
+        xof.absorb(&seed.to_le_bytes());
+        xof.finalize(0x1f);
+        let mut bytes = vec![0u8; len];
+        xof.squeeze(&mut bytes);
+        bytes
+    }
+
+    /// Sequential `RejBoundedPoly` over a byte stream: the reference.
+    fn reference(bytes: &[u8], eta: u32) -> ([u32; MLDSA_N], usize) {
+        let mut coeffs = [0u32; MLDSA_N];
+        let mut filled = 0;
+        for block in bytes.as_chunks::<136>().0 {
+            rej_eta_ingest_block(block, eta, &mut coeffs, &mut filled);
+        }
+        (coeffs, filled)
+    }
+
+    #[test]
+    fn the_branchless_nibble_map_is_the_fips204_map() {
+        for nibble in 0u8..16 {
+            let (value, accept) = rej_eta_nibble_ct(nibble as u32, 2);
+            match qsag_verified::mldsa44_sample_eta2_nibble_mod_q(nibble) {
+                Some(expected) => assert_eq!((value, accept), (expected, 1)),
+                None => assert_eq!(accept, 0),
+            }
+            let (value, accept) = rej_eta_nibble_ct(nibble as u32, 4);
+            assert_eq!(accept, (nibble < 9) as u32);
+            if nibble < 9 {
+                assert_eq!(value, fq_sub(4, nibble as u32));
+            }
+        }
+    }
+
+    #[test]
+    fn oblivious_compaction_matches_sequential_rejection_sampling() {
+        for eta in [2u32, 4] {
+            let len = 136 * rej_eta_fixed_blocks(eta);
+            for seed in 0..200u64 {
+                let bytes = stream(seed ^ ((eta as u64) << 32), len);
+                let (expected, expected_filled) = reference(&bytes, eta);
+                assert_eq!(expected_filled, MLDSA_N);
+                let mut coeffs = [0xdead_beefu32; MLDSA_N];
+                let filled = rej_eta_fill_from_prefix_ct(&bytes, eta, &mut coeffs);
+                assert_eq!(filled, MLDSA_N);
+                assert_eq!(coeffs, expected, "eta={eta} seed={seed}");
+            }
+        }
+    }
+
+    /// Streams built to reject far more than a real one: runs of rejected
+    /// nibbles at the start, at the end, alternating, and a prefix that runs
+    /// short, which the sequential continuation then completes.
+    #[test]
+    fn compaction_handles_dense_rejection_and_a_short_prefix() {
+        for eta in [2u32, 4] {
+            let blocks = rej_eta_fixed_blocks(eta);
+            let len = 136 * blocks;
+            let good = stream(77 + eta as u64, len + 4 * 136);
+            let patterns: [&dyn Fn(usize) -> bool; 5] = [
+                &|i| i < len / 3,
+                &|i| i >= len / 2,
+                &|i| i % 2 == 0,
+                &|i| i % 3 != 0,
+                &|_| true,
+            ];
+            for (which, reject) in patterns.iter().enumerate() {
+                let mut bytes = good.clone();
+                for (i, byte) in bytes[..len].iter_mut().enumerate() {
+                    if reject(i) {
+                        *byte = 0xff;
+                    } else if which == 2 {
+                        // One rejected and one accepted nibble in the same byte.
+                        *byte |= 0xf0;
+                    }
+                }
+                let (expected, expected_filled) = reference(&bytes, eta);
+                assert_eq!(expected_filled, MLDSA_N);
+                let mut coeffs = [0xdead_beefu32; MLDSA_N];
+                let mut filled = rej_eta_fill_from_prefix_ct(&bytes[..len], eta, &mut coeffs);
+                let (prefix_only, prefix_filled) = reference(&bytes[..len], eta);
+                assert_eq!(filled, prefix_filled, "eta={eta} pattern={which}");
+                assert_eq!(coeffs[..filled], prefix_only[..filled]);
+                assert!(coeffs[filled..].iter().all(|&c| c == 0));
+                for block in bytes[len..].as_chunks::<136>().0 {
+                    rej_eta_ingest_block(block, eta, &mut coeffs, &mut filled);
+                }
+                assert_eq!(filled, MLDSA_N);
+                assert_eq!(coeffs, expected, "eta={eta} pattern={which}");
+            }
+        }
+    }
+
+    #[test]
+    fn barrett_reduction_of_u64_matches_the_remainder() {
+        let q = MLDSA_Q as u64;
+        let mut samples = vec![0, 1, q - 1, q, q + 1, 2 * q - 1, 2 * q, u64::MAX, u64::MAX - 1];
+        for k in [1u64 << 23, 1 << 32, 1 << 46, 1 << 62, 1 << 63] {
+            samples.extend([k - 1, k, k + 1, (k / q) * q, (k / q) * q - 1]);
+        }
+        let bytes = stream(5, 8 * 4096);
+        samples.extend(bytes.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)));
+        for x in samples {
+            assert_eq!(fq_reduce_u64(x) as u64, x % q, "x={x}");
+        }
+    }
+
+    #[test]
+    fn low_bits_magnitude_matches_the_signed_decomposition() {
+        for gamma2 in [(MLDSA_Q - 1) / 88, (MLDSA_Q - 1) / 32] {
+            for r in (0..MLDSA_Q).step_by(97).chain(MLDSA_Q - 300..MLDSA_Q) {
+                let (_, r0) = decompose_ct(r, gamma2);
+                assert_eq!(low_bits_abs_ct(r, gamma2), r0.unsigned_abs());
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_equality_reads_all_coefficients() {
+        let zero = Poly256::zero();
+        assert!(zero == Poly256::zero());
+        for index in [0, 1, 127, MLDSA_N - 1] {
+            for value in [1u32, 1 << 22, u32::MAX] {
+                let mut other = Poly256::zero();
+                other.coeffs[index] = value;
+                assert!(zero != other);
+                assert!(other == other.clone());
             }
         }
     }

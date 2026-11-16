@@ -185,6 +185,42 @@ impl NonceBurnPersistence for AllowBurn {
     fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
         true
     }
+    fn next_epoch(&self, _: &[u8; 32], _: u16) -> Result<u64, ThresholdMlDsaError> {
+        Ok(0)
+    }
+}
+
+/// In-memory ledger bound to one key, counting every call that reaches it.
+struct BoundBurn {
+    key_id: [u8; 32],
+    next: u64,
+    reservations: usize,
+    enrolled: Option<Vec<u16>>,
+}
+impl NonceBurnPersistence for BoundBurn {
+    fn reserve(&mut self, _: u16, epoch: u64, _: &[u8; 32], _: u32) -> bool {
+        self.reservations += 1;
+        if epoch < self.next {
+            return false;
+        }
+        self.next = epoch + 1;
+        true
+    }
+    fn next_epoch(&self, key_id: &[u8; 32], _: u16) -> Result<u64, ThresholdMlDsaError> {
+        if key_id != &self.key_id {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+        Ok(self.next)
+    }
+    fn enroll_parties(
+        &mut self,
+        key_id: &[u8; 32],
+        party_ids: &[u16],
+    ) -> Result<(), ThresholdMlDsaError> {
+        assert_eq!(key_id, &self.key_id);
+        self.enrolled = Some(party_ids.to_vec());
+        Ok(())
+    }
 }
 
 fn engine_for<'a>(net: &'a mut Endpoint, st: &Structure, me: usize) -> Engine<'a, Endpoint> {
@@ -928,6 +964,9 @@ fn a_refused_attempt_reservation_stops_before_any_mask_exists() {
         fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
             false
         }
+        fn next_epoch(&self, _: &[u8; 32], _: u16) -> Result<u64, ThresholdMlDsaError> {
+            Ok(0)
+        }
     }
     let mut shares = dkg(&[1, 2, 3], 2, 12);
     let request = ThresholdSignSession {
@@ -952,6 +991,260 @@ fn a_refused_attempt_reservation_stops_before_any_mask_exists() {
             .all(|r| r == &Err(ThresholdMlDsaError::NoncePersistenceFailed))
     );
     assert!(log.iter().all(|r| r.phase == PHASE_SETUP));
+}
+
+/// Every way a hand-built pack can be wrong is refused by `validate`, with the
+/// same verdict `from_bytes` gives for the encoded form.
+#[test]
+fn pack_validation_rejects_every_malformed_field() {
+    let shares = dkg(&[1, 2, 3], 2, 31);
+    let good = shares[0].verification_pack().clone();
+    assert_eq!(good.validate(), Ok(()));
+    assert_eq!(
+        ThresholdVerificationPack::from_bytes(&good.to_bytes()).as_ref(),
+        Ok(&good)
+    );
+    let malformed = Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+    let mutations: [(&str, fn(&mut ThresholdVerificationPack)); 11] = [
+        ("unsorted ids", |p| p.party_ids = vec![2, 1, 3]),
+        ("missing polynomial", |p| {
+            p.t.pop();
+        }),
+        ("extra polynomial", |p| p.t.push(Poly256::zero())),
+        ("no polynomials", |p| p.t.clear()),
+        ("coefficient q", |p| p.t[0].coeffs[0] = MLDSA_Q),
+        ("coefficient u32::MAX", |p| p.t[3].coeffs[255] = u32::MAX),
+        ("high part of t", |p| {
+            p.t[1].coeffs[7] = fq_add(p.t[1].coeffs[7], 1 << MLDSA_D)
+        }),
+        ("public key bit", |p| p.pk_bytes[40] ^= 1),
+        ("public key truncated", |p| {
+            p.pk_bytes.pop();
+        }),
+        ("rho", |p| p.rho[0] ^= 1),
+        ("level", |p| p.level = MlDsaLevel::MlDsa65),
+    ];
+    for (name, mutate) in mutations {
+        let mut pack = good.clone();
+        mutate(&mut pack);
+        assert_eq!(pack.validate(), malformed, "{name}");
+    }
+    let mut duplicate = good.clone();
+    duplicate.party_ids = vec![1, 1, 3];
+    assert_eq!(
+        duplicate.validate(),
+        Err(ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 1 })
+    );
+    let mut threshold = good.clone();
+    threshold.threshold = 3;
+    assert_eq!(
+        threshold.validate(),
+        Err(ThresholdMlDsaError::InsufficientHonestHolderCoverage {
+            threshold: 3,
+            num_parties: 3
+        })
+    );
+}
+
+/// A pack with the wrong number of `t` polynomials used to burn an attempt and
+/// then panic on a length assertion. It is now refused at entry: no round is
+/// run and the ledger is not consulted.
+#[test]
+fn signing_with_a_malformed_pack_stops_before_any_round_or_reservation() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let request = ThresholdSignSession {
+        session_id: [0x51; 32],
+        quorum: vec![1, 2, 3],
+    };
+    let mutations: [fn(&mut ThresholdVerificationPack); 4] = [
+        |p| {
+            p.t.pop();
+        },
+        |p| p.party_ids = vec![3, 2, 1],
+        |p| p.t[0].coeffs[0] = MLDSA_Q,
+        |p| p.pk_bytes[33] ^= 0x80,
+    ];
+    for (index, mutate) in mutations.into_iter().enumerate() {
+        let mut shares = dkg(&[1, 2, 3], 2, 32);
+        for share in &mut shares {
+            mutate(&mut share.pack);
+        }
+        let ledger_calls = AtomicUsize::new(0);
+        struct Counting<'a>(&'a AtomicUsize);
+        impl NonceBurnPersistence for Counting<'_> {
+            fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+            fn next_epoch(&self, _: &[u8; 32], _: u16) -> Result<u64, ThresholdMlDsaError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            }
+        }
+        let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+        let (results, log) = run(states, Vec::new(), |me, share, net| {
+            threshold_sign_mldsa_party(
+                share,
+                &request,
+                b"m",
+                b"",
+                &[me as u8 + 1; 32],
+                &mut Counting(&ledger_calls),
+                net,
+            )
+        });
+        for result in &results {
+            assert_eq!(
+                result,
+                &Err(ThresholdMlDsaError::ProtocolInvariantViolated),
+                "mutation {index}"
+            );
+        }
+        assert!(log.is_empty(), "mutation {index}");
+        assert_eq!(ledger_calls.load(Ordering::SeqCst), 0, "mutation {index}");
+        assert!(shares.iter().all(|share| share.next_epoch == 0));
+    }
+}
+
+#[test]
+fn a_shamir_share_is_not_restored_against_a_malformed_pack() {
+    let shares = dkg(&[1, 2, 3], 2, 33);
+    let good = shares[0].verification_pack().clone();
+    let params = good.level.params();
+    let holder = ThresholdMlDsaSignerShare {
+        party_id: 2,
+        pack: good.clone(),
+        subsets: Vec::new(),
+        shamir: Some(ShamirShare {
+            s1_hat: vec![Poly256::zero(); params.ell],
+            s2_hat: vec![Poly256::zero(); params.k],
+        }),
+        next_epoch: 5,
+    };
+    let bytes = holder.to_shamir_bytes().unwrap();
+    let restored = ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, good.clone(), 2).unwrap();
+    assert_eq!((restored.party_id, restored.next_epoch), (2, 5));
+    let mutations: [fn(&mut ThresholdVerificationPack); 4] = [
+        |p| p.party_ids = vec![2, 1, 3],
+        |p| {
+            p.t.pop();
+        },
+        |p| p.t[2].coeffs[9] = MLDSA_Q + 1,
+        |p| p.pk_bytes[100] ^= 4,
+    ];
+    for (index, mutate) in mutations.into_iter().enumerate() {
+        let mut pack = good.clone();
+        mutate(&mut pack);
+        assert_eq!(
+            ThresholdMlDsaSignerShare::from_shamir_bytes(&bytes, pack, 2).map(|share| share.party_id),
+            Err(ThresholdMlDsaError::ProtocolInvariantViolated),
+            "mutation {index}"
+        );
+    }
+}
+
+/// The ledger is checked against the signing key and the share's epoch before
+/// the first round: a ledger for another key, a ledger that cannot report its
+/// epoch, and a share whose epoch is behind the ledger are all refused with
+/// nothing reserved.
+#[test]
+fn signing_binds_the_ledger_to_the_key_and_epoch_before_any_round() {
+    let request = ThresholdSignSession {
+        session_id: [0x52; 32],
+        quorum: vec![1, 2, 3],
+    };
+    let mut shares = dkg(&[1, 2, 3], 2, 34);
+    let key_id = shares[0].verification_pack().policy_signing_key_id();
+    let sign_with = |shares: &mut Vec<ThresholdMlDsaSignerShare>,
+                     ledger: &(dyn Fn() -> BoundBurn + Sync)| {
+        let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+        run(states, Vec::new(), |me, share, net| {
+            let mut burn = ledger();
+            let result = threshold_sign_mldsa_party(
+                share,
+                &request,
+                b"m",
+                b"",
+                &[me as u8 + 3; 32],
+                &mut burn,
+                net,
+            );
+            (result, burn.reservations, burn.enrolled)
+        })
+    };
+    let refused = |results: Vec<(Result<ThresholdSignOutput, ThresholdMlDsaError>, usize, Option<Vec<u16>>)>,
+                   log: Vec<RoundInfo>| {
+        for (result, reservations, enrolled) in results {
+            assert_eq!(result, Err(ThresholdMlDsaError::NoncePersistenceFailed));
+            assert_eq!(reservations, 0);
+            assert_eq!(enrolled, None);
+        }
+        assert!(log.is_empty());
+    };
+
+    // A ledger provisioned for another key.
+    let mut other_key = key_id;
+    other_key[0] ^= 1;
+    let (results, log) = sign_with(&mut shares, &|| BoundBurn {
+        key_id: other_key,
+        next: 0,
+        reservations: 0,
+        enrolled: None,
+    });
+    refused(results, log);
+
+    // A ledger ahead of the share: the share was restored without recovery.
+    let (results, log) = sign_with(&mut shares, &|| BoundBurn {
+        key_id,
+        next: 4,
+        reservations: 0,
+        enrolled: None,
+    });
+    refused(results, log);
+    assert!(shares.iter().all(|share| share.next_epoch == 0));
+
+    // A ledger that cannot report an epoch (the trait default) cannot sign.
+    struct NoRecovery;
+    impl NonceBurnPersistence for NoRecovery {
+        fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
+            panic!("reserved through a ledger that is not bound to the key");
+        }
+    }
+    let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+    let (results, log) = run(states, Vec::new(), |me, share, net| {
+        threshold_sign_mldsa_party(
+            share,
+            &request,
+            b"m",
+            b"",
+            &[me as u8 + 3; 32],
+            &mut NoRecovery,
+            net,
+        )
+    });
+    assert!(
+        results
+            .iter()
+            .all(|r| r == &Err(ThresholdMlDsaError::NoncePersistenceFailed))
+    );
+    assert!(log.is_empty());
+
+    // After recovery the same shares sign, and the ledger was told the
+    // enrolled custodians before its first reservation.
+    for share in &mut shares {
+        share.next_epoch = 4;
+    }
+    let (results, _) = sign_with(&mut shares, &|| BoundBurn {
+        key_id,
+        next: 4,
+        reservations: 0,
+        enrolled: None,
+    });
+    for (result, reservations, enrolled) in results {
+        let output = result.unwrap();
+        assert_eq!(reservations as u32, output.attempts);
+        assert_eq!(enrolled, Some(vec![1, 2, 3]));
+    }
 }
 
 #[test]
@@ -1415,6 +1708,94 @@ fn verified_response_gate_enforces_every_barrier_and_context() {
             PendingResponse::new_sealed(response(), context, 9, &seal_entropy)
                 .release(checks)
                 .is_err()
+        );
+    }
+}
+
+/// Abandoning an attempt (what `Drop` does on a rejected attempt or an error
+/// return) erases the seal key inside the gate: the gate reports the abort and
+/// the response can no longer be decrypted, even with every barrier passing.
+#[test]
+fn an_abandoned_pending_response_loses_its_seal_key() {
+    let context = [41; 32];
+    let good = MlDsaBarrierChecks {
+        req_session_id: context,
+        req_attempt: 2,
+        z_norm_ok: true,
+        r0_norm_ok: true,
+        w1_match: true,
+        u_com_bound: true,
+    };
+    let sealed = |entropy: u8| {
+        PendingResponse::new_sealed(
+            Sh {
+                c: vec![vec![5, 6, 7], vec![8, 9, 10]],
+            },
+            context,
+            2,
+            &[entropy; 32],
+        )
+    };
+    let mut pending = sealed(1);
+    assert!(!pending.gate.aborted() && !pending.gate.released());
+    pending.abandon();
+    assert!(pending.gate.aborted() && !pending.gate.released());
+    assert_eq!(
+        pending.release(good).map(|sh| sh.c.clone()),
+        Err(ThresholdMlDsaError::ProtocolInvariantViolated)
+    );
+
+    // A failed barrier leaves the gate in the same erased state, so a second
+    // gate holding the same key is the only way to decrypt; the sealed bytes
+    // of the refused response are not the plaintext.
+    let refused = sealed(1);
+    let ciphertext = refused.sealed_response.c.clone();
+    assert_ne!(ciphertext, vec![vec![5, 6, 7], vec![8, 9, 10]]);
+    let mut failing = good;
+    failing.w1_match = false;
+    assert!(refused.release(failing).is_err());
+
+    // The untouched path still releases, and different seal entropy gives a
+    // different ciphertext for the same response.
+    assert_ne!(sealed(2).sealed_response.c, ciphertext);
+    assert_eq!(
+        sealed(1).release(good).unwrap().c,
+        vec![vec![5, 6, 7], vec![8, 9, 10]]
+    );
+}
+
+/// The ciphertext tag is the canonical length-framed cSHAKE256 of the context,
+/// the attempt, the component count and each component, so moving a
+/// coefficient across a component boundary changes it.
+#[test]
+fn pending_ciphertext_tag_is_the_framed_cshake_of_its_components() {
+    let context = [9; 32];
+    let sh = Sh {
+        c: vec![vec![1, 2], vec![3]],
+    };
+    let le = |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let expected = cshake256_framed_32(
+        b"QSAG.MLDSA.PENDING_CT_TAG.V2",
+        &[
+            &context,
+            &7u32.to_be_bytes(),
+            &2u64.to_be_bytes(),
+            &le(&[1, 2]),
+            &le(&[3]),
+        ],
+    );
+    assert_eq!(PendingResponse::ciphertext_tag(&sh, &context, 7), expected);
+    let variants = [
+        (Sh { c: vec![vec![1], vec![2, 3]] }, context, 7),
+        (Sh { c: vec![vec![1, 2, 3]] }, context, 7),
+        (Sh { c: vec![vec![1, 2], vec![3], vec![]] }, context, 7),
+        (sh.clone(), context, 8),
+        (sh.clone(), [8; 32], 7),
+    ];
+    for (other, other_context, attempt) in variants {
+        assert_ne!(
+            PendingResponse::ciphertext_tag(&other, &other_context, attempt),
+            expected
         );
     }
 }
@@ -2288,4 +2669,109 @@ fn policy_swapped_party_tokens_fail_before_nonce_burn() {
         assert_eq!(burn.0, 0);
         assert_eq!(share.next_epoch, epoch_before);
     }
+}
+
+/// The file ledger enforces the same binding itself: `enroll_parties` refuses
+/// another key and a ledger holding burns of a party outside the committee,
+/// and once it has run, a party that is not a custodian cannot take a slot.
+#[cfg(feature = "std")]
+#[test]
+fn file_ledger_is_bound_to_its_key_and_enrolled_custodians() {
+    let dir = nonce_test_dir("enrolled");
+    let key = [0x71; 32];
+    let mac = [0x72; 32];
+    let failed = Err(ThresholdMlDsaError::NoncePersistenceFailed);
+
+    let mut store = FsNonceBurnStore::create(dir.join("a"), key, mac).unwrap();
+    assert_eq!(store.enroll_parties(&[0x70; 32], &[1, 2, 3]), failed);
+    assert_eq!(store.enroll_parties(&key, &[1, 1, 3]), failed);
+    // Not enrolled yet: the refused calls above installed nothing.
+    assert!(store.reserve(9, 0, &[1; 32], 0));
+    // The ledger now holds party 9, which is not in this committee.
+    assert_eq!(store.enroll_parties(&key, &[1, 2, 3]), failed);
+    assert_eq!(store.enroll_parties(&key, &[1, 2, 3, 9]), Ok(()));
+    let generation = store.generation();
+    for outsider in [0u16, 4, 8, 10, u16::MAX] {
+        assert!(!store.reserve(outsider, 0, &[2; 32], 0));
+    }
+    assert_eq!(store.generation(), generation);
+    assert!(store.reserve(2, 0, &[2; 32], 0));
+    assert!(store.reserve(9, 1, &[2; 32], 0));
+    assert_eq!(store.next_epoch(&key, 2), Ok(1));
+    assert_eq!(store.next_epoch(&[0x70; 32], 2), failed);
+
+    // Outsiders cannot use up the party table: every slot stays available to
+    // the custodians.
+    let mut store = FsNonceBurnStore::create(dir.join("b"), key, mac).unwrap();
+    let committee: Vec<u16> = (100..100 + MAX_THRESHOLD_MLDSA_PARTIES as u16).collect();
+    store.enroll_parties(&key, &committee).unwrap();
+    for outsider in 0..100u16 {
+        assert!(!store.reserve(outsider, 0, &[3; 32], 0));
+    }
+    for &custodian in &committee {
+        assert!(store.reserve(custodian, 0, &[3; 32], 0));
+    }
+    assert_eq!(store.generation(), MAX_THRESHOLD_MLDSA_PARTIES as u64);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// End to end with the file ledger: signing refuses a ledger created for
+/// another key and a share that is behind its ledger, without writing to
+/// either, and signs once the epoch is recovered.
+#[cfg(feature = "std")]
+#[test]
+fn signing_with_a_file_ledger_checks_key_and_epoch_first() {
+    let dir = nonce_test_dir("sign-binding");
+    let mac = [0x73; 32];
+    let request = ThresholdSignSession {
+        session_id: [0x53; 32],
+        quorum: vec![1, 2, 3],
+    };
+    let mut shares = dkg(&[1, 2, 3], 2, 35);
+    let key_id = shares[0].verification_pack().policy_signing_key_id();
+    let mut wrong_key = key_id;
+    wrong_key[31] ^= 1;
+    for me in 0..3 {
+        FsNonceBurnStore::create(dir.join(std::format!("wrong-{me}")), wrong_key, mac).unwrap();
+        let mut store =
+            FsNonceBurnStore::create(dir.join(std::format!("good-{me}")), key_id, mac).unwrap();
+        assert!(store.reserve(me as u16 + 1, 6, &[0x99; 32], 0));
+    }
+    let attempt = |shares: &mut Vec<ThresholdMlDsaSignerShare>, name: &str, ledger_key: [u8; 32]| {
+        let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+        run(states, Vec::new(), |me, share, net| {
+            let path = dir.join(std::format!("{name}-{me}"));
+            let mut store = FsNonceBurnStore::open(&path, ledger_key, mac).unwrap();
+            let before = store.generation();
+            let result = threshold_sign_mldsa_party(
+                share,
+                &request,
+                b"m",
+                b"",
+                &[me as u8 + 5; 32],
+                &mut store,
+                net,
+            );
+            (result, store.generation() - before)
+        })
+    };
+    for (name, ledger_key) in [("wrong", wrong_key), ("good", key_id)] {
+        let (results, log) = attempt(&mut shares, name, ledger_key);
+        for (result, written) in results {
+            assert_eq!(result, Err(ThresholdMlDsaError::NoncePersistenceFailed), "{name}");
+            assert_eq!(written, 0, "{name}");
+        }
+        assert!(log.is_empty(), "{name}");
+    }
+    for (me, share) in shares.iter_mut().enumerate() {
+        let path = dir.join(std::format!("good-{me}"));
+        let store = FsNonceBurnStore::open(&path, key_id, mac).unwrap();
+        share.recover_epoch_from_store(&store).unwrap();
+        assert_eq!(share.next_epoch, 7);
+    }
+    let (results, _) = attempt(&mut shares, "good", key_id);
+    for (result, written) in results {
+        assert_eq!(written, u64::from(result.unwrap().attempts));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

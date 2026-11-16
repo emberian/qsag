@@ -41,7 +41,7 @@
 //! hold shares of a different key, and it learns nothing beyond its own shares.
 
 use crate::fips204_ntt::{
-    MLDSA_N, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt, pk_encode,
+    MLDSA_N, MLDSA_Q, MlDsaLevel, Poly256, expand_a_ntt, fq_add, fq_mul, fq_sub, mat_vec_mul_ntt, pk_encode,
     power2round,
 };
 use crate::rss_mpc::{
@@ -145,9 +145,6 @@ impl ThresholdVerificationPack {
             .iter()
             .map(|pair| u16::from_le_bytes(*pair))
             .collect();
-        if sorted_distinct(&party_ids)? != party_ids {
-            return Err(malformed);
-        }
         let (rho, rest) = rest.split_at(32);
         let (pk_bytes, t) = rest.split_at(params.pk_bytes);
         let pack = Self {
@@ -158,10 +155,37 @@ impl ThresholdVerificationPack {
             pk_bytes: pk_bytes.to_vec(),
             t: to_polys(&unpack(t, t_len).ok_or(malformed.clone())?),
         };
-        if pack.pk_bytes != encode_public_key(&pack) {
+        pack.validate()?;
+        Ok(pack)
+    }
+
+    /// Checks everything signing relies on. The fields are public, so a pack
+    /// that did not come from [`Self::from_bytes`] or a ceremony is checked
+    /// here before it is used: supported parameters, custodian identifiers in
+    /// strictly ascending order, exactly `k` polynomials of `t` with every
+    /// coefficient below `q`, and `pk_bytes` equal to the FIPS 204 encoding of
+    /// `(rho, Power2Round(t).1)`.
+    pub fn validate(&self) -> Result<(), ThresholdMlDsaError> {
+        let malformed = ThresholdMlDsaError::ProtocolInvariantViolated;
+        check_parameters(self.level, self.threshold, self.party_ids.len())?;
+        if sorted_distinct(&self.party_ids)? != self.party_ids {
             return Err(malformed);
         }
-        Ok(pack)
+        let params = self.level.params();
+        if self.t.len() != params.k
+            || self.pk_bytes.len() != params.pk_bytes
+            || self
+                .t
+                .iter()
+                .flat_map(|poly| &poly.coeffs)
+                .any(|&coeff| coeff >= MLDSA_Q)
+        {
+            return Err(malformed);
+        }
+        if self.pk_bytes != encode_public_key(self) {
+            return Err(malformed);
+        }
+        Ok(())
     }
 }
 
@@ -202,6 +226,7 @@ impl ThresholdMlDsaSignerShare {
         pack: ThresholdVerificationPack,
         expected_party: u16,
     ) -> Result<Self, ThresholdMlDsaError> {
+        pack.validate()?;
         let params = pack.level.params();
         let split = params.ell * MLDSA_N;
         let len = split + params.k * MLDSA_N;
@@ -360,7 +385,7 @@ pub fn threshold_mldsa_shamir_expand_party<T: MpcTransport>(
         record.extend_from_slice(&share.pack.pk_bytes);
         pack(&flatten(&share.pack.t), &mut record);
         broadcast.extend_from_slice(&record);
-        let custody = SecretBuffer(share.custody_digest());
+        let custody = share.custody_digest();
         for (component, &subset) in share.subsets.iter().zip(&structure.subsets_of(me)) {
             let secret = flatten_key(&component.s1_hat, &component.s2_hat);
             let key = SecretBuffer(cshake256_framed_32(

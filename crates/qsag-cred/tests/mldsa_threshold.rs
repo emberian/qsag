@@ -78,6 +78,9 @@ impl NonceBurnPersistence for Burn {
         self.0.push(epoch);
         fresh
     }
+    fn next_epoch(&self, _: &[u8; 32], _: u16) -> Result<u64, ThresholdMlDsaError> {
+        Ok(self.0.iter().max().map_or(0, |epoch| epoch + 1))
+    }
 }
 
 #[test]
