@@ -317,7 +317,7 @@ fn stage_lists(fibers: u128, blowup: u128, folds: u32, a: u128) -> Option<u128> 
 }
 
 /// The stage at agreement threshold `agreement`, or at the smallest feasible one.
-fn stage_bound(
+pub(crate) fn stage_bound(
     blowup: usize,
     step_vars: usize,
     queries: usize,
@@ -547,7 +547,7 @@ impl SecurityReport {
 }
 
 /// Authentication siblings of `queries` leaves in a tree of `2^log_leaves` leaves, at most.
-fn siblings(queries: usize, log_leaves: usize) -> usize {
+pub(crate) fn siblings(queries: usize, log_leaves: usize) -> usize {
     if queries >> log_leaves != 0 {
         return 0;
     }

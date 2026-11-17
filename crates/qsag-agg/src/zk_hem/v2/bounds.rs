@@ -453,3 +453,489 @@ pub fn report(profile: Profile, size: ShapeSize) -> Option<Report> {
 
 /// The smallest Stage-0 query count at which a table of `2^log_cells` cells has a
 /// QROM level at least `target`, or `None` when no count up to 2048 does.
+pub fn min_stage0_queries(log_cells: usize, target: MilliBits) -> Option<usize> {
+    if !(super::params::MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS).contains(&log_cells) {
+        return None;
+    }
+    let size = ShapeSize {
+        log_rows: log_cells,
+        num_vars: 1 << (log_cells - 1),
+        num_public: 0,
+    };
+    let meets = |q: usize| {
+        schedule_with_stage0(log_cells, q)
+            .and_then(|s| {
+                report_with(
+                    Profile::CshakeJohnson400,
+                    size,
+                    log_cells,
+                    log_cells - 1,
+                    0,
+                    &s,
+                )
+            })
+            .is_some_and(|r| r.qrom_sum_bits(24_000) >= 0 && r.qrom_work_bits() >= target)
+    };
+    let (mut lo, mut hi) = (1usize, 2048usize);
+    if !meets(hi) {
+        return None;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if meets(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(lo)
+}
+
+/// A relation with `2^log_rows` rows and `num_vars` variables.
+pub fn size(log_rows: usize, num_vars: usize) -> ShapeSize {
+    ShapeSize {
+        log_rows,
+        num_vars,
+        num_public: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::params::{
+        MAX_LOG_CELLS, MIN_LOG_CELLS, STAGE0_QUERIES, blind_cells_for, mask_cells, schedule,
+    };
+    use super::*;
+
+    #[test]
+    fn stage0_queries_are_minimal() {
+        for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let q = STAGE0_QUERIES[log_cells - MIN_LOG_CELLS];
+            assert_eq!(
+                min_stage0_queries(log_cells, TARGET_LEVEL_MILLIBITS),
+                Some(q),
+                "log_cells = {log_cells}"
+            );
+            // Exhaustive negative controls: do not assume that integer rounding or the
+            // search over m makes certification monotone in the query count.
+            for fewer in 1..q {
+                let s = schedule_with_stage0(log_cells, fewer).unwrap();
+                let r = report_with(
+                    Profile::CshakeJohnson400,
+                    size(log_cells, 1 << (log_cells - 1)),
+                    log_cells,
+                    log_cells - 1,
+                    0,
+                    &s,
+                )
+                .unwrap();
+                if r.qrom_sum_bits(24_000) >= 0 {
+                    assert!(
+                        r.qrom_work_bits() < TARGET_LEVEL_MILLIBITS,
+                        "log_cells={log_cells}, earlier certificate at {fewer} queries"
+                    );
+                } else {
+                    assert!(r.rbr_bits < 128_000); // cannot reach 128 even before FS loss
+                }
+            }
+        }
+        // One size further the line no longer reaches the target at any query count.
+        assert_eq!(
+            min_stage0_queries(MAX_LOG_CELLS + 1, TARGET_LEVEL_MILLIBITS),
+            None
+        );
+    }
+
+    #[test]
+    fn every_accepted_size_reaches_128_bits_classical_and_qrom() {
+        for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            // Maximal row exponent and public-input count, with a full aligned variable
+            // region. These dominate the front degree and round count of smaller shapes.
+            let s = schedule(log_cells).unwrap();
+            let st0 = s.stages[0];
+            let blind = blind_cells_for(st0.step_vars, st0.num_queries);
+            let n = usize::BITS as usize - 1;
+            let align = 1 << super::super::params::VAR_ALIGN_MIN.max(log_cells - 8);
+            let num_vars = ((1 << log_cells) - blind - mask_cells(n, log_cells)) / align * align;
+            let shape = ShapeSize {
+                log_rows: n,
+                num_vars,
+                num_public: num_vars - 16,
+            };
+            assert_eq!(Layout::new(shape).unwrap().log_cells, log_cells);
+            for profile in Profile::ALL {
+                let mut r = report(profile, shape).unwrap();
+                assert!(r.qrom_work_bits() >= 128_000, "{log_cells}");
+                assert!(r.classical_work_bits() >= 128_000, "{log_cells}");
+                assert!(r.view_perfectly_simulated());
+                assert_eq!(r.blind_cells, r.opened_symbols + LIMBS * r.mask_values);
+                assert!(r.rounds < 512);
+                assert!(r.rbr_bits <= 266_000); // lower-order-term absorption in V2.7
+                assert_eq!(r.qrom_work_terms().1, 129_112);
+                // A strict negative control for the count predicate, not a leakage claim.
+                r.blind_cells -= 1;
+                assert!(!r.view_perfectly_simulated());
+            }
+        }
+    }
+
+    #[test]
+    fn one_query_fewer_or_a_shorter_digest_misses_the_target() {
+        for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let q = STAGE0_QUERIES[log_cells - MIN_LOG_CELLS];
+            let s = schedule_with_stage0(log_cells, q - 1).unwrap();
+            let r = report_with(
+                Profile::CshakeJohnson400,
+                size(log_cells, 1 << (log_cells - 1)),
+                log_cells,
+                log_cells,
+                0,
+                &s,
+            )
+            .unwrap();
+            assert!(r.qrom_work_bits() < 128_000);
+        }
+        // 48-byte digests: `(384 - 12.663) / 3`.
+        const { assert!((384_000 - QROM_MERKLE_CONST - QROM_ROUND_SLACK) / 3 < 128_000) };
+    }
+
+    #[test]
+    fn mask_line_matches_the_lemma_by_hand() {
+        // 2^22 cells, six folds: 2^18 points, rate 1/4, m = 3.
+        let (a, bits) = mask_line(4, 16, 3);
+        // (1 + 1/6) * sqrt((2^16 + 2) / 2^18) * 2^18 = 152919.0..: the next integer.
+        assert_eq!(a, 152_920);
+        // 3.5^7 = 6433.9; / (3 * (1/4)^1.5) = 17157.1; * 2^36 -> 2^50.066; 319.998 - 50.066,
+        // less the upward rounding of three logarithms.
+        assert!((269_900..=269_932).contains(&bits), "{bits}");
+        // The error grows with m and the threshold falls.
+        let (a8, bits8) = mask_line(4, 16, 8);
+        assert!(a8 < a && bits8 < bits);
+    }
+
+    #[test]
+    fn layout_puts_everything_in_one_cube() {
+        // 1.09M variables (the BIP-32 statement of the frontier note) fit a 2^21 table.
+        let l = Layout::new(size(21, 1_088_721)).unwrap();
+        assert_eq!((l.log_cells, l.var_bits), (21, 21));
+        assert!(l.var_cells >= 1_088_721 && l.var_cells.is_multiple_of(1 << l.var_align));
+        let st0 = l.schedule.stages[0];
+        assert_eq!(l.blind_cells, (st0.num_queries + 25) << st0.step_vars);
+        assert!(l.blind_cells.is_multiple_of(1 << st0.step_vars));
+        assert!(l.var_cells + mask_cells(21, 21) + l.blind_cells <= 1 << 21);
+        // A cube that is nearly full moves to the next size.
+        let full = Layout::new(size(21, (1 << 21) - 100)).unwrap();
+        assert_eq!(full.log_cells, 22);
+        // Small relations use the smallest table that holds the blinders.
+        let small = Layout::new(size(10, 1000)).unwrap();
+        assert_eq!(small.log_cells, MIN_LOG_CELLS);
+        // Past the largest table there is no layout.
+        assert!(Layout::new(size(25, 1 << 25)).is_none());
+        // Malformed dimensions are rejected before rounding, multiplication or shifting.
+        assert!(Layout::new(size(5, usize::MAX)).is_none());
+        assert!(Layout::new(size(usize::MAX, 1000)).is_none());
+        assert!(Layout::new(size(4, 1000)).is_none());
+        assert!(Layout::new(size(5, 15)).is_none());
+        assert!(
+            Layout::new(ShapeSize {
+                log_rows: 5,
+                num_vars: 16,
+                num_public: 1
+            })
+            .is_none()
+        );
+        assert!(Layout::new(size(5, 16)).is_some());
+        assert_eq!(min_stage0_queries(0, TARGET_LEVEL_MILLIBITS), None);
+    }
+
+    #[test]
+    fn directed_rounding_and_summed_crossovers() {
+        // Independent floating-point reference, only in this test; production is integer.
+        for e in 1..=127 {
+            for x in [(1u128 << e) - 1, 1u128 << e, (1u128 << e) + 1] {
+                let exact = 1000.0 * (x as f64).log2();
+                assert!(log2_lo(x) as f64 <= exact + 1e-8, "lo({x})");
+                assert!(log2_hi(x) as f64 + 1e-8 >= exact, "hi({x})");
+            }
+        }
+        // Includes every eighth-bit discontinuity and the large-gap branch at 40 bits.
+        for d in 0..=80_000 {
+            let exact =
+                1000.0 * (2.0f64.powf(-(d as f64) / 1000.0)).ln_1p() / core::f64::consts::LN_2;
+            assert!(log2_one_plus(d) as f64 + 1e-9 >= exact, "d={d}");
+            assert!(log2_one_plus(d) <= 1000);
+            assert_eq!(
+                sum_bits(123_000, 123_000 + d),
+                sum_bits(123_000 + d, 123_000)
+            );
+            assert!(sum_bits(123_000, 123_000 + d) as f64 <= 123_000.0 - exact + 1e-9);
+        }
+        assert_eq!(sum_bits(0, 0), -1000);
+        assert_eq!(sum_bits(-1000, -1000), -2000);
+        for l in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let s = schedule(l).unwrap();
+            let r = report_with(
+                Profile::CshakeJohnson400,
+                size(l, 1 << (l - 1)),
+                l,
+                l - 1,
+                0,
+                &s,
+            )
+            .unwrap();
+            let q = r.qrom_work_bits();
+            let c = r.classical_work_bits();
+            assert!(r.qrom_sum_bits(q) >= 0 && r.qrom_sum_bits(q + 1) < 0);
+            assert!(r.classical_sum_bits(c) >= 0 && r.classical_sum_bits(c + 1) < 0);
+            assert_eq!(c, 198_999);
+            let x = q as f64 / 1000.0;
+            let exact = 320.0
+                * (2.0f64.powf(x) + r.rounds as f64 + 1.0)
+                * (2.0f64.powf(x) + r.rounds as f64)
+                * 2.0f64.powf(-(r.rbr_bits as f64) / 1000.0)
+                + 6380.0 * 2.0f64.powf(3.0 * x - 400.0);
+            assert!(exact <= 1.0, "l={l}: {exact}");
+            // At the smaller individual crossover the SUM already exceeds one.
+            let (a, b) = r.qrom_work_terms();
+            assert!(r.qrom_sum_bits(a.min(b)) < 0);
+        }
+    }
+
+    #[test]
+    fn hiding_counts_cross_proof_salt_collisions() {
+        let r = report(Profile::CshakeJohnson400, size(17, 82_000)).unwrap();
+        assert_eq!(r.stages[0].fibers, 1 << 14);
+        assert_eq!(r.classical_hiding_bits(64, 0), 192_000);
+        assert_eq!(r.quantum_hiding_bits(64, 0), 63_000);
+        // P=2^64, t=1: the birthday term is about 2^-115, much larger than 2^-192.
+        assert_eq!(r.classical_hiding_bits(0, 64), 114_999);
+        assert!(r.quantum_hiding_bits(0, 64) < 95_000);
+        let mut larger = r.clone();
+        larger.stages[0].fibers *= 2;
+        assert!(larger.classical_hiding_bits(0, 64) < r.classical_hiding_bits(0, 64));
+    }
+
+    #[test]
+    fn calculator_rejects_malformed_geometry() {
+        let l = MIN_LOG_CELLS;
+        let shape = size(l, 1 << (l - 1));
+        let mut s = schedule(l).unwrap();
+        let calc = |size, schedule: &Schedule| {
+            report_with(Profile::CshakeJohnson400, size, l, l - 1, 0, schedule)
+        };
+        assert!(calc(shape, &s).is_some());
+        assert!(
+            calc(
+                ShapeSize {
+                    num_public: usize::MAX,
+                    ..shape
+                },
+                &s
+            )
+            .is_none()
+        );
+        assert!(
+            calc(
+                ShapeSize {
+                    log_rows: usize::MAX,
+                    ..shape
+                },
+                &s
+            )
+            .is_none()
+        );
+        s.stages[0].blowup = 3;
+        assert!(calc(shape, &s).is_none());
+        s = schedule(l).unwrap();
+        s.stages[0].step_vars = l + 1;
+        assert!(calc(shape, &s).is_none());
+        s.stages.clear();
+        assert!(calc(shape, &s).is_none());
+    }
+
+    #[test]
+    fn byte_bound_matches_serializer_fields() {
+        use super::super::{
+            field5::Fp5,
+            pcs::{ExtQuery, LaterStage, Opening, Stage0Leaf, Stage0Query},
+            protocol::{MAGIC, ZkHemV2Proof},
+        };
+        use crate::field::Goldilocks;
+        use alloc::vec;
+        assert_eq!(MAGIC.len(), 8);
+        for l in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let shape = size(l, 1 << (l - 1));
+            let s = schedule(l).unwrap();
+            let r = report_with(Profile::CshakeJohnson400, shape, l, l - 1, 0, &s).unwrap();
+            let sibling_counts: Vec<_> = r
+                .stages
+                .iter()
+                .map(|st| siblings(st.queries, st.fibers.trailing_zeros() as usize))
+                .collect();
+            let first = s.stages[0];
+            let opening = Opening {
+                mask_evals: [Fp5::ZERO; MASK_POINTS],
+                stage0_folds: vec![[Fp5::ZERO; 5]; first.step_vars],
+                mask_claim: Fp5::ZERO,
+                stage0_query: Stage0Query {
+                    leaves: vec![
+                        Stage0Leaf {
+                            salt: [0; SALT_BYTES],
+                            z: vec![Goldilocks::ZERO; 1 << first.step_vars],
+                            r: Fp5::ZERO
+                        };
+                        first.num_queries
+                    ],
+                    siblings: vec![[0; DIGEST_BYTES]; sibling_counts[0]],
+                },
+                stages: s
+                    .stages
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .map(|(i, st)| LaterStage {
+                        root: [0; DIGEST_BYTES],
+                        ood: [Fp5::ZERO; LATER_OOD_POINTS],
+                        folds: vec![[Fp5::ZERO; 5]; st.step_vars],
+                        query: ExtQuery {
+                            leaves: vec![vec![Fp5::ZERO; 1 << st.step_vars]; st.num_queries],
+                            siblings: vec![[0; DIGEST_BYTES]; sibling_counts[i]],
+                        },
+                    })
+                    .collect(),
+                final_coeffs: vec![Fp5::ZERO; (1 << s.early_stop_vars) + 2],
+            };
+            let mut proof = ZkHemV2Proof {
+                profile: Profile::CshakeJohnson400,
+                log_cells: l as u8,
+                root: [0; DIGEST_BYTES],
+                row_mask_sum: Fp5::ZERO,
+                row_rounds: vec![vec![Fp5::ZERO; ROW_DEGREE + 1]; shape.log_rows],
+                row_values: [Fp5::ZERO; 3],
+                col_mask_sum: Fp5::ZERO,
+                col_rounds: vec![vec![Fp5::ZERO; COL_DEGREE + 1]; l - 1],
+                opening,
+            };
+            // Synthetic geometry-valid lengths, not a valid cryptographic proof. Maximal
+            // multiproof siblings make the serialized length equal the model's bound.
+            for profile in Profile::ALL {
+                proof.profile = profile;
+                assert_eq!(proof.to_bytes().len(), r.proof_bytes, "l={l}");
+            }
+            proof.opening.stage0_query.siblings.pop().unwrap();
+            assert_eq!(proof.to_bytes().len() + DIGEST_BYTES, r.proof_bytes);
+        }
+    }
+
+    #[test]
+    fn documented_table_matches_calculator() {
+        use alloc::format;
+        use alloc::string::ToString;
+        let doc = include_str!("../../../SECURITY.md");
+        let mb = |b: MilliBits| format!("{}.{:03}", b / 1000, b % 1000);
+        for (rows, vars, label) in [
+            (17, 82_000, "2^17, 82,000"),
+            (17, 1 << 17, "2^17, 2^17"),
+            (20, 1 << 20, "2^20, 2^20"),
+            (21, 1_088_721, "2^21, 1,088,721"),
+            (22, 1 << 22, "2^22, 2^22"),
+            (23, 1 << 23, "2^23, 2^23"),
+        ] {
+            let r = report(Profile::CshakeJohnson400, size(rows, vars)).unwrap();
+            let line = doc
+                .lines()
+                .find(|line| line.starts_with(&format!("| {label} |")))
+                .unwrap();
+            let cells: Vec<_> = line.split('|').map(str::trim).collect();
+            assert_eq!(cells[2], format!("2^{}", r.log_cells));
+            assert_eq!(
+                cells[3],
+                r.schedule
+                    .stages
+                    .iter()
+                    .map(|st| st.num_queries.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            assert_eq!(cells[4], r.mask_m.to_string());
+            let round = match r.rbr_round {
+                Round::MaskLine => "mask line",
+                Round::Query(0) => "Stage-0 queries",
+                _ => panic!("update the documented weakest round"),
+            };
+            assert_eq!(cells[5], format!("{} ({round})", mb(r.rbr_bits)));
+            assert_eq!(cells[6], mb(r.classical_work_bits()));
+            let (a, b) = r.qrom_work_terms();
+            assert_eq!(
+                cells[7],
+                format!("**{}** ({}, {})", mb(r.qrom_work_bits()), mb(a), mb(b))
+            );
+            assert_eq!(cells[8], format!("2^-{}", mb(r.qrom_error_bits(64))));
+            assert_eq!(
+                cells[9].replace(',', "").parse::<usize>().unwrap(),
+                r.proof_bytes
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "prints the tables of SECURITY.md section V2"]
+    fn print_v2_tables() {
+        for log_cells in MIN_LOG_CELLS..=crate::pcs::MAX_PCS_NUM_VARS {
+            let q = min_stage0_queries(log_cells, TARGET_LEVEL_MILLIBITS);
+            assert_eq!(q, STAGE0_QUERIES.get(log_cells - MIN_LOG_CELLS).copied());
+            std::println!("log_cells {log_cells}: min stage-0 queries {q:?}");
+        }
+        for (rows, vars) in [
+            (17usize, 1usize << 17),
+            (17, 82_000),
+            (20, 1 << 20),
+            (21, 1_088_721),
+            (21, 1_719_058),
+            (22, 1 << 22),
+            (23, 1 << 23),
+        ] {
+            let r =
+                report(Profile::CshakeJohnson400, size(rows, vars)).expect("table fixture fits");
+            let (qr, qd) = r.qrom_work_terms();
+            std::println!(
+                "rows 2^{rows} vars {vars}: cells 2^{} queries {:?} m {} rbr {} ({:?}) mask {} \
+                 classical {} qrom {} (round {qr}, digest {qd}) err@2^64 {} bytes {} digests {} \
+                 hashes {} blind {} rounds {}",
+                r.log_cells,
+                r.schedule
+                    .stages
+                    .iter()
+                    .map(|s| s.num_queries)
+                    .collect::<Vec<_>>(),
+                r.mask_m,
+                r.rbr_bits,
+                r.rbr_round,
+                r.mask_bits,
+                r.classical_work_bits(),
+                r.qrom_work_bits(),
+                r.qrom_error_bits(64),
+                r.proof_bytes,
+                r.digests,
+                r.merkle_hashes,
+                r.blind_cells,
+                r.rounds,
+            );
+            for (i, st) in r.stages.iter().enumerate() {
+                std::println!(
+                    "  stage {i}: blowup {} folds {} q {} fibers {} A {} list {} word_list {} \
+                     query {:?} fold {}",
+                    st.blowup,
+                    st.step_vars,
+                    st.queries,
+                    st.fibers,
+                    st.agreement,
+                    st.list,
+                    st.word_list,
+                    st.query_bits,
+                    st.fold_bits
+                );
+            }
+        }
+    }
+}
