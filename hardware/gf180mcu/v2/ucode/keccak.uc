@@ -2,7 +2,7 @@
 ;   flags bit 0: 1 = Keccak-p[1600,12] (TurboSHAKE256), 0 = Keccak-f[1600] (SHAKE256, cSHAKE256)
 ;   arg [7:0] suffix / domain byte, arg [15:8] output words
 ; Also the sponge subroutines used by PRF_MSG.
-.entry 0x20 keccak diag
+.entry 0x20 keccak any
 
 keccak:     LDF  ARGLO
             ST   TMP                ; suffix byte

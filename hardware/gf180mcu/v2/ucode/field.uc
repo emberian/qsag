@@ -1,6 +1,6 @@
 ; Configuration L: Poseidon2 (0x10) and Canopy Merkle path (0x11) on the field unit.
-.entry 0x10 p2 diag
-.entry 0x11 merkle diag
+.entry 0x10 p2 any
+.entry 0x11 merkle any
 
 ; ---------------------------------------------------------------------------------------------
 ; P2, flags bit 0 = 1: raw permutation of 12 words (reduced mod p). Else: sponge hash,
