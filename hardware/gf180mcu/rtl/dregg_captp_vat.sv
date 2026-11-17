@@ -16,13 +16,10 @@ module dregg_captp_vat (
     input  wire         rst_n,
     input  wire         srst_n,             // asynchronous zeroize on tamper/glitch/laser fault
     input  wire         permit_control,     // HD=4 FSM integrity guard
-    // Root K_vat provisioning (from PUF+BCH or TRNG ceremony via TurboSHAKE256)
-    input  wire  [3:0]  kvat_we,
-    input  wire  [63:0] kvat_wdata,
+    // Root K_vat provisioning (from PUF+BCH or TRNG ceremony via TurboSHAKE256). The 256-bit key
+    // itself is stored in the enclave register file (qsag_sponge, rows kvat[0..3]).
     input  wire         kvat_commit,
     output logic        vat_ready,
-    input  wire  [1:0]  kvat_ridx,
-    output wire  [63:0] kvat_rdata,
     // Verified ZK proof root latch (from OP_VERIFY_HEM_STREAM / OP_EXT4_FOLD)
     input  wire         zk_latch_we,
     input  wire  [1:0]  zk_latch_idx,
@@ -66,19 +63,7 @@ module dregg_captp_vat (
     localparam int G_DIST     = 2; // w1[18]
     localparam int G_PIN_VK   = 3; // w1[19]
 
-    // 256-bit K_vat root key
-    wire [63:0] k_vat [4];
     genvar i;
-    generate
-        for (i = 0; i < 4; i++) begin : g_kvat
-            qsag_ereg #(.W(64)) u_kv (
-                .clk(clk), .rst_n(srst_n), .en(kvat_we[i] && permit_control),
-                .d(kvat_wdata), .q(k_vat[i])
-            );
-        end
-    endgenerate
-    assign kvat_rdata = k_vat[kvat_ridx];
-
     // Last verified ZK transcript / statement root (4 x 64 bits in async-cleared latrnq_1 latches!)
     wire        zkr_any_we = zk_latch_we & permit_control;
     wire [63:0] dhold_in   = zkr_any_we ? zk_latch_wdata : desc_wdata;
@@ -91,7 +76,7 @@ module dregg_captp_vat (
         for (i = 0; i < 4; i++) begin : g_zkr
             wire z_en = zkr_any_we && (zk_latch_idx == 2'(i));
             wire z_gate;
-            qsag_clkgate_1 u_zcg (.clk(clk), .en(z_en), .gclk(z_gate));
+            qsag_latgate u_zcg (.clk(clk), .en(z_en), .gclk(z_gate));
             qsag_latch_word_rst #(.W(64)) u_zr (.gate(z_gate), .rst_n(srst_n), .d(desc_wd_q), .q(zk_root[i]));
         end
     endgenerate
@@ -101,7 +86,7 @@ module dregg_captp_vat (
         for (i = 0; i < 5; i++) begin : g_pmeta
             wire p_en = pmeta_we && (parent_idx == 3'(i + 1));
             wire p_gate;
-            qsag_clkgate_1 u_pcg (.clk(clk), .en(p_en), .gclk(p_gate));
+            qsag_latgate u_pcg (.clk(clk), .en(p_en), .gclk(p_gate));
             qsag_latch_word_rst #(.W(64)) u_plat (.gate(p_gate), .rst_n(srst_n), .d(desc_wd_q), .q(pw_meta[i]));
         end
     endgenerate
