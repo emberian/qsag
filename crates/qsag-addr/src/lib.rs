@@ -15,15 +15,12 @@ use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_is_canonical};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_accel::poseidon2::poseidon2_hash_framed_limbs4;
-// The MIR-verified `qsag_verified::policy_and_addr` module has its own intent tag namespace
-// (`IntentSuiteTag` / `IntentIdentityKind`) whose wire discriminators collide with, and partially
-// invert, the canonical `WitnessSuiteTag` / `KeyIdentityKind` below, and the names of its
-// `SUITE_HYBRID_*` constants disagree with this crate (its `0x0501` is named Ed25519/ML-DSA-65
-// but is hashed, as here, as secp256k1/ML-DSA-44). That file and its names are pinned by the
-// Aeneas extraction and its Lean proofs, so the mismatch is contained here instead: none of those
-// items is re-exported. The hybrid kernels are reachable only through the typed wrappers
-// [`hybrid_domain_framing_ok`] / [`hybrid_transcript_digest`], and the verified intent namespace
-// only through [`intent_from_verified`] / [`decode_verified_intent_128`].
+// The MIR-verified `qsag_verified::policy_and_addr` module has its own intent enums
+// (`IntentSuiteTag` / `IntentIdentityKind`). They carry the canonical names and wire words of
+// the matching `WitnessSuiteTag` / `KeyIdentityKind` variants, and admit only a subset of them.
+// They are still not re-exported: the typed wrappers below and [`intent_from_verified`] /
+// [`decode_verified_intent_128`] are the only way in, so a verified frame is always refused
+// unless it is also a valid canonical `(suite, kind)` pair.
 use qsag_verified::{
     CanonicalIntent128 as VerifiedCanonicalIntent128,
     IntentAddressVersion as VerifiedIntentAddressVersion,
@@ -344,54 +341,38 @@ pub const fn decode_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> 
 // Verified intent namespace bridge
 // ---------------------------------------------------------------------------------------------
 
-/// Canonical suite named by a tag of the MIR-verified intent namespace.
-///
-/// The translation is by meaning, never by number: the verified wire words `0x0101`, `0x0201`,
-/// `0x0302`, `0x0501` and `0x0502` each name a different suite in [`WitnessSuiteTag`]. A
-/// threshold ML-DSA-65 key is an ML-DSA-65 key on the wire. `HybridSecp256k1SlhDsa` has no
-/// canonical suite and is refused, reporting its verified wire word.
-pub const fn intent_suite_from_verified(
-    tag: VerifiedIntentSuiteTag,
-) -> Result<WitnessSuiteTag, AddrError> {
+/// Canonical suite named by a tag of the MIR-verified intent namespace. The verified tags
+/// carry the canonical names and wire words, so the translation is the identity on the word.
+pub const fn intent_suite_from_verified(tag: VerifiedIntentSuiteTag) -> WitnessSuiteTag {
     match tag {
-        VerifiedIntentSuiteTag::JortsPoseidon2 => Ok(WitnessSuiteTag::JortsPoseidon2),
-        VerifiedIntentSuiteTag::SlhDsaShake128f => Ok(WitnessSuiteTag::SlhDsa128f),
-        VerifiedIntentSuiteTag::ThresholdMlDsa65 => Ok(WitnessSuiteTag::MlDsa65),
-        VerifiedIntentSuiteTag::HybridEd25519MlDsa65 => Ok(WitnessSuiteTag::HybridEd25519MlDsa65),
-        VerifiedIntentSuiteTag::HybridSecp256k1SlhDsa => {
-            Err(AddrError::UnsupportedSuiteTag(tag.to_u16()))
-        }
+        VerifiedIntentSuiteTag::MlDsa65 => WitnessSuiteTag::MlDsa65,
+        VerifiedIntentSuiteTag::SlhDsa128f => WitnessSuiteTag::SlhDsa128f,
+        VerifiedIntentSuiteTag::JortsPoseidon2 => WitnessSuiteTag::JortsPoseidon2,
+        VerifiedIntentSuiteTag::HybridSecp256k1MlDsa44 => WitnessSuiteTag::HybridSecp256k1MlDsa44,
+        VerifiedIntentSuiteTag::HybridEd25519MlDsa65 => WitnessSuiteTag::HybridEd25519MlDsa65,
     }
 }
 
-/// Canonical identity kind named by a kind of the MIR-verified intent namespace.
-///
-/// Single and threshold keys are one canonical kind, so that they stay indistinguishable. The
-/// verified namespace has no conjunctive-hybrid kind.
+/// Canonical identity kind named by a kind of the MIR-verified intent namespace (same names,
+/// same wire bytes).
 pub const fn intent_identity_kind_from_verified(
     kind: VerifiedIntentIdentityKind,
 ) -> KeyIdentityKind {
     match kind {
-        VerifiedIntentIdentityKind::SingleKey | VerifiedIntentIdentityKind::ThresholdCommittee => {
-            KeyIdentityKind::SingleOrThreshold
-        }
-        VerifiedIntentIdentityKind::PolicyBound => KeyIdentityKind::ScriptPredicate,
+        VerifiedIntentIdentityKind::SingleOrThreshold => KeyIdentityKind::SingleOrThreshold,
+        VerifiedIntentIdentityKind::HybridConjunctive => KeyIdentityKind::HybridConjunctive,
+        VerifiedIntentIdentityKind::ScriptPredicate => KeyIdentityKind::ScriptPredicate,
     }
 }
 
 /// Translate an intent of the MIR-verified namespace into a canonical [`CanonicalIntent128`],
-/// refusing a suite with no canonical counterpart and any `(suite_tag, identity_kind)` pair that
-/// [`WitnessSuiteTag::validate_identity_kind`] refuses.
-///
-/// Since the verified namespace has no conjunctive-hybrid kind, every verified intent that names
-/// a hybrid suite is refused here.
+/// refusing any `(suite_tag, identity_kind)` pair that [`WitnessSuiteTag::validate_identity_kind`]
+/// refuses. `qsag_verified::decode_intent_128` refuses the same pairs, but a
+/// `VerifiedCanonicalIntent128` can also be built field by field, so the pair is checked here too.
 pub const fn intent_from_verified(
     intent: &VerifiedCanonicalIntent128,
 ) -> Result<CanonicalIntent128, AddrError> {
-    let suite_tag = match intent_suite_from_verified(intent.suite_tag) {
-        Ok(tag) => tag,
-        Err(err) => return Err(err),
-    };
+    let suite_tag = intent_suite_from_verified(intent.suite_tag);
     let identity_kind = intent_identity_kind_from_verified(intent.identity_kind);
     if let Err(err) = suite_tag.validate_identity_kind(identity_kind) {
         return Err(err);
@@ -418,9 +399,8 @@ pub const fn intent_from_verified(
 /// `qsag_verified::encode_intent_128`) and translate it with [`intent_from_verified`]. `None` if
 /// the verified decoder or the translation refuses it.
 ///
-/// Such a frame is not a canonical frame: [`decode_intent_128`] reads the same bytes as a
-/// different suite, or refuses them. Re-encode the result with [`try_encode_intent_128`] to get
-/// the canonical frame.
+/// The two namespaces now share wire words, so a frame this accepts re-encodes to the same
+/// bytes with [`try_encode_intent_128`] and is accepted by [`decode_intent_128`] too.
 pub const fn decode_verified_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> {
     match qsag_verified::decode_intent_128(bytes) {
         Some(intent) => match intent_from_verified(&intent) {
