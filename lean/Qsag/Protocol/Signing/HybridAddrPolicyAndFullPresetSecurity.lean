@@ -783,3 +783,299 @@ namespace Qsag.HybridSecurity
 #tooth_pair security_regime_separation vs tooth_narrow_16byte_frontier_excluded
 
 end Qsag.HybridSecurity
+
+/-! ### Exports for lane sig -/
+public section
+
+#verify_inhabited Qsag.HybridSecurity.one_use_incomparable Qsag.HybridSecurity.incomparable_inhabited
+
+end
+
+/-! ## Executed toy-hash envelope and policy-release instances of `Tests/CompositionInstances`
+
+Evaluated here, where `validateForAddress`, `verifyWith`, `PolicyAccepts`, `LedgerStep` and the
+other definitions of this module unfold. The names stay in `Qsag.CompositionInstances`; the test
+module audits them and builds the modelled-primitive (`cSHAKE256`, `Poseidon2`) instances. -/
+public section
+namespace Qsag.CompositionInstances
+set_option autoImplicit false
+set_option exponentiation.threshold 2048
+set_option maxRecDepth 1000000
+open Qsag.HybridSecurity
+
+def mix (bs : Bytes) : Nat :=
+  bs.foldl (fun acc b => (acc * 257 + b.toNat + 1) % 256 ^ 32) 0
+
+def encodePre : Preimage → Bytes
+  | .key pq s pk => (if pq then 2 else 1) :: (suiteBytes s ++ pk)
+  | .identity s c p => 3 :: (suiteBytes s ++ (be 32 c.val ++ be 32 p.val))
+  | .address hrp v s id =>
+    4 :: (be 8 hrp.length ++ (hrp ++ (be 8 v ++ (suiteBytes s ++ be 32 id.val))))
+
+/-- Input-dependent stand-in for the domain-separated hash. Not collision resistant. -/
+def toyHash : HybridSecurity.Hash := fun x =>
+  ⟨mix (encodePre x) % 256 ^ 32, Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
+
+/-- The V2 transcript field layout without its constant ASCII label (`String.toUTF8` did not
+reduce under `decide` here); the label is the same for every transcript. -/
+def transcriptFields (t : Transcript) : Bytes :=
+  (if t.pq then 2 else 1) :: (suiteBytes t.suite ++ (be 32 t.id.val ++
+    (be 32 t.classicalDigest.val ++ (be 32 t.pqDigest.val ++ (be 8 t.msg.length ++ t.msg)))))
+
+def toySign (pk : Bytes) (t : Transcript) : Bytes := be 32 (mix (pk ++ transcriptFields t))
+
+/-- Key- and transcript-bound checksum verifier. Publicly computable, hence forgeable. -/
+def toyVerifier : Verifier := fun pk t sig => decide (sig = toySign pk t)
+
+def envelopeFor (k : Keys) (m : Bytes) : HybridPinnedEnvelope :=
+  ⟨k, toySign k.classical (transcript toyHash k false m),
+    toySign k.pq (transcript toyHash k true m)⟩
+
+def hk : Keys := ⟨.secpMl44, [2, 0xA1, 0xA2], [0xB1, 0xB2, 0xB3]⟩
+
+def hrpQs : Bytes := [113, 115]
+
+def paid : Bytes := [0x70, 0x61, 0x79]
+
+def unpaid : Bytes := [0x70, 0x61, 0x7A]
+
+theorem hybrid_honest_accepts :
+    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 1) ∧
+    verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) paid := by
+  unfold validateForAddress verifyWith; decide +kernel
+
+theorem hybrid_rejects_other_message :
+    ¬ verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) unpaid := by
+  unfold verifyWith; decide +kernel
+
+/-- The envelope carries no HRP or version, so it validates for every address derived from the
+same keys. Network exclusivity has to be bound in the message, as the source module states. -/
+theorem hybrid_envelope_valid_for_every_network :
+    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk [113, 116] 1) ∧
+    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 2) := by
+  unfold validateForAddress; decide +kernel
+
+/-- Address metadata is bound by the commitment: relabelling the HRP or the version without
+recomputing the commitment is rejected. -/
+theorem hybrid_rejects_relabelled_hrp :
+    ¬ validateForAddress toyHash (envelopeFor hk paid)
+      { addressOf toyHash hk hrpQs 1 with hrp := [113, 116] } := by
+  unfold validateForAddress; decide +kernel
+
+theorem hybrid_rejects_relabelled_version :
+    ¬ validateForAddress toyHash (envelopeFor hk paid)
+      { addressOf toyHash hk hrpQs 1 with version := 2 } := by
+  unfold validateForAddress; decide +kernel
+
+theorem hybrid_address_commitments_differ :
+    (addressOf toyHash hk [113, 116] 1).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment ∧
+    (addressOf toyHash hk hrpQs 2).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment := by
+  decide +kernel
+
+theorem hybrid_rejects_other_keys_address :
+    ¬ validateForAddress toyHash (envelopeFor hk paid)
+      (addressOf toyHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
+  unfold validateForAddress; decide +kernel
+
+/-- Identical component keys and one verification algorithm: the role flag in the transcript
+alone keeps a classical-role signature from being accepted in the PQ role. -/
+def twin : Keys := ⟨.secpMl44, [9], [9]⟩
+
+theorem hybrid_rejects_swapped_roles :
+    verifyWith toyHash toyVerifier toyVerifier (envelopeFor twin paid) paid ∧
+    ¬ verifyWith toyHash toyVerifier toyVerifier
+      ⟨twin, (envelopeFor twin paid).pqSignature, (envelopeFor twin paid).classicalSignature⟩
+      paid := by
+  unfold verifyWith; decide +kernel
+
+/-- An honest PQ signature is not accepted next to a substituted classical key. -/
+theorem hybrid_rejects_rogue_partner :
+    ¬ (toyVerifier hk.pq (transcript toyHash { hk with classical := [0xEE] } true paid)
+      (envelopeFor hk paid).pqSignature = true) := by decide +kernel
+
+theorem hybrid_keybound_instance : ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
+    (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
+    validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
+  ⟨toyHash, toyVerifier, toyVerifier, hk, hrpQs, 1, envelopeFor hk paid, paid, [unpaid],
+    hybrid_honest_accepts.1, hybrid_honest_accepts.2, by decide⟩
+
+def brokenClassical : Verifier := fun _ _ _ => true
+
+/-- Output `0`: junk signatures on a fresh message. Output `1`: replay of a queried message. -/
+def advOut (j : Fin 2) : HybridPinnedEnvelope × Bytes :=
+  if j.val = 0 then (⟨hk, [0], [0]⟩, unpaid) else (envelopeFor hk paid, paid)
+
+/-- Classical component accepting everything, PQ component binding: the hybrid win mass is
+`0` while the classical component game is won with mass `1`. -/
+theorem robust_combiner_instance :
+    mass (fun _ : Fin 2 => 1) (fun j =>
+      hybridWins toyHash brokenClassical toyVerifier hk hrpQs 1 [paid] (advOut j)) = 0 ∧
+    mass (fun _ : Fin 2 => 1) (fun j =>
+      brokenClassical hk.classical (transcript toyHash hk false (advOut j).2)
+        (advOut j).1.classicalSignature && decide ((advOut j).2 ∉ [paid])) = 1 ∧
+    mass (fun _ : Fin 2 => 1) (fun j =>
+      toyVerifier hk.pq (transcript toyHash hk true (advOut j).2)
+        (advOut j).1.pqSignature && decide ((advOut j).2 ∉ [paid])) = 0 := by
+  decide +kernel
+
+/-- Both components accepting everything: the fresh junk output wins. -/
+theorem both_components_broken_instance :
+    mass (fun _ : Fin 2 => 1) (fun j =>
+      hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
+  decide +kernel
+
+def pol : TransactionPolicy := ⟨9, [7, 8], 100, 150, [⟨50, 1⟩, ⟨100, 2⟩]⟩
+
+def intentHash (i : TransactionIntent) : Nat :=
+  ((((i.recipient * 1000003 + i.amount) * 1000003 + i.reportedSpend) * 1000003 + i.nonce) *
+    1000003 + i.session) * 1000003 + i.window
+
+def payA : TransactionIntent := ⟨7, 60, 0, 1, 11, 5⟩
+
+def payB : TransactionIntent := ⟨8, 80, 60, 2, 12, 5⟩
+
+def genesis : Ledger := ⟨0, [], []⟩
+
+def quorum01 (j : Fin 3) : Bool := decide (j.val < 2)
+
+def corrupt0 (j : Fin 3) : Bool := decide (j.val = 0)
+
+/-- The corrupt quorum member holds a token that was never minted for the intent. -/
+def tokensA (j : Fin 3) : AuthorizedSignReleaseToken :=
+  if j.val = 0 then ⟨0, 0, 0, 0, 0⟩ else minted intentHash pol payA
+
+theorem only_honest_member : ∀ j : Fin 3,
+    quorum01 j = true → corrupt0 j = false → j = 1 := by decide +kernel
+
+theorem acceptsA : PolicyAccepts pol payA 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+
+theorem acceptsB : PolicyAccepts pol payB 2 :=
+  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
+
+theorem stepA : LedgerStep pol.maxWindowSpend 5 genesis payA (burn genesis payA) := by
+  unfold LedgerStep; decide +kernel
+
+theorem stepB : LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payB
+    (burn (burn genesis payA) payB) := by
+  unfold LedgerStep; decide +kernel
+
+theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by decide +kernel
+
+/-- `n = 3`, `t = 2`, `f = 1`: the quorum contains the corrupt party; the honest member alone
+supplies the release. -/
+theorem corrupt_quorum_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
+    (H : TransactionIntent → Nat) (i : TransactionIntent) (q corrupt : Fin n → Bool)
+    (before after : Fin n → Ledger) (tokens : Fin n → AuthorizedSignReleaseToken),
+    cardinal q = t ∧ cardinal corrupt ≤ f ∧ f < t ∧
+    (∀ j, q j = true → corrupt j = false →
+      ValidRelease H p t w i (before j) (after j) (tokens j)) :=
+  ⟨3, 2, 1, 5, pol, intentHash, payA, quorum01, corrupt0, fun _ => genesis,
+    fun _ => burn genesis payA, tokensA, by decide +kernel, by decide +kernel, by decide,
+    fun j hq hc => by
+      obtain rfl := only_honest_member j hq hc
+      exact ⟨rfl, acceptsA, stepA⟩⟩
+
+def quorumOf (i : TransactionIntent) (j : Fin 3) : Bool :=
+  if i = payA then decide (j.val < 2) else decide (0 < j.val)
+
+def beforeOf (i : TransactionIntent) : Ledger := if i = payA then genesis else burn genesis payA
+
+/-- Two intents, two different quorums sharing honest party `1`, one serialized ledger. -/
+theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
+    (H : TransactionIntent → Nat) (is : List TransactionIntent) (corrupt : Fin n → Bool)
+    (q : TransactionIntent → Fin n → Bool) (before after : TransactionIntent → Fin n → Ledger)
+    (tokens : TransactionIntent → Fin n → AuthorizedSignReleaseToken) (final : Ledger),
+    cardinal corrupt ≤ f ∧ f < t ∧ (∀ i ∈ is, cardinal (q i) = t) ∧
+    (∀ i ∈ is, ∀ j, q i j = true → corrupt j = false →
+      ValidRelease H p t w i (before i j) (after i j) (tokens i j)) ∧
+    LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
+  refine ⟨3, 2, 1, 5, pol, intentHash, [payA, payB], corrupt0, quorumOf,
+    fun i _ => beforeOf i, fun i _ => burn (beforeOf i) i, fun i _ => minted intentHash pol i,
+    burn (burn genesis payA) payB, by decide +kernel, by decide, ?_, ?_, ?_⟩
+  · intro i hi
+    rcases List.mem_cons.mp hi with rfl | hi
+    · decide +kernel
+    · obtain rfl := List.mem_singleton.mp hi
+      decide +kernel
+  · intro i hi j _ _
+    rcases List.mem_cons.mp hi with rfl | hi
+    · exact ⟨rfl, acceptsA, stepA⟩
+    · obtain rfl := List.mem_singleton.mp hi
+      exact ⟨rfl, acceptsB, stepB⟩
+  · exact .cons stepA (.cons stepB (.nil _))
+
+theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.2.1 (by decide +kernel)
+
+theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 :=
+  fun h => absurd h.1 (by decide +kernel)
+
+theorem rejects_insufficient_approvals : ¬ PolicyAccepts pol payB 1 := by
+  rintro ⟨_, _, r, hr, hn⟩
+  have e : pol.tiers.find? (fun r => decide (payB.amount ≤ r.cap)) = some ⟨100, 2⟩ := by
+    decide +kernel
+  rw [e] at hr
+  cases hr
+  exact absurd hn (by decide +kernel)
+
+theorem rejects_nonce_replay :
+    ¬ LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payA
+      (burn (burn genesis payA) payA) :=
+  fun h => absurd h.2.1 (by decide +kernel)
+
+/-- After `payA` and `payB` (140 of 150 spent) a further 20 has no ledger step at all. -/
+theorem rejects_window_overspend (next : Ledger) :
+    ¬ LedgerStep pol.maxWindowSpend 5 (burn (burn genesis payA) payB)
+      ⟨7, 20, 0, 3, 13, 5⟩ next :=
+  fun h => absurd h.2.2.2.1 (by decide +kernel)
+
+theorem rejects_stale_window (next : Ledger) :
+    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next :=
+  fun h => absurd h.1 (by decide +kernel)
+
+theorem token_is_intent_specific :
+    minted intentHash pol payA ≠ minted intentHash pol payB := by decide +kernel
+
+def toyMac (policy old next : Nat) : Nat := (policy * 65537 + old) * 65537 + next + 0x5eed
+
+theorem window_advance_accepts :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by decide +kernel
+
+/-- Wrong tag, non-increasing epoch, tag for another policy, tag for another old epoch. -/
+theorem window_advance_rejects :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨5, toyMac 9 5 5⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 8 5 6⟩ = none ∧
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by decide +kernel
+
+theorem window_advance_rejects_wrong_tag :
+    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by decide +kernel
+
+/-- The two demonstration messages differ (used where `paid`, `unpaid` do not unfold). -/
+theorem paid_ne_unpaid : paid ≠ unpaid := by decide
+
+#verify_constructive paid_ne_unpaid hybrid_honest_accepts hybrid_rejects_other_message
+  hybrid_envelope_valid_for_every_network hybrid_rejects_relabelled_hrp
+  hybrid_rejects_relabelled_version hybrid_address_commitments_differ
+  hybrid_rejects_other_keys_address hybrid_rejects_swapped_roles
+  hybrid_rejects_rogue_partner hybrid_keybound_instance robust_combiner_instance
+  both_components_broken_instance
+  only_honest_member acceptsA acceptsB stepA stepB
+  corrupt_token_not_minted corrupt_quorum_instance two_intent_spending_instance
+  rejects_over_per_tx_cap rejects_unlisted_recipient rejects_insufficient_approvals
+  rejects_nonce_replay rejects_window_overspend rejects_stale_window token_is_intent_specific
+  window_advance_accepts window_advance_rejects window_advance_rejects_wrong_tag
+#verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma hybrid_keybound_instance
+#verify_inhabited Qsag.HybridSecurity.threshold_policy_composition corrupt_quorum_instance
+#verify_inhabited Qsag.HybridSecurity.threshold_spending_safety two_intent_spending_instance
+#tooth_pair Qsag.HybridSecurity.dual_key_euf_cma vs hybrid_rejects_other_message
+#tooth_pair Qsag.HybridSecurity.address_binding vs hybrid_rejects_relabelled_hrp
+#tooth_pair Qsag.HybridSecurity.rogue_partner_resistance vs hybrid_rejects_rogue_partner
+#tooth_pair Qsag.HybridSecurity.threshold_policy_composition vs rejects_insufficient_approvals
+#tooth_pair Qsag.HybridSecurity.ledger_trace_safety vs rejects_nonce_replay
+#tooth_pair Qsag.HybridSecurity.threshold_spending_safety vs rejects_window_overspend
+#tooth_pair Qsag.HybridSecurity.authorized_window_binding vs window_advance_rejects_wrong_tag
+
+end Qsag.CompositionInstances
+end

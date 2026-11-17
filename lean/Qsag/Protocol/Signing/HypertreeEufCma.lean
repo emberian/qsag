@@ -7317,3 +7317,150 @@ theorem prodToyForgery_accepted_on (msg : List UInt8) :
   constantSuite1B_production_forgery_accepted msg
 end Qsag
 end
+
+/-! ### Exports for lane sig -/
+public section
+namespace Qsag
+
+theorem buildStatefulDetOptDomain_def (epoch : Nat) (pkSeed : List UInt8) :
+    buildStatefulDetOptDomain epoch pkSeed =
+      encodeMultiFrame
+        [[81, 83, 65, 71, 46, 80, 81, 46, 66, 65, 71, 71, 89, 83, 73, 71, 46, 68, 69, 84, 47, 118, 49],
+         be 8 epoch, pkSeed] := by rfl
+
+/-- The unchecked mutant signer returns the reference signature at the wrapped leaf. -/
+theorem mutantUncheckedReuseSign_ok (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (st : CheckedStatefulLatchState) (reqEpoch : Nat) (msg : List UInt8)
+    (grindLimit : Nat) (sig : PqHashSig) (hValid : params.checkedStatefulValid = true)
+    (hSign : evalSingleSign suite params sk msg (buildStatefulDetOptDomain reqEpoch sk.pkSeed)
+      (reqEpoch % (2 ^ params.maxSigsLog2)) grindLimit = some sig) :
+    mutantUncheckedReuseSign suite params sk st reqEpoch msg grindLimit =
+      .ok (st, reqEpoch % (2 ^ params.maxSigsLog2), msg, sig) := by
+  unfold mutantUncheckedReuseSign
+  rw [hValid]
+  simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hSign]
+
+theorem toothStatefulParams_checkedStatefulValid :
+    (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams).checkedStatefulValid = true ∧
+    (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams).checkedStatefulValid = true := by
+  obtain ⟨h1, h2, h3, h4⟩ := toothStatefulParams_geometry
+  rw [PqHashParams.checkedStatefulValid_eq, PqHashParams.checkedStatefulValid_eq, h1, h2, h3, h4]
+  decide
+
+/-- The checked oracle signs epochs `0` and `1` of the budget-`2` profile and refuses epoch `2`. -/
+theorem toothDistinctSuite_oracle_budgetExhausted :
+    (execCheckedStatefulOracle toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) initCheckedStatefulLatch
+      [.signNext [1] 1, .signNext [9] 1, .signNext [2] 1]).abortError =
+      some (.budgetExhausted 2 2) := by
+  obtain ⟨h1, h2, _⟩ := toothDistinctSuite_sign_isSome
+  obtain ⟨s1, h1⟩ := Option.isSome_iff_exists.mp h1
+  obtain ⟨s2, h2⟩ := Option.isSome_iff_exists.mp h2
+  have h1' : evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] (buildStatefulDetOptDomain 0 []) 0 1 = some s1 := h1
+  have h2' : evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [9] (buildStatefulDetOptDomain 1 []) 1 1 = some s2 := h2
+  simp [execCheckedStatefulOracle, execCheckedStatefulOracleAux, checkedStatefulSignStep,
+    checkedStatefulFreshEpochSign, initCheckedStatefulLatch, CheckedStatefulLatchState.validBounds,
+    toothStatefulParams_checkedStatefulValid.1, h1', h2']
+
+/-- The checked oracle refuses a second message at the in-flight epoch `0`. -/
+theorem toothDistinctSuite_oracle_equivocationRefused :
+    (execCheckedStatefulOracle toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) initCheckedStatefulLatch
+      [.signEpoch 0 [1] 1, .signEpoch 0 [2] 1]).abortError =
+      some (.equivocationRefused 0) := by
+  obtain ⟨h1, _, _⟩ := toothDistinctSuite_sign_isSome
+  obtain ⟨s1, h1⟩ := Option.isSome_iff_exists.mp h1
+  have h1' : evalSingleSign toothDistinctSuite (⟨4, 128, 1, 1, 0, 0, 1, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] (buildStatefulDetOptDomain 0 []) 0 1 = some s1 := h1
+  simp [execCheckedStatefulOracle, execCheckedStatefulOracleAux, checkedStatefulSignStep,
+    checkedStatefulFreshEpochSign, initCheckedStatefulLatch, CheckedStatefulLatchState.validBounds,
+    toothStatefulParams_checkedStatefulValid.1, h1']
+
+theorem crumbToySuite_stateless_forgery_accepted :
+    verifyPqHashSig crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (derivePublicKey crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)) []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0,
+        forsOpenings := [⟨[], [[]]⟩],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } = true :=
+  constantSuite1B_stateless_forgery_accepted
+
+/-- After one signing query on `[1]`, the empty-valued signature on `[]` opens only FORS
+    addresses already in the log: the constant suite sends both digests to the same leaf. -/
+theorem crumbToySuite_forsItsrBreak :
+    ForsItsrBreak crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (derivePublicKey crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey))
+      (signingOracleLog crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [⟨[1], [], 0, 1⟩]) []
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0,
+        forsOpenings := [⟨[], [[]]⟩],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩] } := by
+  obtain ⟨hSome, hCov⟩ := constantSuite1B_sign_fors_cover
+  obtain ⟨s, hs⟩ := Option.isSome_iff_exists.mp hSome
+  obtain ⟨hLeaf, hIdx⟩ := hCov s hs
+  have hs' : evalSingleSign crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [1] [] 0 1 = some s := hs
+  have hLog : signingOracleLog crumbToySuite (⟨4, 128, 1, 1, 1, 1, 1, false⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [⟨[1], [], 0, 1⟩] = [([1], s)] := by
+    rw [signingOracleLog_cons]
+    dsimp only
+    rw [hs', signingOracleLog_nil]
+  rw [hLog]
+  refine ⟨?_, by decide, ?_⟩
+  · intro e he
+    rw [List.mem_singleton] at he
+    subst he
+    intro h
+    cases h
+  · intro a ha
+    unfold logForsLeafAddrs logForsLeafAddrs
+    rw [List.append_nil]
+    unfold sigForsLeafAddrs sigForsLeafIdx sigForsDigest at ha ⊢
+    rw [hLeaf]
+    erw [hIdx]
+    exact ha
+
+/-- A four-query checked run over two XMSS layers: fresh epochs `0`, `1`, a retry of epoch `1`
+    and an explicit epoch `2`. -/
+theorem crumbToySuite_twoLayer_checkedStateful_run :
+    ∃ s1 s2 s3 : PqHashSig,
+      execCheckedStatefulOracle crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) initCheckedStatefulLatch
+        [.signNext [10] 1, .signNext [20] 1, .retryEpoch 1 [20], .signEpoch 2 [30] 1] =
+        { activeState := some ⟨3, some (2, [30], s3)⟩, abortError := none,
+          emittedLog := [(0, [10], s1), (1, [20], s2), (1, [20], s2), (2, [30], s3)] } := by
+  obtain ⟨h1, h2, h3⟩ := constantSuite1B_twoLayer_sign_isSome
+  obtain ⟨s1, h1⟩ := Option.isSome_iff_exists.mp h1
+  obtain ⟨s2, h2⟩ := Option.isSome_iff_exists.mp h2
+  obtain ⟨s3, h3⟩ := Option.isSome_iff_exists.mp h3
+  have h1' : evalSingleSign crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [10] (buildStatefulDetOptDomain 0 []) 0 1 = some s1 := h1
+  have h2' : evalSingleSign crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [20] (buildStatefulDetOptDomain 1 []) 1 1 = some s2 := h2
+  have h3' : evalSingleSign crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey) [30] (buildStatefulDetOptDomain 2 []) 2 1 = some s3 := h3
+  refine ⟨s1, s2, s3, ?_⟩
+  simp [execCheckedStatefulOracle, execCheckedStatefulOracleAux, checkedStatefulSignStep,
+    checkedStatefulFreshEpochSign, initCheckedStatefulLatch, CheckedStatefulLatchState.validBounds,
+    toothStatefulParams_checkedStatefulValid.2, h1', h2', h3']
+
+theorem crumbToySuite_twoLayer_forgery_accepted :
+    verifyCheckedStateful crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (derivePublicKey crumbToySuite (⟨4, 128, 1, 2, 0, 0, 2, true⟩ : PqHashParams) (⟨[], [], []⟩ : PqSecretKey)) [99]
+      { rRand := [], msgTswCtr := 0, leafGlobalIdx := 0, forsOpenings := [],
+        layerSigs := [⟨0, List.replicate 128 [], [[]]⟩, ⟨0, List.replicate 128 [], [[]]⟩] } = true := by
+  rw [verifyCheckedStateful_eq, toothStatefulParams_checkedStatefulValid.2]
+  exact constantSuite1B_twoLayer_forgery_accepted
+
+theorem EpochLatchState.wellFormed_iff (st : EpochLatchState) :
+    st.WellFormed ↔ ∀ ep m s, st.latchedLast = some (ep, m, s) → ep < st.nextEpoch := Iff.rfl
+
+#verify_constructive stateful_jorts_crash_retry_idempotent epochLatchSign_preserves_wellFormed
+  production_stateful_forgery_break
+
+set_option maxRecDepth 32768 in
+#verify_constructive mutantUncheckedReuseSign_ok toothStatefulParams_checkedStatefulValid
+  toothDistinctSuite_oracle_budgetExhausted toothDistinctSuite_oracle_equivocationRefused
+  crumbToySuite_stateless_forgery_accepted crumbToySuite_forsItsrBreak
+  crumbToySuite_twoLayer_checkedStateful_run crumbToySuite_twoLayer_forgery_accepted
+
+end Qsag
+end
+
+/-! ### The constant toy suite's hash (cited by `Tests/SigningTeeth`) -/
+public section
+namespace Qsag
+
+/-- `crumbToySuite` hashes every input to `0x1B…1B`. -/
+theorem crumbToySuite_rawHash (x : List UInt8) :
+    crumbToySuite.rawHash x = List.replicate 32 0x1B := by
+  rfl
+
+end Qsag
+end
