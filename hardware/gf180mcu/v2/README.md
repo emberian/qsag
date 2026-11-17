@@ -66,10 +66,10 @@ tests/              unittest suites; report.py prints the measured figures; muta
 ## Running
 
 ```
-python3 -B -m unittest discover -s hardware/gf180mcu/v2/tests      # 189 tests, about 90 s
+python3 -B -m unittest discover -s hardware/gf180mcu/v2/tests      # 199 tests, about 90 s
 python3 -B hardware/gf180mcu/v2/model/romcheck.py S                 # static ROM checks, also L
 python3 -B hardware/gf180mcu/v2/tests/report.py                     # ROM size and clocks per command
-python3 -B hardware/gf180mcu/v2/tests/mutation.py -j 10             # MUTANTS mutants, about MUTMIN minutes
+python3 -B hardware/gf180mcu/v2/tests/mutation.py -j 10             # 364 mutants; each runs the suite, so about an hour on 10 busy cores
 ```
 
 Signature parameter sets. The ROM is assembled for one set (`chip.SLH`): `128s` (FIPS 205
@@ -83,7 +83,14 @@ for 128s its key generation and signature equal, byte for byte, those of the PyP
 has no dependency). It has not been compared with `crates/qsag-core`.
 
 `tests/mutation.py` applies each mutant to a temporary copy and requires the suite to fail; it exits
-non-zero if a mutant survives. It sets `DREGG_FAST=1`, which skips the one `128s` test.
+non-zero if a mutant survives. It sets `DREGG_FAST=1`, which skips the one `128s` test. Its mutants: every
+decoder fault and every static finding removed; in the lifecycle, gate, verifier, TRNG, record and signer
+microcode every conditional branch and every compare removed; and a hand-written list (label and domain
+swaps, statement fields dropped, thresholds moved, taint propagation, the hold register and stall rules).
+One class of weakening it cannot see and does not claim: a compare of a public 128-bit hash is two `CMP`
+instructions, which are removed together, because no test can make the two halves disagree without a
+64-bit partial collision. Tag compares (`CMPT`), where the tests can forge half a tag, are removed word by
+word.
 
 ## The reference script
 
@@ -193,7 +200,7 @@ Hardwired constants of the sequencer (`model/isa.py`; the assembler lays the ima
 | Address | Use |
 |---|---|
 | 0 | the idle point: the only `DISP` |
-| 1..79 | key range: `KEYWR`, `PMOV`, `CTL LC`, `CTL AUTH`, `CTL PUFE`, `CTL PUFR`, `CTL SYNW` decode only here (56 words used) |
+| 1..79 | key range: `KEYWR`, `PMOV`, `CTL LC`, `CTL AUTH`, `CTL PUFE`, `CTL PUFR`, `CTL SYNW` decode only here (55 words used) |
 | 80..287 | record range: `FRAM` instructions and writes of state rows decode only here (191 words used) |
 | 288.. | everything else; every command entry is here |
 
@@ -279,11 +286,11 @@ Why the new instances are needed and what each releases:
   It is public helper data by design (`ARCHITECTURE.md` 6.1): the chip must be able to recognise a correct
   reconstruction before it derives anything, and the owner root must sign it. It reveals `w` only to
   someone who can invert the hash; `K_dev` is a hash of `w` in a different domain with the enrolment nonce.
-- **`K_host` at `COMMIT`** (`cm_auth+19`, `+20`): the one key a host is meant to hold. Released once, only
+- **`K_host` at `COMMIT`** (`cm_auth+17`, `+18`): the one key a host is meant to hold. Released once, only
   in state `BLANK`, only after the owner root's signature verified and the PUF reconstructed to the signed
   tag, and not in vat mode. After `COMMIT` the chip is `LOCKED` until reset, and `COMMIT` never decodes
   again on a provisioned chip.
-- **Check-tag verdict** (`puf_key+4`, `+6`): one bit, whether this die reconstructs the tag in the
+- **Check-tag verdict** (`puf_key+3`, `+5`): one bit, whether this die reconstructs the tag in the
   authenticated helper record. It is what R1's latch is set from.
 
 Not declassification points, though they look like ones: the syndromes (`LDF SYN0/SYN1`) are public helper
@@ -299,7 +306,7 @@ test_verification_is_public_computation` checks that no key is in the lanes whil
   (ten lines, reviewed), the value comparisons of the tests against `host.py`, and the mutants that swap
   labels.
 - **What a verdict is used for.** `CMPT` leaks one bit by design; `CTL AUTH` accepts any clear, untainted
-  Z. In the ROM it is set in two places of the 56-word key range: after the PUF check-tag compare (which
+  Z. In the ROM it is set in two places of the 55-word key range: after the PUF check-tag compare (which
   lets `K_dev` be written and an unleased chip become `READY`) and, through `auth_z`, after an accepted
   lease statement (which lets a leased chip become `READY`). That nothing else calls `auth_z` is the ROM's
   property, not the decoder's.
@@ -314,11 +321,11 @@ test_verification_is_public_computation` checks that no key is in the lanes whil
 
 | | Code words | Image words (with `.org` padding) | Bits | Constants | Dispatch entries |
 |---|---:|---:|---:|---:|---:|
-| Configuration S | 1,452 | 1,492 | 41,776 | 15 x 64 | 11 x 25 bits |
-| Configuration L | 1,609 | 1,649 | 46,172 | 15 x 64 | 13 |
+| Configuration S | 1,443 | 1,484 | 41,552 | 15 x 64 | 11 x 25 bits |
+| Configuration L | 1,600 | 1,641 | 45,948 | 15 x 64 | 13 |
 
-Words per source: `main` 1, `key` 56, `rec` 191, `ping` 21, `keccak` 46, `hash` 65, `trng` 145, `slh` 307,
-`life` 413, `sign` 207, `field` 157 (L only). Not re-synthesized: the stage 2 RTL's 455-word ROM is 42.6 µm² per word. With stage 5 still to come the image will reach about 2,000 words; the
+Words per source: `main` 1, `key` 55, `rec` 191, `ping` 21, `keccak` 46, `hash` 65, `trng` 141, `slh` 307,
+`life` 409, `sign` 207, `field` 157 (L only). Not re-synthesized: the stage 2 RTL's 455-word ROM is 42.6 µm² per word. With stage 5 still to come the image will reach about 2,000 words; the
 micro-PC has 11 bits (`ARCHITECTURE.md` 5.5).
 
 ## Commands, routines and clocks
@@ -347,12 +354,12 @@ ring spread). Signature figures are for 128s.
 | | counted chip: record tag, write, read-back | + 4,298 | + 0.17 ms |
 | BOOT | blank chip | 2,446 | 0.1 ms |
 | | to READY: verification 2.68 M, PUF 1.14 M, records | 3.83 M | 0.15 s |
-| | leased: the same and TRNG start-up with one nonce (0.31 M) | 4,133,568 | 0.17 s |
-| ENROL | TRNG start-up and nonce, PUF | 1,455,811 | 58 ms |
-| COMMIT | verification, PUF, three record writes | 3,826,938 | 0.15 s |
-| LEASE | one authority signature (2,569 Keccak calls) | 2,620,905 | 0.10 s |
-| GATE | one authority signature (2,704 Keccak calls; 949,619 micro-instructions) | 2,718,597 | 0.11 s |
-| | 3 of 5 | 8,094,277 | 0.32 s |
+| | leased: the same and TRNG start-up with one nonce (0.31 M) | 4,133,555 | 0.17 s |
+| ENROL | TRNG start-up and nonce, PUF | 1,455,799 | 58 ms |
+| COMMIT | verification, PUF, three record writes | 3,826,935 | 0.15 s |
+| LEASE | one authority signature (2,569 Keccak calls) | 2,620,904 | 0.10 s |
+| GATE | one authority signature (2,704 Keccak calls; 949,618 micro-instructions) | 2,718,596 | 0.11 s |
+| | 3 of 5 | 8,094,276 | 0.32 s |
 | | of which the fingerprint: 1,036 words folded, 422 micro-instructions per GF(2^64) product | 874,580 | 35 ms |
 | P2 (L) | raw permutation | 3,149 | 0.13 ms |
 | any | refused by the dispatcher | 3 | |

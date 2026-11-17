@@ -44,11 +44,10 @@ proc puf::place {} {
         for {set c 0} {$c < $per} {incr c} {
             set x [expr {$rx0 + ($s0 + $c * $SLOT) * $sw}]
             if { $r == 0 || $r == $NROWS + 1 || $c < 2 || $c >= $per - 2 } {
-                puf::slot "$P/g_dum\[$d\].u_s" $ri $x
+                puf::slot "$P/g_r\[$r\].g_c\[$c\].g_d.u_s" $ri $x
                 incr d
             } else {
-                set q [expr {($r - 1) * $QPR + ($c - 2) / 4}]
-                puf::slot "$P/g_q\[$q\].g_r\[[expr {($c - 2) % 4}]\].u_s" $ri $x
+                puf::slot "$P/g_r\[$r\].g_c\[$c\].g_u.u_s" $ri $x
                 incr n
             }
         }

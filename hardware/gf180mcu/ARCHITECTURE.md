@@ -23,7 +23,7 @@ experiment RTL was synthesized for area only; none of it was simulated.
 
 Contents: 1 uses · 2 trust model · 3 security state and lifecycle · 4 the verifier as gate · 5 datapath and
 control · 6 organs · 7 budget · 8 verification plan · 9 migration and schedule · 10 decisions ·
-11 configuration S, maximised · appendix A configuration L.
+11 configuration S, maximised · 12 microcode placement and the v3 shape · appendix A configuration L.
 
 **Result in one paragraph.** The target is `SLOT_0P5X0P5` with chip-on-board packaging and the default pad
 ring (owner decision; section 11). Configuration **S** is one 72-row register file, one lane-serial Keccak
@@ -1349,6 +1349,193 @@ Conclusions:
 - 1,015,400 µm² synthesized with every organ, 931,100 without use U5 [M and E as labelled in 7.1]: 69.2 % and
   62.9 % of the placeable area after buffer repair, against 61.5 % placed so far (7.3).
 
+
+---
+
+## 12. Microcode placement and the v3 shape
+
+Asked by the owner: could the microcode live outside the chip, and what would let the design scale to faster
+clocks and smaller nodes. Figures are from the model's interpreter on real 128s statements
+(`v2/tests/report.py` and a trace of every micro-PC), the stage 2 RTL's synthesis, and the physical-design
+lane's placement; [D] marks arithmetic on them.
+
+### 12.1 What the ROM costs and what is in it
+
+The image is 1,443 words now and about 2,000 with stage 5: 85,200 µm² of cells at 42.6 per word, and about
+twice that in floor, because the ROM as random logic is the block that congests (7.3). By source: key range
+55, record routines 191, sponge and shared hashing 111, signer 207, PING 21, idle 1 ("hot": 586); TRNG policy
+141, signature verification 307, lifecycle, statements and gate 409 ("cold": 857).
+
+Two measured facts decide most of what follows.
+
+- **A stored bit that can be written costs about 47 times a ROM bit here.** The register file is 4,575 µm²
+  a row, 71 per bit; the ROM is 42.6 a word, 1.5 per bit (3 with its routing floor). There is no dense
+  writable memory in this flow: the foundry SRAM macro is 51 µm² a bit and byte-wide (5.2).
+- **The work is not where the words are.** One gate statement runs 950,000 micro-instructions, 872,000 of
+  them in the 30-word fingerprint loop, between 2,704 Keccak calls that take 1.86 M of its 2.8 M clocks. A
+  WOTS signature runs 14,005 micro-instructions around 552 Keccak calls: 25 instructions a call, 96 % of the
+  clocks in the unit.
+
+### 12.2 External microcode
+
+Fetch cost [D]: the FRAM port at SCK = clk / 4 moves a 28-bit word in 112 clocks and re-addresses in 128; a
+quad-SPI flash at SCK = clk / 2 moves a word in 14 clocks and re-addresses in 28. While the Keccak unit runs
+(721 clocks) a prefetcher can bring 6 words over plain SPI or 51 over quad.
+
+| Variant | ROM words left (of about 2,000) | Cells / floor freed | Signer | One gate statement (0.11 s today) |
+|---|---:|---:|---|---|
+| (c) none: today | 2,000 | 0 | as 7.4 | as 7.4 |
+| (b) hybrid: cold routines external, executed in place, no cache | about 900 | 47,000 / 94,000 | unchanged (in ROM) | quad: + 18.7 M clocks, 0.86 s. Plain SPI: + 128 M clocks, 5.2 s |
+| (b) with a cache of two 16-word blocks | about 900 | as above, less 64,000 for the cache | unchanged | quad + 64 %; plain SPI + 490 % (6,026 block fetches) |
+| (b) with a cache of four 16-word blocks | about 900 | as above, less 128,000 for the cache | unchanged | quad + 3 %; plain SPI + 22 % (274 block fetches) |
+| (a) everything external but a stub (key and record routines, sponge, authenticator: about 360 words) | 360 | 70,000 / 140,000 | quad: prefetch hides it (25 words a call against 51). Plain SPI: 4.8 times slower | as (b) |
+
+The cache is what makes it fast and the cache is what makes it pointless: 64 words of latches cost more than
+the 1,100 words of ROM they would replace. Register-file rows cannot be borrowed: a row holds two
+micro-words, a 16-word block is eight rows, and a gate statement already uses all 24 scratch rows (4.3).
+Executed in place without a cache, the fingerprint loop alone makes verification seven times slower on the
+best link. So on performance and area: (a) and (b) do not pay in this node. They would pay in a node with
+dense memory, which is 12.4.
+
+**The security argument** is the larger objection, and it would remain in any node.
+
+What an arbitrary program cannot do, by the decoder rules alone (5.3; proved on the stage 2 RTL with ROM
+contents free for the stage-1 rule set): put a key row, the PUF response, or anything computed from them
+into the response, the FRAM, a scratch or state row, a loop count, an index or a branch, except through the
+three declassification instructions; read the capacity of a keyed sponge; address the out rows; end a
+command without the wipe. If it runs outside the hardwired key and record ranges it cannot itself issue a
+key write, a FRAM instruction, a state-row write or a lifecycle change.
+
+What it can do, with the rules as they are:
+
+- **Misuse declassification.** `REL` releases the rate of any completed permutation over a keyed state. A
+  program that copies `K_dev` into the lanes with a label of its choosing and permutes can release
+  `SK.seed`, `SK.prf`, the record MAC key, or a chain value at step 0. Every derived key falls; only the
+  raw `K_dev` rows and the raw PUF response do not.
+- **Skip the counter, a check, or a verdict.** The counter discipline, the request tag, the lease bound
+  and the retirement check are sequences of instructions, not rules.
+- **Call into the middle of the trusted ranges.** The range rules restrict where an instruction sits, not
+  how it is reached. A `CALL` to the record-update routines writes any lifecycle record, tagged under
+  `K_dev`; a cleared compare flag and a `CALL` to the latch routine gives `READY`.
+- **Declare any response length.** The cap is an operand of the routine's own `HDR`.
+
+So an unauthenticated external program is a total loss of everything but `K_dev` itself, and fetched code
+has to be exactly as authentic as the ROM. Against someone who holds the board:
+
+- A digest of the whole image checked at boot is defeated by changing the memory, or the bus, afterwards.
+  Authentication has to be per block and has to finish before any word of the block executes, which is
+  another reason a block buffer is unavoidable.
+- **What can authenticate a block.** (i) The sponge: not available, the running routine's state is in the
+  lanes; a tag checked only at routine boundaries leaves every block in between unauthenticated when it
+  runs. (ii) A hash tree under a pinned root: seven Keccak calls a block for 128 blocks, and the same
+  conflict. (iii) A dedicated polynomial MAC over GF(2^64) under a key derived from `K_dev`: the multiplier
+  is small (about 20,000 µm² [E, half the measured GF(2^128) unit]), but a polynomial tag stored in the
+  clear on the board gives its key away after two blocks, so each tag needs a pad from a keyed function of
+  the block address and image version, and the only keyed function on the chip is the sponge. That means a
+  second, small PRF in hardware (20,000 to 30,000 µm² [E]) and a new cryptographic design to review.
+  Only (iii) works, and with the block buffer it costs more than the ROM it frees.
+- Tags under a device key mean each chip signs its own image at enrolment, so the enrolment, boot and
+  verification code that decides which image to accept must be in ROM anyway: that is most of the cold set.
+- **Rollback.** The image version has to be bound into every tag and held in the lifecycle record. On an
+  unleased chip a restored FRAM image then restores the old version with it, and the old microcode is
+  authentic again: the residual of 3.4 would extend from counters to code, so a routine with a known defect
+  could be put back by anyone holding the board. A leased chip could have the authority name the minimum
+  version in the lease.
+- Every fetch is also a place to inject a fault from the board.
+
+### 12.3 Hardware macro-operations, so that code need not be trusted
+
+The idea: make the declassification points and the counter discipline hardware-sequenced operations that
+carry their own checks, and give every row a taint tag with a kind, so that code can sequence the
+operations and cannot misuse them.
+
+What that takes, concretely:
+
+- **Typed key derivation.** A derive operation whose label is one of a hardwired few and which tags the
+  lanes with the kind of what they now hold (request-tag key, signing seed, randomiser key, record key).
+  `REL` and `CMPT` check the kind: a signing seed is never releasable; a randomiser output is.
+- **A chain operation.** PRF, then exactly `d` steps of `F`, with `d` from a hardware digit queue loaded
+  from a digest the hardware computed, and a release only at the end. About the 60 words of the signer's
+  inner loops as a state machine.
+- **An atomic counted-sign start.** Compare the leaf with the counter, write the record, read it back, and
+  only then arm the chain operation for that key pair.
+- **Entry points.** Trusted ranges enterable only at listed addresses.
+- **Per-row tags.** Three bits a row, 216 flops, about 15,000 µm² [E].
+
+With all code free this would make provable: no signing seed or derived key leaves except as the public
+outputs of the signature scheme at the step counts the scheme prescribes; a counted key's counter is
+advanced and stored before its first release. That is use U1 and U2 against a malicious program.
+
+What it does not reach is authorisation. A gated transition is safe only if the verdict is true, and the
+verdict is the output of 300 words of signature verification, the statement hashing and the committee
+check. If that code is not trusted, the record-update operations are open to it whatever their own checks
+are. The same holds for the nonce policy (a lease is only as fresh as the health tests are honest) and for
+boot. Making those hardware operations too is writing the ROM again as state machines: no smaller, and
+harder to review. Counted in words, the code that would still have to be authentic is the key and record
+routines, the hashing, verification, statements and the gate, and the TRNG policy: about 1,000 of the 1,443.
+
+So in this chip the trusted core cannot be made small, because almost nothing on it is anything but
+security policy. Macro-operations are the right structure for a chip that also runs code it does not
+trust (a vat with programmable guards, new protocols loaded in the field). They are not a way to save area
+in S. Two pieces are worth taking into v2 regardless, because they close gaps found in 12.2 for a few
+dozen gates: **entry points** for the trusted ranges, and a **kind tag on the lane taint** so that `REL`
+cannot release a derived key. Both are decoder rules of the kind already modelled and proved.
+
+### 12.4 What ties v2 to this node, and the parameters of a generator
+
+| In v2 | Tied to | Parameter a generator exposes |
+|---|---|---|
+| Lane-serial Keccak, 721 clocks a call | area in a 180 nm slot | Keccak slicing: clocks per round, from 30 (lane-serial) to 1 (round per clock: 342,265 µm² here [M], negligible below 65 nm) |
+| Register file of standard-cell latches, one read port | no dense memory in the flow | storage: latch array or memory macro; ports. The clear-with-clock-stopped requirement (5.2) is what a macro has to meet |
+| One clock from micro-PC to hold register, 79 ns at SS | the ROM and word unit in one stage | pipeline depth: 1, 2 (instruction register), 3 (row read registered) |
+| Fingerprint as 422 instructions a product | no multiplier in S | a GF(2^64) multiply-accumulate unit, serial or one clock |
+| ROM as random logic | synthesis | ROM structure; microcode in a memory macro (which is where 12.2 becomes cheap, and where its authentication question stays) |
+| Ring-oscillator PUF and TRNG, their thresholds | process, layout, supply | organ interfaces as they already are in the model: start, done, a statistics port, a response port under the key rule; all thresholds are microcode constants |
+| FRAM as the only non-volatile state | no trustworthy NVM in the PDK | a monotonic counter organ, if a node has one: it removes the unleased residual of 3.4 |
+
+What the instruction set, the microcode, the model and the proofs depend on: the row classes and their
+counts, the hardwired address ranges, the rule set, and the unit and organ interfaces (start, done, clocks).
+What they do not depend on: how many clocks a unit takes, how the file is built, the pipeline depth (it
+changes the stall rule, which is a rule about clocks and not about values: the output-bound and taint
+properties are stated over instructions), the clock, the node. The model takes unit clock counts as
+constants (`units.py`), so a design point is a set of constants; the clocks-per-instruction rules are the
+one place where the RTL lane reports and the model follows.
+
+Per-operation times at three design points. A is S as specified; B adds one unit to it; C is a v3 shape.
+Arithmetic [D] from the measured instruction and call counts: one gate statement is 2,704 Keccak calls,
+950,000 instructions of which 872,000 are the fingerprint, 221,000 taken transfers; a worst-case WOTS
+signature is 552 calls, 14,005 instructions, 3,354 taken transfers.
+
+| | A: v2, two-stage, 25 MHz, GF180 | B: A with a serial GF(2^64) unit (64 clocks a product, about 20,000 µm² E) | C: v3, round-per-clock Keccak (about 32 clocks a call E), one-clock GF(2^64) product, two-stage, 100 MHz |
+|---|---:|---:|---:|
+| Keccak call as microcode uses it | 748 clocks | 748 | about 60 |
+| One gate statement (128s) | 3.04 M clocks, 0.12 s | 2.2 M, 0.09 s | 0.19 M, 1.9 ms |
+| 3 of 5 committee | 0.36 s | 0.26 s | 6 ms |
+| WOTS signature, most steps | 0.40 M, 16 ms | same | 35,000, 0.35 ms |
+| SLH-DSA-128s signature, cold / with root cache | 64 s / 12 s | same | 1.3 s / 0.24 s |
+| What limits it | the Keccak unit (two thirds of a verification, 96 % of signing) | the Keccak unit | microcode: half the clocks of a call are lane set-up |
+
+A assumes one more clock for each taken transfer and nothing else; the RTL lane's measured two-stage counts
+replace that. At C the microcode around each hash call is as long as the call, so the next step there is
+fused set-up operations, not a faster unit.
+
+### 12.5 Recommendation
+
+1. **v2: microcode stays in ROM** (variant c). External microcode saves no area in this node once its
+   buffer and authentication are counted, slows verification several times without a buffer, and extends
+   the rollback residual from counters to code.
+2. **Fix the ROM's floor cost where it arises.** In order: write the 1,443 words for size; split the image
+   into banks that place separately (the congestion is one block of 28 outputs fanning out of one region);
+   a ROM array placed by script, as the register file is; only then a custom contact-programmed array,
+   which carries the same foundry-deck risk as any custom cell. The physical-design lane can measure the
+   second and third on the image that exists.
+3. **Take the two decoder rules of 12.3 into v2** (entry points; a kind tag on the lane taint). They cost
+   little and remove the two ways in which the present rules lean on ROM content that 12.2 exposed.
+4. **v3 is a generator**, with the parameters of 12.4, the same instruction set and model, and macro-
+   operations if and only if the chip is to run code that is not part of its own policy.
+
+The decision is the owner's: whether any of 3 goes into this tape-out, and whether v3 is specified as a
+generator now (which constrains how stage 5 is written) or after first silicon.
 
 ---
 

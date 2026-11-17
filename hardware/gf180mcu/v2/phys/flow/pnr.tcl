@@ -53,7 +53,7 @@ proc set_rc {} {
 # Hand-sized or hand-placed instances are don't-touch for the resizer. Signal nets that feed an input
 # of a protected instance are frozen while the resizer runs (it must never buffer in front of a
 # don't-touch load, RSZ-3006) and released from the saved list afterwards, so CTS still owns the clocks.
-set RX_BASE {u_ring/g_st|u_trng/u_(fast|slow)/g_st|u_puf/g_bank\[[0-9]+\]\.u_ro[ab]/g_st|u_pufarr/g_pair\[[0-9]+\]\.u_[ab]/g_st|u_db/u_tdc/g_vernier|u_db/u_rapid_mux/u_fast_mux|u_db/u_lock/u_(set|hold)|u_shield/g_quad\[[0-9]+\]\.u_qsp/g_sp|u_shield/u_m5_loop/(g_m5|u_ant_end)|u_rf/(g_row|g_grp|g_col)|u_clkroot|u_oscbuf}
+set RX_BASE {u_ring/g_st|u_trng/u_(fast|slow)/g_st|u_puf/g_bank\[[0-9]+\]\.u_ro[ab]/g_st|u_pufarr/g_r|u_db/u_tdc/g_vernier|u_db/u_rapid_mux/u_fast_mux|u_db/u_lock/u_(set|hold)|u_shield/g_quad\[[0-9]+\]\.u_qsp/g_sp|u_shield/u_m5_loop/(g_m5|u_ant_end)|u_rf/(g_row|g_grp|g_col)|u_clkroot|u_oscbuf}
 set ::rx $RX_BASE
 if { [envd P_RX ""] ne "" } { set ::rx "$RX_BASE|[envd P_RX ""]" }
 # P_RF_FREE=1: baseline in which the register file is ordinary logic (placer, resizer and CTS own it)
@@ -311,7 +311,7 @@ foreach st $stages {
     if { $st eq "drt" } {
         set_propagated_clock [all_clocks]
         set_thread_count [envd P_THREADS 12]
-        if { [catch {detailed_route -bottom_routing_layer Metal1 -top_routing_layer Metal5 \
+        if { [catch {detailed_route \
                 -output_drc $out/drt_drc.rpt -droute_end_iter [envd P_DRT_ITERS 24] -or_seed 42 -verbose 1} err] } {
             puts "DRT_ERROR $err"; metric drt_failed 1
         }
