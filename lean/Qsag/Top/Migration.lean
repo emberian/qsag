@@ -18,20 +18,36 @@ Top-level composition module (zero `import all`) connecting:
    arithmetic, and five-way `𝔽_{2^{128}}` multiplication equivalence (`ActiveMigrationZeroTest`,
    `Math.Gf2Pow128`),
 5. The destination-bound discrete-log instance `dlogOwnershipScheme` of `Spec.LegacyOwnershipScheme`
-   over finite canonical curve keys `CanonicalSwPk C` (`x < C.p`, `y < C.p`, `C.onCurve = true`,
-   with ZERO global hash-injectivity assumption; witness `DlogOwnershipWitness` binding
-   `authorizedDest = claim.pqDestinationPk`, paired with `tooth_dlogOwnership_rejects_destination_swap`,
-   and inhabited via `secp7Mod43_primeSubgroup`, `secp256k1_primeSubgroup`, `pallas_primeSubgroup`,
-   and `bls381_primeSubgroup`),
-6. The settlement registry as a machine over RAW `MigrationExecution.Submission`s
-   (`rawSettlementMachine`: snapshot admission, then `MigrationExecution.settle`), its unconditional
-   `Spec.DataRefines` forward simulations into both `Spec.idealMigrateMachine` and
-   `Spec.idealKeyMigrateMachine` (`rawSettlement_dataRefines_idealMigrate`,
-   `rawSettlement_dataRefines_idealKeyMigrate`), its collision-branching multi-turn completeness
-   dichotomy (`rawSettlement_schedule_refines_or_nullifierCollision`,
-   `dlogSettlement_schedule_refines_or_nullifierCollision`), and complete zero-premise curve
-   instantiations on `secp7Mod43` (`secp7Mod43_dlogSettlement_complete_refinement_witness`) and
-   381-bit `BLS12-381` (`bls381_dlogSettlement_refines_or_nullifierCollision`)!
+   over finite canonical curve keys `CanonicalSwPk C` (`x < C.p`, `y < C.p`, `C.onCurve = true`),
+   with no injectivity hypothesis on the nullifier; witness `DlogOwnershipWitness` binding
+   `authorizedDest = claim.pqDestinationPk`, paired with `tooth_dlogOwnership_rejects_destination_swap`.
+   The scheme is parameterised by a `PrimeSubgroup`. The only `PrimeSubgroup` constructed in the
+   tree is `secp7Mod43_primeSubgroup`: the toy curve `y² = x³ + 7` over `ℤ/43` with a generator of
+   order `31`. `secp256k1_primeSubgroup`, `pallas_primeSubgroup` and `bls381_primeSubgroup` are
+   functions of a `PrimeOrderGroup` hypothesis (closure, additivity, order and exactness of the
+   generator) that is proved for none of those curves, so nothing in this module is instantiated
+   at secp256k1, Pallas or BLS12-381.
+6. The settlement registry as a machine over raw `MigrationExecution.Submission`s
+   (`rawSettlementMachine`: snapshot admission, then `MigrationExecution.settle`); its
+   `Spec.DataRefines` forward simulations into `Spec.idealMigrateMachine` and
+   `Spec.idealKeyMigrateMachine`, given `SettlementCircuitSound`
+   (`rawSettlement_dataRefines_idealMigrate`, `rawSettlement_dataRefines_idealKeyMigrate`); and the
+   multi-turn dichotomy "every honest enrolled submission settles, or two enrolled keys collide
+   under the nullifier" (`rawSettlement_schedule_refines_or_nullifierCollision`), with no
+   injectivity hypothesis on the nullifier.
+7. The discrete-log instance of item 6 (`dlogSettlementWire`, `dlogSettlementVerify`,
+   `dlogSettlement_circuitSound`, `dlogSettlement_dataRefines_idealMigrate`,
+   `dlogSettlement_schedule_refines_or_nullifierCollision`). What it assumes: an authorization
+   `DlogSettlementAuth` carries the opened views for two distinct ZKBoo challenges, and
+   `dlogSettlementVerify` reconstructs the scalar from them and checks `grp.smul sk = pk` itself.
+   That is the output of the special-soundness extractor taken as the input format; one ZKBoo
+   proof opens one challenge. `dlogSettlement_circuitSound` does not use the compiled circuit or
+   its run, and nothing here states that a compiled circuit enforces the discrete-log relation.
+   One joint instance is exhibited, on the toy curve:
+   `secp7Mod43_dlogSettlement_complete_refinement_witness` (two enrolled keys, three submissions;
+   its circuit is the lane well-formedness circuit of `MigrationExecution.honestSubmission` for
+   every statement). `bls381_dlogSettlement_refines_or_nullifierCollision` is the dichotomy over
+   BLS12-381 coordinates, conditional on a `PrimeOrderGroup` hypothesis for `bls381G1`.
 -/
 
 public import Qsag.Spec.Primitives
@@ -222,11 +238,12 @@ structure DlogOwnershipWitness where
   deriving DecidableEq, Repr
 
 /-- Discrete-log ownership over finite canonical curve keys `CanonicalSwPk C` (`x < C.p`, `y < C.p`,
-    `C.onCurve = true`, cardinality `≤ C.p²`) in a prime-order subgroup (`PrimeSubgroup`, inhabited
-    unconditionally by `secp7Mod43_primeSubgroup` and conditionally by `secp256k1_primeSubgroup`,
-    `pallas_primeSubgroup`, and `bls381_primeSubgroup`):
-    `ownsKey pk w claim` checks BOTH `0 < w.scalar < ord ∧ grp.smul w.scalar = pk.toSwPoint` AND
-    `w.authorizedDest = claim.pqDestinationPk`, with ZERO global nullifier-injectivity assumption. -/
+    `C.onCurve = true`, cardinality `≤ C.p²`) in a prime-order subgroup `PrimeSubgroup`. The only
+    constructed `PrimeSubgroup` is `secp7Mod43_primeSubgroup` (toy curve over `ℤ/43`, order `31`);
+    `secp256k1_primeSubgroup`, `pallas_primeSubgroup` and `bls381_primeSubgroup` each take the
+    group laws of their generator as a hypothesis that is not proved in the tree.
+    `ownsKey pk w claim` is `0 < w.scalar < ord ∧ grp.smul w.scalar = pk.toSwPoint` together with
+    `w.authorizedDest = claim.pqDestinationPk`. No injectivity of `deriveNullifier` is assumed. -/
 def dlogOwnershipScheme {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.CanonicalSwPk C → Qsag.Spec.Digest256) :
@@ -444,6 +461,20 @@ private theorem rawSettlementAdmit_eq_none {LegacyPk Witness Authorization : Typ
   show (match Spec.EnrolledSnapshot.entitlement snapshot pk with
     | none => none
     | some amount => some (pk, amount)) = none
+  rw [hEnt]
+
+private theorem rawSettlementAdmit_of_decoded {LegacyPk Witness Authorization : Type}
+    [DecidableEq LegacyPk]
+    {D : SettlementWire LegacyPk Witness Authorization} {snapshot : Spec.EnrolledSnapshot LegacyPk}
+    {st : MigrationExecution.Statement} {pk : LegacyPk} {amount : Nat}
+    (hPk : D.legacyPkOf st.legacyCommitment = some pk)
+    (hEnt : Spec.EnrolledSnapshot.entitlement snapshot pk = some amount) :
+    rawSettlementAdmit D snapshot st = some (pk, amount) := by
+  unfold rawSettlementAdmit
+  rw [hPk]
+  show (match Spec.EnrolledSnapshot.entitlement snapshot pk with
+    | none => none
+    | some amount => some (pk, amount)) = some (pk, amount)
   rw [hEnt]
 
 /-- Receipt emitted for a settlement verdict: only an accepted settlement emits
@@ -834,13 +865,17 @@ def rawSettlement_dataRefines_idealKeyMigrate {LegacyPk Witness Authorization : 
   absInit _ := Spec.IdealMigrateState.init
   init_ok hInit := by
     cases hInit
-    exact ⟨rfl, rfl, Spec.IdealMigrateState.init_inv scheme snapshot⟩
+    exact ⟨(Spec.idealKeyMigrateMachine_init_iff scheme snapshot _).mpr rfl, rfl,
+      Spec.IdealMigrateState.init_inv scheme snapshot⟩
   sim_visible {ledger ledger' a sub out j} hRel hStep hVis := by
     obtain ⟨a', hStepM, hSpent'⟩ :=
       (rawSettlement_dataRefines_idealMigrate S snapshot).sim_visible hRel.1 hStep hVis
-    obtain ⟨a'', hStepK, hEqK, hInv'⟩ :=
+    obtain ⟨a'', hStepK, hRelK⟩ :=
       (Spec.idealMigrate_dataRefines_idealKeyMigrate scheme snapshot).sim_visible
-        ⟨rfl, hRel.2⟩ hStepM rfl
+        ((Spec.idealMigrate_dataRefines_idealKeyMigrate_rel_iff scheme snapshot a a).mpr
+          ⟨rfl, hRel.2⟩) hStepM rfl
+    obtain ⟨hEqK, hInv'⟩ :=
+      (Spec.idealMigrate_dataRefines_idealKeyMigrate_rel_iff scheme snapshot a' a'').mp hRelK
     subst hEqK
     exact ⟨a', hStepK, hSpent', hInv'⟩
   sim_internal {ledger ledger' a sub out} _ hStep hVis := by
@@ -970,7 +1005,8 @@ private theorem rawSettlement_schedule_complete_or_collision_aux
         · left
           intro sub₀ hMem pk amount hHon
           rcases List.mem_cons.mp hMem with rfl | hInRest
-          · rw [hPk] at hHon; exact nomatch hHon.1
+          · have hNone := hPk.symm.trans hHon.1
+            cases hNone
           · exact hAllRest sub₀ hInRest pk amount hHon
         · exact .inr hColl
       | some pk =>
@@ -1000,7 +1036,8 @@ private theorem rawSettlement_schedule_complete_or_collision_aux
             · left
               intro sub₀ hMem pk' amount' hHon
               rcases List.mem_cons.mp hMem with rfl | hInRest
-              · rw [hVer] at hHon; exact nomatch hHon.2.2.1
+              · have hFalse := hVer.symm.trans hHon.2.2.1
+                cases hFalse
               · exact hAllRest sub₀ hInRest pk' amount' hHon
             · exact .inr hColl
           | true =>
@@ -1019,13 +1056,8 @@ private theorem rawSettlement_schedule_complete_or_collision_aux
                   · exact hAllRest sub₀ hInRest pk' amount' hHon
                 · exact .inr hColl
               · right
-                have hAd : rawSettlementAdmit D snapshot sub.statement = some (pk, amount) := by
-                  unfold rawSettlementAdmit
-                  rw [hPk]
-                  show (match Spec.EnrolledSnapshot.entitlement snapshot pk with
-                    | none => none
-                    | some amount => some (pk, amount)) = some (pk, amount)
-                  rw [hEnt]
+                have hAd : rawSettlementAdmit D snapshot sub.statement = some (pk, amount) :=
+                  rawSettlementAdmit_of_decoded hPk hEnt
                 have hSpent : sub.statement.nullifier ∈ ledger.spent := by
                   cases (inferInstance : Decidable (sub.statement.nullifier ∈ ledger.spent)) with
                   | isTrue hIn => exact hIn
@@ -1151,7 +1183,7 @@ theorem rawSettlement_schedule_complete_of_injOn
   rcases rawSettlement_schedule_refines_or_nullifierCollision S snapshot subs with
     hOk | ⟨pk₁, pk₂, h₁, h₂, hNe, hEq⟩
   · exact hOk
-  · exact absurd (hInj h₁ h₂ hEq) hNe
+  · exact absurd ((Spec.NullifierInjOn_iff _ _).mp hInj h₁ h₂ hEq) hNe
 
 /-- `#tooth` A raw submission whose legacy commitment does not parse is rejected, whatever its
     authorization, witness lanes and nullifier. -/
@@ -1373,7 +1405,13 @@ theorem tooth_migrationToy_forged_nullifier_rejected
 
 /-! ## 6. Unified Curve-Ownership Settlement (`dlogOwnershipScheme` ↔ `rawSettlementMachine`) -/
 
-/-- ZKBoo 2-of-3 discrete-log + destination authorization proof for curve-ownership settlement. -/
+/-- Authorization format of the discrete-log settlement model: two challenges `e1`, `e2`, the
+    opened pair of additive scalar shares for each, and the authorized destination.
+    When `e1 ≠ e2` the two opened pairs contain all three shares, so the scalar is determined by
+    the authorization (`DlogSettlementAuth.reconstructScalar`). This is the transcript pair that
+    the special-soundness extractor of ZKBoo consumes, not a ZKBoo proof: a proof opens one
+    challenge per repetition, and its verifier checks view consistency against commitments, which
+    this structure does not contain. A submission in this model therefore discloses the scalar. -/
 structure DlogSettlementAuth where
   e1 : Fin 3
   e2 : Fin 3
@@ -1382,7 +1420,8 @@ structure DlogSettlementAuth where
   authorizedDest : BitVec 256
   deriving DecidableEq, Repr
 
-/-- Extract the reconstructed scalar `zkbooReconstructScalar ord s0 s1 s2` from a `DlogSettlementAuth`. -/
+/-- The scalar `zkbooReconstructScalar ord s0 s1 s2` of the three shares read off the two opened
+    pairs of a `DlogSettlementAuth` by `extractThreeShares`. -/
 def DlogSettlementAuth.reconstructScalar (ord : Nat) (auth : DlogSettlementAuth) : Nat :=
   let (s0, s1, s2) := Qsag.extractThreeShares auth.e1 auth.e2 auth.opened1 auth.opened2
   Qsag.zkbooReconstructScalar ord s0 s1 s2
@@ -1404,10 +1443,15 @@ def dlogSettlementWire {C : Qsag.SwCurve} (ord : Nat)
   migrationDomain := migrationDomain
   epoch := epoch
 
-/-- Curve-ownership settlement authorization verifier over `CanonicalSwPk C`: checks distinct ZKBoo
-    challenges `e1 ≠ e2`, campaign `(migrationDomain, epoch)`, destination authorization
+/-- Authorization verifier of the discrete-log settlement model over `CanonicalSwPk C`: checks
+    `e1 ≠ e2`, campaign `(migrationDomain, epoch)`, destination authorization
     `auth.authorizedDest = st.destination`, nullifier derivation `st.nullifier = deriveNullifier pk`,
-    and discrete-log relation `0 < sk < ord ∧ grp.smul sk = pk.toSwPoint`. -/
+    and, for the scalar `sk` reconstructed from the two opened pairs,
+    `0 < sk < ord ∧ grp.smul sk = pk.toSwPoint`.
+    The verifier recomputes the scalar and checks the discrete-log relation directly. It models
+    "an accepted authorization yields an extracted witness" by putting the extractor's input in
+    the authorization; it is not the verifier of a zero-knowledge proof and it checks no
+    commitment, view or circuit. -/
 def dlogSettlementVerify {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
@@ -1425,9 +1469,37 @@ def dlogSettlementVerify {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
       st.nullifier = deriveNullifier pk ∧
       0 < sk ∧ sk < ord ∧ grp.smul sk = pk.toSwPoint)
 
-/-- **`SettlementCircuitSound` for Unified Curve-Ownership Settlement (`dlogSettlement_circuitSound`)**:
-    Bridges `dlogOwnershipScheme grp deriveNullifier` directly into `SettlementCircuitSound` over
-    `CanonicalSwPk C` for any `PrimeSubgroup C G ord`, with ZERO hash-injectivity hypothesis! -/
+private theorem dlogSettlementVerify_eq_true {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
+    (grp : Qsag.PrimeSubgroup C G ord)
+    (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
+    (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
+    (migrationDomain : BitVec 256) (epoch : UInt64)
+    {st : MigrationExecution.Statement} {auth : DlogSettlementAuth} {pk : Qsag.CanonicalSwPk C}
+    (hPk : legacyPkOf st.legacyCommitment = some pk)
+    (h : auth.e1 ≠ auth.e2 ∧
+      st.migrationDomain = migrationDomain ∧
+      st.epoch = epoch ∧
+      auth.authorizedDest = st.destination ∧
+      st.nullifier = deriveNullifier pk ∧
+      0 < auth.reconstructScalar ord ∧ auth.reconstructScalar ord < ord ∧
+      grp.smul (auth.reconstructScalar ord) = pk.toSwPoint) :
+    dlogSettlementVerify grp deriveNullifier legacyPkOf migrationDomain epoch st auth = true := by
+  unfold dlogSettlementVerify
+  rw [hPk]
+  exact decide_eq_true h
+
+/-- `SettlementCircuitSound` for `dlogSettlementWire`, `dlogOwnershipScheme` and
+    `dlogSettlementVerify`, for every `compile`.
+    Proved: each of the three fields follows from `dlogSettlementVerify … = true` alone, because
+    that verifier checks the campaign, the derived nullifier and the discrete-log relation of the
+    scalar reconstructed from the authorization, and `dlogSettlementWire.extractWitness` returns
+    that same scalar.
+    Not used: the hypothesis `MigrationExecution.run w (compile st) = .accepted` of the fields
+    `accepted_nullifier_derived` and `accepted_witness_owns`. `compile` is arbitrary and the
+    witness lanes `w` play no role, so this is not a soundness statement about a compiled circuit.
+    Assumed by the model: that an accepted authorization contains two openings under distinct
+    challenges (`DlogSettlementAuth`), i.e. the special-soundness extractor has already run. No
+    injectivity of `deriveNullifier` is assumed. -/
 theorem dlogSettlement_circuitSound {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
@@ -1462,11 +1534,12 @@ theorem dlogSettlement_circuitSound {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord :
     exact ⟨hDec.2.2.2.2.2.1, hDec.2.2.2.2.2.2.1, hDec.2.2.2.2.2.2.2,
       congrArg destinationBytes hDec.2.2.2.1⟩
 
-/-- **Unified Forward Simulation (`dlogSettlement_dataRefines_idealMigrate`)**:
-    `rawSettlementMachine` parameterized by `dlogSettlementWire` and `dlogSettlementVerify` over
-    finite canonical curve keys `CanonicalSwPk C` refines
-    `Spec.idealMigrateMachine (dlogOwnershipScheme grp deriveNullifier) snapshot` via
-    `Spec.DataRefines`, with ZERO global nullifier-injectivity premise! -/
+/-- `Spec.DataRefines` from `rawSettlementMachine` with `dlogSettlementWire` and
+    `dlogSettlementVerify` over `CanonicalSwPk C` into
+    `Spec.idealMigrateMachine (dlogOwnershipScheme grp deriveNullifier) snapshot`, with no
+    injectivity premise on `deriveNullifier`. The ownership step rests on
+    `dlogSettlement_circuitSound`, hence on the authorization format `DlogSettlementAuth` (both
+    openings present), not on a property of `compile`. -/
 def dlogSettlement_dataRefines_idealMigrate {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
@@ -1490,8 +1563,9 @@ def dlogSettlement_dataRefines_idealMigrate {C : Qsag.SwCurve} {G : Qsag.SwPoint
       migrationDomain epoch compile)
     snapshot
 
-/-- Unconditional `Spec.DataRefines` of curve-ownership settlement into the hash-free key-indexed
-    ideal machine `Spec.idealKeyMigrateMachine`. -/
+/-- `Spec.DataRefines` of the discrete-log settlement model into the key-indexed ideal machine
+    `Spec.idealKeyMigrateMachine`, under the same modelling assumption as
+    `dlogSettlement_dataRefines_idealMigrate`. -/
 def dlogSettlement_dataRefines_idealKeyMigrate {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
     (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
@@ -1536,16 +1610,16 @@ theorem dlogSettlement_refinement_exists {C : Qsag.SwCurve} {G : Qsag.SwPoint} {
   ⟨dlogSettlement_dataRefines_idealMigrate grp deriveNullifier legacyPkOf destinationBytes hDestInj
     migrationDomain epoch compile snapshot⟩
 
-/-- **Unconditional Collision-Branching Curve-Migration Refinement
-    (`dlogSettlement_schedule_refines_or_nullifierCollision`)**:
-    For ANY `PrimeSubgroup C G ord` (including `secp256k1`, `Pallas`, `Ed25519`, and 381-bit
-    `BLS12-381`) and ANY compressing 256-bit nullifier hash `deriveNullifier : CanonicalSwPk C → Digest256`
-    with **ZERO** injectivity assumption, every multi-turn schedule `subs` EITHER:
-    1. Projects to admitted traces of BOTH `Spec.idealMigrateMachine` and `Spec.idealKeyMigrateMachine`,
-       preserves ownership soundness, non-double-claim, conservation, and `spent.Nodup`, AND settles
-       every honest enrolled submission in `subs` without cross-key blocking, OR
-    2. Constructively exhibits an explicit distinct canonical curve-key collision
-       `Spec.NullifierCollision deriveNullifier pk₁ pk₂` (`pk₁ ≠ pk₂`) in `snapshot`! -/
+/-- Collision-branching dichotomy for the discrete-log settlement model
+    (`rawSettlement_schedule_refines_or_nullifierCollision` at `dlogSettlement_circuitSound`).
+    For every `PrimeSubgroup C G ord` and every `deriveNullifier : CanonicalSwPk C → Digest256`,
+    with no injectivity assumption, every schedule `subs` either
+    1. projects to admitted traces of `Spec.idealMigrateMachine` and `Spec.idealKeyMigrateMachine`,
+       with ownership soundness, non-double-claim, conservation and `spent.Nodup`, and settles
+       every honest enrolled submission in `subs`, or
+    2. exhibits two distinct keys of `snapshot` with equal nullifiers
+       (`Spec.NullifierCollision deriveNullifier pk₁ pk₂`).
+    The `PrimeSubgroup` is a parameter; the only one constructed is `secp7Mod43_primeSubgroup`. -/
 theorem dlogSettlement_schedule_refines_or_nullifierCollision
     {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
     (grp : Qsag.PrimeSubgroup C G ord)
@@ -1654,36 +1728,47 @@ theorem tooth_dlogSettlement_destination_tamper_rejected
     rw [hPk'] at hAuth
     exact absurd (of_decide_eq_true hAuth).2.2.2.1 hTamper
 
-/-! ## 7. Complete Joint-Satisfiability Refinement Witnesses (`secp7Mod43` & 381-Bit `BLS12-381`) -/
+/-! ## 7. Joint Refinement Witness on the Toy Curve `secp7Mod43`; `BLS12-381` Conditional on its Group Laws -/
 
 /-- Canonical injective 256-bit nullifier encoding on `CanonicalSwPk Weierstrass.secp7Mod43`:
     packs `pk.encodeCoordNat = pk.x + 43 * pk.y < 1849` alongside `NULLIFIER_DOMAIN`. -/
 def secp7Mod43Nullifier (pk : Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43) : Spec.Digest256 :=
   BitVec.ofNat 256 (1 + pk.encodeCoordNat * 2 + Qsag.NULLIFIER_DOMAIN.toNat * 8192)
 
-/-- **Unconditional Global Injectivity of `secp7Mod43Nullifier` on `CanonicalSwPk secp7Mod43`
-    (`secp7Mod43Nullifier_injective`)**:
-    Because `CanonicalSwPk secp7Mod43` bounds `x, y < 43` (`encodeCoordNat < 1849`), `secp7Mod43Nullifier`
-    is 100% injective across the entire curve key carrier with zero unreduced-coordinate collisions! -/
+private theorem secp7Mod43Nullifier_pack_lt {e d : Nat} (he : e < 1849)
+    (hd : d < 18446744073709551616) : 1 + e * 2 + d * 8192 < 2 ^ 256 := by
+  have h : 1 + e * 2 + d * 8192 <
+      115792089237316195423570985008687907853269984665640564039457584007913129639936 := by
+    omega
+  exact h
+
+private theorem secp7Mod43Nullifier_pack_inj {e₁ e₂ d : Nat}
+    (h : 1 + e₁ * 2 + d * 8192 = 1 + e₂ * 2 + d * 8192) : e₁ = e₂ := by
+  omega
+
+/-- `secp7Mod43Nullifier` is injective on `CanonicalSwPk secp7Mod43`: the carrier bounds
+    `x, y < 43`, so `encodeCoordNat < 1849` and the packed value is below `2^256`. -/
 theorem secp7Mod43Nullifier_injective : Spec.NullifierInjective secp7Mod43Nullifier := by
+  refine (Spec.NullifierInjective_iff _).mpr ?_
   intro pk₁ pk₂ hEq
-  have hc₁ : pk₁.encodeCoordNat < 43 * 43 := by
+  have hp : Qsag.Weierstrass.secp7Mod43.p = 43 :=
+    congrArg (fun C : Qsag.SwCurve => C.p) Qsag.Weierstrass.secp7Mod43_eq
+  have hc₁ : pk₁.encodeCoordNat < 1849 := by
     have h := pk₁.encodeCoordNat_lt_sq
-    rw [Qsag.Weierstrass.secp7Mod43_eq] at h
+    rw [hp] at h
     exact h
-  have hc₂ : pk₂.encodeCoordNat < 43 * 43 := by
+  have hc₂ : pk₂.encodeCoordNat < 1849 := by
     have h := pk₂.encodeCoordNat_lt_sq
-    rw [Qsag.Weierstrass.secp7Mod43_eq] at h
+    rw [hp] at h
     exact h
-  have hd : Qsag.NULLIFIER_DOMAIN.toNat < 2 ^ 64 := Qsag.NULLIFIER_DOMAIN.toFin.isLt
-  have h256 : 1 + 43 * 43 * 2 + 2 ^ 64 * 8192 < 2 ^ 256 := by decide
-  have hb₁ : 1 + pk₁.encodeCoordNat * 2 + Qsag.NULLIFIER_DOMAIN.toNat * 8192 < 2 ^ 256 := by omega
-  have hb₂ : 1 + pk₂.encodeCoordNat * 2 + Qsag.NULLIFIER_DOMAIN.toNat * 8192 < 2 ^ 256 := by omega
+  have hd : Qsag.NULLIFIER_DOMAIN.toNat < 18446744073709551616 :=
+    Qsag.NULLIFIER_DOMAIN.toFin.isLt
   have hNat := congrArg BitVec.toNat hEq
   unfold secp7Mod43Nullifier at hNat
-  rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hb₁, Nat.mod_eq_of_lt hb₂] at hNat
-  have hCoord : pk₁.encodeCoordNat = pk₂.encodeCoordNat := by omega
-  exact Qsag.CanonicalSwPk.encodeCoordNat_injective hCoord
+  rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+    Nat.mod_eq_of_lt (secp7Mod43Nullifier_pack_lt hc₁ hd),
+    Nat.mod_eq_of_lt (secp7Mod43Nullifier_pack_lt hc₂ hd)] at hNat
+  exact Qsag.CanonicalSwPk.encodeCoordNat_injective (secp7Mod43Nullifier_pack_inj hNat)
 
 /-- Validated 2-byte curve public-key decoder on `secp7Mod43`: decodes `[bx, by_]` via
     `CanonicalSwPk.ofSwPoint?`, rejecting off-curve and unreduced (`≥ 43`) coordinates. -/
@@ -1692,18 +1777,38 @@ def secp7Mod43DecodePk : List UInt8 → Option (Qsag.CanonicalSwPk Qsag.Weierstr
     Qsag.CanonicalSwPk.ofSwPoint? Qsag.Weierstrass.secp7Mod43 (some (bx.toNat, by_.toNat))
   | _ => none
 
+private theorem secp7Mod43DecodePk_eq_some {bx by_ : UInt8}
+    {pk : Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43}
+    (h : pk.toSwPoint = some (bx.toNat, by_.toNat)) :
+    secp7Mod43DecodePk [bx, by_] = some pk :=
+  Qsag.CanonicalSwPk.ofSwPoint?_eq_some_iff.mpr h.symm
+
+private theorem secp7Mod43DecodePk_eq_none {bx by_ : UInt8}
+    (h : Qsag.SwCurve.onCurve ⟨43, 0, 7⟩ (some (bx.toNat, by_.toNat)) = false) :
+    secp7Mod43DecodePk [bx, by_] = none := by
+  cases hD : secp7Mod43DecodePk [bx, by_] with
+  | none => rfl
+  | some pk =>
+    have hPt : some (bx.toNat, by_.toNat) = pk.toSwPoint :=
+      Qsag.CanonicalSwPk.ofSwPoint?_eq_some_iff.mp hD
+    have hOn := pk.toSwPoint_onCurve
+    rw [← hPt, Qsag.Weierstrass.secp7Mod43_eq, h] at hOn
+    cases hOn
+
 /-- `#tooth` Off-curve (`[0, 0]`) and unreduced (`[50, 7]`, `[71, 7]`) byte pairs are deterministically
     rejected by `secp7Mod43DecodePk`. -/
 theorem tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced :
     secp7Mod43DecodePk [0, 0] = none ∧
     secp7Mod43DecodePk [50, 7] = none ∧
-    secp7Mod43DecodePk [71, 7] = none := by
-  exact ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+    secp7Mod43DecodePk [71, 7] = none :=
+  ⟨secp7Mod43DecodePk_eq_none (by decide +kernel), secp7Mod43DecodePk_eq_none (by decide +kernel),
+    secp7Mod43DecodePk_eq_none (by decide +kernel)⟩
 
-private def unaryDestBytes (d : BitVec 256) : Spec.Bytes :=
+/-- Unary serialization of a 256-bit destination (toy wire format of the `secp7Mod43` instance). -/
+def unaryDestBytes (d : BitVec 256) : Spec.Bytes :=
   List.replicate d.toNat 0
 
-private theorem unaryDestBytes_injective {d₁ d₂ : BitVec 256}
+theorem unaryDestBytes_injective {d₁ d₂ : BitVec 256}
     (h : unaryDestBytes d₁ = unaryDestBytes d₂) : d₁ = d₂ := by
   have hLen := congrArg List.length h
   unfold unaryDestBytes at hLen
@@ -1717,7 +1822,10 @@ private def secp7Mod43Wire :
     MigrationExecution.honestSubmission.statement.migrationDomain
     MigrationExecution.honestSubmission.statement.epoch
 
-private def secp7Mod43Compile (_ : MigrationExecution.Statement) : List MigrationExecution.Gate :=
+/-- Circuit compiler of the `secp7Mod43` instance: every statement gets the circuit of
+    `MigrationExecution.honestSubmission`, so the circuit does not depend on the statement and
+    checks lane well-formedness only. -/
+def secp7Mod43Compile (_ : MigrationExecution.Statement) : List MigrationExecution.Gate :=
   MigrationExecution.honestCircuit MigrationExecution.honestSubmission.statement
 
 private theorem secp7Mod43_honest_submission_valid
@@ -1743,25 +1851,24 @@ private theorem secp7Mod43_honest_submission_valid
   have hRunOrig := ((MigrationExecution.settle_accepted_iff (fun _ (_ : Unit) => true)
     MigrationExecution.honestCircuit ⟨[]⟩ MigrationExecution.honestSubmission).mp
     MigrationExecution.settlement_acceptance_witness).2.2
-  refine ⟨?_, hRunOrig⟩
-  unfold dlogSettlementVerify
-  change (match secp7Mod43DecodePk [bx, by_] with
-    | none => false
-    | some pk' => _) = true
-  rw [hDec]
-  dsimp only
-  have hRec : (DlogSettlementAuth.mk 0 1 (s0, s1) (s1, s2)
-      MigrationExecution.honestSubmission.statement.destination).reconstructScalar 31 = sk := by
+  have hRec : ∀ d : BitVec 256,
+      (DlogSettlementAuth.mk 0 1 (s0, s1) (s1, s2) d).reconstructScalar 31 = sk := by
+    intro d
     unfold DlogSettlementAuth.reconstructScalar
     rw [Qsag.extractThreeShares_zero_one]
     exact hSk
-  rw [hRec, hSmul]
-  exact decide_eq_true ⟨by decide, rfl, rfl, rfl, rfl, hPos, hLt, rfl⟩
+  exact ⟨dlogSettlementVerify_eq_true Qsag.secp7Mod43_primeSubgroup deriveNullifier
+    secp7Mod43DecodePk _ _ (pk := pk) hDec
+    ⟨(by decide : (0 : Fin 3) ≠ 1), rfl, rfl, rfl, rfl, Nat.lt_of_lt_of_eq hPos (hRec _).symm,
+      Nat.lt_of_le_of_lt (Nat.le_of_eq (hRec _)) hLt, (congrArg _ (hRec _)).trans hSmul⟩,
+    hRunOrig⟩
 
-/-- **Concrete End-to-End Curve Settlement Witness (`secp7Mod43_dlogSettlement_honest_accepted`)**:
-    Instantiates `rawSettlementMachine` over `CanonicalSwPk secp7Mod43` on `secp7Mod43_primeSubgroup`
-    with enrolled canonical key `secp7Mod43Pk2 = (7, 7) = [2]G` (ZKBoo shares `(1, 1, 0)`), executing
-    `MigrationExecution.honestCircuit` and minting the enrolled entitlement `250`! -/
+/-- One accepted step of the discrete-log settlement model on the toy curve: over
+    `secp7Mod43_primeSubgroup` with enrolled key `secp7Mod43Pk2 = (7, 7) = [2]G`, the submission
+    whose authorization opens shares `(1, 1, 0)` is accepted from the empty ledger and its
+    receipt carries the enrolled entitlement `250`. The circuit run is that of
+    `secp7Mod43Compile` on the lanes of `MigrationExecution.honestSubmission`; it is unrelated to
+    the curve relation. -/
 theorem secp7Mod43_dlogSettlement_honest_accepted :
     let pk2 := Qsag.secp7Mod43Pk2
     let wire := dlogSettlementWire 31 secp7Mod43DecodePk unaryDestBytes unaryDestBytes_injective
@@ -1785,12 +1892,12 @@ theorem secp7Mod43_dlogSettlement_honest_accepted :
       some (ledger', ⟨wire.claimOf pk2 stmt, 250⟩) := by
   dsimp only
   have hDec2 : secp7Mod43DecodePk [7, 7] = some Qsag.secp7Mod43Pk2 :=
-    Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint Qsag.secp7Mod43Pk2
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.2.1
   have hSmul2 : Qsag.secp7Mod43_primeSubgroup.smul 2 = Qsag.secp7Mod43Pk2.toSwPoint := by
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.2.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.2.2.1
   obtain ⟨hVer, hRun⟩ := secp7Mod43_honest_submission_valid 7 7 Qsag.secp7Mod43Pk2 hDec2
-    1 1 0 2 (by rw [Qsag.zkbooReconstructScalar_eq]; decide) (by decide) (by decide) hSmul2
+    1 1 0 2 (Qsag.zkbooReconstructScalar_eq 31 1 1 0) (by decide) (by decide) hSmul2
     secp7Mod43Nullifier
   let snap : Spec.EnrolledSnapshot (Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43) :=
     [(Qsag.secp7Mod43Pk2, 250)]
@@ -1810,17 +1917,8 @@ theorem secp7Mod43_dlogSettlement_honest_accepted :
       ⟨(by intro h; cases h), hVer, hRun⟩
   have hEnt : Spec.EnrolledSnapshot.entitlement snap Qsag.secp7Mod43Pk2 = some 250 := by
     simp only [snap, Spec.EnrolledSnapshot.entitlement, ↓reduceIte]
-  have hAd : rawSettlementAdmit secp7Mod43Wire snap stmt = some (Qsag.secp7Mod43Pk2, 250) := by
-    unfold rawSettlementAdmit
-    change (match secp7Mod43DecodePk [7, 7] with
-      | none => none
-      | some pk =>
-        match Spec.EnrolledSnapshot.entitlement snap pk with
-        | none => none
-        | some amount => some (pk, amount)) = some (Qsag.secp7Mod43Pk2, 250)
-    rw [hDec2]
-    dsimp only
-    rw [hEnt]
+  have hAd : rawSettlementAdmit secp7Mod43Wire snap stmt = some (Qsag.secp7Mod43Pk2, 250) :=
+    rawSettlementAdmit_of_decoded (D := secp7Mod43Wire) (st := stmt) hDec2 hEnt
   refine ⟨(MigrationExecution.settle
       (dlogSettlementVerify Qsag.secp7Mod43_primeSubgroup secp7Mod43Nullifier secp7Mod43DecodePk
         MigrationExecution.honestSubmission.statement.migrationDomain
@@ -1833,17 +1931,21 @@ theorem secp7Mod43_dlogSettlement_honest_accepted :
   rw [hAcc]
   rfl
 
-/-- **Complete Unconditional `dlogSettlement_dataRefines_idealMigrate` Witness on `secp7Mod43`
-    (`secp7Mod43_dlogSettlement_complete_refinement_witness`)**:
-    Discharges EVERY SINGLE PREMISE simultaneously with **zero unproved hypotheses**:
-    1. `Spec.NullifierInjective secp7Mod43Nullifier` holds unconditionally across all canonical curve points,
-    2. `SettlementCircuitSound` holds (`dlogSettlement_circuitSound`),
-    3. `dlogSettlement_dataRefines_idealMigrate` AND `dlogSettlement_dataRefines_idealKeyMigrate`
-       instantiate `Spec.DataRefines` on the two-key snapshot `[(Pk1, 150), (Pk2, 250)]`, and
-    4. Executing the multi-turn schedule `[sub1, sub2, sub2Replay]` settles BOTH canonical keys
-       `Pk1 = [1]G = (2, 12)` and `Pk2 = [2]G = (7, 7)` (minting `150 + 250 = 400`), rejects the
-       replay `sub2Replay`, and lifts via `dlogSettlement_dataRefines_idealMigrate` to admitted
-       2-claim traces of BOTH `Spec.idealMigrateMachine` and `Spec.idealKeyMigrateMachine`! -/
+/-- Joint instance of the discrete-log settlement model on the toy curve `secp7Mod43` (`p = 43`,
+    subgroup order `31`), with the snapshot `[(Pk1, 150), (Pk2, 250)]` and the schedule
+    `[sub1, sub2, sub2Replay]`. In this one instance, with no hypotheses:
+    1. `Spec.NullifierInjective secp7Mod43Nullifier`;
+    2. `SettlementCircuitSound` for the instance (`dlogSettlement_circuitSound`);
+    3. the accepted trace of the schedule projects to admitted traces of
+       `Spec.idealMigrateMachine` and `Spec.idealKeyMigrateMachine` (the first of these is stated
+       twice: it is obtained once from `dlogSettlement_schedule_complete_of_injOn` and once from
+       `dlogSettlement_dataRefines_idealMigrate`);
+    4. the schedule settles exactly `Pk1 = [1]G = (2, 12)` and `Pk2 = [2]G = (7, 7)`, amounts
+       summing to `400`, the replay `sub2Replay` with another destination being rejected.
+    Limits of the instance: the curve is a toy; `secp7Mod43Compile` gives every statement the
+    lane well-formedness circuit of `MigrationExecution.honestSubmission`; and each authorization
+    carries both openings (`DlogSettlementAuth`), so the scalars `1` and `2` are in the
+    submissions. -/
 theorem secp7Mod43_dlogSettlement_complete_refinement_witness :
     let pk1 := Qsag.secp7Mod43Pk1
     let pk2 := Qsag.secp7Mod43Pk2
@@ -1871,10 +1973,6 @@ theorem secp7Mod43_dlogSettlement_complete_refinement_witness :
       { stmt2 with destination := 1#256 }
     let sub2Replay : MigrationExecution.Submission DlogSettlementAuth :=
       ⟨stmt2Replay, ⟨0, 1, (1, 1), (1, 0), 1#256⟩, MigrationExecution.honestSubmission.witness⟩
-    let ref := dlogSettlement_dataRefines_idealMigrate Qsag.secp7Mod43_primeSubgroup
-      secp7Mod43Nullifier secp7Mod43DecodePk unaryDestBytes unaryDestBytes_injective
-      MigrationExecution.honestSubmission.statement.migrationDomain
-      MigrationExecution.honestSubmission.statement.epoch secp7Mod43Compile snap
     let res := runRawSettlementSchedule wire snap verify secp7Mod43Compile ⟨[]⟩
       [sub1, sub2, sub2Replay]
     Spec.NullifierInjective secp7Mod43Nullifier ∧
@@ -1915,9 +2013,9 @@ theorem secp7Mod43_dlogSettlement_complete_refinement_witness :
   let sub2Replay : MigrationExecution.Submission DlogSettlementAuth :=
     ⟨stmt2Replay, ⟨0, 1, (1, 1), (1, 0), 1#256⟩, MigrationExecution.honestSubmission.witness⟩
   have hDec1 : secp7Mod43DecodePk [2, 12] = some pk1 :=
-    Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint pk1
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.1
   have hDec2 : secp7Mod43DecodePk [7, 7] = some pk2 :=
-    Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint pk2
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.2.1
   have hSmul1 : Qsag.secp7Mod43_primeSubgroup.smul 1 = pk1.toSwPoint := by
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.1
@@ -1925,24 +2023,22 @@ theorem secp7Mod43_dlogSettlement_complete_refinement_witness :
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.2.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.2.2.1
   obtain ⟨hVer1, hRun1⟩ := secp7Mod43_honest_submission_valid 2 12 pk1 hDec1
-    1 0 0 1 (by rw [Qsag.zkbooReconstructScalar_eq]; decide) (by decide) (by decide) hSmul1
+    1 0 0 1 (Qsag.zkbooReconstructScalar_eq 31 1 0 0) (by decide) (by decide) hSmul1
     secp7Mod43Nullifier
   obtain ⟨hVer2, hRun2⟩ := secp7Mod43_honest_submission_valid 7 7 pk2 hDec2
-    1 1 0 2 (by rw [Qsag.zkbooReconstructScalar_eq]; decide) (by decide) (by decide) hSmul2
+    1 1 0 2 (Qsag.zkbooReconstructScalar_eq 31 1 1 0) (by decide) (by decide) hSmul2
     secp7Mod43Nullifier
   have hPkNe : pk2 ≠ pk1 := Ne.symm Qsag.secp7Mod43_canonicalPks_props.2.2.2.2.2.2.2.2.2.1
   have hNullNe : secp7Mod43Nullifier pk2 ≠ secp7Mod43Nullifier pk1 :=
-    fun hEq => hPkNe (secp7Mod43Nullifier_injective hEq)
+    fun hEq => hPkNe ((Spec.NullifierInjective_iff _).mp secp7Mod43Nullifier_injective hEq)
   have hEnt1 : Spec.EnrolledSnapshot.entitlement snap pk1 = some 150 := by
     simp only [snap, Spec.EnrolledSnapshot.entitlement, ↓reduceIte]
   have hEnt2 : Spec.EnrolledSnapshot.entitlement snap pk2 = some 250 := by
     simp only [snap, Spec.EnrolledSnapshot.entitlement, hPkNe, ↓reduceIte]
-  have hAd1 : rawSettlementAdmit wire snap stmt1 = some (pk1, 150) := by
-    unfold rawSettlementAdmit; change (match secp7Mod43DecodePk [2, 12] with | none => none | some pk => _) = _
-    rw [hDec1]; dsimp only; rw [hEnt1]
-  have hAd2 : rawSettlementAdmit wire snap stmt2 = some (pk2, 250) := by
-    unfold rawSettlementAdmit; change (match secp7Mod43DecodePk [7, 7] with | none => none | some pk => _) = _
-    rw [hDec2]; dsimp only; rw [hEnt2]
+  have hAd1 : rawSettlementAdmit wire snap stmt1 = some (pk1, 150) :=
+    rawSettlementAdmit_of_decoded (D := wire) (st := stmt1) hDec1 hEnt1
+  have hAd2 : rawSettlementAdmit wire snap stmt2 = some (pk2, 250) :=
+    rawSettlementAdmit_of_decoded (D := wire) (st := stmt2) hDec2 hEnt2
   have hStep1 : (rawSettlementMachine wire snap verify secp7Mod43Compile).step ⟨[]⟩ sub1 =
       some (⟨[secp7Mod43Nullifier pk1]⟩, ⟨wire.claimOf pk1 stmt1, 150⟩) := by
     have hAcc1 : (MigrationExecution.settle verify secp7Mod43Compile ⟨[]⟩ sub1).2 = .accepted :=
@@ -2022,8 +2118,8 @@ theorem secp7Mod43_dlogSettlement_complete_refinement_witness :
       MigrationExecution.honestSubmission.statement.migrationDomain
       MigrationExecution.honestSubmission.statement.epoch secp7Mod43Compile,
     hComp.1, hComp.2.1, ?_, ?_, hAdmC, ref.preserve_admitsTrace hAdmC⟩
-  · rw [hSched]; rfl
-  · rw [hSched]; decide
+  · exact congrArg (fun r => r.2.map (fun io => io.2.claim.legacyPk)) hSched
+  · exact congrArg (fun r => (r.2.map (fun io => io.2.amount)).sum) hSched
 
 /-- Defective x-only nullifier on `secp7Mod43` that omits `y`-parity (`[1]G = (2, 12)` and
     `[30]G = (2, 31)` share `x = 2`). -/
@@ -2091,9 +2187,9 @@ theorem tooth_dlogSettlement_xOnlyNullifier_extracts_collision :
   let sub30 : MigrationExecution.Submission DlogSettlementAuth :=
     ⟨stmt30, ⟨0, 1, (10, 10), (10, 10), stmt30.destination⟩, MigrationExecution.honestSubmission.witness⟩
   have hDec1 : secp7Mod43DecodePk [2, 12] = some pk1 :=
-    Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint pk1
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.1
   have hDec30 : secp7Mod43DecodePk [2, 31] = some pk30 :=
-    Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint pk30
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.2.2.1
   have hSmul1 : Qsag.secp7Mod43_primeSubgroup.smul 1 = pk1.toSwPoint := by
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.1
@@ -2101,10 +2197,10 @@ theorem tooth_dlogSettlement_xOnlyNullifier_extracts_collision :
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.2.2.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.2.1
   obtain ⟨hVer1, hRun1⟩ := secp7Mod43_honest_submission_valid 2 12 pk1 hDec1
-    1 0 0 1 (by rw [Qsag.zkbooReconstructScalar_eq]; decide) (by decide) (by decide) hSmul1
+    1 0 0 1 (Qsag.zkbooReconstructScalar_eq 31 1 0 0) (by decide) (by decide) hSmul1
     secp7Mod43XOnlyNullifier
   obtain ⟨hVer30, hRun30⟩ := secp7Mod43_honest_submission_valid 2 31 pk30 hDec30
-    10 10 10 30 (by rw [Qsag.zkbooReconstructScalar_eq]; decide) (by decide) (by decide) hSmul30
+    10 10 10 30 (Qsag.zkbooReconstructScalar_eq 31 10 10 10) (by decide) (by decide) hSmul30
     secp7Mod43XOnlyNullifier
   have hPkNe : pk30 ≠ pk1 := Ne.symm Qsag.secp7Mod43_canonicalPks_props.2.2.2.2.2.2.2.2.2.2
   have hEnt1 : Spec.EnrolledSnapshot.entitlement snap pk1 = some 150 := by
@@ -2119,12 +2215,10 @@ theorem tooth_dlogSettlement_xOnlyNullifier_extracts_collision :
     unfold secp7Mod43XOnlyNullifier
     rw [Qsag.secp7Mod43_canonicalPks_props.2.2.2.1,
         Qsag.secp7Mod43_canonicalPks_props.2.2.2.2.2.2.2.1]
-  have hAd1 : rawSettlementAdmit wire snap stmt1 = some (pk1, 150) := by
-    unfold rawSettlementAdmit; change (match secp7Mod43DecodePk [2, 12] with | none => none | some pk => _) = _
-    rw [hDec1]; dsimp only; rw [hEnt1]
-  have hAd30 : rawSettlementAdmit wire snap stmt30 = some (pk30, 250) := by
-    unfold rawSettlementAdmit; change (match secp7Mod43DecodePk [2, 31] with | none => none | some pk => _) = _
-    rw [hDec30]; dsimp only; rw [hEnt30]
+  have hAd1 : rawSettlementAdmit wire snap stmt1 = some (pk1, 150) :=
+    rawSettlementAdmit_of_decoded (D := wire) (st := stmt1) hDec1 hEnt1
+  have hAd30 : rawSettlementAdmit wire snap stmt30 = some (pk30, 250) :=
+    rawSettlementAdmit_of_decoded (D := wire) (st := stmt30) hDec30 hEnt30
   have hStep1 : (rawSettlementMachine wire snap verify secp7Mod43Compile).step ⟨[]⟩ sub1 =
       some (⟨[secp7Mod43XOnlyNullifier pk1]⟩, ⟨wire.claimOf pk1 stmt1, 150⟩) := by
     have hAcc1 : (MigrationExecution.settle verify secp7Mod43Compile ⟨[]⟩ sub1).2 = .accepted :=
@@ -2167,6 +2261,54 @@ theorem tooth_dlogSettlement_xOnlyNullifier_extracts_collision :
   · exact False.elim (hBlocked (hLeft.2.2.2.2.2.2 sub30 (.tail _ (.head _)) pk30 250 hHon30))
   · exact hRight
 
+/-- `#tooth` The completeness clause of `dlogSettlement_schedule_complete_of_injOn` is false for
+    the x-only nullifier: in the schedule `[sub1, sub30]` over the snapshot of `[1]G` and `[30]G`,
+    not every honest submission settles its key. -/
+theorem tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner :
+    ¬ (let pk1 := Qsag.secp7Mod43Pk1
+       let pk30 := Qsag.secp7Mod43Pk30
+       let wire := dlogSettlementWire 31 secp7Mod43DecodePk unaryDestBytes unaryDestBytes_injective
+         MigrationExecution.honestSubmission.statement.migrationDomain
+         MigrationExecution.honestSubmission.statement.epoch
+       let verify := dlogSettlementVerify Qsag.secp7Mod43_primeSubgroup secp7Mod43XOnlyNullifier
+         secp7Mod43DecodePk MigrationExecution.honestSubmission.statement.migrationDomain
+         MigrationExecution.honestSubmission.statement.epoch
+       let snap : Spec.EnrolledSnapshot (Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43) :=
+         [(pk1, 150), (pk30, 250)]
+       let stmt1 : MigrationExecution.Statement :=
+         { MigrationExecution.honestSubmission.statement with
+           legacyCommitment := [2, 12]
+           nullifier := secp7Mod43XOnlyNullifier pk1 }
+       let sub1 : MigrationExecution.Submission DlogSettlementAuth :=
+         ⟨stmt1, ⟨0, 1, (1, 0), (0, 0), stmt1.destination⟩,
+           MigrationExecution.honestSubmission.witness⟩
+       let stmt30 : MigrationExecution.Statement :=
+         { MigrationExecution.honestSubmission.statement with
+           legacyCommitment := [2, 31]
+           nullifier := secp7Mod43XOnlyNullifier pk30 }
+       let sub30 : MigrationExecution.Submission DlogSettlementAuth :=
+         ⟨stmt30, ⟨0, 1, (10, 10), (10, 10), stmt30.destination⟩,
+           MigrationExecution.honestSubmission.witness⟩
+       let res := runRawSettlementSchedule wire snap verify secp7Mod43Compile ⟨[]⟩ [sub1, sub30]
+       ∀ sub ∈ [sub1, sub30],
+         ∀ (pk : Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43) (amount : Nat),
+           HonestRawSubmission wire snap verify secp7Mod43Compile sub pk amount →
+             pk ∈ res.2.map (fun io => io.2.claim.legacyPk)) := by
+  intro h
+  have hTooth := tooth_dlogSettlement_xOnlyNullifier_extracts_collision
+  dsimp only at h hTooth
+  exact hTooth.2.2.1 (h _ (.tail _ (.head _)) _ 250 hTooth.2.1)
+
+/-- `#tooth` The collision disjunct of `dlogSettlement_schedule_refines_or_nullifierCollision` is
+    inhabited: the snapshot of `[1]G` and `[30]G` holds two distinct keys with equal x-only
+    nullifiers. -/
+theorem tooth_dlogSettlement_xOnlyNullifier_snapshot_collision :
+    ∃ pkA pkB : Qsag.CanonicalSwPk Qsag.Weierstrass.secp7Mod43,
+      pkA ∈ [(Qsag.secp7Mod43Pk1, 150), (Qsag.secp7Mod43Pk30, 250)].map Prod.fst ∧
+      pkB ∈ [(Qsag.secp7Mod43Pk1, 150), (Qsag.secp7Mod43Pk30, 250)].map Prod.fst ∧
+      Spec.NullifierCollision secp7Mod43XOnlyNullifier pkA pkB :=
+  tooth_dlogSettlement_xOnlyNullifier_extracts_collision.2.2.2
+
 /-! ### 381-Bit `BLS12-381` Compressing-Nullifier Instantiation -/
 
 /-- Compressing 256-bit nullifier fold over 381-bit `CanonicalSwPk bls381Curve` coordinates. -/
@@ -2174,11 +2316,13 @@ def bls381FoldNullifier (pk : Qsag.CanonicalSwPk Qsag.bls381Curve) : Spec.Digest
   BitVec.ofNat 256
     (pk.x ^^^ (pk.x >>> 256) ^^^ (pk.y <<< 1) ^^^ (pk.y >>> 255) ^^^ Qsag.NULLIFIER_DOMAIN.toNat)
 
-/-- **381-Bit `BLS12-381` Collision-Branching Refinement (`bls381_dlogSettlement_refines_or_nullifierCollision`)**:
-    Even though `2^256 < p_bls381` makes global `Digest256` injectivity impossible by Pigeonhole
-    (`tooth_bls381_width_no_injective_bitvec256`), `dlogSettlement` over `CanonicalSwPk bls381Curve`
-    unconditionally `Spec.DataRefines` `Spec.idealMigrateMachine` AND satisfies the full multi-turn
-    collision-branching refinement dichotomy! -/
+/-- The dichotomy over `CanonicalSwPk bls381Curve` with the compressing nullifier
+    `bls381FoldNullifier`, conditional on `hGrp`: the `PrimeOrderGroup` laws of `bls381G1`, which
+    are not proved in the tree, so this theorem has no instance here. Given `hGrp`, the
+    discrete-log settlement model has a `Spec.DataRefines` into `Spec.idealMigrateMachine` and
+    satisfies the collision-branching dichotomy, although `2^256 < p_bls381` rules out an
+    injective map from the coordinate range to `Digest256`
+    (`tooth_bls381_width_no_injective_bitvec256`). -/
 theorem bls381_dlogSettlement_refines_or_nullifierCollision
     (hGrp : Qsag.bls381Curve.PrimeOrderGroup Qsag.bls381G1 Qsag.r_bls381)
     (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk Qsag.bls381Curve))
@@ -2217,9 +2361,10 @@ theorem bls381_dlogSettlement_refines_or_nullifierCollision
   · exact .inl ⟨hOk.1, hOk.2.1, hOk.2.2.2.2.2.2⟩
   · exact .inr hColl
 
-/-- Unconditional 381-bit `BLS12-381` finite-snapshot `Spec.NullifierInjOn` non-vacuity witness:
-    `bls381G1Canonical` and `bls381NegG1Canonical` are distinct canonical 381-bit keys (`2^380 < x`)
-    separated by `bls381FoldNullifier`, while `2^256 < p_bls381` forbids global 256-bit injectivity. -/
+/-- `Spec.NullifierInjOn` is satisfiable for the compressing nullifier on 381-bit coordinates:
+    `bls381G1Canonical` and `bls381NegG1Canonical` are distinct canonical keys with different
+    `bls381FoldNullifier` values, while `2^256 < p_bls381` rules out an injective map from
+    `Fin p_bls381` to `BitVec 256`. This concerns the nullifier only; it uses no group law. -/
 theorem bls381_compressing_nullifier_nonvacuous :
     Qsag.bls381G1Canonical ≠ Qsag.bls381NegG1Canonical ∧
     bls381FoldNullifier Qsag.bls381G1Canonical ≠ bls381FoldNullifier Qsag.bls381NegG1Canonical ∧
@@ -2230,8 +2375,12 @@ theorem bls381_compressing_nullifier_nonvacuous :
   have hDistinct := Qsag.bls381_canonicalPks_distinct_and_381bit.2.2.1
   have hNullNe : bls381FoldNullifier Qsag.bls381G1Canonical ≠
       bls381FoldNullifier Qsag.bls381NegG1Canonical := by
+    obtain ⟨hx, hy, hnx, hny⟩ := Qsag.bls381_canonicalPks_coords
+    unfold bls381FoldNullifier
+    rw [hnx, hny, hx, hy, Qsag.NULLIFIER_DOMAIN_eq]
     decide +kernel
-  refine ⟨hDistinct, hNullNe, ?_, Qsag.tooth_bls381_width_no_injective_bitvec256⟩
+  refine ⟨hDistinct, hNullNe, (Spec.NullifierInjOn_iff _ _).mpr ?_,
+    Qsag.tooth_bls381_width_no_injective_bitvec256⟩
   intro pk₁ pk₂ h₁ h₂ hEq
   rcases List.mem_cons.mp h₁ with rfl | h₁'
   · rcases List.mem_cons.mp h₂ with rfl | h₂'
@@ -2271,12 +2420,18 @@ theorem inhabited_dlogOwnership_accepted_claim :
   have hEnt : Spec.EnrolledEntitlement snap pk1 150 := by
     show Spec.EnrolledSnapshot.entitlement snap pk1 = some 150
     simp only [snap, Spec.EnrolledSnapshot.entitlement, ↓reduceIte]
+  have hValid : Spec.ValidLegacyOwnership
+      (dlogOwnershipScheme Qsag.secp7Mod43_primeSubgroup secp7Mod43Nullifier) snap claim w 150 :=
+    ⟨hEnt, rfl, (by decide : 0 < 1), (by decide : 1 < 31), hSmul1, rfl⟩
+  have hInjOn : Spec.NullifierInjOn
+      (dlogOwnershipScheme Qsag.secp7Mod43_primeSubgroup secp7Mod43Nullifier).deriveNullifier
+      (snap.map Prod.fst) :=
+    secp7Mod43Nullifier_injective.injOn _
   have hStep := Spec.idealMigrateMachine_unclaimed_owner_accepts
-    (secp7Mod43Nullifier_injective.injOn _)
+    (st := Spec.IdealMigrateState.init) hInjOn
     (Spec.IdealMigrateState.init_inv
       (dlogOwnershipScheme Qsag.secp7Mod43_primeSubgroup secp7Mod43Nullifier) snap)
-    ⟨hEnt, rfl, by decide, by decide, hSmul1, rfl⟩
-    (fun h => nomatch h)
+    hValid (fun h => nomatch h)
   exact ⟨_, _, _, Qsag.secp7Mod43_primeSubgroup, secp7Mod43Nullifier, snap,
     Spec.IdealMigrateState.init, _, claim, w, ⟨claim, 150⟩, hStep⟩
 
@@ -2301,10 +2456,9 @@ theorem inhabited_zkboo_extracted_scalar_claim :
     rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.2.1]
     exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.2.2.1
   have hDlog : Qsag.ZkBooDlogCommitted Qsag.secp7Mod43_primeSubgroup pk2.toSwPoint shares := by
-    unfold Qsag.ZkBooDlogCommitted
-    have hRec : Qsag.zkbooReconstructScalar 31 (shares 0) (shares 1) (shares 2) = 2 := by
-      rw [Qsag.zkbooReconstructScalar_eq]
-      decide
+    refine (Qsag.ZkBooDlogCommitted_iff _ _ _).mpr ?_
+    have hRec : Qsag.zkbooReconstructScalar 31 (shares 0) (shares 1) (shares 2) = 2 :=
+      (Qsag.zkbooReconstructScalar_eq 31 _ _ _).trans rfl
     rw [hRec]
     exact ⟨by decide, by decide, hSmul2⟩
   have hEnt : Spec.EnrolledEntitlement snap pk2 250 := by
@@ -2316,23 +2470,33 @@ theorem inhabited_zkboo_extracted_scalar_claim :
     ⟨Spec.IdealMigrateState.init, [], rfl, .nil _⟩,
     by decide, hDlog, hEnt, fun h => nomatch h⟩
 
+/-- Joint witness for the premises of `dlogSettlement_schedule_complete_of_injOn` on `secp7Mod43`:
+    one instance (group, nullifier, decoder, destination encoding, snapshot of two keys, schedule of
+    three submissions) in which the destination encoding is injective, the nullifier is injective
+    on the snapshot, and the schedule settles exactly the enrolled keys. -/
 theorem inhabited_dlogSettlement_schedule_complete :
     ∃ (C : Qsag.SwCurve) (G : Qsag.SwPoint) (ord : Nat)
       (grp : Qsag.PrimeSubgroup C G ord)
       (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
       (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
       (destinationBytes : BitVec 256 → Spec.Bytes)
+      (hDestInj : ∀ {d₁ d₂ : BitVec 256}, destinationBytes d₁ = destinationBytes d₂ → d₁ = d₂)
       (migrationDomain : BitVec 256) (epoch : UInt64)
       (compile : MigrationExecution.Statement → List MigrationExecution.Gate)
       (snapshot : Spec.EnrolledSnapshot (Qsag.CanonicalSwPk C))
       (subs : List (MigrationExecution.Submission DlogSettlementAuth)),
-      (∀ {d₁ d₂ : BitVec 256}, destinationBytes d₁ = destinationBytes d₂ → d₁ = d₂) ∧
-      Spec.NullifierInjOn deriveNullifier (snapshot.map Prod.fst) :=
+      Spec.NullifierInjOn deriveNullifier (snapshot.map Prod.fst) ∧
+      (runRawSettlementSchedule
+        (dlogSettlementWire ord legacyPkOf destinationBytes hDestInj migrationDomain epoch)
+        snapshot (dlogSettlementVerify grp deriveNullifier legacyPkOf migrationDomain epoch)
+        compile ⟨[]⟩ subs).2.map (fun io => io.2.claim.legacyPk) = snapshot.map Prod.fst :=
   ⟨_, _, _, Qsag.secp7Mod43_primeSubgroup, secp7Mod43Nullifier, secp7Mod43DecodePk,
-    unaryDestBytes, MigrationExecution.honestSubmission.statement.migrationDomain,
+    unaryDestBytes, unaryDestBytes_injective,
+    MigrationExecution.honestSubmission.statement.migrationDomain,
     MigrationExecution.honestSubmission.statement.epoch, secp7Mod43Compile,
-    [(Qsag.secp7Mod43Pk1, 150), (Qsag.secp7Mod43Pk2, 250)], [],
-    unaryDestBytes_injective, secp7Mod43Nullifier_injective.injOn _⟩
+    [(Qsag.secp7Mod43Pk1, 150), (Qsag.secp7Mod43Pk2, 250)], _,
+    secp7Mod43Nullifier_injective.injOn _,
+    secp7Mod43_dlogSettlement_complete_refinement_witness.2.2.2.2.1⟩
 
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
@@ -2367,6 +2531,8 @@ theorem inhabited_dlogSettlement_schedule_complete :
   Qsag.Top.secp7Mod43_dlogSettlement_honest_accepted
   Qsag.Top.secp7Mod43_dlogSettlement_complete_refinement_witness
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_extracts_collision
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_snapshot_collision
   Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision
   Qsag.Top.bls381_compressing_nullifier_nonvacuous
   Qsag.Top.inhabited_dlogOwnership_accepted_claim
@@ -2388,9 +2554,11 @@ theorem inhabited_dlogSettlement_schedule_complete :
 #tooth_pair Qsag.Top.secp7Mod43_dlogSettlement_honest_accepted vs
   Qsag.Top.tooth_dlogSettlement_destination_tamper_rejected
 #tooth_pair Qsag.Top.secp7Mod43_dlogSettlement_complete_refinement_witness vs
-  Qsag.Top.tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner
+#tooth_pair Qsag.Top.dlogSettlement_schedule_complete_of_injOn vs
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_blocks_honest_owner
 #tooth_pair Qsag.Top.dlogSettlement_schedule_refines_or_nullifierCollision vs
-  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_extracts_collision
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_snapshot_collision
 
 #tooth_pair Qsag.Top.rawSettlement_accepted_decodes vs
   Qsag.Top.tooth_rawSettlement_undecodable_submission_rejected

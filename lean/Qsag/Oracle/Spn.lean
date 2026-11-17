@@ -3180,6 +3180,11 @@ def identityPublicPermutation : PublicPermutation PublicSpnState where
   inverse_forward := fun _ => rfl
   forward_inverse := fun _ => rfl
 
+/-- The feed-forward of the identity permutation is the zero map. -/
+theorem publicSpnFeedForward_identity (x : PublicSpnState) :
+    publicSpnFeedForward identityPublicPermutation x = (0#128, 0#128) := by
+  simp only [publicSpnFeedForward, identityPublicPermutation, id_eq, BitVec.xor_self]
+
 /-- Nonvacuity guard: the permutation laws alone cannot imply collision resistance
 of the feed-forward construction. Distinct explicit 256-bit nodes collide. -/
 theorem publicPermutation_laws_allow_feedForward_collision :
@@ -3262,6 +3267,414 @@ theorem polyToTower128_mds_constants :
   refine ⟨?_, ?_⟩
   · rw [← gf128_mds_constants_certified.1, polyToTower128_psiTower128ToPoly]
   · rw [← gf128_mds_constants_certified.2.1, polyToTower128_psiTower128ToPoly]
+
+/-! ## Executed controls and teeth (audited and paired in `Tests/OracleAndQrom`)
+
+These evaluate `binaryPopcount`, `spnIterRounds128`, the Rust-model round, the lane framing, `pairXor`
+and `walsh`, whose bodies are visible only in this module. -/
+section ExecutedControls
+open MigrationExecution
+set_option exponentiation.threshold 2048
+
+theorem tooth_frobenius_sbox_x2_differential_probability_one :
+    ∃ badBound : RatBound,
+      binaryPopcount 2 = 1 ∧
+      (∀ x delta : Tower128,
+        towerAdd 7 (towerMul 7 (towerAdd 7 x delta) (towerAdd 7 x delta)) (towerMul 7 x x) =
+          towerMul 7 delta delta) ∧
+      RatBound.lt sbox7MaxDiffProb128 badBound ∧
+      ¬ strictlyMoreThanBits 125 badBound := by
+  refine ⟨RatBound.one, by decide, fun x delta => ?_, by rw [RatBound.one_eq]; decide,
+    by rw [RatBound.one_eq]; decide⟩
+  rw [towerSq_add, towerAdd_comm 7 (towerMul 7 x x), towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+
+theorem tooth_zero_round_constants_preserve_zero_subspace (mdsA mdsB : Tower128) :
+    ∃ rc : Tower128 × Tower128,
+      spnRound128 mdsA mdsB rc (towerZero 7, towerZero 7) = (towerZero 7, towerZero 7) ∧
+      spnIterRounds128 mdsA mdsB (fun _ => rc) spnRounds
+        (towerZero 7, towerZero 7) = (towerZero 7, towerZero 7) := by
+  have hStep : spnRound128 mdsA mdsB (towerZero 7, towerZero 7) (towerZero 7, towerZero 7) =
+      (towerZero 7, towerZero 7) := by unfold spnRound128 spnLinearMix towerSbox7; simp
+  refine ⟨(towerZero 7, towerZero 7), hStep, ?_⟩
+  suffices hAll : ∀ r : Nat, spnIterRounds128 mdsA mdsB (fun _ => (towerZero 7, towerZero 7)) r
+      (towerZero 7, towerZero 7) = (towerZero 7, towerZero 7) from hAll spnRounds
+  intro r
+  induction r with
+  | zero => rfl
+  | succ r ih => simp only [spnIterRounds128, ih, hStep]
+
+private theorem rustPow7_zero : rustPow7 0#128 = 0#128 := by
+  simp only [rustPow7, rustGf128Mul_zero_left]
+
+private theorem rustPow7_one : rustPow7 1#128 = 1#128 := by
+  simp only [rustPow7, rustGf128Mul_one_left]
+
+private theorem rustSpnRound_zero_rc_unit_x :
+    rustSpnRound (0#128, 0#128) (1#128, 0#128) = (1#128, gf128MdsBPolyBits) := by
+  simp only [rustSpnRound, BitVec.xor_zero, rustPow7_zero, rustPow7_one, rustGf128Mul_zero_left,
+    rustGf128Mul_one_left, BitVec.zero_xor]
+
+private theorem rustSpnRound_zero_rc_unit_y :
+    rustSpnRound (0#128, 0#128) (0#128, 1#128) = (gf128MdsAPolyBits, 1#128) := by
+  simp only [rustSpnRound, BitVec.xor_zero, rustPow7_zero, rustPow7_one, rustGf128Mul_zero_left,
+    rustGf128Mul_one_left, BitVec.zero_xor]
+
+set_option maxRecDepth 4096 in
+/-- Positive controls: values of the Rust model, cross-checked against an independent
+    transcription of `gf2_128_mul` / `pow7_plain` / the round body outside Lean. -/
+theorem rust_spn_poly_basis_kats :
+    rustPow7 2#128 = 0x80#128 ∧
+    rustPow7 3#128 = 0xff#128 ∧
+    rustSpnRound (7#128, 11#128) (3#128, 5#128) =
+      (0x7e449a0c3042bf1c84c9783f54d336e9#128, 0x11db4739396e6534126ec4cc445b09a2#128) ∧
+    rustSpnRound (0#128, 0#128) (1#128, 0#128) = (1#128, gf128MdsBPolyBits) := by
+  -- The multiplication loop is sealed in `Math/Gf2Pow128`; its executed values are certified there.
+  have h := rustGf128Mul_pow7_round_kats
+  exact ⟨h.1, h.2.1, Prod.ext h.2.2.1 h.2.2.2, rustSpnRound_zero_rc_unit_x⟩
+
+/-- Positive control for the framing: the little-endian bytes of `GF128_MDS_A`; byte 0 bit 0
+    is the constant coefficient and byte 15 bit 7 is `x^127`. -/
+theorem rust_le_lane_framing_kats :
+    rustU128FromLeBytes [0x35, 0xc8, 0xed, 0x5c, 0x60, 0xc0, 0x9c, 0xf3,
+      0x15, 0x7c, 0x4a, 0x7f, 0xb9, 0x79, 0x37, 0x9e] = gf128MdsAPolyBits ∧
+    rustU128FromLeBytes [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] = 1#128 ∧
+    rustU128FromLeBytes [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80] =
+      BitVec.twoPow 128 127 ∧
+    rustU128ToLeBytes 2#128 = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] := by
+  decide +kernel
+
+/-- Negative control: reading the same sixteen bytes big-endian gives a different field
+    element. -/
+theorem tooth_big_endian_lane_framing_differs :
+    BitVec.ofNat 128 (ofBE [0x35, 0xc8, 0xed, 0x5c, 0x60, 0xc0, 0x9c, 0xf3,
+      0x15, 0x7c, 0x4a, 0x7f, 0xb9, 0x79, 0x37, 0x9e]) ≠ gf128MdsAPolyBits := by
+  decide +kernel
+
+set_option maxRecDepth 4096 in
+/-- Negative control: exchanging `GF128_MDS_A` and `GF128_MDS_B` changes the round. -/
+theorem tooth_swapped_mds_constants_change_round :
+    ∃ st : BitVec 128 × BitVec 128,
+      rustSpnRound (0#128, 0#128) st ≠
+        (let x7 := rustPow7 st.1
+         let y7 := rustPow7 st.2
+         (x7 ^^^ rustGf128Mul y7 gf128MdsBPolyBits, y7 ^^^ rustGf128Mul x7 gf128MdsAPolyBits)) :=
+  ⟨(1#128, 0#128), by
+    rw [rustSpnRound_zero_rc_unit_x]
+    simp only [rustPow7_zero, rustPow7_one, rustGf128Mul_zero_left, rustGf128Mul_one_left,
+      BitVec.xor_zero, BitVec.zero_xor]
+    decide⟩
+
+set_option maxRecDepth 4096 in
+/-- Negative control: with tower constants read as raw `packTower` words instead of their
+    images, the Rust round disagrees with the image of the tower round. -/
+theorem tooth_untranslated_tower_constant_breaks_round :
+    psiTower128Pair (spnRound128 gf128MdsATower gf128MdsBTower
+        (towerZero 7, towerZero 7) (towerZero 7, towerOne 7)) ≠
+      (rustGf128Mul 1#128 gf128MdsATowerBits, 1#128) ∧
+    psiTower128Pair (spnRound128 gf128MdsATower gf128MdsBTower
+        (towerZero 7, towerZero 7) (towerZero 7, towerOne 7)) =
+      (gf128MdsAPolyBits, 1#128) := by
+  have hEq : psiTower128Pair (spnRound128 gf128MdsATower gf128MdsBTower
+        (towerZero 7, towerZero 7) (towerZero 7, towerOne 7)) = (gf128MdsAPolyBits, 1#128) := by
+    rw [psiTower128Pair_spnRound128]
+    show rustSpnRound (psiTower128ToPoly (towerZero 7), psiTower128ToPoly (towerZero 7))
+      (psiTower128ToPoly (towerZero 7), psiTower128ToPoly (towerOne 7)) = _
+    rw [psiTower128ToPoly_zero, psiTower128ToPoly_one]
+    exact rustSpnRound_zero_rc_unit_y
+  refine ⟨?_, hEq⟩
+  rw [hEq, rustGf128Mul_one_left]
+  decide
+
+/-- **Invertibility is not collision or preimage resistance.** Xor with a constant is a
+    bijection of the 256-bit state, and its Davies–Meyer feed-forward is the constant map:
+    every pair collides and every input is a preimage of `c`. Any collision or preimage claim
+    for `spnDaviesMeyer48` must therefore use more than `pow7_tower128_bijective`. -/
+theorem tooth_xor_constant_permutation_davies_meyer_collapses (c : Tower128 × Tower128) :
+    IsBijective (fun x => pairXor x c) ∧ ∀ x, pairXor (pairXor x c) x = c := by
+  have hInv : ∀ x, pairXor (pairXor x c) c = x := fun x => by
+    unfold pairXor
+    apply Prod.ext <;> simp only [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+  refine ⟨⟨fun a b h => ?_, fun b => ⟨pairXor b c, hInv b⟩⟩, fun x => ?_⟩
+  · have h2 := congrArg (fun z => pairXor z c) h
+    simpa only [hInv] using h2
+  · unfold pairXor
+    apply Prod.ext
+    · show towerAdd 7 (towerAdd 7 x.1 c.1) x.1 = c.1
+      rw [towerAdd_comm 7 x.1 c.1, towerAdd_assoc, towerAdd_comm 7 x.1 x.1, towerAdd_self_zero,
+        towerAdd_zero]
+    · show towerAdd 7 (towerAdd 7 x.2 c.2) x.2 = c.2
+      rw [towerAdd_comm 7 x.2 c.2, towerAdd_assoc, towerAdd_self_zero, towerAdd_zero]
+
+/-- `Bool` with `&&` as pairing and `^^` as addition. -/
+def boolWalsh : WalshSpace Bool where
+  elems := [false, true]
+  dot := fun a b => a && b
+  add := fun a b => a ^^ b
+  nodup := by decide
+  complete := fun x => by cases x <;> decide
+  dot_symm := fun a b => by cases a <;> cases b <;> rfl
+  dot_add := fun u a b => by cases u <;> cases a <;> cases b <;> rfl
+  orth := fun y y' => by cases y <;> cases y' <;> rfl
+
+/-- Two rounds over `Bool`: the identity, then the constant map. With output and input mask
+    `true`, the trail through the intermediate mask `false` contributes `2 · 2 = 4`, the trail
+    through `true` contributes `-2 · 2 = -4`, and the hull (their sum) is `0`. A single
+    trail's size says nothing about the hull, in either direction. -/
+theorem tooth_walsh_single_trail_is_not_the_hull :
+    walsh boolWalsh (fun _ => true) true false * walsh boolWalsh (fun x => x) false true = 0 ∧
+    walsh boolWalsh (fun _ => true) true true * walsh boolWalsh (fun x => x) true true = 0 ∧
+    walsh boolWalsh (fun x => !x) true true * walsh boolWalsh (fun x => x) true true = -4 ∧
+    walsh boolWalsh (fun x => x) true true * walsh boolWalsh (fun x => x) true true = 4 ∧
+    walshTrailSum boolWalsh [fun x => x, fun _ => true] true true = 0 := by
+  decide
+
+/-! Kernel-evaluable twin of the Rust multiplication. `rustGf128Mul` is sealed in `Math/Gf2Pow128`
+(only its equations are exported), so the executed round vectors below run this module-local copy,
+which is proved equal to it from those equations. -/
+
+private def katMulX (a : BitVec 128) : BitVec 128 :=
+  (a <<< 1) ^^^ (if a.getLsbD 127 then 0x87#128 else 0#128)
+
+private def katMulLoop : Nat → BitVec 128 → BitVec 128 → BitVec 128 → BitVec 128
+  | 0, _, _, acc => acc
+  | n + 1, x, y, acc =>
+    katMulLoop n (katMulX x) (y >>> 1) (acc ^^^ (if y.getLsbD 0 then x else 0#128))
+
+private def katMul (a b : BitVec 128) : BitVec 128 := katMulLoop 128 a b 0#128
+
+private theorem katMulX_eq (a : BitVec 128) : katMulX a = rustGf128MulX a := by
+  simp only [katMulX, rustGf128MulX.public_eqs]
+
+private theorem katMulLoop_eq : ∀ (n : Nat) (x y acc : BitVec 128),
+    katMulLoop n x y acc = rustGf128MulLoop n x y acc
+  | 0, _, _, _ => by simp only [katMulLoop, rustGf128MulLoop.public_eqs]
+  | n + 1, x, y, acc => by
+    simp only [katMulLoop, rustGf128MulLoop.public_eqs, katMulX_eq, katMulLoop_eq n]
+
+private theorem katMul_eq (a b : BitVec 128) : katMul a b = rustGf128Mul a b := by
+  simp only [katMul, rustGf128Mul.public_eqs, katMulLoop_eq]
+
+private def katPow7 (x : BitVec 128) : BitVec 128 :=
+  let x2 := katMul x x
+  let x4 := katMul x2 x2
+  katMul (katMul x x2) x4
+
+private def katRound (rc st : BitVec 128 × BitVec 128) : BitVec 128 × BitVec 128 :=
+  let x7 := katPow7 (st.1 ^^^ rc.1)
+  let y7 := katPow7 (st.2 ^^^ rc.2)
+  (x7 ^^^ katMul y7 gf128MdsAPolyBits, y7 ^^^ katMul x7 gf128MdsBPolyBits)
+
+private theorem katRound_eq (rc st : BitVec 128 × BitVec 128) : katRound rc st = rustSpnRound rc st := by
+  simp only [katRound, katPow7, katMul_eq, rustSpnRound, rustPow7]
+
+private def katIterFrom (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
+    Nat → BitVec 128 × BitVec 128 → BitVec 128 × BitVec 128
+  | 0, st => st
+  | n + 1, st => katRound (rcs (m + n)) (katIterFrom rcs m n st)
+
+/-- Rounds `m, …, m+n-1` of the Rust loop. -/
+def rustSpnIterFrom (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
+    Nat → BitVec 128 × BitVec 128 → BitVec 128 × BitVec 128
+  | 0, st => st
+  | n + 1, st => rustSpnRound (rcs (m + n)) (rustSpnIterFrom rcs m n st)
+
+theorem rustSpnIter_add (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
+    ∀ (n : Nat) (st : BitVec 128 × BitVec 128),
+      rustSpnIter rcs (m + n) st = rustSpnIterFrom rcs m n (rustSpnIter rcs m st)
+  | 0, _ => rfl
+  | n + 1, st => by
+    show rustSpnRound (rcs (m + n)) (rustSpnIter rcs (m + n) st) =
+      rustSpnRound (rcs (m + n)) (rustSpnIterFrom rcs m n (rustSpnIter rcs m st))
+    rw [rustSpnIter_add rcs m n st]
+
+private theorem rustSpnIterFrom_eq_kat (rcs : Nat → BitVec 128 × BitVec 128) (m : Nat) :
+    ∀ (n : Nat) (st : BitVec 128 × BitVec 128), rustSpnIterFrom rcs m n st = katIterFrom rcs m n st
+  | 0, _ => rfl
+  | n + 1, st => by
+    show rustSpnRound (rcs (m + n)) (rustSpnIterFrom rcs m n st) =
+      katRound (rcs (m + n)) (katIterFrom rcs m n st)
+    rw [rustSpnIterFrom_eq_kat rcs m n st, katRound_eq]
+
+/-- `cur = a0 a1 … bf`. -/
+def chainStepKatCur : List UInt8 :=
+  [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+   0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+   0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf]
+
+/-- Output printed by the compiled Rust `qsag_fts::parallel_mpc::parallel_chain_step` (label
+    `POW7_ROUNDS.V5`) for `(pk_seed, epoch 7, chain_idx 3, step 2, cur)`. -/
+def chainStepKatRustOutput : List UInt8 :=
+  [0xad, 0xbf, 0xab, 0x95, 0x2b, 0x29, 0xd9, 0xe8, 0x89, 0x4d, 0xa4, 0x69,
+   0xa7, 0xb1, 0xce, 0x40, 0xe3, 0x56, 0xec, 0xff, 0x1d, 0x50, 0x76, 0xac,
+   0x46, 0xd7, 0x33, 0x34, 0x65, 0x7d, 0xc4, 0x61]
+
+def chainStepKatTweak : BitVec 128 × BitVec 128 :=
+  (0x4668a6864f7bee9787e94643de34423c#128, 0x2f7744435eb81c943103f437706a0e10#128)
+
+/-- State after `8k` rounds, `k ≤ 6`. -/
+def chainStepKatState : Nat → BitVec 128 × BitVec 128
+  | 0 => (0xafaeadacabaaa9a8a7a6a5a4a3a2a1a0#128, 0xbfbebdbcbbbab9b8b7b6b5b4b3b2b1b0#128)
+  | 1 => (0xcfe875a4c42ae20e39e3c0d879d92e23#128, 0x12aeeead5a863c075f0e3f5781c8fc65#128)
+  | 2 => (0xaacba03cdc94eed5475d40f589cf70fb#128, 0xb27b201c28f45aa3898908dee0c22324#128)
+  | 3 => (0x1b9c5eddf208544c6359ba10c764c7ac#128, 0x81b4b555b012a19261fa327c17c19872#128)
+  | 4 => (0x33f373b7052ea3949bede8944c3727b0#128, 0xaf021355ca2d3f1bb60e2305d46ec3a2#128)
+  | 5 => (0x4b7e30eded2d6a0e4cef9f0814972739#128, 0x66fa18039a7600e5ea17dea95196c3a1#128)
+  | 6 => (0xef601c0bc20ee4214f7f8c8f36091e0d#128, 0xde7ac0d98f896efe1bc0e5a94c5ee753#128)
+  | _ => (0#128, 0#128)
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_tweak :
+    rustDeriveChainTweak spnCshake256FramedXof chainStepKatPkSeed 7 3 2 = chainStepKatTweak := by
+  -- The cSHAKE256 stream is certified in `Oracle/Keccak`; the lane framing is evaluated here.
+  show rustBytes32ToLanes (spnCshake256FramedXof _ [chainStepKatPkSeed, be 4 7, be 2 3, [2]] 32) = _
+  rw [show spnCshake256FramedXof spnChainTweakCustomization
+      [chainStepKatPkSeed, be 4 7, be 2 3, [2]] 32 = _ from chainStepKat_tweak_stream]
+  decide +kernel
+
+theorem chainStepKat_lanes : rustBytes32ToLanes chainStepKatCur = chainStepKatState 0 := by
+  decide +kernel
+
+set_option maxRecDepth 65536 in
+/-- The Lean cSHAKE256 model reproduces the whole Rust round-constant stream. -/
+theorem chainStepKat_stream :
+    rustSpnRoundConstantStream spnCshake256FramedXof chainStepKatTweak = chainStepKatRustStream := by
+  -- The cSHAKE256 stream is certified in `Oracle/Keccak`; the frame bytes are evaluated here.
+  have h0 : rustU128ToLeBytes chainStepKatTweak.1 =
+      [0x3c, 0x42, 0x34, 0xde, 0x43, 0x46, 0xe9, 0x87, 0x97, 0xee, 0x7b, 0x4f, 0x86, 0xa6, 0x68, 0x46] := by decide +kernel
+  have h1 : rustU128ToLeBytes chainStepKatTweak.2 =
+      [0x10, 0x0e, 0x6a, 0x70, 0x37, 0xf4, 0x03, 0x31, 0x94, 0x1c, 0xb8, 0x5e, 0x43, 0x44, 0x77, 0x2f] := by decide +kernel
+  unfold rustSpnRoundConstantStream
+  rw [h0, h1]
+  exact chainStepKat_round_constant_stream
+
+/-- Round constants read from the Rust stream. -/
+def chainStepKatRcs (round : Nat) : BitVec 128 × BitVec 128 :=
+  rustBytes32ToLanes ((chainStepKatRustStream.drop (32 * round)).take 32)
+
+theorem chainStepKat_rcs :
+    rustSpnRoundConstants spnCshake256FramedXof chainStepKatTweak = chainStepKatRcs := by
+  funext round
+  unfold rustSpnRoundConstants chainStepKatRcs
+  rw [chainStepKat_stream]
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_0_8 :
+    rustSpnIterFrom chainStepKatRcs 0 8
+      (chainStepKatState 0) = chainStepKatState 1 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_8_16 :
+    rustSpnIterFrom chainStepKatRcs 8 8
+      (chainStepKatState 1) = chainStepKatState 2 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_16_24 :
+    rustSpnIterFrom chainStepKatRcs 16 8
+      (chainStepKatState 2) = chainStepKatState 3 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_24_32 :
+    rustSpnIterFrom chainStepKatRcs 24 8
+      (chainStepKatState 3) = chainStepKatState 4 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_32_40 :
+    rustSpnIterFrom chainStepKatRcs 32 8
+      (chainStepKatState 4) = chainStepKatState 5 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+theorem chainStepKat_rounds_40_48 :
+    rustSpnIterFrom chainStepKatRcs 40 8
+      (chainStepKatState 5) = chainStepKatState 6 := by
+  rw [rustSpnIterFrom_eq_kat]
+  unfold chainStepKatRcs
+  rw [chainStepKatRustStream.public_eqs]
+  decide +kernel
+
+theorem chainStepKat_rounds_0_48 :
+    rustSpnIter chainStepKatRcs spnRounds
+      (chainStepKatState 0) = chainStepKatState 6 := by
+  let rcs := chainStepKatRcs
+  have step : ∀ (m k : Nat), rustSpnIter rcs m (chainStepKatState 0) = chainStepKatState k →
+      rustSpnIterFrom rcs m 8 (chainStepKatState k) = chainStepKatState (k + 1) →
+      rustSpnIter rcs (m + 8) (chainStepKatState 0) = chainStepKatState (k + 1) :=
+    fun m k hPrev hChunk =>
+      (rustSpnIter_add rcs m 8 _).trans ((congrArg (rustSpnIterFrom rcs m 8) hPrev).trans hChunk)
+  have h8 := step 0 0 rfl chainStepKat_rounds_0_8
+  have h16 := step 8 1 h8 chainStepKat_rounds_8_16
+  have h24 := step 16 2 h16 chainStepKat_rounds_16_24
+  have h32 := step 24 3 h24 chainStepKat_rounds_24_32
+  have h40 := step 32 4 h32 chainStepKat_rounds_32_40
+  exact step 40 5 h40 chainStepKat_rounds_40_48
+
+/-- **Executed-Rust agreement.** The Lean transcription of `parallel_chain_step`, evaluated by
+    the kernel over the Lean cSHAKE256 model, returns the 32 bytes the compiled Rust function
+    printed for the same arguments. -/
+theorem rust_parallel_chain_step_executed_kat :
+    rustParallelChainStep spnCshake256FramedXof chainStepKatPkSeed 7 3 2 chainStepKatCur =
+      chainStepKatRustOutput := by
+  have hStep : rustAlgebraicStep chainStepKatRcs (chainStepKatState 0) =
+      ((chainStepKatState 6).1 ^^^ (chainStepKatState 0).1,
+       (chainStepKatState 6).2 ^^^ (chainStepKatState 0).2) := by
+    show ((rustSpnIter chainStepKatRcs spnRounds (chainStepKatState 0)).1 ^^^
+          (chainStepKatState 0).1,
+        (rustSpnIter chainStepKatRcs spnRounds (chainStepKatState 0)).2 ^^^
+          (chainStepKatState 0).2) = _
+    rw [chainStepKat_rounds_0_48]
+  unfold rustParallelChainStep
+  rw [chainStepKat_tweak, chainStepKat_rcs, chainStepKat_lanes, hStep]
+  decide +kernel
+
+theorem towerToRust_differs_from_psi_on_mds_constant :
+    towerToRust 7 gf128MdsATower ≠ gf128MdsAPolyBits ∧
+    psiTower128ToPoly gf128MdsATower = gf128MdsAPolyBits := by
+  -- `towerToRust` is sealed in `Math/Gf2Pow128`; the executed inequality is certified there.
+  exact ⟨gf128_towerToRust_mds_a_ne_poly_bits, gf128_mds_constants_certified.1⟩
+
+#verify_constructive
+  Qsag.rustSpnIter_add
+  Qsag.towerToRust_differs_from_psi_on_mds_constant
+  Qsag.publicSpnFeedForward_identity
+  Qsag.chainStepKat_tweak
+  Qsag.chainStepKat_lanes
+  Qsag.chainStepKat_stream
+  Qsag.chainStepKat_rcs
+  Qsag.chainStepKat_rounds_0_48
+  Qsag.rust_parallel_chain_step_executed_kat
+  Qsag.spnLinearMix_branch_number_three
+  Qsag.sbox7MaxDiffProb128_eq_three_div_two_pow_127
+  Qsag.spnRound128_nonzero_rc_breaks_zero_fixpoint
+  Qsag.spn48_active_sboxes_ge_72
+  Qsag.tooth_frobenius_sbox_x2_differential_probability_one
+  Qsag.tooth_zero_round_constants_preserve_zero_subspace
+  Qsag.rust_spn_poly_basis_kats
+  Qsag.rust_le_lane_framing_kats
+  Qsag.tooth_big_endian_lane_framing_differs
+  Qsag.tooth_swapped_mds_constants_change_round
+  Qsag.tooth_untranslated_tower_constant_breaks_round
+  Qsag.tooth_xor_constant_permutation_davies_meyer_collapses
+  Qsag.tooth_walsh_single_trail_is_not_the_hull
+end ExecutedControls
 
 end Qsag
 end

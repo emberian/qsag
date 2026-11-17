@@ -1676,3 +1676,47 @@ public section
 #export_eqns Qsag.Goldilocks.wordMultiplicity Qsag.ext4WordMultiplicity
 #verify_constructive Qsag.GoldilocksField.GoldilocksExt4.towerToPoly_mul_hom Qsag.wordQuadPool_fiber_length
 end
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+theorem witness_ext4_nontrivial_element :
+    ∃ z : GoldilocksField.GoldilocksExt4, z ≠ GoldilocksField.GoldilocksExt4.zero ∧
+      z⁻¹ ≠ GoldilocksField.GoldilocksExt4.zero := by
+  have key : ∀ z : GoldilocksField.GoldilocksExt4, z ≠ GoldilocksField.GoldilocksExt4.zero →
+      z⁻¹ ≠ GoldilocksField.GoldilocksExt4.zero := by
+    intro z hz h
+    have hc := (GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel hz).2
+    rw [h] at hc
+    have hZero : GoldilocksField.GoldilocksExt4.zero * z = GoldilocksField.GoldilocksExt4.zero :=
+      LawfulCommRing.zero_mul z
+    rw [hZero] at hc
+    exact absurd hc (by decide)
+  have hz : (⟨⟨⟨3, by decide⟩, ⟨0, by decide⟩⟩, ⟨⟨0, by decide⟩, ⟨0, by decide⟩⟩⟩ :
+      GoldilocksField.GoldilocksExt4) ≠ GoldilocksField.GoldilocksExt4.zero := by decide
+  exact ⟨_, hz, key _ hz⟩
+
+/-- A limb equal to `p` (non-canonical encoding of `0`) is rejected. -/
+theorem decodeExt4Bytes32_rejects_noncanonical_limb :
+    decodeExt4Bytes32
+      ([1, 0, 0, 0, 255, 255, 255, 255] ++ List.replicate 24 (0 : UInt8)) = none ∧
+    decodeExt4Bytes32 (List.replicate 32 (0 : UInt8)) = some GoldilocksExt4.zero := by
+  decide
+
+-- (math-teeth anchor Qsag )
+end Qsag
+end
+#verify_constructive
+  Qsag.witness_ext4_nontrivial_element
+  Qsag.decodeExt4Bytes32_rejects_noncanonical_limb
+#verify_inhabited Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel Qsag.witness_ext4_nontrivial_element

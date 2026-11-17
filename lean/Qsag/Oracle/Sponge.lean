@@ -606,6 +606,38 @@ theorem qsag_tags_sponge_padded_blocks_ne (m₁ m₂ : List UInt8) :
 #export_eqns shakeRateBytes poseidon2RateBytes domShake256 domTurboShake256 domCshake256 domSha3_256
 #export_eqns qsagTagCanopyLeaf qsagTagCanopyNode qsagTagFiatShamir qsagTagFtsOtPad
 
+/-! ### Inhabitedness witnesses (evaluate the sealed domain bytes / tags; audited again in `Tests/OracleAndQrom`) -/
+
+theorem witness_pad10star1_valid_domain :
+    ∃ (r : Nat) (d : UInt8) (m₁ m₂ : List UInt8),
+      0 < r ∧ ValidDomByte d ∧ absorbPayload r d m₁ = absorbPayload r d m₂ :=
+  ⟨136, domShake256, [0x61, 0x62], [0x61, 0x62], by decide, ⟨by decide, by decide⟩, rfl⟩
+
+theorem witness_cross_domain_pair :
+    ∃ (r : Nat) (d₁ d₂ : UInt8) (m₁ m₂ : List UInt8),
+      m₁ = [0x01] ∧ m₂ = [0x02] ∧
+      0 < r ∧ ValidDomByte d₁ ∧ ValidDomByte d₂ ∧ d₁ ≠ d₂ :=
+  ⟨136, domShake256, domCshake256, [0x01], [0x02], rfl, rfl,
+   by decide, ⟨by decide, by decide⟩, ⟨by decide, by decide⟩, by decide⟩
+
+/-- `cshakePrefix_prefix_free` applied at the Canopy leaf tag: its hypotheses are jointly
+dischargeable. The equation forces repeated components, which the positional
+`#verify_inhabited` matcher cannot assign, so the application itself is the witness. -/
+theorem witness_cshakePrefix_canopy :
+    ([] : List UInt8) = [] ∧ qsagTagCanopyLeaf = qsagTagCanopyLeaf ∧ ([0x01] : List UInt8) = [0x01] :=
+  cshakePrefix_prefix_free (N₁ := []) (S₁ := qsagTagCanopyLeaf) (N₂ := []) (S₂ := qsagTagCanopyLeaf)
+    (m₁ := [0x01]) (m₂ := [0x01])
+    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide))
+    (bitlen_lt_sp800_bound (by decide)) (bitlen_lt_sp800_bound (by decide)) rfl
+
+theorem witness_keccak_midstate_canopy :
+    ∃ (S msg : List UInt8) (outLen : Nat),
+      S ≠ [] ∧ (encodeString [] ++ encodeString S).length ≤ 134 ∧
+      (cshake256Xof outLen S msg).length = 32 :=
+  ⟨qsagTagCanopyLeaf, [0xde, 0xad, 0xbe, 0xef], 32, by decide, by
+    rw [List.length_append, encodeString_length_short (by decide), encodeString_length_short (by decide)]
+    decide, by simp⟩
+
 #verify_constructive
   Qsag.pad10star1_joint_injective
   Qsag.pad10star1_injective
@@ -623,5 +655,9 @@ theorem qsag_tags_sponge_padded_blocks_ne (m₁ m₂ : List UInt8) :
   Qsag.cshakePrefix_single_block_length
   Qsag.cshake_precomputed_midstate_eq
   Qsag.keccak_cshake256_precomputed_midstate_eq
+  Qsag.witness_cshakePrefix_canopy
+#verify_inhabited Qsag.pad10star1_injective Qsag.witness_pad10star1_valid_domain
+#verify_inhabited Qsag.absorbPayload_cross_domain_encodings_ne Qsag.witness_cross_domain_pair
+#verify_inhabited Qsag.keccak_cshake256_precomputed_midstate_eq Qsag.witness_keccak_midstate_canopy
 end Qsag
 end

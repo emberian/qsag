@@ -1,5 +1,6 @@
 module
 public import Qsag.Math.PolyRing
+import Qsag.Tactic.AssuranceKit
 
 /-!
 # Qsag.Math.HasseHensel
@@ -3028,3 +3029,68 @@ theorem ptHom_apply (x y z : F) (q : Poly3 F) : (ptHom x y z).toFun q = UPoly.ev
 theorem evalAffineLine_zero (α β : F) (p : UPoly F) : evalAffineLine zero α β p = zero := (affineLineHom α β p).map_zero
 end Poly3
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.Hensel.map_num
+  Qsag.Hensel.num_spec
+  Qsag.Poly3.deg_evalAffineLine_le
+  Qsag.Poly3.henselNum_spec
+  Qsag.Poly3.jet_cover
+  Qsag.Poly3.root_unique_of_jet
+  Qsag.UPoly.hasse_one_hasse
+  Qsag.UPoly.trunc_cancel
+  Qsag.Hensel.delta_num_le
+  Qsag.Poly3.deg_henselNum_le
+  Qsag.Poly3.inPow_affine_of_cons
+  Qsag.Poly3.jet_hyps
+  Qsag.UPoly.coeffAt_taylorShift
+  Qsag.UPoly.hensel_unique
+  Qsag.Hensel.evG_eq
+  Qsag.Hensel.phi_contract
+  Qsag.UPoly.eval_hasse
+  Qsag.UPoly.eval_taylorShift
+  Qsag.UPoly.mapHom_hasse
+  Qsag.UPoly.taylorShift_neg_cancel
+  Qsag.Poly3.deg_reconCoeff_le
+  Qsag.Poly3.reconCoeff_spec
+  Qsag.Poly3.unshift_shift
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.Hensel.num
+#export_eqns Qsag.Hensel.iter
+#export_eqns Qsag.Hensel.phi
+#export_eqns Qsag.Hensel.sep
+#export_eqns Qsag.Hensel.e12
+#export_eqns Qsag.Hensel.evW
+#export_eqns Qsag.UPoly.shiftDown
+#export_eqns Qsag.Hensel.e2
+#export_eqns Qsag.Hensel.e11
+#export_eqns Qsag.Hensel.evG
+#export_eqns Qsag.Poly3.henselNum
+#export_eqns Qsag.Poly3.henselG
+#export_eqns Qsag.Poly3.liftXY
+#export_eqns Qsag.Poly3.jetV
+#export_eqns Qsag.Poly3.liftX
+#export_eqns Qsag.Poly3.C3
+#export_eqns Qsag.Poly3.c3Hom
+#export_eqns Qsag.Poly3.jetY
+#export_eqns Qsag.Poly3.shiftHom
+#export_eqns Qsag.Poly3.yLine
+#export_eqns Qsag.UPoly.taylorShift
+#export_eqns Qsag.Poly3.triples
+#export_eqns Qsag.rows
+#export_eqns Qsag.Poly3.cons
+#export_eqns Qsag.Poly3.coeff3
+#export_eqns Qsag.Poly3.comb
+#export_eqns Qsag.Poly3.hasseZ
+#export_eqns Qsag.UPoly.hasse
+#export_eqns Qsag.Poly3.eval3
+#export_eqns Qsag.Poly3.ptHom
+#export_eqns Qsag.Poly3.triCount
+#export_eqns Qsag.Poly3.jetHom
+#export_eqns Qsag.Poly3.evalAffineLine
+#export_eqns Qsag.Poly3.affineLineHom
+#export_eqns Qsag.Poly3.degZ
+#export_eqns Qsag.Poly3.henselSep
+#export_eqns Qsag.Hensel.res

@@ -1684,6 +1684,114 @@ namespace Qsag
 theorem joinBits_eq_append (k : Nat) (lo hi : TowerBitVec k) :
     joinBits k lo hi = (hi ++ lo).cast (Nat.two_pow_succ k).symm := by
   unfold joinBits; rfl
+/-- Executed values of the Rust multiplication behind `rust_spn_poly_basis_kats` (`Oracle/Spn`): the
+`pow7_plain` product tree `(x·x²)·(x²·x²)` at `2` and `3`, and both lanes of one round body at state
+`(3, 5)`, round constant `(7, 11)`, with the two deployed linear-layer constants. Checked here because
+the multiplication loop is not exported. -/
+theorem rustGf128Mul_pow7_round_kats :
+    MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 2#128 (MigrationExecution.rustGf128Mul 2#128 2#128)) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 2#128 2#128) (MigrationExecution.rustGf128Mul 2#128 2#128)) = 0x80#128 ∧
+    MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 3#128 (MigrationExecution.rustGf128Mul 3#128 3#128)) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul 3#128 3#128) (MigrationExecution.rustGf128Mul 3#128 3#128)) = 0xff#128 ∧
+    (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)))) ^^^
+        MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)))) 0x9E3779B97F4A7C15F39CC0605CEDC835#128 =
+      0x7e449a0c3042bf1c84c9783f54d336e9#128 ∧
+    (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)) (MigrationExecution.rustGf128Mul (5#128 ^^^ 11#128) (5#128 ^^^ 11#128)))) ^^^
+        MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128))) (MigrationExecution.rustGf128Mul (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)) (MigrationExecution.rustGf128Mul (3#128 ^^^ 7#128) (3#128 ^^^ 7#128)))) 0xBF58476D1CE4E5B994D049BB133111EB#128 =
+      0x11db4739396e6534126ec4cc445b09a2#128 := by
+  decide +kernel
+/-- Reading the tower word of `GF128_MDS_A` through `towerToRust` (the wrong basis map) does not give
+its polynomial-basis image; the executed half of `towerToRust_differs_from_psi_on_mds_constant`
+(`Oracle/Spn`). -/
+theorem gf128_towerToRust_mds_a_ne_poly_bits :
+    MigrationExecution.towerToRust 7 (unpackTower 7 0x6938822d2669c41b597c42deeb84a0bb#128) ≠
+      0x9E3779B97F4A7C15F39CC0605CEDC835#128 := by
+  decide +kernel
+#verify_constructive Qsag.rustGf128Mul_pow7_round_kats Qsag.gf128_towerToRust_mds_a_ne_poly_bits
 #export_eqns lowBits highBits Simulates rustGf128MulXIter
 #export_eqns MigrationExecution.rustGf128MulX MigrationExecution.rustGf128MulLoop MigrationExecution.rustGf128Mul MigrationExecution.rustPolyAct
 end Qsag
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag.MigrationExecution
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+set_option maxRecDepth 4096 in
+theorem rust_gf128_basis_kats :
+    rustGf128Mul 2#128 2#128 = 4#128 ∧
+    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
+    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
+  decide +kernel
+
+/-- Regression against treating Wiedemann coordinate bit-packing as the Rust polynomial basis
+    (the verified conversion is `rustToTower`):
+    under naive coordinate bit-packing, bit `1` (`x_0 ∈ Tower128`) squares to `x_0 + 1` (`3#128`),
+    whereas in `RustGf128` bit `1` (`x`) squares to `x^2` (`4#128`). -/
+theorem tooth_identity_basis_conversion_wrong :
+    ∃ x : RustGf128,
+      rustGf128Mul x x ≠
+        wiedemannPack128 (towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x)) ∧
+      wiedemannUnpack128 (rustGf128Mul x x) ≠
+        towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x) := by
+  refine ⟨2#128, ?_⟩
+  have hK : towerMul 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) =
+      wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) :=
+    (wiedemannKaratsuba_eq_towerMul 7 _ _).symm
+  have hW : wiedemannPack128 (wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128)) = 3#128 := by
+    decide
+  have hR : rustGf128Mul 2#128 2#128 = 4#128 := by decide +kernel
+  rw [hK]
+  refine ⟨?_, ?_⟩
+  · rw [hR, hW]; decide
+  · intro hEq
+    have hp := congrArg wiedemannPack128 hEq
+    rw [hW] at hp
+    have h4 : wiedemannPack128 (wiedemannUnpack128 (rustGf128Mul 2#128 2#128)) = 4#128 := by
+      rw [hR]; decide
+    rw [h4] at hp
+    revert hp; decide
+
+-- (math-teeth anchor MigrationExecution )
+end Qsag.MigrationExecution
+end
+#verify_constructive
+  Qsag.MigrationExecution.rust_gf128_basis_kats
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+open MigrationExecution
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+theorem tooth_packTower_is_not_the_poly_basis :
+    psiTower128ToPoly (unpackTower 7 2#128) ≠ 2#128 ∧
+    mulExec 7 2#128 2#128 = 3#128 ∧ rustGf128Mul 2#128 2#128 = 4#128 := by
+  refine ⟨?_, ?_, rust_gf128_basis_kats.1⟩
+  · have h : psiTower128ToPoly (unpackTower 7 2#128) =
+        0x295ac0b1f4731af9676aac9fa4b20b08#128 := by decide +kernel
+    rw [h]; decide
+  · decide +kernel
+
+-- (math-teeth anchor Qsag MigrationExecution)
+end Qsag
+end
+#verify_constructive
+  Qsag.tooth_packTower_is_not_the_poly_basis
+
+-- Owning-module audit certificates for the theorems audited again in `Tests/MigrationTeeth`.
+#verify_constructive
+  Qsag.MigrationExecution.rustToTower_mul
+  Qsag.MigrationExecution.rustGf128Mul_comm
+  Qsag.MigrationExecution.rustGf128Mul_assoc
+  Qsag.MigrationExecution.towerToRust_mul
+  Qsag.MigrationExecution.towerToRust_injective
+  Qsag.MigrationExecution.towerToRust_rustToTower
+  Qsag.MigrationExecution.rustToTower_towerToRust
+  Qsag.MigrationExecution.rustGf128Mul_eq_zero

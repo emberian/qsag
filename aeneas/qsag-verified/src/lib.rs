@@ -77,7 +77,7 @@ pub use pants_and_quorum_guards::{
 pub use policy_and_addr::{
     CanonicalIntent128, HybridRoleTag, INTENT_V1_MAGIC, IntentAddressVersion, IntentIdentityKind,
     IntentSuiteTag, MAX_VELOCITY_U128, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65,
-    SUITE_HYBRID_SECP256K1_SLHDSA, StatefulVelocityGuard, VelocitySpendRequest,
+    SUITE_HYBRID_SECP256K1_MLDSA44, StatefulVelocityGuard, VelocitySpendRequest,
     check_hybrid_domain_framing, decode_intent_128, derive_hybrid_transcript_digest,
     encode_intent_128,
 };

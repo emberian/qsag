@@ -1024,6 +1024,146 @@ theorem highCap_sliced_three_challenge_stage_supported_budget
     fun h24 Q hQ => dfmRoundScale_clears_128bits_of_bits _ 27
       (atLeastBits_weaken (by decide) _ (hb184 h24)) Q hQ⟩
 
+/-! ### §6. Evaluated tightness of the `25..=28` floors
+
+Cited by `Tests/HemHighCapSlicedBudgetTeeth`. They are evaluated in this module because the
+kernel-evaluable restatements (`restT`, `mfNumT`, `threeT`) of the upstream counts are private to
+it. Stage geometries and rows are the literals of `hemPcsHighCapStageGeoms_nv28` /
+`hemPcsHighCapStageGeoms_nv25`, `hemPcsHighCapWitnessRows` and `slicedPcsHighCapTable`. -/
+
+private theorem binaryBitsT_iff (b : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (slicedBinaryStageBound g r w) ↔
+      (r.2.2.2.2 + restT g.n g.d r.2.2.1 w.2.2.1 (r.2.2.2.1 * r.2.2.1 - r.2.2.2.2) r.2.2.2.2
+        (goldilocksPrime ^ 4)) * 2 ^ b ≤ goldilocksPrime ^ 4 * goldilocksPrime ^ 4 := by
+  show (slicedBinaryStageBound g r w).num * 2 ^ b ≤ (slicedBinaryStageBound g r w).den ↔ _
+  rw [bridge_slicedBinaryStageBound_num, bridge_slicedBinaryStageBound_den, slicedStageCount_def,
+    bridge_goldilocksExt4Card_def, ← restT_eq]
+
+private theorem binaryDfmT_iff (Q b : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (dfmRoundScale Q (slicedBinaryStageBound g r w)) ↔
+      (2 * Q + 1) ^ 2 * (r.2.2.2.2 + restT g.n g.d r.2.2.1 w.2.2.1
+        (r.2.2.2.1 * r.2.2.1 - r.2.2.2.2) r.2.2.2.2 (goldilocksPrime ^ 4)) * 2 ^ b ≤
+        goldilocksPrime ^ 4 * goldilocksPrime ^ 4 := by
+  show (2 * Q + 1) ^ 2 * (slicedBinaryStageBound g r w).num * 2 ^ b ≤
+    (slicedBinaryStageBound g r w).den ↔ _
+  rw [bridge_slicedBinaryStageBound_num, bridge_slicedBinaryStageBound_den, slicedStageCount_def,
+    bridge_goldilocksExt4Card_def, ← restT_eq]
+
+private theorem multiFoldBitsT_iff (b : Nat) (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (slicedMultiFoldStageBound g r w) ↔
+      mfNumT g r w * 2 ^ b ≤ (goldilocksPrime ^ 4) ^ 4 := by
+  show (slicedMultiFoldStageBound g r w).num * 2 ^ b ≤ (slicedMultiFoldStageBound g r w).den ↔ _
+  rw [← mfNumT_eq, bridge_slicedMultiFoldStageBound_den, bridge_goldilocksExt4Card_def]
+
+private theorem multiFoldDfmT_iff (Q b : Nat) (g : HemStageGeom)
+    (r : Nat × Nat × Nat × Nat × Nat) (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (dfmRoundScale Q (slicedMultiFoldStageBound g r w)) ↔
+      (2 * Q + 1) ^ 2 * mfNumT g r w * 2 ^ b ≤ (goldilocksPrime ^ 4) ^ 4 := by
+  show (2 * Q + 1) ^ 2 * (slicedMultiFoldStageBound g r w).num * 2 ^ b ≤
+    (slicedMultiFoldStageBound g r w).den ↔ _
+  rw [← mfNumT_eq, bridge_slicedMultiFoldStageBound_den, bridge_goldilocksExt4Card_def]
+
+private theorem threeBitsT_iff (b : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (highCapSlicedThreeChallengeStageBound g r w) ↔
+      threeT g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2 (goldilocksPrime ^ 4) *
+        2 ^ b ≤ goldilocksPrime ^ 4 * (goldilocksPrime ^ 4 * goldilocksPrime ^ 4) := by
+  show (highCapSlicedThreeChallengeStageBound g r w).num * 2 ^ b ≤
+    (highCapSlicedThreeChallengeStageBound g r w).den ↔ _
+  rw [highCapSlicedThreeChallengeStageBound_num, highCapSlicedThreeChallengeStageBound_den,
+    bridge_goldilocksExt4Card_def, ← threeT_eq]
+
+private theorem threeDfmT_iff (Q b : Nat) (g : HemStageGeom) (r : Nat × Nat × Nat × Nat × Nat)
+    (w : Nat × Nat × Nat × Nat) :
+    atLeastBits b (dfmRoundScale Q (highCapSlicedThreeChallengeStageBound g r w)) ↔
+      (2 * Q + 1) ^ 2 * threeT g.n (g.d - 1) (r.2.2.1 - 1) w.2.2.1 r.2.2.2.1 r.2.2.2.2
+        (goldilocksPrime ^ 4) * 2 ^ b ≤
+        goldilocksPrime ^ 4 * (goldilocksPrime ^ 4 * goldilocksPrime ^ 4) := by
+  show (2 * Q + 1) ^ 2 * (highCapSlicedThreeChallengeStageBound g r w).num * 2 ^ b ≤
+    (highCapSlicedThreeChallengeStageBound g r w).den ↔ _
+  rw [highCapSlicedThreeChallengeStageBound_num, highCapSlicedThreeChallengeStageBound_den,
+    bridge_goldilocksExt4Card_def, ← threeT_eq]
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 28`, stage `0`: the binary bound has `183` bits and not `184`, and its DFM scale fails
+    `128` bits at `Q + 1 = 2^27`. -/
+theorem highCap_nv28_stage0_binary_tight :
+    atLeastBits 183 (slicedBinaryStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 184 (slicedBinaryStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (slicedBinaryStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨(binaryBitsT_iff 183 _ _ _).mpr ?_, fun h => ?_, fun h => ?_⟩
+  · decide +kernel
+  · exact absurd ((binaryBitsT_iff 184 _ _ _).mp h) (by decide +kernel)
+  · exact absurd ((binaryDfmT_iff (2 ^ 27 - 1) 128 _ _ _).mp h) (by decide +kernel)
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 28`, stage `0`: the summed multi-fold bound has `177` bits and not `178`, and its DFM
+    scale fails `128` bits at `Q + 1 = 2^24`. -/
+theorem highCap_nv28_stage0_multifold_tight :
+    atLeastBits 177 (slicedMultiFoldStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 178 (slicedMultiFoldStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 24 - 1) (slicedMultiFoldStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨(multiFoldBitsT_iff 177 _ _ _).mpr ?_, fun h => ?_, fun h => ?_⟩
+  · decide +kernel
+  · exact absurd ((multiFoldBitsT_iff 178 _ _ _).mp h) (by decide +kernel)
+  · exact absurd ((multiFoldDfmT_iff (2 ^ 24 - 1) 128 _ _ _).mp h) (by decide +kernel)
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 25`, stage `1`: the summed multi-fold bound has `193` bits and not `194`. -/
+theorem highCap_nv25_stage1_multifold_tight :
+    atLeastBits 193 (slicedMultiFoldStageBound
+      { stageIdx := 1, logBlowup := 4, stepVars := 4, n := 524288, d := 32770 }
+      (25, 1, 133941, 32, 1732) (25, 1, 131078, 196)) ∧
+    ¬ atLeastBits 194 (slicedMultiFoldStageBound
+      { stageIdx := 1, logBlowup := 4, stepVars := 4, n := 524288, d := 32770 }
+      (25, 1, 133941, 32, 1732) (25, 1, 131078, 196)) := by
+  refine ⟨(multiFoldBitsT_iff 193 _ _ _).mpr ?_, fun h => ?_⟩
+  · decide +kernel
+  · exact absurd ((multiFoldBitsT_iff 194 _ _ _).mp h) (by decide +kernel)
+
+set_option maxRecDepth 1000000 in
+/-- `nv = 28`, stage `0`: the 3-challenge bound has `183` bits and not `184`, and its DFM scale
+    fails `128` bits at `Q + 1 = 2^27`. -/
+theorem highCap_nv28_stage0_three_challenge_tight :
+    atLeastBits 183 (highCapSlicedThreeChallengeStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 184 (highCapSlicedThreeChallengeStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183)) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 27 - 1) (highCapSlicedThreeChallengeStageBound
+      { stageIdx := 0, logBlowup := 2, stepVars := 6, n := 16777216, d := 4194306 }
+      (28, 0, 8433861, 128, 6362) (28, 0, 8388611, 183))) := by
+  refine ⟨(threeBitsT_iff 183 _ _ _).mpr ?_, fun h => ?_, fun h => ?_⟩
+  · decide +kernel
+  · exact absurd ((threeBitsT_iff 184 _ _ _).mp h) (by decide +kernel)
+  · exact absurd ((threeDfmT_iff (2 ^ 27 - 1) 128 _ _ _).mp h) (by decide +kernel)
+
+-- Equations of the row lookups and their tables for `Tests/HemHighCapSlicedBudgetTeeth`
+-- (no body exposed).
+#export_eqns hemPcsHighCapTableRow hemPcsHighCapWitnessRows slicedPcsHighCapRow
+  slicedPcsHighCapTable
+
+#verify_constructive Qsag.highCap_nv28_stage0_binary_tight
+#verify_constructive Qsag.highCap_nv28_stage0_multifold_tight
+#verify_constructive Qsag.highCap_nv25_stage1_multifold_tight
+#verify_constructive Qsag.highCap_nv28_stage0_three_challenge_tight
+
 #verify_constructive Qsag.hemPcsHighCapStageGeometry_of_le_24
 #verify_constructive Qsag.hemPcsHighCapStageGeoms_of_le_24
 #verify_constructive Qsag.hemPcsHighCapTableRow_of_le_24

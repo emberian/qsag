@@ -1551,6 +1551,97 @@ theorem qipm_bht_shape_256_up_to_2pow42 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 42) :
   have hlit : (2 ^ 42) ^ 3 * 2 ^ 128 ≤ 2 ^ 256 := by decide +kernel
   exact Nat.le_trans (Nat.mul_le_mul_right _ (Nat.pow_le_pow_left hQ 3)) hlit
 
+/-! ## Executed controls (evaluated here, where the bodies are visible; paired in `Tests/QipmTeeth`) -/
+
+def qipmToyElems : List (Fin 4) := [0, 1, 2, 3]
+
+theorem qipmToyElems_enum : QipmEnum qipmToyElems := by
+  intro a
+  revert a
+  decide
+
+def qipmToyInvAttack : TwoWayQipmAdv (Fin 4) (Fin 4) :=
+  TwoWayQipmAdv.inv 0 TwoWayQipmAdv.done
+
+/-- Identity digest, no constraint: the inverse attack has weight `12 = 4 * 3`, the total. -/
+theorem qipm_toy_unprotected_attack_certain :
+    qipmWeight qipmToyElems (qipmPreimageWin (fun _ => true) (fun _ z => z) (0 : Fin 4))
+      (qipmFinalizeFwd qipmToyInvAttack) 2 [] = 12 ∧ qipmFall qipmToyElems.length 0 2 = 12 := by
+  decide +kernel
+
+/-- Feed-forward `x + z`: the same attack keeps weight `3` of `12`. -/
+theorem qipm_toy_feed_forward_attack_weight :
+    qipmWeight qipmToyElems (qipmPreimageWin (fun _ => true) (fun x z => x + z) (0 : Fin 4))
+      (qipmFinalizeFwd qipmToyInvAttack) 2 [] = 3 := by
+  decide +kernel
+
+theorem tooth_qipm_toy_feed_forward_defeats_inverse_attack :
+    ¬ (qipmWeight qipmToyElems (qipmPreimageWin (fun _ => true) (fun x z => x + z) (0 : Fin 4))
+      (qipmFinalizeFwd qipmToyInvAttack) 2 [] = qipmFall qipmToyElems.length 0 2) := by
+  decide +kernel
+
+/-- The preimage bound applies to the toy feed-forward compression with fiber count `1`:
+    every one-query adversary succeeds with probability at most `2 / 3`. -/
+theorem qipm_toy_feed_forward_bound_applies (A : TwoWayQipmAdv (Fin 4) (Fin 4)) :
+    RatBound.le (qipmPreimageProb qipmToyElems (fun _ => true) (fun x z => x + z) (0 : Fin 4) A 1
+        (by decide))
+      ⟨(1 + 1) * 1, qipmToyElems.length - (1 + 1) + 1, Nat.succ_pos _⟩ :=
+  qipm_two_way_preimage_bound qipmToyElems qipmToyElems_enum (fun _ => true)
+    (fun x z => x + z) 0 1 (by decide) (by decide) A 1 (by decide)
+
+/-- A two-forward-query adaptive adversary stays in budget and the certain event has the full
+    weight: the weights are a probability distribution. -/
+theorem qipm_toy_total_weight :
+    qipmWeight qipmToyElems (fun _ (_ : Fin 4) => true)
+      (TwoWayQipmAdv.fwd 1 (fun z => TwoWayQipmAdv.inv z (fun x => TwoWayQipmAdv.done x)))
+      2 [] = qipmFall qipmToyElems.length 0 2 := by
+  decide +kernel
+
+/-- At a marked point the oracles of `π` and `π ∘ (a b)` really differ. -/
+theorem tooth_qipm_swap_changes_marked_point :
+    ¬ (qipmPermOracle (n := 2) (w := 1) (fun x => qipmFinSwap 0 1 x) (fun y => qipmFinSwap 0 1 y)
+        (fun x => BitVec.ofNat 1 x.val) (qipmFwdIdx 0) =
+      qipmPermOracle (n := 2) (w := 1) (fun x => x) (fun y => y)
+        (fun x => BitVec.ofNat 1 x.val) (qipmFwdIdx 0)) := by
+  decide +kernel
+
+/-- The state with limbs `0, 1, …, 11`. -/
+def qipmKatState : Poseidon2State12 :=
+  ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩,
+   ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩,
+   ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩
+
+/-- The truncation without feed-forward is a different function: on the same state it does not
+    return the digest of `poseidon2CompressWeighted`. -/
+theorem tooth_truncation_is_not_poseidon2CompressWeighted :
+    ¬ (qipmTruncComp qipmKatState (poseidon2Perm12 qipmKatState) =
+      poseidon2CompressWeighted qipmKatState) := by
+  rw [← qipmWeightedCompress_poseidon2Perm12, qipmWeightedCompress_eq]
+  intro h
+  have hff : (lane4Add (lane4Add qipmKatState.b0 (lane4Scale (Goldilocks.ofNat 2) qipmKatState.b1))
+      (lane4Scale (Goldilocks.ofNat 4) qipmKatState.b2)).x0.val = 40 := by
+    rw [lane4Scale_eq, lane4Scale_eq, lane4Add_eq, lane4Add_eq]
+    decide +kernel
+  have h0 := congrArg (fun l : Lane4 => l.x0.val) h
+  simp only [qipmTruncComp] at h0
+  rw [lane4Add_eq] at h0
+  simp only [Goldilocks.add_val, hff] at h0
+  have hlt := (poseidon2Perm12 qipmKatState).b0.x0.isLt
+  have hp : goldilocksPrime = 18446744069414584321 := by decide
+  rw [hp] at h0 hlt
+  exfalso
+  omega
+
+/-- Without feed-forward and without a capacity constraint, a one-inverse-query adversary wins
+    the preimage game with the full weight, over every state space and every truncation. -/
+theorem tooth_qipm_no_feedforward_no_capacity_inverted {D G : Type} [DecidableEq D]
+    [DecidableEq G] (elems : List D) (out : D → G) (zs : D) :
+    ∃ A : TwoWayQipmAdv D D,
+      qipmWeight elems (qipmPreimageWin (fun _ => true) (fun _ z => out z) (out zs))
+        (qipmFinalizeFwd A) (1 + 1) [] = qipmFall elems.length 0 (1 + 1) :=
+  ⟨TwoWayQipmAdv.inv zs TwoWayQipmAdv.done,
+    qipm_unweighted_inverse_attack_total elems out (out zs) zs rfl⟩
+
 #verify_constructive
   Qsag.qipmWeightedCompress_poseidon2Perm12
   Qsag.qipmFeedForward_eq_poseidon2WeightedFeedForward
@@ -1581,6 +1672,18 @@ theorem qipm_bht_shape_256_up_to_2pow42 (Q : Nat) (hQ : Q + 1 ≤ 2 ^ 42) :
   Qsag.qipm_two_way_swap_o2h
   Qsag.qipm_grover_shape_256_at_2pow56
   Qsag.qipm_bht_shape_256_up_to_2pow42
+  Qsag.qipmToyElems_enum
+  Qsag.qipm_toy_unprotected_attack_certain
+  Qsag.qipm_toy_feed_forward_attack_weight
+  Qsag.tooth_qipm_toy_feed_forward_defeats_inverse_attack
+  Qsag.qipm_toy_feed_forward_bound_applies
+  Qsag.qipm_toy_total_weight
+  Qsag.tooth_qipm_swap_changes_marked_point
+  Qsag.tooth_truncation_is_not_poseidon2CompressWeighted
+  Qsag.tooth_qipm_no_feedforward_no_capacity_inverted
+
+-- Paired here: `qipmPreimageProb` is sealed downstream, so the shared `qipmWeight` is visible only in this module.
+#tooth_pair qipm_two_way_preimage_bound vs tooth_qipm_no_feedforward_no_capacity_inverted
 
 end Qsag
 end

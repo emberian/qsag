@@ -107,7 +107,7 @@
         "aeneas/lean/QsagVerified/Proofs/RealSpecBeltWeld.lean"
       ],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1574 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1594 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -233,8 +233,8 @@
       "production_call_sites": [
         "crates/qsag-quorum/src/access.rs:480 (path)",
         "crates/qsag-quorum/src/access.rs:507 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1819 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1866 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1839 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1886 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -254,8 +254,8 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1594 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1766 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1614 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1786 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -690,8 +690,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-cred/src/fips204_ntt.rs:934 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1478 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1505 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1480 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1507 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -711,8 +711,8 @@
       "lean_weld_modules": [],
       "production_call_sites": [
         "crates/qsag-cred/src/fips204_ntt.rs:935 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1479 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1506 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1481 (path)",
+        "crates/qsag-cred/src/fips204_ntt.rs:1508 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -737,7 +737,7 @@
       "status": "direct",
       "test_call_sites": [
         "crates/qsag-cred/src/fips204_ntt.rs:1025 (path)",
-        "crates/qsag-cred/src/fips204_ntt.rs:1928 (path)"
+        "crates/qsag-cred/src/fips204_ntt.rs:1930 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -1796,15 +1796,15 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:1139 (path)"
+        "crates/qsag-addr/src/lib.rs:1119 (path)"
       ],
       "same_named_production_fns": [
         "crates/qsag-core/src/sponge/keccak.rs:680"
       ],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:494 (path)",
-        "crates/qsag-addr/src/lib.rs:2039 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:512 (path)",
+        "crates/qsag-addr/src/lib.rs:2019 (path)",
         "crates/qsag-hd/tests/hybrid_framing.rs:29 (path)"
       ],
       "verified_crate_tests": [
@@ -2643,13 +2643,13 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:1341 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1361 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-quorum/src/quorum_jorts.rs:3195 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:3204 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:3241 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:3250 (path)"
       ],
       "verified_crate_tests": []
     },
@@ -2715,7 +2715,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:591",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:624",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::HybridRoleTag::to_u8",
       "lean_definition": "policy_and_addr.HybridRoleTag.to_u8",
@@ -2731,7 +2731,9 @@
       "same_named_production_fns": [],
       "status": "reached",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
       "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:203",
@@ -2765,10 +2767,12 @@
       "same_named_production_fns": [],
       "status": "reached",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:231",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:232",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::IntentIdentityKind::from_u8",
       "lean_definition": "policy_and_addr.IntentIdentityKind.from_u8",
@@ -2780,10 +2784,12 @@
       "same_named_production_fns": [],
       "status": "proof-only",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:222",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:223",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::IntentIdentityKind::to_u8",
       "lean_definition": "policy_and_addr.IntentIdentityKind.to_u8",
@@ -2799,10 +2805,54 @@
       "same_named_production_fns": [],
       "status": "reached",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:264",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:296",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentSuiteTag::admits_identity_kind",
+      "lean_definition": "policy_and_addr.IntentSuiteTag.admits_identity_kind",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [],
+      "reached_via": {
+        "caller": "qsag_verified::policy_and_addr::decode_intent_128",
+        "edge": "lexical"
+      },
+      "same_named_production_fns": [],
+      "status": "reached",
+      "test_call_sites": [],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:283",
+      "extracted": true,
+      "function": "qsag_verified::policy_and_addr::IntentSuiteTag::expected_identity_kind",
+      "lean_definition": "policy_and_addr.IntentSuiteTag.expected_identity_kind",
+      "lean_proof_modules": [
+        "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
+      ],
+      "lean_weld_modules": [],
+      "production_call_sites": [
+        "crates/qsag-addr/src/lib.rs:147 (method-lexical)"
+      ],
+      "same_named_production_fns": [],
+      "status": "direct-lexical",
+      "test_call_sites": [
+        "crates/qsag-addr/src/lib.rs:2161 (method-lexical)"
+      ],
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
+    },
+    {
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:268",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::IntentSuiteTag::from_u16",
       "lean_definition": "policy_and_addr.IntentSuiteTag.from_u16",
@@ -2814,10 +2864,12 @@
       "same_named_production_fns": [],
       "status": "proof-only",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:253",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:257",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::IntentSuiteTag::to_u16",
       "lean_definition": "policy_and_addr.IntentSuiteTag.to_u16",
@@ -2825,13 +2877,13 @@
         "aeneas/lean/QsagVerified/Proofs/PolicyAndAddr.lean"
       ],
       "lean_weld_modules": [],
-      "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:362 (method-lexical)"
-      ],
+      "production_call_sites": [],
       "same_named_production_fns": [],
-      "status": "direct-lexical",
+      "status": "proof-only",
       "test_call_sites": [],
-      "verified_crate_tests": []
+      "verified_crate_tests": [
+        "aeneas/qsag-verified/tests/unit_kat.rs"
+      ]
     },
     {
       "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:89",
@@ -2976,7 +3028,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:601",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:634",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::check_hybrid_domain_framing",
       "lean_definition": "policy_and_addr.check_hybrid_domain_framing",
@@ -2985,20 +3037,20 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:696 (call)"
+        "crates/qsag-addr/src/lib.rs:676 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/lib.rs:2040 (call)",
-        "crates/qsag-addr/src/lib.rs:2052 (call)"
+        "crates/qsag-addr/src/lib.rs:2020 (call)",
+        "crates/qsag-addr/src/lib.rs:2032 (call)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:676",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:709",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::checked_velocity_spend",
       "lean_definition": "policy_and_addr.checked_velocity_spend",
@@ -3016,7 +3068,7 @@
       "verified_crate_tests": []
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:558",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:588",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::decode_intent_128",
       "lean_definition": "policy_and_addr.decode_intent_128",
@@ -3025,21 +3077,22 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:425 (path)"
+        "crates/qsag-addr/src/lib.rs:405 (path)"
       ],
       "same_named_production_fns": [
-        "crates/qsag-addr/src/lib.rs:283"
+        "crates/qsag-addr/src/lib.rs:280"
       ],
       "status": "direct",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:435 (path)"
+        "crates/qsag-addr/src/audit_tests.rs:404 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:445 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:643",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:676",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::derive_hybrid_transcript_digest",
       "lean_definition": "policy_and_addr.derive_hybrid_transcript_digest",
@@ -3048,7 +3101,7 @@
       ],
       "lean_weld_modules": [],
       "production_call_sites": [
-        "crates/qsag-addr/src/lib.rs:717 (call)"
+        "crates/qsag-addr/src/lib.rs:697 (call)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -3060,7 +3113,7 @@
       ]
     },
     {
-      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:546",
+      "defined_at": "aeneas/qsag-verified/src/policy_and_addr.rs:574",
       "extracted": true,
       "function": "qsag_verified::policy_and_addr::encode_intent_128",
       "lean_definition": "policy_and_addr.encode_intent_128",
@@ -3070,13 +3123,14 @@
       "lean_weld_modules": [],
       "production_call_sites": [],
       "same_named_production_fns": [
-        "crates/qsag-addr/src/lib.rs:242"
+        "crates/qsag-addr/src/lib.rs:239"
       ],
       "status": "proof-only",
       "test_call_sites": [
-        "crates/qsag-addr/src/audit_tests.rs:393 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:435 (path)",
-        "crates/qsag-addr/src/audit_tests.rs:449 (path)"
+        "crates/qsag-addr/src/audit_tests.rs:397 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:445 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:457 (path)",
+        "crates/qsag-addr/src/audit_tests.rs:464 (path)"
       ],
       "verified_crate_tests": [
         "aeneas/qsag-verified/tests/unit_kat.rs"
@@ -3865,12 +3919,13 @@
         "crates/qsag-quorum/src/quorum_jorts.rs:400 (path)",
         "crates/qsag-quorum/src/quorum_jorts.rs:507 (path)",
         "crates/qsag-quorum/src/quorum_jorts.rs:522 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1286 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1778 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1873 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:1923 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:555 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1306 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1798 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:1893 (path)",
         "crates/qsag-quorum/src/quorum_jorts.rs:1943 (path)",
-        "crates/qsag-quorum/src/quorum_jorts.rs:2231 (path)"
+        "crates/qsag-quorum/src/quorum_jorts.rs:1963 (path)",
+        "crates/qsag-quorum/src/quorum_jorts.rs:2251 (path)"
       ],
       "same_named_production_fns": [],
       "status": "direct",
@@ -4169,11 +4224,11 @@
     "direct": 35,
     "direct-lexical": 16,
     "not_extracted": 0,
-    "proof-only": 69,
-    "reached": 13,
+    "proof-only": 70,
+    "reached": 14,
     "spec-welded": 16,
     "test-only": 56,
-    "total": 237,
+    "total": 239,
     "unreferenced": 32
   }
 }

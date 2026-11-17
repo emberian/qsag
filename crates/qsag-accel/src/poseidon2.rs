@@ -148,7 +148,6 @@ pub fn sponge12_rate6(message: &[u64]) -> [u64; 12] {
 
 /// Stack-allocated zeroizing Width-12 `Poseidon2` sponge (`rate = 8`, `capacity = 4` = 256 bits)
 /// with `10*1` multi-rate padding and **zero heap `Vec` allocation**.
-#[derive(Clone)]
 pub struct Poseidon2Sponge {
     state: [u64; 12],
     rate_pos: usize,

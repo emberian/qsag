@@ -743,6 +743,7 @@ theorem inhabited_reconstruction : ∃ domain : List (TowerElem 1),
 #verify_constructive merged_quorum_reduction mobile_covers_entire_roster
 #verify_inhabited honest_threshold inhabited_approval
 #verify_inhabited quorum_advantage_from_extraction inhabited_composed_game
+#verify_constructive inhabited_union tooth_omit_outer
 #verify_inhabited retained_shares_determine_secret inhabited_reconstruction
 #verify_inhabited solutions_exact inhabited_reconstruction
 #verify_inhabited mobile_uniform_fibers inhabited_mobile
@@ -844,5 +845,11 @@ theorem quorumForgery_iff (geom : AggSigGeometry) (q : Custody) (msg : List UInt
       ∃ sig : AggNativeSignature,
         verifyAggNativeSig geom q.state.pk msg sig = true ∧ quorumParticipated q msg = false :=
   Iff.rfl
+
+-- Equations for the symbolic instances of `Tests/CompositionInstances`; no body is exposed.
+#export_eqns MergeTree.bitmap MergeTree.leaves firstActive treeBad exampleTree quorumParticipated
+  SigningMode.message
+-- `inhabited_union` is this module's witness; the pair is certified here for `Tests/CompositionInstances`.
+#verify_inhabited composed_advantage_bound inhabited_union
 
 end Qsag.Composed

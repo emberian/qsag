@@ -1,5 +1,6 @@
 module
 public import Qsag.Coding.WhirProfiles
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Coding.AffineProximity
 public import Qsag.Math.QuarticExt4
 public section
@@ -1448,3 +1449,66 @@ theorem slicedStageTable_def : slicedStageTable =
     (24, 3, 4120, 201) ] := by rfl
 end Qsag
 end
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.cwyz26_affineMcaBound_of_nonExcluded
+  Qsag.cwyz26_affineMcaBound_sliced
+  Qsag.cwyz26_whir_nv20_and_nv24_all_stages_valid
+  Qsag.hem_gs_interpolation_dimensions
+  Qsag.sliced_rest_exceeds_simple_budget
+  Qsag.sliced_stage_table_covers_every_canonical_stage
+  Qsag.slicedParamsOk_sound
+  Qsag.sumTo_le_of_le
+  Qsag.sliced_stage_decomp_bound
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.whirAffineStageWitnesses
+#export_eqns Qsag.hemJohnsonQromStageWitness
+#export_eqns Qsag.hemJohnsonQromTableRow
+#export_eqns Qsag.hemJohnsonQromWitnessTable
+#export_eqns Qsag.hemJohnsonQromStageExhaustive
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+/-- Actual distinct-query counts at all four `nv = 24` deployed stages. The hypothesis
+    states the agreement bound on the committed oracle; the conclusion counts accepting
+    tuples, with no replacement and no floating-point approximation. This does not assert
+    the separate affine-fold proximity-gap theorem. -/
+theorem hemJohnson_deployed_query_count {α : Type} [DecidableEq α]
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses 24 true)
+    (U : List α) (good : α → Bool) (hU : U.Nodup) (hLen : U.length = w.n)
+    (hGood : (U.filter good).length ≤ w.A + w.sFolds) :
+    ((affineDistinctTuples w.queries U).filter (fun t => t.all good)).length * 2 ^ 256 <
+      (affineDistinctTuples w.queries U).length := by
+  have hCount := affineDistinctTuples_all_good_le w.queries (w.A + w.sFolds) U good hU hGood
+  have hRows : ∀ v ∈ whirAffineStageWitnesses 24 true,
+      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
+        affineFallingFactorial v.n v.queries := by decide +kernel
+  rw [affineDistinctTuples_length _ hU, hLen]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 256) hCount) (hRows w hw)
+
+theorem inhabited_deployed_gs_dimensions :
+    ∃ (nv : Nat) (w : WhirAffineWitness), nv = 24 ∧ 2 ≤ nv ∧ nv ≤ 24 ∧
+      w ∈ whirAffineStageWitnesses nv true ∧ w.n = 1048576 ∧ w.queries = 258 := by
+  let w : WhirAffineWitness :=
+    { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+  refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
+  exact List.mem_cons_self ..
+
+-- (math-teeth anchor Qsag )
+end Qsag
+end
+#verify_constructive
+  Qsag.hemJohnson_deployed_query_count
+#verify_constructive
+  Qsag.inhabited_deployed_gs_dimensions
+#verify_inhabited Qsag.hem_gs_interpolation_dimensions Qsag.inhabited_deployed_gs_dimensions

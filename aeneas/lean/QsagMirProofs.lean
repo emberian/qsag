@@ -265,7 +265,13 @@ export qsag_verified.proofs (
   velocity_spend_step_sim
   policy_velocity_guard_multiturn_cap_sound
   rotate_window_resets_spent_monotone_spec
+  intent_suite_tag_wire_words
+  intent_identity_kind_wire_bytes
+  intentSuiteExpectedKind
+  intent_expected_identity_kind_spec
+  intent_admits_identity_kind_spec
   intent_codec_roundtrip_injective_mir
+  decode_intent_128_pairing_valid
   hybridDomainMagic14
   hybridRoleByte
   check_hybrid_domain_framing_spec
@@ -274,6 +280,8 @@ export qsag_verified.proofs (
   tooth_policy_cap_exceeded_rejected
   tooth_policy_u128_overflow_rejected
   tooth_intent_bad_magic_rejected
+  tooth_intent_retired_suite_words_rejected
+  tooth_intent_hybrid_suite_single_kind_rejected
   tooth_hybrid_role_confusion_rejected
   mldsa44_eta2_nibble_uniform_spec
   check_mldsa44_norm_bounds_spec

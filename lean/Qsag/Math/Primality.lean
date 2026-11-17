@@ -1328,3 +1328,60 @@ theorem secp256k1OrderPrime_isPrime :
 
 
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.checkLucasBlsCert_sound
+  Qsag.goldilocksPrime_is_prime
+  Qsag.verifyPrimeCert_sound
+  Qsag.goldilocks_lucas_fermat_witnesses
+  Qsag.secp256k1FieldPrime_isPrime
+  Qsag.goldilocks_seven_primitive_root
+  Qsag.secp256k1OrderPrime_isPrime
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+/-- Mutation-sensitivity witness: the Carmichael number `561 = 3 · 11 · 17` passes the naive
+    base-2 Fermat pseudoprime test `2^560 ≡ 1 (mod 561)`, yet `checkPocklingtonStep` rejects it
+    because `gcd(2^(560 / 17) - 1, 561) ≠ 1`. -/
+theorem tooth_carmichael_561_rejected_by_pocklington :
+    ∃ (chain : List PocklingtonStep) (target : Nat),
+      powModFuel 256 2 (target - 1) target = 1 ∧
+      verifyPrimeCert chain target = false ∧
+      ¬ Weierstrass.IsPrime target := by
+  refine ⟨[⟨3, 2, [(2, 1)]⟩, ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨561, 2, [(17, 1), (11, 1)]⟩],
+    561, by decide +kernel, by decide +kernel, fun ⟨_, hdiv⟩ => ?_⟩
+  rcases hdiv 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
+
+theorem inhabited_verifyPrimeCert :
+    ∃ (chain : List PocklingtonStep) (target : Nat),
+      verifyPrimeCert chain target = true ∧ Weierstrass.IsPrime target :=
+  ⟨[⟨3, 2, [(2, 1)]⟩], 3, by decide +kernel,
+    verifyPrimeCert_sound (chain := [⟨3, 2, [(2, 1)]⟩]) (by decide +kernel)⟩
+
+theorem witness_lucas_bls_goldilocks :
+    ∃ (N g : Nat) (facs : List (Nat × Nat)),
+      N - 1 < 2 ^ 64 ∧ (∀ qe ∈ facs, IsPrimeNat qe.1) ∧ checkLucasBlsCert N g facs = true :=
+  ⟨Goldilocks.p, 7, goldilocksTotientFactors, by decide,
+   goldilocksTotientFactors_all_prime, goldilocks_lucas_cert_valid⟩
+
+-- (math-teeth anchor Qsag )
+end Qsag
+end
+#verify_constructive
+  Qsag.tooth_carmichael_561_rejected_by_pocklington
+  Qsag.inhabited_verifyPrimeCert
+#verify_inhabited Qsag.verifyPrimeCert_sound Qsag.inhabited_verifyPrimeCert
+#verify_constructive
+  Qsag.witness_lucas_bls_goldilocks
+#verify_inhabited Qsag.checkLucasBlsCert_sound Qsag.witness_lucas_bls_goldilocks
+
+-- Owning-module audit certificate for the theorem audited again in `Tests/MigrationTeeth`.
+#verify_constructive Qsag.Weierstrass.IsPrime.dvd_mul

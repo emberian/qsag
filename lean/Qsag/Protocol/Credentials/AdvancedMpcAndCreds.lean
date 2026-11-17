@@ -5691,6 +5691,9 @@ set_option maxRecDepth 4096 in
   credentialGgm_overlap_same_digest credentialGgmCheckDefects_unique
   credentialGgmCheckDefects_zero credentialGgmPresentation_unique credentialGgm_challenge_space
 
+-- Equation used by `Tests/CredentialsTeeth`; no body is exposed.
+#export_eqns credentialGgmCheckDefects
+
 theorem durableBurnReserve_empty (keyId sid : List UInt8) (party : UInt16)
     (epoch : UInt64) (attempt : UInt32) (hEpoch : epoch.toNat + 1 < 2 ^ 64) :
     (durableBurnReserve ⟨keyId, [], false⟩ party epoch sid attempt true).1 = true := by

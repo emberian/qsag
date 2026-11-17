@@ -449,6 +449,9 @@ theorem capability_release_discharge_not_transplantable [DecidableEq B] [Decidab
 
 end CapabilityGate
 
+-- Equations for the concrete runs of `Tests/CapabilityTeeth`; no body is exposed.
+#export_eqns Reachable Collides consume coinWins consumeUnderCapability
+
 end Qsag.VolatileCoupon
 end
 

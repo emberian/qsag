@@ -1,5 +1,6 @@
 module
 public import Qsag.Math.Algebra
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Math.Goldilocks
 public import Qsag.Tactic.Prelude
 
@@ -4226,3 +4227,100 @@ end SylElim
 
 end Qsag
 end
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.Poly2.common_roots_card_le_mul_deg
+  Qsag.Poly2.coprimeZ_const_of_vCoeff
+  Qsag.Poly2.eliminant_bezout
+  Qsag.Poly2.isPrimY_mul
+  Qsag.Poly2.primY_dvd_of_dvd_FY
+  Qsag.Poly2.splitAgainstList
+  Qsag.Poly2.tdeg_mul
+  Qsag.SylElim.common_root_unique_of_sylResDeriv_ne_zero
+  Qsag.SylElim.curve_leaf_gcd_decomp
+  Qsag.SylElim.curve_leaf_root_decomp
+  Qsag.SylElim.curve_three_poly_sheet_decomp
+  Qsag.SylElim.degFn_homEvalCoeffs_poly_le
+  Qsag.SylElim.divModLead_spec
+  Qsag.SylElim.homEvalCoeffs_mul
+  Qsag.SylElim.modPoly2Hom_eq_zero_iff
+  Qsag.SylElim.primY_natDeg_pos
+  Qsag.SylElim.sylRes_eq_zero_of_common_root
+  Qsag.SylElim.sylRes_mul_X_sub
+  Qsag.SylElim.sylResDeriv_common_root
+  Qsag.SylElim.sylResDeriv_eq_zero_of_common_factor_ge_two
+  Qsag.SylElim.sylResDeriv_of_factor
+  Qsag.SylElim.sylResDeriv_X_common_root
+  Qsag.SylElim.wdeg_divModLead_rem_le
+  Qsag.Poly2.d5_split_prim
+  Qsag.Poly2.natDeg_resZ_le
+  Qsag.Poly2.tdeg_C
+  Qsag.SylElim.ModMonic.eval_modGen_eq_zero
+  Qsag.SylElim.degFn_sylResDeriv_le
+  Qsag.SylElim.isUnit_sylRes_of_bezout
+  Qsag.SylElim.map_homEvalCoeffs
+  Qsag.SylElim.modPoly2Hom_unit_of_coprimeZ
+  Qsag.SylElim.modUnitOrSplit
+  Qsag.SylElim.sylResDeriv_X_mapped_common_root
+  Qsag.Poly2.contY_mul_primY
+  Qsag.SylElim.degFn_homEvalCoeffs_le
+  Qsag.SylElim.degFn_sylRes_le
+  Qsag.SylElim.homEvalCoeffs_map_root
+  Qsag.SylElim.homEvalCoeffs_resultant_root
+  Qsag.Poly2.eval_resZ_eq_zero
+  Qsag.Poly2.resZ_ne_zero_iff
+  Qsag.SylElim.curve_pullback_dvd_iff
+  Qsag.SylElim.d5_xgcd_mod
+  Qsag.SylElim.homEvalCoeffs_map_zero_iff
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.SylElim.modPoly2Hom
+#export_eqns Qsag.SylElim.remM
+#export_eqns Qsag.SylElim.divModLead
+#export_eqns Qsag.SylElim.divModLeadAux
+#export_eqns Qsag.SylElim.quotM
+#export_eqns Qsag.Poly2.mono
+#export_eqns Qsag.SylElim.embedUZ
+#export_eqns Qsag.Poly2.resZ
+#export_eqns Qsag.Poly2.eliminant
+#export_eqns Qsag.Poly2.elimV
+#export_eqns Qsag.Poly2.lincomb
+#export_eqns Qsag.Poly2.elimIdx
+#export_eqns Qsag.Poly2.elimVec
+#export_eqns Qsag.Poly2.nullVec
+#export_eqns Qsag.Poly2.coeff2
+#export_eqns Qsag.Poly2.elimGens
+#export_eqns Qsag.Poly2.elimCons
+#export_eqns Qsag.Poly2.elimDeg
+#export_eqns Qsag.Poly2.elimU
+#export_eqns Qsag.Poly2.swapVZ
+#export_eqns Qsag.Poly2.innerHom
+#export_eqns Qsag.SylElim.dualPerturb
+
+/-! ## Projection lemmas for the dual-number ring
+
+`Dual.inl` and `Dual.map` carry proof fields, so `#export_eqns` refuses them; these state the same
+defining equations by hand for the executed resultant controls in `Tests/MathAndCoding`. -/
+public section
+namespace Qsag.SylElim.Dual
+open CommRingOps
+variable {R S : Type} [LawfulCommRing R] [LawfulCommRing S]
+theorem zero_eq : (zero : Dual R) = ⟨zero, zero⟩ := by rfl
+theorem one_eq : (one : Dual R) = ⟨one, zero⟩ := by rfl
+theorem add_eq (x y : Dual R) : add x y = ⟨add x.fst y.fst, add x.snd y.snd⟩ := by rfl
+theorem mul_eq (x y : Dual R) :
+    mul x y = ⟨mul x.fst y.fst, add (mul x.fst y.snd) (mul x.snd y.fst)⟩ := by rfl
+theorem neg_eq (x : Dual R) : neg x = ⟨neg x.fst, neg x.snd⟩ := by rfl
+theorem sub_eq (x y : Dual R) : sub x y = ⟨sub x.fst y.fst, sub x.snd y.snd⟩ := by rfl
+theorem inl_toFun (a : R) : (inl (R := R)).toFun a = ⟨a, zero⟩ := by rfl
+theorem map_toFun (φ : RingHom R S) (x : Dual R) :
+    (map φ).toFun x = ⟨φ.toFun x.fst, φ.toFun x.snd⟩ := by rfl
+omit [LawfulCommRing R] in
+theorem eq_iff_fst_snd {x y : Dual R} : x = y ↔ x.fst = y.fst ∧ x.snd = y.snd :=
+  ⟨fun h => h ▸ ⟨rfl, rfl⟩, fun h => Dual.ext h.1 h.2⟩
+end Qsag.SylElim.Dual
+end
+#verify_constructive Qsag.SylElim.Dual.zero_eq Qsag.SylElim.Dual.one_eq Qsag.SylElim.Dual.add_eq
+  Qsag.SylElim.Dual.mul_eq Qsag.SylElim.Dual.neg_eq Qsag.SylElim.Dual.sub_eq Qsag.SylElim.Dual.inl_toFun
+  Qsag.SylElim.Dual.map_toFun Qsag.SylElim.Dual.eq_iff_fst_snd

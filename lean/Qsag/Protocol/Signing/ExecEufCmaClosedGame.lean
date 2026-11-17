@@ -217,6 +217,14 @@ def execEufCmaGameWith {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
     (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) : Spec.FinGame n :=
   ⟨hPos, fun ω => prodEufCmaWin suite params (execEufCmaOutcome latchOn suite params keygen adv ω)⟩
 
+/-- The win predicate of `execEufCmaGameWith` at a coin. -/
+theorem execEufCmaGameWith_win {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
+    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n) :
+    (execEufCmaGameWith latchOn hPos suite params keygen adv).win ω =
+      prodEufCmaWin suite params (execEufCmaOutcome latchOn suite params keygen adv ω) := by
+  rfl
+
 /-- **Closed adaptive EUF-CMA experiment** over the coin space `Fin n`, with the latch on. -/
 @[expose] def ExecEufCmaGame {n qHash qSign : Nat} (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
@@ -1399,35 +1407,33 @@ theorem concreteExecEufCma_forger_bound :
      (Spec.poly257Hash_smDtPreHard_within 2 1),
    by decide⟩
 
-/-! ### §6.2 Multi-Query Adaptive Target-Sum WOTS+C Reduction & Target-Oracle Signer Simulation
+/-! ### §6.2 Definitions for a four-leaf `poly257` suite
 
-We construct a genuine multi-leaf (`2 ^ 2 = 4` leaves, height-`2` Merkle tree, `w = 4`,
-`ell1 = 128`, `targetSum = 192`, `productionWellFormed = true`) stateful target-sum WOTS+C
-instantiation (`poly257MultiLeafSuite`, `multiLeaf4JortsParams`) over `Spec.poly257Hash` with
-`24` independent uniform chain secrets (`6` active Manchester `{0, 3}` chains per leaf across `4`
-leaves) and `1` uniform tweakable-hash public seed (`256 ^ 25` uniform keys), and establish:
+Definitions for a toy parameter set with four leaves (`subtreeHeight = 2`, `w = 4`,
+`ell1 = 128`), and the facts proved about them. No adversary, reduction or probability bound
+over this suite is stated in this section: `ExecEufCmaGame` is not instantiated with
+`poly257MultiLeafSuite`, and the only `ExecEufCmaReductionEmbedding` constructed in this file
+is the zero-query one of §6.1.
 
-1. **Target-Oracle Signer Simulation for Arbitrary `(qHash, qSign)` Adaptive Adversaries**:
-   For each secret slot `s : Fin 24`, the reduction adversary `puncturedMultiLeafPreAdv s`
-   receives the `23` non-target secrets on `πp(s).advc ω`, queries `.target` once before `.reveal`
-   to obtain `y_s = poly257Hash pkSeed tweak_s [x_s]`, calls `.reveal` to learn `pkSeed`, derives
-   the exact Merkle root `pkRoot` without `x_s`, and simulates up to `qSign` arbitrary adaptive
-   signing queries across the monotone epoch latch (`puncturedSignQuery`).
-2. **Universal Multi-Query `< 1` Forger Bound (`poly257MultiLeaf_adaptive_forger_bound`)**:
-   For *every* `qHash, qSign, qEval` and *every* candidate-bounded adaptive adversary family
-   `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign` (whether forging on a reused leaf or an
-   unqueried leaf), every winning coin wins `Spec.smDtPreGame` at some unopened slot `s : Fin 24`,
-   yielding `winProb ≤ 24 · (qEval + 1) / 256` (`< 1` for all `qEval ≤ 9`).
-3. **Concrete 3-Query Adaptive `ExecEufCmaReductionEmbedding` (`adaptiveMultiQueryReductionEmbedding`)**:
-   An explicit `(qHash = 2, qSign = 3)` adaptive adversary (`adaptiveThreeQueryForger`) queries
-   epochs `0, 1, 2` on `[0], [1], [2]`, reconstructs leaf `2`'s `wotsPk` via `hashQuery` to form
-   leaf `3`'s height-`2` Merkle authentication path from `sig₂`, and attempts a forgery on the
-   unqueried message `[4]` at epoch `3`, inhabiting `ExecEufCmaReductionEmbedding` with `0 < winCount`
-   and proved `< 1` bound `6 / 256`.
-4. **Load-Bearing Monotone-Latch Attack (`poly257MultiLeaf_unlatched_wins_all_coins`)**:
-   With `latchOn = false`, a 2-query adaptive adversary (`unlatchedTwoTimeWotsAdv`) queries `[0]`
-   and `[7]` both at epoch `0`, combines their complementary `{0, 3}` WOTS+C chains, and forges
-   on unqueried `[4]` on *every* one of the `256 ^ 25` keys (`winProb = 1`). -/
+* `byteVecSampler k`: `k` bytes from a coin in `Fin (pow256 k)`; `uniformOn_byteVecSampler` says
+  it is a bijection onto the byte strings of length `k`.
+* `splitByteVecAt k s`: the `Spec.CoinSplit` of `Fin (pow256 (k + 1))` into byte `s` and the
+  other `k` bytes; `splitByteVecAt_getD_and_insert` relates both coordinates to
+  `byteVecSampler`.
+* `puncturedKeyAndAdvSplit nA s`: the `Spec.CoinSplit` of a key coin and an adversary coin into
+  (`pkSeed` byte, secret byte `s`) and (other 23 secret bytes, adversary coin).
+* `multiLeaf4JortsParams` satisfies `PqHashParams.productionWellFormed`
+  (`multiLeaf4JortsParams_productionWellFormed`).
+* `multiLeaf24Keygen`: a one-byte `pkSeed` and 24 one-byte entries of `skSeed`;
+  `multiLeaf24Keygen_uniform` says it is a bijection from `Fin (256 * pow256 24)` onto the
+  keys of that shape.
+* `encodeMsg3Hmsg m` for `m < 8`: a 32-byte digest whose base-4 digits pass
+  `extractBaseWDigitsChecked 4 128` and `checkTargetSum 4 128 192`
+  (`encodeMsg3Hmsg_digits_valid`); two distinct codes differ at one of the first six digits
+  with `0` against `3` (`encodeMsg3Hmsg_incomparable`).
+* `poly257MultiLeafSuite`: a `TweakableHashSuite` whose `rawHash` decodes a `thPreimage` and
+  dispatches on the role tag, calling `Spec.poly257Hash` at chain step `0`. Proved about it:
+  the output has 32 bytes, and `thCall` on it equals the dispatch function. -/
 
 /-- Right-nested powers `256 ^ k` so `pow256 (k + 1) = 256 * pow256 k` holds definitionally. -/
 def pow256 : Nat → Nat
@@ -1448,26 +1454,34 @@ def byteVecSampler : (k : Nat) → Fin (pow256 k) → Spec.Bytes
 theorem byteVecSampler_length : ∀ (k : Nat) (z : Fin (pow256 k)),
     (byteVecSampler k z).length = k
   | 0, _ => rfl
-  | k + 1, z => congrArg Nat.succ (byteVecSampler_length k _)
+  | k + 1, _ => congrArg Nat.succ (byteVecSampler_length k _)
+
+private theorem byteVecSampler_succ (k : Nat) (z : Fin (256 * pow256 k)) :
+    byteVecSampler (k + 1) z =
+      UInt8.ofNat ((Spec.CoinSplit.prod 256 (pow256 k)).chal z).1 ::
+        byteVecSampler k ((Spec.CoinSplit.prod 256 (pow256 k)).advc z) := by
+  rfl
 
 theorem uniformOn_byteVecSampler : ∀ k : Nat,
     Spec.UniformOn (fun bs : Spec.Bytes => bs.length = k) (byteVecSampler k)
   | 0 =>
     { mem := fun _ => rfl
-      injective := fun i j _ => Fin.ext (by have := i.2; have := j.2; change i.1 < 1 at *; omega)
+      injective := fun i j _ =>
+        Fin.ext ((Nat.lt_one_iff.mp i.2).trans (Nat.lt_one_iff.mp j.2).symm)
       surjective := fun bs h => ⟨⟨0, Nat.one_pos⟩, (List.eq_nil_of_length_eq_zero h).symm⟩ }
   | k + 1 =>
     let ih := uniformOn_byteVecSampler k
     let sp := Spec.CoinSplit.prod 256 (pow256 k)
     { mem := fun z => byteVecSampler_length (k + 1) z
       injective := fun i j h => by
-        unfold byteVecSampler at h
+        rw [byteVecSampler_succ k i, byteVecSampler_succ k j] at h
         injection h with hHd hTl
         have hB : sp.chal i = sp.chal j :=
           Spec.uniformOn_byte1Seed.injective (sp.chal i) (sp.chal j)
             (by simpa only [Spec.byte1SeedSampler.public_eqs] using congrArg (· :: []) hHd)
         have hR : sp.advc i = sp.advc j := ih.injective _ _ hTl
-        rw [← sp.pair_chal_advc i, ← sp.pair_chal_advc j, hB, hR]
+        exact (sp.pair_eta i).symm.trans ((congrArg (sp.pair · (sp.advc i)) hB).trans
+          ((congrArg (sp.pair (sp.chal j)) hR).trans (sp.pair_eta j)))
       surjective := fun bs hLen => by
         match bs, hLen with
         | b :: rest, hLen =>
@@ -1475,56 +1489,10 @@ theorem uniformOn_byteVecSampler : ∀ k : Nat,
           obtain ⟨ib, hib⟩ := Spec.uniformOn_byte1Seed.surjective [b] rfl
           obtain ⟨ir, hir⟩ := ih.surjective rest hRest
           refine ⟨sp.pair ib ir, ?_⟩
-          unfold byteVecSampler
-          dsimp only
-          rw [sp.chal_pair, sp.advc_pair, hir]
+          rw [byteVecSampler_succ k (sp.pair ib ir), sp.chal_pair, sp.advc_pair, hir]
           rw [Spec.byte1SeedSampler.public_eqs] at hib
           injection hib with hb _
           rw [hb] }
-
-private def coinSplitSymm {n a b : Nat} (π : Spec.CoinSplit n a b) : Spec.CoinSplit n b a where
-  chal ω := π.advc ω
-  advc ω := π.chal ω
-  pair x y := π.pair y x
-  chal_pair x y := π.advc_pair y x
-  advc_pair x y := π.chal_pair y x
-  pair_chal_advc ω := π.pair_chal_advc ω
-
-private def coinSplitAssocLeft (a b c : Nat) :
-    Spec.CoinSplit ((a * b) * c) a (b * c) where
-  chal ω := (Spec.CoinSplit.prod a b).chal ((Spec.CoinSplit.prod (a * b) c).chal ω)
-  advc ω := (Spec.CoinSplit.prod b c).pair
-    ((Spec.CoinSplit.prod a b).advc ((Spec.CoinSplit.prod (a * b) c).chal ω))
-    ((Spec.CoinSplit.prod (a * b) c).advc ω)
-  pair x yz := (Spec.CoinSplit.prod (a * b) c).pair
-    ((Spec.CoinSplit.prod a b).pair x ((Spec.CoinSplit.prod b c).chal yz))
-    ((Spec.CoinSplit.prod b c).advc yz)
-  chal_pair x yz := by
-    rw [(Spec.CoinSplit.prod (a * b) c).chal_pair, (Spec.CoinSplit.prod a b).chal_pair]
-  advc_pair x yz := by
-    rw [(Spec.CoinSplit.prod (a * b) c).chal_pair, (Spec.CoinSplit.prod (a * b) c).advc_pair,
-      (Spec.CoinSplit.prod a b).advc_pair, (Spec.CoinSplit.prod b c).pair_chal_advc]
-  pair_chal_advc ω := by
-    rw [(Spec.CoinSplit.prod b c).chal_pair, (Spec.CoinSplit.prod b c).advc_pair,
-      (Spec.CoinSplit.prod a b).pair_chal_advc, (Spec.CoinSplit.prod (a * b) c).pair_chal_advc]
-
-private def coinSplitAssocRight (a b c : Nat) :
-    Spec.CoinSplit (a * (b * c)) (a * b) c where
-  chal ω := (Spec.CoinSplit.prod a b).pair
-    ((Spec.CoinSplit.prod a (b * c)).chal ω)
-    ((Spec.CoinSplit.prod b c).chal ((Spec.CoinSplit.prod a (b * c)).advc ω))
-  advc ω := (Spec.CoinSplit.prod b c).advc ((Spec.CoinSplit.prod a (b * c)).advc ω)
-  pair xy z := (Spec.CoinSplit.prod a (b * c)).pair
-    ((Spec.CoinSplit.prod a b).chal xy)
-    ((Spec.CoinSplit.prod b c).pair ((Spec.CoinSplit.prod a b).advc xy) z)
-  chal_pair xy z := by
-    rw [(Spec.CoinSplit.prod a (b * c)).chal_pair, (Spec.CoinSplit.prod a (b * c)).advc_pair,
-      (Spec.CoinSplit.prod b c).chal_pair, (Spec.CoinSplit.prod a b).pair_chal_advc]
-  advc_pair xy z := by
-    rw [(Spec.CoinSplit.prod a (b * c)).advc_pair, (Spec.CoinSplit.prod b c).advc_pair]
-  pair_chal_advc ω := by
-    rw [(Spec.CoinSplit.prod a b).chal_pair, (Spec.CoinSplit.prod a b).advc_pair,
-      (Spec.CoinSplit.prod b c).pair_chal_advc, (Spec.CoinSplit.prod a (b * c)).pair_chal_advc]
 
 private def coinSplitLiftRight {n₁ n₂ a b : Nat} (c : Nat)
     (h1 : Spec.CoinSplit n₁ n₂ c) (sub : Spec.CoinSplit n₂ a b) :
@@ -1535,10 +1503,10 @@ private def coinSplitLiftRight {n₁ n₂ a b : Nat} (c : Nat)
     ((Spec.CoinSplit.prod b c).advc yz)
   chal_pair x yz := by rw [h1.chal_pair, sub.chal_pair]
   advc_pair x yz := by
-    rw [h1.chal_pair, h1.advc_pair, sub.advc_pair, (Spec.CoinSplit.prod b c).pair_chal_advc]
-  pair_chal_advc ω := by
+    rw [h1.chal_pair, h1.advc_pair, sub.advc_pair, (Spec.CoinSplit.prod b c).pair_eta]
+  pair_eta ω := by
     rw [(Spec.CoinSplit.prod b c).chal_pair, (Spec.CoinSplit.prod b c).advc_pair,
-      sub.pair_chal_advc, h1.pair_chal_advc]
+      sub.pair_eta, h1.pair_eta]
 
 private def coinSplitSwapSecond {n b c : Nat} (a : Nat)
     (sub : Spec.CoinSplit n b c) : Spec.CoinSplit (a * n) b (a * c) where
@@ -1552,16 +1520,16 @@ private def coinSplitSwapSecond {n b c : Nat} (a : Nat)
   chal_pair y xz := by rw [(Spec.CoinSplit.prod a n).advc_pair, sub.chal_pair]
   advc_pair y xz := by
     rw [(Spec.CoinSplit.prod a n).chal_pair, (Spec.CoinSplit.prod a n).advc_pair,
-      sub.advc_pair, (Spec.CoinSplit.prod a c).pair_chal_advc]
-  pair_chal_advc ω := by
+      sub.advc_pair, (Spec.CoinSplit.prod a c).pair_eta]
+  pair_eta ω := by
     rw [(Spec.CoinSplit.prod a c).chal_pair, (Spec.CoinSplit.prod a c).advc_pair,
-      sub.pair_chal_advc, (Spec.CoinSplit.prod a n).pair_chal_advc]
+      sub.pair_eta, (Spec.CoinSplit.prod a n).pair_eta]
 
 /-- Insert byte `b` back into a `(k - 1)`-byte list at position `idx`, reconstructing the full
     `k`-byte secret vector. -/
 def insertByteAt : Nat → UInt8 → Spec.Bytes → Spec.Bytes
   | 0, b, rest => b :: rest
-  | i + 1, b, [] => [b]
+  | _ + 1, b, [] => [b]
   | i + 1, b, x :: xs => x :: insertByteAt i b xs
 
 /-- Puncture `Fin (pow256 (k + 1))` at byte index `s : Fin (k + 1)` into the target byte
@@ -1576,7 +1544,8 @@ theorem splitByteVecAt_getD_and_insert :
       (byteVecSampler (k + 1) z).getD s.1 0 = UInt8.ofNat ((splitByteVecAt k s).chal z).1 ∧
       insertByteAt s.1 (UInt8.ofNat ((splitByteVecAt k s).chal z).1)
         (byteVecSampler k ((splitByteVecAt k s).advc z)) = byteVecSampler (k + 1) z
-  | k, ⟨0, _⟩, z => ⟨rfl, rfl⟩
+  | 0, ⟨0, _⟩, _ => ⟨rfl, rfl⟩
+  | _ + 1, ⟨0, _⟩, _ => ⟨rfl, rfl⟩
   | k + 1, ⟨i + 1, hi⟩, z => by
     let spTop := Spec.CoinSplit.prod 256 (pow256 (k + 1))
     let spAdv := Spec.CoinSplit.prod 256 (pow256 k)
@@ -1585,9 +1554,7 @@ theorem splitByteVecAt_getD_and_insert :
     have hAdvEq : byteVecSampler (k + 1) ((splitByteVecAt (k + 1) ⟨i + 1, hi⟩).advc z) =
         UInt8.ofNat (spTop.chal z).1 :: byteVecSampler k (sub.advc (spTop.advc z)) := by
       show byteVecSampler (k + 1) (spAdv.pair (spTop.chal z) (sub.advc (spTop.advc z))) = _
-      unfold byteVecSampler
-      dsimp only
-      rw [spAdv.chal_pair, spAdv.advc_pair]
+      rw [byteVecSampler_succ k, spAdv.chal_pair, spAdv.advc_pair]
     refine ⟨?_, ?_⟩
     · show (UInt8.ofNat (spTop.chal z).1 :: byteVecSampler (k + 1) (spTop.advc z)).getD (i + 1) 0 =
         UInt8.ofNat (sub.chal (spTop.advc z)).1
@@ -1599,48 +1566,29 @@ theorem splitByteVecAt_getD_and_insert :
         UInt8.ofNat (spTop.chal z).1 :: byteVecSampler (k + 1) (spTop.advc z)
       exact congrArg _ ih.2
 
-/-- Combine `pkSeed : Fin 256` and punctured secret byte `x_s : Fin 256` into the `(256 * 256)`
-    challenger coordinate of `Spec.byte1SeedAndPreSampler`, leaving the other `23` secret bytes
-    and the adversary coin `Fin nA` on the reduction's adversary coordinate. -/
+/-- Split of a key coin `Fin (256 * pow256 24)` paired with an adversary coin `Fin nA`: the
+    first coordinate holds the `pkSeed` byte and secret byte `s`, the second the other `23`
+    secret bytes and the adversary coin. -/
 def puncturedKeyAndAdvSplit (nA : Nat) (s : Fin 24) :
     Spec.CoinSplit ((256 * pow256 24) * nA) (256 * 256) (pow256 23 * nA) :=
   coinSplitLiftRight nA (Spec.CoinSplit.prod (256 * pow256 24) nA)
-    (coinSplitAssocRight 256 256 (pow256 23) |> fun spR =>
-      { chal := fun k => spR.chal ((Spec.CoinSplit.prod 256 (pow256 24)).chal k |> fun cSeed =>
-          (Spec.CoinSplit.prod 256 (256 * pow256 23)).pair cSeed
-            ((Spec.CoinSplit.prod 256 (pow256 23)).pair
-              ((splitByteVecAt 23 s).chal ((Spec.CoinSplit.prod 256 (pow256 24)).advc k))
-              ((splitByteVecAt 23 s).advc ((Spec.CoinSplit.prod 256 (pow256 24)).advc k))))
-        advc := fun k => (splitByteVecAt 23 s).advc ((Spec.CoinSplit.prod 256 (pow256 24)).advc k)
-        pair := fun c2 rest =>
-          (Spec.CoinSplit.prod 256 (pow256 24)).pair
-            ((Spec.CoinSplit.prod 256 256).chal c2)
-            ((splitByteVecAt 23 s).pair ((Spec.CoinSplit.prod 256 256).advc c2) rest)
-        chal_pair := fun c2 rest => by
-          dsimp only
-          rw [(Spec.CoinSplit.prod 256 (pow256 24)).chal_pair,
-            (Spec.CoinSplit.prod 256 (pow256 24)).advc_pair,
-            (splitByteVecAt 23 s).chal_pair, (splitByteVecAt 23 s).advc_pair]
-          unfold coinSplitAssocRight
-          dsimp only
-          rw [(Spec.CoinSplit.prod 256 (256 * pow256 23)).chal_pair,
-            (Spec.CoinSplit.prod 256 (256 * pow256 23)).advc_pair,
-            (Spec.CoinSplit.prod 256 (pow256 23)).chal_pair,
-            (Spec.CoinSplit.prod 256 256).pair_chal_advc]
-        advc_pair := fun c2 rest => by
-          dsimp only
-          rw [(Spec.CoinSplit.prod 256 (pow256 24)).advc_pair, (splitByteVecAt 23 s).advc_pair]
-        pair_chal_advc := fun k => by
-          dsimp only
-          unfold coinSplitAssocRight
-          dsimp only
-          rw [(Spec.CoinSplit.prod 256 (256 * pow256 23)).chal_pair,
-            (Spec.CoinSplit.prod 256 (256 * pow256 23)).advc_pair,
-            (Spec.CoinSplit.prod 256 (pow256 23)).chal_pair,
-            (Spec.CoinSplit.prod 256 256).chal_pair,
-            (Spec.CoinSplit.prod 256 256).advc_pair,
-            (splitByteVecAt 23 s).pair_chal_advc,
-            (Spec.CoinSplit.prod 256 (pow256 24)).pair_chal_advc] })
+    { chal := fun k => (Spec.CoinSplit.prod 256 256).pair
+        ((Spec.CoinSplit.prod 256 (pow256 24)).chal k)
+        ((splitByteVecAt 23 s).chal ((Spec.CoinSplit.prod 256 (pow256 24)).advc k))
+      advc := fun k => (splitByteVecAt 23 s).advc ((Spec.CoinSplit.prod 256 (pow256 24)).advc k)
+      pair := fun c2 rest =>
+        (Spec.CoinSplit.prod 256 (pow256 24)).pair
+          ((Spec.CoinSplit.prod 256 256).chal c2)
+          ((splitByteVecAt 23 s).pair ((Spec.CoinSplit.prod 256 256).advc c2) rest)
+      chal_pair := fun c2 rest => by
+        rw [(Spec.CoinSplit.prod 256 (pow256 24)).chal_pair,
+          (Spec.CoinSplit.prod 256 (pow256 24)).advc_pair,
+          (splitByteVecAt 23 s).chal_pair, (Spec.CoinSplit.prod 256 256).pair_eta]
+      advc_pair := fun c2 rest => by
+        rw [(Spec.CoinSplit.prod 256 (pow256 24)).advc_pair, (splitByteVecAt 23 s).advc_pair]
+      pair_eta := fun k => by
+        rw [(Spec.CoinSplit.prod 256 256).chal_pair, (Spec.CoinSplit.prod 256 256).advc_pair,
+          (splitByteVecAt 23 s).pair_eta, (Spec.CoinSplit.prod 256 (pow256 24)).pair_eta] }
 
 /-- Concrete 4-leaf (`subtreeHeight = 2`), 128-chain (`w = 4`, `targetSum = 192`) stateful Jorts
     parameter set passing `PqHashParams.productionWellFormed`. -/
@@ -1658,6 +1606,7 @@ def multiLeaf4JortsParams : PqHashParams :=
 
 theorem multiLeaf4JortsParams_productionWellFormed :
     multiLeaf4JortsParams.productionWellFormed = true := by
+  rw [PqHashParams.productionWellFormed_eq]
   decide +kernel
 
 theorem multiLeaf4JortsParams_radix :
@@ -1678,13 +1627,13 @@ theorem multiLeaf24Keygen_uniform :
     Spec.UniformOn
       (fun sk : PqSecretKey => sk.skSeed.length = 24 ∧ sk.skPrf = [] ∧ sk.pkSeed.length = 1)
       multiLeaf24Keygen where
-  mem k := ⟨byteVecSampler_length 24 _, rfl, rfl⟩
+  mem _ := ⟨byteVecSampler_length 24 _, rfl, Spec.uniformOn_byte1Seed.mem _⟩
   injective i j h := by
     let sp := Spec.CoinSplit.prod 256 (pow256 24)
     injection h with hSk _ hPk
     have hC := Spec.uniformOn_byte1Seed.injective (sp.chal i) (sp.chal j) hPk
     have hA := (uniformOn_byteVecSampler 24).injective (sp.advc i) (sp.advc j) hSk
-    rw [← sp.pair_chal_advc i, ← sp.pair_chal_advc j, hC, hA]
+    rw [← sp.pair_eta i, ← sp.pair_eta j, hC, hA]
   surjective sk hOk := by
     obtain ⟨hSk, hPrf, hPk⟩ := hOk
     obtain ⟨c, hc⟩ := Spec.uniformOn_byte1Seed.surjective sk.pkSeed hPk
@@ -1800,10 +1749,6 @@ private def decodeAdrsLocal (bs : List UInt8) : Option HashAdrs :=
           hashStep := UInt32.ofNat (ofBE ((bs.drop 28).take 4)) }
   else none
 
-private theorem adrsKind_fromCode_toCode (k : AdrsKind) :
-    AdrsKind.fromCode k.toCode = some k := by
-  cases k <;> decide
-
 private theorem decodeAdrsLocal_encodeAdrs (a : HashAdrs) :
     decodeAdrsLocal (encodeAdrs a) = some a := by
   have hLen := encodeAdrs_length a
@@ -1846,15 +1791,14 @@ private theorem decodeAdrsLocal_encodeAdrs (a : HashAdrs) :
   have hTakeSt : ((encodeAdrs a).drop 28).take 4 = be 4 a.hashStep.toNat := by
     rw [hDrop28, List.take_of_length_le (Nat.le_of_eq (length_be 4 _))]
   have u32Rt : ∀ u : UInt32, UInt32.ofNat (ofBE (be 4 u.toNat)) = u := fun u => by
-    rw [ofBE_be 4 u.toNat (by simpa using u.toBitVec.isLt)]
+    rw [ofBE_be (w := 4) (Nat.lt_of_lt_of_le u.toNat_lt (Nat.le_of_eq (by decide)))]
     exact UInt32.ofNat_toNat
   have u64Rt : ∀ u : UInt64, UInt64.ofNat (ofBE (be 8 u.toNat)) = u := fun u => by
-    rw [ofBE_be 8 u.toNat (by simpa using u.toBitVec.isLt)]
+    rw [ofBE_be (w := 8) (Nat.lt_of_lt_of_le u.toNat_lt (Nat.le_of_eq (by decide)))]
     exact UInt64.ofNat_toNat
   rw [hTake4, hTakeTree, hTakeKind, hTakeKp, hTakeCh, hTakeSt,
-    u32Rt a.kind.toCode, adrsKind_fromCode_toCode,
+    u32Rt a.kind.toCode, AdrsKind.fromCode_toCode,
     u32Rt a.layer, u64Rt a.tree, u32Rt a.keyPair, u32Rt a.chainIdx, u32Rt a.hashStep]
-  cases a; rfl
 
 private def parseThPreimageLocal (raw : List UInt8) :
     Option (List UInt8 × List UInt8 × HashAdrs × List (List UInt8)) :=
@@ -1871,7 +1815,9 @@ private theorem parseThPreimageLocal_thPreimage (role pkSeed : List UInt8)
   rw [thPreimage_eq]
   unfold parseThPreimageLocal
   rw [decodeMultiFrameLocal_encodeMultiFrame]
-  dsimp only
+  show (match decodeAdrsLocal (encodeAdrs adrs) with
+        | some a => some (role, pkSeed, a, args)
+        | none => none) = _
   rw [decodeAdrsLocal_encodeAdrs]
 
 /-- Domain-separated tweak `[kp, r]` for step-0 `Spec.poly257Hash` chain evaluation. -/
@@ -1886,7 +1832,7 @@ def encodeStep0Secret (b : UInt8) : List UInt8 :=
 
 #export_eqns encodeStep0Secret
 
-theorem encodeStep0Secret_length (b : UInt8) : (encodeStep0Secret b).length = 32 := rfl
+theorem encodeStep0Secret_length (b : UInt8) : (encodeStep0Secret b).length = 32 := by rfl
 
 /-- Decode a 32-byte step-0 chain carrier into a 1- or 2-byte `poly257Hash` preimage candidate. -/
 def decodeStep0Cand (x : List UInt8) : Option Spec.Bytes :=
@@ -1905,34 +1851,14 @@ theorem decodeStep0Cand_encodeStep0Secret (b : UInt8) :
 theorem decodeStep0Cand_len_le_two {x : List UInt8} {cand : Spec.Bytes}
     (h : decodeStep0Cand x = some cand) : cand.length ≤ 2 := by
   unfold decodeStep0Cand at h
-  match x with
-  | 0xA0 :: b :: rest =>
-    dsimp only at h
-    split at h
-    · injection h with hc; rw [← hc]; decide
+  split at h
+  · split at h
+    · injection h with hc; rw [← hc]; exact Nat.le_succ 1
     · cases h
-  | 0xA1 :: b₀ :: b₁ :: rest =>
-    dsimp only at h
-    split at h
-    · injection h with hc; rw [← hc]; decide
+  · split at h
+    · injection h with hc; rw [← hc]; exact Nat.le_refl 2
     · cases h
-  | [] => cases h
-  | [t] =>
-    cases h0 : (t == 0xA0) <;> cases h1 : (t == 0xA1) <;> simp_all
-  | t :: b :: rest =>
-    by_cases ht0 : t = 0xA0
-    · subst ht0; split at h
-      · injection h with hc; rw [← hc]; decide
-      · cases h
-    · by_cases ht1 : t = 0xA1
-      · subst ht1
-        match rest with
-        | [] => simp at h
-        | b₁ :: rest' =>
-          dsimp only at h; split at h
-          · injection h with hc; rw [← hc]; decide
-          · cases h
-      · simp [ht0, ht1] at h
+  · cases h
 
 private def invalid32 : List UInt8 :=
   0xFF :: List.replicate 31 0x00
@@ -2010,19 +1936,21 @@ private theorem unpackLeaf6At_packLeaf6 (p0 p1 p2 p3 p4 p5 : UInt8 × UInt8)
   rcases p0 with ⟨a0, b0⟩; rcases p1 with ⟨a1, b1⟩; rcases p2 with ⟨a2, b2⟩
   rcases p3 with ⟨a3, b3⟩; rcases p4 with ⟨a4, b4⟩; rcases p5 with ⟨a5, b5⟩
   dsimp only at h0 h1 h2 h3 h4 h5 ⊢
-  unfold packLeaf6 unpackLeaf6At
-  dsimp only [List.getD, List.headD]
   have hFlLt : a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
       8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat < 256 := by omega
-  rw [uint8_toNat_of_lt256 hFlLt]
-  have mkEq : ∀ (u : UInt8) (v : Nat), v = u.toNat → UInt8.ofNat v = u := fun u v hv => by
-    rw [hv]; exact UInt8.ofNat_toNat
-  refine ⟨Prod.ext (mkEq a0 _ (by omega)) rfl,
-    Prod.ext (mkEq a1 _ (by omega)) rfl,
-    Prod.ext (mkEq a2 _ (by omega)) rfl,
-    Prod.ext (mkEq a3 _ (by omega)) rfl,
-    Prod.ext (mkEq a4 _ (by omega)) rfl,
-    Prod.ext (mkEq a5 _ (by omega)) rfl⟩
+  have key : ∀ (d : Nat) (a : UInt8),
+      a.toNat = (a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
+        8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat) / d % 2 →
+      UInt8.ofNat ((UInt8.ofNat (a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
+        8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat)).toNat / d % 2) = a := fun d a h => by
+    rw [uint8_toNat_of_lt256 hFlLt, ← h]
+    exact UInt8.ofNat_toNat
+  exact ⟨Prod.ext (key 1 a0 (by omega)) rfl,
+    Prod.ext (key 2 a1 (by omega)) rfl,
+    Prod.ext (key 4 a2 (by omega)) rfl,
+    Prod.ext (key 8 a3 (by omega)) rfl,
+    Prod.ext (key 16 a4 (by omega)) rfl,
+    Prod.ext (key 32 a5 (by omega)) rfl⟩
 
 private def extractActive6 (kp : Nat) (limbs : List (List UInt8)) :
     Option (List (UInt8 × UInt8)) :=
@@ -2049,26 +1977,45 @@ def encodeMsg3Hmsg (m : Nat) : List UInt8 :=
 
 private theorem encodeMsg3Hmsg_length (m : Nat) : (encodeMsg3Hmsg m).length = 32 := rfl
 
+private theorem sumDigits_eq_foldr : ∀ ds : List Nat, sumDigits ds = ds.foldr (· + ·) 0
+  | [] => sumDigits_nil
+  | d :: ds => (sumDigits_cons d ds).trans (congrArg (d + ·) (sumDigits_eq_foldr ds))
+
+private theorem encodeMsg3Hmsg_digits_eval :
+    ∀ m : Fin 8,
+      extractBaseWDigitsChecked 4 128 (encodeMsg3Hmsg m.1) =
+          some (extractBaseWDigits 4 128 (encodeMsg3Hmsg m.1)) ∧
+        checkTargetSum 4 128 192 (extractBaseWDigits 4 128 (encodeMsg3Hmsg m.1)) = true ∧
+        ∀ r : Nat, r < 128 → 6 ≤ r →
+          (extractBaseWDigits 4 128 (encodeMsg3Hmsg m.1)).getD r 0 =
+            if r % 2 = 0 then 0 else 3 := by
+  simp only [extractBaseWDigitsChecked_eq, extractBaseWDigits_eq, checkTargetSum,
+    sumDigits_eq_foldr]
+  decide +kernel
+
 theorem encodeMsg3Hmsg_digits_valid :
     ∀ m : Fin 8,
       ∃ digits : List Nat,
         extractBaseWDigitsChecked 4 128 (encodeMsg3Hmsg m.1) = some digits ∧
         checkTargetSum 4 128 192 digits = true ∧
         (∀ r : Nat, 6 ≤ r → r < 128 →
-          digits.getD r 0 = if r % 2 = 0 then 0 else 3) := by
-  decide +kernel
+          digits.getD r 0 = if r % 2 = 0 then 0 else 3) :=
+  fun m => ⟨_, (encodeMsg3Hmsg_digits_eval m).1, (encodeMsg3Hmsg_digits_eval m).2.1,
+    fun r h6 hr => (encodeMsg3Hmsg_digits_eval m).2.2 r hr h6⟩
 
 theorem encodeMsg3Hmsg_incomparable :
     ∀ m₁ m₂ : Fin 8, m₁ ≠ m₂ →
       ∃ r : Fin 6,
         (extractBaseWDigits 4 128 (encodeMsg3Hmsg m₁.1)).getD r.1 0 = 0 ∧
         (extractBaseWDigits 4 128 (encodeMsg3Hmsg m₂.1)).getD r.1 0 = 3 := by
+  simp only [extractBaseWDigits_eq]
   decide +kernel
 
 theorem encodeMsg3Hmsg_has_zero_digit :
     ∀ m : Fin 8,
       ∃ r : Fin 6,
         (extractBaseWDigits 4 128 (encodeMsg3Hmsg m.1)).getD r.1 0 = 0 := by
+  simp only [extractBaseWDigits_eq]
   decide +kernel
 
 private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs)
@@ -2171,26 +2118,13 @@ private theorem poly257MultiLeafDispatch_length (role pkSeed : List UInt8) (adrs
     · rw [ite_eq_right h2]
       by_cases h3 : role = tagHPre
       · rw [ite_eq_left h3]
-        match args with
-        | [_, [m]] => dsimp only; split <;> rfl
-        | [] | [_] | [_, []] | [_, _ :: _ :: _] | _ :: _ :: _ :: _ => rfl
+        repeat' split
+        all_goals rfl
       · rw [ite_eq_right h3]
         by_cases h4 : role = tagHMsg
         · rw [ite_eq_left h4]
-          match args with
-          | [_, _, 0xE0 :: m :: rest, _] => dsimp only; split <;> rfl
-          | [_, _, [], _] => rfl
-          | [_, _, [t], _] =>
-            cases ht : (t == 0xE0)
-            · have hne : t ≠ 0xE0 := by intro he; subst he; cases ht
-              simp [hne]; rfl
-            · have he : t = 0xE0 := of_decide_eq_true ht
-              subst he; rfl
-          | [_, _, t :: m :: rest, _] =>
-            by_cases ht : t = 0xE0
-            · subst ht; dsimp only; split <;> rfl
-            · simp [ht]; rfl
-          | [] | [_] | [_, _] | [_, _, _] | _ :: _ :: _ :: _ :: _ :: _ => rfl
+          repeat' split
+          all_goals rfl
         · rw [ite_eq_right h4]
           by_cases h5 : role = tagThF
           · rw [ite_eq_left h5]
@@ -2249,8 +2183,8 @@ private theorem poly257MultiLeafDispatch_length (role pkSeed : List UInt8) (adrs
                 | [] | [_] | _ :: _ :: _ :: _ => rfl
               · rw [ite_eq_right h7]; rfl
 
-/-- Concrete 4-leaf height-2 Merkle + target-sum WOTS+C tweakable hash suite backed by
-    `Spec.poly257Hash`. -/
+/-- Tweakable-hash suite whose `rawHash` decodes a `thPreimage` and dispatches on the role tag
+    (`poly257MultiLeafDispatch`); inputs that do not decode hash to `invalid32`. -/
 def poly257MultiLeafSuite : TweakableHashSuite where
   suiteId := "QSAG.PQ.SUITE.POLY257.MULTILEAF/v1".toByteArray.toList
   rawHash raw :=
@@ -2258,10 +2192,9 @@ def poly257MultiLeafSuite : TweakableHashSuite where
     | some (role, pkSeed, adrs, args) => poly257MultiLeafDispatch role pkSeed adrs args
     | none => invalid32
   rawHash_len raw := by
-    dsimp only
-    cases parseThPreimageLocal raw with
-    | none => rfl
-    | some q => rcases q with ⟨role, pkSeed, adrs, args⟩; exact poly257MultiLeafDispatch_length _ _ _ _
+    split
+    · exact poly257MultiLeafDispatch_length _ _ _ _
+    · rfl
 
 private theorem poly257MultiLeafSuite_thCall (role pkSeed : List UInt8) (adrs : HashAdrs)
     (args : List (List UInt8)) :
@@ -2273,27 +2206,6 @@ private theorem poly257MultiLeafSuite_thCall (role pkSeed : List UInt8) (adrs : 
         | none => invalid32) = _
   rw [parseThPreimageLocal_thPreimage]
 
-private theorem allRoleTags_distinct :
-    tagPrf ≠ tagPrfMsg ∧ tagPrf ≠ tagHPre ∧ tagPrf ≠ tagHMsg ∧ tagPrf ≠ tagThF ∧
-    tagPrf ≠ tagThTl ∧ tagPrf ≠ tagThH ∧
-    tagPrfMsg ≠ tagHPre ∧ tagPrfMsg ≠ tagHMsg ∧ tagPrfMsg ≠ tagThF ∧
-    tagPrfMsg ≠ tagThTl ∧ tagPrfMsg ≠ tagThH ∧
-    tagHPre ≠ tagHMsg ∧ tagHPre ≠ tagThF ∧ tagHPre ≠ tagThTl ∧ tagHPre ≠ tagThH ∧
-    tagHMsg ≠ tagThF ∧ tagHMsg ≠ tagThTl ∧ tagHMsg ≠ tagThH ∧
-    tagThF ≠ tagThTl ∧ tagThF ≠ tagThH ∧ tagThTl ≠ tagThH := by
-  simp only [tagPrf.public_eqs, tagPrfMsg.public_eqs, tagHPre.public_eqs, tagHMsg.public_eqs,
-    tagThF.public_eqs, tagThTl.public_eqs, tagThH_eq]
-  decide +kernel
-
-private theorem poly257Hash_hi_le_one (seed tweak cand : Spec.Bytes) (hLen : cand.length ≤ 2) :
-    ((Spec.poly257Hash seed tweak cand).getD 1 0).toNat ≤ 1 := by
-  rw [Spec.poly257Hash_eq, ite_eq_left hLen]
-  dsimp only [List.getD]
-  have hvLt : Spec.poly257Eval (seed.headD 0).toNat cand < 257 :=
-    Nat.mod_lt _ (by decide)
-  rw [uint8_toNat_of_lt256 (by omega : Spec.poly257Eval (seed.headD 0).toNat cand / 256 < 256)]
-  omega
-
 private theorem poly257Hash_eq_of_hi_lo_eq (seed tweak cand₁ cand₂ : Spec.Bytes)
     (h₁ : cand₁.length ≤ 2) (h₂ : cand₂.length ≤ 2)
     (hHi : (Spec.poly257Hash seed tweak cand₁).getD 1 0 =
@@ -2303,8 +2215,15 @@ private theorem poly257Hash_eq_of_hi_lo_eq (seed tweak cand₁ cand₂ : Spec.By
     Spec.poly257Hash seed tweak cand₁ = Spec.poly257Hash seed tweak cand₂ := by
   rw [Spec.poly257Hash_eq, ite_eq_left h₁] at hHi hLo ⊢
   rw [Spec.poly257Hash_eq, ite_eq_left h₂] at hHi hLo ⊢
-  dsimp only [List.getD] at hHi hLo
-  rw [hHi, hLo]
+  have hHi' : UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ / 256) =
+      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ / 256) := hHi
+  have hLo' : UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ % 256) =
+      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ % 256) := hLo
+  show (0x00 :: UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ / 256) ::
+      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ % 256) :: tweak : Spec.Bytes) =
+    0x00 :: UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ / 256) ::
+      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ % 256) :: tweak
+  rw [hHi', hLo']
 
 #verify_constructive
   Qsag.evalLatchedAdaptiveTree_log_increasing

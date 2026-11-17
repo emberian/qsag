@@ -1,5 +1,6 @@
 module
 public import Qsag.Math.CoeffPoly
+import Qsag.Tactic.AssuranceKit
 
 /-!
 # Qsag.Math.PolyRing
@@ -2510,3 +2511,32 @@ theorem affineCombine_def {F : Type} [CommRingOps F] (θ α β : F) (F_poly G_po
 -- (end exports for lane agg-budget)
 
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.Mat.degFn_det_weighted_le
+  Qsag.Mat.det_matMul
+  Qsag.Mat.map_det
+  Qsag.UPoly.degFn_wdeg
+  Qsag.Mat.det_col0_unit
+  Qsag.Mat.det_perm_rows
+  Qsag.Frac.of_injective
+  Qsag.Mat.det_idMat
+  Qsag.Mat.det_lower_tri_one
+  Qsag.UPoly.d5_split
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.SylElim.monom
+#export_eqns Qsag.PreFrac.Rel
+#export_eqns Qsag.Frac.mk
+#export_eqns Qsag.UPoly.wdegFrom
+#export_eqns Qsag.Mat.det
+#export_eqns Qsag.Mat.minor
+#export_eqns Qsag.Mat.skipIdx
+#export_eqns Qsag.Mat.rangeSum
+#export_eqns Qsag.Mat.signed
+#export_eqns Qsag.UPoly.prodList
+#export_eqns Qsag.Mat.idMat
+#export_eqns Qsag.Mat.matMul
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).

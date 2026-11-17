@@ -1194,6 +1194,24 @@ theorem OracleComp.toProbPkg_multiSession (𝒞 : DistClass) {n : Nat} {Dom Cod 
       ((OracleComp.toProbPkg init handle O).multiSession K) (ε.scale K) :=
   ProbPkg.multiSession_hybrid 𝒞 real _ ε h K
 
+/-- **One session call, evaluated.** A `Code.callSession` step against `multiSession K P` asks `P`
+    on that session's own coin and state and continues with the answer. Consumers evaluate
+    multi-session programs with this equation; `Code.callSession` itself stays sealed. -/
+theorem ProbPkg.evalState_multiSession_callSession {n : Nat} {I : Iface} {σ R : Type}
+    (P : ProbPkg n I Iface.empty σ) (K : Nat) (ω : Fin (coinPow n K)) (st : SessState σ K)
+    (sid : Fin K) (q : I.Query) (k : I.Resp q → Code (Iface.sessions I K) R) :
+    Code.evalState ((P.multiSession K).sample ω).closedHandler (Code.callSession K sid q k) st =
+      Code.evalState ((P.multiSession K).sample ω).closedHandler
+        (k ((P.sample (sessCoin K ω sid)).closedHandler (SessState.get K st sid) q).1)
+        (SessState.set K st sid
+          ((P.sample (sessCoin K ω sid)).closedHandler (SessState.get K st sid) q).2) := by
+  have h := ProbPkg.multiSession_step P K ω st sid q
+  show Code.evalState _
+    (Code.call (Iface.sessQuery K sid q) (fun r => k (Iface.sessResp K sid q r))) st = _
+  rw [Code.evalState_call, h.1, h.2]
+
+#export_eqns sessCoin Machine.toProbPkg
+
 #verify_constructive
   Qsag.Spec.sampleSum_eq_qsum
   Qsag.Spec.advDist_eq_zero_of_coin_perm
@@ -1233,6 +1251,7 @@ theorem OracleComp.toProbPkg_multiSession (𝒞 : DistClass) {n : Nat} {Dom Cod 
   Qsag.Spec.OracleComp.toProbPkg_closedHandler
   Qsag.Spec.OracleComp.toProbPkg_congr
   Qsag.Spec.OracleComp.toProbPkg_multiSession
+  Qsag.Spec.ProbPkg.evalState_multiSession_callSession
 
 end Qsag.Spec
 end

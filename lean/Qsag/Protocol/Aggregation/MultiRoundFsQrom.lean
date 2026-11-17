@@ -2306,5 +2306,166 @@ namespace Qsag
   cases ys <;> rfl
  theorem hemInterleave_cons_cons {F : Type} (a b : F) (xs ys : List F) :
     hemInterleave (a :: xs) (b :: ys) = a :: b :: hemInterleave xs ys := by rfl
+
+-- Equations for `Tests/HemMultistageCascadeTeeth` (no body exposed).
+/-! ## Executed Hem checker fixtures and teeth
+
+These evaluate `polyWitnessValid`, `HemStatementValid`, `verifyHemAffineWhir` and
+`mutantVerifyHemAffineWhirUnincremented` over `QuarticGoldilocks`, whose bodies are visible only in this
+module. They are audited and paired in `Tests/HemExtractedOpeningBridgeTests`; the facts stated over a
+literal instance are cited by `Protocol/Aggregation/HemOpening`, which owns `hemZeroOracleClaimInstance`. -/
+section HemExecutedTeeth
+set_option exponentiation.threshold 2048
+set_option maxRecDepth 65536
+
+/-- The former checker, retained only as the mutation under test: it forgets to compare
+    the number of batch claims to the number of batch oracles. -/
+def verifyHemMissingBatchArity {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
+  match tr with
+  | .cascade shifts weights decoded :: rest =>
+    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
+    decide (shifts.length = inst.batchClaims.length) &&
+    decide (weights.length = inst.batchClaims.length) &&
+    decoded.any (fun P => polyWitnessValid inst.initDomainPts inst.initMinAgree
+      (inst.initDegBound + 1) (evalCascadeOracle inst.initDomainPts inst.batchOracles weights)
+      inst.initKernel (evalCascadeClaim inst.batchClaims shifts weights) P) &&
+    verifyHemStages (evalCascadeOracle inst.initDomainPts inst.batchOracles weights)
+      inst.initDomainPts (inst.initDegBound + 1) inst.initMinAgree inst.initKernel
+      (evalCascadeClaim inst.batchClaims shifts weights) inst.stages rest
+  | _ => false
+
+def hemMissingClaimInstance : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun _ => CommRingOps.one]
+    batchClaims := []
+    initDomainPts := [CommRingOps.zero, CommRingOps.one]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [CommRingOps.one]
+    stages := [] }
+
+/-- The old checker accepted an invalid statement by dropping its only oracle. The repaired
+    checker rejects exactly the same transcript, even though its polynomial checks succeed. -/
+theorem tooth_missing_batch_claim_erases_oracle :
+    ¬ HemStatementValid hemMissingClaimInstance ∧
+    verifyHemMissingBatchArity hemMissingClaimInstance
+      [.cascade [] [] [[]], .finalQuery []] = true ∧
+    verifyHemAffineWhir hemMissingClaimInstance
+      [.cascade [] [] [[]], .finalQuery []] = false := by
+  exact ⟨fun h => h.2, by decide, by decide⟩
+
+def qgNat : Nat → QuarticGoldilocks
+  | 0 => CommRingOps.zero
+  | n + 1 => CommRingOps.add (qgNat n) CommRingOps.one
+
+def toothDeg1Dom : List QuarticGoldilocks :=
+  [qgNat 0, qgNat 1, qgNat 2, qgNat 3]
+
+def toothDeg1Pool : List QuarticGoldilocks :=
+  [qgNat 0, qgNat 1, CommRingOps.sub CommRingOps.zero CommRingOps.one]
+
+/-- **Unincremented Cascade Agreement Counterexample
+    (`tooth_verifyHemAffineWhir_unincremented_agree_accepts_all`)**:
+    In `mutantVerifyHemAffineWhirUnincremented`, `.cascade` checks `polyWitnessValid` at
+    `inst.initMinAgree` (`A₀`) rather than `A₀ + 1`. At `domPts = [0, 1, 2]`, `d₀ = 0`, `A₀ = 2`,
+    the oracle `0 ↦ 1, _ ↦ 0` with claim `1` violates `HemStatementValid inst` at `A₀ = 2`, yet
+    has an `(A₀ - 1) = 1`-agreeing witness `G = [1]` and therefore passes the deliberately stale verifier
+    via `P(z) = α - α z` on **every** `(α, β) ∈ prodPool S` (`100%` acceptance)!
+    This proves that the `initMinAgree - 1` premise in `arbitrary_batch_cascade_fiber_bound`
+    cannot be weakened to `¬ HemStatementValid inst` without the agreement increment now enforced by `verifyHemAffineWhir`. -/
+def toothUnincCascadeInst : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun idx => if idx = 0 then qgNat 1 else qgNat 0]
+    batchClaims := [qgNat 1]
+    initDomainPts := [qgNat 0, qgNat 1, qgNat 2]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [qgNat 1]
+    stages := [] }
+
+theorem tooth_verifyHemAffineWhir_unincremented_agree_accepts_all :
+    ∃ inst : HemWhirInstance QuarticGoldilocks,
+      ¬ HemStatementValid inst ∧
+      HemStatementValid { inst with initMinAgree := 1 } ∧
+      ∀ ch : Fin (prodPool toothDeg1Pool).length,
+        let p := (prodPool toothDeg1Pool).get ch
+        let P : List QuarticGoldilocks := [p.1, CommRingOps.sub CommRingOps.zero p.1]
+        mutantVerifyHemAffineWhirUnincremented inst
+          [.cascade [qgNat 0] [p] [P], .finalQuery P] = true := by
+  refine ⟨toothUnincCascadeInst, ?_, ⟨by decide, ⟨[qgNat 1], by decide +kernel⟩, trivial⟩, by
+    rw [prodPool_eq]
+    decide +kernel⟩
+  rintro ⟨_, ⟨G, hG⟩, _⟩
+  unfold polyWitnessValid toothUnincCascadeInst at hG
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hG
+  rcases hG with ⟨⟨hGLen, hGAg⟩, hGDot⟩
+  rcases G with _ | ⟨c, _ | _⟩
+  · change CommRingOps.zero = qgNat 1 at hGDot
+    exact (by decide : CommRingOps.zero ≠ qgNat 1) hGDot
+  · have hOne : qgNat 1 = CommRingOps.one := by decide
+    have hc1 : c = CommRingOps.one := by
+      rw [hOne] at hGDot
+      simpa only [ringDot_cons_cons, ringDot_nil_left, ringDot_nil_right, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hGDot
+    subst hc1
+    exact absurd hGAg (by decide +kernel)
+  · simp only [List.length_cons] at hGLen
+    omega
+
+/-- The repaired verifier rejects the old attack at a nonzero challenge; the zero
+    challenge still legitimately belongs to the bad-challenge set. -/
+theorem tooth_incremented_cascade_rejects_old_attack :
+    ∃ P : List QuarticGoldilocks,
+    mutantVerifyHemAffineWhirUnincremented toothUnincCascadeInst
+      [.cascade [qgNat 0] [(qgNat 1, qgNat 0)] [P], .finalQuery P] = true ∧
+    verifyHemAffineWhir toothUnincCascadeInst
+      [.cascade [qgNat 0] [(qgNat 1, qgNat 0)] [P], .finalQuery P] = false := by
+  refine ⟨[qgNat 1, CommRingOps.sub (qgNat 0) (qgNat 1)], ?_⟩
+  decide +kernel
+
+/-- The zero-oracle / claim-one instance on the domain `[0, 1]` (the body of
+    `hemZeroOracleClaimInstance [0, 1] 0 2 []`): the cascade transcript with shift `0`, weight `(0, 1)` and
+    the empty polynomial is accepted, and exactly two of the four weight pairs are. -/
+theorem verifyHemAffineWhir_zeroOracleClaim_dom01_kat :
+    verifyHemAffineWhir
+      ({ batchOracles := [fun _ => CommRingOps.zero]
+         batchClaims := [CommRingOps.one]
+         initDomainPts := [CommRingOps.zero, CommRingOps.one]
+         initDegBound := 0
+         initMinAgree := 2
+         initKernel := [CommRingOps.one]
+         stages := [] } : HemWhirInstance QuarticGoldilocks)
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.one)] [[]], .finalQuery []] = true ∧
+    ((prodPool ([CommRingOps.zero, CommRingOps.one] : List QuarticGoldilocks)).filter (fun p =>
+      verifyHemAffineWhir
+        ({ batchOracles := [fun _ => CommRingOps.zero]
+         batchClaims := [CommRingOps.one]
+         initDomainPts := [CommRingOps.zero, CommRingOps.one]
+         initDegBound := 0
+         initMinAgree := 2
+         initKernel := [CommRingOps.one]
+         stages := [] } : HemWhirInstance QuarticGoldilocks)
+        [.cascade [CommRingOps.zero] [p] [[]], .finalQuery []])).length = 2 := by
+  rw [prodPool_eq]
+  decide
+
+/-- Executed half of `tooth_equal_degree_invalid_mixture`: after `θ = -1` mixing the two zero words
+    carry the valid claim zero. -/
+theorem polyWitnessValid_theta_neg_one_mixture_kat :
+    polyWitnessValid ([CommRingOps.zero, CommRingOps.one] : List QuarticGoldilocks) 2 0
+      (fun _ => CommRingOps.add CommRingOps.zero
+        (CommRingOps.mul (CommRingOps.sub CommRingOps.zero CommRingOps.one) CommRingOps.zero))
+      [CommRingOps.one]
+      (CommRingOps.add CommRingOps.one
+        (CommRingOps.mul (CommRingOps.sub CommRingOps.zero CommRingOps.one) CommRingOps.one)) [] = true := by
+  decide
+
+#verify_constructive
+  Qsag.tooth_missing_batch_claim_erases_oracle
+  Qsag.tooth_verifyHemAffineWhir_unincremented_agree_accepts_all
+  Qsag.tooth_incremented_cascade_rejects_old_attack
+  Qsag.verifyHemAffineWhir_zeroOracleClaim_dom01_kat
+  Qsag.polyWitnessValid_theta_neg_one_mixture_kat
+end HemExecutedTeeth
+
+#export_eqns evalCascadePolySum
 end Qsag
 end

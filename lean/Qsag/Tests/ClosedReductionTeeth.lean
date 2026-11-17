@@ -37,16 +37,8 @@ open Qsag Qsag.ClosedWhir Qsag.ClosedFs
 set_option autoImplicit false
 set_option exponentiation.threshold 100000
 
-/-- Node hash keeping the left child, leaf hash keeping the parity of the value. -/
-def parityLeafSetup : MerkleSetup Nat Nat := ⟨fun _ _ a _ => a, fun _ _ v => v % 2⟩
-
-theorem tooth_lying_opening_yields_collision :
-    ¬ (findCollision parityLeafSetup (fun _ => 0) (fun _ _ => 7) [(0, 0)] [(5, [])] = none) := by
-  decide +kernel
-
-theorem inhabited_honest_opening_no_collision :
-    findCollision parityLeafSetup (fun _ => 0) (fun _ _ => 7) [(0, 0)] [(7, [])] = none := by
-  decide +kernel
+-- `parityLeafSetup`, `tooth_lying_opening_yields_collision` and `inhabited_honest_opening_no_collision`
+-- are proved in `Protocol/Aggregation/ClosedFsQromCompile` (they execute `findCollision`, sealed here).
 
 #verify_constructive Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
 #verify_constructive Qsag.ClosedReductionTeeth.inhabited_honest_opening_no_collision

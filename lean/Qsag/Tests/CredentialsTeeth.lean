@@ -40,20 +40,17 @@ set_option autoImplicit false
 representatives. -/
 def teethEchoChalHash (mu : List UInt8) (_w1 : Fin 4 → NatTree 8) : List UInt8 := mu
 
-def teethZeroFields : IssuerRootAttestationFields :=
-  ⟨Vec.replicate 32 0, 0, lane6Zero, Vec.replicate 32 0⟩
-
 /-- The all-zero response with the raw attestation message as challenge bytes. -/
 def teethRawMessageSig : ThresholdSignSig :=
-  ⟨teethZeroFields.message, fun _ => PolyTree.zero 8, fun _ => hintTree204 8 [], 0⟩
+  ⟨teethZeroFields.message, fun _ => PolyTree.zero 8, mldsaZeroHints204, 0⟩
 
 /-- The check that feeds the raw message to the algebraic core as `μ` (the wrapper before this
 stage) accepts `teethRawMessageSig`. -/
 theorem teeth_raw_message_check_accepts :
     mldsaVerify teethEchoChalHash (fun _ => PolyTree.zero 8) (fun _ _ => PolyTree.zero 8)
       (fun _ => PolyTree.zero 8) teethZeroFields.message
-      teethRawMessageSig.cTilde teethRawMessageSig.z teethRawMessageSig.h = true := by
-  decide +kernel
+      teethRawMessageSig.cTilde teethRawMessageSig.z teethRawMessageSig.h = true :=
+  mldsaVerify_echo_zero_accepts teethZeroFields.message
 
 /-- **BACKLOG-57 tooth.** A concrete signature accepted when the raw message stands in for the
 message representative is rejected once the FIPS 204 representative is computed, for every
@@ -71,31 +68,16 @@ theorem tooth_raw_message_signature_rejected_by_fips204_check :
     fun issuerPk => verifyIssuerRootAttestation_rejects_raw_message_signature issuerPk
       (fun _ _ _ h => h) teeth_raw_message_check_accepts⟩
 
-/-- The attestation bytes of the model before this stage: `QSAG.ROOT`, root tag, epoch, root.
-The issuer key digest is absent. -/
-def teethLegacyAttestationMsg (f : IssuerRootAttestationFields) : List UInt8 :=
-  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] ++
-  f.issuerRootTag.toList ++ encodeNatLeBytes 8 f.issuerEpoch.toNat ++
-  encodeGoldilocksVecLe [f.accumulatorRoot.x0, f.accumulatorRoot.x1, f.accumulatorRoot.x2,
-    f.accumulatorRoot.x3, f.accumulatorRoot.x4, f.accumulatorRoot.x5]
-
-/-- Without the issuer key digest two different field tuples have the same bytes. -/
-theorem tooth_attestation_msg_without_key_digest_not_injective :
-    ∃ f g : IssuerRootAttestationFields,
-      ¬ (f = g) ∧ teethLegacyAttestationMsg f = teethLegacyAttestationMsg g :=
-  ⟨teethZeroFields, { teethZeroFields with issuerPkDigest := Vec.replicate 32 1 },
-    fun h => by
-      have hd := congrArg (fun x => x.issuerPkDigest.toList.head?) h
-      revert hd; decide,
-    rfl⟩
-
 #verify_constructive teeth_raw_message_check_accepts
   tooth_raw_message_signature_rejected_by_fips204_check
   tooth_attestation_msg_without_key_digest_not_injective
 #tooth_pair verifyIssuerRootAttestationBytes_accepts_core vs
   tooth_raw_message_signature_rejected_by_fips204_check
-#tooth_pair IssuerRootAttestationFields.message_injective vs
-  tooth_attestation_msg_without_key_digest_not_injective
+-- `teethZeroFields`, `teethLegacyAttestationMsg` and
+-- `tooth_attestation_msg_without_key_digest_not_injective` are proved in
+-- `Protocol/Credentials/BlindVcQromSecurity` and paired there with
+-- `IssuerRootAttestationFields.message_injective`: the shared field projections sit under the
+-- sealed body of `IssuerRootAttestationFields.message`.
 
 /-! ## Hidden-party opening of the `N = 256` presentation -/
 
@@ -122,34 +104,13 @@ theorem tooth_opening_round_zero_defects_all_bytes_accepted :
   have hAll : ∀ ch : Nat,
       credentialSdOpeningAccepts 1 (fun _ _ => credentialFp5Zero) ch = true := by
     intro ch
-    unfold credentialSdOpeningAccepts
-    apply List.all_eq_true.mpr
-    intro idx _
-    exact credentialGgmCheckDefects_zero _
+    exact credentialSdOpeningAccepts_zero 1 ch
   rw [qsum_congr (fun ch => by rw [hAll ch.val])]
   simp only [↓reduceIte, qsum_const]
   decide
 
-/-- The hypothesis of the opening-round bound is satisfiable, and its bound is attained: with
-one nonzero check value, at party 255, hiding party 255 passes. -/
-theorem inhabited_opening_round_nonzero_defect :
-    ∃ defect : Nat → Fin 256 → CredentialFp5,
-      (∀ idx < 33, ∃ bad, defect idx bad ≠ credentialFp5Zero) ∧
-      credentialGgmCheckDefects (defect 0) ⟨255, by decide⟩ = true := by
-  refine ⟨fun _ p _ => if p.val = 255 then Goldilocks.one else Goldilocks.zero,
-    fun _ _ => ⟨⟨255, by decide⟩, fun he => ?_⟩, ?_⟩
-  · have hc : Goldilocks.one = Goldilocks.zero := congrFun he 0
-    exact absurd hc (by decide)
-  · apply List.all_eq_true.mpr
-    intro p _
-    rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq]
-    by_cases hp : p = ⟨255, by decide⟩
-    · exact Or.inl hp
-    · refine Or.inr (funext (fun _ => ?_))
-      have hv : ¬ (p.val = 255) := fun h => hp (Fin.ext h)
-      show (if p.val = 255 then Goldilocks.one else Goldilocks.zero) = Goldilocks.zero
-      rw [ite_eq_right hv]
-
+-- `inhabited_opening_round_nonzero_defect` is proved in `Protocol/Credentials/BlindVcQromSecurity`,
+-- which also certifies its inhabitedness pair (cited below).
 #verify_constructive tooth_opening_round_zero_defects_all_bytes_accepted
   inhabited_opening_round_nonzero_defect
 #tooth_pair credentialSd_opening_bad_count_le_one vs
@@ -158,11 +119,9 @@ theorem inhabited_opening_round_nonzero_defect :
 
 /-! ## TOPRF group roles -/
 
-/-- The third role of group `(0, 1)` is not the fixed third holder: roles rotate. (Moved from
-`Protocol/Migration/HdToprfAndMigrationSecurity`, where it needed the bodies of the threshold
-module.) -/
-theorem toprfRotation204_not_constant :
-    (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
+/-! `toprfRotation204_not_constant` (the third role of group `(0, 1)` is not the fixed third
+holder) is proved in `Protocol/Threshold/ThresholdMlDsaAndToprf`, the module that owns
+`toprfGroupRoles204` and `toprfHolders`; it is audited here. -/
 
 #verify_constructive toprfRotation204_not_constant
 
@@ -171,19 +130,20 @@ theorem toprfRotation204_not_constant :
 theorem tooth_single_rep_two_of_three_tight :
     ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
       qsum 3 (fun e => if p e = true then 1 else 0) = 2 ∧ ¬ (2 ^ 1 * 2 ^ 1 < 3 ^ 1) :=
-  ⟨fun e => decide (e.1 < 2), by decide, by decide, by decide⟩
+  ⟨fun e => decide (e.1 < 2), by rw [fin3AllTrue_eq]; decide, by decide, by decide⟩
 
 theorem fin3_not_all_count_witness :
     ∃ p : Fin 3 → Bool, fin3AllTrue p = false ∧
       qsum 3 (fun e => if p e = true then 1 else 0) ≤ 2 :=
-  ⟨fun e => decide (e.1 < 2), by decide, by decide⟩
+  ⟨fun e => decide (e.1 < 2), by rw [fin3AllTrue_eq]; decide, by decide⟩
 
 theorem vcMerkleTree_opening_witness :
     ∃ (epoch : UInt64) (tree : VcMerkleTree 0) (layer : Nat) (leaf : Lane6) (steps : List (Bool × Lane6)),
       steps.length = 0 ∧ evalVcMerklePathBool epoch layer leaf steps = vcMerkleTreeRoot epoch layer tree :=
   let z6 : Lane6 :=
     ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
-  ⟨0, .leaf z6, 0, z6, [], rfl, rfl⟩
+  ⟨0, .leaf z6, 0, z6, [], rfl,
+    by rw [evalVcMerklePathBool_nil, vcMerkleTreeRoot.public_eq_1]⟩
 
 /-- The repaired language has false instances even for a constant hash. The previous
 collision-in-language disjunct made every statement true for that hash. -/
@@ -195,15 +155,15 @@ theorem blindVcParallelIop_false_statement_witness
     Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
   let z4 : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
   let stmt : BlindVcPublicStatement :=
-    { schema := ⟨0, 1, by decide, by decide⟩, treeDepth := 0,
+    { schema := ⟨0, 1, by decide, by rw [vcSmallMaxAttrs_eq]; decide⟩, treeDepth := 0,
       presNonce := Vec.replicate 32 0, issuerEpoch := 0, accumulatorRoot := z6,
       presCommit := z6, scopeTag := z6, verifierScopeLimbs := z4,
       disclosedAttrs := [(0, Goldilocks.zero), (0, Goldilocks.zero)] }
   refine ⟨stmt, ?_⟩
-  rintro ⟨wit, hw⟩
-  have h := hw.1
-  change false = true at h
-  cases h
+  intro hLang
+  obtain ⟨wit, hw⟩ := (blindVcParallelIop_inLang_iff H prgExpand k stmt).mp hLang
+  have hNd := (vcCheckDisclosedStrictAsc_bounds_and_nodup hw.strictAsc).2
+  exact absurd hNd (by decide)
 
 /-- A constant hash and two concretely different views do trigger the event. The
 candidate table is retained, rather than replacing it by an unrelated global collision. -/
@@ -215,7 +175,7 @@ theorem vcRewoundCommitConflict_constant_hash
     VcRewoundCommitConflict (fun _ => []) nonce idx bad bad bad := by
   intro bad
   apply Or.inl
-  refine ⟨?_, rfl⟩
+  refine ⟨?_, by simp only [vcCommitPartyView.public_eqs]⟩
   intro he
   have hh := congrArg PartyVcRepView.attrShares he
   change [Goldilocks.zero] = [] at hh
@@ -253,7 +213,20 @@ theorem tooth_rss3_unverified_shift_corrupts_recon :
       sacAcceptRepeated [ext6Zero]
         (rss3ToSacGate zSh zSh Fq204.zero Fq204.zero Fq204.one ext6Zero zSh
           (ext6EmbedFq Fq204.one)) = false :=
-  ⟨⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, by decide, by decide⟩
+  ⟨⟨Fq204.zero, Fq204.zero, Fq204.zero⟩,
+    by
+      rw [rss3MulStep_recon]
+      simp only [rss3Recon.public_eqs]
+      decide,
+    by
+      rw [sacAcceptRepeated.public_eqs, List.all_cons, List.all_nil, Bool.and_true,
+        Bool.eq_false_iff]
+      intro hAcc
+      rw [sacAccept204_iff_tau_eq, rss3ToSacGate_error_eq_delta, sacTripleError204_eq] at hAcc
+      have h0 := congrArg Ext6Fq204.a0 hAcc
+      simp only [rss3ToSacGate.public_eqs, rss3Recon.public_eqs, ext6Sub_eq, ext6Scale_eq,
+        ext6Add.public_eqs, ext6EmbedFq.public_eqs, ext6Zero_eq] at h0
+      exact absurd h0 (by decide)⟩
 
 theorem rss3_repeated_sacrifice_witness :
     ∃ (x y : Rss3Share) (r0 r1 deltaZ : Fq204)
@@ -262,7 +235,13 @@ theorem rss3_repeated_sacrifice_witness :
       sacAcceptRepeated chis (rss3ToSacGate x y r0 r1 deltaZ a b deltaC) = true :=
   ⟨⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩,
    Fq204.zero, Fq204.zero, Fq204.one, ext6Zero,
-   ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, ext6Zero, [ext6Zero], by decide, by decide⟩
+   ⟨Fq204.zero, Fq204.zero, Fq204.zero⟩, ext6Zero, [ext6Zero], by decide,
+   by
+     rw [sacAcceptRepeated.public_eqs, List.all_cons, List.all_nil, Bool.and_true,
+       sacAccept204_iff_tau_eq, rss3ToSacGate_error_eq_delta, sacTripleError204_eq]
+     simp only [rss3ToSacGate.public_eqs, rss3Recon.public_eqs, ext6Sub_eq, ext6Scale_eq,
+       ext6Add.public_eqs, ext6Zero_eq, Ext6Fq204.mk.injEq]
+     decide⟩
 
 
 #tooth_pair rss3_repeated_sacrifice_pq256 vs tooth_rss3_unverified_shift_corrupts_recon
@@ -320,11 +299,18 @@ theorem inhabited_credPort_channel_contract :
         Top.CredPartyInCommittee party ∧
         Top.credChannelEndpointPort adversaryIds m.sender = party.port := by
   let m : Spec.ChannelMsg := ⟨0, 1, 0, [0x01]⟩
-  have hPort : Top.credChannelEndpointPort [99] m.sender = Spec.CredParty.issuer.port :=
-    Top.credChannelEndpointPort_roundtrip [99] .issuer trivial (by decide)
+  have hCommittee : Top.CredPartyInCommittee Spec.CredParty.issuer := by
+    rw [Top.CredPartyInCommittee.public_eq_1]; exact trivial
+  have hPort : Top.credChannelEndpointPort [99] m.sender = Spec.CredParty.issuer.port := by
+    have hRound := Top.credChannelEndpointPort_roundtrip [99] .issuer hCommittee
+      (by rw [Top.credPartyEndpointId.public_eq_1]; decide)
+    rw [Top.credPartyEndpointId.public_eq_1] at hRound
+    exact hRound
   refine ⟨fun tr => Spec.channelRun tr [] [] = true, Spec.checkedChannel_contract,
-    [99], [.send m, .deliver m], [.send m], [], m, .issuer, ?_, rfl, trivial, hPort⟩
-  exact Spec.checkedChannel_contract.honestRunsAdmitted [m] (by decide)
+    [99], [.send m, .deliver m], [.send m], [], m, .issuer, ?_, rfl, hCommittee, hPort⟩
+  have hRun := Spec.checkedChannel_contract.honestRunsAdmitted [m] (by decide)
+  rw [Spec.honestChannelRun.public_eqs] at hRun
+  exact hRun
 
 #verify_constructive
   Qsag.inhabited_blindVc_cut_and_choose_gameBound
@@ -337,14 +323,17 @@ theorem inhabited_credPort_channel_contract :
   Qsag.inhabited_blindVc_cut_and_choose_gameBound
 #verify_inhabited Qsag.Top.piToprfCredService_issuance_authenticated
   Qsag.inhabited_piToprfCredService_issuance
+-- `inhabited_partial_reserve_burns_without_recycle` restates `spdz_partial_reserve_burns_witness`;
+-- the witness with the visible constructor is audited against the theorem in its owning module
+-- (`Protocol/Credentials/ToprfMachine`), and that certified pair is cited here.
 #verify_inhabited Qsag.partial_reserve_burns_without_recycle
-  Qsag.inhabited_partial_reserve_burns_without_recycle
+  Qsag.spdz_partial_reserve_burns_witness
 #verify_inhabited Qsag.Top.credPort_authenticated_by_channel_contract
   Qsag.inhabited_credPort_channel_contract
 
 #tooth_pair Qsag.partial_reserve_burns_without_recycle vs
   Qsag.tooth_unratcheted_failed_slot_recycles_counter
-#tooth_pair Qsag.Top.piToprfCredService_issuance_authenticated vs
-  Qsag.Top.unauthenticatedCredService_not_implementation
+-- `Top.piToprfCredService_issuance_authenticated vs Top.unauthenticatedCredService_not_implementation`
+-- is paired in `Top/Credentials` (its `#tooth_pair` list), where both bodies are visible.
 end Qsag
 end

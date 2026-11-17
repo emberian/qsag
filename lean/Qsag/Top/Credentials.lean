@@ -1216,5 +1216,8 @@ theorem inhabited_piToprfCredService_issuance :
 #tooth_pair Qsag.Top.threshold_mldsa_frozen_sacrifice_sign_step_soundness vs
   Qsag.tooth_rssSacrificedSignStep_swapped_order_forges
 
+-- Equations used by `Tests/CredentialsTeeth`; no body is exposed.
+#export_eqns CredPartyInCommittee credPartyEndpointId
+
 end Qsag.Top
 end

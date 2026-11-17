@@ -352,55 +352,66 @@ fn verified_intent(
     }
 }
 
-/// H-01: the verified intent namespace reuses canonical wire words for other suites, so a
-/// verified frame must never be read as a canonical frame with the same meaning, and the
-/// bridge must translate by meaning and enforce the canonical `(suite, kind)` rule.
+/// H-01: the verified intent namespace carries the canonical names and wire words, so the bridge
+/// is the identity on frames, and it still enforces the canonical `(suite, kind)` rule that the
+/// verified decoder does not.
 #[test]
-fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
+fn verified_intent_namespace_agrees_with_canonical_and_is_validated() {
     use VerifiedIntentIdentityKind as VK;
     use VerifiedIntentSuiteTag as VS;
     let suites = [
-        (VS::JortsPoseidon2, Some(WitnessSuiteTag::JortsPoseidon2)),
-        (VS::SlhDsaShake128f, Some(WitnessSuiteTag::SlhDsa128f)),
-        (VS::ThresholdMlDsa65, Some(WitnessSuiteTag::MlDsa65)),
+        (VS::MlDsa65, WitnessSuiteTag::MlDsa65, 0x0102u16),
+        (VS::SlhDsa128f, WitnessSuiteTag::SlhDsa128f, 0x0202),
+        (VS::JortsPoseidon2, WitnessSuiteTag::JortsPoseidon2, 0x0214),
+        (
+            VS::HybridSecp256k1MlDsa44,
+            WitnessSuiteTag::HybridSecp256k1MlDsa44,
+            0x0501,
+        ),
         (
             VS::HybridEd25519MlDsa65,
-            Some(WitnessSuiteTag::HybridEd25519MlDsa65),
+            WitnessSuiteTag::HybridEd25519MlDsa65,
+            0x0502,
         ),
-        (VS::HybridSecp256k1SlhDsa, None),
     ];
     let kinds = [
-        (VK::SingleKey, KeyIdentityKind::SingleOrThreshold),
-        (VK::ThresholdCommittee, KeyIdentityKind::SingleOrThreshold),
-        (VK::PolicyBound, KeyIdentityKind::ScriptPredicate),
+        (VK::SingleOrThreshold, KeyIdentityKind::SingleOrThreshold),
+        (VK::HybridConjunctive, KeyIdentityKind::HybridConjunctive),
+        (VK::ScriptPredicate, KeyIdentityKind::ScriptPredicate),
     ];
     let mut accepted = 0;
-    for (verified_suite, canonical_suite) in suites {
-        assert_eq!(
-            intent_suite_from_verified(verified_suite).ok(),
-            canonical_suite
-        );
-        // Every verified wire word names a different canonical suite, or none.
-        let colliding = WitnessSuiteTag::from_u16(verified_suite.to_u16()).ok();
-        assert!(colliding.is_some());
-        assert_ne!(colliding, canonical_suite);
+    for (verified_suite, canonical_suite, word) in suites {
+        // Same name, same wire word on both sides, and the word round-trips in both.
+        assert_eq!(intent_suite_from_verified(verified_suite), canonical_suite);
+        assert_eq!(verified_suite.to_u16(), word);
+        assert_eq!(canonical_suite as u16, word);
+        assert_eq!(VS::from_u16(word), Some(verified_suite));
+        assert_eq!(WitnessSuiteTag::from_u16(word), Ok(canonical_suite));
         for (verified_kind, canonical_kind) in kinds {
             assert_eq!(
                 intent_identity_kind_from_verified(verified_kind),
                 canonical_kind
             );
+            assert_eq!(verified_kind.to_u8(), canonical_kind as u8);
             let verified = verified_intent(verified_suite, verified_kind);
             let frame = qsag_verified::encode_intent_128(&verified);
             let translated = intent_from_verified(&verified);
             assert_eq!(decode_verified_intent_128(&frame), translated.ok());
-            let valid = canonical_suite
-                .is_some_and(|suite| suite.validate_identity_kind(canonical_kind).is_ok());
+            let valid = canonical_suite.validate_identity_kind(canonical_kind).is_ok();
             assert_eq!(translated.is_ok(), valid);
-            let Ok(canonical) = translated else {
+            // The verified decoder checks the pair exactly as the canonical one does.
+            assert_eq!(verified_suite.admits_identity_kind(verified_kind), valid);
+            assert_eq!(qsag_verified::decode_intent_128(&frame).is_some(), valid);
+            if !valid {
+                // The verified encoder is total, so the frame exists; the verified decoder,
+                // the bridge and the canonical decoder all refuse it.
+                assert!(decode_verified_intent_128(&frame).is_none());
+                assert!(decode_intent_128(&frame).is_none());
                 continue;
-            };
+            }
+            let canonical = translated.unwrap();
             accepted += 1;
-            assert_eq!(Some(canonical.suite_tag), canonical_suite);
+            assert_eq!(canonical.suite_tag, canonical_suite);
             assert_eq!(canonical.identity_kind, canonical_kind);
             assert_eq!(canonical.address_version, AddressVersion::V2Poseidon2);
             assert_eq!(canonical.validate(), Ok(()));
@@ -418,21 +429,20 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
             );
             assert_eq!(canonical.recipient_commitment, [0xA5; 32]);
             assert_eq!(canonical.payload_digest, [0xEE; 32]);
-            // The canonical frame differs from the verified frame, and the verified frame read
-            // as canonical is never this intent.
-            let canonical_frame = try_encode_intent_128(&canonical).unwrap();
-            assert_ne!(canonical_frame, frame);
-            assert_ne!(decode_intent_128(&frame), Some(canonical));
-            assert_eq!(decode_intent_128(&canonical_frame), Some(canonical));
+            // The frames are byte-identical and both decoders read the same intent.
+            assert_eq!(try_encode_intent_128(&canonical).unwrap(), frame);
+            assert_eq!(decode_intent_128(&frame), Some(canonical));
         }
     }
-    // Three non-hybrid suites with single or threshold keys; nothing else.
-    assert_eq!(accepted, 6);
+    // Exactly one valid kind per suite: single-or-threshold for the three non-hybrid suites,
+    // hybrid-conjunctive for the two hybrid ones.
+    assert_eq!(accepted, 5);
 
-    // The pair the verified decoder admits and the audit named: hybrid suite, single key.
-    let invalid = verified_intent(VS::HybridEd25519MlDsa65, VK::SingleKey);
+    // The pair the audit named, hybrid suite with a single key: the verified decoder refuses
+    // its frame, and the bridge refuses the struct however it was built.
+    let invalid = verified_intent(VS::HybridEd25519MlDsa65, VK::SingleOrThreshold);
     assert!(
-        qsag_verified::decode_intent_128(&qsag_verified::encode_intent_128(&invalid)).is_some()
+        qsag_verified::decode_intent_128(&qsag_verified::encode_intent_128(&invalid)).is_none()
     );
     assert_eq!(
         intent_from_verified(&invalid),
@@ -441,12 +451,20 @@ fn verified_intent_namespace_is_translated_by_meaning_and_validated() {
             kind: 0x01,
         })
     );
-    assert_eq!(
-        intent_from_verified(&verified_intent(VS::HybridSecp256k1SlhDsa, VK::SingleKey)),
-        Err(AddrError::UnsupportedSuiteTag(0x0502))
-    );
-    let mut bad_magic =
-        qsag_verified::encode_intent_128(&verified_intent(VS::JortsPoseidon2, VK::SingleKey));
+    // Words of canonical suites outside the verified subset are refused by the verified decoder.
+    for word in [0x0101u16, 0x0201, 0x0302] {
+        assert_eq!(VS::from_u16(word), None);
+        let mut frame = qsag_verified::encode_intent_128(&verified_intent(
+            VS::JortsPoseidon2,
+            VK::SingleOrThreshold,
+        ));
+        frame[4..6].copy_from_slice(&word.to_be_bytes());
+        assert!(decode_verified_intent_128(&frame).is_none());
+    }
+    let mut bad_magic = qsag_verified::encode_intent_128(&verified_intent(
+        VS::JortsPoseidon2,
+        VK::SingleOrThreshold,
+    ));
     assert!(decode_verified_intent_128(&bad_magic).is_some());
     bad_magic[0] ^= 1;
     assert!(decode_verified_intent_128(&bad_magic).is_none());

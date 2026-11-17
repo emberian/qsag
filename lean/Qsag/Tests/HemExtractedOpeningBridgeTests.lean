@@ -22,7 +22,6 @@ public section
 namespace Qsag
 set_option autoImplicit false
 
-def toyOpeningSlots : List (MerkleOpeningSlot 4 1) := [⟨0, 1, toyOpening⟩]
 
 def toyHemDecode (_ : Fin 4) (values : List (Option (MerkleOpeningValue 1))) :
     List (HemTranscriptRound QuarticGoldilocks) :=
@@ -54,13 +53,6 @@ theorem toy_hem_substitution_execution :
         (toyHemDecode x (extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x))) = 8 := by
   decide +kernel
 
-/-- Repeating an opening preserves the failure event, while the conservative union budget
-    doubles. This checks real multi-slot evaluation without claiming collision independence. -/
-theorem toy_batch_duplicate_execution :
-    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
-    measuredEventMass guesser (batchMerkleFailure toyMerkleLayout (toyOpeningSlots ++ toyOpeningSlots)) = 8 ∧
-    batchMerkleCost 1 (toyOpeningSlots ++ toyOpeningSlots) = 8 := by
-  decide +kernel
 
 theorem toyHemInstance_invalid : ¬ HemStatementValid toyHemInstance :=
   hemZeroOracleClaimInstance_invalid _ 0 2 [] (by decide) (by decide)
@@ -157,42 +149,6 @@ set_option autoImplicit false
 set_option exponentiation.threshold 2048
 set_option maxRecDepth 65536
 
-/-- The former checker, retained only as the mutation under test: it forgets to compare
-    the number of batch claims to the number of batch oracles. -/
-def verifyHemMissingBatchArity {F : Type} [CommRingOps F] [DecidableEq F]
-    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
-  match tr with
-  | .cascade shifts weights decoded :: rest =>
-    decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
-    decide (shifts.length = inst.batchClaims.length) &&
-    decide (weights.length = inst.batchClaims.length) &&
-    decoded.any (fun P => polyWitnessValid inst.initDomainPts inst.initMinAgree
-      (inst.initDegBound + 1) (evalCascadeOracle inst.initDomainPts inst.batchOracles weights)
-      inst.initKernel (evalCascadeClaim inst.batchClaims shifts weights) P) &&
-    verifyHemStages (evalCascadeOracle inst.initDomainPts inst.batchOracles weights)
-      inst.initDomainPts (inst.initDegBound + 1) inst.initMinAgree inst.initKernel
-      (evalCascadeClaim inst.batchClaims shifts weights) inst.stages rest
-  | _ => false
-
-def hemMissingClaimInstance : HemWhirInstance QuarticGoldilocks :=
-  { batchOracles := [fun _ => CommRingOps.one]
-    batchClaims := []
-    initDomainPts := [CommRingOps.zero, CommRingOps.one]
-    initDegBound := 0
-    initMinAgree := 2
-    initKernel := [CommRingOps.one]
-    stages := [] }
-
-/-- The old checker accepted an invalid statement by dropping its only oracle. The repaired
-    checker rejects exactly the same transcript, even though its polynomial checks succeed. -/
-theorem tooth_missing_batch_claim_erases_oracle :
-    ¬ HemStatementValid hemMissingClaimInstance ∧
-    verifyHemMissingBatchArity hemMissingClaimInstance
-      [.cascade [] [] [[]], .finalQuery []] = true ∧
-    verifyHemAffineWhir hemMissingClaimInstance
-      [.cascade [] [] [[]], .finalQuery []] = false := by
-  exact ⟨fun h => h.2, by decide, by decide⟩
-
 /-- Regression for the old unincremented checker: the restricted cascade IOP
     already required the stronger agreement threshold now enforced by the full checker. -/
 def hemCoreAgreementBoundaryInstance : HemWhirInstance QuarticGoldilocks :=
@@ -275,31 +231,9 @@ theorem tooth_sliced_nv24_profile_margin :
   Qsag.tooth_equal_degree_invalid_mixture
   Qsag.tooth_sliced_nv24_profile_margin
 
-/-- Concrete inhabited failure fragment at the deployed digest width. The
-opening has a nonzero leaf and sibling, verifies its root, and is absent from
-the pre-challenge table. This is the same predicate used by committee refusal. -/
-theorem batchMerkleFailure_inhabited_256 {cardX : Nat}
-    (L : MerkleAddressLayout cardX 256) (hLevels : 1 ≤ L.levels) (hNodes : 0 < L.nodes) :
-    ∃ (slot : MerkleOpeningSlot cardX 256) (H : Fin cardX → BitVec 256) (out : Fin cardX),
-      slot.level + slot.depth ≤ L.levels ∧ batchMerkleFailure L [slot] H [] out = true := by
-  let slot : MerkleOpeningSlot cardX 256 :=
-    ⟨0, 1, fun _ => ⟨0#256, 0, 1#256, [2#256]⟩⟩
-  refine ⟨slot, fun _ => 0#256, L.encode 0 0 1#256 2#256, hLevels, ?_⟩
-  simp [batchMerkleFailure, measuredMerkleFailure, merkleOpeningShape,
-    merkleRootFromPath, MerkleAddressLayout.hash, merkleRecords,
-    extractOnlineMerkleOpening, findFirst, slot, hNodes]
 
+-- `batchMerkleFailure_inhabited_256` is proved in `Oracle/Qrom` (it unfolds the measured-failure predicate).
 #verify_constructive batchMerkleFailure_inhabited_256
-
-def qgNat : Nat → QuarticGoldilocks
-  | 0 => CommRingOps.zero
-  | n + 1 => CommRingOps.add (qgNat n) CommRingOps.one
-
-def toothDeg1Dom : List QuarticGoldilocks :=
-  [qgNat 0, qgNat 1, qgNat 2, qgNat 3]
-
-def toothDeg1Pool : List QuarticGoldilocks :=
-  [qgNat 0, qgNat 1, CommRingOps.sub CommRingOps.zero CommRingOps.one]
 
 /-- **Equal-Degree `θ`-Exception Necessity Counterexample (`tooth_equal_degree_drop_theta_exception_unsound`)**:
     Let `D = [0, 1, 2, 3]`, `S = [0, 1, -1]`, `d = 0, A = 3`, `f(z) = z`, `g(z) = z`, and all claims `0`.
@@ -339,61 +273,6 @@ theorem tooth_equal_degree_drop_theta_exception_unsound :
       ⟨Nat.le_trans (trimPoly_length_le Fp) hLen, hpAg⟩
   rw [hEmpty] at hpMem
   cases hpMem
-
-/-- **Unincremented Cascade Agreement Counterexample
-    (`tooth_verifyHemAffineWhir_unincremented_agree_accepts_all`)**:
-    In `mutantVerifyHemAffineWhirUnincremented`, `.cascade` checks `polyWitnessValid` at
-    `inst.initMinAgree` (`A₀`) rather than `A₀ + 1`. At `domPts = [0, 1, 2]`, `d₀ = 0`, `A₀ = 2`,
-    the oracle `0 ↦ 1, _ ↦ 0` with claim `1` violates `HemStatementValid inst` at `A₀ = 2`, yet
-    has an `(A₀ - 1) = 1`-agreeing witness `G = [1]` and therefore passes the deliberately stale verifier
-    via `P(z) = α - α z` on **every** `(α, β) ∈ prodPool S` (`100%` acceptance)!
-    This proves that the `initMinAgree - 1` premise in `arbitrary_batch_cascade_fiber_bound`
-    cannot be weakened to `¬ HemStatementValid inst` without the agreement increment now enforced by `verifyHemAffineWhir`. -/
-def toothUnincCascadeInst : HemWhirInstance QuarticGoldilocks :=
-  { batchOracles := [fun idx => if idx = 0 then qgNat 1 else qgNat 0]
-    batchClaims := [qgNat 1]
-    initDomainPts := [qgNat 0, qgNat 1, qgNat 2]
-    initDegBound := 0
-    initMinAgree := 2
-    initKernel := [qgNat 1]
-    stages := [] }
-
-theorem tooth_verifyHemAffineWhir_unincremented_agree_accepts_all :
-    ∃ inst : HemWhirInstance QuarticGoldilocks,
-      ¬ HemStatementValid inst ∧
-      HemStatementValid { inst with initMinAgree := 1 } ∧
-      ∀ ch : Fin (prodPool toothDeg1Pool).length,
-        let p := (prodPool toothDeg1Pool).get ch
-        let P : List QuarticGoldilocks := [p.1, CommRingOps.sub CommRingOps.zero p.1]
-        mutantVerifyHemAffineWhirUnincremented inst
-          [.cascade [qgNat 0] [p] [P], .finalQuery P] = true := by
-  refine ⟨toothUnincCascadeInst, ?_, ⟨by decide, ⟨[qgNat 1], by decide +kernel⟩, trivial⟩, by decide +kernel⟩
-  rintro ⟨_, ⟨G, hG⟩, _⟩
-  unfold polyWitnessValid toothUnincCascadeInst at hG
-  simp only [Bool.and_eq_true, decide_eq_true_eq] at hG
-  rcases hG with ⟨⟨hGLen, hGAg⟩, hGDot⟩
-  rcases G with _ | ⟨c, _ | _⟩
-  · change CommRingOps.zero = qgNat 1 at hGDot
-    exact (by decide : CommRingOps.zero ≠ qgNat 1) hGDot
-  · have hOne : qgNat 1 = CommRingOps.one := by decide
-    have hc1 : c = CommRingOps.one := by
-      rw [hOne] at hGDot
-      simpa only [ringDot_cons_cons, ringDot_nil_left, ringDot_nil_right, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hGDot
-    subst hc1
-    exact absurd hGAg (by decide +kernel)
-  · simp only [List.length_cons] at hGLen
-    omega
-
-/-- The repaired verifier rejects the old attack at a nonzero challenge; the zero
-    challenge still legitimately belongs to the bad-challenge set. -/
-theorem tooth_incremented_cascade_rejects_old_attack :
-    ∃ P : List QuarticGoldilocks,
-    mutantVerifyHemAffineWhirUnincremented toothUnincCascadeInst
-      [.cascade [qgNat 0] [(qgNat 1, qgNat 0)] [P], .finalQuery P] = true ∧
-    verifyHemAffineWhir toothUnincCascadeInst
-      [.cascade [qgNat 0] [(qgNat 1, qgNat 0)] [P], .finalQuery P] = false := by
-  refine ⟨[qgNat 1, CommRingOps.sub (qgNat 0) (qgNat 1)], ?_⟩
-  decide +kernel
 
 /-- **DFM vs State-Restoration Scaling Contrast at `Q = 2^50` (`tooth_dfmRoundScale_fails_128bits_at_2pow50`)**:
     On `nv = 24` stage `0`, `cdhzStateRestorationScale (2^50) 32 b` and `cdhzSaltedMerkleCollisionBound (2^50)`

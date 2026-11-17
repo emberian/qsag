@@ -26,16 +26,23 @@ Charon + Aeneas extracted Rust MIR of `qsag_verified::policy_and_addr`
 2. **`rotate_window_resets_spent_monotone_spec`:**
    Proves `StatefulVelocityGuard::rotate_window` enforces pin equality and strict
    window monotonicity (`window_id < next_window_id`) before resetting `spent_units := 0`.
-3. **`intent_codec_roundtrip_injective_mir`:**
-   Proves total 128-byte encode/decode roundtrip, converse canonicality
-   (`decode b = some i → encode i = b`), and full `encode_intent_128` injectivity (`P0-10`/`P1-01`).
+3. **`intent_codec_roundtrip_injective_mir`, `intent_suite_tag_wire_words`,
+   `intent_identity_kind_wire_bytes`, `intent_admits_identity_kind_spec`:**
+   The suite and identity-kind tags carry the canonical `qsag-addr` wire words
+   (`MlDsa65 = 0x0102`, `SlhDsa128f = 0x0202`, `JortsPoseidon2 = 0x0214`,
+   `HybridSecp256k1MlDsa44 = 0x0501`, `HybridEd25519MlDsa65 = 0x0502`; kinds `1`, `2`, `3`).
+   `encode_intent_128` is total and injective; `decode_intent_128` reads an encoded frame
+   back exactly when the identity kind is the one the suite mandates
+   (`intentSuiteExpectedKind`) and refuses it otherwise; and every decoded frame re-encodes
+   to the same bytes and has a valid `(suite, kind)` pair (`P0-10`/`P1-01`).
 4. **`check_hybrid_domain_framing_spec`, `hybrid_domain_framing_role_disjoint_mir`,
    `derive_hybrid_transcript_digest_total`:**
    Proves exact constant-time `"QSAG.HYBRID.V2"` framing semantics, disjointness between
    `Classical` and `PostQuantum` leg signatures, and total SHAKE256 transcript derivation.
 5. **Concrete `#tooth` Refusal Witnesses:**
    `tooth_policy_cap_exceeded_rejected`, `tooth_policy_u128_overflow_rejected`,
-   `tooth_intent_bad_magic_rejected`, `tooth_hybrid_role_confusion_rejected`.
+   `tooth_intent_bad_magic_rejected`, `tooth_intent_retired_suite_words_rejected`,
+   `tooth_intent_hybrid_suite_single_kind_rejected`, `tooth_hybrid_role_confusion_rejected`.
 -/
 
 namespace qsag_verified.proofs
@@ -750,17 +757,17 @@ private theorem u128Lo_pack (hi lo : Std.U64) :
   simp [packU128, UScalar.cast]
 
 private def intentSuiteWord : policy_and_addr.IntentSuiteTag → Std.U16
-  | .JortsPoseidon2 => 257#u16
-  | .SlhDsaShake128f => 513#u16
-  | .ThresholdMlDsa65 => 770#u16
-  | .HybridEd25519MlDsa65 => 1281#u16
-  | .HybridSecp256k1SlhDsa => 1282#u16
+  | .MlDsa65 => 258#u16
+  | .SlhDsa128f => 514#u16
+  | .JortsPoseidon2 => 532#u16
+  | .HybridSecp256k1MlDsa44 => 1281#u16
+  | .HybridEd25519MlDsa65 => 1282#u16
 
 private theorem intentSuite_encode (t : policy_and_addr.IntentSuiteTag) :
     policy_and_addr.IntentSuiteTag.to_u16 t = .ok (intentSuiteWord t) := by
   unfold policy_and_addr.IntentSuiteTag.to_u16
+    policy_and_addr.SUITE_HYBRID_SECP256K1_MLDSA44
     policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
-    policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
   cases t <;> rfl
 
 private theorem intentSuite_decode (t : policy_and_addr.IntentSuiteTag) :
@@ -792,9 +799,9 @@ private theorem intentAddrVer_converse (raw : Std.U8) (v : policy_and_addr.Inten
   split at h <;> cases h <;> rfl
 
 private def intentIdKindByte : policy_and_addr.IntentIdentityKind → Std.U8
-  | .SingleKey => 1#u8
-  | .ThresholdCommittee => 2#u8
-  | .PolicyBound => 3#u8
+  | .SingleOrThreshold => 1#u8
+  | .HybridConjunctive => 2#u8
+  | .ScriptPredicate => 3#u8
 
 private theorem intentIdKind_encode (k : policy_and_addr.IntentIdentityKind) :
     policy_and_addr.IntentIdentityKind.to_u8 k = .ok (intentIdKindByte k) := by
@@ -809,6 +816,85 @@ private theorem intentIdKind_converse (raw : Std.U8) (k : policy_and_addr.Intent
     intentIdKindByte k = raw := by
   unfold policy_and_addr.IntentIdentityKind.from_u8 at h
   split at h <;> cases h <;> rfl
+
+/-- The suite tags of the verified intent namespace carry the canonical `qsag-addr`
+`WitnessSuiteTag` wire words (`0x0102`, `0x0202`, `0x0214`, `0x0501`, `0x0502`), and
+`from_u16` never fails and accepts a word exactly when it is the word of the tag it returns. -/
+theorem intent_suite_tag_wire_words :
+    policy_and_addr.IntentSuiteTag.to_u16 .MlDsa65 = .ok 258#u16 ∧
+    policy_and_addr.IntentSuiteTag.to_u16 .SlhDsa128f = .ok 514#u16 ∧
+    policy_and_addr.IntentSuiteTag.to_u16 .JortsPoseidon2 = .ok 532#u16 ∧
+    policy_and_addr.IntentSuiteTag.to_u16 .HybridSecp256k1MlDsa44 = .ok 1281#u16 ∧
+    policy_and_addr.IntentSuiteTag.to_u16 .HybridEd25519MlDsa65 = .ok 1282#u16 ∧
+    (∀ (raw : Std.U16) (t : policy_and_addr.IntentSuiteTag),
+      policy_and_addr.IntentSuiteTag.from_u16 raw = .ok (some t) ↔
+        policy_and_addr.IntentSuiteTag.to_u16 t = .ok raw) ∧
+    (∀ raw : Std.U16, ∃ o, policy_and_addr.IntentSuiteTag.from_u16 raw = .ok o) := by
+  refine ⟨intentSuite_encode .MlDsa65, intentSuite_encode .SlhDsa128f,
+    intentSuite_encode .JortsPoseidon2, intentSuite_encode .HybridSecp256k1MlDsa44,
+    intentSuite_encode .HybridEd25519MlDsa65, ?_, ?_⟩
+  · intro raw t
+    constructor
+    · intro h
+      rw [intentSuite_encode, intentSuite_converse raw t h]
+    · intro h
+      rw [intentSuite_encode] at h
+      injection h with h
+      rw [← h]
+      exact intentSuite_decode t
+  · intro raw
+    unfold policy_and_addr.IntentSuiteTag.from_u16
+    split <;> exact ⟨_, rfl⟩
+
+/-- The identity kinds carry the canonical `qsag-addr` `KeyIdentityKind` wire bytes
+(`SingleOrThreshold = 1`, `HybridConjunctive = 2`, `ScriptPredicate = 3`). -/
+theorem intent_identity_kind_wire_bytes :
+    policy_and_addr.IntentIdentityKind.to_u8 .SingleOrThreshold = .ok 1#u8 ∧
+    policy_and_addr.IntentIdentityKind.to_u8 .HybridConjunctive = .ok 2#u8 ∧
+    policy_and_addr.IntentIdentityKind.to_u8 .ScriptPredicate = .ok 3#u8 ∧
+    (∀ (raw : Std.U8) (k : policy_and_addr.IntentIdentityKind),
+      policy_and_addr.IntentIdentityKind.from_u8 raw = .ok (some k) ↔
+        policy_and_addr.IntentIdentityKind.to_u8 k = .ok raw) ∧
+    (∀ raw : Std.U8, ∃ o, policy_and_addr.IntentIdentityKind.from_u8 raw = .ok o) := by
+  refine ⟨rfl, rfl, rfl, ?_, ?_⟩
+  · intro raw k
+    constructor
+    · intro h
+      rw [intentIdKind_encode, intentIdKind_converse raw k h]
+    · intro h
+      rw [intentIdKind_encode] at h
+      injection h with h
+      rw [← h]
+      exact intentIdKind_decode k
+  · intro raw
+    unfold policy_and_addr.IntentIdentityKind.from_u8
+    split <;> exact ⟨_, rfl⟩
+
+/-- The identity kind each admitted suite mandates: `qsag-addr`'s
+`WitnessSuiteTag::expected_identity_kind` on the five suites of this namespace. -/
+@[expose]
+def intentSuiteExpectedKind :
+    policy_and_addr.IntentSuiteTag → policy_and_addr.IntentIdentityKind
+  | .MlDsa65 => .SingleOrThreshold
+  | .SlhDsa128f => .SingleOrThreshold
+  | .JortsPoseidon2 => .SingleOrThreshold
+  | .HybridSecp256k1MlDsa44 => .HybridConjunctive
+  | .HybridEd25519MlDsa65 => .HybridConjunctive
+
+theorem intent_expected_identity_kind_spec (t : policy_and_addr.IntentSuiteTag) :
+    policy_and_addr.IntentSuiteTag.expected_identity_kind t =
+      .ok (intentSuiteExpectedKind t) := by
+  cases t <;> rfl
+
+/-- `admits_identity_kind` never fails and returns `true` exactly for the mandated kind. -/
+theorem intent_admits_identity_kind_spec
+    (t : policy_and_addr.IntentSuiteTag) (k : policy_and_addr.IntentIdentityKind) :
+    ∃ b, policy_and_addr.IntentSuiteTag.admits_identity_kind t k = .ok b ∧
+      (b = true ↔ k = intentSuiteExpectedKind t) := by
+  cases t <;> cases k <;> refine ⟨_, rfl, ?_⟩ <;>
+    first
+      | exact ⟨fun _ => rfl, fun _ => rfl⟩
+      | exact ⟨fun h => absurd h (by decide), fun h => nomatch h⟩
 
 private def intentHeader32Bytes (hdr : policy_and_addr.IntentHeaderFields) :
     Std.Array Std.U8 32#usize :=
@@ -1272,33 +1358,47 @@ private theorem pack4x32_sliceBlocks_eq (buf : Std.Array Std.U8 128#usize) :
     rw [List.getElem_append_right hge012, sliceBlock32_getElem, hl012,
         Nat.add_sub_of_le (Nat.le_of_not_gt h96), List.getElem_eq_getD 0#u8]
 
-private theorem encode_intent_128_roundtrip
-    (intent : policy_and_addr.CanonicalIntent128) :
-    ∃ bytes,
-      policy_and_addr.encode_intent_128 intent = .ok bytes ∧
-      policy_and_addr.decode_intent_128 bytes = .ok (some intent) := by
-  let b0 := intentHeader32Bytes (intentToHeader intent)
-  let b1 := intentAmounts32Bytes intent.amount_units intent.rolling_window_spent
-  let bytes := pack4x32Pure b0 b1 intent.recipient_commitment intent.payload_digest
-  refine ⟨bytes, ?_, ?_⟩
-  · unfold policy_and_addr.encode_intent_128
-    simp only [bind_eq_result_bind]
-    rw [encode_intent_header32_eq, result_bind_ok,
-        encode_intent_amounts32_eq, result_bind_ok, pack_4x32_eq]
-  · unfold policy_and_addr.decode_intent_128
-    simp only [bind_eq_result_bind]
-    rw [unpack_block32_eq bytes 0#usize (by decide), result_bind_ok,
-        unpack_block32_eq bytes 32#usize (by decide), result_bind_ok,
-        unpack_block32_eq bytes 64#usize (by decide), result_bind_ok,
-        unpack_block32_eq bytes 96#usize (by decide), result_bind_ok]
-    have h0 : (0#usize).val = 0 := rfl
-    have h32 : (32#usize).val = 32 := rfl
-    have h64 : (64#usize).val = 64 := rfl
-    have h96 : (96#usize).val = 96 := rfl
-    rw [h0, h32, h64, h96,
-        sliceBlock32_pack_0, sliceBlock32_pack_32, sliceBlock32_pack_64, sliceBlock32_pack_96,
-        decode_intent_header32_roundtrip, result_bind_ok]
-    dsimp only
+private theorem encode_intent_128_eq (intent : policy_and_addr.CanonicalIntent128) :
+    policy_and_addr.encode_intent_128 intent =
+      .ok (pack4x32Pure (intentHeader32Bytes (intentToHeader intent))
+        (intentAmounts32Bytes intent.amount_units intent.rolling_window_spent)
+        intent.recipient_commitment intent.payload_digest) := by
+  unfold policy_and_addr.encode_intent_128
+  simp only [bind_eq_result_bind]
+  rw [encode_intent_header32_eq, result_bind_ok,
+      encode_intent_amounts32_eq, result_bind_ok, pack_4x32_eq]
+
+/-- The decoder on an encoded frame: the intent itself when the pairing check passes,
+`none` when it does not. -/
+private theorem decode_encoded_intent_128
+    (intent : policy_and_addr.CanonicalIntent128) (b : Bool)
+    (hb : policy_and_addr.IntentSuiteTag.admits_identity_kind
+      intent.suite_tag intent.identity_kind = .ok b) :
+    policy_and_addr.decode_intent_128
+      (pack4x32Pure (intentHeader32Bytes (intentToHeader intent))
+        (intentAmounts32Bytes intent.amount_units intent.rolling_window_spent)
+        intent.recipient_commitment intent.payload_digest) =
+      .ok (if b = true then some intent else none) := by
+  unfold policy_and_addr.decode_intent_128
+  simp only [bind_eq_result_bind]
+  rw [unpack_block32_eq _ 0#usize (by decide), result_bind_ok,
+      unpack_block32_eq _ 32#usize (by decide), result_bind_ok,
+      unpack_block32_eq _ 64#usize (by decide), result_bind_ok,
+      unpack_block32_eq _ 96#usize (by decide), result_bind_ok]
+  have h0 : (0#usize).val = 0 := rfl
+  have h32 : (32#usize).val = 32 := rfl
+  have h64 : (64#usize).val = 64 := rfl
+  have h96 : (96#usize).val = 96 := rfl
+  rw [h0, h32, h64, h96,
+      sliceBlock32_pack_0, sliceBlock32_pack_32, sliceBlock32_pack_64, sliceBlock32_pack_96,
+      decode_intent_header32_roundtrip, result_bind_ok]
+  dsimp only
+  have hb' : policy_and_addr.IntentSuiteTag.admits_identity_kind
+      (intentToHeader intent).suite_tag (intentToHeader intent).identity_kind = .ok b := hb
+  rw [hb', result_bind_ok]
+  cases b with
+  | false => rfl
+  | true =>
     rw [decode_intent_amounts32_roundtrip, result_bind_ok]
     cases intent; rfl
 
@@ -1306,7 +1406,8 @@ private theorem decode_intent_128_converse
     (bytes : Std.Array Std.U8 128#usize)
     (intent : policy_and_addr.CanonicalIntent128)
     (h : policy_and_addr.decode_intent_128 bytes = .ok (some intent)) :
-    policy_and_addr.encode_intent_128 intent = .ok bytes := by
+    policy_and_addr.encode_intent_128 intent = .ok bytes ∧
+      intent.identity_kind = intentSuiteExpectedKind intent.suite_tag := by
   unfold policy_and_addr.decode_intent_128 at h
   simp only [bind_eq_result_bind] at h
   rw [unpack_block32_eq bytes 0#usize (by decide), result_bind_ok,
@@ -1327,53 +1428,130 @@ private theorem decode_intent_128_converse
     | none => cases h
     | some hdr =>
       dsimp only at h
-      cases hamt : policy_and_addr.decode_intent_amounts32 (sliceBlock32 bytes 32) with
-      | fail _ => rw [hamt] at h; cases h
-      | div => rw [hamt] at h; cases h
-      | ok pair =>
-        rcases pair with ⟨amt, spent⟩
-        rw [hamt, result_bind_ok] at h
-        simp only [Result.ok.injEq, Option.some.injEq] at h
-        subst intent
-        unfold policy_and_addr.encode_intent_128
-        simp only [bind_eq_result_bind]
-        rw [encode_intent_header32_eq, result_bind_ok,
-            encode_intent_amounts32_eq, result_bind_ok, pack_4x32_eq]
-        apply congrArg Result.ok
-        have hhdr_eq : intentToHeader
-            { suite_tag := hdr.suite_tag, address_version := hdr.address_version,
-              identity_kind := hdr.identity_kind, chain_id := hdr.chain_id,
-              nonce := hdr.nonce, timestamp_secs := hdr.timestamp_secs,
-              amount_units := amt, rolling_window_spent := spent,
-              recipient_commitment := sliceBlock32 bytes 64,
-              payload_digest := sliceBlock32 bytes 96 } = hdr := by
-          cases hdr; rfl
-        rw [hhdr_eq,
-            decode_intent_header32_converse _ hdr hhdr,
-            decode_intent_amounts32_converse _ amt spent hamt]
-        exact pack4x32_sliceBlocks_eq bytes
+      obtain ⟨b, hb, hpair⟩ :=
+        intent_admits_identity_kind_spec hdr.suite_tag hdr.identity_kind
+      rw [hb, result_bind_ok] at h
+      cases b with
+      | false => cases h
+      | true =>
+        have hkind : hdr.identity_kind = intentSuiteExpectedKind hdr.suite_tag := hpair.mp rfl
+        simp only [↓reduceIte] at h
+        cases hamt : policy_and_addr.decode_intent_amounts32 (sliceBlock32 bytes 32) with
+        | fail _ => rw [hamt] at h; cases h
+        | div => rw [hamt] at h; cases h
+        | ok pair =>
+          rcases pair with ⟨amt, spent⟩
+          rw [hamt, result_bind_ok] at h
+          simp only [Result.ok.injEq, Option.some.injEq] at h
+          subst intent
+          refine ⟨?_, hkind⟩
+          unfold policy_and_addr.encode_intent_128
+          simp only [bind_eq_result_bind]
+          rw [encode_intent_header32_eq, result_bind_ok,
+              encode_intent_amounts32_eq, result_bind_ok, pack_4x32_eq]
+          apply congrArg Result.ok
+          have hhdr_eq : intentToHeader
+              { suite_tag := hdr.suite_tag, address_version := hdr.address_version,
+                identity_kind := hdr.identity_kind, chain_id := hdr.chain_id,
+                nonce := hdr.nonce, timestamp_secs := hdr.timestamp_secs,
+                amount_units := amt, rolling_window_spent := spent,
+                recipient_commitment := sliceBlock32 bytes 64,
+                payload_digest := sliceBlock32 bytes 96 } = hdr := by
+            cases hdr; rfl
+          rw [hhdr_eq,
+              decode_intent_header32_converse _ hdr hhdr,
+              decode_intent_amounts32_converse _ amt spent hamt]
+          exact pack4x32_sliceBlocks_eq bytes
 
+private theorem encode_intent_128_injective
+    (i1 i2 : policy_and_addr.CanonicalIntent128) (bytes : Array Std.U8 128#usize)
+    (he1 : policy_and_addr.encode_intent_128 i1 = .ok bytes)
+    (he2 : policy_and_addr.encode_intent_128 i2 = .ok bytes) : i1 = i2 := by
+  rw [encode_intent_128_eq] at he1 he2
+  injection he1 with he1
+  injection he2 with he2
+  have hpk := he1.trans he2.symm
+  have hh := congrArg (fun b => sliceBlock32 b 0) hpk
+  have ha := congrArg (fun b => sliceBlock32 b 32) hpk
+  have hr := congrArg (fun b => sliceBlock32 b 64) hpk
+  have hp := congrArg (fun b => sliceBlock32 b 96) hpk
+  rw [sliceBlock32_pack_0, sliceBlock32_pack_0] at hh
+  rw [sliceBlock32_pack_32, sliceBlock32_pack_32] at ha
+  rw [sliceBlock32_pack_64, sliceBlock32_pack_64] at hr
+  rw [sliceBlock32_pack_96, sliceBlock32_pack_96] at hp
+  have hhdr : intentToHeader i2 = intentToHeader i1 := by
+    have h1 := decode_intent_header32_roundtrip (intentToHeader i1)
+    rw [hh, decode_intent_header32_roundtrip] at h1
+    injection h1 with h1
+    injection h1
+  have hamt : (i2.amount_units, i2.rolling_window_spent) =
+      (i1.amount_units, i1.rolling_window_spent) := by
+    have h1 := decode_intent_amounts32_roundtrip i1.amount_units i1.rolling_window_spent
+    rw [ha, decode_intent_amounts32_roundtrip] at h1
+    injection h1
+  have hs : i2.suite_tag = i1.suite_tag := congrArg (fun h => h.suite_tag) hhdr
+  have hv : i2.address_version = i1.address_version :=
+    congrArg (fun h => h.address_version) hhdr
+  have hk : i2.identity_kind = i1.identity_kind := congrArg (fun h => h.identity_kind) hhdr
+  have hc : i2.chain_id = i1.chain_id := congrArg (fun h => h.chain_id) hhdr
+  have hn : i2.nonce = i1.nonce := congrArg (fun h => h.nonce) hhdr
+  have ht : i2.timestamp_secs = i1.timestamp_secs := congrArg (fun h => h.timestamp_secs) hhdr
+  have hau : i2.amount_units = i1.amount_units := congrArg Prod.fst hamt
+  have hsp : i2.rolling_window_spent = i1.rolling_window_spent := congrArg Prod.snd hamt
+  cases i1
+  cases i2
+  dsimp only at hs hv hk hc hn ht hau hsp hr hp
+  subst hs hv hk hc hn ht hau hsp hr hp
+  rfl
+
+/-- The 128-byte intent codec. (1) `encode_intent_128` is total, and `decode_intent_128`
+reads the encoded frame back when the identity kind is the one the suite mandates and
+refuses it otherwise. (2) Every frame the decoder accepts is the encoding of what it
+returns, and what it returns has a valid `(suite, kind)` pair. (3) The encoding is
+injective on all intents. -/
 theorem intent_codec_roundtrip_injective_mir :
     (∀ intent : policy_and_addr.CanonicalIntent128,
       ∃ bytes : Array Std.U8 128#usize,
         policy_and_addr.encode_intent_128 intent = .ok bytes ∧
-        policy_and_addr.decode_intent_128 bytes = .ok (some intent)) ∧
+        (intent.identity_kind = intentSuiteExpectedKind intent.suite_tag →
+          policy_and_addr.decode_intent_128 bytes = .ok (some intent)) ∧
+        (intent.identity_kind ≠ intentSuiteExpectedKind intent.suite_tag →
+          policy_and_addr.decode_intent_128 bytes = .ok none)) ∧
     (∀ (bytes : Array Std.U8 128#usize) (intent : policy_and_addr.CanonicalIntent128),
       policy_and_addr.decode_intent_128 bytes = .ok (some intent) →
-      policy_and_addr.encode_intent_128 intent = .ok bytes) ∧
+      policy_and_addr.encode_intent_128 intent = .ok bytes ∧
+        intent.identity_kind = intentSuiteExpectedKind intent.suite_tag) ∧
     (∀ (i1 i2 : policy_and_addr.CanonicalIntent128) (bytes : Array Std.U8 128#usize),
       policy_and_addr.encode_intent_128 i1 = .ok bytes →
       policy_and_addr.encode_intent_128 i2 = .ok bytes →
       i1 = i2) := by
-  refine ⟨encode_intent_128_roundtrip, decode_intent_128_converse, ?_⟩
-  intro i1 i2 bytes he1 he2
-  obtain ⟨b1, hb1, hd1⟩ := encode_intent_128_roundtrip i1
-  obtain ⟨b2, hb2, hd2⟩ := encode_intent_128_roundtrip i2
-  rw [he1] at hb1; injection hb1 with hb1_eq; subst hb1_eq
-  rw [he2] at hb2; injection hb2 with hb2_eq; subst hb2_eq
-  rw [hd1] at hd2
-  injection hd2 with hs
-  injection hs
+  refine ⟨?_, decode_intent_128_converse, encode_intent_128_injective⟩
+  intro intent
+  obtain ⟨b, hb, hpair⟩ :=
+    intent_admits_identity_kind_spec intent.suite_tag intent.identity_kind
+  refine ⟨_, encode_intent_128_eq intent, ?_, ?_⟩
+  · intro hvalid
+    rw [decode_encoded_intent_128 intent b hb, hpair.mpr hvalid]
+    rfl
+  · intro hinvalid
+    rw [decode_encoded_intent_128 intent b hb]
+    cases b with
+    | false => rfl
+    | true => exact absurd (hpair.mp rfl) hinvalid
+
+/-- A frame `decode_intent_128` accepts carries a `(suite, kind)` pair the canonical
+`qsag-addr` `WitnessSuiteTag::validate_identity_kind` accepts: a hybrid suite with
+`HybridConjunctive`, any other admitted suite with `SingleOrThreshold`. In particular no
+decoded intent has kind `ScriptPredicate`. -/
+theorem decode_intent_128_pairing_valid
+    (bytes : Array Std.U8 128#usize) (intent : policy_and_addr.CanonicalIntent128)
+    (h : policy_and_addr.decode_intent_128 bytes = .ok (some intent)) :
+    intent.identity_kind = intentSuiteExpectedKind intent.suite_tag ∧
+    intent.identity_kind ≠ .ScriptPredicate := by
+  have hkind := (decode_intent_128_converse bytes intent h).2
+  refine ⟨hkind, ?_⟩
+  rw [hkind]
+  cases intent.suite_tag <;> exact fun h => nomatch h
 
 /-! ## 3. Hybrid Domain Framing & SHAKE256 Transcript Derivation -/
 
@@ -1414,8 +1592,8 @@ theorem check_hybrid_domain_framing_spec
       Std.Array.index_usize magic14 i = .ok (magic14.val.getD i.val 0#u8) :=
     array_index_getD magic14 i 0#u8 hi
   unfold policy_and_addr.check_hybrid_domain_framing
+    policy_and_addr.SUITE_HYBRID_SECP256K1_MLDSA44
     policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
-    policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
   apply bind_ok_step (index 0#usize (by decide)); apply bind_ok_step (lift_eq_ok _)
   apply bind_ok_step (index 1#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
   apply bind_ok_step (index 2#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
@@ -1697,6 +1875,29 @@ theorem tooth_intent_bad_magic_rejected :
     rw [hr0, hne]
     rfl
   rw [hhdr, result_bind_ok]
+
+/-- The three words the verified namespace used before it adopted the canonical tags
+(`0x0101`, `0x0201`, `0x0302`) are refused. -/
+theorem tooth_intent_retired_suite_words_rejected :
+    policy_and_addr.IntentSuiteTag.from_u16 257#u16 = .ok none ∧
+    policy_and_addr.IntentSuiteTag.from_u16 513#u16 = .ok none ∧
+    policy_and_addr.IntentSuiteTag.from_u16 770#u16 = .ok none :=
+  ⟨rfl, rfl, rfl⟩
+
+/-- A hybrid suite paired with a single-key identity kind encodes, and the decoder refuses
+the frame. -/
+theorem tooth_intent_hybrid_suite_single_kind_rejected :
+    let z := Array.repeat 32#usize 0#u8
+    let intent : policy_and_addr.CanonicalIntent128 :=
+      { suite_tag := .HybridEd25519MlDsa65, address_version := .V2,
+        identity_kind := .SingleOrThreshold, chain_id := 7#u64, nonce := 9#u64,
+        timestamp_secs := 11#u64, amount_units := 13#u128, rolling_window_spent := 17#u128,
+        recipient_commitment := z, payload_digest := z }
+    ∃ bytes, policy_and_addr.encode_intent_128 intent = .ok bytes ∧
+      policy_and_addr.decode_intent_128 bytes = .ok none := by
+  intro z intent
+  obtain ⟨bytes, henc, _, hrefuse⟩ := intent_codec_roundtrip_injective_mir.1 intent
+  exact ⟨bytes, henc, hrefuse (fun h => nomatch h)⟩
 
 theorem tooth_hybrid_role_confusion_rejected :
     let idc := Array.repeat 32#usize 0x77#u8

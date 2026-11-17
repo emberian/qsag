@@ -16345,4 +16345,40 @@ theorem centeredDiffNormVec4_eq (r : PolyVec4) (w1 : Fin 4 → NatTree 8) :
   unfold centeredDiffNormVec4
   rfl
 
+/-! ### Exports and executed controls for `Tests/CredentialsTeeth`
+
+The bodies these controls execute are sealed outside this module. -/
+
+/-- The all-`false` hint vector, as decoded from an empty hint encoding. -/
+def mldsaZeroHints204 : Fin 4 → HintTree 8 := fun _ => hintTree204 8 []
+
+/-- With the challenge hash that returns its message representative, the zero key and the zero
+    response, the algebraic core accepts every `μ` presented as its own challenge bytes. -/
+theorem mldsaVerify_echo_zero_accepts (mu : List UInt8) :
+    mldsaVerify (fun m _ => m) (fun _ => PolyTree.zero 8) (fun _ _ => PolyTree.zero 8)
+      (fun _ => PolyTree.zero 8) mu mu (fun _ => PolyTree.zero 8) mldsaZeroHints204 = true := by
+  have h1 : infNormVec4 (fun _ => PolyTree.zero 8) < mldsa44Gamma1 - mldsa44Beta := by
+    decide +kernel
+  have h2 : hintWeightVec4 mldsaZeroHints204 ≤ mldsa44Omega := by decide +kernel
+  unfold mldsaVerify
+  simp only [decide_eq_true h1, decide_eq_true h2, decide_true, Bool.and_self]
+
+theorem vcSmallMaxAttrs_eq : vcSmallMaxAttrs = 6 := by rfl
+
+/-- A valid witness needs strictly ascending, in-range disclosed indices. -/
+theorem BlindVcWitnessValid.strictAsc {stmt : BlindVcPublicStatement}
+    {wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth}
+    (h : BlindVcWitnessValid stmt wit) :
+    vcCheckDisclosedStrictAsc stmt.schema.arity stmt.disclosedAttrs = true := h.1
+
+/-- The third role of group `(0, 1)` is not the fixed third holder: roles rotate. (Audited in
+    `Tests/CredentialsTeeth`; proved here, where both bodies are visible.) -/
+theorem toprfRotation204_not_constant :
+    (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
+
+#export_eqns Vec.replicate vcCommitPartyView ext6EmbedFq ext6Add
+
+#verify_constructive mldsaVerify_echo_zero_accepts vcSmallMaxAttrs_eq
+  BlindVcWitnessValid.strictAsc toprfRotation204_not_constant
+
 end Qsag

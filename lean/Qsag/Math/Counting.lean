@@ -1,5 +1,6 @@
 module
 public import Qsag.Tactic.Prelude
+import Qsag.Tactic.AssuranceKit
 
 /-!
 # Qsag.Math.Counting
@@ -1332,3 +1333,20 @@ theorem filter_any_length_le_mul {α β : Type} (items : List α) (pred : α →
 -- (end exports for lane agg-budget)
 
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.JohnsonBound.johnson_set_system_card_le
+  Qsag.JohnsonBound.johnson_set_system_mul_le
+  Qsag.JohnsonBound.nat_cauchy_schwarz
+  Qsag.JohnsonBound.count_partition_le
+
+/-- Defining equation of `natAbsDiff`, used by the statistical-distance tooth in `Tests/SigningTeeth`. -/
+theorem Qsag.natAbsDiff_def (a b : Nat) : Qsag.natAbsDiff a b = if a ≤ b then b - a else a - b := by rfl
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.affineDistinctTuples
+#export_eqns Qsag.eraseFirst
+#export_eqns Qsag.prodPool
+#export_eqns Qsag.JohnsonBound.elemBool
+#export_eqns Qsag.JohnsonBound.johnsonBound

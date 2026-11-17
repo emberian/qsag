@@ -533,12 +533,32 @@ impl QuorumTree {
 
 /// One custodian's shares of the chain nodes a signature reveals: entry `i` is its share of
 /// `y_i^(d_i)`, or zero where `d_i = 3` and the node is the public chain end.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ShareOpening {
     pub party: usize,
     pub leaf: u64,
     pub shares: Vec<Node>,
 }
+
+/// Equality that reads every share byte whatever the values are. `party`, `leaf` and the
+/// share count are public; the shares are secret.
+impl PartialEq for ShareOpening {
+    fn eq(&self, other: &Self) -> bool {
+        if self.party != other.party
+            || self.leaf != other.leaf
+            || self.shares.len() != other.shares.len()
+        {
+            return false;
+        }
+        let mut equal = true;
+        for (a, b) in self.shares.iter().zip(&other.shares) {
+            equal &= qsag_verified::ct_eq_bytes32(a, b);
+        }
+        equal
+    }
+}
+
+impl Eq for ShareOpening {}
 
 /// Bytes of a [`ShareOpening`] on the wire: the leaf index and 128 shares.
 pub const SHARE_OPENING_WIRE_BYTES: usize = 8 + 32 * WOTS_CHAINS;
@@ -2305,6 +2325,32 @@ mod tests {
     use super::*;
 
     const SEED: Node = [0x5a; 32];
+
+    #[test]
+    fn share_opening_equality_compares_every_share_byte() {
+        let base = ShareOpening {
+            party: 3,
+            leaf: 9,
+            shares: (0..WOTS_CHAINS).map(|i| [i as u8; 32]).collect(),
+        };
+        assert!(base == base.clone());
+        for chain in [0, 1, WOTS_CHAINS - 1] {
+            for byte in [0usize, 31] {
+                let mut other = base.clone();
+                other.shares[chain][byte] ^= 1;
+                assert!(base != other, "chain {chain} byte {byte}");
+            }
+        }
+        let mut other = base.clone();
+        other.party += 1;
+        assert!(base != other);
+        let mut other = base.clone();
+        other.leaf += 1;
+        assert!(base != other);
+        let mut other = base.clone();
+        other.shares.pop();
+        assert!(base != other && other != base);
+    }
 
     #[test]
     fn digits_use_the_full_digest_and_grinding_is_short() {

@@ -1262,6 +1262,48 @@ theorem demo_chain_expired :
 theorem demo_chain_scoped :
     chainFrom demoSuite demoRootTag demoScopedCaveats = demoScoped.tag := by rfl
 
+/-! ### Executed verifier verdicts on the demonstration tokens
+
+Evaluated here, where `verifierVerify` and the demonstration values unfold; cited by the
+macaroon-gated slot audits of `Tests/CapabilityTeeth`. -/
+
+theorem demo_registry : ∀ d ∈ [(⟨demoBound, 6⟩ : Discharge Nat DemoTag)],
+    d.rootKey = demoDeployment.registry d.token.identifier :=
+  fun d hd => by rw [List.mem_singleton.mp hd]; rfl
+
+def demoNotBefore : Token Nat DemoTag :=
+  ⟨false, 4, 2, [.resource 3, .notBefore 1#64], ⟨1, false, 4, 2, [.resource 3, .notBefore 1#64]⟩⟩
+
+theorem demo_attenuate_notBefore :
+    attenuate demoSuite demoScoped (.notBefore 1#64) = .ok demoNotBefore := by rfl
+
+theorem demo_parent_verifier_accepts :
+    verifierVerify demoSuite demoDeployment demoParent demoRequest [⟨demoBound, 6⟩] = .ok () := by
+  decide
+
+theorem demo_scoped_verifier_accepts :
+    verifierVerify demoSuite demoDeployment demoScoped demoRequest [] = .ok () := by decide
+
+theorem demo_notBefore_verifier_accepts :
+    verifierVerify demoSuite demoDeployment demoNotBefore demoRequest [] = .ok () := by decide
+
+theorem demo_expired_verifier_rejects :
+    ¬ (verifierVerify demoSuite demoDeployment demoExpired demoRequest [] = .ok ()) := by decide
+
+theorem demo_sibling_verifier_rejects :
+    ¬ (verifierVerify demoSuite demoDeployment demoSibling demoRequest [⟨demoBound, 6⟩] = .ok ()) := by
+  decide
+
+theorem demo_expiry_caveat_firstParty :
+    (Caveat.expiresAt 5#64 : Caveat Nat).isThirdParty = false := by rfl
+
+theorem demo_expiry_caveat_fails :
+    Caveat.holds demoRequest (.expiresAt 5#64) = false := by decide
+
+#verify_constructive demo_registry demo_attenuate_notBefore demo_parent_verifier_accepts
+  demo_scoped_verifier_accepts demo_notBefore_verifier_accepts demo_expired_verifier_rejects
+  demo_sibling_verifier_rejects demo_expiry_caveat_firstParty demo_expiry_caveat_fails
+
 #verify_constructive authorized_of_caveat_subset attenuation_narrows attenuation_firstParty_exact
   attenuation_narrows_or_chain_collision edit_yields_cascade_forgery
   edited_chain_is_cascade_forgery accepted_non_attenuation_is_token_forgery

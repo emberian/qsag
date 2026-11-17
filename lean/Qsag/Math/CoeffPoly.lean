@@ -1,5 +1,6 @@
 module
 public import Qsag.Spec.Algebra
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Tactic.Prelude
 public import Qsag.Math.Tactic.CommRing
 public import Qsag.Math.Counting
@@ -1966,6 +1967,8 @@ theorem coeffs_add (a b : UPoly R) : (add a b).coeffs = pAdd a.coeffs b.coeffs :
 theorem coeffs_mul (a b : UPoly R) : (mul a b).coeffs = pMul a.coeffs b.coeffs := by rfl
 theorem coeffs_neg (a : UPoly R) : (neg a).coeffs = pNeg a.coeffs := by rfl
 theorem coeffs_sub (a b : UPoly R) : (sub a b).coeffs = pSub a.coeffs b.coeffs := by rfl
+theorem coeffs_one : (one : UPoly R).coeffs = trimPoly [one] := by rfl
+theorem eq_iff_coeffs {a b : UPoly R} : a = b ↔ a.coeffs = b.coeffs := ⟨fun h => h ▸ rfl, ext⟩
 theorem eq_zero_iff (a : UPoly R) : a = zero ↔ a.coeffs = [] :=
   ⟨fun h => h ▸ rfl, fun h => ext h⟩
 
@@ -2592,3 +2595,26 @@ theorem filter_overlap_len {α : Type} (p q : α → Bool) :
 
 
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.UPoly.natDeg_mul
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.UPoly.lead
+#export_eqns Qsag.RoundPoly.eval
+#export_eqns Qsag.monomial
+#export_eqns Qsag.solveHomogeneous
+#export_eqns Qsag.insertIdxVal
+#export_eqns Qsag.subVec
+#export_eqns Qsag.dropIdx
+#export_eqns Qsag.scaleVec
+#export_eqns Qsag.RoundPoly.subCoeffs
+#export_eqns Qsag.vanishingPoly
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.pSub
+#export_eqns Qsag.pAdd
+#export_eqns Qsag.pNeg
+#export_eqns Qsag.rawNegCoeffs
+#export_eqns Qsag.findNonzeroIdx

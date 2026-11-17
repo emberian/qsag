@@ -2210,3 +2210,272 @@ end
 #verify_constructive Qsag.ProdTargetIdx.mem_pathTargets Qsag.productionSigningLog_length_le
 #verify_constructive Qsag.ProdTcrWitness.target_mem Qsag.prodTcrOutput_target_budget
 #verify_constructive Qsag.prodTargetIdx_layer_out_of_range
+
+/-! ### Which branch the extractor takes when the recovered WOTS endpoints differ
+
+If, at the single hypertree layer of an accepted stateful forgery, the endpoint list the verifier
+recovers differs from the honest endpoint list, the extractor stops at the XMSS path or at the WOTS
+public-key compression: it returns a target collision, never the preimage event. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+
+set_option hygiene false in
+local notation:max "pos⟪" i "⟫" => sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight)
+set_option hygiene false in
+local notation:max "tree⟪" i "⟫" =>
+  UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) / 2 ^ params.subtreeHeight)
+set_option hygiene false in
+local notation:max "kp⟪" i "⟫" =>
+  (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+set_option hygiene false in
+local notation:max "lsig⟪" i "⟫" => (sigStar.layerSigs.getD i ⟨0, [], []⟩)
+set_option hygiene false in
+local notation:max "PK_ROOT" => (derivePublicKey suite params sk).pkRoot
+set_option hygiene false in
+local notation:max "digs⟪" i "⟫" =>
+  (extractBaseWDigits params.w params.ell1
+    (productionLayerDigest suite params sigStar.rRand sk.pkSeed
+      (derivePublicKey suite params sk).pkRoot cur i
+      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+        2 ^ params.subtreeHeight))
+      (UInt32.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) %
+        2 ^ params.subtreeHeight))
+      (sigStar.layerSigs.getD i ⟨0, [], []⟩).tswCtr))
+set_option hygiene false in
+local notation:max "TOP_ROOT" =>
+  (computeXmssSubtreeRoot suite params sk (UInt32.ofNat (params.numLayers - 1))
+    (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (params.numLayers * params.subtreeHeight))))
+
+/-- A forged chain value that is empty at a chain whose digit is the top digit `w - 1` makes the
+    recovered endpoint list differ from the honest one: the honest endpoint is a 32-byte hash. -/
+theorem recoverWotsEndpoints_ne_honest_of_top_digit_empty (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (layer : UInt32) (tree : UInt64) (kp : Nat)
+    (digits : List Nat) (chains : List (List UInt8)) (r : Nat) (hr : r < params.ell1)
+    (k : Nat) (hk : params.w - 1 = k + 1) (hd : digits.getD r 0 = params.w - 1)
+    (hc : chains.getD r [] = []) :
+    recoverWotsEndpoints suite params sk.pkSeed layer tree kp digits chains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk layer tree kp r (params.w - 1) := by
+  intro h
+  rw [recoverWotsEndpoints_eq] at h
+  have hr' := List.map_inj_left.mp h r (List.mem_range.mpr hr)
+  rw [hd, Nat.sub_self, hc, wotsChainSteps_zero, hk, ← honestChainNode_succ, thChainF_eq] at hr'
+  have hl := congrArg List.length hr'
+  rw [List.length_nil, thCall_length] at hl
+  exact absurd hl (by decide)
+
+/-- One layer: differing endpoint lists force the collision branch of `prodLayerExtract`. -/
+theorem prodLayerExtract_tcr_of_endpoints_ne (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (i : Nat) (hi : i < params.numLayers) (cur : List UInt8) (digF : List Nat)
+    (hDigF : digF = digs⟪i⟫)
+    (hDiff : ∀ e ∈ log, e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = pos⟪i⟫ →
+      cur ≠ prodHonestLayerMsg suite params sk e i)
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ .tree params.subtreeHeight
+        0 kp⟪i⟫
+        (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digF
+          lsig⟪i⟫.wotsChains)
+        lsig⟪i⟫.authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) tree⟪i⟫))
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digF
+        lsig⟪i⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ r (params.w - 1)) :
+    ∃ w, prodLayerExtract suite params sk log msgStar sigStar hw hPwf hLog hCons i hi cur digF
+      hDigF hDiff hTsw hWalk = .inl w := by
+  unfold prodLayerExtract
+  dsimp only
+  split
+  · exact ⟨_, rfl⟩
+  · split
+    · exact ⟨_, rfl⟩
+    · rename_i hEnds _
+      exact absurd hEnds hEndsNe
+
+/-- One layer: with differing endpoint lists `prodLayerExtract` is not the preimage branch. -/
+theorem prodLayerExtract_ne_inr_of_endpoints_ne (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8)
+    (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (i : Nat) (hi : i < params.numLayers) (cur : List UInt8) (digF : List Nat)
+    (hDigF : digF = digs⟪i⟫)
+    (hDiff : ∀ e ∈ log, e.2.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) = pos⟪i⟫ →
+      cur ≠ prodHonestLayerMsg suite params sk e i)
+    (hTsw : checkTargetSum params.w params.ell1 params.targetSum digF = true)
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ .tree params.subtreeHeight
+        0 kp⟪i⟫
+        (recoverWotsPkFromSig suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digF
+          lsig⟪i⟫.wotsChains)
+        lsig⟪i⟫.authPath =
+      some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat i) tree⟪i⟫))
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digF
+        lsig⟪i⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ r (params.w - 1))
+    (h : ProdPreimageBreak suite params sk log msgStar sigStar) :
+    prodLayerExtract suite params sk log msgStar sigStar hw hPwf hLog hCons i hi cur digF
+      hDigF hDiff hTsw hWalk ≠ .inr h := by
+  obtain ⟨w, hEq⟩ := prodLayerExtract_tcr_of_endpoints_ne suite params sk log msgStar sigStar hw
+    hPwf hLog hCons i hi cur digF hDigF hDiff hTsw hWalk hEndsNe
+  rw [hEq]
+  intro hc
+  cases hc
+
+/-- The single-layer walk on a log with no entries: differing endpoint lists give a collision. -/
+theorem prodHypertreeWalkExtract_single_tcr_of_endpoints_ne (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (hEmpty : ∀ e, e ∉ log)
+    (sigs : List LayerXmssSig) (hOne : sigs.length = 1) (i : Nat) (cur : List UInt8)
+    (hNe : sigs ≠ [])
+    (hAlign : ∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩)
+    (hLenEq : i + sigs.length = params.numLayers)
+    (hVer : verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand i
+        (pos⟪i⟫) cur sigs = some TOP_ROOT)
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digs⟪i⟫
+        lsig⟪i⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ r (params.w - 1)) :
+    ∃ w, prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf hLog hCons sigs i
+      cur hNe hAlign hLenEq hVer = .tcr w := by
+  cases sigs with
+  | nil => exact absurd rfl hNe
+  | cons lsig rest =>
+    cases rest with
+    | cons l2 r2 =>
+      exfalso
+      simp only [List.length_cons] at hOne
+      omega
+    | nil =>
+      unfold prodHypertreeWalkExtract
+      dsimp only
+      split
+      · rename_i hNone
+        exfalso
+        obtain ⟨_, _, n', hW, _⟩ :=
+          verifyProductionHypertreeLayers_cons_inv suite params _ _ _ _ _ _ _ _ _ hVer
+        have hLs := hAlign 0
+        rw [List.getD_cons_zero, Nat.add_zero] at hLs
+        rw [hLs] at hW
+        rw [hNone] at hW
+        cases hW
+      · split
+        · exfalso
+          exact hEmpty _ (by assumption)
+        · split
+          · exact ⟨_, rfl⟩
+          · rename_i hPre hEq
+            exact absurd hEq (prodLayerExtract_ne_inr_of_endpoints_ne _ _ _ _ _ _ _ _ _ _ _ _ _ _
+              _ _ _ _ hEndsNe hPre)
+
+/-- The single-layer walk on a log with no entries is not the preimage outcome. -/
+theorem prodHypertreeWalkExtract_single_ne_pre_of_endpoints_ne (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (log : List (List UInt8 × PqHashSig))
+    (msgStar : List UInt8) (sigStar : PqHashSig) (hw : params.w = 4 ∨ params.w = 16)
+    (hPwf : params.productionWellFormed = true)
+    (hLog : ∀ e ∈ log, ProdLogEntryOk suite params sk e)
+    (hCons : ProdLogConsistent suite params sk log)
+    (hEmpty : ∀ e, e ∉ log)
+    (sigs : List LayerXmssSig) (hOne : sigs.length = 1) (i : Nat) (cur : List UInt8)
+    (hNe : sigs ≠ [])
+    (hAlign : ∀ j, sigs.getD j ⟨0, [], []⟩ = sigStar.layerSigs.getD (i + j) ⟨0, [], []⟩)
+    (hLenEq : i + sigs.length = params.numLayers)
+    (hVer : verifyProductionHypertreeLayers suite params sk.pkSeed PK_ROOT sigStar.rRand i
+        (pos⟪i⟫) cur sigs = some TOP_ROOT)
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ digs⟪i⟫
+        lsig⟪i⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat i) tree⟪i⟫ kp⟪i⟫ r (params.w - 1))
+    (h : ProdPreimageBreak suite params sk log msgStar sigStar) :
+    prodHypertreeWalkExtract suite params sk log msgStar sigStar hw hPwf hLog hCons sigs i
+      cur hNe hAlign hLenEq hVer ≠ .pre h := by
+  obtain ⟨w, hEq⟩ := prodHypertreeWalkExtract_single_tcr_of_endpoints_ne suite params sk log
+    msgStar sigStar hw hPwf hLog hCons hEmpty sigs hOne i cur hNe hAlign hLenEq hVer hEndsNe
+  rw [hEq]
+  intro hc
+  cases hc
+
+/-- **Stateful extractor, one layer, no logged signature.** If the endpoint list recovered from the
+    accepted forgery differs from the honest one, the extractor returns a target-collision witness. -/
+theorem production_stateful_forgery_extract_tcr_of_endpoints_ne (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateful : params.statefulJorts = true)
+    (hOneTime : ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true)
+    (hEmpty : ∀ e, e ∉ productionSigningLog suite params sk queries)
+    (hOne : sigStar.layerSigs.length = 1)
+    (cur : List UInt8) (hCur : cur = thPreHash suite sk.pkSeed PK_ROOT msgStar)
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat 0) tree⟪0⟫ kp⟪0⟫ digs⟪0⟫
+        lsig⟪0⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat 0) tree⟪0⟫ kp⟪0⟫ r (params.w - 1)) :
+    ∃ w, production_stateful_forgery_extract suite params sk queries msgStar sigStar hw hStateful
+      hOneTime hFresh hAccept = .inl w := by
+  subst hCur
+  unfold production_stateful_forgery_extract
+  dsimp only
+  split
+  · exact ⟨_, rfl⟩
+  · rename_i hPre hEq
+    exact absurd hEq (prodHypertreeWalkExtract_single_ne_pre_of_endpoints_ne _ _ _ _ _ _ _ _ _ _
+      hEmpty _ hOne _ _ _ _ _ _ hEndsNe hPre)
+  · exfalso
+    exact hEmpty _ (by assumption)
+
+/-- **The reduction returns a collision.** On a winning stateful outcome with one hypertree layer
+    and no logged signature, differing endpoint lists make `prodTcrOutput` return a pair. -/
+theorem prodTcrOutput_isSome_of_endpoints_ne (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (sk : PqSecretKey) (queries : List ProdSigningQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hOneTime : params.statefulJorts = true →
+      ∀ q, q ∈ queries → ∀ q', q' ∈ queries → q.epoch = q'.epoch → q = q')
+    (hStateful : params.statefulJorts = true)
+    (hAccept : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msgStar
+      sigStar = true)
+    (hEmpty : ∀ e, e ∉ productionSigningLog suite params sk queries)
+    (hOne : sigStar.layerSigs.length = 1)
+    (cur : List UInt8) (hCur : cur = thPreHash suite sk.pkSeed PK_ROOT msgStar)
+    (hEndsNe : recoverWotsEndpoints suite params sk.pkSeed (UInt32.ofNat 0) tree⟪0⟫ kp⟪0⟫ digs⟪0⟫
+        lsig⟪0⟫.wotsChains ≠
+      (List.range params.ell1).map fun r =>
+        honestChainNode suite sk (UInt32.ofNat 0) tree⟪0⟫ kp⟪0⟫ r (params.w - 1)) :
+    (prodTcrOutput suite params hw ⟨sk, queries, msgStar, sigStar⟩ hOneTime).isSome = true := by
+  have hFresh : ∀ e ∈ productionSigningLog suite params sk queries, e.1 ≠ msgStar :=
+    fun e he => absurd he (hEmpty e)
+  have hWin : prodEufCmaWin suite params ⟨sk, queries, msgStar, sigStar⟩ = true := by
+    rw [prodEufCmaWin_eq, Bool.and_eq_true]
+    refine ⟨hAccept, decide_eq_true ?_⟩
+    intro hMem
+    obtain ⟨e, he, _⟩ := List.mem_map.mp hMem
+    exact hEmpty e he
+  obtain ⟨w, hEq⟩ := production_stateful_forgery_extract_tcr_of_endpoints_ne suite params sk
+    queries msgStar sigStar hw hStateful (hOneTime hStateful) hFresh hAccept hEmpty hOne cur hCur
+    hEndsNe
+  rw [prodTcrOutput_eq, prodOutcomeBreak_of_win suite params hw _ hOneTime hWin hFresh hAccept,
+    production_forgery_extract_true suite params sk queries msgStar sigStar hw hStateful hOneTime
+      hFresh hAccept, hEq]
+  rfl
+
+#verify_constructive recoverWotsEndpoints_ne_honest_of_top_digit_empty
+  prodLayerExtract_tcr_of_endpoints_ne prodLayerExtract_ne_inr_of_endpoints_ne
+  prodHypertreeWalkExtract_single_tcr_of_endpoints_ne
+  prodHypertreeWalkExtract_single_ne_pre_of_endpoints_ne
+  production_stateful_forgery_extract_tcr_of_endpoints_ne prodTcrOutput_isSome_of_endpoints_ne
+
+end Qsag
+end

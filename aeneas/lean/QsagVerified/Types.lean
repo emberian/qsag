@@ -536,27 +536,27 @@ inductive policy_and_addr.IntentAddressVersion where
 | V2 : policy_and_addr.IntentAddressVersion
 
 /-- [qsag_verified::policy_and_addr::IntentIdentityKind]
-    Source: 'src/policy_and_addr.rs', lines 214:0-218:1
+    Source: 'src/policy_and_addr.rs', lines 215:0-219:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.IntentIdentityKind where
-| SingleKey : policy_and_addr.IntentIdentityKind
-| ThresholdCommittee : policy_and_addr.IntentIdentityKind
-| PolicyBound : policy_and_addr.IntentIdentityKind
+| SingleOrThreshold : policy_and_addr.IntentIdentityKind
+| HybridConjunctive : policy_and_addr.IntentIdentityKind
+| ScriptPredicate : policy_and_addr.IntentIdentityKind
 
 /-- [qsag_verified::policy_and_addr::IntentSuiteTag]
-    Source: 'src/policy_and_addr.rs', lines 243:0-249:1
+    Source: 'src/policy_and_addr.rs', lines 247:0-253:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.IntentSuiteTag where
+| MlDsa65 : policy_and_addr.IntentSuiteTag
+| SlhDsa128f : policy_and_addr.IntentSuiteTag
 | JortsPoseidon2 : policy_and_addr.IntentSuiteTag
-| SlhDsaShake128f : policy_and_addr.IntentSuiteTag
-| ThresholdMlDsa65 : policy_and_addr.IntentSuiteTag
+| HybridSecp256k1MlDsa44 : policy_and_addr.IntentSuiteTag
 | HybridEd25519MlDsa65 : policy_and_addr.IntentSuiteTag
-| HybridSecp256k1SlhDsa : policy_and_addr.IntentSuiteTag
 
 /-- [qsag_verified::policy_and_addr::CanonicalIntent128]
-    Source: 'src/policy_and_addr.rs', lines 290:0-301:1
+    Source: 'src/policy_and_addr.rs', lines 316:0-327:1
     Visibility: public -/
 structure policy_and_addr.CanonicalIntent128 where
   suite_tag : policy_and_addr.IntentSuiteTag
@@ -571,7 +571,7 @@ structure policy_and_addr.CanonicalIntent128 where
   payload_digest : Array Std.U8 32#usize
 
 /-- [qsag_verified::policy_and_addr::IntentHeaderFields]
-    Source: 'src/policy_and_addr.rs', lines 304:0-311:1 -/
+    Source: 'src/policy_and_addr.rs', lines 330:0-337:1 -/
 structure policy_and_addr.IntentHeaderFields where
   suite_tag : policy_and_addr.IntentSuiteTag
   address_version : policy_and_addr.IntentAddressVersion
@@ -581,7 +581,7 @@ structure policy_and_addr.IntentHeaderFields where
   timestamp_secs : Std.U64
 
 /-- [qsag_verified::policy_and_addr::HybridRoleTag]
-    Source: 'src/policy_and_addr.rs', lines 584:0-587:1
+    Source: 'src/policy_and_addr.rs', lines 617:0-620:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.HybridRoleTag where

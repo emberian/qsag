@@ -953,7 +953,8 @@ fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
 fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     use qsag_verified::{
         CanonicalIntent128, HybridRoleTag, IntentAddressVersion, IntentIdentityKind,
-        IntentSuiteTag, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65, StatefulVelocityGuard,
+        IntentSuiteTag, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65, SUITE_HYBRID_SECP256K1_MLDSA44,
+        StatefulVelocityGuard,
         VelocitySpendRequest, check_hybrid_domain_framing, decode_intent_128,
         derive_hybrid_transcript_digest, encode_intent_128,
     };
@@ -1028,7 +1029,7 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     let intent = CanonicalIntent128 {
         suite_tag: IntentSuiteTag::HybridEd25519MlDsa65,
         address_version: IntentAddressVersion::V2,
-        identity_kind: IntentIdentityKind::ThresholdCommittee,
+        identity_kind: IntentIdentityKind::HybridConjunctive,
         chain_id: 0x0102_0304_0506_0708,
         nonce: 42,
         timestamp_secs: 1_794_614_400,
@@ -1064,6 +1065,65 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     bad_id[7] = 9;
     assert!(decode_intent_128(&bad_id).is_none());
 
+    // The verified intent namespace uses the canonical `qsag-addr` wire words and bytes.
+    for (tag, word) in [
+        (IntentSuiteTag::MlDsa65, 0x0102u16),
+        (IntentSuiteTag::SlhDsa128f, 0x0202),
+        (IntentSuiteTag::JortsPoseidon2, 0x0214),
+        (IntentSuiteTag::HybridSecp256k1MlDsa44, 0x0501),
+        (IntentSuiteTag::HybridEd25519MlDsa65, 0x0502),
+    ] {
+        assert_eq!(tag.to_u16(), word);
+        assert_eq!(IntentSuiteTag::from_u16(word), Some(tag));
+    }
+    // Words the old verified namespace used for other suites are no longer admitted.
+    for word in [0x0101u16, 0x0201, 0x0302] {
+        assert_eq!(IntentSuiteTag::from_u16(word), None);
+    }
+    for (kind, byte) in [
+        (IntentIdentityKind::SingleOrThreshold, 1u8),
+        (IntentIdentityKind::HybridConjunctive, 2),
+        (IntentIdentityKind::ScriptPredicate, 3),
+    ] {
+        assert_eq!(kind.to_u8(), byte);
+        assert_eq!(IntentIdentityKind::from_u8(byte), Some(kind));
+    }
+    assert_eq!(SUITE_HYBRID_SECP256K1_MLDSA44, 0x0501);
+    assert_eq!(SUITE_HYBRID_ED25519_MLDSA65, 0x0502);
+
+    // The decoder reads a frame back only when the identity kind is the one the suite
+    // mandates; the encoder is total, so every other pair encodes to a refused frame.
+    let mut admitted = 0;
+    for (suite, expected_kind) in [
+        (IntentSuiteTag::MlDsa65, IntentIdentityKind::SingleOrThreshold),
+        (IntentSuiteTag::SlhDsa128f, IntentIdentityKind::SingleOrThreshold),
+        (IntentSuiteTag::JortsPoseidon2, IntentIdentityKind::SingleOrThreshold),
+        (IntentSuiteTag::HybridSecp256k1MlDsa44, IntentIdentityKind::HybridConjunctive),
+        (IntentSuiteTag::HybridEd25519MlDsa65, IntentIdentityKind::HybridConjunctive),
+    ] {
+        assert_eq!(suite.expected_identity_kind(), expected_kind);
+        for kind in [
+            IntentIdentityKind::SingleOrThreshold,
+            IntentIdentityKind::HybridConjunctive,
+            IntentIdentityKind::ScriptPredicate,
+        ] {
+            let paired = CanonicalIntent128 { suite_tag: suite, identity_kind: kind, ..intent };
+            let frame = encode_intent_128(&paired);
+            assert_eq!(suite.admits_identity_kind(kind), kind == expected_kind);
+            match decode_intent_128(&frame) {
+                Some(back) => {
+                    assert_eq!(kind, expected_kind);
+                    assert_eq!(back.suite_tag, suite);
+                    assert_eq!(back.identity_kind, kind);
+                    assert_eq!(encode_intent_128(&back), frame);
+                    admitted += 1;
+                }
+                None => assert_ne!(kind, expected_kind),
+            }
+        }
+    }
+    assert_eq!(admitted, 5);
+
     // Hybrid domain framing role separation
     let magic = b"QSAG.HYBRID.V2";
     let id_c = [0x77u8; 32];
@@ -1090,7 +1150,7 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
         magic,
         0x02,
         HybridRoleTag::PostQuantum,
-        0x0302,
+        0x0102,
         &id_c,
         &id_c,
     ));

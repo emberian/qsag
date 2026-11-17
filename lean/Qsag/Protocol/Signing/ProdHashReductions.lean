@@ -4138,3 +4138,168 @@ end
 #verify_constructive Qsag.evalProdAdaptiveTree_budgets
   Qsag.prodAdaptive_eufCma_to_budgeted_events
   Qsag.corduroyCustody128_target_pool_budget
+
+/-! ### Exports for lane sig -/
+public section
+namespace Qsag
+
+#export_eqns eufCmaWithinWin eufCmaRealWithinWins smDtTcrWithinWin smDtTcrWithinWins
+  smDtTcrChallengerCheck tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map HashSignAdv.bind
+  advRawHash runHashSignAdv challengerSignStep challengerEpochConflict
+  runSeedWithheldEufCma evalProdAdaptiveTree publicVerifierWithTcrCands hypertreeLayersWithCands
+
+end Qsag
+end
+
+/-! ### Candidate list on an empty log when the layer digest is rejected (cited by `Tests/SigningTeeth`) -/
+public section
+namespace Qsag
+
+/-- With an empty signing log, a layer walk whose every checked digit extraction fails the
+    target-sum check records no target-collision candidate. -/
+theorem hypertreeLayersWithCands_snd_nil_of_digest_rejected (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed pkRoot rRand : List UInt8)
+    (hRej : ∀ (pre : List UInt8) (digits : List Nat),
+      extractBaseWDigitsChecked params.w params.ell1 (suite.rawHash pre) = some digits →
+        checkTargetSum params.w params.ell1 params.targetSum digits = false)
+    (layerIdx globalIdx : Nat) (curRoot : List UInt8) (sigs : List LayerXmssSig) :
+    (hypertreeLayersWithCands suite params pkSeed pkRoot rRand [] layerIdx globalIdx curRoot
+      sigs).2 = [] := by
+  cases sigs with
+  | nil => rfl
+  | cons lsig rest =>
+    unfold hypertreeLayersWithCands
+    split
+    · rfl
+    · dsimp only [List.map_nil]
+      split
+      · rfl
+      · rename_i digits hEq
+        rw [hRej _ _ hEq]
+        rfl
+
+/-- With an empty signing log and stateful parameters, the candidate-collecting public verifier
+    returns no candidate when every checked digit extraction fails the target-sum check. -/
+theorem publicVerifierWithTcrCands_snd_nil_of_digest_rejected (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (hSt : params.statefulJorts = true)
+    (hRej : ∀ (pre : List UInt8) (digits : List Nat),
+      extractBaseWDigitsChecked params.w params.ell1 (suite.rawHash pre) = some digits →
+        checkTargetSum params.w params.ell1 params.targetSum digits = false) :
+    (publicVerifierWithTcrCands suite params pk [] msg sig).2 = [] := by
+  unfold publicVerifierWithTcrCands
+  rw [hSt]
+  dsimp only [↓reduceIte, List.map_nil, List.nil_append]
+  split
+  · rfl
+  · split
+    · rfl
+    · split
+      · split
+        · rfl
+        · exact hypertreeLayersWithCands_snd_nil_of_digest_rejected suite params _ _ _ hRej _ _ _ _
+      · rename_i hNe
+        exact absurd rfl hNe
+
+/-- Replaying a message obtained from a signing query loses `eufCmaWithinWin`. -/
+theorem tooth_replayed_query_loses_eufCmaWithin (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (q : ProdSigningQuery) (sig : PqHashSig)
+    (hSign : prodSignQuery suite params sk q = some sig) :
+    eufCmaWithinWin suite params sk
+      (fun _ => .querySign q (fun resp => .done (q.message, resp.getD sig))) = false := by
+  unfold eufCmaWithinWin runHashSignAdv challengerSignStep
+  have hNoConf : challengerEpochConflict params [] q = false := by
+    simp [challengerEpochConflict]
+  rw [hNoConf]
+  dsimp only [Bool.false_eq_true, ↓reduceIte, runHashSignAdv]
+  apply prodEufCmaWin_rejects_signed_message suite params _ sig
+  simp [productionSigningLog, hSign]
+
+/-- `#tooth`: Submitting the target preimage itself (`forged = target.input`) is rejected by
+    `smDtTcrChallengerCheck`, even though its hash collides trivially. -/
+theorem tooth_identical_input_rejected_by_smDtTcr (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (qs : List ProdSigningQuery)
+    (leaf : Nat) (idxs : List Nat) (t : ProdTargetIdx) :
+    smDtTcrChallengerCheck suite params sk qs
+      (some ⟨leaf, idxs, t, t.input suite params sk leaf⟩) = false := by
+  simp [smDtTcrChallengerCheck, prodTcrCheck_eq]
+
+/-- A query-free adversary leaves the challenger's query list unchanged. -/
+theorem runHashSignAdv_done {Out : Type} (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (qs : List ProdSigningQuery) (out : Out) :
+    runHashSignAdv suite params sk qs (.done out) = (out, qs) := by
+  rfl
+
+/-- Against a query-free forger the within-game EUF-CMA bit is the production verifier's verdict. -/
+theorem eufCmaWithinWin_done (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (msg : List UInt8) (sig : PqHashSig) :
+    eufCmaWithinWin suite params sk (fun _ => .done (msg, sig)) =
+      verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msg sig := by
+  unfold eufCmaWithinWin runHashSignAdv
+  dsimp only
+  rw [prodEufCmaWin_eq]
+  dsimp only
+  rw [productionSigningLog_nil]
+  simp
+
+/-- The best-slot extractor is the slot extractor at some slot. -/
+theorem bestTcrExtractorAdv_eq_slot (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (qs_max : Nat) (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig)) :
+    ∃ k : Nat, bestTcrExtractorAdv coins params qs_max A = tcrExtractorAdv params k A :=
+  ⟨_, rfl⟩
+
+/-- The best-slot extractor wins on at least as many coins as every slot extractor. -/
+theorem bestTcrExtractorAdv_wins_ge_slot (coins : List ProdExperimentCoin) (params : PqHashParams)
+    (qs_max : Nat) (A : PqPublicKey → HashSignAdv (List UInt8 × PqHashSig))
+    (slot : Fin (prodPathTargetCount params qs_max)) :
+    smDtTcrWithinWins coins params (tcrExtractorAdv params slot.val A) ≤
+      smDtTcrWithinWins coins params (bestTcrExtractorAdv coins params qs_max A) :=
+  bestFinIdx_ge (prodPathTargetCount params qs_max) _
+    (fun k => smDtTcrWithinWins coins params (tcrExtractorAdv params k.val A)) slot
+
+/-- A seed-withheld adversary that outputs without querying produces the outcome with empty logs. -/
+theorem runSeedWithheldEufCma_pure {qHash qSign : Nat} (suite : TweakableHashSuite)
+    (params : PqHashParams) (adv : SeedWithheldEufCmaAdv qHash qSign) (sk : PqSecretKey)
+    (msg : List UInt8) (sig : PqHashSig) (h : ∀ pk, adv.run pk = .pure (msg, sig)) :
+    runSeedWithheldEufCma suite params adv sk = (⟨sk, [], msg, sig⟩, []) := by
+  unfold runSeedWithheldEufCma
+  dsimp only
+  rw [h]
+  rfl
+
+/-- If the candidate-collecting verifier records no candidate for a query-free forger's output,
+    no slot of the target-collision extractor wins the `SM_DT_TCR` game. -/
+theorem smDtTcrWithinWin_tcrExtractorAdv_done_of_cands_nil (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (slot : Nat) (msg : List UInt8) (sig : PqHashSig)
+    (hC : (publicVerifierWithTcrCands suite params (derivePublicKey suite params sk) [] msg
+      sig).2 = []) :
+    smDtTcrWithinWin suite params sk
+      (tcrExtractorAdv params slot (fun _ => .done (msg, sig))) = false := by
+  unfold smDtTcrWithinWin tcrExtractorAdv advCollectTcrSubmissions HashSignAdv.map
+  rw [runHashSignAdv_bind, runHashSignAdv_advTrackSignLog suite params sk [] [] _ rfl]
+  dsimp only [runHashSignAdv, productionSigningLog]
+  rw [runHashSignAdv_bind]
+  dsimp only [HashSignAdv.bind]
+  rw [runHashSignAdv_bind]
+  dsimp only [advRawHash, runHashSignAdv]
+  rw [runHashSignAdv_bind, runHashSignAdv_advDeriveProductionStatelessInputs]
+  dsimp only
+  rw [runHashSignAdv_bind, runHashSignAdv_advVerifyWithTcrCands]
+  dsimp only [runHashSignAdv]
+  rw [hC]
+  simp [smDtTcrChallengerCheck]
+
+#verify_constructive hypertreeLayersWithCands_snd_nil_of_digest_rejected
+  publicVerifierWithTcrCands_snd_nil_of_digest_rejected
+  tooth_replayed_query_loses_eufCmaWithin tooth_identical_input_rejected_by_smDtTcr
+  runHashSignAdv_done eufCmaWithinWin_done bestTcrExtractorAdv_eq_slot
+  bestTcrExtractorAdv_wins_ge_slot runSeedWithheldEufCma_pure
+  smDtTcrWithinWin_tcrExtractorAdv_done_of_cands_nil
+
+-- Paired here: the teeth are stated on `eufCmaWithinWin` / `smDtTcrChallengerCheck`, which sit one
+-- definition below the theorems' `eufCmaRealWithinWins` / `smDtTcrWithinWin` and are sealed downstream.
+#tooth_pair Qsag.production_euf_cma_within_game_reduction_bound vs Qsag.tooth_replayed_query_loses_eufCmaWithin
+#tooth_pair Qsag.smDtTcrWithinWin_discharges_prodSmTcrBreak vs Qsag.tooth_identical_input_rejected_by_smDtTcr
+
+end Qsag
+end

@@ -2786,6 +2786,288 @@ theorem canopyOpening_payload_unique_of_collision_free
 -- both primitives are sealed for the audits (after every proof that computes with them).
 attribute [local irreducible] Goldilocks.mul poseidon2Perm12
 
+section RecursiveTreeFixtures
+open Aggregation RoundPoly
+
+/-! ### Concrete recursive-tree fixtures (evaluated here; audited and paired in `Tests/RecursiveAggregationTeeth`) -/
+
+def headerShardZero : RecursiveShardHeader :=
+  { shardId := 0, threshold := 2, committeeSize := 3, validCount := 2,
+    publicDigest := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ }
+
+def headerShardP : RecursiveShardHeader :=
+  { shardId := goldilocksPrime, threshold := 2, committeeSize := 3, validCount := 2,
+    publicDigest := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ }
+
+/-- The two headers differ, reduce to one `Poseidon2` preimage (hence one digest), and only the
+    canonical one passes `verifyRecursiveShardHeader`: without the `shardId < p` check the tree
+    would carry two distinct shard ids under one digest. -/
+theorem tooth_noncanonical_shard_header_collides_and_is_rejected :
+    ∃ h1 h2 : RecursiveShardHeader,
+      ¬ (h1 = h2) ∧
+      leafShardHeaderPreimage h1 = leafShardHeaderPreimage h2 ∧
+      hashLeafShardHeader h1 = hashLeafShardHeader h2 ∧
+      verifyRecursiveShardHeader h1 = true ∧
+      verifyRecursiveShardHeader h2 = false := by
+  have hP : Goldilocks.ofNat goldilocksPrime = Goldilocks.ofNat 0 := by decide
+  have hPre : leafShardHeaderPreimage headerShardZero = leafShardHeaderPreimage headerShardP := by
+    unfold leafShardHeaderPreimage headerShardZero headerShardP
+    dsimp only
+    rw [hP]
+  refine ⟨headerShardZero, headerShardP, by decide, hPre, ?_, by decide, by decide⟩
+  unfold hashLeafShardHeader
+  rw [hPre]
+
+/-- Positive instance of `leafShardHeaderPreimage_injective`: two canonical headers. -/
+theorem inhabited_canonical_shard_headers :
+    verifyRecursiveShardHeader headerShardZero = true ∧
+    verifyRecursiveShardHeader { headerShardZero with shardId := 1 } = true ∧
+    ¬ (leafShardHeaderPreimage headerShardZero =
+      leafShardHeaderPreimage { headerShardZero with shardId := 1 }) := by
+  refine ⟨by decide, by decide, fun h => ?_⟩
+  exact absurd (congrArg (fun p : Poseidon2CanopyPreimage => p.initCap.x2.val) h) (by decide)
+
+/-- The transcript sponge is the `Poseidon2` duplex chain on the block addends of the frames. -/
+private theorem fsSqueeze_eq_duplexChain (frames : List FsFrame) :
+    fsSqueeze frames =
+      lane4ToExt4 (poseidon2DuplexChain ((fsTranscriptBlocks frames).map FsBlock.addend)).b0 := by
+  unfold fsSqueeze
+  rw [fsSpongeState_eq_blocks, poseidon2DuplexChain.public_eqs, List.foldl_map]
+  rfl
+
+/-- Frames of two absorbed one-limb messages, each followed by its squeeze frame. -/
+private def swapRoundFrames (x y : Nat) : List FsFrame :=
+  [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat x]⟩, ⟨Goldilocks.ofNat 11, []⟩,
+   ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat y]⟩, ⟨Goldilocks.ofNat 11, []⟩]
+
+private theorem swapRoundFrames_blocks (x y : Nat) :
+    (fsTranscriptBlocks (swapRoundFrames x y)).map FsBlock.addend =
+      poseidon2SwapRoundKatBlocks x y := by
+  rw [poseidon2SwapRoundKatBlocks.public_eqs]
+  simp only [poseidon2DuplexBlock.public_eqs]
+  rfl
+
+/-- Frames of the child-verifier transcript up to the first fold-challenge squeeze, at bottom
+    depth `1`, canopy depth `0`, zero digests and claim, and sumcheck messages `[a,0,0,0]`,
+    `[b,0,0,0]`. -/
+private def swapSumcheckFrames (a b : Nat) : List FsFrame :=
+  [⟨Goldilocks.ofNat 1, [childWhirVersion, Goldilocks.ofNat 1, Goldilocks.ofNat 0]⟩,
+   ⟨Goldilocks.ofNat 2, List.replicate 12 Goldilocks.zero⟩,
+   ⟨Goldilocks.ofNat 3, List.replicate 4 Goldilocks.zero⟩,
+   ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat a, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero]⟩,
+   ⟨Goldilocks.ofNat 11, []⟩,
+   ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat b, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero]⟩,
+   ⟨Goldilocks.ofNat 11, []⟩,
+   ⟨Goldilocks.ofNat 12, []⟩, ⟨Goldilocks.ofNat 13, []⟩]
+
+private theorem swapSumcheckFrames_blocks (a b : Nat) :
+    (fsTranscriptBlocks (swapSumcheckFrames a b)).map FsBlock.addend =
+      poseidon2SwapSumcheckKatBlocks a b := by
+  rw [poseidon2SwapSumcheckKatBlocks.public_eqs]
+  simp only [poseidon2DuplexBlock.public_eqs]
+  rfl
+
+def swapRoundA : FsRound := ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1], [Goldilocks.ofNat 11]⟩
+
+def swapRoundB : FsRound := ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2], [Goldilocks.ofNat 11]⟩
+
+/-- Swapping two round messages changes the challenge derived after them. -/
+theorem tooth_swapped_round_messages_change_challenge :
+    ¬ (fsDeriveChallenges [swapRoundA, swapRoundB] = fsDeriveChallenges [swapRoundB, swapRoundA]) := by
+  intro h
+  have h' : [fsSqueeze (swapRoundFrames 1 2)] = [fsSqueeze (swapRoundFrames 2 1)] := h
+  rw [fsSqueeze_eq_duplexChain, fsSqueeze_eq_duplexChain, swapRoundFrames_blocks,
+    swapRoundFrames_blocks] at h'
+  exact poseidon2DuplexChain_swap_round_kat (lane4ToExt4_injective (List.cons.inj h').1)
+
+def swapPolyA : List QuarticGoldilocks :=
+  [⟨⟨Goldilocks.one, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩]
+
+def swapPolyB : List QuarticGoldilocks :=
+  [⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩]
+
+def swapZeroLane : Lane4 := ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+
+def swapZeroExt : QuarticGoldilocks :=
+  ⟨⟨Goldilocks.zero, Goldilocks.zero⟩, ⟨Goldilocks.zero, Goldilocks.zero⟩⟩
+
+set_option maxRecDepth 1000000 in
+/-- In the child verifier, exchanging two sumcheck round polynomials changes the fold challenge
+    `theta` squeezed after them: the round messages are absorbed, in order. -/
+theorem tooth_swapped_sumcheck_round_changes_theta :
+    ¬ ((childWhirChallenges swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane
+          [swapPolyA, swapPolyB] []).theta =
+       (childWhirChallenges swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane
+          [swapPolyB, swapPolyA] []).theta) := by
+  have hTheta : ∀ (P Q : List QuarticGoldilocks),
+      (childWhirChallenges swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane [P, Q] []).theta =
+        (fsDeriveChallenges ((childWhirRounds swapZeroLane 1 0 swapZeroLane swapZeroExt
+          swapZeroLane [P, Q] []).take 6)).getD 0 CommRingOps.zero := by
+    intro P Q
+    have hc := childWhirTranscript_challenge swapZeroLane 1 0 swapZeroLane swapZeroExt
+      swapZeroLane [P, Q] [] 5 (by show 5 < 2 + 5; decide)
+    have hg : ((childWhirTranscript swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane [P, Q]
+        []).map Prod.snd).getD 5 [] =
+        fsDeriveChallenges ((childWhirRounds swapZeroLane 1 0 swapZeroLane swapZeroExt
+          swapZeroLane [P, Q] []).take 6) := by
+      rw [List.getD_eq_getElem?_getD, hc]
+      rfl
+    show (((childWhirTranscript swapZeroLane 1 0 swapZeroLane swapZeroExt swapZeroLane [P, Q]
+      []).map Prod.snd).getD 5 []).getD 0 CommRingOps.zero = _
+    rw [hg]
+  intro h
+  rw [hTheta, hTheta] at h
+  have h' : fsSqueeze (swapSumcheckFrames 1 0) = fsSqueeze (swapSumcheckFrames 0 1) := h
+  rw [fsSqueeze_eq_duplexChain, fsSqueeze_eq_duplexChain, swapSumcheckFrames_blocks,
+    swapSumcheckFrames_blocks] at h'
+  exact poseidon2DuplexChain_swap_sumcheck_kat (lane4ToExt4_injective h')
+
+/-- The frame encoding separates a message from its split: one frame `[1, 2]` and two frames
+    `[1]`, `[2]` under the same tag have different block encodings. -/
+theorem tooth_frame_boundary_is_encoded :
+    ¬ (fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1, Goldilocks.ofNat 2]⟩] =
+       fsTranscriptBlocks [⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 1]⟩,
+         ⟨Goldilocks.ofNat 10, [Goldilocks.ofNat 2]⟩]) := by
+  decide
+
+private theorem filter_false_nil {α : Type} : ∀ l : List α, l.filter (fun _ => false) = []
+  | [] => rfl
+  | _ :: l => filter_false_nil l
+
+/-- The leaf relation has no witness for a shard with `threshold ≥ 1` none of whose committee keys
+    has a signature accepted by `verifyPqHashSig` on the shard-bound message. -/
+theorem tooth_leaf_relation_requires_a_valid_signature (epochFloor msg : List UInt8)
+    (registry : List ShardRegistration) (s : HemShardProof) (hThr : 1 ≤ s.threshold)
+    (hNoSig : ∀ pk ∈ s.inst.committee, ∀ sig : PqHashSig,
+      verifyPqHashSig s.inst.suite s.inst.params pk
+        (shardBoundMessage s.shardId epochFloor msg) sig = false) :
+    LeafShardQuorumWitness epochFloor msg registry s → False := by
+  intro w
+  have hFew : (s.inst.committee.filter (fun _ => false)).length < s.threshold := by
+    rw [filter_false_nil]
+    exact hThr
+  obtain ⟨q, hq, _⟩ := w.exists_sig_not (fun _ => false) hFew
+  obtain ⟨hPk, hValid⟩ := w.sig_valid q hq
+  rw [hNoSig q.slot.pk hPk q.sig] at hValid
+  exact absurd hValid Bool.false_ne_true
+
+/-- `concreteHemShard false` with its threshold raised above its single signer. -/
+def subQuorumHemShard : HemShardProof := { concreteHemShard false with threshold := 2 }
+
+def subQuorumRecursiveLeaf : RecursiveHemLeafCert :=
+  { header := mkLeafShardHeader concreteHemRegistryDigest [] [] 0 subQuorumHemShard
+    shard := subQuorumHemShard
+    leafProof := mkHonestChildWhirWitness
+      (hashLeafShardHeader (mkLeafShardHeader concreteHemRegistryDigest [] [] 0 subQuorumHemShard))
+      swapZeroLane }
+
+/-- A leaf whose shard has no quorum is rejected although its child-WHIR proof on the header
+    digest accepts: the child proof carries no signature statement. -/
+theorem tooth_accepting_child_proof_without_quorum_rejected :
+    ∃ leaf : RecursiveHemLeafCert,
+      ChildWhirCircuitAccepts (hashLeafShardHeader leaf.header) leaf.leafProof = true ∧
+      verifyRecursiveHemTree poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+        concreteHemRegistryDigest [] [] 2 0 leaf = false := by
+  refine ⟨subQuorumRecursiveLeaf, mkHonestChildWhirWitness_accepts _ _, ?_⟩
+  apply recursive_tree_rejects_leaf_with_failing_shard
+  have hQ : decide (subQuorumRecursiveLeaf.shard.threshold ≤
+      bitmapPopcountSpec subQuorumRecursiveLeaf.shard.proof.agg.bitmap) = false := by
+    show decide (2 ≤ bitmapPopcountSpec (concreteHemShard false).proof.agg.bitmap) = false
+    rw [concreteHemShard_popcount]
+    rfl
+  apply Bool.eq_false_iff.mpr
+  intro hAcc
+  rw [decide_eq_true (verifyHemShard_facts hAcc).2.2.2.1] at hQ
+  exact Bool.noConfusion hQ
+
+def concreteRecursiveLeaf (b : Bool) : RecursiveHemLeafCert :=
+  { header := mkLeafShardHeader concreteHemRegistryDigest [] [] (if b then 1 else 0)
+      (concreteHemShard b)
+    shard := concreteHemShard b
+    leafProof := mkHonestChildWhirWitness
+      (hashLeafShardHeader (mkLeafShardHeader concreteHemRegistryDigest [] []
+        (if b then 1 else 0) (concreteHemShard b))) swapZeroLane }
+
+theorem concreteRecursiveLeaf_header_valid (b : Bool) :
+    verifyRecursiveShardHeader (concreteRecursiveLeaf b).header = true := by
+  have hThr : (concreteHemShard b).threshold = 1 := concreteHemShard_threshold b
+  have hCom : (concreteHemShard b).inst.committee.length = 1 := concreteHemShard_committee_length b
+  have hPop : bitmapPopcountSpec (concreteHemShard b).proof.agg.bitmap = 1 :=
+    concreteHemShard_popcount b
+  unfold verifyRecursiveShardHeader concreteRecursiveLeaf mkLeafShardHeader
+  dsimp only
+  rw [hThr, hCom, hPop]
+  cases b <;> decide
+
+theorem concreteRecursiveLeaf_binds (b : Bool) :
+    leafHeaderBindsShard concreteHemRegistryDigest [] [] (concreteRecursiveLeaf b).header
+      (concreteRecursiveLeaf b).shard = true :=
+  leafHeaderBindsShard_mk concreteHemRegistryDigest [] [] (if b then 1 else 0) (concreteHemShard b)
+    (by rw [concreteHemShard_shardId]; cases b <;> rfl)
+
+def concreteDepth1Agg : RecursiveHemAggregate 1 :=
+  ({ summaryDigest := poseidon2SummaryHash 1 2
+       [hashLeafShardHeader (concreteRecursiveLeaf false).header,
+        hashLeafShardHeader (concreteRecursiveLeaf true).header]
+     outerProof := mkHonestChildWhirWitness
+       (poseidon2SummaryHash 1 2
+         [hashLeafShardHeader (concreteRecursiveLeaf false).header,
+          hashLeafShardHeader (concreteRecursiveLeaf true).header]) swapZeroLane
+     children := [concreteRecursiveLeaf false, concreteRecursiveLeaf true] } :
+    RecursiveHemOuterCert (RecursiveHemAggregate 0))
+
+/-- The depth-1, fan-in-2 tree over the two concrete shard certificates is accepted against the
+    registry commitment under `poseidon2Hash32`. -/
+theorem inhabited_verifyRecursiveHemTree :
+    verifyRecursiveHemTree poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] 2 1 concreteDepth1Agg = true :=
+  verifyRecursiveHemTree_depth1_pair poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+    concreteHemRegistryDigest [] [] (concreteRecursiveLeaf false) (concreteRecursiveLeaf true) _
+    (concreteRecursiveLeaf_header_valid false) (concreteRecursiveLeaf_header_valid true)
+    (concreteRecursiveLeaf_binds false) (concreteRecursiveLeaf_binds true)
+    (mkHonestChildWhirWitness_accepts _ _) (mkHonestChildWhirWitness_accepts _ _)
+    (mkHonestChildWhirWitness_accepts _ _)
+    inhabited_verifyHierarchicalHem_two_shards.1
+
+/-- Extraction environment of a concrete shard: the tables of its verified opening transcript. -/
+def concreteHemShardEnv (b : Bool) : HemShardEnv concreteHemArith rsSbox7WhirDomain :=
+  { shard := concreteHemShard b
+    law := concreteHemShard_lawful b
+    view := reconstructSuccinctView rsSbox7WhirDomain (concreteHemShardTranscript b).transcript
+    bound := reconstructSuccinctView_stagesBound rsSbox7WhirDomain (concreteHemShard b).proof
+      (concreteHemShardTranscript b).transcript (concreteHemShardTranscript_accepts b) }
+
+/-- Every hypothesis of `recursive_hem_false_statement_yields_forgery_or_break` holds for the
+    concrete tree with the empty signing log, and its conclusion follows. -/
+theorem inhabited_recursive_hem_forgery_or_break :
+    (∃ (s : HemShardProof) (pk : PqPublicKey) (sig : PqHashSig),
+      s ∈ recursiveHemLeafShards 1 concreteDepth1Agg ∧
+      s.registration ∈ concreteHemRegistry ∧
+      pk ∈ s.inst.committee ∧
+      (fun (_ : PqPublicKey) (_ : List UInt8) => false) pk (shardBoundMessage s.shardId [] []) = false ∧
+      verifyPqHashSig s.inst.suite s.inst.params pk (shardBoundMessage s.shardId [] []) sig = true) ∨
+    Nonempty (HemHierarchyBreak poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      [concreteHemShardEnv false, concreteHemShardEnv true]) := by
+  refine recursive_hem_false_statement_yields_forgery_or_break poseidon2Hash32 concreteHemArith
+    rsSbox7WhirDomain concreteHemRegistryDigest [] [] concreteHemRegistry
+    concreteHemRegistryDigest_eq 2 1 concreteDepth1Agg
+    [concreteHemShardEnv false, concreteHemShardEnv true] rfl inhabited_verifyRecursiveHemTree
+    (fun _ _ => false) ⟨concreteHemShard false, List.mem_cons_self .., ?_⟩
+  show ((concreteHemShard false).inst.committee.filter (fun _ => false)).length <
+    (concreteHemShard false).threshold
+  rw [filter_false_nil, concreteHemShard_threshold]
+  exact Nat.zero_lt_one
+
+end RecursiveTreeFixtures
+
+#verify_constructive
+  tooth_noncanonical_shard_header_collides_and_is_rejected inhabited_canonical_shard_headers
+  tooth_swapped_round_messages_change_challenge tooth_swapped_sumcheck_round_changes_theta
+  tooth_frame_boundary_is_encoded tooth_leaf_relation_requires_a_valid_signature
+  tooth_accepting_child_proof_without_quorum_rejected concreteRecursiveLeaf_header_valid
+  concreteRecursiveLeaf_binds inhabited_verifyRecursiveHemTree
+  inhabited_recursive_hem_forgery_or_break
+
 #verify_constructive
   Qsag.hemHighCapStageGeometry_eq_hemStageGeometry
   Qsag.hemHighCapSchedule_covers_nv2_to_28

@@ -14,20 +14,10 @@ namespace Qsag
 set_option autoImplicit false
 set_option exponentiation.threshold 2048
 set_option maxRecDepth 10000
-/-- Concrete 2-query Hadamard superposition circuit (`QuantumAdv 2 2 1 2`) preparing
-    `|0, 0, 0⟩ + |1, 0, 0⟩` via `hadamardQuery2 2 1` after query 0 so query 1 probes `oracleXor`
-    in uniform superposition across both basis inputs! -/
-def concreteSuperpositionAdv : QuantumAdv 2 2 1 2 where
-  init := fun x y _ => if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else GaussInt.zero
-  h_init_pos := by decide
-  steps := fun i => if i.1 == 0 then hadamardQuery2 2 1 else ScaledUnitary.id 2 2 1
-
-/-- Concrete 2-query adaptive `OracleComp` decision tree branching on the LSB of its first
-    256-bit oracle query response before choosing its second query input! -/
-def concreteAdaptiveTwoQueryAdv : OracleComp (BitVec 8) (BitVec 256) (BitVec 8) :=
-  .query (BitVec.ofNat 8 1) (fun d₁ =>
-    let x₂ := if d₁.getLsbD 0 then BitVec.ofNat 8 2 else BitVec.ofNat 8 3
-    .query x₂ (fun _ => .pure x₂))
+/- `concreteSuperpositionAdv` and `concreteAdaptiveTwoQueryAdv` are defined in `Oracle/Qrom`, next to the
+   evaluated facts `concreteSuperpositionAdv_queryWeights` and `concreteAdaptiveTwoQueryAdv_queryBounded`;
+   the roster conjunct is `qsagPq128PortfolioRoster_inhabited_at_concrete_budget` in
+   `Protocol/Aggregation/ConcreteSecurityBudget`. Their bodies are not visible from this module. -/
 
 /-- Non-scalar quartic basis element `v ∈ QuarticGoldilocks` (`v^2 = u ∈ GoldilocksExt2`) and
     non-zero quadratic polynomial `P(X) = X^2 - u` (`cs = [-u, 0, 1]`). -/
@@ -73,40 +63,14 @@ theorem inhabited_concrete_security_budget_roster :
         atLeastBits 128 entry.quantumBound) := by
   refine ⟨?_, ?_, ?_, ?_⟩
   · -- 1. Genuine superposition query weights on both `x = 0` and `x = 1`:
-    constructor <;> decide
+    exact concreteSuperpositionAdv_queryWeights
   · -- 2. Adaptive 2-query `OracleComp` + `wotsCDibits128Bv` injectivity fiber bound:
-    refine ⟨?_, fiberCard_le_one_of_injective 256 wotsCDibits128Bv
+    exact ⟨concreteAdaptiveTwoQueryAdv_queryBounded, fiberCard_le_one_of_injective 256 wotsCDibits128Bv
                   (fun _ _ h => wotsCDibits128Bv_injective h) _⟩
-    unfold concreteAdaptiveTwoQueryAdv QueryBounded
-    intro _ _
-    exact trivial
   · -- 3. Non-scalar quadratic polynomial `X^2 - u` over `QuarticGoldilocks`:
     refine ⟨by decide, by decide, by decide⟩
   · -- 4. Concrete 12-profile portfolio evaluation at `b₀ = ⟨2^30 - 1, 2^16, 2^20 - 1⟩`:
-    let b₀ : QueryBudget := ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩
-    have hPort := qsag_pq128_portfolio_soundness_budget b₀ (by decide)
-    refine ⟨hPort.1, ?_⟩
-    intro entry hMem
-    have hBits := hPort.2 entry hMem
-      (Nat.le_trans (by decide : b₀.qHash + 1 ≤ 2 ^ 30)
-        (Nat.pow_le_pow_right (by decide) (roster_ceiling_ge_30 b₀ entry hMem)))
-    have hPos : 0 < entry.classicalBound.num ∧ 0 < entry.quantumBound.num := by
-      simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
-      rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨by decide, by decide⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-      · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
-    exact ⟨hPos.1, hPos.2, hBits.1, hBits.2⟩
-
+    exact qsagPq128PortfolioRoster_inhabited_at_concrete_budget
 
 #verify_constructive Qsag.inhabited_concrete_security_budget_roster
 end Qsag

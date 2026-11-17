@@ -1793,5 +1793,7 @@ theorem digest_reduction_witness : ∃ a b : BitVec 256,
 #tooth_pair universal_customization_partition vs unframed_partition_tooth
 #tooth_pair auditedByteLabels_cross_crate_cshake256_encodings_ne vs
   tooth_shared_label_is_in_two_crates
+-- Equations for the symbolic instances of `Tests/CompositionInstances`; no body is exposed.
+#export_eqns formatted reprogramAt runOracle
 end Qsag.CrossProtocol
 end

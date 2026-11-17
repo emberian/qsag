@@ -15,7 +15,7 @@ use libfuzzer_sys::fuzz_target;
 use qsag_accel::CpuReferenceBackend;
 use qsag_addr::{
     HybridPinnedEnvelope, QsagAddress, decode_intent_128, decode_verified_intent_128,
-    encode_intent_128,
+    encode_intent_128, try_encode_intent_128,
 };
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, decode_slh_sig, slh_verify,
@@ -131,8 +131,17 @@ fuzz_target!(init: {
         if let Some(intent) = decode_intent_128(&arr128) {
             assert_eq!(encode_intent_128(&intent), arr128);
         }
+        // The MIR-verified intent namespace shares the canonical wire words, so whatever it
+        // accepts (after the canonical `(suite, kind)` check) is the same intent the canonical
+        // decoder reads, and it re-encodes to the input bytes. The converse need not hold: the
+        // verified namespace admits only a subset of the canonical suites.
         if let Some(v_intent) = decode_verified_intent_128(&arr128) {
-            assert_eq!(encode_intent_128(&v_intent), arr128);
+            assert_eq!(v_intent.validate(), Ok(()));
+            assert_eq!(decode_intent_128(&arr128), Some(v_intent));
+            assert_eq!(
+                try_encode_intent_128(&v_intent).expect("validated intent must encode"),
+                arr128
+            );
         }
     }
 

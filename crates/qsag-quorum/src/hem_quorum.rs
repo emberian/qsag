@@ -200,10 +200,27 @@ impl core::error::Error for HemQuorumError {}
 const HEM_LATCH_ACK_TAG: &[u8] = b"QSAG.HEM.EPOCH.ACK/v1";
 
 /// Pinned BFT custodian MAC authority (`2 * q > n + (t - 1)`) for `Hem` quorum leaf latching.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct HemEpochLatchAuthority {
     mac_keys: Vec<[u8; 32]>,
 }
+
+/// Equality of the pinned MAC keys without data-dependent timing. The number of custodians
+/// is public; every key pair is compared, with no early exit on the first difference.
+impl PartialEq for HemEpochLatchAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        if self.mac_keys.len() != other.mac_keys.len() {
+            return false;
+        }
+        let mut equal = true;
+        for (a, b) in self.mac_keys.iter().zip(&other.mac_keys) {
+            equal &= ct_eq_bytes32(a, b);
+        }
+        equal
+    }
+}
+
+impl Eq for HemEpochLatchAuthority {}
 
 impl fmt::Debug for HemEpochLatchAuthority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2971,6 +2988,27 @@ impl HemSpdzSeedQuorum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn latch_authority_equality_compares_every_key_byte() {
+        let base = HemEpochLatchAuthority {
+            mac_keys: vec![[0x11; 32], [0x22; 32], [0x33; 32]],
+        };
+        assert!(base == base.clone());
+        // A difference in any single byte of any key, first or last, is detected.
+        for key in 0..3 {
+            for byte in [0usize, 15, 31] {
+                let mut other = base.clone();
+                other.mac_keys[key][byte] ^= 0x80;
+                assert!(base != other, "key {key} byte {byte}");
+                assert!(other != base, "key {key} byte {byte}");
+            }
+        }
+        let shorter = HemEpochLatchAuthority {
+            mac_keys: vec![[0x11; 32], [0x22; 32]],
+        };
+        assert!(base != shorter && shorter != base);
+    }
 
     fn test_party_rngs(seed: u8, n: usize) -> Vec<PartyPrivateRng> {
         (0..n)

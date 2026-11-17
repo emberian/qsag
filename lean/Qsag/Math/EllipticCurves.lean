@@ -1597,7 +1597,7 @@ theorem CanonicalSwPk.ofSwPoint?_eq_some_iff {C : SwCurve} {pt : SwPoint} {pk : 
         injection h with hEq
         subst hEq
         rfl
-      · simp only [hc, ↓reduceDIte] at h
+      · simp only [hc] at h
         cases h
   · intro h
     subst h
@@ -1757,6 +1757,15 @@ def bls381NegG1Canonical : CanonicalSwPk bls381Curve :=
     have hNeg := bls381Curve.neg_onCurve _ hOn
     exact SwCurve.onCurve_of_OnCurve hNeg⟩
 
+theorem bls381_canonicalPks_coords :
+    bls381G1Canonical.x =
+      0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb ∧
+    bls381G1Canonical.y =
+      0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1 ∧
+    bls381NegG1Canonical.x = bls381G1Canonical.x ∧
+    bls381NegG1Canonical.y = (p_bls381 - bls381G1Canonical.y) % p_bls381 :=
+  ⟨rfl, rfl, rfl, rfl⟩
+
 theorem bls381_canonicalPks_distinct_and_381bit :
     bls381G1Canonical.toSwPoint = bls381G1 ∧
     bls381NegG1Canonical.toSwPoint = bls381Curve.neg bls381G1 ∧
@@ -1803,3 +1812,158 @@ theorem bls381_canonicalPks_distinct_and_381bit :
   Qsag.bls381_canonicalPks_distinct_and_381bit
 
 end Qsag
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag.Weierstrass
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+/-- A point of order two keeps its parity under negation: on `y² = x³ + 7` over `ℤ/7`
+    the point `(0, 0)` is its own negative. `PrimeOrderGroup.n_odd` excludes this. -/
+theorem tooth_two_torsion_point_is_its_own_negative :
+    ∃ (C : Curve) (P : Point), C.OnCurve P ∧ P ≠ none ∧ C.p % 2 = 1 ∧
+      Point.yOdd (C.neg P) = Point.yOdd P ∧ C.smul 2 P = none := by
+  refine ⟨⟨7, 0, 7⟩, some (0, 0), ?_, ?_, ?_, ?_, ?_⟩ <;> decide
+
+-- (math-teeth anchor Weierstrass )
+end Qsag.Weierstrass
+end
+#verify_constructive
+  Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+/-- **`#tooth` Ed25519 Clamped Scalars Exceed `ED_ORDER` & Wrap Non-Injectively (`tooth_ed25519_clamped_wraps_mod_order_non_injective`)**:
+    1. Every clamped value `c = clampEd25519Bytes32 raw` satisfies `ED25519_ORDER_L < c.toNat`, so
+       feeding `c` directly into `requireCanonicalScalar .Ed25519` **always fails** (`= false`), and
+       `reduceEd25519Order c ≠ c`.
+    2. Distinct values `≥ ED_ORDER` (`x1 = BitVec.ofNat 256 (2^254)` and
+       `x2 = BitVec.ofNat 256 (2^254 - ED25519_ORDER_L)`, both `> ED25519_ORDER_L`) wrap to the
+       **same** canonical scalar modulo `ED_ORDER`, proving `reduceEd25519Order`,
+       `clampEd25519Bytes32`, and `normalizeSlip0010Ed25519Scalar` are all non-injective! -/
+theorem tooth_ed25519_clamped_wraps_mod_order_non_injective :
+    ∃ x1 x2 : BitVec 256,
+      (∀ raw : BitVec 256,
+        ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
+        requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
+        reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw) ∧
+      ED25519_ORDER_L ≤ x1.toNat ∧
+      ED25519_ORDER_L ≤ x2.toNat ∧
+      x1 ≠ x2 ∧
+      reduceEd25519Order x1 = reduceEd25519Order x2 ∧
+      ¬ Function.Injective clampEd25519Bytes32 ∧
+      ¬ Function.Injective reduceEd25519Order ∧
+      ¬ Function.Injective normalizeSlip0010Ed25519Scalar := by
+  have hOrd := curve_orders_match_le_limbs_and_bounds
+  have hOrdLt253 : ED25519_ORDER_L < 2 ^ 253 := hOrd.2.2.2.2.2.2.1
+  have h253_254 : (2 : Nat) ^ 254 = 2 * (2 ^ 253) := by decide
+  have h254Lt256 : (2 : Nat) ^ 254 < 2 ^ 256 := by decide
+  have hAllWrap : ∀ raw : BitVec 256,
+      ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
+      requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
+      reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
+    intro raw
+    have hb := clampEd25519Bytes32_bits_and_range raw
+    have hGtOrd : ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat := by omega
+    have hNotCanon : requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false := by
+      unfold requireCanonicalScalar ScalarGroup.orderNat
+      have hNotLt : ¬ ((clampEd25519Bytes32 raw).toNat < ED25519_ORDER_L) := by omega
+      rw [decide_eq_false hNotLt, Bool.and_false]
+    have hRedNe : reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
+      intro hEq
+      have hv := congrArg BitVec.toNat hEq
+      unfold reduceEd25519Order at hv
+      have hModLt : (clampEd25519Bytes32 raw).toNat % ED25519_ORDER_L < ED25519_ORDER_L :=
+        Nat.mod_lt _ (by omega)
+      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)] at hv
+      omega
+    exact ⟨hGtOrd, hNotCanon, hRedNe⟩
+  let x1 : BitVec 256 := clampEd25519Bytes32 0#256
+  let x2 : BitVec 256 := BitVec.ofNat 256 (x1.toNat - ED25519_ORDER_L)
+  have hx1Val : x1.toNat = 2 ^ 254 := by
+    change clampEd25519Nat 0 = 2 ^ 254
+    unfold clampEd25519Nat
+    simp
+  have hx2Val : x2.toNat = 2 ^ 254 - ED25519_ORDER_L := by
+    dsimp [x2]
+    rw [hx1Val, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
+  have hx1Ge : ED25519_ORDER_L ≤ x1.toNat := by omega
+  have hx2Ge : ED25519_ORDER_L ≤ x2.toNat := by omega
+  have hx1NeX2 : x1 ≠ x2 := by
+    intro hEq
+    have hv := congrArg BitVec.toNat hEq
+    omega
+  have hRedEq : reduceEd25519Order x1 = reduceEd25519Order x2 := by
+    unfold reduceEd25519Order
+    apply congrArg (BitVec.ofNat 256)
+    rw [hx1Val, hx2Val]
+    have hSplit : 2 ^ 254 = (2 ^ 254 - ED25519_ORDER_L) + ED25519_ORDER_L * 1 := by omega
+    conv => lhs; rw [hSplit]
+    rw [Nat.add_mul_mod_self_left]
+  have hClamp01 : clampEd25519Bytes32 0#256 = clampEd25519Bytes32 1#256 := by
+    apply BitVec.eq_of_toNat_eq
+    change clampEd25519Nat 0 = clampEd25519Nat 1
+    unfold clampEd25519Nat
+    have h1Mod : 1 % (2 ^ 254) = 1 := Nat.mod_eq_of_lt (by decide)
+    rw [h1Mod]
+  have h0Ne1 : (0#256 : BitVec 256) ≠ 1#256 := by decide
+  exact ⟨x1, x2, hAllWrap, hx1Ge, hx2Ge, hx1NeX2, hRedEq,
+    fun hInj => h0Ne1 (hInj hClamp01),
+    fun hInj => hx1NeX2 (hInj hRedEq),
+    fun hInj => h0Ne1 (hInj (congrArg reduceEd25519Order hClamp01))⟩
+
+/-- `#tooth` Carmichael `561` passes `2^560 ≡ 1 (mod 561)` yet `checkPrattStep` deterministically rejects it. -/
+theorem tooth_carmichael_561_passes_fermat_but_fails_pratt :
+    ∃ c : PrattCert, c.n = 561 ∧ lucasPowMod 384 c.g (c.n - 1) c.n = 1 ∧
+      checkPrattStep [2, 3, 5, 7] c = false ∧ ¬ IsPrimeMod c.n := by
+  refine ⟨⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩, rfl, by decide +kernel, by decide +kernel, fun hPrime => ?_⟩
+  dsimp only at hPrime; rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
+
+def bls381Torsion3Point : SwPoint := some (0, 2)
+
+/-- `#tooth` `BLS12-381` 3-torsion point `(0, 2)` lies on `y^2 = x^3 + 4` yet fails `[r_bls381]P = O`. -/
+theorem tooth_bls381_torsion3_onCurve_but_off_subgroup :
+    ∃ P : SwPoint, bls381Curve.onCurve P = true ∧
+      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) 3) = true ∧
+      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) r_bls381) = false :=
+  ⟨bls381Torsion3Point, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+-- (math-teeth anchor Qsag )
+end Qsag
+end
+#verify_constructive
+  Qsag.tooth_ed25519_clamped_wraps_mod_order_non_injective
+  Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
+  Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
+
+-- Owning-module audit certificates for the theorems audited again in `Tests/MigrationTeeth`.
+#verify_constructive
+  Qsag.IsPrimeMod.dvd_mul
+  Qsag.lucasPowMod_eq_pow_mod
+  Qsag.isPrime_of_lucas_pratt
+  Qsag.pallas_and_bls381_moduli_prime
+  Qsag.projEqAffine_zk_constraint_sound
+  Qsag.canonical_scalar_boundaries_exact
+  Qsag.secpNegScalar_props
+  Qsag.clampEd25519Bytes32_bits_and_range
+  Qsag.Weierstrass.Curve.neg_onCurve
+  Qsag.Weierstrass.neg_y_parity
+  Qsag.Weierstrass.Curve.eq_or_eq_neg_of_same_x
+  Qsag.Weierstrass.Curve.add_eq_none_iff_neg
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
+  Qsag.Weierstrass.secp7Mod43_projection_coordinates
+  Qsag.Weierstrass.secp256k1_checked_parameters
+  Qsag.secp256k1_xonly_parity_on_curve_points
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective

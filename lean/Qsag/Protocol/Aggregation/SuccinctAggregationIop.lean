@@ -11270,5 +11270,7 @@ theorem canopyRootHashOf_val (H : ByteArray → ByteArray)
     (hOut : ∀ x, (H x).data.toList.length = 32) (i : Nat) (top : CanopyDigest32) :
     (canopyRootHashOf H hOut i top).val = H (canopyRootFrame i top) := by rfl
 #export_eqns canopyNodeFrame canopyRootFrame
+-- Field values of the audit geometry for `Tests/CompositionInstances`; no body is exposed.
+#export_eqns compactAuditGeom
 end Qsag
 end

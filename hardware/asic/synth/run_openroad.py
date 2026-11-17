@@ -124,7 +124,7 @@ foreach inst [$block getInsts] {{
 puts "Placed $bi SRAM macro banks"
 
 place_pins -hor_layers {cfg['hor_layer']} -ver_layers {cfg['ver_layer']}
-global_placement -density {cfg.get('target_density', 0.52)} -overflow 0.15
+global_placement -density 0.52 -overflow 0.15
 
 source {PDK / cfg['set_rc']}
 estimate_parasitics -placement
@@ -199,15 +199,14 @@ CONFIGS = [
         "ver_layer": "metal2",
         "macro_w": 190.0,
         "macro_h": 140.0,
-        "die_w": 1180,
-        "die_h": 1180,
+        "die_w": 1550,
+        "die_h": 1550,
         "margin": 20,
-        "bank_xs": [20, 210, 970, 1160],
-        "bank_y": 590,
+        "bank_xs": [30, 260, 1070, 1300],
+        "bank_y": 1370,
         "period_ns": 8.0,
         "io_delay": 0.4,
         "nand2_um2": 0.7980,
-        "target_density": 0.65,
     },
     {
         "lib": "sky130",

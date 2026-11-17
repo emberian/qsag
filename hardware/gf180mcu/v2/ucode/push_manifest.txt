@@ -1,0 +1,37 @@
+# Every micro-instruction that writes the response, reviewed. Format: place  source  # what leaves the chip
+# `place` is label+offset in the ROM; `source` is H or a register-file row (rN, +X = indexed).
+# `rel:` marks a release: a declassification point, the only way key-derived data reaches the response.
+# model/romcheck.py fails if the ROM image and this list differ in either direction.
+prov_nonce+7  H        # provisioning nonce, word 0 (public)
+prov_nonce+9  H        # provisioning nonce, word 1
+ping+5        H        # chip identifier (constant)
+ping+7        H        # status word
+ping+9        H        # reserved, zero
+ping+10       H        # reserved, zero
+kq_loop+0     r0+X     # KECCAK: rate lanes of a sponge over host data (no key in this command)
+prfmsg+10     rel:r0   # RELEASE. PRF_MSG: R = SHAKE256(SK.prf || payload), lane 0, after the final permutation
+prfmsg+11     rel:r1   # RELEASE. PRF_MSG: R, lane 1
+w_emit+0      rel:r0   # RELEASE. WOTS: chain value after the chip-derived number of steps, lane 0
+w_emit+1      rel:r1   # RELEASE. WOTS: chain value, lane 1
+fo_emit+0     rel:r0   # RELEASE. FORS: leaf value (PRF output, or F of it under PUBGEN), lane 0
+fo_emit+1     rel:r1   # RELEASE. FORS: leaf value, lane 1
+# configuration L
+p2r_out+0     r0+X     # P2 raw: permutation output (no key in this command)
+p2h_out+2     r0       # P2 hash: digest word 0
+p2h_out+3     r1       # P2 hash: digest word 1
+p2h_out+4     r2       # P2 hash: digest word 2
+p2h_out+5     r3       # P2 hash: digest word 3
+mk_out+0      H        # MERKLE: ok word (0 or 1)
+mk_out+1      r16      # MERKLE: computed root word 0
+mk_out+2      r17      # MERKLE: computed root word 1
+mk_out+3      r18      # MERKLE: computed root word 2
+mk_out+4      r19      # MERKLE: computed root word 3
+# other declassification points: tag verdicts (cmpt) and record tags written to the FRAM (fram)
+fram_write+2  fram:r0  # record tag to the FRAM, word 0
+fram_write+3  fram:r1  # record tag to the FRAM, word 1
+fram_check+4  cmpt:r0  # verdict: record read back equals the one written, word 0
+fram_check+6  cmpt:r1  # verdict: record read back equals the one written, word 1
+anchor_read+5 cmpt:r0  # verdict: stored record is authentic, word 0
+anchor_read+7 cmpt:r1  # verdict: stored record is authentic, word 1
+cth_in+9      cmpt:r0  # verdict: request tag is valid, word 0
+cth_in+11     cmpt:r1  # verdict: request tag is valid, word 1

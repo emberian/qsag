@@ -1,6 +1,7 @@
 module
 /- The certified quadratic extension of the canonical Goldilocks base field. -/
 public import Qsag.Math.GoldilocksBase
+import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 set_option autoImplicit false
@@ -640,3 +641,12 @@ end GoldilocksExt2
 
 
 end Qsag
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.goldilocks_mul_invBezout_cancel
+  Qsag.goldilocks_quadExtMulMod_no_zero_divisors
+  Qsag.goldilocks_universal_mul_inv_cancel
+  Qsag.v_pow4_sub_seven_irreducible
+  Qsag.Goldilocks.natCast_ne_zero
+  Qsag.goldilocks_invBezout_eq_inv

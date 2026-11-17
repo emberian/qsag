@@ -203,6 +203,14 @@ def ZkBooDlogCommitted {C : SwCurve} {G : SwPoint} {ord : Nat}
   let sk := zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2)
   0 < sk ∧ sk < ord ∧ grp.smul sk = pk
 
+theorem ZkBooDlogCommitted_iff {C : SwCurve} {G : SwPoint} {ord : Nat}
+    (grp : PrimeSubgroup C G ord) (pk : SwPoint) (shares : Fin 3 → Nat) :
+    ZkBooDlogCommitted grp pk shares ↔
+      0 < zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2) ∧
+      zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2) < ord ∧
+      grp.smul (zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2)) = pk :=
+  Iff.rfl
+
 theorem zkboo_two_challenge_extraction_sound {C : SwCurve} {G pk : SwPoint} {ord : Nat}
     (grp : PrimeSubgroup C G ord) (shares : Fin 3 → Nat) (e1 e2 : Fin 3) (hNe : e1 ≠ e2)
     (hValid : ZkBooDlogCommitted grp pk shares) :

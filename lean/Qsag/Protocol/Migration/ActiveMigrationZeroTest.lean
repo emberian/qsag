@@ -7348,6 +7348,159 @@ theorem inhabited_unconditional_circuit_to_sacrifice_ceremony :
   Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness
   Qsag.MigrationExecution.inhabited_unconditional_circuit_to_sacrifice_ceremony
 
+/-! ### Executed teeth and witnesses of the sacrifice, flush and ceremony counts
+
+Audited and paired in `Tests/MigrationTeeth`. They are proved here because they run `IpClaim.err`,
+`sacrificeAccepts`, `flushBaseAccepts`, `ceremonyAccepts` and `stagedBadCoinBound`, whose bodies are
+sealed outside this module. `rustGf128Mul` is sealed here too: each product below has an operand
+`0#128` or `1#128` and is rewritten with `rustGf128Mul_one_left` and its three siblings. -/
+
+set_option linter.unusedSimpArgs false
+
+/-- Defect of the length-one claim `1 · 1 = c`. -/
+private theorem unitClaim_err (c : RustGf128) :
+    (⟨1, fun _ => 1#128, fun _ => 1#128, c⟩ : IpClaim).err = 1#128 ^^^ c := by
+  simp only [IpClaim.err, rustDot, rustGf128Mul_one_left, BitVec.zero_xor]
+
+/-- Commit order matters: for a false claim, every coin has a forging message
+    when the message may be chosen after the coin. -/
+theorem tooth_fold_message_after_coin_forges :
+    ∃ s : IpClaim, s.err ≠ 0#128 ∧
+      ∀ rk : RustGf128, ∃ m : FoldMessage, (foldRound s m rk).err = 0#128 := by
+  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, by rw [unitClaim_err]; decide, fun rk => ?_⟩
+  exact ⟨_, fold_message_after_coin_cancels_defect _ rk⟩
+
+/-- The mutant base case that keeps the length test and drops the opened
+    product test. -/
+def baseAcceptsWithoutProductTest (s : IpClaim) (_m : BaseMessage) (_rb : RustGf128) : Bool :=
+  decide (s.len = 1)
+
+/-- Without the product test a false claim is accepted on every coin, while
+    the real base case rejects it. -/
+theorem tooth_sacrifice_without_product_test_accepts_false_claim :
+    ∃ (s : IpClaim) (m : BaseMessage),
+      s.err ≠ 0#128 ∧
+      (∀ rb : RustGf128, baseAcceptsWithoutProductTest s m rb = true) ∧
+      sacrificeAccepts 0 m s [1#128] = false := by
+  refine ⟨⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩, ⟨0#128, 0#128, 0#128, 0#128⟩,
+    by rw [unitClaim_err]; decide, fun _ => rfl, ?_⟩
+  simp only [sacrificeAccepts, baseAccepts, baseOpening, BaseOpening.check,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+  decide
+
+/-- A true two-element claim is accepted through one honest fold and the
+    honest base case. -/
+theorem inhabited_sacrifice_accepted :
+    ∃ (p : FoldProver 1) (s : IpClaim) (coins : List RustGf128),
+      SacrificeAccepted 1 p s coins := by
+  refine ⟨(⟨0#128, 0#128⟩, fun _ => ⟨0#128, 0#128, 0#128, 0#128⟩),
+    ⟨2, fun _ => 1#128, fun _ => 1#128, 0#128⟩, [1#128, 1#128], ?_⟩
+  show sacrificeAccepts 1 _ _ _ = true
+  simp only [sacrificeAccepts, foldRound, IpClaim.half, padded, baseAccepts, baseOpening,
+      BaseOpening.check, Nat.reduceAdd, Nat.reduceDiv, Nat.reduceLT, ↓reduceIte,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+  decide
+
+/-- The mutant base case that checks lane `0` only. -/
+def flushBaseAcceptsLaneZeroOnly (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
+    (rb : CoinPair) : Bool :=
+  finAll 2 (fun t => decide ((cl t 0).len = 1) && baseAccepts (cl t 0) (bm t 0) (coinAt rb t))
+
+/-- Checking one lane lets a false claim in another lane through; the real base
+    case rejects it. -/
+theorem tooth_flush_single_lane_check_accepts_false_lane :
+    ∃ (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (lane : Fin 64) (rb : CoinPair),
+      (cl 0 lane).err ≠ 0#128 ∧ (cl 1 lane).err ≠ 0#128 ∧
+      flushBaseAcceptsLaneZeroOnly cl bm rb = true ∧
+      flushBaseAccepts cl bm rb = false := by
+  refine ⟨fun _ lane => ⟨1, fun _ => 1#128, fun _ => 1#128, if lane.val = 0 then 1#128 else 0#128⟩,
+    fun _ _ => ⟨0#128, 0#128, 0#128, 0#128⟩, 1, (1#128, 1#128),
+    by rw [unitClaim_err]; decide, by rw [unitClaim_err]; decide, ?_, ?_⟩
+  · simp only [flushBaseAcceptsLaneZeroOnly, baseAccepts, baseOpening, BaseOpening.check,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+    decide
+  · simp only [flushBaseAccepts, baseAccepts, baseOpening, BaseOpening.check,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+    decide
+
+/-- The mutant ceremony gate that checks the flush of fork `0` only. -/
+def ceremonyAcceptsForkZeroOnly (r : Nat) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
+    (coins : CeremonyCoins) : Bool :=
+  flushAccepts r (p 0 coins) (cl 0) (coins 0)
+
+/-- Checking one of the seven forks accepts a false repetition of another fork
+    (repetition `64`, fork 1, lane 0); the seven-fork gate rejects it. -/
+theorem tooth_ceremony_single_fork_check_accepts_false_repetition :
+    ∃ (p : CeremonyProver 0) (cl : Fin 7 → FlushClaims) (rep : Fin 438) (coins : CeremonyCoins),
+      FalseRepetition 0 p cl rep ∧
+      ceremonyAcceptsForkZeroOnly 0 p cl coins = true ∧
+      ceremonyAccepts 0 p cl coins = false := by
+  refine ⟨fun _ _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 0,
+    fun b _ _ => ⟨1, fun _ => 1#128, fun _ => 1#128, if b.val = 0 then 1#128 else 0#128⟩,
+    ⟨64, by decide⟩, fun _ => [(1#128, 1#128)],
+    ⟨fun _ _ => rfl, by rw [unitClaim_err]; decide, by rw [unitClaim_err]; decide⟩, ?_, ?_⟩
+  · simp only [ceremonyAcceptsForkZeroOnly, flushAccepts, flushBaseAccepts, constFlushProver,
+      baseAccepts, baseOpening, BaseOpening.check,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+    decide
+  · simp only [ceremonyAccepts, flushAccepts, flushBaseAccepts, constFlushProver,
+      baseAccepts, baseOpening, BaseOpening.check,
+      rustGf128Mul_one_left, rustGf128Mul_one_right, rustGf128Mul_zero_left,
+      rustGf128Mul_zero_right, BitVec.xor_self, BitVec.xor_zero, BitVec.zero_xor]
+    decide
+
+/-- The numerator `63` is not slack: `62 / (2^128 - 1)` is below the staged count. -/
+theorem tooth_rust_bit_check_numerator_62_too_small :
+    ¬ (stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
+      62 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1)))) := by
+  decide +kernel
+
+/-- The `D0_BITS = 16` numerator `54` does not bound the Rust geometry. -/
+theorem tooth_rust_bit_check_numerator_54_too_small :
+    ¬ (stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
+      54 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1)))) := by
+  decide +kernel
+
+/-- The hypotheses of `staged_sacrifice_false_claim_accepting_coins_bound` are jointly
+    satisfiable: a stage that leaves the claim unchanged is sound with degree `0`. -/
+theorem inhabited_staged_sacrifice_hypotheses :
+    ∃ (S Sb : List RustGf128) (stage : Nat → IpClaim → Unit → RustGf128 → IpClaim)
+      (ds : List Nat) (s : IpClaim),
+      S.Nodup ∧ Sb.Nodup ∧
+      StagesSound S stage (fun s => decide (s.err ≠ 0#128)) ds ∧ s.err ≠ 0#128 :=
+  ⟨[0#128, 1#128], [1#128], fun _ s _ _ => s, [0], ⟨1, fun _ => 1#128, fun _ => 1#128, 0#128⟩,
+    by decide, by decide,
+    ⟨fun s _ hs => by
+      have h : (fun _ : RustGf128 => !decide (s.err ≠ 0#128)) = fun _ => false :=
+        funext (fun _ => by rw [show decide (s.err ≠ 0#128) = true from hs]; rfl)
+      show (List.filter (fun _ => !decide (s.err ≠ 0#128)) [0#128, 1#128]).length ≤ 0
+      rw [h]; decide, trivial⟩,
+    by rw [unitClaim_err]; decide⟩
+
+#verify_constructive
+  Qsag.MigrationExecution.tooth_fold_message_after_coin_forges
+  Qsag.MigrationExecution.tooth_sacrifice_without_product_test_accepts_false_claim
+  Qsag.MigrationExecution.inhabited_sacrifice_accepted
+  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
+  Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
+  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
+  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_54_too_small
+  Qsag.MigrationExecution.inhabited_staged_sacrifice_hypotheses
+  Qsag.MigrationExecution.sacrifice_accepted_coins_have_round_count
+#verify_inhabited Qsag.MigrationExecution.sacrifice_accepted_coins_have_round_count
+  Qsag.MigrationExecution.inhabited_sacrifice_accepted
+
 end MigrationExecution
 
 end Qsag
