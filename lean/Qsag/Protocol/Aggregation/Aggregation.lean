@@ -535,22 +535,22 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
 def WhirSecurityRegime.meetsUnconditionalGrover128Floor (r : WhirSecurityRegime) : Bool :=
   decide (128 ≤ r.qromGroverRoundBits)
 
-/-- `WhirSecurityRegime::meets_bounded_qrom_128_profile`: the five CDHZ25 regimes (`5, 6, 7, 8, 10`). -/
-def WhirSecurityRegime.meetsBoundedQrom128Profile : WhirSecurityRegime → Bool
+/-- `WhirSecurityRegime::is_bounded_query_profile`: the five CDHZ25 regimes (`5, 6, 7, 8, 10`).
+    Membership only: 108 or 107 bits of nominal single-round Grover work under a query cap,
+    not a 128-bit level. -/
+def WhirSecurityRegime.isBoundedQueryProfile : WhirSecurityRegime → Bool
   | .cdhz25JohnsonQrom128 | .cdhz25ZeroPowQrom128
   | .poseidon2Cdhz25JohnsonQrom128 | .poseidon2Cdhz25ZeroPowQrom128
   | .turboShakeCdhz25JohnsonQrom128 => true
   | _ => false
 
-/-- Canonical honest name for the aggregate authorization policy: either the unconditional
-    128-bit Grover round-work floor (tags `4, 9`) or an accounted bounded-query CDHZ25 profile
-    (tags `5, 6, 7, 8, 10`). Classical tag `2` is never authorized. -/
-def WhirSecurityRegime.meetsAuthorizedAggRegimeFloor (r : WhirSecurityRegime) : Bool :=
-  r.meetsUnconditionalGrover128Floor || r.meetsBoundedQrom128Profile
-
-/-- Backwards-compatible alias matching Rust `WhirSecurityRegime::meets_qrom_128_floor`. -/
-abbrev WhirSecurityRegime.meetsQrom128Floor (r : WhirSecurityRegime) : Bool :=
-  r.meetsAuthorizedAggRegimeFloor
+/-- `WhirSecurityRegime::is_accepted_aggregate_profile`: the aggregate verifier's profile
+    policy, either at least 128 bits of nominal single-round Grover work (tags `4, 9`) or a
+    bounded-query CDHZ25 profile (tags `5, 6, 7, 8, 10`). Classical tag `2` is excluded.
+    Policy membership, not a security floor: `crates/qsag-agg/SECURITY.md` puts the composed
+    QROM level of every accepted tag at 81 bits (256-bit digests). -/
+def WhirSecurityRegime.isAcceptedAggregateProfile (r : WhirSecurityRegime) : Bool :=
+  r.meetsUnconditionalGrover128Floor || r.isBoundedQueryProfile
 
 /-- `WhirSecurityRegime::uses_poseidon2_canopy`. -/
 def WhirSecurityRegime.usesPoseidon2Canopy : WhirSecurityRegime → Bool
@@ -680,15 +680,15 @@ theorem whirRegime_unconditional_grover_floor (r : WhirSecurityRegime) :
   cases r <;> decide
 
 /-- **(b) The bounded-query profiles.** The five CDHZ25 regimes (tags `5, 6, 7, 8, 10`) are
-    exactly the regimes with `meetsBoundedQrom128Profile`. None reaches the 128-bit nominal Grover
+    exactly the regimes with `isBoundedQueryProfile`. None reaches the 128-bit nominal Grover
     floor: tags `5, 7, 10` have 108 bits at an accounted budget `Q ≤ 2^38`, tags `6, 8` have 107
     bits at `Q + 1 ≤ 2^40`. -/
 theorem whirRegime_bounded_query_profiles (r : WhirSecurityRegime) :
-    (r.meetsBoundedQrom128Profile = true ↔
+    (r.isBoundedQueryProfile = true ↔
       r = .cdhz25JohnsonQrom128 ∨ r = .cdhz25ZeroPowQrom128 ∨
       r = .poseidon2Cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25ZeroPowQrom128 ∨
       r = .turboShakeCdhz25JohnsonQrom128) ∧
-    (r.meetsBoundedQrom128Profile = true → r.meetsUnconditionalGrover128Floor = false) ∧
+    (r.isBoundedQueryProfile = true → r.meetsUnconditionalGrover128Floor = false) ∧
     (r = .cdhz25JohnsonQrom128 ∨ r = .poseidon2Cdhz25JohnsonQrom128 ∨
       r = .turboShakeCdhz25JohnsonQrom128 →
       r.qromGroverRoundBits = 108 ∧ r.boundedQueryLog2? = some 38) ∧
@@ -700,7 +700,7 @@ theorem whirRegime_bounded_query_profiles (r : WhirSecurityRegime) :
     classical regime (tag `2`) has 72 and is never authorized for aggregates. -/
 theorem whirRegime_grover_round_bits_table :
     WhirSecurityRegime.all.map (·.qromGroverRoundBits) = [72, 136, 108, 107, 108, 107, 136, 108] ∧
-    WhirSecurityRegime.all.map (·.meetsAuthorizedAggRegimeFloor) =
+    WhirSecurityRegime.all.map (·.isAcceptedAggregateProfile) =
       [false, true, true, true, true, true, true, true] ∧
     WhirSecurityRegime.all.map (·.tagByte) = [2, 4, 5, 6, 7, 8, 9, 10] := by
   decide
