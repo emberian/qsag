@@ -172,7 +172,10 @@ struct Bench {
     void por(int cid) {
         const ChipDef& c = chips.at(cid);
         idle_inputs();
-        top->por_n = 0; top->tamper_n = 1; top->eval();
+        // a falling edge on the reset pad every time: the behavioural tamper latch of qsag_cells is cleared
+        // by the edge (the gf180 cell by the level), and the first reset starts from random storage
+        top->tamper_n = 1; top->por_n = 1; top->eval();
+        top->por_n = 0; top->eval();
         for (int i = 0; i < 3; i++) edge();
         if (cur_rom != c.rom) load_rom(c.rom);
         top->puf_present = c.puf;
@@ -364,7 +367,14 @@ int main(int argc, char** argv) {
     b.top->dump_row = 0; b.top->bd_row = 0; b.top->bd_data = 0; b.top->bd_flags = 0;
     b.top->puf_present = 0; b.top->ent_present = 0;
     b.idle_inputs();
+    b.top->por_n = 1;                                   // no reset yet: what does the storage start as?
     b.top->eval();
+    {
+        int nz = 0;
+        for (unsigned r = 0; r < b.top->nrows_o; r++) { b.top->dump_row = r; b.top->eval(); nz += b.top->dump_data != 0; }
+        printf("before the first reset: %d of %u rows non-zero, hold register %016llx, flags %03x\n", nz, (unsigned)b.top->nrows_o,
+               (unsigned long long)b.top->dump_h, (unsigned)b.top->dump_flags);
+    }
 
     std::ifstream in(b.dir + "/trace.txt");
     if (!in) { printf("cannot open %s/trace.txt\n", b.dir.c_str()); return 2; }

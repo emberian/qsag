@@ -2,8 +2,8 @@
 
 rom_with(body, where) builds the shipped ROM with one extra routine at opcode 0x7A:
     where = "rom"   appended after the shipped code (ordinary address range)
-    where = "key"   in place of provision.uc (the hardwired key range)
-    where = "rec"   appended to fram.uc (the hardwired record range)
+    where = "key"   appended to key.uc (the hardwired key range; about 20 words are free)
+    where = "rec"   appended to rec.uc (the hardwired record range; about 15 words are free)
 """
 import common  # noqa: F401
 import chip
@@ -11,32 +11,27 @@ import host
 import isa
 import uasm
 
-K = bytes(range(0x40, 0x50))
-SEED = bytes(range(0x10, 0x20))
-PRF = bytes(range(0x20, 0x30))
+KDEV = [0x1111111111111111 * (i + 1) for i in range(4)]
 TEST_OP = 0x7A
 
 
-def rom_with(body, where="rom", config="S", end=True):
-    text = f".entry {TEST_OP} t_entry diag\nt_entry:\n" + body + ("\n END\n" if end else "\n")
-    src = chip.read_sources(config)
-    if where == "rom":
-        src = src + [("fixture", text)]
-    elif where == "key":
-        src = [(n, text if n == "provision.uc" else t) for n, t in src]
-    elif where == "rec":
-        src = [(n, t + text if n == "fram.uc" else t) for n, t in src]
-    else:
-        raise ValueError(where)
-    return uasm.assemble(src)
+def rom_with(body, where="rom", config="S", end=True, slh=common.SLH):
+    src = chip.read_sources(config, slh)
+    tail = "\n END\n" if end else "\n"
+    name = {"rom": None, "key": "key.uc", "rec": "rec.uc"}[where]
+    if name is None:
+        return uasm.assemble(src + [("fixture", f"\n.entry {TEST_OP} t_entry any\nt_entry:\n" + body + tail)])
+    # a command starts in the ordinary code (the dispatcher refuses anything else) and branches into the range
+    src = [(n, t + "\nt_body:\n" + body + tail if n == name else t) for n, t in src]
+    return uasm.assemble(src + [("fixture", f"\n.entry {TEST_OP} t_entry any\nt_entry: BR t_body\n")])
 
 
 def run(body, payload=(), keys=True, where="rom", config="S", end=True, **chip_kw):
     c = common.new_chip(config, rom=rom_with(body, where, config, end), **chip_kw)
     if keys:
-        # keys are placed directly: the fixture ROM may have no provisioning routine
-        for i, w in enumerate(host.words_of(K + SEED + PRF)):
-            c.m.rf[isa.KEY0 + 4 + i] = w
-        c.m.key_valid = True
+        # the device key is placed directly and the chip is put in READY: the fixture is not a boot
+        for i, w in enumerate(KDEV):
+            c.m.rf[isa.KEY0 + i] = w
+        c.m.lc = isa.LC_READY
     rsp = c.transact([host.hdr(TEST_OP, 0, 8 * len(payload))] + list(payload))
     return c, rsp

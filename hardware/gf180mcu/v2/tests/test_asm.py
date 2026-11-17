@@ -37,7 +37,11 @@ class Encoding(unittest.TestCase):
         self.assertEqual(one("ST t0"), (8 << 23) | (isa.SCRATCH0 << 9) | (1 << 5))
         self.assertEqual(one("KEC 12 ret"), (19 << 23) | (1 << 16) | 1)
         self.assertEqual(one("x: BXNE #17 x"), (26 << 23) | (17 << 16))
-        self.assertEqual(one("KMOV k_host0 > l0"), (15 << 23) | ((isa.KEY0 + 4) << 16))
+        self.assertEqual(one("KMOV k_dev2 > l0"), (15 << 23) | ((isa.KEY0 + 2) << 16))
+        self.assertEqual(one("PMOV #3 > l5"), (15 << 23) | (3 << 16) | (5 << 9) | (1 << 5))
+        self.assertEqual(one("CTL LC #4"), (17 << 23) | (1 << 16) | (4 << 9))
+        self.assertEqual(one("UN XT"), (8 << 23) | (13 << 16))
+        self.assertEqual(one("UN SHL1C > t0"), (8 << 23) | (14 << 16) | (isa.SCRATCH0 << 9) | (1 << 5))
         self.assertEqual(one("PUSH l2"), (12 << 23) | (2 << 16))
         self.assertEqual(one("REL l2"), (12 << 23) | (2 << 16) | (1 << 5))
         self.assertEqual(one("PUSH H"), (12 << 23) | (2 << 5))
@@ -54,9 +58,12 @@ class Encoding(unittest.TestCase):
         with self.assertRaises(uasm.AsmError):
             uasm.assemble([("t", "NOP\nNOP\n.org 1\n")])
 
-    def test_entries_carry_a_dispatch_class(self):
-        rom = uasm.assemble([("t", "a: NOP\n.entry 0x40 a prov\n.entry 1 a diag\n.entry 2 a keyed\n")])
-        self.assertEqual(rom.entries, {0x40: (0, isa.D_PROV), 1: (0, isa.D_DIAG), 2: (0, isa.D_KEYED)})
+    def test_entries_carry_the_lifecycle_states_they_decode_in(self):
+        rom = uasm.assemble([("t", "a: NOP\n.entry 0x40 a blank\n.entry 1 a any\n.entry 2 a ready\n.entry 3 a orphan|lease\n")])
+        self.assertEqual(rom.entries, {0x40: (0, 1 << isa.LC_BLANK), 1: (0, isa.LC_ANY), 2: (0, 1 << isa.LC_READY),
+                                       3: (0, (1 << isa.LC_ORPHAN) | (1 << isa.LC_LEASE))})
+        with self.assertRaises(uasm.AsmError):
+            uasm.assemble([("t", "a: NOP\n.entry 1 a sometimes\n")])
         with self.assertRaises(uasm.AsmError):
             uasm.assemble([("t", "a: NOP\n.entry 0x40 a\n")])
 
@@ -88,8 +95,9 @@ class Encoding(unittest.TestCase):
            HDR #70
            HDR #5 okz
            FAIL #5
-           KMOV k_seed0 > l6
-           KEYWR > k_host0+X x+
+           KMOV k_dev0 > l6
+           PMOV #2 > l3
+           KEYWR > k_dev0+X x+
            CTL SETFM
            WIPE #15
            KEC 24
@@ -101,7 +109,13 @@ class Encoding(unittest.TestCase):
            FRAM WWORD l1
            FRAM WSTART
            CTL AUTH
-           LDF NONCE1
+           LDF TRAW
+           LDF SYN1 > t2
+           CTL LC #5
+           CTL SYNW #1
+           CTL TRUN
+           UN XT > t1
+           UN SHL1C
            END
            SETX #9
            SETX H
@@ -117,12 +131,12 @@ class Encoding(unittest.TestCase):
            ST t0 ret
         """
         rom = uasm.assemble([("t", src)])
-        self.assertEqual(len(rom.words), 47)
+        self.assertEqual(len(rom.words), 54)
         again = uasm.assemble([("d", "\n".join(uasm.disasm(w) for w in rom.words))])
         self.assertEqual(again.words, rom.words)
 
     def test_errors(self):
-        for bad in ("BR nowhere", "LD #0x10000", "FROB t0", "x: NOP\nx: NOP", "LD t0 > ", "KMOV k_host0",
+        for bad in ("BR nowhere", "LD #0x10000", "FROB t0", "x: NOP\nx: NOP", "LD t0 > ", "KMOV k_dev0", "PMOV #1", "CTL LC", "CTL AUTH #1",
                     "PUSH l0 > t0", "LD r200", ".const C \"short\"", "SETC 0", "REL l0 > t0", "CMPT #5", "CMP l0 > t0",
                     "END ret", "FRAM WWORD", "FRAM WSTART > t0", "x: NOP\n.entry 1 x nobody", ".keyrange"):
             with self.assertRaises(uasm.AsmError, msg=bad):

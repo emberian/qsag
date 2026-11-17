@@ -171,6 +171,8 @@ proc timing_report {tag} {
     catch { report_worst_slack -min }
     catch { report_check_types -max_slew -max_capacitance -max_fanout -violators > $::out/violators_$tag.rpt }
     catch { report_checks -corner ss -path_delay max -path_group clk_core -group_path_count 1 -format full > $::out/worst_core_ss_$tag.rpt }
+    catch { report_checks -corner ss -path_delay min -group_path_count 1 -format full_clock_expanded > $::out/worst_hold_ss_$tag.rpt }
+    catch { report_checks -corner ss -path_delay min -group_path_count 3000 -unique_paths_to_endpoint -slack_max 0 -format summary > $::out/hold_viol_ss_$tag.rpt }
     catch { report_checks -corner ss -path_delay max -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}] -format full > $::out/responder_ss_$tag.rpt }
     catch { report_checks -corner tt -path_delay max -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}] -format full > $::out/responder_tt_$tag.rpt }
     puts "==== end timing $tag"
@@ -267,8 +269,17 @@ foreach st $stages {
         # Setup repair is bounded: the proxy's micro-instruction path (PC -> ROM -> row address -> read ->
         # word unit) is 2.2 periods long at the slow corner and no buffering closes it; an unbounded
         # repair_timing works on 5,200 endpoints for hours. Worst endpoint only, 20 passes (10 passes take 3 minutes here).
-        if { [catch {repair_timing -setup -setup_margin 0.05 -max_buffer_percent 20 -repair_tns 0 -max_passes [envd P_SETUP_PASSES 20] -verbose} err] } { puts "RT_SETUP_ERROR $err" }
-        if { [catch {repair_timing -hold -hold_margin 0.35 -setup_margin 0.05 -max_buffer_percent 50 -allow_setup_violations -verbose} err] } { puts "RT_HOLD_ERROR $err" }
+        # Default: no setup repair (P_SETUP=1 enables it). In the 14 minutes it was given it moved the slow
+        # corner's worst slack from -49.1 to -40.8 ns with 20 cells and was still running.
+        if { [envd P_SETUP 0] } {
+            if { [catch {repair_timing -setup -setup_margin 0.05 -max_buffer_percent 20 -repair_tns 0 -max_passes [envd P_SETUP_PASSES 20] -verbose} err] } { puts "RT_SETUP_ERROR $err" }
+        }
+        # Hold repair is off by default (P_HOLD=1 enables it): run g1 found 1,774 violating endpoints, nearly
+        # all flop/latch -> latch paths behind clock gates (up to -19 ns at the slow corner), and answered
+        # with 19,592 hold buffers (+258,000 um2), after which placement could not be legalised (DPL-0016).
+        if { [envd P_HOLD 0] } {
+    if { [catch {repair_timing -hold -hold_margin 0.35 -setup_margin 0.05 -max_buffer_percent 50 -allow_setup_violations -verbose} err] } { puts "RT_HOLD_ERROR $err" }
+        }
         dont_touch 0
         rf_nets 1
         if { [catch {dpl} err] } { puts "DPL3_ERROR $err"; metric dpl3_failed 1 }
@@ -282,7 +293,9 @@ foreach st $stages {
     # ================================================================ global route
     if { $st eq "grt" } {
         set_propagated_clock [all_clocks]
-        if { [catch {global_route -congestion_iterations [envd P_GRT_ITERS 50] -verbose \
+        set gargs {}
+        if { [envd P_GRT_ALLOW 0] } { lappend gargs -allow_congestion }
+        if { [catch {global_route -congestion_iterations [envd P_GRT_ITERS 50] -verbose {*}$gargs \
                 -congestion_report_file $out/congestion.rpt} err] } {
             puts "GRT_ERROR $err"; metric grt_failed 1
             catch {global_route -congestion_iterations 30 -verbose -allow_congestion -congestion_report_file $out/congestion.rpt}

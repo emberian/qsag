@@ -7,9 +7,9 @@ and state of the sequencer; none reads a property of the ROM image. A violation 
 every latch is cleared and nothing is answered.
 
   Key rows
-  R1  key rows are read only by KMOV and written only by KEYWR. KEYWR, CTL SETKV, CTL AUTH and
-      CTL NONCE decode only at addresses KEY_LO..KEY_HI. KEYWR and SETKV also need the authorisation
-      latch, which only CTL AUTH sets, in the same command.
+  R1  key rows are read only by KMOV and written only by KEYWR. KEYWR decodes only at addresses
+      KEY_LO..KEY_HI and needs the verdict latch, which only CTL AUTH sets (in the key range, from an
+      untainted and clear compare flag), in the same command.
   R2  KMOV writes a rate lane (0..16), sets `keyed`, `dirty` and the lane taint, and clears H.
   R3  while `dirty` (a key was copied into the lanes and no permutation has run since), a lane is
       read only by an XOR that stores back to the same lane, and H is cleared afterwards.
@@ -19,11 +19,11 @@ every latch is cleared and nothing is answered.
   Taint (key-derived data)
   R5  four flags: T_lanes (the lanes hold key-derived data), T_H, T_Z, T_CY. KMOV sets T_lanes; only a
       wipe of all lanes clears it. Reading a lane while T_lanes taints H; H's taint follows it through
-      the word unit; CMP taints Z, ADD and SUB taint the carry.
-  R6  a tainted H is stored only to a lane or (KEYWR) a key row. Scratch, pin, state and challenge
-      rows, the index register and the loop counters therefore never hold key-derived data.
+      the word unit; CMP taints Z, ADD, SUB and SHL1C taint the carry.
+  R6  a tainted H is stored only to a lane or (KEYWR) a key row. Scratch, state and challenge rows, the
+      index register and the loop counters therefore never hold key-derived data.
   R7  refused when the value is tainted: PUSH, HDR (length), SETX H, SETC H, FRAM RSTART / WSTART
-      (slot), CTL SETKV, CTL VOK, and every branch on a tainted flag (Z, carry, H = 0).
+      (record index), CTL AUTH, CTL VOK, CTL SYNW, CTL TSEL, and every branch on a tainted flag.
   R8  declassification points, the only ways key-derived data crosses R7:
         REL lane   a rate lane, after a permutation, to the response
         CMPT lane  compares an untainted H (a word the host or the FRAM supplied) with a rate lane
@@ -35,17 +35,21 @@ every latch is cleared and nothing is answered.
       at most the cap in the instruction; the egress stops at that length and the end action pads to
       it. Out rows are not addressable. FAIL is refused after HDR.
   R10 a command ends only by END or FAIL (or a hardware refusal in DISP). The end action is hardware:
-      pad the response, clear every working row and the session flags, discard unread payload, go to
-      address 0. No instruction can branch to address 0, and DISP decodes only there.
+      pad the response, clear every working row, the PUF response register and the session flags,
+      discard unread payload, go to address 0. No instruction can branch to address 0, and DISP decodes
+      only there.
 
-  FRAM
-  R11 FRAM instructions decode only at addresses REC_LO..REC_HI. FRAM WWORD sends one of three rows:
-      the record counter row (scratch 9) or lane 0 or 1 after a permutation. A transaction is three
-      words in one direction.
-
-  Lifecycle
-  R12 DISP refuses by class: provisioning commands need the device secret and no key yet; keyed
-      commands need a valid key. Bad magic and unknown opcodes are refused by DISP itself.
+  FRAM and lifecycle state
+  R11 FRAM instructions decode only at addresses REC_LO..REC_HI. FRAM WWORD sends a state row, or lane
+      0 or 1 after a permutation. A transaction is at most 16 words in one direction.
+  R12 DISP decodes a command only in the lifecycle states its dispatch entry names. Bad magic and
+      unknown opcodes are refused by DISP itself.
+  R13 the PUF organ: CTL PUFE, PUFR, SYNW and PMOV decode only in the key range. PMOV moves a word of
+      the response register to a rate lane under the rules of KMOV (R2). Nothing else reads it.
+  R14 state rows (the loaded lifecycle record, lease, nonce) are written only at addresses
+      REC_LO..REC_HI.
+  R15 the lifecycle register is written only by CTL LC in the key range; READY only with the verdict
+      latch set, and only from RESET or LEASE; nothing leaves LOCKED.
 """
 import isa
 import units
@@ -54,43 +58,44 @@ from regfile import RegFile
 
 
 class ControlFault(Exception):
+    """`sent` is what the link had already carried when the fault struck: the response header and the
+    words pushed before it. Hardware cannot take them back; the frame is cut short (link.py)."""
+
     def __init__(self, msg, pc, place):
         super().__init__(f"{msg} at {place} (address {pc})")
         self.msg, self.pc, self.place = msg, pc, place
+        self.sent = []
 
 
 class Machine:
-    MAX_STEPS = 20_000_000
+    MAX_STEPS = 1 << 28                 # a 28-bit step counter: a statement of 256 members is about 2^27.4
 
-    def __init__(self, rom, config="S", fram=None, puf=None, entropy=None, owner=None):
+    def __init__(self, rom, config="S", fram=None, puf=None, trng=None):
         assert config in ("S", "L")
         self.rom, self.config = rom, config
+        self.dec = [(isa.decode(w), isa.OPS[w >> 23]) for w in rom.words]
         self.rf = RegFile(isa.ROWS_L if config == "L" else isa.ROWS_S)
+        self.cls = [isa.row_class(r, self.rf.nrows) for r in range(128)]
         self.keccak, self.field, self.fram = units.KeccakUnit(), units.FieldUnit(), units.FramUnit(fram)
-        self.puf, self.entropy, self.owner = puf, entropy, owner
+        self.puf, self.trng = puf, trng
         self.framer = Framer()
         self.trace = None                   # optional callback(pc, word, machine)
-        self.boot_cycles = 0
         self.power_on()
 
     # ------------------------------------------------------------ state
     def power_on(self):
-        """Reset, power cycle or control fault: everything on the chip is volatile. The FRAM is not
-        part of the chip. Boot then re-derives the device secret if the PUF interface is present."""
+        """Reset, power cycle or control fault: everything on the chip is volatile, the lifecycle
+        register included. The FRAM is not part of the chip."""
         self.rf.secret_reset()
-        self.key_valid = False
-        self.key_attr = 0
-        self.nonce = None
+        self.lc = isa.LC_RESET
         self.fault_mac = self.fault_anchor = self.fault_control = False
         self.verify_ok = False
         self.fram.abort()
         self.framer = Framer()
-        self.dev_ok = False
         if self.puf is not None:
-            for i, w in enumerate(self.puf.reconstruct()):
-                self.rf[isa.KEY0 + i] = w
-            self.dev_ok = True
-            self.boot_cycles = units.PUF_BOOT
+            self.puf.power_on()
+        if self.trng is not None:
+            self.trng.power_on()
         self._session()
 
     def _session(self):
@@ -106,11 +111,11 @@ class Machine:
         self.auth_ok = False
         self.limit = 0
         self.last_w = None
+        self.last_wipe = self.cur_wipe = 0
 
     def status_word(self):
-        return (int(self.key_valid) | (int(self.fault_mac) << 1) | (int(self.fault_anchor) << 2)
-                | (int(self.dev_ok) << 3) | ((self.key_attr & 0xF) << 4)
-                | (int(self.config == "L") << 8) | (self.rom.used << 32))
+        return (int(self.lc == isa.LC_READY) | (int(self.fault_mac) << 1) | (int(self.fault_anchor) << 2)
+                | (self.lc << 4) | (int(self.config == "L") << 8) | (self.rom.used << 32))
 
     # ------------------------------------------------------------ decoder helpers
     def _fault(self, msg):
@@ -118,7 +123,7 @@ class Machine:
 
     def _rd(self, row, same=None):
         """Value and taint of a row as the word unit reads it."""
-        cls = isa.row_class(row, self.rf.nrows)
+        cls = self.cls[row]
         if cls in ("none", "key", "out", "kwork"):
             self._fault(f"read of {cls} row {row}")
         tainted = False
@@ -128,15 +133,27 @@ class Machine:
             if self.keyed and row >= isa.RATE_LANES:
                 self._fault(f"read of capacity lane {row} in a keyed command")
             tainted = self.t_lanes
-        if row == self.last_w:
-            self.cycles += 1                # the row is transparent this clock: one stall
-            self.stalls += 1
+        self._stall(row)
         return self.rf[row], tainted
 
+    def _stall(self, row):
+        """A row written in the previous clock (by a store, the last lane of a permutation, or a wipe of
+        its class) is still transparent: reading it costs one clock."""
+        if row == self.last_w or (self.last_wipe and self._wiped(row)):
+            self.cycles += 1
+            self.stalls += 1
+
+    def _wiped(self, row):
+        m = self.last_wipe
+        return ((m & isa.W_LANES_LO and row < 8) or (m & isa.W_LANES_HI and 8 <= row < isa.SCRATCH0)
+                or (m & isa.W_SCRATCH and isa.SCRATCH0 <= row < isa.KEY0) or (m & isa.W_OUT and row >= isa.OUT0))
+
     def _wr(self, row, v, tainted):
-        cls = isa.row_class(row, self.rf.nrows)
+        cls = self.cls[row]
         if cls in ("none", "key", "out", "kwork"):
             self._fault(f"write of {cls} row {row}")
+        if cls in ("pin", "state") and not isa.REC_LO <= self.cur_pc <= isa.REC_HI:
+            self._fault("write of a state row outside the record range")
         if tainted:
             if cls != "lane":
                 self._fault(f"store of key-derived data to {cls} row {row}")
@@ -155,6 +172,8 @@ class Machine:
         return isa.KEY_LO <= self.cur_pc <= isa.KEY_HI
 
     def _cond(self, c):
+        if c >= len(isa.COND):
+            self._fault("undefined function code")
         n = isa.COND[c]
         if n in ("Z", "NZ") and self.t_z:
             self._fault("branch on a key-derived compare result")
@@ -162,10 +181,19 @@ class Machine:
             self._fault("branch on a key-derived carry")
         if n in ("HZ", "HNZ") and self.t_h:
             self._fault("branch on key-derived data")
-        return {"AL": True, "Z": bool(self.z), "NZ": not self.z, "CY": bool(self.cy), "NC": not self.cy,
-                "HZ": self.h == 0, "HNZ": self.h != 0, "MORE": self.framer.remaining > 0,
-                "NOMORE": self.framer.remaining == 0, "KV": self.key_valid, "NKV": not self.key_valid,
-                "C1Z": self.c[1] == 0, "C1NZ": self.c[1] != 0}[n]
+        if n == "AL":
+            return True
+        if n in ("Z", "NZ"):
+            return bool(self.z) == (n == "Z")
+        if n in ("CY", "NC"):
+            return bool(self.cy) == (n == "CY")
+        if n in ("HZ", "HNZ"):
+            return (self.h == 0) == (n == "HZ")
+        if n in ("MORE", "NOMORE"):
+            return (self.framer.remaining > 0) == (n == "MORE")
+        if n in ("KV", "NKV"):
+            return (self.lc == isa.LC_READY) == (n == "KV")
+        return (self.c[1] == 0) == (n == "C1Z")
 
     def _emit(self, v):
         if not self.hdr_done or self.failed:
@@ -188,6 +216,8 @@ class Machine:
         self.rf.wipe(isa.W_LANES_LO | isa.W_LANES_HI | isa.W_SCRATCH | isa.W_OUT)
         self.framer.drain()
         self.fram.abort()
+        if self.puf is not None:
+            self.puf.clear()
         self.cycles += isa.END_CLOCKS - 1
         self._session()
 
@@ -204,7 +234,7 @@ class Machine:
         self.response = []
         self.sent = 0
         self.cycles = self.steps = self.stalls = 0
-        self.unit_cycles = {"keccak": 0, "field": 0, "fram": 0, "auth": 0}
+        self.unit_cycles = {"keccak": 0, "field": 0, "fram": 0, "puf": 0, "trng": 0}
         self.unit_calls = {"keccak": 0, "field": 0}
         self.key_words_emitted = []
         self.verify_ok = False
@@ -212,7 +242,8 @@ class Machine:
             while self._step():
                 if self.steps > self.MAX_STEPS:
                     self._fault("runaway microprogram")
-        except ControlFault:
+        except ControlFault as e:
+            e.sent = list(self.response)
             self.power_on()
             self.fault_control = True
             raise
@@ -224,13 +255,13 @@ class Machine:
         if pc >= len(rom.words):
             self._fault("fell off the end of the ROM")
         w = rom.words[pc]
-        d = isa.decode(w)
-        mn = isa.OPS[d["op"]]
+        d, mn = self.dec[pc]
         if self.trace:
             self.trace(pc, w, self)
         self.steps += 1
         self.cycles += 1
         self.cur_w = None
+        self.cur_wipe = 0
         self.pc = pc + 1
         fr = self.framer
         a = (d["a"] + self.x) & 127 if d["ia"] else d["a"]
@@ -272,6 +303,10 @@ class Machine:
             if store:
                 self._wr(b, self.h, self.t_h or clear_h)
         elif mn == "UN":
+            if d["a"] >= len(isa.UN):
+                self._fault("undefined function code")
+            if isa.UN[d["a"]] == "SHL1C":
+                self.cy, self.t_cy = self.h >> 63, self.t_h
             self.h = units.unary(d["a"], self.h)
             if store:
                 self._wr(b, self.h, self.t_h)
@@ -282,15 +317,26 @@ class Machine:
             if store:
                 self._wr(b, self.h, False)
         elif mn == "LDF":
+            if d["a"] >= len(isa.LDF):
+                self._fault("undefined function code")
             n = isa.LDF[d["a"]]
-            nonce = self.nonce or [0, 0]
-            self.h = {"HDRW": fr.hdr, "FLAGS": fr.flags, "LEN": fr.length, "NWORDS": fr.remaining, "ARG": fr.arg,
-                      "ARGLO": fr.arg & 0xFF, "ARGHI": fr.arg >> 8, "X": self.x, "STATUS": self.status_word(),
-                      "NONCE0": nonce[0], "NONCE1": nonce[1], "KATTR": self.key_attr}[n]
+            if n in ("HDRW", "FLAGS", "LEN", "NWORDS", "ARG", "ARGLO", "ARGHI", "X", "STATUS", "LC"):
+                self.h = {"HDRW": fr.hdr, "FLAGS": fr.flags, "LEN": fr.length, "NWORDS": fr.remaining, "ARG": fr.arg,
+                          "ARGLO": fr.arg & 0xFF, "ARGHI": fr.arg >> 8, "X": self.x, "STATUS": self.status_word(),
+                          "LC": self.lc}[n]
+            elif n in ("SYN0", "SYN1", "PNOISE"):       # public outputs of the PUF organ
+                p = self.puf
+                self.h = 0 if p is None else p.noise() if n == "PNOISE" else p.syn[int(n[3])]
+            else:                                       # statistics and raw word of the TRNG organ
+                t = self.trng
+                self.h = 0 if t is None else {
+                    "TS1": t.s1, "TS4": t.s4, "TSUM": t.total, "TFLAGS": t.flag_word(), "TRAW": t.raw}[n]
             self.t_h = False
             if store:
                 self._wr(b, self.h, False)
         elif mn == "LDC":
+            if d["a"] >= len(rom.consts):
+                self._fault("undefined constant")
             self.h, self.t_h = rom.consts[d["a"]], False
             if store:
                 self._wr(b, self.h, False)
@@ -304,6 +350,7 @@ class Machine:
                     self._fault("REL operand is not a rate lane")
                 v, _ = self._rd(a)
                 self._emit(v)
+                clear_h = True                      # the row passes through the hold register
             else:
                 if isa.row_class(a, self.rf.nrows) not in ("lane", "scratch", "pin", "state", "chal"):
                     self._fault(f"PUSH of {isa.row_class(a, self.rf.nrows)} row {a}")
@@ -311,6 +358,7 @@ class Machine:
                 if tx:
                     self._fault("PUSH of key-derived data")
                 self._emit(v)
+                clear_h = True
         elif mn == "HDR":
             if self.hdr_done or self.failed:
                 self._fault("second response header")
@@ -329,11 +377,20 @@ class Machine:
             self._refuse(isa.imm16(d))
             return False
         elif mn == "KMOV":
-            if isa.row_class(a, self.rf.nrows) != "key":
-                self._fault("KMOV source is not a key row")
+            if d["fn"] & 1:                         # PMOV: a word of the PUF response register (R13)
+                if not self._in_key_range():
+                    self._fault("PMOV outside the key range")
+                if self.puf is None or self.puf.rsp is None or d["ia"] or d["a"] >= units.PUF_BLOCKS:
+                    self._fault("PMOV without a PUF response")
+                v = self.puf.rsp[d["a"]]
+            else:
+                if isa.row_class(a, self.rf.nrows) != "key":
+                    self._fault("KMOV source is not a key row")
+                self._stall(a)
+                v = self.rf[a]
             if not 0 <= b < isa.RATE_LANES:
                 self._fault("KMOV destination is not a rate lane")
-            self.rf[b] = self.rf[a]
+            self.rf[b] = v
             self.cur_w = b
             self.keyed = self.dirty = self.t_lanes = True
             clear_h = True
@@ -342,24 +399,18 @@ class Machine:
             if not self._in_key_range():
                 self._fault("KEYWR outside the key range")
             if not self.auth_ok:
-                self._fault("KEYWR without authorisation")
+                self._fault("KEYWR without the verdict latch")
             if isa.row_class(b, self.rf.nrows) != "key":
                 self._fault("KEYWR destination is not a key row")
             self.rf[b] = self.h
             self.cur_w = b
             clear_h = True
         elif mn == "CTL":
+            if d["a"] >= len(isa.CTL):
+                self._fault("undefined function code")
             n = isa.CTL[d["a"]]
             if n == "CLRZ":
                 self.z, self.t_z = 0, False
-            elif n == "SETKV":
-                if not self._in_key_range():
-                    self._fault("SETKV outside the key range")
-                if not self.auth_ok:
-                    self._fault("SETKV without authorisation")
-                if self.t_h:
-                    self._fault("key attribute from key-derived data")
-                self.key_valid, self.key_attr = True, self.h & 0xF
             elif n == "SETFM":
                 self.fault_mac = True
             elif n == "SETFA":
@@ -368,41 +419,64 @@ class Machine:
                 if self.t_z:
                     self._fault("verdict pin from a key-derived compare result")
                 self.verify_ok = not self.z
-            elif n == "NONCE":
-                if not self._in_key_range():
-                    self._fault("NONCE outside the key range")
-                if self.entropy is None:
-                    self.nonce, self.z = None, 1
-                else:
-                    self.nonce = self.entropy.draw()
-                    self.cycles += units.NONCE_DRAW
-            elif n == "AUTH":
-                # Owner-root authorisation of the statement (nonce, lanes 0..3), read from the next two
-                # payload words. Stage 4 replaces the two words by a signature stream and this call by
-                # the signature-verification routine; the interface is the same. One attempt per nonce.
-                if not self._in_key_range():
-                    self._fault("AUTH outside the key range")
-                if fr.remaining < 2:
-                    self._fault("AUTH past the end of the payload")
-                sig = [fr.din(), fr.din()]
-                nonce, self.nonce = self.nonce, None
-                digest = [self.rf[isa.LANE0 + i] for i in range(4)]
-                ok = (nonce is not None and self.owner is not None and not self.t_lanes
-                      and self.owner(nonce, digest, sig))
-                self.cycles += units.AUTH_VERIFY
-                self.unit_cycles["auth"] += units.AUTH_VERIFY
-                if ok:
+            elif n == "ZKEY":
+                for r in range(isa.KEY0, isa.KEY0 + isa.N_KEYS):
+                    self.rf[r] = 0
+            elif n in isa.CTL_KEY and not self._in_key_range():
+                self._fault("key-range CTL outside the key range")
+            elif n == "AUTH":                       # the verdict latch (R1): from a clear, untainted Z
+                if self.t_z:
+                    self._fault("verdict latch from a key-derived compare result")
+                if not self.z:
                     self.auth_ok = True
-                else:
+            elif n == "LC":                         # the lifecycle register (R15)
+                to = d["b"]
+                if to >= len(isa.LC) or to == isa.LC_RESET:
+                    self._fault("lifecycle state out of range")
+                if self.lc == isa.LC_LOCKED:
+                    self._fault("lifecycle change out of LOCKED")
+                if to == isa.LC_READY and not self.auth_ok:
+                    self._fault("READY without the verdict latch")
+                if to == isa.LC_READY and self.lc not in (isa.LC_RESET, isa.LC_LEASE):
+                    self._fault("READY from a state that cannot boot")
+                self.lc = to
+            elif n in ("PUFE", "PUFR"):
+                if self.puf is None:
                     self.z = 1
+                else:
+                    k = self.puf.enrol() if n == "PUFE" else self.puf.reconstruct()
+                    self.cycles += k
+                    self.unit_cycles["puf"] += k
+            elif n == "SYNW":
+                if self.t_h:
+                    self._fault("syndrome from key-derived data")
+                if self.puf is not None:
+                    self.puf.syn[d["b"] & 1] = self.h
+            elif n == "TSEL":
+                if self.t_h:
+                    self._fault("TRNG pair from key-derived data")
+                if self.trng is not None:
+                    self.trng.select(self.h & 31)
+            elif n == "TRUN":
+                if self.trng is not None:
+                    k = self.trng.run()
+                    self.cycles += k
+                    self.unit_cycles["trng"] += k
+            elif n == "TCLR":
+                if self.trng is not None:
+                    self.trng.clear()
+            elif n == "TARM":
+                if self.trng is not None:
+                    self.trng.armed = True
         elif mn == "WIPE":
             self.rf.wipe(d["a"])
+            self.cur_wipe = d["a"]
             if d["a"] & 3 == 3:
                 self.dirty = self.t_lanes = False
         elif mn == "KEC":
-            if self.last_w is not None:
-                self.cycles += 1
             n = self.keccak.run(self.rf, 12 if d["a"] else 24)
+            self.cur_w = isa.LANE0 + 24             # the unit writes lane 24 last
+            clear_h = True                          # the hold register is the unit's write path
             self.cycles += n
             self.unit_cycles["keccak"] += n
             self.unit_calls["keccak"] += 1
@@ -432,19 +506,21 @@ class Machine:
         elif mn == "FRAM":
             if not isa.REC_LO <= pc <= isa.REC_HI:
                 self._fault("FRAM instruction outside the record range")
+            if d["a"] >= len(isa.FRAM):
+                self._fault("undefined function code")
             n = isa.FRAM[d["a"]]
             try:
                 if n in ("RSTART", "WSTART"):
                     if self.t_h:
-                        self._fault("FRAM slot from key-derived data")
-                    k = self.fram.start(self.h & 1, n == "WSTART")
+                        self._fault("FRAM record index from key-derived data")
+                    k = self.fram.start(self.h & 3, n == "WSTART")
                 elif n == "RWORD":
                     self.h, k = self.fram.rword()
                     self.t_h = False
                     if store:
                         self._wr(b, self.h, False)
                 elif n == "WWORD":
-                    if d["ib"] or d["b"] not in isa.FRAM_SRC:
+                    if d["ib"] or not (d["b"] in isa.FRAM_LANES or isa.row_class(d["b"], self.rf.nrows) in ("pin", "state")):
                         self._fault(f"FRAM WWORD of row {b}")
                     v, _ = self._rd(d["b"])         # lanes: refused while dirty (R3); tag lanes are released (R8)
                     k = self.fram.wword(v)
@@ -477,7 +553,7 @@ class Machine:
                 self._goto(isa.target(d))
                 taken = True
         elif mn == "CALL":
-            if len(self.stack) >= 2:
+            if len(self.stack) >= isa.STACK_DEPTH:
                 self._fault("return stack overflow")
             self.stack.append(pc + 1)
             self._goto(isa.target(d))
@@ -491,13 +567,11 @@ class Machine:
             elif fr.op not in rom.entries:
                 code = isa.E_OPCODE
             else:
-                addr, cls = rom.entries[fr.op]
-                if cls == isa.D_PROV and not self.dev_ok:
-                    code = isa.E_NOKEY
-                elif cls == isa.D_PROV and self.key_valid:
-                    code = isa.E_KEYSET
-                elif cls == isa.D_KEYED and not self.key_valid:
-                    code = isa.E_NOKEY
+                addr, mask = rom.entries[fr.op]
+                if addr < isa.ROM_BASE:
+                    self._fault("dispatch entry below the ordinary code")
+                if not (mask >> self.lc) & 1:       # R12: not in a state this command decodes in
+                    code = isa.E_NOKEY if mask == 1 << isa.LC_READY else isa.E_STATE
             if code:
                 self._refuse(code)
                 return False
@@ -516,5 +590,5 @@ class Machine:
             if not self.stack:
                 self._fault("return with an empty stack")
             self._goto(self.stack.pop())
-        self.last_w = self.cur_w
+        self.last_w, self.last_wipe = self.cur_w, self.cur_wipe
         return True

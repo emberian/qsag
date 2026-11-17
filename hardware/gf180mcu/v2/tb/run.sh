@@ -10,7 +10,12 @@
 #   bash v2/tb/run.sh chip                   the reference script through dregg_top over SPI
 #   bash v2/tb/run.sh xprop                  cosim of the script with every storage element randomised
 #
-# Environment: OSS (path of oss-cad-suite), JOBS (parallel simulations, default 16).
+# Environment: OSS (path of oss-cad-suite), JOBS (parallel simulations, default 16),
+#   DREGG_V2_REF: the v2 directory whose model/, ucode/ and tests/ are the reference (default: this tree).
+#   The RTL here was verified against commit ef8564b; extract it with
+#     git archive ef8564b hardware/gf180mcu/v2/model hardware/gf180mcu/v2/ucode hardware/gf180mcu/v2/tests \
+#         hardware/gf180mcu/tb hardware/gf180mcu/model | tar -x -C <dir>
+#   and set DREGG_V2_REF=<dir>/hardware/gf180mcu/v2 when the live model has moved on.
 set -e
 OSS=${OSS:-/home/build/qsag-ni-fpga/oss-cad-suite}
 . "$OSS/environment"
@@ -19,7 +24,7 @@ B=build/v2
 mkdir -p $B
 OLD="rtl/qsag_cells.sv $B/qsag_p2_rc.sv"
 R=${RTLDIR:-v2/rtl}
-V2RTL="$R/dregg_rf_slice.sv $R/dregg_regfile.sv $R/dregg_keccak_serial.sv $R/dregg_word_unit.sv $R/dregg_egress.sv $R/dregg_framer.sv $R/dregg_anchor_spi.sv $R/dregg_fram.sv $R/dregg_rules.sv $R/dregg_seq.sv $R/dregg_rst.sv $R/dregg_core.sv"
+V2RTL="$R/dregg_gf180_sim.sv $R/dregg_regfile.sv $R/dregg_keccak_serial.sv $R/dregg_word_unit.sv $R/dregg_egress.sv $R/dregg_framer.sv $R/dregg_anchor_spi.sv $R/dregg_fram.sv $R/dregg_rules.sv $R/dregg_seq.sv $R/dregg_rst.sv $R/dregg_core.sv"
 TOPRTL="$R/dregg_spi_link.sv $R/dregg_top.sv"
 REFS="rtl/qsag_keccak_serial.sv rtl/qsag_anchor_spi.sv"
 
@@ -84,7 +89,7 @@ unit)
         rm -rf $B/obj_urf
         verilator --cc --exe --build -j 8 -Wall -Wno-fatal -Wno-DECLFILENAME --x-assign unique --x-initial unique \
             -DQSAG_LATCH_RF -I$B/inc$rows --top-module unit_regfile_tb -Mdir $B/obj_urf \
-            rtl/qsag_cells.sv v2/rtl/dregg_rf_slice.sv v2/rtl/dregg_regfile.sv v2/rtl/dregg_rst.sv \
+            rtl/qsag_cells.sv v2/rtl/dregg_gf180_sim.sv v2/rtl/dregg_regfile.sv v2/rtl/dregg_rst.sv \
             v2/tb/unit_regfile_tb.sv v2/tb/unit_regfile.cpp -o unit_regfile > $B/build_urf$rows.log 2>&1 \
             || { grep -B2 -A8 '%Error\|error:' $B/build_urf$rows.log | head -60; exit 1; }
         for seed in 1 2 3; do
@@ -98,7 +103,7 @@ cosim)
     gen
     tag=cosim$rows$(echo "$@" | tr -d ' =-')
     sc=20; [ "$rows" = 64 ] && sc=12
-    python3 -B v2/tb/record.py --scratch $sc ${PROPOSE:+--propose $PROPOSE} $B/trace$rows$PROPOSE ${SCEN:-script quick tests long}
+    python3 -B v2/tb/record.py --scratch $sc ${PROPOSE:+--propose $PROPOSE} $B/trace$rows$PROPOSE ${SCEN:-script quick tests long extra}
     build_cosim $rows $tag "$@"
     run_shards $tag$PROPOSE $B/trace$rows$PROPOSE
     ;;
@@ -120,12 +125,15 @@ chip)
     ;;
 fast)   # cosim on a trace with the owner-verification stand-in shortened to 100 clocks: parameter variants, mutants
     rows=${2:-72}; tag=${3:-fast}; shift; shift || true; shift || true
-    if [ ! -f $B/trace_fast$rows/trace.txt ]; then
+    tr=$B/trace_fast$rows$PROPOSE
+    if [ ! -f $tr/trace.txt ]; then
         gen; sc=20; [ "$rows" = 64 ] && sc=12
-        python3 -B v2/tb/record.py --scratch $sc --auth-verify 100 $B/trace_fast$rows script quick tests long > $B/record_fast$rows.log 2>&1
+        python3 -B v2/tb/record.py --scratch $sc --auth-verify 100 ${PROPOSE:+--propose $PROPOSE} $tr ${SCEN:-script quick tests long extra} > $tr.log 2>&1
     fi
     build_cosim $rows $tag "$@"
-    PROPOSE= run_shards $tag $B/trace_fast$rows
+    p=$PROPOSE
+    PROPOSE= run_shards $tag $tr
+    PROPOSE=$p
     ;;
 xprop)
     gen
@@ -134,8 +142,8 @@ xprop)
     build_cosim 72 xprop --x-assign unique --x-initial unique
     st=0
     for seed in 1 2 3; do
-        $B/obj_xprop/cosim $B/trace_x +verilator+seed+$seed +verilator+rand+reset+2 > $B/run_xprop.$seed.log 2>&1 || st=1
-        echo "x-initial seed $seed: $(grep RESULT $B/run_xprop.$seed.log)"
+        timeout --kill-after=10s 900s $B/obj_xprop/cosim $B/trace_x +verilator+seed+$seed +verilator+rand+reset+2 > $B/run_xprop.$seed.log 2>&1 || st=1
+        echo "x-initial seed $seed: $(grep 'before the first reset' $B/run_xprop.$seed.log); $(grep RESULT $B/run_xprop.$seed.log)"
     done
     exit $st
     ;;

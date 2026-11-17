@@ -8,6 +8,7 @@ One micro-word is 28 bits:
     [8:5]   fn    flags (bit 0 = W: store H to row B; bit 1 = I: operand is the immediate) |
                   immediate bits [15:14] in fn[3:2] | branch target [3:0]
                   CMP: bit 0 = tag compare (CMPT).  PUSH: bit 0 = release (REL), bit 1 = source is H.
+                  KMOV: bit 0 = the source is word A of the PUF response (PMOV).
     [4]     ia    row A is indexed: A + X (mod 128)
     [3]     ib    row B is indexed: B + X (mod 128)
     [2]     xi    X is incremented after the instruction
@@ -28,9 +29,15 @@ OP = {n: i for i, n in enumerate(OPS)}
 ALU2 = ("LD", "XOR", "AND", "OR", "ADD", "SUB", "CMP")      # operand: row A or imm16
 BRANCH = ("BR", "BXNE", "DBNZ", "CALL")                     # target in {B, fn}
 
-UN = ["ID", "NIB", "BE32", "HSWAP", "LO32", "HI32", "SHR1", "SHR4", "SHR8", "SHR16", "SHL1", "SHL4", "SHL8"]
-CTL = ["CLRZ", "SETKV", "SETFM", "SETFA", "VOK", "AUTH", "NONCE"]
-LDF = ["HDRW", "FLAGS", "LEN", "NWORDS", "ARG", "ARGLO", "ARGHI", "X", "STATUS", "NONCE0", "NONCE1", "KATTR"]
+UN = ["ID", "NIB", "BE32", "HSWAP", "LO32", "HI32", "SHR1", "SHR4", "SHR8", "SHR16", "SHL1", "SHL4", "SHL8",
+      "XT", "SHL1C"]      # XT: multiply by x in GF(2^64); SHL1C: shift left 1, carry = the bit shifted out
+# CTL: codes 1 and 6 were SETKV and NONCE in stage 1. LC and SYNW take a small operand in field B.
+CTL = ["CLRZ", "LC", "SETFM", "SETFA", "VOK", "AUTH", "ZKEY", "PUFE", "PUFR", "SYNW", "TSEL", "TRUN", "TCLR", "TARM"]
+CTL_ARG = ("LC", "SYNW")
+CTL_KEY = ("LC", "AUTH", "PUFE", "PUFR", "SYNW")          # decode only in the key range
+# LDF: codes 9..11 were NONCE0, NONCE1, KATTR in stage 1.
+LDF = ["HDRW", "FLAGS", "LEN", "NWORDS", "ARG", "ARGLO", "ARGHI", "X", "STATUS", "LC", "SYN0", "SYN1", "PNOISE",
+       "TS1", "TS4", "TSUM", "TFLAGS", "TRAW"]
 FLD = ["PERM", "RED"]
 FRAM = ["RSTART", "WSTART", "RWORD", "WWORD", "DONE"]
 COND = ["AL", "Z", "NZ", "CY", "NC", "HZ", "HNZ", "MORE", "NOMORE", "KV", "NKV", "C1Z", "C1NZ"]
@@ -42,27 +49,33 @@ W_LANES_LO, W_LANES_HI, W_SCRATCH, W_OUT = 1, 2, 4, 8       # WIPE mask bits
 # These are constants of the decoder, not data of the ROM image. The assembler lays the image out to
 # match them (.org) and romcheck.py fails an image that does not.
 IDLE_ADDR = 0                       # the one DISP
-KEY_LO, KEY_HI = 1, 63              # provisioning range: KEYWR, CTL SETKV, CTL AUTH, CTL NONCE decode only here
-REC_LO, REC_HI = 64, 127            # record range: FRAM instructions decode only here
-ROM_BASE = 128                      # everything else
+KEY_LO, KEY_HI = 1, 79              # key range: KEYWR, PMOV and the CTL functions of CTL_KEY decode only here
+REC_LO, REC_HI = 80, 287            # record range: FRAM instructions and writes of state rows decode only here
+ROM_BASE = 288                      # everything else
 END_CLOCKS = 3                      # END: decode, pad and wipe, return to idle
-D_DIAG, D_PROV, D_KEYED = 0, 1, 2   # dispatch classes (lifecycle gate)
-DCLASS = {"diag": D_DIAG, "prov": D_PROV, "keyed": D_KEYED}
-E_MAGIC, E_OPCODE, E_LEN, E_NOKEY, E_KEYSET = 1, 2, 3, 4, 10   # error codes the hardware itself issues
+STACK_DEPTH = 4                     # return stack entries
+# lifecycle states (ARCHITECTURE.md 3.2): a register of the sequencer, written by CTL LC in the key range
+LC = ["RESET", "BLANK", "ORPHAN", "LEASE", "READY", "LOCKED"]
+LC_RESET, LC_BLANK, LC_ORPHAN, LC_LEASE, LC_READY, LC_LOCKED = range(6)
+LC_ANY = (1 << len(LC)) - 1
+LCMASK = {n.lower(): 1 << i for i, n in enumerate(LC)}      # dispatch-table entry: the states a command decodes in
+LCMASK["any"] = LC_ANY
+E_MAGIC, E_OPCODE, E_LEN, E_NOKEY, E_STATE = 1, 2, 3, 4, 14    # error codes the hardware itself issues
+FRAM_REC_WORDS = 16                 # one FRAM record: 16 words at byte address 128 * index; index 0..2
 
 # ---------------------------------------------------------------- register-file row map
-N_LANES, N_KWORK, N_SCRATCH, N_KEYS, N_PINS, N_STATE, N_OUT = 25, 7, 12, 10, 6, 2, 2
+N_LANES, N_KWORK, N_SCRATCH, N_KEYS, N_PINS, N_STATE, N_OUT = 25, 7, 24, 4, 0, 10, 2
 LANE0 = 0
 KWORK0 = LANE0 + N_LANES          # 25
 SCRATCH0 = KWORK0 + N_KWORK       # 32
 KEY0 = SCRATCH0 + N_SCRATCH       # 44
 PIN0 = KEY0 + N_KEYS              # 54
 STATE0 = PIN0 + N_PINS            # 60
-OUT0 = STATE0 + N_STATE           # 62
-ROWS_S = OUT0 + N_OUT             # 64
-ROWS_L = 128                      # rows 64..127: challenge rows (configuration L)
+OUT0 = STATE0 + N_STATE           # 70
+ROWS_S = OUT0 + N_OUT             # 72
+ROWS_L = 128                      # rows 72..127: challenge rows (configuration L)
 RATE_LANES = 17                   # SHAKE256 / TurboSHAKE256 rate, in lanes
-FRAM_SRC = (SCRATCH0 + 9, LANE0, LANE0 + 1)   # the only rows FRAM WWORD may send: record counter, record tag
+FRAM_LANES = (LANE0, LANE0 + 1)   # FRAM WWORD may send a state row, or the record tag in these lanes
 
 
 def row_class(r, nrows=ROWS_S):
@@ -92,9 +105,8 @@ def row_symbols():
     s["lm1"] = 127                # with +X: lane X - 1
     for i in range(N_SCRATCH):
         s[f"t{i}"] = SCRATCH0 + i
-    for i, n in enumerate(["k_dev0", "k_dev1", "k_dev2", "k_dev3", "k_host0", "k_host1", "k_seed0", "k_seed1",
-                           "k_prf0", "k_prf1"]):
-        s[n] = KEY0 + i
+    for i in range(N_KEYS):
+        s[f"k_dev{i}"] = KEY0 + i
     for i in range(N_PINS):
         s[f"pin{i}"] = PIN0 + i
     for i in range(N_STATE):

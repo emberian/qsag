@@ -1,6 +1,8 @@
-"""Command behaviour beyond the reference script: provisioning and its refusals, the signer against an
-independent FIPS 205 reference (hashlib), the request tag on every request type, counted keys and the
-anchor across resets, framing."""
+"""Command behaviour beyond the reference script: the signer against an independent FIPS 205 reference
+(hashlib), the request tag on every request type, counted keys and the use counter across resets,
+framing. The chips are provisioned through ENROL and COMMIT and booted (common.provisioned); the keys
+the signer uses are derived on the chip from the PUF-derived device key, and the tests compute the same
+derivations from the model die's response (lifecycle and gate: test_lifecycle.py)."""
 import hashlib
 import unittest
 
@@ -8,27 +10,21 @@ import common
 import host
 import isa
 import units
-from chip import Chip
 from framing import LinkError
 from link import SpiLink
 
 q = units.q
-K = bytes.fromhex("a1b2c3d4e5f60718293a4b5c6d7e8f90")
-SEED = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
-PRF = bytes.fromhex("f0e1d2c3b4a5968778695a4b3c2d1e0f")
+_D = common.provisioned()
+K, SEED, PRF = _D.k_host, _D.seed, _D.prf           # K_host as COMMIT released it; SK.seed, SK.prf as derived
 PK = bytes.fromhex("5ca1ab1e5ca1ab1e0123456789abcdef")
 LAYER, TREE, KEYPAIR = 3, 0x0123456789AB, 7
-OK_LOAD = [host.rhdr(host.OP_KEYLOAD, 0)]
+err = host.err
 
 
-def err(op, code):
-    return [host.rhdr(op, 0, False, code)]
-
-
-def chip_with_keys(config="S", anchor=True, counted=False, **kw):
-    c = common.new_chip(config, **kw)
-    assert host.provision(c, c.owner, K, SEED, PRF, anchor, counted) == OK_LOAD
-    return c
+def chip_with_keys(config="S", counted=False):
+    d = common.provisioned(host.F_COUNTED if counted else 0, config=config)
+    assert (d.k_host, d.seed, d.prf) == (K, SEED, PRF)
+    return d.chip
 
 
 def values(rsp):
@@ -36,121 +32,20 @@ def values(rsp):
     return [b[i:i + 16] for i in range(0, len(b), 16)]
 
 
-class Provisioning(unittest.TestCase):
-    def test_interfaces_absent_means_refused(self):
-        """The default chip has no device secret, no entropy and no owner verifier."""
-        c = Chip("S")
-        self.assertEqual(c.transact(host.provision_nonce()), err(host.OP_NONCE, host.E_NOKEY))
-        self.assertEqual(c.transact(host.keyload_body(K, SEED, PRF) + [0, 0]), err(host.OP_KEYLOAD, host.E_NOKEY))
-        self.assertEqual(c.transact(host.prf_msg(b"")), err(host.OP_PRFMSG, host.E_NOKEY))
-        self.assertEqual(c.transact([host.hdr(host.OP_PING)])[2] & 0xF, 0)
-        c = Chip("S", puf=units.PufUnit(common.DEV))                       # device secret, no entropy
-        self.assertEqual(c.transact(host.provision_nonce()), err(host.OP_NONCE, host.E_TRNG))
-        self.assertEqual(c.transact(host.keyload_body(K, SEED, PRF) + [0, 0]), err(host.OP_KEYLOAD, host.E_AUTH))
-        c = Chip("S", puf=units.PufUnit(common.DEV), entropy=units.EntropyUnit(3))   # no owner verifier
-        owner = host.Owner()
-        self.assertEqual(host.provision(c, owner, K, SEED, PRF), err(host.OP_KEYLOAD, host.E_AUTH))
-        self.assertEqual(c.transact(host.prf_msg(b"")), err(host.OP_PRFMSG, host.E_NOKEY))
-
-    def test_authorised_load(self):
+class DerivedKeys(unittest.TestCase):
+    def test_the_host_key_is_the_one_commit_released_and_the_others_never_leave(self):
+        self.assertEqual(_D.info["k_host"], K)
+        self.assertEqual(len({K, SEED, PRF}), 3)
         c = chip_with_keys()
-        self.assertEqual(host.bytes_of(c.transact(host.prf_msg(b""))[1:]), hashlib.shake_256(PRF).digest(16))
-        self.assertEqual(c.transact([host.hdr(host.OP_PING)])[2] & 0x1F, 0b01001)   # key valid, device ok, uncounted
-        c = chip_with_keys(counted=True)
-        self.assertEqual(c.transact([host.hdr(host.OP_PING)])[2] & 0x1F, 0b11001)
-
-    def load(self, c, mutate=None, nonce=None, owner=None, **kw):
-        if nonce is None:
-            nonce = c.transact(host.provision_nonce())[1:]
-        body = host.keyload_body(K, SEED, PRF, **kw)
-        req = body + (owner or c.owner).authorise(nonce, body)
-        if mutate:
-            mutate(req)
-        return c.transact(req)
-
-    def refused(self, c, rsp, code=host.E_AUTH):
-        self.assertEqual(rsp, err(host.OP_KEYLOAD, code))
-        self.assertFalse(c.m.key_valid)
-        self.assertEqual(c.transact(host.prf_msg(b"")), err(host.OP_PRFMSG, host.E_NOKEY))
-        self.assertFalse(set(host.words_of(K + SEED + PRF)) & c.m.rf.key_values())
-
-    def test_load_without_a_nonce_is_refused(self):
-        for nonce in ([1, 2], [0, 0]):
-            c = common.new_chip()
-            self.refused(c, self.load(c, nonce=nonce))
-
-    def test_every_word_of_the_request_is_authorised(self):
-        for i in range(9):
-            for bit in (0, 31, 63) if i else (17, 18):        # header: anchor-init and counted flags
-                c = common.new_chip()
-
-                def flip(req, i=i, bit=bit):
-                    req[i] ^= 1 << bit
-                self.refused(c, self.load(c, flip))
-
-    def test_authorisation_by_another_owner_is_refused(self):
-        c = common.new_chip()
-        self.refused(c, self.load(c, owner=host.Owner(b"someone else")))
-
-    def test_an_authorisation_is_good_for_one_nonce(self):
-        c = common.new_chip()
-        nonce = c.transact(host.provision_nonce())[1:]
-        body = host.keyload_body(K, SEED, PRF)
-        req = body + c.owner.authorise(nonce, body)
-        self.assertEqual(c.transact(req), OK_LOAD)
-        c.reset()
-        self.refused(c, c.transact(req))                       # replay with no nonce drawn
-        fresh = c.transact(host.provision_nonce())[1:]
-        self.assertNotEqual(fresh, nonce)
-        self.refused(c, c.transact(req))                       # replay against a fresh nonce
-        c.transact(host.provision_nonce())
-        bad = list(req)
-        bad[-1] ^= 1
-        self.refused(c, c.transact(bad))
-        self.refused(c, c.transact(req[:7] + c.owner.authorise(fresh, body)))   # the nonce was spent by the attempt
-        n3 = c.transact(host.provision_nonce())[1:]
-        good = body + c.owner.authorise(n3, body)
-        self.refused(c, c.transact(good[:-1] + [good[-1] ^ 1]))                 # a wrong attempt spends n3
-        self.refused(c, c.transact(good))                                       # so the right one is too late
-        n4 = c.transact(host.provision_nonce())[1:]
-        self.assertEqual(c.transact(body + c.owner.authorise(n4, body)), OK_LOAD)
-
-    def test_no_reprovisioning_while_a_key_is_valid(self):
-        c = chip_with_keys()
-        self.assertEqual(c.transact(host.provision_nonce()), err(host.OP_NONCE, host.E_KEYSET))
-        self.assertEqual(self.load(c, nonce=[0, 0]), err(host.OP_KEYLOAD, host.E_KEYSET))
+        self.assertEqual(c.m.rf.key_values(), set(_D.k_dev))            # the only stored key is K_dev
         self.assertEqual(host.bytes_of(c.transact(host.prf_msg(b""))[1:]), hashlib.shake_256(PRF).digest(16))
 
-    def test_reset_clears_keys_and_reprovisioning_needs_the_owner_again(self):
-        c = chip_with_keys()
-        c.reset()
-        self.assertEqual(c.transact(host.prf_msg(b"")), err(host.OP_PRFMSG, host.E_NOKEY))
-        self.assertFalse(set(host.words_of(K + SEED + PRF)) & c.m.rf.key_values())
-        self.refused(c, self.load(c, owner=host.Owner(b"not the owner")))
-        self.assertEqual(self.load(c), OK_LOAD)
-
-    def test_shape_refusals(self):
-        c = common.new_chip()
-        w = host.words_of(K + SEED + PRF)
-        self.assertEqual(c.transact([host.hdr(host.OP_KEYLOAD, 1, 48)] + w), err(host.OP_KEYLOAD, host.E_LEN))
-        self.assertEqual(c.transact([host.hdr(host.OP_KEYLOAD, 0, 64)] + w + [0, 0]), err(host.OP_KEYLOAD, host.E_OPCODE))
-        self.assertEqual(c.transact([host.hdr(host.OP_KEYLOAD, 9, 64)] + w + [0, 0]), err(host.OP_KEYLOAD, host.E_OPCODE))
-        self.assertEqual(c.transact([host.hdr(host.OP_NONCE, 0, 8), 0]), err(host.OP_NONCE, host.E_LEN))
-
-    def test_anchor_write_is_verified_at_provisioning(self):
-        for fram in (DeadFram(64), FlakyFram(64, word=0), FlakyFram(64, word=1), FlakyFram(64, word=2),
-                     FlakyFram(64, word=5)):
-            c = common.new_chip(fram=fram)
-            self.refused(c, self.load(c), host.E_ANCHOR_IO)
-
-    def test_anchor_records_are_under_the_device_secret(self):
-        c = chip_with_keys()
-        self.assertEqual(bytes(c.fram[0:24]), host.fram_record(common.DEV, 0))
-        self.assertEqual(bytes(c.fram[32:56]), host.fram_record(common.DEV, 0))
-        self.assertNotEqual(bytes(c.fram[0:24]), host.fram_record(K + K, 0))
-        other = Chip("S", puf=units.PufUnit(bytes(32)), entropy=units.EntropyUnit(1), owner=c.owner.verify)
-        host.provision(other, c.owner, K, SEED, PRF)
-        self.assertNotEqual(bytes(other.fram[0:24]), bytes(c.fram[0:24]))   # same host keys, another device
+    def test_vat_mode_has_no_signing_coprocessor(self):
+        d = common.provisioned(host.F_VAT)
+        self.assertEqual(d.info["rsp"][1:], [0, 0])                     # and COMMIT released no K_host
+        self.assertEqual(d.chip.transact(host.prf_msg(b"x")), err(host.OP_PRFMSG, host.E_CLASS))
+        self.assertEqual(d.chip.transact(host.cth_wots(K, 0, 0, 1, 2, PK, bytes(16), 1)), err(host.OP_CTH, host.E_CLASS))
+        self.assertEqual(d.chip.log[-1]["unit_calls"]["keccak"], 0)     # refused before any key is derived
 
 
 class DeadFram(bytearray):
@@ -161,17 +56,14 @@ class DeadFram(bytearray):
 
 
 class FlakyFram(bytearray):
-    """A FRAM that stores one word of each record (0 counter, 1 or 2 tag) with a flipped bit;
-    word 3 + n: the same for slot 1 only."""
+    """A FRAM that stores one word of each record (0..4 data, 5 or 6 tag) with a flipped bit."""
 
-    def __init__(self, n, word):
-        super().__init__(n)
+    def __init__(self, data, word):
+        super().__init__(data)
         self.word = word
 
     def __setitem__(self, k, v):
-        start = k.start
-        slot, w = start // 32, (start % 32) // 8
-        if w == self.word or (slot == 1 and w + 3 == self.word):
+        if (k.start % 128) // 8 == self.word:
             v = bytes([v[0] ^ 1]) + bytes(v[1:])
         super().__setitem__(k, v)
 
@@ -271,7 +163,7 @@ class RequestTag(unittest.TestCase):
         self.assertEqual(c.pins["FAULT"], 0)
         self.assertEqual(c.transact(req), err(host.OP_CTH, host.E_MAC), name)
         self.assertEqual(c.pins["FAULT"], 1)
-        self.assertEqual(c.log[-1]["unit_calls"]["keccak"], 1)       # the tag check and nothing else
+        self.assertEqual(c.log[-1]["unit_calls"]["keccak"], 2)       # K_host and the tag check, nothing else
         self.assertEqual(bytes(c.fram), fram)
 
     def test_good_requests_are_served(self):
@@ -353,7 +245,8 @@ class PrfMsg(unittest.TestCase):
 
 
 class CountedKeys(unittest.TestCase):
-    """Whether the counter applies is a property of the key, fixed at provisioning."""
+    """Whether the counter applies is a policy flag fixed at COMMIT. The counter is the use counter u of
+    the lifecycle record (leases: test_lifecycle.py)."""
 
     def sign(self, c, leaf, msg=bytes(16), keypair=None, n=1, **kw):
         return c.transact(host.cth_wots(K, leaf, 0, 9, leaf if keypair is None else keypair, PK, msg, n, **kw))
@@ -396,7 +289,7 @@ class CountedKeys(unittest.TestCase):
         self.assertEqual(len(c.transact(host.cth_fors(K, 5, 0, 9, 5, PK, [1], pubgen=True))), 3)
         self.assertEqual(bytes(c.fram), before)
 
-    def test_uncounted_key_never_touches_the_anchor(self):
+    def test_uncounted_key_never_touches_the_record(self):
         c = chip_with_keys(counted=False)
         before = bytes(c.fram)
         self.assertEqual(len(self.sign(c, 3)), 3)
@@ -405,96 +298,58 @@ class CountedKeys(unittest.TestCase):
         self.assertEqual(bytes(c.fram), before)
 
     def test_counter_survives_reset_through_the_fram(self):
-        c = chip_with_keys(counted=True)
-        self.assertEqual(len(self.sign(c, 4)), 3)
-        c.reset()
-        self.assertEqual(host.provision(c, c.owner, K, SEED, PRF, anchor_init=False, counted=True), OK_LOAD)
-        self.assertEqual(self.sign(c, 4), err(host.OP_CTH, host.E_REUSE))
-        self.assertEqual(len(self.sign(c, 5)), 3)
+        d = common.provisioned(host.F_COUNTED)
+        self.assertEqual(len(self.sign(d.chip, 4)), 3)
+        self.assertEqual(d.reboot()[1], host.LC_READY)
+        self.assertEqual(self.sign(d.chip, 4), err(host.OP_CTH, host.E_REUSE))
+        self.assertEqual(len(self.sign(d.chip, 5)), 3)
+
+    def test_first_use_counter_comes_from_the_commit_word(self):
+        d = common.provisioned(host.F_COUNTED, u0=40)
+        self.assertEqual(self.sign(d.chip, 39), err(host.OP_CTH, host.E_REUSE))
+        self.assertEqual(len(self.sign(d.chip, 40)), 3)
 
     def test_refused_before_any_secret_is_touched(self):
         c = chip_with_keys(counted=True)
         self.sign(c, 3)
         self.sign(c, 3)
-        self.assertEqual(c.log[-1]["unit_calls"]["keccak"], 3)        # request tag + two record tags
+        self.assertEqual(c.log[-1]["unit_calls"]["keccak"], 2)        # K_host and the request tag; no record, no SK.seed
+        self.assertEqual(c.log[-1]["unit_cycles"]["fram"], 0)
 
     def test_record_format_and_slot_alternation(self):
-        c = chip_with_keys(counted=True)
+        d = common.provisioned(host.F_COUNTED)
+        c, root = d.chip, d.com.root
+
+        def rec(seq, u):
+            return host.record_bytes(d.k_dev, [host.rec0(seq, 0, host.F_COUNTED, 1), u, 0] + root)
+        self.assertEqual((bytes(c.fram[128:184]), bytes(c.fram[256:312])), (rec(0, 0), rec(1, 0)))    # as COMMIT left them
         self.sign(c, 2)
-        self.assertEqual({bytes(c.fram[0:24]), bytes(c.fram[32:56])},
-                         {host.fram_record(common.DEV, 0), host.fram_record(common.DEV, 3)})
+        self.assertEqual((bytes(c.fram[128:184]), bytes(c.fram[256:312])), (rec(2, 3), rec(1, 0)))
         self.sign(c, 3)
-        self.assertEqual({bytes(c.fram[0:24]), bytes(c.fram[32:56])},
-                         {host.fram_record(common.DEV, 4), host.fram_record(common.DEV, 3)})
+        self.assertEqual((bytes(c.fram[128:184]), bytes(c.fram[256:312])), (rec(2, 3), rec(3, 4)))
+        self.assertNotIn(K, bytes(c.fram))
+        self.assertNotEqual(bytes(c.fram[168:184]), host.bytes_of(host.ts([0] * 4 + [host.L_REC] + [host.rec0(2, 0, host.F_COUNTED, 1), 3, 0] + root, host.D_FRAM)))
 
-    def test_empty_and_forged_anchor(self):
-        c = chip_with_keys(anchor=False, counted=True)
-        self.assertEqual(self.sign(c, 0), err(host.OP_CTH, host.E_ANCHOR_EMPTY))
-        good = host.fram_record(common.DEV, 7)
-        self.assertEqual(len(good), 24)
-        forgeries = [(7).to_bytes(8, "little") + bytes(16),                      # no tag
-                     good[:8] + good[8:16] + bytes(8),                            # first tag word only
-                     good[:8] + bytes(8) + good[16:24],                           # second tag word only
-                     good[:8] + good[8:23] + bytes([good[23] ^ 0x80]),            # one bit of the second word
-                     good[:8] + bytes([good[8] ^ 1]) + good[9:24],                # one bit of the first word
-                     (6).to_bytes(8, "little") + good[8:24],                      # tag of another counter
-                     host.fram_record(K + K, 7),                                  # tag under the host's key
-                     ((1 << 32) | 7).to_bytes(8, "little") + good[8:24],          # counter above 32 bits, tag of 7
-                     host.fram_record(common.DEV, (1 << 32) | 7),                 # counter above 32 bits, its own tag
-                     host.fram_record(common.DEV, 1 << 63)]
-        for slot in (0, 1):
-            c = chip_with_keys(anchor=False, counted=True)
-            for rec in forgeries:
-                c.fram[:] = bytes(64)
-                c.fram[32 * slot:32 * slot + 24] = rec
-                image = bytes(c.fram)
-                self.assertEqual(self.sign(c, 8), err(host.OP_CTH, host.E_ANCHOR_EMPTY), (slot, rec.hex()))
-                self.assertEqual(bytes(c.fram), image)                         # nothing was written
-            c.fram[:] = bytes(64)
-            c.fram[32 * slot:32 * slot + 24] = good                            # the authentic record, either slot
-            self.assertEqual(self.sign(c, 6), err(host.OP_CTH, host.E_REUSE))
-            self.assertEqual(len(self.sign(c, 7)), 3)
-
-    def test_the_larger_authentic_counter_wins_in_either_slot(self):
-        for hi_slot in (0, 1):
-            c = chip_with_keys(anchor=False, counted=True)
-            c.fram[32 * hi_slot:32 * hi_slot + 24] = host.fram_record(common.DEV, 9)
-            c.fram[32 * (1 - hi_slot):32 * (1 - hi_slot) + 24] = host.fram_record(common.DEV, 4)
-            self.assertEqual(self.sign(c, 8), err(host.OP_CTH, host.E_REUSE), hi_slot)
-            self.assertEqual(len(self.sign(c, 9)), 3)
-            self.assertEqual(bytes(c.fram[32 * hi_slot:32 * hi_slot + 24]), host.fram_record(common.DEV, 9))
-            self.assertEqual(bytes(c.fram[32 * (1 - hi_slot):32 * (1 - hi_slot) + 24]), host.fram_record(common.DEV, 10))
-
-    def test_one_damaged_slot_is_tolerated_either_way(self):
-        for damaged in (0, 1):
-            c = chip_with_keys(anchor=False, counted=True)
-            c.fram[32 * (1 - damaged):32 * (1 - damaged) + 24] = host.fram_record(common.DEV, 3)
-            c.fram[32 * damaged:32 * damaged + 24] = host.fram_record(common.DEV, 50)[:23] + b"\x00"
-            self.assertEqual(self.sign(c, 2), err(host.OP_CTH, host.E_REUSE), damaged)
-            self.assertEqual(len(self.sign(c, 3)), 3)
-            self.assertEqual(bytes(c.fram[32 * damaged:32 * damaged + 24]), host.fram_record(common.DEV, 4))
-
-    def test_nothing_is_released_unless_the_new_counter_reads_back(self):
+    def test_nothing_is_released_unless_the_new_record_reads_back(self):
         """A FRAM that drops or corrupts the write: the request is refused and no chain value leaves."""
-        for make in (lambda: DeadFram(64), lambda: FlakyFram(64, 0), lambda: FlakyFram(64, 1), lambda: FlakyFram(64, 2)):
-            fram = make()
-            bytearray.__setitem__(fram, slice(0, 24), host.fram_record(common.DEV, 0))
-            bytearray.__setitem__(fram, slice(32, 56), host.fram_record(common.DEV, 0))
-            c = chip_with_keys(anchor=False, counted=True, fram=fram)
-            rsp = self.sign(c, 1)
-            self.assertEqual(rsp, err(host.OP_CTH, host.E_ANCHOR_IO), type(fram).__name__)
-            self.assertEqual(c.log[-1]["unit_calls"]["keccak"], 4)    # tag, two record tags, the new record's tag; no PRF
-            self.assertEqual(c.log[-1]["key_words_emitted"], [])
+        for make in [lambda b: DeadFram(b)] + [lambda b, w=w: FlakyFram(b, w) for w in range(7)]:
+            d = common.provisioned(host.F_COUNTED)
+            d.chip.m.fram.mem = make(bytes(d.chip.fram))
+            rsp = self.sign(d.chip, 1)
+            self.assertEqual(rsp, err(host.OP_CTH, host.E_RECORD_IO), type(d.chip.fram).__name__)
+            self.assertEqual(d.chip.log[-1]["unit_calls"]["keccak"], 3)     # K_host, request tag, record tag; no SK.seed
+            self.assertEqual(d.chip.log[-1]["key_words_emitted"], [])
 
-    def test_rollback_in_session_is_a_fault(self):
+    def test_the_fram_is_not_consulted_within_a_session(self):
+        """An older image put back while the chip runs changes nothing: the counter the chip holds is the
+        one it advanced. (After a reset the older image is taken: ARCHITECTURE.md 3.4, test_lifecycle.py.)"""
         c = chip_with_keys(counted=True)
         self.sign(c, 1)
         image = bytes(c.fram)
-        self.sign(c, 2)
-        self.assertEqual(c.pins["FAULT"], 0)
+        self.assertEqual(len(self.sign(c, 2)), 3)
         c.fram[:] = image
-        self.assertEqual(self.sign(c, 7), err(host.OP_CTH, host.E_ROLLBACK))
-        self.assertEqual(c.pins["FAULT"], 1)
+        self.assertEqual(self.sign(c, 2), err(host.OP_CTH, host.E_REUSE))
+        self.assertEqual(len(self.sign(c, 3)), 3)
 
 
 class Framing(unittest.TestCase):
@@ -503,7 +358,7 @@ class Framing(unittest.TestCase):
         self.assertEqual(c.transact([0x52 | (1 << 8)]), err(1, host.E_MAGIC))
         self.assertEqual(c.transact([host.hdr(0x7E, 0, 16), 1, 2]), err(0x7E, host.E_OPCODE))
         self.assertEqual(c.transact([host.hdr(host.OP_PING, 0, 8), 1]), err(host.OP_PING, host.E_LEN))
-        for op in (0x02, 0x03, 0x30, 0x31, 0x50, 0x51, 0x52, 0x53):      # not in stage 1
+        for op in (0x02, 0x03, 0x30, 0x31, 0x40, 0x50, 0x51, 0x52, 0x53):      # not implemented; 0x40 was the key import
             self.assertEqual(c.transact([host.hdr(op)]), err(op, host.E_OPCODE))
         with self.assertRaises(LinkError):
             c.transact([host.hdr(host.OP_KECCAK, 0, 16), 1])
@@ -516,7 +371,7 @@ class Framing(unittest.TestCase):
             self.assertEqual(c.transact([host.hdr(host.OP_PING)])[1], int.from_bytes(b"QSAGNI18", "little"))
 
     def test_lifecycle_gate(self):
-        """Before a key is valid only diagnostics and provisioning decode; signer opcodes never start."""
+        """Before boot only diagnostics and BOOT decode; signer opcodes never start."""
         c = common.new_chip()
         for req in (host.prf_msg(b"x"), host.cth_wots(K, 0, 0, 1, 2, PK, bytes(16), 1), [host.hdr(host.OP_CTH, 0, 8), 0]):
             self.assertEqual(c.transact(req), err((req[0] >> 8) & 0xFF, host.E_NOKEY))
@@ -590,26 +445,30 @@ class Invariants(unittest.TestCase):
     def test_working_rows_are_clear_after_every_command_and_no_key_word_leaves(self):
         for counted in (False, True):
             c = chip_with_keys("L", counted=counted)
-            dev = set(host.words_of(common.DEV))
+            dev = set(_D.k_dev)
             reqs = [host.prf_msg(b"x" * 300), host.cth_wots(K, 0, LAYER, TREE, KEYPAIR, PK, bytes(range(16)), 35),
                     host.cth_fors(K, 0, 0, TREE, KEYPAIR, PK, list(range(16)), pubgen=True),
                     host.cth_wots(K, 1, 0, 9, 1, PK, bytes(16), 3), host.cth_wots(K, 0, 0, 9, 0, PK, bytes(16), 3),
                     host.cth_wots(K, 0, 0, 9, 1, PK, bytes(16), 3)[:-1] + [0],
-                    host.keccak(b"y" * 500, 40), [host.hdr(host.OP_PING)], host.keyload_body(K, SEED, PRF) + [0, 0]]
+                    host.keccak(b"y" * 500, 40), [host.hdr(host.OP_PING)], host.cmd(host.OP_NONCE), host.cmd(host.OP_BOOT)]
             for r in reqs:
                 rsp = c.transact(r)
                 self.assertTrue(common.working_rows_clear(c))
                 self.assertEqual(c.log[-1]["key_words_emitted"], [])
                 self.assertFalse(dev & set(rsp))
-            self.assertFalse(any(common.DEV[i:i + 8] in bytes(c.fram) for i in range(0, 32, 8)))
+            self.assertFalse(any(w.to_bytes(8, "little") in bytes(c.fram) for w in _D.k_dev))
 
     def test_cycle_counts_do_not_depend_on_the_keys(self):
-        """The same requests under different key material take the same number of clocks."""
+        """The same requests on dies with different PUF responses, hence different keys, take the same
+        number of clocks."""
         seen = []
+        com = common.committee()
         for salt in (b"a", b"b", b"c"):
-            k, seed, prf = (hashlib.sha256(salt + t).digest()[:16] for t in (b"k", b"s", b"p"))
-            c = common.new_chip()
-            assert host.provision(c, c.owner, k, seed, prf, True, True) == OK_LOAD
+            c = common.new_chip(puf=salt * 32)
+            info = host.provision(c, common.owner(), com.root, host.F_COUNTED)
+            c.reset()
+            self.assertEqual(host.boot(c, info["helper_sig"])[1], host.LC_READY)
+            k = info["k_host"]
             run = []
             for req in (host.cth_wots(k, 2, 0, 9, 2, PK, bytes(range(16)), 35), host.cth_fors(k, 0, 0, 9, 1, PK, [3, 4], pubgen=True),
                         host.prf_msg(b"m" * 200), host.cth_wots(k, 2, 0, 9, 2, PK, bytes(16), 1),
@@ -619,6 +478,7 @@ class Invariants(unittest.TestCase):
             seen.append(run)
         self.assertEqual(seen[0], seen[1])
         self.assertEqual(seen[0], seen[2])
+        self.assertNotEqual(info["k_host"], K)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-"""Stage 1 exit: the reference golden model's 54-transaction script against the v2 model."""
+"""The reference golden model's 54-transaction script against the v2 model (replay.py states what can
+still be compared with the reference and what is compared with FIPS 205 instead)."""
 import collections
 import unittest
 
@@ -13,12 +14,14 @@ class ReferenceScript(unittest.TestCase):
         self.assertEqual(failures, [])
         self.assertEqual(len(rows), 54)
         cls = collections.Counter(r["cls"] for r in rows)
-        # 36 requests sent unchanged; 12 CTH and 2 KEYLOAD requests rebuilt in the v2 format (same expected
-        # responses); 4 verifier-VM requests that stage 1 does not implement
-        self.assertEqual(cls, {"verbatim": 36, "translated": 14, "deferred": 4})
-        self.assertEqual(collections.Counter(r["op"] for r in rows if r["cls"] == "translated"),
-                         {host.OP_CTH: 12, host.OP_KEYLOAD: 2})
-        self.assertEqual(len(inserted), 2)                 # one nonce request; one reset + counted key load
+        # 34 requests sent unchanged and answered as the reference answers; 11 CTH and 2 PRF_MSG answered as
+        # FIPS 205 says under the chip's own keys (or refused with the reference's code); 2 key loads and the
+        # roll-back refusal, which no longer exist; 4 verifier-VM requests
+        self.assertEqual(cls, {"verbatim": 34, "recomputed": 13, "changed": 3, "deferred": 4})
+        self.assertEqual(collections.Counter(r["op"] for r in rows if r["cls"] == "recomputed"),
+                         {host.OP_CTH: 11, host.OP_PRFMSG: 2})
+        self.assertEqual(collections.Counter(r["op"] for r in rows if r["cls"] == "changed"), {0x40: 2, host.OP_CTH: 1})
+        self.assertEqual(len(inserted), 2)                 # a provisioned chip; a second one with the counted policy
         self.assertTrue(all(r["ok"] for r in rows))
         self.assertTrue(all(r["op"] in (0x30, 0x31) for r in rows if r["cls"] == "deferred"))
 
@@ -26,7 +29,7 @@ class ReferenceScript(unittest.TestCase):
         rows, failures, _ = replay.replay("S")
         self.assertEqual(failures, [])
         cls = collections.Counter(r["cls"] for r in rows)
-        self.assertEqual(cls, {"verbatim": 21, "translated": 14, "deferred": 4, "absent": 15})
+        self.assertEqual(cls, {"verbatim": 19, "recomputed": 13, "changed": 3, "deferred": 4, "absent": 15})
         self.assertTrue(all(r["op"] in (0x10, 0x11) for r in rows if r["cls"] == "absent"))
 
     def test_quick_script(self):
@@ -36,20 +39,28 @@ class ReferenceScript(unittest.TestCase):
             self.assertEqual(len(rows), 38)
 
     def test_comparison_can_fail(self):
-        """The comparison is not vacuous: one flipped bit in the anchor constant must show up."""
+        """The comparison is not vacuous: a signer that derives SK.seed under another label must show up,
+        and so must a use counter that is written one too low."""
+        import common
         import chip
         import uasm
-        src = [(n, t.replace('"QSAGNIFR"', '"QSAGNIFS"')) for n, t in chip.read_sources("S")]
-        saved = chip._roms["S"] if "S" in chip._roms else None
-        chip._roms["S"] = uasm.assemble(src)
-        try:
-            _, failures, _ = replay.replay("S")
-        finally:
-            if saved is None:
-                del chip._roms["S"]
-            else:
-                chip._roms["S"] = saved
-        self.assertTrue(any(name.startswith("FRAMCHK") for name, _, _ in failures))
+        for old, new, needle in (('.const C_LSEED  "DREGGSKS"', '.const C_LSEED  "DREGGSKT"', "WOTS"),
+                                 ("            ADD  #1\n            BR   CY e_reuse          ; counter would wrap",
+                                  "            ADD  #0\n            BR   CY e_reuse          ; counter would wrap", "FRAMCHK")):
+            src = chip.read_sources("S", common.SLH)
+            self.assertEqual(sum(t.count(old) for _, t in src), 1)
+            key = ("S", common.SLH, None)
+            saved = chip.build_rom("S", common.SLH)
+            chip._roms[key] = uasm.assemble([(n, t.replace(old, new)) for n, t in src])
+            cache = dict(common._cache)
+            common._cache.clear()
+            try:
+                _, failures, _ = replay.replay("S")
+            finally:
+                chip._roms[key] = saved
+                common._cache.clear()
+                common._cache.update(cache)
+            self.assertTrue(any(needle in name for name, _, _ in failures), (needle, [f[0] for f in failures]))
 
     def test_verbatim_responses_are_compared_word_for_word(self):
         """The only unchecked words of the whole reference script are PING words 2..4."""

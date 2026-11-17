@@ -18,7 +18,11 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL = os.path.normpath(os.path.join(HERE, "..", "model"))
+# The model to read: the v2 directory this file lives in, or another checkout of it named by
+# DREGG_V2_REF (a directory holding model/, ucode/ and tests/), e.g. an extraction of the commit the
+# RTL was verified against.
+V2REF = os.path.abspath(os.environ.get("DREGG_V2_REF") or os.path.join(HERE, ".."))
+MODEL = os.path.join(V2REF, "model")
 
 
 def model_isa(scratch=None):

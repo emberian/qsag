@@ -150,6 +150,7 @@ int main(int argc, char** argv) {
     }
     if (nchips != 1) { printf("the trace must hold exactly one chip (has %d)\n", nchips); return 2; }
     auto reset = [&]() {
+        top->por_n = 1; top->eval();                 // a falling edge every time (see cosim.cpp)
         top->por_n = 0; top->eval(); ticks_n(3);
         top->por_n = 1; top->eval();
         int n = 0; while (!top->ready && n++ < 200) tick();

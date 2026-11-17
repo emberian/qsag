@@ -13,7 +13,7 @@ import uasm
 
 MANIFEST = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ucode", "push_manifest.txt"))
 KEY_OPS = ("KEYWR",)
-KEY_CTL = ("SETKV", "AUTH", "NONCE")
+KEY_CTL = isa.CTL_KEY
 
 
 def load_manifest(path=MANIFEST):
@@ -44,11 +44,11 @@ def check(rom, manifest):
         f.append("DISP must be at address 0 and nowhere else")
     if not any(op_of(w) in ("END", "FAIL") for w in words):
         f.append("the ROM has no END or FAIL")
-    for op, (addr, cls) in rom.entries.items():
-        if not 0 < addr < len(words) or addr in rom.padding:
-            f.append(f"entry of opcode {op:#x} is outside the code")
-        if (cls == isa.D_PROV) != (isa.KEY_LO <= addr <= isa.KEY_HI):
-            f.append(f"entry of opcode {op:#x}: provisioning class and key range disagree")
+    for op, (addr, mask) in rom.entries.items():
+        if not isa.ROM_BASE <= addr < len(words) or addr in rom.padding:
+            f.append(f"entry of opcode {op:#x} is outside the ordinary code")
+        if not 0 < mask <= isa.LC_ANY:
+            f.append(f"entry of opcode {op:#x} decodes in no lifecycle state")
     for a, w in enumerate(words):
         d = isa.decode(w)
         mn = isa.OPS[d["op"]]
@@ -59,13 +59,14 @@ def check(rom, manifest):
             if t == isa.IDLE_ADDR or t >= len(words) or t in rom.padding:
                 f.append(f"{where}: transfer to {t}")
         # 4. key and record instructions only in their hardwired ranges
-        keyish = mn in KEY_OPS or (mn == "CTL" and isa.CTL[d["a"]] in KEY_CTL)
+        keyish = (mn in KEY_OPS or (mn == "CTL" and d["a"] < len(isa.CTL) and isa.CTL[d["a"]] in KEY_CTL)
+                  or (mn == "KMOV" and d["fn"] & 1))
         if keyish and not isa.KEY_LO <= a <= isa.KEY_HI:
             f.append(f"{where}: key instruction outside the key range")
         if mn == "FRAM":
             if not isa.REC_LO <= a <= isa.REC_HI:
                 f.append(f"{where}: FRAM instruction outside the record range")
-            if isa.FRAM[d["a"]] == "WWORD" and (d["ib"] or d["b"] not in isa.FRAM_SRC):
+            if isa.FRAM[d["a"]] == "WWORD" and (d["ib"] or not (d["b"] in isa.FRAM_LANES or isa.row_class(d["b"]) in ("pin", "state"))):
                 f.append(f"{where}: FRAM WWORD of row {d['b']}")
         # 5. rows named directly
         reads_row = (mn in isa.ALU2 or mn == "PUSH") and not d["fn"] & 2 or mn == "FADD"
@@ -77,7 +78,12 @@ def check(rom, manifest):
             if r is not None and not (d["ia"] if kind == "read" else d["ib"]):
                 if isa.row_class(r, isa.ROWS_L) in ("key", "out", "kwork", "none"):
                     f.append(f"{where}: {kind} of {isa.row_class(r, isa.ROWS_L)} row {r}")
-        if mn == "KMOV" and (isa.row_class(d["a"]) != "key" or d["b"] >= isa.RATE_LANES or d["ia"] or d["ib"]):
+        if wr is not None and isa.row_class(wr, isa.ROWS_L) in ("pin", "state") and not isa.REC_LO <= a <= isa.REC_HI:
+            f.append(f"{where}: write of state row {wr} outside the record range")
+        if mn == "KMOV" and d["fn"] & 1:
+            if d["a"] > 3 or d["b"] >= isa.RATE_LANES or d["ia"] or d["ib"]:
+                f.append(f"{where}: PMOV operands")
+        elif mn == "KMOV" and (isa.row_class(d["a"]) != "key" or d["b"] >= isa.RATE_LANES or d["ia"] or d["ib"]):
             f.append(f"{where}: KMOV operands")
         if (mn == "PUSH" and d["fn"] & 1 and not d["fn"] & 2) or (mn == "CMP" and d["fn"] & 1 and not d["fn"] & 2):
             if not d["ia"] and d["a"] >= isa.RATE_LANES:

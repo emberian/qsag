@@ -8,7 +8,9 @@
 // diagnostics and hashing and refuses provisioning, as the model does without those interfaces.
 `default_nettype none
 
-module dregg_top (
+module dregg_top #(
+    parameter bit IR_STAGE = 1'b0               // see dregg_seq
+) (
     input  wire         clk,
     input  wire         por_n,
     input  wire         tamper_n,
@@ -63,7 +65,7 @@ module dregg_top (
         .rom_len(rom_len), .rom_used(rom_used)
     );
 
-    dregg_core u_core (
+    dregg_core #(.IR_STAGE(IR_STAGE)) u_core (
         .clk(clk), .por_n(por_n), .tamper_n(tamper_n),
         .in_valid(in_valid), .in_first(in_first), .in_data(in_data), .in_take(in_take),
         .out_valid(out_valid), .out_data(out_data), .out_take(out_take),
