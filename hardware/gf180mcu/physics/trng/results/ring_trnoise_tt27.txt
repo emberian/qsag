@@ -1,0 +1,13 @@
+Transient-noise ring simulations, TT 5 V 27 C, ngspice 45, injected stage noise S0 = 4.0e-24 A^2/Hz x scale^2
+(run_ring_trnoise.py, analyze_ring_trnoise.py; waveform files deleted after analysis)
+r7_a0        7 stages scale 0   periods 1529  T 1.9470 ns  sigma_period 0.0003 ps (numerical floor)
+r7_a10_s1    7 stages scale 10  periods 1529  T 1.9470 ns  sigma_period 2.3499 ps  kappa/scale 5.33e-09 (1 period), 5.73e-09 (slope)  lag-1 corr -0.056
+r7_a10_s2    7 stages scale 10  periods 1529  T 1.9469 ns  sigma_period 2.3216 ps  kappa/scale 5.26e-09 (1 period), 4.73e-09 (slope)  lag-1 corr +0.005
+r7_a30_s3    7 stages scale 30  periods 1530  T 1.9471 ns  sigma_period 7.0792 ps  kappa/scale 5.35e-09 (1 period), 4.14e-09 (slope)  lag-1 corr -0.017
+r17_a10_s5  17 stages scale 10  periods 1057  T 4.7060 ns  sigma_period 3.2117 ps  kappa/scale 4.68e-09 (1 period), 4.70e-09 (slope)  lag-1 corr +0.008
+r17_a10_s6  17 stages scale 10  periods 1057  T 4.7060 ns  sigma_period 3.3520 ps  kappa/scale 4.89e-09 (1 period), 4.93e-09 (slope)  lag-1 corr +0.011
+sigma(m periods)/sqrt(m), ps, m = 1 2 4 8 16 32:
+ r7_a10_s1 2.350 2.291 2.326 2.351 2.514 2.519 ; r7_a10_s2 2.322 2.367 2.343 2.294 2.105 2.246 ; r7_a30_s3 7.079 7.033 6.617 6.130 5.643 5.738
+ r17_a10_s5 3.212 3.265 3.211 3.125 3.236 3.737 ; r17_a10_s6 3.352 3.340 3.337 3.484 3.367 3.503
+Result: kappa = 5.3e-9 sqrt(s) (7 stages), 4.8e-9 sqrt(s) (17 stages); linear in the injected amplitude (scale 10 vs 30);
+white accumulation (sigma grows as sqrt(m)).  Abidi's formula with gamma = 2/3 gave 4.1e-9.

@@ -2380,4 +2380,53 @@ theorem exists_invalid_batch_coordinate
 
 -- (end exports for lane agg-budget)
 
+/-! ### Exports and executed teeth for `Tests/HemExtractedOpeningBridgeTests` -/
+
+/-- Public form of the single-candidate bound for the zero oracle. -/
+theorem gsDecodeList_zeroOracle_length_le_one (domPts : List QuarticGoldilocks)
+    (d A : Nat) (hDom : domPts.Nodup) (hdA : d + 1 ≤ A) :
+    (gsDecodeList d A domPts (fun _ => CommRingOps.zero)).length ≤ 1 :=
+  gsDecodeList_zero_length_le_one domPts d A hDom hdA
+
+theorem tooth_core_agreement_is_stronger_than_checker :
+    let S : List QuarticGoldilocks := [CommRingOps.zero, CommRingOps.one]
+    let tr : List (HemIopMsg QuarticGoldilocks × Nat) :=
+      [(.msgCascade [CommRingOps.zero], 2),
+       (.msgFinal [CommRingOps.zero, CommRingOps.one], 0)]
+    mutantVerifyHemAffineWhirUnincremented hemCoreAgreementBoundaryInstance
+      (assembleHemCoreTranscript S tr) = true ∧
+    verifyHemAffineWhir hemCoreAgreementBoundaryInstance (assembleHemCoreTranscript S tr) = false ∧
+    verifyHemCoreIop S hemCoreAgreementBoundaryInstance.initDomainPts 0 2
+      hemCoreAgreementBoundaryInstance tr = false := by
+  -- The checker bodies are sealed in `MultiRoundFsQrom`; their executed values are certified there.
+  have hAsm : assembleHemCoreTranscript [CommRingOps.zero, CommRingOps.one]
+      [(.msgCascade [CommRingOps.zero], 2), (.msgFinal [CommRingOps.zero, CommRingOps.one], 0)] =
+      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)]
+        [[CommRingOps.zero, CommRingOps.one]], .finalQuery [CommRingOps.zero, CommRingOps.one]] := by
+    simp only [assembleHemCoreTranscript, prodPool_eq]
+    rfl
+  intro S tr
+  refine ⟨?_, ?_, ?_⟩
+  · show mutantVerifyHemAffineWhirUnincremented hemCoreAgreementBoundaryInstance
+      (assembleHemCoreTranscript [CommRingOps.zero, CommRingOps.one]
+        [(.msgCascade [CommRingOps.zero], 2), (.msgFinal [CommRingOps.zero, CommRingOps.one], 0)]) = true
+    rw [hAsm]
+    exact hemCoreAgreementBoundary_transcript_kat.1
+  · show verifyHemAffineWhir hemCoreAgreementBoundaryInstance
+      (assembleHemCoreTranscript [CommRingOps.zero, CommRingOps.one]
+        [(.msgCascade [CommRingOps.zero], 2), (.msgFinal [CommRingOps.zero, CommRingOps.one], 0)]) = false
+    rw [hAsm]
+    exact hemCoreAgreementBoundary_transcript_kat.2
+  · show verifyHemCoreIop [CommRingOps.zero, CommRingOps.one]
+      (hemCoreAgreementBoundaryInstance.initDomainPts) 0 2 hemCoreAgreementBoundaryInstance
+      [(.msgCascade [CommRingOps.zero], 2), (.msgFinal [CommRingOps.zero, CommRingOps.one], 0)] = false
+    simp only [verifyHemCoreIop, hAsm, hemCoreAgreementBoundary_transcript_kat.2, Bool.and_false]
+
+#verify_constructive
+  Qsag.gsDecodeList_zeroOracle_length_le_one
+  Qsag.tooth_core_agreement_is_stronger_than_checker
+
+-- Equation for the executed bridge witness of `Cwyz26EqualDegreeAndMultiFold` (no body exposed).
+#export_eqns hemVirtualFoldOracle
+
 end Qsag

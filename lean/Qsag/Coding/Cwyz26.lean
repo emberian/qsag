@@ -1504,6 +1504,39 @@ theorem inhabited_deployed_gs_dimensions :
   refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
   exact List.mem_cons_self ..
 
+/-! ### Executed table lookups at `nv = 24`, stage `0`
+
+Cited by the stage-profile teeth of `Protocol/Aggregation/HemOpening` (audited in
+`Tests/HemExtractedOpeningBridgeTests`); the tables are not exported. -/
+
+set_option maxRecDepth 65536 in
+theorem hemJohnsonQrom_nv24_stage0_rows :
+    hemJohnsonQromStageExhaustive ((hemStageGeoms 24).get ⟨0, by decide⟩) = false ∧
+    hemJohnsonQromTableRow 24 ((hemStageGeoms 24).get ⟨0, by decide⟩).stageIdx =
+      some (24, 0, 527170, 64, 27164) ∧
+    slicedStageRow 24 ((hemStageGeoms 24).get ⟨0, by decide⟩).stageIdx =
+      some (24, 0, 524291, 185) := by
+  decide +kernel
+
+set_option maxRecDepth 65536 in
+theorem whirAffineStageWitnesses_nv24_qrom_pos : 0 < (whirAffineStageWitnesses 24 true).length := by
+  decide +kernel
+
+set_option maxRecDepth 65536 in
+theorem whirAffineStageWitnesses_nv24_qrom_head :
+    (whirAffineStageWitnesses 24 true).get ⟨0, whirAffineStageWitnesses_nv24_qrom_pos⟩ =
+      { n := ((hemStageGeoms 24).get ⟨0, by decide⟩).n, d := ((hemStageGeoms 24).get ⟨0, by decide⟩).d,
+        sFolds := ((hemStageGeoms 24).get ⟨0, by decide⟩).stepVars, A := 527170, B := 527169,
+        m := 64, D := 27164,
+        queries := hemJohnsonMinQueries true ((hemStageGeoms 24).get ⟨0, by decide⟩).logBlowup,
+        queryTargetBits := 256 } := by
+  rfl
+
+#verify_constructive
+  Qsag.hemJohnsonQrom_nv24_stage0_rows
+  Qsag.whirAffineStageWitnesses_nv24_qrom_pos
+  Qsag.whirAffineStageWitnesses_nv24_qrom_head
+
 -- (math-teeth anchor Qsag )
 end Qsag
 end

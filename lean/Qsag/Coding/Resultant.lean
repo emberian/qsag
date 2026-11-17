@@ -4238,6 +4238,7 @@ end
   Qsag.Poly2.splitAgainstList
   Qsag.Poly2.tdeg_mul
   Qsag.SylElim.common_root_unique_of_sylResDeriv_ne_zero
+  Qsag.SylElim.bezout_space_finite_u_locus
   Qsag.SylElim.curve_leaf_gcd_decomp
   Qsag.SylElim.curve_leaf_root_decomp
   Qsag.SylElim.curve_three_poly_sheet_decomp

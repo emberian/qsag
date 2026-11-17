@@ -1933,5 +1933,344 @@ theorem slicedBinaryStageBound_den (g : HemStageGeom) (r : Nat × Nat × Nat × 
     (slicedBinaryStageBound g r w).den = goldilocksExt4Card * goldilocksExt4Card := by rfl
 -- (end exports for lane agg-whir-cert)
 
+/-! ## Executed fixtures and teeth (audited and paired in `Tests/HemExtractedOpeningBridgeTests`)
+
+These unfold this module's definitions (`hemZeroOracleClaimInstance`, `claimedOpeningValues`,
+`extractedOpeningValues`, `verifyHemOpeningBatch`, the stage profiles). Values of definitions sealed in
+lower modules are cited from the certificates proved there: the toy Merkle game in `Oracle/Qrom`, the Hem
+checker in `MultiRoundFsQrom`. -/
+
+def toyHemDecode (_ : Fin 4) (values : List (Option (MerkleOpeningValue 1))) :
+    List (HemTranscriptRound QuarticGoldilocks) :=
+  if values = [some (0#1, [1#1])] then
+    [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.one)] [[]], .finalQuery []]
+  else []
+
+def toyHemInstance : HemWhirInstance QuarticGoldilocks :=
+  hemZeroOracleClaimInstance [CommRingOps.zero, CommRingOps.one] 0 2 []
+
+private theorem toyHemInstance_accepts_claimed :
+    verifyHemAffineWhir toyHemInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.one)] [[]], .finalQuery []] = true :=
+  verifyHemAffineWhir_zeroOracleClaim_dom01_kat.1
+
+private theorem toyClaimedOpeningValues (x : Fin 4) :
+    claimedOpeningValues toyOpeningSlots x = [some (0#1, [1#1])] := by
+  rw [toyOpeningSlots_eq]
+  show [some ((toyOpening x).leaf, (toyOpening x).path)] = _
+  rw [toyOpening_eq]
+
+private theorem toyHemDecode_claimed (x : Fin 4) :
+    toyHemDecode x [some (0#1, [1#1])] =
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.one)] [[]], .finalQuery []] := by
+  simp only [toyHemDecode, ↓reduceIte]
+
+private theorem toyHemDecode_other (x : Fin 4) (values : List (Option (MerkleOpeningValue 1)))
+    (h : ¬ values = [some (0#1, [1#1])]) : toyHemDecode x values = [] := by
+  simp only [toyHemDecode, h, ↓reduceIte]
+
+private theorem toy_event_accept (H : Fin 4 → BitVec 1) (x : Fin 4) :
+    verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x =
+      toyAccepted H x := by
+  have hV : verifyOpeningBatch toyMerkleLayout toyOpeningSlots H x = toyAccepted H x := by
+    rw [toyOpeningSlots_eq, toyAccepted_eq]
+    simp only [verifyOpeningBatch, List.all_cons, List.all_nil, Bool.and_true, toyOpening_shape,
+      Bool.true_and]
+  unfold verifyHemOpeningBatch
+  rw [hV, toyClaimedOpeningValues, toyHemDecode_claimed, toyHemInstance_accepts_claimed, Bool.and_true]
+
+private theorem toy_event_fail (H : Fin 4 → BitVec 1) (xs : List (Fin 4)) (x : Fin 4) :
+    (verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x &&
+      !verifyHemAffineWhir toyHemInstance
+        (toyHemDecode x (extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x))) =
+      measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs x := by
+  have hE : extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x =
+      [extractOnlineMerkleOpening (toyOpening x).rt (merkleRecords toyMerkleLayout H xs) 0
+        (toyOpening x).path.length (toyOpening x).idx] := by
+    rw [toyOpeningSlots_eq]; rfl
+  have hLp : ((toyOpening x).leaf, (toyOpening x).path) = ((0#1 : BitVec 1), [(1#1 : BitVec 1)]) := by
+    rw [toyOpening_eq]
+  rw [toy_event_accept, measuredMerkleFailure_def, toyOpening_shape, Bool.true_and, ← toyAccepted_eq,
+    hE]
+  cases hd : decide (extractOnlineMerkleOpening (toyOpening x).rt (merkleRecords toyMerkleLayout H xs) 0
+      (toyOpening x).path.length (toyOpening x).idx = some ((toyOpening x).leaf, (toyOpening x).path))
+  · have he := of_decide_eq_false hd
+    rw [toyHemDecode_other x _ (fun h => he ((List.cons.inj h).1.trans (congrArg some hLp.symm)))]
+    rfl
+  · have he := of_decide_eq_true hd
+    rw [he, hLp, toyHemDecode_claimed, toyHemInstance_accepts_claimed]
+
+/-- The decoder consumes extracted data: a missing opening rejects; the exact claimed
+    opening accepts an invalid statement. The measured extraction loss is 0 for the query
+    at the actual compression address, and 8/16 for the other address. -/
+theorem toy_hem_substitution_execution :
+    let honest := toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_stateNormSq_pos _)
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_stateNormSq_pos _)
+    verifyHemAffineWhir toyHemInstance (toyHemDecode ⟨0, by decide⟩ [none]) = false ∧
+    verifyHemAffineWhir toyHemInstance
+      (toyHemDecode ⟨0, by decide⟩ (claimedOpeningValues toyOpeningSlots ⟨0, by decide⟩)) = true ∧
+    measuredEventMass honest (fun H _ x =>
+      verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x) = 8 ∧
+    measuredEventMass honest (fun H xs x =>
+      verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x &&
+      !verifyHemAffineWhir toyHemInstance
+        (toyHemDecode x (extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x))) = 0 ∧
+    measuredEventMass guesser (fun H xs x =>
+      verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x &&
+      !verifyHemAffineWhir toyHemInstance
+        (toyHemDecode x (extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x))) = 8 := by
+  intro honest guesser
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · rw [toyHemDecode_other _ _ (by decide)]
+    rfl
+  · rw [toyClaimedOpeningValues, toyHemDecode_claimed]
+    exact toyHemInstance_accepts_claimed
+  · exact (congrArg (measuredEventMass honest)
+      (funext fun H => funext fun _ => funext fun x => toy_event_accept H x)).trans
+        toy_measured_merkle_event_masses.1
+  · exact (congrArg (measuredEventMass honest)
+      (funext fun H => funext fun xs => funext fun x => toy_event_fail H xs x)).trans
+        toy_measured_merkle_event_masses.2.1
+  · exact (congrArg (measuredEventMass guesser)
+      (funext fun H => funext fun xs => funext fun x => toy_event_fail H xs x)).trans
+        toy_measured_merkle_event_masses.2.2
+
+/-- Actual authenticated Hem decoder consumer, on the earlier nonconstant one-bit layout. -/
+theorem coherent_hem_decoder_execution :
+    let honest := toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_stateNormSq_pos _)
+    coherentTableEventMass
+      (verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode)
+      (fourierOracleState (fourierAdvStateAt honest 1 (Nat.le_refl 1))) = 524288 := by
+  intro honest
+  rw [coherent_hem_authenticated_event_eq]
+  have hEv : (fun H : Fin 4 → BitVec 1 =>
+      QVec.queryMassOn
+        (verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H)
+        (runQuantumAdv honest H)) =
+      fun H => QVec.queryMassOn (toyAccepted H) (runQuantumAdv honest H) :=
+    funext fun H => congrArg (fun e => QVec.queryMassOn e (runQuantumAdv honest H))
+      (funext fun x => toy_event_accept H x)
+  rw [hEv, toy_coherent_accept_mass]
+
+#verify_constructive Qsag.coherent_hem_decoder_execution
+
+theorem toyHemInstance_invalid : ¬ HemStatementValid toyHemInstance :=
+  hemZeroOracleClaimInstance_invalid _ 0 2 [] (by decide) (by decide)
+
+/-- The universal replacement theorem has a concrete decoder and inhabited adversary. -/
+theorem toy_hem_substitution_bound_instance :
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_stateNormSq_pos _)
+    2 ^ 1 * measuredEventMass guesser (fun H xs x =>
+      verifyHemOpeningBatch toyMerkleLayout toyOpeningSlots toyHemInstance toyHemDecode H x &&
+      !verifyHemAffineWhir toyHemInstance
+        (toyHemDecode x (extractedOpeningValues toyMerkleLayout toyOpeningSlots H xs x))) ≤
+      batchMerkleCost 1 toyOpeningSlots * quantumExperimentTotal guesser := by
+  exact measured_hem_opening_substitution_bound _ _ _
+    (by intro s hs; rw [toyOpeningSlots_eq] at hs
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hs
+        subst s; rw [toyMerkleLayout_levels]; decide) _ _
+
+/-- The concrete bound has both accepting and rejecting challenges on an invalid instance:
+    exactly two of the four pairs survive. This tests more than an empty attack schedule. -/
+theorem hemZeroOracle_acceptance_nontrivial :
+    let D : List QuarticGoldilocks := [CommRingOps.zero, CommRingOps.one]
+    let inst := hemZeroOracleClaimInstance D 0 2 []
+    ¬ HemStatementValid inst ∧
+    ((prodPool D).filter (fun p => verifyHemAffineWhir inst
+      [.cascade [CommRingOps.zero] [p] [[]], .finalQuery []])).length = 2 ∧
+    2 < (prodPool D).length := by
+  refine ⟨hemZeroOracleClaimInstance_invalid _ 0 2 [] (by decide) (by decide), ?_, ?_⟩
+  · exact verifyHemAffineWhir_zeroOracleClaim_dom01_kat.2
+  · rw [prodPool_length]
+    decide
+
+private theorem slicedBinaryStageProfile_nv24_stage0 :
+    slicedBinaryStageProfile 24 ((hemStageGeoms 24).get ⟨0, by decide⟩) =
+      slicedBinaryStageBound ((hemStageGeoms 24).get ⟨0, by decide⟩)
+        (24, 0, 527170, 64, 27164) (24, 0, 524291, 185) := by
+  unfold slicedBinaryStageProfile
+  rw [hemJohnsonQrom_nv24_stage0_rows.2.1, hemJohnsonQrom_nv24_stage0_rows.2.2]
+
+/-- The actual proved nv24 stage-0 expression cannot replace the much smaller paper input.
+    Nor does widening commitment digests repair this DFM-scaled arithmetic term. These
+    are counterexamples about bounds, not attacks achieving their upper bounds. -/
+theorem tooth_sliced_nv24_profile_margin :
+    let g := (hemStageGeoms 24).get ⟨0, by decide⟩
+    let b := slicedBinaryStageProfile 24 g
+    atLeastBits 185 b ∧ ¬ atLeastBits 186 b ∧ ¬ atLeastBits 244 b ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 28) b) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 40) b) ∧
+    ¬ atLeastBits 128 (dfmRoundScale (2 ^ 56) b) ∧
+    ¬ RatBound.le b (whirAffineEqualDegreeCommitFoldBound
+      ((whirAffineStageWitnesses 24 true).get ⟨0, whirAffineStageWitnesses_nv24_qrom_pos⟩)) := by
+  -- The table rows are sealed in `Coding/Cwyz26`; their lookups are certified there.
+  intro g b
+  rw [show b = _ from slicedBinaryStageProfile_nv24_stage0, whirAffineStageWitnesses_nv24_qrom_head]
+  simp only [atLeastBits, dfmRoundScale, RatBound.le, whirAffineEqualDegreeCommitFoldBound,
+    slicedBinaryStageBound_num, slicedBinaryStageBound_den, goldilocksExt4Card_def]
+  decide +kernel
+
+/-- **DFM vs State-Restoration Scaling Contrast at `Q = 2^50` (`tooth_dfmRoundScale_fails_128bits_at_2pow50`)**:
+    On `nv = 24` stage `0`, `cdhzStateRestorationScale (2^50) 32 b` and `cdhzSaltedMerkleCollisionBound (2^50)`
+    both clear `128` bits, whereas naive `[DFM20]` `dfmRoundScale (2^50) b` fails `128` bits. -/
+theorem tooth_dfmRoundScale_fails_128bits_at_2pow50 :
+    ∃ g : HemStageGeom, g ∈ hemStageGeoms 24 ∧
+      atLeastBits 128 (cdhzStateRestorationScale (2 ^ 50) 32 (slicedBinaryStageProfile 24 g)) ∧
+      atLeastBits 128 (cdhzSaltedMerkleCollisionBound (2 ^ 50)) ∧
+      ¬ atLeastBits 128 (dfmRoundScale (2 ^ 50) (slicedBinaryStageProfile 24 g)) :=
+  ⟨(hemStageGeoms 24).get ⟨0, by decide⟩, list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩,
+   by
+    rw [slicedBinaryStageProfile_nv24_stage0]
+    simp only [atLeastBits, cdhzStateRestorationScale, slicedBinaryStageBound_num,
+      slicedBinaryStageBound_den, goldilocksExt4Card_def]
+    decide +kernel,
+   by decide +kernel,
+   by
+    rw [slicedBinaryStageProfile_nv24_stage0]
+    simp only [atLeastBits, dfmRoundScale]
+    decide +kernel⟩
+
+private def witEqDegDom : List QuarticGoldilocks := [qgNat 0, qgNat 1, qgNat 2, qgNat 3]
+
+private theorem witEqDegDom_eq : witEqDegDom = toothDeg1Dom := toothDeg1Dom_eq.symm
+
+private theorem witEqDegDom_nodup : witEqDegDom.Nodup := by
+  rw [witEqDegDom_eq]; exact toothDeg1Dom_fixture_facts.1
+
+private theorem witEqDegDom_zero_mem : (CommRingOps.zero : QuarticGoldilocks) ∈ witEqDegDom := by
+  rw [witEqDegDom_eq]; exact toothDeg1Dom_fixture_facts.2.1
+
+private theorem witEqDegDecomp3 :
+    AffineFoldDecompBound witEqDegDom witEqDegDom 1 3 16 := by
+  intro _ L hNd _
+  have hLen : (prodPool witEqDegDom).length = 16 := by rw [prodPool_length]; decide
+  rw [← hLen]
+  exact Nat.le_trans (nodup_length_le_of_subset hNd (fun ch _ => List.mem_finRange ch))
+    (Nat.le_of_eq List.length_finRange)
+
+private theorem witEqDegDecomp4 :
+    AffineFoldDecompBound witEqDegDom witEqDegDom 1 4 16 := by
+  intro _ L hNd _
+  have hLen : (prodPool witEqDegDom).length = 16 := by rw [prodPool_length]; decide
+  rw [← hLen]
+  exact Nat.le_trans (nodup_length_le_of_subset hNd (fun ch _ => List.mem_finRange ch))
+    (Nat.le_of_eq List.length_finRange)
+
+private theorem witEqDegMixList :
+    ∀ θ : QuarticGoldilocks,
+      (gsDecodeList 0 3 witEqDegDom
+        (fun _ => CommRingOps.add (qgNat 0) (CommRingOps.mul θ (qgNat 0)))).length ≤ 1 := by
+  intro θ
+  have hZero : (fun _ : QuarticGoldilocks => CommRingOps.add (qgNat 0) (CommRingOps.mul θ (qgNat 0))) =
+      (fun _ => CommRingOps.zero) := by
+    funext _; rw [qgNat_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  rw [hZero]
+  exact gsDecodeList_zeroOracle_length_le_one witEqDegDom 0 3 witEqDegDom_nodup (by decide)
+
+private theorem witEqDegInvalid :
+    (∀ Fp : List QuarticGoldilocks, Fp.length ≤ 1 →
+      2 ≤ (witEqDegDom.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = qgNat 0))).length →
+      ringDot Fp [qgNat 1] ≠ qgNat 1) ∨
+    (∀ Gp : List QuarticGoldilocks, Gp.length ≤ 1 →
+      2 ≤ (witEqDegDom.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = qgNat 0))).length →
+      ringDot Gp [qgNat 1] ≠ qgNat 0) := by
+  refine .inl (fun Fp hLen hAg hDot => ?_)
+  rcases Fp with _ | ⟨c, _ | _⟩
+  · change CommRingOps.zero = qgNat 1 at hDot
+    rw [qgNat_one] at hDot
+    exact (by decide : (CommRingOps.zero : QuarticGoldilocks) ≠ CommRingOps.one) hDot
+  · have hOne : qgNat 1 = CommRingOps.one := qgNat_one
+    have hc1 : c = CommRingOps.one := by
+      rw [hOne] at hDot
+      simpa only [ringDot_cons_cons, ringDot_nil_left, ringDot_nil_right, LawfulCommRing.mul_one, LawfulCommRing.add_zero] using hDot
+    subst hc1
+    rw [witEqDegDom_eq] at hAg
+    exact absurd hAg toothDeg1Dom_fixture_facts.2.2
+  · simp only [List.length_cons] at hLen
+    omega
+
+theorem witness_equal_degree_three_challenge_bound :
+    ∃ (D S kernel : List QuarticGoldilocks) (d A badTheta badAB maxMix : Nat)
+      (f g : QuarticGoldilocks → QuarticGoldilocks) (e_f e_g c_f c_g : QuarticGoldilocks)
+      (triples : List (Fin S.length × Fin (prodPool S).length)),
+      D.Nodup ∧ S.Nodup ∧ (CommRingOps.zero : QuarticGoldilocks) ∈ S ∧
+      d + 3 ≤ A ∧ A ≤ D.length ∧
+      AffineFoldDecompBound D S (d + 1) A badTheta ∧
+      AffineFoldDecompBound D S (d + 1) (A + 1) badAB ∧
+      (∀ θ : QuarticGoldilocks,
+        (gsDecodeList d A D (fun z => CommRingOps.add (f z) (CommRingOps.mul θ (g z)))).length ≤ maxMix) ∧
+      ((∀ Fp : List QuarticGoldilocks, Fp.length ≤ d + 1 →
+          A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = f z))).length →
+          ringDot Fp kernel ≠ e_f) ∨
+       (∀ Gp : List QuarticGoldilocks, Gp.length ≤ d + 1 →
+          A - 1 ≤ (D.filter (fun z => decide (RoundPoly.evalCoeffs Gp z = g z))).length →
+          ringDot Gp kernel ≠ e_g)) ∧
+      triples.Nodup ∧
+      (∀ tr ∈ triples, ¬¬ ∃ P : List QuarticGoldilocks,
+        affineMcaAccepts D S (d + 1) (A + 1)
+          (g, fun z => CommRingOps.add (f z) (CommRingOps.mul (S.get tr.1) (g z))) tr.2.1 P = true ∧
+        ringDot P kernel = hemFoldClaimUpdate e_f e_g c_f c_g (S.get tr.1)
+          ((prodPool S).get tr.2).1 ((prodPool S).get tr.2).2) :=
+  ⟨witEqDegDom, witEqDegDom, [qgNat 1], 0, 3, 16, 16, 1,
+   (fun _ => qgNat 0), (fun _ => qgNat 0), qgNat 1, qgNat 0, qgNat 0, qgNat 0, [],
+   witEqDegDom_nodup, witEqDegDom_nodup, witEqDegDom_zero_mem, by decide, by decide,
+   witEqDegDecomp3, witEqDegDecomp4, witEqDegMixList, witEqDegInvalid, .nil, fun _ h => nomatch h⟩
+
+private def witCascInst : HemWhirInstance QuarticGoldilocks :=
+  hemZeroOracleClaimInstance witEqDegDom 0 3 []
+
+private theorem witCascInstInvalidPrev :
+    ¬ HemStatementValid { witCascInst with initMinAgree := witCascInst.initMinAgree - 1 } :=
+  hemZeroOracleClaimInstance_invalid witEqDegDom 0 2 [] witEqDegDom_nodup (by decide)
+
+theorem witness_arbitrary_batch_cascade_fiber_bound :
+    ∃ (inst : HemWhirInstance QuarticGoldilocks)
+      (S : List QuarticGoldilocks) (badMca : Nat)
+      (shifts : List QuarticGoldilocks)
+      (baseWeights : List (QuarticGoldilocks × QuarticGoldilocks)),
+      (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) ∧
+      inst.batchClaims.length = inst.batchOracles.length ∧
+      shifts.length = inst.batchClaims.length ∧
+      baseWeights.length = inst.batchClaims.length ∧
+      inst.initDomainPts.Nodup ∧ S.Nodup ∧
+      inst.initDegBound + 3 ≤ inst.initMinAgree ∧
+      AffineFoldDecompBound inst.initDomainPts S (inst.initDegBound + 1) inst.initMinAgree badMca ∧
+      ¬ HemStatementValid { inst with initMinAgree := inst.initMinAgree - 1 } :=
+  ⟨witCascInst, witEqDegDom, 16, [qgNat 0], [(qgNat 0, qgNat 0)],
+   by decide, rfl, rfl, rfl, witEqDegDom_nodup, witEqDegDom_nodup, by decide,
+   witEqDegDecomp3, witCascInstInvalidPrev⟩
+
+private def witStage24 : HemStageGeom := (hemStageGeoms 24).get ⟨0, by decide⟩
+
+theorem witness_cdhz_sliced_stage_clears_128bits_at_2pow50 :
+    ∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 24 ∧ g ∈ hemStageGeoms nv ∧ hemJohnsonQromStageExhaustive g = false :=
+  ⟨24, witStage24, by decide, by decide, list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩,
+    hemJohnsonQrom_nv24_stage0_rows.1⟩
+
+theorem inhabited_recursive_nv30_sliced_stage :
+    ∃ (nv childCap : Nat) (g : HemStageGeom),
+      nv = 30 ∧ childCap = 24 ∧ 2 ≤ nv ∧ 2 ≤ childCap ∧ childCap ≤ 24 ∧
+      g ∈ hemRecursiveStageGeoms nv childCap ∧ hemJohnsonQromStageExhaustive g = false := by
+  refine ⟨30, 24, witStage24, rfl, rfl, by decide, by decide, by decide, ?_, ?_⟩
+  · exact list_get_mem (hemStageGeoms 24) ⟨0, by decide⟩
+  · exact hemJohnsonQrom_nv24_stage0_rows.1
+
+#verify_constructive
+  Qsag.toy_hem_substitution_execution
+  Qsag.tooth_sliced_nv24_profile_margin
+  Qsag.tooth_dfmRoundScale_fails_128bits_at_2pow50
+  Qsag.witness_equal_degree_three_challenge_bound
+  Qsag.witness_arbitrary_batch_cascade_fiber_bound
+  Qsag.witness_cdhz_sliced_stage_clears_128bits_at_2pow50
+  Qsag.inhabited_recursive_nv30_sliced_stage
+  Qsag.toy_hem_substitution_bound_instance
+  Qsag.toyHemInstance_invalid
+  Qsag.hemZeroOracle_acceptance_nontrivial
+#verify_inhabited cdhz_recursive_sliced_stage_clears_128bits_at_2pow50 witness_cdhz_sliced_stage_clears_128bits_at_2pow50
+#verify_inhabited Qsag.equal_degree_three_challenge_bound Qsag.witness_equal_degree_three_challenge_bound
+#verify_inhabited Qsag.arbitrary_batch_cascade_fiber_bound Qsag.witness_arbitrary_batch_cascade_fiber_bound
+#verify_inhabited Qsag.cdhz_sliced_stage_clears_128bits_at_2pow50 Qsag.witness_cdhz_sliced_stage_clears_128bits_at_2pow50
+
 end Qsag
 end

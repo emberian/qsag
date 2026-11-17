@@ -1,8 +1,10 @@
-# Swarm scratch and worktree lanes
-scratch/
+# Swarm scratch: lane reports and handoffs are kept, the rest is not
+scratch
+scratch/*
+!scratch/lanes/
+!scratch/HANDOFF-*.md
 # Spice and Synth result/report directories
 hardware/gf180mcu/spice/results/
-hardware/gf180mcu/synth/reports/
 
 # Rust build artifacts
 /target/
@@ -98,3 +100,102 @@ hardware/fpga/tb/fixtures/
 hardware/asic/trace/*.bin
 hardware/asic/trace/*_trace.txt
 hardware/gf180mcu/gf180mcu/
+
+# Lane reports under scratch/lanes are tracked (overrides the *.last.md family above)
+!scratch/lanes/**
+
+# Simulation sweeps: partial checkpoints duplicate the final json; Magic extraction outputs
+**/*.partial.jsonl
+hardware/gf180mcu/physics/**/*.ext
+
+# ---- Checkpoint hygiene: things agents and tools leave behind ----
+
+# Process bookkeeping and shell leftovers
+**/*.pid
+**/nohup.out
+**/*.rc
+**/*.stdout
+**/*.stderr
+**/core.[0-9]*
+
+# Stray root-level search dumps and notes (lane reports belong in scratch/lanes)
+/*.txt
+/*.out
+/*.json
+/*.png
+/*.patch
+/*.diff
+
+# Local worktrees and per-agent state
+.gemini/
+.agy/
+.cursor/
+.worktrees/
+**/.venv/
+**/node_modules/
+
+# Bulk physics sweep data: keep decks, scripts and text summaries; raw sweeps are regenerable
+hardware/gf180mcu/physics/**/results/*.json
+hardware/gf180mcu/physics/**/results/*.jsonl
+hardware/gf180mcu/physics/**/results/*.csv
+hardware/gf180mcu/physics/**/results/*.spice
+hardware/gf180mcu/physics/**/*.npy
+hardware/gf180mcu/physics/**/*.npz
+
+# Physical design outputs (constraints, scripts and proxies are kept)
+hardware/**/results/*.def
+hardware/**/results/*.v
+hardware/**/results/*.rpt
+hardware/**/*.gds
+hardware/**/*.gds.gz
+hardware/**/*.oas
+hardware/**/*.lef.bak
+hardware/**/*.mag
+hardware/**/*.nl.v
+hardware/**/*.pnl.v
+hardware/**/*_synth.v
+hardware/**/*.guide
+hardware/**/*.drc
+hardware/**/*.lvs
+hardware/**/reports/**/*.rpt
+hardware/gf180mcu/v2/phys/results/
+hardware/gf180mcu/v2/**/*.png
+
+# RTL simulation and formal scratch
+hardware/**/*.hex.gen
+hardware/**/*.mem.gen
+hardware/**/*_sby/
+hardware/**/*.sby.d/
+hardware/**/*.btor
+hardware/**/*.aig
+hardware/**/*.yw
+hardware/**/trace*.vcd
+hardware/**/cosim_*.txt
+hardware/**/mutants_out/
+
+# Lean scratch
+lean/**/Scratch*.lean
+lean/**/_scratch*.lean
+lean/**/*.olean
+lean/**/*.ilean
+lean/**/*.c.o
+aeneas/**/*.olean
+
+# Rust scratch
+**/*.profraw
+**/*.profdata
+**/flamegraph*.svg
+**/fuzz-*.log
+**/crash-*
+**/timeout-*
+**/slow-unit-*
+
+# Archives and dumps
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.zip
+**/*.core
+
+# Template IP that ships as GDS stays tracked
+!hardware/gf180mcu/ip/**

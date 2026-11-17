@@ -400,19 +400,30 @@ Decoder and sequencer rules, independent of the ROM contents (implemented and te
 - Every command ends in one shared epilogue that clears all working rows. The sequencer cannot return to idle
   by any other address, and the epilogue is entered only at its first word.
 
-Rules added after the review of the stage-1 model (`scratch/lanes/sonnet-audit-dregg180-v2-stage1.last.md`);
-they are requirements on stage 2 and are not yet in `v2/`:
+Rules added after the review of the stage-1 model (`scratch/lanes/sonnet-audit-dregg180-v2-stage1.last.md`),
+now implemented and tested in `v2/` (rules R5 to R12 of `v2/model/machine.py`):
 
-- **The FRAM master is an output too.** FRAM write instructions decode only inside the address range of the
-  record routines, and their data comes only from the record rows and the MAC lanes of that routine.
-- **Derived secrets do not steer control.** A taint flag follows the hold register, the index register, the
-  loop counters and the compare flag once a keyed permutation has run. A tainted value cannot set the response
-  length, a loop count, the index register or a branch, and cannot be written to scratch; the listed
-  exceptions are the tag-comparison verdict and the moves in the output manifest.
-- **The ranges are hardwired.** Key range, record range, epilogue and idle addresses are constants of the
-  sequencer, not data read from the ROM image; the build fails if the image does not match them. The wipe of
-  working rows on the way to idle is a sequencer action, not ROM content.
-- **Dispatch is gated by lifecycle state** (3.2): before boot completes only diagnostics decode.
+- **Derived secrets do not leave the lanes or steer control.** Four taint flags: the lanes as a group, the
+  hold register, the compare flag and the carry. A key copied into the lanes taints them until all lanes are
+  wiped. A tainted hold register is stored only to a lane or a key row, so scratch rows, the index register
+  and the loop counters never hold key-derived data. A tainted value cannot be pushed, set the response
+  length, a loop count or the index register, choose a FRAM slot, or decide a branch.
+- **Three declassification points**, each an instruction of its own and each listed per instance in the
+  output manifest: `REL` (a rate lane after a permutation, to the response); `CMPT` (an untainted word
+  compared with a rate lane after a permutation; only the verdict leaves); and the record tag written to the
+  FRAM.
+- **The FRAM master is an output too.** FRAM instructions decode only inside the address range of the
+  record routines. A write sends one of three rows: the record counter row, or lane 0 or 1 after a
+  permutation. A transaction is three words in one direction.
+- **The ranges are hardwired.** Idle address, key range and record range are constants of the sequencer,
+  not data read from the ROM image; the build fails if the image does not match them. Padding, the wipe of
+  every working row and the return to idle are one hardware end action (`END`, `FAIL`), not ROM content.
+- **Dispatch is gated by lifecycle state** (3.2): provisioning commands decode only without a valid key,
+  keyed commands only with one, and the dispatcher itself refuses bad magic and unknown opcodes.
+- **Key writes need the owner root.** The key-write instruction needs an authorisation latch that only a
+  successful verification over a fresh nonce sets, in the same command.
+
+What these rules cannot decide is listed in `v2/README.md`: chiefly, which hash output a routine releases.
 
 Which hash output a routine emits is a property of the ROM image: every `PUSH` in the image is listed, with
 its source row and reason, in a reviewed manifest that a script compares with the image (8.2).
@@ -467,10 +478,11 @@ A microprogram ROM and a sequencer replace the 124-state process of `rtl/qsag_wi
   enrolment 180, sponge and MAC subroutines 90, signer 160, G1 160, vat 150, transitions 100, FRAM 80, seal 60,
   NFC 40, distance 60, self-test and diagnostics 80, TRNG 30: about 1,420 for S; plus about 500 for the
   verifier machine in L. Stage 1 wrote the first four of these that it needs (framing, sponge, signer without
-  `H_msg` and root tagging, FRAM) in 383 words against 410 estimated, plus 35 for a key-load stand-in; within
-  that the signer is 269 against 160 and framing 21 against 80. With the rest of the signer the S estimate is about 1,500 words [E] against 1,536
-  budgeted. ROM cost: the stage-1 image with its constant and dispatch tables is 19,072 for 418 words (S) and
-  24,981 for 575 words (L) [M], 45.6 and 43.4 per word; random content measured 85,024 for 1,536 × 28 [M]. With the committee gate, the fingerprint microroutine, leases and the owner-root routines the
+  `H_msg` and root tagging, FRAM) in 356 words against 330 estimated (sponge 46, signer 264 against 160, FRAM
+  46), plus 58 for a provisioning stand-in and 18 for PING and error exits; framing and the epilogue became
+  hardware. With the rest of the signer the S estimate is about 1,500 words [E] against 1,536
+  budgeted. ROM cost: an earlier stage-1 image with its constant and dispatch tables was 19,072 for 418 words (S)
+  and 24,981 for 575 words (L) [M], 45.6 and 43.4 per word; random content measured 85,024 for 1,536 × 28 [M]. With the committee gate, the fingerprint microroutine, leases and the owner-root routines the
   S estimate is about 1,700 words [E]. Budgeted: 1,700 words at 45.6 = 77,500 [E, extrapolated from a quarter
   of the ROM]; option F adds about 400 words.
 - Inner loops with fixed structure stay hardwired in their units (Keccak round sequencing, Poseidon2 and Ext4
@@ -607,7 +619,7 @@ Core of `SLOT_0P5X0P5`: 1,052 × 1,647 = 1,732,644 µm². How much of it can be 
 | Keccak unit less its rows | 90,650 | M: 112,280 − 21,630 |
 | Word unit | 34,329 | M, skeleton of the unit as modelled in `v2/` |
 | Microcode ROM | 77,500 | E: 1,700 words at the 45.6 µm² per word measured on the stage-1 image |
-| Sequencer | 23,985 | M, skeleton of the sequencer as modelled in `v2/` |
+| Sequencer | 23,985 | M, skeleton of the sequencer as first modelled in `v2/`; the taint flags, range comparators and dispatch classes added since are not in it |
 | SPI link, diagnostics | 25,000 | E from a 22,764 M skeleton |
 | PUF, 504 rings | 114,000 | 44,115 M + 70,000 E |
 | NFC receiver, no NCO | 35,000 | 28,729 M (existing leaf with the NCO removed) + 6,000 E for the longer token frame |
@@ -664,10 +676,10 @@ For comparison: the tree today is 1,297,563 µm² flat [M, state report]; config
 |---|---:|---:|---|
 | Keccak-f[1600] / Keccak-p[1600,12] | 721 / 373 | 28.8 µs / 14.9 µs | M |
 | One `F` call / one `PRF` call, as the signer microcode runs them | 755 / 765 | 30.2 µs / 30.6 µs | model (`v2/tests/report.py`) |
-| Signer request, fixed part (tag check, shape checks, header) | about 474 | 19 µs | model: 1,239 for a request with one chain of zero steps, less its one PRF call |
-| Stateful request, added (two record reads, write, read-back) | 4,775 | 0.19 ms | model; FRAM transfers estimated at SCK = clk / 4 |
-| WOTS signature, 35 chains, FIPS 205: most steps / digits spread evenly | 388,762 / 219,335 | 15.6 ms / 8.8 ms | model: 516 / 291 Keccak calls |
-| WOTS public key, 35 chains | 422,392 | 16.9 ms | model: 561 Keccak calls |
+| Signer request, fixed part (tag check, shape checks, header) | 472 | 19 µs | model: 1,237 for a request with one chain of zero steps, less its one PRF call |
+| Counted-key request, added (two record reads, write, read-back) | 4,780 | 0.19 ms | model; FRAM transfers estimated at SCK = clk / 4 |
+| WOTS signature, 35 chains, FIPS 205: most steps / digits spread evenly | 388,760 / 219,333 | 15.6 ms / 8.8 ms | model: 516 / 291 Keccak calls |
+| WOTS public key, 35 chains | 422,683 | 16.9 ms | model: 561 Keccak calls |
 | One-time signature (WOTS+C, FTS), up to 600 calls | 0.46 M | 18 ms | D |
 | SLH-DSA-128f signature, cold / with tagged root cache | 78 M / 6.6 M | 3.1 s / 0.27 s | D: 102,800 / 8,700 calls |
 | SLH-DSA-128s signature, cold / with tagged root cache | 1.61 G / 305 M | 64 s / 12 s | D: 2.12 M / 401,000 calls |
@@ -814,8 +826,8 @@ Each stage ends with the stated regression passing. Effort is lane-days for one 
 
 | # | Stage | Ends with | Days |
 |---|---|---|---:|
-| 1 | Model first: microcode assembler, model interpreter, register-file and unit models; port PING, hash, key load, PRF_msg, WOTS and FORS, the anchor, and (L) Poseidon2 and Merkle. **Done, in `v2/`** | Model answers 50 of today's 54 script transactions identically, 12 of them from requests in the new signer format; the four verifier-VM transactions belong to stage 7 | 4 |
-| 2 | Register file, sequencer, word unit, egress in RTL with the kept Keccak unit; SPI link only. In the model first: the rules added to 5.3, and a refusing test for each guard the review found untested | RTL equals model on stage 1; properties 1, 2, 3, 6 of 8.2 proved | 6 |
+| 1 | Model first: microcode assembler, model interpreter, register-file and unit models; port PING, hash, key load, PRF_msg, WOTS and FORS, the anchor, and (L) Poseidon2 and Merkle. **Done, in `v2/`** | Model answers 50 of today's 54 script transactions identically, 14 of them from requests rebuilt in the new signer and provisioning formats; the four verifier-VM transactions belong to stage 7. Every decoder rule of 5.3 has a refusing test, and a mutation harness (`v2/tests/mutation.py`, 153 mutants) keeps it so | 4 |
+| 2 | Register file, sequencer, word unit, egress in RTL with the kept Keccak unit; SPI link only, with the decoder rules of 5.3 as modelled | RTL equals model on stage 1, including every refusing microprogram of `v2/tests/test_output_bound.py`; properties 1, 2, 3, 6 of 8.2 proved | 5 |
 | 3 | Lifecycle: FRAM records, owner-root enrolment and re-initialisation, boot, PUF array with fixed pairing, leases and the authority model | Lifecycle and rollback rows of 8.3; synthesis of everything so far, replacing the estimates of 7.1 | 6 |
 | 4 | G1 routine with the microcoded fingerprint, G3, transitions; review of the fingerprint and lease arguments | Gate rows of 8.3 for G1 and G3 | 5 |
 | 5 | Vat in microcode; NFC token; distance roles; guards; rest of the signer: FORS indices from `H_msg` on chip, root tagging (7.4) | Vat, NFC, distance rows; signer rows | 5 |
@@ -825,14 +837,14 @@ Each stage ends with the stated regression passing. Effort is lane-days for one 
 | 9 | Gate-level simulation (8.4) | Passing at both SDF corners | 4 |
 | 10 | DRC, LVS, antenna, density; independent audit | Clean reports | 5 |
 
-Configuration S: stages 2 to 6 and 8 to 10 remain, 39 lane-days. Option F adds stage 7. The largest
+Configuration S: stages 2 to 6 and 8 to 10 remain, 38 lane-days. Option F adds stage 7. The largest
 uncertainties are the physical stages, none of which has ever completed on this chip, and, for option F, a
 compiler that does not exist and a verifier machine that has never run a real proof.
 
 ### 9.4 Run 3 and a later run
 
 Run 3 closes for purchase on 9 Dec 2026 and needs a clean GDS on 16 Dec 2026, thirty days after this was
-written. The stages still to do for configuration S are 39 lane-days, and stages 8 to 10 have never been run
+written. The stages still to do for configuration S are 38 lane-days, and stages 8 to 10 have never been run
 on any version of this chip: no clock tree has completed, nothing has been routed, and no DRC, LVS, antenna
 or density check has run. **Configuration S cannot credibly be taped out in Run 3.**
 
@@ -859,7 +871,7 @@ Two gates decide it. Do not buy the slot unless both are met:
    boot and one signing transaction passes, and the wafer.space precheck is clean on a complete GDS.
 
 The plan that optimises for the chip and not the date: finish stages 2 to 6 and 8 to 10 for configuration S
-(39 lane-days, five to six weeks with two lanes), replace the 178,000 µm² of estimates with synthesis of real
+(38 lane-days, five to six weeks with two lanes), replace the 178,000 µm² of estimates with synthesis of real
 RTL after stage 3 and decide option F and the cuts of 11.3 then, have the fingerprint and lease arguments
 reviewed, and tape out in the first run after that with an independent audit of the diff. If the
 engineering sample was made, its parts ship in Q2 2027 and its PUF and TRNG measurements set the fuzzy

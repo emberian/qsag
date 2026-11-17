@@ -1307,4 +1307,7 @@ theorem gsDecodeList_length_le_johnson {F : Type} [LawfulField F] [DecidableEq F
     exact hx₀Diff ((of_decide_eq_true he₁).trans (of_decide_eq_true he₂).symm)
 
 
+-- Owning-module audit certificate (audited and paired in `Tests/QromCoherentOracleTests`).
+#verify_constructive Qsag.gsDecodeList_length_le_johnson
+
 end Qsag

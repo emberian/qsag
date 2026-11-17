@@ -19,7 +19,7 @@ DRIVE = json.load(open(os.path.join(HERE, "drive.json")))["curves"]
 TAMB = {-40: 233.15, 27: 300.15, 125: 398.15}
 # production sweeps: coarse grid, large steps, step cap.  Mode "verify" compares them with the base and fine settings.
 FAST_GRID = dict(hlink=0.09, hpad=0.2)
-FAST_RUN = dict(dT_step=120.0, max_steps=2500)
+FAST_RUN = dict(dT_step=120.0, max_steps=int(os.environ.get("FUSE_MAX_STEPS", "2500")))
 
 def mkparams(over):
     p = ft.Params()
@@ -55,9 +55,14 @@ def one(job):
 def run(name, jobs, nproc):
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     t0 = time.time()
+    ppath = os.path.join(HERE, "results", name + ".partial.jsonl")
+    res = []
+    if "--resume" in sys.argv and os.path.exists(ppath):      # a run cut by the 900 s cap continues where it stopped
+        res = [json.loads(l) for l in open(ppath) if l.strip()]
+        done = {r["tag"] for r in res}; jobs = [j for j in jobs if j["tag"] not in done]
+        print("resume: %d done, %d to run" % (len(done), len(jobs)), flush=True)
     with Pool(nproc) as pool:
-        res = []
-        part = open(os.path.join(HERE, "results", name + ".partial.jsonl"), "w")
+        part = open(ppath, "a" if res else "w")
         for r in pool.imap_unordered(one, jobs):
             res.append(r); part.write(json.dumps(r) + "\n"); part.flush()
             print("%-44s R0=%6.1f I0=%5.1fmA melt=%s bridge=%s end=%-6s | plateau I=%5.1fmA R=%6.1f P=%5.1fmW T=%5.0fK fm=%.2f (%.0fs)" % (
@@ -110,7 +115,8 @@ def main():
                 (0.12, 0.40, "nom", {}, ("gate1.5V",)), (0.10, 0.30, "nom", {}, ("gate1.5V",)),
                 (0.12, 0.30, "Tm1532", dict(T_melt=1532.0), ("gate1.5V",)),
                 (0.12, 0.30, "tcr_sat", dict(tc2=0.0, tcr_cap=4.0), ("gate1.5V",)),
-                (0.12, 0.30, "kox1.3", dict(k_ox_scale=1.3), ("gate1.5V",))):
+                (0.12, 0.30, "kox1.3", dict(k_ox_scale=1.3), ("gate1.5V",)),
+                (0.12, 0.30, "kox2.4", dict(k_ox_scale=2.4), ("gate1.5V", "0.5x"))):
             geom = dict(L=1.2, Wd=wd, pad_an=(1.0, 0.5), pad_ca=(2.0, 1.0), t_sil=0.03, t_fox=fox, t_poly=0.18, t_ild=0.6, name="kothandaraman")
             rs = calib_rs("generic", geom, pov, 120.0)
             for iname, isat, ron in (("gate1.5V", 10e-3, 82.0), ("0.5x", 5e-3, 164.0), ("0.3x", 3e-3, 273.0), ("2x", 20e-3, 41.0)):
@@ -127,15 +133,18 @@ def main():
                              drive=("limited", 4.7, ilim, 0.0), t_end=250e-6, keep=True))
         run("valid", jobs, nproc)
     elif mode == "corners":
+        # --rs X: silicide sheet resistance override.  25 ohm/sq reproduces the 200 ohm unblown value of the PDK's
+        # own efuse model (sm141064 .subckt efuse); the default 7.3 ohm/sq is the PDK's salicided p+ poly resistor.
+        rsov = dict(rs_sil=float(sys.argv[sys.argv.index("--rs") + 1])) if "--rs" in sys.argv else {}
         jobs = []
         for macro in ("async", "array"):
             for c in ("typical", "ss", "ff"):
                 for v in (4.5, 5.0, 5.5):
                     for t in (-40, 27, 125):
                         k = corner_key(macro, c, v, t)
-                        jobs.append(dict(tag="corners/" + k, params=dict(T0=TAMB[t]), drive=("table", k), t_end=20e-6,
+                        jobs.append(dict(tag="corners/" + k, params=dict(T0=TAMB[t], **rsov), drive=("table", k), t_end=20e-6,
                                          keep=(k in (nom, "array/ss/4.5/125", "async/ff/5.5/-40"))))
-        run("corners", jobs, nproc)
+        run("corners" + ("_rs%g" % rsov["rs_sil"] if rsov else ""), jobs, nproc)
     elif mode == "sens":
         jobs = []
         cases = [("async/typical/5.0/27", 27), ("array/typical/5.0/27", 27), ("array/ss/4.5/125", 125)]
@@ -149,17 +158,33 @@ def main():
                 ("r_contact=40", dict(r_contact=40.0), {}), ("k_poly=15", dict(k_poly300=15.0), {}),
                 ("k_poly=45", dict(k_poly300=45.0), {}), ("tcr_saturating", dict(tc2=0.0, tcr_cap=4.0), {}),
                 ("rs_poly=1000", dict(rs_poly=1000.0), {}),
+                # crude bound: all oxide conduction 2.4x better, the factor by which the model would be too hot
+                # if the fuse of Kothandaraman 2002 was at the authors' estimated 850 C instead of at the melt
+                ("k_ox*2.4", dict(k_ox_scale=2.4), {}), ("k_ox*2.4,rs=3", dict(k_ox_scale=2.4, rs_sil=3.0), {}),
                 ("rs=3,k_ox*1.2,fox0.25", dict(rs_sil=3.0, k_ox_scale=1.2), dict(t_fox=0.25))]
         for k, t in cases:
             for name, pov, gov in var:
                 p = dict(T0=TAMB[t]); p.update(pov)
                 jobs.append(dict(tag="sens/%s/%s" % (k, name), params=p, geom=gov, drive=("table", k), t_end=20e-6))
         run("sens" + ("_" + sys.argv[sys.argv.index("--cases") + 1].replace(",", "") if "--cases" in sys.argv else ""), jobs, nproc)
+    elif mode == "scan":
+        # Drive-scale scan: the corner's I(R) curve multiplied by s (a weaker or stronger programming path:
+        # narrower PMOS, extra series drop, sagging supply).  Classifies each run over the full 50 us pulse.
+        allc = [("async/typical/5.0/27", 27), ("async/ss/4.5/125", 125), ("array/typical/5.0/27", 27), ("array/ss/4.5/125", 125)]
+        sel = sys.argv[sys.argv.index("--cases") + 1] if "--cases" in sys.argv else "0,1,2,3"
+        jobs = []
+        for k, t in [allc[int(i)] for i in sel.split(",")]:
+            for name, pov in (("nominal", {}), ("rs_sil=3", dict(rs_sil=3.0)), ("k_ox*2.4", dict(k_ox_scale=2.4))):
+                for s in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.6, 2.0):
+                    p = dict(T0=TAMB[t]); p.update(pov)
+                    jobs.append(dict(tag="scan/%s/%s/s=%.2f" % (k, name, s), params=p, drive=("table", k, s), t_end=50e-6,
+                                     run=dict(dT_step=120.0, max_steps=int(os.environ.get("FUSE_MAX_STEPS", "1500")))))
+        run("scan_" + sel.replace(",", ""), jobs, nproc)
     elif mode == "margin":
         # critical drive scale s*: smallest multiple of the corner's I(R) that still melts the link within 50 us.
         cases = []
         for k, t in (("async/typical/5.0/27", 27), ("async/ss/4.5/125", 125), ("array/typical/5.0/27", 27), ("array/ss/4.5/125", 125)):
-            for name, pov in (("nominal", {}), ("rs_sil=3", dict(rs_sil=3.0)), ("rs_sil=15", dict(rs_sil=15.0))):
+            for name, pov in (("nominal", {}), ("rs_sil=3", dict(rs_sil=3.0)), ("rs_sil=15", dict(rs_sil=15.0)), ("k_ox*2.4", dict(k_ox_scale=2.4))):
                 cases.append((k, t, name, pov))
         lo = {c[:3]: 0.03 for c in cases}; hi = {c[:3]: 1.0 for c in cases}; allres = []
         for it in range(5):
