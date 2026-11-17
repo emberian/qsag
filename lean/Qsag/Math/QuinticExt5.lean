@@ -460,3 +460,467 @@ theorem mul_ofBase (z : QuinticGoldilocks) (a : Goldilocks) :
   apply ext <;> quint_coords [] <;> constructive_ring
 
 /-- `inv` is `conj z` scaled by the base-field inverse of the norm, as `Fp5::inv` computes it. -/
+theorem inv_eq_scale (z : QuinticGoldilocks) :
+    inv z = ⟨(conj z).c0 *ᵍ Goldilocks.inv (norm z), (conj z).c1 *ᵍ Goldilocks.inv (norm z),
+      (conj z).c2 *ᵍ Goldilocks.inv (norm z), (conj z).c3 *ᵍ Goldilocks.inv (norm z),
+      (conj z).c4 *ᵍ Goldilocks.inv (norm z)⟩ :=
+  mul_ofBase (conj z) (Goldilocks.inv (norm z))
+
+theorem norm_one : norm CommRingOps.one = CommRingOps.one := by
+  rw [← ofBase_one, norm_ofBase]
+  constructive_ring
+
+/-- An element with nonzero norm is not a zero divisor. -/
+private theorem eq_zero_of_mul_eq_zero_of_norm_ne {z q : QuinticGoldilocks}
+    (hq : norm q ≠ CommRingOps.zero) (h : z *ᵍ q = CommRingOps.zero) :
+    z = CommRingOps.zero := by
+  have hi := Goldilocks.mul_inv_cancel hq
+  have e : z = (z *ᵍ q) *ᵍ (conj q *ᵍ ofBase (Goldilocks.inv (norm q))) := by
+    rw [LawfulCommRing.mul_assoc, ← LawfulCommRing.mul_assoc q, mul_conj, ← ofBase_mul, hi,
+      ofBase_one, LawfulCommRing.mul_one]
+  rw [e, h, LawfulCommRing.zero_mul]
+
+/-! ### `norm z = 0` only at `z = 0`, by polynomial degree -/
+
+/-- `(a X + b) · linCofactor a b = a^5 X^5 + b^5`. -/
+private def linCofactor (a b : Goldilocks) : QuinticGoldilocks :=
+  ⟨CRing.npow b 4, CommRingOps.neg (a *ᵍ CRing.npow b 3), CRing.npow a 2 *ᵍ CRing.npow b 2,
+    CommRingOps.neg (CRing.npow a 3 *ᵍ b), CRing.npow a 4⟩
+
+private theorem linCofactor_mul (z : QuinticGoldilocks) (h2 : z.c2 = CommRingOps.zero)
+    (h3 : z.c3 = CommRingOps.zero) (h4 : z.c4 = CommRingOps.zero) :
+    z *ᵍ linCofactor z.c1 z.c0 =
+      ofBase (nonResidue *ᵍ CRing.npow z.c1 5 +ᵍ CRing.npow z.c0 5) := by
+  apply ext <;> quint_coords [linCofactor, h2, h3, h4] <;> constructive_ring
+
+/-- Degree at most one. A zero norm on `a X + b` with `a ≠ 0` gives `(-b/a)^5 = 3`. -/
+private theorem eq_zero_of_norm_low1 {z : QuinticGoldilocks} (h2 : z.c2 = CommRingOps.zero)
+    (h3 : z.c3 = CommRingOps.zero) (h4 : z.c4 = CommRingOps.zero)
+    (hn : norm z = CommRingOps.zero) : z = CommRingOps.zero := by
+  have hprod : norm (z *ᵍ linCofactor z.c1 z.c0) = CommRingOps.zero := by
+    rw [norm_mul, hn, LawfulCommRing.zero_mul]
+  rw [linCofactor_mul z h2 h3 h4, norm_ofBase] at hprod
+  have hs := goldNpowEqZero _ 5 hprod
+  if h1 : z.c1 = CommRingOps.zero then
+    have h0 : z.c0 = CommRingOps.zero := by
+      rw [h1] at hs
+      have e : CRing.npow z.c0 5 =
+          nonResidue *ᵍ CRing.npow (CommRingOps.zero : Goldilocks) 5 +ᵍ CRing.npow z.c0 5 := by
+        constructive_ring
+      exact goldNpowEqZero _ 5 (e.trans hs)
+    exact ext h0 h1 h2 h3 h4
+  else
+    exfalso
+    have hi := Goldilocks.mul_inv_cancel h1
+    have hE : CRing.npow (CommRingOps.neg z.c0) 5 = nonResidue *ᵍ CRing.npow z.c1 5 := by
+      refine quintEqOfSubEqMul _ (CommRingOps.neg CommRingOps.one) hs ?_
+      constructive_ring
+    exact nonResidue_not_fifth_power _
+      (quintFifthRootOfRatio nonResidue (CommRingOps.neg z.c0) z.c1 (Goldilocks.inv z.c1) hi hE)
+
+/-- Constant coefficient of `(a X^2 + b X + c) · quadCofactor a b c` after `X^5 = 3`. -/
+private def quadRem0 (a b c : Goldilocks) : Goldilocks :=
+  c *ᵍ CommRingOps.sub (CRing.natCast 2 *ᵍ (a *ᵍ (b *ᵍ c))) (CRing.npow b 3) +ᵍ
+    nonResidue *ᵍ CRing.npow a 4
+
+/-- `X` coefficient of `(a X^2 + b X + c) · quadCofactor a b c`. -/
+private def quadRem1 (a b c : Goldilocks) : Goldilocks :=
+  CommRingOps.sub (CRing.natCast 3 *ᵍ (a *ᵍ ((b *ᵍ b) *ᵍ c)))
+    (CRing.npow b 4 +ᵍ (a *ᵍ a) *ᵍ (c *ᵍ c))
+
+/-- The cubic `a^3 X^3 - a^2 b X^2 + (a b^2 - a^2 c) X + (2 a b c - b^3)`: the quotient of
+    `a^4 X^5` by `a X^2 + b X + c`. -/
+private def quadCofactor (a b c : Goldilocks) : QuinticGoldilocks :=
+  ⟨CommRingOps.sub (CRing.natCast 2 *ᵍ (a *ᵍ (b *ᵍ c))) (CRing.npow b 3),
+    CommRingOps.sub (a *ᵍ (b *ᵍ b)) ((a *ᵍ a) *ᵍ c),
+    CommRingOps.neg ((a *ᵍ a) *ᵍ b),
+    CRing.npow a 3,
+    CommRingOps.zero⟩
+
+private theorem quadCofactor_mul (z : QuinticGoldilocks) (h3 : z.c3 = CommRingOps.zero)
+    (h4 : z.c4 = CommRingOps.zero) :
+    z *ᵍ quadCofactor z.c2 z.c1 z.c0 =
+      ⟨quadRem0 z.c2 z.c1 z.c0, quadRem1 z.c2 z.c1 z.c0, CommRingOps.zero, CommRingOps.zero,
+        CommRingOps.zero⟩ := by
+  apply ext <;> quint_coords [quadCofactor, quadRem0, quadRem1, h3, h4] <;> constructive_ring
+
+/-- No quadratic `a X^2 + b X + c` with `a ≠ 0` divides `X^5 - 3` over `Goldilocks`. -/
+private theorem goldNoQuadFactor (a b c : Goldilocks) (ha : a ≠ CommRingOps.zero)
+    (h1 : quadRem1 a b c = CommRingOps.zero) (h0 : quadRem0 a b c = CommRingOps.zero) :
+    False := by
+  have hE := quintQuadKey nonResidue a b c h1 h0
+  unfold quadRem1 at h1
+  unfold quadRem0 at h0
+  if hb : b = CommRingOps.zero then
+    have hac : (a *ᵍ a) *ᵍ (c *ᵍ c) = CommRingOps.zero := by
+      refine quintEqOfSubEqMul2 _ (CommRingOps.neg CommRingOps.one) b
+        (CommRingOps.sub (CRing.natCast 3 *ᵍ (a *ᵍ (b *ᵍ c))) (CRing.npow b 3)) h1 hb ?_
+      constructive_ring
+    have hc : c = CommRingOps.zero := by
+      rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hac with h | h
+      · rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h' | h' <;>
+          exact absurd h' ha
+      · rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h with h' | h' <;> exact h'
+    have hwa : nonResidue *ᵍ CRing.npow a 4 = CommRingOps.zero := by
+      refine quintEqOfSubEqMul2 _ CommRingOps.one c
+        (CommRingOps.neg (CommRingOps.sub (CRing.natCast 2 *ᵍ (a *ᵍ (b *ᵍ c))) (CRing.npow b 3)))
+        h0 hc ?_
+      constructive_ring
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hwa with h | h
+    · exact nonResidue_ne_zero h
+    · exact ha (goldNpowEqZero a 4 h)
+  else
+    have hab : a *ᵍ b ≠ CommRingOps.zero := fun h =>
+      (NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h).elim ha hb
+    have hi := Goldilocks.mul_inv_cancel hab
+    exact nonResidue_not_fifth_power _
+      (quintFifthRootOfRatio nonResidue _ (a *ᵍ b) (Goldilocks.inv (a *ᵍ b)) hi hE)
+
+/-- Degree at most two. The cubic cofactor sends `z` to a zero-norm element of degree at most
+    one, which vanishes, so `z` would be a quadratic factor of `X^5 - 3`. -/
+private theorem eq_zero_of_norm_low2 {z : QuinticGoldilocks} (h3 : z.c3 = CommRingOps.zero)
+    (h4 : z.c4 = CommRingOps.zero) (hn : norm z = CommRingOps.zero) :
+    z = CommRingOps.zero := by
+  if h2 : z.c2 = CommRingOps.zero then
+    exact eq_zero_of_norm_low1 h2 h3 h4 hn
+  else
+    exfalso
+    have hprod : norm (z *ᵍ quadCofactor z.c2 z.c1 z.c0) = CommRingOps.zero := by
+      rw [norm_mul, hn, LawfulCommRing.zero_mul]
+    rw [quadCofactor_mul z h3 h4] at hprod
+    have hρ := eq_zero_of_norm_low1 (z := _) (by rfl) (by rfl) (by rfl) hprod
+    exact goldNoQuadFactor z.c2 z.c1 z.c0 h2 (congrArg QuinticGoldilocks.c1 hρ)
+      (congrArg QuinticGoldilocks.c0 hρ)
+
+/-- `(a X^3 + b X^2 + c X + d) · cubicCofactor a b c` has no `X^3` and no `X^4` term. -/
+private def cubicCofactor (a b c : Goldilocks) : QuinticGoldilocks :=
+  ⟨CommRingOps.sub (b *ᵍ b) (c *ᵍ a), CommRingOps.neg (b *ᵍ a), a *ᵍ a, CommRingOps.zero,
+    CommRingOps.zero⟩
+
+private theorem cubicCofactor_mul_c3 (z : QuinticGoldilocks) (h4 : z.c4 = CommRingOps.zero) :
+    (z *ᵍ cubicCofactor z.c3 z.c2 z.c1).c3 = CommRingOps.zero := by
+  quint_coords [cubicCofactor, h4]
+  constructive_ring
+
+private theorem cubicCofactor_mul_c4 (z : QuinticGoldilocks) (h4 : z.c4 = CommRingOps.zero) :
+    (z *ᵍ cubicCofactor z.c3 z.c2 z.c1).c4 = CommRingOps.zero := by
+  quint_coords [cubicCofactor, h4]
+  constructive_ring
+
+/-- Degree at most three. The quadratic cofactor `q` has nonzero norm by the previous case and
+    `z · q` has degree at most two and zero norm, so `z · q = 0` and `z = 0`. -/
+private theorem eq_zero_of_norm_low3 {z : QuinticGoldilocks} (h4 : z.c4 = CommRingOps.zero)
+    (hn : norm z = CommRingOps.zero) : z = CommRingOps.zero := by
+  if h3 : z.c3 = CommRingOps.zero then
+    exact eq_zero_of_norm_low2 h3 h4 hn
+  else
+    exfalso
+    have hprod : norm (z *ᵍ cubicCofactor z.c3 z.c2 z.c1) = CommRingOps.zero := by
+      rw [norm_mul, hn, LawfulCommRing.zero_mul]
+    have hρ := eq_zero_of_norm_low2 (cubicCofactor_mul_c3 z h4) (cubicCofactor_mul_c4 z h4) hprod
+    have hqn : norm (cubicCofactor z.c3 z.c2 z.c1) ≠ CommRingOps.zero := fun hq => by
+      have hq0 := eq_zero_of_norm_low2 (z := cubicCofactor z.c3 z.c2 z.c1) (by rfl) (by rfl) hq
+      have hsq : z.c3 *ᵍ z.c3 = CommRingOps.zero := congrArg QuinticGoldilocks.c2 hq0
+      rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hsq with h | h <;> exact h3 h
+    exact h3 (congrArg QuinticGoldilocks.c3 (eq_zero_of_mul_eq_zero_of_norm_ne hqn hρ))
+
+/-- `(a X^4 + b X^3 + …) · lastCofactor a b` has no `X^4` term. -/
+private def lastCofactor (a b : Goldilocks) : QuinticGoldilocks :=
+  ⟨CommRingOps.neg b, a, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero⟩
+
+private theorem lastCofactor_mul_c4 (z : QuinticGoldilocks) :
+    (z *ᵍ lastCofactor z.c4 z.c3).c4 = CommRingOps.zero := by
+  quint_coords [lastCofactor]
+  constructive_ring
+
+/-- **The norm vanishes only at zero.** -/
+theorem eq_zero_of_norm_eq_zero {z : QuinticGoldilocks} (hn : norm z = CommRingOps.zero) :
+    z = CommRingOps.zero := by
+  if h4 : z.c4 = CommRingOps.zero then
+    exact eq_zero_of_norm_low3 h4 hn
+  else
+    exfalso
+    have hprod : norm (z *ᵍ lastCofactor z.c4 z.c3) = CommRingOps.zero := by
+      rw [norm_mul, hn, LawfulCommRing.zero_mul]
+    have hρ := eq_zero_of_norm_low3 (lastCofactor_mul_c4 z) hprod
+    have hqn : norm (lastCofactor z.c4 z.c3) ≠ CommRingOps.zero := fun hq => by
+      have hq0 := eq_zero_of_norm_low1 (z := lastCofactor z.c4 z.c3) (by rfl) (by rfl) (by rfl) hq
+      exact h4 (congrArg QuinticGoldilocks.c1 hq0)
+    exact h4 (congrArg QuinticGoldilocks.c4 (eq_zero_of_mul_eq_zero_of_norm_ne hqn hρ))
+
+/-- **Quintic irreducibility, in norm form (`norm_ne_zero`)**: a nonzero element of
+    `𝔽_p[X]/(X^5 - 3)` has a nonzero norm, so the ring is a field. -/
+theorem norm_ne_zero {z : QuinticGoldilocks} (hz : z ≠ zero) : norm z ≠ Goldilocks.zero :=
+  fun hn => hz (eq_zero_of_norm_eq_zero hn)
+
+theorem norm_zero : norm zero = Goldilocks.zero := by
+  show norm (ofBase CommRingOps.zero) = CommRingOps.zero
+  rw [norm_ofBase]
+  constructive_ring
+
+theorem norm_eq_zero_iff (z : QuinticGoldilocks) : norm z = Goldilocks.zero ↔ z = zero :=
+  ⟨eq_zero_of_norm_eq_zero, fun h => h ▸ norm_zero⟩
+
+theorem mul_inv_cancel {z : QuinticGoldilocks} (hz : z ≠ zero) :
+    z *ᵍ inv z = CommRingOps.one := by
+  show z *ᵍ (conj z *ᵍ ofBase (Goldilocks.inv (norm z))) = CommRingOps.one
+  rw [← LawfulCommRing.mul_assoc, mul_conj, ← ofBase_mul,
+    Goldilocks.mul_inv_cancel (norm_ne_zero hz), ofBase_one]
+
+theorem inv_zero : inv zero = zero := by
+  show conj zero *ᵍ ofBase (Goldilocks.inv (norm zero)) = CommRingOps.zero
+  rw [norm_zero]
+  show conj zero *ᵍ ofBase (LawfulField.inv (CommRingOps.zero : Goldilocks)) = CommRingOps.zero
+  rw [LawfulField.inv_zero, ofBase_zero, LawfulCommRing.mul_zero]
+
+/-- The reduction constant is what makes the ring a domain: with `nonResidue` it has no zero
+    divisors. -/
+theorem mulWith_nonResidue_eq_zero {a b : QuinticGoldilocks}
+    (h : mulWith nonResidue a b = zero) : a = zero ∨ b = zero := by
+  if ha : a = zero then
+    exact .inl ha
+  else
+    right
+    have hmul := congrArg (fun t => inv a *ᵍ t) (show a *ᵍ b = CommRingOps.zero from h)
+    rw [LawfulCommRing.mul_zero, ← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm (inv a) a,
+      mul_inv_cancel ha, LawfulCommRing.one_mul] at hmul
+    exact hmul
+
+/-- With a reduction constant `n = t^5` that IS a fifth power, the same product has the zero
+    divisors `X - t` and `X^4 + t X^3 + t^2 X^2 + t^3 X + t^4`. -/
+theorem mulWith_fifth_power_zero_divisor (n t : Goldilocks) (h : CRing.npow t 5 = n) :
+    mulWith n
+      ⟨CommRingOps.neg t, CommRingOps.one, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero⟩
+      ⟨CRing.npow t 4, CRing.npow t 3, CRing.npow t 2, t, CommRingOps.one⟩ = zero := by
+  have hk : CommRingOps.sub (CRing.npow t 5) n = CommRingOps.zero := by
+    rw [h, LawfulCommRing.sub_self]
+  apply ext <;> quint_coords []
+  · refine quintEqOfSubEqMul _ (CommRingOps.neg CommRingOps.one) hk ?_
+    constructive_ring
+  all_goals constructive_ring
+
+/-- Inverses are unique: a right inverse is `inv`. -/
+theorem inv_eq_of_mul_eq_one {a b : QuinticGoldilocks} (h : a *ᵍ b = CommRingOps.one) :
+    inv a = b := by
+  have ha : a ≠ zero := fun h0 => by
+    rw [h0] at h
+    have hz : (zero : QuinticGoldilocks) *ᵍ b = CommRingOps.zero := LawfulCommRing.zero_mul b
+    rw [hz] at h
+    exact LawfulField.zero_ne_one (F := Goldilocks) (congrArg QuinticGoldilocks.c0 h)
+  have e : inv a = inv a *ᵍ (a *ᵍ b) := by rw [h, LawfulCommRing.mul_one]
+  rw [e, ← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm (inv a) a, mul_inv_cancel ha,
+    LawfulCommRing.one_mul]
+
+end QuinticGoldilocks
+
+instance : NoZeroDivisors QuinticGoldilocks where
+  eq_zero_or_eq_zero_of_mul_eq_zero {_ _} h := QuinticGoldilocks.mulWith_nonResidue_eq_zero h
+
+instance : Mul QuinticGoldilocks := ⟨QuinticGoldilocks.mul⟩
+instance : Inv QuinticGoldilocks := ⟨QuinticGoldilocks.inv⟩
+instance : LawfulField QuinticGoldilocks where
+  inv := QuinticGoldilocks.inv
+  zero_ne_one h :=
+    LawfulField.zero_ne_one (F := Goldilocks) (congrArg QuinticGoldilocks.c0 h)
+  inv_zero := QuinticGoldilocks.inv_zero
+  mul_inv_cancel := QuinticGoldilocks.mul_inv_cancel
+
+namespace QuinticGoldilocks
+
+theorem fieldInv_eq (z : QuinticGoldilocks) : LawfulField.inv z = inv z := by rfl
+
+/-- The base-field embedding as a `RingHom`. -/
+def baseEmbeddingHom : RingHom Goldilocks QuinticGoldilocks where
+  toFun := ofBase
+  map_zero := ofBase_zero
+  map_one := ofBase_one
+  map_add := ofBase_add
+  map_mul := ofBase_mul
+
+theorem natCast_eq (k : Nat) :
+    (CRing.natCast k : QuinticGoldilocks) = ofBase (CRing.natCast k : Goldilocks) := by
+  rw [← baseEmbeddingHom.map_natCast]
+  rfl
+
+/-- `1, …, p - 1` are nonzero in `QuinticGoldilocks`. -/
+theorem natCast_ne_zero (k : Nat) (h1 : 1 ≤ k) (hk : k < goldilocksPrime) :
+    (CRing.natCast k : QuinticGoldilocks) ≠ CommRingOps.zero := fun e => by
+  rw [natCast_eq] at e
+  exact Goldilocks.natCast_ne_zero k h1 hk (congrArg QuinticGoldilocks.c0 e)
+
+end QuinticGoldilocks
+
+namespace GoldilocksField
+/-- The zk-Hem v2 challenge field, in the spelling of the quartic tower's exports. -/
+abbrev GoldilocksExt5 := Qsag.QuinticGoldilocks
+namespace GoldilocksExt5
+abbrev c0 (z : GoldilocksExt5) := QuinticGoldilocks.c0 z
+abbrev c1 (z : GoldilocksExt5) := QuinticGoldilocks.c1 z
+abbrev c2 (z : GoldilocksExt5) := QuinticGoldilocks.c2 z
+abbrev c3 (z : GoldilocksExt5) := QuinticGoldilocks.c3 z
+abbrev c4 (z : GoldilocksExt5) := QuinticGoldilocks.c4 z
+abbrev mk := QuinticGoldilocks.mk
+abbrev ext := @QuinticGoldilocks.ext
+abbrev nonResidue := QuinticGoldilocks.nonResidue
+abbrev zero := QuinticGoldilocks.zero
+abbrev one := QuinticGoldilocks.one
+abbrev xBasis := QuinticGoldilocks.xBasis
+abbrev ofBase := QuinticGoldilocks.ofBase
+abbrev embedBase := QuinticGoldilocks.ofBase
+abbrev add := QuinticGoldilocks.add
+abbrev neg := QuinticGoldilocks.neg
+abbrev sub := QuinticGoldilocks.sub
+abbrev mul := QuinticGoldilocks.mul
+abbrev frob := QuinticGoldilocks.frob
+abbrev norm := QuinticGoldilocks.norm
+abbrev inv := QuinticGoldilocks.inv
+
+theorem norm_ne_zero {z : GoldilocksExt5} (hz : z ≠ zero) : norm z ≠ Goldilocks.zero :=
+  QuinticGoldilocks.norm_ne_zero hz
+theorem mul_inv_cancel {z : GoldilocksExt5} (hz : z ≠ zero) :
+    CommRingOps.mul z (inv z) = CommRingOps.one := QuinticGoldilocks.mul_inv_cancel hz
+theorem ext5_mul_inv_cancel {z : GoldilocksExt5} (hz : z ≠ zero) :
+    z * z⁻¹ = one ∧ z⁻¹ * z = one :=
+  ⟨QuinticGoldilocks.mul_inv_cancel hz,
+    (LawfulCommRing.mul_comm _ _).trans (QuinticGoldilocks.mul_inv_cancel hz)⟩
+/-- **Absence of non-trivial zero divisors in `GoldilocksExt5`.** -/
+theorem ext5_mul_eq_zero_iff (z w : GoldilocksExt5) : z * w = zero ↔ z = zero ∨ w = zero := by
+  constructor
+  · exact NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero
+  · rintro (rfl | rfl)
+    · exact LawfulCommRing.zero_mul w
+    · exact LawfulCommRing.mul_zero z
+theorem xBasis_pow5_eq_three :
+    ((xBasis * xBasis) * (xBasis * xBasis)) * xBasis = embedBase nonResidue :=
+  QuinticGoldilocks.xBasis_pow5
+theorem nonResidue_not_fifth_power (t : Goldilocks) : CRing.npow t 5 ≠ nonResidue :=
+  QuinticGoldilocks.nonResidue_not_fifth_power t
+theorem embedBase_c0 (a : Goldilocks) : (embedBase a).c0 = a := QuinticGoldilocks.ofBase_c0 a
+theorem embedBase_zero : embedBase Goldilocks.zero = zero := QuinticGoldilocks.ofBase_zero
+theorem embedBase_one : embedBase Goldilocks.one = one := QuinticGoldilocks.ofBase_one
+theorem embedBase_injective {a b : Goldilocks} (h : embedBase a = embedBase b) : a = b :=
+  QuinticGoldilocks.ofBase_injective h
+theorem embedBase_add (a b : Goldilocks) :
+    embedBase (CommRingOps.add a b) = CommRingOps.add (embedBase a) (embedBase b) :=
+  QuinticGoldilocks.ofBase_add a b
+theorem embedBase_sub (a b : Goldilocks) :
+    embedBase (CommRingOps.sub a b) = CommRingOps.sub (embedBase a) (embedBase b) :=
+  QuinticGoldilocks.ofBase_sub a b
+theorem embedBase_mul (a b : Goldilocks) :
+    embedBase (CommRingOps.mul a b) = CommRingOps.mul (embedBase a) (embedBase b) :=
+  QuinticGoldilocks.ofBase_mul a b
+theorem frob_eq_self_iff (z : GoldilocksExt5) : frob z = z ↔ z = embedBase z.c0 :=
+  QuinticGoldilocks.frob_eq_self_iff z
+theorem zero_eq_ringZero : zero = CommRingOps.zero := by rfl
+theorem one_eq_ringOne : one = CommRingOps.one := by rfl
+end GoldilocksExt5
+end GoldilocksField
+
+/-! ### Kernel-evaluated known answers
+
+`frob`, `norm` and `inv` are sealed outside this module, so their concrete values are stated
+here; `Tests/QuinticExt5Teeth` pairs them with the multiplication known answers. The values
+were computed independently (Python, `F_p[X]/(X^5 - 3)` with `p = 2^64 - 2^32 + 1`) and pin
+`Fp5` in `crates/qsag-agg/src/zk_hem/v2/field5.rs`. -/
+
+namespace QuinticGoldilocks
+
+/-- The element `1 + 2 X + 3 X^2 + 4 X^3 + 5 X^4`. -/
+def kat12345 : QuinticGoldilocks :=
+  ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4,
+    Goldilocks.ofNat 5⟩
+
+theorem frob_kat12345 : frob kat12345 =
+    ⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2082576518476559110,
+      Goldilocks.ofNat 10568986813412808496, Goldilocks.ofNat 846350220555798788,
+      Goldilocks.ofNat 6865216354783480110⟩ := by decide +kernel
+
+theorem norm_kat12345 : norm kat12345 = Goldilocks.ofNat 214567 := by decide +kernel
+
+theorem inv_kat12345 : inv kat12345 =
+    ⟨Goldilocks.ofNat 16227807958868272813, Goldilocks.ofNat 4552730750487813724,
+      Goldilocks.ofNat 11612833514307017418, Goldilocks.ofNat 9161515214422980997,
+      Goldilocks.ofNat 13509202856671625680⟩ := by decide +kernel
+
+/-- A full-width element (every limb above `2^56`). -/
+def katWide : QuinticGoldilocks :=
+  ⟨Goldilocks.ofNat 81985529216486895, Goldilocks.ofNat 18364758544493064720,
+    Goldilocks.ofNat 16045690984503098046, Goldilocks.ofNat 1089357896855742840,
+    Goldilocks.ofNat 1234605616436508552⟩
+
+theorem frob_katWide : frob katWide =
+    ⟨Goldilocks.ofNat 81985529216486895, Goldilocks.ofNat 9961272706250400476,
+      Goldilocks.ofNat 4912495906482251711, Goldilocks.ofNat 9291945967817452589,
+      Goldilocks.ofNat 15493897884983376685⟩ := by decide +kernel
+
+theorem norm_katWide : norm katWide = Goldilocks.ofNat 11913873338696290852 := by
+  decide +kernel
+
+theorem inv_katWide : inv katWide =
+    ⟨Goldilocks.ofNat 17033286724174752684, Goldilocks.ofNat 16464919206864593009,
+      Goldilocks.ofNat 3901309921467269908, Goldilocks.ofNat 17713944588012397749,
+      Goldilocks.ofNat 16392840534563784651⟩ := by decide +kernel
+
+/-- A nonzero element whose inverse is nonzero: the hypothesis of `ext5_mul_inv_cancel` is
+    inhabited and its conclusion is not vacuous. -/
+theorem witness_ext5_nontrivial_element :
+    ∃ z : GoldilocksField.GoldilocksExt5, z ≠ GoldilocksField.GoldilocksExt5.zero ∧
+      z⁻¹ ≠ GoldilocksField.GoldilocksExt5.zero := by
+  have key : ∀ z : GoldilocksField.GoldilocksExt5, z ≠ GoldilocksField.GoldilocksExt5.zero →
+      z⁻¹ ≠ GoldilocksField.GoldilocksExt5.zero := by
+    intro z hz h
+    have hc := (GoldilocksField.GoldilocksExt5.ext5_mul_inv_cancel hz).2
+    rw [h] at hc
+    have hZero : GoldilocksField.GoldilocksExt5.zero * z = GoldilocksField.GoldilocksExt5.zero :=
+      LawfulCommRing.zero_mul z
+    rw [hZero] at hc
+    exact LawfulField.zero_ne_one (F := Goldilocks) (congrArg QuinticGoldilocks.c0 hc)
+  have hz : xBasis ≠ GoldilocksField.GoldilocksExt5.zero := fun h =>
+    LawfulField.zero_ne_one (F := Goldilocks) (congrArg QuinticGoldilocks.c1 h).symm
+  exact ⟨_, hz, key _ hz⟩
+
+end QuinticGoldilocks
+
+end Qsag
+end
+#verify_constructive
+  Qsag.goldilocks_three_fifth_modPow
+  Qsag.QuinticGoldilocks.nonResidue_not_fifth_power
+  Qsag.QuinticGoldilocks.xBasis_pow5
+  Qsag.QuinticGoldilocks.zeta_pow5
+  Qsag.QuinticGoldilocks.frob_add
+  Qsag.QuinticGoldilocks.frob_mul
+  Qsag.QuinticGoldilocks.frob_one
+  Qsag.QuinticGoldilocks.frob_pow5
+  Qsag.QuinticGoldilocks.frob_eq_self_iff
+  Qsag.QuinticGoldilocks.ofBase_injective
+  Qsag.QuinticGoldilocks.ofBase_add
+  Qsag.QuinticGoldilocks.ofBase_mul
+  Qsag.QuinticGoldilocks.mul_conj
+  Qsag.QuinticGoldilocks.norm_mul
+  Qsag.QuinticGoldilocks.norm_ofBase
+  Qsag.QuinticGoldilocks.conj_eq_two_mul
+  Qsag.QuinticGoldilocks.mul_ofBase
+  Qsag.QuinticGoldilocks.inv_eq_scale
+  Qsag.QuinticGoldilocks.eq_zero_of_norm_eq_zero
+  Qsag.QuinticGoldilocks.norm_ne_zero
+  Qsag.QuinticGoldilocks.norm_eq_zero_iff
+  Qsag.QuinticGoldilocks.mul_inv_cancel
+  Qsag.QuinticGoldilocks.inv_zero
+  Qsag.QuinticGoldilocks.inv_eq_of_mul_eq_one
+  Qsag.QuinticGoldilocks.mulWith_nonResidue_eq_zero
+  Qsag.QuinticGoldilocks.mulWith_fifth_power_zero_divisor
+  Qsag.QuinticGoldilocks.natCast_ne_zero
+  Qsag.GoldilocksField.GoldilocksExt5.ext5_mul_inv_cancel
+  Qsag.GoldilocksField.GoldilocksExt5.ext5_mul_eq_zero_iff
+  Qsag.GoldilocksField.GoldilocksExt5.xBasis_pow5_eq_three
+  Qsag.GoldilocksField.GoldilocksExt5.frob_eq_self_iff
+  Qsag.QuinticGoldilocks.frob_kat12345
+  Qsag.QuinticGoldilocks.norm_kat12345
+  Qsag.QuinticGoldilocks.inv_kat12345
+  Qsag.QuinticGoldilocks.frob_katWide
+  Qsag.QuinticGoldilocks.norm_katWide
+  Qsag.QuinticGoldilocks.inv_katWide
+  Qsag.QuinticGoldilocks.witness_ext5_nontrivial_element
+#verify_inhabited Qsag.GoldilocksField.GoldilocksExt5.ext5_mul_inv_cancel
+  Qsag.QuinticGoldilocks.witness_ext5_nontrivial_element
