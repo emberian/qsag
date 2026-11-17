@@ -751,6 +751,12 @@ def idealKeyMigrateMachine {LegacyPk Witness : Type} [DecidableEq LegacyPk]
       (scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) inp.1 inp.2)
   errStep st _ := st
 
+theorem idealKeyMigrateMachine_init_iff {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    (st : IdealMigrateState LegacyPk) :
+    (idealKeyMigrateMachine scheme snapshot).Init st ↔ st = IdealMigrateState.init :=
+  Iff.rfl
+
 theorem idealKeyMigrateMachine_step_eq_some_iff {LegacyPk Witness : Type} [DecidableEq LegacyPk]
     (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
     (st st' : IdealMigrateState LegacyPk) (claim : MigrationClaim LegacyPk) (wit : Witness)
@@ -826,6 +832,14 @@ def idealMigrate_dataRefines_idealKeyMigrate {LegacyPk Witness : Type} [Decidabl
       ⟨hValid, hKeyFresh, hClaim, hSt⟩, rfl, hInv'⟩
   sim_internal _ _ hVis := by cases hVis
   sim_reject hRel _ := hRel
+
+theorem idealMigrate_dataRefines_idealKeyMigrate_rel_iff {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    (c a : IdealMigrateState LegacyPk) :
+    (idealMigrate_dataRefines_idealKeyMigrate scheme snapshot).Rel c a ↔
+      c = a ∧ c.Inv scheme snapshot :=
+  Iff.rfl
 
 /-- Stepwise lockstep agreement or explicit `NullifierCollision`: in any state satisfying `Inv`,
     `idealMigrateMachine` and `idealKeyMigrateMachine` take the EXACT same step on `(claim, wit)`
