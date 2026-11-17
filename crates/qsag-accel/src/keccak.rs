@@ -317,7 +317,6 @@ pub fn commit_mpc_broadcast(
 
 /// Interleaved Fiat-Shamir transcript enforcing round-by-round absorb-before-squeeze discipline
 /// (structurally preventing non-interleaved challenge reuse).
-#[derive(Clone)]
 pub struct InterleavedTranscript {
     chain_key: [u8; 32],
     round_counter: u64,
