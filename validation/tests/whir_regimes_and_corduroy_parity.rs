@@ -22,7 +22,7 @@
 //!    (`protocol::prove_public`/`verify_public` with 3 independent `ZKHEM_COMBINE` challenges and
 //!    `HEM_PUBLIC_CELLS` batching) + adversarial tamper rejection.
 //! 6. `zk_hem::full_shard` recursion (`prove_recursive_shard`, `prove_full_shard_merge`,
-//!    `verify_full_shard_merge`, `QSAGFSM1`) with child, statement and wire tamper rejection. The
+//!    `verify_full_shard_merge`, `QSAGFSM2`) with child, statement and wire tamper rejection. The
 //!    both one-child and two-child parents run by default.
 
 use qsag_agg::field::{Goldilocks, GoldilocksExt4, build_eq_table_ext4};
@@ -308,7 +308,7 @@ fn whir_active_regimes_retired_tag_rejection_and_dual_ood_pinning() {
         assert_eq!(WhirSecurityRegime::from_u8(row.tag), Some(row.regime));
         assert_eq!(row.regime.pow_bits(), row.pow_bits);
         assert_eq!(row.regime.pure_query_target_bits(), row.pure_bits);
-        assert_eq!(row.regime.meets_qrom_128_floor(), row.qrom_128_ok);
+        assert_eq!(row.regime.is_accepted_aggregate_profile(), row.qrom_128_ok);
         assert_eq!(row.regime.uses_poseidon2_canopy(), row.poseidon2);
         assert_eq!(row.regime.uses_turboshake_canopy(), row.turboshake);
 
@@ -552,7 +552,7 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     let mode = SigningMode::SharedMessage(msg);
     let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
 
-    // Classical tag `2` must be rejected by `HemAggregator` (`!meets_qrom_128_floor()`).
+    // Classical tag `2` must be rejected by `HemAggregator` (`!is_accepted_aggregate_profile()`).
     let classical_cfg = HemAggConfig {
         regime: WhirSecurityRegime::BciksJohnsonClassical128,
         ..HemAggConfig::default_for(AggSigProfile::CorduroyPoseidon2, [0x80; 32])
@@ -785,7 +785,7 @@ fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
     );
 }
 
-/// `zk_hem::full_shard` recursive merge (`QSAGFSM1`) of `children` two-slot shards under one
+/// `zk_hem::full_shard` recursive merge (`QSAGFSM2`) of `children` two-slot shards under one
 /// parent, with child, statement and wire tamper rejection.
 fn full_shard_merge_and_tamper_rejection(children: usize) {
     // These two tests each retain a large verifier key across proving and tamper checks.
@@ -866,9 +866,9 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
         prove_full_shard_merge(&relation, &statements, &child_proofs, regime, &[0x88; 32])
             .expect("prove_full_shard_merge");
     let parent_wire = parent_proof.to_bytes();
-    assert_eq!(&parent_wire[..8], b"QSAGFSM1");
+    assert_eq!(&parent_wire[..8], b"QSAGFSM2");
     let decoded_parent =
-        FullShardMergeProof::from_bytes(&parent_wire, &relation, regime).expect("decode QSAGFSM1");
+        FullShardMergeProof::from_bytes(&parent_wire, &relation, regime).expect("decode QSAGFSM2");
     assert_eq!(decoded_parent, parent_proof);
     assert!(verify_full_shard_merge(
         &relation,
@@ -905,7 +905,7 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
 
     // Wire tamper rejection: wrong magic, then payload bit flips.
     let mut bad_magic = parent_wire.clone();
-    bad_magic[7] = b'2';
+    bad_magic[7] = b'1'; // the version-1 (non-hiding hologram) carrier
     assert!(FullShardMergeProof::from_bytes(&bad_magic, &relation, regime).is_none());
     assert_wire_bit_flips_rejected(
         &parent_wire,

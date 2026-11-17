@@ -71,10 +71,10 @@ use qsag_hd::HdError;
 use qsag_hd::budget::DurableQueryBudget;
 use qsag_policy::{
     AuthorizedSignReleaseToken, CapabilityError, CapabilityGate, CapabilityRequest, Caveat,
-    Discharge, MacaroonVerifier, PQ_BISCUIT_HOP_CRYPTO_BYTES, PolicyAuthenticatedOt, PolicyEngine,
-    PolicyGuardDkgRound1, PolicySignerGuardShare, PolicyViolation, PqBiscuit,
-    PqBiscuitAuthorityKey, QuorumTierRule, SigningPayloadBinding, SpongeMacaroon,
-    TransactionIntent, TransactionPolicy, finalize_distributed_policy_guard,
+    Discharge, MacaroonVerifier, MemorySealConsumptionStore, PQ_BISCUIT_HOP_CRYPTO_BYTES,
+    PolicyAuthenticatedOt, PolicyEngine, PolicyGuardDkgRound1, PolicySignerGuardShare,
+    PolicyViolation, PqBiscuit, PqBiscuitAuthorityKey, QuorumTierRule, SigningPayloadBinding,
+    SpongeMacaroon, TransactionIntent, TransactionPolicy, finalize_distributed_policy_guard,
 };
 
 // ============================================================================
@@ -827,7 +827,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     // Missing or unbound 3rd-party discharge MUST be rejected by `PolicyEngine` BEFORE BDOZ slot burn!
     let unbound_discharge =
         SpongeMacaroon::issue_discharge(&third_party_key, third_party_caveat_id, audience);
-    let bad_gate = CapabilityGate::Macaroon {
+    let mut bad_gate = CapabilityGate::Macaroon {
         verifier: &mac_verifier,
         token: &macaroon,
         discharges: &[Discharge {
@@ -841,7 +841,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
                 &intent_b1,
                 session_b1,
                 2_500,
-                Some(&bad_gate),
+                Some(&mut bad_gate),
                 &mut guards[1..4],
                 &accel,
             )
@@ -861,7 +861,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     macaroon
         .bind_discharge(&mut bound_discharge)
         .expect("bind_discharge");
-    let mac_gate = CapabilityGate::Macaroon {
+    let mut mac_gate = CapabilityGate::Macaroon {
         verifier: &mac_verifier,
         token: &macaroon,
         discharges: &[Discharge {
@@ -874,7 +874,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             &intent_b1,
             session_b1,
             2_500,
-            Some(&mac_gate),
+            Some(&mut mac_gate),
             &mut guards[1..4],
             &accel,
         )
@@ -987,11 +987,15 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
         .expect("PqBiscuit mint");
     assert_eq!(biscuit_auth.remaining_mints(), 3);
 
+    // The audience's one seal-consumption domain, shared by every biscuit verification below.
+    let mut seal_domain = MemorySealConsumptionStore::new(16);
+
     // Unsealed `PqBiscuit` MUST be rejected before latching any BDOZ slot!
-    let unsealed_gate = CapabilityGate::Biscuit {
+    let mut unsealed_gate = CapabilityGate::Biscuit {
         authority_pk: &biscuit_auth_pk,
         dp: &dp_1122,
         token: &biscuit_hop0,
+        domain: &mut seal_domain,
     };
     assert!(
         engine
@@ -999,7 +1003,7 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
                 &intent_b2,
                 session_b2,
                 3_000,
-                Some(&unsealed_gate),
+                Some(&mut unsealed_gate),
                 &mut guards[1..4],
                 &accel,
             )
@@ -1037,14 +1041,15 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
     let decoded_biscuit = PqBiscuit::from_bytes(&biscuit_wire).expect("PqBiscuit::from_bytes");
     assert_eq!(decoded_biscuit, sealed_biscuit);
 
-    let biscuit_gate = CapabilityGate::Biscuit {
+    let mut biscuit_gate = CapabilityGate::Biscuit {
         authority_pk: &biscuit_auth_pk,
         dp: &dp_1122,
         token: &decoded_biscuit,
+        domain: &mut seal_domain,
     };
     // Replay at a different timestamp (`3_001 != 3_000`) fails PoP request-bound seal verification!
     assert_eq!(
-        engine.verify_capability(&intent_b2, 3_001, &biscuit_gate),
+        engine.verify_capability(&intent_b2, 3_001, &mut biscuit_gate),
         Err(PolicyViolation::CapabilityDenied(
             CapabilityError::InvalidTag
         ))
@@ -1055,11 +1060,16 @@ fn e2e_policy_macaroon_and_compact1122_biscuit_to_threshold_mldsa_signing() {
             &intent_b2,
             session_b2,
             3_000,
-            Some(&biscuit_gate),
+            Some(&mut biscuit_gate),
             &mut guards[1..4],
             &accel,
         )
         .expect("PolicyEngine authorize B2 via Compact1122 PqBiscuit");
+    // The seal was consumed by that authorization: the same token and request are refused.
+    assert_eq!(
+        engine.verify_capability(&intent_b2, 3_000, &mut biscuit_gate),
+        Err(PolicyViolation::CapabilityDenied(CapabilityError::Replay))
+    );
     assert!(
         guards[1..4]
             .iter()

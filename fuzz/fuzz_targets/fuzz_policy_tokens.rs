@@ -19,13 +19,14 @@
 
 use std::sync::OnceLock;
 
-use libfuzzer_sys::fuzz_target;
 use qsag_accel::CpuReferenceBackend;
 use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 use qsag_policy::{
-    CapabilityError, CapabilityRequest, Caveat, Discharge, MacaroonVerifier, PqBiscuit,
-    PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey, PqBiscuitStepKey, SpongeMacaroon,
+    CapabilityError, CapabilityRequest, Caveat, Discharge, MacaroonVerifier,
+    MemorySealConsumptionStore, PqBiscuit, PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey,
+    PqBiscuitStepKey, SpongeMacaroon,
 };
+use libfuzzer_sys::fuzz_target;
 
 const ROOT_KEY: [u8; 32] = [0xA1; 32];
 const THIRD_PARTY_KEY: [u8; 32] = [0xB2; 32];
@@ -36,6 +37,7 @@ const RESOURCE: [u8; 32] = [0x33; 32];
 
 fn request() -> CapabilityRequest {
     CapabilityRequest {
+        intent_digest: [0x55; 32],
         audience: AUDIENCE,
         resource: RESOURCE,
         actions: 0b0011,
@@ -77,7 +79,9 @@ fn fixtures() -> &'static Fixtures {
         discharge
             .attenuate(Caveat::ExpiresAt(1_750_000_000))
             .expect("discharge caveat");
-        primary.bind_discharge(&mut discharge).expect("bound discharge");
+        primary
+            .bind_discharge(&mut discharge)
+            .expect("bound discharge");
         let verifier = MacaroonVerifier::new(&ROOT_KEY, IDENTIFIER, AUDIENCE);
         let presented = [Discharge {
             token: &discharge,
@@ -120,9 +124,22 @@ fn fixtures() -> &'static Fixtures {
         let sealed = tail
             .seal(&attenuated, &dp, Some(&request()), &[0x63; 32], &accel)
             .expect("sealed biscuit");
-        assert_eq!(sealed.verify(&authority_pk, &dp, &request()), Ok(()));
         assert_eq!(
-            attenuated.verify(&authority_pk, &dp, &request()),
+            sealed.verify(
+                &authority_pk,
+                &dp,
+                &request(),
+                &mut MemorySealConsumptionStore::new(16)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            attenuated.verify(
+                &authority_pk,
+                &dp,
+                &request(),
+                &mut MemorySealConsumptionStore::new(16)
+            ),
             Err(CapabilityError::Denied)
         );
 
@@ -193,7 +210,12 @@ fn check_biscuit(fx: &Fixtures, bytes: &[u8]) {
         return;
     };
     assert_eq!(token.to_bytes().as_deref(), Ok(bytes));
-    let verdict = token.verify(&fx.authority_pk, &fx.dp, &request());
+    let verdict = token.verify(
+        &fx.authority_pk,
+        &fx.dp,
+        &request(),
+        &mut MemorySealConsumptionStore::new(16),
+    );
     if !token.is_sealed() {
         assert_eq!(verdict, Err(CapabilityError::Denied));
     }
@@ -204,7 +226,16 @@ fn check_biscuit(fx: &Fixtures, bytes: &[u8]) {
             amount: 501,
             ..request()
         };
-        assert!(token.verify(&fx.authority_pk, &fx.dp, &other).is_err());
+        assert!(
+            token
+                .verify(
+                    &fx.authority_pk,
+                    &fx.dp,
+                    &other,
+                    &mut MemorySealConsumptionStore::new(16)
+                )
+                .is_err()
+        );
     }
 }
 
@@ -232,7 +263,7 @@ fuzz_target!(init: {
         // A biscuit is bound to the authority that minted it.
         if pk != fx.authority_pk {
             let sealed = PqBiscuit::from_bytes(&fx.sealed_biscuit_wire).expect("sealed seed");
-            assert!(sealed.verify(&pk, &fx.dp, &request()).is_err());
+            assert!(sealed.verify(&pk, &fx.dp, &request(), &mut MemorySealConsumptionStore::new(16)).is_err());
         }
     }
     if let Ok(key) = PqBiscuitAuthorityKey::from_secret_bytes(data) {
@@ -253,7 +284,7 @@ fuzz_target!(init: {
                 check_biscuit(fx, &candidate);
                 if candidate == fx.sealed_biscuit_wire {
                     let token = PqBiscuit::from_bytes(&candidate).expect("sealed seed");
-                    assert_eq!(token.verify(&fx.authority_pk, &fx.dp, &request()), Ok(()));
+                    assert_eq!(token.verify(&fx.authority_pk, &fx.dp, &request(), &mut MemorySealConsumptionStore::new(16)), Ok(()));
                 }
             }
         }

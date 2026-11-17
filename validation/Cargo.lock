@@ -1037,6 +1037,7 @@ dependencies = [
  "qsag-accel",
  "qsag-addr",
  "qsag-asm",
+ "qsag-core",
  "qsag-fts",
  "qsag-verified",
 ]
