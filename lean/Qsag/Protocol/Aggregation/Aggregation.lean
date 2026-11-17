@@ -6834,3 +6834,79 @@ theorem stage_pow_fixture_rejects_zero :
   verifyWhirStagePow_16_iff stage_pow_fixture_accepts stage_pow_fixture_rejects_zero
 end Qsag.Aggregation
 end
+
+/-! ### Sbox7 fixture facts
+
+Projection and evaluation lemmas for the sealed Sbox7 fixture family (`rsSbox7Inst`, `mkSbox7Pk`,
+`rsSbox7TraceArith`, `rsSbox7WhirDomain`, `buildHonestSbox7WhirBundle`). The recursive-aggregation
+fixtures of `Poseidon2AlgebraicAndRecursiveHem` and `RecursivePoseidon2WhirSoundness` cite them; no
+body is exposed. -/
+public section
+namespace Qsag.Aggregation
+
+theorem pow7Goldilocks_zero : pow7Goldilocks Goldilocks.zero = Goldilocks.zero := by
+  decide +kernel
+
+theorem sbox7_root_of_zero_preimage (seed : Goldilocks) :
+    CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed = seed := by
+  rw [pow7Goldilocks_zero]
+  exact LawfulCommRing.zero_add seed
+
+/-- The trace arithmetization depends on `seed - root` only. -/
+theorem rsSbox7TraceArith_self (seed : Goldilocks) :
+    rsSbox7TraceArith seed seed = rsSbox7TraceArith Goldilocks.zero Goldilocks.zero := by
+  unfold rsSbox7TraceArith
+  rw [LawfulCommRing.sub_self, LawfulCommRing.sub_self]
+
+theorem rsSbox7Inst_message (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7Inst seed root msg).message = msg := by rfl
+
+theorem rsSbox7Inst_committee (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7Inst seed root msg).committee = [mkSbox7Pk seed root] := by rfl
+
+theorem rsSbox7Inst_suite (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7Inst seed root msg).suite = sbox7FieldSuite := by rfl
+
+theorem rsSbox7Inst_params (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7Inst seed root msg).params = sbox7Params := by rfl
+
+theorem rsSbox7Inst_regime (seed root : Goldilocks) (msg : List UInt8) :
+    (rsSbox7Inst seed root msg).regime = .bciksJohnsonQrom128 := by rfl
+
+theorem sbox7Params_eq : sbox7Params = ⟨2, 2, 0, 1, 0, 0, 0, true⟩ := by rfl
+
+theorem mkSbox7Pk_eq (seed root : Goldilocks) :
+    mkSbox7Pk seed root = { pkSeed := be 32 seed.val, pkRoot := be 32 root.val } := by rfl
+
+theorem mkSbox7Pk_zero_ne_one :
+    ¬ ((mkSbox7Pk Goldilocks.zero Goldilocks.zero).pkSeed =
+      (mkSbox7Pk Goldilocks.one Goldilocks.one).pkSeed) := by
+  decide +kernel
+
+theorem rsSbox7WhirDomain_stageIdx_nodup :
+    (rsSbox7WhirDomain.stages.map (·.stageIdx)).Nodup := by decide +kernel
+
+theorem rsSbox7WhirDomain_stages_length : rsSbox7WhirDomain.stages.length = 2 := by rfl
+
+theorem rsSbox7WhirDomain_stages_eq :
+    rsSbox7WhirDomain.stages = [sbox7Stage0Dom, sbox7Stage1Dom] := by rfl
+
+theorem sbox7StageDoms_fold_shape :
+    sbox7Stage0Dom.groups0 = 4 ∧ sbox7Stage0Dom.foldLayers = 1 ∧
+      sbox7Stage1Dom.groups0 = 8 ∧ sbox7Stage1Dom.foldLayers = 1 := ⟨rfl, rfl, rfl, rfl⟩
+
+/-- The honest bundle carries exactly one active signer. -/
+theorem buildHonestSbox7WhirBundle_popcount (seed x0 b1 : Goldilocks) (msg : List UInt8) :
+    bitmapPopcountSpec (buildHonestSbox7WhirBundle seed x0 b1 msg).1.agg.bitmap = 1 := by rfl
+
+theorem buildHonestSbox7WhirBundle_regime (seed x0 b1 : Goldilocks) (msg : List UInt8) :
+    (buildHonestSbox7WhirBundle seed x0 b1 msg).1.agg.regime = .bciksJohnsonQrom128 := by rfl
+
+#verify_constructive pow7Goldilocks_zero sbox7_root_of_zero_preimage rsSbox7TraceArith_self
+  rsSbox7Inst_message rsSbox7Inst_committee rsSbox7Inst_suite rsSbox7Inst_params
+  rsSbox7Inst_regime sbox7Params_eq mkSbox7Pk_eq mkSbox7Pk_zero_ne_one
+  rsSbox7WhirDomain_stageIdx_nodup rsSbox7WhirDomain_stages_length
+  rsSbox7WhirDomain_stages_eq sbox7StageDoms_fold_shape
+  buildHonestSbox7WhirBundle_popcount buildHonestSbox7WhirBundle_regime
+end Qsag.Aggregation
+end
