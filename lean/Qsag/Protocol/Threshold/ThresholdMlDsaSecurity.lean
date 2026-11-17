@@ -2307,4 +2307,8 @@ theorem inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness :
 #verify_inhabited rssSacrificedSignStep_mldsaQ6_frozen_soundness
   inhabited_rssSacrificedSignStep_mldsaQ6_frozen_soundness
 
+-- Equations and certificate used by `Tests/CredentialsTeeth`; no body is exposed.
+#export_eqns rss3Recon rss3ToSacGate sacAcceptRepeated
+#verify_constructive rss3_repeated_sacrifice_pq256
+
 end Qsag

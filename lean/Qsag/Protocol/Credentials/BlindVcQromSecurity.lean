@@ -1238,4 +1238,76 @@ theorem blindVc_collision_filter_preserves_honest_openings
   verifyIssuerRootAttestation_rejects_raw_message_signature
   blindVc_presentation_reduces_to_issuer_mldsa
 
+/-- Membership in the language of the parallel IOP is the existence of a valid witness. -/
+theorem blindVcParallelIop_inLang_iff
+    (H : List UInt8 → List UInt8)
+    (prgExpand : (D : Nat) → Nat → Fin 3 → Vec UInt8 32 → PartyGateCoins D) (k : Nat)
+    (stmt : BlindVcPublicStatement) :
+    (blindVcParallelIop H prgExpand k).inLang stmt ↔
+      ∃ wit : BlindVcSecretWitness stmt.schema.arity stmt.treeDepth,
+        BlindVcWitnessValid stmt wit := Iff.rfl
+
+/-! ### Attestation-encoding tooth (audited in `Tests/CredentialsTeeth`; paired here, where the body of
+`IssuerRootAttestationFields.message` is visible) -/
+
+def teethZeroFields : IssuerRootAttestationFields :=
+  ⟨Vec.replicate 32 0, 0, lane6Zero, Vec.replicate 32 0⟩
+
+/-- The attestation bytes of the model before this stage: `QSAG.ROOT`, root tag, epoch, root.
+The issuer key digest is absent. -/
+def teethLegacyAttestationMsg (f : IssuerRootAttestationFields) : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x4F, 0x4F, 0x54] ++
+  f.issuerRootTag.toList ++ encodeNatLeBytes 8 f.issuerEpoch.toNat ++
+  encodeGoldilocksVecLe [f.accumulatorRoot.x0, f.accumulatorRoot.x1, f.accumulatorRoot.x2,
+    f.accumulatorRoot.x3, f.accumulatorRoot.x4, f.accumulatorRoot.x5]
+
+/-- Without the issuer key digest two different field tuples have the same bytes. -/
+theorem tooth_attestation_msg_without_key_digest_not_injective :
+    ∃ f g : IssuerRootAttestationFields,
+      ¬ (f = g) ∧ teethLegacyAttestationMsg f = teethLegacyAttestationMsg g :=
+  ⟨teethZeroFields, { teethZeroFields with issuerPkDigest := Vec.replicate 32 1 },
+    fun h => by
+      have hd := congrArg (fun x => x.issuerPkDigest.toList.head?) h
+      simp only [teethZeroFields, Vec.replicate.public_eqs, Vec.toList_cons,
+        List.head?_cons] at hd
+      exact absurd hd (by decide),
+    rfl⟩
+
+/-! ### Opening-round witness (audited in `Tests/CredentialsTeeth`; its inhabitedness pair is certified
+here, where `credentialSdOpeningAccepts` shows the shared `credentialGgmCheckDefects`) -/
+
+/-- The hypothesis of the opening-round bound is satisfiable, and its bound is attained: with
+one nonzero check value, at party 255, hiding party 255 passes. -/
+theorem inhabited_opening_round_nonzero_defect :
+    ∃ defect : Nat → Fin 256 → CredentialFp5,
+      (∀ idx < 33, ∃ bad, defect idx bad ≠ credentialFp5Zero) ∧
+      credentialGgmCheckDefects (defect 0) ⟨255, by decide⟩ = true := by
+  refine ⟨fun _ p _ => if p.val = 255 then Goldilocks.one else Goldilocks.zero,
+    fun _ _ => ⟨⟨255, by decide⟩, fun he => ?_⟩, ?_⟩
+  · have hc : Goldilocks.one = Goldilocks.zero :=
+      (congrFun he 0).trans (credentialFp5Zero_apply 0)
+    exact absurd hc (by decide)
+  · rw [credentialGgmCheckDefects.public_eqs]
+    apply List.all_eq_true.mpr
+    intro p _
+    rw [Bool.or_eq_true, decide_eq_true_eq, decide_eq_true_eq]
+    by_cases hp : p = ⟨255, by decide⟩
+    · exact Or.inl hp
+    · refine Or.inr (funext (fun _ => ?_))
+      have hv : ¬ (p.val = 255) := fun h => hp (Fin.ext h)
+      rw [credentialFp5Zero_apply]
+      show (if p.val = 255 then Goldilocks.one else Goldilocks.zero) = Goldilocks.zero
+      rw [ite_eq_right hv]
+
+-- Equations and certificates used by `Tests/CredentialsTeeth`; no body is exposed.
+theorem fin3AllTrue_eq (p : Fin 3 → Bool) : fin3AllTrue p = (p 0 && p 1 && p 2) := by rfl
+
+#export_eqns vcMerkleTreeRoot
+#verify_constructive fin3_not_all_count_le_two blindVcParallelIop_inLang_iff fin3AllTrue_eq
+  tooth_attestation_msg_without_key_digest_not_injective
+#tooth_pair IssuerRootAttestationFields.message_injective vs
+  tooth_attestation_msg_without_key_digest_not_injective
+#verify_constructive inhabited_opening_round_nonzero_defect
+#verify_inhabited credentialSd_opening_bad_count_le_one inhabited_opening_round_nonzero_defect
+
 end Qsag

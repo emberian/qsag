@@ -63,6 +63,9 @@ instance (b : Nat) (bound : RatBound) : Decidable (exceedsBitBudget b bound) :=
 /-- Unit probability bound `1 / 1`. -/
 def RatBound.one : RatBound := ⟨1, 1, Nat.zero_lt_one⟩
 
+/-- Defining equation of `RatBound.one` for consumers outside this module. -/
+theorem RatBound.one_eq : RatBound.one = ⟨1, 1, Nat.zero_lt_one⟩ := by rfl
+
 /-- Canonical `b`-bit target threshold `1 / 2 ^ b`. -/
 @[expose] def RatBound.invPow2 (b : Nat) : RatBound := ⟨1, 2 ^ b, Nat.two_pow_pos b⟩
 

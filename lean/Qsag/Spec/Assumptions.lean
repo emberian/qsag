@@ -5249,5 +5249,8 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
   Qsag.Spec.uniformOn_byte1SeedAndPre
   Qsag.Spec.poly257Hash_smDtPreHard_within
 
+-- Equation used by `Tests/CredentialsTeeth`; no body is exposed.
+#export_eqns honestChannelRun
+
 end Qsag.Spec
 end
