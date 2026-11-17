@@ -10,7 +10,14 @@ description = "Authenticated transaction-predicate guard evaluating recipient al
 default = ["alloc"]
 alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
 test-dealer = []
-std = ["qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
+std = [
+    "qsag-asm/std",
+    "alloc",
+    "qsag-accel/std",
+    "qsag-addr/std",
+    "dep:qsag-core",
+    "qsag-core/std",
+]
 
 [dependencies]
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
@@ -18,3 +25,5 @@ qsag-fts = { path = "../qsag-fts", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false, features = ["alloc"] }
 qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-addr = { path = "../qsag-addr", default-features = false }
+# The external rollback anchor contract (`ExternalMonotoneAnchor`) of the durable stores.
+qsag-core = { path = "../qsag-core", default-features = false, optional = true }

@@ -18,7 +18,12 @@
 //! - **Mandatory terminal sealing & optional PoP request binding:** Open chains cannot be
 //!   verified until sealed by the final holder (`seal`), preventing in-transit caveat
 //!   appendage; passing `Some(&request)` binds the terminal signature to the exact
-//!   [`CapabilityRequest`].
+//!   [`CapabilityRequest`], including its complete canonical intent digest.
+//! - **One-use verification:** every successful verification consumes the seal in
+//!   the audience's one [`SealConsumptionDomain`], which `verify` requires. A
+//!   deployment has exactly one such domain per audience, shared by every accepting
+//!   instance; [`crate::FsSealConsumptionStore`] with an external anchor also refuses
+//!   a rolled-back store. Consumption is not an execution transaction.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -34,6 +39,8 @@ use qsag_fts::{
     FrontierFtsSignature, FrontierFtsSigningKey, FtsEpochWal, verify_frontier_fts,
 };
 
+use crate::seal_store::SealConsumptionDomain;
+
 use crate::macaroon::{CapabilityError, CapabilityRequest, Caveat, MAX_CAVEATS};
 
 /// Exact cryptographic witness size per delegation hop: `32 B` `next_pk_root` + `1,122 B`
@@ -46,7 +53,7 @@ pub const MAX_BISCUIT_HOPS: usize = 16;
 /// Maximum Merkle height for a multi-mint [`PqBiscuitAuthorityKey`] (`2^8 = 256` root mints).
 pub const MAX_AUTHORITY_TREE_HEIGHT: u8 = 8;
 
-const BISCUIT_WIRE_MAGIC: &[u8; 8] = b"QSBSC001";
+const BISCUIT_WIRE_MAGIC: &[u8; 8] = b"QSBSC002";
 const AUTHORITY_PK_MAGIC: &[u8; 8] = b"QSBSCPK1";
 const AUTHORITY_SK_MAGIC: &[u8; 8] = b"QSBSCAK1";
 const STEP_SK_MAGIC: &[u8; 8] = b"QSBSCSK1";
@@ -192,8 +199,9 @@ pub(crate) fn evaluate_first_party_caveat(caveat: &Caveat, r: &CapabilityRequest
 /// Canonical digest of a [`CapabilityRequest`] for Proof-of-Possession request-bound seals.
 pub fn capability_request_digest(r: &CapabilityRequest) -> [u8; 32] {
     cshake256_framed_32(
-        b"QSAG.BISCUIT.REQ.V1",
+        b"QSAG.BISCUIT.REQ.V2",
         &[
+            &r.intent_digest,
             &r.audience,
             &r.resource,
             &r.actions.to_be_bytes(),
@@ -236,7 +244,7 @@ fn seal_signing_message(
     let mode = [u8::from(bound_request_digest.is_some())];
     let req = bound_request_digest.copied().unwrap_or([0u8; 32]);
     cshake256_framed_32(
-        b"QSAG.BISCUIT.SEAL.MSG.V1",
+        b"QSAG.BISCUIT.SEAL.MSG.V2",
         &[chain_digest, &hop_index.to_be_bytes(), &mode, &req],
     )
 }
@@ -781,8 +789,9 @@ impl PqBiscuitStepKey {
         Ok((updated, next_step))
     }
 
-    /// Permanently seal `token` with this tail key (optionally binding to `bound_request` for
-    /// Proof-of-Possession replay protection), consuming `self`.
+    /// Permanently seal `token`, consuming this tail key. `bound_request` commits
+    /// the complete intent digest and request facts. Verification consumes every
+    /// seal through the caller's store, including unbound bearer seals.
     pub fn seal<B: AcceleratorBackend>(
         self,
         token: &PqBiscuit,
@@ -973,12 +982,19 @@ impl PqBiscuit {
     }
 
     /// Verify every `Compact1122` hop signature from `authority_pk` to the terminal seal and
-    /// evaluate all caveats across all hops conjunctively against `request`.
+    /// evaluate all caveats across all hops conjunctively against `request`, then
+    /// atomically consume the authenticated seal in `domain` before returning success.
+    /// `domain` must be the audience's one consumption domain
+    /// ([`SealConsumptionDomain`]): the same durable, rollback-protected records for
+    /// every request, process, restart and replica. Invalid tokens
+    /// never consume an entry; failures after consumption do not refund it.
+    /// V1 token wire encodings and V1 terminal signatures are refused.
     pub fn verify(
         &self,
         authority_pk: &PqBiscuitAuthorityPublicKey,
         dp: &FrontierDpTable,
         request: &CapabilityRequest,
+        domain: &mut dyn SealConsumptionDomain,
     ) -> Result<(), CapabilityError> {
         let seal = self.seal.as_ref().ok_or(CapabilityError::Denied)?;
         if !ct_eq_bytes(&self.audience, &request.audience) {
@@ -1091,7 +1107,13 @@ impl PqBiscuit {
         let seal_msg = seal_signing_message(&chain, seal_hop, req_digest.as_ref());
         verify_compact1122_bytes(seal_pk_seed, seal_pk_root, dp, &seal_msg, &seal.signature)?;
 
-        Ok(())
+        // Consume the authenticated terminal statement, not caller-selected request
+        // fields or signature bytes. A bearer seal is also one-use across requests.
+        let seal_id = cshake256_framed_32(
+            b"QSAG.BISCUIT.CONSUME.V2",
+            &[&authority_pk.to_bytes(), &seal_msg],
+        );
+        domain.consume(seal_id)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, CapabilityError> {
@@ -1248,15 +1270,72 @@ impl PqBiscuit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MemorySealConsumptionStore;
     use qsag_accel::CpuReferenceBackend;
 
     fn sample_request() -> CapabilityRequest {
         CapabilityRequest {
+            intent_digest: [0x55; 32],
             audience: [0x22; 32],
             resource: [0x33; 32],
             actions: 0b0011,
             amount: 500,
             now: 1_700_000_100,
+        }
+    }
+
+    #[test]
+    fn seal_rejects_second_acceptance() {
+        let accel = CpuReferenceBackend::new();
+        let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
+        for bound in [true, false] {
+            let mut authority =
+                PqBiscuitAuthorityKey::keygen([0x11; 32], [0xAA; 32], 0, &accel).unwrap();
+            let pk = *authority.public_key();
+            let req = sample_request();
+            let (token, step) = authority
+                .mint(
+                    &dp,
+                    [0x44; 32],
+                    req.audience,
+                    &[],
+                    [0x51; 32],
+                    &[0x61; 32],
+                    &accel,
+                )
+                .unwrap();
+            let sealed = step
+                .seal(&token, &dp, bound.then_some(&req), &[0x63; 32], &accel)
+                .unwrap();
+            let mut consumption = MemorySealConsumptionStore::new(16);
+            if bound {
+                let mut other_intent = sample_request();
+                other_intent.intent_digest[0] ^= 1;
+                assert_eq!(
+                    sealed.verify(&pk, &dp, &other_intent, &mut consumption),
+                    Err(CapabilityError::InvalidTag)
+                );
+            }
+            assert_eq!(
+                sealed.verify(&pk, &dp, &req, &mut MemorySealConsumptionStore::new(0)),
+                Err(CapabilityError::ConsumptionFailed)
+            );
+            sealed.verify(&pk, &dp, &req, &mut consumption).unwrap();
+            assert_eq!(
+                sealed.verify(&pk, &dp, &req, &mut consumption),
+                Err(CapabilityError::Replay),
+                "same seal accepted twice"
+            );
+            if !bound {
+                let mut later = sample_request();
+                later.now += 1;
+                later.intent_digest[0] ^= 1;
+                assert_eq!(
+                    sealed.verify(&pk, &dp, &later, &mut consumption),
+                    Err(CapabilityError::Replay),
+                    "bearer seal reused for another request"
+                );
+            }
         }
     }
 
@@ -1277,6 +1356,12 @@ mod tests {
         };
         let raw = token.to_bytes().unwrap();
         assert_eq!(PqBiscuit::from_bytes(&raw).unwrap(), token);
+        let mut legacy = raw.clone();
+        legacy[..8].copy_from_slice(b"QSBSC001");
+        assert_eq!(
+            PqBiscuit::from_bytes(&legacy),
+            Err(CapabilityError::Malformed)
+        );
         token.blocks[0].caveats.push(Caveat::Actions(1));
         assert_eq!(token.to_bytes(), Err(CapabilityError::TooManyCaveats));
         token.blocks[0].caveats = vec![Caveat::ThirdParty([6; 32])];
@@ -1315,7 +1400,12 @@ mod tests {
         assert_eq!(authority.next_leaf(), 1);
         // Unsealed token cannot be verified.
         assert_eq!(
-            tok0.verify(&authority_pk, &dp, &sample_request()),
+            tok0.verify(
+                &authority_pk,
+                &dp,
+                &sample_request(),
+                &mut MemorySealConsumptionStore::new(16)
+            ),
             Err(CapabilityError::Denied)
         );
 
@@ -1357,11 +1447,23 @@ mod tests {
         // Hop 0 + Hop 1 + terminal seal + compact header/caveats: ~3.5 KiB total (~1,154 B/hop).
         assert_eq!(PQ_BISCUIT_HOP_CRYPTO_BYTES, 1154);
         let decoded = PqBiscuit::from_bytes(&wire).unwrap();
-        decoded.verify(&authority_pk, &dp, &req).unwrap();
+        decoded
+            .verify(
+                &authority_pk,
+                &dp,
+                &req,
+                &mut MemorySealConsumptionStore::new(16),
+            )
+            .unwrap();
         let mut stripped_binding = decoded.clone();
         stripped_binding.seal.as_mut().unwrap().request_bound = false;
         assert_eq!(
-            stripped_binding.verify(&authority_pk, &dp, &req),
+            stripped_binding.verify(
+                &authority_pk,
+                &dp,
+                &req,
+                &mut MemorySealConsumptionStore::new(16)
+            ),
             Err(CapabilityError::InvalidTag)
         );
 
@@ -1393,8 +1495,14 @@ mod tests {
             let mut tampered = wire.clone();
             tampered[offset] ^= 1;
             assert!(
-                PqBiscuit::from_bytes(&tampered)
-                    .map_or(true, |b| b.verify(&authority_pk, &dp, &req).is_err()),
+                PqBiscuit::from_bytes(&tampered).map_or(true, |b| b
+                    .verify(
+                        &authority_pk,
+                        &dp,
+                        &req,
+                        &mut MemorySealConsumptionStore::new(16)
+                    )
+                    .is_err()),
                 "offset={offset}"
             );
         }
@@ -1407,24 +1515,43 @@ mod tests {
                 3 => changed.amount -= 1,
                 _ => changed.now += 1,
             }
-            assert!(decoded.verify(&authority_pk, &dp, &changed).is_err());
+            assert!(
+                decoded
+                    .verify(
+                        &authority_pk,
+                        &dp,
+                        &changed,
+                        &mut MemorySealConsumptionStore::new(16)
+                    )
+                    .is_err()
+            );
         }
 
         // Request-bound PoP seal rejects replay at a different amount or timestamp!
         let mut different_req = sample_request();
         different_req.amount = 400;
         assert_eq!(
-            decoded.verify(&authority_pk, &dp, &different_req),
+            decoded.verify(
+                &authority_pk,
+                &dp,
+                &different_req,
+                &mut MemorySealConsumptionStore::new(16)
+            ),
             Err(CapabilityError::InvalidTag)
         );
 
         // Tampering with any caveat byte invalidates the Compact1122 hop chain!
         let mut tampered = wire.clone();
         tampered[185] ^= 0x01;
-        assert!(
-            PqBiscuit::from_bytes(&tampered)
-                .map_or(true, |b| b.verify(&authority_pk, &dp, &req).is_err())
-        );
+        assert!(PqBiscuit::from_bytes(&tampered).map_or(true, |b| {
+            b.verify(
+                &authority_pk,
+                &dp,
+                &req,
+                &mut MemorySealConsumptionStore::new(16),
+            )
+            .is_err()
+        }));
 
         // Authority secret serialization roundtrips and preserves `next_leaf`.
         let auth_bytes = authority.to_secret_bytes();
@@ -1462,13 +1589,23 @@ mod tests {
         let bearer_sealed = step_b.seal(&tok_b, &dp, None, &[0x82; 32], &accel).unwrap();
         // Later permissive caveat (9_999) cannot widen earlier MaxAmount(200)!
         assert_eq!(
-            bearer_sealed.verify(&authority_pk, &dp, &req),
+            bearer_sealed.verify(
+                &authority_pk,
+                &dp,
+                &req,
+                &mut MemorySealConsumptionStore::new(16)
+            ),
             Err(CapabilityError::Denied)
         );
         let mut small_req = sample_request();
         small_req.amount = 150;
         bearer_sealed
-            .verify(&authority_pk, &dp, &small_req)
+            .verify(
+                &authority_pk,
+                &dp,
+                &small_req,
+                &mut MemorySealConsumptionStore::new(16),
+            )
             .unwrap();
         // Every mint has a distinct authenticated leaf, including after restore.
         let mut indices = vec![tok0.authority_leaf_index(), tok_b.authority_leaf_index()];
@@ -1488,7 +1625,12 @@ mod tests {
             indices.push(token.authority_leaf_index());
             step.seal(&token, &dp, None, &[0x84; 32], &accel)
                 .unwrap()
-                .verify(&authority_pk, &dp, &small_req)
+                .verify(
+                    &authority_pk,
+                    &dp,
+                    &small_req,
+                    &mut MemorySealConsumptionStore::new(16),
+                )
                 .unwrap();
         }
         assert_eq!(indices, vec![0, 1, 2, 3]);

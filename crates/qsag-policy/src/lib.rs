@@ -12,6 +12,7 @@ extern crate std;
 pub mod biscuit;
 pub mod durable;
 pub mod macaroon;
+pub mod seal_store;
 pub use biscuit::{
     MAX_AUTHORITY_TREE_HEIGHT, MAX_BISCUIT_HOPS, PQ_BISCUIT_HOP_CRYPTO_BYTES, PqBiscuit,
     PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey, PqBiscuitHopBlock, PqBiscuitSeal,
@@ -24,6 +25,9 @@ pub use macaroon::{
     CapabilityError, CapabilityRequest, Caveat, Discharge, MacaroonVerifier, SpongeMacaroon,
 };
 pub use qsag_addr::policy_signing_key_id;
+#[cfg(feature = "std")]
+pub use seal_store::{AnchoredSnapshot, FsSealConsumptionStore};
+pub use seal_store::{MemorySealConsumptionStore, SealConsumptionDomain};
 
 use alloc::vec::Vec;
 use core::cell::Cell;
@@ -3585,11 +3589,14 @@ pub enum CapabilityGate<'a> {
         authority_pk: &'a PqBiscuitAuthorityPublicKey,
         dp: &'a qsag_fts::FrontierDpTable,
         token: &'a PqBiscuit,
+        /// The audience's one consumption domain; see [`SealConsumptionDomain`].
+        domain: &'a mut dyn SealConsumptionDomain,
     },
 }
 
 impl CapabilityRequest {
     /// Derive trusted [`CapabilityRequest`] facts directly from `(policy, intent, now, actions)`:
+    /// - `intent_digest = intent.canonical_digest()` (the release-token binding)
     /// - `audience = policy.canonical_digest()`
     /// - `resource = intent.recipient.commitment_256`
     /// - `amount = intent.amount_units`
@@ -3601,6 +3608,7 @@ impl CapabilityRequest {
         current_timestamp: u64,
     ) -> Self {
         Self {
+            intent_digest: intent.canonical_digest(),
             audience: policy.canonical_digest(),
             resource: intent.recipient.commitment_256,
             actions,
@@ -3630,7 +3638,7 @@ impl<'a> PolicyEngine<'a> {
         &self,
         intent: &TransactionIntent,
         current_timestamp: u64,
-        capability: &CapabilityGate<'_>,
+        capability: &mut CapabilityGate<'_>,
     ) -> Result<(), PolicyViolation> {
         let req = CapabilityRequest::from_policy_intent(
             self.policy,
@@ -3653,7 +3661,8 @@ impl<'a> PolicyEngine<'a> {
                 authority_pk,
                 dp,
                 token,
-            } => token.verify(authority_pk, dp, &req),
+                domain,
+            } => token.verify(authority_pk, dp, &req, *domain),
         };
         res.map_err(PolicyViolation::CapabilityDenied)
     }
@@ -3666,7 +3675,7 @@ impl<'a> PolicyEngine<'a> {
         intent: &TransactionIntent,
         session_id: [u8; 32],
         current_timestamp: u64,
-        capability: Option<&CapabilityGate<'_>>,
+        capability: Option<&mut CapabilityGate<'_>>,
         quorum_guards: &mut [PolicySignerGuardShare],
         accel: &B,
     ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
@@ -6476,6 +6485,33 @@ mod cleanup_tests {
     }
 
     #[test]
+    fn capability_binding_distinguishes_complete_intents() {
+        let (policy, intent) = crate::tests::phase_fixture(&[1, 2]);
+        let digest = |i: &TransactionIntent| {
+            capability_request_digest(&CapabilityRequest::from_policy_intent(
+                &policy,
+                i,
+                1,
+                intent.timestamp_secs,
+            ))
+        };
+        for field in 0..3 {
+            let mut changed = intent.clone();
+            match field {
+                0 => changed.nonce[0] ^= 1,
+                1 => changed.session_id[0] ^= 1,
+                _ => changed.payload_digest[0] ^= 1,
+            }
+            assert_ne!(intent.canonical_digest(), changed.canonical_digest());
+            assert_ne!(
+                digest(&intent),
+                digest(&changed),
+                "intent field {field} omitted"
+            );
+        }
+    }
+
+    #[test]
     fn policy_engine_integrates_macaroon_discharges_and_pq_biscuits_before_bdoz_barrier() {
         let accel = qsag_accel::CpuReferenceBackend::new();
         let (policy, mut intent) = crate::tests::phase_fixture(&[1, 2]);
@@ -6503,7 +6539,7 @@ mod cleanup_tests {
                     &intent,
                     intent.session_id,
                     intent.timestamp_secs,
-                    Some(&CapabilityGate::Macaroon {
+                    Some(&mut CapabilityGate::Macaroon {
                         verifier: &verifier,
                         token: &denied_mac,
                         discharges: &[],
@@ -6536,7 +6572,7 @@ mod cleanup_tests {
                 &intent,
                 intent.session_id,
                 intent.timestamp_secs,
-                Some(&CapabilityGate::Macaroon {
+                Some(&mut CapabilityGate::Macaroon {
                     verifier: &verifier,
                     token: &ok_mac,
                     discharges: &discharges,
@@ -6545,8 +6581,54 @@ mod cleanup_tests {
                 &accel,
             )
             .unwrap();
+        // Macaroons remain reusable bearer grants; the barrier, not the grant,
+        // binds the complete intent and rejects repeated executions.
+        assert_eq!(release.intent_digest(), &intent.canonical_digest());
+        assert_eq!(
+            engine
+                .authorize_committed_barrier(
+                    &intent,
+                    intent.session_id,
+                    intent.timestamp_secs,
+                    Some(&mut CapabilityGate::Macaroon {
+                        verifier: &verifier,
+                        token: &ok_mac,
+                        discharges: &discharges,
+                    }),
+                    &mut guards,
+                    &accel,
+                )
+                .err(),
+            Some(PolicyViolation::DuplicateIntentNonce),
+        );
         let party_tokens = release.into_quorum_party_tokens();
         assert_eq!(party_tokens.len(), 2);
+        // The same macaroon authorizes a different intent: nothing in the engine treats
+        // it as spent. What stops a second execution is the intent's own nonce above.
+        let mut next_intent = intent.clone();
+        next_intent.session_id = [0x73; 32];
+        next_intent.nonce = [0x74; 32];
+        let next_bytes = next_intent.to_canonical_signing_bytes(&policy_digest);
+        next_intent.message_digest = cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[&next_bytes]);
+        let next_release = engine
+            .authorize_committed_barrier(
+                &next_intent,
+                next_intent.session_id,
+                next_intent.timestamp_secs,
+                Some(&mut CapabilityGate::Macaroon {
+                    verifier: &verifier,
+                    token: &ok_mac,
+                    discharges: &discharges,
+                }),
+                &mut guards,
+                &accel,
+            )
+            .unwrap();
+        assert_eq!(
+            next_release.intent_digest(),
+            &next_intent.canonical_digest()
+        );
+        drop(next_release);
 
         // 2. Ephemeral Compact1122 PqBiscuit 2-hop delegation chain + PoP seal gates BDOZ barrier!
         let dp = qsag_fts::FrontierDpTable::build(qsag_fts::FrontierFtsProfile::Compact1122);
@@ -6595,10 +6677,11 @@ mod cleanup_tests {
                 &intent2,
                 intent2.session_id,
                 intent2.timestamp_secs,
-                Some(&CapabilityGate::Biscuit {
+                Some(&mut CapabilityGate::Biscuit {
                     authority_pk: &auth_pk,
                     dp: &dp,
                     token: &b_sealed,
+                    domain: &mut MemorySealConsumptionStore::new(16),
                 }),
                 &mut guards,
                 &accel,

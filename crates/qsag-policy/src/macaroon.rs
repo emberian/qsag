@@ -6,6 +6,11 @@
 //! seeing the parent capability; the holder then binds it to a one-way commitment
 //! of the parent's final tag, so it cannot be transplanted to another capability
 //! and neither the third party nor the discharge bytes reveal the parent's tag.
+//! These are reusable bearer grants, not request-bound proofs of possession.
+//! Verification checks predicates only; it does not consume an intent or a token.
+//! PolicyEngine passes the full intent through the signing barrier, whose guards
+//! enforce nonce/session replay rules and whose release tokens bind its canonical
+//! digest. Standalone services must enforce their own transaction replay policy.
 //! Tags are 256 bits; this is not a claim of 256-bit quantum forgery resistance.
 extern crate alloc;
 use alloc::vec::Vec;
@@ -110,6 +115,10 @@ impl Caveat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityError {
     Malformed,
+    /// This seal has already authorized a request.
+    Replay,
+    /// Consumption could not be durably recorded (including capacity exhaustion).
+    ConsumptionFailed,
     TooManyCaveats,
     InvalidTag,
     Denied,
@@ -121,6 +130,10 @@ pub enum CapabilityError {
 
 /// Request facts derived by the service, never accepted from untrusted token claims.
 pub struct CapabilityRequest {
+    /// Complete application intent digest, derived by the verifier. For policy
+    /// requests this is `TransactionIntent::canonical_digest()`. Macaroon bearer
+    /// predicates do not bind this value; Biscuit request-bound seals do.
+    pub intent_digest: [u8; 32],
     pub audience: [u8; 32],
     pub resource: [u8; 32],
     /// All requested action bits must be allowed by every Actions caveat.
@@ -433,6 +446,7 @@ mod tests {
     use super::*;
     fn request() -> CapabilityRequest {
         CapabilityRequest {
+            intent_digest: [0x55; 32],
             audience: [2; 32],
             resource: [3; 32],
             actions: 1,
