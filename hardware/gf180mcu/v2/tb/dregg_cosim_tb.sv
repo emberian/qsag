@@ -6,7 +6,8 @@
 module dregg_cosim_tb #(
     parameter bit H_SHADOW = 1'b1,
     parameter bit KEC_WAIT_AFTER_STORE = 1'b1,
-    parameter bit FRAM_DONE_PAD = 1'b1
+    parameter bit FRAM_DONE_PAD = 1'b1,
+    parameter bit IR_STAGE = 1'b0
 ) (
     input  wire         clk,
     input  wire         por_n,
@@ -85,7 +86,7 @@ module dregg_cosim_tb #(
         .rom_len(rom_len), .rom_used(rom_used)
     );
 
-    dregg_core #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .FRAM_DONE_PAD(FRAM_DONE_PAD)) dut (
+    dregg_core #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .FRAM_DONE_PAD(FRAM_DONE_PAD), .IR_STAGE(IR_STAGE)) dut (
         .clk(clk), .por_n(por_n), .tamper_n(tamper_n),
         .in_valid(in_valid), .in_first(in_first), .in_data(in_data), .in_take(in_take),
         .out_valid(out_valid), .out_data(out_data), .out_take(out_take),
@@ -104,17 +105,9 @@ module dregg_cosim_tb #(
     );
 
     // ------------------------------------------------------------ dump
-    wire [NROWS-1:0] col [64];
-    genvar b;
-    generate
-        for (b = 0; b < 64; b++) begin : g_col
-            assign col[b] = dut.u_rf.g_bit[b].u_s.q_all;
-        end
-    endgenerate
     always_comb begin
         dump_data = '0;
-        for (int i = 0; i < 64; i++)
-            if (dump_row < 7'(NROWS)) dump_data[i] = col[i][dump_row];
+        if (dump_row < 7'(NROWS)) dump_data = dut.u_rf.q_row[dump_row];
     end
     assign dump_flags  = {dut.u_seq.nonce_valid, dut.u_seq.key_attr, dut.u_seq.v_ok, dut.u_seq.f_anchor,
                           dut.u_seq.f_mac, dut.u_seq.key_valid};

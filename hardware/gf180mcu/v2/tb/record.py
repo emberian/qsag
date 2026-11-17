@@ -6,6 +6,9 @@
 Scenarios:  script   the 54-transaction reference script, configuration S (tests/replay.py)
             quick    the quick reference script
             tests    every unittest under v2/tests (132 tests; configuration L chips are skipped)
+            extra    directed cases of this lane (KEYWR out of range after a valid authorisation; capacity
+                     lane of a keyed state on a releasing path)
+            gaps     cases where the RTL needs a clock the model does not count (not part of the gate)
             long     long signer runs on configuration S (35-chain WOTS public key and signatures, 14 FORS
                      leaves, counted signatures), each compared with the hashlib FIPS 205 reference
 
@@ -193,8 +196,21 @@ def apply_proposals(names, isa):
                 self.last_w = isa.LANE0 + 24
             return more
         machine.Machine._step = step
+    if "ir_stage" in names:
+        # two-stage machine (rtl/dregg_seq.sv IR_STAGE = 1): an instruction whose successor is not the
+        # next address is followed by one empty clock, which also absorbs the stall of a following read
+        o_step2 = machine.Machine._step
+
+        def step2(self):
+            pc0 = self.pc
+            more = o_step2(self)
+            if more and self.pc != pc0 + 1:
+                self.cycles += 1
+                self.last_w = None          # the row written by that instruction has closed meanwhile
+            return more
+        machine.Machine._step = step2
     for n in names:
-        if n not in ("kec_last_w",):
+        if n not in ("kec_last_w", "ir_stage"):
             raise SystemExit(f"unknown proposal {n}")
 
 
@@ -218,7 +234,8 @@ def main():
     outdir, scenarios = args[0], args[1:]
     os.makedirs(outdir, exist_ok=True)
     isa = gen_defs.model_isa(scratch)
-    sys.path.insert(0, os.path.join(V2, "tests"))
+    tests_dir = os.path.join(gen_defs.V2REF, "tests")
+    sys.path.insert(0, tests_dir)
     import units
     if auth_verify is not None:
         units.AUTH_VERIFY = auth_verify       # shorter owner-verification stand-in (quick runs only)
@@ -235,7 +252,7 @@ def main():
             print(f"{sc}: {len(rows)} reference transactions, {len(inserted)} inserted steps, {len(failures)} model failures")
             status |= bool(failures)
         elif sc == "tests":
-            suite = unittest.defaultTestLoader.discover(os.path.join(V2, "tests"))
+            suite = unittest.defaultTestLoader.discover(tests_dir)
             buf = io.StringIO()
             res = unittest.TextTestRunner(stream=buf, verbosity=0).run(suite)
             bad = sorted(t.id() for t, _ in res.failures + res.errors)
@@ -248,6 +265,52 @@ def main():
             if bad and not (scratch not in (None, 12) and set(bad) == known):
                 print(buf.getvalue()[-3000:])
                 status = 1
+        elif sc in ("extra", "gaps"):
+            # Directed microprograms of this lane, run on the model. "extra": cases the model's own tests
+            # only tell apart by the fault message, which the RTL does not have; each must end in a control
+            # fault in the model. "gaps": cases where the RTL needs a clock the model does not count
+            # (reported to the spec owner; not part of the gate).
+            import chip
+            import common
+            import fixtures
+            import host
+            import uasm
+            from machine import ControlFault
+            n = 0
+            if sc == "extra":
+                # KEYWR outside the key range with the authorisation latch set (AUTH in range, then a branch out)
+                key_part = (f".entry {fixtures.TEST_OP} t_entry diag\nt_entry: CTL NONCE\n LD #1\n ST l0\n CTL AUTH\n"
+                            " BR Z t_no\n BR t_out\nt_no: FAIL #12\n")
+                rom_part = "t_out: LD #5\n KEYWR > k_seed0\n LD #0\n HDR #0\n END\n"
+                src = [(nm, key_part if nm == "provision.uc" else t) for nm, t in chip.read_sources("S")] + [("extra", rom_part)]
+                c = common.new_chip("S", rom=uasm.assemble(src))
+                import units
+                nonce = units.EntropyUnit(1).draw()
+                sig = host.words_of(host.q.turboshake256(c.owner.key + host.bytes_of(nonce) + host.bytes_of([1, 0, 0, 0]), 16, 0x23))
+                try:
+                    c.transact([host.hdr(fixtures.TEST_OP, 0, 16)] + sig)
+                    raise SystemExit("extra: KEYWR outside the key range was not refused by the model")
+                except ControlFault as e:
+                    assert "KEYWR outside the key range" in str(e), str(e)
+                    n += 1
+                # a capacity lane of a keyed state, on a path that would release it
+                for lane in (17, 24):
+                    try:
+                        fixtures.run(f" KMOV k_seed0 > l0\n KEC 24\n LD #1\n HDR #1\n LD l{lane}\n ST l1\n REL l1")
+                        raise SystemExit("extra: capacity lane read was not refused by the model")
+                    except ControlFault as e:
+                        assert "capacity lane" in str(e), str(e)
+                        n += 1
+                # the same path with a rate lane is legal and releases it (the positive twin)
+                _, rsp = fixtures.run(" KMOV k_seed0 > l0\n KEC 24\n LD #1\n HDR #1\n LD l16\n ST l1\n REL l1")
+                assert len(rsp) == 2
+                n += 1
+            else:
+                _, rsp = fixtures.run(" LD #1\n HDR #1\n WIPE #3\n LD l0\n PUSH H", keys=False)      # read of a row a wipe has open
+                assert rsp[1] == 0
+                _, rsp = fixtures.run(" LD #1\n HDR #1\n KEC 12\n PUSH l24", keys=False)              # read of the unit's last write
+                n += 2
+            print(f"{sc}: {n} directed cases")
         elif sc == "long":
             # the long signer runs of tests/report.py, on configuration S, each checked against the
             # hashlib FIPS 205 reference of host.py

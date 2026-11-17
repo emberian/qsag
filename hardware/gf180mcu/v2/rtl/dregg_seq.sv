@@ -20,12 +20,21 @@
 // KEC_WAIT_AFTER_STORE = 1 makes KEC wait one clock when the previous instruction wrote a row, as the
 // model charges it; the Keccak unit's first read is a clock later, so 0 is also safe.
 //
+// IR_STAGE = 1 puts an instruction register between the ROM and the decoder (physical-design finding:
+// PC -> ROM -> row address -> read -> word unit -> hold register does not fit one 40 ns clock). The ROM
+// is then read one clock ahead at pc + 1. An instruction whose successor is not pc + 1 (taken branch,
+// call, return, dispatch) is followed by one empty clock in which the ROM is read at the new address.
+// A row written by that instruction has closed by the time the next one runs, so the two-phase stall
+// (and the KEC wait) that would have followed is absorbed by the empty clock. Nothing else changes; the
+// model does not count that clock (IR_STAGE = 0 is the model's machine).
+//
 // Address 0 is the idle point: the instruction there executes only when the framer offers a header.
 `default_nettype none
 
 module dregg_seq #(
     parameter bit H_SHADOW = 1'b1,
-    parameter bit KEC_WAIT_AFTER_STORE = 1'b1
+    parameter bit KEC_WAIT_AFTER_STORE = 1'b1,
+    parameter bit IR_STAGE = 1'b0
 ) (
     input  wire         clk,
     input  wire         srst_n,
@@ -138,6 +147,7 @@ module dregg_seq #(
     output wire         link_wait,    // this clock is spent waiting for the link
     output wire         stall,        // this clock is a two-phase stall
     output wire  [10:0] pc_o,
+    output wire  [27:0] ir_o,         // the instruction at pc_o
     output wire         rd_used,      // rf_rdata is consumed in this clock
     output wire         key_wr,       // a key row is opened in this clock ...
     output wire         key_wr_boot   // ... by the boot interface
@@ -149,12 +159,12 @@ module dregg_seq #(
     localparam logic [1:0] HA_NONE = 2'd0, HA_ZERO = 2'd1, HA_SHADOW = 2'd2;
 
     // ------------------------------------------------------------ state
-    logic [3:0]  st;
+    (* keep *) logic [3:0]  st;         // kept by name: timing reports select paths by these registers
     logic [3:0]  boot_cnt;
     logic [1:0]  pidx;
     logic        dev_ok;
     // session (cleared by the end action)
-    logic [10:0] pc;
+    (* keep *) logic [10:0] pc;
     logic [10:0] stk0, stk1;
     logic [1:0]  sp;
     logic [11:0] c0, c1;
@@ -180,15 +190,21 @@ module dregg_seq #(
     wire  [127:0] nonce;
 
     // ------------------------------------------------------------ decode
-    assign rom_addr = pc;
-    wire [4:0]  op   = rom_word[27:23];
-    wire [6:0]  fa   = rom_word[22:16];
-    wire [6:0]  fb   = rom_word[15:9];
-    wire [3:0]  fn   = rom_word[8:5];
-    wire        ia   = rom_word[4];
-    wire        ib   = rom_word[3];
-    wire        xi   = rom_word[2];
-    wire        ret  = rom_word[0];
+    (* keep *) logic [27:0] ir_q;          // instruction register (IR_STAGE)
+    logic        ir_v;          // ir_q is the ROM word at pc
+    wire         ir_ok = !IR_STAGE || ir_v;
+    wire [10:0]  pc_p1 = pc + 11'd1;
+    assign rom_addr = (IR_STAGE && ir_v) ? pc_p1 : pc;
+    wire [27:0] iw   = IR_STAGE ? ir_q : rom_word;     // the instruction at pc
+    assign ir_o = iw;
+    wire [4:0]  op   = iw[27:23];
+    wire [6:0]  fa   = iw[22:16];
+    wire [6:0]  fb   = iw[15:9];
+    wire [3:0]  fn   = iw[8:5];
+    wire        ia   = iw[4];
+    wire        ib   = iw[3];
+    wire        xi   = iw[2];
+    wire        ret  = iw[0];
     wire [6:0]  ra   = ia ? (fa + x) : fa;
     wire [6:0]  rb   = ib ? (fb + x) : fb;
     wire [15:0] imm16  = {fn[3:2], fa, fb};
@@ -262,9 +278,9 @@ module dregg_seq #(
     assign disp_op = fr_in_op;
 
     // ------------------------------------------------------------ the clock's verdict
-    wire at_idle  = (st == S_RUN) && (pc == IDLE_ADDR) && !off_end;
+    wire at_idle  = (st == S_RUN) && (pc == IDLE_ADDR) && !off_end && ir_ok;
     assign fr_idle = at_idle;
-    wire present  = (st == S_RUN) && (!at_idle || fr_hdr_valid);     // an instruction is up for execution
+    wire present  = (st == S_RUN) && ir_ok && (!at_idle || fr_hdr_valid);     // an instruction is up for execution
     assign fault_now = present && r_fault;
     assign fault_why = r_why;
 
@@ -483,6 +499,7 @@ module dregg_seq #(
     wire [6:0]  x_set = (op == OP_SETX) ? (fn[0] ? h_vis[6:0] : fa) : x;
     wire        rets  = ret && !taken;
     wire [10:0] pc_inc = pc + 11'd1;
+    wire [10:0] pc_n   = rets ? stk0 : (op == OP_DISP) ? disp_addr : taken ? target : pc_inc;
 
     always_ff @(posedge clk or negedge srst_n)
         if (!srst_n) begin
@@ -517,6 +534,8 @@ module dregg_seq #(
             astep    <= '0;
             steps    <= '0;
             off_end  <= 1'b0;
+            ir_q     <= '0;
+            ir_v     <= 1'b0;
             key_valid   <= 1'b0;
             key_attr    <= '0;
             f_mac       <= 1'b0;
@@ -529,6 +548,17 @@ module dregg_seq #(
             tr_row   <= tr_row_n;
             tr_wipe  <= rf_wipe[2:0];
             if (do_stall) lw_valid <= 1'b0;
+            if (IR_STAGE) begin
+                if (!ir_v) begin                    // the empty clock: read the ROM at the new address
+                    ir_q <= rom_word;
+                    ir_v <= 1'b1;
+                    if (st == S_RUN) lw_valid <= 1'b0;      // the row written before it has closed
+                end else if (fin) begin             // the ROM was read at pc + 1 in this clock
+                    ir_q <= rom_word;
+                    ir_v <= (pc_n == pc_inc);
+                end
+                if (st == S_ENDI) ir_v <= 1'b0;
+            end
 
             unique case (st)
                 S_BOOTW: begin
@@ -685,7 +715,7 @@ module dregg_seq #(
         end
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, rom_word[1]};     // seq bit 1 is not used by the model either
+    wire unused = &{1'b0, iw[1], pc_p1};     // seq bit 1 is not used by the model either
     /* verilator lint_on UNUSEDSIGNAL */
 `ifdef FORMAL
     // Properties of the sequencer and its decoder rules, for every ROM content, every register-file
@@ -718,7 +748,7 @@ module dregg_seq #(
             assert (!(fin && (st == S_RUN) && (op != OP_DISP) && taken && ({1'b0, target} >= rom_len)));
             // address 0 (idle) is entered only from the last clock of the end action, which follows the wipe
             if (pc == IDLE_ADDR && $past(pc) != IDLE_ADDR) assert ($past(st) == S_ENDI || off_end);
-            if (off_end && st == S_RUN) assert (fault_now);
+            if (off_end && st == S_RUN && ir_ok) assert (fault_now);
             if (st == S_ENDI) assert ($past(st) == S_ENDF && $past(rf_wipe) == 4'hF);
             if (st == S_RUN && $past(st) == S_ENDI) assert (pc == IDLE_ADDR && !keyed && !dirty && !t_lanes && !t_h && !hdr_done);
             // 8.2 (3): a key row opens only for the boot interface (device-secret rows) or for KEYWR inside
@@ -742,6 +772,13 @@ module dregg_seq #(
             // 8.2 (6): the word unit never reads a row in the clock in which it is transparent
             assert (!(rd_used && (st == S_RUN) && open_hit));
             assert (!((st == S_AUTH) && (tr_valid || (|tr_wipe)) && (astep >= 4'd2)));
+            // R4: a capacity lane of a keyed state is never read by the word unit, a PUSH or the FRAM path
+            assert (!(rd_used && (st == S_RUN) && keyed && (rf_raddr >= 7'(RATE_LANES)) && (rf_raddr < 7'(KWORK0))));
+            // R2: after KMOV the accumulator reads as zero; R5: a lane loaded while the lanes are key-derived
+            // taints the accumulator
+            if ($past(st) == S_KMOV2) assert ((h_alt == HA_ZERO) && !t_h && keyed && dirty && t_lanes);
+            if ($past(fin) && $past(st) == S_RUN && $past(op) == OP_LD && !$past(immf) && ($past(ra) < 7'(KWORK0))
+                && $past(t_lanes) && !$past(r_clear_h)) assert (t_h);
             // a refused instruction has no effect
             assert (!(fault_now && f_effect));
             // taint (R7): key-derived data sets no response length, index, loop count, verdict or key attribute

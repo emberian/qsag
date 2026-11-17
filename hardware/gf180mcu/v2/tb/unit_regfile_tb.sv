@@ -32,16 +32,9 @@ module unit_regfile_tb (
     dregg_regfile u_rf (.clk(clk), .srst_n(srst_n), .h_en(h_en), .h_d(h_d), .h_q(h_q), .we(we), .waddr(waddr),
                         .out_we(out_we), .wipe(wipe), .kw_we(kw_we), .kc_d(kc_d), .kb_d(kb_d), .kw_q(kw_q),
                         .raddr(raddr), .rdata(rdata), .out_q(out_q), .wl_en_o(wl_en));
-    wire [NROWS-1:0] col [64];
-    genvar b;
-    generate
-        for (b = 0; b < 64; b++) begin : g_col
-            assign col[b] = u_rf.g_bit[b].u_s.q_all;
-        end
-    endgenerate
     always_comb begin
         dump_data = '0;
-        for (int i = 0; i < 64; i++) if (dump_row < 7'(NROWS)) dump_data[i] = col[i][dump_row];
+        if (dump_row < 7'(NROWS)) dump_data = u_rf.q_row[dump_row];
     end
     assign nrows_o = 8'(NROWS);
     assign key0_o = 8'(KEY0);

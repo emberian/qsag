@@ -10,8 +10,9 @@
 //
 // Clocks per instruction, including its first, with SCK = clk / 4:
 //   RSTART 97, WSTART 133, RWORD 257, WWORD 257: these follow from the master and equal the model.
-//   DONE: the master needs 3 clocks after a read and none after a write (it closes by itself after
-//   the third word). The model charges 5. DONE_PAD = 1 waits to 5; DONE_PAD = 0 is the natural count.
+//   DONE: the master needs 4 clocks after a read (resume, a two-clock closing tick, idle) and has closed
+//   by itself after the third word of a write. The model charges 5. DONE_PAD = 1 waits to 5; DONE_PAD = 0
+//   is the natural count.
 `default_nettype none
 
 module dregg_fram #(

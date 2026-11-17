@@ -1,4 +1,4 @@
-// Register-file unit bench (v2/rtl/dregg_regfile.sv, dregg_rf_slice.sv, dregg_rst.sv).
+// Register-file unit bench (v2/rtl/dregg_regfile.sv with the cell stand-ins of dregg_gf180_sim.sv, dregg_rst.sv).
 // Run with +verilator+rand+reset+2 and several seeds: storage starts random, so every check below also
 // shows that reset reaches the latch it looks at.
 //

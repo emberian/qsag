@@ -9,7 +9,8 @@
 module dregg_core #(
     parameter bit H_SHADOW = 1'b1,              // see dregg_seq
     parameter bit KEC_WAIT_AFTER_STORE = 1'b1,  // see dregg_seq
-    parameter bit FRAM_DONE_PAD = 1'b1          // see dregg_fram
+    parameter bit FRAM_DONE_PAD = 1'b1,         // see dregg_fram
+    parameter bit IR_STAGE = 1'b0               // see dregg_seq
 ) (
     input  wire         clk,
     input  wire         por_n,
@@ -152,7 +153,8 @@ module dregg_core #(
 
     // ------------------------------------------------------------ sequencer
     wire rd_used, key_wr, key_wr_boot;
-    dregg_seq #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE)) u_seq (
+    wire [27:0] ir;
+    dregg_seq #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .IR_STAGE(IR_STAGE)) u_seq (
         .clk(clk), .srst_n(srst_n),
         .rom_addr(rom_addr), .rom_word(rom_word), .const_idx(const_idx), .const_data(const_data), .const_ok(const_ok),
         .disp_op(disp_op), .disp_hit(disp_hit), .disp_addr(disp_addr), .disp_class(disp_class),
@@ -179,7 +181,7 @@ module dregg_core #(
         .own_ok(own_ok),
         .fault_now(fault_now), .fault_why(fault_why), .verify_ok(verify_ok), .fault_mac(fault_mac),
         .fault_anchor(fault_anchor), .ready(ready), .busy(busy),
-        .cmd_active(cmd_active), .link_wait(link_wait), .stall(stall), .pc_o(pc), .rd_used(rd_used),
+        .cmd_active(cmd_active), .link_wait(link_wait), .stall(stall), .pc_o(pc), .ir_o(ir), .rd_used(rd_used),
         .key_wr(key_wr), .key_wr_boot(key_wr_boot)
     );
 
@@ -198,7 +200,7 @@ module dregg_core #(
         end else begin
             open_q  <= wl_en;
             push_q  <= |rf_out_we;
-            pushh_q <= (|rf_out_we) && (rom_word[27:23] == OP_PUSH) && rom_word[6];
+            pushh_q <= (|rf_out_we) && (ir[27:23] == OP_PUSH) && ir[6];
             rsrc_q  <= rf_raddr;
         end
     wire a_rd_key = rd_used && (rf_raddr >= 7'(KEY0)) && (rf_raddr < 7'(KEY0 + N_KEYS));
@@ -216,17 +218,17 @@ module dregg_core #(
         // 8.2 (6): a row is never read while transparent
         `DREGG_CHECK(!(rd_used && rf_raddr < 7'd72 && open_q[rf_raddr]), "row read while transparent")
         // key rows are read only by the first clock of KMOV
-        `DREGG_CHECK(!(a_rd_key && !(rom_word[27:23] == OP_KMOV && !kec_busy)), "key row read by a non-KMOV instruction")
+        `DREGG_CHECK(!(a_rd_key && !(ir[27:23] == OP_KMOV && !kec_busy)), "key row read by a non-KMOV instruction")
         // 8.2 (3): a key row is written only by the boot interface or by KEYWR inside the key range
-        `DREGG_CHECK(!(key_wr && !key_wr_boot && !(rom_word[27:23] == OP_KEYWR && pc >= KEY_LO && pc <= KEY_HI)),
+        `DREGG_CHECK(!(key_wr && !key_wr_boot && !(ir[27:23] == OP_KEYWR && pc >= KEY_LO && pc <= KEY_HI)),
                      "key row written outside the key range")
         // key rows never drive the FRAM data: a FRAM word is taken only from the three record rows
         `DREGG_CHECK(!(fm_wword && !(rf_raddr == FRAM_SRC0 || rf_raddr == FRAM_SRC1 || rf_raddr == FRAM_SRC2)),
                      "FRAM WWORD sends a row outside the record rows")
         // key rows never drive the egress: an out row opens only on a PUSH, and the row that went through
         // the hold register for it is not a key row
-        `DREGG_CHECK(!((|rf_out_we) && rom_word[27:23] != OP_PUSH), "out row opened by a non-PUSH instruction")
-        `DREGG_CHECK(!((|rf_out_we) && !rom_word[6] && a_rd_key), "PUSH of a key row")
+        `DREGG_CHECK(!((|rf_out_we) && ir[27:23] != OP_PUSH), "out row opened by a non-PUSH instruction")
+        `DREGG_CHECK(!((|rf_out_we) && !ir[6] && a_rd_key), "PUSH of a key row")
         // 8.2 (1): a data word reaches the link only from an out row
         `DREGG_CHECK(!(out_valid && out_take && (eg_sel == 2'd1) && out_data !== out_q[63:0]), "egress word is not out row 0")
         `DREGG_CHECK(!(out_valid && out_take && (eg_sel == 2'd2) && out_data !== out_q[127:64]), "egress word is not out row 1")
@@ -241,9 +243,9 @@ module dregg_core #(
         `DREGG_CHECK(!(out_valid && (eg_sel == 2'd2) && open_q[OUT0 + 1]), "out row 1 offered while transparent")
     end
 `undef DREGG_CHECK
-    wire unused_a = &{1'b0, push_q, pushh_q, rsrc_q, kec_done};
+    wire unused_a = &{1'b0, ir[22:7], ir[5:0], push_q, pushh_q, rsrc_q, kec_done};
 `else
-    wire unused_s = &{1'b0, wl_en, rd_used, key_wr, key_wr_boot, eg_sel, kec_busy, kec_done};
+    wire unused_s = &{1'b0, ir, wl_en, rd_used, key_wr, key_wr_boot, eg_sel, kec_busy, kec_done};
 `endif
 endmodule
 `default_nettype wire
