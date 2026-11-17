@@ -2,8 +2,12 @@
 
 Status: proposal for the owner's agreement. No RTL has been changed to match it. Where this document and
 `README.md` disagree, `README.md` describes the RTL as it is and this document describes the target.
-Stage 1 of section 9.3 (the executable model and its microcode) is in `v2/`; `v2/README.md` lists each place
-where implementing it changed this document, and those changes are already made below.
+Stage 1 of section 9.3 (the executable model and its microcode) is in `v2/`, and so is the digital side of
+stages 3 and 4 (boot, enrolment, lifecycle records, leases, the TRNG and PUF interfaces, signature
+verification and the gate); `v2/README.md` lists each place where implementing them changed this document,
+and those changes are already made below. The device-physics simulations of
+`scratch/lanes/fable-efuse-and-process-sim.last.md` and `fable-physics-fixes.last.md` are integrated in 3,
+4.3, 6.1, 6.5, 6.6 and 7; label **[S]** marks a figure simulated there.
 
 Number labels used throughout:
 
@@ -22,16 +26,22 @@ control · 6 organs · 7 budget · 8 verification plan · 9 migration and schedu
 11 configuration S, maximised · appendix A configuration L.
 
 **Result in one paragraph.** The target is `SLOT_0P5X0P5` with chip-on-board packaging and the default pad
-ring (owner decision; section 11). The configuration specified for it, **S**, is about 0.82 M µm² of
-synthesized cells: one 72-row register file, one lane-serial Keccak unit, a microcoded sequencer, an SPI
-link, and the PUF, NFC, distance, tamper and TRNG organs. That is just under the size of the only design
-that has passed buffer repair and legal placement in this slot (0.84 M); the ceiling is about 0.92 M, and
-nothing has ever been routed in it. The gate verifies, with the Keccak unit alone, either one authority signature or `k` signatures
-of distinct members of a pinned committee (4.6). On-chip verification of aggregate (Hem/WHIR) proofs needs a
-field unit and about 76,000 µm² more; it is an option that does not fit beside all the organs (11.3). The
-eFuse macros are not relied on: the chip has no non-volatile state of its own, and section 3 states what
-follows from that. Configuration S cannot credibly be taped out in Run 3; an engineering sample might be
-(9.4). The larger-slot variant **L** is appendix A.
+ring (owner decision; section 11). Configuration **S** is one 72-row register file, one lane-serial Keccak
+unit, a word unit, a microcoded sequencer, an SPI link, and the PUF, NFC, distance, tamper and TRNG organs.
+With the PUF array and the TRNG that the physics simulations require, the register file as the
+physical-design lane has to build it, the control logic as the stage 2 RTL measures it, and the microcode
+ROM at the size the model measures, S with every organ is about **1.02 M µm²** of synthesized cells. That
+does not fit: the largest design placed legally in this slot is 0.89 M, the ceiling is about 0.92 M, and
+nothing has been routed. Section 7.3 ranks what can give way. Without use U5 (distance bounding and the NFC
+presence token) S is **0.93 M**, still about 23,000 µm² above the placed point after buffer repair; the rest
+has to come from the sequencer's 64-bit data routing (7.1), or from the shield, or from the PUF, in that
+order of preference (decision D14). The gate verifies, with the Keccak unit alone, either one authority
+signature or `k` signatures of distinct members of a pinned committee (4.6); the verification is public
+computation and needs no entropy source. On-chip verification of aggregate (Hem/WHIR) proofs needs a field
+unit and about 76,000 µm² more and is not in S (11.3). The eFuse macros are not relied on for any bit: the
+chip has no non-volatile state of its own, and section 3 states what follows from that. What can be taped
+out in which run is section 9.4, which this revision did not re-examine. The larger-slot variant **L** is
+appendix A.
 
 ---
 
@@ -44,7 +54,7 @@ implements the chip-side operation.
 
 | Use | Protocol role (source) | Chip operation | What the chip guarantees that host software cannot | Scope |
 |---|---|---|---|---|
-| U1 Signer | SLH-DSA-SHAKE, n = 16 (128s, 128f) and the WOTS+C / FORS operations of Baggy and Jorts (`crates/qsag-core/src/fips205.rs:452-530`, the four secret-touching oracles at `:3225-3290`) | `PRF`, `PRF_msg`, `H_msg` digits, WOTS chains and FORS leaves from `SK.seed`, `SK.prf` | The seed never leaves. Chain positions are chosen by the chip from a digest it computed, so no request can obtain a chain value below the one a valid signature publishes. This holds once the digest is computed on chip (stage 5); the stage-1 model takes a 16-byte message from the host | In |
+| U1 Signer | SLH-DSA-SHAKE, n = 16 (128s, 128f) and the WOTS+C / FORS operations of Baggy and Jorts (`crates/qsag-core/src/fips205.rs:452-530`, the four secret-touching oracles at `:3225-3290`) | `PRF`, `PRF_msg`, `H_msg` digits, WOTS chains and FORS leaves from `SK.seed`, `SK.prf` | The seed never leaves. Chain positions are chosen by the chip from a digest it computed, so no request can obtain a chain value below the one a valid signature publishes. This holds once the digest is computed on chip (stage 5); the model in `v2/` still takes a 16-byte message from the host | In |
 | U2 Leaf-reuse guard | FTS `uses_completed` (`crates/qsag-fts`, `frontier.rs:11-13`: one use per key), Jorts BeltLatch epoch (`belt_latch.rs:1-30`) | Monotone counter bound to each one-time operation, committed before the secret-dependent output is released. The counter value is the key pair address the signer uses, so advancing it on one number and signing with another is refused. Whether a key is counted is a property of the key's address class fixed at provisioning, not a flag of the request: a signing request on a counted key always goes through the counter | A one-time key is used once, across resets and power loss: against host software always; against someone holding the board only on a leased chip (3.4) | In |
 | U3 Capability vat | Capability tokens with attenuation (`crates/qsag-policy/src/macaroon.rs`; chip format `rtl/dregg_captp_vat.sv`) | Mint, attenuate, check and count invocations | The chip, not the bearer, decides whether a request is within rights, epoch, spend and guards | In |
 | U4 Sealed share and gated release | Custodian share at rest for the MPC protocols of `qsag-quorum`, `qsag-hd`; classical scalar of `qsag-migrate` | Seal a blob under a device key; unseal to the host only on a gated transition | A share on disk is useless without this die and an authorised release; releases are counted | In (seal, release). The MPC itself runs on the host and is out of scope |
@@ -65,11 +75,11 @@ library are part of the work in section 9.
 | Owner root key | Authenticating enrolment, re-initialisation after a lost FRAM, and the read-out of the characterisation array. Its public-key digest is a mask constant (decision D3) | Nothing else at run time; it never sees a chip secret |
 | Enrolment station | One session per chip, in state BLANK: it sees the PUF helper data and relays the owner root's signed choice of mode, policy and authority pin | Anything on its own: without the owner-root signature it can commit nothing |
 | Authority | Policy: it signs transitions (section 4) and, for leased chips, issues the lease at each power-up (3.4). It is one key, possibly held by a threshold of custodians, or a committee of which `k` members must sign | Secrets: it never receives key material |
-| Host, coprocessor mode | A host that holds `K_host` may request any U1 operation | Reading keys; changing lifecycle |
+| Host, coprocessor mode | A host that holds `K_host` may request any U1 operation. `K_host` is derived from `K_dev` and released once, in the response to `COMMIT` | Reading any other key; changing lifecycle |
 | Host, vat mode | Transport only. It is the bearer of capabilities | Confidentiality, integrity, choice of chain positions, time, counters, guard results |
 | FRAM | Availability | Confidentiality, integrity, freshness. It is on the carrier board, outside the chip-on-board package: an attacker with board access can read it, rewrite it and restore an older image |
 | NFC token, distance peer | Holding `K_tok`, derived for it at provisioning | Anything not carried under that key |
-| Physical attacker | — | Assumed able to drive every pad, reset and power-cycle at will, glitch clock and supply, and rewrite the FRAM. Invasive attacks on the powered die are addressed only by the tamper input, the shield and zeroisation |
+| Physical attacker | — | Assumed able to drive every pad, reset and power-cycle at will, glitch clock and supply, rewrite the FRAM, and run the chip from a rail that is back-powered through its signal pads (6.6). Invasive attacks on the powered die are addressed only by the tamper input, the shield and zeroisation |
 
 **Two modes, chosen once.** The coprocessor role (the host with `K_host` is trusted to ask for signatures)
 and the vat role (the host is an untrusted bearer) cannot hold on the same keys at the same time. The mode
@@ -78,7 +88,8 @@ is fixed at enrolment commit and carried in every lifecycle record (3.1):
 - **COPROCESSOR**: every U1 request that releases a value derived from `SK.seed` (WOTS chains, FORS leaves,
   public-key generation included) carries a MAC under `K_host`. `PRF_msg` is not tagged: it releases only the
   randomiser that every signature publishes. Vat, guard and gate commands for capabilities are
-  refused. `K_host` is loaded at enrolment and is the only key a host ever supplies.
+  refused. `K_host` is a derivation from `K_dev`, released to the enrolment station once, in the response to `COMMIT`;
+  the chip stores no key that a host supplied.
 - **VAT**: `K_host` does not exist. Every secret-touching request, including public-key generation, needs a
   capability. Root capabilities are minted during enrolment or by a gated transition.
 
@@ -90,7 +101,11 @@ Everything else (U2, U4, U6, lifecycle) is the same in both modes.
 
 The chip has no non-volatile state of its own. The eFuse macros in the PDK come from a compiler whose authors
 describe them as not proven in silicon, and no programming conditions are published
-(`scratch/lanes/sonnet-slot-price-and-efuse.last.md`), so no security property below depends on a fuse. Every
+(`scratch/lanes/sonnet-slot-price-and-efuse.last.md`). Electro-thermal simulation of the fuse and its drivers
+[S, `scratch/lanes/fable-efuse-and-process-sim.last.md` A] adds that the array macro's programming margin is
+1.0 to 1.25 at its weak corner and vanishes inside the model's uncertainty, and that the read circuit calls a
+fuse blown only above 2 to 20 kΩ depending on corner, so a partly programmed fuse can read differently at
+different corners. No security property below depends on a fuse, and none is fitted (decision D2). Every
 bit that survives power loss is in the FRAM on the carrier board, outside the chip-on-board package. Section
 3.4 states what that does and does not allow.
 
@@ -98,52 +113,68 @@ bit that survives power loss is in the FRAM on the carrier board, outside the ch
 
 | State | Storage | Survives reset | Survives power loss | Cleared by |
 |---|---|---|---|---|
-| Device key `K_dev` (256 bit) | Not stored. Re-derived at each boot from the PUF response and the helper data | re-derived | re-derived | any reset, tamper, zeroise |
-| `SK.seed`, `SK.prf`, `K_host`, `K_vat`, `K_fram`, `K_seal`, `K_tok` | Key rows of the register file, derived from `K_dev` by labelled TurboSHAKE256 at boot or on use | re-derived | re-derived | any reset, tamper, zeroise |
-| Helper record: PUF syndromes, check tag, owner-root signature over them | FRAM, written once at enrolment | yes | yes | — (public, static, replayable by design) |
-| Lifecycle record: `seq`, `gen`, mode, policy flags (leased, mint lock, retired), use counter `u`, spend counters, epoch, NFC counter, authority pin (key, or committee root and threshold), verifier pin, PUF failure count | FRAM, two slots written alternately, each MACed under `K_fram = KDF(K_dev, "fram")` | yes | yes | superseded by a higher `seq` |
-| High-water marks of `seq` and `u` | Volatile registers | no | no | reset |
-| Session lease: nonce, upper bounds on `u` and spend for this power session | Volatile registers | no | no | reset |
+| Device key `K_dev` (256 bit) | Four key rows, written at boot from the PUF response and the helper data after the check tag has matched | re-derived | re-derived | any reset, tamper, zeroise |
+| `SK.seed`, `SK.prf`, `K_host`, `K_vat`, `K_seal`, `K_tok`, the record MAC key | Not stored. Each is a labelled TurboSHAKE256 derivation from `K_dev`, computed into the lanes when it is used and wiped with them at the end of the command. This costs one short Keccak call per use and saves six key rows (5.2) | re-derived | re-derived | every command end |
+| Helper record, nine words: PUF syndromes, check tag (the public chip identifier), enrolment nonce, and the first record's commit word (mode, policy, threshold, generation, first use counter) and authority pin | FRAM, written once at `COMMIT`. The owner-root signature over it is public data that the host keeps and presents at every boot (3.3) | yes | yes | — (public, static, replayable by design) |
+| Lifecycle record: `seq`, `gen`, mode, policy flags (leased, counted, mint lock, retired), threshold, use counter `u`, epoch, spend and NFC counters, authority pin (key, or committee root) | FRAM, two slots written alternately (the record with sequence number `s` goes to slot `s mod 2`), each with a 128-bit tag under `K_dev` in its own domain | yes | yes | superseded by a higher `seq` |
+| The loaded record: the counters as the chip last advanced them | Volatile state rows. They are read from the FRAM once, at boot, and are the only copy the chip consults afterwards | no | no | reset |
+| Session lease: nonce, upper bounds on `u` and spend for this power session | Volatile state rows | no | no | reset |
 | Session state: gate verdict, transition register, guard results, working rows | Volatile, wiped by the epilogue of every command | no | no | every command end |
-| Optional: fuse bits mirroring `gen` and the retired flag | One `efuse_async_mem_1x8` macro, if fitted (decision D2) | yes | yes | never |
 
 Nothing that authorises an action is a volatile bit whose reset value is permissive. After any reset the chip
-holds no key and accepts only diagnostics until boot (3.3) completes.
+holds no key and accepts only diagnostics and `BOOT` until boot (3.3) completes.
+
+A count of failed PUF reconstructions, which an earlier draft kept in the lifecycle record, cannot exist: a
+failed reconstruction yields no key, so the chip cannot authenticate a record update. A failed boot raises
+FAULT and changes nothing; with fixed pairing, a fixed-time decoder and a constant-time tag compare it
+reveals nothing that needs rationing.
 
 ### 3.2 States and allowed transitions
 
-`BLANK` (no authentic helper record) → `PROVISIONED`. Each power session of a provisioned chip goes
-`BOOT` → `READY`, or `BOOT` → `LEASE_PENDING` → `READY`, or `BOOT` → `ORPHAN`, or `BOOT` → `LOCKED_OUT`.
-Retirement is a flag of the lifecycle record.
+`BLANK` (no helper record) → `PROVISIONED`. Each power session starts in `RESET`, where only diagnostics and
+the `BOOT` command decode, and goes `BOOT` → `READY`, or `BOOT` → `LEASE_PENDING` → `READY`, or `BOOT` →
+`ORPHAN`, or `BOOT` → `BLANK`, or `BOOT` → `LOCKED_OUT`. The state is a register of the sequencer that only
+instructions in the hardwired key range can write, and the dispatcher decodes each command only in the
+states its table entry names (5.3). Retirement is a flag of the lifecycle record.
 
 | From | To | Trigger | Condition | Effect |
 |---|---|---|---|---|
-| BLANK | BLANK (enrol session) | `ENROL` | No authentic helper record | PUF enrolment. The chip emits the helper data and a fresh nonce `N`. No key is usable and nothing else is enabled |
-| BLANK | PROVISIONED | `COMMIT` | In the same power session: an owner-root signature (4.3 routine, mask-constant key digest, D3) over `N`, the helper-data digest, the mode, the policy flags and the first authority pin; helper record and both lifecycle slots written and read back | First lifecycle record, `seq = 0`. The record never grants more than later ones: there is no enrolment-only privilege to return to |
-| PROVISIONED | BOOT → READY | reset release | Helper record authentic; PUF reconstruction passes its check tag; a lifecycle record with a valid MAC exists; not retired; policy not leased | Keys derived; counters loaded |
-| BOOT | LEASE_PENDING → READY | as above, policy leased | A gate statement (4.1) for transition `LEASE` over this session's nonce, the reported `seq`, the authority's `gen`, and the granted base and bounds | `u` and the spend counters jump to the granted base; they may not pass the granted bounds in this session |
-| BOOT | ORPHAN | reset release | Helper record authentic, no valid lifecycle record | Only `REINIT` is accepted |
-| ORPHAN | PROVISIONED | `REINIT` | Owner-root signature over a fresh nonce and a new first record | New record with `gen` above any the owner has issued for this chip |
-| BOOT | LOCKED_OUT | reset release | Any other check fails | Diagnostics only until the next reset. Nothing is erased, so a transient fault cannot brick the part |
+| BLANK | BLANK (enrol session) | `ENROL` | No helper record; the TRNG passes its start-up and health tests (6.5), so a die without a working entropy source cannot be enrolled | PUF enrolment. The chip emits the syndromes, the check tag and a fresh nonce `N`. Nothing is written to the FRAM, no key is usable and nothing else is enabled |
+| BLANK | PROVISIONED | `COMMIT` | In the same power session: an owner-root signature (4.3 routine, mask-constant key digest, D3) over `N`, the syndromes, the check tag, the mode, the policy flags and the first authority pin; the PUF reconstructed again from those syndromes and matching that tag; helper record and both lifecycle slots written and read back | First lifecycle records. The record never grants more than later ones: there is no enrolment-only privilege to return to. In coprocessor mode the response carries `K_host`. The chip then accepts only diagnostics until the next reset |
+| PROVISIONED | BOOT → READY | `BOOT` after reset release | Helper record authentic under the owner-root signature the host presents; PUF reconstruction passes its check tag; a lifecycle record with a valid MAC exists; not retired; policy not leased | `K_dev` written; counters loaded |
+| BOOT | LEASE_PENDING → READY | as above, policy leased; then `LEASE` | A gate statement (4.1) for transition `LEASE` over this session's nonce, the reported `seq`, the authority's `gen`, and the granted base and bounds | `u` and the spend counters jump to the granted base; they may not pass the granted bounds in this session. The nonce is cleared by the first attempt, accepted or not |
+| BOOT | ORPHAN | `BOOT` | Helper record authentic, PUF reconstructed, no valid lifecycle record | Only `NONCE` and `REINIT` are accepted |
+| ORPHAN | PROVISIONED | `REINIT` | Owner-root signature over a nonce drawn in this power session, the chip identifier and a new first record | New record with `gen` above any the owner has issued for this chip. The chip then accepts only diagnostics until the next reset |
+| BOOT | BLANK | `BOOT` | The helper slot of the FRAM does not hold a helper record | `ENROL` and `COMMIT` are accepted |
+| BOOT | LOCKED_OUT | `BOOT` | Any other check fails: owner signature, check tag, retired flag | Diagnostics only until the next reset. Nothing is written or erased, so a transient fault, a failed sensor or a noisy PUF read cannot brick the part |
 | READY | READY | gated transitions of 4.2 | Gate verdict for that exact transition | Record updated, `seq` + 1 |
 | READY | READY (retired) | `RETIRE` | gated | Retired flag set; the chip derives no keys at later boots |
 
 `ENROL` is not usable by replay: erasing the FRAM and writing the original helper record back gives `ORPHAN`,
 not an enrolment session, and `COMMIT` and `REINIT` need a signature over a nonce the chip drew in the same
-power session. A chip whose FRAM is lost is useless until the owner root re-initialises it.
+power session. A chip whose FRAM is lost is useless until the owner root re-initialises it. `ENROL` writes
+nothing to the FRAM, so an enrolment that is never committed leaves the chip `BLANK`; a `COMMIT` interrupted
+after the helper record and before the lifecycle slots leaves it `ORPHAN`.
 
 ### 3.3 Boot
 
-1. Reset releases on the pad clock (6.6). No internal oscillator, sensor or the TRNG is needed to reach step 4.
-2. Read the helper record. Verify the owner-root signature over it with the ROM routine of 4.3 (no secret is
-   involved, so this happens before the PUF is touched). No record: `BLANK`.
-3. Run the PUF, decode, compare the check tag in constant time (6.1). Derive `K_dev` and the key rows.
-4. Read both lifecycle slots, verify each MAC under `K_fram`, take the valid one with the larger `seq`.
-5. Unleased policy: `READY`. Leased policy: draw the session nonce from the TRNG and the PUF counter noise
-   (6.5), emit it with the chip identifier and `seq`, and wait in `LEASE_PENDING`.
+1. Reset releases on the pad clock (6.6). The chip is in `RESET`: diagnostics and `BOOT` only. No internal
+   oscillator, sensor or the TRNG is needed up to step 5.
+2. `BOOT` (a host command, because the owner-root signature is 16 kB of public data that the host carries
+   more cheaply than the FRAM). The chip reads the helper record from the FRAM. No record: `BLANK`.
+3. It verifies the owner-root signature over the helper record with the ROM routine of 4.3. The routine is
+   public computation: no secret, no entropy. This happens before the PUF is touched.
+4. Run the PUF with the authenticated syndromes, decode, compare the check tag in constant time (6.1).
+   Write `K_dev` to its four key rows.
+5. Read both lifecycle slots, verify each tag under `K_dev`, load the valid one with the larger `seq`. None:
+   `ORPHAN`. Retired: the key rows are cleared and the chip is `LOCKED_OUT`.
+6. Unleased policy: `READY`. Leased policy: start the TRNG (6.5), draw the session nonce, emit it with the
+   chip identifier and `seq`, and wait in `LEASE_PENDING`. If the TRNG fails its tests the chip still enters
+   `LEASE_PENDING`, without a nonce; `NONCE` tries again, and no lease can be accepted until it succeeds.
 
-Time at 25 MHz: about 0.2 s to step 5 [E] (one signature verification at most 0.16 s [D], PUF 16 ms [D]); a
-lease adds one gate verification (0.16 s per signature, 4.6) and the round trip to the authority.
+Time at 25 MHz: about 0.25 s to step 6 [E] (one signature verification at most 0.17 s [D], PUF 30 to 60 ms
+[D, 6.1]); a lease adds the TRNG start-up (up to 0.12 s, 6.5), one gate verification (4.6) and the round trip
+to the authority.
 
 ### 3.4 What is and is not guaranteed
 
@@ -169,15 +200,25 @@ chip-to-authority authenticator and is not specified yet.
 What a lease costs: the authority must be reachable at every power-up; the chip must have a working entropy
 source, and it refuses to leave `LEASE_PENDING` if the TRNG health tests fail; the lease check is one more
 decision that a fault must not flip (doubled decision bits, 5.5). An entropy source that is biased without
-failing its health tests would allow an old lease to be replayed; the nonce therefore mixes two sources.
+failing its health tests would allow an old lease to be replayed; the nonce therefore mixes two sources. The
+TRNG's variance test bounds the jitter directly (6.5); interference near the beat rate is the case the second
+source is for.
+
+The entropy source is needed for exactly three things, all of them public nonces: enrolment, `REINIT`, and
+the lease. An unleased chip that has been enrolled never needs it again: boot, the signer, and every gate
+verification run without it. A leased chip whose TRNG has failed for good is unusable, since nothing else on
+the die can make a lease fresh; that is the price of the policy and it is why the policy is chosen per chip.
 
 The choice between the two policies is made per chip at `COMMIT` (decision D11). A chip that guards one-time
 keys or spend limits against someone who may hold the board has to be leased.
 
-If the optional fuse macro is fitted and proves to work, `ROTATE`, `REINIT` and `RETIRE` also burn a bit, read
-back and verified, and boot takes the larger of the fuse and record generations. That would make those three
-transitions irreversible on an unleased chip. A fuse that fails to program leaves the chip exactly as
-described above.
+No fuse backs any of this. What it would take to change that is known from the simulations [S, report
+section A.7] and is not in S: every one-way bit stored as the OR of the eight fuses of one
+`efuse_async_mem_1x8` macro (a single programmed fuse may read 0 at some corner with a probability budgeted
+at 0.1 to 0.2 until silicon says otherwise), generations counted in unary, one programming pulse per fuse,
+verification at the strictest read corner, and nothing in the programming path able to act while reset is
+low on a back-powered rail (6.6). A generation counter of `n` steps is `n` macros of 8,075 µm². It is
+revisited when the characterisation structure of 6.6 has been measured on silicon.
 
 ---
 
@@ -188,11 +229,14 @@ described above.
 A **transition** is a change of security state. The chip builds the transition message itself:
 
 ```
-m = TurboSHAKE256( "DREGG.TRANSITION/v1" ‖ chip_id ‖ gen ‖ seq ‖ type ‖ H(arguments) )
+m = TurboSHAKE256( "DREGG.TR" ‖ chip_id ‖ (seq, gen, flags, threshold) ‖ type ‖ nonce ‖ arguments )[0..31]
 ```
 
-`chip_id` is a public identifier derived from `K_dev`; `seq` is the current record counter. The host never
-supplies `m`. A statement is accepted only for the `m` the chip computed, so it cannot be used on another
+`chip_id` is the 128-bit PUF check tag, public and fixed at enrolment; `seq` is the current record
+counter, in one word with the generation, the policy flags and the threshold; the arguments are three words,
+absorbed as they are; the nonce is the session nonce while a lease is pending and zero otherwise. `COMMIT` and `REINIT` have statements of the same shape under
+their own labels (the enrolment nonce, syndromes, check tag and first record; the session nonce, chip
+identifier and first record). The host never supplies `m`. A statement is accepted only for the `m` the chip computed, so it cannot be used on another
 chip (`chip_id`), a second time (`seq` advances on acceptance), or for a different transition (`type`,
 arguments). The verdict is a session register cleared by the command that consumes it.
 
@@ -212,7 +256,7 @@ G2 needs option F (11.3).
 
 | Transition | Gated | Notes |
 |---|---|---|
-| `MINT` a root capability | yes | There is no ungated mint, in enrolment or after |
+| `MINT` a root capability | yes | There is no ungated mint, in enrolment or after. `MINT`, `LIMIT`, `RELEASE` and `INVOKE` belong to the vat and the seal (stage 5); the model in `v2/` has `LEASE`, `EPOCH`, `RETIRE` and `ROTATE` |
 | `LIMIT`: raise or re-arm a spend limit | yes | |
 | `EPOCH`: advance the epoch counter | yes | Gives the epoch guard a source the host cannot choose |
 | `RELEASE`: unseal a blob to the host (U4) | yes | Counted in the record |
@@ -224,28 +268,60 @@ G2 needs option F (11.3).
 
 ### 4.3 G1: cost and method
 
-Verification is public computation on the Keccak unit. Count per FIPS 205 [D]: FORS 14 × (1 leaf + 12 path
-nodes) = 182 calls; seven layers of at most 35 × 15 = 525 chain steps; 63 tree nodes; `T_k`, seven `T_len`
-and `H_msg`. Average about 2,100 calls, at most about 3,900. At 760 clocks per call (721 for Keccak-f [M]
-plus load and unload [E]) that is at most 3.0 M clocks for the hashing; with the fingerprint passes below, at
-most 3.9 M clocks: **0.16 s at 25 MHz**, about 0.10 s on average.
+Verification is public computation on the Keccak unit and the word unit. No value in it is secret, and it
+needs neither the TRNG nor `K_dev`: the same ROM routine verifies the owner-root signature at boot before
+the PUF is touched, and every gate statement on a chip whose entropy source has failed.
+
+Count per FIPS 205 [D]: FORS 14 × (1 leaf + 12 path nodes) = 182 calls; seven layers of at most 35 × 15 =
+525 chain steps; 63 tree nodes; `T_k`, seven `T_len` and `H_msg`. Average about 2,100 calls, at most about
+3,900, at about 760 clocks each.
 
 `T_len` absorbs 35 chain ends over five sponge blocks while each chain needs the sponge for itself, and the
-file holds one sponge state. The routine therefore runs two passes: it computes each chain end and folds it
-into a polynomial fingerprint under fresh secret points (TRNG output conditioned with `K_dev`); the
-host then supplies the chain ends, which the chip absorbs into `T_len` and folds into a second fingerprint;
-the two fingerprints must be equal. `T_k` over the 14 FORS roots is handled the same way. The fingerprint is
-two polynomial evaluations over GF(2^64) at independent points, computed by a shift-and-XOR microroutine on
-the word unit (about 420 clocks per product [E]; about 2,070 products per signature); a wrong sequence passes
-with probability below 2^-115 per check. It costs four rows instead of a second 25-row sponge, and no unit:
-the GF(2^128) multiplier of the first draft is not needed.
-The argument needs review by a cryptographer before it is relied on (stage 4 of section 9).
+file holds one sponge state. Holding the chain ends would take 70 rows and saving the sponge 25. The routine
+instead makes three passes over the 35 values, bound together by a two-row hash chain and a fingerprint:
 
-Rows used by one verification: the digest indices or the WOTS digit queue 4, address context 3, current node
-2, fingerprint 4, loop work 2; with G3, the transition message 4. That is 19 scratch rows, which is why
-configuration S has 20.
+1. **Pass 1, the signature values.** For each chain the chip computes the chain end `c_i` and extends a hash
+   chain over them, `D ← TurboSHAKE256(D ‖ c_i)[0..15]`.
+2. **Points.** `r_0, r_1 = TurboSHAKE256(D)` in its own domain. They are public, and they are fixed only
+   after every chain end is.
+3. **Pass 2a, the chain ends as the host states them.** The chip extends a second hash chain over the stated
+   values, which must end in `D`, and folds each 64-bit word `w` into two accumulators,
+   `a_j ← (a_j ⊕ w)·r_j` in GF(2^64).
+4. **Pass 2b, the stated chain ends again.** The chip absorbs them into `T_len` and folds them the same
+   way. The accumulators of 2a and 2b must be equal.
 
-The same ROM routine verifies the owner-root signature at boot.
+`T_k` over the 14 FORS roots is handled the same way. The product is a shift-and-XOR microroutine on the
+word unit, most significant bit of the point first (422 clocks per product, measured on the model; 2,072
+products per signature, 0.88 M clocks). It costs six rows in place of a second sponge, and no unit.
+
+Why it is sound, and what that rests on. To make the chip absorb into `T_len` anything but the chain ends
+it computed, the stated values must either differ from the computed ones under an equal hash chain (a second
+preimage), or differ between passes 2a and 2b and still agree in both accumulators. The points are a hash of
+the computed chain ends, so each choice of signature values succeeds in the second way with probability at
+most (70 / 2^64)^2 < 2^-115, and the search is offline: about 2^115 trials of at least 35 chains each, which
+is the cost of the generic attack on a 128-bit hash. An earlier draft drew secret points from the TRNG
+conditioned with `K_dev`: per attempt that is the same bound with no offline search, but it made every
+verification depend on the entropy source and on a key that does not exist before the PUF has run, and it
+put key-derived data in rows the output rules treat as public. A third point (three more rows, half as many
+products again) would take the bound to 2^-173. The argument needs review by a cryptographer before it is
+relied on (stage 4 of section 9).
+
+Data. The host sends, per signature: `R`; the FORS values; the 14 roots twice; and per layer the 35
+signature values, the 35 chain ends twice and the authentication path: 2,018 words, 16,144 bytes, against
+7,856 for the signature alone.
+
+Rows used by one verification: digest and digit queue 4, address 3, `PK.seed` 2, current node 2, hash chain
+and fingerprint 6, loop work 2; with a gate statement, its arguments 5 (the transition message is recomputed
+from them for each signature, not stored). That is 24 scratch rows.
+
+The public key is not held in rows. The host states it, the chip checks it against its pin before the
+signature (the owner root's against a mask-constant digest, a committee member's against the pinned Merkle
+root) and checks the root the signature leads to against the same pin afterwards; the single authority key
+of G1 is the pin itself.
+
+Time: at most about 4.1 M clocks, 0.16 s at 25 MHz [D: 3,900 calls at about 760 clocks, 530 short calls for
+the hash chains and points, 0.88 M for the fingerprint]. One verification of a real 128s signature on the
+model takes 2.7 M clocks (0.11 s; 2,648 Keccak calls), of which the fingerprint is a third.
 
 ### 4.4 G2: parameters, cost and how the program is pinned
 
@@ -313,26 +389,34 @@ is a proof whose size and checking time are independent of the committee, and a 
 ### 4.6 G3: committee threshold on the Keccak unit
 
 - **Committee.** `n` members, each with an SLH-DSA-SHAKE-128s public key (`PK.seed ‖ PK.root`, 32 bytes).
-  Leaf `i` is `TurboSHAKE256(i ‖ pk_i)` and a node is `TurboSHAKE256(left ‖ right)`, 32 bytes each, with
-  distinct domain bytes for leaf and node. The root, the depth and the threshold `k` are the authority pin
-  in the lifecycle record, set at `COMMIT` or by `ROTATE`.
+  Leaf `i` is `TurboSHAKE256(i ‖ pk_i)` and a node is `TurboSHAKE256(left ‖ right)`, 16 bytes each, with
+  distinct domain bytes for leaf and node. The root and the threshold `k` are the authority pin in the
+  lifecycle record, set at `COMMIT` or by `ROTATE`; the depth is whatever path the host presents, at most
+  16. A single authority key (G1) is the committee of one member with an empty path, so G1 and G3 are one
+  routine. Sixteen-byte nodes give 128 bits against presenting a key that is not in the tree, the same
+  level as the signatures; they give 64 bits against whoever builds the tree making two trees with one
+  root, and that party is the authority itself. The owner root's mask constant is the same leaf hash.
 - **Statement.** For the transition message `m` of 4.1, the host supplies `k` items in strictly increasing
-  member index: index, public key, Merkle path, signature on `m`. For each the chip recomputes the root from
-  the leaf and path and compares it with the pin, runs the 4.3 routine under that public key, and counts.
-  The verdict is set when the count reaches `k`. Increasing indices make the members distinct with one row.
-- **Cost.** Per member at most 3.9 M clocks (0.16 s) and 7,856 + 32 + 32 × depth bytes.
+  member index: index, public key, Merkle path, signature on `m` (with the stated values of 4.3), and the
+  Merkle path again. For each the chip recomputes the root from the leaf and path and compares it with the
+  pin, runs the 4.3 routine under that public key, recomputes the root from the leaf made of the stated
+  `PK.seed` and the root the signature led to, and counts. The verdict is set when the count reaches `k`.
+  Increasing indices make the members distinct with one row.
+- **Cost.** Per member one verification (at most about 0.16 s, 0.11 s typical; 7.4) and
+  16,144 + 40 + 32 × depth bytes.
 
 | Committee | Time, at most | Data |
 |---|---:|---:|
-| 3 of 5 | 0.5 s | 24 kB |
-| 11 of 16 | 1.7 s | 88 kB |
-| 67 of 100 | 10.5 s | 0.54 MB |
-| 171 of 256 | 27 s | 1.4 MB |
+| 3 of 5 | 0.5 s (0.32 s measured on the model) | 49 kB |
+| 11 of 16 | 1.8 s | 0.18 MB |
+| 67 of 100 | 11 s | 1.1 MB |
+| 171 of 256 | 28 s | 2.8 MB |
 
 - **What it enforces.** At least `k` distinct holders of committee keys signed exactly this transition, for
   this chip and this sequence number. Members sign ordinary FIPS 205 signatures with existing code.
-- **What it needs that does not exist.** The host driver and a committee-tree builder. No compiler, no new
-  cryptographic argument beyond the fingerprint of 4.3.
+- **What it needs that does not exist.** A host driver in the protocol crates (`v2/model/host.py` has the
+  committee tree, the statement builder and the packaging of a signature with its stated values, in Python).
+  No compiler, no new cryptographic argument beyond the fingerprint of 4.3.
 - **Cheaper member keys.** A member key that is a single XMSS tree (one layer of the same structure, stateful
   on the member's side) verifies in about 20 ms with a signature under 1 kB, using a subset of the same
   routine. Not specified further here.
@@ -343,7 +427,7 @@ is a proof whose size and checking time are independent of the committee, and a 
 
 ### 5.1 Principle
 
-One 64-bit register file holds every word of working state and every key. Four arithmetic units read one
+One 64-bit register file holds every word of working state and the device key. Four arithmetic units read one
 row at a time through a single read port and write through a single hold register. One microcoded sequencer
 drives them. No unit and no organ keeps a private copy of secret state beyond pipeline registers.
 
@@ -353,7 +437,11 @@ Word width is 64 bits: a Keccak lane, a Goldilocks element and half a GF(2^128) 
 
 - Rows of 64 `latrnq_1`, one `icgtp_1` per row, one 64-bit write-hold register, one read port.
   Measured [M]: 64 rows 263,672; 72 rows 296,497; 80 rows 328,657; 128 rows 550,122 (about 4,110 per row, of
-  which 3,091 is latches). A second read port costs 85,666 at 96 rows [M] and is not used.
+  which 3,091 is latches), with the read multiplexer inferred by synthesis. Built as the placed array that
+  the physical design needs (one 64-bit word per standard-cell row, row-local read gates and a column tree,
+  word-line drivers sized for 64 loads), 72 rows are 329,434 [M, `scratch/lanes/fable-dregg180-phys.last.md`]:
+  about 4,575 per row. That is the figure the budget uses. A second read port costs 85,666 at 96 rows [M]
+  and is not used.
 - A foundry SRAM is not used: `gf180mcu_fd_ip_sram__sram512x8m8wm1` is 431.86 × 484.88 µm = 209,400 µm² for
   4,096 bits (LEF), no smaller than latches, byte-wide, and it cannot be cleared with the clock stopped.
 - **Zeroisation.** The asynchronous clear of every latch and of the hold register is driven only by a
@@ -370,15 +458,15 @@ Row map:
 |---|---:|---|---|
 | lanes | 25 | working, secret-capable | Keccak state; Poseidon2 state and verifier registers share these rows |
 | Keccak work | 7 | working | Column parities and saved lanes of the lane-serial unit (today private to it) |
-| scratch | 20 | working | Staging, capability words, fingerprint accumulators. The signer uses 12 (five address words, four message words, anchor work); signature verification uses 19 (4.3) |
-| keys | 10 | key | `K_dev` 4, `SK.seed` 2, `SK.prf` 2, `K_host` or `K_vat` half 2; other keys are derived on use into scratch |
-| pins | 6 | public | Capability rights and limits 2, pinned root or authority key 4 |
-| state | 2 | public | Loaded lifecycle counters |
+| scratch | 24 | working, public | Staging, capability words, the hash chain and fingerprint of 4.3. The signer uses 12; a gate statement uses all 24 (4.3) |
+| keys | 4 | key | `K_dev`. Every other key is derived from it into the lanes when it is used (3.1) |
+| state | 10 | public, kept between commands | The loaded lifecycle record 3 (sequence, generation, flags and threshold; use counter and epoch; spend and NFC counters), authority root 2, PUF check tag 2 (the chip identifier), session nonce 2, lease bound 1 |
 | out | 2 | output | Egress FIFO; the only rows the egress mux can read |
 | **S total** | **72** | | |
 
-Configuration L (appendix A) adds 64 public challenge rows for a 128-row file. The stage-1 model in `v2/`
-still has 12 scratch rows and 64 rows; it grows with the stage that needs them.
+The count is unchanged from the previous revision and its use is not: six key rows became four scratch rows
+and two state rows, and the pin rows are state rows like the others. Configuration L (appendix A) adds public challenge rows up to a 128-row file. The model
+in `v2/` has this map.
 
 ### 5.3 Structural output bound
 
@@ -411,17 +499,33 @@ now implemented and tested in `v2/` (rules R5 to R12 of `v2/model/machine.py`):
 - **Three declassification points**, each an instruction of its own and each listed per instance in the
   output manifest: `REL` (a rate lane after a permutation, to the response); `CMPT` (an untainted word
   compared with a rate lane after a permutation; only the verdict leaves); and the record tag written to the
-  FRAM.
+  FRAM. Stages 3 and 4 added instances (the check tag and `K_host` at enrolment; the tag verdicts of boot)
+  and no new kind.
 - **The FRAM master is an output too.** FRAM instructions decode only inside the address range of the
-  record routines. A write sends one of three rows: the record counter row, or lane 0 or 1 after a
-  permutation. A transaction is three words in one direction.
+  record routines. A write sends a state row, or lane 0 or 1 after a permutation. A transaction is at
+  most sixteen words in one direction, to one of three records.
+- **One hold register.** The Keccak unit writes through it and a pushed row passes through it, so H is
+  cleared by a permutation and by `PUSH row` and `REL`. A row written in one clock (by a store, as the last
+  lane of a permutation, or by a wipe of its class) is transparent in the next, and reading it then costs a
+  clock. A command starts only at an address in the ordinary code; the dispatcher checks the table entry.
+  Undefined function codes are control faults.
+- **A fault cuts the response short.** Words already pushed have left the chip; the frame then holds fewer
+  words than its header states and FAULT is raised. A host treats a short frame as no response.
 - **The ranges are hardwired.** Idle address, key range and record range are constants of the sequencer,
   not data read from the ROM image; the build fails if the image does not match them. Padding, the wipe of
   every working row and the return to idle are one hardware end action (`END`, `FAIL`), not ROM content.
-- **Dispatch is gated by lifecycle state** (3.2): provisioning commands decode only without a valid key,
-  keyed commands only with one, and the dispatcher itself refuses bad magic and unknown opcodes.
-- **Key writes need the owner root.** The key-write instruction needs an authorisation latch that only a
-  successful verification over a fresh nonce sets, in the same command.
+- **Dispatch is gated by lifecycle state** (3.2): every dispatch-table entry carries the set of states in
+  which its command decodes, and the dispatcher itself refuses bad magic and unknown opcodes. The state
+  register is written only by an instruction of the key range, and `READY` only with the verdict latch set.
+- **Key writes need a verdict.** The key-write instruction needs a latch that one instruction of the key
+  range sets from an untainted, clear compare flag in the same command: in the ROM, the PUF check-tag
+  compare.
+- **Lifecycle state is written in one place.** State rows are written only by instructions in the record
+  range, which is also the only place the FRAM master can be driven. A FRAM write sends a state row, or
+  the record tag.
+- **The PUF's response is a key.** It leaves its organ only into a rate lane, under the rules of a key row;
+  the organ's instructions decode only in the key range. The syndromes are public by construction and are
+  the one thing the organ gives the word unit.
 
 What these rules cannot decide is listed in `v2/README.md`: chiefly, which hash output a routine releases.
 
@@ -440,7 +544,7 @@ than argued per command.
 | Goldilocks, digit-serial (option F, not in S) | One accumulator: load, add, subtract, double, and multiply by the register-file row, most significant multiplier bit first; the multiplicand stays on the read port | new | 37,801 / 57,211 / 92,376 for 1 / 2 / 4 multiplier bits per clock [M, skeletons, not simulated] | product 64 / 32 / 16; Poseidon2 about 36,000 / 21,000 / 14,000 [D] |
 | Field micro-sequencer and constants (L); constants only (option F, sequencing in microcode) | Poseidon2 permutation, Ext4 operations; round constants | `qsag_field_engine` 14,618, `qsag_p2_rc` 19,691 [M] | 34,309 (L); 19,691 (F) | — |
 | GF(2^128) (configuration L only; in S the fingerprint is microcode on the word unit) | 128-bit carry-less multiply-accumulate, 2 bits per clock | `qsag_gf128_clmul`, unchanged | 48,545 [M] | 64 per product |
-| Word unit | XOR, AND, OR, 32-bit add and subtract with carry, constant-time compare accumulator, 16-bit immediates; wiring functions on the hold register: nibble swap, byte reversal of each half, half swap, half masks, shifts right by 1, 4, 8, 16 and left by 1, 4, 8 | new | 34,329 [M, skeleton with these functions; an earlier skeleton without the wiring functions was 23,594] | 1 |
+| Word unit | XOR, AND, OR, 32-bit add and subtract with carry, constant-time compare accumulator, 16-bit immediates; wiring functions on the hold register: nibble swap, byte reversal of each half, half swap, half masks, shifts right by 1, 4, 8, 16 and left by 1, 4, 8; for the fingerprint of 4.3, a left shift by one that puts the bit shifted out in the carry, and multiplication by x in GF(2^64) (a shift and four conditional XORs) | new | 34,329 [M, skeleton without the two fingerprint functions, which add about 700 E; an earlier skeleton without the wiring functions was 23,594] | 1 |
 
 Earlier digit-serial skeletons with their own operand registers and one reduction per function were far larger
 (4 bits 89,083; 8 bits 103,802; 16 bits 139,683 [M]); sharing one add-fold-subtract path among all functions
@@ -460,7 +564,9 @@ Scheduling of each primitive:
 | Poseidon2, Ext4 (option F, L) | L: field micro-sequencer on the parallel unit over lane rows 0–11 and the verifier registers. Option F: microroutines on the digit-serial unit |
 | Merkle (Canopy) path (option F, L) | Microroutine: one permutation per level with the feed-forward; index bits from a transcript-bound register |
 | Committee Merkle path (G3) | Microroutine: one TurboSHAKE256 call per level |
-| Fingerprint (4.3) | Two GF(2^64) accumulators and two points in four scratch rows; shift-and-XOR product in microcode on the word unit |
+| Fingerprint (4.3) | Two points, two accumulators and the saved pair of the earlier pass in six scratch rows; shift-and-XOR product in microcode on the word unit |
+| Key derivation on use | Microroutine: `K_dev` and a label into the lanes, one Keccak-p[1600,12] call; the result stays in the lanes |
+| TRNG health tests and conditioning (6.5) | Microcode compares the organ's statistics with constants of the ROM and absorbs the raw words |
 
 ### 5.5 Control
 
@@ -471,9 +577,11 @@ A microprogram ROM and a sequencer replace the 124-state process of `rtl/qsag_wi
   (row + index register X), a post-increment bit for X, 2-bit sequencing (next, return). Branch, call,
   compare-X and decrement-and-branch are instructions with an 11-bit target. Immediates are 16 bits; 64-bit
   constants come from a small table beside the ROM.
-- **Sequencer**: 11-bit micro-PC, two-entry return stack, two 12-bit down counters, 7-bit index register X,
-  response-length counter, the rule comparators of 5.3, opcode dispatch gated by lifecycle state. Skeleton of
-  this sequencer: 23,985 [M].
+- **Sequencer**: 11-bit micro-PC, a 28-bit step counter as runaway guard (a statement of 256 members is
+  about 2^27.4 micro-instructions), four-entry return stack (signature verification nests four deep; two
+  entries served the signer), two 12-bit down counters, 7-bit index register X, response-length counter, the
+  rule comparators of 5.3, the lifecycle state register, opcode dispatch gated by it. Skeleton of the
+  sequencer as first modelled: 23,985 [M].
 - **ROM size.** Estimated routine sizes in micro-words: boot and lifecycle 150, framing and epilogue 80,
   enrolment 180, sponge and MAC subroutines 90, signer 160, G1 160, vat 150, transitions 100, FRAM 80, seal 60,
   NFC 40, distance 60, self-test and diagnostics 80, TRNG 30: about 1,420 for S; plus about 500 for the
@@ -483,8 +591,16 @@ A microprogram ROM and a sequencer replace the 124-state process of `rtl/qsag_wi
   hardware. With the rest of the signer the S estimate is about 1,500 words [E] against 1,536
   budgeted. ROM cost: an earlier stage-1 image with its constant and dispatch tables was 19,072 for 418 words (S)
   and 24,981 for 575 words (L) [M], 45.6 and 43.4 per word; random content measured 85,024 for 1,536 × 28 [M]. With the committee gate, the fingerprint microroutine, leases and the owner-root routines the
-  S estimate is about 1,700 words [E]. Budgeted: 1,700 words at 45.6 = 77,500 [E, extrapolated from a quarter
-  of the ROM]; option F adds about 400 words.
+  S estimate was about 1,700 words [E]. **Measured since:** the image with the signer, boot, enrolment,
+  records, leases, the TRNG tests, signature verification and the gate is 1,443 words (key range 55, record
+  routines 191, TRNG 141, verification 307, lifecycle and gate 409, signer 207, sponge and shared hashing
+  111, the rest 22). Still to come: vat about 150, the transitions that belong to it 100, seal 60, NFC 40,
+  distance 60, self-test and diagnostics 80, the rest of the signer about 100 [E]: about 2,030 words with
+  every organ, 1,930 without U5. Budgeted: 2,000 words at 42.6 = 85,200 [E, the density of the stage 2 RTL's
+  455-word ROM]. Two consequences: the micro-PC is 11 bits, so 2,048 words is a hard limit that the full
+  image would touch, and a twelfth bit changes the branch encoding; and the routines written so far have not
+  been optimised for size, which is the first place to look. Option F adds about 400 words and does not
+  fit the 11-bit micro-PC.
 - Inner loops with fixed structure stay hardwired in their units (Keccak round sequencing, Poseidon2 and Ext4
   in the field micro-sequencer). They are already tested and are denser than microcode.
 - **Host-supplied programs.** None in S. With option F, or in L, only the verifier machine of 4.4 accepts host
@@ -507,34 +623,73 @@ source-synchronous and clockless links are removed (decision D4).
 Each organ exposes start, done and word-transfer signals to the sequencer and keeps no secret outside the
 register file except where noted. "Lock" means that an authentic helper record exists (the chip is not
 `BLANK`, 3.2). Because that condition can be undone by erasing the FRAM, no test hook that could expose key
-material is tied to it.
+material is tied to it. A sensor or source that fails (TRNG, PUF read, clock monitor) refuses the commands
+that need it and changes no stored state; none of them is on the path of an unleased boot except the PUF
+itself.
 
 ### 6.1 PUF and key derivation
 
-- **Array.** 252 disjoint pairs of adjacent ring oscillators (504 rings), one pair enabled at a time, each pair
-  placed as neighbours. One response bit per pair. The existing 64-ring design compares 32 rings against 32 at
-  16 offsets; its 480 bits are not independent and are replaced.
-- **Entropy account.** Four BCH(63,36,5) blocks in the syndrome (code-offset) construction, fixed pairing, no
-  selection mask. Each block publishes 27 syndrome bits. With min-entropy `h` per response bit the remainder is
-  4 × (63·h − 27): 144 bits at h = 1, **131 bits at h = 0.95**, 119 at h = 0.90 [D]. The claim is 128 bits and
-  holds for h ≥ 0.94. `h` must be measured (Monte Carlo before tape-out, silicon after). Five blocks (630
-  rings) give 148 bits at h = 0.90 for about 11,000 µm² more (decision D6).
-- **Reliability.** Each bit is the majority of three measurements. Count windows of 10–20 µs [C,
-  `astra-dregg180-spice-pcb.last.md`]. Rings must be slowed or prescaled so the first counter stage sees at most
-  400 MHz at the fast corner; the measured 400–1,120 MHz range [C] is too fast for an unproven toggle stage.
-- **Helper data before use.** The helper record carries a signature by the owner root key, verified in boot
-  step 3 before the PUF runs. After decoding, the check tag `TurboSHAKE256("DREGG.PUFCHK" ‖ w)` is compared in
+- **Array.** 252 disjoint quads of adjacent ring oscillators in one row (1,008 rings), one ring enabled at a
+  time on one counter. One response bit per quad: the sign of (c1 + c4) − (c2 + c3), the four counts taken in
+  slot order. The comparison cancels any offset that alternates between neighbouring slots and any linear
+  gradient, in space and, measured in that order, in time. Every ring is one slot (enable buffer, five
+  `nand2_1`, output buffer, well tap: 24.08 × 3.92 µm) with ring nets routed from one template, dummy slots
+  at the row ends and dummy rows above and below. The rules are
+  `physics/puf/placement_requirements.md` (R0 to R5) and are part of this specification.
+- **Why not pairs.** The array of the previous revision (252 pairs, the two rings of a pair in mirrored rows,
+  ring nets left to the router, the ring node itself routed to the multiplexer) supports no entropy claim
+  [S, `scratch/lanes/fable-physics-fixes.last.md` 2]. The random spread of a pair is 0.258 % of frequency; a
+  filler cell beside one ring moves it by 0.14 %, a row end by 0.24 %, a micrometre of wire by more, and
+  h = 0.95 needs every such layout-determined difference below 0.011 % (6 aF on one ring node, 0.8 mV of
+  supply). Pairs in one row under the same rules, with five blocks, are the smaller fallback: 630 rings and
+  a claim of h = 0.90, which needs the total offset under 0.023 % of frequency and cannot be defended before
+  the gradient across the field has been measured on silicon (7.3, decision D6).
+- **Entropy account.** Four BCH(63,36,5) blocks in the syndrome (code-offset) construction, fixed grouping,
+  no selection mask. Each block publishes 27 syndrome bits. With min-entropy `h` per response bit the
+  remainder is 4 × (63·h − 27): 144 bits at h = 1, **131 bits at h = 0.95**, 119 at h = 0.90 [D]. The claim
+  is 128 bits and holds for h ≥ 0.94. Three blocks (756 rings) give 98 bits at h = 0.95.
+- **What h rests on.** The foundry mismatch model gives h = 1 for any layout, so Monte Carlo cannot confirm
+  h; it gives the spread (quad 0.368 % of frequency [S]). h is set by offsets that are the same on every
+  die and therefore known to an attacker; 0.95 needs them below 0.044 of the spread. With the quad
+  comparison the claim rests on second-order terms only: curvature above 10 %/mm², or a difference between
+  the inner and outer slots of a quad that the dummies do not remove [S, `puf/puf_budget.py`]. It is
+  confirmed before tape-out by extraction of the placed and routed array (R5: 6 aF per node of the quad
+  combination, 0.011 % of frequency per quad, 0.2 mV of supply), and checked on silicon by the
+  characterisation array. What silicon can and cannot confirm: a run of 1,000 dies with 16 characterised
+  quads resolves an offset common to all positions to 0.024 of the spread, and an offset of one position to
+  about 0.1 (h about 0.89), and it measures the characterised positions, not the 252 that make the key.
+  The per-position claim therefore rests on the extraction and on the two arrays being built identically;
+  the lot statistics can refute it, not prove it. If the upper 99 % bound of the measured offset gives
+  h below 0.94, the key-length claim is reduced to 4 × (63·h − 27); it is not waved through.
+- **Reliability.** Each bit is the majority of three measurements of its quad; a measurement is four count
+  windows of 10–20 µs [C, `astra-dregg180-spice-pcb.last.md`], so enrolment and each reconstruction take 30
+  to 60 ms [D]. Rings must be slowed or prescaled so the first counter stage sees at most 400 MHz at the fast
+  corner; the measured 400–1,120 MHz range [C] is too fast for an unproven toggle stage. Not established:
+  the bit error rate across temperature and supply. The code was chosen without one, and five errors in 63
+  bits per block is the whole budget; it must be simulated (ring temperature and supply coefficients with
+  mismatch) before the block count is final.
+- **Helper data before use.** The helper record is authenticated by the owner-root signature in boot step 3,
+  before the PUF runs. After decoding, the check tag `TurboSHAKE256("DREGG.PUFCHK" ‖ w)` is compared in
   constant time before any key row is written. The decoder runs a fixed number of clocks whatever the error
-  pattern. With fixed pairing and no mask, a rejected attempt reveals bit reliability, not bit value.
-  Failed attempts are counted in the lifecycle record.
-- **Key.** `K_dev = TurboSHAKE256("DREGG.KDEV" ‖ w ‖ enrolment nonce)`. All other keys are labelled derivations.
+  pattern. With fixed grouping and no mask, a rejected attempt reveals nothing about a bit's value.
+- **Key.** `K_dev = TurboSHAKE256("DREGG.KDEV" ‖ w ‖ enrolment nonce)`. All other keys are labelled
+  derivations, made when they are used (3.1).
 - **Test hooks.** No ring of the key array has a path to a pad in any state, and there is no injected-flip
   input: a hook gated by lifecycle could be re-opened by erasing the FRAM, and ring frequencies with the
-  helper data give the key. Silicon characterisation uses a separate array of 16 pairs that feeds no key; its
-  counts are read out only under an owner-root signature over a fresh nonce (decision D13).
-- **Needs from the datapath:** Keccak (KDF, tag), one scratch row per block. **Private area:** array 44,115 [M
-  for 252 pairs; 55,440 for 315]; counters, BCH decoder and control about 70,000 [E, from the existing leaf's
-  76,551 M less its 64 rings]. Total about 114,000.
+  helper data give the key. Silicon characterisation uses a separate array of at least 16 quads, built from
+  the same slots in the same block under the same rules, that feeds no key; its counts are read out only
+  under an owner-root signature over a fresh nonce (decision D13). The lot qualification it supports
+  (per-die: all its ring counts, three windows each, at two supply voltages; per lot: mean and spread of the
+  quad combination and of the plain pair differences per position, Hamming distance between dies,
+  correlation of neighbouring bits) is station software, specified in the physics report section 2.5. It
+  is also the second noise source of the nonces (6.5).
+- **Needs from the datapath:** Keccak (KDF, tag) and the lanes; no scratch row. **Private area:** array with
+  its dummies 116,300 [M, slot geometry as placed by `v2/phys/floorplan/puf_array.tcl`: 1,008 used and 224
+  dummy slots in a 674 × 172.5 µm box, with a 20 µm keep-out]; characterisation quads 6,500 [E]; enable
+  decode and output collection for 1,072 rings about 26,800 [E, 25 per ring; the old array figure of 87.5
+  per ring included its own, the slot does not]; counters, BCH decoder and control about 70,000 [E, from the
+  existing leaf's 76,551 M less its 64 rings]. Total about 219,600, against 118,000 before. The physics report
+  put the growth at 51,000; it counted neither the dummies its own rules require nor the selection logic.
 
 ### 6.2 NFC front end and presence token
 
@@ -576,22 +731,81 @@ material is tied to it.
 
 ### 6.5 TRNG
 
-Existing two-ring source with repetition-count and adaptive-proportion tests. Raw words are never output
-after lock. Every use conditions at least 512 raw bits through TurboSHAKE256 together with `K_dev`. Boot does
-not need the TRNG; a health failure refuses only the commands that need fresh randomness (enrolment, G1
-fingerprint points, nonces) and sets a status bit; a leased chip then stays in `LEASE_PENDING`. The lease
-and enrolment nonces also absorb the low bits of the PUF ring counters of that boot, a second noise source
-that shares nothing with the TRNG rings. Area 13,035 [M].
+The existing design (a divided 13-stage ring sampling a 7-stage ring) yields about 0.005 bit of min-entropy
+per raw bit from thermal jitter, not the 0.5 its header claims: 2.6 bits in the 512 raw bits a nonce
+conditions [S, transient-noise simulation, kappa = 5.3e-9 √s]. Its repetition-count and adaptive-proportion
+tests pass on a noise-free source, because the beat of two incommensurate rings looks balanced. It is
+replaced.
+
+- **Source.** Coherent sampling: 8 rings of 17 `nand2_1` in the same template-routed slots as the PUF rings,
+  in one row. A selected pair runs, one ring sampling the other; a counter measures each beat in ring
+  periods; the least significant bit of each count is the raw bit. 64 to 425 kbit/s [S].
+- **Claim.** 0.5 bit of min-entropy per count for a pair whose count-variance statistic V is at least 2.0
+  when it is selected. The stochastic model gives at least 0.93 for such a pair [S, `trng/coso_model.py`];
+  the factor of two is the margin for what the model leaves out, chiefly flicker noise.
+- **Start-up**, on first use in a power session and never at boot: for each candidate pair 256 counts (a pair
+  is abandoned after 4 ms); pairs with V ≥ 2.0 and a mean count between 400 and 3,600 qualify; the qualifying
+  pair with the smallest mean count is used; then 1,024 counts under the health tests. At most 0.12 s.
+- **Health tests**, over every 256 consecutive counts: H1, V below 1.25 twice in a row (loss of jitter: a
+  noise-free pair gives at most 0.33 [S]); H2, 2^14 sampling periods without a beat, or a count below 64
+  (locked or stuck rings); H3, the same statistic on sums of four counts above 8 V, where white noise gives
+  4 V (jitter that is slow or periodic and not thermal); H4, repetition count and adaptive proportion on
+  the raw bit, as today. The organ accumulates the statistics; the thresholds, the selection and what
+  happens on a failure are microcode, in the ROM. H3 is designed from the scaling of white and correlated
+  noise and has not been simulated: its false-alarm rate is unknown, and it can refuse a lease, so its
+  threshold is provisional until it has been simulated with the foundry flicker model or measured.
+- **On a failure** the routine runs the start-up once more and tries again; if that fails too, the command
+  that asked is refused with a status bit and nothing else changes. What can be refused is listed in 3.4:
+  enrolment, `REINIT`, and the lease nonce. Boot, the signer and the gate do not use the source.
+- **Conditioning.** A nonce is TurboSHAKE256 over 512 counts' raw bits (256 bits of claimed min-entropy for
+  128 bits out; 1.2 to 4.8 ms) and a word of counter noise from the PUF characterisation rings, a second
+  source that shares nothing with the TRNG rings. Raw words are never output. `K_dev` is not mixed in:
+  every use of the source is a public nonce, and what a nonce needs is not to repeat, which a key does not
+  add.
+- **Not fitted: a long-divider fallback.** The physics report proposes that a die with no qualifying pair
+  (6.5e-6 of dies at the simulated spread) fall back to a divided ring at 460 bit/s. That figure is for the
+  old 7-stage ring; with the 17-stage rings it is 64 bit/s [D, same formula], eight seconds a nonce, and no
+  test of this section observes the jitter in that mode. Such a die fails `ENROL` and is screened out.
+- **Not covered by any test:** interference at a frequency near the beat rate that acts differently on the
+  two rings. The defence is structural (adjacent identical rings on one strap) and the second source.
+- **Area** about 19,000 [E: rings 1,800, selectors and sampler 800, counter and capture 2,400, statistics
+  6,000, control 2,500, 64-bit shift register and bit tests 6,000], against 13,035 [M] for the old one.
 
 ### 6.6 Clock, reset, pads, power
 
 - **Clock.** The core runs on the pad clock from reset, selected combinationally by a strap. One fixed ring
   oscillator serves as loss-of-clock and frequency-window detector and, by strap, as an alternative clock for
   bring-up. The tunable DCRO, its loops, the replica path and dither are removed.
-- **Design clock 25 MHz** (40 ns). The current 20 ns target has never been met; no timing exists for this RTL.
+- **Design clock 25 MHz** (40 ns). The current 20 ns target has never been met. First timing, on the
+  physical-design lane's proxy after placement: the path micro-PC → ROM (25 ns) → row address → row read
+  (16 ns) → word unit (32 ns) → hold register is 79 ns at the slow corner, so one clock per micro-instruction
+  does not make 25 MHz. The ROM output needs an instruction register: a two-stage machine (fetch, execute).
+  The RTL lane is implementing it behind a parameter. What it costs in clocks is not yet known: one clock
+  per taken transfer at least, and the stall rule for a row written in the previous clock has to be restated
+  for the new stage. Until its counts are in, every figure in 7.4 that comes from the model is for the
+  one-stage machine and is a lower bound; unit times (Keccak 721 clocks) are not affected. The model follows
+  the RTL's counts when they are reported, as it did for the stalls of 5.3.
 - **Reset.** Schmitt-trigger reset pad with pull-down (the pending `scripts/pending_src_b4_b6.patch`), external
   supervisor on the board. The secret-reset net asserts asynchronously and releases synchronously; the
   sequencer waits 16 clocks after release before its first write.
+- **Back-powering.** A signal pin at 5 V lifts the unpowered rail to 4.4–5.3 V through the pad's upper diode,
+  at every corner and whatever series resistor is fitted [S, `physics/pads`, nine corners]; a resistor
+  limits the current, not the voltage, and no practical bleed holds the rail down. Requirements on the chip:
+  while reset is low every bidirectional pad is high-impedance, every internal oscillator is off, the FRAM
+  chip-select is inactive or released, and nothing acts on the rail being up; no output enable can be high
+  in reset, to be shown on the gate-level netlist (8.4). Requirements on the board: the reset supervisor
+  senses the supply ahead of a reverse-blocking element, not the chip rail; a series resistor at the chip
+  on every pin that something outside the chip's own rail can drive (1 kΩ on the SPI lines, 10 kΩ on straps
+  and tamper, 330 Ω on outputs; 5 mA per pad and 20 mA in total are project limits, the foundry publishes
+  none); a 100 kΩ bleed; the FRAM supplied from the chip rail with a 100 kΩ pull-up on its chip-select; the
+  NFC pads reached only through the isolated front end, with at most 0.2 V at the pad when the chip is off
+  (conduction starts at 0.25 V at the fast hot corner). The distance-bounding lines cannot take a resistor
+  (nanosecond edges allow 50–100 Ω, which passes 30–50 mA into an unpowered pad): they need a buffer beside
+  the chip, supplied from the chip rail and specified for partial power-down, whose delay enters the
+  calibration. None of this protects against someone who holds the board: they can release reset themselves
+  and run the chip from a back-powered rail at reduced voltage. The defences against that are on the die
+  (5.5: the coded micro-PC and the doubled decision bits), and there is no on-chip supply monitor. Latch-up
+  when real power arrives on a forward-biased pad cannot be simulated from this PDK.
 - **Pads:** the default pad ring, unchanged, as chip-on-board requires (11.2). SPI 4, FRAM SPI 4, NFC 3,
   distance 2, tamper 1, FAULT 1, BUSY/IRQ 1, clock monitor 1 (pad clock divided, no internal node), 2 straps:
   19 of the 42 general pads, plus the dedicated clock and reset pads. Unused pads are tied as inputs with
@@ -599,11 +813,15 @@ that shares nothing with the TRNG rings. Area 13,035 [M].
 - **Power.** One 5 V domain; core and pad rails are shorted in the pad library. The 1.2 V ground bounce [C]
   came from the eight-bit parallel link switching together; with SPI only, one output switches at a time,
   slew-limited. The default ring has four supply pad pairs, one per side, and none can be added.
-- **Fuses.** None in configuration S. `gf180mcu_re_efuse` in the PDK provides `efuse_async_mem_1x8`
-  (97.27 × 83.02 µm, 8 bits) with 5 V timing libraries; it programs from the 5 V rail through on-macro PMOS
-  with a 50 µs pulse [C, compiler documentation]. Its authors describe it as not proven in silicon, and no
-  programming current, retention or yield figure was found. It may be fitted later as redundant hardening
-  only (3.4, decision D2).
+- **Fuses.** None in configuration S, and no bit depends on one (3.4). `gf180mcu_re_efuse` in the PDK
+  provides `efuse_async_mem_1x8` (97.27 × 83.02 µm, 8 bits) with 5 V timing libraries; it programs from the
+  5 V rail through on-macro PMOS with a 50 µs pulse [C, compiler documentation]. Its authors describe it as
+  not proven in silicon; simulation finds enough drive in the asynchronous macro and too little margin in
+  the array macro [S]. A characterisation-only block is specified in
+  `physics/efuse/test_structure_spec.md`: 64 bare fuse cells in eight driver variants, one analog pad,
+  controlled by an owner-root command, about 33,000 µm² (17,000 for half). It carries the same foundry-deck
+  risk as any fuse layout and is not in S: there is no area for it (7.3). It belongs on the engineering
+  sample of 9.4, where the organs are present for measurement and nothing depends on them.
 
 ---
 
@@ -611,28 +829,55 @@ that shares nothing with the TRNG rings. Area 13,035 [M].
 
 ### 7.1 Area
 
-Core of `SLOT_0P5X0P5`: 1,052 × 1,647 = 1,732,644 µm². How much of it can be filled is section 11.1.
+Core of `SLOT_0P5X0P5`: 1,052 × 1,647 = 1,732,644 µm². How much of it can be filled is 7.3 and section 11.1.
 
-| Block | Configuration S | Basis |
+| Block | S, every organ | Basis |
 |---|---:|---|
-| Register file, 72 rows | 296,497 | M |
-| Keccak unit less its rows | 90,650 | M: 112,280 − 21,630 |
-| Word unit | 34,329 | M, skeleton of the unit as modelled in `v2/` |
-| Microcode ROM | 77,500 | E: 1,700 words at the 45.6 µm² per word measured on the stage-1 image |
-| Sequencer | 23,985 | M, skeleton of the sequencer as first modelled in `v2/`; the taint flags, range comparators and dispatch classes added since are not in it |
-| SPI link, diagnostics | 25,000 | E from a 22,764 M skeleton |
-| PUF, 504 rings | 114,000 | 44,115 M + 70,000 E |
+| Register file, 72 rows, as a placed array | 329,434 | M, physical-design lane (the inferred file of the previous revision was 296,497) |
+| Keccak unit less its rows | 89,988 | M, stage 2 RTL (`scratch/lanes/fable-dregg180-v2-stage2.last.md` 6) |
+| Word unit | 21,400 | 20,683 M, stage 2 RTL (its operand and hold-register multiplexers are counted in the sequencer) + 700 E for the two fingerprint functions |
+| Microcode ROM | 85,200 | E: 2,000 words at the 42.6 µm² per word of the stage 2 RTL's 455-word ROM; 1,443 words exist (5.5) |
+| Sequencer, decoder rules, egress, framer | 82,500 | 100,542 M on the stage 2 RTL of the stage-1 machine (sequencer with rules 76,724, egress 10,915, framer 12,903), less 8,403 M for a shadow hold register the model no longer needs and about 9,600 D for a nonce register that is now two state rows; the lifecycle register, deeper stack and wider step counter of this revision are not in it. The skeleton figure of earlier revisions was 23,985 |
+| SPI link, diagnostics | 27,776 | M, stage 2 RTL |
+| PUF, 1,008 rings in quads | 219,600 | 116,300 M (slots and dummies) + 6,500 E (characterisation quads) + 26,800 E (ring selection) + 70,000 E (counters, decoder, control); 6.1 |
 | NFC receiver, no NCO | 35,000 | 28,729 M (existing leaf with the NCO removed) + 6,000 E for the longer token frame |
 | Distance, TDC | 45,000 | 44,593 M |
 | Clock, reset, tamper, shield | 35,000 | 14,291 M skeleton + 16,306 M (existing shield leaf) + E for the ring and glue |
-| TRNG, FRAM SPI master | 25,739 | M |
-| Redundant decision bits, checkers, glue | 20,000 | E |
-| **Total** | **822,700** | |
-| **Share of core** | **47.5 %** | |
+| TRNG, FRAM SPI master | 34,500 | 19,000 E (6.5) + 15,540 M, stage 2 RTL (three-word transactions; sixteen now) |
+| Redundant decision bits, micro-PC code, glue | 10,000 | E; the taint flags and comparators that were in this line are now measured in the sequencer |
+| **Total** | **1,015,400** | |
+| **Share of core** | **58.6 %** | |
 
-Of the total, about 178,000 is estimate with no synthesis behind it (ROM, PUF decoder, redundancy, parts of
-NFC and clock) and about 95,000 comes from skeletons that were synthesized and never simulated (word unit,
-sequencer, SPI link, clock monitor).
+Of the total, about 230,000 is estimate with no synthesis behind it (most of the ROM, PUF selection, decoder
+and characterisation quads, TRNG, redundancy, parts of NFC and clock). The datapath and control lines are now
+synthesis of RTL that simulates against the model, for the stage-1 machine. The largest single estimate is
+the PUF's counters, decoder and control.
+
+**Where the sequencer's area goes** [M and D, stage 2 report]: 334 flops; the 64-bit multiplexers that the
+instruction set asks for (the operand select, the hold register's input with its many sources, the framer's
+header fields); a 64-bit header register and a 22-bit word counter in the framer; the egress. The decoder
+rules themselves are 7,901: the rule set is not the cost, the 64-bit data routing is. Changes to the
+instruction set that would cut it, none measured, each a decision for the stage that implements it:
+(1) `LDF` has 18 sources, of which only the header word, the two syndrome words, the counter-noise word and
+the TRNG raw word are 64 bits wide; routing those five through one organ-data port, like `DIN`, leaves a
+24-bit multiplexer; (2) the framer need not hold the header for the whole command: the microcode can store
+it to a scratch row with its first instruction; (3) the response-length counter, the 28-bit step counter and
+the two loop counters could share one down-counter structure. The RTL lane is the one that can measure these.
+
+What moved since the previous revision (822,700):
+
+| Change | Effect | Why |
+|---|---:|---|
+| PUF array: 504 rings in pairs → 1,008 in quads, with dummies | + 72,200 | 6.1: pairs across mirrored rows support no entropy claim |
+| PUF ring selection for 1,072 rings | + 26,800 | the slot has no selection logic of its own |
+| Characterisation quads counted in the total | + 6,500 | the entropy claim cannot be checked without them (was 4,000, outside the total) |
+| Register file as a placed array | + 32,900 | measured by the physical-design lane; the file cannot be placed as synthesis infers it |
+| TRNG replaced | + 6,000 | 6.5: the old source has no entropy to speak of |
+| Word unit, fingerprint functions | + 700 | 4.3 |
+| ROM 1,700 → 2,000 words, at the measured density | + 7,700 | 5.5: 1,443 words measured with stages 3 and 4 in, stage 5 still to come |
+| Sequencer, egress and framer measured on RTL | + 58,500 | the skeleton predated the taint rules and had no framer or egress |
+| Word unit, Keccak, SPI link, FRAM master measured on RTL; glue line halved | − 18,700 | stage 2 RTL |
+| Key rows 10 → 4, scratch 20 → 24, state and pins 8 → 10 | 0 | keys derived on use pay for the rows that verification needs (5.2) |
 
 Not in the total, each a separate decision:
 
@@ -640,17 +885,13 @@ Not in the total, each a separate decision:
 |---|---:|---|---|
 | Option F, field kit for aggregate-proof verification: digit-serial Goldilocks unit, round constants, verifier microcode | 75,800 | 37,801 M skeleton + 19,691 M + 18,300 E | D5 |
 | NCO (carrier, FSK, chirp) | 25,940 | M: 54,669 − 28,729 | D7 |
-| One `efuse_async_mem_1x8` macro and glue | 10,100 | LEF 8,075 + 2,000 E | D2 |
-| Characterisation ring array, 16 pairs, with owner-signed read-out | 4,000 | E from 175 µm² per pair M | D13 |
-
-For comparison: the tree today is 1,297,563 µm² flat [M, state report]; configuration S as first written
-(64 rows, GF(2^128) unit, fuse macros, NCO, estimated link and clock unit) was 909,070.
+| Fuse characterisation block | 33,000 (half: 17,000) | E, `physics/efuse/test_structure_spec.md` | D2 |
 
 ### 7.2 What changed from the first S
 
 | Change | Effect | Why |
 |---|---:|---|
-| Register file 64 → 72 rows | + 32,825 | Signature verification needs about 19 scratch rows (4.3); the first S never tallied them |
+| Register file 64 → 72 rows | + 32,825 | Signature verification needs the scratch rows of 4.3; the first S never tallied them |
 | GF(2^128) unit removed | − 48,545 | The fingerprint is two GF(2^64) products in microcode on the word unit |
 | Fuse macros removed | − 18,150 | Not relied on (section 3) |
 | NCO removed | − 25,940 | No protocol role; measured by synthesizing the leaf without it |
@@ -658,35 +899,111 @@ For comparison: the tree today is 1,297,563 µm² flat [M, state report]; config
 | Clock unit 50,000 → 35,000 | − 15,000 | Skeleton and shield leaf measured |
 | NFC frame growth restated on the smaller base | + 940 | |
 | ROM 1,536 → 1,700 words | + 7,500 | Committee gate, fingerprint, lease and owner-root routines |
+| Physics findings, the placed register file, the measured ROM and the stage 2 RTL figures (table in 7.1) | + 192,700 | |
 
-### 7.3 Utilisation and margin
+### 7.3 Does it fit, and what gives way
 
-- Ceiling 0.92 M µm² of synthesized cells, design point at most 0.84 M (11.1). S is 822,700: 49 % of the
-  placeable area, about 55 % as the placer reports it.
-- Margin to the ceiling: about 97,000 µm², 12 % of S. Margin to the demonstrated point: about 12,000.
-- Option F on top of S gives 898,500, about 21,000 under the ceiling. Since 178,000 of S is estimate, that is
-  no margin. Option F beside every organ does not honestly fit; it fits if about 60,000 to 75,000 of organs
-  give way (11.3), or if the measured baseline comes in that much under its estimate.
-- The estimates are replaced by synthesis of real RTL at the end of stages 2 and 3. Additions are decided
-  then, not now.
+Evidence (11.1, and `scratch/lanes/fable-dregg180-phys.last.md`, preliminary): a proxy of 889,888 µm² with the
+register file as a placed array has been placed legally in this slot; buffer repair added 15.7 %, none of it
+in the register file, which is about 25 % of the cells that are placed automatically; the result is 61.5 %
+of the placeable area. Clock tree and routing are still to run. Nothing above 61.5 % after repair has been
+legalised, and the configured target corresponds to about 68 %.
+
+The comparison that carries over is fill after repair, with the two hand-placed arrays (register file, PUF
+slots: 452,200 together) taken at their size and everything else grown by 25 % [D]:
+
+| Configuration | Synthesized | After repair | Fill | Against 61.5 % placed |
+|---|---:|---:|---:|---|
+| S with every organ | 1,015,400 | 1,157,700 | 69.2 % | 128,000 µm² over |
+| without distance bounding | 967,800 | 1,098,200 | 65.6 % | 69,000 over |
+| without distance bounding and NFC: no U5 | 931,100 | 1,052,300 | 62.9 % | 23,000 over |
+| **no U5, no shield (D14)** | **914,800** | **1,031,900** | **61.7 %** | **2,000 over: the same point** |
+| no U5, PUF of three blocks | 899,800 | 1,020,500 | 61.0 % | 9,000 under |
+| no U5, no shield, PUF of three blocks | 883,500 | 1,000,100 | 59.8 % | 29,000 under |
+| no U5, PUF of 630 rings in pairs | 877,100 | 995,700 | 59.5 % | 34,000 under |
+
+Each organ removed also takes its microcode (distance 60 words, NFC 40).
+
+What the physical-design lane has measured since, and what it does to this table
+(`scratch/lanes/fable-dregg180-phys.last.md`, preliminary; detailed routing still to run):
+
+- The placed proxy has its clock tree at 62.4 %, legal, and global routing uses 37 % of the tracks: the chip
+  as a whole is not routing-limited at this fill. The rule to budget by is synthesized area × about 1.16
+  against the 1,673,768 µm² placeable; the "after repair" column above is that rule with the hand-placed
+  arrays exempted, and the two agree within 1 % for these configurations.
+- **The microcode ROM as random logic is the one congested block**: all the routing overflow is in the ROM
+  and sequencer region, and the ROM needs about 50 % local fill, that is, twice its cell area. At 2,000 words
+  that is another 85,000 µm² of floor that the table does not show. Either the ROM is counted double (S
+  without U5 and the shield then stands at about 1.00 M of floor demand: it does not fit), or the ROM gets
+  another structure. Two that need no foundry macro, neither measured: a NOR-plane ROM placed by script
+  like the register file (one row of cells per bit line, routed by template), or splitting the image so
+  that the routines of the hardwired key and record ranges, which change least, are a separate small block.
+  This is now the first thing to resolve, ahead of the sequencer reductions of 7.1, because it is larger.
+- Every separately fenced organ costs about 19,000 µm² of slack and 15 to 45 % of its own area. Fence only
+  the PUF array (which needs its keep-out), the distance fast path if it stays, and the TRNG rings.
+- The 9-track library is never denser. Not pursued.
+
+S with every organ does not fit: it is above anything placed, with a quarter of it estimated, and nothing
+routed. What can give way, in the order recommended:
+
+| # | Reduction | Saves | What is lost | Whose decision |
+|---|---|---:|---|---|
+| 1 | Distance bounding and its timer | 47,600 | The proximity guard of use U5. The presence token stays. It is also the organ with the most unresolved board work: its two pins cannot be protected by a resistor (6.6) | owner (D14) |
+| 2 | NFC receiver and token | 36,700 | The presence guard; with 1, all of U5: capabilities then have no guard that needs a second device | owner (D14) |
+| 3 | Shield | 16,306 | The top-metal serpentine over the register file, the only measure against probing from above | owner (D14) |
+| 4 | PUF of three blocks, 756 rings | 31,300 | Key entropy claim 131 → 98 bits. Every key on the chip derives from this one | owner (D6) |
+| 5 | PUF of 630 rings in pairs, five blocks | 54,000 | The claim becomes h = 0.90 on a gradient that has not been measured: defensible only after silicon | owner (D6) |
+| — | PUF decoder measured instead of estimated | unknown | Nothing. 70,000 is the largest estimate in the table; stage 3 synthesizes it | — |
+| — | Microcode written for size | perhaps 100 to 200 words, 5,000 to 9,000 | Nothing; 5.5 | — |
+| — | Register-file rows | 4,575 a row | Scratch rows are at their floor for a gate statement (4.3); a routine rewritten to use fewer frees rows only in whole-file steps | — |
+
+Where this stands: with the stage 2 RTL's measured control logic in the budget, S does not fit with margin
+under any combination that keeps both the full PUF and the shield. Without use U5 it is 931,100, which is
+23,000 µm² above the one point that has been placed; without U5 and the shield it is at that point; margin
+below it needs a third of the PUF as well, or the sequencer reductions listed in 7.1 to come true.
+
+Recommendation, in order: (a) remove use U5 now (reductions 1 and 2): it is a guard on capabilities that no
+crate implements yet (section 1), and its two organs have the most board work outstanding (6.6);
+(b) have the RTL lane measure the three sequencer reductions of 7.1 and the microcode written for size,
+which together are the only candidates that cost no function; (c) decide between the shield and the PUF's
+fourth block only when (b) and the physical-design lane's routed result are in. The PUF is the root of
+every key and the one block whose claim cannot be repaired after tape-out, so of the two the shield goes
+first; but that is a security reduction either way and it is the owner's decision (D14). Options 4 and 5 are
+listed so that the choice is explicit; 5 is not recommended at all.
+
+- The estimates are replaced by synthesis of real RTL at the end of stage 3. Additions are decided then.
+- Option F (75,800) fits beside nothing in this table.
+- The 20 µm keep-out and the routing obstructions of the PUF array (R2.3, R3.2 to R3.4) are the physical
+  lane's to account for; the fills above count cells only.
 
 ### 7.4 Time per operation at 25 MHz
+
+Model figures are clocks of the one-stage machine. The two-stage machine that 25 MHz needs (6.6) adds
+clocks to microcode, not to the units; in a signature verification about two thirds of the clocks are
+Keccak unit time and one third is microcode, so the times below grow by less than the microcode share
+times the pipeline's overhead. Alternatively the one-stage machine runs at about 12 MHz and every time
+below doubles.
 
 | Operation | Clocks | Time | Basis |
 |---|---:|---:|---|
 | Keccak-f[1600] / Keccak-p[1600,12] | 721 / 373 | 28.8 µs / 14.9 µs | M |
-| One `F` call / one `PRF` call, as the signer microcode runs them | 755 / 765 | 30.2 µs / 30.6 µs | model (`v2/tests/report.py`) |
-| Signer request, fixed part (tag check, shape checks, header) | 472 | 19 µs | model: 1,237 for a request with one chain of zero steps, less its one PRF call |
-| Counted-key request, added (two record reads, write, read-back) | 4,780 | 0.19 ms | model; FRAM transfers estimated at SCK = clk / 4 |
-| WOTS signature, 35 chains, FIPS 205: most steps / digits spread evenly | 388,760 / 219,333 | 15.6 ms / 8.8 ms | model: 516 / 291 Keccak calls |
-| WOTS public key, 35 chains | 422,683 | 16.9 ms | model: 561 Keccak calls |
+| One `F` call / one chain start, as the signer microcode runs them | 748 / 1,150 | 29.9 µs / 46.0 µs | model (`v2/tests/report.py`). A chain start derives `SK.seed` from `K_dev` (about 390 clocks) and runs one `PRF` call |
+| Signer request, fixed part (`K_host` derivation, tag check, shape checks, header) | 867 | 35 µs | model: a request with one chain of zero steps, less its chain start |
+| Counted-key request, added (record tag, write of seven words, read-back) | 4,298 | 0.17 ms | model; FRAM transfers estimated at SCK = clk / 4 |
+| WOTS signature, 35 chains, FIPS 205: most steps / digits spread evenly | 399,269 / 231,417 | 16.0 ms / 9.3 ms | model: 552 / 327 Keccak calls |
+| WOTS public key, 35 chains | 432,875 | 17.3 ms | model: 597 Keccak calls |
 | One-time signature (WOTS+C, FTS), up to 600 calls | 0.46 M | 18 ms | D |
 | SLH-DSA-128f signature, cold / with tagged root cache | 78 M / 6.6 M | 3.1 s / 0.27 s | D: 102,800 / 8,700 calls |
 | SLH-DSA-128s signature, cold / with tagged root cache | 1.61 G / 305 M | 64 s / 12 s | D: 2.12 M / 401,000 calls |
-| G1: one SLH-DSA-128s verification, with the fingerprint passes | at most 3.9 M | at most 0.16 s, about 0.10 s on average | D, E (4.3) |
-| G3: `k` member signatures and Merkle paths | `k` × 3.9 M | 0.5 s for 3 of 5; 1.7 s for 11 of 16; 10.5 s for 67 of 100 | D (4.6) |
-| Boot to READY, unleased | about 5 M | about 0.2 s | E |
-| Lease at power-up | one gate verification | + 0.16 s per signature, plus the authority round trip | D |
+| G1: one SLH-DSA-128s verification, with the hash chains and the fingerprint | at most about 4.1 M; 2.7 M for the signature measured | at most 0.16 s; 0.11 s | D (4.3); model: `GATE` with one authority signature, 2,718,597 clocks |
+| G3: `k` member signatures and Merkle paths | `k` × 4.1 M at most | 0.5 s for 3 of 5 (model: 8.1 M clocks, 0.32 s); 1.8 s for 11 of 16; 11 s for 67 of 100 | D (4.6), model |
+| Boot to READY, unleased | 3.8 M | 0.15 s | model: one verification 2.7 M, PUF 1.14 M (E: 252 quads × 4 rings × 3 measurements × 15 µs, and the decoder), two record reads |
+| Boot of a leased chip to `LEASE_PENDING` | 4.1 M | 0.17 s | model: as above, and TRNG start-up with one nonce 0.31 M for the modelled ring spread |
+| Enrolment: `ENROL` / `COMMIT` | 1.5 M / 3.8 M | 58 ms / 0.15 s | model |
+| TRNG start-up, first use in a power session | at most 3 M | at most 0.12 s | S (6.5); pairs whose beats are too long are abandoned after 64 counts |
+| Nonce: 512 counts and conditioning | 30,000–120,000 | 1.2–4.8 ms | S (6.5) |
+| Key derivation on use | about 390 per use | 16 µs | model |
+| Lease at power-up | one gate verification | + 0.10 s per signature (2.62 M clocks on the model), plus the authority round trip | model |
 | Capability check, per attenuation level | about 400 | 16 µs | D |
 | NFC token | — | 2.3 ms on air | D: 248 bits at 106 kbit/s |
 | Option F: Poseidon2 permutation, 1 / 2 / 4 multiplier bits per clock | about 36,000 / 21,000 / 14,000 | 1.5 / 0.85 / 0.55 ms | D: 472 products and about 3,700 other clocks |
@@ -702,24 +1019,30 @@ does not fit this slot.
 
 ### 7.5 Floorplan sketch (core 1,052 × 1,647 µm, not to scale)
 
-Pad sides as in `librelane/slots/slot_0p5x0p5.yaml`. The identification macros that the precheck requires sit
-in the die corners outside the core (`librelane/macros/macros_qsag.yaml`) and take no core area.
+The floorplan is the physical-design lane's (`v2/phys/floorplan/regions.tcl`), which is the reference; this
+is its outline. The register file is a placed array across the full width and splits the core. The
+identification macros that the precheck requires sit in the die corners outside the core
+(`librelane/macros/macros_qsag.yaml`) and take no core area.
 
 ```
-                         NORTH: analog 3..0 (unused), FRAM SPI 22..25, tamper 26
+                 NORTH: analog 3..0 (unused), FRAM SPI 22..25, tamper 26
         +--------------------------------------------------------------+
-        | PUF array + decoder 114k        | TRNG, FRAM master 26k      |
-        | (quiet corner, halo)            | clock, reset, tamper 35k   |
-        +---------------------------------+----------------------------+
- WEST   |        REGISTER FILE 296k  (shield route above)              |  EAST
- straps |        key rows in the centre, away from every edge          |  NFC 8..10
- CS_N   +-------------------------------+------------------------------+  distance 13, 14
- 27..37 | Keccak 91k                    | NFC 35k                      |  (fast path placed
- unused | word unit 34k                 | distance + TDC 45k           |   against the pads)
-        +-------------------------------+------------------------------+  FAULT, IRQ, CLK_MON
-        | sequencer + ROM 101k          | SPI link 25k | glue 20k      |
+        | PUF ring array 674 x 172 um, placed slots | keep- | FRAM     |
+        | (north-west corner; 20 um keep-out)       | out   | master   |
+        +-------------------------------------------+-------+----------+
+        | PUF decoder, counters, ring selection | shield logic | TRNG  |
+        +==============================================================+
+ WEST   |   REGISTER FILE 72 x 64, placed array, shield route above    |  EAST
+ straps +==============================================================+  FAULT, IRQ,
+ CS_N   | word unit and hold register (strip under the read port)      |  CLK_MON
+        +-------------------------------------+------------------------+  distance 13, 14
+        | Keccak                              | distance, TDC (D14)    |  (fast path placed
+        +-------------------------------------+------------------------+   against the pads)
+        | microcode ROM + sequencer           | NFC front end          |  NFC 8..10
+        +---------------+---------------------+------------------------+
+        | clock, reset  | SPI link                                     |
         +--------------------------------------------------------------+
-                         SOUTH: clock, reset, SPI 0..3
+                 SOUTH: clock, reset, SPI 0..3
 ```
 
 ---
@@ -728,10 +1051,11 @@ in the die corners outside the core (`librelane/macros/macros_qsag.yaml`) and ta
 
 ### 8.1 Golden model
 
-`model/qsag_ni_model.py` is extended to the whole command set and executes **the same microcode image** as
-the RTL, over a Python model of the register file and units. It gains models of the PUF (parametrised by a
-response and a noise vector), the FRAM (with an interface to rewrite it and restore old images), an authority
-with its lease ledger,
+The model in `v2/model` executes **the same microcode image** as the RTL, over a Python model of the
+register file and units. It has models of the PUF (a response, a set of bits that read wrong, the BCH
+decoder), the TRNG (a stochastic model of the ring pairs with the failure modes of 6.5), the FRAM (which
+tests rewrite and restore), and, in `host.py`, the owner root, the authority, committee members and a
+FIPS 205 signer built on hashlib. Still to come: an authority with its lease ledger as a party of its own,
 the NFC token and the distance exchange. The G1 routine is checked against `crates/qsag-core` FIPS 205
 vectors; G3 against the same code with a committee tree; the G2 machine, if option F is taken, against
 `crates/qsag-agg` proofs.
@@ -762,20 +1086,24 @@ Kept: the equivalence proofs of the Goldilocks and GF(2^128) units (`lec/run_lec
 ### 8.3 Regression: every guard has a test that fails without it
 
 Each row is a pair: the accepting case and the refusing cases. A test is admitted only after it has been
-shown to fail on a build with the guard removed.
+shown to fail on a build with the guard removed. On the model the rows Lifecycle, Rollback, Gate (G1, G3),
+Entropy source, Output bound and the model's part of Survival exist in `v2/tests`, and
+`v2/tests/mutation.py` removes each guard in turn; Signer is as far as stage 1 took it; Vat, NFC, Distance
+and Faults do not exist yet.
 
 | Area | Accept | Refuse |
 |---|---|---|
-| Lifecycle | enrol → commit → reset → boot → same keys; re-initialisation of an orphan by the owner root | enrol after commit; commit or re-initialise with a signature over an old nonce; enrol after the FRAM is erased and the helper record written back; boot with altered helper data; boot with a wrong owner signature; any command but `REINIT` in `ORPHAN` |
+| Lifecycle | enrol → commit → reset → boot → same keys; re-initialisation of an orphan by the owner root; reconstruction with up to five wrong bits in a block | enrol after commit; commit or re-initialise with a signature over an old nonce; enrol after the FRAM is erased and the helper record written back; boot with altered helper data; boot with a wrong owner signature; boot with six wrong bits in a block; any command but `NONCE` and `REINIT` in `ORPHAN`; any keyed command before `BOOT` |
 | Rollback | counter advances across reset; leased chip resumes at the granted base | leased chip: older image restored, then any value of `u` at or below one already granted; lease over an old nonce; lease naming a superseded `gen`; counter past the session bound; leaving `LEASE_PENDING` with the TRNG failed. Unleased chip: the test asserts the documented residual, that an older authentic image is accepted |
 | Signer | signatures verify under `crates/qsag-core` | any request naming a chain position; WOTS signing of a root without a valid tag; one-time key used twice, including across reset |
 | Vat | mint, attenuate, invoke within limits | wider child rights; removed guard; spend over limit, including across reset; mint after mint lock, including after reset; expired epoch |
-| Gate | valid statement for this transition | same statement on a second chip model; replay after `seq` advanced; statement for another type or other arguments; bad signature; G3: `k` − 1 members, a member repeated, indices out of order, a key not under the pinned root, a path to another root; G2 (option F): unpinned program, program with an assertion removed, bitmap under threshold, a stated challenge that differs from the transcript |
+| Gate | valid statement for this transition | same statement on a second chip model; replay after `seq` advanced; statement for another type or other arguments; bad signature; a stated chain end or FORS root that differs in either pass, in every position class; G3: `k` − 1 members, a member repeated, indices out of order, a key not under the pinned root, a path to another root; G2 (option F): unpinned program, program with an assertion removed, bitmap under threshold, a stated challenge that differs from the transcript |
 | NFC | fresh token bound to the request | replayed counter; wrong binding; bad tag; valid CRC only |
 | Distance | all rounds correct in time | one wrong bit; late answer; calibration result presented as validity |
 | Output bound | — | for every opcode: response longer than its limit; any key-dependent word in any response, FRAM write, response length or cycle count that the manifest does not list (checked by propagating a taint from key rows in the model and the RTL, not by comparing values) |
 | Faults | — | reset or zeroise injected at every micro-PC of every routine: no key-dependent output, lifecycle not advanced without its record write |
-| Survival | boot with TRNG dead, internal oscillator dead, FRAM absent, tamper pad floating before lock | — |
+| Survival | boot with TRNG dead, internal oscillator dead, FRAM absent, tamper pad floating before lock; a gate statement accepted with the TRNG dead | — |
+| Entropy source | nonce from a pair that passes | a noise-free source (V at most 0.33); locked rings; jitter that is not white; no qualifying pair; a source that degrades after start-up; enrolment, `REINIT` and lease with the source failed |
 
 ### 8.4 Gate level
 
@@ -802,7 +1130,7 @@ crossings (SCK, NFC clock); then an audit of the diff and of every number by a m
 | `qsag_p2_rc` (option F); `qsag_gl64_karatsuba_csa`, `qsag_field_engine` (configuration L only) | 593 vectors against the Lean oracle fixture; `lec/run_lec.py`, `run_mul_lec.py`, `run_prefix_lec.py` |
 | `qsag_gf128_clmul` (configuration L only) | `lec/lec_gf128.sv` |
 | `qsag_cells` | used by every regression |
-| `qsag_trng`, `qsag_anchor_spi` | scenarios `trng`, FRAM rollback transactions |
+| `qsag_anchor_spi` | FRAM rollback transactions. `qsag_trng` is not kept: 6.5 |
 | Latch-row and hold-register scheme of `qsag_sponge` | full-chip regression |
 | BCH decoder, counters and ring cell of `dregg_ro_puf_bch` | `tb/unit_puf.cpp` |
 | Receiver of `dregg_nfc_nco`; responder latch and Vernier chain of `dregg_distance_tdc` | `tb/unit_tdc.cpp` |
@@ -828,8 +1156,8 @@ Each stage ends with the stated regression passing. Effort is lane-days for one 
 |---|---|---|---:|
 | 1 | Model first: microcode assembler, model interpreter, register-file and unit models; port PING, hash, key load, PRF_msg, WOTS and FORS, the anchor, and (L) Poseidon2 and Merkle. **Done, in `v2/`** | Model answers 50 of today's 54 script transactions identically, 14 of them from requests rebuilt in the new signer and provisioning formats; the four verifier-VM transactions belong to stage 7. Every decoder rule of 5.3 has a refusing test, and a mutation harness (`v2/tests/mutation.py`, 153 mutants) keeps it so | 4 |
 | 2 | Register file, sequencer, word unit, egress in RTL with the kept Keccak unit; SPI link only, with the decoder rules of 5.3 as modelled | RTL equals model on stage 1, including every refusing microprogram of `v2/tests/test_output_bound.py`; properties 1, 2, 3, 6 of 8.2 proved | 5 |
-| 3 | Lifecycle: FRAM records, owner-root enrolment and re-initialisation, boot, PUF array with fixed pairing, leases and the authority model | Lifecycle and rollback rows of 8.3; synthesis of everything so far, replacing the estimates of 7.1 | 6 |
-| 4 | G1 routine with the microcoded fingerprint, G3, transitions; review of the fingerprint and lease arguments | Gate rows of 8.3 for G1 and G3 | 5 |
+| 3 | Lifecycle: FRAM records, owner-root enrolment and re-initialisation, boot, PUF array in quads, the coherent-sampling TRNG, leases and the authority model. **Model and microcode done, in `v2/`; RTL and synthesis not** | Lifecycle and rollback rows of 8.3; synthesis of everything so far, replacing the estimates of 7.1 | 6 |
+| 4 | G1 routine with the microcoded fingerprint, G3, transitions; review of the fingerprint and lease arguments. **Model and microcode done, in `v2/` (transitions `LEASE`, `EPOCH`, `RETIRE`, `ROTATE`); RTL and the review not** | Gate rows of 8.3 for G1 and G3 | 5 |
 | 5 | Vat in microcode; NFC token; distance roles; guards; rest of the signer: FORS indices from `H_msg` on chip, root tagging (7.4) | Vat, NFC, distance rows; signer rows | 5 |
 | 6 | Survival: clock strap, reset pad, tamper arming, self-test extension, fault-injection sweep | Faults and survival rows | 3 |
 | 7 | Option F only (decided after stage 3): digit-serial field unit, verifier machine in microcode with stated challenges, program pinning, compiler from `qsag-agg` | Real regime-7 proof accepted; mutated proof and unpinned program refused; the four verifier-VM transactions of today's script, re-expressed under 4.4 | 10 |
@@ -854,9 +1182,10 @@ What could be, with two lanes in parallel, is an engineering sample:
 |---|---|---|
 | Logic | Stage 2 machine (register file, sequencer, word unit, Keccak, SPI) with the stage-1 ROM as modelled and tested: PING, hashing, key load, PRF_msg, WOTS and FORS, the FRAM anchor | Lifecycle, enrolment, PUF key derivation, leases, the gate (G1, G3), vat, seal, option F |
 | Organs | Present for measurement, with open read-out and no security claim: the PUF ring array, the TRNG, the distance fast path, the NFC receiver front end, the clock monitor and tamper input | Their authenticated use: helper data, tokens, keyed distance rounds |
-| Area | about 660,000 µm² [E], 39 % geometric | 822,700 |
+| Area | about 660,000 µm² [E, from before the stage 2 RTL was measured: its datapath, control, ROM and link alone are 562,579 M], 39 % geometric | 1,015,400 with every organ (7.3) |
 | What it is | A signing coprocessor with volatile host-loaded keys, and a characterisation vehicle: PUF entropy and reliability across 1,000 dies, ring speeds, TRNG quality, latch-array timing, pad and supply behaviour | The product |
 | What it is not | A root of trust. It has no lifecycle and its test read-outs are open | |
+| Also carried, if it passes the foundry decks | The fuse characterisation block of 6.6 and the PUF and TRNG ring slots under the placement rules of 6.1, so that their measurements set the product's parameters | |
 
 Lane A writes stage 2 RTL against the model (5 days) and the measurement read-outs (2 days). Lane B starts the
 physical flow on day one with the existing leaves and a register-file stub, so that the first complete pass
@@ -892,17 +1221,18 @@ Open, with recommendations:
 
 | # | Decision | Recommendation | Cost either way |
 |---|---|---|---|
-| D2 | Fit one eFuse macro as redundant, read-back-verified hardening (3.4) | **Not on the first tape-out.** It is an experimental hard macro that has to pass the foundry decks; nothing depends on it. Revisit when silicon results for the macro exist | Yes: 10,100 µm² and a DRC risk on the whole die. No: `ROTATE`, `REINIT` and `RETIRE` stay reversible on an unleased chip |
+| D2 | Fuses | **None in S, for any bit, and no characterisation block either.** One fuse cannot carry a one-way bit (3.4); a redundant scheme is whole macros per bit; the characterisation block is 33,000 µm² that S does not have, with a foundry-deck risk on the whole die. Put the block on an engineering sample if one is made | No: `ROTATE`, `REINIT` and `RETIRE` stay reversible on an unleased chip, and the PDK fuse stays unmeasured |
 | D3 | Owner root public-key digest as a mask constant | **Yes.** Enrolment, re-initialisation and debug unlock all rest on it now | Yes: every die of the run trusts one key, fixed at tape-out, and that key can unlock the characterisation read-out. No: nothing authenticates enrolment, and an erased FRAM can be re-enrolled by anyone |
 | D4 | Host link | **SPI only** (as built in `v2/`) | Other links: about 55,000 µm² and two more clock domains |
 | D5 | Gate | **G1 and G3 in the baseline.** Option F (G2, aggregate proofs) decided after stage 3, when the estimates in 7.1 are measured; it is not for Run 3 | Option F: 75,800 µm², about 24 s per proof, a verifier compiler that does not exist, and about 60,000 to 75,000 µm² of organs to give up (distance bounding first) unless the measured baseline comes in low |
-| D6 | PUF size | **504 rings, four blocks** | A fifth block is 11,000 µm² and buys margin against biased bits |
+| D6 | PUF array | **1,008 rings as 252 quads, four blocks, under the placement rules of 6.1** | 219,600 µm² against 118,000. Three blocks: 31,300 less and a 98-bit claim. 630 rings in pairs with five blocks: 54,000 less and a claim that cannot be defended before silicon. The array as drawn before: no claim |
 | D7 | NCO | **Deferred** | 25,940 µm² measured |
 | D9 | Mode (coprocessor or vat) fixed per chip at `COMMIT` | **Yes** | A chip serves one role |
 | D10 | Design clock 25 MHz | **Yes** | Every time in 7.4 scales with it; no timing result exists |
 | D11 | Rollback policy per chip: leased or unleased (3.4) | **Leased** for any chip that guards one-time keys or spend limits against someone who may hold the board; unleased otherwise | Leased: the authority must be online at every power-up, and unused grants are lost. Unleased: an attacker with the board can restore any earlier state |
 | D12 | Run 3 | **Tape out only the engineering sample of 9.4, and only if both gates there are met and the money is there.** Otherwise skip Run 3 | Engineering sample: $4,500 and about three weeks of two lanes, for silicon data on the PUF, TRNG, register file and pads. Skip: first silicon is also the first product attempt |
-| D13 | Characterisation ring array with owner-signed read-out | **Yes** | 4,000 µm². Without it there is no silicon measurement of PUF entropy that does not also expose key material |
+| D13 | Characterisation ring array with owner-signed read-out | **Yes**, at least 16 quads in the key array's block; now in the total | 6,500 µm². Without it there is no silicon measurement of PUF entropy that does not also expose key material |
+| D14 | What gives way for the PUF, the placed register file and the measured control logic (7.3) | **Use U5 now. Then, only if the sequencer reductions of 7.1 and the routed result do not find the rest: the shield before any part of the PUF** | Every organ: 1,015,400 µm², far above anything placed. Without U5: 931,100, still 23,000 over the placed point. Without U5 and the shield: 914,800, at it. Each further step is a security claim given up: probing resistance (shield) or key entropy 131 → 98 bits (PUF of three blocks) |
 
 D8 (round-per-clock Keccak) is closed: it does not fit this slot.
 
@@ -944,10 +1274,21 @@ Reading them:
 | Ceiling: the configured 62 % target | 0.92 M | 68 % | Never reached with a legal result; no failure known below it either |
 | Known failures | 1.28 M, 1.45 M | 94 %, 107 % | Repair or legalisation failed |
 
+Superseded by the measurements of the physical-design lane reported in 7.3: budget by synthesized area ×
+about 1.16 against the placeable area, with the ROM counted at twice its cell area. The reasoning below is
+the earlier estimate, kept for the record.
+
 **The area ceiling is 0.92 M µm² of synthesized cells, and the design point should be at or below 0.84 M.**
 Between 0.92 M and 1.28 M there is no evidence at all. The organ regions (PUF corner with a halo, NFC and
 distance against their pads) need local fill of at most 70 to 75 % [C, basin search]; after repair, 0.92 M
-leaves almost nothing for that and 0.84 M leaves some. Configuration S is 822,700.
+leaves almost nothing for that and 0.84 M leaves some.
+
+Since this was written the physical-design lane has placed a proxy of 889,888 µm² legally with the register
+file as a placed array (61.5 % after a repair growth of 15.7 %; `scratch/lanes/fable-dregg180-phys.last.md`,
+preliminary, clock tree and routing pending), which moves the demonstrated line from 0.84 M to 0.89 M of
+this cell mix. Hand-placed arrays take no repair buffers, so the comparison is made on fill after repair in
+7.3. Configuration S with every organ is 1,015,400 and does not fit; without use U5 it is 931,100, and
+without U5 and the shield 914,800.
 
 ### 11.2 What the default pad ring fixes
 
@@ -999,13 +1340,14 @@ Conclusions:
 
 ### 11.4 What configuration S is, in one list
 
-- One 72-row register file; lane-serial Keccak; word unit; microcoded sequencer with about 1,700 ROM words.
+- One 72-row register file; lane-serial Keccak; word unit; microcoded sequencer with about 2,000 ROM words.
 - SPI host link; FRAM master; TRNG; pad clock with a fixed ring as monitor; tamper, shield, glitch sensors.
-- PUF with 504 rings and fixed pairing; NFC receiver with a keyed, counted token; distance bounding with
-  keyed response bits and a placed fast path.
+- PUF with 1,008 rings in 252 quads; NFC receiver with a keyed, counted token; distance bounding with
+  keyed response bits and a placed fast path; decision D14 recommends building without these two.
 - Signer (use U1), anchor and leases (U2), vat (U3), seal and release (U4), guards (U5).
 - Gate (U6): G1 and G3. No algebraic verifier, no GF(2^128) unit, no NCO, no fuses, no second link.
-- 822,700 µm² synthesized [M and E as labelled in 7.1]: 49 % geometric, about 55 % as the placer reports it.
+- 1,015,400 µm² synthesized with every organ, 931,100 without use U5 [M and E as labelled in 7.1]: 69.2 % and
+  62.9 % of the placeable area after buffer repair, against 61.5 % placed so far (7.3).
 
 
 ---
