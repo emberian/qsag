@@ -15,11 +15,11 @@ use crate::tower::ct_eq_bytes32;
 /// Magic 32-bit header word `"QSI1"` (`0x5153_4931`) for canonical 128-byte `TransactionIntent`.
 pub const INTENT_V1_MAGIC: u32 = 0x5153_4931;
 
-/// Conjunctive hybrid witness suite code `HybridEd25519MlDsa65` (`0x0501`).
-pub const SUITE_HYBRID_ED25519_MLDSA65: u16 = 0x0501;
+/// Conjunctive hybrid witness suite code `HybridSecp256k1MlDsa44` (`0x0501`).
+pub const SUITE_HYBRID_SECP256K1_MLDSA44: u16 = 0x0501;
 
-/// Conjunctive hybrid witness suite code `HybridSecp256k1SlhDsa` (`0x0502`).
-pub const SUITE_HYBRID_SECP256K1_SLHDSA: u16 = 0x0502;
+/// Conjunctive hybrid witness suite code `HybridEd25519MlDsa65` (`0x0502`).
+pub const SUITE_HYBRID_ED25519_MLDSA65: u16 = 0x0502;
 
 /// Maximum representable 128-bit rolling-window velocity counter (`2^128 - 1`).
 pub const MAX_VELOCITY_U128: u128 = 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF;
@@ -209,67 +209,92 @@ impl IntentAddressVersion {
     }
 }
 
-/// Canonical `qsag-addr` key identity kind (`SingleKey = 1`, `ThresholdCommittee = 2`, `PolicyBound = 3`).
+/// Canonical `qsag-addr` `KeyIdentityKind` (`SingleOrThreshold = 1`, `HybridConjunctive = 2`,
+/// `ScriptPredicate = 3`): same names, same wire bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntentIdentityKind {
-    SingleKey,
-    ThresholdCommittee,
-    PolicyBound,
+    SingleOrThreshold,
+    HybridConjunctive,
+    ScriptPredicate,
 }
 
 impl IntentIdentityKind {
     #[inline]
     pub const fn to_u8(self) -> u8 {
         match self {
-            Self::SingleKey => 1,
-            Self::ThresholdCommittee => 2,
-            Self::PolicyBound => 3,
+            Self::SingleOrThreshold => 1,
+            Self::HybridConjunctive => 2,
+            Self::ScriptPredicate => 3,
         }
     }
 
     #[inline]
     pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
-            1 => Some(Self::SingleKey),
-            2 => Some(Self::ThresholdCommittee),
-            3 => Some(Self::PolicyBound),
+            1 => Some(Self::SingleOrThreshold),
+            2 => Some(Self::HybridConjunctive),
+            3 => Some(Self::ScriptPredicate),
             _ => None,
         }
     }
 }
 
-/// Canonical `qsag-addr` witness suite tag (`0x0101`, `0x0201`, `0x0302`, `0x0501`, `0x0502`).
+/// The subset of the canonical `qsag-addr` `WitnessSuiteTag` this verified namespace admits
+/// (`MlDsa65 = 0x0102`, `SlhDsa128f = 0x0202`, `JortsPoseidon2 = 0x0214`,
+/// `HybridSecp256k1MlDsa44 = 0x0501`, `HybridEd25519MlDsa65 = 0x0502`): same names, same wire
+/// words. Every other canonical suite word is refused by [`IntentSuiteTag::from_u16`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntentSuiteTag {
+    MlDsa65,
+    SlhDsa128f,
     JortsPoseidon2,
-    SlhDsaShake128f,
-    ThresholdMlDsa65,
+    HybridSecp256k1MlDsa44,
     HybridEd25519MlDsa65,
-    HybridSecp256k1SlhDsa,
 }
 
 impl IntentSuiteTag {
     #[inline]
     pub const fn to_u16(self) -> u16 {
         match self {
-            Self::JortsPoseidon2 => 0x0101,
-            Self::SlhDsaShake128f => 0x0201,
-            Self::ThresholdMlDsa65 => 0x0302,
+            Self::MlDsa65 => 0x0102,
+            Self::SlhDsa128f => 0x0202,
+            Self::JortsPoseidon2 => 0x0214,
+            Self::HybridSecp256k1MlDsa44 => SUITE_HYBRID_SECP256K1_MLDSA44,
             Self::HybridEd25519MlDsa65 => SUITE_HYBRID_ED25519_MLDSA65,
-            Self::HybridSecp256k1SlhDsa => SUITE_HYBRID_SECP256K1_SLHDSA,
         }
     }
 
     #[inline]
     pub const fn from_u16(v: u16) -> Option<Self> {
         match v {
-            0x0101 => Some(Self::JortsPoseidon2),
-            0x0201 => Some(Self::SlhDsaShake128f),
-            0x0302 => Some(Self::ThresholdMlDsa65),
-            0x0501 => Some(Self::HybridEd25519MlDsa65),
-            0x0502 => Some(Self::HybridSecp256k1SlhDsa),
+            0x0102 => Some(Self::MlDsa65),
+            0x0202 => Some(Self::SlhDsa128f),
+            0x0214 => Some(Self::JortsPoseidon2),
+            0x0501 => Some(Self::HybridSecp256k1MlDsa44),
+            0x0502 => Some(Self::HybridEd25519MlDsa65),
             _ => None,
         }
+    }
+
+    /// The identity kind this suite mandates: the canonical `qsag-addr`
+    /// `WitnessSuiteTag::expected_identity_kind`, restricted to the suites admitted here. No
+    /// admitted suite mandates `ScriptPredicate`.
+    #[inline]
+    pub const fn expected_identity_kind(self) -> IntentIdentityKind {
+        match self {
+            Self::MlDsa65 => IntentIdentityKind::SingleOrThreshold,
+            Self::SlhDsa128f => IntentIdentityKind::SingleOrThreshold,
+            Self::JortsPoseidon2 => IntentIdentityKind::SingleOrThreshold,
+            Self::HybridSecp256k1MlDsa44 => IntentIdentityKind::HybridConjunctive,
+            Self::HybridEd25519MlDsa65 => IntentIdentityKind::HybridConjunctive,
+        }
+    }
+
+    /// `true` iff `(self, kind)` is a pair the canonical
+    /// `WitnessSuiteTag::validate_identity_kind` accepts.
+    #[inline]
+    pub const fn admits_identity_kind(self, kind: IntentIdentityKind) -> bool {
+        self.expected_identity_kind().to_u8() == kind.to_u8()
     }
 }
 
@@ -278,7 +303,8 @@ impl IntentSuiteTag {
 /// - `bytes[0..4]`   : `INTENT_V1_MAGIC` (`0x5153_4931`, big-endian)
 /// - `bytes[4..6]`   : `suite_tag` (`u16` big-endian, validated `IntentSuiteTag`)
 /// - `bytes[6]`      : `address_version` (`u8`, validated `IntentAddressVersion`)
-/// - `bytes[7]`      : `identity_kind` (`u8`, validated `IntentIdentityKind`)
+/// - `bytes[7]`      : `identity_kind` (`u8`, validated `IntentIdentityKind`, which
+///   [`decode_intent_128`] requires to be the one `suite_tag` mandates)
 /// - `bytes[8..16]`  : `chain_id` (`u64` big-endian)
 /// - `bytes[16..24]` : `nonce` (`u64` big-endian)
 /// - `bytes[24..32]` : `timestamp_secs` (`u64` big-endian)
@@ -542,7 +568,9 @@ pub(crate) const fn pack_4x32(
     ]
 }
 
-/// Encode `CanonicalIntent128` deterministically into a fixed 128-byte wire frame.
+/// Encode `CanonicalIntent128` deterministically into a fixed 128-byte wire frame. The encoding
+/// is total and injective; [`decode_intent_128`] reads the frame back only when
+/// `intent.suite_tag.admits_identity_kind(intent.identity_kind)`.
 pub const fn encode_intent_128(intent: &CanonicalIntent128) -> [u8; 128] {
     let b0 = encode_intent_header32(intent);
     let b1 = encode_intent_amounts32(intent.amount_units, intent.rolling_window_spent);
@@ -554,7 +582,9 @@ pub const fn encode_intent_128(intent: &CanonicalIntent128) -> [u8; 128] {
     )
 }
 
-/// Decode and validate a 128-byte canonical `TransactionIntent` frame (`None` on any non-canonical tag/magic).
+/// Decode and validate a 128-byte canonical `TransactionIntent` frame. `None` on a wrong magic,
+/// an unknown tag, or an `identity_kind` that `suite_tag` does not mandate
+/// ([`IntentSuiteTag::admits_identity_kind`]), as in the canonical `qsag-addr` decoder.
 pub const fn decode_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> {
     let b0 = unpack_block32(bytes, 0);
     let b1 = unpack_block32(bytes, 32);
@@ -564,6 +594,9 @@ pub const fn decode_intent_128(bytes: &[u8; 128]) -> Option<CanonicalIntent128> 
         Some(h) => h,
         None => return None,
     };
+    if !hdr.suite_tag.admits_identity_kind(hdr.identity_kind) {
+        return None;
+    }
     let (amount_units, rolling_window_spent) = decode_intent_amounts32(&b1);
     Some(CanonicalIntent128 {
         suite_tag: hdr.suite_tag,
@@ -623,9 +656,9 @@ pub fn check_hybrid_domain_framing(
     if diff != 0 {
         return false;
     }
-    let suite_valid = if suite_code == SUITE_HYBRID_ED25519_MLDSA65 {
+    let suite_valid = if suite_code == SUITE_HYBRID_SECP256K1_MLDSA44 {
         true
-    } else if suite_code == SUITE_HYBRID_SECP256K1_SLHDSA {
+    } else if suite_code == SUITE_HYBRID_ED25519_MLDSA65 {
         true
     } else {
         false
