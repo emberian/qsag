@@ -75,8 +75,11 @@
 //! take every online server's state, like `qsag_core::poseidon2_mpc`: they model
 //! honest execution and detect altered shares, MACs and tuples. A networked
 //! deployment must send each opened share over authenticated channels with consistent
-//! broadcast and feed the received values to the same checks. Verifiability is
-//! against the enrolled record, not a public proof. The Poseidon2 keyed sponge and
+//! broadcast and feed the received values to the same checks. That distributed
+//! endpoint/transport implementation is not supplied by this module; the current
+//! all-states-in-one-call API is not a deployment across mutually distrusting
+//! processes. Verifiability is against the enrolled record, not a public proof.
+//! The Poseidon2 keyed sponge and
 //! cSHAKE assumptions are those of [`crate::voprf`].
 
 use crate::toprf_engine::hash;

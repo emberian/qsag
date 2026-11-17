@@ -1,4 +1,6 @@
-//! Threshold oblivious PRF with replicated, actively checked arithmetic.
+//! Custom symmetric Poseidon2/cSHAKE threshold oblivious PRF with replicated,
+//! actively checked arithmetic; not a lattice construction or two-round protocol.
+//! Server-to-server multiplication requires multiple communication rounds.
 //!
 //! # Construction and security boundary
 //! This backend supports exactly threshold t=2, n=5, with at most t'=1 statically

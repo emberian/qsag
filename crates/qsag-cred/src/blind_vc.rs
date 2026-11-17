@@ -5,14 +5,23 @@
 //! issuance message replaces the former threshold lattice signature. The issuer
 //! enrolls that commitment in its authoritative accumulator. Verifiers must pin
 //! the accumulator root, epoch policy, schema and fresh challenge externally.
-//! A token alone is not an independently publicly verifiable signature.
+//! A token alone is not an independently publicly verifiable signature. Anyone
+//! with trusted issuer ML-DSA and OPRF public records can verify a membership
+//! presentation and the issuer's root attestation; that verifies enrollment and
+//! the proved attributes, not an independent credential signature or the truth
+//! of the issuer's attribute claims. Revocation/freshness requires external root
+//! and epoch policy. Replay is refused by the verifier's challenge ledger:
+//! [`verify_presentation`] accepts a presentation only by consuming a challenge
+//! from a [`PresentationChallenges`] ([`VerifierChallengeLedger`], or the durable
+//! `FsVerifierChallengeLedger` with feature `std`).
 //!
 //! Attribute, presentation, scope and Merkle commitments use a rate-6,
 //! capacity-6 Poseidon2 sponge with six-limb digests.
 //! Issuance commitments use 3-party Goldilocks ZKBoo; selective-disclosure
 //! membership presentations use an N=256 seed-tree MPC-in-the-head polynomial
 //! multiplication check over GF(p^5) = GF(p)[T]/(T^5 - 3). No quantum Fiat-Shamir
-//! theorem is claimed. Fresh mode avoids an intentional stable scope pseudonym;
+//! theorem is claimed. Fresh mode requires fresh private holder entropy for every
+//! presentation and avoids an intentional stable scope pseudonym;
 //! revealed attributes and application metadata may still identify the holder.
 //! Issuance attributes and the accumulator leaf are visible to the issuer.
 //! The OPRF protects its input against one server, not against a caller that
@@ -37,6 +46,12 @@ use qsag_accel::poseidon2::{
 use qsag_core::field::goldilocks::{GOLDILOCKS_EPSILON, Goldilocks};
 
 use crate::fips204_ntt::{MlDsaLevel, MlDsaSigningKey, ml_dsa_sign_deterministic, ml_dsa_verify};
+#[cfg(feature = "std")]
+pub use crate::presentation_challenge::FsVerifierChallengeLedger;
+pub use crate::presentation_challenge::{
+    ChallengeError, MAX_OUTSTANDING_CHALLENGES, PresentationChallenges, ReplayNotPrevented,
+    VerifierChallengeLedger,
+};
 use crate::voprf::{Evaluation, PublicKey};
 
 /// Maximum canonical Goldilocks field attributes per `PiBlindVc` credential.
@@ -98,9 +113,6 @@ impl ZkSoundnessProfile {
 
 pub const VC_FINAL_OUTPUTS: usize = 18 + VC_ACCUMULATOR_DEPTH;
 
-/// Verifier challenges one [`HolderCredentialSecret`] remembers (2 MiB of history).
-pub const MAX_SEEN_VERIFIER_CHALLENGES: usize = 1 << 16;
-
 const VC_ATTR_COMMIT_TAG: u64 = 0x5643_4154_5452_5631; // "VCATTRV1"
 const VC_PRES_COMMIT_TAG: u64 = 0x5643_5052_4553_5631; // "VCPRESV1"
 const VC_SCOPE_TAG_DOM: u64 = 0x5643_5343_4F50_5631; // "VCSCOPV1"
@@ -109,26 +121,13 @@ const VC_MERKLE_NODE_TAG: u64 = 0x5643_4D4B_4C45_5631; // "VCMKLEV1"
 /// Errors returned by `PiBlindVc` issuance, accumulator enrollment, or selective disclosure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlindVcError {
-    AttributeCountExceeded {
-        count: usize,
-    },
-    NonCanonicalGoldilocksAttribute {
-        index: usize,
-    },
-    InvalidDisclosedAttributeIndex {
-        index: usize,
-    },
-    DuplicateDisclosedAttributeIndex {
-        index: usize,
-    },
-    DisclosedAttributeValueMismatch {
-        index: usize,
-    },
+    AttributeCountExceeded { count: usize },
+    NonCanonicalGoldilocksAttribute { index: usize },
+    InvalidDisclosedAttributeIndex { index: usize },
+    DuplicateDisclosedAttributeIndex { index: usize },
+    DisclosedAttributeValueMismatch { index: usize },
     BlindIssuanceProofInvalid,
     InvalidOprfEvaluation,
-    ReplayedVerifierChallenge,
-    /// The holder's challenge history reached [`MAX_SEEN_VERIFIER_CHALLENGES`].
-    ChallengeHistoryFull,
     AccumulatorFull,
     InvalidAccumulatorLeafIndex,
     CredentialBindingMismatch,
@@ -644,26 +643,29 @@ pub struct OpenedZkBooRepetition {
 
 /// Holder secret state with redacted `Debug` and zeroizing `Drop`.
 ///
-/// # Challenge history
-/// `seen_challenges` records every verifier challenge this value has answered,
-/// so the same challenge is refused twice (`ReplayedVerifierChallenge`). Its
-/// scope is exactly this in-memory value:
-/// - It is **not persisted**. A holder secret rebuilt after a restart, or
-///   restored from a backup, starts with an empty history. Replay protection
-///   across restarts is the verifier's: it must issue fresh challenges and
-///   reject a presentation whose challenge it did not issue. The history is a
-///   second line of defence for the lifetime of one process.
-/// - It is **bounded** at [`MAX_SEEN_VERIFIER_CHALLENGES`] entries (32 bytes
-///   each). When it is full, further presentations are refused with
-///   [`BlindVcError::ChallengeHistoryFull`] instead of forgetting old
-///   challenges; obtain a new credential to continue.
-/// - It is kept sorted, so a lookup is a binary search.
+/// # Presentation freshness and replay
+/// No verifier-controlled challenge history is kept. Refusing a challenge seen
+/// at another verifier would let colluding verifiers recognize this holder;
+/// even a bounded scoped history could reveal prior use through exhaustion.
+/// Callers supply fresh private entropy for every presentation. The nonce binds
+/// that entropy to the scope, challenge, mode, issuer root and disclosure; proof
+/// randomness is additionally hedged with the complete public statement.
+///
+/// This preserves fresh randomized proofs and binding to the requested scope
+/// and challenge. It deliberately gives up local duplicate-challenge refusal.
+/// Captured-proof replay was never prevented by holder history. It is refused on
+/// the verifier's side: [`verify_presentation`] consumes the presentation's
+/// challenge from the verifier's [`PresentationChallenges`] ledger, which issued
+/// it, expires it and accepts it once. A
+/// repeated challenge is safe to answer with fresh entropy, but revealing the
+/// same attributes or using `ScopedPseudonym` can still identify the holder.
+///
+/// This type has no serialization API or persisted challenge-history format.
 pub struct HolderCredentialSecret {
     pub schema_id: u64,
     arity: usize,
     attrs: [u64; MAX_VC_ATTRS],
     holder_blind: [u64; 4],
-    seen_challenges: core::cell::RefCell<Vec<[u8; 32]>>,
 }
 
 impl fmt::Debug for HolderCredentialSecret {
@@ -680,27 +682,10 @@ impl Drop for HolderCredentialSecret {
     fn drop(&mut self) {
         ct_zeroize_u64s(&mut self.attrs);
         ct_zeroize_u64s(&mut self.holder_blind);
-        self.seen_challenges.get_mut().secret_wipe();
     }
 }
 
 impl HolderCredentialSecret {
-    /// Records `challenge` in the sorted history, or refuses it when it was
-    /// answered before or the history is full.
-    fn burn_verifier_challenge(&self, challenge: &[u8; 32]) -> Result<(), BlindVcError> {
-        let mut seen = self.seen_challenges.borrow_mut();
-        match seen.binary_search(challenge) {
-            Ok(_) => Err(BlindVcError::ReplayedVerifierChallenge),
-            Err(_) if seen.len() >= MAX_SEEN_VERIFIER_CHALLENGES => {
-                Err(BlindVcError::ChallengeHistoryFull)
-            }
-            Err(position) => {
-                seen.insert(position, *challenge);
-                Ok(())
-            }
-        }
-    }
-
     /// Number of active Goldilocks attribute limbs (`<= MAX_VC_ATTRS`) committed by this credential.
     #[inline]
     pub const fn arity(&self) -> usize {
@@ -781,7 +766,8 @@ impl core::fmt::Debug for BlindVerifiableCredential {
     }
 }
 
-/// Prepare a blind issuance request + holder secret from canonical Goldilocks attributes (`<= 6`).
+/// Prepare an issuance request and holder secret from at most [`MAX_VC_ATTRS`]
+/// canonical Goldilocks attributes. The request discloses those attributes.
 pub fn holder_prepare_blind_issuance(
     schema_id: u64,
     issuer_attested_attrs: &[u64],
@@ -1059,7 +1045,6 @@ pub fn holder_prepare_blind_issuance_with_profile(
             arity: issuer_attested_attrs.len(),
             attrs: *attrs,
             holder_blind: final_holder_blind,
-            seen_challenges: core::cell::RefCell::new(Vec::new()),
         },
     ))
 }
@@ -3200,7 +3185,8 @@ fn serialize_sd_instance(instance: &SdInstance<'_>) -> Vec<u8> {
     out
 }
 
-/// What the verifier asked for: its scope, its fresh challenge, and whether
+/// What the verifier asked for: its scope, its fresh challenge (from
+/// [`VerifierChallengeLedger::issue`] or the durable ledger), and whether
 /// presentations to it may be linked.
 pub struct PresentationRequest<'a> {
     pub verifier_scope: &'a [u8],
@@ -3208,7 +3194,12 @@ pub struct PresentationRequest<'a> {
     pub mode: PresentationMode,
 }
 
-/// Generate an unlinkable selective-disclosure ZK presentation revealing only `disclosed_indices`.
+/// Generate a selective-disclosure ZK presentation revealing only `disclosed_indices`.
+///
+/// `presentation_entropy` must be 32 fresh private random bytes for each call,
+/// including retries. Reusing both entropy and a request repeats the proof;
+/// statement hedging protects distinct statements, not identical requests.
+/// Challenges are not blacklisted: see [`HolderCredentialSecret`].
 pub fn prove_selective_disclosure(
     cred: &BlindVerifiableCredential,
     holder_secret: &HolderCredentialSecret,
@@ -3228,7 +3219,8 @@ pub fn prove_selective_disclosure(
     )
 }
 
-/// Generate an unlinkable selective-disclosure presentation under an explicit soundness profile.
+/// Generate a selective-disclosure presentation under an explicit soundness profile.
+/// The fresh-private-entropy contract of [`prove_selective_disclosure`] applies.
 #[allow(clippy::too_many_arguments)]
 pub fn prove_selective_disclosure_with_profile(
     cred: &BlindVerifiableCredential,
@@ -3303,10 +3295,6 @@ pub fn prove_selective_disclosure_with_profile(
         cred.issuer_epoch,
         &accumulator_root,
     );
-
-    // Burn before producing a proof, including failed attempts. Scope changes
-    // must not let a verifier bypass the per-credential challenge history.
-    holder_secret.burn_verifier_challenge(verifier_challenge)?;
 
     let mut nonce_bind = Vec::with_capacity(64 + sorted_idx.len() * 12);
     nonce_bind.extend_from_slice(&cred.issuer_epoch.to_le_bytes());
@@ -3894,6 +3882,17 @@ pub fn prove_selective_disclosure_with_profile(
 /// Verify an unlinkable [`SelectiveDisclosurePresentation`] against an issuer-signed
 /// [`IssuerRootAttestation`] (`trusted_root`), `expected_issuer_mldsa_pk`, `expected_oprf_pk`,
 /// and `verifier_scope`.
+///
+/// # Replay
+/// The proof is checked against the challenge the presentation carries
+/// (`pres.verifier_challenge`). When the proof and every statement check have
+/// passed, that challenge is consumed from `challenges` for `verifier_scope`, and
+/// the result is `true` only if the consumption succeeded. An invalid presentation
+/// never consumes a challenge. With a [`VerifierChallengeLedger`] (`ledger.at(now)`)
+/// or `FsVerifierChallengeLedger`, a presentation is therefore accepted at most
+/// once, only for a challenge this verifier issued for this scope, and only while
+/// that challenge is live. [`ReplayNotPrevented`] is the explicit opt-out for proof
+/// audit; with it, repeated calls with the same valid proof return `true`.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_presentation(
     pres: &SelectiveDisclosurePresentation,
@@ -3901,7 +3900,7 @@ pub fn verify_presentation(
     expected_issuer_mldsa_pk: &[u8],
     expected_oprf_pk: &PublicKey,
     verifier_scope: &[u8],
-    verifier_challenge: &[u8; 32],
+    challenges: &mut dyn PresentationChallenges,
     mode: PresentationMode,
     expected_schema_id: u64,
     expected_arity: usize,
@@ -3912,7 +3911,7 @@ pub fn verify_presentation(
         expected_issuer_mldsa_pk,
         expected_oprf_pk,
         verifier_scope,
-        verifier_challenge,
+        challenges,
         mode,
         expected_schema_id,
         expected_arity,
@@ -3921,6 +3920,7 @@ pub fn verify_presentation(
 }
 
 /// Verify a [`SelectiveDisclosurePresentation`] under an explicit soundness profile.
+/// The challenge is consumed from `challenges` exactly as in [`verify_presentation`].
 #[allow(clippy::too_many_arguments)]
 pub fn verify_presentation_with_profile(
     pres: &SelectiveDisclosurePresentation,
@@ -3928,19 +3928,48 @@ pub fn verify_presentation_with_profile(
     expected_issuer_mldsa_pk: &[u8],
     expected_oprf_pk: &PublicKey,
     verifier_scope: &[u8],
-    verifier_challenge: &[u8; 32],
+    challenges: &mut dyn PresentationChallenges,
     mode: PresentationMode,
     expected_schema_id: u64,
     expected_arity: usize,
     profile: ZkSoundnessProfile,
 ) -> bool {
+    presentation_proof_holds(
+        pres,
+        trusted_root,
+        expected_issuer_mldsa_pk,
+        expected_oprf_pk,
+        verifier_scope,
+        mode,
+        expected_schema_id,
+        expected_arity,
+        profile,
+    ) && challenges
+        .consume(verifier_scope, &pres.verifier_challenge)
+        .is_ok()
+}
+
+/// Everything [`verify_presentation_with_profile`] checks except that the challenge
+/// is one the verifier issued: the proof is for `pres.verifier_challenge`.
+#[allow(clippy::too_many_arguments)]
+fn presentation_proof_holds(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+    profile: ZkSoundnessProfile,
+) -> bool {
+    let verifier_challenge = &pres.verifier_challenge;
     if !trusted_root.verify(expected_issuer_mldsa_pk, expected_oprf_pk) {
         return false;
     }
     if !(1..=MAX_VC_ATTRS).contains(&expected_arity)
         || pres.arity != expected_arity
         || pres.schema_id != expected_schema_id
-        || pres.verifier_challenge != *verifier_challenge
         || pres.mode != mode
         || pres.issuer_epoch != trusted_root.issuer_epoch
         || pres.accumulator_root != trusted_root.accumulator_root
@@ -4881,59 +4910,6 @@ mod tests {
     }
 
     #[test]
-    fn verifier_challenge_history_is_sorted_bounded_and_refuses_replays() {
-        let holder = HolderCredentialSecret {
-            schema_id: 1,
-            arity: 0,
-            attrs: [0; MAX_VC_ATTRS],
-            holder_blind: [0; 4],
-            seen_challenges: core::cell::RefCell::new(Vec::new()),
-        };
-        for byte in [9u8, 3, 200, 0, 77] {
-            assert_eq!(holder.burn_verifier_challenge(&[byte; 32]), Ok(()));
-            assert_eq!(
-                holder.burn_verifier_challenge(&[byte; 32]),
-                Err(BlindVcError::ReplayedVerifierChallenge)
-            );
-        }
-        assert_eq!(holder.seen_challenges.borrow().len(), 5);
-        assert!(holder.seen_challenges.borrow().is_sorted());
-
-        // Fill the history to one below the bound.
-        {
-            let mut seen = holder.seen_challenges.borrow_mut();
-            seen.clear();
-            seen.extend((0..MAX_SEEN_VERIFIER_CHALLENGES as u32 - 1).map(|i| {
-                let mut challenge = [0u8; 32];
-                challenge[..4].copy_from_slice(&i.to_be_bytes());
-                challenge
-            }));
-        }
-        assert_eq!(holder.burn_verifier_challenge(&[0xEE; 32]), Ok(()));
-        assert_eq!(
-            holder.seen_challenges.borrow().len(),
-            MAX_SEEN_VERIFIER_CHALLENGES
-        );
-        // Full: a new challenge is refused and not recorded; an old one is
-        // still reported as a replay.
-        for _ in 0..2 {
-            assert_eq!(
-                holder.burn_verifier_challenge(&[0xEF; 32]),
-                Err(BlindVcError::ChallengeHistoryFull)
-            );
-        }
-        assert_eq!(
-            holder.burn_verifier_challenge(&[0xEE; 32]),
-            Err(BlindVcError::ReplayedVerifierChallenge)
-        );
-        assert_eq!(
-            holder.seen_challenges.borrow().len(),
-            MAX_SEEN_VERIFIER_CHALLENGES
-        );
-        assert!(holder.seen_challenges.borrow().is_sorted());
-    }
-
-    #[test]
     fn credential_tokens_are_redacted_compared_in_full_and_erased() {
         let token = [0xA7u8; 32];
         let printed_token = "167, 167";
@@ -5091,7 +5067,6 @@ mod tests {
                 [840, 1994, 3, 9910, 2030, 0].get(i).copied().unwrap_or(0)
             }),
             holder_blind: [17, 18, 19, 20],
-            seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
         let commitment = compute_vc_poseidon2_commit(
             holder.schema_id,
@@ -5141,7 +5116,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5159,7 +5134,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5173,7 +5148,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             6,
@@ -5186,7 +5161,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             6,
@@ -5203,7 +5178,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5220,7 +5195,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5237,7 +5212,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5252,7 +5227,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5267,7 +5242,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5283,7 +5258,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5300,7 +5275,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5316,7 +5291,7 @@ mod tests {
             &issuer_mldsa_pk,
             &oprf_pk,
             b"verifier",
-            &[73; 32],
+            &mut ReplayNotPrevented(&[73; 32]),
             mode,
             42,
             holder.arity,
@@ -5337,7 +5312,7 @@ mod tests {
                 &issuer_mldsa_pk,
                 &oprf_pk,
                 b"verifier",
-                &[73; 32],
+                &mut ReplayNotPrevented(&[73; 32]),
                 mode,
                 42,
                 holder.arity,
@@ -5356,6 +5331,369 @@ mod tests {
     }
 
     #[test]
+    fn colluding_verifier_challenges_do_not_link_fresh_presentations() {
+        let holder = HolderCredentialSecret {
+            schema_id: 42,
+            arity: 6,
+            attrs: core::array::from_fn(|i| {
+                [840, 1994, 3, 9910, 2030, 777].get(i).copied().unwrap_or(0)
+            }),
+            holder_blind: [17, 18, 19, 20],
+        };
+        let commitment = compute_vc_poseidon2_commit(
+            holder.schema_id,
+            &holder.attrs[..holder.arity],
+            &holder.holder_blind,
+            VC_ATTR_COMMIT_TAG,
+        )
+        .unwrap();
+        let oprf_pk = PublicKey::test_key();
+        let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+        let index = accumulator.enroll(commitment).unwrap();
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: commitment,
+            issuance_token: [0; 32],
+            accumulator_leaf_index: index,
+        };
+        let (issuer_pk, issuer_sk) =
+            crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x55; 32]);
+        let root = accumulator
+            .attest_root_deterministic(MlDsaLevel::MlDsa44, &issuer_sk, issuer_pk.clone())
+            .unwrap();
+        let membership = accumulator.membership_witness(index).unwrap();
+        let profile = ZkSoundnessProfile::Classical128;
+        let challenge = [0xC7; 32];
+        let present = |holder: &HolderCredentialSecret, scope: &[u8], entropy| {
+            prove_selective_disclosure_with_profile(
+                &cred,
+                holder,
+                &membership,
+                &[0],
+                PresentationRequest {
+                    verifier_scope: scope,
+                    verifier_challenge: &challenge,
+                    mode: PresentationMode::UnlinkableFresh,
+                },
+                entropy,
+                profile,
+            )
+        };
+        let verify = |pres: &SelectiveDisclosurePresentation, scope: &[u8], challenge| {
+            verify_presentation_with_profile(
+                pres,
+                &root,
+                &issuer_pk,
+                &oprf_pk,
+                scope,
+                &mut ReplayNotPrevented(challenge),
+                PresentationMode::UnlinkableFresh,
+                42,
+                holder.arity,
+                profile,
+            )
+        };
+        // Verifier A tags this holder with C. B must not distinguish it from
+        // an untagged holder by offering C in another scope.
+        let a = present(&holder, b"verifier-a", [1; 32]).unwrap();
+        let b = present(&holder, b"verifier-b", [2; 32]);
+        assert!(
+            b.is_ok(),
+            "a prior verifier's challenge must not cause refusal: {:?}",
+            b.as_ref().err()
+        );
+        let b = b.unwrap();
+        assert!(verify(&a, b"verifier-a", &challenge));
+        assert!(verify(&b, b"verifier-b", &challenge));
+        assert!(!verify(&a, b"verifier-b", &challenge));
+        assert!(!verify(&a, b"verifier-a", &[0xC8; 32]));
+        assert_ne!(a.presentation_nonce, b.presentation_nonce);
+        assert_ne!(a.scope_tag, b.scope_tag);
+        assert_ne!(a.pres_commit, b.pres_commit);
+
+        // Even in the same scope, fresh holder entropy permits the same
+        // challenge without a stable pseudonym or reused proof randomness.
+        // Refusing repeated challenges locally is deliberately not a promise.
+        let b_again = present(&holder, b"verifier-b", [3; 32]).unwrap();
+        assert!(verify(&b_again, b"verifier-b", &challenge));
+        assert_ne!(b.presentation_nonce, b_again.presentation_nonce);
+        assert_ne!(b.scope_tag, b_again.scope_tag);
+        assert_ne!(b.pres_commit, b_again.pres_commit);
+        for (r1, r2) in b.opened_reps.iter().zip(&b_again.opened_reps) {
+            assert_ne!(r1.ggm_copath, r2.ggm_copath);
+            assert_ne!(r1.com_1_hidden, r2.com_1_hidden);
+        }
+        // This test is about the holder side: the proofs are checked with the
+        // replay opt-out. Refusing a second showing is the verifier ledger's job
+        // (`memory_ledger_accepts_a_presentation_once`).
+        assert!(verify(&b_again, b"verifier-b", &challenge));
+    }
+
+    /// One enrolled credential and everything a verifier pins. Deterministic, so a
+    /// child process rebuilds the same issuer root.
+    struct ReplayFixture {
+        holder: HolderCredentialSecret,
+        cred: BlindVerifiableCredential,
+        membership: CredentialMembershipWitness,
+        root: IssuerRootAttestation,
+        issuer_pk: Vec<u8>,
+        oprf_pk: PublicKey,
+    }
+
+    impl ReplayFixture {
+        const PROFILE: ZkSoundnessProfile = ZkSoundnessProfile::Classical128;
+
+        fn new() -> Self {
+            let holder = HolderCredentialSecret {
+                schema_id: 42,
+                arity: 3,
+                attrs: core::array::from_fn(|i| [840, 1994, 3].get(i).copied().unwrap_or(0)),
+                holder_blind: [21, 22, 23, 24],
+            };
+            let commitment = compute_vc_poseidon2_commit(
+                holder.schema_id,
+                &holder.attrs[..holder.arity],
+                &holder.holder_blind,
+                VC_ATTR_COMMIT_TAG,
+            )
+            .unwrap();
+            let oprf_pk = PublicKey::test_key();
+            let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+            let index = accumulator.enroll(commitment).unwrap();
+            let (issuer_pk, issuer_sk) =
+                crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x61; 32]);
+            Self {
+                holder,
+                cred: BlindVerifiableCredential {
+                    issuer_epoch: 7,
+                    schema_id: 42,
+                    attr_commit: commitment,
+                    issuance_token: [0; 32],
+                    accumulator_leaf_index: index,
+                },
+                membership: accumulator.membership_witness(index).unwrap(),
+                root: accumulator
+                    .attest_root_deterministic(MlDsaLevel::MlDsa44, &issuer_sk, issuer_pk.clone())
+                    .unwrap(),
+                issuer_pk,
+                oprf_pk,
+            }
+        }
+
+        fn present(
+            &self,
+            scope: &[u8],
+            challenge: &[u8; 32],
+            entropy: [u8; 32],
+        ) -> SelectiveDisclosurePresentation {
+            prove_selective_disclosure_with_profile(
+                &self.cred,
+                &self.holder,
+                &self.membership,
+                &[0],
+                PresentationRequest {
+                    verifier_scope: scope,
+                    verifier_challenge: challenge,
+                    mode: PresentationMode::UnlinkableFresh,
+                },
+                entropy,
+                Self::PROFILE,
+            )
+            .unwrap()
+        }
+
+        fn verify(
+            &self,
+            pres: &SelectiveDisclosurePresentation,
+            scope: &[u8],
+            challenges: &mut dyn PresentationChallenges,
+        ) -> bool {
+            verify_presentation_with_profile(
+                pres,
+                &self.root,
+                &self.issuer_pk,
+                &self.oprf_pk,
+                scope,
+                challenges,
+                PresentationMode::UnlinkableFresh,
+                42,
+                self.holder.arity,
+                Self::PROFILE,
+            )
+        }
+    }
+
+    #[test]
+    fn memory_ledger_accepts_a_presentation_once() {
+        let fx = ReplayFixture::new();
+        let mut ledger = VerifierChallengeLedger::new(2);
+        let challenge = ledger.issue(b"verifier-a", 1_000, 60, [0xE1; 32]).unwrap();
+        let pres = fx.present(b"verifier-a", &challenge, [1; 32]);
+
+        // An invalid proof for a live challenge leaves the challenge outstanding.
+        let mut forged = pres.clone();
+        forged.disclosed_attrs[0].1 = gl_add(forged.disclosed_attrs[0].1, 1);
+        assert!(!fx.verify(&forged, b"verifier-a", &mut ledger.at(1_001)));
+        assert_eq!(ledger.outstanding(), 1);
+
+        // A's challenge relayed by verifier B: the holder's proof for B's scope is
+        // valid, B's ledger position is refused, and A's challenge is not spent.
+        let relayed = fx.present(b"verifier-b", &challenge, [2; 32]);
+        assert!(fx.verify(&relayed, b"verifier-b", &mut ReplayNotPrevented(&challenge)));
+        assert!(!fx.verify(&relayed, b"verifier-b", &mut ledger.at(1_001)));
+        assert_eq!(ledger.outstanding(), 1);
+
+        // Expired at 1_060; live at 1_059; accepted exactly once.
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_060)));
+        assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_059)));
+        assert_eq!(ledger.outstanding(), 0);
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_059)));
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+
+        // A valid proof for a challenge this verifier never issued is refused.
+        let stray = fx.present(b"verifier-a", &[0xC7; 32], [3; 32]);
+        assert!(fx.verify(&stray, b"verifier-a", &mut ReplayNotPrevented(&[0xC7; 32])));
+        assert!(!fx.verify(&stray, b"verifier-a", &mut ledger.at(1_001)));
+
+        // The same holder answers a fresh challenge, once.
+        let fresh = ledger.issue(b"verifier-a", 1_100, 60, [0xE2; 32]).unwrap();
+        assert_ne!(fresh, challenge);
+        let pres = fx.present(b"verifier-a", &fresh, [4; 32]);
+        assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_101)));
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_101)));
+    }
+
+    // The presentation is accepted by one process and refused by the next, which
+    // only shares the ledger file with it.
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn fs_ledger_refuses_a_replayed_presentation_in_another_process() {
+        let _serial = crate::presentation_challenge::test_support::serial();
+        const ROLE: &str = "QSAG_VC_CHALLENGE_CHILD_ROLE";
+        const DIR: &str = "QSAG_VC_CHALLENGE_CHILD_DIR";
+        let fx = ReplayFixture::new();
+        if let Some(role) = std::env::var_os(ROLE) {
+            let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+            let ledger = FsVerifierChallengeLedger::open_existing(dir.join("challenges"), 4);
+            if role == "locked" {
+                assert!(ledger.is_err());
+                return;
+            }
+            let pres = SelectiveDisclosurePresentation::from_compact_wire_bytes(
+                &std::fs::read(dir.join("presentation")).unwrap(),
+            )
+            .unwrap();
+            let accepted = fx.verify(&pres, b"verifier-a", &mut ledger.unwrap().at(1_001));
+            assert_eq!(accepted, role == "accept");
+            return;
+        }
+        let dir = crate::presentation_challenge::test_support::temporary_directory("process");
+        let path = dir.join("challenges");
+        let child = |role: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "blind_vc::tests::fs_ledger_refuses_a_replayed_presentation_in_another_process",
+                    "--nocapture",
+                ])
+                .env(ROLE, role)
+                .env(DIR, &dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let mut ledger = FsVerifierChallengeLedger::create_new(&path, 4).unwrap();
+        let challenge = ledger.issue(b"verifier-a", 1_000, 60, [0xE3; 32]).unwrap();
+        let pres = fx.present(b"verifier-a", &challenge, [5; 32]);
+        std::fs::write(
+            dir.join("presentation"),
+            pres.to_compact_wire_bytes().unwrap(),
+        )
+        .unwrap();
+        assert!(child("locked"));
+        drop(ledger);
+        assert!(child("accept"));
+        // A second child that expects acceptance fails: the children really verify.
+        assert!(!child("accept"));
+        assert!(child("refuse"));
+        let mut ledger = FsVerifierChallengeLedger::open_existing(&path, 4).unwrap();
+        assert_eq!(ledger.outstanding(), 0);
+        assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+        drop(ledger);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // A presentation accepted after a backup must stay refused when the backup is
+    // put back over the ledger. The unanchored ledger in the same scenario accepts
+    // it a second time: that is the gap the anchor closes.
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn anchored_fs_ledger_refuses_a_restored_file_and_the_bare_one_replays() {
+        let _serial = crate::presentation_challenge::test_support::serial();
+        use crate::presentation_challenge::test_support::{
+            TestAnchor, dir_files, temporary_directory,
+        };
+        use alloc::boxed::Box;
+        let fx = ReplayFixture::new();
+        for anchored in [false, true] {
+            let dir = temporary_directory(if anchored { "anchored" } else { "bare" });
+            let path = dir.join("challenges");
+            let anchor = TestAnchor::default();
+            let open = || {
+                if anchored {
+                    FsVerifierChallengeLedger::open_existing_anchored(
+                        &path,
+                        4,
+                        Box::new(anchor.clone()),
+                    )
+                } else {
+                    FsVerifierChallengeLedger::open_existing(&path, 4)
+                }
+            };
+            let mut ledger = if anchored {
+                FsVerifierChallengeLedger::create_new_anchored(&path, 4, Box::new(anchor.clone()))
+            } else {
+                FsVerifierChallengeLedger::create_new(&path, 4)
+            }
+            .unwrap();
+            assert_eq!(ledger.is_anchored(), anchored);
+            let challenge = ledger.issue(b"verifier-a", 1_000, 60, [0xE4; 32]).unwrap();
+            drop(ledger);
+            let pres = fx.present(b"verifier-a", &challenge, [6; 32]);
+            let backup = dir_files(&dir);
+
+            let mut ledger = open().unwrap();
+            assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+            assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+            drop(ledger);
+            let current = dir_files(&dir);
+
+            // In place: same inodes, earlier bytes, as a volume snapshot restore.
+            for (file, bytes) in &backup {
+                std::fs::write(file, bytes).unwrap();
+            }
+            let restored = open();
+            if anchored {
+                let err = restored.err().expect("rolled-back ledger must not open");
+                assert!(std::format!("{err}").contains("rollback"), "{err}");
+                for (file, bytes) in &current {
+                    std::fs::write(file, bytes).unwrap();
+                }
+                let mut ledger = open().unwrap();
+                assert!(!fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+            } else {
+                // No anchor: the consumed challenge is outstanding again.
+                let mut ledger = restored.unwrap();
+                assert!(fx.verify(&pres, b"verifier-a", &mut ledger.at(1_001)));
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
     fn repeated_entropy_across_distinct_statements_produces_independent_zkboo_shares() {
         let holder = HolderCredentialSecret {
             schema_id: 42,
@@ -5364,7 +5702,6 @@ mod tests {
                 [840, 1994, 3, 9910, 2030, 777].get(i).copied().unwrap_or(0)
             }),
             holder_blind: [17, 18, 19, 20],
-            seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
         let commitment = compute_vc_poseidon2_commit(
             holder.schema_id,
@@ -5397,22 +5734,6 @@ mod tests {
             reused_entropy,
         )
         .unwrap();
-        assert_eq!(
-            prove_selective_disclosure(
-                &cred,
-                &holder,
-                &accumulator.membership_witness(index).unwrap(),
-                &[0],
-                PresentationRequest {
-                    verifier_scope: b"scope-alpha",
-                    verifier_challenge: &[0x11; 32],
-                    mode: PresentationMode::UnlinkableFresh
-                },
-                reused_entropy,
-            )
-            .unwrap_err(),
-            BlindVcError::ReplayedVerifierChallenge
-        );
         let pres2 = prove_selective_disclosure(
             &cred,
             &holder,
@@ -5464,7 +5785,6 @@ mod tests {
                     .unwrap_or(i as u64 + 100)
             }),
             holder_blind: [17, 18, 19, 20],
-            seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
         let commitment = compute_vc_poseidon2_commit(
             holder.schema_id,
@@ -5529,7 +5849,7 @@ mod tests {
                 &issuer_mldsa_pk,
                 &oprf_pk,
                 b"compact-wire",
-                &[challenge_byte; 32],
+                &mut ReplayNotPrevented(&[challenge_byte; 32]),
                 PresentationMode::UnlinkableFresh,
                 42,
                 holder.arity,
@@ -5559,7 +5879,7 @@ mod tests {
                     &issuer_mldsa_pk,
                     &oprf_pk,
                     b"compact-wire",
-                    &[challenge_byte; 32],
+                    &mut ReplayNotPrevented(&[challenge_byte; 32]),
                     PresentationMode::UnlinkableFresh,
                     42,
                     holder.arity,
@@ -5708,7 +6028,7 @@ mod tests {
                 &issuer_mldsa_pk,
                 &oprf_pk,
                 b"kat-scope",
-                &[challenge_byte; 32],
+                &mut ReplayNotPrevented(&[challenge_byte; 32]),
                 mode,
                 42,
                 attrs.len(),
