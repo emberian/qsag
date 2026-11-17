@@ -6930,17 +6930,17 @@ def
 @[global_simps, irreducible]
 def policy_and_addr.INTENT_V1_MAGIC : Std.U32 := 1364412721#u32
 
-/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_ED25519_MLDSA65]
-    Source: 'src/policy_and_addr.rs', lines 19:0-19:53
+/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_SECP256K1_MLDSA44]
+    Source: 'src/policy_and_addr.rs', lines 19:0-19:55
     Visibility: public -/
 @[global_simps, irreducible]
-def policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65 : Std.U16 := 1281#u16
+def policy_and_addr.SUITE_HYBRID_SECP256K1_MLDSA44 : Std.U16 := 1281#u16
 
-/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_SECP256K1_SLHDSA]
-    Source: 'src/policy_and_addr.rs', lines 22:0-22:54
+/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_ED25519_MLDSA65]
+    Source: 'src/policy_and_addr.rs', lines 22:0-22:53
     Visibility: public -/
 @[global_simps, irreducible]
-def policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA : Std.U16 := 1282#u16
+def policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65 : Std.U16 := 1282#u16
 
 /-- [qsag_verified::policy_and_addr::MAX_VELOCITY_U128]
     Source: 'src/policy_and_addr.rs', lines 25:0-25:78
@@ -7320,7 +7320,7 @@ def policy_and_addr.IntentAddressVersion.from_u8
   | _ => ok none
 
 /-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentIdentityKind}::clone]:
-    Source: 'src/policy_and_addr.rs', lines 213:9-213:14
+    Source: 'src/policy_and_addr.rs', lines 214:9-214:14
     Visibility: public -/
 def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone.clone
   (self : policy_and_addr.IntentIdentityKind) :
@@ -7329,7 +7329,7 @@ def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:9-213:14 -/
+    Source: 'src/policy_and_addr.rs', lines 214:9-214:14 -/
 @[reducible]
 def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone : core.clone.Clone
   policy_and_addr.IntentIdentityKind := {
@@ -7337,7 +7337,7 @@ def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:16-213:20 -/
+    Source: 'src/policy_and_addr.rs', lines 214:16-214:20 -/
 @[reducible]
 def policy_and_addr.IntentIdentityKind.Insts.CoreMarkerCopy : core.marker.Copy
   policy_and_addr.IntentIdentityKind := {
@@ -7345,22 +7345,22 @@ def policy_and_addr.IntentIdentityKind.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentIdentityKind}::fmt]:
-    Source: 'src/policy_and_addr.rs', lines 213:22-213:27
+    Source: 'src/policy_and_addr.rs', lines 214:22-214:27
     Visibility: public -/
 def policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug.fmt
   (self : policy_and_addr.IntentIdentityKind) (f : core.fmt.Formatter) :
   Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
   := do
   match self with
-  | policy_and_addr.IntentIdentityKind.SingleKey =>
-    core.fmt.Formatter.write_str f (toStr "SingleKey")
-  | policy_and_addr.IntentIdentityKind.ThresholdCommittee =>
-    core.fmt.Formatter.write_str f (toStr "ThresholdCommittee")
-  | policy_and_addr.IntentIdentityKind.PolicyBound =>
-    core.fmt.Formatter.write_str f (toStr "PolicyBound")
+  | policy_and_addr.IntentIdentityKind.SingleOrThreshold =>
+    core.fmt.Formatter.write_str f (toStr "SingleOrThreshold")
+  | policy_and_addr.IntentIdentityKind.HybridConjunctive =>
+    core.fmt.Formatter.write_str f (toStr "HybridConjunctive")
+  | policy_and_addr.IntentIdentityKind.ScriptPredicate =>
+    core.fmt.Formatter.write_str f (toStr "ScriptPredicate")
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:22-213:27 -/
+    Source: 'src/policy_and_addr.rs', lines 214:22-214:27 -/
 @[reducible]
 def policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug : core.fmt.Debug
   policy_and_addr.IntentIdentityKind := {
@@ -7368,14 +7368,14 @@ def policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:29-213:38 -/
+    Source: 'src/policy_and_addr.rs', lines 214:29-214:38 -/
 @[reducible]
 def policy_and_addr.IntentIdentityKind.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq policy_and_addr.IntentIdentityKind := {
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentIdentityKind> for qsag_verified::policy_and_addr::IntentIdentityKind}::eq]:
-    Source: 'src/policy_and_addr.rs', lines 213:29-213:38
+    Source: 'src/policy_and_addr.rs', lines 214:29-214:38
     Visibility: public -/
 def
   policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind.eq
@@ -7388,7 +7388,7 @@ def
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentIdentityKind> for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:29-213:38 -/
+    Source: 'src/policy_and_addr.rs', lines 214:29-214:38 -/
 @[reducible]
 def policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind
   : core.cmp.PartialEq policy_and_addr.IntentIdentityKind
@@ -7398,7 +7398,7 @@ def policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::IntentIdentityKind}]
-    Source: 'src/policy_and_addr.rs', lines 213:40-213:42 -/
+    Source: 'src/policy_and_addr.rs', lines 214:40-214:42 -/
 @[reducible]
 impl_def policy_and_addr.IntentIdentityKind.Insts.CoreCmpEq : core.cmp.Eq
   policy_and_addr.IntentIdentityKind := {
@@ -7409,29 +7409,28 @@ impl_def policy_and_addr.IntentIdentityKind.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentIdentityKind}::to_u8]:
-    Source: 'src/policy_and_addr.rs', lines 222:4-228:5
+    Source: 'src/policy_and_addr.rs', lines 223:4-229:5
     Visibility: public -/
 def policy_and_addr.IntentIdentityKind.to_u8
   (self : policy_and_addr.IntentIdentityKind) : Result Std.U8 := do
   match self with
-  | policy_and_addr.IntentIdentityKind.SingleKey => ok 1#u8
-  | policy_and_addr.IntentIdentityKind.ThresholdCommittee => ok 2#u8
-  | policy_and_addr.IntentIdentityKind.PolicyBound => ok 3#u8
+  | policy_and_addr.IntentIdentityKind.SingleOrThreshold => ok 1#u8
+  | policy_and_addr.IntentIdentityKind.HybridConjunctive => ok 2#u8
+  | policy_and_addr.IntentIdentityKind.ScriptPredicate => ok 3#u8
 
 /-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentIdentityKind}::from_u8]:
-    Source: 'src/policy_and_addr.rs', lines 231:4-238:5
+    Source: 'src/policy_and_addr.rs', lines 232:4-239:5
     Visibility: public -/
 def policy_and_addr.IntentIdentityKind.from_u8
   (v : Std.U8) : Result (Option policy_and_addr.IntentIdentityKind) := do
   match v with
-  | 1#uscalar => ok (some policy_and_addr.IntentIdentityKind.SingleKey)
-  | 2#uscalar =>
-    ok (some policy_and_addr.IntentIdentityKind.ThresholdCommittee)
-  | 3#uscalar => ok (some policy_and_addr.IntentIdentityKind.PolicyBound)
+  | 1#uscalar => ok (some policy_and_addr.IntentIdentityKind.SingleOrThreshold)
+  | 2#uscalar => ok (some policy_and_addr.IntentIdentityKind.HybridConjunctive)
+  | 3#uscalar => ok (some policy_and_addr.IntentIdentityKind.ScriptPredicate)
   | _ => ok none
 
 /-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentSuiteTag}::clone]:
-    Source: 'src/policy_and_addr.rs', lines 242:9-242:14
+    Source: 'src/policy_and_addr.rs', lines 246:9-246:14
     Visibility: public -/
 def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone.clone
   (self : policy_and_addr.IntentSuiteTag) :
@@ -7440,7 +7439,7 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:9-242:14 -/
+    Source: 'src/policy_and_addr.rs', lines 246:9-246:14 -/
 @[reducible]
 def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone : core.clone.Clone
   policy_and_addr.IntentSuiteTag := {
@@ -7448,7 +7447,7 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:16-242:20 -/
+    Source: 'src/policy_and_addr.rs', lines 246:16-246:20 -/
 @[reducible]
 def policy_and_addr.IntentSuiteTag.Insts.CoreMarkerCopy : core.marker.Copy
   policy_and_addr.IntentSuiteTag := {
@@ -7456,26 +7455,26 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentSuiteTag}::fmt]:
-    Source: 'src/policy_and_addr.rs', lines 242:22-242:27
+    Source: 'src/policy_and_addr.rs', lines 246:22-246:27
     Visibility: public -/
 def policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug.fmt
   (self : policy_and_addr.IntentSuiteTag) (f : core.fmt.Formatter) :
   Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
   := do
   match self with
+  | policy_and_addr.IntentSuiteTag.MlDsa65 =>
+    core.fmt.Formatter.write_str f (toStr "MlDsa65")
+  | policy_and_addr.IntentSuiteTag.SlhDsa128f =>
+    core.fmt.Formatter.write_str f (toStr "SlhDsa128f")
   | policy_and_addr.IntentSuiteTag.JortsPoseidon2 =>
     core.fmt.Formatter.write_str f (toStr "JortsPoseidon2")
-  | policy_and_addr.IntentSuiteTag.SlhDsaShake128f =>
-    core.fmt.Formatter.write_str f (toStr "SlhDsaShake128f")
-  | policy_and_addr.IntentSuiteTag.ThresholdMlDsa65 =>
-    core.fmt.Formatter.write_str f (toStr "ThresholdMlDsa65")
+  | policy_and_addr.IntentSuiteTag.HybridSecp256k1MlDsa44 =>
+    core.fmt.Formatter.write_str f (toStr "HybridSecp256k1MlDsa44")
   | policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65 =>
     core.fmt.Formatter.write_str f (toStr "HybridEd25519MlDsa65")
-  | policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa =>
-    core.fmt.Formatter.write_str f (toStr "HybridSecp256k1SlhDsa")
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:22-242:27 -/
+    Source: 'src/policy_and_addr.rs', lines 246:22-246:27 -/
 @[reducible]
 def policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug : core.fmt.Debug
   policy_and_addr.IntentSuiteTag := {
@@ -7483,14 +7482,14 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:29-242:38 -/
+    Source: 'src/policy_and_addr.rs', lines 246:29-246:38 -/
 @[reducible]
 def policy_and_addr.IntentSuiteTag.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq policy_and_addr.IntentSuiteTag := {
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentSuiteTag> for qsag_verified::policy_and_addr::IntentSuiteTag}::eq]:
-    Source: 'src/policy_and_addr.rs', lines 242:29-242:38
+    Source: 'src/policy_and_addr.rs', lines 246:29-246:38
     Visibility: public -/
 def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag.eq
   (self : policy_and_addr.IntentSuiteTag)
@@ -7502,7 +7501,7 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag.eq
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentSuiteTag> for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:29-242:38 -/
+    Source: 'src/policy_and_addr.rs', lines 246:29-246:38 -/
 @[reducible]
 def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag :
   core.cmp.PartialEq policy_and_addr.IntentSuiteTag
@@ -7511,7 +7510,7 @@ def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag :
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::IntentSuiteTag}]
-    Source: 'src/policy_and_addr.rs', lines 242:40-242:42 -/
+    Source: 'src/policy_and_addr.rs', lines 246:40-246:42 -/
 @[reducible]
 impl_def policy_and_addr.IntentSuiteTag.Insts.CoreCmpEq : core.cmp.Eq
   policy_and_addr.IntentSuiteTag := {
@@ -7522,36 +7521,68 @@ impl_def policy_and_addr.IntentSuiteTag.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::to_u16]:
-    Source: 'src/policy_and_addr.rs', lines 253:4-261:5
+    Source: 'src/policy_and_addr.rs', lines 257:4-265:5
     Visibility: public -/
 def policy_and_addr.IntentSuiteTag.to_u16
   (self : policy_and_addr.IntentSuiteTag) : Result Std.U16 := do
   match self with
-  | policy_and_addr.IntentSuiteTag.JortsPoseidon2 => ok 257#u16
-  | policy_and_addr.IntentSuiteTag.SlhDsaShake128f => ok 513#u16
-  | policy_and_addr.IntentSuiteTag.ThresholdMlDsa65 => ok 770#u16
+  | policy_and_addr.IntentSuiteTag.MlDsa65 => ok 258#u16
+  | policy_and_addr.IntentSuiteTag.SlhDsa128f => ok 514#u16
+  | policy_and_addr.IntentSuiteTag.JortsPoseidon2 => ok 532#u16
+  | policy_and_addr.IntentSuiteTag.HybridSecp256k1MlDsa44 =>
+    ok policy_and_addr.SUITE_HYBRID_SECP256K1_MLDSA44
   | policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65 =>
     ok policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
-  | policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa =>
-    ok policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
 
 /-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::from_u16]:
-    Source: 'src/policy_and_addr.rs', lines 264:4-273:5
+    Source: 'src/policy_and_addr.rs', lines 268:4-277:5
     Visibility: public -/
 def policy_and_addr.IntentSuiteTag.from_u16
   (v : Std.U16) : Result (Option policy_and_addr.IntentSuiteTag) := do
   match v with
-  | 257#uscalar => ok (some policy_and_addr.IntentSuiteTag.JortsPoseidon2)
-  | 513#uscalar => ok (some policy_and_addr.IntentSuiteTag.SlhDsaShake128f)
-  | 770#uscalar => ok (some policy_and_addr.IntentSuiteTag.ThresholdMlDsa65)
+  | 258#uscalar => ok (some policy_and_addr.IntentSuiteTag.MlDsa65)
+  | 514#uscalar => ok (some policy_and_addr.IntentSuiteTag.SlhDsa128f)
+  | 532#uscalar => ok (some policy_and_addr.IntentSuiteTag.JortsPoseidon2)
   | 1281#uscalar =>
-    ok (some policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65)
+    ok (some policy_and_addr.IntentSuiteTag.HybridSecp256k1MlDsa44)
   | 1282#uscalar =>
-    ok (some policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa)
+    ok (some policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65)
   | _ => ok none
 
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::expected_identity_kind]:
+    Source: 'src/policy_and_addr.rs', lines 283:4-291:5
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.expected_identity_kind
+  (self : policy_and_addr.IntentSuiteTag) :
+  Result policy_and_addr.IntentIdentityKind
+  := do
+  match self with
+  | policy_and_addr.IntentSuiteTag.MlDsa65 =>
+    ok policy_and_addr.IntentIdentityKind.SingleOrThreshold
+  | policy_and_addr.IntentSuiteTag.SlhDsa128f =>
+    ok policy_and_addr.IntentIdentityKind.SingleOrThreshold
+  | policy_and_addr.IntentSuiteTag.JortsPoseidon2 =>
+    ok policy_and_addr.IntentIdentityKind.SingleOrThreshold
+  | policy_and_addr.IntentSuiteTag.HybridSecp256k1MlDsa44 =>
+    ok policy_and_addr.IntentIdentityKind.HybridConjunctive
+  | policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65 =>
+    ok policy_and_addr.IntentIdentityKind.HybridConjunctive
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::admits_identity_kind]:
+    Source: 'src/policy_and_addr.rs', lines 296:4-298:5
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.admits_identity_kind
+  (self : policy_and_addr.IntentSuiteTag)
+  (kind : policy_and_addr.IntentIdentityKind) :
+  Result Bool
+  := do
+  let iik ← policy_and_addr.IntentSuiteTag.expected_identity_kind self
+  let i ← policy_and_addr.IntentIdentityKind.to_u8 iik
+  let i1 ← policy_and_addr.IntentIdentityKind.to_u8 kind
+  ok (i = i1)
+
 /-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::CanonicalIntent128}::clone]:
-    Source: 'src/policy_and_addr.rs', lines 289:9-289:14
+    Source: 'src/policy_and_addr.rs', lines 315:9-315:14
     Visibility: public -/
 def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone.clone
   (self : policy_and_addr.CanonicalIntent128) :
@@ -7560,7 +7591,7 @@ def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::CanonicalIntent128}]
-    Source: 'src/policy_and_addr.rs', lines 289:9-289:14 -/
+    Source: 'src/policy_and_addr.rs', lines 315:9-315:14 -/
 @[reducible]
 def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone : core.clone.Clone
   policy_and_addr.CanonicalIntent128 := {
@@ -7568,7 +7599,7 @@ def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::CanonicalIntent128}]
-    Source: 'src/policy_and_addr.rs', lines 289:16-289:20 -/
+    Source: 'src/policy_and_addr.rs', lines 315:16-315:20 -/
 @[reducible]
 def policy_and_addr.CanonicalIntent128.Insts.CoreMarkerCopy : core.marker.Copy
   policy_and_addr.CanonicalIntent128 := {
@@ -7576,7 +7607,7 @@ def policy_and_addr.CanonicalIntent128.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentHeaderFields}::clone]:
-    Source: 'src/policy_and_addr.rs', lines 303:9-303:14
+    Source: 'src/policy_and_addr.rs', lines 329:9-329:14
     Visibility: public -/
 def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone.clone
   (self : policy_and_addr.IntentHeaderFields) :
@@ -7585,7 +7616,7 @@ def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentHeaderFields}]
-    Source: 'src/policy_and_addr.rs', lines 303:9-303:14 -/
+    Source: 'src/policy_and_addr.rs', lines 329:9-329:14 -/
 @[reducible]
 def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone : core.clone.Clone
   policy_and_addr.IntentHeaderFields := {
@@ -7593,7 +7624,7 @@ def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentHeaderFields}]
-    Source: 'src/policy_and_addr.rs', lines 303:16-303:20 -/
+    Source: 'src/policy_and_addr.rs', lines 329:16-329:20 -/
 @[reducible]
 def policy_and_addr.IntentHeaderFields.Insts.CoreMarkerCopy : core.marker.Copy
   policy_and_addr.IntentHeaderFields := {
@@ -7601,7 +7632,7 @@ def policy_and_addr.IntentHeaderFields.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::policy_and_addr::be_u16_read]:
-    Source: 'src/policy_and_addr.rs', lines 314:0-316:1 -/
+    Source: 'src/policy_and_addr.rs', lines 340:0-342:1 -/
 def policy_and_addr.be_u16_read
   (b0 : Std.U8) (b1 : Std.U8) : Result Std.U16 := do
   let i ← lift (UScalar.cast .U16 b0)
@@ -7610,7 +7641,7 @@ def policy_and_addr.be_u16_read
   ok (i1 ||| i2)
 
 /-- [qsag_verified::policy_and_addr::be_u32_read]:
-    Source: 'src/policy_and_addr.rs', lines 319:0-321:1 -/
+    Source: 'src/policy_and_addr.rs', lines 345:0-347:1 -/
 def policy_and_addr.be_u32_read
   (b0 : Std.U8) (b1 : Std.U8) (b2 : Std.U8) (b3 : Std.U8) :
   Result Std.U32
@@ -7627,7 +7658,7 @@ def policy_and_addr.be_u32_read
   ok (i7 ||| i8)
 
 /-- [qsag_verified::policy_and_addr::be_u64_read]:
-    Source: 'src/policy_and_addr.rs', lines 324:0-342:1 -/
+    Source: 'src/policy_and_addr.rs', lines 350:0-368:1 -/
 def policy_and_addr.be_u64_read
   (b0 : Std.U8) (b1 : Std.U8) (b2 : Std.U8) (b3 : Std.U8) (b4 : Std.U8)
   (b5 : Std.U8) (b6 : Std.U8) (b7 : Std.U8) :
@@ -7657,7 +7688,7 @@ def policy_and_addr.be_u64_read
   ok (i19 ||| i20)
 
 /-- [qsag_verified::policy_and_addr::pack_u128_from_u64_be]:
-    Source: 'src/policy_and_addr.rs', lines 345:0-347:1 -/
+    Source: 'src/policy_and_addr.rs', lines 371:0-373:1 -/
 def policy_and_addr.pack_u128_from_u64_be
   (hi : Std.U64) (lo : Std.U64) : Result Std.U128 := do
   let i ← lift (UScalar.cast .U128 hi)
@@ -7666,20 +7697,20 @@ def policy_and_addr.pack_u128_from_u64_be
   ok (i1 ||| i2)
 
 /-- [qsag_verified::policy_and_addr::unpack_u128_hi]:
-    Source: 'src/policy_and_addr.rs', lines 350:0-352:1 -/
+    Source: 'src/policy_and_addr.rs', lines 376:0-378:1 -/
 def policy_and_addr.unpack_u128_hi (v : Std.U128) : Result Std.U64 := do
   let i ← v >>> 64#i32
   let i1 ← lift (i &&& 18446744073709551615#u128)
   ok (UScalar.cast .U64 i1)
 
 /-- [qsag_verified::policy_and_addr::unpack_u128_lo]:
-    Source: 'src/policy_and_addr.rs', lines 355:0-357:1 -/
+    Source: 'src/policy_and_addr.rs', lines 381:0-383:1 -/
 def policy_and_addr.unpack_u128_lo (v : Std.U128) : Result Std.U64 := do
   let i ← lift (v &&& 18446744073709551615#u128)
   ok (UScalar.cast .U64 i)
 
 /-- [qsag_verified::policy_and_addr::encode_intent_header32]:
-    Source: 'src/policy_and_addr.rs', lines 359:0-401:1 -/
+    Source: 'src/policy_and_addr.rs', lines 385:0-427:1 -/
 def policy_and_addr.encode_intent_header32
   (intent : policy_and_addr.CanonicalIntent128) :
   Result (Array Std.U8 32#usize)
@@ -7780,7 +7811,7 @@ def policy_and_addr.encode_intent_header32
       ])
 
 /-- [qsag_verified::policy_and_addr::decode_intent_header32]:
-    Source: 'src/policy_and_addr.rs', lines 403:0-432:1 -/
+    Source: 'src/policy_and_addr.rs', lines 429:0-458:1 -/
 def policy_and_addr.decode_intent_header32
   (b : Array Std.U8 32#usize) :
   Result (Option policy_and_addr.IntentHeaderFields)
@@ -7851,7 +7882,7 @@ def policy_and_addr.decode_intent_header32
             })
 
 /-- [qsag_verified::policy_and_addr::encode_intent_amounts32]:
-    Source: 'src/policy_and_addr.rs', lines 434:0-473:1 -/
+    Source: 'src/policy_and_addr.rs', lines 460:0-499:1 -/
 def policy_and_addr.encode_intent_amounts32
   (amount_units : Std.U128) (spent_units : Std.U128) :
   Result (Array Std.U8 32#usize)
@@ -7960,7 +7991,7 @@ def policy_and_addr.encode_intent_amounts32
       ])
 
 /-- [qsag_verified::policy_and_addr::decode_intent_amounts32]:
-    Source: 'src/policy_and_addr.rs', lines 475:0-484:1 -/
+    Source: 'src/policy_and_addr.rs', lines 501:0-510:1 -/
 def policy_and_addr.decode_intent_amounts32
   (b : Array Std.U8 32#usize) : Result (Std.U128 × Std.U128) := do
   let i ← Array.index_usize b 0#usize
@@ -8004,7 +8035,7 @@ def policy_and_addr.decode_intent_amounts32
   ok (i32, i33)
 
 /-- [qsag_verified::policy_and_addr::unpack_block32]:
-    Source: 'src/policy_and_addr.rs', lines 486:0-521:1 -/
+    Source: 'src/policy_and_addr.rs', lines 512:0-547:1 -/
 def policy_and_addr.unpack_block32
   (buf : Array Std.U8 128#usize) (base : Std.Usize) :
   Result (Array Std.U8 32#usize)
@@ -8080,7 +8111,7 @@ def policy_and_addr.unpack_block32
       ])
 
 /-- [qsag_verified::policy_and_addr::pack_4x32]:
-    Source: 'src/policy_and_addr.rs', lines 523:0-543:1 -/
+    Source: 'src/policy_and_addr.rs', lines 549:0-569:1 -/
 def policy_and_addr.pack_4x32
   (b0 : Array Std.U8 32#usize) (b1 : Array Std.U8 32#usize)
   (b2 : Array Std.U8 32#usize) (b3 : Array Std.U8 32#usize) :
@@ -8229,7 +8260,7 @@ def policy_and_addr.pack_4x32
       ])
 
 /-- [qsag_verified::policy_and_addr::encode_intent_128]:
-    Source: 'src/policy_and_addr.rs', lines 546:0-555:1
+    Source: 'src/policy_and_addr.rs', lines 574:0-583:1
     Visibility: public -/
 def policy_and_addr.encode_intent_128
   (intent : policy_and_addr.CanonicalIntent128) :
@@ -8243,7 +8274,7 @@ def policy_and_addr.encode_intent_128
     intent.payload_digest
 
 /-- [qsag_verified::policy_and_addr::decode_intent_128]:
-    Source: 'src/policy_and_addr.rs', lines 558:0-580:1
+    Source: 'src/policy_and_addr.rs', lines 588:0-613:1
     Visibility: public -/
 def policy_and_addr.decode_intent_128
   (bytes : Array Std.U8 128#usize) :
@@ -8257,24 +8288,30 @@ def policy_and_addr.decode_intent_128
   match o with
   | none => ok none
   | some h =>
-    let (amount_units, rolling_window_spent) ←
-      policy_and_addr.decode_intent_amounts32 b1
-    ok (some
-      {
-        suite_tag := h.suite_tag,
-        address_version := h.address_version,
-        identity_kind := h.identity_kind,
-        chain_id := h.chain_id,
-        nonce := h.nonce,
-        timestamp_secs := h.timestamp_secs,
-        amount_units,
-        rolling_window_spent,
-        recipient_commitment,
-        payload_digest
-      })
+    let b ←
+      policy_and_addr.IntentSuiteTag.admits_identity_kind h.suite_tag
+        h.identity_kind
+    if b
+    then
+      let (amount_units, rolling_window_spent) ←
+        policy_and_addr.decode_intent_amounts32 b1
+      ok (some
+        {
+          suite_tag := h.suite_tag,
+          address_version := h.address_version,
+          identity_kind := h.identity_kind,
+          chain_id := h.chain_id,
+          nonce := h.nonce,
+          timestamp_secs := h.timestamp_secs,
+          amount_units,
+          rolling_window_spent,
+          recipient_commitment,
+          payload_digest
+        })
+    else ok none
 
 /-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::HybridRoleTag}::clone]:
-    Source: 'src/policy_and_addr.rs', lines 583:9-583:14
+    Source: 'src/policy_and_addr.rs', lines 616:9-616:14
     Visibility: public -/
 def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone.clone
   (self : policy_and_addr.HybridRoleTag) :
@@ -8283,7 +8320,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:9-583:14 -/
+    Source: 'src/policy_and_addr.rs', lines 616:9-616:14 -/
 @[reducible]
 def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone : core.clone.Clone
   policy_and_addr.HybridRoleTag := {
@@ -8291,7 +8328,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:16-583:20 -/
+    Source: 'src/policy_and_addr.rs', lines 616:16-616:20 -/
 @[reducible]
 def policy_and_addr.HybridRoleTag.Insts.CoreMarkerCopy : core.marker.Copy
   policy_and_addr.HybridRoleTag := {
@@ -8299,7 +8336,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::HybridRoleTag}::fmt]:
-    Source: 'src/policy_and_addr.rs', lines 583:22-583:27
+    Source: 'src/policy_and_addr.rs', lines 616:22-616:27
     Visibility: public -/
 def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug.fmt
   (self : policy_and_addr.HybridRoleTag) (f : core.fmt.Formatter) :
@@ -8312,7 +8349,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "PostQuantum")
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:22-583:27 -/
+    Source: 'src/policy_and_addr.rs', lines 616:22-616:27 -/
 @[reducible]
 def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug : core.fmt.Debug
   policy_and_addr.HybridRoleTag := {
@@ -8320,14 +8357,14 @@ def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:29-583:38 -/
+    Source: 'src/policy_and_addr.rs', lines 616:29-616:38 -/
 @[reducible]
 def policy_and_addr.HybridRoleTag.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq policy_and_addr.HybridRoleTag := {
 }
 
 /-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::HybridRoleTag> for qsag_verified::policy_and_addr::HybridRoleTag}::eq]:
-    Source: 'src/policy_and_addr.rs', lines 583:29-583:38
+    Source: 'src/policy_and_addr.rs', lines 616:29-616:38
     Visibility: public -/
 def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag.eq
   (self : policy_and_addr.HybridRoleTag)
@@ -8339,7 +8376,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag.eq
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::HybridRoleTag> for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:29-583:38 -/
+    Source: 'src/policy_and_addr.rs', lines 616:29-616:38 -/
 @[reducible]
 def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag :
   core.cmp.PartialEq policy_and_addr.HybridRoleTag
@@ -8348,7 +8385,7 @@ def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag :
 }
 
 /-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::HybridRoleTag}]
-    Source: 'src/policy_and_addr.rs', lines 583:40-583:42 -/
+    Source: 'src/policy_and_addr.rs', lines 616:40-616:42 -/
 @[reducible]
 impl_def policy_and_addr.HybridRoleTag.Insts.CoreCmpEq : core.cmp.Eq
   policy_and_addr.HybridRoleTag := {
@@ -8359,7 +8396,7 @@ impl_def policy_and_addr.HybridRoleTag.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::HybridRoleTag}::to_u8]:
-    Source: 'src/policy_and_addr.rs', lines 591:4-596:5
+    Source: 'src/policy_and_addr.rs', lines 624:4-629:5
     Visibility: public -/
 def policy_and_addr.HybridRoleTag.to_u8
   (self : policy_and_addr.HybridRoleTag) : Result Std.U8 := do
@@ -8368,7 +8405,7 @@ def policy_and_addr.HybridRoleTag.to_u8
   | policy_and_addr.HybridRoleTag.PostQuantum => ok 2#u8
 
 /-- [qsag_verified::policy_and_addr::check_hybrid_domain_framing]:
-    Source: 'src/policy_and_addr.rs', lines 601:0-640:1
+    Source: 'src/policy_and_addr.rs', lines 634:0-673:1
     Visibility: public -/
 def policy_and_addr.check_hybrid_domain_framing
   (magic14 : Array Std.U8 14#usize) (wire_role_byte : Std.U8)
@@ -8422,10 +8459,10 @@ def policy_and_addr.check_hybrid_domain_framing
   then ok false
   else
     let suite_valid ←
-      if suite_code = policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+      if suite_code = policy_and_addr.SUITE_HYBRID_SECP256K1_MLDSA44
       then ok true
       else
-        if suite_code = policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+        if suite_code = policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
         then ok true
         else ok false
     if suite_valid
@@ -8437,7 +8474,7 @@ def policy_and_addr.check_hybrid_domain_framing
     else ok false
 
 /-- [qsag_verified::policy_and_addr::derive_hybrid_transcript_digest]:
-    Source: 'src/policy_and_addr.rs', lines 643:0-673:1
+    Source: 'src/policy_and_addr.rs', lines 676:0-706:1
     Visibility: public -/
 def policy_and_addr.derive_hybrid_transcript_digest
   (role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
@@ -8552,7 +8589,7 @@ def policy_and_addr.derive_hybrid_transcript_digest
     else ok none
 
 /-- [qsag_verified::policy_and_addr::checked_velocity_spend]:
-    Source: 'src/policy_and_addr.rs', lines 676:0-682:1
+    Source: 'src/policy_and_addr.rs', lines 709:0-715:1
     Visibility: public -/
 def policy_and_addr.checked_velocity_spend
   (prior : Std.U128) (amount : Std.U128) (cap : Std.U128) :

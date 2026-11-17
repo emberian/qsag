@@ -7,12 +7,12 @@ The analysis is lexical. Statuses are defined in the script docstring.
 |---|---|
 | direct | 35 |
 | direct-lexical | 16 |
-| reached | 13 |
+| reached | 14 |
 | spec-welded | 16 |
-| proof-only | 69 |
+| proof-only | 70 |
 | test-only | 56 |
 | unreferenced | 32 |
-| **total** | **237** |
+| **total** | **239** |
 
 `pub fn`s with no definition in `Funs.lean`: 0.
 
@@ -20,9 +20,9 @@ The analysis is lexical. Statuses are defined in the script docstring.
 
 | Function | Production call sites | First |
 |---|---|---|
-| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1574` |
+| `qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard::new_validated` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1594` |
 | `qsag_verified::authenticated_belt::custodian_ack_tag` | 4 | `crates/qsag-quorum/src/access.rs:480` |
-| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1594` |
+| `qsag_verified::authenticated_belt::wal_receipt_tag` | 2 | `crates/qsag-quorum/src/quorum_jorts.rs:1614` |
 | `qsag_verified::belt_latch_kernel::BeltLatchKernel::recover` | 1 | `crates/qsag-core/src/belt_latch.rs:1126` |
 | `qsag_verified::cred_and_hd_guards::HdCommittedZeroTest::new_awaiting_peer_commit` | 1 | `crates/qsag-hd/src/zero_gate.rs:45` |
 | `qsag_verified::cred_and_hd_guards::MlDsaReleaseGate::new_sealed` | 1 | `crates/qsag-cred/src/threshold_mldsa.rs:2050` |
@@ -37,24 +37,24 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::fts_spn_guard::FtsDeferredMacSession::new_spn48_evaluated` | 2 | `crates/qsag-fts/src/release_gate.rs:148` |
 | `qsag_verified::fts_spn_guard::FtsEpochGuard::new_unused` | 2 | `crates/qsag-fts/src/parallel_mpc.rs:1340` |
 | `qsag_verified::keccak::Shake256Sponge::new_cshake256` | 1 | `crates/qsag-cred/src/toprf_engine.rs:266` |
-| `qsag_verified::keccak::shake256_32` | 1 | `crates/qsag-addr/src/lib.rs:1139` |
+| `qsag_verified::keccak::shake256_32` | 1 | `crates/qsag-addr/src/lib.rs:1119` |
 | `qsag_verified::opening_guard::ConsumingOpeningGuard2Lane::new` | 3 | `crates/qsag-fts/src/release_gate.rs:236` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_poisoned` | 1 | `crates/qsag-quorum/src/party_node.rs:933` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::is_unverified` | 1 | `crates/qsag-quorum/src/party_node.rs:942` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::new_clean` | 4 | `crates/qsag-core/src/rss256.rs:1577` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::new_enrolled` | 1 | `crates/qsag-core/src/baggy.rs:1473` |
 | `qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard::from_digest_verified` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:303` |
-| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1341` |
+| `qsag_verified::pants_and_quorum_guards::validate_belt_quorum_config` | 1 | `crates/qsag-quorum/src/quorum_jorts.rs:1361` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_extract_digits` | 1 | `crates/qsag-core/src/wots_c.rs:80` |
 | `qsag_verified::pants_and_quorum_guards::verified_wotsc256_verify_sum` | 1 | `crates/qsag-core/src/wots_c.rs:79` |
 | `qsag_verified::policy_and_addr::StatefulVelocityGuard::new_window` | 4 | `crates/qsag-policy/src/durable.rs:656` |
-| `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | 1 | `crates/qsag-addr/src/lib.rs:696` |
+| `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | 1 | `crates/qsag-addr/src/lib.rs:676` |
 | `qsag_verified::policy_and_addr::checked_velocity_spend` | 2 | `crates/qsag-policy/src/lib.rs:254` |
-| `qsag_verified::policy_and_addr::decode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:425` |
-| `qsag_verified::policy_and_addr::derive_hybrid_transcript_digest` | 1 | `crates/qsag-addr/src/lib.rs:717` |
+| `qsag_verified::policy_and_addr::decode_intent_128` | 1 | `crates/qsag-addr/src/lib.rs:405` |
+| `qsag_verified::policy_and_addr::derive_hybrid_transcript_digest` | 1 | `crates/qsag-addr/src/lib.rs:697` |
 | `qsag_verified::rss_cut_session::RssCutGateSession::new_round1_committed` | 1 | `crates/qsag-core/src/rss256.rs:2668` |
 | `qsag_verified::rss_cut_session::compute_rss_mask_commitment` | 2 | `crates/qsag-core/src/rss256.rs:2662` |
-| `qsag_verified::tower::ct_eq_bytes32` | 9 | `crates/qsag-quorum/src/quorum_jorts.rs:400` |
+| `qsag_verified::tower::ct_eq_bytes32` | 10 | `crates/qsag-quorum/src/quorum_jorts.rs:400` |
 
 ## direct-lexical (16)
 
@@ -75,9 +75,9 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::opening_guard::OpeningReleasePermit::openings` | 1 | `crates/qsag-fts/src/release_gate.rs:336` |
 | `qsag_verified::opening_guard::OpeningReleasePermit::round_id` | 1 | `crates/qsag-fts/src/release_gate.rs:335` |
 | `qsag_verified::opening_guard::OpeningReleasePermit::session_id` | 2 | `crates/qsag-fts/src/release_gate.rs:162` |
-| `qsag_verified::policy_and_addr::IntentSuiteTag::to_u16` | 1 | `crates/qsag-addr/src/lib.rs:362` |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::expected_identity_kind` | 1 | `crates/qsag-addr/src/lib.rs:147` |
 
-## reached (13)
+## reached (14)
 
 | Function | Reached from | Edge |
 |---|---|---|
@@ -94,6 +94,7 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::policy_and_addr::HybridRoleTag::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentAddressVersion::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
 | `qsag_verified::policy_and_addr::IntentIdentityKind::to_u8` | `qsag_verified::policy_and_addr::check_hybrid_domain_framing` | lexical |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::admits_identity_kind` | `qsag_verified::policy_and_addr::decode_intent_128` | lexical |
 
 ## spec-welded (16)
 
@@ -116,7 +117,7 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::tower::tower256_add` | 1 | 0 | 1 | 0 |
 | `qsag_verified::tower::tower256_mul` | 1 | 1 | 1 | 0 |
 
-## proof-only (69)
+## proof-only (70)
 
 | Function | Lean welds | Lean proofs | Crate tests | Same-named production fns |
 |---|---|---|---|---|
@@ -158,8 +159,9 @@ The analysis is lexical. Statuses are defined in the script docstring.
 | `qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch::step` | 0 | 1 | 1 | 0 |
 | `qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard::authorize_ancestor_derivation` | 0 | 1 | 1 | 0 |
 | `qsag_verified::policy_and_addr::IntentAddressVersion::from_u8` | 0 | 1 | 0 | 0 |
-| `qsag_verified::policy_and_addr::IntentIdentityKind::from_u8` | 0 | 1 | 0 | 0 |
-| `qsag_verified::policy_and_addr::IntentSuiteTag::from_u16` | 0 | 1 | 0 | 0 |
+| `qsag_verified::policy_and_addr::IntentIdentityKind::from_u8` | 0 | 1 | 1 | 0 |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::from_u16` | 0 | 1 | 1 | 0 |
+| `qsag_verified::policy_and_addr::IntentSuiteTag::to_u16` | 0 | 1 | 1 | 0 |
 | `qsag_verified::policy_and_addr::StatefulVelocityGuard::authorize_spend` | 0 | 3 | 1 | 0 |
 | `qsag_verified::policy_and_addr::StatefulVelocityGuard::rotate_window` | 0 | 2 | 1 | 0 |
 | `qsag_verified::policy_and_addr::encode_intent_128` | 0 | 1 | 1 | 1 |
