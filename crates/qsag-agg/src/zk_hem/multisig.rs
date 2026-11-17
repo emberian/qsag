@@ -1,6 +1,9 @@
-//! Fixed-capacity private-policy multisignature as a zk-Hem relation.
+//! Fixed-capacity multisignature with a witnessed policy as a zk-Hem relation.
 //!
-//! The only public values are the policy address and a 32-byte message:
+//! It uses the committed-mask protocol; its security statement is summarised on
+//! [`protocol::prove`] and given in `crates/qsag-agg/SECURITY.md`.
+//!
+//! The only public inputs to the relation are the policy address and a 32-byte message:
 //!
 //! ```text
 //! leaf_i      = sponge12(pk_seed_i || pk_root_i || LEAF)[0..4]
@@ -13,7 +16,7 @@
 //! its policy path and a `JortsPoseidon2` signature of the message under that key, and the
 //! slot's full verification is constrained: the message hash `mu` from the key bytes, the
 //! chain digits of `H_msg`, the target digit sum, all 128 chains, the endpoint sponge and
-//! the XMSS path up to `pk_root`. A slot also carries a hidden `active` bit. Active slots
+//! the XMSS path up to `pk_root`. A slot also carries a witnessed `active` bit. Active slots
 //! form a prefix, their member indices strictly increase (so they are distinct members),
 //! and `sum(active) - threshold` is a small non-negative number. An inactive slot repeats
 //! any valid member signature, so its contents satisfy the same rows and the relation is

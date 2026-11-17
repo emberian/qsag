@@ -1,4 +1,6 @@
-//! Committed zk-Hem: a zero-knowledge argument for a [`Shape`] over the Hem WHIR commitment.
+//! Committed-mask zk-Hem for a [`Shape`] over the Hem WHIR commitment.
+//! The security statement, with its hypotheses and numbers, is `crates/qsag-agg/SECURITY.md`;
+//! [`super::bounds`] computes the numbers. See [`prove`] for a summary.
 //!
 //! One batch commitment holds five base-field tables of `2^l` cells: the masked assignment
 //! table `Z` and four uniform companion tables `C_0..C_3`. `Z` is laid out as
@@ -37,7 +39,8 @@
 //!    symbols are uniform (`opened_symbols_perfectly_simulated`). Unopened Stage-0 leaves
 //!    are salted.
 //!
-//! What this file does not establish is listed on [`prove`].
+//! The simulator that composes these statements is Theorem 4 of `crates/qsag-agg/SECURITY.md`;
+//! step 6 is its Lemma 4.1 (top hypercube cells blind exactly as many codeword symbols).
 
 use alloc::sync::Arc;
 use alloc::vec;
@@ -68,9 +71,12 @@ type F = Goldilocks;
 pub const ROW_DEGREE: usize = 9;
 /// Individual degree of the column sumcheck: `M * Z`.
 pub const COL_DEGREE: usize = 2;
-const ROW_MASK_BITS: usize = 4;
-const COL_MASK_BITS: usize = 2;
-const COMPANIONS: usize = 4;
+/// `log2` of the cells holding one limb of one row-mask round.
+pub const ROW_MASK_BITS: usize = 4;
+/// `log2` of the cells holding one limb of one column-mask round.
+pub const COL_MASK_BITS: usize = 2;
+/// Companion tables committed beside the assignment table.
+pub const COMPANIONS: usize = 4;
 const _: () = assert!(ROW_DEGREE < 1 << ROW_MASK_BITS && COL_DEGREE < 1 << COL_MASK_BITS);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +106,7 @@ pub struct Layout {
 impl Layout {
     /// Smallest table that holds the variable subcube, the masks and the opening blinders.
     pub fn new(shape: &Shape, regime: WhirSecurityRegime) -> Option<Self> {
-        if !regime.meets_qrom_128_floor() {
+        if !regime.is_accepted_aggregate_profile() {
             return None;
         }
         let var_bits = shape.num_vars.next_power_of_two().trailing_zeros().max(1) as usize;
@@ -132,7 +138,8 @@ impl Layout {
     }
 }
 
-/// A zk-Hem proof.
+/// The committed-mask zk-Hem wire format. What it does and does not guarantee is summarised
+/// on [`prove`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZkHemProof {
     pub commitment: CanopyCommitment,
@@ -1096,20 +1103,22 @@ fn column_table(shape: &Shape, eq_rx: &[E], combine: &[E], cells: usize) -> Vec<
 /// its masking variables are overwritten here. `seed` must be uniform and secret: it
 /// determines the masks, the companions, the blinders and the leaf salts.
 ///
-/// Not established by this implementation:
-/// * a mechanized proof of the composed simulator for this exact layout. The ingredients
-///   are the theorems of `ZkHemSoundnessAndPrivacy.lean` named in the module comment; their
-///   composition over the cell layout is argued in comments only: the row masks do not
-///   enter the row summand, the column masks and blinders lie outside the variable subcube
-///   the column sumcheck runs over, the masking rows have determinant `k1 k2 k3`, and the
-///   blinders are sampled last, conditioned on everything else;
-/// * hiding of unopened Stage-0 leaves beyond the salted-leaf coupling of that file (no
-///   bound on the bad event is mechanized there);
-/// * the batching step uses scalar weights `beta^j`. Its proximity loss is the standard one
-///   for random linear combinations and is not re-derived for the regime's query schedule,
-///   which was accounted for the affine cascade of the non-hiding opening;
-/// * knowledge soundness of the composition (masked sumchecks, linear batching, companion
-///   challenge, WHIR) has no concrete bound stated or proved here.
+/// Security (`crates/qsag-agg/SECURITY.md`; numbers from [`super::bounds::security_report`]):
+/// * zero knowledge: the interactive oracle proof is perfectly honest-verifier zero
+///   knowledge (Theorem 4). The proof string adds the hiding of unopened salted Stage-0
+///   leaves: distance at most `t P / 2^128` for `t` classical hash queries over `P` proofs,
+///   `2 t sqrt(P / 2^128)` for quantum queries;
+/// * the blend with scalar weights `beta^j` has mutual correlated agreement up to the
+///   Johnson radius with error growing as the square of the domain size; it is the weakest
+///   round, `2^-184` to `2^-199` (section 3);
+/// * knowledge soundness: 127 bits in the classical random-oracle model and 81 bits in the
+///   quantum one, both set by the 256-bit digests (Theorems 2 and 3). No regime gives a
+///   128-bit quantum level;
+/// * the argument is on paper, not mechanized: the Lean theorems named in the module
+///   comment cover the masking ingredients only.
+///
+/// A `seed` must not be reused for the same relation, statement and witness under a
+/// different transcript; the coins below bind everything that enters the transcript.
 pub fn prove(
     shape: &Shape,
     assignment: Vec<F>,
@@ -1150,10 +1159,13 @@ fn prove_with_claimed_publics(
         qsag_asm::volatile_fill(&mut assignment, F::ZERO);
         return Err(ZkHemError::Unsatisfied);
     }
-    // Coins are bound to the relation, the statement and the witness, so a repeated `seed`
-    // does not repeat masks across different proofs.
+    // Coins are bound to the relation, the regime's schedule, the statement and the witness,
+    // so a repeated `seed` does not repeat masks across different proofs. The schedule
+    // matters: it enters the transcript, so two regimes give two transcripts, and equal masks
+    // under different challenges cancel (`bounds::tests::coins_do_not_repeat_across_regimes`).
     let mut coin_input = seed.to_vec();
     coin_input.extend_from_slice(&shape.digest());
+    coin_input.extend_from_slice(&layout.schedule.to_bytes());
     coin_input.extend_from_slice(&cshake256_32(b"QSAG.ZKHEM.COINS.STMT/v1", statement));
     let mut witness_bytes: Vec<u8> = assignment.iter().flat_map(|v| v.to_le_bytes()).collect();
     coin_input.extend_from_slice(&cshake256_32(b"QSAG.ZKHEM.COINS.WIT/v1", &witness_bytes));
@@ -1479,7 +1491,7 @@ fn public_layout(shape: &Shape, regime: WhirSecurityRegime) -> Option<Layout> {
         .checked_next_power_of_two()?
         .trailing_zeros()
         .max(2) as usize;
-    (regime.meets_qrom_128_floor() && var_bits <= MAX_PCS_NUM_VARS).then(|| Layout {
+    (regime.is_accepted_aggregate_profile() && var_bits <= MAX_PCS_NUM_VARS).then(|| Layout {
         log_cells: var_bits,
         var_bits,
         blind_cells: 0,
@@ -1728,7 +1740,7 @@ impl ShapeVerifierKey {
 
     /// Check bounded geometry before decoding proofs or evaluating structured matrices.
     pub fn is_well_formed(&self) -> bool {
-        if !self.regime.meets_qrom_128_floor()
+        if !self.regime.is_accepted_aggregate_profile()
             || !(4..=MAX_PCS_NUM_VARS).contains(&self.log_rows)
             || !(2..=MAX_PCS_NUM_VARS).contains(&self.var_bits)
             || self.ell_nz < self.log_rows.max(self.var_bits)
@@ -1805,7 +1817,7 @@ impl ShapeVerifierKey {
         let pub_var_blocks =
             usize::try_from(u64::from_le_bytes(bytes.get(75..83)?.try_into().ok()?)).ok()?;
         let regime = WhirSecurityRegime::from_u8(*bytes.get(83)?)?;
-        if !regime.meets_qrom_128_floor()
+        if !regime.is_accepted_aggregate_profile()
             || !(4..=MAX_PCS_NUM_VARS).contains(&log_rows)
             || !(2..=MAX_PCS_NUM_VARS).contains(&var_bits)
             || ell_nz < log_rows.max(var_bits)
@@ -3093,7 +3105,117 @@ fn start_hologram_transcript(
         .bind_instance(&[statement, &pub_bytes, &comm_z.to_bytes()])
 }
 
-/// Prove a public relation using a precompiled [`ShapeHologram`] so native verification runs
+// Apply the public-evaluation distinguisher to the masked transcript. For each candidate,
+// recover the twelve row-mask cells consistent with the public row_values at rx, then
+// compare M(rx,ry) * candidate_with_recovered_masks(ry) with the column's terminal claim.
+// Comparing the original zero-mask candidate alone would miss a leak if column masking
+// were removed: row-mask randomness would already change the assignment evaluation.
+// The remaining terminal pad is rho2 * g2(ry). Its hypercube sum is public, but does not
+// by itself determine its evaluation at ry. This tests this attack, not the full transcript.
+#[cfg(test)]
+pub(super) fn candidate_matches_masked_evaluation(
+    shape: &Shape,
+    regime: WhirSecurityRegime,
+    public: &[F],
+    statement: &[u8],
+    proof: &ZkHemProof,
+    candidate: &[F],
+) -> bool {
+    let layout = Layout::new(shape, regime).unwrap();
+    let mut tr = start_transcript(shape, &layout, statement, public, &proof.commitment);
+    let _tau = squeeze_point(&mut tr, b"ZKHEM_TAU", shape.log_rows);
+    tr.absorb_ext4(b"ZKHEM_ROW_MASK_SUM", proof.row_mask_sum);
+    let rho1 = NonzeroChallenge::squeeze(&mut tr, b"ZKHEM_RHO1").get();
+    let (_, rx) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_ROW_ROUND",
+        &proof.row_rounds,
+        ROW_DEGREE,
+        rho1 * proof.row_mask_sum,
+    )
+    .unwrap();
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &proof.row_values);
+    let combine = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    tr.absorb_ext4(b"ZKHEM_COL_MASK_SUM", proof.col_mask_sum);
+    let rho2 = NonzeroChallenge::squeeze(&mut tr, b"ZKHEM_RHO2").get();
+    let claim = combine
+        .iter()
+        .zip(proof.row_values)
+        .fold(E::ZERO, |v, (&c, r)| v + c * r);
+    let (terminal, ry) = verify_sumcheck(
+        &mut tr,
+        b"ZKHEM_COL_ROUND",
+        &proof.col_rounds,
+        COL_DEGREE,
+        claim + rho2 * proof.col_mask_sum,
+    )
+    .unwrap();
+    assert_eq!(candidate.len(), shape.num_vars);
+    let mut candidate = candidate.to_vec();
+    candidate[shape.mask_var_base..].fill(F::ZERO);
+    let row_weights = eq_table(&rx);
+    let have = [&shape.a, &shape.b, &shape.c].map(|matrix| {
+        row_weights
+            .iter()
+            .enumerate()
+            .fold(E::ZERO, |acc, (row, &weight)| {
+                acc + weight.mul_base(matrix.row_dot(row, &candidate))
+            })
+    });
+    let delta: [E; 3] = core::array::from_fn(|i| proof.row_values[i] - have[i]);
+    let k: [E; 3] = core::array::from_fn(|g| corner_factor(&rx, shape.mask_row_base(g)));
+    let e2 = delta[1] * k[1].inv();
+    let e3 = (delta[2] - delta[1] - delta[0]) * k[2].inv();
+    let e1 = (delta[0] - k[2] * e3) * k[0].inv();
+    let basis = CornerPadBasis::new(rx[0], rx[1]).unwrap();
+    for (g, evaluation) in [e1, e2, e3].into_iter().enumerate() {
+        let super::Pad(cells) = basis.invert(evaluation);
+        candidate[shape.mask_var_base + 4 * g..shape.mask_var_base + 4 * g + 4]
+            .copy_from_slice(&cells);
+    }
+    let weights = eq_table(&ry);
+    let evaluation = candidate
+        .iter()
+        .zip(weights)
+        .fold(E::ZERO, |v, (&z, w)| v + w.mul_base(z));
+    matrix_at(shape, &rx, &ry, &combine) * evaluation == terminal
+}
+
+// Test-only observer: uses only the wire proof, statement and public verifier key.
+// Replaying Fiat-Shamir recovers the evaluation point; no prover randomness is needed.
+#[cfg(test)]
+pub(super) fn candidate_matches_public_evaluation(
+    vk: &ShapeVerifierKey,
+    public: &[F],
+    statement: &[u8],
+    proof: &HologramPublicProof,
+    candidate: &[F],
+) -> bool {
+    let mut tr = start_hologram_transcript(vk, statement, public, &proof.comm_z);
+    let _tau = squeeze_point(&mut tr, b"ZKHEM_TAU", vk.log_rows);
+    for round in &proof.row_rounds {
+        tr.absorb_ext4_slice(b"ZKHEM_ROW_ROUND", round);
+        tr.squeeze_ext4(b"ZKHEM_ROW_ROUND");
+    }
+    tr.absorb_ext4_slice(b"ZKHEM_ROW_VALUES", &proof.row_values);
+    let _combine = squeeze_point(&mut tr, b"ZKHEM_COMBINE", 3);
+    tr.squeeze_ext4(b"HEM_PUBLIC_CELLS");
+    let mut ry = Vec::new();
+    for round in &proof.col_rounds {
+        tr.absorb_ext4_slice(b"ZKHEM_COL_ROUND", round);
+        ry.push(tr.squeeze_ext4(b"ZKHEM_COL_ROUND"));
+    }
+    let weights = eq_table(&ry);
+    let evaluation = candidate
+        .iter()
+        .zip(weights)
+        .fold(E::ZERO, |v, (&z, w)| v + w.mul_base(z));
+    evaluation == proof.eval_z
+}
+
+/// Prove a relation without witness hiding using a precompiled [`ShapeHologram`].
+/// The proof reveals unmasked row values and an assignment evaluation (`eval_z`);
+/// omitting the literal witness does not provide signer privacy. Native verification runs
 /// against [`ShapeVerifierKey`] alone; timing depends on shape and security regime.
 pub fn prove_public_hologram(
     shape: &Shape,
@@ -3103,7 +3225,7 @@ pub fn prove_public_hologram(
     seed: &[u8; 32],
 ) -> Result<HologramPublicProof, ZkHemError> {
     let vk = &hologram.vk;
-    if vk.shape_digest != shape.digest() || !vk.regime.meets_qrom_128_floor() {
+    if vk.shape_digest != shape.digest() || !vk.regime.is_accepted_aggregate_profile() {
         return Err(ZkHemError::Unsatisfied);
     }
     if assignment.len() != shape.num_vars || assignment.first() != Some(&F::ONE) {

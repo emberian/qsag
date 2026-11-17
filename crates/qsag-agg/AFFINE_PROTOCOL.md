@@ -30,11 +30,13 @@ Each committed stage receives two independent OOD points. Both evaluations are a
 
 ## Accounting boundary
 
-The Johnson QROM schedule (`BciksJohnsonQrom128`) uses `ceil(512/log2(B)) + 2`, giving `(258,130,88,66)` for blowups `(4,16,64,256)`. Classical Johnson (`BciksJohnsonClassical128`) uses `ceil(256/log2(B)) + 1` and is restricted to raw PCS tests (rejected by QROM-128 aggregate validation). Retired capacity-proximity wire tags (`0`, `1`, `3`) fail closed on deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). Queries are sampled without replacement and become exhaustive when the target exceeds the number of fibers.
+The Johnson QROM schedule (`BciksJohnsonQrom128`) uses `ceil(512/log2(B)) + 2`, giving `(258,130,88,66)` for blowups `(4,16,64,256)`. Classical Johnson (`BciksJohnsonClassical128`) uses `ceil(256/log2(B)) + 1` and is restricted to raw PCS tests (rejected by aggregate profile policy). Retired capacity-proximity wire tags (`0`, `1`, `3`) fail closed on deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). Queries are sampled without replacement and become exhaustive when the target exceeds the number of fibers.
+
+The aggregate profile policy also accepts the historically named `Cdhz25*Qrom128` variants: the 16-bit PoW profiles (tags 5, 7 and 10) have **108-bit nominal Grover work** and assume `Q <= 2^38` oracle queries; the zero-PoW profiles (tags 6 and 8) have **107-bit nominal Grover work** and assume `Q + 1 <= 2^40`. These are bounded-query profiles, not a 128-bit work floor. `WhirSecurityRegime::is_accepted_aggregate_profile()` reports this policy membership; it does not certify a composed security bound.
 
 The finite-witness regression checks all 46 non-exhaustive canonical Johnson QROM stages across `nv = 2..24`: exact Theorem 4.8 interpolation inequalities, Johnson list bounds, query error below `2^-256` including the stage fold-coordinate loss, and stage affine-combiner error below `2000/p^4` (more than 245 bits). Its dyadic probability calculation rounds upward at every division; it uses no floating-point approximations. The other stages are queried exhaustively.
 
-These implementation and arithmetic tests do not constitute a complete Fiat–Shamir or QROM security proof. Cascade coordinate losses and protocol-wide union bounds must still be composed separately. Formal security-budget sources outside this crate are not modified by this upgrade.
+These implementation and arithmetic tests are the per-stage part of the argument. The composition (fold and coordinate losses, list sizes, every verifier round, BCS in the ROM and the QROM) is in `SECURITY.md` sections 2 and 5, computed by `src/zk_hem/bounds.rs`. Formal security-budget sources outside this crate are not modified by this upgrade.
 
 ## Validation
 

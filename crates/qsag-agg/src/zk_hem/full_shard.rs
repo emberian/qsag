@@ -25,13 +25,15 @@
 //! signer count: no child proof, summary or locally verified evidence is an input of
 //! [`verify_full_shard_merge`].
 //!
-//! Scope. Only `JortsPoseidon2` shards. The signer set is hidden; the count is public. The
-//! verifier of a parent still evaluates the relation's matrices, so its time is linear in
-//! the relation size, and a parent cannot be a child of another parent. The composed
-//! soundness of this transcript has not been mechanized, and the regimes keep their
-//! bounded-query assumptions. Recording the row constraints needs `std`.
+//! Scope. Only `JortsPoseidon2` shards. The count is public; signer bits and child proofs
+//! are witnesses of the committed-mask path [`protocol::prove`]. This removes the public
+//! hologram's unmasked witness evaluation; the zero-knowledge and knowledge-soundness
+//! statements of that path are in `crates/qsag-agg/SECURITY.md`. Parent verification scans the
+//! relation matrices (linear time); a parent cannot be a child of another parent. The
+//! CDHZ25 profiles retain their bounded-query assumptions: 108-bit nominal Grover work
+//! for the PoW profile at `Q <= 2^38`, or 107 bits without PoW at `Q + 1 <= 2^40`.
 
-use super::protocol::{self, HologramPublicProof, ShapeHologram, ShapeVerifierKey};
+use super::protocol::{self, ZkHemProof};
 use super::recursive_whir::{
     Assignment, Backend, Base, ChildWhirStatement, Digest, Ext, FixedPathWhirParams,
     FixedPathWhirProof, Native, RecursiveWhirError, Transcript, bits, commit_for_recursion, f,
@@ -59,7 +61,7 @@ use core::cell::RefCell;
 pub const SHARD_MESSAGE_BYTES: usize = 32;
 /// Public words of one child: committee digest, message bytes, signer count.
 pub(crate) const PUBLIC_WORDS: usize = 4 + SHARD_MESSAGE_BYTES + 1;
-const PROOF_LABEL: &[u8] = b"QSAG.FULL.SHARD.MERGE/v1";
+const PROOF_LABEL: &[u8] = b"QSAG.FULL.SHARD.MERGE/v2";
 
 // Transcript frame tags, disjoint from the opening transcript's (1..=31) and the leaf,
 // node and merge domains of `recursive_whir`.
@@ -840,6 +842,8 @@ pub enum FullShardError {
     InvalidSignature,
     /// A child proof does not verify.
     InvalidChild,
+    /// The sampled row point lacks full-rank masks; retry with a fresh secret seed.
+    MaskRankDeficient,
     Whir(RecursiveWhirError),
 }
 
@@ -1233,14 +1237,13 @@ pub struct FullShardRelationStats {
     pub variables: usize,
 }
 
-/// The relation "each of `children` recursive shard proofs verifies", precompiled with a
-/// deterministic Spark [`ShapeHologram`] so the verifier needs only its key.
+/// The relation "each of `children` recursive shard proofs verifies".
+/// The masked parent verifier uses this full relation, not a compact hologram key.
 #[derive(Clone)]
 pub struct FullShardMergeRelation {
     params: FullShardParams,
     children: usize,
     shape: Shape,
-    hologram: ShapeHologram,
     stats: FullShardRelationStats,
 }
 
@@ -1266,8 +1269,6 @@ impl FullShardMergeRelation {
         let used = cs.num_rows();
         let (shape, mut z) = cs.finish();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
-        let hologram = ShapeHologram::compile_native(&shape, params.regime())
-            .map_err(|_| FullShardError::InvalidParameters)?;
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
             multiplication_rows: used - shape.num_sbox,
@@ -1278,7 +1279,6 @@ impl FullShardMergeRelation {
             params,
             children,
             shape,
-            hologram,
             stats,
         })
     }
@@ -1290,12 +1290,6 @@ impl FullShardMergeRelation {
     }
     pub fn shape(&self) -> &Shape {
         &self.shape
-    }
-    pub fn hologram(&self) -> &ShapeHologram {
-        &self.hologram
-    }
-    pub fn verifier_key(&self) -> &ShapeVerifierKey {
-        self.hologram.verifier_key()
     }
     pub fn stats(&self) -> FullShardRelationStats {
         self.stats
@@ -1394,15 +1388,15 @@ fn populate(
     }
 }
 
-/// One parent proof for the shards named by its statement, verified against the relation's
-/// [`ShapeVerifierKey`] without reading the relation.
+/// One committed-mask parent proof for the shards named by its statement.
+/// Verification reads the relation; security limitations are those of [`protocol::prove`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FullShardMergeProof {
-    pub proof: HologramPublicProof,
+    pub proof: ZkHemProof,
 }
 impl FullShardMergeProof {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = b"QSAGFSM1".to_vec();
+        let mut out = b"QSAGFSM2".to_vec();
         out.extend(self.proof.to_bytes());
         out
     }
@@ -1411,22 +1405,19 @@ impl FullShardMergeProof {
         relation: &FullShardMergeRelation,
         regime: WhirSecurityRegime,
     ) -> Option<Self> {
-        if bytes.get(..8)? != b"QSAGFSM1" || !regime.meets_qrom_128_floor() {
+        if bytes.get(..8)? != b"QSAGFSM2" || !regime.is_accepted_aggregate_profile() {
             return None;
         }
-        if regime == relation.verifier_key().regime {
-            let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, relation.verifier_key())?;
-            Some(Self { proof })
-        } else {
-            let alt = ShapeHologram::compile_native(&relation.shape, regime).ok()?;
-            let proof = HologramPublicProof::from_bytes(bytes.get(8..)?, alt.verifier_key())?;
-            Some(Self { proof })
-        }
+        let proof = ZkHemProof::from_bytes(bytes.get(8..)?, &relation.shape, regime)?;
+        Some(Self { proof })
     }
 }
 
 /// Prove that every child verifies. The children are witnesses: the result carries none of
-/// them. `regime` is the parent proof's own regime.
+/// them verbatim. The parent uses committed masks rather than the public hologram path;
+/// see [`protocol::prove`] for the remaining security-analysis gaps. `regime` is the
+/// parent proof's own regime. `seed` must be uniform and secret; it supplies all masks,
+/// companions, opening blinders and salts.
 pub fn prove_full_shard_merge(
     relation: &FullShardMergeRelation,
     statements: &[RecursiveShardStatement],
@@ -1434,7 +1425,7 @@ pub fn prove_full_shard_merge(
     regime: WhirSecurityRegime,
     seed: &[u8; 32],
 ) -> Result<FullShardMergeProof, FullShardError> {
-    if !regime.meets_qrom_128_floor()
+    if !regime.is_accepted_aggregate_profile()
         || statements.len() != relation.children
         || proofs.len() != relation.children
     {
@@ -1446,16 +1437,10 @@ pub fn prove_full_shard_merge(
     let z = relation.assignment(statements, proofs)?;
     let map_err = |e: protocol::ZkHemError| match e {
         protocol::ZkHemError::Unsatisfied => FullShardError::InvalidChild,
-        _ => FullShardError::InvalidParameters,
+        protocol::ZkHemError::MaskRankDeficient => FullShardError::MaskRankDeficient,
+        protocol::ZkHemError::RelationTooLarge => FullShardError::InvalidParameters,
     };
-    let proof = if regime == relation.verifier_key().regime {
-        protocol::prove_public_hologram(&relation.shape, &relation.hologram, z, PROOF_LABEL, seed)
-            .map_err(map_err)?
-    } else {
-        let alt = ShapeHologram::compile_native(&relation.shape, regime).map_err(map_err)?;
-        protocol::prove_public_hologram(&relation.shape, &alt, z, PROOF_LABEL, seed)
-            .map_err(map_err)?
-    };
+    let proof = protocol::prove(&relation.shape, z, PROOF_LABEL, regime, seed).map_err(map_err)?;
     Ok(FullShardMergeProof { proof })
 }
 
@@ -1466,23 +1451,11 @@ pub fn verify_full_shard_merge(
     regime: WhirSecurityRegime,
     proof: &FullShardMergeProof,
 ) -> bool {
-    if !regime.meets_qrom_128_floor() || shards.len() != relation.children {
+    if !regime.is_accepted_aggregate_profile() || shards.len() != relation.children {
         return false;
     }
     let public: Vec<F> = shards.iter().flat_map(ShardPublic::words).collect();
-    if regime == relation.verifier_key().regime {
-        protocol::verify_public_hologram(
-            relation.verifier_key(),
-            &public,
-            PROOF_LABEL,
-            &proof.proof,
-        )
-    } else {
-        let Ok(alt) = ShapeHologram::compile_native(&relation.shape, regime) else {
-            return false;
-        };
-        protocol::verify_public_hologram(alt.verifier_key(), &public, PROOF_LABEL, &proof.proof)
-    }
+    protocol::verify(&relation.shape, &public, PROOF_LABEL, regime, &proof.proof)
 }
 
 #[cfg(test)]
@@ -1534,6 +1507,168 @@ mod tests {
             message,
         };
         (statement, signatures)
+    }
+
+    /// Auxiliary-input attack: the observer knows both complete child-proof sets, but
+    /// not the parent's coins. Same committee, message and count; different signer.
+    #[test]
+    fn full_shard_candidate_witness_distinguisher() {
+        let params = FullShardParams::new(REGIME, 2).unwrap();
+        let (left, left_sigs) = shard(2, &[0], [0x71; 32], 93);
+        let (right, right_sigs) = shard(2, &[1], [0x71; 32], 93);
+        let public = left.public(&params).unwrap();
+        assert_eq!(public, right.public(&params).unwrap());
+        let candidates = [left, right];
+        let children = [
+            prove_recursive_shard(&params, &candidates[0], &left_sigs, &[11; 32]).unwrap(),
+            prove_recursive_shard(&params, &candidates[1], &right_sigs, &[12; 32]).unwrap(),
+        ];
+        let start = Instant::now();
+        let relation = FullShardMergeRelation::new(params, 1).unwrap();
+        std::println!(
+            "candidate fixture: {:?}, setup_s={:.3}",
+            relation.stats(),
+            start.elapsed().as_secs_f64()
+        );
+        let assignments: Vec<_> = (0..2)
+            .map(|i| {
+                relation
+                    .assignment(
+                        core::slice::from_ref(&candidates[i]),
+                        core::slice::from_ref(&children[i]),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert_ne!(assignments[0], assignments[1]);
+        // Positive control and same-fixture cost baseline: the public hologram leaks
+        // exactly which candidate was used. Its coins are not available to the observer.
+        {
+            let hologram =
+                protocol::ShapeHologram::compile_native(relation.shape(), REGIME).unwrap();
+            let start = Instant::now();
+            let legacy = protocol::prove_public_hologram(
+                relation.shape(),
+                &hologram,
+                assignments[1].clone(),
+                PROOF_LABEL,
+                &[0x59; 32],
+            )
+            .unwrap();
+            std::println!(
+                "public parent baseline: bytes={}, prove_s={:.3}",
+                8 + legacy.to_bytes().len(),
+                start.elapsed().as_secs_f64()
+            );
+            let legacy = protocol::HologramPublicProof::from_bytes(
+                &legacy.to_bytes(),
+                hologram.verifier_key(),
+            )
+            .unwrap();
+            let start = Instant::now();
+            assert!(protocol::verify_public_hologram(
+                hologram.verifier_key(),
+                &public.words(),
+                PROOF_LABEL,
+                &legacy
+            ));
+            std::println!(
+                "public parent verify_s={:.3}",
+                start.elapsed().as_secs_f64()
+            );
+            let matches: Vec<_> = assignments
+                .iter()
+                .map(|z| {
+                    protocol::candidate_matches_public_evaluation(
+                        hologram.verifier_key(),
+                        &public.words(),
+                        PROOF_LABEL,
+                        &legacy,
+                        z,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                matches,
+                [false, true],
+                "positive control must identify the signer"
+            );
+        }
+        let start = Instant::now();
+        let parent = prove_full_shard_merge(
+            &relation,
+            &candidates[1..],
+            &children[1..],
+            REGIME,
+            &[0x59; 32],
+        )
+        .unwrap();
+        std::println!(
+            "candidate parent: bytes={}, prove_s={:.3}",
+            parent.to_bytes().len(),
+            start.elapsed().as_secs_f64()
+        );
+        let wire = parent.to_bytes();
+        let parent = FullShardMergeProof::from_bytes(&wire, &relation, REGIME).unwrap();
+        assert_eq!(parent.to_bytes(), wire);
+        let mut old_version = wire.clone();
+        old_version[..8].copy_from_slice(b"QSAGFSM1");
+        assert!(FullShardMergeProof::from_bytes(&old_version, &relation, REGIME).is_none());
+        let aggregate = crate::recursive::SuccinctFullShardAggregate {
+            signer_counts: vec![1],
+            proof: parent.clone(),
+        };
+        let mut aggregate_wire = aggregate.to_bytes();
+        assert_eq!(
+            crate::recursive::SuccinctFullShardAggregate::from_bytes_canonical(
+                &relation,
+                REGIME,
+                &aggregate_wire,
+            )
+            .unwrap(),
+            aggregate,
+        );
+        aggregate_wire[..8].copy_from_slice(b"QSAGFSA1");
+        assert!(
+            crate::recursive::SuccinctFullShardAggregate::from_bytes_canonical(
+                &relation,
+                REGIME,
+                &aggregate_wire,
+            )
+            .is_none()
+        );
+        let start = Instant::now();
+        assert!(verify_full_shard_merge(
+            &relation,
+            core::slice::from_ref(&public),
+            REGIME,
+            &parent
+        ));
+        std::println!(
+            "masked parent verify_s={:.3}",
+            start.elapsed().as_secs_f64()
+        );
+        let matches: Vec<_> = assignments
+            .iter()
+            .map(|z| {
+                protocol::candidate_matches_masked_evaluation(
+                    relation.shape(),
+                    REGIME,
+                    &public.words(),
+                    PROOF_LABEL,
+                    &parent.proof,
+                    z,
+                )
+            })
+            .collect();
+        // The same terminal-evaluation comparison cannot identify either candidate.
+        // This is evidence against this particular distinguisher on this fixture, not
+        // a proof of zero knowledge or witness indistinguishability of the protocol.
+        assert_eq!(
+            matches,
+            [false, false],
+            "unmasked parent evaluation identifies a candidate"
+        );
     }
 
     #[test]
@@ -1795,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn variable_height_jorts_recursive_shard_and_sublinear_hologram_merge() {
+    fn variable_height_jorts_recursive_shard_and_masked_merge() {
         let profile = AggSigProfile::jorts_with_height(10).unwrap();
         let params = FullShardParams::with_profile(REGIME, profile, 2).unwrap();
         assert_eq!(params.profile(), profile);
@@ -1838,8 +1973,7 @@ mod tests {
             &parent
         ));
         let ver_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        std::println!("HEIGHT10_HOLOGRAM verify_ms={ver_ms:.3}");
-        assert!(ver_ms < 25.0, "verify_ms={ver_ms}");
+        std::println!("HEIGHT10_MASKED verify_ms={ver_ms:.3}");
     }
 
     /// `QSAG_FULL_SHARD_SLOTS` signer slots per shard (all signing), `QSAG_FULL_SHARD_CHILDREN`

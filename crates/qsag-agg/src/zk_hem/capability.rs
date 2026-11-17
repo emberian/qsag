@@ -1,5 +1,9 @@
 //! Batched presentation of issuer-enrolled bearer capabilities with `SortedRevocationTree`
-//! interval non-membership, as a hiding `zk-Hem` relation (`#![no_std]` + `alloc`).
+//! interval non-membership, as a committed-mask `zk-Hem` relation (`#![no_std]` + `alloc`).
+//!
+//! Witness privacy and knowledge soundness are those of the masking protocol, summarised
+//! on [`protocol::prove`] and stated in `crates/qsag-agg/SECURITY.md`. A presentation reveals
+//! its public inputs and tags. The constraints below specify the relation being checked.
 //!
 //! # Capability model
 //!
@@ -31,20 +35,20 @@
 //!
 //! For offline delegation, [`DelegatedBearerCapability`] authenticates every attenuation
 //! with an ephemeral Poseidon2 WOTS+C key. [`DelegatedCapabilityRelation`] verifies the
-//! chain and possession of its terminal secret in zero knowledge. Only the initial key
-//! is enrolled; later hops need no contact with the issuer. The registered mode above
+//! chain and possession of its terminal secret using the same masking protocol. Only the
+//! initial key is enrolled; later hops need no contact with the issuer. The registered mode above
 //! remains available for smaller presentation circuits.
 //!
 //! # Relation
 //!
-//! Each slot `b` of a batch of `B >= 1` capabilities proves in zero knowledge:
+//! Each slot `b` of a batch of `B >= 1` capabilities constrains:
 //!
-//! 1. **Caveats.** For a hidden `n <= max_hops`, the first `n` hops are active. Each active
+//! 1. **Caveats.** For a witnessed `n <= max_hops`, the first `n` hops are active. Each active
 //!    hop advances the tag chain and enforces its predicate (`ExpiresAt`, `NotBefore`,
 //!    `Resource`, `Actions`, `MaxAmount`) against the verifier's [`CapabilityRequest`]. The
-//!    chain ends at the hidden `final_tag`.
-//! 2. **Enrollment.** `mint_leaf`, computed from the hidden `token_id`, `root_tag`,
-//!    `final_tag` and `n` and from the request's public `audience`, opens at a hidden index
+//!    chain ends at the witnessed `final_tag`.
+//! 2. **Enrollment.** `mint_leaf`, computed from the witnessed `token_id`, `root_tag`,
+//!    `final_tag` and `n` and from the request's public `audience`, opens at a witnessed index
 //!    under `issuer_root`.
 //! 3. **Presentation tag.** The public
 //!    `presentation_tag = sponge12(final_tag || token_id || context_digest || [CAP_PRESENT_TAG_DOM])[0..4]`
@@ -807,7 +811,9 @@ pub struct CapabilityBatchStatement {
     pub revocation_root: Digest,
     pub revocation_epoch: u64,
     pub request: CapabilityRequest,
-    /// Per-capability unlinkable presentation nullifiers, ordered by hidden `token_id`.
+    /// Deterministic per-context presentation nullifiers, ordered by witnessed `token_id`.
+    /// Equal contexts for the same capability produce equal tags; unlinkability across
+    /// contexts rests on the tag derivation, which `crates/qsag-agg/SECURITY.md` does not analyse.
     pub presentation_tags: Vec<Digest>,
 }
 
@@ -1440,7 +1446,9 @@ fn populate(
     }
 }
 
-/// Self-delimiting wire wrapper (`b"QSAGCAP1"`) around a hiding [`ZkHemProof`] for [`CapabilityRelation`].
+/// Self-delimiting wire wrapper (`b"QSAGCAP1"`) around a committed-mask [`ZkHemProof`]
+/// for [`CapabilityRelation`]. The `Zk` name identifies the protocol; it does not establish
+/// the privacy or knowledge-soundness properties left open in [`protocol::prove`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZkCapabilityBatchProof {
     pub proof: ZkHemProof,

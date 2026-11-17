@@ -1,5 +1,10 @@
 //! `BlindVC` selective-disclosure presentation as a zk-Hem relation.
 //!
+//! Presentations use the committed-mask protocol, whose zero-knowledge and knowledge-
+//! soundness statements are summarised on [`protocol::prove`] and given in
+//! `crates/qsag-agg/SECURITY.md`. Selective disclosure describes which attributes are public
+//! inputs; the proof reveals nothing else about the witness within those bounds.
+//!
 //! The statement is the one of `qsag-cred::blind_vc::eval_sd_plaintext_circuit`: the holder
 //! knows attributes, a holder blind, a presentation blind and an accumulator path such that
 //!
