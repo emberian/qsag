@@ -209,8 +209,45 @@ def apply_proposals(names, isa):
                 self.last_w = None          # the row written by that instruction has closed meanwhile
             return more
         machine.Machine._step = step2
+    if "ra_stage" in names:
+        # registered read address (rtl/dregg_seq.sv RA_STAGE = 1): every row read costs one clock, in
+        # place of the conditional two-phase stall; KMOV reads its key row the same way
+        o_rd = machine.Machine._rd
+
+        def rd(self, row, same=None):
+            r = o_rd(self, row, same)
+            if row != self.last_w:
+                self.cycles += 1
+            return r
+        machine.Machine._rd = rd
+        o_step3 = machine.Machine._step
+
+        def step3(self):
+            w = self.rom.words[self.pc] if self.pc < len(self.rom.words) else None
+            more = o_step3(self)
+            if more and w is not None and isa.OPS[isa.decode(w)["op"]] == "KMOV":
+                self.cycles += 1
+            return more
+        machine.Machine._step = step3
+    if "opr_estimate" in names:
+        # ESTIMATE ONLY, no RTL behind it: an operand register in front of the word unit, one more clock for
+        # every instruction that goes through the word unit (two-operand functions, CMP, UN, LDF, LDC, DIN,
+        # FRAM RWORD)
+        o_step4 = machine.Machine._step
+        wu_ops = set(isa.ALU2) | {"UN", "LDF", "LDC", "DIN"}
+
+        def step4(self):
+            w = self.rom.words[self.pc] if self.pc < len(self.rom.words) else None
+            more = o_step4(self)
+            if more and w is not None:
+                d = isa.decode(w)
+                mn = isa.OPS[d["op"]]
+                if mn in wu_ops or (mn == "FRAM" and isa.FRAM[d["a"]] == "RWORD"):
+                    self.cycles += 1
+            return more
+        machine.Machine._step = step4
     for n in names:
-        if n not in ("kec_last_w", "ir_stage"):
+        if n not in ("kec_last_w", "ir_stage", "ra_stage", "opr_estimate"):
             raise SystemExit(f"unknown proposal {n}")
 
 

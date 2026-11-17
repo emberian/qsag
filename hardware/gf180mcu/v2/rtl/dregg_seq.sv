@@ -28,13 +28,20 @@
 // (and the KEC wait) that would have followed is absorbed by the empty clock. Nothing else changes; the
 // model does not count that clock (IR_STAGE = 0 is the model's machine).
 //
+// RA_STAGE = 1 registers the read address: an instruction that reads a row (word unit operand, PUSH of a
+// row, REL, KMOV, FRAM WWORD) first spends one clock in which only its row address is captured, then runs
+// as before with the registered address. That clock is also the clock in which a row written by the
+// previous instruction closes, so the two-phase stall never occurs in addition. Model accounting: every
+// row read costs one clock, in place of the conditional stall.
+//
 // Address 0 is the idle point: the instruction there executes only when the framer offers a header.
 `default_nettype none
 
 module dregg_seq #(
     parameter bit H_SHADOW = 1'b1,
     parameter bit KEC_WAIT_AFTER_STORE = 1'b1,
-    parameter bit IR_STAGE = 1'b0
+    parameter bit IR_STAGE = 1'b0,
+    parameter bit RA_STAGE = 1'b0
 ) (
     input  wire         clk,
     input  wire         srst_n,
@@ -293,7 +300,10 @@ module dregg_seq #(
     wire        open_hit = (tr_valid && (tr_row == phys_row))
                          | (tr_wipe[0] && row_lo) | (tr_wipe[1] && row_hi) | (tr_wipe[2] && row_sc);
     wire        kec_hold = KEC_WAIT_AFTER_STORE && (op == OP_KEC) && lw_valid;
-    wire        do_stall = present && !r_fault && ((phys_rd && open_hit) || kec_hold);
+    logic       ra_v;           // RA_STAGE: raddr_q holds this instruction's row address
+    logic [6:0] raddr_q;
+    wire        ra_wait  = RA_STAGE && phys_rd && !ra_v;
+    wire        do_stall = present && !r_fault && ((phys_rd && open_hit) || ra_wait || kec_hold);
     assign stall = do_stall;
 
     wire        wipe_out  = (op == OP_WIPE) && fa[W_OUT_B];
@@ -414,7 +424,7 @@ module dregg_seq #(
         rf_waddr   = rb;
         rf_out_we  = 2'b00;
         rf_wipe    = 4'd0;
-        rf_raddr   = phys_row;
+        rf_raddr   = RA_STAGE ? raddr_q : phys_row;
         unique case (st)
             S_PUFA: begin
                 h_en = puf_valid;
@@ -536,6 +546,8 @@ module dregg_seq #(
             off_end  <= 1'b0;
             ir_q     <= '0;
             ir_v     <= 1'b0;
+            ra_v     <= 1'b0;
+            raddr_q  <= '0;
             key_valid   <= 1'b0;
             key_attr    <= '0;
             f_mac       <= 1'b0;
@@ -548,6 +560,13 @@ module dregg_seq #(
             tr_row   <= tr_row_n;
             tr_wipe  <= rf_wipe[2:0];
             if (do_stall) lw_valid <= 1'b0;
+            if (RA_STAGE) begin
+                if (present && !r_fault && ra_wait) begin
+                    raddr_q <= phys_row;
+                    ra_v    <= 1'b1;
+                end
+                if (fin || (st == S_ENDI)) ra_v <= 1'b0;
+            end
             if (IR_STAGE) begin
                 if (!ir_v) begin                    // the empty clock: read the ROM at the new address
                     ir_q <= rom_word;
@@ -779,6 +798,9 @@ module dregg_seq #(
             if ($past(st) == S_KMOV2) assert ((h_alt == HA_ZERO) && !t_h && keyed && dirty && t_lanes);
             if ($past(fin) && $past(st) == S_RUN && $past(op) == OP_LD && !$past(immf) && ($past(ra) < 7'(KWORK0))
                 && $past(t_lanes) && !$past(r_clear_h)) assert (t_h);
+            // RA_STAGE: the registered address is the instruction's row whenever the row is read
+            if (RA_STAGE && rd_used && (st == S_RUN)) assert (ra_v && (raddr_q == phys_row));
+            if (RA_STAGE && ra_v) assert ((raddr_q == phys_row) && phys_rd);
             // a refused instruction has no effect
             assert (!(fault_now && f_effect));
             // taint (R7): key-derived data sets no response length, index, loop count, verdict or key attribute

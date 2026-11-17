@@ -1,7 +1,7 @@
 #!/bin/bash
 # SymbiYosys proofs of the small control blocks (ARCHITECTURE.md 8.2). Run from the chip directory:
 #   bash v2/lec/run_formal.sh [egress|seq] ...
-# IR=1 proves the two-stage machine (dregg_seq with IR_STAGE = 1).
+# IR=1 proves dregg_seq with IR_STAGE = 1 and RA_STAGE = 1 (instruction register, registered read address).
 # Each task is run twice: bounded model checking from reset, and k-induction (an unbounded proof).
 set -e
 OSS=${OSS:-/home/build/qsag-ni-fpga/oss-cad-suite}
@@ -24,12 +24,12 @@ depth $depth
 smtbmc ${SOLVER:-yices}
 [script]
 read_verilog -sv -formal -DSYNTHESIS -DFORMAL -I$PWD/$B/inc$rows $PWD/rtl/qsag_cells.sv $PWD/$R/dregg_rules.sv $PWD/$R/dregg_seq.sv $PWD/$R/dregg_egress.sv $PWD/v2/lec/fv_$t.sv
-${IR:+chparam -set IR_STAGE 1 dregg_seq}
+${IR:+chparam -set IR_STAGE 1 -set RA_STAGE 1 dregg_seq}
 prep -top fv_$t
 async2sync
 SBY
             if timeout --kill-after=10s ${FV_TIMEOUT:-1500}s sby -f -d $O/$name $O/$name.sby > $O/$name.log 2>&1; then r=PASS; else r=FAIL; st=1; fi
-            echo "formal $t${IR:+ (IR_STAGE=1)}, $rows rows, $mode depth $depth: $r ($(grep -c 'assert (' $PWD/$R/dregg_$t.sv) assert statements in dregg_$t.sv; $(tail -1 $O/$name.log | cut -c1-90))"
+            echo "formal $t${IR:+ (IR_STAGE=1, RA_STAGE=1)}, $rows rows, $mode depth $depth: $r ($(grep -c 'assert (' $PWD/$R/dregg_$t.sv) assert statements in dregg_$t.sv; $(tail -1 $O/$name.log | cut -c1-90))"
         done
     done
 done
