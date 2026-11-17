@@ -33,7 +33,8 @@ use qsag_migrate::{
     FpPallas, FqPallas, FrBls381, HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness,
     MigrateError, MigrationRequest, PallasCommitmentKind, PallasMigrationRequest,
     PallasOwnershipWitness, PallasPoint, compute_bls_0x00_withdrawal_credentials,
-    ed25519_ct::public_key_from_clamped_scalar, prove_bls_migration_in_domain,
+    ed25519_ct::public_key_from_clamped_scalar, prove_bls_key_possession_in_domain,
+    prove_bls_migration_in_domain, verify_bls_key_possession,
     prove_migration_in_domain, prove_pallas_migration_in_domain, secp256k1_ct::SecpPoint,
     verify_bls_migration, verify_migration_proof, verify_pallas_migration,
 };
@@ -450,8 +451,8 @@ fn check_bls12_381_scalars_against_blstrs(
     let wit1 = BlsOwnershipWitness::from_secret_scalar_be(sk1_be).unwrap();
     prop_assert_eq!(wit1.compute_validator_pubkey_48(), Some(ref_pk48_1));
     prop_assert_eq!(
-        wit1.compute_beacon_commitment(),
-        Some(BlsValidatorCommitment::BeaconValidatorPubkey(ref_pk48_1))
+        wit1.compute_operator_commitment(),
+        Some(BlsValidatorCommitment::OperatorSigningPubkey(ref_pk48_1))
     );
 
     // 3. `0x00` `BLS_WITHDRAWAL_PREFIX` credential vs `sha2::Sha256`
@@ -459,8 +460,8 @@ fn check_bls12_381_scalars_against_blstrs(
     ref_cred32[0] = 0x00;
     prop_assert_eq!(compute_bls_0x00_withdrawal_credentials(&ref_pk48_1), ref_cred32);
     prop_assert_eq!(
-        wit1.compute_unrevealed_0x00_commitment(),
-        Some(BlsValidatorCommitment::UnrevealedBls0x00Credential(ref_cred32))
+        wit1.compute_withdrawal_commitment(),
+        Some(BlsValidatorCommitment::BlsWithdrawalCredential(ref_cred32))
     );
 
     // 4. Complete addition, doubling, & compressed 48-byte roundtrip
@@ -656,7 +657,7 @@ fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection
         assert!(verify_pallas_migration(&stmt, &proof, &domain, epoch).is_err());
     }
 
-    // 4. Upstream `blstrs` Ethereum Beacon `0x02` `BeaconValidatorPubkey` & unrevealed `0x00` ceremonies
+    // 4. Upstream `blstrs` Ethereum Beacon `OperatorSigningPubkey` key possession & `0x00` `BlsWithdrawalCredential` ceremonies
     let mut bls_sk_be = [0x6Cu8; 32];
     bls_sk_be[0] = 0x51;
     let ref_bls_sk = BlsRefScalar::from_bytes_be(&bls_sk_be).expect("canonical BlsRefScalar");
@@ -674,22 +675,13 @@ fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection
     })
     .unwrap();
 
-    for (label, comm, wc) in [
-        (
-            "BeaconValidatorPubkey0x02",
-            BlsValidatorCommitment::BeaconValidatorPubkey(ref_bls_pk48),
-            cred_0x02,
-        ),
-        (
-            "UnrevealedBls0x00Credential",
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(ref_cred_0x00),
-            ref_cred_0x00,
-        ),
-    ] {
+    // Withdrawal-key statement: the fund-migration entry points.
+    {
+        let label = "BlsWithdrawalCredential";
         let req = BlsMigrationRequest {
-            commitment: comm,
+            commitment: BlsValidatorCommitment::BlsWithdrawalCredential(ref_cred_0x00),
             validator_index: 512_345,
-            withdrawal_credentials: wc,
+            withdrawal_credentials: ref_cred_0x00,
             target: sample_pq_destination(label.as_bytes()),
             epoch,
             domain,
@@ -703,8 +695,45 @@ fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection
             Ok(()),
             "BLS12-381 438-rep ZKBoo verification failed for {label}"
         );
+        assert_eq!(
+            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
+            Ok(())
+        );
         proof.repetitions[42].hidden_outputs[0] ^= 0x01;
         assert!(verify_bls_migration(&stmt, &proof, &domain, epoch).is_err());
+    }
+
+    // Operator signing-key statement: key possession only. The fund-migration prover and
+    // verifier refuse it, whatever withdrawal credential the caller attaches.
+    {
+        let label = "OperatorSigningPubkey0x02";
+        let req = BlsMigrationRequest {
+            commitment: BlsValidatorCommitment::OperatorSigningPubkey(ref_bls_pk48),
+            validator_index: 512_345,
+            withdrawal_credentials: cred_0x02,
+            target: sample_pq_destination(label.as_bytes()),
+            epoch,
+            domain,
+        };
+        assert!(prove_bls_migration_in_domain(&bls_wit, req.clone(), [0x55; 32], &accel).is_err());
+        assert!(
+            prove_bls_key_possession_in_domain(&bls_wrong, req.clone(), [0x55; 32], &accel)
+                .is_err()
+        );
+
+        let (stmt, mut proof) =
+            prove_bls_key_possession_in_domain(&bls_wit, req, [0x66; 32], &accel).expect(label);
+        assert_eq!(
+            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
+            Ok(()),
+            "BLS12-381 438-rep ZKBoo verification failed for {label}"
+        );
+        assert!(
+            verify_bls_migration(&stmt, &proof, &domain, epoch).is_err(),
+            "an operator signing-key proof must not pass fund-migration verification"
+        );
+        proof.repetitions[42].hidden_outputs[0] ^= 0x01;
+        assert!(verify_bls_key_possession(&stmt, &proof, &domain, epoch).is_err());
     }
 
     // 5. Subgroup safety: point `(0, 2)` is on `y^2 = x^3 + 4` over `FpBls381` (`2^2 = 0^3 + 4`),
