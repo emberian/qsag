@@ -30,22 +30,19 @@ HEAD = """* RO PUF {mode} seed={seed}
 VVDD VDD 0 {{vdd_val}}
 VVSS VSS 0 0
 VEN EN 0 PWL(0 0 0.4n 0 0.6n {{vdd_val}})
-.subckt ring en osc vdd vss cl=5.0f c0=5.0f
-XI en  eni    vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__buf_2
-X0 osc eni n1 vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1
-C0 n1  vss {{c0}}
-X1 n1  n1  n2 vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1
-C1 n2  vss {{cl}}
-X2 n2  n2  n3 vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1
-C2 n3  vss {{cl}}
-X3 n3  n3  n4 vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1
-C3 n4  vss {{cl}}
-X4 n4  n4  osc vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1
-C4 osc vss {{cl}}
-.ends ring
+{ringsub}
 """
+def ringsub(stages):
+    """buf_2 enable isolation + `stages` nand2_1 (first one gated); 5 fF assumed per stage."""
+    l = [".subckt ring en osc vdd vss cl=5.0f c0=5.0f", "XI en eni vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__buf_2"]
+    for i in range(stages):
+        inp = "osc" if i == 0 else "n%d" % i; out = "osc" if i == stages - 1 else "n%d" % (i + 1)
+        l.append("X%d %s %s %s vdd vdd vss vss gf180mcu_fd_sc_mcu7t5v0__nand2_1" % (i, inp, "eni" if i == 0 else inp, out))
+        l.append("C%d %s vss {%s}" % (i, out, "c0" if i == 0 else "cl"))
+    return "\n".join(l + [".ends ring"])
+
 TAIL = """.param vmid='vdd_val/2'
-.tran 10p 60n 0 10p
+.tran 10p {tran} 0 10p
 {meas}
 .end
 """
@@ -65,15 +62,15 @@ def run_deck(a, text, name):
 def mc(a, seed):
     # the "statistical" section is itself a complete MOS library (typical centre + die-to-die terms)
     corner = "statistical" if a.glob else a.corner
-    t = HEAD.format(mode="mc", seed=seed, pdk=a.pdk, glob=a.glob, mm=1, corner=corner, vdd=a.vdd, temp=a.temp, statlib="")
+    t = HEAD.format(ringsub=ringsub(a.stages), mode="mc", seed=seed, pdk=a.pdk, glob=a.glob, mm=1, corner=corner, vdd=a.vdd, temp=a.temp, statlib="")
     m = ""
     for i in range(a.rings):
         t += "XR%d EN OSC%d VDD VSS ring\n" % (i, i); m += meas(i, "OSC%d" % i)
-    per, _ = run_deck(a, t + TAIL.format(meas=m), "mc_%s_%s_%s_g%d_s%d" % (a.corner, a.vdd, a.temp, a.glob, seed))
+    per, _ = run_deck(a, t + TAIL.format(meas=m, tran=a.tran), "mc%d_%s_%s_%s_g%d_s%d" % (a.stages, a.corner, a.vdd, a.temp, a.glob, seed))
     return seed, [20.0 / per[i] if i in per else None for i in range(a.rings)]
 
 def sens(a):
-    t = HEAD.format(mode="sens", seed=1, pdk=a.pdk, glob=0, mm=0, corner=a.corner, vdd=a.vdd, temp=a.temp, statlib="")
+    t = HEAD.format(ringsub=ringsub(a.stages), mode="sens", seed=1, pdk=a.pdk, glob=0, mm=0, corner=a.corner, vdd=a.vdd, temp=a.temp, statlib="")
     cases = [("nominal", "cl=5.0f c0=5.0f", "VDD"), ("load_all_+5pct", "cl=5.25f c0=5.25f", "VDD"),
              ("load_one_stage_+0.5fF", "cl=5.0f c0=5.5f", "VDD"), ("vdd_-50mV", "cl=5.0f c0=5.0f", "VDDL"),
              ("isupply", "cl=5.0f c0=5.0f", "VDDM")]
@@ -83,14 +80,14 @@ def sens(a):
         t += "XR%d EN OSC%d %s VSS ring %s\n" % (i, i, sup, par); m += meas(i, "OSC%d" % i)
     m += ".meas tran iavg AVG i(VM) FROM=20n TO=60n\n"
     t += ".save all i(VM)\n"
-    per, iavg = run_deck(a, t + TAIL.format(meas=m), "sens_%s_%s_%s" % (a.corner, a.vdd, a.temp))
+    per, iavg = run_deck(a, t + TAIL.format(meas=m, tran=a.tran), "sens_%s_%s_%s" % (a.corner, a.vdd, a.temp))
     return {"cases": {c[0]: 20.0 / per[i] for i, c in enumerate(cases) if i in per}, "iavg_ring_A": iavg}
 
 def main():
     if platform.system() != "Linux": raise SystemExit("run on the Linux build box, not the Mac")
     ap = argparse.ArgumentParser()
     ap.add_argument("mode"); ap.add_argument("--pdk", default="/spice/pdk"); ap.add_argument("--ngspice", default="ngspice")
-    ap.add_argument("--seeds", default="1"); ap.add_argument("--rings", type=int, default=64)
+    ap.add_argument("--stages", type=int, default=5); ap.add_argument("--tran", default="60n"); ap.add_argument("--seeds", default="1"); ap.add_argument("--rings", type=int, default=64)
     ap.add_argument("--corner", default="typical"); ap.add_argument("--vdd", type=float, default=5.0)
     ap.add_argument("--temp", type=float, default=27); ap.add_argument("--global", dest="glob", type=int, default=0)
     ap.add_argument("--jobs", type=int, default=8); ap.add_argument("--work", default="work"); ap.add_argument("--out", default="puf.json")
