@@ -43,8 +43,8 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use qsag_core::anti_rollback::{
     CompositeAntiRollbackAnchor, DevTpmRm0, HypervisorGenerationAnchor, LinuxSysfsVmGenSource,
-    Tpm2NvMonotoneAnchor, Tpm2Transport, VmGenPolicy, inspect_tpm2_seal, is_valid_tpm2_nv_index,
-    tpm2_nv_read_counter, tpm2_nv_read_public,
+    Tpm2NvMonotoneAnchor, Tpm2Transport, TpmRebindState, VmGenPolicy, inspect_tpm2_seal,
+    is_valid_tpm2_nv_index, tpm2_nv_read_counter, tpm2_nv_read_public,
 };
 use qsag_core::ceremony_journal::CeremonyContext;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
@@ -165,7 +165,9 @@ impl AnchorConfig {
     /// must never have been incremented: a written counter backs another anchor (in
     /// this vault, another vault, or the policy ledger) or an abandoned enrollment,
     /// and two seals on one counter invalidate each other. For [`TpmUse::Reopen`]
-    /// every counter must be written and readable with the configured authorization.
+    /// every counter must be written. Ordinary counters are also checked with the
+    /// configured authorization here; reservation-policy counters authenticate at
+    /// per-domain open, after the custody key needed to derive their auth is loaded.
     pub fn check_tpm_range(&self, slots: u32, purpose: TpmUse) -> Result<(), CliError> {
         self.tpm_slot(0, slots)?;
         let Some(base) = self.tpm_nv_index else {
@@ -540,6 +542,12 @@ fn probe_tpm_range(
             }
             (TpmUse::Enroll, false) => {}
             (TpmUse::Reopen, true) => {
+                // A migrated counter uses its domain/transaction auth, derived from
+                // the authenticated seal and custody key. This public preflight has
+                // neither; the actual anchor open must verify the exact live count.
+                if public.check_rebind_counter(index).is_ok() {
+                    continue;
+                }
                 tpm2_nv_read_counter(transport, index, password).map_err(|e| {
                     CliError::state(format!(
                         "{slot} cannot be read with the configured authorization: {}",
@@ -1161,10 +1169,13 @@ impl AnchorConfig {
     /// That is checked before anything is written; a vault whose newest seal is
     /// behind the counter is refused as rolled back or foreign.
     ///
-    /// Domains are moved in ascending order of their sealed count, the one that
-    /// matches the counter last, so an interrupted run leaves the proof intact for
-    /// the domains that remain and can simply be run again. A domain already moved
-    /// is verified against its own new counter instead.
+    /// Each completed move retires the source count once. Authenticated migration
+    /// histories retain the original seal count and source start value. On retry we
+    /// require a contiguous retirement chain beginning at the largest original seal
+    /// count; at most its last step can be incomplete. Thus restoring an older batch
+    /// cannot invent the source increments that have happened since that snapshot.
+    /// Each migrated destination is also verified against its own counter before
+    /// any remaining old seal moves. No retired source seal can open again.
     pub fn reanchor_shared_tpm_index(
         &self,
         new_base: u32,
@@ -1208,6 +1219,8 @@ impl AnchorConfig {
             new_binding: [u8; 32],
             // The count of a seal still on the shared index; `None` once it has moved.
             shared_count: Option<u64>,
+            migration: Option<TpmRebindState>,
+            original_count: u64,
         }
         let mut pending = Vec::with_capacity(domains.len());
         for domain in domains {
@@ -1233,7 +1246,11 @@ impl AnchorConfig {
             }
             let tpm_mac =
                 derive_sub_mac(&domain.mac_key, b"tpm2_nv", domain.domain, &domain.key_id);
-            let shared_count = match inspect_tpm2_seal(&seal_path, shared_index, tpm_mac.0) {
+            let (shared_count, migration, original_count) = match inspect_tpm2_seal(
+                &seal_path,
+                shared_index,
+                tpm_mac.0,
+            ) {
                 Ok(seal) if !ticket_moved => {
                     if seal.commit_in_flight
                         || seal.checkpoint.generation != ticket.state.checkpoint.generation
@@ -1244,7 +1261,7 @@ impl AnchorConfig {
                             domain.domain
                         )));
                     }
-                    Some(seal.sealed_count)
+                    (Some(seal.sealed_count), None, seal.sealed_count)
                 }
                 Ok(_) => {
                     return Err(refused(format!(
@@ -1253,14 +1270,26 @@ impl AnchorConfig {
                     )));
                 }
                 Err(_) => {
-                    inspect_tpm2_seal(&seal_path, new_index, tpm_mac.0).map_err(|e| {
+                    let seal = inspect_tpm2_seal(&seal_path, new_index, tpm_mac.0).map_err(|e| {
                         refused(format!(
                             "the {} TPM seal is bound to neither that index nor {new_index:#010x}: {}",
                             domain.domain,
                             e.into_io_error()
                         ))
                     })?;
-                    None
+                    let migration = seal.rebind;
+                    if migration.is_some_and(|m| m.old_index != shared_index)
+                        || seal.commit_in_flight
+                        || seal.checkpoint != ticket.state.checkpoint
+                    {
+                        return Err(refused(format!(
+                            "the {} migration and custody record disagree",
+                            domain.domain
+                        )));
+                    }
+                    // A legacy already-moved seal is independently authenticated
+                    // against its destination before the retirement-only upgrade.
+                    (None, migration, migration.map_or(0, |m| m.original_count))
                 }
             };
             pending.push(Pending {
@@ -1270,24 +1299,60 @@ impl AnchorConfig {
                 new_index,
                 new_binding,
                 shared_count,
+                migration,
+                original_count,
             });
         }
-        if let Some(newest) = pending.iter().filter_map(|p| p.shared_count).max() {
+        if let Some(newest) = pending.iter().map(|p| p.original_count).max() {
             let live = self.with_tpm(|tpm| {
                 tpm2_nv_read_counter(tpm, shared_index, &password).map_err(|e| {
                     refused(format!("the counter cannot be read: {}", e.into_io_error()))
                 })
             })?;
-            if newest != live {
+            let mut chain: Vec<_> = pending.iter().filter_map(|p| p.migration).collect();
+            chain.sort_by_key(|migration| migration.source_start);
+            let newest = if newest == 0 {
+                // All domains were already moved by the old implementation: no
+                // remaining custody state relies on the shared source count.
+                chain
+                    .first()
+                    .map_or(live, |migration| migration.source_start)
+            } else {
+                newest
+            };
+            let mut expected = newest;
+            for (i, migration) in chain.iter().enumerate() {
+                if migration.source_start != expected
+                    || (i + 1 != chain.len() && migration.phase < 2)
+                {
+                    return Err(refused("the source-retirement history has a gap, duplicate, or unfinished predecessor".into()));
+                }
+                expected = expected
+                    .checked_add(1)
+                    .ok_or_else(|| refused("the source counter is exhausted".into()))?;
+            }
+            let last_pending = chain
+                .last()
+                .is_some_and(|migration| live == migration.source_start);
+            let fully_retired =
+                live == expected && chain.last().is_none_or(|migration| migration.phase >= 2);
+            if !last_pending && !fully_retired {
                 return Err(refused(format!(
-                    "the newest seal on disk was written at count {newest} but the counter is at {live}: the disk is older than the TPM (rolled back), or something else used this index"
+                    "the newest seal on disk was written at count {newest}, with {} retirements, but the counter is at {live}: the disk is older than the TPM (rolled back), or something else used this index",
+                    chain.len()
                 )));
             }
         }
 
         // Phase 2: move the seals, the one that matches the counter last, then rebind
         // each ticket record. Each step is safe to repeat.
-        pending.sort_by_key(|p| p.shared_count.unwrap_or(0));
+        pending.sort_by_key(|p| {
+            (
+                p.migration.is_none(),
+                p.migration
+                    .map_or(p.shared_count.unwrap_or(0), |m| m.source_start),
+            )
+        });
         for p in &mut pending {
             let tpm_mac = derive_sub_mac(
                 &p.domain.mac_key,
@@ -1904,6 +1969,34 @@ pub(crate) mod tpm_model {
             )
             .unwrap();
         }
+    }
+
+    /// Emulate a successful domain move by the previous non-atomic implementation.
+    pub(crate) fn legacy_move_shared_domain(
+        tpm: &ModelTpm2,
+        shared: &AnchorConfig,
+        new_index: u32,
+        dir: &str,
+        domain: &TpmDomain<'_>,
+    ) {
+        let target = AnchorConfig {
+            tpm_nv_index: Some(new_index),
+            ..shared.clone()
+        };
+        let (record_path, seal_path) =
+            domain_record_paths(shared, &[], &[dir], domain.domain, &domain.key_id).unwrap();
+        let mut ticket = open_ticket(shared, &record_path, domain).unwrap();
+        Tpm2NvMonotoneAnchor::fixture_reseal_on_shared_counter(
+            tpm.clone(),
+            &seal_path,
+            shared.tpm_nv_index.unwrap(),
+            new_index,
+            b"",
+            derive_sub_mac(&domain.mac_key, b"tpm2_nv", domain.domain, &domain.key_id).0,
+        )
+        .unwrap();
+        ticket.inner.domain_hash = backend_binding_hash(&target, domain.domain);
+        ticket.inner.write_state(&ticket.state).unwrap();
     }
 
     /// One enrolled anchor domain: honest storage reopens; an advance moves only its
