@@ -1,5 +1,6 @@
 module
 public import Qsag.Coding.Resultant
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Tactic.Prelude
 
 public section
@@ -1170,3 +1171,28 @@ variable {F : Type} [LawfulField F] [DecidableEq F]
 theorem liftK_apply (q : Poly3 F) : (liftK (F := F)).toFun q = (mapHom (mapHom Frac.of)).toFun q := by unfold liftK; rfl
 theorem lineSpec_apply (Q : Poly3 F) (α β : F) : lineSpec Q α β = (mapHom (evalHom (line α β))).toFun Q := by unfold lineSpec; rfl
 end Qsag.Poly3
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.Poly3.evalAffineLine_eq_zero_of_agree
+  Qsag.Poly3.excluded_pairs_card_le
+  Qsag.Poly3.exists_trivariate_affine_explainer
+  Qsag.Poly3.natDeg_sepElim_le
+  Qsag.Poly3.simple_root_of_hasse
+  Qsag.Poly3.simple_root_of_not_excluded
+  Qsag.Poly3.exists_multiplicity
+  Qsag.Poly3.explainer_spec
+  Qsag.Poly3.sepElim_ne_zero
+  Qsag.Poly3.explainer_vanishes
+  Qsag.Poly3.lineSpec_zero_card_le
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.Poly3.explainer
+#export_eqns Qsag.Poly3.consRows
+#export_eqns Qsag.Poly3.gens
+#export_eqns Qsag.Poly3.mono3
+#export_eqns Qsag.Poly3.lineSpec
+#export_eqns Qsag.Poly3.Excluded
+#export_eqns Qsag.Poly3.sepElim
+#export_eqns Qsag.Poly3.liftK
+#export_eqns Qsag.Poly3.factored

@@ -1,5 +1,6 @@
 module
 public import Qsag.Coding.ReedSolomon
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Coding.GuruswamiSudan
 public import Qsag.Tactic.Prelude
 
@@ -2065,3 +2066,33 @@ end Poly3
 end Qsag
 
 end
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.affineMcaBound_ge_card
+  Qsag.Poly3.jetEq_pt
+  Qsag.Poly3.nonExcluded_pairs_card_le
+  Qsag.Poly3.roots_on_line_card_le
+  Qsag.Poly3.slice_card_le
+  Qsag.SlicedJet.cover_count
+  Qsag.Poly3.deg_jetEq_le
+  Qsag.SlicedJet.leaf_bound_arith
+  Qsag.affineMcaBound_without_field_term_fails
+  Qsag.poleWords_far
+  Qsag.Poly3.primY_liftK_eval
+  Qsag.poleWords_accept
+
+-- Kernel-checked defining equations for the executed controls in `Tests/MathAndCoding` (no body is exposed).
+#export_eqns Qsag.poleWords
+
+public section
+namespace Qsag
+/-- Public form of the root-count bound of this module (a nonzero polynomial has at most `natDeg` distinct
+    roots), for the two-root controls in `Tests/MathAndCoding`. -/
+theorem UPoly.roots_length_le_natDeg {F : Type} [LawfulField F] [DecidableEq F] (P : UPoly F)
+    (hP : P ≠ CommRingOps.zero) (zs : List F) (hNd : zs.Nodup)
+    (hRoot : ∀ z ∈ zs, P.eval z = CommRingOps.zero) : zs.length ≤ P.natDeg :=
+  uPoly_roots_le_natDeg P hP zs hNd hRoot
+end Qsag
+end
+#verify_constructive Qsag.UPoly.roots_length_le_natDeg

@@ -25,6 +25,211 @@ namespace Qsag
 open CommRingOps RoundPoly
 set_option autoImplicit false
 set_option exponentiation.threshold 512
+set_option linter.unusedSimpArgs false
+/-- `decide +kernel`, named so that it can close a `first` alternative. -/
+macro "kernel_decide" : tactic => `(tactic| decide +kernel)
+/-- Evaluates a closed polynomial-stack statement by rewriting with the kernel-checked defining equations that
+    the owning modules export (`#export_eqns`; no body is exposed) and deciding the residual field
+    arithmetic. The bracket lists the fixtures of the statement at hand. -/
+macro "poly_eval" "[" ls:Lean.Parser.Tactic.simpLemma,* "]" : tactic =>
+  `(tactic| first | kernel_decide | ((simp (config := {decide := true}) [$ls,*, UPoly.eq_iff_coeffs, UPoly.coeffs_zero, UPoly.coeffs_one,
+    UPoly.coeffs_add, UPoly.coeffs_mul, UPoly.coeffs_neg, UPoly.coeffs_sub, UPoly.coeffs_ofList,
+    SylElim.Dual.eq_iff_fst_snd, SylElim.Dual.zero_eq, SylElim.Dual.one_eq, SylElim.Dual.add_eq,
+    SylElim.Dual.mul_eq, SylElim.Dual.neg_eq, SylElim.Dual.sub_eq, SylElim.Dual.inl_toFun,
+    SylElim.Dual.map_toFun,
+    Qsag.affineDistinctTuples.public_eqs,
+    Qsag.eraseFirst.public_eqs,
+    Qsag.prodPool.public_eqs,
+    Qsag.JohnsonBound.elemBool.public_eqs,
+    Qsag.JohnsonBound.johnsonBound.public_eqs,
+    Qsag.UPoly.lead.public_eqs,
+    Qsag.RoundPoly.eval.public_eqs,
+    Qsag.monomial.public_eqs,
+    Qsag.solveHomogeneous.public_eqs,
+    Qsag.insertIdxVal.public_eqs,
+    Qsag.subVec.public_eqs,
+    Qsag.dropIdx.public_eqs,
+    Qsag.scaleVec.public_eqs,
+    Qsag.RoundPoly.subCoeffs.public_eqs,
+    Qsag.vanishingPoly.public_eqs,
+    Qsag.pSub.public_eqs,
+    Qsag.pAdd.public_eqs,
+    Qsag.pNeg.public_eqs,
+    Qsag.rawNegCoeffs.public_eqs,
+    Qsag.findNonzeroIdx.public_eqs,
+    Qsag.SylElim.monom.public_eqs,
+    Qsag.PreFrac.Rel.public_eqs,
+    Qsag.Frac.mk.public_eqs,
+    Qsag.UPoly.wdegFrom.public_eqs,
+    Qsag.Mat.det.public_eqs,
+    Qsag.Mat.minor.public_eqs,
+    Qsag.Mat.skipIdx.public_eqs,
+    Qsag.Mat.rangeSum.public_eqs,
+    Qsag.Mat.signed.public_eqs,
+    Qsag.UPoly.prodList.public_eqs,
+    Qsag.Mat.idMat.public_eqs,
+    Qsag.Mat.matMul.public_eqs,
+    Qsag.Hensel.num.public_eqs,
+    Qsag.Hensel.iter.public_eqs,
+    Qsag.Hensel.phi.public_eqs,
+    Qsag.Hensel.sep.public_eqs,
+    Qsag.Hensel.e12.public_eqs,
+    Qsag.Hensel.evW.public_eqs,
+    Qsag.UPoly.shiftDown.public_eqs,
+    Qsag.Hensel.e2.public_eqs,
+    Qsag.Hensel.e11.public_eqs,
+    Qsag.Hensel.evG.public_eqs,
+    Qsag.Poly3.henselNum.public_eqs,
+    Qsag.Poly3.henselG.public_eqs,
+    Qsag.Poly3.liftXY.public_eqs,
+    Qsag.Poly3.jetV.public_eqs,
+    Qsag.Poly3.liftX.public_eqs,
+    Qsag.Poly3.C3.public_eqs,
+    Qsag.Poly3.c3Hom.public_eqs,
+    Qsag.Poly3.jetY.public_eqs,
+    Qsag.Poly3.shiftHom.public_eqs,
+    Qsag.Poly3.yLine.public_eqs,
+    Qsag.UPoly.taylorShift.public_eqs,
+    Qsag.Poly3.triples.public_eqs,
+    Qsag.rows.public_eqs,
+    Qsag.Poly3.cons.public_eqs,
+    Qsag.Poly3.coeff3.public_eqs,
+    Qsag.Poly3.comb.public_eqs,
+    Qsag.Poly3.hasseZ.public_eqs,
+    Qsag.UPoly.hasse.public_eqs,
+    Qsag.Poly3.eval3.public_eqs,
+    Qsag.Poly3.ptHom.public_eqs,
+    Qsag.Poly3.triCount.public_eqs,
+    Qsag.Poly3.jetHom.public_eqs,
+    Qsag.Poly3.evalAffineLine.public_eqs,
+    Qsag.Poly3.affineLineHom.public_eqs,
+    Qsag.Poly3.degZ.public_eqs,
+    Qsag.Poly3.henselSep.public_eqs,
+    Qsag.Hensel.res.public_eqs,
+    Qsag.SylElim.modPoly2Hom.public_eqs,
+    Qsag.SylElim.remM.public_eqs,
+    Qsag.SylElim.divModLead.public_eqs,
+    Qsag.SylElim.divModLeadAux.public_eqs,
+    Qsag.SylElim.quotM.public_eqs,
+    Qsag.Poly2.mono.public_eqs,
+    Qsag.SylElim.embedUZ.public_eqs,
+    Qsag.Poly2.resZ.public_eqs,
+    Qsag.Poly2.eliminant.public_eqs,
+    Qsag.Poly2.elimV.public_eqs,
+    Qsag.Poly2.lincomb.public_eqs,
+    Qsag.Poly2.elimIdx.public_eqs,
+    Qsag.Poly2.elimVec.public_eqs,
+    Qsag.Poly2.nullVec.public_eqs,
+    Qsag.Poly2.coeff2.public_eqs,
+    Qsag.Poly2.elimGens.public_eqs,
+    Qsag.Poly2.elimCons.public_eqs,
+    Qsag.Poly2.elimDeg.public_eqs,
+    Qsag.Poly2.elimU.public_eqs,
+    Qsag.Poly2.swapVZ.public_eqs,
+    Qsag.Poly2.innerHom.public_eqs,
+    Qsag.SylElim.dualPerturb.public_eqs,
+    Qsag.Poly3.explainer.public_eqs,
+    Qsag.Poly3.consRows.public_eqs,
+    Qsag.Poly3.gens.public_eqs,
+    Qsag.Poly3.mono3.public_eqs,
+    Qsag.Poly3.lineSpec.public_eqs,
+    Qsag.Poly3.Excluded.public_eqs,
+    Qsag.Poly3.sepElim.public_eqs,
+    Qsag.Poly3.liftK.public_eqs,
+    Qsag.Poly3.factored.public_eqs,
+    Qsag.poleWords.public_eqs,
+    Qsag.whirAffineStageWitnesses.public_eqs,
+    Qsag.hemJohnsonQromStageWitness.public_eqs,
+    Qsag.hemJohnsonQromTableRow.public_eqs,
+    Qsag.hemJohnsonQromWitnessTable.public_eqs,
+    Qsag.hemJohnsonQromStageExhaustive.public_eqs,
+    Qsag.AffineMcaBound,
+    Qsag.Frac,
+    Qsag.Goldilocks.add,
+    Qsag.Goldilocks.inv,
+    Qsag.Goldilocks.mul,
+    Qsag.Goldilocks.neg,
+    Qsag.Goldilocks.ofNat,
+    Qsag.Goldilocks.one,
+    Qsag.Goldilocks.sub,
+    Qsag.Goldilocks.zero,
+    Qsag.GoldilocksExt2.add,
+    Qsag.GoldilocksExt2.inv,
+    Qsag.GoldilocksExt2.mul,
+    Qsag.GoldilocksExt2.neg,
+    Qsag.GoldilocksExt2.nonResidue,
+    Qsag.GoldilocksExt2.one,
+    Qsag.GoldilocksExt2.sub,
+    Qsag.GoldilocksExt2.zero,
+    Qsag.GsUniPoly,
+    Qsag.GsUniPoly.ofCoeffs,
+    Qsag.GsUniPoly.val,
+    Qsag.HasAffineWitnessS1,
+    Qsag.HasCorrelatedAgreement,
+    Qsag.HasPolynomialExplanation,
+    Qsag.IsPersistent,
+    Qsag.NonExcludedBound,
+    Qsag.Poly2,
+    Qsag.Poly2.CoprimeZ,
+    Qsag.Poly2.IsPrimY,
+    Qsag.Poly2.eval2,
+    Qsag.Poly2.liftFY,
+    Qsag.Poly2.tdeg,
+    Qsag.Poly2.vCoeff,
+    Qsag.Poly3,
+    Qsag.Poly3.deg11d,
+    Qsag.Poly3.degYZ,
+    Qsag.Poly3.line,
+    Qsag.RatFunc,
+    Qsag.RingHom.comp,
+    Qsag.RingHom.id,
+    Qsag.RoundPoly.evalCoeffs,
+    Qsag.SimpleEquiv.refl,
+    Qsag.SylElim.Dual.eps,
+    Qsag.SylElim.sylMat,
+    Qsag.SylElim.sylRes,
+    Qsag.SylElim.sylResDeriv,
+    Qsag.UPoly.C,
+    Qsag.UPoly.CHom,
+    Qsag.UPoly.X,
+    Qsag.UPoly.eval,
+    Qsag.UPoly.evalHom,
+    Qsag.UPoly.eval₂,
+    Qsag.UPoly.eval₂Hom,
+    Qsag.UPoly.mapHom,
+    Qsag.UPoly.natDeg,
+    Qsag.UPoly.ofList,
+    Qsag.UPoly.wdeg,
+    Qsag.affineFallingFactorial,
+    Qsag.affineMcaAccepts,
+    Qsag.checkWhirAffineWitness,
+    Qsag.coeffAt,
+    Qsag.dotVec,
+    Qsag.foldAgree,
+    Qsag.foldAgreePt,
+    Qsag.goldOfInt,
+    Qsag.goldP,
+    Qsag.goldilocksAddSpec,
+    Qsag.goldilocksReduce128Spec,
+    Qsag.goldilocksSubSpec,
+    Qsag.gsMonomialCount,
+    Qsag.gsUniHasse,
+    Qsag.hemJohnsonMinQueries,
+    Qsag.hemStageGeometry,
+    Qsag.hemStageGeoms,
+    Qsag.hemStageGeomsAux,
+    Qsag.interpEquationsAux,
+    Qsag.interpUnknownsAux,
+    Qsag.natCeilDiv,
+    Qsag.pMul,
+    Qsag.quadExtMulMod,
+    Qsag.rawAddCoeffs,
+    Qsag.rawMul,
+    Qsag.slicedParamsOk,
+    Qsag.sumTo,
+    Qsag.trimPoly]) <;> kernel_decide))
+/-- `poly_eval` with no fixtures. -/
+macro "poly_eval" : tactic => `(tactic| poly_eval [UPoly.coeffs_zero])
 /-- Dropping the parity bit loses injectivity at every order above two: `[1]G` and
     `[n - 1]G` are distinct multiples with one `x`-coordinate. -/
 theorem TaprootCurveProjection.tooth_xonly_not_injective {n : Nat} {XCoord : Type}
@@ -66,13 +271,6 @@ theorem tooth_taproot_xonly_not_injective_without_y_parity
 
 
 namespace Weierstrass
-/-- A point of order two keeps its parity under negation: on `y² = x³ + 7` over `ℤ/7`
-    the point `(0, 0)` is its own negative. `PrimeOrderGroup.n_odd` excludes this. -/
-theorem tooth_two_torsion_point_is_its_own_negative :
-    ∃ (C : Curve) (P : Point), C.OnCurve P ∧ P ≠ none ∧ C.p % 2 = 1 ∧
-      Point.yOdd (C.neg P) = Point.yOdd P ∧ C.smul 2 P = none := by
-  refine ⟨⟨7, 0, 7⟩, some (0, 0), ?_, ?_, ?_, ?_, ?_⟩ <;> decide
-
 #tooth_pair
   Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
   vs
@@ -81,110 +279,15 @@ theorem tooth_two_torsion_point_is_its_own_negative :
 
 end Weierstrass
 
-/-- **`#tooth` Ed25519 Clamped Scalars Exceed `ED_ORDER` & Wrap Non-Injectively (`tooth_ed25519_clamped_wraps_mod_order_non_injective`)**:
-    1. Every clamped value `c = clampEd25519Bytes32 raw` satisfies `ED25519_ORDER_L < c.toNat`, so
-       feeding `c` directly into `requireCanonicalScalar .Ed25519` **always fails** (`= false`), and
-       `reduceEd25519Order c ≠ c`.
-    2. Distinct values `≥ ED_ORDER` (`x1 = BitVec.ofNat 256 (2^254)` and
-       `x2 = BitVec.ofNat 256 (2^254 - ED25519_ORDER_L)`, both `> ED25519_ORDER_L`) wrap to the
-       **same** canonical scalar modulo `ED_ORDER`, proving `reduceEd25519Order`,
-       `clampEd25519Bytes32`, and `normalizeSlip0010Ed25519Scalar` are all non-injective! -/
-theorem tooth_ed25519_clamped_wraps_mod_order_non_injective :
-    ∃ x1 x2 : BitVec 256,
-      (∀ raw : BitVec 256,
-        ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
-        requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
-        reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw) ∧
-      ED25519_ORDER_L ≤ x1.toNat ∧
-      ED25519_ORDER_L ≤ x2.toNat ∧
-      x1 ≠ x2 ∧
-      reduceEd25519Order x1 = reduceEd25519Order x2 ∧
-      ¬ Function.Injective clampEd25519Bytes32 ∧
-      ¬ Function.Injective reduceEd25519Order ∧
-      ¬ Function.Injective normalizeSlip0010Ed25519Scalar := by
-  have hOrd := curve_orders_match_le_limbs_and_bounds
-  have hOrdLt253 : ED25519_ORDER_L < 2 ^ 253 := hOrd.2.2.2.2.2.2.1
-  have h253_254 : (2 : Nat) ^ 254 = 2 * (2 ^ 253) := by decide
-  have h254Lt256 : (2 : Nat) ^ 254 < 2 ^ 256 := by decide
-  have hAllWrap : ∀ raw : BitVec 256,
-      ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
-      requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
-      reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
-    intro raw
-    have hb := clampEd25519Bytes32_bits_and_range raw
-    have hGtOrd : ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat := by omega
-    have hNotCanon : requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false := by
-      unfold requireCanonicalScalar ScalarGroup.orderNat
-      have hNotLt : ¬ ((clampEd25519Bytes32 raw).toNat < ED25519_ORDER_L) := by omega
-      rw [decide_eq_false hNotLt, Bool.and_false]
-    have hRedNe : reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw := by
-      intro hEq
-      have hv := congrArg BitVec.toNat hEq
-      unfold reduceEd25519Order at hv
-      have hModLt : (clampEd25519Bytes32 raw).toNat % ED25519_ORDER_L < ED25519_ORDER_L :=
-        Nat.mod_lt _ (by omega)
-      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)] at hv
-      omega
-    exact ⟨hGtOrd, hNotCanon, hRedNe⟩
-  let x1 : BitVec 256 := clampEd25519Bytes32 0#256
-  let x2 : BitVec 256 := BitVec.ofNat 256 (x1.toNat - ED25519_ORDER_L)
-  have hx1Val : x1.toNat = 2 ^ 254 := by
-    change clampEd25519Nat 0 = 2 ^ 254
-    unfold clampEd25519Nat
-    simp
-  have hx2Val : x2.toNat = 2 ^ 254 - ED25519_ORDER_L := by
-    dsimp [x2]
-    rw [hx1Val, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
-  have hx1Ge : ED25519_ORDER_L ≤ x1.toNat := by omega
-  have hx2Ge : ED25519_ORDER_L ≤ x2.toNat := by omega
-  have hx1NeX2 : x1 ≠ x2 := by
-    intro hEq
-    have hv := congrArg BitVec.toNat hEq
-    omega
-  have hRedEq : reduceEd25519Order x1 = reduceEd25519Order x2 := by
-    unfold reduceEd25519Order
-    apply congrArg (BitVec.ofNat 256)
-    rw [hx1Val, hx2Val]
-    have hSplit : 2 ^ 254 = (2 ^ 254 - ED25519_ORDER_L) + ED25519_ORDER_L * 1 := by omega
-    conv => lhs; rw [hSplit]
-    rw [Nat.add_mul_mod_self_left]
-  have hClamp01 : clampEd25519Bytes32 0#256 = clampEd25519Bytes32 1#256 := by
-    apply BitVec.eq_of_toNat_eq
-    change clampEd25519Nat 0 = clampEd25519Nat 1
-    unfold clampEd25519Nat
-    have h1Mod : 1 % (2 ^ 254) = 1 := Nat.mod_eq_of_lt (by decide)
-    rw [h1Mod]
-  have h0Ne1 : (0#256 : BitVec 256) ≠ 1#256 := by decide
-  exact ⟨x1, x2, hAllWrap, hx1Ge, hx2Ge, hx1NeX2, hRedEq,
-    fun hInj => h0Ne1 (hInj hClamp01),
-    fun hInj => hx1NeX2 (hInj hRedEq),
-    fun hInj => h0Ne1 (hInj (congrArg reduceEd25519Order hClamp01))⟩
-
 #tooth_pair
   Qsag.slip0010_ed25519_clamped_canonical_nonzero
   vs
   Qsag.tooth_ed25519_clamped_wraps_mod_order_non_injective
 
 
-/-- `#tooth` Carmichael `561` passes `2^560 ≡ 1 (mod 561)` yet `checkPrattStep` deterministically rejects it. -/
-theorem tooth_carmichael_561_passes_fermat_but_fails_pratt :
-    ∃ c : PrattCert, c.n = 561 ∧ lucasPowMod 384 c.g (c.n - 1) c.n = 1 ∧
-      checkPrattStep [2, 3, 5, 7] c = false ∧ ¬ IsPrimeMod c.n := by
-  refine ⟨⟨561, 2, [(2, 4), (5, 1), (7, 1)]⟩, rfl, by decide +kernel, by decide +kernel, fun hPrime => ?_⟩
-  dsimp only at hPrime; rcases hPrime.2 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
-
 #tooth_pair Qsag.checkPrattStep_sound vs Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
 #verify_constructive Qsag.tooth_carmichael_561_passes_fermat_but_fails_pratt
 
-
-def bls381Torsion3Point : SwPoint := some (0, 2)
-
-/-- `#tooth` `BLS12-381` 3-torsion point `(0, 2)` lies on `y^2 = x^3 + 4` yet fails `[r_bls381]P = O`. -/
-theorem tooth_bls381_torsion3_onCurve_but_off_subgroup :
-    ∃ P : SwPoint, bls381Curve.onCurve P = true ∧
-      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) 3) = true ∧
-      isProjIdentity p_bls381 (rcbSmul p_bls381 12 (toRcbProj P) r_bls381) = false :=
-  ⟨bls381Torsion3Point, by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 #tooth_pair Qsag.bls381G1_onCurve_and_prime_subgroup_order vs Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
 #verify_constructive Qsag.tooth_bls381_torsion3_onCurve_but_off_subgroup
@@ -204,20 +307,20 @@ def pSq : UPoly Goldilocks := ofList [g 0, g 0, g 1]
 theorem inhabited_deg_evalAffineLine :
     ∃ (Q : Poly3 Goldilocks) (P : UPoly Goldilocks) (d : Nat), P.natDeg ≤ d ∧
       (Q.evalAffineLine (g 3) (g 5) P).natDeg = 2 ∧ Q.deg11d d = 2 :=
-  ⟨qZ, pSq, 2, by decide, by decide, by decide⟩
+  ⟨qZ, pSq, 2, by poly_eval [qZ, pSq, g], by poly_eval [qZ, pSq, g], by poly_eval [qZ, pSq, g]⟩
 
 /-- The `Z`-weight cannot be lowered below `deg P`: with weight `1` the bound fails. -/
 theorem tooth_deg_evalAffineLine_weight :
     ∃ (Q : Poly3 Goldilocks) (P : UPoly Goldilocks), P.natDeg ≤ 2 ∧
       ¬ (Q.evalAffineLine (g 3) (g 5) P).natDeg ≤ Q.deg11d 1 :=
-  ⟨qZ, pSq, by decide, by decide⟩
+  ⟨qZ, pSq, by decide, by poly_eval [g, qZ, pSq]⟩
 
 /-- Taylor's formula on a concrete cubic: `p = 1 + 2X + 3X² + 4X³` at `b = 5` has first
     Hasse derivative `2 + 6·5 + 12·25 = 332`. -/
 theorem taylor_cubic_example :
     coeffAt ((taylorShift (g 5)).toFun (ofList [g 1, g 2, g 3, g 4])).coeffs 1 = g 332 ∧
       (hasse 1 (ofList [g 1, g 2, g 3, g 4])).coeffs = [g 2, g 6, g 12] := by
-  decide
+  poly_eval [g, qZ, pSq]
 
 #verify_constructive deg_evalAffineLine_le UPoly.coeffAt_taylorShift UPoly.eval_taylorShift
 #verify_constructive UPoly.degFn_wdeg UPoly.natDeg_mul UPoly.eval_hasse taylor_cubic_example
@@ -238,12 +341,12 @@ theorem inhabited_det_matMul :
     ∃ (k : Nat) (A B : Nat → Nat → Goldilocks),
       det k A ≠ zero ∧ det k B ≠ zero ∧
       det k (matMul k A B) = g 12 ∧ det k (matMul k A B) = mul (det k A) (det k B) :=
-  ⟨2, matA, matB, by decide +kernel, by decide +kernel, by decide +kernel, det_matMul 2 matA matB⟩
+  ⟨2, matA, matB, by poly_eval [matA, matB, g], by poly_eval [matA, matB, g], by poly_eval [matA, matB, g], det_matMul 2 matA matB⟩
 
 theorem tooth_det_not_entrywise_mul :
     ∃ (k : Nat) (A B : Nat → Nat → Goldilocks),
       det k (fun i j => mul (A i j) (B i j)) ≠ mul (det k A) (det k B) :=
-  ⟨2, idMat, fun _ _ => one, by decide +kernel⟩
+  ⟨2, idMat, fun _ _ => one, by poly_eval [g, matA, matB]⟩
 
 theorem inhabited_degFn_det_weighted_le :
     ∃ (M : Nat → Nat → UPoly Goldilocks),
@@ -253,7 +356,7 @@ theorem inhabited_degFn_det_weighted_le :
       det 2 M ≠ zero := by
   let M : Nat → Nat → UPoly Goldilocks
     | 0, 0 => UPoly.X | 0, 1 => one | 1, 0 => zero | 1, 1 => UPoly.X | _, _ => zero
-  refine ⟨M, UPoly.degFn_natDeg, by decide +kernel, ?_, by decide +kernel⟩
+  refine ⟨M, UPoly.degFn_natDeg, by decide +kernel, ?_, by poly_eval [g, matA, matB]⟩
   intro i hi j hj hne
   match i, j with
   | 0, 0 | 0, 1 | 1, 0 | 1, 1 => dsimp [M] at hne ⊢; decide +kernel
@@ -280,24 +383,6 @@ theorem tooth_carmichael_561_rejected :
       checkLucasBlsCert N 2 [(2, 4), (5, 1), (7, 1)] = false ∧ ¬ IsPrimeNat N :=
   ⟨561, rfl, by decide, by decide, fun hp => by
     rcases hp.2 3 ⟨187, by decide⟩ with h1 | h2 <;> omega⟩
-
-/-- Mutation-sensitivity witness: the Carmichael number `561 = 3 · 11 · 17` passes the naive
-    base-2 Fermat pseudoprime test `2^560 ≡ 1 (mod 561)`, yet `checkPocklingtonStep` rejects it
-    because `gcd(2^(560 / 17) - 1, 561) ≠ 1`. -/
-theorem tooth_carmichael_561_rejected_by_pocklington :
-    ∃ (chain : List PocklingtonStep) (target : Nat),
-      powModFuel 256 2 (target - 1) target = 1 ∧
-      verifyPrimeCert chain target = false ∧
-      ¬ Weierstrass.IsPrime target := by
-  refine ⟨[⟨3, 2, [(2, 1)]⟩, ⟨11, 2, [(2, 1), (5, 1)]⟩, ⟨561, 2, [(17, 1), (11, 1)]⟩],
-    561, by decide +kernel, by decide +kernel, fun ⟨_, hdiv⟩ => ?_⟩
-  rcases hdiv 3 ⟨187, by decide⟩ with h1 | h561 <;> omega
-
-theorem inhabited_verifyPrimeCert :
-    ∃ (chain : List PocklingtonStep) (target : Nat),
-      verifyPrimeCert chain target = true ∧ Weierstrass.IsPrime target :=
-  ⟨[⟨3, 2, [(2, 1)]⟩], 3, by decide +kernel,
-    verifyPrimeCert_sound (chain := [⟨3, 2, [(2, 1)]⟩]) (by decide +kernel)⟩
 
 #tooth_pair
   Qsag.verifyPrimeCert_sound
@@ -334,12 +419,6 @@ theorem tooth_ext4_zero_has_no_inverse : zero * zero⁻¹ ≠ one := by
 end GoldilocksField.GoldilocksExt4
 /-! ## 4. Inhabitedness Witnesses & `#tooth_pair` / `#verify_constructive` Assurance Gates -/
 
-theorem witness_lucas_bls_goldilocks :
-    ∃ (N g : Nat) (facs : List (Nat × Nat)),
-      N - 1 < 2 ^ 64 ∧ (∀ qe ∈ facs, IsPrimeNat qe.1) ∧ checkLucasBlsCert N g facs = true :=
-  ⟨Goldilocks.p, 7, goldilocksTotientFactors, by decide,
-   goldilocksTotientFactors_all_prime, goldilocks_lucas_cert_valid⟩
-
 theorem witness_goldilocks_nonzero_element :
     ∃ x : Goldilocks, x ≠ Goldilocks.zero ∧ Goldilocks.inv x ≠ Goldilocks.zero :=
   ⟨⟨7, by decide⟩, by decide, by decide⟩
@@ -347,11 +426,6 @@ theorem witness_goldilocks_nonzero_element :
 theorem witness_goldilocks_bezout_nonzero :
     ∃ x : Goldilocks, x ≠ Goldilocks.zero ∧ Goldilocks.invBezout x ≠ Goldilocks.zero :=
   ⟨⟨7, by decide⟩, by decide, by rw [goldilocks_invBezout_eq_inv]; decide⟩
-
-theorem witness_ext4_nontrivial_element :
-    ∃ z : GoldilocksField.GoldilocksExt4, z ≠ GoldilocksField.GoldilocksExt4.zero ∧
-      z⁻¹ ≠ GoldilocksField.GoldilocksExt4.zero :=
-  ⟨⟨⟨⟨3, by decide⟩, ⟨0, by decide⟩⟩, ⟨⟨0, by decide⟩, ⟨0, by decide⟩⟩⟩, by decide, by decide⟩
 
 theorem tooth_goldilocks_zero_has_no_inverse :
     CommRingOps.mul Goldilocks.zero (Goldilocks.inv Goldilocks.zero) ≠ CommRingOps.one := by
@@ -380,13 +454,6 @@ theorem tooth_monic_quad_factor_zero_at_origin :
 #tooth_pair Qsag.goldilocks_quadExtMulMod_no_zero_divisors vs Qsag.tooth_mod29_seven_residue_zero_divisor
 #tooth_pair Qsag.v_pow4_sub_seven_irreducible vs Qsag.tooth_monic_quad_factor_zero_at_origin
 #tooth_pair Qsag.GoldilocksField.GoldilocksExt4.ext4_mul_inv_cancel vs Qsag.GoldilocksField.GoldilocksExt4.tooth_ext4_zero_has_no_inverse
-
-/-- A limb equal to `p` (non-canonical encoding of `0`) is rejected. -/
-theorem decodeExt4Bytes32_rejects_noncanonical_limb :
-    decodeExt4Bytes32
-      ([1, 0, 0, 0, 255, 255, 255, 255] ++ List.replicate 24 (0 : UInt8)) = none ∧
-    decodeExt4Bytes32 (List.replicate 32 (0 : UInt8)) = some GoldilocksExt4.zero := by
-  decide
 
 end Qsag
 
@@ -930,7 +997,7 @@ theorem inhabited_affine_proximity_gaps :
   refine ⟨by decide, hExcAll, ?_⟩
   exact welch_berlekamp_affine_proximity_gap f g D S 1 5 [(g0, g1)] (fun _ => [])
     (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by intro p hp; simp at hp; subst hp; decide)
+    (by intro p hp; simp at hp; subst hp; poly_eval [indexOf?, scalarFloorWords, zeroLossAffineWords])
     (by intro _ _; simp)
     (by intro p hp; simp at hp; subst hp; decide)
     hExcAll
@@ -1066,23 +1133,6 @@ theorem tooth_checkWhirAffineWitness_rejects_perturbed_rows :
 
 
 
-/-- Actual distinct-query counts at all four `nv = 24` deployed stages. The hypothesis
-    states the agreement bound on the committed oracle; the conclusion counts accepting
-    tuples, with no replacement and no floating-point approximation. This does not assert
-    the separate affine-fold proximity-gap theorem. -/
-theorem hemJohnson_deployed_query_count {α : Type} [DecidableEq α]
-    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses 24 true)
-    (U : List α) (good : α → Bool) (hU : U.Nodup) (hLen : U.length = w.n)
-    (hGood : (U.filter good).length ≤ w.A + w.sFolds) :
-    ((affineDistinctTuples w.queries U).filter (fun t => t.all good)).length * 2 ^ 256 <
-      (affineDistinctTuples w.queries U).length := by
-  have hCount := affineDistinctTuples_all_good_le w.queries (w.A + w.sFolds) U good hU hGood
-  have hRows : ∀ v ∈ whirAffineStageWitnesses 24 true,
-      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
-        affineFallingFactorial v.n v.queries := by decide +kernel
-  rw [affineDistinctTuples_length _ hU, hLen]
-  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 256) hCount) (hRows w hw)
-
 theorem tooth_deployed_agreement_threshold_increased :
     ∃ w : WhirAffineWitness, w.A = 527171 ∧ w.queries = 258 ∧
       checkWhirAffineWitness w (goldilocksPrime ^ 4) = false := by
@@ -1092,15 +1142,6 @@ theorem tooth_deployed_agreement_threshold_increased :
   exact ⟨w, rfl, rfl, tooth_checkWhirAffineWitness_rejects_perturbed_rows.1⟩
 
 #tooth_pair cwyz26_whir_nv20_and_nv24_all_stages_valid vs tooth_deployed_agreement_threshold_increased
-theorem inhabited_deployed_gs_dimensions :
-    ∃ (nv : Nat) (w : WhirAffineWitness), nv = 24 ∧ 2 ≤ nv ∧ nv ≤ 24 ∧
-      w ∈ whirAffineStageWitnesses nv true ∧ w.n = 1048576 ∧ w.queries = 258 := by
-  let w : WhirAffineWitness :=
-    { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
-      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
-  refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
-  exact List.mem_cons_self ..
-
 #verify_inhabited hem_gs_interpolation_dimensions inhabited_deployed_gs_dimensions
 
 
@@ -1202,7 +1243,7 @@ theorem inhabited_isPrimY_mul :
   let B : Poly2 Goldilocks := ofList [neg X, one]
   have hA : IsPrimY A := isPrimY_monic_deg1 X
   have hB : IsPrimY B := isPrimY_monic_deg1 (neg X)
-  exact ⟨A, B, hA, hB, isPrimY_mul hA hB, by decide +kernel⟩
+  exact ⟨A, B, hA, hB, isPrimY_mul hA hB, by poly_eval [A, B]⟩
 
 /-- `#tooth`: dropping `IsPrimY A` invalidates `isPrimY_mul`: `A = Y · 1` (`C X`) and `B = Z` (`X`)
     satisfy `A ≠ 0 ∧ IsPrimY B`, yet `mul A B = Y · Z` is divisible by `Y` (`natDeg = 1 ≠ 0`). -/
@@ -1251,9 +1292,9 @@ theorem inhabited_curve_incidence :
           decide ((equation z).eval2 q.1 q.2 = zero))).length ≤ B) ∧
       pts.length = 2 ∧ pts.length = Nat.max 1 ((D.length * (tdeg C * M * C.natDeg)) / (A-B)) := by
   refine ⟨X, twoCoords, coordEquation, twoPts, 1, 1, 0, primitive_X,
-    by decide +kernel, by decide +kernel, by decide, by decide +kernel, ?_,
+    by decide +kernel, by decide +kernel, by decide, by poly_eval [coordEquation, twoPts, twoCoords], ?_,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    rfl, by decide +kernel⟩
+    rfl, by poly_eval [coordEquation, twoPts, twoCoords]⟩
   intro z hz
   right
   refine ⟨zero, one, ofList [neg z, one], ?_, ?_⟩
@@ -1278,7 +1319,7 @@ theorem tooth_curve_incidence_needs_gap :
           decide ((equation z).eval2 q.1 q.2 = zero))).length ≤ B) ∧
       ¬ pts.length ≤ Nat.max 1 ((D.length * (tdeg C * M * C.natDeg)) / (A-B)) := by
   refine ⟨X, [zero], (fun _ => zero), twoPts, 0, 1, 1, primitive_X,
-    by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, by poly_eval [coordEquation, twoPts, twoCoords],
     (fun _ _ => .inl ⟨zero, (LawfulCommRing.mul_zero _).symm⟩),
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
     by decide +kernel⟩
@@ -1364,9 +1405,8 @@ theorem inhabited_assembly :
       cases L with
       | nil => exact Nat.le_refl 0
       | cons p _ =>
-        have hp : p ∈ ([] : List (Goldilocks × Goldilocks)) := (h p (.head _)).1
-        cases hp),
-    by decide, by decide, by decide, by decide⟩
+        exact absurd (h p (.head _)).1 (by simp [prodPool.public_eqs])),
+    by decide, by decide, by poly_eval [g], by decide⟩
 
 def dom11 : List Goldilocks :=
   [g 0, g 1, g 2, g 3, g 4, g 5, g 6, g 7, g 8, g 9, g 10]
@@ -1381,7 +1421,7 @@ theorem inhabited_sliced :
       (∀ k, 1 ≤ k → k ≤ Dy → (CRing.natCast k : Goldilocks) ≠ zero) ∧
       A ≤ D.length ∧ ¬ 2 * D.length + d + 1 < 3 * A := by
   have hchar : ∀ k, k ≤ 4 → 1 ≤ k → (CRing.natCast k : Goldilocks) ≠ zero := by decide +kernel
-  exact ⟨dom11, dom11, 1, 8, 5, 2, 12, 4, by decide +kernel, by decide +kernel, by decide,
+  exact ⟨dom11, dom11, 1, 8, 5, 2, 12, 4, by decide +kernel, by decide +kernel, by poly_eval [g, dom11],
     by decide, by decide, by decide, by decide, by decide, by decide,
     fun k h1 h2 => hchar k h2 h1, by decide, by decide⟩
 
@@ -1407,70 +1447,12 @@ end Qsag
 
 public section
 namespace Qsag
-def bellToyRho (y : Int) : Nat := if y = 0 then 4 else if y.natAbs = 1 then 3 else if y.natAbs = 2 then 1 else 0
 
 
-theorem tooth_pcg_dense_depth14_stern_dumer_below_256 :
-    ¬ sternDumerWorkExceedsPow2 pcgDepth14Cols pcgDenseRows pcgDenseWeightT 2 52 256 := by
-  intro hBad
-  have h60Le : 60 ≤ pcgDenseRows - 52 := Nat.le_trans
-    (Nat.le_trans (by decide : 60 ≤ 1024) (Nat.le_mul_of_pos_left 1024 (by decide : 0 < 135))) (rows_sub_ge 52 (by decide))
-  have hUp60 : binom pcgDepth14Cols 60 ≤ 8 ^ 60 * binom (pcgDenseRows - 52) 60 := by
-    apply binom_scale_upper_bound 8 h60Le
-    rw [Nat.sub_sub]
-    have hR := Nat.mul_le_mul_left 8 (rows_sub_ge (52 + 60) (by decide))
-    rw [← Nat.mul_assoc 8 135 1024] at hR
-    exact Nat.le_trans (by unfold pcgDepth14Cols; exact Nat.mul_le_mul_right 1024 (by decide : 1024 ≤ 8 * 135)) hR
-  exact stern_dumer_depth14_contra_gen binom binom_one_right binom_step_right hUp60 (binom_pos h60Le) hBad
 
-
-theorem tooth_omitting_accumulator_collapses_dual_lpn_bias :
-    ¬ ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb ((List.replicate 64 3).map depth15TreeRate))))
-      (ExactRat.twoNegPow 256) := by
-  rw [piling_up_lemma_regular_blocks_rat]; apply ExactRat.not_lt_twoNegPow_of_gt
-  have hRep : ∀ n : Nat, (((List.replicate n 3).map depth15TreeRate).foldr
-        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).num = ((32762 ^ n : Nat) : Int) ∧
-      (((List.replicate n 3).map depth15TreeRate).foldr
-        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).den = 32768 ^ n := by
-    intro n; induction n with
-    | zero => exact ⟨rfl, rfl⟩
-    | succ n' ih =>
-      rw [List.replicate_succ, List.map_cons, List.foldr_cons, ExactRat.mul_num, ExactRat.mul_den, ih.1, ih.2]
-      exact ⟨by change (32762 : Int) * ((32762 ^ n' : Nat) : Int) = _; rw [Nat.pow_succ', Int.natCast_mul]; rfl,
-             by change 32768 * 32768 ^ n' = 32768 ^ (n' + 1); rw [Nat.pow_succ']⟩
-  rw [(hRep 64).1, (hRep 64).2, Int.natAbs_natCast]
-  have hSplit : ∀ m : Nat, 32768 ^ m = 16384 ^ m * 2 ^ m := by
-    intro m; induction m with
-    | zero => rfl
-    | succ m' ih => rw [Nat.pow_succ 32768, ih, Nat.pow_succ 16384, Nat.pow_succ 2, nat_mul4_swap, show 16384 * 2 = 32768 from by decide]
-  rw [hSplit 64]
-  exact Nat.lt_of_lt_of_le
-    (Nat.mul_lt_mul_of_pos_right (Nat.pow_lt_pow_left (by decide) (by decide)) (Nat.two_pow_pos 64))
-    (Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide) (by decide)))
-
-
-theorem tooth_omitting_rejection_scaling_breaks_hvzk :
-    ¬ ExactRat.eqv (ExactRat.scaleNat (bellToyRho (0 - 0)) (acceptProbExact bellToyRho 1 0 0))
-      (ExactRat.scaleNat (bellToyRho (0 - 1)) (acceptProbExact bellToyRho 1 0 1)) := by decide
-
-
-theorem tooth_tight_clipping_loses_boundary_preimage :
-    ∃ z v : Int, inHalfOpenBox rlweAcceptHalfWidth z = true ∧ (-1 ≤ v) ∧ (v ≤ 1) ∧
-      inHalfOpenBox rlweAcceptHalfWidth (z - v) = false :=
-  ⟨-3070, 1, by decide, by decide, by decide, by decide⟩
 
 
 /-! ## 6. Constructive Witness Inhabitedness & `#tooth_pair` Assurance Gates -/
-
-theorem witness_accept_box_preimage :
-    ∃ z v : Int, inHalfOpenBox rlweAcceptHalfWidth z = true ∧ (-1 ≤ v) ∧ (v ≤ 1) :=
-  ⟨-3070, 1, by decide, by decide, by decide⟩
-
-theorem witness_acceptProb_cancellation :
-    ∃ (rho : Int → Nat) (M : Nat) (hM : 0 < M) (z v : Int),
-      0 < rho (z - v) ∧ rho z ≤ M * rho (z - v) ∧
-      ExactRat.eqv (ExactRat.scaleNat (rho (z - v)) (acceptProbExact rho M z v)) ⟨(rho z : Int), M, hM⟩ :=
-  ⟨bellToyRho, 4, by decide, 0, 1, by decide, by decide, by decide⟩
 
 theorem witness_dual_lpn_bias :
     ∃ weights : List Nat, weights.length = 64 ∧
@@ -1534,12 +1516,12 @@ theorem inhabited_persistent_pairs_card_le :
   refine ⟨poleWords, dom4, pool2, 1, 4, 3, [(g 1, g 1)],
     by decide, by decide, by decide,
     poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide),
-    by decide, by decide, by decide, ?_⟩
+    by decide, by poly_eval [g, dom4, pool2], by decide, ?_⟩
   intro p hp
   rw [List.mem_singleton.mp hp]
-  refine ⟨C (g 1), by decide +kernel, by decide +kernel,
+  refine ⟨C (g 1), by decide +kernel, by poly_eval [g, dom4, pool2],
     one, ofList [one, one], by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel⟩
+    by poly_eval [g, dom4, pool2]⟩
 
 /-- `#tooth`: dropping `¬ HasCorrelatedAgreement d (A - 1) f g D` invalidates Lemma 4.5:
     for `f = 0, g = 0` on `D = [0, 1, 2, 3]`, `S = [0, 1, 2]` (`|S| = 3`), `d = 1, B = 3, A = 4`,
@@ -1557,7 +1539,7 @@ theorem tooth_persistent_needs_far :
           Nat.max S.length (D.length * (D.length - 1) / 2)) := by
   let S7 : List Goldilocks := [g 0, g 1, g 2, g 3, g 4, g 5, g 6]
   refine ⟨(fun _ => zero, fun _ => zero), dom4, S7, 1, 4, 3, prodPool S7,
-    by decide, by decide, by decide, prodPool_nodup (by decide), fun _ h => h, ?_, by decide⟩
+    by decide, by decide, by decide, prodPool_nodup (by decide), fun _ h => h, ?_, by poly_eval [g, dom4, pool2]⟩
   intro p _
   have hz0 : ∀ z : Goldilocks, (zero : UPoly Goldilocks).eval z = zero := fun _ => rfl
   have hAgAll : dom4.filter (foldAgreePt (fun _ => zero, fun _ => zero) p.1 p.2 zero) = dom4 :=
@@ -1593,12 +1575,12 @@ theorem inhabited_exceptional_persistent_pairs :
         IsPersistent x D d B p.1 p.2 P ∧
         ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) := by
   refine ⟨poleWords, dom4, pool2, 1, 4, 3, [(g 1, g 1)],
-    by decide, by decide, by decide, by decide, by decide, by decide, ?_⟩
+    by decide, by decide, by decide, by decide, by poly_eval [g, dom4, pool2], by decide, ?_⟩
   intro p hp
   rw [List.mem_singleton.mp hp]
-  refine ⟨C (g 1), by decide +kernel, by decide +kernel, ?_, ?_⟩
+  refine ⟨C (g 1), by decide +kernel, by poly_eval [g, dom4, pool2], ?_, ?_⟩
   · exact ⟨one, ofList [one, one], by decide +kernel, by decide +kernel,
-      by decide +kernel, by decide +kernel⟩
+      by decide +kernel, by poly_eval [g, dom4, pool2]⟩
   · rintro ⟨Fp, Gp, hF, hG, hAgree, _⟩
     exact poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide)
       ⟨Fp, Gp, hF, hG, hAgree⟩
@@ -1658,12 +1640,24 @@ private theorem three_of_four (p : Goldilocks → Bool) (h : 3 ≤ (dom.filter p
        simp only [List.filter, h0, h1, h2, h3, List.length_cons, List.length_nil] at h
        exact absurd h (by decide))
 
+private theorem natDeg_sub_le_max {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (p q : UPoly R) (B : Nat) (hp : p.natDeg ≤ B) (hq : q.natDeg ≤ B) :
+    (sub p q).natDeg ≤ B := by
+  rw [LawfulCommRing.sub_eq_add_neg]
+  have h1 := (degFn_natDeg (R := R)).add_le p (neg q)
+  have h2 := (degFn_natDeg (R := R)).neg_le q
+  omega
+
+private theorem eval_sub_eq {R : Type} [LawfulCommRing R] [DecidableEq R]
+    (p q : UPoly R) (z : R) : (sub p q).eval z = sub (p.eval z) (q.eval z) := by
+  simpa only [evalHom_apply] using RingHom.map_sub (evalHom z) p q
+
 private theorem eq_zero_of_two_roots (H : UPoly Goldilocks) (hd : H.natDeg ≤ 1)
     (a b : Goldilocks) (hab : a ≠ b) (ha : H.eval a = zero) (hb : H.eval b = zero) :
     H = zero := by
   apply Decidable.byContradiction
   intro hne
-  have hr := uPoly_roots_le_natDeg H hne [a, b]
+  have hr := UPoly.roots_length_le_natDeg H hne [a, b]
     (List.pairwise_cons.mpr ⟨(fun c hc => by rw [List.mem_singleton.mp hc]; exact hab),
       List.pairwise_cons.mpr ⟨(fun _ hc => absurd hc List.not_mem_nil), List.Pairwise.nil⟩⟩)
     (fun z hz => by
@@ -1767,11 +1761,11 @@ theorem inhabited_slice :
         evalAffineLine (hasseZ 1 R) a β P ≠ zero ∧ ¬ IsPersistent x D d B a β P) ∧
       as.Nodup ∧ as.length = 1 := by
   refine ⟨stepWords, dom, 1, 4, 3, 1, zSurface, zero, [zero], by decide +kernel, by decide,
-    by decide, by decide, by decide, by decide +kernel, by decide +kernel, ?_,
+    by decide, by decide, by decide, by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], ?_,
     by decide +kernel, rfl⟩
   intro a ha
   rw [List.mem_singleton.mp ha]
-  exact ⟨zero, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+  exact ⟨zero, by decide +kernel, by decide +kernel, by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface],
     stepWords_nonpersistent⟩
 
 /-- Without nonpersistence the slice bound fails: all ten intercepts are accepted for the
@@ -1787,9 +1781,9 @@ theorem tooth_slice_needs_nonpersistent :
   have key : ∀ a ∈ tenPts, (zero : UPoly Goldilocks).natDeg ≤ 1 ∧
       4 ≤ (dom.filter (foldAgreePt zeroWords a zero zero)).length ∧
       evalAffineLine zSurface a zero zero = zero ∧
-      evalAffineLine (hasseZ 1 zSurface) a zero zero ≠ zero := by decide +kernel
+      evalAffineLine (hasseZ 1 zSurface) a zero zero ≠ zero := by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface]
   exact ⟨zeroWords, dom, 1, 4, 3, 1, zSurface, zero, tenPts, by decide +kernel, by decide,
-    by decide, by decide, by decide, by decide +kernel, by decide +kernel,
+    by decide, by decide, by decide, by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface],
     fun a ha => ⟨zero, key a ha⟩, by decide +kernel, by decide⟩
 
 /-- The hypotheses of `nonExcluded_pairs_card_le` hold together with a counted challenge. -/
@@ -1805,18 +1799,18 @@ theorem inhabited_nonExcluded_pairs :
           evalAffineLine Q p.1 p.2 P = zero ∧
           ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) ∧
       L.length = 1 := by
-  have hdz : zSurface.degZ = 1 := by decide +kernel
+  have hdz : zSurface.degZ = 1 := by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface]
   refine ⟨stepWords, dom, dom, 1, 4, 3, 1, zSurface, [(zero, zero)], by decide +kernel,
     by decide +kernel, by decide, by decide, by decide, by decide, by decide +kernel,
-    by decide +kernel, by decide +kernel, ?_, by decide +kernel, ?_, rfl⟩
+    by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], ?_, by decide +kernel, ?_, rfl⟩
   · intro k h1 h2
     rw [hdz] at h2
     rw [Nat.le_antisymm h2 h1]
     exact LawfulField.one_ne_zero
   · intro p hp
     rw [List.mem_singleton.mp hp]
-    exact ⟨by decide +kernel, by decide +kernel, zero, by decide +kernel, by decide +kernel,
-      by decide +kernel, stepWords_unexplained⟩
+    exact ⟨by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], zero, by decide +kernel, by decide +kernel,
+      by poly_eval [two, three, stepWords, zeroWords, dom, tenPts, zSurface], stepWords_unexplained⟩
 
 #verify_constructive Poly3.jetEq_pt Poly3.deg_jetEq_le Poly3.primY_liftK_eval
 #verify_constructive Poly3.slice_card_le Poly3.nonExcluded_pairs_card_le
@@ -1857,14 +1851,14 @@ private theorem isPrimY_monic_deg1_loc (p : UPoly Goldilocks) :
 theorem inhabited_primY_natDeg_pos :
     ∃ E : Poly2 Goldilocks, IsPrimY E ∧ 1 ≤ tdeg E ∧ 1 ≤ E.natDeg :=
   let E : Poly2 Goldilocks := ofList [neg X, one]
-  ⟨E, isPrimY_monic_deg1_loc (neg X), by decide +kernel,
-    primY_natDeg_pos (isPrimY_monic_deg1_loc (neg X)) (by decide +kernel)⟩
+  ⟨E, isPrimY_monic_deg1_loc (neg X), by poly_eval [E, g],
+    primY_natDeg_pos (isPrimY_monic_deg1_loc (neg X)) (by poly_eval [E, g])⟩
 
 /-- `#tooth`: dropping `IsPrimY E` invalidates `primY_natDeg_pos`: `E = C X` (`U · 1`) has
     `tdeg E = 1 ≥ 1` yet `E.natDeg = 0`! -/
 theorem tooth_natDeg_pos_needs_primY :
     ∃ E : Poly2 Goldilocks, E ≠ zero ∧ 1 ≤ tdeg E ∧ ¬ (1 ≤ E.natDeg) :=
-  ⟨C X, by decide +kernel, by decide +kernel, by decide +kernel⟩
+  ⟨C X, by decide +kernel, by poly_eval [g], by decide +kernel⟩
 
 /-- The curve `W = 0` divides `Res_Z(Z, W) = W`, while its derivative resultant is `1`.
 This exercises the common-root branch with a nonzero resultant and a nonempty curve. -/
@@ -1876,8 +1870,8 @@ theorem inhabited_curve_leaf_root_decomp :
       sylRes 1 0 (embedUZ.toFun C₁) P₀ ≠ zero ∧
       sylResDeriv 1 0 (embedUZ.toFun C₁) P₀ one = one := by
   refine ⟨X, X, C X, by decide +kernel, by decide +kernel, by decide +kernel,
-    isPrimY_monic_deg1_loc zero, by decide +kernel, ⟨one, by decide +kernel⟩,
-    by decide +kernel, by decide +kernel⟩
+    isPrimY_monic_deg1_loc zero, by poly_eval [g], ⟨one, by poly_eval [g]⟩,
+    by poly_eval [g], by poly_eval [g]⟩
 
 /-- Applying the decomposition to `Res_Z(Z,W)` produces an actual common-root leaf. -/
 theorem inhabited_curve_common_root :
@@ -1888,12 +1882,12 @@ theorem inhabited_curve_common_root :
   obtain ⟨Es, _, hCover, hLeaves⟩ :=
     curve_leaf_root_decomp (h_C := 1) (H₀ := 0) (C₁ := (X : Poly2 Goldilocks))
       (P₀ := C X) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-      X (isPrimY_monic_deg1_loc zero) (by decide +kernel) ⟨one, by decide +kernel⟩
+      X (isPrimY_monic_deg1_loc zero) (by poly_eval [g]) ⟨one, by poly_eval [g]⟩
   obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
   obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
   · obtain ⟨Q, hQ⟩ := hDiv
     have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) (C X) one = one :=
-      by decide +kernel
+      by poly_eval [g]
     rw [hDeriv] at hQ
     have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
     have hDegree := UPoly.natDeg_mul hP.1 hQne
@@ -1919,13 +1913,13 @@ theorem tooth_curve_leaf_root_decomp_needs_divisibility :
               ((mapHom (modPoly2Hom Ej hPj hDj)).toFun (embedUZ.toFun C₁)).eval ζ = zero ∧
               ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀).eval ζ = zero) := by
   refine ⟨X, X, one, by decide +kernel, by decide +kernel, by decide +kernel,
-    isPrimY_monic_deg1_loc zero, by decide +kernel, ?_⟩
+    isPrimY_monic_deg1_loc zero, by poly_eval [g], ?_⟩
   rintro ⟨Es, _, hCover, hLeaves⟩
   obtain ⟨E, hMem, _⟩ := hCover zero zero (by decide +kernel)
   obtain ⟨hP, hD, hDiv | hRoot⟩ := hLeaves E hMem
   · obtain ⟨Q, hQ⟩ := hDiv
     have hDeriv : sylResDeriv 1 0 (embedUZ.toFun (X : Poly2 Goldilocks)) one one = one :=
-      by decide +kernel
+      by poly_eval [g]
     rw [hDeriv] at hQ
     have hQne : Q ≠ zero := fun e => NontrivialRing.one_ne_zero (by rw [hQ, e, LawfulCommRing.mul_zero])
     have hDegree := UPoly.natDeg_mul hP.1 hQne
@@ -1969,7 +1963,7 @@ theorem inhabited_sylResDeriv_eq_zero_of_common_factor_ge_two :
   let G : UPoly Goldilocks := ofList [neg (g 1), g 0, g 1]
   ⟨2, 2, 2, mul G one, mul G one, G, one, one,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by decide +kernel⟩
+    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by poly_eval [G, g]⟩
 
 /-- `#tooth`: dropping `2 ≤ d_G` (`d_G = 1`, simple common factor `G = X - 3` of `C1 = (X - 3)(X - 5)`
     and `P0 = X - 3`) makes `sylResDeriv 2 1 C1 P0 1 = -2 ≠ 0`! -/
@@ -1983,7 +1977,7 @@ theorem tooth_sylResDeriv_nonzero_for_deg_one_gcd :
   let QC : UPoly Goldilocks := ofList [neg (g 5), g 1]
   ⟨2, 1, 1, mul G QC, mul G one, G, QC, one,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by decide +kernel⟩
+    by decide +kernel, by decide +kernel, rfl, by decide +kernel, rfl, by poly_eval [G, QC, g]⟩
 
 /-- A simple common root has nonzero derivative resultant and is uniquely recovered. -/
 theorem inhabited_common_root_unique :
@@ -1994,7 +1988,7 @@ theorem inhabited_common_root_unique :
   refine ⟨1, 1, ofList [neg (g 1), g 1], ofList [neg (g 1), g 1], g 1, g 1,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, rfl⟩
+    by poly_eval [g], rfl⟩
 
 /-- Without the derivative condition, even a squarefree first polynomial has two common roots. -/
 theorem tooth_common_root_unique_needs_derivative :
@@ -2051,7 +2045,7 @@ theorem inhabited_coprimeZ_const_of_vCoeff :
   let p : UPoly Goldilocks := X
   let A : Poly2 Goldilocks := add (C X) X
   have hp : 1 ≤ p.natDeg := by decide +kernel
-  have hv1 : vCoeff A 1 = one := by decide +kernel
+  have hv1 : vCoeff A 1 = one := by poly_eval [A]
   have hbez : add (mul zero p) (mul one (vCoeff A 1)) = one := by
     rw [hv1, LawfulCommRing.zero_mul, LawfulCommRing.zero_add, LawfulCommRing.mul_one]
   exact ⟨p, A, 1, zero, one, hp, hbez, coprimeZ_const_of_vCoeff p A hp 1 zero one hbez⟩
@@ -2065,9 +2059,9 @@ theorem tooth_coprimeZ_needs_coprime_vCoeff :
       1 ≤ p.natDeg ∧ vCoeff A 1 ≠ zero ∧ ¬ CoprimeZ ((UPoly.mapHom CHom).toFun p) A := by
   let p : UPoly Goldilocks := X
   let A : Poly2 Goldilocks := mul (C X) X
-  refine ⟨p, A, by decide +kernel, by decide +kernel, ?_⟩
+  refine ⟨p, A, by decide +kernel, by poly_eval [A], ?_⟩
   rintro ⟨U, V, c, hc, hbez⟩
-  have hPZ : (UPoly.mapHom CHom).toFun p = (X : Poly2 Goldilocks) := by decide +kernel
+  have hPZ : (UPoly.mapHom CHom).toFun p = (X : Poly2 Goldilocks) := by poly_eval [p]
   rw [hPZ] at hbez
   have h0 := congrArg (fun Q : Poly2 Goldilocks => coeffAt Q.coeffs 0) hbez
   have hUX : coeffAt (mul U X).coeffs 0 = zero := by
@@ -2111,7 +2105,7 @@ def pDiag : Poly2 Goldilocks := ofList [ofList [g 0, neg (g 1)], one]
 theorem resZ_parabola_line :
     resZ pA pB ≠ zero ∧ (resZ pA pB).natDeg = 1 ∧ (resZ pA pB).eval (g 1) = zero ∧
       add (mul (eliminant pA pB).1 pA) (mul (eliminant pA pB).2.1 pB) = C (resZ pA pB) := by
-  decide +kernel
+  poly_eval [g, pA, pB, pDiag]
 
 /-- The hypotheses of `common_roots_card_le_mul_deg` are jointly satisfiable:
     `1·A - (Z + 1)·B = 1 - Y` certifies coprimality and `(1, 1)` is a common zero. -/
@@ -2121,7 +2115,7 @@ theorem inhabited_common_roots :
       (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧ pts.length = 1 :=
   ⟨pA, pB, [(g 1, g 1)], by decide, by decide,
     ⟨one, ofList [ofList [neg (g 1)], ofList [neg (g 1)]], ofList [g 1, neg (g 1)],
-      by decide, by decide +kernel⟩, by decide, by decide, rfl⟩
+      by decide, by poly_eval [g, pA, pB, pDiag]⟩, by decide, by decide, rfl⟩
 
 /-- Without coprimality the bound fails: `Z - Y` and itself share two points with distinct
     ordinates, more than `1 · 1`. -/
@@ -2131,7 +2125,7 @@ theorem tooth_common_roots_needs_coprime :
       (∀ p ∈ pts, A.eval2 p.1 p.2 = zero ∧ B.eval2 p.1 p.2 = zero) ∧
       ¬ pts.length ≤ tdeg A * tdeg B :=
   ⟨pDiag, pDiag, [(g 0, g 0), (g 1, g 1)], by decide, by decide, by decide, by decide,
-    by decide⟩
+    by poly_eval [g, pA, pB, pDiag]⟩
 
 #verify_constructive eliminant_bezout natDeg_resZ_le resZ_ne_zero_iff eval_resZ_eq_zero
 #verify_constructive common_roots_card_le_mul_deg resZ_parabola_line
@@ -2174,7 +2168,7 @@ theorem inhabited_primitive_common_roots :
   let B : Poly2 Goldilocks := C X
   refine ⟨A, B, [(zero, zero), (zero, one)],
     primitive_of_monic A 2 (by decide +kernel), by decide +kernel,
-    by decide +kernel, ?_, by decide +kernel, by decide +kernel, rfl, by decide +kernel⟩
+    by decide +kernel, ?_, by decide +kernel, by poly_eval [A, B], rfl, by decide +kernel⟩
   refine ⟨zero, one, X, by decide +kernel, ?_⟩
   rw [LawfulCommRing.zero_mul, LawfulCommRing.one_mul, LawfulCommRing.zero_add]
 
@@ -2189,7 +2183,7 @@ theorem tooth_common_roots_needs_primitive :
   let B : Poly2 Goldilocks := C X
   refine ⟨A, B, [(zero, zero), (zero, one), (zero, Goldilocks.ofNat 2)],
     by decide +kernel, by decide +kernel, ?_, by decide +kernel,
-    by decide +kernel, by decide +kernel⟩
+    by decide +kernel, by poly_eval [A, B]⟩
   refine ⟨zero, one, X, by decide +kernel, ?_⟩
   rw [LawfulCommRing.zero_mul, LawfulCommRing.one_mul, LawfulCommRing.zero_add]
 
@@ -2218,7 +2212,7 @@ theorem inhabited_sylRes_mul_X_sub :
   ⟨1, 1, g 3, ofList [neg (g 5), g 1], ofList [g 2, g 1],
     by decide +kernel, by decide +kernel, by
       rw [sylRes_mul_X_sub 1 1 (g 3) _ _ (by decide +kernel) (by decide +kernel)]
-      decide +kernel⟩
+      poly_eval [g]⟩
 
 /-- `#tooth`: dropping `B.eval ζ = 0` invalidates `sylRes_eq_zero_of_common_root`
     (`A = X - 3`, `B = X - 5`, `ζ = 3` gives `sylRes 1 1 A B = -2 ≠ 0`). -/
@@ -2227,7 +2221,7 @@ theorem tooth_sylRes_needs_both_roots :
       1 ≤ m ∧ A.natDeg ≤ m ∧ B.natDeg ≤ N ∧ A.eval ζ = zero ∧
       sylRes m N A B ≠ zero :=
   ⟨1, 1, ofList [neg (g 3), g 1], ofList [neg (g 5), g 1], g 3,
-    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, by poly_eval [g]⟩
 
 #verify_constructive SylElim.sylRes_mul_X_sub SylElim.sylRes_eq_zero_of_common_root
 #verify_constructive SylElim.divModLead_spec SylElim.isUnit_sylRes_of_bezout SylElim.degFn_sylRes_le
@@ -2260,8 +2254,8 @@ theorem inhabited_root_unique_of_jet :
       evalAffineLine R α β P = zero ∧ evalAffineLine R α β P' = zero ∧
       P.eval t₀ = P'.eval t₀ ∧
       ((hasseZ 1 R).evalAffineLine α β (C (P.eval t₀))).eval t₀ ≠ zero :=
-  ⟨rPar, g 1, g 0, g 0, one, one, (by decide +kernel), (by decide +kernel), rfl,
-    (by decide +kernel)⟩
+  ⟨rPar, g 1, g 0, g 0, one, one, (by poly_eval [g, rPar, rCross]), (by poly_eval [g, rPar, rCross]), rfl,
+    (by poly_eval [g, rPar, rCross])⟩
 
 /-- The separant condition is needed: `X` and `-X` are distinct roots of `Z² - X²` with the
     same value at `t₀ = 0`, where the separant `2Z` vanishes. -/
@@ -2269,14 +2263,14 @@ theorem tooth_root_unique_needs_separant :
     ∃ (R : Poly3 Goldilocks) (α β t₀ : Goldilocks) (P P' : UPoly Goldilocks),
       evalAffineLine R α β P = zero ∧ evalAffineLine R α β P' = zero ∧
       P.eval t₀ = P'.eval t₀ ∧ P ≠ P' :=
-  ⟨rCross, g 0, g 0, g 0, ofList [g 0, g 1], ofList [g 0, neg (g 1)], (by decide +kernel),
-    (by decide +kernel), (by decide +kernel), (by decide +kernel)⟩
+  ⟨rCross, g 0, g 0, g 0, ofList [g 0, g 1], ofList [g 0, neg (g 1)], (by poly_eval [g, rPar, rCross]),
+    (by poly_eval [g, rPar, rCross]), (by decide +kernel), (by decide +kernel)⟩
 
 /-- For `R = Z² - Y` the first numerator is `N₁ = V` and the separant is `2Z`:
     `c₁ = V / (2Z)`, the derivative of `√Y` along `Y + V·W`. -/
 theorem henselNum_parabola :
     henselNum rPar (g 0) 1 = jetV ∧ henselSep rPar (g 0) = mul (C3 (g 2)) X := by
-  decide +kernel
+  poly_eval [g, rPar, rCross]
 
 /-- The hypotheses of `henselNum_spec` hold together: `R = Z² - Y` at the jet
     `(y, v, z) = (1, 1, 1)` with the first-order root `e = W/2` of `(1 + e)² = 1 + W`. -/
@@ -2285,9 +2279,9 @@ theorem inhabited_henselNum_spec :
       e.eval zero = zero ∧ eval3 R t₀ y z = zero ∧ eval3 (hasseZ 1 R) t₀ y z ≠ zero ∧
       (∀ k, k ≤ n → coeffAt (eval₂ (jetHom t₀ y v) (add (C z) e) R).coeffs k = zero) :=
   ⟨rPar, g 0, g 1, g 1, g 1, ofList [g 0, LawfulField.inv (g 2)], 1, by decide +kernel,
-    by decide +kernel, by decide +kernel, fun k hk => by
+    by poly_eval [g, rPar, rCross], by poly_eval [g, rPar, rCross], fun k hk => by
       have hk' : k = 0 ∨ k = 1 := by omega
-      rcases hk' with rfl | rfl <;> decide +kernel⟩
+      rcases hk' with rfl | rfl <;> poly_eval [g, rPar, rCross]⟩
 
 /-- The separant hypothesis of `henselNum_spec` is needed: `R = Z² - X²` at the origin has
     the root `e = W` with vanishing separant, and its first numerator `0` does not see it. -/
@@ -2296,8 +2290,8 @@ theorem tooth_henselNum_needs_separant :
       e.eval zero = zero ∧ eval3 R t₀ y z = zero ∧
       eval₂ (jetHom t₀ y v) (add (C z) e) R = zero ∧
       (ptHom y v z).toFun (henselNum R t₀ 1) ≠ coeffAt e.coeffs 1 :=
-  ⟨rCross, g 0, g 0, g 0, g 0, X, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel⟩
+  ⟨rCross, g 0, g 0, g 0, g 0, X, by decide +kernel, by poly_eval [g, rPar, rCross], by poly_eval [g, rPar, rCross],
+    by poly_eval [g, rPar, rCross]⟩
 
 #verify_constructive henselNum_spec deg_henselNum_le reconCoeff_spec deg_reconCoeff_le
 #verify_constructive henselNum_parabola tooth_henselNum_needs_separant
@@ -2331,7 +2325,7 @@ theorem inhabited_johnson_set_system :
       fam.length = 3 ∧
       fam.length = johnsonBound D.length B t :=
   ⟨[0, 1, 2], [[0, 1], [1, 2], [0, 2]], fun s z => elemBool z s, 2, 1,
-    by decide, by decide, by decide, by decide, rfl, by decide⟩
+    by decide, by poly_eval, by poly_eval, by decide, rfl, by poly_eval⟩
 
 /-- `#tooth`: without the Johnson denominator hypothesis `D.length * t < B * B`, the bound fails:
     at `D = [0, 1, 2, 3]`, `B = 2`, `t = 1` (`4 * 1 = 2 * 2`), `6` pairs of size `2` exist while
@@ -2343,7 +2337,7 @@ theorem tooth_johnson_needs_pos_denom :
       fam.Pairwise (fun s₁ s₂ => (D.filter (fun z => mem s₁ z && mem s₂ z)).length ≤ t) ∧
       ¬ (fam.length ≤ johnsonBound D.length B t) :=
   ⟨[0, 1, 2, 3], [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]], fun s z => elemBool z s, 2, 1,
-    by decide, by decide, by decide, by decide⟩
+    by decide, by poly_eval, by poly_eval, by poly_eval⟩
 
 #verify_constructive JohnsonBound.nat_cauchy_schwarz JohnsonBound.count_partition_le
 #verify_constructive JohnsonBound.johnson_set_system_mul_le JohnsonBound.johnson_set_system_card_le
@@ -2371,8 +2365,8 @@ theorem inhabited_explainer :
     ∃ (f g' : Goldilocks → Goldilocks) (Dm : List Goldilocks) (m d Wx Dy : Nat),
       Dm.length * triCount 1 m Dy m < triCount d Wx Dy (Dy + 1) ∧
       explainer f g' Dm m d Wx Dy ≠ zero :=
-  ⟨fun _ => g 0, fun _ => g 1, [g 0, g 1], 1, 1, 2, 1, by decide,
-    (explainer_spec _ _ _ 1 1 2 1 (by decide)).1⟩
+  ⟨fun _ => g 0, fun _ => g 1, [g 0, g 1], 1, 1, 2, 1, by poly_eval [g],
+    (explainer_spec _ _ _ 1 1 2 1 (by poly_eval [g])).1⟩
 
 /-- `Q = Z - Y` meets the order-one constraint at `z = 0` for `f(0) = 0`, `g(0) = 1`. -/
 def qTooth : Poly3 Goldilocks := ofList [ofList [zero, neg one], one]
@@ -2387,11 +2381,12 @@ theorem tooth_agree_needs_degree :
       (∀ z ∈ zs, P.eval z = add (f z) (mul (add α (mul β z)) (g' z))) ∧ P.natDeg ≤ 1 ∧
       evalAffineLine Q α β P ≠ zero := by
   refine ⟨qTooth, fun _ => g 0, fun _ => g 1, g 0, g 0, X, [g 0], by decide, ?_, ?_,
-    by decide, by decide +kernel⟩
+    by decide, by poly_eval [g, qTooth]⟩
   · intro z hz r t s hrs
     rw [List.mem_singleton.mp hz]
     obtain ⟨rfl, rfl⟩ : r = 0 ∧ s = 0 := ⟨by omega, by omega⟩
-    have e : (shiftHom (g 0) (g 0) (g 1)).toFun qTooth = X := by decide +kernel
+    have e : (shiftHom (g 0) (g 0) (g 1)).toFun qTooth = X := by poly_eval [g, qTooth]
+    rw [Poly3.cons_eq, Poly3.coeff3_eq]
     show coeffAt (coeffAt (coeffAt ((shiftHom (g 0) (g 0) (g 1)).toFun qTooth).coeffs 0).coeffs
       t).coeffs 0 = zero
     rw [e]
@@ -2428,7 +2423,7 @@ def gSqrt : UPoly (UPoly Goldilocks) :=
 /-- The numerators of `√(1 + W) - 1`: `N₁ = 1`, `N₂ = -1`, with separant `2`, so
     `c₁ = 1/2` and `c₂ = -1/2³`. -/
 theorem num_sqrt : sep gSqrt = g 2 ∧ num gSqrt 1 = g 1 ∧ num gSqrt 2 = neg (g 1) := by
-  decide +kernel
+  poly_eval [g, gSqrt]
 
 /-- The hypotheses of `num_spec` hold for `G = (1 + U)² - (1 + W)` and the truncation
     `e = W/2` of its root, to first order. -/
@@ -2436,10 +2431,12 @@ theorem inhabited_num_spec :
     ∃ (G : UPoly (UPoly Goldilocks)) (e : UPoly Goldilocks) (n : Nat), e.eval zero = zero ∧
       res G = zero ∧ sep G ≠ zero ∧
       (∀ k, k ≤ n → coeffAt (G.eval e).coeffs k = zero) :=
-  ⟨gSqrt, ofList [g 0, LawfulField.inv (g 2)], 1, by decide +kernel, by decide +kernel,
-    by decide +kernel, fun k hk => by
+  ⟨gSqrt, ofList [g 0, LawfulField.inv (g 2)], 1, by decide +kernel, by poly_eval [g, gSqrt],
+    by poly_eval [g, gSqrt], fun k hk => by
       have hk' : k = 0 ∨ k = 1 := by omega
-      rcases hk' with rfl | rfl <;> decide +kernel⟩
+      have hinv : (LawfulField.inv (g 2) : Goldilocks) = g 9223372034707292161 := by decide +kernel
+      rw [hinv]
+      rcases hk' with rfl | rfl <;> poly_eval [g, gSqrt]⟩
 
 /-- The separant hypothesis is needed: `G = U² - W²` has the root `e = W` with residue and
     separant both zero, and the conclusion `s·N₁ = s²·e₁` degenerates to `0 = 0` while the
@@ -2447,8 +2444,8 @@ theorem inhabited_num_spec :
 theorem tooth_num_needs_separant :
     ∃ (G : UPoly (UPoly Goldilocks)) (e : UPoly Goldilocks), res G = zero ∧
       coeffAt e.coeffs 0 = zero ∧ G.eval e = zero ∧ num G 1 ≠ coeffAt e.coeffs 1 :=
-  ⟨ofList [ofList [g 0, g 0, neg (g 1)], zero, one], X, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel⟩
+  ⟨ofList [ofList [g 0, g 0, neg (g 1)], zero, one], X, by poly_eval [g, gSqrt], by decide +kernel,
+    by poly_eval [g, gSqrt], by poly_eval [g, gSqrt]⟩
 
 #verify_constructive Hensel.num_spec Hensel.delta_num_le Hensel.phi_contract Hensel.evG_eq
 #verify_constructive Hensel.map_num num_sqrt tooth_num_needs_separant
@@ -2477,8 +2474,8 @@ def cLine : UPoly (UPoly Goldilocks) := ofList [neg (line (g 3) (g 5)), one]
 
 /-- `2·R - Z·∂_Z R = -2Y` certifies that `Z² - Y` is squarefree in `Z`. -/
 theorem sqFactor_rPar : SqFactor rPar :=
-  SqFactor.of_cert (by decide) (ofList [ofList [ofList [g 2]]]) (ofList [zero, neg one])
-    (ofList [zero, ofList [neg (g 2)]]) (by decide) (by decide +kernel)
+  SqFactor.of_cert (by poly_eval [g, rPar, cLine]) (ofList [ofList [ofList [g 2]]]) (ofList [zero, neg one])
+    (ofList [zero, ofList [neg (g 2)]]) (by decide) (by poly_eval [g, rPar, cLine])
 
 /-- The hypotheses of `excluded_pairs_card_le` hold together, with a genuinely excluded pair. -/
 theorem inhabited_excluded_pairs :
@@ -2487,9 +2484,11 @@ theorem inhabited_excluded_pairs :
       Cc.natDeg + (Rs.map degYZ).sum ≤ D ∧ E.Nodup ∧
       (∀ p ∈ E, Excluded Cc Rs p.1 p.2) ∧ E.length = 1 :=
   ⟨cLine, [rPar], 3, [(g 3, g 5)], (by decide),
-    (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar), (by decide),
+    (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar), (by poly_eval [g, rPar, cLine]),
     (by decide),
-    (fun p hp => by rw [List.mem_singleton.mp hp]; exact Or.inl (by decide +kernel)), rfl⟩
+    (fun p hp => by
+      rw [List.mem_singleton.mp hp, Qsag.Poly3.Excluded.public_eqs]
+      exact Or.inl (by poly_eval [g, cLine])), rfl⟩
 
 /-- The content must be nonzero: with `C = 0` every pair is excluded, so no bound holds. -/
 theorem tooth_excluded_needs_content :
@@ -2498,7 +2497,7 @@ theorem tooth_excluded_needs_content :
       (zero : UPoly (UPoly Goldilocks)).natDeg + (Rs.map degYZ).sum ≤ D ∧ E.Nodup ∧
       (∀ p ∈ E, Excluded zero Rs p.1 p.2) ∧ ¬ E.length ≤ D ^ 2 :=
   ⟨[], 0, [(g 0, g 0), (g 1, g 1)], (fun _ h => by cases h), (by decide), (by decide),
-    (fun _ _ => Or.inl (UPoly.eval₂_zero _ _)), (by decide)⟩
+    (fun _ _ => by rw [Qsag.Poly3.Excluded.public_eqs]; exact Or.inl (UPoly.eval₂_zero _ _)), (by decide)⟩
 
 /-- A root on a non-excluded line: on `Y = 1` the factor `Z² - 1` has the simple root
     `P = 1`. The separant eliminant is computed over `F(X)` by the kernel. -/
@@ -2509,7 +2508,7 @@ theorem inhabited_simple_root :
       evalAffineLine (factored Cc Rs e) α β P = zero :=
   ⟨one, [rPar], fun _ => 1, g 1, g 0, ofList [g 1],
     (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar),
-    (by show ¬ (_ ∨ ∃ R ∈ [rPar], _); decide +kernel), (by decide +kernel)⟩
+    (by rw [Qsag.Poly3.Excluded.public_eqs]; poly_eval [g, rPar, cLine]), (by poly_eval [g, rPar, cLine])⟩
 
 #verify_constructive excluded_pairs_card_le simple_root_of_not_excluded sepElim_ne_zero
 #verify_constructive natDeg_sepElim_le sqFactor_rPar Frac.of_injective UPoly.d5_split
@@ -2540,7 +2539,7 @@ theorem inhabited_sylResDeriv_common_root :
       sylResDeriv m N C1 P0 B ≠ zero :=
   ⟨2, 1, ofList [g 15, neg (g 8), g 1], ofList [neg (g 3), g 1], ofList [g 2, g 1], g 3,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel, by decide +kernel⟩
+    by decide +kernel, by decide +kernel, by poly_eval [g]⟩
 
 /-- `#tooth`: dropping `P0.eval ζ = 0` invalidates `sylResDeriv_common_root`
     (`C1 = (X - 3)(X - 5)`, `P0 = X - 7`, `B = X`, `ζ = 3`). -/
@@ -2550,7 +2549,7 @@ theorem tooth_sylResDeriv_needs_P0_root :
       sylResDeriv m N C1 P0 B ≠ mul (B.eval ζ) (sylResDeriv m N C1 P0 one) :=
   ⟨2, 1, ofList [g 15, neg (g 8), g 1], ofList [neg (g 7), g 1], X, g 3,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, by decide +kernel⟩
+    by decide +kernel, by poly_eval [g]⟩
 
 #verify_constructive SylElim.sylResDeriv_of_factor SylElim.sylResDeriv_common_root SylElim.degFn_sylResDeriv_le
 #verify_constructive inhabited_sylResDeriv_common_root tooth_sylResDeriv_needs_P0_root
@@ -2584,17 +2583,17 @@ theorem inhabited_simple_root_of_hasse :
       lineSpec Q α β ≠ zero ∧ evalAffineLine Q α β P = zero :=
   ⟨qDouble, g 3, g 5, X, fun k h1 h2 => by
       have hk : k = 1 ∨ k = 2 := by
-        have : qDouble.degZ = 2 := by decide +kernel
+        have : qDouble.degZ = 2 := by poly_eval [g, qDouble, qLine]
         omega
       rcases hk with rfl | rfl <;> decide +kernel,
-    by decide +kernel, by decide +kernel⟩
+    by poly_eval [g, qDouble, qLine], by poly_eval [g, qDouble, qLine]⟩
 
 /-- The double root is found at multiplicity two: `∂_Z Q = 2(Z - X)` vanishes at `P = X` and
     its derivative `2` does not. -/
 theorem double_root_stratum :
     evalAffineLine (hasseZ 1 qDouble) (g 3) (g 5) X = zero ∧
       evalAffineLine (hasseZ 1 (hasseZ 1 qDouble)) (g 3) (g 5) X ≠ zero := by
-  decide +kernel
+  poly_eval [g, qDouble, qLine]
 
 /-- The non-vanishing hypothesis is needed: `Q = Z·(Y - X)` has every `P` as a root on the
     line `Y = X`, and none of them is a simple root of a Hasse derivative of `Q`. -/
@@ -2603,12 +2602,12 @@ theorem tooth_simple_root_needs_nonvanishing :
       evalAffineLine Q α β P = zero ∧
       ¬ ∃ μ, 1 ≤ μ ∧ μ ≤ Q.degZ ∧ evalAffineLine (hasseZ (μ - 1) Q) α β P = zero ∧
         evalAffineLine (hasseZ 1 (hasseZ (μ - 1) Q)) α β P ≠ zero :=
-  ⟨qLine, g 0, g 1, X, by decide +kernel, fun ⟨μ, h1, h2, _, h4⟩ => by
-    have hd : qLine.degZ = 1 := by decide +kernel
+  ⟨qLine, g 0, g 1, X, by poly_eval [g, qDouble, qLine], fun ⟨μ, h1, h2, _, h4⟩ => by
+    have hd : qLine.degZ = 1 := by poly_eval [g, qDouble, qLine]
     rw [hd] at h2
     have hμ : μ = 1 := Nat.le_antisymm h2 h1
     subst hμ
-    exact h4 (by decide +kernel)⟩
+    exact h4 (by poly_eval [g, qDouble, qLine])⟩
 
 #verify_constructive simple_root_of_hasse exists_multiplicity lineSpec_zero_card_le
 #verify_constructive UPoly.hasse_one_hasse double_root_stratum
@@ -2646,7 +2645,7 @@ theorem inhabited_curve_leaf_gcd_decomp :
   let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
   ⟨2, 1, C₁, X, C X,
     by decide +kernel, by decide +kernel, by decide +kernel,
-    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩, by decide +kernel⟩
+    isPrimY_W, by poly_eval [C₁], ⟨X, by poly_eval [C₁]⟩, by poly_eval [C₁]⟩
 
 /-- `#tooth`: even when `C₁ = Z² - 1` is monic AND separable in `Z` (`sylRes 2 1 C₁ (hasse 1 C₁) ≠ 0`),
     over `E = W` (`P₀ = W`) BOTH sheets `Z = ±1` vanish simultaneously, forcing `Gj.deg = 2` and
@@ -2664,7 +2663,7 @@ theorem tooth_multisheet_smooth_cylinder_divides_g1 :
   obtain ⟨Es, _, hCover, hLeaves⟩ :=
     SylElim.curve_leaf_gcd_decomp (h_C := 2) (H₀ := 1) (C₁ := C₁) (P₀ := P₀)
       (by decide +kernel) (by decide +kernel) (by decide +kernel)
-      X isPrimY_W (by decide +kernel) ⟨X, by decide +kernel⟩
+      X isPrimY_W (by poly_eval [C₁, P₀]) ⟨X, by poly_eval [C₁, P₀]⟩
   obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
   obtain ⟨hPj, hDj, Gj, ⟨QE, hXE⟩, hDegLe2, ⟨U0, V0, hBez⟩, _, _, _, _, hDichot, _⟩ :=
     hLeaves Ej hMem
@@ -2678,9 +2677,11 @@ theorem tooth_multisheet_smooth_cylinder_divides_g1 :
     let C1_mod := (mapHom φ).toFun (embedUZ.toFun C₁)
     have hC1_deg : C1_mod.natDeg ≤ 2 :=
       Nat.le_trans (natDeg_mapHom_le φ _)
-        (Nat.le_trans (natDeg_mapHom_le CHom C₁) (by decide +kernel))
+        (Nat.le_trans (by rw [Qsag.SylElim.embedUZ.public_eqs]; exact natDeg_mapHom_le CHom C₁)
+          (by decide +kernel))
     have hC1_mon : coeffAt C1_mod.coeffs 2 = one := by
-      dsimp only [C1_mod, embedUZ]
+      dsimp only [C1_mod]
+      rw [Qsag.SylElim.embedUZ.public_eqs]
       have hTop : coeffAt C₁.coeffs 2 = one := by decide +kernel
       rw [coeffAt_mapHom, coeffAt_mapHom, hTop, CHom.map_one, φ.map_one]
     let M_C1 : MonicPoly (ModMonic (monicFY Ej hPj hDj)) := ⟨C1_mod, 2, by decide, hC1_deg, hC1_mon⟩
@@ -2693,7 +2694,7 @@ theorem tooth_multisheet_smooth_cylinder_divides_g1 :
     have h10 : (one : ModMonic (monicFY Ej hPj hDj)) = zero := by
       rw [← Gj.coeff_deg, ← hBez, coeffs_zero, coeffAt_nil]
     exact NontrivialRing.one_ne_zero h10
-  · exact ⟨C₁, P₀, Ej, hPj, hDj, Gj, by decide +kernel, by omega, hDivG1⟩
+  · exact ⟨C₁, P₀, Ej, hPj, hDj, Gj, by poly_eval [C₁, P₀], by omega, hDivG1⟩
 
 /-- Joint inhabitedness witness for `SylElim.curve_three_poly_sheet_decomp` (`C₁ = Z² - 1`,
     `P₀ = W`, `H = Z`, `E = W`). -/
@@ -2705,7 +2706,7 @@ theorem inhabited_curve_three_poly_sheet_decomp :
   let C₁ : Poly2 Goldilocks := ofList [neg one, zero, one]
   ⟨2, 1, C₁, X, C X, X,
     by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
-    isPrimY_W, by decide +kernel, ⟨X, by decide +kernel⟩⟩
+    isPrimY_W, by poly_eval [C₁], ⟨X, by poly_eval [C₁]⟩⟩
 
 /-- `#tooth`: without resultant divisibility (`E ∤ sylRes`), `curve_three_poly_sheet_decomp` fails
     on `C₁ = Z`, `P₀ = 1`, `H = Z`, `E = W`: no leaf can have a positive-degree common `Z`-gcd `Gj`. -/
@@ -2720,7 +2721,7 @@ theorem tooth_three_poly_sheet_needs_divisibility :
           (Gj : MonicPoly (ModMonic (monicFY Ej hPj hDj))),
           (∃ Q_P, ((mapHom (modPoly2Hom Ej hPj hDj)).toFun P₀) = mul Gj.poly Q_P) := by
   refine ⟨X, X, one, X, by decide +kernel, by decide +kernel, by decide +kernel,
-    by decide +kernel, isPrimY_W, by decide +kernel, ?_⟩
+    by decide +kernel, isPrimY_W, by poly_eval, ?_⟩
   rintro ⟨Es, _, hCover, hLeaves⟩
   obtain ⟨Ej, hMem, _⟩ := hCover zero zero (by decide +kernel)
   obtain ⟨hPj, hDj, Gj, ⟨QP, hQP⟩⟩ := hLeaves Ej hMem
@@ -2737,7 +2738,7 @@ theorem tooth_three_poly_sheet_needs_divisibility :
     rw [Gj.coeff_deg] at hc
     exact NontrivialRing.one_ne_zero hc
   rw [hQP, ← hGjDegEq, (coeffAt_mul_top Gj.poly QP).2] at hz
-  unfold lead at hz
+  rw [UPoly.lead_eq Gj.poly] at hz
   rw [hGjDegEq, Gj.coeff_deg, LawfulCommRing.one_mul] at hz
   exact lead_ne_zero hQPNe hz
 
@@ -2775,7 +2776,7 @@ theorem inhabited_johnsonCert_sliced :
       domPts.length * (d₀ + 1 + 1) < B * B ∧ B < A₀ + 1 ∧ 1 ≤ Dy ∧ Dy < goldilocksPrime ∧
       domPts.length * (m_gs * (m_gs + 1) / 2) < gsMonomialCount (m_gs * A₀) d₀ listG ∧
       ¬ 2 * domPts.length + (d₀ + 1) + 1 < 3 * (A₀ + 1) :=
-  ⟨dom11, dom11, 0, 7, 5, 2, 12, 4, 1, 1, by decide, by decide, by decide, by decide,
+  ⟨dom11, dom11, 0, 7, 5, 2, 12, 4, 1, 1, by decide, by decide, by poly_eval [q, dom11], by decide,
     by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide,
     by decide⟩
 
@@ -2814,25 +2815,9 @@ end
 
 public section
 namespace Qsag.MigrationExecution
-set_option maxRecDepth 4096 in
-theorem rust_gf128_basis_kats :
-    rustGf128Mul 2#128 2#128 = 4#128 ∧
-    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
-    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
-  decide +kernel
-
 end Qsag.MigrationExecution
 namespace Qsag
 open MigrationExecution
-theorem tooth_packTower_is_not_the_poly_basis :
-    psiTower128ToPoly (unpackTower 7 2#128) ≠ 2#128 ∧
-    mulExec 7 2#128 2#128 = 3#128 ∧ rustGf128Mul 2#128 2#128 = 4#128 := by
-  refine ⟨?_, ?_, rust_gf128_basis_kats.1⟩
-  · have h : psiTower128ToPoly (unpackTower 7 2#128) =
-        0x295ac0b1f4731af9676aac9fa4b20b08#128 := by decide +kernel
-    rw [h]; decide
-  · decide +kernel
-
 #verify_constructive tooth_packTower_is_not_the_poly_basis
 
 end Qsag
