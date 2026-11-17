@@ -55,6 +55,54 @@ static uint64_t run(int op, int d = 0, int s1 = 0, int s2 = 0, int n = 0, int di
     return cycles - c0;
 }
 enum { PERM = 1, ABSW, SETW, MOV, EMUL, EADD, ESUB, EEQ, FFWD, LDRES };
+
+static std::vector<uint8_t> unhex(const std::string& h) {
+    std::vector<uint8_t> b;
+    if (h == "-") return b;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) b.push_back((uint8_t)strtoul(h.substr(i, 2).c_str(), nullptr, 16));
+    return b;
+}
+static void xor_byte(size_t pos, uint8_t v) {             // XOR into the rate, little-endian lanes
+    int lane = (int)(pos / 8);
+    wr(lane, rd(lane) ^ ((uint64_t)v << (8 * (pos % 8))));
+}
+static uint64_t permute(int rounds) {
+    top->k_turbo = rounds == 12;
+    top->k_start = 1;
+    tick();
+    top->k_start = 0;
+    uint64_t c0 = cycles;
+    while (!top->k_done) tick();
+    return cycles - c0;
+}
+// One sponge call over the register file with the RTL permutation (FIPS 202 section 4, pad10*1
+// with the domain suffix in the first padding byte)
+static bool sponge_kat(size_t rate, uint8_t suffix, int rounds, const std::vector<uint8_t>& msg,
+                       const std::vector<uint8_t>& want) {
+    for (int i = 0; i < 25; i++) wr(i, 0);
+    size_t off = 0;
+    for (size_t i = 0; i < msg.size(); i++) {
+        xor_byte(off, msg[i]);
+        if (++off == rate) {
+            permute(rounds);
+            off = 0;
+        }
+    }
+    xor_byte(off, suffix);
+    xor_byte(rate - 1, 0x80);
+    permute(rounds);
+    bool ok = true;
+    off = 0;
+    for (size_t i = 0; i < want.size(); i++) {
+        if (off == rate) {
+            permute(rounds);
+            off = 0;
+        }
+        ok &= (uint8_t)(rd((int)(off / 8)) >> (8 * (off % 8))) == want[i];
+        off++;
+    }
+    return ok;
+}
 enum { T0 = 0, CH = 12, RA = 16, RB = 20, RX = 32, RY = 36 };
 
 int main(int argc, char** argv) {
@@ -73,6 +121,19 @@ int main(int argc, char** argv) {
         std::istringstream ss(line);
         std::string tag, tok;
         ss >> tag;
+        if (tag == "H") {                                // FIPS 202 known answer: rate suffix rounds msg out
+            size_t rate;
+            std::string suf, msg, out;
+            int rounds;
+            ss >> rate >> suf >> rounds >> msg >> out;
+            bool hok = sponge_kat(rate, (uint8_t)strtoul(suf.c_str(), nullptr, 16), rounds, unhex(msg), unhex(out));
+            n++;
+            if (!hok) {
+                bad++;
+                if (bad <= 10) printf("MISMATCH line %d: %s\n", n, line.substr(0, 70).c_str());
+            }
+            continue;
+        }
         std::vector<uint64_t> w;
         while (ss >> tok) w.push_back(strtoull(tok.c_str(), nullptr, 16));
         bool ok = true;
@@ -135,8 +196,11 @@ int main(int argc, char** argv) {
             }
         }
     }
-    printf("unit_dp: %d vectors, %d mismatches; PERM = %" PRIu64 " cycles, EMUL = %" PRIu64 ", Keccak-f = %" PRIu64 ", Keccak-p12 = %" PRIu64 " cycles\n",
-           n, bad, cyc_perm, cyc_emul, cyc_keccak[0], cyc_keccak[1]);
+    if (argc > 2)
+        printf("%s: %d vectors, %d mismatches\n", argv[2], n, bad);
+    else
+        printf("unit_dp: %d vectors, %d mismatches; PERM = %" PRIu64 " cycles, EMUL = %" PRIu64 ", Keccak-f = %" PRIu64 ", Keccak-p12 = %" PRIu64 " cycles\n",
+               n, bad, cyc_perm, cyc_emul, cyc_keccak[0], cyc_keccak[1]);
     delete top;
     return bad != 0 || n == 0;
 }

@@ -4,6 +4,7 @@
 #   tb/run_sim.sh <config> [scenario] [script]        run one configuration
 set -e
 mkdir -p build
+[ -f rtl/qsag_p2_rc.sv ] || python3 scripts/gen_p2_rc.py rtl/qsag_p2_rc.sv > /dev/null
 if [ "$1" = build ]; then
     shift
     sh tb/run_model.sh > build/model.log 2>&1 || { cat build/model.log; exit 1; }

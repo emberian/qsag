@@ -3,7 +3,8 @@
 //   sim_qsag_ni_180 <script.txt> <config> [scenario]
 //
 // config   = spi | ss_023 | ss_100 | ss_370 | ss_dcro | async | async_slow
-// scenario = script (default) | clkswitch | tamper | glitch | trng | loops
+// scenario = script (default) | clkswitch | tamper | glitch | trng | loops | spiburst
+//            | coldboot | diag | prfcap | tamperboot | bist
 //
 // The script (tb/gen_script.py) carries request words and the model's expected response
 // words; this file only implements the three link personalities, the FRAM model and the
@@ -52,6 +53,8 @@ struct Sim {
 
     // clocks
     int clk = 0;
+    bool pad_stopped = false;   // clk_pad held at its current level (no external clock)
+    bool tamper_low_boot = false;   // TAMPER_ZEROIZE_N driven low through reset()
     u64 next_pad = 0;
     u64 glitch_half = 0;     // length of the two shortened half periods of an injected glitch
     int glitch_req = 0, glitch_cnt = 0;
@@ -188,7 +191,7 @@ struct Sim {
             t = nxt;
             ctx->time(t);
             if (t == next_pad) {
-                clk ^= 1;
+                if (!pad_stopped) clk ^= 1;
                 if (glitch_req && clk == 1) {            // one short cycle, rising edge to rising edge
                     glitch_req = 0;
                     glitch_cnt = 2;
@@ -235,6 +238,10 @@ struct Sim {
         cs_n = 1;
         cc_armed = false;
         top->rst_n = 0;
+        if (tamper_low_boot) {
+            drv[26] = true;
+            val[26] = 0;
+        }
         if (cfg.mode == 0) drv[18] = true;                               // SCK idle low
         if (cfg.mode == 1) {
             for (int i = 27; i <= 37; i++) if (i != 35) drv[i] = true;
@@ -308,8 +315,8 @@ struct Sim {
         spi_read(width, 1, ws);
         return ws[0];
     }
-    void spi_read(int width, int nwords, std::vector<u64>& out) {
-        spi_cmd(width == 1 ? 0x02 : width == 4 ? 0x42 : 0x82);
+    void spi_read(int width, int nwords, std::vector<u64>& out, int cmd = -1) {
+        spi_cmd(cmd >= 0 ? (uint8_t)cmd : width == 1 ? 0x02 : width == 4 ? 0x42 : 0x82);
         for (int i = 0; i < 8; i++) drv[i] = false;      // bus turnaround: host releases DQ
         for (int i = 0; i < 8; i++) sck_pulse();
         for (int wd = 0; wd < nwords; wd++) {
@@ -450,7 +457,7 @@ static int run_script(Sim& s, const char* path) {
             int bad = 0;
             for (size_t i = 0; ok && i < exp.size(); i++)
                 if (exp[i] != "-" && rsp[i] != strtoull(exp[i].c_str(), nullptr, 16)) {
-                    if (!bad) printf("  mismatch word %zu: got %016" PRIx64 " expected %s\n", i, rsp[i], exp[i].c_str());
+                    if (bad < 12) printf("  mismatch word %zu: got %016" PRIx64 " expected %s\n", i, rsp[i], exp[i].c_str());
                     bad++;
                 }
             n_xfer++;
@@ -634,6 +641,174 @@ static void scenario_loops(Sim& s) {
     check(s, lo >= 12 && hi <= 18 && hi > lo, "effective tap dithers upward only");
 }
 
+// 64-bit READ_DIAG frame (SPI command 0x05, single-bit, SCK only)
+static u64 read_diag(Sim& s) {
+    std::vector<u64> ws;
+    s.spi_read(1, 1, ws, 0x05);
+    return ws[0];
+}
+static void print_diag(u64 d) {
+    printf("  READ_DIAG %016" PRIx64 ": magic %04x hb %02x/%02x rst_core_n %d busy %d fault %d verify_ok %d io_mode %d"
+           " ovr %d und %d i_full %d e_empty %d tamper_n %d fill %d/%d trailer %02x\n",
+           d, (unsigned)(d & 0xFFFF), (unsigned)(d >> 16 & 0xFF), (unsigned)(d >> 32 & 0xFF), (int)(d >> 31 & 1),
+           (int)(d >> 30 & 1), (int)(d >> 29 & 1), (int)(d >> 28 & 1), (int)(d >> 26 & 3), (int)(d >> 47 & 1),
+           (int)(d >> 46 & 1), (int)(d >> 45 & 1), (int)(d >> 44 & 1), (int)(d >> 41 & 1), (int)(d >> 52 & 15),
+           (int)(d >> 48 & 7), (unsigned)(d >> 56));
+}
+
+// Built-in self-test (OP_BIST): TurboSHAKE256 permutation, Ext4 multiply and GF(2^128) step over
+// fixed inputs. The expected word is not taken from the RTL: it is
+//   s = Keccak-p[1600,12](lane0 = "QSAGNI18", lane1 = 0x1F, lane16 = 0x80..0),
+//   e = Ext4 product of (s[0..3] mod p) and (s[4..7] mod p),  kat = e[0] ^ low64(gf128_mul(e[0], H))
+// evaluated with model/qsag_prims.py (keccak_p, ext4_mul, gf128_mul).
+static void scenario_bist(Sim& s) {
+    printf("scenario: built-in self-test\n");
+    std::vector<u64> r;
+    bool got = s.xfer({0x0351ULL}, 2, r);
+    printf("  BIST response: %016" PRIx64 " %016" PRIx64 "\n", got ? r[0] : 0, got && r.size() > 1 ? r[1] : 0);
+    check(s, got && (r[0] >> 16 & 0x81) == 1, "BIST response header reports success");
+    check(s, got && r[1] == 0x4ae21323a2980887ULL, "BIST word equals the independently computed value");
+    s.advance(8 * s.cfg.half_pad);
+    check(s, s.pin_verify_ok() == 1, "VERIFY_OK pin high after BIST");
+    check(s, s.xfer({0x0151ULL}, 5, r) && r[1] == 0x3831494E47415351ULL, "link alive after BIST");
+}
+
+// R1 B4: the chip must come up and answer with no edge on the pad clock at all, whatever the
+// EXT_CLK_BYPASS strap says, take the pad clock when it appears, and survive losing it again.
+static void scenario_coldboot(Sim& s) {
+    printf("scenario: cold boot with a quiescent clock pad (EXT_CLK_BYPASS = %d at reset)\n", s.bypass);
+    std::vector<u64> r;
+    u64 c0 = s.cc_cycles;
+    s.advance(2000000);
+    check(s, s.cc_cycles - c0 > 50, "clk_core runs with the pad clock stopped");
+    check(s, s.xfer({0x0151ULL}, 5, r) && r[1] == 0x3831494E47415351ULL, "PING answers (core on the internal oscillator)");
+    u64 tel = r.size() > 2 ? r[2] : 0;
+    check(s, ((tel >> 29) & 1) == 1 && ((tel >> 28) & 1) == 0, "telemetry: dcro_on = 1, pad_on = 0");
+    // the R1 deadlock sequence: strap high through reset with a dead clock, then driven low
+    s.bypass = 0;
+    s.advance(2000000);
+    check(s, s.xfer({0x0151ULL}, 5, r) && r[1] == 0x3831494E47415351ULL, "PING answers after the strap is driven low");
+    s.bypass = 1;
+    s.pad_stopped = false;                               // the board clock starts
+    s.advance(4000000);
+    tel = s.ping_tel(2);
+    check(s, ((tel >> 28) & 1) == 1 && ((tel >> 29) & 1) == 0, "pad clock taken once it runs: pad_on = 1, dcro_on = 0");
+    s.cc_min = ~0ULL;
+    s.pad_stopped = true;                                // and stops again, at whatever level it had
+    s.advance(400000000);                                // > 4096 oscillator cycles
+    c0 = s.cc_cycles;
+    s.advance(2000000);
+    check(s, s.cc_cycles - c0 > 50, "clk_core runs again after the pad clock died");
+    check(s, s.xfer({0x0151ULL}, 5, r) && r[1] == 0x3831494E47415351ULL, "PING answers after the pad clock died");
+    tel = r.size() > 2 ? r[2] : 0;
+    check(s, ((tel >> 29) & 1) == 1 && ((tel >> 28) & 1) == 0, "telemetry: back on the oscillator");
+    s.pad_stopped = false;
+    s.advance(4000000);
+}
+
+// R1 B6: READ_DIAG answers from SCK alone and does not disturb the egress FIFO.
+static void scenario_diag(Sim& s) {
+    printf("scenario: clockless READ_DIAG (SPI 0x05)\n");
+    if (s.cfg.mode != 0) {
+        printf("  READ_DIAG exists in SPI mode only\n");
+        s.errors++;
+        return;
+    }
+    std::vector<u64> r;
+    u64 d = read_diag(s);
+    print_diag(d);
+    check(s, (d & 0xFFFF) == 0xD180 && (d >> 56) == 0x5A, "magic and trailer");
+    check(s, ((d >> 16) & 0xFF) != ((d >> 32) & 0xFF), "the two heartbeat samples differ (clk_core running)");
+    check(s, ((d >> 31) & 1) == 1 && ((d >> 30) & 1) == 0 && ((d >> 29) & 1) == 0, "rst_core_n = 1, busy = 0, fault = 0");
+    check(s, ((d >> 44) & 1) == 1 && ((d >> 41) & 1) == 1, "egress empty, TAMPER_N high");
+    // a response is waiting: READ_DIAG must not consume it
+    s.send({0x0151ULL});
+    s.wait_for([&] { return s.pad_out(20) == 1; }, 2000000000ULL, "TX_VALID_IRQ");
+    s.advance(400 * s.cfg.half_pad);
+    d = read_diag(s);
+    print_diag(d);
+    check(s, ((d >> 44) & 1) == 0 && ((d >> 48) & 7) != 0, "egress not empty while a response waits");
+    check(s, s.recv(5, r) && r[0] == (0x51ULL | (0x81ULL << 8) | (1ULL << 16) | (32ULL << 24)) && r[1] == 0x3831494E47415351ULL,
+          "the PING response is intact after READ_DIAG");
+    u64 tel = s.ping_tel(2);
+    check(s, !((tel >> 37) & 3), "no overrun / underrun flagged by the diagnostic read");
+    // core clock stopped: pad clock selected, then frozen; the watchdog needs ~100 us to fall back,
+    // READ_DIAG is taken well inside that gap
+    s.pad_stopped = true;
+    s.advance(40 * s.cfg.half_pad);
+    u64 c0 = s.cc_cycles;
+    d = read_diag(s);
+    print_diag(d);
+    check(s, s.cc_cycles == c0, "no clk_core edge during this READ_DIAG");
+    check(s, (d & 0xFFFF) == 0xD180 && (d >> 56) == 0x5A, "READ_DIAG answers with clk_core stopped");
+    check(s, ((d >> 16) & 0xFF) == ((d >> 32) & 0xFF), "heartbeat samples equal (clk_core stopped)");
+    s.pad_stopped = false;
+    s.advance(4000000);
+    // engine dead after a tamper event: FAULT and busy visible
+    s.advance(200000000);                                // past the tamper boot blanking
+    s.drv[26] = true;
+    s.val[26] = 0;
+    s.advance(3000);
+    s.drv[26] = false;
+    s.advance(40 * s.cfg.half_pad);
+    d = read_diag(s);
+    print_diag(d);
+    check(s, ((d >> 29) & 1) == 1 && ((d >> 30) & 1) == 1, "after tamper: fault = 1, busy = 1 (engine in S_DEAD)");
+    s.reset();
+}
+
+// R1 A5.2 / B6: once the vat root key exists, PRF_msg without a capability is refused.
+static void scenario_prfcap(Sim& s) {
+    printf("scenario: PRF_msg requires a capability once the vat is ready\n");
+    std::vector<u64> r;
+    // before any key: refused for lack of a key (unchanged behaviour)
+    check(s, s.xfer({0x51ULL | (0x42ULL << 8) | (8ULL << 24), 0x1234}, 1, r) && (r[0] >> 48) == 4, "no key: refused with E_NOKEY");
+    // host key load with a vat root key (flags 0 and 2): mask key, SK.seed/SK.prf, K_vat
+    std::vector<u64> kl = {0x51ULL | (0x40ULL << 8) | (5ULL << 16) | (80ULL << 24),
+                           0x1111111111111111ULL, 0x2222222222222222ULL, 3, 4, 5, 6,
+                           0xA1A1A1A1A1A1A1A1ULL, 0xB2B2B2B2B2B2B2B2ULL, 0xC3C3C3C3C3C3C3C3ULL, 0xD4D4D4D4D4D4D4D4ULL};
+    check(s, s.xfer(kl, 1, r) && (r[0] >> 16 & 0x81) == 1, "key load with K_vat");
+    check(s, s.xfer({0x0151ULL}, 5, r) && ((r[3] >> 32) & 1) == 1 && ((r[3] >> 36) & 1) == 1, "key_valid = 1 and vat_ready = 1");
+    bool got = s.xfer({0x51ULL | (0x42ULL << 8) | (8ULL << 24), 0x1234}, 1, r);
+    printf("  PRF_msg without flags[2]: response header %016" PRIx64 "\n", got ? r[0] : 0);
+    check(s, got && (r[0] >> 48) == 13 && ((r[0] >> 23) & 1) == 1 && ((r[0] >> 24) & 0xFFFFFF) == 0,
+          "PRF_msg without a capability: refused with E_CAP, no payload");
+    check(s, s.pin_fault() == 0, "the refusal is not a fault");
+    check(s, s.xfer({0x0151ULL}, 5, r) && ((r[3] >> 32) & 1) == 1, "key still valid afterwards");
+}
+
+// R1 B6: a TAMPER_ZEROIZE_N pad that is still low when the core reset releases must not brick
+// the boot; one that stays low past the blanking window must.
+static void scenario_tamperboot(Sim& s) {
+    printf("scenario: TAMPER_ZEROIZE_N slow rise at power-up\n");
+    std::vector<u64> r;
+    std::vector<u64> kl(KEYLOAD_HOST, KEYLOAD_HOST + 7);
+    s.tamper_low_boot = true;
+    s.reset();                                           // pad low through reset and 40 half periods after
+    s.advance(20000000);                                 // 20 us more (1000 core clocks), still low
+    s.drv[26] = false;                                   // pull-up wins
+    s.tamper_low_boot = false;
+    s.advance(40 * s.cfg.half_pad);
+    check(s, s.pin_fault() == 0, "no FAULT after a slow TAMPER_N rise inside the blanking window");
+    check(s, s.xfer({0x0151ULL}, 5, r) && r[1] == 0x3831494E47415351ULL && !((r[2] >> 33) & 1), "PING answers, tamper flag clear");
+    check(s, s.xfer(kl, 1, r) && (r[0] >> 16 & 0x81) == 1 && key_valid(s), "key load works after that boot");
+    s.advance(200000000);                                // past the blanking window (4096 clocks)
+    s.drv[26] = true;
+    s.val[26] = 0;
+    s.advance(3000);
+    s.drv[26] = false;
+    s.advance(20 * s.cfg.half_pad);
+    check(s, s.pin_fault() == 1, "a tamper pulse after the window still raises FAULT");
+    // held low for good: the latch must set as soon as the window ends
+    s.tamper_low_boot = true;
+    s.reset();
+    s.advance(200000000);
+    check(s, s.pin_fault() == 1, "TAMPER_N held low past the window: FAULT");
+    s.drv[26] = false;
+    s.tamper_low_boot = false;
+    s.reset();
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         printf("usage: %s <script> <config> [scenario]\n", argv[0]);
@@ -655,6 +830,7 @@ int main(int argc, char** argv) {
     else if (cfgname == "async_slow") { c.mode = 2; c.io_half = 61000; }
     else { printf("unknown config %s\n", cfgname.c_str()); return 2; }
     if (scen == "loops") c.bypass = 0;
+    if (scen == "coldboot") s.pad_stopped = true;        // no pad clock edge before, during or after reset
     s.bypass = c.bypass;
     s.next_pad = c.half_pad;
     s.drive();
@@ -672,6 +848,15 @@ int main(int argc, char** argv) {
     else if (scen == "trng") scenario_trng(s);
     else if (scen == "loops") scenario_loops(s);
     else if (scen == "spiburst") scenario_spiburst(s);
+    else if (scen == "coldboot") scenario_coldboot(s);
+    else if (scen == "diag") scenario_diag(s);
+    else if (scen == "prfcap") scenario_prfcap(s);
+    else if (scen == "tamperboot") scenario_tamperboot(s);
+    else if (scen == "bist") scenario_bist(s);
+    else {
+        printf("unknown scenario %s\n", scen.c_str());
+        s.errors++;
+    }
     u64 tel = s.ping_tel(2);
     printf("final telemetry %016" PRIx64 ": rx_overrun %d tx_underrun %d; pad contention events %" PRIu64
            "; min clk_core pulse %" PRIu64 " ps; %" PRIu64 " core cycles; FRAM byte writes %" PRIu64 "\n",
