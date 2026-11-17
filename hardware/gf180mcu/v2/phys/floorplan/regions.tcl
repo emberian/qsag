@@ -55,7 +55,9 @@ fp::region wu   {445 1128 1405 1217} {^i_chip_core/(u_wu/|u_rf/(u_hold|_[0-9]+_|
 # Keccak unit under the word unit: it uses the read port and the write path every clock it runs
 fp::region kec  {445 870 1085 1124}  {^i_chip_core/u_kec/}
 # control: ROM and sequencer together (the ROM's 28 outputs go nowhere else)
-fp::region ctl  {445 580 1090 866}   {^i_chip_core/(u_rom|u_seq)/}
+# (run g1: all 9,070 tracks of global-route overflow were inside this region at 645 x 286 um, so it is
+# widened to the NFC region's edge; the ROM is the one block that is routing-limited)
+fp::region ctl  {445 570 1195 866}   {^i_chip_core/(u_rom|u_seq)/}
 
 # ---- SPI link at SCK / MOSI / MISO / CS_N (south, x 826..1214); clock, reset, tamper at CLK / RST_N
 fp::region spi  {800 445 1195 566}   {^i_chip_core/u_spi/}
@@ -67,10 +69,10 @@ fp::region fram {1165 1975 1492 2083} {^i_chip_core/u_fram/}
 # TRNG (eight rings, coherent sampling): east side of the north part, away from the register file's
 # bit lines and from the SPI, FRAM and NFC clocks. No hard guard: a region admits no foreign cell, and
 # it is sized for about 45 % fill, so the rings sit in decap.
-fp::region trng {1270 1740 1492 1940} {^i_chip_core/u_trng/}
+fp::region trng {1240 1690 1492 1960} {^i_chip_core/u_trng/}
 # PUF: 20 um keep-out (hard blockage) east and south of the placed array (physics R2.3); west and north
 # are the core edge. Decoder, enable decode, output OR tree and counters below the keep-out (R4.4).
 lassign $::puf_box px1 py1 px2 py2
 fp::blockage [list $px2 [expr {$py1 - 20}] [expr {$px2 + 20}] 2085.4]
 fp::blockage [list 443 [expr {$py1 - 20}] $px2 $py1]
-fp::region pufd [list 445 1560 1010 [expr {$py1 - 24}]] {^i_chip_core/(u_puf/|u_pufcnt|u_pufarr/)}
+fp::region pufd [list 445 1560 1120 [expr {$py1 - 24}]] {^i_chip_core/(u_puf/|u_pufcnt|u_pufarr/)}
