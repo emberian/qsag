@@ -31,39 +31,40 @@ def ringToGauss (z : GaussIntRing) : GaussInt := ⟨z.re, z.im⟩
 theorem ringToGauss_gaussToRing (z : GaussInt) : ringToGauss (gaussToRing z) = z := by rfl
 theorem gaussToRing_ringToGauss (z : GaussIntRing) : gaussToRing (ringToGauss z) = z := by rfl
 theorem gaussToRing_add (z w : GaussInt) :
-    gaussToRing (GaussInt.add z w) = add (gaussToRing z) (gaussToRing w) := by rfl
+    gaussToRing (GaussInt.add z w) = add (gaussToRing z) (gaussToRing w) := by
+  rw [GaussInt.add_def]; rfl
 theorem gaussToRing_sub (z w : GaussInt) :
-    gaussToRing (GaussInt.sub z w) = sub (gaussToRing z) (gaussToRing w) := by rfl
+    gaussToRing (GaussInt.sub z w) = sub (gaussToRing z) (gaussToRing w) := by
+  rw [GaussInt.sub_def]; rfl
 theorem gaussToRing_mul (z w : GaussInt) :
-    gaussToRing (GaussInt.mul z w) = mul (gaussToRing z) (gaussToRing w) := by rfl
+    gaussToRing (GaussInt.mul z w) = mul (gaussToRing z) (gaussToRing w) := by
+  rw [GaussInt.mul_def]; rfl
 
 /-- The class norm on `ℤ[i]` is the legacy natural-number norm. -/
 theorem gaussToRing_normSq (z : GaussInt) :
     (normSq (gaussToRing z) : Int) = Int.ofNat (GaussInt.normSq z) := by
-  rw [← GaussInt.normSqInt_eq_ofNat_normSq]
+  rw [← GaussInt.normSqInt_eq_ofNat_normSq, GaussInt.normSqInt_def]
   rfl
 
 theorem ringSum_int_ofNat : ∀ (n : Nat) (f : Fin n → Nat),
     ringSum n (fun i => Int.ofNat (f i)) = Int.ofNat (qsum n f)
-  | 0, _ => by rfl
+  | 0, _ => by rw [ringSum_zero_eq]; rfl
   | n + 1, f => by
-    simp only [ringSum, qsum]
-    rw [ringSum_int_ofNat n]
+    rw [ringSum_succ_eq, ringSum_int_ofNat n]
     rfl
 
 theorem natCastR_int : ∀ n : Nat, (natCastR n : Int) = Int.ofNat n
-  | 0 => by rfl
+  | 0 => by rw [natCastR.public_eq_1]; rfl
   | n + 1 => by
-    show add (natCastR n) one = Int.ofNat (n + 1)
-    rw [natCastR_int n]
+    rw [natCastR.public_eq_2, natCastR_int n]
     rfl
 
 theorem finCountTrue_eq_qsum : ∀ (n : Nat) (p : Fin n → Bool),
     finCountTrue n p = qsum n (fun j => if p j = true then 1 else 0)
-  | 0, _ => by rfl
+  | 0, _ => by rw [finCountTrue_zero_eq]; rfl
   | n + 1, p => by
-    simp only [finCountTrue, qsum]
-    rw [finCountTrue_eq_qsum n]
+    rw [finCountTrue_succ_eq, finCountTrue_eq_qsum n]
+    simp only [qsum]
     cases p ⟨0, Nat.zero_lt_succ n⟩
     · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
     · simp only [↓reduceIte]
@@ -80,7 +81,8 @@ def unliftQVec (ψ : QVecOver GaussIntRing cardX (2 ^ w) cardAnc) : QVec cardX w
 
 theorem liftQVec_queryWeight (ψ : QVec cardX w cardAnc) (x : Fin cardX) :
     queryWeightOver (liftQVec ψ) x = Int.ofNat (QVec.queryWeight ψ x) := by
-  unfold queryWeightOver QVec.queryWeight liftQVec
+  rw [queryWeightOver.public_eqs, QVec.queryWeight_def]
+  unfold liftQVec
   rw [← ringSum_int_ofNat]
   apply ringSum_congr; intro y
   rw [← ringSum_int_ofNat]
@@ -89,13 +91,13 @@ theorem liftQVec_queryWeight (ψ : QVec cardX w cardAnc) (x : Fin cardX) :
 
 theorem liftQVec_stateNormSq (ψ : QVec cardX w cardAnc) :
     stateNormSqOver (liftQVec ψ) = Int.ofNat (QVec.stateNormSq ψ) := by
-  unfold stateNormSqOver QVec.stateNormSq
+  rw [stateNormSqOver.public_eqs, QVec.stateNormSq_def]
   rw [← ringSum_int_ofNat]
   exact ringSum_congr (liftQVec_queryWeight ψ)
 
 theorem liftQVec_queryMassOn (T : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) :
     queryMassOnOver T (liftQVec ψ) = Int.ofNat (QVec.queryMassOn T ψ) := by
-  unfold queryMassOnOver QVec.queryMassOn
+  rw [queryMassOnOver.public_eqs, QVec.queryMassOn_def]
   rw [← ringSum_int_ofNat]
   apply ringSum_congr; intro x
   cases T x
@@ -111,10 +113,14 @@ def xorGate (w : Nat) : ResponseGate (BitVec w) (2 ^ w) where
   right_inv v y := xorFin_involutive v y
 
 theorem liftQVec_oracleXor (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) :
-    oracleGate (xorGate w) H (liftQVec ψ) = liftQVec (oracleXor H ψ) := by rfl
+    oracleGate (xorGate w) H (liftQVec ψ) = liftQVec (oracleXor H ψ) := by
+  funext x y a
+  rw [oracleGate.public_eqs, oracleXor_def]; rfl
 
 theorem pointUpdate_eq_reprogramOracle (H : Fin cardX → BitVec w) (x : Fin cardX) (v : BitVec w) :
-    pointUpdate H x v = reprogramOracle H x v := by rfl
+    pointUpdate H x v = reprogramOracle H x v := by
+  funext y
+  rw [pointUpdate.public_eqs, reprogramOracle_def]
 
 /-- Every legacy scaled unitary is a scaled unitary over `ℤ[i]`, with the same scale. -/
 def liftScaledUnitary (U : ScaledUnitary cardX w cardAnc) :
@@ -122,9 +128,18 @@ def liftScaledUnitary (U : ScaledUnitary cardX w cardAnc) :
   apply ψ := liftQVec (U.apply (unliftQVec ψ))
   scaleSq := Int.ofNat U.scaleSq
   map_sub ψ φ := by
-    have h : unliftQVec (qvSub ψ φ) = (unliftQVec ψ).sub (unliftQVec φ) := by rfl
-    rw [h, U.map_sub]
-    rfl
+    have h : unliftQVec (qvSub ψ φ) = (unliftQVec ψ).sub (unliftQVec φ) := by
+      rw [QVec.sub_def]
+      funext x y a
+      show ringToGauss (qvSub ψ φ x y a) =
+        GaussInt.sub (ringToGauss (ψ x y a)) (ringToGauss (φ x y a))
+      rw [qvSub.public_eqs, GaussInt.sub_def]; rfl
+    rw [h, U.map_sub, QVec.sub_def]
+    funext x y a
+    show gaussToRing (GaussInt.sub (U.apply (unliftQVec ψ) x y a) (U.apply (unliftQVec φ) x y a)) =
+      qvSub (liftQVec (U.apply (unliftQVec ψ))) (liftQVec (U.apply (unliftQVec φ))) x y a
+    rw [qvSub.public_eqs]
+    exact gaussToRing_sub _ _
   normSq_eq ψ := by
     have h2 : stateNormSqOver ψ = Int.ofNat (QVec.stateNormSq (unliftQVec ψ)) :=
       liftQVec_stateNormSq (unliftQVec ψ)
@@ -153,10 +168,19 @@ theorem run_liftStepsFrom {q : Nat} (A : QuantumAdv cardX w cardAnc q) (H : Fin 
   | 0, t, h, ht => by
     have e : t = q := h
     subst e
+    show runStepsOver (xorGate w) H [] (liftQVec (advStateAt A H t ht)) = _
+    rw [runStepsOver.public_eq_1, runQuantumAdv_def]
+  | k + 1, t, h, ht => by
+    have ht' : t + 1 ≤ q := Nat.lt_of_lt_of_eq (Nat.lt_add_of_pos_right (Nat.succ_pos k)) h
+    have ih := run_liftStepsFrom A H k (t + 1) ((Nat.succ_add_eq_add_succ t k).trans h) ht'
+    rw [advStateAt_succ] at ih
+    rw [← ih]
+    show runStepsOver (xorGate w) H
+      (liftScaledUnitary (A.steps ⟨t, ht'⟩) ::
+        liftStepsFrom A k (t + 1) ((Nat.succ_add_eq_add_succ t k).trans h))
+      (liftQVec (advStateAt A H t ht)) = _
+    rw [runStepsOver.public_eq_2, liftQVec_oracleXor]
     rfl
-  | k + 1, t, h, ht =>
-    run_liftStepsFrom A H k (t + 1) ((Nat.succ_add_eq_add_succ t k).trans h)
-      (Nat.lt_of_lt_of_eq (Nat.lt_add_of_pos_right (Nat.succ_pos k)) h)
 
 /-- A legacy adversary as an adversary over `ℤ[i]`. -/
 def liftQuantumAdv {q : Nat} (A : QuantumAdv cardX w cardAnc q) :
@@ -169,8 +193,11 @@ theorem liftQuantumAdv_length {q : Nat} (A : QuantumAdv cardX w cardAnc q) :
 
 /-- The general runtime reproduces the legacy runtime exactly. -/
 theorem liftQuantumAdv_run {q : Nat} (A : QuantumAdv cardX w cardAnc q) (H : Fin cardX → BitVec w) :
-    runQuantumAdvOver (xorGate w) (liftQuantumAdv A) H = liftQVec (runQuantumAdv A H) :=
-  run_liftStepsFrom A H q 0 (Nat.zero_add q) (Nat.zero_le q)
+    runQuantumAdvOver (xorGate w) (liftQuantumAdv A) H = liftQVec (runQuantumAdv A H) := by
+  have h := run_liftStepsFrom A H q 0 (Nat.zero_add q) (Nat.zero_le q)
+  rw [advStateAt_zero] at h
+  rw [runQuantumAdvOver.public_eqs]
+  exact h
 
 /-- **The general theorem specialises to the legacy projected step.** This is the inequality of
     `qrom_unitary_measure_reprogram_rbr_step_projected` with the common factor `2^w` cancelled,
@@ -221,8 +248,7 @@ theorem legacy_rbr_step_from_general {Q : Nat} (A : QuantumAdv cardX w cardAnc Q
       cases flipsToLive xStar (BitVec.ofFin j)
       · rfl
       · simp only [↓reduceIte]
-        rw [liftQuantumAdv_run, liftQVec_queryMassOn]
-        rfl
+        rw [liftQuantumAdv_run, liftQVec_queryMassOn, pointUpdate_eq_reprogramOracle]
   rw [hL] at h
   exact Int.ofNat_le.mp h
 
@@ -241,6 +267,7 @@ theorem rationalPhaseMatrix_unitary : IsScaledUnitary rationalPhaseMatrix (one :
   have hu : mul (star unitThreeFourFifths) unitThreeFourFifths = one := by
     rw [LawfulCommRing.mul_comm]
     exact unitThreeFourFifths_mul_star
+  simp only [IsScaledUnitary.public_eqs, ringSum_succ_eq, ringSum_zero_eq]
   intro j k
   match j, k with
   | ⟨0, _⟩, ⟨0, _⟩ =>
@@ -277,8 +304,9 @@ def hadamardMatrix : Fin 2 → Fin 2 → GaussIntRing
   | _, _ => one
 
 theorem hadamardMatrix_scaled_unitary : IsScaledUnitary hadamardMatrix (2 : Int) := by
-  unfold IsScaledUnitary
-  decide
+  simp only [IsScaledUnitary.public_eqs, ringSum_succ_eq, ringSum_zero_eq]
+  intro j k
+  apply Complexified.ext' <;> revert j k <;> decide
 
 /-- A controlled swap of a one-bit response register. -/
 def boolSwapGate : ResponseGate Bool 2 where
@@ -308,7 +336,8 @@ theorem rationalPhaseAdv_exact_unitary (H : Fin 2 → Bool) :
     stateNormSqOver (runQuantumAdvOver boolSwapGate rationalPhaseAdv H) =
       stateNormSqOver rationalPhaseAdv.init := by
   rw [runQuantumAdvOver_normSq]
-  show mul (mul (normSq unitThreeFourFifths) one) _ = _
+  show mul (stepsScaleOver [ScaledUnitaryOver.phase unitThreeFourFifths]) _ = _
+  rw [stepsScaleOver.public_eq_2, stepsScaleOver.public_eq_1, ScaledUnitaryOver.phase_scaleSq]
   rw [unitThreeFourFifths_normSq]
   constructive_ring
 
@@ -328,7 +357,8 @@ theorem rationalPhaseAdv_rbr_step (H : Fin 2 → Bool) :
         (stateNormSqOver (runQuantumAdvOver boolSwapGate rationalPhaseAdv H))) :=
   qrom_measure_reprogram_rbr_step_over_point boolSwapGate rationalPhaseAdv H
     (fun j : Fin 2 => decide (j.val = 1)) (fun _ => true)
-    (fun _ j => decide (j.val = 0)) 1 (fun _ _ => by decide)
+    (fun _ j => decide (j.val = 0)) 1
+    (fun _ _ => by rw [finCountTrue_succ_eq, finCountTrue_succ_eq, finCountTrue_zero_eq]; decide)
 
 /-! ## 3. Teeth -/
 
@@ -343,6 +373,7 @@ def basisE1 : HVec GaussIntRing 2
 /-- Cauchy–Schwarz is a strict inequality for orthogonal basis states: `0 ≠ 1 · 1`. -/
 theorem tooth_cauchy_schwarz_not_equality :
     ¬ (normSq (hvInner basisE0 basisE1) = mul (normSqVec basisE0) (normSqVec basisE1)) := by
+  simp only [hvInner.public_eqs, normSqVec.public_eqs, ringSum_succ_eq, ringSum_zero_eq]
   decide
 
 /-- An idempotent map that is not self-adjoint: `(x, y) ↦ (x + y, 0)`. -/
@@ -354,6 +385,7 @@ def obliqueMap (ψ : HVec GaussIntRing 2) : HVec GaussIntRing 2
 theorem tooth_oblique_idempotent_breaks_pythagoras :
     ¬ (normSqVec basisE1 =
       add (normSqVec (obliqueMap basisE1)) (normSqVec (hvSub basisE1 (obliqueMap basisE1)))) := by
+  simp only [hvSub.public_eqs, normSqVec.public_eqs, ringSum_succ_eq, ringSum_zero_eq]
   decide
 
 /-- The shear `[[1, 1], [0, 1]]`. -/
@@ -364,8 +396,11 @@ def shearMatrix : Fin 2 → Fin 2 → GaussIntRing
 /-- A shear is not a scaled unitary for any scale: its columns are not orthogonal. -/
 theorem tooth_shear_not_scaled_unitary : ¬ ∃ s : Int, IsScaledUnitary shearMatrix s := by
   rintro ⟨s, h⟩
-  have h01 : (one : GaussIntRing) = zero := h ⟨0, by decide⟩ ⟨1, by decide⟩
-  exact absurd h01 (by decide)
+  rw [IsScaledUnitary.public_eqs] at h
+  have h01 := h ⟨0, by decide⟩ ⟨1, by decide⟩
+  have hne : ¬ ((⟨0, by decide⟩ : Fin 2) = ⟨1, by decide⟩) := by decide
+  simp only [ringSum_succ_eq, ringSum_zero_eq, hne, ↓reduceIte] at h01
+  exact absurd (congrArg Complexified.re h01) (by decide)
 
 #verify_constructive
   Qsag.gaussToRing_normSq

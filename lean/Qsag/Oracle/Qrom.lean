@@ -2994,6 +2994,40 @@ theorem rbr_multiRound_qrom_induction
     exact RatBound.le_trans hRestBound
       (RatBound.add_le_add hFirstSimp (RatBound.le_refl _))
 
+/-! ### Executed non-vacuity fixtures (evaluated here, where the bodies are visible; assembled in
+`Tests/ConcreteSecurityBudgetTeeth`) -/
+
+/-- Concrete 2-query Hadamard superposition circuit (`QuantumAdv 2 2 1 2`) preparing
+    `|0, 0, 0⟩ + |1, 0, 0⟩` via `hadamardQuery2 2 1` after query 0 so query 1 probes `oracleXor`
+    in uniform superposition across both basis inputs! -/
+def concreteSuperpositionAdv : QuantumAdv 2 2 1 2 where
+  init := fun x y _ => if x.1 == 0 && y.1 == 0 then ⟨1, 0⟩ else GaussInt.zero
+  h_init_pos := by decide
+  steps := fun i => if i.1 == 0 then hadamardQuery2 2 1 else ScaledUnitary.id 2 2 1
+
+/-- Concrete 2-query adaptive `OracleComp` decision tree branching on the LSB of its first
+    256-bit oracle query response before choosing its second query input! -/
+def concreteAdaptiveTwoQueryAdv : OracleComp (BitVec 8) (BitVec 256) (BitVec 8) :=
+  .query (BitVec.ofNat 8 1) (fun d₁ =>
+    let x₂ := if d₁.getLsbD 0 then BitVec.ofNat 8 2 else BitVec.ofNat 8 3
+    .query x₂ (fun _ => .pure x₂))
+
+/-- After one query, `concreteSuperpositionAdv` has query weight `1` on both basis inputs. -/
+theorem concreteSuperpositionAdv_queryWeights :
+    QVec.queryWeight (advStateAt concreteSuperpositionAdv (fun _ => BitVec.zero 2) 1 (by decide))
+        ⟨0, by decide⟩ = 1 ∧
+      QVec.queryWeight (advStateAt concreteSuperpositionAdv (fun _ => BitVec.zero 2) 1 (by decide))
+        ⟨1, by decide⟩ = 1 := by
+  constructor <;> decide
+
+theorem concreteAdaptiveTwoQueryAdv_queryBounded :
+    QueryBounded 2 concreteAdaptiveTwoQueryAdv := by
+  unfold concreteAdaptiveTwoQueryAdv QueryBounded
+  intro _ _
+  exact trivial
+
+#verify_constructive Qsag.concreteSuperpositionAdv_queryWeights
+  Qsag.concreteAdaptiveTwoQueryAdv_queryBounded
 
 end Qsag
 
@@ -7085,6 +7119,10 @@ theorem GaussInt.add_def (z w : GaussInt) : GaussInt.add z w = ⟨z.re + w.re, z
 theorem GaussInt.sub_def (z w : GaussInt) : GaussInt.sub z w = ⟨z.re - w.re, z.im - w.im⟩ := by
   rfl
 
+theorem GaussInt.mul_def (z w : GaussInt) :
+    GaussInt.mul z w = ⟨z.re * w.re - z.im * w.im, z.re * w.im + z.im * w.re⟩ := by
+  rfl
+
 theorem QVec.zero_apply (cardX w cardAnc : Nat) (x : Fin cardX) (y : Fin (2 ^ w))
     (a : Fin cardAnc) : QVec.zero cardX w cardAnc x y a = GaussInt.zero := by rfl
 
@@ -7374,4 +7412,729 @@ theorem verifyCanopyMultiproof_one {D : Type} [DecidableEq D]
       decide (rootHash 1 (nodeHash 1 leaf sibling) = commitment) := by
   simp [verifyCanopyMultiproof, canopyIndicesOk, canopyLevels, canopyLevelStep, canopyParentHash]
 end Qsag
+end
+
+/-! ## Executed controls, fixtures and teeth (audited and paired in `Tests/OracleAndQrom`)
+
+These declarations evaluate or unfold definitions of this module (`keyedPrfRealAccept`,
+`quantumBht*Bound`, `merkleRootFromPath`, `verifyCanopyMultiproof`, `findFirst`, `QVec.queryMassOn`,
+`runQuantumAdv`, `measuredStateAt`, …) whose bodies are not exported. -/
+public section
+namespace Qsag
+set_option autoImplicit false
+set_option exponentiation.threshold 8192
+
+
+def buildFullTableReader (cardB : Nat) : (rem : Nat) → rem ≤ cardB →
+    OracleComp (Fin cardB × Unit) Bool Bool
+  | 0, _ => .pure false
+  | m + 1, hm =>
+    .query (⟨cardB - (m + 1), by omega⟩, ()) (fun b =>
+      if b then .pure true else buildFullTableReader cardB m (by omega))
+
+def oneQueryGuesser (cardB : Nat) (hPos : 0 < cardB) : OracleComp (Fin cardB × Unit) Bool Bool :=
+  .query (⟨0, hPos⟩, ()) (fun b => .pure b)
+
+def zeroQueryHardcoder (cardB : Nat) (c : Bool) : OracleComp (Fin cardB × Unit) Bool Bool :=
+  .pure c
+
+theorem lazyRo_query_regime_characterization (cardB : Nat) (hPos : 0 < cardB) (c : Bool) :
+    natAbsDiff (keyedPrfRealAccept cardB (fun _ => false) (fun _ => true) (zeroQueryHardcoder cardB c))
+               (keyedPrfIdealAccept cardB (fun _ => false) (zeroQueryHardcoder cardB c)) = 0 ∧
+    (0 < natAbsDiff (keyedPrfRealAccept cardB (fun _ => false) (fun _ => true) (oneQueryGuesser cardB hPos))
+                    (keyedPrfIdealAccept cardB (fun _ => false) (oneQueryGuesser cardB hPos)) ∧
+     QueryBounded 1 (oneQueryGuesser cardB hPos)) ∧
+    2 * 1 < natAbsDiff (keyedPrfRealAccept 8 (fun _ => false) (fun _ => true) (buildFullTableReader 8 8 (Nat.le_refl 8)))
+                       (keyedPrfIdealAccept 8 (fun _ => false) (buildFullTableReader 8 8 (Nat.le_refl 8))) := by
+  refine ⟨?_, ⟨?_, fun _ => trivial⟩, by rw [natAbsDiff_eq]; decide⟩
+  · unfold keyedPrfRealAccept keyedPrfIdealAccept zeroQueryHardcoder evalOracleComp
+    simp [natAbsDiff_eq]
+  · unfold keyedPrfRealAccept keyedPrfIdealAccept oneQueryGuesser evalOracleComp
+    have hIdeal0 : qsum cardB (fun _ => (0 : Nat)) = 0 := by rw [qsum_const]; omega
+    have hReal1 :
+        qsum cardB (fun kStar : Fin cardB =>
+          if (if (⟨0, hPos⟩ : Fin cardB) = kStar then true else false) = true then 1 else 0) = 1 := by
+      have hCongr :
+          qsum cardB (fun kStar : Fin cardB =>
+            if (if (⟨0, hPos⟩ : Fin cardB) = kStar then true else false) = true then 1 else 0) =
+          qsum cardB (fun kStar : Fin cardB => if kStar = ⟨0, hPos⟩ then 1 else 0) := by
+        apply qsum_congr
+        intro kStar
+        by_cases hk : kStar = ⟨0, hPos⟩
+        · subst hk; simp
+        · have hne : (⟨0, hPos⟩ : Fin cardB) ≠ kStar := fun h => hk h.symm
+          simp [hk, hne]
+      rw [hCongr, qsum_eq_indicator]
+    change 0 < natAbsDiff
+      (qsum cardB (fun kStar : Fin cardB =>
+        if (if (⟨0, hPos⟩ : Fin cardB) = kStar then true else false) = true then 1 else 0))
+      (qsum cardB (fun _ => 0))
+    rw [hReal1, hIdeal0, natAbsDiff_eq]
+    decide
+
+/-- **`#tooth` BHT 256-Bit Unrestricted Collision Ceiling (`~85.3` Quantum Bits)**:
+    A 256-bit untargeted hash does NOT provide 128-bit generic quantum collision resistance:
+    at `qHash = 2 ^ 86` (`< 2 ^ 128`), `quantumBhtPureCubicBound 256 (2 ^ 86) = 2 ^ 258 / 2 ^ 256 > 1`
+    (`exceedsBitBudget 0`), whereas a 384-bit output achieves `atLeastBits 128` up to `qHash < 2 ^ 84`
+    even under `quantumBhtCollisionBound 384`! -/
+theorem tooth_bht_256bit_unrestricted_collision_ceiling_85bits :
+    exceedsBitBudget 0 (quantumBhtPureCubicBound 256 (2 ^ 86)) ∧
+    exceedsBitBudget 128 (quantumBhtPureCubicBound 256 (2 ^ 43)) ∧
+    (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 84 →
+      atLeastBits 129 (quantumBhtCollisionBound 384 qHash)) := by
+  refine ⟨by unfold exceedsBitBudget quantumBhtPureCubicBound; decide,
+          by unfold exceedsBitBudget quantumBhtPureCubicBound; decide, ?_⟩
+  intro qHash hq
+  unfold atLeastBits quantumBhtCollisionBound
+  dsimp only
+  have hCube : (qHash + 1) ^ 3 ≤ (2 ^ 84) ^ 3 := Nat.pow_le_pow_left hq 3
+  have hPow : 8 * (2 ^ 84) ^ 3 * 2 ^ 129 ≤ 2 ^ 384 := by decide
+  have h1 := Nat.mul_le_mul_left 8 hCube
+  have h2 := Nat.mul_le_mul_right (2 ^ 129) h1
+  exact Nat.le_trans h2 hPow
+
+
+/-- `#tooth`: a compression function that forgets its right child is not binding, and the
+    theorem's collision branch is the one that fires. -/
+theorem tooth_merkle_right_blind_compression_collides :
+    merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [1] =
+      merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [2] ∧
+    MerkleTweakCollision (fun _ _ (a : Nat) _ => a) := by
+  refine ⟨rfl, ?_⟩
+  unfold MerkleTweakCollision
+  exact ⟨0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
+
+
+/-! ### Concrete instance: `logLeaves = 3`, opened leaves `{1, 2, 6}` -/
+
+/-- Cantor pairing on `Nat`, used as a toy digest combiner. -/
+def canopyToyPair (a b : Nat) : Nat := (a + b) * (a + b + 1) / 2 + b
+
+/-- Toy `hash_merkle_internal`: pairs the node index with the pair of children. -/
+def canopyToyNodeHash (i l r : Nat) : Nat := canopyToyPair i (canopyToyPair l r)
+
+/-- Toy `hash_tree_root`: pairs `logLeaves` with the top node. -/
+def canopyToyRootHash (logLeaves top : Nat) : Nat := canopyToyPair logLeaves top
+
+/-- Toy leaf digest of leaf `i`. -/
+def canopyToyLeaf (i : Nat) : Nat := 100 + i
+
+/-- Commitment of the full 8-leaf toy tree, computed node by node (not through the verifier). -/
+def canopyToyCommitment : Nat :=
+  canopyToyRootHash 3
+    (canopyToyNodeHash 1
+      (canopyToyNodeHash 2
+        (canopyToyNodeHash 4 (canopyToyLeaf 0) (canopyToyLeaf 1))
+        (canopyToyNodeHash 5 (canopyToyLeaf 2) (canopyToyLeaf 3)))
+      (canopyToyNodeHash 3
+        (canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5))
+        (canopyToyNodeHash 7 (canopyToyLeaf 6) (canopyToyLeaf 7))))
+
+/-- Opened leaves `{1, 2, 6}` with their digests. -/
+def canopyToyLeaves : List (Nat × Nat) :=
+  [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (6, canopyToyLeaf 6)]
+
+/-- Steiner multiproof for `{1, 2, 6}`: leaves `0`, `3`, `7` at the bottom level and internal
+    node `6` one level up; nodes `4, 5` and `2, 3` merge without consuming a digest. -/
+def canopyToyProof : List Nat :=
+  [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7,
+   canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)]
+
+theorem canopyToy_honest_accepted :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof = true := by decide
+
+theorem canopyToy_sibling_count :
+    steinerSiblingCount 3 [1, 2, 6] = 4 := by decide
+
+/-- A flipped sibling digest (leaf `7` replaced) is rejected. -/
+theorem canopyToy_flipped_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves
+      [canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+       canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)] = false := by decide
+
+/-- `#tooth`: a proof differing from the honest one in a single sibling digest is rejected. -/
+theorem tooth_canopy_sibling_mutation :
+    ∃ proof : List Nat, proof ≠ canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        canopyToyLeaves proof = false :=
+  ⟨[canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+    canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)],
+    by decide, canopyToy_flipped_sibling_rejected⟩
+
+
+/-- The exact-sibling-count premise is inhabited by the honest three-leaf opening. -/
+theorem inhabited_canopy_nonempty_opening :
+    ∃ (leaves : List (Nat × Nat)) (proof : List Nat),
+      leaves = canopyToyLeaves ∧ proof = canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves proof = true :=
+  ⟨canopyToyLeaves, canopyToyProof, rfl, rfl, canopyToy_honest_accepted⟩
+
+/-- A flipped leaf digest (leaf `2`) is rejected. -/
+theorem canopyToy_flipped_leaf_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2 + 1), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- The proof with its last sibling removed is rejected. -/
+theorem canopyToy_missing_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof.dropLast = false := by decide
+
+/-- The proof with one trailing digest appended is rejected. -/
+theorem canopyToy_extra_sibling_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+
+/-- A duplicated index is rejected. -/
+theorem canopyToy_duplicate_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- An unsorted index list is rejected. -/
+theorem canopyToy_unsorted_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(2, canopyToyLeaf 2), (1, canopyToyLeaf 1), (6, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- An index `≥ 2^logLeaves` is rejected. -/
+theorem canopyToy_out_of_range_index_rejected :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      [(1, canopyToyLeaf 1), (2, canopyToyLeaf 2), (8, canopyToyLeaf 6)]
+      canopyToyProof = false := by decide
+
+/-- **The exact-consumption check is load-bearing.** The relaxed verifier, which differs from
+    `verifyCanopyMultiproof` only by ignoring unconsumed digests, accepts the honest proof with a
+    trailing digest appended, while `verifyCanopyMultiproof` rejects the same input. -/
+theorem canopyToy_relaxed_accepts_extra_sibling :
+    verifyCanopyMultiproofRelaxed canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = true ∧
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves (canopyToyProof ++ [999]) = false := by decide
+
+/-- Non-vacuity witness for §3: the honest toy opening is accepted, carries exactly
+    `steinerSiblingCount` siblings, and every other opening of the same indices against the same
+    commitment is rejected or exhibits a collision of the toy hashes. -/
+theorem inhabited_canopy_multiproof_binding :
+    verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+      canopyToyLeaves canopyToyProof = true ∧
+    canopyToyProof.length = steinerSiblingCount 3 (canopyToyLeaves.map Prod.fst) ∧
+    (∀ (leaves' : List (Nat × Nat)) (proof' : List Nat),
+      leaves'.map Prod.fst = canopyToyLeaves.map Prod.fst →
+      (leaves', proof') ≠ (canopyToyLeaves, canopyToyProof) →
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves' proof' = false ∨
+      (∃ top₁ top₂ : Nat, top₁ ≠ top₂ ∧ canopyToyRootHash 3 top₁ = canopyToyRootHash 3 top₂) ∨
+      (∃ (i l r l' r' : Nat), (l, r) ≠ (l', r') ∧
+        canopyToyNodeHash i l r = canopyToyNodeHash i l' r')) :=
+  ⟨canopyToy_honest_accepted,
+   verifyCanopyMultiproof_exact_sibling_count canopyToyNodeHash canopyToyRootHash 3
+     canopyToyCommitment canopyToyLeaves canopyToyProof canopyToy_honest_accepted,
+   fun leaves' proof' hIdx hNe =>
+     verifyCanopyMultiproof_tamper_rejected_or_collision canopyToyNodeHash canopyToyRootHash 3
+       canopyToyCommitment canopyToyLeaves leaves' canopyToyProof proof'
+       canopyToy_honest_accepted hIdx hNe⟩
+
+
+/-- `#tooth` witness: with an empty pre-challenge query table (`queries = []`), a depth-1 opening
+    cannot be online-extracted (`extractOnlineMerkleOpening = none`). -/
+theorem tooth_onlineMerkle_empty_queries_unqueried_root :
+    ¬ ∃ lp : Nat × List Nat,
+      extractOnlineMerkleOpening 10 ([] : List (RecordedMerkleQuery Nat)) 0 1 0 = some lp := by
+  rintro ⟨_, h⟩
+  unfold extractOnlineMerkleOpening findFirst at h
+  cases h
+
+
+
+
+private def witnessInitVec : QVec 2 2 1 :=
+  fun x y _ => if x.1 = 0 ∧ y.1 = 0 then ⟨1, 0⟩ else GaussInt.zero
+
+private theorem witnessInitVec_pos : 0 < QVec.stateNormSq witnessInitVec := by decide
+
+private def witnessQuantumAdv : QuantumAdv 2 2 1 0 :=
+  { init := witnessInitVec, h_init_pos := witnessInitVec_pos, steps := fun t => Fin.elim0 t }
+
+private def witnessFailExtract (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
+  decide ((H x).toNat = 0)
+
+private def witnessProj (_ : Fin (2 * 1)) (x : Fin 2) : Fin 2 := x
+
+private def witnessTargetSet (_ : Fin (2 * 1)) (_ : Fin 2 → BitVec 2) (_ : Fin 2) :
+    List (BitVec 2) := [0#2]
+
+private theorem witnessCoverProof (H : Fin 2 → BitVec 2) :
+    QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qsum (2 * 1) (fun r =>
+        qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj r) (fun _ _ => true)
+          (fun O x => listHasElem (O x) (witnessTargetSet r O x))) := by
+  have hPt : ∀ (ψ : QVec 2 2 1) (x : Fin 2),
+      QVec.queryWeight ψ x ≤ QVec.queryMassOn (fun z => decide (x = z)) ψ := by
+    intro ψ ⟨i, hi⟩
+    match i, hi with
+    | 0, _ =>
+      unfold QVec.queryMassOn qsum; dsimp only
+      simp only [decide_true, ↓reduceIte]
+      exact Nat.le_add_right _ _
+    | 1, _ =>
+      unfold QVec.queryMassOn
+      simp only [qsum, Fin.ext_iff, Nat.one_ne_zero, Nat.zero_add, decide_false, decide_true,
+        Bool.false_eq_true, ↓reduceIte]
+      omega
+  have hLe : QVec.queryMassOn (witnessFailExtract H) (runQuantumAdv witnessQuantumAdv H) ≤
+      qromOrdinaryFlipMass witnessQuantumAdv H (witnessProj ⟨0, by omega⟩) (fun _ _ => true)
+        (fun O x => listHasElem (O x) (witnessTargetSet ⟨0, by omega⟩ O x)) := by
+    unfold QVec.queryMassOn qromOrdinaryFlipMass witnessFailExtract witnessProj witnessTargetSet
+    apply qsum_le_qsum; intro x
+    by_cases h0 : (H x).toNat = 0
+    · have hBv : H x = 0#2 := BitVec.eq_of_toNat_eq h0
+      have hElem : listHasElem (H x) [0#2] = true := by
+        rw [hBv]; exact (listHasElem_eq_true_iff _ _).2 List.mem_cons_self
+      simp only [h0, decide_true, Bool.true_and, hElem, ↓reduceIte]
+      exact hPt (runQuantumAdv witnessQuantumAdv H) x
+    · simp only [h0, decide_false, Bool.false_eq_true, ↓reduceIte]
+      exact Nat.zero_le _
+  exact Nat.le_trans hLe (Nat.le_add_right _ _)
+
+/-- Inhabitedness of the conditional target-hit premises: zero queries, two-bit answers,
+    and constant singleton targets. This is not an inhabited Merkle extraction execution. -/
+theorem inhabited_qrom_unitary_merkle_extract :
+    ∃ (cardX w cardAnc Q numRoots : Nat)
+      (A : QuantumAdv cardX w cardAnc Q)
+      (failExtract : (Fin cardX → BitVec w) → Fin cardX → Bool)
+      (proj : Fin (2 * numRoots) → Fin cardX → Fin cardX)
+      (targetSet : Fin (2 * numRoots) → (Fin cardX → BitVec w) → Fin cardX → List (BitVec w)),
+      (∀ r O x ch, targetSet r (reprogramOracle O x ch) x = targetSet r O x) ∧
+      (∀ r O x, (targetSet r O x).length ≤ (if r.1 % 2 = 0 then 1 else 2 * Q + 1)) ∧
+      (∀ H, QVec.queryMassOn (failExtract H) (runQuantumAdv A H) ≤
+        qsum (2 * numRoots) (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (fun _ _ => true)
+            (fun O x => listHasElem (O x) (targetSet r O x)))) :=
+  ⟨2, 2, 1, 0, 1, witnessQuantumAdv, witnessFailExtract, witnessProj, witnessTargetSet,
+    (fun _ _ _ _ => rfl),
+    (fun _ _ _ => by unfold witnessTargetSet; simp),
+    witnessCoverProof⟩
+
+
+
+
+/-- A singleton adaptive target can contain the answer being tested. -/
+def qromSelfTarget (H : Fin 1 → BitVec 1) (x : Fin 1) : List (BitVec 1) := [H x]
+
+/-- Small target cardinality is insufficient: this event always succeeds, but changing its
+    tested oracle coordinate changes its target list and violates `hLocal`. -/
+theorem tooth_qrom_self_target_not_local :
+    (∀ (H : Fin 1 → BitVec 1) (x : Fin 1),
+      (qromSelfTarget H x).length = 1 ∧ listHasElem (H x) (qromSelfTarget H x) = true) ∧
+    ¬ (∀ (H : Fin 1 → BitVec 1) (x : Fin 1) (ch : BitVec 1),
+      qromSelfTarget (reprogramOracle H x ch) x = qromSelfTarget H x) := by
+  constructor
+  · intro H x
+    exact ⟨rfl, (listHasElem_eq_true_iff _ _).2 List.mem_cons_self⟩
+  · intro h
+    have h01 := h (fun _ => 0#1) 0 1#1
+    have hne : qromSelfTarget (reprogramOracle (fun _ : Fin 1 => 0#1) 0 1#1) 0 ≠
+        qromSelfTarget (fun _ : Fin 1 => 0#1) 0 := by decide
+    exact hne h01
+
+/-- Uniform query register, phase-kickback response, and a blank record register. -/
+def qromParityInit : QVec 2 1 2 := fun _ y a =>
+  if a.val = 0 then (if y.val = 0 then ⟨1, 0⟩ else ⟨-1, 0⟩) else GaussInt.zero
+
+/-- The two input addresses have different oracle answers. -/
+def qromParityOracle (x : Fin 2) : BitVec 1 := BitVec.ofFin x
+
+/-- One coherent oracle call followed by a query-register Hadamard. -/
+def qromParityAdv : QuantumAdv 2 1 2 1 where
+  init := qromParityInit
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 1 2
+
+/-- The same initial state after copying the query address to an orthogonal record.
+    This is the controlled-X copy on a blank ancilla, before the oracle call. -/
+def qromRecordedParityInit : QVec 2 1 2 := fun x y a =>
+  if a = x then (if y.val = 0 then ⟨1, 0⟩ else ⟨-1, 0⟩) else GaussInt.zero
+
+def qromRecordedParityAdv : QuantumAdv 2 1 2 1 where
+  init := qromRecordedParityInit
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 1 2
+
+/-- A classical record of the queried address destroys interference even for one query.
+    Both final states have squared norm eight. The coherent circuit outputs one with
+    probability one; retaining the address record changes that probability to one half.
+    An online extractor therefore needs a proved disturbance/simulation bound, not just a
+    consistent classical query list handed to `classifyOnlineMerkleOpening`. -/
+theorem tooth_qrom_query_record_changes_born_probability :
+    QVec.stateNormSq (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    QVec.stateNormSq (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 8 ∧
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromRecordedParityAdv qromParityOracle) = 4 := by
+  decide
+
+
+/-! ## Executed example: the experiment is not the coherent run -/
+
+/-- On the one-query parity circuit of `QromExtractionBoundary`, the coherent run puts mass
+    8 of 8 on output one, while the measured experiment puts 4 of 8 there (two branches of
+    mass 4 each). The bounds in this module are statements about the second number. -/
+theorem measured_parity_execution :
+    QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (runQuantumAdv qromParityAdv qromParityOracle) = 8 ∧
+    sumLogs 2 1 (fun xs => QVec.queryMassOn (fun x : Fin 2 => decide (x.val = 1))
+      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 4 ∧
+    sumLogs 2 1 (fun xs => QVec.stateNormSq
+      (measuredStateAt qromParityAdv qromParityOracle 1 (Nat.le_refl 1) xs)) = 8 := by
+  decide
+
+set_option maxRecDepth 10000 in
+/-- Nonvacuity control in the QUANTUM game: the identity primitive makes the mode
+constant, so every online adversary wins for every challenge. This does not describe
+the actual SPN; it rules out deriving mode hardness from permutation laws alone. -/
+theorem identityPublicPermutation_quantum_preimage_mass {anc q : Nat}
+    (adversary : PublicSpnPreimageAdversary anc q) (challenge : PublicSpnState) :
+    publicSpnPreimageMass identityPublicPermutation adversary challenge =
+      QVec.stateNormSq (publicSpnPreimageFinalState identityPublicPermutation adversary challenge) := by
+  unfold publicSpnPreimageMass QVec.stateNormSq QVec.queryWeight
+  simp only [publicSpnFeedForward_identity, ↓reduceIte]
+
+def paritySuccess (H : Fin 2 → BitVec 1) (x : Fin 2) : Bool :=
+  decide (x.val = (H 0 ^^^ H 1).toNat)
+
+/-- A genuine superposition query: both addresses have positive initial mass. All four
+    oracles are included. The coherent runtime preserves perfect parity success and has
+    Fourier support exactly on one-entry labels after one call. -/
+theorem coherent_parity_runtime_execution :
+    QVec.queryWeight qromParityAdv.init 0 = 2 ∧ QVec.queryWeight qromParityAdv.init 1 = 2 ∧
+    uniformOracleSum 1 2 (fun H => QVec.queryMassOn (paritySuccess H) (runQuantumAdv qromParityAdv H)) = 32 ∧
+    coherentTableEventMass paritySuccess
+      (fourierOracleState (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))) = 8192 ∧
+    oracleTableSum 2 (fun d => if tableWeight 2 d = 1 then
+      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 2048 ∧
+    oracleTableSum 2 (fun d => if 1 < tableWeight 2 d then
+      QVec.stateNormSq (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1) d) else 0) = 0 := by
+  decide +kernel
+
+/-- Measuring the Fourier label before decoding changes oracle/output correlations. The
+    coherent success mass 8192 falls to 4096 while total mass stays 8192. This refutes treating
+    the Q-entry support invariant as a nondisturbing classical answer-table extractor. -/
+theorem tooth_fourier_database_measurement_disturbs :
+    oracleTableSum 2 (fun d => coherentTableEventMass paritySuccess
+      (fourierOracleState (projectFourierLabel d (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))))) = 4096 ∧
+    oracleTableSum 2 (fun d => coherentTableEventMass (fun _ _ => true)
+      (fourierOracleState (projectFourierLabel d (fourierAdvStateAt qromParityAdv 1 (Nat.le_refl 1))))) = 8192 ∧
+    uniformOracleSum 1 2 (fun H => sumLogs 2 1 (fun xs =>
+      QVec.queryMassOn (paritySuccess H) (measuredStateAt qromParityAdv H 1 (Nat.le_refl 1) xs))) = 16 := by
+  decide +kernel
+
+def toyMerkleEncode (u v : BitVec 1) : Fin 4 :=
+  ⟨2 * u.toFin.val + v.toFin.val, by have := u.toFin.isLt; have := v.toFin.isLt; omega⟩
+
+def toyMerkleDecode (x : Fin 4) : Nat × Nat × BitVec 1 × BitVec 1 :=
+  (0, 0, BitVec.ofNat 1 (x.val / 2), BitVec.ofNat 1 (x.val % 2))
+
+def toyMerkleLayout : MerkleAddressLayout 4 1 where
+  encode := fun _ _ u v => toyMerkleEncode u v
+  decode := fun x => some (toyMerkleDecode x)
+  levels := 1
+  nodes := 1
+  decode_sound := by
+    intro x l n u v h
+    have h' := Option.some.inj h
+    have hu : BitVec.ofNat 1 (x.val / 2) = u := congrArg (fun τ => τ.2.2.1) h'
+    have hv : BitVec.ofNat 1 (x.val % 2) = v := congrArg (fun τ => τ.2.2.2) h'
+    rw [← hu, ← hv]
+    clear h h' hu hv
+    revert x
+    decide
+  decode_encode := by
+    intro l n u v hl hn
+    have hl0 : l = 0 := by omega
+    have hn0 : n = 0 := by omega
+    subst hl0 hn0
+    cases u with | ofFin fu =>
+    cases v with | ofFin fv =>
+    revert fu fv
+    decide
+
+/-- Basis state at query address `x₀`, zero response register. -/
+def toyBasisInit (x₀ : Fin 4) : QVec 4 1 1 := fun x y _ =>
+  if x = x₀ ∧ y.val = 0 then ⟨1, 0⟩ else GaussInt.zero
+
+def toyQueryAdv (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) : QuantumAdv 4 1 1 1 where
+  init := toyBasisInit x₀
+  h_init_pos := h
+  steps := fun _ => ScaledUnitary.id 4 1 1
+
+/-- Every output claims: root `0`, index `0`, leaf `0`, sibling `1`. The verifier therefore
+    evaluates the oracle at address `2 * 0 + 1 = 1`. -/
+def toyOpening (_ : Fin 4) : MerkleOpeningReadout 1 := ⟨0#1, 0, 0#1, [1#1]⟩
+
+/-- Acceptance without the extraction comparison. -/
+def toyAccepted (H : Fin 4 → BitVec 1) (o : Fin 4) : Bool :=
+  decide (merkleRootFromPath (toyMerkleLayout.hash H) 0 (toyOpening o).idx (toyOpening o).leaf
+    (toyOpening o).path = (toyOpening o).rt)
+
+theorem toy_measured_merkle_execution :
+    let honest := toyQueryAdv ⟨1, by decide⟩ (by decide)
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    -- both are accepted on 8 of the 16 oracles
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (toyAccepted H) (measuredStateAt honest H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (toyAccepted H) (measuredStateAt guesser H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    -- the honest log always yields the opening; the other log never does
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs)
+        (measuredStateAt honest H 1 (Nat.le_refl 1) xs))) = 0 ∧
+    uniformOracleSum 1 4 (fun H => sumLogs 4 1 (fun xs =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H xs)
+        (measuredStateAt guesser H 1 (Nat.le_refl 1) xs))) = 8 ∧
+    (2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init) = 16 := by
+  decide +kernel
+
+/-- The toy adversaries are classical-address adversaries, so `ClassicalQueryAddresses` is
+    satisfiable and the transfer theorem applies to them. -/
+theorem toyQueryAdv_classical (x₀ : Fin 4) (h : 0 < QVec.stateNormSq (toyBasisInit x₀)) :
+    ClassicalQueryAddresses (toyQueryAdv x₀ h) (fun _ _ => x₀) := by
+  intro H t ht x y a hx
+  have ht0 : t = 0 := by omega
+  subst ht0
+  show (if x = x₀ ∧ y.val = 0 then (⟨1, 0⟩ : GaussInt) else GaussInt.zero) = GaussInt.zero
+  exact ite_eq_right (fun hh => hx hh.1)
+
+/-- The coherent run of the non-querying-the-right-address adversary, with its own address
+    log `[0]`, has failure mass 8 of 16: the value the measured experiment gave, as the
+    transfer theorem states, and within the general bound `(1 * 4 + 0) / 2`. -/
+theorem toy_classical_run_execution :
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (by decide)
+    uniformOracleSum 1 4 (fun H =>
+      QVec.queryMassOn (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening H
+          (classicalQueryLog (fun _ _ => (⟨0, by decide⟩ : Fin 4)) H 1))
+        (runQuantumAdv guesser H)) = 8 ∧
+    2 ^ 1 * 8 ≤ (1 * (3 * 1 + 1) + triangleSum 1) *
+      ((2 ^ 1) ^ 4 * (prefixScale guesser 1 (Nat.le_refl 1) * QVec.stateNormSq guesser.init)) := by
+  decide +kernel
+
+#verify_constructive
+  Qsag.lazyRo_query_regime_characterization
+  Qsag.toy_measured_merkle_execution
+  Qsag.toyQueryAdv_classical
+  Qsag.toy_classical_run_execution
+  Qsag.coherent_parity_runtime_execution
+  Qsag.tooth_fourier_database_measurement_disturbs
+  Qsag.identityPublicPermutation_quantum_preimage_mass
+  Qsag.tooth_bht_256bit_unrestricted_collision_ceiling_85bits
+  Qsag.tooth_merkle_right_blind_compression_collides
+  Qsag.canopyToy_honest_accepted
+  Qsag.canopyToy_sibling_count
+  Qsag.canopyToy_flipped_sibling_rejected
+  Qsag.tooth_canopy_sibling_mutation
+  Qsag.inhabited_canopy_nonempty_opening
+  Qsag.canopyToy_flipped_leaf_rejected
+  Qsag.canopyToy_missing_sibling_rejected
+  Qsag.canopyToy_extra_sibling_rejected
+  Qsag.canopyToy_duplicate_index_rejected
+  Qsag.canopyToy_unsorted_index_rejected
+  Qsag.canopyToy_out_of_range_index_rejected
+  Qsag.canopyToy_relaxed_accepts_extra_sibling
+  Qsag.inhabited_canopy_multiproof_binding
+  Qsag.tooth_onlineMerkle_empty_queries_unqueried_root
+  Qsag.onlineMerkle_preChallenge_unique
+  Qsag.witnessInitVec_pos
+  Qsag.witnessCoverProof
+  Qsag.inhabited_qrom_unitary_merkle_extract
+  Qsag.qrom_unitary_multiRoot_merkle_extract_bound
+  Qsag.verifyCanopyMultiproof_exact_sibling_count
+  Qsag.tooth_qrom_self_target_not_local
+  Qsag.tooth_qrom_query_record_changes_born_probability
+  Qsag.measured_parity_execution
+#verify_inhabited Qsag.verifyCanopyMultiproof_exact_sibling_count Qsag.inhabited_canopy_nonempty_opening
+#verify_inhabited Qsag.qrom_unitary_multiRoot_merkle_extract_bound Qsag.inhabited_qrom_unitary_merkle_extract
+
+/-! ### Toy Merkle game: facts for `Protocol/Aggregation/HemOpening` and `Tests/HemExtractedOpeningBridgeTests`
+
+The toy fixtures above are sealed outside this module; these are their evaluated facts. -/
+
+theorem toyBasisInit_stateNormSq_pos (x₀ : Fin 4) : 0 < QVec.stateNormSq (toyBasisInit x₀) := by
+  revert x₀
+  decide
+
+theorem toyOpening_eq (x : Fin 4) : toyOpening x = ⟨0#1, 0, 0#1, [1#1]⟩ := by rfl
+
+theorem toyAccepted_eq (H : Fin 4 → BitVec 1) (o : Fin 4) :
+    toyAccepted H o = decide (merkleRootFromPath (toyMerkleLayout.hash H) 0 (toyOpening o).idx
+      (toyOpening o).leaf (toyOpening o).path = (toyOpening o).rt) := by rfl
+
+theorem toyMerkleLayout_levels : toyMerkleLayout.levels = 1 := by rfl
+
+theorem toyOpening_shape (x : Fin 4) : merkleOpeningShape toyMerkleLayout 1 (toyOpening x) = true := by
+  rw [toyOpening_eq]
+  decide
+
+/-- `toy_measured_merkle_execution` in `measuredEventMass` form. -/
+theorem toy_measured_merkle_event_masses :
+    measuredEventMass (toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_stateNormSq_pos _))
+      (fun H _ x => toyAccepted H x) = 8 ∧
+    measuredEventMass (toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_stateNormSq_pos _))
+      (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening) = 0 ∧
+    measuredEventMass (toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_stateNormSq_pos _))
+      (measuredMerkleFailure toyMerkleLayout 0 1 toyOpening) = 8 :=
+  ⟨toy_measured_merkle_execution.1, toy_measured_merkle_execution.2.2.1,
+    toy_measured_merkle_execution.2.2.2.1⟩
+
+def toyOpeningSlots : List (MerkleOpeningSlot 4 1) := [⟨0, 1, toyOpening⟩]
+
+/-- Repeating an opening preserves the failure event, while the conservative union budget
+    doubles. This checks real multi-slot evaluation without claiming collision independence. -/
+theorem toy_batch_duplicate_execution :
+    let guesser := toyQueryAdv ⟨0, by decide⟩ (toyBasisInit_stateNormSq_pos _)
+    measuredEventMass guesser (batchMerkleFailure toyMerkleLayout (toyOpeningSlots ++ toyOpeningSlots)) = 8 ∧
+    batchMerkleCost 1 (toyOpeningSlots ++ toyOpeningSlots) = 8 := by
+  decide +kernel
+
+/-- Concrete inhabited failure fragment at the deployed digest width. The
+opening has a nonzero leaf and sibling, verifies its root, and is absent from
+the pre-challenge table. This is the same predicate used by committee refusal. -/
+theorem batchMerkleFailure_inhabited_256 {cardX : Nat}
+    (L : MerkleAddressLayout cardX 256) (hLevels : 1 ≤ L.levels) (hNodes : 0 < L.nodes) :
+    ∃ (slot : MerkleOpeningSlot cardX 256) (H : Fin cardX → BitVec 256) (out : Fin cardX),
+      slot.level + slot.depth ≤ L.levels ∧ batchMerkleFailure L [slot] H [] out = true := by
+  let slot : MerkleOpeningSlot cardX 256 :=
+    ⟨0, 1, fun _ => ⟨0#256, 0, 1#256, [2#256]⟩⟩
+  refine ⟨slot, fun _ => 0#256, L.encode 0 0 1#256 2#256, hLevels, ?_⟩
+  simp [batchMerkleFailure, measuredMerkleFailure, merkleOpeningShape,
+    merkleRootFromPath, MerkleAddressLayout.hash, merkleRecords,
+    extractOnlineMerkleOpening, findFirst, slot, hNodes]
+
+#verify_constructive
+  Qsag.toyBasisInit_stateNormSq_pos
+  Qsag.toyOpening_shape
+  Qsag.toy_measured_merkle_event_masses
+  Qsag.toy_batch_duplicate_execution
+  Qsag.batchMerkleFailure_inhabited_256
+end Qsag
+
+/-! ### Executed preprocessing-game controls (audited in `Tests/OracleAndQrom`) -/
+namespace Qsag.PreprocessingGame
+set_option autoImplicit false
+set_option exponentiation.threshold 8192
+
+/-- Two advice bits choose one of three pairs; no online oracle call is made. -/
+def storedCollisionAdvice (H : Fin 3 → BitVec 1) : BitVec 2 :=
+  if H 0 = H 1 then 0 else if H 0 = H 2 then 1 else 2
+
+def storedCollisionPair (advice : BitVec 2) : Fin 3 × Fin 3 :=
+  if advice = 0 then (0, 1) else if advice = 1 then (0, 2) else (1, 2)
+
+def storedCollision : ClassicalAdvice 3 1 1 2 0 (Fin 3 × Fin 3) where
+  preprocess := storedCollisionAdvice
+  online := fun advice _ => .done (storedCollisionPair advice)
+
+/-- A real zero-online-query strategy wins on EVERY oracle in this finite family.
+This is an inhabited counterexample to unsalted collision hardness with free preprocessing. -/
+theorem storedCollision_wins (H : Fin 3 → BitVec 1) :
+    collisionWin H (storedCollision.run H 0).1 = true := by
+  have hpigeon : ∀ a b c : BitVec 1, a = b ∨ a = c ∨ b = c := by decide
+  have hp := hpigeon (H 0) (H 1) (H 2)
+  by_cases h01 : H 0 = H 1
+  · simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+      Program.run, storedCollisionPair, collisionWin, h01]
+  · by_cases h02 : H 0 = H 2
+    · have h21 : H 2 ≠ H 1 := by intro he; exact h01 (h02.trans he)
+      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+        Program.run, storedCollisionPair, collisionWin, h02, h21]
+    · have h12 : H 1 = H 2 := hp.resolve_left h01 |>.resolve_left h02
+      simp [ClassicalAdvice.run, storedCollision, storedCollisionAdvice,
+        Program.run, storedCollisionPair, collisionWin, h02, h12]
+
+theorem storedCollision_count :
+    adviceWinCount storedCollision (fun H _ pair => collisionWin H pair) = 8 := by
+  have hEach : ∀ H : Fin 3 → BitVec 1, qsum 1 (fun salt =>
+      if collisionWin H (storedCollision.run H salt).1 then 1 else 0) = 1 := by
+    intro H
+    have hTerms : ∀ salt : Fin 1,
+        (if collisionWin H (storedCollision.run H salt).1 then 1 else 0) = 1 := by
+      intro salt
+      have hs : salt = (0 : Fin 1) := Fin.ext (by omega)
+      rw [hs, storedCollision_wins]
+      rfl
+    rw [qsum_congr hTerms, qsum_const]
+  unfold adviceWinCount
+  rw [uniformOracleSum_congr 1 3 _ _ hEach, uniformOracleSum_const]
+
+/-- With advice fixed independently of H, each chosen pair collides on 4 of 8 oracles. -/
+theorem fixedAdvice_collision_count (a : BitVec 2) :
+    fixedAdviceWinCount storedCollision.online (fun H _ pair => collisionWin H pair) a = 4 := by
+  cases a with | ofFin a =>
+  revert a
+  decide +kernel
+
+/-- A witness that the oracle-dependent preprocessing really changes the experiment:
+8 successes with two bits of advice versus 4 for every fixed advice, and zero online calls. -/
+theorem storedCollision_execution :
+    adviceWinCount storedCollision (fun H _ pair => collisionWin H pair) = 8 ∧
+    fixedAdviceWinCount storedCollision.online (fun H _ pair => collisionWin H pair) 0 = 4 ∧
+    ∀ H : Fin 3 → BitVec 1, (storedCollision.run H 0).2 = 0 := by
+  refine ⟨storedCollision_count, fixedAdvice_collision_count 0, ?_⟩
+  intro H
+  rfl
+
+/-- Two disjoint three-address slices of the same six-address oracle. -/
+def saltSlice (H : Fin 6 → BitVec 1) (s : Fin 2) : Fin 3 → BitVec 1 :=
+  fun x => H ⟨s.val * 3 + x.val, by have := s.isLt; have := x.isLt; omega⟩
+
+/-- A single stored entry for salt zero, created without knowing the challenge salt. -/
+def oneSaltTable (H : Fin 6 → BitVec 1) : List (Fin 2 × (Fin 3 × Fin 3)) :=
+  [(0, storedCollisionPair (storedCollisionAdvice (saltSlice H 0)))]
+
+/-- The same one-entry capacity used after learning the challenge: intentionally NOT
+an instance of the chronology in ClassicalAdvice, because preprocessing receives s. -/
+def challengeAwareTable (H : Fin 6 → BitVec 1) (s : Fin 2) :
+    List (Fin 2 × (Fin 3 × Fin 3)) :=
+  [(s, storedCollisionPair (storedCollisionAdvice (saltSlice H s)))]
+
+/-- Fresh uniform salt: exactly 64 successful oracle/salt pairs out of 64*2.
+The entry-count bound is attained. Challenge-dependent preprocessing: 128/128 despite
+still storing just one entry. Thus moving salt disclosure before preprocessing invalidates
+applying the fixed-table entries/K bound to the whole two-stage experiment. -/
+theorem freshSalt_chronology_execution :
+    uniformOracleSum 1 6 (fun H => qsum 2
+      (tableWin (fun s pair => collisionWin (saltSlice H s) pair) (oneSaltTable H))) = 64 ∧
+    uniformOracleSum 1 6 (fun H => qsum 2 (fun s =>
+      tableWin (fun t pair => collisionWin (saltSlice H t) pair) (challengeAwareTable H s) s)) = 128 ∧
+    (2 ^ 1) ^ 6 * 2 = 128 := by
+  decide +kernel
+
+/-- Reuses the general proved theorem, not only an executed enumeration. -/
+theorem oneSaltTable_bound :
+    uniformOracleSum 1 6 (fun H => qsum 2
+      (tableWin (fun s pair => collisionWin (saltSlice H s) pair) (oneSaltTable H))) ≤ 64 := by
+  exact freshSalt_preprocessed_table_bound oneSaltTable
+    (fun H s pair => collisionWin (saltSlice H s) pair) 1 (fun _ => Nat.le_refl 1)
+
+/-- Actual adaptive online queries are charged, even when an address is repeated. -/
+def twiceQuery (x : Fin 3) : Program (Fin 3) (BitVec 1) (BitVec 1) 2 :=
+  .query x fun _ => .query x fun y => .done y
+
+theorem twiceQuery_execution (H : Fin 3 → BitVec 1) (x : Fin 3) :
+    (twiceQuery x).run H = (H x, 2) := by
+  unfold twiceQuery Program.run
+  rfl
+
+#verify_constructive
+  Qsag.PreprocessingGame.storedCollision_wins
+  Qsag.PreprocessingGame.storedCollision_count
+  Qsag.PreprocessingGame.fixedAdvice_collision_count
+  Qsag.PreprocessingGame.storedCollision_execution
+  Qsag.PreprocessingGame.freshSalt_chronology_execution
+  Qsag.PreprocessingGame.oneSaltTable_bound
+  Qsag.PreprocessingGame.twiceQuery_execution
+end Qsag.PreprocessingGame
 end

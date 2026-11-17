@@ -15,6 +15,7 @@ ring `R`; nothing is normalised, so no square root or division occurs.
    and the measure-and-reprogram round-by-round step with factor `(2Q + 1)²`.
 -/
 public import Qsag.Math.ConstructiveAmplitudeRing
+public import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -1255,6 +1256,26 @@ theorem qrom_measure_reprogram_rbr_step_over_point {Y : Type} (G : ResponseGate 
       exact (hPoint _ xStar).symm
 
 end QueryRegister
+
+/- Compiler equations for `Tests/ConstructiveQuantumHilbertTeeth` (legacy `GaussInt` bridge, exact
+   unitaries, teeth); no body is exposed. -/
+theorem ringSum_zero_eq {R : Type} [CommRingOps R] (f : Fin 0 → R) : ringSum 0 f = zero := by rfl
+theorem ringSum_succ_eq {R : Type} [CommRingOps R] (n : Nat) (f : Fin (n + 1) → R) :
+    ringSum (n + 1) f = add (f ⟨0, Nat.zero_lt_succ n⟩)
+      (ringSum n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)) := by rfl
+theorem finCountTrue_zero_eq (p : Fin 0 → Bool) : finCountTrue 0 p = 0 := by rfl
+theorem finCountTrue_succ_eq (n : Nat) (p : Fin (n + 1) → Bool) :
+    finCountTrue (n + 1) p =
+      if p ⟨0, Nat.zero_lt_succ n⟩ = true then
+        finCountTrue n (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) + 1
+      else finCountTrue n (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩) := by rfl
+theorem ScaledUnitaryOver.phase_scaleSq {R A : Type} [OrderedCommRing R]
+    [ConstructiveAmplitudeRing R A] {cardX cardY cardAnc : Nat} (u : A) :
+    (ScaledUnitaryOver.phase (cardX := cardX) (cardY := cardY) (cardAnc := cardAnc) u).scaleSq =
+      normSq u := by rfl
+#export_eqns natCastR hvSub hvInner normSqVec matVec IsScaledUnitary
+#export_eqns pointUpdate qvSub queryWeightOver stateNormSqOver queryMassOnOver oracleGate
+#export_eqns runStepsOver runQuantumAdvOver stepsScaleOver
 
 #verify_constructive
   Qsag.ringSum_bijection
