@@ -2437,12 +2437,12 @@ theorem verifyHemAffineWhir_zeroOracleClaim_dom01_kat :
     ((prodPool ([CommRingOps.zero, CommRingOps.one] : List QuarticGoldilocks)).filter (fun p =>
       verifyHemAffineWhir
         ({ batchOracles := [fun _ => CommRingOps.zero]
-         batchClaims := [CommRingOps.one]
-         initDomainPts := [CommRingOps.zero, CommRingOps.one]
-         initDegBound := 0
-         initMinAgree := 2
-         initKernel := [CommRingOps.one]
-         stages := [] } : HemWhirInstance QuarticGoldilocks)
+           batchClaims := [CommRingOps.one]
+           initDomainPts := [CommRingOps.zero, CommRingOps.one]
+           initDegBound := 0
+           initMinAgree := 2
+           initKernel := [CommRingOps.one]
+           stages := [] } : HemWhirInstance QuarticGoldilocks)
         [.cascade [CommRingOps.zero] [p] [[]], .finalQuery []])).length = 2 := by
   rw [prodPool_eq]
   decide
@@ -2458,8 +2458,115 @@ theorem polyWitnessValid_theta_neg_one_mixture_kat :
         (CommRingOps.mul (CommRingOps.sub CommRingOps.zero CommRingOps.one) CommRingOps.one)) [] = true := by
   decide
 
+/-- Regression for the old unincremented checker: the restricted cascade IOP
+    already required the stronger agreement threshold now enforced by the full checker. -/
+def hemCoreAgreementBoundaryInstance : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun i => if i = 1 then CommRingOps.one else CommRingOps.zero]
+    batchClaims := [CommRingOps.one]
+    initDomainPts := [CommRingOps.zero, CommRingOps.one,
+      CommRingOps.add CommRingOps.one CommRingOps.one]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [CommRingOps.zero, CommRingOps.one]
+    stages := [] }
+
+private theorem nodup_filter_eq_const_length_le_one {α : Type} [DecidableEq α] (v : α) (l : List α)
+    (h : l.Nodup) : (l.filter (fun z => decide (v = z))).length ≤ 1 := by
+  have hNd : (l.filter (fun z => decide (v = z))).Nodup := List.Pairwise.filter _ h
+  have hAll : ∀ z ∈ l.filter (fun z => decide (v = z)), v = z :=
+    fun z hz => of_decide_eq_true (List.mem_filter.mp hz).2
+  generalize l.filter (fun z => decide (v = z)) = f at hNd hAll
+  match f, hNd, hAll with
+  | [], _, _ => exact Nat.zero_le 1
+  | [_], _, _ => exact Nat.le_refl 1
+  | a :: b :: _, hNd, hAll =>
+    exfalso
+    have hab : a = b := (hAll a List.mem_cons_self).symm.trans
+      (hAll b (List.mem_cons_of_mem _ List.mem_cons_self))
+    exact (List.nodup_cons.mp hNd).1 (hab ▸ List.mem_cons_self)
+
+/-- **Equal-Degree `θ`-Exception Necessity Counterexample (`tooth_equal_degree_drop_theta_exception_unsound`)**:
+    Let `D = [0, 1, 2, 3]`, `S = [0, 1, -1]`, `d = 0, A = 3`, `f(z) = z`, `g(z) = z`, and all claims `0`.
+    Neither `(f, 0)` nor `(g, 0)` admits any degree-`≤ 0` witness at agreement `≥ A - 1 = 2`
+    (`gsDecodeList 0 2 D id = []`). Yet at `θ = -1` (`iθ = 2`), `f + θ g = 0` and **all**
+    `|prodPool S| = 9 = |S|^2` pairs `(α, β)` accept `P(X) = X` (`deg 1 ≤ d + 1`), proving that
+    the `(badTheta + ...) · |prodPool S|` term in `equal_degree_three_challenge_bound` cannot be omitted. -/
+theorem tooth_equal_degree_drop_theta_exception_unsound :
+    ∃ iθ : Fin toothDeg1Pool.length,
+      (gsDecodeList 0 2 toothDeg1Dom (fun z => z)).length = 0 ∧
+      (∀ Fp : List QuarticGoldilocks, Fp.length ≤ 1 →
+        2 ≤ (toothDeg1Dom.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = z))).length → False) ∧
+      (prodPool toothDeg1Pool).length = 9 ∧
+      ∀ ch : Fin (prodPool toothDeg1Pool).length,
+        affineMcaAccepts toothDeg1Dom toothDeg1Pool 1 4
+          ((fun z => z),
+           fun z => CommRingOps.add z (CommRingOps.mul (toothDeg1Pool.get iθ) z))
+          ch.1 [qgNat 0, qgNat 1] = true ∧
+        ringDot [qgNat 0, qgNat 1] [qgNat 1] =
+          hemFoldClaimUpdate (qgNat 0) (qgNat 0) (qgNat 0) (qgNat 0)
+            (toothDeg1Pool.get iθ)
+            ((prodPool toothDeg1Pool).get ch).1 ((prodPool toothDeg1Pool).get ch).2 := by
+  -- `gsDecodeList` is sealed in `Coding/ReedSolomon` and cannot be executed here: the empty decoding
+  -- list is derived from `mem_gsDecodeList_iff` and the direct agreement count below.
+  have hD : toothDeg1Dom.Nodup := by decide +kernel
+  have hNo : ∀ Fp : List QuarticGoldilocks, Fp.length ≤ 1 →
+      2 ≤ (toothDeg1Dom.filter (fun z => decide (RoundPoly.evalCoeffs Fp z = z))).length → False := by
+    intro Fp hLen hAg
+    have hConst : ∃ v : QuarticGoldilocks, ∀ z, RoundPoly.evalCoeffs Fp z = v := by
+      match Fp, hLen with
+      | [], _ => exact ⟨CommRingOps.zero, fun _ => rfl⟩
+      | [c], _ =>
+        exact ⟨c, fun z => by
+          simp only [RoundPoly.evalCoeffs_cons, RoundPoly.evalCoeffs_nil, LawfulCommRing.mul_zero,
+            LawfulCommRing.add_zero]⟩
+      | _ :: _ :: _, h => exact absurd h (by simp only [List.length_cons]; omega)
+    obtain ⟨v, hv⟩ := hConst
+    have hLe := nodup_filter_eq_const_length_le_one v toothDeg1Dom hD
+    simp only [hv] at hAg
+    omega
+  have hEmpty : gsDecodeList 0 2 toothDeg1Dom (fun z => z) = [] := by
+    generalize hC : gsDecodeList 0 2 toothDeg1Dom (fun z => z) = cands
+    match cands, hC with
+    | [], _ => rfl
+    | p :: _, hC =>
+      exfalso
+      have hMem : p ∈ gsDecodeList 0 2 toothDeg1Dom (fun z => z) := hC ▸ List.mem_cons_self
+      have h := (mem_gsDecodeList_iff (fun z => z) hD (by decide) p).mp hMem
+      exact hNo p.coeffs h.1 h.2
+  refine ⟨⟨2, by decide⟩, by rw [hEmpty]; rfl, hNo, by rw [prodPool_length]; decide, by
+    unfold affineMcaAccepts
+    rw [prodPool_eq]
+    decide +kernel⟩
+
+/-- Executed checker values behind `tooth_core_agreement_is_stronger_than_checker`
+    (`Protocol/Aggregation/HemRbrSoundness`), on the transcript that `assembleHemCoreTranscript` builds
+    for challenge index `2` (pair `(1, 0)`): the stale checker accepts, the incremented one rejects. -/
+theorem hemCoreAgreementBoundary_transcript_kat :
+    mutantVerifyHemAffineWhirUnincremented hemCoreAgreementBoundaryInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)]
+        [[CommRingOps.zero, CommRingOps.one]], .finalQuery [CommRingOps.zero, CommRingOps.one]] = true ∧
+    verifyHemAffineWhir hemCoreAgreementBoundaryInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)]
+        [[CommRingOps.zero, CommRingOps.one]], .finalQuery [CommRingOps.zero, CommRingOps.one]] = false := by
+  decide
+
+/-! Facts about the fixtures `qgNat` / `toothDeg1Dom` for the witnesses of
+`Protocol/Aggregation/HemOpening` (the fixture bodies are not exported). -/
+theorem toothDeg1Dom_eq : toothDeg1Dom = [qgNat 0, qgNat 1, qgNat 2, qgNat 3] := by rfl
+theorem qgNat_zero : qgNat 0 = CommRingOps.zero := by rfl
+theorem qgNat_one : qgNat 1 = CommRingOps.one := by decide
+theorem toothDeg1Dom_fixture_facts :
+    toothDeg1Dom.Nodup ∧ (CommRingOps.zero : QuarticGoldilocks) ∈ toothDeg1Dom ∧
+    ¬ 2 ≤ (toothDeg1Dom.filter
+      (fun z => decide (RoundPoly.evalCoeffs [CommRingOps.one] z = qgNat 0))).length := by
+  decide +kernel
+
 #verify_constructive
   Qsag.tooth_missing_batch_claim_erases_oracle
+  Qsag.qgNat_one
+  Qsag.toothDeg1Dom_fixture_facts
+  Qsag.tooth_equal_degree_drop_theta_exception_unsound
+  Qsag.hemCoreAgreementBoundary_transcript_kat
   Qsag.tooth_verifyHemAffineWhir_unincremented_agree_accepts_all
   Qsag.tooth_incremented_cascade_rejects_old_attack
   Qsag.verifyHemAffineWhir_zeroOracleClaim_dom01_kat
@@ -2467,5 +2574,8 @@ theorem polyWitnessValid_theta_neg_one_mixture_kat :
 end HemExecutedTeeth
 
 #export_eqns evalCascadePolySum
+-- Equations for the executed fold witnesses of `Cwyz26EqualDegreeAndMultiFold` (no body exposed).
+#export_eqns hemInterleave hemKernelFold hemBridgeFoldClaim hemFoldClaimUpdate hemCosetAgreeCount
+  polyWitnessValid
 end Qsag
 end

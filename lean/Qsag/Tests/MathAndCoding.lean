@@ -1501,6 +1501,25 @@ def g (n : Nat) : Goldilocks := Goldilocks.ofNat n
 def dom4 : List Goldilocks := [g 0, g 1, g 2, g 3]
 def pool2 : List Goldilocks := [g 1, g 2]
 
+/-! The evaluated facts of the two persistent-pair witnesses, each stated once. The witnesses cite them, so
+    the inhabitedness audit re-checks an application of a proved lemma, not the evaluation inside it. -/
+private theorem poleWords_dom4_far : ¬ HasCorrelatedAgreement 1 (4 - 1) poleWords.1 poleWords.2 dom4 :=
+  poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide)
+
+private theorem diag11_mem_pool2 : ∀ p ∈ [(g 1, g 1)], p ∈ prodPool pool2 := by
+  poly_eval [g, dom4, pool2]
+
+private theorem diag11_natDeg : (C (g 1) : UPoly Goldilocks).natDeg ≤ 1 := by decide +kernel
+
+private theorem diag11_agree :
+    4 ≤ (dom4.filter (foldAgreePt poleWords (g 1, g 1).1 (g 1, g 1).2 (C (g 1)))).length := by
+  poly_eval [g, dom4, pool2]
+
+private theorem diag11_persistent :
+    IsPersistent poleWords dom4 1 3 (g 1, g 1).1 (g 1, g 1).2 (C (g 1)) :=
+  ⟨one, ofList [one, one], by decide +kernel, by decide +kernel, by decide +kernel,
+    by poly_eval [g, dom4, pool2]⟩
+
 /-- Witness that `persistent_pairs_card_le` is inhabited on `Goldilocks` (`|D| = 4`, `d = 1`,
     `B = 3`, `A = 4`, where `4 * 2 = 8 < 9 = 3^2`, using `poleWords` which has no correlated
     agreement `≥ 3` while diagonal challenges `(β, β)` have rational explanation `H = 1, L = X + 1`). -/
@@ -1514,14 +1533,11 @@ theorem inhabited_persistent_pairs_card_le :
         A ≤ (D.filter (foldAgreePt x p.1 p.2 P)).length ∧
         IsPersistent x D d B p.1 p.2 P) := by
   refine ⟨poleWords, dom4, pool2, 1, 4, 3, [(g 1, g 1)],
-    by decide, by decide, by decide,
-    poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide),
-    by decide, by poly_eval [g, dom4, pool2], by decide, ?_⟩
+    by decide, by decide, by decide, poleWords_dom4_far,
+    by decide, diag11_mem_pool2, by decide, ?_⟩
   intro p hp
   rw [List.mem_singleton.mp hp]
-  refine ⟨C (g 1), by decide +kernel, by poly_eval [g, dom4, pool2],
-    one, ofList [one, one], by decide +kernel, by decide +kernel, by decide +kernel,
-    by poly_eval [g, dom4, pool2]⟩
+  exact ⟨C (g 1), diag11_natDeg, diag11_agree, diag11_persistent⟩
 
 /-- `#tooth`: dropping `¬ HasCorrelatedAgreement d (A - 1) f g D` invalidates Lemma 4.5:
     for `f = 0, g = 0` on `D = [0, 1, 2, 3]`, `S = [0, 1, 2]` (`|S| = 3`), `d = 1, B = 3, A = 4`,
@@ -1575,15 +1591,19 @@ theorem inhabited_exceptional_persistent_pairs :
         IsPersistent x D d B p.1 p.2 P ∧
         ¬ HasPolynomialExplanation x D d (A - 1) p.1 p.2 P) := by
   refine ⟨poleWords, dom4, pool2, 1, 4, 3, [(g 1, g 1)],
-    by decide, by decide, by decide, by decide, by poly_eval [g, dom4, pool2], by decide, ?_⟩
+    by decide, by decide, by decide, by decide, diag11_mem_pool2, by decide, ?_⟩
   intro p hp
   rw [List.mem_singleton.mp hp]
-  refine ⟨C (g 1), by decide +kernel, by poly_eval [g, dom4, pool2], ?_, ?_⟩
-  · exact ⟨one, ofList [one, one], by decide +kernel, by decide +kernel,
-      by decide +kernel, by poly_eval [g, dom4, pool2]⟩
-  · rintro ⟨Fp, Gp, hF, hG, hAgree, _⟩
-    exact poleWords_far dom4 1 4 (by decide) (by decide +kernel) (by decide) (by decide)
-      ⟨Fp, Gp, hF, hG, hAgree⟩
+  refine ⟨C (g 1), diag11_natDeg, diag11_agree, diag11_persistent, ?_⟩
+  rintro ⟨Fp, Gp, hF, hG, hAgree, _⟩
+  exact poleWords_dom4_far ⟨Fp, Gp, hF, hG, hAgree⟩
+
+/-- Pool membership decided through `mem_prodPool_iff` (the body of `prodPool` is sealed here). The
+    inhabitedness audits below bind `S := D` by first match and decide `∀ p ∈ L, p ∈ prodPool D`, as they
+    did when the body was visible. -/
+local instance (priority := high) prodPoolMemDecidable {α : Type} [DecidableEq α] (S : List α)
+    (p : α × α) : Decidable (p ∈ prodPool S) :=
+  decidable_of_iff (p.1 ∈ S ∧ p.2 ∈ S) mem_prodPool_iff.symm
 
 #verify_constructive inhabited_exceptional_persistent_pairs
 #verify_inhabited exceptional_persistent_pairs_card_le inhabited_exceptional_persistent_pairs
@@ -2100,12 +2120,49 @@ def pB : Poly2 Goldilocks := ofList [ofList [neg (g 1)], one]
 /-- `Z - Y`, which shares the whole diagonal with itself. -/
 def pDiag : Poly2 Goldilocks := ofList [ofList [g 0, neg (g 1)], one]
 
+/-! The eliminant of `pA`, `pB` executed in stages, each over the exported equations of its owner: the
+    degree budget (`Coding/Resultant`), the constraint matrix of the four generators `A, B, Y·B, Z·B`
+    (`Coding/Resultant`), the Gaussian solve of that matrix (`Math/CoeffPoly`). -/
+private theorem parabolaLine_degrees :
+    pA.natDeg = 2 ∧ pB.natDeg = 1 ∧ tdeg pA = 2 ∧ tdeg pB = 1 ∧ elimDeg pA pB = 2 := by
+  poly_eval [g, pA, pB]
+
+private theorem parabolaLine_gens_length : (elimGens pA pB 2 2 1 2 1).length = 4 := by
+  poly_eval [g, pA, pB]
+
+private theorem parabolaLine_rows :
+    (elimCons 2 2).map (fun p => (elimGens pA pB 2 2 1 2 1).map (fun q => coeff2 q p.1 p.2)) =
+      [[g 0, g 1, g 0, neg (g 1)], [g 0, g 0, g 1, g 0], [g 1, g 0, g 0, g 1]] := by
+  poly_eval [g, pA, pB, (by decide : List.range 2 = [0, 1]), (by decide : List.range 1 = [0])]
+
+private theorem parabolaLine_inv_one : (LawfulField.inv (g 1) : Goldilocks) = g 1 := by decide +kernel
+
+set_option maxRecDepth 100000 in
+private theorem parabolaLine_solve :
+    solveHomogeneous 4 [[g 0, g 1, g 0, neg (g 1)], [g 0, g 0, g 1, g 0], [g 1, g 0, g 0, g 1]] =
+      [neg (g 1), g 1, g 0, g 1] := by
+  poly_eval [parabolaLine_inv_one]
+
 /-- The computed eliminant of `Z² - Y` and `Z - 1` is a nonzero linear polynomial vanishing
     at `Y = 1`: the Gaussian solve, the Bézout identity and the degree budget all execute. -/
 theorem resZ_parabola_line :
     resZ pA pB ≠ zero ∧ (resZ pA pB).natDeg = 1 ∧ (resZ pA pB).eval (g 1) = zero ∧
       add (mul (eliminant pA pB).1 pA) (mul (eliminant pA pB).2.1 pB) = C (resZ pA pB) := by
-  poly_eval [g, pA, pB, pDiag]
+  have hvec : elimVec pA pB 2 2 1 2 1 = [neg (g 1), g 1, g 0, g 1] := by
+    rw [Qsag.Poly2.elimVec.public_eqs, Qsag.Poly2.nullVec.public_eqs, parabolaLine_gens_length,
+      parabolaLine_rows, parabolaLine_solve]
+  have hE : eliminant pA pB =
+      (elimU pA pB 2 2 1 2 1, elimV pA pB 2 2 1 2 1,
+        coeffAt (add (mul (elimU pA pB 2 2 1 2 1) pA) (mul (elimV pA pB 2 2 1 2 1) pB)).coeffs 0) := by
+    rw [Qsag.Poly2.eliminant.public_eqs, parabolaLine_degrees.1, parabolaLine_degrees.2.1,
+      parabolaLine_degrees.2.2.1, parabolaLine_degrees.2.2.2.1, parabolaLine_degrees.2.2.2.2]
+  have hU : elimU pA pB 2 2 1 2 1 = C (C (neg (g 1))) := by
+    rw [Qsag.Poly2.elimU.public_eqs, hvec]; poly_eval [g, pA, pB]
+  have hV : elimV pA pB 2 2 1 2 1 = ofList [one, one] := by
+    rw [Qsag.Poly2.elimV.public_eqs, hvec]
+    poly_eval [g, pA, pB, (by decide : List.range 2 = [0, 1]), (by decide : List.range 1 = [0])]
+  rw [Qsag.Poly2.resZ.public_eqs, hE, hU, hV]
+  poly_eval [g, pA, pB]
 
 /-- The hypotheses of `common_roots_card_le_mul_deg` are jointly satisfiable:
     `1·A - (Z + 1)·B = 1 - Y` certifies coprimality and `(1, 1)` is a common zero. -/
@@ -2499,6 +2556,98 @@ theorem tooth_excluded_needs_content :
   ⟨[], 0, [(g 0, g 0), (g 1, g 1)], (fun _ h => by cases h), (by decide), (by decide),
     (fun _ _ => by rw [Qsag.Poly3.Excluded.public_eqs]; exact Or.inl (UPoly.eval₂_zero _ _)), (by decide)⟩
 
+local instance : NoZeroDivisors (RatFunc Goldilocks) := LawfulField.toNoZeroDivisors (RatFunc Goldilocks)
+
+private theorem rPar_facts :
+    rPar.natDeg = 2 ∧ (hasseZ 1 rPar).natDeg = 1 ∧ rPar.degYZ ≤ 2 ∧ (hasseZ 1 rPar).degYZ ≤ 1 ∧
+      evalAffineLine rPar (g 1) (g 0) zero ≠ zero ∧
+      evalAffineLine (hasseZ 1 rPar) (g 1) (g 0) zero = zero ∧
+      coeffAt (hasseZ 1 rPar).coeffs 0 = zero ∧ (one : UPoly (UPoly Goldilocks)).eval (line (g 1) (g 0)) ≠ zero := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> poly_eval [g, rPar]
+
+private theorem elimIdx_221 : Poly2.elimIdx 2 2 1 = [(0, 0)] := by
+  poly_eval [(by decide : List.range 1 = [0])]
+local notation "fracOf" => (Frac.of (D := UPoly Goldilocks))
+local notation "yPt" => (RingHom.toFun fracOf (line (g 1) (g 0)))
+local notation "evPt" => (UPoly.eval₂Hom (UPoly.evalHom yPt) (zero : RatFunc Goldilocks))
+
+/-- The separant eliminant of `Z² - Y` does not vanish on the line `Y = 1`. The eliminant lives over
+    `F(X)`; instead of running the Gaussian solve there, the Bézout identity is specialised at
+    `(Y, Z) = (1, 0)` and at `Z = 0`, with the cofactor of `R` confined to the span of `mono 0 0`. -/
+private theorem sepElim_rPar_eval_ne : (sepElim rPar).eval yPt ≠ zero := by
+  intro h0
+  obtain ⟨hm, hn, hdA, hdB, hcA, hcB, hB0, -⟩ := rPar_facts
+  have hSq := sqFactor_rPar
+  have hA1 := hSq.natDeg_liftK
+  have hne := sepElim_ne_zero hSq
+  rw [Qsag.Poly3.sepElim.public_eqs] at h0 hne
+  have hL : ∀ Q : Poly3 Goldilocks,
+      liftK.toFun Q = (UPoly.mapHom (UPoly.mapHom fracOf)).toFun Q := fun Q => by
+    rw [Qsag.Poly3.liftK.public_eqs]
+  have hmK : (liftK.toFun rPar).natDeg = 2 := by
+    rw [hL, UPoly.natDeg_mapHom _ map_of_inj rPar, hm]
+  have hnK : (liftK.toFun (hasseZ 1 rPar)).natDeg = 1 := by
+    rw [hL, UPoly.natDeg_mapHom _ map_of_inj (hasseZ 1 rPar), hn]
+  have ha : Poly2.tdeg (liftK.toFun rPar) = 2 := by
+    have h1 : Poly2.tdeg (liftK.toFun rPar) ≤ rPar.degYZ := by
+      rw [hL]; exact UPoly.wdeg_mapHom_mapHom_le _ rPar
+    have h2 := Poly2.natDeg_le_tdeg (liftK.toFun rPar)
+    omega
+  have hb : Poly2.tdeg (liftK.toFun (hasseZ 1 rPar)) = 1 := by
+    have h1 : Poly2.tdeg (liftK.toFun (hasseZ 1 rPar)) ≤ (hasseZ 1 rPar).degYZ := by
+      rw [hL]; exact UPoly.wdeg_mapHom_mapHom_le _ (hasseZ 1 rPar)
+    have h2 := Poly2.natDeg_le_tdeg (liftK.toFun (hasseZ 1 rPar))
+    omega
+  have hT : Poly2.elimDeg (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar)) = 2 := by
+    rw [Qsag.Poly2.elimDeg.public_eqs, hmK, hnK, ha, hb]
+  have hbez := Poly2.eliminant_bezout (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar)) hA1
+  have hU : (Poly2.eliminant (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar))).1 =
+      Poly2.elimU (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar)) 2 2 1 2 1 := by
+    rw [Qsag.Poly2.eliminant.public_eqs, hT, hmK, hnK, ha, hb]
+  have hEvA : (evPt).toFun (liftK.toFun rPar) = (fracOf).toFun (evalAffineLine rPar (g 1) (g 0) zero) := by
+    rw [UPoly.eval₂Hom_apply, hL, evalAffineLine_eq_eval₂]
+    have h := UPoly.eval₂_mapHom_mapHom fracOf rPar (line (g 1) (g 0)) zero
+    rw [RingHom.map_zero] at h
+    exact h
+  have hEvB : (evPt).toFun (liftK.toFun (hasseZ 1 rPar)) = zero := by
+    rw [UPoly.eval₂Hom_apply, hL]
+    have h := UPoly.eval₂_mapHom_mapHom fracOf (hasseZ 1 rPar) (line (g 1) (g 0)) zero
+    rw [RingHom.map_zero, ← evalAffineLine_eq_eval₂, hcB, RingHom.map_zero] at h
+    exact h
+  have hEvC : ∀ r : UPoly (RatFunc Goldilocks), (evPt).toFun (UPoly.C r) = r.eval yPt := fun r => by
+    rw [UPoly.eval₂Hom_apply, UPoly.eval₂_C, UPoly.evalHom_apply]
+  have hEvCC : ∀ x : RatFunc Goldilocks, (evPt).toFun (UPoly.C (UPoly.C x)) = x := fun x => by
+    rw [hEvC, UPoly.eval_C]
+  have hEvMono : (evPt).toFun (Poly2.mono 0 0) = one := by
+    rw [UPoly.eval₂Hom_apply, Qsag.Poly2.mono.public_eqs]
+    simp [Qsag.monomial.public_eqs, UPoly.eval₂_ofList, UPoly.evalHom_apply,
+      LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    exact UPoly.eval_C (one : RatFunc Goldilocks) _
+  have hUz : (Poly2.eliminant (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar))).1 = zero := by
+    have hΨ := congrArg (evPt).toFun hbez
+    rw [RingHom.map_add, RingHom.map_mul, RingHom.map_mul, hEvA, hEvB, hEvC, h0,
+      LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hΨ
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hΨ with hu | hc
+    · rw [hU, Qsag.Poly2.elimU.public_eqs, elimIdx_221] at hu ⊢
+      simp only [List.length_singleton, List.map_cons, List.map_nil] at hu ⊢
+      generalize List.take 1 (Poly2.elimVec (liftK.toFun rPar) (liftK.toFun (hasseZ 1 rPar)) 2 2 1 2 1) = xs
+        at hu ⊢
+      cases xs with
+      | nil => simp only [Qsag.Poly2.lincomb.public_eqs]
+      | cons x xs' =>
+        simp only [Qsag.Poly2.lincomb.public_eqs, Poly2.lincomb_nil] at hu ⊢
+        rw [RingHom.map_add, RingHom.map_mul, RingHom.map_zero, LawfulCommRing.add_zero, hEvCC,
+          hEvMono, LawfulCommRing.mul_one] at hu
+        rw [hu, UPoly.C_zero_eq, UPoly.C_zero_eq, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    · exact absurd (Frac.of_injective (hc.trans (fracOf).map_zero.symm)) hcA
+  rw [hUz, LawfulCommRing.zero_mul, LawfulCommRing.zero_add] at hbez
+  have h3 := congrArg (UPoly.evalHom (zero : UPoly (RatFunc Goldilocks))).toFun hbez
+  rw [RingHom.map_mul] at h3
+  simp only [UPoly.evalHom_apply] at h3
+  rw [UPoly.eval_C, UPoly.eval_zero_eq (liftK.toFun (hasseZ 1 rPar)), hL (hasseZ 1 rPar), UPoly.coeffAt_mapHom, hB0,
+    RingHom.map_zero, LawfulCommRing.mul_zero] at h3
+  rw [hL (hasseZ 1 rPar)] at hne
+  exact hne h3.symm
 /-- A root on a non-excluded line: on `Y = 1` the factor `Z² - 1` has the simple root
     `P = 1`. The separant eliminant is computed over `F(X)` by the kernel. -/
 theorem inhabited_simple_root :
@@ -2508,7 +2657,12 @@ theorem inhabited_simple_root :
       evalAffineLine (factored Cc Rs e) α β P = zero :=
   ⟨one, [rPar], fun _ => 1, g 1, g 0, ofList [g 1],
     (fun R hR => by rw [List.mem_singleton.mp hR]; exact sqFactor_rPar),
-    (by rw [Qsag.Poly3.Excluded.public_eqs]; poly_eval [g, rPar, cLine]), (by poly_eval [g, rPar, cLine])⟩
+    (by
+      rw [Qsag.Poly3.Excluded.public_eqs]
+      rintro (h | ⟨R, hR, h⟩)
+      · exact rPar_facts.2.2.2.2.2.2.2 h
+      · rw [List.mem_singleton.mp hR] at h; exact sepElim_rPar_eval_ne h),
+    (by poly_eval [g, rPar, cLine, CRing.npow])⟩
 
 #verify_constructive excluded_pairs_card_le simple_root_of_not_excluded sepElim_ne_zero
 #verify_constructive natDeg_sepElim_le sqFactor_rPar Frac.of_injective UPoly.d5_split
