@@ -901,4 +901,24 @@ end Closed
 #verify_constructive Qsag.ClosedFs.exec_fs_qrom_closed_soundness
 
 end Qsag.ClosedFs
+
+/-! ### Executed controls for `findCollision` (audited and paired in `Tests/ClosedReductionTeeth`) -/
+namespace Qsag.ClosedReductionTeeth
+open Qsag Qsag.ClosedFs
+
+/-- Node hash keeping the left child, leaf hash keeping the parity of the value. -/
+def parityLeafSetup : MerkleSetup Nat Nat := ⟨fun _ _ a _ => a, fun _ _ v => v % 2⟩
+
+theorem tooth_lying_opening_yields_collision :
+    ¬ (findCollision parityLeafSetup (fun _ => 0) (fun _ _ => 7) [(0, 0)] [(5, [])] = none) := by
+  decide +kernel
+
+theorem inhabited_honest_opening_no_collision :
+    findCollision parityLeafSetup (fun _ => 0) (fun _ _ => 7) [(0, 0)] [(7, [])] = none := by
+  decide +kernel
+
+#verify_constructive Qsag.ClosedReductionTeeth.tooth_lying_opening_yields_collision
+#verify_constructive Qsag.ClosedReductionTeeth.inhabited_honest_opening_no_collision
+
+end Qsag.ClosedReductionTeeth
 end

@@ -78,8 +78,10 @@ theorem transparent_boundary {n : Nat} (geom : AggSigGeometry) (custody : Fin n 
 def skOf (v : Fin 2) : Digest4 :=
   if v.val = 0 then auditSkSeed
   else ⟨Goldilocks.ofNat 12, Goldilocks.ofNat 23, Goldilocks.ofNat 34, Goldilocks.ofNat 45⟩
+
 def lane (a b c d : Nat) : Digest4 :=
   ⟨Goldilocks.ofNat a, Goldilocks.ofNat b, Goldilocks.ofNat c, Goldilocks.ofNat d⟩
+
 /-- Public keys and signatures are literals so that each later check runs only the verifier;
 `fixtures_are_modelled_outputs` ties them to the modelled key generation and signer. -/
 def pkOf (v : Fin 2) : AggValidatorPk :=
@@ -88,6 +90,7 @@ def pkOf (v : Fin 2) : AggValidatorPk :=
       lane 4411130677596272051 12386187803866016865 4846206855630815541 13194810747827022671
     else
       lane 17576564533966561130 16051823357764822570 14727583026633534692 1732328166828656438⟩
+
 def sigOf (v : Fin 2) : AggNativeSignature :=
   if v.val = 0 then
     ⟨.xmssPoseidon2, auditRRand, 0, [], [⟨37,
@@ -101,6 +104,7 @@ def sigOf (v : Fin 2) : AggNativeSignature :=
        lane 6519691662884691569 6995657412139860735 8574290930621241436 12609139020484668794],
       [lane 13388180661509288011 5130805258596798721 8406673262598715289
         15360960474733464499]⟩]⟩
+
 /-- The literals are the outputs of `deriveAggPublicKey` and of the honest signer
 `signAggNative` on `auditMsg` ("QSAG"), validator `v` at leaf `v`, with the target-sum
 counters `37` and `45` found by search. -/
@@ -108,14 +112,18 @@ theorem fixtures_are_modelled_outputs : ∀ v : Fin 2,
     pkOf v = deriveAggPublicKey compactAuditGeom (skOf v) auditPkSeed ∧
     sigOf v = signAggNative compactAuditGeom (skOf v) (pkOf v) auditMsg auditRRand v.val
       (if v.val = 0 then 37 else 45) [] := by decide +kernel
+
 def otherMsg : List UInt8 := [0x51, 0x53, 0x41, 0x48]
 
 theorem native_accepts : ∀ v : Fin 2,
     verifyAggNativeSig compactAuditGeom (pkOf v) auditMsg (sigOf v) = true := by decide +kernel
+
 theorem native_rejects_other_message : ∀ v : Fin 2,
     verifyAggNativeSig compactAuditGeom (pkOf v) otherMsg (sigOf v) = false := by decide +kernel
+
 theorem native_rejects_other_key :
     verifyAggNativeSig compactAuditGeom (pkOf 1) auditMsg (sigOf 0) = false := by decide +kernel
+
 theorem native_rejects_tampered_randomizer :
     verifyAggNativeSig compactAuditGeom (pkOf 0) auditMsg
       { sigOf 0 with rRand := auditPkSeed } = false := by decide +kernel
@@ -138,13 +146,38 @@ def goodTree : MergeTree 2 :=
 theorem good_full_accepts : goodVerify fullShard = true := by decide +kernel
 theorem good_tree_accepts : checkTree goodHeader goodVerify 16 goodTree = true := by
   decide +kernel
-theorem good_bits : ∀ v : Fin 2, goodTree.bitmap.getLsbD v.val = true := by decide +kernel
+/-- `SigningMode.message` on the shared mode, through its exported equation. -/
+theorem shared_message (m : List UInt8) (v : Nat) : (SigningMode.shared m).message v = m := by
+  simp only [SigningMode.message.public_eqs]
+theorem fullShard_bits : ∀ v : Fin 2, fullShard.bitmap.getLsbD v.val = true := by decide +kernel
+theorem good_bits : ∀ v : Fin 2, goodTree.bitmap.getLsbD v.val = true := by
+  simp only [goodTree, MergeTree.bitmap.public_eqs]
+  decide +kernel
+/-- The custody shape of `custodyOf`, over an arbitrary key and message: `quorumParticipated`
+is run through its exported equation, the key and the message are not inspected. -/
+theorem logged_custody_participates (pk : AggValidatorPk) (m : List UInt8) :
+    quorumParticipated ⟨⟨pk, 2, 3, [0], [m], []⟩, 7, [1],
+      fun p ep msg => decide (p = 1 ∧ ep = 7 ∧ msg = m)⟩ m = true := by
+  rw [quorumParticipated.public_eqs]
+  have hv : validThresholdApproval (⟨pk, 2, 3, [0], [m], []⟩ : IdealTsigState AggValidatorPk (List UInt8))
+      [1] = true := rfl
+  have hl : ([1] : List Nat).all (fun p => decide (p = 1 ∧ 7 = 7 ∧ m = m)) = true := by
+    rw [List.all_cons, List.all_nil, Bool.and_true]
+    exact decide_eq_true ⟨rfl, rfl, rfl⟩
+  exact Bool.and_eq_true_iff.mpr ⟨hv, hl⟩
+/-- The same custody with an empty approval log does not participate. -/
+theorem unlogged_custody_not_participated (pk : AggValidatorPk) (m : List UInt8) :
+    quorumParticipated ⟨⟨pk, 2, 3, [0], [m], []⟩, 7, [1], fun _ _ _ => false⟩ m = false := by
+  rw [quorumParticipated.public_eqs]
+  exact Bool.and_false _
 theorem good_participation : ∀ v : Fin 2,
-    quorumParticipated (custodyOf v) auditMsg = true := by decide +kernel
+    quorumParticipated (custodyOf v) auditMsg = true :=
+  fun v => logged_custody_participates (pkOf v) auditMsg
 
 theorem good_no_forgery (v : Fin 2) :
     ¬ QuorumForgery compactAuditGeom (custodyOf v) auditMsg := by
-  rintro ⟨_, _, hq⟩
+  intro hf
+  obtain ⟨_, _, hq⟩ := (quorumForgery_iff _ _ _).mp hf
   rw [good_participation v] at hq
   cases hq
 
@@ -155,11 +188,13 @@ theorem good_regime_resolves (v : Fin 2) :
     ¬ QuorumForgery compactAuditGeom (custodyOf v) (goodHeader.mode.message v.val) ∧
     ¬ ∃ s ∈ goodTree.leaves, False := by
   have hbad : ¬ ∃ s ∈ goodTree.leaves, False := fun ⟨_, _, h⟩ => h
-  have hnf : ¬ QuorumForgery compactAuditGeom (custodyOf v)
-      (goodHeader.mode.message v.val) := good_no_forgery v
-  rcases merged_quorum_reduction compactAuditGeom custodyOf goodVerify (fun _ => False)
+  have hm : goodHeader.mode.message v.val = auditMsg := shared_message auditMsg v.val
+  have hred := merged_quorum_reduction compactAuditGeom custodyOf goodVerify (fun _ => False)
       (transparent_boundary compactAuditGeom custodyOf sigOf _) goodHeader goodTree
-      good_tree_accepts v (good_bits v) with hb | hf | hq
+      good_tree_accepts v (good_bits v)
+  rw [hm] at hred ⊢
+  have hnf : ¬ QuorumForgery compactAuditGeom (custodyOf v) auditMsg := good_no_forgery v
+  rcases hred with hb | hf | hq
   · exact absurd hb hbad
   · exact absurd hf hnf
   · exact ⟨hq, hnf, hbad⟩
@@ -170,7 +205,7 @@ theorem good_regime_instance : ∃ geom custody verify bad,
     ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true :=
   ⟨compactAuditGeom, custodyOf, goodVerify, fun _ => False,
     transparent_boundary compactAuditGeom custodyOf sigOf _, fullShard, 0,
-    good_full_accepts, good_bits 0, goodHeader, goodTree, good_tree_accepts, good_bits 0⟩
+    good_full_accepts, fullShard_bits 0, goodHeader, goodTree, good_tree_accepts, good_bits 0⟩
 
 /-- The bridge premises hold with `bad := fun _ => False` on the row-committed AIR: the
 verifier is restricted to the shared-message mode, the statement is the two-key committee,
@@ -179,17 +214,41 @@ verifier holds the signatures; a succinct verifier needs WHIR knowledge soundnes
 def sharedVerify (s : Shard 2) : Bool :=
   goodVerify s && decide (s.header.mode = .shared auditMsg)
 def committeeStmt : AggArithPublicStmt := ⟨compactAuditGeom, auditMsg, [pkOf 0, pkOf 1], 1⟩
+/-- Well-formedness of the two-key committee statement, from the owner's geometry fact, the
+exported geometry fields and the inequality of the two literal keys. -/
+theorem committeeStmt_wellFormed : committeeStmt.wellFormed = true := by
+  have hg : compactAuditGeom.wellFormed = true := deployedAggGeometries_wellFormed.2.2
+  have hp : compactAuditGeom.profile = AggSigProfile.xmssPoseidon2 := by
+    rw [compactAuditGeom.public_eqs]
+  have hne : pkOf 0 ≠ pkOf 1 := fun h =>
+    absurd (congrArg (fun p : AggValidatorPk => p.pkRoot.x0.val) h) (by decide +kernel)
+  have hnd : [pkOf 0, pkOf 1].Nodup :=
+    List.Pairwise.cons (fun b hb => by
+        cases hb with
+        | head => exact hne
+        | tail _ h => nomatch h)
+      (List.Pairwise.cons (fun _ h => nomatch h) List.Pairwise.nil)
+  show (compactAuditGeom.wellFormed && !([pkOf 0, pkOf 1] : List AggValidatorPk).isEmpty &&
+      decide ([pkOf 0, pkOf 1].Nodup) &&
+      decide (([pkOf 0, pkOf 1] : List AggValidatorPk).length ≤ 2 ^ 1) &&
+      ((AggSigProfile.xmssPoseidon2 == compactAuditGeom.profile) &&
+        ((AggSigProfile.xmssPoseidon2 == compactAuditGeom.profile) && true))) = true
+  rw [hg, decide_eq_true hnd, hp, beq_self_eq_true]
+  rfl
 theorem committee_trace_satisfied :
     traceSatisfiesAllConstraints committeeStmt
       (buildHonestAggExecutionTrace committeeStmt [sigOf 0, sigOf 1]) = true :=
-  buildHonestAggExecutionTrace_satisfies_constraints committeeStmt _ (by decide +kernel) rfl
+  buildHonestAggExecutionTrace_satisfies_constraints committeeStmt _ committeeStmt_wellFormed rfl
     (fun k hkP hkS => match k, hkP, hkS with
       | 0, _, _ => native_accepts 0
       | 1, _, _ => native_accepts 1
       | k + 2, h, _ => absurd (Nat.le_of_succ_le_succ (Nat.le_of_succ_le_succ h))
           (Nat.not_succ_le_zero k))
 theorem committee_slots : ∀ v : Fin 2,
-    committeeStmt.committeePks[v.val]? = some (custodyOf v).state.pk := by decide +kernel
+    committeeStmt.committeePks[v.val]? = some (custodyOf v).state.pk :=
+  fun v => match v with
+    | ⟨0, _⟩ => rfl
+    | ⟨1, _⟩ => rfl
 theorem committee_trace_boundary :
     ExtractionBoundary compactAuditGeom custodyOf sharedVerify (fun _ => False) :=
   boundary_of_committee_trace compactAuditGeom custodyOf sharedVerify _
@@ -198,11 +257,16 @@ theorem committee_trace_boundary :
     (fun s h => ⟨rfl, fun v _ => ⟨committee_slots v, by
       have h' : (goodVerify s && decide (s.header.mode = .shared auditMsg)) = true := h
       rw [of_decide_eq_true (Bool.and_eq_true_iff.mp h').2]
-      rfl⟩⟩)
+      exact (shared_message auditMsg v.val).symm⟩⟩)
 theorem shared_verify_accepts : sharedVerify fullShard = true := by decide +kernel
 theorem shared_verify_rejects_per_signer_mode :
     sharedVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
-  decide +kernel
+  have hne : ¬ ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header.mode =
+      SigningMode.shared auditMsg) := fun h => SigningMode.noConfusion h
+  show (goodVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) &&
+    decide ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header.mode =
+      SigningMode.shared auditMsg)) = false
+  rw [decide_eq_false hne, Bool.and_false]
 
 /-- Concrete 1-level 8-bit `MerkleAddressLayout` (`65536` addresses = `u || v`) exercising both
 `verifyOpeningBatch` path verification and `verifyHemAffineWhir` transcript verification without
@@ -283,7 +347,12 @@ theorem hemOpeningShardVerify_tree_accepts :
 
 theorem hemOpeningShardVerify_rejects_per_signer :
     hemOpeningShardVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
-  decide +kernel
+  have hne : ¬ ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header = goodHeader) :=
+    fun h => SigningMode.noConfusion (congrArg Header.mode h)
+  show (verifyHemOpeningBatch compactMerkleLayout [compactHemSlot] compactHemInst compactHemDecode
+      compactHemOracle ⟨0, by decide⟩ &&
+    decide ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header = goodHeader)) = false
+  rw [decide_eq_false hne, Bool.and_false]
 
 theorem hemOpeningShardVerify_boundary :
     ExtractionBoundary compactAuditGeom custodyOf hemOpeningShardVerify (fun _ => False) :=
@@ -296,7 +365,7 @@ theorem hemOpeningShardVerify_boundary :
     (fun _ _ _ => .inr compactHemInst_valid)
     (fun _ _ _ => ⟨_, committee_trace_satisfied⟩)
     (fun s hMode => ⟨rfl, fun v _ => ⟨committee_slots v, by
-      rw [of_decide_eq_true hMode]; rfl⟩⟩)
+      rw [of_decide_eq_true hMode]; exact (shared_message auditMsg v.val).symm⟩⟩)
 
 theorem hem_opening_regime_instance : ∃ geom custody verify bad,
     ExtractionBoundary (n := 2) geom custody verify bad ∧
@@ -304,7 +373,7 @@ theorem hem_opening_regime_instance : ∃ geom custody verify bad,
     ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true :=
   ⟨compactAuditGeom, custodyOf, hemOpeningShardVerify, fun _ => False,
     hemOpeningShardVerify_boundary, fullShard, 0,
-    hemOpeningShardVerify_accepts, good_bits 0,
+    hemOpeningShardVerify_accepts, fullShard_bits 0,
     goodHeader, goodTree, hemOpeningShardVerify_tree_accepts, good_bits 0⟩
 
 /-- Validator `1` is assigned a message it did not sign: the leaf is rejected. -/
@@ -325,7 +394,9 @@ theorem rejects_foreign_committee_leaf :
     checkTree goodHeader goodVerify 16
       (.branch (.leaf (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2))
         (.leaf (shardFor goodHeader 2#2)) 3#2) = false := by
-  decide +kernel
+  have hne : (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2).header ≠ goodHeader :=
+    fun h => absurd (congrArg Header.committeeRoot h) (by decide)
+  simp only [checkTree, decide_eq_false hne, Bool.false_and, Bool.and_false]
 theorem foreign_committee_leaf_not_accepted :
     ¬ (checkTree goodHeader goodVerify 16
       (.branch (.leaf (shardFor { goodHeader with committeeRoot := [0xC1] } 1#2))
@@ -342,11 +413,12 @@ theorem other_key_not_accepted :
 /-- Same keys and signatures, but no custodian logged an approval. -/
 def rogueCustody (v : Fin 2) : Custody := { custodyOf v with approvalLog := fun _ _ _ => false }
 theorem rogue_not_participated : ∀ v : Fin 2,
-    quorumParticipated (rogueCustody v) auditMsg = false := by decide +kernel
+    quorumParticipated (rogueCustody v) auditMsg = false :=
+  fun v => unlogged_custody_not_participated (pkOf v) auditMsg
 /-- The forgery event is witnessed by a real accepted signature. -/
 theorem unapproved_signature_is_forgery (v : Fin 2) :
     QuorumForgery compactAuditGeom (rogueCustody v) auditMsg :=
-  ⟨sigOf v, native_accepts v, rogue_not_participated v⟩
+  (quorumForgery_iff _ _ _).mpr ⟨sigOf v, native_accepts v, rogue_not_participated v⟩
 
 def mixedCustody (v : Fin 2) : Custody := if v.val = 0 then custodyOf v else rogueCustody v
 def mixedVerify : Shard 2 → Bool :=
@@ -354,9 +426,16 @@ def mixedVerify : Shard 2 → Bool :=
 theorem mixed_accepts : mixedVerify fullShard = true := by decide +kernel
 theorem mixed_unapproved_is_one : ∀ v : Fin 2,
     quorumParticipated (mixedCustody v) auditMsg = false → decide (v.val = 1) = true := by
-  decide +kernel
-theorem mixed_one_unapproved : quorumParticipated (mixedCustody 1) auditMsg = false := by
-  decide +kernel
+  intro v
+  match v with
+  | ⟨0, _⟩ =>
+    intro h
+    have h' : quorumParticipated (custodyOf 0) auditMsg = false := h
+    rw [good_participation 0] at h'
+    cases h'
+  | ⟨1, _⟩ => intro _; rfl
+theorem mixed_one_unapproved : quorumParticipated (mixedCustody 1) auditMsg = false :=
+  unlogged_custody_not_participated (pkOf 1) auditMsg
 
 /-- `quorum_advantage_from_extraction` with the outer event identically false: the whole
 attack mass is carried by the forgery term of the one validator whose custody did not approve. -/
@@ -373,8 +452,16 @@ theorem forgery_regime_instance : ∃ (geom : AggSigGeometry) (custody : Fin 2 �
   ⟨compactAuditGeom, mixedCustody, mixedVerify, fun _ => false,
     transparent_boundary compactAuditGeom mixedCustody sigOf _,
     fun _ => fullShard, fun _ => true, 2#2, fun _ v => decide (v.val = 1),
-    fun _ _ => ⟨mixed_accepts, 1, good_bits 1, good_bits 1, mixed_one_unapproved⟩,
-    fun _ v ⟨_, _, hq⟩ => mixed_unapproved_is_one v hq⟩
+    fun _ _ => ⟨mixed_accepts, 1, by decide, fullShard_bits 1, by
+      show quorumParticipated (mixedCustody 1) ((SigningMode.shared auditMsg).message 1) = false
+      rw [shared_message]
+      exact mixed_one_unapproved⟩,
+    fun _ v hf => mixed_unapproved_is_one v (by
+      obtain ⟨_, _, hq⟩ := (quorumForgery_iff _ _ _).mp hf
+      have hq' : quorumParticipated (mixedCustody v)
+          ((SigningMode.shared auditMsg).message v.val) = false := hq
+      rw [shared_message] at hq'
+      exact hq')⟩
 
 /-- The three masses of that instance: attack `1`, outer `0`, forgery `1`. -/
 theorem forgery_regime_masses :
@@ -389,105 +476,10 @@ end Composed
 section Hybrid
 open Qsag.HybridSecurity
 
-def mix (bs : Bytes) : Nat :=
-  bs.foldl (fun acc b => (acc * 257 + b.toNat + 1) % 256 ^ 32) 0
-def encodePre : Preimage → Bytes
-  | .key pq s pk => (if pq then 2 else 1) :: (suiteBytes s ++ pk)
-  | .identity s c p => 3 :: (suiteBytes s ++ (be 32 c.val ++ be 32 p.val))
-  | .address hrp v s id =>
-    4 :: (be 8 hrp.length ++ (hrp ++ (be 8 v ++ (suiteBytes s ++ be 32 id.val))))
-/-- Input-dependent stand-in for the domain-separated hash. Not collision resistant. -/
-def toyHash : HybridSecurity.Hash := fun x =>
-  ⟨mix (encodePre x) % 256 ^ 32, Nat.mod_lt _ (Nat.pow_pos (by decide))⟩
-/-- The V2 transcript field layout without its constant ASCII label (`String.toUTF8` did not
-reduce under `decide` here); the label is the same for every transcript. -/
-def transcriptFields (t : Transcript) : Bytes :=
-  (if t.pq then 2 else 1) :: (suiteBytes t.suite ++ (be 32 t.id.val ++
-    (be 32 t.classicalDigest.val ++ (be 32 t.pqDigest.val ++ (be 8 t.msg.length ++ t.msg)))))
-def toySign (pk : Bytes) (t : Transcript) : Bytes := be 32 (mix (pk ++ transcriptFields t))
-/-- Key- and transcript-bound checksum verifier. Publicly computable, hence forgeable. -/
-def toyVerifier : Verifier := fun pk t sig => decide (sig = toySign pk t)
-def envelopeFor (k : Keys) (m : Bytes) : HybridPinnedEnvelope :=
-  ⟨k, toySign k.classical (transcript toyHash k false m),
-    toySign k.pq (transcript toyHash k true m)⟩
-
-def hk : Keys := ⟨.secpMl44, [2, 0xA1, 0xA2], [0xB1, 0xB2, 0xB3]⟩
-def hrpQs : Bytes := [113, 115]
-def paid : Bytes := [0x70, 0x61, 0x79]
-def unpaid : Bytes := [0x70, 0x61, 0x7A]
-
-theorem hybrid_honest_accepts :
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 1) ∧
-    verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) paid := by
-  unfold validateForAddress verifyWith; decide +kernel
-theorem hybrid_rejects_other_message :
-    ¬ verifyWith toyHash toyVerifier toyVerifier (envelopeFor hk paid) unpaid := by
-  unfold verifyWith; decide +kernel
-/-- The envelope carries no HRP or version, so it validates for every address derived from the
-same keys. Network exclusivity has to be bound in the message, as the source module states. -/
-theorem hybrid_envelope_valid_for_every_network :
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk [113, 116] 1) ∧
-    validateForAddress toyHash (envelopeFor hk paid) (addressOf toyHash hk hrpQs 2) := by
-  unfold validateForAddress; decide +kernel
-/-- Address metadata is bound by the commitment: relabelling the HRP or the version without
-recomputing the commitment is rejected. -/
-theorem hybrid_rejects_relabelled_hrp :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      { addressOf toyHash hk hrpQs 1 with hrp := [113, 116] } := by
-  unfold validateForAddress; decide +kernel
-theorem hybrid_rejects_relabelled_version :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      { addressOf toyHash hk hrpQs 1 with version := 2 } := by
-  unfold validateForAddress; decide +kernel
-theorem hybrid_address_commitments_differ :
-    (addressOf toyHash hk [113, 116] 1).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment ∧
-    (addressOf toyHash hk hrpQs 2).commitment ≠ (addressOf toyHash hk hrpQs 1).commitment := by
-  decide +kernel
-theorem hybrid_rejects_other_keys_address :
-    ¬ validateForAddress toyHash (envelopeFor hk paid)
-      (addressOf toyHash { hk with classical := [3, 0xA1, 0xA2] } hrpQs 1) := by
-  unfold validateForAddress; decide +kernel
-/-- Identical component keys and one verification algorithm: the role flag in the transcript
-alone keeps a classical-role signature from being accepted in the PQ role. -/
-def twin : Keys := ⟨.secpMl44, [9], [9]⟩
-theorem hybrid_rejects_swapped_roles :
-    verifyWith toyHash toyVerifier toyVerifier (envelopeFor twin paid) paid ∧
-    ¬ verifyWith toyHash toyVerifier toyVerifier
-      ⟨twin, (envelopeFor twin paid).pqSignature, (envelopeFor twin paid).classicalSignature⟩
-      paid := by
-  unfold verifyWith; decide +kernel
-/-- An honest PQ signature is not accepted next to a substituted classical key. -/
-theorem hybrid_rejects_rogue_partner :
-    ¬ (toyVerifier hk.pq (transcript toyHash { hk with classical := [0xEE] } true paid)
-      (envelopeFor hk paid).pqSignature = true) := by decide +kernel
-
-theorem hybrid_keybound_instance : ∃ (H : HybridSecurity.Hash) (vc vp : Verifier) (k : Keys) (hrp : Bytes)
-    (v : Nat) (e : HybridPinnedEnvelope) (m : Bytes) (qs : List Bytes),
-    validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
-  ⟨toyHash, toyVerifier, toyVerifier, hk, hrpQs, 1, envelopeFor hk paid, paid, [unpaid],
-    hybrid_honest_accepts.1, hybrid_honest_accepts.2, by decide⟩
-
-def brokenClassical : Verifier := fun _ _ _ => true
-/-- Output `0`: junk signatures on a fresh message. Output `1`: replay of a queried message. -/
-def advOut (j : Fin 2) : HybridPinnedEnvelope × Bytes :=
-  if j.val = 0 then (⟨hk, [0], [0]⟩, unpaid) else (envelopeFor hk paid, paid)
-/-- Classical component accepting everything, PQ component binding: the hybrid win mass is
-`0` while the classical component game is won with mass `1`. -/
-theorem robust_combiner_instance :
-    mass (fun _ : Fin 2 => 1) (fun j =>
-      hybridWins toyHash brokenClassical toyVerifier hk hrpQs 1 [paid] (advOut j)) = 0 ∧
-    mass (fun _ : Fin 2 => 1) (fun j =>
-      brokenClassical hk.classical (transcript toyHash hk false (advOut j).2)
-        (advOut j).1.classicalSignature && decide ((advOut j).2 ∉ [paid])) = 1 ∧
-    mass (fun _ : Fin 2 => 1) (fun j =>
-      toyVerifier hk.pq (transcript toyHash hk true (advOut j).2)
-        (advOut j).1.pqSignature && decide ((advOut j).2 ∉ [paid])) = 0 := by
-  decide +kernel
-/-- Both components accepting everything: the fresh junk output wins. -/
-theorem both_components_broken_instance :
-    mass (fun _ : Fin 2 => 1) (fun j =>
-      hybridWins toyHash brokenClassical brokenClassical hk hrpQs 1 [paid] (advOut j)) = 1 := by
-  decide +kernel
+/-! The toy-hash envelope fixtures (`toyHash`, `toyVerifier`, `envelopeFor`, `hk`, `paid`, …, the
+`hybrid_*` and combiner instances) and the policy-release fixtures (`pol`, `payA`, `payB`, `acceptsA`,
+…, `rejects_*`, `window_advance_*`) are proved in
+`Protocol/Signing/HybridAddrPolicyAndFullPresetSecurity` under the same names. -/
 
 /-! ### Real `cSHAKE256` (`keccakF1600`) + `verifyAggNativeSig` (`Poseidon2` Jorts) Hybrid Envelope -/
 
@@ -603,113 +595,9 @@ theorem real_hybrid_keybound_instance :
       validateForAddress H e (addressOf H k hrp v) ∧ verifyWith H vc vp e m ∧ m ∉ qs :=
   ⟨cshakeHybridHash, jortsNativeVerifier, jortsNativeVerifier, realHk, hrpQs, 1,
     realEnvelopePaid, paid, [unpaid],
-    real_hybrid_honest_accepts.1, real_hybrid_honest_accepts.2, by decide⟩
+    real_hybrid_honest_accepts.1, real_hybrid_honest_accepts.2,
+    fun h => paid_ne_unpaid (List.mem_singleton.mp h)⟩
 
-def pol : TransactionPolicy := ⟨9, [7, 8], 100, 150, [⟨50, 1⟩, ⟨100, 2⟩]⟩
-def intentHash (i : TransactionIntent) : Nat :=
-  ((((i.recipient * 1000003 + i.amount) * 1000003 + i.reportedSpend) * 1000003 + i.nonce) *
-    1000003 + i.session) * 1000003 + i.window
-def payA : TransactionIntent := ⟨7, 60, 0, 1, 11, 5⟩
-def payB : TransactionIntent := ⟨8, 80, 60, 2, 12, 5⟩
-def genesis : Ledger := ⟨0, [], []⟩
-def quorum01 (j : Fin 3) : Bool := decide (j.val < 2)
-def corrupt0 (j : Fin 3) : Bool := decide (j.val = 0)
-/-- The corrupt quorum member holds a token that was never minted for the intent. -/
-def tokensA (j : Fin 3) : AuthorizedSignReleaseToken :=
-  if j.val = 0 then ⟨0, 0, 0, 0, 0⟩ else minted intentHash pol payA
-
-theorem only_honest_member : ∀ j : Fin 3,
-    quorum01 j = true → corrupt0 j = false → j = 1 := by decide +kernel
-theorem acceptsA : PolicyAccepts pol payA 2 :=
-  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
-theorem acceptsB : PolicyAccepts pol payB 2 :=
-  ⟨by decide +kernel, by decide +kernel, ⟨100, 2⟩, by decide +kernel, by decide +kernel⟩
-theorem stepA : LedgerStep pol.maxWindowSpend 5 genesis payA (burn genesis payA) := by
-  unfold LedgerStep; decide +kernel
-theorem stepB : LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payB
-    (burn (burn genesis payA) payB) := by
-  unfold LedgerStep; decide +kernel
-theorem corrupt_token_not_minted : tokensA 0 ≠ minted intentHash pol payA := by decide +kernel
-
-/-- `n = 3`, `t = 2`, `f = 1`: the quorum contains the corrupt party; the honest member alone
-supplies the release. -/
-theorem corrupt_quorum_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
-    (H : TransactionIntent → Nat) (i : TransactionIntent) (q corrupt : Fin n → Bool)
-    (before after : Fin n → Ledger) (tokens : Fin n → AuthorizedSignReleaseToken),
-    cardinal q = t ∧ cardinal corrupt ≤ f ∧ f < t ∧
-    (∀ j, q j = true → corrupt j = false →
-      ValidRelease H p t w i (before j) (after j) (tokens j)) :=
-  ⟨3, 2, 1, 5, pol, intentHash, payA, quorum01, corrupt0, fun _ => genesis,
-    fun _ => burn genesis payA, tokensA, by decide +kernel, by decide +kernel, by decide,
-    fun j hq hc => by
-      obtain rfl := only_honest_member j hq hc
-      exact ⟨rfl, acceptsA, stepA⟩⟩
-
-def quorumOf (i : TransactionIntent) (j : Fin 3) : Bool :=
-  if i = payA then decide (j.val < 2) else decide (0 < j.val)
-def beforeOf (i : TransactionIntent) : Ledger := if i = payA then genesis else burn genesis payA
-
-/-- Two intents, two different quorums sharing honest party `1`, one serialized ledger. -/
-theorem two_intent_spending_instance : ∃ (n t f w : Nat) (p : TransactionPolicy)
-    (H : TransactionIntent → Nat) (is : List TransactionIntent) (corrupt : Fin n → Bool)
-    (q : TransactionIntent → Fin n → Bool) (before after : TransactionIntent → Fin n → Ledger)
-    (tokens : TransactionIntent → Fin n → AuthorizedSignReleaseToken) (final : Ledger),
-    cardinal corrupt ≤ f ∧ f < t ∧ (∀ i ∈ is, cardinal (q i) = t) ∧
-    (∀ i ∈ is, ∀ j, q i j = true → corrupt j = false →
-      ValidRelease H p t w i (before i j) (after i j) (tokens i j)) ∧
-    LedgerTrace p.maxWindowSpend w ⟨0, [], []⟩ is final := by
-  refine ⟨3, 2, 1, 5, pol, intentHash, [payA, payB], corrupt0, quorumOf,
-    fun i _ => beforeOf i, fun i _ => burn (beforeOf i) i, fun i _ => minted intentHash pol i,
-    burn (burn genesis payA) payB, by decide +kernel, by decide, ?_, ?_, ?_⟩
-  · intro i hi
-    rcases List.mem_cons.mp hi with rfl | hi
-    · decide +kernel
-    · obtain rfl := List.mem_singleton.mp hi
-      decide +kernel
-  · intro i hi j _ _
-    rcases List.mem_cons.mp hi with rfl | hi
-    · exact ⟨rfl, acceptsA, stepA⟩
-    · obtain rfl := List.mem_singleton.mp hi
-      exact ⟨rfl, acceptsB, stepB⟩
-  · exact .cons stepA (.cons stepB (.nil _))
-
-theorem rejects_over_per_tx_cap : ¬ PolicyAccepts pol ⟨7, 101, 0, 3, 13, 5⟩ 3 :=
-  fun h => absurd h.2.1 (by decide +kernel)
-theorem rejects_unlisted_recipient : ¬ PolicyAccepts pol ⟨9, 10, 0, 3, 13, 5⟩ 3 :=
-  fun h => absurd h.1 (by decide +kernel)
-theorem rejects_insufficient_approvals : ¬ PolicyAccepts pol payB 1 := by
-  rintro ⟨_, _, r, hr, hn⟩
-  have e : pol.tiers.find? (fun r => decide (payB.amount ≤ r.cap)) = some ⟨100, 2⟩ := by
-    decide +kernel
-  rw [e] at hr
-  cases hr
-  exact absurd hn (by decide +kernel)
-theorem rejects_nonce_replay :
-    ¬ LedgerStep pol.maxWindowSpend 5 (burn genesis payA) payA
-      (burn (burn genesis payA) payA) :=
-  fun h => absurd h.2.1 (by decide +kernel)
-/-- After `payA` and `payB` (140 of 150 spent) a further 20 has no ledger step at all. -/
-theorem rejects_window_overspend (next : Ledger) :
-    ¬ LedgerStep pol.maxWindowSpend 5 (burn (burn genesis payA) payB)
-      ⟨7, 20, 0, 3, 13, 5⟩ next :=
-  fun h => absurd h.2.2.2.1 (by decide +kernel)
-theorem rejects_stale_window (next : Ledger) :
-    ¬ LedgerStep pol.maxWindowSpend 6 genesis payA next :=
-  fun h => absurd h.1 (by decide +kernel)
-theorem token_is_intent_specific :
-    minted intentHash pol payA ≠ minted intentHash pol payB := by decide +kernel
-
-def toyMac (policy old next : Nat) : Nat := (policy * 65537 + old) * 65537 + next + 0x5eed
-theorem window_advance_accepts :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6⟩ = some ⟨0, [], []⟩ := by decide +kernel
-/-- Wrong tag, non-increasing epoch, tag for another policy, tag for another old epoch. -/
-theorem window_advance_rejects :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ = none ∧
-    advanceAuthorized toyMac 9 5 ⟨5, toyMac 9 5 5⟩ = none ∧
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 8 5 6⟩ = none ∧
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 4 6⟩ = none := by decide +kernel
-theorem window_advance_rejects_wrong_tag :
-    advanceAuthorized toyMac 9 5 ⟨6, toyMac 9 5 6 + 1⟩ ≠ some ⟨0, [], []⟩ := by decide +kernel
 end Hybrid
 
 /-! ## 3. Cross-protocol: the modelled Poseidon2 permutation and real labels -/
@@ -766,6 +654,9 @@ def weightedJiveExtra (x : State Lane4) : Lane4 :=
 theorem compress12FF_eq_jive (in0 in1 tweak : Lane4) :
     poseidon2Compress12FF in0 in1 tweak =
       jiveCompress weightedJiveExtra poseidonEquiv (in0, in1, tweak) := by
+  rw [poseidon2Compress12FF.public_eqs, poseidon2CompressWeighted_eq,
+    poseidon2WeightedFeedForward_eq, jiveCompress.public_eqs, relation.public_eqs]
+  simp only [weightedJiveExtra, lane4Add_eq]
   show CommRingOps.add (poseidon2Perm12 ⟨in0, in1, tweak⟩).b0
       (CommRingOps.add (CommRingOps.add in0 (lane4Scale (Goldilocks.ofNat 2) in1))
         (lane4Scale (Goldilocks.ofNat 4) tweak)) =
@@ -794,7 +685,8 @@ def realTranscript : List (State Lane4 × State Lane4) :=
   [(poseidonEquiv.invFun realY, realY), (realX, poseidonEquiv.toFun realX)]
 theorem real_transcript_consistent : Consistent poseidonEquiv realTranscript :=
   inverse_extension _ _
-    (forward_extension _ [] (fun _ _ h => absurd h List.not_mem_nil) realX) realY
+    (forward_extension _ [] (by rw [Consistent.public_eqs]; exact fun _ _ h => absurd h List.not_mem_nil)
+      realX) realY
 
 theorem real_transcript_instance :
     ∃ p : SimpleEquiv (State Lane4) (State Lane4),
@@ -840,20 +732,25 @@ theorem small_field_bad_count :
         (fun _ _ => (CommRingOps.zero : Bool × Bool)) smallChosen x ∈
           ([] : List (Bool × Bool))))).flatMap
       (fun y => (extensions (smallAvail.length - 1) (smallAvail.erase y)).map (y :: ·))).length
-      = 0 := by decide +kernel
+      = 0 := by
+  have hl : smallAvail.length - 1 = 2 := rfl
+  simp only [hl, queryValue.public_eqs, relation.public_eqs, extensions.public_eqs,
+    Bool.false_eq_true, ↓reduceIte]
+  decide +kernel
 end SmallField
 
 /-- A hash that separates `[1]` from `[2]` and collides on `[0, 1]` and `[1]`. -/
 def foldHash (m : List UInt8) : BitVec 256 :=
   BitVec.ofNat 256 (m.foldl (fun a b => a * 256 + b.toNat) 0)
 theorem digest_separates_distinct_hashes :
-    digest5FromBitVec256 (foldHash [1]) ≠ digest5FromBitVec256 (foldHash [2]) := by
-  decide +kernel
+    digest5FromBitVec256 (foldHash [1]) ≠ digest5FromBitVec256 (foldHash [2]) :=
+  fun h => absurd (congrArg (fun d : Digest5 => d.limb0.val) h) (by decide +kernel)
 /-- Equal digests on distinct messages come from the hash, as `digest5_collision_iff` states. -/
 theorem digest_collision_is_hash_collision :
     ([0, 1] : List UInt8) ≠ [1] ∧
     digest5FromBitVec256 (foldHash [0, 1]) = digest5FromBitVec256 (foldHash [1]) ∧
-    foldHash [0, 1] = foldHash [1] := by decide +kernel
+    foldHash [0, 1] = foldHash [1] :=
+  ⟨by decide, congrArg digest5FromBitVec256 (by decide +kernel), by decide +kernel⟩
 
 /-- ASCII `QSAG.MU/v2` and `QSAG.HEM.MSG/v2` from the audited qsag-agg label inventory. -/
 def muLabel : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x55, 0x2F, 0x76, 0x32]
@@ -882,66 +779,75 @@ theorem foreign_label_reprogram_instance :
 theorem same_label_reprogram_changes_game :
     ¬ (runOracle (fun x => reprogramAt toyOracle (formatted muLabel [1]) 0
       (formatted muLabel x)) twoQueryGame =
-    runOracle (fun x => toyOracle (formatted muLabel x)) twoQueryGame) := by decide +kernel
+    runOracle (fun x => toyOracle (formatted muLabel x)) twoQueryGame) := by
+  have h1 : formatted muLabel [2, 3] ≠ formatted muLabel [1] := by
+    rw [formatted.public_eqs, formatted.public_eqs]
+    intro h
+    exact absurd (List.append_cancel_left h) (by decide)
+  have hpos : toyOracle (formatted muLabel [1]) ≠ 0 := by
+    rw [formatted.public_eqs]
+    unfold toyOracle
+    rw [List.foldl_append]
+    exact Nat.succ_ne_zero _
+  simp only [twoQueryGame, runOracle.public_eqs, reprogramAt.public_eqs, eq_self, h1, ↓reduceIte,
+    Nat.zero_mul, Nat.zero_add]
+  intro h
+  generalize toyOracle (formatted muLabel [1]) = a at h hpos
+  generalize toyOracle (formatted muLabel [2, 3]) = b at h
+  omega
 end Cross
 
-#verify_constructive transparent_boundary boundary_of_committee_trace
-  boundary_of_hem_opening_batch compactHemInst_valid
-  hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
-  hemOpeningShardVerify_rejects_per_signer hemOpeningShardVerify_boundary
-  hem_opening_regime_instance
-  fixtures_are_modelled_outputs native_accepts
-  native_rejects_other_message native_rejects_other_key native_rejects_tampered_randomizer
-  good_full_accepts good_tree_accepts good_bits good_participation good_no_forgery
-  good_regime_resolves good_regime_instance committee_trace_satisfied committee_slots
-  committee_trace_boundary shared_verify_accepts shared_verify_rejects_per_signer_mode
-  rejects_unsigned_per_signer_message
-  accepts_signed_per_signer_messages rejects_swapped_signature_table
-  rejects_foreign_committee_leaf foreign_committee_leaf_not_accepted
-  unsigned_per_signer_message_not_accepted other_key_not_accepted rogue_not_participated unapproved_signature_is_forgery
-  mixed_accepts mixed_unapproved_is_one mixed_one_unapproved forgery_regime_instance
-  forgery_regime_masses
-#verify_constructive hybrid_honest_accepts hybrid_rejects_other_message
-  hybrid_envelope_valid_for_every_network hybrid_rejects_relabelled_hrp
-  hybrid_rejects_relabelled_version hybrid_address_commitments_differ
-  hybrid_rejects_other_keys_address hybrid_rejects_swapped_roles
-  hybrid_rejects_rogue_partner hybrid_keybound_instance robust_combiner_instance
-  both_components_broken_instance
-  real_hybrid_sigs_are_modelled_outputs
-  real_hybrid_honest_accepts real_hybrid_rejects_other_message
-  real_hybrid_rejects_rogue_partner real_hybrid_keybound_instance
-  only_honest_member acceptsA acceptsB stepA stepB
-  corrupt_token_not_minted corrupt_quorum_instance two_intent_spending_instance
-  rejects_over_per_tx_cap rejects_unlisted_recipient rejects_insufficient_approvals
-  rejects_nonce_replay rejects_window_overspend rejects_stale_window token_is_intent_specific
-  window_advance_accepts window_advance_rejects window_advance_rejects_wrong_tag
-#verify_constructive compress12FF_eq_jive deployed_compress_preimage_hits_transcript
-  real_transcript_consistent real_transcript_instance real_poseidon_nondegenerate
-  real_poseidon_raw_vs_feedforward real_poseidon_feedforward_misses small_field_bad_count digest_separates_distinct_hashes
+-- Audited here and now: every instance that does not kernel-execute a sealed primitive.
+#verify_constructive transparent_boundary boundary_of_committee_trace boundary_of_hem_opening_batch
+  hemOpeningShardVerify_rejects_per_signer good_bits good_participation good_no_forgery
+  committee_slots shared_verify_rejects_per_signer_mode rejects_foreign_committee_leaf
+  foreign_committee_leaf_not_accepted rogue_not_participated mixed_unapproved_is_one
+  mixed_one_unapproved forgery_regime_masses shared_message fullShard_bits
+  logged_custody_participates unlogged_custody_not_participated committeeStmt_wellFormed
+#verify_constructive hybrid_honest_accepts hybrid_rejects_other_message hybrid_envelope_valid_for_every_network
+  hybrid_rejects_relabelled_hrp hybrid_rejects_relabelled_version
+  hybrid_address_commitments_differ hybrid_rejects_other_keys_address
+  hybrid_rejects_swapped_roles hybrid_rejects_rogue_partner hybrid_keybound_instance
+  robust_combiner_instance both_components_broken_instance only_honest_member acceptsA
+  acceptsB stepA stepB corrupt_token_not_minted corrupt_quorum_instance
+  two_intent_spending_instance rejects_over_per_tx_cap rejects_unlisted_recipient
+  rejects_insufficient_approvals rejects_nonce_replay rejects_window_overspend
+  rejects_stale_window token_is_intent_specific window_advance_accepts
+  window_advance_rejects window_advance_rejects_wrong_tag
+#verify_constructive compress12FF_eq_jive deployed_compress_preimage_hits_transcript real_transcript_consistent
+  real_transcript_instance small_field_bad_count digest_separates_distinct_hashes
   digest_collision_is_hash_collision real_label_partition_instance
   foreign_label_reprogram_instance same_label_reprogram_changes_game
+-- Kernel-executed primitive fixtures (native signature, HEM opening batch, cSHAKE, Poseidon2):
+-- red while the primitive modules are sealed; see scratch/lanes/fable-teeth-greenup.comp.md.
+#verify_constructive compactHemInst_valid hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
+  hemOpeningShardVerify_boundary hem_opening_regime_instance fixtures_are_modelled_outputs
+  native_accepts native_rejects_other_message native_rejects_other_key
+  native_rejects_tampered_randomizer good_full_accepts good_tree_accepts
+  good_regime_resolves good_regime_instance committee_trace_satisfied
+  committee_trace_boundary shared_verify_accepts rejects_unsigned_per_signer_message
+  accepts_signed_per_signer_messages rejects_swapped_signature_table
+  unsigned_per_signer_message_not_accepted other_key_not_accepted
+  unapproved_signature_is_forgery mixed_accepts forgery_regime_instance
+#verify_constructive real_hybrid_sigs_are_modelled_outputs real_hybrid_honest_accepts
+  real_hybrid_rejects_other_message real_hybrid_rejects_rogue_partner
+  real_hybrid_keybound_instance
+#verify_constructive real_poseidon_nondegenerate real_poseidon_raw_vs_feedforward
+  real_poseidon_feedforward_misses
 #verify_inhabited Qsag.Composed.merged_quorum_reduction good_regime_instance
 #verify_inhabited Qsag.Composed.merged_quorum_reduction hem_opening_regime_instance
 #verify_inhabited Qsag.Composed.quorum_aggregation_reduction good_regime_instance
 #verify_inhabited Qsag.Composed.quorum_aggregation_reduction hem_opening_regime_instance
 #verify_inhabited Qsag.Composed.quorum_advantage_from_extraction forgery_regime_instance
-#verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma hybrid_keybound_instance
+-- The toy-hash and policy instances are evaluated, audited (`#verify_inhabited`, `#tooth_pair`) in
+-- `Protocol/Signing/HybridAddrPolicyAndFullPresetSecurity`, where the checked definitions unfold.
 #verify_inhabited Qsag.HybridSecurity.dual_key_euf_cma real_hybrid_keybound_instance
-#verify_inhabited Qsag.HybridSecurity.threshold_policy_composition corrupt_quorum_instance
-#verify_inhabited Qsag.HybridSecurity.threshold_spending_safety two_intent_spending_instance
 #verify_inhabited Qsag.CrossProtocol.checked_preimage_is_transcript_hit real_transcript_instance
 #verify_inhabited Qsag.CrossProtocol.universal_customization_partition
   real_label_partition_instance
 #tooth_pair Qsag.Composed.merged_quorum_reduction vs foreign_committee_leaf_not_accepted
 #tooth_pair Qsag.Composed.binary_merge_sound vs unsigned_per_signer_message_not_accepted
 #tooth_pair Qsag.Composed.quorum_aggregation_reduction vs other_key_not_accepted
-#tooth_pair Qsag.HybridSecurity.dual_key_euf_cma vs hybrid_rejects_other_message
-#tooth_pair Qsag.HybridSecurity.address_binding vs hybrid_rejects_relabelled_hrp
-#tooth_pair Qsag.HybridSecurity.rogue_partner_resistance vs hybrid_rejects_rogue_partner
-#tooth_pair Qsag.HybridSecurity.threshold_policy_composition vs rejects_insufficient_approvals
-#tooth_pair Qsag.HybridSecurity.ledger_trace_safety vs rejects_nonce_replay
-#tooth_pair Qsag.HybridSecurity.threshold_spending_safety vs rejects_window_overspend
-#tooth_pair Qsag.HybridSecurity.authorized_window_binding vs window_advance_rejects_wrong_tag
 #tooth_pair Qsag.CrossProtocol.inverse_feedforward_relation vs real_poseidon_feedforward_misses
 #tooth_pair Qsag.CrossProtocol.isolated_game_zero_drift vs same_label_reprogram_changes_game
 
@@ -951,17 +857,59 @@ end Qsag.CompositionInstances
 namespace Qsag.Composed
 set_option autoImplicit false
 
+/-- Leaf case of the exposed `checkTree`, from its four checks. -/
+theorem checkTree_leaf_intro {n : Nat} (root : Header) (verify : Shard n → Bool) (d : Nat)
+    (s : Shard n) (hh : s.header = root)
+    (hv : 2 ≤ s.numVars ∧ s.numVars ≤ 28 ∧ s.schedule = root.regime.schedule s.numVars)
+    (hw : 0 < weight s.bitmap) (hver : verify s = true) :
+    checkTree root verify d (.leaf s) = true := by
+  cases d <;> simp only [checkTree] <;>
+    rw [decide_eq_true hh, decide_eq_true hv, decide_eq_true hw, hver] <;> rfl
+/-- Branch case of the exposed `checkTree`, from its three bitmap checks and the two subtrees. -/
+theorem checkTree_branch_intro {n : Nat} (root : Header) (verify : Shard n → Bool) (d : Nat)
+    (l r : MergeTree n) (b : BitVec n) (hd : l.bitmap &&& r.bitmap = 0#n)
+    (hb : b = l.bitmap ||| r.bitmap) (hf : firstActive l.bitmap < firstActive r.bitmap)
+    (hl : checkTree root verify d l = true) (hr : checkTree root verify d r = true) :
+    checkTree root verify (d + 1) (.branch l r b) = true := by
+  simp only [checkTree]
+  rw [decide_eq_true hd, decide_eq_true hb, decide_eq_true hf, hl, hr]
+  rfl
+theorem exampleShard_leaf_accepts (b : BitVec 2) (hw : 0 < weight b) (d : Nat) :
+    checkTree exampleHeader exampleVerifier d (.leaf (exampleShard b)) = true :=
+  checkTree_leaf_intro exampleHeader exampleVerifier d (exampleShard b) rfl
+    ⟨show (2 : Nat) ≤ 2 from Nat.le_refl 2, show (2 : Nat) ≤ 28 by decide, rfl⟩ hw rfl
+theorem exampleTree_accepts : checkTree exampleHeader exampleVerifier 16 exampleTree = true := by
+  rw [exampleTree.public_eqs]
+  exact checkTree_branch_intro exampleHeader exampleVerifier 15 _ _ _
+    (by simp only [MergeTree.bitmap.public_eqs]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs]; decide)
+    (exampleShard_leaf_accepts 1#2 (by decide) 15) (exampleShard_leaf_accepts 2#2 (by decide) 15)
+theorem exampleTree_bit0 : exampleTree.bitmap.getLsbD 0 = true := by
+  simp only [exampleTree.public_eqs, MergeTree.bitmap.public_eqs]; decide
+theorem headD_mem_of_ne_nil {α : Type} (l : List α) (d : α) (h : l ≠ []) : l.headD d ∈ l := by
+  cases l with
+  | nil => exact absurd rfl h
+  | cons a t => exact List.mem_cons_self
+
 theorem inhabited_tree : ∃ root verify tree,
     checkTree (n := 2) root verify 16 tree = true ∧ tree.bitmap.getLsbD 0 = true ∧
     ∃ s ∈ tree.leaves, ∃ st : WhirStageSpec, st ∈ s.schedule.stages :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, by decide, by decide,
-    exampleShard 1#2, by simp [exampleTree, MergeTree.leaves],
-    (whirStageSchedule 2).stages.headD ⟨0,0,0⟩, by decide⟩
+  ⟨exampleHeader, exampleVerifier, exampleTree, exampleTree_accepts, exampleTree_bit0,
+    exampleShard 1#2, by
+      simp only [exampleTree.public_eqs, MergeTree.leaves.public_eqs]
+      exact List.mem_append_left _ (List.mem_singleton.mpr rfl),
+    (whirStageSchedule 2).stages.headD ⟨0,0,0⟩,
+    headD_mem_of_ne_nil _ _ (fun e => absurd (congrArg List.length e) (by decide))⟩
+
 theorem tooth_overlap : ∃ a b : BitVec 2,
     a &&& b ≠ 0#2 ∧ weight (a ||| b) < weight a + weight b ∧
     checkTree exampleHeader exampleVerifier 16
       (.branch (.leaf (exampleShard a)) (.leaf (exampleShard b)) (a ||| b)) = false :=
-  ⟨1#2, 1#2, by decide, by decide, by decide⟩
+  ⟨1#2, 1#2, by decide, by decide, by
+    simp only [checkTree, MergeTree.bitmap.public_eqs]
+    decide⟩
+
 /-- The outer-bad branch is reachable; the honest approval branch has its own fixture. -/
 theorem inhabited_reduction : ∃ geom custody verify bad,
     ExtractionBoundary (n := 2) geom custody verify bad ∧
@@ -969,13 +917,19 @@ theorem inhabited_reduction : ∃ geom custody verify bad,
     ∃ root tree, checkTree root verify 16 tree = true ∧ tree.bitmap.getLsbD v.val = true := by
   refine ⟨compactAuditGeom, (fun _ => exampleCustody), exampleVerifier,
     (fun _ => True), ⟨fun _ _ => .inl trivial⟩, exampleShard 1#2, ⟨0, by decide⟩,
-    by decide, by decide, exampleHeader, exampleTree, by decide, by decide⟩
+    by decide, by decide, exampleHeader, exampleTree, exampleTree_accepts, exampleTree_bit0⟩
+
 theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 2 → Bool,
     checkTree root verify 16 tree = true ∧
     (qsum 2 fun ω => if treeBad (bad ω) tree then 1 else 0) = 2 :=
-  ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), by decide, by
+  ⟨exampleHeader, exampleVerifier, exampleTree, (fun _ _ => true), exampleTree_accepts, by
+    have ht : treeBad (fun _ : Shard 2 => true) exampleTree = true := by
+      simp only [exampleTree.public_eqs, treeBad.public_eqs, Bool.or_self]
+    show (qsum 2 fun _ => if treeBad (fun _ : Shard 2 => true) exampleTree then 1 else 0) = 2
+    rw [ht]
     show (qsum 2 fun _ => 1) = 2
     rw [qsum_const]⟩
+
 #verify_inhabited binary_merge_sound inhabited_tree
 #verify_inhabited depth_sixteen inhabited_tree
 #verify_inhabited selected_leaf inhabited_tree
@@ -985,7 +939,7 @@ theorem inhabited_shard_bound : ∃ root verify tree, ∃ bad : Fin 2 → Shard 
 #verify_inhabited quorum_aggregation_reduction inhabited_reduction
 #verify_inhabited merged_quorum_reduction inhabited_reduction
 #verify_inhabited additive_shard_bound inhabited_shard_bound
-#verify_inhabited composed_advantage_bound inhabited_union
+-- `composed_advantage_bound` / `inhabited_union` is certified in `ComposedQsAgAndMergeSecurity`, which owns both.
 #tooth_pair composed_advantage_bound vs tooth_omit_outer
 #tooth_pair quorum_advantage_from_extraction vs tooth_omit_outer
 

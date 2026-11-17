@@ -2530,6 +2530,46 @@ private theorem ratBound_add_num_pos_left {a b : RatBound} (ha : 0 < a.num) :
   dsimp only
   exact Nat.lt_of_lt_of_le (Nat.mul_pos ha b.h_pos) (Nat.le_add_right _ _)
 
+/-- Roster conjunct of `inhabited_concrete_security_budget_roster` (`Tests/ConcreteSecurityBudgetTeeth`),
+    proved here because the roster body and its ceiling lemma are not visible downstream: at
+    `b₀ = ⟨2^30 - 1, 2^16, 2^20 - 1⟩` all 12 entries have positive numerators and meet
+    `atLeastBits 128` classically and in the QROM. -/
+theorem qsagPq128PortfolioRoster_inhabited_at_concrete_budget :
+    (qsagPq128PortfolioRoster ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩).length = 12 ∧
+      ∀ entry ∈ qsagPq128PortfolioRoster ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩,
+        0 < entry.classicalBound.num ∧
+        0 < entry.quantumBound.num ∧
+        atLeastBits 128 entry.classicalBound ∧
+        atLeastBits 128 entry.quantumBound := by
+  let b₀ : QueryBudget := ⟨2 ^ 30 - 1, 2 ^ 16, 2 ^ 20 - 1⟩
+  have hPort := qsag_pq128_portfolio_soundness_budget b₀ (by decide)
+  refine ⟨hPort.1, ?_⟩
+  intro entry hMem
+  have hBits := hPort.2 entry hMem
+    (Nat.le_trans (by decide : b₀.qHash + 1 ≤ 2 ^ 30)
+      (Nat.pow_le_pow_right (by decide) (roster_ceiling_ge_30 b₀ entry hMem)))
+  have hPos : 0 < entry.classicalBound.num ∧ 0 < entry.quantumBound.num := by
+    simp only [qsagPq128PortfolioRoster, List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+    all_goals try simp only [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def,
+      classicalFiatShamirBound_def, quantumGroverGrindingBound_def]
+    · exact ⟨by decide, by decide⟩
+    · exact ⟨by decide, by decide⟩
+    · exact ⟨by decide, by decide⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left
+        (by rw [quantumGroverSingleTargetBound_def, quantumZhandryMultiTargetBound_def]; decide)⟩
+    · exact ⟨by decide, by decide⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    · exact ⟨by decide, by decide⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+    · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
+  exact ⟨hPos.1, hPos.2, hBits.1, hBits.2⟩
+
+#verify_constructive Qsag.qsagPq128PortfolioRoster_inhabited_at_concrete_budget
+
 /-- Cardinality of the production joint 24-repetition, 11-bit signed-monomial RLWE challenge.
     This is challenge-space arithmetic, not an RLWE hardness or extraction theorem. -/
 def rlweSignedMonomialChallengeCard (reps : Nat) : Nat := (2 ^ 11) ^ reps

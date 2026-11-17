@@ -1898,4 +1898,9 @@ theorem linearTable_final_valid (D : List QuarticGoldilocks) (a b : QuarticGoldi
 #verify_constructive linearVirtualFold linearTable_toOracle linearFoldTableCheck
   linearVirtualFold_of linearStage_complete linearTable_final_valid
 
+-- Equations for `Tests/HemMultistageCascadeTeeth` (no body exposed).
+#export_eqns hemMultistageRun hemMultistageVerify linearOracle linearNextA linearNextB linearTable
+  hemFoldWitnessStage1 hemFoldWitnessStage2 hemFoldWitnessStages hemFoldFalseInst hemFoldDom32
+  hemFoldStageRoundBudgets hemWelchBerlekampBudget
+
 end Qsag
