@@ -284,7 +284,9 @@ impl WhirSecurityRegime {
         }
     }
 
-    /// Conservative per-round query plus PoW budget, before other protocol errors.
+    /// Nominal query target plus PoW bits, before composed reduction accounting.
+    /// This is not a lower bound on deployed round security: tag 2's fold-loss-adjusted
+    /// query round reaches only 124.467 bits, so its nominal 144-bit figure is not attained.
     pub fn classical_fs_round_bits(self) -> u32 {
         match self {
             Self::BciksJohnsonClassical128 => 144,
@@ -293,7 +295,7 @@ impl WhirSecurityRegime {
         }
     }
 
-    /// Grover round-search budget; total security requires separate reduction accounting.
+    /// Nominal Grover round-search figure; total security requires separate reduction accounting.
     pub fn qrom_grover_round_bits(self) -> u32 {
         self.classical_fs_round_bits() / 2
     }

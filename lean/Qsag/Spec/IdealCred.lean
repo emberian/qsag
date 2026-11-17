@@ -62,6 +62,214 @@ namespace Qsag.Spec
 
 set_option autoImplicit false
 
+/-! ## Verifier-owned challenge ledgers
+
+The executable state below follows `presentation_challenge.rs`: only outstanding challenges
+are retained, issuance is bounded, expiry frees capacity, and a valid presentation removes its
+challenge. Each verifier owns its entire ledger (including capacity and issuance counter),
+independently of the statement scope. One verifier may issue for several scopes; two verifiers
+may use identical scopes and challenge names without sharing state.
+`Nat` challenge names idealize collision-free outputs of the Rust cSHAKE derivation containing
+that ledger's strictly increasing issuance counter. This is an ideal-function model, not a
+claim that a finite digest is injective, nor a proof of its unpredictability. Clock rollback
+can extend an outstanding challenge's lifetime but cannot resurrect a consumed challenge.
+-/
+
+structure VerifierChallengeLedger where
+  capacity : Nat := 65536
+  issued : Nat := 0
+  outstanding : List ((Bytes × Nat) × Nat) := []
+  deriving DecidableEq, Repr
+
+/-- The verifier clock is a caller parameter, as for Rust `ledger.at(now)`. -/
+def VerifierChallengeLedger.accepts (l : VerifierChallengeLedger) (scope : Bytes) (nonce now : Nat) : Bool :=
+  l.outstanding.any (fun e => decide (e.1 = (scope, nonce)) && decide (now < e.2))
+
+/-- Remove every occurrence: malformed duplicate entries cannot permit replay either. -/
+def VerifierChallengeLedger.consume (l : VerifierChallengeLedger) (scope : Bytes) (nonce : Nat) :
+    VerifierChallengeLedger :=
+  { l with outstanding := l.outstanding.filter (fun e => decide (e.1 ≠ (scope, nonce))) }
+
+/-- Fresh challenge issuance, including the Rust capacity and u64 lifetime/counter bounds.
+    A live challenge is never evicted to make room. -/
+def VerifierChallengeLedger.issue (l : VerifierChallengeLedger) (scope : Bytes) (now ttl : Nat) :
+    Option (VerifierChallengeLedger × Nat) :=
+  let live := l.outstanding.filter (fun e => decide (now < e.2))
+  if 0 < l.capacity ∧ l.capacity ≤ 65536 ∧ 0 < ttl ∧ now + ttl < 2^64 ∧
+      live.length < l.capacity ∧ l.issued + 1 < 2^64 then
+    some ({ l with issued := l.issued + 1,
+                   outstanding := ((scope, l.issued + 1), now + ttl) :: live }, l.issued + 1)
+  else none
+
+/-- Rust prunes expired challenges after validating the capacity and lifetime, before checking
+    remaining room and counter exhaustion. This mutation survives a later issuance refusal. -/
+def VerifierChallengeLedger.prune (l : VerifierChallengeLedger) (now : Nat) :
+    VerifierChallengeLedger :=
+  { l with outstanding := l.outstanding.filter (fun e => decide (now < e.2)) }
+
+/-- Stateful issuance, including its failure path. `issue` computes a successful fresh issue;
+    this wrapper preserves the Rust post-pruning state when a later check refuses it. -/
+def VerifierChallengeLedger.issueAttempt (l : VerifierChallengeLedger) (scope : Bytes)
+    (now ttl : Nat) : VerifierChallengeLedger × Option Nat :=
+  if 0 < l.capacity ∧ l.capacity ≤ 65536 ∧ 0 < ttl ∧ now + ttl < 2^64 then
+    match l.issue scope now ttl with
+    | some (next, nonce) => (next, some nonce)
+    | none => (l.prune now, none)
+  else (l, none)
+
+/-- A proof failure never touches the ledger; consumption happens only after verification. -/
+def VerifierChallengeLedger.verify (l : VerifierChallengeLedger) (proofValid : Bool)
+    (scope : Bytes) (nonce now : Nat) : VerifierChallengeLedger × Bool :=
+  if proofValid && l.accepts scope nonce now then (l.consume scope nonce, true) else (l, false)
+
+/-- Explicit proof-audit opt-out, mirroring Rust `ReplayNotPrevented`. It is deliberately
+    separate from the authorization machine and gives no one-time acceptance guarantee. -/
+def ReplayNotPrevented (expected nonce : Nat) (proofValid : Bool) : Bool :=
+  proofValid && decide (expected = nonce)
+
+abbrev VerifierChallengeLedgers := Nat → VerifierChallengeLedger
+
+def VerifierChallengeLedgers.set (ls : VerifierChallengeLedgers) (verifier : Nat)
+    (l : VerifierChallengeLedger) : VerifierChallengeLedgers :=
+  fun v => if v = verifier then l else ls v
+
+def VerifierChallengeLedgers.consume (ls : VerifierChallengeLedgers) (verifier : Nat)
+    (scope : Bytes) (nonce : Nat) : VerifierChallengeLedgers :=
+  ls.set verifier ((ls verifier).consume scope nonce)
+
+theorem VerifierChallengeLedger.consume_rejects (l : VerifierChallengeLedger)
+    (scope : Bytes) (nonce now : Nat) : (l.consume scope nonce).accepts scope nonce now = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  obtain ⟨e, he, hBoth⟩ := List.any_eq_true.mp h
+  have hEq := (Bool.and_eq_true_iff.mp hBoth).1
+  obtain ⟨_, hNe⟩ := List.mem_filter.mp he
+  exact (of_decide_eq_true hNe) (of_decide_eq_true hEq)
+
+theorem VerifierChallengeLedger.invalid_proof_preserves (l : VerifierChallengeLedger)
+    (scope : Bytes) (nonce now : Nat) : l.verify false scope nonce now = (l, false) := by rfl
+
+/-- A successful verification makes the same challenge fail, even at an earlier clock time. -/
+theorem VerifierChallengeLedger.accepted_at_most_once (l l' : VerifierChallengeLedger)
+    (proofValid : Bool) (scope : Bytes) (nonce now later : Nat)
+    (h : l.verify proofValid scope nonce now = (l', true)) :
+    l'.verify true scope nonce later = (l', false) := by
+  unfold verify at h
+  split at h
+  · have hs := (Prod.mk.inj h).1
+    rw [← hs]
+    simp only [verify, consume_rejects, Bool.and_false, Bool.false_eq_true, ↓reduceIte]
+  · cases (Prod.mk.inj h).2
+
+/-- Equality of the observer's ledger suffices for identical refusals and successor state;
+    all other verifier ledgers may differ arbitrarily. -/
+theorem VerifierChallengeLedgers.refusal_noninterference (a b : VerifierChallengeLedgers)
+    (verifier : Nat) (h : a verifier = b verifier) (valid : Bool) (scope : Bytes) (nonce now : Nat) :
+    (a verifier).verify valid scope nonce now = (b verifier).verify valid scope nonce now := by rw [h]
+
+theorem VerifierChallengeLedgers.set_other (ls : VerifierChallengeLedgers)
+    (a b : Nat) (h : b ≠ a) (l : VerifierChallengeLedger) :
+    (ls.set a l) b = ls b := by
+  simp only [set, h, ↓reduceIte]
+
+/-- Every outstanding name came from an issuance no later than the current counter. -/
+def VerifierChallengeLedger.WellFormed (l : VerifierChallengeLedger) : Prop :=
+  ∀ e ∈ l.outstanding, e.1.2 ≤ l.issued
+
+/-- Consumed (or expired and pruned) names cannot be reissued: the counter has passed them. -/
+def VerifierChallengeLedger.Retired (l : VerifierChallengeLedger) (scope : Bytes) (nonce : Nat) : Prop :=
+  nonce ≤ l.issued ∧ ∀ e ∈ l.outstanding, e.1 ≠ (scope, nonce)
+
+theorem VerifierChallengeLedger.issue_shape {l l' : VerifierChallengeLedger} {scope : Bytes} {now ttl n : Nat}
+    (h : l.issue scope now ttl = some (l', n)) :
+    n = l.issued + 1 ∧ l'.issued = l.issued + 1 ∧
+      ∀ e ∈ l'.outstanding, e.1.2 = n ∨ e ∈ l.outstanding := by
+  unfold issue at h
+  dsimp only at h
+  split at h
+  · obtain ⟨hs, hn⟩ := Prod.mk.inj (Option.some.inj h)
+    rw [← hs, ← hn]
+    refine ⟨rfl, rfl, fun e he => ?_⟩
+    rcases List.mem_cons.mp he with he | he
+    · exact Or.inl (congrArg (fun e : (Bytes × Nat) × Nat => e.1.2) he)
+    · exact Or.inr (List.mem_filter.mp he).1
+  · cases h
+
+/-- All possible ledger changes, including intervening issuance, successful consumption,
+    refusal, and changes to other scopes. No constructor permits restoring old state. -/
+inductive VerifierLedgerEvolution : VerifierChallengeLedger → VerifierChallengeLedger → Prop
+  | refl (l) : VerifierLedgerEvolution l l
+  | issue {l l' scope now ttl n} (h : l.issue scope now ttl = some (l', n)) :
+      VerifierLedgerEvolution l l'
+  | consume (l scope nonce) : VerifierLedgerEvolution l (l.consume scope nonce)
+  | prune (l now) : VerifierLedgerEvolution l (l.prune now)
+  | trans {a b c} : VerifierLedgerEvolution a b → VerifierLedgerEvolution b c →
+      VerifierLedgerEvolution a c
+
+theorem VerifierLedgerEvolution.wellFormed {l l' : VerifierChallengeLedger}
+    (h : VerifierLedgerEvolution l l') (hw : l.WellFormed) : l'.WellFormed := by
+  induction h with
+  | refl => exact hw
+  | issue h =>
+    obtain ⟨hn, hi, he⟩ := VerifierChallengeLedger.issue_shape h
+    intro e hem
+    rw [hi]
+    rcases he e hem with hnew | hold
+    · rw [hnew, hn]
+      exact Nat.le_refl _
+    · exact Nat.le_trans (hw e hold) (Nat.le_succ _)
+  | consume l scope nonce =>
+    exact fun e he => hw e (List.mem_filter.mp he).1
+  | prune l now =>
+    exact fun e he => hw e (List.mem_filter.mp he).1
+  | trans _ _ ih₁ ih₂ => exact ih₂ (ih₁ hw)
+
+theorem VerifierLedgerEvolution.retired {l l' : VerifierChallengeLedger}
+    (h : VerifierLedgerEvolution l l') {scope : Bytes} {nonce : Nat} (hr : l.Retired scope nonce) :
+    l'.Retired scope nonce := by
+  induction h with
+  | refl => exact hr
+  | issue h =>
+    obtain ⟨hn, hi, he⟩ := VerifierChallengeLedger.issue_shape h
+    refine ⟨hi ▸ Nat.le_trans hr.1 (Nat.le_succ _), fun e hem eq => ?_⟩
+    rcases he e hem with hnew | hold
+    · have hn' : nonce = _ + 1 := (congrArg Prod.snd eq).symm.trans (hnew.trans hn)
+      exact Nat.not_succ_le_self _ (hn' ▸ hr.1)
+    · exact hr.2 e hold eq
+  | consume l other n =>
+    exact ⟨hr.1, fun e he => hr.2 e (List.mem_filter.mp he).1⟩
+  | prune l now =>
+    exact ⟨hr.1, fun e he => hr.2 e (List.mem_filter.mp he).1⟩
+  | trans _ _ ih₁ ih₂ => exact ih₂ (ih₁ hr)
+
+theorem VerifierChallengeLedger.issueAttempt_evolution (l : VerifierChallengeLedger)
+    (scope : Bytes) (now ttl : Nat) :
+    VerifierLedgerEvolution l (l.issueAttempt scope now ttl).1 := by
+  unfold issueAttempt
+  split
+  · cases he : l.issue scope now ttl with
+    | none => exact .prune _ _
+    | some pair =>
+      obtain ⟨next, nonce⟩ := pair
+      exact .issue he
+  · exact .refl _
+
+theorem VerifierChallengeLedger.accepted_retired (l : VerifierChallengeLedger)
+    (scope : Bytes) (nonce now : Nat) (hw : l.WellFormed) (ha : l.accepts scope nonce now = true) :
+    (l.consume scope nonce).Retired scope nonce := by
+  obtain ⟨e, he, hb⟩ := List.any_eq_true.mp ha
+  have hn := of_decide_eq_true (Bool.and_eq_true_iff.mp hb).1
+  have hn' : e.1.2 = nonce := congrArg Prod.snd hn
+  refine ⟨hn' ▸ hw e he, fun e he => ?_⟩
+  exact of_decide_eq_true (List.mem_filter.mp he).2
+
+theorem VerifierChallengeLedger.Retired.rejects {l : VerifierChallengeLedger} {scope : Bytes} {nonce : Nat}
+    (hr : l.Retired scope nonce) (now : Nat) : l.accepts scope nonce now = false := by
+  apply Bool.eq_false_iff.mpr
+  intro ha
+  obtain ⟨e, he, hb⟩ := List.any_eq_true.mp ha
+  exact hr.2 e he (of_decide_eq_true (Bool.and_eq_true_iff.mp hb).1)
+
 /-! ## 1. Statements, ports, commands -/
 
 /-- Public selective-disclosure presentation statement pinned by the verifier (`blind_vc.rs`):
@@ -71,9 +279,12 @@ structure CredentialStatement (Attr : Type) where
   epoch : Nat
   accumulatorRoot : Digest256
   disclosed : List (Nat × Attr)
-  /-- The verifier's consumption key: the pair (verifier scope, verifier challenge) of
-      `blind_vc.rs`, as one byte string. Equal challenges under two scopes are two keys. -/
-  challengeNonce : Bytes
+  /-- Ideal fresh name of the challenge issued by this verifier ledger. -/
+  challengeNonce : Nat
+  /-- Verifier instance selected by the service caller, independently of the scope. -/
+  verifier : Nat := 0
+  verifierScope : Bytes := []
+  verificationTime : Nat := 0
   deriving DecidableEq, Repr
 
 /-- Disclosed attribute indices are strictly below `pqCredentialProfile.maxAttrs` (`32`) and
@@ -113,6 +324,7 @@ inductive CredPort where
   | issuer
   | holder (id : Nat)
   | server (index : Nat)
+  | verifier (id : Nat)
   | client
   | adversary
   deriving DecidableEq, Repr
@@ -132,6 +344,8 @@ inductive CredCommand (Attr : Type) where
   | advanceEpoch (newEpoch : Nat) (newRoot : Digest256)
   /-- `holder` shows credential `credId` for `stmt`. -/
   | present (holder : Nat) (credId : Nat) (stmt : CredentialStatement Attr)
+  /-- Only the named verifier can issue into its own ledger. -/
+  | issueChallenge (verifier : Nat) (scope : Bytes) (now ttl : Nat)
   /-- TOPRF server `server` approves `ticket`. -/
   | approveToprf (server : Nat) (ticket : ToprfTicket)
   /-- Evaluation request for `input` under `ticket`. -/
@@ -151,6 +365,7 @@ inductive CredCommand (Attr : Type) where
   | .issue _ _ _ => some .issuer
   | .advanceEpoch _ _ => some .issuer
   | .present h _ _ => some (.holder h)
+  | .issueChallenge _ _ _ _ => none
   | .approveToprf i _ => some (.server i)
   | .evalToprf _ _ => none
   | .corrupt _ => none
@@ -163,10 +378,17 @@ inductive IdealCredOutput (O : Type) where
   | issued (credId : Nat)
   | epochAdvanced (epoch : Nat)
   | presentationVerdict (ok : Bool)
+  | challengeIssued (nonce : Nat)
+  | challengeRefused
   | toprfApproved
   | toprfEvaluated (out : O)
   | corrupted
   deriving DecidableEq, Repr
+
+/-- Refusal is observable, and unlike a rejected caller port it can carry a pruned successor. -/
+def challengeIssueOutput {O : Type} : Option Nat → IdealCredOutput O
+  | some nonce => .challengeIssued nonce
+  | none => .challengeRefused
 
 /-- Configuration: initial public parameters, the initial corruption set (`issuerCorrupt`,
     `corruptHolders`, `corruptServers`: the parties corrupt before the run starts), the keyed
@@ -181,6 +403,8 @@ structure IdealCredConfig (O : Type) where
   corruptServers : List Nat
   oprf : ToprfPoint → O
   oprfQuota : Nat
+  /-- Each verifier's bound applies across all scopes issued by that instance. -/
+  challengeCapacity : Nat → Nat := fun _ => 65536
 
 /-- Number of initially corrupt TOPRF servers among the committee indices. -/
 def IdealCredConfig.corruptServerCount {O : Type} (cfg : IdealCredConfig O) : Nat :=
@@ -197,15 +421,9 @@ structure CredentialRecord (Attr : Type) where
 
 /-! ## 2. State and transition -/
 
-/-- Ideal credential state: public parameters, the current corruption set, the issued records, consumed
-    verifier challenges, recorded server approvals, the revealed part of the TOPRF graph and the
-    charged tickets (newest first).
-
-    `usedChallenges` is the union of what the verifiers' challenge ledgers have consumed
-    (`presentation_challenge.rs`), keyed by scope and challenge. Consumption is the verifier's:
-    the Rust holder keeps no challenge record and answers a repeated challenge, and a second
-    acceptance is refused by the ledger of that scope. The model has one ledger per scope and
-    does not model issuance, expiry or capacity of a ledger. -/
+/-- Credential custody and independent verifier ledgers. The holder has no challenge history;
+    `issueChallenge` acts on the verifier port and a presentation consumes only the selected
+    verifier's outstanding `(scope, nonce)` after all credential checks succeed. -/
 structure IdealCredState (Attr O : Type) where
   issuerPk : Bytes
   epoch : Nat
@@ -215,7 +433,7 @@ structure IdealCredState (Attr O : Type) where
   corruptHolders : List Nat
   corruptServers : List Nat
   records : List (CredentialRecord Attr)
-  usedChallenges : List Bytes
+  challengeLedgers : VerifierChallengeLedgers
   toprfApprovals : List (Nat × ToprfTicket)
   oprfTable : List (ToprfPoint × O)
   oprfCharges : List ToprfTicket
@@ -230,7 +448,7 @@ structure IdealCredState (Attr O : Type) where
     corruptHolders := cfg.corruptHolders
     corruptServers := cfg.corruptServers
     records := []
-    usedChallenges := []
+    challengeLedgers := fun verifier => { capacity := cfg.challengeCapacity verifier }
     toprfApprovals := []
     oprfTable := []
     oprfCharges := [] }
@@ -302,6 +520,7 @@ theorem IdealCredState.withCorrupt_le {Attr O : Type} (st : IdealCredState Attr 
     decide (port = .issuer) || (decide (port = .adversary) && st.issuerCorrupt)
   | .present h _ _ =>
     decide (port = .holder h) || (decide (port = .adversary) && decide (h ∈ st.corruptHolders))
+  | .issueChallenge verifier _ _ _ => decide (port = .verifier verifier)
   | .approveToprf i _ =>
     decide (port = .server i) || (decide (port = .adversary) && decide (i ∈ st.corruptServers))
   | .evalToprf _ _ => true
@@ -327,7 +546,7 @@ def IdealCredState.presentAccepts {Attr O : Type} [DecidableEq Attr]
   decide (stmt.issuerPk = st.issuerPk) &&
   decide (stmt.epoch = st.epoch) &&
   decide (stmt.accumulatorRoot = st.accumulatorRoot) &&
-  decide (stmt.challengeNonce ∉ st.usedChallenges) &&
+  (st.challengeLedgers stmt.verifier).accepts stmt.verifierScope stmt.challengeNonce stmt.verificationTime &&
   st.eligible h cid stmt
 
 /-- Number of distinct committee servers that approved `t`. -/
@@ -376,9 +595,13 @@ def credExec {Attr O : Type} [DecidableEq Attr] (cfg : IdealCredConfig O)
     else none
   | .present h cid stmt =>
     if st.presentAccepts h cid stmt then
-      some ({ st with usedChallenges := stmt.challengeNonce :: st.usedChallenges },
+      some ({ st with challengeLedgers := st.challengeLedgers.consume stmt.verifier stmt.verifierScope stmt.challengeNonce },
             .presentationVerdict true)
     else some (st, .presentationVerdict false)
+  | .issueChallenge verifier scope now ttl =>
+    let attempt := (st.challengeLedgers verifier).issueAttempt scope now ttl
+    some ({ st with challengeLedgers := st.challengeLedgers.set verifier attempt.1 },
+      challengeIssueOutput attempt.2)
   | .approveToprf i t =>
     if decide (i < pqCredentialProfile.toprfServers) && decide (t.epoch = st.epoch) then
       some ({ st with toprfApprovals := (i, t) :: st.toprfApprovals }, .toprfApproved)
@@ -488,7 +711,7 @@ theorem credExec_present_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr 
     (h cid : Nat) (stmt : CredentialStatement Attr) :
     credExec cfg st (.present h cid stmt) =
       some (if st.presentAccepts h cid stmt then
-              ({ st with usedChallenges := stmt.challengeNonce :: st.usedChallenges },
+              ({ st with challengeLedgers := st.challengeLedgers.consume stmt.verifier stmt.verifierScope stmt.challengeNonce },
                IdealCredOutput.presentationVerdict true)
             else (st, IdealCredOutput.presentationVerdict false)) := by
   cases hC : st.presentAccepts h cid stmt with
@@ -517,7 +740,7 @@ theorem IdealCredState.presentAccepts_eq (st : IdealCredState Attr O)
       (decide (stmt.issuerPk = st.issuerPk) &&
        decide (stmt.epoch = st.epoch) &&
        decide (stmt.accumulatorRoot = st.accumulatorRoot) &&
-       decide (stmt.challengeNonce ∉ st.usedChallenges) &&
+       (st.challengeLedgers stmt.verifier).accepts stmt.verifierScope stmt.challengeNonce stmt.verificationTime &&
        st.eligible h cid stmt) := by
   rfl
 
@@ -593,7 +816,7 @@ theorem credExec_evalToprf_eq (cfg : IdealCredConfig O) (st : IdealCredState Att
 theorem credExec_present_true_inv {h cid : Nat} {stmt : CredentialStatement Attr}
     (hExec : credExec cfg st (.present h cid stmt) = some (st', .presentationVerdict true)) :
     st.presentAccepts h cid stmt = true ∧
-    st' = { st with usedChallenges := stmt.challengeNonce :: st.usedChallenges } := by
+    st' = { st with challengeLedgers := st.challengeLedgers.consume stmt.verifier stmt.verifierScope stmt.challengeNonce } := by
   rw [credExec_present_eq] at hExec
   cases hC : st.presentAccepts h cid stmt with
   | false =>
@@ -604,6 +827,23 @@ theorem credExec_present_true_inv {h cid : Nat} {stmt : CredentialStatement Attr
     simp only [hC, ↓reduceIte] at hExec
     obtain ⟨hSt, _⟩ := Prod.mk.inj (Option.some.inj hExec)
     exact ⟨rfl, hSt.symm⟩
+
+theorem credExec_issueChallenge_eq (cfg : IdealCredConfig O) (st : IdealCredState Attr O)
+    (verifier : Nat) (scope : Bytes) (now ttl : Nat) :
+    credExec cfg st (.issueChallenge verifier scope now ttl) =
+      let attempt := (st.challengeLedgers verifier).issueAttempt scope now ttl
+      some ({ st with challengeLedgers := st.challengeLedgers.set verifier attempt.1 },
+        challengeIssueOutput attempt.2) := by
+  rfl
+
+theorem credExec_issueChallenge_inv {verifier : Nat} {scope : Bytes} {now ttl : Nat}
+    (hExec : credExec cfg st (.issueChallenge verifier scope now ttl) = some (st', out)) :
+    ∃ l result, (st.challengeLedgers verifier).issueAttempt scope now ttl = (l, result) ∧
+      st' = { st with challengeLedgers := st.challengeLedgers.set verifier l } ∧
+      out = challengeIssueOutput result := by
+  simp only [credExec] at hExec
+  obtain ⟨hs, ho⟩ := Prod.mk.inj (Option.some.inj hExec)
+  exact ⟨_, _, rfl, hs.symm, ho.symm⟩
 
 theorem credExec_approveToprf_inv {i : Nat} {t : ToprfTicket}
     (hExec : credExec cfg st (.approveToprf i t) = some (st', out)) :
@@ -680,11 +920,17 @@ theorem idealCredStep_output_command {port : CredPort} {cmd : CredCommand Attr}
     | .issued _ => ∃ h attrs newRoot, cmd = .issue h attrs newRoot
     | .epochAdvanced _ => ∃ newEpoch newRoot, cmd = .advanceEpoch newEpoch newRoot
     | .presentationVerdict _ => ∃ h cid stmt, cmd = .present h cid stmt
+    | .challengeIssued _ => ∃ verifier scope now ttl, cmd = .issueChallenge verifier scope now ttl
+    | .challengeRefused => ∃ verifier scope now ttl, cmd = .issueChallenge verifier scope now ttl
     | .toprfApproved => ∃ i t, cmd = .approveToprf i t
     | .toprfEvaluated _ => ∃ t input, cmd = .evalToprf t input
     | .corrupted => ∃ party, cmd = .corrupt party := by
   have hExec := (idealCredStep_inv hStep).2
   cases cmd with
+  | issueChallenge verifier scope now ttl =>
+    obtain ⟨_, result, _, _, hOut⟩ := credExec_issueChallenge_inv hExec
+    subst hOut
+    cases result <;> exact ⟨verifier, scope, now, ttl, rfl⟩
   | issue h attrs newRoot =>
     obtain ⟨_, _, hOut⟩ := credExec_issue_inv hExec
     subst hOut
@@ -737,6 +983,79 @@ theorem idealCredStep_issuer_issues_at_init (cfg : IdealCredConfig O) (h : Nat) 
   rfl
 
 end Inversion
+
+/-- The actual machine makes only lawful ledger changes, independently at each verifier. -/
+theorem credExec_ledger_evolution {Attr O : Type} [DecidableEq Attr]
+    {cfg : IdealCredConfig O} {st st' : IdealCredState Attr O}
+    {cmd : CredCommand Attr} {out : IdealCredOutput O}
+    (hs : credExec cfg st cmd = some (st', out)) (scope : Nat) :
+    VerifierLedgerEvolution (st.challengeLedgers scope) (st'.challengeLedgers scope) := by
+  cases cmd with
+  | issueChallenge target issueScope now ttl =>
+    obtain ⟨l, n, hi, hst, _⟩ := credExec_issueChallenge_inv hs
+    subst hst
+    by_cases he : scope = target
+    · subst scope
+      have hev := (st.challengeLedgers target).issueAttempt_evolution issueScope now ttl
+      rw [hi] at hev
+      simpa only [VerifierChallengeLedgers.set, ↓reduceIte] using
+        hev
+    · simp only [VerifierChallengeLedgers.set, he, ↓reduceIte]
+      exact .refl _
+  | present h cid stmt =>
+    rw [credExec_present_eq] at hs
+    cases ha : st.presentAccepts h cid stmt <;>
+      simp only [ha, Bool.false_eq_true, ↓reduceIte] at hs
+    · have hst := (Prod.mk.inj (Option.some.inj hs)).1
+      rw [← hst]
+      exact .refl _
+    · have hst := (Prod.mk.inj (Option.some.inj hs)).1
+      rw [← hst]
+      by_cases he : scope = stmt.verifier
+      · simp only [VerifierChallengeLedgers.consume, VerifierChallengeLedgers.set,
+          he, ↓reduceIte]
+        exact .consume _ _ _
+      · simp only [VerifierChallengeLedgers.consume, VerifierChallengeLedgers.set,
+          he, ↓reduceIte]
+        exact .refl _
+  | issue h attrs root =>
+    obtain ⟨_, hst, _⟩ := credExec_issue_inv hs
+    subst hst
+    exact .refl _
+  | advanceEpoch epoch root =>
+    obtain ⟨_, hst, _⟩ := credExec_advanceEpoch_inv hs
+    subst hst
+    exact .refl _
+  | approveToprf i t =>
+    obtain ⟨_, _, hst, _⟩ := credExec_approveToprf_inv hs
+    subst hst
+    exact .refl _
+  | evalToprf t input =>
+    obtain ⟨_, hcase⟩ := credExec_evalToprf_inv hs
+    rcases hcase with ⟨_, _, hst, _⟩ | ⟨hst, _⟩ <;> subst hst <;> exact .refl _
+  | corrupt party =>
+    obtain ⟨hst, _⟩ := credExec_corrupt_inv hs
+    subst hst
+    cases party <;> exact .refl _
+
+theorem idealCredMachine_ledger_evolution {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {st st' : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (ht : (idealCredMachine cfg).ValidTrace st tr st') (scope : Nat) :
+    VerifierLedgerEvolution (st.challengeLedgers scope) (st'.challengeLedgers scope) := by
+  induction ht with
+  | nil => exact .refl _
+  | accept hs _ ih => exact .trans (credExec_ledger_evolution (idealCredStep_inv hs).2 scope) ih
+  | reject _ _ _ ih => exact ih
+
+theorem idealCredMachine_ledger_wellFormed {Attr O : Type} [DecidableEq Attr]
+    {cfg : IdealCredConfig O} {st : IdealCredState Attr O}
+    (hr : (idealCredMachine cfg).Reachable st) (scope : Nat) :
+    (st.challengeLedgers scope).WellFormed := by
+  obtain ⟨s, tr, hi, ht⟩ := hr
+  have he : s = IdealCredState.empty cfg := hi
+  subst s
+  exact (idealCredMachine_ledger_evolution cfg ht scope).wellFormed (fun _ h => nomatch h)
 
 /-! ## 4. Reachable-state invariant -/
 
@@ -844,6 +1163,12 @@ theorem idealCredInv_exec {Attr O : Type} [DecidableEq Attr] {cfg : IdealCredCon
     (hInv : IdealCredInv cfg st) (hExec : credExec cfg st cmd = some (st', out)) :
     IdealCredInv cfg st' := by
   cases cmd with
+  | issueChallenge verifier scope now ttl =>
+    obtain ⟨_, _, _, hSt, _⟩ := credExec_issueChallenge_inv hExec
+    subst hSt
+    exact ⟨hInv.issuerPk_eq, hInv.issuerCorrupt_of_cfg, hInv.corruptHolders_of_cfg,
+      hInv.corruptServers_of_cfg, hInv.records_wf, hInv.table_graph, hInv.table_charged,
+      hInv.charges_budget, hInv.charges_fresh⟩
   | issue h attrs newRoot =>
     obtain ⟨hAcc, hSt, _⟩ := credExec_issue_inv hExec
     simp only [IdealCredState.issueAccepts, Bool.and_eq_true, decide_eq_true_eq] at hAcc
@@ -953,6 +1278,9 @@ theorem idealCredStep_attributed {Attr O : Type} [DecidableEq Attr] (cfg : Ideal
     port = party.port ∨ (port = CredPort.adversary ∧ st.isCorrupt party) := by
   have hSpeak := (idealCredStep_inv hStep).1
   cases cmd with
+  | issueChallenge verifier scope now ttl =>
+    have hP : (none : Option CredParty) = some party := hParty
+    exact nomatch hP
   | issue h attrs newRoot =>
     have hP : CredParty.issuer = party := Option.some.inj hParty
     subst hP
@@ -1006,6 +1334,10 @@ theorem idealCredStep_provenance {Attr O : Type} [DecidableEq Attr] (cfg : Ideal
   obtain ⟨port, cmd⟩ := inp
   obtain ⟨hSpeak, hExec⟩ := idealCredStep_inv hStep
   cases cmd with
+  | issueChallenge verifier scope now ttl =>
+    obtain ⟨_, _, _, hSt, _⟩ := credExec_issueChallenge_inv hExec
+    subst hSt
+    exact ⟨credCorruptionLe_of_eq rfl rfl rfl, fun _ hr => Or.inl hr, fun _ ha => Or.inl ha⟩
   | issue h attrs newRoot =>
     obtain ⟨_, hSt, hOut⟩ := credExec_issue_inv hExec
     simp only [IdealCredState.speaksFor, Bool.or_eq_true, Bool.and_eq_true,
@@ -1377,8 +1709,8 @@ theorem idealCredMachine_presentation_sound {Attr O : Type} [DecidableEq Attr]
     stmt.issuerPk = st.issuerPk ∧
     stmt.epoch = st.epoch ∧
     stmt.accumulatorRoot = st.accumulatorRoot ∧
-    stmt.challengeNonce ∉ st.usedChallenges ∧
-    stmt.challengeNonce ∈ st'.usedChallenges ∧
+    (st.challengeLedgers stmt.verifier).accepts stmt.verifierScope stmt.challengeNonce stmt.verificationTime = true ∧
+    (∀ now, (st'.challengeLedgers stmt.verifier).accepts stmt.verifierScope stmt.challengeNonce now = false) ∧
     DisclosedIndicesValid stmt = true ∧
     ∃ r ∈ st.records, r.credId = cid ∧ r.holder = h ∧ r.epoch = st.epoch ∧
       CredentialMatchesAttributes stmt r.attrs = true := by
@@ -1394,7 +1726,10 @@ theorem idealCredMachine_presentation_sound {Attr O : Type} [DecidableEq Attr]
     simp only [CredentialMatchesAttributes, Bool.and_eq_true] at hM
     exact hM.1.2
   subst hSt
-  exact ⟨hSpeak, hPk, hEp, hRoot, hFresh, List.Mem.head _, hIdx, r, hr, hId, hH, hREp, hMatch⟩
+  refine ⟨hSpeak, hPk, hEp, hRoot, hFresh, ?_, hIdx, r, hr, hId, hH, hREp, hMatch⟩
+  intro now
+  simp only [VerifierChallengeLedgers.consume, VerifierChallengeLedgers.set, ↓reduceIte]
+  exact VerifierChallengeLedger.consume_rejects _ _ _ _
 
 /-- **Possession provenance.** If, after a run from the initial state, a presentation of
     credential `cid` by holder `h` is accepted in state `st`, then it arrived on the port of `h`,
@@ -1486,7 +1821,7 @@ theorem idealCredMachine_rejects_foreign_corrupt {Attr O : Type} [DecidableEq At
 
 /-- A corruption request on the adversary port is answered in every state; afterwards the party is
     corrupt, every earlier corrupt party still is, and records, approvals, charges, epoch and
-    used challenges are unchanged. -/
+    verifier ledgers are unchanged. -/
 theorem idealCredMachine_corrupt_accepted {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) (st : IdealCredState Attr O) (party : CredParty) :
     ∃ st' : IdealCredState Attr O,
@@ -1495,7 +1830,7 @@ theorem idealCredMachine_corrupt_accepted {Attr O : Type} [DecidableEq Attr]
       st'.records = st.records ∧ st'.toprfApprovals = st.toprfApprovals ∧
       st'.oprfCharges = st.oprfCharges ∧ st'.oprfTable = st.oprfTable ∧
       st'.epoch = st.epoch ∧ st'.accumulatorRoot = st.accumulatorRoot ∧
-      st'.usedChallenges = st.usedChallenges := by
+      st'.challengeLedgers = st.challengeLedgers := by
   refine ⟨st.withCorrupt party, idealCredStep_corrupt_eq cfg st party,
     (st.withCorrupt_le party).1, (st.withCorrupt_le party).2, ?_⟩
   cases party <;> exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
@@ -1569,6 +1904,8 @@ theorem idealCredMachine_rejects_retired_credential {Attr O : Type} [DecidableEq
 theorem idealCredMachine_rejects_replayed_challenge {Attr O : Type} [DecidableEq Attr]
     (cfg : IdealCredConfig O) {st st₁ st₂ : IdealCredState Attr O} (port port' : CredPort)
     (h cid h' cid' : Nat) (stmt stmt' : CredentialStatement Attr)
+    (hVerifier : stmt'.verifier = stmt.verifier)
+    (hScope : stmt'.verifierScope = stmt.verifierScope)
     (hSame : stmt'.challengeNonce = stmt.challengeNonce)
     (hFirst : (idealCredMachine cfg).step st (port, .present h cid stmt) =
       some (st₁, .presentationVerdict true)) :
@@ -1577,8 +1914,84 @@ theorem idealCredMachine_rejects_replayed_challenge {Attr O : Type} [DecidableEq
   intro hSecond
   obtain ⟨_, _, _, _, _, hBurned, _⟩ := idealCredMachine_presentation_sound cfg hFirst
   obtain ⟨_, _, _, _, hFresh, _⟩ := idealCredMachine_presentation_sound cfg hSecond
-  rw [hSame] at hFresh
-  exact hFresh hBurned
+  rw [hVerifier, hSame, hScope, hBurned] at hFresh
+  cases hFresh
+
+/-- At most one acceptance of a challenge in its scope throughout a run, even with arbitrary
+    intervening issuance, other presentations, epoch changes, corruption, and clock rollback. -/
+theorem idealCredMachine_challenge_at_most_once_trace {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {st st₁ mid st₂ : IdealCredState Attr O}
+    {tr : List (IdealCredInput Attr × IdealCredOutput O)}
+    (port port' : CredPort) (h cid h' cid' : Nat) (stmt stmt' : CredentialStatement Attr)
+    (hr : (idealCredMachine cfg).Reachable st)
+    (hFirst : (idealCredMachine cfg).step st (port, .present h cid stmt) =
+      some (st₁, .presentationVerdict true))
+    (ht : (idealCredMachine cfg).ValidTrace st₁ tr mid)
+    (hVerifier : stmt'.verifier = stmt.verifier)
+    (hScope : stmt'.verifierScope = stmt.verifierScope)
+    (hNonce : stmt'.challengeNonce = stmt.challengeNonce) :
+    (idealCredMachine cfg).step mid (port', .present h' cid' stmt') ≠
+      some (st₂, .presentationVerdict true) := by
+  have hw := idealCredMachine_ledger_wellFormed hr stmt.verifier
+  have ha := (idealCredMachine_presentation_sound cfg hFirst).2.2.2.2.1
+  have hRet := VerifierChallengeLedger.accepted_retired _ _ _ _ hw ha
+  obtain ⟨_, hs⟩ := credExec_present_true_inv (idealCredStep_inv hFirst).2
+  have hRet₁ : (st₁.challengeLedgers stmt.verifier).Retired stmt.verifierScope stmt.challengeNonce := by
+    rw [hs]
+    simpa only [VerifierChallengeLedgers.consume, VerifierChallengeLedgers.set, ↓reduceIte] using hRet
+  have hRetMid := (idealCredMachine_ledger_evolution cfg ht stmt.verifier).retired hRet₁
+  intro hSecond
+  have hb := (idealCredMachine_presentation_sound cfg hSecond).2.2.2.2.1
+  rw [hVerifier, hScope, hNonce, hRetMid.rejects] at hb
+  cases hb
+
+/-- Changing another verifier's entire ledger cannot change this verifier's presentation verdict,
+    even when both use the identical scope and nonce. The other verifier's consumption history
+    cannot become a refusal side channel. -/
+theorem idealCredMachine_presentation_ledger_noninterference {Attr O : Type} [DecidableEq Attr]
+    (st : IdealCredState Attr O) (other : Nat) (replacement : VerifierChallengeLedger)
+    (h cid : Nat) (stmt : CredentialStatement Attr) (hne : stmt.verifier ≠ other) :
+    ({ st with challengeLedgers := st.challengeLedgers.set other replacement } :
+      IdealCredState Attr O).presentAccepts h cid stmt = st.presentAccepts h cid stmt := by
+  simp only [IdealCredState.presentAccepts, IdealCredState.eligible,
+    VerifierChallengeLedgers.set, hne, ↓reduceIte]
+
+/-- A real accepted presentation on A leaves all of B's ledger state untouched, including
+    B's outstanding challenges, issuance counter, capacity, and resulting refusals. -/
+theorem idealCredMachine_presentation_preserves_other_ledger {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {st st' : IdealCredState Attr O} {port : CredPort} {h cid : Nat}
+    {stmt : CredentialStatement Attr} (other : Nat) (hne : other ≠ stmt.verifier)
+    (hs : (idealCredMachine cfg).step st (port, .present h cid stmt) =
+      some (st', .presentationVerdict true)) :
+    st'.challengeLedgers other = st.challengeLedgers other := by
+  obtain ⟨_, he⟩ := credExec_present_true_inv (idealCredStep_inv hs).2
+  rw [he]
+  exact VerifierChallengeLedgers.set_other _ _ _ hne _
+
+/-- Issuance on A cannot consume B's capacity or change B's issued names or refusals. -/
+theorem idealCredMachine_issue_preserves_other_ledger {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {st st' : IdealCredState Attr O} {port : CredPort}
+    {verifier : Nat} {scope : Bytes} {now ttl : Nat} {out : IdealCredOutput O}
+    (other : Nat) (hne : other ≠ verifier)
+    (hs : (idealCredMachine cfg).step st (port, .issueChallenge verifier scope now ttl) = some (st', out)) :
+    st'.challengeLedgers other = st.challengeLedgers other := by
+  obtain ⟨_, _, _, he, _⟩ := credExec_issueChallenge_inv (idealCredStep_inv hs).2
+  rw [he]
+  exact VerifierChallengeLedgers.set_other _ _ _ hne _
+
+/-- The other verifier cannot detect an accepted presentation through its next refusal:
+    the actual successor machine state gives exactly the same verdict at its scope. -/
+theorem idealCredMachine_presentation_preserves_other_verdict {Attr O : Type} [DecidableEq Attr]
+    (cfg : IdealCredConfig O) {st st' : IdealCredState Attr O} {port : CredPort} {h cid : Nat}
+    {stmt : CredentialStatement Attr} (h' cid' : Nat) (other : CredentialStatement Attr)
+    (hne : other.verifier ≠ stmt.verifier)
+    (hs : (idealCredMachine cfg).step st (port, .present h cid stmt) =
+      some (st', .presentationVerdict true)) :
+    st'.presentAccepts h' cid' other = st.presentAccepts h' cid' other := by
+  obtain ⟨_, he⟩ := credExec_present_true_inv (idealCredStep_inv hs).2
+  rw [he]
+  exact idealCredMachine_presentation_ledger_noninterference st stmt.verifier
+    ((st.challengeLedgers stmt.verifier).consume stmt.verifierScope stmt.challengeNonce) h' cid' other hne
 
 /-! ## 6. Selective-disclosure privacy and unlinkability -/
 
@@ -1879,12 +2292,12 @@ def idealCredDemoConfig (issuerCorrupt : Bool) : IdealCredConfig Nat where
 /-- State after the honest issuer issued credential `0` with attributes `[11, 22]` to holder `1`. -/
 def idealCredDemoState : IdealCredState Nat Nat :=
   (credRun (idealCredMachine (idealCredDemoConfig false)) (IdealCredState.empty (idealCredDemoConfig false))
-    [(.issuer, .issue 1 [11, 22] 1#256)]).1
+    [(.issuer, .issue 1 [11, 22] 1#256), (.verifier 0, .issueChallenge 0 [] 0 60)]).1
 
 /-- Statement against the demo state disclosing `disclosed`. -/
 def idealCredDemoStatement (disclosed : List (Nat × Nat)) : CredentialStatement Nat :=
   { issuerPk := [1], epoch := 0, accumulatorRoot := 1#256, disclosed := disclosed,
-    challengeNonce := [9] }
+    challengeNonce := 1 }
 
 /-- The gates are satisfiable: the issuer-port issuance is answered with identifier `0`, and
     holder `1` is accepted on its own port for the empty disclosure and for attribute `1`. -/
@@ -2084,7 +2497,152 @@ theorem idealCredDemo_toprf_provenance_needs_corruption_bound :
     have hAdv := List.all_eq_true.mp hNoServer _ hi
     exact nomatch of_decide_eq_true hAdv
 
+/-! ## Independent verifier ledgers, issuance and consumption order -/
+
+def ledgerTeethStatement (verifier : Nat) : CredentialStatement Nat :=
+  { issuerPk := [1], epoch := 0, accumulatorRoot := 1#256, disclosed := [],
+    verifier := verifier, verifierScope := [9], challengeNonce := 1, verificationTime := 1 }
+
+/-- Both verifiers issue the same ideal nonce name. A accepts once, its replay is refused,
+    and B still accepts. A later issuance cannot resurrect A's first nonce. -/
+def ledgerTeethIndependentOutputs : List (Option (IdealCredOutput Nat)) :=
+  (credRun (idealCredMachine (idealCredDemoConfig false))
+      (IdealCredState.empty (idealCredDemoConfig false))
+      [(.issuer, .issue 1 [11, 22] 1#256),
+       (.verifier 1, .issueChallenge 1 [9] 0 60),
+       (.verifier 2, .issueChallenge 2 [9] 0 60),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 1)),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 1)),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 2)),
+       (.verifier 1, .issueChallenge 1 [9] 0 60),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 1))]).2
+
+theorem tooth_verifiers_independent_and_replay_refused :
+    ledgerTeethIndependentOutputs =
+      [some (.issued 0), some (.challengeIssued 1), some (.challengeIssued 1),
+       some (.presentationVerdict true), some (.presentationVerdict false),
+       some (.presentationVerdict true), some (.challengeIssued 2),
+       some (.presentationVerdict false)] := by
+  decide +kernel
+
+/-- Wrong proof/statement, unknown challenge, expired challenge, and foreign verifier port are
+    refusals. The invalid statement does not burn the outstanding valid challenge. -/
+def ledgerTeethInvalidOutputs : List (Option (IdealCredOutput Nat)) :=
+  (credRun (idealCredMachine (idealCredDemoConfig false))
+      (IdealCredState.empty (idealCredDemoConfig false))
+      [(.issuer, .issue 1 [11, 22] 1#256),
+       (.verifier 2, .issueChallenge 1 [9] 0 60),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 1)),
+       (.verifier 1, .issueChallenge 1 [9] 0 60),
+       (.holder 1, .present 1 0 { ledgerTeethStatement 1 with verifierScope := [8] }),
+       (.holder 1, .present 1 0 { ledgerTeethStatement 1 with disclosed := [(0, 99)] }),
+       (.holder 1, .present 1 0 { ledgerTeethStatement 1 with verificationTime := 60 }),
+       (.holder 1, .present 1 0 (ledgerTeethStatement 1))]).2
+
+theorem tooth_invalid_proof_does_not_consume_challenge :
+    ledgerTeethInvalidOutputs =
+      [some (.issued 0), none, some (.presentationVerdict false), some (.challengeIssued 1),
+       some (.presentationVerdict false), some (.presentationVerdict false), some (.presentationVerdict false),
+       some (.presentationVerdict true)] := by
+  decide +kernel
+
+def ledgerTeethFull : VerifierChallengeLedger :=
+  { capacity := 2, issued := 2, outstanding := [(([1], 1), 10), (([2], 2), 50)] }
+
+/-- Full capacity refuses to evict live sessions, while expiry and consumption free capacity.
+    The issue counter continues past consumed names. Invalid capacities/lifetimes fail closed. -/
+theorem tooth_ledger_capacity_expiry_and_fresh_issuance :
+    ledgerTeethFull.issue [3] 9 10 = none ∧
+    (ledgerTeethFull.issue [3] 10 10).map (fun p => (p.1.outstanding, p.2)) =
+      some ([(([3], 3), 20), (([2], 2), 50)], 3) ∧
+    ((ledgerTeethFull.consume [1] 1).issue [2] 1 10).map Prod.snd = some 3 ∧
+    ({ capacity := 0 } : VerifierChallengeLedger).issue [] 0 10 = none ∧
+    ({ capacity := 65537 } : VerifierChallengeLedger).issue [] 0 10 = none ∧
+    ({} : VerifierChallengeLedger).issue [] 0 0 = none ∧
+    ({} : VerifierChallengeLedger).issue [] (2^64 - 1) 1 = none := by
+  decide +kernel
+
+/-- A verifier's capacity is shared across scopes, while another verifier has its own capacity. -/
+theorem tooth_capacity_shared_by_scopes_not_verifiers :
+    (credRun (idealCredMachine { idealCredDemoConfig false with challengeCapacity := fun _ => 1 })
+      (IdealCredState.empty { idealCredDemoConfig false with challengeCapacity := fun _ => 1 })
+      [(.verifier 1, CredCommand.issueChallenge (Attr := Nat) 1 [1] 0 60),
+       (.verifier 1, .issueChallenge 1 [2] 0 60),
+       (.verifier 2, .issueChallenge 2 [2] 0 60)]).2 =
+      [some (.challengeIssued 1), some .challengeRefused, some (.challengeIssued 1)] := by
+  decide +kernel
+
+def ledgerTeethExhausted : VerifierChallengeLedger :=
+  { capacity := 2, issued := 2^64 - 1, outstanding := [(([1], 1), 10)] }
+
+/-- Counter exhaustion happens after expiry pruning. A subsequent backwards clock cannot
+    restore that expired entry; an earlier lifetime-validation failure does not prune it. -/
+theorem tooth_failed_issue_retains_pruning :
+    (ledgerTeethExhausted.issueAttempt [2] 10 1).2 = none ∧
+    (ledgerTeethExhausted.issueAttempt [2] 10 1).1.accepts [1] 1 0 = false ∧
+    (ledgerTeethExhausted.issueAttempt [2] 10 0).1.accepts [1] 1 0 = true := by
+  decide +kernel
+
+/-- The deliberately named opt-out really permits replay; it is not covered by the ledger
+    one-time acceptance theorem. A different expected challenge is still rejected. -/
+theorem tooth_replay_not_prevented_really_replays :
+    [1, 1, 2].map (fun nonce => ReplayNotPrevented 1 nonce true) =
+      [true, true, false] := by
+  decide +kernel
+
 #verify_constructive
+  tooth_verifiers_independent_and_replay_refused
+  tooth_invalid_proof_does_not_consume_challenge
+  tooth_ledger_capacity_expiry_and_fresh_issuance
+  tooth_capacity_shared_by_scopes_not_verifiers
+  tooth_failed_issue_retains_pruning
+  tooth_replay_not_prevented_really_replays
+
+/-- Refute a global challenge blacklist: it would refuse verifier B after verifier A's
+    acceptance, despite B's independently issued, identical `(scope, nonce)`. -/
+theorem tooth_global_challenge_blacklist_wrong :
+    ledgerTeethIndependentOutputs ≠
+      [some (.issued 0), some (.challengeIssued 1), some (.challengeIssued 1),
+       some (.presentationVerdict true), some (.presentationVerdict false),
+       some (.presentationVerdict false), some (.challengeIssued 2),
+       some (.presentationVerdict false)] := by
+  decide +kernel
+
+/-- Refute consumption before verification: the valid attempt after the forged one succeeds. -/
+theorem tooth_consume_before_verify_wrong :
+    ledgerTeethInvalidOutputs ≠
+      [some (.issued 0), none, some (.presentationVerdict false), some (.challengeIssued 1),
+       some (.presentationVerdict false), some (.presentationVerdict false),
+       some (.presentationVerdict false), some (.presentationVerdict false)] := by
+  decide +kernel
+
+/-- Refute failure to remove the first challenge: its last replay still fails after reissuance. -/
+theorem tooth_reissue_resurrects_consumed_nonce_wrong :
+    ledgerTeethIndependentOutputs ≠
+      [some (.issued 0), some (.challengeIssued 1), some (.challengeIssued 1),
+       some (.presentationVerdict true), some (.presentationVerdict false),
+       some (.presentationVerdict true), some (.challengeIssued 2),
+       some (.presentationVerdict true)] := by
+  decide +kernel
+
+#tooth_pair idealCredMachine_challenge_at_most_once_trace vs
+  tooth_reissue_resurrects_consumed_nonce_wrong
+#tooth_pair idealCredMachine_presentation_preserves_other_verdict vs
+  tooth_global_challenge_blacklist_wrong
+#tooth_pair idealCredMachine_presentation_sound vs
+  tooth_consume_before_verify_wrong
+
+#verify_constructive
+  Qsag.Spec.VerifierChallengeLedger.accepted_at_most_once
+  Qsag.Spec.VerifierChallengeLedger.invalid_proof_preserves
+  Qsag.Spec.VerifierLedgerEvolution.wellFormed
+  Qsag.Spec.VerifierLedgerEvolution.retired
+  Qsag.Spec.idealCredMachine_ledger_evolution
+  Qsag.Spec.idealCredMachine_challenge_at_most_once_trace
+  Qsag.Spec.idealCredMachine_presentation_ledger_noninterference
+  Qsag.Spec.idealCredMachine_presentation_preserves_other_ledger
+  Qsag.Spec.idealCredMachine_issue_preserves_other_ledger
+  Qsag.Spec.idealCredMachine_presentation_preserves_other_verdict
   Qsag.Spec.idealCredInv_exec
   Qsag.Spec.idealCredInv_reachable
   Qsag.Spec.idealCredStep_provenance

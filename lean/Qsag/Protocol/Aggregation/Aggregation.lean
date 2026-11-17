@@ -514,15 +514,22 @@ theorem WhirSecurityRegime.decodeTag?_isSome_iff (tag : UInt8) :
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 0
   | _ => 16
 
-/-- `WhirSecurityRegime::pure_query_target_bits`: the exponent `t` such that every stage's
-    distinct-fiber query error is below `2^-t` (`whirRegime_positive_slack`). -/
+/-- `WhirSecurityRegime::pure_query_target_bits`: the nominal query target `t`, not a
+    measured soundness level. `whirRegime_positive_slack` proves the scalar expression
+    `(1 / √B + η)^q < 2^-t`; `whir_regime_query_miss_lt` requires the corresponding
+    bad-fiber density as a hypothesis. Neither includes the deployed fold loss. With that
+    loss, tag `2` has a worst query round of 124.467 bits (about 124.5), below its 128-bit
+    target; see `crates/qsag-agg/src/zk_hem/bounds.rs`,
+    `stage_bounds_against_the_constants_asserted_by_the_regimes`, and the crate's
+    `SECURITY.md`. Tags `4` through `10` meet their query targets at `2^17..2^24` cells. -/
 @[expose] def WhirSecurityRegime.pureQueryTargetBits : WhirSecurityRegime → Nat
   | .bciksJohnsonClassical128 => 128
   | .bciksJohnsonQrom128 | .turboShakeBciksJohnsonQrom128 => 256
   | .cdhz25JohnsonQrom128 | .poseidon2Cdhz25JohnsonQrom128 | .turboShakeCdhz25JohnsonQrom128 => 200
   | .cdhz25ZeroPowQrom128 | .poseidon2Cdhz25ZeroPowQrom128 => 214
 
-/-- `WhirSecurityRegime::classical_fs_round_bits`: query target plus PoW bits. -/
+/-- `WhirSecurityRegime::classical_fs_round_bits`: nominal query target plus PoW bits.
+    In particular, tag `2`'s `144` is not a lower bound on the analysed round security. -/
 @[expose] def WhirSecurityRegime.classicalFsRoundBits (r : WhirSecurityRegime) : Nat :=
   r.pureQueryTargetBits + r.powBits
 
@@ -624,11 +631,13 @@ theorem tooth_retired_capacity_queries_fail_johnson_qrom256 :
       ¬ ((1024 / p.1 + 1) ^ p.2 * 2 ^ 256 < 1024 ^ p.2) := by
   decide +kernel
 
-/-- **Unconditional `[BCIKS20]` Classical-128 Positive Johnson Proximity Slack
+/-- **Classical-128 scalar positive-slack inequality
     (`bciksJohnsonClassical128_positive_slack`)**:
     With `+1` query (`q = (129, 65, 44, 33)`), EVERY stage satisfies `(1 / √B_s + η)^{q_s} < 2^-128`
     at concrete positive proximity slack `η = 1 / 512 > 0` (yielding explicit finite `[BCIKS20]`
-    list-decoding bound `L ≤ 1 / (2η) = 256`). -/
+    list-decoding bound `L ≤ 1 / (2η) = 256`). This arithmetic statement does not prove
+    that the deployed folds preserve that proximity. Including their loss gives the
+    124.467-bit worst query round in the Rust calculator, not 128 bits. -/
 theorem bciksJohnsonClassical128_positive_slack :
     ∀ s ∈ whirSchedule4Stage .bciksJohnsonClassical128,
       2 ^ 128 < s.johnsonSqrtBlowup ^ s.numQueries ∧
@@ -656,10 +665,11 @@ theorem bciksJohnson_schedules_eq_minimum_queries :
     (whirSchedule4Stage .bciksJohnsonQrom128).map (·.blowup) = [2, 4, 6, 8].map (2 ^ ·) := by
   decide
 
-/-- **Per-regime query target with positive proximity slack.** In every one of the six
+/-- **Per-regime scalar query target with positive proximity slack.** In every one of the eight
     regimes, every stage satisfies `(1 / √B_s + η)^{q_s} < 2^-t` at `η = 1 / r.slackDen > 0`,
     where `t = r.pureQueryTargetBits` is that regime's own target: `128, 256, 200, 214, 200,
-    214` for tags `2, 4, 5, 6, 7, 8`. -/
+    214, 256, 200` for tags `2, 4, 5, 6, 7, 8, 9, 10`. The inequality omits fold loss;
+    it is not the deployed stage error bound (in particular for tag `2`). -/
 theorem whirRegime_positive_slack (r : WhirSecurityRegime) :
     ∀ s ∈ whirSchedule4Stage r,
       2 ^ r.pureQueryTargetBits < s.johnsonSqrtBlowup ^ s.numQueries ∧
@@ -3966,12 +3976,14 @@ private theorem strict_query_miss_from_slack {α : Type} (bad : α → Bool) (do
     rw [h2] at h1
     exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h3 (Nat.le_trans hb h1))
 
-/-- **Unconditional `[BCIKS20]` Classical-128 Per-Stage Query Bound
+/-- **Classical-128 query-miss bound conditional on the stated bad-fiber density
     (`whir_bciksJohnsonClassical128_query_miss_lt`)**:
     For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonClassical128` (`q = (129, 65, 44, 33)`),
     whenever `bad` has relative density `≥ 1 - (1 / √B_s + 1 / 512)` (positive proximity slack
     `η = 1 / 512 > 0`, finite Johnson list size `L ≤ 256`), fewer than a `2^-128` fraction of
-    distinct query tuples miss `bad`. -/
+    distinct query tuples miss `bad`. The density assumption `hfar` is stronger than the
+    deployed fold-loss accounting establishes; this theorem remains true, but does not
+    assert 128-bit soundness of tag `2` (whose worst analysed query round is 124.467 bits). -/
 theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
     (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .bciksJohnsonClassical128)
     (bad : α → Bool) (dom : List α)
@@ -4005,10 +4017,11 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
     (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom (hAllLe s hs) hfar hSlack
 
 /-- **Per-stage query bound in every regime, at the regime's own target.** For every stage of
-    every one of the six regimes, if `bad` has relative density at least
+    every one of the eight regimes, if `bad` has relative density at least
     `1 - (1 / √B_s + 1 / r.slackDen)`, fewer than a `2^-(r.pureQueryTargetBits)` fraction of
-    distinct query tuples miss `bad`. The exponent is `128, 256, 200, 214, 200, 214` for tags
-    `2, 4, 5, 6, 7, 8`; no common 128-bit Grover figure follows from it. -/
+    distinct query tuples miss `bad`. The exponent is `128, 256, 200, 214, 200, 214, 256, 200`
+    for tags `2, 4, 5, 6, 7, 8, 9, 10`. This is conditional on `hfar`, not a proof that
+    deployed folds establish it; no composed soundness or common Grover figure follows. -/
 theorem whir_regime_query_miss_lt {α : Type} (r : WhirSecurityRegime)
     (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage r)
     (bad : α → Bool) (dom : List α)

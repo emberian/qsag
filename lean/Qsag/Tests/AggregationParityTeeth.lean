@@ -15,7 +15,7 @@ A. Canonical GF(p^4) (`Math/QuarticExt4`, `Protocol/Aggregation/FieldTransport`)
 B. Squeezed challenges (`Aggregation` §10b): zero has sixteen word-quadruple preimages, a
    generic element has one, and the factor 16 cannot be dropped from
    `Aggregation.squeezed_event_count_le` (`tooth_squeezed_zero_event_exceeds_uniform_bound`).
-C. WHIR regimes: the six wire tags, the per-regime targets, and that the four bounded-query
+C. WHIR regimes: the eight wire tags, the per-regime targets, and that the five bounded-query
    profiles and the classical regime do not reach the 128-bit Grover floor or the 256-bit query
    target (`tooth_cdhz25_misses_johnson_qrom_target`, `tooth_no_uniform_grover_floor`).
 D. The 28-variable cap in `Composed.checkTree`.
@@ -146,14 +146,19 @@ theorem tooth_squeezed_zero_event_exceeds_uniform_bound :
 
 /-! ## C. WHIR regimes -/
 
-/-- All six `repr(u8)` tags decode and re-encode; the next unused tag `9` is rejected. -/
-theorem inhabited_six_regime_tags :
-    ([2, 4, 5, 6, 7, 8] : List UInt8).map Aggregation.WhirSecurityRegime.decodeTag? =
+/-- All eight Rust `repr(u8)` tags decode; the next unused tag `11` is rejected. -/
+theorem inhabited_eight_regime_tags :
+    ([2, 4, 5, 6, 7, 8, 9, 10] : List UInt8).map Aggregation.WhirSecurityRegime.decodeTag? =
       Aggregation.WhirSecurityRegime.all.map some ∧
-    Aggregation.WhirSecurityRegime.decodeTag? 9 = none := by
+    Aggregation.WhirSecurityRegime.decodeTag? 11 = none := by
   exact ⟨rfl, rfl⟩
 
-/-- The four CDHZ25 regimes at the 28-variable cap. -/
+/-- `#tooth`: the Role-1 TurboSHAKE tag is live, so rejecting tag `9` is not wire parity. -/
+theorem tooth_turboshake_tag_not_retired :
+    Aggregation.WhirSecurityRegime.decodeTag? 9 ≠ none := by
+  decide
+
+/-- Representatives of the CDHZ25 tables at the 28-variable cap. -/
 theorem inhabited_cdhz25_schedule_28 :
     (WhirSecurityRegime.schedule .cdhz25JohnsonQrom128 28).stages =
       [⟨4, 6, 202⟩, ⟨16, 6, 102⟩, ⟨64, 4, 70⟩, ⟨256, 4, 52⟩] ∧
@@ -168,7 +173,7 @@ theorem tooth_cdhz25_misses_johnson_qrom_target :
       2 ^ 256 < s.johnsonSqrtBlowup ^ s.numQueries) := by
   decide
 
-/-- `#tooth`: there is no 128-bit nominal Grover floor over all six regimes: five of the six
+/-- `#tooth`: there is no 128-bit nominal Grover floor over all eight regimes: six of the eight
     are below it. -/
 theorem tooth_no_uniform_grover_floor :
     ¬ (∀ r ∈ Aggregation.WhirSecurityRegime.all, 128 ≤ r.qromGroverRoundBits) := by
@@ -216,7 +221,7 @@ theorem tooth_checkTree_29_vars_rejected :
 /-- The Rust `round_constants` label and the current HD/policy/VC labels are inventoried. -/
 theorem inhabited_current_labels :
     (CrossProtocol.auditedLabelsOf "qsag-fts").contains "QSAG.PSFTS.POW7_ROUNDS.V5" = true ∧
-    (CrossProtocol.auditedLabelsOf "qsag-hd").contains "QSAG.HD.QUERY_BUDGET.V3" = true ∧
+    (CrossProtocol.auditedLabelsOf "qsag-hd").contains "QSAG.HD.QUERY_BUDGET.V4" = true ∧
     (CrossProtocol.auditedLabelsOf "qsag-policy").contains "QSAG.POLICY.DURABLE_LEDGER.V6" = true ∧
     (CrossProtocol.auditedLabelsOf "qsag-cred").contains "QSAG.VC.SD_STMT_DIGEST.V2" = true := by
   decide +kernel
@@ -225,6 +230,7 @@ theorem inhabited_current_labels :
 theorem tooth_stale_labels_absent :
     ¬ ((CrossProtocol.auditedLabelsOf "qsag-fts").contains "QSAG.PSFTS.POW7_ROUND.V4" = true) ∧
     ¬ ((CrossProtocol.auditedLabelsOf "qsag-hd").contains "QSAG.HD.QUERY_BUDGET.V2" = true) ∧
+    ¬ ((CrossProtocol.auditedLabelsOf "qsag-hd").contains "QSAG.HD.QUERY_BUDGET.V3" = true) ∧
     ¬ ((CrossProtocol.auditedLabelsOf "qsag-policy").contains "QSAG.POLICY.DURABLE_LEDGER.V5" = true) ∧
     ¬ ((CrossProtocol.auditedLabelsOf "qsag-cred").contains "QSAG.VC.SD_STMT_DIGEST.V1" = true) := by
   decide +kernel
@@ -233,7 +239,8 @@ theorem tooth_stale_labels_absent :
   tooth_identity_limb_order_not_multiplicative tooth_identity_limb_order_wrong_wire
   inhabited_zero_word_preimages inhabited_word_multiplicity_one inhabited_zero_quad_preimages
   inhabited_zero_event_uniform_bound inhabited_squeezed_event_count
-  tooth_squeezed_zero_event_exceeds_uniform_bound inhabited_six_regime_tags
+  tooth_squeezed_zero_event_exceeds_uniform_bound inhabited_eight_regime_tags
+  tooth_turboshake_tag_not_retired
   inhabited_cdhz25_schedule_28 tooth_cdhz25_misses_johnson_qrom_target
   tooth_no_uniform_grover_floor tooth_cdhz25_search_accounting_fails_at_two_pow_64
   inhabited_checkTree_28_vars tooth_checkTree_29_vars_rejected inhabited_current_labels

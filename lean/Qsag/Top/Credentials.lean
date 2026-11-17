@@ -174,7 +174,8 @@ theorem blindVc_presentation_provenance_and_collision_finder_roster
     (O' : Fin cardX → BitVec (64 * k)) (seeds : List (Fin cardX))
     (weight : Fin cardX → Nat)
     (nonce : Qsag.Vec UInt8 32) (idx : Nat) (tr : Qsag.BlindVcRepTriple) :
-    (stmtCred.challengeNonce ∉ st.usedChallenges ∧
+    ((st.challengeLedgers stmtCred.verifier).accepts
+        stmtCred.verifierScope stmtCred.challengeNonce stmtCred.verificationTime = true ∧
       stmtCred.epoch = st.epoch ∧
       Qsag.Spec.DisclosedIndicesValid stmtCred = true ∧
       (port = Qsag.Spec.CredPort.holder holder ∨
@@ -546,6 +547,7 @@ def credCommandClaimedPort {Attr : Type} : Qsag.Spec.CredCommand Attr → Qsag.S
   | .issue _ _ _ => .issuer
   | .advanceEpoch _ _ => .issuer
   | .present h _ _ => .holder h
+  | .issueChallenge verifier _ _ _ => .verifier verifier
   | .approveToprf i _ => .server i
   | .evalToprf _ _ => .client
   | .corrupt _ => .adversary

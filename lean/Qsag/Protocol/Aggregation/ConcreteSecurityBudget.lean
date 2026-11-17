@@ -608,17 +608,20 @@ theorem goldilocksExt4Card_pos : 0 < goldilocksExt4Card := by
 theorem goldilocksQuadraticExtCard_pos : 0 < goldilocksQuadraticExtCard := by
   unfold goldilocksQuadraticExtCard goldilocksPrime; decide
 
-/-- Canonical 2-regime unconditional WHIR Johnson security ladder mirroring
+/-- Two-regime scalar Johnson budget model mirroring the query counts in
     `crates/qsag-agg/src/pcs.rs` (`WhirSecurityRegime`, `#[repr(u8)]` tags `{2, 4}`,
     `default = .bciksJohnsonQrom128` = `4`; retired capacity wire tags `0, 1, 3` are rejected per
     `Crites & Stewart 2025/2046` and `Krachun-Kazanin-Habock 2026/782`):
     1. `bciksJohnsonClassical128` (wire tag `2`): `(129, 65, 44, 33)` (`⌈256 / log₂ B_i⌉ + 1`,
-       `< 2⁻¹²⁸` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0`,
+       nominal `< 2⁻¹²⁸` scalar Johnson query target with positive slack `η_i > 0`,
        `~72` QROM round-search bits — classical regime, NOT `PQ128`),
     2. `bciksJohnsonQrom128` (**DEFAULT**, wire tag `4`): `(258, 130, 88, 66)`
-       (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]`
-       Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits /
-       `136` QROM Grover round-search bits). -/
+       (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, nominal `< 2⁻²⁵⁶` scalar Johnson
+       query target with positive slack `η_i > 0` + `16`b PoW = `272` nominal classical bits /
+       `136` nominal Grover round-search bits).
+    This model chooses proximity slack directly; it does not establish the bad-fiber
+    agreement of the deployed finite affine folds. Their loss gives tag `2` a worst
+    query round of 124.467 bits in `zk_hem/bounds.rs`, below its nominal 128-bit target. -/
 inductive WhirBudgetRegime where
   | bciksJohnsonClassical128
   | bciksJohnsonQrom128
@@ -771,17 +774,20 @@ def whirPositiveEtaCommitFoldBound (st : WhirStageBudget) (etaScale : Nat) : Rat
   ⟨st.stepVars * (2 ^ st.domainLog2) ^ 2 * (whirJohnsonListSize st etaScale) ^ 7,
    goldilocksExt4Card, goldilocksExt4Card_pos⟩
 
-/-- **Positive-`η` `[BCIKS20]` Johnson Proximity Slack, Finite List Size & Commit-Phase Theorem**
-    (on the deployed `num_vars = 24` geometry `|D_i| = 2^(26, 22, 20, 19)`, `s_i = (6, 4, 3, 3)`):
+/-- **Positive-`η` scalar Johnson, list-size and commit-cost inequalities**
+    (on the `num_vars = 24` geometry template `|D_i| = 2^(26, 22, 20, 19)`, `s_i = (6, 4, 3, 3)`):
+    These are exact inequalities for the three defined rational expressions, not a
+    theorem instantiating their premises for the Rust finite affine schedule. In particular,
+    the 128-bit scalar query inequality below does not bound tag `2`'s deployed query round.
     Thanks to the query slack (`⌈256 / log₂ B_i⌉ + 1` and `⌈512 / log₂ B_i⌉ + 2`),
     1. `bciksJohnsonClassical128` (`q = (129, 65, 44, 33)`) at `etaScale = 128` (`η_i = 1 / (256 √B_i) > 0`,
        finite list sizes `L = (256, 512, 1024, 2048)`) achieves **`strictlyMoreThanBits 128`** PURE
-       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 213`** OOD list-pinning, and
+       modeled query budget BEFORE PoW, **`strictlyMoreThanBits 213`** OOD list-pinning, and
        **`atLeastBits 139`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage
        (stage 3, `|D_3| = 2^19`, `L_3 = 2048`, is the bottleneck);
     2. `bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`) at `etaScale = 256` (`η_i = 1 / (512 √B_i) > 0`,
        finite list sizes `L = (512, 1024, 2048, 4096)`) achieves **`strictlyMoreThanBits 256`** PURE
-       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 211`** OOD list-pinning, and
+       modeled query budget BEFORE PoW, **`strictlyMoreThanBits 211`** OOD list-pinning, and
        **`atLeastBits 132`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage! -/
 theorem bciks_johnson_positive_eta_slack_and_commit_costs :
     (∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
@@ -890,6 +896,9 @@ def whirUnconditionalMultiStageTerms
 
 /-- **`WhirBudgetRegime` (`pcs.rs` `WhirSecurityRegime`) Wire Bijection, Multi-Stage Union &
     Multi-Session Scaling Theorem**:
+    All budget conclusions concern the rational expressions defined here. There is no
+    premise-instantiation theorem connecting this 13-term model to the deployed finite
+    affine folds; its tag-2 result is not a replacement for the 124.467-bit Rust query analysis.
     1. **Wire-Tag Bijection (`pcs.rs:121-141`)**: `fromU8? (r.toU8) = some r`,
        `WhirBudgetRegime.default = .bciksJohnsonQrom128`, and `meetsUnconditionalGrover128Floor = true` iff
        `r = .bciksJohnsonQrom128` (with wire tags `0, 1, 3` rejected).

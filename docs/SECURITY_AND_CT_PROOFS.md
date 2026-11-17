@@ -144,9 +144,9 @@ and 10. The Lean enumeration `WhirSecurityRegime` in `Protocol/Aggregation/Aggre
 has the same eight constructors, with `decodeTag?_tagByte`, `decodeTag?_isSome_iff` and
 `tooth_whirSecurityRegime_decodeTag_rejects_retired`:
 
-| Tag | Regime | Queries at $B=(4,16,64,256)$ | PoW bits | Hash | Query target | Round bits (classical / Grover) | Query bound of the accounting | Aggregate authorization |
+| Tag | Regime | Queries at $B=(4,16,64,256)$ | PoW bits | Hash | Nominal query target | Nominal round bits (classical / Grover) | Query bound of the accounting | Aggregate authorization |
 | ---: | --- | --- | ---: | --- | ---: | ---: | --- | --- |
-| 2 | `BciksJohnsonClassical128` | 129, 65, 44, 33 | 16 | cSHAKE256 | $2^{-128}$ | 144 / 72 | classical only | never; low-level PCS callers only |
+| 2 | `BciksJohnsonClassical128` | 129, 65, 44, 33 | 16 | cSHAKE256 | $2^{-128}$ (missed: worst round 124.467 bits) | 144 / 72 | classical only | never; low-level PCS callers only |
 | 4 | `BciksJohnsonQrom128` (default) | 258, 130, 88, 66 | 16 | cSHAKE256 | $2^{-256}$ | 272 / 136 | none | yes: nominal round-work floor |
 | 5 | `Cdhz25JohnsonQrom128` | 202, 102, 70, 52 | 16 | cSHAKE256 | $2^{-200}$ | 216 / 108 | $Q \le 2^{38}$ | yes: bounded-query profile |
 | 6 | `Cdhz25ZeroPowQrom128` | 216, 109, 74, 56 | 0 | cSHAKE256 | $2^{-214}$ | 214 / 107 | $Q+1 \le 2^{40}$ | yes: bounded-query profile |
@@ -175,6 +175,16 @@ round of 124.5 bits rather than 128
 (`bounds::tests::stage_bounds_against_the_constants_asserted_by_the_regimes`). "Round bits" is that exponent plus the proof-of-work bits, and
 its half: the nominal work of a classical, respectively Grover, search over one round of
 challenges. It is a per-round estimate, not a composed QROM security theorem.
+
+Lean's `bciksJohnsonClassical128_positive_slack` proves the scalar inequality
+$(1/\sqrt{B}+1/512)^q < 2^{-128}$ exactly. Its consumer
+`whir_bciksJohnsonClassical128_query_miss_lt` assumes the corresponding bad-fiber density
+(`hfar`); it does not establish that density after the deployed folds. Both theorems are
+true as stated and concern a different quantity from the fold-loss-adjusted query error.
+Similarly, `ConcreteSecurityBudget.lean`'s `bciks_johnson_positive_eta_slack_and_commit_costs`
+and `whirBudgetRegime_multistage_union_and_session_bounds` prove inequalities of their
+defined rational expressions; they do not instantiate that model for the deployed finite
+affine folds. Their tag-2 budget conclusions do not supersede the Rust analysis.
 
 **Analysed levels.** `crates/qsag-agg/SECURITY.md` composes the round-by-round errors of
 the opening and of committed-mask zk-Hem through BCS, and

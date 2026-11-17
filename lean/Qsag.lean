@@ -51,6 +51,7 @@ public import Qsag.Math.MlDsaNtt
 public import Qsag.Math.PolyRing
 public import Qsag.Math.Primality
 public import Qsag.Math.QuarticExt4
+public import Qsag.Math.QuinticExt5
 public import Qsag.Math.TapRowParityBias
 
 -- Qsag/Math/Tactic
@@ -106,6 +107,7 @@ public import Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
 public import Qsag.Protocol.Aggregation.SuccinctAggregationIop
 public import Qsag.Protocol.Aggregation.UcGames
 public import Qsag.Protocol.Aggregation.ZkHem
+public import Qsag.Protocol.Aggregation.ZkHemV2
 
 -- Qsag/Protocol/Credentials
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
@@ -300,6 +302,7 @@ public import Qsag.Tests.ProbPkgBridgeTeeth
 public import Qsag.Tests.ProductionCoinReductionChecks
 public import Qsag.Tests.QipmTeeth
 public import Qsag.Tests.QromCoherentOracleTests
+public import Qsag.Tests.QuinticExt5Teeth
 public import Qsag.Tests.RecursiveAggregationTeeth
 public import Qsag.Tests.RssParticipantChecks
 public import Qsag.Tests.RssParticipantGateChecksRun
@@ -316,3 +319,4 @@ public import Qsag.Tests.SeparatedCustodyUcResourceChecks
 public import Qsag.Tests.SigningTeeth
 public import Qsag.Tests.TwoSlotHwmTeeth
 public import Qsag.Tests.WelchBerlekampTeeth
+public import Qsag.Tests.ZkHemV2Teeth

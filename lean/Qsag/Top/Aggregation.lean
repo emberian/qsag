@@ -4,6 +4,7 @@ public import Qsag.Protocol.Aggregation.HemHighCapSlicedBudget
 public import Qsag.Protocol.Aggregation.HemMultistageCascadeRbr
 public import Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
 public import Qsag.Protocol.Aggregation.ZkHem
+public import Qsag.Protocol.Aggregation.ZkHemV2
 /-
 # Qsag.Top.Aggregation — End-to-End Composed Succinct Aggregation Soundness and Extraction
 
@@ -39,6 +40,7 @@ public import Qsag.Spec.Parameters
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealAggregate
 public import Qsag.Math.QuarticExt4
+public import Qsag.Math.QuinticExt5
 public import Qsag.Protocol.Aggregation.Cwyz26JohnsonCertificate
 public import Qsag.Coding.Cwyz26
 public import Qsag.Protocol.Aggregation.Cwyz26EqualDegreeAndMultiFold

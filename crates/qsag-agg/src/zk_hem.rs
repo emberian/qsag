@@ -38,6 +38,7 @@ pub mod multisig;
 pub mod protocol;
 pub mod recursive_whir;
 pub mod relation;
+pub mod v2;
 
 use crate::field::{
     Goldilocks, GoldilocksExt2, GoldilocksExt2Ops as _, GoldilocksExt4, GoldilocksOps as _,

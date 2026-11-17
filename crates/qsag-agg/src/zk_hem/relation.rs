@@ -209,6 +209,89 @@ impl Csr {
 /// the assignment.
 pub const MASK_ROWS: usize = 12;
 
+/// How a relation was closed: which masking variables and rows it ends with.
+///
+/// `V1` ([`ConstraintSystem::finish`]) is the layout above: three groups of four variables on
+/// three corners of four rows. `V2` ([`ConstraintSystem::finish_v2`]) is the layout of
+/// zk-Hem v2 (`SECURITY.md`, V2.1): three groups of five variables, one per limb of the
+/// quintic challenge field, on three corners of eight rows of which the first five are used.
+/// The two closings give different digests for the same rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closing {
+    V1,
+    V2,
+}
+
+impl Closing {
+    /// Masking variables per group.
+    pub const fn group(self) -> usize {
+        match self {
+            Self::V1 => 4,
+            Self::V2 => 5,
+        }
+    }
+
+    /// Rows of one corner.
+    pub const fn corner_rows(self) -> usize {
+        match self {
+            Self::V1 => 4,
+            Self::V2 => 8,
+        }
+    }
+
+    /// Masking variables appended to the assignment.
+    pub const fn mask_vars(self) -> usize {
+        3 * self.group()
+    }
+
+    /// Rows reserved at the top of the row cube.
+    pub const fn pad_rows(self) -> usize {
+        3 * self.corner_rows()
+    }
+
+    const fn min_log_rows(self) -> u32 {
+        match self {
+            Self::V1 => 4,
+            Self::V2 => 5,
+        }
+    }
+
+    /// Append the three corners for the masking variables `mask_var_base..`.
+    fn push_rows(self, mask_var_base: usize, a: &mut Csr, b: &mut Csr, c: &mut Csr) {
+        let one = Lc::constant(F::ONE);
+        let two = Lc::constant(F::TWO);
+        let empty = Lc::zero();
+        for g in 0..3 {
+            for k in 0..self.corner_rows() {
+                if k >= self.group() {
+                    a.push_row(&empty);
+                    b.push_row(&empty);
+                    c.push_row(&empty);
+                    continue;
+                }
+                let p = Lc::term(Var((mask_var_base + g * self.group() + k) as u32), F::ONE);
+                match g {
+                    0 => {
+                        a.push_row(&p);
+                        b.push_row(&one);
+                        c.push_row(&p);
+                    }
+                    1 => {
+                        a.push_row(&one);
+                        b.push_row(&p);
+                        c.push_row(&p);
+                    }
+                    _ => {
+                        a.push_row(&p);
+                        b.push_row(&two);
+                        c.push_row(&p.scaled(F::TWO));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Tag marking a variable allocated inside the 128-stride Poseidon2 S-box arena of a
 /// hologram-aligned [`ConstraintSystem`].
 const P2_VAR_TAG: u32 = 1u32 << 31;
@@ -243,6 +326,7 @@ pub struct Shape {
     pub b: Csr,
     pub c: Csr,
     hologram_meta: HologramMeta,
+    closing: Closing,
     digest: [u8; 32],
 }
 
@@ -255,7 +339,13 @@ impl Shape {
     /// First row of masking group `g in 0..3`.
     #[inline]
     pub fn mask_row_base(&self, g: usize) -> usize {
-        self.num_rows() - 4 * (3 - g)
+        self.num_rows() - self.closing.corner_rows() * (3 - g)
+    }
+
+    /// Which closing produced the masking variables and rows.
+    #[inline]
+    pub fn closing(&self) -> Closing {
+        self.closing
     }
 
     /// Binding digest of the whole relation, public constants included. Computed once by
@@ -287,9 +377,13 @@ impl Shape {
 
     fn compute_digest(&self) -> [u8; 32] {
         const SHAPE_MIDSTATE: [u64; 25] = cshake256_static_midstate(b"QSAG.ZKHEM.SHAPE/v1");
+        const SHAPE_V2_MIDSTATE: [u64; 25] = cshake256_static_midstate(b"QSAG.ZKHEM.SHAPE/v2");
         const RATE: usize = 136;
 
-        let mut state = SHAPE_MIDSTATE;
+        let mut state = match self.closing {
+            Closing::V1 => SHAPE_MIDSTATE,
+            Closing::V2 => SHAPE_V2_MIDSTATE,
+        };
         let mut buf = [0u8; RATE];
         let mut filled = 0usize;
         let xor_rate = |st: &mut [u64; 25], blk: &[u8; RATE]| {
@@ -608,20 +702,30 @@ impl ConstraintSystem {
     /// Close the relation: append the masking variables and rows, pad the row count to a
     /// power of two. Returns the shape and the assignment, whose masking variables are zero
     /// until the prover overwrites them.
-    pub fn finish(mut self) -> (Shape, Vec<F>) {
+    pub fn finish(self) -> (Shape, Vec<F>) {
+        self.finish_with(Closing::V1)
+    }
+
+    /// [`Self::finish`] with the closing of zk-Hem v2: fifteen masking variables and three
+    /// corners of eight rows ([`Closing::V2`]). The shape is for `zk_hem::v2::protocol` only.
+    pub fn finish_v2(self) -> (Shape, Vec<F>) {
+        self.finish_with(Closing::V2)
+    }
+
+    fn finish_with(mut self, closing: Closing) -> (Shape, Vec<F>) {
         assert!(self.record_rows);
-        let one = Lc::constant(F::ONE);
-        let two = Lc::constant(F::TWO);
         let empty = Lc::zero();
 
         if !self.hologram_aligned {
             let mask_var_base = self.values.len();
-            let mask: Vec<Var> = (0..MASK_ROWS).map(|_| self.alloc(F::ZERO)).collect();
+            for _ in 0..closing.mask_vars() {
+                self.alloc(F::ZERO);
+            }
             let used = self.num_rows();
-            let log_rows = (used + MASK_ROWS)
+            let log_rows = (used + closing.pad_rows())
                 .next_power_of_two()
                 .trailing_zeros()
-                .max(4) as usize;
+                .max(closing.min_log_rows()) as usize;
             let total = 1usize << log_rows;
 
             let num_sbox = self.sbox.len();
@@ -638,31 +742,12 @@ impl ConstraintSystem {
                 b.push_row(&rb);
                 c.push_row(&rc);
             }
-            for _ in used..total - MASK_ROWS {
+            for _ in used..total - closing.pad_rows() {
                 a.push_row(&empty);
                 b.push_row(&empty);
                 c.push_row(&empty);
             }
-            for (k, &p) in mask.iter().enumerate() {
-                let p: Lc = p.into();
-                match k / 4 {
-                    0 => {
-                        a.push_row(&p);
-                        b.push_row(&one);
-                        c.push_row(&p);
-                    }
-                    1 => {
-                        a.push_row(&one);
-                        b.push_row(&p);
-                        c.push_row(&p);
-                    }
-                    _ => {
-                        a.push_row(&p);
-                        b.push_row(&two);
-                        c.push_row(&p.scaled(F::TWO));
-                    }
-                }
-            }
+            closing.push_rows(mask_var_base, &mut a, &mut b, &mut c);
             let z = core::mem::take(&mut self.values);
             let mut shape = Shape {
                 log_rows,
@@ -674,6 +759,7 @@ impl ConstraintSystem {
                 b,
                 c,
                 hologram_meta: HologramMeta::default(),
+                closing,
                 digest: [0; 32],
             };
             shape.digest = shape.compute_digest();
@@ -686,7 +772,7 @@ impl ConstraintSystem {
         let misc_var_base = p2_var_base + self.p2_values.len();
         let misc_len = self.values.len() - pub_prefix;
         let mask_var_base = misc_var_base + misc_len;
-        let num_vars = mask_var_base + MASK_ROWS;
+        let num_vars = mask_var_base + closing.mask_vars();
 
         let remap_var = |v: u32| -> u32 {
             if v & P2_VAR_TAG != 0 {
@@ -709,10 +795,10 @@ impl ConstraintSystem {
 
         let used = self.num_rows();
         let num_sbox = self.p2_sbox.len() + self.sbox.len();
-        let log_rows = (used + MASK_ROWS)
+        let log_rows = (used + closing.pad_rows())
             .next_power_of_two()
             .trailing_zeros()
-            .max(4) as usize;
+            .max(closing.min_log_rows()) as usize;
         let total = 1usize << log_rows;
 
         let p2_sbox = core::mem::take(&mut self.p2_sbox);
@@ -729,31 +815,12 @@ impl ConstraintSystem {
             b.push_row(&remap_lc(rb));
             c.push_row(&remap_lc(rc));
         }
-        for _ in used..total - MASK_ROWS {
+        for _ in used..total - closing.pad_rows() {
             a.push_row(&empty);
             b.push_row(&empty);
             c.push_row(&empty);
         }
-        for k in 0..MASK_ROWS {
-            let p = Lc::term(Var((mask_var_base + k) as u32), F::ONE);
-            match k / 4 {
-                0 => {
-                    a.push_row(&p);
-                    b.push_row(&one);
-                    c.push_row(&p);
-                }
-                1 => {
-                    a.push_row(&one);
-                    b.push_row(&p);
-                    c.push_row(&p);
-                }
-                _ => {
-                    a.push_row(&p);
-                    b.push_row(&two);
-                    c.push_row(&p.scaled(F::TWO));
-                }
-            }
-        }
+        closing.push_rows(mask_var_base, &mut a, &mut b, &mut c);
 
         let mut z = Vec::new();
         qsag_core::wipe::secret_vec_reserve(&mut z, num_vars);
@@ -780,6 +847,7 @@ impl ConstraintSystem {
                 poseidon2_perms: self.p2_perms,
                 pub_var_blocks,
             },
+            closing,
             digest: [0; 32],
         };
         shape.digest = shape.compute_digest();
@@ -1071,5 +1139,108 @@ mod tests {
         }
         assert!(shape.is_satisfied(&z));
         assert_eq!(shape.mask_row_base(2) + 4, shape.num_rows());
+    }
+
+    /// A small relation with public inputs, a Poseidon2 sponge and multiplication rows.
+    fn pinned_relation(mut cs: ConstraintSystem) -> ConstraintSystem {
+        let x = cs.public_input(f(17));
+        let w = cs.alloc(f(23));
+        let out = sponge12(&mut cs, &[x.into(), w.into()]);
+        let y = cs.mul(&out[0], &w.into());
+        let b = cs.alloc(f(1));
+        cs.enforce_boolean(&b.into());
+        let _ = cs.select(&b.into(), &y.into(), &x.into());
+        cs
+    }
+
+    fn hex(d: &[u8; 32]) -> alloc::string::String {
+        d.iter().map(|b| alloc::format!("{b:02x}")).collect()
+    }
+
+    /// Digests of v1 shapes, computed before the v2 closing existed in this file.
+    #[test]
+    fn v1_shape_digests_are_pinned() {
+        let (plain, _) = pinned_relation(ConstraintSystem::new()).finish();
+        let (aligned, _) = pinned_relation(ConstraintSystem::new_hologram_aligned()).finish();
+        assert_eq!(
+            hex(&plain.digest()),
+            "6db81767fa7ef2b2b9b2c179867d0cb622808e4afc0c753f6080647d94159861"
+        );
+        assert_eq!(
+            hex(&aligned.digest()),
+            "365d415aacede18c2989a541132a7b2451a12c479819c9930dac70d6cedb5400"
+        );
+    }
+    #[test]
+    fn v2_closing_has_fifteen_masking_variables_on_three_corners_of_eight_rows() {
+        for aligned in [false, true] {
+            let cs = |aligned: bool| {
+                pinned_relation(if aligned {
+                    ConstraintSystem::new_hologram_aligned()
+                } else {
+                    ConstraintSystem::new()
+                })
+            };
+            let (v1, z1) = cs(aligned).finish();
+            let (v2, mut z2) = cs(aligned).finish_v2();
+            assert_eq!((v1.closing(), v2.closing()), (Closing::V1, Closing::V2));
+            assert_ne!(v1.digest(), v2.digest());
+            assert_eq!(v2.mask_var_base, v1.mask_var_base);
+            assert_eq!(v2.num_vars, v2.mask_var_base + 15);
+            assert_eq!(z2.len(), z1.len() + 3);
+            assert_eq!(v2.num_sbox, v1.num_sbox);
+            assert_eq!(v2.hologram_meta(), v1.hologram_meta());
+            assert!(v2.log_rows >= 5);
+            for g in 0..3 {
+                assert_eq!(v2.mask_row_base(g), v2.num_rows() - 8 * (3 - g));
+                assert_eq!(v1.mask_row_base(g), v1.num_rows() - 4 * (3 - g));
+            }
+            // Any masking values satisfy the rows; row `c` of corner `g` holds variable
+            // `5 g + c` and rows five to seven of each corner are empty.
+            for k in 0..15 {
+                z2[v2.mask_var_base + k] = f(0xBEEF_0000 + k as u64);
+            }
+            assert!(v2.is_satisfied(&z2));
+            for g in 0..3 {
+                for c in 0..8 {
+                    let row = v2.mask_row_base(g) + c;
+                    let vars: Vec<usize> = [&v2.a, &v2.b, &v2.c]
+                        .iter()
+                        .flat_map(|m| m.row(row).map(|(col, _)| col))
+                        .filter(|&col| col != 0)
+                        .collect();
+                    if c < 5 {
+                        assert_eq!(
+                            vars,
+                            [v2.mask_var_base + 5 * g + c; 2],
+                            "corner {g} row {c}"
+                        );
+                    } else {
+                        assert!(vars.is_empty());
+                        assert_eq!(v2.a.row(row).count() + v2.b.row(row).count(), 0);
+                    }
+                }
+                // The value the corner adds to (Az, Bz, Cz) on row `c`.
+                let row = v2.mask_row_base(g) + 2;
+                let p = z2[v2.mask_var_base + 5 * g + 2];
+                let (a, b, c) = (
+                    v2.a.row_dot(row, &z2),
+                    v2.b.row_dot(row, &z2),
+                    v2.c.row_dot(row, &z2),
+                );
+                let want = match g {
+                    0 => (p, F::ONE, p),
+                    1 => (F::ONE, p, p),
+                    _ => (p, F::TWO, p + p),
+                };
+                assert_eq!((a, b, c), want);
+            }
+            // The rows before the corners are those of the v1 shape.
+            let common = v1.mask_row_base(0).min(v2.mask_row_base(0));
+            for row in 0..common {
+                assert!(v1.a.row(row).eq(v2.a.row(row)));
+                assert!(v1.c.row(row).eq(v2.c.row(row)));
+            }
+        }
     }
 }

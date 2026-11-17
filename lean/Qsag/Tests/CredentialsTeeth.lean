@@ -335,5 +335,35 @@ theorem inhabited_credPort_channel_contract :
   Qsag.tooth_unratcheted_failed_slot_recycles_counter
 -- `Top.piToprfCredService_issuance_authenticated vs Top.unauthenticatedCredService_not_implementation`
 -- is paired in `Top/Credentials` (its `#tooth_pair` list), where both bodies are visible.
+
+/-! ## Independent verifier ledger regression roster
+
+These executable witnesses are proved next to the machine so its non-exposed implementation
+remains private; importing this module builds and constructively audits the witnesses.
+-/
+export Spec (tooth_verifiers_independent_and_replay_refused
+  tooth_invalid_proof_does_not_consume_challenge
+  tooth_ledger_capacity_expiry_and_fresh_issuance
+  tooth_capacity_shared_by_scopes_not_verifiers
+  tooth_failed_issue_retains_pruning
+  tooth_global_challenge_blacklist_wrong
+  tooth_consume_before_verify_wrong
+  tooth_reissue_resurrects_consumed_nonce_wrong
+  tooth_replay_not_prevented_really_replays)
+
+#verify_constructive
+  Spec.idealCredMachine_challenge_at_most_once_trace
+  Spec.idealCredMachine_presentation_preserves_other_verdict
+  Spec.tooth_verifiers_independent_and_replay_refused
+  Spec.tooth_invalid_proof_does_not_consume_challenge
+  Spec.tooth_ledger_capacity_expiry_and_fresh_issuance
+  Spec.tooth_capacity_shared_by_scopes_not_verifiers
+  Spec.tooth_failed_issue_retains_pruning
+  Spec.tooth_global_challenge_blacklist_wrong
+  Spec.tooth_consume_before_verify_wrong
+  Spec.tooth_reissue_resurrects_consumed_nonce_wrong
+  Spec.tooth_replay_not_prevented_really_replays
+  piToprfCred_invalid_opening_preserves_challenges
+
 end Qsag
 end

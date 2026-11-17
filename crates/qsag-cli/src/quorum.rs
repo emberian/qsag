@@ -550,12 +550,28 @@ could have advanced), then binds each anchor to its own never-written counter:
 party p belt = base+2p, ceremony = base+2p+1. No key material or leaf state changes.
 
 A vault whose newest seal is behind the counter is refused: it was rolled back, or
-something else used the index. An interrupted run can be repeated.
+something else used the index. An interrupted run can be repeated. Keep the shared
+source counter defined: every migration retires one source count and records it.
+
+The new counters need an ADMIN auth-change policy for crash-safe TPM reservation.
+Create the public policy once (no secrets in this file):
+  tpm2_startauthsession -g sha256 -S reanchor.ctx
+  tpm2_policycommandcode -S reanchor.ctx TPM2_CC_NV_ChangeAuth
+  tpm2_policypassword -S reanchor.ctx
+  tpm2_policynvwritten -S reanchor.ctx -L reanchor.policy c
+  tpm2_flushcontext reanchor.ctx
+Then define each NEW index with the policy and the initial index password used by
+--anchor-tpm-auth-env (omit -p for an empty password):
+  tpm2_nvdefine <index> -C o -s 8 -g sha256 -L reanchor.policy -a \"authread|authwrite|no_da|nt=counter\" -p <initial-index-password>
+Do not undefine existing anchors. Re-anchoring replaces each destination password
+with its domain's derived secret; ordinary qsag opens derive it automatically.
+Already-moved legacy counters are verified with their existing seals and passwords.
+Those old records do not name their historical source; --anchor-tpm-nv explicitly
+authorizes retirement of the source index you provide.
 
   --vault-dir <dir>              the quorum vault
   --anchor-tpm-nv <index>        the shared counter the quorum was enrolled with
-  --new-anchor-tpm-nv <base>     six never-written counters: tpm2_nvdefine <index> -C o -s 8
-                                 -a \"authread|authwrite|no_da|nt=counter\" for each
+  --new-anchor-tpm-nv <base>     six never-written counters provisioned as above
   --anchor-tpm-device <path> / --anchor-tpm-auth-env <VAR>  as at enrollment (both ranges)
   --anchor-dir <dir> / --anchor-vmgenid / --allow-single-disk-anchor  as at enrollment
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed party secrets
@@ -1776,13 +1792,14 @@ mod tpm_anchor_tests {
         tpm.define_counter(SHARED, b"");
         // The fourth new counter does not exist yet: the first run stops there.
         for slot in (0..QUORUM_TPM_SLOTS).filter(|slot| *slot != 3) {
-            tpm.define_counter(NEW_BASE + slot, b"");
+            tpm.define_rebind_counter(NEW_BASE + slot, b"");
         }
         let vault = scratch.path("vault");
         let message = scratch.path("message");
         std::fs::write(&message, b"re-anchored quorum").unwrap();
         keygen_at_base(&vault, &scratch.path("pk"));
         make_shared(tpm, &vault);
+        let before_migration = regular_files(&vault);
         let sign = |base: &str, epoch: &str, out: &str| {
             quorum(&[
                 "sign",
@@ -1820,9 +1837,29 @@ mod tpm_anchor_tests {
         );
         assert!(sign("0x01800050", "0", &scratch.path("never")).is_err());
 
-        tpm.define_counter(NEW_BASE + 3, b"");
+        tpm.define_rebind_counter(NEW_BASE + 3, b"");
         reanchor(&vault).unwrap();
         let settled = tpm.counts();
+        // Crash composition: all TPM seals committed, but the ticket binding write
+        // has not happened. Restoring only those old ticket bytes must repair the
+        // bindings without reserving or incrementing any counter again.
+        let mut restored_tickets = 0;
+        for (path, bytes) in &before_migration {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "anchor")
+            {
+                std::fs::write(path, bytes).unwrap();
+                restored_tickets += 1;
+            }
+        }
+        assert_eq!(restored_tickets, QUORUM_TPM_SLOTS);
+        reanchor(&vault).unwrap();
+        assert_eq!(
+            tpm.counts(),
+            settled,
+            "ticket repair must not repeat TPM retirement"
+        );
         reanchor(&vault).unwrap();
         assert_eq!(tpm.counts(), settled, "a repeated run only verifies");
 
@@ -1844,6 +1881,95 @@ mod tpm_anchor_tests {
                 domain.key_id,
                 domain.mac_key,
             );
+        }
+        // A different, fully provisioned fresh range must not turn an old shared
+        // snapshot into current custody. Only source retirement can reject this:
+        // none of these destinations has been written or is missing its policy.
+        const OTHER_BASE: u32 = 0x0180_0070;
+        for slot in 0..QUORUM_TPM_SLOTS {
+            tpm.define_rebind_counter(OTHER_BASE + slot, b"");
+        }
+        let counts = tpm.counts();
+        for (path, bytes) in &before_migration {
+            std::fs::write(path, bytes).unwrap();
+        }
+        let err = quorum(&[
+            "reanchor-tpm",
+            "--vault-dir",
+            &vault,
+            "--anchor-tpm-nv",
+            "0x01800040",
+            "--new-anchor-tpm-nv",
+            "0x01800070",
+        ])
+        .unwrap_err();
+        assert!(err.message.contains("older than the TPM"), "{err:?}");
+        assert_eq!(
+            tpm.counts(),
+            counts,
+            "a fresh destination cannot bypass source retirement"
+        );
+        let restored = scratch.path("restored-whole-vault");
+        std::fs::create_dir(&restored).unwrap();
+        for (path, bytes) in &before_migration {
+            std::fs::write(Path::new(&restored).join(path.file_name().unwrap()), bytes).unwrap();
+        }
+        assert!(
+            quorum(&[
+                "reanchor-tpm",
+                "--vault-dir",
+                &restored,
+                "--anchor-tpm-nv",
+                "0x01800040",
+                "--new-anchor-tpm-nv",
+                "0x01800070",
+            ])
+            .is_err()
+        );
+        assert_eq!(tpm.counts(), counts);
+    }
+
+    #[test]
+    fn reanchor_finishes_legacy_partial_and_complete_moves_without_redefining_counters() {
+        for moved in [1, QUORUM_TPM_SLOTS] {
+            let scratch = Scratch::new("reanchor-legacy");
+            let installed = tpm_model::install(BASE, QUORUM_TPM_SLOTS, 41);
+            let tpm = &installed.0;
+            tpm.define_counter(SHARED, b"");
+            for slot in 0..QUORUM_TPM_SLOTS {
+                if slot < moved {
+                    tpm.define_counter(NEW_BASE + slot, b"");
+                } else {
+                    tpm.define_rebind_counter(NEW_BASE + slot, b"");
+                }
+            }
+            let vault = scratch.path("vault");
+            keygen_at_base(&vault, &scratch.path("pk"));
+            make_shared(tpm, &vault);
+            let shared = AnchorConfig {
+                tpm_nv_index: Some(SHARED),
+                vault_dir: Some(vault.clone()),
+                ..Default::default()
+            };
+            let domains = domains_of(&vault, &shared);
+            for domain in domains.iter().take(moved as usize) {
+                tpm_model::legacy_move_shared_domain(
+                    tpm,
+                    &shared,
+                    NEW_BASE + domain.slot,
+                    &vault,
+                    domain,
+                );
+            }
+            let source = tpm.count(SHARED).unwrap();
+            reanchor(&vault).unwrap();
+            assert_eq!(
+                tpm.count(SHARED),
+                Some(source + u64::from(QUORUM_TPM_SLOTS))
+            );
+            let settled = tpm.counts();
+            reanchor(&vault).unwrap();
+            assert_eq!(tpm.counts(), settled);
         }
     }
 
