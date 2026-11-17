@@ -361,6 +361,9 @@ class Records(unittest.TestCase):
         self.assertEqual(bytes(c.fram[128:]), bytes(len(c.fram) - 128))
         import test_commands as tc
         n6 = c.transact(host.cmd(host.OP_NONCE))[1:]
+        short = host.reinit_request(own, n6, syn, tag, cw, d.com.root)
+        self.assertEqual(c.transact(host.cmd(host.OP_REINIT, short[1:-1])), err(host.OP_REINIT, host.E_LEN))
+        self.assertEqual(c.transact(host.cmd(host.OP_REINIT, short[1:] + [0])), err(host.OP_REINIT, host.E_LEN))
         live = c.m.fram.mem
         c.m.fram.mem = tc.DeadFram(bytes(live))
         self.assertEqual(reinit(n6), err(host.OP_REINIT, host.E_RECORD_IO))      # the new records must read back
@@ -795,6 +798,19 @@ class EntropySource(unittest.TestCase):
         # variance between the health limit (1.25) and the selection limit (2.0) on every pair that beats
         c, rsp = self.enrol(offsets=(0, 0, 0, 0, 0.2, 0.2, 0.2, 0))
         self.assertEqual(rsp, err(host.OP_ENROL, host.E_TRNG))
+        # one candidate pair, healthy by every running test (V about 1.6) but below the selection limit:
+        # it is good enough to keep and not good enough to choose
+        one = (0, 0.195, 1, 2, 3, 4, 5, 6)
+        c, rsp = self.enrol(offsets=one)
+        self.assertEqual(rsp, err(host.OP_ENROL, host.E_TRNG))
+        t, total = units.TrngUnit(5, offsets=one), 0
+        for _ in range(8):
+            t.clear()
+            for _ in range(4):
+                t.run()
+            self.assertEqual(t.flags, 0)
+            total += t.s1
+        self.assertTrue(638 < total / 8 < 1020, total / 8)
         # strong jitter on beats that are too short to resolve it
         c, rsp = self.enrol(kappa=3, offsets=(0, 0.3, 0.6, 0.9, 1.2, 1.5, 1.8, 2.1))
         self.assertEqual(rsp, err(host.OP_ENROL, host.E_TRNG))

@@ -637,7 +637,10 @@ def fromU8? (tag : UInt8) : Option WhirBudgetRegime :=
   else if tag == 4 then some .bciksJohnsonQrom128
   else none
 
-def meetsQrom128Floor : WhirBudgetRegime → Bool
+/-- `WhirSecurityRegime::meets_unconditional_grover_128_floor` on the two regimes of this
+    ladder: at least 128 bits of nominal single-round Grover search work. A per-round work
+    estimate; the composed QROM level of tag `4` is 81 bits (`crates/qsag-agg/SECURITY.md`). -/
+def meetsUnconditionalGrover128Floor : WhirBudgetRegime → Bool
   | .bciksJohnsonQrom128 => true
   | .bciksJohnsonClassical128 => false
 
@@ -888,13 +891,16 @@ def whirUnconditionalMultiStageTerms
 /-- **`WhirBudgetRegime` (`pcs.rs` `WhirSecurityRegime`) Wire Bijection, Multi-Stage Union &
     Multi-Session Scaling Theorem**:
     1. **Wire-Tag Bijection (`pcs.rs:121-141`)**: `fromU8? (r.toU8) = some r`,
-       `WhirBudgetRegime.default = .bciksJohnsonQrom128`, and `meetsQrom128Floor = true` iff
+       `WhirBudgetRegime.default = .bciksJohnsonQrom128`, and `meetsUnconditionalGrover128Floor = true` iff
        `r = .bciksJohnsonQrom128` (with wire tags `0, 1, 3` rejected).
     2. **4-Stage + Multi-Session QROM Union Slack (`pcs.rs:174`)**: summing ALL 4 QROM Grover
        round-search bounds (`RatBound.sumList`) and scaling across up to `S ≤ 2 ^ 7 = 128`
        online sessions preserves **`atLeastBits 128`** for unconditional positive-`η`
        `bciksJohnsonQrom128` for ALL `qHash + 1 ≤ 2 ^ 66` (`137` per-stage bits
-       minus `2` stage-union bits minus `7` session-union bits = `128` quantum bits!).
+       minus `2` stage-union bits minus `7` session-union bits = `128` bits of nominal Grover
+       round-search work). This sums per-round search bounds with the proof-of-work credited;
+       it is not a composed QROM knowledge-soundness level, which `crates/qsag-agg/SECURITY.md`
+       puts at 81 bits for 256-bit digests with no quantum credit for grinding.
     3. **Full 13-Event Multi-Stage + Multi-Session Unconditional `[BCIKS20]` Union Bounds**:
        (exact 13-term rational sums on the deployed `num_vars = 24` geometry, kernel-decided)
        - `bciksJohnsonClassical128` (`etaScale = 128`): the sum of ALL 13 multi-stage proximity +
@@ -907,7 +913,7 @@ def whirUnconditionalMultiStageTerms
 theorem whirBudgetRegime_multistage_union_and_session_bounds :
     (∀ r : WhirBudgetRegime, WhirBudgetRegime.fromU8? r.toU8 = some r) ∧
     (∀ r : WhirBudgetRegime,
-      r.meetsQrom128Floor = true ↔ r = .bciksJohnsonQrom128) ∧
+      r.meetsUnconditionalGrover128Floor = true ↔ r = .bciksJohnsonQrom128) ∧
     (∀ qHash S : Nat, qHash + 1 ≤ 2 ^ 66 → S ≤ 2 ^ 7 →
       atLeastBits 128
         (RatBound.scale S

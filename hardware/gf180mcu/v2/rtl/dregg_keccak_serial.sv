@@ -1,6 +1,7 @@
 // Dregg-180 v2 Keccak unit: qsag_keccak_serial (../rtl/qsag_keccak_serial.sv) with one change: its
 // seven private work rows (column parities, two saved lanes) are ports to rows of the register file,
-// and a `last` strobe marks the final clock. Sequencing, datapath and clock counts are untouched; the
+// a `last` strobe marks the final clock, and the read address is registered (retimed: same value in
+// every clock). Sequencing, datapath and clock counts are untouched; the
 // test bench runs the two modules in lockstep (tb/unit_keccak) and requires identical outputs.
 // Generated from the original by a mechanical edit; diff the two files to review.
 //
@@ -40,7 +41,7 @@ module dregg_keccak_serial (
     input  wire         fault_inj,   // EAL6+ Bellcore / laser fault-injection self-test hook
     output wire         busy,
     output logic        done,
-    output logic [5:0]  rd_addr,
+    output wire  [5:0]  rd_addr,
     input  wire  [63:0] port,
     output logic        wr_en,
     output logic [5:0]  wr_addr,
@@ -159,13 +160,18 @@ module dregg_keccak_serial (
                        : 64'd0;
     wire [63:0] e_out = bq4 ^ (~chi_a & chi_b) ^ iota;
 
+    // The read address comes from a register (timing: counter -> address -> array -> theta, rho -> window
+    // is otherwise one stage). The register is loaded with the address of the NEXT clock, computed from
+    // the next values of the counters, so its output equals the original combinational address in every
+    // clock: rd_addr_c below is the original expression, kept for the check at the bottom of the file.
+    logic [5:0] rd_addr_c;
     always_comb begin
-        rd_addr = 6'd0;
+        rd_addr_c = 6'd0;
         wr_en   = 1'b0;
         wr_addr = 6'd0;
         wr_data = 64'd0;
-        if (st == K_PAR) rd_addr = {1'b0, t};
-        if (rd_act)      rd_addr = ra;
+        if (st == K_PAR) rd_addr_c = {1'b0, t};
+        if (rd_act)      rd_addr_c = ra;
         if (wr_act) begin
             wr_en   = 1'b1;
             wr_addr = wa;
@@ -215,6 +221,65 @@ module dregg_keccak_serial (
     assign b1s = kw_q[64*6 +: 64];
     // last clock of the permutation: the sequencer's next instruction runs in the clock after it
     assign last = (st == K_RND) && (t == 5'd28) && (rnd == 5'd23);
+
+    // next values of the counters the read address depends on (the same transitions as the process below)
+    logic [1:0] st_n;
+    logic [4:0] t_n;
+    logic [1:0] rnd_n;          // the address needs the round index modulo 4 only
+    logic [2:0] rx_n, ry_n;
+    always_comb begin
+        st_n  = st;
+        t_n   = t;
+        rnd_n = rnd[1:0];
+        rx_n  = rx;
+        ry_n  = ry;
+        unique case (st)
+            K_IDLE: if (start) begin
+                rnd_n = 2'd0;               // 12 and 0 are both multiples of 4
+                t_n   = 5'd0;
+                st_n  = K_PAR;
+            end
+            K_PAR: begin
+                if (t == 5'd24) begin
+                    t_n  = 5'd0;
+                    rx_n = 3'd0;
+                    ry_n = 3'd0;
+                    st_n = K_RND;
+                end else t_n = t + 5'd1;
+            end
+            K_RND: begin
+                if (rd_act) begin
+                    if (rx == 3'd4) begin
+                        rx_n = 3'd0;
+                        ry_n = ry + 3'd1;
+                    end else rx_n = rx + 3'd1;
+                end
+                if (t == 5'd28) begin
+                    t_n  = 5'd0;
+                    rx_n = 3'd0;
+                    ry_n = 3'd0;
+                    if (rnd == 5'd23) st_n = K_IDLE;
+                    else rnd_n = rnd[1:0] + 2'd1;
+                end else t_n = t + 5'd1;
+            end
+            default: st_n = K_IDLE;
+        endcase
+    end
+    wire [2:0] xs_n = mod5({2'd0, rx_n} + {1'b0, ry_n, 1'b0} + {2'd0, ry_n});
+    wire [5:0] ra_n = lane_addr(xs_n, nrow(rnd_n, xs_n, rx_n));
+    logic [5:0] rd_addr_q;
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) rd_addr_q <= 6'd0;
+        else        rd_addr_q <= (st_n == K_PAR) ? {1'b0, t_n} : ((st_n == K_RND) && (t_n < 5'd25)) ? ra_n : 6'd0;
+    assign rd_addr = rd_addr_q;
+`ifndef SYNTHESIS
+    always_ff @(posedge clk)
+        if (rst_n && rd_addr_q != rd_addr_c) $error("dregg_keccak_serial: registered read address differs from the original");
+`else
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_rc = &{1'b0, rd_addr_c};
+    /* verilator lint_on UNUSEDSIGNAL */
+`endif
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

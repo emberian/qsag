@@ -1,13 +1,15 @@
 //! Zero-knowledge classical-to-PQ ownership migration CLI (`qsag migrate`),
 //! backed by [`qsag_migrate`] (`438`-repetition mixed-domain ZKBoo proofs with
-//! `< 2^-256` classical soundness error and `> 2^128` quantum Grover cost).
+//! conditional challenge error `< 2^-256` and challenge-search Grover cost `> 2^128`).
+//! These are not composed security bounds: 256-bit commitment digests have about
+//! 85 generic quantum collision-query bits. See the migration crate's SECURITY.md.
 //!
 //! Subcommands:
 //! - `commit` — Compute the canonical classical legacy commitment (`btc-p2wpkh`,
 //!   `btc-taproot`, `eth-eoa`, or `ed25519-slip10`) without revealing the key.
 //! - `prove` — Produce a self-contained zero-knowledge migration proof binding a legacy
 //!   spending key to a target Bech32m post-quantum `QsagAddress`, epoch anchor,
-//!   and replay-preventing nullifier.
+//!   and a nullifier for external replay tracking.
 //! - `verify` — Verify a zero-knowledge migration proof against its statement, expected
 //!   epoch, and optional expected target address / campaign domain.
 
@@ -47,8 +49,9 @@ const PROOF_WIRE_MAGIC: &[u8; 8] = b"QSAGMIGP";
 //   per repetition: opened_e (1) | 2 x [seed (32) | inputs | products | outputs] |
 //                   hidden_party_commit (32) | hidden_outputs
 // where each named field is a little-endian u32 length followed by that many bytes. The field
-// lengths are fixed by the ownership circuit of the legacy kind, which the verifier replays
-// exactly; the caps below only bound what is read before that check. Measured per repetition
+// lengths are fixed by the ownership circuit of the legacy kind. The library checks exact
+// statement-derived lengths before allocating the circuit or replay scratch; these caps bound
+// decoder storage before that check. Framed fields must be present before allocation. Measured per repetition
 // (inputs, products, outputs): btc-p2wpkh (288, 81424, 85), eth-eoa (288, 80480, 85),
 // btc-taproot (288, 75680, 98), ed25519-slip10 (288, 65600, 97), i.e. 57.9 to 71.7 MB of wire.
 const WIRE_HEADER_BYTES: u64 = 8 + 32 + 4;
@@ -84,7 +87,7 @@ const MAX_PROOF_WIRE_BYTES: u64 = {
 /// under 700 bytes of it.
 const MAX_PROOF_ENVELOPE_BYTES: u64 = 4096;
 /// Largest proof file `verify` reads and `prove` writes: the wire payload in hex plus the
-/// envelope (about 223 MiB; files written today are 116 to 144 MB).
+/// envelope (about 229 MiB; files written today are 116 to 144 MB).
 const MAX_MIGRATION_PROOF_FILE_BYTES: u64 =
     checked(checked(MAX_PROOF_WIRE_BYTES.checked_mul(2)).checked_add(MAX_PROOF_ENVELOPE_BYTES));
 // The wire payload must be addressable on the host before it is decoded into memory.
@@ -358,6 +361,9 @@ fn decode_zk_proof_wire(bytes: &[u8]) -> Result<MigrationZkProof, CliError> {
     let mut repetitions = Vec::with_capacity(rep_count);
     for _ in 0..rep_count {
         let opened_e = take_exact(&mut cur, 1)?[0];
+        if opened_e >= 3 {
+            return Err(CliError::verify("invalid opened party index"));
+        }
         let p0 = take_party_view(&mut cur)?;
         let p1 = take_party_view(&mut cur)?;
         let mut hidden_party_commit = [0u8; 32];
@@ -773,9 +779,9 @@ mod tests {
     #[test]
     fn size_bounds_follow_the_wire_schema_and_cover_every_legacy_kind() {
         assert_eq!(MIT_REPETITIONS, 438);
-        assert_eq!(MAX_PROOF_WIRE_BYTES, wire_len(1024, 128 * 1024, 1024));
-        assert_eq!(MAX_PROOF_WIRE_BYTES, 117_116_426);
-        assert_eq!(MAX_MIGRATION_PROOF_FILE_BYTES, 2 * 117_116_426 + 4096);
+        assert_eq!(MAX_PROOF_WIRE_BYTES, wire_len(4096, 128 * 1024, 1024));
+        assert_eq!(MAX_PROOF_WIRE_BYTES, 119_807_498);
+        assert_eq!(MAX_MIGRATION_PROOF_FILE_BYTES, 2 * 119_807_498 + 4096);
         // (inputs, products, outputs, wire bytes) written by `migrate prove` for each kind.
         for (inputs, products, outputs, wire) in [
             (288, 81_424, 85, 71_746_196u64), // btc-p2wpkh
@@ -832,6 +838,11 @@ mod tests {
             assert_eq!(err.code, crate::cli::exit::VERIFY_FAILED, "{what}");
             assert!(err.message.contains(what), "{what}: {}", err.message);
         };
+        for index in [3, 255] {
+            let mut invalid = wire.clone();
+            invalid[44] = index;
+            rejects(&invalid, "invalid opened party index");
+        }
         // Offsets inside the first repetition: opened_e at 44, first seed at 45, then the
         // inputs / products / outputs length prefixes of the first opened view.
         let inputs_len_at = 44 + 1 + 32;

@@ -20,12 +20,13 @@
 //! Every fixture is built in `LLVMFuzzerInitialize` (the `init:` block), before libFuzzer
 //! arms its per-input watchdog.
 //!
-//! Not covered here: `FullShardMergeProof::from_bytes` (`QSAGFSM1`) and
-//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA1`). Both take a
+//! Not covered here: `FullShardMergeProof::from_bytes` (`QSAGFSM2`) and
+//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA2`). Both take a
 //! `&FullShardMergeRelation`, whose only constructor synthesizes the in-circuit WHIR verifier
-//! (about 2.7M rows per child) and compiles its hologram: minutes under coverage
-//! instrumentation. The `HologramPublicProof` decoder and verifier both wrap, and the
-//! key-only `QSAGSTA1` subtree carriers, are fuzzed in `fuzz_hologram_and_subtree_decode`.
+//! (about 2.7M rows per child): minutes under coverage instrumentation. Their underlying
+//! `ZkHemProof` decoder and verifier are covered here and in `fuzz_hologram_and_subtree_decode`;
+//! the latter also checks the full-shard wrapper encoders, public hologram proofs and
+//! key-only `QSAGSTA1` subtree carriers.
 
 use std::sync::OnceLock;
 

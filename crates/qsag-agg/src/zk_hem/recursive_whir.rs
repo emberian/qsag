@@ -549,7 +549,8 @@ pub struct FixedPathQuery {
     pub values: Vec<E>,
     pub siblings: Vec<Digest>,
 }
-/// Private witness for a fixed-path affine WHIR opening. The parent never serializes this.
+/// Witness data for a fixed-path affine WHIR opening. Omitting its literal serialization
+/// is not hiding: the public parent proof can reveal functions of this witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedPathWhirProof {
     pub stage_roots: Vec<Digest>,
@@ -1853,8 +1854,8 @@ pub(super) fn commit_levels_for_recursion(
 }
 
 /// Commit to a base-field evaluation table in the recursion format.
-/// This PCS mode is binding but not independently hiding; keep child witnesses private
-/// when using the zero-knowledge merge.
+/// This PCS mode is non-hiding, as is the public merge path. Privacy requires a masked
+/// outer protocol and its own analysis; see [`protocol::prove`] for that path's limitations.
 pub fn commit_for_recursion(
     params: &FixedPathWhirParams,
     evaluations: &[F],
@@ -4141,7 +4142,7 @@ pub fn prove_succinct_children_whir_merge(
     regime: WhirSecurityRegime,
     seed: &[u8; 32],
 ) -> Result<SuccinctChildWhirMerge, RecursiveWhirError> {
-    if !regime.meets_qrom_128_floor()
+    if !regime.is_accepted_aggregate_profile()
         || children.len() != relation.children
         || proofs.len() != relation.children
     {
@@ -4168,7 +4169,7 @@ pub fn verify_succinct_children_whir_merge(
     regime: WhirSecurityRegime,
     parent: &SuccinctChildWhirMerge,
 ) -> bool {
-    if !regime.meets_qrom_128_floor()
+    if !regime.is_accepted_aggregate_profile()
         || children.len() != relation.children
         || children
             .iter()

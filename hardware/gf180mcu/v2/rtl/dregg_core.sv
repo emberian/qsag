@@ -10,7 +10,8 @@ module dregg_core #(
     parameter bit H_SHADOW = 1'b1,              // see dregg_seq
     parameter bit KEC_WAIT_AFTER_STORE = 1'b1,  // see dregg_seq
     parameter bit FRAM_DONE_PAD = 1'b1,         // see dregg_fram
-    parameter bit IR_STAGE = 1'b0               // see dregg_seq
+    parameter bit IR_STAGE = 1'b0,              // see dregg_seq
+    parameter bit RA_STAGE = 1'b0               // see dregg_seq
 ) (
     input  wire         clk,
     input  wire         por_n,
@@ -154,7 +155,7 @@ module dregg_core #(
     // ------------------------------------------------------------ sequencer
     wire rd_used, key_wr, key_wr_boot;
     wire [27:0] ir;
-    dregg_seq #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .IR_STAGE(IR_STAGE)) u_seq (
+    dregg_seq #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .IR_STAGE(IR_STAGE), .RA_STAGE(RA_STAGE)) u_seq (
         .clk(clk), .srst_n(srst_n),
         .rom_addr(rom_addr), .rom_word(rom_word), .const_idx(const_idx), .const_data(const_data), .const_ok(const_ok),
         .disp_op(disp_op), .disp_hit(disp_hit), .disp_addr(disp_addr), .disp_class(disp_class),

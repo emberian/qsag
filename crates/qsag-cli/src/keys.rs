@@ -592,8 +592,14 @@ The secret file is created with owner-only permissions.
   --wal-dir <dir>       agg-jorts-poseidon2: directory in which each validator's epoch
                         write-ahead log is created (required for that scheme)
   --anchor-dir <dir>    stateful schemes: owner-only 0700 external monotone anchor directory
+  --anchor-tpm-nv <base>  a TPM2 NV counter that was never incremented (tpm2_nvdefine <index>
+                        -C o -s 8 -a \"authread|authwrite|no_da|nt=counter\"); committees reserve
+                        validators+1 of them: validator i=base+i, ceremony=base+validators
+  --anchor-vmgenid     optional snapshot/clone guard; requires disjoint --anchor-dir or TPM
   --vault-dir <dir>     explicit local custody directory verified disjoint from --anchor-dir
-  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
+  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode);
+                        it then stops a restore of the custody directory only: a volume or VM
+                        snapshot rewinds the anchor with it
   --policy-ledger-dir <dir>  enroll the key against this custody policy ledger: it will then
                         sign only an intent that ledger releases (not for agg-jorts-poseidon2);
                         with --policy-anchor-dir / --policy-passphrase-* as the ledger requires
@@ -612,6 +618,25 @@ pub(crate) fn require_stateful_anchor(
         return Ok(());
     }
     crate::anchor::require_anchor_or_waiver(anchor.is_some(), ephemeral_unanchored, "anchor-dir")
+}
+
+/// `--validators` of a committee key (default 8), bounded by the key file size.
+fn committee_validators(args: &Args) -> Result<u32, CliError> {
+    let validators = args.get_u64("validators")?.unwrap_or(8);
+    // A canonical validator key is 65 bytes, encoded as 130 hex digits.
+    // Reserve whitespace and metadata within the reader's own file limit.
+    if validators == 0
+        || validators > u32::MAX as u64
+        || validators
+            .checked_mul(140)
+            .and_then(|n| n.checked_add(4096))
+            .is_none_or(|n| n > MAX_KEY_FILE_BYTES)
+    {
+        return Err(CliError::usage(
+            "validator committee exceeds the bounded public-key file size",
+        ));
+    }
+    Ok(validators as u32)
 }
 
 pub fn keygen(raw: &[String]) -> Result<(), CliError> {
@@ -665,6 +690,12 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let scheme = Scheme::by_name(args.require("scheme")?)?;
     require_dealer_acceptance(scheme, &args)?;
+    // A committee reserves one counter per validator and one for its ceremony.
+    let tpm_slots = match scheme {
+        Scheme::AggCommittee => committee_validators(&args)?.saturating_add(1),
+        _ => 1,
+    };
+    crate::anchor::refuse_policy_tpm_overlap(&args, tpm_slots)?;
     let policy_pin = crate::policy_ledger::key_pin_from_args(&args)?;
     if policy_pin.is_some() && matches!(scheme, Scheme::AggCommittee) {
         return Err(CliError::usage(
@@ -682,6 +713,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "--anchor-dir applies only to stateful schemes",
         ));
     }
+    crate::anchor::preflight_tpm_enrollment(anchor_cfg.as_ref(), &args, tpm_slots)?;
     let passphrase = crate::envelope::passphrase(&args)?;
     let secret_out = args.require("secret-out")?;
     let public_out = args.require("public-out")?;
@@ -858,20 +890,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             threshold_public_bytes(&setup.pk)
         }
         Scheme::AggCommittee => {
-            let validators = args.get_u64("validators")?.unwrap_or(8);
-            // A canonical validator key is 65 bytes, encoded as 130 hex digits.
-            // Reserve whitespace and metadata within the reader's own file limit.
-            if validators == 0
-                || validators > u32::MAX as u64
-                || validators
-                    .checked_mul(140)
-                    .and_then(|n| n.checked_add(4096))
-                    .is_none_or(|n| n > MAX_KEY_FILE_BYTES)
-            {
-                return Err(CliError::usage(
-                    "validator committee exceeds the bounded public-key file size",
-                ));
-            }
+            let validators = u64::from(committee_validators(&args)?);
             let wal_dir = args
                 .get("wal-dir")
                 .ok_or_else(|| CliError::usage("agg-jorts-poseidon2 requires --wal-dir"))?;
@@ -957,7 +976,9 @@ Stateful schemes persist their advanced state before the signature is written.
                       (stateful schemes require it unless --ephemeral-unanchored is given)
   --ephemeral-unanchored  sign with a disposable stateful key enrolled without an anchor
   --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
-  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
+  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode);
+                        it then stops a restore of the custody directory only: a volume or VM
+                        snapshot rewinds the anchor with it
   --policy-id-hex <hex>  32-byte policy identifier committed into CeremonyContext
   --spend-amount <n>  spend amount committed into CeremonyContext (default: 0)
   --json              print the signature file contents to standard output as well
@@ -1082,6 +1103,7 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::refuse_policy_tpm_overlap(&args, 1)?;
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
     let mut base_context = crate::anchor::parse_ceremony_context(&args, 0)?;
     let has_context_flags =

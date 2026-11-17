@@ -1221,7 +1221,7 @@ pub fn verify_hierarchical_hem_evidence(
     aggregate: &HierarchicalHemAggregate,
 ) -> Option<VerifiedHierarchicalHemEvidence> {
     let message = message.as_ref();
-    if !regime.meets_qrom_128_floor()
+    if !regime.is_accepted_aggregate_profile()
         || !verify_hierarchical_hem_inner(
             policies,
             epoch_floor,
@@ -1254,7 +1254,7 @@ pub fn verify_hierarchical_hem_evidence_prepared(
     aggregate: &HierarchicalHemAggregate,
 ) -> Option<VerifiedHierarchicalHemEvidence> {
     let message = message.as_ref();
-    if !regime.meets_qrom_128_floor()
+    if !regime.is_accepted_aggregate_profile()
         || !verify_hierarchical_hem_with_roots(
             &registry.policies,
             &registry.committee_roots,
@@ -2082,7 +2082,7 @@ pub fn prove_succinct_hierarchical_hem(
     minimum_global_quorums: usize,
     config: &HemAggConfig,
 ) -> Result<SuccinctHierarchicalHemAggregate, HemAggError> {
-    if !config.regime.meets_qrom_128_floor() {
+    if !config.regime.is_accepted_aggregate_profile() {
         return Err(HemAggError::InvalidShardConfig);
     }
     let msg_ref = message.as_ref();
@@ -2147,7 +2147,7 @@ fn check_hierarchical_hem_commitment_with_roots(
     expected_regime: WhirSecurityRegime,
     aggregate: &SuccinctHierarchicalHemAggregate,
 ) -> bool {
-    if !expected_regime.meets_qrom_128_floor()
+    if !expected_regime.is_accepted_aggregate_profile()
         || aggregate.shards.len() != policies.len()
         || committee_roots.len() != policies.len()
         || minimum_global_quorums == 0
@@ -2634,7 +2634,7 @@ pub use crate::zk_hem::full_shard::{
 };
 
 /// Canonical 8-byte wire header for [`SuccinctFullShardAggregate`].
-pub const SUCCINCT_FULL_SHARD_WIRE_MAGIC: &[u8; 8] = b"QSAGFSA1";
+pub const SUCCINCT_FULL_SHARD_WIRE_MAGIC: &[u8; 8] = b"QSAGFSA2";
 
 /// The 32-byte statement a quorum key of `policy` signs in full-shard mode: a digest of
 /// [`hierarchical_hem_message`], so it binds the registry root, the shard's identity,
@@ -2663,7 +2663,9 @@ pub struct FullShardAggregateStatement<'a> {
 
 /// One parent proof that, in every shard of a registry, `signer_counts[i]` distinct quorum
 /// keys signed the shard's [`full_shard_signing_message`]. It carries no child proof, no
-/// signer bitmap and no summary; which keys signed stays hidden.
+/// signer bitmap and no summary. The parent uses committed masking; signer privacy of
+/// the full composition is not proved. See [`crate::zk_hem::protocol::prove`] for the
+/// simulator and concrete security bounds still missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuccinctFullShardAggregate {
     pub signer_counts: Vec<u32>,
@@ -2671,7 +2673,7 @@ pub struct SuccinctFullShardAggregate {
 }
 
 impl SuccinctFullShardAggregate {
-    /// Serialize to canonical self-delimiting wire bytes (`QSAGFSA1` header).
+    /// Serialize to canonical self-delimiting wire bytes (`QSAGFSA2` header).
     pub fn to_bytes(&self) -> Vec<u8> {
         let proof_bytes = self.proof.to_bytes();
         let mut out = Vec::with_capacity(12 + 4 * self.signer_counts.len() + proof_bytes.len());
@@ -2756,7 +2758,8 @@ type Digest4Limbs = [Goldilocks; 4];
 /// Prove a full-shard aggregate. `witnesses[i]` holds shard `i`'s signer bitmap over its
 /// policy's quorum keys and the signatures of those signers, in ascending index order, over
 /// [`full_shard_signing_message`]. Both the children and the parent use the relation's
-/// regime.
+/// regime. `seed` must be uniform and secret, as required by
+/// [`crate::zk_hem::protocol::prove`].
 pub fn prove_succinct_full_shard_aggregate(
     relation: &FullShardMergeRelation,
     statement: &FullShardAggregateStatement<'_>,
@@ -3718,7 +3721,7 @@ impl SubtreeInternalMergeRelation {
             || base_merkle_level > 58usize.saturating_sub(fan_in.trailing_zeros() as usize)
             || child_vk.num_public != SUBTREE_PUBLIC_WORDS
             || !child_vk.regime.uses_poseidon2_canopy()
-            || !parent_regime.meets_qrom_128_floor()
+            || !parent_regime.is_accepted_aggregate_profile()
         {
             return Err(FullShardError::InvalidParameters);
         }

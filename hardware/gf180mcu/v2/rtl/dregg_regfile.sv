@@ -143,58 +143,56 @@ module dregg_regfile (
             (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand3_1 u_f2 (.A1(gn[6][b]), .A2(gn[7][b]), .A3(gn[8][b]), .ZN(f2));
             (* keep *) gf180mcu_fd_sc_mcu7t5v0__or3_1   u_or (.A1(f0), .A2(f1), .A3(f2), .Z(rdata[b]));
         end
-        for (k = 0; k < 9; k++) begin : g_grp
-            if (k < NG) begin : g_on
-                (* keep *) gf180mcu_fd_sc_mcu7t5v0__clkbuf_4 u_ckb (.I(clk), .Z(gck[k]));
-                for (b = 0; b < 64; b++) begin : g_bit
-                    wire a, bb;
-                    (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand4_1 u_na (.A1(n[8*k+0][b]), .A2(n[8*k+1][b]),
-                                                                      .A3(n[8*k+2][b]), .A4(n[8*k+3][b]), .ZN(a));
-                    (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand4_1 u_nb (.A1(n[8*k+4][b]), .A2(n[8*k+5][b]),
-                                                                      .A3(n[8*k+6][b]), .A4(n[8*k+7][b]), .ZN(bb));
-                    (* keep *) gf180mcu_fd_sc_mcu7t5v0__nor2_1  u_gn (.A1(a), .A2(bb), .ZN(gn[k][b]));
-                end
-            end else begin : g_off                   // a 64-row file has eight groups
-                assign gck[k] = 1'b0;
-                assign gn[k]  = '1;
+        for (k = 0; k < NG; k++) begin : g_grp
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__clkbuf_4 u_ckb (.I(clk), .Z(gck[k]));
+            for (b = 0; b < 64; b++) begin : g_bit
+                wire a, bb;
+                (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand4_1 u_na (.A1(n[8*k+0][b]), .A2(n[8*k+1][b]),
+                                                                  .A3(n[8*k+2][b]), .A4(n[8*k+3][b]), .ZN(a));
+                (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand4_1 u_nb (.A1(n[8*k+4][b]), .A2(n[8*k+5][b]),
+                                                                  .A3(n[8*k+6][b]), .A4(n[8*k+7][b]), .ZN(bb));
+                (* keep *) gf180mcu_fd_sc_mcu7t5v0__nor2_1  u_gn (.A1(a), .A2(bb), .ZN(gn[k][b]));
             end
         end
-        for (r = 0; r < 72; r++) begin : g_row
-            if (r < NROWS) begin : g_on
-                // logical row of this slot (the same mapping as slot_row above)
-                localparam int R = (r < N_KWORK) ? KWORK0 + r : (r < NDR) ? OUT0 + (r - N_KWORK)
-                                 : ((r - NDR) < KWORK0) ? r - NDR : r - N_OUT;
-                wire wen, gate, sel;
-                wire [63:0] dl;
-                if (r < 5)            begin : g_kc assign dl = kcd[64*r +: 64]; end
-                else if (r < N_KWORK) begin : g_kb assign dl = kbd; end
-                else                  begin : g_wb assign dl = wbl; end
-                (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_1  u_wen (.A1(en_a[r]), .A2(en_b[r]), .Z(wen));
-                (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_4 u_cg  (.CLK(gck[r / 8]), .E(wen), .TE(1'b0), .Q(gate));
-                (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_4  u_sel (.A1(sel_a[r]), .A2(sel_b[r]), .Z(sel));
-                for (b = 0; b < 64; b++) begin : g_bit
-                    wire q, nrd;
+        for (k = NG; k < 9; k++) begin : g_nogrp     // a 64-row file has eight groups
+            assign gck[k] = 1'b0;
+            assign gn[k]  = '1;
+        end
+        for (r = NROWS; r < 72; r++) begin : g_norow
+            assign n[r]     = '1;
+            assign dn[r]    = '1;
+            assign q_row[r] = '0;
+        end
+        for (r = 0; r < NROWS; r++) begin : g_row
+            // logical row of this slot (the same mapping as slot_row above)
+            localparam int R = (r < N_KWORK) ? KWORK0 + r : (r < NDR) ? OUT0 + (r - N_KWORK)
+                             : ((r - NDR) < KWORK0) ? r - NDR : r - N_OUT;
+            wire wen, gate, sel;
+            wire [63:0] dl;
+            if (r < 5)            begin : g_kc assign dl = kcd[64*r +: 64]; end
+            else if (r < N_KWORK) begin : g_kb assign dl = kbd; end
+            else                  begin : g_wb assign dl = wbl; end
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_1  u_wen (.A1(en_a[r]), .A2(en_b[r]), .Z(wen));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_4 u_cg  (.CLK(gck[r / 8]), .E(wen), .TE(1'b0), .Q(gate));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_4  u_sel (.A1(sel_a[r]), .A2(sel_b[r]), .Z(sel));
+            for (b = 0; b < 64; b++) begin : g_bit
+                wire q, nrd;
 `ifdef DREGG_TB_BACKDOOR
-                    dregg_tb_latrnq u_lat (.D(dl[b]), .E(gate), .RN(rn[b]), .Q(q),
-                                           .bd_we(`DREGG_TB_BACKDOOR.bd_rf_we && `DREGG_TB_BACKDOOR.bd_row == 7'(R)),
-                                           .bd_d(`DREGG_TB_BACKDOOR.bd_data[b]));
+                dregg_tb_latrnq u_lat (.D(dl[b]), .E(gate), .RN(rn[b]), .Q(q),
+                                       .bd_we(`DREGG_TB_BACKDOOR.bd_rf_we && `DREGG_TB_BACKDOOR.bd_row == 7'(R)),
+                                       .bd_d(`DREGG_TB_BACKDOOR.bd_data[b]));
 `else
-                    (* keep *) gf180mcu_fd_sc_mcu7t5v0__latrnq_1 u_lat (.D(dl[b]), .E(gate), .RN(rn[b]), .Q(q));
+                (* keep *) gf180mcu_fd_sc_mcu7t5v0__latrnq_1 u_lat (.D(dl[b]), .E(gate), .RN(rn[b]), .Q(q));
 `endif
-                    (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1  u_rd  (.A1(q), .A2(sel), .ZN(nrd));
-                    assign q_row[R][b] = q;
-                    if (r < NDR) begin : g_direct
-                        assign n[r][b]  = 1'b1;          // not on the read port
-                        assign dn[r][b] = nrd;
-                    end else begin : g_read
-                        assign n[r][b]  = nrd;
-                        assign dn[r][b] = 1'b1;
-                    end
+                (* keep *) gf180mcu_fd_sc_mcu7t5v0__nand2_1  u_rd  (.A1(q), .A2(sel), .ZN(nrd));
+                assign q_row[R][b] = q;
+                if (r < NDR) begin : g_direct
+                    assign n[r][b]  = 1'b1;          // not on the read port
+                    assign dn[r][b] = nrd;
+                end else begin : g_read
+                    assign n[r][b]  = nrd;
+                    assign dn[r][b] = 1'b1;
                 end
-            end else begin : g_off
-                assign n[r]     = '1;
-                assign dn[r]    = '1;
-                assign q_row[r] = '0;
             end
         end
         for (k = 0; k < N_KWORK; k++) begin : g_kq

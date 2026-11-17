@@ -454,7 +454,7 @@ fn blind_vc_uses_the_oprf_and_pins_schema() {
         &issuer_mldsa_pk,
         &accumulator.oprf_key,
         b"verifier",
-        &[27; 32],
+        &mut ReplayNotPrevented(&[27; 32]),
         PresentationMode::UnlinkableFresh,
         42,
         3
@@ -465,7 +465,7 @@ fn blind_vc_uses_the_oprf_and_pins_schema() {
         &issuer_mldsa_pk,
         &accumulator.oprf_key,
         b"verifier",
-        &[27; 32],
+        &mut ReplayNotPrevented(&[27; 32]),
         PresentationMode::UnlinkableFresh,
         43,
         3

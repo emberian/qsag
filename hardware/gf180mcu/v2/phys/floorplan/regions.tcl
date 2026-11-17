@@ -48,16 +48,16 @@ fp::region db   {1090 870 1492 1058} {^i_chip_core/u_db/}
 # domain stays within 300 um of its pads and away from the register file
 fp::region nfc  {1200 520 1492 856}  {^i_chip_core/u_nfc/}
 
-# ---- datapath neighbours of the register file
-# word unit, hold register, read predecode: a full-width strip directly under the array's foot rows,
-# so bit b of the unit sits under column b of the file
-fp::region wu   {445 1128 1405 1217} {^i_chip_core/(u_wu/|u_rf/(u_hold|_[0-9]+_|g_half))}
-# Keccak unit under the word unit: it uses the read port and the write path every clock it runs
-fp::region kec  {445 870 1085 1124}  {^i_chip_core/u_kec/}
-# control: ROM and sequencer together (the ROM's 28 outputs go nowhere else)
-# (run g1: all 9,070 tracks of global-route overflow were inside this region at 645 x 286 um, so it is
-# widened to the NFC region's edge; the ROM is the one block that is routing-limited)
-fp::region ctl  {445 570 1195 866}   {^i_chip_core/(u_rom|u_seq)/}
+# ---- datapath and control: NOT fenced by default (FP_FENCE_CORE=1 restores the fences of run g1).
+# Measured: with word unit, Keccak and ROM + sequencer in their own regions the ROM region overflowed
+# in global routing (9,070 tracks, all inside it, at 45 to 64 % fill), while the same netlist with no
+# regions at all routed with zero overflow. The placer already puts these blocks next to the register
+# file's read port; a fence only removes the whitespace the ROM's wiring needs.
+if { [info exists ::env(FP_FENCE_CORE)] && $::env(FP_FENCE_CORE) } {
+    fp::region wu   {445 1128 1405 1217} {^i_chip_core/(u_wu/|u_rf/(u_hold|_[0-9]+_|g_half))}
+    fp::region kec  {445 870 1085 1124}  {^i_chip_core/u_kec/}
+    fp::region ctl  {445 570 1195 866}   {^i_chip_core/(u_rom|u_seq)/}
+}
 
 # ---- SPI link at SCK / MOSI / MISO / CS_N (south, x 826..1214); clock, reset, tamper at CLK / RST_N
 fp::region spi  {800 445 1195 566}   {^i_chip_core/u_spi/}

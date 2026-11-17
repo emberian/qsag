@@ -1474,7 +1474,7 @@ fn open_vault_anchored(
     let anchor = match (meta.anchor_info, anchor_cfg) {
         (Some(_), None) => {
             return Err(CliError::state(
-                "Hem quorum vault requires an external monotone anchor (--anchor-dir, --anchor-tpm-nv, or --anchor-vmgenid)",
+                "Hem quorum vault requires an external monotone anchor (--anchor-dir or --anchor-tpm-nv)",
             ));
         }
         (None, Some(_)) => {
@@ -1928,6 +1928,7 @@ pub fn keygen(args: &Args) -> Result<(), CliError> {
     let public_out = args.require("public-out")?;
     let passphrase = crate::envelope::passphrase(args)?;
     let anchor_cfg = AnchorConfig::from_quorum_args(args, vault_dir)?;
+    crate::anchor::preflight_tpm_enrollment(anchor_cfg.as_ref(), args, 1)?;
     require_anchor_or_waiver(
         anchor_cfg.is_some(),
         args.flag("ephemeral-unanchored"),

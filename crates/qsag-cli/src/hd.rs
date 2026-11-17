@@ -498,7 +498,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic] [--json]"
+            "qsag hd keygen [--threshold <t>] [--parties <n>] [--count <pow2>] --vault-dir <dir> --watch-out <path> [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--allow-unencrypted] [--deterministic] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
@@ -506,6 +506,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let vault_dir = args.require("vault-dir")?;
     let watch_out = args.require("watch-out")?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    crate::anchor::preflight_tpm_enrollment(anchor_cfg.as_ref(), &args, 1)?;
     require_anchor_or_waiver(
         anchor_cfg.is_some(),
         args.flag("ephemeral-unanchored"),
@@ -910,7 +911,7 @@ fn recover(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd recover --vault-dir <dir> [--signers <i,j,..>] --index <child_idx> --proof <child.json> --secret-out <path> [--public-out <path>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--json]"
+            "qsag hd recover --vault-dir <dir> [--signers <i,j,..>] --index <child_idx> --proof <child.json> --secret-out <path> [--public-out <path>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }
@@ -1133,7 +1134,7 @@ fn export_rss(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(raw, &opts, &flags)?;
     if args.flag("help") {
         println!(
-            "qsag hd export-rss --vault-dir <dir> --index <child_idx> [--proof <child.json>] [--party <0|1|2> --secret-out <path> | --out-dir <dir>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--out-passphrase-env <VAR> | --out-passphrase-file <path> | --allow-unencrypted] [--json]"
+            "qsag hd export-rss --vault-dir <dir> --index <child_idx> [--proof <child.json>] [--party <0|1|2> --secret-out <path> | --out-dir <dir>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <path>] [--out-passphrase-env <VAR> | --out-passphrase-file <path> | --allow-unencrypted] [--json]\n  --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM."
         );
         return Ok(());
     }

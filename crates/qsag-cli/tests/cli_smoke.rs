@@ -58,7 +58,11 @@ fn qsag(args: &[&str]) -> Output {
             )
             | (Some(&"hd"), Some(&"keygen" | &"recover" | &"export-rss"), _)
             | (Some(&"policy"), Some(&"init"), _)
-            | (Some(&"policy"), Some(&"biscuit"), Some(&"keygen" | &"mint"))
+            | (
+                Some(&"policy"),
+                Some(&"biscuit"),
+                Some(&"keygen" | &"mint" | &"verify")
+            )
     );
     let has_anchor = args.iter().any(|a| {
         matches!(
@@ -1038,6 +1042,184 @@ fn restore_dir_files_in_place(snapshot: &[(PathBuf, Vec<u8>)]) {
         f.write_all(bytes).unwrap();
         f.sync_all().unwrap();
     }
+}
+
+/// Restore the custody bytes of a vault in place: every inode is kept, and the anchor
+/// `.lock` sidecars and VMGENID `.target` files are not touched at all. A vault's own
+/// `.vault.lock` holds its state MAC, so its contents are part of the old state.
+#[cfg(target_os = "linux")]
+fn restore_custody_bytes_in_place(snapshot: &[(PathBuf, Vec<u8>)]) {
+    let custody: Vec<_> = snapshot
+        .iter()
+        .filter(|(path, _)| {
+            path.to_string_lossy().ends_with(".vault.lock")
+                || !matches!(
+                    path.extension().and_then(|s| s.to_str()),
+                    Some("lock" | "target")
+                )
+        })
+        .cloned()
+        .collect();
+    restore_dir_files_in_place(&custody);
+}
+
+// A VM generation id changes when the hypervisor restores or clones the whole VM. It
+// does not change when the guest's files are put back in place, and the VMGENID seal
+// lives on the disk being restored. Before `--anchor-vmgenid` stopped counting as an
+// anchor, the first half of this test enrolled with it alone, signed epoch 0, restored
+// the vault bytes in place and signed epoch 0 again for a different message: two valid
+// signatures from one one-time leaf.
+#[cfg(target_os = "linux")]
+#[test]
+fn vmgenid_alone_is_refused_and_in_place_restore_cannot_respend_a_leaf() {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let dir = Workdir::new("vmgenid-in-place");
+    let private = |path: &Path| {
+        std::fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+    };
+    let vault = dir.0.join("vault");
+    private(&vault);
+    let vault_s = vault.to_str().unwrap();
+    let pk = dir.path("pk");
+    let keygen = |vault: &str, pk: &str, anchor: &[&str]| {
+        let mut args = vec![
+            "quorum",
+            "keygen",
+            "--vault-dir",
+            vault,
+            "--public-out",
+            pk,
+            "--tree-height",
+            "1",
+        ];
+        args.extend_from_slice(anchor);
+        qsag(&args)
+    };
+    let sign = |vault: &str, message: &str, output: &str, anchor: &[&str]| {
+        let mut args = vec![
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault,
+            "--epoch",
+            "0",
+            "--in",
+            message,
+            "--out",
+            output,
+        ];
+        args.extend_from_slice(anchor);
+        qsag(&args)
+    };
+    let verify = |pk: &str, message: &str, sig: &str| {
+        expect(
+            &[
+                "quorum", "verify", "--public", pk, "--in", message, "--sig", sig,
+            ],
+            0,
+        );
+    };
+    let stderr = |output: &Output| String::from_utf8_lossy(&output.stderr).into_owned();
+
+    // 1. VMGENID on its own.
+    let enrolled = keygen(vault_s, &pk, &["--anchor-vmgenid"]);
+    if code(&enrolled) == 0 {
+        let genesis = snapshot_dir_files(&vault);
+        let first = dir.path("first.sig");
+        let second = dir.path("second.sig");
+        let signed = sign(vault_s, &dir.path("msg"), &first, &["--anchor-vmgenid"]);
+        assert_eq!(code(&signed), 0, "{}", stderr(&signed));
+        let identity = |path: &Path| {
+            let meta = std::fs::metadata(path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let inodes: Vec<_> = genesis.iter().map(|(path, _)| identity(path)).collect();
+        restore_custody_bytes_in_place(&genesis);
+        let after: Vec<_> = genesis.iter().map(|(path, _)| identity(path)).collect();
+        assert_eq!(inodes, after);
+        let resigned = sign(vault_s, &dir.path("other"), &second, &["--anchor-vmgenid"]);
+        if code(&resigned) == 0 {
+            verify(&pk, &dir.path("msg"), &first);
+            verify(&pk, &dir.path("other"), &second);
+            panic!(
+                "VMGENID-only vault reopened its restored state: two valid epoch-0 signatures over different messages"
+            );
+        }
+        panic!(
+            "--anchor-vmgenid alone was accepted as a rollback anchor: {}",
+            stderr(&resigned)
+        );
+    }
+    assert_eq!(code(&enrolled), 1, "{}", stderr(&enrolled));
+    assert!(
+        stderr(&enrolled).contains("snapshot/clone detection only"),
+        "{}",
+        stderr(&enrolled)
+    );
+    assert!(!Path::new(&pk).exists());
+    assert_eq!(std::fs::read_dir(&vault).unwrap().count(), 0);
+
+    // 2. A directory anchor on the vault's own device is restored by the same restore;
+    //    the single-disk waiver does not turn VMGENID into the monotone half.
+    let same_disk = dir.0.join("anchor");
+    private(&same_disk);
+    let refused = keygen(
+        vault_s,
+        &pk,
+        &[
+            "--anchor-vmgenid",
+            "--anchor-dir",
+            same_disk.to_str().unwrap(),
+            "--allow-single-disk-anchor",
+        ],
+    );
+    assert_eq!(code(&refused), 4, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("snapshot/clone detection only"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!Path::new(&pk).exists());
+
+    // 3. With a directory anchor on another device the same in-place restore is refused.
+    let shm = Path::new("/dev/shm");
+    if !shm.is_dir()
+        || std::fs::metadata(shm).unwrap().dev() == std::fs::metadata(&vault).unwrap().dev()
+    {
+        eprintln!("no second filesystem device for the disjoint-anchor half of this test");
+        return;
+    }
+    let disjoint = shm.join(format!("qsag-cli-vmgenid-anchor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&disjoint);
+    private(&disjoint);
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(disjoint.clone());
+    let vault2 = dir.0.join("vault2");
+    private(&vault2);
+    let vault2_s = vault2.to_str().unwrap();
+    let pk2 = dir.path("pk2");
+    let anchored = [
+        "--anchor-vmgenid",
+        "--anchor-dir",
+        disjoint.to_str().unwrap(),
+    ];
+    let enrolled = keygen(vault2_s, &pk2, &anchored);
+    assert_eq!(code(&enrolled), 0, "{}", stderr(&enrolled));
+    let genesis = snapshot_dir_files(&vault2);
+    let first = dir.path("anchored-first.sig");
+    let second = dir.path("anchored-second.sig");
+    let signed = sign(vault2_s, &dir.path("msg"), &first, &anchored);
+    assert_eq!(code(&signed), 0, "{}", stderr(&signed));
+    verify(&pk2, &dir.path("msg"), &first);
+    restore_custody_bytes_in_place(&genesis);
+    let resigned = sign(vault2_s, &dir.path("other"), &second, &anchored);
+    assert_eq!(code(&resigned), 4, "{}", stderr(&resigned));
+    assert!(!Path::new(&second).exists());
 }
 
 #[cfg(unix)]
@@ -3204,6 +3386,39 @@ fn e2e_policy_macaroon_attenuation_third_party_discharge_and_refusal() {
         ],
         0,
     );
+    // A macaroon is a reusable bearer grant: verification keeps no state, so the same
+    // token and discharge verify again, and the output says so instead of implying
+    // that the grant was spent.
+    let again = expect(
+        &[
+            "policy",
+            "macaroon",
+            "verify",
+            "--key",
+            &root_key,
+            "--in",
+            &tok1,
+            "--audience-hex",
+            audience,
+            "--resource-hex",
+            resource,
+            "--actions",
+            "3",
+            "--amount",
+            huge_amount,
+            "--now",
+            "1700000000",
+            "--discharge",
+            &dis_bound,
+            "--discharge-key",
+            &tp_key,
+            "--json",
+        ],
+        0,
+    );
+    assert_eq!(json_member(&again, "valid"), "true");
+    assert_eq!(json_member(&again, "consumed"), "false");
+    assert_eq!(json_member(&again, "reusable"), "true");
     // Spending 1 unit over the u128 max-amount cap is denied (exit 3).
     expect(
         &[
@@ -3256,6 +3471,8 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
     let tok1 = dir.path("b1.json");
     let step1 = dir.path("step1.sk");
     let sealed = dir.path("sealed.json");
+    let seal_store = dir.path("seal-ledger");
+    let intent_digest = &"56".repeat(32);
     let audience = &"12".repeat(32);
     let resource = &"34".repeat(32);
 
@@ -3357,6 +3574,8 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
             "--step-key",
             &step1,
             "--bind-request",
+            "--intent-digest-hex",
+            intent_digest,
             "--audience-hex",
             audience,
             "--resource-hex",
@@ -3377,34 +3596,44 @@ fn e2e_policy_biscuit_anchored_mint_attenuate_step_retirement_seal_and_rollback(
             .unwrap()
             .contains("\"retired\": true")
     );
-    expect(
-        &[
-            "policy",
-            "biscuit",
-            "verify",
-            "--public",
-            &auth_pk,
-            "--in",
-            &sealed,
-            "--audience-hex",
-            audience,
-            "--resource-hex",
-            resource,
-            "--actions",
-            "3",
-            "--amount",
-            "50000000000000000000",
-            "--now",
-            "1700000000",
-        ],
-        0,
-    );
+    let verify_args = [
+        "policy",
+        "biscuit",
+        "verify",
+        "--intent-digest-hex",
+        intent_digest,
+        "--seal-store",
+        &seal_store,
+        "--public",
+        &auth_pk,
+        "--in",
+        &sealed,
+        "--audience-hex",
+        audience,
+        "--resource-hex",
+        resource,
+        "--actions",
+        "3",
+        "--amount",
+        "50000000000000000000",
+        "--now",
+        "1700000000",
+    ];
+    let mut first_verify = verify_args.to_vec();
+    first_verify.push("--create-seal-store");
+    expect(&first_verify, 0);
+    // A new CLI process reopening the same ledger must refuse the same seal.
+    expect(&verify_args, 3);
     // Request mismatch (different amount than bound request) fails verification!
     expect(
         &[
             "policy",
             "biscuit",
             "verify",
+            "--intent-digest-hex",
+            intent_digest,
+            "--seal-store",
+            &seal_store,
             "--public",
             &auth_pk,
             "--in",
@@ -3684,6 +3913,7 @@ fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
         let token = dir.path(&format!("token-{mint}"));
         let step = dir.path(&format!("step-{mint}"));
         let sealed = dir.path(&format!("sealed-{mint}"));
+        let seal_store = dir.path(&format!("seal-store-{mint}"));
         let args = [
             "policy",
             "biscuit",
@@ -3774,10 +4004,199 @@ fn passphrase_biscuit_authority_survives_multiple_anchored_mints() {
                 &audience,
                 "--resource-hex",
                 &resource,
+                "--seal-store",
+                &seal_store,
+                "--create-seal-store",
             ],
             0,
         );
     }
+}
+
+// A seal consumed after a backup of the verifier's seal store must stay consumed when
+// the backup is put back. Without an anchor the restored store accepts it again.
+#[cfg(unix)]
+#[test]
+fn biscuit_seal_store_anchor_refuses_a_restored_store() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("seal-store-rollback");
+    let private = |name: &str| {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir.path(name))
+            .unwrap();
+        dir.path(name)
+    };
+    let sk = dir.path("authority.sk");
+    let pk = dir.path("authority.pk");
+    let audience = "12".repeat(32);
+    let resource = "34".repeat(32);
+    expect(
+        &[
+            "policy",
+            "biscuit",
+            "keygen",
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+            "--tree-height",
+            "2",
+        ],
+        0,
+    );
+    let seal = |n: usize| {
+        let token = dir.path(&format!("token-{n}"));
+        let step = dir.path(&format!("step-{n}"));
+        let sealed = dir.path(&format!("sealed-{n}"));
+        expect(
+            &[
+                "policy",
+                "biscuit",
+                "mint",
+                "--secret",
+                &sk,
+                "--audience-hex",
+                &audience,
+                "--resource-hex",
+                &resource,
+                "--token-out",
+                &token,
+                "--step-key-out",
+                &step,
+            ],
+            0,
+        );
+        expect(
+            &[
+                "policy",
+                "biscuit",
+                "seal",
+                "--in",
+                &token,
+                "--step-key",
+                &step,
+                "--out",
+                &sealed,
+            ],
+            0,
+        );
+        sealed
+    };
+    let verify = |sealed: &str, store: &str, extra: &[&str]| {
+        let mut args = vec![
+            "policy",
+            "biscuit",
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            sealed,
+            "--audience-hex",
+            &audience,
+            "--resource-hex",
+            &resource,
+            "--seal-store",
+            store,
+        ];
+        args.extend_from_slice(extra);
+        qsag(&args)
+    };
+    let stderr = |output: &Output| String::from_utf8_lossy(&output.stderr).into_owned();
+
+    for anchored in [false, true] {
+        let store_dir = private(if anchored {
+            "anchored-store"
+        } else {
+            "bare-store"
+        });
+        let store = format!("{store_dir}/seals");
+        let anchor_dir = private(if anchored {
+            "anchor-a"
+        } else {
+            "anchor-unused"
+        });
+        let anchor: Vec<&str> = if anchored {
+            vec!["--anchor-dir", &anchor_dir, "--allow-single-disk-anchor"]
+        } else {
+            vec!["--ephemeral-unanchored"]
+        };
+        let with = |extra: &[&'static str]| -> Vec<&str> {
+            anchor
+                .iter()
+                .copied()
+                .chain(extra.iter().copied())
+                .collect()
+        };
+        let (first, second) = (
+            seal(usize::from(anchored) * 2),
+            seal(usize::from(anchored) * 2 + 1),
+        );
+
+        let created = verify(&first, &store, &with(&["--create-seal-store"]));
+        assert_eq!(code(&created), 0, "{}", stderr(&created));
+        let backup = snapshot_dir_files(Path::new(&store_dir));
+        let accepted = verify(&second, &store, &with(&[]));
+        assert_eq!(code(&accepted), 0, "{}", stderr(&accepted));
+        let replayed = verify(&second, &store, &with(&[]));
+        assert_eq!(code(&replayed), 3, "{}", stderr(&replayed));
+        let current = snapshot_dir_files(Path::new(&store_dir));
+
+        // The store directory goes back to the backup, every inode kept.
+        restore_dir_files_in_place(&backup);
+        let after_restore = verify(&second, &store, &with(&[]));
+        if anchored {
+            assert_eq!(code(&after_restore), 4, "{}", stderr(&after_restore));
+            assert!(
+                stderr(&after_restore).contains("rollback"),
+                "{}",
+                stderr(&after_restore)
+            );
+            // The anchor requirement cannot be dropped to get around it.
+            let waived = verify(&second, &store, &["--ephemeral-unanchored"]);
+            assert_eq!(code(&waived), 4, "{}", stderr(&waived));
+            assert!(stderr(&waived).contains("must be opened with it"));
+            // The current store still opens and still refuses the consumed seals.
+            restore_dir_files_in_place(&current);
+            for sealed in [&first, &second] {
+                let refused = verify(sealed, &store, &with(&[]));
+                assert_eq!(code(&refused), 3, "{}", stderr(&refused));
+            }
+        } else {
+            // No anchor: the consumed seal is accepted a second time.
+            assert_eq!(code(&after_restore), 0, "{}", stderr(&after_restore));
+            // And an unanchored store cannot be claimed to be anchored afterwards.
+            let claimed = verify(
+                &first,
+                &store,
+                &["--anchor-dir", &anchor_dir, "--allow-single-disk-anchor"],
+            );
+            assert_eq!(code(&claimed), 4, "{}", stderr(&claimed));
+            assert!(stderr(&claimed).contains("without an external anchor"));
+        }
+    }
+    // Neither an anchor nor the waiver: the command refuses to pick for the operator.
+    let output = Command::new(env!("CARGO_BIN_EXE_qsag"))
+        .args([
+            "policy",
+            "biscuit",
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &dir.path("sealed-3"),
+            "--audience-hex",
+            &audience,
+            "--resource-hex",
+            &resource,
+            "--seal-store",
+            &dir.path("undecided"),
+            "--create-seal-store",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 1, "{}", stderr(&output));
+    assert!(!Path::new(&dir.path("undecided")).exists());
 }
 
 #[test]

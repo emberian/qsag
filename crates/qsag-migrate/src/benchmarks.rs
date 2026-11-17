@@ -93,7 +93,7 @@ fn local_four_curve_benchmark() {
     credentials[..12].fill(0);
     credentials[0] = 1;
     let request = BlsMigrationRequest {
-        commitment: witness.compute_beacon_commitment().unwrap(),
+        commitment: witness.compute_operator_commitment().unwrap(),
         validator_index: 42,
         withdrawal_credentials: credentials,
         target,
@@ -102,10 +102,10 @@ fn local_four_curve_benchmark() {
     };
     let start = Instant::now();
     let (statement, proof) =
-        prove_bls_migration_in_domain(&witness, request, [31; 32], &backend).unwrap();
+        prove_bls_key_possession_in_domain(&witness, request, [31; 32], &backend).unwrap();
     let prove = start.elapsed();
     let start = Instant::now();
-    verify_bls_migration(
+    verify_bls_key_possession(
         &statement,
         &proof,
         &statement.migration_domain,

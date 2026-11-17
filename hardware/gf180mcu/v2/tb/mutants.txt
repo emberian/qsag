@@ -16,3 +16,4 @@ fram_done_short|dregg_fram.sv|s/dcnt == 3'(T_FRAM_DONE)/dcnt == 3'd3/
 regfile_wipe_keeps_lane7|dregg_regfile.sv|s/lw = (lr <= 7'(WIPE_LO_LAST))/lw = (lr < 7'(WIPE_LO_LAST))/
 regfile_out_row_on_read_port|dregg_regfile.sv|s/assign n\[r\]\[b\]  = 1'b1;          \/\/ not on the read port/assign n[r][b]  = nrd;/
 regfile_sel_decode|dregg_regfile.sv|s/sel_b\[p\] = (raddr\[2:0\] == lr\[2:0\]);/sel_b[p] = (raddr[2:0] == lr[2:0]) || (lr[2:0] == 3'd5);/
+kec_registered_address|dregg_keccak_serial.sv|s/((st_n == K_RND) \&\& (t_n < 5'd25))/((st_n == K_RND) \&\& (t_n < 5'd24))/

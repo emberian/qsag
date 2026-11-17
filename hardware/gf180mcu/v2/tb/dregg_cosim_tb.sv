@@ -7,7 +7,8 @@ module dregg_cosim_tb #(
     parameter bit H_SHADOW = 1'b1,
     parameter bit KEC_WAIT_AFTER_STORE = 1'b1,
     parameter bit FRAM_DONE_PAD = 1'b1,
-    parameter bit IR_STAGE = 1'b0
+    parameter bit IR_STAGE = 1'b0,
+    parameter bit RA_STAGE = 1'b0
 ) (
     input  wire         clk,
     input  wire         por_n,
@@ -86,7 +87,7 @@ module dregg_cosim_tb #(
         .rom_len(rom_len), .rom_used(rom_used)
     );
 
-    dregg_core #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .FRAM_DONE_PAD(FRAM_DONE_PAD), .IR_STAGE(IR_STAGE)) dut (
+    dregg_core #(.H_SHADOW(H_SHADOW), .KEC_WAIT_AFTER_STORE(KEC_WAIT_AFTER_STORE), .FRAM_DONE_PAD(FRAM_DONE_PAD), .IR_STAGE(IR_STAGE), .RA_STAGE(RA_STAGE)) dut (
         .clk(clk), .por_n(por_n), .tamper_n(tamper_n),
         .in_valid(in_valid), .in_first(in_first), .in_data(in_data), .in_take(in_take),
         .out_valid(out_valid), .out_data(out_data), .out_take(out_take),

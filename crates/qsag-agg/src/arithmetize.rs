@@ -2586,7 +2586,8 @@ fn verify_shard_rows(
 /// `mode` covers exactly the signers of `proof.bitmap`, in ascending index order.
 ///
 /// The proof must use the default Johnson QROM schedule. Use
-/// [`verify_shard_batch_with_regime`] to select another QROM-128 regime explicitly.
+/// [`verify_shard_batch_with_regime`] to select another accepted aggregate profile explicitly; see
+/// [`WhirSecurityRegime`] for its nominal work factor and bounded-query assumptions.
 pub fn verify_shard_batch(
     pks: &[ValidatorPublicKey],
     committee_root: &[u8; 32],
@@ -2634,7 +2635,7 @@ pub fn verify_shard_batch_with_regime(
     let schedule = &proof.schedule;
     let num_vars = LOG_TRACE_COLS + circuit.log_rows();
     let expected_schedule = expected_regime.schedule(num_vars);
-    if !expected_regime.meets_qrom_128_floor()
+    if !expected_regime.is_accepted_aggregate_profile()
         || *schedule != expected_schedule
         || !schedule.validate(num_vars)
         || !schedule.is_canonical(num_vars)

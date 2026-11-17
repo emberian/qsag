@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 #![no_main]
 
-//! Coverage-guided hostile wire-decoder and verifier fuzzer for the hologram proof family of
-//! `qsag-agg`, driven by verifier keys of two small compiled relations:
+//! Coverage-guided hostile wire-decoder and verifier fuzzer for the hologram and masked
+//! proof formats of `qsag-agg`, driven by two small compiled relations:
 //!
 //! 1. `zk_hem::protocol::ShapeVerifierKey::from_bytes`.
 //! 2. `zk_hem::protocol::HologramPublicProof::from_bytes` + `verify_public_hologram`.
@@ -10,14 +10,15 @@
 //!    `verify_succinct_subtree_aggregate_against_roster_root`.
 //! 4. `recursive::split::SplitSubtreeAggregate::from_bytes_canonical` +
 //!    `verify_against_roster_root`.
+//! 5. `zk_hem::protocol::ZkHemProof::from_bytes` + `verify`, and full-shard wrapper encoders.
 //!
 //! Scope with respect to the full-shard carriers: `FullShardMergeProof::from_bytes`
-//! (`QSAGFSM1`) is an 8-byte magic check followed by `HologramPublicProof::from_bytes`, and
-//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA1`) is a magic, a count
+//! (`QSAGFSM2`) is an 8-byte magic check followed by `ZkHemProof::from_bytes`, and
+//! `SuccinctFullShardAggregate::from_bytes_canonical` (`QSAGFSA2`) is a magic, a count
 //! vector and that same call. Both take a `&FullShardMergeRelation`, which only
 //! `FullShardMergeRelation::new` constructs, by synthesizing the in-circuit WHIR verifier:
 //! minutes under coverage instrumentation at the smallest parameters. This target therefore
-//! reaches the proof decoder those two wrap, under a small relation's key, and checks the
+//! reaches the masked proof decoder those two wrap, under a small relation, and checks the
 //! wrappers' encoders; the two wrapper decoders themselves are not executed here.
 //!
 //! Every fixture is built in `LLVMFuzzerInitialize` (the `init:` block), before libFuzzer
@@ -37,16 +38,18 @@ use qsag_agg::recursive::{
 };
 use qsag_agg::zk_hem::full_shard::FullShardMergeProof;
 use qsag_agg::zk_hem::protocol::{
-    HologramPublicProof, ShapeHologram, ShapeVerifierKey, prove_public_hologram,
+    self, HologramPublicProof, ShapeHologram, ShapeVerifierKey, ZkHemProof, prove_public_hologram,
     verify_public_hologram,
 };
-use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, poseidon2_perm};
+use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm};
 
 /// Regime of the fixture relations and the seed proof. Its proof-of-work grinds through
 /// the assembly Keccak kernel, which coverage instrumentation does not slow down.
 const REGIME: WhirSecurityRegime = WhirSecurityRegime::BciksJohnsonQrom128;
 /// The statement label the subtree root verifier binds.
 const SUBTREE_ROOT_LABEL: &[u8] = b"QSAG.SUBTREE.ROOT.HOLOGRAM/v1";
+/// The full-shard masked parent label; the fixture uses a small substitute relation.
+const FULL_SHARD_LABEL: &[u8] = b"QSAG.FULL.SHARD.MERGE/v2";
 /// Public words of the split carrier: the subtree statement plus a four-limb ledger root.
 const SPLIT_PUBLIC_WORDS: usize = SUBTREE_PUBLIC_WORDS + 4;
 
@@ -65,11 +68,13 @@ struct Fixtures {
     public_words: [Goldilocks; SUBTREE_PUBLIC_WORDS],
     proof_wire: Vec<u8>,
     aggregate_wire: Vec<u8>,
+    masked_shape: Shape,
+    masked_proof_wire: Vec<u8>,
 }
 
 /// A hologram-aligned relation with `publics` unconstrained public inputs and a few
 /// Poseidon2 permutations, and its satisfying assignment.
-fn small_relation(publics: &[Goldilocks]) -> (qsag_agg::zk_hem::relation::Shape, Vec<Goldilocks>) {
+fn small_relation(publics: &[Goldilocks]) -> (Shape, Vec<Goldilocks>) {
     let f = Goldilocks::from_u64_reduced;
     let mut cs = ConstraintSystem::new_hologram_aligned();
     for &word in publics {
@@ -121,6 +126,17 @@ fn fixtures() -> &'static Fixtures {
         let hologram = ShapeHologram::compile_native(&shape, REGIME).expect("subtree hologram");
         let vk = hologram.verifier_key().clone();
         assert_eq!(vk.num_public, SUBTREE_PUBLIC_WORDS);
+        let masked_proof = protocol::prove(
+            &shape,
+            assignment.clone(),
+            FULL_SHARD_LABEL,
+            REGIME,
+            &[0x43; 32],
+        )
+        .expect("seed masked proof");
+        assert!(protocol::verify(
+            &shape, &public_words, FULL_SHARD_LABEL, REGIME, &masked_proof,
+        ));
         let proof = prove_public_hologram(
             &shape,
             &hologram,
@@ -154,6 +170,8 @@ fn fixtures() -> &'static Fixtures {
             public_words,
             proof_wire,
             aggregate_wire: aggregate.to_bytes(),
+            masked_shape: shape,
+            masked_proof_wire: masked_proof.to_bytes(),
         };
         assert!(verify_succinct_subtree_aggregate_against_roster_root(
             &fx.vk,
@@ -184,10 +202,27 @@ fn check_proof(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
     let proof = HologramPublicProof::from_bytes(bytes, &fx.vk)?;
     assert_eq!(proof.to_bytes(), bytes);
 
+    let verified = verify_public_hologram(&fx.vk, &fx.public_words, SUBTREE_ROOT_LABEL, &proof);
+    if verified {
+        // The label and every public word are bound.
+        assert!(!verify_public_hologram(&fx.vk, &fx.public_words, b"another label", &proof));
+        let mut other_words = fx.public_words;
+        other_words[10] += Goldilocks::ONE;
+        assert!(!verify_public_hologram(&fx.vk, &other_words, SUBTREE_ROOT_LABEL, &proof));
+    }
+    Some(verified)
+}
+
+/// A committed-mask proof under the fixture shape, plus the two full-shard encoders.
+/// This does not execute the full-shard wrapper decoders or their large relation.
+fn check_masked_proof(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
+    let proof = ZkHemProof::from_bytes(bytes, &fx.masked_shape, REGIME)?;
+    assert_eq!(proof.to_bytes(), bytes);
+
     // The two full-shard carriers frame exactly these proof bytes.
     let merge = FullShardMergeProof { proof };
     let merge_wire = merge.to_bytes();
-    assert_eq!(merge_wire[..8], *b"QSAGFSM1");
+    assert_eq!(merge_wire[..8], *b"QSAGFSM2");
     assert_eq!(&merge_wire[8..], bytes);
     let counts = vec![1u32, 2, 3];
     let carrier = SuccinctFullShardAggregate {
@@ -203,13 +238,18 @@ fn check_proof(fx: &Fixtures, bytes: &[u8]) -> Option<bool> {
     assert_eq!(carrier_wire[24..], merge_wire);
 
     let proof = &carrier.proof.proof;
-    let verified = verify_public_hologram(&fx.vk, &fx.public_words, SUBTREE_ROOT_LABEL, proof);
+    let verified = protocol::verify(
+        &fx.masked_shape, &fx.public_words, FULL_SHARD_LABEL, REGIME, proof,
+    );
     if verified {
-        // The label and every public word are bound.
-        assert!(!verify_public_hologram(&fx.vk, &fx.public_words, b"another label", proof));
+        assert!(!protocol::verify(
+            &fx.masked_shape, &fx.public_words, b"another label", REGIME, proof,
+        ));
         let mut other_words = fx.public_words;
         other_words[10] += Goldilocks::ONE;
-        assert!(!verify_public_hologram(&fx.vk, &other_words, SUBTREE_ROOT_LABEL, proof));
+        assert!(!protocol::verify(
+            &fx.masked_shape, &other_words, FULL_SHARD_LABEL, REGIME, proof,
+        ));
     }
     Some(verified)
 }
@@ -282,6 +322,7 @@ fuzz_target!(init: {
     // 1. Raw bytes through every decoder, bare and magic-prefixed.
     check_verifier_key(fx, data);
     let _ = check_proof(fx, data);
+    let _ = check_masked_proof(fx, data);
     let _ = check_aggregate(fx, data);
     let _ = check_aggregate(fx, &with_magic(SUCCINCT_SUBTREE_WIRE_MAGIC, data));
     check_split_aggregate(fx, data);
@@ -289,7 +330,7 @@ fuzz_target!(init: {
     // 2. Sparse edits of the real key, proof and aggregate: `[0xed, kind]` then
     //    `(offset, xor)` records. With no records the unedited value must verify.
     if let [0xed, kind, edits @ ..] = data {
-        match kind % 3 {
+        match kind % 4 {
             0 => check_verifier_key(fx, &edited(&fx.vk_wire, edits)),
             1 => {
                 let candidate = edited(&fx.proof_wire, edits);
@@ -298,10 +339,17 @@ fuzz_target!(init: {
                     assert_eq!(outcome, Some(true));
                 }
             }
-            _ => {
+            2 => {
                 let candidate = edited(&fx.aggregate_wire, edits);
                 let outcome = check_aggregate(fx, &candidate);
                 if candidate == fx.aggregate_wire {
+                    assert_eq!(outcome, Some(true));
+                }
+            }
+            _ => {
+                let candidate = edited(&fx.masked_proof_wire, edits);
+                let outcome = check_masked_proof(fx, &candidate);
+                if candidate == fx.masked_proof_wire {
                     assert_eq!(outcome, Some(true));
                 }
             }

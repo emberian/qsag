@@ -4,6 +4,12 @@ The integrated main-library axiom audit checks **59,257 declarations, including 
 
 ## Relation and encoding
 
+The relation proves knowledge of a curve scalar, not provenance of a wallet seed.
+A Shor-capable quantum attacker can compute that scalar from a revealed public
+key: for revealed keys this relation authenticates nobody against such an attacker.
+Orchard `ak`/`rk` statements are not tied to an on-chain note. Replay prevention
+requires a spent-nullifier registry, which this crate does not provide.
+
 The witness is a nonzero canonical **spending scalar**, not a derivation seed.
 A GF(2) circuit checks its 256-bit encoding against the relevant subgroup order.
 Four-bit window selection feeds complete projective secp256k1 addition or
@@ -16,12 +22,24 @@ point has `Z = 1` as a public constant and the selected secp256k1 point has
 `Z = 1 - sel_0` (only entry 0, the identity, has `Z = 0`). Neither shortcut
 depends on the bits being Boolean or on any private wire value.
 
-The four statements are:
+The original four address statements are:
 
 * Bitcoin: RIPEMD-160(SHA-256(compressed secp256k1 public key)).
 * Ethereum: the last 20 bytes of Keccak-256(uncompressed x || y).
 * Taproot: the x coordinate of an even-y secp256k1 output key.
 * Ed25519: canonical y with the parity of x in the high bit.
+
+Pallas additionally proves knowledge of the scalar for an Orchard `ak`, or of
+`ask` and `alpha` for `rk = [ask + alpha] SpendAuthG`; neither establishes note
+ownership. BLS fund-migration entry points accept only `BlsWithdrawalCredential`:
+the witness is the **withdrawal key**, and the circuit computes its compressed
+48-byte public key and SHA-256, replacing the first digest byte with `0x00`.
+`OperatorSigningPubkey` proves only possession of a validator **signing key**
+through the separate key-possession APIs. It does not confer withdrawal authority.
+The validator index and operator-mode withdrawal credentials are unauthenticated
+caller context, despite transcript binding; consumers must authenticate their
+association against chain state. The withdrawal credential itself is constrained
+in withdrawal mode, but its association with a validator record is not.
 
 SHA-256, RIPEMD-160 and Keccak-f[1600] execute as Boolean word circuits.
 Taproot witness normalization performs the tagged SHA-256 tweak and parity
@@ -80,18 +98,23 @@ the neighboring head's committed multiplication outputs. It does not attempt
 to recompute that neighbor's multiplication without the third head's operands.
 Both opened views, every hidden output share, the repetition index and the
 head index are authenticated by the root committed before challenge selection.
-The verifier authenticates the complete root before gate replay and checks every
-recomputable multiplication residual and output share **exactly** across all
-opened `(e, (e+1) mod 3)` views; all public output constraints reconstruct to
-zero. Proof verification consists of exact deterministic gate replay and
-`cSHAKE256` root binding. Every length, challenge index and field encoding in a
-proof is checked before use; a malformed proof returns an error.
+The verifier checks exact statement-derived stream lengths and CoZK headers
+before circuit construction. V3 authenticates the complete root before building
+the circuit and replaying gates. Compact CoZK V4/V5 cannot do so: the primary
+multiplication stream is omitted and reconstructed by replay before its view
+commitment can be checked. Structurally valid CoZK proofs therefore still incur
+circuit construction and replay before root authentication. This is a resource
+boundary of the existing format, not authentication of incoming work.
+Every recomputable multiplication residual and output share is checked **exactly**
+across opened `(e, (e+1) mod 3)` views; all public output constraints reconstruct
+to zero. Field encodings are checked before arithmetic use; malformed proofs
+return an error.
 
 ## Soundness, Grover search cost, and privacy assumptions
 
 For independently sampled interactive ternary challenges across
 `MIT_REPETITIONS = 438` repetitions, three-view consistency and commitment
-binding give classical soundness error
+binding give the conditional interactive soundness error
 
 ```
 (2/3)^438 = 2^(-438 * log2(3/2))
@@ -99,10 +122,10 @@ binding give classical soundness error
           < 2^-256.
 ```
 
-* **Classical random-oracle model:** Fiat-Shamir challenge derivation over
-  `QSAG.MIGRATE.ROOT.V3` gives a cheating prover success probability of at most
-  `(2/3)^438 < 2^-256` per challenge-oracle query, composed with 256-bit
-  `cSHAKE256` commitment binding.
+* **Classical random-oracle model:** Conditioned on binding commitments,
+  Fiat-Shamir challenge grinding has success probability `(2/3)^438 < 2^-256`
+  per independent challenge-oracle query. This term is not the security of the
+  composed proof: commitment failures must also be accounted for.
 * **Generic quantum search:** Grover search for a root whose challenge string a
   cheating prover can answer succeeds with amplitude `(2/3)^219` per iteration,
 
@@ -115,10 +138,40 @@ binding give classical soundness error
   so it needs more than `2^128` oracle iterations. This is the cost of generic
   search. It is not a quantum random-oracle Fiat-Shamir theorem for this proof
   system, and this crate does not claim one.
-* **Source-chain witness boundary:** the proved witness is a legacy `secp256k1`
-  or `Ed25519` discrete-logarithm spending scalar. A Shor-capable quantum
-  computer recovers it from the source-chain public key in polynomial time, so
-  legacy assets must settle on-chain before such computers exist.
+* **Commitment binding:** Every view digest, CoZK product-tree leaf/root,
+  V5 sub-seed commitment, repetition digest and final root is **256 bits**.
+  A malicious prover chooses the committed messages and may prepare distinct
+  openings before publishing a digest. The consistency/extraction argument
+  therefore needs collision-resistant binding at each of these layers, not
+  merely second-preimage resistance to an independently fixed honest message.
+  Domain separation and length framing prevent ambiguous encodings, but do
+  not increase digest length. In the ideal-hash model, generic collision work
+  is about `2^128` classically and `2^(256/3)` (about `2^85.3`) quantum queries.
+  [FIPS 202](https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.202.pdf) gives
+  the classical output-length limits; the quantum collision query bound is
+  due to [Brassard, Høyer and Tapp](https://arxiv.org/abs/quant-ph/9705002).
+* **Fixed targets:** Replacing the opening of an independently fixed honest
+  commitment is instead a second-preimage problem, generically `2^256`
+  classical or `2^128` quantum queries for a 256-bit ideal digest. Seed secrecy
+  and tape expansion require preimage resistance and pseudorandomness, not
+  collision resistance. These stronger target-binding figures cannot replace
+  collision binding in the malicious-prover argument above.
+* **Composition limit:** The present collision-based accounting has an
+  approximately **85-bit generic quantum commitment-binding ceiling**, below
+  128 bits. This is neither a proved `2^85` proof forgery nor a complete QROM
+  soundness theorem. It precludes advertising 128-bit quantum security for the
+  composed proof from the repetition count alone. At least **384-bit digests
+  (48 bytes) at every binding layer**, with a suitable sponge capacity and
+  security analysis, would restore the *generic collision* target of 128
+  quantum bits (192 classical bits). SHAKE256's 512-bit capacity does not
+  obstruct that output-length target. Widening just the final root would not
+  repair shorter inner commitments. The current wire format is unchanged;
+  concrete composition losses and the custom 12-round CoZK hash construction
+  would still require analysis after such a change.
+* **Source relation:** All four curve families rely on discrete-logarithm
+  scalars recoverable from revealed public keys by Shor's algorithm. Hidden
+  Bitcoin HASH160 and Ethereum 160-bit address targets also have a generic
+  quantum key-search ceiling of about `2^80`, independent of proof strength.
 
 The privacy target is computational zero knowledge, conditioned on the public
 legacy commitment, deterministic nullifier and remaining public statement.
@@ -588,7 +641,7 @@ byte-sharing uses the workspace Wiedemann tower `GF(256)` (`TowerGf256`), with
 constant-time `GFNI_MAT_T3_TO_POLY` / `GFNI_MAT_POLY_TO_T3` basis conversion
 helpers at the `0x11b` boundary. All four legacy ecosystems (`secp256k1`,
 `Ed25519`, Zcash Orchard `Pallas` `ak`/`rk`, and Ethereum Beacon `BLS12-381`
-`BeaconValidatorPubkey` / `UnrevealedBls0x00Credential`) execute 3-custodian
+`OperatorSigningPubkey` / `BlsWithdrawalCredential`) execute 3-custodian
 and general-quorum active `co_zk_mpc` proving without reconstructing the
 spending scalar (or `pk_48` in unrevealed `0x00` mode). The check runs before any
 output opening is sent, again before an opened output is returned to the

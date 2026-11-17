@@ -142,9 +142,9 @@ impl Domain {
             Self::Gold => [gl_mul(a[0], b[0]), 0, 0, 0, 0, 0],
             Self::Secp => lift4((Fp256(trunc4(a)) * Fp256(trunc4(b))).0),
             Self::Ed => lift4(crate::ed25519_ct::multiply_limbs(trunc4(a), trunc4(b))),
-            Self::PallasFp => lift4(
-                (crate::pallas::FpPallas(trunc4(a)) * crate::pallas::FpPallas(trunc4(b))).0,
-            ),
+            Self::PallasFp => {
+                lift4((crate::pallas::FpPallas(trunc4(a)) * crate::pallas::FpPallas(trunc4(b))).0)
+            }
             Self::BlsFp => (crate::bls12_381::FpBls381(a) * crate::bls12_381::FpBls381(b)).0,
         }
     }
@@ -174,11 +174,44 @@ impl Drop for Node {
         ct_zeroize_u64s(&mut self.value);
     }
 }
-#[derive(Default)]
 pub(crate) struct Builder {
     nodes: RefCell<Vec<Node>>,
     outputs: RefCell<Vec<Wire>>,
 }
+#[cfg(test)]
+std::thread_local! {
+    static FORBID_BUILD: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// A deterministic work barrier: fail at construction, before allocating any nodes.
+#[cfg(test)]
+pub(crate) fn without_circuit_build<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORBID_BUILD.set(self.0);
+        }
+    }
+    let _restore = Restore(FORBID_BUILD.replace(true));
+    f()
+}
+
+// Written out so the test build can refuse construction; outside tests it equals the derive.
+#[cfg_attr(not(test), allow(clippy::derivable_impls))]
+impl Default for Builder {
+    fn default() -> Self {
+        #[cfg(test)]
+        assert!(
+            !FORBID_BUILD.get(),
+            "verifier constructed a circuit before structural rejection/authentication"
+        );
+        Self {
+            nodes: RefCell::default(),
+            outputs: RefCell::default(),
+        }
+    }
+}
+
 impl Builder {
     fn push(&self, domain: Domain, op: Op, value: Value) -> Wire {
         let mut ns = self.nodes.borrow_mut();

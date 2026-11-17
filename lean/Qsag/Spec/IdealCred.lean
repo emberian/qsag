@@ -71,6 +71,8 @@ structure CredentialStatement (Attr : Type) where
   epoch : Nat
   accumulatorRoot : Digest256
   disclosed : List (Nat × Attr)
+  /-- The verifier's consumption key: the pair (verifier scope, verifier challenge) of
+      `blind_vc.rs`, as one byte string. Equal challenges under two scopes are two keys. -/
   challengeNonce : Bytes
   deriving DecidableEq, Repr
 
@@ -197,7 +199,13 @@ structure CredentialRecord (Attr : Type) where
 
 /-- Ideal credential state: public parameters, the current corruption set, the issued records, consumed
     verifier challenges, recorded server approvals, the revealed part of the TOPRF graph and the
-    charged tickets (newest first). -/
+    charged tickets (newest first).
+
+    `usedChallenges` is the union of what the verifiers' challenge ledgers have consumed
+    (`presentation_challenge.rs`), keyed by scope and challenge. Consumption is the verifier's:
+    the Rust holder keeps no challenge record and answers a repeated challenge, and a second
+    acceptance is refused by the ledger of that scope. The model has one ledger per scope and
+    does not model issuance, expiry or capacity of a ledger. -/
 structure IdealCredState (Attr O : Type) where
   issuerPk : Bytes
   epoch : Nat

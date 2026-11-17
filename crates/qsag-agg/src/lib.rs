@@ -46,13 +46,14 @@
 //! for cross-batch concurrency. This bounds active witnesses, not each witness's byte size;
 //! `HemAggConfig::max_shards_per_batch` separately controls joint-batch width.
 //!
-//! # Zero-knowledge relations
+//! # Committed-mask relations
 //!
-//! [`zk_hem::protocol`] is a separate zero-knowledge argument over the same commitment scheme
-//! for relations built from S-box and multiplication rows ([`zk_hem::relation`]). Sumcheck
-//! masks and companion words are committed with the witness, and WHIR opens only their blend.
-//! [`zk_hem::blind_vc`] and [`zk_hem::multisig`] are the two relations defined on it. Aggregate
-//! proofs above are not zero-knowledge and do not use it.
+//! [`zk_hem::protocol`] implements committed masking for S-box and multiplication-row
+//! relations ([`zk_hem::relation`]). Its zero-knowledge and knowledge-soundness statements
+//! and their bounds are in `crates/qsag-agg/SECURITY.md` and [`zk_hem::bounds`]. Sumcheck masks
+//! and companion words are committed with the witness, and WHIR opens their blend.
+//! Full-shard merges and the blind-credential, multisig and capability relations use this
+//! path. The ordinary shard batches and the public hologram recursion paths are non-hiding.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -1079,7 +1080,9 @@ pub fn verify_aggregate(
     verify_aggregate_with_regime(pks, mode, proof, WhirSecurityRegime::default())
 }
 
-/// Verify every leaf under exactly the explicitly selected QROM-128 regime.
+/// Verify every leaf under exactly the explicitly selected aggregate profile.
+/// See [`WhirSecurityRegime`] for nominal work factors and bounded-query assumptions;
+/// acceptance does not establish a composed QROM security bound.
 pub fn verify_aggregate_with_regime(
     pks: &[ValidatorPublicKey],
     mode: &SigningMode<'_>,
@@ -1727,7 +1730,7 @@ mod tests {
         ));
 
         // Both prover (`aggregate_with_config`) and verifier/wire-decoder must refuse
-        // classical-only Johnson (`BciksJohnsonClassical128`, fails QROM-128 floor).
+        // classical-only Johnson (`BciksJohnsonClassical128`, excluded by aggregate profile policy).
         let mut classical_cfg = cfg.clone();
         classical_cfg.regime = wrong;
         assert!(
@@ -1773,7 +1776,7 @@ mod tests {
         bad.schedule.stages[0].num_queries = 1;
         assert!(!HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad)));
 
-        // The leaf verifier itself enforces the QROM-128 floor and exact regime parity.
+        // The leaf verifier itself enforces aggregate profile policy and exact regime parity.
         let committee_root = compute_committee_root(&pks);
         let profile = AggSigProfile::JortsPoseidon2;
         assert!(verify_shard_batch(

@@ -1,4 +1,4 @@
-//! Ethereum Beacon Validator (`BLS12-381` `G_1`) post-quantum ownership migration (`Π_bls381_migrate`).
+//! BLS withdrawal-key migration and distinct validator operator-key possession proofs.
 //!
 //! Curve parameters (IETF RFC 9380 / draft-irtf-cfrg-bls-signature / Ethereum Consensus Specs):
 //! - Base field prime (`381` bits, `p ≡ 3 (mod 4)`):
@@ -7,14 +7,18 @@
 //!   `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`
 //! - Curve equation: `E(F_p) : y^2 = x^3 + 4` (`a = 0, b = 4, 3b = 12`), `G_1 = E(F_p)[r]`.
 //!
-//! Supports two validator post-quantum migration modes into Beam Chain (`Hem` / `Jorts` / `QSAG`) keys:
-//! 1. `BeaconValidatorPubkey([u8; 48])`: proves knowledge of `sk ∈ [1, r - 1]` with `pk = [sk] G_1`
-//!    bound to `validator_index`, `withdrawal_credentials` (`0x01` 32 ETH or `0x02` EIP-7251 2048 ETH
-//!    compounding credentials), and `target_pq_address` using 438-repetition mixed-domain ZKBoo
-//!    without emitting any pairing-friendly BLS signature.
-//! 2. `UnrevealedBls0x00Credential([u8; 32])`: proves knowledge of `sk ∈ [1, r - 1]` whose compressed
-//!    48-byte `G_1` public key hashes to `0x00 || SHA256(pk_48)[1..32]` **without ever revealing
-//!    `pk_48` on-chain**, protecting legacy `0x00` validators against quantum harvest-now-decrypt-later.
+//! Two distinct relations are supported:
+//! - `BlsWithdrawalCredential`: knowledge of the **withdrawal** scalar whose compressed
+//!   public key hashes to `0x00 || SHA256(pk_48)[1..32]`. The fund-migration entrypoints
+//!   accept only this relation. The public key remains hidden by the proof.
+//! - `OperatorSigningPubkey`: knowledge of a validator **signing** scalar. This proves
+//!   operator-key possession only, never withdrawal authority (including for `0x01`
+//!   and `0x02` execution-address withdrawal credentials).
+//!
+//! Neither relation authenticates a validator record. Consumers must check the supplied
+//! validator index and credential association against authenticated chain state. A revealed
+//! curve public key lets a Shor-capable attacker recover its scalar; this proof does not
+//! restore authority after that exposure. Transcript binding does not establish chain truth.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -604,24 +608,24 @@ pub fn compute_bls_0x00_withdrawal_credentials(pubkey_48: &[u8; 48]) -> [u8; 32]
     out
 }
 
-/// Ethereum Beacon validator `BLS12-381` target commitment for post-quantum Beam Chain migration.
+/// The key relation to prove. Only `BlsWithdrawalCredential` establishes withdrawal-key possession.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlsValidatorCommitment {
-    /// Active Beacon Chain 48-byte compressed `G_1` validator public key (`32 ETH` `0x01` or `2048 ETH` `0x02` stake).
-    BeaconValidatorPubkey([u8; 48]),
-    /// Unrevealed legacy `0x00` `BLS_WITHDRAWAL_PREFIX` credential (`0x00 || SHA256(pk_48)[1..32]`),
-    /// proved in zero knowledge without ever exposing `pk_48` on-chain.
-    UnrevealedBls0x00Credential([u8; 32]),
+    /// Validator signing-key possession only; conveys no withdrawal authority or authenticated validator membership.
+    OperatorSigningPubkey([u8; 48]),
+    /// Withdrawal-key possession for `0x00 || SHA256(withdrawal_pk_48)[1..32]`,
+    /// with the public key hash constrained inside the circuit. The proof does not reveal the key.
+    BlsWithdrawalCredential([u8; 32]),
 }
 
 impl BlsValidatorCommitment {
     pub fn write_transcript(&self, out: &mut Vec<u8>) {
         match self {
-            Self::BeaconValidatorPubkey(pk) => {
+            Self::OperatorSigningPubkey(pk) => {
                 out.push(1);
                 out.extend_from_slice(pk);
             }
-            Self::UnrevealedBls0x00Credential(cred) => {
+            Self::BlsWithdrawalCredential(cred) => {
                 out.push(2);
                 out.extend_from_slice(cred);
             }
@@ -629,7 +633,7 @@ impl BlsValidatorCommitment {
     }
 }
 
-/// Secret Ethereum Beacon validator `BLS12-381` scalar witness (`sk ∈ [1, r - 1]`) with redacted `Debug` and volatile `Drop`.
+/// Secret BLS signing or withdrawal scalar witness (`sk ∈ [1, r - 1]`) with redacted `Debug` and volatile `Drop`.
 pub struct BlsOwnershipWitness {
     sk_be: RedactedSecret<32>,
 }
@@ -673,17 +677,19 @@ impl BlsOwnershipWitness {
         Some(pt.to_compressed_48())
     }
 
-    pub fn compute_beacon_commitment(&self) -> Option<BlsValidatorCommitment> {
+    /// Derive an operator signing-key commitment, not a withdrawal credential.
+    pub fn compute_operator_commitment(&self) -> Option<BlsValidatorCommitment> {
         self.compute_validator_pubkey_48()
-            .map(BlsValidatorCommitment::BeaconValidatorPubkey)
+            .map(BlsValidatorCommitment::OperatorSigningPubkey)
     }
 
-    /// Derive the unrevealed `0x00 || SHA256(pk_48)[1..32]` withdrawal credential commitment.
-    pub fn compute_unrevealed_0x00_commitment(&self) -> Option<BlsValidatorCommitment> {
+    /// Hash this withdrawal key as `0x00 || SHA256(pk_48)[1..32]`.
+    /// This does not attest that the public key has never been revealed.
+    pub fn compute_withdrawal_commitment(&self) -> Option<BlsValidatorCommitment> {
         let mut pk = self.compute_validator_pubkey_48()?;
         let cred = compute_bls_0x00_withdrawal_credentials(&pk);
         ct_zeroize_bytes(&mut pk);
-        Some(BlsValidatorCommitment::UnrevealedBls0x00Credential(cred))
+        Some(BlsValidatorCommitment::BlsWithdrawalCredential(cred))
     }
 
     pub fn matches_commitment(&self, commitment: &BlsValidatorCommitment) -> bool {
@@ -691,10 +697,10 @@ impl BlsOwnershipWitness {
             return false;
         };
         let ok = match commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(expected) => {
+            BlsValidatorCommitment::OperatorSigningPubkey(expected) => {
                 qsag_accel::ct::ct_eq_bytes(&pk, expected)
             }
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(cred) => {
+            BlsValidatorCommitment::BlsWithdrawalCredential(cred) => {
                 let mut actual = compute_bls_0x00_withdrawal_credentials(&pk);
                 let eq = cred[0] == 0x00 && qsag_accel::ct::ct_eq_bytes(&actual, cred);
                 ct_zeroize_bytes(&mut actual);
@@ -706,22 +712,29 @@ impl BlsOwnershipWitness {
     }
 }
 
-/// Request for an Ethereum Beacon validator `BLS12-381` post-quantum ownership migration proof.
+/// Request shared by BLS key-possession proofs. Fund-migration entrypoints require a withdrawal credential.
 #[derive(Clone, Debug)]
 pub struct BlsMigrationRequest {
     pub commitment: BlsValidatorCommitment,
+    /// Unauthenticated caller context; check the validator association against chain state.
     pub validator_index: u64,
+    /// In withdrawal mode, must equal the constrained credential. In operator mode,
+    /// unauthenticated caller context; transcript binding proves no chain association.
     pub withdrawal_credentials: [u8; 32],
     pub target: QsagAddress,
     pub epoch: u64,
     pub domain: [u8; 32],
 }
 
-/// Public statement of an Ethereum Beacon validator `BLS12-381` PQ Beam Chain migration proof.
+/// Public BLS key statement. Its commitment variant determines the proved relation.
+/// Only `BlsWithdrawalCredential` is admitted by the fund-migration verifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlsMigrationStatement {
     pub commitment: BlsValidatorCommitment,
+    /// Unauthenticated caller context; check the validator association against chain state.
     pub validator_index: u64,
+    /// In withdrawal mode, must equal the constrained credential. In operator mode,
+    /// unauthenticated caller context; transcript binding proves no chain association.
     pub withdrawal_credentials: [u8; 32],
     pub target_pq_address: QsagAddress,
     pub epoch_anchor: u64,
@@ -730,14 +743,25 @@ pub struct BlsMigrationStatement {
 }
 
 impl BlsMigrationStatement {
+    /// Whether this statement carries a constrained withdrawal credential.
+    /// An operator signing key never passes fund-migration admission, even if
+    /// the caller supplies a syntactically valid withdrawal credential.
     pub fn credentials_consistent(&self) -> bool {
         match &self.commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(_) => {
-                matches!(self.withdrawal_credentials[0], 0x00..=0x02)
-            }
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(cred) => {
+            BlsValidatorCommitment::OperatorSigningPubkey(_) => false,
+            BlsValidatorCommitment::BlsWithdrawalCredential(cred) => {
                 cred[0] == 0x00 && &self.withdrawal_credentials == cred
             }
+        }
+    }
+
+    /// Encoding check only. Operator credentials remain unauthenticated context.
+    pub(crate) fn context_encoding_valid(&self) -> bool {
+        match self.commitment {
+            BlsValidatorCommitment::OperatorSigningPubkey(_) => {
+                matches!(self.withdrawal_credentials[0], 0x00..=0x02)
+            }
+            BlsValidatorCommitment::BlsWithdrawalCredential(_) => self.credentials_consistent(),
         }
     }
 
@@ -899,11 +923,11 @@ pub fn build_bls_ownership_circuit(
     let z_inv = c.inverse(proj[2]);
 
     match (&statement.commitment, public_affine) {
-        (BlsValidatorCommitment::BeaconValidatorPubkey(_), Some((x_pub, y_pub))) => {
+        (BlsValidatorCommitment::OperatorSigningPubkey(_), Some((x_pub, y_pub))) => {
             c.equal(proj[0], c.scale_value(proj[2], x_pub.0));
             c.equal(proj[1], c.scale_value(proj[2], y_pub.0));
         }
-        (BlsValidatorCommitment::UnrevealedBls0x00Credential(cred), None) => {
+        (BlsValidatorCommitment::BlsWithdrawalCredential(cred), None) => {
             // Decompose affine `(x, y) = (proj[0] * z_inv, proj[1] * z_inv)` directly via
             // `Op::Digit` so multi-custodian `co_zk_mpc` never reconstructs `pk_48` in the clear.
             let mut x_bits = c.bits(c.mul(proj[0], z_inv));
@@ -978,7 +1002,8 @@ fn bls_seeds(entropy: &[u8; 32], stmt_bytes: &[u8], rep: usize) -> [[u8; 32]; 3]
     })
 }
 
-/// Prove Ethereum Beacon validator `BLS12-381` ownership in the default epoch campaign domain.
+/// Prove BLS withdrawal-key possession for fund migration in the default epoch campaign domain.
+/// Operator signing-key commitments are rejected. Chain-state association must be checked externally.
 #[allow(clippy::too_many_arguments)]
 pub fn prove_bls_migration<B: AcceleratorBackend>(
     witness: &BlsOwnershipWitness,
@@ -1006,8 +1031,30 @@ pub fn prove_bls_migration<B: AcceleratorBackend>(
     )
 }
 
-/// Prove Ethereum Beacon validator `BLS12-381` ownership in an explicit campaign domain.
+/// Prove BLS withdrawal-key possession for fund migration in an explicit domain.
+/// Rejects operator signing-key commitments. The validator association is caller context.
 pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
+    witness: &BlsOwnershipWitness,
+    request: BlsMigrationRequest,
+    mut entropy: [u8; 32],
+    accel: &B,
+) -> Result<(BlsMigrationStatement, MigrationZkProof), MigrateError> {
+    if !matches!(
+        request.commitment,
+        BlsValidatorCommitment::BlsWithdrawalCredential(_)
+    ) {
+        ct_zeroize_bytes(&mut entropy);
+        return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
+    }
+    let result = prove_bls_key_possession_in_domain(witness, request, entropy, accel);
+    ct_zeroize_bytes(&mut entropy);
+    result
+}
+
+/// Prove the selected BLS key-possession relation. `OperatorSigningPubkey`
+/// proves only operator-key possession, never fund-migration or withdrawal authority.
+/// Validator index and operator withdrawal credentials are unauthenticated context.
+pub fn prove_bls_key_possession_in_domain<B: AcceleratorBackend>(
     witness: &BlsOwnershipWitness,
     request: BlsMigrationRequest,
     mut entropy: [u8; 32],
@@ -1018,7 +1065,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
             return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
         }
         let public_affine = match &request.commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+            BlsValidatorCommitment::OperatorSigningPubkey(pk_48) => {
                 let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
                     .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?;
                 Some(
@@ -1026,7 +1073,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
                         .ok_or(MigrateError::WitnessMismatchWithLegacyCommitment)?,
                 )
             }
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+            BlsValidatorCommitment::BlsWithdrawalCredential(_) => None,
         };
         let sk = witness
             .scalar()
@@ -1040,7 +1087,7 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
             migration_domain: request.domain,
             migration_nullifier: sk.compute_nullifier(&request.domain),
         };
-        if !statement.credentials_consistent() {
+        if !statement.context_encoding_valid() {
             return Err(MigrateError::WitnessMismatchWithLegacyCommitment);
         }
         let mut sk_le = sk.to_le_bytes();
@@ -1100,7 +1147,8 @@ pub fn prove_bls_migration_in_domain<B: AcceleratorBackend>(
     result
 }
 
-/// Verify an Ethereum Beacon validator `BLS12-381` post-quantum ownership migration proof.
+/// Verify BLS withdrawal-key possession for fund migration. Operator proofs are rejected.
+/// The consumer must authenticate the validator record and its credential association.
 pub fn verify_bls_migration(
     statement: &BlsMigrationStatement,
     proof: &MigrationZkProof,
@@ -1116,8 +1164,39 @@ pub fn verify_bls_migration(
     )
 }
 
-/// Verify an Ethereum Beacon validator `BLS12-381` migration proof on a selected `AcceleratorBackend`.
+/// Verify a withdrawal-key fund-migration proof with the selected backend.
 pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
+    statement: &BlsMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+    accel: &B,
+) -> Result<(), MigrateError> {
+    if !statement.credentials_consistent() {
+        return Err(MigrateError::MalformedProofStructure);
+    }
+    verify_bls_key_possession_with_backend(statement, proof, expected_domain, expected_epoch, accel)
+}
+
+/// Verify key possession only. An accepted `OperatorSigningPubkey` proof does not
+/// authorize withdrawals or authenticate the supplied validator-record context.
+pub fn verify_bls_key_possession(
+    statement: &BlsMigrationStatement,
+    proof: &MigrationZkProof,
+    expected_domain: &[u8; 32],
+    expected_epoch: u64,
+) -> Result<(), MigrateError> {
+    verify_bls_key_possession_with_backend(
+        statement,
+        proof,
+        expected_domain,
+        expected_epoch,
+        &qsag_accel::CpuReferenceBackend,
+    )
+}
+
+/// Backend variant of [`verify_bls_key_possession`]; operator proofs confer no withdrawal authority.
+pub fn verify_bls_key_possession_with_backend<B: AcceleratorBackend>(
     statement: &BlsMigrationStatement,
     proof: &MigrationZkProof,
     expected_domain: &[u8; 32],
@@ -1127,7 +1206,7 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
     if &statement.migration_domain != expected_domain || statement.epoch_anchor != expected_epoch {
         return Err(MigrateError::SessionMismatch);
     }
-    if !statement.credentials_consistent()
+    if !statement.context_encoding_valid()
         || proof.repetitions.len() != MIT_REPETITIONS
         || statement
             .migration_nullifier
@@ -1136,8 +1215,9 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
     {
         return Err(MigrateError::MalformedProofStructure);
     }
+    crate::zk_engine::preflight_proof(proof, crate::proof_shape::bls(&statement.commitment))?;
     let public_affine = match &statement.commitment {
-        BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+        BlsValidatorCommitment::OperatorSigningPubkey(pk_48) => {
             let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
                 .ok_or(MigrateError::MalformedProofStructure)?;
             Some(
@@ -1145,7 +1225,7 @@ pub fn verify_bls_migration_with_backend<B: AcceleratorBackend>(
                     .ok_or(MigrateError::MalformedProofStructure)?,
             )
         }
-        BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+        BlsValidatorCommitment::BlsWithdrawalCredential(_) => None,
     };
 
     let mut t = bls_transcript(statement, &proof.views_merkle_root);
@@ -1228,6 +1308,142 @@ mod tests {
     }
 
     #[test]
+    fn malformed_cozk_rejected_before_bls_circuit_build() {
+        for commitment in [
+            BlsValidatorCommitment::OperatorSigningPubkey(BlsG1Point::GENERATOR.to_compressed_48()),
+            BlsValidatorCommitment::BlsWithdrawalCredential([0; 32]),
+        ] {
+            let statement = BlsMigrationStatement {
+                commitment,
+                validator_index: 7,
+                withdrawal_credentials: [0; 32],
+                target_pq_address: sample_beam_pq_dest(b"cheap-bls-rejection"),
+                epoch_anchor: 19,
+                migration_domain: [23; 32],
+                migration_nullifier: [0; 4],
+            };
+            let es = challenges(&mut bls_transcript(&statement, &[7; 32]));
+            let proof = crate::zk_engine::tests::malformed_cozk_proof(es);
+            crate::circuit::without_circuit_build(|| {
+                assert_eq!(
+                    verify_bls_key_possession(&statement, &proof, &[23; 32], 19),
+                    Err(MigrateError::MalformedProofStructure)
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn operator_key_is_not_withdrawal_migration_authority() {
+        let mut operator_sk = [0u8; 32];
+        operator_sk[0] = 7;
+        let operator = BlsOwnershipWitness::from_secret_scalar_le(operator_sk).unwrap();
+        let mut withdrawal_sk = [0u8; 32];
+        withdrawal_sk[0] = 11;
+        let withdrawal = BlsOwnershipWitness::from_secret_scalar_le(withdrawal_sk).unwrap();
+        let BlsValidatorCommitment::BlsWithdrawalCredential(credentials) =
+            withdrawal.compute_withdrawal_commitment().unwrap()
+        else {
+            unreachable!()
+        };
+        let domain = [0x91; 32];
+        let statement = BlsMigrationStatement {
+            commitment: operator.compute_operator_commitment().unwrap(),
+            // Neither this association nor these withdrawal credentials belong to
+            // the signing-key relation. Choose them before building the proof.
+            validator_index: 123456,
+            withdrawal_credentials: credentials,
+            target_pq_address: sample_beam_pq_dest(b"operator-is-not-withdrawer"),
+            epoch_anchor: 19,
+            migration_domain: domain,
+            migration_nullifier: operator.scalar().unwrap().compute_nullifier(&domain),
+        };
+        let pk = operator.compute_validator_pubkey_48().unwrap();
+        let affine = BlsG1Point::from_validator_pubkey_48(&pk)
+            .unwrap()
+            .to_affine();
+        let circuit = build_bls_ownership_circuit(&statement, affine, &operator_sk);
+        // Concrete counterexample: the operator relation is satisfied even when
+        // the withdrawal key differs and the validator association is invented.
+        assert!(
+            circuit
+                .0
+                .outputs
+                .iter()
+                .all(|&w| circuit.0.nodes[w].value == ZERO)
+        );
+        assert!(
+            !statement.credentials_consistent(),
+            "operator-key possession must not satisfy withdrawal migration admission"
+        );
+        let request = BlsMigrationRequest {
+            commitment: statement.commitment,
+            validator_index: statement.validator_index,
+            withdrawal_credentials: credentials,
+            target: statement.target_pq_address.clone(),
+            epoch: statement.epoch_anchor,
+            domain,
+        };
+        assert_eq!(
+            prove_bls_migration_in_domain(
+                &operator,
+                request.clone(),
+                [1; 32],
+                &CpuReferenceBackend
+            ),
+            Err(MigrateError::WitnessMismatchWithLegacyCommitment)
+        );
+        let empty_proof = MigrationZkProof {
+            views_merkle_root: [0; 32],
+            repetitions: Vec::new(),
+        };
+        assert_eq!(
+            verify_bls_migration(&statement, &empty_proof, &domain, 19),
+            Err(MigrateError::MalformedProofStructure)
+        );
+
+        let withdrawal_commitment = withdrawal.compute_withdrawal_commitment().unwrap();
+        let withdrawal_request = BlsMigrationRequest {
+            commitment: withdrawal_commitment,
+            ..request
+        };
+        assert_eq!(
+            prove_bls_migration_in_domain(
+                &operator,
+                withdrawal_request,
+                [2; 32],
+                &CpuReferenceBackend
+            ),
+            Err(MigrateError::WitnessMismatchWithLegacyCommitment)
+        );
+        let mut withdrawal_statement = statement.clone();
+        withdrawal_statement.commitment = withdrawal_commitment;
+        assert!(withdrawal_statement.credentials_consistent());
+        // Bypass the native witness precheck: the actual hash relation must also
+        // reject a signing scalar that does not control the withdrawal key.
+        let wrong = build_bls_ownership_circuit(&withdrawal_statement, None, &operator_sk);
+        assert!(
+            wrong
+                .0
+                .outputs
+                .iter()
+                .any(|&w| wrong.0.nodes[w].value != ZERO)
+        );
+        withdrawal_statement.migration_nullifier =
+            withdrawal.scalar().unwrap().compute_nullifier(&domain);
+        let right = build_bls_ownership_circuit(&withdrawal_statement, None, &withdrawal_sk);
+        assert!(
+            right
+                .0
+                .outputs
+                .iter()
+                .all(|&w| right.0.nodes[w].value == ZERO)
+        );
+        withdrawal_statement.withdrawal_credentials[31] ^= 1;
+        assert!(!withdrawal_statement.credentials_consistent());
+    }
+
+    #[test]
     fn bls12_381_ietf_g1_constants_codec_and_subgroup_rejection_hold() {
         // `(p - 1)^2 == 1 (mod p)` (`p^2` wraparound check) & Fermat inversion:
         let pm1 = FpBls381([
@@ -1289,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn bls12_381_beacon_validator_and_unrevealed_0x00_zk_migration_roundtrip_and_rejections() {
+    fn operator_possession_and_withdrawal_migration_roundtrip_and_rejections() {
         let mut sk_be = [0u8; 32];
         sk_be[30] = 0x13;
         sk_be[31] = 0x37;
@@ -1301,8 +1517,8 @@ mod tests {
         let epoch = 360_000;
         let validator_index = 987_654;
 
-        // 1. Active Beacon validator pubkey with EIP-7251 `0x02` compounding `2048 ETH` credentials:
-        let beacon_comm = wit.compute_beacon_commitment().unwrap();
+        // 1. Operator signing-key possession with caller-supplied credential context:
+        let beacon_comm = wit.compute_operator_commitment().unwrap();
         let mut creds_0x02 = [0u8; 32];
         creds_0x02[0] = 0x02;
         creds_0x02[12..32].copy_from_slice(&[0x44; 20]);
@@ -1316,30 +1532,39 @@ mod tests {
             domain,
         };
         let (stmt, mut proof) =
-            prove_bls_migration_in_domain(&wit, req_beacon.clone(), [0x77; 32], &backend).unwrap();
-        assert_eq!(verify_bls_migration(&stmt, &proof, &domain, epoch), Ok(()));
+            prove_bls_key_possession_in_domain(&wit, req_beacon.clone(), [0x77; 32], &backend)
+                .unwrap();
+        assert_eq!(
+            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
+            Ok(())
+        );
+        assert_eq!(
+            verify_bls_migration(&stmt, &proof, &domain, epoch),
+            Err(MigrateError::MalformedProofStructure)
+        );
 
         // Wrong validator secret key rejected:
         let mut wrong_sk = sk_be;
         wrong_sk[31] ^= 1;
         let wrong_wit = BlsOwnershipWitness::from_secret_scalar_be(wrong_sk).unwrap();
         assert_eq!(
-            prove_bls_migration_in_domain(&wrong_wit, req_beacon, [0x11; 32], &backend),
+            prove_bls_key_possession_in_domain(&wrong_wit, req_beacon, [0x11; 32], &backend),
             Err(MigrateError::WitnessMismatchWithLegacyCommitment)
         );
 
-        // Wrong validator pubkey / mutated withdrawal credentials / mutated validator_index rejected:
+        // These post-proof changes test transcript binding only. They do not establish
+        // that the caller-supplied validator record is true.
         let mut bad_pub_stmt = stmt.clone();
-        bad_pub_stmt.commitment = wrong_wit.compute_beacon_commitment().unwrap();
-        assert!(verify_bls_migration(&bad_pub_stmt, &proof, &domain, epoch).is_err());
+        bad_pub_stmt.commitment = wrong_wit.compute_operator_commitment().unwrap();
+        assert!(verify_bls_key_possession(&bad_pub_stmt, &proof, &domain, epoch).is_err());
 
         let mut bad_creds_stmt = stmt.clone();
         bad_creds_stmt.withdrawal_credentials[31] ^= 1;
-        assert!(verify_bls_migration(&bad_creds_stmt, &proof, &domain, epoch).is_err());
+        assert!(verify_bls_key_possession(&bad_creds_stmt, &proof, &domain, epoch).is_err());
 
         let mut bad_idx_stmt = stmt.clone();
         bad_idx_stmt.validator_index += 1;
-        assert!(verify_bls_migration(&bad_idx_stmt, &proof, &domain, epoch).is_err());
+        assert!(verify_bls_key_possession(&bad_idx_stmt, &proof, &domain, epoch).is_err());
 
         // Small-subgroup point `(0, 2)` stuffed into statement commitment rejected:
         let torsion3 = BlsG1Point {
@@ -1349,21 +1574,24 @@ mod tests {
         };
         let mut subgroup_stmt = stmt.clone();
         subgroup_stmt.commitment =
-            BlsValidatorCommitment::BeaconValidatorPubkey(torsion3.to_compressed_48());
+            BlsValidatorCommitment::OperatorSigningPubkey(torsion3.to_compressed_48());
         assert_eq!(
-            verify_bls_migration(&subgroup_stmt, &proof, &domain, epoch),
+            verify_bls_key_possession(&subgroup_stmt, &proof, &domain, epoch),
             Err(MigrateError::MalformedProofStructure)
         );
 
         // Tampered ZKBoo party view rejected:
         proof.repetitions[0].pair[0].products[0] ^= 1;
-        assert!(verify_bls_migration(&stmt, &proof, &domain, epoch).is_err());
+        assert!(verify_bls_key_possession(&stmt, &proof, &domain, epoch).is_err());
         proof.repetitions[0].pair[0].products[0] ^= 1;
-        assert_eq!(verify_bls_migration(&stmt, &proof, &domain, epoch), Ok(()));
+        assert_eq!(
+            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
+            Ok(())
+        );
 
-        // 2. Unrevealed `0x00` BLS withdrawal credential (`pk_48` never published on-chain!):
-        let unrev_comm = wit.compute_unrevealed_0x00_commitment().unwrap();
-        let BlsValidatorCommitment::UnrevealedBls0x00Credential(cred_0x00) = unrev_comm else {
+        // 2. Withdrawal-key migration under the SHA-256 credential relation:
+        let unrev_comm = wit.compute_withdrawal_commitment().unwrap();
+        let BlsValidatorCommitment::BlsWithdrawalCredential(cred_0x00) = unrev_comm else {
             unreachable!()
         };
         let req_unrev = BlsMigrationRequest {

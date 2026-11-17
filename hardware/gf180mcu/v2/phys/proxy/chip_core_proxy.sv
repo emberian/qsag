@@ -235,13 +235,17 @@ module chip_core #(
         .busy(puf_busy), .done(puf_done), .blk_err(puf_err), .vmask_out(puf_vmask), .syn_out(puf_syn),
         .word_out(puf_word), .accepted_in_blk(puf_acc), .corrected_in_blk(puf_corr)
     );
-    logic [9:0] ring_q;
+    logic [5:0] prow_q;
+    logic [4:0] pcol_q;
     always_ff @(posedge clk_core or negedge rst_core_n) begin
-        if (!rst_core_n) ring_q <= '0;
-        else if (puf_done) ring_q <= (ring_q == 10'd1007) ? 10'd0 : ring_q + 10'd1;
+        if (!rst_core_n) begin prow_q <= '0; pcol_q <= '0; end
+        else if (puf_done) begin
+            pcol_q <= (pcol_q == 5'd23) ? 5'd0 : pcol_q + 5'd1;
+            if (pcol_q == 5'd23) prow_q <= (prow_q == 6'd41) ? 6'd0 : prow_q + 6'd1;
+        end
     end
     wire arr_osc;
-    px_puf_array u_pufarr (.en(puf_busy), .ring(ring_q), .osc(arr_osc));
+    px_puf_array u_pufarr (.en(puf_busy), .row(prow_q), .col(pcol_q), .osc(arr_osc));
     dregg_ripple_cnt #(.N(16)) u_pufcnt_a (.clk(arr_osc), .rst_n(puf_busy), .q(cnt_a));
     dregg_ripple_cnt #(.N(16)) u_pufcnt_b (.clk(puf_mon), .rst_n(puf_busy), .q(cnt_b));
 

@@ -1098,6 +1098,7 @@ pub fn verify_pallas_migration_with_backend<B: AcceleratorBackend>(
     {
         return Err(MigrateError::MalformedProofStructure);
     }
+    crate::zk_engine::preflight_proof(proof, crate::proof_shape::pallas(&statement.commitment))?;
     let pub_pt = PallasPoint::from_nonidentity_bytes(statement.commitment.compressed_bytes())
         .ok_or(MigrateError::MalformedProofStructure)?;
     let expected_affine = pub_pt
@@ -1180,6 +1181,40 @@ mod tests {
             tag,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn malformed_cozk_rejected_before_pallas_build() {
+        let pk = PallasPoint::spend_auth_mul_ct(
+            &FqPallas::from_nonzero_le_bytes(&{
+                let mut one = [0; 32];
+                one[0] = 1;
+                one
+            })
+            .unwrap(),
+        )
+        .to_compressed_bytes();
+        for commitment in [
+            PallasCommitmentKind::OrchardSpendAuthKey(pk),
+            PallasCommitmentKind::OrchardRedPallasRk(pk),
+        ] {
+            let statement = PallasMigrationStatement {
+                commitment,
+                target_pq_address: sample_pq_dest(b"preflight"),
+                epoch_anchor: 1,
+                migration_domain: [23; 32],
+                migration_nullifier: [0; 4],
+            };
+            let proof = crate::zk_engine::tests::malformed_cozk_proof(challenges(
+                &mut pallas_transcript(&statement, &[7; 32]),
+            ));
+            crate::circuit::without_circuit_build(|| {
+                assert_eq!(
+                    verify_pallas_migration(&statement, &proof, &[23; 32], 1),
+                    Err(MigrateError::MalformedProofStructure),
+                )
+            });
+        }
     }
 
     #[test]
