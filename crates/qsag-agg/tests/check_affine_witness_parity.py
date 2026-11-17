@@ -4,7 +4,7 @@ import re
 
 root = Path(__file__).resolve().parents[3]
 rust = (root / "crates/qsag-agg/src/pcs/affine_schedule.rs").read_text()
-lean = (root / "lean/Qsag/AffineProximityGaps.lean").read_text()
+lean = (root / "lean/Qsag/Coding/Cwyz26.lean").read_text()
 rust_table = rust.split("const WITNESSES:", 1)[1].split("];", 1)[0]
 lean_table = lean.split("def hemJohnsonQromWitnessTable :", 1)[1].split(
     "def hemJohnsonQromTableRow", 1

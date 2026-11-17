@@ -476,7 +476,7 @@ def verify(root: Path) -> None:
               "embedded high-capacity witness table matches affine_schedule.rs")
     else:
         check(False, f"missing {rust_path}")
-    lean_path = root / "lean/Qsag/Coding/AffineProximityGaps.lean"
+    lean_path = root / "lean/Qsag/Coding/Cwyz26.lean"
     if lean_path.exists():
         lean = lean_path.read_text().split("def hemJohnsonQromWitnessTable :", 1)[1]
         lean = lean.split("def hemJohnsonQromTableRow", 1)[0]
@@ -487,7 +487,8 @@ def verify(root: Path) -> None:
     pcs_path = root / "crates/qsag-agg/src/pcs.rs"
     affine_path = root / "crates/qsag-agg/src/pcs/affine.rs"
     trace_path = root / "crates/qsag-agg/src/trace.rs"
-    for required in (pcs_path, affine_path, trace_path):
+    sig_path = root / "crates/qsag-agg/src/sig.rs"
+    for required in (pcs_path, affine_path, trace_path, sig_path):
         check(required.exists(), f"source cross-check input exists: {required.relative_to(root)}")
     if pcs_path.exists() and affine_path.exists():
         pcs = pcs_path.read_text()
@@ -496,11 +497,24 @@ def verify(root: Path) -> None:
               and f"MAX_PCS_NUM_VARS: usize = {MAX_PCS_NUM_VARS}" in pcs
               and "PCS_BATCH_POW" in pcs and "WHIR_FOLD_POW" in affine,
               "pcs.rs + pcs/affine.rs query budget, fold/batch/query PoW and num_vars cap match")
-    if trace_path.exists():
+    if trace_path.exists() and sig_path.exists():
         trace = trace_path.read_text()
-        check("JortsPoseidon2 => 512" in trace and "CorduroyPoseidon2 => 8192" in trace
-              and "LOG_TRACE_COLS: usize = 8" in trace,
-              "trace.rs rows_per_signer and trace width match this model")
+        sig = sig_path.read_text()
+        rps_match = re.search(
+            r"pub\s+const\s+fn\s+rows_per_signer\s*\(\s*profile\s*:\s*AggSigProfile\s*\)\s*->\s*usize\s*\{\s*"
+            r"if\s+profile\.is_jorts\(\)\s*\{\s*(\d+)\s*\}\s*else\s*\{\s*(\d+)\s*\}",
+            trace,
+        )
+        jorts_ok = (
+            rps_match is not None
+            and int(rps_match.group(1)) == ROWS_PER_SIGNER["JortsPoseidon2"]
+            and int(rps_match.group(2)) == ROWS_PER_SIGNER["CorduroyPoseidon2"]
+            and "Self::JortsPoseidon2 => Some(JORTS_XMSS_HEIGHT)" in sig
+            and "Self::CorduroyPoseidon2 => None" in sig
+            and "self.jorts_xmss_height().is_some()" in sig
+        )
+        check(jorts_ok and "LOG_TRACE_COLS: usize = 8" in trace and "NUM_TRACE_COLS: usize = 256" in trace,
+              "trace.rs + sig.rs profile.is_jorts() rows_per_signer and trace width match this model")
 
     doc = build("best", MAX_BATCH_POLYS)
     check(to_json(doc) == to_json(build("best", MAX_BATCH_POLYS)), "deterministic JSON output")

@@ -22,7 +22,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-X86_ZERO = bytes.fromhex('4889f131c0880748ffc748ffc975f60faef0c3')
+X86_ZERO = bytes.fromhex(
+    '4889f131c0880748ffc748ffc975f60faef031ff31f631d231c94531c04531c94531d24531db31c0c3'
+)
 ARM_ZERO = bytes.fromhex('1f140038210400f1c1ffff54bf3b03d5c0035fd6')
 MASK = (1 << 64) - 1
 
@@ -123,18 +125,18 @@ def relocation_overlaps(location, width, start, size):
 
 
 def fixtures(generation='current'):
-    """Extract symbol bytes from the selected compiled archive literal."""
-    text = (ROOT/'lean/Qsag/Machine/CompiledRlibFixtures.lean').read_text()
+    """Extract symbol bytes from the compiled archive literals in `Qsag.Machine.ElfFixtures`."""
+    require(generation in ('current', 'historical'), f'unknown fixture generation: {generation}')
+    text = (ROOT/'lean/Qsag/Machine/ElfFixtures.lean').read_text()
     result = {}
     for arch in ('x86', 'aarch64'):
-        if generation == 'current':
-            prefix = 'current' + ('X86' if arch == 'x86' else 'Aarch64')
-            match = re.search(r'def '+prefix+r'RlibLiteral[^:=]*: Nat × Nat :=\s*\((\d+),\s*(0x[0-9A-Fa-f]+)\)', text)
-            require(match is not None, 'missing current archive literal')
-            size, integer = int(match[1]), int(match[2], 16)
-        else:
-            size = int(re.search(r'def '+arch+r'RlibArchiveLen\s*: Nat :=\s*(\d+)', text)[1])
-            integer = int(re.search(r'def '+arch+r'RlibArchiveNat\s*: Nat :=\s*(0x[0-9A-Fa-f]+)', text)[1], 16)
+        prefix = 'current' + ('X86' if arch == 'x86' else 'Aarch64')
+        match = re.search(
+            r'def ' + prefix + r'RlibLiteral[^:=]*: Nat × Nat :=\s*\((\d+),\s*(0x[0-9A-Fa-f]+)\)',
+            text,
+        )
+        require(match is not None, f'missing {prefix}RlibLiteral')
+        size, integer = int(match[1]), int(match[2], 16)
         result.update(archive_functions(integer.to_bytes(size, 'little')))
     return result
 
@@ -347,55 +349,49 @@ def check_induction(cfg, loop, smt, use_z3=True, require_z3=False):
 
 
 def emit_lean(machine, code, generation="current"):
-    """Proof proposal against the current `Qsag.SydTv` certificate API.
+    """Proof proposal against the `Qsag.Machine.SydTv` and `Qsag.Machine.McRefine` certificate APIs.
 
     The proposal is untrusted text: `--check-lean` elaborates it with the project toolchain,
     and only that elaboration says anything about it.
     """
-    if generation == 'current':
-        arch, index = ('x86_64', 15) if machine == 62 else ('aarch64', 6)
-        symbol = 'qsag_asm_ct_memzero_' + arch
-        require(fixtures('current').get(symbol) == (machine, code),
-                'no proved fresh certificate template for these bytes')
-        theorem = 'current_ct_memzero_' + arch + '_mc_refines'
-        source = (ROOT/'lean/Qsag/Machine/McRefine.lean').read_text()
-        statement = source.split('theorem ' + theorem, 1)[1].split(' := by', 1)[0]
-        collection = 'currentX86ExtractedSlices' if machine == 62 else 'currentAarch64ExtractedSlices'
-        literal = literal_brackets(', '.join(f'0x{x:02x}' for x in code))
-        return ('module\npublic import Qsag.Machine.McRefine\npublic section\nopen Qsag\n'
-                'namespace Qsag.SydTv.Generated\n'
-                f'theorem extracted_bytes : ({collection}[{index}]).code = '
-                f'({literal} : List UInt8) := by decide +kernel\n'
-                f'theorem certificate{statement} := Qsag.{theorem}\n'
-                'end Qsag.SydTv.Generated\n')
+    require(generation in ('current', 'historical'), f'unknown fixture generation: {generation}')
     require((machine, code) in ((62, X86_ZERO), (183, ARM_ZERO)),
             'no proved certificate template for these bytes')
-    literal = ', '.join(f'0x{x:02x}' for x in code)
-    header = f'''module
-public import Qsag.Machine.SydTvTranslationValidation
-public section
-namespace Qsag.SydTv.Generated
--- Proposed by untrusted Python; every proof is checked by the Lean kernel.
-'''
+    arch, index = ('x86_64', 15) if machine == 62 else ('aarch64', 6)
+    symbol = 'qsag_asm_ct_memzero_' + arch
+    require(fixtures('current').get(symbol) == (machine, code),
+            'no proved fresh certificate template for these bytes')
+    theorem = 'current_ct_memzero_' + arch + '_mc_refines'
+    source = (ROOT/'lean/Qsag/Machine/McRefine.lean').read_text()
+    statement = source.split('theorem ' + theorem, 1)[1].split(' := by', 1)[0]
+    collection = 'currentX86ExtractedSlices' if machine == 62 else 'currentAarch64ExtractedSlices'
+    literal = literal_brackets(', '.join(f'0x{x:02x}' for x in code))
+    header = ('module\npublic import Qsag.Machine.SydTv\npublic section\nopen Qsag\n'
+              'namespace Qsag.SydTv.Generated\n'
+              '-- Proposed by untrusted Python; every proof is checked by the Lean kernel.\n'
+              f'theorem extracted_bytes : ({collection}[{index}]).code = '
+              f'({literal} : List UInt8) := by decide +kernel\n')
     if machine == 62:
-        body = f'''theorem extracted_bytes : ({literal_brackets(literal)} : List UInt8) = Qsag.SydTv.zeroCode := by decide
-def certificate (s₀ : Qsag.X86State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64) :
-    Qsag.SydTv.LoopRelationCert Qsag.X86State Qsag.SydTv.MirMemzero n
-      Qsag.SydTv.memzeroX86BodyStep Qsag.SydTv.mirMemzeroX86BodyStep
-      ⟨5, (s₀.gpr.set 0 0 |>.set 1 (UInt64.ofNat n)), s₀.ymm, false, false, true, s₀.ymmDirty, false, s₀.mem⟩
-      ⟨s₀.gpr.get 7, n, s₀.mem⟩ (Qsag.SydTv.MemzeroX86LoopPost s₀ n) :=
-  Qsag.SydTv.ctMemzeroX86PosCert s₀ n positive bound
-'''
+        loop_cert = (
+            'def loop_certificate (s₀ : Qsag.X86State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64) :\n'
+            '    Qsag.SydTv.LoopRelationCert Qsag.X86State Qsag.SydTv.AsmFfiMemzero n\n'
+            '      Qsag.SydTv.memzeroX86BodyStep Qsag.SydTv.asmFfiMemzeroX86BodyStep\n'
+            '      ⟨5, (s₀.gpr.set 0 0 |>.set 1 (UInt64.ofNat n)), s₀.ymm, false, false, true, s₀.ymmDirty, false, s₀.mem⟩\n'
+            '      ⟨s₀.gpr.get 7, n, s₀.mem⟩ (Qsag.SydTv.MemzeroX86LoopPost s₀ n) :=\n'
+            '  Qsag.SydTv.ctMemzeroX86PosCert s₀ n positive bound\n'
+        )
     else:
-        body = f'''theorem extracted_bytes : ({literal_brackets(literal)} : List UInt8) = Qsag.SydTv.armZeroCode := by decide
-def certificate (s₀ : Qsag.Arm64State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64)
-    (count : Qsag.armGet s₀.gpr 1 = UInt64.ofNat n) (entry : s₀.pc = 0) (running : s₀.halted = false) :
-    Qsag.SydTv.LoopRelationCert Qsag.Arm64State Qsag.SydTv.MirMemzero n
-      Qsag.SydTv.memzeroArmBodyStep Qsag.SydTv.mirMemzeroArmBodyStep
-      s₀ ⟨Qsag.armGet s₀.gpr 0, n, s₀.mem⟩ (Qsag.SydTv.MemzeroArmLoopPost s₀ n) :=
-  Qsag.SydTv.ctMemzeroArmPosCert s₀ n positive bound count entry running
-'''
-    return header + body + 'end Qsag.SydTv.Generated\n'
+        loop_cert = (
+            'def loop_certificate (s₀ : Qsag.Arm64State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64)\n'
+            '    (count : Qsag.armGet s₀.gpr 1 = UInt64.ofNat n) (entry : s₀.pc = 0) (running : s₀.halted = false) :\n'
+            '    Qsag.SydTv.LoopRelationCert Qsag.Arm64State Qsag.SydTv.AsmFfiMemzero n\n'
+            '      Qsag.SydTv.memzeroArmBodyStep Qsag.SydTv.asmFfiMemzeroArmBodyStep\n'
+            '      s₀ ⟨Qsag.armGet s₀.gpr 0, n, s₀.mem⟩ (Qsag.SydTv.MemzeroArmLoopPost s₀ n) :=\n'
+            '  Qsag.SydTv.ctMemzeroArmPosCert s₀ n positive bound count entry running\n'
+        )
+    return (header + loop_cert
+            + f'theorem certificate{statement} := Qsag.{theorem}\n'
+            + 'end Qsag.SydTv.Generated\n')
 
 
 def check_lean(proposals):
