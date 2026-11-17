@@ -1055,3 +1055,1042 @@ fn stage0_reduce_verify<C: Channel>(
     (chals, beta_r)
 }
 
+// ============================================================================
+// Stage 0, round 12: opened fibers
+// ============================================================================
+
+/// The prover's answer to the Stage-0 queries `idx` (sorted, distinct).
+fn stage0_answer(st: &Committed, idx: &[usize]) -> Stage0Query {
+    let hasher = Hasher::new(st.profile);
+    let d0 = &st.dims[0];
+    Stage0Query {
+        leaves: idx
+            .iter()
+            .map(|&j| Stage0Leaf {
+                salt: hasher.salt(&st.salt_seed, j as u32),
+                z: fiber(&st.z_code, d0, j),
+                r: st.r_code[j],
+            })
+            .collect(),
+        siblings: st.tree.open(idx),
+    }
+}
+
+/// Check the opened Stage-0 leaves against `root` and fold each to the value of `g` at the
+/// point below its fiber: `P_s(y) + beta_R R^(y)`.
+fn stage0_check_fibers(
+    hasher: Hasher,
+    root: &Digest,
+    d0: &StageDims,
+    idx: &[usize],
+    query: &Stage0Query,
+    chals: &[[Fp5; 3]],
+    beta_r: Fp5,
+) -> Option<Vec<(Goldilocks, Fp5)>> {
+    if query.leaves.len() != idx.len() || query.leaves.iter().any(|l| l.z.len() != d0.arity()) {
+        return None;
+    }
+    let digests: Vec<(usize, Digest)> = idx
+        .iter()
+        .zip(&query.leaves)
+        .map(|(&j, leaf)| (j, hasher.leaf_stage0(j as u32, &leaf.salt, &leaf.z, leaf.r)))
+        .collect();
+    if !verify_multiproof(hasher, 0, d0.log_leaves(), root, &digests, &query.siblings) {
+        return None;
+    }
+    Some(
+        idx.iter()
+            .zip(&query.leaves)
+            .map(|(&j, leaf)| {
+                let x0 = d0.fiber_base(j);
+                let vals = leaf.z.iter().map(|&z| Fp5::from_base(z)).collect();
+                let folded = fold_fiber(vals, x0, chals);
+                (d0.fiber_image(j), folded + beta_r * leaf.r)
+            })
+            .collect(),
+    )
+}
+
+/// The same for a later stage: values of the polynomial after the stage's folds.
+fn ext_check_fibers(
+    hasher: Hasher,
+    stage: usize,
+    root: &Digest,
+    dims: &StageDims,
+    idx: &[usize],
+    query: &ExtQuery,
+    chals: &[[Fp5; 3]],
+) -> Option<Vec<(Goldilocks, Fp5)>> {
+    if query.leaves.len() != idx.len() || query.leaves.iter().any(|l| l.len() != dims.arity()) {
+        return None;
+    }
+    let digests: Vec<(usize, Digest)> = idx
+        .iter()
+        .zip(&query.leaves)
+        .map(|(&j, leaf)| (j, hasher.leaf_ext(stage as u8, j as u32, leaf)))
+        .collect();
+    if !verify_multiproof(
+        hasher,
+        stage as u8,
+        dims.log_leaves(),
+        root,
+        &digests,
+        &query.siblings,
+    ) {
+        return None;
+    }
+    Some(
+        idx.iter()
+            .zip(&query.leaves)
+            .map(|(&j, leaf)| {
+                (
+                    dims.fiber_image(j),
+                    fold_fiber(leaf.clone(), dims.fiber_base(j), chals),
+                )
+            })
+            .collect(),
+    )
+}
+
+// ============================================================================
+// Opening and verification
+// ============================================================================
+
+/// Absorb the folded query values, draw the weights of the out-of-domain values and of the
+/// query values, and return the new point terms `(weight, point)` with the claim increment.
+fn stage_claims<C: Channel>(
+    ood_points: [Fp5; LATER_OOD_POINTS],
+    ood: &[Fp5; LATER_OOD_POINTS],
+    shifts: &[(Goldilocks, Fp5)],
+    ch: &mut C,
+) -> (Vec<(Fp5, Fp5)>, Fp5) {
+    let vals: Vec<Fp5> = shifts.iter().map(|s| s.1).collect();
+    ch.absorb_fp5_slice(b"QUERY_VALUES", &vals);
+    let mut terms = Vec::with_capacity(LATER_OOD_POINTS + shifts.len());
+    let mut delta = Fp5::ZERO;
+    for (z, &e) in ood_points.into_iter().zip(ood) {
+        let xi = ch.squeeze_fp5(b"OOD_WEIGHT");
+        terms.push((xi, z));
+        delta += xi * e;
+    }
+    let gamma = ch.squeeze_fp5(b"QUERY_GAMMA");
+    let mut w = gamma;
+    for &(y, v) in shifts {
+        terms.push((w, Fp5::from_base(y)));
+        delta += w * v;
+        w *= gamma;
+    }
+    (terms, delta)
+}
+
+/// Open the commitment against `<coeffs, kernel> = claim`, where `kernel` is a sum of tensor
+/// terms given as a vector over the `2^log_cells` coefficients. The caller has bound the
+/// commitment, the kernel and the claim into `ch`. For zero knowledge the kernel must vanish
+/// on the blinder coefficients (SECURITY.md Theorem V2.Z); this function does not check it.
+pub fn open<C: Channel>(
+    st: &Committed,
+    kernel: Vec<Fp5>,
+    claim: Fp5,
+    ch: &mut C,
+) -> Result<Opening, MaskRankDeficient> {
+    let _phase = crate::profile::span("zkhem2_open");
+    let hasher = Hasher::new(st.profile);
+    let dims = &st.dims;
+    let phase = crate::profile::span("zkhem2_open_stage0_folds");
+    let red = stage0_reduce(
+        &st.coeffs,
+        &st.mask,
+        dims[0].step_vars,
+        MASK_POINTS,
+        kernel,
+        claim,
+        ch,
+    )?;
+    drop(phase);
+    let Stage0Reduced {
+        mask_evals,
+        folds: stage0_folds,
+        mask_claim,
+        g: mut poly,
+        st: mut fold,
+        chals: mut prev_chals,
+        beta_r,
+    } = red;
+    let mut stage0_query = None;
+    let mut stages: Vec<LaterStage> = Vec::with_capacity(dims.len() - 1);
+    // The oracle of the stage before the current one, for stages after the first.
+    let mut prev_oracle: Option<(Vec<Fp5>, MerkleTree)> = None;
+    for (i, d) in dims.iter().enumerate().skip(1) {
+        let phase = crate::profile::span("zkhem2_open_encode");
+        let code = encode_ext(&poly, d.log_domain);
+        drop(phase);
+        let phase = crate::profile::span("zkhem2_open_merkle");
+        let mut leaves = vec![[0u8; DIGEST_BYTES]; d.fibers];
+        crate::pcs::fill_indexed(&mut leaves, |j| {
+            hasher.leaf_ext(i as u8, j as u32, &fiber(&code, d, j))
+        });
+        let tree = MerkleTree::build(hasher, i as u8, leaves);
+        drop(phase);
+        let root = tree.root();
+        ch.absorb(b"STAGE_ROOT", &root);
+        let ood_points: [Fp5; LATER_OOD_POINTS] =
+            core::array::from_fn(|_| ch.squeeze_fp5(b"OOD_POINT"));
+        let ood = eval_poly(&poly, ood_points);
+        ch.absorb_fp5_slice(b"OOD_EVAL", &ood);
+
+        let before = &dims[i - 1];
+        let idx = ch.squeeze_distinct_indices(b"QUERY", before.fibers, before.queries);
+        let shifts: Vec<(Goldilocks, Fp5)> = match &prev_oracle {
+            None => {
+                let query = stage0_answer(st, &idx);
+                let shifts = idx
+                    .iter()
+                    .zip(&query.leaves)
+                    .map(|(&j, leaf)| {
+                        let vals = leaf.z.iter().map(|&z| Fp5::from_base(z)).collect();
+                        let folded = fold_fiber(vals, before.fiber_base(j), &prev_chals);
+                        (before.fiber_image(j), folded + beta_r * leaf.r)
+                    })
+                    .collect();
+                stage0_query = Some(query);
+                shifts
+            }
+            Some((prev_code, prev_tree)) => {
+                let query = ExtQuery {
+                    leaves: idx.iter().map(|&j| fiber(prev_code, before, j)).collect(),
+                    siblings: prev_tree.open(&idx),
+                };
+                let shifts = idx
+                    .iter()
+                    .zip(&query.leaves)
+                    .map(|(&j, leaf)| {
+                        (
+                            before.fiber_image(j),
+                            fold_fiber(leaf.clone(), before.fiber_base(j), &prev_chals),
+                        )
+                    })
+                    .collect();
+                stages[i - 2].query = query;
+                shifts
+            }
+        };
+        let (terms, delta) = stage_claims(ood_points, &ood, &shifts, ch);
+        let _folds = crate::profile::span("zkhem2_open_points_and_folds");
+        add_points(&mut fold.kernel, &terms);
+        fold.points.extend(terms);
+        fold.claim += delta;
+
+        let mut folds = Vec::with_capacity(d.step_vars);
+        prev_chals = Vec::with_capacity(d.step_vars);
+        for _ in 0..d.step_vars {
+            let (next, wire, c) = prove_fold(&poly, &mut fold, 0, ch)?;
+            poly = next;
+            folds.push(wire);
+            prev_chals.push(c);
+        }
+        stages.push(LaterStage {
+            root,
+            ood,
+            folds,
+            query: ExtQuery {
+                leaves: Vec::new(),
+                siblings: Vec::new(),
+            },
+        });
+        prev_oracle = Some((code, tree));
+    }
+
+    ch.absorb_fp5_slice(b"FINAL_POLY", &poly);
+    let last = dims.len() - 1;
+    let d = &dims[last];
+    let idx = ch.squeeze_distinct_indices(b"QUERY", d.fibers, d.queries);
+    let (code, tree) = prev_oracle.as_ref().expect("at least two stages");
+    stages[last - 1].query = ExtQuery {
+        leaves: idx.iter().map(|&j| fiber(code, d, j)).collect(),
+        siblings: tree.open(&idx),
+    };
+    let mut mask_eval_array = [Fp5::ZERO; MASK_POINTS];
+    mask_eval_array.copy_from_slice(&mask_evals);
+    Ok(Opening {
+        mask_evals: mask_eval_array,
+        stage0_folds,
+        mask_claim,
+        stage0_query: stage0_query.expect("at least two stages"),
+        stages,
+        final_coeffs: poly,
+    })
+}
+
+/// Verify an [`Opening`] of the commitment `root` against the claim
+/// `sum_t terms[t].weight * W(terms[t].point, 0, ..) = claim` on the committed table `W`.
+/// The caller has bound `root`, the terms and the claim into `ch`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify<C: Channel>(
+    profile: Profile,
+    root: &Digest,
+    log_cells: usize,
+    schedule: &Schedule,
+    terms: &[TensorTerm],
+    claim: Fp5,
+    opening: &Opening,
+    ch: &mut C,
+) -> bool {
+    let Some(dims) = stage_dims(log_cells, schedule) else {
+        return false;
+    };
+    let hasher = Hasher::new(profile);
+    if terms.iter().any(|t| t.point.len() > log_cells)
+        || opening.stage0_folds.len() != dims[0].step_vars
+        || opening.stages.len() + 1 != dims.len()
+        || opening
+            .stages
+            .iter()
+            .zip(&dims[1..])
+            .any(|(stage, d)| stage.folds.len() != d.step_vars)
+        || opening.final_coeffs.len() != (1usize << schedule.early_stop_vars) + 2
+    {
+        return false;
+    }
+    let mut claim = claim;
+    let mut kernel = KernelTerms::new(terms);
+    let (mut prev_chals, beta_r) = stage0_reduce_verify(opening, &mut claim, &mut kernel, ch);
+
+    for i in 1..dims.len() {
+        let stage = &opening.stages[i - 1];
+        ch.absorb(b"STAGE_ROOT", &stage.root);
+        let ood_points: [Fp5; LATER_OOD_POINTS] =
+            core::array::from_fn(|_| ch.squeeze_fp5(b"OOD_POINT"));
+        ch.absorb_fp5_slice(b"OOD_EVAL", &stage.ood);
+
+        let before = &dims[i - 1];
+        let idx = ch.squeeze_distinct_indices(b"QUERY", before.fibers, before.queries);
+        let shifts = if i == 1 {
+            stage0_check_fibers(
+                hasher,
+                root,
+                before,
+                &idx,
+                &opening.stage0_query,
+                &prev_chals,
+                beta_r,
+            )
+        } else {
+            let prev = &opening.stages[i - 2];
+            ext_check_fibers(
+                hasher,
+                i - 1,
+                &prev.root,
+                before,
+                &idx,
+                &prev.query,
+                &prev_chals,
+            )
+        };
+        let Some(shifts) = shifts else {
+            return false;
+        };
+        let (new_terms, delta) = stage_claims(ood_points, &stage.ood, &shifts, ch);
+        kernel.points.extend(new_terms);
+        claim += delta;
+
+        prev_chals = stage
+            .folds
+            .iter()
+            .map(|wire| verify_fold(wire, &mut claim, &mut kernel, ch))
+            .collect();
+    }
+
+    ch.absorb_fp5_slice(b"FINAL_POLY", &opening.final_coeffs);
+    if kernel.apply(&opening.final_coeffs) != claim {
+        return false;
+    }
+    let last = dims.len() - 1;
+    let d = &dims[last];
+    let idx = ch.squeeze_distinct_indices(b"QUERY", d.fibers, d.queries);
+    let stage = &opening.stages[last - 1];
+    let Some(values) = ext_check_fibers(
+        hasher,
+        last,
+        &stage.root,
+        d,
+        &idx,
+        &stage.query,
+        &prev_chals,
+    ) else {
+        return false;
+    };
+    values
+        .iter()
+        .all(|&(y, v)| eval_at_base(&opening.final_coeffs, y) == v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::hash::Transcript;
+    use super::super::params::StageSpec;
+    use super::*;
+
+    const P: u64 = crate::field::GOLDILOCKS_PRIME;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn base(&mut self) -> Goldilocks {
+            Goldilocks::from_u64_reduced(self.next_u64())
+        }
+        fn fp5(&mut self) -> Fp5 {
+            Fp5(core::array::from_fn(|_| self.base()))
+        }
+    }
+
+    /// Coins that do not depend on the prover's messages.
+    struct FixedCoins {
+        rng: Rng,
+        indices: Vec<usize>,
+    }
+
+    impl Channel for FixedCoins {
+        fn absorb(&mut self, _: &[u8], _: &[u8]) {}
+        fn squeeze_fp5(&mut self, _: &[u8]) -> Fp5 {
+            self.rng.fp5()
+        }
+        fn squeeze_distinct_indices(&mut self, _: &[u8], n: usize, count: usize) -> Vec<usize> {
+            self.indices
+                .iter()
+                .copied()
+                .filter(|&i| i < n)
+                .take(count)
+                .collect()
+        }
+    }
+
+    fn toy_schedule() -> Schedule {
+        Schedule {
+            early_stop_vars: 3,
+            stages: vec![
+                StageSpec {
+                    blowup: 4,
+                    step_vars: 2,
+                    num_queries: 6,
+                },
+                StageSpec {
+                    blowup: 16,
+                    step_vars: 2,
+                    num_queries: 5,
+                },
+                StageSpec {
+                    blowup: 64,
+                    step_vars: 1,
+                    num_queries: 4,
+                },
+            ],
+        }
+    }
+
+    const LOG_CELLS: usize = 8;
+
+    /// The tensor terms as a kernel vector: `kappa_i = sum_t w_t prod_j r_{t,j}^{bit_j(i)}`.
+    fn kernel_of(terms: &[TensorTerm], log_cells: usize) -> Vec<Fp5> {
+        let mut k = vec![Fp5::ZERO; 1 << log_cells];
+        for t in terms {
+            for (i, slot) in k.iter_mut().enumerate().take(1 << t.point.len()) {
+                *slot += t
+                    .point
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| (i >> j) & 1 == 1)
+                    .fold(t.weight, |acc, (_, &r)| acc * r);
+            }
+        }
+        k
+    }
+
+    fn dot(c: &[Goldilocks], k: &[Fp5]) -> Fp5 {
+        c.iter()
+            .zip(k)
+            .fold(Fp5::ZERO, |acc, (&c, &k)| acc + k.mul_base(c))
+    }
+
+    struct Fixture {
+        profile: Profile,
+        schedule: Schedule,
+        st: Committed,
+        terms: Vec<TensorTerm>,
+        claim: Fp5,
+    }
+
+    fn fixture(profile: Profile, seed: u64) -> Fixture {
+        let mut rng = Rng(seed);
+        let schedule = toy_schedule();
+        let coeffs: Vec<Goldilocks> = (0..1 << LOG_CELLS).map(|_| rng.base()).collect();
+        let mask: Vec<Fp5> = (0..mask_len(LOG_CELLS, 2)).map(|_| rng.fp5()).collect();
+        // Full-length, short and zero/one-coordinate points.
+        let mut terms = vec![
+            TensorTerm {
+                weight: rng.fp5(),
+                point: (0..LOG_CELLS).map(|_| rng.fp5()).collect(),
+            },
+            TensorTerm {
+                weight: rng.fp5(),
+                point: (0..3).map(|_| rng.fp5()).collect(),
+            },
+            TensorTerm {
+                weight: rng.fp5(),
+                point: Vec::new(),
+            },
+        ];
+        let mut bits: Vec<Fp5> = (0..LOG_CELLS)
+            .map(|j| if j % 3 == 0 { Fp5::ONE } else { Fp5::ZERO })
+            .collect();
+        bits[1] = rng.fp5();
+        terms.push(TensorTerm {
+            weight: rng.fp5(),
+            point: bits,
+        });
+        let claim = dot(&coeffs, &kernel_of(&terms, LOG_CELLS));
+        let salt_seed = [seed as u8; 32];
+        let st = commit(profile, LOG_CELLS, &schedule, coeffs, mask, &salt_seed);
+        Fixture {
+            profile,
+            schedule,
+            st,
+            terms,
+            claim,
+        }
+    }
+
+    fn transcript(f: &Fixture) -> Transcript {
+        Transcript::new(f.profile, &[b"pcs-test", &f.st.root()])
+    }
+
+    fn prove(f: &Fixture) -> Opening {
+        let kernel = kernel_of(&f.terms, LOG_CELLS);
+        open(&f.st, kernel, f.claim, &mut transcript(f)).expect("coins in Good")
+    }
+
+    fn check(f: &Fixture, opening: &Opening) -> bool {
+        verify(
+            f.profile,
+            &f.st.root(),
+            LOG_CELLS,
+            &f.schedule,
+            &f.terms,
+            f.claim,
+            opening,
+            &mut transcript(f),
+        )
+    }
+
+    #[test]
+    fn codewords_are_evaluations_in_natural_order() {
+        let mut rng = Rng(11);
+        let coeffs: Vec<Goldilocks> = (0..16).map(|_| rng.base()).collect();
+        let code = encode_base(&coeffs, 6);
+        let w = Goldilocks::two_adic_generator(6);
+        for (j, &v) in code.iter().enumerate() {
+            let x = SHIFT * w.pow(j as u64);
+            let direct = coeffs
+                .iter()
+                .rev()
+                .fold(Goldilocks::ZERO, |a, &c| a * x + c);
+            assert_eq!(v, direct, "point {j}");
+        }
+        // 18 coefficients: two more than a power of two.
+        let ext: Vec<Fp5> = (0..18).map(|_| rng.fp5()).collect();
+        let code = encode_ext(&ext, 6);
+        for (j, &v) in code.iter().enumerate() {
+            let x = SHIFT * w.pow(j as u64);
+            assert_eq!(v, eval_at_base(&ext, x), "point {j}");
+            assert_eq!(v, eval_poly(&ext, [Fp5::from_base(x)])[0]);
+        }
+        // The folded domain holds the images of the fibers.
+        let dims = StageDims {
+            vars: 4,
+            step_vars: 2,
+            log_domain: 6,
+            fibers: 16,
+            queries: 1,
+        };
+        let folded = encode_ext_folded(&ext[..6], 6, 2);
+        assert_eq!(folded.len(), 16);
+        for (j, &v) in folded.iter().enumerate() {
+            let y = dims.fiber_image(j);
+            assert_eq!(v, eval_at_base(&ext[..6], y), "fiber {j}");
+            for t in 0..4 {
+                let x = SHIFT * w.pow((j + t * 16) as u64);
+                assert_eq!(x.pow(4), y);
+            }
+        }
+    }
+
+    #[test]
+    fn fiber_fold_matches_coefficient_fold() {
+        let mut rng = Rng(12);
+        let poly: Vec<Fp5> = (0..18).map(|_| rng.fp5()).collect();
+        let dims = StageDims {
+            vars: 4,
+            step_vars: 2,
+            log_domain: 6,
+            fibers: 16,
+            queries: 1,
+        };
+        let code = encode_ext(&poly, 6);
+        let chals: Vec<[Fp5; 3]> = (0..2).map(|_| [rng.fp5(), rng.fp5(), rng.fp5()]).collect();
+        // Fold the coefficients with the prover's routine under fixed coins equal to `chals`.
+        struct Replay(Vec<Fp5>);
+        impl Channel for Replay {
+            fn absorb(&mut self, _: &[u8], _: &[u8]) {}
+            fn squeeze_fp5(&mut self, _: &[u8]) -> Fp5 {
+                self.0.remove(0)
+            }
+            fn squeeze_distinct_indices(&mut self, _: &[u8], _: usize, _: usize) -> Vec<usize> {
+                Vec::new()
+            }
+        }
+        let phis = [rng.fp5(), rng.fp5()];
+        let mut coins = Replay(vec![
+            phis[0],
+            chals[0][0],
+            chals[0][1],
+            chals[0][2],
+            phis[1],
+            chals[1][0],
+            chals[1][1],
+            chals[1][2],
+        ]);
+        let kernel: Vec<Fp5> = (0..18).map(|_| rng.fp5()).collect();
+        let claim = poly
+            .iter()
+            .zip(&kernel)
+            .fold(Fp5::ZERO, |a, (&p, &k)| a + p * k);
+        let mut st = Folding {
+            kernel,
+            points: Vec::new(),
+            claim,
+        };
+        let (p1, _, c0) = prove_fold(&poly, &mut st, 0, &mut coins).unwrap();
+        assert_eq!(c0, chals[0]);
+        let (p2, _, _) = prove_fold(&p1, &mut st, 0, &mut coins).unwrap();
+        assert_eq!(p2.len(), 6);
+        // The claim follows the polynomial.
+        let direct = p2
+            .iter()
+            .zip(&st.kernel)
+            .fold(Fp5::ZERO, |a, (&p, &k)| a + p * k);
+        assert_eq!(direct, st.claim);
+        for j in 0..16 {
+            let folded = fold_fiber(fiber(&code, &dims, j), dims.fiber_base(j), &chals);
+            assert_eq!(folded, eval_at_base(&p2, dims.fiber_image(j)), "fiber {j}");
+        }
+        // A changed symbol changes the folded value.
+        let mut symbols = fiber(&code, &dims, 3);
+        symbols[2] += Fp5::ONE;
+        assert_ne!(
+            fold_fiber(symbols, dims.fiber_base(3), &chals),
+            eval_at_base(&p2, dims.fiber_image(3))
+        );
+    }
+
+    #[test]
+    fn claim_chain_holds_with_point_terms_through_overflow() {
+        // The identity of the prototype: after every fold, <P, kernel> equals the claim, with
+        // point terms continued exactly past the end of the polynomial.
+        let mut rng = Rng(13);
+        let coeffs: Vec<Goldilocks> = (0..64).map(|_| rng.base()).collect();
+        let mut kernel: Vec<Fp5> = (0..64).map(|_| rng.fp5()).collect();
+        let points: Vec<(Fp5, Fp5)> = (0..3).map(|_| (rng.fp5(), rng.fp5())).collect();
+        let tensor_claim = dot(&coeffs, &kernel);
+        let evals: Fp5 = points
+            .iter()
+            .map(|&(w, x)| w * eval_poly(&coeffs, [x])[0])
+            .fold(Fp5::ZERO, |a, b| a + b);
+        add_points(&mut kernel, &points);
+        assert_eq!(dot(&coeffs, &kernel), tensor_claim + evals);
+        let mut st = Folding {
+            kernel,
+            points,
+            claim: tensor_claim + evals,
+        };
+        let mut coins = FixedCoins {
+            rng: Rng(99),
+            indices: Vec::new(),
+        };
+        let (mut poly, _, _) = prove_fold(&coeffs, &mut st, 0, &mut coins).unwrap();
+        for _ in 0..4 {
+            assert_eq!(poly.len(), st.kernel.len());
+            let direct = poly
+                .iter()
+                .zip(&st.kernel)
+                .fold(Fp5::ZERO, |a, (&p, &k)| a + p * k);
+            assert_eq!(direct, st.claim);
+            poly = prove_fold(&poly, &mut st, 0, &mut coins).unwrap().0;
+        }
+        assert_eq!(poly.len(), 4);
+        // A point term stays a point term: after a fold it is the evaluation kernel at `x^2`
+        // with weight `w (1 + phi x)` on every coefficient, the last one included. Without the
+        // continuation (v1's convention) the last coefficient is cut off.
+        let (w, x) = (rng.fp5(), rng.fp5());
+        let p: Vec<Fp5> = (0..6).map(|_| rng.fp5()).collect();
+        let point_kernel = |w: Fp5, x: Fp5, len: usize| -> Vec<Fp5> {
+            (0..len).map(|n| w * x.pow(n as u64)).collect()
+        };
+        for keep in [true, false] {
+            let mut st = Folding {
+                kernel: point_kernel(w, x, 6),
+                points: if keep { vec![(w, x)] } else { Vec::new() },
+                claim: w * eval_poly(&p, [x])[0],
+            };
+            let mut coins = FixedCoins {
+                rng: Rng(98),
+                indices: Vec::new(),
+            };
+            let phi = FixedCoins {
+                rng: Rng(98),
+                indices: Vec::new(),
+            }
+            .squeeze_fp5(b"");
+            let (q, _, _) = prove_fold(&p, &mut st, 0, &mut coins).unwrap();
+            let expected = point_kernel(w * (Fp5::ONE + phi * x), x.square(), 4);
+            assert_eq!(st.kernel[..3], expected[..3]);
+            assert_eq!(st.kernel[3] == expected[3], keep);
+            if keep {
+                assert_eq!(st.points, vec![(expected[0], x.square())]);
+                assert_eq!(st.claim, expected[0] * eval_poly(&q, [x.square()])[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn roundtrip_both_profiles_and_serialization() {
+        for profile in Profile::ALL {
+            let f = fixture(profile, 21);
+            let opening = prove(&f);
+            assert!(check(&f, &opening));
+            let mut bytes = vec![0xAA];
+            opening.push_bytes(&mut bytes);
+            let mut pos = 1;
+            let back = Opening::read(&bytes, &mut pos, LOG_CELLS, &f.schedule).unwrap();
+            assert_eq!(pos, bytes.len());
+            assert_eq!(back, opening);
+            // Truncation and a non-canonical limb are refused.
+            let mut pos = 1;
+            assert!(
+                Opening::read(&bytes[..bytes.len() - 1], &mut pos, LOG_CELLS, &f.schedule)
+                    .is_none()
+            );
+            let mut bad = bytes.clone();
+            bad[1..9].copy_from_slice(&P.to_le_bytes());
+            let mut pos = 1;
+            assert!(Opening::read(&bad, &mut pos, LOG_CELLS, &f.schedule).is_none());
+        }
+        // The two profiles give different commitments and proofs.
+        let a = fixture(Profile::CshakeJohnson400, 21);
+        let b = fixture(Profile::TurboShakeJohnson400, 21);
+        assert_ne!(a.st.root(), b.st.root());
+        assert!(!verify(
+            b.profile,
+            &a.st.root(),
+            LOG_CELLS,
+            &a.schedule,
+            &a.terms,
+            a.claim,
+            &prove(&a),
+            &mut transcript(&a),
+        ));
+    }
+
+    #[test]
+    fn wrong_claim_terms_root_or_schedule_fail() {
+        let f = fixture(Profile::CshakeJohnson400, 22);
+        let opening = prove(&f);
+        let run = |terms: &[TensorTerm], claim: Fp5, root: Digest, schedule: &Schedule| {
+            verify(
+                f.profile,
+                &root,
+                LOG_CELLS,
+                schedule,
+                terms,
+                claim,
+                &opening,
+                &mut transcript(&f),
+            )
+        };
+        assert!(run(&f.terms, f.claim, f.st.root(), &f.schedule));
+        assert!(!run(&f.terms, f.claim + Fp5::ONE, f.st.root(), &f.schedule));
+        let mut terms = f.terms.clone();
+        terms[0].weight += Fp5::ONE;
+        assert!(!run(&terms, f.claim, f.st.root(), &f.schedule));
+        let mut terms = f.terms.clone();
+        terms[0].point[LOG_CELLS - 1] += Fp5::ONE;
+        assert!(!run(&terms, f.claim, f.st.root(), &f.schedule));
+        let mut terms = f.terms.clone();
+        terms[1].point.push(Fp5::ONE);
+        assert!(!run(&terms, f.claim, f.st.root(), &f.schedule));
+        let mut root = f.st.root();
+        root[0] ^= 1;
+        assert!(!run(&f.terms, f.claim, root, &f.schedule));
+        let mut schedule = f.schedule.clone();
+        schedule.stages[0].num_queries -= 1;
+        assert!(!run(&f.terms, f.claim, f.st.root(), &schedule));
+        let mut schedule = f.schedule.clone();
+        schedule.stages.pop();
+        assert!(!run(&f.terms, f.claim, f.st.root(), &schedule));
+    }
+
+    #[test]
+    fn every_opening_field_is_bound() {
+        let f = fixture(Profile::TurboShakeJohnson400, 23);
+        let opening = prove(&f);
+        assert!(check(&f, &opening));
+        let bump = Fp5::X.pow(3);
+        let mut cases: Vec<(&str, Opening)> = Vec::new();
+        let mut add = |name: &'static str, edit: &dyn Fn(&mut Opening)| {
+            let mut o = opening.clone();
+            edit(&mut o);
+            assert_ne!(o, opening, "{name}: the edit changed nothing");
+            cases.push((name, o));
+        };
+        for j in 0..MASK_POINTS {
+            add("mask eval", &|o| o.mask_evals[j] += bump);
+        }
+        for k in 0..5 {
+            add("stage-0 fold scalar", &|o| o.stage0_folds[1][k] += bump);
+            add("later fold scalar", &|o| o.stages[0].folds[0][k] += bump);
+            add("last fold scalar", &|o| o.stages[1].folds[0][k] += bump);
+        }
+        add("mask claim", &|o| o.mask_claim += bump);
+        add("stage-1 root", &|o| o.stages[0].root[7] ^= 1);
+        add("stage-2 root", &|o| o.stages[1].root[49] ^= 0x80);
+        add("ood eval", &|o| o.stages[0].ood[1] += bump);
+        add("ood eval 2", &|o| o.stages[1].ood[0] += bump);
+        add("opened Z symbol", &|o| {
+            o.stage0_query.leaves[2].z[3] += Goldilocks::ONE
+        });
+        add("opened R symbol", &|o| o.stage0_query.leaves[0].r += bump);
+        add("salt", &|o| o.stage0_query.leaves[1].salt[31] ^= 1);
+        add("stage-0 sibling", &|o| o.stage0_query.siblings[0][0] ^= 1);
+        add("stage-0 sibling dropped", &|o| {
+            o.stage0_query.siblings.pop();
+        });
+        add("stage-0 leaf dropped", &|o| {
+            o.stage0_query.leaves.pop();
+        });
+        add("stage-1 symbol", &|o| {
+            o.stages[0].query.leaves[1][2] += bump
+        });
+        add("stage-1 sibling", &|o| {
+            o.stages[0].query.siblings[1][3] ^= 1
+        });
+        add("stage-2 symbol", &|o| {
+            o.stages[1].query.leaves[0][1] += bump
+        });
+        add("stage-2 sibling", &|o| {
+            o.stages[1].query.siblings[0][9] ^= 1
+        });
+        add("stage-2 sibling added", &|o| {
+            o.stages[1].query.siblings.push([0u8; DIGEST_BYTES])
+        });
+        for k in [0usize, 7, 8, 9] {
+            add("terminal coefficient", &|o| o.final_coeffs[k] += bump);
+        }
+        add("terminal coefficient dropped", &|o| {
+            o.final_coeffs.pop();
+        });
+        add("two leaves swapped", &|o| o.stage0_query.leaves.swap(0, 1));
+        assert!(cases.len() > 40);
+        for (name, o) in &cases {
+            assert!(!check(&f, o), "accepted a proof with a changed {name}");
+        }
+    }
+
+    #[test]
+    fn good_event_predicates() {
+        let mut rng = Rng(31);
+        let omegas: Vec<Fp5> = (0..5).map(|_| rng.fp5()).collect();
+        assert!(mask_points_good(&omegas, 2));
+        // A point whose 2^s-th power is in the base field.
+        let zeta4 = Goldilocks::two_adic_generator(2);
+        let mut bad = omegas.clone();
+        bad[3] = Fp5::from_base(zeta4 * rng.base());
+        assert!(!mask_points_good(&bad, 2));
+        // Conjugate points, and points whose 2^s-th powers are conjugate.
+        let mut bad = omegas.clone();
+        bad[4] = bad[1].frobenius_pow(3);
+        assert!(!mask_points_good(&bad, 2));
+        let mut bad = omegas.clone();
+        bad[0] = bad[2].frobenius() * Fp5::from_base(zeta4);
+        assert!(!mask_points_good(&bad, 2));
+        assert!(mask_points_good(&bad, 1));
+        let mut bad = omegas.clone();
+        bad[2] = bad[1];
+        assert!(!mask_points_good(&bad, 2));
+        let mut bad = omegas.clone();
+        bad[0] = Fp5::ZERO;
+        assert!(!mask_points_good(&bad, 2));
+
+        let xs = [rng.fp5(), rng.fp5()];
+        assert!(fold_challenge_good(rng.fp5(), &xs));
+        assert!(!fold_challenge_good(Fp5::ZERO, &xs));
+        assert!(!fold_challenge_good(-xs[1].inverse(), &xs));
+    }
+
+    #[test]
+    fn prover_aborts_outside_good() {
+        let f = fixture(Profile::CshakeJohnson400, 24);
+        let kernel = kernel_of(&f.terms, LOG_CELLS);
+        struct Scripted {
+            inner: FixedCoins,
+            at: usize,
+            value: Fp5,
+            count: usize,
+        }
+        impl Channel for Scripted {
+            fn absorb(&mut self, _: &[u8], _: &[u8]) {}
+            fn squeeze_fp5(&mut self, l: &[u8]) -> Fp5 {
+                self.count += 1;
+                if self.count - 1 == self.at {
+                    self.value
+                } else {
+                    self.inner.squeeze_fp5(l)
+                }
+            }
+            fn squeeze_distinct_indices(&mut self, l: &[u8], n: usize, c: usize) -> Vec<usize> {
+                self.inner.squeeze_distinct_indices(l, n, c)
+            }
+        }
+        let run = |at: usize, value: Fp5| {
+            let mut ch = Scripted {
+                inner: FixedCoins {
+                    rng: Rng(5),
+                    indices: (0..256).collect(),
+                },
+                at,
+                value,
+                count: 0,
+            };
+            open(&f.st, kernel.clone(), f.claim, &mut ch).is_err()
+        };
+        // Draw order: five points, five weights, then per fold phi, theta, alpha, beta.
+        assert!(!run(usize::MAX, Fp5::ZERO));
+        assert!(run(2, Fp5::from_u64(9)), "mask point in the base field");
+        assert!(run(7, Fp5::ZERO), "zero weight");
+        assert!(run(10, Fp5::ZERO), "phi_0 = 0");
+        assert!(run(14, Fp5::ZERO), "phi_1 = 0");
+        assert!(!run(11, Fp5::ZERO), "theta may be zero");
+        // Draws 18..=23 are beta_R, two out-of-domain points, their weights and gamma; 24 is
+        // phi of the first later fold, which is not constrained.
+        assert!(!run(24, Fp5::ZERO));
+    }
+
+    /// Rank over `F_p` by Gaussian elimination.
+    fn rank(mut rows: Vec<Vec<Goldilocks>>) -> usize {
+        let cols = rows[0].len();
+        let mut rank = 0;
+        for col in 0..cols {
+            let Some(piv) = (rank..rows.len()).find(|&r| !rows[r][col].is_zero()) else {
+                continue;
+            };
+            rows.swap(rank, piv);
+            let inv = rows[rank][col].inv();
+            for v in &mut rows[rank] {
+                *v *= inv;
+            }
+            let pivot = rows[rank].clone();
+            for (r, row) in rows.iter_mut().enumerate() {
+                if r != rank && !row[col].is_zero() {
+                    let f = row[col];
+                    for (v, &p) in row.iter_mut().zip(&pivot) {
+                        *v -= f * p;
+                    }
+                }
+            }
+            rank += 1;
+        }
+        rank
+    }
+
+    /// The view of Lemmas V2.2 and V2.3 as base-field coordinates: the opened symbols of the
+    /// table codeword, the out-of-domain values and the Stage-0 fold scalars, under fixed
+    /// coins, computed by the prover's own routines.
+    fn stage0_view(
+        coeffs: &[Goldilocks],
+        kernel: &[Fp5],
+        points: usize,
+        fibers: &[usize],
+    ) -> Vec<Goldilocks> {
+        let schedule = toy_schedule();
+        let dims = stage_dims(LOG_CELLS, &schedule).unwrap();
+        let d0 = dims[0];
+        let code = encode_base(coeffs, d0.log_domain);
+        let mut view: Vec<Goldilocks> = fibers.iter().flat_map(|&j| fiber(&code, &d0, j)).collect();
+        let mask = vec![Fp5::ZERO; mask_len(LOG_CELLS, d0.step_vars)];
+        let mut coins = FixedCoins {
+            rng: Rng(77),
+            indices: Vec::new(),
+        };
+        let red = stage0_reduce(
+            coeffs,
+            &mask,
+            d0.step_vars,
+            points,
+            kernel.to_vec(),
+            dot(coeffs, kernel),
+            &mut coins,
+        )
+        .expect("fixed coins in Good");
+        assert_eq!(red.folds.len(), d0.step_vars);
+        view.extend(red.mask_evals.iter().flat_map(|a| a.to_limbs()));
+        view.extend(red.folds.iter().flatten().flat_map(|a| a.to_limbs()));
+        view
+    }
+
+    fn blinder_rank(points: usize) -> (usize, usize, usize) {
+        let mut rng = Rng(41);
+        let n = 1usize << LOG_CELLS;
+        let (s, q0) = (2usize, 2usize);
+        let blind = (q0 + 5 * points) << s;
+        let fibers = [3usize, 100];
+        let mut coeffs: Vec<Goldilocks> = (0..n).map(|_| rng.base()).collect();
+        coeffs[n - blind..].fill(Goldilocks::ZERO);
+        // An arbitrary kernel that reads no blinder coefficient.
+        let kernel: Vec<Fp5> = (0..n)
+            .map(|i| if i < n - blind { rng.fp5() } else { Fp5::ZERO })
+            .collect();
+        let base = stage0_view(&coeffs, &kernel, points, &fibers);
+        let rows: Vec<Vec<Goldilocks>> = (0..blind)
+            .map(|i| {
+                let mut c = coeffs.clone();
+                c[n - blind + i] = Goldilocks::ONE;
+                stage0_view(&c, &kernel, points, &fibers)
+                    .iter()
+                    .zip(&base)
+                    .map(|(&a, &b)| a - b)
+                    .collect()
+            })
+            .collect();
+        (blind, base.len(), rank(rows))
+    }
+
+    #[test]
+    fn blinders_cover_the_stage0_view_with_five_points_and_not_with_four() {
+        // |Q| + 25 (s + 1) with |Q| = 8 opened symbols and s = 2.
+        let (blind, dims, r) = blinder_rank(5);
+        assert_eq!((blind, dims), (108, 8 + 25 * 3));
+        assert_eq!(r, dims, "the view is not uniform");
+        // Four points expose 20 coordinates of out-of-domain values and still 25 per fold.
+        let (blind, dims, r) = blinder_rank(4);
+        assert_eq!((blind, dims), (88, 8 + 20 + 50));
+        assert!(
+            r < dims,
+            "four points should not cover five scalars per fold"
+        );
+        assert_eq!(r, 8 + 20 * 3);
+    }
+}
