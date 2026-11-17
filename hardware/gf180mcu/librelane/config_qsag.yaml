@@ -25,10 +25,16 @@ VERILOG_FILES:
 - dir::../rtl/qsag_gals_clk_rst.sv
 - dir::../rtl/qsag_io_shell.sv
 
-VERILOG_DEFINES: ["SLOT_0P5X0P5", "QSAG_GF180_CELLS", "QSAG_ICG"]
+# SYNTHESIS: LibreLane's Yosys step does not define it; rtl/dregg_ro_puf_bch.sv uses it (and
+# QSAG_GF180_CELLS) to keep the simulation-only oscillator model out of the netlist.
+VERILOG_DEFINES: ["SLOT_0P5X0P5", "SYNTHESIS", "QSAG_GF180_CELLS", "QSAG_ICG", "QSAG_LATCH_RF"]
 
-# Synthesis (`DELAY 0` avoids ABC `dch` area inflation on gf180mcu 7t5v0; restore latch_map)
-SYNTH_STRATEGY: DELAY 0
+# Synthesis strategy, measured on this RTL with scripts/ll_synth_sweep.sh (standard cells only):
+#   DELAY 0  1,356,131 um^2    AREA 0  1,276,978    AREA 1  1,277,633    AREA 2  1,276,220
+#   AREA 3   1,359,836
+# The core does not fit comfortably at any of them, so the smallest simple script is used. No
+# post-route timing exists for either choice.
+SYNTH_STRATEGY: AREA 0
 SYNTH_MUL_BOOTH: True
 SYNTH_LATCH_MAP: pdk_dir::libs.tech/librelane/gf180mcu_fd_sc_mcu7t5v0/latch_map.v
 ERROR_ON_SYNTH_CHECKS: False
@@ -37,10 +43,12 @@ ERROR_ON_SYNTH_CHECKS: False
 EXTRA_EXCLUDED_CELLS:
 - "gf180mcu_fd_sc_mcu7t5v0__dly*"
 
-# Timing (50 MHz = 20 ns target across TT/SS/FF; 3 CTS trees in chip_top_qsag.sdc)
+# Timing (50 MHz = 20 ns target across TT/SS/FF; one clock root per domain in chip_top_qsag.sdc)
 CLOCK_PERIOD: 20
 MAX_FANOUT_CONSTRAINT: 40
-MAX_TRANSITION_CONSTRAINT: 1.5
+# MAX_TRANSITION_CONSTRAINT is left at the PDK value (3 ns). The previous 1.5 ns made
+# RepairDesignPostGPL treat ~49,000 nets as slew violations (30 GB of memory, no room for the
+# buffers at this utilisation).
 PNR_SDC_FILE: dir::chip_top_qsag.sdc
 SIGNOFF_SDC_FILE: dir::chip_top_qsag.sdc
 FALLBACK_SDC: dir::chip_top_qsag.sdc
@@ -55,13 +63,13 @@ GRT_RESIZER_HOLD_SLACK_MARGIN: 0.55
 
 # Routing & Antenna Repair (Subcarbon R0 Traps 2 & 4)
 GRT_OVERFLOW_ITERS: 3
-DRT_THREADS: 16
+ROUTING_CORES: 16
 DRT_ANTENNA_REPAIR_ITERS: 15
 DRT_ANTENNA_REPAIR_MARGIN: 25
 
 # Protect hand-sized oscillators, Vernier taps, Muller-C elements, shield buffers & responder mux
 # (Upstream nets pass through non-dont_touch `u_*iso` buffers so RSZ-3006 never fires!)
-RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c|u_d|u_b|u_cn|u_na)|u_clk\\.u_mux\\.u_(ga|gb|o|ia|ib)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
+RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c|u_d|u_b|u_cn|u_na)|u_clk\\.u_mux\\.u_(ga|gb|o|ia|ib)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_db\\.u_lock\\.u_(set|hold)|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
 
 # PDN without macro grids (core rings 25 um <= 30 um slotting limit)
 PDN_CFG: dir::pdn/pdn_cfg_qsag.tcl
