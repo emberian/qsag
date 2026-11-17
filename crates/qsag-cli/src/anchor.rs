@@ -1,15 +1,37 @@
 //! External monotone anchor backend (`FsExternalMountAnchor`) for CLI custody state.
 //!
-//! Defends local stateful signing against full vault-directory snapshot rollback and VM/volume
-//! forks by composing up to three independent anti-rollback authorities via
+//! Defends local stateful signing against vault-directory rollback using independent
+//! monotone storage, optionally composed with VM snapshot/clone detection via
 //! [`CompositeAntiRollbackAnchor`]:
 //! 1. `--anchor-dir <dir>`: a `LockedRecord` single-use ceremony ticket seal (`QSAGANC1`) paired
 //!    with a mirrored dual-slot [`FsDirectoryMonotoneAnchor`] (`TwoSlotRecord` surviving loss of
 //!    either slot).
 //! 2. `--anchor-tpm-nv <nv-index>`: hardware TPM 2.0 `TPM_NT_COUNTER` NV index accessed directly
-//!    through `/dev/tpmrm0` ([`Tpm2NvMonotoneAnchor<DevTpmRm0>`]).
+//!    through `/dev/tpmrm0` ([`Tpm2NvMonotoneAnchor<DevTpmRm0>`]). Multi-domain workflows
+//!    treat this index as a range base: RSS quorum party `p` uses `base + 2*p` for its
+//!    belt and `base + 2*p + 1` for its ceremony (six counters); committee validator
+//!    `i` uses `base + i`, with `base + validators` for the ceremony. All indices must
+//!    be defined (`tpm2_nvdefine <index> -C o -s 8 -a "authread|authwrite|no_da|nt=counter"`)
+//!    and never written before enrollment. Do not undefine enrolled counters.
+//!    Every index is a counter of its own, and the TPM is asked to prove it: an
+//!    enrolling command reads each index's public area (`TPM2_NV_ReadPublic`) before it
+//!    writes anything and refuses one that is not a plain `TPM_NT_COUNTER` or that has
+//!    ever been incremented. So an index already used by another key, vault or policy
+//!    ledger, or one inside this command's own `--policy-anchor-tpm-nv`, is refused at
+//!    enrollment rather than surfacing later as a false rollback.
+//!
+//!    Enrollments made while all anchors of a quorum or committee shared one index
+//!    cannot open. `quorum sign` and `aggregate` recognise them and name the repair:
+//!    `quorum reanchor-tpm` / `aggregate --reanchor-tpm-nv`
+//!    ([`AnchorConfig::reanchor_shared_tpm_index`]), which proves the disk is the
+//!    newest state the shared counter has seen and moves each anchor to a new counter.
 //! 3. `--anchor-vmgenid`: hypervisor generation-ID + kernel `boot_id` + inode continuity fence
-//!    ([`HypervisorGenerationAnchor<LinuxSysfsVmGenSource>`]).
+//!    ([`HypervisorGenerationAnchor<LinuxSysfsVmGenSource>`]). This is snapshot/clone detection
+//!    only, not protection against in-guest file restore. It requires a disjoint-device
+//!    directory anchor or TPM counter. Without hypervisor VMGENID, it only pins boot/file identity.
+//!    A vault enrolled with this guard alone has no re-anchoring path: it kept no
+//!    monotone record outside its own disk, so its current state cannot be told from a
+//!    restored one. Such a key is retired and a new one enrolled.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,7 +43,8 @@ use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use qsag_core::anti_rollback::{
     CompositeAntiRollbackAnchor, DevTpmRm0, HypervisorGenerationAnchor, LinuxSysfsVmGenSource,
-    Tpm2NvMonotoneAnchor, Tpm2Transport, VmGenPolicy, is_valid_tpm2_nv_index,
+    Tpm2NvMonotoneAnchor, Tpm2Transport, VmGenPolicy, inspect_tpm2_seal, is_valid_tpm2_nv_index,
+    tpm2_nv_read_counter, tpm2_nv_read_public,
 };
 use qsag_core::ceremony_journal::CeremonyContext;
 use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
@@ -112,6 +135,68 @@ fn read_tpm_password(auth_env: Option<&str>) -> Result<ZeroizingBuf, CliError> {
 }
 
 impl AnchorConfig {
+    /// Select an independent counter from a workflow's contiguous NV range. The CLI
+    /// never defines or resets NV indices: the operator must provision every counter
+    /// in this exclusive range, with the same authorization, before enrollment.
+    /// Checking the entire range on every selection prevents overflow/aliasing and
+    /// keeps enrollment and recovery on the same deterministic allocation.
+    pub fn tpm_slot(&self, offset: u32, slots: u32) -> Result<Self, CliError> {
+        if slots == 0 || offset >= slots {
+            return Err(CliError::state("invalid TPM2 anchor domain allocation"));
+        }
+        let mut scoped = self.clone();
+        if let Some(base) = self.tpm_nv_index {
+            let last = base
+                .checked_add(slots - 1)
+                .filter(|n| is_valid_tpm2_nv_index(*n));
+            if !is_valid_tpm2_nv_index(base) || last.is_none() {
+                return Err(CliError::usage(format!(
+                    "TPM2 anchor range starting at {base:#010x} needs {slots} distinct NV indices within 0x01000000..=0x01ffffff"
+                )));
+            }
+            scoped.tpm_nv_index = Some(base + offset);
+        }
+        Ok(scoped)
+    }
+
+    /// Validate a workflow's whole NV range against the TPM before any state of the
+    /// command exists. Every index must be a counter an anchor can use
+    /// (`Tpm2NvPublic::check_anchor_counter`). For [`TpmUse::Enroll`] every counter
+    /// must never have been incremented: a written counter backs another anchor (in
+    /// this vault, another vault, or the policy ledger) or an abandoned enrollment,
+    /// and two seals on one counter invalidate each other. For [`TpmUse::Reopen`]
+    /// every counter must be written and readable with the configured authorization.
+    pub fn check_tpm_range(&self, slots: u32, purpose: TpmUse) -> Result<(), CliError> {
+        self.tpm_slot(0, slots)?;
+        let Some(base) = self.tpm_nv_index else {
+            return Ok(());
+        };
+        let password = read_tpm_password(self.tpm_auth_env.as_deref())?;
+        self.with_tpm(|tpm| probe_tpm_range(tpm, base, slots, &password, purpose))
+    }
+
+    /// Run `f` against the configured TPM (the test thread's model when one is installed).
+    fn with_tpm<R>(
+        &self,
+        f: impl FnOnce(&dyn Tpm2Transport) -> Result<R, CliError>,
+    ) -> Result<R, CliError> {
+        #[cfg(all(test, unix))]
+        if let Some(tpm) = tpm_model::active() {
+            return f(&tpm);
+        }
+        let dev_path = self
+            .tpm_device_path
+            .as_deref()
+            .unwrap_or(DevTpmRm0::DEFAULT_DEVICE_PATH);
+        let dev = DevTpmRm0::open_path(dev_path).map_err(|e| {
+            CliError::state(format!(
+                "opening TPM2 resource manager {dev_path}: {}",
+                e.into_io_error()
+            ))
+        })?;
+        f(&dev)
+    }
+
     #[cfg(test)]
     pub fn dir_only(
         anchor_dir: impl Into<String>,
@@ -154,10 +239,11 @@ impl AnchorConfig {
                 "--allow-single-disk-anchor requires --anchor-dir",
             ));
         }
-        let any_anchor = anchor_dir.is_some() || tpm_nv_index.is_some() || vmgenid;
+        require_vmgenid_backing(vmgenid, anchor_dir.is_some(), tpm_nv_index.is_some())?;
+        let any_anchor = anchor_dir.is_some() || tpm_nv_index.is_some();
         if !any_anchor && vault_dir.is_some() {
             return Err(CliError::usage(
-                "--vault-dir requires an anchor (--anchor-dir, --anchor-tpm-nv, or --anchor-vmgenid)",
+                "--vault-dir requires an anchor (--anchor-dir or --anchor-tpm-nv)",
             ));
         }
         if !any_anchor {
@@ -236,7 +322,8 @@ impl AnchorConfig {
                 None => (None, None, None, false, false),
             };
 
-        if anchor_dir.is_none() && tpm_nv_index.is_none() && !vmgenid {
+        require_vmgenid_backing(vmgenid, anchor_dir.is_some(), tpm_nv_index.is_some())?;
+        if anchor_dir.is_none() && tpm_nv_index.is_none() {
             return Ok(None);
         }
         Ok(Some(Self {
@@ -259,6 +346,11 @@ impl AnchorConfig {
         explicit_dirs: &[&str],
         create_anchor_dir: bool,
     ) -> Result<(), CliError> {
+        require_vmgenid_backing(
+            self.vmgenid,
+            self.anchor_dir.is_some(),
+            self.tpm_nv_index.is_some(),
+        )?;
         let explicit_vault = match &self.vault_dir {
             Some(vd) => {
                 let vault = Location {
@@ -344,6 +436,11 @@ impl AnchorConfig {
         other: &Location,
         what: &str,
     ) -> Result<(), CliError> {
+        if other.id.0 == anchor.id.0 && self.vmgenid && self.tpm_nv_index.is_none() {
+            return Err(CliError::state(
+                "VMGENID provides snapshot/clone detection only; --anchor-dir must be on a disjoint device unless --anchor-tpm-nv is also supplied; --allow-single-disk-anchor cannot waive this requirement",
+            ));
+        }
         if other.id.0 == anchor.id.0 && !self.allow_single_disk {
             return Err(CliError::state(format!(
                 "--anchor-dir resides on the same filesystem device as {what}; mount an independent device or pass --allow-single-disk-anchor"
@@ -351,6 +448,108 @@ impl AnchorConfig {
         }
         Ok(())
     }
+}
+
+// VM/file identities attest continuity, not a signing-state floor. In particular,
+// restoring authenticated local records in place leaves these identities intact.
+fn require_vmgenid_backing(vmgenid: bool, directory: bool, tpm: bool) -> Result<(), CliError> {
+    if vmgenid && !directory && !tpm {
+        return Err(CliError::usage(
+            "VMGENID provides snapshot/clone detection only; combine with --anchor-dir on a disjoint device or --anchor-tpm-nv (policy vaults use the corresponding policy options). A vault that was enrolled with VMGENID alone cannot be re-anchored: it kept no monotone record outside its own disk, so nothing distinguishes its current state from a restored one and its one-time leaves may already have been spent twice. Retire that key and enroll a new one with a monotone anchor",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a `--policy-anchor-tpm-nv` index inside the `slots` counters this command
+/// reserves from `--anchor-tpm-nv`: the policy ledger's anchor and a key anchor would
+/// share a counter. Reads only the options, so commands call it before anything else.
+pub fn refuse_policy_tpm_overlap(args: &Args, slots: u32) -> Result<(), CliError> {
+    let index = |option: &str| args.get(option).map(parse_tpm_nv_index).transpose();
+    let (Some(base), Some(policy)) = (index("anchor-tpm-nv")?, index("policy-anchor-tpm-nv")?)
+    else {
+        return Ok(());
+    };
+    if policy >= base && policy - base < slots {
+        return Err(CliError::usage(format!(
+            "--policy-anchor-tpm-nv {policy:#010x} lies inside the {slots} counter(s) reserved from --anchor-tpm-nv {base:#010x}; every anchor needs its own TPM2 NV counter"
+        )));
+    }
+    Ok(())
+}
+
+/// The TPM checks every enrolling command makes right after parsing its options and
+/// before it writes anything: the `slots` counters reserved from `--anchor-tpm-nv`
+/// exist, can back an anchor and have never been used, and the policy ledger's
+/// counter (if this command names one) is not among them.
+pub fn preflight_tpm_enrollment(
+    cfg: Option<&AnchorConfig>,
+    args: &Args,
+    slots: u32,
+) -> Result<(), CliError> {
+    let Some(cfg) = cfg else {
+        return Ok(());
+    };
+    refuse_policy_tpm_overlap(args, slots)?;
+    cfg.check_tpm_range(slots, TpmUse::Enroll)
+}
+
+/// What a command is about to do with its TPM2 NV counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TpmUse {
+    /// Bind new anchors: the counters must never have been incremented.
+    Enroll,
+    /// Open existing anchors: the counters must be in use.
+    Reopen,
+}
+
+/// How to create a counter the anchor accepts, for error messages.
+const TPM_DEFINE_HINT: &str = "define it with: tpm2_nvdefine <index> -C o -s 8 -a \"authread|authwrite|no_da|nt=counter\" [-p <auth>]";
+
+fn probe_tpm_range(
+    transport: &dyn Tpm2Transport,
+    base: u32,
+    slots: u32,
+    password: &[u8],
+    purpose: TpmUse,
+) -> Result<(), CliError> {
+    for index in base..base + slots {
+        let slot = format!(
+            "TPM2 NV counter {index:#010x} (slot {} of the {slots} reserved from {base:#010x})",
+            index - base
+        );
+        let public = tpm2_nv_read_public(transport, index).map_err(|e| {
+            CliError::state(format!(
+                "{slot} is not defined or cannot be read: {}; {TPM_DEFINE_HINT}",
+                e.into_io_error()
+            ))
+        })?;
+        public.check_anchor_counter(index).map_err(|e| {
+            CliError::state(format!("{slot}: {}; {TPM_DEFINE_HINT}", e.into_io_error()))
+        })?;
+        match (purpose, public.is_written()) {
+            (TpmUse::Enroll, true) => {
+                return Err(CliError::state(format!(
+                    "{slot} has already been incremented: it backs another anchor (another key, vault or policy ledger) or an abandoned enrollment. Two anchors on one counter invalidate each other, so enrollment needs counters that were never written: choose unused indices, or undefine and define this one again (tpm2_nvundefine {index:#010x} -C o; {TPM_DEFINE_HINT})"
+                )));
+            }
+            (TpmUse::Reopen, false) => {
+                return Err(CliError::state(format!(
+                    "{slot} was never incremented, so no anchor was enrolled on it: wrong index or range base, another TPM, or the index was redefined"
+                )));
+            }
+            (TpmUse::Enroll, false) => {}
+            (TpmUse::Reopen, true) => {
+                tpm2_nv_read_counter(transport, index, password).map_err(|e| {
+                    CliError::state(format!(
+                        "{slot} cannot be read with the configured authorization: {}",
+                        e.into_io_error()
+                    ))
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A directory as the isolation rules see it: `(device, inode)` and resolved path.
@@ -428,7 +627,7 @@ pub fn enforce_anchor_requirement(
     anchor_requirement(secret, anchor_cfg.is_some()).map_err(|e| match e {
         AnchorRequirementError::Malformed => crate::vault::corrupt(),
         AnchorRequirementError::AnchorMissing => CliError::state(
-            "key requires an external monotone anchor (--anchor-dir, --anchor-tpm-nv, or --anchor-vmgenid)",
+            "key requires an external monotone anchor (--anchor-dir or --anchor-tpm-nv)",
         ),
         AnchorRequirementError::NotEnrolled => {
             CliError::state("key was not enrolled with an external monotone anchor")
@@ -551,6 +750,19 @@ impl AnchorInner {
     }
 
     fn decode(&self, bytes: &[u8]) -> io::Result<AnchorRecordState> {
+        let (domain_hash, state) = self.decode_any_backend_binding(bytes)?;
+        if !ct_eq_bytes(&domain_hash, &self.domain_hash) {
+            return Err(invalid_anchor("external anchor header binding mismatch"));
+        }
+        Ok(state)
+    }
+
+    /// Authenticate a record for this key and return the domain/backend binding it was
+    /// written under along with its state, whatever that binding is.
+    fn decode_any_backend_binding(
+        &self,
+        bytes: &[u8],
+    ) -> io::Result<([u8; 32], AnchorRecordState)> {
         if bytes.len() != ANCHOR_RECORD_LEN {
             return Err(invalid_anchor("external anchor record wrong length"));
         }
@@ -562,12 +774,10 @@ impl AnchorInner {
         if !ct_eq_bytes(stored_mac, &expected_mac.0) {
             return Err(invalid_anchor("external anchor MAC verification failed"));
         }
-        if &payload[..8] != ANCHOR_MAGIC
-            || !ct_eq_bytes(&payload[8..40], &self.domain_hash)
-            || !ct_eq_bytes(&payload[40..72], &self.key_id)
-        {
+        if &payload[..8] != ANCHOR_MAGIC || !ct_eq_bytes(&payload[40..72], &self.key_id) {
             return Err(invalid_anchor("external anchor header binding mismatch"));
         }
+        let domain_hash: [u8; 32] = payload[8..40].try_into().unwrap();
         let generation = u64::from_be_bytes(payload[72..80].try_into().unwrap());
         let mut tag = [0u8; 32];
         tag.copy_from_slice(&payload[80..112]);
@@ -591,10 +801,13 @@ impl AnchorInner {
             }
             _ => return Err(invalid_anchor("external anchor invalid consumed flag")),
         };
-        Ok(AnchorRecordState {
-            checkpoint: LedgerCheckpoint { generation, tag },
-            consumed,
-        })
+        Ok((
+            domain_hash,
+            AnchorRecordState {
+                checkpoint: LedgerCheckpoint { generation, tag },
+                consumed,
+            },
+        ))
     }
 
     fn read_verified_disk_state(&self) -> io::Result<Option<AnchorRecordState>> {
@@ -630,7 +843,8 @@ impl AnchorInner {
 /// - `O_NOFOLLOW` `0600` [`LockedRecord`] single-use ticket seal (`lock_identity_seal`),
 /// - mirrored dual-slot [`FsDirectoryMonotoneAnchor`] (`--anchor-dir`),
 /// - hardware TPM 2.0 NV counter [`Tpm2NvMonotoneAnchor<DevTpmRm0>`] (`--anchor-tpm-nv`), and
-/// - hypervisor generation-ID + `boot_id` + inode continuity [`HypervisorGenerationAnchor`] (`--anchor-vmgenid`)
+/// - optional hypervisor generation-ID + `boot_id` + inode continuity fork guard
+///   [`HypervisorGenerationAnchor`] (`--anchor-vmgenid`), requiring independent monotone backing
 ///   via [`CompositeAntiRollbackAnchor`].
 #[derive(Clone)]
 pub struct FsExternalMountAnchor {
@@ -796,6 +1010,369 @@ fn derive_sub_mac(
     ))
 }
 
+/// The domain and enrolled backends a ticket record is bound to. Authenticating the
+/// hardware and fork-guard requirements in the record header stops a TPM+directory
+/// anchor from being reopened with only `--anchor-dir`, which would silently drop the
+/// hardware fence. The directory-only encoding is the original one.
+fn backend_binding_hash(config: &AnchorConfig, domain: &str) -> [u8; 32] {
+    if config.tpm_nv_index.is_none() && !config.vmgenid {
+        return cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
+    }
+    let backend_flags = [
+        u8::from(config.anchor_dir.is_some()),
+        u8::from(config.tpm_nv_index.is_some()),
+        u8::from(config.vmgenid),
+        u8::from(config.vmgenid_strict),
+    ];
+    cshake256_framed_32(
+        b"QSAG.CLI.ANCHOR.DOMAIN.V1",
+        &[
+            domain.as_bytes(),
+            &backend_flags,
+            &config.tpm_nv_index.unwrap_or_default().to_be_bytes(),
+        ],
+    )
+}
+
+/// Where a domain's ticket record and TPM seal live under `config`.
+fn domain_record_paths(
+    config: &AnchorConfig,
+    custody_files: &[&str],
+    explicit_dirs: &[&str],
+    domain: &str,
+    key_id: &[u8; 32],
+) -> Result<(PathBuf, PathBuf), CliError> {
+    let stem = slot_stem(domain, key_id);
+    Ok(match &config.anchor_dir {
+        Some(dir) => (
+            anchor_record_path(dir, domain, key_id),
+            Path::new(dir).join(format!("{stem}.tpm")),
+        ),
+        None => {
+            let dir = resolve_custody_dir(config, custody_files, explicit_dirs)?;
+            (
+                dir.join(format!(".qsag-{stem}.anchor")),
+                dir.join(format!(".qsag-{stem}.tpm")),
+            )
+        }
+    })
+}
+
+/// One anchor domain of a multi-anchor workflow, with its slot in the workflow's
+/// TPM2 NV counter range.
+pub struct TpmDomain<'a> {
+    pub slot: u32,
+    pub domain: &'a str,
+    pub key_id: [u8; 32],
+    pub mac_key: [u8; 32],
+}
+
+impl Drop for TpmDomain<'_> {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.mac_key);
+    }
+}
+
+/// A domain's ticket record, authenticated, with the binding it was written under.
+struct TicketView {
+    inner: AnchorInner,
+    binding: [u8; 32],
+    state: AnchorRecordState,
+}
+
+fn open_ticket(
+    config: &AnchorConfig,
+    record_path: &Path,
+    domain: &TpmDomain<'_>,
+) -> Result<TicketView, CliError> {
+    let unavailable = |e: io::Error| {
+        CliError::state(format!(
+            "ExternalAnchorUnavailableOrCorrupt ({}): {e}",
+            domain.domain
+        ))
+    };
+    let inner = AnchorInner {
+        record: LockedRecord::open_existing(record_path).map_err(unavailable)?,
+        poisoned: AtomicBool::new(false),
+        domain_hash: backend_binding_hash(config, domain.domain),
+        key_id: domain.key_id,
+        mac_key: domain.mac_key,
+        state: Mutex::new(None),
+        written: AtomicBool::new(true),
+    };
+    let bytes = inner
+        .record
+        .read_bounded(ANCHOR_RECORD_LEN)
+        .map_err(unavailable)?;
+    let (binding, state) = inner
+        .decode_any_backend_binding(&bytes)
+        .map_err(unavailable)?;
+    Ok(TicketView {
+        inner,
+        binding,
+        state,
+    })
+}
+
+impl AnchorConfig {
+    /// Whether these `domains` were enrolled before each domain had its own counter:
+    /// more than one of their ticket records is bound to the single index
+    /// `--anchor-tpm-nv` names. Such a vault cannot open (every seal but the newest
+    /// lags the shared counter); [`Self::reanchor_shared_tpm_index`] repairs it.
+    pub fn shared_tpm_index_enrollment(
+        &self,
+        custody_files: &[&str],
+        explicit_dirs: &[&str],
+        domains: &[TpmDomain<'_>],
+    ) -> Result<bool, CliError> {
+        if self.tpm_nv_index.is_none() {
+            return Ok(false);
+        }
+        let mut shared = 0;
+        for domain in domains {
+            let (record_path, _) = domain_record_paths(
+                self,
+                custody_files,
+                explicit_dirs,
+                domain.domain,
+                &domain.key_id,
+            )?;
+            let Ok(ticket) = open_ticket(self, &record_path, domain) else {
+                continue;
+            };
+            if ct_eq_bytes(&ticket.binding, &backend_binding_hash(self, domain.domain)) {
+                shared += 1;
+            }
+        }
+        Ok(shared > 1)
+    }
+
+    /// Move every domain of a shared-index enrollment (`self` names the shared index)
+    /// onto its own never-written counter in the range starting at `new_base`, keeping
+    /// each domain's checkpoint.
+    ///
+    /// # Why this is safe against a rolled-back disk
+    /// On a shared counter a domain can only be opened, and so only advanced, while
+    /// its seal equals the counter, and advancing keeps it equal. So at any time
+    /// exactly one domain's seal equals the live counter (the last one to advance) and
+    /// every other domain is still in the single state it was enrolled in, which a
+    /// rollback cannot change. The domains not yet moved are therefore all current
+    /// if and only if the largest count among their seals equals the live counter.
+    /// That is checked before anything is written; a vault whose newest seal is
+    /// behind the counter is refused as rolled back or foreign.
+    ///
+    /// Domains are moved in ascending order of their sealed count, the one that
+    /// matches the counter last, so an interrupted run leaves the proof intact for
+    /// the domains that remain and can simply be run again. A domain already moved
+    /// is verified against its own new counter instead.
+    pub fn reanchor_shared_tpm_index(
+        &self,
+        new_base: u32,
+        slots: u32,
+        custody_files: &[&str],
+        explicit_dirs: &[&str],
+        domains: &[TpmDomain<'_>],
+    ) -> Result<(), CliError> {
+        let shared_index = self.tpm_nv_index.ok_or_else(|| {
+            CliError::usage("re-anchoring needs the shared index as --anchor-tpm-nv")
+        })?;
+        let new_cfg = AnchorConfig {
+            tpm_nv_index: Some(new_base),
+            ..self.clone()
+        };
+        new_cfg.tpm_slot(0, slots)?;
+        if shared_index >= new_base && shared_index - new_base < slots {
+            return Err(CliError::usage(format!(
+                "the new counter range starting at {new_base:#010x} contains the shared index {shared_index:#010x}"
+            )));
+        }
+        if domains.len() as u64 != u64::from(slots) {
+            return Err(CliError::state(
+                "re-anchoring needs every domain of the enrollment",
+            ));
+        }
+        self.validate_isolation(custody_files, explicit_dirs, false)?;
+        let password = read_tpm_password(self.tpm_auth_env.as_deref())?;
+        let refused = |why: String| {
+            CliError::state(format!(
+                "shared TPM2 NV index {shared_index:#010x} cannot be re-anchored: {why}"
+            ))
+        };
+
+        // Phase 1: authenticate every domain and establish that the old state is current.
+        struct Pending<'a> {
+            domain: &'a TpmDomain<'a>,
+            ticket: TicketView,
+            seal_path: PathBuf,
+            new_index: u32,
+            new_binding: [u8; 32],
+            // The count of a seal still on the shared index; `None` once it has moved.
+            shared_count: Option<u64>,
+        }
+        let mut pending = Vec::with_capacity(domains.len());
+        for domain in domains {
+            let scoped = new_cfg.tpm_slot(domain.slot, slots)?;
+            let new_index = scoped.tpm_nv_index.unwrap_or(new_base);
+            let new_binding = backend_binding_hash(&scoped, domain.domain);
+            let (record_path, seal_path) = domain_record_paths(
+                self,
+                custody_files,
+                explicit_dirs,
+                domain.domain,
+                &domain.key_id,
+            )?;
+            let ticket = open_ticket(self, &record_path, domain)?;
+            let ticket_moved = ct_eq_bytes(&ticket.binding, &new_binding);
+            if !ticket_moved
+                && !ct_eq_bytes(&ticket.binding, &backend_binding_hash(self, domain.domain))
+            {
+                return Err(refused(format!(
+                    "the {} anchor record is bound to neither that index nor its new counter {new_index:#010x}",
+                    domain.domain
+                )));
+            }
+            let tpm_mac =
+                derive_sub_mac(&domain.mac_key, b"tpm2_nv", domain.domain, &domain.key_id);
+            let shared_count = match inspect_tpm2_seal(&seal_path, shared_index, tpm_mac.0) {
+                Ok(seal) if !ticket_moved => {
+                    if seal.commit_in_flight
+                        || seal.checkpoint.generation != ticket.state.checkpoint.generation
+                        || !ct_eq_bytes(&seal.checkpoint.tag, &ticket.state.checkpoint.tag)
+                    {
+                        return Err(refused(format!(
+                            "the {} TPM seal and anchor record disagree or hold an interrupted commit",
+                            domain.domain
+                        )));
+                    }
+                    Some(seal.sealed_count)
+                }
+                Ok(_) => {
+                    return Err(refused(format!(
+                        "the {} anchor record was moved but its TPM seal was not",
+                        domain.domain
+                    )));
+                }
+                Err(_) => {
+                    inspect_tpm2_seal(&seal_path, new_index, tpm_mac.0).map_err(|e| {
+                        refused(format!(
+                            "the {} TPM seal is bound to neither that index nor {new_index:#010x}: {}",
+                            domain.domain,
+                            e.into_io_error()
+                        ))
+                    })?;
+                    None
+                }
+            };
+            pending.push(Pending {
+                domain,
+                ticket,
+                seal_path,
+                new_index,
+                new_binding,
+                shared_count,
+            });
+        }
+        if let Some(newest) = pending.iter().filter_map(|p| p.shared_count).max() {
+            let live = self.with_tpm(|tpm| {
+                tpm2_nv_read_counter(tpm, shared_index, &password).map_err(|e| {
+                    refused(format!("the counter cannot be read: {}", e.into_io_error()))
+                })
+            })?;
+            if newest != live {
+                return Err(refused(format!(
+                    "the newest seal on disk was written at count {newest} but the counter is at {live}: the disk is older than the TPM (rolled back), or something else used this index"
+                )));
+            }
+        }
+
+        // Phase 2: move the seals, the one that matches the counter last, then rebind
+        // each ticket record. Each step is safe to repeat.
+        pending.sort_by_key(|p| p.shared_count.unwrap_or(0));
+        for p in &mut pending {
+            let tpm_mac = derive_sub_mac(
+                &p.domain.mac_key,
+                b"tpm2_nv",
+                p.domain.domain,
+                &p.domain.key_id,
+            );
+            self.rebind_seal(
+                &p.seal_path,
+                shared_index,
+                p.new_index,
+                &password,
+                tpm_mac.0,
+            )
+            .map_err(|e| {
+                refused(format!(
+                    "moving the {} seal to {:#010x}: {}",
+                    p.domain.domain,
+                    p.new_index,
+                    e.into_io_error()
+                ))
+            })?;
+            // The record keeps its lock identity (the seal pinned in the custody file);
+            // only the backend binding in its authenticated header changes.
+            p.ticket.inner.domain_hash = p.new_binding;
+            p.ticket
+                .inner
+                .write_state(&p.ticket.state)
+                .map_err(|e| refused(format!("rebinding the {} record: {e}", p.domain.domain)))?;
+        }
+        drop(pending);
+
+        // Phase 3: every domain opens under the new layout.
+        for domain in domains {
+            let anchor = FsExternalMountAnchor::open_existing(
+                &new_cfg.tpm_slot(domain.slot, slots)?,
+                custody_files,
+                explicit_dirs,
+                domain.domain,
+                domain.key_id,
+                domain.mac_key,
+            )?;
+            anchor
+                .load()
+                .map_err(|e| refused(format!("verifying {} after the move: {e}", domain.domain)))?;
+        }
+        Ok(())
+    }
+
+    fn rebind_seal(
+        &self,
+        seal_path: &Path,
+        shared_index: u32,
+        new_index: u32,
+        password: &[u8],
+        mac_key: [u8; 32],
+    ) -> Result<(), qsag_core::anti_rollback::AntiRollbackError> {
+        #[cfg(all(test, unix))]
+        if let Some(tpm) = tpm_model::active() {
+            return Tpm2NvMonotoneAnchor::rebind_to_new_counter(
+                tpm,
+                seal_path,
+                shared_index,
+                new_index,
+                password,
+                mac_key,
+            )
+            .map(drop);
+        }
+        let dev_path = self
+            .tpm_device_path
+            .as_deref()
+            .unwrap_or(DevTpmRm0::DEFAULT_DEVICE_PATH);
+        Tpm2NvMonotoneAnchor::rebind_to_new_counter(
+            DevTpmRm0::open_path(dev_path)?,
+            seal_path,
+            shared_index,
+            new_index,
+            password,
+            mac_key,
+        )
+        .map(drop)
+    }
+}
+
 fn ensure_seal_state(path: &Path, fresh: bool, label: &str) -> Result<(), CliError> {
     let exists = match std::fs::symlink_metadata(path) {
         Ok(_) => true,
@@ -827,6 +1404,19 @@ impl FsExternalMountAnchor {
         key_id: [u8; 32],
         mac_key: [u8; 32],
     ) -> Result<Self, CliError> {
+        #[cfg(all(test, unix))]
+        if let Some(tpm) = tpm_model::active() {
+            return Self::open_composite(
+                config,
+                custody_files,
+                explicit_dirs,
+                domain,
+                key_id,
+                mac_key,
+                true,
+                Some(tpm),
+            );
+        }
         Self::open_composite::<DevTpmRm0>(
             config,
             custody_files,
@@ -848,6 +1438,19 @@ impl FsExternalMountAnchor {
         key_id: [u8; 32],
         mac_key: [u8; 32],
     ) -> Result<Self, CliError> {
+        #[cfg(all(test, unix))]
+        if let Some(tpm) = tpm_model::active() {
+            return Self::open_composite(
+                config,
+                custody_files,
+                explicit_dirs,
+                domain,
+                key_id,
+                mac_key,
+                false,
+                Some(tpm),
+            );
+        }
         Self::open_composite::<DevTpmRm0>(
             config,
             custody_files,
@@ -940,28 +1543,7 @@ impl FsExternalMountAnchor {
             })?
         };
 
-        // Authenticate the enrolled hardware/fork-guard requirements in the
-        // existing record header. Otherwise reopening a TPM+directory anchor
-        // with only --anchor-dir silently removes the hardware rollback fence.
-        // Preserve the existing directory-only encoding.
-        let domain_hash = if config.tpm_nv_index.is_none() && !config.vmgenid {
-            cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()])
-        } else {
-            let backend_flags = [
-                u8::from(config.anchor_dir.is_some()),
-                u8::from(config.tpm_nv_index.is_some()),
-                u8::from(config.vmgenid),
-                u8::from(config.vmgenid_strict),
-            ];
-            cshake256_framed_32(
-                b"QSAG.CLI.ANCHOR.DOMAIN.V1",
-                &[
-                    domain.as_bytes(),
-                    &backend_flags,
-                    &config.tpm_nv_index.unwrap_or_default().to_be_bytes(),
-                ],
-            )
-        };
+        let domain_hash = backend_binding_hash(config, domain);
         let inner = Arc::new(AnchorInner {
             record,
             poisoned: AtomicBool::new(false),
@@ -1241,9 +1823,207 @@ impl ExternalMonotoneAnchor for FsExternalMountAnchor {
     }
 }
 
+/// Installs the software TPM model (`qsag_core::anti_rollback::tpm2_model`) for
+/// tests that drive the real CLI call chains, which open their own transport.
+#[cfg(all(test, unix))]
+pub(crate) mod tpm_model {
+    use super::*;
+    pub(crate) use qsag_core::anti_rollback::tpm2_model::ModelTpm2;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<ModelTpm2>> = const { RefCell::new(None) };
+    }
+
+    /// The model this test thread installed, used in place of `/dev/tpmrm0`.
+    pub(crate) fn active() -> Option<ModelTpm2> {
+        ACTIVE.with(|t| t.borrow().clone())
+    }
+
+    /// Keeps a model installed for the current test thread.
+    pub(crate) struct Installed(pub(crate) ModelTpm2);
+
+    /// A TPM whose counters have reached `history`, with never-written anchor counters
+    /// `first..first + count` (empty index authorization) defined.
+    pub(crate) fn install(first: u32, count: u32, history: u64) -> Installed {
+        let tpm = ModelTpm2::with_history(history);
+        for nv_index in first..first + count {
+            tpm.define_counter(nv_index, b"");
+        }
+        ACTIVE.with(|t| {
+            assert!(t.borrow().is_none(), "one model TPM per test thread");
+            *t.borrow_mut() = Some(tpm.clone());
+        });
+        Installed(tpm)
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            ACTIVE.with(|t| *t.borrow_mut() = None);
+        }
+    }
+
+    /// Rewrite a workflow enrolled under `layout` (one counter per domain) into the
+    /// on-disk shape releases before per-domain counters produced: every ticket record
+    /// and every seal bound to the one index `shared`, each seal holding the count the
+    /// shared counter had right after that domain's own increment.
+    pub(crate) fn make_shared_index_enrollment(
+        tpm: &ModelTpm2,
+        layout: &AnchorConfig,
+        shared: u32,
+        slots: u32,
+        custody_files: &[&str],
+        explicit_dirs: &[&str],
+        domains: &[TpmDomain<'_>],
+    ) {
+        let legacy = AnchorConfig {
+            tpm_nv_index: Some(shared),
+            ..layout.clone()
+        };
+        for domain in domains {
+            let scoped = layout.tpm_slot(domain.slot, slots).unwrap();
+            let (record_path, seal_path) = domain_record_paths(
+                layout,
+                custody_files,
+                explicit_dirs,
+                domain.domain,
+                &domain.key_id,
+            )
+            .unwrap();
+            let mut ticket = open_ticket(&scoped, &record_path, domain).unwrap();
+            assert_eq!(ticket.binding, backend_binding_hash(&scoped, domain.domain));
+            ticket.inner.domain_hash = backend_binding_hash(&legacy, domain.domain);
+            ticket.inner.write_state(&ticket.state).unwrap();
+            Tpm2NvMonotoneAnchor::fixture_reseal_on_shared_counter(
+                tpm.clone(),
+                &seal_path,
+                scoped.tpm_nv_index.unwrap(),
+                shared,
+                b"",
+                derive_sub_mac(&domain.mac_key, b"tpm2_nv", domain.domain, &domain.key_id).0,
+            )
+            .unwrap();
+        }
+    }
+
+    /// One enrolled anchor domain: honest storage reopens; an advance moves only its
+    /// own counter `nv_index`; restoring every local record of the domain in place
+    /// (ticket and TPM seal, inodes kept) is refused; the current records reopen.
+    pub(crate) fn assert_domain_reopens_and_refuses_rollback(
+        tpm: &ModelTpm2,
+        config: &AnchorConfig,
+        dir: &str,
+        nv_index: u32,
+        domain: &str,
+        key_id: [u8; 32],
+        mac_key: [u8; 32],
+    ) {
+        let scoped = AnchorConfig {
+            tpm_nv_index: Some(nv_index),
+            ..config.clone()
+        };
+        let stem = slot_stem(domain, &key_id);
+        let files: Vec<PathBuf> = ["anchor", "tpm"]
+            .iter()
+            .map(|ext| Path::new(dir).join(format!(".qsag-{stem}.{ext}")))
+            .collect();
+        let read_all = || -> Vec<Vec<u8>> {
+            files
+                .iter()
+                .map(|p| {
+                    std::fs::read(p).unwrap_or_else(|e| panic!("{domain} {}: {e}", p.display()))
+                })
+                .collect()
+        };
+        let write_all = |contents: &[Vec<u8>]| {
+            for (path, bytes) in files.iter().zip(contents) {
+                std::fs::write(path, bytes).unwrap();
+            }
+        };
+        let open =
+            || FsExternalMountAnchor::open_existing(&scoped, &[], &[dir], domain, key_id, mac_key);
+
+        let anchor = open()
+            .unwrap_or_else(|e| panic!("honest {domain} at {nv_index:#x} must reopen: {e:?}"));
+        let checkpoint = anchor.load().unwrap().expect("enrolled checkpoint");
+        let before_records = read_all();
+        let before_counters = tpm.counts();
+        anchor
+            .advance(LedgerCheckpoint {
+                generation: checkpoint.generation + 1,
+                tag: [0x9b; 32],
+            })
+            .unwrap();
+        drop(anchor);
+        let mut expected = before_counters.clone();
+        *expected.get_mut(&nv_index).unwrap().as_mut().unwrap() += 1;
+        assert_eq!(
+            tpm.counts(),
+            expected,
+            "{domain} owns exactly {nv_index:#x}"
+        );
+
+        let current_records = read_all();
+        write_all(&before_records);
+        let err = match open() {
+            Ok(_) => panic!("rolled-back {domain} reopened"),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(err.contains("lags TPM2 NV monotonic counter"), "{err}");
+        write_all(&current_records);
+        drop(open().unwrap_or_else(|e| panic!("current {domain} must reopen: {e:?}")));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vmgenid_requires_an_independent_monotone_backend() {
+        let raw = vec!["--anchor-vmgenid".to_owned()];
+        let args = Args::parse(&raw, ANCHOR_VALUE_OPTIONS, ANCHOR_FLAG_OPTIONS).unwrap();
+        assert!(AnchorConfig::from_args(&args).is_err());
+        assert!(AnchorConfig::from_quorum_args(&args, "/vault").is_err());
+        let raw = vec!["--policy-vmgenid".to_owned()];
+        let args = Args::parse(&raw, &[], &["policy-vmgenid"]).unwrap();
+        assert!(
+            AnchorConfig::for_vault(
+                &args,
+                "/vault",
+                "policy-anchor-dir",
+                "policy-allow-single-disk-anchor"
+            )
+            .is_err()
+        );
+        // Direct users of the configuration cannot bypass the parser's requirement.
+        let config = AnchorConfig {
+            vmgenid: true,
+            ..AnchorConfig::default()
+        };
+        assert!(config.validate_isolation(&[], &[], false).is_err());
+    }
+
+    #[test]
+    fn vmgenid_same_device_waiver_cannot_supply_monotonicity() {
+        let root = temp_root("vmgenid-disjoint-device");
+        let vault = root.join("vault");
+        let anchor_dir = root.join("anchor");
+        private_dir(vault.to_str().unwrap(), true).unwrap();
+        private_dir(anchor_dir.to_str().unwrap(), true).unwrap();
+        let mut config = AnchorConfig {
+            anchor_dir: Some(anchor_dir.to_string_lossy().into_owned()),
+            vault_dir: Some(vault.to_string_lossy().into_owned()),
+            allow_single_disk: true,
+            vmgenid: true,
+            ..AnchorConfig::default()
+        };
+        assert!(config.validate_isolation(&[], &[], false).is_err());
+        // A TPM counter supplies the independent monotone state even on one disk.
+        config.tpm_nv_index = Some(0x01800001);
+        config.validate_isolation(&[], &[], false).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn floor_checkpoint_rejects_generation_overflow() {
@@ -1946,55 +2726,274 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
-    struct TestTpm2Device {
-        nv_index: u32,
-        counter: Arc<Mutex<u64>>,
+    use super::tpm_model::ModelTpm2;
+
+    fn model_tpm(nv_index: u32) -> ModelTpm2 {
+        let tpm = ModelTpm2::with_history(41);
+        tpm.define_counter(nv_index, b"");
+        tpm
     }
 
-    impl Tpm2Transport for TestTpm2Device {
-        fn transmit(
-            &self,
-            cmd: &[u8],
-        ) -> Result<Vec<u8>, qsag_core::anti_rollback::AntiRollbackError> {
-            use qsag_core::anti_rollback::{
-                AntiRollbackError, TPM_CC_NV_INCREMENT, TPM_CC_NV_READ, TPM_RC_SUCCESS,
-                TPM_ST_SESSIONS,
-            };
-            if cmd.len() < 18 {
-                return Err(AntiRollbackError::ProtocolFramingError("short cmd"));
-            }
-            let cc = u32::from_be_bytes([cmd[6], cmd[7], cmd[8], cmd[9]]);
-            let nv = u32::from_be_bytes([cmd[14], cmd[15], cmd[16], cmd[17]]);
-            if nv != self.nv_index {
-                return Err(AntiRollbackError::Tpm2ResponseError(0x0000_018B));
-            }
-            let params: Vec<u8> = match cc {
-                TPM_CC_NV_READ => {
-                    let val = *self.counter.lock().unwrap();
-                    let mut p = Vec::with_capacity(10);
-                    p.extend_from_slice(&8u16.to_be_bytes());
-                    p.extend_from_slice(&val.to_be_bytes());
-                    p
-                }
-                TPM_CC_NV_INCREMENT => {
-                    *self.counter.lock().unwrap() += 1;
-                    Vec::new()
-                }
-                _ => return Err(AntiRollbackError::Tpm2ResponseError(0x0000_0143)),
-            };
-            let total_len = (10 + 4 + params.len() + 5) as u32;
-            let mut rsp = Vec::with_capacity(total_len as usize);
-            rsp.extend_from_slice(&TPM_ST_SESSIONS.to_be_bytes());
-            rsp.extend_from_slice(&total_len.to_be_bytes());
-            rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
-            rsp.extend_from_slice(&(params.len() as u32).to_be_bytes());
-            rsp.extend_from_slice(&params);
-            rsp.extend_from_slice(&0u16.to_be_bytes());
-            rsp.push(0x01);
-            rsp.extend_from_slice(&0u16.to_be_bytes());
-            Ok(rsp)
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Every command that binds a new anchor, with the options that carry it to its
+    /// TPM preflight. `{dir}` is a scratch directory that must stay empty.
+    fn enrolling_commands(dir: &str, tpm_nv: &str) -> Vec<(&'static str, Vec<String>)> {
+        let path = |name: &str| format!("{dir}/{name}");
+        let (out, pk, vault) = (path("out"), path("pk"), path("vault"));
+        let hem = crate::quorum_hem::HEM_SCHEME_NAME;
+        let table: Vec<(&'static str, Vec<&str>)> = vec![
+            (
+                "keygen (single key)",
+                vec![
+                    "keygen",
+                    "--scheme",
+                    "fts-frontier-2338",
+                    "--secret-out",
+                    &out,
+                    "--public-out",
+                    &pk,
+                ],
+            ),
+            (
+                "keygen (committee)",
+                vec![
+                    "keygen",
+                    "--scheme",
+                    "agg-jorts-poseidon2",
+                    "--secret-out",
+                    &out,
+                    "--public-out",
+                    &pk,
+                    "--wal-dir",
+                    &vault,
+                    "--validators",
+                    "2",
+                ],
+            ),
+            (
+                "quorum keygen",
+                vec![
+                    "quorum",
+                    "keygen",
+                    "--vault-dir",
+                    &vault,
+                    "--public-out",
+                    &pk,
+                    "--tree-height",
+                    "1",
+                ],
+            ),
+            (
+                "quorum keygen (Hem)",
+                vec![
+                    "quorum",
+                    "keygen",
+                    "--scheme",
+                    hem,
+                    "--vault-dir",
+                    &vault,
+                    "--public-out",
+                    &pk,
+                ],
+            ),
+            (
+                "cred voprf-keygen",
+                vec![
+                    "cred",
+                    "voprf-keygen",
+                    "--vault-dir",
+                    &vault,
+                    "--public-out",
+                    &pk,
+                ],
+            ),
+            (
+                "cred mldsa-keygen",
+                vec![
+                    "cred",
+                    "mldsa-keygen",
+                    "--vault-dir",
+                    &vault,
+                    "--public-out",
+                    &pk,
+                ],
+            ),
+            (
+                "hd keygen",
+                vec!["hd", "keygen", "--vault-dir", &vault, "--watch-out", &pk],
+            ),
+            (
+                "policy init",
+                vec![
+                    "policy",
+                    "init",
+                    "--ledger-dir",
+                    &vault,
+                    "--accept-single-host-custody",
+                ],
+            ),
+            (
+                "policy biscuit keygen",
+                vec![
+                    "policy",
+                    "biscuit",
+                    "keygen",
+                    "--secret-out",
+                    &out,
+                    "--public-out",
+                    &pk,
+                ],
+            ),
+        ];
+        table
+            .into_iter()
+            .map(|(name, mut args)| {
+                args.extend_from_slice(&["--anchor-tpm-nv", tpm_nv]);
+                (name, strings(&args))
+            })
+            .collect()
+    }
+
+    fn dispatch(args: &[String]) -> Result<(), CliError> {
+        let rest = &args[1..];
+        match args[0].as_str() {
+            "keygen" => crate::keys::keygen(rest),
+            "quorum" => crate::quorum::run(rest),
+            "cred" => crate::cred::run(rest),
+            "hd" => crate::hd::run(rest),
+            "policy" => crate::policy::run(rest),
+            other => panic!("{other}"),
         }
+    }
+
+    // A counter that anything has incremented (a key, a vault, a policy ledger, an
+    // abandoned enrollment) is refused by every enrolling command before it creates
+    // a file or touches the TPM. Before, the second anchor on an index enrolled, and
+    // both it and the first then failed later as "rolled back".
+    #[test]
+    fn every_enrolling_command_refuses_a_used_tpm_counter_before_writing() {
+        let root = temp_root("tpm-used-counter");
+        // 0x01800200 backs another vault's anchor; the committee and the quorum also
+        // need the following counters, which are unused, so only the overlap refuses.
+        // The counters below it are defined and unused, so a range that starts below it
+        // is refused for the overlap and for nothing else.
+        let installed = tpm_model::install(0x0180_01f8, 16, 41);
+        let tpm = &installed.0;
+        let other_vault = root.join("other");
+        private_dir(other_vault.to_str().unwrap(), true).unwrap();
+        let other_cfg = AnchorConfig {
+            tpm_nv_index: Some(0x0180_0200),
+            ..AnchorConfig::default()
+        };
+        let other = FsExternalMountAnchor::provision_fresh(
+            &other_cfg,
+            &[],
+            &[other_vault.to_str().unwrap()],
+            "ceremony",
+            [0x31; 32],
+            [0x32; 32],
+        )
+        .unwrap();
+        other.advance(ckpt(1, 0x33)).unwrap();
+        let counts = tpm.counts();
+        let scratch = root.join("scratch");
+        private_dir(scratch.to_str().unwrap(), true).unwrap();
+        let scratch_s = scratch.to_str().unwrap();
+        for (name, args) in enrolling_commands(scratch_s, "0x01800200") {
+            let err = dispatch(&args).expect_err(name);
+            assert!(
+                err.message.contains("0x01800200")
+                    && err.message.contains("has already been incremented"),
+                "{name}: {err:?}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&scratch).unwrap().count(),
+                0,
+                "{name} wrote before its TPM preflight"
+            );
+            assert_eq!(tpm.counts(), counts, "{name} touched a counter");
+        }
+        // Multi-anchor ranges that reach the used counter from below are refused too.
+        for (name, base) in [
+            ("quorum keygen", "0x018001fb"),
+            ("keygen (committee)", "0x018001fe"),
+        ] {
+            let args = enrolling_commands(scratch_s, base)
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .unwrap()
+                .1;
+            let err = dispatch(&args).expect_err(name);
+            assert!(
+                err.message.contains("0x01800200")
+                    && err.message.contains("has already been incremented"),
+                "{name}: {err:?}"
+            );
+            assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+            assert_eq!(tpm.counts(), counts, "{name} touched a counter");
+        }
+        // The other vault's anchor is untouched and still opens.
+        assert_eq!(other.load().unwrap(), Some(ckpt(1, 0x33)));
+        drop(other);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // The policy ledger has its own anchor. Naming its counter inside the counters a
+    // key reserves would bind two anchors to one counter.
+    #[test]
+    fn policy_ledger_counter_inside_a_key_range_is_refused_before_writing() {
+        let root = temp_root("tpm-policy-overlap");
+        let dir = root.to_str().unwrap();
+        let installed = tpm_model::install(0x0180_0300, 8, 41);
+        // (command, the policy counter that collides with it, one just outside its range)
+        for (name, inside, outside) in [
+            ("keygen (single key)", "0x01800300", "0x01800301"),
+            ("keygen (committee)", "0x01800302", "0x01800303"),
+            ("quorum keygen", "0x01800305", "0x01800306"),
+            ("quorum keygen", "0x01800300", "0x018002ff"),
+        ] {
+            let mut args = enrolling_commands(dir, "0x01800300")
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .unwrap()
+                .1;
+            args.extend(strings(&["--policy-anchor-tpm-nv", inside]));
+            let err = dispatch(&args).expect_err(name);
+            assert!(err.message.contains("lies inside"), "{name}: {err:?}");
+            assert!(err.message.contains(&inside[2..]), "{name}: {err:?}");
+            // Outside the range the overlap check passes; the command then stops at a
+            // later requirement (the policy ledger these options belong to).
+            let len = args.len();
+            args[len - 1] = outside.to_owned();
+            let err = dispatch(&args).expect_err(name);
+            assert!(!err.message.contains("lies inside"), "{name}: {err:?}");
+            assert!(installed.0.counts().values().all(Option::is_none));
+            let _ = std::fs::remove_dir_all(format!("{dir}/vault"));
+            let _ = std::fs::remove_file(format!("{dir}/out"));
+            let _ = std::fs::remove_file(format!("{dir}/pk"));
+        }
+        // Signing with a quorum checks the same thing before it opens the vault.
+        let err = crate::quorum::run(&strings(&[
+            "sign",
+            "--vault-dir",
+            &format!("{dir}/vault"),
+            "--epoch",
+            "0",
+            "--in",
+            &format!("{dir}/no-such-message"),
+            "--out",
+            &format!("{dir}/sig"),
+            "--anchor-tpm-nv",
+            "0x01800300",
+            "--policy-anchor-tpm-nv",
+            "0x01800303",
+        ]))
+        .unwrap_err();
+        assert!(err.message.contains("lies inside"), "{err:?}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2005,10 +3004,7 @@ mod tests {
             vmgenid: true,
             ..slot.cfg.clone()
         };
-        let tpm = TestTpm2Device {
-            nv_index: 0x0180_0007,
-            counter: Arc::new(Mutex::new(41)),
-        };
+        let tpm = model_tpm(0x0180_0007);
         let key_id = [0x87; 32];
         let mac_key = [0x98; 32];
         let anchor = FsExternalMountAnchor::provision_fresh_with_tpm(
@@ -2042,7 +3038,7 @@ mod tests {
                 result.is_err(),
                 "removing an enrolled backend must fail closed"
             );
-            assert_eq!(*tpm.counter.lock().unwrap(), 42);
+            assert_eq!(tpm.count(0x0180_0007), Some(42));
         }
         let reopened = FsExternalMountAnchor::open_existing_with_tpm(
             &config,
@@ -2086,10 +3082,7 @@ mod tests {
         let sk_path = vault.join("sk");
         let sk_str = sk_path.to_str().unwrap();
 
-        let tpm = TestTpm2Device {
-            nv_index: 0x0180_0007,
-            counter: Arc::new(Mutex::new(41)),
-        };
+        let tpm = model_tpm(0x0180_0007);
         let key_id = [0x88; 32];
         let mac_key = [0x99; 32];
 
@@ -2105,9 +3098,9 @@ mod tests {
         .unwrap();
         assert_eq!(anchor.load().unwrap(), None);
         anchor.advance(ckpt(1, 0xA1)).unwrap();
-        assert_eq!(*tpm.counter.lock().unwrap(), 42);
+        assert_eq!(tpm.count(0x0180_0007), Some(42));
         anchor.advance(ckpt(2, 0xB2)).unwrap();
-        assert_eq!(*tpm.counter.lock().unwrap(), 43);
+        assert_eq!(tpm.count(0x0180_0007), Some(43));
         drop(anchor);
 
         let reopened = FsExternalMountAnchor::open_existing_with_tpm(
@@ -2123,9 +3116,14 @@ mod tests {
         assert_eq!(reopened.load().unwrap(), Some(ckpt(2, 0xB2)));
         drop(reopened);
 
-        // Simulate local disk snapshot rollback while hardware TPM2 counter remains at 43:
-        // bump hardware counter to 44 (as if another signature occurred before snapshot restore).
-        *tpm.counter.lock().unwrap() = 44;
+        // The counter moves on without this seal, as it would if the seal on disk were
+        // an older one than the TPM last saw.
+        tpm.transmit(
+            &qsag_core::anti_rollback::marshal_tpm2_nv_increment_cmd(0x0180_0007, 0x0180_0007, b"")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tpm.count(0x0180_0007), Some(44));
         assert!(
             FsExternalMountAnchor::open_existing_with_tpm(
                 &parsed_cfg,

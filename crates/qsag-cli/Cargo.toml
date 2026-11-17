@@ -27,6 +27,8 @@ qsag-quorum = { path = "../qsag-quorum", features = ["std"] }
 [dev-dependencies]
 # Unit tests provision `fts-threshold` shares with the trusted dealer; the shipped binary never does.
 qsag-fts = { path = "../qsag-fts", features = ["std", "test-dealer"] }
+# Tests drive the TPM-anchored commands against the software TPM 2.0 NV counter model.
+qsag-core = { path = "../qsag-core", features = ["std", "tpm-model"] }
 
 [features]
 default = []

@@ -43,7 +43,7 @@ const SCHEME_NAME: &str = "jorts-2of3-sha3";
 const MAX_CLI_TREE_HEIGHT: u64 = 20;
 
 const QUORUM_HELP: &str = "\
-qsag quorum <keygen|sign|refresh|reshare|verify|coupon> [options]
+qsag quorum <keygen|sign|reanchor-tpm|refresh|reshare|verify|coupon> [options]
 
 Threshold Jorts custody ceremonies:
   - `--scheme jorts-2of3-sha3` (default): dealerless 2-of-3 RSS Jorts gated by FsBeltWal & FsCeremonyJournal.
@@ -53,6 +53,8 @@ Threshold Jorts custody ceremonies:
 subcommands:
   keygen   enroll a quorum custody vault (--vault-dir) and write --public-out
   sign     threshold-sign one monotone leaf epoch across the active quorum
+  reanchor-tpm  move a jorts-2of3 quorum that was enrolled on one shared TPM2 NV counter
+           onto six counters of its own (see 'qsag quorum reanchor-tpm --help')
   refresh  proactively refresh (t, n) custodian shares (Π_refresh) in place
   reshare  switch (t, n) -> (t', n') threshold & roster (Π_reshare) under the exact same public key
   verify   verify a qsag quorum signature against --public and --in / --message
@@ -69,9 +71,14 @@ Run a dealerless 2-of-3 RSS key generation ceremony with zero central secret rec
   --public-out <path>           destination for the quorum public key JSON
   --tree-height <1..=20>         Merkle tree height (default: 3, capacity = 2^height signatures)
   --anchor-dir <dir>            enroll per-party external monotone anchors in <dir>
+  --anchor-tpm-nv <base>         six never-incremented TPM2 NV counters: party p belt=base+2p,
+                                ceremony=base+2p+1 (tpm2_nvdefine <index> -C o -s 8
+                                -a \"authread|authwrite|no_da|nt=counter\")
   --ephemeral-unanchored        enroll a disposable quorum without rollback protection
-                                (one of the two is required)
-  --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir
+                                (an anchor or this waiver is required)
+  --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir;
+                                it then stops a restore of the vault directory only: a volume
+                                or VM snapshot rewinds the anchor with it
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal each party secret share
   --policy-ledger-dir <dir>     enroll the quorum against this custody policy ledger: it will
                                 then sign only an intent that ledger releases; with
@@ -89,7 +96,10 @@ Execute a 2-of-3 Jorts Mode 3A threshold signing ceremony gated by FsBeltWal and
   --in <file|->                 message path (or '-' for standard input)
   --out <path>                  destination for the quorum signature JSON
   --anchor-dir <dir>            external monotone anchor directory (required if enrolled)
-  --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir
+  --anchor-tpm-nv <base>         same six-counter base reserved at enrollment
+  --allow-single-disk-anchor    permit --anchor-dir on the same filesystem device as --vault-dir;
+                                it then stops a restore of the vault directory only: a volume
+                                or VM snapshot rewinds the anchor with it
   --policy-id-hex <64-hex>      32-byte policy digest committed into CeremonyContext
   --spend-amount <u64>          spend amount committed into CeremonyContext
   --retry                       recover an already-latched in-flight epoch with identical context
@@ -149,6 +159,19 @@ pub(crate) fn ensure_absent(path: &str) -> Result<(), CliError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(CliError::io(format_args!("inspecting {path}"), e)),
     }
+}
+
+/// A quorum reserves six TPM2 NV counters from `--anchor-tpm-nv <base>`: party `p` has
+/// `base + 2p` for its belt anchor and `base + 2p + 1` for its ceremony anchor. Every
+/// anchor seals its own counter value, so no two may share an index.
+const QUORUM_TPM_SLOTS: u32 = 6;
+
+fn quorum_tpm_slot(
+    cfg: &AnchorConfig,
+    party: usize,
+    ceremony: bool,
+) -> Result<AnchorConfig, CliError> {
+    cfg.tpm_slot(2 * party as u32 + u32::from(ceremony), QUORUM_TPM_SLOTS)
 }
 
 fn derive_party_secret(seed: &[u8; 32], party: usize, role: &[u8]) -> Secret32 {
@@ -384,11 +407,237 @@ fn reject_hem_unsupported_sign_args(args: &Args) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Whether loading the party secrets is the start of a release.
+enum PolicyPin<'a> {
+    /// A signature may follow: a ledger-pinned key needs its gate.
+    Enforce(Option<&'a crate::policy_ledger::Gate>),
+    /// Anchor maintenance: no leaf is spent and no key state changes.
+    NothingReleased,
+}
+
+/// Lock, authenticate and decode the three party secrets of a vault.
+fn load_parties(
+    party_sk_paths: &[String; 3],
+    passphrase: Option<&[u8]>,
+    pin: PolicyPin<'_>,
+    anchor_cfg: Option<&AnchorConfig>,
+) -> Result<(Vec<LoadedParty>, QuorumHeaderMeta), CliError> {
+    let mut parties_vec: Vec<LoadedParty> = Vec::with_capacity(3);
+    let mut header_meta: Option<QuorumHeaderMeta> = None;
+
+    for (p, sk_path) in party_sk_paths.iter().enumerate() {
+        let mut vault = Vault::acquire(sk_path, false)?;
+        let raw_text = read_text(sk_path)?;
+        let secret_on_disk = Json::parse(&raw_text)?;
+        if secret_on_disk.field_str("format")? != PARTY_SECRET_FORMAT
+            || secret_on_disk.field_str("scheme")? != SCHEME_NAME
+            || secret_on_disk.field_u64("party_id")? != p as u64
+        {
+            return Err(corrupt());
+        }
+        let opened = crate::envelope::open(&secret_on_disk, passphrase)?;
+        vault.set_key_material(&opened);
+        vault.authenticate(&secret_on_disk)?;
+        if let PolicyPin::Enforce(gate) = pin {
+            crate::policy_ledger::enforce_key_pin(&secret_on_disk, gate)?;
+        }
+        let anchor_req = enforce_anchor_requirement(&secret_on_disk, anchor_cfg)?;
+
+        let height_u64 = secret_on_disk.field_u64("tree_height")?;
+        if !(1..=MAX_CLI_TREE_HEIGHT).contains(&height_u64) {
+            return Err(corrupt());
+        }
+        let height = height_u64 as usize;
+        let dkg_sid: [u8; 32] = from_hex_exact(
+            secret_on_disk.field_str("dkg_session_id")?,
+            "dkg_session_id",
+        )?;
+        let pk_seed: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_seed")?, "pk_seed")?;
+        let pk_root: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_root")?, "pk_root")?;
+        let tree_digest: [u8; 32] =
+            from_hex_exact(secret_on_disk.field_str("tree_digest")?, "tree_digest")?;
+        let pk = JortsPublicKey { pk_seed, pk_root };
+
+        match &header_meta {
+            None => {
+                header_meta = Some(QuorumHeaderMeta {
+                    height,
+                    dkg_session_id: dkg_sid,
+                    pk,
+                    tree_digest,
+                    anchor_required: anchor_req,
+                })
+            }
+            Some(m0) => {
+                if m0.height != height
+                    || !ct_eq_bytes(&m0.dkg_session_id, &dkg_sid)
+                    || m0.pk != pk
+                    || !ct_eq_bytes(&m0.tree_digest, &tree_digest)
+                    || m0.anchor_required != anchor_req
+                {
+                    return Err(CliError::state("QuorumPartyMetadataMismatch"));
+                }
+            }
+        }
+
+        let seed = opened.seed()?;
+        let uses_completed = secret_on_disk.field_u64("uses_completed")?;
+        let party_key_id = derive_party_key_id(&pk, height, p);
+        parties_vec.push(LoadedParty {
+            vault,
+            sk_path: sk_path.clone(),
+            secret_on_disk,
+            seed,
+            uses_completed,
+            party_key_id,
+        });
+    }
+    Ok((parties_vec, header_meta.ok_or_else(corrupt)?))
+}
+
+/// The six anchor domains of a quorum in TPM slot order.
+fn quorum_tpm_domains(parties: &[LoadedParty]) -> Vec<crate::anchor::TpmDomain<'static>> {
+    let mut domains = Vec::with_capacity(6);
+    for (p, party) in parties.iter().enumerate() {
+        for (ceremony, domain, role) in [
+            (false, "quorum_belt", &b"external_belt_anchor_mac"[..]),
+            (
+                true,
+                "quorum_ceremony",
+                &b"external_ceremony_anchor_mac"[..],
+            ),
+        ] {
+            domains.push(crate::anchor::TpmDomain {
+                slot: 2 * p as u32 + u32::from(ceremony),
+                domain,
+                key_id: party.party_key_id,
+                mac_key: derive_party_secret(&party.seed.0, p, role).0,
+            });
+        }
+    }
+    domains
+}
+
+/// A quorum enrolled on one shared TPM2 NV counter cannot open; say why and how to
+/// repair it instead of reporting the lagging seals as a rollback.
+fn refuse_shared_tpm_index(
+    cfg: &AnchorConfig,
+    party_sk_refs: &[&str],
+    vault_dir: &str,
+    parties: &[LoadedParty],
+) -> Result<(), CliError> {
+    if !cfg.shared_tpm_index_enrollment(
+        party_sk_refs,
+        &[vault_dir],
+        &quorum_tpm_domains(parties),
+    )? {
+        return Ok(());
+    }
+    let index = cfg.tpm_nv_index.unwrap_or_default();
+    Err(CliError::state(format!(
+        "this quorum was enrolled with one TPM2 NV counter ({index:#010x}) shared by all six of its anchors. Each anchor seals the exact count, so only the newest seal matches the counter and the vault cannot open. Its state can still be proven current: define six new counters and run `qsag quorum reanchor-tpm --vault-dir {vault_dir} --anchor-tpm-nv {index:#010x} --new-anchor-tpm-nv <new base>`"
+    )))
+}
+
+const QUORUM_REANCHOR_HELP: &str = "\
+qsag quorum reanchor-tpm --vault-dir <dir> --anchor-tpm-nv <shared index> --new-anchor-tpm-nv <base> [options]
+
+Repair a quorum that was enrolled with one TPM2 NV counter shared by its six anchors
+(qsag before per-domain counters). Such a vault cannot open: every seal but the
+newest lags the shared counter. This command proves the vault's state is the newest
+the TPM has seen (the newest seal on disk equals the live counter; no other domain
+could have advanced), then binds each anchor to its own never-written counter:
+party p belt = base+2p, ceremony = base+2p+1. No key material or leaf state changes.
+
+A vault whose newest seal is behind the counter is refused: it was rolled back, or
+something else used the index. An interrupted run can be repeated.
+
+  --vault-dir <dir>              the quorum vault
+  --anchor-tpm-nv <index>        the shared counter the quorum was enrolled with
+  --new-anchor-tpm-nv <base>     six never-written counters: tpm2_nvdefine <index> -C o -s 8
+                                 -a \"authread|authwrite|no_da|nt=counter\" for each
+  --anchor-tpm-device <path> / --anchor-tpm-auth-env <VAR>  as at enrollment (both ranges)
+  --anchor-dir <dir> / --anchor-vmgenid / --allow-single-disk-anchor  as at enrollment
+  --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed party secrets
+";
+
+fn reanchor_tpm(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "vault-dir",
+            "anchor-dir",
+            "anchor-tpm-nv",
+            "new-anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
+            "passphrase-env",
+            "passphrase-file",
+        ],
+        &[
+            "help",
+            "json",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
+            "allow-single-disk-anchor",
+        ],
+    )?;
+    if args.flag("help") {
+        print!("{QUORUM_REANCHOR_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let vault_dir = args.require("vault-dir")?;
+    args.require("anchor-tpm-nv")?;
+    let new_base = crate::anchor::parse_tpm_nv_index(args.require("new-anchor-tpm-nv")?)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?
+        .ok_or_else(|| CliError::usage("reanchor-tpm requires --anchor-tpm-nv"))?;
+    private_dir(vault_dir, false)?;
+    let party_sk_paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault_dir, p));
+    let party_sk_refs: [&str; 3] = [
+        party_sk_paths[0].as_str(),
+        party_sk_paths[1].as_str(),
+        party_sk_paths[2].as_str(),
+    ];
+    // The party vault locks are held until every anchor has been moved and verified.
+    let (parties, _) = load_parties(
+        &party_sk_paths,
+        passphrase.as_deref().map(Vec::as_slice),
+        PolicyPin::NothingReleased,
+        Some(&cfg),
+    )?;
+    cfg.reanchor_shared_tpm_index(
+        new_base,
+        QUORUM_TPM_SLOTS,
+        &party_sk_refs,
+        &[vault_dir],
+        &quorum_tpm_domains(&parties),
+    )?;
+    if args.flag("json") {
+        print!(
+            "{}",
+            Json::object(vec![
+                ("reanchored", Json::Bool(true)),
+                ("anchor_tpm_nv_base", Json::num(u64::from(new_base))),
+                ("counters", Json::num(u64::from(QUORUM_TPM_SLOTS))),
+            ])
+            .to_pretty()
+        );
+    } else {
+        println!(
+            "re-anchored quorum {vault_dir}: six anchors now on TPM2 NV counters {new_base:#010x}..={:#010x}; sign with --anchor-tpm-nv {new_base:#010x}",
+            new_base + QUORUM_TPM_SLOTS - 1
+        );
+    }
+    Ok(())
+}
+
 pub fn run(raw: &[String]) -> Result<(), CliError> {
     let Some((sub, rest)) = raw.split_first() else {
         eprint!("{QUORUM_HELP}");
         return Err(CliError::usage(
-            "quorum expects a subcommand (keygen, sign, refresh, reshare, verify, coupon)",
+            "quorum expects a subcommand (keygen, sign, reanchor-tpm, refresh, reshare, verify, coupon)",
         ));
     };
     match sub.as_str() {
@@ -398,6 +647,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
         }
         "keygen" => keygen(rest),
         "sign" => sign(rest),
+        "reanchor-tpm" => reanchor_tpm(rest),
         "refresh" => crate::quorum_hem::refresh(rest),
         "reshare" => crate::quorum_hem::reshare(rest),
         "verify" => verify(rest),
@@ -474,6 +724,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             )));
         }
     }
+    crate::anchor::refuse_policy_tpm_overlap(&args, QUORUM_TPM_SLOTS)?;
     let policy_pin = crate::policy_ledger::key_pin_from_args(&args)?;
     let vault_dir = args.require("vault-dir")?;
     let public_out = args.require("public-out")?;
@@ -487,6 +738,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
     let params = JortsParams::with_height(height);
     let passphrase = crate::envelope::passphrase(&args)?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    crate::anchor::preflight_tpm_enrollment(anchor_cfg.as_ref(), &args, QUORUM_TPM_SLOTS)?;
     crate::anchor::require_anchor_or_waiver(
         anchor_cfg.is_some(),
         args.flag("ephemeral-unanchored"),
@@ -551,7 +803,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             let belt_anchor_mac =
                 derive_party_secret(&party_seeds[p].0, p, b"external_belt_anchor_mac");
             let belt_anchor = FsExternalMountAnchor::provision_fresh(
-                cfg,
+                &quorum_tpm_slot(cfg, p, false)?,
                 &party_sk_refs,
                 &[vault_dir],
                 "quorum_belt",
@@ -577,7 +829,7 @@ fn keygen(raw: &[String]) -> Result<(), CliError> {
             let ceremony_anchor_mac =
                 derive_party_secret(&party_seeds[p].0, p, b"external_ceremony_anchor_mac");
             let ceremony_anchor = FsExternalMountAnchor::provision_fresh(
-                cfg,
+                &quorum_tpm_slot(cfg, p, true)?,
                 &party_sk_refs,
                 &[vault_dir],
                 "quorum_ceremony",
@@ -736,6 +988,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     args.no_positionals()?;
+    crate::anchor::refuse_policy_tpm_overlap(&args, QUORUM_TPM_SLOTS)?;
     let vault_dir = args.require("vault-dir")?;
     let use_hem = match args.get("scheme") {
         Some(crate::quorum_hem::HEM_SCHEME_NAME) => true,
@@ -776,6 +1029,9 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
     let mut base_context = parse_ceremony_context(&args, 0)?;
     let passphrase = crate::envelope::passphrase(&args)?;
     let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    if let Some(cfg) = &anchor_cfg {
+        cfg.tpm_slot(0, QUORUM_TPM_SLOTS)?;
+    }
     // The ledger lock is taken before any party's and held until the signature is written.
     let mut gate = crate::policy_ledger::Gate::from_args(&args, true)?;
     let policy_retry = args.flag("policy-retry");
@@ -806,74 +1062,15 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         party_sk_paths[2].as_str(),
     ];
 
-    let mut parties_vec: Vec<LoadedParty> = Vec::with_capacity(3);
-    let mut header_meta: Option<QuorumHeaderMeta> = None;
-
-    for (p, sk_path) in party_sk_paths.iter().enumerate() {
-        let mut vault = Vault::acquire(sk_path, false)?;
-        let raw_text = read_text(sk_path)?;
-        let secret_on_disk = Json::parse(&raw_text)?;
-        if secret_on_disk.field_str("format")? != PARTY_SECRET_FORMAT
-            || secret_on_disk.field_str("scheme")? != SCHEME_NAME
-            || secret_on_disk.field_u64("party_id")? != p as u64
-        {
-            return Err(corrupt());
-        }
-        let opened =
-            crate::envelope::open(&secret_on_disk, passphrase.as_deref().map(Vec::as_slice))?;
-        vault.set_key_material(&opened);
-        vault.authenticate(&secret_on_disk)?;
-        crate::policy_ledger::enforce_key_pin(&secret_on_disk, gate.as_ref())?;
-        let anchor_req = enforce_anchor_requirement(&secret_on_disk, anchor_cfg.as_ref())?;
-
-        let height_u64 = secret_on_disk.field_u64("tree_height")?;
-        if !(1..=MAX_CLI_TREE_HEIGHT).contains(&height_u64) {
-            return Err(corrupt());
-        }
-        let height = height_u64 as usize;
-        let dkg_sid: [u8; 32] = from_hex_exact(
-            secret_on_disk.field_str("dkg_session_id")?,
-            "dkg_session_id",
-        )?;
-        let pk_seed: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_seed")?, "pk_seed")?;
-        let pk_root: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_root")?, "pk_root")?;
-        let tree_digest: [u8; 32] =
-            from_hex_exact(secret_on_disk.field_str("tree_digest")?, "tree_digest")?;
-        let pk = JortsPublicKey { pk_seed, pk_root };
-
-        match &header_meta {
-            None => {
-                header_meta = Some(QuorumHeaderMeta {
-                    height,
-                    dkg_session_id: dkg_sid,
-                    pk,
-                    tree_digest,
-                    anchor_required: anchor_req,
-                })
-            }
-            Some(m0) => {
-                if m0.height != height
-                    || !ct_eq_bytes(&m0.dkg_session_id, &dkg_sid)
-                    || m0.pk != pk
-                    || !ct_eq_bytes(&m0.tree_digest, &tree_digest)
-                    || m0.anchor_required != anchor_req
-                {
-                    return Err(CliError::state("QuorumPartyMetadataMismatch"));
-                }
-            }
-        }
-
-        let seed = opened.seed()?;
-        let uses_completed = secret_on_disk.field_u64("uses_completed")?;
-        let party_key_id = derive_party_key_id(&pk, height, p);
-        parties_vec.push(LoadedParty {
-            vault,
-            sk_path: sk_path.clone(),
-            secret_on_disk,
-            seed,
-            uses_completed,
-            party_key_id,
-        });
+    let (mut parties_vec, header_meta) = load_parties(
+        &party_sk_paths,
+        passphrase.as_deref().map(Vec::as_slice),
+        PolicyPin::Enforce(gate.as_ref()),
+        anchor_cfg.as_ref(),
+    )?;
+    if let Some(cfg) = &anchor_cfg {
+        refuse_shared_tpm_index(cfg, &party_sk_refs, vault_dir, &parties_vec)?;
+        cfg.check_tpm_range(QUORUM_TPM_SLOTS, crate::anchor::TpmUse::Reopen)?;
     }
 
     let QuorumHeaderMeta {
@@ -882,7 +1079,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
         pk,
         tree_digest,
         anchor_required: _,
-    } = header_meta.ok_or_else(corrupt)?;
+    } = header_meta;
     let params = JortsParams::with_height(height);
     if epoch >= params.capacity() {
         return Err(CliError::state("epoch exceeds quorum tree capacity"));
@@ -908,7 +1105,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
             let belt_anchor_mac =
                 derive_party_secret(&party.seed.0, p, b"external_belt_anchor_mac");
             let belt_anchor = FsExternalMountAnchor::open_existing(
-                cfg,
+                &quorum_tpm_slot(cfg, p, false)?,
                 &party_sk_refs,
                 &[vault_dir],
                 "quorum_belt",
@@ -944,7 +1141,7 @@ fn sign(raw: &[String]) -> Result<(), CliError> {
             let ceremony_anchor_mac =
                 derive_party_secret(&party.seed.0, p, b"external_ceremony_anchor_mac");
             let ceremony_anchor = FsExternalMountAnchor::open_existing(
-                cfg,
+                &quorum_tpm_slot(cfg, p, true)?,
                 &party_sk_refs,
                 &[vault_dir],
                 "quorum_ceremony",
@@ -1354,5 +1551,373 @@ mod hem_flag_guard_tests {
                 err.message
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tpm_anchor_tests {
+    use super::*;
+    use crate::anchor::tpm_model;
+
+    const BASE: u32 = 0x0180_0001;
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "qsag-quorum-tpm-{label}-{}",
+                crate::codec::to_hex(&os_random_32().unwrap()[..8])
+            ));
+            private_dir(root.to_str().unwrap(), true).unwrap();
+            Self(root)
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_owned()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn quorum(args: &[&str]) -> Result<(), CliError> {
+        run(&args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+    }
+
+    fn regular_files(dir: &str) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| std::fs::symlink_metadata(p).unwrap().is_file())
+            .map(|p| {
+                let bytes = std::fs::read(&p).unwrap();
+                (p, bytes)
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    // The real `quorum keygen` and `quorum sign` call chains against one TPM. With a
+    // single shared NV index every later anchor's provisioning increment left the earlier
+    // seals behind, and the first reopen reported a rollback on honest storage.
+    #[test]
+    fn tpm_anchored_quorum_reopens_and_refuses_rollback_of_each_domain() {
+        let scratch = Scratch::new("domains");
+        let installed = tpm_model::install(BASE, QUORUM_TPM_SLOTS, 41);
+        let tpm = &installed.0;
+        let vault = scratch.path("vault");
+        let pk_path = scratch.path("pk");
+        let message = scratch.path("message");
+        std::fs::write(&message, b"TPM multi-domain regression").unwrap();
+        quorum(&[
+            "keygen",
+            "--vault-dir",
+            &vault,
+            "--public-out",
+            &pk_path,
+            "--tree-height",
+            "1",
+            "--anchor-tpm-nv",
+            "0x01800001",
+        ])
+        .unwrap();
+        let enrolled = regular_files(&vault);
+
+        let sign = |epoch: &str, out: &str| {
+            quorum(&[
+                "sign",
+                "--vault-dir",
+                &vault,
+                "--epoch",
+                epoch,
+                "--in",
+                &message,
+                "--out",
+                out,
+                "--anchor-tpm-nv",
+                "0x01800001",
+            ])
+        };
+        // Honest storage: all six anchors reopen and the leaf is spent.
+        sign("0", &scratch.path("sig0")).unwrap();
+        assert!(
+            tpm.counts().values().all(|n| n.is_some_and(|n| n > 41)),
+            "every reserved counter backs one domain: {:?}",
+            tpm.counts()
+        );
+
+        // Restoring the whole vault in place (every inode kept) must not reopen leaf 0.
+        let spent = regular_files(&vault);
+        for (path, bytes) in &enrolled {
+            std::fs::write(path, bytes).unwrap();
+        }
+        let err = sign("0", &scratch.path("sig0-again")).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("lags TPM2 NV monotonic counter"),
+            "{err:?}"
+        );
+        assert!(!Path::new(&scratch.path("sig0-again")).exists());
+        for (path, bytes) in &spent {
+            std::fs::write(path, bytes).unwrap();
+        }
+        sign("1", &scratch.path("sig1")).unwrap();
+
+        // Each of the six domains on its own.
+        let cfg = AnchorConfig {
+            tpm_nv_index: Some(BASE),
+            vault_dir: Some(vault.clone()),
+            ..Default::default()
+        };
+        for p in 0..3 {
+            let secret =
+                Json::parse(&std::fs::read_to_string(party_secret_path(&vault, p)).unwrap())
+                    .unwrap();
+            let seed: [u8; 32] = from_hex_exact(secret.field_str("seed").unwrap(), "seed").unwrap();
+            let pk = JortsPublicKey {
+                pk_seed: from_hex_exact(secret.field_str("pk_seed").unwrap(), "pk_seed").unwrap(),
+                pk_root: from_hex_exact(secret.field_str("pk_root").unwrap(), "pk_root").unwrap(),
+            };
+            let key_id = derive_party_key_id(&pk, 1, p);
+            for (slot, domain, role) in [
+                (
+                    2 * p as u32,
+                    "quorum_belt",
+                    &b"external_belt_anchor_mac"[..],
+                ),
+                (
+                    2 * p as u32 + 1,
+                    "quorum_ceremony",
+                    &b"external_ceremony_anchor_mac"[..],
+                ),
+            ] {
+                tpm_model::assert_domain_reopens_and_refuses_rollback(
+                    tpm,
+                    &cfg,
+                    &vault,
+                    BASE + slot,
+                    domain,
+                    key_id,
+                    derive_party_secret(&seed, p, role).0,
+                );
+            }
+        }
+    }
+
+    const SHARED: u32 = 0x0180_0040;
+    const NEW_BASE: u32 = 0x0180_0050;
+
+    fn keygen_at_base(vault: &str, pk: &str) {
+        quorum(&[
+            "keygen",
+            "--vault-dir",
+            vault,
+            "--public-out",
+            pk,
+            "--tree-height",
+            "1",
+            "--anchor-tpm-nv",
+            "0x01800001",
+        ])
+        .unwrap();
+    }
+
+    fn domains_of(vault: &str, cfg: &AnchorConfig) -> Vec<crate::anchor::TpmDomain<'static>> {
+        let paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault, p));
+        let (parties, _) =
+            load_parties(&paths, None, PolicyPin::NothingReleased, Some(cfg)).unwrap();
+        quorum_tpm_domains(&parties)
+    }
+
+    /// Turn the vault into what a release before per-domain counters left on disk.
+    fn make_shared(tpm: &tpm_model::ModelTpm2, vault: &str) {
+        let cfg = AnchorConfig {
+            tpm_nv_index: Some(BASE),
+            vault_dir: Some(vault.to_owned()),
+            ..Default::default()
+        };
+        let paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault, p));
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        tpm_model::make_shared_index_enrollment(
+            tpm,
+            &cfg,
+            SHARED,
+            QUORUM_TPM_SLOTS,
+            &refs,
+            &[vault],
+            &domains_of(vault, &cfg),
+        );
+    }
+
+    fn reanchor(vault: &str) -> Result<(), CliError> {
+        quorum(&[
+            "reanchor-tpm",
+            "--vault-dir",
+            vault,
+            "--anchor-tpm-nv",
+            "0x01800040",
+            "--new-anchor-tpm-nv",
+            "0x01800050",
+        ])
+    }
+
+    // A quorum enrolled on one shared counter could never open, and said "rollback".
+    // It now names the cause and the command, and that command moves every anchor to
+    // its own counter after proving the disk is the newest state the TPM has seen.
+    #[test]
+    fn shared_index_quorum_names_the_remedy_and_reanchors_across_an_interrupted_run() {
+        let scratch = Scratch::new("reanchor");
+        let installed = tpm_model::install(BASE, QUORUM_TPM_SLOTS, 41);
+        let tpm = &installed.0;
+        tpm.define_counter(SHARED, b"");
+        // The fourth new counter does not exist yet: the first run stops there.
+        for slot in (0..QUORUM_TPM_SLOTS).filter(|slot| *slot != 3) {
+            tpm.define_counter(NEW_BASE + slot, b"");
+        }
+        let vault = scratch.path("vault");
+        let message = scratch.path("message");
+        std::fs::write(&message, b"re-anchored quorum").unwrap();
+        keygen_at_base(&vault, &scratch.path("pk"));
+        make_shared(tpm, &vault);
+        let sign = |base: &str, epoch: &str, out: &str| {
+            quorum(&[
+                "sign",
+                "--vault-dir",
+                &vault,
+                "--epoch",
+                epoch,
+                "--in",
+                &message,
+                "--out",
+                out,
+                "--anchor-tpm-nv",
+                base,
+            ])
+        };
+
+        let err = sign("0x01800040", "0", &scratch.path("never")).unwrap_err();
+        assert!(
+            err.message.contains("shared by all six")
+                && err.message.contains("quorum reanchor-tpm")
+                && !err.message.contains("rollback"),
+            "{err:?}"
+        );
+
+        let err = reanchor(&vault).unwrap_err();
+        assert!(err.message.contains("0x01800053"), "{err:?}");
+        let moved: Vec<bool> = (0..QUORUM_TPM_SLOTS)
+            .filter(|slot| *slot != 3)
+            .map(|slot| tpm.count(NEW_BASE + slot).is_some())
+            .collect();
+        assert_eq!(
+            moved,
+            [true, true, true, false, false],
+            "oldest seals first"
+        );
+        assert!(sign("0x01800050", "0", &scratch.path("never")).is_err());
+
+        tpm.define_counter(NEW_BASE + 3, b"");
+        reanchor(&vault).unwrap();
+        let settled = tpm.counts();
+        reanchor(&vault).unwrap();
+        assert_eq!(tpm.counts(), settled, "a repeated run only verifies");
+
+        sign("0x01800050", "0", &scratch.path("sig0")).unwrap();
+        assert!(sign("0x01800040", "1", &scratch.path("never")).is_err());
+        assert!(!Path::new(&scratch.path("never")).exists());
+        let cfg = AnchorConfig {
+            tpm_nv_index: Some(NEW_BASE),
+            vault_dir: Some(vault.clone()),
+            ..Default::default()
+        };
+        for domain in domains_of(&vault, &cfg) {
+            tpm_model::assert_domain_reopens_and_refuses_rollback(
+                tpm,
+                &cfg,
+                &vault,
+                NEW_BASE + domain.slot,
+                domain.domain,
+                domain.key_id,
+                domain.mac_key,
+            );
+        }
+    }
+
+    // Re-anchoring is not a way around the TPM: a disk older than the shared counter
+    // is refused, and so is a vault that was never on a shared counter.
+    #[test]
+    fn reanchoring_refuses_a_disk_behind_the_shared_counter_and_a_vault_that_is_not_shared() {
+        use qsag_core::anti_rollback::{Tpm2Transport, marshal_tpm2_nv_increment_cmd};
+        let scratch = Scratch::new("reanchor-refused");
+        let installed = tpm_model::install(BASE, QUORUM_TPM_SLOTS, 41);
+        let tpm = &installed.0;
+        tpm.define_counter(SHARED, b"");
+        for slot in 0..QUORUM_TPM_SLOTS {
+            tpm.define_counter(NEW_BASE + slot, b"");
+        }
+        let vault = scratch.path("vault");
+        keygen_at_base(&vault, &scratch.path("pk"));
+
+        // Enrolled one counter per domain: nothing to repair, and naming its base as
+        // "the shared index" does not move anything.
+        let err = quorum(&[
+            "reanchor-tpm",
+            "--vault-dir",
+            &vault,
+            "--anchor-tpm-nv",
+            "0x01800001",
+            "--new-anchor-tpm-nv",
+            "0x01800050",
+        ])
+        .unwrap_err();
+        assert!(err.message.contains("bound to neither"), "{err:?}");
+
+        // Shared, and then the counter moves on without the disk: what the TPM shows
+        // when the newest domain advanced after this disk image was taken.
+        make_shared(tpm, &vault);
+        tpm.transmit(&marshal_tpm2_nv_increment_cmd(SHARED, SHARED, b"").unwrap())
+            .unwrap();
+        let err = reanchor(&vault).unwrap_err();
+        assert!(err.message.contains("older than the TPM"), "{err:?}");
+        assert!(
+            (0..QUORUM_TPM_SLOTS).all(|slot| tpm.count(NEW_BASE + slot).is_none()),
+            "a refused re-anchoring writes no counter"
+        );
+    }
+
+    // A range the TPM cannot serve is refused before the vault exists: numerically
+    // out of the NV handle space, or with a counter that was never defined.
+    #[test]
+    fn tpm_anchored_quorum_checks_its_whole_counter_range_before_enrolling() {
+        let scratch = Scratch::new("range");
+        let installed = tpm_model::install(BASE, QUORUM_TPM_SLOTS - 1, 41);
+        for (base, reason) in [
+            ("0x01fffffb", "needs 6 distinct NV indices"),
+            ("0x01800001", "TPM2 NV counter 0x01800006"),
+        ] {
+            let vault = scratch.path("vault");
+            let err = quorum(&[
+                "keygen",
+                "--vault-dir",
+                &vault,
+                "--public-out",
+                &scratch.path("pk"),
+                "--tree-height",
+                "1",
+                "--anchor-tpm-nv",
+                base,
+            ])
+            .unwrap_err();
+            assert!(format!("{err:?}").contains(reason), "{err:?}");
+            assert!(!Path::new(&vault).exists(), "preflight precedes enrollment");
+        }
+        assert!(
+            installed.0.counts().values().all(Option::is_none),
+            "a refused enrollment increments nothing"
+        );
     }
 }
