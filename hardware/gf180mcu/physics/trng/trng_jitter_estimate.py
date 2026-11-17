@@ -38,6 +38,8 @@ def entropy_per_sample(sig_over_t, n=20000):
 def main():
     t_fast, t_slow, i_fast, i_slow, div = 1.950e-9, 3.608e-9, 2.50e-4, 2.55e-4, 64
     kf, ks = kappa(i_fast), kappa(i_slow)
+    if len(sys.argv) > 1:      # kappa measured by the transient-noise simulation (run_ring_trnoise.py), both rings
+        kf = ks = float(sys.argv[1]); print('using simulated kappa')
     t_acc = div * t_slow
     sig = math.sqrt(kf * kf + ks * ks) * math.sqrt(t_acc)
     print("kappa fast %.2e sqrt(s), slow %.2e sqrt(s)" % (kf, ks))
