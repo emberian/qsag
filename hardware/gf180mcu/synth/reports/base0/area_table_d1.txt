@@ -1,0 +1,9 @@
+chip_core                                               1396378 um^2  80.59 %   local       549
+  qsag_wire_engine                                      1052254 um^2  60.73 %   local    274582
+  qsag_io_shell                                           96097 um^2   5.55 %   local     22676
+  dregg_ro_puf_bch                                        74048 um^2   4.27 %   local     69377
+  dregg_nfc_nco                                           54336 um^2   3.14 %   local     39558
+  qsag_gals_clk_rst                                       52942 um^2   3.06 %   local     16640
+  dregg_distance_tdc                                      40438 um^2   2.33 %   local     14820
+  qsag_trng                                               12991 um^2   0.75 %   local     12570
+  qsag_anchor_spi                                         12723 um^2   0.73 %   local     12723

@@ -1,0 +1,40 @@
+Warning: Complex async reset for dff `\q'.
+Warning: Complex async reset for dff `\q'.
+hierarchy    1356897 um^2 | 154.53 kGE @8.78 | 123.62 kGE @nand2_1 | 78.31 % of core | sequential 331447 um^2
+flat         1297701 um^2 | 147.79 kGE @8.78 | 118.23 kGE @nand2_1 | 74.90 % of core | sequential 326984 um^2
+-- per module (exclusive of submodules), kGE @8.78
+qsag_wire_engine                      31.64
+dregg_ro_puf_bch                       7.87
+qsag_keccak_serial                     5.51
+qsag_gl64_karatsuba_csa                5.39
+dregg_captp_vat                        4.85
+dregg_nfc_nco                          4.53
+qsag_sponge                            4.47
+qsag_mul33\W=s32'00000000000000000     4.33
+qsag_io_shell                          3.09
+qsag_gals_clk_rst                      2.29
+qsag_p2_rc                             2.23
+qsag_gf128_step\D=s32'000000000000     2.18
+dregg_distance_tdc                     2.11
+qsag_async_fifo_gray                   1.79
+qsag_anchor_spi                        1.45
+qsag_trng                              1.43
+qsag_field_engine                      1.38
+qsag_gf128_clmul\D=s32'00000000000     1.19
+qsag_prefix_add\N=s32'000000000000     1.09
+qsag_ereg\W=s32'000000000000000000     1.09
+qsag_ereg_nr\W=s32'000000000000000     1.04
+qsag_prefix_add\N=s32'000000000000     0.95
+qsag_prefix_add\N=s32'000000000000     0.92
+qsag_async_fifo_gray                   0.74
+dregg_shield_canaries                  0.65
+qsag_gl64_mrows                        0.62
+qsag_dcro                              0.61
+dregg_vernier_tdc32                    0.60
+qsag_ereg_nr\W=s32'000000000000000     0.55
+qsag_ereg\W=s32'000000000000000000     0.54
+qsag_ereg_nr\W=s32'000000000000000     0.48
+qsag_ereg_nr\W=s32'000000000000000     0.46
+-- cell census (flat)
+xnor2_1:1 xnor3_1:2 xor2_1:4 xor3_1:7 addf_1:1330 dffnrnq_1:38 dffq_1:1773 dffrnq_1:2675 dffrsnq_1:1 dffsnq_1:146 icgtp_1:67 icgtp_2:28 latq_1:768 latrnq_1:3776 mux2_1:2330 mux2_2:4 mux2_4:1 xnor2_1:399 xnor3_1:153 xor2_1:1844 xor3_1:215 addf_1:1330 dffnrnq_1:38 dffq_1:1773 dffrnq_1:2675 dffrsnq_1:1 dffsnq_1:146 icgtp_1:67 icgtp_2:28 latq_1:768 latrnq_1:3776 mux2_1:2330 mux2_2:4 mux2_4:1 xnor2_1:403 xnor3_1:161 xor2_1:1860 xor3_1:243 
+    47162  1.3E+06 cells
