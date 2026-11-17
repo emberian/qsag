@@ -13,14 +13,16 @@ Source syntax, one instruction per line, `;` starts a comment:
         REL  l0                 append a rate lane to the response (declassification point)
         CMPT l0                 tag compare: payload word in H against a MAC lane (declassified verdict)
         END                     end of command: pad, wipe all working rows, drain, return to idle
-        KMOV k_host0 > l0       key row to a rate lane          KEYWR > k_host0+X
-        CTL  name               WIPE #mask      KEC 24|12      FLD PERM|RED [> row]     FADD row [> row]
+        KMOV k_dev0 > l0        key row to a rate lane          KEYWR > k_dev0+X
+        PMOV #i > l0            word i of the PUF response register to a rate lane
+        CTL  name [#n]          WIPE #mask      KEC 24|12      FLD PERM|RED [> row]     FADD row [> row]
         FRAM RSTART|WSTART|DONE   FRAM RWORD [> row]   FRAM WWORD row
         SETX #k | SETX H        SETC 0|1 #n | SETC 0|1 H        INCX
         BR [cond] label         BXNE #k label   DBNZ 0|1 label  CALL label   RET   DISP   ILL
     any instruction may end with `ret`.
 
-Directives: .equ NAME value|row   .const NAME value64|"8 bytes"   .entry opcode label diag|prov|keyed
+Directives: .equ NAME value|row   .const NAME value64|"8 bytes"
+            .entry opcode label states     states: any, or lifecycle states joined by | (reset|blank|...)
             .org address (fills with ILL up to a hardwired boundary of isa.py)
 """
 import re
@@ -37,7 +39,7 @@ class Rom:
         self.words = []
         self.consts = []            # 64-bit constant table
         self.const_names = {}
-        self.entries = {}           # request opcode -> (address, dispatch class)
+        self.entries = {}           # request opcode -> (address, mask of lifecycle states)
         self.padding = set()        # addresses filled by .org
         self.labels = {}
         self.where = []             # per address: (file, line number, source text)
@@ -77,7 +79,7 @@ class Rom:
         return len(self.words) - len(self.padding)
 
     def bits(self):
-        disp = len(self.entries) * (8 + 11 + 2)
+        disp = len(self.entries) * (8 + 11 + len(isa.LC))
         return dict(words=len(self.words), used=self.used, word_bits=len(self.words) * isa.WIDTH, const_bits=64 * len(self.consts),
                     dispatch_bits=disp, total_bits=len(self.words) * isa.WIDTH + 64 * len(self.consts) + disp)
 
@@ -151,7 +153,10 @@ def assemble(sources):
         try:
             if a is None:
                 if tok[0] == ".entry" and len(tok) == 4:
-                    rom.entries[_int(tok[1], syms)] = (rom.labels[tok[2]], isa.DCLASS[tok[3]])
+                    mask = 0
+                    for name in tok[3].split("|"):
+                        mask |= isa.LCMASK[name]
+                    rom.entries[_int(tok[1], syms)] = (rom.labels[tok[2]], mask)
                 else:
                     raise AsmError(f"bad directive {tok[0]}")
                 continue
@@ -239,6 +244,14 @@ def _encode(tok, syms, rom):
         f["a"], f["ia"] = _row(args[0], syms)
         f["fn"] = 1
         return isa.encode(isa.OP["CMP"], **f)
+    if mn == "PMOV":
+        need(1)
+        if dst is None:
+            raise AsmError("PMOV needs a destination")
+        f["a"] = _int(args[0].lstrip("#"), syms)
+        f["b"], f["ib"] = dst
+        f["fn"] = 1
+        return isa.encode(isa.OP["KMOV"], **f)
     if op is None:
         raise AsmError(f"unknown mnemonic {mn}")
     if mn in ("END", "ILL") and (seq or xi):
@@ -301,9 +314,13 @@ def _encode(tok, syms, rom):
             raise AsmError("KEYWR needs a destination")
         f["b"], f["ib"] = dst
     elif mn == "CTL":
-        need(1)
         no_store()
         f["a"] = isa.CTL.index(args[0])
+        if args[0] in isa.CTL_ARG:
+            need(2)
+            f["b"] = _int(args[1].lstrip("#"), syms)
+        else:
+            need(1)
     elif mn == "WIPE":
         need(1)
         no_store()
@@ -394,11 +411,11 @@ def disasm(w):
     elif mn == "FAIL":
         s = f"FAIL #{isa.imm16(d)}"
     elif mn == "KMOV":
-        s = f"KMOV {ra} > {rb}"
+        s = f"PMOV #{d['a']} > {rb}" if d["fn"] & 1 else f"KMOV {ra} > {rb}"
     elif mn == "KEYWR":
         s = f"KEYWR > {rb}"
     elif mn == "CTL":
-        s = f"CTL {isa.CTL[d['a']]}"
+        s = f"CTL {isa.CTL[d['a']]}" + (f" #{d['b']}" if isa.CTL[d["a"]] in isa.CTL_ARG else "")
     elif mn == "WIPE":
         s = f"WIPE #{d['a']}"
     elif mn == "KEC":
