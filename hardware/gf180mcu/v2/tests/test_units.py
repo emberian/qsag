@@ -18,10 +18,26 @@ class WordUnit(unittest.TestCase):
         want = {"ID": h, "NIB": 0x1032547698BADCFE, "BE32": 0x67452301EFCDAB89, "HSWAP": 0x89ABCDEF01234567,
                 "LO32": 0x89ABCDEF, "HI32": 0x0123456700000000, "SHR1": h >> 1, "SHR4": 0x00123456789ABCDE,
                 "SHR8": 0x000123456789ABCD, "SHR16": 0x00000123456789AB, "SHL1": 0x02468ACF13579BDE,
-                "SHL4": 0x123456789ABCDEF0, "SHL8": 0x23456789ABCDEF00}
+                "SHL4": 0x123456789ABCDEF0, "SHL8": 0x23456789ABCDEF00, "XT": 0x02468ACF13579BDE,
+                "SHL1C": 0x02468ACF13579BDE}
         self.assertEqual(set(want), set(isa.UN))
         for n, v in want.items():
             self.assertEqual(units.unary(U[n], h), v, n)
+
+    def test_multiply_by_x_in_gf_2_64(self):
+        """XT against a bit-serial product modulo x^64 + x^4 + x^3 + x + 1 (the GHASH-style reference below)."""
+        def mul(a, b):
+            r = 0
+            for i in range(64):
+                if (b >> i) & 1:
+                    r ^= a << i
+            for i in range(127, 63, -1):
+                if (r >> i) & 1:
+                    r ^= (0x1B | (1 << 64)) << (i - 64)
+            return r
+        for h in (1, 1 << 63, 0x8000000000000001, 0xFFFFFFFFFFFFFFFF, 0x0123456789ABCDEF):
+            self.assertEqual(units.unary(U["XT"], h), mul(h, 2))
+        self.assertEqual(units.unary(U["XT"], 1 << 63), 0x1B)
 
     def test_byte_order_helpers_against_struct(self):
         import struct
@@ -107,12 +123,14 @@ class Fram(unittest.TestCase):
         for w in (0x1122334455667788, 2, 3):
             clocks += u.wword(w)
         clocks += u.done()
-        self.assertEqual(bytes(u.mem[32:40]).hex(), "8877665544332211")       # least significant byte first
-        self.assertEqual(bytes(u.mem[:32]), bytes(32))
+        self.assertEqual(bytes(u.mem[128:136]).hex(), "8877665544332211")     # least significant byte first
+        self.assertEqual(bytes(u.mem[:128]), bytes(128))
         u.start(1, False)
         self.assertEqual([u.rword()[0] for _ in range(3)], [0x1122334455667788, 2, 3])
+        for _ in range(13):
+            u.rword()
         with self.assertRaises(units.FramMisuse):
-            u.rword()                                                          # a fourth word
+            u.rword()                                                          # a seventeenth word
         with self.assertRaises(units.FramMisuse):
             u.start(0, True)                                                   # transaction still open
         u.done()
@@ -120,41 +138,124 @@ class Fram(unittest.TestCase):
             u.done()
         with self.assertRaises(units.FramMisuse):
             u.wword(1)
+        with self.assertRaises(units.FramMisuse):
+            u.start(3, False)                                                  # three records: helper and two slots
         u.start(0, True)
         with self.assertRaises(units.FramMisuse):
             u.rword()
-        self.assertEqual(len(u.mem), 64)
+        self.assertEqual(len(u.mem), 384)
         self.assertEqual(clocks, units.FRAM_WSTART + 3 * units.FRAM_WORD + units.FRAM_DONE)
 
 
-class Interfaces(unittest.TestCase):
-    def test_puf_and_entropy_stand_ins(self):
+class Bch(unittest.TestCase):
+    """The decoder of the PUF organ model: BCH(63,36,5)."""
+
+    def test_generator_is_the_one_of_the_existing_rtl(self):
+        self.assertEqual(units.BCH_G, 0x86E8113)                # G_MASK of rtl/dregg_ro_puf_bch.sv
+
+    def test_up_to_five_errors_are_found_and_six_are_not_miscorrected_silently(self):
+        import random
+        r = random.Random(7)
+        for trial in range(200):
+            w = r.getrandbits(63)
+            k = trial % 8
+            e = sum(1 << p for p in r.sample(range(63), k))
+            got = units.bch_error(units.bch_syndrome(w) ^ units.bch_syndrome(w ^ e))
+            if k <= 5:
+                self.assertEqual(got, e)
+            else:                                               # beyond the radius: no pattern, or another codeword's
+                self.assertTrue(got is None or (got != e and bin(got).count("1") <= 5))
+
+    def test_syndrome_is_linear_and_27_bits(self):
+        a, b = 0x1234567890ABCDE, 0x7EDCBA098765432
+        self.assertEqual(units.bch_syndrome(a) ^ units.bch_syndrome(b), units.bch_syndrome(a ^ b))
+        self.assertLess(units.bch_syndrome(a), 1 << 27)
+
+
+class PufOrgan(unittest.TestCase):
+    def test_enrol_then_reconstruct(self):
         p = units.PufUnit(bytes(range(32)))
-        self.assertEqual(p.reconstruct(), [0x0706050403020100, 0x0F0E0D0C0B0A0908, 0x1716151413121110, 0x1F1E1D1C1B1A1918])
-        e = units.EntropyUnit(5)
-        a, b = e.draw(), e.draw()
-        self.assertNotEqual(a, b)
-        self.assertEqual(units.EntropyUnit(5).draw(), a)
-        self.assertNotEqual(units.EntropyUnit(6).draw(), a)
+        p.enrol()
+        w, syn = list(p.rsp), list(p.syn)
+        self.assertEqual(w, p.ideal)
+        self.assertTrue(all(0 < x < (1 << 54) for x in syn))
+        p.clear()
+        p.flips = {0, 5, 20, 40, 62, 63 + 7, 126 + 1, 126 + 2, 126 + 3, 126 + 4, 126 + 5, 251}      # at most five a block
+        p.reconstruct()
+        self.assertEqual(p.rsp, w)
+        p.flips = {0, 1, 2, 3, 4, 5}                            # six in block 0
+        p.reconstruct()
+        self.assertNotEqual(p.rsp, w)
+        self.assertEqual(p.rsp[1:], w[1:])
+        p.power_on()
+        self.assertEqual((p.syn, p.rsp), ([0, 0], None))
+
+    def test_reconstruction_uses_the_syndrome_register(self):
+        p = units.PufUnit(bytes(range(32)))
+        p.enrol()
+        w = list(p.rsp)
+        p.syn = [p.syn[0] ^ 1, p.syn[1]]                        # helper data for another response
+        p.reconstruct()
+        self.assertNotEqual(p.rsp, w)
+
+    def test_different_dies_differ(self):
+        self.assertNotEqual(units.PufUnit(bytes(32)).ideal, units.PufUnit(bytes([1]) + bytes(31)).ideal)
+
+
+class TrngOrgan(unittest.TestCase):
+    """The stochastic model against the figures of the physics report (trng/coso_model.py)."""
+
+    def stats(self, pair, **kw):
+        t = units.TrngUnit(11, **kw)
+        t.select(pair)
+        t.clear()
+        clocks = sum(t.run() for _ in range(4))
+        return t, clocks
+
+    def test_variance_statistic_tracks_the_simulated_table(self):
+        t, clocks = self.stats(units.TRNG_PAIRS.index((0, 1)), offsets=(0, 0.10, 1, 2, 3, 4, 5, 6))
+        self.assertTrue(6.0 < t.s1 / 510 < 15.0, t.s1 / 510)       # d = 0.10 %: V = 10.1 [S]
+        self.assertTrue(950 < t.total / 256 < 1050)
+        self.assertEqual(t.flags, 0)
+        self.assertTrue(20_000 < clocks < 40_000)                  # 256 beats of 1,000 periods of 4.7 ns
+        t, _ = self.stats(units.TRNG_PAIRS.index((0, 1)), offsets=(0, 0.20, 1, 2, 3, 4, 5, 6))
+        self.assertTrue(0.8 < t.s1 / 510 < 2.5, t.s1 / 510)        # d = 0.20 %: V = 1.48 [S]
+
+    def test_a_noise_free_source_has_no_variance(self):
+        for d in (0.07, 0.11, 0.15, 0.21):
+            t, _ = self.stats(0, offsets=(0, d, 1, 2, 3, 4, 5, 6), kappa=0.0)
+            self.assertLess(t.s1 / 510, 0.5)                       # at most 0.33 [S]
+
+    def test_locked_and_distant_pairs_raise_flags(self):
+        t, clocks = self.stats(0, locked={0})
+        self.assertEqual(t.flags & units.TF_TIMEOUT, units.TF_TIMEOUT)
+        t, _ = self.stats(units.TRNG_PAIRS.index((0, 7)))          # d = 1.71 %: beats of 58 periods
+        self.assertEqual(t.flags & units.TF_SHORT, units.TF_SHORT)
+
+    def test_slow_jitter_shows_in_the_sums_of_four(self):
+        t, _ = self.stats(0, flicker=1.5, kappa=0.3)
+        self.assertGreater(85 * t.s4, 168 * t.s1)                  # V4 > 8 V
+        t, _ = self.stats(0)
+        self.assertLess(85 * t.s4, 168 * t.s1)                     # white: V4 is about 4 V
 
 
 class Registers(unittest.TestCase):
     def test_row_map(self):
-        self.assertEqual(isa.ROWS_S, 64)
-        cls = [isa.row_class(r) for r in range(64)]
+        self.assertEqual(isa.ROWS_S, 72)
+        cls = [isa.row_class(r) for r in range(72)]
         self.assertEqual({c: cls.count(c) for c in set(cls)},
-                         {"lane": 25, "kwork": 7, "scratch": 12, "key": 10, "pin": 6, "state": 2, "out": 2})
-        self.assertEqual(isa.row_class(64), "none")
-        self.assertEqual(isa.row_class(64, isa.ROWS_L), "chal")
+                         {"lane": 25, "kwork": 7, "scratch": 24, "key": 4, "state": 10, "out": 2})
+        self.assertEqual(isa.row_class(72), "none")
+        self.assertEqual(isa.row_class(72, isa.ROWS_L), "chal")
 
     def test_wipe_classes(self):
         rf = RegFile(isa.ROWS_S)
-        for r in range(64):
+        for r in range(72):
             rf[r] = r + 1
         rf.wipe(isa.W_LANES_HI)
-        self.assertEqual([r for r in range(64) if rf[r] == 0], list(range(8, 32)))
+        self.assertEqual([r for r in range(72) if rf[r] == 0], list(range(8, 32)))
         rf.wipe(15)
-        self.assertEqual([r for r in range(64) if rf[r]], list(range(isa.KEY0, isa.OUT0)))
+        self.assertEqual([r for r in range(72) if rf[r]], list(range(isa.KEY0, isa.OUT0)))     # keys and state stay
         rf.secret_reset()
         self.assertFalse(any(rf.rows))
 
