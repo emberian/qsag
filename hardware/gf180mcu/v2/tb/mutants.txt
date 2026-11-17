@@ -13,4 +13,6 @@ keccak_last_early|dregg_keccak_serial.sv|s/(t == 5'd28) \&\& (rnd == 5'd23);/(t 
 egress_no_padding|dregg_egress.sv|s/wire pad_rdy  = flush \&\& (full == 2'b00) \&\& (left_tx != 16'd0);/wire pad_rdy  = 1'b0;/
 framer_no_tail_mask|dregg_framer.sv|s/if (3'(b) >= tail) mask\[8\*b +: 8\] = 8'h00;/if (3'(b) >= tail) mask[8*b +: 8] = 8'hFF;/
 fram_done_short|dregg_fram.sv|s/dcnt == 3'(T_FRAM_DONE)/dcnt == 3'd3/
-regfile_wipe_keeps_lane7|dregg_regfile.sv|s/if (r <= WIPE_LO_LAST) /if (r < WIPE_LO_LAST) /
+regfile_wipe_keeps_lane7|dregg_regfile.sv|s/lw = (lr <= 7'(WIPE_LO_LAST))/lw = (lr < 7'(WIPE_LO_LAST))/
+regfile_out_row_on_read_port|dregg_regfile.sv|s/assign n\[r\]\[b\]  = 1'b1;          \/\/ not on the read port/assign n[r][b]  = nrd;/
+regfile_sel_decode|dregg_regfile.sv|s/sel_b\[p\] = (raddr\[2:0\] == lr\[2:0\]);/sel_b[p] = (raddr[2:0] == lr[2:0]) || (lr[2:0] == 3'd5);/

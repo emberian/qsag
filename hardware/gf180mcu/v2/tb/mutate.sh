@@ -2,6 +2,8 @@
 # Mutation check of the co-simulation: each mutant is one edit of a copy of v2/rtl; the bench must FAIL on
 # it. Run from the chip directory:   bash v2/tb/mutate.sh
 # A mutant the bench passes is printed as SURVIVED and the script exits 1.
+# The trace is recorded with the proposed model change kec_last_w applied (v2/tb/record.py), so that the
+# unmutated RTL passes with zero errors and any error is the mutant's.
 # The list is v2/tb/mutants.txt: name | file | sed expression.
 B=build/v2
 mkdir -p $B/mut
@@ -13,7 +15,7 @@ while IFS='|' read -r name file expr; do
     cp v2/rtl/*.sv v2/rtl/*.svh $d/
     sed -i "$expr" $d/$file
     if cmp -s $d/$file v2/rtl/$file; then echo "MUTANT $name: the edit did not apply"; continue; fi
-    if RTLDIR=$d JOBS=${JOBS:-16} bash v2/tb/run.sh fast 72 mut_$name > $B/mut/$name.log 2>&1 < /dev/null; then r=SURVIVED; else r=killed; fi
+    if RTLDIR=$d JOBS=${JOBS:-16} PROPOSE=kec_last_w bash v2/tb/run.sh fast 72 mut_$name > $B/mut/$name.log 2>&1 < /dev/null; then r=SURVIVED; else r=killed; fi
     grep -q "shards: 16 finished" $B/mut/$name.log || r="$r (run incomplete)"
     echo "MUTANT $name: $r   [$(grep -h 'ERROR\|ASSERT' $B/mut/$name.log | sed 's/transaction [0-9]*/transaction N/; s/(op [0-9a-f]*)//' | cut -c1-70 | sort | uniq -c | sort -rn | head -2 | tr '\n' ';')]"
     rm -rf $B/obj_mut_$name $d
