@@ -2194,6 +2194,7 @@ inductive ToprfCredWire (Attr : Type) where
   | advanceEpochWire (newEpoch : Nat) (newRoot : Spec.Digest256)
   | presentWire (holder : Nat) (credId : Nat) (stmt : Spec.CredentialStatement Attr)
       (opening : LimboSdOpeningWire)
+  | issueChallengeWire (verifier : Nat) (scope : Spec.Bytes) (now ttl : Nat)
   | approveToprfWire (server : Nat) (ticket : Spec.ToprfTicket)
   | approveToprfStoreFault (server : Nat) (ticket : Spec.ToprfTicket)
   | evalToprfWire (ticket : Spec.ToprfTicket) (input : Spec.Bytes) (online : SpdzOnlineTranscript)
@@ -2223,7 +2224,7 @@ structure PiToprfCredState (Attr O : Type) where
   corruptHolders : List Nat
   corruptServers : List Nat
   entries : List (ConcreteCredEntry Attr)
-  usedChallenges : List Spec.Bytes
+  challengeLedgers : Spec.VerifierChallengeLedgers
   toprfApprovals : List (Nat × Spec.ToprfTicket)
   oprfTable : List (Spec.ToprfPoint × O)
   oprfCharges : List Spec.ToprfTicket
@@ -2259,7 +2260,7 @@ def PiToprfCredState.init {Attr O : Type} (cfg : Spec.IdealCredConfig O) : PiTop
     corruptHolders := cfg.corruptHolders
     corruptServers := cfg.corruptServers
     entries := []
-    usedChallenges := []
+    challengeLedgers := fun verifier => { capacity := cfg.challengeCapacity verifier }
     toprfApprovals := []
     oprfTable := []
     oprfCharges := [] }
@@ -2275,7 +2276,7 @@ def PiToprfCredState.abs {Attr O : Type} (c : PiToprfCredState Attr O) : Spec.Id
     corruptHolders := c.corruptHolders
     corruptServers := c.corruptServers
     records := c.entries.map (fun e => ⟨e.credId, e.holder, e.attrs, e.epoch, e.root⟩)
-    usedChallenges := c.usedChallenges
+    challengeLedgers := c.challengeLedgers
     toprfApprovals := c.toprfApprovals
     oprfTable := c.oprfTable
     oprfCharges := c.oprfCharges }
@@ -2285,6 +2286,7 @@ def ToprfCredWire.toCommand {Attr : Type} : ToprfCredWire Attr → Spec.CredComm
   | .issueWire h attrs newRoot _ => .issue h attrs newRoot
   | .advanceEpochWire newEpoch newRoot => .advanceEpoch newEpoch newRoot
   | .presentWire h cid stmt _ => .present h cid stmt
+  | .issueChallengeWire verifier scope now ttl => .issueChallenge verifier scope now ttl
   | .approveToprfWire srv t => .approveToprf srv t
   | .approveToprfStoreFault srv t => .approveToprf srv t
   | .evalToprfWire t input _ => .evalToprf t input
@@ -2297,6 +2299,7 @@ def PiToprfCredState.checkCallerPort {Attr O : Type} (c : PiToprfCredState Attr 
   | .advanceEpochWire _ _ => decide (port = .issuer) || (decide (port = .adversary) && c.issuerCorrupt)
   | .presentWire h _ _ _ =>
     decide (port = .holder h) || (decide (port = .adversary) && decide (h ∈ c.corruptHolders))
+  | .issueChallengeWire verifier _ _ _ => decide (port = .verifier verifier)
   | .approveToprfWire srv _ =>
     decide (port = .server srv) || (decide (port = .adversary) && decide (srv ∈ c.corruptServers))
   | .approveToprfStoreFault srv _ =>
@@ -2324,7 +2327,7 @@ def PiToprfCredState.checkPresentation {Attr O : Type} [DecidableEq Attr]
   decide (stmt.issuerPk = c.issuerPk) &&
   decide (stmt.epoch = c.epoch) &&
   decide (stmt.accumulatorRoot = c.accumulatorRoot) &&
-  decide (stmt.challengeNonce ∉ c.usedChallenges) &&
+  (c.challengeLedgers stmt.verifier).accepts stmt.verifierScope stmt.challengeNonce stmt.verificationTime &&
   c.hasMatchingEntry h cid stmt
 
 /-- Concrete committee quorum count of distinct server approvals in `c.toprfApprovals`. -/
@@ -2389,12 +2392,16 @@ def piToprfCredWireOutcome {Attr O : Type} [DecidableEq Attr] (cfg : Spec.IdealC
         .err { c with phaseAuditCount := c.phaseAuditCount + 1 } ()
       else if c.checkPresentation h cid stmt then
         .ok { c with
-              usedChallenges := stmt.challengeNonce :: c.usedChallenges
+              challengeLedgers := c.challengeLedgers.consume stmt.verifier stmt.verifierScope stmt.challengeNonce
               phaseAuditCount := c.phaseAuditCount + 1 }
             (.presentationVerdict true)
       else
         .ok { c with phaseAuditCount := c.phaseAuditCount + 1 }
             (.presentationVerdict false)
+    | .issueChallengeWire verifier scope now ttl =>
+      let attempt := (c.challengeLedgers verifier).issueAttempt scope now ttl
+      .ok { c with challengeLedgers := c.challengeLedgers.set verifier attempt.1
+                   phaseAuditCount := c.phaseAuditCount + 1 } (Spec.challengeIssueOutput attempt.2)
     | .approveToprfStoreFault srv t =>
       .err { c with
              serverHighWater := (srv, t.counter) :: c.serverHighWater
@@ -2575,6 +2582,10 @@ theorem piToprfCredWireOutcome_sound {Attr O : Type} [DecidableEq Attr]
         Spec.credExec cfg c.abs w.toCommand :=
       Spec.idealCredStep_of_speaksFor hSp
     cases w with
+    | issueChallengeWire verifier scope now ttl =>
+      dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
+      rw [hStepEq, Spec.credExec_issueChallenge_eq]
+      rfl
     | issueWire h attrs newRoot tag =>
       dsimp only [ToprfCredWire.toCommand] at hStepEq ⊢
       rw [checkIssueWire_eq_issueAccepts]
@@ -2821,6 +2832,8 @@ private theorem piToprfCredWireOutcome_session_step {Attr O : Type} [DecidableEq
   | true =>
     simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
     cases w with
+    | issueChallengeWire verifier scope now ttl =>
+      session_step_close (reservoirStepMonotone_refl c.reservoir)
     | issueWire h attrs newRoot tag =>
       dsimp only
       cases c.checkIssueWire attrs <;>
@@ -2922,6 +2935,20 @@ theorem tooth_forged_limbo_opening_rejected_by_piToprfCredService {Attr O : Type
   | false => rfl
   | true =>
     simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hVerFalse, Bool.not_false]
+
+/-- Invalid cryptographic openings never consume a verifier challenge, including on the
+    concrete error-state path (which still advances its public phase audit counter). -/
+theorem piToprfCred_invalid_opening_preserves_challenges {Attr O : Type} [DecidableEq Attr]
+    (cfg : Spec.IdealCredConfig O) (c : PiToprfCredState Attr O)
+    (port : Spec.CredPort) (h cid : Nat) (stmt : Spec.CredentialStatement Attr)
+    (opening : LimboSdOpeningWire) (hv : opening.verify33 = false) :
+    match piToprfCredWireOutcome cfg c port (.presentWire h cid stmt opening) with
+    | .ok c' _ => c'.challengeLedgers = c.challengeLedgers
+    | .err c' _ => c'.challengeLedgers = c.challengeLedgers := by
+  unfold piToprfCredWireOutcome
+  cases c.checkCallerPort port (.presentWire h cid stmt opening) with
+  | false => rfl
+  | true => simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hv, Bool.not_false]
 
 /-- **An accepted TOPRF evaluation passed every check on the wire data.** If `piToprfCredService`
     accepts `.evalToprfWire t input online`, then the transcript's context is the granted ticket,
@@ -3367,6 +3394,7 @@ theorem tooth_unratcheted_failed_slot_recycles_counter :
   exact ⟨⟨1, some 6, some 6, false⟩, rfl, by decide⟩
 
 #verify_constructive
+  piToprfCred_invalid_opening_preserves_challenges
   Qsag.spdz_constants_exact
   Qsag.SpdzConfig.new_isSome_iff
   Qsag.spdz_quorum_contains_honest_server
