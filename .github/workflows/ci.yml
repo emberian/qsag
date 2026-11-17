@@ -256,6 +256,15 @@ jobs:
             lake build QsagWhirVerifiedChallenge
           fi
 
+      - name: Elaborate aggregation parity teeth against the current Rust label roster
+        if: matrix.workdir == 'lean'
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_domain_labels.py
+          cd lean
+          # Re-elaborate the source even when its .olean was copied from a warm build.
+          lake env lean -DwarningAsError=true Qsag/Tests/AggregationParityTeeth.lean
+
       - name: Audit dependency closures (only propext and Quot.sound)
         if: matrix.audit_axioms
         working-directory: ${{ matrix.workdir }}

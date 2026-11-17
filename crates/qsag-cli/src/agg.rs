@@ -432,6 +432,9 @@ Third form: committee-vault demo signing + aggregation backed by per-validator F
   --reanchor-tpm-nv <new base>  repair a committee enrolled on ONE shared counter
                          (--anchor-tpm-nv names it): prove its state is the newest the TPM has
                          seen, then bind validators+1 never-written counters from <new base>.
+                         Each new counter needs the ADMIN auth-change policy documented by
+                         `qsag quorum reanchor-tpm --help` (same provisioning recipe).
+                         Keep the shared source counter defined after re-anchoring.
                          No signature is made; --epoch, --signers and the message are not needed
   --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
   --ephemeral-unanchored  allow disposable committee signing without rollback protection
@@ -1307,7 +1310,7 @@ mod tpm_anchor_tests {
         const NEW_BASE: u32 = 0x0180_0150;
         tpm.define_counter(SHARED, b"");
         for slot in 0..=VALIDATORS {
-            tpm.define_counter(NEW_BASE + slot, b"");
+            tpm.define_rebind_counter(NEW_BASE + slot, b"");
         }
         let domains = || committee_tpm_domains(&seed, VALIDATORS);
         assert!(
