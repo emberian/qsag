@@ -34,6 +34,7 @@ import all Qsag.Math.MlDsaNtt
 import all Qsag.Math.PolyRing
 import all Qsag.Math.Primality
 import all Qsag.Math.QuarticExt4
+import all Qsag.Math.QuinticExt5
 import all Qsag.Math.TapRowParityBias
 import all Qsag.Math.Tactic.CommRing
 import all Qsag.Math.Tactic.MaskBijection
@@ -81,6 +82,7 @@ import all Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Aggregation.ZkHem
+import all Qsag.Protocol.Aggregation.ZkHemV2
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Protocol.Credentials.BlindVcCollisionFinder
 import all Qsag.Protocol.Credentials.BlindVcQromSecurity
@@ -253,6 +255,7 @@ import all Qsag.Tests.ProbPkgBridgeTeeth
 import all Qsag.Tests.ProductionCoinReductionChecks
 import all Qsag.Tests.QipmTeeth
 import all Qsag.Tests.QromCoherentOracleTests
+import all Qsag.Tests.QuinticExt5Teeth
 import all Qsag.Tests.RecursiveAggregationTeeth
 import all Qsag.Tests.RssParticipantChecks
 import all Qsag.Tests.RssParticipantGateChecksRun
@@ -269,6 +272,7 @@ import all Qsag.Tests.SeparatedCustodyUcResourceChecks
 import all Qsag.Tests.SigningTeeth
 import all Qsag.Tests.TwoSlotHwmTeeth
 import all Qsag.Tests.WelchBerlekampTeeth
+import all Qsag.Tests.ZkHemV2Teeth
 import Lean
 public meta import AxiomAuditSupport
 
@@ -346,6 +350,7 @@ run_cmd do
     `Qsag.Math.PolyRing,
     `Qsag.Math.Primality,
     `Qsag.Math.QuarticExt4,
+    `Qsag.Math.QuinticExt5,
     `Qsag.Math.TapRowParityBias,
     `Qsag.Coding.AffineProximity,
     `Qsag.Coding.Cwyz26,
@@ -391,6 +396,7 @@ run_cmd do
     `Qsag.Protocol.Aggregation.SuccinctAggregationIop,
     `Qsag.Protocol.Aggregation.UcGames,
     `Qsag.Protocol.Aggregation.ZkHem,
+    `Qsag.Protocol.Aggregation.ZkHemV2,
     `Qsag.Protocol.Credentials.AdvancedMpcAndCreds,
     `Qsag.Protocol.Credentials.BlindVcCollisionFinder,
     `Qsag.Protocol.Credentials.BlindVcQromSecurity,
@@ -557,6 +563,7 @@ run_cmd do
     `Qsag.Tests.ProductionCoinReductionChecks,
     `Qsag.Tests.QipmTeeth,
     `Qsag.Tests.QromCoherentOracleTests,
+    `Qsag.Tests.QuinticExt5Teeth,
     `Qsag.Tests.RecursiveAggregationTeeth,
     `Qsag.Tests.RssParticipantChecks,
     `Qsag.Tests.RssParticipantGateChecksRun,
@@ -572,7 +579,8 @@ run_cmd do
     `Qsag.Tests.SeparatedCustodyUcResourceChecks,
     `Qsag.Tests.SigningTeeth,
     `Qsag.Tests.TwoSlotHwmTeeth,
-    `Qsag.Tests.WelchBerlekampTeeth
+    `Qsag.Tests.WelchBerlekampTeeth,
+    `Qsag.Tests.ZkHemV2Teeth
   ]
 
   let privEnv := (← getEnv).setExporting false
