@@ -54,12 +54,18 @@ uniform on the other, so the two views are identically distributed.
     independent `ZKHEM_COMBINE` challenges `(c₀, c₁, c₂)` and binding `Z[0] = 1` plus all
     public-input cells under `λ = HEM_PUBLIC_CELLS`. Twelve base-field masking cells in three
     four-corner groups jointly pad the revealed row triple with determinant `k₁ k₂ k₃`.
-§12 Deployed five-table `(Z, C_0..C_3)` `zk-Hem` joint HVZK simulator composition (`simulateZkHem5Table`,
-    `zkHem5Table_joint_hvzk_perfect`, `zkHem5Table_salted_ro_hvzk_bound`): composes fast
-    Möbius-to-monomial transport, Stage-0 Vandermonde blinding, finite row/column Libra blocks
-    with per-round constants, 12-cell rank-checked `MaskRankDeficient`-aware row padding,
-    adaptive Fiat–Shamir challenges, Welch–Berlekamp Gaussian `publicReferenceAssignment`,
-    primitive quartic `β` companion translation, and salted Stage-0 Merkle RO coupling.
+§12 Fixed-challenge five-table `(Z, C_0..C_3)` `zk-Hem` joint HVZK simulator composition
+    (`simulateZkHem5Table`, `zkHem5Table_joint_hvzk_perfect`, `zkHem5Table_salted_ro_hvzk_bound`):
+    at fixed verifier challenges and fixed Stage-0 blinded linear claims `(M, V)` (Stage-0
+    Vandermonde blinding of opened symbols is proved separately in §7
+    `opened_symbols_perfectly_simulated`), `zkHem5Table_joint_hvzk_perfect` fibers the 12-cell
+    `checkRowRank`-guarded row-padding bijection (`rank_checked_masking_rows_perfectly_simulated`)
+    with the row and column `LibraMask` coin bijections (`libraCoinBij`) and primitive-quartic `β`
+    companion translation against Welch–Berlekamp Gaussian `publicReferenceAssignment`
+    (`five_table_public_reference_linear_simulation`). `zkHem5Table_salted_ro_hvzk_bound` couples
+    that algebraic view with unopened salted Stage-0 leaf digests via `saltShiftBij` and bounds
+    adaptive RO salt-query hits plus salt birthday collisions via `saltVector_bad_probability`.
+    Multi-round adaptive Fiat–Shamir ROM challenge programming across rounds is not modelled here.
 -/
 
 public import Init.Data.List.FinRange
@@ -4253,6 +4259,332 @@ theorem rank_checked_masking_rows_perfectly_simulated (a b k₁ k₂ k₃ : Fp4)
 #verify_constructive padCoordinates_scale LinearPadMap.ext_app cornerPad_add cornerPad_scale
   checkedCornerPadBasis_some_iff cornerColumnCandidates_correct makeCornerPadBasis_success_iff
   rank_checked_masking_rows_perfectly_simulated
+
+/-! ## §12. Fixed-challenge five-table `zk-Hem` joint simulator & salted-RO coupling -/
+
+/-- Public fixed-challenge parameters for one five-table `(Z, C_0..C_3)` `zk-Hem` opening:
+    Stage-0 blinded linear opening matrix/claims `(M, V)`, public corner-rank point and factors
+    `(a, b, k₁, k₂, k₃)`, row and column Libra sumcheck parameters, and primitive quartic
+    companion challenge `β`. -/
+structure ZkHem5TableParams (n q : Nat) where
+  M : PublicOpeningMatrix n q
+  V : PublicOpeningClaims q
+  a : Fp4
+  b : Fp4
+  k₁ : Fp4
+  k₂ : Fp4
+  k₃ : Fp4
+  nRow : Nat
+  dRow : Nat
+  cRow : Nat → Fp4
+  ρRow : Fp4
+  pubHRow : Fp4
+  termRow : RowTriple → Fp4
+  nCol : Nat
+  dCol : Nat
+  cCol : Nat → Fp4
+  ρCol : Fp4
+  colClaimOf : RowTriple → Fp4
+  β : Fp4
+
+/-- Valid witness family for `P`: the assignment table `table r` and honest row/column sumcheck
+    transcripts `rowRounds r`, `colRounds r` may depend on the 12 row-masking cells `r`, while
+    Stage-0 blinding holds the public linear claims `P.V` fixed across `r`. -/
+structure ZkHem5TableWitness {n q : Nat} (P : ZkHem5TableParams n q) where
+  rowTriple : RowTriple
+  table : RowMaskCells → Fin n → Fp
+  rowRounds : RowMaskCells → WitnessRounds Fp4
+  colRounds : RowMaskCells → WitnessRounds Fp4
+  table_matches : ∀ r, publicOpeningMatches P.M P.V (table r)
+  row_honest : ∀ r, (rowRounds r).Honest P.nRow P.dRow P.cRow
+  row_claim : ∀ r, (rowRounds r).H = P.pubHRow
+  row_term : ∀ r (cert : RowRankCertificate P.a P.b P.k₁ P.k₂ P.k₃),
+    checkRowRank P.a P.b P.k₁ P.k₂ P.k₃ = some cert →
+    (rowRounds r).claim P.dRow P.cRow P.nRow =
+      P.termRow (rowTripleAdd rowTriple (rowMaskCellsMap cert.basis P.k₁ P.k₂ P.k₃ r))
+  col_honest : ∀ r, (colRounds r).Honest P.nCol P.dCol P.cCol
+  col_claim : ∀ r (cert : RowRankCertificate P.a P.b P.k₁ P.k₂ P.k₃),
+    checkRowRank P.a P.b P.k₁ P.k₂ P.k₃ = some cert →
+    (colRounds r).H =
+      P.colClaimOf (rowTripleAdd rowTriple (rowMaskCellsMap cert.basis P.k₁ P.k₂ P.k₃ r))
+
+/-- Prover coins: 12 base-field row-masking cells, row and column `LibraMask`s, and four
+    base-field companion tables `Fin n → Pad`. -/
+abbrev ZkHem5TableProverCoins (n : Nat) : Type :=
+  RowMaskCells × LibraMask Fp4 × LibraMask Fp4 × (Fin n → Pad)
+
+/-- Simulator coins: revealed padded row triple, row and column `LibraCoins`, and four
+    base-field companion tables `Fin n → Pad`. -/
+abbrev ZkHem5TableSimCoins (n : Nat) : Type :=
+  RowTriple × LibraCoins Fp4 × LibraCoins Fp4 × (Fin n → Pad)
+
+/-- Accepted algebraic view of a five-table `zk-Hem` execution (wrapped in `Option` so `none`
+    represents the public `MaskRankDeficient` abort). -/
+structure ZkHem5TableAcceptedView (n q : Nat) where
+  paddedRows : RowTriple
+  rowLibra : LibraView Fp4
+  colTranscript : Fp4 × List (List Fp4)
+  companionView : (Fin n → Fp4) × CompanionClaims
+  rawOpenings : Fin q → Fp × Pad
+
+/-- Honest five-table `zk-Hem` algebraic view on witness `w` and prover coins `coins`. -/
+def realZkHem5Table {n q : Nat} (P : ZkHem5TableParams n q)
+    (w : ZkHem5TableWitness P) (coins : ZkHem5TableProverCoins n) :
+    Option (ZkHem5TableAcceptedView n q) :=
+  (checkRowRank P.a P.b P.k₁ P.k₂ P.k₃).map fun cert =>
+    { paddedRows := rowTripleAdd w.rowTriple (rowMaskCellsMap cert.basis P.k₁ P.k₂ P.k₃ coins.1)
+      rowLibra := libraReal P.nRow P.dRow P.cRow P.ρRow (w.rowRounds coins.1) coins.2.1
+      colTranscript := libraPublicTranscript
+        (libraReal P.nCol P.dCol P.cCol P.ρCol (w.colRounds coins.1) coins.2.2.1)
+      companionView := privateCompanionView P.β P.M.kernelForm (w.table coins.1) coins.2.2.2
+      rawOpenings := rawFiveTableView P.M.rawForm (w.table coins.1) coins.2.2.2 }
+
+/-- Witness-free joint five-table `zk-Hem` simulator: computes `publicReferenceAssignment P.M P.V`
+    solely from public `(P.M, P.V)` via Welch–Berlekamp Gaussian elimination, mirrors the public
+    `checkRowRank` abort branch, and simulates the padded row triple, row/column Libra transcripts,
+    blended five-table word, four companion claims, and raw base-field openings. -/
+def simulateZkHem5Table {n q : Nat} (P : ZkHem5TableParams n q)
+    (s : ZkHem5TableSimCoins n) : Option (ZkHem5TableAcceptedView n q) :=
+  let Z0 := publicReferenceAssignment P.M P.V
+  (checkRowRank P.a P.b P.k₁ P.k₂ P.k₃).map fun _ =>
+    { paddedRows := s.1
+      rowLibra := libraSim P.nRow P.dRow P.cRow P.ρRow P.pubHRow (P.termRow s.1) s.2.1
+      colTranscript := libraPublicSim P.nCol P.dCol P.cCol P.ρCol (P.colClaimOf s.1) s.2.2.1
+      companionView := privateCompanionView P.β P.M.kernelForm Z0 s.2.2.2
+      rawOpenings := rawFiveTableView P.M.rawForm Z0 s.2.2.2 }
+
+/-- Triangular bijection fibering three coin equivalences over a first-coordinate equivalence. -/
+def fiberedQuadEquiv {A A' B B' C C' D D' : Type}
+    (eA : SimpleEquiv A A')
+    (eB : A → SimpleEquiv B B')
+    (eC : A → SimpleEquiv C C')
+    (eD : A → SimpleEquiv D D') :
+    SimpleEquiv (A × B × C × D) (A' × B' × C' × D') where
+  toFun x := (eA.toFun x.1, (eB x.1).toFun x.2.1, (eC x.1).toFun x.2.2.1,
+    (eD x.1).toFun x.2.2.2)
+  invFun y :=
+    let a := eA.invFun y.1
+    (a, (eB a).invFun y.2.1, (eC a).invFun y.2.2.1, (eD a).invFun y.2.2.2)
+  left_inv := by
+    rintro ⟨a, b, c, d⟩
+    dsimp only
+    rw [eA.left_inv a, (eB a).left_inv b, (eC a).left_inv c, (eD a).left_inv d]
+  right_inv := by
+    rintro ⟨a', b', c', d'⟩
+    dsimp only
+    rw [eA.right_inv a', (eB (eA.invFun a')).right_inv b',
+      (eC (eA.invFun a')).right_inv c', (eD (eA.invFun a')).right_inv d']
+
+def zeroRowMaskCells : RowMaskCells :=
+  ⟨⟨zero, zero, zero, zero⟩, ⟨zero, zero, zero, zero⟩, ⟨zero, zero, zero, zero⟩⟩
+
+/-- **Joint Fixed-Challenge Five-Table `zk-Hem` HVZK Simulation (`zkHem5Table_joint_hvzk_perfect`)**:
+    For `P.ρRow ≠ 0`, `P.ρCol ≠ 0`, and `P.β ∉ F_{p^2}` (`P.β.c1 ≠ 0`), `realZkHem5Table P` and the
+    witness-free `simulateZkHem5Table P` are `PerfectlySimulated` via a constructive fibered
+    coin bijection coupling the 12 row-masking cells across row padding, row and column `LibraMask`
+    transcripts, and four-companion `Pad` translation against `publicReferenceAssignment P.M P.V`. -/
+theorem zkHem5Table_joint_hvzk_perfect {n q : Nat} (P : ZkHem5TableParams n q)
+    (hρRow : P.ρRow ≠ zero) (hρCol : P.ρCol ≠ zero) (hβ : P.β.c1 ≠ zero) :
+    PerfectlySimulated (realZkHem5Table P) (simulateZkHem5Table P) := by
+  intro w
+  let Z0 := publicReferenceAssignment P.M P.V
+  have hRef : publicOpeningMatches P.M P.V Z0 :=
+    publicReferenceAssignment_matches P.M P.V
+      (publicOpeningRows_consistent P.M P.V (w.table zeroRowMaskCells)
+        (w.table_matches zeroRowMaskCells))
+  let eRowLibra : RowMaskCells → SimpleEquiv (LibraMask Fp4) (LibraCoins Fp4) :=
+    fun r => libraCoinBij fp4_two_ne_zero P.nRow P.dRow P.ρRow hρRow (w.rowRounds r)
+  let eColLibra : RowMaskCells → SimpleEquiv (LibraMask Fp4) (LibraCoins Fp4) :=
+    fun r => libraCoinBij fp4_two_ne_zero P.nCol P.dCol P.ρCol hρCol (w.colRounds r)
+  let eComp : RowMaskCells → SimpleEquiv (Fin n → Pad) (Fin n → Pad) :=
+    fun r => companionTranslateBij P.β (fun i => sub (w.table r i) (Z0 i))
+  cases hc : checkRowRank P.a P.b P.k₁ P.k₂ P.k₃ with
+  | none =>
+    refine ⟨fiberedQuadEquiv rowCellsCoordinatesBij eRowLibra eColLibra eComp, ?_⟩
+    intro coins
+    simp only [realZkHem5Table, simulateZkHem5Table, hc, Option.map_none]
+  | some cert =>
+    let eBase := rowMaskCellsBij cert.basis P.k₁ P.k₂ P.k₃
+      cert.first_nonzero cert.second_nonzero cert.third_nonzero
+    let eCells : SimpleEquiv RowMaskCells RowTriple :=
+      { toFun := fun r => rowTripleAdd w.rowTriple (eBase.toFun r)
+        invFun := fun v => eBase.invFun (rowTripleSub v w.rowTriple)
+        left_inv := fun r => by
+          have hSub : rowTripleSub (rowTripleAdd w.rowTriple (eBase.toFun r)) w.rowTriple =
+              eBase.toFun r := by
+            apply RowTriple.ext <;> dsimp [rowTripleAdd, rowTripleSub] <;> constructive_ring
+          rw [hSub, eBase.left_inv]
+        right_inv := fun v => by
+          rw [eBase.right_inv]
+          apply RowTriple.ext <;> dsimp [rowTripleAdd, rowTripleSub] <;> constructive_ring }
+    refine ⟨fiberedQuadEquiv eCells eRowLibra eColLibra eComp, ?_⟩
+    rintro ⟨r, mRow, mCol, C⟩
+    simp only [realZkHem5Table, simulateZkHem5Table, hc, Option.map_some, fiberedQuadEquiv]
+    apply congrArg some
+    have hRowSim : libraReal P.nRow P.dRow P.cRow P.ρRow (w.rowRounds r) mRow =
+        libraSim P.nRow P.dRow P.cRow P.ρRow P.pubHRow
+          (P.termRow (eCells.toFun r)) ((eRowLibra r).toFun mRow) := by
+      change libraReal P.nRow P.dRow P.cRow P.ρRow (w.rowRounds r) mRow =
+        libraSim P.nRow P.dRow P.cRow P.ρRow P.pubHRow
+          (P.termRow (rowTripleAdd w.rowTriple (rowMaskCellsMap cert.basis P.k₁ P.k₂ P.k₃ r)))
+          (libraCoinsOf P.nRow P.dRow P.ρRow (w.rowRounds r) mRow)
+      rw [libra_real_eq_sim fp4_two_ne_zero P.nRow P.dRow P.cRow P.ρRow hρRow
+          (w.rowRounds r) (w.row_honest r) mRow,
+        w.row_claim r, w.row_term r cert hc]
+    have hColSim : libraPublicTranscript
+          (libraReal P.nCol P.dCol P.cCol P.ρCol (w.colRounds r) mCol) =
+        libraPublicSim P.nCol P.dCol P.cCol P.ρCol
+          (P.colClaimOf (eCells.toFun r)) ((eColLibra r).toFun mCol) := by
+      change libraPublicTranscript
+          (libraReal P.nCol P.dCol P.cCol P.ρCol (w.colRounds r) mCol) =
+        libraPublicSim P.nCol P.dCol P.cCol P.ρCol
+          (P.colClaimOf (rowTripleAdd w.rowTriple (rowMaskCellsMap cert.basis P.k₁ P.k₂ P.k₃ r)))
+          (libraCoinsOf P.nCol P.dCol P.ρCol (w.colRounds r) mCol)
+      rw [libra_real_eq_sim fp4_two_ne_zero P.nCol P.dCol P.cCol P.ρCol hρCol
+          (w.colRounds r) (w.col_honest r) mCol,
+        w.col_claim r cert hc]
+      rfl
+    have hK : P.M.kernelForm.app (fun i => embed (w.table r i)) =
+        P.M.kernelForm.app (fun i => embed (Z0 i)) :=
+      (w.table_matches r).1.trans hRef.1.symm
+    have hR : ∀ j, (P.M.rawForm j).app (w.table r) = (P.M.rawForm j).app Z0 :=
+      fun j => ((w.table_matches r).2 j).trans (hRef.2 j).symm
+    have hCompSim : privateCompanionView P.β P.M.kernelForm (w.table r) C =
+        privateCompanionView P.β P.M.kernelForm Z0 ((eComp r).toFun C) := by
+      apply Prod.ext
+      · exact (privateBatchWord_translate P.β hβ (w.table r) Z0 C).symm
+      · exact (companionClaims_translate P.M.kernelForm P.β
+          (fun i => sub (w.table r i) (Z0 i)) C
+          (kernel_base_difference_zero P.M.kernelForm (w.table r) Z0 hK)).symm
+    have hRawSim : rawFiveTableView P.M.rawForm (w.table r) C =
+        rawFiveTableView P.M.rawForm Z0 ((eComp r).toFun C) :=
+      (rawFiveTableView_translate P.M.rawForm P.β (w.table r) Z0 C hR).symm
+    dsimp only [eCells] at hRowSim hColSim ⊢
+    rw [hRowSim, hColSim, hCompSim, hRawSim]
+    rfl
+
+/-- Lookup first index `j ∈ js` with `salts j = s`, returning `vals j`, or `zero` if none. -/
+def findSaltVal {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F) (s : Fin N) : List (Fin m) → F
+  | [] => zero
+  | i :: rest => if salts i = s then vals i else findSaltVal salts vals s rest
+
+/-- Shift table on `Fin N` assigning `vals j` at each unopened leaf salt `salts j`, and `zero`
+    elsewhere. -/
+def unopenedSaltDelta {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F) (s : Fin N) : F :=
+  findSaltVal salts vals s (List.finRange m)
+
+private theorem findSaltVal_mem {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F)
+    (hInj : ∀ i j : Fin m, salts i = salts j → i = j) (j : Fin m) :
+    ∀ js : List (Fin m), j ∈ js → findSaltVal salts vals (salts j) js = vals j
+  | [], hj => nomatch hj
+  | i :: rest, hj => by
+    unfold findSaltVal
+    by_cases hEq : salts i = salts j
+    · rw [ite_eq_left hEq, hInj i j hEq]
+    · rw [ite_eq_right hEq]
+      rcases List.mem_cons.mp hj with rfl | hTail
+      · exact absurd rfl hEq
+      · exact findSaltVal_mem salts vals hInj j rest hTail
+
+private theorem findSaltVal_off {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F) (s : Fin N)
+    (hOff : ¬ ∃ j : Fin m, salts j = s) :
+    ∀ js : List (Fin m), findSaltVal salts vals s js = zero
+  | [] => rfl
+  | i :: rest => by
+    unfold findSaltVal
+    have hNe : salts i ≠ s := fun h => hOff ⟨i, h⟩
+    rw [ite_eq_right hNe]
+    exact findSaltVal_off salts vals s hOff rest
+
+theorem unopenedSaltDelta_at_injective {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F)
+    (hInj : ∀ i j : Fin m, salts i = salts j → i = j) (j : Fin m) :
+    unopenedSaltDelta salts vals (salts j) = vals j :=
+  findSaltVal_mem salts vals hInj j (List.finRange m) (List.mem_finRange j)
+
+theorem unopenedSaltDelta_off_support {F : Type} [CommRingOps F] {N m : Nat}
+    (salts : Fin m → Fin N) (vals : Fin m → F) (s : Fin N)
+    (hOff : ¬ ∃ j : Fin m, salts j = s) :
+    unopenedSaltDelta salts vals s = zero :=
+  findSaltVal_off salts vals s hOff (List.finRange m)
+
+/-- **Salted-RO Coupling & Bad-Salt Probability Bound for Five-Table `zk-Hem`
+    (`zkHem5Table_salted_ro_hvzk_bound`)**:
+    1. *Joint algebraic + salted-RO coupling*: For any valid witness `w`, there is an explicit
+       bijection `Φ` on `ZkHem5TableProverCoins n` and, for every injective `m`-tuple of unopened
+       Stage-0 leaf salts `salts : Fin m → Fin N` avoided by an adaptive RO adversary `adv`, an
+       explicit oracle bijection `Ψ = saltShiftBij (unopenedSaltDelta salts unopenedVals)` such that
+       the honest tuple `(realZkHem5Table P w coins, unopened salted leaf digests, adv.run O)`
+       equals `(simulateZkHem5Table P (Φ coins), zero-leaf digests under Ψ O, adv.run (Ψ O))`.
+    2. *Explicit finite bad-salt bound*: Over `m` uniform salts in `(Fin N)^m` (`0 < N`), the
+       probability of hitting `adv.queriedSalts O` (`|queriedSalts| ≤ Q_ro`) or repeating a salt
+       is bounded by `(m · Q_ro + m(m - 1)/2) / N`. -/
+theorem zkHem5Table_salted_ro_hvzk_bound {n q N m Q_ro : Nat} {LeafVal D Out : Type}
+    [LawfulField LeafVal] (hN : 0 < N)
+    (P : ZkHem5TableParams n q)
+    (hρRow : P.ρRow ≠ zero) (hρCol : P.ρCol ≠ zero) (hβ : P.β.c1 ≠ zero)
+    (w : ZkHem5TableWitness P)
+    (O : Fin N × LeafVal → D) (adv : RoAdv (Fin N) LeafVal D Out)
+    (hQ : (adv.queriedSalts O).length ≤ Q_ro)
+    (salts : Fin m → Fin N) (unopenedVals : Fin m → LeafVal) :
+    (∃ Φ : SimpleEquiv (ZkHem5TableProverCoins n) (ZkHem5TableSimCoins n),
+      ∃ Ψ : SimpleEquiv (Fin N × LeafVal → D) (Fin N × LeafVal → D),
+        (∀ coins, realZkHem5Table P w coins = simulateZkHem5Table P (Φ.toFun coins)) ∧
+        ((∀ i j : Fin m, salts i = salts j → i = j) →
+          (∀ j : Fin m, salts j ∉ adv.queriedSalts O) →
+          (fun j : Fin m => O (salts j, unopenedVals j)) =
+            (fun j : Fin m => (Ψ.toFun O) (salts j, zero)) ∧
+          adv.run (Ψ.toFun O) = adv.run O)) ∧
+    RatBound.le
+      ⟨saltVectorBadMass (adv.queriedSalts O) [] m, N ^ m, Nat.pow_pos hN⟩
+      ⟨m * Q_ro + m * (m - 1) / 2, N, hN⟩ := by
+  obtain ⟨Φ, hΦ⟩ := zkHem5Table_joint_hvzk_perfect P hρRow hρCol hβ w
+  let δ := unopenedSaltDelta salts unopenedVals
+  refine ⟨⟨Φ, saltShiftBij δ, hΦ, fun hInj hAvoid => ⟨?_, ?_⟩⟩, ?_⟩
+  · funext j
+    change O (salts j, unopenedVals j) = O (salts j, add zero (unopenedSaltDelta salts unopenedVals (salts j)))
+    rw [LawfulCommRing.zero_add, unopenedSaltDelta_at_injective salts unopenedVals hInj j]
+  · apply salted_leaves_identical_until_bad δ (fun s => ∃ j : Fin m, salts j = s)
+    · intro s hNot
+      exact unopenedSaltDelta_off_support salts unopenedVals s hNot
+    · apply (RoAdv.avoids_iff O (fun s => ∃ j : Fin m, salts j = s) adv).mpr
+      rintro s hs ⟨j, rfl⟩
+      exact hAvoid j hs
+  · refine RatBound.le_trans (saltVector_bad_probability hN (adv.queriedSalts O) m) ?_
+    unfold RatBound.le
+    dsimp only
+    exact Nat.mul_le_mul_right N
+      (Nat.add_le_add_right (Nat.mul_le_mul_left m hQ) _)
+
+/-- `#tooth` Subfield companion challenge (`β.c1 = 0`, i.e. `β ∈ F_{p^2}`) breaks five-table
+    companion masking: the `(c_1, c_3)` tower half of `privateBatchWord β Z C` is zero for every
+    base-field table `Z` and pad table `C`, so no pad table can realize `vBasis` at index `0`. -/
+theorem tooth_subfield_beta_breaks_five_table_batch_word (β : Fp4) (hβ : β.c1 = zero)
+    (Z : Fin 1 → Fp) :
+    ¬ ∃ C : Fin 1 → Pad,
+      privateBatchWord β Z C ⟨0, Nat.one_pos⟩ = GoldilocksField.GoldilocksExt4.vBasis := by
+  rintro ⟨C, hEq⟩
+  have hPad := padMap_c1_of_subfield β hβ (C ⟨0, Nat.one_pos⟩)
+  have hC1 := congrArg GoldilocksField.GoldilocksExt4.c1 hEq
+  unfold privateBatchWord embed at hC1
+  rw [fp4_add_c1, fp4_mul_c1, hβ, hPad] at hC1
+  have hZero : add (zero : Fp2) (add (mul β.c0 zero)
+      (mul zero (padMap β (C ⟨0, Nat.one_pos⟩)).c0)) = zero := by
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul,
+      LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  exact LawfulField.zero_ne_one (F := Fp2) (hZero.symm.trans (hC1.trans QuarticGoldilocks.vBasis_c1))
+
+#verify_constructive Qsag.ZkHem.unopenedSaltDelta_at_injective
+  Qsag.ZkHem.unopenedSaltDelta_off_support
+  Qsag.ZkHem.zkHem5Table_joint_hvzk_perfect
+  Qsag.ZkHem.zkHem5Table_salted_ro_hvzk_bound
+  Qsag.ZkHem.tooth_subfield_beta_breaks_five_table_batch_word
+#tooth_pair Qsag.ZkHem.zkHem5Table_joint_hvzk_perfect vs
+  Qsag.ZkHem.tooth_subfield_beta_breaks_five_table_batch_word
 
 section CubeSumcheckSoundness
 variable {F : Type} [LawfulField F] [DecidableEq F]

@@ -10,6 +10,7 @@ module
   migration modules build on.
 -/
 
+public import Qsag.Top.Migration
 public import Qsag.Protocol.Migration.PallasAndBlsMigration
 public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 public import Qsag.Math.EllipticCurves
@@ -223,5 +224,43 @@ end MigrationExecution
 #tooth_pair Qsag.MigrationExecution.rust_bit_check_numerator_63_bound vs Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
 
 #tooth_pair Qsag.MigrationExecution.rust_bit_check_numerator_63_bound vs Qsag.MigrationExecution.tooth_rust_bit_check_numerator_54_too_small
+
+/-- `#tooth` Regression against `gpt6pro` §2A: global injectivity `SwPoint → Spec.Digest256` is
+    literally `False` by constructive Pigeonhole (`SwPoint` infinite, `Digest256 = BitVec 256`). -/
+theorem tooth_global_swPoint_nullifier_injectivity_false :
+    ¬ ∃ deriveNullifier : SwPoint → Spec.Digest256,
+        ∀ {pk₁ pk₂ : SwPoint}, deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂ :=
+  tooth_unbounded_swPoint_no_injective_bitvec 256
+
+#verify_constructive
+  Qsag.tooth_global_swPoint_nullifier_injectivity_false
+  Qsag.CanonicalSwPk.encodeCoordNat_lt_sq
+  Qsag.CanonicalSwPk.encodeCoordNat_injective
+  Qsag.tooth_unbounded_swPoint_no_injective_bitvec
+  Qsag.tooth_bls381_width_no_injective_bitvec256
+  Qsag.PrimeSubgroup.smulCanonicalPk_toSwPoint
+  Qsag.PrimeSubgroup.smulCanonicalPk_injective
+  Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts_or_collision
+  Qsag.Spec.idealMigrate_step_eq_idealKeyMigrate_or_collision
+  Qsag.Spec.tooth_idealMigrate_colliding_nullifier_blocks_second_key
+  Qsag.Top.dlogSettlement_refinement_exists
+  Qsag.Top.dlogSettlement_schedule_refines_or_nullifierCollision
+  Qsag.Top.dlogSettlement_schedule_complete_of_injOn
+  Qsag.Top.secp7Mod43Nullifier_injective
+  Qsag.Top.tooth_secp7Mod43DecodePk_rejects_offCurve_and_unreduced
+  Qsag.Top.secp7Mod43_dlogSettlement_complete_refinement_witness
+  Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_extracts_collision
+  Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision
+  Qsag.Top.bls381_compressing_nullifier_nonvacuous
+
+#verify_inhabited
+  Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
+  Qsag.Top.inhabited_dlogOwnership_accepted_claim
+#verify_inhabited
+  Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement
+  Qsag.Top.inhabited_zkboo_extracted_scalar_claim
+#verify_inhabited
+  Qsag.Top.dlogSettlement_schedule_complete_of_injOn
+  Qsag.Top.inhabited_dlogSettlement_schedule_complete
 
 end Qsag

@@ -4,6 +4,7 @@ set -e
 mkdir -p build
 python3 scripts/gen_p2_rc.py rtl/qsag_p2_rc.sv
 python3 tb/gen_dp_vectors.py tb/fixtures/lean_external_oracle_vectors.json build/dp_vectors.txt
+python3 tb/gen_kat_vectors.py build/kat_vectors.txt
 RTL="rtl/qsag_cells.sv rtl/qsag_gl64_karatsuba_csa.sv rtl/qsag_sponge.sv rtl/qsag_keccak_serial.sv rtl/qsag_p2_rc.sv rtl/qsag_field_engine.sv tb/dp_top.sv"
 for cfg in "" "-DQSAG_ICG" "-DQSAG_ICG -DQSAG_LATCH_RF"; do
     rm -rf build/obj_dp
@@ -12,4 +13,5 @@ for cfg in "" "-DQSAG_ICG" "-DQSAG_ICG -DQSAG_LATCH_RF"; do
     grep -c '%Warning' build/unit_dp_build.log || true
     echo "config: [$cfg]"
     build/obj_dp/unit_dp build/dp_vectors.txt
+    build/obj_dp/unit_dp build/kat_vectors.txt keccak_fips202_kat
 done

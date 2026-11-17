@@ -51,7 +51,7 @@ the external regulator rating as permission to exceed pad current limits.
    weakly coupled VNA loop. The analytic loaded Q≈17.88 is a small-signal estimate;
    rectifier/clamp and gate loading change it substantially. Geometry-derived
    coupling and plane-loss estimates are not an EM extraction.
-4. **Rectifier and cold tap:** tank → 220 Ω → Schottky rectifier → `RECT`, with
+4. **Rectifier and cold tap:** tank → 150 Ω → Schottky rectifier → `RECT`, with
    4.7 nF, 10 kΩ bleed, and 4.7 V shunt Zener to ground. Add the negative
    Schottky clamp at the rectifier input. **RECT remains separate from ASIC 5 V.**
    For the clock input, tank → 2.2 kΩ → FDV301N gate; Schottky clamps from gate to
@@ -100,7 +100,7 @@ the external regulator rating as permission to exceed pad current limits.
 | CT1, CT2 | 68 pF + 12 pF, C0G, 1%, ≥100 V | Initial tank tuning |
 | CT3 | 3–15 pF RF trimmer, ≥100 V | Tune populated board |
 | RD, RB | 4.7 Ω / 12 kΩ | Tank damping / bleed |
-| RR | 220 Ω, ≥0.25 W | Rectifier current limiting; verify measured dissipation |
+| RR | 150 Ω, ≥0.5 W | Rectifier current limiting; verify measured dissipation |
 | RG | 2.2 kΩ, ≥0.25 W | Gate branch current limiting |
 | RP, RGS | 470 Ω / 1 MΩ | Drain pullup / gate pulldown |
 | CR, RRECT | 4.7 nF / 10 kΩ | Independent rectified node |

@@ -55,7 +55,7 @@ module qsag_async_fifo_gray #(
         for (i = 0; i < DEPTH; i++) begin : g_mem
             wire we = any_we && (wbin[AW-1:0] == AW'(i));
             wire gate;
-            qsag_clkgate_1 u_cg (.clk(wclk), .en(we), .gclk(gate));
+            qsag_latgate u_cg (.clk(wclk), .en(we), .gclk(gate));
             qsag_latch_word #(.W(W)) u_m (.gate(gate), .d(wd_hold_q), .q(mem[i]));
         end
 `else

@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 import re
+import platform
 import subprocess
 
 
@@ -11,7 +12,9 @@ def main():
     p.add_argument('--stock',required=True)
     p.add_argument('--fixed',required=True)
     p.add_argument('--output',type=Path,default=Path('engine_regression'))
-    a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
+    a=p.parse_args()
+    if platform.system() != 'Linux':p.error('Linux build host required')
+    a.output.mkdir(parents=True,exist_ok=True)
     template=(Path(__file__).parent/'diode_sidewall_regression.sp').read_text()
     for label,exe,temp,fcs in [('stock',a.stock,-40,.5)]+[
             (f'fixed_{t}_{f}',a.fixed,t,f) for t in [-40,27,125] for f in [.35,.5]]:

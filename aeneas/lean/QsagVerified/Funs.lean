@@ -2632,37 +2632,37 @@ def belt_latch_kernel.BeltLatchKernel.bind
                 belt_latch_kernel.BeltLatchKernelError.WalPersistFailed)
 
 /-- [qsag_verified::cred_and_hd_guards::MLDSA_Q]
-    Source: 'src/cred_and_hd_guards.rs', lines 16:0-16:35
+    Source: 'src/cred_and_hd_guards.rs', lines 18:0-18:35
     Visibility: public -/
 @[global_simps, irreducible]
 def cred_and_hd_guards.MLDSA_Q : Std.U32 := 8380417#u32
 
 /-- [qsag_verified::cred_and_hd_guards::MLDSA44_Z_NORM_BOUND]
-    Source: 'src/cred_and_hd_guards.rs', lines 19:0-19:46
+    Source: 'src/cred_and_hd_guards.rs', lines 21:0-21:46
     Visibility: public -/
 @[global_simps, irreducible]
 def cred_and_hd_guards.MLDSA44_Z_NORM_BOUND : Std.U32 := 130994#u32
 
 /-- [qsag_verified::cred_and_hd_guards::MLDSA44_R0_NORM_BOUND]
-    Source: 'src/cred_and_hd_guards.rs', lines 22:0-22:46
+    Source: 'src/cred_and_hd_guards.rs', lines 24:0-24:46
     Visibility: public -/
 @[global_simps, irreducible]
 def cred_and_hd_guards.MLDSA44_R0_NORM_BOUND : Std.U32 := 95154#u32
 
 /-- [qsag_verified::cred_and_hd_guards::MLDSA65_Z_NORM_BOUND]
-    Source: 'src/cred_and_hd_guards.rs', lines 25:0-25:46
+    Source: 'src/cred_and_hd_guards.rs', lines 27:0-27:46
     Visibility: public -/
 @[global_simps, irreducible]
 def cred_and_hd_guards.MLDSA65_Z_NORM_BOUND : Std.U32 := 524092#u32
 
 /-- [qsag_verified::cred_and_hd_guards::MLDSA65_R0_NORM_BOUND]
-    Source: 'src/cred_and_hd_guards.rs', lines 28:0-28:47
+    Source: 'src/cred_and_hd_guards.rs', lines 30:0-30:47
     Visibility: public -/
 @[global_simps, irreducible]
 def cred_and_hd_guards.MLDSA65_R0_NORM_BOUND : Std.U32 := 261692#u32
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::CredHdGuardError}::clone]:
-    Source: 'src/cred_and_hd_guards.rs', lines 31:9-31:14
+    Source: 'src/cred_and_hd_guards.rs', lines 33:9-33:14
     Visibility: public -/
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreCloneClone.clone
   (self : cred_and_hd_guards.CredHdGuardError) :
@@ -2671,7 +2671,7 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:9-31:14 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:9-33:14 -/
 @[reducible]
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreCloneClone : core.clone.Clone
   cred_and_hd_guards.CredHdGuardError := {
@@ -2679,7 +2679,7 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::Copy for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:16-31:20 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:16-33:20 -/
 @[reducible]
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreMarkerCopy : core.marker.Copy
   cred_and_hd_guards.CredHdGuardError := {
@@ -2687,7 +2687,7 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::CredHdGuardError}::fmt]:
-    Source: 'src/cred_and_hd_guards.rs', lines 31:22-31:27
+    Source: 'src/cred_and_hd_guards.rs', lines 33:22-33:27
     Visibility: public -/
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreFmtDebug.fmt
   (self : cred_and_hd_guards.CredHdGuardError) (f : core.fmt.Formatter) :
@@ -2715,7 +2715,7 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "HdZeroTestMismatchQuarantined")
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:22-31:27 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:22-33:27 -/
 @[reducible]
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreFmtDebug : core.fmt.Debug
   cred_and_hd_guards.CredHdGuardError := {
@@ -2723,14 +2723,14 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::StructuralPartialEq for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:29-31:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:29-33:38 -/
 @[reducible]
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq cred_and_hd_guards.CredHdGuardError := {
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::CredHdGuardError> for qsag_verified::cred_and_hd_guards::CredHdGuardError}::eq]:
-    Source: 'src/cred_and_hd_guards.rs', lines 31:29-31:38
+    Source: 'src/cred_and_hd_guards.rs', lines 33:29-33:38
     Visibility: public -/
 def
   cred_and_hd_guards.CredHdGuardError.Insts.CoreCmpPartialEqCredHdGuardError.eq
@@ -2743,7 +2743,7 @@ def
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::CredHdGuardError> for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:29-31:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:29-33:38 -/
 @[reducible]
 def cred_and_hd_guards.CredHdGuardError.Insts.CoreCmpPartialEqCredHdGuardError
   : core.cmp.PartialEq cred_and_hd_guards.CredHdGuardError
@@ -2753,7 +2753,7 @@ def cred_and_hd_guards.CredHdGuardError.Insts.CoreCmpPartialEqCredHdGuardError
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::Eq for qsag_verified::cred_and_hd_guards::CredHdGuardError}]
-    Source: 'src/cred_and_hd_guards.rs', lines 31:40-31:42 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 33:40-33:42 -/
 @[reducible]
 impl_def cred_and_hd_guards.CredHdGuardError.Insts.CoreCmpEq : core.cmp.Eq
   cred_and_hd_guards.CredHdGuardError := {
@@ -2764,7 +2764,7 @@ impl_def cred_and_hd_guards.CredHdGuardError.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::cred_and_hd_guards::mldsa44_sample_eta2_nibble_mod_q]:
-    Source: 'src/cred_and_hd_guards.rs', lines 48:0-58:1
+    Source: 'src/cred_and_hd_guards.rs', lines 50:0-60:1
     Visibility: public -/
 def cred_and_hd_guards.mldsa44_sample_eta2_nibble_mod_q
   (nibble : Std.U8) : Result (Option Std.U32) := do
@@ -2782,7 +2782,7 @@ def cred_and_hd_guards.mldsa44_sample_eta2_nibble_mod_q
       ok (some i2)
 
 /-- [qsag_verified::cred_and_hd_guards::check_mldsa44_norm_bounds]:
-    Source: 'src/cred_and_hd_guards.rs', lines 62:0-74:1
+    Source: 'src/cred_and_hd_guards.rs', lines 64:0-76:1
     Visibility: public -/
 def cred_and_hd_guards.check_mldsa44_norm_bounds
   (z_inf_norm : Std.U32) (r0_inf_norm : Std.U32) : Result (Bool × Bool) := do
@@ -2795,7 +2795,7 @@ def cred_and_hd_guards.check_mldsa44_norm_bounds
   else ok (z_ok, false)
 
 /-- [qsag_verified::cred_and_hd_guards::check_mldsa65_norm_bounds]:
-    Source: 'src/cred_and_hd_guards.rs', lines 78:0-90:1
+    Source: 'src/cred_and_hd_guards.rs', lines 80:0-92:1
     Visibility: public -/
 def cred_and_hd_guards.check_mldsa65_norm_bounds
   (z_inf_norm : Std.U32) (r0_inf_norm : Std.U32) : Result (Bool × Bool) := do
@@ -2808,7 +2808,7 @@ def cred_and_hd_guards.check_mldsa65_norm_bounds
   else ok (z_ok, false)
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::MlDsaBarrierChecks}::clone]:
-    Source: 'src/cred_and_hd_guards.rs', lines 93:9-93:14
+    Source: 'src/cred_and_hd_guards.rs', lines 95:9-95:14
     Visibility: public -/
 def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreCloneClone.clone
   (self : cred_and_hd_guards.MlDsaBarrierChecks) :
@@ -2817,7 +2817,7 @@ def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::MlDsaBarrierChecks}]
-    Source: 'src/cred_and_hd_guards.rs', lines 93:9-93:14 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 95:9-95:14 -/
 @[reducible]
 def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreCloneClone :
   core.clone.Clone cred_and_hd_guards.MlDsaBarrierChecks := {
@@ -2825,7 +2825,7 @@ def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::Copy for qsag_verified::cred_and_hd_guards::MlDsaBarrierChecks}]
-    Source: 'src/cred_and_hd_guards.rs', lines 93:16-93:20 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 95:16-95:20 -/
 @[reducible]
 def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreMarkerCopy :
   core.marker.Copy cred_and_hd_guards.MlDsaBarrierChecks := {
@@ -2833,7 +2833,7 @@ def cred_and_hd_guards.MlDsaBarrierChecks.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::cred_and_hd_guards::abort_mldsa_gate]:
-    Source: 'src/cred_and_hd_guards.rs', lines 121:0-129:1 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 123:0-131:1 -/
 def cred_and_hd_guards.abort_mldsa_gate
   (session_id : Array Std.U8 32#usize) (attempt : Std.U32) :
   Result cred_and_hd_guards.MlDsaReleaseGate
@@ -2849,7 +2849,7 @@ def cred_and_hd_guards.abort_mldsa_gate
     }
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::session_id]:
-    Source: 'src/cred_and_hd_guards.rs', lines 133:4-135:5
+    Source: 'src/cred_and_hd_guards.rs', lines 135:4-137:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.impl.session_id
   (self : cred_and_hd_guards.MlDsaReleaseGate) :
@@ -2858,28 +2858,28 @@ def cred_and_hd_guards.MlDsaReleaseGate.impl.session_id
   ok self.session_id
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::attempt]:
-    Source: 'src/cred_and_hd_guards.rs', lines 138:4-140:5
+    Source: 'src/cred_and_hd_guards.rs', lines 140:4-142:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.impl.attempt
   (self : cred_and_hd_guards.MlDsaReleaseGate) : Result Std.U32 := do
   ok self.attempt
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::released]:
-    Source: 'src/cred_and_hd_guards.rs', lines 143:4-145:5
+    Source: 'src/cred_and_hd_guards.rs', lines 145:4-147:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.impl.released
   (self : cred_and_hd_guards.MlDsaReleaseGate) : Result Bool := do
   ok self.released
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::aborted]:
-    Source: 'src/cred_and_hd_guards.rs', lines 148:4-150:5
+    Source: 'src/cred_and_hd_guards.rs', lines 150:4-152:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.impl.aborted
   (self : cred_and_hd_guards.MlDsaReleaseGate) : Result Bool := do
   ok self.aborted
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::new_sealed]:
-    Source: 'src/cred_and_hd_guards.rs', lines 154:4-166:5
+    Source: 'src/cred_and_hd_guards.rs', lines 156:4-168:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.new_sealed
   (session_id : Array Std.U8 32#usize) (attempt : Std.U32)
@@ -2891,7 +2891,7 @@ def cred_and_hd_guards.MlDsaReleaseGate.new_sealed
     }
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::try_release_z_share]:
-    Source: 'src/cred_and_hd_guards.rs', lines 171:4-208:5
+    Source: 'src/cred_and_hd_guards.rs', lines 173:4-210:5
     Visibility: public -/
 def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
   (self : cred_and_hd_guards.MlDsaReleaseGate)
@@ -2963,6 +2963,72 @@ def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
         ok (mdrg, core.result.Result.Err
           cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
 
+/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::abort_in_place]:
+    Source: 'src/cred_and_hd_guards.rs', lines 253:4-257:5
+    Visibility: public -/
+def cred_and_hd_guards.MlDsaReleaseGate.abort_in_place
+  (self : cred_and_hd_guards.MlDsaReleaseGate) :
+  Result cred_and_hd_guards.MlDsaReleaseGate
+  := do
+  let a := Array.repeat 32#usize 0#u8
+  ok { self with z_share_masked := a, released := false, aborted := true }
+
+/-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::MlDsaReleaseGate}::try_release_z_share_into]:
+    Source: 'src/cred_and_hd_guards.rs', lines 218:4-249:5
+    Visibility: public -/
+def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share_into
+  (self : cred_and_hd_guards.MlDsaReleaseGate)
+  (checks : cred_and_hd_guards.MlDsaBarrierChecks)
+  (out : Array Std.U8 32#usize) :
+  Result ((core.result.Result Unit cred_and_hd_guards.CredHdGuardError) ×
+    cred_and_hd_guards.MlDsaReleaseGate × (Array Std.U8 32#usize))
+  := do
+  let refusal ←
+    if self.aborted
+    then ok (some cred_and_hd_guards.CredHdGuardError.GateAbortedOrReleased)
+    else
+      if self.released
+      then ok (some cred_and_hd_guards.CredHdGuardError.GateAbortedOrReleased)
+      else
+        do
+        let b ← tower.ct_eq_bytes32 self.session_id checks.req_session_id
+        if b
+        then
+          if self.attempt != checks.req_attempt
+          then ok (some cred_and_hd_guards.CredHdGuardError.AttemptMismatch)
+          else
+            if checks.z_norm_ok
+            then
+              if checks.r0_norm_ok
+              then
+                if checks.w1_match
+                then
+                  if checks.u_com_bound
+                  then ok none
+                  else
+                    ok (some
+                      cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
+                else
+                  ok (some
+                    cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
+              else
+                ok (some
+                  cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
+            else
+              ok (some
+                cred_and_hd_guards.CredHdGuardError.RejectionSamplingBarrierFailed)
+        else ok (some cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
+  match refusal with
+  | none =>
+    let a := Array.repeat 32#usize 0#u8
+    ok (core.result.Result.Ok (),
+      { self with z_share_masked := a, released := true, aborted := false },
+      self.z_share_masked)
+  | some error =>
+    let out1 := Array.repeat 32#usize 0#u8
+    let self1 ← cred_and_hd_guards.MlDsaReleaseGate.abort_in_place self
+    ok (core.result.Result.Err error, self1, out1)
+
 /-- [qsag_verified::goldilocks::GOLDILOCKS_PRIME]
     Source: 'src/goldilocks.rs', lines 11:0-11:56
     Visibility: public -/
@@ -2970,7 +3036,7 @@ def cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share
 def goldilocks.GOLDILOCKS_PRIME : Std.U64 := 18446744069414584321#u64
 
 /-- [qsag_verified::cred_and_hd_guards::toprf_majority_of_3_goldilocks]:
-    Source: 'src/cred_and_hd_guards.rs', lines 218:0-252:1
+    Source: 'src/cred_and_hd_guards.rs', lines 267:0-301:1
     Visibility: public -/
 def cred_and_hd_guards.toprf_majority_of_3_goldilocks
   (s0 : Std.U64) (s1 : Std.U64) (s2 : Std.U64) :
@@ -3033,7 +3099,7 @@ def cred_and_hd_guards.toprf_majority_of_3_goldilocks
            else ok none
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::clone]:
-    Source: 'src/cred_and_hd_guards.rs', lines 255:9-255:14
+    Source: 'src/cred_and_hd_guards.rs', lines 304:9-304:14
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone.clone
   (self : cred_and_hd_guards.HdZeroTestPhase) :
@@ -3042,7 +3108,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::clone::Clone for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:9-255:14 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:9-304:14 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone : core.clone.Clone
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3050,7 +3116,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::Copy for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:16-255:20 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:16-304:20 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerCopy : core.marker.Copy
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3058,7 +3124,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::fmt]:
-    Source: 'src/cred_and_hd_guards.rs', lines 255:22-255:27
+    Source: 'src/cred_and_hd_guards.rs', lines 304:22-304:27
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug.fmt
   (self : cred_and_hd_guards.HdZeroTestPhase) (f : core.fmt.Formatter) :
@@ -3077,7 +3143,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "FamilyQuarantined")
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::fmt::Debug for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:22-255:27 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:22-304:27 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug : core.fmt.Debug
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3085,14 +3151,14 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::marker::StructuralPartialEq for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:29-255:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq cred_and_hd_guards.HdZeroTestPhase := {
 }
 
 /-- [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::HdZeroTestPhase> for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}::eq]:
-    Source: 'src/cred_and_hd_guards.rs', lines 255:29-255:38
+    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38
     Visibility: public -/
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase.eq
   (self : cred_and_hd_guards.HdZeroTestPhase)
@@ -3104,7 +3170,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase.eq
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::PartialEq<qsag_verified::cred_and_hd_guards::HdZeroTestPhase> for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:29-255:38 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:29-304:38 -/
 @[reducible]
 def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase :
   core.cmp.PartialEq cred_and_hd_guards.HdZeroTestPhase
@@ -3114,7 +3180,7 @@ def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpPartialEqHdZeroTestPhase :
 }
 
 /-- Trait implementation: [qsag_verified::cred_and_hd_guards::{impl core::cmp::Eq for qsag_verified::cred_and_hd_guards::HdZeroTestPhase}]
-    Source: 'src/cred_and_hd_guards.rs', lines 255:40-255:42 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 304:40-304:42 -/
 @[reducible]
 impl_def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpEq : core.cmp.Eq
   cred_and_hd_guards.HdZeroTestPhase := {
@@ -3125,7 +3191,7 @@ impl_def cred_and_hd_guards.HdZeroTestPhase.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::cred_and_hd_guards::quarantine_hd_family]:
-    Source: 'src/cred_and_hd_guards.rs', lines 277:0-290:1 -/
+    Source: 'src/cred_and_hd_guards.rs', lines 326:0-339:1 -/
 def cred_and_hd_guards.quarantine_hd_family
   (session_id : Array Std.U8 32#usize)
   (frozen_peer_commitment : Array Std.U8 32#usize) (modulus_q : Std.U32) :
@@ -3142,7 +3208,7 @@ def cred_and_hd_guards.quarantine_hd_family
     }
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::session_id]:
-    Source: 'src/cred_and_hd_guards.rs', lines 294:4-296:5
+    Source: 'src/cred_and_hd_guards.rs', lines 343:4-345:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.session_id
   (self : cred_and_hd_guards.HdCommittedZeroTest) :
@@ -3151,7 +3217,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.impl.session_id
   ok self.session_id
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::phase]:
-    Source: 'src/cred_and_hd_guards.rs', lines 299:4-301:5
+    Source: 'src/cred_and_hd_guards.rs', lines 348:4-350:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.phase
   (self : cred_and_hd_guards.HdCommittedZeroTest) :
@@ -3160,7 +3226,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.impl.phase
   ok self.phase
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::frozen_peer_commitment]:
-    Source: 'src/cred_and_hd_guards.rs', lines 304:4-306:5
+    Source: 'src/cred_and_hd_guards.rs', lines 353:4-355:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.frozen_peer_commitment
   (self : cred_and_hd_guards.HdCommittedZeroTest) :
@@ -3169,21 +3235,21 @@ def cred_and_hd_guards.HdCommittedZeroTest.impl.frozen_peer_commitment
   ok self.frozen_peer_commitment
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::modulus_q]:
-    Source: 'src/cred_and_hd_guards.rs', lines 309:4-311:5
+    Source: 'src/cred_and_hd_guards.rs', lines 358:4-360:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.modulus_q
   (self : cred_and_hd_guards.HdCommittedZeroTest) : Result Std.U32 := do
   ok self.modulus_q
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::family_quarantined]:
-    Source: 'src/cred_and_hd_guards.rs', lines 314:4-316:5
+    Source: 'src/cred_and_hd_guards.rs', lines 363:4-365:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.impl.family_quarantined
   (self : cred_and_hd_guards.HdCommittedZeroTest) : Result Bool := do
   ok self.family_quarantined
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::new_awaiting_peer_commit]:
-    Source: 'src/cred_and_hd_guards.rs', lines 321:4-338:5
+    Source: 'src/cred_and_hd_guards.rs', lines 370:4-387:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit
   (session_id : Array Std.U8 32#usize) (local_residual : Std.U32)
@@ -3212,7 +3278,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit
         }
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::freeze_peer_commitment]:
-    Source: 'src/cred_and_hd_guards.rs', lines 341:4-380:5
+    Source: 'src/cred_and_hd_guards.rs', lines 390:4-429:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment
   (self : cred_and_hd_guards.HdCommittedZeroTest)
@@ -3273,7 +3339,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment
         cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::open_local_residual]:
-    Source: 'src/cred_and_hd_guards.rs', lines 384:4-423:5
+    Source: 'src/cred_and_hd_guards.rs', lines 433:4-472:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.open_local_residual
   (self : cred_and_hd_guards.HdCommittedZeroTest)
@@ -3332,7 +3398,7 @@ def cred_and_hd_guards.HdCommittedZeroTest.open_local_residual
         cred_and_hd_guards.CredHdGuardError.SessionIdMismatch)
 
 /-- [qsag_verified::cred_and_hd_guards::{qsag_verified::cred_and_hd_guards::HdCommittedZeroTest}::verify_peer_opening]:
-    Source: 'src/cred_and_hd_guards.rs', lines 427:4-490:5
+    Source: 'src/cred_and_hd_guards.rs', lines 476:4-539:5
     Visibility: public -/
 def cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening
   (self : cred_and_hd_guards.HdCommittedZeroTest)

@@ -64,6 +64,19 @@ export qsag_verified.proofs (
   extractedMlDsa_forwardSim_mirMlDsa
   extractedMlDsa_at_most_one_release
   tooth_extractedMlDsa_failed_barrier_never_released
+  mlDsa_abort_in_place_spec
+  mlDsa_abort_in_place_refuses_valid_checks
+  mlDsa_try_release_into_eq_by_value
+  mlDsa_try_release_into_postcondition
+  mlDsaTryReleaseIntoStep
+  mlDsaTryReleaseIntoStep_eq_by_value
+  mlDsaInto_extracted_step_refines
+  extractedMlDsaIntoMachine
+  extractedMlDsaInto_forwardSim_mirMlDsa
+  extractedMlDsaInto_at_most_one_release
+  mlDsa_try_release_into_failed_barrier_wipes_out_and_aborts
+  tooth_mlDsa_abort_in_place_blocks_valid_checks
+  tooth_extractedMlDsaInto_failed_barrier_wipes_out_and_withholds
   beltKernelAbs
   beltReqAbs
   beltLatch_extracted_step_refines
@@ -118,6 +131,15 @@ run_cmd do
     ``qsag_verified.proofs.extractedVelocity_multiTurn_cap_and_monotonic_nonce,
     ``qsag_verified.proofs.mlDsa_extracted_step_refines,
     ``qsag_verified.proofs.extractedMlDsa_at_most_one_release,
+    ``qsag_verified.proofs.mlDsa_abort_in_place_spec,
+    ``qsag_verified.proofs.mlDsa_abort_in_place_refuses_valid_checks,
+    ``qsag_verified.proofs.mlDsa_try_release_into_eq_by_value,
+    ``qsag_verified.proofs.mlDsa_try_release_into_postcondition,
+    ``qsag_verified.proofs.mlDsaInto_extracted_step_refines,
+    ``qsag_verified.proofs.extractedMlDsaInto_at_most_one_release,
+    ``qsag_verified.proofs.mlDsa_try_release_into_failed_barrier_wipes_out_and_aborts,
+    ``qsag_verified.proofs.tooth_mlDsa_abort_in_place_blocks_valid_checks,
+    ``qsag_verified.proofs.tooth_extractedMlDsaInto_failed_barrier_wipes_out_and_withholds,
     ``qsag_verified.proofs.beltLatch_extracted_step_refines,
     ``qsag_verified.proofs.extractedBeltLatch_equivocation_free,
     ``qsag_verified.proofs.sigma_release_iff,
@@ -146,6 +168,7 @@ run_cmd do
     ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut,
     ``qsag_verified.proofs.extractedVelocity_forwardSim_mirVelocity,
     ``qsag_verified.proofs.extractedMlDsa_forwardSim_mirMlDsa,
+    ``qsag_verified.proofs.extractedMlDsaInto_forwardSim_mirMlDsa,
     ``qsag_verified.proofs.extractedBeltLatch_forwardSim_mirBeltLatchKernel]
   for simulationName in simulationNames do
     match env.find? simulationName with

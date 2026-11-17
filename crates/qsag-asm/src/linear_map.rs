@@ -244,8 +244,7 @@ unsafe fn gfni128(x: u128, matrices: &ByteMatrices) -> u128 {
     let result = u128::from_le_bytes(out);
     crate::volatile_fill(&mut out, 0);
     crate::volatile_fill(&mut input_bytes, 0);
-    // SAFETY: SSE2 is baseline; no vector value is live past this point.
-    unsafe { crate::wipe::wipe_xmm_regs() };
+    crate::wipe::wipe_vector_scratch();
     result
 }
 
@@ -278,8 +277,7 @@ unsafe fn pclmul_map<const INVERSE: bool>(x: u128) -> u128 {
     let result = u128::from_le_bytes(output);
     crate::volatile_fill(&mut output, 0);
     crate::volatile_fill(&mut input_bytes, 0);
-    // SAFETY: SSE2 is baseline; no vector value is live past this point.
-    unsafe { crate::wipe::wipe_xmm_regs() };
+    crate::wipe::wipe_vector_scratch();
     result
 }
 

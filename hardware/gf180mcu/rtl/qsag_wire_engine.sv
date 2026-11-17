@@ -5,7 +5,8 @@
 //     both `12'h000` crowbar-zero and `12'hFFF` laser-saturation states with distance >= 4, checked
 //     via `(* keep_hierarchy *)` `qsag_hd4_checker` + complementary loop counter `steps_inv_q`!).
 //   * Full 62-bit Merkle index (`midx[62:0]`, `lidx[61:0]`, planetary depth `1..62`, Gotcha #6).
-//   * 1-clock 64-byte shadow-to-sponge Keccak block absorb (`blk_absorb_mask`, Gotcha #4).
+//   * Input words that arrive while Keccak permutes are parked in the scratchpad rows and absorbed
+//     afterwards one word at a time (`S_KSB`, two clocks per word).
 //   * Day-1 Built-In Self-Test (`0x03 OP_BIST`, < 950 clocks cold-reset KAT over TurboSHAKE256 +
 //     Goldilocks Karatsuba-CSA + Han-Carlson prefix adders + Ext4 + GF(2^128) CLMUL).
 //   * EAL6+ In-Hardware `Cut-the-Hash` WOTS+C Chain-End Self-Verification (`flags[3]=1`, computing
@@ -16,12 +17,13 @@
 //     gating on `0x41 OP_CTH` and `0x42 OP_PRFMSG`).
 `default_nettype none
 
-(* keep_hierarchy *) module qsag_hd4_checker #(
-    parameter logic [6:0] MAX_ID = 7'd123
-) (
+// (No parameter: a parameterized module is renamed `$paramod...` by Yosys, and LibreLane's
+// unmapped-cell check counts every instance whose type starts with `$`.)
+(* keep_hierarchy *) module qsag_hd4_checker (
     input  wire [11:0] c,
     output wire        ok
 );
+    localparam logic [6:0] MAX_ID = 7'd123;
     wire [3:0] p = ({4{c[5]}} & 4'd3)  ^ ({4{c[6]}} & 4'd5)
                  ^ ({4{c[7]}} & 4'd6)  ^ ({4{c[8]}} & 4'd7)
                  ^ ({4{c[9]}} & 4'd9)  ^ ({4{c[10]}} & 4'd10)
@@ -32,7 +34,10 @@
 endmodule
 
 module qsag_wire_engine #(
-    parameter int GF_D = 4
+    // GF(2^128) digit width: one binding / tag step takes 128 / GF_D clocks. 2 instead of 4 halves
+    // the digit-serial multiplier; a step is still far shorter than the Poseidon2 or Keccak work
+    // it sits next to (R1 A1).
+    parameter int GF_D = 2
 ) (
     input  wire         clk,
     input  wire         rst_n,        // core reset (synchronized)
@@ -185,10 +190,10 @@ module qsag_wire_engine #(
 
     (* fsm_encoding = "none", keep *) logic [11:0] st, ret, ret2, ret3;
     wire ok_st, ok_r1, ok_r2, ok_r3;
-    qsag_hd4_checker #(.MAX_ID(7'd123)) u_chk_st (.c(st),   .ok(ok_st));
-    qsag_hd4_checker #(.MAX_ID(7'd123)) u_chk_r1 (.c(ret),  .ok(ok_r1));
-    qsag_hd4_checker #(.MAX_ID(7'd123)) u_chk_r2 (.c(ret2), .ok(ok_r2));
-    qsag_hd4_checker #(.MAX_ID(7'd123)) u_chk_r3 (.c(ret3), .ok(ok_r3));
+    qsag_hd4_checker u_chk_st (.c(st),   .ok(ok_st));
+    qsag_hd4_checker u_chk_r1 (.c(ret),  .ok(ok_r1));
+    qsag_hd4_checker u_chk_r2 (.c(ret2), .ok(ok_r2));
+    qsag_hd4_checker u_chk_r3 (.c(ret3), .ok(ok_r3));
 
     // Complementary shadow loop counter `steps_inv_q` (Subcarbon R0 §5.1.3: catches single-spot
     // laser counter skipping in WOTS+C!)
@@ -217,9 +222,9 @@ module qsag_wire_engine #(
     logic [5:0]  obase;
     logic [4:0]  olim;
     logic        partial;
-    // 1-clock shadow block absorb tracking
+    // scratchpad words parked during a permutation, and the phase of their absorb loop
     logic [3:0]  sh_fill;
-    logic [7:0]  sh_mask;
+    logic        ksb_ph;
     // Poseidon2 sponge hash
     logic [15:0] hs_n, hs_k;
     logic [3:0]  hs_idx;
@@ -239,6 +244,8 @@ module qsag_wire_engine #(
     logic        inrec, fail, fset, noncanon, verdict;
     // keys, enclave & Houyhnhnm state
     wire  [63:0] key [6];
+    wire [383:0] key_q;
+    wire [255:0] kvat_q;
     logic        key_valid, vat_mint_locked;
     logic [31:0] cur, hwm, ctmp;
     logic        hwm_valid, v0, anyv, older, aslot, rcmp, hi0, macdiff, is_fors, isprf;
@@ -261,19 +268,16 @@ module qsag_wire_engine #(
     assign puf_blk_sel = puf_blk;
 
     // ------------------------------------------------------------------ CapTP Vat Membrane
-    logic [3:0]  kvat_we;
     logic        kvat_commit, zk_latch_we, zk_latch_set, zk_latch_clr;
     logic        vat_pchk_clr, vat_pwe, vat_cchk_clr, vat_cwe;
     wire         vat_commit_inv;
     wire         vat_ready, zk_root_valid, vat_att_ok, vat_att_step_ok, vat_inv_ok, vat_need_fram;
-    wire  [63:0] kvat_rdata;
     wire  [31:0] vat_spend_used;
 
     wire [15:0] vat_req_right = (op == OP_CTH)    ? 16'h0001 :
                                 (op == OP_PRFMSG) ? 16'h0002 : 16'h0004;
     wire [31:0] vat_req_epoch = (op == OP_CTH)    ? y_hold0[31:0] : {16'd0, arg};
     wire [31:0] vat_req_spend = (op == OP_CTH)    ? {24'd0, arg[7:0]} : 32'd1;
-    wire [63:0] kvat_wd_mux   = (st == S_KLH) ? in_data : port;
 
     assign vat_ready_o = vat_ready;
 
@@ -303,7 +307,6 @@ module qsag_wire_engine #(
     logic [5:0]  e_rd, e_wa;
     logic        e_we;
     logic [63:0] e_wd;
-    logic [7:0]  blk_abs_pulse;
 
     logic zeroize_q;
     /* verilator lint_off SYNCASYNCNET */
@@ -341,6 +344,23 @@ module qsag_wire_engine #(
         .busy(kc_busy), .done(kc_done), .rd_addr(kc_rd), .port(port),
         .wr_en(kc_we), .wr_addr(kc_wa), .wr_data(kc_wd)
     );
+    // Aux write port of the register file: scratchpad word from the input stream while Keccak
+    // owns the scalar port, or one key / vat-root-key row. Key words come from the sponge (derived
+    // keys) in S_KLK / S_PF4 / S_PF5 and from the input stream otherwise.
+    logic [5:0]  key_we;
+    logic [3:0]  kvat_we;
+    wire         key_wr    = (|key_we)  && permit_control;
+    wire         kvat_wr   = (|kvat_we) && permit_control;
+    wire         aux_we    = bg_sh_can_take | key_wr | kvat_wr;
+    wire  [63:0] aux_wdata = (st == S_KLK || st == S_PF4 || st == S_PF5) ? port : in_data;
+    logic [4:0]  aux_addr;
+    always_comb begin
+        aux_addr = {2'd0, sh_fill[2:0]};
+        if (key_wr)
+            for (int k = 0; k < 6; k++) if (key_we[k]) aux_addr = 5'd8 + 5'(k);
+        if (kvat_wr)
+            for (int k = 0; k < 4; k++) if (kvat_we[k]) aux_addr = 5'd14 + 5'(k);
+    end
     qsag_sponge u_sp (
         .clk(clk), .srst_n(secret_rst_n), .wipe(!rst_n | sp_wipe | zeroize_q | fault_control | fault_laser_dfa),
         .wr_en(fe_busy ? fe_we : kc_busy ? kc_we : e_we),
@@ -348,11 +368,17 @@ module qsag_wire_engine #(
         .wr_data(fe_busy ? cv : kc_busy ? kc_wd : e_wd),
         .rd_addr(fe_busy ? fe_rd : kc_busy ? kc_rd : e_rd),
         .rd_data(port),
-        .sh_ext_we(bg_sh_can_take),
-        .sh_ext_addr(sh_fill[2:0]),
-        .sh_ext_wdata(in_data),
-        .blk_absorb_mask(blk_abs_pulse)
+        .aux_we(aux_we), .aux_addr(aux_addr), .aux_wdata(aux_wdata),
+        .key_q(key_q), .kvat_q(kvat_q)
     );
+    genvar gi;
+    generate
+        for (gi = 0; gi < 6; gi++) begin : g_key
+            assign key[gi] = key_q[64*gi +: 64];
+        end
+    endgenerate
+    wire [1:0]  kvat_ridx  = cnt2[1:0] - 2'd1;
+    wire [63:0] kvat_rdata = kvat_q[64*kvat_ridx +: 64];
     wire [127:0] gf_h_eff = (op == OP_BIST) ? 128'hA5A5_5A5A_DEAD_BEEF_3831_494E_4741_5351 : {key[5], key[4]};
     qsag_gf128_clmul #(.D(GF_D)) u_gf (
         .clk(clk), .rst_n(sub_rst_n), .srst_n(secret_rst_n), .clr(gf_clr), .start(gf_start),
@@ -361,8 +387,7 @@ module qsag_wire_engine #(
 
     dregg_captp_vat u_vat (
         .clk(clk), .rst_n(sub_rst_n), .srst_n(secret_rst_n), .permit_control(permit_control),
-        .kvat_we(kvat_we), .kvat_wdata(kvat_wd_mux), .kvat_commit(kvat_commit), .vat_ready(vat_ready),
-        .kvat_ridx(cnt2[1:0] - 2'd1), .kvat_rdata(kvat_rdata),
+        .kvat_commit(kvat_commit), .vat_ready(vat_ready),
         .zk_latch_we(zk_latch_we), .zk_latch_idx(cnt2[1:0]), .zk_latch_wdata(port),
         .zk_latch_valid_set(zk_latch_set), .zk_latch_clear(zk_latch_clr), .zk_root_valid(zk_root_valid),
         .parent_chk_clr(vat_pchk_clr), .parent_we(vat_pwe), .parent_idx(cnt2[2:0]),
@@ -378,16 +403,6 @@ module qsag_wire_engine #(
         .attenuate_legal(vat_att_ok), .attenuate_step_ok(vat_att_step_ok), .invoke_legal(vat_inv_ok),
         .need_stateful_fram(vat_need_fram), .vat_spend_used(vat_spend_used)
     );
-
-    // key registers
-    logic [5:0]  key_we;
-    wire  [63:0] key_d;
-    genvar gi;
-    generate
-        for (gi = 0; gi < 6; gi++) begin : g_key
-            qsag_ereg #(.W(64)) u_k (.clk(clk), .rst_n(secret_rst_n), .en(key_we[gi] && permit_control), .d(key_d), .q(key[gi]));
-        end
-    endgenerate
 
     // ------------------------------------------------------------------ helpers
     function automatic logic [5:0] rb(input logic [2:0] id);
@@ -495,7 +510,6 @@ module qsag_wire_engine #(
         kc_turbo       = 1'b0;
         gf_clr         = 1'b0;
         sp_wipe        = 1'b0;
-        blk_abs_pulse  = 8'd0;
         an_start       = 1'b0;
         an_write       = 1'b0;
         an_addr        = {10'd0, aslot, 5'd0};
@@ -757,7 +771,18 @@ module qsag_wire_engine #(
                 xsel   = 3'd0;
             end
             S_KSB: begin
-                blk_abs_pulse = sh_mask;
+                // st[cnt2] ^= sh[cnt2], one parked word per two clocks: read the scratchpad row
+                // into y_hold0, then XOR it into the lane
+                if (!ksb_ph) begin
+                    e_rd = 6'd32 + {1'b0, cnt2};
+                end else begin
+                    e_wreq = 1'b1;
+                    e_rd   = {1'b0, cnt2};
+                    e_wa   = {1'b0, cnt2};
+                    wsel   = 3'd1;
+                    xsel   = 3'd1;
+                    imm    = y_hold0;
+                end
             end
             S_KSP, S_KSR, S_BKC: begin
                 kind     = K_KC;
@@ -1185,7 +1210,6 @@ module qsag_wire_engine #(
         (st == S_CA3 && cap_mode && rcmp)
     );
 
-    assign key_d    = (st == S_KLK || st == S_PF4 || st == S_PF5) ? port : in_data;
     assign an_tx    = (st == S_AW2) ? {32'd0, ctmp} : port;
     assign cmp_ne   = (st == S_AW7) ? (an_rx != {32'd0, ctmp})
                     : (st == S_CTT) ? (in_data != (port ^ (cnt2[0] ? gf_acc[127:64] : gf_acc[63:0])))
@@ -1349,7 +1373,9 @@ module qsag_wire_engine #(
                     S_HDR: begin
                         st <= ret;
                         if (ret == S_HDR) begin
-                            ret <= S_IDLE;
+                            // header, then `olim` words from the register file. The ZK grant is
+                            // squeezed from a sponge keyed with K_vat: wipe it afterwards.
+                            ret <= (op == OP_VAT_ZK) ? S_WIPE : S_IDLE;
                             st  <= S_OUTL;
                         end
                     end
@@ -1433,8 +1459,8 @@ module qsag_wire_engine #(
                         else if (wrem == 21'd1 && lenb != 3'd0) st <= S_KSD;
                         else if (wi == 5'd16) st <= S_KSP;
                     end
-                    S_KSP: st <= (sh_mask != 8'd0) ? S_KSB : S_KSA;
-                    S_KSB: st <= S_KSA;
+                    S_KSP: st <= (sh_fill != 4'd0) ? S_KSB : S_KSA;
+                    S_KSB: if (ksb_ph && (cnt2[3:0] + 4'd1 == sh_fill)) st <= S_KSA;
                     S_KSD: st <= S_KSE;
                     S_KSE: st <= S_KSQ;
                     S_KSQ: begin
@@ -1661,8 +1687,10 @@ module qsag_wire_engine #(
                     S_VZK: begin
                         if (!vat_inv_ok) st <= S_DRAIN;
                         else begin
+                            // (ret was S_OUTL here: S_OUTL then returned to itself and kept
+                            // emitting register-file words past the four of the grant)
                             ret3 <= S_HDR;
-                            ret  <= S_OUTL;
+                            ret  <= S_HDR;
                             st   <= S_BLD;
                         end
                     end
@@ -1717,7 +1745,10 @@ module qsag_wire_engine #(
                         st  <= S_OUTL;
                     end
                     S_HVC: begin
-                        ret <= S_IDLE;
+                        // The receipt MAC ran Keccak over lanes 0..24, i.e. over the verifier
+                        // registers CH/A/B. Wipe before returning, so the next program starts from
+                        // zero registers (as the model does) and no MAC state stays readable.
+                        ret <= S_WIPE;
                         st  <= S_OUTL;
                     end
                     default: st <= S_DEAD;
@@ -1745,7 +1776,7 @@ module qsag_wire_engine #(
             olim          <= '0;
             partial       <= 1'b0;
             sh_fill       <= '0;
-            sh_mask       <= '0;
+            ksb_ph        <= 1'b0;
             hs_n          <= '0;
             hs_k          <= '0;
             hs_idx        <= '0;
@@ -1805,10 +1836,7 @@ module qsag_wire_engine #(
         end else if (!(zeroize_q || control_bad || fault_control || fault_laser_dfa)) begin
             if (in_pop) wrem <= wrem - 21'd1;
             if (in_pop && inrec) dleft <= dleft - 16'd1;
-            if (bg_sh_can_take) begin
-                sh_mask[sh_fill[2:0]] <= 1'b1;
-                sh_fill               <= sh_fill + 4'd1;
-            end
+            if (bg_sh_can_take) sh_fill <= sh_fill + 4'd1;
             if (fire) begin
                 unique case (st)
                     S_IDLE: begin
@@ -1826,7 +1854,7 @@ module qsag_wire_engine #(
                         wi        <= '0;
                         partial   <= 1'b0;
                         sh_fill   <= '0;
-                        sh_mask   <= '0;
+                        ksb_ph    <= 1'b0;
                         fail      <= 1'b0;
                         fset      <= 1'b0;
                         noncanon  <= 1'b0;
@@ -2040,7 +2068,7 @@ module qsag_wire_engine #(
                         cnt2    <= '0;
                         wi      <= '0;
                         sh_fill <= '0;
-                        sh_mask <= '0;
+                        ksb_ph  <= 1'b0;
                         if (op == OP_PRFMSG) begin
                             if (!key_valid) rcode <= E_NOKEY;
                             else if (cap_mode && macdiff) rcode <= E_MAC;
@@ -2058,14 +2086,26 @@ module qsag_wire_engine #(
                             if (wi == 5'd16) begin
                                 wi      <= '0;
                                 sh_fill <= '0;
-                                sh_mask <= '0;
                             end else wi <= wi + 5'd1;
                         end
                     end
+                    S_KSP: begin
+                        cnt2   <= '0;
+                        ksb_ph <= 1'b0;
+                    end
                     S_KSB: begin
-                        wi      <= {1'b0, sh_fill};
-                        sh_fill <= '0;
-                        sh_mask <= '0;
+                        if (!ksb_ph) begin
+                            y_hold0 <= port;
+                            ksb_ph  <= 1'b1;
+                        end else begin
+                            ksb_ph <= 1'b0;
+                            cnt2   <= cnt2 + 5'd1;
+                            if (cnt2[3:0] + 4'd1 == sh_fill) begin
+                                wi      <= {1'b0, sh_fill};
+                                sh_fill <= '0;
+                                y_hold0 <= '0;
+                            end
+                        end
                     end
                     S_KSQ: begin
                         cnt  <= (op == OP_KECCAK) ? {8'd0, arg[15:8]} : 16'd2;

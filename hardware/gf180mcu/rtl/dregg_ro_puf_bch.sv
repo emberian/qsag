@@ -253,13 +253,14 @@ module dregg_ro_puf_bch (
     logic [5:0] ma, mb;
     wire  [5:0] mp = gf6_mul(ma, mb);
 
+    // Horner multipliers alpha^1, alpha^3, alpha^5, alpha^7, alpha^9 over GF(2^6), x^6 + x + 1
     function automatic logic [5:0] horn_c(input logic [2:0] k);
         case (k)
             3'd0:    horn_c = 6'h02;
             3'd1:    horn_c = 6'h08;
             3'd2:    horn_c = 6'h20;
-            3'd3:    horn_c = 6'h0C;
-            default: horn_c = 6'h30;
+            3'd3:    horn_c = 6'h06;   // alpha^7 (was 6'h0C = alpha^8: S7 and S9 were wrong and
+            default: horn_c = 6'h18;   // alpha^9  no error pattern could be corrected)
         endcase
     endfunction
     function automatic logic [5:0] chien_c(input logic [2:0] k);

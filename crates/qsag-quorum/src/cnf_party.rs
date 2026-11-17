@@ -718,6 +718,55 @@ fn gf_mul(a: u128, b: u128) -> u128 {
     gf_from_words(acc)
 }
 
+fn public_gamma_pattern(gamma: &[[u64; 2]; 64]) -> qsag_asm::XorCombinePattern {
+    core::array::from_fn(|bit| core::array::from_fn(|group| {
+        (0..4).fold(0, |nibble, offset| {
+            nibble | ((((gamma[4 * group + offset][bit / 64] >> (bit % 64)) & 1) as u8) << offset)
+        })
+    }))
+}
+
+/// `out[i] = XOR_b gamma[b] * bit_b(plane[i])`. Only the public gamma coefficients
+/// select entries in the shared assembly kernel's subset-XOR tables; secret words
+/// never select memory addresses. Partial batches use the same fixed-address scalar map.
+fn bind_plane_gamma(
+    plane: &[u64],
+    gamma: &[[u64; 2]; 64],
+    pattern: &qsag_asm::XorCombinePattern,
+    out: &mut [[u64; 2]],
+) {
+    assert_eq!(plane.len(), out.len());
+    let mut rows = SecretBuffer([[0u64; 4]; 64]);
+    let mut fields = SecretBuffer([[[0u64; 4]; 64]; 2]);
+    for (src, dst) in plane.chunks(256).zip(out.chunks_mut(256)) {
+        if src.len() == 256 {
+            for (word, row) in rows.iter_mut().enumerate() {
+                for (column, value) in row.iter_mut().enumerate() {
+                    *value = src[64 * column + word];
+                }
+            }
+            qsag_asm::transpose64x256(&mut rows);
+            qsag_asm::gf2_xor_combine_planes(&rows, pattern, &mut fields);
+            let [lo, hi] = &mut *fields;
+            qsag_asm::transpose64x256(lo);
+            qsag_asm::transpose64x256(hi);
+            for (word, value) in dst.iter_mut().enumerate() {
+                *value = [lo[word % 64][word / 64], hi[word % 64][word / 64]];
+            }
+        } else {
+            for (value, &word) in dst.iter_mut().zip(src) {
+                let mut sum = [0u64; 2];
+                for (bit, g) in gamma.iter().enumerate() {
+                    let mask = 0u64.wrapping_sub(core::hint::black_box((word >> bit) & 1));
+                    sum[0] ^= g[0] & mask;
+                    sum[1] ^= g[1] & mask;
+                }
+                *value = sum;
+            }
+        }
+    }
+}
+
 /// Theta, rho and pi on one slot's bit share.
 fn linear_bits(a: &[u64; 25]) -> [u64; 25] {
     let mut c = [0u64; 5];
@@ -965,6 +1014,8 @@ pub struct IsolatedCnfParty<T: WireTransport, J: PoisonJournal> {
     poisoned: bool,
     #[cfg(test)]
     fault: Option<Fault>,
+    #[cfg(test)]
+    record_received: bool,
     /// Plaintext of every frame received, for view tests.
     #[cfg(test)]
     received: Vec<(usize, u32, Vec<u8>)>,
@@ -1084,6 +1135,8 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
             #[cfg(test)]
             fault: None,
             #[cfg(test)]
+            record_received: false,
+            #[cfg(test)]
             received: Vec::new(),
         })
     }
@@ -1189,7 +1242,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
     fn recv(&mut self, from: usize, round: u32, len: usize) -> Result<Vec<u8>, CnfPartyError> {
         let payload = recv_checked(&mut self.transport, from, round, len)?;
         #[cfg(test)]
-        self.received.push((from, round, payload.clone()));
+        if self.record_received {
+            self.received.push((from, round, payload.clone()));
+        }
         Ok(payload)
     }
 
@@ -1556,17 +1611,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedCnfParty<T, J> {
                 .map(|chunk| gf_words(u128::from_le_bytes(*chunk)))
                 .collect();
             let mut row_g = vec![[0u64; 2]; plane_words];
+            let pattern = public_gamma_pattern(&gamma);
             let fold_plane = |plane: &[u64], row_g: &mut [[u64; 2]]| -> u128 {
-                // Fixed addresses and loop bounds: share bits must never index a LUT.
-                for (dst, &word) in row_g.iter_mut().zip(plane) {
-                    let mut sum = [0u64; 2];
-                    for (bit, g) in gamma.iter().enumerate() {
-                        let mask = 0u64.wrapping_sub(core::hint::black_box((word >> bit) & 1));
-                        sum[0] ^= g[0] & mask;
-                        sum[1] ^= g[1] & mask;
-                    }
-                    *dst = sum;
-                }
+                bind_plane_gamma(plane, &gamma, &pattern, row_g);
                 let mut acc = [0u64; 2];
                 qsag_asm::gf2_128_mul_acc_batch(&mut acc, &beta, row_g);
                 gf_from_words(acc)
@@ -3225,6 +3272,37 @@ mod tests {
     type Party = IsolatedCnfParty<InMemoryEndpoint, MemoryPoisonJournal>;
 
     #[test]
+    fn gamma_plane_binding_matches_scalar_definition_across_batches_and_tails() {
+        let mut state = 0x5A97_3821_FEDC_BA09u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let gamma: [[u64; 2]; 64] = core::array::from_fn(|_| [next(), next()]);
+        let pattern = public_gamma_pattern(&gamma);
+        for len in [0, 1, 63, 255, 256, 257, 511, 512, 777] {
+            let mut words: Vec<u64> = (0..len).map(|_| next()).collect();
+            for (bit, word) in words.iter_mut().take(64).enumerate() {
+                *word = 1u64 << bit;
+            }
+            let expected: Vec<[u64; 2]> = words.iter().map(|word| {
+                let mut value = 0u128;
+                for (bit, coefficient) in gamma.iter().enumerate() {
+                    if (word >> bit) & 1 != 0 {
+                        value ^= gf_from_words(*coefficient);
+                    }
+                }
+                gf_words(value)
+            }).collect();
+            let mut actual = vec![[u64::MAX; 2]; len];
+            bind_plane_gamma(&words, &gamma, &pattern, &mut actual);
+            assert_eq!(actual, expected, "plane words={len}");
+        }
+    }
+
+    #[test]
     fn ceremony_preserves_party_order_and_propagates_panics_after_joining() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -3514,6 +3592,7 @@ mod tests {
     ) -> (Arc<MeshStats>, Vec<ReceivedLog>, Vec<Vec<u8>>) {
         let (parties, stats) = parties(keys, session, &[]);
         let out = run_isolated_cnf_ceremony(parties, |_, party: &mut Party| {
+            party.record_received = true;
             let digest = party.keyed_shake256(PREFIX, SUFFIX, 32).unwrap();
             let opened = party.open(&digest).unwrap();
             (core::mem::take(&mut party.received), opened)
@@ -4164,6 +4243,7 @@ mod tests {
         let run_slh_recorded = |ks: &[CnfPartyKeys], pk_ref: &SlhPublicKey| {
             let (ps, _) = parties_with_timeout(ks, session, &[], Duration::from_secs(60));
             let out = run_isolated_cnf_ceremony(ps, |_, party: &mut Party| {
+                party.record_received = true;
                 let sig = party.slh_sign(&params, msg, ctx, pk_ref, None).unwrap();
                 (core::mem::take(&mut party.received), sig)
             });

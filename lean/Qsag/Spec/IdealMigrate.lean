@@ -10,7 +10,13 @@ The functionality is parameterized by
   snapshot tree, with `EnrolledEntitlement snapshot pk amount` the membership-and-amount relation;
 * a `LegacyOwnershipScheme`: the cryptographic ownership relation
   `ownsKey : LegacyPk → Witness → MigrationClaim LegacyPk → Prop`, a Boolean checker deciding it
-  (`check_iff`), and the deterministic injective nullifier derivation `deriveNullifier`.
+  (`check_iff`), and the deterministic 256-bit nullifier derivation `deriveNullifier`.
+  Global injectivity of `deriveNullifier` is NOT assumed in `LegacyOwnershipScheme` (for
+  `BLS12-381` with `p ≈ 2^381 > 2^256` global injectivity into `Digest256` is false by Pigeonhole,
+  and for 256-bit curves under Poseidon2 or SHAKE256 it is collision-resistant rather than globally
+  injective): all safety invariants hold unconditionally, while non-blocking liveness and lockstep
+  equivalence with the key-indexed reference `idealKeyMigrateMachine` hold up to an explicit
+  `NullifierCollision` (or under finite-snapshot `NullifierInjOn`).
 
 `idealMigrateMachine` receives a claim together with the ownership witness itself and mints exactly
 when `ValidLegacyOwnership` holds (the key is enrolled, the nullifier is the derived one, the witness
@@ -45,8 +51,14 @@ Results:
    pairwise distinct.
 4. `idealMigrateMachine_trace_minted_le_enrolled`: the amounts minted along an initialized trace sum
    to at most the total enrolled entitlement.
-5. `idealMigrateMachine_unclaimed_owner_accepts`: by injectivity of `deriveNullifier`, the owner of an
-   enrolled key that has not been settled is accepted in every reachable state.
+5. `idealMigrateMachine_unclaimed_owner_accepts_or_collision` and
+   `idealMigrateMachine_unclaimed_owner_accepts`: an enrolled key that has not been settled is
+   either accepted in every reachable state or exhibits an explicit `NullifierCollision` with a
+   settled enrolled key (and is accepted unconditionally under `NullifierInjOn`).
+6. `idealKeyMigrateMachine`, `idealMigrate_dataRefines_idealKeyMigrate`, and
+   `idealMigrate_step_eq_idealKeyMigrate_or_collision`: pure key-indexed ideal reference where
+   distinct keys never block each other, refined unconditionally by `idealMigrateMachine` and
+   lockstep-equivalent up to `NullifierCollision`.
 -/
 
 public import Qsag.Spec.Primitives
@@ -175,16 +187,51 @@ structure MigrationReceipt (LegacyPk : Type) where
   | r :: rest => r.amount + MigrationReceipt.totalAmount rest
 
 /-- Cryptographic parameters of the ideal migration functionality: the legacy-key ownership
-    relation over the whole claim, a Boolean checker deciding it, and the deterministic injective
-    nullifier derivation. -/
+    relation over the whole claim, a Boolean checker deciding it, and the deterministic 256-bit
+    nullifier derivation `deriveNullifier` (with NO global injectivity assumption). -/
 structure LegacyOwnershipScheme (LegacyPk Witness : Type) where
   ownsKey : LegacyPk → Witness → MigrationClaim LegacyPk → Prop
   checkOwnership : LegacyPk → Witness → MigrationClaim LegacyPk → Bool
   check_iff : ∀ (pk : LegacyPk) (wit : Witness) (claim : MigrationClaim LegacyPk),
     checkOwnership pk wit claim = true ↔ ownsKey pk wit claim
   deriveNullifier : LegacyPk → Digest256
-  deriveNullifier_injective : ∀ {pk₁ pk₂ : LegacyPk},
+
+/-- Explicit distinct-key 256-bit nullifier collision under `deriveNullifier`. -/
+@[expose] def NullifierCollision {LegacyPk : Type}
+    (deriveNullifier : LegacyPk → Digest256) (pk₁ pk₂ : LegacyPk) : Prop :=
+  pk₁ ≠ pk₂ ∧ deriveNullifier pk₁ = deriveNullifier pk₂
+
+/-- Injectivity of `deriveNullifier` restricted to a finite list of keys `keys`
+    (such as `snapshot.map Prod.fst`). -/
+def NullifierInjOn {LegacyPk : Type}
+    (deriveNullifier : LegacyPk → Digest256) (keys : List LegacyPk) : Prop :=
+  ∀ ⦃pk₁ pk₂ : LegacyPk⦄, pk₁ ∈ keys → pk₂ ∈ keys →
     deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂
+
+theorem NullifierInjOn_iff {LegacyPk : Type}
+    (deriveNullifier : LegacyPk → Digest256) (keys : List LegacyPk) :
+    NullifierInjOn deriveNullifier keys ↔
+      ∀ ⦃pk₁ pk₂ : LegacyPk⦄, pk₁ ∈ keys → pk₂ ∈ keys →
+        deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂ :=
+  Iff.rfl
+
+/-- Global injectivity of `deriveNullifier` across the key carrier `LegacyPk` (achievable when
+    `|LegacyPk| ≤ 2^256`, e.g., `CanonicalSwPk Weierstrass.secp7Mod43`). -/
+def NullifierInjective {LegacyPk : Type}
+    (deriveNullifier : LegacyPk → Digest256) : Prop :=
+  ∀ ⦃pk₁ pk₂ : LegacyPk⦄, deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂
+
+theorem NullifierInjective_iff {LegacyPk : Type}
+    (deriveNullifier : LegacyPk → Digest256) :
+    NullifierInjective deriveNullifier ↔
+      ∀ ⦃pk₁ pk₂ : LegacyPk⦄, deriveNullifier pk₁ = deriveNullifier pk₂ → pk₁ = pk₂ :=
+  Iff.rfl
+
+theorem NullifierInjective.injOn {LegacyPk : Type}
+    {deriveNullifier : LegacyPk → Digest256}
+    (hInj : NullifierInjective deriveNullifier) (keys : List LegacyPk) :
+    NullifierInjOn deriveNullifier keys :=
+  fun _ _ _ _ hEq => hInj hEq
 
 /-- Genuine legacy ownership of an enrolled entitlement: `claim.legacyPk` is enrolled with
     entitlement `amount`, `claim.nullifier` is the nullifier derived from that key, and `wit`
@@ -572,10 +619,21 @@ theorem idealMigrateMachine_trace_minted_le_enrolled {LegacyPk Witness : Type}
   rw [idealMigrateMachine_trace_totalMigrated scheme snapshot hTrace] at hLe
   exact Nat.le_trans (Nat.le_add_left _ _) hLe
 
-/-- No blocking by other identities: in a state satisfying the invariant, a claim with
-    `ValidLegacyOwnership` whose legacy key is not yet settled is accepted and mints its
-    entitlement. Injectivity of `deriveNullifier` excludes a collision with a spent nullifier. -/
-theorem idealMigrateMachine_unclaimed_owner_accepts {LegacyPk Witness : Type}
+private theorem settled_pk_mem_snapshot {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    {st : IdealMigrateState LegacyPk} {pk : LegacyPk}
+    (hInv : st.Inv scheme snapshot)
+    (hpk : pk ∈ st.settledClaims.map (fun r => r.claim.legacyPk)) :
+    pk ∈ snapshot.map Prod.fst := by
+  obtain ⟨r, hrMem, hrEq⟩ := List.exists_of_mem_map hpk
+  have hEnt := (hInv.2.2.1 r hrMem).1
+  rw [← hrEq]
+  exact List.mem_map_of_mem (f := Prod.fst) (EnrolledEntitlement.mem hEnt)
+
+/-- Collision-branching non-blocking liveness (`0` injectivity assumptions): in a state satisfying
+    `Inv`, a valid claim for an unsettled enrolled key is EITHER accepted and mints its entitlement
+    OR exhibits an explicit `NullifierCollision` against an already-settled enrolled key. -/
+theorem idealMigrateMachine_unclaimed_owner_accepts_or_collision {LegacyPk Witness : Type}
     [DecidableEq LegacyPk]
     {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
     {st : IdealMigrateState LegacyPk} {claim : MigrationClaim LegacyPk} {wit : Witness}
@@ -587,17 +645,325 @@ theorem idealMigrateMachine_unclaimed_owner_accepts {LegacyPk Witness : Type}
       some ({ totalMigrated := st.totalMigrated + amount
               spentNullifiers := claim.nullifier :: st.spentNullifiers
               settledClaims := { claim := claim, amount := amount } :: st.settledClaims },
+            { claim := claim, amount := amount }) ∨
+    ∃ pk_prev ∈ st.settledClaims.map (fun r => r.claim.legacyPk),
+      pk_prev ∈ snapshot.map Prod.fst ∧
+      NullifierCollision scheme.deriveNullifier pk_prev claim.legacyPk := by
+  cases (inferInstance : Decidable (claim.nullifier ∈ st.spentNullifiers)) with
+  | isFalse hFresh =>
+    exact .inl ((idealMigrateMachine_step_eq_some_iff scheme snapshot st _ claim wit _).mpr
+      ⟨hValid, hFresh, rfl, rfl⟩)
+  | isTrue hMem =>
+    have hMap := hInv.1
+    rw [hMap] at hMem
+    obtain ⟨pk_prev, hpk, hEq⟩ := List.exists_of_mem_map hMem
+    have hNe : pk_prev ≠ claim.legacyPk := fun hSame => hUnclaimed (hSame ▸ hpk)
+    exact .inr ⟨pk_prev, hpk, settled_pk_mem_snapshot hInv hpk, hNe, hEq.trans hValid.2.1⟩
+
+/-- No blocking by other identities under finite-snapshot `NullifierInjOn`: in a state satisfying
+    `Inv`, a claim with `ValidLegacyOwnership` whose legacy key is not yet settled is accepted and
+    mints its entitlement. -/
+theorem idealMigrateMachine_unclaimed_owner_accepts {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    {st : IdealMigrateState LegacyPk} {claim : MigrationClaim LegacyPk} {wit : Witness}
+    {amount : Nat}
+    (hInj : NullifierInjOn scheme.deriveNullifier (snapshot.map Prod.fst))
+    (hInv : st.Inv scheme snapshot)
+    (hValid : ValidLegacyOwnership scheme snapshot claim wit amount)
+    (hUnclaimed : claim.legacyPk ∉ st.settledClaims.map (fun r => r.claim.legacyPk)) :
+    (idealMigrateMachine scheme snapshot).step st (claim, wit) =
+      some ({ totalMigrated := st.totalMigrated + amount
+              spentNullifiers := claim.nullifier :: st.spentNullifiers
+              settledClaims := { claim := claim, amount := amount } :: st.settledClaims },
             { claim := claim, amount := amount }) := by
-  refine (idealMigrateMachine_step_eq_some_iff scheme snapshot st _ claim wit _).mpr
-    ⟨hValid, ?_, rfl, rfl⟩
-  intro hMem
-  obtain ⟨hMap, _, _, _⟩ := hInv
-  rw [hMap] at hMem
-  obtain ⟨pk, hpk, hEq⟩ := List.exists_of_mem_map hMem
-  obtain ⟨_, hNull, _⟩ := hValid
-  have hPk : pk = claim.legacyPk := scheme.deriveNullifier_injective (hEq.trans hNull)
-  subst hPk
-  exact hUnclaimed hpk
+  rcases idealMigrateMachine_unclaimed_owner_accepts_or_collision hInv hValid hUnclaimed with
+    hStep | ⟨pk_prev, _, hSnapPrev, hNe, hNullEq⟩
+  · exact hStep
+  · have hSnapClaim : claim.legacyPk ∈ snapshot.map Prod.fst :=
+      List.mem_map_of_mem (f := Prod.fst) (EnrolledEntitlement.mem hValid.1)
+    exact absurd (hInj hSnapPrev hSnapClaim hNullEq) hNe
+
+/-- Corollary of `idealMigrateMachine_unclaimed_owner_accepts` when `deriveNullifier` is injective
+    across the key carrier `LegacyPk`. -/
+theorem idealMigrateMachine_unclaimed_owner_accepts_of_injective {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    {st : IdealMigrateState LegacyPk} {claim : MigrationClaim LegacyPk} {wit : Witness}
+    {amount : Nat}
+    (hInj : NullifierInjective scheme.deriveNullifier)
+    (hInv : st.Inv scheme snapshot)
+    (hValid : ValidLegacyOwnership scheme snapshot claim wit amount)
+    (hUnclaimed : claim.legacyPk ∉ st.settledClaims.map (fun r => r.claim.legacyPk)) :
+    (idealMigrateMachine scheme snapshot).step st (claim, wit) =
+      some ({ totalMigrated := st.totalMigrated + amount
+              spentNullifiers := claim.nullifier :: st.spentNullifiers
+              settledClaims := { claim := claim, amount := amount } :: st.settledClaims },
+            { claim := claim, amount := amount }) :=
+  idealMigrateMachine_unclaimed_owner_accepts (hInj.injOn _) hInv hValid hUnclaimed
+
+/-! ## 5b. Key-Indexed Collision-Free Reference (`idealKeyMigrateMachine`) -/
+
+/-- Pure key-indexed acceptance test: checks `!decide (claim.legacyPk ∈ settledKeys)` rather than
+    `!decide (claim.nullifier ∈ spent)`, so distinct identities `pk₁ ≠ pk₂` never interfere even if
+    `deriveNullifier` collides. -/
+def LegacyOwnershipScheme.keyAccepts {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (settledKeys : List LegacyPk)
+    (claim : MigrationClaim LegacyPk) (wit : Witness) : Bool :=
+  decide (claim.nullifier = scheme.deriveNullifier claim.legacyPk) &&
+    !decide (claim.legacyPk ∈ settledKeys) &&
+    scheme.checkOwnership claim.legacyPk wit claim
+
+theorem LegacyOwnershipScheme.keyAccepts_iff {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (settledKeys : List LegacyPk)
+    (claim : MigrationClaim LegacyPk) (wit : Witness) :
+    scheme.keyAccepts settledKeys claim wit = true ↔
+      claim.nullifier = scheme.deriveNullifier claim.legacyPk ∧
+      claim.legacyPk ∉ settledKeys ∧
+      scheme.ownsKey claim.legacyPk wit claim := by
+  unfold LegacyOwnershipScheme.keyAccepts
+  constructor
+  · intro h
+    have h1 := Bool.and_eq_true_iff.mp h
+    have h2 := Bool.and_eq_true_iff.mp h1.1
+    refine ⟨of_decide_eq_true h2.1, ?_, (scheme.check_iff _ _ _).mp h1.2⟩
+    intro hMem
+    have hDec : decide (claim.legacyPk ∈ settledKeys) = true := decide_eq_true hMem
+    have hNot := h2.2
+    rw [hDec] at hNot
+    exact absurd hNot (by decide)
+  · intro h
+    obtain ⟨hNull, hFresh, hOwn⟩ := h
+    refine Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true hNull, ?_⟩,
+      (scheme.check_iff _ _ _).mpr hOwn⟩
+    rw [decide_eq_false hFresh]
+    rfl
+
+/-- Pure key-indexed ideal migration machine: distinct keys never block one another regardless of
+    256-bit nullifier collisions. -/
+def idealKeyMigrateMachine {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk) :
+    Machine (IdealMigrateState LegacyPk) (MigrationClaim LegacyPk × Witness)
+      (MigrationReceipt LegacyPk) where
+  Init st := st = IdealMigrateState.init
+  step st inp :=
+    idealMigrateSettle st inp.1 (EnrolledSnapshot.entitlement snapshot inp.1.legacyPk)
+      (scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) inp.1 inp.2)
+  errStep st _ := st
+
+theorem idealKeyMigrateMachine_step_eq_some_iff {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    (st st' : IdealMigrateState LegacyPk) (claim : MigrationClaim LegacyPk) (wit : Witness)
+    (out : MigrationReceipt LegacyPk) :
+    (idealKeyMigrateMachine scheme snapshot).step st (claim, wit) = some (st', out) ↔
+      ValidLegacyOwnership scheme snapshot claim wit out.amount ∧
+      claim.legacyPk ∉ st.settledClaims.map (fun r => r.claim.legacyPk) ∧
+      out.claim = claim ∧
+      st' = { totalMigrated := st.totalMigrated + out.amount
+              spentNullifiers := claim.nullifier :: st.spentNullifiers
+              settledClaims := out :: st.settledClaims } := by
+  constructor
+  · intro h
+    have h0 : idealMigrateSettle st claim (EnrolledSnapshot.entitlement snapshot claim.legacyPk)
+        (scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit) =
+        some (st', out) := h
+    cases hE : EnrolledSnapshot.entitlement snapshot claim.legacyPk with
+    | none =>
+      rw [hE] at h0
+      exact nomatch (show (none : Option (IdealMigrateState LegacyPk ×
+        MigrationReceipt LegacyPk)) = some (st', out) from h0)
+    | some amount =>
+      rw [hE] at h0
+      cases hA : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit with
+      | false =>
+        rw [hA] at h0
+        exact nomatch (show (none : Option (IdealMigrateState LegacyPk ×
+          MigrationReceipt LegacyPk)) = some (st', out) from h0)
+      | true =>
+        rw [hA] at h0
+        injection h0 with h1
+        injection h1 with hSt hOut
+        subst hSt; subst hOut
+        obtain ⟨hNull, hFresh, hOwn⟩ := (scheme.keyAccepts_iff _ _ _).mp hA
+        exact ⟨⟨hE, hNull, hOwn⟩, hFresh, rfl, rfl⟩
+  · intro h
+    obtain ⟨⟨hEnt, hNull, hOwn⟩, hFresh, hClaim, hSt⟩ := h
+    obtain ⟨outClaim, outAmount⟩ := out
+    subst hClaim
+    have hA : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) outClaim wit = true :=
+      (scheme.keyAccepts_iff _ _ _).mpr ⟨hNull, hFresh, hOwn⟩
+    have hE : EnrolledSnapshot.entitlement snapshot outClaim.legacyPk = some outAmount := hEnt
+    show idealMigrateSettle st outClaim
+        (EnrolledSnapshot.entitlement snapshot outClaim.legacyPk)
+        (scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) outClaim wit) = _
+    rw [hE, hA, hSt]
+    rfl
+
+/-- Unconditional `DataRefines` from `idealMigrateMachine` into the key-indexed reference
+    `idealKeyMigrateMachine` (zero hash injectivity assumptions). -/
+def idealMigrate_dataRefines_idealKeyMigrate {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk) :
+    DataRefines (idealMigrateMachine scheme snapshot)
+      (idealKeyMigrateMachine scheme snapshot) some id where
+  Rel c a := c = a ∧ c.Inv scheme snapshot
+  absInit _ := IdealMigrateState.init
+  init_ok {c₀} hInit := by
+    have hc : c₀ = IdealMigrateState.init := hInit
+    subst hc
+    exact ⟨rfl, rfl, IdealMigrateState.init_inv scheme snapshot⟩
+  sim_visible {c c' a inp out j} hRel hStepC hVis := by
+    rcases hRel with ⟨rfl, hInv⟩
+    cases hVis
+    obtain ⟨hInv', _⟩ := idealMigrateMachine_step_preserves_inv hInv hStepC
+    obtain ⟨hValid, hFresh, hClaim, hSt⟩ :=
+      (idealMigrateMachine_step_eq_some_iff scheme snapshot c c' inp.1 inp.2 out).mp hStepC
+    have hKeyFresh : inp.1.legacyPk ∉ c.settledClaims.map (fun r => r.claim.legacyPk) := by
+      intro hMem
+      apply hFresh
+      rw [hInv.1, hValid.2.1]
+      exact List.mem_map_of_mem (f := scheme.deriveNullifier) hMem
+    exact ⟨c', (idealKeyMigrateMachine_step_eq_some_iff scheme snapshot c c' inp.1 inp.2 out).mpr
+      ⟨hValid, hKeyFresh, hClaim, hSt⟩, rfl, hInv'⟩
+  sim_internal _ _ hVis := by cases hVis
+  sim_reject hRel _ := hRel
+
+/-- Stepwise lockstep agreement or explicit `NullifierCollision`: in any state satisfying `Inv`,
+    `idealMigrateMachine` and `idealKeyMigrateMachine` take the EXACT same step on `(claim, wit)`
+    unless `claim.legacyPk` is enrolled and collides under `deriveNullifier` with an already-settled
+    enrolled key `pk_prev ≠ claim.legacyPk`. -/
+theorem idealMigrate_step_eq_idealKeyMigrate_or_collision {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    {st : IdealMigrateState LegacyPk} (hInv : st.Inv scheme snapshot)
+    (claim : MigrationClaim LegacyPk) (wit : Witness) :
+    (idealMigrateMachine scheme snapshot).step st (claim, wit) =
+      (idealKeyMigrateMachine scheme snapshot).step st (claim, wit) ∨
+    (claim.legacyPk ∈ snapshot.map Prod.fst ∧
+      ∃ pk_prev ∈ st.settledClaims.map (fun r => r.claim.legacyPk),
+        pk_prev ∈ snapshot.map Prod.fst ∧
+        NullifierCollision scheme.deriveNullifier pk_prev claim.legacyPk) := by
+  show idealMigrateSettle st claim (EnrolledSnapshot.entitlement snapshot claim.legacyPk)
+      (scheme.accepts st.spentNullifiers claim wit) =
+    idealMigrateSettle st claim (EnrolledSnapshot.entitlement snapshot claim.legacyPk)
+      (scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit) ∨ _
+  cases hE : EnrolledSnapshot.entitlement snapshot claim.legacyPk with
+  | none =>
+    left
+    cases scheme.accepts st.spentNullifiers claim wit <;>
+      cases scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit <;> rfl
+  | some amount =>
+    cases (inferInstance : Decidable (claim.nullifier = scheme.deriveNullifier claim.legacyPk)) with
+    | isFalse hNull =>
+      left
+      have hA : scheme.accepts st.spentNullifiers claim wit = false := by
+        cases hb : scheme.accepts st.spentNullifiers claim wit with
+        | false => rfl
+        | true => exact absurd ((scheme.accepts_iff _ _ _).mp hb).1 hNull
+      have hK : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit = false := by
+        cases hb : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit with
+        | false => rfl
+        | true => exact absurd ((scheme.keyAccepts_iff _ _ _).mp hb).1 hNull
+      rw [hA, hK]
+    | isTrue hNull =>
+      cases hChk : scheme.checkOwnership claim.legacyPk wit claim with
+      | false =>
+        left
+        have hNotOwn : ¬ scheme.ownsKey claim.legacyPk wit claim := fun ho =>
+          nomatch (hChk.symm.trans ((scheme.check_iff _ _ _).mpr ho))
+        have hA : scheme.accepts st.spentNullifiers claim wit = false := by
+          cases hb : scheme.accepts st.spentNullifiers claim wit with
+          | false => rfl
+          | true => exact absurd ((scheme.accepts_iff _ _ _).mp hb).2.2 hNotOwn
+        have hK : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit = false := by
+          cases hb : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit with
+          | false => rfl
+          | true => exact absurd ((scheme.keyAccepts_iff _ _ _).mp hb).2.2 hNotOwn
+        rw [hA, hK]
+      | true =>
+        have hOwn : scheme.ownsKey claim.legacyPk wit claim := (scheme.check_iff _ _ _).mp hChk
+        cases (inferInstance : Decidable
+            (claim.legacyPk ∈ st.settledClaims.map (fun r => r.claim.legacyPk))) with
+        | isTrue hSettled =>
+          left
+          have hSpent : claim.nullifier ∈ st.spentNullifiers := by
+            rw [hInv.1, hNull]
+            exact List.mem_map_of_mem (f := scheme.deriveNullifier) hSettled
+          have hA : scheme.accepts st.spentNullifiers claim wit = false := by
+            cases hb : scheme.accepts st.spentNullifiers claim wit with
+            | false => rfl
+            | true => exact absurd hSpent ((scheme.accepts_iff _ _ _).mp hb).2.1
+          have hK : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit = false := by
+            cases hb : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit with
+            | false => rfl
+            | true => exact absurd hSettled ((scheme.keyAccepts_iff _ _ _).mp hb).2.1
+          rw [hA, hK]
+        | isFalse hSettled =>
+          cases (inferInstance : Decidable (claim.nullifier ∈ st.spentNullifiers)) with
+          | isFalse hFresh =>
+            left
+            have hA : scheme.accepts st.spentNullifiers claim wit = true :=
+              (scheme.accepts_iff _ _ _).mpr ⟨hNull, hFresh, hOwn⟩
+            have hK : scheme.keyAccepts (st.settledClaims.map (fun r => r.claim.legacyPk)) claim wit = true :=
+              (scheme.keyAccepts_iff _ _ _).mpr ⟨hNull, hSettled, hOwn⟩
+            rw [hA, hK]
+          | isTrue hMem =>
+            right
+            rw [hInv.1] at hMem
+            obtain ⟨pk_prev, hpk, hEq⟩ := List.exists_of_mem_map hMem
+            have hEnr : EnrolledEntitlement snapshot claim.legacyPk amount := hE
+            exact ⟨List.mem_map_of_mem (f := Prod.fst) (EnrolledEntitlement.mem hEnr),
+              pk_prev, hpk, settled_pk_mem_snapshot hInv hpk,
+              fun hSame => hSettled (hSame ▸ hpk), hEq.trans hNull⟩
+
+/-- Under finite-snapshot `NullifierInjOn`, `idealMigrateMachine` refines `idealKeyMigrateMachine`
+    in exact lockstep (`⊑`). -/
+def idealMigrate_refines_idealKeyMigrate_of_injOn {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    (hInj : NullifierInjOn scheme.deriveNullifier (snapshot.map Prod.fst)) :
+    idealMigrateMachine scheme snapshot ⊑ idealKeyMigrateMachine scheme snapshot :=
+  LockstepSim.toRefines
+    { Inv := fun st => st.Inv scheme snapshot
+      abs := id
+      init_inv := fun {c₀} hInit => by
+        have hc : c₀ = IdealMigrateState.init := hInit
+        subst hc
+        exact ⟨IdealMigrateState.init_inv scheme snapshot, rfl⟩
+      step_eq := fun {c} inp hInv => by
+        rcases idealMigrate_step_eq_idealKeyMigrate_or_collision hInv inp.1 inp.2 with
+          hEq | ⟨hSnapClaim, pk_prev, _, hSnapPrev, hNe, hNullEq⟩
+        · cases hS : (idealMigrateMachine scheme snapshot).step c inp with
+          | some pair =>
+            rw [hS] at hEq
+            exact ⟨(idealMigrateMachine_step_preserves_inv hInv hS).1, hEq.symm⟩
+          | none =>
+            rw [hS] at hEq
+            exact ⟨hInv, hEq.symm, rfl⟩
+        · exact False.elim (hNe (hInj hSnapPrev hSnapClaim hNullEq)) }
+
+/-- Under finite-snapshot `NullifierInjOn`, `idealKeyMigrateMachine` also refines
+    `idealMigrateMachine` in exact lockstep (`⊑`), establishing full bisimulation. -/
+def idealKeyMigrate_refines_idealMigrate_of_injOn {LegacyPk Witness : Type} [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    (hInj : NullifierInjOn scheme.deriveNullifier (snapshot.map Prod.fst)) :
+    idealKeyMigrateMachine scheme snapshot ⊑ idealMigrateMachine scheme snapshot :=
+  LockstepSim.toRefines
+    { Inv := fun st => st.Inv scheme snapshot
+      abs := id
+      init_inv := fun {c₀} hInit => by
+        have hc : c₀ = IdealMigrateState.init := hInit
+        subst hc
+        exact ⟨IdealMigrateState.init_inv scheme snapshot, rfl⟩
+      step_eq := fun {c} inp hInv => by
+        rcases idealMigrate_step_eq_idealKeyMigrate_or_collision hInv inp.1 inp.2 with
+          hEq | ⟨hSnapClaim, pk_prev, _, hSnapPrev, hNe, hNullEq⟩
+        · cases hK : (idealKeyMigrateMachine scheme snapshot).step c inp with
+          | some pair =>
+            have hM : (idealMigrateMachine scheme snapshot).step c inp = some pair :=
+              hEq.trans hK
+            exact ⟨(idealMigrateMachine_step_preserves_inv hInv hM).1, hM⟩
+          | none =>
+            exact ⟨hInv, hEq.trans hK, rfl⟩
+        · exact False.elim (hNe (hInj hSnapPrev hSnapClaim hNullEq)) }
 
 /-! ## 6. Rejection Teeth -/
 
@@ -669,15 +1035,40 @@ theorem tooth_idealMigrate_second_claim_same_legacyPk_rejected {LegacyPk Witness
   rw [hNullEq]
   exact .head _
 
+/-- `#tooth` Tightness of the `NullifierCollision` branch: if two distinct enrolled keys `pk₁ ≠ pk₂`
+    collide under `deriveNullifier`, settling `pk₁` causes `idealMigrateMachine` to reject `pk₂`
+    even though `pk₂` is unsettled and `idealKeyMigrateMachine` accepts `pk₂`. -/
+theorem tooth_idealMigrate_colliding_nullifier_blocks_second_key {LegacyPk Witness : Type}
+    [DecidableEq LegacyPk]
+    (scheme : LegacyOwnershipScheme LegacyPk Witness) (snapshot : EnrolledSnapshot LegacyPk)
+    {st st' : IdealMigrateState LegacyPk} {claim₁ claim₂ : MigrationClaim LegacyPk}
+    {wit₁ wit₂ : Witness} {out₁ : MigrationReceipt LegacyPk} {amount₂ : Nat}
+    (hStep₁ : (idealMigrateMachine scheme snapshot).step st (claim₁, wit₁) = some (st', out₁))
+    (hValid₂ : ValidLegacyOwnership scheme snapshot claim₂ wit₂ amount₂)
+    (hColl : NullifierCollision scheme.deriveNullifier claim₁.legacyPk claim₂.legacyPk) :
+    (idealMigrateMachine scheme snapshot).step st' (claim₂, wit₂) = none := by
+  obtain ⟨hValid₁, _, _, hSt⟩ :=
+    (idealMigrateMachine_step_eq_some_iff scheme snapshot st st' claim₁ wit₁ out₁).mp hStep₁
+  apply step_none_of_not_accepts
+  intro hA
+  obtain ⟨_, hFresh₂, _⟩ := (scheme.accepts_iff _ _ _).mp hA
+  rw [hSt] at hFresh₂
+  apply hFresh₂
+  have hNullEq : claim₂.nullifier = claim₁.nullifier :=
+    hValid₂.2.1.trans (hColl.2.symm.trans hValid₁.2.1.symm)
+  rw [hNullEq]
+  exact .head _
+
 /-! ## 6b. Ownership Is Relative to `ownsKey` -/
 
 /-- Caveat: the ownership guarantee is exactly as strong as `scheme.ownsKey`. If `ownsKey` holds
-    for every key, witness and claim, then in every state satisfying the invariant a claim for an
-    enrolled, not yet settled key under its derived nullifier is accepted with ANY witness and ANY
-    destination. -/
+    for every key, witness and claim and `NullifierInjOn` holds on `snapshot`, then in every state
+    satisfying the invariant a claim for an enrolled, not yet settled key under its derived
+    nullifier is accepted with ANY witness and ANY destination. -/
 theorem idealMigrateMachine_trivial_ownsKey_admits_any_witness {LegacyPk Witness : Type}
     [DecidableEq LegacyPk]
     {scheme : LegacyOwnershipScheme LegacyPk Witness} {snapshot : EnrolledSnapshot LegacyPk}
+    (hInj : NullifierInjOn scheme.deriveNullifier (snapshot.map Prod.fst))
     (hTrivial : ∀ (pk : LegacyPk) (wit : Witness) (claim : MigrationClaim LegacyPk),
       scheme.ownsKey pk wit claim)
     {st : IdealMigrateState LegacyPk} (hInv : st.Inv scheme snapshot)
@@ -690,7 +1081,7 @@ theorem idealMigrateMachine_trivial_ownsKey_admits_any_witness {LegacyPk Witness
               settledClaims := ⟨⟨pk, scheme.deriveNullifier pk, dest⟩, amount⟩ ::
                 st.settledClaims },
             ⟨⟨pk, scheme.deriveNullifier pk, dest⟩, amount⟩) :=
-  idealMigrateMachine_unclaimed_owner_accepts hInv
+  idealMigrateMachine_unclaimed_owner_accepts hInj hInv
     ⟨hEnrolled, rfl, hTrivial pk wit ⟨pk, scheme.deriveNullifier pk, dest⟩⟩ hUnclaimed
 
 /-- Degenerate scheme over 256-bit keys whose ownership relation always holds. -/
@@ -699,15 +1090,17 @@ def idealMigrateOpenScheme : LegacyOwnershipScheme Digest256 Digest256 where
   checkOwnership _ _ _ := true
   check_iff _ _ _ := ⟨fun _ => rfl, fun _ => rfl⟩
   deriveNullifier pk := pk
-  deriveNullifier_injective h := h
 
 /-- `#tooth` Under the degenerate scheme the enrolled toy key is claimed from the initial state by
     every witness to every destination: no witness is rejected. -/
 theorem tooth_idealMigrateOpen_any_witness_claims_enrolled_key (wit : Digest256) (dest : Bytes) :
     ¬ ((idealMigrateMachine idealMigrateOpenScheme [(6#256, 100)]).step
         IdealMigrateState.init (⟨6#256, 6#256, dest⟩, wit) = none) := by
+  have hInj : NullifierInjOn idealMigrateOpenScheme.deriveNullifier
+      (([(6#256, 100)] : EnrolledSnapshot Digest256).map Prod.fst) :=
+    fun _ _ _ _ h => h
   have h := idealMigrateMachine_trivial_ownsKey_admits_any_witness
-    (scheme := idealMigrateOpenScheme) (snapshot := [(6#256, 100)]) (fun _ _ _ => rfl)
+    (scheme := idealMigrateOpenScheme) (snapshot := [(6#256, 100)]) hInj (fun _ _ _ => rfl)
     (IdealMigrateState.init_inv idealMigrateOpenScheme [(6#256, 100)])
     (entitlement_cons_eq (6#256) 100 []) (fun h => nomatch h) wit dest
   intro hNone
@@ -725,7 +1118,6 @@ def idealMigrateToyScheme : LegacyOwnershipScheme Digest256 Digest256 where
   checkOwnership pk wit _ := decide (pk = wit + wit)
   check_iff _ _ _ := decide_eq_true_iff
   deriveNullifier pk := pk
-  deriveNullifier_injective h := h
 
 /-- Toy snapshot enrolling the single key `6` with entitlement `100`. -/
 def idealMigrateToySnapshot : EnrolledSnapshot Digest256 := [(6#256, 100)]
@@ -738,10 +1130,13 @@ theorem idealMigrateToy_owner_claim_accepted :
               spentNullifiers := [6#256]
               settledClaims := [⟨⟨6#256, 6#256, []⟩, 100⟩] },
             ⟨⟨6#256, 6#256, []⟩, 100⟩) := by
+  have hInj : NullifierInjOn idealMigrateToyScheme.deriveNullifier
+      (idealMigrateToySnapshot.map Prod.fst) :=
+    fun _ _ _ _ h => h
   have hValid : ValidLegacyOwnership idealMigrateToyScheme idealMigrateToySnapshot
       ⟨6#256, 6#256, []⟩ (3#256) 100 :=
     ⟨entitlement_cons_eq (6#256) 100 [], rfl, (by decide : (6#256 : Digest256) = 3#256 + 3#256)⟩
-  exact idealMigrateMachine_unclaimed_owner_accepts
+  exact idealMigrateMachine_unclaimed_owner_accepts hInj
     (IdealMigrateState.init_inv idealMigrateToyScheme idealMigrateToySnapshot) hValid
     (fun h => nomatch h)
 
@@ -777,6 +1172,8 @@ theorem tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
   Qsag.Spec.tooth_idealMigrate_audit_fresh_nullifier_drain_rejected
 #tooth_pair Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts vs
   Qsag.Spec.tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
+#tooth_pair Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts_or_collision vs
+  Qsag.Spec.tooth_idealMigrate_colliding_nullifier_blocks_second_key
 
 #tooth_pair Qsag.Spec.idealMigrateMachine_trivial_ownsKey_admits_any_witness vs
   Qsag.Spec.tooth_idealMigrateOpen_any_witness_claims_enrolled_key
@@ -784,8 +1181,13 @@ theorem tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
 #verify_constructive
   Qsag.Spec.idealMigrateMachine_trivial_ownsKey_admits_any_witness
   Qsag.Spec.EnrolledEntitlement.mem
+  Qsag.Spec.NullifierInjOn_iff
+  Qsag.Spec.NullifierInjective_iff
+  Qsag.Spec.NullifierInjective.injOn
   Qsag.Spec.LegacyOwnershipScheme.accepts_iff
+  Qsag.Spec.LegacyOwnershipScheme.keyAccepts_iff
   Qsag.Spec.idealMigrateMachine_step_eq_some_iff
+  Qsag.Spec.idealKeyMigrateMachine_step_eq_some_iff
   Qsag.Spec.IdealMigrateState.init_inv
   Qsag.Spec.idealMigrateMachine_step_preserves_inv
   Qsag.Spec.idealMigrateMachine_trace_preserves_inv
@@ -797,11 +1199,15 @@ theorem tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected
   Qsag.Spec.idealMigrateMachine_trace_no_double_claim
   Qsag.Spec.idealMigrateMachine_trace_totalMigrated
   Qsag.Spec.idealMigrateMachine_trace_minted_le_enrolled
+  Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts_or_collision
   Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts
+  Qsag.Spec.idealMigrateMachine_unclaimed_owner_accepts_of_injective
+  Qsag.Spec.idealMigrate_step_eq_idealKeyMigrate_or_collision
   Qsag.Spec.tooth_idealMigrate_unenrolled_legacyPk_rejected
   Qsag.Spec.tooth_idealMigrate_underived_nullifier_rejected
   Qsag.Spec.tooth_idealMigrate_unowned_witness_rejected
   Qsag.Spec.tooth_idealMigrate_second_claim_same_legacyPk_rejected
+  Qsag.Spec.tooth_idealMigrate_colliding_nullifier_blocks_second_key
   Qsag.Spec.idealMigrateToy_owner_claim_accepted
   Qsag.Spec.tooth_idealMigrate_audit_fresh_nullifier_drain_rejected
   Qsag.Spec.tooth_idealMigrate_audit_enrolled_key_fresh_nullifier_rejected

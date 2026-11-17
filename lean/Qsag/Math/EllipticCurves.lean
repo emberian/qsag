@@ -1512,6 +1512,263 @@ theorem ScalarGroup.nullifierTag_injective {g₁ g₂ : ScalarGroup}
     (h : g₁.nullifierTag = g₂.nullifierTag) : g₁ = g₂ := by
   cases g₁ <;> cases g₂ <;> first | rfl | (exact absurd (congrArg Goldilocks.val h) (by decide))
 
+/-! ### Finite Canonical Affine Curve Public-Key Carrier (`CanonicalSwPk`) & Pigeonhole Bounds -/
+
+theorem SwCurve.OnCurve_of_onCurve {C : SwCurve} {P : SwPoint}
+    (h : C.onCurve P = true) : C.OnCurve P := by
+  rcases P with _ | ⟨x, y⟩
+  · exact trivial
+  · dsimp only [SwCurve.onCurve] at h
+    obtain ⟨hxy, hEqB⟩ := Bool.and_eq_true_iff.mp h
+    obtain ⟨hxB, hyB⟩ := Bool.and_eq_true_iff.mp hxy
+    exact ⟨of_decide_eq_true hxB, of_decide_eq_true hyB, beq_iff_eq.mp hEqB⟩
+
+/-- Canonical non-identity affine curve public key `(x, y)` on `C : SwCurve`:
+    coordinates are canonically reduced (`x < C.p`, `y < C.p`) and satisfy the short-Weierstrass
+    curve equation (`C.onCurve (some (x, y)) = true`).
+    Unlike unbounded `SwPoint := Option (Nat × Nat)`, `CanonicalSwPk C` excludes `none` and
+    unreduced coordinates, forming a finite carrier of size `≤ C.p * C.p`. -/
+structure CanonicalSwPk (C : SwCurve) where
+  x : Nat
+  y : Nat
+  isCanonical : C.onCurve (some (x, y)) = true
+  deriving Repr
+
+theorem CanonicalSwPk.ext {C : SwCurve} {pk₁ pk₂ : CanonicalSwPk C}
+    (hx : pk₁.x = pk₂.x) (hy : pk₁.y = pk₂.y) : pk₁ = pk₂ := by
+  cases pk₁; cases pk₂; cases hx; cases hy; rfl
+
+instance instDecidableEqCanonicalSwPk {C : SwCurve} : DecidableEq (CanonicalSwPk C)
+  | pk₁, pk₂ =>
+    match decEq pk₁.x pk₂.x, decEq pk₁.y pk₂.y with
+    | isTrue hx, isTrue hy => isTrue (CanonicalSwPk.ext hx hy)
+    | isFalse hx, _ => isFalse (fun h => hx (congrArg CanonicalSwPk.x h))
+    | _, isFalse hy => isFalse (fun h => hy (congrArg CanonicalSwPk.y h))
+
+theorem CanonicalSwPk.bounds {C : SwCurve} (pk : CanonicalSwPk C) :
+    pk.x < C.p ∧ pk.y < C.p ∧
+      (pk.y * pk.y) % C.p = (pk.x * pk.x * pk.x + C.a * pk.x + C.b) % C.p :=
+  SwCurve.OnCurve_of_onCurve pk.isCanonical
+
+def CanonicalSwPk.toSwPoint {C : SwCurve} (pk : CanonicalSwPk C) : SwPoint :=
+  some (pk.x, pk.y)
+
+theorem CanonicalSwPk.toSwPoint_eq {C : SwCurve} (pk : CanonicalSwPk C) :
+    pk.toSwPoint = some (pk.x, pk.y) := by
+  rfl
+
+theorem CanonicalSwPk.toSwPoint_ne_none {C : SwCurve} (pk : CanonicalSwPk C) :
+    pk.toSwPoint ≠ none := by
+  intro h; cases h
+
+theorem CanonicalSwPk.toSwPoint_onCurve {C : SwCurve} (pk : CanonicalSwPk C) :
+    C.onCurve pk.toSwPoint = true :=
+  pk.isCanonical
+
+theorem CanonicalSwPk.toSwPoint_injective {C : SwCurve} {pk₁ pk₂ : CanonicalSwPk C}
+    (h : pk₁.toSwPoint = pk₂.toSwPoint) : pk₁ = pk₂ := by
+  have hPair : (pk₁.x, pk₁.y) = (pk₂.x, pk₂.y) := Option.some.inj h
+  exact CanonicalSwPk.ext (congrArg Prod.fst hPair) (congrArg Prod.snd hPair)
+
+/-- Validated canonical curve public-key decoder from `SwPoint`: rejects `none` and off-curve or
+    unreduced `(x, y)` pairs. -/
+def CanonicalSwPk.ofSwPoint? (C : SwCurve) : SwPoint → Option (CanonicalSwPk C)
+  | none => none
+  | some (x, y) =>
+    if h : C.onCurve (some (x, y)) = true then some ⟨x, y, h⟩ else none
+
+theorem CanonicalSwPk.ofSwPoint?_none (C : SwCurve) :
+    CanonicalSwPk.ofSwPoint? C none = none := by
+  rfl
+
+theorem CanonicalSwPk.ofSwPoint?_toSwPoint {C : SwCurve} (pk : CanonicalSwPk C) :
+    CanonicalSwPk.ofSwPoint? C pk.toSwPoint = some pk := by
+  simp only [CanonicalSwPk.ofSwPoint?, CanonicalSwPk.toSwPoint, pk.isCanonical, ↓reduceDIte]
+
+theorem CanonicalSwPk.ofSwPoint?_eq_some_iff {C : SwCurve} {pt : SwPoint} {pk : CanonicalSwPk C} :
+    CanonicalSwPk.ofSwPoint? C pt = some pk ↔ pt = pk.toSwPoint := by
+  constructor
+  · intro h
+    rcases pt with _ | ⟨x, y⟩
+    · cases h
+    · simp only [CanonicalSwPk.ofSwPoint?] at h
+      by_cases hc : C.onCurve (some (x, y)) = true
+      · simp only [hc, ↓reduceDIte] at h
+        injection h with hEq
+        subst hEq
+        rfl
+      · simp only [hc, ↓reduceDIte] at h
+        cases h
+  · intro h
+    subst h
+    exact CanonicalSwPk.ofSwPoint?_toSwPoint pk
+
+/-- Injection of `CanonicalSwPk C` into the finite product `Fin C.p × Fin C.p`. -/
+def CanonicalSwPk.toFinPair {C : SwCurve} (pk : CanonicalSwPk C) : Fin C.p × Fin C.p :=
+  (⟨pk.x, pk.bounds.1⟩, ⟨pk.y, pk.bounds.2.1⟩)
+
+theorem CanonicalSwPk.toFinPair_injective {C : SwCurve} {pk₁ pk₂ : CanonicalSwPk C}
+    (h : pk₁.toFinPair = pk₂.toFinPair) : pk₁ = pk₂ := by
+  have hx : pk₁.x = pk₂.x := congrArg Fin.val (congrArg Prod.fst h)
+  have hy : pk₁.y = pk₂.y := congrArg Fin.val (congrArg Prod.snd h)
+  exact CanonicalSwPk.ext hx hy
+
+/-- Bijective base-`C.p` coordinate rank `x + C.p * y < C.p * C.p` witnessing `|CanonicalSwPk C| ≤ C.p²`. -/
+def CanonicalSwPk.encodeCoordNat {C : SwCurve} (pk : CanonicalSwPk C) : Nat :=
+  pk.x + C.p * pk.y
+
+theorem CanonicalSwPk.encodeCoordNat_eq {C : SwCurve} (pk : CanonicalSwPk C) :
+    pk.encodeCoordNat = pk.x + C.p * pk.y := by
+  rfl
+
+theorem CanonicalSwPk.encodeCoordNat_lt_sq {C : SwCurve} (pk : CanonicalSwPk C) :
+    pk.encodeCoordNat < C.p * C.p := by
+  obtain ⟨hx, hy, _⟩ := pk.bounds
+  have hyLe : pk.y + 1 ≤ C.p := hy
+  have hMul : C.p * (pk.y + 1) ≤ C.p * C.p := Nat.mul_le_mul_left C.p hyLe
+  rw [Nat.mul_add, Nat.mul_one] at hMul
+  unfold CanonicalSwPk.encodeCoordNat
+  omega
+
+theorem CanonicalSwPk.encodeCoordNat_injective {C : SwCurve} {pk₁ pk₂ : CanonicalSwPk C}
+    (h : pk₁.encodeCoordNat = pk₂.encodeCoordNat) : pk₁ = pk₂ := by
+  obtain ⟨hx₁, hy₁, _⟩ := pk₁.bounds
+  obtain ⟨hx₂, _, _⟩ := pk₂.bounds
+  have hp : 0 < C.p := Nat.zero_lt_of_lt hx₁
+  unfold CanonicalSwPk.encodeCoordNat at h
+  have hMod : (pk₁.x + C.p * pk₁.y) % C.p = (pk₂.x + C.p * pk₂.y) % C.p :=
+    congrArg (· % C.p) h
+  rw [Nat.add_mul_mod_self_left, Nat.add_mul_mod_self_left,
+      Nat.mod_eq_of_lt hx₁, Nat.mod_eq_of_lt hx₂] at hMod
+  have hDiv : (pk₁.x + C.p * pk₁.y) / C.p = (pk₂.x + C.p * pk₂.y) / C.p :=
+    congrArg (· / C.p) h
+  rw [Nat.add_mul_div_left _ _ hp, Nat.add_mul_div_left _ _ hp,
+      Nat.div_eq_of_lt hx₁, Nat.div_eq_of_lt hx₂, Nat.zero_add, Nat.zero_add] at hDiv
+  exact CanonicalSwPk.ext hMod hDiv
+
+/-- Constructive finite Pigeonhole Principle (`0 Classical.choice`): no map `Fin (n + 1) → Fin n`
+    is injective. -/
+theorem fin_pigeonhole :
+    ∀ (n : Nat) (f : Fin (n + 1) → Fin n),
+      ¬ (∀ i j : Fin (n + 1), f i = f j → i = j)
+  | 0, f, _ => Nat.not_lt_zero _ (f ⟨0, Nat.zero_lt_one⟩).isLt
+  | n + 1, f, hInj => by
+    let top : Fin (n + 1) := f ⟨n + 1, Nat.lt_succ_self (n + 1)⟩
+    have hNeTop : ∀ i : Fin (n + 1), (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).val ≠ top.val := by
+      intro i hEqVal
+      have hEqFin : f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩ = f ⟨n + 1, Nat.lt_succ_self (n + 1)⟩ :=
+        Fin.ext hEqVal
+      have hIdx : (⟨i.val, Nat.lt_succ_of_lt i.isLt⟩ : Fin (n + 2)) =
+          ⟨n + 1, Nat.lt_succ_self (n + 1)⟩ := hInj _ _ hEqFin
+      exact absurd (congrArg (fun k : Fin (n + 2) => k.val) hIdx) (Nat.ne_of_lt i.isLt)
+    let gVal : Fin (n + 1) → Nat := fun i =>
+      let v := (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).val
+      if v < top.val then v else v - 1
+    have gVal_lt : ∀ i : Fin (n + 1), gVal i < n := by
+      intro i
+      dsimp only [gVal]
+      have hv := (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).isLt
+      have ht := top.isLt
+      have hni := hNeTop i
+      by_cases hLt : (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).val < top.val <;>
+        simp only [hLt, ↓reduceIte] <;> omega
+    let g : Fin (n + 1) → Fin n := fun i => ⟨gVal i, gVal_lt i⟩
+    refine fin_pigeonhole n g (fun i j hij => ?_)
+    have hgi : gVal i = gVal j := congrArg (fun k : Fin n => k.val) hij
+    dsimp only [gVal] at hgi
+    have hni := hNeTop i
+    have hnj := hNeTop j
+    have hEqV : (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).val =
+        (f ⟨j.val, Nat.lt_succ_of_lt j.isLt⟩).val := by
+      by_cases hi : (f ⟨i.val, Nat.lt_succ_of_lt i.isLt⟩).val < top.val <;>
+        by_cases hj : (f ⟨j.val, Nat.lt_succ_of_lt j.isLt⟩).val < top.val <;>
+        simp only [hi, hj, ↓reduceIte] at hgi <;> omega
+    have hEqIdx : (⟨i.val, Nat.lt_succ_of_lt i.isLt⟩ : Fin (n + 2)) =
+        ⟨j.val, Nat.lt_succ_of_lt j.isLt⟩ := hInj _ _ (Fin.ext hEqV)
+    exact Fin.ext (congrArg (fun k : Fin (n + 2) => k.val) hEqIdx)
+
+/-- `#tooth` Unbounded `SwPoint := Option (Nat × Nat)` admits NO injection into `BitVec w` for any
+    bit-width `w` (in particular `w = 256`), refuting global `SwPoint → Digest256` injectivity. -/
+theorem tooth_unbounded_swPoint_no_injective_bitvec (w : Nat) :
+    ¬ ∃ f : SwPoint → BitVec w, ∀ {p₁ p₂ : SwPoint}, f p₁ = f p₂ → p₁ = p₂ := by
+  rintro ⟨f, hInj⟩
+  refine fin_pigeonhole (2 ^ w) (fun i => (f (some (i.val, 0))).toFin) (fun i j hij => ?_)
+  have hBv : f (some (i.val, 0)) = f (some (j.val, 0)) :=
+    BitVec.eq_of_toNat_eq (congrArg (fun k : Fin (2 ^ w) => k.val) hij)
+  have hPt := hInj hBv
+  injection hPt with hPair
+  exact Fin.ext (congrArg Prod.fst hPair)
+
+/-- `#tooth` A 381-bit `BLS12-381`-width carrier (`Fin p_bls381`, `p_bls381 > 2^380 > 2^256`)
+    admits NO global injection into `BitVec 256`, witnessing why collision-branching refinement is
+    mathematically mandatory beyond 256-bit coordinate domains. -/
+theorem tooth_bls381_width_no_injective_bitvec256 :
+    2 ^ 256 < p_bls381 ∧
+      ¬ ∃ f : Fin p_bls381 → BitVec 256, ∀ {x₁ x₂ : Fin p_bls381}, f x₁ = f x₂ → x₁ = x₂ := by
+  have hLt : 2 ^ 256 + 1 ≤ p_bls381 := by
+    have hb := pallas_and_bls381_limbs_and_bit_bounds.2.2.2.2.2.2.2.2.2.2.1
+    have hStep : 2 ^ 256 + 1 ≤ 2 ^ 380 := by decide
+    exact Nat.le_trans hStep (Nat.le_of_lt hb)
+  refine ⟨by omega, ?_⟩
+  rintro ⟨f, hInj⟩
+  refine fin_pigeonhole (2 ^ 256)
+    (fun i => (f ⟨i.val, Nat.lt_of_lt_of_le i.isLt hLt⟩).toFin) (fun i j hij => ?_)
+  have hBv : f ⟨i.val, Nat.lt_of_lt_of_le i.isLt hLt⟩ =
+      f ⟨j.val, Nat.lt_of_lt_of_le j.isLt hLt⟩ :=
+    BitVec.eq_of_toNat_eq (congrArg (fun k : Fin (2 ^ 256) => k.val) hij)
+  have hEqFin : (⟨i.val, Nat.lt_of_lt_of_le i.isLt hLt⟩ : Fin p_bls381) =
+      ⟨j.val, Nat.lt_of_lt_of_le j.isLt hLt⟩ := hInj hBv
+  exact Fin.ext (congrArg (fun k : Fin p_bls381 => k.val) hEqFin)
+
+/-- Canonical curve key `[1]G = (2, 12)` on `secp7Mod43`. -/
+def secp7Mod43Pk1 : CanonicalSwPk Weierstrass.secp7Mod43 :=
+  ⟨2, 12, by decide +kernel⟩
+
+/-- Canonical curve key `[2]G = (7, 7)` on `secp7Mod43`. -/
+def secp7Mod43Pk2 : CanonicalSwPk Weierstrass.secp7Mod43 :=
+  ⟨7, 7, by decide +kernel⟩
+
+/-- Canonical curve key `[30]G = -[1]G = (2, 31)` on `secp7Mod43` (shares `x = 2` with `secp7Mod43Pk1`). -/
+def secp7Mod43Pk30 : CanonicalSwPk Weierstrass.secp7Mod43 :=
+  ⟨2, 31, by decide +kernel⟩
+
+theorem secp7Mod43_canonicalPks_props :
+    secp7Mod43Pk1.toSwPoint = some (2, 12) ∧
+    secp7Mod43Pk2.toSwPoint = some (7, 7) ∧
+    secp7Mod43Pk30.toSwPoint = some (2, 31) ∧
+    secp7Mod43Pk1.x = 2 ∧ secp7Mod43Pk1.y = 12 ∧
+    secp7Mod43Pk2.x = 7 ∧ secp7Mod43Pk2.y = 7 ∧
+    secp7Mod43Pk30.x = 2 ∧ secp7Mod43Pk30.y = 31 ∧
+    secp7Mod43Pk1 ≠ secp7Mod43Pk2 ∧
+    secp7Mod43Pk1 ≠ secp7Mod43Pk30 := by
+  exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, by decide, by decide⟩
+
+/-- Canonical 381-bit `BLS12-381` `G_1` generator key `bls381G1`. -/
+def bls381G1Canonical : CanonicalSwPk bls381Curve :=
+  ⟨0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb,
+   0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1,
+   bls381G1_onCurve_and_prime_subgroup_order.1⟩
+
+/-- Distinct canonical 381-bit `BLS12-381` `G_1` key `-bls381G1`. -/
+def bls381NegG1Canonical : CanonicalSwPk bls381Curve :=
+  ⟨bls381G1Canonical.x, (p_bls381 - bls381G1Canonical.y) % p_bls381, by
+    have hOn : bls381Curve.OnCurve (some (bls381G1Canonical.x, bls381G1Canonical.y)) :=
+      bls381G1Canonical.bounds
+    have hNeg := bls381Curve.neg_onCurve _ hOn
+    exact SwCurve.onCurve_of_OnCurve hNeg⟩
+
+theorem bls381_canonicalPks_distinct_and_381bit :
+    bls381G1Canonical.toSwPoint = bls381G1 ∧
+    bls381NegG1Canonical.toSwPoint = bls381Curve.neg bls381G1 ∧
+    bls381G1Canonical ≠ bls381NegG1Canonical ∧
+    2 ^ 380 < bls381G1Canonical.x ∧
+    2 ^ 380 < bls381NegG1Canonical.x := by
+  refine ⟨rfl, rfl, ?_, by decide +kernel, by decide +kernel⟩
+  intro hEq
+  have hy := congrArg CanonicalSwPk.y hEq
+  revert hy
+  decide +kernel
+
 #verify_constructive
   Qsag.curve_orders_match_le_limbs_and_bounds
   Qsag.TaprootCurveProjection.compressed_injective
@@ -1530,5 +1787,19 @@ theorem ScalarGroup.nullifierTag_injective {g₁ g₂ : ScalarGroup}
   Qsag.orchardSpendAuthG_onCurve_and_prime_subgroup_order
   Qsag.bls381G1_onCurve_and_prime_subgroup_order
   Qsag.SwCurve.onCurve_of_OnCurve
+  Qsag.SwCurve.OnCurve_of_onCurve
+  Qsag.CanonicalSwPk.ext
+  Qsag.CanonicalSwPk.bounds
+  Qsag.CanonicalSwPk.toSwPoint_injective
+  Qsag.CanonicalSwPk.ofSwPoint?_toSwPoint
+  Qsag.CanonicalSwPk.ofSwPoint?_eq_some_iff
+  Qsag.CanonicalSwPk.toFinPair_injective
+  Qsag.CanonicalSwPk.encodeCoordNat_lt_sq
+  Qsag.CanonicalSwPk.encodeCoordNat_injective
+  Qsag.fin_pigeonhole
+  Qsag.tooth_unbounded_swPoint_no_injective_bitvec
+  Qsag.tooth_bls381_width_no_injective_bitvec256
+  Qsag.secp7Mod43_canonicalPks_props
+  Qsag.bls381_canonicalPks_distinct_and_381bit
 
 end Qsag

@@ -1,11 +1,28 @@
-// Dregg-180 (QSAG-NI-180) ultra-compact 64-bit word-serial in-place Keccak-p[1600, nr] engine.
+// Dregg-180 (QSAG-NI-180) lane-serial, in-place Keccak-p[1600, nr] over the sponge register file
+// (one 64-bit read port, one 64-bit write port).
 //
-//   * Operates directly over `qsag_sponge`'s scalar 64-bit `rd_addr/port` + `wr_addr/wr_data` ports
-//     (`0` wide sponge crossbar muxes!).
-//   * Ring-shifted 5x64-bit `cd[0..4]` column-parity & D-sheet ring (`0` data muxes / XORs on
-//     `cd[0..3]`, `1` shared 64-bit XOR on `cd[4]`) + `1` 6-stage logarithmic 64-bit barrel rotator
-//     (`384` mux2_1 cells vs dual variable shifters), saving > 68,000 um^2 while executing 12-round
-//     TurboSHAKE256 in 817 clocks and 24-round SHAKE256 in 1,609 clocks (~2x faster than bit-serial!).
+// One pass over the 25 lanes per round (Bertoni, Daemen, Peeters, Van Assche, "Keccak
+// implementation overview" 3.2, section 2.5, in-place processing):
+//
+//   * Row y of the round output E needs the five lanes B[x, y] = ROL(A[x + 3y, x] ^ D[x + 3y], r),
+//     i.e. five lanes of the round input, one from each column. The five results are written back
+//     into those same five slots, each into the slot of its own column. A logical lane (x, y)
+//     therefore stays in column x of the memory, and after k rounds it sits in row
+//     N^k(x, y) with N(x, y) = x + 2y (mod 5):
+//         k = 0: y      k = 1: x + 2y      k = 2: 3x + 4y      k = 3: 2x + 3y      k = 4: y
+//     N has order 4, so after 12 or 24 rounds the state is back in canonical lane order and no
+//     final shuffle exists. Lane (0, 0), where iota is added, never moves.
+//   * Column parities of the round output are accumulated while it is written (C_nxt, a 5-lane
+//     ring that rotates once per written lane), so theta of the next round needs no extra pass.
+//     Only the first round is preceded by a 25-read parity pass.
+//   * rho is one 64-bit barrel rotator on the read path; chi runs over a 4-lane shift window
+//     (plus two saved lanes for the wrap-around terms of a row). Results leave the window four
+//     clocks after their first operand was read, which is late enough that the destination slot
+//     has always been read (the slot of column x in row y is read at position x + 2y of the row).
+//
+// Timing: 25 clocks parity pass + 29 clocks per round (25 reads, 25 writes, overlapped by 21):
+//     Keccak-p[1600, 12]  373 clocks      Keccak-f[1600]  721 clocks       (+1 for the start pulse)
+// (previous two-pass engine: 62 clocks per round, 817 / 1609 clocks).
 `default_nettype none
 
 module qsag_keccak_serial (
@@ -23,46 +40,53 @@ module qsag_keccak_serial (
     output logic [5:0]  wr_addr,
     output logic [63:0] wr_data
 );
-    function automatic logic [4:0] pi_lane(input logic [4:0] s);
-        unique case (s)
-            5'd0:  pi_lane = 5'd1;   5'd1:  pi_lane = 5'd10;  5'd2:  pi_lane = 5'd7;
-            5'd3:  pi_lane = 5'd11;  5'd4:  pi_lane = 5'd17;  5'd5:  pi_lane = 5'd18;
-            5'd6:  pi_lane = 5'd3;   5'd7:  pi_lane = 5'd5;   5'd8:  pi_lane = 5'd16;
-            5'd9:  pi_lane = 5'd8;   5'd10: pi_lane = 5'd21;  5'd11: pi_lane = 5'd24;
-            5'd12: pi_lane = 5'd4;   5'd13: pi_lane = 5'd15;  5'd14: pi_lane = 5'd23;
-            5'd15: pi_lane = 5'd19;  5'd16: pi_lane = 5'd13;  5'd17: pi_lane = 5'd12;
-            5'd18: pi_lane = 5'd2;   5'd19: pi_lane = 5'd20;  5'd20: pi_lane = 5'd14;
-            5'd21: pi_lane = 5'd22;  5'd22: pi_lane = 5'd9;   5'd23: pi_lane = 5'd6;
-            default: pi_lane = 5'd1;
+    // ------------------------------------------------------------ small arithmetic modulo 5
+    function automatic logic [2:0] mod5(input logic [4:0] v);   // v in 0..28
+        if (v >= 5'd25)      mod5 = 3'(v - 5'd25);
+        else if (v >= 5'd20) mod5 = 3'(v - 5'd20);
+        else if (v >= 5'd15) mod5 = 3'(v - 5'd15);
+        else if (v >= 5'd10) mod5 = 3'(v - 5'd10);
+        else if (v >= 5'd5)  mod5 = 3'(v - 5'd5);
+        else                 mod5 = v[2:0];
+    endfunction
+    // memory row of logical lane (x, y) after k rounds: N^k(x, y)
+    function automatic logic [2:0] nrow(input logic [1:0] k, input logic [2:0] x, input logic [2:0] y);
+        logic [4:0] xx, yy;
+        begin
+            xx = {2'd0, x};
+            yy = {2'd0, y};
+            unique case (k)
+                2'd0: nrow = y;
+                2'd1: nrow = mod5(xx + (yy << 1));                 //  x + 2y
+                2'd2: nrow = mod5((xx << 1) + xx + (yy << 2));     // 3x + 4y
+                2'd3: nrow = mod5((xx << 1) + (yy << 1) + yy);     // 2x + 3y
+            endcase
+        end
+    endfunction
+    function automatic logic [5:0] lane_addr(input logic [2:0] x, input logic [2:0] row);
+        lane_addr = {1'b0, row, 2'b00} + {3'd0, row} + {3'd0, x};   // 5 * row + x
+    endfunction
+    // rho offsets r[x][y] (FIPS 202, table 2)
+    function automatic logic [5:0] rho(input logic [2:0] x, input logic [2:0] y);
+        unique case ({x, y})
+            {3'd0, 3'd0}: rho = 6'd0;   {3'd0, 3'd1}: rho = 6'd36;  {3'd0, 3'd2}: rho = 6'd3;
+            {3'd0, 3'd3}: rho = 6'd41;  {3'd0, 3'd4}: rho = 6'd18;
+            {3'd1, 3'd0}: rho = 6'd1;   {3'd1, 3'd1}: rho = 6'd44;  {3'd1, 3'd2}: rho = 6'd10;
+            {3'd1, 3'd3}: rho = 6'd45;  {3'd1, 3'd4}: rho = 6'd2;
+            {3'd2, 3'd0}: rho = 6'd62;  {3'd2, 3'd1}: rho = 6'd6;   {3'd2, 3'd2}: rho = 6'd43;
+            {3'd2, 3'd3}: rho = 6'd15;  {3'd2, 3'd4}: rho = 6'd61;
+            {3'd3, 3'd0}: rho = 6'd28;  {3'd3, 3'd1}: rho = 6'd55;  {3'd3, 3'd2}: rho = 6'd25;
+            {3'd3, 3'd3}: rho = 6'd21;  {3'd3, 3'd4}: rho = 6'd56;
+            {3'd4, 3'd0}: rho = 6'd27;  {3'd4, 3'd1}: rho = 6'd20;  {3'd4, 3'd2}: rho = 6'd39;
+            {3'd4, 3'd3}: rho = 6'd8;   {3'd4, 3'd4}: rho = 6'd14;
+            default:      rho = 6'd0;
         endcase
     endfunction
-
-    function automatic logic [5:0] rho_sh(input logic [4:0] s);
-        unique case (s)
-            5'd0:  rho_sh = 6'd1;   5'd1:  rho_sh = 6'd3;   5'd2:  rho_sh = 6'd6;
-            5'd3:  rho_sh = 6'd10;  5'd4:  rho_sh = 6'd15;  5'd5:  rho_sh = 6'd21;
-            5'd6:  rho_sh = 6'd28;  5'd7:  rho_sh = 6'd36;  5'd8:  rho_sh = 6'd45;
-            5'd9:  rho_sh = 6'd55;  5'd10: rho_sh = 6'd2;   5'd11: rho_sh = 6'd14;
-            5'd12: rho_sh = 6'd27;  5'd13: rho_sh = 6'd41;  5'd14: rho_sh = 6'd56;
-            5'd15: rho_sh = 6'd8;   5'd16: rho_sh = 6'd25;  5'd17: rho_sh = 6'd43;
-            5'd18: rho_sh = 6'd62;  5'd19: rho_sh = 6'd18;  5'd20: rho_sh = 6'd39;
-            5'd21: rho_sh = 6'd61;  5'd22: rho_sh = 6'd20;  default: rho_sh = 6'd44;
-        endcase
-    endfunction
-
-    function automatic logic [2:0] mod5_of(input logic [4:0] idx);
-        if (idx >= 5'd20)      mod5_of = 3'(idx - 5'd20);
-        else if (idx >= 5'd15) mod5_of = 3'(idx - 5'd15);
-        else if (idx >= 5'd10) mod5_of = 3'(idx - 5'd10);
-        else if (idx >= 5'd5)  mod5_of = 3'(idx - 5'd5);
-        else                   mod5_of = idx[2:0];
-    endfunction
-
-    // Single 6-stage logarithmic 64-bit left rotator (384 mux2_1 cells, 6 gate levels)
+    // 6-stage logarithmic 64-bit left rotator
     function automatic logic [63:0] rol64(input logic [63:0] x, input logic [5:0] sh);
         logic [63:0] t0, t1, t2, t3, t4;
         begin
-            t0    = sh[0] ? {x[62:0],  x[63]}    : x;
+            t0    = sh[0] ? {x[62:0],  x[63]}     : x;
             t1    = sh[1] ? {t0[61:0], t0[63:62]} : t0;
             t2    = sh[2] ? {t1[59:0], t1[63:60]} : t1;
             t3    = sh[3] ? {t2[55:0], t2[63:56]} : t2;
@@ -71,167 +95,176 @@ module qsag_keccak_serial (
         end
     endfunction
 
-    localparam logic [2:0] K_IDLE = 3'd0, K_TH0 = 3'd1, K_THD = 3'd2,
-                           K_RHO  = 3'd3, K_CR  = 3'd4, K_CW  = 3'd5;
-    logic [2:0] st;
-    logic [4:0] rnd;
-    logic [4:0] step;
-    logic [2:0] row_y;
-
-    wire [63:0] cd [5];
-    wire [63:0] w0, w1, b0_save, b1_save;
+    // ------------------------------------------------------------ sequencing
+    localparam logic [1:0] K_IDLE = 2'd0, K_PAR = 2'd1, K_RND = 2'd2;
+    logic [1:0] st;
+    logic [4:0] rnd;        // round index 0..23 (round constant index)
+    logic [4:0] t;          // K_PAR: 0..24, K_RND: 0..28
+    logic [2:0] rx, ry;     // read position inside the round: row ry, position rx
+    logic [2:0] wj, wy;     // write position inside the round: row wy, column wj
 
     assign busy = (st != K_IDLE);
 
+    wire rd_act = (st == K_RND) && (t < 5'd25);
+    wire wr_act = (st == K_RND) && (t >= 5'd4);
+    wire [1:0] k_rd = rnd[1:0];           // 12 and 0 are both multiples of 4
+    wire [1:0] k_wr = rnd[1:0] + 2'd1;
+
+    // read: lane B[rx, ry] comes from logical lane (xs, ys) = (rx + 3 ry, rx) of the round input
+    wire [2:0] xs = mod5({2'd0, rx} + {1'b0, ry, 1'b0} + {2'd0, ry});
+    wire [2:0] ys = rx;
+    wire [5:0] ra = lane_addr(xs, nrow(k_rd, xs, ys));
+    // write: result E[wj, wy]
+    wire [5:0] wa = lane_addr(wj, nrow(k_wr, wj, wy));
+
+    // ------------------------------------------------------------ datapath
+    wire [63:0] cnx [5];    // C_nxt ring: parity of the lanes written so far in this round
+    wire [63:0] ccu [5];    // C_cur: column parity of the round input
+    wire [63:0] bq1, bq2, bq3, bq4, b0s, b1s;
+
+    // theta: D[xs] = C[xs - 1] ^ ROL(C[xs + 1], 1)
+    logic [63:0] c_m, c_p;
+    always_comb begin
+        unique case (xs)
+            3'd0:    begin c_m = ccu[4]; c_p = ccu[1]; end
+            3'd1:    begin c_m = ccu[0]; c_p = ccu[2]; end
+            3'd2:    begin c_m = ccu[1]; c_p = ccu[3]; end
+            3'd3:    begin c_m = ccu[2]; c_p = ccu[4]; end
+            default: begin c_m = ccu[3]; c_p = ccu[0]; end
+        endcase
+    end
+    wire [63:0] d_x  = c_m ^ {c_p[62:0], c_p[63]};
+    // rho (pi is the read order)
+    wire [63:0] b_in = rol64(port ^ d_x, rho(xs, ys));
+
+    // chi over the window: E[j] = B[j] ^ (~B[j+1] & B[j+2]); B[j] is bq4 when E[j] is formed
+    wire [63:0] chi_a = (wj == 3'd4) ? b0s : bq3;
+    wire [63:0] chi_b = (wj <= 3'd2) ? bq2 : (wj == 3'd3) ? b0s : b1s;
     wire [63:0] rc;
     qsag_keccak_rc u_rc (.idx(rnd), .rc(rc));
-
-    wire [4:0]  idx_m2  = step - 5'd2;
-    wire [5:0]  cur_sh  = rho_sh(idx_m2);
-    wire [4:0]  src_ln  = pi_lane(idx_m2);
-    wire [2:0]  src_x   = mod5_of(src_ln);
-    wire [63:0] cd_rho  = (src_x == 3'd0) ? cd[0] : (src_x == 3'd1) ? cd[1] :
-                          (src_x == 3'd2) ? cd[2] : (src_x == 3'd3) ? cd[3] : cd[4];
-    wire [63:0] rot_out = rol64(w0 ^ cd_rho, cur_sh);
-
-    wire [4:0]  row_base = 5'd5 * {2'd0, row_y};
-    wire [63:0] chi_b2   = (step == 5'd3) ? b0_save : (step == 5'd4) ? b1_save : port;
-    wire [63:0] iota_xor = (row_y == 3'd0 && step == 5'd0)
-                           ? (rc ^ ((fault_inj && rnd == 5'd18) ? 64'h0000_0000_0001_0000 : 64'd0))
-                           : 64'd0;
-    wire [63:0] chi_out  = w0 ^ (~w1 & chi_b2) ^ iota_xor;
-
-    wire [4:0]  dst_ln   = pi_lane((step == 5'd25) ? 5'd0 : (step - 5'd1));
+    wire [63:0] iota = (wj == 3'd0 && wy == 3'd0)
+                       ? (rc ^ ((fault_inj && rnd == 5'd18) ? 64'h0000_0000_0001_0000 : 64'd0))
+                       : 64'd0;
+    wire [63:0] e_out = bq4 ^ (~chi_a & chi_b) ^ iota;
 
     always_comb begin
         rd_addr = 6'd0;
         wr_en   = 1'b0;
         wr_addr = 6'd0;
         wr_data = 64'd0;
-        unique case (st)
-            K_TH0: rd_addr = {1'b0, step};
-            K_RHO: begin
-                if (step == 5'd0) begin
-                    rd_addr = 6'd0;
-                    wr_en   = 1'b1;
-                    wr_addr = 6'd0;
-                    wr_data = port ^ cd[0];
-                end else if (step == 5'd1) begin
-                    rd_addr = 6'd1;
-                end else begin
-                    rd_addr = {1'b0, dst_ln};
-                    wr_en   = 1'b1;
-                    wr_addr = {1'b0, dst_ln};
-                    wr_data = rot_out;
-                end
-            end
-            K_CR: rd_addr = {1'b0, row_base + step};
-            K_CW: begin
-                rd_addr = {1'b0, row_base + step + 5'd2};
-                wr_en   = 1'b1;
-                wr_addr = {1'b0, row_base + step};
-                wr_data = chi_out;
-            end
-            default: ;
-        endcase
+        if (st == K_PAR) rd_addr = {1'b0, t};
+        if (rd_act)      rd_addr = ra;
+        if (wr_act) begin
+            wr_en   = 1'b1;
+            wr_addr = wa;
+            wr_data = e_out;
+        end
     end
 
-    // Ring-shifted cd[0..4]: cd[0..3] are pure shift registers (0 XORs, 0 muxes); cd[4] has 1 XOR!
-    wire        cd_shift = (st == K_TH0) || (st == K_THD) || (st == K_CW);
-    wire [63:0] thd_rhs  = (step == 5'd4) ? w1 : cd[1];
-    wire [63:0] xor_lhs  = (st == K_THD)  ? ((step == 5'd0) ? cd[4] : w0) :
-                           (st == K_TH0)  ? ((step < 5'd5)  ? 64'd0 : cd[0]) :
-                                            ((row_y == 3'd0) ? 64'd0 : cd[0]);
-    wire [63:0] xor_rhs  = (st == K_THD)  ? {thd_rhs[62:0], thd_rhs[63]} :
-                           (st == K_TH0)  ? port : chi_out;
-    wire [63:0] cd4_next = xor_lhs ^ xor_rhs;
+    // window: one lane in per clock while a round runs
+    wire win_en = (st == K_RND);
+    qsag_ereg #(.W(64)) u_bq1 (.clk(clk), .rst_n(srst_n), .en(win_en), .d(b_in), .q(bq1));
+    qsag_ereg #(.W(64)) u_bq2 (.clk(clk), .rst_n(srst_n), .en(win_en), .d(bq1),  .q(bq2));
+    qsag_ereg #(.W(64)) u_bq3 (.clk(clk), .rst_n(srst_n), .en(win_en), .d(bq2),  .q(bq3));
+    qsag_ereg #(.W(64)) u_bq4 (.clk(clk), .rst_n(srst_n), .en(win_en), .d(bq3),  .q(bq4));
 
-    genvar gx;
+    // C_nxt ring: rotates once per accumulated lane; the first five lanes of a pass load it
+    wire        par_act  = (st == K_PAR);
+    wire        ring_en  = par_act || wr_act;
+    wire        ring_ld  = par_act ? (t < 5'd5) : (wy == 3'd0);
+    wire [63:0] ring_src = par_act ? port : e_out;
+    wire [63:0] ring_hd  = ring_ld ? ring_src : (cnx[0] ^ ring_src);
+    genvar gi;
     generate
-        for (gx = 0; gx < 4; gx++) begin : g_cd_sh
-            qsag_ereg #(.W(64)) u_cd (.clk(clk), .rst_n(srst_n), .en(cd_shift), .d(cd[gx + 1]), .q(cd[gx]));
+        for (gi = 0; gi < 4; gi++) begin : g_ring
+            qsag_ereg #(.W(64)) u_c (.clk(clk), .rst_n(srst_n), .en(ring_en), .d(cnx[gi + 1]), .q(cnx[gi]));
         end
     endgenerate
-    qsag_ereg #(.W(64)) u_cd4 (.clk(clk), .rst_n(srst_n), .en(cd_shift), .d(cd4_next), .q(cd[4]));
+    qsag_ereg #(.W(64)) u_c4 (.clk(clk), .rst_n(srst_n), .en(ring_en), .d(ring_hd), .q(cnx[4]));
 
-    wire w_clr = !srst_n;
-    wire w0_en = w_clr || (st == K_THD && step <= 5'd3) ||
-                 (st == K_RHO && step >= 5'd1 && step <= 5'd24) ||
-                 (st == K_CR && step == 5'd0) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w0_d = w_clr ? 64'd0 : (st == K_THD) ? cd[0] : (st == K_CW) ? w1 : port;
-
-    wire w1_en = w_clr || (st == K_THD && step == 5'd0) ||
-                 (st == K_CR && step == 5'd1) || (st == K_CW && step <= 5'd3);
-    wire [63:0] w1_d = w_clr ? 64'd0 : (st == K_THD) ? cd[0] : (st == K_CW) ? chi_b2 : port;
-
-    qsag_ereg_nr #(.W(64)) u_w0 (.clk(clk), .en(w0_en), .d(w0_d), .q(w0));
-    qsag_ereg_nr #(.W(64)) u_w1 (.clk(clk), .en(w1_en), .d(w1_d), .q(w1));
-
+    // C_cur <- C_nxt on the clock edge that ends a pass; the two saved window lanes B[0], B[1]
+    // of the row being read (they are still needed after the window has moved on)
+    wire cc_ld  = (par_act && t == 5'd24) || (st == K_RND && t == 5'd28);
+    wire b0_ld  = rd_act && (rx == 3'd3);   // bq3 holds B[0] of this row
+    wire b1_ld  = rd_act && (rx == 3'd4);   // bq3 holds B[1] of this row
 `ifdef QSAG_LATCH_RF
-    wire b_gate;
-    qsag_clkgate_1 u_bcg (.clk(clk), .en(st == K_CR && step == 5'd1), .gclk(b_gate));
-    qsag_latch_word_rst #(.W(128)) u_bs (.gate(b_gate), .rst_n(srst_n), .d({w1, w0}), .q({b1_save, b0_save}));
+    // latrnq_1 rows behind icgtp_1: the row is transparent in the high phase after the load
+    // clock, when the source flops already hold the value of that edge (ring after its last
+    // rotation, bq4 = the former bq3).
+    wire cc_gate, b0_gate, b1_gate;
+    qsag_latgate u_ccg (.clk(clk), .en(cc_ld), .gclk(cc_gate));
+    qsag_latgate u_b0g (.clk(clk), .en(b0_ld), .gclk(b0_gate));
+    qsag_latgate u_b1g (.clk(clk), .en(b1_ld), .gclk(b1_gate));
+    generate
+        for (gi = 0; gi < 5; gi++) begin : g_ccur
+            qsag_latch_word_rst #(.W(64)) u_l (.gate(cc_gate), .rst_n(srst_n), .d(cnx[gi]), .q(ccu[gi]));
+        end
+    endgenerate
+    qsag_latch_word_rst #(.W(64)) u_b0s (.gate(b0_gate), .rst_n(srst_n), .d(bq4), .q(b0s));
+    qsag_latch_word_rst #(.W(64)) u_b1s (.gate(b1_gate), .rst_n(srst_n), .d(bq4), .q(b1s));
 `else
-    qsag_ereg_nr #(.W(64)) u_b0s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd0)), .d(w_clr ? 64'd0 : port), .q(b0_save));
-    qsag_ereg_nr #(.W(64)) u_b1s (.clk(clk), .en(w_clr || (st == K_CR && step == 5'd1)), .d(w_clr ? 64'd0 : port), .q(b1_save));
+    generate
+        for (gi = 0; gi < 4; gi++) begin : g_ccur
+            qsag_ereg #(.W(64)) u_l (.clk(clk), .rst_n(srst_n), .en(cc_ld), .d(cnx[gi + 1]), .q(ccu[gi]));
+        end
+    endgenerate
+    qsag_ereg #(.W(64)) u_l4  (.clk(clk), .rst_n(srst_n), .en(cc_ld), .d(ring_hd), .q(ccu[4]));
+    qsag_ereg #(.W(64)) u_b0s (.clk(clk), .rst_n(srst_n), .en(b0_ld), .d(bq3), .q(b0s));
+    qsag_ereg #(.W(64)) u_b1s (.clk(clk), .rst_n(srst_n), .en(b1_ld), .d(bq3), .q(b1s));
 `endif
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            st    <= K_IDLE;
-            done  <= 1'b0;
-            rnd   <= '0;
-            step  <= '0;
-            row_y <= '0;
+            st   <= K_IDLE;
+            done <= 1'b0;
+            rnd  <= '0;
+            t    <= '0;
+            rx   <= '0;
+            ry   <= '0;
+            wj   <= '0;
+            wy   <= '0;
         end else begin
             done <= 1'b0;
             unique case (st)
                 K_IDLE: if (start) begin
-                    rnd  <= turbo ? 5'd12 : 5'd0;
-                    step <= 5'd0;
-                    st   <= K_TH0;
+                    rnd <= turbo ? 5'd12 : 5'd0;
+                    t   <= 5'd0;
+                    st  <= K_PAR;
                 end
-                K_TH0: begin
-                    if (step == 5'd24) begin
-                        step <= 5'd0;
-                        st   <= K_THD;
-                    end else step <= step + 5'd1;
+                K_PAR: begin
+                    if (t == 5'd24) begin
+                        t  <= 5'd0;
+                        rx <= 3'd0;
+                        ry <= 3'd0;
+                        wj <= 3'd0;
+                        wy <= 3'd0;
+                        st <= K_RND;
+                    end else t <= t + 5'd1;
                 end
-                K_THD: begin
-                    if (step == 5'd4) begin
-                        step <= 5'd0;
-                        st   <= K_RHO;
-                    end else step <= step + 5'd1;
-                end
-                K_RHO: begin
-                    if (step == 5'd25) begin
-                        step  <= 5'd0;
-                        row_y <= 3'd0;
-                        st    <= K_CR;
-                    end else step <= step + 5'd1;
-                end
-                K_CR: begin
-                    if (step == 5'd1) begin
-                        step <= 5'd0;
-                        st   <= K_CW;
-                    end else step <= step + 5'd1;
-                end
-                K_CW: begin
-                    if (step == 5'd4) begin
-                        step <= 5'd0;
-                        if (row_y == 3'd4) begin
-                            if (rnd == 5'd23) begin
-                                done <= 1'b1;
-                                st   <= K_IDLE;
-                            end else begin
-                                rnd <= rnd + 5'd1;
-                                st  <= K_THD;
-                            end
-                        end else begin
-                            row_y <= row_y + 3'd1;
-                            st    <= K_CR;
-                        end
-                    end else step <= step + 5'd1;
+                K_RND: begin
+                    if (rd_act) begin
+                        if (rx == 3'd4) begin
+                            rx <= 3'd0;
+                            ry <= ry + 3'd1;
+                        end else rx <= rx + 3'd1;
+                    end
+                    if (wr_act) begin
+                        if (wj == 3'd4) begin
+                            wj <= 3'd0;
+                            wy <= wy + 3'd1;
+                        end else wj <= wj + 3'd1;
+                    end
+                    if (t == 5'd28) begin
+                        t  <= 5'd0;
+                        rx <= 3'd0;
+                        ry <= 3'd0;
+                        wj <= 3'd0;
+                        wy <= 3'd0;
+                        if (rnd == 5'd23) begin
+                            done <= 1'b1;
+                            st   <= K_IDLE;
+                        end else rnd <= rnd + 5'd1;
+                    end else t <= t + 5'd1;
                 end
                 default: st <= K_IDLE;
             endcase

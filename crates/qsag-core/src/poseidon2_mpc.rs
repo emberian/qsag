@@ -6046,17 +6046,22 @@ mod tests {
         };
 
         // Two-layer stateless hypertree, 2-of-2 signing committee (guard ids 1 and 2).
+        // Message-substitution assertions need a nontrivial FORS selector space: the old
+        // one-bit FORS plus two-bit leaf geometry had only eight selectors and could
+        // accept a distinct message by an ordinary selector collision. Keep the small
+        // trees, but bind 128 FORS bits instead of changing either rejection assertion.
         let params = PqHashParams {
             w: 4,
             ell1: 128,
             max_sigs_log2: 2,
             num_layers: 2,
             subtree_height: 1,
-            fors_trees: 1,
+            fors_trees: 128,
             fors_height: 1,
             stateful: false,
         };
         assert!(params.is_well_formed() && params.num_layers > 1);
+        assert!(params.fors_trees * params.fors_height >= 128);
         let kg = required_poseidon2_keygen_preprocessing_budget(&params);
         let sg = required_poseidon2_sign_preprocessing_budget(&params);
         let (mut keys, mut vaults, mut rngs, sk) =

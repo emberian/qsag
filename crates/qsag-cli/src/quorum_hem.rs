@@ -1390,6 +1390,11 @@ fn settle_interrupted_reshare(
         return Err(retired());
     }
     // Never committed. The staged shares are shares of this vault's key: wipe them.
+    if let (Ok(src_meta), Ok(dst_meta)) = (std::fs::metadata(vault_dir), std::fs::metadata(&target))
+        && qsag_asm::durable::file_identity(&src_meta) == qsag_asm::durable::file_identity(&dst_meta)
+    {
+        return Err(unknown("pending reshare target aliases the active vault"));
+    }
     {
         let _target_lock = if exists(&lock_path(&target))? {
             Some(Vault::acquire(&meta_path(&target), false)?)
@@ -1402,13 +1407,10 @@ fn settle_interrupted_reshare(
             (None, Some(lock)) => Some(hem_anchor_key_id(&meta.pk, lock_identity(lock)?)),
             (None, None) => None,
         };
-        if let Some(key_id) = target_anchor_key_id {
-            crate::anchor::remove_uncommitted_guarded_target(
-                &target,
-                pending.anchor_dir.as_deref(),
-                HEM_ANCHOR_DOMAIN,
-                &key_id,
-            )?;
+        if let Some(key_id) = target_anchor_key_id
+            && Some(key_id) != meta.anchor_key_id
+        {
+            crate::anchor::remove_uncommitted_guarded_target(&target, HEM_ANCHOR_DOMAIN, &key_id)?;
         }
         for leftover in [directory_path(&target), lock_path(&target)] {
             if exists(&leftover)? {
@@ -2404,9 +2406,41 @@ mod tests {
             std::fs::write(&artifact, b"uncommitted target").unwrap();
             drop(open_vault(&old, None, &mut no_crash).unwrap());
             assert!(!exists(&artifact).unwrap());
-            assert!(!exists(&ext_anchor_lock).unwrap());
-            assert!(!exists(&ext_mirror_dir).unwrap());
+            // External anchor state must NEVER be deleted from local pending metadata!
+            assert!(exists(&ext_anchor_lock).unwrap());
+            assert!(exists(&ext_mirror_dir).unwrap());
             assert!(!exists(&meta_path(&target)).unwrap());
+        }
+        // Forging `pending_anchor_key_id = meta.anchor_key_id` in local `hem-meta.json`
+        // must never trick `settle_interrupted_reshare` into deleting the live vault's
+        // own external `.anchor` / `.mirror` anti-rollback state!
+        {
+            let mut forged = Meta::read(&old).unwrap();
+            let live_key_id = forged.anchor_key_id.unwrap();
+            let live_digest = cshake256_framed_32(
+                b"QSAG.CLI.ANCHOR.SLOT.V1",
+                &[HEM_ANCHOR_DOMAIN.as_bytes(), &live_key_id],
+            );
+            let live_stem = format!("hem_quorum-{}", to_hex(&live_digest));
+            let live_anchor = join(&anchor_dir, &format!("{live_stem}.anchor"));
+            let live_mirror = join(&anchor_dir, &format!("{live_stem}.mirror"));
+            assert!(exists(&live_anchor).unwrap());
+            assert!(exists(&live_mirror).unwrap());
+
+            let decoy_target = scratch.path("forged-decoy-target");
+            private_dir(&decoy_target, true).unwrap();
+            forged.pending = Some(PendingReshare {
+                target: decoy_target,
+                quorum_epoch: forged.quorum_epoch + 1,
+                anchor_key_id: Some(live_key_id),
+                anchor_dir: Some(anchor_dir.clone()),
+            });
+            forged.write(&old, false).unwrap();
+
+            let old_cfg = AnchorConfig::dir_only(&anchor_dir, Some(old.clone()), true);
+            drop(open_vault_anchored(&old, None, Some(&old_cfg), &mut no_crash).unwrap());
+            assert!(exists(&live_anchor).unwrap());
+            assert!(exists(&live_mirror).unwrap());
         }
         // Legacy pre-existing unrecorded external anchor remains untouched, while
         // the successor commits cleanly under its own fresh identity.

@@ -61,10 +61,11 @@ module dp_top (
         .wr_addr(busy ? fe_wa : k_busy ? k_wa : tb_addr),
         .wr_data(busy ? cv : k_busy ? k_wd : tb_wdata),
         .rd_addr(busy ? fe_rd : k_busy ? k_rd : tb_addr), .rd_data(port),
-        .sh_ext_we(1'b0), .sh_ext_addr(3'd0), .sh_ext_wdata(64'd0),
-        .blk_absorb_mask(8'd0)
+        .aux_we(1'b0), .aux_addr(5'd0), .aux_wdata(64'd0), .key_q(key_q), .kvat_q(kvat_q)
     );
+    wire [383:0] key_q;
+    wire [255:0] kvat_q;
     assign tb_rdata = port;
-    wire unused = &{1'b0, mul_busy};
+    wire unused = &{1'b0, mul_busy, key_q, kvat_q};
 endmodule
 `default_nettype wire

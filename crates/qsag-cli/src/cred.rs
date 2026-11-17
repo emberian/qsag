@@ -2034,6 +2034,21 @@ impl NonceBurnPersistence for AnchoredNonceBurnStore {
         }
         self.inner.next_epoch(key_id, party_id)
     }
+
+    fn enroll_parties(
+        &mut self,
+        key_id: &[u8; 32],
+        party_ids: &[u16],
+    ) -> Result<(), ThresholdMlDsaError> {
+        if self.poisoned {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+        let res = self.inner.enroll_parties(key_id, party_ids);
+        if res.is_err() {
+            self.poisoned = true;
+        }
+        res
+    }
 }
 
 fn round_binding(info: RoundInfo, private: &[Vec<u8>], broadcast: &[u8]) -> [u8; 32] {
@@ -3029,6 +3044,33 @@ mod local_share_tests {
             mldsa_deterministic_dkg_session("ml-dsa-65", 258, 300),
             mldsa_deterministic_dkg_session("ml-dsa-65", 2, 300)
         );
+    }
+
+    #[test]
+    fn anchored_nonce_burn_store_forwards_custodian_enrollment_and_poisons_on_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-cli-cred-enroll-{}",
+            to_hex(&os_random_32().unwrap())
+        ));
+        private_dir(dir.to_str().unwrap(), true).unwrap();
+        let path = dir.join("party-0.burn");
+        let key_id = [0x51; 32];
+        let mac_key = [0x62; 32];
+        FsNonceBurnStore::create(&path, key_id, mac_key).unwrap();
+        let inner = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 0).unwrap();
+        let mut anchored = AnchoredNonceBurnStore {
+            inner,
+            party_idx: 0,
+            user_epoch: 1,
+            vault_anchor: None,
+            poisoned: false,
+        };
+        anchored.enroll_parties(&key_id, &[1, 2, 3]).unwrap();
+        // Unenrolled party IDs cannot consume ledger slots through the CLI wrapper!
+        assert!(!anchored.reserve(9, 0, &[0xAA; 32], 0));
+        assert!(anchored.poisoned);
+        assert!(anchored.enroll_parties(&key_id, &[1, 2, 3]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1783,8 +1783,24 @@ fn presentation_scope(
 // `const_mul`: branchless and inlined, the same class as the portable kernels used elsewhere in
 // this file). `qsag_core` has no quintic extension, so only the degree-5 structure lives here.
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Eq)]
 struct Fp5([Goldilocks; 5]);
+
+impl core::fmt::Debug for Fp5 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Fp5").field(&"<REDACTED>").finish()
+    }
+}
+
+impl PartialEq for Fp5 {
+    fn eq(&self, other: &Self) -> bool {
+        let mut diff = 0u64;
+        for (a, b) in self.0.iter().zip(other.0.iter()) {
+            diff |= a.to_canonical_u64() ^ b.to_canonical_u64();
+        }
+        qsag_accel::ct::ct_eq_u64(diff, 0)
+    }
+}
 impl SecretWipe for Fp5 {
     fn secret_wipe(&mut self) {
         self.0.secret_wipe();
@@ -2796,7 +2812,7 @@ fn eval_sd_party_shares(
         ev.z_out[g] = z;
     }
 
-    let mut final_outs = [0u64; VC_FINAL_OUTPUTS];
+    let mut final_outs = SecretBuffer([0u64; VC_FINAL_OUTPUTS]);
     final_outs[0..6].copy_from_slice(&cur_node[..]);
     final_outs[6..12].copy_from_slice(&st_pres[0..6]);
     final_outs[12..18].copy_from_slice(&st_sc[0..6]);

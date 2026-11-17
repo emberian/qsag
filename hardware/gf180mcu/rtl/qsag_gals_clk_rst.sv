@@ -356,19 +356,23 @@ module qsag_gals_clk_rst (
     // ------------------------------------------------------------ tamper, canary, zeroize
     // Boot blanking of the external tamper input (R1 B6). TAMPER_ZEROIZE_N has only the pad
     // pull-up; with board capacitance it can still be below V_IH when the core reset releases, and
-    // the sticky latch would then put every cold boot into S_DEAD. For the first 4096 core clocks
-    // (82 us at 50 MHz, enough for the ~50 kOhm pull-up to charge about 1 nF) a low TAMPER_N holds
-    // the secret reset asserted, so no secret can exist, but does not set the latch. After that the
-    // latch is armed and works without a clock, as before.
+    // the sticky latch would then put every cold boot into S_DEAD. The latch is therefore armed by
+    // the first of: TAMPER_N seen high (synchronized; a few clocks after reset on a normal boot),
+    // or 4096 core clocks (82 us at 50 MHz, enough for the ~50 kOhm pull-up to charge about 1 nF).
+    // While it is not armed, a low TAMPER_N holds the secret reset asserted, so no secret can exist,
+    // but does not set the latch. A pad that never rises (cut bond wire, held low) ends in S_DEAD
+    // when the counter expires. Once armed the latch works without a clock, as before.
     logic [11:0] boot_cnt;
     logic        tamp_armed;
+    wire         tamp_hi_s;
+    qsag_sync2 u_ths (.clk(clk_core), .rst_n(rst_core_n), .d(tamper_n), .q(tamp_hi_s));
     always_ff @(posedge clk_core or negedge rst_core_n)
         if (!rst_core_n) begin
             boot_cnt   <= '0;
             tamp_armed <= 1'b0;
         end else if (!tamp_armed) begin
             boot_cnt <= boot_cnt + 12'd1;
-            if (&boot_cnt) tamp_armed <= 1'b1;
+            if (tamp_hi_s || (&boot_cnt)) tamp_armed <= 1'b1;
         end
 
     wire tamp_q;

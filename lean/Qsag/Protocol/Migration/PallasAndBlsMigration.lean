@@ -25,6 +25,7 @@ structure PrimeSubgroup (C : SwCurve) (G : SwPoint) (ord : Nat) where
   p_prime : IsPrimeMod C.p
   ord_prime : IsPrimeMod ord
   gen_onCurve : C.onCurve G = true
+  smul_onCurve : ∀ k, C.onCurve (smul k) = true
   add_none_left : ∀ P, add none P = P
   smul_add : ∀ a b, smul (a + b) = add (smul a) (smul b)
   smul_ord : smul ord = none
@@ -33,7 +34,7 @@ structure PrimeSubgroup (C : SwCurve) (G : SwPoint) (ord : Nat) where
 /-- **Bridge from `Weierstrass.Curve.PrimeOrderGroup` to `PrimeSubgroup` (`PrimeSubgroup.ofPrimeOrderGroup`)**:
     Ties `PrimeSubgroup`'s `add` and `smul` directly to short-Weierstrass chord-tangent curve
     arithmetic `C.add` and `C.smul · G` on `SwCurve`, discharging `p_prime`, `ord_prime`,
-    `gen_onCurve`, `add_none_left`, `smul_add`, `smul_ord`, and `exact_ord`. -/
+    `gen_onCurve`, `smul_onCurve`, `add_none_left`, `smul_add`, `smul_ord`, and `exact_ord`. -/
 def PrimeSubgroup.ofPrimeOrderGroup {C : SwCurve} {G : SwPoint} {ord : Nat}
     (h : C.PrimeOrderGroup G ord) : PrimeSubgroup C G ord where
   add := C.add
@@ -44,6 +45,7 @@ def PrimeSubgroup.ofPrimeOrderGroup {C : SwCurve} {G : SwPoint} {ord : Nat}
     have h1 : C.OnCurve (C.smul 1 G) := h.onCurve 1
     rw [Weierstrass.Curve.smul_one] at h1
     exact SwCurve.onCurve_of_OnCurve h1
+  smul_onCurve k := SwCurve.onCurve_of_OnCurve (h.onCurve k)
   add_none_left := Weierstrass.Curve.add_none_left C
   smul_add := h.smul_add
   smul_ord := h.order
@@ -92,6 +94,34 @@ def pallas_primeSubgroup (h : pallasCurve.PrimeOrderGroup orchardSpendAuthG q_pa
     PrimeSubgroup pallasCurve orchardSpendAuthG q_pallas :=
   PrimeSubgroup.ofPrimeOrderGroup h
 
+/-- **`BLS12-381` (`G_1`) `PrimeOrderGroup` Constructor (`bls381GroupLaws_of_group_facts`)**:
+    Discharges `p_bls381` and `r_bls381` primality via Lucas–Pratt certificates (`p_bls381_isPrime`,
+    `r_bls381_isPrime`) and oddness via `pallas_and_bls381_limbs_and_bit_bounds`, leaving only the
+    four affine chord-tangent subgroup closure laws. -/
+theorem bls381GroupLaws_of_group_facts
+    (onCurve : ∀ k, bls381Curve.OnCurve (bls381Curve.smul k bls381G1))
+    (smul_add : ∀ a b, bls381Curve.smul (a + b) bls381G1 =
+      bls381Curve.add (bls381Curve.smul a bls381G1) (bls381Curve.smul b bls381G1))
+    (order : bls381Curve.smul r_bls381 bls381G1 = none)
+    (exact : ∀ k, 0 < k → k < r_bls381 → bls381Curve.smul k bls381G1 ≠ none) :
+    bls381Curve.PrimeOrderGroup bls381G1 r_bls381 where
+  p_prime := by rw [bls381Curve_p]; exact p_bls381_isPrime
+  p_odd := by
+    rw [bls381Curve_p]
+    have h4 := pallas_and_bls381_limbs_and_bit_bounds.2.2.2.2.2.2.2.2.2.2.2.2.1
+    omega
+  n_prime := r_bls381_isPrime
+  n_odd := pallas_and_bls381_limbs_and_bit_bounds.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
+  onCurve := onCurve
+  smul_add := smul_add
+  order := order
+  exact := exact
+
+/-- **`BLS12-381` `PrimeSubgroup` on `SwCurve` (`bls381_primeSubgroup`)**. -/
+def bls381_primeSubgroup (h : bls381Curve.PrimeOrderGroup bls381G1 r_bls381) :
+    PrimeSubgroup bls381Curve bls381G1 r_bls381 :=
+  PrimeSubgroup.ofPrimeOrderGroup h
+
 theorem PrimeSubgroup.smul_injective {C : SwCurve} {G : SwPoint} {ord : Nat}
     (grp : PrimeSubgroup C G ord) {a b : Nat} (ha : a < ord) (hb : b < ord) (hEq : grp.smul a = grp.smul b) :
     a = b := by
@@ -105,6 +135,32 @@ theorem PrimeSubgroup.smul_injective {C : SwCurve} {G : SwPoint} {ord : Nat}
   · exact False.elim (hNeLt hlt hb hEq)
   · exact heq
   · exact False.elim (hNeLt hgt ha hEq.symm)
+
+/-- Every canonical nonzero scalar `0 < sk < ord` in a `PrimeSubgroup C G ord` produces a finite
+    canonical affine curve key `CanonicalSwPk C` (`x < C.p`, `y < C.p`, `C.onCurve = true`). -/
+def PrimeSubgroup.smulCanonicalPk {C : SwCurve} {G : SwPoint} {ord : Nat}
+    (grp : PrimeSubgroup C G ord) (sk : Nat) (hPos : 0 < sk) (hLt : sk < ord) :
+    CanonicalSwPk C :=
+  match hPt : grp.smul sk with
+  | none => False.elim (grp.exact_ord sk hPos hLt hPt)
+  | some (x, y) => ⟨x, y, hPt ▸ grp.smul_onCurve sk⟩
+
+theorem PrimeSubgroup.smulCanonicalPk_toSwPoint {C : SwCurve} {G : SwPoint} {ord : Nat}
+    (grp : PrimeSubgroup C G ord) (sk : Nat) (hPos : 0 < sk) (hLt : sk < ord) :
+    (grp.smulCanonicalPk sk hPos hLt).toSwPoint = grp.smul sk := by
+  unfold PrimeSubgroup.smulCanonicalPk
+  split
+  · next hNone => exact False.elim (grp.exact_ord sk hPos hLt hNone)
+  · next x y hSome => 
+                        exact Eq.trans (CanonicalSwPk.toSwPoint_eq _) hSome.symm
+
+theorem PrimeSubgroup.smulCanonicalPk_injective {C : SwCurve} {G : SwPoint} {ord s₁ s₂ : Nat}
+    (grp : PrimeSubgroup C G ord) (hp₁ : 0 < s₁) (hl₁ : s₁ < ord)
+    (hp₂ : 0 < s₂) (hl₂ : s₂ < ord)
+    (hEq : grp.smulCanonicalPk s₁ hp₁ hl₁ = grp.smulCanonicalPk s₂ hp₂ hl₂) : s₁ = s₂ := by
+  have hPt : grp.smul s₁ = grp.smul s₂ := by
+    rw [← grp.smulCanonicalPk_toSwPoint s₁ hp₁ hl₁, ← grp.smulCanonicalPk_toSwPoint s₂ hp₂ hl₂, hEq]
+  exact grp.smul_injective hl₁ hl₂ hPt
 
 def zkbooReconstructScalar (ord s0 s1 s2 : Nat) : Nat := (s0 + s1 + s2) % ord
 
@@ -334,7 +390,11 @@ theorem tooth_unreduced_256bit_scalar_alias_all_four_curves
 /-! ## 6. Constructive Axiom Audit (`#verify_constructive`) -/
 
 #verify_constructive
-  Qsag.PrimeSubgroup.smul_injective Qsag.extractThreeShares_complete
+  Qsag.PrimeSubgroup.smul_injective
+  Qsag.bls381GroupLaws_of_group_facts
+  Qsag.PrimeSubgroup.smulCanonicalPk_toSwPoint
+  Qsag.PrimeSubgroup.smulCanonicalPk_injective
+  Qsag.extractThreeShares_complete
   Qsag.zkboo_two_challenge_extraction_sound
   Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
   Qsag.primeSubgroup_smul_add_mod Qsag.orchard_redpallas_rerandomized_extraction_sound
