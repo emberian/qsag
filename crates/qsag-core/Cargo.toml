@@ -9,6 +9,8 @@ description = "Zero-dependency no_std post-quantum threshold hash-based signatur
 [features]
 default = []
 testing-ephemeral = []
+# The software model of the TPM 2.0 NV counter commands (`anti_rollback::tpm2_model`), for tests.
+tpm-model = ["std"]
 std = ["qsag-asm/std", "qsag-accel/std"]
 
 [dependencies]

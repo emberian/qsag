@@ -4,13 +4,14 @@
 //! Two orthogonal rollback/fork surfaces threaten stateful hash-based signers (`XMSS`,
 //! `LMS/HSS`, `Jorts`, `FTS`):
 //!
-//! 1. **VM snapshot restore / live-fork / EBS volume clone / container checkpoint-restore:**
-//!    Restoring a hypervisor snapshot or cloning a block volume rewinds the filesystem WAL
-//!    together with any same-disk sidecar. [`VmGenIdForkGuard`] and [`HypervisorGenerationAnchor`]
-//!    bind every checkpoint to the hypervisor's 128-bit ACPI `VMGENID`
-//!    (`/sys/devices/virtual/misc/vmgenid` / `QEMU0002:00`), Linux `/proc/sys/kernel/random/boot_id`,
-//!    and the guarded state file's `(st_dev, st_ino, st_ctime)` tuple, hard-halting signing with
-//!    [`AntiRollbackError::RollbackOrForkDetected`] the instant any fork/clone/restore occurs.
+//! 1. **VM snapshot restore / clone:** [`VmGenIdForkGuard`] and
+//!    [`HypervisorGenerationAnchor`] bind checkpoints to hypervisor ACPI `VMGENID`,
+//!    Linux `boot_id`, and a guarded file's `(st_dev, st_ino, st_ctime)` tuple. A changed
+//!    hypervisor generation detects whole-VM snapshot restore or cloning when the
+//!    hypervisor exposes and updates it. Boot/file identity checks add continuity fences.
+//!    These are **not independently monotone signing state**: restoring the local seal
+//!    and custody bytes in place can preserve every checked identity. Always combine
+//!    this guard with an independent monotone authority for storage rollback protection.
 //! 2. **Offline disk image rollback across host reboots:**
 //!    [`Tpm2NvMonotoneAnchor`] speaks raw big-endian ISO/IEC 11889 TPM 2.0 command/response
 //!    packets (`TPM2_NV_Increment = 0x00000134`, `TPM2_NV_Read = 0x0000014E` under
@@ -35,10 +36,48 @@ use crate::wipe::{SecretBuffer, ct_eq_bytes, ct_eq_bytes32, wipe_bytes, wipe_byt
 pub const TPM_ST_NO_SESSIONS: u16 = 0x8001;
 /// TPM 2.0 command/response structure tag carrying an authorization area (`0x8002`).
 pub const TPM_ST_SESSIONS: u16 = 0x8002;
-/// TPM 2.0 `TPM_CC_NV_Increment` command code (`0x0000_0134`, ISO/IEC 11889-3 §31.5).
+// Section numbers below are those of the TCG "Trusted Platform Module Library, Family
+// 2.0, Level 00 Revision 01.59" (ISO/IEC 11889:2015 is the earlier revision): Part 2
+// (Structures) and Part 3 (Commands).
+
+/// `TPM_CC_NV_Increment` (Part 3 §31.8).
 pub const TPM_CC_NV_INCREMENT: u32 = 0x0000_0134;
-/// TPM 2.0 `TPM_CC_NV_Read` command code (`0x0000_014E`, ISO/IEC 11889-3 §31.6).
+/// `TPM_CC_NV_Read` (Part 3 §31.13).
 pub const TPM_CC_NV_READ: u32 = 0x0000_014E;
+/// `TPM_CC_NV_ReadPublic` (Part 3 §31.6): no authorization, no sessions.
+pub const TPM_CC_NV_READ_PUBLIC: u32 = 0x0000_0169;
+
+/// `TPM_RC_NV_UNINITIALIZED` (Part 2 §6.6.3, `RC_VER1 + 0x04A`): the index is defined
+/// and `TPMA_NV_WRITTEN` is CLEAR (Part 3 §31.13).
+pub const TPM_RC_NV_UNINITIALIZED: u32 = 0x0000_014A;
+/// `TPM_RC_NV_LOCKED` (`RC_VER1 + 0x048`).
+pub const TPM_RC_NV_LOCKED: u32 = 0x0000_0148;
+/// `TPM_RC_NV_AUTHORIZATION` (`RC_VER1 + 0x049`): the index does not allow this
+/// access with its own authorization value.
+pub const TPM_RC_NV_AUTHORIZATION: u32 = 0x0000_0149;
+/// `TPM_RC_NV_RANGE` (`RC_VER1 + 0x046`).
+pub const TPM_RC_NV_RANGE: u32 = 0x0000_0146;
+/// `TPM_RC_COMMAND_CODE` (`RC_VER1 + 0x043`).
+pub const TPM_RC_COMMAND_CODE: u32 = 0x0000_0143;
+/// `TPM_RC_HANDLE` (`RC_FMT1 + 0x00B`) for the first handle: the index does not exist.
+pub const TPM_RC_HANDLE_1: u32 = 0x0000_018B;
+/// `TPM_RC_ATTRIBUTES` (`RC_FMT1 + 0x002`) for the second handle (`nvIndex`).
+pub const TPM_RC_ATTRIBUTES_HANDLE_2: u32 = 0x0000_0282;
+/// `TPM_RC_BAD_AUTH` (`RC_FMT1 + 0x022`) for the first session.
+pub const TPM_RC_BAD_AUTH_SESSION_1: u32 = 0x0000_09A2;
+
+/// `TPMA_NV` bits (Part 2 §13.4, Table 214).
+pub const TPMA_NV_AUTHWRITE: u32 = 1 << 2;
+/// `TPM_NT` is bits 7:4 of `TPMA_NV`; `TPM_NT_COUNTER = 0x1` (Part 2 §13.2).
+pub const TPMA_NV_TPM_NT_MASK: u32 = 0xF << 4;
+pub const TPMA_NV_TPM_NT_COUNTER: u32 = 0x1 << 4;
+pub const TPMA_NV_WRITELOCKED: u32 = 1 << 11;
+pub const TPMA_NV_AUTHREAD: u32 = 1 << 18;
+pub const TPMA_NV_NO_DA: u32 = 1 << 25;
+pub const TPMA_NV_ORDERLY: u32 = 1 << 26;
+pub const TPMA_NV_CLEAR_STCLEAR: u32 = 1 << 27;
+pub const TPMA_NV_READLOCKED: u32 = 1 << 28;
+pub const TPMA_NV_WRITTEN: u32 = 1 << 29;
 /// TPM 2.0 password authorization session handle (`TPM_RS_PW = 0x4000_0009`).
 pub const TPM_RS_PW: u32 = 0x4000_0009;
 /// TPM 2.0 `TPM_RH_OWNER` permanent hierarchy handle (`0x4000_0001`).
@@ -61,6 +100,9 @@ pub enum AntiRollbackError {
     ProtocolFramingError(&'static str),
     /// Local anchor record failed CSHAKE256 MAC verification or magic/length validation.
     AuthenticationFailed,
+    /// The NV index cannot back an anchor: wrong type or attributes, or (for a new
+    /// anchor) a counter that has already been incremented by something else.
+    UnsuitableCounterIndex(&'static str),
     /// Underlying OS/filesystem/device I/O failure.
     Io(io::ErrorKind),
 }
@@ -81,6 +123,9 @@ impl core::fmt::Display for AntiRollbackError {
             Self::AuthenticationFailed => {
                 write!(f, "anti-rollback anchor record authentication failed")
             }
+            Self::UnsuitableCounterIndex(msg) => {
+                write!(f, "TPM 2.0 NV index cannot back an anchor: {msg}")
+            }
             Self::Io(kind) => write!(f, "anti-rollback anchor I/O error: {kind:?}"),
         }
     }
@@ -96,7 +141,9 @@ impl AntiRollbackError {
             Self::RollbackOrForkDetected(_) | Self::AuthenticationFailed => {
                 io::ErrorKind::InvalidData
             }
-            Self::ProtocolFramingError(_) | Self::Tpm2ResponseError(_) => io::ErrorKind::Other,
+            Self::ProtocolFramingError(_)
+            | Self::Tpm2ResponseError(_)
+            | Self::UnsuitableCounterIndex(_) => io::ErrorKind::Other,
             Self::Io(k) => *k,
         };
         io::Error::new(kind, self)
@@ -154,8 +201,8 @@ impl VmGenPolicy {
     };
 
     /// Ephemeral/container fork-guard policy: does not require ACPI `VMGENID`, but pins both
-    /// `boot_id` and `(dev, ino)` (and `vmgenid` if present), halting on any VM restore,
-    /// container checkpoint/restore, or host reboot without TPM2 re-verification.
+    /// `boot_id` and `(dev, ino)` (and `vmgenid` if present), halting when those identities
+    /// change. Without hypervisor VMGENID, a restore preserving them is undetectable.
     pub const PINNED_BOOT_SESSION: Self = Self {
         require_vmgenid: false,
         pin_boot_id: true,
@@ -428,8 +475,11 @@ const VMGEN_RECORD_LEN: usize = 146;
 //   [106..114] monotonic_update_seq (u64 LE)
 //   [114..146] CSHAKE256 MAC ([u8; 32])
 
-/// Durable [`ExternalMonotoneAnchor`] sealing [`LedgerCheckpoint`] alongside hypervisor
-/// `VMGENID`, Linux `boot_id`, and guarded WAL `(dev, ino, ctime)` continuity.
+/// VM snapshot/clone continuity guard implementing [`ExternalMonotoneAnchor`] for composition.
+/// Seals [`LedgerCheckpoint`] alongside hypervisor `VMGENID`, Linux `boot_id`, and guarded
+/// file `(dev, ino, ctime)` continuity. This guard alone cannot detect in-place restoration
+/// of custody and seal bytes: its checkpoint and sequence are on the same rollbackable
+/// storage. Pair with an independently monotone anchor to protect stateful signing.
 pub struct HypervisorGenerationAnchor<S: VmGenSource = LinuxSysfsVmGenSource> {
     record: LockedRecord,
     guarded_target: PathBuf,
@@ -858,8 +908,136 @@ pub fn parse_tpm2_nv_read_u64_rsp(rsp: &[u8]) -> Result<u64, AntiRollbackError> 
     Ok(u64::from_be_bytes(counter_be))
 }
 
+/// Marshal `TPM2_NV_ReadPublic` (Part 3 §31.6, Table 218): `TPM_ST_NO_SESSIONS`, one
+/// handle, no authorization.
+pub fn marshal_tpm2_nv_read_public_cmd(nv_index: u32) -> Result<Vec<u8>, AntiRollbackError> {
+    if !is_valid_tpm2_nv_index(nv_index) {
+        return Err(AntiRollbackError::ProtocolFramingError(
+            "nv_index handle outside TPM_HT_NV_INDEX (0x01000000..=0x01FFFFFF)",
+        ));
+    }
+    let mut pkt = Vec::with_capacity(14);
+    pkt.extend_from_slice(&TPM_ST_NO_SESSIONS.to_be_bytes());
+    pkt.extend_from_slice(&14u32.to_be_bytes());
+    pkt.extend_from_slice(&TPM_CC_NV_READ_PUBLIC.to_be_bytes());
+    pkt.extend_from_slice(&nv_index.to_be_bytes());
+    Ok(pkt)
+}
+
+/// The public area of an NV index (`TPMS_NV_PUBLIC`, Part 2 §13.5) as far as an anchor
+/// needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tpm2NvPublic {
+    pub nv_index: u32,
+    pub name_alg: u16,
+    /// `TPMA_NV` (Part 2 §13.4).
+    pub attributes: u32,
+    pub data_size: u16,
+}
+
+impl Tpm2NvPublic {
+    /// Whether the counter has ever been incremented (`TPMA_NV_WRITTEN`).
+    pub const fn is_written(&self) -> bool {
+        self.attributes & TPMA_NV_WRITTEN != 0
+    }
+
+    /// What an anchor needs of its index, whatever its age:
+    ///
+    /// * `TPM_NT_COUNTER` with an 8-octet value: only `TPM2_NV_Increment` changes it
+    ///   and nothing lowers it (Part 3 §31.2);
+    /// * `TPMA_NV_AUTHREAD` and `TPMA_NV_AUTHWRITE`: the anchor authorizes with the
+    ///   index's own authorization value;
+    /// * `TPMA_NV_ORDERLY` CLEAR: an orderly counter is advanced by up to
+    ///   `MAX_ORDERLY_COUNT` at the startup after an unclean shutdown (Part 3 §31.2,
+    ///   §31.8 NOTE 2), which a seal holding the exact count would read as a rollback;
+    /// * `TPMA_NV_CLEAR_STCLEAR` CLEAR (it cannot be SET on a counter);
+    /// * not write- or read-locked.
+    pub fn check_anchor_counter(&self, nv_index: u32) -> Result<(), AntiRollbackError> {
+        let unsuitable = AntiRollbackError::UnsuitableCounterIndex;
+        if self.nv_index != nv_index {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "TPM2_NV_ReadPublic answered for another index",
+            ));
+        }
+        if self.attributes & TPMA_NV_TPM_NT_MASK != TPMA_NV_TPM_NT_COUNTER || self.data_size != 8 {
+            return Err(unsuitable(
+                "the index is not a TPM_NT_COUNTER (define it with nt=counter)",
+            ));
+        }
+        if self.attributes & TPMA_NV_AUTHREAD == 0 || self.attributes & TPMA_NV_AUTHWRITE == 0 {
+            return Err(unsuitable(
+                "the index lacks TPMA_NV_AUTHREAD or TPMA_NV_AUTHWRITE (define it with authread|authwrite)",
+            ));
+        }
+        if self.attributes & (TPMA_NV_ORDERLY | TPMA_NV_CLEAR_STCLEAR) != 0 {
+            return Err(unsuitable(
+                "the index is TPMA_NV_ORDERLY: its count jumps after an unclean shutdown (define it without orderly)",
+            ));
+        }
+        if self.attributes & (TPMA_NV_WRITELOCKED | TPMA_NV_READLOCKED) != 0 {
+            return Err(unsuitable("the index is read- or write-locked"));
+        }
+        Ok(())
+    }
+}
+
+/// Parse a `TPM2_NV_ReadPublic` response (Part 3 §31.6, Table 219): `TPM2B_NV_PUBLIC`
+/// then `TPM2B_NAME`, exact lengths.
+pub fn parse_tpm2_nv_read_public_rsp(rsp: &[u8]) -> Result<Tpm2NvPublic, AntiRollbackError> {
+    let framing = AntiRollbackError::ProtocolFramingError;
+    if rsp.len() < 10 {
+        return Err(framing("truncated TPM2 response header (< 10 bytes)"));
+    }
+    let tag = u16::from_be_bytes([rsp[0], rsp[1]]);
+    let size = u32::from_be_bytes([rsp[2], rsp[3], rsp[4], rsp[5]]) as usize;
+    let rc = u32::from_be_bytes([rsp[6], rsp[7], rsp[8], rsp[9]]);
+    if size != rsp.len() {
+        return Err(framing(
+            "TPM2 responseSize field mismatches received byte length",
+        ));
+    }
+    if rc != TPM_RC_SUCCESS {
+        return Err(AntiRollbackError::Tpm2ResponseError(rc));
+    }
+    if tag != TPM_ST_NO_SESSIONS {
+        return Err(framing(
+            "TPM2_NV_ReadPublic response must be TPM_ST_NO_SESSIONS",
+        ));
+    }
+    let short = || framing("TPM2_NV_ReadPublic response truncated");
+    let body = &rsp[10..];
+    let public_len = u16::from_be_bytes(body.get(..2).ok_or_else(short)?.try_into().unwrap());
+    let public = body.get(2..2 + public_len as usize).ok_or_else(short)?;
+    // nvIndex(4) nameAlg(2) attributes(4) authPolicy.size(2) [authPolicy] dataSize(2)
+    if public.len() < 14 {
+        return Err(short());
+    }
+    let policy_len = u16::from_be_bytes([public[10], public[11]]) as usize;
+    if public.len() != 14 + policy_len {
+        return Err(framing("TPMS_NV_PUBLIC length mismatches its authPolicy"));
+    }
+    let name = &body[2 + public_len as usize..];
+    if name.len() < 2 || name.len() != 2 + u16::from_be_bytes([name[0], name[1]]) as usize {
+        return Err(framing("TPM2B_NAME length mismatches the response"));
+    }
+    Ok(Tpm2NvPublic {
+        nv_index: u32::from_be_bytes(public[..4].try_into().unwrap()),
+        name_alg: u16::from_be_bytes([public[4], public[5]]),
+        attributes: u32::from_be_bytes(public[6..10].try_into().unwrap()),
+        data_size: u16::from_be_bytes([public[12 + policy_len], public[13 + policy_len]]),
+    })
+}
+
+/// Read and parse the public area of `nv_index`.
+pub fn tpm2_nv_read_public<T: Tpm2Transport + ?Sized>(
+    transport: &T,
+    nv_index: u32,
+) -> Result<Tpm2NvPublic, AntiRollbackError> {
+    parse_tpm2_nv_read_public_rsp(&transport.transmit(&marshal_tpm2_nv_read_public_cmd(nv_index)?)?)
+}
+
 /// Transport abstraction over the Linux kernel TPM 2.0 resource manager (`/dev/tpmrm0`) or
-/// deterministic in-memory unit-test transceivers.
+/// the software model in [`tpm2_model`].
 pub trait Tpm2Transport: Send + Sync {
     fn transmit(&self, command: &[u8]) -> Result<Vec<u8>, AntiRollbackError>;
 }
@@ -946,6 +1124,19 @@ struct TpmSealedState {
 /// Hardware-backed [`ExternalMonotoneAnchor`] binding [`LedgerCheckpoint`] progression to a
 /// 64-bit TPM 2.0 `TPM_NT_COUNTER` NVRAM index over `/dev/tpmrm0`.
 ///
+/// ### One counter per anchor, proven by the TPM
+/// Each sealed record needs its own NV index: sharing one makes an honest advance of
+/// either record leave the other behind. A new anchor therefore only accepts a counter
+/// that has never been incremented (`TPMA_NV_WRITTEN` CLEAR in `TPM2_NV_ReadPublic`):
+/// anything else that used the index would have set it. The anchor's first advance is
+/// the first `TPM2_NV_Increment`, which leaves a count above every count any counter
+/// on this TPM ever held (Part 3 §31.2), so an index that is undefined and defined
+/// again never repeats a sealed value. The exact hardware/seal equality below must
+/// never be relaxed to tolerate a shared counter.
+///
+/// The index must be a `TPM_NT_COUNTER` with `authread|authwrite` and without
+/// `orderly` ([`Tpm2NvPublic::check_anchor_counter`]); this is checked on every open.
+///
 /// ### Two-Phase Crash-Safe & Zero-Slack Anti-Rollback Protocol
 /// 1. Before issuing `TPM2_NV_Increment`, [`Tpm2NvMonotoneAnchor::advance_checked`] stages
 ///    `pending = (hw_counter + 1, next_checkpoint)` in the MAC-authenticated [`LockedRecord`].
@@ -1016,7 +1207,45 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
             ));
         }
 
-        let record = LockedRecord::acquire(seal_path)?;
+        let this = Self::assemble(
+            transport,
+            LockedRecord::acquire(seal_path)?,
+            auth_handle,
+            nv_index,
+            nv_password,
+            key_arg.as_slice(),
+        );
+        drop(key_arg);
+        let public = tpm2_nv_read_public(&this.transport, nv_index)?;
+        public.check_anchor_counter(nv_index)?;
+        match (this.is_unenrolled()?, public.is_written()) {
+            (true, true) => {
+                return Err(AntiRollbackError::UnsuitableCounterIndex(
+                    "the counter has already been incremented: it backs another anchor or an earlier enrollment; a new anchor needs an index that was never written",
+                ));
+            }
+            (false, false) => {
+                return Err(AntiRollbackError::RollbackOrForkDetected(
+                    "a seal exists but the TPM2 NV counter was never written (index redefined, or another TPM)",
+                ));
+            }
+            (true, false) => {}
+            // Verify the hardware counter against the local sealed state.
+            (false, true) => {
+                this.load_checked()?;
+            }
+        }
+        Ok(this)
+    }
+
+    fn assemble(
+        transport: T,
+        record: LockedRecord,
+        auth_handle: u32,
+        nv_index: u32,
+        nv_password: &[u8],
+        mac_key: &[u8],
+    ) -> Self {
         let mut this = Self {
             transport,
             record,
@@ -1026,12 +1255,146 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
             auth_len: nv_password.len(),
             mac_key: [0u8; 32],
         };
-        this.mac_key.copy_from_slice(key_arg.as_slice());
-        drop(key_arg);
+        this.mac_key.copy_from_slice(mac_key);
         this.auth_value[..nv_password.len()].copy_from_slice(nv_password);
-        // Immediately verify hardware counter vs local sealed state on open!
-        let _ = this.load_checked()?;
+        this
+    }
+
+    /// Move an existing seal from counter `old_nv_index` to the never-written counter
+    /// `new_nv_index`, keeping its checkpoint. For seals that were enrolled on a
+    /// counter shared with other seals and can therefore never match it again.
+    ///
+    /// **This does not establish that the seal is current.** The old counter cannot
+    /// show it (that is the defect being repaired), so the caller must have proven it
+    /// some other way before calling, for every seal it moves; see the CLI's
+    /// `reanchor_shared_tpm_index` for the proof used there. What this function does
+    /// check: the seal authenticates under `old_nv_index` with no commit in flight,
+    /// and the new counter is a suitable, never-written anchor counter.
+    ///
+    /// A seal already bound to `new_nv_index` (an earlier, interrupted run) is opened
+    /// normally against that counter instead.
+    ///
+    /// Not crash-atomic: the new counter is incremented before the seal is replaced. A
+    /// crash or a failed write between the two leaves the seal on `old_nv_index` and
+    /// `new_nv_index` written, and a retry then refuses `new_nv_index` as used. That
+    /// fails closed (nothing is accepted that was not current), but the seal cannot be
+    /// moved to that index any more. A recovery record written before the increment
+    /// would have to stay unusable for a disk restored to that moment, since a
+    /// never-written counter has no value to pin in advance; none is implemented.
+    pub fn rebind_to_new_counter(
+        transport: T,
+        seal_path: impl Into<PathBuf>,
+        old_nv_index: u32,
+        new_nv_index: u32,
+        nv_password: &[u8],
+        mut mac_key: [u8; 32],
+    ) -> Result<Self, AntiRollbackError> {
+        let key_arg = SecretBuffer(&mut mac_key);
+        if !is_valid_tpm2_nv_index(old_nv_index)
+            || !is_valid_tpm2_nv_index(new_nv_index)
+            || old_nv_index == new_nv_index
+        {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "re-anchoring needs two distinct NV index handles",
+            ));
+        }
+        if nv_password.len() > MAX_TPM2_AUTH_BYTES {
+            return Err(AntiRollbackError::ProtocolFramingError(
+                "TPM2 password authorization exceeds 64-byte TPM2B_AUTH limit",
+            ));
+        }
+        let mut this = Self::assemble(
+            transport,
+            LockedRecord::open_existing(seal_path.into())?,
+            new_nv_index,
+            new_nv_index,
+            nv_password,
+            key_arg.as_slice(),
+        );
+        drop(key_arg);
+        let public = tpm2_nv_read_public(&this.transport, new_nv_index)?;
+        public.check_anchor_counter(new_nv_index)?;
+        let raw = this
+            .record
+            .read_bounded(TPM_ANCHOR_RECORD_LEN)
+            .map_err(|e| AntiRollbackError::Io(e.kind()))?;
+        if this.decode_state(&raw).is_ok() {
+            if !public.is_written() {
+                return Err(AntiRollbackError::RollbackOrForkDetected(
+                    "a seal exists but the TPM2 NV counter was never written (index redefined, or another TPM)",
+                ));
+            }
+            this.load_checked()?;
+            return Ok(this);
+        }
+        (this.nv_index, this.auth_handle) = (old_nv_index, old_nv_index);
+        let old = this.decode_state(&raw);
+        (this.nv_index, this.auth_handle) = (new_nv_index, new_nv_index);
+        let old = old?;
+        if old.pending.is_some() {
+            return Err(AntiRollbackError::RollbackOrForkDetected(
+                "the seal has a commit in flight on its old counter; its state cannot be carried over",
+            ));
+        }
+        if public.is_written() {
+            return Err(AntiRollbackError::UnsuitableCounterIndex(
+                "the new counter has already been incremented; re-anchoring needs an index that was never written",
+            ));
+        }
+        this.increment_hardware_counter()?;
+        let rebound = TpmSealedState {
+            committed_hw: this.read_hardware_counter()?,
+            committed_cp: old.committed_cp,
+            pending: None,
+        };
+        this.record.replace(&this.encode_state(&rebound))?;
         Ok(this)
+    }
+
+    /// Test fixture: put an existing seal on `shared_nv_index` the way releases before
+    /// per-domain counters enrolled every anchor of a workflow (read the counter,
+    /// increment it, seal the new count), whatever else already uses that counter.
+    /// Calling it for several seals in turn reproduces a shared-index enrollment.
+    #[cfg(any(test, feature = "tpm-model"))]
+    pub fn fixture_reseal_on_shared_counter(
+        transport: T,
+        seal_path: impl Into<PathBuf>,
+        current_nv_index: u32,
+        shared_nv_index: u32,
+        nv_password: &[u8],
+        mac_key: [u8; 32],
+    ) -> Result<(), AntiRollbackError> {
+        let mut this = Self::assemble(
+            transport,
+            LockedRecord::open_existing(seal_path.into())?,
+            current_nv_index,
+            current_nv_index,
+            nv_password,
+            &mac_key,
+        );
+        let raw = this
+            .record
+            .read_bounded(TPM_ANCHOR_RECORD_LEN)
+            .map_err(|e| AntiRollbackError::Io(e.kind()))?;
+        let current = this.decode_state(&raw)?;
+        (this.nv_index, this.auth_handle) = (shared_nv_index, shared_nv_index);
+        this.increment_hardware_counter()?;
+        let shared = TpmSealedState {
+            committed_hw: this.read_hardware_counter()?,
+            committed_cp: current.committed_cp,
+            pending: None,
+        };
+        this.record.replace(&this.encode_state(&shared))?;
+        Ok(())
+    }
+
+    /// No seal has been written yet: the anchor's first advance will enrol it.
+    fn is_unenrolled(&self) -> Result<bool, AntiRollbackError> {
+        match self.record.read_bounded(TPM_ANCHOR_RECORD_LEN) {
+            Ok(_) => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && self.record.is_fresh() => Ok(true),
+            Err(e) => Err(AntiRollbackError::Io(e.kind())),
+        }
     }
 
     fn auth_slice(&self) -> &[u8] {
@@ -1160,7 +1523,7 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
         }
         if live_hw > st.committed_hw {
             return Err(AntiRollbackError::RollbackOrForkDetected(
-                "local custody state lags TPM2 NV monotonic counter (disk rollback detected)",
+                "local custody state lags TPM2 NV monotonic counter (disk rollback, or another anchor incremented this index; the two cannot be told apart)",
             ));
         }
         Err(AntiRollbackError::RollbackOrForkDetected(
@@ -1170,14 +1533,15 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
 
     /// Authenticate local sealed state against the live TPM 2.0 hardware NV counter.
     pub fn load_checked(&self) -> Result<Option<LedgerCheckpoint>, AntiRollbackError> {
+        // An unenrolled anchor has an unwritten counter, which cannot be read.
+        if self.is_unenrolled()? {
+            return Ok(None);
+        }
         let live_hw = self.read_hardware_counter()?;
-        let raw = match self.record.read_bounded(TPM_ANCHOR_RECORD_LEN) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && self.record.is_fresh() => {
-                return Ok(None);
-            }
-            Err(e) => return Err(AntiRollbackError::Io(e.kind())),
-        };
+        let raw = self
+            .record
+            .read_bounded(TPM_ANCHOR_RECORD_LEN)
+            .map_err(|e| AntiRollbackError::Io(e.kind()))?;
         let st = self.decode_state(&raw)?;
         let (_hw, cp) = self.reconcile_with_hardware(st, live_hw)?;
         Ok(Some(cp))
@@ -1185,9 +1549,9 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
 
     /// Atomically increment the TPM 2.0 hardware NV counter and seal `checkpoint`.
     pub fn advance_checked(&self, checkpoint: LedgerCheckpoint) -> Result<(), AntiRollbackError> {
-        let live_hw = self.read_hardware_counter()?;
         match self.record.read_bounded(TPM_ANCHOR_RECORD_LEN) {
             Ok(raw) => {
+                let live_hw = self.read_hardware_counter()?;
                 let st = self.decode_state(&raw)?;
                 let (active_hw, active_cp) = self.reconcile_with_hardware(st, live_hw)?;
                 if checkpoint.generation < active_cp.generation {
@@ -1249,22 +1613,21 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound && self.record.is_fresh() => {
-                // First provisioning: increment TPM2 NV counter once from `live_hw -> live_hw + 1`
-                // so a deleted/re-created seal directory cannot silently re-adopt `live_hw` after
-                // signing under a previous seal!
-                let next_hw =
-                    live_hw
-                        .checked_add(1)
-                        .ok_or(AntiRollbackError::ProtocolFramingError(
-                            "TPM2 64-bit NV counter exhausted",
-                        ))?;
-                self.increment_hardware_counter()?;
-                let after_hw = self.read_hardware_counter()?;
-                if after_hw != next_hw {
-                    return Err(AntiRollbackError::RollbackOrForkDetected(
-                        "unexpected TPM2 NV counter jump during initial anchor provisioning",
-                    ));
+                // Enrollment: the counter is unwritten (checked on open, and a written
+                // counter makes the read below the only one that can succeed first).
+                // The first increment initializes it above every count this TPM has
+                // held (Part 3 §31.2) and is this anchor's alone.
+                match self.read_hardware_counter() {
+                    Err(AntiRollbackError::Tpm2ResponseError(TPM_RC_NV_UNINITIALIZED)) => {}
+                    Ok(_) => {
+                        return Err(AntiRollbackError::UnsuitableCounterIndex(
+                            "the counter was incremented by something else during enrollment",
+                        ));
+                    }
+                    Err(e) => return Err(e),
                 }
+                self.increment_hardware_counter()?;
+                let next_hw = self.read_hardware_counter()?;
                 let initial = TpmSealedState {
                     committed_hw: next_hw,
                     committed_cp: checkpoint,
@@ -1276,6 +1639,68 @@ impl<T: Tpm2Transport> Tpm2NvMonotoneAnchor<T> {
             Err(e) => Err(AntiRollbackError::Io(e.kind())),
         }
     }
+}
+
+/// What a seal file holds, authenticated under its MAC key for `nv_index`. Says nothing
+/// about the TPM: see [`inspect_tpm2_seal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tpm2SealView {
+    /// The counter value the seal was last committed at.
+    pub sealed_count: u64,
+    pub checkpoint: LedgerCheckpoint,
+    /// A commit was staged and not finalized.
+    pub commit_in_flight: bool,
+}
+
+struct NoTpm;
+
+impl Tpm2Transport for NoTpm {
+    fn transmit(&self, _command: &[u8]) -> Result<Vec<u8>, AntiRollbackError> {
+        Err(AntiRollbackError::ProtocolFramingError(
+            "seal inspection does not talk to a TPM",
+        ))
+    }
+}
+
+/// Authenticate the seal at `seal_path` as one written for `nv_index` (authorized by
+/// the index itself) and return its contents, without comparing it to any counter.
+pub fn inspect_tpm2_seal(
+    seal_path: impl Into<PathBuf>,
+    nv_index: u32,
+    mut mac_key: [u8; 32],
+) -> Result<Tpm2SealView, AntiRollbackError> {
+    let key_arg = SecretBuffer(&mut mac_key);
+    let seal = Tpm2NvMonotoneAnchor::assemble(
+        NoTpm,
+        LockedRecord::open_existing(seal_path.into())?,
+        nv_index,
+        nv_index,
+        b"",
+        key_arg.as_slice(),
+    );
+    drop(key_arg);
+    let raw = seal
+        .record
+        .read_bounded(TPM_ANCHOR_RECORD_LEN)
+        .map_err(|e| AntiRollbackError::Io(e.kind()))?;
+    let state = seal.decode_state(&raw)?;
+    Ok(Tpm2SealView {
+        sealed_count: state.committed_hw,
+        checkpoint: state.committed_cp,
+        commit_in_flight: state.pending.is_some(),
+    })
+}
+
+/// Read a written counter with the index's own authorization value.
+pub fn tpm2_nv_read_counter<T: Tpm2Transport + ?Sized>(
+    transport: &T,
+    nv_index: u32,
+    nv_password: &[u8],
+) -> Result<u64, AntiRollbackError> {
+    let mut cmd = marshal_tpm2_nv_read_u64_cmd(nv_index, nv_index, nv_password)?;
+    let rsp = transport.transmit(&cmd);
+    wipe_bytes(&mut cmd);
+    parse_tpm2_nv_read_u64_rsp(&rsp?)
 }
 
 impl<T: Tpm2Transport> ExternalMonotoneAnchor for Tpm2NvMonotoneAnchor<T> {
@@ -1337,6 +1762,317 @@ impl<A: ExternalMonotoneAnchor, B: ExternalMonotoneAnchor> ExternalMonotoneAncho
     }
 }
 
+/// A software model of the TPM 2.0 NV counter commands an anchor issues, for tests
+/// that cannot reach a TPM. It is not a TPM: it has no hierarchies, sessions other
+/// than `TPM_RS_PW`, policies, dictionary-attack lockout or real Names.
+///
+/// Modelled, with the clause each rule comes from (TCG TPM 2.0 Library, Level 00
+/// Revision 01.59):
+///
+/// * `TPM2_NV_ReadPublic` returns `TPMS_NV_PUBLIC` without authorization (Part 3 §31.6).
+/// * A defined, never-written index: `TPM2_NV_Read` fails with
+///   `TPM_RC_NV_UNINITIALIZED` (Part 3 §31.13).
+/// * `TPM2_NV_Increment` on an index that is not `TPM_NT_COUNTER` fails with
+///   `TPM_RC_ATTRIBUTES`, on a write-locked index with `TPM_RC_NV_LOCKED`; otherwise it
+///   SETs `TPMA_NV_WRITTEN` and adds one (Part 3 §31.8).
+/// * A new counter starts above every count any counter on the TPM has held since
+///   manufacture, including counters since undefined (Part 3 §31.2). As in the TCG
+///   reference code the initial value is taken at the first increment.
+/// * `TPMA_NV_ORDERLY` counters keep recent increments in RAM; after an unclean
+///   shutdown `MAX_ORDERLY_COUNT` is ORed into the count (Part 3 §31.2, §31.8 NOTE 2).
+/// * Index authorization: `TPMA_NV_AUTHREAD` / `TPMA_NV_AUTHWRITE` gate the use of the
+///   index's own authorization value (`TPM_RC_NV_AUTHORIZATION` otherwise, Part 3
+///   §31.1); a wrong value is `TPM_RC_BAD_AUTH` (Part 2 §6.6.3).
+/// * A handle that names no index is `TPM_RC_HANDLE` (Part 2 §6.6.3).
+///
+/// `define_*`, `undefine`, `write_lock` and `restart` stand in for the owner-side
+/// commands (`TPM2_NV_DefineSpace` §31.3, `TPM2_NV_UndefineSpace` §31.4,
+/// `TPM2_NV_WriteLock` §31.11, `TPM2_Startup` §9.3) that an anchor never issues.
+#[cfg(any(test, feature = "tpm-model"))]
+pub mod tpm2_model {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    /// `MAX_ORDERLY_COUNT` of the TCG reference implementation (a power of two minus one).
+    pub const MAX_ORDERLY_COUNT: u64 = 255;
+    /// `TPM_ALG_SHA256`.
+    const NAME_ALG: u16 = 0x000B;
+
+    struct Index {
+        attributes: u32,
+        auth: Vec<u8>,
+        data_size: u16,
+        count: u64,
+    }
+
+    #[derive(Default)]
+    struct State {
+        indices: BTreeMap<u32, Index>,
+        /// The highest count any counter on this TPM has held.
+        max_count: u64,
+        forced_rc: Option<u32>,
+    }
+
+    /// Shared handle: clones talk to the same TPM.
+    #[derive(Clone, Default)]
+    pub struct ModelTpm2(Arc<Mutex<State>>);
+
+    fn error_response(rc: u32) -> Vec<u8> {
+        let mut rsp = Vec::with_capacity(10);
+        rsp.extend_from_slice(&TPM_ST_NO_SESSIONS.to_be_bytes());
+        rsp.extend_from_slice(&10u32.to_be_bytes());
+        rsp.extend_from_slice(&rc.to_be_bytes());
+        rsp
+    }
+
+    /// A `TPM_ST_SESSIONS` success response with one password session's
+    /// `TPMS_AUTH_RESPONSE` (empty nonce, `continueSession`, empty hmac).
+    pub fn session_response(params: &[u8]) -> Vec<u8> {
+        let total = (10 + 4 + params.len() + 5) as u32;
+        let mut rsp = Vec::with_capacity(total as usize);
+        rsp.extend_from_slice(&TPM_ST_SESSIONS.to_be_bytes());
+        rsp.extend_from_slice(&total.to_be_bytes());
+        rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
+        rsp.extend_from_slice(&(params.len() as u32).to_be_bytes());
+        rsp.extend_from_slice(params);
+        rsp.extend_from_slice(&[0, 0, 1, 0, 0]);
+        rsp
+    }
+
+    impl ModelTpm2 {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// A TPM whose counters have already reached `max_count`.
+        pub fn with_history(max_count: u64) -> Self {
+            let tpm = Self::default();
+            tpm.0.lock().unwrap().max_count = max_count;
+            tpm
+        }
+
+        /// `TPM2_NV_DefineSpace` with explicit `TPMA_NV` attributes. `TPMA_NV_WRITTEN`
+        /// and the lock bits are CLEAR in a new index (Part 2 §13.4).
+        pub fn define_space(&self, nv_index: u32, attributes: u32, auth: &[u8], data_size: u16) {
+            assert!(is_valid_tpm2_nv_index(nv_index));
+            let mut state = self.0.lock().unwrap();
+            assert!(
+                !state.indices.contains_key(&nv_index),
+                "TPM_RC_NV_DEFINED: {nv_index:#x}"
+            );
+            state.indices.insert(
+                nv_index,
+                Index {
+                    attributes: attributes
+                        & !(TPMA_NV_WRITTEN | TPMA_NV_WRITELOCKED | TPMA_NV_READLOCKED),
+                    auth: auth.to_vec(),
+                    data_size,
+                    count: 0,
+                },
+            );
+        }
+
+        /// The index an anchor needs: `nt=counter`, `authread|authwrite|no_da`.
+        pub fn define_counter(&self, nv_index: u32, auth: &[u8]) {
+            self.define_space(
+                nv_index,
+                TPMA_NV_TPM_NT_COUNTER | TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE | TPMA_NV_NO_DA,
+                auth,
+                8,
+            );
+        }
+
+        /// `TPM2_NV_UndefineSpace`: the index goes, its count stays in the TPM's maximum.
+        pub fn undefine(&self, nv_index: u32) {
+            let mut state = self.0.lock().unwrap();
+            let index = state.indices.remove(&nv_index).expect("TPM_RC_HANDLE");
+            state.max_count = state.max_count.max(index.count);
+        }
+
+        /// `TPM2_NV_WriteLock` on an index that allows it.
+        pub fn write_lock(&self, nv_index: u32) {
+            let mut state = self.0.lock().unwrap();
+            state
+                .indices
+                .get_mut(&nv_index)
+                .expect("TPM_RC_HANDLE")
+                .attributes |= TPMA_NV_WRITELOCKED;
+        }
+
+        /// `TPM2_Shutdown` (or its absence) followed by `TPM2_Startup(CLEAR)`.
+        pub fn restart(&self, orderly_shutdown: bool) {
+            let mut state = self.0.lock().unwrap();
+            let state = &mut *state;
+            for index in state.indices.values_mut() {
+                index.attributes &= !(TPMA_NV_WRITELOCKED | TPMA_NV_READLOCKED);
+                let orderly_counter = index.attributes & TPMA_NV_ORDERLY != 0
+                    && index.attributes & TPMA_NV_TPM_NT_MASK == TPMA_NV_TPM_NT_COUNTER
+                    && index.attributes & TPMA_NV_WRITTEN != 0;
+                if orderly_counter && !orderly_shutdown {
+                    index.count |= MAX_ORDERLY_COUNT;
+                    state.max_count = state.max_count.max(index.count);
+                }
+            }
+        }
+
+        /// The count of a written counter; `None` while `TPMA_NV_WRITTEN` is CLEAR.
+        pub fn count(&self, nv_index: u32) -> Option<u64> {
+            let state = self.0.lock().unwrap();
+            let index = state.indices.get(&nv_index).expect("TPM_RC_HANDLE");
+            (index.attributes & TPMA_NV_WRITTEN != 0).then_some(index.count)
+        }
+
+        /// Every defined index with its count (`None` if never written).
+        pub fn counts(&self) -> BTreeMap<u32, Option<u64>> {
+            let state = self.0.lock().unwrap();
+            state
+                .indices
+                .iter()
+                .map(|(nv, index)| {
+                    (
+                        *nv,
+                        (index.attributes & TPMA_NV_WRITTEN != 0).then_some(index.count),
+                    )
+                })
+                .collect()
+        }
+
+        /// Answer every command with this response code (a failing device).
+        pub fn force_response_code(&self, rc: Option<u32>) {
+            self.0.lock().unwrap().forced_rc = rc;
+        }
+
+        fn read_public(state: &State, cmd: &[u8]) -> Vec<u8> {
+            if cmd.len() != 14 || cmd[..2] != TPM_ST_NO_SESSIONS.to_be_bytes() {
+                return error_response(TPM_RC_COMMAND_CODE);
+            }
+            let nv_index = u32::from_be_bytes(cmd[10..14].try_into().unwrap());
+            let Some(index) = state.indices.get(&nv_index) else {
+                return error_response(TPM_RC_HANDLE_1);
+            };
+            let mut public = Vec::new();
+            public.extend_from_slice(&nv_index.to_be_bytes());
+            public.extend_from_slice(&NAME_ALG.to_be_bytes());
+            public.extend_from_slice(&index.attributes.to_be_bytes());
+            public.extend_from_slice(&0u16.to_be_bytes());
+            public.extend_from_slice(&index.data_size.to_be_bytes());
+            // nameAlg || digest. The digest is a placeholder: nothing here checks Names.
+            let mut name = Vec::new();
+            name.extend_from_slice(&NAME_ALG.to_be_bytes());
+            name.extend_from_slice(&[0; 32]);
+            let total = 10 + 2 + public.len() + 2 + name.len();
+            let mut rsp = Vec::with_capacity(total);
+            rsp.extend_from_slice(&TPM_ST_NO_SESSIONS.to_be_bytes());
+            rsp.extend_from_slice(&(total as u32).to_be_bytes());
+            rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
+            rsp.extend_from_slice(&(public.len() as u16).to_be_bytes());
+            rsp.extend_from_slice(&public);
+            rsp.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            rsp.extend_from_slice(&name);
+            rsp
+        }
+
+        fn nv_command(state: &mut State, cc: u32, cmd: &[u8]) -> Vec<u8> {
+            // tag(2) size(4) cc(4) authHandle(4) nvIndex(4) authSize(4) TPM_RS_PW(4)
+            // nonce.size(2) attributes(1) hmac.size(2) hmac parameters
+            if cmd.len() < 31 || cmd[..2] != TPM_ST_SESSIONS.to_be_bytes() {
+                return error_response(TPM_RC_COMMAND_CODE);
+            }
+            let word = |at: usize| u32::from_be_bytes(cmd[at..at + 4].try_into().unwrap());
+            let (auth_handle, nv_index) = (word(10), word(14));
+            let hmac_len = u16::from_be_bytes([cmd[29], cmd[30]]) as usize;
+            let well_formed = word(22) == TPM_RS_PW
+                && cmd[26..28] == [0, 0]
+                && word(18) as usize == 9 + hmac_len
+                && cmd.len() >= 31 + hmac_len;
+            if !well_formed {
+                return error_response(TPM_RC_COMMAND_CODE);
+            }
+            let (hmac, params) = cmd[31..].split_at(hmac_len);
+            // The anchor authorizes with the index itself (Auth Role USER, §31.8 Table 222).
+            if auth_handle != nv_index {
+                return error_response(TPM_RC_NV_AUTHORIZATION);
+            }
+            let max_count = state.max_count;
+            let Some(index) = state.indices.get_mut(&nv_index) else {
+                return error_response(TPM_RC_HANDLE_1);
+            };
+            let needed = if cc == TPM_CC_NV_INCREMENT {
+                TPMA_NV_AUTHWRITE
+            } else {
+                TPMA_NV_AUTHREAD
+            };
+            if index.attributes & needed == 0 {
+                return error_response(TPM_RC_NV_AUTHORIZATION);
+            }
+            if hmac != index.auth.as_slice() {
+                return error_response(TPM_RC_BAD_AUTH_SESSION_1);
+            }
+            if cc == TPM_CC_NV_INCREMENT {
+                if !params.is_empty() {
+                    return error_response(TPM_RC_COMMAND_CODE);
+                }
+                if index.attributes & TPMA_NV_TPM_NT_MASK != TPMA_NV_TPM_NT_COUNTER {
+                    return error_response(TPM_RC_ATTRIBUTES_HANDLE_2);
+                }
+                if index.attributes & TPMA_NV_WRITELOCKED != 0 {
+                    return error_response(TPM_RC_NV_LOCKED);
+                }
+                if index.attributes & TPMA_NV_WRITTEN == 0 {
+                    index.attributes |= TPMA_NV_WRITTEN;
+                    index.count = max_count;
+                }
+                index.count = index.count.checked_add(1).expect("64-bit counter");
+                let count = index.count;
+                state.max_count = state.max_count.max(count);
+                return session_response(&[]);
+            }
+            if params.len() != 4 {
+                return error_response(TPM_RC_COMMAND_CODE);
+            }
+            let size = u16::from_be_bytes([params[0], params[1]]);
+            let offset = u16::from_be_bytes([params[2], params[3]]);
+            if index.attributes & TPMA_NV_READLOCKED != 0 {
+                return error_response(TPM_RC_NV_LOCKED);
+            }
+            if u32::from(size) + u32::from(offset) > u32::from(index.data_size) {
+                return error_response(TPM_RC_NV_RANGE);
+            }
+            if index.attributes & TPMA_NV_WRITTEN == 0 {
+                return error_response(TPM_RC_NV_UNINITIALIZED);
+            }
+            let value = index.count.to_be_bytes();
+            let data = &value[offset as usize..(offset + size) as usize];
+            let mut out = Vec::with_capacity(2 + data.len());
+            out.extend_from_slice(&size.to_be_bytes());
+            out.extend_from_slice(data);
+            session_response(&out)
+        }
+    }
+
+    impl Tpm2Transport for ModelTpm2 {
+        fn transmit(&self, cmd: &[u8]) -> Result<Vec<u8>, AntiRollbackError> {
+            let mut state = self.0.lock().unwrap();
+            if let Some(rc) = state.forced_rc {
+                return Ok(error_response(rc));
+            }
+            if cmd.len() < 10
+                || u32::from_be_bytes(cmd[2..6].try_into().unwrap()) as usize != cmd.len()
+            {
+                return Ok(error_response(TPM_RC_COMMAND_CODE));
+            }
+            Ok(match u32::from_be_bytes(cmd[6..10].try_into().unwrap()) {
+                TPM_CC_NV_READ_PUBLIC => Self::read_public(&state, cmd),
+                cc @ (TPM_CC_NV_INCREMENT | TPM_CC_NV_READ) => {
+                    Self::nv_command(&mut state, cc, cmd)
+                }
+                _ => error_response(TPM_RC_COMMAND_CODE),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,110 +2098,7 @@ mod tests {
         }
     }
 
-    /// Deterministic in-memory TPM 2.0 NV counter emulator validating every incoming command's
-    /// exact big-endian header, commandCode, handles, and `TPM_RS_PW` authorization framing.
-    #[derive(Clone)]
-    struct MockTpm2Device {
-        state: Arc<Mutex<MockTpmState>>,
-    }
-
-    struct MockTpmState {
-        nv_index: u32,
-        expected_auth: Vec<u8>,
-        counter: u64,
-        forced_rc: Option<u32>,
-        recorded_cmds: Vec<Vec<u8>>,
-    }
-
-    impl MockTpm2Device {
-        fn new(nv_index: u32, auth: &[u8], initial_counter: u64) -> Self {
-            Self {
-                state: Arc::new(Mutex::new(MockTpmState {
-                    nv_index,
-                    expected_auth: auth.to_vec(),
-                    counter: initial_counter,
-                    forced_rc: None,
-                    recorded_cmds: Vec::new(),
-                })),
-            }
-        }
-
-        fn counter(&self) -> u64 {
-            self.state.lock().unwrap().counter
-        }
-
-        fn bump_out_of_band(&self, delta: u64) {
-            self.state.lock().unwrap().counter += delta;
-        }
-
-        fn set_forced_rc(&self, rc: Option<u32>) {
-            self.state.lock().unwrap().forced_rc = rc;
-        }
-    }
-
-    fn build_session_rsp(params: &[u8]) -> Vec<u8> {
-        // 10B header + 4B paramSize + params + 5B minimal TPMS_AUTH_RESPONSE (nonce=0, attr=1, hmac=0)
-        let total_len = (10 + 4 + params.len() + 5) as u32;
-        let mut rsp = Vec::with_capacity(total_len as usize);
-        rsp.extend_from_slice(&TPM_ST_SESSIONS.to_be_bytes());
-        rsp.extend_from_slice(&total_len.to_be_bytes());
-        rsp.extend_from_slice(&TPM_RC_SUCCESS.to_be_bytes());
-        rsp.extend_from_slice(&(params.len() as u32).to_be_bytes());
-        rsp.extend_from_slice(params);
-        rsp.extend_from_slice(&0u16.to_be_bytes()); // nonceTPM.size = 0
-        rsp.push(0x01); // continueSession = 1
-        rsp.extend_from_slice(&0u16.to_be_bytes()); // hmac.size = 0
-        rsp
-    }
-
-    impl Tpm2Transport for MockTpm2Device {
-        fn transmit(&self, cmd: &[u8]) -> Result<Vec<u8>, AntiRollbackError> {
-            let mut st = self.state.lock().unwrap();
-            st.recorded_cmds.push(cmd.to_vec());
-            if let Some(rc) = st.forced_rc {
-                let mut err_rsp = Vec::with_capacity(10);
-                err_rsp.extend_from_slice(&TPM_ST_NO_SESSIONS.to_be_bytes());
-                err_rsp.extend_from_slice(&10u32.to_be_bytes());
-                err_rsp.extend_from_slice(&rc.to_be_bytes());
-                return Ok(err_rsp);
-            }
-            assert!(cmd.len() >= 27, "command shorter than session frame");
-            let tag = u16::from_be_bytes([cmd[0], cmd[1]]);
-            let sz = u32::from_be_bytes([cmd[2], cmd[3], cmd[4], cmd[5]]) as usize;
-            let cc = u32::from_be_bytes([cmd[6], cmd[7], cmd[8], cmd[9]]);
-            assert_eq!(tag, TPM_ST_SESSIONS);
-            assert_eq!(sz, cmd.len());
-            let _auth_handle = u32::from_be_bytes([cmd[10], cmd[11], cmd[12], cmd[13]]);
-            let nv_idx = u32::from_be_bytes([cmd[14], cmd[15], cmd[16], cmd[17]]);
-            assert_eq!(nv_idx, st.nv_index);
-            let auth_size = u32::from_be_bytes([cmd[18], cmd[19], cmd[20], cmd[21]]) as usize;
-            let session_handle = u32::from_be_bytes([cmd[22], cmd[23], cmd[24], cmd[25]]);
-            assert_eq!(session_handle, TPM_RS_PW);
-            let nonce_sz = u16::from_be_bytes([cmd[26], cmd[27]]) as usize;
-            assert_eq!(nonce_sz, 0);
-            assert_eq!(cmd[28], 0x01);
-            let hmac_sz = u16::from_be_bytes([cmd[29], cmd[30]]) as usize;
-            assert_eq!(auth_size, 9 + hmac_sz);
-            assert_eq!(&cmd[31..31 + hmac_sz], st.expected_auth.as_slice());
-
-            let params = &cmd[31 + hmac_sz..];
-            match cc {
-                TPM_CC_NV_INCREMENT => {
-                    assert!(params.is_empty());
-                    st.counter = st.counter.checked_add(1).unwrap();
-                    Ok(build_session_rsp(&[]))
-                }
-                TPM_CC_NV_READ => {
-                    assert_eq!(params, &[0x00, 0x08, 0x00, 0x00]);
-                    let mut out_params = [0u8; 10];
-                    out_params[..2].copy_from_slice(&8u16.to_be_bytes());
-                    out_params[2..10].copy_from_slice(&st.counter.to_be_bytes());
-                    Ok(build_session_rsp(&out_params))
-                }
-                other => panic!("unexpected TPM_CC 0x{other:08x}"),
-            }
-        }
-    }
+    use super::tpm2_model::{MAX_ORDERLY_COUNT, ModelTpm2, session_response as build_session_rsp};
 
     #[test]
     fn tpm2_packet_marshaling_matches_normative_big_endian_wire_bytes() {
@@ -1568,80 +2201,78 @@ mod tests {
         }
     }
 
+    const PW: &[u8] = b"custody-pw";
+
+    fn open_anchor(
+        tpm: &ModelTpm2,
+        seal: &Path,
+        nv_index: u32,
+    ) -> Result<Tpm2NvMonotoneAnchor<ModelTpm2>, AntiRollbackError> {
+        Tpm2NvMonotoneAnchor::open_with_transport(
+            tpm.clone(),
+            seal,
+            nv_index,
+            nv_index,
+            PW,
+            [0x5A; 32],
+        )
+    }
+
+    fn checkpoint(generation: u64) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation,
+            tag: [generation as u8 * 0x11; 32],
+        }
+    }
+
+    fn nv_increment(tpm: &ModelTpm2, nv_index: u32, auth: &[u8]) -> Result<(), AntiRollbackError> {
+        let cmd = marshal_tpm2_nv_increment_cmd(nv_index, nv_index, auth).unwrap();
+        parse_tpm2_nv_increment_rsp(&tpm.transmit(&cmd).unwrap())
+    }
+
+    fn nv_read(tpm: &ModelTpm2, nv_index: u32, auth: &[u8]) -> Result<u64, AntiRollbackError> {
+        let cmd = marshal_tpm2_nv_read_u64_cmd(nv_index, nv_index, auth).unwrap();
+        parse_tpm2_nv_read_u64_rsp(&tpm.transmit(&cmd).unwrap())
+    }
+
     #[test]
     fn tpm2_nv_anchor_detects_disk_snapshot_rollback_and_recovers_pending_crash() {
         let tmp = TempDir::new("tpm2");
         let seal_path = tmp.0.join("tpm_anchor");
         let nv_index = 0x0150_0042;
-        let mac_key = [0x5Au8; 32];
-        let tpm = MockTpm2Device::new(nv_index, b"custody-pw", 100);
+        let tpm = ModelTpm2::with_history(100);
+        tpm.define_counter(nv_index, PW);
 
-        let anchor = Tpm2NvMonotoneAnchor::open_with_transport(
-            tpm.clone(),
-            &seal_path,
-            nv_index,
-            nv_index,
-            b"custody-pw",
-            mac_key,
-        )
-        .unwrap();
+        let anchor = open_anchor(&tpm, &seal_path, nv_index).unwrap();
         assert_eq!(anchor.load_checked().unwrap(), None);
-
-        let cp1 = LedgerCheckpoint {
-            generation: 1,
-            tag: [0x11; 32],
-        };
-        let cp2 = LedgerCheckpoint {
-            generation: 2,
-            tag: [0x22; 32],
-        };
+        assert_eq!(tpm.count(nv_index), None, "opening does not write");
+        let (cp1, cp2, cp3) = (checkpoint(1), checkpoint(2), checkpoint(3));
         anchor.advance_checked(cp1).unwrap();
-        assert_eq!(tpm.counter(), 101);
+        assert_eq!(tpm.count(nv_index), Some(101));
         assert_eq!(anchor.load_checked().unwrap(), Some(cp1));
 
         // Snapshot the on-disk seal record at generation 1 (hardware counter = 101).
         let disk_snapshot_bytes = fs::read(&seal_path).unwrap();
-
-        // Advance to generation 2 (hardware counter -> 102).
         anchor.advance_checked(cp2).unwrap();
-        assert_eq!(tpm.counter(), 102);
+        assert_eq!(tpm.count(nv_index), Some(102));
         assert_eq!(anchor.load_checked().unwrap(), Some(cp2));
         drop(anchor);
 
-        // Simulate attacker restoring disk snapshot back to generation 1 while hardware TPM2
-        // remains at 102: reopen MUST immediately halt with RollbackOrForkDetected!
+        // The disk goes back to generation 1 while the TPM stays at 102.
         fs::write(&seal_path, &disk_snapshot_bytes).unwrap();
-        let reopened = Tpm2NvMonotoneAnchor::open_with_transport(
-            tpm.clone(),
-            &seal_path,
-            nv_index,
-            nv_index,
-            b"custody-pw",
-            mac_key,
-        );
         assert!(matches!(
-            reopened,
+            open_anchor(&tpm, &seal_path, nv_index),
             Err(AntiRollbackError::RollbackOrForkDetected(_))
         ));
 
-        // Simulate crash mid-commit: stage `pending = (103, cp3)` in a fresh anchor, bump TPM2
-        // to 103, and verify recovery promotes `cp3` cleanly without bricking!
+        // Crash mid-commit on a second anchor with its own counter: `pending` is staged,
+        // the increment reached the TPM, the final write did not happen.
         let seal_path2 = tmp.0.join("tpm_anchor_crash");
-        let anchor2 = Tpm2NvMonotoneAnchor::open_with_transport(
-            tpm.clone(),
-            &seal_path2,
-            nv_index,
-            nv_index,
-            b"custody-pw",
-            mac_key,
-        )
-        .unwrap();
+        let nv_index2 = 0x0150_0043;
+        tpm.define_counter(nv_index2, PW);
+        let anchor2 = open_anchor(&tpm, &seal_path2, nv_index2).unwrap();
         anchor2.advance_checked(cp2).unwrap();
-        assert_eq!(tpm.counter(), 103);
-        let cp3 = LedgerCheckpoint {
-            generation: 3,
-            tag: [0x33; 32],
-        };
+        assert_eq!(tpm.count(nv_index2), Some(103));
         let staged = TpmSealedState {
             committed_hw: 103,
             committed_cp: cp2,
@@ -1651,26 +2282,353 @@ mod tests {
             .record
             .replace(&anchor2.encode_state(&staged))
             .unwrap();
-        tpm.bump_out_of_band(1); // hardware counter = 104 (TPM2_NV_Increment succeeded right before power loss)
+        nv_increment(&tpm, nv_index2, PW).unwrap();
         drop(anchor2);
-
-        let recovered = Tpm2NvMonotoneAnchor::open_with_transport(
-            tpm.clone(),
-            &seal_path2,
-            nv_index,
-            nv_index,
-            b"custody-pw",
-            mac_key,
-        )
-        .unwrap();
+        let recovered = open_anchor(&tpm, &seal_path2, nv_index2).unwrap();
         assert_eq!(recovered.load_checked().unwrap(), Some(cp3));
 
-        // TPM2 hardware error response propagates typed `Tpm2ResponseError`.
-        tpm.set_forced_rc(Some(0x0000_014A));
+        // A device error propagates as the typed response code.
+        tpm.force_response_code(Some(TPM_RC_NV_LOCKED));
         assert_eq!(
             recovered.load_checked(),
-            Err(AntiRollbackError::Tpm2ResponseError(0x0000_014A))
+            Err(AntiRollbackError::Tpm2ResponseError(TPM_RC_NV_LOCKED))
         );
+    }
+
+    // Two seals on one counter was the multi-anchor defect: each advance left the other
+    // seal behind. A second anchor is now refused when it is opened, not when the first
+    // is reopened, because the TPM itself says the counter has been used.
+    #[test]
+    fn new_tpm2_anchor_requires_a_never_written_counter_of_the_right_kind() {
+        let tmp = TempDir::new("tpm2-enrol");
+        let tpm = ModelTpm2::with_history(7);
+        let unsuitable = |result: Result<Tpm2NvMonotoneAnchor<ModelTpm2>, AntiRollbackError>| {
+            matches!(result, Err(AntiRollbackError::UnsuitableCounterIndex(_)))
+        };
+
+        let shared = 0x0150_0050;
+        tpm.define_counter(shared, PW);
+        let first = open_anchor(&tpm, &tmp.0.join("first"), shared).unwrap();
+        // Unwritten until the first advance, so a sibling opened in between is not yet
+        // refused; whichever advances second is.
+        let sibling = open_anchor(&tpm, &tmp.0.join("sibling"), shared).unwrap();
+        first.advance_checked(checkpoint(1)).unwrap();
+        assert_eq!(
+            sibling.advance_checked(checkpoint(1)),
+            Err(AntiRollbackError::UnsuitableCounterIndex(
+                "the counter was incremented by something else during enrollment"
+            ))
+        );
+        assert_eq!(
+            tpm.count(shared),
+            Some(8),
+            "the refused sibling wrote nothing"
+        );
+        drop(sibling);
+        assert!(unsuitable(open_anchor(&tpm, &tmp.0.join("second"), shared)));
+        assert_eq!(first.load_checked().unwrap(), Some(checkpoint(1)));
+        drop(first);
+        drop(open_anchor(&tpm, &tmp.0.join("first"), shared).unwrap());
+
+        // Index kinds an anchor cannot use.
+        let counter = TPMA_NV_TPM_NT_COUNTER | TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE;
+        for (nv_index, attributes, data_size) in [
+            (0x0150_0051, TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE, 8),
+            (0x0150_0052, counter | TPMA_NV_ORDERLY, 8),
+            (0x0150_0053, counter & !TPMA_NV_AUTHWRITE, 8),
+            (0x0150_0054, counter & !TPMA_NV_AUTHREAD, 8),
+            (0x0150_0055, TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE, 32),
+        ] {
+            tpm.define_space(nv_index, attributes, PW, data_size);
+            assert!(
+                unsuitable(open_anchor(&tpm, &tmp.0.join("kind"), nv_index)),
+                "{nv_index:#x}"
+            );
+        }
+        assert_eq!(
+            open_anchor(&tpm, &tmp.0.join("kind"), 0x0150_0056).err(),
+            Some(AntiRollbackError::Tpm2ResponseError(TPM_RC_HANDLE_1))
+        );
+
+        // An index that is undefined and defined again is unwritten: the old seal is
+        // refused, and a new anchor on it starts above every earlier sealed count.
+        tpm.undefine(shared);
+        tpm.define_counter(shared, PW);
+        assert!(matches!(
+            open_anchor(&tpm, &tmp.0.join("first"), shared),
+            Err(AntiRollbackError::RollbackOrForkDetected(_))
+        ));
+        let again = open_anchor(&tpm, &tmp.0.join("again"), shared).unwrap();
+        again.advance_checked(checkpoint(1)).unwrap();
+        assert_eq!(tpm.count(shared), Some(9));
+    }
+
+    #[test]
+    fn rebinding_a_seal_needs_a_never_written_counter_and_keeps_the_checkpoint() {
+        let tmp = TempDir::new("tpm2-rebind");
+        let tpm = ModelTpm2::with_history(20);
+        let (old, new, used) = (0x0150_00A0, 0x0150_00A1, 0x0150_00A2);
+        for nv_index in [old, new, used] {
+            tpm.define_counter(nv_index, PW);
+        }
+        nv_increment(&tpm, used, PW).unwrap();
+        let seal = tmp.0.join("seal");
+        let anchor = open_anchor(&tpm, &seal, old).unwrap();
+        anchor.advance_checked(checkpoint(1)).unwrap();
+        anchor.advance_checked(checkpoint(2)).unwrap();
+        drop(anchor);
+        let view = inspect_tpm2_seal(&seal, old, [0x5A; 32]).unwrap();
+        assert_eq!(
+            view,
+            Tpm2SealView {
+                sealed_count: tpm.count(old).unwrap(),
+                checkpoint: checkpoint(2),
+                commit_in_flight: false,
+            }
+        );
+        assert!(inspect_tpm2_seal(&seal, new, [0x5A; 32]).is_err());
+        assert!(inspect_tpm2_seal(&seal, old, [0x5B; 32]).is_err());
+
+        let rebind = |to: u32| {
+            Tpm2NvMonotoneAnchor::rebind_to_new_counter(tpm.clone(), &seal, old, to, PW, [0x5A; 32])
+        };
+        assert!(matches!(
+            rebind(used),
+            Err(AntiRollbackError::UnsuitableCounterIndex(_))
+        ));
+        assert!(rebind(old).is_err());
+        assert_eq!(tpm.count(new), None);
+        let before = fs::read(&seal).unwrap();
+        let rebound = rebind(new).unwrap();
+        assert_eq!(rebound.load_checked().unwrap(), Some(checkpoint(2)));
+        assert!(tpm.count(new).unwrap() > tpm.count(old).unwrap());
+        rebound.advance_checked(checkpoint(3)).unwrap();
+        drop(rebound);
+        // Running it again finds the seal already on the new counter and verifies it.
+        let count = tpm.count(new);
+        drop(rebind(new).unwrap());
+        assert_eq!(tpm.count(new), count);
+        assert_eq!(
+            open_anchor(&tpm, &seal, new)
+                .unwrap()
+                .load_checked()
+                .unwrap(),
+            Some(checkpoint(3))
+        );
+        // The pre-rebind seal bytes are refused on both counters afterwards.
+        fs::write(&seal, before).unwrap();
+        assert!(open_anchor(&tpm, &seal, new).is_err());
+        assert!(matches!(
+            rebind(new),
+            Err(AntiRollbackError::UnsuitableCounterIndex(_))
+        ));
+    }
+
+    // Part 3 §31.13 and §31.2.
+    #[test]
+    fn model_unwritten_index_cannot_be_read_and_a_new_counter_exceeds_every_past_count() {
+        let tpm = ModelTpm2::new();
+        let (a, b) = (0x0150_0060, 0x0150_0061);
+        tpm.define_counter(a, b"");
+        assert_eq!(
+            nv_read(&tpm, a, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(
+                TPM_RC_NV_UNINITIALIZED
+            ))
+        );
+        assert!(!tpm2_nv_read_public(&tpm, a).unwrap().is_written());
+        for expected in 1..=3 {
+            nv_increment(&tpm, a, b"").unwrap();
+            assert_eq!(nv_read(&tpm, a, b""), Ok(expected));
+        }
+        assert!(tpm2_nv_read_public(&tpm, a).unwrap().is_written());
+
+        // The deleted counter's count still bounds every later counter from below.
+        tpm.undefine(a);
+        tpm.define_counter(b, b"");
+        assert_eq!(tpm.count(b), None);
+        nv_increment(&tpm, b, b"").unwrap();
+        assert_eq!(nv_read(&tpm, b, b""), Ok(4));
+        tpm.define_counter(a, b"");
+        assert_eq!(
+            nv_read(&tpm, a, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(
+                TPM_RC_NV_UNINITIALIZED
+            ))
+        );
+        nv_increment(&tpm, a, b"").unwrap();
+        assert_eq!(nv_read(&tpm, a, b""), Ok(5));
+        nv_increment(&tpm, b, b"").unwrap();
+        assert_eq!(nv_read(&tpm, b, b""), Ok(5), "increments add exactly one");
+    }
+
+    // Part 3 §31.8.
+    #[test]
+    fn model_increment_needs_a_counter_that_is_not_write_locked() {
+        let tpm = ModelTpm2::new();
+        let (ordinary, counter) = (0x0150_0070, 0x0150_0071);
+        tpm.define_space(ordinary, TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE, b"", 8);
+        assert_eq!(
+            nv_increment(&tpm, ordinary, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(
+                TPM_RC_ATTRIBUTES_HANDLE_2
+            ))
+        );
+        tpm.define_counter(counter, b"");
+        nv_increment(&tpm, counter, b"").unwrap();
+        tpm.write_lock(counter);
+        assert_eq!(
+            nv_increment(&tpm, counter, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(TPM_RC_NV_LOCKED))
+        );
+        assert_eq!(
+            nv_read(&tpm, counter, b""),
+            Ok(1),
+            "a refused increment adds nothing"
+        );
+        tpm.restart(true);
+        nv_increment(&tpm, counter, b"").unwrap();
+        assert_eq!(nv_read(&tpm, counter, b""), Ok(2));
+    }
+
+    // Part 3 §31.1 (index authorization), §31.13 (range), Part 2 §6.6.3 (codes).
+    #[test]
+    fn model_authorization_handles_and_read_range() {
+        let tpm = ModelTpm2::new();
+        let counter = 0x0150_0080;
+        tpm.define_counter(counter, b"secret");
+        nv_increment(&tpm, counter, b"secret").unwrap();
+        let rc = |result: Result<u64, AntiRollbackError>| match result {
+            Err(AntiRollbackError::Tpm2ResponseError(rc)) => rc,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            rc(nv_read(&tpm, counter, b"wrong")),
+            TPM_RC_BAD_AUTH_SESSION_1
+        );
+        assert_eq!(
+            nv_increment(&tpm, counter, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(
+                TPM_RC_BAD_AUTH_SESSION_1
+            ))
+        );
+        assert_eq!(rc(nv_read(&tpm, 0x0150_0081, b"secret")), TPM_RC_HANDLE_1);
+        assert_eq!(
+            tpm2_nv_read_public(&tpm, 0x0150_0081),
+            Err(AntiRollbackError::Tpm2ResponseError(TPM_RC_HANDLE_1))
+        );
+        // Owner-only indices cannot be used with the index's own authorization.
+        let owner_only = 0x0150_0082;
+        tpm.define_space(
+            owner_only,
+            TPMA_NV_TPM_NT_COUNTER | (1 << 1) | (1 << 17),
+            b"",
+            8,
+        );
+        assert_eq!(rc(nv_read(&tpm, owner_only, b"")), TPM_RC_NV_AUTHORIZATION);
+        assert_eq!(
+            nv_increment(&tpm, owner_only, b""),
+            Err(AntiRollbackError::Tpm2ResponseError(
+                TPM_RC_NV_AUTHORIZATION
+            ))
+        );
+        // size + offset beyond the 8-octet counter.
+        let mut cmd = marshal_tpm2_nv_read_u64_cmd(counter, counter, b"secret").unwrap();
+        let at = cmd.len() - 2;
+        cmd[at..].copy_from_slice(&1u16.to_be_bytes());
+        assert_eq!(
+            rc(parse_tpm2_nv_read_u64_rsp(&tpm.transmit(&cmd).unwrap())),
+            TPM_RC_NV_RANGE
+        );
+        assert_eq!(nv_read(&tpm, counter, b"secret"), Ok(1));
+    }
+
+    // Part 3 §31.2 and §31.8 NOTE 2: the reason an anchor refuses `orderly` counters.
+    #[test]
+    fn model_orderly_counter_jumps_after_an_unclean_shutdown() {
+        let tpm = ModelTpm2::new();
+        let (orderly, plain) = (0x0150_0090, 0x0150_0091);
+        let counter = TPMA_NV_TPM_NT_COUNTER | TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE;
+        tpm.define_space(orderly, counter | TPMA_NV_ORDERLY, b"", 8);
+        tpm.define_counter(plain, b"");
+        for nv_index in [orderly, plain] {
+            nv_increment(&tpm, nv_index, b"").unwrap();
+            nv_increment(&tpm, nv_index, b"").unwrap();
+        }
+        let before = nv_read(&tpm, orderly, b"").unwrap();
+        let plain_before = nv_read(&tpm, plain, b"").unwrap();
+        tpm.restart(true);
+        assert_eq!(nv_read(&tpm, orderly, b""), Ok(before));
+        tpm.restart(false);
+        assert_eq!(nv_read(&tpm, orderly, b""), Ok(before | MAX_ORDERLY_COUNT));
+        assert!(nv_read(&tpm, orderly, b"").unwrap() > before);
+        // A counter without the attribute keeps its exact count, which is what a seal
+        // holds; and later counters start above the jump.
+        assert_eq!(nv_read(&tpm, plain, b""), Ok(plain_before));
+        let later = 0x0150_0092;
+        tpm.define_counter(later, b"");
+        nv_increment(&tpm, later, b"").unwrap();
+        assert_eq!(
+            nv_read(&tpm, later, b""),
+            Ok((before | MAX_ORDERLY_COUNT) + 1)
+        );
+    }
+
+    // Part 3 §31.6, Tables 218 and 219.
+    #[test]
+    fn tpm2_nv_read_public_wire_format() {
+        assert_eq!(
+            marshal_tpm2_nv_read_public_cmd(0x0150_0007).unwrap(),
+            vec![
+                0x80, 0x01, // TPM_ST_NO_SESSIONS
+                0x00, 0x00, 0x00, 0x0E, // commandSize = 14
+                0x00, 0x00, 0x01, 0x69, // TPM_CC_NV_ReadPublic
+                0x01, 0x50, 0x00, 0x07, // nvIndex
+            ]
+        );
+        assert!(marshal_tpm2_nv_read_public_cmd(0x8100_0001).is_err());
+        // tpm2_nvdefine -a "authread|authwrite|no_da|nt=counter" with a 32-byte policy.
+        let attributes: u32 = 0x0204_0014;
+        let mut rsp = vec![0x80, 0x01, 0, 0, 0, 0, 0, 0, 0, 0];
+        rsp.extend_from_slice(&46u16.to_be_bytes());
+        rsp.extend_from_slice(&0x0150_0007u32.to_be_bytes());
+        rsp.extend_from_slice(&0x000Bu16.to_be_bytes());
+        rsp.extend_from_slice(&attributes.to_be_bytes());
+        rsp.extend_from_slice(&32u16.to_be_bytes());
+        rsp.extend_from_slice(&[0xEE; 32]);
+        rsp.extend_from_slice(&8u16.to_be_bytes());
+        rsp.extend_from_slice(&34u16.to_be_bytes());
+        rsp.extend_from_slice(&[0xAA; 34]);
+        let size = rsp.len() as u32;
+        rsp[2..6].copy_from_slice(&size.to_be_bytes());
+        let public = parse_tpm2_nv_read_public_rsp(&rsp).unwrap();
+        assert_eq!(
+            public,
+            Tpm2NvPublic {
+                nv_index: 0x0150_0007,
+                name_alg: 0x000B,
+                attributes,
+                data_size: 8,
+            }
+        );
+        assert_eq!(
+            attributes,
+            TPMA_NV_TPM_NT_COUNTER | TPMA_NV_AUTHREAD | TPMA_NV_AUTHWRITE | TPMA_NV_NO_DA
+        );
+        public.check_anchor_counter(0x0150_0007).unwrap();
+        assert!(public.check_anchor_counter(0x0150_0008).is_err());
+        assert!(!public.is_written());
+        // Every truncation and a wrong inner length are framing errors, not panics.
+        for cut in 0..rsp.len() {
+            let mut short = rsp[..cut].to_vec();
+            if cut >= 6 {
+                short[2..6].copy_from_slice(&(cut as u32).to_be_bytes());
+            }
+            assert!(parse_tpm2_nv_read_public_rsp(&short).is_err(), "cut {cut}");
+        }
+        let mut wrong = rsp.clone();
+        wrong[10..12].copy_from_slice(&45u16.to_be_bytes());
+        assert!(parse_tpm2_nv_read_public_rsp(&wrong).is_err());
     }
 
     #[derive(Clone)]
