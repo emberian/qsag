@@ -133,7 +133,7 @@ module dregg_captp_vat (
     wire [32:0] next_spend = {1'b0, vat_spend_used} + {1'b0, req_spend};
     wire spend_ok = (req_spend <= p_spend) && (next_spend <= {1'b0, p_spend});
 
-    wire vk_ok   = !p_guards[G_PIN_VK] || (check_is_zk ? (zk_root_valid && p_vk_zk_ok_q) : p_vk_pk_ok);
+    wire vk_ok   = (check_is_zk ? (zk_root_valid && p_vk_zk_ok_q) : (!p_guards[G_PIN_VK] || p_vk_pk_ok));
     wire nfc_ok  = !p_guards[G_NFC]    || (nfc_token_valid && (nfc_digest_bind == req_bind_lo));
     wire dist_ok = !p_guards[G_DIST]   || (dist_valid && !dist_timeout && (dist_cycles <= p_maxd));
 

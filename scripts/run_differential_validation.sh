@@ -97,7 +97,10 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
             fuzz_blind_vc_and_agg_decode \
             fuzz_fips205_and_fts_decode \
             fuzz_diff_hashes_and_ntt \
-            fuzz_quorum_frames; do
+            fuzz_quorum_frames \
+            fuzz_policy_tokens \
+            fuzz_cred_wire \
+            fuzz_hologram_and_subtree_decode; do
             echo "--- Fuzzing ${target} (${FUZZ_SECS}s) ---"
             CORPUS_DIR="${REPO_ROOT}/fuzz/corpus/${target}"
             ARTIFACT_DIR="${REPO_ROOT}/fuzz/artifacts/${target}"

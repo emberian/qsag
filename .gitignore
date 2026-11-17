@@ -1,8 +1,5 @@
 # Swarm scratch and worktree lanes
 scratch/
-# Temporary search/violation logs
-*.txt
-
 # Spice and Synth result/report directories
 hardware/gf180mcu/spice/results/
 hardware/gf180mcu/synth/reports/
