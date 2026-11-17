@@ -444,7 +444,16 @@ fn recv_checked<T: WireTransport>(
     round: u32,
     len: usize,
 ) -> Result<Vec<u8>, CnfPartyError> {
-    match transport.recv_frame(from, round) {
+    check_received(transport.recv_frame(from, round), from, round, len)
+}
+
+fn check_received(
+    received: Result<Vec<u8>, TransportError>,
+    from: usize,
+    round: u32,
+    len: usize,
+) -> Result<Vec<u8>, CnfPartyError> {
+    match received {
         Ok(mut payload) => {
             if payload.len() == len {
                 Ok(payload)
@@ -481,6 +490,15 @@ fn send_abort<T: WireTransport>(transport: &mut T, topo: &Topology) {
 ///
 /// A contribution opened last can depend on the others only through an abort, so each slot
 /// seed is uniform as long as one holder is honest; every slot has one.
+///
+/// During opening, an authenticated commitment mismatch takes precedence over link errors
+/// and peer aborts. A peer can queue its bad opening and disconnect before we send ours, or
+/// an honest peer can reject first and close its links. Neither schedule hides the queued
+/// evidence: we attempt every opening send, then inspect every peer in index order until a
+/// mismatch is found. After a transport failure this is abort-only diagnosis; the channel
+/// stays closed and no key can be returned, even if all received openings are valid. The
+/// accusation requires the actual authenticated opening, not a peer's claimed abort reason;
+/// a missing opening remains a transport/abort error, not evidence of a bad commitment.
 pub fn run_isolated_cnf_dkg<T: WireTransport>(
     cfg: &CnfRssConfig,
     key_len: usize,
@@ -596,6 +614,7 @@ fn dkg_inner<T: WireTransport>(
             coms[i][peer] = *chunk;
         }
     }
+    let mut opening_error = None;
     for peer in topo.peers() {
         let mut payload = Vec::new();
         for i in items_with(peer) {
@@ -604,11 +623,24 @@ fn dkg_inner<T: WireTransport>(
         }
         let sent = channel.send_frame(peer, ROUND_CNF_DKG_OPEN, &payload);
         wipe_bytes(&mut payload);
-        sent?;
+        if let Err(error) = sent {
+            opening_error.get_or_insert(CnfPartyError::Transport(error));
+        }
     }
     for peer in topo.peers() {
         let items = items_with(peer);
-        let mut raw = recv_checked(channel, peer, ROUND_CNF_DKG_OPEN, 64 * items.len())?;
+        let received = if opening_error.is_some() {
+            channel.recv_frame_for_abort(peer, ROUND_CNF_DKG_OPEN)
+        } else {
+            channel.recv_frame(peer, ROUND_CNF_DKG_OPEN)
+        };
+        let mut raw = match check_received(received, peer, ROUND_CNF_DKG_OPEN, 64 * items.len()) {
+            Ok(raw) => raw,
+            Err(error) => {
+                opening_error.get_or_insert(error);
+                continue;
+            }
+        };
         let mut ok = true;
         for (chunk, &i) in raw.as_chunks::<64>().0.iter().zip(&items) {
             let (salt, contribution) = chunk.split_at(32);
@@ -627,6 +659,9 @@ fn dkg_inner<T: WireTransport>(
         if !ok {
             return Err(CnfPartyError::OpeningRejected { party: peer });
         }
+    }
+    if let Some(error) = opening_error {
+        return Err(error);
     }
     let derive = |i: usize, out: &mut [u8]| {
         let mut xof = Cshake256Xof::new_shake256();
@@ -3982,23 +4017,78 @@ mod tests {
         p
     }
 
+    /// Hold honest opening sends until the corrupt sender has dropped all its links.
+    /// Unlike a sleep, this forces the schedule that used to hide the queued evidence.
+    struct DkgOpeningGate {
+        endpoint: InMemoryEndpoint,
+        before_open: Option<Arc<std::sync::Barrier>>,
+    }
+
+    impl WireTransport for DkgOpeningGate {
+        fn party(&self) -> usize {
+            self.endpoint.party()
+        }
+
+        fn parties(&self) -> usize {
+            self.endpoint.parties()
+        }
+
+        fn send_frame(
+            &mut self,
+            peer: usize,
+            round: u32,
+            payload: &[u8],
+        ) -> Result<(), TransportError> {
+            if round == ROUND_CNF_DKG_OPEN
+                && let Some(gate) = self.before_open.take()
+            {
+                gate.wait();
+            }
+            self.endpoint.send_frame(peer, round, payload)
+        }
+
+        fn recv_frame(&mut self, peer: usize, round: u32) -> Result<Vec<u8>, TransportError> {
+            self.endpoint.recv_frame(peer, round)
+        }
+
+        fn recv_authenticated_envelope(
+            &mut self,
+            peer: usize,
+            round: u32,
+        ) -> Result<Vec<u8>, TransportError> {
+            self.endpoint.recv_authenticated_envelope(peer, round)
+        }
+    }
+
     #[test]
     fn wire_dkg_corrupted_opening_aborts_with_opening_rejected() {
-        for (t, n) in [(2usize, 3usize), (3, 5)] {
+        let schedules = [(2usize, 3usize), (3, 5)].into_iter().flat_map(|(t, n)| {
+            (0..n).flat_map(move |p| [true, false].map(|forced| (t, n, p, forced)))
+        });
+        for (t, n, corrupt, force_disconnect, corrupt_opening) in
+            schedules.flat_map(|(t, n, p, forced)| [true, false].map(|bad| (t, n, p, forced, bad)))
+        {
             let cfg = CnfRssConfig::new(t, n).unwrap();
             let session = [0x9A + n as u8; 32];
             let link = |a: usize, b: usize| [(7 + a.min(b) * 16 + a.max(b)) as u8; 32];
-            let (endpoints, _) = InMemoryWireMesh::connect(n, session);
+            let (endpoints, stats) = InMemoryWireMesh::connect(n, session);
             let endpoints: Vec<_> = endpoints.into_iter().map(Some).collect();
+            let gate = force_disconnect.then(|| Arc::new(std::sync::Barrier::new(n)));
 
             let out = run_isolated_cnf_ceremony(endpoints, |p, endpoint| {
                 let mut endpoint = endpoint.take().unwrap();
                 endpoint.set_timeout(Duration::from_secs(10));
+                let endpoint = DkgOpeningGate {
+                    endpoint,
+                    before_open: if p == corrupt { None } else { gate.clone() },
+                };
                 let links: Vec<[u8; 32]> = (0..n).map(|q| link(p, q)).collect();
-                if p == 0 {
-                    // Corrupted party 0 possesses valid link keys, commits honestly in Round 1,
+                if p == corrupt {
+                    // The corrupted party possesses valid link keys, commits honestly in Round 1,
                     // then flips a contribution byte in Round 2 (`ROUND_CNF_DKG_OPEN`).
-                    let topo = Topology::new(&cfg, 0).unwrap();
+                    // The valid-opening control must abort without accusing this peer
+                    // of a commitment mismatch, even though it also disconnects early.
+                    let topo = Topology::new(&cfg, corrupt).unwrap();
                     let dkg_session = h32(b"cnf-party/dkg-session", &[&session]);
                     let mut chan =
                         MacSealedWireChannel::new_encrypted(endpoint, dkg_session, links).unwrap();
@@ -4013,7 +4103,7 @@ mod tests {
                         }
                     };
                     let my_coms: Vec<[u8; 32]> = (0..=held)
-                        .map(|i| dkg_commitment(&session, item_id(i), 0, &salt, &contrib))
+                        .map(|i| dkg_commitment(&session, item_id(i), corrupt, &salt, &contrib))
                         .collect();
                     for peer in topo.peers() {
                         let mut items = topo.common(peer);
@@ -4031,7 +4121,7 @@ mod tests {
                         let _ = recv_checked(&mut chan, peer, ROUND_CNF_DKG_COMMIT, 32 * items.len());
                     }
                     let mut bad_contrib = contrib;
-                    bad_contrib[0] ^= 0x01;
+                    bad_contrib[0] ^= u8::from(corrupt_opening);
                     for peer in topo.peers() {
                         let mut items = topo.common(peer);
                         items.push(held);
@@ -4042,18 +4132,40 @@ mod tests {
                         }
                         let _ = chan.send_frame(peer, ROUND_CNF_DKG_OPEN, &payload);
                     }
-                    Err(CnfPartyError::OpeningRejected { party: 0 })
+                    drop(chan);
+                    if let Some(gate) = &gate {
+                        gate.wait();
+                    }
+                    Err(CnfPartyError::OpeningRejected { party: corrupt })
                 } else {
                     let mut rng = SeedRng::new(&[0x80 + p as u8; 32], b"dkg-bad-open");
                     run_isolated_cnf_dkg(&cfg, 32, endpoint, session, links, &mut rng).map(|_| ())
                 }
             });
 
-            for (p, res) in out.iter().enumerate().skip(1) {
-                assert_eq!(
-                    *res,
-                    Err(CnfPartyError::OpeningRejected { party: 0 }),
-                    "honest party {p} must reject corrupted DKG opening from party 0"
+            for (p, res) in out.iter().enumerate().filter(|(p, _)| *p != corrupt) {
+                if corrupt_opening {
+                    assert_eq!(
+                        *res,
+                        Err(CnfPartyError::OpeningRejected { party: corrupt }),
+                        "honest party {p} must reject corrupted DKG opening from party {corrupt}; forced disconnect: {force_disconnect}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            res,
+                            Err(CnfPartyError::Transport(_) | CnfPartyError::PeerAborted { .. })
+                        ),
+                        "valid opening plus disconnect must fail without a false accusation: {res:?}"
+                    );
+                }
+            }
+            if force_disconnect {
+                assert!(
+                    stats
+                        .frames()
+                        .iter()
+                        .all(|f| f.round_tag != ROUND_CNF_DKG_CONFIRM)
                 );
             }
         }

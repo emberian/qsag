@@ -537,6 +537,24 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
         }
         Ok(payload)
     }
+
+    /// Irreversibly abort this channel and read one authenticated frame as failure evidence.
+    ///
+    /// A failed send must not suppress an already queued inbound commitment opening: send
+    /// and receive keys/sequences are independent. Ordinary I/O remains closed on every
+    /// link after this call, even when evidence is received successfully. Only an aborting
+    /// protocol may use the payload, to diagnose its failure rather than resume execution.
+    /// Authentication, routing, round, replay checks and receive-key erasure still apply;
+    /// neither a disconnect nor an unauthenticated accusation is evidence against a peer.
+    pub(crate) fn recv_frame_for_abort(
+        &mut self,
+        peer: usize,
+        round: u32,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.failed_links.fill(true);
+        let raw = self.transport.recv_authenticated_envelope(peer, round)?;
+        self.open(peer, round, &raw)
+    }
 }
 
 impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
@@ -1215,6 +1233,67 @@ mod tests {
     use super::*;
 
     const SESSION: [u8; 32] = [7; 32];
+
+    #[test]
+    fn abort_receive_preserves_authenticated_evidence_without_reopening_links() {
+        for encrypted in [false, true] {
+            for tamper in [false, true] {
+                let (endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+                let mut channels: Vec<_> = endpoints
+                    .into_iter()
+                    .map(|endpoint| {
+                        let mut channel =
+                            MacSealedWireChannel::new(endpoint, SESSION, vec![[3; 32]; 3]).unwrap();
+                        channel.encrypted = encrypted;
+                        channel
+                    })
+                    .collect();
+                let mut carol = channels.pop().unwrap();
+                let mut bob = channels.pop().unwrap();
+                let mut alice = channels.pop().unwrap();
+                let mut evidence = bob.seal(0, 7, b"opening").unwrap();
+                if tamper {
+                    *evidence.last_mut().unwrap() ^= 1;
+                }
+                bob.transport.send_frame(0, 7, &evidence).unwrap();
+                drop(bob);
+                carol.send_frame(0, 7, b"other opening").unwrap();
+                assert_eq!(
+                    alice.send_frame(1, 7, b"too late"),
+                    Err(TransportError::Closed { peer: 1 })
+                );
+                assert_eq!(
+                    alice.recv_frame(1, 7),
+                    Err(TransportError::Closed { peer: 1 })
+                );
+                let expected = if tamper {
+                    Err(TransportError::AuthenticationFailed)
+                } else {
+                    Ok(b"opening".to_vec())
+                };
+                assert_eq!(alice.recv_frame_for_abort(1, 7), expected);
+                assert_eq!(alice.sequencer.recv_seq[1], u64::from(!tamper));
+                // Even the unaffected peer is now abort-only; no successful receive can
+                // restore ordinary protocol I/O or make a failed session usable again.
+                assert_eq!(
+                    alice.send_frame(2, 7, b"resume"),
+                    Err(TransportError::Closed { peer: 2 })
+                );
+                assert_eq!(
+                    alice.recv_frame(2, 7),
+                    Err(TransportError::Closed { peer: 2 })
+                );
+                assert_eq!(
+                    alice.recv_frame_for_abort(2, 7),
+                    Ok(b"other opening".to_vec())
+                );
+                assert_eq!(
+                    alice.recv_frame(2, 7),
+                    Err(TransportError::Closed { peer: 2 })
+                );
+            }
+        }
+    }
 
     #[test]
     fn frame_layout_is_canonical_and_decoding_is_strict() {
