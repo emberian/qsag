@@ -1235,3 +1235,943 @@ fn column_table(shape: &Shape, eq_rx: &[E], combine: &[E], cells: usize) -> Vec<
 /// the assignment are overwritten here. `seed` must be uniform and secret: it determines the
 /// masks, the blinders, the mask polynomial and the leaf salts. What the proof guarantees is
 /// SECURITY.md section V2; the numbers are [`super::bounds::report`].
+pub fn prove(
+    shape: &Shape,
+    assignment: Vec<F>,
+    statement: &[u8],
+    profile: Profile,
+    seed: &[u8; 32],
+) -> Result<ZkHemV2Proof, ZkHemV2Error> {
+    prove_inner(shape, assignment, statement, profile, seed, true, None)
+}
+
+/// `claimed` replaces the public inputs bound into the transcript and `check` can be turned
+/// off (tests only: a prover whose committed cells differ from what it claims).
+fn prove_inner(
+    shape: &Shape,
+    mut assignment: Vec<F>,
+    statement: &[u8],
+    profile: Profile,
+    seed: &[u8; 32],
+    check: bool,
+    claimed: Option<&[F]>,
+) -> Result<ZkHemV2Proof, ZkHemV2Error> {
+    let Some(layout) = layout_of(shape) else {
+        qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+        return Err(ZkHemV2Error::UnsupportedRelation);
+    };
+    if assignment.len() != shape.num_vars {
+        qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+        return Err(ZkHemV2Error::Unsatisfied);
+    }
+    let phase = crate::profile::span("zkhem2_coins");
+    let mut coins = Coins::new(profile, shape, &layout, statement, &assignment, seed);
+    let mut secrets = sample_secrets(&mut coins, shape, &layout, &mut assignment);
+    drop(coins);
+    drop(phase);
+    let row_base = if check && assignment[0] != F::ONE {
+        None
+    } else {
+        row_tables(shape, &assignment, check)
+    };
+    let public_inputs =
+        claimed.map_or_else(|| assignment[1..=shape.num_public].to_vec(), <[F]>::to_vec);
+    qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+    let Some(row_base) = row_base else {
+        return Err(ZkHemV2Error::Unsatisfied);
+    };
+
+    // The variable cells the column sumcheck runs over, zero above `var_cells`.
+    let phase = crate::profile::span("zkhem2_monomial");
+    let var_cube = 1usize << layout.var_bits;
+    let mut z_var = vec![F::ZERO; var_cube];
+    let live = layout.var_cells.min(var_cube);
+    z_var[..live].copy_from_slice(&secrets.table[..live]);
+
+    let coeffs = hypercube_to_monomial_coeffs(&secrets.table);
+    qsag_asm::volatile_fill(&mut secrets.table, F::ZERO);
+    secrets.table = Vec::new();
+    drop(phase);
+    let committed = pcs::commit(
+        profile,
+        layout.log_cells,
+        &layout.schedule,
+        coeffs,
+        core::mem::take(&mut secrets.mask_poly),
+        &secrets.salt_seed,
+    );
+    let root = committed.root();
+    let mut tr = start_transcript(profile, shape, &layout, statement, &public_inputs, &root);
+
+    // Rounds 1 and 2: masked row sumcheck.
+    let tau = squeeze_point(&mut tr, b"TAU", shape.log_rows);
+    let row_mask_sum = secrets.row_mask.sum();
+    tr.absorb_fp5_slice(b"ROW_MASK_SUM", &[row_mask_sum]);
+    let rho1 = tr.squeeze_fp5_nonzero(b"RHO1");
+    let (row_rounds, rx, row_values) = row_sumcheck(
+        &mut tr,
+        &tau,
+        shape.num_sbox,
+        row_base,
+        &secrets.row_mask,
+        rho1,
+    );
+    // (G1), before the row values exist outside the prover.
+    if !row_challenge_good(shape, &rx) {
+        qsag_asm::volatile_fill(&mut z_var, F::ZERO);
+        return Err(ZkHemV2Error::MaskRankDeficient);
+    }
+
+    // Round 3: row values. Rounds 4 and 5: masked column sumcheck of `M(rx, y) Z_var(y)`.
+    tr.absorb_fp5_slice(b"ROW_VALUES", &row_values);
+    let combine = squeeze_point(&mut tr, b"COMBINE", 3);
+    let col_mask_sum = secrets.col_mask.sum();
+    tr.absorb_fp5_slice(b"COL_MASK_SUM", &[col_mask_sum]);
+    let rho2 = tr.squeeze_fp5_nonzero(b"RHO2");
+    let tm = column_table(shape, &eq_table(&rx), &combine, var_cube);
+    let (col_rounds, ry, matrix_at_point) =
+        column_sumcheck(&mut tr, tm, &z_var, &secrets.col_mask, rho2);
+    qsag_asm::volatile_fill(&mut z_var, F::ZERO);
+
+    // Round 6: one linear functional for everything that remains.
+    let lambda = tr.squeeze_fp5(b"LAMBDA");
+    let phase = crate::profile::span("zkhem2_kernel");
+    let weights = claim_cell_weights(&ClaimInputs {
+        layout: &layout,
+        log_rows: shape.log_rows,
+        num_public: shape.num_public,
+        rx: &rx,
+        ry: &ry,
+        lambda,
+        rho2,
+        matrix_at_point,
+    });
+    let kernel = cell_weights_to_kernel(weights, 1 << layout.log_cells);
+    let table_coeffs = committed.coeffs();
+    let [value] = par_sum(kernel.len(), |range| {
+        [range.fold(E::ZERO, |acc, i| acc + kernel[i].mul_base(table_coeffs[i]))]
+    });
+    drop(phase);
+
+    // Rounds 7 on.
+    let opening = pcs::open(&committed, kernel, value, &mut tr)
+        .map_err(|pcs::MaskRankDeficient| ZkHemV2Error::MaskRankDeficient)?;
+    Ok(ZkHemV2Proof {
+        profile,
+        log_cells: layout.log_cells as u8,
+        root,
+        row_mask_sum,
+        row_rounds,
+        row_values,
+        col_mask_sum,
+        col_rounds,
+        opening,
+    })
+}
+
+// ============================================================================
+// Verifier
+// ============================================================================
+
+/// Replays one masked sumcheck; returns the final claim and the challenge point.
+fn verify_sumcheck(
+    tr: &mut Transcript,
+    label: &[u8],
+    rounds: &[Vec<E>],
+    degree: usize,
+    mut claim: E,
+) -> Option<(E, Vec<E>)> {
+    let mut point = Vec::with_capacity(rounds.len());
+    for round in rounds {
+        if round.len() != degree + 1 {
+            return None;
+        }
+        let at_one = round.iter().fold(E::ZERO, |acc, &c| acc + c);
+        if round[0] + at_one != claim {
+            return None;
+        }
+        tr.absorb_fp5_slice(label, round);
+        let c = tr.squeeze_fp5(label);
+        claim = eval_poly(round, c);
+        point.push(c);
+    }
+    Some((claim, point))
+}
+
+/// `sum_i eq(rx, i) (r_a A + r_b B + r_c C)[i, .]` evaluated at `ry` on the variable cells.
+fn matrix_at(shape: &Shape, rx: &[E], ry: &[E], combine: &[E]) -> E {
+    let eq_rx = eq_table(rx);
+    let eq_ry = eq_table(ry);
+    let cols = &eq_ry[..shape.num_vars];
+    let [total] = par_sum(eq_rx.len(), |range| {
+        let mut acc = E::ZERO;
+        for i in range {
+            let mut row = E::ZERO;
+            for (m, &r) in [&shape.a, &shape.b, &shape.c].into_iter().zip(combine) {
+                let inner = m
+                    .row(i)
+                    .fold(E::ZERO, |acc, (col, val)| acc + cols[col].mul_base(val));
+                row += r * inner;
+            }
+            acc += eq_rx[i] * row;
+        }
+        [acc]
+    });
+    total
+}
+
+/// Verify a zk-Hem v2 proof for `shape` with the given public inputs, bound to `statement`,
+/// under `profile`.
+pub fn verify(
+    shape: &Shape,
+    public_inputs: &[F],
+    statement: &[u8],
+    profile: Profile,
+    proof: &ZkHemV2Proof,
+) -> bool {
+    let Some(layout) = layout_of(shape) else {
+        return false;
+    };
+    if proof.profile != profile
+        || usize::from(proof.log_cells) != layout.log_cells
+        || proof.row_rounds.len() != shape.log_rows
+        || proof.col_rounds.len() != layout.var_bits
+        || public_inputs.len() != shape.num_public
+    {
+        return false;
+    }
+    let mut tr = start_transcript(
+        profile,
+        shape,
+        &layout,
+        statement,
+        public_inputs,
+        &proof.root,
+    );
+
+    let tau = squeeze_point(&mut tr, b"TAU", shape.log_rows);
+    tr.absorb_fp5_slice(b"ROW_MASK_SUM", &[proof.row_mask_sum]);
+    let rho1 = tr.squeeze_fp5_nonzero(b"RHO1");
+    let Some((row_final, rx)) = verify_sumcheck(
+        &mut tr,
+        b"ROW_ROUND",
+        &proof.row_rounds,
+        ROW_DEGREE,
+        rho1 * proof.row_mask_sum,
+    ) else {
+        return false;
+    };
+    let [va, vb, vc] = proof.row_values;
+    tr.absorb_fp5_slice(b"ROW_VALUES", &proof.row_values);
+    let gate = eq_eval(&tau, &rx) * row_gate(prefix_indicator(&rx, shape.num_sbox), va, vb, vc);
+    // The value the committed row mask must take at `rx`.
+    let row_mask_at_point = (row_final - gate) * rho1.inv();
+
+    let combine = squeeze_point(&mut tr, b"COMBINE", 3);
+    tr.absorb_fp5_slice(b"COL_MASK_SUM", &[proof.col_mask_sum]);
+    let rho2 = tr.squeeze_fp5_nonzero(b"RHO2");
+    let col_claim = combine[0] * va + combine[1] * vb + combine[2] * vc;
+    let Some((col_final, ry)) = verify_sumcheck(
+        &mut tr,
+        b"COL_ROUND",
+        &proof.col_rounds,
+        COL_DEGREE,
+        col_claim + rho2 * proof.col_mask_sum,
+    ) else {
+        return false;
+    };
+
+    let lambda = tr.squeeze_fp5(b"LAMBDA");
+    let terms = claim_terms(&ClaimInputs {
+        layout: &layout,
+        log_rows: shape.log_rows,
+        num_public: shape.num_public,
+        rx: &rx,
+        ry: &ry,
+        lambda,
+        rho2,
+        matrix_at_point: matrix_at(shape, &rx, &ry, &combine),
+    });
+    let mut values = vec![
+        proof.row_mask_sum,
+        proof.col_mask_sum,
+        row_mask_at_point,
+        col_final,
+        E::ONE,
+    ];
+    values.extend(public_inputs.iter().map(|&v| E::from_base(v)));
+    let value = batched_value(lambda, &values);
+    pcs::verify(
+        profile,
+        &proof.root,
+        layout.log_cells,
+        &layout.schedule,
+        &terms,
+        value,
+        &proof.opening,
+        &mut tr,
+    )
+}
+
+const _: () = assert!(PAD_VARS == LIMBS);
+const _: () = assert!(ROW_DEGREE < 1 << ROW_MASK_BITS && COL_DEGREE < 1 << COL_MASK_BITS);
+
+#[cfg(test)]
+mod tests {
+    use super::super::bounds;
+    use super::super::params::{MAX_LOG_CELLS, MIN_LOG_CELLS, schedule};
+    use super::*;
+    use crate::pcs::WhirSecurityRegime;
+    use crate::zk_hem::protocol as v1;
+    use crate::zk_hem::relation::{ConstraintSystem, Lc};
+
+    fn f(x: u64) -> F {
+        F::from_u64_reduced(x)
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn fp5(&mut self) -> E {
+            Fp5(core::array::from_fn(|_| f(self.next_u64())))
+        }
+    }
+
+    /// `y = x^7 * w`, `w` boolean-free witness, plus a few rows of each kind; `x`, `y`
+    /// public. `extra` adds witness-only rows and variables.
+    fn relation(x: u64, w: u64, constant: u64, extra: usize) -> ConstraintSystem {
+        let mut cs = ConstraintSystem::new();
+        let xv = cs.public_input(f(x));
+        let x7 = f(x).pow(7);
+        let yv = cs.public_input(x7 * f(w) + f(constant));
+        let wv = cs.alloc(f(w));
+        let s = cs.sbox7(&xv.into());
+        let prod = cs.mul(&s.into(), &wv.into());
+        cs.enforce_equal(&Lc::from(prod).plus_const(f(constant)), &yv.into());
+        let mut acc: Lc = wv.into();
+        for i in 0..extra {
+            let t = cs.sbox7(&acc);
+            let u = cs.mul(&t.into(), &acc);
+            acc = Lc::from(u).plus_const(f(i as u64 + 1));
+        }
+        cs
+    }
+
+    fn fixture(extra: usize) -> (Shape, Vec<F>) {
+        relation(3, 5, 11, extra).finish_v2()
+    }
+
+    const SEED: [u8; 32] = [7u8; 32];
+    const STATEMENT: &[u8] = b"v2 statement";
+
+    fn publics(shape: &Shape, z: &[F]) -> Vec<F> {
+        z[1..=shape.num_public].to_vec()
+    }
+
+    #[test]
+    fn honest_roundtrip_both_profiles_and_serialization() {
+        let (shape, z) = fixture(40);
+        assert!(shape.is_satisfied(&z));
+        let layout = layout_of(&shape).unwrap();
+        for profile in Profile::ALL {
+            let proof = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+            assert!(verify(
+                &shape,
+                &publics(&shape, &z),
+                STATEMENT,
+                profile,
+                &proof
+            ));
+            let bytes = proof.to_bytes();
+            assert_eq!(&bytes[..8], b"QSAGZKH2");
+            assert_eq!(bytes[8], profile.wire_tag());
+            assert_eq!(
+                ZkHemV2Proof::from_bytes(&bytes, &shape),
+                Some(proof.clone())
+            );
+            // The calculator's bound covers the serialized proof.
+            let report = bounds::report(
+                profile,
+                ShapeSize {
+                    log_rows: shape.log_rows,
+                    num_vars: shape.num_vars,
+                    num_public: shape.num_public,
+                },
+            )
+            .unwrap();
+            assert_eq!(report.log_cells, layout.log_cells);
+            assert!(
+                bytes.len() <= report.proof_bytes,
+                "{} bytes, bound {}",
+                bytes.len(),
+                report.proof_bytes
+            );
+            // Canonical decoding.
+            assert!(ZkHemV2Proof::from_bytes(&bytes[..bytes.len() - 1], &shape).is_none());
+            let mut longer = bytes.clone();
+            longer.push(0);
+            assert!(ZkHemV2Proof::from_bytes(&longer, &shape).is_none());
+            for (at, value) in [(0usize, b'X'), (8, 4), (8, 18), (9, 17)] {
+                let mut bad = bytes.clone();
+                bad[at] = value;
+                assert!(
+                    ZkHemV2Proof::from_bytes(&bad, &shape).is_none(),
+                    "byte {at}"
+                );
+            }
+            let mut bad = bytes.clone();
+            bad[60..68].copy_from_slice(&crate::field::GOLDILOCKS_PRIME.to_le_bytes());
+            assert!(ZkHemV2Proof::from_bytes(&bad, &shape).is_none());
+        }
+        // A wrong witness is refused, and a proof made without the check does not verify.
+        let mut bad = z.clone();
+        bad[3] += F::ONE;
+        assert_eq!(
+            prove(
+                &shape,
+                bad.clone(),
+                STATEMENT,
+                Profile::CshakeJohnson400,
+                &SEED
+            ),
+            Err(ZkHemV2Error::Unsatisfied)
+        );
+        let forged = prove_inner(
+            &shape,
+            bad,
+            STATEMENT,
+            Profile::CshakeJohnson400,
+            &SEED,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(!verify(
+            &shape,
+            &publics(&shape, &z),
+            STATEMENT,
+            Profile::CshakeJohnson400,
+            &forged
+        ));
+    }
+
+    #[test]
+    fn every_proof_field_is_bound() {
+        let (shape, z) = fixture(40);
+        let profile = Profile::TurboShakeJohnson400;
+        let proof = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+        let public = publics(&shape, &z);
+        assert!(verify(&shape, &public, STATEMENT, profile, &proof));
+        let bump = Fp5::X.pow(2);
+        let last_stage = proof.opening.stages.len() - 1;
+        type Edit = alloc::boxed::Box<dyn Fn(&mut ZkHemV2Proof)>;
+        let edits: Vec<(&str, Edit)> = vec![
+            ("root", alloc::boxed::Box::new(|p| p.root[10] ^= 1)),
+            (
+                "row mask sum",
+                alloc::boxed::Box::new(move |p| p.row_mask_sum += bump),
+            ),
+            (
+                "row round 0",
+                alloc::boxed::Box::new(move |p| p.row_rounds[0][9] += bump),
+            ),
+            (
+                "row round last",
+                alloc::boxed::Box::new(move |p| {
+                    let n = p.row_rounds.len();
+                    p.row_rounds[n - 1][0] += bump
+                }),
+            ),
+            (
+                "row value a",
+                alloc::boxed::Box::new(move |p| p.row_values[0] += bump),
+            ),
+            (
+                "row value b",
+                alloc::boxed::Box::new(move |p| p.row_values[1] += bump),
+            ),
+            (
+                "row value c",
+                alloc::boxed::Box::new(move |p| p.row_values[2] += bump),
+            ),
+            (
+                "col mask sum",
+                alloc::boxed::Box::new(move |p| p.col_mask_sum += bump),
+            ),
+            (
+                "col round",
+                alloc::boxed::Box::new(move |p| p.col_rounds[1][2] += bump),
+            ),
+            (
+                "a_0",
+                alloc::boxed::Box::new(move |p| p.opening.mask_evals[0] += bump),
+            ),
+            (
+                "a_4",
+                alloc::boxed::Box::new(move |p| p.opening.mask_evals[4] += bump),
+            ),
+            (
+                "sigma_even",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_folds[0][0] += bump),
+            ),
+            (
+                "tau_01",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_folds[0][1] += bump),
+            ),
+            (
+                "tau_10",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_folds[0][2] += bump),
+            ),
+            (
+                "c_F",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_folds[0][3] += bump),
+            ),
+            (
+                "c_G",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_folds[0][4] += bump),
+            ),
+            (
+                "mu",
+                alloc::boxed::Box::new(move |p| p.opening.mask_claim += bump),
+            ),
+            (
+                "stage-1 root",
+                alloc::boxed::Box::new(|p| p.opening.stages[0].root[0] ^= 1),
+            ),
+            (
+                "ood value",
+                alloc::boxed::Box::new(move |p| p.opening.stages[0].ood[0] += bump),
+            ),
+            (
+                "Z symbol",
+                alloc::boxed::Box::new(|p| p.opening.stage0_query.leaves[5].z[1] += F::ONE),
+            ),
+            (
+                "R symbol",
+                alloc::boxed::Box::new(move |p| p.opening.stage0_query.leaves[5].r += bump),
+            ),
+            (
+                "salt",
+                alloc::boxed::Box::new(|p| p.opening.stage0_query.leaves[0].salt[0] ^= 1),
+            ),
+            (
+                "sibling",
+                alloc::boxed::Box::new(|p| p.opening.stage0_query.siblings[3][1] ^= 1),
+            ),
+            (
+                "later symbol",
+                alloc::boxed::Box::new(move |p| {
+                    p.opening.stages[last_stage].query.leaves[0][0] += bump
+                }),
+            ),
+            (
+                "terminal coefficient",
+                alloc::boxed::Box::new(move |p| p.opening.final_coeffs[1] += bump),
+            ),
+        ];
+        for (name, edit) in &edits {
+            let mut bad = proof.clone();
+            edit(&mut bad);
+            assert_ne!(bad, proof, "{name}: the edit changed nothing");
+            assert!(
+                !verify(&shape, &public, STATEMENT, profile, &bad),
+                "accepted a proof with a changed {name}"
+            );
+        }
+        // One flipped bit anywhere in a sample of byte positions of the serialized proof.
+        let bytes = proof.to_bytes();
+        for at in (10..bytes.len()).step_by(bytes.len() / 97) {
+            let mut bad = bytes.clone();
+            bad[at] ^= 0x10;
+            let accepted = ZkHemV2Proof::from_bytes(&bad, &shape)
+                .is_some_and(|p| verify(&shape, &public, STATEMENT, profile, &p));
+            assert!(!accepted, "byte {at}");
+        }
+    }
+
+    #[test]
+    fn statement_relation_public_input_and_profile_are_bound() {
+        let (shape, z) = fixture(40);
+        let profile = Profile::CshakeJohnson400;
+        let proof = prove(&shape, z.clone(), STATEMENT, profile, &SEED).unwrap();
+        let public = publics(&shape, &z);
+        assert!(verify(&shape, &public, STATEMENT, profile, &proof));
+        assert!(!verify(&shape, &public, b"v2 statemenu", profile, &proof));
+        assert!(!verify(
+            &shape,
+            &public,
+            STATEMENT,
+            Profile::TurboShakeJohnson400,
+            &proof
+        ));
+        let mut retagged = proof.clone();
+        retagged.profile = Profile::TurboShakeJohnson400;
+        assert!(!verify(
+            &shape,
+            &public,
+            STATEMENT,
+            Profile::TurboShakeJohnson400,
+            &retagged
+        ));
+        for i in 0..public.len() {
+            let mut other = public.clone();
+            other[i] += F::ONE;
+            assert!(!verify(&shape, &other, STATEMENT, profile, &proof));
+        }
+        assert!(!verify(&shape, &public[..1], STATEMENT, profile, &proof));
+        // The same sizes, another constant in one row.
+        let (other, _) = relation(3, 5, 12, 40).finish_v2();
+        assert_eq!(
+            (other.log_rows, other.num_vars, other.num_public),
+            (shape.log_rows, shape.num_vars, shape.num_public)
+        );
+        assert_ne!(other.digest(), shape.digest());
+        assert!(!verify(&other, &public, STATEMENT, profile, &proof));
+        // A prover that commits to one public value and claims another.
+        let mut claimed = public.clone();
+        claimed[1] += F::ONE;
+        let lying = prove_inner(
+            &shape,
+            z.clone(),
+            STATEMENT,
+            profile,
+            &SEED,
+            true,
+            Some(&claimed),
+        )
+        .unwrap();
+        assert!(!verify(&shape, &claimed, STATEMENT, profile, &lying));
+        assert!(!verify(&shape, &public, STATEMENT, profile, &lying));
+    }
+
+    #[test]
+    fn coins_do_not_repeat_across_profiles() {
+        let (shape, z) = fixture(40);
+        let a = prove(
+            &shape,
+            z.clone(),
+            STATEMENT,
+            Profile::CshakeJohnson400,
+            &SEED,
+        )
+        .unwrap();
+        let b = prove(
+            &shape,
+            z.clone(),
+            STATEMENT,
+            Profile::TurboShakeJohnson400,
+            &SEED,
+        )
+        .unwrap();
+        assert_ne!(a.row_mask_sum, b.row_mask_sum);
+        assert_ne!(a.col_mask_sum, b.col_mask_sum);
+        assert_ne!(a.root, b.root);
+        // Deterministic for a fixed seed; a new seed, statement or witness changes the coins.
+        let again = prove(
+            &shape,
+            z.clone(),
+            STATEMENT,
+            Profile::CshakeJohnson400,
+            &SEED,
+        )
+        .unwrap();
+        assert_eq!(a, again);
+        let c = prove(
+            &shape,
+            z.clone(),
+            STATEMENT,
+            Profile::CshakeJohnson400,
+            &[8u8; 32],
+        )
+        .unwrap();
+        assert_ne!(a.row_mask_sum, c.row_mask_sum);
+        let d = prove(
+            &shape,
+            z.clone(),
+            b"other",
+            Profile::CshakeJohnson400,
+            &SEED,
+        )
+        .unwrap();
+        assert_ne!(a.row_mask_sum, d.row_mask_sum);
+        let (shape_w, z_w) = relation(3, 6, 11, 40).finish_v2();
+        let (shape_w0, _) = relation(3, 5, 11, 40).finish_v2();
+        assert_eq!(shape_w0.digest(), shape.digest());
+        let e = prove(&shape_w, z_w, STATEMENT, Profile::CshakeJohnson400, &SEED).unwrap();
+        assert_ne!(a.row_mask_sum, e.row_mask_sum);
+        // Two layouts.
+        let (big, z_big) = fixture(300);
+        assert_ne!(layout_of(&big).unwrap(), layout_of(&shape).unwrap());
+        let g = prove(&big, z_big, STATEMENT, Profile::CshakeJohnson400, &SEED).unwrap();
+        assert_ne!(a.row_mask_sum, g.row_mask_sum);
+        assert_ne!(a.root, g.root);
+        // v1 with the same seed, statement and synthesis.
+        let (shape1, z1) = relation(3, 5, 11, 40).finish();
+        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let p1 = v1::prove(&shape1, z1, STATEMENT, regime, &SEED).unwrap();
+        assert_ne!(
+            p1.row_mask_sum.to_limbs()[..],
+            a.row_mask_sum.to_limbs()[..4]
+        );
+        assert_ne!(p1.commitment.root[..], a.root[..32]);
+    }
+
+    #[test]
+    fn blinders_match_the_opened_view_and_are_fresh_per_seed() {
+        // b = opened symbols + 25 * 2^s at every accepted size.
+        for log_cells in MIN_LOG_CELLS..=MAX_LOG_CELLS {
+            let sched = schedule(log_cells).unwrap();
+            let dims = pcs::stage_dims(log_cells, &sched).unwrap();
+            let d0 = dims[0];
+            let layout = Layout::new(ShapeSize {
+                log_rows: log_cells - 1,
+                num_vars: 1 << (log_cells - 2),
+                num_public: 1,
+            })
+            .unwrap();
+            if layout.log_cells == log_cells {
+                assert_eq!(
+                    layout.blind_cells,
+                    d0.queries * d0.arity() + 25 * d0.arity(),
+                    "2^{log_cells} cells"
+                );
+                assert_eq!(layout.blind_cells % d0.arity(), 0);
+                assert_eq!(((1usize << log_cells) - layout.blind_cells) % d0.arity(), 0);
+            }
+        }
+        let (shape, z) = fixture(40);
+        let layout = layout_of(&shape).unwrap();
+        let d0 = pcs::stage_dims(layout.log_cells, &layout.schedule).unwrap()[0];
+        assert_eq!(layout.blind_cells, (d0.queries + 25) * d0.arity());
+        let draw = |seed: &[u8; 32]| {
+            let mut a = z.clone();
+            let mut coins = Coins::new(
+                Profile::CshakeJohnson400,
+                &shape,
+                &layout,
+                STATEMENT,
+                &a,
+                seed,
+            );
+            let s = sample_secrets(&mut coins, &shape, &layout, &mut a);
+            let cells = s.table.len();
+            (
+                s.table[cells - layout.blind_cells..].to_vec(),
+                s.mask_poly.clone(),
+                s.salt_seed,
+                a[shape.mask_var_base..].to_vec(),
+                s.table[layout.mask_base..cells - layout.blind_cells].to_vec(),
+            )
+        };
+        let (b1, r1, s1, m1, masks1) = draw(&SEED);
+        let (b2, r2, s2, m2, masks2) = draw(&[9u8; 32]);
+        assert_eq!(draw(&SEED).0, b1);
+        assert_eq!(b1.len(), layout.blind_cells);
+        assert_eq!(r1.len(), (1 << (layout.log_cells - d0.step_vars)) + 2);
+        assert_eq!(m1.len(), 15);
+        // No coordinate repeats between the two seeds.
+        assert!(b1.iter().zip(&b2).all(|(x, y)| x != y));
+        assert!(r1.iter().zip(&r2).all(|(x, y)| x != y));
+        assert!(m1.iter().zip(&m2).all(|(x, y)| x != y));
+        assert_ne!(s1, s2);
+        assert_ne!(masks1, masks2);
+        // The blinders are not constant and the cells between the masks and the blinders are
+        // zero.
+        assert!(b1.windows(2).all(|w| w[0] != w[1]));
+        let mask_end = layout.col_mask_block(shape.log_rows, layout.var_bits, 0) - layout.mask_base;
+        assert!(masks1[mask_end..].iter().all(|v| v.is_zero()));
+        assert!(masks1[..mask_end].iter().filter(|v| v.is_zero()).count() < 8);
+    }
+
+    #[test]
+    fn pad_basis_exists() {
+        // The witness of SECURITY.md V2.1: (X, X^2, X^4).
+        let x = Fp5::X;
+        let det = pad_basis_det(&[x, x.pow(2), x.pow(4)]);
+        assert!(det == f(16) || det == -f(16), "{det:?}");
+        let mut rng = Rng(3);
+        for _ in 0..50 {
+            let rx: Vec<E> = (0..5).map(|_| rng.fp5()).collect();
+            assert!(super::pad_basis_exists(&rx));
+        }
+        // Degenerate challenges: base-field coordinates, or a repeated weight.
+        let base: Vec<E> = (0..5).map(|i| E::from_u64(i + 2)).collect();
+        assert!(!super::pad_basis_exists(&base));
+        let mut rx: Vec<E> = (0..5).map(|_| rng.fp5()).collect();
+        rx[0] = E::ZERO;
+        assert!(!super::pad_basis_exists(&rx));
+        rx[0] = rng.fp5();
+        rx[2] = E::ONE;
+        assert!(!super::pad_basis_exists(&rx));
+    }
+
+    #[test]
+    fn row_challenge_good_rejects_zero_corner_factors() {
+        let (shape, _) = fixture(40);
+        assert_eq!(shape.mask_row_base(2) + 8, shape.num_rows());
+        let mut rng = Rng(4);
+        let rx: Vec<E> = (0..shape.log_rows).map(|_| rng.fp5()).collect();
+        assert!(row_challenge_good(&shape, &rx));
+        // The corners sit at the top of the row cube: every high coordinate is 1 there, except
+        // the two bits that number the corners.
+        for j in 3..shape.log_rows {
+            let mut bad = rx.clone();
+            bad[j] = E::ZERO;
+            assert!(!row_challenge_good(&shape, &bad), "coordinate {j}");
+        }
+        let mut bad = rx.clone();
+        bad[3] = E::ONE;
+        assert!(!row_challenge_good(&shape, &bad));
+        let mut bad = rx.clone();
+        bad[1] = bad[0];
+        bad[2] = bad[0];
+        assert_eq!(
+            super::pad_basis_exists(&bad),
+            row_challenge_good(&shape, &bad)
+        );
+    }
+
+    #[test]
+    fn cell_weights_and_tensor_terms_are_the_same_functional() {
+        let (shape, _) = fixture(300);
+        let layout = layout_of(&shape).unwrap();
+        let mut rng = Rng(5);
+        let rx: Vec<E> = (0..shape.log_rows).map(|_| rng.fp5()).collect();
+        let ry: Vec<E> = (0..layout.var_bits).map(|_| rng.fp5()).collect();
+        let inp = ClaimInputs {
+            layout: &layout,
+            log_rows: shape.log_rows,
+            num_public: shape.num_public,
+            rx: &rx,
+            ry: &ry,
+            lambda: rng.fp5(),
+            rho2: rng.fp5(),
+            matrix_at_point: rng.fp5(),
+        };
+        let weights = claim_cell_weights(&inp);
+        let terms = claim_terms(&inp);
+        assert!(terms.len() <= 15 * (shape.log_rows + layout.var_bits) + 16);
+        // A random table over the cells the functional may read.
+        let cells = 1usize << layout.log_cells;
+        let table: Vec<F> = (0..cells).map(|_| f(rng.next_u64())).collect();
+        let by_cells = weights
+            .iter()
+            .zip(&table)
+            .fold(E::ZERO, |acc, (&w, &z)| acc + w.mul_base(z));
+        // Each tensor term is a multilinear evaluation of the table.
+        let eval = |point: &[E]| {
+            let eq = eq_table(point);
+            eq.iter()
+                .zip(&table)
+                .fold(E::ZERO, |acc, (&e, &z)| acc + e.mul_base(z))
+        };
+        let by_terms = terms
+            .iter()
+            .fold(E::ZERO, |acc, t| acc + t.weight * eval(&t.point));
+        assert_eq!(by_cells, by_terms);
+        // The kernel on monomial coefficients gives the same value and reads no blinder.
+        let kernel = cell_weights_to_kernel(weights.clone(), cells);
+        let coeffs = hypercube_to_monomial_coeffs(&table);
+        let by_kernel = kernel
+            .iter()
+            .zip(&coeffs)
+            .fold(E::ZERO, |acc, (&k, &c)| acc + k.mul_base(c));
+        assert_eq!(by_kernel, by_cells);
+        let mask_end = layout.col_mask_block(shape.log_rows, layout.var_bits, 0);
+        assert!(kernel[mask_end..].iter().all(|k| k.is_zero()));
+        assert!(mask_end <= cells - layout.blind_cells);
+        // It reads the variables below `var_cells` and the masks: a cell between the
+        // variables and `var_cells` has weight from the terminal term only when inside the cube.
+        assert!(!weights[0].is_zero() && !weights[layout.mask_base].is_zero());
+        // Changing one mask cell or one variable cell changes the value.
+        for cell in [
+            1usize,
+            shape.num_vars - 1,
+            layout.mask_base + 3,
+            mask_end - 1,
+        ] {
+            assert!(!weights[cell].is_zero(), "cell {cell}");
+        }
+    }
+
+    #[test]
+    fn sumcheck_mask_sums_and_rounds_are_consistent() {
+        let (shape, z) = fixture(40);
+        let layout = layout_of(&shape).unwrap();
+        let mut coins = Coins::new(
+            Profile::CshakeJohnson400,
+            &shape,
+            &layout,
+            STATEMENT,
+            &z,
+            &SEED,
+        );
+        let mask = Mask::sample(&mut coins, 4, 3);
+        // Brute force over the cube.
+        let brute: E = (0..16usize)
+            .map(|x| {
+                let point: Vec<E> = (0..4).map(|j| E::from_u64(((x >> j) & 1) as u64)).collect();
+                mask.eval(&point)
+            })
+            .fold(E::ZERO, |a, b| a + b);
+        assert_eq!(mask.sum(), brute);
+        let mut rng = Rng(6);
+        let mut prefix = Vec::new();
+        let mut claim = mask.sum();
+        for _ in 0..4 {
+            let round = mask.round_poly(&prefix);
+            let at_one = round.iter().fold(E::ZERO, |a, &c| a + c);
+            assert_eq!(round[0] + at_one, claim);
+            let c = rng.fp5();
+            claim = eval_poly(&round, c);
+            prefix.push(c);
+        }
+        assert_eq!(claim, mask.eval(&prefix));
+        // Interpolation on 0..d.
+        let poly: Vec<E> = (0..9).map(|_| rng.fp5()).collect();
+        let evals: Vec<E> = (0..9).map(|i| eval_poly(&poly, E::from_u64(i))).collect();
+        assert_eq!(evals_to_coeffs(&evals), poly);
+    }
+
+    #[test]
+    fn v1_and_v2_reject_each_other() {
+        let (shape2, z2) = fixture(40);
+        let (shape1, z1) = relation(3, 5, 11, 40).finish();
+        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let profile = Profile::CshakeJohnson400;
+        assert_eq!(shape1.closing(), Closing::V1);
+        assert_eq!(shape2.closing(), Closing::V2);
+        assert_ne!(shape1.digest(), shape2.digest());
+        assert_eq!(shape2.num_vars, shape1.num_vars + 3);
+
+        let p1 = v1::prove(&shape1, z1.clone(), STATEMENT, regime, &SEED).unwrap();
+        let public1 = z1[1..=shape1.num_public].to_vec();
+        assert!(v1::verify(&shape1, &public1, STATEMENT, regime, &p1));
+        let bytes1 = p1.to_bytes();
+        let p2 = prove(&shape2, z2.clone(), STATEMENT, profile, &SEED).unwrap();
+        let bytes2 = p2.to_bytes();
+
+        // v1 bytes are not a v2 proof, for either shape.
+        assert!(ZkHemV2Proof::from_bytes(&bytes1, &shape2).is_none());
+        assert!(ZkHemV2Proof::from_bytes(&bytes1, &shape1).is_none());
+        // v2 bytes are not a v1 proof, for either shape.
+        assert!(v1::ZkHemProof::from_bytes(&bytes2, &shape1, regime).is_none());
+        assert!(v1::ZkHemProof::from_bytes(&bytes2, &shape2, regime).is_none());
+        // v2 refuses a v1 relation.
+        assert!(layout_of(&shape1).is_none());
+        assert_eq!(
+            prove(&shape1, z1, STATEMENT, profile, &SEED),
+            Err(ZkHemV2Error::UnsupportedRelation)
+        );
+        assert!(!verify(&shape1, &public1, STATEMENT, profile, &p2));
+        // A v1 proof of the v1 relation does not verify against the v2 relation.
+        assert!(!v1::verify(&shape2, &public1, STATEMENT, regime, &p1));
+    }
+}

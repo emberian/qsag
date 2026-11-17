@@ -157,7 +157,7 @@ impl BlindVcStatement {
     }
 
     /// Transcript binding of the public values and the verifier's fresh `context`.
-    fn statement_bytes(&self, context: &[u8]) -> Vec<u8> {
+    pub(crate) fn statement_bytes(&self, context: &[u8]) -> Vec<u8> {
         let mut out = b"QSAG.ZKHEM.BLINDVC/v1".to_vec();
         for n in [
             self.arity as u64,
@@ -187,7 +187,18 @@ impl BlindVcStatement {
 
     /// The relation, with the assignment for `witness`. Its structure depends only on
     /// `arity` and the disclosed index set.
-    fn synthesize(&self, witness: &BlindVcWitness) -> (Shape, Vec<F>) {
+    pub(crate) fn synthesize(&self, witness: &BlindVcWitness) -> (Shape, Vec<F>) {
+        self.constraints(witness).finish()
+    }
+
+    /// [`Self::synthesize`] with the closing of zk-Hem v2 (`ConstraintSystem::finish_v2`):
+    /// the same rows and variables, for `zk_hem::v2::protocol`.
+    pub fn synthesize_v2(&self, witness: &BlindVcWitness) -> (Shape, Vec<F>) {
+        self.constraints(witness).finish_v2()
+    }
+
+    /// The rows and variables of the relation, before it is closed.
+    fn constraints(&self, witness: &BlindVcWitness) -> ConstraintSystem {
         let mut cs = ConstraintSystem::new();
         let attrs: Vec<Lc> = (0..self.arity.max(6))
             .map(|i| {
@@ -249,7 +260,7 @@ impl BlindVcStatement {
             &core::array::from_fn(|j| scope_state[j].clone()),
             &self.scope_tag,
         );
-        cs.finish()
+        cs
     }
 
     /// The public relation. `None` for a malformed statement.

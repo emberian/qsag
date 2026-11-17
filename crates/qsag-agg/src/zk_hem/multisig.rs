@@ -560,6 +560,19 @@ fn synthesize(
     cs.finish()
 }
 
+/// [`synthesize`] with the closing of zk-Hem v2 (`ConstraintSystem::finish_v2`).
+fn synthesize_v2(
+    params: MultisigParams,
+    address: &Digest,
+    message: &[u8; 32],
+    threshold: u32,
+    slots: &[Slot],
+) -> (Shape, Vec<F>) {
+    let mut cs = ConstraintSystem::new();
+    populate(&mut cs, params, address, message, threshold, slots);
+    cs.finish_v2()
+}
+
 fn populate(
     cs: &mut ConstraintSystem,
     params: MultisigParams,
@@ -669,6 +682,18 @@ impl MultisigRelation {
         Ok(Self { params, shape })
     }
 
+    /// [`Self::new`] with the relation closed for zk-Hem v2: the same rows and variables,
+    /// for `zk_hem::v2::protocol` with [`Self::assignment`]. [`Self::prove`] and
+    /// [`Self::verify`] are v1 only.
+    pub fn new_v2(params: MultisigParams) -> Result<Self, MultisigError> {
+        if !params.valid() {
+            return Err(MultisigError::InvalidParams);
+        }
+        let slots = vec![Slot::placeholder(params.depth); params.capacity];
+        let (shape, _) = synthesize_v2(params, &[F::ZERO; 4], &[0u8; 32], 0, &slots);
+        Ok(Self { params, shape })
+    }
+
     pub fn params(&self) -> MultisigParams {
         self.params
     }
@@ -677,7 +702,7 @@ impl MultisigRelation {
         &self.shape
     }
 
-    fn statement_bytes(&self) -> Vec<u8> {
+    pub(crate) fn statement_bytes(&self) -> Vec<u8> {
         let mut out = b"QSAG.ZKHEM.MULTISIG/v1".to_vec();
         out.extend_from_slice(&(self.params.capacity as u64).to_le_bytes());
         out.extend_from_slice(&(self.params.depth as u64).to_le_bytes());
@@ -732,16 +757,14 @@ impl MultisigRelation {
         Ok(slots)
     }
 
-    /// Prove that at least `policy.threshold()` distinct members signed `message`.
-    /// `signers` is ordered by member index. `seed` must be uniform and secret.
-    pub fn prove(
+    /// The assignment of the relation for a signer set (`signers` ordered by member index),
+    /// with its masking variables zero. It is secret.
+    pub fn assignment(
         &self,
         policy: &Policy,
         message: &[u8; 32],
         signers: &[MultisigSigner],
-        regime: WhirSecurityRegime,
-        seed: &[u8; 32],
-    ) -> Result<ZkHemProof, MultisigError> {
+    ) -> Result<Vec<F>, MultisigError> {
         let slots = self.slots(policy, message, signers)?;
         let mut cs = ConstraintSystem::witness_only();
         populate(
@@ -752,9 +775,21 @@ impl MultisigRelation {
             policy.threshold,
             &slots,
         );
-        let assignment = cs
-            .finish_assignment(&self.shape)
-            .ok_or(MultisigError::InvalidParams)?;
+        cs.finish_assignment(&self.shape)
+            .ok_or(MultisigError::InvalidParams)
+    }
+
+    /// Prove that at least `policy.threshold()` distinct members signed `message`.
+    /// `signers` is ordered by member index. `seed` must be uniform and secret.
+    pub fn prove(
+        &self,
+        policy: &Policy,
+        message: &[u8; 32],
+        signers: &[MultisigSigner],
+        regime: WhirSecurityRegime,
+        seed: &[u8; 32],
+    ) -> Result<ZkHemProof, MultisigError> {
+        let assignment = self.assignment(policy, message, signers)?;
         protocol::prove(
             &self.shape,
             assignment,
