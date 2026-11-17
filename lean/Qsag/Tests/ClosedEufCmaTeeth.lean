@@ -32,7 +32,6 @@ classification.
 -/
 
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
-public import Qsag.Tests.SigningTeeth
 public import Qsag.Protocol.Signing.ProdHashReductions
 public import Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
@@ -43,6 +42,9 @@ namespace Qsag.ClosedEufCmaTeeth
 set_option autoImplicit false
 
 def toyKeygen : Fin 1 → PqSecretKey := fun _ => ⟨[], [], []⟩
+
+theorem toyRadix : prodToyStatefulParams.w = 4 ∨ prodToyStatefulParams.w = 16 :=
+  .inl (by rw [prodToyStatefulParams.public_eqs])
 
 def reuseQueryA : ProdSigningQuery := ⟨[1], [], 0, 0⟩
 def reuseQueryB : ProdSigningQuery := ⟨[2], [], 0, 0⟩
@@ -73,15 +75,15 @@ theorem toyOutcome_wins (qs : List ProdSigningQuery)
     prodEufCmaWin crumbToySuite prodToyStatefulParams ⟨⟨[], [], []⟩, qs, [], prodToyForgery⟩ =
       true := by
   unfold prodEufCmaWin
-  exact (Bool.and_eq_true _ _).mpr ⟨prodToyForgery_accepted,
+  exact (Bool.and_eq_true _ _).mpr ⟨prodToyForgery_accepted_on [],
     decide_eq_true (fresh_of_not_requested _ _ _ qs [] h)⟩
 
 theorem execEufCmaGameWith_win_eq {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams) (keygen : Fin n → PqSecretKey)
     (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n) :
     (execEufCmaGameWith latchOn hPos suite params keygen adv).win ω =
-      prodEufCmaWin suite params (execEufCmaOutcome latchOn suite params keygen adv ω) := by
-  rfl
+      prodEufCmaWin suite params (execEufCmaOutcome latchOn suite params keygen adv ω) :=
+  execEufCmaGameWith_win latchOn hPos suite params keygen adv ω
 
 theorem finGame_one_winCount (G : Spec.FinGame 1) (h : G.win ⟨0, Nat.zero_lt_succ 0⟩ = true) :
     G.winCount = 1 := by
@@ -176,7 +178,7 @@ theorem witness_toy_forgery_reduction_adversary_wins :
         (fun _ => execPreimageReductionAdv prodToyStatefulParams slot.val zeroQueryAdv)).win
           ⟨0, Nat.zero_lt_one⟩ = true) :=
   execEufCma_win_reduction_adversary_wins (Nat.zero_lt_one) crumbToySuite prodToyStatefulParams
-    prodToyRadix _ _ ⟨0, Nat.zero_lt_one⟩
+    toyRadix _ _ ⟨0, Nat.zero_lt_one⟩
     (toy_execEufCmaGame_win (Spec.CoinSplit.challengerOnly 1) ⟨0, Nat.zero_lt_one⟩)
 
 /-- The hypotheses of the bound are jointly satisfiable: instance with the three hardness
@@ -191,7 +193,7 @@ theorem witness_keyed_target_bound_toy :
           (Spec.RatBound.scale (prodPathTargetCount prodToyStatefulParams 0) Spec.RatBound.one)).add
         (Spec.RatBound.scale (prodPreCandidateCount prodToyStatefulParams) Spec.RatBound.one)) :=
   jorts_baggy_closed_euf_cma_keyed_target_bound (Nat.zero_lt_one) crumbToySuite
-    prodToyStatefulParams prodToyRadix (Spec.CoinSplit.challengerOnly 1) toyKeygen
+    prodToyStatefulParams toyRadix (Spec.CoinSplit.challengerOnly 1) toyKeygen
     toyKeygen_uniform (fun _ => zeroQueryAdv)
     (𝒜I := fun _ => True) (𝒜T := fun _ => True) (𝒜P := fun _ => True)
     (fun _ => trivial) (fun _ _ => trivial) (fun _ _ => trivial)
@@ -212,7 +214,7 @@ theorem tooth_constant_hash_refutes_zero_keyed_hardness :
         (0 + (1 + prodXofHashBudget prodToyStatefulParams)) 0 Spec.RatBound.zero) := by
   intro h
   have hB := jorts_baggy_closed_euf_cma_keyed_target_bound (Nat.zero_lt_one) crumbToySuite
-    prodToyStatefulParams prodToyRadix (Spec.CoinSplit.challengerOnly 1) toyKeygen
+    prodToyStatefulParams toyRadix (Spec.CoinSplit.challengerOnly 1) toyKeygen
     toyKeygen_uniform (fun _ => zeroQueryAdv)
     (fun _ => trivial) (fun _ _ => trivial) (fun _ _ => trivial) h.1 h.2.1 h.2.2
   refine Spec.FinGame.not_bound_of_forall_win _
