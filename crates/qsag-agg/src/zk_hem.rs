@@ -22,11 +22,16 @@
 //! `uncommitted_*` tests). [`protocol`] is the committed protocol built from it: masks and
 //! companions are committed with the witness and WHIR runs on the blended word only.
 //! [`relation`] is the constraint system it proves.
+//!
+//! The security of the composed protocol (simulator, unopened-leaf hiding, batching
+//! proximity loss, knowledge soundness in the ROM and the QROM) is stated in
+//! `crates/qsag-agg/SECURITY.md`. [`bounds`] computes its numbers for a regime and a relation size.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 pub mod blind_vc;
+pub mod bounds;
 pub mod capability;
 pub mod full_shard;
 pub mod multisig;

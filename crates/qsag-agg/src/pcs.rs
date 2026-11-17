@@ -126,8 +126,10 @@ pub struct WhirStageSpec {
 ///
 /// Capacity proximity-gap wire tags (`0`, `1`, `3`) are permanently retired and rejected on
 /// deserialization (`Crites & Stewart 2025/2046`, `Krachun-Kazanin-Habock 2026/782`). These are
-/// per-stage query bounds, not a proof of total Fiat–Shamir/QROM security (which also needs
-/// reduction, list-size, field-error, and union-bound accounting).
+/// per-stage query bounds. The composed bounds (round-by-round errors with list sizes and
+/// field errors, then BCS in the ROM and the QROM) are stated in `crates/qsag-agg/SECURITY.md` and
+/// computed by `zk_hem::bounds::pcs_report`: with the 256-bit digests used here every
+/// accepted regime gives 127 bits classically and 81 bits in the QROM.
 ///
 /// The `Cdhz25*` regimes use the per-stage query tables of
 /// `lean/Qsag/QromSaltedMerkleStateRestoration.lean` (`HemOptimizedQromSchedule.minQueries`):
@@ -136,26 +138,43 @@ pub struct WhirStageSpec {
 /// `2^-214`, no PoW, stated for `Q + 1 <= 2^40`). The `Poseidon2*` variants use the same query
 /// tables with the width-12 Poseidon2 Merkle-Canopy and Fiat–Shamir transcript in place of
 /// `cSHAKE256`.
+///
+/// The `Qrom128` suffix on the CDHZ25 variants records a historical bounded-query target,
+/// not a 128-bit nominal Grover work factor: the PoW profiles have 108 nominal bits and
+/// require `Q <= 2^38`; the zero-PoW profiles have 107 nominal bits and require
+/// `Q + 1 <= 2^40`. The bounded-query target credits grinding inside the CDHZ25 bound, which
+/// no cited theorem supports; without that credit the public opening has error `2^-114.5`
+/// at `Q = 2^38` (tags 5, 7, 10) and `2^-122.3` at `Q = 2^40` (tags 6, 8). No `Qrom128`
+/// label, on any variant, is a 128-bit QROM security level (`crates/qsag-agg/SECURITY.md`,
+/// section 0).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WhirSecurityRegime {
+    /// `ceil(256/log2(B)) + 1` queries plus 16-bit PoW. Raw PCS tests only. Its weakest
+    /// query round has error `2^-124.5` before grinding, not `2^-128`.
     BciksJohnsonClassical128 = 2,
-    /// Default: unconditional Johnson-radius QROM budget (`ceil(512/log2(B)) + 2`).
+    /// Default: `ceil(512/log2(B)) + 2` queries at the Johnson radius plus 16-bit PoW.
+    /// Proven levels: 127 bits classical, 81 bits QROM (`crates/qsag-agg/SECURITY.md`).
     #[default]
     BciksJohnsonQrom128 = 4,
     /// `(202, 102, 70, 52)` queries at blowups `(4, 16, 64, 256)` plus 16-bit PoW, `cSHAKE256`.
+    /// 108-bit nominal Grover work; bounded-query accounting assumes `Q <= 2^38`.
     Cdhz25JohnsonQrom128 = 5,
     /// `(216, 109, 74, 56)` queries at blowups `(4, 16, 64, 256)`, no PoW, `cSHAKE256`.
+    /// 107-bit nominal Grover work; bounded-query accounting assumes `Q + 1 <= 2^40`.
     Cdhz25ZeroPowQrom128 = 6,
     /// [`Self::Cdhz25JohnsonQrom128`] query table over the Poseidon2 canopy and transcript.
+    /// 108-bit nominal Grover work; bounded-query accounting assumes `Q <= 2^38`.
     Poseidon2Cdhz25JohnsonQrom128 = 7,
     /// [`Self::Cdhz25ZeroPowQrom128`] query table over the Poseidon2 canopy and transcript.
+    /// 107-bit nominal Grover work; bounded-query accounting assumes `Q + 1 <= 2^40`.
     Poseidon2Cdhz25ZeroPowQrom128 = 8,
-    /// Unconditional Johnson-radius QROM budget (`(258, 130, 88, 66)` + 16-bit PoW) over
+    /// [`Self::BciksJohnsonQrom128`] query table (`(258, 130, 88, 66)` + 16-bit PoW) over
     /// Role-1 12-round `TurboSHAKE256` Merkle-Canopy & PoW.
     TurboShakeBciksJohnsonQrom128 = 9,
     /// [`Self::Cdhz25JohnsonQrom128`] query table (`(202, 102, 70, 52)` + 16-bit PoW) over
     /// Role-1 12-round `TurboSHAKE256` Merkle-Canopy & PoW.
+    /// 108-bit nominal Grover work; bounded-query accounting assumes `Q <= 2^38`.
     TurboShakeCdhz25JohnsonQrom128 = 10,
 }
 
@@ -187,16 +206,18 @@ impl WhirSecurityRegime {
     }
 
     /// Nominal single-round Grover search work is at least 128 bits.
-    /// This is a per-round work estimate, not a composed QROM security theorem.
+    /// This is a per-round work estimate, not a security level: the proven QROM level of
+    /// every regime is 81 bits (`crates/qsag-agg/SECURITY.md`, Theorem 3).
     /// Tag 2 has 72 bits, tags 4/9 have 136; tags 5/7/10 have 108 and 6/8 have 107.
     pub fn meets_unconditional_grover_128_floor(self) -> bool {
         self.qrom_grover_round_bits() >= 128
     }
 
-    /// Uses a CDHZ25 bounded-query profile, rather than a 128-bit nominal Grover floor.
-    /// The PoW profile is accounted for at Q <= 2^38, and the zero-PoW profile at
-    /// Q + 1 <= 2^40, as documented on Self. This does not promise security at 2^64 queries.
-    pub fn meets_bounded_qrom_128_profile(self) -> bool {
+    /// Uses a CDHZ25 bounded-query profile.
+    /// The PoW profiles have 108-bit nominal Grover work and assume `Q <= 2^38`;
+    /// the zero-PoW profiles have 107-bit nominal work and assume `Q + 1 <= 2^40`.
+    /// This does not promise security at `2^64` queries or a composed security bound.
+    pub fn is_bounded_query_profile(self) -> bool {
         matches!(
             self,
             Self::Cdhz25JohnsonQrom128
@@ -207,12 +228,15 @@ impl WhirSecurityRegime {
         )
     }
 
-    /// Backwards-compatible aggregate authorization policy: either the nominal Grover
-    /// floor or a bounded-query CDHZ25 profile. Despite the historical name, true does
-    /// NOT imply 128 bits of unconditional Grover work. Use the separate predicates
-    /// above when inspecting security assumptions. Classical tag 2 is never authorized.
-    pub fn meets_qrom_128_floor(self) -> bool {
-        self.meets_unconditional_grover_128_floor() || self.meets_bounded_qrom_128_profile()
+    /// Accepted by the aggregate verifier's profile policy: either at least 128 bits of
+    /// nominal single-round Grover work, or a CDHZ25 bounded-query profile (108 nominal
+    /// bits at `Q <= 2^38`, or 107 at `Q + 1 <= 2^40`). Classical tag 2 is excluded.
+    ///
+    /// This is policy membership, not a security floor or a composed QROM theorem.
+    /// Inspect [`Self::qrom_grover_round_bits`] and [`Self::is_bounded_query_profile`]
+    /// when choosing assumptions.
+    pub fn is_accepted_aggregate_profile(self) -> bool {
+        self.meets_unconditional_grover_128_floor() || self.is_bounded_query_profile()
     }
 
     /// Merkle-Canopy trees and the Fiat–Shamir transcript use width-12 Poseidon2.
@@ -244,8 +268,11 @@ impl WhirSecurityRegime {
         }
     }
 
-    /// Exponent `t` such that every non-exhaustive canonical stage has distinct-fiber query
-    /// error below `2^-t` (checked against the finite witnesses in `pcs/affine_schedule.rs`).
+    /// Exponent `t` the schedule targets: every non-exhaustive canonical stage is meant to
+    /// have distinct-fiber query error below `2^-t` (checked against the finite witnesses in
+    /// `pcs/affine_schedule.rs`). With the fold loss counted, tags 4 to 10 meet it at
+    /// `2^17..2^24` cells; tag 2 does not (124.5 bits at worst, see
+    /// `zk_hem::bounds::tests::stage_bounds_against_the_constants_asserted_by_the_regimes`).
     pub fn pure_query_target_bits(self) -> u32 {
         match self {
             Self::BciksJohnsonClassical128 => 128,
@@ -303,9 +330,10 @@ impl WhirSecurityRegime {
 }
 
 /// Default schedule: Johnson QROM (`BciksJohnsonQrom128`), `ceil(512/log2(B)) + 2` queries plus
-/// 16-bit PoW, i.e. `(258, 130, 88, 66)` at blowups `(4, 16, 64, 256)`. That gives unconditional
-/// Johnson proximity below $2^{-256}$ with positive proximity slack. Per-round query budgets
-/// alone do not prove total PCS/QROM security.
+/// 16-bit PoW, i.e. `(258, 130, 88, 66)` at blowups `(4, 16, 64, 256)`. That puts the query
+/// error of the public opening below $2^{-256}$ at a proven Johnson-radius threshold. Under
+/// the scalar blend of zk-Hem the Stage-0 query error is $2^{-201}$. The composed bounds are
+/// in `crates/qsag-agg/SECURITY.md` (`zk_hem::bounds`).
 pub fn whir_stage_schedule(num_vars: usize) -> WhirSchedule {
     WhirSecurityRegime::default().schedule(num_vars)
 }
@@ -426,7 +454,7 @@ fn stage_geometry(num_vars: usize) -> WhirSchedule {
 impl WhirSchedule {
     /// Aggregate authorization: canonical structure plus an accepted QROM profile.
     pub fn validate(&self, num_vars: usize) -> bool {
-        self.validate_structural(num_vars) && self.regime.meets_qrom_128_floor()
+        self.validate_structural(num_vars) && self.regime.is_accepted_aggregate_profile()
     }
 
     /// Validate geometry, resource limits, and the canonical query table of the selected
@@ -6671,15 +6699,12 @@ mod pcs_unit_tests {
             assert_eq!(regime as u8, tag);
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
-            assert_eq!(regime.meets_qrom_128_floor(), tag != 2);
+            assert_eq!(regime.is_accepted_aggregate_profile(), tag != 2);
             assert_eq!(
                 regime.meets_unconditional_grover_128_floor(),
                 matches!(tag, 4 | 9)
             );
-            assert_eq!(
-                regime.meets_bounded_qrom_128_profile(),
-                matches!(tag, 5..=8 | 10)
-            );
+            assert_eq!(regime.is_bounded_query_profile(), matches!(tag, 5..=8 | 10));
             assert_eq!(regime.pow_bits(), pow_bits);
             assert_eq!(regime.uses_poseidon2_canopy(), poseidon2);
             assert_eq!(regime.uses_turboshake_canopy(), turboshake);
@@ -6712,7 +6737,7 @@ mod pcs_unit_tests {
             for nv in 2..=MAX_PCS_NUM_VARS {
                 let schedule = regime.schedule(nv);
                 assert!(schedule.validate_structural(nv));
-                if !regime.meets_qrom_128_floor() {
+                if !regime.is_accepted_aggregate_profile() {
                     assert!(!schedule.validate(nv));
                     assert!(WhirSchedule::from_bytes_canonical(&schedule.to_bytes(), nv).is_none());
                     continue;
@@ -7225,7 +7250,7 @@ mod pcs_unit_tests {
 
             // Every other regime, including the one sharing this query table, rejects the proof.
             for other in WhirSecurityRegime::ALL {
-                if other == regime || !other.meets_qrom_128_floor() {
+                if other == regime || !other.is_accepted_aggregate_profile() {
                     continue;
                 }
                 let other_schedule = other.schedule(nv);
@@ -7473,12 +7498,8 @@ mod pcs_unit_tests {
                 "TurboSHAKE batch commit fell back to CPU"
             );
             let mut btr_gpu = regime_transcript(&schedule, b"turbo-gpu-batch");
-            let bproof_gpu = whir_open_batch(
-                &bstate_gpu,
-                &[&pt0, &pt1],
-                &[val0, val1],
-                &mut btr_gpu,
-            );
+            let bproof_gpu =
+                whir_open_batch(&bstate_gpu, &[&pt0, &pt1], &[val0, val1], &mut btr_gpu);
             drop(bstate_gpu);
             let after_b = crate::acceleration::vulkan_execution_counts().unwrap();
             assert_eq!(
@@ -7489,12 +7510,8 @@ mod pcs_unit_tests {
             let (bcomm_cpu, bstate_cpu) = cpu_state(alloc::vec![p0, p1], &[0x5A; 32], &schedule);
             assert_eq!(bcomm_gpu, bcomm_cpu);
             let mut btr_cpu = regime_transcript(&schedule, b"turbo-gpu-batch");
-            let bproof_cpu = whir_open_batch(
-                &bstate_cpu,
-                &[&pt0, &pt1],
-                &[val0, val1],
-                &mut btr_cpu,
-            );
+            let bproof_cpu =
+                whir_open_batch(&bstate_cpu, &[&pt0, &pt1], &[val0, val1], &mut btr_cpu);
             drop(bstate_cpu);
             assert_eq!(bproof_gpu, bproof_cpu);
             let mut btr_ver = regime_transcript(&schedule, b"turbo-gpu-batch");
