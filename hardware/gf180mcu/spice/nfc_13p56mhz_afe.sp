@@ -47,7 +47,7 @@ C_TRIM TANK 0 8.885p
 C_STRAY TANK 0 3.2p
 R_BLEED TANK 0 12k
 * Rectifier is independent of ASIC VDD. Never join RECT to chip 5V directly.
-R_RECT TANK RECT_IN 220
+R_RECT TANK RECT_IN 150
 V_IR RECT_IN RECT_D 0
 D_RECT RECT_D RECT SCH
 D_NEG 0 RECT_IN SCH
@@ -104,8 +104,8 @@ X_PAD_BAD 0 0 VDD_BAD 0 0 0 PAD_BAD 0 0 0 VDD_BAD 0 Y_BAD gf180mcu_fd_io__bi_24t
 .meas tran pass_cold PARAM='(cold_inject_avg<1u)*(cold_inject_pk<100u)*(cold_max<0.3)*(cold_min> -0.3)'
 .meas tran pass_hot PARAM='(hot_max<vdd_val+0.3)*(hot_min> -0.3)*(logic_high>0.8*vdd_val)*(logic_low<0.2*vdd_val)*(clk_hz>13.4e6)*(clk_hz<13.7e6)'
 .meas tran rect_current_pk MAX i(v.X_TANK_HOT.V_IR) FROM=0 TO=4u
-.meas tran rect_irms RMS par('v(TANK,X_TANK_HOT.RECT_IN)/220') FROM=2u TO=4u
-.meas tran rect_resistor_w PARAM='rect_irms*rect_irms*220'
+.meas tran rect_irms RMS par('v(TANK,X_TANK_HOT.RECT_IN)/150') FROM=2u TO=4u
+.meas tran rect_resistor_w PARAM='rect_irms*rect_irms*150'
 .meas tran gate_irms RMS par('v(TANK,X_HOT.GATE)/2200') FROM=2u TO=4u
 .meas tran gate_resistor_w PARAM='gate_irms*gate_irms*2200'
 .meas tran pass_rect PARAM='(rect_max<5.5)*(gate_max<10)*(rect_current_pk<70m)*(rect_resistor_w<0.25)*(gate_resistor_w<0.25)'
