@@ -72,7 +72,8 @@ def edges(breaks, hmax):
 # material laws
 # ----------------------------------------------------------------------------
 class Params:
-    """Every assumed number in one place.  Sources in physics/efuse/README.md."""
+    """Every assumed number in one place.  Sources and the reasoning behind each value:
+    scratch/lanes/fable-efuse-and-process-sim.last.md (section A.3)."""
     T0 = 300.0
     rs_sil = 7.3          # ohm/sq, silicided p+ poly at 25 C (PDK rsh_ppolyf_s, typical)
     tc1 = 3.245e-3        # 1/K   (PDK ppolyf_s r_tc1, tnom 25 C; extrapolated above 175 C)
