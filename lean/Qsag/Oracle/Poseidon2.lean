@@ -19,6 +19,7 @@ Self-contained Lean 4.35 algebraic sponge specification (`Init` + `Qsag.Goldiloc
 public import Qsag.Math.Goldilocks
 public import Qsag.Math.Tactic.CommRing
 public import Qsag.Oracle.Keccak
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -6211,6 +6212,10 @@ theorem _root_.Qsag.state12Sum_def (st : Poseidon2State12) :
       Goldilocks.add (Goldilocks.add (lane4Sum st.b0) (lane4Sum st.b1)) (lane4Sum st.b2) := by rfl
 
 
+#verify_constructive checked_preimage_is_transcript_hit inverse_feedforward_relation
+-- Equations for the symbolic instances of `Tests/CompositionInstances`; no body is exposed.
+#export_eqns rawTrunc relation jiveCompress Consistent extensions queryValue
+
 end Qsag.CrossProtocol
 end
 
@@ -6373,5 +6378,310 @@ theorem poseidon2ConstAt_eq (tag round lane : Nat) :
   unfold poseidon2ConstAt poseidon2ConstWord poseidon2ConstIV
   rfl
 
+/-! ## 5. Build-Time Conformance Vectors Matching `poseidon2.rs` -/
+
+example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩).toList.map (·.val) =
+    [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := by decide +kernel
+
+example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
+    [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := by decide +kernel
+
+example : poseidon2Hash32 [] =
+    [182, 168, 65, 106, 0, 54, 23, 124, 22, 116, 119, 199, 75, 253, 202, 145, 123, 13, 115, 200, 186, 143, 207, 66, 162, 161, 198, 9, 220, 37, 176, 162] := by decide +kernel
+
+example : poseidon2Hash32 [0] =
+    [116, 79, 15, 95, 17, 248, 202, 240, 45, 126, 192, 181, 89, 193, 185, 161, 98, 167, 199, 38, 214, 141, 4, 22, 97, 34, 223, 133, 16, 3, 170, 104] := by decide +kernel
+
+example : poseidon2Hash32 [1, 2, 3] =
+    [149, 79, 171, 160, 0, 49, 166, 60, 204, 121, 241, 71, 102, 130, 24, 17, 35, 162, 114, 249, 194, 254, 120, 46, 18, 111, 254, 27, 106, 81, 178, 227] := by decide +kernel
+
+example : poseidon2Hash32 [113, 115, 97, 103, 45, 112, 111, 115, 101, 105, 100, 111, 110, 50, 45, 107, 97, 116] =
+    [228, 156, 140, 147, 124, 10, 100, 197, 103, 106, 168, 7, 254, 196, 250, 183, 212, 130, 17, 26, 2, 139, 235, 15, 219, 46, 193, 238, 148, 50, 236, 229] := by decide +kernel
+
+example : (let out := poseidon2CompressWeighted ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩;
+    [out.x0.val, out.x1.val, out.x2.val, out.x3.val]) =
+    [13782584570844608185, 13136387643152332218, 7171133015474200873, 7643370872200861755] := by decide +kernel
+
+/-! ## Teeth that unfold or execute this module's definitions (audited and paired in `Tests/OracleAndQrom`) -/
+section ExecutedTeeth
+open RoundPoly
+
+/-- `x ↦ x ^ 3` identifies `ω₃ ≠ 1` with `1`, because `3 ∣ p - 1`. -/
+theorem tooth_d3_not_permutation_on_goldilocks :
+    goldilocksOmega3 ≠ Goldilocks.one ∧ goldilocksOmega3 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega3 3 = goldilocksPow Goldilocks.one 3 ∧
+    3 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨6148914689804861440, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+/-- `x ↦ x ^ 5` identifies `ω₅ ≠ 1` with `1`, because `5 ∣ p - 1`. -/
+theorem tooth_d5_not_permutation_on_goldilocks :
+    goldilocksOmega5 ≠ Goldilocks.one ∧ goldilocksOmega5 ≠ Goldilocks.zero ∧
+    goldilocksPow goldilocksOmega5 5 = goldilocksPow Goldilocks.one 5 ∧
+    5 ∣ goldilocksPrime - 1 := by
+  refine ⟨gold_ne_of_val_ne (by decide), gold_ne_of_val_ne (by decide), ?_,
+    ⟨3689348813882916864, by decide⟩⟩
+  apply Goldilocks.ext
+  rw [goldilocksPow_val, goldilocksPow_val]
+  decide
+
+/-- `#tooth` **Merz–Rodríguez García (`2026/306`) `(X, -X, 0)` Subspace & Partial Feed-Forward Vulnerability**:
+    1. On the block-circulant factor `applyMEStd = P_3 ⊗ M_4 = circ(2 M_4, M_4, M_4)` (the external layer before the `M_4 ⊗ P_3` lane transposition was deployed), the entire 4-dimensional subspace
+       `⟨X, -X, 0⟩` maps to `⟨M_4 X, -M_4 X, 0⟩`, leaving the sponge capacity block `b2 = 0` untouched!
+    2. Across a full round `sboxState12 (state12Add (applyMEStd ⟨U0 + X, -X, U2⟩) C)` under the two linear
+       antisymmetry conditions `(applyMEStd ⟨U0, 0, U2⟩).b0 + C.b0 = -((applyMEStd ⟨U0, 0, U2⟩).b1 + C.b1)`,
+       oddness of `sbox7` preserves `(X^(1), -X^(1))` in blocks `0, 1` while keeping block `b2` independent of `X`!
+    3. Partial feed-forward `(perm st).b0 + st.b0` (`poseidon2_compress12_ff` in `sponge.rs`) and naive
+       uniform sum `st.b0 + st.b1 + st.b2` leave `(0, X, -X)` canceled in the feed-forward term. -/
+theorem tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip (X U0 U2 : Lane4)
+    (C : Poseidon2State12)
+    (hAnti : lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b0 C.b0 =
+             lane4Neg (lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b1 C.b1)) :
+    applyMEStd ⟨X, lane4Neg X, lane4Zero⟩ = ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ ∧
+    let afterSbox := sboxState12 (state12Add (applyMEStd ⟨lane4Add U0 X, lane4Neg X, U2⟩) C)
+    afterSbox.b1 = lane4Neg afterSbox.b0 ∧
+    afterSbox.b2 = sboxLane4 (lane4Add (applyMEStd ⟨U0, lane4Zero, U2⟩).b2 C.b2) ∧
+    (⟨U0, X, lane4Neg X⟩ : Poseidon2State12).b0 = U0 ∧
+    lane4Add (lane4Add U0 X) (lane4Neg X) = U0 := by
+  have hLinSub : applyMEStd ⟨X, lane4Neg X, lane4Zero⟩ =
+      ⟨applyM4 X, lane4Neg (applyM4 X), lane4Zero⟩ := by
+    unfold applyMEStd lane4Neg applyM4 lane4Add lane4Sub lane4Sum lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  have hDecomp : ⟨lane4Add U0 X, lane4Neg X, U2⟩ =
+      state12Add ⟨U0, lane4Zero, U2⟩ ⟨X, lane4Neg X, lane4Zero⟩ := by
+    unfold state12Add lane4Add lane4Neg lane4Sub lane4Zero
+    apply Poseidon2State12.ext <;> apply Lane4.ext <;> gold_cring
+  refine ⟨hLinSub, ?_, ?_, rfl, ?_⟩
+  · rw [hDecomp, applyMEStd_add, hLinSub]
+    unfold state12Add sboxState12 sboxLane4
+    dsimp only
+    have hHelper : ∀ (M0 M1 A C0 C1 : Lane4),
+        lane4Add M0 C0 = lane4Neg (lane4Add M1 C1) →
+        lane4Add (lane4Add M1 (lane4Neg A)) C1 = lane4Neg (lane4Add (lane4Add M0 A) C0) := by
+      intro M0 M1 A C0 C1 hEq
+      have h0 := congrArg Lane4.x0 hEq
+      have h1 := congrArg Lane4.x1 hEq
+      have h2 := congrArg Lane4.x2 hEq
+      have h3 := congrArg Lane4.x3 hEq
+      unfold lane4Add lane4Neg lane4Sub lane4Zero at h0 h1 h2 h3 ⊢
+      dsimp only at h0 h1 h2 h3 ⊢
+      have hInv : ∀ a : Goldilocks, Goldilocks.sub Goldilocks.zero (Goldilocks.sub Goldilocks.zero a) = a :=
+        fun _ => by gold_cring
+      apply Lane4.ext
+      · have hL : Goldilocks.add (Goldilocks.add M1.x0 (Goldilocks.sub Goldilocks.zero A.x0)) C1.x0 =
+            Goldilocks.sub (Goldilocks.add M1.x0 C1.x0) A.x0 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x0 A.x0) C0.x0) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0)) A.x0 := by gold_cring
+        have hFlip : Goldilocks.add M1.x0 C1.x0 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x0 C0.x0) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h0
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x1 (Goldilocks.sub Goldilocks.zero A.x1)) C1.x1 =
+            Goldilocks.sub (Goldilocks.add M1.x1 C1.x1) A.x1 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x1 A.x1) C0.x1) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1)) A.x1 := by gold_cring
+        have hFlip : Goldilocks.add M1.x1 C1.x1 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x1 C0.x1) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h1
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x2 (Goldilocks.sub Goldilocks.zero A.x2)) C1.x2 =
+            Goldilocks.sub (Goldilocks.add M1.x2 C1.x2) A.x2 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x2 A.x2) C0.x2) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2)) A.x2 := by gold_cring
+        have hFlip : Goldilocks.add M1.x2 C1.x2 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x2 C0.x2) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h2
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+      · have hL : Goldilocks.add (Goldilocks.add M1.x3 (Goldilocks.sub Goldilocks.zero A.x3)) C1.x3 =
+            Goldilocks.sub (Goldilocks.add M1.x3 C1.x3) A.x3 := by gold_cring
+        have rhsEq : Goldilocks.sub Goldilocks.zero (Goldilocks.add (Goldilocks.add M0.x3 A.x3) C0.x3) =
+            Goldilocks.sub (Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3)) A.x3 := by gold_cring
+        have hFlip : Goldilocks.add M1.x3 C1.x3 = Goldilocks.sub Goldilocks.zero (Goldilocks.add M0.x3 C0.x3) := by
+          have := congrArg (Goldilocks.sub Goldilocks.zero) h3
+          rw [hInv] at this
+          exact this.symm
+        rw [hL, rhsEq, hFlip]
+    have hSumAnti := hHelper (applyMEStd ⟨U0, lane4Zero, U2⟩).b0 (applyMEStd ⟨U0, lane4Zero, U2⟩).b1
+      (applyM4 X) C.b0 C.b1 hAnti
+    rw [hSumAnti]
+    unfold lane4Neg lane4Sub lane4Zero
+    dsimp only
+    exact Lane4.ext (sbox7_odd _) (sbox7_odd _) (sbox7_odd _) (sbox7_odd _)
+  · rw [hDecomp, applyMEStd_add, hLinSub]
+    unfold state12Add sboxState12
+    dsimp only
+    have hAddZ : ∀ a : Lane4, lane4Add a lane4Zero = a := fun a => by
+      unfold lane4Add lane4Zero; apply Lane4.ext <;> exact LawfulCommRing.add_zero _
+    rw [hAddZ]
+  · unfold lane4Add lane4Neg lane4Sub lane4Zero
+    apply Lane4.ext <;> gold_cring
+
+/-- Superseded internal diffusion matrix `diag(-2, 1, 2, 4, ..., 1024) + 1·1ᵀ` (first diagonal entry
+    `-2`; the deployed `applyMI` uses `-64`). Kept only as the object of the tooth below. -/
+def applyMIFirstEntryNegTwo (st : Poseidon2State12) : Poseidon2State12 :=
+  let s := state12Sum st
+  ⟨⟨Goldilocks.add (Goldilocks.mul (goldOfInt (-2)) st.b0.x0) s,
+    Goldilocks.add st.b0.x1 s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 2) st.b0.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 4) st.b0.x3) s⟩,
+   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 8) st.b1.x0) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 16) st.b1.x1) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 32) st.b1.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 64) st.b1.x3) s⟩,
+   ⟨Goldilocks.add (Goldilocks.mul (goldOfInt 128) st.b2.x0) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 256) st.b2.x1) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 512) st.b2.x2) s,
+    Goldilocks.add (Goldilocks.mul (goldOfInt 1024) st.b2.x3) s⟩⟩
+
+/-- Explicit 12-lane Goldilocks eigenvector of `applyMIFirstEntryNegTwo` for eigenvalue
+    `λ₀ = 8914261387277420341`. -/
+def miRationalEigvec0 : Poseidon2State12 :=
+  ⟨⟨Goldilocks.ofNat 8415733694666260766, Goldilocks.ofNat 10081604446170657914,
+    Goldilocks.ofNat 13429757962329074280, Goldilocks.ofNat 7212905167159261059⟩,
+   ⟨Goldilocks.ofNat 7177536167446655380, Goldilocks.ofNat 16173559831921257667,
+    Goldilocks.ofNat 11410676009809774369, Goldilocks.ofNat 263994636750658321⟩,
+   ⟨Goldilocks.ofNat 11338638786567724180, Goldilocks.ofNat 17416777037312523837,
+    Goldilocks.ofNat 8867871345638664998, Goldilocks.ofNat 17338153400129577477⟩⟩
+
+/-- `#tooth` **The superseded `V[0] = -2` internal matrix has a rational eigenvector over Goldilocks**:
+    `applyMIFirstEntryNegTwo miRationalEigvec0 = λ₀ · miRationalEigvec0` with `miRationalEigvec0 ≠ 0`, so
+    `diag(-2, 1, 2, ..., 1024) + 1·1ᵀ` has a reducible characteristic polynomial over `𝔽_p`. The same
+    vector is not an eigenvector of the deployed `applyMI` for `λ₀`. -/
+theorem tooth_current_mi_has_rational_eigenvector :
+    miRationalEigvec0 ≠ state12Zero ∧
+    applyMIFirstEntryNegTwo miRationalEigvec0 =
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0 ∧
+    ¬ (applyMI miRationalEigvec0 =
+      state12Scale (Goldilocks.ofNat 8914261387277420341) miRationalEigvec0) := by decide
+
+#verify_constructive
+  Qsag.poseidon2_interpolation_margin_needs_26
+  Qsag.tooth_d3_not_permutation_on_goldilocks
+  Qsag.tooth_d5_not_permutation_on_goldilocks
+  Qsag.tooth_poseidon2_me_std_admits_x_neg_x_subspace_skip
+  Qsag.tooth_current_mi_has_rational_eigenvector
+end ExecutedTeeth
+
+end Qsag
+
+/-! ### Feed-forward teeth (evaluate `rawTrunc` / `jiveCompress`; audited and paired in `Tests/OracleAndQrom`) -/
+namespace Qsag.CrossProtocol
+open CommRingOps LawfulCommRing
+
+/-- Explicit permutation: raw inversion succeeds, adding the recovered input fails. -/
+theorem raw_vs_feedforward_tooth :
+    ∃ p : SimpleEquiv (State Goldilocks) (State Goldilocks),
+      rawTrunc p (p.invFun (one, zero, zero)) = one ∧
+      jiveCompress (fun _ => zero) p (p.invFun (one, zero, zero)) ≠ one := by
+  refine ⟨SimpleEquiv.refl _, rfl, ?_⟩
+  decide
+
+
+/-- Feed-forward does not guarantee security for every fixed permutation. -/
+theorem identity_collision_tooth :
+    ∃ x y : State Goldilocks, x ≠ y ∧
+      jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x =
+      jiveCompress (fun _ => zero) (SimpleEquiv.refl _) y := by
+  exact ⟨(zero, zero, zero), (zero, one, zero), by decide, rfl⟩
+
+
+/-- A zero-query guess can succeed; verification must extend the charged transcript. -/
+theorem unchecked_preimage_tooth : ∃ x : State Goldilocks,
+    jiveCompress (fun _ => zero) (SimpleEquiv.refl _) x = zero ∧
+    ¬ ∃ y, (x, y) ∈ ([] : List (State Goldilocks × State Goldilocks)) := by
+  exact ⟨(zero, zero, zero), by decide, by intro ⟨_, h⟩; cases h⟩
+
+#verify_constructive
+  Qsag.CrossProtocol.inverse_feedforward_relation
+  Qsag.CrossProtocol.raw_vs_feedforward_tooth
+  Qsag.CrossProtocol.identity_collision_tooth
+  Qsag.CrossProtocol.unchecked_preimage_tooth
+end Qsag.CrossProtocol
+end
+
+/-! ### Registry-digest KAT for the Sbox7 two-key fixture
+
+`poseidon2Hash32` is evaluated here because its sponge internals are sealed downstream.
+`Protocol/Aggregation/Poseidon2AlgebraicAndRecursiveHem` proves that these bytes are its
+`encodeRegistry` of the one-shard, two-key fixture policy with threshold `thr`. -/
+public section
+namespace Qsag
+
+/-- The 188 canonical registry bytes of the one-shard, two-key Sbox7 fixture policy; only the
+    threshold byte (index 7) varies. -/
+def sbox7TwoKeyRegistryBytes (thr : UInt8) : List UInt8 :=
+  [1, 185, 1, 5, 1, 0, 1] ++ [thr] ++
+  [22, 81, 83, 65, 71, 46, 80, 81, 46, 83, 85, 73, 84, 69, 46, 83, 66, 79, 88, 55, 47, 118, 49,
+   17, 8, 1, 2, 1, 2, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 137, 1, 2, 67, 2, 32] ++
+  List.replicate 32 0 ++ [32] ++ List.replicate 32 0 ++ [67, 2, 32] ++
+  List.replicate 31 0 ++ [1, 32] ++ List.replicate 31 0 ++ [1]
+
+set_option maxRecDepth 16384 in
+/-- Lowering the threshold byte from `2` to `1` changes the `poseidon2Hash32` registry digest. -/
+theorem poseidon2Hash32_sbox7TwoKeyRegistry_threshold_kat :
+    ¬ (poseidon2Hash32 (sbox7TwoKeyRegistryBytes 1) =
+      poseidon2Hash32 (sbox7TwoKeyRegistryBytes 2)) := by
+  decide +kernel
+
+#export_eqns sbox7TwoKeyRegistryBytes
+#verify_constructive poseidon2Hash32_sbox7TwoKeyRegistry_threshold_kat
+
+/-! ### Duplex-chain KATs for the recursive verifier transcript
+
+The permutation is evaluated here because `lane4Add`, `state12Add` and the round helpers are sealed
+downstream. `Protocol/Aggregation/RecursivePoseidon2WhirSoundness` proves that its transcript
+sponge is this chain on the block addends of its frames, and cites the two KATs below. -/
+
+/-- Rate-8 duplex from the zero state: add each block to the state, then permute. -/
+def poseidon2DuplexChain (blocks : List Poseidon2State12) : Poseidon2State12 :=
+  blocks.foldl (fun st b => poseidon2Perm12 (state12Add st b)) ⟨lane4Zero, lane4Zero, lane4Zero⟩
+
+/-- A duplex block addend: six rate limbs `r0..r5` and the two capacity limbs `c10`, `c11`. -/
+def poseidon2DuplexBlock (r0 r1 r2 r3 r4 r5 c10 c11 : Nat) : Poseidon2State12 :=
+  ⟨⟨Goldilocks.ofNat r0, Goldilocks.ofNat r1, Goldilocks.ofNat r2, Goldilocks.ofNat r3⟩,
+   ⟨Goldilocks.ofNat r4, Goldilocks.ofNat r5, Goldilocks.zero, Goldilocks.zero⟩,
+   ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.ofNat c10, Goldilocks.ofNat c11⟩⟩
+
+/-- Blocks of two absorbed one-limb messages `a`, `b` (tag `10`), each followed by an empty
+    squeeze frame (tag `11`). -/
+def poseidon2SwapRoundKatBlocks (a b : Nat) : List Poseidon2State12 :=
+  [poseidon2DuplexBlock a 1 0 0 0 0 10 1, poseidon2DuplexBlock 1 0 0 0 0 0 11 0,
+   poseidon2DuplexBlock b 1 0 0 0 0 10 1, poseidon2DuplexBlock 1 0 0 0 0 0 11 0]
+
+set_option maxRecDepth 100000 in
+/-- Swapping the two absorbed messages changes the squeezed lane. -/
+theorem poseidon2DuplexChain_swap_round_kat :
+    ¬ ((poseidon2DuplexChain (poseidon2SwapRoundKatBlocks 1 2)).b0 =
+      (poseidon2DuplexChain (poseidon2SwapRoundKatBlocks 2 1)).b0) := by
+  decide +kernel
+
+/-- Blocks of the child-verifier transcript prefix up to the first fold challenge, at bottom
+    depth `1`, canopy depth `0`, zero digests and claim, and two four-limb sumcheck messages
+    `[a, 0, 0, 0]`, `[b, 0, 0, 0]`. -/
+def poseidon2SwapSumcheckKatBlocks (a b : Nat) : List Poseidon2State12 :=
+  [poseidon2DuplexBlock 0x4657484952000001 1 0 1 0 0 1 3,
+   poseidon2DuplexBlock 0 0 0 0 0 0 2 12, poseidon2DuplexBlock 0 0 0 0 0 0 0 0,
+   poseidon2DuplexBlock 1 0 0 0 0 0 0 0,
+   poseidon2DuplexBlock 0 0 0 0 1 0 3 4,
+   poseidon2DuplexBlock a 0 0 0 1 0 10 4, poseidon2DuplexBlock 1 0 0 0 0 0 11 0,
+   poseidon2DuplexBlock b 0 0 0 1 0 10 4, poseidon2DuplexBlock 1 0 0 0 0 0 11 0,
+   poseidon2DuplexBlock 1 0 0 0 0 0 12 0, poseidon2DuplexBlock 1 0 0 0 0 0 13 0]
+
+set_option maxRecDepth 100000 in
+/-- Swapping the two sumcheck messages changes the lane squeezed for the fold challenge. -/
+theorem poseidon2DuplexChain_swap_sumcheck_kat :
+    ¬ ((poseidon2DuplexChain (poseidon2SwapSumcheckKatBlocks 1 0)).b0 =
+      (poseidon2DuplexChain (poseidon2SwapSumcheckKatBlocks 0 1)).b0) := by
+  decide +kernel
+
+#export_eqns poseidon2DuplexChain poseidon2DuplexBlock poseidon2SwapRoundKatBlocks
+  poseidon2SwapSumcheckKatBlocks
+#verify_constructive poseidon2DuplexChain_swap_round_kat poseidon2DuplexChain_swap_sumcheck_kat
 end Qsag
 end
