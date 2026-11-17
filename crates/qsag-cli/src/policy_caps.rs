@@ -14,8 +14,9 @@ use qsag_accel::CpuReferenceBackend;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_fts::{FrontierDpTable, FrontierFtsProfile};
 use qsag_policy::{
-    CapabilityError, CapabilityRequest, Caveat, Discharge, MacaroonVerifier, PqBiscuit,
-    PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey, PqBiscuitStepKey, SpongeMacaroon,
+    CapabilityError, CapabilityRequest, Caveat, Discharge, FsSealConsumptionStore,
+    MacaroonVerifier, PqBiscuit, PqBiscuitAuthorityKey, PqBiscuitAuthorityPublicKey,
+    PqBiscuitStepKey, SpongeMacaroon,
 };
 
 use crate::anchor::{
@@ -36,13 +37,18 @@ const MACAROON_TOKEN_FORMAT: &str = "qsag-macaroon-token-v1";
 const BISCUIT_AUTH_SK_FORMAT: &str = "qsag-biscuit-authority-secret-v1";
 const BISCUIT_AUTH_PK_FORMAT: &str = "qsag-biscuit-authority-public-v1";
 const BISCUIT_STEP_SK_FORMAT: &str = "qsag-biscuit-step-secret-v1";
-const BISCUIT_TOKEN_FORMAT: &str = "qsag-biscuit-token-v1";
+const BISCUIT_TOKEN_FORMAT: &str = "qsag-biscuit-token-v2";
 const BISCUIT_ANCHOR_DOMAIN: &str = "biscuit_authority";
+const SEAL_STORE_ANCHOR_DOMAIN: &str = "biscuit_seal_store";
 
 const MACAROON_HELP: &str = "\
 qsag policy macaroon <keygen|issue|attenuate|issue-discharge|bind-discharge|verify> [options]
 
-256-bit cSHAKE256 attenuated bearer capabilities and third-party discharges:
+256-bit cSHAKE256 attenuated bearer capabilities and third-party discharges. A macaroon
+is a reusable grant: `verify` checks its caveats against the request and keeps no state, so
+the same token verifies any number of times until a caveat (e.g. --expires-at) stops it.
+For one-use authorization use `policy biscuit` (sealed, consumed in a seal store) or gate
+the signature on a policy ledger intent.
 
   keygen           --out <key.json> [--passphrase-env <VAR> | --passphrase-file <PATH>]
   issue            --key <key.json> --audience-hex <64-hex> [--id-hex <64-hex>] --out <tok.json> [caveats]
@@ -69,23 +75,48 @@ Post-quantum public-key capability chains over one-time Compact1122 (FrontierSum
 
   keygen     --secret-out <sk.json> --public-out <pk.json> [--tree-height <0..=8>]
              [--authority-id-hex <64-hex>] [--anchor-dir <dir> | --anchor-tpm-nv <idx> |
-             --anchor-vmgenid | --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>]
+             --ephemeral-unanchored] [--passphrase-env <VAR> | --passphrase-file <PATH>]
+             --anchor-vmgenid adds snapshot/clone detection; requires a disjoint-device directory anchor or TPM.
   mint       --secret <sk.json> --audience-hex <64-hex> [--token-id-hex <64-hex>]
              --token-out <biscuit.json> --step-key-out <step1.sk> [caveats] [anchor options]
   attenuate  --in <biscuit.json> --step-key <step.sk> --token-out <next.json>
              --step-key-out <next.sk> [caveats]
   seal       --in <biscuit.json> --step-key <step.sk> --out <sealed.json>
-             [--bind-request --audience-hex <64-hex> --resource-hex <64-hex>
+             [--bind-request --intent-digest-hex <64-hex> --audience-hex <64-hex> --resource-hex <64-hex>
               [--actions <u64>] [--amount <u128>] [--now <secs>]]
   verify     --public <pk.json> --in <sealed.json> --audience-hex <64-hex>
+             --seal-store <ledger> [--create-seal-store] [--intent-digest-hex <64-hex>]
              --resource-hex <64-hex> [--actions <u64>] [--amount <u128>] [--now <secs>]
+             [--anchor-dir <dir> | --anchor-tpm-nv <idx> | --ephemeral-unanchored]
+
+Verification consumes each seal once, including bearer seals, in the seal store: the one
+consumption domain of the audience. Create it explicitly once and give every accepting
+process the same store. Request-bound seals require the complete canonical intent digest
+at sealing and verification. A failed later operation does not refund a seal.
+
+Rollback: with --anchor-dir (another device) or --anchor-tpm-nv the store is pinned in an
+external monotone anchor, and a store put back to an earlier state (file restored in place,
+volume snapshot) is refused, so a consumed seal stays consumed. With --ephemeral-unanchored
+it is not: restoring the file re-admits every seal consumed since. The anchor key is kept in
+<ledger>.anchor-key (owner-only); someone who can read it and rewrite the anchor can forge.
+Replicas: two verifiers with separate stores each accept a seal once. Nothing local can
+detect that; run one store per audience, or put one linearizable service behind it.
+
+Step keys (--step-key-out) are one-time bearer secrets. `attenuate` and `seal` retire the
+file before signing, so a second use on this host is refused, as is putting back the key file
+alone. That is all local state can do for a file that is meant to be handed on: a copy taken
+before use, or the key file restored together with its .vault.lock companion, is a second
+live key. Never copy or back up a step key. Two hops signed with one step key let anyone who
+sees both forge hops with that step's (already attenuated) authority; acceptance is still
+one-use, because the verifier consumes the seal.
 
 First-party caveat flags:
   --expires-at <secs>  --not-before <secs>  --resource-hex <64-hex>
   --actions <u64>      --max-amount <u128>
   --passphrase-env <VAR> / --passphrase-file <PATH>  seal keygen or unlock mint authority
   --vault-dir <dir>  local custody directory for external anchor isolation
-  --allow-single-disk-anchor  permit a distinct anchor directory on the same filesystem
+  --allow-single-disk-anchor  permit a distinct anchor directory on the same filesystem; it
+                     then stops a restore of the custody directory only, not of the volume
 ";
 
 const CAVEAT_OPTIONS: &[&str] = &[
@@ -107,7 +138,9 @@ fn map_cap_err(err: CapabilityError) -> CliError {
         | CapabilityError::Denied
         | CapabilityError::MissingDischarge
         | CapabilityError::UnboundDischarge
-        | CapabilityError::UnusedDischarge => {
+        | CapabilityError::UnusedDischarge
+        | CapabilityError::Replay
+        | CapabilityError::ConsumptionFailed => {
             CliError::new(exit::POLICY_DENIED, format!("capability denied: {err:?}"))
         }
     }
@@ -176,12 +209,21 @@ fn parse_capability_request(args: &Args) -> Result<CapabilityRequest, CliError> 
         None => unix_now()?,
     };
     Ok(CapabilityRequest {
+        intent_digest: [0; 32],
         audience,
         resource,
         actions,
         amount,
         now,
     })
+}
+
+// Bind the application's canonical complete intent, not just predicate facts.
+fn parse_bound_capability_request(args: &Args) -> Result<CapabilityRequest, CliError> {
+    let mut request = parse_capability_request(args)?;
+    request.intent_digest =
+        from_hex_exact(args.require("intent-digest-hex")?, "--intent-digest-hex")?;
+    Ok(request)
 }
 
 fn load_macaroon_key(path: &str, pass: Option<&[u8]>) -> Result<Secret32, CliError> {
@@ -474,12 +516,15 @@ fn macaroon_verify(raw: &[String]) -> Result<(), CliError> {
         ("audience", Json::hex(&req.audience)),
         ("caveat_count", Json::num(token.caveats().len())),
         ("discharges_verified", Json::num(discharges.len())),
+        // A macaroon is a bearer grant: nothing was consumed and it verifies again.
+        ("consumed", Json::Bool(false)),
+        ("reusable", Json::Bool(true)),
     ]);
     if args.flag("json") {
         print!("{}", summary.to_pretty());
     } else {
         println!(
-            "valid macaroon {} ({} caveats)",
+            "valid macaroon {} ({} caveats; reusable bearer grant, nothing consumed)",
             to_hex(token.identifier()),
             token.caveats().len()
         );
@@ -561,7 +606,9 @@ fn consume_step_key(path: &str) -> Result<PqBiscuitStepKey, CliError> {
     ]);
     vault.bind(&mut tombstone)?;
     // Advance the companion MAC before replacing the secret. Any interrupted
-    // update fails closed, as does restoring only the old secret file.
+    // update fails closed, as does restoring only the old secret file. Restoring the
+    // file together with its companion reopens the key: see the step key paragraph
+    // of BISCUIT_HELP for why no local state can prevent that for a bearer file.
     vault.seal(&mut tombstone)?;
     replace(Path::new(path), tombstone.to_pretty().as_bytes(), || Ok(()))
         .map_err(|e| CliError::io("retiring one-time biscuit step key", e))?;
@@ -621,6 +668,7 @@ fn biscuit_keygen(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     let anchor_cfg = AnchorConfig::from_args(&args)?;
+    crate::anchor::preflight_tpm_enrollment(anchor_cfg.as_ref(), &args, 1)?;
     require_anchor_or_waiver(
         anchor_cfg.is_some(),
         args.flag("ephemeral-unanchored"),
@@ -924,6 +972,7 @@ fn biscuit_seal(raw: &[String]) -> Result<(), CliError> {
             "actions",
             "amount",
             "now",
+            "intent-digest-hex",
         ],
         &["bind-request", "json", "help"],
     )?;
@@ -936,7 +985,7 @@ fn biscuit_seal(raw: &[String]) -> Result<(), CliError> {
     let out_path = args.require("out")?;
     ensure_absent(out_path)?;
     let bound_req = if args.flag("bind-request") {
-        Some(parse_capability_request(&args)?)
+        Some(parse_bound_capability_request(&args)?)
     } else {
         None
     };
@@ -965,19 +1014,106 @@ fn biscuit_seal(raw: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn seal_store_anchor_key_path(store_path: &str) -> String {
+    format!("{store_path}.anchor-key")
+}
+
+/// Open (or with `--create-seal-store`, provision) the audience's seal consumption
+/// store, pinned in the external anchor the options name. A store is opened the way
+/// it was created: an anchored one needs its anchor, an unanchored one the waiver.
+fn open_seal_store(args: &Args) -> Result<FsSealConsumptionStore, CliError> {
+    const CAPACITY: usize = qsag_policy::MAX_BURNED_INTENT_NONCES;
+    let store_path = args.require("seal-store")?;
+    let anchor_cfg = AnchorConfig::from_args(args)?;
+    require_anchor_or_waiver(
+        anchor_cfg.is_some(),
+        args.flag("ephemeral-unanchored"),
+        "anchor-dir",
+    )?;
+    let store_error = |e: std::io::Error| {
+        CliError::state(format!("Biscuit seal consumption store {store_path}: {e}"))
+    };
+    let Some(cfg) = &anchor_cfg else {
+        return if args.flag("create-seal-store") {
+            FsSealConsumptionStore::create_new(store_path, CAPACITY)
+        } else {
+            FsSealConsumptionStore::open_existing(store_path, CAPACITY)
+        }
+        .map_err(store_error);
+    };
+    let key_path = seal_store_anchor_key_path(store_path);
+    if args.flag("create-seal-store") {
+        crate::anchor::preflight_tpm_enrollment(Some(cfg), args, 1)?;
+        ensure_absent(store_path)?;
+        ensure_absent(&key_path)?;
+        let domain_id = os_random_32()?;
+        let anchor_key = Secret32::new(os_random_32()?);
+        let anchor = FsExternalMountAnchor::provision_fresh(
+            cfg,
+            &[store_path],
+            &[],
+            SEAL_STORE_ANCHOR_DOMAIN,
+            domain_id,
+            anchor_key.0,
+        )?;
+        write_new(&key_path, to_hex(&anchor_key.0).as_bytes(), true)?;
+        return FsSealConsumptionStore::create_new_anchored(
+            store_path,
+            CAPACITY,
+            domain_id,
+            Box::new(anchor),
+        )
+        .map_err(store_error);
+    }
+    let domain_id =
+        FsSealConsumptionStore::anchored_domain_id(store_path, CAPACITY).map_err(store_error)?;
+    let key_hex = read_bounded_file(&key_path, 128)?;
+    let anchor_key = Secret32::new(from_hex_exact(
+        std::str::from_utf8(&key_hex)
+            .map_err(|_| CliError::state("seal store anchor key is not hex"))?
+            .trim(),
+        "seal store anchor key",
+    )?);
+    let anchor = FsExternalMountAnchor::open_existing(
+        cfg,
+        &[store_path],
+        &[],
+        SEAL_STORE_ANCHOR_DOMAIN,
+        domain_id,
+        anchor_key.0,
+    )?;
+    FsSealConsumptionStore::open_existing_anchored(store_path, CAPACITY, Box::new(anchor))
+        .map_err(store_error)
+}
+
 fn biscuit_verify(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
         &[
             "public",
+            "seal-store",
             "in",
             "audience-hex",
             "resource-hex",
             "actions",
             "amount",
             "now",
+            "intent-digest-hex",
+            "anchor-dir",
+            "vault-dir",
+            "anchor-tpm-nv",
+            "anchor-tpm-device",
+            "anchor-tpm-auth-env",
         ],
-        &["json", "help"],
+        &[
+            "json",
+            "help",
+            "create-seal-store",
+            "allow-single-disk-anchor",
+            "anchor-vmgenid",
+            "anchor-vmgenid-strict",
+            "ephemeral-unanchored",
+        ],
     )?;
     if args.flag("help") {
         print!("{BISCUIT_HELP}");
@@ -988,15 +1124,24 @@ fn biscuit_verify(raw: &[String]) -> Result<(), CliError> {
     let pk = PqBiscuitAuthorityPublicKey::from_bytes(&pk_doc.field_hex("public_key")?)
         .map_err(map_cap_err)?;
     let token = load_biscuit_token(args.require("in")?)?;
-    let req = parse_capability_request(&args)?;
+    let req = if token.is_request_bound() {
+        parse_bound_capability_request(&args)?
+    } else {
+        parse_capability_request(&args)?
+    };
+    let mut consumption = open_seal_store(&args)?;
     let dp = FrontierDpTable::build(FrontierFtsProfile::Compact1122);
-    token.verify(&pk, &dp, &req).map_err(map_cap_err)?;
+    token
+        .verify(&pk, &dp, &req, &mut consumption)
+        .map_err(map_cap_err)?;
     let summary = Json::object(vec![
         ("valid", Json::Bool(true)),
         ("token_id", Json::hex(token.token_id())),
         ("authority_id", Json::hex(&pk.authority_id)),
         ("hops", Json::num(token.blocks().len())),
         ("request_bound", Json::Bool(token.is_request_bound())),
+        ("consumed", Json::Bool(true)),
+        ("seal_store_anchored", Json::Bool(consumption.is_anchored())),
     ]);
     if args.flag("json") {
         print!("{}", summary.to_pretty());
@@ -1063,7 +1208,7 @@ mod tests {
         std::fs::write(path, snapshot).unwrap();
         assert!(
             consume_step_key(path).is_err(),
-            "the companion state must reject a restored step key"
+            "the companion state rejects the key file put back on its own"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
