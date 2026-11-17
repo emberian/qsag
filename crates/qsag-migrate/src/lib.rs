@@ -2,8 +2,12 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 //! Classical spending-key ownership with 438-repetition mixed-domain ZKBoo proofs
-//! (`(2/3)^438 < 2^-256` classical soundness error; generic Grover search over the
-//! challenge space costs `> 2^128` oracle iterations).
+//! (conditional challenge soundness `(2/3)^438 < 2^-256`; generic Grover search
+//! over challenges costs `> 2^128` iterations). These are not composed security
+//! bounds: 256-bit commitment digests provide about 128 classical collision bits
+//! and 85 quantum collision-query bits. Revealed curve keys do not authenticate
+//! their original owner against an attacker capable of Shor's algorithm.
+//! Replay prevention requires an external nullifier registry. See `SECURITY.md`.
 //!
 //! The distributed outer prover (`co_zk_mpc`) runs on one of two actively secure
 //! engines. Three custodians use replicated 2-of-3 sharing (`outer_mpc`): active
@@ -34,7 +38,8 @@ pub mod zk_engine;
 pub use bls12_381::{
     BlsG1Point, BlsMigrationRequest, BlsMigrationStatement, BlsOwnershipWitness,
     BlsValidatorCommitment, FpBls381, FrBls381, compute_bls_0x00_withdrawal_credentials,
-    prove_bls_migration, prove_bls_migration_in_domain, verify_bls_migration,
+    prove_bls_key_possession_in_domain, prove_bls_migration, prove_bls_migration_in_domain,
+    verify_bls_key_possession, verify_bls_key_possession_with_backend, verify_bls_migration,
     verify_bls_migration_with_backend,
 };
 pub use legacy::{HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness};
@@ -48,6 +53,7 @@ mod circuit;
 pub mod co_zk_mpc;
 mod limbs;
 mod ownership;
+mod proof_shape;
 pub use co_zk_mpc::CoZkCustodianShare;
 mod batch_hash;
 mod outer_mpc;

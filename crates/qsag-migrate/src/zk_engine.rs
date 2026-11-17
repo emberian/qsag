@@ -13,9 +13,10 @@ use qsag_accel::{
 };
 use qsag_addr::QsagAddress;
 pub const MIT_PARTIES: usize = 3;
-/// Classical soundness error `(2/3)^438 = 2^-256.2135753159 < 2^-256`. Generic Grover
+/// Conditional challenge soundness `(2/3)^438 = 2^-256.2135753159 < 2^-256`. Generic Grover
 /// search for an accepting challenge string therefore needs about
-/// `(3/2)^219 = 2^128.1067876579 > 2^128` oracle iterations. See `SECURITY.md`.
+/// `(3/2)^219 = 2^128.1067876579 > 2^128` oracle iterations. These are not composed
+/// security bounds; commitment collision binding is weaker. See `SECURITY.md`.
 pub const MIT_REPETITIONS: usize = 438;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrateError {
@@ -947,6 +948,73 @@ pub(crate) fn is_cozk_proof(proof: &MigrationZkProof) -> bool {
     })
 }
 
+/// Reject statement-determined framing errors before hashing or building a circuit.
+/// CoZK's omitted primary products still require replay for root authentication.
+pub(crate) fn preflight_proof(
+    proof: &MigrationZkProof,
+    shape: crate::proof_shape::ProofShape,
+) -> Result<(), MigrateError> {
+    let bad = MigrateError::MalformedProofStructure;
+    if proof.repetitions.len() != MIT_REPETITIONS {
+        return Err(bad);
+    }
+    let cozk = is_cozk_proof(proof);
+    let first = &proof.repetitions[0].pair[0].inputs;
+    let profile = if cozk {
+        let m = *first.get(8).ok_or(bad)? as usize;
+        if !(1..=MAX_COZK_CUSTODIANS).contains(&m) {
+            return Err(bad);
+        }
+        Some((&first[..8], m, 9 + (m - 1) * 32))
+    } else {
+        None
+    };
+    let packed = |bytes: &[u8], bits: usize| -> Result<(), MigrateError> {
+        if bytes.len() != bits.div_ceil(8)
+            || (bits % 8 != 0 && bytes.last().is_some_and(|b| b >> (bits % 8) != 0))
+        {
+            return Err(bad);
+        }
+        Ok(())
+    };
+    for rep in &proof.repetitions {
+        if rep.opened_e >= 3 {
+            return Err(bad);
+        }
+        for (j, view) in rep.pair.iter().enumerate() {
+            if let Some((magic, m, header)) = profile {
+                if view.inputs.get(..8) != Some(magic)
+                    || view.inputs.get(8).copied().map(usize::from) != Some(m)
+                {
+                    return Err(bad);
+                }
+                let head_bits = if (rep.opened_e as usize + j) % 3 == 2 {
+                    shape.input_bits
+                } else {
+                    0
+                };
+                if view.inputs.len() != header + head_bits.div_ceil(8) {
+                    return Err(bad);
+                }
+                packed(&view.inputs[header..], head_bits)?;
+                packed(&view.products, if j == 0 { 0 } else { shape.product_bits })?;
+                packed(&view.outputs, shape.output_bits)?;
+            } else if view.inputs.len() != shape.input_bytes
+                || view.products.len() != shape.product_bytes
+                || view.outputs.len() != shape.output_bytes
+            {
+                return Err(bad);
+            }
+        }
+        if cozk {
+            packed(&rep.hidden_outputs, shape.output_bits)?;
+        } else if rep.hidden_outputs.len() != shape.output_bytes {
+            return Err(bad);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn encode_cozk_v4_inputs(
     subseeds: &[[u8; 32]],
     head_inputs: &[u8],
@@ -1360,9 +1428,13 @@ pub fn verify_migration_proof_with_backend<B: AcceleratorBackend>(
     {
         return Err(MigrateError::MalformedProofStructure);
     }
+    preflight_proof(
+        proof,
+        crate::proof_shape::legacy(&statement.legacy_commitment),
+    )?;
     let mut t = transcript(statement, &proof.views_merkle_root);
     let es = challenges(&mut t);
-    // Authenticate both openings and all output shares before any gate replay.
+    // Check challenges before the profile-specific authentication/replay path.
     if proof
         .repetitions
         .iter()
@@ -1446,6 +1518,112 @@ pub(crate) mod tests {
             domain: [23; 32],
         }
     }
+    pub(crate) fn malformed_cozk_proof(es: [u8; MIT_REPETITIONS]) -> MigrationZkProof {
+        MigrationZkProof {
+            views_merkle_root: [7; 32],
+            repetitions: es
+                .into_iter()
+                .map(|opened_e| OpenedRepetitionView {
+                    opened_e,
+                    pair: core::array::from_fn(|_| PartyView {
+                        seed: [0; 32],
+                        inputs: [COZK_VIEW_MAGIC_V4.as_slice(), &[1]].concat(),
+                        products: Vec::new(),
+                        outputs: Vec::new(),
+                    }),
+                    hidden_party_commit: [0; 32],
+                    hidden_outputs: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn malformed_cozk_rejected_before_build_for_all_legacy_statements() {
+        for kind in [
+            LegacyCommitmentKind::BitcoinHash160([0; 20]),
+            LegacyCommitmentKind::EthereumKeccak20([0; 20]),
+            LegacyCommitmentKind::BitcoinTaprootXOnly([0; 32]),
+            LegacyCommitmentKind::Slip0010Ed25519([0; 32]),
+        ] {
+            let req = request(kind);
+            let statement = MigrationStatement {
+                legacy_commitment: req.legacy,
+                target_pq_address: req.target,
+                epoch_anchor: req.epoch,
+                migration_domain: req.domain,
+                migration_nullifier: [0; 4],
+                witness_anchor: [0; 4],
+            };
+            let mut proof = malformed_cozk_proof(challenges(&mut transcript(&statement, &[7; 32])));
+            for magic in [COZK_VIEW_MAGIC_V4, COZK_VIEW_MAGIC_V5] {
+                for rep in &mut proof.repetitions {
+                    for view in &mut rep.pair {
+                        view.inputs[..8].copy_from_slice(&magic);
+                    }
+                }
+                crate::circuit::without_circuit_build(|| {
+                    assert_eq!(
+                        verify_migration_proof(&statement, &proof, &req.domain, req.epoch),
+                        Err(MigrateError::MalformedProofStructure),
+                    )
+                });
+            }
+        }
+        crate::proof_shape::assert_descriptors_match_circuit_streams();
+    }
+
+    #[test]
+    fn authenticated_empty_v3_rejected_before_build() {
+        let req = request(LegacyCommitmentKind::BitcoinTaprootXOnly([0; 32]));
+        let statement = MigrationStatement {
+            legacy_commitment: req.legacy,
+            target_pq_address: req.target,
+            epoch_anchor: req.epoch,
+            migration_domain: req.domain,
+            migration_nullifier: [0; 4],
+            witness_anchor: [0; 4],
+        };
+        let views: [PartyView; 3] = core::array::from_fn(|_| PartyView {
+            seed: [0; 32],
+            inputs: Vec::new(),
+            products: Vec::new(),
+            outputs: Vec::new(),
+        });
+        let commits: Vec<_> = (0..MIT_REPETITIONS)
+            .map(|rep| core::array::from_fn(|head| commit(rep, head, &views[head])))
+            .collect();
+        let roots: Vec<_> = commits
+            .iter()
+            .enumerate()
+            .flat_map(|(rep, cs)| rep_root(rep, cs, [&[]; 3]))
+            .collect();
+        let root = cshake256_framed_32(b"QSAG.MIGRATE.ROOT.V3", &[&roots]);
+        let es = challenges(&mut transcript(&statement, &root));
+        let proof = MigrationZkProof {
+            views_merkle_root: root,
+            repetitions: es
+                .into_iter()
+                .enumerate()
+                .map(|(rep, e)| OpenedRepetitionView {
+                    opened_e: e,
+                    pair: [
+                        views[e as usize].clone(),
+                        views[(e as usize + 1) % 3].clone(),
+                    ],
+                    hidden_party_commit: commits[rep][(e as usize + 2) % 3],
+                    hidden_outputs: Vec::new(),
+                })
+                .collect(),
+        };
+        crate::circuit::without_circuit_build(|| {
+            assert_eq!(
+                verify_migration_proof(&statement, &proof, &req.domain, req.epoch),
+                Err(MigrateError::MalformedProofStructure),
+            )
+        });
+    }
+
     #[test]
     fn buffered_tapes_and_canonical_encodings() {
         let seed = [93; 32];

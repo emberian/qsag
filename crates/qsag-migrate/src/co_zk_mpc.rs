@@ -561,9 +561,10 @@ impl CoZkCustodianShare {
         }
     }
 
-    /// Prove Ethereum Beacon validator `BLS12-381` (`BeaconValidatorPubkey` or
-    /// `UnrevealedBls0x00Credential`) ownership across the custodian quorum without
-    /// reconstructing `sk` (or `pk_48` in `UnrevealedBls0x00Credential` mode).
+    /// Prove BLS key possession across the custodian quorum without reconstructing
+    /// the scalar or, in withdrawal mode, the public key. `OperatorSigningPubkey`
+    /// proves operator-key possession only, never withdrawal authority. The validator
+    /// record association is unauthenticated context; consumers must check chain state.
     pub fn prove_bls<T: Transport>(
         self,
         statement: &BlsMigrationStatement,
@@ -580,16 +581,16 @@ impl CoZkCustodianShare {
         accel: &B,
     ) -> Result<MigrationZkProof, Error> {
         let own = self.expand_witness_lanes(false)?;
-        if !statement.credentials_consistent() {
+        if !statement.context_encoding_valid() {
             return Err(Error::InvalidConfiguration);
         }
         let public_affine = match &statement.commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+            BlsValidatorCommitment::OperatorSigningPubkey(pk_48) => {
                 let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
                     .ok_or(Error::InvalidConfiguration)?;
                 Some(pt.to_affine().ok_or(Error::InvalidConfiguration)?)
             }
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+            BlsValidatorCommitment::BlsWithdrawalCredential(_) => None,
         };
         let statement_bytes = statement.to_transcript_bytes();
         let circuit = bls12_381::build_bls_ownership_circuit(statement, public_affine, &[0; 32]).0;
@@ -603,7 +604,7 @@ impl CoZkCustodianShare {
                 &own,
                 |root| bls12_381::bls_transcript(statement, root),
                 |proof| {
-                    bls12_381::verify_bls_migration_with_backend(
+                    bls12_381::verify_bls_key_possession_with_backend(
                         statement,
                         proof,
                         &statement.migration_domain,
@@ -621,7 +622,7 @@ impl CoZkCustodianShare {
                 &own,
                 |root| bls12_381::bls_transcript(statement, root),
                 |proof| {
-                    bls12_381::verify_bls_migration_with_backend(
+                    bls12_381::verify_bls_key_possession_with_backend(
                         statement,
                         proof,
                         &statement.migration_domain,
@@ -638,7 +639,8 @@ impl CoZkCustodianShare {
     /// (after verifying in-MPC that the shared `sk` matches `request.commitment`,
     /// including SHA-256 of the unrevealed compressed `G_1` key in `0x00` mode!) and
     /// prove the full 438-repetition Ethereum Beacon `BLS12-381` ZKBoo proof without
-    /// ever reconstructing `sk` or `pk_48`.
+    /// ever reconstructing `sk` or `pk_48`. An operator commitment proves only signing-key
+    /// possession; it gives no withdrawal authority. Check the validator association externally.
     pub fn prove_bls_request<T: Transport>(
         self,
         request: BlsMigrationRequest,
@@ -656,12 +658,12 @@ impl CoZkCustodianShare {
     ) -> Result<(BlsMigrationStatement, MigrationZkProof), Error> {
         let own = self.expand_witness_lanes(false)?;
         let public_affine = match &request.commitment {
-            BlsValidatorCommitment::BeaconValidatorPubkey(pk_48) => {
+            BlsValidatorCommitment::OperatorSigningPubkey(pk_48) => {
                 let pt = BlsG1Point::from_validator_pubkey_48(pk_48)
                     .ok_or(Error::InvalidConfiguration)?;
                 Some(pt.to_affine().ok_or(Error::InvalidConfiguration)?)
             }
-            BlsValidatorCommitment::UnrevealedBls0x00Credential(_) => None,
+            BlsValidatorCommitment::BlsWithdrawalCredential(_) => None,
         };
         let mut statement = BlsMigrationStatement {
             commitment: request.commitment,
@@ -672,7 +674,7 @@ impl CoZkCustodianShare {
             migration_domain: request.domain,
             migration_nullifier: [0; 4],
         };
-        if !statement.credentials_consistent() {
+        if !statement.context_encoding_valid() {
             return Err(Error::InvalidConfiguration);
         }
         let req_bytes = statement.to_transcript_bytes();
@@ -694,7 +696,7 @@ impl CoZkCustodianShare {
                     &own,
                     |root| bls12_381::bls_transcript(&statement, root),
                     |proof| {
-                        bls12_381::verify_bls_migration_with_backend(
+                        bls12_381::verify_bls_key_possession_with_backend(
                             &statement,
                             proof,
                             &statement.migration_domain,
@@ -720,7 +722,7 @@ impl CoZkCustodianShare {
                     &own,
                     |root| bls12_381::bls_transcript(&statement, root),
                     |proof| {
-                        bls12_381::verify_bls_migration_with_backend(
+                        bls12_381::verify_bls_key_possession_with_backend(
                             &statement,
                             proof,
                             &statement.migration_domain,
@@ -4593,7 +4595,7 @@ mod tests {
         }
     }
 
-    // Revealed `BeaconValidatorPubkey` (`0x01` credentials) through `prove_bls`.
+    // Revealed `OperatorSigningPubkey` (`0x01` credentials) through `prove_bls`.
     #[test]
     #[ignore = "full 438-repetition ceremony; run by name"]
     fn complete_distributed_bls12_381_pubkey_proof_verifies() {
@@ -4601,7 +4603,7 @@ mod tests {
         let mut withdrawal_credentials = [0x11u8; 32];
         withdrawal_credentials[0] = 0x01;
         let statement = BlsMigrationStatement {
-            commitment: fixture.witness.compute_beacon_commitment().unwrap(),
+            commitment: fixture.witness.compute_operator_commitment().unwrap(),
             validator_index: 123_456,
             withdrawal_credentials,
             target_pq_address: fixture.target.clone(),
@@ -4621,8 +4623,8 @@ mod tests {
             .prove_bls(&statement, net)
         });
         for (party, (res, audit)) in outcomes.into_iter().enumerate() {
-            let proof = res.expect("distributed BLS BeaconValidatorPubkey proof must succeed");
-            bls12_381::verify_bls_migration(&statement, &proof, &fixture.domain, 99).unwrap();
+            let proof = res.expect("distributed BLS OperatorSigningPubkey proof must succeed");
+            bls12_381::verify_bls_key_possession(&statement, &proof, &fixture.domain, 99).unwrap();
             for recovered in audit.candidates() {
                 assert_ne!(recovered, fixture.sk_le, "custodian {party} leaked BLS sk");
             }
@@ -4635,12 +4637,8 @@ mod tests {
     #[ignore = "full 438-repetition ceremony; run by name"]
     fn complete_distributed_bls12_381_unrevealed_0x00_request_proof_verifies() {
         let fixture = bls_fixture();
-        let commitment = fixture
-            .witness
-            .compute_unrevealed_0x00_commitment()
-            .unwrap();
-        let BlsValidatorCommitment::UnrevealedBls0x00Credential(withdrawal_credentials) =
-            commitment
+        let commitment = fixture.witness.compute_withdrawal_commitment().unwrap();
+        let BlsValidatorCommitment::BlsWithdrawalCredential(withdrawal_credentials) = commitment
         else {
             unreachable!()
         };
@@ -4665,7 +4663,7 @@ mod tests {
         });
         for (party, (res, audit)) in outcomes.into_iter().enumerate() {
             let (statement, proof) =
-                res.expect("distributed BLS UnrevealedBls0x00Credential proof must succeed");
+                res.expect("distributed BLS BlsWithdrawalCredential proof must succeed");
             assert_eq!(statement.migration_nullifier, fixture.nullifier);
             bls12_381::verify_bls_migration(&statement, &proof, &fixture.domain, 99).unwrap();
             for recovered in audit.candidates() {
@@ -4776,7 +4774,7 @@ mod tests {
         let mut withdrawal_credentials = [0u8; 32];
         withdrawal_credentials[0] = 0x02;
         let statement = BlsMigrationStatement {
-            commitment: witness.compute_beacon_commitment().unwrap(),
+            commitment: witness.compute_operator_commitment().unwrap(),
             validator_index: 9,
             withdrawal_credentials,
             target_pq_address: target,
@@ -4811,9 +4809,8 @@ mod tests {
             mut shares,
         } = bls_fault_fixture();
         shares[0][0] ^= 0x01;
-        let commitment = witness.compute_unrevealed_0x00_commitment().unwrap();
-        let BlsValidatorCommitment::UnrevealedBls0x00Credential(withdrawal_credentials) =
-            commitment
+        let commitment = witness.compute_withdrawal_commitment().unwrap();
+        let BlsValidatorCommitment::BlsWithdrawalCredential(withdrawal_credentials) = commitment
         else {
             unreachable!()
         };
