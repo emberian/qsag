@@ -76,7 +76,7 @@ Stateful signatures require each one-time leaf to be spent at most once, even ac
 
 Hem starts from public `JortsPoseidon2` signatures. It encodes their verification over the 64-bit Goldilocks field and its quartic extension, checks the trace with LogUp-GKR sumcheck, and commits multilinear witnesses using affine-combiner WHIR. The query schedules use the proven Johnson radius; retired capacity-proximity profiles are rejected.
 
-The default tag-4 profile uses cSHAKE256 and a 16-bit proof of work; tag 9 uses TurboSHAKE256 for the outer commitment hash. Explicit opt-in profiles use bounded-query salted-Merkle accounting. [Security parameters and composition boundaries](docs/SECURITY_AND_CT_PROOFS.md#hem-profile-and-qrom-accounting) matter when comparing proof sizes and timings.
+The default tag-4 profile uses cSHAKE256 and a 16-bit proof of work; tag 9 uses TurboSHAKE256 for the outer commitment hash. Explicit opt-in profiles use bounded-query salted-Merkle accounting. The analysed knowledge-soundness level of every profile is 127 bits in the classical random-oracle model and 81 bits in the quantum one, limited by 256-bit digests ([aggregation security](crates/qsag-agg/SECURITY.md)); the profile names and their nominal per-round figures are not security levels. [Security parameters and composition boundaries](docs/SECURITY_AND_CT_PROOFS.md#hem-profile-and-qrom-accounting) matter when comparing proof sizes and timings.
 
 Above a shard, the implementation has full in-circuit hologram merges and **contractive split recursion**. Split nodes verify child sumchecks, bind deferred PCS claims into an accumulator root, and fold homogeneous claims at each level. The native verifier checks the root proof, claim ledger, and folded openings against a **32-byte roster root**. Ordered, nonoverlapping shard-index intervals prevent double-counting within a tree; roster enrollment must enforce validator-key uniqueness across shards. [Implementation](crates/qsag-agg/src/recursive/split.rs) · [affine protocol](crates/qsag-agg/AFFINE_PROTOCOL.md).
 
@@ -113,7 +113,7 @@ QSAG_ACCEL=vulkan QSAG_BENCH_N=512 QSAG_BENCH_SHARD=512 \
     bench_consensus_scale -- --ignored --nocapture
 ```
 
-The consensus examples are single-host protocol harnesses with explicit network models. [Benchmark commands](docs/PERFORMANCE.md) specify the measured configurations. Stateful CLI vaults require `--anchor-dir <dir>` on a disjoint device, `--anchor-tpm-nv <index>`, or `--anchor-vmgenid`; use `--ephemeral-unanchored` for disposable test keys.
+The consensus examples are single-host protocol harnesses with explicit network models. [Benchmark commands](docs/PERFORMANCE.md) specify the measured configurations. Stateful CLI vaults require `--anchor-dir <dir>` on a disjoint device or `--anchor-tpm-nv <index>` (one never-written counter per anchored domain); `--anchor-vmgenid` adds snapshot and clone detection to one of them and is refused alone; use `--ephemeral-unanchored` for disposable test keys.
 
 ## Wallets, migration, and capabilities
 
@@ -122,10 +122,10 @@ The same custody machinery supports the rest of a wallet's signing lifecycle:
 | Component | What it provides |
 | --- | --- |
 | `qsag-hd`, `qsag-addr` | Dealerless module-lattice key hierarchies, committed watch-only inventories, Bech32m PQ addresses, and hybrid keys |
-| `qsag-migrate` | Local and threshold zero-knowledge ownership proofs for secp256k1, Ed25519, Pallas, and BLS12-381, bound to a PQ address—even when the chain has only seen a public-key hash |
+| `qsag-migrate` | Local and threshold zero-knowledge proofs of knowledge of a secp256k1, Ed25519, Pallas, or BLS12-381 (withdrawal-key) scalar, bound to a PQ address—even when the chain has only seen a public-key hash. Commitments are 256-bit: about 85 bits of generic quantum collision binding ([migration security](crates/qsag-migrate/SECURITY.md)) |
 | `qsag-policy` | Stateful velocity, allowlist, and window rules checked before custodians release shares |
-| `SpongeMacaroon`, `PqBiscuit` | Offline attenuation using a keyed sponge chain or a public-key-verifiable one-time-signature chain; third-party discharges for macaroons |
-| `qsag-cred`, zk-Hem | Threshold ML-DSA, threshold oblivious PRFs, selective-disclosure credentials, private multisignatures, and delegated capability presentations |
+| `SpongeMacaroon`, `PqBiscuit` | Offline attenuation using a keyed sponge chain or a public-key-verifiable one-time-signature chain; third-party discharges for macaroons. A `PqBiscuit` seal binds the complete intent and is accepted once per audience, through a consumption store the verifier must supply |
+| `qsag-cred`, zk-Hem | Threshold ML-DSA, threshold symmetric (Poseidon2) oblivious PRFs, issuer-accumulator selective-disclosure credentials whose presentations a verifier accepts once, multisignatures with witnessed policies, and delegated capability presentations |
 
 A migration proof establishes ownership; the receiving chain or application must implement the settlement rule. [Migration security](crates/qsag-migrate/SECURITY.md).
 
@@ -133,7 +133,7 @@ A migration proof establishes ownership; the receiving chain or application must
 
 Lean 4 covers protocol models, compiler-extracted Rust functions, and decoded assembly routines. The proof library forbids `sorry`, custom axioms, `native_decide`, and `Classical.choice`; selected top-level and MIR theorems are replayed across six independent kernels. The [extraction coverage map](aeneas/qsag-verified/extraction-coverage.md) identifies which extracted functions sit on production paths. Differential tests compare executable Lean models and Rust against independent implementations.
 
-This is component-level assurance. Whole-binary Rust refinement, full deployed WHIR/QROM composition, and a complete zk-Hem simulator remain open. [ASSURANCE.md](ASSURANCE.md) states the theorem premises, trusted base, and current boundaries; [proof architecture](docs/PROOF_ARCHITECTURE.md) and [MIR verification](docs/AENEAS_VERIFICATION.md) map the code to the proofs.
+This is component-level assurance. Whole-binary Rust refinement, full deployed WHIR/QROM composition, and a mechanized zk-Hem simulator remain open (the simulator and the composed bounds are argued on paper in `crates/qsag-agg/SECURITY.md`). [ASSURANCE.md](ASSURANCE.md) states the theorem premises, trusted base, and current boundaries; [proof architecture](docs/PROOF_ARCHITECTURE.md) and [MIR verification](docs/AENEAS_VERIFICATION.md) map the code to the proofs.
 
 Two hardware projects exercise the same primitives:
 

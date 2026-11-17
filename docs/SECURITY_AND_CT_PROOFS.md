@@ -168,17 +168,36 @@ The security of the 12-round permutation is an assumption about TurboSHAKE, and 
 in the table are the same per-round estimates as for tags 4 and 5, computed without regard to
 the round count of the hash.
 
-"Query target" is the exponent below which every non-exhaustive canonical stage keeps its
-distinct-fiber query error. "Round bits" is that exponent plus the proof-of-work bits, and
+"Query target" is the exponent the schedule aims every non-exhaustive canonical stage's
+distinct-fiber query error below. With the fold loss included, the calculator confirms it
+for tags 4 to 10 at $2^{17}$ to $2^{24}$ cells; tag 2 misses its target, with a worst query
+round of 124.5 bits rather than 128
+(`bounds::tests::stage_bounds_against_the_constants_asserted_by_the_regimes`). "Round bits" is that exponent plus the proof-of-work bits, and
 its half: the nominal work of a classical, respectively Grover, search over one round of
 challenges. It is a per-round estimate, not a composed QROM security theorem.
+
+**Analysed levels.** `crates/qsag-agg/SECURITY.md` composes the round-by-round errors of
+the opening and of committed-mask zk-Hem through BCS, and
+`crates/qsag-agg/src/zk_hem/bounds.rs` computes the numbers (`security_report`,
+`pcs_report`; pinned by `bounds::tests::reports_are_pinned_at_the_project_sizes`). Every
+accepted tag has 127 bits of knowledge soundness in the classical random-oracle model and
+**81 bits in the QROM**. Both are set by the 256-bit Merkle and transcript digests: the
+QROM digest term is `6380 t^3 / 2^256` ([CDHZ25] Theorems 11.3, 6.10, 8.3) and grinding
+receives no quantum credit. The "136" of tags 4 and 9 is therefore not a QROM level; with
+longer digests the next limits are the round terms (96 to 116 bits for the public opening,
+86 to 95 for the hiding protocol's scalar blend), and the quartic field caps the cited
+theorem at about 116 bits. Tag 2 reaches 124.5 bits per query round. That analysis is a
+paper argument citing published theorems; the Lean accounting referenced in this section
+is per-round and does not prove it. The parameter changes that raise the level (32-byte
+Stage-0 salts, 48-byte digests, affine blend) are listed in that document's section 6 and
+are not implemented.
 
 Two predicates separate the regimes, and they should not be conflated:
 
 - `meets_unconditional_grover_128_floor` holds when the Grover round work is at least 128
   bits in the nominal single-round search estimate, without a query-ceiling parameter. **Only tags 4 and 9 satisfy it** (136
   bits; they share one query table).
-- `meets_bounded_qrom_128_profile` holds for tags 5–8 and 10. Their query tables come from the
+- `is_bounded_query_profile` (Lean `isBoundedQueryProfile`) holds for tags 5–8 and 10. Their query tables come from the
   [CDHZ25] compressed-oracle state-restoration accounting in
   `Protocol/Aggregation/QromSaltedMerkleStateRestoration.lean`
   (`HemOptimizedQromSchedule.minQueries`: `cdhzPow16At2pow38` and `unitaryZeroPow`), which
@@ -189,10 +208,10 @@ Two predicates separate the regimes, and they should not be conflated:
   10 on 12-round TurboSHAKE256 for the Merkle-Canopy and proof of work.
 
 Aggregate authorization (`WhirSchedule::validate`, and the regime checks in
-`arithmetize.rs` and `recursive.rs`) uses `meets_qrom_128_floor`, which is the disjunction
-of the two predicates (in Lean, `meetsAuthorizedAggRegimeFloor`, with `meetsQrom128Floor`
-kept as an alias). The name is historical: a `true` result does not imply 128 bits of
-unconditional Grover work. The entry points without a regime argument (`verify_aggregate`,
+`arithmetize.rs` and `recursive.rs`) uses `is_accepted_aggregate_profile`, which is the
+disjunction of the two predicates (in Lean, `isAcceptedAggregateProfile`). It was named
+`meets_qrom_128_floor`; it reports policy membership, and a `true` result implies neither
+128 bits of unconditional Grover work nor a 128-bit QROM level. The entry points without a regime argument (`verify_aggregate`,
 `verify_shard_batch`) pass `WhirSecurityRegime::default()` and so accept tag 4 only; a
 verifier that accepts tags 5–10 opts in through
 the `*_with_regime` entry points and thereby adopts that regime's assumptions (including a query ceiling for tags 5–8 and 10; tag 9 uses the nominal round-work floor). Merged
@@ -209,10 +228,18 @@ disjoint signer sets, not recursive SNARK verification.
 
 The zk-Hem prover (`crates/qsag-agg/src/zk_hem/protocol.rs`) has two modes. The hiding
 mode (`prove`: five tables, Libra masks, opening blinders) is used by the BlindVC
-presentation and the zk-Multisig relation. The public mode (`prove_public`: one table, no
+presentation, the zk-Multisig and capability relations, and the full-shard merge. Its
+coins are derived from the seed, the relation digest, the regime's schedule, the statement
+and the witness; the schedule was missing, so one seed under two regimes repeated every
+mask under different challenges
+(`zk_hem::bounds::tests::coins_do_not_repeat_across_regimes`). The public mode (`prove_public`: one table, no
 masks) is used by the recursive opening merge, whose inputs are public child openings.
-The separate full-shard merge now also uses `prove_public_hologram`; that non-hiding proof
-mode does not establish zero knowledge for its witnessed child proofs or signer bits.
+The full-shard merge used `prove_public_hologram` until wire version 2. That proof
+serializes `eval_z`, an unmasked evaluation of the parent assignment, which distinguishes
+two candidate child-proof sets with the same committee, message and count
+(`zk_hem::full_shard::tests::full_shard_candidate_witness_distinguisher`). The parent is
+now a committed-mask `ZkHemProof` (`QSAGFSM2` in `QSAGFSA2`, statement label
+`QSAG.FULL.SHARD.MERGE/v2`); version-1 carriers are rejected.
 What the public transcript binds, in order: the relation digest (all matrices, variable
 count, public-input count), the WHIR schedule, the statement, the public inputs and the
 commitment, before the first challenge; each row round before its challenge; the three row
@@ -240,9 +267,11 @@ A separate `crates/qsag-agg/src/zk_hem/full_shard.rs` implementation now records
 checks in `shard_gadget`, together with committee/message binding and the WHIR opening;
 `verify_full_shard_merge` consumes public shard statements and a parent proof without
 local child-verification evidence. It is restricted to `JortsPoseidon2`, has verifier work
-linear in the relation size, and does not permit a parent to be a child. Its composed
-QROM soundness, as well as the opening-only/public-mode transcript reduction, is not
-mechanized. The Poseidon2 Merkle tweak is injective per key
+linear in the relation size (it scans the relation matrices; no hologram is compiled),
+and does not permit a parent to be a child. Its soundness and signer privacy are the
+committed-mask statements of `crates/qsag-agg/SECURITY.md` (81 bits QROM, 127 classical;
+honest-verifier zero knowledge with 128-bit leaf salts); neither they nor the
+opening-only/public-mode transcript reduction is mechanized. The Poseidon2 Merkle tweak is injective per key
 but not across keys (`pk_seed + (0,0,d,0)` at index `idx - d` equals `pk_seed` at `idx`);
 no full authentication path can be replayed that way, and the scope is pinned by a test.
 
@@ -344,9 +373,12 @@ consumed through single-use tickets (`AnchorTicket` in `durable_ledger.rs`): a t
 reserved, the journal write is made durable, and the ticket is consumed; replay, a failed
 persist, a crash at either point and a second consumption are all refused. The CLI gate
 (`require_anchor_or_waiver` in `crates/qsag-cli/src/anchor.rs`) demands exactly one of
-`--anchor-dir` and `--ephemeral-unanchored` for `keygen`, `sign`, `aggregate`,
+a monotone anchor (`--anchor-dir`, or `--anchor-tpm-nv` with one never-written counter per
+anchored domain) and `--ephemeral-unanchored` for `keygen`, `sign`, `aggregate`,
 `quorum keygen` and `policy init`, and the MAC-covered `anchor_required` field stops an
-anchored key from being used under the waiver. `Exec/TwoSlotHwmCrashModel.lean` (with
+anchored key from being used under the waiver. `--anchor-vmgenid` detects VM snapshot
+and clone only and is refused without a disjoint-device directory anchor or a TPM
+counter: an in-place restore of same-disk state passes its checks. `Exec/TwoSlotHwmCrashModel.lean` (with
 `Exec/TwoSlotHwmBase.lean`, instances in `Tests/TwoSlotHwmTeeth.lean`) is the Lean crash
 model of the paged two-slot layout under torn sectors, with the MAC as an assumption.
 
@@ -479,7 +511,7 @@ Source inspection dated 2026-11-14, with the Baggy, FTS, TOPRF and ceremony rows
 | Baggy few-time layer | PORS+FP `SHA3_128F`: tree height 11, 28 revealed leaves, at most 128 multiproof nodes; layer at most `32·28 + 2 + 32·128 = 4,994` bytes; signature at most 71,654 bytes. Subset-cover bound $\binom{28g}{28}/\binom{2048}{28}$: at least 209, 157, 136, 122 bits for $g=1..4$ (proved in-tree by `sha3_128f_binomial_bits`; the Rust estimate is `forgery_bits_milli`). | `crates/qsag-core/src/pors_fp.rs`; `Protocol/Signing/PorsFpSecurity.lean` |
 | Threshold FTS ceremony | Per tuple and ordered pair: 256 random OTs for the shared-operand products (three operands in the three 16-byte segments of a 48-byte KOS pad, plus one set for $a^6$) instead of 7,552; MACs from 128 random OTs per lane on the key share, expanded to cSHAKE256 streams and folded by powers of $z$; squarings checked by one batched linear check; three products combined with weights $s,s^2,s^3$ against one sacrificial product; 9 authenticated values instead of 25. Tested by fault injection, not modelled in Lean. | `crates/qsag-fts/src/dkg.rs`, `crates/qsag-fts/src/ot.rs` |
 | Threshold OPRF reservoir | Chunks of 4 power tuples or 32 triples per preprocessing run, each under its own session id `PREPROCESS.V2(binding, sessions, scope, counter)`; union bound over runs. Client checks $ab=c$ on each reconstructed triple (a shifted factor passes with probability $1/p$) and masks each input limb with two triples ($1/p^2$). | `crates/qsag-cred/src/voprf_spdz.rs` |
-| Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors per flush are `<(63/(2^128-1))^2<2^-244` for packed Boolean `AND` (`BIT_CHECK_NUMERATOR=63`), `<2^-249` over the large primes, and `<2^-186` over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem. | `zk_engine.rs`; `outer_mpc.rs`; `pallas.rs`; `bls12_381.rs` |
+| Migration | `MIT_REPETITIONS=438`; `(2/3)^438≈2^-256.2136`. Active multiplication errors per flush are `<(63/(2^128-1))^2<2^-244` for packed Boolean `AND` (`BIT_CHECK_NUMERATOR=63`), `<2^-249` over the large primes, and `<2^-186` over cubic Goldilocks. No one of these numbers is a complete FS/QROM acceptance theorem; every commitment layer is a 256-bit digest, so generic collision binding is about $2^{128}$ classical and $2^{85}$ quantum queries (`crates/qsag-migrate/SECURITY.md`). | `zk_engine.rs`; `outer_mpc.rs`; `pallas.rs`; `bls12_381.rs` |
 
 `hem_johnson_qrom_witnesses_cover_every_canonical_stage` checks canonical nv=2…24 stage coverage and equality of the used-row/table counts; the Rust schedule also admits nv=25…28, which this check does not cover. It establishes the stated numerical side conditions for the deployed QROM table; the underlying decomposition theorem remains the separate obligation below.
 
