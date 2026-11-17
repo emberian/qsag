@@ -1091,3 +1091,91 @@ theorem regularBlockXorOneProb_cons (t : ExactRat) (ts : List ExactRat) :
     regularBlockXorOneProb (t :: ts) = xorStepProb t (regularBlockXorOneProb ts) := by rfl
 end Qsag
 end
+
+-- Owning-module audit certificates for theorems audited and paired in `Tests/MathAndCoding`.
+#verify_constructive
+  Qsag.acceptProbExact_safe_cancels_shift
+  Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128
+  Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256
+  Qsag.rlwe_accept_box_preimage_in_proposal_box
+
+/-! ## Executed controls for `Tests/MathAndCoding`
+
+Kernel-evaluated witnesses and teeth, stated here because the definitions they execute are sealed outside
+this module. `Tests/MathAndCoding` audits and pairs them. -/
+public section
+namespace Qsag
+
+set_option autoImplicit false
+set_option exponentiation.threshold 512
+def bellToyRho (y : Int) : Nat := if y = 0 then 4 else if y.natAbs = 1 then 3 else if y.natAbs = 2 then 1 else 0
+
+theorem tooth_omitting_rejection_scaling_breaks_hvzk :
+    ¬ ExactRat.eqv (ExactRat.scaleNat (bellToyRho (0 - 0)) (acceptProbExact bellToyRho 1 0 0))
+      (ExactRat.scaleNat (bellToyRho (0 - 1)) (acceptProbExact bellToyRho 1 0 1)) := by decide
+
+theorem tooth_tight_clipping_loses_boundary_preimage :
+    ∃ z v : Int, inHalfOpenBox rlweAcceptHalfWidth z = true ∧ (-1 ≤ v) ∧ (v ≤ 1) ∧
+      inHalfOpenBox rlweAcceptHalfWidth (z - v) = false :=
+  ⟨-3070, 1, by decide, by decide, by decide, by decide⟩
+
+theorem witness_accept_box_preimage :
+    ∃ z v : Int, inHalfOpenBox rlweAcceptHalfWidth z = true ∧ (-1 ≤ v) ∧ (v ≤ 1) :=
+  ⟨-3070, 1, by decide, by decide, by decide⟩
+
+theorem witness_acceptProb_cancellation :
+    ∃ (rho : Int → Nat) (M : Nat) (hM : 0 < M) (z v : Int),
+      0 < rho (z - v) ∧ rho z ≤ M * rho (z - v) ∧
+      ExactRat.eqv (ExactRat.scaleNat (rho (z - v)) (acceptProbExact rho M z v)) ⟨(rho z : Int), M, hM⟩ :=
+  ⟨bellToyRho, 4, by decide, 0, 1, by decide, by decide, by decide⟩
+
+theorem tooth_pcg_dense_depth14_stern_dumer_below_256 :
+    ¬ sternDumerWorkExceedsPow2 pcgDepth14Cols pcgDenseRows pcgDenseWeightT 2 52 256 := by
+  intro hBad
+  have h60Le : 60 ≤ pcgDenseRows - 52 := Nat.le_trans
+    (Nat.le_trans (by decide : 60 ≤ 1024) (Nat.le_mul_of_pos_left 1024 (by decide : 0 < 135))) (rows_sub_ge 52 (by decide))
+  have hUp60 : binom pcgDepth14Cols 60 ≤ 8 ^ 60 * binom (pcgDenseRows - 52) 60 := by
+    apply binom_scale_upper_bound 8 h60Le
+    rw [Nat.sub_sub]
+    have hR := Nat.mul_le_mul_left 8 (rows_sub_ge (52 + 60) (by decide))
+    rw [← Nat.mul_assoc 8 135 1024] at hR
+    exact Nat.le_trans (by unfold pcgDepth14Cols; exact Nat.mul_le_mul_right 1024 (by decide : 1024 ≤ 8 * 135)) hR
+  exact stern_dumer_depth14_contra_gen binom binom_one_right binom_step_right hUp60 (binom_pos h60Le) hBad
+
+theorem tooth_omitting_accumulator_collapses_dual_lpn_bias :
+    ¬ ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb ((List.replicate 64 3).map depth15TreeRate))))
+      (ExactRat.twoNegPow 256) := by
+  rw [piling_up_lemma_regular_blocks_rat]; apply ExactRat.not_lt_twoNegPow_of_gt
+  have hRep : ∀ n : Nat, (((List.replicate n 3).map depth15TreeRate).foldr
+        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).num = ((32762 ^ n : Nat) : Int) ∧
+      (((List.replicate n 3).map depth15TreeRate).foldr
+        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).den = 32768 ^ n := by
+    intro n; induction n with
+    | zero => exact ⟨rfl, rfl⟩
+    | succ n' ih =>
+      rw [List.replicate_succ, List.map_cons, List.foldr_cons, ExactRat.mul_num, ExactRat.mul_den, ih.1, ih.2]
+      exact ⟨by change (32762 : Int) * ((32762 ^ n' : Nat) : Int) = _; rw [Nat.pow_succ', Int.natCast_mul]; rfl,
+             by change 32768 * 32768 ^ n' = 32768 ^ (n' + 1); rw [Nat.pow_succ']⟩
+  rw [(hRep 64).1, (hRep 64).2, Int.natAbs_natCast]
+  have hSplit : ∀ m : Nat, 32768 ^ m = 16384 ^ m * 2 ^ m := by
+    intro m; induction m with
+    | zero => rfl
+    | succ m' ih => rw [Nat.pow_succ 32768, ih, Nat.pow_succ 16384, Nat.pow_succ 2, nat_mul4_swap, show 16384 * 2 = 32768 from by decide]
+  rw [hSplit 64]
+  exact Nat.lt_of_lt_of_le
+    (Nat.mul_lt_mul_of_pos_right (Nat.pow_lt_pow_left (by decide) (by decide)) (Nat.two_pow_pos 64))
+    (Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide) (by decide)))
+
+-- (math-teeth anchor Qsag )
+end Qsag
+end
+#verify_constructive
+  Qsag.tooth_omitting_rejection_scaling_breaks_hvzk
+  Qsag.tooth_tight_clipping_loses_boundary_preimage
+  Qsag.witness_accept_box_preimage
+  Qsag.witness_acceptProb_cancellation
+#verify_inhabited Qsag.rlwe_accept_box_preimage_in_proposal_box Qsag.witness_accept_box_preimage
+#verify_inhabited Qsag.acceptProbExact_safe_cancels_shift Qsag.witness_acceptProb_cancellation
+#verify_constructive
+  Qsag.tooth_pcg_dense_depth14_stern_dumer_below_256
+  Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias
