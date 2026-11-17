@@ -175,32 +175,52 @@ fn eq_eval(a: &[E], b: &[E]) -> E {
 
 /// `eq(point, x)` for every `x`, with `point[0]` on the lowest index bit.
 fn eq_table(point: &[E]) -> Vec<E> {
-    let mut table = vec![E::ZERO; 1 << point.len()];
-    table[0] = E::ONE;
-    for (j, &r) in point.iter().enumerate() {
-        let (lo, hi) = table[..2 << j].split_at_mut(1 << j);
-        let step = |lo: &mut [E], hi: &mut [E]| {
+    let serial = |point: &[E]| {
+        let mut table = vec![E::ZERO; 1 << point.len()];
+        table[0] = E::ONE;
+        for (j, &r) in point.iter().enumerate() {
+            let (lo, hi) = table[..2 << j].split_at_mut(1 << j);
             for (l, h) in lo.iter_mut().zip(hi) {
                 *h = *l * r;
                 *l -= *h;
             }
-        };
-        #[cfg(feature = "std")]
-        {
-            let chunk = par_chunk(lo.len());
-            if lo.len() > chunk {
-                std::thread::scope(|scope| {
-                    for (l, h) in lo.chunks_mut(chunk).zip(hi.chunks_mut(chunk)) {
-                        let step = &step;
-                        crate::spawn_bounded(scope, move || step(l, h));
-                    }
-                });
-                continue;
+        }
+        table
+    };
+    let mut table = vec![E::ZERO; 1 << point.len()];
+    let rows = par_chunk(table.len());
+    if rows >= table.len() {
+        return serial(point);
+    }
+    // The table is the product of the tables of the two halves of the point.
+    let split = point.len() / 2;
+    let (low, high) = (serial(&point[..split]), serial(&point[split..]));
+    let per_job = rows.div_ceil(low.len()) * low.len();
+    par_chunks_of(&mut table, per_job, |off, part| {
+        for (block, &h) in part.chunks_mut(low.len()).zip(&high[off / low.len()..]) {
+            for (slot, &l) in block.iter_mut().zip(&low) {
+                *slot = h * l;
             }
         }
-        step(lo, hi);
-    }
+    });
     table
+}
+
+/// `f(offset, chunk)` over consecutive chunks of `chunk` elements of `data`.
+fn par_chunks_of(data: &mut [E], chunk: usize, f: impl Fn(usize, &mut [E]) + Sync) {
+    #[cfg(feature = "std")]
+    {
+        std::thread::scope(|scope| {
+            for (k, part) in data.chunks_mut(chunk).enumerate() {
+                let f = &f;
+                crate::spawn_bounded(scope, move || f(k * chunk, part));
+            }
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    for (k, part) in data.chunks_mut(chunk).enumerate() {
+        f(k * chunk, part);
+    }
 }
 
 /// `eq(point, bits of index)` for one index.
@@ -1482,6 +1502,9 @@ pub fn verify(
     };
 
     let lambda = tr.squeeze_fp5(b"LAMBDA");
+    let phase = crate::profile::span("zkhem2_verify_matrix");
+    let matrix_at_point = matrix_at(shape, &rx, &ry, &combine);
+    drop(phase);
     let terms = claim_terms(&ClaimInputs {
         layout: &layout,
         log_rows: shape.log_rows,
@@ -1490,7 +1513,7 @@ pub fn verify(
         ry: &ry,
         lambda,
         rho2,
-        matrix_at_point: matrix_at(shape, &rx, &ry, &combine),
+        matrix_at_point,
     });
     let mut values = vec![
         proof.row_mask_sum,
@@ -1501,6 +1524,7 @@ pub fn verify(
     ];
     values.extend(public_inputs.iter().map(|&v| E::from_base(v)));
     let value = batched_value(lambda, &values);
+    let _phase = crate::profile::span("zkhem2_verify_opening");
     pcs::verify(
         profile,
         &proof.root,

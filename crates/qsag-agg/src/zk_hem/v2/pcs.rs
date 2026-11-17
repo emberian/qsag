@@ -224,14 +224,27 @@ impl Coef for Fp5 {
     }
 }
 
-/// `sum_i coeffs[i] x^i` at each of `K` points.
+/// `sum_i coeffs[i] x^i` at each of `K` points. Blocks of [`EVAL_BLOCK`] coefficients are
+/// taken against a table of powers, so that a base-field coefficient costs one
+/// multiplication by a base-field element, and the blocks are combined by Horner's rule.
 pub fn eval_poly<T: Coef, const K: usize>(coeffs: &[T], xs: [Fp5; K]) -> [Fp5; K] {
+    let powers: [[Fp5; EVAL_BLOCK + 1]; K] = xs.map(|x| {
+        let mut row = [Fp5::ONE; EVAL_BLOCK + 1];
+        for j in 1..=EVAL_BLOCK {
+            row[j] = row[j - 1] * x;
+        }
+        row
+    });
     par_sum(coeffs.len(), |range| {
         let start = range.start as u64;
         let mut acc = [Fp5::ZERO; K];
-        for c in coeffs[range].iter().rev() {
-            for (a, &x) in acc.iter_mut().zip(&xs) {
-                *a = *a * x + c.lift();
+        for block in coeffs[range].chunks(EVAL_BLOCK).rev() {
+            for (a, row) in acc.iter_mut().zip(&powers) {
+                let low = block
+                    .iter()
+                    .zip(row)
+                    .fold(Fp5::ZERO, |sum, (c, &p)| sum + c.scale(p));
+                *a = *a * row[EVAL_BLOCK] + low;
             }
         }
         for (a, x) in acc.iter_mut().zip(&xs) {
@@ -240,6 +253,8 @@ pub fn eval_poly<T: Coef, const K: usize>(coeffs: &[T], xs: [Fp5; K]) -> [Fp5; K
         acc
     })
 }
+
+const EVAL_BLOCK: usize = 32;
 
 /// A challenge-field polynomial at a base-field point.
 fn eval_at_base(coeffs: &[Fp5], y: Goldilocks) -> Fp5 {
