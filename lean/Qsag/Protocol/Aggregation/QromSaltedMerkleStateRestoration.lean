@@ -3093,5 +3093,277 @@ theorem hemOptimizedStageWitnesses_unitaryZeroPow_24 :
   rw [hemStageGeoms_24_eq]
   rfl
 
+/-! ### Unsalted canopy tooth (audited in `Tests/HemExtractedOpeningBridgeTests`)
+
+Paired here: the constant shared with `saltedCanopy_fresh_salt_preprocessed_bound` is
+`SaltedCanopyLayout.levels`, reached through the body of `SaltedCanopyLayout.atSalt`, which is visible
+only in this module. -/
+
+/-- Explicit unsalted (`cardSalt = 1`) 4-address finite Canopy instance showing why omitting
+    per-commitment salts enables a 0-online-query collision attack under 2 bits of offline advice. -/
+def unsaltedFourAddressCanopy : SaltedCanopyLayout 1 4 1 where
+  encode := fun _ _ _ u v =>
+    ⟨u.toNat * 2 + v.toNat, by
+      have hu := u.isLt
+      have hv := v.isLt
+      omega⟩
+  decode := fun x =>
+    some (0, 0, 0, BitVec.ofNat 1 (x.1 / 2), BitVec.ofNat 1 (x.1 % 2))
+  levels := 1
+  nodes := 1
+  decode_sound := by
+    intro x s l n u v h
+    injection h with hEq
+    rcases hEq with ⟨_, _, _, rfl, rfl⟩
+    apply Fin.ext
+    dsimp
+    have hx := x.isLt
+    have h1 : (BitVec.ofNat 1 (x.1 / 2)).toNat = x.1 / 2 := by
+      rw [BitVec.toNat_ofNat]; omega
+    have h2 : (BitVec.ofNat 1 (x.1 % 2)).toNat = x.1 % 2 := by
+      rw [BitVec.toNat_ofNat]; omega
+    rw [h1, h2]
+    omega
+  decode_encode := by
+    intro s l n u v hl hn
+    have hs : s = 0 := Fin.ext (by omega)
+    have hl0 : l = 0 := by omega
+    have hn0 : n = 0 := by omega
+    subst hs hl0 hn0
+    dsimp
+    have hu := u.isLt
+    have hv := v.isLt
+    have hU : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) / 2) = u := by
+      apply BitVec.eq_of_toNat_eq
+      rw [BitVec.toNat_ofNat]; omega
+    have hV : BitVec.ofNat 1 ((u.toNat * 2 + v.toNat) % 2) = v := by
+      apply BitVec.eq_of_toNat_eq
+      rw [BitVec.toNat_ofNat]; omega
+    rw [hU, hV]
+
+/-- `#tooth`: without fresh salting (`cardSalt = 1`), 2 bits of offline advice find an explicit
+    oracle collision in 0 online queries on 100% (`8 / 8`) of 1-bit 3-address oracles. -/
+theorem tooth_unsalted_canopy_preprocessed_collision :
+    ∃ (A : PreprocessingGame.ClassicalAdvice 3 1 1 2 0 (Fin 3 × Fin 3)),
+      PreprocessingGame.adviceWinCount A
+        (fun H _ pair => PreprocessingGame.collisionWin H pair) = (2 ^ 1) ^ 3 ∧
+      (∀ H : Fin 3 → BitVec 1, (A.run H 0).2 = 0) ∧
+      unsaltedFourAddressCanopy.levels = 1 :=
+  ⟨PreprocessingGame.storedCollision, PreprocessingGame.storedCollision_count,
+   PreprocessingGame.storedCollision_execution.2.2, rfl⟩
+
+#verify_constructive Qsag.tooth_unsalted_canopy_preprocessed_collision
+#tooth_pair saltedCanopy_fresh_salt_preprocessed_bound vs tooth_unsalted_canopy_preprocessed_collision
+
+/-! ### Executed `w = 2` DFMS runtime witness and database-measurement tooth
+(audited and paired in `Tests/QromCoherentOracleTests`)
+
+The Gaussian-integer arithmetic, the query gate and the oracle sums are sealed in `Oracle/Qrom`. The
+copies below have bodies the kernel can evaluate in this module; each is proved equal to the original
+from the equations `Oracle/Qrom` exports, and the two theorems rewrite to the copies before deciding. -/
+
+private def gaussAddK (z w : GaussInt) : GaussInt := ⟨z.re + w.re, z.im + w.im⟩
+
+private def gaussSubK (z w : GaussInt) : GaussInt := ⟨z.re - w.re, z.im - w.im⟩
+
+private def gaussDoublePowK : Nat → GaussInt → GaussInt
+  | 0, z => z
+  | k + 1, z => gaussAddK (gaussDoublePowK k z) (gaussDoublePowK k z)
+
+private theorem gaussDoublePow_eq_K : ∀ (k : Nat) (z : GaussInt),
+    gaussDoublePow k z = gaussDoublePowK k z
+  | 0, z => gaussDoublePow_base z
+  | k + 1, z => by
+    rw [gaussDoublePow_step, gaussDoublePow_eq_K k z, GaussInt.add_def]
+    rfl
+
+private def dfmsCellDecompressK (m : Nat) (f : Option (BitVec (2 * m)) → GaussInt) :
+    Option (BitVec (2 * m)) → GaussInt
+  | none => gaussDoublePowK m (bvGaussSum (2 * m) (fun y => f (some y)))
+  | some y =>
+    gaussAddK
+      (gaussSubK (gaussDoublePowK (2 * m) (f (some y))) (bvGaussSum (2 * m) (fun y' => f (some y'))))
+      (gaussDoublePowK m (f none))
+
+private theorem dfmsCellDecompress_eq_K (m : Nat) (f : Option (BitVec (2 * m)) → GaussInt)
+    (c : Option (BitVec (2 * m))) : dfmsCellDecompress m f c = dfmsCellDecompressK m f c := by
+  cases c with
+  | none => simp only [dfmsCellDecompress, dfmsCellDecompressK, gaussDoublePow_eq_K]
+  | some y =>
+    simp only [dfmsCellDecompress, dfmsCellDecompressK, gaussDoublePow_eq_K, GaussInt.add_def,
+      GaussInt.sub_def, gaussAddK, gaussSubK]
+
+private def dfmsDecompressK (m : Nat) :
+    (n : Nat) → (DfmsTable m n → GaussInt) → DfmsTable m n → GaussInt
+  | 0, f, () => f ()
+  | n + 1, f, (c, D) =>
+    dfmsCellDecompressK m (fun c' => dfmsDecompressK m n (fun D' => f (c', D')) D) c
+
+private theorem dfmsDecompress_eq_K (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → GaussInt)
+    (D : DfmsTable m n), dfmsDecompress m n f D = dfmsDecompressK m n f D
+  | 0, _, () => rfl
+  | n + 1, f, (c, D) => by
+    have hInner : (fun c' => dfmsDecompress m n (fun D' => f (c', D')) D) =
+        fun c' => dfmsDecompressK m n (fun D' => f (c', D')) D :=
+      funext fun c' => dfmsDecompress_eq_K m n _ D
+    show dfmsCellDecompress m (fun c' => dfmsDecompress m n (fun D' => f (c', D')) D) c = _
+    rw [hInner, dfmsCellDecompress_eq_K]
+    rfl
+
+private def dfmsTableSumK (m : Nat) : (n : Nat) → (DfmsTable m n → Nat) → Nat
+  | 0, f => f ()
+  | n + 1, f =>
+    dfmsTableSumK m n (fun D => f (none, D)) +
+      qsumK (2 ^ (2 * m)) (fun j => dfmsTableSumK m n (fun D => f (some (BitVec.ofFin j), D)))
+
+private theorem dfmsTableSum_eq_K (m : Nat) : ∀ (n : Nat) (f : DfmsTable m n → Nat),
+    dfmsTableSum m n f = dfmsTableSumK m n f
+  | 0, _ => rfl
+  | n + 1, f => by
+    show dfmsCellSum (2 * m) (fun c => dfmsTableSum m n (fun D => f (c, D))) = _
+    unfold dfmsCellSum
+    rw [qsum_eq_qsumK]
+    have hInner : (fun j : Fin (2 ^ (2 * m)) =>
+        dfmsTableSum m n (fun D => f (some (BitVec.ofFin j), D))) =
+        fun j => dfmsTableSumK m n (fun D => f (some (BitVec.ofFin j), D)) :=
+      funext fun j => dfmsTableSum_eq_K m n _
+    show dfmsTableSum m n (fun D => f (none, D)) +
+      qsumK (2 ^ (2 * m)) (fun j => dfmsTableSum m n (fun D => f (some (BitVec.ofFin j), D))) = _
+    rw [hInner, dfmsTableSum_eq_K m n]
+    rfl
+
+/-- The one-query DFMS state of `dfmsW2ParityAdv`, with the kernel-evaluable copies. -/
+private def dfmsW2StateK : DfmsState 1 2 1 := fun D x y a =>
+  dfmsDecompressK 1 2 (fun D₁ =>
+    (fun (ψ : QVec 2 2 1) (x : Fin 2) (y : Fin (2 ^ 2)) (a : Fin 1) =>
+      if x.val == 0 then gaussAddK (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+      else gaussSubK (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a))
+    (fun x y a =>
+      match dfmsEntry 2 D₁ x with
+      | none => dfmsDecompressK 1 2 (fun D₀ =>
+          if dfmsIsAllBot 1 2 D₀ then (if y.1 % 2 == 0 then (⟨1, 0⟩ : GaussInt) else ⟨-1, 0⟩)
+          else ⟨0, 0⟩) D₁
+      | some v => dfmsDecompressK 1 2 (fun D₀ =>
+          if dfmsIsAllBot 1 2 D₀ then
+            (if (BitVec.ofFin y ^^^ v).toFin.1 % 2 == 0 then (⟨1, 0⟩ : GaussInt) else ⟨-1, 0⟩)
+          else ⟨0, 0⟩) D₁) x y a) D
+
+private theorem dfmsW2State_eq_K :
+    dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) = dfmsW2StateK := by
+  funext D x y a
+  show dfmsDecompress 1 2 (fun D₁ => (dfmsW2ParityAdv.steps ⟨0, Nat.le_refl 1⟩).apply
+    (dfmsCellXor D₁ (fun x y a => dfmsDecompress 1 2
+      (fun D₀ => (if dfmsIsAllBot 1 2 D₀ then dfmsW2ParityAdv.init else QVec.zero 2 (2 * 1) 1) x y a)
+      D₁)) x y a) D = _
+  rw [dfmsDecompress_eq_K]
+  unfold dfmsW2StateK
+  apply congrArg (fun f => dfmsDecompressK 1 2 f D)
+  funext D₁
+  rw [dfmsW2ParityAdv_steps, hadamardQuery2_apply, GaussInt.add_def, GaussInt.sub_def]
+  have hCell : ∀ (x' : Fin 2), dfmsCellXor D₁ (fun x y a => dfmsDecompress 1 2
+      (fun D₀ => (if dfmsIsAllBot 1 2 D₀ then dfmsW2ParityAdv.init else QVec.zero 2 (2 * 1) 1) x y a)
+      D₁) x' y a =
+      match dfmsEntry 2 D₁ x' with
+      | none => dfmsDecompressK 1 2 (fun D₀ =>
+          if dfmsIsAllBot 1 2 D₀ then (if y.1 % 2 == 0 then (⟨1, 0⟩ : GaussInt) else ⟨-1, 0⟩)
+          else ⟨0, 0⟩) D₁
+      | some v => dfmsDecompressK 1 2 (fun D₀ =>
+          if dfmsIsAllBot 1 2 D₀ then
+            (if (BitVec.ofFin y ^^^ v).toFin.1 % 2 == 0 then (⟨1, 0⟩ : GaussInt) else ⟨-1, 0⟩)
+          else ⟨0, 0⟩) D₁ := by
+    intro x'
+    unfold dfmsCellXor
+    have hInit : ∀ (y' : Fin (2 ^ (2 * 1))), (fun D₀ : DfmsTable 1 2 =>
+        (if dfmsIsAllBot 1 2 D₀ then dfmsW2ParityAdv.init else QVec.zero 2 (2 * 1) 1) x' y' a) =
+        fun D₀ => if dfmsIsAllBot 1 2 D₀ then
+          (if y'.1 % 2 == 0 then (⟨1, 0⟩ : GaussInt) else ⟨-1, 0⟩) else ⟨0, 0⟩ := by
+      intro y'
+      funext D₀
+      rw [dfmsW2ParityAdv_init, QVec.zero_def, GaussInt.zero_def]
+      cases dfmsIsAllBot 1 2 D₀ <;> rfl
+    cases dfmsEntry 2 D₁ x' with
+    | none => simp only [hInit, dfmsDecompress_eq_K]
+    | some v => simp only [hInit, dfmsDecompress_eq_K, xorFin_def]
+  rw [hCell, hCell]
+  rfl
+
+private theorem stateNormSq_eq_K (ψ : QVec 2 2 1) :
+    QVec.stateNormSq ψ = qsumK 2 (fun x => qsumK (2 ^ 2) (fun y => qsumK 1 (fun a =>
+      (ψ x y a).re.natAbs * (ψ x y a).re.natAbs + (ψ x y a).im.natAbs * (ψ x y a).im.natAbs))) := by
+  simp only [QVec.stateNormSq_def, QVec.queryWeight_def, GaussInt.normSq_def, qsum_eq_qsumK]
+
+private theorem dfmsCoherentEventMass_eq_K (event : (Fin 2 → BitVec (2 * 1)) → Fin 2 → Bool)
+    (ψ : DfmsState 1 2 1) :
+    dfmsCoherentEventMass (m := 1) event (dfmsDecompressState ψ) =
+      dfmsTableSumK 1 2 (fun D => qsumK 2 (fun x =>
+        if event (dfmsToOracle 1 2 D) x = true then
+          qsumK (2 ^ 2) (fun y => qsumK 1 (fun a =>
+            (dfmsDecompressK 1 2 (fun D' => ψ D' x y a) D).re.natAbs *
+                (dfmsDecompressK 1 2 (fun D' => ψ D' x y a) D).re.natAbs +
+              (dfmsDecompressK 1 2 (fun D' => ψ D' x y a) D).im.natAbs *
+                (dfmsDecompressK 1 2 (fun D' => ψ D' x y a) D).im.natAbs))
+        else 0)) := by
+  unfold dfmsCoherentEventMass dfmsDecompressState
+  simp only [QVec.queryMassOn_def, QVec.queryWeight_def, GaussInt.normSq_def, qsum_eq_qsumK,
+    dfmsTableSum_eq_K, dfmsDecompress_eq_K]
+
+/-- Decidable equality on `DfmsTable 1 2` (`25` states: `Option (BitVec 2) × Option (BitVec 2)`). -/
+def dfmsW2TableEq (D₁ D₂ : DfmsTable 1 2) : Bool :=
+  decide (D₁.1 = D₂.1 ∧ D₁.2.1 = D₂.2.1)
+
+/-- Executable `w = 2` (`m = 1`, 2-bit `Option (BitVec 2)` compressed database!) kernel-`decide`
+    witness: after 1 coherent 2-bit query, `dfmsW2ParityAdv` has **0 mass** on `dfmsRecordedCount > 1`,
+    strictly positive mass on recorded `some (y : BitVec 2)` entries, and **100% (`256 / 256`)**
+    undisturbed parity success both in `uniformOracleSum 2 2` and after `dfmsDecompressState`! -/
+theorem dfms_w2_coherent_runtime_witness :
+    uniformOracleSum 2 2 (fun H =>
+      QVec.queryMassOn (dfmsW2ParityEvent H) (runQuantumAdv dfmsW2ParityAdv H)) = 256 ∧
+    quantumExperimentTotal dfmsW2ParityAdv = 256 ∧
+    dfmsTableSum 1 2 (fun D =>
+      if 1 < dfmsRecordedCount 2 D then
+        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
+      else 0) = 0 ∧
+    0 < dfmsTableSum 1 2 (fun D =>
+      if dfmsRecordedCount 2 D == 1 then
+        QVec.stateNormSq (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1) D)
+      else 0) ∧
+    dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+      (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) =
+      4 ^ 10 * 256 := by
+  refine ⟨dfmsW2Parity_real_oracle_execution.1, dfmsW2Parity_real_oracle_execution.2, ?_, ?_, ?_⟩
+  · rw [dfmsW2State_eq_K, dfmsTableSum_eq_K]
+    simp only [stateNormSq_eq_K]
+    decide +kernel
+  · rw [dfmsW2State_eq_K, dfmsTableSum_eq_K]
+    simp only [stateNormSq_eq_K]
+    decide +kernel
+  · rw [dfmsAdv_event_eq 1 dfmsW2ParityAdv dfmsW2ParityEvent, dfmsW2Parity_real_oracle_execution.1]
+
+/-- `#tooth` negative control at `w = 2` (`Option (BitVec 2)`): naively collapsing the `DfmsTable 1 2`
+    database (`projectDfmsPred (dfmsW2TableEq D)`) before decompression destroys coherent cross-address
+    interference and drops `dfmsW2ParityEvent` mass from `4^10 * 256` (`100%`) strictly down to
+    `4^10 * 128` (`50%`), demonstrating why `dfms_projective_extraction_disturbance_bound` is required! -/
+theorem tooth_dfms_w2_raw_database_measurement_disturbs :
+    ∃ measuredMass : Nat,
+      measuredMass = dfmsTableSum 1 2 (fun D =>
+        dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+          (dfmsDecompressState
+            (projectDfmsPred (dfmsW2TableEq D)
+              (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))))) ∧
+      measuredMass = 4 ^ 10 * 128 ∧
+      measuredMass ≠ dfmsCoherentEventMass (m := 1) dfmsW2ParityEvent
+        (dfmsDecompressState (dfmsAdvStateAt 1 dfmsW2ParityAdv 1 (Nat.le_refl 1))) := by
+  refine ⟨4 ^ 10 * 128, ?_, rfl, ?_⟩
+  · rw [dfmsW2State_eq_K, dfmsTableSum_eq_K]
+    simp only [dfmsCoherentEventMass_eq_K, projectDfmsPred, QVec.zero_def, GaussInt.zero_def,
+      dfmsW2ParityEvent_eq]
+    decide +kernel
+  · rw [dfms_w2_coherent_runtime_witness.2.2.2.2]
+    decide
+
+#verify_constructive
+  Qsag.dfms_w2_coherent_runtime_witness
+  Qsag.tooth_dfms_w2_raw_database_measurement_disturbs
+
 end Qsag
 end

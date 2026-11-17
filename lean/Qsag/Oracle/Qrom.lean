@@ -7991,6 +7991,8 @@ theorem toy_measured_merkle_event_masses :
 
 def toyOpeningSlots : List (MerkleOpeningSlot 4 1) := [⟨0, 1, toyOpening⟩]
 
+theorem toyOpeningSlots_eq : toyOpeningSlots = [⟨0, 1, toyOpening⟩] := by rfl
+
 /-- Repeating an opening preserves the failure event, while the conservative union budget
     doubles. This checks real multi-slot evaluation without claiming collision independence. -/
 theorem toy_batch_duplicate_execution :
@@ -8019,6 +8021,57 @@ theorem batchMerkleFailure_inhabited_256 {cardX : Nat}
   Qsag.toy_measured_merkle_event_masses
   Qsag.toy_batch_duplicate_execution
   Qsag.batchMerkleFailure_inhabited_256
+
+/-! ### Coherent-run facts for `Protocol/Aggregation/HemOpening`, `QromSaltedMerkleStateRestoration`
+and `Tests/QromCoherentOracleTests`
+
+Evaluated here, where the query gate, the adversary runtime and the oracle sums are visible. -/
+
+/-- The honest toy adversary's coherent run is accepted on 8 of the 16 oracles. -/
+theorem toy_coherent_accept_mass :
+    uniformOracleSum 1 4 (fun H =>
+      QVec.queryMassOn (toyAccepted H)
+        (runQuantumAdv (toyQueryAdv ⟨1, by decide⟩ (toyBasisInit_stateNormSq_pos _)) H)) = 8 := by
+  decide +kernel
+
+theorem hadamardQuery2_apply (w cardAnc : Nat) (ψ : QVec 2 w cardAnc) (x : Fin 2) (y : Fin (2 ^ w))
+    (a : Fin cardAnc) :
+    (hadamardQuery2 w cardAnc).apply ψ x y a =
+      if x.val == 0 then GaussInt.add (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+      else GaussInt.sub (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a) := by rfl
+
+/-- Concrete `w = 2` (`m = 1`, 2-bit output!) 1-query superposed parity adversary deciding
+    `(H 0).lsb ⊕ (H 1).lsb` across all `16` two-bit 2-address oracles in a single coherent query,
+    using `hadamardQuery2 2 1 : ScaledUnitary 2 2 1`. -/
+def dfmsW2ParityAdv : QuantumAdv 2 2 1 1 where
+  init := fun _ y _ => if y.1 % 2 == 0 then ⟨1, 0⟩ else ⟨-1, 0⟩
+  h_init_pos := by decide
+  steps := fun _ => hadamardQuery2 2 1
+
+/-- Event testing whether output address `x : Fin 2` equals `((H 0).toNat + (H 1).toNat) % 2`. -/
+def dfmsW2ParityEvent (H : Fin 2 → BitVec 2) (x : Fin 2) : Bool :=
+  decide (x.1 = ((H ⟨0, by decide⟩).toNat + (H ⟨1, by decide⟩).toNat) % 2)
+
+theorem dfmsW2ParityAdv_init :
+    dfmsW2ParityAdv.init = fun _ y _ => if y.1 % 2 == 0 then ⟨1, 0⟩ else ⟨-1, 0⟩ := by rfl
+
+theorem dfmsW2ParityAdv_steps (i : Fin 1) : dfmsW2ParityAdv.steps i = hadamardQuery2 2 1 := by rfl
+
+theorem dfmsW2ParityEvent_eq (H : Fin 2 → BitVec 2) (x : Fin 2) :
+    dfmsW2ParityEvent H x =
+      decide (x.1 = ((H ⟨0, by decide⟩).toNat + (H ⟨1, by decide⟩).toNat) % 2) := by rfl
+
+/-- The real-oracle half of `dfms_w2_coherent_runtime_witness`: full parity success mass and the
+    experiment total, both `256`. -/
+theorem dfmsW2Parity_real_oracle_execution :
+    uniformOracleSum 2 2 (fun H =>
+      QVec.queryMassOn (dfmsW2ParityEvent H) (runQuantumAdv dfmsW2ParityAdv H)) = 256 ∧
+    quantumExperimentTotal dfmsW2ParityAdv = 256 := by
+  decide +kernel
+
+#verify_constructive
+  Qsag.toy_coherent_accept_mass
+  Qsag.dfmsW2Parity_real_oracle_execution
 end Qsag
 
 /-! ### Executed preprocessing-game controls (audited in `Tests/OracleAndQrom`) -/
