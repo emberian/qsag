@@ -16,7 +16,7 @@
 //! the durability requirements of the existing FTS implementation.
 //!
 //! The local transition implements `consume` in
-//! `lean/Qsag/VolatileCouponAndCapabilitySecurity.lean`: authenticate and validate,
+//! `lean/Qsag/Custody/VolatileCoupon.lean`: authenticate and validate,
 //! remove the entire slot, copy only the selected shares, erase every other share,
 //! then return. An unauthenticated request cannot spend a slot. A valid malicious
 //! initiator can still exhaust its authorized pool; network loss burns a coupon.
