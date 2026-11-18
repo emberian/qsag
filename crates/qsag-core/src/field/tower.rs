@@ -388,7 +388,7 @@ pub const fn tower_fermat_inv_128(a: u128) -> u128 {
     sq_n(t127, 1) // a^(2^128 - 2)
 }
 
-/// Element of Wiedemann tower level $\mathcal{T}_3 = \mathbb{F}_{2^8}$ (`lean/Qsag/BinaryTower.lean`).
+/// Element of Wiedemann tower level $\mathcal{T}_3 = \mathbb{F}_{2^8}$ (`lean/Qsag/Math/Gf2Pow128.lean`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct TowerGf256(pub u8);

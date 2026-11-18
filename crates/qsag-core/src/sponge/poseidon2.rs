@@ -1,5 +1,5 @@
 //! Width-12 Goldilocks `Poseidon2` permutation (`poseidon2_perm12`) and 256-bit sponge
-//! (`poseidon2_hash32`), matching `lean/Qsag/Poseidon2.lean` bit-for-bit.
+//! (`poseidon2_hash32`), matching `lean/Qsag/Oracle/Poseidon2.lean` bit-for-bit.
 //!
 //! Includes the fixed internal-round ordering (`sbox7(st[0] + rc)` BEFORE `apply_mi`) and
 //! nothing-up-my-sleeve Stafford-13 round constants anchored at `POSEIDON2_CONST_IV = "POS2_GL1"`.

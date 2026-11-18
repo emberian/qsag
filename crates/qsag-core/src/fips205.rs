@@ -6,7 +6,7 @@
 //! DER public-key encoding compatible with OpenSSL 3.5, and cut-boundary `SlhMpcOracles` for
 //! distributed threshold MPC signing without reconstructing `SK.seed` or `SK.prf`.
 //!
-//! Matches `lean/Qsag/Fips205.lean` bit-for-bit across all algorithms (`slh_keygen_internal`,
+//! Matches `lean/Qsag/Protocol/Signing/Fips205.lean` bit-for-bit across all algorithms (`slh_keygen_internal`,
 //! `slh_sign_internal`, `slh_verify_internal`, pure `slh_sign`/`slh_verify`, `hash_slh_sign`/
 //! `hash_slh_verify`, and `slhKeygenMpc`/`slhSignMpc`).
 
