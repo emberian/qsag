@@ -48,9 +48,9 @@ use alloc::vec::Vec;
 
 use super::recursive_whir::{
     Backend as RecBackend, Base as RecBase, Correlated3WhirProof, Digest as RecDigest,
-    Ext as RecExt, FixedPathWhirParams, FoldedEdgeSpec, FoldedLevelWhirProof,
-    Native as RecNative, PublicRecursionCommitment, Transcript as RecTranscript,
-    commit_for_recursion, commit_levels_for_recursion, f as rec_f, open_correlated3_for_recursion,
+    Ext as RecExt, FixedPathWhirParams, FoldedEdgeSpec, FoldedLevelWhirProof, Native as RecNative,
+    PublicRecursionCommitment, Transcript as RecTranscript, commit_for_recursion,
+    commit_levels_for_recursion, f as rec_f, open_correlated3_for_recursion,
     prove_folded_level_for_recursion, verify_correlated3_gadget, verify_folded_level,
 };
 use super::relation::{HologramMeta, Poseidon2InteriorTemplate, Shape};
@@ -901,6 +901,11 @@ fn row_sumcheck(
     });
     bind(rx[tau.len() - 1], round, &mut base, &mut ext, &mut selector);
     let values = [ext[0][0], ext[1][0], ext[2][0]];
+    if secret {
+        for e in &mut ext {
+            qsag_asm::volatile_fill(e, E::ZERO);
+        }
+    }
     (rounds, rx, values)
 }
 
@@ -1228,7 +1233,7 @@ fn prove_with_claimed_publics(
     let row_mask_sum = row_libra.sum();
     tr.absorb_ext4(b"ZKHEM_ROW_MASK_SUM", row_mask_sum);
     let rho1 = NonzeroChallenge::squeeze(&mut tr, b"ZKHEM_RHO1").get();
-    let (row_rounds, rx, row_values) = row_sumcheck(
+    let (row_rounds, rx, mut row_values) = row_sumcheck(
         &mut tr,
         &tau,
         shape.num_sbox,
@@ -1236,6 +1241,7 @@ fn prove_with_claimed_publics(
         Some((&row_libra, rho1)),
     );
     if !mask_rows_full_rank(shape, &rx) {
+        qsag_asm::volatile_fill(&mut row_values, E::ZERO);
         return Err(ZkHemError::MaskRankDeficient);
     }
 

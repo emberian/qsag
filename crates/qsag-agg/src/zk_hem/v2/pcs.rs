@@ -1298,7 +1298,9 @@ pub fn open<C: Channel>(
         let mut folds = Vec::with_capacity(d.step_vars);
         prev_chals = Vec::with_capacity(d.step_vars);
         for _ in 0..d.step_vars {
-            let (next, wire, c) = prove_fold(&poly, &mut fold, 0, ch)?;
+            let folded = prove_fold(&poly, &mut fold, 0, ch);
+            qsag_asm::volatile_fill(&mut poly, Fp5::ZERO);
+            let (next, wire, c) = folded?;
             poly = next;
             folds.push(wire);
             prev_chals.push(c);
@@ -1312,18 +1314,21 @@ pub fn open<C: Channel>(
                 siblings: Vec::new(),
             },
         });
-        prev_oracle = Some((code, tree));
+        if let Some((mut old_code, _)) = prev_oracle.replace((code, tree)) {
+            qsag_asm::volatile_fill(&mut old_code, Fp5::ZERO);
+        }
     }
 
     ch.absorb_fp5_slice(b"FINAL_POLY", &poly);
     let last = dims.len() - 1;
     let d = &dims[last];
     let idx = ch.squeeze_distinct_indices(b"QUERY", d.fibers, d.queries);
-    let (code, tree) = prev_oracle.as_ref().expect("at least two stages");
+    let (mut code, tree) = prev_oracle.take().expect("at least two stages");
     stages[last - 1].query = ExtQuery {
-        leaves: idx.iter().map(|&j| fiber(code, d, j)).collect(),
+        leaves: idx.iter().map(|&j| fiber(&code, d, j)).collect(),
         siblings: tree.open(&idx),
     };
+    qsag_asm::volatile_fill(&mut code, Fp5::ZERO);
     let mut mask_eval_array = [Fp5::ZERO; MASK_POINTS];
     mask_eval_array.copy_from_slice(&mask_evals);
     Ok(Opening {

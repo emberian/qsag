@@ -1,7 +1,7 @@
 //! zk-Hem masking layer over `GoldilocksExt4`.
 //!
 //! Each item here is the executable counterpart of a definition in
-//! `lean/Qsag/ZkHemSoundnessAndPrivacy.lean`; the Lean name is given on the item.
+//! `lean/Qsag/Protocol/Aggregation/ZkHem.lean`; the Lean name is given on the item.
 //!
 //! * [`PrimitiveChallenge`]: challenges rejection-sampled from $\mathbb{F}_{p^4} \setminus
 //!   \mathbb{F}_{p^2}$ (tower coordinate `c1 != 0`, i.e. $(c_1, c_3) \ne (0, 0)$ in the

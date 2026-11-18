@@ -87,6 +87,26 @@ pub fn log2_hi(x: u128) -> MilliBits {
     }
 }
 
+/// An upper bound on `1000 log2(1 + 2^(-d / 1000))` for `d >= 0`: `log2(1 + x) <= x / ln 2`
+/// with `x` rounded up to the next eighth of a bit, and never more than one bit.
+pub(crate) fn log2_one_plus(d: MilliBits) -> MilliBits {
+    // `ceil(1000 * 2^(-k / 8))`.
+    const EIGHTHS: [i64; 8] = [1000, 918, 841, 772, 708, 649, 595, 546];
+    assert!(d >= 0);
+    let steps = d / 125;
+    let shift = steps / 8;
+    if shift >= 40 {
+        return 1;
+    }
+    // `1443 >= 1000 / ln 2`.
+    (((1443 * EIGHTHS[(steps % 8) as usize] + 999) / 1000) >> shift).min(999) + 1
+}
+
+/// A lower bound on `-log2(2^(-a / 1000) + 2^(-b / 1000))`.
+pub(crate) fn sum_bits(a: MilliBits, b: MilliBits) -> MilliBits {
+    a.min(b) - log2_one_plus((a - b).abs())
+}
+
 /// `-log2` of the probability that `queries` distinct uniform positions out of `n` all fall in
 /// a set of `agreement` positions; `None` when that probability is zero.
 pub fn query_bits(n: u128, agreement: u128, queries: usize) -> Option<MilliBits> {
@@ -252,16 +272,29 @@ pub struct ShapeSize {
 
 /// `(log_cells, blind_cells)` of [`super::protocol::Layout::new`].
 pub fn zk_layout(regime: WhirSecurityRegime, size: ShapeSize) -> Option<(usize, usize)> {
-    if !regime.is_accepted_aggregate_profile() {
+    if !regime.is_accepted_aggregate_profile()
+        || !(1..usize::BITS as usize).contains(&size.log_rows)
+        || !(1..MAX_PCS_NUM_VARS).contains(&size.var_bits)
+    {
         return None;
     }
-    let masks = ((size.log_rows * 4) << ROW_MASK_BITS) + ((size.var_bits * 4) << COL_MASK_BITS);
+    let var_cells = 1usize.checked_shl(size.var_bits as u32)?;
+    if size.num_public > var_cells.saturating_sub(1) {
+        return None;
+    }
+    let row_masks = size.log_rows.checked_mul(4 << ROW_MASK_BITS)?;
+    let col_masks = size.var_bits.checked_mul(4 << COL_MASK_BITS)?;
+    let masks = row_masks.checked_add(col_masks)?;
     (size.var_bits + 1..=MAX_PCS_NUM_VARS).find_map(|log_cells| {
         let cells = 1usize << log_cells;
         let st0 = regime.schedule(log_cells).stages[0];
         let arity = 1usize << st0.step_vars;
         let blind = st0.num_queries.min(cells * st0.blowup / arity) * arity;
-        ((1usize << size.var_bits) + masks + blind <= cells).then_some((log_cells, blind))
+        var_cells
+            .checked_add(masks)?
+            .checked_add(blind)
+            .is_some_and(|used| used <= cells)
+            .then_some((log_cells, blind))
     })
 }
 
@@ -388,8 +421,12 @@ pub fn min_queries(
 }
 
 /// `[BCGM25]` Lemma 9.3 for the blend of five words on the Stage-0 domain: the smallest
-/// agreement threshold in fibers covered by proximity parameter `m`, and the error.
+/// agreement threshold in fibers covered by proximity parameter `m`, and `-log2` of the error
+/// `(m + 1/2)^7 * 4 * n^2 / (3 * rho^(3/2) * |F_{p^4} \ F_{p^2}|)` for `beta` uniform in the
+/// primitive challenge set.
 fn scalar_blend(log_cells: usize, st0: &StageBound, m: u128) -> (u128, MilliBits) {
+    assert!((3..=4096).contains(&m));
+    assert!(st0.blowup.is_power_of_two() && st0.blowup <= 256 && log_cells <= MAX_PCS_NUM_VARS);
     let points = (st0.blowup as u128) << log_cells;
     let k = (1u128 << log_cells) + 2;
     // `A / fibers >= (1 + 1/(2m)) sqrt(k / points)`, squared and cleared of denominators.
@@ -397,6 +434,10 @@ fn scalar_blend(log_cells: usize, st0: &StageBound, m: u128) -> (u128, MilliBits
         (2 * m * a) * (2 * m * a) * points
             >= (2 * m + 1) * (2 * m + 1) * st0.fibers * st0.fibers * k
     };
+    assert!(
+        covers(st0.fibers),
+        "scalar blend threshold exceeds Stage-0 domain"
+    );
     let (mut lo, mut hi) = (1u128, st0.fibers);
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
@@ -407,6 +448,8 @@ fn scalar_blend(log_cells: usize, st0: &StageBound, m: u128) -> (u128, MilliBits
         }
     }
     // `(m + 1/2)^7 / (3 rho^(3/2)) * d * n^2` with `d = 4` and `rho >= 1 / blowup`.
+    // `CHALLENGE_SET_MILLIBITS` lower-bounds `log2 |F_{p^4} \ F_{p^2}|`, covering the
+    // `|E| / |E \ F_{p^2}|` factor from sampling `beta` via `PrimitiveChallenge`.
     let numerator = 7 * log2_hi(2 * m + 1)
         + 1500 * i64::from(st0.blowup.trailing_zeros())
         + 2000
@@ -437,23 +480,72 @@ pub struct ZkBound {
     /// Symbols of the assignment codeword opened by the Stage-0 queries.
     pub opened_symbols: usize,
     /// Whether the verifier's view of the interactive oracle proof is perfectly simulated:
-    /// `blind_cells >= opened_symbols`. The remaining loss is the hiding of unopened leaves.
+    /// `blind_cells >= opened_symbols`. The remaining loss is the hiding of unopened leaves
+    /// and Fiat-Shamir challenge programming.
     pub view_perfectly_simulated: bool,
     pub salt_bits: u32,
+    /// Stage-0 leaves per proof (`stages[0].fibers`), used to bound cross-proof salt collisions.
+    pub stage0_fibers: u128,
+    /// Programmed Fiat-Shamir challenge-derivation oracle inputs per simulated proof (including
+    /// limb-expansion squeezes), used in `M(t + M) / 2^(sigma - 1)`.
+    pub programmed_inputs_per_proof: usize,
+    /// Effective chaining-state entropy in millibits (`sigma`).
+    pub digest_millibits: MilliBits,
 }
 
 impl ZkBound {
-    /// Classical ROM: `-log2` of the distance between real and simulated proofs of
-    /// `2^log_proofs` statements against `2^log_queries` hash queries, `t P / 2^salt`.
-    pub fn classical_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        1000 * (i64::from(self.salt_bits) - i64::from(log_queries) - i64::from(log_proofs))
+    /// Add the cross-proof salt-collision hybrid for `P = 2^log_proofs` proofs, each with at
+    /// most `stage0_fibers` Stage-0 leaves: `stage0_fibers * binom(P, 2) / 2^salt_bits <=
+    /// stage0_fibers * P^2 / 2^(salt_bits + 1)`.
+    fn with_salt_collisions(&self, query_bits: MilliBits, log_proofs: u32) -> MilliBits {
+        if log_proofs == 0 {
+            return query_bits; // One proof: leaf indices separate every pair of its leaves.
+        }
+        let collision_bits = 1000 * (i64::from(self.salt_bits) + 1 - 2 * i64::from(log_proofs))
+            - log2_hi(self.stage0_fibers);
+        sum_bits(query_bits, collision_bits)
     }
 
-    /// QROM: `2 t sqrt(P / 2^salt)`, by one-way to hiding (`2018-ahu-semi-classical-oracles-
-    /// o2h-2018-904`, Theorem 3).
+    /// Classical ROM unopened-leaf hiding: `-log2` of `t P / 2^salt + delta_salt` across
+    /// `2^log_proofs` proofs against `2^log_queries` hash queries.
+    pub fn classical_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
+        self.with_salt_collisions(
+            1000 * (i64::from(self.salt_bits) - i64::from(log_queries) - i64::from(log_proofs)),
+            log_proofs,
+        )
+    }
+
+    /// QROM unopened-leaf hiding: `2 t sqrt(P / 2^salt) + delta_salt`, by one-way to hiding
+    /// (`2018-ahu-semi-classical-oracles-o2h-2018-904`, Theorem 3).
     pub fn quantum_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        500 * (i64::from(self.salt_bits) - i64::from(log_proofs))
-            - 1000 * (i64::from(log_queries) + 1)
+        self.with_salt_collisions(
+            500 * (i64::from(self.salt_bits) - i64::from(log_proofs))
+                - 1000 * (i64::from(log_queries) + 1),
+            log_proofs,
+        )
+    }
+
+    /// Classical programmable-ROM Fiat-Shamir programming-collision loss
+    /// `M(t + M) / 2^(sigma - 1)`, where `M = P * programmed_inputs_per_proof` counts all
+    /// programmed challenge-derivation oracle inputs across `P = 2^log_proofs` simulated proofs
+    /// (not merely `P`).
+    pub fn classical_programming_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
+        let log_t = 1000 * i64::from(log_queries);
+        let log_m = 1000 * i64::from(log_proofs)
+            + log2_hi(u128::try_from(self.programmed_inputs_per_proof.max(1)).unwrap());
+        sum_bits(
+            self.digest_millibits - 1000 - log_t - log_m,
+            self.digest_millibits - 1000 - 2 * log_m,
+        )
+    }
+
+    /// Combined classical ROM non-interactive zero-knowledge distance: unopened-leaf hiding
+    /// (including cross-proof salt collisions) summed with Fiat-Shamir programming collisions.
+    pub fn classical_nizk_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
+        sum_bits(
+            self.classical_hiding_bits(log_queries, log_proofs),
+            self.classical_programming_bits(log_queries, log_proofs),
+        )
     }
 }
 
@@ -492,21 +584,52 @@ impl SecurityReport {
         1000 * i64::from(self.params.digest_bits) - i64::from(self.regime.uses_poseidon2_canopy())
     }
 
-    /// `-log2` of the ROM knowledge-soundness error against `2^log_queries` classical
-    /// queries, `t eps_rbr + 4 t^2 / 2^sigma`: state restoration from round-by-round
-    /// soundness and `3 (t^2 + 1) / 2^sigma` from
-    /// `2016-bcs-interactive-oracle-proofs-2016-116`, Theorem 7.1.
-    pub fn classical_error_bits(&self, log_queries: u32) -> MilliBits {
-        let t = 1000 * i64::from(log_queries);
-        (self.classical.bits - t).min(self.digest_millibits() - 2000 - 2 * t) - 1000
+    fn classical_sum_bits(&self, log_t: MilliBits) -> MilliBits {
+        sum_bits(
+            self.classical.bits - log_t,
+            self.digest_millibits() - 2000 - 2 * log_t,
+        )
     }
 
-    /// Largest `log2 t` at which neither term of [`Self::classical_error_bits`] is vacuous.
-    /// This is also the security level `kappa` with `eps(t) <= t / 2^kappa` for `t <= 2^kappa`.
+    /// `-log2` of the ROM knowledge-soundness error against `2^log_queries >= 4` classical
+    /// queries, `t eps_rbr + 4 t^2 / 2^sigma`: state restoration from round-by-round
+    /// soundness and `3 (t^2 + 1) / 2^sigma` from
+    /// `2016-bcs-interactive-oracle-proofs-2016-116`, Theorem 7.1 (`t >= 3`).
+    pub fn classical_error_bits(&self, log_queries: u32) -> MilliBits {
+        assert!(log_queries >= 2);
+        let t = 1000 * i64::from(log_queries);
+        self.classical_sum_bits(t)
+    }
+
+    /// Certified classical crossover of the SUM `t eps_rbr + 4 t^2 / 2^sigma`.
     pub fn classical_work_bits(&self) -> MilliBits {
-        self.classical
-            .bits
-            .min((self.digest_millibits() - 2000) / 2)
+        let (mut lo, mut hi) = (
+            0,
+            self.classical
+                .bits
+                .min((self.digest_millibits() - 2000) / 2),
+        );
+        assert!(self.classical_sum_bits(lo) >= 0);
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if self.classical_sum_bits(mid) >= 0 {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    }
+
+    fn qrom_sum_bits_with(&self, rbr_bits: MilliBits, log_t: MilliBits) -> MilliBits {
+        sum_bits(
+            rbr_bits - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * log_t,
+            self.digest_millibits() - QROM_MERKLE_CONST - QROM_ROUND_SLACK - 3 * log_t,
+        )
+    }
+
+    fn qrom_sum_bits(&self, log_t: MilliBits) -> MilliBits {
+        self.qrom_sum_bits_with(self.ungrounded.bits, log_t)
     }
 
     /// `-log2` of the QROM knowledge-soundness error against `2^log_queries >= 2^24` quantum
@@ -517,13 +640,11 @@ impl SecurityReport {
     pub fn qrom_error_bits(&self, log_queries: u32) -> MilliBits {
         assert!(log_queries >= 24 && self.rounds < 1 << 9);
         let t = 1000 * i64::from(log_queries);
-        (self.ungrounded.bits - QROM_RBR_CONST - QROM_ROUND_SLACK - 2 * t)
-            .min(self.digest_millibits() - QROM_MERKLE_CONST - QROM_ROUND_SLACK - 3 * t)
-            - 1000
+        self.qrom_sum_bits(t)
     }
 
     /// The two terms of [`Self::qrom_error_bits`] as query counts at which each becomes
-    /// vacuous: `(round-by-round, digest)`. Their minimum is the QROM security level.
+    /// vacuous alone: `(round-by-round, digest)`.
     pub fn qrom_work_terms(&self) -> (MilliBits, MilliBits) {
         (
             (self.ungrounded.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2,
@@ -531,18 +652,44 @@ impl SecurityReport {
         )
     }
 
-    /// The QROM security level proven by the cited theorems.
+    /// The QROM security level proven by the cited theorems: largest millibit `log2 t`
+    /// certified by the rounded upper bound on the SUM of the round and digest terms.
     pub fn qrom_work_bits(&self) -> MilliBits {
         let (rbr, digest) = self.qrom_work_terms();
-        rbr.min(digest)
+        let (mut lo, mut hi) = (24_000, rbr.min(digest));
+        assert!(self.rounds < 1 << 9 && self.qrom_sum_bits(lo) >= 0 && hi >= lo);
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if self.qrom_sum_bits(mid) >= 0 {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
     }
 
     /// [`Self::qrom_work_bits`] with grinding credited as in the classical bound. Heuristic:
     /// this is the accounting behind `WhirSecurityRegime::qrom_grover_round_bits`, and no
     /// cited theorem supports it.
     pub fn qrom_work_bits_crediting_grinding(&self) -> MilliBits {
-        ((self.classical.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2)
-            .min(self.qrom_work_terms().1)
+        let rbr_ground = (self.classical.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2;
+        let digest = self.qrom_work_terms().1;
+        let (mut lo, mut hi) = (24_000, rbr_ground.min(digest));
+        assert!(
+            self.rounds < 1 << 9
+                && self.qrom_sum_bits_with(self.classical.bits, lo) >= 0
+                && hi >= lo
+        );
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if self.qrom_sum_bits_with(self.classical.bits, mid) >= 0 {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
     }
 }
 
@@ -566,12 +713,23 @@ pub fn security_report(
             * (1 + (ROW_DEGREE + 1) * size.log_rows + 3 + 1 + (COL_DEGREE + 1) * size.var_bits + 4);
     let mut report = pcs_report(regime, log_cells, params, Some(size))?;
     let st0 = &report.stages[0];
-    let opened_symbols = st0.queries.min(st0.fibers as usize) << st0.step_vars;
+    let stage0_fibers = st0.fibers;
+    let opened_symbols = st0.queries.min(stage0_fibers as usize) << st0.step_vars;
+    let fold_vars = log_cells - regime.schedule(log_cells).early_stop_vars;
+    let ext4_challenges =
+        (2 * size.log_rows + size.var_bits + 7) + 4 + 4 * fold_vars + 5 * (report.stages.len() - 1);
+    let limb_squeezes_per_ext4 = if regime.uses_poseidon2_canopy() { 1 } else { 4 };
+    let programmed_inputs_per_proof =
+        limb_squeezes_per_ext4 * ext4_challenges + report.stages.len();
+    let digest_millibits = report.digest_millibits();
     report.zk = Some(ZkBound {
         blind_cells,
         opened_symbols,
         view_perfectly_simulated: blind_cells >= opened_symbols,
         salt_bits: params.salt_bits,
+        stage0_fibers,
+        programmed_inputs_per_proof,
+        digest_millibits,
     });
     report.proof_bytes += front;
     Some(report)
@@ -586,6 +744,13 @@ pub fn pcs_report(
     size: Option<ShapeSize>,
 ) -> Option<SecurityReport> {
     if !(2..=MAX_PCS_NUM_VARS).contains(&log_cells) {
+        return None;
+    }
+    if let Some(s) = size
+        && (!(1..usize::BITS as usize).contains(&s.log_rows)
+            || !(1..=log_cells).contains(&s.var_bits)
+            || 4usize.checked_add(s.num_public).is_none())
+    {
         return None;
     }
     let schedule = regime.schedule(log_cells);
@@ -633,8 +798,15 @@ pub fn pcs_report(
         };
         if let Some(size) = size {
             // Zero-check point, mask challenges, sumcheck rounds, row-value and claim batching:
-            // one polynomial identity of at most this degree per member of the Stage-0 list.
-            let degree = size.log_rows.max(ROW_DEGREE).max(4 + size.num_public) as u128;
+            // one polynomial identity of at most this degree per member of the Stage-0 list. A
+            // committed row-mask block is any univariate of degree below `2^ROW_MASK_BITS`: the
+            // verifier does not check that its coefficients above `ROW_DEGREE` are zero.
+            // `CHALLENGE_SET_MILLIBITS` covers the nonzero `rho1, rho2` denominator `|E| - 1`.
+            let degree = size
+                .log_rows
+                .max(ROW_DEGREE)
+                .max((1 << ROW_MASK_BITS) - 1)
+                .max(4 + size.num_public) as u128;
             note(
                 CHALLENGE_SET_MILLIBITS - log2_hi(degree * stages[0].word_list) + algebraic,
                 Round::Sumcheck,
@@ -833,9 +1005,12 @@ mod tests {
         // The constants of the QROM bound.
         assert!(log2_lo(320) < QROM_RBR_CONST && QROM_RBR_CONST <= log2_hi(320));
         assert!(log2_lo(6380) < QROM_MERKLE_CONST && QROM_MERKLE_CONST <= log2_hi(6380));
-        // `|F_{p^4}| - |F_{p^2}| > 2^255.998`: `p > 2^64 (1 - 2^-31)` gives
+        // Every challenge denominator used by v1 (`|E| = p^4`, nonzero `|E| - 1`, and primitive
+        // `|F_{p^4} \ F_{p^2}| = p^4 - p^2`) exceeds `2^255.998`: `p > 2^64 (1 - 2^-31)` gives
         // `p^4 - p^2 > 2^256 (1 - 2^-28)`, and `log2(1 - 2^-28) > -0.001`.
-        assert!(u128::from(crate::field::GOLDILOCKS_PRIME) > (1u128 << 64) - (1u128 << 33));
+        let p = u128::from(crate::field::GOLDILOCKS_PRIME);
+        assert!(p > (1u128 << 64) - (1u128 << 33));
+        assert!(p * p > (1u128 << 127));
     }
 
     /// The query error against a direct product over a small case, and its zero case.
@@ -983,7 +1158,36 @@ mod tests {
                 r.proof_bytes,
             );
             assert_eq!(got, want, "{regime:?} {rows}");
+            assert_eq!(r.classical_work_bits(), 126_999, "{regime:?} {rows}");
+            let want_qrom = if regime == R::Poseidon2Cdhz25ZeroPowQrom128
+                || (regime == R::Cdhz25JohnsonQrom128 && rows == 22)
+            {
+                81_111
+            } else {
+                81_112
+            };
+            assert_eq!(r.qrom_work_bits(), want_qrom, "{regime:?} {rows}");
         }
+        // Small-row relation (`log_rows = 10 < 15`, `num_public = 5`): the unchecked 16-cell
+        // row-mask block sets the frontend degree to `max(10, 15, 9) = 15`, not `ROW_DEGREE = 9`.
+        let small = ShapeSize {
+            log_rows: 10,
+            var_bits: 10,
+            num_public: 5,
+        };
+        let r_small = pcs_report(R::BciksJohnsonQrom128, 18, PUBLIC, Some(small)).unwrap();
+        let r_deg15 = pcs_report(
+            R::BciksJohnsonQrom128,
+            18,
+            PUBLIC,
+            Some(ShapeSize {
+                log_rows: 15,
+                var_bits: 10,
+                num_public: 5,
+            }),
+        )
+        .unwrap();
+        assert_eq!(r_small.classical.bits, r_deg15.classical.bits);
         // The public opening of the default regime: every round sits at a list size over the
         // field; the weakest is the batching of the 260 claims produced by the Stage-0 queries.
         let public = pcs_report(R::BciksJohnsonQrom128, 21, PUBLIC, None).unwrap();
@@ -996,12 +1200,14 @@ mod tests {
             (240_104, Round::Query(0))
         );
         assert_eq!(public.qrom_work_terms(), (115_879, 81_112));
+        assert_eq!(public.qrom_work_bits(), 81_112);
     }
 
     /// No regime reaches the level its name or `qrom_grover_round_bits` states, for the
     /// committed-mask protocol as implemented, at any project size.
     #[test]
     fn no_regime_reaches_its_nominal_level_as_implemented() {
+        use WhirSecurityRegime as R;
         for regime in ZK_REGIMES {
             for rows in 17..=22 {
                 let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
@@ -1009,42 +1215,58 @@ mod tests {
                 assert!(zk.view_perfectly_simulated && zk.blind_cells == zk.opened_symbols);
                 // Classical: bound by collisions in 256-bit digests, with more than 50 bits of
                 // round-by-round margin.
-                assert!((126_999..=127_000).contains(&r.classical_work_bits()));
+                assert_eq!(r.classical_work_bits(), 126_999);
                 assert!(
                     (180_000..200_000).contains(&r.classical.bits),
                     "{regime:?} {rows}"
                 );
                 // The regime's per-round figure counts queries and grinding only.
                 assert!(r.classical.bits < 1000 * i64::from(regime.classical_fs_round_bits()));
-                // QROM: the 256-bit digests bind at 81 bits. The round-by-round term alone is
-                // 86 to 96 bits, below the nominal 107, 108 and 136.
+                // QROM: the 256-bit digests bind at 81.111..81.112 bits.
+                // The round-by-round term alone is 86 to 96 bits, below the nominal 107, 108 and 136.
+                let is_poseidon2 = matches!(
+                    regime,
+                    R::Poseidon2Cdhz25JohnsonQrom128 | R::Poseidon2Cdhz25ZeroPowQrom128
+                );
                 let (rbr, digest) = r.qrom_work_terms();
                 assert_eq!(digest, 81_112);
-                assert_eq!(r.qrom_work_bits(), 81_112);
+                let want_qrom = if is_poseidon2
+                    || (rows == 22
+                        && matches!(
+                            regime,
+                            R::Cdhz25JohnsonQrom128 | R::TurboShakeCdhz25JohnsonQrom128
+                        )) {
+                    81_111
+                } else {
+                    81_112
+                };
+                assert_eq!(r.qrom_work_bits(), want_qrom, "{regime:?} {rows}");
                 assert!((86_000..96_000).contains(&rbr), "{regime:?} {rows}: {rbr}");
                 assert!(rbr < 1000 * i64::from(regime.qrom_grover_round_bits()));
-                assert_eq!(r.qrom_work_bits_crediting_grinding(), 81_112);
+                assert_eq!(
+                    r.qrom_work_bits_crediting_grinding(),
+                    if is_poseidon2 { 81_111 } else { 81_112 }
+                );
                 // Bounded-query profiles: at the stated cap the proven error is not `2^-128`.
                 if regime.is_bounded_query_profile() {
                     let cap = if regime.pow_bits() == 0 { 40 } else { 38 };
                     let bits = r.qrom_error_bits(cap);
                     assert!(
-                        (95_000..106_000).contains(&bits),
+                        (92_000..104_000).contains(&bits),
                         "{regime:?} {rows}: {bits}"
                     );
                 }
             }
         }
-        // The public opening at the bounded-query caps, for comparison.
-        use WhirSecurityRegime as R;
+        // The public opening at the bounded-query caps, for comparison (`sum_bits`).
         let at = |regime, cap| {
             pcs_report(regime, 21, PUBLIC, None)
                 .unwrap()
                 .qrom_error_bits(cap)
         };
-        assert_eq!(at(R::Cdhz25JohnsonQrom128, 38), 114_513);
-        assert_eq!(at(R::Cdhz25ZeroPowQrom128, 40), 122_337);
-        assert_eq!(at(R::BciksJohnsonQrom128, 40), 122_337);
+        assert_eq!(at(R::Cdhz25JohnsonQrom128, 38), 115_512);
+        assert_eq!(at(R::Cdhz25ZeroPowQrom128, 40), 122_976);
+        assert_eq!(at(R::BciksJohnsonQrom128, 40), 123_336);
     }
 
     /// Section 6 of SECURITY.md: what each change buys and costs, at `2^20` rows.
@@ -1067,8 +1289,8 @@ mod tests {
         assert_eq!(r.proof_bytes - now.proof_bytes, 16 * 258);
         assert_eq!(now.zk.unwrap().quantum_hiding_bits(40, 0), 23_000);
         assert_eq!(r.zk.unwrap().quantum_hiding_bits(40, 0), 87_000);
-        assert_eq!(now.zk.unwrap().classical_hiding_bits(64, 20), 44_000);
-        assert_eq!(r.zk.unwrap().classical_hiding_bits(64, 20), 172_000);
+        assert_eq!(now.zk.unwrap().classical_hiding_bits(64, 20), 43_999);
+        assert_eq!(r.zk.unwrap().classical_hiding_bits(64, 20), 171_999);
 
         // 48-byte digests: the digest term rises from 81 to 123 bits and the blend binds.
         let wide = Params {
@@ -1114,12 +1336,68 @@ mod tests {
         };
         let r = security_report(regime, size, ground).unwrap();
         assert_eq!(r.qrom_work_bits(), 115_879);
-        assert_eq!(r.qrom_work_bits_crediting_grinding(), 123_779);
+        assert_eq!(r.qrom_work_bits_crediting_grinding(), 123_379);
         assert_eq!(r.grinding_hashes, 1_058_013_184);
 
         // Stage-0 queries that keep the query error at `2^-256` under the scalar blend.
         assert_eq!(stage0_queries_for(4, 3, 256), 331);
         assert_eq!(stage0_queries_for(4, 80, 256), 259);
+    }
+
+    #[test]
+    fn directed_rounding_summed_crossovers_salt_collisions_and_programming_inputs() {
+        for regime in ZK_REGIMES {
+            for rows in [17usize, 20, 22] {
+                let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
+                let c = r.classical_work_bits();
+                let q = r.qrom_work_bits();
+                let qg = r.qrom_work_bits_crediting_grinding();
+                assert!(r.classical_sum_bits(c) >= 0 && r.classical_sum_bits(c + 1) < 0);
+                assert!(r.qrom_sum_bits(q) >= 0 && r.qrom_sum_bits(q + 1) < 0);
+                assert!(
+                    r.qrom_sum_bits_with(r.classical.bits, qg) >= 0
+                        && r.qrom_sum_bits_with(r.classical.bits, qg + 1) < 0
+                );
+                let (a, b) = r.qrom_work_terms();
+                assert!(q <= a.min(b) && r.qrom_sum_bits(a.min(b) + 1) < 0);
+            }
+        }
+        // When both QROM terms sit near the same crossover, the summed bound is strictly tighter
+        // than `min(a, b)`.
+        let r_close = security_report(
+            WhirSecurityRegime::BciksJohnsonQrom128,
+            square(20),
+            Params {
+                digest_bits: 384,
+                blend: Blend::AffineCascade,
+                algebraic_pow_bits: 24,
+                ..Params::IMPLEMENTED
+            },
+        )
+        .unwrap();
+        let digest_only = r_close.qrom_work_terms().1;
+        assert_eq!(digest_only, 123_779);
+        assert_eq!(r_close.qrom_work_bits_crediting_grinding(), 123_379);
+        assert!(r_close.qrom_sum_bits_with(r_close.classical.bits, digest_only) < 0);
+        // Cross-proof salt collisions on 128-bit salts: at P = 2^40, t = 1, `2^17 * 2^80 / 2^129 = 2^-32`
+        // dominates `t P / 2^128 = 2^-88`.
+        let r = security_report(
+            WhirSecurityRegime::BciksJohnsonQrom128,
+            square(20),
+            Params::IMPLEMENTED,
+        )
+        .unwrap();
+        let zk = r.zk.unwrap();
+        assert_eq!(zk.stage0_fibers, 1 << 17);
+        assert_eq!(zk.classical_hiding_bits(0, 40), 31_999);
+        assert!(zk.quantum_hiding_bits(0, 40) <= 31_999);
+
+        // Programming collisions count programmed oracle inputs `M = P * inputs_per_proof`, not `P`.
+        assert!(zk.programmed_inputs_per_proof > r.rounds);
+        let prog_one_proof = zk.classical_programming_bits(64, 0);
+        // `256 - 1 - 64 - log2(inputs_per_proof)`: strictly tighter than naïve `255 - 64 = 191` by > 8 bits.
+        assert!(prog_one_proof < 191_000 - 8_000, "{prog_one_proof}");
+        assert!(zk.classical_nizk_bits(64, 20) <= zk.classical_hiding_bits(64, 20));
     }
 
     /// The size model against the measured full-shard proof of SECURITY.md, section 9.2
