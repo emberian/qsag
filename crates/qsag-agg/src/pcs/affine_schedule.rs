@@ -130,7 +130,7 @@ const HIGH_CAPACITY_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
 ];
 
 // 49-row finite Johnson witness table (`nv = 2..=24`) for the `Cdhz25*` regimes, equal to
-// `lean/Qsag/QromSaltedMerkleStateRestoration.lean::hemOptimizedQromWitnessTable`.
+// `lean/Qsag/Protocol/Aggregation/QromSaltedMerkleStateRestoration.lean::hemOptimizedQromWitnessTable`.
 const CDHZ25_WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (7, 1, 98, 1, 25),
     (8, 1, 98, 1, 25),

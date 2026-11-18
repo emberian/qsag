@@ -1391,7 +1391,8 @@ fn settle_interrupted_reshare(
     }
     // Never committed. The staged shares are shares of this vault's key: wipe them.
     if let (Ok(src_meta), Ok(dst_meta)) = (std::fs::metadata(vault_dir), std::fs::metadata(&target))
-        && qsag_asm::durable::file_identity(&src_meta) == qsag_asm::durable::file_identity(&dst_meta)
+        && qsag_asm::durable::file_identity(&src_meta)
+            == qsag_asm::durable::file_identity(&dst_meta)
     {
         return Err(unknown("pending reshare target aliases the active vault"));
     }
@@ -2416,7 +2417,18 @@ mod tests {
         // must never trick `settle_interrupted_reshare` into deleting the live vault's
         // own external `.anchor` / `.mirror` anti-rollback state!
         {
-            let mut forged = Meta::read(&old).unwrap();
+            let anchored_live = scratch.path("anchored-live");
+            let live_cfg = AnchorConfig::dir_only(&anchor_dir, Some(anchored_live.clone()), true);
+            create_vault_anchored(
+                &anchored_live,
+                &stage(2),
+                Secret32::new([0x34; 32]),
+                None,
+                Some(&live_cfg),
+                &mut no_crash,
+            )
+            .unwrap();
+            let mut forged = Meta::read(&anchored_live).unwrap();
             let live_key_id = forged.anchor_key_id.unwrap();
             let live_digest = cshake256_framed_32(
                 b"QSAG.CLI.ANCHOR.SLOT.V1",
@@ -2436,12 +2448,14 @@ mod tests {
                 anchor_key_id: Some(live_key_id),
                 anchor_dir: Some(anchor_dir.clone()),
             });
-            forged.write(&old, false).unwrap();
+            forged.write(&anchored_live, false).unwrap();
 
-            let old_cfg = AnchorConfig::dir_only(&anchor_dir, Some(old.clone()), true);
-            drop(open_vault_anchored(&old, None, Some(&old_cfg), &mut no_crash).unwrap());
+            drop(
+                open_vault_anchored(&anchored_live, None, Some(&live_cfg), &mut no_crash).unwrap(),
+            );
             assert!(exists(&live_anchor).unwrap());
             assert!(exists(&live_mirror).unwrap());
+            assert!(Meta::read(&anchored_live).unwrap().pending.is_none());
         }
         // Legacy pre-existing unrecorded external anchor remains untouched, while
         // the successor commits cleanly under its own fresh identity.
