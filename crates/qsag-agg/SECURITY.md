@@ -130,7 +130,7 @@ any fixed kernel; Lemma V2.3 needs point terms to be evaluations.)
 | 10 | `mu = <R, v_s>` | `beta_R != 0` |
 | 11 | root of the Stage-1 oracle, the codeword of `g = P_s + beta_R R` | two out-of-domain points |
 | 12 | two evaluations of `g` | `q_0` distinct Stage-0 fibers; two weights and `gamma` |
-| 13.. | the WHIR of v1 on `g` (stages 1.., over `E`, no grinding, no salts) | |
+| 13.. | the WHIR of v1 on `g` (stages 1.., over `E`, no grinding, no salts), except that the point terms of every stage (out-of-domain and query claims) keep their exact continuation on overflow coefficients, as in Stage 0 | |
 
 `Z_var` is `Z` on the cells below `var_cells` and zero above. `K` is the functional of v1
 step 4 with one change: the terminal term is `M(rx, ry) Z_var~(ry)`, written as at most
@@ -434,8 +434,10 @@ expansion adds the hybrid of V2.5; quantum Fiat-Shamir simulation remains open.
 
 ### V2.5 Coins
 
-`cSHAKE256(seed, "QSAG.ZKHEM2.COINS/v1", profile tag, relation digest, layout, H(statement),
-H(witness))`, so distinct profiles, layouts, and v1/v2 protocols have distinct derivation
+Two steps, as in v1: a 32-byte key
+`cSHAKE256("QSAG.ZKHEM2.COINS.SEED/v1", seed, profile tag, relation digest, layout and
+schedule, H(statement), H(witness))`, then the stream `SeedStream("QSAG.ZKHEM2.COINS/v1",
+key)` (`v2/protocol.rs`), so distinct profiles, layouts, and v1/v2 protocols have distinct derivation
 inputs. Independent outputs are a random-oracle/PRG claim, not a guarantee that random
 strings can never coincide. `v2::protocol::tests::coins_do_not_repeat_across_profiles` is
 a regression test present in source; its execution is outside the bounds checks of V2.9.
@@ -455,8 +457,14 @@ programming. Reusing a seed with identical inputs reproduces the proof, not fres
 | Lemma V2.2, in the interpolation form: `|Q| + 5 |Y|` base-field coefficients against `|Q|` base points and a Frobenius-closed set of `5 |Y|` points of `E` | `v2_blinding_count` | same |
 | Lemma V2.3 (c) | `v2_fold_scalar_matrix_bijective` | same |
 
-These names are present in source; build validation is pending in this pass (V2.9), so
-they are not labelled [lean] here. `v2_blinding_count` is about point evaluations, not
+Both modules compiled on bb2 against the warm library (`ZkHemV2`: 374 declarations,
+`Tests/ZkHemV2Teeth`: 21, axioms within `[propext, Quot.sound]`, policy gate passing; the
+whole-library build and `AuditAxioms` target were not run). The simulation statements use
+`ZkHemV2.CoinBijectionSimulated`, a definition with the same body as
+`ZkHem.PerfectlySimulated`, which is sealed to importing modules. Teeth: a zero mask
+challenge reveals the word; `phi = 0`, a repeated point, or four points break the
+bijection of Lemma V2.3 (c); a base-field point, two conjugate points, or one coefficient
+too many break the blinding count. `v2_blinding_count` is about point evaluations, not
 directly the quotient rings of Lemma V2.2. For the protocol's `z_j = omega_j^(2^s)`,
 the bridge must use the `2^s` distinct roots
 of each `x^(2^s)-z_j` and their disjoint Frobenius orbits (all roots lie in `E`, since
