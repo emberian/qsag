@@ -5,7 +5,7 @@ use crate::AccelError;
 use crate::ct::ct_zeroize_u64s;
 use crate::goldilocks::{gl_add, gl_mul, gl_neg, gl_reduce_u64};
 
-/// Domain IV `"POS2_GL1"` (`0x504F_5332_5F47_4C31`), matching `lean/Qsag/Poseidon2.lean`.
+/// Domain IV `"POS2_GL1"` (`0x504F_5332_5F47_4C31`), matching `lean/Qsag/Oracle/Poseidon2.lean`.
 pub const POSEIDON2_CONST_IV: u64 = 0x504F_5332_5F47_4C31;
 /// External half-rounds ($R_F = 8$ total).
 pub const POSEIDON2_HALF_EXTERNAL_ROUNDS: u64 = 4;
@@ -103,7 +103,7 @@ pub fn poseidon2_apply_mi(st: &mut [u64; 12]) {
 }
 
 /// Canonical Width-12 Goldilocks `Poseidon2` permutation (`poseidon2_perm12`), matching
-/// `lean/Qsag/Poseidon2.lean` bit-for-bit.
+/// `lean/Qsag/Oracle/Poseidon2.lean` bit-for-bit.
 pub fn poseidon2_perm12(st: &mut [u64; 12]) {
     poseidon2_apply_me(st);
     for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {

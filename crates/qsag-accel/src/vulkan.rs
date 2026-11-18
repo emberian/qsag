@@ -478,7 +478,11 @@ pub struct VulkanSpirvBackend {
         target_pointer_width = "64"
     ))]
     prover_session_in_use: AtomicBool,
-    #[cfg(all(feature = "std", any(target_os = "linux", target_os = "macos"), target_pointer_width = "64"))]
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
     prover_session_owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
     /// `info.secret_slot_audit().is_ok()`, fixed at construction.
     #[cfg(all(
@@ -516,6 +520,28 @@ impl Drop for ProverSessionGuard<'_> {
     fn drop(&mut self) {
         self.backend.release_prover_session();
     }
+}
+
+/// Geometry and arena capacity parameters for Round-0 WHIR commitment receipt helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WhirRound0ReceiptParams<'a> {
+    pub salt_seed: &'a [u8; 32],
+    pub num_vars: usize,
+    pub blowup: usize,
+    pub group_arity: usize,
+    pub max_stage1_domain_ext4: usize,
+    pub max_stage1_groups: usize,
+    pub extra_witness_words: usize,
+}
+
+/// Geometry and VRAM word-offset parameters for multi-polynomial batch sumcheck receipt helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WhirBatchSumcheckStep {
+    pub round: usize,
+    pub cur_len: usize,
+    pub num_polys: usize,
+    pub src_base: u32,
+    pub dst_base: u32,
 }
 
 impl core::fmt::Debug for VulkanSpirvBackend {
@@ -1341,7 +1367,10 @@ impl VulkanSpirvBackend {
                     "prover session requires audited zero-spill pipelines",
                 ));
             }
-            let mut owner = self.prover_session_owner.lock().map_err(|_| VulkanError::WorkspacePoisoned)?;
+            let mut owner = self
+                .prover_session_owner
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?;
             if self
                 .prover_session_in_use
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1350,7 +1379,10 @@ impl VulkanSpirvBackend {
                 return Err(VulkanError::WorkspacePoisoned);
             }
             *owner = Some(std::thread::current().id());
-            Ok(ProverSessionGuard { backend: self, _thread_bound: core::marker::PhantomData })
+            Ok(ProverSessionGuard {
+                backend: self,
+                _thread_bound: core::marker::PhantomData,
+            })
         }
         #[cfg(not(all(
             feature = "std",
@@ -1372,7 +1404,10 @@ impl VulkanSpirvBackend {
             target_pointer_width = "64"
         ))]
         {
-            let mut owner = self.prover_session_owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut owner = self
+                .prover_session_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if *owner != Some(std::thread::current().id()) {
                 return;
             }
@@ -1407,7 +1442,12 @@ impl VulkanSpirvBackend {
             ));
         }
         if !self.prover_session_in_use.load(Ordering::Acquire)
-            || *self.prover_session_owner.lock().map_err(|_| VulkanError::WorkspacePoisoned)? != Some(std::thread::current().id()) {
+            || *self
+                .prover_session_owner
+                .lock()
+                .map_err(|_| VulkanError::WorkspacePoisoned)?
+                != Some(std::thread::current().id())
+        {
             return Err(VulkanError::WorkspacePoisoned);
         }
         Ok(())
@@ -1631,6 +1671,163 @@ impl VulkanSpirvBackend {
                 dst.copy_from_slice(&polys[poly_idx][pos..pos + dst.len()]);
             },
         )
+    }
+
+    /// Execute [`Self::prover_whir_commit_round0`] on slice-backed polynomials and issue a keyed
+    /// V5 [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirLdeCommitment`).
+    pub fn prover_whir_commit_round0_slice_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        polys: &[&[u64]],
+        params: WhirRound0ReceiptParams<'_>,
+    ) -> Result<([u8; 32], ProverExecutionReceipt), VulkanError> {
+        let c_len = u32::try_from(params.num_vars)
+            .ok()
+            .and_then(|shift| 1usize.checked_shl(shift))
+            .unwrap_or(0);
+        if c_len == 0 || polys.is_empty() || polys.iter().any(|p| p.len() != c_len) {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        self.prover_whir_commit_round0_with_receipt(
+            key,
+            transcript_anchor,
+            polys.len(),
+            params.salt_seed,
+            params.num_vars,
+            params.blowup,
+            params.group_arity,
+            params.max_stage1_domain_ext4,
+            params.max_stage1_groups,
+            params.extra_witness_words,
+            |poly_idx, pos, dst| {
+                dst.copy_from_slice(&polys[poly_idx][pos..pos + dst.len()]);
+            },
+        )
+    }
+
+    /// Execute [`Self::prover_whir_commit_round0_with_mode`] on an audited GPU and issue a keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirLdeCommitment`), binding `turboshake_canopy`
+    /// into the input digest.
+    pub fn prover_whir_commit_round0_with_mode_and_receipt<F>(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        turboshake_canopy: bool,
+        num_polys: usize,
+        params: WhirRound0ReceiptParams<'_>,
+        mut fill_chunk: F,
+    ) -> Result<([u8; 32], ProverExecutionReceipt), VulkanError>
+    where
+        F: FnMut(usize, usize, &mut [u64]),
+    {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirLdeCommitment,
+                }
+                .into());
+            }
+            let slot = ProverKernelSlot::WhirLdeCommitment;
+            let mut witness_sp = init_cshake256(b"", slot.algorithm_domain());
+            witness_sp.absorb(&(num_polys as u64).to_le_bytes());
+            witness_sp.absorb(&(params.num_vars as u64).to_le_bytes());
+            let poly_len = u32::try_from(params.num_vars)
+                .ok()
+                .and_then(|shift| 1usize.checked_shl(shift))
+                .unwrap_or(0);
+            let mut next_chunk = (0usize, 0usize);
+            let mut in_order = true;
+            let top_node = self.prover_whir_commit_round0_with_mode(
+                turboshake_canopy,
+                num_polys,
+                params.salt_seed,
+                params.num_vars,
+                params.blowup,
+                params.group_arity,
+                params.max_stage1_domain_ext4,
+                params.max_stage1_groups,
+                params.extra_witness_words,
+                |poly_idx, pos, dst| {
+                    fill_chunk(poly_idx, pos, dst);
+                    in_order &= (poly_idx, pos) == next_chunk;
+                    let end = pos + dst.len();
+                    next_chunk = if end == poly_len {
+                        (poly_idx + 1, 0)
+                    } else {
+                        (poly_idx, end)
+                    };
+                    for sub in dst.chunks(256) {
+                        let mut buf = [0u8; 2048];
+                        let used = sub.len() * 8;
+                        for (b_dst, &w) in buf[..used].as_chunks_mut::<8>().0.iter_mut().zip(sub) {
+                            *b_dst = w.to_le_bytes();
+                        }
+                        witness_sp.absorb(&buf[..used]);
+                        crate::ct::ct_zeroize_bytes(&mut buf[..used]);
+                    }
+                },
+            )?;
+            if !in_order || next_chunk != (num_polys, 0) {
+                return Err(AccelError::BackendFailure.into());
+            }
+            finalize_cshake256(&mut witness_sp, true);
+            let mut witness_digest = [0u8; 32];
+            witness_sp.squeeze(&mut witness_digest);
+            let capacity_args = [
+                (params.max_stage1_domain_ext4 as u64).to_le_bytes(),
+                (params.max_stage1_groups as u64).to_le_bytes(),
+                (params.extra_witness_words as u64).to_le_bytes(),
+            ];
+            let op_tag = if turboshake_canopy { 0x10 } else { 0 };
+            let input_digest = prover_stage_io_digest(
+                slot,
+                0x01,
+                op_tag,
+                &[
+                    params.salt_seed,
+                    &witness_digest,
+                    &capacity_args[0],
+                    &capacity_args[1],
+                    &capacity_args[2],
+                ],
+            );
+            let output_digest = prover_stage_io_digest(slot, 0x02, op_tag, &[&top_node]);
+            let receipt = self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirCommitRound0 {
+                    num_polys,
+                    num_vars: params.num_vars,
+                    blowup: params.blowup,
+                    group_arity: params.group_arity,
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )?;
+            Ok((top_node, receipt))
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (
+                key,
+                transcript_anchor,
+                turboshake_canopy,
+                num_polys,
+                params,
+                &mut fill_chunk,
+            );
+            match self._uninhabited {}
+        }
     }
 
     /// Execute [`Self::prover_whir_commit_round0_with`] on an audited GPU and issue a keyed V5
@@ -1919,6 +2116,241 @@ impl VulkanSpirvBackend {
         }
     }
 
+    /// Execute [`Self::prover_whir_batch_sumcheck_init`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 10`).
+    pub fn prover_whir_batch_sumcheck_init_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        eq_kronecker: &[[u64; 4]],
+        lambda_pows: &[[u64; 4]],
+        num_vars: usize,
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            let num_elements = u32::try_from(num_vars)
+                .ok()
+                .and_then(|s| 1usize.checked_shl(s))
+                .ok_or(VulkanError::Accel(AccelError::LengthOverflow))?;
+            self.prover_whir_batch_sumcheck_init(eq_kronecker, lambda_pows, num_vars)?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let eq_d = Self::hash_ext4_slice_for_prover(slot, eq_kronecker);
+            let lam_d = Self::hash_ext4_slice_for_prover(slot, lambda_pows);
+            let nv_bytes = (num_vars as u64).to_le_bytes();
+            let input_digest = prover_stage_io_digest(slot, 0x01, 10, &[&nv_bytes, &eq_d, &lam_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 10, &[&nv_bytes]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 10,
+                    num_elements,
+                    aux: lambda_pows.len() as u64,
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, eq_kronecker, lambda_pows, num_vars);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_whir_batch_sumcheck_eval`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 11`).
+    pub fn prover_whir_batch_sumcheck_eval_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        round: usize,
+        cur_len: usize,
+        num_polys: usize,
+        src_base: u32,
+    ) -> Result<([[u64; 4]; 2], ProverExecutionReceipt), VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            let (ev0, ev2) =
+                self.prover_whir_batch_sumcheck_eval(round, cur_len, num_polys, src_base)?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let mut meta = [0u8; 20];
+            meta[0..8].copy_from_slice(&(round as u64).to_le_bytes());
+            meta[8..16].copy_from_slice(&(num_polys as u64).to_le_bytes());
+            meta[16..20].copy_from_slice(&src_base.to_le_bytes());
+            let evals = [ev0, ev2];
+            let out_d = Self::hash_ext4_slice_for_prover(slot, &evals);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 11, &[&meta]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 11, &[&out_d]);
+            let receipt = self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 11,
+                    num_elements: cur_len,
+                    aux: ((round as u64) << 32) | u64::from(src_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )?;
+            Ok((evals, receipt))
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, round, cur_len, num_polys, src_base);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_whir_batch_sumcheck_fold`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 12`).
+    pub fn prover_whir_batch_sumcheck_fold_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        step: WhirBatchSumcheckStep,
+        chal: [u64; 4],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.prover_whir_batch_sumcheck_fold(
+                step.round,
+                step.cur_len,
+                step.num_polys,
+                step.src_base,
+                step.dst_base,
+                chal,
+            )?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let mut meta = [0u8; 24];
+            meta[0..8].copy_from_slice(&(step.round as u64).to_le_bytes());
+            meta[8..16].copy_from_slice(&(step.num_polys as u64).to_le_bytes());
+            meta[16..20].copy_from_slice(&step.src_base.to_le_bytes());
+            meta[20..24].copy_from_slice(&step.dst_base.to_le_bytes());
+            let chal_d = Self::hash_ext4_slice_for_prover(slot, &[chal]);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 12, &[&meta, &chal_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 12, &[&meta]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 12,
+                    num_elements: step.cur_len,
+                    aux: (u64::from(step.src_base) << 32) | u64::from(step.dst_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, step, chal);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_whir_batch_sumcheck_read_tail`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 13`).
+    pub fn prover_whir_batch_sumcheck_read_tail_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        step: WhirBatchSumcheckStep,
+        out_tables: &mut [[u64; 4]],
+        out_kernels: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.prover_whir_batch_sumcheck_read_tail(
+                step.cur_len,
+                step.num_polys,
+                step.src_base,
+                out_tables,
+                out_kernels,
+            )?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let mut meta = [0u8; 12];
+            meta[0..8].copy_from_slice(&(step.num_polys as u64).to_le_bytes());
+            meta[8..12].copy_from_slice(&step.src_base.to_le_bytes());
+            let tab_d = Self::hash_ext4_slice_for_prover(slot, out_tables);
+            let ker_d = Self::hash_ext4_slice_for_prover(slot, out_kernels);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 13, &[&meta]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 13, &[&tab_d, &ker_d]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 13,
+                    num_elements: step.cur_len,
+                    aux: ((step.num_polys as u64) << 32) | u64::from(step.src_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, step, out_tables, out_kernels);
+            match self._uninhabited {}
+        }
+    }
+
     /// Expand a 768-entry Kronecker monomial table (`num_vars <= 24`; callers with
     /// `num_vars in 25..=26` must use [`Self::prover_whir_expand_monomial_and_dot_1024`])
     /// into `cur_k` (`vram_work_a[0..(1<<num_vars)+2]`), and optionally compute
@@ -1999,6 +2431,106 @@ impl VulkanSpirvBackend {
             let _ = (mono_kronecker_1024, num_vars, dot_k_offset, out_dots);
             match self._uninhabited {}
         }
+    }
+
+    /// Execute `prover_whir_expand_monomial_and_dot` (`768` or `1024` Kronecker entries) and issue
+    /// an audited keyed V5 [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 1`).
+    pub fn prover_whir_expand_monomial_and_dot_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        mono_kronecker: &[[u64; 4]],
+        num_vars: usize,
+        dot_k_offset: u32,
+        out_dots: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            let num_elements = u32::try_from(num_vars)
+                .ok()
+                .and_then(|s| 1usize.checked_shl(s))
+                .and_then(|n| n.checked_add(2))
+                .ok_or(VulkanError::Accel(AccelError::LengthOverflow))?;
+            self.check_prover_session_active()?;
+            {
+                let mut guard = self
+                    .engine
+                    .lock()
+                    .map_err(|_| VulkanError::WorkspacePoisoned)?;
+                guard.exec_prover_whir_expand_monomial_and_dot(
+                    mono_kronecker,
+                    num_vars,
+                    dot_k_offset,
+                    out_dots,
+                )?;
+            }
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let mono_d = Self::hash_ext4_slice_for_prover(slot, mono_kronecker);
+            let out_d = Self::hash_ext4_slice_for_prover(slot, out_dots);
+            let mut meta = [0u8; 12];
+            meta[0..8].copy_from_slice(&(num_vars as u64).to_le_bytes());
+            meta[8..12].copy_from_slice(&dot_k_offset.to_le_bytes());
+            let input_digest = prover_stage_io_digest(slot, 0x01, 1, &[&meta, &mono_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 1, &[&out_d]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 1,
+                    num_elements,
+                    aux: ((out_dots.len() as u64) << 32) | u64::from(dot_k_offset),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (
+                key,
+                transcript_anchor,
+                mono_kronecker,
+                num_vars,
+                dot_k_offset,
+                out_dots,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// 4-byte (`1024`-entry) typed companion to [`Self::prover_whir_expand_monomial_and_dot_with_receipt`].
+    pub fn prover_whir_expand_monomial_and_dot_1024_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        mono_kronecker_1024: &[[u64; 4]; 1024],
+        num_vars: usize,
+        dot_k_offset: u32,
+        out_dots: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        self.prover_whir_expand_monomial_and_dot_with_receipt(
+            key,
+            transcript_anchor,
+            mono_kronecker_1024,
+            num_vars,
+            dot_k_offset,
+            out_dots,
+        )
     }
 
     /// Construct `cur_coeffs[0..(1<<num_vars)+2]` in `vram_work_b` from `vram_mono` + `weights`
@@ -2227,6 +2759,103 @@ impl VulkanSpirvBackend {
             let _ = (k_len, k_base, xi_z_kronecker_2x1024);
             match self._uninhabited {}
         }
+    }
+
+    /// 4-byte (`2 x 1024`-entry) typed companion to [`Self::prover_whir_open_init_with_receipt`].
+    pub fn prover_whir_open_init_1024_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        num_vars: usize,
+        is_single: bool,
+        weights: &[[[u64; 4]; 2]],
+        z_ood_kronecker_2x1024: &[[u64; 4]; 2048],
+    ) -> Result<([[u64; 4]; 2], ProverExecutionReceipt), VulkanError> {
+        self.prover_whir_open_init_with_receipt(
+            key,
+            transcript_anchor,
+            num_vars,
+            is_single,
+            weights,
+            z_ood_kronecker_2x1024,
+        )
+    }
+
+    /// Execute `prover_whir_add_ood_claims` (`1536` or `2048` Kronecker entries) and issue an
+    /// audited keyed V5 [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 3`).
+    pub fn prover_whir_add_ood_claims_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        k_len: usize,
+        k_base: u32,
+        xi_z_kronecker: &[[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.check_prover_session_active()?;
+            {
+                let mut guard = self
+                    .engine
+                    .lock()
+                    .map_err(|_| VulkanError::WorkspacePoisoned)?;
+                guard.exec_prover_whir_add_ood_claims(k_len, k_base, xi_z_kronecker)?;
+            }
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let xi_d = Self::hash_ext4_slice_for_prover(slot, xi_z_kronecker);
+            let kb_bytes = k_base.to_le_bytes();
+            let input_digest = prover_stage_io_digest(slot, 0x01, 3, &[&kb_bytes, &xi_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 3, &[&kb_bytes]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 3,
+                    num_elements: k_len,
+                    aux: u64::from(k_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, k_len, k_base, xi_z_kronecker);
+            match self._uninhabited {}
+        }
+    }
+
+    /// 4-byte (`2 x 1024`-entry) typed companion to [`Self::prover_whir_add_ood_claims_with_receipt`].
+    pub fn prover_whir_add_ood_claims_1024_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        k_len: usize,
+        k_base: u32,
+        xi_z_kronecker_2x1024: &[[u64; 4]; 2048],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        self.prover_whir_add_ood_claims_with_receipt(
+            key,
+            transcript_anchor,
+            k_len,
+            k_base,
+            xi_z_kronecker_2x1024,
+        )
     }
 
     /// `prove_fold_in_place` Pass A: reduce `wire[0..3]` over `pairs_ck` pairs.
@@ -2738,6 +3367,85 @@ impl VulkanSpirvBackend {
         }
     }
 
+    /// Execute `prover_whir_eval_univariate_2` (`1536` or `2048` Kronecker entries) and issue an
+    /// audited keyed V5 [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 4`).
+    pub fn prover_whir_eval_univariate_2_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        coeff_len: usize,
+        c_base: u32,
+        z_ood_kronecker: &[[u64; 4]],
+    ) -> Result<([[u64; 4]; 2], ProverExecutionReceipt), VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.check_prover_session_active()?;
+            let evals = {
+                let mut guard = self
+                    .engine
+                    .lock()
+                    .map_err(|_| VulkanError::WorkspacePoisoned)?;
+                guard.exec_prover_whir_eval_univariate_2(coeff_len, c_base, z_ood_kronecker)?
+            };
+            self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let z_d = Self::hash_ext4_slice_for_prover(slot, z_ood_kronecker);
+            let out_d = Self::hash_ext4_slice_for_prover(slot, &evals);
+            let cb_bytes = c_base.to_le_bytes();
+            let input_digest = prover_stage_io_digest(slot, 0x01, 4, &[&cb_bytes, &z_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 4, &[&out_d]);
+            let receipt = self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 4,
+                    num_elements: coeff_len,
+                    aux: u64::from(c_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )?;
+            Ok((evals, receipt))
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, coeff_len, c_base, z_ood_kronecker);
+            match self._uninhabited {}
+        }
+    }
+
+    /// 4-byte (`2 x 1024`-entry) typed companion to [`Self::prover_whir_eval_univariate_2_with_receipt`].
+    pub fn prover_whir_eval_univariate_2_1024_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        coeff_len: usize,
+        c_base: u32,
+        z_ood_kronecker_2x1024: &[[u64; 4]; 2048],
+    ) -> Result<([[u64; 4]; 2], ProverExecutionReceipt), VulkanError> {
+        self.prover_whir_eval_univariate_2_with_receipt(
+            key,
+            transcript_anchor,
+            coeff_len,
+            c_base,
+            z_ood_kronecker_2x1024,
+        )
+    }
+
     /// Gather queried fibers, Round-0 salts (if `stage_idx == 0`), and Steiner Merkle siblings.
     #[allow(clippy::too_many_arguments)]
     pub fn prover_whir_gather_queries(
@@ -2937,6 +3645,125 @@ impl VulkanSpirvBackend {
         )))]
         {
             let _ = (c_base, out_coeffs);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_whir_accumulate_shift_claims`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 8`).
+    pub fn prover_whir_accumulate_shift_claims_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        k_len: usize,
+        k_base: u32,
+        z_pow_256: &[u64],
+        claims_meta: &[[u64; 8]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.prover_whir_accumulate_shift_claims(k_len, k_base, z_pow_256, claims_meta)?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let zp_d = Self::hash_u64_slice_for_prover(slot, z_pow_256);
+            let mut cm_sp = init_cshake256(b"", slot.algorithm_domain());
+            cm_sp.absorb(&(claims_meta.len() as u64).to_le_bytes());
+            for row in claims_meta {
+                for &w in row {
+                    cm_sp.absorb(&w.to_le_bytes());
+                }
+            }
+            finalize_cshake256(&mut cm_sp, true);
+            let mut cm_d = [0u8; 32];
+            cm_sp.squeeze(&mut cm_d);
+            let kb_bytes = k_base.to_le_bytes();
+            let input_digest = prover_stage_io_digest(slot, 0x01, 8, &[&kb_bytes, &zp_d, &cm_d]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 8, &[&kb_bytes]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 8,
+                    num_elements: k_len,
+                    aux: ((claims_meta.len() as u64) << 32) | u64::from(k_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (
+                key,
+                transcript_anchor,
+                k_len,
+                k_base,
+                z_pow_256,
+                claims_meta,
+            );
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_whir_read_final_coeffs`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::WhirFoldSumcheck`, `op_code = 9`).
+    pub fn prover_whir_read_final_coeffs_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        c_base: u32,
+        out_coeffs: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::WhirFoldSumcheck,
+                }
+                .into());
+            }
+            self.prover_whir_read_final_coeffs(c_base, out_coeffs)?;
+            let slot = ProverKernelSlot::WhirFoldSumcheck;
+            let cb_bytes = c_base.to_le_bytes();
+            let out_d = Self::hash_ext4_slice_for_prover(slot, out_coeffs);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 9, &[&cb_bytes]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 9, &[&out_d]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::WhirFoldSumcheck {
+                    op_code: 9,
+                    num_elements: out_coeffs.len(),
+                    aux: u64::from(c_base),
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (key, transcript_anchor, c_base, out_coeffs);
             match self._uninhabited {}
         }
     }
@@ -3470,6 +4297,87 @@ impl VulkanSpirvBackend {
         )))]
         {
             let _ = (col_src_ext4, sh_src_ext4, out_cols, out_shifts);
+            match self._uninhabited {}
+        }
+    }
+
+    /// Execute [`Self::prover_air_read_folded_cols`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::AirRowGroupA`, `mode = 3`).
+    pub fn prover_air_read_folded_cols_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        col_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        self.prover_air_read_tail_with_receipt(
+            key,
+            transcript_anchor,
+            col_src_ext4,
+            0,
+            out_cols,
+            &mut [],
+        )
+    }
+
+    /// Execute [`Self::prover_air_read_tail`] and issue an audited keyed V5
+    /// [`ProverExecutionReceipt`] (`ProverKernelSlot::AirRowGroupA`, `mode = 3`).
+    pub fn prover_air_read_tail_with_receipt(
+        &self,
+        key: &BackendAttestationKey,
+        transcript_anchor: [u8; 32],
+        col_src_ext4: u32,
+        sh_src_ext4: u32,
+        out_cols: &mut [[u64; 4]],
+        out_shifts: &mut [[u64; 4]],
+    ) -> Result<ProverExecutionReceipt, VulkanError> {
+        #[cfg(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        ))]
+        {
+            if !self.secret_slots_audited {
+                return Err(AccelError::ProverSlotUnaudited {
+                    slot: ProverKernelSlot::AirRowGroupA,
+                }
+                .into());
+            }
+            self.prover_air_read_tail(col_src_ext4, sh_src_ext4, out_cols, out_shifts)?;
+            let slot = ProverKernelSlot::AirRowGroupA;
+            let mut offs = [0u8; 8];
+            offs[0..4].copy_from_slice(&col_src_ext4.to_le_bytes());
+            offs[4..8].copy_from_slice(&sh_src_ext4.to_le_bytes());
+            let col_d = Self::hash_ext4_slice_for_prover(slot, out_cols);
+            let sh_d = Self::hash_ext4_slice_for_prover(slot, out_shifts);
+            let input_digest = prover_stage_io_digest(slot, 0x01, 3, &[&offs]);
+            let output_digest = prover_stage_io_digest(slot, 0x02, 3, &[&col_d, &sh_d]);
+            self.issue_prover_receipt(
+                key,
+                ProverJobDescriptor::AirRowGroupA {
+                    mode: 3,
+                    cur_m: out_cols.len() / 256,
+                    cur_r: out_shifts.len() / 3,
+                },
+                transcript_anchor,
+                input_digest,
+                output_digest,
+            )
+        }
+        #[cfg(not(all(
+            feature = "std",
+            any(target_os = "linux", target_os = "macos"),
+            target_pointer_width = "64"
+        )))]
+        {
+            let _ = (
+                key,
+                transcript_anchor,
+                col_src_ext4,
+                sh_src_ext4,
+                out_cols,
+                out_shifts,
+            );
             match self._uninhabited {}
         }
     }
@@ -4711,7 +5619,13 @@ mod tests {
     #[test]
     fn macos_moltenvk_search_paths_and_wave32_portability_gate() {
         let paths = VulkanSpirvBackend::macos_library_search_paths();
-        assert_eq!(paths, ["/opt/homebrew/lib/libvulkan.1.dylib", "/opt/homebrew/lib/libMoltenVK.dylib"]);
+        assert_eq!(
+            paths,
+            [
+                "/opt/homebrew/lib/libvulkan.1.dylib",
+                "/opt/homebrew/lib/libMoltenVK.dylib"
+            ]
+        );
         assert!(paths.iter().all(|p| p.starts_with('/')));
 
         let mut portability_info = audited_device_info();
@@ -4753,10 +5667,20 @@ mod tests {
         gpu.portability_public_enabled = true;
         let key = BackendAttestationKey::derive(&[7; 32], b"portability-gate-test");
         let reject = |slot| VulkanError::Accel(AccelError::ProverSlotUnaudited { slot });
-        assert!(matches!(gpu.try_acquire_prover_session(), Err(VulkanError::PipelineAuditFailed(_))));
-        assert!(matches!(gpu.try_acquire_secret_prover_session(), Err(VulkanError::PipelineAuditFailed(_))));
-        assert!(matches!(gpu.prover_whir_commit_round0_with(1, &[0; 32], 2, 4, 4, 0, 0, 0,
-            |_, _, _| panic!("unaudited prover read a witness")), Err(VulkanError::PipelineAuditFailed(_))));
+        assert!(matches!(
+            gpu.try_acquire_prover_session(),
+            Err(VulkanError::PipelineAuditFailed(_))
+        ));
+        assert!(matches!(
+            gpu.try_acquire_secret_prover_session(),
+            Err(VulkanError::PipelineAuditFailed(_))
+        ));
+        assert!(matches!(
+            gpu.prover_whir_commit_round0_with(1, &[0; 32], 2, 4, 4, 0, 0, 0, |_, _, _| panic!(
+                "unaudited prover read a witness"
+            )),
+            Err(VulkanError::PipelineAuditFailed(_))
+        ));
         assert_eq!(
             gpu.prover_whir_commit_round0_with_receipt(
                 &key,
@@ -4815,23 +5739,42 @@ mod tests {
         gpu.release_prover_session();
     }
 
-    #[cfg(all(feature = "std", any(target_os = "linux", target_os = "macos"), target_pointer_width = "64"))]
+    #[cfg(all(
+        feature = "std",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
     #[test]
     fn prover_guard_scrubs_on_unwind_and_rejects_another_thread() {
         let gpu = match VulkanSpirvBackend::try_new_audited() {
             Ok(gpu) => gpu,
             Err(e) => {
-                assert!(std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(), "required GPU: {e}");
+                assert!(
+                    std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+                    "required GPU: {e}"
+                );
                 return;
             }
         };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _session = gpu.try_acquire_prover_session().unwrap();
-            gpu.prover_whir_commit_round0(&[&[1; 16]], &[2; 32], 4, 4, 4, 0, 0, 0).unwrap();
-            std::thread::scope(|scope| scope.spawn(|| {
-                assert!(matches!(gpu.try_acquire_prover_session(), Err(VulkanError::WorkspacePoisoned)));
-                assert_eq!(gpu.check_prover_session_active(), Err(VulkanError::WorkspacePoisoned));
-            }).join().unwrap());
+            gpu.prover_whir_commit_round0(&[&[1; 16]], &[2; 32], 4, 4, 4, 0, 0, 0)
+                .unwrap();
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        assert!(matches!(
+                            gpu.try_acquire_prover_session(),
+                            Err(VulkanError::WorkspacePoisoned)
+                        ));
+                        assert_eq!(
+                            gpu.check_prover_session_active(),
+                            Err(VulkanError::WorkspacePoisoned)
+                        );
+                    })
+                    .join()
+                    .unwrap()
+            });
             // Poison the engine mutex too: guard cleanup must recover it and still scrub.
             let _engine = gpu.engine.lock().unwrap();
             panic!("exercise unwind cleanup");
@@ -4839,7 +5782,10 @@ mod tests {
         assert!(outcome.is_err());
         assert!(!gpu.prover_session_in_use.load(Ordering::Acquire));
         assert!(gpu.prover_session_owner.lock().unwrap().is_none());
-        assert_eq!(gpu.check_prover_session_active(), Err(VulkanError::WorkspacePoisoned));
+        assert_eq!(
+            gpu.check_prover_session_active(),
+            Err(VulkanError::WorkspacePoisoned)
+        );
     }
 
     #[test]
