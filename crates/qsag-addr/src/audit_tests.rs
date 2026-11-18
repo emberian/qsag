@@ -397,7 +397,9 @@ fn verified_intent_namespace_agrees_with_canonical_and_is_validated() {
             let frame = qsag_verified::encode_intent_128(&verified);
             let translated = intent_from_verified(&verified);
             assert_eq!(decode_verified_intent_128(&frame), translated.ok());
-            let valid = canonical_suite.validate_identity_kind(canonical_kind).is_ok();
+            let valid = canonical_suite
+                .validate_identity_kind(canonical_kind)
+                .is_ok();
             assert_eq!(translated.is_ok(), valid);
             // The verified decoder checks the pair exactly as the canonical one does.
             assert_eq!(verified_suite.admits_identity_kind(verified_kind), valid);
@@ -468,6 +470,37 @@ fn verified_intent_namespace_agrees_with_canonical_and_is_validated() {
     assert!(decode_verified_intent_128(&bad_magic).is_some());
     bad_magic[0] ^= 1;
     assert!(decode_verified_intent_128(&bad_magic).is_none());
+}
+
+#[test]
+fn decode_verified_intent_128_canonical_roundtrip_and_rejects_noncanonical_bytes() {
+    use VerifiedIntentIdentityKind as VK;
+    use VerifiedIntentSuiteTag as VS;
+
+    for (vs, vk) in [
+        (VS::MlDsa65, VK::SingleOrThreshold),
+        (VS::SlhDsa128f, VK::SingleOrThreshold),
+        (VS::JortsPoseidon2, VK::SingleOrThreshold),
+        (VS::HybridSecp256k1MlDsa44, VK::HybridConjunctive),
+        (VS::HybridEd25519MlDsa65, VK::HybridConjunctive),
+    ] {
+        let raw = qsag_verified::encode_intent_128(&verified_intent(vs, vk));
+        let v_intent = decode_verified_intent_128(&raw).expect("valid verified intent");
+        assert_eq!(v_intent.validate(), Ok(()));
+        assert_eq!(
+            decode_intent_128(&encode_intent_128(&v_intent)),
+            Some(v_intent)
+        );
+        assert_eq!(encode_intent_128(&v_intent), raw);
+
+        // Invalid discriminators in header bytes (address_version / identity_kind) are rejected by both.
+        for bad_idx in [6usize, 7usize] {
+            let mut dirty = raw;
+            dirty[bad_idx] ^= 0x80;
+            assert_eq!(decode_verified_intent_128(&dirty), None);
+            assert_eq!(decode_intent_128(&dirty), None);
+        }
+    }
 }
 
 /// H-01: the hybrid kernels take canonical suites only, and agree with the envelope.

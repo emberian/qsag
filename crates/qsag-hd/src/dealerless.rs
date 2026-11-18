@@ -466,13 +466,8 @@ impl Core {
         CHECK_PRODUCTS * if self.parent.is_some() { 2 } else { 1 }
     }
     fn zero_commitment(&self, party_id: u16, values: &[u32], salt: &[u8; 32]) -> [u8; 32] {
-        commit_mpc_broadcast(
-            &self.session,
-            5,
-            party_id,
-            &pack_field_elements(values),
-            salt,
-        )
+        let packed = SecretBuffer(pack_field_elements(values));
+        commit_mpc_broadcast(&self.session, 5, party_id, &packed, salt)
     }
     fn coin_commitment(
         request: &[u8; 32],

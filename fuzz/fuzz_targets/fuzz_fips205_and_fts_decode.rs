@@ -17,9 +17,7 @@ use qsag_addr::{
     HybridPinnedEnvelope, QsagAddress, decode_intent_128, decode_verified_intent_128,
     encode_intent_128, try_encode_intent_128,
 };
-use qsag_core::fips205::{
-    Fips205Params, SlhPublicKey, decode_slh_sig, slh_verify,
-};
+use qsag_core::fips205::{Fips205Params, SlhPublicKey, decode_slh_sig, slh_verify};
 use qsag_core::tsw_baggy::decode_adrs;
 use qsag_cred::{MlDsaLevel, ml_dsa_verify, pk_decode, pk_encode, sig_decode, sig_encode};
 use qsag_fts::parallel_mpc::{
@@ -86,7 +84,13 @@ fn fixtures() -> &'static Fixtures {
         )
         .expect("two-party parallel-seeded setup");
         let sig = setup
-            .threshold_sign(0, SEEDED_MSG, [0x73; 32], &mut OneUseBurnLog::default(), &accel)
+            .threshold_sign(
+                0,
+                SEEDED_MSG,
+                [0x73; 32],
+                &mut OneUseBurnLog::default(),
+                &accel,
+            )
             .expect("threshold signature on leaf 0");
         verify_parallel_seeded_fts(&setup.pk, SEEDED_MSG, &sig, &accel)
             .expect("seed signature verifies");
@@ -138,6 +142,10 @@ fuzz_target!(init: {
         if let Some(v_intent) = decode_verified_intent_128(&arr128) {
             assert_eq!(v_intent.validate(), Ok(()));
             assert_eq!(decode_intent_128(&arr128), Some(v_intent));
+            assert_eq!(
+                decode_intent_128(&encode_intent_128(&v_intent)),
+                Some(v_intent)
+            );
             assert_eq!(
                 try_encode_intent_128(&v_intent).expect("validated intent must encode"),
                 arr128
