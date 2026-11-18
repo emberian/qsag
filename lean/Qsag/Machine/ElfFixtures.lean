@@ -63,7 +63,7 @@ def currentX86RlibSha256 : String := "1eb5446c9cfa27b869e4a012012ec5d2d155eeac63
 
 def currentX86RcguElfSha256 : String := "765bd75ec6fe46214e716547b338fc8615438b77e11474c34f0ac33f8fd5f2f9"
 
-def currentX86BitsliceSourceSha256 : String := "398c23c1bc9aed4d7986ba58dacbe7f5125a83b887b3ff5610584966fa3b2870"
+def currentX86BitsliceSourceSha256 : String := "d3a931d58c15aef8821e61826a813e6bf3e3fe19026e0cf36349ee05ca69aa3f"
 
 /-- Fresh Linux source build; full rlib SHA-256 1934b346ced71e920860035ccb2c35abafe15b5b81d70fcee0dd5fb17763dda1. -/
 @[expose] noncomputable def currentAarch64RlibLiteral : Nat × Nat :=
@@ -73,7 +73,7 @@ def currentAarch64RlibSha256 : String := "d5a2f15aa41efb76301a11b735e0548e53be16
 
 def currentAarch64RcguElfSha256 : String := "ff1d4a12272dcd821d2e06b6afb22ffee601fc63212a28e7a1002fca9f8b664e"
 
-def currentAarch64BitsliceSourceSha256 : String := "398c23c1bc9aed4d7986ba58dacbe7f5125a83b887b3ff5610584966fa3b2870"
+def currentAarch64BitsliceSourceSha256 : String := "d3a931d58c15aef8821e61826a813e6bf3e3fe19026e0cf36349ee05ca69aa3f"
 
 end Qsag
 end

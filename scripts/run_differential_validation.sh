@@ -111,6 +111,20 @@ if [[ "$RUN_FUZZ" -eq 1 ]]; then
                 if [[ ! -e "${CORPUS_DIR}/capability-structured" ]]; then
                     printf '\312\120' > "${CORPUS_DIR}/capability-structured"
                 fi
+            elif [[ "$target" == fuzz_fips205_and_fts_decode ]]; then
+                if [[ ! -e "${CORPUS_DIR}/structured-edit" ]]; then
+                    printf '\367\136\000\000' > "${CORPUS_DIR}/structured-edit"
+                fi
+            elif [[ "$target" == fuzz_blind_vc_and_agg_decode || \
+                    "$target" == fuzz_quorum_frames || \
+                    "$target" == fuzz_policy_tokens || \
+                    "$target" == fuzz_cred_wire || \
+                    "$target" == fuzz_hologram_and_subtree_decode ]]; then
+                for kind_oct in 000 001 002 003 004; do
+                    if [[ ! -e "${CORPUS_DIR}/structured-${kind_oct}" ]]; then
+                        printf "\\355\\${kind_oct}\\000\\000" > "${CORPUS_DIR}/structured-${kind_oct}"
+                    fi
+                done
             fi
             RUN_LOG="${ARTIFACT_DIR}/last_run.log"
             "./target/${HOST_TRIPLE}/release/${target}" "${CORPUS_DIR}" \

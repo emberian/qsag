@@ -182,10 +182,13 @@ class InstructionStream(list):
         self.relocations = {}
 
 
-def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]]:
+def parse_objdump_functions(
+    disasm_text: str,
+    vma_resolver=None,
+) -> dict[str, list[tuple[str, str]]]:
     funcs: dict[str, list[tuple[str, str]]] = {}
     current_sym = None
-    sym_elf_re = re.compile(r"^[0-9a-fA-F]+\s+<(.+)>:\s*$")
+    sym_elf_re = re.compile(r"^([0-9a-fA-F]+)\s+<(.+)>:\s*$")
     sym_macho_re = re.compile(r"^([_A-Za-z][A-Za-z0-9_$.]*):\s*$")
     ins_re = re.compile(r"^\s*[0-9a-fA-F]+:\s+[0-9a-fA-F ]+\t\s*([a-zA-Z0-9_.]+)(?:\s+(.*))?$")
 
@@ -193,9 +196,14 @@ def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]
         if raw_line.startswith("Disassembly of section"):
             current_sym = None
             continue
-        m_sym = sym_elf_re.match(raw_line) or sym_macho_re.match(raw_line)
-        if m_sym:
-            current_sym = m_sym.group(1)
+        m_elf = sym_elf_re.match(raw_line)
+        m_macho = None if m_elf else sym_macho_re.match(raw_line)
+        if m_elf or m_macho:
+            base_sym = m_elf.group(2) if m_elf else m_macho.group(1)
+            if base_sym in funcs and funcs[base_sym] and m_elf:
+                current_sym = f"{base_sym} (@0x{m_elf.group(1).lstrip('0') or '0'})"
+            else:
+                current_sym = base_sym
             funcs.setdefault(current_sym, InstructionStream())
             continue
         if current_sym is None:
@@ -213,8 +221,33 @@ def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]
             if arrangement:
                 mnem, lane = arrangement.groups()
                 ops = re.sub(r"\bv([0-9]+)\b(?!\.)", rf"v\1.{lane}", ops)
+            linked_target = None
+            linked_vma = None
+            comment_vma = re.search(r"(?:#\s*|//\s*)(?:0x)?([0-9a-fA-F]+)(?:\s+<([^>]+)>)?\s*$", ops)
+            if comment_vma:
+                linked_vma = int(comment_vma.group(1), 16)
+                linked_target = comment_vma.group(2)
+            else:
+                tail_sym = re.search(r"(?:^|\s)(?:0x)?([0-9a-fA-F]+)\s+<([^>]+)>\s*$", ops)
+                if tail_sym:
+                    linked_vma = int(tail_sym.group(1), 16)
+                    linked_target = tail_sym.group(2)
+                else:
+                    bare_sym = re.search(r"\s+<([^>]+)>\s*$", ops)
+                    if bare_sym:
+                        linked_target = bare_sym.group(1)
+            if vma_resolver is not None and linked_vma is not None:
+                resolved = vma_resolver(linked_vma)
+                if resolved:
+                    linked_target = resolved
             ops_clean = re.sub(r"\s+(?:#\s|//).*$", "", ops)
             ops_clean = re.sub(r"\s+<.+>$", "", ops_clean).strip()
+            ins_idx = len(funcs[current_sym])
+            if linked_target:
+                cur_base = re.sub(r"\s*\(@0x[0-9a-fA-F]+\)$", "", current_sym)
+                target_base = re.sub(r"\+0x[0-9a-fA-F]+$", "", linked_target)
+                if target_base != cur_base:
+                    funcs[current_sym].relocations[ins_idx] = linked_target
             funcs[current_sym].append((mnem, ops_clean))
             funcs[current_sym].addresses.append(int(raw_line.strip().split(":", 1)[0], 16))
     return funcs
@@ -521,6 +554,7 @@ def is_branchless_portable_primitive(sym: str) -> bool:
 def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
     """Check upper-YMM/ZMM hygiene and the shared architecture-aware taint screen."""
     errors = []
+    relocations = getattr(instrs, "relocations", {})
     ymm_dirty = False
     for idx, (mnem, ops) in enumerate(instrs):
         ops_l = ops.lower()
@@ -528,7 +562,8 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], stri
             ymm_dirty = True
         if mnem in ("vzeroupper", "vzeroall"):
             ymm_dirty = False
-        if mnem in ("call", "callq", "ret") and ymm_dirty:
+        is_tail_call = idx in relocations and (mnem in ("jmp", "jmpq") or conditional(mnem))
+        if (mnem in ("call", "callq", "ret", "retq") or is_tail_call) and ymm_dirty:
             errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM/ZMM state")
     return errors + vector_wipe_errors(sym, instrs, 62) + rust_errors(sym, instrs, strict, machine=62)
 
@@ -663,8 +698,11 @@ def live_vector_registers_at_exit(instructions, machine):
             continue
         written, zeroed = vector_register_effect(mnemonic, operands, machine)
         dirty = frozenset((dirty - zeroed) | (written & tracked))
-        if conditional(mnemonic) and target is not None:
-            pending.append((target, dirty))
+        if conditional(mnemonic):
+            if target is not None and index not in relocations:
+                pending.append((target, dirty))
+            elif dirty:
+                exits[index] = dirty
         pending.append((index + 1, dirty))
     return [(index, sorted(registers)) for index, registers in sorted(exits.items())]
 
@@ -1362,15 +1400,65 @@ def missing_simd_symbols(audited, machine):
     return [symbol for symbol in REQUIRED_SIMD_SYMBOLS[machine] if symbol not in audited]
 
 
+def strip_generic_args(text: str) -> str:
+    out = []
+    depth = 0
+    for ch in text:
+        if ch == '<':
+            depth += 1
+        elif ch == '>':
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return ''.join(out)
+
+
+def outer_rust_symbol(symbol: str) -> str:
+    """Return the defining item path of a demangled Rust symbol without generic type arguments.
+
+    Prevents generic container/iterator/thread instantiations such as
+    `<alloc::vec::Vec<qsag_asm::wipe::SecretBuffer<u8>>>::push_mut` from being misclassified
+    as `qsag_asm` kernels, while keeping inherent and trait methods defined on audited types
+    (`<qsag_core::rss256::Rss256Engine as Trait>::method` -> `qsag_core::rss256::Rss256Engine::method`).
+    """
+    s = re.sub(r"\s*\(@0x[0-9a-fA-F]+\)$", "", symbol.strip())
+    s = re.sub(r"\s*\(\.llvm\.[0-9]+\)$", "", s)
+    if secret_guard_drop_kind(s) is not None:
+        return s
+    while s.startswith('<'):
+        # Walk the top-level `<SelfType [as Trait<...>]>` header.
+        depth = 0
+        end_idx = None
+        as_pos = None
+        for idx, ch in enumerate(s):
+            if ch == '<':
+                depth += 1
+            elif ch == '>':
+                depth -= 1
+                if depth == 0:
+                    end_idx = idx
+                    break
+            elif depth == 1 and s[idx:idx + 4] == ' as ' and as_pos is None:
+                as_pos = idx
+        if end_idx is None:
+            break
+        inner = s[1:as_pos] if as_pos is not None else s[1:end_idx]
+        s = inner.strip() + s[end_idx + 1:]
+    return re.sub(r"::+", "::", strip_generic_args(s))
+
+
 def is_rust_crypto_symbol(symbol):
     # Storage, CPU discovery, formatting and allocation are outside the kernel
     # ABI. Include root-level dispatch wrappers as well as nested SIMD modules.
     if is_rust_non_crypto_helper(symbol) or 'qsag_asm::durable::' in symbol:
         return False
-    if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', symbol):
+    outer = outer_rust_symbol(symbol)
+    if re.search(r'::(?:tests|[A-Za-z0-9_]+_tests)::', outer):
         return False
-    return ('qsag_asm::' in symbol or any(module in symbol for module in RUST_MODULES)
-            or 'gf2_128_mul_acc_batch' in symbol)
+    if secret_guard_drop_kind(symbol) == 'flat':
+        return True
+    return ('qsag_asm::' in outer or any(module in outer for module in RUST_MODULES)
+            or 'gf2_128_mul_acc_batch' in outer)
 
 
 def elf_header(data):
@@ -1400,6 +1488,8 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
     """
     if not instructions:
         return [f'{symbol}: empty instruction stream']
+    clean_sym = re.sub(r'\s*\(@0x[0-9a-fA-F]+\)$', '', symbol)
+    clean_sym = re.sub(r'\s*\(\.llvm\.[0-9]+\)$', '', clean_sym)
     if machine is None:
         machine = 183 if any(re.search(r'\b[wx][0-9]+\b', op) or m.startswith('b.')
                              or m in AARCH64_DIV_MNEMONICS | AARCH64_VAR_SHIFT_MNEMONICS
@@ -1434,40 +1524,40 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             if name in operand:
                 return size
         return 64 if 'zmm' in operand else 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
-    is_clmul64_acc = 'gf2_64x128_clmul_acc' in symbol or '::clmul_64x128_acc_' in symbol
-    scalar = (not is_clmul64_acc) and (is_branchless_portable_primitive(symbol) or any(
-        name in symbol for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
-                                     'wiedemann_', 'clmul', 'tower_mul', 'tower_scale')))
+    is_clmul64_acc = 'gf2_64x128_clmul_acc' in clean_sym or '::clmul_64x128_acc_' in clean_sym
+    scalar = (not is_clmul64_acc) and (is_branchless_portable_primitive(clean_sym) or any(
+        name in clean_sym for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
+                                       'wiedemann_', 'clmul', 'tower_mul', 'tower_scale')))
     taint = ({f'x{i}' for i in range(8)} if arm else
              {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
     # The final backend argument is public, even when field operands are secret.
-    if symbol.endswith('::goldilocks_mul_ct_with_backend'):
+    if clean_sym.endswith('::goldilocks_mul_ct_with_backend'):
         taint.discard('x2' if arm else 'rdx')
-    elif symbol.endswith('::goldilocks_pow7_ct_with_backend'):
+    elif clean_sym.endswith('::goldilocks_pow7_ct_with_backend'):
         taint.discard('x1' if arm else 'rsi')
     taint.update(f'v{i}' for i in range(32))
     stack = {}
-    if not arm and symbol.endswith('::gf256_shamir_mul_with_backend'):
+    if not arm and clean_sym.endswith('::gf256_shamir_mul_with_backend'):
         # Three slice descriptors occupy the six argument registers; backend is
         # the seventh SysV argument, a public byte at entry rsp + 8.
         stack['rsp', 8] = False
-    if not arm and symbol.endswith('::gf2_128_scale_xor_with_backend'):
+    if not arm and clean_sym.endswith('::gf2_128_scale_xor_with_backend'):
         # Seven-argument SysV signature: backend is the first stack argument;
         # the two scalar field limbs in r8/r9 are secret.
         taint.update(('r8', 'r9'))
         stack['rsp', 8] = False
-    if 'gf2_64x128_clmul_acc' in symbol:
+    if 'gf2_64x128_clmul_acc' in clean_sym:
         # `(acc: &mut [[u128; 2]], words: &[u64], scalar: u128[, backend: SimdBackend])`:
         # `acc` and `words` are public slice descriptors (contents secret); `scalar` limbs are secret.
         taint.update(('x4', 'x5') if arm else ('r8', 'r9'))
-        if not arm and symbol.endswith('_with_backend'):
+        if not arm and clean_sym.endswith('_with_backend'):
             stack['rsp', 8] = False
     public_pointer = set()
-    if any(name in symbol for name in ('::gf2_xor_combine_planes', '::xor_combine_planes_avx2')):
+    if any(name in clean_sym for name in ('::gf2_xor_combine_planes', '::xor_combine_planes_avx2')):
         # Documented `bitslice.rs` contract: `rows` (`rdi`/`x0`) is secret; `pattern` (`rsi`/`x1`)
         # is the public subset-XOR nibble selector matrix.
         public_pointer.add('x1' if arm else 'rsi')
-    if has_public_vec_header_argument(symbol):
+    if has_public_vec_header_argument(clean_sym):
         public_pointer.add('x0' if arm else 'rdi')
     flags = True
     errors = []
@@ -1501,14 +1591,14 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
             target_text = operands.split(',')[-1].strip()
             target = int(target_text, 16) if re.fullmatch(r'(?:0x)?[0-9a-f]+', target_text) else None
             if conditional(mnemonic):
-                if target in positions:
+                if target in positions and not getattr(instructions, 'relocations', {}).get(i):
                     successors.append(positions[target])
-                else:
+                elif not getattr(instructions, 'relocations', {}).get(i):
                     errors.append(f'{symbol}[{i}]: unresolved conditional target')
             elif mnemonic in ('jmp', 'jmpq', 'b'):
                 reloc_jmp = getattr(instructions, 'relocations', {}).get(i, '')
                 successors = [positions[target]] if (not reloc_jmp and target in positions) else []
-            elif mnemonic in ('ret', 'retq'):
+            elif mnemonic in ('ret', 'retq', 'ud2', 'int3', 'udf', 'brk'):
                 successors = []
         # Preserve spill identities when the stack pointer moves. Unknown stack
         # adjustments invalidate the map rather than declaring new contents public.
@@ -1608,12 +1698,36 @@ def rust_errors(symbol, instructions, strict=False, machine=None):
                     else:
                         taint.discard(destination)
                 continue
-            if not parts or conditional(mnemonic) or mnemonic in ('ret', 'jmp', 'b', 'nop', 'push'):
+            if not parts or conditional(mnemonic) or mnemonic in ('ret', 'retq', 'ud2', 'int3', 'udf', 'brk', 'jmp', 'b', 'nop', 'push'):
                 continue
             if mnemonic in ('call', 'callq', 'bl', 'blr'):
                 if any(p in relocation for p in ('panicking::', 'assert_failed', 'panic_bounds_check',
-                                                 'slice_end_index_len_fail', 'slice_start_index_len_fail')):
+                                                 'slice_end_index_len_fail', 'slice_start_index_len_fail',
+                                                 'handle_alloc_error', '__rust_alloc_error_handler',
+                                                 'raw_vec::handle_error', 'capacity_overflow',
+                                                 '_Unwind_Resume')):
                     successors = []
+                    continue
+                alloc_fn = re.search(
+                    r'(?:^|[^A-Za-z0-9_])(malloc|calloc|__rust_alloc|__rust_alloc_zeroed|__rust_realloc)(?:@|$|[^A-Za-z0-9_])',
+                    relocation,
+                )
+                if alloc_fn:
+                    fn_name = alloc_fn.group(1)
+                    arg_regs = (('x0',) if arm else ('rdi',))
+                    if fn_name in ('calloc', '__rust_alloc', '__rust_alloc_zeroed'):
+                        arg_regs = ('x0', 'x1') if arm else ('rdi', 'rsi')
+                    elif fn_name == '__rust_realloc':
+                        arg_regs = ('x1', 'x2', 'x3') if arm else ('rsi', 'rdx', 'rcx')
+                    if any(r in taint for r in arg_regs):
+                        fail('secret-tainted allocation size')
+                        taint.update(('x0', 'x1') if arm else ('rax', 'rdx'))
+                        flags = True
+                    else:
+                        # Public-sized heap allocation: the returned pointer address (and OOM
+                        # NULL check) is public, while `[rax]` buffer contents remain secret.
+                        taint.difference_update(('x0', 'x1') if arm else ('rax', 'rdx'))
+                        flags = False
                     continue
                 if 'qsag_asm::cpuid::probe_capabilities' in relocation:
                     # The concrete Rust return ABI writes seventeen public capability bytes
@@ -1966,6 +2080,21 @@ def self_tests():
     count += 4
     assert not is_rust_crypto_symbol('<qsag_asm::durable::LockedRecord>::replace')
     assert not is_rust_crypto_symbol('<alloc::vec::Vec<u8>>::resize')
+    assert not is_rust_crypto_symbol('<alloc::vec::Vec<qsag_asm::wipe::SecretBuffer<u8>>>::push_mut')
+    assert not is_rust_crypto_symbol('<alloc::raw_vec::RawVec<qsag_core::rss256::SharedDigest256>>::grow_one')
+    assert is_rust_crypto_symbol('<qsag_core::rss256::Rss256Engine as qsag_core::baggy::BaggyEngine>::barrier')
+    # Linked ET_DYN disassembly resolves call/RIP targets in `<...>` annotations rather than `R_*` lines.
+    linked_dis = (
+        '0000000000500000 <qsag_asm::goldilocks_mul_ct_with_backend (.llvm.42)>:\n'
+        '  500000: 8b 05 10 20 00 00\tmov eax, dword ptr [rip + 0x2010] # 0x502016 <qsag_asm::cpuid::CACHED_BACKEND>\n'
+        '  500006: 85 c0\ttest eax, eax\n'
+        '  500008: 74 02\tje 0x50000c <qsag_asm::goldilocks_mul_ct_with_backend (.llvm.42)+0xc>\n'
+        '  50000a: eb 05\tjmp 0x500011 <core::panicking::panic_bounds_check>\n'
+        '  50000c: c3\tret\n'
+    )
+    linked_fn = kernel_audit.parse_objdump_functions(linked_dis)['qsag_asm::goldilocks_mul_ct_with_backend (.llvm.42)']
+    assert not rust_errors('qsag_asm::goldilocks_mul_ct_with_backend (.llvm.42)', linked_fn, True, 62)
+    count += 4
     # AArch64 CSEL overwrites its destination; a secret old destination is not
     # an operand. Secret condition flags and source registers remain rejected.
     assert not rust_errors('buffer_probe', [('ldr', 'x3, [x0]'), ('cmp', 'x1, x2'),
@@ -1993,7 +2122,133 @@ def self_tests():
         assert rust_errors(pattern_symbol, [('mov', 'x6, x1'),
             (arithmetic, 'x6, x0, #7')] + lookup, True, 183)
         count += 3
+    # Public-sized heap allocation allows OOM null check while keeping buffer contents secret;
+    # secret-sized heap allocation is rejected.
+    malloc_oom_stream = InstructionStream()
+    malloc_oom_stream.extend([('mov', 'edi, 64'), ('call', '0x400'), ('test', 'rax, rax'), ('je', '0x14'), ('ret', '')])
+    malloc_oom_stream.addresses = [0, 4, 8, 12, 16, 20]
+    malloc_oom_stream.relocations[1] = 'malloc@GLIBC_2.2.5'
+    assert not rust_errors('buffer_probe', malloc_oom_stream, True, 62)
+    malloc_content_leak = InstructionStream()
+    malloc_content_leak.extend([('mov', 'edi, 64'), ('call', '0x400'), ('mov', 'rbx, [rax]'),
+                                ('test', 'rbx, rbx'), ('je', '0x18'), ('ret', '')])
+    malloc_content_leak.addresses = [0, 4, 8, 12, 16, 20, 24]
+    malloc_content_leak.relocations[1] = 'malloc@GLIBC_2.2.5'
+    assert rust_errors('buffer_probe', malloc_content_leak, True, 62)
+    malloc_secret_size = InstructionStream()
+    malloc_secret_size.extend([('mov', 'rdi, [rsi]'), ('call', '0x400'), ('ret', '')])
+    malloc_secret_size.addresses = [0, 4, 8]
+    malloc_secret_size.relocations[1] = 'malloc@GLIBC_2.2.5'
+    assert any('secret-tainted allocation size' in e for e in rust_errors('buffer_probe', malloc_secret_size, True, 62))
+    # #tooth: conditional tail-calls (`jne` to external symbol) must enforce clean upper AVX/SIMD
+    # state on exit while not being mistaken for intraprocedural jumps.
+    cond_tail_dirty = InstructionStream()
+    cond_tail_dirty.extend([('vpxor', 'ymm0, ymm0, ymm0'), ('test', 'rdi, rdi'), ('jne', '0x400'), ('vzeroupper', ''), ('ret', '')])
+    cond_tail_dirty.addresses = [0, 4, 8, 12, 16]
+    cond_tail_dirty.relocations[2] = 'external_tail_target'
+    assert audit_compiled_rust_x86_symbol('probe_cond_tail', cond_tail_dirty, True)
+    cond_tail_clean = InstructionStream()
+    cond_tail_clean.extend([('vpxor', 'ymm0, ymm0, ymm0'), ('vzeroupper', ''), ('test', 'rdi, rdi'), ('jne', '0x400'), ('ret', '')])
+    cond_tail_clean.addresses = [0, 4, 8, 12, 16]
+    cond_tail_clean.relocations[3] = 'external_tail_target'
+    assert not audit_compiled_rust_x86_symbol('probe_cond_tail', cond_tail_clean, True)
+    count += 5
     return count
+
+
+def build_linked_elf_vma_resolver(data: bytes, executable: str, path: Path):
+    """Resolve `.got` / `.rodata` effective VMAs in linked `ET_EXEC` / `ET_DYN` ELF64 images."""
+    if len(data) < 64 or data[:5] != b'\x7fELF\x02' or data[5] != 1:
+        return None
+    e_shoff = int.from_bytes(data[40:48], 'little')
+    e_shentsize = int.from_bytes(data[58:60], 'little')
+    e_shnum = int.from_bytes(data[60:62], 'little')
+    e_shstrndx = int.from_bytes(data[62:64], 'little')
+    if not e_shoff or not e_shnum or e_shentsize < 64 or e_shstrndx >= e_shnum:
+        return None
+    sections = []
+    for idx in range(e_shnum):
+        off = e_shoff + idx * e_shentsize
+        if off + 64 > len(data):
+            return None
+        sections.append((
+            int.from_bytes(data[off:off + 4], 'little'),
+            int.from_bytes(data[off + 4:off + 8], 'little'),
+            int.from_bytes(data[off + 16:off + 24], 'little'),
+            int.from_bytes(data[off + 24:off + 32], 'little'),
+            int.from_bytes(data[off + 32:off + 40], 'little'),
+            int.from_bytes(data[off + 40:off + 44], 'little'),
+            int.from_bytes(data[off + 56:off + 64], 'little'),
+        ))
+    shstr_off, shstr_sz = sections[e_shstrndx][3], sections[e_shstrndx][4]
+    shstr = data[shstr_off:shstr_off + shstr_sz]
+
+    def cstr(buf: bytes, pos: int) -> str:
+        end = buf.find(b'\x00', pos)
+        return buf[pos:end].decode('utf-8', 'replace') if end != -1 else ''
+
+    rodata_ranges = []
+    for sh_name, _, sh_addr, _, sh_size, _, _ in sections:
+        if cstr(shstr, sh_name).startswith('.rodata') and sh_addr and sh_size:
+            rodata_ranges.append((sh_addr, sh_addr + sh_size))
+
+    sym_exact = {}
+    sym_ranges = []
+    try:
+        sym_out = subprocess.check_output([executable, '-t', '-C', str(path)], text=True, stderr=subprocess.DEVNULL)
+        for line in sym_out.splitlines():
+            m = re.match(r'^([0-9a-fA-F]{16})\s+.{7}\s+(\S+)\s+([0-9a-fA-F]{16})\s+(?:\.hidden\s+)?(.+)$', line)
+            if m:
+                addr, sec, sz, name = int(m.group(1), 16), m.group(2), int(m.group(3), 16), m.group(4).strip()
+                if addr and sec != '*UND*' and not name.startswith('$'):
+                    sym_exact[addr] = name
+                    if sz > 0:
+                        sym_ranges.append((addr, addr + sz, name))
+    except Exception:
+        pass
+
+    def lookup_direct(vma: int) -> str | None:
+        if vma in sym_exact:
+            return sym_exact[vma]
+        for lo, hi, name in sym_ranges:
+            if lo <= vma < hi:
+                return name
+        for lo, hi in rodata_ranges:
+            if lo <= vma < hi:
+                return '.rodata.'
+        return None
+
+    dynsyms = {}
+    for idx, (_, sh_type, _, sh_offset, sh_size, sh_link, sh_entsize) in enumerate(sections):
+        if sh_type == 11 and sh_entsize and sh_link < len(sections):
+            str_off, str_sz = sections[sh_link][3], sections[sh_link][4]
+            strtab = data[str_off:str_off + str_sz]
+            dynsyms[idx] = [
+                cstr(strtab, int.from_bytes(data[p:p + 4], 'little'))
+                for p in range(sh_offset, sh_offset + sh_size, sh_entsize)
+            ]
+
+    got_map = {}
+    for _, sh_type, _, sh_offset, sh_size, sh_link, sh_entsize in sections:
+        if sh_type == 4 and sh_entsize == 24:
+            ds = dynsyms.get(sh_link, [])
+            for p in range(sh_offset, sh_offset + sh_size, 24):
+                r_offset = int.from_bytes(data[p:p + 8], 'little')
+                r_info = int.from_bytes(data[p + 8:p + 16], 'little')
+                r_addend = int.from_bytes(data[p + 16:p + 24], 'little', signed=True)
+                r_type = r_info & 0xffffffff
+                r_sym = r_info >> 32
+                if r_type in (8, 1027):  # R_X86_64_RELATIVE, R_AARCH64_RELATIVE
+                    target = lookup_direct(r_addend)
+                    if target:
+                        got_map[r_offset] = target
+                elif r_sym and r_sym < len(ds) and ds[r_sym]:
+                    got_map[r_offset] = ds[r_sym]
+
+    def resolve(vma: int) -> str | None:
+        return got_map.get(vma) or lookup_direct(vma)
+
+    return resolve
 
 
 def audit(path, objdump, strict, require_bitslice, require_namespaces=(), require_simd=False):
@@ -2035,9 +2290,11 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
                 member_path.write_bytes(blob)
                 chunks.append(subprocess.check_output(command + [str(member_path)], text=True))
         output = '\n'.join(chunks)
+        vma_resolver = None
     else:
         output = subprocess.check_output(command + [str(path)], text=True)
-    functions = kernel_audit.parse_objdump_functions(output)
+        vma_resolver = build_linked_elf_vma_resolver(data, executable, path) if kind in (2, 3) else None
+    functions = kernel_audit.parse_objdump_functions(output, vma_resolver=vma_resolver)
     expected = (kernel_audit.EXPECTED_X86_SYMBOLS if machine == 62 else kernel_audit.EXPECTED_AARCH64_SYMBOLS) + BITSLICE[machine]
     errors, audited = [], []
     branches = 0
