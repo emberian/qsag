@@ -54,6 +54,36 @@ def ValidAggregateWitness {PK Sig : Type} {numValidators : Nat}
     | none => False
     | some sig => verifySingle (stmt.roster i) stmt.message sig = true
 
+theorem ValidAggregateWitness_iff {PK Sig : Type} {numValidators : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool)
+    (stmt : AggregateStatement PK numValidators)
+    (sigs : Fin numValidators → Option Sig) :
+    ValidAggregateWitness verifySingle stmt sigs ↔
+      ∀ i : Fin numValidators,
+        stmt.bitmap.getLsbD i.val = true →
+        ∃ sig : Sig, sigs i = some sig ∧ verifySingle (stmt.roster i) stmt.message sig = true := by
+  unfold ValidAggregateWitness
+  constructor
+  · intro h i hAct
+    have hi := h i hAct
+    cases hs : sigs i with
+    | none => rw [hs] at hi; exact False.elim hi
+    | some sig => rw [hs] at hi; exact ⟨sig, rfl, hi⟩
+  · intro h i hAct
+    obtain ⟨sig, hs, hv⟩ := h i hAct
+    rw [hs]
+    exact hv
+
+theorem ValidAggregateWitness.intro {PK Sig : Type} {numValidators : Nat}
+    {verifySingle : PK → Bytes → Sig → Bool}
+    {stmt : AggregateStatement PK numValidators}
+    {sigs : Fin numValidators → Option Sig}
+    (h : ∀ i : Fin numValidators,
+      stmt.bitmap.getLsbD i.val = true →
+      ∃ sig : Sig, sigs i = some sig ∧ verifySingle (stmt.roster i) stmt.message sig = true) :
+    ValidAggregateWitness verifySingle stmt sigs :=
+  (ValidAggregateWitness_iff verifySingle stmt sigs).mpr h
+
 /-- Binary merge tree over bitmaps of width `w`, ensuring child shards cover disjoint validator subsets. -/
 inductive BitmapMergeTree (w : Nat) where
   | leaf (bm : BitVec w) : BitmapMergeTree w
@@ -151,6 +181,10 @@ structure AggregateBreak where
 def ValidBreak (H : Bytes → Bytes) (b : AggregateBreak) : Prop :=
   b.m₁ ≠ b.m₂ ∧ H b.m₁ = H b.m₂
 
+theorem ValidBreak_iff (H : Bytes → Bytes) (b : AggregateBreak) :
+    ValidBreak H b ↔ b.m₁ ≠ b.m₂ ∧ H b.m₁ = H b.m₂ :=
+  Iff.rfl
+
 /-- A validated break is a `HashCollision` witness of the collision game for `H`. -/
 def ValidBreak.toCollision {H : Bytes → Bytes} {b : AggregateBreak} (h : ValidBreak H b) :
     HashCollision H :=
@@ -170,6 +204,11 @@ theorem not_validBreak_of_injective {H : Bytes → Bytes}
     inputs are recorded queries. A collision the prover did not query is not one. -/
 def TranscriptBreak (H : Bytes → Bytes) (log : List (Bytes × Bytes)) (b : AggregateBreak) : Prop :=
   b.m₁ ∈ log.map Prod.fst ∧ b.m₂ ∈ log.map Prod.fst ∧ ValidBreak H b
+
+theorem TranscriptBreak_iff (H : Bytes → Bytes) (log : List (Bytes × Bytes)) (b : AggregateBreak) :
+    TranscriptBreak H log b ↔
+      b.m₁ ∈ log.map Prod.fst ∧ b.m₂ ∈ log.map Prod.fst ∧ ValidBreak H b :=
+  Iff.rfl
 
 theorem TranscriptBreak.append_left {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
     {b : AggregateBreak} (h : TranscriptBreak H log b) (log' : List (Bytes × Bytes)) :
@@ -221,6 +260,28 @@ def AggregateSoundnessOutcome {PK Sig : Type} {w : Nat}
     (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes) (log : List (Bytes × Bytes))
     (stmt : AggregateStatement PK w) (extracted : Fin w → Option Sig) : Prop :=
   ValidAggregateWitness verifySingle stmt extracted ∨ ∃ b : AggregateBreak, TranscriptBreak H log b
+
+theorem AggregateSoundnessOutcome_iff {PK Sig : Type} {w : Nat}
+    (verifySingle : PK → Bytes → Sig → Bool) (H : Bytes → Bytes) (log : List (Bytes × Bytes))
+    (stmt : AggregateStatement PK w) (extracted : Fin w → Option Sig) :
+    AggregateSoundnessOutcome verifySingle H log stmt extracted ↔
+      (ValidAggregateWitness verifySingle stmt extracted ∨
+        ∃ b : AggregateBreak, TranscriptBreak H log b) :=
+  Iff.rfl
+
+theorem AggregateSoundnessOutcome.of_witness {PK Sig : Type} {w : Nat}
+    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
+    {stmt : AggregateStatement PK w} {extracted : Fin w → Option Sig}
+    (h : ValidAggregateWitness verifySingle stmt extracted) :
+    AggregateSoundnessOutcome verifySingle H log stmt extracted :=
+  .inl h
+
+theorem AggregateSoundnessOutcome.of_break {PK Sig : Type} {w : Nat}
+    {verifySingle : PK → Bytes → Sig → Bool} {H : Bytes → Bytes} {log : List (Bytes × Bytes)}
+    {stmt : AggregateStatement PK w} {extracted : Fin w → Option Sig}
+    (b : AggregateBreak) (h : TranscriptBreak H log b) :
+    AggregateSoundnessOutcome verifySingle H log stmt extracted :=
+  .inr ⟨b, h⟩
 
 /-- With an injective commitment hash the outcome is a valid extracted witness. -/
 theorem AggregateSoundnessOutcome.witness_of_injective {PK Sig : Type} {w : Nat}
@@ -444,6 +505,15 @@ def StraightLineExtractor {PK Sig Proof : Type} {w : Nat}
   ∀ (log : List (Bytes × Bytes)) (stmt : AggregateStatement PK w) (proof : Proof) (i : Fin w)
     (sig : Sig), extract log stmt proof i = some sig →
     sig ∈ proofSigs proof ∨ ∃ e ∈ log, decode e.1 = some sig ∨ decode e.2 = some sig
+
+theorem StraightLineExtractor_iff {PK Sig Proof : Type} {w : Nat}
+    (decode : Bytes → Option Sig) (proofSigs : Proof → List Sig)
+    (extract : List (Bytes × Bytes) → AggregateStatement PK w → Proof → Fin w → Option Sig) :
+    StraightLineExtractor decode proofSigs extract ↔
+      ∀ (log : List (Bytes × Bytes)) (stmt : AggregateStatement PK w) (proof : Proof) (i : Fin w)
+        (sig : Sig), extract log stmt proof i = some sig →
+        sig ∈ proofSigs proof ∨ ∃ e ∈ log, decode e.1 = some sig ∨ decode e.2 = some sig :=
+  Iff.rfl
 
 /-- **Knowledge-soundness contract** of the aggregate verifier `verifyAgg` with extractor
     `extract` of the class `ℰ`, for the oracle family `oracle` sampled by the challenger, prover
@@ -1005,6 +1075,16 @@ theorem tooth_unsound_verifier_breaks_idealAggregate :
 #verify_constructive Qsag.Spec.acceptAll_alwaysValid_unrestricted_extractorSound
 #verify_constructive Qsag.Spec.acceptAll_not_straightLine_extractorSound
 #verify_constructive Qsag.Spec.acceptAll_alwaysValid_not_straightLine_extractorSound
+#verify_constructive Qsag.Spec.ValidAggregateWitness_iff
+#verify_constructive Qsag.Spec.ValidAggregateWitness.intro
+#verify_constructive Qsag.Spec.ValidBreak_iff
+#verify_constructive Qsag.Spec.TranscriptBreak_iff
+#verify_constructive Qsag.Spec.AggregateSoundnessOutcome_iff
+#verify_constructive Qsag.Spec.AggregateSoundnessOutcome.of_witness
+#verify_constructive Qsag.Spec.AggregateSoundnessOutcome.of_break
+#verify_constructive Qsag.Spec.StraightLineExtractor_iff
+#verify_constructive Qsag.Spec.StraightLineExtractor.of_proofSigs
+#verify_constructive Qsag.Spec.AggregateExtractorSound.of_deterministic
 #verify_constructive Qsag.Spec.idealAggregateMachine_all_certified_valid
 #verify_constructive Qsag.Spec.tooth_unsound_verifier_breaks_idealAggregate
 

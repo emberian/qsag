@@ -22,18 +22,25 @@ from an execution of the verifier to explicit reduction events, not a tuple of l
    by the extractor run on the whole outcome.
 
 Standing assumptions and explicit boundaries, stated where they enter:
-* **`WhirScheduleCert`.** `deployed_whir_exec_closed_qrom_128` is conditional: it takes
-  `ClosedWhir.WhirScheduleCert env deployedSched w` as a hypothesis, no such certificate is
-  constructed in this library, and `deployedStages` uses the profile input
-  `whirAffineStageSimpleNum`, which the proved sliced MCA counts do not reach. The `2^-128`
-  figure for the `nv = 24` schedule is therefore not an unconditional theorem here. What is
-  constructed is a certificate for a one-stage toy schedule with one sampled query
-  (`sampledQueryWhir_closed_qrom_soundness`, `sampledQueryWhir_nonvacuity`): the hypotheses of
-  `whir_exec_closed_qrom_soundness` are jointly satisfiable by a verifier that has a stage,
-  accepts honest proofs and errs with positive probability; that instance has no folding and
-  its error bound is above one;
-* the adversary's output carries the committed tables, and the Fiat–Shamir oracle is queried
-  on whole message prefixes (`ClosedFs` module header);
+* **`WhirScheduleCert`.** Two unconditional certificates are constructed in `ClosedWhir`:
+  1. `flatHemSlicedWhir_closed_qrom_soundness` and
+     `flatHemSlicedWhir_succinct_closed_qrom_soundness` (`flatHemSlicedWhir_nonvacuity`) discharge
+     `ClosedWhir.WhirScheduleCert` unconditionally on the two-stage (`6`-round) schedule
+     `ClosedWhir.flatHemSlicedSched` (`64 → 32 → 16` coset chain over `QuarticGoldilocks`,
+     `q = 2^62`, `w = 256`) using **strictly proved `[CWYZ26]` sliced MCA counts**
+     (`sliced_singleStep_bridge_four_challenge_bound`, `WhirStage.decode_list_le`), exercising fold,
+     out-of-domain, and shift-query rounds with `scheduleQromError < 2^-20 < 1`;
+  2. `sampledQueryWhir_closed_qrom_soundness` (`sampledQueryWhir_nonvacuity`) certifies a one-stage
+     toy schedule with one sampled query (`scheduleQromError > 1`).
+  By contrast, `deployed_whir_exec_closed_qrom_128` for the `nv = 24` schedule remains conditional:
+  it takes `ClosedWhir.WhirScheduleCert env deployedSched w` as a hypothesis, and `deployedStages`
+  uses the profile input `whirAffineStageSimpleNum`, which the proved sliced MCA counts do not
+  reach;
+* **Succinct vs. table-carrying Fiat–Shamir:** `whir_succinct_closed_qrom_soundness` and
+  `whirSuccinctCollisionReduction` (`whirSuccinctCollisionReduction_validBreak`) hash ONLY succinct
+  `(Option D, WhirPub F)` message prefixes in the Fiat–Shamir oracle and verify authentication
+  paths against wire-transmitted Merkle roots (`ClosedFs.succinct_fs_qrom_closed_soundness`),
+  whereas `whir_exec_closed_qrom_soundness` places full tables in `WhirMsg`;
 * **Signature reductions:** `jorts_baggy_closed_euf_cma_keyed_target_bound` reduces directly to
   `ExecSubsetCoverHard`, `ExecKeyedPathCollisionHard`, and `ExecKeyedSecretPreimageHard`, while
   `jorts_baggy_closed_euf_cma_prf_keygen_hop` and
@@ -228,6 +235,260 @@ theorem whirCollisionReduction_validBreak {F : Type} [CommRingOps F] [DecidableE
        (whirCollisionReduction Hb nodeC leafC env sched c aux x H o h).m₂⟩ :=
   (whirCollisionReduction Hb nodeC leafC env sched c aux x H o h).validBreak
 
+/-! ### 1b. Succinct Merkle-root-and-opening WHIR QROM soundness & multi-stage `[CWYZ26]` instance -/
+
+section SuccinctWhir
+variable {F D : Type} [CommRingOps F] [DecidableEq F] [DecidableEq D]
+
+/-- Acceptance probability of the succinct Merkle-root-and-opening WHIR verifier under Fiat–Shamir
+    hashing of `(Option D, WhirPub F)` message prefixes only. -/
+def WhirSuccinctSoundnessWinProb {cardX cardAnc Q w : Nat}
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (M : Qsag.ClosedFs.MerkleSetup D F) (dfltRoot : D)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub F)) sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List D))
+    (claim : F) (initRoots : Nat → D)
+    (A : Qsag.QuantumAdv cardX w cardAnc Q) : Qsag.RatBound :=
+  ⟨Qsag.uniformOracleSum w cardX (fun H =>
+      Qsag.QVec.queryMassOn
+        (Qsag.ClosedFs.succinctFsAccept (Qsag.ClosedWhir.whirOracleIop env sched w)
+          (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot) M codec aux claim initRoots H)
+        (Qsag.runQuantumAdv A H)),
+    (2 ^ w) ^ cardX * (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+    Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+      (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+
+/-- Probability that the succinct WHIR verifier accepts AND `findCollision` extracts an explicit
+    Merkle collision against `tblOf`. -/
+def WhirSuccinctMerkleCollisionWinProb {cardX cardAnc Q w : Nat}
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (M : Qsag.ClosedFs.MerkleSetup D F) (dfltRoot : D)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub F)) sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List D))
+    (claim : F) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (A : Qsag.QuantumAdv cardX w cardAnc Q) : Qsag.RatBound :=
+  ⟨Qsag.uniformOracleSum w cardX (fun H =>
+      Qsag.QVec.queryMassOn
+        (Qsag.ClosedFs.succinctFsCollisionEvent (Qsag.ClosedWhir.whirOracleIop env sched w)
+          (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot)
+          M codec aux claim initRoots tblOf H)
+        (Qsag.runQuantumAdv A H)),
+    (2 ^ w) ^ cardX * (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+    Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+      (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+
+/-- **Closed Succinct-Transcript QROM Soundness of Multi-Round WHIR
+    (`whir_succinct_closed_qrom_soundness`)**:
+    Bounds succinct Merkle-root-and-opening acceptance by `scheduleQromError sched Q` plus the
+    explicit `MerkleCollision` extraction probability. -/
+theorem whir_succinct_closed_qrom_soundness {cardX cardAnc Q w : Nat}
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (M : Qsag.ClosedFs.MerkleSetup D F) (dfltRoot : D)
+    (sc : Qsag.ClosedWhir.WhirScheduleCert env sched w)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub F)) sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List D))
+    (claim : F) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang env sched
+      ((Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot).liftStmt claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec w) (o : Fin cardX),
+      Qsag.ClosedFs.succinctFsAccept (Qsag.ClosedWhir.whirOracleIop env sched w)
+        (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot)
+        M codec aux claim initRoots H o = true →
+      let str := Qsag.ClosedFs.fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (Qsag.ClosedWhir.whirOracleIop env sched w).queries claim
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((Qsag.ClosedWhir.whirOracleIop env sched w).depth q.1)
+          (tblOf q.1 ((Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)
+    (A : Qsag.QuantumAdv cardX w cardAnc Q) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSuccinctSoundnessWinProb env sched M dfltRoot codec aux claim initRoots A))
+      (Qsag.Spec.RatBound.ofBudget
+        (Qsag.RatBound.add (Qsag.ClosedWhir.scheduleQromError sched Q)
+          (WhirSuccinctMerkleCollisionWinProb env sched M dfltRoot codec aux claim
+            initRoots tblOf A))) :=
+  (Qsag.Spec.RatBound.ofBudget_le_iff _ _).mpr
+    (Qsag.ClosedWhir.whir_succinct_closed_qrom_soundness env sched M dfltRoot sc codec aux
+      claim initRoots tblOf hx hRoots A)
+
+end SuccinctWhir
+
+/-- Succinct collision reduction turning `succinctFsCollisionEvent` into `Spec.HashCollision Hb`. -/
+def whirSuccinctCollisionReduction {F : Type} [CommRingOps F] [DecidableEq F] {cardX w : Nat}
+    (Hb : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (nodeC : Qsag.Spec.FramedCodec (Nat × Nat × Qsag.Spec.Bytes × Qsag.Spec.Bytes))
+    (leafC : Qsag.Spec.FramedCodec (Nat × Nat × F))
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (dfltRoot : Qsag.Spec.Bytes)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg Qsag.Spec.Bytes (Qsag.ClosedWhir.WhirPub F))
+      sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List Qsag.Spec.Bytes))
+    (claim : F) (initRoots : Nat → Qsag.Spec.Bytes)
+    (tblOf : Nat → Qsag.Spec.Bytes → Nat → F)
+    (H : Fin cardX → BitVec w) (o : Fin cardX)
+    (h : Qsag.ClosedFs.succinctFsCollisionEvent (Qsag.ClosedWhir.whirOracleIop env sched w)
+      (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot)
+      (Qsag.ClosedFs.framedSetup Hb nodeC leafC) codec aux claim initRoots tblOf H o = true) :
+    Qsag.Spec.HashCollision Hb :=
+  Qsag.ClosedFs.succinctFsCollisionReduction Hb nodeC leafC
+    (Qsag.ClosedWhir.whirOracleIop env sched w)
+    (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot)
+    codec aux claim initRoots tblOf H o h
+
+theorem whirSuccinctCollisionReduction_validBreak {F : Type} [CommRingOps F] [DecidableEq F]
+    {cardX w : Nat}
+    (Hb : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (nodeC : Qsag.Spec.FramedCodec (Nat × Nat × Qsag.Spec.Bytes × Qsag.Spec.Bytes))
+    (leafC : Qsag.Spec.FramedCodec (Nat × Nat × F))
+    (env : Qsag.ClosedWhir.WhirEnv F) (sched : Qsag.ClosedWhir.WhirVerifierSchedule)
+    (dfltRoot : Qsag.Spec.Bytes)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg Qsag.Spec.Bytes (Qsag.ClosedWhir.WhirPub F))
+      sched.numRounds cardX)
+    (aux : Fin cardX → List (F × List Qsag.Spec.Bytes))
+    (claim : F) (initRoots : Nat → Qsag.Spec.Bytes)
+    (tblOf : Nat → Qsag.Spec.Bytes → Nat → F)
+    (H : Fin cardX → BitVec w) (o : Fin cardX)
+    (h : Qsag.ClosedFs.succinctFsCollisionEvent (Qsag.ClosedWhir.whirOracleIop env sched w)
+      (Qsag.ClosedWhir.whirSuccinctBridge env sched w dfltRoot)
+      (Qsag.ClosedFs.framedSetup Hb nodeC leafC) codec aux claim initRoots tblOf H o = true) :
+    Qsag.Spec.ValidBreak Hb
+      ⟨(whirSuccinctCollisionReduction Hb nodeC leafC env sched dfltRoot codec aux claim
+          initRoots tblOf H o h).m₁,
+       (whirSuccinctCollisionReduction Hb nodeC leafC env sched dfltRoot codec aux claim
+          initRoots tblOf H o h).m₂⟩ :=
+  (whirSuccinctCollisionReduction Hb nodeC leafC env sched dfltRoot codec aux claim
+    initRoots tblOf H o h).validBreak
+
+/-- **Unconditional Multi-Stage `[CWYZ26]` Sliced-MCA WHIR Closed QROM Soundness
+    (`flatHemSlicedWhir_closed_qrom_soundness`)**:
+    Discharges `ClosedWhir.WhirScheduleCert` unconditionally via `ClosedWhir.flatHemSlicedCert` on
+    the two-stage (`6`-round) schedule `ClosedWhir.flatHemSlicedSched` (`q = 2^62, w = 256`). -/
+theorem flatHemSlicedWhir_closed_qrom_soundness {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat}
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuarticGoldilocks)
+    (c : Qsag.ClosedFs.FsCodec (Qsag.ClosedWhir.WhirMsg Qsag.QuarticGoldilocks)
+      Qsag.ClosedWhir.flatHemSlicedSched.numRounds cardX)
+    (aux : Fin cardX → List (Qsag.QuarticGoldilocks × List D))
+    (x : Qsag.ClosedWhir.WhirStmt Qsag.QuarticGoldilocks)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.flatHemSlicedEnv
+      Qsag.ClosedWhir.flatHemSlicedSched x)
+    (A : Qsag.QuantumAdv cardX 256 cardAnc Q) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSoundnessWinProb Qsag.ClosedWhir.flatHemSlicedEnv
+          Qsag.ClosedWhir.flatHemSlicedSched M c aux x A))
+      (Qsag.Spec.RatBound.ofBudget
+        (Qsag.RatBound.add
+          (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.flatHemSlicedSched Q)
+          (WhirMerkleCollisionWinProb Qsag.ClosedWhir.flatHemSlicedEnv
+            Qsag.ClosedWhir.flatHemSlicedSched M c aux x A))) :=
+  whir_exec_closed_qrom_soundness Qsag.ClosedWhir.flatHemSlicedEnv
+    Qsag.ClosedWhir.flatHemSlicedSched M Qsag.ClosedWhir.flatHemSlicedCert c aux x hx A
+
+/-- **Unconditional Multi-Stage `[CWYZ26]` Succinct-Transcript WHIR Closed QROM Soundness
+    (`flatHemSlicedWhir_succinct_closed_qrom_soundness`)**:
+    Composes `whir_succinct_closed_qrom_soundness` with `ClosedWhir.flatHemSlicedCert` (`0`
+    certificate assumptions, succinct `(Option D, WhirPub)` Fiat–Shamir hashing, explicit
+    `MerkleCollision` branch). -/
+theorem flatHemSlicedWhir_succinct_closed_qrom_soundness {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat}
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuarticGoldilocks) (dfltRoot : D)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub Qsag.QuarticGoldilocks))
+      Qsag.ClosedWhir.flatHemSlicedSched.numRounds cardX)
+    (aux : Fin cardX → List (Qsag.QuarticGoldilocks × List D))
+    (claim : Qsag.QuarticGoldilocks) (initRoots : Nat → D)
+    (tblOf : Nat → D → Nat → Qsag.QuarticGoldilocks)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.flatHemSlicedEnv
+      Qsag.ClosedWhir.flatHemSlicedSched
+      ((Qsag.ClosedWhir.whirSuccinctBridge Qsag.ClosedWhir.flatHemSlicedEnv
+        Qsag.ClosedWhir.flatHemSlicedSched 256 dfltRoot).liftStmt claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 256) (o : Fin cardX),
+      Qsag.ClosedFs.succinctFsAccept
+        (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.flatHemSlicedEnv
+          Qsag.ClosedWhir.flatHemSlicedSched 256)
+        (Qsag.ClosedWhir.whirSuccinctBridge Qsag.ClosedWhir.flatHemSlicedEnv
+          Qsag.ClosedWhir.flatHemSlicedSched 256 dfltRoot)
+        M codec aux claim initRoots H o = true →
+      let str := Qsag.ClosedFs.fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.flatHemSlicedEnv
+          Qsag.ClosedWhir.flatHemSlicedSched 256).queries claim
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.flatHemSlicedEnv
+            Qsag.ClosedWhir.flatHemSlicedSched 256).depth q.1)
+          (tblOf q.1 ((Qsag.ClosedWhir.whirSuccinctBridge Qsag.ClosedWhir.flatHemSlicedEnv
+            Qsag.ClosedWhir.flatHemSlicedSched 256 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (Qsag.ClosedWhir.whirSuccinctBridge Qsag.ClosedWhir.flatHemSlicedEnv
+            Qsag.ClosedWhir.flatHemSlicedSched 256 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)
+    (A : Qsag.QuantumAdv cardX 256 cardAnc Q) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSuccinctSoundnessWinProb Qsag.ClosedWhir.flatHemSlicedEnv
+          Qsag.ClosedWhir.flatHemSlicedSched M dfltRoot codec aux claim initRoots A))
+      (Qsag.Spec.RatBound.ofBudget
+        (Qsag.RatBound.add
+          (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.flatHemSlicedSched Q)
+          (WhirSuccinctMerkleCollisionWinProb Qsag.ClosedWhir.flatHemSlicedEnv
+            Qsag.ClosedWhir.flatHemSlicedSched M dfltRoot codec aux claim initRoots tblOf A))) :=
+  whir_succinct_closed_qrom_soundness Qsag.ClosedWhir.flatHemSlicedEnv
+    Qsag.ClosedWhir.flatHemSlicedSched M dfltRoot Qsag.ClosedWhir.flatHemSlicedCert
+    codec aux claim initRoots tblOf hx hRoots A
+
+/-- Non-vacuity witness bundle for the unconditional two-stage `[CWYZ26]` schedule:
+    `2` stages (`6` rounds) passing `johnsonOk`, `< 2^-20` error at `Q = 0` and `< 1` at `Q = 256`,
+    accepted honest two-stage proof, false statement outside `whirInLang`, positive certified
+    fold-round flip count, and an explicit challenge where the false statement is accepted. -/
+theorem flatHemSlicedWhir_nonvacuity :
+    Qsag.ClosedWhir.flatHemSlicedSched.stages.length = 2 ∧
+    Qsag.ClosedWhir.flatHemSlicedSched.johnsonOk = true ∧
+    Qsag.atLeastBits 20
+      (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.flatHemSlicedSched 0) ∧
+    Qsag.RatBound.lt
+      (Qsag.ClosedWhir.scheduleQromError Qsag.ClosedWhir.flatHemSlicedSched 256)
+      Qsag.RatBound.one ∧
+    ¬ Qsag.ClosedWhir.whirInLang Qsag.ClosedWhir.flatHemSlicedEnv
+      Qsag.ClosedWhir.flatHemSlicedSched
+      ⟨List.replicate 64 (Qsag.hemFoldQg 1), Qsag.hemFoldQg 2⟩ ∧
+    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.flatHemSlicedEnv
+      Qsag.ClosedWhir.flatHemSlicedSched 256).verify
+      ⟨List.replicate 64 (Qsag.hemFoldQg 1), Qsag.hemFoldQg 1⟩
+      [(⟨[], [Qsag.hemFoldQg 1, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero,
+              CommRingOps.zero], []⟩, Qsag.ClosedWhir.flatHemQ),
+       (⟨List.replicate 32 (Qsag.hemFoldQg 1), [], []⟩, 0),
+       (⟨[], [], [Qsag.hemFoldQg 1, Qsag.hemFoldQg 1]⟩, 1),
+       (⟨[], [Qsag.hemFoldQg 39, CommRingOps.zero, CommRingOps.zero, CommRingOps.zero,
+              CommRingOps.zero], []⟩, Qsag.ClosedWhir.flatHemQ),
+       (⟨[], [Qsag.hemFoldQg 1], []⟩, 0),
+       (⟨[], [], [Qsag.hemFoldQg 1, Qsag.hemFoldQg 1]⟩, 0)] = true ∧
+    (Qsag.ClosedWhir.whirOracleIop Qsag.ClosedWhir.flatHemSlicedEnv
+      Qsag.ClosedWhir.flatHemSlicedSched 256).verify
+      ⟨List.replicate 64 (Qsag.hemFoldQg 1), Qsag.hemFoldQg 2⟩
+      [(⟨[], [], []⟩, 0), (⟨[], [], []⟩, 0),
+       (⟨[], [], [CommRingOps.zero, CommRingOps.zero]⟩, 0),
+       (⟨[], [], []⟩, 0), (⟨[], [], []⟩, 0),
+       (⟨[], [], [CommRingOps.zero, CommRingOps.zero]⟩, 0)] = true ∧
+    0 < Qsag.ClosedWhir.flatHemSlicedCert.cert.bad
+      ⟨0, Nat.lt_of_lt_of_eq (by decide : 0 < 6)
+        Qsag.ClosedWhir.flatHemSlicedSched_shape.2.2.symm⟩ :=
+  ⟨Qsag.ClosedWhir.flatHemSlicedSched_shape.1,
+   Qsag.ClosedWhir.flatHemSlicedSched_shape.2.1,
+   Qsag.ClosedWhir.flatHemSlicedSched_error_bits.1,
+   Qsag.ClosedWhir.flatHemSlicedSched_error_bits.2,
+   Qsag.ClosedWhir.flatHemSliced_false_not_inLang,
+   Qsag.ClosedWhir.flatHemSliced_honest_accepts,
+   Qsag.ClosedWhir.flatHemSliced_false_accepted_once.1,
+   Qsag.ClosedWhir.flatHemSlicedCert_fold0_bad_pos⟩
+
 /-! ## 2. Closed adaptive EUF-CMA experiment with the epoch latch -/
 
 /-- **Same-trace classification of the closed EUF-CMA experiment.** The adversary-driven
@@ -351,6 +612,11 @@ theorem concrete_exec_euf_cma_spec_assumptions_witness :
   Qsag.Top.sampledQueryWhir_closed_qrom_soundness
   Qsag.Top.sampledQueryWhir_nonvacuity
   Qsag.Top.whirCollisionReduction_validBreak
+  Qsag.Top.whir_succinct_closed_qrom_soundness
+  Qsag.Top.whirSuccinctCollisionReduction_validBreak
+  Qsag.Top.flatHemSlicedWhir_closed_qrom_soundness
+  Qsag.Top.flatHemSlicedWhir_succinct_closed_qrom_soundness
+  Qsag.Top.flatHemSlicedWhir_nonvacuity
   Qsag.Top.jorts_baggy_closed_euf_cma_same_trace_classification
   Qsag.Top.jorts_baggy_closed_euf_cma_keyed_target_bound
   Qsag.Top.jorts_baggy_closed_euf_cma_prf_keygen_hop
