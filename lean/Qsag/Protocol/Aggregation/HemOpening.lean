@@ -394,6 +394,8 @@ theorem hem_extracted_invalid_coordinate {cardX w : Nat}
   Qsag.measured_hem_acceptance_from_extracted
   Qsag.classical_hem_opening_substitution_bound
   Qsag.hem_extracted_invalid_coordinate
+
+#export_eqns claimedOpeningValues verifyOpeningBatch verifyHemOpeningBatch
 end Qsag
 end
 

@@ -2447,6 +2447,29 @@ theorem verifyHemAffineWhir_zeroOracleClaim_dom01_kat :
   rw [prodPool_eq]
   decide
 
+/-- Constant-`1` oracle and claim `1` on `[0, 1]` (`compactHemInst` in `Tests/CompositionInstances`):
+    valid statement, and accepted by `verifyHemAffineWhir` on the canonical weight-`(1, 0)` transcript. -/
+theorem verifyHemAffineWhir_oneOracleClaim_dom01_kat :
+    HemStatementValid
+      ({ batchOracles := [fun _ => CommRingOps.one]
+         batchClaims := [CommRingOps.one]
+         initDomainPts := [CommRingOps.zero, CommRingOps.one]
+         initDegBound := 0
+         initMinAgree := 2
+         initKernel := [CommRingOps.one]
+         stages := [] } : HemWhirInstance QuarticGoldilocks) ∧
+    verifyHemAffineWhir
+      ({ batchOracles := [fun _ => CommRingOps.one]
+         batchClaims := [CommRingOps.one]
+         initDomainPts := [CommRingOps.zero, CommRingOps.one]
+         initDegBound := 0
+         initMinAgree := 2
+         initKernel := [CommRingOps.one]
+         stages := [] } : HemWhirInstance QuarticGoldilocks)
+      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)] [[CommRingOps.one]],
+       .finalQuery [CommRingOps.one]] = true := by
+  exact ⟨⟨by decide, ⟨[CommRingOps.one], by decide +kernel⟩, trivial⟩, by decide +kernel⟩
+
 /-- Executed half of `tooth_equal_degree_invalid_mixture`: after `θ = -1` mixing the two zero words
     carry the valid claim zero. -/
 theorem polyWitnessValid_theta_neg_one_mixture_kat :
@@ -2570,6 +2593,7 @@ theorem toothDeg1Dom_fixture_facts :
   Qsag.tooth_verifyHemAffineWhir_unincremented_agree_accepts_all
   Qsag.tooth_incremented_cascade_rejects_old_attack
   Qsag.verifyHemAffineWhir_zeroOracleClaim_dom01_kat
+  Qsag.verifyHemAffineWhir_oneOracleClaim_dom01_kat
   Qsag.polyWitnessValid_theta_neg_one_mixture_kat
 end HemExecutedTeeth
 
