@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Emit the generated QSAG-NI RTL:
-  * Balanced 4-row-per-stage 64x64 Dadda partial-product tree (16 x 64x4 slices + 4-level binary
-    combiner tree) and 2-step Goldilocks CSA fold (`fold_one` + `fold_pair`)
+  * 3-way 32x32 / 33x33 Solinas-Karatsuba Dadda partial-product tree (`2 x tree32 + 1 x tree33`,
+    every stage <= 4 CSA rows) and direct Golden-Ratio modular CSA fold
+    `a*b == (1 - 2^32)*P0 + 2^32*PS - P2 (mod p)` (`sk_p0`, `sk_ps`, `sk_a`, `sk_b`, `sk_s2`)
+  * Standalone 128->64 CSA reducer (`fold_one` + `final_par`) matching Obend `goldilocksReduce128`
   * True 2-level Tower Karatsuba `GoldilocksExt4` (`3 x F_{p^2}` Karatsuba + outer `Ext4` combiner,
     every leaf <= 4 CSA rows)
   * Hierarchical CSE Poseidon2 `M_E` (`csa4 + 4 x m4_lane`, `csa3 + 3 x me_col_lane`) & `M_I`
     (`2 x csa3 + sum4_csa` tail + `12 x mi_lane0..11`)
   * Canopy feed-forward, Poseidon2 round constants, and balanced-XOR-tree GF(2^128) Wiedemann `T_7` maps
 
-Every leaf arithmetic sub-module compresses <= 4 rows (`<= 272` input bits) so Z3 and Bitwuzla
-discharge 100% of compositional LEC miters in < 15s (`0` undecided miters).
+Every leaf arithmetic sub-module compresses <= 4 rows (`<= 268` input bits; `<= 134` input bits on
+all modulo-p leaves) so Z3 and Bitwuzla discharge 100% of compositional LEC miters in < 15s (`0` undecided).
 
   python3 gen/gen_rtl.py rtl/
 """
@@ -33,38 +35,32 @@ def _assign_rows(mod, csa, w_out, s_name="s", c_name="c"):
     mod.raw(f"assign {c_name} = {{{', '.join(reversed(ys))}}};")
 
 
-def gen_mul_tree():
-    """64x64 Dadda tree factored into <=4-row stages for <4s symbolic bit-vector LEC:
-      * 16 x `qsag_gl64_mul_slice64x4` (64b x 4b -> 68b s, c)
-      * 8 x `qsag_gl64_mul_comb_l1` (shift 4, 68b -> 72b)
-      * 4 x `qsag_gl64_mul_comb_l2` (shift 8, 72b -> 80b)
-      * 2 x `qsag_gl64_mul_comb_l3` (shift 16, 80b -> 96b)
-      * 1 x `qsag_gl64_mul_comb_l4` (shift 32, 96b -> 128b)
-    """
+def _gen_sub_tree(tag, wa, has_top_bit=False):
+    """Emit a 32x32 (`wa=32`) or 33x33 (`wa=33, has_top_bit=True`) 4-row-per-stage Dadda tree."""
     mods = []
-    ms = Mod("qsag_gl64_mul_slice64x4", [
-        "input  wire [63:0] a",
+    w_slice = wa + 4
+    ms = Mod(f"qsag_gl64_mul_slice{wa}x4", [
+        f"input  wire [{wa - 1}:0] a",
         "input  wire [3:0]  b",
-        "output wire [67:0] s",
-        "output wire [67:0] c",
+        f"output wire [{w_slice - 1}:0] s",
+        f"output wire [{w_slice - 1}:0] c",
     ])
     csa_s = Csa(ms)
-    for i in range(64):
+    for i in range(wa):
         for j in range(4):
             csa_s.raw(ms.w(f"a[{i}] & b[{j}]"), i + j)
-    _assign_rows(ms, csa_s, 68)
+    _assign_rows(ms, csa_s, w_slice)
     mods.append(ms.text())
-    stats["mul_slice64x4 (fa, ha, stages)"] = (csa_s.fas, csa_s.has, csa_s.stages)
+    stats[f"mul_slice{wa}x4 (fa, ha, stages)"] = (csa_s.fas, csa_s.has, csa_s.stages)
 
-    tot_fa = 16 * csa_s.fas
+    tot_fa = 8 * csa_s.fas
     levels = [
-        (1, 68, 4, 72, 8),
-        (2, 72, 8, 80, 4),
-        (3, 80, 16, 96, 2),
-        (4, 96, 32, 128, 1),
+        (1, wa + 4,  4,  wa + 8,  4),
+        (2, wa + 8,  8,  wa + 16, 2),
+        (3, wa + 16, 16, wa + 32, 1),
     ]
     for lvl, win, sh, wout, count in levels:
-        mc = Mod(f"qsag_gl64_mul_comb_l{lvl}", [
+        mc = Mod(f"qsag_gl64_mul_comb{wa}_l{lvl}", [
             f"input  wire [{win - 1}:0] s0",
             f"input  wire [{win - 1}:0] c0",
             f"input  wire [{win - 1}:0] s1",
@@ -82,41 +78,92 @@ def gen_mul_tree():
         _assign_rows(mc, cc, wout)
         mods.append(mc.text())
         tot_fa += count * cc.fas
-        stats[f"mul_comb_l{lvl} (fa, ha)"] = (cc.fas, cc.has)
 
-    stats["mul_tree_total_fa"] = tot_fa
+    w_final = 2 * wa
+    if has_top_bit:
+        mt = Mod(f"qsag_gl64_mul_comb{wa}_top", [
+            f"input  wire [{wa + 31}:0] s0",
+            f"input  wire [{wa + 31}:0] c0",
+            f"input  wire [{wa - 1}:0]  a",
+            "input  wire [0:0]  b_hi",
+            f"output wire [{w_final - 1}:0] s",
+            f"output wire [{w_final - 1}:0] c",
+        ])
+        ct = Csa(mt)
+        for b in range(wa + 32):
+            ct.raw(f"s0[{b}]", b)
+            ct.raw(f"c0[{b}]", b)
+        for i in range(wa):
+            ct.raw(mt.w(f"a[{i}] & b_hi[0]"), 32 + i)
+        _assign_rows(mt, ct, w_final)
+        mods.append(mt.text())
+        tot_fa += ct.fas
 
+    wb = wa if has_top_bit else 32
     top = [
-        "module qsag_gl64_mul_tree (",
-        "  input  wire [63:0]  a,",
-        "  input  wire [63:0]  b,",
-        "  output wire [127:0] s,",
-        "  output wire [127:0] c",
+        f"module {tag} (",
+        f"  input  wire [{wa - 1}:0] a,",
+        f"  input  wire [{wb - 1}:0] b,",
+        f"  output wire [{w_final - 1}:0] s,",
+        f"  output wire [{w_final - 1}:0] c",
         ");",
     ]
-    for k in range(16):
-        top.append(f"  wire [67:0] l0_s{k}, l0_c{k};")
-        top.append(f"  qsag_gl64_mul_slice64x4 u_s{k} (.a(a), .b(b[{4*k+3}:{4*k}]), .s(l0_s{k}), .c(l0_c{k}));")
+    for k in range(8):
+        top.append(f"  wire [{w_slice - 1}:0] l0_s{k}, l0_c{k};")
+        top.append(f"  qsag_gl64_mul_slice{wa}x4 u_s{k} (.a(a), .b(b[{4*k+3}:{4*k}]), .s(l0_s{k}), .c(l0_c{k}));")
     for lvl, win, sh, wout, count in levels:
         prev = f"l{lvl - 1}"
         cur = f"l{lvl}"
         for k in range(count):
-            if lvl < 4:
+            if lvl < 3 or has_top_bit:
                 top.append(f"  wire [{wout - 1}:0] {cur}_s{k}, {cur}_c{k};")
                 so, co = f"{cur}_s{k}", f"{cur}_c{k}"
             else:
                 so, co = "s", "c"
             top.append(
-                f"  qsag_gl64_mul_comb_l{lvl} u_l{lvl}_{k} ("
+                f"  qsag_gl64_mul_comb{wa}_l{lvl} u_l{lvl}_{k} ("
                 f".s0({prev}_s{2*k}), .c0({prev}_c{2*k}), "
                 f".s1({prev}_s{2*k+1}), .c1({prev}_c{2*k+1}), .s({so}), .c({co}));"
             )
+    if has_top_bit:
+        top.append(f"  qsag_gl64_mul_comb{wa}_top u_top (.s0(l3_s0), .c0(l3_c0), .a(a), .b_hi(b[32:32]), .s(s), .c(c));")
     top.append("endmodule\n")
-    return "\n".join(mods) + "\n" + "\n".join(top)
+    return "\n".join(mods) + "\n" + "\n".join(top), tot_fa
+
+
+def gen_mul_tree():
+    """3-way Solinas-Karatsuba partial-product trees (`2 x 32x32 + 1 x 33x33`)."""
+    t32_txt, fa32 = _gen_sub_tree("qsag_gl64_mul_tree32", 32, has_top_bit=False)
+    t33_txt, fa33 = _gen_sub_tree("qsag_gl64_mul_tree33", 33, has_top_bit=True)
+    stats["mul_tree_sk_total_fa"] = 2 * fa32 + fa33
+    wrap = """module qsag_gl64_mul_tree (
+  input  wire [63:0] a,
+  input  wire [63:0] b,
+  output wire [63:0] p0_s,
+  output wire [63:0] p0_c,
+  output wire [63:0] p2_s,
+  output wire [63:0] p2_c,
+  output wire [65:0] ps_s,
+  output wire [65:0] ps_c
+);
+  wire [32:0] sa = {1'b0, a[31:0]} + {1'b0, a[63:32]};
+  wire [32:0] sb = {1'b0, b[31:0]} + {1'b0, b[63:32]};
+  qsag_gl64_mul_tree32 u_p0 (.a(a[31:0]),  .b(b[31:0]),  .s(p0_s), .c(p0_c));
+  qsag_gl64_mul_tree32 u_p2 (.a(a[63:32]), .b(b[63:32]), .s(p2_s), .c(p2_c));
+  qsag_gl64_mul_tree33 u_ps (.a(sa),       .b(sb),       .s(ps_s), .c(ps_c));
+endmodule
+"""
+    return t32_txt + "\n" + t33_txt + "\n" + wrap
 
 
 def gen_fold():
-    """Two-step modular CSA fold (`fold_one` + single-pass 4-row `fold_pair`)."""
+    """Direct Solinas-Karatsuba modular CSA fold:
+      (a0 + 2^32*a1)*(b0 + 2^32*b1) == (P0 - P2) + 2^32*(PS - P0) (mod p),
+    factored into pure exact 4:2 integer compressors (`sk_c0`, `sk_c1`, `sk_m0`, `sk_m1`, <= 134 FAs
+    each -> < 1s LEC) and tiny <=138-bit modulo-p leaves (`sk_sh32`: 68b/32 FAs; `sk_s2`: 138b/77 FAs
+    with exact `+6` bias cancelling `2*(1 + 2^32)*(2^64 - 1) == -6 (mod p)`), plus standalone
+    `fold_one` + `reduce128_csa` for Obend/KATs.
+    """
     m1 = Mod("qsag_gl64_fold_one", [
         "input  wire [127:0] v",
         "output wire [W1-1:0] x",
@@ -131,63 +178,127 @@ def gen_fold():
     m1.ports[2] = f"output wire [{w1 - 1}:0] y"
     stats["fold_one (W1, q1, fa)"] = (w1, q1, c1.fas)
 
-    m2a = Mod("qsag_gl64_fold_pair_s1", [
-        f"input  wire [{w1 - 1}:0] sx",
-        f"input  wire [{w1 - 1}:0] sy",
-        f"input  wire [{w1 - 1}:0] cx",
-        f"input  wire [{w1 - 1}:0] cy",
-        "output wire [W2-1:0] r1x",
-        "output wire [W2-1:0] r1y",
+    # 1) `qsag_gl64_sk_c0`: exact 4:2 integer sum d0x + d0y == p0_s + p0_c + ~p2_s + ~p2_c
+    mc0 = Mod("qsag_gl64_sk_c0", [
+        "input  wire [63:0] p0_s",
+        "input  wire [63:0] p0_c",
+        "input  wire [63:0] p2_s",
+        "input  wire [63:0] p2_c",
+        "output wire [65:0] d0x",
+        "output wire [65:0] d0y",
     ])
-    c2a = Csa(m2a)
-    for sig in ("sx", "sy", "cx", "cy"):
-        c2a.term(sig, w1)
-    r1x, r1y, w2, q2 = c2a.rows("r", None)
-    m2a.raw(f"assign r1x = {r1x};")
-    m2a.raw(f"assign r1y = {r1y};")
-    m2a.ports[4] = f"output wire [{w2 - 1}:0] r1x"
-    m2a.ports[5] = f"output wire [{w2 - 1}:0] r1y"
+    cc0 = Csa(mc0)
+    cc0.term_exact("p0_s", 64, 0, 1)
+    cc0.term_exact("p0_c", 64, 0, 1)
+    cc0.term_exact("p2_s", 64, 0, -1)
+    cc0.term_exact("p2_c", 64, 0, -1)
+    cc0.const = 0
+    _assign_rows(mc0, cc0, 66, "d0x", "d0y")
 
-    m2b = Mod("qsag_gl64_fold_pair_s2", [
-        f"input  wire [{w2 - 1}:0] r1x",
-        f"input  wire [{w2 - 1}:0] r1y",
+    # 2) `qsag_gl64_sk_c1`: exact 4:2 integer sum d1x + d1y == ps_s + ps_c + ~p0_s + ~p0_c
+    mc1 = Mod("qsag_gl64_sk_c1", [
+        "input  wire [65:0] ps_s",
+        "input  wire [65:0] ps_c",
+        "input  wire [63:0] p0_s",
+        "input  wire [63:0] p0_c",
+        "output wire [67:0] d1x",
+        "output wire [67:0] d1y",
+    ])
+    cc1 = Csa(mc1)
+    cc1.term_exact("ps_s", 66, 0, 1)
+    cc1.term_exact("ps_c", 66, 0, 1)
+    cc1.term_exact("p0_s", 64, 0, -1)
+    cc1.term_exact("p0_c", 64, 0, -1)
+    cc1.const = 0
+    _assign_rows(mc1, cc1, 68, "d1x", "d1y")
+
+    # 3) `qsag_gl64_sk_sh32` (68 input bits, 32 FAs): (x + y) == (v * 2^32) (mod p)
+    msh = Mod("qsag_gl64_sk_sh32", [
+        "input  wire [67:0] v",
+        "output wire [WSH-1:0] x",
+        "output wire [WSH-1:0] y",
+    ])
+    csh = Csa(msh)
+    csh.term("v", 68, 32, 1)
+    xsh, ysh, wsh, _ = csh.rows("r", None)
+    msh.raw(f"assign x = {xsh};")
+    msh.raw(f"assign y = {ysh};")
+    msh.ports[1] = f"output wire [{wsh - 1}:0] x"
+    msh.ports[2] = f"output wire [{wsh - 1}:0] y"
+
+    # 4) `qsag_gl64_sk_m0`: exact 4:2 integer sum m0x + m0y == d0x + d0y + e1x + e1y
+    mm0 = Mod("qsag_gl64_sk_m0", [
+        "input  wire [65:0] d0x",
+        "input  wire [65:0] d0y",
+        f"input  wire [{wsh - 1}:0] e1x",
+        f"input  wire [{wsh - 1}:0] e1y",
+        "output wire [67:0] m0x",
+        "output wire [67:0] m0y",
+    ])
+    cm0 = Csa(mm0)
+    cm0.term_exact("d0x", 66)
+    cm0.term_exact("d0y", 66)
+    cm0.term_exact("e1x", wsh)
+    cm0.term_exact("e1y", wsh)
+    _assign_rows(mm0, cm0, 68, "m0x", "m0y")
+
+    # 5) `qsag_gl64_sk_m1`: exact 4:2 integer sum m1x + m1y == m0x + m0y + e2x + e2y
+    mm1 = Mod("qsag_gl64_sk_m1", [
+        "input  wire [67:0] m0x",
+        "input  wire [67:0] m0y",
+        f"input  wire [{wsh - 1}:0] e2x",
+        f"input  wire [{wsh - 1}:0] e2y",
+        "output wire [68:0] m1x",
+        "output wire [68:0] m1y",
+    ])
+    cm1 = Csa(mm1)
+    cm1.term_exact("m0x", 68)
+    cm1.term_exact("m0y", 68)
+    cm1.term_exact("e2x", wsh)
+    cm1.term_exact("e2y", wsh)
+    _assign_rows(mm1, cm1, 69, "m1x", "m1y")
+
+    # 6) `qsag_gl64_sk_s2` (138 input bits -> max_quot = 3): m1x + m1y + 6 -> (x, y) < 4*p
+    m2 = Mod("qsag_gl64_sk_s2", [
+        "input  wire [68:0] bx",
+        "input  wire [68:0] by",
         "output wire [FW-1:0] x",
         "output wire [FW-1:0] y",
     ])
-    c2b = Csa(m2b)
-    c2b.term("r1x", w2)
-    c2b.term("r1y", w2)
-    x2, y2, fw, fq = c2b.rows("r", 3)
-    m2b.raw(f"assign x = {x2};")
-    m2b.raw(f"assign y = {y2};")
-    m2b.ports[2] = f"output wire [{fw - 1}:0] x"
-    m2b.ports[3] = f"output wire [{fw - 1}:0] y"
-    stats["fold_pair (W2, FW, fq, fa)"] = (w2, fw, fq, c2a.fas + c2b.fas)
-
-    fp_wrap = f"""module qsag_gl64_fold_pair (
-  input  wire [{w1 - 1}:0] sx,
-  input  wire [{w1 - 1}:0] sy,
-  input  wire [{w1 - 1}:0] cx,
-  input  wire [{w1 - 1}:0] cy,
-  output wire [{fw - 1}:0] x,
-  output wire [{fw - 1}:0] y
-);
-  wire [{w2 - 1}:0] r1x, r1y;
-  qsag_gl64_fold_pair_s1 u_s1 (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .r1x(r1x), .r1y(r1y));
-  qsag_gl64_fold_pair_s2 u_s2 (.r1x(r1x), .r1y(r1y), .x(x), .y(y));
-endmodule
-"""
+    c2 = Csa(m2)
+    c2.term("bx", 69, 0, 1)
+    c2.term("by", 69, 0, 1)
+    c2.const += 6  # cancels 2*(1 + 2^32)*(2^64 - 1) == -6 (mod p)
+    x2, y2, fw, fq = c2.rows("r", 3)
+    m2.raw(f"assign x = {x2};")
+    m2.raw(f"assign y = {y2};")
+    m2.ports[2] = f"output wire [{fw - 1}:0] x"
+    m2.ports[3] = f"output wire [{fw - 1}:0] y"
+    stats["sk_fold (wsh, fw, fq, fa)"] = (
+        wsh, fw, fq, cc0.fas + cc1.fas + 2 * csh.fas + cm0.fas + cm1.fas + c2.fas
+    )
 
     wrap = f"""module qsag_gl64_fold (
-  input  wire [127:0] s,
-  input  wire [127:0] c,
+  input  wire [63:0] p0_s,
+  input  wire [63:0] p0_c,
+  input  wire [63:0] p2_s,
+  input  wire [63:0] p2_c,
+  input  wire [65:0] ps_s,
+  input  wire [65:0] ps_c,
   output wire [{fw - 1}:0] x,
   output wire [{fw - 1}:0] y
 );
-  wire [{w1 - 1}:0] sx, sy, cx, cy;
-  qsag_gl64_fold_one u_fs (.v(s), .x(sx), .y(sy));
-  qsag_gl64_fold_one u_fc (.v(c), .x(cx), .y(cy));
-  qsag_gl64_fold_pair u_fp (.sx(sx), .sy(sy), .cx(cx), .cy(cy), .x(x), .y(y));
+  wire [65:0] d0x, d0y;
+  wire [67:0] d1x, d1y, m0x, m0y;
+  wire [{wsh - 1}:0] e1x, e1y, e2x, e2y;
+  wire [68:0] m1x, m1y;
+  qsag_gl64_sk_c0   u_c0 (.p0_s(p0_s), .p0_c(p0_c), .p2_s(p2_s), .p2_c(p2_c), .d0x(d0x), .d0y(d0y));
+  qsag_gl64_sk_c1   u_c1 (.ps_s(ps_s), .ps_c(ps_c), .p0_s(p0_s), .p0_c(p0_c), .d1x(d1x), .d1y(d1y));
+  qsag_gl64_sk_sh32 u_e1 (.v(d1x), .x(e1x), .y(e1y));
+  qsag_gl64_sk_sh32 u_e2 (.v(d1y), .x(e2x), .y(e2y));
+  qsag_gl64_sk_m0   u_m0 (.d0x(d0x), .d0y(d0y), .e1x(e1x), .e1y(e1y), .m0x(m0x), .m0y(m0y));
+  qsag_gl64_sk_m1   u_m1 (.m0x(m0x), .m0y(m0y), .e2x(e2x), .e2y(e2y), .m1x(m1x), .m1y(m1y));
+  qsag_gl64_sk_s2   u_s2 (.bx(m1x), .by(m1y), .x(x), .y(y));
 endmodule
 """
     red = f"""module qsag_gl64_reduce128_csa (
@@ -199,7 +310,10 @@ endmodule
   qsag_gl64_final_par #(.W({w1}), .NJ({q1 + 1})) u_final (.x(x), .y(y), .r(r));
 endmodule
 """
-    return "\n".join([m1.text(), m2a.text(), m2b.text(), fp_wrap, wrap]), red, w1, q1, w2, q2, fw, fq
+    return (
+        "\n".join([m1.text(), mc0.text(), mc1.text(), msh.text(), mm0.text(), mm1.text(), m2.text(), wrap]),
+        red, w1, q1, wsh, fw, fq
+    )
 
 
 def gen_mul(fw, fq):
@@ -208,10 +322,21 @@ def gen_mul(fw, fq):
   input  wire [63:0] b,
   output wire [63:0] r
 );
-  wire [127:0] s, c;
+  wire [63:0] p0_s, p0_c, p2_s, p2_c;
+  wire [65:0] ps_s, ps_c;
   wire [{fw - 1}:0] x, y;
-  qsag_gl64_mul_tree u_tree (.a(a), .b(b), .s(s), .c(c));
-  qsag_gl64_fold u_fold (.s(s), .c(c), .x(x), .y(y));
+  qsag_gl64_mul_tree u_tree (
+    .a(a), .b(b),
+    .p0_s(p0_s), .p0_c(p0_c),
+    .p2_s(p2_s), .p2_c(p2_c),
+    .ps_s(ps_s), .ps_c(ps_c)
+  );
+  qsag_gl64_fold u_fold (
+    .p0_s(p0_s), .p0_c(p0_c),
+    .p2_s(p2_s), .p2_c(p2_c),
+    .ps_s(ps_s), .ps_c(ps_c),
+    .x(x), .y(y)
+  );
   qsag_gl64_final_par #(.W({fw}), .NJ({fq + 1})) u_final (.x(x), .y(y), .r(r));
 endmodule
 """
@@ -238,10 +363,7 @@ def _emit_lin_mod(name, terms):
 
 
 def gen_ext4_karatsuba():
-    """True 2-level Tower Karatsuba over F_p[v]/(v^4 - 7), limb order [1, u, v, u*v]:
-      * Level 1 (3 x F_{p^2} Karatsuba): `qsag_fp2_kara_re` (`m0 + 7*m1`, 3 rows) & `qsag_fp2_kara_im` (`m2 - m0 - m1`, 3 rows)
-      * Level 2 (outer Ext4 reconstruction + addend Z): `qsag_ext4_kara_r0..r3` (3-4 rows each)
-    """
+    """True 2-level Tower Karatsuba over F_p[v]/(v^4 - 7), limb order [1, u, v, u*v]."""
     inp = """module qsag_ext4_kara_inputs (
   input  wire [255:0] a,
   output wire [575:0] q
@@ -322,10 +444,7 @@ def gen_csa_helpers():
 
 
 def gen_me(fa_csa3, fa_csa4):
-    """Hierarchical CSE M_E with <=4-row leaf modules:
-      * `qsag_p2_m4`: `qsag_gl64_csa4` + `4 x qsag_p2_m4_lane` (`sx + sy + bi + 2*bj`)
-      * `qsag_p2_me_col`: `qsag_gl64_csa3` + `3 x qsag_p2_me_col_lane` (`sx + sy + yb + rcb`)
-    """
+    """Hierarchical CSE M_E with <=4-row leaf modules."""
     m4_lane, fa_m4l = _emit_lin_mod("qsag_p2_m4_lane", [
         ("sx", 66, 0, 1), ("sy", 66, 0, 1), ("bi", 64, 0, 1), ("bj", 64, 1, 1)
     ])
@@ -389,10 +508,7 @@ endmodule
 
 
 def gen_mi(fa_csa3):
-    """Hierarchical CSE M_I with <=4-row leaf modules:
-      * `qsag_gl64_sum6`: `2 x qsag_gl64_csa3` + `qsag_gl64_sum4_csa` (4 rows)
-      * `qsag_p2_mi_lane0..11`: 4 rows each
-    """
+    """Hierarchical CSE M_I with <=4-row leaf modules."""
     sum4_csa, fa_s4 = _emit_lin_mod("qsag_gl64_sum4_csa", [
         ("sx0", 66, 0, 1), ("sy0", 66, 0, 1), ("sx1", 66, 0, 1), ("sy1", 66, 0, 1)
     ])
@@ -558,7 +674,7 @@ def gen_tower_maps():
 
 
 def main(outdir):
-    fold_txt, red_txt, w1, q1, w2, q2, fw, fq = gen_fold()
+    fold_txt, red_txt, w1, q1, wsh, fw, fq = gen_fold()
     gl = HDR + gen_mul_tree() + "\n" + fold_txt + "\n" + gen_mul(fw, fq) + "\n" + red_txt + FTR
     open(os.path.join(outdir, "qsag_asic_gl64_csa_gen.sv"), "w").write(gl)
     csa_txt, fa_c3, fa_c4 = gen_csa_helpers()
@@ -568,7 +684,7 @@ def main(outdir):
     open(os.path.join(outdir, "qsag_asic_gen_params.svh"), "w").write(
         f"// GENERATED by hardware/asic/gen/gen_rtl.py\n"
         f"`define QSAG_FOLD_W1 {w1}\n`define QSAG_FOLD_NJ1 {q1 + 1}\n"
-        f"`define QSAG_FOLD_W2 {w2}\n`define QSAG_FOLD_NJ2 {q2 + 1}\n"
+        f"`define QSAG_SK_WSH {wsh}\n"
         f"`define QSAG_FOLD_W {fw}\n`define QSAG_FOLD_NJ {fq + 1}\n")
     for k, v in stats.items():
         print(k, v)
