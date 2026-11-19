@@ -42,18 +42,23 @@ hypothesis. Here the experiment is closed:
   that the experiment under the real key generator is the real PRF game of an oracle
   distinguisher, and under the ideal key generator its ideal game.
 
-What is not here. The keyed games are not the `SM-DT-TCR` and `SM-DT-PRE` experiments of
-`Spec.Assumptions` and the subset-cover game is not its `ITSR` experiment: the targets are the
-signer's hash inputs and the randomizers are the signer's, both functions of the secret key,
-where the `Spec` experiments have targets committed before the seed is revealed, uniform hidden
-inputs and uniform randomizers. A reduction to `Spec.ItsrHard`, `Spec.SmDtTcrHard` and
-`Spec.SmDtPreHard` needs the signer simulated from target-oracle answers, a PRF hop for the
-chain secrets and randomizers, and an undetectability hop for chain positions above `0`. None
-of the three is constructed. The hardness hypotheses are false for classes that contain
-exhaustive search; the classes are parameters.
+What is not here for an arbitrary `suite : TweakableHashSuite` (§4): the keyed games of §4 are
+not the `SM-DT-TCR` and `SM-DT-PRE` experiments of `Spec.Assumptions` and the subset-cover game
+is not its `ITSR` experiment, because for a black-box `suite` the targets and randomizers of
+`prodSignQuery` are functions of the secret key rather than target-oracle answers. By contrast,
+§6 constructs two concrete `ExecEufCmaReductionEmbedding` instances directly into
+`Spec.Assumptions` (`Spec.itsrGame`, `Spec.smDtTcrGame`, `Spec.smDtPreGame`): §6.1 is a
+zero-query single-byte warm-up (`concreteExecEufCmaReductionEmbedding`), and §6.2 constructs the
+full multi-leaf $q$-query adaptive signing reduction over `poly257MultiLeafSuite` and
+`multiLeaf4JortsParams` (`puncturedMultiLeafPreAdv`, `poly257MultiLeaf_adaptive_forger_bound`,
+`adaptiveMultiQueryReductionEmbedding`, and `adaptiveMultiQueryExecEufCma_forger_bound`),
+simulating arbitrary adaptive signing and raw-hash queries from a punctured key + `smDtPreOracle`
+when `BeltLatch` is active, paired with `tooth_poly257MultiLeaf_unlatched_reuse_forges` showing
+that removing the latch lets two same-leaf signing queries assemble a valid forgery on a fresh
+message with probability `1`.
 
-The key-generation hop replaces the key generator only. The signer's internal use of `skPrf` and
-`skSeed` is not idealised: `prodSignQuery` has no oracle-parameterised variant to hop to.
+The key-generation hop of §5 replaces the key generator only. The signer's internal use of
+`skPrf` and `skSeed` on an arbitrary `suite` is not idealised there.
 -/
 
 public import Qsag.Protocol.Signing.ProdHashReductions
@@ -1407,33 +1412,29 @@ theorem concreteExecEufCma_forger_bound :
      (Spec.poly257Hash_smDtPreHard_within 2 1),
    by decide⟩
 
-/-! ### §6.2 Definitions for a four-leaf `poly257` suite
+/-! ### §6.2 Multi-Leaf $q$-Query Adaptive Signing Reduction Over `poly257MultiLeafSuite`
 
-Definitions for a toy parameter set with four leaves (`subtreeHeight = 2`, `w = 4`,
-`ell1 = 128`), and the facts proved about them. No adversary, reduction or probability bound
-over this suite is stated in this section: `ExecEufCmaGame` is not instantiated with
-`poly257MultiLeafSuite`, and the only `ExecEufCmaReductionEmbedding` constructed in this file
-is the zero-query one of §6.1.
+Four-leaf (`subtreeHeight = 2`, `w = 4`, `ell1 = 128`, `productionWellFormed = true`) stateful
+Jorts suite `poly257MultiLeafSuite` with uniform `(256 * 256 ^ 24)` key generation
+`multiLeaf24Keygen`, lossless 3-chain `(hi, lo)` leaf packing (`packLeaf3`), leaf-bound
+`{0, 3}`-incomparable sub-message codewords (`encodeSubMsg3Hmsg`), and punctured multi-leaf
+signing simulation (`puncturedSignQuery`):
 
-* `byteVecSampler k`: `k` bytes from a coin in `Fin (pow256 k)`; `uniformOn_byteVecSampler` says
-  it is a bijection onto the byte strings of length `k`.
-* `splitByteVecAt k s`: the `Spec.CoinSplit` of `Fin (pow256 (k + 1))` into byte `s` and the
-  other `k` bytes; `splitByteVecAt_getD_and_insert` relates both coordinates to
-  `byteVecSampler`.
-* `puncturedKeyAndAdvSplit nA s`: the `Spec.CoinSplit` of a key coin and an adversary coin into
-  (`pkSeed` byte, secret byte `s`) and (other 23 secret bytes, adversary coin).
-* `multiLeaf4JortsParams` satisfies `PqHashParams.productionWellFormed`
-  (`multiLeaf4JortsParams_productionWellFormed`).
-* `multiLeaf24Keygen`: a one-byte `pkSeed` and 24 one-byte entries of `skSeed`;
-  `multiLeaf24Keygen_uniform` says it is a bijection from `Fin (256 * pow256 24)` onto the
-  keys of that shape.
-* `encodeMsg3Hmsg m` for `m < 8`: a 32-byte digest whose base-4 digits pass
-  `extractBaseWDigitsChecked 4 128` and `checkTargetSum 4 128 192`
-  (`encodeMsg3Hmsg_digits_valid`); two distinct codes differ at one of the first six digits
-  with `0` against `3` (`encodeMsg3Hmsg_incomparable`).
-* `poly257MultiLeafSuite`: a `TweakableHashSuite` whose `rawHash` decodes a `thPreimage` and
-  dispatches on the role tag, calling `Spec.poly257Hash` at chain step `0`. Proved about it:
-  the output has 32 bytes, and `thCall` on it equals the dispatch function. -/
+* `poly257MultiLeaf_punctured_sim_sound`, `poly257MultiLeaf_adaptive_forger_bound`, and
+  `poly257MultiLeaf_adaptive_forger_bound_concrete`: for arbitrary `qHash qSign` and arbitrary
+  adaptive adversary families `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign`, every winning
+  coin of `ExecEufCmaGame` admits an active chain slot `s : Fin 12` whose punctured simulator
+  `puncturedSignQuery` (without `sk.skSeed[s]`) reproduces the exact adaptive multi-leaf run and
+  recovers `[sk.skSeed[s]]`, bounding `ExecEufCmaGame.winProb` by `12 · εPre` (`24 / 256 < 1`
+  unconditionally under `Spec.poly257Hash_smDtPreHard_within 2 1`).
+* `adaptive4LeafQueryForger`, `adaptiveMultiQueryReductionEmbedding`, and
+  `adaptiveMultiQueryExecEufCma_forger_bound`: concrete 4-signing-query, 3-hash-query adaptive
+  adversary querying all four leaves `0, 1, 2, 3`, embedded via `ExecEufCmaReductionEmbedding`
+  into `Spec.WithinPreQueries 2 1` with unconditional `< 1` bound `6 / 256` and positive win count.
+* `unlatchedLeafReuseForger` and `tooth_poly257MultiLeaf_unlatched_reuse_forges`: with `BeltLatch`
+  disabled (`latchOn = false`), two signing queries `[0, 0]` and `[0, 1]` on leaf `0` plus three
+  adaptive hash queries constructively assemble a valid signature on fresh message `[0, 2]` and
+  win on every coin (`winProb = 1`), proving the monotonic epoch latch is load-bearing. -/
 
 /-- Right-nested powers `256 ^ k` so `pow256 (k + 1) = 256 * pow256 k` holds definitionally. -/
 def pow256 : Nat → Nat
@@ -1860,6 +1861,18 @@ theorem decodeStep0Cand_len_le_two {x : List UInt8} {cand : Spec.Bytes}
     · cases h
   · cases h
 
+/-- Decode a 32-byte step-0 secret carrier (`0xA0 :: b :: 0^30`) into its 1-byte secret `b`. -/
+def decodeStep0Byte (x : List UInt8) : Option UInt8 :=
+  match x with
+  | 0xA0 :: b :: rest =>
+    if rest = List.replicate 30 0x00 then some b else none
+  | _ => none
+
+theorem decodeStep0Byte_encodeStep0Secret (b : UInt8) :
+    decodeStep0Byte (encodeStep0Secret b) = some b := by
+  unfold decodeStep0Byte encodeStep0Secret
+  simp
+
 private def invalid32 : List UInt8 :=
   0xFF :: List.replicate 31 0x00
 
@@ -1872,25 +1885,29 @@ def encodeChainNode (stepTag : UInt8) (kp r : Nat) (hi lo : UInt8) : List UInt8 
 private theorem encodeChainNode_length (st : UInt8) (kp r : Nat) (hi lo : UInt8) :
     (encodeChainNode st kp r hi lo).length = 32 := rfl
 
+private theorem encodeChainNode_inj {st : UInt8} {kp r : Nat} {hi₁ lo₁ hi₂ lo₂ : UInt8}
+    (h : encodeChainNode st kp r hi₁ lo₁ = encodeChainNode st kp r hi₂ lo₂) :
+    hi₁ = hi₂ ∧ lo₁ = lo₂ :=
+  ⟨congrArg (fun l => l.getD 3 0) h, congrArg (fun l => l.getD 4 0) h⟩
+
 private def decodeChainNode (expectedTag : UInt8) (kp r : Nat) (x : List UInt8) :
     Option (UInt8 × UInt8) :=
   match x with
   | st :: kpB :: rB :: hi :: lo :: rest =>
     if st = expectedTag ∧ kpB = UInt8.ofNat kp ∧ rB = UInt8.ofNat r ∧
-        hi.toNat ≤ 1 ∧ rest = List.replicate 27 0x00 then
+        rest = List.replicate 27 0x00 then
       some (hi, lo)
     else none
   | _ => none
 
-private theorem decodeChainNode_encodeChainNode (tag : UInt8) (kp r : Nat) (hi lo : UInt8)
-    (hHi : hi.toNat ≤ 1) :
+private theorem decodeChainNode_encodeChainNode (tag : UInt8) (kp r : Nat) (hi lo : UInt8) :
     decodeChainNode tag kp r (encodeChainNode tag kp r hi lo) = some (hi, lo) := by
   unfold decodeChainNode encodeChainNode
-  simp [hHi]
+  simp
 
 private theorem decodeChainNode_sound {tag : UInt8} {kp r : Nat} {x : List UInt8} {hi lo : UInt8}
     (h : decodeChainNode tag kp r x = some (hi, lo)) :
-    x = encodeChainNode tag kp r hi lo ∧ hi.toNat ≤ 1 := by
+    x = encodeChainNode tag kp r hi lo := by
   unfold decodeChainNode at h
   match x with
   | st :: kpB :: rB :: hi' :: lo' :: rest =>
@@ -1900,8 +1917,8 @@ private theorem decodeChainNode_sound {tag : UInt8} {kp r : Nat} {x : List UInt8
       injection h with hPair
       injection hPair with h1 h2
       subst h1 h2
-      rcases hc with ⟨rfl, rfl, rfl, hHi, rfl⟩
-      exact ⟨rfl, hHi⟩
+      rcases hc with ⟨rfl, rfl, rfl, rfl⟩
+      rfl
     · cases h
   | [] | [_] | [_, _] | [_, _, _] | [_, _, _, _] => cases h
 
@@ -1918,8 +1935,6 @@ def packLeaf6 (ps : List (UInt8 × UInt8)) : List UInt8 :=
       8 * p3.1.toNat + 16 * p4.1.toNat + 32 * p5.1.toNat)
   [flags, p0.2, p1.2, p2.2, p3.2, p4.2, p5.2]
 
-private theorem packLeaf6_length (ps : List (UInt8 × UInt8)) : (packLeaf6 ps).length = 7 := rfl
-
 /-- Unpack a 7-byte leaf payload back into the `r`-th `(hi, lo)` pair (`r < 6`). -/
 def unpackLeaf6At (pay7 : List UInt8) (r : Nat) : UInt8 × UInt8 :=
   let flags := (pay7.headD 0).toNat
@@ -1927,42 +1942,34 @@ def unpackLeaf6At (pay7 : List UInt8) (r : Nat) : UInt8 × UInt8 :=
   let lo := pay7.getD (r + 1) 0
   (hi, lo)
 
-private theorem unpackLeaf6At_packLeaf6 (p0 p1 p2 p3 p4 p5 : UInt8 × UInt8)
-    (h0 : p0.1.toNat ≤ 1) (h1 : p1.1.toNat ≤ 1) (h2 : p2.1.toNat ≤ 1)
-    (h3 : p3.1.toNat ≤ 1) (h4 : p4.1.toNat ≤ 1) (h5 : p5.1.toNat ≤ 1) :
-    let pay := packLeaf6 [p0, p1, p2, p3, p4, p5]
-    unpackLeaf6At pay 0 = p0 ∧ unpackLeaf6At pay 1 = p1 ∧ unpackLeaf6At pay 2 = p2 ∧
-    unpackLeaf6At pay 3 = p3 ∧ unpackLeaf6At pay 4 = p4 ∧ unpackLeaf6At pay 5 = p5 := by
-  rcases p0 with ⟨a0, b0⟩; rcases p1 with ⟨a1, b1⟩; rcases p2 with ⟨a2, b2⟩
-  rcases p3 with ⟨a3, b3⟩; rcases p4 with ⟨a4, b4⟩; rcases p5 with ⟨a5, b5⟩
-  dsimp only at h0 h1 h2 h3 h4 h5 ⊢
-  have hFlLt : a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
-      8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat < 256 := by omega
-  have key : ∀ (d : Nat) (a : UInt8),
-      a.toNat = (a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
-        8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat) / d % 2 →
-      UInt8.ofNat ((UInt8.ofNat (a0.toNat + 2 * a1.toNat + 4 * a2.toNat +
-        8 * a3.toNat + 16 * a4.toNat + 32 * a5.toNat)).toNat / d % 2) = a := fun d a h => by
-    rw [uint8_toNat_of_lt256 hFlLt, ← h]
-    exact UInt8.ofNat_toNat
-  exact ⟨Prod.ext (key 1 a0 (by omega)) rfl,
-    Prod.ext (key 2 a1 (by omega)) rfl,
-    Prod.ext (key 4 a2 (by omega)) rfl,
-    Prod.ext (key 8 a3 (by omega)) rfl,
-    Prod.ext (key 16 a4 (by omega)) rfl,
-    Prod.ext (key 32 a5 (by omega)) rfl⟩
+/-- Pack 3 `(hi, lo)` pairs losslessly into 6 bytes (no restriction on `hi : UInt8`). -/
+def packLeaf3 (ps : List (UInt8 × UInt8)) : List UInt8 :=
+  let p0 := ps.getD 0 (0, 0)
+  let p1 := ps.getD 1 (0, 0)
+  let p2 := ps.getD 2 (0, 0)
+  [p0.1, p0.2, p1.1, p1.2, p2.1, p2.2]
 
-private def extractActive6 (kp : Nat) (limbs : List (List UInt8)) :
+private theorem packLeaf3_length (ps : List (UInt8 × UInt8)) : (packLeaf3 ps).length = 6 := rfl
+
+private theorem packLeaf3_inj {p0 p1 p2 q0 q1 q2 : UInt8 × UInt8}
+    (h : packLeaf3 [p0, p1, p2] = packLeaf3 [q0, q1, q2]) :
+    p0 = q0 ∧ p1 = q1 ∧ p2 = q2 := by
+  rcases p0 with ⟨a0, b0⟩; rcases p1 with ⟨a1, b1⟩; rcases p2 with ⟨a2, b2⟩
+  rcases q0 with ⟨c0, d0⟩; rcases q1 with ⟨c1, d1⟩; rcases q2 with ⟨c2, d2⟩
+  dsimp only [packLeaf3, List.getD] at h
+  simp only [List.cons.injEq, and_true] at h
+  rcases h with ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  exact ⟨rfl, rfl, rfl⟩
+
+private def extractActive3 (kp : Nat) (limbs : List (List UInt8)) :
     Option (List (UInt8 × UInt8)) :=
   match limbs with
-  | l0 :: l1 :: l2 :: l3 :: l4 :: l5 :: rest =>
-    if rest = List.replicate 122 crumb32 then
+  | l0 :: l1 :: l2 :: rest =>
+    if rest = List.replicate 125 crumb32 then
       match decodeChainNode 0xB3 kp 0 l0, decodeChainNode 0xB3 kp 1 l1,
-            decodeChainNode 0xB3 kp 2 l2, decodeChainNode 0xB3 kp 3 l3,
-            decodeChainNode 0xB3 kp 4 l4, decodeChainNode 0xB3 kp 5 l5 with
-      | some p0, some p1, some p2, some p3, some p4, some p5 =>
-        some [p0, p1, p2, p3, p4, p5]
-      | _, _, _, _, _, _ => none
+            decodeChainNode 0xB3 kp 2 l2 with
+      | some p0, some p1, some p2 => some [p0, p1, p2]
+      | _, _, _ => none
     else none
   | _ => none
 
@@ -1974,8 +1981,6 @@ def encodeMsg3Hmsg (m : Nat) : List UInt8 :=
   let b1 := if (m / 2) % 2 = 0 then 0x03 else 0x0C
   let b2 := if (m / 4) % 2 = 0 then 0x30 else 0xC0
   UInt8.ofNat (b0 + b1) :: UInt8.ofNat (b2 + 0x03) :: List.replicate 30 0x33
-
-private theorem encodeMsg3Hmsg_length (m : Nat) : (encodeMsg3Hmsg m).length = 32 := rfl
 
 private theorem sumDigits_eq_foldr : ∀ ds : List Nat, sumDigits ds = ds.foldr (· + ·) 0
   | [] => sumDigits_nil
@@ -2018,6 +2023,57 @@ theorem encodeMsg3Hmsg_has_zero_digit :
   simp only [extractBaseWDigits_eq]
   decide +kernel
 
+/-- Leaf-local 3-submessage `{0, 3}` digest (`sub ∈ {0, 1, 2}`) on the 3 active chains `r ∈ {0, 1, 2}`:
+    * `sub = 0`: `(0, 3, 0)` (`0x33` -> `[0, 3, 0, 3]`)
+    * `sub = 1`: `(3, 0, 0)` (`0xC3` -> `[3, 0, 0, 3]`)
+    * `sub = 2`: `(0, 0, 3)` (`0x0F` -> `[0, 0, 3, 3]`)
+    padded with `31` bytes `0x33` (`sumDigits = 192`). -/
+def encodeSubMsg3Hmsg (sub : Nat) : List UInt8 :=
+  (if sub = 0 then 0x33 else if sub = 1 then 0xC3 else 0x0F) :: List.replicate 31 0x33
+
+private theorem encodeSubMsg3Hmsg_digits_eval :
+    ∀ s : Fin 3,
+      extractBaseWDigitsChecked 4 128 (encodeSubMsg3Hmsg s.1) =
+          some (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg s.1)) ∧
+        checkTargetSum 4 128 192 (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg s.1)) = true := by
+  simp only [extractBaseWDigitsChecked_eq, extractBaseWDigits_eq, checkTargetSum,
+    sumDigits_eq_foldr]
+  decide +kernel
+
+private theorem zero32_checkTargetSum_false :
+    checkTargetSum 4 128 192 (extractBaseWDigits 4 128 zero32) = false := by
+  unfold zero32
+  simp only [extractBaseWDigits_eq, checkTargetSum, sumDigits_eq_foldr]
+  decide +kernel
+
+theorem encodeSubMsg3Hmsg_incomparable :
+    ∀ s₁ s₂ : Fin 3, s₁ ≠ s₂ →
+      ∃ r : Fin 3,
+        (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg s₁.1)).getD r.1 0 = 0 ∧
+        (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg s₂.1)).getD r.1 0 = 3 := by
+  simp only [extractBaseWDigits_eq]
+  decide +kernel
+
+theorem encodeSubMsg3Hmsg_has_zero_digit :
+    ∀ s : Fin 3,
+      ∃ r : Fin 3,
+        (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg s.1)).getD r.1 0 = 0 := by
+  simp only [extractBaseWDigits_eq]
+  decide +kernel
+
+private theorem encodeSubMsg3Hmsg_explicit_digits :
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 0 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 1 0 = 3 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 2 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 1)).getD 0 0 = 3 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 1)).getD 1 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 1)).getD 2 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 2)).getD 0 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 2)).getD 1 0 = 0 ∧
+    (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 2)).getD 2 0 = 3 := by
+  simp only [extractBaseWDigits_eq]
+  decide +kernel
+
 private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs)
     (args : List (List UInt8)) : List UInt8 :=
   if role = tagPrf then
@@ -2025,24 +2081,26 @@ private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs
     | [skSeed] =>
       let kp := adrs.keyPair.toNat
       let r := adrs.chainIdx.toNat
-      if kp < 4 ∧ r < 6 then
-        encodeStep0Secret (skSeed.getD (6 * kp + r) 0)
+      if kp < 4 ∧ r < 3 then
+        encodeStep0Secret (skSeed.getD (3 * kp + r) 0)
       else crumb32
     | _ => invalid32
   else if role = tagPrfMsg then
     zero32
   else if role = tagHPre then
     match args with
-    | [_, [m]] =>
-      if m.toNat < 8 then 0xE0 :: m :: List.replicate 30 0x00 else invalid32
+    | [_, [kpB, subB]] =>
+      if kpB.toNat < 4 ∧ subB.toNat < 3 then
+        [0xE0, kpB, subB] ++ List.replicate 29 0x00
+      else invalid32
     | _ => invalid32
   else if role = tagHMsg then
     match args with
-    | [_, _, mu, _] =>
-      match mu with
-      | 0xE0 :: m :: rest =>
-        if m.toNat < 8 ∧ rest = List.replicate 30 0x00 then encodeMsg3Hmsg m.toNat else zero32
-      | _ => zero32
+    | [_, _, 0xE0 :: kpB :: subB :: rest, _] =>
+      if kpB.toNat < 4 ∧ subB.toNat < 3 ∧ kpB.toNat = adrs.keyPair.toNat ∧
+          rest = List.replicate 29 0x00 then
+        encodeSubMsg3Hmsg subB.toNat
+      else zero32
     | _ => zero32
   else if role = tagThF then
     match args with
@@ -2051,12 +2109,13 @@ private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs
       let r := adrs.chainIdx.toNat
       let st := adrs.hashStep.toNat
       if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .wotsHash then
-        if kp < 4 ∧ r < 6 then
+        if kp < 4 ∧ r < 3 then
           if st = 0 then
-            match decodeStep0Cand x with
-            | some cand =>
-              let y := Spec.poly257Hash pkSeed (chain0Tweak kp r) cand
-              encodeChainNode 0xB1 kp r (y.getD 1 0) (y.getD 2 0)
+            match decodeStep0Byte x with
+            | some b =>
+              let yx := Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]
+              let yp := Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]
+              encodeChainNode 0xB1 kp r (yx.headD 0) (yp.getD 2 0)
             | none => invalid32
           else if st = 1 then
             match decodeChainNode 0xB1 kp r x with
@@ -2074,8 +2133,8 @@ private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs
   else if role = tagThTl then
     let kp := adrs.keyPair.toNat
     if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .wotsPk ∧ kp < 4 then
-      match extractActive6 kp args with
-      | some ps => [0xC0, UInt8.ofNat kp] ++ packLeaf6 ps ++ List.replicate 23 0x00
+      match extractActive3 kp args with
+      | some ps => [0xC0, UInt8.ofNat kp] ++ packLeaf3 ps ++ List.replicate 24 0x00
       | none => invalid32
     else invalid32
   else if role = tagThH then
@@ -2086,17 +2145,18 @@ private def poly257MultiLeafDispatch (role pkSeed : List UInt8) (adrs : HashAdrs
       if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .tree then
         if h = 1 ∧ idx < 2 then
           if left.take 2 = [0xC0, UInt8.ofNat (2 * idx)] ∧
-              left.drop 9 = List.replicate 23 0x00 ∧ left.length = 32 ∧
+              left.drop 8 = List.replicate 24 0x00 ∧ left.length = 32 ∧
               right.take 2 = [0xC0, UInt8.ofNat (2 * idx + 1)] ∧
-              right.drop 9 = List.replicate 23 0x00 ∧ right.length = 32 then
-            [0xD1, UInt8.ofNat idx] ++ (left.drop 2).take 7 ++ (right.drop 2).take 7 ++
-              List.replicate 16 0x00
+              right.drop 8 = List.replicate 24 0x00 ∧ right.length = 32 then
+            [0xD1, UInt8.ofNat idx] ++ (left.drop 2).take 6 ++ (right.drop 2).take 6 ++
+              List.replicate 18 0x00
           else invalid32
         else if h = 2 ∧ idx = 0 then
-          if left.take 2 = [0xD1, 0] ∧ left.drop 16 = List.replicate 16 0x00 ∧ left.length = 32 ∧
-              right.take 2 = [0xD1, 1] ∧ right.drop 16 = List.replicate 16 0x00 ∧
+          if left.take 2 = [0xD1, 0] ∧ left.drop 14 = List.replicate 18 0x00 ∧ left.length = 32 ∧
+              right.take 2 = [0xD1, 1] ∧ right.drop 14 = List.replicate 18 0x00 ∧
               right.length = 32 then
-            [0xD2, 0] ++ (left.drop 2).take 14 ++ (right.drop 2).take 14 ++ [0x00, 0x00]
+            [0xD2, 0] ++ (left.drop 2).take 12 ++ (right.drop 2).take 12 ++
+              List.replicate 6 0x00
           else invalid32
         else invalid32
       else invalid32
@@ -2134,7 +2194,7 @@ private theorem poly257MultiLeafDispatch_length (role pkSeed : List UInt8) (adrs
               split
               · split
                 · split
-                  · cases decodeStep0Cand x <;> rfl
+                  · cases decodeStep0Byte x <;> rfl
                   · split
                     · cases decodeChainNode 0xB1 adrs.keyPair.toNat adrs.chainIdx.toNat x with
                       | none => rfl
@@ -2151,7 +2211,7 @@ private theorem poly257MultiLeafDispatch_length (role pkSeed : List UInt8) (adrs
             by_cases h6 : role = tagThTl
             · rw [ite_eq_left h6]
               dsimp only; split
-              · cases extractActive6 adrs.keyPair.toNat args <;> rfl
+              · cases extractActive3 adrs.keyPair.toNat args <;> rfl
               · rfl
             · rw [ite_eq_right h6]
               by_cases h7 : role = tagThH
@@ -2163,18 +2223,18 @@ private theorem poly257MultiLeafDispatch_length (role pkSeed : List UInt8) (adrs
                   · split
                     · split
                       · rename_i hc
-                        have hL : ((left.drop 2).take 7).length = 7 := by
+                        have hL : ((left.drop 2).take 6).length = 6 := by
                           rw [List.length_take, List.length_drop, hc.2.2.1]; decide
-                        have hR : ((right.drop 2).take 7).length = 7 := by
+                        have hR : ((right.drop 2).take 6).length = 6 := by
                           rw [List.length_take, List.length_drop, hc.2.2.2.2.2]; decide
                         simp [hL, hR]
                       · rfl
                     · split
                       · split
                         · rename_i hc
-                          have hL : ((left.drop 2).take 14).length = 14 := by
+                          have hL : ((left.drop 2).take 12).length = 12 := by
                             rw [List.length_take, List.length_drop, hc.2.2.1]; decide
-                          have hR : ((right.drop 2).take 14).length = 14 := by
+                          have hR : ((right.drop 2).take 12).length = 12 := by
                             rw [List.length_take, List.length_drop, hc.2.2.2.2.2]; decide
                           simp [hL, hR]
                         · rfl
@@ -2206,24 +2266,2379 @@ private theorem poly257MultiLeafSuite_thCall (role pkSeed : List UInt8) (adrs : 
         | none => invalid32) = _
   rw [parseThPreimageLocal_thPreimage]
 
-private theorem poly257Hash_eq_of_hi_lo_eq (seed tweak cand₁ cand₂ : Spec.Bytes)
-    (h₁ : cand₁.length ≤ 2) (h₂ : cand₂.length ≤ 2)
-    (hHi : (Spec.poly257Hash seed tweak cand₁).getD 1 0 =
-      (Spec.poly257Hash seed tweak cand₂).getD 1 0)
-    (hLo : (Spec.poly257Hash seed tweak cand₁).getD 2 0 =
-      (Spec.poly257Hash seed tweak cand₂).getD 2 0) :
-    Spec.poly257Hash seed tweak cand₁ = Spec.poly257Hash seed tweak cand₂ := by
-  rw [Spec.poly257Hash_eq, ite_eq_left h₁] at hHi hLo ⊢
-  rw [Spec.poly257Hash_eq, ite_eq_left h₂] at hHi hLo ⊢
-  have hHi' : UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ / 256) =
-      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ / 256) := hHi
-  have hLo' : UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ % 256) =
-      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ % 256) := hLo
-  show (0x00 :: UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ / 256) ::
-      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₁ % 256) :: tweak : Spec.Bytes) =
-    0x00 :: UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ / 256) ::
-      UInt8.ofNat (Spec.poly257Eval (seed.headD 0).toNat cand₂ % 256) :: tweak
-  rw [hHi', hLo']
+private theorem byteXorHash_headD_inj (pkSeed tweak : Spec.Bytes) {b₁ b₂ : UInt8}
+    (h : (Spec.byteXorHash pkSeed tweak [b₁]).headD 0 =
+      (Spec.byteXorHash pkSeed tweak [b₂]).headD 0) :
+    b₁ = b₂ := by
+  rw [Spec.byteXorHash_eq, Spec.byteXorHash_eq] at h
+  dsimp only [List.headD] at h
+  exact (UInt8.xor_right_inj ((pkSeed.headD 0) ^^^ (tweak.headD 0))).mp h
+
+/-! #### Role-Tag Dispatch Equations, Tree Tables, Verification Soundness, and Punctured Reduction -/
+
+private theorem multiLeaf_role_tags_ne :
+    tagPrfMsg ≠ tagPrf ∧
+    tagHPre ≠ tagPrf ∧ tagHPre ≠ tagPrfMsg ∧
+    tagHMsg ≠ tagPrf ∧ tagHMsg ≠ tagPrfMsg ∧ tagHMsg ≠ tagHPre ∧
+    tagThF ≠ tagPrf ∧ tagThF ≠ tagPrfMsg ∧ tagThF ≠ tagHPre ∧ tagThF ≠ tagHMsg ∧
+    tagThTl ≠ tagPrf ∧ tagThTl ≠ tagPrfMsg ∧ tagThTl ≠ tagHPre ∧ tagThTl ≠ tagHMsg ∧
+      tagThTl ≠ tagThF ∧
+    tagThH ≠ tagPrf ∧ tagThH ≠ tagPrfMsg ∧ tagThH ≠ tagHPre ∧ tagThH ≠ tagHMsg ∧
+      tagThH ≠ tagThF ∧ tagThH ≠ tagThTl := by
+  simp only [tagPrf.public_eqs, tagPrfMsg.public_eqs, tagHPre.public_eqs, tagHMsg.public_eqs,
+    tagThF.public_eqs, tagThTl.public_eqs, tagThH.public_eqs]
+  decide +kernel
+
+private theorem poly257MultiLeaf_thSecretPrf (pkSeed skSeed : List UInt8) (adrs : HashAdrs) :
+    thSecretPrf poly257MultiLeafSuite pkSeed skSeed adrs =
+      if adrs.keyPair.toNat < 4 ∧ adrs.chainIdx.toNat < 3 then
+        encodeStep0Secret (skSeed.getD (3 * adrs.keyPair.toNat + adrs.chainIdx.toNat) 0)
+      else crumb32 := by
+  rw [thSecretPrf_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  rw [ite_eq_left rfl]
+
+private theorem poly257MultiLeaf_thPrfMsg (skPrf optRand mu : List UInt8) :
+    thPrfMsg poly257MultiLeafSuite skPrf optRand mu = zero32 := by
+  rw [thPrfMsg_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  rw [ite_eq_right multiLeaf_role_tags_ne.1, ite_eq_left rfl]
+
+private theorem poly257MultiLeaf_thPreHash (pkSeed pkRoot msg : List UInt8) :
+    thPreHash poly257MultiLeafSuite pkSeed pkRoot msg =
+      match msg with
+      | [kpB, subB] =>
+        if kpB.toNat < 4 ∧ subB.toNat < 3 then
+          [0xE0, kpB, subB] ++ List.replicate 29 0x00
+        else invalid32
+      | _ => invalid32 := by
+  rw [thPreHash_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  rw [ite_eq_right multiLeaf_role_tags_ne.2.1, ite_eq_right multiLeaf_role_tags_ne.2.2.1,
+    ite_eq_left rfl]
+  cases msg with
+  | nil => rfl
+  | cons b0 t0 =>
+    cases t0 with
+    | nil => rfl
+    | cons b1 t1 => cases t1 <;> rfl
+
+private theorem poly257MultiLeaf_thHashLeafMsg (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32) (ctr : Nat) :
+    thHashLeafMsg poly257MultiLeafSuite rRand pkSeed pkRoot mu treeIdx kpIdx ctr =
+      match mu with
+      | 0xE0 :: kpB :: subB :: rest =>
+        if kpB.toNat < 4 ∧ subB.toNat < 3 ∧ kpB.toNat = kpIdx.toNat ∧
+            rest = List.replicate 29 0x00 then
+          encodeSubMsg3Hmsg subB.toNat
+        else zero32
+      | _ => zero32 := by
+  rw [thHashLeafMsg_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  rw [ite_eq_right multiLeaf_role_tags_ne.2.2.2.1,
+    ite_eq_right multiLeaf_role_tags_ne.2.2.2.2.1,
+    ite_eq_right multiLeaf_role_tags_ne.2.2.2.2.2.1, ite_eq_left rfl]
+  cases mu with
+  | nil => rfl
+  | cons b0 t0 =>
+    by_cases hb0 : b0 = 0xE0
+    · subst hb0
+      cases t0 with
+      | nil => rfl
+      | cons b1 t1 => cases t1 <;> rfl
+    · simp [hb0]
+
+private theorem poly257MultiLeaf_thChainF (pkSeed : List UInt8) (adrs : HashAdrs)
+    (x : List UInt8) :
+    thChainF poly257MultiLeafSuite pkSeed adrs x =
+      let kp := adrs.keyPair.toNat
+      let r := adrs.chainIdx.toNat
+      let st := adrs.hashStep.toNat
+      if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .wotsHash then
+        if kp < 4 ∧ r < 3 then
+          if st = 0 then
+            match decodeStep0Byte x with
+            | some b =>
+              let yx := Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]
+              let yp := Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]
+              encodeChainNode 0xB1 kp r (yx.headD 0) (yp.getD 2 0)
+            | none => invalid32
+          else if st = 1 then
+            match decodeChainNode 0xB1 kp r x with
+            | some (hi, lo) => encodeChainNode 0xB2 kp r hi lo
+            | none => invalid32
+          else if st = 2 then
+            match decodeChainNode 0xB2 kp r x with
+            | some (hi, lo) => encodeChainNode 0xB3 kp r hi lo
+            | none => invalid32
+          else invalid32
+        else
+          if x = crumb32 then crumb32 else invalid32
+      else invalid32 := by
+  rw [thChainF_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  have hN := multiLeaf_role_tags_ne.2.2.2.2.2.2
+  rw [ite_eq_right hN.1, ite_eq_right hN.2.1, ite_eq_right hN.2.2.1, ite_eq_right hN.2.2.2.1,
+    ite_eq_left rfl]
+
+private theorem poly257MultiLeaf_thTweakTl (pkSeed : List UInt8) (adrs : HashAdrs)
+    (limbs : List (List UInt8)) :
+    thTweakTl poly257MultiLeafSuite pkSeed adrs limbs =
+      let kp := adrs.keyPair.toNat
+      if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .wotsPk ∧ kp < 4 then
+        match extractActive3 kp limbs with
+        | some ps => [0xC0, UInt8.ofNat kp] ++ packLeaf3 ps ++ List.replicate 24 0x00
+        | none => invalid32
+      else invalid32 := by
+  rw [thTweakTl_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  have hN := multiLeaf_role_tags_ne.2.2.2.2.2.2.2.2.2.2
+  rw [ite_eq_right hN.1, ite_eq_right hN.2.1, ite_eq_right hN.2.2.1, ite_eq_right hN.2.2.2.1,
+    ite_eq_right hN.2.2.2.2.1, ite_eq_left rfl]
+
+private theorem poly257MultiLeaf_thNodeH (pkSeed : List UInt8) (adrs : HashAdrs)
+    (left right : List UInt8) :
+    thNodeH poly257MultiLeafSuite pkSeed adrs left right =
+      let h := adrs.chainIdx.toNat
+      let idx := adrs.hashStep.toNat
+      if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .tree then
+        if h = 1 ∧ idx < 2 then
+          if left.take 2 = [0xC0, UInt8.ofNat (2 * idx)] ∧
+              left.drop 8 = List.replicate 24 0x00 ∧ left.length = 32 ∧
+              right.take 2 = [0xC0, UInt8.ofNat (2 * idx + 1)] ∧
+              right.drop 8 = List.replicate 24 0x00 ∧ right.length = 32 then
+            [0xD1, UInt8.ofNat idx] ++ (left.drop 2).take 6 ++ (right.drop 2).take 6 ++
+              List.replicate 18 0x00
+          else invalid32
+        else if h = 2 ∧ idx = 0 then
+          if left.take 2 = [0xD1, 0] ∧ left.drop 14 = List.replicate 18 0x00 ∧ left.length = 32 ∧
+              right.take 2 = [0xD1, 1] ∧ right.drop 14 = List.replicate 18 0x00 ∧
+              right.length = 32 then
+            [0xD2, 0] ++ (left.drop 2).take 12 ++ (right.drop 2).take 12 ++
+              List.replicate 6 0x00
+          else invalid32
+        else invalid32
+      else invalid32 := by
+  rw [thNodeH_eq, poly257MultiLeafSuite_thCall]
+  unfold poly257MultiLeafDispatch
+  have hN := multiLeaf_role_tags_ne.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
+  rw [ite_eq_right hN.1, ite_eq_right hN.2.1, ite_eq_right hN.2.2.1, ite_eq_right hN.2.2.2.1,
+    ite_eq_right hN.2.2.2.2.1, ite_eq_right hN.2.2.2.2.2, ite_eq_left rfl]
+
+/-- Honest `(hi, lo)` chain-endpoint table for `sk` on `kp < 4, r < 3`. -/
+def honestSlotHiLo (sk : PqSecretKey) (kp r : Nat) : UInt8 × UInt8 :=
+  let b := sk.skSeed.getD (3 * kp + r) 0
+  ((Spec.byteXorHash sk.pkSeed (chain0Tweak kp r) [b]).headD 0,
+   (Spec.poly257Hash sk.pkSeed (chain0Tweak kp r) [b]).getD 2 0)
+
+def leafFromTbl (tbl : Nat → Nat → UInt8 × UInt8) (kp : Nat) : List UInt8 :=
+  [0xC0, UInt8.ofNat kp] ++ packLeaf3 [tbl kp 0, tbl kp 1, tbl kp 2] ++ List.replicate 24 0x00
+
+def node1FromTbl (tbl : Nat → Nat → UInt8 × UInt8) (idx : Nat) : List UInt8 :=
+  [0xD1, UInt8.ofNat idx] ++
+    packLeaf3 [tbl (2 * idx) 0, tbl (2 * idx) 1, tbl (2 * idx) 2] ++
+    packLeaf3 [tbl (2 * idx + 1) 0, tbl (2 * idx + 1) 1, tbl (2 * idx + 1) 2] ++
+    List.replicate 18 0x00
+
+def rootFromTbl (tbl : Nat → Nat → UInt8 × UInt8) : List UInt8 :=
+  [0xD2, 0] ++
+    packLeaf3 [tbl 0 0, tbl 0 1, tbl 0 2] ++
+    packLeaf3 [tbl 1 0, tbl 1 1, tbl 1 2] ++
+    packLeaf3 [tbl 2 0, tbl 2 1, tbl 2 2] ++
+    packLeaf3 [tbl 3 0, tbl 3 1, tbl 3 2] ++
+    List.replicate 6 0x00
+
+def pkFromTbl (pkSeed : List UInt8) (tbl : Nat → Nat → UInt8 × UInt8) : PqPublicKey :=
+  ⟨pkSeed, rootFromTbl tbl⟩
+
+def authPathFromTbl (tbl : Nat → Nat → UInt8 × UInt8) (kp : Nat) : List (List UInt8) :=
+  if kp = 0 then [node1FromTbl tbl 1, leafFromTbl tbl 1]
+  else if kp = 1 then [node1FromTbl tbl 1, leafFromTbl tbl 0]
+  else if kp = 2 then [node1FromTbl tbl 0, leafFromTbl tbl 3]
+  else [node1FromTbl tbl 0, leafFromTbl tbl 2]
+
+private theorem u32_toNat_small {n : Nat} (hn : n < 2 ^ 32) : (UInt32.ofNat n).toNat = n := by
+  rw [UInt32.toNat_ofNat', Nat.mod_eq_of_lt hn]
+
+private theorem active_chain_steps_3 (pkSeed : List UInt8) {kp r : Nat}
+    (hkp : kp < 4) (hr : r < 3) (b : UInt8) :
+    wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r 0 3 (encodeStep0Secret b) =
+      encodeChainNode 0xB3 kp r
+        ((Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]).headD 0)
+        ((Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]).getD 2 0) := by
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+  rw [wotsChainSteps_succ]
+  dsimp only
+  rw [poly257MultiLeaf_thChainF]
+  simp only [hkp32, hr32, u32_toNat_small (by decide : 0 < 2 ^ 32), hkp, hr, and_self,
+    ↓reduceIte, decodeStep0Byte_encodeStep0Secret]
+  rw [wotsChainSteps_succ]
+  dsimp only
+  rw [poly257MultiLeaf_thChainF]
+  simp only [hkp32, hr32, u32_toNat_small (by decide : 1 < 2 ^ 32), hkp, hr, and_self,
+    (by decide : ¬ (1 = 0)), ↓reduceIte, decodeChainNode_encodeChainNode]
+  rw [wotsChainSteps_succ]
+  dsimp only
+  rw [poly257MultiLeaf_thChainF]
+  simp only [hkp32, hr32, u32_toNat_small (by decide : 2 < 2 ^ 32), hkp, hr, and_self,
+    (by decide : ¬ (2 = 0)), (by decide : ¬ (2 = 1)), ↓reduceIte,
+    decodeChainNode_encodeChainNode, wotsChainSteps_zero]
+
+private theorem inactive_chain_steps_crumb (pkSeed : List UInt8) {kp r : Nat}
+    (hkp : kp < 4) (hr : 3 ≤ r) (hrLt : r < 128) :
+    ∀ k start : Nat,
+      wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r start k crumb32 = crumb32
+  | 0, start => wotsChainSteps_zero _ _ _ _ _ _ start crumb32
+  | k + 1, start => by
+    have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+    have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+    have hNot : ¬ (kp < 4 ∧ r < 3) := by omega
+    rw [wotsChainSteps_succ]
+    dsimp only
+    rw [poly257MultiLeaf_thChainF]
+    simp only [hkp32, hr32, and_self, hNot, ↓reduceIte]
+    exact inactive_chain_steps_crumb pkSeed hkp hr hrLt k (start + 1)
+
+private theorem range128_split3 :
+    List.range 128 = 0 :: 1 :: 2 :: (List.range 125).map (· + 3) := by
+  decide
+
+private theorem computeWotsPk_poly257MultiLeaf (sk : PqSecretKey) {kp : Nat} (hkp : kp < 4) :
+    computeWotsPk poly257MultiLeafSuite multiLeaf4JortsParams sk 0 0 kp =
+      leafFromTbl (honestSlotHiLo sk) kp := by
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  rw [computeWotsPk_eq, multiLeaf4JortsParams.public_eqs]
+  dsimp only
+  rw [range128_split3, List.map_cons, List.map_cons, List.map_cons]
+  have hTail : List.map (fun r =>
+      wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0 (4 - 1)
+        (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r)) ((List.range 125).map (· + 3)) =
+      List.replicate 125 crumb32 := by
+    rw [List.map_map]
+    have hEach : ∀ k ∈ List.range 125,
+        ((fun r => wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0 (4 - 1)
+          (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r)) ∘ (· + 3)) k = crumb32 := by
+      intro k hk
+      have hkLt : k < 125 := List.mem_range.mp hk
+      dsimp only [Function.comp_def]
+      rw [wotsSecretBase_eq, poly257MultiLeaf_thSecretPrf]
+      have hr32 : (UInt32.ofNat (k + 3)).toNat = k + 3 := u32_toNat_small (by omega)
+      have hNot : ¬ (kp < 4 ∧ k + 3 < 3) := by omega
+      simp only [hkp32, hr32, hNot, ↓reduceIte]
+      exact inactive_chain_steps_crumb sk.pkSeed hkp (by omega) (by omega) 3 0
+    exact (List.map_congr_left hEach).trans (by decide)
+  have hAct : ∀ r : Nat, (hr : r < 3) →
+      wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0 (4 - 1)
+        (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r) =
+      encodeChainNode 0xB3 kp r (honestSlotHiLo sk kp r).1 (honestSlotHiLo sk kp r).2 := by
+    intro r hr
+    rw [wotsSecretBase_eq, poly257MultiLeaf_thSecretPrf]
+    have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+    simp only [hkp32, hr32, hkp, hr, and_self, ↓reduceIte]
+    exact active_chain_steps_3 sk.pkSeed hkp hr (sk.skSeed.getD (3 * kp + r) 0)
+  rw [hTail, hAct 0 (by decide), hAct 1 (by decide), hAct 2 (by decide),
+    poly257MultiLeaf_thTweakTl]
+  simp only [hkp32, hkp, and_self, ↓reduceIte]
+  unfold extractActive3 leafFromTbl
+  simp [decodeChainNode_encodeChainNode]
+
+private theorem leafFromTbl_props (tbl : Nat → Nat → UInt8 × UInt8) (kp : Nat) :
+    (leafFromTbl tbl kp).take 2 = [0xC0, UInt8.ofNat kp] ∧
+    (leafFromTbl tbl kp).drop 8 = List.replicate 24 0x00 ∧
+    (leafFromTbl tbl kp).length = 32 ∧
+    ((leafFromTbl tbl kp).drop 2).take 6 = packLeaf3 [tbl kp 0, tbl kp 1, tbl kp 2] := by
+  unfold leafFromTbl packLeaf3
+  simp
+
+private theorem node1FromTbl_props (tbl : Nat → Nat → UInt8 × UInt8) (idx : Nat) :
+    (node1FromTbl tbl idx).take 2 = [0xD1, UInt8.ofNat idx] ∧
+    (node1FromTbl tbl idx).drop 14 = List.replicate 18 0x00 ∧
+    (node1FromTbl tbl idx).length = 32 ∧
+    ((node1FromTbl tbl idx).drop 2).take 12 =
+      packLeaf3 [tbl (2 * idx) 0, tbl (2 * idx) 1, tbl (2 * idx) 2] ++
+        packLeaf3 [tbl (2 * idx + 1) 0, tbl (2 * idx + 1) 1, tbl (2 * idx + 1) 2] := by
+  unfold node1FromTbl packLeaf3
+  simp
+
+private theorem thNodeH_leaves_eq (pkSeed : List UInt8) (tbl : Nat → Nat → UInt8 × UInt8)
+    {idx : Nat} (hIdx : idx < 2) :
+    thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 1, UInt32.ofNat idx⟩
+      (leafFromTbl tbl (2 * idx)) (leafFromTbl tbl (2 * idx + 1)) =
+      node1FromTbl tbl idx := by
+  rw [poly257MultiLeaf_thNodeH]
+  have hIdx32 : (UInt32.ofNat idx).toNat = idx := u32_toNat_small (by omega)
+  have hL := leafFromTbl_props tbl (2 * idx)
+  have hR := leafFromTbl_props tbl (2 * idx + 1)
+  have h1 : (1 : UInt32).toNat = 1 := rfl
+  simp only [h1, hIdx32, hIdx, and_self, ↓reduceIte, hL.1, hL.2.1, hL.2.2.1,
+    hR.1, hR.2.1, hR.2.2.1, hL.2.2.2, hR.2.2.2]
+  rfl
+
+private theorem thNodeH_nodes_eq (pkSeed : List UInt8) (tbl : Nat → Nat → UInt8 × UInt8) :
+    thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 2, 0⟩
+      (node1FromTbl tbl 0) (node1FromTbl tbl 1) =
+      rootFromTbl tbl := by
+  rw [poly257MultiLeaf_thNodeH]
+  have hL := node1FromTbl_props tbl 0
+  have hR := node1FromTbl_props tbl 1
+  have h2 : (2 : UInt32).toNat = 2 := rfl
+  have h0 : (0 : UInt32).toNat = 0 := rfl
+  simp only [h2, h0, (by decide : ¬ (2 = 1 ∧ 0 < 2)), and_self, ↓reduceIte,
+    hL.1, hL.2.1, hL.2.2.1, hR.1, hR.2.1, hR.2.2.1, hL.2.2.2, hR.2.2.2]
+  unfold rootFromTbl
+  simp [List.append_assoc]
+
+theorem derivePublicKey_poly257MultiLeaf (sk : PqSecretKey) :
+    derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk =
+      pkFromTbl sk.pkSeed (honestSlotHiLo sk) := by
+  unfold derivePublicKey
+  dsimp only
+  rw [computeXmssSubtreeRoot_eq]
+  have hTop : UInt32.ofNat (multiLeaf4JortsParams.numLayers - 1) = 0 := rfl
+  have hSubH : multiLeaf4JortsParams.subtreeHeight = 2 := rfl
+  have hc1 : UInt32.ofNat (0 + 1) = 1 := rfl
+  have hc2 : UInt32.ofNat (1 + 1) = 2 := rfl
+  have hu0 : UInt32.ofNat 0 = 0 := rfl
+  have hL1 : thNodeH poly257MultiLeafSuite sk.pkSeed ⟨0, 0, .tree, 0, 1, 1⟩
+      (leafFromTbl (honestSlotHiLo sk) 2) (leafFromTbl (honestSlotHiLo sk) 3) =
+      node1FromTbl (honestSlotHiLo sk) 1 :=
+    thNodeH_leaves_eq sk.pkSeed (honestSlotHiLo sk) (by decide : 1 < 2)
+  rw [hTop, hSubH, computeMerkleNode_succ, computeMerkleNode_succ, computeMerkleNode_succ,
+    computeMerkleNode_zero, computeMerkleNode_zero, computeMerkleNode_zero, computeMerkleNode_zero]
+  dsimp only
+  rw [hc1, hc2,
+    computeWotsPk_poly257MultiLeaf sk (by decide : 0 < 4),
+    computeWotsPk_poly257MultiLeaf sk (by decide : 1 < 4),
+    computeWotsPk_poly257MultiLeaf sk (by decide : 2 < 4),
+    computeWotsPk_poly257MultiLeaf sk (by decide : 3 < 4),
+    thNodeH_leaves_eq sk.pkSeed (honestSlotHiLo sk) (by decide : 0 < 2),
+    hL1,
+    hu0, thNodeH_nodes_eq sk.pkSeed (honestSlotHiLo sk)]
+  rfl
+
+private theorem buildMerkleAuthPathKp_poly257MultiLeaf (sk : PqSecretKey) {kp : Nat}
+    (hkp : kp < 4) :
+    buildMerkleAuthPathKp poly257MultiLeafSuite sk.pkSeed 0 0 .tree 0
+      (computeWotsPk poly257MultiLeafSuite multiLeaf4JortsParams sk 0 0) 2 0 0 kp =
+      authPathFromTbl (honestSlotHiLo sk) kp := by
+  have hCases : kp = 0 ∨ kp = 1 ∨ kp = 2 ∨ kp = 3 := by omega
+  have hc1 : UInt32.ofNat (0 + 1) = 1 := rfl
+  have hs1 : (1 : UInt32) = UInt32.ofNat 1 := rfl
+  have hL1 : thNodeH poly257MultiLeafSuite sk.pkSeed ⟨0, 0, .tree, 0, UInt32.ofNat 1, UInt32.ofNat 1⟩
+      (leafFromTbl (honestSlotHiLo sk) (2 * (2 * 0 + 1)))
+      (leafFromTbl (honestSlotHiLo sk) (2 * (2 * 0 + 1) + 1)) =
+      node1FromTbl (honestSlotHiLo sk) 1 :=
+    thNodeH_leaves_eq sk.pkSeed (honestSlotHiLo sk) (by decide : 1 < 2)
+  rcases hCases with rfl | rfl | rfl | rfl
+  · rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_succ, Nat.pow_zero, (by decide : 0 < 2), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : 0 < 1), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_1, computeMerkleNodeKp_succ, computeMerkleNodeKp_zero,
+      computeMerkleNodeKp_zero, computeMerkleNodeKp_zero, hc1, hs1,
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) + 1 < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * 0 + 1 < 4),
+      hL1]
+    rfl
+  · rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_succ, Nat.pow_zero, (by decide : 1 < 2), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : ¬ (1 < 1)), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_1, computeMerkleNodeKp_succ, computeMerkleNodeKp_zero,
+      computeMerkleNodeKp_zero, computeMerkleNodeKp_zero, hc1, hs1,
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) + 1 < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * 0 < 4),
+      hL1]
+    rfl
+  · rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_succ, Nat.pow_zero, (by decide : ¬ (2 < 2)), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : 2 - 2 < 1), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_1, computeMerkleNodeKp_succ, computeMerkleNodeKp_zero,
+      computeMerkleNodeKp_zero, computeMerkleNodeKp_zero, hc1,
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0) < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0) + 1 < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) + 1 < 4),
+      thNodeH_leaves_eq sk.pkSeed (honestSlotHiLo sk) (by decide : 2 * 0 < 2)]
+    rfl
+  · rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_succ, Nat.pow_zero, (by decide : ¬ (3 < 2)), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : ¬ (3 - 2 < 1)), ↓reduceIte]
+    rw [buildMerkleAuthPathKp.public_eq_1, computeMerkleNodeKp_succ, computeMerkleNodeKp_zero,
+      computeMerkleNodeKp_zero, computeMerkleNodeKp_zero, hc1,
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0) < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0) + 1 < 4),
+      computeWotsPk_poly257MultiLeaf sk (by decide : 2 * (2 * 0 + 1) < 4),
+      thNodeH_leaves_eq sk.pkSeed (honestSlotHiLo sk) (by decide : 2 * 0 < 2)]
+    rfl
+
+/-- Honest signature produced by `prodSignQuery` on leaf `kp < 4` and sub-message `sub < 3`. -/
+def honestMultiLeafSig (sk : PqSecretKey) (kp sub : Nat) : PqHashSig :=
+  let digits := extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)
+  let wotsChains := (List.range 128).map fun r =>
+    let dr := digits.getD r 0
+    wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0 dr
+      (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r)
+  { rRand := zero32
+    msgTswCtr := 0
+    leafGlobalIdx := kp
+    forsOpenings := []
+    layerSigs := [⟨0, wotsChains, authPathFromTbl (honestSlotHiLo sk) kp⟩] }
+
+private theorem grind_zero32_none (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32)
+    (hZero : ∀ ctr : Nat,
+      thHashLeafMsg poly257MultiLeafSuite rRand pkSeed pkRoot mu treeIdx kpIdx ctr = zero32) :
+    ∀ (fuel curCtr : Nat),
+      grindTswLeafCounterAux poly257MultiLeafSuite 4 128 192 rRand pkSeed pkRoot mu
+        treeIdx kpIdx curCtr fuel = none
+  | 0, curCtr => grindTswLeafCounterAux_zero _ _ _ _ _ _ _ _ _ _ curCtr
+  | fuel + 1, curCtr => by
+    rw [grindTswLeafCounterAux_succ]
+    by_cases hLt : curCtr < 2 ^ 32
+    · simp only [hLt, decide_true, Bool.not_true, Bool.false_eq_true, ↓reduceIte, hZero curCtr]
+      have hExt : extractBaseWDigitsChecked 4 128 zero32 =
+          some (extractBaseWDigits 4 128 zero32) :=
+        extractBaseWDigitsChecked_of_productionWellFormed multiLeaf4JortsParams
+          multiLeaf4JortsParams_productionWellFormed zero32 rfl
+      rw [hExt]
+      dsimp only
+      rw [zero32_checkTargetSum_false, ite_eq_right Bool.false_ne_true]
+      exact grind_zero32_none rRand pkSeed pkRoot mu treeIdx kpIdx hZero fuel (curCtr + 1)
+    · simp [hLt]
+
+private theorem multiLeaf4JortsParams_targetSum : multiLeaf4JortsParams.targetSum = 192 := by
+  rw [PqHashParams.targetSum_eq, multiLeaf4JortsParams.public_eqs]
+  decide
+
+private theorem prodSignQuery_poly257MultiLeaf_valid (sk : PqSecretKey) {kp sub maxGrind : Nat}
+    (hkp : kp < 4) (hsub : sub < 3) (hGrind : 0 < maxGrind) (optRand : List UInt8) :
+    prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams sk
+      ⟨[UInt8.ofNat kp, UInt8.ofNat sub], optRand, kp, maxGrind⟩ =
+      some (honestMultiLeafSig sk kp sub) := by
+  match maxGrind, hGrind with
+  | fuel + 1, _ =>
+    rw [prodSignQuery_eq]
+    have hSt : multiLeaf4JortsParams.statefulJorts = true := rfl
+    rw [ite_eq_left hSt, evalProductionStatefulSign_def]
+    have hRange : multiLeaf4JortsParams.productionLeafIdxInRange kp = true := by
+      rw [PqHashParams.productionLeafIdxInRange_eq, multiLeaf4JortsParams.public_eqs]
+      simpa using hkp
+    simp only [hSt, multiLeaf4JortsParams_productionWellFormed, hRange, Bool.not_true,
+      Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+    rw [signProductionHypertreeCore_def]
+    have hNumLayers : multiLeaf4JortsParams.numLayers = 1 := rfl
+    simp only [hSt, ↓reduceIte, hNumLayers]
+    have hDiv : kp / 4 = 0 := Nat.div_eq_of_lt hkp
+    have hMod : kp % 4 = kp := Nat.mod_eq_of_lt hkp
+    have hkp8 : (UInt8.ofNat kp).toNat = kp := uint8_toNat_of_lt256 (by omega)
+    have hsub8 : (UInt8.ofNat sub).toNat = sub := uint8_toNat_of_lt256 (by omega)
+    have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+    have hMu : thPreHash poly257MultiLeafSuite
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkSeed
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot
+        [UInt8.ofNat kp, UInt8.ofNat sub] =
+        [0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00 := by
+      rw [poly257MultiLeaf_thPreHash]
+      simp [hkp8, hsub8, hkp, hsub]
+    have hRand : thPrfMsg poly257MultiLeafSuite sk.skPrf optRand
+        ([0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00) = zero32 :=
+      poly257MultiLeaf_thPrfMsg _ _ _
+    rw [hMu, hRand]
+    have hHmsg0 : thHashLeafMsg poly257MultiLeafSuite zero32 sk.pkSeed
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot
+        ([0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00)
+        (UInt64.ofNat (kp / 4)) (UInt32.ofNat (kp % 4)) 0 = encodeSubMsg3Hmsg sub := by
+      rw [hDiv, hMod, poly257MultiLeaf_thHashLeafMsg]
+      simp [hkp8, hsub8, hkp32, hkp, hsub]
+    have hGrind0 : grindTswLeafCounterAux poly257MultiLeafSuite 4 128
+        multiLeaf4JortsParams.targetSum zero32 sk.pkSeed
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot
+        ([0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00)
+        (UInt64.ofNat (kp / 4)) (UInt32.ofNat (kp % 4)) 0 (fuel + 1) =
+        some (0, extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub), encodeSubMsg3Hmsg sub) := by
+      rw [multiLeaf4JortsParams_targetSum, grindTswLeafCounterAux_succ]
+      simp only [(by decide : 0 < 2 ^ 32), decide_true, Bool.not_true, Bool.false_eq_true,
+        ↓reduceIte, hHmsg0]
+      have hEv := encodeSubMsg3Hmsg_digits_eval ⟨sub, hsub⟩
+      rw [hEv.1]
+      dsimp only
+      rw [ite_eq_left hEv.2]
+    have hLayers : signProductionHypertreeLayers poly257MultiLeafSuite multiLeaf4JortsParams sk
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot zero32
+        (fuel + 1) 0 kp
+        ([0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00) 1 =
+        some ((honestMultiLeafSig sk kp sub).layerSigs) := by
+      rw [signProductionHypertreeLayers_succ]
+      have hSubLeaves : 2 ^ multiLeaf4JortsParams.subtreeHeight = 4 := rfl
+      have hSubH : multiLeaf4JortsParams.subtreeHeight = 2 := rfl
+      have hEll : multiLeaf4JortsParams.ell1 = 128 := rfl
+      have hW : multiLeaf4JortsParams.w = 4 := rfl
+      have hu32_0 : UInt32.ofNat 0 = 0 := rfl
+      have hu64_0 : UInt64.ofNat 0 = 0 := rfl
+      simp only [hSubLeaves, hSt, decide_true, Bool.and_self, ↓reduceIte, hW, hEll, hGrind0]
+      rw [signProductionHypertreeLayers_zero]
+      dsimp only
+      rw [hDiv, hMod, hu32_0, hu64_0, hSubH, buildMerkleAuthPathKp_poly257MultiLeaf sk hkp]
+      rfl
+    rw [hLayers]
+    dsimp only
+    have hVer : verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk)
+        [UInt8.ofNat kp, UInt8.ofNat sub] (honestMultiLeafSig sk kp sub) = true := by
+      obtain ⟨_, hLsVer⟩ := signProductionHypertreeLayers_sound poly257MultiLeafSuite
+        multiLeaf4JortsParams sk
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot zero32
+        (fuel + 1) 1 0 kp
+        ([0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00)
+        (honestMultiLeafSig sk kp sub).layerSigs (by decide)
+        (by simpa [multiLeaf4JortsParams.public_eqs] using hkp) hLayers
+      rw [verifyProductionPqHashSig_eq]
+      have hLsLen : (honestMultiLeafSig sk kp sub).layerSigs.length = 1 := rfl
+      have hLeaf : (honestMultiLeafSig sk kp sub).leafGlobalIdx = kp := rfl
+      have hCtr : (honestMultiLeafSig sk kp sub).msgTswCtr = 0 := rfl
+      have hFors : (honestMultiLeafSig sk kp sub).forsOpenings = [] := rfl
+      have hR : (honestMultiLeafSig sk kp sub).rRand = zero32 := rfl
+      have hPkSeed : (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkSeed =
+          sk.pkSeed := rfl
+      have hMu' : thPreHash poly257MultiLeafSuite sk.pkSeed
+          (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot
+          [UInt8.ofNat kp, UInt8.ofNat sub] =
+          [0xE0, UInt8.ofNat kp, UInt8.ofNat sub] ++ List.replicate 29 0x00 := hMu
+      simp only [multiLeaf4JortsParams_productionWellFormed, hLeaf, hRange, Bool.not_true,
+        Bool.or_self, Bool.false_eq_true, ↓reduceIte, hLsLen, hNumLayers, hSt,
+        hCtr, ne_eq, not_true_eq_false, hFors, List.isEmpty_nil, hR, hPkSeed]
+      rw [hMu', hLsVer]
+      simp [derivePublicKey, hNumLayers]
+    change (if verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk)
+        [UInt8.ofNat kp, UInt8.ofNat sub] (honestMultiLeafSig sk kp sub) = true then
+      some (honestMultiLeafSig sk kp sub) else none) = some (honestMultiLeafSig sk kp sub)
+    rw [ite_eq_left hVer]
+
+private def queryMsgValidAt (kp : Nat) (msg : List UInt8) : Option Nat :=
+  match msg with
+  | [kpB, subB] =>
+    if kpB.toNat = kp ∧ kp < 4 ∧ subB.toNat < 3 then some subB.toNat else none
+  | _ => none
+
+private theorem prodSignQuery_poly257MultiLeaf_characterize (sk : PqSecretKey)
+    (q : ProdSigningQuery) :
+    prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams sk q =
+      if 0 < q.grindLimit then
+        match queryMsgValidAt q.epoch q.message with
+        | some sub => some (honestMultiLeafSig sk q.epoch sub)
+        | none => none
+      else none := by
+  by_cases hGrind : 0 < q.grindLimit
+  · rw [ite_eq_left hGrind]
+    cases hVal : queryMsgValidAt q.epoch q.message with
+    | some sub =>
+      unfold queryMsgValidAt at hVal
+      match hMsg : q.message with
+      | [kpB, subB] =>
+        rw [hMsg] at hVal
+        dsimp only at hVal
+        split at hVal
+        · rename_i hc
+          injection hVal with hSubEq
+          rcases hc with ⟨hKpEq, hKpLt, hSubLt⟩
+          have hKpB : kpB = UInt8.ofNat q.epoch := by
+            rw [← hKpEq]; exact UInt8.ofNat_toNat.symm
+          have hSubB : subB = UInt8.ofNat sub := by
+            rw [← hSubEq]; exact UInt8.ofNat_toNat.symm
+          cases q with
+          | mk message randomness epoch grindLimit =>
+            dsimp only at hMsg hGrind hKpLt ⊢
+            rw [hMsg, hKpB, hSubB]
+            exact prodSignQuery_poly257MultiLeaf_valid sk hKpLt (hSubEq ▸ hSubLt) hGrind randomness
+        · cases hVal
+      | [] | [_] | _ :: _ :: _ :: _ =>
+        rw [hMsg] at hVal; cases hVal
+    | none =>
+      rw [prodSignQuery_eq]
+      have hSt : multiLeaf4JortsParams.statefulJorts = true := rfl
+      rw [ite_eq_left hSt, evalProductionStatefulSign_def]
+      by_cases hkp : q.epoch < 4
+      · have hRange : multiLeaf4JortsParams.productionLeafIdxInRange q.epoch = true := by
+          rw [PqHashParams.productionLeafIdxInRange_eq, multiLeaf4JortsParams.public_eqs]
+          simpa using hkp
+        simp only [hSt, multiLeaf4JortsParams_productionWellFormed, hRange, Bool.not_true,
+          Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+        rw [signProductionHypertreeCore_def]
+        have hNumLayers : multiLeaf4JortsParams.numLayers = 1 := rfl
+        simp only [hSt, ↓reduceIte, hNumLayers]
+        rw [signProductionHypertreeLayers_succ]
+        have hSubLeaves : 2 ^ multiLeaf4JortsParams.subtreeHeight = 4 := rfl
+        have hMod : q.epoch % 4 = q.epoch := Nat.mod_eq_of_lt hkp
+        have hkp32 : (UInt32.ofNat q.epoch).toNat = q.epoch := u32_toNat_small (by omega)
+        have hZeroHmsg : ∀ ctr : Nat,
+            thHashLeafMsg poly257MultiLeafSuite
+              (thPrfMsg poly257MultiLeafSuite sk.skPrf q.randomness
+                (thPreHash poly257MultiLeafSuite
+                  (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkSeed
+                  (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot q.message))
+              sk.pkSeed
+              (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot
+              (thPreHash poly257MultiLeafSuite
+                (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkSeed
+                (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot q.message)
+              (UInt64.ofNat (q.epoch / 4)) (UInt32.ofNat (q.epoch % 4)) ctr = zero32 := by
+          intro ctr
+          rw [hMod, poly257MultiLeaf_thHashLeafMsg, poly257MultiLeaf_thPreHash]
+          match hM : q.message with
+          | [kpB, subB] =>
+            dsimp only
+            by_cases hB : kpB.toNat < 4 ∧ subB.toNat < 3
+            · rw [ite_eq_left hB]
+              simp only [List.cons_append, List.nil_append]
+              have hNeKp : kpB.toNat ≠ q.epoch := by
+                intro hEq
+                unfold queryMsgValidAt at hVal
+                rw [hM] at hVal
+                dsimp only at hVal
+                have hcV : kpB.toNat = q.epoch ∧ q.epoch < 4 ∧ subB.toNat < 3 :=
+                  ⟨hEq, hkp, hB.2⟩
+                rw [ite_eq_left hcV] at hVal
+                cases hVal
+              rw [hkp32]
+              have hnc : ¬ (kpB.toNat < 4 ∧ subB.toNat < 3 ∧ kpB.toNat = q.epoch ∧ True) :=
+                fun hc => hNeKp hc.2.2.1
+              exact ite_eq_right hnc
+            · rw [ite_eq_right hB]; rfl
+          | [] | [_] | _ :: _ :: _ :: _ => rfl
+        have hGrindNone := grind_zero32_none _ _ _ _ _ _ hZeroHmsg q.grindLimit 0
+        have hW : multiLeaf4JortsParams.w = 4 := rfl
+        have hEll : multiLeaf4JortsParams.ell1 = 128 := rfl
+        simp only [hSubLeaves, hSt, decide_true, Bool.and_self, ↓reduceIte, hW, hEll,
+          multiLeaf4JortsParams_targetSum, hGrindNone]
+      · have hRangeF : multiLeaf4JortsParams.productionLeafIdxInRange q.epoch = false := by
+          rw [PqHashParams.productionLeafIdxInRange_eq, multiLeaf4JortsParams.public_eqs]
+          simpa using hkp
+        simp [hRangeF]
+  · rw [ite_eq_right hGrind]
+    have hz : q.grindLimit = 0 := by omega
+    rw [prodSignQuery_eq]
+    have hSt : multiLeaf4JortsParams.statefulJorts = true := rfl
+    rw [ite_eq_left hSt, evalProductionStatefulSign_def]
+    split
+    · rfl
+    · rw [signProductionHypertreeCore_def]
+      have hNumLayers : multiLeaf4JortsParams.numLayers = 1 := rfl
+      simp only [hSt, ↓reduceIte, hNumLayers, hz]
+      rw [signProductionHypertreeLayers_succ]
+      have hW : multiLeaf4JortsParams.w = 4 := rfl
+      have hEll : multiLeaf4JortsParams.ell1 = 128 := rfl
+      simp [hSt, hW, hEll, multiLeaf4JortsParams_targetSum, grindTswLeafCounterAux_zero]
+
+/-- Extract the 1-byte step-0 preimage candidate from chain `r` of a `PqHashSig`. -/
+def extractSigChainCand (sig : PqHashSig) (r : Nat) : Spec.Bytes :=
+  match sig.layerSigs with
+  | lsig :: _ =>
+    match decodeStep0Byte (lsig.wotsChains.getD r []) with
+    | some b => [b]
+    | none => []
+  | [] => []
+
+private theorem invalid32_ne_tagged {tag b : UInt8} {rest : List UInt8}
+    (hTag : tag ≠ 0xFF) : tag :: b :: rest ≠ invalid32 := by
+  intro h
+  unfold invalid32 at h
+  injection h with hEq _
+  exact hTag hEq
+
+private theorem slice_mid_left (b0 b1 : UInt8) (a b pad : List UInt8)
+    (ha : a.length = 6) (hb : b.length = 6) :
+    ((([b0, b1] ++ a ++ b ++ pad).drop 2).take 12).take 6 = a := by
+  have hDrop : ([b0, b1] ++ a ++ b ++ pad).drop 2 = (a ++ b) ++ pad := by
+    simp only [List.append_assoc, List.cons_append, List.nil_append, List.drop_succ_cons,
+      List.drop_zero]
+  rw [hDrop, List.take_left' (by rw [List.length_append, ha, hb]), List.take_left' ha]
+
+private theorem slice_mid_right (b0 b1 : UInt8) (a b pad : List UInt8)
+    (ha : a.length = 6) (hb : b.length = 6) :
+    ((([b0, b1] ++ a ++ b ++ pad).drop 2).take 12).drop 6 = b := by
+  have hDrop : ([b0, b1] ++ a ++ b ++ pad).drop 2 = (a ++ b) ++ pad := by
+    simp only [List.append_assoc, List.cons_append, List.nil_append, List.drop_succ_cons,
+      List.drop_zero]
+  rw [hDrop, List.take_left' (by rw [List.length_append, ha, hb]), List.drop_left' ha]
+
+private theorem slice_top_left (b0 b1 : UInt8) (a b pad : List UInt8) (ha : a.length = 12) :
+    (([b0, b1] ++ a ++ b ++ pad).drop 2).take 12 = a := by
+  have hDrop : ([b0, b1] ++ a ++ b ++ pad).drop 2 = a ++ (b ++ pad) := by
+    simp only [List.append_assoc, List.cons_append, List.nil_append, List.drop_succ_cons,
+      List.drop_zero]
+  rw [hDrop, List.take_left' ha]
+
+private theorem slice_top_right (b0 b1 : UInt8) (a b pad : List UInt8)
+    (ha : a.length = 12) (hb : b.length = 12) :
+    (([b0, b1] ++ a ++ b ++ pad).drop 14).take 12 = b := by
+  have hDrop : ([b0, b1] ++ a ++ b ++ pad).drop 14 = (a ++ (b ++ pad)).drop 12 := by
+    change ((b0 :: b1 :: ((a ++ b) ++ pad)).drop (2 + 12)) = _
+    rw [← List.drop_drop, List.append_assoc]
+    rfl
+  rw [hDrop, List.drop_left' ha, List.take_left' hb]
+
+private theorem rootFromTbl_slices (tbl : Nat → Nat → UInt8 × UInt8) :
+    (((rootFromTbl tbl).drop 2).take 12).take 6 = packLeaf3 [tbl 0 0, tbl 0 1, tbl 0 2] ∧
+    (((rootFromTbl tbl).drop 2).take 12).drop 6 = packLeaf3 [tbl 1 0, tbl 1 1, tbl 1 2] ∧
+    (((rootFromTbl tbl).drop 14).take 12).take 6 = packLeaf3 [tbl 2 0, tbl 2 1, tbl 2 2] ∧
+    (((rootFromTbl tbl).drop 14).take 12).drop 6 = packLeaf3 [tbl 3 0, tbl 3 1, tbl 3 2] := by
+  unfold rootFromTbl packLeaf3
+  exact ⟨rfl, rfl, rfl, rfl⟩
+
+private theorem walkMerkle2_extract_leaf {pkSeed : List UInt8}
+    {tbl : Nat → Nat → UInt8 × UInt8} {kp : Nat} {wotsPk : List UInt8}
+    {authPath : List (List UInt8)} (hkp : kp < 4)
+    (hWalk : walkMerkleAuthPathKp poly257MultiLeafSuite pkSeed 0 0 .tree 0 2 0 kp
+      wotsPk authPath = some (rootFromTbl tbl)) :
+    (wotsPk.drop 2).take 6 = packLeaf3 [tbl kp 0, tbl kp 1, tbl kp 2] ∧
+    wotsPk ≠ invalid32 := by
+  have hNotInvRoot : rootFromTbl tbl ≠ invalid32 :=
+    invalid32_ne_tagged (by decide : (0xD2 : UInt8) ≠ 0xFF)
+  have hCases : kp = 0 ∨ kp = 1 ∨ kp = 2 ∨ kp = 3 := by omega
+  match authPath with
+  | [] => cases hWalk
+  | [_] => rcases hCases with rfl | rfl | rfl | rfl <;> cases hWalk
+  | _ :: _ :: _ :: _ => rcases hCases with rfl | rfl | rfl | rfl <;> cases hWalk
+  | [sibTop, sibBot] =>
+    have h2 : (2 : UInt32).toNat = 2 := rfl
+    have h1 : (1 : UInt32).toNat = 1 := rfl
+    have h0 : (0 : UInt32).toNat = 0 := rfl
+    rcases hCases with rfl | rfl | rfl | rfl
+    · -- kp = 0
+      unfold walkMerkleAuthPathKp at hWalk
+      simp only [Nat.pow_succ, Nat.pow_zero, (by decide : 0 < 2),
+        (by decide : 0 < 1), ↓reduceIte, walkMerkleAuthPathKp, Option.some.injEq] at hWalk
+      let mid := thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 1, 0⟩ wotsPk sibBot
+      have hTop : thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 2, 0⟩ mid sibTop =
+          rootFromTbl tbl := hWalk
+      rw [poly257MultiLeaf_thNodeH] at hTop
+      simp only [h2, h0, (by decide : ¬ (2 = 1 ∧ 0 < 2)), and_self, ↓reduceIte] at hTop
+      split at hTop
+      · rename_i hcTop
+        have hMid12 : ((mid.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.1]; decide
+        have hMidPay : ((mid.drop 2).take 12).take 6 =
+            packLeaf3 [tbl 0 0, tbl 0 1, tbl 0 2] := by
+          have hDrop2 := congrArg (fun l => ((l.drop 2).take 12).take 6) hTop
+          rw [slice_top_left 0xD2 0 ((mid.drop 2).take 12) ((sibTop.drop 2).take 12)
+            (List.replicate 6 0x00) hMid12, (rootFromTbl_slices tbl).1] at hDrop2
+          exact hDrop2
+        have hMidNeInv : mid ≠ invalid32 := by
+          intro hEq; rw [hEq] at hcTop
+          exact absurd hcTop.1 (by decide)
+        dsimp only [mid] at hMidNeInv hMidPay
+        rw [poly257MultiLeaf_thNodeH] at hMidNeInv hMidPay
+        simp only [h1, h0, (by decide : 0 < 2), and_self, ↓reduceIte] at hMidNeInv hMidPay
+        split at hMidNeInv
+        · rename_i hcMid
+          rw [ite_eq_left hcMid] at hMidPay
+          have hLen6 : ((wotsPk.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.1]; decide
+          have hLen6R : ((sibBot.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.2.2.2]; decide
+          rw [slice_mid_left 0xD1 (UInt8.ofNat 0) ((wotsPk.drop 2).take 6) ((sibBot.drop 2).take 6)
+            (List.replicate 18 0x00) hLen6 hLen6R] at hMidPay
+          refine ⟨hMidPay, fun hInv => ?_⟩
+          rw [hInv] at hcMid
+          exact absurd hcMid.1 (by decide)
+        · exact absurd rfl hMidNeInv
+      · exact absurd hTop.symm hNotInvRoot
+    · -- kp = 1
+      unfold walkMerkleAuthPathKp at hWalk
+      simp only [Nat.pow_succ, Nat.pow_zero, (by decide : 1 < 2),
+        (by decide : ¬ (1 < 1)), ↓reduceIte, walkMerkleAuthPathKp, Option.some.injEq] at hWalk
+      let mid := thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 1, 0⟩ sibBot wotsPk
+      have hTop : thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 2, 0⟩ mid sibTop =
+          rootFromTbl tbl := hWalk
+      rw [poly257MultiLeaf_thNodeH] at hTop
+      simp only [h2, h0, (by decide : ¬ (2 = 1 ∧ 0 < 2)), and_self, ↓reduceIte] at hTop
+      split at hTop
+      · rename_i hcTop
+        have hMid12 : ((mid.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.1]; decide
+        have hMidPay : ((mid.drop 2).take 12).drop 6 =
+            packLeaf3 [tbl 1 0, tbl 1 1, tbl 1 2] := by
+          have hDrop2 := congrArg (fun l => ((l.drop 2).take 12).drop 6) hTop
+          rw [slice_top_left 0xD2 0 ((mid.drop 2).take 12) ((sibTop.drop 2).take 12)
+            (List.replicate 6 0x00) hMid12, (rootFromTbl_slices tbl).2.1] at hDrop2
+          exact hDrop2
+        have hMidNeInv : mid ≠ invalid32 := by
+          intro hEq; rw [hEq] at hcTop
+          exact absurd hcTop.1 (by decide)
+        dsimp only [mid] at hMidNeInv hMidPay
+        rw [poly257MultiLeaf_thNodeH] at hMidNeInv hMidPay
+        simp only [h1, h0, (by decide : 0 < 2), and_self, ↓reduceIte] at hMidNeInv hMidPay
+        split at hMidNeInv
+        · rename_i hcMid
+          rw [ite_eq_left hcMid] at hMidPay
+          have hLen6L : ((sibBot.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.1]; decide
+          have hLen6 : ((wotsPk.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.2.2.2]; decide
+          rw [slice_mid_right 0xD1 (UInt8.ofNat 0) ((sibBot.drop 2).take 6) ((wotsPk.drop 2).take 6)
+            (List.replicate 18 0x00) hLen6L hLen6] at hMidPay
+          refine ⟨hMidPay, fun hInv => ?_⟩
+          rw [hInv] at hcMid
+          exact absurd hcMid.2.2.2.1 (by decide)
+        · exact absurd rfl hMidNeInv
+      · exact absurd hTop.symm hNotInvRoot
+    · -- kp = 2
+      unfold walkMerkleAuthPathKp at hWalk
+      simp only [Nat.pow_succ, Nat.pow_zero, (by decide : ¬ (2 < 2)),
+        (by decide : 0 < 1), ↓reduceIte, walkMerkleAuthPathKp, Option.some.injEq] at hWalk
+      let mid := thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 1, 1⟩ wotsPk sibBot
+      have hTop : thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 2, 0⟩ sibTop mid =
+          rootFromTbl tbl := hWalk
+      rw [poly257MultiLeaf_thNodeH] at hTop
+      simp only [h2, h0, (by decide : ¬ (2 = 1 ∧ 0 < 2)), and_self, ↓reduceIte] at hTop
+      split at hTop
+      · rename_i hcTop
+        have hSib12 : ((sibTop.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.1]; decide
+        have hMid12 : ((mid.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.2.2.2]; decide
+        have hMidPay : ((mid.drop 2).take 12).take 6 =
+            packLeaf3 [tbl 2 0, tbl 2 1, tbl 2 2] := by
+          have hDrop14 := congrArg (fun l => ((l.drop 14).take 12).take 6) hTop
+          rw [slice_top_right 0xD2 0 ((sibTop.drop 2).take 12) ((mid.drop 2).take 12)
+            (List.replicate 6 0x00) hSib12 hMid12, (rootFromTbl_slices tbl).2.2.1] at hDrop14
+          exact hDrop14
+        have hMidNeInv : mid ≠ invalid32 := by
+          intro hEq; rw [hEq] at hcTop
+          exact absurd hcTop.2.2.2.1 (by decide)
+        dsimp only [mid] at hMidNeInv hMidPay
+        rw [poly257MultiLeaf_thNodeH] at hMidNeInv hMidPay
+        simp only [h1, (by decide : 1 < 2), and_self, ↓reduceIte] at hMidNeInv hMidPay
+        split at hMidNeInv
+        · rename_i hcMid
+          rw [ite_eq_left hcMid] at hMidPay
+          have hLen6 : ((wotsPk.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.1]; decide
+          have hLen6R : ((sibBot.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.2.2.2]; decide
+          rw [slice_mid_left 0xD1 (UInt8.ofNat 1) ((wotsPk.drop 2).take 6) ((sibBot.drop 2).take 6)
+            (List.replicate 18 0x00) hLen6 hLen6R] at hMidPay
+          refine ⟨hMidPay, fun hInv => ?_⟩
+          rw [hInv] at hcMid
+          exact absurd hcMid.1 (by decide)
+        · exact absurd rfl hMidNeInv
+      · exact absurd hTop.symm hNotInvRoot
+    · -- kp = 3
+      unfold walkMerkleAuthPathKp at hWalk
+      simp only [Nat.pow_succ, Nat.pow_zero, (by decide : ¬ (3 < 2)),
+        (by decide : ¬ (3 - 2 < 1)), ↓reduceIte, walkMerkleAuthPathKp, Option.some.injEq] at hWalk
+      let mid := thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 1, 1⟩ sibBot wotsPk
+      have hTop : thNodeH poly257MultiLeafSuite pkSeed ⟨0, 0, .tree, 0, 2, 0⟩ sibTop mid =
+          rootFromTbl tbl := hWalk
+      rw [poly257MultiLeaf_thNodeH] at hTop
+      simp only [h2, h0, (by decide : ¬ (2 = 1 ∧ 0 < 2)), and_self, ↓reduceIte] at hTop
+      split at hTop
+      · rename_i hcTop
+        have hSib12 : ((sibTop.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.1]; decide
+        have hMid12 : ((mid.drop 2).take 12).length = 12 := by
+          rw [List.length_take, List.length_drop, hcTop.2.2.2.2.2]; decide
+        have hMidPay : ((mid.drop 2).take 12).drop 6 =
+            packLeaf3 [tbl 3 0, tbl 3 1, tbl 3 2] := by
+          have hDrop14 := congrArg (fun l => ((l.drop 14).take 12).drop 6) hTop
+          rw [slice_top_right 0xD2 0 ((sibTop.drop 2).take 12) ((mid.drop 2).take 12)
+            (List.replicate 6 0x00) hSib12 hMid12, (rootFromTbl_slices tbl).2.2.2] at hDrop14
+          exact hDrop14
+        have hMidNeInv : mid ≠ invalid32 := by
+          intro hEq; rw [hEq] at hcTop
+          exact absurd hcTop.2.2.2.1 (by decide)
+        dsimp only [mid] at hMidNeInv hMidPay
+        rw [poly257MultiLeaf_thNodeH] at hMidNeInv hMidPay
+        simp only [h1, (by decide : 1 < 2), and_self, ↓reduceIte] at hMidNeInv hMidPay
+        split at hMidNeInv
+        · rename_i hcMid
+          rw [ite_eq_left hcMid] at hMidPay
+          have hLen6L : ((sibBot.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.1]; decide
+          have hLen6 : ((wotsPk.drop 2).take 6).length = 6 := by
+            rw [List.length_take, List.length_drop, hcMid.2.2.2.2.2]; decide
+          rw [slice_mid_right 0xD1 (UInt8.ofNat 1) ((sibBot.drop 2).take 6) ((wotsPk.drop 2).take 6)
+            (List.replicate 18 0x00) hLen6L hLen6] at hMidPay
+          refine ⟨hMidPay, fun hInv => ?_⟩
+          rw [hInv] at hcMid
+          exact absurd hcMid.2.2.2.1 (by decide)
+        · exact absurd rfl hMidNeInv
+      · exact absurd hTop.symm hNotInvRoot
+
+private theorem chain3_from_step0_sound (pkSeed : List UInt8) {kp r : Nat}
+    (hkp : kp < 4) (hr : r < 3) {sigVal : List UInt8} {hi lo : UInt8}
+    (hEnd : wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r 0 3 sigVal =
+      encodeChainNode 0xB3 kp r hi lo) :
+    ∃ b : UInt8,
+      decodeStep0Byte sigVal = some b ∧
+      (Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]).headD 0 = hi ∧
+      (Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]).getD 2 0 = lo := by
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+  have hNotInv3 : encodeChainNode 0xB3 kp r hi lo ≠ invalid32 :=
+    invalid32_ne_tagged (by decide : (0xB3 : UInt8) ≠ 0xFF)
+  rw [wotsChainSteps_succ, wotsChainSteps_succ, wotsChainSteps_succ, wotsChainSteps_zero] at hEnd
+  let s1 := thChainF poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 0⟩ sigVal
+  let s2 := thChainF poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 1⟩ s1
+  have hStep2 : thChainF poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 2⟩ s2 =
+      encodeChainNode 0xB3 kp r hi lo := hEnd
+  rw [poly257MultiLeaf_thChainF] at hStep2
+  dsimp only at hStep2
+  simp only [hkp32, hr32, hkp, hr, and_self, ↓reduceIte] at hStep2
+  cases hDec2 : decodeChainNode 0xB2 kp r s2 with
+  | none => rw [hDec2] at hStep2; exact absurd hStep2.symm hNotInv3
+  | some p2 =>
+    rcases p2 with ⟨hi2, lo2⟩
+    rw [hDec2] at hStep2
+    obtain ⟨rfl, rfl⟩ := encodeChainNode_inj hStep2
+    have hs2Eq := decodeChainNode_sound hDec2
+    dsimp only [s2] at hs2Eq
+    have hNotInv2 : encodeChainNode 0xB2 kp r hi2 lo2 ≠ invalid32 :=
+      invalid32_ne_tagged (by decide : (0xB2 : UInt8) ≠ 0xFF)
+    rw [poly257MultiLeaf_thChainF] at hs2Eq
+    dsimp only at hs2Eq
+    simp only [hkp32, hr32, hkp, hr, and_self, ↓reduceIte] at hs2Eq
+    cases hDec1 : decodeChainNode 0xB1 kp r s1 with
+    | none => rw [hDec1] at hs2Eq; exact absurd hs2Eq.symm hNotInv2
+    | some p1 =>
+      rcases p1 with ⟨hi1, lo1⟩
+      rw [hDec1] at hs2Eq
+      obtain ⟨rfl, rfl⟩ := encodeChainNode_inj hs2Eq
+      have hs1Eq := decodeChainNode_sound hDec1
+      dsimp only [s1] at hs1Eq
+      have hNotInv1 : encodeChainNode 0xB1 kp r hi1 lo1 ≠ invalid32 :=
+        invalid32_ne_tagged (by decide : (0xB1 : UInt8) ≠ 0xFF)
+      rw [poly257MultiLeaf_thChainF] at hs1Eq
+      dsimp only at hs1Eq
+      simp only [hkp32, hr32, hkp, hr, and_self, ↓reduceIte] at hs1Eq
+      cases hDec0 : decodeStep0Byte sigVal with
+      | none => rw [hDec0] at hs1Eq; exact absurd hs1Eq.symm hNotInv1
+      | some b =>
+        rw [hDec0] at hs1Eq
+        obtain ⟨hHi, hLo⟩ := encodeChainNode_inj hs1Eq
+        exact ⟨b, rfl, hHi, hLo⟩
+
+private theorem verifyProductionPqHashSig_poly257MultiLeaf_sound
+    (sk : PqSecretKey) (msg : List UInt8) (sig : PqHashSig)
+    (hVer : verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams
+      (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk) msg sig = true) :
+    sig.leafGlobalIdx < 4 ∧
+    ∃ sub : Nat, sub < 3 ∧ msg = [UInt8.ofNat sig.leafGlobalIdx, UInt8.ofNat sub] ∧
+      ∀ r : Nat, r < 3 →
+        (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD r 0 = 0 →
+        extractSigChainCand sig r = [sk.skSeed.getD (3 * sig.leafGlobalIdx + r) 0] := by
+  rw [derivePublicKey_poly257MultiLeaf sk] at hVer
+  dsimp only [pkFromTbl] at hVer
+  rw [verifyProductionPqHashSig_eq] at hVer
+  cases hRange : multiLeaf4JortsParams.productionLeafIdxInRange sig.leafGlobalIdx with
+  | false => simp [multiLeaf4JortsParams_productionWellFormed, hRange] at hVer
+  | true =>
+    have hkp : sig.leafGlobalIdx < 4 := by
+      rw [PqHashParams.productionLeafIdxInRange_eq, multiLeaf4JortsParams.public_eqs] at hRange
+      simpa using hRange
+    simp only [multiLeaf4JortsParams_productionWellFormed, hRange, Bool.not_true, Bool.or_self,
+      Bool.false_eq_true, ↓reduceIte] at hVer
+    match hLs : sig.layerSigs with
+    | [] =>
+      have hNe : sig.layerSigs.length ≠ multiLeaf4JortsParams.numLayers := by
+        rw [hLs, multiLeaf4JortsParams.public_eqs]; decide
+      rw [decide_eq_true hNe] at hVer
+      simp only [Bool.true_or, ↓reduceIte] at hVer
+      cases hVer
+    | _ :: _ :: _ =>
+      have hNe : sig.layerSigs.length ≠ multiLeaf4JortsParams.numLayers := by
+        rw [hLs, multiLeaf4JortsParams.public_eqs]
+        exact fun h => Nat.noConfusion (Nat.succ.inj h)
+      rw [decide_eq_true hNe] at hVer
+      simp only [Bool.true_or, ↓reduceIte] at hVer
+      cases hVer
+    | [lsig] =>
+      rw [hLs] at hVer
+      by_cases hCtr0 : sig.msgTswCtr = 0
+      · by_cases hFors : sig.forsOpenings = []
+        · simp only [hCtr0, hFors, multiLeaf4JortsParams.public_eqs, List.length_singleton,
+            ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte,
+            List.isEmpty_nil] at hVer
+          rw [verifyProductionHypertreeLayers_cons] at hVer
+          by_cases hTswLt : lsig.tswCtr < 2 ^ 32
+          · simp only [hTswLt, decide_true, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hVer
+            have hMod : sig.leafGlobalIdx % 4 = sig.leafGlobalIdx := Nat.mod_eq_of_lt hkp
+            have hDiv : sig.leafGlobalIdx / 4 = 0 := Nat.div_eq_of_lt hkp
+            have hkp32 : (UInt32.ofNat sig.leafGlobalIdx).toNat = sig.leafGlobalIdx :=
+              u32_toNat_small (by omega)
+            rw [productionLayerDigest_eq] at hVer
+            simp only [decide_true, Bool.and_self, ↓reduceIte, hMod, hDiv] at hVer
+            have hTgtRaw : (PqHashParams.mk 4 128 2 1 0 0 2 true).targetSum = 192 := by
+              rw [PqHashParams.targetSum_eq]; decide
+            have hExtZ : extractBaseWDigitsChecked 4 128 zero32 =
+                some (extractBaseWDigits 4 128 zero32) := by
+              have h := extractBaseWDigitsChecked_of_productionWellFormed
+                multiLeaf4JortsParams multiLeaf4JortsParams_productionWellFormed zero32 rfl
+              rw [multiLeaf4JortsParams.public_eqs] at h
+              exact h
+            have hInvMatch :
+                (match invalid32 with
+                 | 0xE0 :: kpB :: subB :: rest =>
+                   if kpB.toNat < 4 ∧ subB.toNat < 3 ∧
+                       kpB.toNat = (UInt32.ofNat sig.leafGlobalIdx).toNat ∧
+                       rest = List.replicate 29 0x00 then
+                     encodeSubMsg3Hmsg subB.toNat
+                   else zero32
+                 | _ => zero32) = zero32 := rfl
+            have hHmsgValid : ∃ sub : Nat, sub < 3 ∧
+                msg = [UInt8.ofNat sig.leafGlobalIdx, UInt8.ofNat sub] ∧
+                thHashLeafMsg poly257MultiLeafSuite sig.rRand sk.pkSeed
+                  (rootFromTbl (honestSlotHiLo sk))
+                  (thPreHash poly257MultiLeafSuite sk.pkSeed
+                    (rootFromTbl (honestSlotHiLo sk)) msg)
+                  (UInt64.ofNat 0) (UInt32.ofNat sig.leafGlobalIdx) lsig.tswCtr =
+                  encodeSubMsg3Hmsg sub := by
+              rw [poly257MultiLeaf_thHashLeafMsg, poly257MultiLeaf_thPreHash] at hVer ⊢
+              match msg with
+              | [kpB, subB] =>
+                dsimp only at hVer ⊢
+                by_cases hB : kpB.toNat < 4 ∧ subB.toNat < 3
+                · rw [ite_eq_left hB] at hVer ⊢
+                  simp only [List.cons_append, List.nil_append] at hVer ⊢
+                  by_cases hEqKp : kpB.toNat = sig.leafGlobalIdx
+                  · have hc : kpB.toNat < 4 ∧ subB.toNat < 3 ∧
+                        kpB.toNat = (UInt32.ofNat sig.leafGlobalIdx).toNat ∧ True :=
+                      ⟨hB.1, hB.2, hEqKp.trans hkp32.symm, trivial⟩
+                    rw [ite_eq_left hc]
+                    refine ⟨subB.toNat, hB.2, ?_, rfl⟩
+                    rw [← hEqKp, UInt8.ofNat_toNat, UInt8.ofNat_toNat]
+                  · have hnc : ¬ (kpB.toNat < 4 ∧ subB.toNat < 3 ∧
+                        kpB.toNat = (UInt32.ofNat sig.leafGlobalIdx).toNat ∧ True) := by
+                      rw [hkp32]; intro h; exact hEqKp h.2.2.1
+                    rw [ite_eq_right hnc, hExtZ] at hVer
+                    dsimp only at hVer
+                    rw [hTgtRaw, zero32_checkTargetSum_false] at hVer
+                    simp only [Bool.not_false, ↓reduceIte] at hVer
+                    cases hVer
+                · rw [ite_eq_right hB, hInvMatch, hExtZ] at hVer
+                  dsimp only at hVer
+                  rw [hTgtRaw, zero32_checkTargetSum_false] at hVer
+                  simp only [Bool.not_false, ↓reduceIte] at hVer
+                  cases hVer
+              | [] | [_] | _ :: _ :: _ :: _ =>
+                dsimp only at hVer
+                rw [hInvMatch, hExtZ] at hVer
+                dsimp only at hVer
+                rw [hTgtRaw, zero32_checkTargetSum_false] at hVer
+                simp only [Bool.not_false, ↓reduceIte] at hVer
+                cases hVer
+            obtain ⟨sub, hSubLt, hMsgEq, hHmsgEq⟩ := hHmsgValid
+            rw [hHmsgEq] at hVer
+            have hEv := encodeSubMsg3Hmsg_digits_eval ⟨sub, hSubLt⟩
+            dsimp only at hEv
+            rw [hEv.1] at hVer
+            dsimp only at hVer
+            rw [hTgtRaw, hEv.2] at hVer
+            by_cases hChLen : lsig.wotsChains.length = 128
+            · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hChLen, ne_eq,
+                not_true_eq_false] at hVer
+              have hu32_0 : UInt32.ofNat 0 = 0 := rfl
+              have hu64_0 : UInt64.ofNat 0 = 0 := rfl
+              rw [hu32_0, hu64_0, ← multiLeaf4JortsParams.public_eqs] at hVer
+              cases hWalk : walkMerkleAuthPathKp poly257MultiLeafSuite sk.pkSeed 0 0 .tree 0
+                  2 0 sig.leafGlobalIdx
+                  (recoverWotsPkFromSig poly257MultiLeafSuite multiLeaf4JortsParams sk.pkSeed
+                    0 0 sig.leafGlobalIdx (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub))
+                    lsig.wotsChains)
+                  lsig.authPath with
+              | none => rw [hWalk] at hVer; dsimp only at hVer; cases hVer
+              | some topRoot =>
+                rw [hWalk] at hVer
+                dsimp only at hVer
+                rw [verifyProductionHypertreeLayers_nil] at hVer
+                dsimp only at hVer
+                have hRootEq : topRoot = rootFromTbl (honestSlotHiLo sk) :=
+                  of_decide_eq_true hVer
+                rw [hRootEq] at hWalk
+                obtain ⟨hWotsPay, hWotsNeInv⟩ := walkMerkle2_extract_leaf hkp hWalk
+                rw [recoverWotsPkFromSig_eq, poly257MultiLeaf_thTweakTl] at hWotsPay hWotsNeInv
+                simp only [hkp32, hkp, and_self, multiLeaf4JortsParams.public_eqs,
+                  ↓reduceIte] at hWotsPay hWotsNeInv
+                cases hAct3 : extractActive3 sig.leafGlobalIdx
+                    (recoverWotsEndpoints poly257MultiLeafSuite
+                      (PqHashParams.mk 4 128 2 1 0 0 2 true) sk.pkSeed 0 0 sig.leafGlobalIdx
+                      (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)) lsig.wotsChains) with
+                | none => rw [hAct3] at hWotsNeInv; exact absurd rfl hWotsNeInv
+                | some ps =>
+                  rw [hAct3] at hWotsPay
+                  unfold extractActive3 at hAct3
+                  rw [recoverWotsEndpoints_eq] at hAct3
+                  dsimp only at hAct3
+                  rw [range128_split3, List.map_cons, List.map_cons, List.map_cons] at hAct3
+                  dsimp only at hAct3
+                  split at hAct3
+                  · cases hD0 : decodeChainNode 0xB3 sig.leafGlobalIdx 0 _ with
+                    | none => rw [hD0] at hAct3; cases hAct3
+                    | some p0 =>
+                      cases hD1 : decodeChainNode 0xB3 sig.leafGlobalIdx 1 _ with
+                      | none => rw [hD0, hD1] at hAct3; cases hAct3
+                      | some p1 =>
+                        cases hD2 : decodeChainNode 0xB3 sig.leafGlobalIdx 2 _ with
+                        | none => rw [hD0, hD1, hD2] at hAct3; cases hAct3
+                        | some p2 =>
+                          rw [hD0, hD1, hD2] at hAct3
+                          injection hAct3 with hPs
+                          subst hPs
+                          have hTakePay : (([0xC0, UInt8.ofNat sig.leafGlobalIdx] ++
+                              packLeaf3 [p0, p1, p2] ++ List.replicate 24 0x00).drop 2).take 6 =
+                              packLeaf3 [p0, p1, p2] := rfl
+                          rw [hTakePay] at hWotsPay
+                          obtain ⟨hp0, hp1, hp2⟩ := packLeaf3_inj hWotsPay
+                          refine ⟨hkp, sub, hSubLt, hMsgEq, ?_⟩
+                          intro r hr hZeroDig
+                          have hExtr : extractSigChainCand sig r =
+                              match decodeStep0Byte (lsig.wotsChains.getD r []) with
+                              | some b => [b]
+                              | none => [] := by
+                            unfold extractSigChainCand; rw [hLs]
+                          rw [hExtr]
+                          have hrCases : r = 0 ∨ r = 1 ∨ r = 2 := by omega
+                          rcases hrCases with rfl | rfl | rfl
+                          · have hSnd := decodeChainNode_sound hD0
+                            rw [hZeroDig, hp0] at hSnd
+                            obtain ⟨b, hB, hHi, _⟩ :=
+                              chain3_from_step0_sound sk.pkSeed hkp (by decide) hSnd
+                            rw [hB]
+                            exact congrArg (· :: []) (byteXorHash_headD_inj _ _ hHi)
+                          · have hSnd := decodeChainNode_sound hD1
+                            rw [hZeroDig, hp1] at hSnd
+                            obtain ⟨b, hB, hHi, _⟩ :=
+                              chain3_from_step0_sound sk.pkSeed hkp (by decide) hSnd
+                            rw [hB]
+                            exact congrArg (· :: []) (byteXorHash_headD_inj _ _ hHi)
+                          · have hSnd := decodeChainNode_sound hD2
+                            rw [hZeroDig, hp2] at hSnd
+                            obtain ⟨b, hB, hHi, _⟩ :=
+                              chain3_from_step0_sound sk.pkSeed hkp (by decide) hSnd
+                            rw [hB]
+                            exact congrArg (· :: []) (byteXorHash_headD_inj _ _ hHi)
+                  · cases hAct3
+            · simp [hChLen] at hVer
+          · simp [hTswLt] at hVer
+        · have hNotEmpty : (!sig.forsOpenings.isEmpty) = true := by
+            cases hF : sig.forsOpenings with
+            | nil => exact absurd hF hFors
+            | cons _ _ => rfl
+          simp [hCtr0, hNotEmpty, multiLeaf4JortsParams.public_eqs] at hVer
+      · simp [hCtr0] at hVer
+
+/-! #### Punctured Multi-Leaf Signing Oracle Simulator & $q$-Query Adaptive Reduction -/
+
+/-- Embed one of the `12` active `(kp, r)` chain slots (`kp < 4, r < 3`) into `Fin 24`. -/
+def slot24Of12 (s : Fin 12) : Fin 24 :=
+  ⟨s.1, Nat.lt_trans s.2 (by decide)⟩
+
+private theorem insertByteAt_getD_ne :
+    ∀ (idx : Nat) (b₁ b₂ : UInt8) (xs : Spec.Bytes) (j : Nat),
+      idx ≤ xs.length → j ≠ idx →
+      (insertByteAt idx b₁ xs).getD j 0 = (insertByteAt idx b₂ xs).getD j 0
+  | 0, _, _, _, 0, _, hNe => absurd rfl hNe
+  | 0, _, _, _, _ + 1, _, _ => rfl
+  | _ + 1, _, _, [], _, hIdx, _ => absurd hIdx (Nat.not_succ_le_zero _)
+  | _ + 1, _, _, _ :: _, 0, _, _ => rfl
+  | i + 1, b₁, b₂, _ :: xs, j + 1, hIdx, hNe =>
+    insertByteAt_getD_ne i b₁ b₂ xs j (Nat.le_of_succ_le_succ hIdx)
+      (fun h => hNe (congrArg Nat.succ h))
+
+/-- Reconstruct the full `(hi, lo)` endpoint table from the public `0xB3` endpoint `endpt` at
+    punctured slot `s : Fin 12` and the `23` non-punctured secret bytes `other23`. -/
+def puncturedSlotTbl (pkSeed : List UInt8) (s : Fin 12) (endpt : UInt8 × UInt8)
+    (other23 : Spec.Bytes) (kp r : Nat) : UInt8 × UInt8 :=
+  if 3 * kp + r = s.1 then
+    endpt
+  else
+    let skDummy : PqSecretKey := ⟨insertByteAt s.1 0x00 other23, [], pkSeed⟩
+    honestSlotHiLo skDummy kp r
+
+/-- Simulate `prodSignQuery` across all `4` leaves without knowing secret byte `s : Fin 12`, using
+    the public `0xB3` endpoint `endpt` whenever a query on leaf `s / 3` has base-4 digit `3` at
+    chain `s % 3`. -/
+def puncturedSignQuery (pkSeed : List UInt8) (s : Fin 12) (endpt : UInt8 × UInt8)
+    (other23 : Spec.Bytes) (q : ProdSigningQuery) : Option PqHashSig :=
+  if 0 < q.grindLimit then
+    match queryMsgValidAt q.epoch q.message with
+    | none => none
+    | some sub =>
+      let digits := extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)
+      if q.epoch = s.1 / 3 ∧ digits.getD (s.1 % 3) 0 ≠ 3 then
+        none
+      else
+        let skDummy : PqSecretKey := ⟨insertByteAt s.1 0x00 other23, [], pkSeed⟩
+        let tbl := puncturedSlotTbl pkSeed s endpt other23
+        let wotsChains := (List.range 128).map fun r =>
+          if q.epoch = s.1 / 3 ∧ r = s.1 % 3 then
+            encodeChainNode 0xB3 q.epoch r endpt.1 endpt.2
+          else
+            let dr := digits.getD r 0
+            wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 q.epoch r 0 dr
+              (wotsSecretBase poly257MultiLeafSuite skDummy 0 0 q.epoch r)
+        some
+          { rRand := zero32
+            msgTswCtr := 0
+            leafGlobalIdx := q.epoch
+            forsOpenings := []
+            layerSigs := [⟨0, wotsChains, authPathFromTbl tbl q.epoch⟩] }
+  else none
+
+/-- Compatibility of a signing query `q` with puncturing active chain slot `s : Fin 12`: if `q` is
+    a valid signing query on leaf `s / 3`, its sub-message has base-4 digit `3` on chain `s % 3`
+    (so `prodSignQuery` only reveals the `0xB3` endpoint and never reveals `sk.skSeed[s]`). -/
+def QuerySlotCompat (s : Fin 12) (q : ProdSigningQuery) : Prop :=
+  0 < q.grindLimit →
+    ∀ sub : Nat, queryMsgValidAt q.epoch q.message = some sub →
+      q.epoch = s.1 / 3 →
+      (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD (s.1 % 3) 0 = 3
+
+private theorem puncturedSlotTbl_eq_honest (sk : PqSecretKey) (s : Fin 12)
+    (other23 : Spec.Bytes) (hLen23 : other23.length = 23)
+    (hIns : insertByteAt s.1 (sk.skSeed.getD s.1 0) other23 = sk.skSeed) :
+    ∀ kp r : Nat, kp < 4 → r < 3 →
+      puncturedSlotTbl sk.pkSeed s (honestSlotHiLo sk (s.1 / 3) (s.1 % 3)) other23 kp r =
+        honestSlotHiLo sk kp r := by
+  intro kp r hkp hr
+  unfold puncturedSlotTbl honestSlotHiLo
+  by_cases hEq : 3 * kp + r = s.1
+  · rw [ite_eq_left hEq]
+    have hDiv : s.1 / 3 = kp := by omega
+    have hMod : s.1 % 3 = r := by omega
+    rw [hDiv, hMod]
+  · rw [ite_eq_right hEq]
+    dsimp only
+    have hIdxLe : s.1 ≤ other23.length := by rw [hLen23]; have := s.2; omega
+    have hByteEq : (insertByteAt s.1 0x00 other23).getD (3 * kp + r) 0 =
+        sk.skSeed.getD (3 * kp + r) 0 := by
+      rw [insertByteAt_getD_ne s.1 0x00 (sk.skSeed.getD s.1 0) other23 (3 * kp + r) hIdxLe hEq,
+        hIns]
+    rw [hByteEq]
+
+private theorem authPathFromTbl_congr {tbl₁ tbl₂ : Nat → Nat → UInt8 × UInt8}
+    (hEq : ∀ kp r : Nat, kp < 4 → r < 3 → tbl₁ kp r = tbl₂ kp r) (kp : Nat) :
+    authPathFromTbl tbl₁ kp = authPathFromTbl tbl₂ kp := by
+  have hLeaf : ∀ j : Nat, j < 4 → leafFromTbl tbl₁ j = leafFromTbl tbl₂ j := fun j hj => by
+    unfold leafFromTbl
+    rw [hEq j 0 hj (by decide), hEq j 1 hj (by decide), hEq j 2 hj (by decide)]
+  have hNode : ∀ idx : Nat, idx < 2 → node1FromTbl tbl₁ idx = node1FromTbl tbl₂ idx :=
+    fun idx hi => by
+      unfold node1FromTbl
+      rw [hEq (2 * idx) 0 (by omega) (by decide), hEq (2 * idx) 1 (by omega) (by decide),
+        hEq (2 * idx) 2 (by omega) (by decide), hEq (2 * idx + 1) 0 (by omega) (by decide),
+        hEq (2 * idx + 1) 1 (by omega) (by decide), hEq (2 * idx + 1) 2 (by omega) (by decide)]
+  unfold authPathFromTbl
+  repeat' split
+  all_goals simp [hLeaf 0 (by decide), hLeaf 1 (by decide), hLeaf 2 (by decide),
+    hLeaf 3 (by decide), hNode 0 (by decide), hNode 1 (by decide)]
+
+private theorem rootFromTbl_congr {tbl₁ tbl₂ : Nat → Nat → UInt8 × UInt8}
+    (hEq : ∀ kp r : Nat, kp < 4 → r < 3 → tbl₁ kp r = tbl₂ kp r) :
+    rootFromTbl tbl₁ = rootFromTbl tbl₂ := by
+  unfold rootFromTbl
+  rw [hEq 0 0 (by decide) (by decide), hEq 0 1 (by decide) (by decide),
+    hEq 0 2 (by decide) (by decide), hEq 1 0 (by decide) (by decide),
+    hEq 1 1 (by decide) (by decide), hEq 1 2 (by decide) (by decide),
+    hEq 2 0 (by decide) (by decide), hEq 2 1 (by decide) (by decide),
+    hEq 2 2 (by decide) (by decide), hEq 3 0 (by decide) (by decide),
+    hEq 3 1 (by decide) (by decide), hEq 3 2 (by decide) (by decide)]
+
+private theorem puncturedSignQuery_eq_prodSignQuery
+    (sk : PqSecretKey) (s : Fin 12) (other23 : Spec.Bytes) (hLen23 : other23.length = 23)
+    (hIns : insertByteAt s.1 (sk.skSeed.getD s.1 0) other23 = sk.skSeed)
+    (q : ProdSigningQuery) (hCompat : QuerySlotCompat s q) :
+    puncturedSignQuery sk.pkSeed s (honestSlotHiLo sk (s.1 / 3) (s.1 % 3)) other23 q =
+      prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams sk q := by
+  rw [prodSignQuery_poly257MultiLeaf_characterize]
+  unfold puncturedSignQuery
+  by_cases hGrind : 0 < q.grindLimit
+  · rw [ite_eq_left hGrind, ite_eq_left hGrind]
+    cases hVal : queryMsgValidAt q.epoch q.message with
+    | none => rfl
+    | some sub =>
+      dsimp only
+      have hkp : q.epoch < 4 := by
+        unfold queryMsgValidAt at hVal
+        match q.message, hVal with
+        | [_, _], hVal =>
+          dsimp only at hVal
+          split at hVal
+          · rename_i hc; exact hc.2.1
+          · cases hVal
+        | [], hVal | [_], hVal | _ :: _ :: _ :: _, hVal => cases hVal
+      have hNoAbort : ¬ (q.epoch = s.1 / 3 ∧
+          (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD (s.1 % 3) 0 ≠ 3) := by
+        intro hc
+        exact hc.2 (hCompat hGrind sub hVal hc.1)
+      rw [ite_eq_right hNoAbort]
+      unfold honestMultiLeafSig
+      congr 1; congr 1; congr 1; congr 1
+      · apply List.map_congr_left
+        intro r hrMem
+        have hr128 : r < 128 := List.mem_range.mp hrMem
+        by_cases hHit : q.epoch = s.1 / 3 ∧ r = s.1 % 3
+        · rw [ite_eq_left hHit]
+          have hDig3 := hCompat hGrind sub hVal hHit.1
+          rw [← hHit.2] at hDig3
+          rw [hDig3]
+          have hr3 : r < 3 := by rw [hHit.2]; exact Nat.mod_lt _ (by decide)
+          have hkp32 : (UInt32.ofNat q.epoch).toNat = q.epoch := u32_toNat_small (by omega)
+          have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+          rw [wotsSecretBase_eq, poly257MultiLeaf_thSecretPrf]
+          simp only [hkp32, hr32, hkp, hr3, and_self, ↓reduceIte]
+          have hSlotEq : 3 * q.epoch + r = s.1 := by omega
+          rw [hSlotEq, active_chain_steps_3 sk.pkSeed hkp hr3 (sk.skSeed.getD s.1 0)]
+          unfold honestSlotHiLo
+          dsimp only
+          rw [← hHit.1, ← hHit.2, hSlotEq]
+        · rw [ite_eq_right hHit]
+          congr 1
+          rw [wotsSecretBase_eq, wotsSecretBase_eq, poly257MultiLeaf_thSecretPrf,
+            poly257MultiLeaf_thSecretPrf]
+          have hkp32 : (UInt32.ofNat q.epoch).toNat = q.epoch := u32_toNat_small (by omega)
+          have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+          by_cases hr3 : r < 3
+          · simp only [hkp32, hr32, hkp, hr3, and_self, ↓reduceIte]
+            have hSlotNe : 3 * q.epoch + r ≠ s.1 := by
+              intro hEq
+              exact hHit ⟨by omega, by omega⟩
+            have hIdxLe : s.1 ≤ other23.length := by rw [hLen23]; have := s.2; omega
+            rw [insertByteAt_getD_ne s.1 0x00 (sk.skSeed.getD s.1 0) other23
+              (3 * q.epoch + r) hIdxLe hSlotNe, hIns]
+          · have hNot : ¬ (q.epoch < 4 ∧ r < 3) := by omega
+            simp only [hkp32, hr32, hNot, ↓reduceIte]
+      · exact authPathFromTbl_congr (puncturedSlotTbl_eq_honest sk s other23 hLen23 hIns) q.epoch
+  · rw [ite_eq_right hGrind, ite_eq_right hGrind]
+
+private theorem evalLatchedAdaptiveTree_congr_on_log {α : Type}
+    (rawHash : List UInt8 → List UInt8)
+    (sign₁ sign₂ : ProdSigningQuery → Option PqHashSig) :
+    ∀ (prog : ProdAdaptiveTree α) (lo : Nat),
+      (∀ q ∈ (evalLatchedAdaptiveTree true rawHash sign₂ prog lo).2, sign₁ q = sign₂ q) →
+      evalLatchedAdaptiveTree true rawHash sign₁ prog lo =
+        evalLatchedAdaptiveTree true rawHash sign₂ prog lo
+  | .pure _, _, _ => rfl
+  | .hashQuery x next, lo, hLog =>
+    evalLatchedAdaptiveTree_congr_on_log rawHash sign₁ sign₂ (next (rawHash x)) lo hLog
+  | .signQuery q next, lo, hLog => by
+    rw [evalLatchedAdaptiveTree_sign, evalLatchedAdaptiveTree_sign]
+    by_cases hLo : lo ≤ q.epoch
+    · rw [ite_eq_left (Or.inr hLo), ite_eq_left (Or.inr hLo)]
+      have hHeadEq : sign₁ q = sign₂ q := by
+        refine hLog q ?_
+        rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr hLo)]
+        exact List.mem_cons_self
+      rw [hHeadEq]
+      have ih := evalLatchedAdaptiveTree_congr_on_log rawHash sign₁ sign₂ (next (sign₂ q))
+        (q.epoch + 1) (fun q' hq' => hLog q' (by
+          rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr hLo)]
+          exact List.mem_cons_of_mem q hq'))
+      rw [ih]
+    · have hNot : ¬ ((true = false) ∨ lo ≤ q.epoch) := fun hOr =>
+        hOr.elim (fun hb => Bool.noConfusion hb) hLo
+      rw [ite_eq_right hNot, ite_eq_right hNot]
+      exact evalLatchedAdaptiveTree_congr_on_log rawHash sign₁ sign₂ (next none) lo (fun q' hq' =>
+        hLog q' (by
+          rw [evalLatchedAdaptiveTree_sign, ite_eq_right hNot]
+          exact hq'))
+
+private theorem puncturedKeyAndAdvSplit_coords {nA : Nat} (s : Fin 12)
+    (ω : Fin ((256 * pow256 24) * nA)) :
+    let π₀ := Spec.CoinSplit.prod (256 * pow256 24) nA
+    let πs := puncturedKeyAndAdvSplit nA (slot24Of12 s)
+    let sk := multiLeaf24Keygen (π₀.chal ω)
+    let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+    let other23 := byteVecSampler 23 (spAdv.chal (πs.advc ω))
+    (Spec.byte1SeedAndPreSampler (πs.chal ω)).1 = sk.pkSeed ∧
+    (Spec.byte1SeedAndPreSampler (πs.chal ω)).2 = [[sk.skSeed.getD s.1 0]] ∧
+    spAdv.advc (πs.advc ω) = π₀.advc ω ∧
+    other23.length = 23 ∧
+    insertByteAt s.1 (sk.skSeed.getD s.1 0) other23 = sk.skSeed := by
+  intro π₀ πs sk spAdv other23
+  let spKey := Spec.CoinSplit.prod 256 (pow256 24)
+  let s24 := slot24Of12 s
+  have hSplit :
+      (byteVecSampler 24 (spKey.advc (π₀.chal ω))).getD s.1 0 =
+        UInt8.ofNat ((splitByteVecAt 23 s24).chal (spKey.advc (π₀.chal ω))).1 ∧
+      insertByteAt s.1 (UInt8.ofNat ((splitByteVecAt 23 s24).chal (spKey.advc (π₀.chal ω))).1)
+        (byteVecSampler 23 ((splitByteVecAt 23 s24).advc (spKey.advc (π₀.chal ω)))) =
+        byteVecSampler 24 (spKey.advc (π₀.chal ω)) :=
+    splitByteVecAt_getD_and_insert 23 s24 (spKey.advc (π₀.chal ω))
+  have hChalEq : πs.chal ω = (Spec.CoinSplit.prod 256 256).pair
+      (spKey.chal (π₀.chal ω)) ((splitByteVecAt 23 s24).chal (spKey.advc (π₀.chal ω))) := rfl
+  have hAdvcChal : spAdv.chal (πs.advc ω) =
+      (splitByteVecAt 23 s24).advc (spKey.advc (π₀.chal ω)) := by
+    show spAdv.chal (spAdv.pair _ _) = _
+    rw [spAdv.chal_pair]
+  have hAdvcAdvc : spAdv.advc (πs.advc ω) = π₀.advc ω := by
+    show spAdv.advc (spAdv.pair _ _) = _
+    rw [spAdv.advc_pair]
+  have hSkEq : sk = ⟨byteVecSampler 24 (spKey.advc (π₀.chal ω)), [],
+      Spec.byte1SeedSampler (spKey.chal (π₀.chal ω))⟩ := by
+    dsimp only [sk]; rw [multiLeaf24Keygen.public_eqs]
+  refine ⟨?_, ?_, hAdvcAdvc, byteVecSampler_length 23 _, ?_⟩
+  · rw [hChalEq, Spec.byte1SeedAndPreSampler_eq, (Spec.CoinSplit.prod 256 256).chal_pair, hSkEq,
+      Spec.byte1SeedSampler.public_eqs]
+  · rw [hChalEq, Spec.byte1SeedAndPreSampler_eq, (Spec.CoinSplit.prod 256 256).advc_pair,
+      hSkEq]
+    dsimp only
+    rw [← hSplit.1]
+  · dsimp only [other23]
+    rw [hAdvcChal, hSkEq]
+    dsimp only
+    rw [hSplit.1]
+    exact hSplit.2
+
+private def findSignedSubAtLeaf (kp : Nat) : List ProdSigningQuery → Option (ProdSigningQuery × Nat)
+  | [] => none
+  | q :: qs =>
+    if 0 < q.grindLimit then
+      match queryMsgValidAt q.epoch q.message with
+      | some sub => if q.epoch = kp then some (q, sub) else findSignedSubAtLeaf kp qs
+      | none => findSignedSubAtLeaf kp qs
+    else findSignedSubAtLeaf kp qs
+
+private theorem findSignedSubAtLeaf_some {kp : Nat} :
+    ∀ {qs : List ProdSigningQuery} {q₀ : ProdSigningQuery} {sub : Nat},
+      findSignedSubAtLeaf kp qs = some (q₀, sub) →
+      q₀ ∈ qs ∧ 0 < q₀.grindLimit ∧ queryMsgValidAt q₀.epoch q₀.message = some sub ∧ q₀.epoch = kp
+  | [], _, _, h => by cases h
+  | q :: qs, q₀, sub, h => by
+    unfold findSignedSubAtLeaf at h
+    split at h
+    · rename_i hG
+      cases hV : queryMsgValidAt q.epoch q.message with
+      | none =>
+        rw [hV] at h
+        obtain ⟨h1, h2, h3, h4⟩ := findSignedSubAtLeaf_some h
+        exact ⟨List.mem_cons_of_mem q h1, h2, h3, h4⟩
+      | some s =>
+        rw [hV] at h; dsimp only at h
+        split at h
+        · rename_i hEp
+          injection h with hp; injection hp with hqEq hsEq
+          subst hqEq hsEq
+          exact ⟨List.mem_cons_self, hG, hV, hEp⟩
+        · obtain ⟨h1, h2, h3, h4⟩ := findSignedSubAtLeaf_some h
+          exact ⟨List.mem_cons_of_mem q h1, h2, h3, h4⟩
+    · obtain ⟨h1, h2, h3, h4⟩ := findSignedSubAtLeaf_some h
+      exact ⟨List.mem_cons_of_mem q h1, h2, h3, h4⟩
+
+private theorem findSignedSubAtLeaf_none {kp : Nat} :
+    ∀ {qs : List ProdSigningQuery},
+      findSignedSubAtLeaf kp qs = none →
+      ∀ q ∈ qs, 0 < q.grindLimit → ∀ sub, queryMsgValidAt q.epoch q.message = some sub →
+        q.epoch ≠ kp := by
+  intro qs
+  induction qs with
+  | nil =>
+    intro _ _ hMem
+    nomatch hMem
+  | cons q qs ih =>
+    intro hNone q' hMem hG sub hV
+    unfold findSignedSubAtLeaf at hNone
+    rcases List.mem_cons.mp hMem with rfl | hTail
+    · rw [ite_eq_left hG, hV] at hNone
+      dsimp only at hNone
+      intro hEp
+      rw [ite_eq_left hEp] at hNone
+      cases hNone
+    · split at hNone
+      · cases hVq : queryMsgValidAt q.epoch q.message with
+        | none => rw [hVq] at hNone; exact ih hNone q' hTail hG sub hV
+        | some _ =>
+          rw [hVq] at hNone; dsimp only at hNone
+          split at hNone
+          · cases hNone
+          · exact ih hNone q' hTail hG sub hV
+      · exact ih hNone q' hTail hG sub hV
+
+private theorem mem_productionSigningLog_of_some
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) :
+    ∀ (qs : List ProdSigningQuery) (q : ProdSigningQuery) (sig : PqHashSig),
+      q ∈ qs → prodSignQuery suite params sk q = some sig →
+      (q.message, sig) ∈ productionSigningLog suite params sk qs
+  | [], _, _, hMem, _ => nomatch hMem
+  | q' :: qs, q, sig, hMem, hSome => by
+    rw [productionSigningLog_cons]
+    rcases List.mem_cons.mp hMem with rfl | hTail
+    · rw [hSome]; exact List.mem_append_left _ List.mem_cons_self
+    · exact List.mem_append_right _ (mem_productionSigningLog_of_some suite params sk qs q sig hTail hSome)
+
+/-- **Punctured Multi-Leaf Simulation & Secret-Extraction Soundness
+    (`poly257MultiLeaf_punctured_sim_sound`).**
+    For ANY `nA qHash qSign : Nat` and ANY adaptive multi-query adversary family
+    `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign`, on every winning coin `ω` of
+    `ExecEufCmaGame` over `poly257MultiLeafSuite` + `multiLeaf4JortsParams`, there exists an
+    active chain slot `s : Fin 12` (`kp = s / 3 < 4, r = s % 3 < 3`) such that:
+    1. every admitted signing query `q` in the adaptive log is compatible with puncturing `s`
+       (`QuerySlotCompat s q`, proved via `BeltLatch` + `encodeSubMsg3Hmsg_incomparable`);
+    2. running `adv` against `puncturedSignQuery` using ONLY `pkSeed`, the public `0xB3` endpoint
+       `honestSlotHiLo o.sk (s / 3) (s % 3)`, and the `23` non-punctured secret bytes `other23`
+       (never touching `o.sk.skSeed[s]`) reproduces the exact adaptive execution output and log;
+    3. `extractSigChainCand` on chain `s % 3` of that simulated forgery recovers the withheld
+       secret byte `[o.sk.skSeed.getD s.1 0]`. -/
+theorem poly257MultiLeaf_punctured_sim_sound {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * pow256 24) * nA)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    (ω : Fin ((256 * pow256 24) * nA))
+    (hWin : (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) nA).chal z))
+      (fun z => adv ((Spec.CoinSplit.prod (256 * pow256 24) nA).advc z))).win ω = true) :
+    let π₀ := Spec.CoinSplit.prod (256 * pow256 24) nA
+    let o := execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen (π₀.chal z)) (fun z => adv (π₀.advc z)) ω
+    ∃ s : Fin 12,
+      let πs := puncturedKeyAndAdvSplit nA (slot24Of12 s)
+      let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+      let other23 := byteVecSampler 23 (spAdv.chal (πs.advc ω))
+      let endpt := honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3)
+      let pkSim := pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s endpt other23)
+      let simRun := evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+        (puncturedSignQuery o.sk.pkSeed s endpt other23) ((adv (spAdv.advc (πs.advc ω))).run pkSim) 0
+      s.1 / 3 = o.sigStar.leafGlobalIdx ∧
+      (∀ q ∈ o.queries, QuerySlotCompat s q) ∧
+      pkSim = derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams o.sk ∧
+      simRun = ((o.msgStar, o.sigStar), o.queries) ∧
+      extractSigChainCand simRun.1.2 (s.1 % 3) = [o.sk.skSeed.getD s.1 0] := by
+  intro π₀ o
+  have hWinO : prodEufCmaWin poly257MultiLeafSuite multiLeaf4JortsParams o = true :=
+    (execEufCmaGameWith_win true hPos poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen (π₀.chal z)) (fun z => adv (π₀.advc z)) ω).symm.trans hWin
+  rw [prodEufCmaWin_eq] at hWinO
+  obtain ⟨hVerStar, hFreshDec⟩ := Bool.and_eq_true_iff.mp hWinO
+  have hFresh : o.msgStar ∉
+      (productionSigningLog poly257MultiLeafSuite multiLeaf4JortsParams o.sk o.queries).map
+        Prod.fst := of_decide_eq_true hFreshDec
+  obtain ⟨hKpStar, subStar, hSubStarLt, hMsgStarEq, hPreExtract⟩ :=
+    verifyProductionPqHashSig_poly257MultiLeaf_sound o.sk o.msgStar o.sigStar hVerStar
+  have hOneTime : ProdOneTimeLog o.queries :=
+    execEufCmaOutcome_oneTime poly257MultiLeafSuite multiLeaf4JortsParams _ _ ω
+  have hPickR : ∃ rStar : Fin 3,
+      (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg subStar)).getD rStar.1 0 = 0 ∧
+      ∀ q ∈ o.queries, QuerySlotCompat ⟨3 * o.sigStar.leafGlobalIdx + rStar.1, by omega⟩ q := by
+    cases hFind : findSignedSubAtLeaf o.sigStar.leafGlobalIdx o.queries with
+    | none =>
+      obtain ⟨rStar, hrZero⟩ := encodeSubMsg3Hmsg_has_zero_digit ⟨subStar, hSubStarLt⟩
+      refine ⟨rStar, hrZero, ?_⟩
+      intro q hq hG sub hV hEp
+      have hDiv : (3 * o.sigStar.leafGlobalIdx + rStar.1) / 3 = o.sigStar.leafGlobalIdx := by
+        have := rStar.2; omega
+      exact absurd (hEp.trans hDiv) (findSignedSubAtLeaf_none hFind q hq hG sub hV)
+    | some pair =>
+      rcases pair with ⟨q₀, subQ⟩
+      obtain ⟨hq₀Mem, hq₀G, hq₀V, hq₀Ep⟩ := findSignedSubAtLeaf_some hFind
+      have hSubQLt : subQ < 3 ∧ q₀.message = [UInt8.ofNat q₀.epoch, UInt8.ofNat subQ] := by
+        unfold queryMsgValidAt at hq₀V
+        match hM : q₀.message with
+        | [kpB, subB] =>
+          rw [hM] at hq₀V; dsimp only at hq₀V
+          split at hq₀V
+          · rename_i hc; injection hq₀V with hs
+            exact ⟨hs ▸ hc.2.2, by rw [← hc.1, ← hs, UInt8.ofNat_toNat, UInt8.ofNat_toNat]⟩
+          · cases hq₀V
+        | [] | [_] | _ :: _ :: _ :: _ => rw [hM] at hq₀V; cases hq₀V
+      have hSignedSome : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams o.sk q₀ =
+          some (honestMultiLeafSig o.sk q₀.epoch subQ) := by
+        rw [prodSignQuery_poly257MultiLeaf_characterize, ite_eq_left hq₀G, hq₀V]
+      have hInLog : q₀.message ∈
+          (productionSigningLog poly257MultiLeafSuite multiLeaf4JortsParams o.sk o.queries).map
+            Prod.fst := by
+        refine List.mem_map.mpr ⟨(q₀.message, honestMultiLeafSig o.sk q₀.epoch subQ), ?_, rfl⟩
+        exact mem_productionSigningLog_of_some _ _ _ _ _ _ hq₀Mem hSignedSome
+      have hSubNe : (⟨subStar, hSubStarLt⟩ : Fin 3) ≠ ⟨subQ, hSubQLt.1⟩ := by
+        intro hEq
+        have hSubVal : subStar = subQ := congrArg Fin.val hEq
+        have hMsgSame : q₀.message = o.msgStar := by
+          rw [hSubQLt.2, hMsgStarEq, hq₀Ep, hSubVal]
+        exact hFresh (hMsgSame ▸ hInLog)
+      obtain ⟨rStar, hrZero, hrThree⟩ :=
+        encodeSubMsg3Hmsg_incomparable ⟨subStar, hSubStarLt⟩ ⟨subQ, hSubQLt.1⟩ hSubNe
+      refine ⟨rStar, hrZero, ?_⟩
+      intro q hq _ sub hV hEp
+      have hDiv : (3 * o.sigStar.leafGlobalIdx + rStar.1) / 3 = o.sigStar.leafGlobalIdx := by
+        have := rStar.2; omega
+      have hMod : (3 * o.sigStar.leafGlobalIdx + rStar.1) % 3 = rStar.1 := by
+        have := rStar.2; omega
+      have hqEq : q = q₀ := hOneTime q hq q₀ hq₀Mem ((hEp.trans hDiv).trans hq₀Ep.symm)
+      subst hqEq
+      rw [hq₀V] at hV
+      injection hV with hSubEq
+      subst hSubEq
+      rw [hMod]
+      exact hrThree
+  obtain ⟨rStar, hrZero, hAllCompat⟩ := hPickR
+  let s : Fin 12 := ⟨3 * o.sigStar.leafGlobalIdx + rStar.1, by have := rStar.2; omega⟩
+  have hsDiv : s.1 / 3 = o.sigStar.leafGlobalIdx := by dsimp only [s]; have := rStar.2; omega
+  have hsMod : s.1 % 3 = rStar.1 := by dsimp only [s]; have := rStar.2; omega
+  obtain ⟨_, _, hAdvC, hLen23, hIns⟩ := puncturedKeyAndAdvSplit_coords s ω
+  let πs := puncturedKeyAndAdvSplit nA (slot24Of12 s)
+  let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+  let other23 := byteVecSampler 23 (spAdv.chal (πs.advc ω))
+  let endpt := honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3)
+  have hPkSim : pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s endpt other23) =
+      derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams o.sk := by
+    rw [derivePublicKey_poly257MultiLeaf]
+    unfold pkFromTbl
+    rw [rootFromTbl_congr (puncturedSlotTbl_eq_honest o.sk s other23 hLen23 hIns)]
+  have hTreeSim : evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+      (puncturedSignQuery o.sk.pkSeed s endpt other23)
+      ((adv (spAdv.advc (πs.advc ω))).run
+        (pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s endpt other23))) 0 =
+      ((o.msgStar, o.sigStar), o.queries) := by
+    rw [hAdvC, hPkSim]
+    exact evalLatchedAdaptiveTree_congr_on_log poly257MultiLeafSuite.rawHash _ _ _ 0
+      (fun q hq => puncturedSignQuery_eq_prodSignQuery o.sk s other23 hLen23 hIns q
+        (hAllCompat q hq))
+  refine ⟨s, hsDiv, hAllCompat, hPkSim, hTreeSim, ?_⟩
+  rw [hTreeSim]
+  dsimp only
+  have hCand := hPreExtract rStar.1 rStar.2 hrZero
+  rw [← hsMod] at hCand
+  have hIdxEq : 3 * o.sigStar.leafGlobalIdx + s.1 % 3 = s.1 := by rw [hsMod]
+  rw [hIdxEq] at hCand
+  exact hCand
+
+/-- **Query-Bounded Punctured `SM-DT-PRE` Reduction Adversary (`multiLeafBoundedPreAdv`).**
+    Queries `.target (chain0Tweak (s / 3) (s % 3)) []` and `.reveal`, testing the singleton
+    step-0 candidate `[candOf s advCoin]` in `Spec.WithinPreQueries 2 1`. -/
+def multiLeafBoundedPreAdv {nA : Nat}
+    (candOf : Fin 12 → Fin (pow256 23 * nA) → Spec.Bytes)
+    (s : Fin 12) (advCoin : Fin (pow256 23 * nA)) :
+    Spec.Code Spec.targetIface Spec.TargetBreak :=
+  Spec.boundedPreAdv Spec.poly257Hash (chain0Tweak (s.1 / 3) (s.1 % 3))
+    [candOf s advCoin]
+
+theorem multiLeafBoundedPreAdv_mem_within {nA : Nat}
+    (candOf : Fin 12 → Fin (pow256 23 * nA) → Spec.Bytes)
+    (s : Fin 12) (advCoin : Fin (pow256 23 * nA)) :
+    Spec.WithinPreQueries 2 1 (multiLeafBoundedPreAdv candOf s advCoin) :=
+  Spec.boundedPreAdv_mem_within Spec.poly257Hash (chain0Tweak (s.1 / 3) (s.1 % 3))
+    [candOf s advCoin] (Nat.le_refl 1)
+
+/-- **General $q$-Query Adaptive EUF-CMA Bound Over `poly257MultiLeafSuite`
+    (`poly257MultiLeaf_adaptive_forger_bound`).**
+    For ANY `nA qHash qSign : Nat`, ANY adaptive multi-query adversary family
+    `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign`, and ANY offline candidate map `candOf`
+    covering the punctured simulator's extracted chain-0 candidate on `(pkSeed, endpt)`, under
+    `Spec.SmDtPreHard (Spec.WithinPreQueries 2 1) Spec.poly257Hash 1 1 1 εPre` the closed
+    epoch-latched EUF-CMA game wins with probability at most `12 · εPre`. -/
+theorem poly257MultiLeaf_adaptive_forger_bound {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * pow256 24) * nA)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    (candOf : Fin 12 → Fin (pow256 23 * nA) → Spec.Bytes)
+    (hCand : ∀ (s : Fin 12) (c : Fin (pow256 23 * nA)) (pkSeed : List UInt8)
+        (endpt : UInt8 × UInt8),
+      let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+      let other23 := byteVecSampler 23 (spAdv.chal c)
+      let pkSim := pkFromTbl pkSeed (puncturedSlotTbl pkSeed s endpt other23)
+      let simOut := (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+        (puncturedSignQuery pkSeed s endpt other23) ((adv (spAdv.advc c)).run pkSim) 0).1
+      simOut.2.leafGlobalIdx = s.1 / 3 →
+      extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+      extractSigChainCand simOut.2 (s.1 % 3) = candOf s c)
+    {εPre : Spec.RatBound}
+    (hPre : Spec.SmDtPreHard (Spec.WithinPreQueries 2 1) Spec.poly257Hash 1 1 1 εPre) :
+    Spec.GameBound
+      (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams
+        (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) nA).chal z))
+        (fun z => adv ((Spec.CoinSplit.prod (256 * pow256 24) nA).advc z))).winProb
+      (Spec.RatBound.scale 12 εPre) := by
+  let R : Fin 12 → Spec.FinGame ((256 * pow256 24) * nA) := fun s =>
+    Spec.smDtPreGame hPos Spec.poly257Hash 1
+      (fun z => (Spec.byte1SeedAndPreSampler
+        ((puncturedKeyAndAdvSplit nA (slot24Of12 s)).chal z)).1)
+      (fun z i => (Spec.byte1SeedAndPreSampler
+        ((puncturedKeyAndAdvSplit nA (slot24Of12 s)).chal z)).2.getD i [])
+      (fun z => multiLeafBoundedPreAdv candOf s
+        ((puncturedKeyAndAdvSplit nA (slot24Of12 s)).advc z))
+  have hRed := Spec.event_le_reduction_win
+    (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) nA).chal z))
+      (fun z => adv ((Spec.CoinSplit.prod (256 * pow256 24) nA).advc z)))
+    (Spec.FinGame.mk hPos (anySlotWins 12 R))
+    (fun ω hW => by
+      obtain ⟨s, hsDiv, _, _, hSimEq, hExtrEq⟩ := poly257MultiLeaf_punctured_sim_sound hPos adv ω hW
+      refine anySlotWins_of_win 12 R ω s ?_
+      let π₀ := Spec.CoinSplit.prod (256 * pow256 24) nA
+      let o := execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams
+        (fun z => multiLeaf24Keygen (π₀.chal z)) (fun z => adv (π₀.advc z)) ω
+      let πs := puncturedKeyAndAdvSplit nA (slot24Of12 s)
+      obtain ⟨_, hHidC, _, _, _⟩ := puncturedKeyAndAdvSplit_coords s ω
+      have hSimFst : (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+          (puncturedSignQuery o.sk.pkSeed s (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+            (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω))))
+          ((adv ((Spec.CoinSplit.prod (pow256 23) nA).advc (πs.advc ω))).run
+            (pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s
+              (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+              (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω)))))) 0).1 =
+          (o.msgStar, o.sigStar) := congrArg Prod.fst hSimEq
+      have hLeafEq : (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+          (puncturedSignQuery o.sk.pkSeed s (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+            (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω))))
+          ((adv ((Spec.CoinSplit.prod (pow256 23) nA).advc (πs.advc ω))).run
+            (pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s
+              (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+              (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω)))))) 0).1.2.leafGlobalIdx =
+          s.1 / 3 := by
+        rw [hSimFst]; exact hsDiv.symm
+      have hNeNil : extractSigChainCand (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+          (puncturedSignQuery o.sk.pkSeed s (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+            (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω))))
+          ((adv ((Spec.CoinSplit.prod (pow256 23) nA).advc (πs.advc ω))).run
+            (pkFromTbl o.sk.pkSeed (puncturedSlotTbl o.sk.pkSeed s
+              (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+              (byteVecSampler 23 ((Spec.CoinSplit.prod (pow256 23) nA).chal (πs.advc ω)))))) 0).1.2
+          (s.1 % 3) ≠ [] := by
+        rw [hExtrEq]; exact List.cons_ne_nil _ _
+      have hCandEq : [o.sk.skSeed.getD s.1 0] = candOf s (πs.advc ω) := by
+        rw [← hExtrEq]
+        exact hCand s (πs.advc ω) o.sk.pkSeed (honestSlotHiLo o.sk (s.1 / 3) (s.1 % 3))
+          hLeafEq hNeNil
+      show (Spec.smDtPreGame hPos Spec.poly257Hash 1
+        (fun z => (Spec.byte1SeedAndPreSampler (πs.chal z)).1)
+        (fun z i => (Spec.byte1SeedAndPreSampler (πs.chal z)).2.getD i [])
+        (fun z => multiLeafBoundedPreAdv candOf s (πs.advc z))).win ω = true
+      simp only [Spec.smDtPreGame.public_eqs, Spec.smDtPreRun.public_eqs]
+      unfold multiLeafBoundedPreAdv
+      refine Spec.boundedPreAdv_singleton_hidden_wins Spec.poly257Hash _ _ _ _ ?_
+      rw [hHidC]
+      exact hCandEq)
+  have hEach : ∀ s : Fin 12, Spec.GameBound (R s).winProb εPre := fun s =>
+    hPre _ _ _ hPos (puncturedKeyAndAdvSplit nA (slot24Of12 s))
+      Spec.byte1SeedAndPreSampler Spec.uniformOn_byte1SeedAndPre
+      (multiLeafBoundedPreAdv candOf s) (multiLeafBoundedPreAdv_mem_within candOf s)
+  exact Spec.GameBound.trans hRed (anySlotWins_bound hPos 12 R hEach)
+
+/-- **Unconditional `< 1` Corollary (`poly257MultiLeaf_adaptive_forger_bound_concrete`).**
+    Discharges `Spec.SmDtPreHard` in `poly257MultiLeaf_adaptive_forger_bound` via
+    `Spec.poly257Hash_smDtPreHard_within 2 1`, yielding `24 / 256 < 1` across all 12 active
+    `(kp, r)` chain slots. -/
+theorem poly257MultiLeaf_adaptive_forger_bound_concrete {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * pow256 24) * nA)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    (candOf : Fin 12 → Fin (pow256 23 * nA) → Spec.Bytes)
+    (hCand : ∀ (s : Fin 12) (c : Fin (pow256 23 * nA)) (pkSeed : List UInt8)
+        (endpt : UInt8 × UInt8),
+      let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+      let other23 := byteVecSampler 23 (spAdv.chal c)
+      let pkSim := pkFromTbl pkSeed (puncturedSlotTbl pkSeed s endpt other23)
+      let simOut := (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+        (puncturedSignQuery pkSeed s endpt other23) ((adv (spAdv.advc c)).run pkSim) 0).1
+      simOut.2.leafGlobalIdx = s.1 / 3 →
+      extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+      extractSigChainCand simOut.2 (s.1 % 3) = candOf s c) :
+    Spec.GameBound
+      (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams
+        (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) nA).chal z))
+        (fun z => adv ((Spec.CoinSplit.prod (256 * pow256 24) nA).advc z))).winProb
+      (Spec.RatBound.scale 12 ⟨2, 256, by decide⟩) ∧
+    (Spec.RatBound.scale 12 ⟨2, 256, by decide⟩).lt Spec.RatBound.one :=
+  ⟨poly257MultiLeaf_adaptive_forger_bound hPos adv candOf hCand
+     (Spec.poly257Hash_smDtPreHard_within 2 1),
+   by decide⟩
+
+/-! #### Concrete 4-Leaf Adaptive Forger & Unconditional `< 1` `ExecEufCmaReductionEmbedding` -/
+
+/-- Step a chain carrier `x` by `3` raw-hash queries (`st = 0, 1, 2`) at `(kp, r)`. -/
+def stepChain3Adaptive {α : Type} (pkSeed : List UInt8) (kp r : Nat) (x : List UInt8)
+    (k : List UInt8 → ProdAdaptiveTree α) : ProdAdaptiveTree α :=
+  .hashQuery
+    (thPreimage tagThF pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 0⟩ [x])
+    (fun s1 =>
+      .hashQuery
+        (thPreimage tagThF pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 1⟩ [s1])
+        (fun s2 =>
+          .hashQuery
+            (thPreimage tagThF pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 2⟩ [s2])
+            k))
+
+private theorem evalLatched_stepChain3Adaptive {α : Type} (latchOn : Bool)
+    (sign : ProdSigningQuery → Option PqHashSig)
+    (pkSeed : List UInt8) (kp r : Nat) (x : List UInt8)
+    (k : List UInt8 → ProdAdaptiveTree α) (lo : Nat) :
+    evalLatchedAdaptiveTree latchOn poly257MultiLeafSuite.rawHash sign
+      (stepChain3Adaptive pkSeed kp r x k) lo =
+      evalLatchedAdaptiveTree latchOn poly257MultiLeafSuite.rawHash sign
+        (k (wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r 0 3 x)) lo := by
+  have hStep : ∀ (st : UInt32) (cur : List UInt8),
+      poly257MultiLeafSuite.rawHash
+        (thPreimage tagThF pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, st⟩ [cur]) =
+        thChainF poly257MultiLeafSuite pkSeed
+          ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, st⟩ cur := by
+    intro st cur
+    rw [thChainF_eq, thCall_eq]
+  unfold stepChain3Adaptive
+  dsimp only [evalLatchedAdaptiveTree]
+  rw [hStep, hStep, hStep, wotsChainSteps_succ, wotsChainSteps_succ, wotsChainSteps_succ,
+    wotsChainSteps_zero]
+  rfl
+
+/-- **4-Leaf Adaptive Signing Forger (`adaptive4LeafQueryForger`).**
+    Queries all four leaves `epoch = 0, 1, 2, 3` on `[0, 0]`, `[1, 0]`, `[2, 0]`, `[3, 0]`,
+    adaptively advances `sig₃.wotsChains[0]` by 3 `rawHash` calls (`stepChain3Adaptive`),
+    reuses `sig₃.wotsChains[2]` and `sig₃.authPath`, and guesses `encodeStep0Secret 0x00` at
+    the unrevealed slot `(kp = 3, r = 1)` to forge fresh message `[3, 1]`. -/
+def adaptive4LeafQueryForger : SeedWithheldEufCmaAdv 3 4 where
+  run pk :=
+    .signQuery ⟨[0, 0], [], 0, 1⟩ (fun _ =>
+      .signQuery ⟨[1, 0], [], 1, 1⟩ (fun _ =>
+        .signQuery ⟨[2, 0], [], 2, 1⟩ (fun _ =>
+          .signQuery ⟨[3, 0], [], 3, 1⟩ (fun sig3Opt =>
+            let lsig3 := match sig3Opt with
+              | some s => s.layerSigs.headD ⟨0, [], []⟩
+              | none => ⟨0, [], []⟩
+            let c0 := lsig3.wotsChains.getD 0 zero32
+            let c2 := lsig3.wotsChains.getD 2 zero32
+            stepChain3Adaptive pk.pkSeed 3 0 c0 (fun c0End =>
+              let forgedChains :=
+                c0End :: encodeStep0Secret 0x00 :: c2 :: List.replicate 125 crumb32
+              .pure ([3, 1],
+                { rRand := zero32
+                  msgTswCtr := 0
+                  leafGlobalIdx := 3
+                  forsOpenings := []
+                  layerSigs := [⟨0, forgedChains, lsig3.authPath⟩] }))))))
+  bounded _ := fun _ _ _ _ _ _ _ => trivial
+
+private theorem evalLatched_pure_adaptive4Leaf_out
+    (rawHash : List UInt8 → List UInt8) (sign : ProdSigningQuery → Option PqHashSig)
+    (pk : PqPublicKey) :
+    let out := (evalLatchedAdaptiveTree true rawHash sign (adaptive4LeafQueryForger.run pk) 0).1
+    out.1 = [3, 1] ∧ out.2.leafGlobalIdx = 3 ∧ extractSigChainCand out.2 1 = [0x00] := by
+  unfold adaptive4LeafQueryForger
+  dsimp only
+  rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+  rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 1))]
+  rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 2))]
+  rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 3))]
+  unfold stepChain3Adaptive
+  dsimp only [evalLatchedAdaptiveTree, extractSigChainCand]
+  rw [List.getD_cons_succ, List.getD_cons_zero, decodeStep0Byte_encodeStep0Secret]
+  exact ⟨rfl, rfl, rfl⟩
+
+private theorem adaptive4Leaf_punctured_cand
+    (s : Fin 12) (c : Fin (pow256 23 * 1)) (pkSeed : List UInt8) (endpt : UInt8 × UInt8) :
+    let spAdv := Spec.CoinSplit.prod (pow256 23) 1
+    let other23 := byteVecSampler 23 (spAdv.chal c)
+    let pkSim := pkFromTbl pkSeed (puncturedSlotTbl pkSeed s endpt other23)
+    let simOut := (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+      (puncturedSignQuery pkSeed s endpt other23) (adaptive4LeafQueryForger.run pkSim) 0).1
+    simOut.2.leafGlobalIdx = s.1 / 3 →
+    extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+    extractSigChainCand simOut.2 (s.1 % 3) = [0x00] := by
+  intro spAdv other23 pkSim simOut hLeaf hNeNil
+  have hOut := evalLatched_pure_adaptive4Leaf_out poly257MultiLeafSuite.rawHash
+    (puncturedSignQuery pkSeed s endpt other23) pkSim
+  change simOut.1 = [3, 1] ∧ simOut.2.leafGlobalIdx = 3 ∧
+    extractSigChainCand simOut.2 1 = [0x00] at hOut
+  rw [hOut.2.1] at hLeaf
+  have hsCases : s.1 = 9 ∨ s.1 = 10 ∨ s.1 = 11 := by have := s.2; omega
+  rcases hsCases with hs9 | hs10 | hs11
+  · have hMod0 : s.1 % 3 = 0 := by rw [hs9]
+    rw [hMod0] at hNeNil
+    exfalso
+    apply hNeNil
+    dsimp only [simOut, adaptive4LeafQueryForger]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 1))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 2))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 3))]
+    rw [evalLatched_stepChain3Adaptive]
+    dsimp only [evalLatchedAdaptiveTree, extractSigChainCand]
+    rw [List.getD_cons_zero, wotsChainSteps_succ, wotsChainSteps_succ, wotsChainSteps_succ,
+      wotsChainSteps_zero, poly257MultiLeaf_thChainF]
+    have hu3 : (UInt32.ofNat 3).toNat = 3 := rfl
+    have hu0 : (UInt32.ofNat 0).toNat = 0 := rfl
+    have hu2 : (UInt32.ofNat (0 + 1 + 1)).toNat = 2 := rfl
+    dsimp only
+    rw [hu3, hu0, hu2]
+    simp only [and_self, (by decide : 3 < 4 ∧ 0 < 3), (by decide : ¬ (2 = 0)),
+      (by decide : ¬ (2 = 1)), ↓reduceIte]
+    cases decodeChainNode 0xB2 3 0 _ with
+    | none => rfl
+    | some p => cases p; rfl
+  · have hMod1 : s.1 % 3 = 1 := by rw [hs10]
+    rw [hMod1]
+    exact hOut.2.2
+  · have hMod2 : s.1 % 3 = 2 := by rw [hs11]
+    rw [hMod2] at hNeNil
+    exfalso
+    apply hNeNil
+    have hAbort3 : puncturedSignQuery pkSeed s endpt other23 ⟨[3, 0], [], 3, 1⟩ = none := by
+      unfold puncturedSignQuery queryMsgValidAt
+      have hc3 : (3 : UInt8).toNat = 3 ∧ 3 < 4 ∧ (0 : UInt8).toNat < 3 := by decide
+      dsimp only
+      rw [ite_eq_left Nat.one_pos, ite_eq_left hc3]
+      dsimp only
+      have hHit11 : 3 = s.1 / 3 ∧
+          (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD (s.1 % 3) 0 ≠ 3 := by
+        rw [hs11]
+        refine ⟨rfl, ?_⟩
+        change (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 2 0 ≠ 3
+        rw [encodeSubMsg3Hmsg_explicit_digits.2.2.1]
+        decide
+      exact ite_eq_left hHit11
+    dsimp only [simOut, adaptive4LeafQueryForger]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 1))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 2))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 3)), hAbort3]
+    dsimp only
+    rw [evalLatched_stepChain3Adaptive]
+    dsimp only [evalLatchedAdaptiveTree, extractSigChainCand]
+    rw [List.getD_cons_succ, List.getD_cons_succ, List.getD_cons_zero, List.getD_nil]
+    rfl
+
+/-- **`adaptiveMultiQueryReductionEmbedding` — Concrete 4-Query Adaptive Instance of
+    `ExecEufCmaReductionEmbedding` Over `poly257MultiLeafSuite`.**
+    Embeds the 4-signing-query, 3-hash-query adaptive forger `adaptive4LeafQueryForger` on all
+    `256 * 256 ^ 24` keys directly into `Spec.Assumptions` (`WithinItsrQueries 1 1`,
+    `WithinTcrQueries 2 1`, `WithinPreQueries 2 1`) by puncturing slot `10` (`kp = 3, r = 1`). -/
+def adaptiveMultiQueryReductionEmbedding :
+    ExecEufCmaReductionEmbedding
+      (Nat.mul_pos (Nat.mul_pos (by decide) (pow256_pos 24)) Nat.one_pos)
+      poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z))
+      (fun _ => adaptive4LeafQueryForger) where
+  hmsg := Spec.byteIdxHmsg
+  th := Spec.poly257Hash
+  randLen := 1
+  seedLen := 1
+  inputLen := 1
+  qItsr := 1
+  qTcr := 1
+  qPre := 1
+  𝒜I := Spec.WithinItsrQueries 1 1
+  𝒜T := Spec.WithinTcrQueries 2 1
+  𝒜P := Spec.WithinPreQueries 2 1
+  nCi := 256
+  nAi := pow256 24 * 1
+  nCt := 256
+  nAt := pow256 24 * 1
+  nCp := 256 * 256
+  nAp := pow256 23 * 1
+  πi := coinSplitLiftRight 1 (Spec.CoinSplit.prod (256 * pow256 24) 1)
+    (Spec.CoinSplit.prod 256 (pow256 24))
+  πt := coinSplitLiftRight 1 (Spec.CoinSplit.prod (256 * pow256 24) 1)
+    (Spec.CoinSplit.prod 256 (pow256 24))
+  πp := puncturedKeyAndAdvSplit 1 (slot24Of12 ⟨10, by decide⟩)
+  rand := Spec.byte1ItsrSampler
+  hRand := Spec.uniformOn_byte1Itsr
+  seed := Spec.byte1SeedSampler
+  hSeed := Spec.uniformOn_byte1Seed
+  sample := Spec.byte1SeedAndPreSampler
+  hSample := Spec.uniformOn_byte1SeedAndPre
+  advI := fun _ => Spec.boundedItsrAdv Spec.byteIdxHmsg [0] [([1], [1])]
+  hAdvI := fun _ => Spec.boundedItsrAdv_mem_within Spec.byteIdxHmsg [0] [([1], [1])] (Nat.le_refl 1)
+  advT := fun _ => Spec.boundedTcrAdv Spec.poly257Hash [] [0, 0] [[0, 1]]
+  hAdvT := fun _ => Spec.boundedTcrAdv_mem_within Spec.poly257Hash [] [0, 0] [[0, 1]] (Nat.le_refl 1)
+  advP := multiLeafBoundedPreAdv (fun _ _ => [0x00]) ⟨10, by decide⟩
+  hAdvP := multiLeafBoundedPreAdv_mem_within (fun _ _ => [0x00]) ⟨10, by decide⟩
+  extract_win := fun ω hWin => by
+    refine .inr (.inr ?_)
+    let s10 : Fin 12 := ⟨10, by decide⟩
+    let π₀ := Spec.CoinSplit.prod (256 * pow256 24) 1
+    let o := execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams
+      (fun z => multiLeaf24Keygen (π₀.chal z)) (fun _ => adaptive4LeafQueryForger) ω
+    have hWinO : prodEufCmaWin poly257MultiLeafSuite multiLeaf4JortsParams o = true := hWin
+    rw [prodEufCmaWin_eq] at hWinO
+    obtain ⟨hVerStar, _⟩ := Bool.and_eq_true_iff.mp hWinO
+    have hOut := evalLatched_pure_adaptive4Leaf_out poly257MultiLeafSuite.rawHash
+      (prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams o.sk)
+      (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams o.sk)
+    change o.msgStar = [3, 1] ∧ o.sigStar.leafGlobalIdx = 3 ∧
+      extractSigChainCand o.sigStar 1 = [0x00] at hOut
+    obtain ⟨_, sub, hSubLt3, hMsgEq, hPreExtract⟩ :=
+      verifyProductionPqHashSig_poly257MultiLeaf_sound o.sk o.msgStar o.sigStar hVerStar
+    rw [hOut.1, hOut.2.1] at hMsgEq
+    injection hMsgEq with _ hSubCons
+    injection hSubCons with hSubByte _
+    have hSub1 : sub = 1 := by
+      have hSubCases : sub = 0 ∨ sub = 1 ∨ sub = 2 := by omega
+      rcases hSubCases with rfl | rfl | rfl
+      · exact absurd hSubByte (by decide)
+      · rfl
+      · exact absurd hSubByte (by decide)
+    subst hSub1
+    have hExtr1 := hPreExtract 1 (by decide) encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.1
+    rw [hOut.2.1, hOut.2.2] at hExtr1
+    obtain ⟨_, hHidC, _, _, _⟩ := puncturedKeyAndAdvSplit_coords s10 ω
+    simp only [Spec.smDtPreGame.public_eqs, Spec.smDtPreRun.public_eqs]
+    unfold multiLeafBoundedPreAdv
+    refine Spec.boundedPreAdv_singleton_hidden_wins Spec.poly257Hash _ _ _ _ ?_
+    rw [hHidC]
+    exact hExtr1.symm
+
+/-- All-zero `k`-byte coin in `Fin (pow256 k)`. -/
+def zeroVecCoin : (k : Nat) → Fin (pow256 k)
+  | 0 => ⟨0, Nat.one_pos⟩
+  | k + 1 => (Spec.CoinSplit.prod 256 (pow256 k)).pair ⟨0, by decide⟩ (zeroVecCoin k)
+
+private theorem byteVecSampler_zeroVecCoin :
+    ∀ k : Nat, byteVecSampler k (zeroVecCoin k) = List.replicate k 0x00
+  | 0 => rfl
+  | k + 1 => by
+    unfold zeroVecCoin
+    rw [byteVecSampler_succ, (Spec.CoinSplit.prod 256 (pow256 k)).chal_pair,
+      (Spec.CoinSplit.prod 256 (pow256 k)).advc_pair, byteVecSampler_zeroVecCoin k]
+    rfl
+
+private theorem verify_assembled_leaf_sig (sk : PqSecretKey) {kp sub : Nat}
+    (hkp : kp < 4) (hsub : sub < 3)
+    (c0 c1 c2 : List UInt8)
+    (hc0 : c0 = wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp 0 0
+      ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD 0 0)
+      (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp 0))
+    (hc1 : c1 = wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp 1 0
+      ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD 1 0)
+      (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp 1))
+    (hc2 : c2 = wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp 2 0
+      ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD 2 0)
+      (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp 2)) :
+    verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams
+      (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk)
+      [UInt8.ofNat kp, UInt8.ofNat sub]
+      { rRand := zero32
+        msgTswCtr := 0
+        leafGlobalIdx := kp
+        forsOpenings := []
+        layerSigs := [⟨0, c0 :: c1 :: c2 :: List.replicate 125 crumb32,
+          authPathFromTbl (honestSlotHiLo sk) kp⟩] } = true := by
+  have hHonestVer : verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams
+      (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk)
+      [UInt8.ofNat kp, UInt8.ofNat sub] (honestMultiLeafSig sk kp sub) = true :=
+    prodSignQuery_verifies poly257MultiLeafSuite multiLeaf4JortsParams sk
+      ⟨[UInt8.ofNat kp, UInt8.ofNat sub], [], kp, 1⟩ (honestMultiLeafSig sk kp sub)
+      (prodSignQuery_poly257MultiLeaf_valid sk hkp hsub Nat.one_pos [])
+  have hChainsEq : c0 :: c1 :: c2 :: List.replicate 125 crumb32 =
+      (List.range 128).map (fun r =>
+        let dr := (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD r 0
+        wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0 dr
+          (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r)) := by
+    rw [range128_split3, List.map_cons, List.map_cons, List.map_cons, List.map_map, hc0, hc1, hc2]
+    congr 3
+    have hEach : ∀ k ∈ List.range 125,
+        ((fun r => wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp r 0
+          ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg sub)).getD r 0)
+          (wotsSecretBase poly257MultiLeafSuite sk 0 0 kp r)) ∘ (· + 3)) k = crumb32 := by
+      intro k hk
+      have hkLt : k < 125 := List.mem_range.mp hk
+      dsimp only [Function.comp_def]
+      rw [wotsSecretBase_eq, poly257MultiLeaf_thSecretPrf]
+      have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+      have hr32 : (UInt32.ofNat (k + 3)).toNat = k + 3 := u32_toNat_small (by omega)
+      have hNot : ¬ (kp < 4 ∧ k + 3 < 3) := by omega
+      simp only [hkp32, hr32, hNot, ↓reduceIte]
+      exact inactive_chain_steps_crumb sk.pkSeed hkp (by omega) (by omega) _ 0
+    exact ((List.map_congr_left hEach).trans (by decide)).symm
+  unfold honestMultiLeafSig at hHonestVer
+  rw [hChainsEq]
+  exact hHonestVer
+
+/-- **Unconditional Non-Vacuous `< 1` Multi-Query Adaptive Forger Bound
+    (`adaptiveMultiQueryExecEufCma_forger_bound`).**
+    Certifies simultaneously that on `poly257MultiLeafSuite` + `multiLeaf4JortsParams`:
+    1. `adaptive4LeafQueryForger` issues `4` admitted signing queries across leaves `0, 1, 2, 3`,
+       all `4` succeed in `productionSigningLog`, and an explicit key coin `z0` wins `ExecEufCmaGame`
+       (`winCount > 0`);
+    2. composing `adaptiveMultiQueryReductionEmbedding.forger_bound` with
+       `Spec.byteIdxHmsg_itsrHard_within`, `Spec.poly257Hash_smDtTcrHard_within`, and
+       `Spec.poly257Hash_smDtPreHard_within` yields the unconditional `< 1` bound `6 / 256`. -/
+theorem adaptiveMultiQueryExecEufCma_forger_bound :
+    let hPos : 0 < (256 * pow256 24) * 1 :=
+      Nat.mul_pos (Nat.mul_pos (by decide) (pow256_pos 24)) Nat.one_pos
+    let keygen := fun z : Fin ((256 * pow256 24) * 1) =>
+      multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z)
+    let adv := fun _ : Fin ((256 * pow256 24) * 1) => adaptive4LeafQueryForger
+    let z0 : Fin ((256 * pow256 24) * 1) :=
+      (Spec.CoinSplit.prod (256 * pow256 24) 1).pair
+        ((Spec.CoinSplit.prod 256 (pow256 24)).pair ⟨0, by decide⟩ (zeroVecCoin 24))
+        ⟨0, Nat.one_pos⟩
+    let o0 := execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams keygen adv z0
+    o0.queries.length = 4 ∧
+    (productionSigningLog poly257MultiLeafSuite multiLeaf4JortsParams o0.sk o0.queries).length = 4 ∧
+    (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams keygen adv).win z0 = true ∧
+    Spec.GameBound
+      (ExecEufCmaGame hPos poly257MultiLeafSuite multiLeaf4JortsParams keygen adv).winProb
+      (((⟨2, 256, by decide⟩ : Spec.RatBound).add ⟨2, 256, by decide⟩).add ⟨2, 256, by decide⟩) ∧
+    (((⟨2, 256, by decide⟩ : Spec.RatBound).add ⟨2, 256, by decide⟩).add ⟨2, 256, by decide⟩).lt
+      Spec.RatBound.one := by
+  intro hPos keygen adv z0 o0
+  have hSk0Seed : (keygen z0).skSeed.getD 10 0 = 0x00 := by
+    dsimp only [keygen, z0]
+    rw [(Spec.CoinSplit.prod (256 * pow256 24) 1).chal_pair, multiLeaf24Keygen.public_eqs]
+    dsimp only
+    rw [(Spec.CoinSplit.prod 256 (pow256 24)).advc_pair, byteVecSampler_zeroVecCoin 24]
+    decide
+  have hS0 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen z0) ⟨[0, 0], [], 0, 1⟩ =
+      some (honestMultiLeafSig (keygen z0) 0 0) :=
+    prodSignQuery_poly257MultiLeaf_valid (keygen z0) (by decide : 0 < 4) (by decide : 0 < 3) Nat.one_pos []
+  have hS1 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen z0) ⟨[1, 0], [], 1, 1⟩ =
+      some (honestMultiLeafSig (keygen z0) 1 0) :=
+    prodSignQuery_poly257MultiLeaf_valid (keygen z0) (by decide : 1 < 4) (by decide : 0 < 3) Nat.one_pos []
+  have hS2 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen z0) ⟨[2, 0], [], 2, 1⟩ =
+      some (honestMultiLeafSig (keygen z0) 2 0) :=
+    prodSignQuery_poly257MultiLeaf_valid (keygen z0) (by decide : 2 < 4) (by decide : 0 < 3) Nat.one_pos []
+  have hS3 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen z0) ⟨[3, 0], [], 3, 1⟩ =
+      some (honestMultiLeafSig (keygen z0) 3 0) :=
+    prodSignQuery_poly257MultiLeaf_valid (keygen z0) (by decide : 3 < 4) (by decide : 0 < 3) Nat.one_pos []
+  have hOutEq : o0 =
+      let lsig3 := (honestMultiLeafSig (keygen z0) 3 0).layerSigs.headD ⟨0, [], []⟩
+      let c0End := wotsChainSteps poly257MultiLeafSuite (keygen z0).pkSeed 0 0 3 0 0 3
+        (lsig3.wotsChains.getD 0 zero32)
+      let c2 := lsig3.wotsChains.getD 2 zero32
+      ⟨keygen z0,
+       [⟨[0, 0], [], 0, 1⟩, ⟨[1, 0], [], 1, 1⟩, ⟨[2, 0], [], 2, 1⟩, ⟨[3, 0], [], 3, 1⟩],
+       [3, 1],
+       { rRand := zero32
+         msgTswCtr := 0
+         leafGlobalIdx := 3
+         forsOpenings := []
+         layerSigs := [⟨0, c0End :: encodeStep0Secret 0x00 :: c2 :: List.replicate 125 crumb32,
+           lsig3.authPath⟩] }⟩ := by
+    change execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams keygen adv z0 = _
+    unfold execEufCmaOutcome
+    dsimp only [adv, adaptive4LeafQueryForger]
+    rw [derivePublicKey_poly257MultiLeaf (keygen z0)]
+    dsimp only [pkFromTbl]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 1))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 2))]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.le_refl 3)), hS3]
+    dsimp only
+    rw [evalLatched_stepChain3Adaptive]
+    rfl
+  have hLog4 : productionSigningLog poly257MultiLeafSuite multiLeaf4JortsParams o0.sk o0.queries =
+      [([0, 0], honestMultiLeafSig (keygen z0) 0 0),
+       ([1, 0], honestMultiLeafSig (keygen z0) 1 0),
+       ([2, 0], honestMultiLeafSig (keygen z0) 2 0),
+       ([3, 0], honestMultiLeafSig (keygen z0) 3 0)] := by
+    rw [hOutEq]
+    dsimp only
+    rw [productionSigningLog_cons, hS0, productionSigningLog_cons, hS1,
+      productionSigningLog_cons, hS2, productionSigningLog_cons, hS3, productionSigningLog_nil]
+    rfl
+  refine ⟨by rw [hOutEq]; rfl, by rw [hLog4]; rfl, ?_,
+    adaptiveMultiQueryReductionEmbedding.forger_bound
+      (Spec.byteIdxHmsg_itsrHard_within 1 1)
+      (Spec.poly257Hash_smDtTcrHard_within 2 1)
+      (Spec.poly257Hash_smDtPreHard_within 2 1),
+    by decide⟩
+  show prodEufCmaWin poly257MultiLeafSuite multiLeaf4JortsParams o0 = true
+  rw [prodEufCmaWin_eq, hLog4]
+  have hFresh : ([3, 1] : List UInt8) ∉
+      ([[0, 0], [1, 0], [2, 0], [3, 0]] : List (List UInt8)) := by decide
+  rw [hOutEq]
+  dsimp only [List.map]
+  refine Bool.and_eq_true_iff.mpr ⟨?_, decide_eq_true hFresh⟩
+  unfold honestMultiLeafSig
+  dsimp only [List.headD]
+  have hGet0 : ((List.range 128).map (fun r =>
+      wotsChainSteps poly257MultiLeafSuite (keygen z0).pkSeed 0 0 3 r 0
+        ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+        (wotsSecretBase poly257MultiLeafSuite (keygen z0) 0 0 3 r))).getD 0 zero32 =
+      wotsSecretBase poly257MultiLeafSuite (keygen z0) 0 0 3 0 := by
+    rw [list_getD_map_range 128 _ zero32 (by decide), encodeSubMsg3Hmsg_explicit_digits.1,
+      wotsChainSteps_zero]
+  have hGet2 : ((List.range 128).map (fun r =>
+      wotsChainSteps poly257MultiLeafSuite (keygen z0).pkSeed 0 0 3 r 0
+        ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+        (wotsSecretBase poly257MultiLeafSuite (keygen z0) 0 0 3 r))).getD 2 zero32 =
+      wotsSecretBase poly257MultiLeafSuite (keygen z0) 0 0 3 2 := by
+    rw [list_getD_map_range 128 _ zero32 (by decide), encodeSubMsg3Hmsg_explicit_digits.2.2.1,
+      wotsChainSteps_zero]
+  rw [hGet0, hGet2]
+  refine verify_assembled_leaf_sig (keygen z0) (by decide : 3 < 4) (by decide : 1 < 3) _ _ _ ?_ ?_ ?_
+  · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.1]
+  · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.1, wotsChainSteps_zero, wotsSecretBase_eq,
+      poly257MultiLeaf_thSecretPrf]
+    have hu3 : (UInt32.ofNat 3).toNat = 3 := rfl
+    have hu1 : (UInt32.ofNat 1).toNat = 1 := rfl
+    dsimp only
+    rw [hu3, hu1, ite_eq_left (by decide : 3 < 4 ∧ 1 < 3)]
+    exact congrArg encodeStep0Secret hSk0Seed.symm
+  · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.2.1, wotsChainSteps_zero]
+
+/-! #### Paired Refutation Tooth: Two Queries on an Unlatched Leaf Forge With Probability `1` -/
+
+/-- **Unlatched Same-Leaf Subset-Cover Forger (`unlatchedLeafReuseForger`).**
+    Issues two signing queries `[0, 0]` (digits `(0, 3, 0)`) and `[0, 1]` (digits `(3, 0, 0)`) at
+    `epoch = 0`, advances `sig₀.wotsChains[2]` by 3 `rawHash` steps, and assembles a valid
+    signature `(c₀, c₁, c₂_end)` on fresh message `[0, 2]` (digits `(0, 0, 3)`). -/
+def unlatchedLeafReuseForger : SeedWithheldEufCmaAdv 3 2 where
+  run pk :=
+    .signQuery ⟨[0, 0], [], 0, 1⟩ (fun sig0Opt =>
+      .signQuery ⟨[0, 1], [], 0, 1⟩ (fun sig1Opt =>
+        let lsig0 := match sig0Opt with
+          | some s => s.layerSigs.headD ⟨0, [], []⟩
+          | none => ⟨0, [], []⟩
+        let lsig1 := match sig1Opt with
+          | some s => s.layerSigs.headD ⟨0, [], []⟩
+          | none => ⟨0, [], []⟩
+        let c0 := lsig0.wotsChains.getD 0 zero32
+        let c1 := lsig1.wotsChains.getD 1 zero32
+        let c2 := lsig0.wotsChains.getD 2 zero32
+        stepChain3Adaptive pk.pkSeed 0 2 c2 (fun c2End =>
+          .pure ([0, 2],
+            { rRand := zero32
+              msgTswCtr := 0
+              leafGlobalIdx := 0
+              forsOpenings := []
+              layerSigs := [⟨0, c0 :: c1 :: c2End :: List.replicate 125 crumb32,
+                lsig0.authPath⟩] }))))
+  bounded _ := fun _ _ _ _ _ => trivial
+
+/-- **`#tooth` Removing `BeltLatch` Breaks EUF-CMA on `poly257MultiLeafSuite` With Probability `1`
+    (`tooth_poly257MultiLeaf_unlatched_reuse_forges`).**
+    Without the monotonic epoch latch (`latchOn = false`), `unlatchedLeafReuseForger` queries
+    `[0, 0]` and `[0, 1]` on leaf `0`, constructively assembles a valid WOTS+C signature on fresh
+    message `[0, 2]`, and wins `execEufCmaGameWith false` on EVERY coin `ω` across all
+    `256 * 256 ^ 24` keys (`winCount = n`, refuting both `6 / 256` and `24 / 256 < 1`), whereas
+    with `BeltLatch` enabled (`latchOn = true`) the second query at `epoch = 0` is refused. -/
+theorem tooth_poly257MultiLeaf_unlatched_reuse_forges :
+    ∃ (hPos : 0 < (256 * pow256 24) * 1) (adv : SeedWithheldEufCmaAdv 3 2),
+      (∀ ω : Fin ((256 * pow256 24) * 1),
+        (execEufCmaGameWith false hPos poly257MultiLeafSuite multiLeaf4JortsParams
+          (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z))
+          (fun _ => adv)).win ω = true) ∧
+      (∀ ω : Fin ((256 * pow256 24) * 1),
+        (execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams
+          (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z))
+          (fun _ => adv) ω).queries = [⟨[0, 0], [], 0, 1⟩]) ∧
+      ¬ Spec.GameBound
+          (execEufCmaGameWith false hPos poly257MultiLeafSuite multiLeaf4JortsParams
+            (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z))
+            (fun _ => adv)).winProb
+          (((⟨2, 256, by decide⟩ : Spec.RatBound).add ⟨2, 256, by decide⟩).add
+            ⟨2, 256, by decide⟩) ∧
+      ¬ Spec.GameBound
+          (execEufCmaGameWith false hPos poly257MultiLeafSuite multiLeaf4JortsParams
+            (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z))
+            (fun _ => adv)).winProb
+          (Spec.RatBound.scale 12 ⟨2, 256, by decide⟩) := by
+  let hPos : 0 < (256 * pow256 24) * 1 :=
+    Nat.mul_pos (Nat.mul_pos (by decide) (pow256_pos 24)) Nat.one_pos
+  let keygen := fun z : Fin ((256 * pow256 24) * 1) =>
+    multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z)
+  let adv := fun _ : Fin ((256 * pow256 24) * 1) => unlatchedLeafReuseForger
+  refine ⟨hPos, unlatchedLeafReuseForger, ?_⟩
+  have hForallWin : ∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaGameWith false hPos poly257MultiLeafSuite multiLeaf4JortsParams keygen adv).win ω =
+        true := by
+    intro ω
+    have hS0 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen ω) ⟨[0, 0], [], 0, 1⟩ =
+        some (honestMultiLeafSig (keygen ω) 0 0) :=
+      prodSignQuery_poly257MultiLeaf_valid (keygen ω) (by decide : 0 < 4) (by decide : 0 < 3) Nat.one_pos []
+    have hS1 : prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams (keygen ω) ⟨[0, 1], [], 0, 1⟩ =
+        some (honestMultiLeafSig (keygen ω) 0 1) :=
+      prodSignQuery_poly257MultiLeaf_valid (keygen ω) (by decide : 0 < 4) (by decide : 1 < 3) Nat.one_pos []
+    rw [execEufCmaGameWith_win]
+    have hOut : execEufCmaOutcome false poly257MultiLeafSuite multiLeaf4JortsParams keygen adv ω =
+        let lsig0 := (honestMultiLeafSig (keygen ω) 0 0).layerSigs.headD ⟨0, [], []⟩
+        let lsig1 := (honestMultiLeafSig (keygen ω) 0 1).layerSigs.headD ⟨0, [], []⟩
+        let c0 := lsig0.wotsChains.getD 0 zero32
+        let c1 := lsig1.wotsChains.getD 1 zero32
+        let c2End := wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 2 0 3
+          (lsig0.wotsChains.getD 2 zero32)
+        ⟨keygen ω, [⟨[0, 0], [], 0, 1⟩, ⟨[0, 1], [], 0, 1⟩], [0, 2],
+         { rRand := zero32
+           msgTswCtr := 0
+           leafGlobalIdx := 0
+           forsOpenings := []
+           layerSigs := [⟨0, c0 :: c1 :: c2End :: List.replicate 125 crumb32,
+             lsig0.authPath⟩] }⟩ := by
+      unfold execEufCmaOutcome
+      dsimp only [adv, unlatchedLeafReuseForger]
+      rw [derivePublicKey_poly257MultiLeaf (keygen ω)]
+      dsimp only [pkFromTbl]
+      rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inl rfl), hS0]
+      rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inl rfl), hS1]
+      dsimp only
+      rw [evalLatched_stepChain3Adaptive]
+      rfl
+    rw [hOut, prodEufCmaWin_eq]
+    dsimp only
+    rw [productionSigningLog_cons, hS0, productionSigningLog_cons, hS1, productionSigningLog_nil]
+    dsimp only [List.append, List.map]
+    have hFresh : ([0, 2] : List UInt8) ∉ ([[0, 0], [0, 1]] : List (List UInt8)) := by decide
+    refine Bool.and_eq_true_iff.mpr ⟨?_, decide_eq_true hFresh⟩
+    unfold honestMultiLeafSig
+    dsimp only [List.headD]
+    have hGet0 : ((List.range 128).map (fun r =>
+        wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+          ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+          (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).getD 0 zero32 =
+        wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 0 := by
+      rw [list_getD_map_range 128 _ zero32 (by decide), encodeSubMsg3Hmsg_explicit_digits.1,
+        wotsChainSteps_zero]
+    have hGet1 : ((List.range 128).map (fun r =>
+        wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+          ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 1)).getD r 0)
+          (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).getD 1 zero32 =
+        wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 1 := by
+      rw [list_getD_map_range 128 _ zero32 (by decide),
+        encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.1, wotsChainSteps_zero]
+    have hGet2 : ((List.range 128).map (fun r =>
+        wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+          ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+          (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).getD 2 zero32 =
+        wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 2 := by
+      rw [list_getD_map_range 128 _ zero32 (by decide), encodeSubMsg3Hmsg_explicit_digits.2.2.1,
+        wotsChainSteps_zero]
+    rw [hGet0, hGet1, hGet2]
+    refine verify_assembled_leaf_sig (keygen ω) (by decide : 0 < 4) (by decide : 2 < 3) _ _ _ ?_ ?_ ?_
+    · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.2.2.1, wotsChainSteps_zero]
+    · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.2.2.2.1, wotsChainSteps_zero]
+    · rw [encodeSubMsg3Hmsg_explicit_digits.2.2.2.2.2.2.2.2]
+  have hLatchedLog : ∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaOutcome true poly257MultiLeafSuite multiLeaf4JortsParams keygen adv ω).queries =
+        [⟨[0, 0], [], 0, 1⟩] := by
+    intro ω
+    dsimp only [execEufCmaOutcome, adv, unlatchedLeafReuseForger]
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+    have hRefuse : ¬ ((true = false) ∨ 1 ≤ 0) := fun h =>
+      h.elim (fun hb => Bool.noConfusion hb) (by decide)
+    rw [evalLatchedAdaptiveTree_sign, ite_eq_right hRefuse]
+    unfold stepChain3Adaptive
+    rfl
+  refine ⟨hForallWin, hLatchedLog,
+    Spec.FinGame.not_bound_of_forall_win _ hForallWin (by decide),
+    Spec.FinGame.not_bound_of_forall_win _ hForallWin (by decide)⟩
+
+/-- Joint inhabitedness witness for `poly257MultiLeaf_adaptive_forger_bound` with
+    `adaptive4LeafQueryForger` and `Spec.WithinPreQueries 2 1` at the proved `< 1` bound
+    `εPre = 2 / 256` (`12 · εPre = 24 / 256 < 1`). -/
+theorem inhabited_poly257MultiLeaf_adaptive_forger_bound :
+    ∃ (nA qHash qSign : Nat),
+      0 < (256 * pow256 24) * nA ∧
+      ∃ (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+        (candOf : Fin 12 → Fin (pow256 23 * nA) → Spec.Bytes),
+        (∀ (s : Fin 12) (c : Fin (pow256 23 * nA)) (pkSeed : List UInt8)
+            (endpt : UInt8 × UInt8),
+          let spAdv := Spec.CoinSplit.prod (pow256 23) nA
+          let other23 := byteVecSampler 23 (spAdv.chal c)
+          let pkSim := pkFromTbl pkSeed (puncturedSlotTbl pkSeed s endpt other23)
+          let simOut := (evalLatchedAdaptiveTree true poly257MultiLeafSuite.rawHash
+            (puncturedSignQuery pkSeed s endpt other23) ((adv (spAdv.advc c)).run pkSim) 0).1
+          simOut.2.leafGlobalIdx = s.1 / 3 →
+          extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+          extractSigChainCand simOut.2 (s.1 % 3) = candOf s c) ∧
+        ∃ εPre : Spec.RatBound,
+          Spec.SmDtPreHard (Spec.WithinPreQueries 2 1) Spec.poly257Hash 1 1 1 εPre :=
+  ⟨1, 3, 4, Nat.mul_pos (Nat.mul_pos (by decide) (pow256_pos 24)) Nat.one_pos,
+   fun _ => adaptive4LeafQueryForger,
+   fun _ _ => [0x00],
+   adaptive4Leaf_punctured_cand,
+   ⟨2, 256, by decide⟩,
+   Spec.poly257Hash_smDtPreHard_within 2 1⟩
 
 #verify_constructive
   Qsag.evalLatchedAdaptiveTree_log_increasing
@@ -2253,9 +4668,29 @@ private theorem poly257Hash_eq_of_hi_lo_eq (seed tweak cand₁ cand₂ : Spec.By
   Qsag.splitByteVecAt_getD_and_insert
   Qsag.multiLeaf4JortsParams_productionWellFormed
   Qsag.multiLeaf24Keygen_uniform
+  Qsag.decodeStep0Byte_encodeStep0Secret
   Qsag.encodeMsg3Hmsg_digits_valid
   Qsag.encodeMsg3Hmsg_incomparable
   Qsag.encodeMsg3Hmsg_has_zero_digit
+  Qsag.encodeSubMsg3Hmsg_incomparable
+  Qsag.encodeSubMsg3Hmsg_has_zero_digit
+  Qsag.derivePublicKey_poly257MultiLeaf
+  Qsag.poly257MultiLeaf_punctured_sim_sound
+  Qsag.multiLeafBoundedPreAdv_mem_within
+  Qsag.poly257MultiLeaf_adaptive_forger_bound
+  Qsag.poly257MultiLeaf_adaptive_forger_bound_concrete
+  Qsag.adaptiveMultiQueryExecEufCma_forger_bound
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+  Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+
+#verify_inhabited
+  Qsag.poly257MultiLeaf_adaptive_forger_bound
+  Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+
+#tooth_pair Qsag.poly257MultiLeaf_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.adaptiveMultiQueryExecEufCma_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
 
 end Qsag
 end
