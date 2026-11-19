@@ -3857,6 +3857,1073 @@ theorem AuthDeployment.wellFormed_unary {F C PK D Sig : Type} [LawfulField F]
 
 end UnaryCodec
 
+/-! ## 10. Multi-Epoch Base-4 WOTS+C (`target_sum = 12`) Wire-Serialized Share-Opening Custody (`E4a`)
+
+Instantiates `ShareOpeningDeployment` on a genuine multi-chain base-4 WOTS+C + height-`h` binary
+Merkle signature scheme (`base4WotsCMerkleSigScheme h H : SigScheme Base4WotsCPk Base4WotsCMasterSk Bytes`)
+across **arbitrary epochs `ep < 2 ^ h`** (for ANY Merkle height `h : Nat` and ANY 256-bit hash
+`H : Bytes → BitVec 256`), where:
+1. Signatures are **wire-serialized `Bytes`** (`Sig = Bytes`) encoding `epoch`, the `8` base-4
+   WOTS+C digits (`w = 4`, `4` message digits + `4` checksum digits), and `3` independent RSS slot
+   openings (each carrying `8` stepped 256-bit WOTS+C chain nodes + `h` 256-bit Merkle siblings).
+2. `verify` wire-deserializes `sigBytes : Bytes`, enforces `sig.epoch < 2 ^ pk.height`, verifies the
+   explicit WOTS+C constant-sum constraint `checkBase4TargetSum12 sig.digits = true` (`sum = 12`),
+   checks `sig.digits = wotsBase4Digits H sig.epoch msg`, and walks all `3` height-`h` Merkle
+   authentication paths from the recovered 8-chain WOTS+C leaves up to `(pk.root0, pk.root1, pk.root2)`.
+3. Each custodian holds only its 2-of-3 RSS seed pair and emits only per-epoch stepped `SlotWotsOpening`
+   contributions (`Contrib`); `assembleBase4WotsCSig` combines any 2-of-3 contributions into the
+   wire-serialized `Bytes` signature with **zero secret-key reconstruction**. -/
+
+section MultiEpochBase4WotsCMerkle
+
+/-- Self-delimiting unary header encoding for non-negative `Nat` metadata (`epoch`, lengths, digits). -/
+def encTagNat : Nat → Bytes
+  | 0 => [0x00]
+  | n + 1 => 0x01 :: encTagNat n
+
+/-- Stream parser paired with `encTagNat`. -/
+def decTagNat : Bytes → Option (Nat × Bytes)
+  | [] => none
+  | b :: rest =>
+    if b == 0x00 then some (0, rest)
+    else if b == 0x01 then
+      match decTagNat rest with
+      | none => none
+      | some (n, tail) => some (n + 1, tail)
+    else none
+
+theorem decTagNat_encTagNat : ∀ (n : Nat) (rest : Bytes),
+    decTagNat (encTagNat n ++ rest) = some (n, rest)
+  | 0, rest => rfl
+  | n + 1, rest => by
+    show decTagNat (0x01 :: (encTagNat n ++ rest)) = some (n + 1, rest)
+    unfold decTagNat
+    rw [sh_if_neg (by decide), sh_if_pos (by decide), decTagNat_encTagNat n rest]
+
+def encTagNatList : List Nat → Bytes
+  | [] => []
+  | d :: ds => encTagNat d ++ encTagNatList ds
+
+def decTagNatList : Nat → Bytes → Option (List Nat × Bytes)
+  | 0, bs => some ([], bs)
+  | k + 1, bs =>
+    match decTagNat bs with
+    | none => none
+    | some (d, r1) =>
+      match decTagNatList k r1 with
+      | none => none
+      | some (ds, r2) => some (d :: ds, r2)
+
+theorem decTagNatList_encTagNatList : ∀ (ds : List Nat) (rest : Bytes),
+    decTagNatList ds.length (encTagNatList ds ++ rest) = some (ds, rest)
+  | [], _ => rfl
+  | d :: ds, rest => by
+    show decTagNatList (ds.length + 1) ((encTagNat d ++ encTagNatList ds) ++ rest) = _
+    rw [List.append_assoc]
+    unfold decTagNatList
+    rw [decTagNat_encTagNat]
+    dsimp only
+    rw [decTagNatList_encTagNatList ds rest]
+
+/-- Fixed 32-byte big-endian serialization of a 256-bit digest (`BitVec 256`). -/
+def encBv256 (v : BitVec 256) : Bytes :=
+  be 32 v.toNat
+
+/-- Parse one 32-byte big-endian `BitVec 256` from a byte stream. -/
+def decBv256 (bs : Bytes) : Option (BitVec 256 × Bytes) :=
+  if bs.length < 32 then none
+  else some (BitVec.ofNat 256 (ofBE (bs.take 32)), bs.drop 32)
+
+private theorem bv256_toNat_lt_256_32 (v : BitVec 256) : v.toNat < 256 ^ 32 := by
+  have hPow : (2 : Nat) ^ 256 = 256 ^ 32 := by decide
+  rw [← hPow]
+  exact v.isLt
+
+theorem decBv256_encBv256 (v : BitVec 256) (rest : Bytes) :
+    decBv256 (encBv256 v ++ rest) = some (v, rest) := by
+  unfold decBv256 encBv256
+  have hLen32 : (be 32 v.toNat).length = 32 := length_be 32 v.toNat
+  have hNotLt : ¬ ((be 32 v.toNat ++ rest).length < 32) := by
+    rw [List.length_append, hLen32]; omega
+  rw [sh_if_neg hNotLt, List.take_left' hLen32, List.drop_left' hLen32,
+    ofBE_be (bv256_toNat_lt_256_32 v), BitVec.ofNat_toNat, BitVec.setWidth_eq]
+
+def encBv256List : List (BitVec 256) → Bytes
+  | [] => []
+  | v :: vs => encBv256 v ++ encBv256List vs
+
+def decBv256List : Nat → Bytes → Option (List (BitVec 256) × Bytes)
+  | 0, bs => some ([], bs)
+  | k + 1, bs =>
+    match decBv256 bs with
+    | none => none
+    | some (v, r1) =>
+      match decBv256List k r1 with
+      | none => none
+      | some (vs, r2) => some (v :: vs, r2)
+
+theorem decBv256List_encBv256List : ∀ (vs : List (BitVec 256)) (rest : Bytes),
+    decBv256List vs.length (encBv256List vs ++ rest) = some (vs, rest)
+  | [], _ => rfl
+  | v :: vs, rest => by
+    show decBv256List (vs.length + 1) ((encBv256 v ++ encBv256List vs) ++ rest) = _
+    rw [List.append_assoc]
+    unfold decBv256List
+    rw [decBv256_encBv256]
+    dsimp only
+    rw [decBv256List_encBv256List vs rest]
+
+/-- Extract `8` base-4 WOTS+C digits (`w = 4`, `4` message digits + `4` complement digits `3 - d_k`)
+    with constant sum `target_sum = 12`. -/
+def wotsBase4Digits (H : Bytes → BitVec 256) (ep : Nat) (msg : Bytes) : List Nat :=
+  let v := (H ([0x51, 0x53, 0x4D, 0x34] ++ encTagNat ep ++ msg)).toNat
+  let d0 := v % 4
+  let d1 := (v / 4) % 4
+  let d2 := (v / 16) % 4
+  let d3 := (v / 64) % 4
+  [d0, d1, d2, d3, 3 - d0, 3 - d1, 3 - d2, 3 - d3]
+
+/-- Explicit WOTS+C `target_sum = 12` check over `8` base-4 chains (`∀ d ∈ ds, d < 4` and `∑ d = 12`). -/
+def checkBase4TargetSum12 (ds : List Nat) : Bool :=
+  decide (ds.length = 8) &&
+  ds.all (fun d => decide (d < 4)) &&
+  decide (ds.foldl (· + ·) 0 = 12)
+
+end MultiEpochBase4WotsCMerkle
+
+#export_eqns Qsag.DistCustody.checkBase4TargetSum12
+
+section MultiEpochBase4WotsCMerkleBody
+
+theorem wotsBase4Digits_valid (H : Bytes → BitVec 256) (ep : Nat) (msg : Bytes) :
+    checkBase4TargetSum12 (wotsBase4Digits H ep msg) = true := by
+  unfold wotsBase4Digits checkBase4TargetSum12
+  generalize (H ([0x51, 0x53, 0x4D, 0x34] ++ encTagNat ep ++ msg)).toNat = v
+  rw [Bool.and_eq_true, Bool.and_eq_true]
+  refine ⟨⟨decide_eq_true rfl, ?_⟩, decide_eq_true ?_⟩
+  · simp only [List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨Nat.mod_lt _ (by decide), Nat.mod_lt _ (by decide), Nat.mod_lt _ (by decide),
+      Nat.mod_lt _ (by decide), by omega, by omega, by omega, by omega⟩
+  · dsimp only [List.foldl]
+    omega
+
+/-- Domain-separated PRF derivation of WOTS+C chain base `(slot, ep, chain)` from a slot seed. -/
+def wotsChainBase256 (H : Bytes → BitVec 256) (seed : BitVec 256) (slot ep chain : Nat) :
+    BitVec 256 :=
+  H ([0x51, 0x53, 0x42, UInt8.ofNat slot, UInt8.ofNat chain] ++ encTagNat ep ++ encBv256 seed)
+
+/-- Domain-separated tweakable WOTS+C chain step `(slot, ep, chain, step)`. -/
+def wotsStepAt256 (H : Bytes → BitVec 256) (slot ep chain step : Nat) (v : BitVec 256) :
+    BitVec 256 :=
+  H ([0x51, 0x53, 0x57, 0x04, UInt8.ofNat slot, UInt8.ofNat chain, UInt8.ofNat step] ++
+    encTagNat ep ++ encBv256 v)
+
+/-- Iterate `count` WOTS+C chain steps starting at step index `start`. -/
+def wotsStepsFrom256 (H : Bytes → BitVec 256) (slot ep chain : Nat) :
+    Nat → Nat → BitVec 256 → BitVec 256
+  | _, 0, v => v
+  | st, k + 1, v => wotsStepsFrom256 H slot ep chain (st + 1) k (wotsStepAt256 H slot ep chain st v)
+
+theorem wotsStepsFrom256_add (H : Bytes → BitVec 256) (slot ep chain : Nat) :
+    ∀ (a b st : Nat) (v : BitVec 256),
+      wotsStepsFrom256 H slot ep chain (st + a) b (wotsStepsFrom256 H slot ep chain st a v) =
+        wotsStepsFrom256 H slot ep chain st (a + b) v
+  | 0, b, st, v => by rw [Nat.add_zero, Nat.zero_add]; rfl
+  | a + 1, b, st, v => by
+    rw [Nat.succ_add]
+    have hSt : st + (a + 1) = (st + 1) + a := by omega
+    rw [hSt]
+    exact wotsStepsFrom256_add H slot ep chain a b (st + 1) (wotsStepAt256 H slot ep chain st v)
+
+/-- Compress the `8` base-4 WOTS+C chain endpoints into the epoch-`ep` Merkle leaf for `slot`. -/
+def compressSlotWotsLeaf (H : Bytes → BitVec 256) (slot ep : Nat) (ends : List (BitVec 256)) :
+    BitVec 256 :=
+  H ([0x51, 0x53, 0x4C, UInt8.ofNat slot] ++ encTagNat ep ++ encBv256List ends)
+
+/-- Honest epoch-`ep` WOTS+C leaf for `(seed, slot)` (`8` chains stepped `w - 1 = 3` times). -/
+def honestSlotWotsLeaf (H : Bytes → BitVec 256) (seed : BitVec 256) (slot ep : Nat) : BitVec 256 :=
+  compressSlotWotsLeaf H slot ep
+    ((List.range 8).map (fun c =>
+      wotsStepsFrom256 H slot ep c 0 3 (wotsChainBase256 H seed slot ep c)))
+
+/-- Domain-separated binary Merkle parent node at `(slot, lvl, idx)`. -/
+def merkleParent256 (H : Bytes → BitVec 256) (slot lvl idx : Nat) (l r : BitVec 256) :
+    BitVec 256 :=
+  H ([0x51, 0x53, 0x4E, UInt8.ofNat slot] ++ encTagNat lvl ++ encTagNat idx ++
+    encBv256 l ++ encBv256 r)
+
+/-- Compute subtree root at height `lvl` and node index `idx` over epochs `[idx * 2^lvl .. (idx+1)*2^lvl)`. -/
+def computeSlotMerkleNode (H : Bytes → BitVec 256) (seed : BitVec 256) (slot : Nat) :
+    Nat → Nat → BitVec 256
+  | 0, idx => honestSlotWotsLeaf H seed slot idx
+  | lvl + 1, idx =>
+    merkleParent256 H slot (lvl + 1) idx
+      (computeSlotMerkleNode H seed slot lvl (2 * idx))
+      (computeSlotMerkleNode H seed slot lvl (2 * idx + 1))
+
+/-- Build the top-down authentication path of length `lvl` for local leaf `localIdx < 2 ^ lvl`. -/
+def buildSlotAuthPath (H : Bytes → BitVec 256) (seed : BitVec 256) (slot : Nat) :
+    Nat → Nat → Nat → List (BitVec 256)
+  | 0, _, _ => []
+  | lvl + 1, nodeIdx, localIdx =>
+    let half := 2 ^ lvl
+    if localIdx < half then
+      computeSlotMerkleNode H seed slot lvl (2 * nodeIdx + 1) ::
+        buildSlotAuthPath H seed slot lvl (2 * nodeIdx) localIdx
+    else
+      computeSlotMerkleNode H seed slot lvl (2 * nodeIdx) ::
+        buildSlotAuthPath H seed slot lvl (2 * nodeIdx + 1) (localIdx - half)
+
+/-- Walk a length-`lvl` authentication path from `leafHash` at `localIdx` back to the subtree root. -/
+def walkSlotAuthPath (H : Bytes → BitVec 256) (slot : Nat) :
+    Nat → Nat → Nat → BitVec 256 → List (BitVec 256) → Option (BitVec 256)
+  | 0, _, _, leafHash, [] => some leafHash
+  | 0, _, _, _, _ :: _ => none
+  | _ + 1, _, _, _, [] => none
+  | lvl + 1, nodeIdx, localIdx, leafHash, sib :: rest =>
+    let half := 2 ^ lvl
+    if localIdx < half then
+      match walkSlotAuthPath H slot lvl (2 * nodeIdx) localIdx leafHash rest with
+      | none => none
+      | some sub => some (merkleParent256 H slot (lvl + 1) nodeIdx sub sib)
+    else
+      match walkSlotAuthPath H slot lvl (2 * nodeIdx + 1) (localIdx - half) leafHash rest with
+      | none => none
+      | some sub => some (merkleParent256 H slot (lvl + 1) nodeIdx sib sub)
+
+theorem buildSlotAuthPath_length (H : Bytes → BitVec 256) (seed : BitVec 256) (slot : Nat) :
+    ∀ (lvl nodeIdx localIdx : Nat),
+      (buildSlotAuthPath H seed slot lvl nodeIdx localIdx).length = lvl
+  | 0, _, _ => rfl
+  | lvl + 1, nodeIdx, localIdx => by
+    unfold buildSlotAuthPath
+    dsimp only
+    by_cases hLt : localIdx < 2 ^ lvl
+    · rw [sh_if_pos hLt, List.length_cons, buildSlotAuthPath_length H seed slot lvl]
+    · rw [sh_if_neg hLt, List.length_cons, buildSlotAuthPath_length H seed slot lvl]
+
+theorem walkSlotAuthPath_buildSlotAuthPath (H : Bytes → BitVec 256) (seed : BitVec 256)
+    (slot : Nat) :
+    ∀ (lvl nodeIdx localIdx : Nat),
+      localIdx < 2 ^ lvl →
+      walkSlotAuthPath H slot lvl nodeIdx localIdx
+        (honestSlotWotsLeaf H seed slot (nodeIdx * 2 ^ lvl + localIdx))
+        (buildSlotAuthPath H seed slot lvl nodeIdx localIdx) =
+        some (computeSlotMerkleNode H seed slot lvl nodeIdx)
+  | 0, nodeIdx, localIdx, hLt => by
+    have hZ : localIdx = 0 := by
+      rw [Nat.pow_zero] at hLt; omega
+    subst hZ
+    rw [Nat.pow_zero, Nat.mul_one, Nat.add_zero]
+    rfl
+  | lvl + 1, nodeIdx, localIdx, hLt => by
+    change walkSlotAuthPath H slot (lvl + 1) nodeIdx localIdx
+      (honestSlotWotsLeaf H seed slot (nodeIdx * 2 ^ (lvl + 1) + localIdx))
+      (buildSlotAuthPath H seed slot (lvl + 1) nodeIdx localIdx) =
+      some (merkleParent256 H slot (lvl + 1) nodeIdx
+        (computeSlotMerkleNode H seed slot lvl (2 * nodeIdx))
+        (computeSlotMerkleNode H seed slot lvl (2 * nodeIdx + 1)))
+    unfold buildSlotAuthPath walkSlotAuthPath
+    dsimp only
+    have hPowSucc : 2 ^ (lvl + 1) = 2 * 2 ^ lvl := by
+      rw [Nat.pow_succ]; omega
+    by_cases hHalf : localIdx < 2 ^ lvl
+    · rw [sh_if_pos hHalf]
+      dsimp only
+      rw [sh_if_pos hHalf]
+      have hIdxEq : nodeIdx * 2 ^ (lvl + 1) + localIdx = (2 * nodeIdx) * 2 ^ lvl + localIdx := by
+        rw [hPowSucc, ← Nat.mul_assoc, Nat.mul_comm nodeIdx 2]
+      rw [hIdxEq, walkSlotAuthPath_buildSlotAuthPath H seed slot lvl (2 * nodeIdx) localIdx hHalf]
+    · rw [sh_if_neg hHalf]
+      dsimp only
+      rw [sh_if_neg hHalf]
+      have hSubLt : localIdx - 2 ^ lvl < 2 ^ lvl := by omega
+      have hIdxEq : nodeIdx * 2 ^ (lvl + 1) + localIdx =
+          (2 * nodeIdx + 1) * 2 ^ lvl + (localIdx - 2 ^ lvl) := by
+        have hMul : nodeIdx * (2 * 2 ^ lvl) = (2 * nodeIdx) * 2 ^ lvl := by
+          rw [← Nat.mul_assoc, Nat.mul_comm nodeIdx 2]
+        rw [hPowSucc, hMul, Nat.add_mul, Nat.one_mul]
+        generalize (2 * nodeIdx) * 2 ^ lvl = base at *
+        generalize 2 ^ lvl = pw at *
+        omega
+      rw [hIdxEq, walkSlotAuthPath_buildSlotAuthPath H seed slot lvl (2 * nodeIdx + 1)
+        (localIdx - 2 ^ lvl) hSubLt]
+
+/-- Per-slot WOTS+C opening at one epoch: `8` stepped 256-bit chain nodes + `h` Merkle siblings. -/
+structure SlotWotsOpening where
+  chains : List (BitVec 256)
+  authPath : List (BitVec 256)
+  deriving DecidableEq, Repr
+
+/-- Decoded multi-epoch base-4 WOTS+C signature across the `3` RSS slots. -/
+structure MultiEpochWotsCSig where
+  epoch : Nat
+  digits : List Nat
+  slot0 : SlotWotsOpening
+  slot1 : SlotWotsOpening
+  slot2 : SlotWotsOpening
+  deriving DecidableEq, Repr
+
+def encSlotWotsOpening (op : SlotWotsOpening) : Bytes :=
+  encTagNat op.chains.length ++ encBv256List op.chains ++
+  encTagNat op.authPath.length ++ encBv256List op.authPath
+
+def decSlotWotsOpening (bs : Bytes) : Option (SlotWotsOpening × Bytes) :=
+  match decTagNat bs with
+  | none => none
+  | some (nCh, r1) =>
+    match decBv256List nCh r1 with
+    | none => none
+    | some (chains, r2) =>
+      match decTagNat r2 with
+      | none => none
+      | some (nPath, r3) =>
+        match decBv256List nPath r3 with
+        | none => none
+        | some (authPath, r4) => some (⟨chains, authPath⟩, r4)
+
+theorem decSlotWotsOpening_encSlotWotsOpening (op : SlotWotsOpening) (rest : Bytes) :
+    decSlotWotsOpening (encSlotWotsOpening op ++ rest) = some (op, rest) := by
+  rcases op with ⟨chains, authPath⟩
+  unfold encSlotWotsOpening decSlotWotsOpening
+  dsimp only
+  simp only [List.append_assoc]
+  rw [decTagNat_encTagNat]
+  dsimp only
+  rw [decBv256List_encBv256List]
+  dsimp only
+  rw [decTagNat_encTagNat]
+  dsimp only
+  rw [decBv256List_encBv256List]
+
+/-- Canonical wire serialization (`Sig = Bytes`) of a multi-epoch base-4 WOTS+C signature. -/
+def encodeMultiEpochWotsCSig (sig : MultiEpochWotsCSig) : Bytes :=
+  0x57 :: (encTagNat sig.epoch ++
+    (encTagNat sig.digits.length ++
+      (encTagNatList sig.digits ++
+        (encSlotWotsOpening sig.slot0 ++
+          (encSlotWotsOpening sig.slot1 ++ encSlotWotsOpening sig.slot2)))))
+
+/-- Canonical wire deserialization (`Bytes → Option MultiEpochWotsCSig`) requiring exact framing (`r6 = []`). -/
+def decodeMultiEpochWotsCSig : Bytes → Option MultiEpochWotsCSig
+  | [] => none
+  | tag :: r0 =>
+    if tag == 0x57 then
+      match decTagNat r0 with
+      | none => none
+      | some (ep, r1) =>
+        match decTagNat r1 with
+        | none => none
+        | some (nDig, r2) =>
+          match decTagNatList nDig r2 with
+          | none => none
+          | some (digits, r3) =>
+            match decSlotWotsOpening r3 with
+            | none => none
+            | some (s0, r4) =>
+              match decSlotWotsOpening r4 with
+              | none => none
+              | some (s1, r5) =>
+                match decSlotWotsOpening r5 with
+                | none => none
+                | some (s2, r6) =>
+                  if r6.isEmpty then some ⟨ep, digits, s0, s1, s2⟩ else none
+    else none
+
+theorem decodeMultiEpochWotsCSig_encodeMultiEpochWotsCSig (sig : MultiEpochWotsCSig) :
+    decodeMultiEpochWotsCSig (encodeMultiEpochWotsCSig sig) = some sig := by
+  rcases sig with ⟨ep, digits, s0, s1, s2⟩
+  unfold encodeMultiEpochWotsCSig decodeMultiEpochWotsCSig
+  simp only [(by decide : ((0x57 : UInt8) == 0x57) = true), ↓reduceIte]
+  rw [decTagNat_encTagNat]
+  dsimp only
+  rw [decTagNat_encTagNat]
+  dsimp only
+  rw [decTagNatList_encTagNatList]
+  dsimp only
+  rw [decSlotWotsOpening_encSlotWotsOpening]
+  dsimp only
+  rw [decSlotWotsOpening_encSlotWotsOpening]
+  dsimp only
+  have hS2Nil : encSlotWotsOpening s2 = encSlotWotsOpening s2 ++ [] := (List.append_nil _).symm
+  rw [hS2Nil, decSlotWotsOpening_encSlotWotsOpening]
+  rfl
+
+/-- Step all `8` base-4 WOTS+C chains for `slot` at epoch `ep` and build the height-`h` Merkle path. -/
+def buildSlotWotsOpening (H : Bytes → BitVec 256) (h : Nat) (seed : BitVec 256) (slot ep : Nat)
+    (digits : List Nat) : SlotWotsOpening where
+  chains := (List.range 8).map (fun c =>
+    wotsStepsFrom256 H slot ep c 0 (digits.getD c 0) (wotsChainBase256 H seed slot ep c))
+  authPath := buildSlotAuthPath H seed slot h 0 ep
+
+/-- Recover the compressed WOTS+C leaf and verify its height-`h` Merkle authentication path to `root`. -/
+def verifySlotWotsOpening (H : Bytes → BitVec 256) (h : Nat) (root : BitVec 256)
+    (slot ep : Nat) (digits : List Nat) (op : SlotWotsOpening) : Bool :=
+  decide (op.chains.length = 8) &&
+  decide (op.authPath.length = h) &&
+  let recEnds := (List.range 8).map (fun c =>
+    let d := digits.getD c 0
+    wotsStepsFrom256 H slot ep c d (3 - d) (op.chains.getD c 0#256))
+  let recLeaf := compressSlotWotsLeaf H slot ep recEnds
+  decide (walkSlotAuthPath H slot h 0 ep recLeaf op.authPath = some root)
+
+private theorem list_getD_map_range8 {α : Type} (f : Nat → α) (dflt : α) (c : Nat)
+    (hc : c < 8) : ((List.range 8).map f).getD c dflt = f c := by
+  have hCases : c = 0 ∨ c = 1 ∨ c = 2 ∨ c = 3 ∨ c = 4 ∨ c = 5 ∨ c = 6 ∨ c = 7 := by omega
+  rcases hCases with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> rfl
+
+private theorem getD_lt4_of_checkBase4TargetSum12 {digits : List Nat}
+    (hValid : checkBase4TargetSum12 digits = true) (c : Nat) (hc : c < 8) :
+    digits.getD c 0 < 4 := by
+  unfold checkBase4TargetSum12 at hValid
+  rw [Bool.and_eq_true, Bool.and_eq_true] at hValid
+  have hLen : digits.length = 8 := of_decide_eq_true hValid.1.1
+  have hAll := List.all_eq_true.mp hValid.1.2
+  have hcLt : c < digits.length := hLen ▸ hc
+  have hMem : digits[c] ∈ digits := List.getElem_mem hcLt
+  have hElem : digits.getD c 0 = digits[c] := by
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hcLt]; rfl
+  rw [hElem]
+  exact of_decide_eq_true (hAll digits[c] hMem)
+
+theorem verifySlotWotsOpening_buildSlotWotsOpening (H : Bytes → BitVec 256) (h : Nat)
+    (seed : BitVec 256) (slot ep : Nat) (digits : List Nat)
+    (hEp : ep < 2 ^ h) (hValid : checkBase4TargetSum12 digits = true) :
+    verifySlotWotsOpening H h (computeSlotMerkleNode H seed slot h 0) slot ep digits
+      (buildSlotWotsOpening H h seed slot ep digits) = true := by
+  unfold verifySlotWotsOpening buildSlotWotsOpening
+  dsimp only
+  have hChLen : ((List.range 8).map (fun c =>
+      wotsStepsFrom256 H slot ep c 0 (digits.getD c 0)
+        (wotsChainBase256 H seed slot ep c))).length = 8 := by
+    rw [List.length_map, List.length_range]
+  have hPathLen : (buildSlotAuthPath H seed slot h 0 ep).length = h :=
+    buildSlotAuthPath_length H seed slot h 0 ep
+  have hEndsEq : (List.range 8).map (fun c =>
+      let d := digits.getD c 0
+      wotsStepsFrom256 H slot ep c d (3 - d)
+        (((List.range 8).map (fun c' =>
+          wotsStepsFrom256 H slot ep c' 0 (digits.getD c' 0)
+            (wotsChainBase256 H seed slot ep c'))).getD c 0#256)) =
+      (List.range 8).map (fun c =>
+        wotsStepsFrom256 H slot ep c 0 3 (wotsChainBase256 H seed slot ep c)) := by
+    apply List.map_congr_left
+    intro c hcMem
+    have hc : c < 8 := List.mem_range.mp hcMem
+    rw [list_getD_map_range8 _ 0#256 c hc]
+    dsimp only
+    have hd4 : digits.getD c 0 < 4 := getD_lt4_of_checkBase4TargetSum12 hValid c hc
+    have hZAdd : digits.getD c 0 = 0 + digits.getD c 0 := (Nat.zero_add _).symm
+    have hAdd3 : digits.getD c 0 + (3 - digits.getD c 0) = 3 := by omega
+    conv => lhs; arg 5; rw [hZAdd]
+    rw [wotsStepsFrom256_add, hAdd3]
+  rw [decide_eq_true hChLen, decide_eq_true hPathLen, Bool.true_and, Bool.true_and, hEndsEq]
+  have hWalk := walkSlotAuthPath_buildSlotAuthPath H seed slot h 0 ep hEp
+  rw [Nat.zero_mul, Nat.zero_add] at hWalk
+  exact decide_eq_true hWalk
+
+/-- Public key of `base4WotsCMerkleSigScheme`: tree height `h` + the `3` height-`h` Merkle roots. -/
+structure Base4WotsCPk where
+  height : Nat
+  root0 : BitVec 256
+  root1 : BitVec 256
+  root2 : BitVec 256
+  deriving DecidableEq, Repr
+
+/-- Master secret key (`3` independent 256-bit slot seeds; NEVER reconstructed or held by one party!). -/
+structure Base4WotsCMasterSk where
+  s0 : BitVec 256
+  s1 : BitVec 256
+  s2 : BitVec 256
+  deriving DecidableEq, Repr
+
+/-- **Multi-Epoch Base-4 WOTS+C (`target_sum = 12`) + Height-`h` Merkle `Spec.SigScheme`
+    (`base4WotsCMerkleSigScheme`, `Sig = Bytes`)**:
+    Parameterized over ANY Merkle height `h : Nat` (`2 ^ h` epochs) and ANY 256-bit hash
+    `H : Bytes → BitVec 256`. Signatures are canonical wire-serialized `Bytes`. -/
+def base4WotsCMerkleSigScheme (h : Nat) (H : Bytes → BitVec 256) :
+    SigScheme Base4WotsCPk Base4WotsCMasterSk Bytes where
+  derivePk sk :=
+    { height := h
+      root0 := computeSlotMerkleNode H sk.s0 0 h 0
+      root1 := computeSlotMerkleNode H sk.s1 1 h 0
+      root2 := computeSlotMerkleNode H sk.s2 2 h 0 }
+  sign sk ep msg :=
+    if ep < 2 ^ h then
+      let digits := wotsBase4Digits H ep msg
+      some (encodeMultiEpochWotsCSig
+        { epoch := ep
+          digits := digits
+          slot0 := buildSlotWotsOpening H h sk.s0 0 ep digits
+          slot1 := buildSlotWotsOpening H h sk.s1 1 ep digits
+          slot2 := buildSlotWotsOpening H h sk.s2 2 ep digits })
+    else none
+  verify pk msg sigBytes :=
+    match decodeMultiEpochWotsCSig sigBytes with
+    | none => false
+    | some sig =>
+      decide (sig.epoch < 2 ^ pk.height) &&
+      checkBase4TargetSum12 sig.digits &&
+      decide (sig.digits = wotsBase4Digits H sig.epoch msg) &&
+      verifySlotWotsOpening H pk.height pk.root0 0 sig.epoch sig.digits sig.slot0 &&
+      verifySlotWotsOpening H pk.height pk.root1 1 sig.epoch sig.digits sig.slot1 &&
+      verifySlotWotsOpening H pk.height pk.root2 2 sig.epoch sig.digits sig.slot2
+  correct sk ep msg sigBytes hSign := by
+    dsimp only at hSign ⊢
+    by_cases hEp : ep < 2 ^ h
+    · rw [sh_if_pos hEp] at hSign
+      injection hSign with hEq
+      subst hEq
+      rw [decodeMultiEpochWotsCSig_encodeMultiEpochWotsCSig]
+      dsimp only
+      have hVal := wotsBase4Digits_valid H ep msg
+      rw [decide_eq_true hEp, hVal, decide_eq_true rfl,
+        verifySlotWotsOpening_buildSlotWotsOpening H h sk.s0 0 ep _ hEp hVal,
+        verifySlotWotsOpening_buildSlotWotsOpening H h sk.s1 1 ep _ hEp hVal,
+        verifySlotWotsOpening_buildSlotWotsOpening H h sk.s2 2 ep _ hEp hVal]
+      rfl
+    · rw [sh_if_neg hEp] at hSign
+      cases hSign
+
+/-- `(2, 3)` replicated custodian share: holds ONLY `2` of the `3` 256-bit slot seeds. -/
+abbrev Base4CustodianShare := (Fin 3 × BitVec 256) × (Fin 3 × BitVec 256)
+
+/-- Per-epoch share-opening contribution: stepped WOTS+C + Merkle openings for `2` slots (NO raw seeds!). -/
+abbrev Base4ShareContrib := Option ((Fin 3 × SlotWotsOpening) × (Fin 3 × SlotWotsOpening))
+
+/-- Canonical digest type `(deploymentId, CustodyIntent)` for share-opening deployments. -/
+abbrev MultiEpochDigest := Nat × CustodyIntent
+
+/-- Framed byte encoding of `(deploymentId, CustodyIntent)`. -/
+def encodeMultiEpochDigest (d : MultiEpochDigest) : Bytes :=
+  encTagNat d.1 ++ encTagNat d.2.sessionId ++ encTagNat d.2.round ++
+    encTagNat d.2.epoch ++ encTagNat d.2.spend ++ encTagNat d.2.payload.length ++ d.2.payload
+
+def encBase4ShareContrib : Base4ShareContrib → Bytes
+  | none => [0x00]
+  | some ((iA, opA), (iB, opB)) =>
+    0x01 :: (encTagNat iA.val ++ (encSlotWotsOpening opA ++
+      (encTagNat iB.val ++ encSlotWotsOpening opB)))
+
+def decBase4ShareContrib : Bytes → Option (Base4ShareContrib × Bytes)
+  | [] => none
+  | tag :: r0 =>
+    if tag == 0x00 then some (none, r0)
+    else if tag == 0x01 then
+      match decTagNat r0 with
+      | none => none
+      | some (vA, r1) =>
+        if hA : vA < 3 then
+          match decSlotWotsOpening r1 with
+          | none => none
+          | some (opA, r2) =>
+            match decTagNat r2 with
+            | none => none
+            | some (vB, r3) =>
+              if hB : vB < 3 then
+                match decSlotWotsOpening r3 with
+                | none => none
+                | some (opB, r4) => some (some ((⟨vA, hA⟩, opA), (⟨vB, hB⟩, opB)), r4)
+              else none
+        else none
+    else none
+
+theorem decBase4ShareContrib_encBase4ShareContrib (c : Base4ShareContrib) :
+    decBase4ShareContrib (encBase4ShareContrib c) = some (c, []) := by
+  cases c with
+  | none => rfl
+  | some pair =>
+    rcases pair with ⟨⟨iA, opA⟩, ⟨iB, opB⟩⟩
+    unfold encBase4ShareContrib decBase4ShareContrib
+    dsimp only
+    rw [sh_if_neg (by decide : ¬ ((0x01 : UInt8) == 0x00) = true),
+      sh_if_pos (by decide : ((0x01 : UInt8) == 0x01) = true)]
+    rw [decTagNat_encTagNat]
+    dsimp only
+    rw [dite_eq_left iA.isLt, decSlotWotsOpening_encSlotWotsOpening]
+    dsimp only
+    rw [decTagNat_encTagNat]
+    dsimp only
+    have hOpBNil : encSlotWotsOpening opB = encSlotWotsOpening opB ++ [] := (List.append_nil _).symm
+    rw [dite_eq_left iB.isLt, hOpBNil, decSlotWotsOpening_encSlotWotsOpening]
+
+/-- Length-framed 256-bit commitment preimage binding `(p, d, i)` and `c : Base4ShareContrib`. -/
+def encodeBase4SharePreimage (p d : Nat) (i : CustodyIntent) (c : Base4ShareContrib) : Bytes :=
+  (encTagNat p ++ encTagNat d ++ encTagNat i.sessionId ++ encTagNat i.round ++
+    encTagNat i.epoch ++ encTagNat i.spend ++ encTagNat i.payload.length ++ i.payload) ++
+    encBase4ShareContrib c
+
+theorem encodeBase4SharePreimage_framed (p d : Nat) (i : CustodyIntent)
+    (c₁ c₂ : Base4ShareContrib)
+    (h : encodeBase4SharePreimage p d i c₁ = encodeBase4SharePreimage p d i c₂) : c₁ = c₂ := by
+  have hEnc := List.append_cancel_left h
+  have hDec := congrArg decBase4ShareContrib hEnc
+  rw [decBase4ShareContrib_encBase4ShareContrib, decBase4ShareContrib_encBase4ShareContrib] at hDec
+  injection hDec with hPair
+  exact (Prod.mk.inj hPair).1
+
+def dealBase4RssShare (sk : Base4WotsCMasterSk) : Nat → Base4CustodianShare
+  | 0 => ((⟨1, by decide⟩, sk.s1), (⟨2, by decide⟩, sk.s2))
+  | 1 => ((⟨0, by decide⟩, sk.s0), (⟨2, by decide⟩, sk.s2))
+  | _ => ((⟨0, by decide⟩, sk.s0), (⟨1, by decide⟩, sk.s1))
+
+def base4SlotSeed (sk : Base4WotsCMasterSk) (slot : Fin 3) : BitVec 256 :=
+  match slot.val with
+  | 0 => sk.s0
+  | 1 => sk.s1
+  | _ => sk.s2
+
+def evalBase4Contrib (h : Nat) (H : Bytes → BitVec 256) (_p : Nat)
+    (sh : Base4CustodianShare) (d : Nat) (i : CustodyIntent) : Base4ShareContrib :=
+  if i.epoch < 2 ^ h then
+    let msg := encodeMultiEpochDigest (d, i)
+    let digits := wotsBase4Digits H i.epoch msg
+    some ((sh.1.1, buildSlotWotsOpening H h sh.1.2 sh.1.1.val i.epoch digits),
+          (sh.2.1, buildSlotWotsOpening H h sh.2.2 sh.2.1.val i.epoch digits))
+  else none
+
+def findBase4SlotOpening (slot : Fin 3) :
+    List (Nat × Base4ShareContrib) → Option SlotWotsOpening
+  | [] => none
+  | (_, none) :: rest => findBase4SlotOpening slot rest
+  | (_, some ((iA, opA), (iB, opB))) :: rest =>
+    if iA.val == slot.val then some opA
+    else if iB.val == slot.val then some opB
+    else findBase4SlotOpening slot rest
+
+/-- Public combiner: assembles wire-serialized `Bytes` signature across `ep < 2 ^ h` with ZERO `SK` reconstruction! -/
+def assembleBase4WotsCSig (h : Nat) (H : Bytes → BitVec 256)
+    (contribs : List (Nat × Base4ShareContrib)) (ep : Nat) (dig : MultiEpochDigest) :
+    Option Bytes :=
+  if ep < 2 ^ h then
+    let digits := wotsBase4Digits H ep (encodeMultiEpochDigest dig)
+    match findBase4SlotOpening ⟨0, by decide⟩ contribs,
+          findBase4SlotOpening ⟨1, by decide⟩ contribs,
+          findBase4SlotOpening ⟨2, by decide⟩ contribs with
+    | some s0, some s1, some s2 =>
+      some (encodeMultiEpochWotsCSig ⟨ep, digits, s0, s1, s2⟩)
+    | _, _, _ => none
+  else none
+
+/-- Canonical 2-of-3 quorum profile (`numParties = 3, threshold = 2`). -/
+def base4TwoOfThreeQuorum (spendCap : Nat) : CustodyQuorumProfile where
+  numParties := 3
+  threshold := 2
+  spendCap := spendCap
+  h_pos := by decide
+  h_le := by decide
+
+/-- **Concrete Multi-Epoch Base-4 WOTS+C (`target_sum = 12`) Share-Opening Deployment (`mkBase4WotsCShareDep`, `E4a`)**:
+    Parameterized over ANY Merkle height `h : Nat` (`2 ^ h` epochs), ANY 256-bit hash
+    `H : Bytes → BitVec 256`, spend cap `spendCap`, deployment ID `depId`, and master key `sk`. -/
+def mkBase4WotsCShareDep (h : Nat) (H : Bytes → BitVec 256) (sk : Base4WotsCMasterSk)
+    (depId : Nat := 7) (spendCap : Nat := 100) :
+    ShareOpeningDeployment Base4CustodianShare Base4ShareContrib Bytes
+      Base4WotsCPk Base4WotsCMasterSk MultiEpochDigest Bytes where
+  deploymentId := depId
+  quorum := base4TwoOfThreeQuorum spendCap
+  sigScheme := base4WotsCMerkleSigScheme h H
+  dealtSk := sk
+  fallbackSig := []
+  digests := CustodyDigestScheme.transparent
+  encodeDigest := encodeMultiEpochDigest
+  epochOfDigest d := d.2.epoch
+  dealShare := dealBase4RssShare sk
+  evalContrib := evalBase4Contrib h H
+  assembleSig := assembleBase4WotsCSig h H
+  preimageOf := encodeBase4SharePreimage
+  commit := H
+  commitmentOf p d i :=
+    H (encodeBase4SharePreimage p d i (evalBase4Contrib h H p (dealBase4RssShare sk p) d i))
+
+private theorem findBase4SlotOpening_sound (H : Bytes → BitVec 256) (h : Nat) (slot : Fin 3)
+    (sk : Base4WotsCMasterSk) (ep : Nat) (digits : List Nat) :
+    ∀ (ps : List Nat), (∀ p ∈ ps, p < 3) →
+      (∃ p ∈ ps, (dealBase4RssShare sk p).1.1 = slot ∨ (dealBase4RssShare sk p).2.1 = slot) →
+      findBase4SlotOpening slot
+        (ps.map (fun p => (p, some (((dealBase4RssShare sk p).1.1,
+            buildSlotWotsOpening H h (dealBase4RssShare sk p).1.2
+              (dealBase4RssShare sk p).1.1.val ep digits),
+          ((dealBase4RssShare sk p).2.1,
+            buildSlotWotsOpening H h (dealBase4RssShare sk p).2.2
+              (dealBase4RssShare sk p).2.1.val ep digits))))) =
+        some (buildSlotWotsOpening H h (base4SlotSeed sk slot) slot.val ep digits)
+  | [], _, ⟨_, hm, _⟩ => absurd hm List.not_mem_nil
+  | p :: rest, hLt, hCov => by
+    have hp3 : p < 3 := hLt p List.mem_cons_self
+    have hpCases : p = 0 ∨ p = 1 ∨ p = 2 := by omega
+    have hSlotCases : slot = ⟨0, by decide⟩ ∨ slot = ⟨1, by decide⟩ ∨ slot = ⟨2, by decide⟩ := by
+      rcases slot with ⟨sv, hsv⟩
+      have hsc : sv = 0 ∨ sv = 1 ∨ sv = 2 := by omega
+      rcases hsc with rfl | rfl | rfl
+      · exact .inl rfl
+      · exact .inr (.inl rfl)
+      · exact .inr (.inr rfl)
+    rcases hpCases with rfl | rfl | rfl <;> rcases hSlotCases with rfl | rfl | rfl
+    · change findBase4SlotOpening ⟨0, by decide⟩ _ = _
+      refine findBase4SlotOpening_sound H h ⟨0, by decide⟩ sk ep digits rest
+        (fun q hq => hLt q (List.mem_cons_of_mem _ hq)) ?_
+      obtain ⟨q, hqM, hqS⟩ := hCov
+      rcases List.mem_cons.mp hqM with rfl | hTail
+      · simp [dealBase4RssShare] at hqS
+      · exact ⟨q, hTail, hqS⟩
+    · rfl
+    · rfl
+    · rfl
+    · change findBase4SlotOpening ⟨1, by decide⟩ _ = _
+      refine findBase4SlotOpening_sound H h ⟨1, by decide⟩ sk ep digits rest
+        (fun q hq => hLt q (List.mem_cons_of_mem _ hq)) ?_
+      obtain ⟨q, hqM, hqS⟩ := hCov
+      rcases List.mem_cons.mp hqM with rfl | hTail
+      · simp [dealBase4RssShare] at hqS
+      · exact ⟨q, hTail, hqS⟩
+    · rfl
+    · rfl
+    · rfl
+    · change findBase4SlotOpening ⟨2, by decide⟩ _ = _
+      refine findBase4SlotOpening_sound H h ⟨2, by decide⟩ sk ep digits rest
+        (fun q hq => hLt q (List.mem_cons_of_mem _ hq)) ?_
+      obtain ⟨q, hqM, hqS⟩ := hCov
+      rcases List.mem_cons.mp hqM with rfl | hTail
+      · simp [dealBase4RssShare] at hqS
+      · exact ⟨q, hTail, hqS⟩
+
+private theorem base4_two_of_three_covers_slot (sk : Base4WotsCMasterSk) {ps : List Nat}
+    (hNd : ps.Nodup) (hLt : ∀ p ∈ ps, p < 3) (hLen : 2 ≤ ps.length) (slot : Fin 3) :
+    ∃ p ∈ ps, (dealBase4RssShare sk p).1.1 = slot ∨
+      (dealBase4RssShare sk p).2.1 = slot := by
+  cases ps with
+  | nil => cases hLen
+  | cons p0 tail =>
+    cases tail with
+    | nil => cases (Nat.not_succ_le_zero 0 (Nat.le_of_succ_le_succ hLen))
+    | cons p1 _ =>
+      have hp0 : p0 < 3 := hLt p0 List.mem_cons_self
+      have hp1 : p1 < 3 := hLt p1 (List.mem_cons_of_mem _ List.mem_cons_self)
+      have hNe : p0 ≠ p1 := fun h => (List.nodup_cons.mp hNd).1 (h ▸ List.mem_cons_self)
+      have hC0 : p0 = 0 ∨ p0 = 1 ∨ p0 = 2 := by omega
+      have hC1 : p1 = 0 ∨ p1 = 1 ∨ p1 = 2 := by omega
+      have hCS : slot = ⟨0, by decide⟩ ∨ slot = ⟨1, by decide⟩ ∨ slot = ⟨2, by decide⟩ := by
+        rcases slot with ⟨sv, hsv⟩
+        have hsc : sv = 0 ∨ sv = 1 ∨ sv = 2 := by omega
+        rcases hsc with rfl | rfl | rfl
+        · exact .inl rfl
+        · exact .inr (.inl rfl)
+        · exact .inr (.inr rfl)
+      rcases hC0 with rfl | rfl | rfl <;> rcases hC1 with rfl | rfl | rfl
+      · exact False.elim (hNe rfl)
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · exact False.elim (hNe rfl)
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · rcases hCS with rfl | rfl | rfl <;>
+          first
+          | exact ⟨_, List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_self, .inr rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inl rfl⟩
+          | exact ⟨_, List.mem_cons_of_mem _ List.mem_cons_self, .inr rfl⟩
+      · exact False.elim (hNe rfl)
+
+/-- **`mkBase4WotsCShareDep` satisfies `ShareOpeningDeployment.WellFormed` for ALL Merkle heights `h : Nat`,
+    ALL 256-bit hashes `H : Bytes → BitVec 256`, and ALL master keys `sk` (`0 Classical.choice`).** -/
+theorem mkBase4WotsCShareDep_wellFormed (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (depId spendCap : Nat) :
+    (mkBase4WotsCShareDep h H sk depId spendCap).WellFormed where
+  epoch_digest _ := rfl
+  preimage_framed := encodeBase4SharePreimage_framed
+  commitments_dealt _ _ _ := rfl
+  assemble_dealt approvers i hNd hEnr hThr := by
+    dsimp only [mkBase4WotsCShareDep, ShareOpeningDeployment.trueContrib, evalBase4Contrib,
+      assembleBase4WotsCSig, base4WotsCMerkleSigScheme, CustodyDigestScheme.transparent,
+      base4TwoOfThreeQuorum] at hEnr hThr ⊢
+    by_cases hEp : i.epoch < 2 ^ h
+    · simp only [hEp, ↓reduceIte]
+      let digits := wotsBase4Digits H i.epoch (encodeMultiEpochDigest (depId, i))
+      rw [findBase4SlotOpening_sound H h ⟨0, by decide⟩ sk i.epoch digits approvers hEnr
+            (base4_two_of_three_covers_slot sk hNd hEnr hThr ⟨0, by decide⟩),
+          findBase4SlotOpening_sound H h ⟨1, by decide⟩ sk i.epoch digits approvers hEnr
+            (base4_two_of_three_covers_slot sk hNd hEnr hThr ⟨1, by decide⟩),
+          findBase4SlotOpening_sound H h ⟨2, by decide⟩ sk i.epoch digits approvers hEnr
+            (base4_two_of_three_covers_slot sk hNd hEnr hThr ⟨2, by decide⟩)]
+      rfl
+    · simp [hEp]
+
+/-- **Honest 2-of-3 Share-Opening Release Across Arbitrary Epochs `i.epoch < 2 ^ h`
+    (`mkBase4WotsCShareDep_fresh_epoch_releases`)**:
+    For ANY Merkle height `h : Nat`, ANY 256-bit hash `H : Bytes → BitVec 256`, ANY fresh state `st`
+    whose latches/watermark/budget admit `i` with `i.epoch < 2 ^ h`, two honest `.approve` turns
+    followed by `.execute` release the canonical wire-serialized base-4 WOTS+C signature `sigBytes`
+    and `verify pk msg sigBytes = true`! -/
+theorem mkBase4WotsCShareDep_fresh_epoch_releases (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (depId spendCap : Nat) (i : CustodyIntent)
+    (hEp : i.epoch < 2 ^ h) (hSpend : i.spend ≤ spendCap) :
+    let dep := mkBase4WotsCShareDep h H sk depId spendCap
+    let s0 := ShareState.init dep
+    ∃ (s1 s2 s3 : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes)
+      (sigBytes : Bytes),
+      shareOpeningStep dep s0 (.approve 0 depId i) = some (s1, .approved) ∧
+      shareOpeningStep dep s1 (.approve 1 depId i) = some (s2, .approved) ∧
+      shareOpeningStep dep s2 (.execute depId [0, 1] i false) =
+        some (s3, .custody (.released sigBytes)) ∧
+      dep.sigScheme.verify dep.pk (encodeMultiEpochDigest (depId, i)) sigBytes = true ∧
+      (shareOpeningMachine dep).ValidTrace s0
+        [(.approve 0 depId i, .approved),
+         (.approve 1 depId i, .approved),
+         (.execute depId [0, 1] i false, .custody (.released sigBytes))] s3 := by
+  intro dep s0
+  have hWf := mkBase4WotsCShareDep_wellFormed h H sk depId spendCap
+  have hg0 : 0 < dep.quorum.numParties ∧ 0 ∉ s0.corrupt ∧ depId = dep.deploymentId ∧
+      (s0.nodes 0).latch ≤ i.epoch ∧ i.sessionId ∉ (s0.nodes 0).coupons :=
+    ⟨(by decide : 0 < 3), List.not_mem_nil, rfl, Nat.zero_le _, List.not_mem_nil⟩
+  let s1 : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes :=
+    { s0 with
+      nodes := fun q =>
+        if q = 0 then
+          { share := (s0.nodes 0).share
+            latch := i.epoch + 1
+            latched := i :: (s0.nodes 0).latched
+            coupons := i.sessionId :: (s0.nodes 0).coupons }
+        else s0.nodes q
+      buffer := ShareApproval.mk 0 depId i (dep.evalContrib 0 (s0.nodes 0).share depId i) :: s0.buffer }
+  have hs1 : shareOpeningStep dep s0 (.approve 0 depId i) = some (s1, .approved) := by
+    unfold shareOpeningStep; dsimp only; rw [sh_if_pos hg0]
+  have hg1 : 1 < dep.quorum.numParties ∧ 1 ∉ s1.corrupt ∧ depId = dep.deploymentId ∧
+      (s1.nodes 1).latch ≤ i.epoch ∧ i.sessionId ∉ (s1.nodes 1).coupons :=
+    ⟨(by decide : 1 < 3), List.not_mem_nil, rfl, Nat.zero_le _, List.not_mem_nil⟩
+  let s2 : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes :=
+    { s1 with
+      nodes := fun q =>
+        if q = 1 then
+          { share := (s1.nodes 1).share
+            latch := i.epoch + 1
+            latched := i :: (s1.nodes 1).latched
+            coupons := i.sessionId :: (s1.nodes 1).coupons }
+        else s1.nodes q
+      buffer := ShareApproval.mk 1 depId i (dep.evalContrib 1 (s1.nodes 1).share depId i) :: s1.buffer }
+  have hs2 : shareOpeningStep dep s1 (.approve 1 depId i) = some (s2, .approved) := by
+    unfold shareOpeningStep; dsimp only; rw [sh_if_pos hg1]
+  have hBufEq : s2.buffer =
+      [ShareApproval.mk 1 depId i (dep.trueContrib 1 i),
+       ShareApproval.mk 0 depId i (dep.trueContrib 0 i)] := by
+    dsimp only [s2, s1, s0, ShareState.init, ShareOpeningDeployment.trueContrib,
+      dep, mkBase4WotsCShareDep]
+    rw [sh_if_neg (by decide : ¬ (1 = 0))]
+  let matchMsg (p : Nat) (m : ShareApproval Base4ShareContrib) : Bool :=
+    decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
+    decide (m.intent = i) &&
+    decide (dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+      dep.commitmentOf p dep.deploymentId i)
+  have hDepId : dep.deploymentId = depId := rfl
+  have hComm (p : Nat) (hp : p < 3) :
+      dep.commit (dep.preimageOf p depId i (dep.trueContrib p i)) =
+        dep.commitmentOf p depId i :=
+    (hWf.commitments_dealt p hp i).symm
+  have hFind1 : s2.buffer.find? (matchMsg 1) =
+      some (ShareApproval.mk 1 depId i (dep.trueContrib 1 i)) := by
+    have hM1 : matchMsg 1 (ShareApproval.mk 1 depId i (dep.trueContrib 1 i)) = true := by
+      dsimp only [matchMsg]
+      rw [hDepId, decide_eq_true (rfl : 1 = 1), decide_eq_true (rfl : depId = depId),
+        decide_eq_true (rfl : i = i), decide_eq_true (hComm 1 (by decide : 1 < 3))]
+      rfl
+    rw [hBufEq, List.find?_cons_of_pos hM1]
+  have hFind0 : s2.buffer.find? (matchMsg 0) =
+      some (ShareApproval.mk 0 depId i (dep.trueContrib 0 i)) := by
+    have hM1False : matchMsg 0 (ShareApproval.mk 1 depId i (dep.trueContrib 1 i)) = false := by
+      dsimp only [matchMsg]; simp
+    have hM0 : matchMsg 0 (ShareApproval.mk 0 depId i (dep.trueContrib 0 i)) = true := by
+      dsimp only [matchMsg]
+      rw [hDepId, decide_eq_true (rfl : 0 = 0), decide_eq_true (rfl : depId = depId),
+        decide_eq_true (rfl : i = i), decide_eq_true (hComm 0 (by decide : 0 < 3))]
+      rfl
+    rw [hBufEq, List.find?_cons_of_neg (by rw [hM1False]; exact Bool.false_ne_true),
+      List.find?_cons_of_pos hM0]
+  have hReady : (decide (dep.quorum.threshold ≤ ([0, 1] : List Nat).length) &&
+      decide ([0, 1] : List Nat).Nodup &&
+      ([0, 1] : List Nat).all (fun p =>
+        decide (p < dep.quorum.numParties) && (s2.buffer.find? (matchMsg p)).isSome)) = true := by
+    simp [List.all, hFind0, hFind1, dep, mkBase4WotsCShareDep, base4TwoOfThreeQuorum]
+  have hSignSome : ∃ sigBytes : Bytes,
+      dep.sigScheme.sign dep.dealtSk i.epoch
+        (dep.encodeDigest (dep.digests.digest dep.deploymentId i)) = some sigBytes := by
+    dsimp only [dep, mkBase4WotsCShareDep, base4WotsCMerkleSigScheme]
+    rw [sh_if_pos hEp]
+    exact ⟨_, rfl⟩
+  obtain ⟨sigBytes, hSigEq⟩ := hSignSome
+  have hVerTrue : dep.sigScheme.verify dep.pk
+      (encodeMultiEpochDigest (depId, i)) sigBytes = true :=
+    dep.sigScheme.correct dep.dealtSk i.epoch _ sigBytes hSigEq
+  have hAssEq : dep.assembleSig
+      (([0, 1] : List Nat).filterMap (fun p =>
+        (s2.buffer.find? (matchMsg p)).map (fun m => (p, m.contrib))))
+      i.epoch (dep.digests.digest dep.deploymentId i) = some sigBytes := by
+    have hFMap : ([0, 1] : List Nat).filterMap (fun p =>
+        (s2.buffer.find? (matchMsg p)).map (fun m => (p, m.contrib))) =
+        ([0, 1] : List Nat).map (fun p => (p, dep.trueContrib p i)) := by
+      simp [List.filterMap, hFind0, hFind1]
+    rw [hFMap, hWf.assemble_dealt [0, 1] i (by decide)
+      (fun p hp => by
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
+        rcases hp with rfl | rfl
+        · exact (by decide : 0 < 3)
+        · exact (by decide : 1 < 3))
+      (by decide : 2 ≤ 2)]
+    exact hSigEq
+  have hLed := custodyLedgerSign_fresh_release (S := dep.digests) (oracleSign := fun _ => sigBytes)
+    (L := s2.ledger) (n := 2) (dep := depId) (i := i)
+    rfl rfl rfl (Nat.zero_le _) List.not_mem_nil (by decide : 2 ≤ 2)
+    (by change 0 + i.spend ≤ spendCap; omega)
+  let s3 := { s2 with ledger := (custodyLedgerSign dep.digests (fun _ => sigBytes)
+    s2.ledger 2 depId i false).getD (s2.ledger, .abortedQuarantined) |>.1 }
+  have hs3 : shareOpeningStep dep s2 (.execute depId [0, 1] i false) =
+      some (s3, .custody (.released sigBytes)) := by
+    unfold shareOpeningStep
+    change (match findReleasedEpoch s2.ledger.releasedHistory i.epoch with
+      | some _ =>
+        (custodyLedgerSign dep.digests (fun _ => dep.fallbackSig) s2.ledger 0 depId i false).map
+          (fun r : CustodyLedger Base4WotsCPk MultiEpochDigest Bytes × CustodyOutcome Bytes =>
+            ({ s2 with ledger := r.1 }, ShareEvent.custody r.2))
+      | none => _) = _
+    have hHistNil : findReleasedEpoch s2.ledger.releasedHistory i.epoch = none := rfl
+    rw [hHistNil]
+    dsimp only
+    rw [sh_if_neg Bool.false_ne_true, sh_if_pos hReady]
+    have hAssEq' : dep.assembleSig
+        (([0, 1] : List Nat).filterMap (fun p =>
+          (s2.buffer.find? (fun m =>
+            decide (m.sender = p) && decide (m.deploymentId = dep.deploymentId) &&
+            decide (m.intent = i) &&
+            decide (dep.commit (dep.preimageOf p dep.deploymentId i m.contrib) =
+              dep.commitmentOf p dep.deploymentId i))).map (fun m => (p, m.contrib))))
+        i.epoch (dep.digests.digest dep.deploymentId i) = some sigBytes := hAssEq
+    rw [hAssEq']
+    dsimp only
+    have hEnrPk : s2.ledger.enrolledPk = dep.pk := rfl
+    have hVerTrue' : dep.sigScheme.verify dep.pk
+        (dep.encodeDigest (dep.digests.digest dep.deploymentId i)) sigBytes = true := hVerTrue
+    rw [hEnrPk, sh_if_pos hVerTrue']
+    dsimp only [List.length_cons, List.length_nil, s3]
+    rw [hLed]
+    rfl
+  exact ⟨s1, s2, s3, sigBytes, hs1, hs2, hs3, hVerTrue,
+    .accept hs1 (.accept hs2 (.accept hs3 (.nil s3)))⟩
+
+/-- **`#tooth` Violating Base-4 WOTS+C `target_sum = 12` Is Unconditionally Rejected
+    (`tooth_base4WotsCMerkle_bad_targetSum_rejected`)**:
+    Any wire-serialized `MultiEpochWotsCSig` whose digits fail `checkBase4TargetSum12` is rejected
+    (`verify = false`) for EVERY Merkle height `h`, hash `H`, public key `pk`, and message `msg`. -/
+theorem tooth_base4WotsCMerkle_bad_targetSum_rejected (h : Nat) (H : Bytes → BitVec 256)
+    (pk : Base4WotsCPk) (msg : Bytes) (sig : MultiEpochWotsCSig)
+    (hBad : checkBase4TargetSum12 sig.digits = false) :
+    (base4WotsCMerkleSigScheme h H).verify pk msg (encodeMultiEpochWotsCSig sig) = false := by
+  dsimp only [base4WotsCMerkleSigScheme]
+  rw [decodeMultiEpochWotsCSig_encodeMultiEpochWotsCSig]
+  dsimp only
+  rw [hBad]
+  simp only [Bool.and_false, Bool.false_and]
+
+/-- **`#tooth` Out-of-Range Epochs (`ep ≥ 2 ^ h`) Are Unconditionally Refused at Signing
+    (`tooth_base4WotsCMerkle_epoch_ge_pow_sign_none`)**. -/
+theorem tooth_base4WotsCMerkle_epoch_ge_pow_sign_none (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (ep : Nat) (msg : Bytes)
+    (hOutSign : ¬ (ep < 2 ^ h)) :
+    (base4WotsCMerkleSigScheme h H).sign sk ep msg = none := by
+  dsimp only [base4WotsCMerkleSigScheme]
+  exact sh_if_neg hOutSign _ _
+
+/-- **`#tooth` Out-of-Range Epochs (`sig.epoch ≥ 2 ^ pk.height`) Are Unconditionally Rejected
+    (`tooth_base4WotsCMerkle_epoch_ge_pow_rejected`)**:
+    Any wire signature claiming `sig.epoch ≥ 2 ^ pk.height` is rejected (`verify = false`). -/
+theorem tooth_base4WotsCMerkle_epoch_ge_pow_rejected (h : Nat) (H : Bytes → BitVec 256)
+    (pk : Base4WotsCPk) (msg : Bytes) (sig : MultiEpochWotsCSig)
+    (hOutVer : ¬ (sig.epoch < 2 ^ pk.height)) :
+    (base4WotsCMerkleSigScheme h H).verify pk msg (encodeMultiEpochWotsCSig sig) = false := by
+  dsimp only [base4WotsCMerkleSigScheme]
+  rw [decodeMultiEpochWotsCSig_encodeMultiEpochWotsCSig]
+  dsimp only
+  rw [decide_eq_false hOutVer]
+  rfl
+
+theorem mkBase4WotsCShareDep_sigScheme (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (depId spendCap : Nat) :
+    (mkBase4WotsCShareDep h H sk depId spendCap).sigScheme = base4WotsCMerkleSigScheme h H := by
+  rfl
+
+theorem mkBase4WotsCShareDep_pk_height (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (depId spendCap : Nat) :
+    (mkBase4WotsCShareDep h H sk depId spendCap).pk.height = h := by
+  rfl
+
+theorem mkBase4WotsCShareDep_trueContrib_out (h : Nat) (H : Bytes → BitVec 256)
+    (sk : Base4WotsCMasterSk) (depId spendCap p : Nat) (i : CustodyIntent)
+    (hOut : ¬ (i.epoch < 2 ^ h)) :
+    (mkBase4WotsCShareDep h H sk depId spendCap).trueContrib p i = none :=
+  sh_if_neg hOut _ _
+
+theorem inhabited_mkBase4WotsCShareDep_fresh_epoch_releases :
+    ∃ (h : Nat) (H : Bytes → BitVec 256) (sk : Base4WotsCMasterSk)
+      (depId spendCap : Nat) (i : CustodyIntent),
+      i.epoch < 2 ^ h ∧ i.spend ≤ spendCap ∧
+      (mkBase4WotsCShareDep h H sk depId spendCap).WellFormed :=
+  ⟨3, fun _ => 0#256, ⟨1#256, 2#256, 3#256⟩, 7, 100, ⟨1, 0, 5, 25, [0x42]⟩,
+    by decide, by decide, mkBase4WotsCShareDep_wellFormed 3 (fun _ => 0#256) _ 7 100⟩
+
+end MultiEpochBase4WotsCMerkleBody
+
+#verify_constructive
+  Qsag.DistCustody.decTagNat_encTagNat
+  Qsag.DistCustody.decBv256_encBv256
+  Qsag.DistCustody.wotsBase4Digits_valid
+  Qsag.DistCustody.wotsStepsFrom256_add
+  Qsag.DistCustody.walkSlotAuthPath_buildSlotAuthPath
+  Qsag.DistCustody.decodeMultiEpochWotsCSig_encodeMultiEpochWotsCSig
+  Qsag.DistCustody.verifySlotWotsOpening_buildSlotWotsOpening
+  Qsag.DistCustody.encodeBase4SharePreimage_framed
+  Qsag.DistCustody.mkBase4WotsCShareDep_wellFormed
+  Qsag.DistCustody.mkBase4WotsCShareDep_fresh_epoch_releases
+  Qsag.DistCustody.mkBase4WotsCShareDep_sigScheme
+  Qsag.DistCustody.mkBase4WotsCShareDep_pk_height
+  Qsag.DistCustody.mkBase4WotsCShareDep_trueContrib_out
+  Qsag.DistCustody.tooth_base4WotsCMerkle_bad_targetSum_rejected
+  Qsag.DistCustody.tooth_base4WotsCMerkle_epoch_ge_pow_sign_none
+  Qsag.DistCustody.tooth_base4WotsCMerkle_epoch_ge_pow_rejected
+  Qsag.DistCustody.inhabited_mkBase4WotsCShareDep_fresh_epoch_releases
+
+#verify_inhabited
+  Qsag.DistCustody.mkBase4WotsCShareDep_fresh_epoch_releases
+  Qsag.DistCustody.inhabited_mkBase4WotsCShareDep_fresh_epoch_releases
+
+#tooth_pair Qsag.DistCustody.mkBase4WotsCShareDep_fresh_epoch_releases vs
+  Qsag.DistCustody.tooth_base4WotsCMerkle_bad_targetSum_rejected
+#tooth_pair Qsag.DistCustody.mkBase4WotsCShareDep_fresh_epoch_releases vs
+  Qsag.DistCustody.tooth_base4WotsCMerkle_epoch_ge_pow_rejected
+
 #verify_constructive
   Qsag.DistCustody.AuthDeployment.recover_some
   Qsag.DistCustody.AuthDeployment.recover_sealed

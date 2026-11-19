@@ -1273,4 +1273,156 @@ theorem tooth_forged_contrib_rejected_under_sponge_commit :
 #tooth_pair Qsag.DistCustody.Checks.verifyContrib_dealt_or_collision_audited vs
   Qsag.DistCustody.Checks.tooth_const_commit256_refutes_naive_binding
 
+/-! ## Multi-Epoch (`h = 3`, `8` Epochs `0..7`) Wire-Serialized Base-4 WOTS+C (`target_sum = 12`) Share-Opening Checks (`E4a`) -/
+
+def sampleBase4MasterSk : Base4WotsCMasterSk :=
+  { s0 := 0x111122223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF0001#256
+    s1 := 0x22223333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF00021111#256
+    s2 := 0x3333444455556666777788889999AAAABBBBCCCCDDDDEEEEFFFF000311112222#256 }
+
+/-- Concrete height-`3` (`8` epochs `0..7`) wire-serialized base-4 WOTS+C (`target_sum = 12`)
+    share-opening deployment over NIST SP 800-185 `cSHAKE256` (`BitVec 256`). -/
+def cshakeMultiEpochDep := mkBase4WotsCShareDep 3 cshakeCommit256 sampleBase4MasterSk 7 100
+
+/-- Concrete height-`3` (`8` epochs `0..7`) wire-serialized base-4 WOTS+C (`target_sum = 12`)
+    share-opening deployment over 512-bit ARX sponge `spongeCommit256` (`BitVec 256`). -/
+def spongeMultiEpochDep := mkBase4WotsCShareDep 3 spongeCommit256 sampleBase4MasterSk 7 100
+
+theorem cshakeMultiEpochDep_wellFormed : cshakeMultiEpochDep.WellFormed :=
+  mkBase4WotsCShareDep_wellFormed 3 cshakeCommit256 sampleBase4MasterSk 7 100
+
+theorem spongeMultiEpochDep_wellFormed : spongeMultiEpochDep.WellFormed :=
+  mkBase4WotsCShareDep_wellFormed 3 spongeCommit256 sampleBase4MasterSk 7 100
+
+def multiEpochIntent5 : CustodyIntent :=
+  { sessionId := 50, round := 1, epoch := 5, spend := 30, payload := [0xCA, 0xFE, 0x05] }
+
+def multiEpochIntent7 : CustodyIntent :=
+  { sessionId := 70, round := 2, epoch := 7, spend := 40, payload := [0xBE, 0xEF, 0x07] }
+
+def multiEpochIntentOut : CustodyIntent :=
+  { sessionId := 80, round := 3, epoch := 8, spend := 10, payload := [0x08] }
+
+/-- **Concrete Multi-Epoch (`epoch = 5 < 2 ^ 3` and `epoch = 7 < 2 ^ 3`) Wire-Serialized Base-4 WOTS+C
+    Share-Opening Executions Over Real 256-Bit Sponge (`spongeCommit256`) and `cSHAKE256`**:
+    Certifies that BOTH `spongeMultiEpochDep` and `cshakeMultiEpochDep` release valid wire-serialized
+    8-chain base-4 WOTS+C (`target_sum = 12` verified!) Merkle signatures at non-toy epochs `5` and `7`! -/
+theorem multi_epoch_base4_wotsC_releases_epochs_5_and_7 :
+    (∃ (s3 : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes)
+       (sig5 : Bytes),
+      (shareOpeningMachine spongeMultiEpochDep).ValidTrace (ShareState.init spongeMultiEpochDep)
+        [(.approve 0 7 multiEpochIntent5, .approved),
+         (.approve 1 7 multiEpochIntent5, .approved),
+         (.execute 7 [0, 1] multiEpochIntent5 false, .custody (.released sig5))] s3 ∧
+      spongeMultiEpochDep.sigScheme.verify spongeMultiEpochDep.pk
+        (encodeMultiEpochDigest (7, multiEpochIntent5)) sig5 = true) ∧
+    (∃ (s3' : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes)
+       (sig7 : Bytes),
+      (shareOpeningMachine cshakeMultiEpochDep).ValidTrace (ShareState.init cshakeMultiEpochDep)
+        [(.approve 0 7 multiEpochIntent7, .approved),
+         (.approve 1 7 multiEpochIntent7, .approved),
+         (.execute 7 [0, 1] multiEpochIntent7 false, .custody (.released sig7))] s3' ∧
+      cshakeMultiEpochDep.sigScheme.verify cshakeMultiEpochDep.pk
+        (encodeMultiEpochDigest (7, multiEpochIntent7)) sig7 = true) := by
+  obtain ⟨_, _, s3, sig5, _, _, _, hVer5, hTr5⟩ :=
+    mkBase4WotsCShareDep_fresh_epoch_releases 3 spongeCommit256 sampleBase4MasterSk 7 100
+      multiEpochIntent5 (by decide) (by decide)
+  obtain ⟨_, _, s3', sig7, _, _, _, hVer7, hTr7⟩ :=
+    mkBase4WotsCShareDep_fresh_epoch_releases 3 cshakeCommit256 sampleBase4MasterSk 7 100
+      multiEpochIntent7 (by decide) (by decide)
+  exact ⟨⟨s3, sig5, hTr5, hVer5⟩, ⟨s3', sig7, hTr7, hVer7⟩⟩
+
+theorem multiEpoch_dataRefines_or_collision_audited
+    (dep : ShareOpeningDeployment Base4CustodianShare Base4ShareContrib Bytes
+      Base4WotsCPk Base4WotsCMasterSk MultiEpochDigest Bytes)
+    (hWf : dep.WellFormed)
+    {stFinal : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes}
+    {tr : List (ShareTurn Base4ShareContrib × ShareEvent Base4CustodianShare Bytes)}
+    (hTr : (shareOpeningMachine dep).ValidTrace (ShareState.init dep) tr stFinal) :
+    ((idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).AdmitsTrace (projectTrace (shareVisIn dep) shareVisOut tr) ∧
+      stFinal.corrupt.length < dep.quorum.threshold ∧
+      stFinal.ledger.spent ≤ dep.quorum.spendCap ∧
+      (∀ r : CustodyRelease MultiEpochDigest Bytes, r ∈ stFinal.ledger.releasedHistory →
+        dep.sigScheme.verify dep.pk (dep.encodeDigest r.digest) r.sig = true ∧
+        r.sig = dep.idealOracle (dep.digests.digest dep.deploymentId r.intent) ∧
+        ∃ p : Nat, p < dep.quorum.numParties ∧ r.intent ∈ (stFinal.nodes p).latched ∧
+          r.intent.epoch < (stFinal.nodes p).latch)) ∨
+    (∃ x₁ x₂ : Bytes,
+      x₁ ≠ x₂ ∧ dep.commit x₁ = dep.commit x₂ ∧
+      x₁ ∈ observedSharePreimages dep tr ∧
+      x₂ ∈ observedSharePreimages dep tr) :=
+  distCustody_dataRefines_or_collision dep hWf hTr
+
+theorem inhabited_multiEpoch_base4_wotsC_validTrace :
+    ∃ (dep : ShareOpeningDeployment Base4CustodianShare Base4ShareContrib Bytes
+        Base4WotsCPk Base4WotsCMasterSk MultiEpochDigest Bytes)
+      (stFinal : ShareState Base4CustodianShare Base4ShareContrib Base4WotsCPk MultiEpochDigest Bytes)
+      (tr : List (ShareTurn Base4ShareContrib × ShareEvent Base4CustodianShare Bytes)),
+      dep.WellFormed ∧
+      (shareOpeningMachine dep).ValidTrace (ShareState.init dep) tr stFinal ∧
+      tr.length = 3 := by
+  obtain ⟨⟨s3, sig5, hTr5, _⟩, _⟩ := multi_epoch_base4_wotsC_releases_epochs_5_and_7
+  exact ⟨spongeMultiEpochDep, s3, _, spongeMultiEpochDep_wellFormed, hTr5, rfl⟩
+
+/-- `#tooth`: Tampering `target_sum` on `spongeMultiEpochDep` (all-zero base-4 digits, sum `0 ≠ 12`)
+    is rejected by `spongeMultiEpochDep.sigScheme.verify`! -/
+theorem tooth_spongeMultiEpoch_bad_targetSum_rejected :
+    spongeMultiEpochDep.sigScheme.verify spongeMultiEpochDep.pk
+      (encodeMultiEpochDigest (7, multiEpochIntent5))
+      (encodeMultiEpochWotsCSig
+        { epoch := 5
+          digits := [0, 0, 0, 0, 0, 0, 0, 0]
+          slot0 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩
+          slot1 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩
+          slot2 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩ }) = false := by
+  unfold spongeMultiEpochDep
+  rw [mkBase4WotsCShareDep_sigScheme]
+  exact tooth_base4WotsCMerkle_bad_targetSum_rejected 3 spongeCommit256 _
+    (encodeMultiEpochDigest (7, multiEpochIntent5)) _
+    (by rw [checkBase4TargetSum12.public_eqs]; decide)
+
+/-- `#tooth`: Epoch `8 ≥ 2 ^ 3` is refused at custodian contribution / signing time and rejected by
+    `spongeMultiEpochDep.sigScheme.verify`! -/
+theorem tooth_spongeMultiEpoch_epoch_8_rejected :
+    ∃ outSig : MultiEpochWotsCSig,
+      outSig.epoch = 8 ∧
+      spongeMultiEpochDep.trueContrib 0 multiEpochIntentOut = none ∧
+      spongeMultiEpochDep.sigScheme.verify spongeMultiEpochDep.pk
+        (encodeMultiEpochDigest (7, multiEpochIntentOut))
+        (encodeMultiEpochWotsCSig outSig) = false := by
+  let outSig : MultiEpochWotsCSig :=
+    { epoch := 8
+      digits := wotsBase4Digits spongeCommit256 8 (encodeMultiEpochDigest (7, multiEpochIntentOut))
+      slot0 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩
+      slot1 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩
+      slot2 := ⟨List.replicate 8 0#256, List.replicate 3 0#256⟩ }
+  refine ⟨outSig, rfl, ?_, ?_⟩
+  · exact mkBase4WotsCShareDep_trueContrib_out 3 spongeCommit256 sampleBase4MasterSk 7 100
+      0 multiEpochIntentOut (by decide)
+  · unfold spongeMultiEpochDep
+    rw [mkBase4WotsCShareDep_sigScheme]
+    refine tooth_base4WotsCMerkle_epoch_ge_pow_rejected 3 spongeCommit256 _
+      (encodeMultiEpochDigest (7, multiEpochIntentOut)) outSig ?_
+    rw [mkBase4WotsCShareDep_pk_height]
+    decide
+
+#verify_constructive
+  Qsag.DistCustody.Checks.cshakeMultiEpochDep_wellFormed
+  Qsag.DistCustody.Checks.spongeMultiEpochDep_wellFormed
+  Qsag.DistCustody.Checks.multi_epoch_base4_wotsC_releases_epochs_5_and_7
+  Qsag.DistCustody.Checks.multiEpoch_dataRefines_or_collision_audited
+  Qsag.DistCustody.Checks.inhabited_multiEpoch_base4_wotsC_validTrace
+  Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_bad_targetSum_rejected
+  Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_epoch_8_rejected
+
+#verify_inhabited
+  Qsag.DistCustody.Checks.multiEpoch_dataRefines_or_collision_audited
+  Qsag.DistCustody.Checks.inhabited_multiEpoch_base4_wotsC_validTrace
+
+#tooth_pair Qsag.DistCustody.Checks.multi_epoch_base4_wotsC_releases_epochs_5_and_7 vs
+  Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_bad_targetSum_rejected
+#tooth_pair Qsag.DistCustody.Checks.multi_epoch_base4_wotsC_releases_epochs_5_and_7 vs
+  Qsag.DistCustody.Checks.tooth_spongeMultiEpoch_epoch_8_rejected
+
 end Qsag.DistCustody.Checks
