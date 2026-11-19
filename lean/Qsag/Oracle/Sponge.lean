@@ -552,6 +552,25 @@ theorem turboshake256_canopy_precomputed_midstate_eq {σ : Type}
   rw [absorbPayload_single_block_prefix (by decide +kernel) domTurboShake256 hdr136 msg hHdr]
   rfl
 
+/-- For any customization `S`, message `msg`, and output length `outLen`,
+    `evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] S msg outLen`
+    equals `Keccak.cshake256Xof outLen S msg`. -/
+theorem evalCshake256Sponge_keccak_eq_cshake256Xof (S msg : List UInt8) (outLen : Nat) :
+    evalCshake256Sponge keccakF1600 zeroKState xorRate136 rateBlockBytes [] S msg outLen =
+      cshake256Xof outLen S msg := by
+  unfold evalCshake256Sponge
+  by_cases hS : S = []
+  · subst hS
+    simp only [and_self, ↓reduceIte, evalSponge_keccak_eq_shake256Xof,
+      cshake256Xof_empty_eq_shake256Xof]
+  · rw [ite_eq_right_iff.mpr (fun h : ([] : List UInt8) = [] ∧ S = [] => False.elim (hS h.2))]
+    unfold evalSponge absorbPayload spongeSqueeze cshake256Xof
+    simp only [hS, ↓reduceIte]
+    dsimp only [domCshake256]
+    rw [cshakePrefix_empty_name_eq, pad10star1_136_eq_padForRate,
+        spongeAbsorb_keccak_eq_absorbBlocks, spongeSqueezeFuel_136_eq,
+        ← squeezeXofAux_eq, absorbPadded_eq, shake256RateBytes_eq]
+
 end Qsag
 end
 
@@ -655,6 +674,7 @@ theorem witness_keccak_midstate_canopy :
   Qsag.cshakePrefix_single_block_length
   Qsag.cshake_precomputed_midstate_eq
   Qsag.keccak_cshake256_precomputed_midstate_eq
+  Qsag.evalCshake256Sponge_keccak_eq_cshake256Xof
   Qsag.witness_cshakePrefix_canopy
 #verify_inhabited Qsag.pad10star1_injective Qsag.witness_pad10star1_valid_domain
 #verify_inhabited Qsag.absorbPayload_cross_domain_encodings_ne Qsag.witness_cross_domain_pair

@@ -4,11 +4,14 @@ public import QsagVerified.Proofs.Sponge
 public import Qsag.Oracle.Keccak
 
 /-!
-The universal theorem here covers the extracted 24-round permutation. The phase laws
-below cover actual streaming entry points, but do not yet identify emitted bytes with
-`Qsag.shake256Xof`: rate-block XOR, padding, and arbitrary squeeze-loop invariants remain
-necessary. Absorption after squeezing fails with `.fail .assertionFailure` in the
-generated API; repeated finalization after squeezing leaves the state unchanged.
+The universal theorem here (`keccak_p1600_refines`) covers the extracted 24-round permutation.
+The phase laws below cover the extracted streaming entry points (`shake256_init`, `shake256_absorb`,
+`shake256_finalize`, `shake256_squeeze`, and `shake256_absorb_after_squeezing_fails`, which proves
+that absorption after squeezing fails with `.fail .assertionFailure` while repeated finalization
+after squeezing leaves the state unchanged). Identification of the emitted bytes of the extracted
+Rust entry points with `Qsag.shake256Xof` and `Qsag.cshake256Xof` is proved in
+`QsagVerified.Proofs.SpongeFraming` via `shake256_32_refines`, `cshake256_32_refines`, and
+`cshake256_squeeze_refines`.
 -/
 
 public section

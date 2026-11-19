@@ -8072,6 +8072,14 @@ theorem dfmsW2Parity_real_oracle_execution :
 #verify_constructive
   Qsag.toy_coherent_accept_mass
   Qsag.dfmsW2Parity_real_oracle_execution
+
+theorem MerkleAddressLayout.hash_eq {cardX w : Nat} (L : MerkleAddressLayout cardX w)
+    (H : Fin cardX → BitVec w) (l n : Nat) (u v : BitVec w) :
+    L.hash H l n u v = H (L.encode l n u v) := by rfl
+
+theorem merkleOpeningShape_eq {cardX w : Nat} (L : MerkleAddressLayout cardX w) (d : Nat)
+    (op : MerkleOpeningReadout w) :
+    merkleOpeningShape L d op = (decide (op.path.length ≤ d) && decide (op.idx < L.nodes)) := by rfl
 end Qsag
 
 /-! ### Executed preprocessing-game controls (audited in `Tests/OracleAndQrom`) -/
