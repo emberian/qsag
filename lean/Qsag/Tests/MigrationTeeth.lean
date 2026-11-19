@@ -138,6 +138,10 @@ theorem tooth_global_swPoint_nullifier_injectivity_false :
   Qsag.Top.tooth_dlogSettlement_xOnlyNullifier_snapshot_collision
   Qsag.Top.bls381_dlogSettlement_refines_or_nullifierCollision
   Qsag.Top.bls381_compressing_nullifier_nonvacuous
+  Qsag.Top.migration_bit_check_concrete_bound_63
+  Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
+  Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
+  Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
 
 #verify_inhabited
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
@@ -148,5 +152,13 @@ theorem tooth_global_swPoint_nullifier_injectivity_false :
 #verify_inhabited
   Qsag.Top.dlogSettlement_schedule_complete_of_injOn
   Qsag.Top.inhabited_dlogSettlement_schedule_complete
+#verify_inhabited
+  Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
+  Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
+
+#tooth_pair Qsag.Top.migration_bit_check_concrete_bound_63 vs
+  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
+#tooth_pair Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision vs
+  Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
 
 end Qsag
