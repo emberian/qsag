@@ -103,18 +103,34 @@ def main(root):
     root = pathlib.Path(root)
     out = []
     specs = {
-        "qsag_gl64_mul_slice64x4": (
+        "qsag_gl64_mul_slice32x4": (
             ["s", "c"],
-            {f"a[{i}] & b[{j}]": 1 << (i + j) for i in range(64) for j in range(4)},
+            {f"a[{i}] & b[{j}]": 1 << (i + j) for i in range(32) for j in range(4)},
             0,
         ),
-        "qsag_gl64_mul_comb_l1": (["s", "c"], {**words(s0_w68=1, c0_w68=1), **{f"{p}[{i}]": 1 << (i + 4) for p in ("s1", "c1") for i in range(68)}}, 1 << 72),
-        "qsag_gl64_mul_comb_l2": (["s", "c"], {**words(s0_w72=1, c0_w72=1), **{f"{p}[{i}]": 1 << (i + 8) for p in ("s1", "c1") for i in range(72)}}, 1 << 80),
-        "qsag_gl64_mul_comb_l3": (["s", "c"], {**words(s0_w80=1, c0_w80=1), **{f"{p}[{i}]": 1 << (i + 16) for p in ("s1", "c1") for i in range(80)}}, 1 << 96),
-        "qsag_gl64_mul_comb_l4": (["s", "c"], {**words(s0_w96=1, c0_w96=1), **{f"{p}[{i}]": 1 << (i + 32) for p in ("s1", "c1") for i in range(96)}}, 1 << 128),
+        "qsag_gl64_mul_comb32_l1": (["s", "c"], {**words(s0_w36=1, c0_w36=1), **{f"{p}[{i}]": 1 << (i + 4) for p in ("s1", "c1") for i in range(36)}}, 1 << 40),
+        "qsag_gl64_mul_comb32_l2": (["s", "c"], {**words(s0_w40=1, c0_w40=1), **{f"{p}[{i}]": 1 << (i + 8) for p in ("s1", "c1") for i in range(40)}}, 1 << 48),
+        "qsag_gl64_mul_comb32_l3": (["s", "c"], {**words(s0_w48=1, c0_w48=1), **{f"{p}[{i}]": 1 << (i + 16) for p in ("s1", "c1") for i in range(48)}}, 1 << 64),
+        "qsag_gl64_mul_slice33x4": (
+            ["s", "c"],
+            {f"a[{i}] & b[{j}]": 1 << (i + j) for i in range(33) for j in range(4)},
+            0,
+        ),
+        "qsag_gl64_mul_comb33_l1": (["s", "c"], {**words(s0_w37=1, c0_w37=1), **{f"{p}[{i}]": 1 << (i + 4) for p in ("s1", "c1") for i in range(37)}}, 1 << 41),
+        "qsag_gl64_mul_comb33_l2": (["s", "c"], {**words(s0_w41=1, c0_w41=1), **{f"{p}[{i}]": 1 << (i + 8) for p in ("s1", "c1") for i in range(41)}}, 1 << 49),
+        "qsag_gl64_mul_comb33_l3": (["s", "c"], {**words(s0_w49=1, c0_w49=1), **{f"{p}[{i}]": 1 << (i + 16) for p in ("s1", "c1") for i in range(49)}}, 1 << 65),
+        "qsag_gl64_mul_comb33_top": (
+            ["s", "c"],
+            {**words(s0_w65=1, c0_w65=1), **{f"a[{i}] & b_hi[0]": 1 << (32 + i) for i in range(33)}},
+            0,
+        ),
         "qsag_gl64_fold_one": (["rx", "ry"], words(v_w128=1), P),
-        "qsag_gl64_fold_pair_s1": (["rx", "ry"], words(sx_w66=1, sy_w66=1, cx_w66=1, cy_w66=1), P),
-        "qsag_gl64_fold_pair_s2": (["rx", "ry"], words(r1x_w67=1, r1y_w67=1), P),
+        "qsag_gl64_sk_c0": (["d0x", "d0y"], {"1": 2 * ((1 << 64) - 1), **words(p0_s_w64=1, p0_c_w64=1, p2_s_w64=-1, p2_c_w64=-1)}, 0),
+        "qsag_gl64_sk_c1": (["d1x", "d1y"], {"1": 2 * ((1 << 64) - 1), **words(ps_s_w66=1, ps_c_w66=1, p0_s_w64=-1, p0_c_w64=-1)}, 0),
+        "qsag_gl64_sk_sh32": (["rx", "ry"], words(v_w68=1 << 32), P),
+        "qsag_gl64_sk_m0": (["m0x", "m0y"], words(d0x_w66=1, d0y_w66=1, e1x_w66=1, e1y_w66=1), 0),
+        "qsag_gl64_sk_m1": (["m1x", "m1y"], words(m0x_w68=1, m0y_w68=1, e2x_w66=1, e2y_w66=1), 0),
+        "qsag_gl64_sk_s2": (["rx", "ry"], {"1": 6, **words(bx_w69=1, by_w69=1)}, P),
         "qsag_gl64_csa3": (["sx", "sy"], words(a0=1, a1=1, a2=1), 0),
         "qsag_gl64_csa4": (["sx", "sy"], words(a0=1, a1=1, a2=1, a3=1), 0),
         "qsag_fp2_kara_re": (["o_x", "o_y"], words(m0=1, m1=7), P),

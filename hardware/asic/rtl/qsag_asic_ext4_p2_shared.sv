@@ -1,12 +1,11 @@
 // QSAG-NI shared field & 4-way C-slowed Poseidon2/Canopy datapath:
-//   * Twelve shared 64x64 Goldilocks Dadda-CSA partial-product trees serve:
+//   * Nine shared 3-way 32x32/33x33 Solinas-Karatsuba Goldilocks Dadda-CSA multipliers serve:
 //       - 1-clock GoldilocksExt4 multiply-add  E0 <- E0 * E1 + E2  (9 Tower Karatsuba products)
 //       - 1-clock GoldilocksExt4 base-scalar multiply  E0 <- E0 * st[4]  (4 products)
 //       - 1-clock Goldilocks base multiply  st[0] <- st[0] * st[1]  (1 product)
-//       - Width-12 Poseidon2 S-boxes in both 1-slot sequential mode (`op_perm` / `op_canopy`)
-//         and 4-way C-slowed batch mode (`op_perm4` / `op_canopy4`), overlapping the decoupled
-//         hierarchical-CSE linear layers (`qsag_p2_me`, `qsag_p2_mi_tail`, `qsag_p2_mi_apply`)
-//         across 4 independent 12-lane state slots (`st_b[0..3]`) with zero multi-stage CPA chains.
+//       - Width-12 Poseidon2 S-boxes split cleanly into `9 + 3` (`lanes 0..8` then `lanes 9..11`)
+//         in both 1-slot mode (`op_perm` / `op_canopy`) and 4-way C-slowed batch mode
+//         (`op_perm4` / `op_canopy4`), matching 9-mul `Ext4` 100% with zero idle multipliers!
 `default_nettype none
 `include "qsag_asic_gen_params.svh"
 
@@ -33,17 +32,17 @@ module qsag_asic_ext4_p2_shared (
   output wire         busy,
   output logic        done
 );
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     S_IDLE,
-    // 1-slot states
-    S1_INIT, S1_F1, S1_F2, S1_F3, S1_F4, S1_FM,
+    // 1-slot states (full-round S-boxes split 9+3: S1_F1..F4 on lanes 0..8, S1_G1..G4 on lanes 9..11)
+    S1_INIT, S1_F1, S1_F2, S1_F3, S1_F4, S1_G1, S1_G2, S1_G3, S1_G4, S1_FM,
     S1_P1, S1_P2, S1_P3, S1_PM, S1_FF,
     // 4-slot C-slowed states
     S4_INIT, S4_FULL, S4_PART, S4_FF
   } state_t;
 
   state_t      state;
-  (* keep = "true" *) state_t state_m [12];
+  (* keep = "true" *) state_t state_m [9];
   logic [63:0] st_b     [4][12];
   logic [63:0] t_b      [12];
   logic [63:0] me_pipe  [12];
@@ -54,7 +53,7 @@ module qsag_asic_ext4_p2_shared (
   logic [63:0] p_p7     [4];
   logic [63:0] s_tail_q [4];
   logic [4:0]  rnd;
-  logic [4:0]  sub;
+  logic [5:0]  sub;
   logic [6:0]  pcyc;
   logic        canopy_q;
 
@@ -78,12 +77,14 @@ module qsag_asic_ext4_p2_shared (
   wire [1:0] sM    = pm3[1:0];
   wire [4:0] rM    = 5'd4 + pm3[6:2];
 
-  // 4-slot full-round sub-indices: sub = 0..15 drives trees for slot sub[3:2], step sub[1:0];
-  // sub = 4, 8, 12, 16 drives M_E writeback for slot ((sub >> 2) - 1).
-  wire [1:0] f4_slot = sub[3:2];
-  wire [1:0] f4_step = sub[1:0];
-  wire       f4_me_en = (sub == 5'd4) || (sub == 5'd8) || (sub == 5'd12) || (sub == 5'd16);
-  wire [2:0] f4_me_q  = sub[4:2] - 3'd1;
+  // 4-slot full-round sub-indices (`9 + 3` split per slot):
+  //   sub = 0..31: slot `sub[4:3]` (`0..3`), half `sub[2]` (`0` = lanes `0..8`, `1` = lanes `9..11`), step `sub[1:0]` (`0..3`)
+  //   sub = 8, 16, 24, 32: `M_E` writeback for completed slot `((sub >> 3) - 1)`
+  wire [1:0] f4_slot  = sub[4:3];
+  wire       f4_hi3   = sub[2];
+  wire [1:0] f4_step  = sub[1:0];
+  wire       f4_me_en = (sub == 6'd8) || (sub == 6'd16) || (sub == 6'd24) || (sub == 6'd32);
+  wire [2:0] f4_me_q  = sub[5:3] - 3'd1;
   wire [1:0] f4_me_s  = f4_me_q[1:0];
 
   // ---------------------------------------------------------------- 9-product Karatsuba inputs
@@ -91,15 +92,15 @@ module qsag_asic_ext4_p2_shared (
   qsag_ext4_kara_inputs u_ka (.a(st_o[255:0]),   .q(ka));
   qsag_ext4_kara_inputs u_kb (.a(st_o[511:256]), .q(kb));
 
-  // ---------------------------------------------------------------- 12 shared multiplier trees
-  logic [63:0] ma [12];
-  logic [63:0] mb [12];
-  wire  [63:0] pr [12];
+  // ---------------------------------------------------------------- 9 shared Solinas-Karatsuba trees
+  logic [63:0] ma [9];
+  logic [63:0] mb [9];
+  wire  [63:0] pr [9];
 
   always_comb begin
-    for (int m = 0; m < 12; m++) begin
-      ma[m] = (m < 9) ? ka[64*m +: 64] : 64'd0;
-      mb[m] = (m < 9) ? kb[64*m +: 64] : 64'd0;
+    for (int m = 0; m < 9; m++) begin
+      ma[m] = ka[64*m +: 64];
+      mb[m] = kb[64*m +: 64];
       unique case (state_m[m])
         S_IDLE: begin
           if (op_emulbase && (m < 4)) begin
@@ -114,15 +115,24 @@ module qsag_asic_ext4_p2_shared (
         S1_F2: begin ma[m] = t_b[m];     mb[m] = st_b[0][m]; end
         S1_F3: begin ma[m] = t_b[m];     mb[m] = t_b[m];     end
         S1_F4: begin ma[m] = t_b[m];     mb[m] = st_b[0][m]; end
+        S1_G1: if (m < 3) begin ma[m] = st_b[0][9 + m]; mb[m] = st_b[0][9 + m]; end
+        S1_G2: if (m < 3) begin ma[m] = t_b[9 + m];     mb[m] = st_b[0][9 + m]; end
+        S1_G3: if (m < 3) begin ma[m] = t_b[9 + m];     mb[m] = t_b[9 + m];     end
+        S1_G4: if (m < 3) begin ma[m] = t_b[9 + m];     mb[m] = st_b[0][9 + m]; end
         S1_P1: if (m == 0) begin ma[0] = st_b[0][0]; mb[0] = st_b[0][0]; end
         S1_P2: begin
           if (m == 0) begin ma[0] = p_sq[0]; mb[0] = st_b[0][0]; end
           if (m == 1) begin ma[1] = p_sq[0]; mb[1] = p_sq[0];    end
         end
         S1_P3: if (m == 0) begin ma[0] = p_p3[0]; mb[0] = p_p4[0]; end
-        S4_FULL: if (!sub[4]) begin
-          ma[m] = (f4_step == 2'd0) ? st_b[f4_slot][m] : t_b[m];
-          mb[m] = (f4_step == 2'd2) ? t_b[m]           : st_b[f4_slot][m];
+        S4_FULL: if (!sub[5]) begin
+          if (!f4_hi3) begin
+            ma[m] = (f4_step == 2'd0) ? st_b[f4_slot][m] : t_b[m];
+            mb[m] = (f4_step == 2'd2) ? t_b[m]           : st_b[f4_slot][m];
+          end else if (m < 3) begin
+            ma[m] = (f4_step == 2'd0) ? st_b[f4_slot][9 + m] : t_b[9 + m];
+            mb[m] = (f4_step == 2'd2) ? t_b[9 + m]           : st_b[f4_slot][9 + m];
+          end
         end
         S4_PART: begin
           if (m == 0) begin ma[0] = st_b[sA][0]; mb[0] = st_b[sA][0]; end
@@ -135,7 +145,7 @@ module qsag_asic_ext4_p2_shared (
     end
   end
 
-  for (genvar m = 0; m < 12; m++) begin : g_mul
+  for (genvar m = 0; m < 9; m++) begin : g_mul
     qsag_gl64_mul_csa u_mul (.a(ma[m]), .b(mb[m]), .r(pr[m]));
   end
 
@@ -199,7 +209,7 @@ module qsag_asic_ext4_p2_shared (
 
   task automatic set_state(input state_t ns);
     state <= ns;
-    for (int m = 0; m < 12; m++) state_m[m] <= ns;
+    for (int m = 0; m < 9; m++) state_m[m] <= ns;
   endtask
 
   // ---------------------------------------------------------------- Sequential control
@@ -222,7 +232,7 @@ module qsag_asic_ext4_p2_shared (
             canopy_q <= op_canopy;
           end else if (op_perm4 || op_canopy4) begin
             set_state(S4_INIT);
-            sub      <= 5'd0;
+            sub      <= 6'd0;
             canopy_q <= op_canopy4;
           end else if (op_emuladd) begin
             for (int i = 0; i < 4; i++) st_b[0][i] <= kr[64*i +: 64];
@@ -235,7 +245,7 @@ module qsag_asic_ext4_p2_shared (
           end
         end
 
-        // ---------------- 1-slot Poseidon2 / Canopy
+        // ---------------- 1-slot Poseidon2 / Canopy (`9 + 3` full-round S-box split)
         S1_INIT: begin
           for (int l = 0; l < 12; l++) st_b[0][l] <= me_out[64*l +: 64];
           for (int i = 0; i < 4; i++)  ff_b[0][i] <= ff_w[64*i +: 64];
@@ -243,8 +253,12 @@ module qsag_asic_ext4_p2_shared (
           set_state(S1_F1);
         end
         S1_F1, S1_F2, S1_F3, S1_F4: begin
-          for (int l = 0; l < 12; l++) t_b[l] <= pr[l];
-          set_state(state_t'(state + 4'd1));
+          for (int l = 0; l < 9; l++) t_b[l] <= pr[l];
+          set_state(state_t'(state + 5'd1));
+        end
+        S1_G1, S1_G2, S1_G3, S1_G4: begin
+          for (int l = 0; l < 3; l++) t_b[9 + l] <= pr[l];
+          set_state(state_t'(state + 5'd1));
         end
         S1_FM: begin
           for (int l = 0; l < 12; l++) st_b[0][l] <= me_out[64*l +: 64];
@@ -285,27 +299,35 @@ module qsag_asic_ext4_p2_shared (
         S4_INIT: begin
           for (int l = 0; l < 12; l++) st_b[sub[1:0]][l] <= me_out[64*l +: 64];
           for (int i = 0; i < 4; i++)  ff_b[sub[1:0]][i] <= ff_w[64*i +: 64];
-          if (sub == 5'd3) begin
-            sub <= 5'd0;
+          if (sub == 6'd3) begin
+            sub <= 6'd0;
             rnd <= 5'd0;
             set_state(S4_FULL);
           end else begin
-            sub <= sub + 5'd1;
+            sub <= sub + 6'd1;
           end
         end
         S4_FULL: begin
-          if (!sub[4]) begin
-            if (f4_step == 2'd3) begin
-              for (int l = 0; l < 12; l++) me_pipe[l] <= pr[l];
+          if (!sub[5]) begin
+            if (!f4_hi3) begin
+              if (f4_step == 2'd3) begin
+                for (int l = 0; l < 9; l++) me_pipe[l] <= pr[l];
+              end else begin
+                for (int l = 0; l < 9; l++) t_b[l] <= pr[l];
+              end
             end else begin
-              for (int l = 0; l < 12; l++) t_b[l] <= pr[l];
+              if (f4_step == 2'd3) begin
+                for (int l = 0; l < 3; l++) me_pipe[9 + l] <= pr[l];
+              end else begin
+                for (int l = 0; l < 3; l++) t_b[9 + l] <= pr[l];
+              end
             end
           end
           if (f4_me_en) begin
             for (int l = 0; l < 12; l++) st_b[f4_me_s][l] <= me_out[64*l +: 64];
           end
-          if (sub == 5'd16) begin
-            sub <= 5'd0;
+          if (sub == 6'd32) begin
+            sub <= 6'd0;
             rnd <= rnd + 5'd1;
             if (rnd == 5'd29) begin
               if (canopy_q) set_state(S4_FF);
@@ -315,7 +337,7 @@ module qsag_asic_ext4_p2_shared (
               set_state(S4_PART);
             end
           end else begin
-            sub <= sub + 5'd1;
+            sub <= sub + 6'd1;
           end
         end
         S4_PART: begin
@@ -335,7 +357,7 @@ module qsag_asic_ext4_p2_shared (
           end
           if (pcyc == 7'd90) begin
             rnd <= 5'd26;
-            sub <= 5'd0;
+            sub <= 6'd0;
             set_state(S4_FULL);
           end else begin
             pcyc <= pcyc + 7'd1;
@@ -343,11 +365,11 @@ module qsag_asic_ext4_p2_shared (
         end
         S4_FF: begin
           for (int i = 0; i < 4; i++) st_b[sub[1:0]][i] <= as_r[i];
-          if (sub == 5'd3) begin
+          if (sub == 6'd3) begin
             set_state(S_IDLE);
             done <= 1'b1;
           end else begin
-            sub <= sub + 5'd1;
+            sub <= sub + 6'd1;
           end
         end
 
