@@ -1,14 +1,15 @@
-// Compact rotating-ring Poseidon2 width-12 core for ECP5_COMPACT:
-//   - Instantiates ONE pipelined Goldilocks multiplier (`qsag_gl64_dsp_mul`: 16 MULT18X18D on ECP5)
-//     fed directly from `x[63:0]` and `x_base[63:0]` across 4 S-box stages (`x^2, x^3, x^6, x^7`);
-//   - Rotates the 768-bit state register `x` (`x <= {..., x[767:64]}`) through ONE single-lane
-//     pipelined carry-save linear reducer (with pre-registered round constants) and ONE single-column
-//     M4 unit, keeping register-to-register logic depth <= 18 LUT4/CCU2C levels on ECP5-85F;
-//   - Latency: 1,878 clocks/permutation (only 16 MULT18X18D total across the entire Poseidon2 core).
+// Compact rotating-ring Poseidon2 width-12 core for ECP5:
+//   - USE_PIPE_SBOX=0 (`ECP5_COMPACT`): ONE pipelined Goldilocks multiplier (`qsag_gl64_dsp_mul`:
+//     9 MULT18X18D) reused across 4 S-box stages (`x^2, x^3, x^6, x^7`), 1,878 clks/perm;
+//   - USE_PIPE_SBOX=1 (`ECP5_FULLRATE`): ONE full-rate pipelined `qsag_p2_sbox7` (`4 x 9 = 36`
+//     MULT18X18D, 1 `x^7` per clock!), streaming all 12 lanes in 25 clocks on external rounds
+//     and lane 0 in 13 clocks on internal rounds (1,290 clks/perm; paired with 81-DSP 1-MAC/clk
+//     `qsag_ext4_mac_bfly` = 117 / 156 DSPs = 75.0% on ONE $45 Lattice ECP5-85F!).
 module qsag_p2_compact #(
-    parameter int TAGW = 7,
-    parameter int AW   = 16,
-    parameter int BW   = 16
+    parameter int TAGW          = 7,
+    parameter int AW            = 16,
+    parameter int BW            = 16,
+    parameter bit USE_PIPE_SBOX = 1'b0
 ) (
     input  logic            clk,
     input  logic            rst,
@@ -23,7 +24,10 @@ module qsag_p2_compact #(
     output logic [TAGW-1:0] out_tag,
     output logic            busy
 );
-    localparam int            MUL_LAT  = qsag_ni_pkg::GL_MUL_LAT; // 5 clocks
+    localparam int            MUL_LAT  = qsag_ni_pkg::GL_MUL_LAT;  // 5 clocks
+    localparam int            SBOX_LAT = qsag_ni_pkg::P2_SBOX_LAT; // 13 clocks
+    localparam int            CHUNK34  = 34;
+    localparam int            CHUNK26  = (AW <= 16) ? 38 : 26;
     localparam logic [63:0]   GL_P     = qsag_ni_pkg::GL_P;
     localparam int            LW       = 76;
     localparam logic [LW-1:0] MI0_BIAS = LW'(128'(2) * 128'(GL_P) - (128'd1 << 64) + 128'd1) << 6;
@@ -45,18 +49,14 @@ module qsag_p2_compact #(
     assign busy     = (st != IDLE) || out_valid;
     assign in_ready = !rst && (st == IDLE);
 
-    // Single-lane feed-forward adder: during pass 0 LIN_PREP p_cnt=0..3, x[0], x[4], x[8] present
-    // lanes (i, i+4, i+8) as `x` rotates.
     logic [66:0] ff_one;
-    qsag_sum_csa #(.W(67), .N(3), .CHUNK(34)) u_ff1 (
+    qsag_sum_csa #(.W(67), .N(3), .CHUNK(CHUNK34)) u_ff1 (
         .x({67'(x[64*8 +: 64]) << 2, 67'(x[64*4 +: 64]) << 1, 67'(x[0 +: 64])}),
         .y(ff_one));
 
-    // Sequential 12-lane accumulator during LIN_PREP (p_cnt = 0..11).
-    qsag_add_split #(.W(68), .CHUNK(34)) u_sum_acc (
+    qsag_add_split #(.W(68), .CHUNK(CHUNK34)) u_sum_acc (
         .a(sum12_q), .b(68'(x[63:0])), .y(sum12_next));
 
-    // Hardwired column M4 on x[0], x[3], x[6], x[9].
     wire [66:0] mb [4];
     assign mb[0] = 67'(x[64*0 +: 64]);
     assign mb[1] = 67'(x[64*3 +: 64]);
@@ -72,11 +72,10 @@ module qsag_p2_compact #(
             mb[(k + 1) % 4] << 1,
             mb[k] << 1
         };
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(34)) u_m4 (
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(CHUNK34)) u_m4 (
             .x(m4_terms), .y(m4_d[67*k +: 67]));
     end
 
-    // Pre-registered round constant lookup for next streamed lane (0 extra clock latency).
     qsag_p2_rc u_rc (.pass(pass), .rc(rc));
     wire [3:0]  next_rc_idx = (lstep < 4'd11) ? (lstep + 4'd1) : 4'd0;
     wire [63:0] rc_next     = rc[64*next_rc_idx +: 64];
@@ -85,7 +84,6 @@ module qsag_p2_compact #(
                             ? ((out_jive && lstep < 4'd4) ? ff[66:0] : 67'd0)
                             : 67'(rc_lane_q);
 
-    // Single-lane linear stream (Stage 1 CSA+add -> Stage 2 Goldilocks fold).
     wire [66:0] m4_cur = (lc == 2'd0) ? m4_col0[66:0]
                        : (lc == 2'd1) ? m4_col1[66:0]
                                       : m4_col2[66:0];
@@ -120,7 +118,7 @@ module qsag_p2_compact #(
         end
     end
 
-    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(26)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
+    qsag_sum_csa #(.W(LW), .N(5), .CHUNK(CHUNK26)) u_lin_s1 (.x(lin_terms), .y(lazy_d));
 
     logic [63:0] lo;
     logic [11:0] t_hi;
@@ -130,17 +128,22 @@ module qsag_p2_compact #(
     /* verilator lint_on UNUSEDSIGNAL */
     wire [4*66-1:0] tr0 = {66'd1,            ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
     wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r0 (.x(tr0), .y(r0));
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(34)) u_lin_r1 (.x(tr1), .y(r1));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r0 (.x(tr0), .y(r0));
+    qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r1 (.x(tr1), .y(r1));
     wire [63:0] red_y_d = r1[65] ? r0[63:0] : r1[63:0];
 
-    // Single shared Goldilocks DSP multiplier across all 4 S-box stages (`x^2, x^3, x^6, x^7`).
-    wire [63:0] mul_a = x[63:0];
-    wire [63:0] mul_b = (sb_stage == 2'd0 || sb_stage == 2'd2) ? x[63:0] : x_base[63:0];
-    qsag_gl64_dsp_mul #(.AW(AW), .BW(BW), .REG_OUT(1)) u_mul (
-        .clk(clk), .a(mul_a), .b(mul_b), .r(mul_r));
+    if (USE_PIPE_SBOX) begin : g_pipe_sbox
+        qsag_p2_sbox7 #(.AW(AW), .BW(BW)) u_sbox (.clk(clk), .x(x[63:0]), .y(mul_r));
+        /* verilator lint_off UNUSEDSIGNAL */
+        wire unused_p = &{1'b0, x_base, sb_stage};
+        /* verilator lint_on UNUSEDSIGNAL */
+    end else begin : g_seq_sbox
+        wire [63:0] mul_a = x[63:0];
+        wire [63:0] mul_b = (sb_stage == 2'd0 || sb_stage == 2'd2) ? x[63:0] : x_base[63:0];
+        qsag_gl64_dsp_mul #(.AW(AW), .BW(BW), .REG_OUT(1)) u_mul (
+            .clk(clk), .a(mul_a), .b(mul_b), .r(mul_r));
+    end
 
-    // Datapath shift registers without reset gating so TRELLIS_FF uses native slice CEs.
     always_ff @(posedge clk) begin
         lazy_q  <= lazy_d;
         red_y_q <= red_y_d;
@@ -176,16 +179,29 @@ module qsag_p2_compact #(
                 end
                 if (lstep == 4'd13) begin
                     if (pass == 5'd30) out_state <= {red_y_q, x[703:0]};
-                    else               x_base    <= {red_y_q, x[703:0]};
+                    else if (!USE_PIPE_SBOX) x_base <= {red_y_q, x[703:0]};
                 end
             end
             SBOX: begin
-                if (mi) begin
-                    if (sb_cnt == 5'(MUL_LAT)) x[63:0] <= mul_r;
+                if (USE_PIPE_SBOX) begin
+                    if (mi) begin
+                        if (sb_cnt == 5'(SBOX_LAT)) x[63:0] <= mul_r;
+                    end else begin
+                        // Stream 12 lanes into u_sbox on sb_cnt = 0..11; capture outputs on
+                        // sb_cnt = SBOX_LAT .. SBOX_LAT+11 into x[767:704] shifting right 12 times!
+                        if (sb_cnt < 5'd12)
+                            x <= {x[63:0], x[767:64]};
+                        else if (sb_cnt >= 5'(SBOX_LAT))
+                            x <= {mul_r, x[767:64]};
+                    end
                 end else begin
-                    if (sb_cnt < 5'(MUL_LAT)) x <= {x[63:0], x[767:64]};
-                    else                      x <= {mul_r, x[767:64]};
-                    if (sb_cnt < 5'd12)       x_base <= {x_base[63:0], x_base[767:64]};
+                    if (mi) begin
+                        if (sb_cnt == 5'(MUL_LAT)) x[63:0] <= mul_r;
+                    end else begin
+                        if (sb_cnt < 5'(MUL_LAT)) x <= {x[63:0], x[767:64]};
+                        else                      x <= {mul_r, x[767:64]};
+                        if (sb_cnt < 5'd12)       x_base <= {x_base[63:0], x_base[767:64]};
+                    end
                 end
             end
             default: ;
@@ -232,7 +248,23 @@ module qsag_p2_compact #(
                     end
                 end
                 SBOX: begin
-                    if (mi) begin
+                    if (USE_PIPE_SBOX) begin
+                        if (mi) begin
+                            if (sb_cnt == 5'(SBOX_LAT)) begin
+                                p_cnt <= 4'd0;
+                                st    <= LIN_PREP;
+                            end else begin
+                                sb_cnt <= sb_cnt + 5'd1;
+                            end
+                        end else begin
+                            if (sb_cnt == 5'(SBOX_LAT + 11)) begin
+                                p_cnt <= 4'd0;
+                                st    <= LIN_PREP;
+                            end else begin
+                                sb_cnt <= sb_cnt + 5'd1;
+                            end
+                        end
+                    end else if (mi) begin
                         if (sb_cnt == 5'(MUL_LAT)) begin
                             sb_cnt <= 5'd0;
                             if (sb_stage == 2'd3) begin

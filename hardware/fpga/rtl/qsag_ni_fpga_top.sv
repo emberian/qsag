@@ -1,11 +1,14 @@
 // QSAG-NI FPGA accelerator top: AXI4-Lite command/register interface plus one 512-bit AXI4-Stream
 // slave around the five QSAG-NI primitives and Steiner-Canopy / Sumcheck / Batch-MAC engines.
 //
-// Parameterized across three silicon profiles sharing the identical software-visible ISA:
-//   1. VU9P_TURBO   : PROFILE_COMPACT=0, P2_UNROLLED=1, KECCAK_PIPE=1, CHAIN_SLOTW=8, FOLD_TAW=16
-//   2. XCUP_RING    : PROFILE_COMPACT=0, P2_UNROLLED=0, KECCAK_PIPE=0, CHAIN_SLOTW=5, FOLD_TAW=16
-//   3. ECP5_COMPACT : PROFILE_COMPACT=1, P2_UNROLLED=0, KECCAK_PIPE=0, CHAIN_SLOTW=5, FOLD_TAW=11,
-//                     AW=16, BW=16 (fits one Lattice LFE5UM5G-85F: 80 MULT18X18D, lane-sliced Keccak)
+// Parameterized across four silicon profiles sharing the identical software-visible ISA:
+//   1. VU9P_TURBO    : PROFILE_COMPACT=0, P2_UNROLLED=1, KECCAK_PIPE=1, CHAIN_SLOTW=8, FOLD_TAW=16
+//   2. XCUP_RING     : PROFILE_COMPACT=0, P2_UNROLLED=0, KECCAK_PIPE=0, CHAIN_SLOTW=5, FOLD_TAW=16
+//   3. ECP5_FULLRATE : PROFILE_COMPACT=1, ECP5_FULLRATE=1, FOLD_TAW=11, AW=16, BW=16
+//                      (fits ONE $45 Lattice ECP5-85F: 117/156 MULT18X18D = 75.0%, 1-MAC/clk Ext4 +
+//                       1-Sbox/clk Poseidon2 + 30-clk/rnd 1-RAM Keccak + zk-Hem v2 F_{p^5})
+//   4. ECP5_COMPACT  : PROFILE_COMPACT=1, ECP5_FULLRATE=0, FOLD_TAW=11, AW=16, BW=16
+//                      (ultra-compact 18/156 MULT18X18D = 11.5%, fits ECP5-25F/45F/85F)
 //
 // Register map (32-bit words, byte addresses):
 //   0x000 CMD        W   [7:0] opcode, [15:8] arg0, [31:16] arg1
@@ -37,6 +40,8 @@
 //   0x15 FOLD_MULTI         arg0[3:0] = m (1..8) back-to-back fold rounds with X[0..4m-1]
 //   0x16 EXT4_BATCH         streams arg1 (1..65535) Ext4 MACs on AXI4-Stream (2 beats/MAC:
 //                           {b, a}, {exp_y, c}), hardware-checking every mac_y == exp_y
+//   0x17 EXT5_MAC           zk-Hem v2 F_p[X]/(X^5 - 3): Y[0..4] = X[0..4] * X[5..9] + X[10..14]
+//   0x18 EXT5_FROB          zk-Hem v2 Frobenius: Y[0..4] = phi^(arg0)(X[0..4]), X^p = zeta_5 * X
 //   0x20 KEC_LOAD           Keccak state = X[0..24]
 //   0x21 KEC_PERMUTE        XOR X[0..16] unless arg0[1]; permute (12r if arg0[0] else 24r); Y=st[0..11]
 //   0x22 KEC_STREAM_SPONGE  streams arg1 Keccak rate blocks on AXI4-Stream (3 beats/block: lanes 0..7,
@@ -49,6 +54,7 @@
 //   0x3F CLEAR              clears sticky errors and counters
 module qsag_ni_fpga_top #(
     parameter bit PROFILE_COMPACT = 1'b0,
+    parameter bit ECP5_FULLRATE   = 1'b0,
     parameter bit P2_UNROLLED     = 1'b0,
     parameter bit KECCAK_PIPE     = P2_UNROLLED,
     parameter int CHAIN_SLOTW     = P2_UNROLLED ? 8 : 5,
@@ -82,15 +88,49 @@ module qsag_ni_fpga_top #(
     input  logic         s_axis_tvalid,
     output logic         s_axis_tready
 );
-    localparam logic [65:0] NEG_1P66  = 66'h3_0000_0000_FFFF_FFFF;
-    localparam int          GF128_LAT = qsag_ni_pkg::GF128_LAT;
-    localparam int          EXT_LAT   = qsag_ni_pkg::EXT4_MAC_LAT;
-    localparam int          SLOTW     = CHAIN_SLOTW;
-    localparam int          SLOTS     = 1 << SLOTW;
-    localparam int          STEPW     = 6;
-    localparam int          TAGW      = SLOTW + 2;
-    localparam int          TS_FAW    = PROFILE_COMPACT ? 8 : 9;
-    localparam int          TS_SAW    = 11;
+    localparam logic [65:0] NEG_1P66     = 66'h3_0000_0000_FFFF_FFFF;
+    localparam bit          COMPACT_EXT4 = PROFILE_COMPACT && !ECP5_FULLRATE;
+    localparam int          GF128_LAT    = qsag_ni_pkg::GF128_LAT;
+    localparam int          EXT_LAT      = qsag_ni_pkg::EXT4_MAC_LAT;
+    localparam int          SLOTW        = CHAIN_SLOTW;
+    localparam int          SLOTS        = 1 << SLOTW;
+    localparam int          STEPW        = 6;
+    localparam int          TAGW         = SLOTW + 2;
+    localparam int          TS_FAW       = PROFILE_COMPACT ? 8 : 9;
+    localparam int          TS_SAW       = 11;
+
+    // Primitive 5th root of unity zeta_5 = 3^((p-1)/5) mod p (`zk_hem/v2/field5.rs:FROBENIUS_ZETA5`).
+    function automatic logic [63:0] zeta5_rom(input logic [2:0] idx);
+        case (idx)
+            3'd0:    zeta5_rom = 64'h0000_0000_0000_0001;
+            3'd1:    zeta5_rom = 64'h0e73_6627_a0ae_b983;
+            3'd2:    zeta5_rom = 64'hdb8e_dc80_2dc0_b266;
+            3'd3:    zeta5_rom = 64'h02ef_b5c2_a6f3_5241;
+            3'd4:    zeta5_rom = 64'h130e_0794_8a9d_41d6;
+            default: zeta5_rom = 64'h0000_0000_0000_0001;
+        endcase
+    endfunction
+
+    function automatic logic [2:0] mod5_u8(input logic [7:0] v);
+        logic [4:0] s1;
+        s1 = {1'b0, v[3:0]} + {1'b0, v[7:4]}; // 16 == 1 (mod 5) -> sum in 0..30
+        if      (s1 >= 5'd25) mod5_u8 = 3'(s1 - 5'd25);
+        else if (s1 >= 5'd20) mod5_u8 = 3'(s1 - 5'd20);
+        else if (s1 >= 5'd15) mod5_u8 = 3'(s1 - 5'd15);
+        else if (s1 >= 5'd10) mod5_u8 = 3'(s1 - 5'd10);
+        else if (s1 >= 5'd5)  mod5_u8 = 3'(s1 - 5'd5);
+        else                  mod5_u8 = s1[2:0];
+    endfunction
+
+    function automatic logic [2:0] mul_mod5(input logic [2:0] a, input logic [2:0] b);
+        case ({a, b})
+            6'o11, 6'o23, 6'o32, 6'o44: mul_mod5 = 3'd1;
+            6'o12, 6'o21, 6'o34, 6'o43: mul_mod5 = 3'd2;
+            6'o13, 6'o24, 6'o31, 6'o42: mul_mod5 = 3'd3;
+            6'o14, 6'o22, 6'o33, 6'o41: mul_mod5 = 3'd4;
+            default:                    mul_mod5 = 3'd0;
+        endcase
+    endfunction
 
     // Static sponge midstate ROM (0=zero, 1=FS_MID, 2=TS_CANOPY_MID, 3=TS_POW_MID,
     // 4=CS_CANOPY_MID, 5=TS_FS_MID, 6=CS_POW_MID).
@@ -332,9 +372,10 @@ module qsag_ni_fpga_top #(
     logic [15:0] cmd_a1_q;
 
     // ------------------------------------------------------------------ operation FSM states
-    typedef enum logic [4:0] {
+    typedef enum logic [5:0] {
         O_IDLE, O_P2_OFFER, O_P2_WAIT, O_CH_START, O_CH_WAIT, O_CH_READ,
-        O_MAC, O_SC_SUM, O_SC_H, O_SC_STR, O_SC_STR_S2, O_SC_STR_WAIT,
+        O_MAC, O_EXT5_MAC, O_EXT5_FROB,
+        O_SC_SUM, O_SC_H, O_SC_STR, O_SC_STR_S2, O_SC_STR_WAIT,
         O_FOLD, O_FOLD_NEXT, O_EBATCH, O_EBATCH_DRAIN,
         O_KEC, O_KCMP_LOAD, O_KCMP_XOR, O_KCMP_PERM, O_KCMP_WAIT, O_KCMP_RD,
         O_KSP_COLLECT, O_KSP_PERM, O_KSP_CMP_INIT, O_KSP_CMP_XOR, O_KSP_CMP_PERM,
@@ -379,7 +420,7 @@ module qsag_ni_fpga_top #(
     assign p2_in_tag   = select_eng ? {1'b1, eng_job_last, eng_job_slot} : '0;
 
     if (PROFILE_COMPACT) begin : g_compact_p2
-        qsag_p2_compact #(.TAGW(TAGW), .AW(AW), .BW(BW)) u_p2 (
+        qsag_p2_compact #(.TAGW(TAGW), .AW(AW), .BW(BW), .USE_PIPE_SBOX(ECP5_FULLRATE)) u_p2 (
             .clk(clk), .rst(rst),
             .in_valid(p2_in_valid), .in_ready(p2_in_ready), .in_state(p2_in_state),
             .in_jive(p2_in_jive), .in_tag(p2_in_tag),
@@ -413,9 +454,12 @@ module qsag_ni_fpga_top #(
 
     // ------------------------------------------------------------------ AXI4-Stream routing
     wire [3:0] stream_dst = stream_q[31:28];
-    wire       op_takes_stream = (op_st == O_SC_STR)
-                              || (op_st == O_EBATCH)
-                              || (op_st == O_KSP_COLLECT);
+    wire       op_takes_stream = (op_st == O_SC_STR) || (op_st == O_SC_STR_S2) || (op_st == O_SC_STR_WAIT)
+                              || (op_st == O_EBATCH) || (op_st == O_EBATCH_DRAIN)
+                              || (op_st == O_KSP_COLLECT) || (op_st == O_KSP_PERM)
+                              || (op_st == O_KSP_CMP_INIT) || (op_st == O_KSP_CMP_XOR)
+                              || (op_st == O_KSP_CMP_PERM) || (op_st == O_KSP_CMP_WAIT)
+                              || (op_st == O_KSP_CMP_RD);
     logic      op_stream_ready;
     logic      ts_busy;
     logic      fold_start, fold_busy, fold_done;
@@ -470,7 +514,9 @@ module qsag_ni_fpga_top #(
     logic         eb_half, eb_wait_cmp, eb_fail_q;
     logic [15:0]  eb_rem, eb_ret_rem;
     logic [255:0] eb_a_q, eb_b_q, eb_exp_cmp_q, eb_exp_cmp_val;
-    if (PROFILE_COMPACT) begin : g_eb_cmp
+    logic [3:0][63:0] e5_tb_q;
+    logic [2:0]       e5_step, e5_k_q;
+    if (COMPACT_EXT4) begin : g_eb_cmp
         assign eb_exp_cmp_val = eb_exp_cmp_q;
     end else begin : g_eb_sr
         logic [(EXT_LAT+1)*256-1:0] eb_exp_sr;
@@ -487,7 +533,7 @@ module qsag_ni_fpga_top #(
     assign mac_b     = mac_b_fsm;
     assign mac_c     = mac_c_fsm;
 
-    if (PROFILE_COMPACT) begin : g_compact_ext4
+    if (COMPACT_EXT4) begin : g_compact_ext4
         qsag_ext4_compact_bfly #(.TAW(FOLD_TAW), .AW(AW), .BW(BW)) u_ext4 (
             .clk(clk), .rst(rst),
             .tw_en(passive_stream && stream_dst == 4'h8), .tw_idx(stream_q[FOLD_TAW-1:0]),
@@ -542,11 +588,12 @@ module qsag_ni_fpga_top #(
         end
     end
 
+    localparam int SC_CHUNK = (AW <= 16) ? 33 : 22;
     for (genvar i = 0; i < SC_LANES; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
         wire [63:0] b_l = PROFILE_COMPACT ? sc_vec_q[63:0] : sc_add_b[64*i +: 64];
         wire        c0l = PROFILE_COMPACT ? sc_c0_q        : sc_add_c0;
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(22)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(SC_CHUNK)) u_s1 (
             .x({c0l ? {2'b0, b_l} : 66'd0, {2'b0, b_l}, {2'b0, a_l}}),
             .y(sc_raw_d[66*i +: 66]));
 
@@ -557,8 +604,8 @@ module qsag_ni_fpga_top #(
         /* verilator lint_on UNUSEDSIGNAL */
         wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
         wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(22)) u_r1 (.x(tr1), .y(r1));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r1 (.x(tr1), .y(r1));
         assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
     end
 
@@ -661,7 +708,7 @@ module qsag_ni_fpga_top #(
                     top_kcmd_op    = 2'd2;
                     top_kcmd_nr12  = ksp_flags_q[3];
                 end
-                O_KSP_CMP_RD: if (kcmp_idx < 5'd4) begin
+                O_KSP_CMP_RD: if (kcmp_idx < 5'd8) begin
                     top_kcmd_valid = 1'b1;
                     top_kcmd_op    = 2'd3;
                 end
@@ -671,7 +718,7 @@ module qsag_ni_fpga_top #(
 
         wire use_ts = (op_st == O_TS_CANOPY);
         qsag_keccak_compact u_keccak (
-            .clk(clk), .rst(rst),
+            .clk(clk), .rst(rst), .bank_sel(use_ts),
             .cmd_valid(use_ts ? ts_kcmd_valid : top_kcmd_valid),
             .cmd_ready(kcmd_ready),
             .cmd_op   (use_ts ? ts_kcmd_op    : top_kcmd_op),
@@ -787,8 +834,8 @@ module qsag_ni_fpga_top #(
 
     logic [1:0]   sc_step;
     logic [3:0]   rd_cnt;
-    logic [191:0] ksp_dig_q;
-    wire [255:0]  ksp_full_dig = {kcmd_rd_data, ksp_dig_q};
+    logic [447:0] ksp_dig_q;
+    wire [511:0]  ksp_full_dig = {kcmd_rd_data, ksp_dig_q};
 
     assign op_job_valid    = (op_st == O_P2_OFFER);
     assign op_job_jive     = (cmd_op_q == 8'h02);
@@ -907,7 +954,7 @@ module qsag_ni_fpga_top #(
             if ((op_st == O_EBATCH || op_st == O_EBATCH_DRAIN) && mac_done) begin
                 y_q[3:0]   <= mac_y;
                 eb_ret_rem <= eb_ret_rem - 16'd1;
-                if (PROFILE_COMPACT) eb_wait_cmp <= 1'b0;
+                if (COMPACT_EXT4) eb_wait_cmp <= 1'b0;
                 if (mac_y != eb_exp_cmp_val) eb_fail_q <= 1'b1;
             end
 
@@ -993,6 +1040,25 @@ module qsag_ni_fpga_top #(
                                     op_st       <= O_EBATCH;
                                 end
                             end
+                            8'h17: begin
+                                // Step 0: compute {3*b4, 3*b3, 3*b2, 3*b1} via scalar-vector Ext4 MAC.
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, 64'd3};
+                                mac_b_fsm     <= {x_q[9], x_q[8], x_q[7], x_q[6]};
+                                mac_c_fsm     <= 256'd0;
+                                e5_step       <= 3'd0;
+                                op_st         <= O_EXT5_MAC;
+                            end
+                            8'h18: begin
+                                // Frobenius phi^k(X[0..4]): limb i scaled by zeta_5^((i*k) mod 5).
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[0]};
+                                mac_b_fsm     <= {192'd0, 64'd1};
+                                mac_c_fsm     <= 256'd0;
+                                e5_k_q        <= mod5_u8(wr_data[15:8]);
+                                e5_step       <= 3'd0;
+                                op_st         <= O_EXT5_FROB;
+                            end
                             8'h20: begin
                                 if (PROFILE_COMPACT) begin
                                     kcmp_idx <= 5'd0;
@@ -1071,6 +1137,82 @@ module qsag_ni_fpga_top #(
                     if (mac_done) begin
                         y_q[3:0] <= mac_y;
                         op_st    <= O_FIN;
+                    end
+                end
+                O_EXT5_MAC: begin
+                    if (mac_done) begin
+                        e5_step <= e5_step + 3'd1;
+                        case (e5_step)
+                            3'd0: begin
+                                e5_tb_q       <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[0]};
+                                mac_b_fsm     <= {x_q[8], x_q[7], x_q[6], x_q[5]};
+                                mac_c_fsm     <= {x_q[13], x_q[12], x_q[11], x_q[10]};
+                            end
+                            3'd1: begin
+                                y_q[3:0]      <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[1]};
+                                mac_b_fsm     <= {x_q[7], x_q[6], x_q[5], e5_tb_q[3]};
+                                mac_c_fsm     <= mac_y;
+                            end
+                            3'd2: begin
+                                y_q[3:0]      <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[2]};
+                                mac_b_fsm     <= {x_q[6], x_q[5], e5_tb_q[3], e5_tb_q[2]};
+                                mac_c_fsm     <= mac_y;
+                            end
+                            3'd3: begin
+                                y_q[3:0]      <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[3]};
+                                mac_b_fsm     <= {x_q[5], e5_tb_q[3], e5_tb_q[2], e5_tb_q[1]};
+                                mac_c_fsm     <= mac_y;
+                            end
+                            3'd4: begin
+                                y_q[3:0]      <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[4]};
+                                mac_b_fsm     <= e5_tb_q;
+                                mac_c_fsm     <= mac_y;
+                            end
+                            3'd5: begin
+                                // y[0..3] complete; limb 3 of Ext4(a[0..3], {b4,b3,b2,b1}) + c4 = c4 + a0*b4 + a1*b3 + a2*b2 + a3*b1!
+                                y_q[3:0]      <= mac_y;
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {x_q[3], x_q[2], x_q[1], x_q[0]};
+                                mac_b_fsm     <= {x_q[9], x_q[8], x_q[7], x_q[6]};
+                                mac_c_fsm     <= {x_q[14], 192'd0};
+                            end
+                            3'd6: begin
+                                mac_valid_fsm <= 1'b1;
+                                mac_a_fsm     <= {192'd0, x_q[4]};
+                                mac_b_fsm     <= {192'd0, x_q[5]};
+                                mac_c_fsm     <= {192'd0, mac_y[255:192]};
+                            end
+                            default: begin
+                                y_q[4] <= mac_y[63:0];
+                                op_st  <= O_FIN;
+                            end
+                        endcase
+                    end
+                end
+                O_EXT5_FROB: begin
+                    if (mac_done) begin
+                        y_q[e5_step] <= mac_y[63:0];
+                        if (e5_step == 3'd4) begin
+                            op_st <= O_FIN;
+                        end else begin
+                            logic [2:0] nxt_i;
+                            nxt_i         = e5_step + 3'd1;
+                            e5_step       <= nxt_i;
+                            mac_valid_fsm <= 1'b1;
+                            mac_a_fsm     <= {192'd0, x_q[{2'b00, nxt_i}]};
+                            mac_b_fsm     <= {192'd0, zeta5_rom(mul_mod5(nxt_i, e5_k_q))};
+                            mac_c_fsm     <= 256'd0;
+                        end
                     end
                 end
                 O_SC_SUM: begin
@@ -1225,7 +1367,7 @@ module qsag_ni_fpga_top #(
                 O_EBATCH: begin
                     if (stream_fire) begin
                         if (!eb_half) begin
-                            if (PROFILE_COMPACT) begin
+                            if (COMPACT_EXT4) begin
                                 mac_a_fsm <= s_axis_tdata[255:0];
                                 mac_b_fsm <= s_axis_tdata[511:256];
                             end else begin
@@ -1237,12 +1379,12 @@ module qsag_ni_fpga_top #(
                             eb_half       <= 1'b0;
                             eb_exp_cmp_q  <= s_axis_tdata[511:256];
                             mac_valid_fsm <= 1'b1;
-                            if (!PROFILE_COMPACT) begin
+                            if (!COMPACT_EXT4) begin
                                 mac_a_fsm <= eb_a_q;
                                 mac_b_fsm <= eb_b_q;
                             end
                             mac_c_fsm     <= s_axis_tdata[255:0];
-                            if (PROFILE_COMPACT) eb_wait_cmp <= 1'b1;
+                            if (COMPACT_EXT4) eb_wait_cmp <= 1'b1;
                             if (eb_rem == 16'd1) begin
                                 eb_rem <= 16'd0;
                                 op_st  <= O_EBATCH_DRAIN;
@@ -1320,7 +1462,7 @@ module qsag_ni_fpga_top #(
                 end
                 O_KSP_PERM: begin
                     if (kec_done) begin
-                        y_q[3:0] <= kec_dig_out;
+                        y_q[7:0] <= kec_y_out[511:0];
                         if (ksp_flags_q[4] && kec_dig_out != ksp_exp_q) ksp_fail_q <= 1'b1;
                         if (ksp_rem == 16'd1) begin
                             op_ok <= !(ksp_fail_q || (ksp_flags_q[4] && kec_dig_out != ksp_exp_q));
@@ -1358,14 +1500,14 @@ module qsag_ni_fpga_top #(
                     end
                 end
                 O_KSP_CMP_RD: begin
-                    if (kcmd_ready && kcmp_idx < 5'd4) kcmp_idx <= kcmp_idx + 5'd1;
+                    if (kcmd_ready && kcmp_idx < 5'd8) kcmp_idx <= kcmp_idx + 5'd1;
                     if (kcmd_rd_valid) begin
-                        ksp_dig_q <= ksp_full_dig[255:64];
-                        if (rd_cnt == 4'd3) begin
-                            y_q[3:0] <= ksp_full_dig;
-                            if (ksp_flags_q[4] && ksp_full_dig != ksp_exp_q) ksp_fail_q <= 1'b1;
+                        ksp_dig_q <= ksp_full_dig[511:64];
+                        if (rd_cnt == 4'd7) begin
+                            y_q[7:0] <= ksp_full_dig;
+                            if (ksp_flags_q[4] && ksp_full_dig[255:0] != ksp_exp_q) ksp_fail_q <= 1'b1;
                             if (ksp_rem == 16'd1) begin
-                                op_ok <= !(ksp_fail_q || (ksp_flags_q[4] && ksp_full_dig != ksp_exp_q));
+                                op_ok <= !(ksp_fail_q || (ksp_flags_q[4] && ksp_full_dig[255:0] != ksp_exp_q));
                                 op_st <= O_FIN;
                             end else begin
                                 ksp_rem <= ksp_rem - 16'd1;
