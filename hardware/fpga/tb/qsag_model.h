@@ -49,6 +49,35 @@ static inline E4 e4_add(const E4& a, const E4& b) { E4 o; for (int i = 0; i < 4;
 static inline E4 e4_sub(const E4& a, const E4& b) { E4 o; for (int i = 0; i < 4; i++) o[i] = gl_sub(a[i], b[i]); return o; }
 static inline E4 e4_mul(const E4& a, const E4& b) { return e4_mul_add(a, b, E4{0, 0, 0, 0}); }
 
+// ---- Fp5 = F_p[X]/(X^5 - 3), canonical flat power basis [c0, c1, c2, c3, c4] (zk_hem/v2/field5.rs).
+typedef std::array<uint64_t, 5> E5;
+static const uint64_t ZETA5_POW[5] = {
+    0x0000000000000001ULL,
+    0x0e736627a0aeb983ULL,
+    0xdb8edc802dc0b266ULL,
+    0x02efb5c2a6f35241ULL,
+    0x130e07948a9d41d6ULL
+};
+static inline E5 e5_mul_add(const E5& a, const E5& b, const E5& c) {
+    E5 o;
+    for (int k = 0; k < 5; k++) {
+        uint64_t acc = gl_red(c[k]);
+        for (int i = 0; i < 5; i++) {
+            if (i <= k) acc = gl_add(acc, gl_mul(a[i], b[k - i]));
+            else        acc = gl_add(acc, gl_mul(3, gl_mul(a[i], b[k + 5 - i])));
+        }
+        o[k] = acc;
+    }
+    return o;
+}
+static inline E5 e5_mul(const E5& a, const E5& b) { return e5_mul_add(a, b, E5{0, 0, 0, 0, 0}); }
+static inline E5 e5_frobenius(const E5& a, uint32_t k) {
+    E5 o;
+    uint32_t k5 = k % 5;
+    for (int i = 0; i < 5; i++) o[i] = gl_mul(gl_red(a[i]), ZETA5_POW[(i * k5) % 5]);
+    return o;
+}
+
 // ---- Poseidon2 width 12 (qsag-accel poseidon2.rs).
 typedef std::array<uint64_t, 12> St12;
 static inline uint64_t p2_bij(uint64_t x) {
@@ -263,4 +292,5 @@ struct Rng {
         return (r & 7) == 0 ? E[(r >> 8) % 12] : next();
     }
     E4 e4() { return E4{gl(), gl(), gl(), gl()}; }
+    E5 e5() { return E5{gl(), gl(), gl(), gl(), gl()}; }
 };

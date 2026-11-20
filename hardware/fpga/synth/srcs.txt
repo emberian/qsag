@@ -5,6 +5,7 @@ rtl/qsag_sum_csa.sv
 rtl/qsag_sdp_bram.sv
 rtl/qsag_bram_delay.sv
 rtl/qsag_gl64_reduce.sv
+rtl/qsag_mul33x32_dsp.sv
 rtl/qsag_mul64_dsp.sv
 rtl/qsag_gl64_dsp_mul.sv
 rtl/qsag_p2_sbox7.sv
@@ -14,6 +15,7 @@ rtl/qsag_p2_round.sv
 rtl/qsag_poseidon2_12_fpga.sv
 rtl/qsag_poseidon2_12_pipe.sv
 rtl/qsag_ext4_mac.sv
+rtl/qsag_ext5_mac.sv
 rtl/qsag_ext4_mac_bfly.sv
 rtl/qsag_keccak_turboshake.sv
 rtl/qsag_keccak_compact.sv
