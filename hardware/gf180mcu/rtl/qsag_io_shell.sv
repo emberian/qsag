@@ -98,15 +98,17 @@ module qsag_io_shell (
     qsag_clkbuf u_rxrb (.a(rx_rst_raw), .y(rx_rst_n));
     qsag_clkbuf u_txrb (.a(tx_rst_raw), .y(tx_rst_n));
 
-    // Buffered SPI frame resets (active while CS_N is high in SPI mode; input_PAD[3] false-pathed)
-    wire spi_rst_raw, pk_rst_raw, txl_rst_raw;
-    wire spi_rst_n,   pk_rst_n,   txl_rst_n;
-    qsag_clkand2 u_sra (.a(arst_n),   .b(~cs_n),          .y(spi_rst_raw));
-    qsag_clkand2 u_pra (.a(rx_rst_n), .b(~(m_spi & cs_n)), .y(pk_rst_raw));
-    qsag_clkand2 u_tra (.a(tx_rst_n), .b(~(m_spi & cs_n)), .y(txl_rst_raw));
-    qsag_clkbuf  u_srb (.a(spi_rst_raw), .y(spi_rst_n));
-    qsag_clkbuf  u_prb (.a(pk_rst_raw),  .y(pk_rst_n));
-    qsag_clkbuf  u_trb (.a(txl_rst_raw), .y(txl_rst_n));
+    // Buffered SPI frame & async-micropipeline resets
+    wire spi_rst_raw, pk_rst_raw, txl_rst_raw, mp_rst_raw;
+    wire spi_rst_n,   pk_rst_n,   txl_rst_n,   mp_rst_n;
+    qsag_clkand2 u_sra  (.a(arst_n),   .b(~cs_n),          .y(spi_rst_raw));
+    qsag_clkand2 u_pra  (.a(rx_rst_n), .b(~(m_spi & cs_n)), .y(pk_rst_raw));
+    qsag_clkand2 u_tra  (.a(tx_rst_n), .b(~(m_spi & cs_n)), .y(txl_rst_raw));
+    qsag_clkand2 u_mpra (.a(arst_n),   .b(m_async),         .y(mp_rst_raw));
+    qsag_clkbuf  u_srb  (.a(spi_rst_raw), .y(spi_rst_n));
+    qsag_clkbuf  u_prb  (.a(pk_rst_raw),  .y(pk_rst_n));
+    qsag_clkbuf  u_trb  (.a(txl_rst_raw), .y(txl_rst_n));
+    qsag_clkbuf  u_mprb (.a(mp_rst_raw),  .y(mp_rst_n));
 
     // ------------------------------------------------------------ FIFOs
     logic        push;
@@ -209,7 +211,7 @@ module qsag_io_shell (
     wire [15:0] as_d;
     logic       as_taken;
     qsag_mpipe_stage #(.W(16)) u_mp (
-        .rst_n(arst_n & m_async), .req_in(bidir_in[37] & m_async),
+        .rst_n(mp_rst_n), .req_in(bidir_in[37] & m_async),
         .din({bidir_in[18], bidir_in[6:0], bidir_in[34:27]}),
         .ack_out(as_ack), .taken(as_taken), .c_out(as_c), .dout(as_d)
     );
@@ -236,12 +238,16 @@ module qsag_io_shell (
     end
 
     always_ff @(posedge clk_rx or negedge pk_rst_n)
-        if (!pk_rst_n) begin
-            rxw  <= '0;
-            bcnt <= '0;
-        end else if (m_async) begin
+        if (!pk_rst_n) bcnt <= '0;
+        else if (m_async) begin
+            if (as_go) bcnt <= last2 ? 3'd0 : bcnt + 3'd2;
+        end else if (bv1) begin
+            bcnt <= bcnt + 3'd1;
+        end
+
+    always_ff @(posedge clk_rx)
+        if (m_async) begin
             if (as_go) begin
-                bcnt <= last2 ? 3'd0 : bcnt + 3'd2;
                 unique case (bcnt[2:1])
                     2'd0:    rxw[15:0]  <= as_d;
                     2'd1:    rxw[31:16] <= as_d;
@@ -250,7 +256,6 @@ module qsag_io_shell (
                 endcase
             end
         end else if (bv1) begin
-            bcnt <= bcnt + 3'd1;
             for (int b = 0; b < 7; b++) if (bcnt == 3'(b)) rxw[8*b +: 8] <= byte1;
         end
 
@@ -280,7 +285,7 @@ module qsag_io_shell (
     wire [7:0]  as_tx_dout;
     wire        as_tx_cdone_s;
     qsag_mpipe_tx_stage #(.W(8)) u_mptx (
-        .rst_n(arst_n & m_async), .src_req(as_tx_src), .din(txd_o),
+        .rst_n(mp_rst_n), .src_req(as_tx_src), .din(txd_o),
         .c_done(as_tx_cdone), .req_out(as_tx_req_out),
         .ack_in(bidir_in[17] & m_async), .dout(as_tx_dout)
     );

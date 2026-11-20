@@ -3,7 +3,7 @@
 // SLOT_0P5X0P5 (`4.90 mm^2`, `gf180mcuD`, 5.0V `gf180mcu_fd_sc_mcu7t5v0`).
 // Port signature identical to frozen wafer-space/gf180mcu-project-template `chip_core`.
 //
-//   inputs[0]   EXT_CLK_BYPASS (pull-up: 1 = clk_pad is the core clock)
+//   inputs[0]   EXT_CLK_BYPASS (pull-down: 0 = boots on internal DCRO; 1 = clk_pad when alive)
 //   inputs[2:1] IO_MODE        (pull-down: 00 = SPI, overridable via CSR[56:54])
 //   inputs[3]   CS_N           (pull-up)
 //   analog[3:0] Unused (zero digital cells wired onto unbuffered asig_5p0 pads)
@@ -37,13 +37,13 @@ module chip_core #(
 
     inout  wire [NUM_ANALOG_PADS-1:0] analog
 );
-    localparam logic [31:0] HW_REV = 32'h0180_0002;
+    localparam logic [31:0] HW_REV = 32'h0180_0003;
 
     wire        bypass        = input_in[0];
     wire [1:0]  io_mode_strap = input_in[2:1];
     wire        cs_n          = input_in[3];
-    assign input_pu = 4'b1001;
-    assign input_pd = 4'b0110;
+    assign input_pu = 4'b1000;
+    assign input_pd = 4'b0111;
 
     wire        clk_core, rst_core_n, srst_n, zeroize;
     wire        fault_glitch, fault_tamper, fault_shield, clk_mon;
@@ -61,28 +61,30 @@ module chip_core #(
     wire        an_cs_n, an_sck, an_mosi, an_miso;
 
     // Organ 2: 64-RO PUF + BCH(63,36,t=5) Fuzzy Extractor
-    wire        puf_start_blk, puf_recon_mode, puf_busy, puf_done, puf_blk_err, puf_mon_clk;
+    wire        puf_start_blk, puf_recon_mode, puf_vmask_ld, puf_syn_ld;
+    wire        puf_busy, puf_done, puf_blk_err, puf_mon_clk;
     wire [2:0]  puf_blk_sel, puf_noise_flips;
     wire [5:0]  puf_margin, puf_accepted;
     wire [3:0]  puf_corrected;
-    wire [63:0] puf_vmask_in, puf_vmask_out, puf_word_out;
-    wire [26:0] puf_syn_in, puf_syn_out;
+    wire [63:0] puf_wdata, puf_vmask_out, puf_word_out;
+    wire [26:0] puf_syn_out;
 
-    // Organ 3: 13.56 MHz HF-NFC + 32-Bit RF NCO
+    // Organ 3: 13.56 MHz HF-NFC + 32-Bit RF NCO (96-bit K_vat MAC + 32-bit anti-replay seq)
     wire        nfc_clk_in, nfc_ask_in, nfc_load_mod, nco_rf_out;
-    wire        nfc_token_valid, nfc_token_consume, nfc_crc_err;
-    wire [63:0] nfc_token_nonce, nfc_digest_bind, nco_pkt_data;
+    wire        nfc_frame_rdy, nfc_token_consume, nfc_crc_err;
+    wire [31:0] nfc_seq;
+    wire [95:0] nfc_mac;
+    wire [63:0] nco_pkt_data;
     wire [15:0] nfc_quorum_flags, nfc_rx_frames;
-    wire        nco_en, nco_pkt_load, nco_tx_active;
+    wire        nco_en, nco_cfg_we, nco_pkt_load, nco_tx_active;
     wire [1:0]  nco_mode;
     wire [3:0]  nco_sym_shift;
-    wire [31:0] nco_ftw_base, nco_ftw_delta;
 
-    // Organ 4: < 5 ns Brands-Chaum Rapid-Bit Responder + 32-Tap Vernier TDC
+    // Organ 4: < 6 ns Brands-Chaum Rapid-Bit Responder + 32-Tap Vernier TDC
     wire        db_chal_in, db_resp_out, db_resp_oe, db_resp_ie_force, db_resp_loopback;
     wire        db_load_r0, db_load_r1, db_arm_responder, db_step_round;
     wire        db_launch_ping, db_cal_ping, db_dist_consume;
-    wire        db_responder_armed, db_dist_valid, db_dist_timeout;
+    wire        db_responder_armed, db_dist_valid, db_cal_valid, db_dist_timeout;
     wire [6:0]  db_rounds_done;
     wire [63:0] db_load_wdata, db_chal_log, db_resp_log;
     wire [31:0] db_dist_cycles;
@@ -114,12 +116,14 @@ module chip_core #(
         .busy(an_busy), .cs_n(an_cs_n), .sck(an_sck), .mosi(an_mosi), .miso(an_miso)
     );
 
+    // Block raw RO frequency monitoring on CLK_MON whenever enclave keys or K_vat are active
+    wire puf_mon_allow = csr[50] & ~key_valid & ~vat_ready;
     dregg_ro_puf_bch u_puf (
         .clk(clk_core), .rst_n(rst_core_n), .srst_n(srst_n),
         .start_blk(puf_start_blk), .recon_mode(puf_recon_mode), .blk_sel(puf_blk_sel),
         .margin_thresh(puf_margin), .noise_flips(puf_noise_flips),
-        .vmask_in(puf_vmask_in), .syn_in(puf_syn_in),
-        .mon_en(csr[50]), .mon_beat(csr[51]), .mon_idx(csr[63:58]), .puf_mon_clk(puf_mon_clk),
+        .vmask_ld(puf_vmask_ld), .syn_ld(puf_syn_ld), .puf_wdata(puf_wdata),
+        .mon_en(puf_mon_allow), .mon_beat(csr[51]), .mon_idx(csr[63:58]), .puf_mon_clk(puf_mon_clk),
         .busy(puf_busy), .done(puf_done), .blk_err(puf_blk_err),
         .vmask_out(puf_vmask_out), .syn_out(puf_syn_out), .word_out(puf_word_out),
         .accepted_in_blk(puf_accepted), .corrected_in_blk(puf_corrected)
@@ -129,12 +133,11 @@ module chip_core #(
         .clk(clk_core), .rst_n(rst_core_n), .arst_n(rst_n), .srst_n(srst_n),
         .nfc_clk_in(nfc_clk_in), .nfc_ask_in(nfc_ask_in),
         .nfc_load_mod(nfc_load_mod), .nco_rf_out(nco_rf_out),
-        .token_consume(nfc_token_consume), .token_valid(nfc_token_valid),
-        .token_nonce(nfc_token_nonce), .token_digest_bind(nfc_digest_bind),
+        .token_consume(nfc_token_consume), .token_valid(nfc_frame_rdy),
+        .token_seq(nfc_seq), .token_mac(nfc_mac),
         .token_quorum_flags(nfc_quorum_flags), .nfc_rx_frames(nfc_rx_frames), .nfc_crc_err(nfc_crc_err),
         .nco_en(nco_en), .nco_mode(nco_mode), .nco_sym_shift(nco_sym_shift),
-        .nco_ftw_base(nco_ftw_base), .nco_ftw_delta(nco_ftw_delta),
-        .nco_pkt_load(nco_pkt_load), .nco_pkt_data(nco_pkt_data), .nco_tx_active(nco_tx_active)
+        .nco_cfg_we(nco_cfg_we), .nco_pkt_load(nco_pkt_load), .nco_pkt_data(nco_pkt_data), .nco_tx_active(nco_tx_active)
     );
 
     dregg_distance_tdc u_db (
@@ -147,11 +150,10 @@ module chip_core #(
         .launch_ping(db_launch_ping), .cal_ping(db_cal_ping), .dist_consume(db_dist_consume),
         .responder_armed(db_responder_armed), .rounds_done(db_rounds_done),
         .chal_log_lo(db_chal_log), .resp_log_lo(db_resp_log),
-        .dist_valid(db_dist_valid), .dist_timeout(db_dist_timeout), .dist_cycles(db_dist_cycles)
+        .dist_valid(db_dist_valid), .cal_valid(db_cal_valid),
+        .dist_timeout(db_dist_timeout), .dist_cycles(db_dist_cycles)
     );
 
-    // Mandate #1: rct_fail / apt_fail are reported in tel0 (and gate TRNG keyload) without wedging
-    // FAULT at cold boot if csr[25]=0; fault_shield only asserts FAULT when csr[49] is armed!
     wire fault = fault_glitch | fault_tamper | (fault_shield & csr[49]) | fault_laser_dfa
                | fault_anchor | fault_mac | (csr[25] & (rct_fail | apt_fail))
                | rx_overrun | tx_underrun | fault_control;
@@ -169,22 +171,22 @@ module chip_core #(
         .trng_valid(trng_valid), .trng_word(trng_word), .trng_ok(trng_ok), .trng_take(trng_take),
         .puf_start_blk(puf_start_blk), .puf_recon_mode(puf_recon_mode), .puf_blk_sel(puf_blk_sel),
         .puf_margin(puf_margin), .puf_noise_flips(puf_noise_flips),
-        .puf_vmask_in(puf_vmask_in), .puf_syn_in(puf_syn_in),
+        .puf_vmask_ld(puf_vmask_ld), .puf_syn_ld(puf_syn_ld), .puf_wdata(puf_wdata),
         .puf_done(puf_done), .puf_blk_err(puf_blk_err),
         .puf_vmask_out(puf_vmask_out), .puf_syn_out(puf_syn_out), .puf_word_out(puf_word_out),
         .puf_corrected(puf_corrected),
-        .nfc_token_valid(nfc_token_valid), .nfc_digest_bind(nfc_digest_bind),
+        .nfc_frame_rdy(nfc_frame_rdy), .nfc_seq(nfc_seq), .nfc_mac(nfc_mac),
         .nfc_quorum_flags(nfc_quorum_flags), .nfc_rx_frames(nfc_rx_frames),
         .nfc_token_consume(nfc_token_consume),
         .nco_en(nco_en), .nco_mode(nco_mode), .nco_sym_shift(nco_sym_shift),
-        .nco_ftw_base(nco_ftw_base), .nco_ftw_delta(nco_ftw_delta),
-        .nco_pkt_load(nco_pkt_load), .nco_pkt_data(nco_pkt_data), .nco_tx_active(nco_tx_active),
+        .nco_cfg_we(nco_cfg_we), .nco_pkt_load(nco_pkt_load), .nco_pkt_data(nco_pkt_data), .nco_tx_active(nco_tx_active),
         .db_load_r0(db_load_r0), .db_load_r1(db_load_r1), .db_load_wdata(db_load_wdata),
         .db_arm_responder(db_arm_responder), .db_step_round(db_step_round),
         .db_launch_ping(db_launch_ping), .db_cal_ping(db_cal_ping), .db_dist_consume(db_dist_consume),
         .db_responder_armed(db_responder_armed), .db_rounds_done(db_rounds_done),
         .db_chal_log(db_chal_log), .db_resp_log(db_resp_log),
-        .db_dist_valid(db_dist_valid), .db_dist_timeout(db_dist_timeout), .db_dist_cycles(db_dist_cycles),
+        .db_dist_valid(db_dist_valid), .db_cal_valid(db_cal_valid),
+        .db_dist_timeout(db_dist_timeout), .db_dist_cycles(db_dist_cycles),
         .tel0(tel0), .tel1({HW_REV[15:0], 11'd0, nfc_crc_err, quad_trip_map}), .csr(csr),
         .verify_ok(verify_ok), .key_valid_o(key_valid), .vat_ready_o(vat_ready),
         .fault_anchor(fault_anchor), .fault_mac(fault_mac), .fault_control(fault_control),
@@ -213,7 +215,7 @@ module chip_core #(
     );
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, an_busy, puf_busy, puf_accepted, nfc_token_nonce, vat_ready};
+    wire unused = &{1'b0, an_busy, puf_busy, puf_accepted, vat_ready, analog};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 
