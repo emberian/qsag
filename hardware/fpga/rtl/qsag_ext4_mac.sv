@@ -21,7 +21,8 @@ module qsag_ext4_mac #(
 );
     localparam int MUL64_LAT = qsag_ni_pkg::MUL64_LAT;
     localparam int C_DLY     = 1 + MUL64_LAT; // 4 clocks to align with m[0..8]
-    localparam int CHUNK     = (AW <= 16) ? 16 : 24;
+    localparam int CHUNK     = (AW <= 16) ? 46 : 24;
+    localparam int CHUNK16   = (AW <= 16) ? 34 : 16;
     localparam logic [65:0] NEG_1P66 = 66'h3_0000_0000_FFFF_FFFF; // 2^66 - GL_P
     localparam logic [66:0] NEG_1P67 = 67'h7_0000_0000_FFFF_FFFF; // 2^67 - GL_P
     localparam logic [66:0] NEG_2P67 = 67'h6_0000_0001_FFFF_FFFE; // 2^67 - 2*GL_P
@@ -41,9 +42,9 @@ module qsag_ext4_mac #(
         logic [64:0] s0;
         logic [65:0] s1;
         /* verilator lint_on UNUSEDSIGNAL */
-        qsag_add_split #(.W(65), .CHUNK(16)) u_s0 (
+        qsag_add_split #(.W(65), .CHUNK(CHUNK16)) u_s0 (
             .a({1'b0, p2_lhs[i]}), .b({1'b0, p2_rhs[i]}), .y(s0));
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(16)) u_s1 (
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(CHUNK16)) u_s1 (
             .x({NEG_1P66, {2'b0, p2_rhs[i]}, {2'b0, p2_lhs[i]}}), .y(s1));
         assign p2_sum[i] = !s1[65] ? s1[63:0] : s0[63:0];
     end
@@ -58,11 +59,11 @@ module qsag_ext4_mac #(
         logic [65:0] s0;
         logic [66:0] s1, s2, s3;
         /* verilator lint_on UNUSEDSIGNAL */
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(16)) u_s0 (
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK16)) u_s0 (
             .x({{2'b0, x3}, {2'b0, x2}, {2'b0, x1}, {2'b0, x0}}), .y(s0));
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s1 (.x({NEG_1P67, base}), .y(s1));
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s2 (.x({NEG_2P67, base}), .y(s2));
-        qsag_sum_csa #(.W(67), .N(5), .CHUNK(16)) u_s3 (.x({NEG_3P67, base}), .y(s3));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(CHUNK16)) u_s1 (.x({NEG_1P67, base}), .y(s1));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(CHUNK16)) u_s2 (.x({NEG_2P67, base}), .y(s2));
+        qsag_sum_csa #(.W(67), .N(5), .CHUNK(CHUNK16)) u_s3 (.x({NEG_3P67, base}), .y(s3));
         assign p4_sum[i] = !s3[66] ? s3[63:0] : !s2[66] ? s2[63:0] : !s1[66] ? s1[63:0] : s0[63:0];
     end
 
@@ -106,42 +107,65 @@ module qsag_ext4_mac #(
     // Stage 4: carry-save recombination into four 136-bit accumulators.
     logic [3:0][135:0] acc_d, acc_q;
 
-    // y0 = c0 + m00 + 7*m01 + 7*m12 - 7*m10 - 7*m11  (+ 14*C1)
-    wire [15*136-1:0] t_y0 = {
-        136'(14) * C1, 136'(c0), pm[0],
-        pm[1], pm[1] << 1, pm[1] << 2,
-        pm[5], pm[5] << 1, pm[5] << 2,
-        nm[3], nm[3] << 1, nm[3] << 2,
-        nm[4], nm[4] << 1, nm[4] << 2
-    };
-    qsag_sum_csa #(.W(136), .N(15), .CHUNK(CHUNK)) u_y0 (.x(t_y0), .y(acc_d[0]));
+    if (AW <= 16) begin : g_ecp5_acc
+        wire [135:0] s0_a = pm[1] + pm[5];
+        wire [135:0] s0_b = nm[3] + nm[4];
+        wire [135:0] s0   = s0_a + s0_b;
+        wire [135:0] s0_7 = (s0 << 3) - s0;
+        wire [135:0] b0_c = (136'(14) * C1 + 136'(c0)) + pm[0];
+        qsag_add_split #(.W(136), .CHUNK(46)) u_ay0 (.a(b0_c), .b(s0_7), .y(acc_d[0]));
 
-    // y1 = c1 + m02 + m10 + 7*m11 - m00 - m01  (+ 2*C1)
-    wire [9*136-1:0] t_y1 = {
-        136'(2) * C1, 136'(c1), pm[2], pm[3],
-        pm[4], pm[4] << 1, pm[4] << 2,
-        nm[0], nm[1]
-    };
-    qsag_sum_csa #(.W(136), .N(9), .CHUNK(CHUNK)) u_y1 (.x(t_y1), .y(acc_d[1]));
+        wire [135:0] m4_7 = (pm[4] << 3) - pm[4];
+        wire [135:0] s1_a = (136'(2) * C1 + 136'(c1)) + (pm[2] + pm[3]);
+        wire [135:0] s1_b = m4_7 + (nm[0] + nm[1]);
+        qsag_add_split #(.W(136), .CHUNK(46)) u_ay1 (.a(s1_a), .b(s1_b), .y(acc_d[1]));
 
-    // y2 = c2 + m20 + 7*m21 - m00 - 7*m01 - m10 - 7*m11  (+ 16*C1)
-    wire [14*136-1:0] t_y2 = {
-        136'(16) * C1, 136'(c2), pm[6],
-        pm[7], pm[7] << 1, pm[7] << 2,
-        nm[0],
-        nm[1], nm[1] << 1, nm[1] << 2,
-        nm[3],
-        nm[4], nm[4] << 1, nm[4] << 2
-    };
-    qsag_sum_csa #(.W(136), .N(14), .CHUNK(CHUNK)) u_y2 (.x(t_y2), .y(acc_d[2]));
+        wire [135:0] s2   = pm[7] + (nm[1] + nm[4]);
+        wire [135:0] s2_7 = (s2 << 3) - s2;
+        wire [135:0] s2_a = ((136'(16) * C1 + 136'(c2)) + pm[6]) + (nm[0] + nm[3]);
+        qsag_add_split #(.W(136), .CHUNK(46)) u_ay2 (.a(s2_a), .b(s2_7), .y(acc_d[2]));
 
-    // y3 = c3 + m22 + m00 + m01 + m10 + m11 - m20 - m21 - m02 - m12  (+ 4*C1)
-    wire [11*136-1:0] t_y3 = {
-        136'(4) * C1, 136'(c3),
-        pm[8], pm[0], pm[1], pm[3], pm[4],
-        nm[6], nm[7], nm[2], nm[5]
-    };
-    qsag_sum_csa #(.W(136), .N(11), .CHUNK(CHUNK)) u_y3 (.x(t_y3), .y(acc_d[3]));
+        wire [135:0] s3_a = ((136'(4) * C1 + 136'(c3)) + pm[8]) + ((pm[0] + pm[1]) + (pm[3] + pm[4]));
+        wire [135:0] s3_b = (nm[6] + nm[7]) + (nm[2] + nm[5]);
+        qsag_add_split #(.W(136), .CHUNK(46)) u_ay3 (.a(s3_a), .b(s3_b), .y(acc_d[3]));
+    end else begin : g_csa_acc
+        // y0 = c0 + m00 + 7*m01 + 7*m12 - 7*m10 - 7*m11  (+ 14*C1)
+        wire [15*136-1:0] t_y0 = {
+            136'(14) * C1, 136'(c0), pm[0],
+            pm[1], pm[1] << 1, pm[1] << 2,
+            pm[5], pm[5] << 1, pm[5] << 2,
+            nm[3], nm[3] << 1, nm[3] << 2,
+            nm[4], nm[4] << 1, nm[4] << 2
+        };
+        qsag_sum_csa #(.W(136), .N(15), .CHUNK(CHUNK)) u_y0 (.x(t_y0), .y(acc_d[0]));
+
+        // y1 = c1 + m02 + m10 + 7*m11 - m00 - m01  (+ 2*C1)
+        wire [9*136-1:0] t_y1 = {
+            136'(2) * C1, 136'(c1), pm[2], pm[3],
+            pm[4], pm[4] << 1, pm[4] << 2,
+            nm[0], nm[1]
+        };
+        qsag_sum_csa #(.W(136), .N(9), .CHUNK(CHUNK)) u_y1 (.x(t_y1), .y(acc_d[1]));
+
+        // y2 = c2 + m20 + 7*m21 - m00 - 7*m01 - m10 - 7*m11  (+ 16*C1)
+        wire [14*136-1:0] t_y2 = {
+            136'(16) * C1, 136'(c2), pm[6],
+            pm[7], pm[7] << 1, pm[7] << 2,
+            nm[0],
+            nm[1], nm[1] << 1, nm[1] << 2,
+            nm[3],
+            nm[4], nm[4] << 1, nm[4] << 2
+        };
+        qsag_sum_csa #(.W(136), .N(14), .CHUNK(CHUNK)) u_y2 (.x(t_y2), .y(acc_d[2]));
+
+        // y3 = c3 + m22 + m00 + m01 + m10 + m11 - m20 - m21 - m02 - m12  (+ 4*C1)
+        wire [11*136-1:0] t_y3 = {
+            136'(4) * C1, 136'(c3),
+            pm[8], pm[0], pm[1], pm[3], pm[4],
+            nm[6], nm[7], nm[2], nm[5]
+        };
+        qsag_sum_csa #(.W(136), .N(11), .CHUNK(CHUNK)) u_y3 (.x(t_y3), .y(acc_d[3]));
+    end
 
     for (genvar k = 0; k < 4; k++) begin : g_red
         always_ff @(posedge clk) acc_q[k] <= acc_d[k];
