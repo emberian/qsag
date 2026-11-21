@@ -36,6 +36,9 @@ single coin across all `256 * 256 ^ 24` keys (`winProb = 1`).
 -/
 
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
+public import Qsag.Protocol.Signing.FullAdaptiveEufCma
+public import Qsag.Protocol.Signing.ClosedGameGuardTeeth
+public import Qsag.Protocol.Signing.AdrsSeparationGuardTeeth
 public import Qsag.Protocol.Signing.ProdHashReductions
 public import Qsag.Protocol.Signing.HypertreeEufCma
 import Qsag.Tactic.AssuranceKit
@@ -244,10 +247,23 @@ theorem tooth_constant_hash_refutes_zero_keyed_hardness :
   Qsag.adaptiveMultiQueryExecEufCma_forger_bound
   Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
   Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+  Qsag.poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.pkDependentAdaptiveForger_violates_hCand
+  Qsag.pkDependentAdaptiveForger_unconditional_bound
+  Qsag.inhabited_poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.tswGuardSuite_full_adaptive_forger_bound
+  Qsag.tooth_disabled_checkTargetSum_one_query_forges_prob_one
+  Qsag.tooth_disabled_checkTargetSum_refutes_bound
+  Qsag.symMerkleSuite_full_adaptive_forger_bound
+  Qsag.tooth_zeroed_adrs_leaf_layer_forges_prob_one
+  Qsag.tooth_zeroed_adrs_refutes_bound
 
 #verify_inhabited
   Qsag.poly257MultiLeaf_adaptive_forger_bound
   Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+#verify_inhabited
+  Qsag.poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.inhabited_poly257MultiLeaf_full_adaptive_forger_bound
 
 #tooth_pair Qsag.jorts_baggy_closed_euf_cma_same_trace_classification vs
   Qsag.ClosedEufCmaTeeth.tooth_reused_epoch_latch_wins_euf_cma_prob_one
@@ -257,6 +273,14 @@ theorem tooth_constant_hash_refutes_zero_keyed_hardness :
   Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
 #tooth_pair Qsag.adaptiveMultiQueryExecEufCma_forger_bound vs
   Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.poly257MultiLeaf_full_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.pkDependentAdaptiveForger_unconditional_bound vs
+  Qsag.pkDependentAdaptiveForger_violates_hCand
+#tooth_pair Qsag.tswGuardSuite_full_adaptive_forger_bound vs
+  Qsag.tooth_disabled_checkTargetSum_refutes_bound
+#tooth_pair Qsag.symMerkleSuite_full_adaptive_forger_bound vs
+  Qsag.tooth_zeroed_adrs_refutes_bound
 
 end Qsag.ClosedEufCmaTeeth
 end
