@@ -1958,6 +1958,22 @@ def latchedRandomizedSignerMachine {PK SK Sig : Type} (S : RandomizedSigScheme P
     if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then ⟨req.epoch + 1⟩
     else c
 
+theorem latchedRandomizedSignerMachine_init {PK SK Sig : Type}
+    (S : RandomizedSigScheme PK SK Sig) (sk : SK) (stateful₀ : Bool) (maxWindow : Nat) :
+    (latchedRandomizedSignerMachine S sk stateful₀ maxWindow).Init ⟨0⟩ := by
+  unfold latchedRandomizedSignerMachine; rfl
+
+theorem latchedRandomizedSignerMachine_step_of_valid {PK SK Sig : Type}
+    (S : RandomizedSigScheme PK SK Sig) (sk : SK) (stateful₀ : Bool) (maxWindow : Nat)
+    (c : LatchedSignerState) (req : RandomizedSignRequest) (sig : Sig)
+    (hA : epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true)
+    (hS : S.sign sk req.epoch req.optRand req.message = some sig) :
+    (latchedRandomizedSignerMachine S sk stateful₀ maxWindow).step c req =
+      some (⟨req.epoch + 1⟩, sig) := by
+  unfold latchedRandomizedSignerMachine
+  dsimp only
+  rw [hA, hS]; rfl
+
 /-- **Refinement (`latchedRandomizedSignerMachine ⊑ idealRandomizedSignMachine`).**
     Models hedged per-signature randomness `req.optRand` first-class alongside epoch latching. -/
 def latchedRandomizedSigner_refines_ideal {PK SK Sig : Type}

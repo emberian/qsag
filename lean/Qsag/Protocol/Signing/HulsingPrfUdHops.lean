@@ -81,12 +81,15 @@ private theorem queryVecCode_play (mkInp : Nat → Spec.Bytes) (secFn : Spec.Byt
     have hRange : (List.range (count + 1)).map (fun i => padBytes32 (secFn (mkInp (start + i)))) =
         padBytes32 (secFn (mkInp start)) ::
           (List.range count).map (fun i => padBytes32 (secFn (mkInp (start + 1 + i)))) := by
-      have hR : List.range (count + 1) = 0 :: (List.range count).map (· + 1) := by
-        induction count with
+      have hR : ∀ k : Nat, List.range (k + 1) = 0 :: (List.range k).map (· + 1) := by
+        intro k
+        induction k with
         | zero => rfl
         | succ c ih =>
-          rw [List.range_succ, ih, List.range_succ, List.map_append, List.map_singleton]; rfl
-      rw [hR, List.map_cons, List.map_map, Nat.add_zero]
+          conv => lhs; rw [List.range_succ, ih, List.cons_append]
+          congr 1
+          rw [List.range_succ, List.map_append, List.map_singleton]
+      rw [hR count, List.map_cons, List.map_map, Nat.add_zero]
       congr 1; apply List.map_congr_left; intro i _
       dsimp only [Function.comp_def]; rw [Nat.add_assoc, Nat.add_comm 1 i]
     rw [hRange]
@@ -216,7 +219,7 @@ def signQuerySecCode (suite : TweakableHashSuite) (params : PqHashParams)
       | some (leafGlobalIdx, forsIdxs) => signCoreCode leafGlobalIdx (some forsIdxs)
 
 /-- Adaptive tree runner in `Code byteOracleIface` for Hop 2. -/
-def prfSecHopTreeCode (suite : TweakableHashSuite) (params : PqHashParams)
+def prfSecHopTreeCode (latchOn : Bool) (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed : List UInt8) (pk : PqPublicKey) (rfMsg : Spec.Bytes → Spec.Bytes) :
     ProdAdaptiveTree (List UInt8 × PqHashSig) → Nat → List (List UInt8 × PqHashSig) →
     Spec.Code Spec.byteOracleIface Bool
@@ -224,36 +227,36 @@ def prfSecHopTreeCode (suite : TweakableHashSuite) (params : PqHashParams)
     .ret (verifyProductionPqHashSig suite params pk msgStar sigStar &&
       decide (msgStar ∉ log.map Prod.fst))
   | .hashQuery x next, lo, log =>
-    prfSecHopTreeCode suite params pkSeed pk rfMsg (next (suite.rawHash x)) lo log
+    prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg (next (suite.rawHash x)) lo log
   | .signQuery q next, lo, log =>
-    if params.statefulJorts = false ∨ lo ≤ q.epoch then
-      let lo' := if params.statefulJorts then q.epoch + 1 else lo
+    if latchOn = false ∨ lo ≤ q.epoch then
       Spec.Code.bind (signQuerySecCode suite params pkSeed pk rfMsg q) (fun sigOpt =>
         let log' := match sigOpt with
-          | some sig => log ++ [(q.message, sig)]
           | none => log
-        prfSecHopTreeCode suite params pkSeed pk rfMsg (next sigOpt) lo' log')
+          | some sig => log ++ [(q.message, sig)]
+        prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg (next sigOpt) (q.epoch + 1) log')
     else
-      prfSecHopTreeCode suite params pkSeed pk rfMsg (next none) lo log
+      prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg (next none) lo log
 
 /-- **Hop-2 Secret-PRF Distinguisher (`prfSecHopDistinguisher`)** in `Code byteOracleIface Bool`. -/
-def prfSecHopDistinguisher {qHash qSign : Nat} (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed : List UInt8) (rfMsg : Spec.Bytes → Spec.Bytes)
+def prfSecHopDistinguisher {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed : List UInt8) (rfMsg : Spec.Bytes → Spec.Bytes)
     (A : SeedWithheldEufCmaAdv qHash qSign) : Spec.Code Spec.byteOracleIface Bool :=
   let topLayer := UInt32.ofNat (params.numLayers - 1)
   Spec.Code.bind (fetchSubtreeWotsPkCode suite params pkSeed topLayer 0) (fun sw =>
     let pkRoot := computeMerkleNode suite pkSeed topLayer 0 .tree sw.2 params.subtreeHeight 0
     let pk : PqPublicKey := ⟨pkSeed, pkRoot⟩
-    prfSecHopTreeCode suite params pkSeed pk rfMsg ((canonicalizeAdvOptRand A).run pk) 0 [])
+    prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg ((canonicalizeAdvOptRand A).run pk) 0 [])
 
 private theorem fetchSubtreeWotsPkCode_within (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) :
     Spec.Within (2 ^ params.subtreeHeight * params.ell1)
       (fetchSubtreeWotsPkCode suite params pkSeed layer tree) := by
   unfold fetchSubtreeWotsPkCode
-  have hB := Spec.Within.bind (queryVecCode_within _ 0 (2 ^ params.subtreeHeight * params.ell1))
-    (fun _ => Spec.Within.ret 0 _)
-  rwa [Nat.add_zero] at hB
+  dsimp only
+  refine Spec.Within.mono (b₁ := 2 ^ params.subtreeHeight * params.ell1 + 0) (by omega)
+    (Spec.Within.bind (queryVecCode_within _ 0 (2 ^ params.subtreeHeight * params.ell1))
+      (fun _ => Spec.Within.ret 0 _))
 
 private theorem signLayersSecCode_within (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed pkRoot rRand : List UInt8) (maxGrind : Nat) :
@@ -266,21 +269,17 @@ private theorem signLayersSecCode_within (suite : TweakableHashSuite) (params : 
     dsimp only
     split
     · exact .ret _ _
-    · have hSub := fetchSubtreeWotsPkCode_within suite params pkSeed (UInt32.ofNat lI)
-        (UInt64.ofNat (gI / 2 ^ params.subtreeHeight))
-      have hRest : ∀ sw : List (List UInt8) × (Nat → List UInt8),
-          Spec.Within (rem * (2 ^ params.subtreeHeight * params.ell1))
-            (Spec.Code.bind (signLayersSecCode suite params pkSeed pkRoot rRand maxGrind
-              (lI + 1) (gI / 2 ^ params.subtreeHeight)
-              (computeMerkleNode suite pkSeed (UInt32.ofNat lI)
-                (UInt64.ofNat (gI / 2 ^ params.subtreeHeight)) .tree sw.2 params.subtreeHeight 0)
-              rem) _) := fun _ => by
-        have hb := Spec.Within.bind
-          (signLayersSecCode_within suite params pkSeed pkRoot rRand maxGrind _ _ _ rem)
-          (fun restOpt => match restOpt with | none => .ret 0 _ | some _ => .ret 0 _)
-        rwa [Nat.add_zero] at hb
-      have hTot := Spec.Within.bind hSub hRest
-      exact Spec.Within.mono (by rw [Nat.succ_mul, Nat.add_comm]; exact Nat.le_refl _) hTot
+    · refine Spec.Within.mono
+        (b₁ := 2 ^ params.subtreeHeight * params.ell1 +
+          (rem * (2 ^ params.subtreeHeight * params.ell1) + 0))
+        (by rw [Nat.succ_mul]; omega)
+        (Spec.Within.bind
+          (fetchSubtreeWotsPkCode_within suite params pkSeed (UInt32.ofNat lI)
+            (UInt64.ofNat (gI / 2 ^ params.subtreeHeight)))
+          (fun _ => Spec.Within.bind
+            (signLayersSecCode_within suite params pkSeed pkRoot rRand maxGrind
+              (lI + 1) (gI / 2 ^ params.subtreeHeight) _ rem)
+            (fun restOpt => match restOpt with | none => .ret 0 _ | some _ => .ret 0 _)))
 
 private theorem signQuerySecCode_within (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed : List UInt8) (pk : PqPublicKey) (rfMsg : Spec.Bytes → Spec.Bytes)
@@ -288,85 +287,81 @@ private theorem signQuerySecCode_within (suite : TweakableHashSuite) (params : P
     Spec.Within (prfSecPerSignBudget params)
       (signQuerySecCode suite params pkSeed pk rfMsg q) := by
   unfold signQuerySecCode prfSecPerSignBudget
-  have hCore : ∀ leaf fIdxs,
-      Spec.Within
-        ((if params.statefulJorts then 0 else params.forsTrees * 2 ^ params.forsHeight) +
-          params.numLayers * (2 ^ params.subtreeHeight * params.ell1))
-        (Spec.Code.bind
-          (if params.statefulJorts then .ret (some ([], thPreHash suite pk.pkSeed pk.pkRoot q.message))
-           else match fIdxs with
-           | none => .ret none
-           | some idxs =>
-             Spec.Code.bind (queryVecCode _ 0 (params.forsTrees * 2 ^ params.forsHeight)) _) _) := by
-    intro leaf fIdxs
-    have hInit : Spec.Within
-        (if params.statefulJorts then 0 else params.forsTrees * 2 ^ params.forsHeight)
-        (if params.statefulJorts then .ret (some ([], thPreHash suite pk.pkSeed pk.pkRoot q.message))
-         else match fIdxs with
-         | none => .ret none
-         | some idxs =>
-           Spec.Code.bind (queryVecCode _ 0 (params.forsTrees * 2 ^ params.forsHeight)) _) := by
-      by_cases hSt : params.statefulJorts
-      · simp only [hSt, ↓reduceIte]; exact .ret 0 _
-      · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
-        cases fIdxs with
-        | none => exact .ret _ _
-        | some _ =>
-          have hb := Spec.Within.bind (queryVecCode_within _ 0 _) (fun _ => Spec.Within.ret 0 _)
-          rwa [Nat.add_zero] at hb
-    refine Spec.Within.bind hInit (fun initOpt => ?_)
-    cases initOpt with
-    | none => exact .ret _ _
-    | some fc =>
-      have hb := Spec.Within.bind
-        (signLayersSecCode_within suite params pkSeed pk.pkRoot _ q.grindLimit 0 leaf fc.2
-          params.numLayers)
-        (fun lsOpt => match lsOpt with | none => .ret 0 _ | some _ => .ret 0 _)
-      rwa [Nat.add_zero] at hb
+  dsimp only
   by_cases hSt : params.statefulJorts
   · simp only [hSt, ↓reduceIte]
     split
     · exact .ret _ _
-    · exact hCore q.epoch none
+    · refine Spec.Within.mono
+        (b₁ := 0 + (params.numLayers * (2 ^ params.subtreeHeight * params.ell1) + 0))
+        (by omega) (Spec.Within.bind (.ret 0 _) (fun initOpt => ?_))
+      cases initOpt with
+      | none => exact .ret _ _
+      | some fc =>
+        exact Spec.Within.bind
+          (signLayersSecCode_within suite params pkSeed pk.pkRoot _ q.grindLimit 0 q.epoch fc.2
+            params.numLayers)
+          (fun lsOpt => match lsOpt with | none => .ret 0 _ | some _ => .ret 0 _)
   · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
     split
     · exact .ret _ _
     · cases deriveProductionStatelessInputs suite params _ pk.pkSeed pk.pkRoot _ with
       | none => exact .ret _ _
-      | some li => exact hCore li.1 (some li.2)
+      | some li =>
+        dsimp only
+        refine Spec.Within.mono
+          (b₁ := (params.forsTrees * 2 ^ params.forsHeight + 0) +
+            (params.numLayers * (2 ^ params.subtreeHeight * params.ell1) + 0))
+          (by omega)
+          (Spec.Within.bind
+            (Spec.Within.bind (queryVecCode_within _ 0 (params.forsTrees * 2 ^ params.forsHeight))
+              (fun _ => .ret 0 _))
+            (fun initOpt => ?_))
+        cases initOpt with
+        | none => exact .ret _ _
+        | some fc =>
+          exact Spec.Within.bind
+            (signLayersSecCode_within suite params pkSeed pk.pkRoot _ q.grindLimit 0 li.1 fc.2
+              params.numLayers)
+            (fun lsOpt => match lsOpt with | none => .ret 0 _ | some _ => .ret 0 _)
 
-private theorem prfSecHopTreeCode_within (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed : List UInt8) (pk : PqPublicKey) (rfMsg : Spec.Bytes → Spec.Bytes) :
+private theorem prfSecHopTreeCode_within (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed : List UInt8) (pk : PqPublicKey)
+    (rfMsg : Spec.Bytes → Spec.Bytes) :
     ∀ {qH qS : Nat} (t : ProdAdaptiveTree (List UInt8 × PqHashSig)) (lo : Nat)
       (log : List (List UInt8 × PqHashSig)),
       ProdDualBounded qH qS t →
       Spec.Within (qS * prfSecPerSignBudget params)
-        (prfSecHopTreeCode suite params pkSeed pk rfMsg t lo log)
+        (prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg t lo log)
   | _, _, .pure (_, _), _, _, _ => .ret _ _
   | 0, _, .hashQuery _ _, _, _, h => False.elim h
   | _ + 1, _, .hashQuery x next, lo, log, h =>
-    prfSecHopTreeCode_within suite params pkSeed pk rfMsg (next (suite.rawHash x)) lo log (h _)
+    prfSecHopTreeCode_within latchOn suite params pkSeed pk rfMsg (next (suite.rawHash x)) lo log
+      (h _)
   | _, 0, .signQuery _ _, _, _, h => False.elim h
   | _, qS + 1, .signQuery q next, lo, log, h => by
     unfold prfSecHopTreeCode
-    by_cases hAdm : params.statefulJorts = false ∨ lo ≤ q.epoch
+    by_cases hAdm : latchOn = false ∨ lo ≤ q.epoch
     · rw [ite_eq_left hAdm]
-      have hb := Spec.Within.bind (signQuerySecCode_within suite params pkSeed pk rfMsg q)
-        (fun sigOpt =>
-          prfSecHopTreeCode_within suite params pkSeed pk rfMsg (next sigOpt) _ _ (h sigOpt))
-      exact Spec.Within.mono (by rw [Nat.succ_mul, Nat.add_comm]; exact Nat.le_refl _) hb
+      refine Spec.Within.mono
+        (b₁ := prfSecPerSignBudget params + qS * prfSecPerSignBudget params)
+        (by rw [Nat.succ_mul, Nat.add_comm]; exact Nat.le_refl _)
+        (Spec.Within.bind (signQuerySecCode_within suite params pkSeed pk rfMsg q)
+          (fun sigOpt =>
+            prfSecHopTreeCode_within latchOn suite params pkSeed pk rfMsg (next sigOpt)
+              (q.epoch + 1) _ (h sigOpt)))
     · rw [ite_eq_right hAdm]
       exact Spec.Within.mono (by rw [Nat.succ_mul]; exact Nat.le_add_right _ _)
-        (prfSecHopTreeCode_within suite params pkSeed pk rfMsg (next none) lo log (h none))
+        (prfSecHopTreeCode_within latchOn suite params pkSeed pk rfMsg (next none) lo log (h none))
 
-theorem prfSecHopDistinguisher_within {qHash qSign : Nat} (suite : TweakableHashSuite)
-    (params : PqHashParams) (pkSeed : List UInt8) (rfMsg : Spec.Bytes → Spec.Bytes)
-    (A : SeedWithheldEufCmaAdv qHash qSign) :
+theorem prfSecHopDistinguisher_within {qHash qSign : Nat} (latchOn : Bool)
+    (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed : List UInt8)
+    (rfMsg : Spec.Bytes → Spec.Bytes) (A : SeedWithheldEufCmaAdv qHash qSign) :
     Spec.Within (prfSecQueryBudget params qSign)
-      (prfSecHopDistinguisher suite params pkSeed rfMsg A) := by
+      (prfSecHopDistinguisher latchOn suite params pkSeed rfMsg A) := by
   unfold prfSecHopDistinguisher prfSecQueryBudget
   exact Spec.Within.bind (fetchSubtreeWotsPkCode_within suite params pkSeed _ 0)
-    (fun _ => prfSecHopTreeCode_within suite params pkSeed _ rfMsg _ 0 []
+    (fun _ => prfSecHopTreeCode_within latchOn suite params pkSeed _ rfMsg _ 0 []
       ((canonicalizeAdvOptRand A).bounded _))
 
 private theorem fetchSubtreeWotsPkCode_play (suite : TweakableHashSuite) (params : PqHashParams)
@@ -408,7 +403,7 @@ private theorem fetchSubtreeWotsPkCode_play (suite : TweakableHashSuite) (params
   refine ⟨rfl, hGetSec, ?_⟩
   intro kp hkp
   rw [computeWotsPk_eq, thTweakTl_eq, thTweakTl_eq,
-    secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1]
+    secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
   congr 1; apply List.map_congr_left; intro r hrMem
   have hr := List.mem_range.mp hrMem
   rw [hGetSec kp hkp r hr]
@@ -419,7 +414,7 @@ private theorem fetchSubtreeWotsPkCode_play (suite : TweakableHashSuite) (params
   | zero => intro st x; rw [wotsChainSteps_zero, wotsChainSteps_zero]
   | succ k' ih =>
     intro st x; rw [wotsChainSteps_succ, wotsChainSteps_succ]; dsimp only
-    rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+    rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
     exact ih (st + 1) _
 
 private theorem merkleNodeKp_congr_bounded (suite : TweakableHashSuite) (pkSeed : List UInt8)
@@ -433,16 +428,15 @@ private theorem merkleNodeKp_congr_bounded (suite : TweakableHashSuite) (pkSeed 
     simpa [Nat.pow_zero, Nat.mul_one] using hEq 0 Nat.one_pos
   | ht + 1, n, loc, hEq => by
     rw [computeMerkleNodeKp_succ, computeMerkleNodeKp_succ]
-    dsimp only
     congr 1
     · refine merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ (fun i hi => ?_)
       have hMul : (2 * loc) * 2 ^ ht + i = loc * 2 ^ (ht + 1) + i := by
-        rw [Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm 2 loc, Nat.mul_assoc]
+        rw [Nat.pow_succ, Nat.mul_comm (2 ^ ht) 2, ← Nat.mul_assoc, Nat.mul_comm 2 loc]
       rw [hMul]; exact hEq i (by rw [Nat.pow_succ]; omega)
     · refine merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ (fun i hi => ?_)
       have hMul : (2 * loc + 1) * 2 ^ ht + i = loc * 2 ^ (ht + 1) + (2 ^ ht + i) := by
-        rw [Nat.add_mul, Nat.one_mul, Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm 2 loc,
-          Nat.mul_assoc, Nat.add_assoc]
+        rw [Nat.add_mul, Nat.one_mul, Nat.pow_succ, Nat.mul_comm (2 ^ ht) 2, ← Nat.mul_assoc,
+          Nat.mul_comm 2 loc, Nat.add_assoc]
       rw [hMul]; exact hEq (2 ^ ht + i) (by rw [Nat.pow_succ]; omega)
 
 private theorem authPathKp_congr_bounded (suite : TweakableHashSuite) (pkSeed : List UInt8)
@@ -458,21 +452,19 @@ private theorem authPathKp_congr_bounded (suite : TweakableHashSuite) (pkSeed : 
     have hL : ∀ i < 2 ^ ht, f ((2 * locBase) * 2 ^ ht + i) = g ((2 * locBase) * 2 ^ ht + i) := by
       intro i hi
       have hMul : (2 * locBase) * 2 ^ ht + i = locBase * 2 ^ (ht + 1) + i := by
-        rw [Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm 2 locBase, Nat.mul_assoc]
+        rw [Nat.pow_succ, Nat.mul_comm (2 ^ ht) 2, ← Nat.mul_assoc, Nat.mul_comm 2 locBase]
       rw [hMul]; exact hEq i (by rw [Nat.pow_succ]; omega)
     have hR : ∀ i < 2 ^ ht,
         f ((2 * locBase + 1) * 2 ^ ht + i) = g ((2 * locBase + 1) * 2 ^ ht + i) := by
       intro i hi
       have hMul : (2 * locBase + 1) * 2 ^ ht + i = locBase * 2 ^ (ht + 1) + (2 ^ ht + i) := by
-        rw [Nat.add_mul, Nat.one_mul, Nat.pow_succ, ← Nat.mul_assoc, Nat.mul_comm 2 locBase,
-          Nat.mul_assoc, Nat.add_assoc]
+        rw [Nat.add_mul, Nat.one_mul, Nat.pow_succ, Nat.mul_comm (2 ^ ht) 2, ← Nat.mul_assoc,
+          Nat.mul_comm 2 locBase, Nat.add_assoc]
       rw [hMul]; exact hEq (2 ^ ht + i) (by rw [Nat.pow_succ]; omega)
     split
-    · dsimp only
-      rw [merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ hR,
+    · rw [merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ hR,
         authPathKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ locIdx hL]
-    · dsimp only
-      rw [merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ hL,
+    · rw [merkleNodeKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ hL,
         authPathKp_congr_bounded suite pkSeed l t kind kp f g ht _ _ _ hR]
 
 private theorem signLayersSecCode_play (suite : TweakableHashSuite) (params : PqHashParams)
@@ -516,15 +508,13 @@ private theorem signLayersSecCode_play (suite : TweakableHashSuite) (params : Pq
         | zero => rw [grindTswLeafCounterAux_zero, grindTswLeafCounterAux_zero]
         | succ m' ihM =>
           rw [grindTswLeafCounterAux_succ, grindTswLeafCounterAux_succ,
-            thHashLeafMsg_eq, thHashLeafMsg_eq,
-            secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.1, ihM]
+            thHashLeafMsg_eq, thHashLeafMsg_eq, secOverlaySuite_thCall_cons2, ihM]
       · generalize 0 = c0
         induction maxGrind generalizing c0 with
         | zero => rw [grindTswInternalCounterAux_zero, grindTswInternalCounterAux_zero]
         | succ m' ihM =>
           rw [grindTswInternalCounterAux_succ, grindTswInternalCounterAux_succ,
-            thHashInternalNode_eq, thHashInternalNode_eq,
-            secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.1, ihM]
+            thHashInternalNode_eq, thHashInternalNode_eq, secOverlaySuite_thCall_cons2, ihM]
     rw [← hGrindEq]
     cases (if params.statefulJorts && decide (lI = 0) then
         grindTswLeafCounterAux suite params.w params.ell1 params.targetSum rRand pkSeed pkRoot cur
@@ -580,7 +570,7 @@ private theorem signLayersSecCode_play (suite : TweakableHashSuite) (params : Pq
         | zero => intro st x; rw [wotsChainSteps_zero, wotsChainSteps_zero]
         | succ k' ihK =>
           intro st x; rw [wotsChainSteps_succ, wotsChainSteps_succ]; dsimp only
-          rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+          rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
           exact ihK (st + 1) _
       have hNextRootEq :
           computeMerkleNode suite pkSeed (UInt32.ofNat lI)
@@ -606,7 +596,7 @@ private theorem signLayersSecCode_play (suite : TweakableHashSuite) (params : Pq
       rw [code_play_bind, hNextRootEq, hChainsEq, hApEq]
       obtain ⟨hRec1, hRec2⟩ := signLayersSecCode_play suite params pkSeed pkRoot rRand secFn qPrf
         maxGrind (lI + 1) (gI / 2 ^ params.subtreeHeight) _ rem sw.2 hRemB
-      dsimp only
+      dsimp only [sw] at hUsed1 hRec1 hRec2 ⊢
       rw [hRec1]
       cases signProductionHypertreeLayers ov params ⟨[], [], pkSeed⟩ pkRoot rRand maxGrind
           (lI + 1) (gI / 2 ^ params.subtreeHeight) _ rem with
@@ -626,7 +616,7 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
   let ov := secOverlaySuite suite pkSeed secFn
   have hMuEq : thPreHash suite pk.pkSeed pk.pkRoot q.message =
       thPreHash ov pk.pkSeed pk.pkRoot q.message := by
-    rw [thPreHash_eq, thPreHash_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.1]
+    rw [thPreHash_eq, thPreHash_eq, secOverlaySuite_thCall_cons2]
   have hCorePlay : ∀ (leaf : Nat) (fIdxs : Option (List Nat)),
       (∀ idxs, fIdxs = some idxs → ∀ idx ∈ idxs, idx < 2 ^ params.forsHeight) →
       (∀ idxs, fIdxs = some idxs → idxs.length = params.forsTrees) →
@@ -678,6 +668,7 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
         leaf fIdxs q.grindLimit ∧
       res.2 ≤ used + prfSecPerSignBudget params := by
     intro leaf fIdxs hIdxsBnd hIdxsLen
+    dsimp only
     rw [code_play_bind, signProductionHypertreeCore_def]
     dsimp only
     rw [← hMuEq]
@@ -696,7 +687,9 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
       | none =>
         rw [Spec.Code.play_ret]; exact ⟨rfl, by unfold prfSecPerSignBudget; simp [hSt]; exact hL2⟩
       | some ls =>
-        rw [Spec.Code.play_ret, secOverlaySuite_verify_eq]
+        rw [Spec.Code.play_ret]
+        dsimp only [ov]
+        rw [secOverlaySuite_verify_eq]
         exact ⟨rfl, by unfold prfSecPerSignBudget; simp [hSt]; exact hL2⟩
     · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
       cases fIdxs with
@@ -712,7 +705,7 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
         let kp0 := leaf % 2 ^ params.subtreeHeight
         let tree0 := UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)
         let leafCount := 2 ^ params.forsHeight
-        have hFSec : ∀ j < params.forsTrees, ∀ u < leafCount,
+        have hFSec0 : ∀ j < params.forsTrees, ∀ u < leafCount,
             ((List.range (params.forsTrees * leafCount)).map fun i =>
               padBytes32 (secFn (pkSeed ++ encodeAdrs ⟨0, tree0, .forsPrf, UInt32.ofNat kp0,
                 UInt32.ofNat ((0 + i) / leafCount), UInt32.ofNat ((0 + i) % leafCount)⟩))).getD
@@ -722,13 +715,21 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
           have hLcPos : 0 < leafCount := Nat.two_pow_pos _
           have hIdxLt : j * leafCount + u < params.forsTrees * leafCount := by
             have h1 := Nat.mul_le_mul_right leafCount hj
-            rw [Nat.add_mul, Nat.one_mul] at h1; omega
+            rw [Nat.succ_mul] at h1; omega
           rw [list_getD_map_range _ _ zero32 hIdxLt, Nat.zero_add]
           have hDiv : (j * leafCount + u) / leafCount = j := by
             rw [Nat.mul_comm j, Nat.mul_add_div hLcPos, Nat.div_eq_of_lt hu, Nat.add_zero]
           have hMod : (j * leafCount + u) % leafCount = u := by
             rw [Nat.mul_comm j, Nat.mul_add_mod, Nat.mod_eq_of_lt hu]
-          rw [hDiv, hMod]; unfold forsIndexedSecretLeaf; rw [secOverlaySuite_tagPrf_empty]
+          rw [hDiv, hMod, forsIndexedSecretLeaf_eq, secOverlaySuite_tagPrf_empty]
+        have hFSec : ∀ j < params.forsTrees, ∀ u < leafCount,
+            ((List.range (params.forsTrees * leafCount)).map fun i =>
+              padBytes32 (secFn (pkSeed ++ encodeAdrs ⟨0, tree0, .forsPrf, UInt32.ofNat kp0,
+                UInt32.ofNat (i / leafCount), UInt32.ofNat (i % leafCount)⟩))).getD
+              (j * leafCount + u) zero32 =
+            forsIndexedSecretLeaf ov ⟨[], [], pkSeed⟩ tree0 kp0 j u := by
+          intro j hj u hu
+          simpa only [Nat.zero_add] using hFSec0 j hj u hu
         have hOpsEq :
             ((List.range params.forsTrees).map fun j =>
               let idxJ := idxs.getD j 0
@@ -751,14 +752,15 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
             have hjL : j < idxs.length := (hIdxsLen idxs rfl) ▸ hj
             rw [list_getD_eq_getElem idxs 0 hjL]
             exact hIdxsBnd idxs rfl _ (List.getElem_mem hjL)
-          rw [hFSec j hj _ hIdxLt,
+          dsimp only
+          rw [hFSec0 j hj _ hIdxLt,
             secOverlaySuite_real_authPathKp suite pkSeed secFn 0 tree0 .forsTree _ _ _ (fun _ => rfl)]
           congr 1
           refine authPathKp_congr_bounded suite pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0) _ _
             params.forsHeight j 0 _ (fun u hu => ?_)
           simp only [Nat.zero_mul, Nat.zero_add]; rw [hFSec j hj u hu]
-          unfold forsIndexedLeafFn forsIndexedLeafHash
-          rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+          rw [forsIndexedLeafFn_eq, forsIndexedLeafHash_eq, forsIndexedLeafHash_eq,
+            thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
         have hFpkEq :
             thTweakTl suite pkSeed ⟨0, tree0, .forsRoots, UInt32.ofNat kp0, 0, 0⟩
               ((List.range params.forsTrees).map fun j =>
@@ -771,24 +773,25 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
                   params.forsHeight j 0) =
             computeProductionForsPk ov params ⟨[], [], pkSeed⟩ tree0 kp0 := by
           rw [computeProductionForsPk_eq, thTweakTl_eq, thTweakTl_eq,
-            secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1]
+            secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
           congr 1; apply List.map_congr_left; intro j hjMem
           have hj := List.mem_range.mp hjMem
+          dsimp only [Nat.zero_add]
           rw [secOverlaySuite_real_merkleNodeKp suite pkSeed secFn 0 tree0 .forsTree _ _ _
             (fun _ => rfl)]
           refine merkleNodeKp_congr_bounded suite pkSeed 0 tree0 .forsTree (UInt32.ofNat kp0) _ _
             params.forsHeight j 0 (fun u hu => ?_)
           simp only [Nat.zero_mul, Nat.zero_add]; rw [hFSec j hj u hu]
-          unfold forsIndexedLeafFn forsIndexedLeafHash
-          rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+          rw [forsIndexedLeafFn_eq, forsIndexedLeafHash_eq, forsIndexedLeafHash_eq,
+            thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
         rw [hOpsEq, hFpkEq, code_play_bind]
-        have hLB : (used + params.forsTrees * leafCount) +
+        have hLB : (used + params.forsTrees * 2 ^ params.forsHeight) +
             params.numLayers * (2 ^ params.subtreeHeight * params.ell1) ≤ qPrf := by
           unfold prfSecPerSignBudget at hBudget
           simp only [hSt, Bool.false_eq_true, ↓reduceIte] at hBudget; omega
         obtain ⟨hL1, hL2⟩ := signLayersSecCode_play suite params pkSeed pk.pkRoot _ secFn qPrf
-          q.grindLimit 0 leaf _ params.numLayers (used + params.forsTrees * leafCount) hLB
-        dsimp only
+          q.grindLimit 0 leaf _ params.numLayers (used + params.forsTrees * 2 ^ params.forsHeight) hLB
+        dsimp only [leafCount] at *
         rw [hL1]
         cases signProductionHypertreeLayers ov params ⟨[], [], pkSeed⟩ pk.pkRoot _ q.grindLimit
             0 leaf _ params.numLayers with
@@ -796,15 +799,22 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
           rw [Spec.Code.play_ret]
           exact ⟨rfl, by unfold prfSecPerSignBudget; simp only [hSt, Bool.false_eq_true, ↓reduceIte]; omega⟩
         | some ls =>
-          rw [Spec.Code.play_ret, secOverlaySuite_verify_eq]
+          rw [Spec.Code.play_ret]
+          dsimp only [ov, tree0, kp0] at hL2 ⊢
+          rw [secOverlaySuite_verify_eq]
           exact ⟨rfl, by unfold prfSecPerSignBudget; simp only [hSt, Bool.false_eq_true, ↓reduceIte]; omega⟩
-  unfold signQuerySecCode signQueryIdealPrf signQueryWithRandFn signCoreWithRand
-  dsimp only [derivePublicKeyIdealPrf] at pk ⊢
+  unfold signQuerySecCode
+  rw [signQueryIdealPrf.public_eqs, signQueryWithRandFn.public_eqs, signCoreWithRand.public_eqs]
+  have hPkDef : pk = derivePublicKey ov params ⟨[], [], pkSeed⟩ := by
+    dsimp only [pk]; rw [derivePublicKeyIdealPrf.public_eqs]
+  rw [← hPkDef]
   by_cases hSt : params.statefulJorts
   · simp only [hSt, ↓reduceIte]
     split
     · rw [Spec.Code.play_ret]; exact ⟨rfl, Nat.le_add_right _ _⟩
-    · exact hCorePlay q.epoch none (fun _ h => nomatch h) (fun _ h => nomatch h)
+    · have hC := hCorePlay q.epoch none (fun _ h => nomatch h) (fun _ h => nomatch h)
+      dsimp only at hC ⊢
+      simpa only [hSt, ↓reduceIte] using hC
   · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
     split
     · rw [Spec.Code.play_ret]; exact ⟨rfl, Nat.le_add_right _ _⟩
@@ -814,16 +824,16 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
         intro rR pR mu first n; induction n generalizing first with
         | zero => rw [thXofMsgBlocks_zero, thXofMsgBlocks_zero]
         | succ n' ihX =>
-          rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ,
-            secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.2, ihX]
+          rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ, secOverlaySuite_thCall_cons2, ihX]
       have hDer : deriveProductionStatelessInputs ov params
           (rfMsg (encodePrfMsg65 q.randomness (thPreHash ov pk.pkSeed pk.pkRoot q.message)))
           pk.pkSeed pk.pkRoot (thPreHash ov pk.pkSeed pk.pkRoot q.message) =
         deriveProductionStatelessInputs suite params
           (rfMsg (encodePrfMsg65 q.randomness (thPreHash suite pk.pkSeed pk.pkRoot q.message)))
           pk.pkSeed pk.pkRoot (thPreHash suite pk.pkSeed pk.pkRoot q.message) := by
-        rw [← hMuEq, deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq,
-          thXofMsg_eq, thXofMsg_eq, hXof]
+        rw [← hMuEq, deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq]
+        dsimp only
+        rw [thXofMsg_eq, thXofMsg_eq, hXof]
       rw [hDer]
       cases hD : deriveProductionStatelessInputs suite params
           (rfMsg (encodePrfMsg65 q.randomness (thPreHash suite pk.pkSeed pk.pkRoot q.message)))
@@ -831,38 +841,47 @@ private theorem signQuerySecCode_play (suite : TweakableHashSuite) (params : PqH
       | none => rw [Spec.Code.play_ret]; exact ⟨rfl, Nat.le_add_right _ _⟩
       | some li =>
         have hBnds := deriveProductionStatelessInputs_bounds suite params _ _ _ _ li.1 li.2 hD
-        exact hCorePlay li.1 (some li.2)
+        have hC := hCorePlay li.1 (some li.2)
           (fun idxs hEq => by injection hEq with hE; subst hE; exact hBnds.2.2.2.2)
           (fun idxs hEq => by injection hEq with hE; subst hE; exact hBnds.2.2.2.1)
+        dsimp only at hC ⊢
+        simpa only [hSt, Bool.false_eq_true, ↓reduceIte] using hC
 
-private theorem prfSecHopTreeCode_play (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed : List UInt8) (rfMsg secFn : Spec.Bytes → Spec.Bytes) (qPrf : Nat) :
+private theorem prfSecHopTreeCode_play (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed : List UInt8) (rfMsg secFn : Spec.Bytes → Spec.Bytes)
+    (qPrf : Nat) :
     ∀ {qH qS : Nat} (t : ProdAdaptiveTree (List UInt8 × PqHashSig)) (lo used : Nat)
       (log : List (List UInt8 × PqHashSig)),
       ProdDualBounded qH qS t →
       used + qS * prfSecPerSignBudget params ≤ qPrf →
       let pk := derivePublicKeyIdealPrf suite params pkSeed secFn
       let signFn := signQueryIdealPrf suite params pkSeed rfMsg secFn
-      let run := evalLatchedAdaptiveTree params.statefulJorts suite.rawHash signFn t lo
+      let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn t lo
       (Spec.Code.play (Spec.budgetedFunOracle secFn qPrf)
-        (prfSecHopTreeCode suite params pkSeed pk rfMsg t lo log) used).1 =
+        (prfSecHopTreeCode latchOn suite params pkSeed pk rfMsg t lo log) used).1 =
       (verifyProductionPqHashSig suite params pk run.1.1 run.1.2 &&
         decide (run.1.1 ∉ (log ++ signLogFromOracle signFn run.2).map Prod.fst))
   | _, _, .pure (msgStar, sigStar), _, used, log, _, _ => by
     unfold prfSecHopTreeCode
+    dsimp only
     rw [Spec.Code.play_ret, evalLatchedAdaptiveTree.public_eq_1]
-    dsimp only [signLogFromOracle]; rw [List.append_nil]
+    dsimp only
+    rw [signLogFromOracle.public_eq_1]
+    congr 1
+    exact fresh_decide_congr rfl (List.append_nil log).symm
   | 0, _, .hashQuery _ _, _, _, _, hB, _ => False.elim hB
   | _ + 1, _, .hashQuery x next, lo, used, log, hB, hBudget => by
     unfold prfSecHopTreeCode
+    dsimp only
     rw [evalLatchedAdaptiveTree.public_eq_2]
-    exact prfSecHopTreeCode_play suite params pkSeed rfMsg secFn qPrf (next (suite.rawHash x))
-      lo used log (hB _) hBudget
+    exact prfSecHopTreeCode_play latchOn suite params pkSeed rfMsg secFn qPrf
+      (next (suite.rawHash x)) lo used log (hB _) hBudget
   | _, 0, .signQuery _ _, _, _, _, hB, _ => False.elim hB
   | _, qS + 1, .signQuery q next, lo, used, log, hB, hBudget => by
     unfold prfSecHopTreeCode
+    dsimp only
     rw [evalLatchedAdaptiveTree_sign]
-    by_cases hAdm : params.statefulJorts = false ∨ lo ≤ q.epoch
+    by_cases hAdm : latchOn = false ∨ lo ≤ q.epoch
     · rw [ite_eq_left hAdm, ite_eq_left hAdm, code_play_bind]
       have hStepB : used + prfSecPerSignBudget params ≤ qPrf := by
         rw [Nat.succ_mul] at hBudget; omega
@@ -873,30 +892,34 @@ private theorem prfSecHopTreeCode_play (suite : TweakableHashSuite) (params : Pq
           (signQuerySecCode suite params pkSeed (derivePublicKeyIdealPrf suite params pkSeed secFn)
             rfMsg q) used).2 + qS * prfSecPerSignBudget params ≤ qPrf := by
         rw [Nat.succ_mul] at hBudget; omega
-      have ih := prfSecHopTreeCode_play suite params pkSeed rfMsg secFn qPrf
-        (next (signQueryIdealPrf suite params pkSeed rfMsg secFn q)) _ _
+      have ih := prfSecHopTreeCode_play latchOn suite params pkSeed rfMsg secFn qPrf
+        (next (signQueryIdealPrf suite params pkSeed rfMsg secFn q)) (q.epoch + 1) _
         (match signQueryIdealPrf suite params pkSeed rfMsg secFn q with
-         | some sig => log ++ [(q.message, sig)]
-         | none => log)
+         | none => log
+         | some sig => log ++ [(q.message, sig)])
         (hB _) hNextB
       rw [ih]
-      unfold signLogFromOracle
-      cases signQueryIdealPrf suite params pkSeed rfMsg secFn q <;> simp [List.append_assoc]
+      congr 1
+      exact fresh_decide_congr rfl (by
+        rw [signLogFromOracle_cons]
+        cases signQueryIdealPrf suite params pkSeed rfMsg secFn q with
+        | none => simp
+        | some sig => simp [List.append_assoc])
     · rw [ite_eq_right hAdm, ite_eq_right hAdm]
-      exact prfSecHopTreeCode_play suite params pkSeed rfMsg secFn qPrf (next none) lo used log
-        (hB none) (by rw [Nat.succ_mul] at hBudget; omega)
+      exact prfSecHopTreeCode_play latchOn suite params pkSeed rfMsg secFn qPrf (next none) lo
+        used log (hB none) (by rw [Nat.succ_mul] at hBudget; omega)
 
-private theorem prfSecHopDistinguisher_play {qHash qSign : Nat}
+private theorem prfSecHopDistinguisher_play {qHash qSign : Nat} (latchOn : Bool)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed : List UInt8) (rfMsg secFn : Spec.Bytes → Spec.Bytes)
     (A : SeedWithheldEufCmaAdv qHash qSign) (qPrf : Nat)
     (hqPrf : prfSecQueryBudget params qSign ≤ qPrf) :
     (Spec.Code.play (Spec.budgetedFunOracle secFn qPrf)
-      (prfSecHopDistinguisher suite params pkSeed rfMsg A) 0).1 =
-    (ExecEufCmaIdealPrfGame Nat.one_pos suite params (fun _ => pkSeed) (fun _ => rfMsg)
+      (prfSecHopDistinguisher latchOn suite params pkSeed rfMsg A) 0).1 =
+    (ExecEufCmaIdealPrfGame latchOn Nat.one_pos suite params (fun _ => pkSeed) (fun _ => rfMsg)
       (fun _ => secFn) (fun _ => A)).win ⟨0, Nat.one_pos⟩ := by
   unfold prfSecHopDistinguisher
-  rw [code_play_bind]
+  rw [ExecEufCmaIdealPrfGame_win, code_play_bind]
   have hTopB : 0 + 2 ^ params.subtreeHeight * params.ell1 ≤ qPrf := by
     unfold prfSecQueryBudget at hqPrf; omega
   obtain ⟨hU1, _, hWotsTop⟩ := fetchSubtreeWotsPkCode_play suite params pkSeed secFn qPrf
@@ -908,7 +931,8 @@ private theorem prfSecHopDistinguisher_play {qHash qSign : Nat}
           (fetchSubtreeWotsPkCode suite params pkSeed (UInt32.ofNat (params.numLayers - 1)) 0) 0).1.2
         params.subtreeHeight 0 =
       (derivePublicKeyIdealPrf suite params pkSeed secFn).pkRoot := by
-    unfold derivePublicKeyIdealPrf derivePublicKey
+    rw [derivePublicKeyIdealPrf.public_eqs]
+    unfold derivePublicKey
     dsimp only
     rw [computeXmssSubtreeRoot_eq, ← computeMerkleNodeKp_zero_eq, ← computeMerkleNodeKp_zero_eq,
       secOverlaySuite_real_merkleNodeKp suite pkSeed secFn _ _ _ _ _ _ (fun _ => rfl)]
@@ -919,24 +943,23 @@ private theorem prfSecHopDistinguisher_play {qHash qSign : Nat}
         (fetchSubtreeWotsPkCode suite params pkSeed (UInt32.ofNat (params.numLayers - 1)) 0) 0).1.2
       params.subtreeHeight 0⟩ : PqPublicKey) =
       derivePublicKeyIdealPrf suite params pkSeed secFn := by
-    rw [hPkRootEq]; unfold derivePublicKeyIdealPrf derivePublicKey; rfl
+    rw [hPkRootEq, derivePublicKeyIdealPrf.public_eqs]; unfold derivePublicKey; rfl
   rw [hPkEq]
   have hTreeB : (Spec.Code.play (Spec.budgetedFunOracle secFn qPrf)
       (fetchSubtreeWotsPkCode suite params pkSeed (UInt32.ofNat (params.numLayers - 1)) 0) 0).2 +
       qSign * prfSecPerSignBudget params ≤ qPrf := by
     rw [hU1]; unfold prfSecQueryBudget at hqPrf; omega
-  have hPlay := prfSecHopTreeCode_play suite params pkSeed rfMsg secFn qPrf
+  have hPlay := prfSecHopTreeCode_play latchOn suite params pkSeed rfMsg secFn qPrf
     ((canonicalizeAdvOptRand A).run (derivePublicKeyIdealPrf suite params pkSeed secFn))
     0 _ [] ((canonicalizeAdvOptRand A).bounded _) hTreeB
-  rw [List.nil_append] at hPlay
   exact hPlay
 
 /-- **Hop 2 Theorem (`hulsing_hop2_prfSec_idealization`).**
     Replaces `thSecretPrf suite pkSeed sk.skSeed` across public-key derivation and all `≤ qSign`
     adaptive signatures with a uniform secret function `rfSec`, paying `+ εPrfSec` under
     `Spec.PrfHard` while leaving `suite.rawHash` **100% untouched** for the adversary and verifier. -/
-theorem hulsing_hop2_prfSec_idealization {n nC nA qHash qSign : Nat} (hPos : 0 < n)
-    (suite : TweakableHashSuite) (params : PqHashParams)
+theorem hulsing_hop2_prfSec_idealization {n nC nA qHash qSign : Nat} (latchOn : Bool)
+    (hPos : 0 < n) (suite : TweakableHashSuite) (params : PqHashParams)
     (seedLen keyLen qPrf : Nat) (hqPrf : prfSecQueryBudget params qSign ≤ qPrf)
     (π : Spec.CoinSplit n nC nA)
     (sampleSec : Fin nC → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
@@ -946,19 +969,19 @@ theorem hulsing_hop2_prfSec_idealization {n nC nA qHash qSign : Nat} (hPos : 0 <
     (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
     {𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
     (hClassSec : ∀ a : Fin nA,
-      𝒜Sec (prfSecHopDistinguisher suite params (pkSeedA a) (rfMsgA a) (adv a)))
+      𝒜Sec (prfSecHopDistinguisher latchOn suite params (pkSeedA a) (rfMsgA a) (adv a)))
     {εPrfSec : Spec.RatBound}
     (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrf εPrfSec) :
-    let gHop1 := ExecEufCmaRandIdealGame hPos suite params
+    let gHop1 := ExecEufCmaRandIdealGame latchOn hPos suite params
       (fun ω => pkSeedA (π.advc ω)) (fun ω => (sampleSec (π.chal ω)).1)
       (fun ω => rfMsgA (π.advc ω)) (fun ω => adv (π.advc ω))
-    let gHop2 := ExecEufCmaIdealPrfGame hPos suite params
+    let gHop2 := ExecEufCmaIdealPrfGame latchOn hPos suite params
       (fun ω => pkSeedA (π.advc ω)) (fun ω => rfMsgA (π.advc ω))
       (fun ω => (sampleSec (π.chal ω)).2) (fun ω => adv (π.advc ω))
     Spec.GameBound gHop1.winProb (gHop2.winProb.add εPrfSec) := by
   intro gHop1 gHop2
   let D : Fin nA → Spec.Code Spec.byteOracleIface Bool := fun a =>
-    prfSecHopDistinguisher suite params (pkSeedA a) (rfMsgA a) (adv a)
+    prfSecHopDistinguisher latchOn suite params (pkSeedA a) (rfMsgA a) (adv a)
   have hRealEq : ∀ ω : Fin n,
       gHop1.win ω =
       (Spec.prfRealGame hPos (suitePrfSec seedLen suite) qPrf
@@ -966,9 +989,11 @@ theorem hulsing_hop2_prfSec_idealization {n nC nA qHash qSign : Nat} (hPos : 0 <
     intro ω
     rw [Spec.prfRealGame.public_eqs]
     dsimp only [D]
-    rw [prfSecHopDistinguisher_play suite params (pkSeedA (π.advc ω)) (rfMsgA (π.advc ω))
+    rw [prfSecHopDistinguisher_play latchOn suite params (pkSeedA (π.advc ω)) (rfMsgA (π.advc ω))
       (suitePrfSec seedLen suite (sampleSec (π.chal ω)).1) (adv (π.advc ω)) qPrf hqPrf]
-    dsimp only [gHop1, ExecEufCmaRandIdealGame, ExecEufCmaIdealPrfGame]
+    dsimp only [gHop1]
+    rw [ExecEufCmaRandIdealGame_win, ExecEufCmaIdealPrfGame_win]
+    dsimp only
     have hPk := derivePublicKeyIdealPrf_real_eq suite params (pkSeedA (π.advc ω))
       (sampleSec (π.chal ω)).1 (hSeedLen (π.advc ω))
     have hSign : signQueryIdealPrf suite params (pkSeedA (π.advc ω)) (rfMsgA (π.advc ω))
@@ -984,9 +1009,11 @@ theorem hulsing_hop2_prfSec_idealization {n nC nA qHash qSign : Nat} (hPos : 0 <
         (fun z => (sampleSec (π.chal z)).2) (fun z => D (π.advc z))).win ω := by
     intro ω
     rw [Spec.prfIdealGame.public_eqs]
-    dsimp only [D]
-    exact (prfSecHopDistinguisher_play suite params (pkSeedA (π.advc ω)) (rfMsgA (π.advc ω))
-      ((sampleSec (π.chal ω)).2) (adv (π.advc ω)) qPrf hqPrf).symm
+    dsimp only [D, gHop2]
+    have hP := (prfSecHopDistinguisher_play latchOn suite params (pkSeedA (π.advc ω))
+      (rfMsgA (π.advc ω)) ((sampleSec (π.chal ω)).2) (adv (π.advc ω)) qPrf hqPrf).symm
+    rw [ExecEufCmaIdealPrfGame_win] at hP ⊢
+    exact hP
   have hDist : Spec.GameBound (Spec.AdvDist gHop1 gHop2) εPrfSec := by
     rw [Spec.FinGame.ext_win hRealEq, Spec.FinGame.ext_win hIdealEq]
     exact hPrfSec n nC nA hPos π sampleSec hSampleSec D hClassSec
@@ -1093,12 +1120,15 @@ theorem smDtUdHard_constHash_refuted {nC : Nat} (hPos : 0 < nC)
       ⟨rfl, hq, fun h => nomatch h⟩
     rw [ite_eq_left hc, Spec.Code.play_ret]; rfl
   · dsimp only [smDtUdIdealGame, emptyUdDistinguisher]
-    rw [Spec.Code.play_call]
+    rw [Spec.Code.play_call, Spec.Code.play_ret]
     unfold smDtUdIdealOracle
+    dsimp only
     have hc : false = false ∧ ([] : List (Spec.Bytes × Spec.Bytes)).length < q ∧
         ([] : Spec.Bytes) ∉ ([] : List (Spec.Bytes × Spec.Bytes)).map Prod.fst :=
       ⟨rfl, hq, fun h => nomatch h⟩
-    rw [ite_eq_left hc, Spec.Code.play_ret]
+    apply decide_eq_false
+    rw [ite_eq_left hc]
+    dsimp only
     have hMemOk := hU.mem ((Spec.CoinSplit.challengerOnly nC).chal ω)
     have hY0Len : (((sample ((Spec.CoinSplit.challengerOnly nC).chal ω)).2.2).getD 0 []).length =
         outLen := by
@@ -1109,7 +1139,6 @@ theorem smDtUdHard_constHash_refuted {nC : Nat} (hPos : 0 < nC)
         have hy0Mem : y0 ∈ (sample ((Spec.CoinSplit.challengerOnly nC).chal ω)).2.2 := by
           rw [hYs]; exact List.mem_cons_self
         exact hMemOk.2.2.2 y0 hy0Mem
-    apply decide_eq_false
     intro hSomeEq
     injection hSomeEq with hNil
     change (((sample ((Spec.CoinSplit.challengerOnly nC).chal ω)).2.2).getD 0 []) = [] at hNil

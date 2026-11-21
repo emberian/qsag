@@ -65,7 +65,6 @@ theorem secOverlaySuite_nonPrf_thCall (suite : TweakableHashSuite) (pkSeed : Lis
   unfold secOverlaySuite
   dsimp only
   rw [parseThPreimage_thPreimage]
-  dsimp only
   cases args with
   | nil => rfl
   | cons a rest =>
@@ -86,12 +85,20 @@ theorem secOverlaySuite_tagPrf_empty (suite : TweakableHashSuite) (pkSeed : List
   rw [parseThPreimage_thPreimage]
   simp
 
-theorem publicRoles_ne_tagPrf :
-    tagThF ≠ tagPrf ∧ tagThTl ≠ tagPrf ∧ tagThH ≠ tagPrf ∧ tagHPre ≠ tagPrf ∧
-    tagHMsg ≠ tagPrf ∧ tagHInternal ≠ tagPrf ∧ tagHXof ≠ tagPrf := by
-  simp only [tagThF.public_eqs, tagThTl.public_eqs, tagThH.public_eqs, tagHPre.public_eqs,
-    tagHMsg.public_eqs, tagHInternal.public_eqs, tagHXof.public_eqs, tagPrf.public_eqs]
+theorem tagThF_ne_tagPrf : tagThF ≠ tagPrf ∧ tagThTl ≠ tagPrf := by
+  simp only [tagThF.public_eqs, tagThTl.public_eqs, tagPrf.public_eqs]
   decide +kernel
+
+theorem secOverlaySuite_thCall_cons2 (suite : TweakableHashSuite) (pkSeed : List UInt8)
+    (secFn : Spec.Bytes → Spec.Bytes) (role seed : List UInt8) (adrs : HashAdrs)
+    (a b : List UInt8) (rest : List (List UInt8)) :
+    thCall (secOverlaySuite suite pkSeed secFn) role seed adrs (a :: b :: rest) =
+      thCall suite role seed adrs (a :: b :: rest) := by
+  rw [thCall_eq, thCall_eq]
+  unfold secOverlaySuite
+  dsimp only
+  rw [parseThPreimage_thPreimage]
+  cases a <;> rfl
 
 theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed : List UInt8) (secFn : Spec.Bytes → Spec.Bytes)
@@ -105,7 +112,7 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
     | zero => intro start x; rw [wotsChainSteps_zero, wotsChainSteps_zero]
     | succ k' ih =>
       intro start x; rw [wotsChainSteps_succ, wotsChainSteps_succ]; dsimp only
-      rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+      rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
       exact ih (start + 1) _
   have hWalkKp : ∀ s l t kind kp ht root loc leaf path,
       walkMerkleAuthPathKp ov s l t kind kp ht root loc leaf path =
@@ -125,21 +132,25 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
           cases walkMerkleAuthPathKp suite s l t kind kp ht' (2 * root) loc leaf rest with
           | none => rfl
           | some _ =>
-            rw [thNodeH_eq, thNodeH_eq,
-              secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.1]
+            dsimp only
+            rw [thNodeH_eq, thNodeH_eq]
+            congr 1
+            exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
         · simp only [hHalf, ↓reduceIte, ih]
           cases walkMerkleAuthPathKp suite s l t kind kp ht' (2 * root + 1) (loc - 2 ^ ht')
               leaf rest with
           | none => rfl
           | some _ =>
-            rw [thNodeH_eq, thNodeH_eq,
-              secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.1]
+            dsimp only
+            rw [thNodeH_eq, thNodeH_eq]
+            congr 1
+            exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
   have hRecWots : ∀ s l t kp digs chs,
       recoverWotsPkFromSig ov params s l t kp digs chs =
       recoverWotsPkFromSig suite params s l t kp digs chs := by
     intro s l t kp digs chs
     rw [recoverWotsPkFromSig_eq, recoverWotsPkFromSig_eq, thTweakTl_eq, thTweakTl_eq,
-      secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1,
+      secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2,
       recoverWotsEndpoints_eq, recoverWotsEndpoints_eq]
     congr 1; apply List.map_congr_left; intro r _; exact hWotsSteps _ _ _ _ _ _ _ _
   have hLayers : ∀ s pR rR lI gI cur ls,
@@ -162,9 +173,9 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
           rw [productionLayerDigest_eq, productionLayerDigest_eq]
           split
           · rw [thHashLeafMsg_eq, thHashLeafMsg_eq]
-            exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.1 _ _ _
+            exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
           · rw [thHashInternalNode_eq, thHashInternalNode_eq]
-            exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.1 _ _ _
+            exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
         rw [hDig]
         cases extractBaseWDigitsChecked params.w params.ell1 _ with
         | none => rfl
@@ -188,8 +199,7 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
     induction n generalizing first with
     | zero => rw [thXofMsgBlocks_zero, thXofMsgBlocks_zero]
     | succ n' ih =>
-      rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ,
-        secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.2, ih]
+      rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ, secOverlaySuite_thCall_cons2, ih]
   have hForsRoots : ∀ s t0 kp0 idxs ops j rem,
       recoverProductionForsTreeRoots ov params s t0 kp0 idxs ops j rem =
       recoverProductionForsTreeRoots suite params s t0 kp0 idxs ops j rem := by
@@ -203,9 +213,8 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
           (ops.getD j ⟨[], []⟩).secretVal =
         forsIndexedLeafHash suite s t0 kp0 j (idxs.getD j 0)
           (ops.getD j ⟨[], []⟩).secretVal := by
-        unfold forsIndexedLeafHash
-        rw [thChainF_eq, thChainF_eq]
-        exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1 _ _ _
+        rw [forsIndexedLeafHash_eq, forsIndexedLeafHash_eq, thChainF_eq, thChainF_eq]
+        exact secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1 _ _ _
       rw [hLeafH, hWalkKp]
       cases walkMerkleAuthPathKp suite s 0 t0 .forsTree (UInt32.ofNat kp0) params.forsHeight j
           (idxs.getD j 0) _ (ops.getD j ⟨[], []⟩).authPath with
@@ -215,7 +224,7 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
   dsimp only
   have hMu : thPreHash ov pk.pkSeed pk.pkRoot msg = thPreHash suite pk.pkSeed pk.pkRoot msg := by
     rw [thPreHash_eq, thPreHash_eq]
-    exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.1 _ _ _
+    exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
   rw [hMu]
   cases (!params.productionWellFormed || !params.productionLeafIdxInRange sig.leafGlobalIdx)
   · simp only [Bool.false_eq_true, ↓reduceIte]
@@ -224,7 +233,8 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
       by_cases hSt : params.statefulJorts
       · simp only [hSt, ↓reduceIte]
         cases (!sig.forsOpenings.isEmpty)
-        · simp only [Bool.false_eq_true, ↓reduceIte, hLayers]
+        · simp only [Bool.false_eq_true, ↓reduceIte]
+          rw [hLayers]
         · simp only [↓reduceIte]
       · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
         by_cases hFLen : sig.forsOpenings.length ≠ params.forsTrees
@@ -234,8 +244,9 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
               (thPreHash suite pk.pkSeed pk.pkRoot msg) =
             deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
               (thPreHash suite pk.pkSeed pk.pkRoot msg) := by
-            rw [deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq,
-              thXofMsg_eq, thXofMsg_eq, hXof]
+            rw [deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq]
+            dsimp only
+            rw [thXofMsg_eq, thXofMsg_eq, hXof]
           rw [hDer]
           cases deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot
               (thPreHash suite pk.pkSeed pk.pkRoot msg) with
@@ -261,7 +272,7 @@ theorem secOverlaySuite_verify_eq (suite : TweakableHashSuite) (params : PqHashP
                   | some rs =>
                     dsimp only
                     rw [thTweakTl_eq, thTweakTl_eq,
-                      secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1]
+                      secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
               rw [hRecF]
               cases recoverProductionForsPk suite params pk.pkSeed _ _ li.2 sig.forsOpenings with
               | none => rfl
@@ -284,7 +295,7 @@ def signQueryIdealPrf (suite : TweakableHashSuite) (params : PqHashParams)
 /-- **Hop-2 Idealized-PRF EUF-CMA Game (`ExecEufCmaIdealPrfGame`).**
     Both `skPrf` and `skSeed` are replaced inside the signer by uniform functions `rfMsg` and
     `rfSec`, while **`suite.rawHash` is 100% untouched** for the adversary and verifier! -/
-def ExecEufCmaIdealPrfGame {n qHash qSign : Nat} (hPos : 0 < n)
+def ExecEufCmaIdealPrfGame {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeedOf : Fin n → List UInt8)
     (rfMsg rfSec : Fin n → Spec.Bytes → Spec.Bytes)
@@ -294,7 +305,7 @@ def ExecEufCmaIdealPrfGame {n qHash qSign : Nat} (hPos : 0 < n)
     let pkSeed := pkSeedOf ω
     let pk := derivePublicKeyIdealPrf suite params pkSeed (rfSec ω)
     let signFn := signQueryIdealPrf suite params pkSeed (rfMsg ω) (rfSec ω)
-    let run := evalLatchedAdaptiveTree params.statefulJorts suite.rawHash signFn
+    let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
       ((canonicalizeAdvOptRand (adv ω)).run pk) 0
     let msgStar := run.1.1
     let sigStar := run.1.2
@@ -316,10 +327,10 @@ theorem secOverlaySuite_real_wotsPk {seedLen : Nat} (suite : TweakableHashSuite)
     | zero => intro start x; rw [wotsChainSteps_zero, wotsChainSteps_zero]
     | succ k' ih =>
       intro start x; rw [wotsChainSteps_succ, wotsChainSteps_succ]; dsimp only
-      rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+      rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
       exact ih (start + 1) _
   rw [computeWotsPk_eq, computeWotsPk_eq, thTweakTl_eq, thTweakTl_eq,
-    secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1]
+    secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
   congr 1; apply List.map_congr_left; intro r _
   rw [wotsSecretBase_eq, wotsSecretBase_eq, secOverlaySuite_tagPrf_empty,
     suitePrfSec_eq_thSecretPrf suite hSeed,
@@ -334,9 +345,8 @@ theorem secOverlaySuite_real_merkleNodeKp (suite : TweakableHashSuite)
         computeMerkleNodeKp suite pkSeed l t kind kp g ht n loc
   | 0, _, loc => by rw [computeMerkleNodeKp_zero, computeMerkleNodeKp_zero]; exact hfg loc
   | ht + 1, n, loc => by
-    rw [computeMerkleNodeKp_succ, computeMerkleNodeKp_succ]
-    dsimp only
-    rw [thNodeH_eq, thNodeH_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.1,
+    rw [computeMerkleNodeKp_succ, computeMerkleNodeKp_succ, thNodeH_eq, thNodeH_eq,
+      secOverlaySuite_thCall_cons2,
       secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _,
       secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _]
 
@@ -353,11 +363,9 @@ theorem secOverlaySuite_real_authPathKp (suite : TweakableHashSuite)
     rw [buildMerkleAuthPathKp.public_eq_2, buildMerkleAuthPathKp.public_eq_2]
     dsimp only
     split
-    · dsimp only
-      rw [secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _,
+    · rw [secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _,
         secOverlaySuite_real_authPathKp suite pkSeed secFn l t kind kp f g hfg ht _ _ _]
-    · dsimp only
-      rw [secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _,
+    · rw [secOverlaySuite_real_merkleNodeKp suite pkSeed secFn l t kind kp f g hfg ht _ _,
         secOverlaySuite_real_authPathKp suite pkSeed secFn l t kind kp f g hfg ht _ _ _]
 
 theorem derivePublicKeyIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
@@ -368,6 +376,7 @@ theorem derivePublicKeyIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSu
   dsimp only
   rw [computeXmssSubtreeRoot_eq, computeXmssSubtreeRoot_eq,
     ← computeMerkleNodeKp_zero_eq, ← computeMerkleNodeKp_zero_eq]
+  congr 1
   exact secOverlaySuite_real_merkleNodeKp suite pkSeed _ _ _ _ _ _ _
     (secOverlaySuite_real_wotsPk suite params pkSeed skSeed hSeed _ _) _ _ _
 
@@ -382,15 +391,18 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
   change derivePublicKey ov params ⟨[], [], pkSeed⟩ = _ at hPk
   have hMu : ∀ pR m, thPreHash ov pkSeed pR m = thPreHash suite pkSeed pR m := fun pR m => by
     rw [thPreHash_eq, thPreHash_eq]
-    exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.1 _ _ _
+    exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
   have hForsLeafFn : ∀ t0 kp0 j u,
       forsIndexedLeafFn ov ⟨[], [], pkSeed⟩ t0 kp0 j u =
       forsIndexedLeafFn suite ⟨skSeed, [], pkSeed⟩ t0 kp0 j u := by
     intro t0 kp0 j u
-    unfold forsIndexedLeafFn forsIndexedLeafHash forsIndexedSecretLeaf
-    rw [secOverlaySuite_tagPrf_empty, suitePrfSec_eq_thSecretPrf suite hSeed,
+    rw [forsIndexedLeafFn_eq, forsIndexedLeafFn_eq, forsIndexedLeafHash_eq, forsIndexedLeafHash_eq,
+      forsIndexedSecretLeaf_eq, forsIndexedSecretLeaf_eq,
+      secOverlaySuite_tagPrf_empty]
+    dsimp only [secFn]
+    rw [suitePrfSec_eq_thSecretPrf suite hSeed,
       padBytes32_of_len32 (by rw [thSecretPrf_eq]; exact thCall_length _ _ _ _ _),
-      thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+      thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
   have hGrindLeaf : ∀ rR pR cur tI kpI c rem,
       grindTswLeafCounterAux ov params.w params.ell1 params.targetSum rR pkSeed pR cur tI kpI c rem =
       grindTswLeafCounterAux suite params.w params.ell1 params.targetSum rR pkSeed pR cur tI kpI c rem := by
@@ -402,7 +414,7 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
       have hHm : thHashLeafMsg ov rR pkSeed pR cur tI kpI c =
           thHashLeafMsg suite rR pkSeed pR cur tI kpI c := by
         rw [thHashLeafMsg_eq, thHashLeafMsg_eq]
-        exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.1 _ _ _
+        exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
       rw [hHm, ih (c + 1)]
   have hGrindInt : ∀ pR cur lU tI kpI c rem,
       grindTswInternalCounterAux ov params.w params.ell1 params.targetSum pkSeed pR cur lU tI kpI c rem =
@@ -415,7 +427,7 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
       have hHi : thHashInternalNode ov pkSeed pR cur lU tI kpI c =
           thHashInternalNode suite pkSeed pR cur lU tI kpI c := by
         rw [thHashInternalNode_eq, thHashInternalNode_eq]
-        exact secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.1 _ _ _
+        exact secOverlaySuite_thCall_cons2 _ _ _ _ _ _ _ _ _
       rw [hHi, ih (c + 1)]
   have hSignLayers : ∀ pR rR lI gI cur rem,
       signProductionHypertreeLayers ov params ⟨[], [], pkSeed⟩ pR rR q.grindLimit lI gI cur rem =
@@ -472,8 +484,9 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
                 (UInt64.ofNat (gI / 2 ^ params.subtreeHeight))
                 (gI % 2 ^ params.subtreeHeight) r) := by
           intro r
-          rw [wotsSecretBase_eq, wotsSecretBase_eq, secOverlaySuite_tagPrf_empty,
-            suitePrfSec_eq_thSecretPrf suite hSeed,
+          rw [wotsSecretBase_eq, wotsSecretBase_eq, secOverlaySuite_tagPrf_empty]
+          dsimp only [secFn]
+          rw [suitePrfSec_eq_thSecretPrf suite hSeed,
             padBytes32_of_len32 (by rw [thSecretPrf_eq]; exact thCall_length _ _ _ _ _)]
           generalize digits.getD r 0 = d
           generalize thSecretPrf suite pkSeed skSeed _ = x0
@@ -487,7 +500,7 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
           | zero => intro st x; rw [wotsChainSteps_zero, wotsChainSteps_zero]
           | succ k' ihK =>
             intro st x; rw [wotsChainSteps_succ, wotsChainSteps_succ]; dsimp only
-            rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.1]
+            rw [thChainF_eq, thChainF_eq, secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.1]
             exact ihK (st + 1) _
         have hSubR : computeXmssSubtreeRoot ov params ⟨[], [], pkSeed⟩ (UInt32.ofNat lI)
             (UInt64.ofNat (gI / 2 ^ params.subtreeHeight)) =
@@ -499,7 +512,8 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
             (secOverlaySuite_real_wotsPk suite params pkSeed skSeed hSeed _ _) _ _ _
         have hAp := secOverlaySuite_real_authPathKp suite pkSeed secFn (UInt32.ofNat lI)
           (UInt64.ofNat (gI / 2 ^ params.subtreeHeight)) .tree 0 _ _
-          (secOverlaySuite_real_wotsPk suite params pkSeed skSeed hSeed _ _)
+          (secOverlaySuite_real_wotsPk suite params pkSeed skSeed hSeed
+            (UInt32.ofNat lI) (UInt64.ofNat (gI / 2 ^ params.subtreeHeight)))
           params.subtreeHeight 0 0 (gI % 2 ^ params.subtreeHeight)
         have hMapEq : ((List.range params.ell1).map fun r =>
             wotsChainSteps ov pkSeed (UInt32.ofNat lI)
@@ -525,76 +539,59 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
     intro pk mu rR leaf fIdxs
     rw [signProductionHypertreeCore_def, signProductionHypertreeCore_def]
     dsimp only
-    have hInit :
-        (if params.statefulJorts then some ([], mu)
-         else match fIdxs with
-         | none => none
-         | some idxs =>
-           some (buildProductionForsOpenings ov params ⟨[], [], pkSeed⟩
-                   (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                   (leaf % 2 ^ params.subtreeHeight) idxs,
-                 computeProductionForsPk ov params ⟨[], [], pkSeed⟩
-                   (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                   (leaf % 2 ^ params.subtreeHeight))) =
-        (if params.statefulJorts then some ([], mu)
-         else match fIdxs with
-         | none => none
-         | some idxs =>
-           some (buildProductionForsOpenings suite params ⟨skSeed, [], pkSeed⟩
-                   (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                   (leaf % 2 ^ params.subtreeHeight) idxs,
-                 computeProductionForsPk suite params ⟨skSeed, [], pkSeed⟩
-                   (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                   (leaf % 2 ^ params.subtreeHeight))) := by
-      by_cases hSt : params.statefulJorts
-      · simp only [hSt, ↓reduceIte]
-      · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
-        cases fIdxs with
-        | none => rfl
-        | some idxs =>
-          rw [buildProductionForsOpenings_def, buildProductionForsOpenings_def,
-            computeProductionForsPk_eq, computeProductionForsPk_eq]
-          dsimp only
-          congr 1; congr 1
-          · apply List.map_congr_left; intro j _
-            have hS : forsIndexedSecretLeaf ov ⟨[], [], pkSeed⟩
-                (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                (leaf % 2 ^ params.subtreeHeight) j (idxs.getD j 0) =
-              forsIndexedSecretLeaf suite ⟨skSeed, [], pkSeed⟩
-                (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                (leaf % 2 ^ params.subtreeHeight) j (idxs.getD j 0) := by
-              unfold forsIndexedSecretLeaf
-              rw [secOverlaySuite_tagPrf_empty, suitePrfSec_eq_thSecretPrf suite hSeed,
-                padBytes32_of_len32 (by rw [thSecretPrf_eq]; exact thCall_length _ _ _ _ _)]
-            rw [hS, secOverlaySuite_real_authPathKp suite pkSeed secFn 0 _ .forsTree _ _ _
-              (hForsLeafFn _ _ j)]
-          · rw [thTweakTl_eq, thTweakTl_eq,
-              secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.1]
-            congr 1; congr 1
-            apply List.map_congr_left; intro j _
-            exact secOverlaySuite_real_merkleNodeKp suite pkSeed secFn 0 _ .forsTree _ _ _
-              (hForsLeafFn _ _ j) _ _ _
-    rw [hInit]
-    cases (if params.statefulJorts then some ([], mu)
-        else match fIdxs with
-        | none => none
-        | some idxs =>
-          some (buildProductionForsOpenings suite params ⟨skSeed, [], pkSeed⟩
-                  (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                  (leaf % 2 ^ params.subtreeHeight) idxs,
-                computeProductionForsPk suite params ⟨skSeed, [], pkSeed⟩
-                  (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
-                  (leaf % 2 ^ params.subtreeHeight))) with
-    | none => rfl
-    | some fc =>
+    by_cases hSt : params.statefulJorts
+    · simp only [hSt, ↓reduceIte]
       rw [hSignLayers]
       cases signProductionHypertreeLayers suite params ⟨skSeed, [], pkSeed⟩ pk.pkRoot rR
-          q.grindLimit 0 leaf fc.2 params.numLayers with
+          q.grindLimit 0 leaf mu params.numLayers with
       | none => rfl
-      | some ls =>
+      | some ls => dsimp only; rw [secOverlaySuite_verify_eq]
+    · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
+      cases fIdxs with
+      | none => rfl
+      | some idxs =>
         dsimp only
-        rw [secOverlaySuite_verify_eq]
-  unfold signQueryIdealPrf signQueryWithRandFn signCoreWithRand
+        have hOps : buildProductionForsOpenings ov params ⟨[], [], pkSeed⟩
+            (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+            (leaf % 2 ^ params.subtreeHeight) idxs =
+          buildProductionForsOpenings suite params ⟨skSeed, [], pkSeed⟩
+            (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+            (leaf % 2 ^ params.subtreeHeight) idxs := by
+          rw [buildProductionForsOpenings_def, buildProductionForsOpenings_def]
+          dsimp only
+          apply List.map_congr_left; intro j _
+          have hS : forsIndexedSecretLeaf ov ⟨[], [], pkSeed⟩
+              (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+              (leaf % 2 ^ params.subtreeHeight) j (idxs.getD j 0) =
+            forsIndexedSecretLeaf suite ⟨skSeed, [], pkSeed⟩
+              (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+              (leaf % 2 ^ params.subtreeHeight) j (idxs.getD j 0) := by
+            rw [forsIndexedSecretLeaf_eq, forsIndexedSecretLeaf_eq,
+              secOverlaySuite_tagPrf_empty]
+            dsimp only [secFn]
+            rw [suitePrfSec_eq_thSecretPrf suite hSeed,
+              padBytes32_of_len32 (by rw [thSecretPrf_eq]; exact thCall_length _ _ _ _ _)]
+          rw [hS, secOverlaySuite_real_authPathKp suite pkSeed secFn 0 _ .forsTree _ _ _
+            (hForsLeafFn _ _ j)]
+        have hFpk : computeProductionForsPk ov params ⟨[], [], pkSeed⟩
+            (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+            (leaf % 2 ^ params.subtreeHeight) =
+          computeProductionForsPk suite params ⟨skSeed, [], pkSeed⟩
+            (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight))
+            (leaf % 2 ^ params.subtreeHeight) := by
+          rw [computeProductionForsPk_eq, computeProductionForsPk_eq, thTweakTl_eq, thTweakTl_eq,
+            secOverlaySuite_nonPrf_thCall _ _ _ tagThF_ne_tagPrf.2]
+          congr 1; apply List.map_congr_left; intro j _
+          exact secOverlaySuite_real_merkleNodeKp suite pkSeed secFn 0 _ .forsTree _ _ _
+            (hForsLeafFn _ _ j) _ _ _
+        rw [hOps, hFpk, hSignLayers]
+        cases signProductionHypertreeLayers suite params ⟨skSeed, [], pkSeed⟩ pk.pkRoot rR
+            q.grindLimit 0 leaf _ params.numLayers with
+        | none => rfl
+        | some ls => dsimp only; rw [secOverlaySuite_verify_eq]
+  unfold signQueryIdealPrf
+  rw [signQueryWithRandFn.public_eqs, signQueryWithRandFn.public_eqs,
+    signCoreWithRand.public_eqs, signCoreWithRand.public_eqs]
   dsimp only
   have hPkSeed0 : (derivePublicKey suite params ⟨skSeed, [], pkSeed⟩).pkSeed = pkSeed := by
     unfold derivePublicKey; rfl
@@ -613,18 +610,36 @@ theorem signQueryIdealPrf_real_eq {seedLen : Nat} (suite : TweakableHashSuite)
         intro rR pR mu first n; induction n generalizing first with
         | zero => rw [thXofMsgBlocks_zero, thXofMsgBlocks_zero]
         | succ n' ihX =>
-          rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ,
-            secOverlaySuite_nonPrf_thCall _ _ _ publicRoles_ne_tagPrf.2.2.2.2.2.2, ihX]
+          rw [thXofMsgBlocks_succ, thXofMsgBlocks_succ, secOverlaySuite_thCall_cons2, ihX]
       have hDer : ∀ rR pR mu,
           deriveProductionStatelessInputs ov params rR pkSeed pR mu =
           deriveProductionStatelessInputs suite params rR pkSeed pR mu := by
         intro rR pR mu
-        rw [deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq,
-          thXofMsg_eq, thXofMsg_eq, hXof]
+        rw [deriveProductionStatelessInputs_eq, deriveProductionStatelessInputs_eq]
+        dsimp only
+        rw [thXofMsg_eq, thXofMsg_eq, hXof]
       rw [hDer]
       cases deriveProductionStatelessInputs suite params _ pkSeed _ _ with
       | none => rfl
       | some li => exact hCore _ _ _ _ _
+
+theorem ExecEufCmaIdealPrfGame_win {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeedOf : Fin n → List UInt8)
+    (rfMsg rfSec : Fin n → Spec.Bytes → Spec.Bytes)
+    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n) :
+    (ExecEufCmaIdealPrfGame latchOn hPos suite params pkSeedOf rfMsg rfSec adv).win ω =
+      (let pkSeed := pkSeedOf ω
+       let pk := derivePublicKeyIdealPrf suite params pkSeed (rfSec ω)
+       let signFn := signQueryIdealPrf suite params pkSeed (rfMsg ω) (rfSec ω)
+       let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
+         ((canonicalizeAdvOptRand (adv ω)).run pk) 0
+       let log := signLogFromOracle signFn run.2
+       verifyProductionPqHashSig suite params pk run.1.1 run.1.2 &&
+         decide (run.1.1 ∉ log.map Prod.fst)) := by
+  unfold ExecEufCmaIdealPrfGame; rfl
+
+#export_eqns suitePrfSec derivePublicKeyIdealPrf signQueryIdealPrf
 
 #verify_constructive
   Qsag.suitePrfSec_eq_thSecretPrf

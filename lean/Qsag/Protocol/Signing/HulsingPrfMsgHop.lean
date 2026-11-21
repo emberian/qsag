@@ -69,13 +69,19 @@ theorem derivePublicKey_skPrf_irrel (suite : TweakableHashSuite) (params : PqHas
   dsimp only
   rw [computeXmssSubtreeRoot_skPrf_irrel]
 
+theorem derivePublicKey_skPrf_swap (suite : TweakableHashSuite) (params : PqHashParams)
+    (skSeed r₁ r₂ pkSeed : List UInt8) :
+    derivePublicKey suite params ⟨skSeed, r₁, pkSeed⟩ =
+      derivePublicKey suite params ⟨skSeed, r₂, pkSeed⟩ :=
+  derivePublicKey_skPrf_irrel suite params ⟨skSeed, r₂, pkSeed⟩ r₁
+
 private theorem forsIndexedLeafFn_skPrf_irrel (suite : TweakableHashSuite) (sk : PqSecretKey)
     (r' : List UInt8) (t0 : UInt64) (kp0 j : Nat) :
     forsIndexedLeafFn suite ⟨sk.skSeed, r', sk.pkSeed⟩ t0 kp0 j =
       forsIndexedLeafFn suite sk t0 kp0 j := by
   funext u
-  unfold forsIndexedLeafFn forsIndexedLeafHash
-  rw [forsIndexedSecretLeaf_eq, forsIndexedSecretLeaf_eq]
+  rw [forsIndexedLeafFn_eq, forsIndexedLeafFn_eq, forsIndexedLeafHash_eq, forsIndexedLeafHash_eq,
+    forsIndexedSecretLeaf_eq, forsIndexedSecretLeaf_eq]
 
 theorem signProductionHypertreeLayers_skPrf_irrel (suite : TweakableHashSuite)
     (params : PqHashParams) (sk : PqSecretKey) (r' pkRoot rRand : List UInt8) (maxGrind : Nat) :
@@ -195,6 +201,7 @@ theorem suitePrfMsg65_encodePrfMsg65 (suite : TweakableHashSuite) (skPrf optRand
   · have hZ : (padBytes32 []).length = 32 := padBytes32_length []
     dsimp only [List.isEmpty, ↓reduceIte, List.headD, List.drop]
     rw [List.drop_left' hZ]
+    rfl
   · have hNonNil : optRand.isEmpty = false := by
       cases optRand with
       | nil => cases hOpt32
@@ -251,6 +258,11 @@ def canonicalizeAdvOptRand {qHash qSign : Nat} (A : SeedWithheldEufCmaAdv qHash 
   run pk := canonicalizeTreeOptRand (A.run pk)
   bounded pk := canonicalizeTreeOptRand_bounded (A.run pk) (A.bounded pk)
 
+theorem canonicalizeAdvOptRand_run {qHash qSign : Nat}
+    (A : SeedWithheldEufCmaAdv qHash qSign) (pk : PqPublicKey) :
+    (canonicalizeAdvOptRand A).run pk = canonicalizeTreeOptRand (A.run pk) := by
+  unfold canonicalizeAdvOptRand; rfl
+
 /-- Core signing step from an explicit 32-byte randomizer `rRand` (`skPrf`-free). -/
 def signCoreWithRand (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed skSeed : List UInt8) (q : ProdSigningQuery) (rRand : List UInt8) : Option PqHashSig :=
@@ -302,14 +314,14 @@ theorem signQueryWithRandFn_real_eq (suite : TweakableHashSuite) (params : PqHas
   dsimp only
   rw [hPk]
   by_cases hSt : params.statefulJorts
-  · simp only [hSt, ↓reduceIte, Bool.not_true, Bool.false_or]
+  · simp only [hSt, ↓reduceIte]
     rw [evalProductionStatefulSign_eq]
     simp only [hSt, Bool.not_true, Bool.false_or]
     cases (!params.productionWellFormed || !params.productionLeafIdxInRange q.epoch)
     · simp only [Bool.false_eq_true, ↓reduceIte]
       rw [hPrfEq, signProductionHypertreeCore_skPrf_irrel suite params sk []]
     · simp only [↓reduceIte]
-  · simp only [hSt, Bool.false_eq_true, ↓reduceIte, Bool.false_or]
+  · simp only [hSt, Bool.false_eq_true, ↓reduceIte]
     rw [evalProductionStatelessSign_eq]
     simp only [hSt, Bool.false_or]
     cases (!params.productionWellFormed)
@@ -324,7 +336,10 @@ theorem signQueryWithRandFn_real_eq (suite : TweakableHashSuite) (params : PqHas
           (thPreHash suite (derivePublicKey suite params sk).pkSeed
             (derivePublicKey suite params sk).pkRoot q.message) with
       | none => rfl
-      | some _ => rw [signProductionHypertreeCore_skPrf_irrel suite params sk []]
+      | some val =>
+        rcases val with ⟨leafGlobalIdx, forsIdxs⟩
+        dsimp only
+        rw [signProductionHypertreeCore_skPrf_irrel suite params sk []]
     · simp only [↓reduceIte]
 
 /-- Signing log produced by `signOracle` on query list `qs`. -/
@@ -333,8 +348,17 @@ def signLogFromOracle (signOracle : ProdSigningQuery → Option PqHashSig) :
   | [] => []
   | q :: qs =>
     (match signOracle q with
-     | some sig => [(q.message, sig)]
-     | none => []) ++ signLogFromOracle signOracle qs
+     | none => []
+     | some sig => [(q.message, sig)]) ++ signLogFromOracle signOracle qs
+
+theorem signLogFromOracle_cons (signOracle : ProdSigningQuery → Option PqHashSig)
+    (q : ProdSigningQuery) (qs : List ProdSigningQuery) :
+    signLogFromOracle signOracle (q :: qs) =
+      (match signOracle q with
+       | none => []
+       | some sig => [(q.message, sig)]) ++ signLogFromOracle signOracle qs := by
+  conv => lhs; unfold signLogFromOracle
+  cases signOracle q <;> rfl
 
 theorem signLogFromOracle_eq_productionSigningLog (suite : TweakableHashSuite)
     (params : PqHashParams) (sk : PqSecretKey) :
@@ -350,9 +374,15 @@ theorem signLogFromOracle_eq_productionSigningLog (suite : TweakableHashSuite)
       signQueryWithRandFn_real_eq suite params sk q (hAll q List.mem_cons_self),
       signLogFromOracle_eq_productionSigningLog suite params sk qs
         (fun q' hq' => hAll q' (List.mem_cons_of_mem q hq'))]
+    cases prodSignQuery suite params sk q <;> rfl
+
+theorem fresh_decide_congr {m₁ m₂ : List UInt8}
+    {l₁ l₂ : List (List UInt8 × PqHashSig)} (hm : m₁ = m₂) (hl : l₁ = l₂) :
+    decide (m₁ ∉ l₁.map Prod.fst) = decide (m₂ ∉ l₂.map Prod.fst) := by
+  subst hm; subst hl; rfl
 
 /-- **Hop-1 Idealized-Randomizer EUF-CMA Game (`ExecEufCmaRandIdealGame`).** -/
-def ExecEufCmaRandIdealGame {n qHash qSign : Nat} (hPos : 0 < n)
+def ExecEufCmaRandIdealGame {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
     (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeedOf skSeedOf : Fin n → List UInt8)
     (rfMsg : Fin n → Spec.Bytes → Spec.Bytes)
@@ -363,7 +393,7 @@ def ExecEufCmaRandIdealGame {n qHash qSign : Nat} (hPos : 0 < n)
     let skSeed := skSeedOf ω
     let pk := derivePublicKey suite params ⟨skSeed, [], pkSeed⟩
     let signFn := signQueryWithRandFn suite params pkSeed skSeed (rfMsg ω)
-    let run := evalLatchedAdaptiveTree params.statefulJorts suite.rawHash signFn
+    let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
       ((canonicalizeAdvOptRand (adv ω)).run pk) 0
     let msgStar := run.1.1
     let sigStar := run.1.2
@@ -394,8 +424,34 @@ theorem evalLatched_canonicalize_log_optRand {α : Type}
     · rw [ite_eq_right hAdmit] at hMem
       exact evalLatched_canonicalize_log_optRand latchOn raw sign (next none) lo q hMem
 
+theorem evalLatchedAdaptiveTree_congr_on_log {α : Type} (latchOn : Bool)
+    (raw : List UInt8 → List UInt8)
+    (sign₁ sign₂ : ProdSigningQuery → Option PqHashSig) :
+    ∀ (t : ProdAdaptiveTree α) (lo : Nat),
+      (∀ q ∈ (evalLatchedAdaptiveTree latchOn raw sign₁ t lo).2, sign₁ q = sign₂ q) →
+      evalLatchedAdaptiveTree latchOn raw sign₁ t lo =
+        evalLatchedAdaptiveTree latchOn raw sign₂ t lo
+  | .pure _, _, _ => by rw [evalLatchedAdaptiveTree.public_eq_1, evalLatchedAdaptiveTree.public_eq_1]
+  | .hashQuery x next, lo, hOn => by
+    rw [evalLatchedAdaptiveTree.public_eq_2] at hOn ⊢
+    rw [evalLatchedAdaptiveTree.public_eq_2]
+    exact evalLatchedAdaptiveTree_congr_on_log latchOn raw sign₁ sign₂ (next (raw x)) lo hOn
+  | .signQuery q next, lo, hOn => by
+    rw [evalLatchedAdaptiveTree_sign] at hOn
+    rw [evalLatchedAdaptiveTree_sign, evalLatchedAdaptiveTree_sign]
+    by_cases hAdm : latchOn = false ∨ lo ≤ q.epoch
+    · rw [ite_eq_left hAdm] at hOn
+      rw [ite_eq_left hAdm, ite_eq_left hAdm]
+      have hq : sign₁ q = sign₂ q := hOn q List.mem_cons_self
+      have ih := evalLatchedAdaptiveTree_congr_on_log latchOn raw sign₁ sign₂ (next (sign₁ q))
+        (q.epoch + 1) (fun q' hq' => hOn q' (List.mem_cons_of_mem q hq'))
+      rw [← hq, ih]
+    · rw [ite_eq_right hAdm] at hOn
+      rw [ite_eq_right hAdm, ite_eq_right hAdm]
+      exact evalLatchedAdaptiveTree_congr_on_log latchOn raw sign₁ sign₂ (next none) lo hOn
+
 /-- **Interactive `Code byteOracleIface Bool` Distinguisher for Hop 1 (`prfMsgHopTreeCode`).** -/
-def prfMsgHopTreeCode (suite : TweakableHashSuite) (params : PqHashParams)
+def prfMsgHopTreeCode (latchOn : Bool) (suite : TweakableHashSuite) (params : PqHashParams)
     (pkSeed skSeed : List UInt8) (pk : PqPublicKey) :
     ProdAdaptiveTree (List UInt8 × PqHashSig) → Nat → List (List UInt8 × PqHashSig) →
     Spec.Code Spec.byteOracleIface Bool
@@ -403,107 +459,110 @@ def prfMsgHopTreeCode (suite : TweakableHashSuite) (params : PqHashParams)
     .ret (verifyProductionPqHashSig suite params pk msgStar sigStar &&
       decide (msgStar ∉ log.map Prod.fst))
   | .hashQuery x next, lo, log =>
-    prfMsgHopTreeCode suite params pkSeed skSeed pk (next (suite.rawHash x)) lo log
+    prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk (next (suite.rawHash x)) lo log
   | .signQuery q next, lo, log =>
-    if params.statefulJorts = false ∨ lo ≤ q.epoch then
-      let guardFail :=
-        if params.statefulJorts then
-          !params.productionWellFormed || !params.productionLeafIdxInRange q.epoch
-        else !params.productionWellFormed
-      let lo' := if params.statefulJorts then q.epoch + 1 else lo
-      if guardFail then
-        prfMsgHopTreeCode suite params pkSeed skSeed pk (next none) lo' log
+    if latchOn = false ∨ lo ≤ q.epoch then
+      if (if params.statefulJorts then
+            !params.productionWellFormed || !params.productionLeafIdxInRange q.epoch
+          else !params.productionWellFormed) then
+        prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk (next none) (q.epoch + 1) log
       else
         let mu := thPreHash suite pk.pkSeed pk.pkRoot q.message
         .call (encodePrfMsg65 q.randomness mu) (fun rRand =>
           let sigOpt := signCoreWithRand suite params pkSeed skSeed q rRand
           let log' := match sigOpt with
-            | some sig => log ++ [(q.message, sig)]
             | none => log
-          prfMsgHopTreeCode suite params pkSeed skSeed pk (next sigOpt) lo' log')
+            | some sig => log ++ [(q.message, sig)]
+          prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk (next sigOpt) (q.epoch + 1) log')
     else
-      prfMsgHopTreeCode suite params pkSeed skSeed pk (next none) lo log
+      prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk (next none) lo log
 
 /-- **Hop-1 PRF Distinguisher (`prfMsgHopDistinguisher`)** making at most `qSign` queries to
     `Spec.byteOracleIface`. -/
-def prfMsgHopDistinguisher {qHash qSign : Nat} (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed skSeed : List UInt8) (A : SeedWithheldEufCmaAdv qHash qSign) :
+def prfMsgHopDistinguisher {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed skSeed : List UInt8) (A : SeedWithheldEufCmaAdv qHash qSign) :
     Spec.Code Spec.byteOracleIface Bool :=
   let pk := derivePublicKey suite params ⟨skSeed, [], pkSeed⟩
-  prfMsgHopTreeCode suite params pkSeed skSeed pk ((canonicalizeAdvOptRand A).run pk) 0 []
+  prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk ((canonicalizeAdvOptRand A).run pk) 0 []
 
-private theorem prfMsgHopTreeCode_within (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed skSeed : List UInt8) (pk : PqPublicKey) :
+private theorem prfMsgHopTreeCode_within (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed skSeed : List UInt8) (pk : PqPublicKey) :
     ∀ {qH qS : Nat} (t : ProdAdaptiveTree (List UInt8 × PqHashSig)) (lo : Nat)
       (log : List (List UInt8 × PqHashSig)),
       ProdDualBounded qH qS t →
-      Spec.Within qS (prfMsgHopTreeCode suite params pkSeed skSeed pk t lo log)
+      Spec.Within qS (prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk t lo log)
   | _, qS, .pure (_, _), _, _, _ => .ret qS _
   | 0, _, .hashQuery _ _, _, _, h => False.elim h
   | _ + 1, _, .hashQuery x next, lo, log, h =>
-    prfMsgHopTreeCode_within suite params pkSeed skSeed pk (next (suite.rawHash x)) lo log (h _)
+    prfMsgHopTreeCode_within latchOn suite params pkSeed skSeed pk (next (suite.rawHash x)) lo log
+      (h _)
   | _, 0, .signQuery _ _, _, _, h => False.elim h
   | _, qS + 1, .signQuery q next, lo, log, h => by
     unfold prfMsgHopTreeCode
-    by_cases hAdm : params.statefulJorts = false ∨ lo ≤ q.epoch
+    by_cases hAdm : latchOn = false ∨ lo ≤ q.epoch
     · rw [ite_eq_left hAdm]
-      dsimp only
-      split
-      · exact Spec.Within.mono (Nat.le_succ qS)
-          (prfMsgHopTreeCode_within suite params pkSeed skSeed pk (next none) _ log (h none))
-      · exact .call (E := Spec.byteOracleIface) _ _ (fun _ =>
-          prfMsgHopTreeCode_within suite params pkSeed skSeed pk _ _ _ (h _))
+      by_cases hG : (if params.statefulJorts then
+            !params.productionWellFormed || !params.productionLeafIdxInRange q.epoch
+          else !params.productionWellFormed) = true
+      · rw [ite_eq_left hG]
+        exact Spec.Within.mono (Nat.le_succ qS)
+          (prfMsgHopTreeCode_within latchOn suite params pkSeed skSeed pk (next none) (q.epoch + 1)
+            log (h none))
+      · rw [ite_eq_right hG]
+        exact .call (E := Spec.byteOracleIface) _ _ (fun _ =>
+          prfMsgHopTreeCode_within latchOn suite params pkSeed skSeed pk _ (q.epoch + 1) _ (h _))
     · rw [ite_eq_right hAdm]
       exact Spec.Within.mono (Nat.le_succ qS)
-        (prfMsgHopTreeCode_within suite params pkSeed skSeed pk (next none) lo log (h none))
+        (prfMsgHopTreeCode_within latchOn suite params pkSeed skSeed pk (next none) lo log (h none))
 
-theorem prfMsgHopDistinguisher_within {qHash qSign : Nat} (suite : TweakableHashSuite)
-    (params : PqHashParams) (pkSeed skSeed : List UInt8) (A : SeedWithheldEufCmaAdv qHash qSign) :
-    Spec.Within qSign (prfMsgHopDistinguisher suite params pkSeed skSeed A) :=
-  prfMsgHopTreeCode_within suite params pkSeed skSeed _ _ 0 []
+theorem prfMsgHopDistinguisher_within {qHash qSign : Nat} (latchOn : Bool)
+    (suite : TweakableHashSuite) (params : PqHashParams) (pkSeed skSeed : List UInt8)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    Spec.Within qSign (prfMsgHopDistinguisher latchOn suite params pkSeed skSeed A) :=
+  prfMsgHopTreeCode_within latchOn suite params pkSeed skSeed _ _ 0 []
     ((canonicalizeAdvOptRand A).bounded _)
 
-private theorem prfMsgHopTreeCode_play (suite : TweakableHashSuite) (params : PqHashParams)
-    (pkSeed skSeed : List UInt8) (f : Spec.Bytes → Spec.Bytes) (qPrf : Nat) :
+private theorem prfMsgHopTreeCode_play (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed skSeed : List UInt8) (f : Spec.Bytes → Spec.Bytes)
+    (qPrf : Nat) :
     ∀ {qH qS : Nat} (t : ProdAdaptiveTree (List UInt8 × PqHashSig)) (lo used : Nat)
       (log : List (List UInt8 × PqHashSig)),
       ProdDualBounded qH qS t →
       used + qS ≤ qPrf →
       (Spec.Code.play (Spec.budgetedFunOracle f qPrf)
-        (prfMsgHopTreeCode suite params pkSeed skSeed
+        (prfMsgHopTreeCode latchOn suite params pkSeed skSeed
           (derivePublicKey suite params ⟨skSeed, [], pkSeed⟩) t lo log) used).1 =
       (verifyProductionPqHashSig suite params
           (derivePublicKey suite params ⟨skSeed, [], pkSeed⟩)
-          (evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+          (evalLatchedAdaptiveTree latchOn suite.rawHash
             (signQueryWithRandFn suite params pkSeed skSeed f) t lo).1.1
-          (evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+          (evalLatchedAdaptiveTree latchOn suite.rawHash
             (signQueryWithRandFn suite params pkSeed skSeed f) t lo).1.2 &&
-        decide ((evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+        decide ((evalLatchedAdaptiveTree latchOn suite.rawHash
             (signQueryWithRandFn suite params pkSeed skSeed f) t lo).1.1 ∉
           (log ++ signLogFromOracle (signQueryWithRandFn suite params pkSeed skSeed f)
-            (evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+            (evalLatchedAdaptiveTree latchOn suite.rawHash
               (signQueryWithRandFn suite params pkSeed skSeed f) t lo).2).map Prod.fst))
   | _, _, .pure (msgStar, sigStar), _, used, log, _, _ => by
     unfold prfMsgHopTreeCode
     rw [Spec.Code.play_ret, evalLatchedAdaptiveTree.public_eq_1]
     dsimp only [signLogFromOracle]
-    rw [List.append_nil]
+    congr 1
+    exact fresh_decide_congr rfl (List.append_nil log).symm
   | 0, _, .hashQuery _ _, _, _, _, hB, _ => False.elim hB
   | _ + 1, _, .hashQuery x next, lo, used, log, hB, hUsed => by
     unfold prfMsgHopTreeCode
     rw [evalLatchedAdaptiveTree.public_eq_2]
-    exact prfMsgHopTreeCode_play suite params pkSeed skSeed f qPrf (next (suite.rawHash x)) lo used
-      log (hB _) hUsed
+    exact prfMsgHopTreeCode_play latchOn suite params pkSeed skSeed f qPrf (next (suite.rawHash x))
+      lo used log (hB _) hUsed
   | _, 0, .signQuery _ _, _, _, _, hB, _ => False.elim hB
   | _, qS + 1, .signQuery q next, lo, used, log, hB, hUsed => by
     unfold prfMsgHopTreeCode
     rw [evalLatchedAdaptiveTree_sign]
-    by_cases hAdm : params.statefulJorts = false ∨ lo ≤ q.epoch
+    by_cases hAdm : latchOn = false ∨ lo ≤ q.epoch
     · rw [ite_eq_left hAdm, ite_eq_left hAdm]
-      dsimp only
       let pk := derivePublicKey suite params ⟨skSeed, [], pkSeed⟩
       let signFn := signQueryWithRandFn suite params pkSeed skSeed f
-      let lo' := if params.statefulJorts then q.epoch + 1 else lo
       have hGuardSplit :
           ((if params.statefulJorts then
               !params.productionWellFormed || !params.productionLeafIdxInRange q.epoch
@@ -525,18 +584,17 @@ private theorem prfMsgHopTreeCode_play (suite : TweakableHashSuite) (params : Pq
           · exact .inr ⟨rfl, rfl⟩
           · exact .inl ⟨rfl, rfl⟩
       rcases hGuardSplit with ⟨hGTrue, hSignNone⟩ | ⟨hGFalse, hSignSome⟩
-      · rw [hGTrue]
-        dsimp only [↓reduceIte]
-        have ih := prfMsgHopTreeCode_play suite params pkSeed skSeed f qPrf (next none) lo' used log
-          (hB none) (by omega)
-        change _ = (verifyProductionPqHashSig suite params pk _ _ &&
-          decide (_ ∉ (log ++ signLogFromOracle signFn (q :: _)).map Prod.fst))
-        unfold signLogFromOracle
-        rw [hSignNone, List.nil_append, hSignNone]
-        exact ih
-      · rw [hGFalse]
-        dsimp only [Bool.false_eq_true, ↓reduceIte]
-        rw [Spec.Code.play_call]
+      · rw [ite_eq_left hGTrue]
+        have hSN : signQueryWithRandFn suite params pkSeed skSeed f q = none := hSignNone
+        have ih := prfMsgHopTreeCode_play latchOn suite params pkSeed skSeed f qPrf (next none)
+          (q.epoch + 1) used log (hB none) (by omega)
+        rw [ih, hSN]
+        congr 1
+        exact fresh_decide_congr rfl (by rw [signLogFromOracle_cons, hSN, List.nil_append])
+      · have hNotG : ¬ ((if params.statefulJorts then
+              !params.productionWellFormed || !params.productionLeafIdxInRange q.epoch
+            else !params.productionWellFormed) = true) := by rw [hGFalse]; decide
+        rw [ite_eq_right hNotG, Spec.Code.play_call]
         have hLtQ : used < qPrf := by omega
         have hOracle : Spec.budgetedFunOracle f qPrf used
             (encodePrfMsg65 q.randomness (thPreHash suite pk.pkSeed pk.pkRoot q.message)) =
@@ -545,26 +603,36 @@ private theorem prfMsgHopTreeCode_play (suite : TweakableHashSuite) (params : Pq
           rw [Spec.budgetedFunOracle.public_eqs, ite_eq_left hLtQ]
         rw [hOracle]
         dsimp only
-        change _ = (verifyProductionPqHashSig suite params pk _ _ &&
-          decide (_ ∉ (log ++ signLogFromOracle signFn (q :: _)).map Prod.fst))
+        change (Spec.Code.play (Spec.budgetedFunOracle f qPrf)
+            (prfMsgHopTreeCode latchOn suite params pkSeed skSeed pk
+              (next (signCoreWithRand suite params pkSeed skSeed q
+                (f (encodePrfMsg65 q.randomness (thPreHash suite pk.pkSeed pk.pkRoot q.message)))))
+              (q.epoch + 1) _) (used + 1)).1 =
+          (verifyProductionPqHashSig suite params pk _ _ &&
+            decide (_ ∉ (log ++ signLogFromOracle signFn (q :: _)).map Prod.fst))
         rw [← hSignSome]
-        have ih := prfMsgHopTreeCode_play suite params pkSeed skSeed f qPrf (next (signFn q)) lo'
-          (used + 1)
-          (match signFn q with | some sig => log ++ [(q.message, sig)] | none => log)
+        have ih := prfMsgHopTreeCode_play latchOn suite params pkSeed skSeed f qPrf
+          (next (signFn q)) (q.epoch + 1) (used + 1)
+          (match signFn q with | none => log | some sig => log ++ [(q.message, sig)])
           (hB (signFn q)) (by omega)
         rw [ih]
-        unfold signLogFromOracle
-        cases signFn q <;> simp [List.append_assoc]
+        congr 1
+        exact fresh_decide_congr rfl (by
+          dsimp only [signFn]
+          rw [signLogFromOracle_cons]
+          cases signQueryWithRandFn suite params pkSeed skSeed f q with
+          | none => simp
+          | some sig => simp [List.append_assoc])
     · rw [ite_eq_right hAdm, ite_eq_right hAdm]
-      exact prfMsgHopTreeCode_play suite params pkSeed skSeed f qPrf (next none) lo used log
-        (hB none) (by omega)
+      exact prfMsgHopTreeCode_play latchOn suite params pkSeed skSeed f qPrf (next none) lo used
+        log (hB none) (by omega)
 
 /-- **Hop 1 Theorem (`hulsing_hop1_prfMsg_idealization`).**
     Replaces `thPrfMsg suite sk.skPrf` across all `≤ qSign` adaptive signing queries (both
     deterministic `[]` and adversary-chosen 32-byte `randomness`) with uniform `rfMsg`, paying
     at most `+ εPrfMsg` under `Spec.PrfHard` while leaving `suite.rawHash` 100% untouched. -/
-theorem hulsing_hop1_prfMsg_idealization {n nC nA qHash qSign : Nat} (hPos : 0 < n)
-    (suite : TweakableHashSuite) (params : PqHashParams)
+theorem hulsing_hop1_prfMsg_idealization {n nC nA qHash qSign : Nat} (latchOn : Bool)
+    (hPos : 0 < n) (suite : TweakableHashSuite) (params : PqHashParams)
     (keyLen qPrf : Nat) (hqPrf : qSign ≤ qPrf)
     (π : Spec.CoinSplit n nC nA)
     (sampleMsg : Fin nC → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
@@ -573,72 +641,67 @@ theorem hulsing_hop1_prfMsg_idealization {n nC nA qHash qSign : Nat} (hPos : 0 <
     (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
     {𝒜Msg : Spec.Code Spec.byteOracleIface Bool → Prop}
     (hClassMsg : ∀ a : Fin nA,
-      𝒜Msg (prfMsgHopDistinguisher suite params (pkSeedA a) (skSeedA a) (adv a)))
+      𝒜Msg (prfMsgHopDistinguisher latchOn suite params (pkSeedA a) (skSeedA a) (adv a)))
     {εPrfMsg : Spec.RatBound}
     (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrf εPrfMsg) :
     let keygenReal : Fin n → PqSecretKey := fun ω =>
       ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩
     let advReal : Fin n → SeedWithheldEufCmaAdv qHash qSign := fun ω =>
       canonicalizeAdvOptRand (adv (π.advc ω))
-    let gIdeal := ExecEufCmaRandIdealGame hPos suite params
+    let gIdeal := ExecEufCmaRandIdealGame latchOn hPos suite params
       (fun ω => pkSeedA (π.advc ω)) (fun ω => skSeedA (π.advc ω))
       (fun ω => (sampleMsg (π.chal ω)).2) (fun ω => adv (π.advc ω))
     Spec.GameBound
-      (ExecEufCmaGame hPos suite params keygenReal advReal).winProb
+      (execEufCmaGameWith latchOn hPos suite params keygenReal advReal).winProb
       (gIdeal.winProb.add εPrfMsg) := by
   intro keygenReal advReal gIdeal
   let D : Fin nA → Spec.Code Spec.byteOracleIface Bool := fun a =>
-    prfMsgHopDistinguisher suite params (pkSeedA a) (skSeedA a) (adv a)
+    prfMsgHopDistinguisher latchOn suite params (pkSeedA a) (skSeedA a) (adv a)
   have hRealEq : ∀ ω : Fin n,
-      (ExecEufCmaGame hPos suite params keygenReal advReal).win ω =
+      (execEufCmaGameWith latchOn hPos suite params keygenReal advReal).win ω =
       (Spec.prfRealGame hPos (suitePrfMsg65 suite) qPrf
         (fun z => (sampleMsg (π.chal z)).1) (fun z => D (π.advc z))).win ω := by
     intro ω
     rw [Spec.prfRealGame.public_eqs]
     dsimp only [D, prfMsgHopDistinguisher]
-    have hPlay := prfMsgHopTreeCode_play suite params (pkSeedA (π.advc ω)) (skSeedA (π.advc ω))
-      (suitePrfMsg65 suite (sampleMsg (π.chal ω)).1) qPrf
+    have hPlay := prfMsgHopTreeCode_play latchOn suite params (pkSeedA (π.advc ω))
+      (skSeedA (π.advc ω)) (suitePrfMsg65 suite (sampleMsg (π.chal ω)).1) qPrf
       ((advReal ω).run (derivePublicKey suite params ⟨skSeedA (π.advc ω), [], pkSeedA (π.advc ω)⟩))
       0 0 [] ((advReal ω).bounded _) (by omega)
-    rw [List.nil_append] at hPlay
-    rw [hPlay]
-    rw [ExecEufCmaGame, execEufCmaGameWith_win, prodEufCmaWin_eq]
+    rw [hPlay, execEufCmaGameWith_win, prodEufCmaWin_eq]
     unfold execEufCmaOutcome
     dsimp only [keygenReal]
     have hPkEq : derivePublicKey suite params ⟨skSeedA (π.advc ω), [], pkSeedA (π.advc ω)⟩ =
         derivePublicKey suite params
           ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩ :=
-      (derivePublicKey_skPrf_irrel suite params
-        ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩ []).symm
-    let t := (advReal ω).run
-      (derivePublicKey suite params ⟨skSeedA (π.advc ω), [], pkSeedA (π.advc ω)⟩)
+      derivePublicKey_skPrf_swap suite params (skSeedA (π.advc ω)) []
+        (sampleMsg (π.chal ω)).1 (pkSeedA (π.advc ω))
+    let pk0 := derivePublicKey suite params ⟨skSeedA (π.advc ω), [], pkSeedA (π.advc ω)⟩
+    let t := (advReal ω).run pk0
     have hTreeEq :
-        evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+        evalLatchedAdaptiveTree latchOn suite.rawHash
           (signQueryWithRandFn suite params (pkSeedA (π.advc ω)) (skSeedA (π.advc ω))
             (suitePrfMsg65 suite (sampleMsg (π.chal ω)).1)) t 0 =
-        evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+        evalLatchedAdaptiveTree latchOn suite.rawHash
           (prodSignQuery suite params
             ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩) t 0 := by
-      refine evalLatchedAdaptiveTree_congr_on_log suite.rawHash _ _ t 0 (fun q hq => ?_)
-      have hOpt := evalLatched_canonicalize_log_optRand params.statefulJorts suite.rawHash _
-        ((adv (π.advc ω)).run _) 0 q hq
+      refine evalLatchedAdaptiveTree_congr_on_log latchOn suite.rawHash _ _ t 0 (fun q hq => ?_)
+      have hOpt := evalLatched_canonicalize_log_optRand latchOn suite.rawHash _
+        ((adv (π.advc ω)).run pk0) 0 q hq
       exact signQueryWithRandFn_real_eq suite params
         ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩ q hOpt
-    have hLogOpt : ∀ q ∈ (evalLatchedAdaptiveTree params.statefulJorts suite.rawHash
+    have hLogOpt : ∀ q ∈ (evalLatchedAdaptiveTree latchOn suite.rawHash
         (prodSignQuery suite params
           ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩) t 0).2,
         q.randomness = [] ∨ q.randomness.length = 32 := fun q hq =>
-      evalLatched_canonicalize_log_optRand params.statefulJorts suite.rawHash _ _ 0 q hq
-    change _ = (verifyProductionPqHashSig suite params _
-      (evalLatchedAdaptiveTree _ _ _ ((advReal ω).run _) 0).1.1
-      (evalLatchedAdaptiveTree _ _ _ ((advReal ω).run _) 0).1.2 && _)
-    rw [← hPkEq]
-    change (verifyProductionPqHashSig suite params _
-        (evalLatchedAdaptiveTree _ _ _ t 0).1.1
-        (evalLatchedAdaptiveTree _ _ _ t 0).1.2 &&
-      decide (_ ∉ (signLogFromOracle _ (evalLatchedAdaptiveTree _ _ _ t 0).2).map Prod.fst)) = _
-    rw [hTreeEq, signLogFromOracle_eq_productionSigningLog suite params
-      ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩ _ hLogOpt]
+      evalLatched_canonicalize_log_optRand latchOn suite.rawHash _ _ 0 q hq
+    have hLogEq := signLogFromOracle_eq_productionSigningLog suite params
+      ⟨skSeedA (π.advc ω), (sampleMsg (π.chal ω)).1, pkSeedA (π.advc ω)⟩ _ hLogOpt
+    dsimp only [t, pk0] at hTreeEq hLogEq
+    congr 1
+    · rw [← hPkEq, hTreeEq]
+    · exact fresh_decide_congr (by rw [← hPkEq, hTreeEq])
+        (by rw [List.nil_append, ← hPkEq, ← hLogEq, hTreeEq])
   have hIdealEq : ∀ ω : Fin n,
       gIdeal.win ω =
       (Spec.prfIdealGame hPos qPrf
@@ -646,19 +709,20 @@ theorem hulsing_hop1_prfMsg_idealization {n nC nA qHash qSign : Nat} (hPos : 0 <
     intro ω
     rw [Spec.prfIdealGame.public_eqs]
     dsimp only [D, gIdeal, ExecEufCmaRandIdealGame, prfMsgHopDistinguisher]
-    have hPlay := prfMsgHopTreeCode_play suite params (pkSeedA (π.advc ω)) (skSeedA (π.advc ω))
-      ((sampleMsg (π.chal ω)).2) qPrf
+    have hPlay := prfMsgHopTreeCode_play latchOn suite params (pkSeedA (π.advc ω))
+      (skSeedA (π.advc ω)) ((sampleMsg (π.chal ω)).2) qPrf
       ((canonicalizeAdvOptRand (adv (π.advc ω))).run
         (derivePublicKey suite params ⟨skSeedA (π.advc ω), [], pkSeedA (π.advc ω)⟩))
       0 0 [] ((canonicalizeAdvOptRand (adv (π.advc ω))).bounded _) (by omega)
-    rw [List.nil_append] at hPlay
     exact hPlay.symm
   have hDist : Spec.GameBound
-      (Spec.AdvDist (ExecEufCmaGame hPos suite params keygenReal advReal) gIdeal) εPrfMsg := by
+      (Spec.AdvDist (execEufCmaGameWith latchOn hPos suite params keygenReal advReal) gIdeal)
+      εPrfMsg := by
     rw [Spec.FinGame.ext_win hRealEq, Spec.FinGame.ext_win hIdealEq]
     exact hPrfMsg n nC nA hPos π sampleMsg hSampleMsg D hClassMsg
   exact Spec.RatBound.le_trans
-    (winProb_le_add_advDist (ExecEufCmaGame hPos suite params keygenReal advReal) gIdeal)
+    (winProb_le_add_advDist (execEufCmaGameWith latchOn hPos suite params keygenReal advReal)
+      gIdeal)
     (Spec.RatBound.add_le_add (Spec.RatBound.le_refl _) hDist)
 
 /-- `#tooth` A constant empty randomizer fails `PrfHard` whenever `suitePrfMsg65` is replaced by
@@ -671,6 +735,24 @@ theorem prfMsg_empty_refuted {nC : Nat} (hPos : 0 < nC) (keyLen q : Nat) (hq : 0
     {ε : Spec.RatBound} (hε : ε.num < ε.den) :
     ¬ Spec.PrfHard 𝒜 (fun _ _ => []) keyLen 65 32 q ε :=
   Spec.prfHard_emptyOutput_refuted hPos keyLen 65 32 q sample hU 𝒜 h𝒜 (by decide) hq hε
+
+theorem ExecEufCmaRandIdealGame_win {n qHash qSign : Nat} (latchOn : Bool) (hPos : 0 < n)
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeedOf skSeedOf : Fin n → List UInt8)
+    (rfMsg : Fin n → Spec.Bytes → Spec.Bytes)
+    (adv : Fin n → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n) :
+    (ExecEufCmaRandIdealGame latchOn hPos suite params pkSeedOf skSeedOf rfMsg adv).win ω =
+      (let pk : PqPublicKey := derivePublicKey suite params ⟨skSeedOf ω, [], pkSeedOf ω⟩
+       let signFn := signQueryWithRandFn suite params (pkSeedOf ω) (skSeedOf ω) (rfMsg ω)
+       let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
+         ((canonicalizeAdvOptRand (adv ω)).run pk) 0
+       let log := signLogFromOracle signFn run.2
+       verifyProductionPqHashSig suite params pk run.1.1 run.1.2 &&
+         decide (run.1.1 ∉ log.map Prod.fst)) := by
+  unfold ExecEufCmaRandIdealGame; rfl
+
+#export_eqns padBytes32 encodePrfMsg65 canonicalOptRand canonicalizeQueryOptRand
+  canonicalizeTreeOptRand signCoreWithRand signQueryWithRandFn signLogFromOracle
 
 #verify_constructive
   Qsag.derivePublicKey_skPrf_irrel
