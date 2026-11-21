@@ -55,6 +55,78 @@ def unroll(steps):
     s += "".join(f"(assert (|lec_top_t| s{k} s{k+1}))\n" for k in range(steps))
     return s
 
+def flatten_ys_smt2(ys_txt, mod, steps):
+    """Eliminate uninterpreted state sort |<mod>_s| across `steps` cycles so Bitwuzla solves
+    sequential QF_BV / QF_UFBV pipelines directly in < 0.3s without Ackermannization."""
+    import re
+    out_decls = {t: [] for t in range(steps + 1)}
+    t_body = None
+    lines = [ln.split(";")[0].rstrip() for ln in ys_txt.splitlines() if ln.split(";")[0].strip()]
+    i = 0
+    header = []
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith(f"(declare-sort |{mod}_s|"):
+            i += 1
+            continue
+        m_dec = re.match(rf"^\(declare-fun (\|{re.escape(mod)}[^|]*\|) \(\|{re.escape(mod)}_s\|\) (.+)\)$", ln)
+        if m_dec:
+            fn, ty = m_dec.group(1), m_dec.group(2)
+            for t in range(steps + 1):
+                out_decls[t].append(f"(declare-const {fn[:-1]}@s{t}| {ty})")
+            i += 1
+            continue
+        if ln.startswith(f"(define-fun |{mod}_t| "):
+            blk = [ln]
+            depth = ln.count("(") - ln.count(")")
+            i += 1
+            while depth > 0 and i < len(lines):
+                blk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+            t_body = "\n".join(blk)
+            continue
+        m_def = re.match(rf"^\(define-fun (\|{re.escape(mod)}[^|]*\|) \(\(state \|{re.escape(mod)}_s\|\)\)", ln)
+        if m_def:
+            fn = m_def.group(1)
+            blk = [ln]
+            depth = ln.count("(") - ln.count(")")
+            i += 1
+            while depth > 0 and i < len(lines):
+                blk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+            full = "\n".join(blk)
+            for t in range(steps + 1):
+                out_decls[t].append(("DEF", fn, t, full))
+            continue
+        header.append(ln)
+        i += 1
+
+    pat_state = re.compile(rf"\((\|{re.escape(mod)}[^|]*\|) state\)")
+    pat_next = re.compile(rf"\((\|{re.escape(mod)}[^|]*\|) next_state\)")
+    chunks = ["\n".join(header)]
+    for t in range(steps + 1):
+        for item in out_decls[t]:
+            if isinstance(item, str):
+                chunks.append(item)
+            else:
+                _, fn, tt, full = item
+                s = full.replace(f"(define-fun {fn} ((state |{mod}_s|))", f"(define-fun {fn[:-1]}@s{tt}| ()", 1)
+                s = pat_state.sub(lambda m: f"{m.group(1)[:-1]}@s{tt}|", s)
+                chunks.append(s)
+        chunks.append(f"(assert |{mod}_h@s{t}|)")
+    if t_body and steps > 0:
+        inner = t_body.split("Bool", 1)[1].rsplit(")", 1)[0]
+        for t in range(steps):
+            s = pat_state.sub(lambda m: f"{m.group(1)[:-1]}@s{t}|", inner)
+            s = pat_next.sub(lambda m: f"{m.group(1)[:-1]}@s{t+1}|", s)
+            chunks.append(f"(assert {s})")
+    return "\n".join(chunks) + "\n"
+
+def flat_acc(port, step):
+    return f"|lec_top_n {port}@s{step}|"
+
 def solve(name, text, secs, prefer_bitwuzla=True):
     path = os.path.join(OUT, name + ".smt2")
     is_bv_only = (" Int)" not in text) and ("(mod " not in text)
@@ -334,12 +406,13 @@ def check_adder_contracts():
 
     check_csa_inductive(66, 6)
     check_csa_inductive(67, 5)
+    check_csa_inductive(96, 5)
     check_csa_inductive(128, 12)
     check_csa_inductive(136, 15)
 
-    for w, chk in [(33, 17), (33, 33), (65, 16), (65, 34), (66, 16), (66, 24), (66, 34),
-                   (67, 16), (67, 24), (67, 34), (96, 32),
-                   (128, 16), (128, 24), (136, 16), (136, 24), (136, 46)]:
+    for w, chk in [(33, 17), (33, 33), (65, 16), (65, 34), (66, 16), (66, 24), (66, 34), (66, 66),
+                   (67, 16), (67, 24), (67, 34), (96, 32), (96, 48),
+                   (128, 16), (128, 24), (128, 32), (136, 16), (136, 24), (136, 46)]:
         ys = yosys_smt2(f"contract_split_{w}_{chk}", "qsag_add_split", [], f"-chparam W {w} -chparam CHUNK {chk}", use_contracts=False)
         spec = f"(bvadd {acc('a', 's0')} {acc('b', 's0')})"
         body = ys + "(declare-fun s0 () |lec_top_s|)\n(assert (|lec_top_h| s0))\n"
@@ -348,7 +421,9 @@ def check_adder_contracts():
             raise SystemExit("refusing unproved split-adder contract")
 
     scsa_src = open(SCSA).read().replace("(* flatten *)", "")
-    for w, n, chk in [(66, 6, 16), (66, 6, 24), (67, 5, 16), (128, 12, 16), (128, 12, 24), (136, 15, 16), (136, 15, 24)]:
+    for w, n, chk in [(66, 3, 16), (66, 3, 66), (66, 4, 16), (66, 6, 16), (66, 6, 24), (67, 5, 16),
+                      (96, 5, 48), (128, 12, 16), (128, 12, 24), (128, 12, 32),
+                      (136, 10, 16), (136, 12, 16), (136, 13, 16), (136, 15, 16), (136, 15, 24)]:
         glue_sv = os.path.join(OUT, f"sum_csa_glue_{w}_{n}_{chk}.sv")
         gtxt = scsa_src.replace("input  logic [N*W-1:0] x,",
                                 f"input logic [N*W-1:0] x, input logic [{w-1}:0] free_s,", 1)
@@ -573,13 +648,46 @@ endmodule
         ]
         return ys_abs + unroll(3) + hyps + "(assert (not (and " + " ".join(clauses) + ")))\n(check-sat)\n"
 
-    for aw, bw in [(26, 17), (16, 16)]:
-        ys64 = yosys_smt2(f"mul64_rel_{aw}x{bw}", "qsag_mul64_dsp", [m64_sv], f"-chparam AW {aw} -chparam BW {bw}")
-        if not record(f"mul64_dsp_wiring_rtl_{aw}x{bw}",
-                      f"9-DSP qsag_mul64_dsp AW={aw} BW={bw} RTL pairwise CSA row & sum invariants over all 2^128 inputs",
-                      "unsat", mul64_wiring_rtl_query(ys64),
-                      prefer_bitwuzla=True):
-            raise SystemExit("failed mul64_dsp RTL row proof")
+    def mul64_direct_k64_query(ys_txt):
+        assert ys_txt.count("(bvmul ") == 3, ys_txt.count("(bvmul ")
+        ys_abs = "(declare-fun qmul33 ((_ BitVec 67) (_ BitVec 67)) (_ BitVec 67))\n" + ys_txt.replace("(bvmul ", "(qmul33 ")
+        a64, b64 = flat_acc("a", 0), flat_acc("b", 0)
+        a0_67 = zext(f"((_ extract 31 0) {a64})", 32, 67)
+        a1_67 = zext(f"((_ extract 63 32) {a64})", 32, 67)
+        b0_67 = zext(f"((_ extract 31 0) {b64})", 32, 67)
+        b1_67 = zext(f"((_ extract 63 32) {b64})", 32, 67)
+        sa_33 = f"(bvadd {zext(f'((_ extract 31 0) {a64})', 32, 33)} {zext(f'((_ extract 63 32) {a64})', 32, 33)})"
+        sb_33 = f"(bvadd {zext(f'((_ extract 31 0) {b64})', 32, 33)} {zext(f'((_ extract 63 32) {b64})', 32, 33)})"
+        sa_67 = zext(sa_33, 33, 67)
+        beta_67 = zext(f"((_ extract 31 0) {sb_33})", 32, 67)
+        cb_1 = f"((_ extract 32 32) {sb_33})"
+        p0_67 = f"(qmul33 {a0_67} {b0_67})"
+        p2_67 = f"(qmul33 {a1_67} {b1_67})"
+        ps_67 = f"(qmul33 {sa_67} {beta_67})"
+        hyps = (
+            f"(assert (bvule {p0_67} {bv((2**32 - 1)**2, 67)}))\n"
+            f"(assert (bvule {p2_67} {bv((2**32 - 1)**2, 67)}))\n"
+            f"(assert (bvule {ps_67} {bv((2**33 - 1) * (2**32 - 1), 67)}))\n"
+            f"(assert (= (bvadd {zext(flat_acc('p0_s', 2), 66, 68)} {zext(flat_acc('p0_c', 2), 66, 68)}) (bvadd {zext(flat_acc('pr0', 2), 67, 68)} {bv(B33, 68)})))\n"
+            f"(assert (= (bvadd {zext(flat_acc('p2_s', 2), 66, 68)} {zext(flat_acc('p2_c', 2), 66, 68)}) (bvadd {zext(flat_acc('pr2', 2), 67, 68)} {bv(B33, 68)})))\n"
+            f"(assert (= (bvadd {zext(flat_acc('ps_s', 2), 66, 68)} {zext(flat_acc('ps_c', 2), 66, 68)}) (bvadd {zext(flat_acc('prs', 2), 67, 68)} {bv(B33, 68)})))\n"
+        )
+        p0w, p2w, psw = zext(p0_67, 67, 128), zext(p2_67, 67, 128), zext(ps_67, 67, 128)
+        cbt = f"(ite (= {cb_1} #b1) (bvshl {zext(sa_33, 33, 128)} {bv(64, 128)}) {bv(0, 128)})"
+        k64 = f"(bvadd {p0w} (bvadd (bvshl {p2w} {bv(64, 128)}) (bvadd {cbt} (bvshl (bvsub (bvsub {psw} {p0w}) {p2w}) {bv(32, 128)}))))"
+        return flatten_ys_smt2(ys_abs, "lec_top", 3) + hyps + f"(assert (not (= {flat_acc('p', 3)} {k64})))\n(check-sat)\n"
+
+    ys64_26 = yosys_smt2("mul64_rel_26x17", "qsag_mul64_dsp", [m64_sv], "-chparam AW 26 -chparam BW 17")
+    if not record("mul64_dsp_wiring_rtl_26x17",
+                  "9-DSP qsag_mul64_dsp AW=26 BW=17 RTL pairwise CSA row & sum invariants over all 2^128 inputs",
+                  "unsat", mul64_wiring_rtl_query(ys64_26), prefer_bitwuzla=True):
+        raise SystemExit("failed mul64_dsp RTL row proof 26x17")
+
+    ys64_16 = yosys_smt2("mul64_rel_16x16", "qsag_mul64_dsp", [m64_sv], "-chparam AW 16 -chparam BW 16")
+    if not record("mul64_dsp_wiring_rtl_16x16",
+                  "9-DSP qsag_mul64_dsp AW=16 BW=16 RTL 3-cycle outer Karatsuba equivalence p@s3 == K64 over all 2^128 inputs",
+                  "unsat", mul64_direct_k64_query(ys64_16), prefer_bitwuzla=True):
+        raise SystemExit("failed mul64_dsp RTL K64 proof 16x16")
 
     # Modus Ponens QF_BV join from the 8 proved row invariants to `p@s3 == K64(P0,P2,PS,sa,cb)`:
     rtot_j = bv(0, 128)
@@ -974,17 +1082,43 @@ endmodule
         for is_b, lbl in [(False, "ma"), (True, "mb")]:
             if not record(f"ext5_rtl_stage0_{lbl}{idx}",
                           f"qsag_ext5_mac RTL Stage 0 {lbl}_q[{idx}] {idxs}: < p and equals exact canonical sum mod p",
-                          "unsat", build_stage0_single_query(ys_e5_abs, idx, idxs, is_b=is_b), prefer_bitwuzla=True):
+                          "unsat", build_stage0_single_query(ys_e5_abs, idx, idxs, is_b=is_b), prefer_bitwuzla=False):
                 raise SystemExit(f"failed ext5 Stage-0 {lbl}[{idx}] RTL check")
 
-    # (b) Stage-1..4 RTL CSA recombination proof (all 5 acc_q limbs at s5)
+    # (b) Stage-1..6 RTL cut at named pipeline registers `ma_q, mb_q` (proving universal soundness
+    # for ALL 2^896 `(ma_q@s1, mb_q@s1)` values without re-unrolling 90 copies of Stage-0 adders!)
+    ext5_s16 = ext5_src.replace(
+        "output logic [319:0] y",
+        "output logic [319:0] y,\n    input logic [13:0][63:0] cut_ma, cut_mb,\n    output logic [4:0][135:0] dbg_acc"
+    ).replace(
+        ".clk(clk), .a(ma_q[i]), .b(mb_q[i]), .p(m[i]));",
+        ".clk(clk), .a(cut_ma[i]), .b(cut_mb[i]), .p(m[i]));"
+    ).replace(
+        "endmodule",
+        "    assign dbg_acc = acc_q;\nendmodule"
+    )
+    ext5_s16_sv = os.path.join(OUT, "ext5_s16_cut.sv")
+    open(ext5_s16_sv, "w").write(ext5_s16)
+    sh(f'yosys -q -p "read_verilog -sv {OUT}/proved_adder_contracts.sv {PKG} {red_stub_sv} {stub_sv} {ext5_s16_sv}; '
+       f'hierarchy -top qsag_ext5_mac; proc; flatten; opt_clean; rename -top lec_top; write_smt2 -wires {OUT}/ext5_s16.yosys.smt2"')
+    ys_s16 = open(f"{OUT}/ext5_s16.yosys.smt2").read()
+    assert ys_s16.count("(bvmul ") == 14, ys_s16.count("(bvmul ")
+    assert ys_s16.count("(bvudiv ") == 5, ys_s16.count("(bvudiv ")
+    ys_s16_abs = (
+        "(declare-fun qmul64 ((_ BitVec 128) (_ BitVec 128)) (_ BitVec 128))\n"
+        "(declare-fun qred136_raw ((_ BitVec 136) (_ BitVec 136)) (_ BitVec 136))\n"
+        "(define-fun qred136 ((x (_ BitVec 136))) (_ BitVec 64) "
+        "((_ extract 63 0) (qred136_raw x (bvor x (_ bv1 136)))))\n"
+        + ys_s16.replace("(bvmul ", "(qmul64 ").replace("(bvudiv ", "(qred136_raw ")
+    )
+
     def build_stage4_acc_query(ys_txt, k):
-        ma_s1 = [f"((_ extract {64*i+63} {64*i}) {acc('dbg_ma', 's1')})" for i in range(14)]
-        mb_s1 = [f"((_ extract {64*i+63} {64*i}) {acc('dbg_mb', 's1')})" for i in range(14)]
+        ma_s1 = [f"((_ extract {64*i+63} {64*i}) {flat_acc('cut_ma', 1)})" for i in range(14)]
+        mb_s1 = [f"((_ extract {64*i+63} {64*i}) {flat_acc('cut_mb', 1)})" for i in range(14)]
         m_defs = " ".join(f"(m{i} (qmul64 {zext(ma_s1[i], 64, 128)} {zext(mb_s1[i], 64, 128)}))" for i in range(14))
         pm_defs = " ".join(f"(pm{i} {zext(f'm{i}', 128, 136)})" for i in range(14))
         nm_defs = " ".join(f"(nm{i} {zext(f'(bvnot m{i})', 128, 136)})" for i in range(11))
-        c_in = acc("c", "s0")
+        c_in = flat_acc("c", 0)
         ck = zext(f"((_ extract {64*k+63} {64*k}) {c_in})", 64, 136)
         def shl1(e): return f"(bvshl {e} {bv(1, 136)})"
         def shl2(e): return f"(bvshl {e} {bv(2, 136)})"
@@ -1000,30 +1134,30 @@ endmodule
             [bv(4 * C1, 136), ck, "pm0", "pm1", "pm2", "pm6", "pm7", "pm11",
              "nm3", "nm8", "nm9", "nm10"],
         ]
-        acc_actual = f"((_ extract {136*k+135} {136*k}) {acc('dbg_acc', 's5')})"
-        acc_spec = bvadd_list(terms_by_k[k])
-        return (ys_txt + unroll(5) +
+        acc_actual = f"((_ extract {136*k+135} {136*k}) {flat_acc('dbg_acc', 5)})"
+        acc_spec = bvadd_list(list(reversed(terms_by_k[k])))
+        return (flatten_ys_smt2(ys_txt, "lec_top", 5) +
                 f"(assert (let ({m_defs}) (let ({pm_defs} {nm_defs}) (not (= {acc_actual} {acc_spec})))))\n"
                 "(check-sat)\n")
 
     for k in range(5):
         if not record(f"ext5_rtl_stage4_acc_limb{k}",
                       f"qsag_ext5_mac RTL Stage 1..4: dbg_acc[{k}]@s5 == exact 136-bit Karatsuba combination of c_{k}@s0 and m[0..13]",
-                      "unsat", build_stage4_acc_query(ys_e5_abs, k), prefer_bitwuzla=True):
+                      "unsat", build_stage4_acc_query(ys_s16_abs, k), prefer_bitwuzla=True):
             raise SystemExit(f"failed ext5 Stage-4 acc limb {k} RTL check")
 
     # (c1) Stage-5..6 7-cycle RTL reduction join: y[64*k +: 64]@s7 == qred136(dbg_acc[k]@s5)
     red_clauses = [
-        f"(= ((_ extract {64*k+63} {64*k}) {acc('y', 's7')}) (qred136 ((_ extract {136*k+135} {136*k}) {acc('dbg_acc', 's5')})))"
+        f"(= ((_ extract {64*k+63} {64*k}) {flat_acc('y', 7)}) (qred136 ((_ extract {136*k+135} {136*k}) {flat_acc('dbg_acc', 5)})))"
         for k in range(5)
     ]
     if not record("ext5_rtl_stage6_red_join",
                   "qsag_ext5_mac 7-cycle RTL Stage 5..6: y[64*k +: 64]@s7 == qred136(dbg_acc[k]@s5) for all k=0..4",
-                  "unsat", ys_e5_abs + unroll(7) + "(assert (not (and " + " ".join(red_clauses) + ")))\n(check-sat)\n",
+                  "unsat", flatten_ys_smt2(ys_s16_abs, "lec_top", 7) + "(assert (not (and " + " ".join(red_clauses) + ")))\n(check-sat)\n",
                   prefer_bitwuzla=True):
         raise SystemExit("failed ext5 Stage-6 RTL reduction join")
 
-    # (c2) End-to-end Modus Ponens glue (QF_NIA) for each limb k = 0..4
+    # (c2) End-to-end Modus Ponens glue (Stage-0..4 QF_NIA ring link + Stage-4..6 QF_LIA Euclidean reduction) for each limb k = 0..4
     subset_idx_map = {
         "01": (3, "(+ a0 a1)", "(+ b0 b1)", 2),
         "02": (4, "(+ a0 a2)", "(+ b0 b2)", 2),
@@ -1036,39 +1170,49 @@ endmodule
         "124": (13, "(+ a1 a2 a4)", "(+ b1 b2 b4)", 3),
     }
     direct_map = [(0, "a0", "b0"), (1, "a1", "b1"), (2, "a2", "b2"), (6, "a3", "b3"), (7, "a4", "b4")]
+    if not record("ext5_mul64_prod_range",
+                  "Ext5 Stage-1..3 product bound: 0 <= ma, mb < p implies 0 <= ma * mb < 2^128",
+                  "unsat",
+                  f"(declare-const ma Int) (declare-const mb Int)\n"
+                  f"(assert (and (<= 0 ma) (< ma {P}) (<= 0 mb) (< mb {P})))\n"
+                  f"(assert (not (and (<= 0 (* ma mb)) (< (* ma mb) {2**128}))))\n(check-sat)\n"):
+        raise SystemExit("failed ext5 mul64 range")
+
     for k in range(5):
-        g_decl = (
+        s04_decl = (
             "".join(f"(declare-const a{i} Int) (declare-const b{i} Int) (declare-const c{i} Int)\n" for i in range(5))
             + "".join(f"(declare-const ka_{s} Int) (declare-const kb_{s} Int)\n" for s, _, _ in subsets)
-            + "".join(f"(declare-const ma{i} Int) (declare-const mb{i} Int) (declare-const m{i} Int)\n" for i in range(14))
-            + "(declare-const acc Int) (declare-const sb Int) (declare-const Q Int) (declare-const y Int) (declare-const rk Int)\n"
         )
-        g_hyps = "".join(
-            f"(assert (and (<= 0 a{i}) (< a{i} {P}) (<= 0 b{i}) (< b{i} {P}) (<= 0 c{i}) (< c{i} {P})))\n"
-            for i in range(5)
-        )
+        s04_defs = ""
         for idx, av, bv_name in direct_map:
-            g_hyps += f"(assert (and (= ma{idx} {av}) (= mb{idx} {bv_name})))\n"
-        for s, (idx, sa, sb_e, nterms) in subset_idx_map.items():
-            g_hyps += (
-                f"(assert (and (<= 0 ka_{s}) (< ka_{s} {nterms}) (<= 0 ma{idx}) (< ma{idx} {P}) (= ma{idx} (- {sa} (* {P} ka_{s})))))\n"
-                f"(assert (and (<= 0 kb_{s}) (< kb_{s} {nterms}) (<= 0 mb{idx}) (< mb{idx} {P}) (= mb{idx} (- {sb_e} (* {P} kb_{s})))))\n"
+            s04_defs += f"(define-fun ma{idx} () Int {av})\n(define-fun mb{idx} () Int {bv_name})\n"
+        for s, (idx, sa, sb_e, _nterms) in subset_idx_map.items():
+            s04_defs += (
+                f"(define-fun ma{idx} () Int (- {sa} (* {P} ka_{s})))\n"
+                f"(define-fun mb{idx} () Int (- {sb_e} (* {P} kb_{s})))\n"
             )
         for i in range(14):
-            g_hyps += f"(assert (= m{i} (* ma{i} mb{i})))\n"
-        # Combine exact acc_k == accs_r[k](c, m), 0 < acc < 2^136, congruence acc - sb == P*Q, and reduce contract acc == y + rk*P
-        g_hyps += (
-            f"(assert (= acc {accs_r[k]}))\n"
-            f"(assert (and (< 0 acc) (< acc {2**136})))\n"
-            f"(assert (= sb {sbs[k]}))\n"
-            f"(assert (= (- acc sb) (* {P} {qs[k]})))\n"
-            f"(assert (= Q {qs[k]}))\n"
-            f"(assert (and (<= 0 y) (< y {P}) (= acc (+ y (* rk {P})))))\n"
+            s04_defs += f"(define-fun m{i} () Int (* ma{i} mb{i}))\n"
+        s04_defs += (
+            f"(define-fun acc () Int {accs_r[k]})\n"
+            f"(define-fun sb () Int {sbs[k]})\n"
+            f"(define-fun Q () Int {qs[k]})\n"
         )
-        g_goal = f"(assert (not (= y (mod sb {P}))))\n(check-sat)\n"
+        s04_goal = f"(assert (not (= (- acc sb) (* {P} Q))))\n(check-sat)\n"
+        if not record(f"ext5_stage04_link_limb{k}",
+                      f"Ext5 limb {k} Stage-0..4 ring link: Stage-0 ma/mb + Stage-3 m_i + Stage-4 acc entail acc - sb == p * Q_{k}",
+                      "unsat", s04_decl + s04_defs + s04_goal):
+            raise SystemExit(f"failed ext5 Stage-0..4 link limb {k}")
+
+        mp_q = (
+            "(declare-const acc Int) (declare-const sb Int) (declare-const Q Int) (declare-const y Int) (declare-const rk Int)\n"
+            f"(assert (and (< 0 acc) (< acc {2**136}) (= (- acc sb) (* {P} Q))))\n"
+            f"(assert (and (<= 0 y) (< y {P}) (= acc (+ y (* rk {P})))))\n"
+            f"(assert (not (= y (mod sb {P}))))\n(check-sat)\n"
+        )
         if not record(f"ext5_end_to_end_glue_limb{k}",
-                      f"Ext5 limb {k} end-to-end Modus Ponens: Stage-0..6 contracts entail y_{k} == schoolbook_{k}(a,b,c) mod p",
-                      "unsat", g_decl + g_hyps + g_goal):
+                      f"Ext5 limb {k} end-to-end Modus Ponens: Stage-0..6 + range contracts entail y_{k} == schoolbook_{k}(a,b,c) mod p",
+                      "unsat", mp_q):
             raise SystemExit(f"failed ext5 end-to-end glue limb {k}")
 
     # (d) 3 Mutant teeth (`sat`):
@@ -1083,11 +1227,11 @@ endmodule
         + ys_ms0.replace("(bvmul ", "(qmul64 ").replace("(bvudiv ", "(qred136_raw ")
     )
     if not record("mut_ext5_stage0_wire", "mutant tooth: Stage-0 p4_in wire swap (a1->a2) in qsag_ext5_mac is refuted",
-                  "sat", build_stage0_single_query(ys_ms0_abs, 11, s0_subsets[11], is_b=False), prefer_bitwuzla=True):
+                  "sat", build_stage0_single_query(ys_ms0_abs, 11, s0_subsets[11], is_b=False), prefer_bitwuzla=False):
         raise SystemExit("failed ext5 Stage-0 mutant")
 
     # Mutant 2: Stage-4 `pm[0] << 2` -> `pm[0] << 1` in `t_y0`
-    m_e5 = mutate(ext5_sv, "136'(12) * C1, 136'(c0), pm[0] << 2,", "136'(12) * C1, 136'(c0), pm[0] << 1,", "mut_ext5.sv")
+    m_e5 = mutate(ext5_s16_sv, "136'(12) * C1, 136'(c0), pm[0] << 2,", "136'(12) * C1, 136'(c0), pm[0] << 1,", "mut_ext5.sv")
     sh(f'yosys -q -p "read_verilog -sv {OUT}/proved_adder_contracts.sv {PKG} {red_stub_sv} {stub_sv} {m_e5}; '
        f'hierarchy -top qsag_ext5_mac; proc; flatten; opt_clean; rename -top lec_top; write_smt2 -wires {OUT}/mut_ext5.yosys.smt2"')
     ys_me5 = open(f"{OUT}/mut_ext5.yosys.smt2").read()
@@ -1101,7 +1245,7 @@ endmodule
         raise SystemExit("failed ext5 mutant 2")
 
     # Mutant 3: Stage-4 limb 4 swaps c4 -> c3 in t_y4
-    m_s6 = mutate(ext5_sv, "136'(4) * C1, 136'(c4),", "136'(4) * C1, 136'(c3),", "mut_ext5_s6.sv")
+    m_s6 = mutate(ext5_s16_sv, "136'(4) * C1, 136'(c4),", "136'(4) * C1, 136'(c3),", "mut_ext5_s6.sv")
     sh(f'yosys -q -p "read_verilog -sv {OUT}/proved_adder_contracts.sv {PKG} {red_stub_sv} {stub_sv} {m_s6}; '
        f'hierarchy -top qsag_ext5_mac; proc; flatten; opt_clean; rename -top lec_top; write_smt2 -wires {OUT}/mut_ext5_s6.yosys.smt2"')
     ys_ms6 = open(f"{OUT}/mut_ext5_s6.yosys.smt2").read()

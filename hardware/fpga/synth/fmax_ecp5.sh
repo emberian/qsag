@@ -12,10 +12,12 @@ out="build/synth/$tag.pnr"
 ECP5_DEV="${ECP5_DEV:---85k --package CABGA381 --speed 6}"
 ECP5_LABEL="${ECP5_LABEL:-LFE5U-85F-6BG381C}"
 INLINE_CSA="flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; opt -fast;"
-if [ "${NOFLAT:-0}" = "1" ]; then
-    yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
-else
-    yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
+if [ ! -s "$out.json" ]; then
+    if [ "${NOFLAT:-0}" = "1" ]; then
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
+    else
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
+    fi
 fi
 nextpnr-ecp5 $ECP5_DEV --json "$out.json" --freq "${FREQ:-120}" \
     --timing-allow-fail --seed "${SEED:-1}" --threads 8 ${NEXTPNR_ARGS:---router router2} \

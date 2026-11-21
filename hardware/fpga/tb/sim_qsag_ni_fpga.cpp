@@ -761,7 +761,7 @@ static void test_zk_hem_v2() {
             }
         }
     }
-    // 3. 400-bit (50-byte) Role-1 TurboSHAKE256 (D = 0x07) squeeze via 0x22 KEC_STREAM_SPONGE (Y[0..7]).
+    // 3. 400-bit (50-byte) Role-1 TurboSHAKE256 (D = 0x07) squeeze via 0x22 KEC_STREAM_SPONGE (Y[0..7] + full 400b STATUS.ok).
     {
         KState st{};
         uint64_t lanes[17] = {};
@@ -769,15 +769,32 @@ static void test_zk_hem_v2() {
         lanes[8] = 0x07ULL;            st[8]  = 0x07ULL;
         lanes[16] = 1ULL << 63;        st[16] = 1ULL << 63;
         keccak_p(st, true);
+        uint64_t flags400 = 1ULL | 8ULL | 16ULL | 64ULL | ((st[6] & 0xFFFFULL) << 48); // init=1, nr12=1, chk256=1, chk400=1
+        // (a) Honest 400-bit digest check passes STATUS.ok
         axil_write(R_CMD, 0x22u | (1u << 16));
-        uint64_t flags = 1ULL | 8ULL | 16ULL; // init=1, nr12=1, chk=1
         stream_beat(lanes, 8);
         stream_beat(lanes + 8, 8);
-        uint64_t b2[8] = {lanes[16], flags, st[0], st[1], st[2], st[3], 0, 0};
-        stream_beat(b2, 6);
+        uint64_t b2[8] = {lanes[16], flags400, st[0], st[1], st[2], st[3], st[4], st[5]};
+        stream_beat(b2, 8);
         OpRes r = wait_op(0x22);
-        check(r.ok, "zk-Hem v2 400-bit Role-1 KEC_STREAM_SPONGE ok");
+        check(r.ok, "zk-Hem v2 full 400-bit Role-1 KEC_STREAM_SPONGE ok");
         for (int i = 0; i < 8; i++) CHECK_EQ64(get_y(i), st[i], "zk-Hem v2 512b/400b KEC_STREAM_SPONGE Y[0..7]");
+        // (b) 1-bit tamper in byte 49 (bit 392 = st[6][8]) MUST fail STATUS.ok!
+        axil_write(R_CMD, 0x22u | (1u << 16));
+        stream_beat(lanes, 8);
+        stream_beat(lanes + 8, 8);
+        uint64_t b2_bad49[8] = {lanes[16], flags400 ^ (0x0100ULL << 48), st[0], st[1], st[2], st[3], st[4], st[5]};
+        stream_beat(b2_bad49, 8);
+        OpRes r_bad49 = wait_op(0x22);
+        check(!r_bad49.ok, "zk-Hem v2 400-bit KEC_STREAM_SPONGE rejects byte-49 tamper via STATUS.ok");
+        // (c) 1-bit tamper in byte 35 (st[4]) MUST fail STATUS.ok!
+        axil_write(R_CMD, 0x22u | (1u << 16));
+        stream_beat(lanes, 8);
+        stream_beat(lanes + 8, 8);
+        uint64_t b2_bad35[8] = {lanes[16], flags400, st[0], st[1], st[2], st[3], st[4] ^ (1ULL << 24), st[5]};
+        stream_beat(b2_bad35, 8);
+        OpRes r_bad35 = wait_op(0x22);
+        check(!r_bad35.ok, "zk-Hem v2 400-bit KEC_STREAM_SPONGE rejects byte-35 tamper via STATUS.ok");
     }
     section("top: zk-Hem v2 F_{p^5} EXT5_MAC, EXT5_FROB homomorphism, 400-bit Role-1 KEC_STREAM_SPONGE", c0, f0);
 }
