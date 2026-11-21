@@ -26,8 +26,8 @@ module qsag_p2_compact #(
 );
     localparam int            MUL_LAT  = qsag_ni_pkg::GL_MUL_LAT;  // 5 clocks
     localparam int            SBOX_LAT = qsag_ni_pkg::P2_SBOX_LAT; // 13 clocks
-    localparam int            CHUNK34  = 34;
-    localparam int            CHUNK26  = (AW <= 16) ? 38 : 26;
+    localparam int            CHUNK34  = (AW <= 16) ? 68 : 34;
+    localparam int            CHUNK26  = (AW <= 16) ? 76 : 26;
     localparam logic [63:0]   GL_P     = qsag_ni_pkg::GL_P;
     localparam int            LW       = 76;
     localparam logic [LW-1:0] MI0_BIAS = LW'(128'(2) * 128'(GL_P) - (128'd1 << 64) + 128'd1) << 6;
@@ -123,14 +123,24 @@ module qsag_p2_compact #(
     logic [63:0] lo;
     logic [11:0] t_hi;
     assign {t_hi, lo} = lazy_q;
-    /* verilator lint_off UNUSEDSIGNAL */
-    logic [65:0] r0, r1;
-    /* verilator lint_on UNUSEDSIGNAL */
-    wire [4*66-1:0] tr0 = {66'd1,            ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
-    wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r0 (.x(tr0), .y(r0));
-    qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r1 (.x(tr1), .y(r1));
-    wire [63:0] red_y_d = r1[65] ? r0[63:0] : r1[63:0];
+    logic [63:0] red_y_d;
+    if (AW <= 16) begin : g_red_ecp5
+        wire [43:0] t_f44 = (t_hi == 12'd0) ? 44'd0 : {t_hi - 12'd1, 20'hFFFFF, 12'd0 - t_hi};
+        /* verilator lint_off UNUSEDSIGNAL */
+        wire [64:0] r0 = {1'b0, lo} + {21'd0, t_f44};
+        wire [65:0] r1 = {1'b0, r0} + NEG_1P66;
+        /* verilator lint_on UNUSEDSIGNAL */
+        assign red_y_d = r1[65] ? r0[63:0] : r1[63:0];
+    end else begin : g_red_wide
+        /* verilator lint_off UNUSEDSIGNAL */
+        logic [65:0] r0, r1;
+        /* verilator lint_on UNUSEDSIGNAL */
+        wire [4*66-1:0] tr0 = {66'd1,            ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
+        wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{54'b0, t_hi}, {22'b0, t_hi, 32'b0}, {2'b0, lo}};
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r0 (.x(tr0), .y(r0));
+        qsag_sum_csa #(.W(66), .N(4), .CHUNK(CHUNK34)) u_lin_r1 (.x(tr1), .y(r1));
+        assign red_y_d = r1[65] ? r0[63:0] : r1[63:0];
+    end
 
     if (USE_PIPE_SBOX) begin : g_pipe_sbox
         qsag_p2_sbox7 #(.AW(AW), .BW(BW)) u_sbox (.clk(clk), .x(x[63:0]), .y(mul_r));

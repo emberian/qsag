@@ -218,15 +218,15 @@ module qsag_ts_canopy_engine #(
                   ? '0 : (k_idx[FRONT_AW-1:1] + BAW'(k_idx[0]));
     assign fod_ra = k_idx[FRONT_AW-1:1];
 
-    qsag_sdp_bram #(.AW(BAW), .DW(288)) u_fev (
+    qsag_sdp_bram #(.AW(BAW), .DW(288), .NO_RW_CHECK(1'b1), .FORCE_BRAM(1'b1)) u_fev (
         .clk(clk), .we(f_we && !f_wa[0]), .wa(f_wa[FRONT_AW-1:1]), .wd(f_wd),
         .ra(fev_ra), .rd(fev_rd));
-    qsag_sdp_bram #(.AW(BAW), .DW(288)) u_fod (
+    qsag_sdp_bram #(.AW(BAW), .DW(288), .NO_RW_CHECK(1'b1), .FORCE_BRAM(1'b1)) u_fod (
         .clk(clk), .we(f_we &&  f_wa[0]), .wa(f_wa[FRONT_AW-1:1]), .wd(f_wd),
         .ra(fod_ra), .rd(fod_rd));
 
     logic [255:0] sib_rd;
-    qsag_sdp_bram #(.AW(SIB_AW), .DW(256)) u_sib (
+    qsag_sdp_bram #(.AW(SIB_AW), .DW(256), .NO_RW_CHECK(1'b1)) u_sib (
         .clk(clk), .we(tw_sib_en && st == TS_IDLE), .wa(tw_sib_idx), .wd(tw_sib_dig),
         .ra(sib_cur[SIB_AW-1:0]), .rd(sib_rd));
 

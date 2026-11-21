@@ -151,7 +151,7 @@ module qsag_keccak_compact (
     logic        a_we;
     logic [4:0]  a_wa, a_ra;
     logic [63:0] a_wd, a_rd;
-    qsag_sdp_bram #(.AW(6), .DW(64)) u_amem (
+    qsag_sdp_bram #(.AW(6), .DW(64), .NO_RW_CHECK(1'b1), .FORCE_BRAM(1'b1)) u_amem (
         .clk(clk), .we(a_we), .wa({bank_sel, a_wa}), .wd(a_wd), .ra({bank_sel, a_ra}), .rd(a_rd));
 
     wire [1:0] p_cur  = n_step + 2'd1;

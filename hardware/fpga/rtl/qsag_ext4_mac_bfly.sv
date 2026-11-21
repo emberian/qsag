@@ -87,29 +87,33 @@ module qsag_ext4_mac_bfly #(
     assign bw_en  = wr_v || tw_en;
     assign bw_idx = wr_v ? wr_k : tw_idx;
 
-    qsag_sdp_bram #(.AW(BAW), .DW(256)) u_even (
+    qsag_sdp_bram #(.AW(BAW), .DW(256), .NO_RW_CHECK(1'b1)) u_even (
         .clk(clk), .we(bw_en && !bw_idx[0]), .wa(bw_idx[TAW-1:1]), .wd(wr_data),
         .ra(k[BAW-1:0]), .rd(ev_rd));
-    qsag_sdp_bram #(.AW(BAW), .DW(256)) u_odd (
+    qsag_sdp_bram #(.AW(BAW), .DW(256), .NO_RW_CHECK(1'b1)) u_odd (
         .clk(clk), .we(bw_en && bw_idx[0]), .wa(bw_idx[TAW-1:1]), .wd(wr_data),
         .ra(k[BAW-1:0]), .rd(od_rd));
 
     // d = odd - even (mod p), parallel speculative subtract + split carry (no cascaded carry chain!).
-    localparam int SUB_CHUNK = (AW <= 16) ? 256 : 16;
+    localparam int SUB_CHUNK = 16;
     logic [255:0] d_q, e_q;
     for (genvar i = 0; i < 4; i++) begin : g_sub
         wire [63:0] od_i = od_rd[64*i +: 64];
         wire [63:0] ev_i = ev_rd[64*i +: 64];
-        /* verilator lint_off UNUSEDSIGNAL */
-        logic [64:0] d_raw, d_addp;
-        /* verilator lint_on UNUSEDSIGNAL */
-        // d_raw  = {1'b0, od_i} + ~{1'b0, ev_i} + 1
-        // d_addp = {1'b0, od_i} + ~{1'b0, ev_i} + (GL_P + 1)
-        qsag_sum_csa #(.W(65), .N(3), .CHUNK(SUB_CHUNK)) u_dr (
-            .x({65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_raw));
-        qsag_sum_csa #(.W(65), .N(3), .CHUNK(SUB_CHUNK)) u_dp (
-            .x({{1'b0, GL_P} + 65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_addp));
-        always_ff @(posedge clk) d_q[64*i +: 64] <= d_raw[64] ? d_addp[63:0] : d_raw[63:0];
+        if (AW <= 16) begin : g_sub_ecp5
+            wire [64:0] d_raw    = {1'b0, od_i} - {1'b0, ev_i};
+            wire [63:0] d_addp64 = d_raw[63:0] + GL_P;
+            always_ff @(posedge clk) d_q[64*i +: 64] <= d_raw[64] ? d_addp64 : d_raw[63:0];
+        end else begin : g_sub_wide
+            /* verilator lint_off UNUSEDSIGNAL */
+            logic [64:0] d_raw, d_addp;
+            /* verilator lint_on UNUSEDSIGNAL */
+            qsag_sum_csa #(.W(65), .N(3), .CHUNK(SUB_CHUNK)) u_dr (
+                .x({65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_raw));
+            qsag_sum_csa #(.W(65), .N(3), .CHUNK(SUB_CHUNK)) u_dp (
+                .x({{1'b0, GL_P} + 65'd1, ~{1'b0, ev_i}, {1'b0, od_i}}), .y(d_addp));
+            always_ff @(posedge clk) d_q[64*i +: 64] <= d_raw[64] ? d_addp[63:0] : d_raw[63:0];
+        end
     end
     always_ff @(posedge clk) e_q <= ev_rd;
 
