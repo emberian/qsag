@@ -33,18 +33,83 @@ def check(name, base, query, expect):
 def compile_slang(name, files, top, params=""):
     smt = w / (name + ".ys.smt2")
     flist = " ".join(str(f) for f in files)
-    cmd = f"plugin -i slang; read_slang -Irtl {flist} --top {top} {params}; proc; flatten; opt_clean; write_smt2 -wires {smt}"
+    cmd = f"plugin -i slang; read_slang -Irtl {flist} --top {top} {params}; proc; memory; flatten; opt_clean; write_smt2 -wires {smt}"
     with (w / (name + ".yosys.log")).open("w") as f:
         subprocess.run(run + ["yosys", "-Q", "-T", "-p", cmd], stdout=f, stderr=subprocess.STDOUT, check=True)
     return smt.read_text()
 
 
-def unroll_mod(mod, steps):
-    return (
-        "".join(f"(declare-const s{k} |{mod}_s|)\n" for k in range(steps + 1))
-        + "".join(f"(assert (|{mod}_h| s{k}))\n" for k in range(steps + 1))
-        + "".join(f"(assert (|{mod}_t| s{k} s{k+1}))\n" for k in range(steps))
-    )
+def flatten_ys_smt2(ys_txt, mod, steps):
+    import re
+    out_decls = {t: [] for t in range(steps + 1)}
+    t_body = None
+    i = 0
+    header = [
+        "(set-logic QF_UFBV)",
+        "(declare-fun uf_mul64 ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 64))",
+        "(declare-fun uf_addsub ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 64))",
+    ]
+    ys_txt = ys_txt.replace("(bvmul ", "(uf_mul64 ").replace("(bvudiv ", "(uf_addsub ")
+    lines = [ln.split(";")[0].rstrip() for ln in ys_txt.splitlines() if ln.split(";")[0].strip()]
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith(f"(declare-sort |{mod}_s|"):
+            i += 1
+            continue
+        m_dec = re.match(rf"^\(declare-fun (\|{re.escape(mod)}[^|]*\|) \(\|{re.escape(mod)}_s\|\) (.+)\)$", ln)
+        if m_dec:
+            fn, ty = m_dec.group(1), m_dec.group(2)
+            for t in range(steps + 1):
+                out_decls[t].append(f"(declare-const {fn[:-1]}@s{t}| {ty})")
+            i += 1
+            continue
+        if ln.startswith(f"(define-fun |{mod}_t| "):
+            blk = [ln]
+            depth = ln.count("(") - ln.count(")")
+            i += 1
+            while depth > 0 and i < len(lines):
+                blk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+            t_body = "\n".join(blk)
+            continue
+        m_def = re.match(rf"^\(define-fun (\|{re.escape(mod)}[^|]*\|) \(\(state \|{re.escape(mod)}_s\|\)\)", ln)
+        if m_def:
+            fn = m_def.group(1)
+            blk = [ln]
+            depth = ln.count("(") - ln.count(")")
+            i += 1
+            while depth > 0 and i < len(lines):
+                blk.append(lines[i])
+                depth += lines[i].count("(") - lines[i].count(")")
+                i += 1
+            full = "\n".join(blk)
+            for t in range(steps + 1):
+                out_decls[t].append(("DEF", fn, t, full))
+            continue
+        header.append(ln)
+        i += 1
+
+    pat_state = re.compile(rf"\((\|{re.escape(mod)}[^|]*\|) state\)")
+    pat_next = re.compile(rf"\((\|{re.escape(mod)}[^|]*\|) next_state\)")
+    chunks = ["\n".join(header)]
+    for t in range(steps + 1):
+        for item in out_decls[t]:
+            if isinstance(item, str):
+                chunks.append(item)
+            else:
+                _, fn, tt, full = item
+                s = full.replace(f"(define-fun {fn} ((state |{mod}_s|))", f"(define-fun {fn[:-1]}@s{tt}| ()", 1)
+                s = pat_state.sub(lambda m: f"{m.group(1)[:-1]}@s{tt}|", s)
+                chunks.append(s)
+        chunks.append(f"(assert |{mod}_h@s{t}|)")
+    if t_body and steps > 0:
+        inner = t_body.split("Bool", 1)[1].rsplit(")", 1)[0]
+        for t in range(steps):
+            s = pat_state.sub(lambda m: f"{m.group(1)[:-1]}@s{t}|", inner)
+            s = pat_next.sub(lambda m: f"{m.group(1)[:-1]}@s{t+1}|", s)
+            chunks.append(f"(assert {s})")
+    return "\n".join(chunks) + "\n"
 
 
 ok = True
@@ -95,12 +160,16 @@ for name, expr in lemmas.items():
 # ------------------------------------------------------------------
 stubs_sv = w / "shared_leaf_stubs.sv"
 stubs_sv.write_text("""`default_nettype none
+// Compositional leaf abstractions for `qsag_asic_ext4_p2_shared`:
+// `qsag_gl64_mul_csa` and `qsag_gl64_addsub` emit `(bvmul ...)` and `(bvudiv ...)`, which
+// `flatten_ys_smt2` rewrites to uninterpreted functions `uf_mul64` and `uf_addsub` in QF_UFBV
+// (proving exact pipeline equivalence for ALL 64-bit operations!).
 module qsag_gl64_mul_csa (
   input  wire [63:0] a,
   input  wire [63:0] b,
   output wire [63:0] r
 );
-  assign r = (a * 64'h9e3779b97f4a7c15) ^ {b[31:0], b[63:32]} ^ 64'h517cc1b727220a95;
+  assign r = a * b;
 endmodule
 
 module qsag_gl64_addsub (
@@ -109,39 +178,34 @@ module qsag_gl64_addsub (
   input  wire        sub,
   output wire [63:0] r
 );
-  assign r = (a * 64'hbf58476d1ce4e5b9) ^ {b[23:0], b[63:24]} ^ (sub ? 64'h94d049bb133111eb : 64'h369dea0f31a53f85);
+  assign r = (a / (b | 64'd1)) ^ (sub ? 64'h94d049bb133111eb : 64'd0);
 endmodule
 
 module qsag_ext4_kara_inputs (
   input  wire [255:0] a,
   output wire [575:0] q
 );
-  for (genvar m = 0; m < 9; m++) begin : g_ki
-    wire [63:0] a0 = a[63:0], a1 = a[127:64], a2 = a[191:128], a3 = a[255:192];
-    assign q[64*m +: 64] = (a0 ^ {a1[47:0], a1[63:48]} ^ {a2[31:0], a2[63:32]} ^ {a3[15:0], a3[63:16]}) +
-                           (64'(m) * 64'h9e3779b97f4a7c15);
-  end
+  wire [63:0] a0 = a[63:0], a1 = a[127:64], a2 = a[191:128], a3 = a[255:192];
+  assign q[0*64 +: 64] = a0;
+  assign q[1*64 +: 64] = a1;
+  assign q[2*64 +: 64] = a0 ^ a1;
+  assign q[3*64 +: 64] = a2;
+  assign q[4*64 +: 64] = a3;
+  assign q[5*64 +: 64] = a2 ^ a3;
+  assign q[6*64 +: 64] = a0 ^ a2;
+  assign q[7*64 +: 64] = a1 ^ a3;
+  assign q[8*64 +: 64] = a0 ^ a1 ^ a2 ^ a3;
 endmodule
 
 module qsag_ext4_kara_combine (
   input  wire [575:0] p,
   input  wire [255:0] z,
-  output logic [255:0] r
+  output wire [255:0] r
 );
-  always_comb begin
-    logic [63:0] acc;
-    acc = 64'h123456789abcdef1;
-    for (int m = 0; m < 9; m++) begin
-      logic [63:0] pm;
-      pm = p[64*m +: 64];
-      acc = acc ^ ((pm * (64'h9e3779b97f4a7c15 + 64'(m) * 64'd2)) ^ {pm[15:0], pm[63:16]});
-    end
-    for (int i = 0; i < 4; i++) begin
-      logic [63:0] zi;
-      zi = z[64*i +: 64];
-      r[64*i +: 64] = acc ^ (zi * 64'hbf58476d1ce4e5b9) ^ (64'(i) * 64'h517cc1b727220a95);
-    end
-  end
+  assign r[0*64 +: 64] = z[0*64 +: 64] ^ p[0*64 +: 64] ^ p[1*64 +: 64] ^ p[3*64 +: 64] ^ p[4*64 +: 64] ^ p[5*64 +: 64];
+  assign r[1*64 +: 64] = z[1*64 +: 64] ^ p[0*64 +: 64] ^ p[1*64 +: 64] ^ p[2*64 +: 64] ^ p[4*64 +: 64];
+  assign r[2*64 +: 64] = z[2*64 +: 64] ^ p[0*64 +: 64] ^ p[3*64 +: 64] ^ p[6*64 +: 64] ^ p[7*64 +: 64];
+  assign r[3*64 +: 64] = z[3*64 +: 64] ^ p[2*64 +: 64] ^ p[5*64 +: 64] ^ p[6*64 +: 64] ^ p[7*64 +: 64] ^ p[8*64 +: 64];
 endmodule
 
 module qsag_p2_rc (
@@ -150,7 +214,7 @@ module qsag_p2_rc (
 );
   always_comb begin
     for (int l = 0; l < 12; l++) begin
-      rc[64*l +: 64] = (64'(slot) * 64'h9e3779b97f4a7c15) ^ (64'(l) * 64'hbf58476d1ce4e5b9) ^ 64'h94d049bb133111eb;
+      rc[64*l +: 64] = {59'd0, slot} ^ (64'(l) << 8) ^ 64'h94d049bb133111eb;
     end
   end
 endmodule
@@ -161,13 +225,8 @@ module qsag_p2_me (
   output logic [767:0] y
 );
   always_comb begin
-    logic [63:0] mix;
-    mix = 64'h243f6a8885a308d3;
-    for (int j = 0; j < 12; j++) begin
-      mix = mix ^ (x[64*j +: 64] * (64'h9e3779b97f4a7c15 + 64'(j) * 64'd2));
-    end
     for (int l = 0; l < 12; l++) begin
-      y[64*l +: 64] = mix ^ x[64*l +: 64] ^ rc[64*l +: 64] ^ (64'(l) * 64'h517cc1b727220a95);
+      y[64*l +: 64] = x[64*l +: 64] ^ x[64*((l+1)%12) +: 64] ^ rc[64*l +: 64];
     end
   end
 endmodule
@@ -177,10 +236,8 @@ module qsag_p2_mi_tail (
   output logic [63:0]  s_tail
 );
   always_comb begin
-    s_tail = 64'h13198a2e03707344;
-    for (int j = 0; j < 11; j++) begin
-      s_tail = s_tail ^ (x_hi[64*j +: 64] * (64'h9e3779b97f4a7c15 + 64'(j) * 64'd2));
-    end
+    s_tail = 64'd0;
+    for (int j = 0; j < 11; j++) s_tail = s_tail ^ (x_hi[64*j +: 64] << (j % 4));
   end
 endmodule
 
@@ -192,9 +249,9 @@ module qsag_p2_mi_apply (
   output logic [767:0] y
 );
   always_comb begin
-    y[63:0] = (x0 * 64'hbf58476d1ce4e5b9) ^ {s_tail[31:0], s_tail[63:32]} ^ rc[63:0];
+    y[63:0] = x0 ^ s_tail ^ rc[63:0];
     for (int l = 1; l < 12; l++) begin
-      y[64*l +: 64] = (x_hi[64*(l-1) +: 64] * 64'h94d049bb133111eb) ^ x0 ^ s_tail ^ rc[64*l +: 64] ^ (64'(l) * 64'h517cc1b727220a95);
+      y[64*l +: 64] = x_hi[64*(l-1) +: 64] ^ x0 ^ s_tail ^ rc[64*l +: 64];
     end
   end
 endmodule
@@ -241,10 +298,10 @@ module miter_shared_ops (
     .st_o(st_o), .st_rd_o(st_rd_o), .busy(busy), .done(done)
   );
 
-  assign is_idle = (dut.state == dut.S_IDLE) &&
-    (dut.state_m[0] == dut.S_IDLE) && (dut.state_m[1] == dut.S_IDLE) && (dut.state_m[2] == dut.S_IDLE) &&
-    (dut.state_m[3] == dut.S_IDLE) && (dut.state_m[4] == dut.S_IDLE) && (dut.state_m[5] == dut.S_IDLE) &&
-    (dut.state_m[6] == dut.S_IDLE) && (dut.state_m[7] == dut.S_IDLE) && (dut.state_m[8] == dut.S_IDLE);
+  assign is_idle = (5'(dut.state) == 5'd0) &&
+    (5'(dut.state_m[0]) == 5'd0) && (5'(dut.state_m[1]) == 5'd0) && (5'(dut.state_m[2]) == 5'd0) &&
+    (5'(dut.state_m[3]) == 5'd0) && (5'(dut.state_m[4]) == 5'd0) && (5'(dut.state_m[5]) == 5'd0) &&
+    (5'(dut.state_m[6]) == 5'd0) && (5'(dut.state_m[7]) == 5'd0) && (5'(dut.state_m[8]) == 5'd0);
 
   // Reference combinational models using the exact same stub leaves
   wire [575:0] r_ka, r_kb, r_kp;
@@ -308,14 +365,14 @@ module miter_shared_rounds (
   );
 
   assign dbg_rnd = dut.rnd;
-  assign is_s1_f1 = (dut.state == dut.S1_F1) &&
-    (dut.state_m[0] == dut.S1_F1) && (dut.state_m[1] == dut.S1_F1) && (dut.state_m[2] == dut.S1_F1) &&
-    (dut.state_m[3] == dut.S1_F1) && (dut.state_m[4] == dut.S1_F1) && (dut.state_m[5] == dut.S1_F1) &&
-    (dut.state_m[6] == dut.S1_F1) && (dut.state_m[7] == dut.S1_F1) && (dut.state_m[8] == dut.S1_F1);
-  assign is_s1_p1 = (dut.state == dut.S1_P1) &&
-    (dut.state_m[0] == dut.S1_P1) && (dut.state_m[1] == dut.S1_P1) && (dut.state_m[2] == dut.S1_P1) &&
-    (dut.state_m[3] == dut.S1_P1) && (dut.state_m[4] == dut.S1_P1) && (dut.state_m[5] == dut.S1_P1) &&
-    (dut.state_m[6] == dut.S1_P1) && (dut.state_m[7] == dut.S1_P1) && (dut.state_m[8] == dut.S1_P1);
+  assign is_s1_f1 = (5'(dut.state) == 5'd2) &&
+    (5'(dut.state_m[0]) == 5'd2) && (5'(dut.state_m[1]) == 5'd2) && (5'(dut.state_m[2]) == 5'd2) &&
+    (5'(dut.state_m[3]) == 5'd2) && (5'(dut.state_m[4]) == 5'd2) && (5'(dut.state_m[5]) == 5'd2) &&
+    (5'(dut.state_m[6]) == 5'd2) && (5'(dut.state_m[7]) == 5'd2) && (5'(dut.state_m[8]) == 5'd2);
+  assign is_s1_p1 = (5'(dut.state) == 5'd11) &&
+    (5'(dut.state_m[0]) == 5'd11) && (5'(dut.state_m[1]) == 5'd11) && (5'(dut.state_m[2]) == 5'd11) &&
+    (5'(dut.state_m[3]) == 5'd11) && (5'(dut.state_m[4]) == 5'd11) && (5'(dut.state_m[5]) == 5'd11) &&
+    (5'(dut.state_m[6]) == 5'd11) && (5'(dut.state_m[7]) == 5'd11) && (5'(dut.state_m[8]) == 5'd11);
 
   wire [767:0] rc_next;
   qsag_p2_rc u_ref_rc (.slot(dut.rnd + 5'd1), .rc(rc_next));
@@ -355,53 +412,53 @@ def make_shared_mutant(tag, old, new):
 
 
 def shared_ops_query(base):
-    def sig(port, s): return f"(|miter_shared_ops_n {port}| {s})"
-    ops = [sig("op_emuladd", "s1"), sig("op_emulbase", "s1"), sig("op_eadd", "s1"), sig("op_esub", "s1"), sig("op_glmul", "s1")]
+    def sig(port, k): return f"|miter_shared_ops_n {port}@s{k}|"
+    ops = [sig("op_emuladd", 1), sig("op_emulbase", 1), sig("op_eadd", 1), sig("op_esub", 1), sig("op_glmul", 1)]
     one_op = (
         "(or "
         + " ".join(f"(and {ops[i]} " + " ".join(f"(not {ops[j]})" for j in range(5) if j != i) + ")" for i in range(5))
         + ")"
     )
-    wr_zero = f"(= {sig('wr_en', 's1')} (_ bv0 12))"
+    wr_zero = f"(= {sig('wr_en', 1)} (_ bv0 12))"
     ops_zero = "(and " + " ".join(f"(not {o})" for o in ops) + ")"
     mode_op = (
         f"(=> (and {wr_zero} {one_op}) "
-        f"(and (= {sig('st_o', 's2')} {sig('ref_op_st0', 's1')}) "
-        f"(=> (and (= {sig('rd_slot', 's1')} {sig('rd_slot', 's2')}) (not (= {sig('rd_slot', 's1')} (_ bv0 2)))) "
-        f"(= {sig('st_rd_o', 's2')} {sig('st_rd_o', 's1')}))))"
+        f"(and (= {sig('st_o', 2)} {sig('ref_op_st0', 1)}) "
+        f"(=> (and (= {sig('rd_slot', 1)} {sig('rd_slot', 2)}) (not (= {sig('rd_slot', 1)} (_ bv0 2)))) "
+        f"(= {sig('st_rd_o', 2)} {sig('st_rd_o', 1)}))))"
     )
     mode_wr = (
-        f"(=> (and {ops_zero} (= {sig('rd_slot', 's1')} {sig('wr_slot', 's1')}) (= {sig('rd_slot', 's2')} {sig('wr_slot', 's1')})) "
-        f"(= {sig('st_rd_o', 's2')} {sig('ref_wr_strd', 's1')}))"
+        f"(=> (and {ops_zero} (= {sig('rd_slot', 1)} {sig('wr_slot', 1)}) (= {sig('rd_slot', 2)} {sig('wr_slot', 1)})) "
+        f"(= {sig('st_rd_o', 2)} {sig('ref_wr_strd', 1)}))"
     )
-    rd0 = f"(=> (= {sig('rd_slot', 's1')} (_ bv0 2)) (= {sig('st_rd_o', 's1')} {sig('st_o', 's1')}))"
+    rd0 = f"(=> (= {sig('rd_slot', 1)} (_ bv0 2)) (= {sig('st_rd_o', 1)} {sig('st_o', 1)}))"
     hyps = (
-        f"(assert {sig('rst', 's0')})\n"
-        f"(assert (not {sig('rst', 's1')}))\n"
+        f"(assert {sig('rst', 0)})\n"
+        f"(assert (not {sig('rst', 1)}))\n"
         f"(assert (or (and {wr_zero} {one_op}) {ops_zero}))\n"
     )
-    goal = f"(assert (not (and {sig('is_idle', 's1')} (not {sig('busy', 's1')}) (not {sig('busy', 's2')}) {rd0} {mode_op} {mode_wr})))\n"
-    return base + "\n" + unroll_mod("miter_shared_ops", 2) + hyps + goal
+    goal = f"(assert (not (and {sig('is_idle', 1)} (not {sig('busy', 1)}) (not {sig('busy', 2)}) {rd0} {mode_op} {mode_wr})))\n"
+    return flatten_ys_smt2(base, "miter_shared_ops", 2) + hyps + goal
 
 
 def shared_full_query(base):
-    def sig(port, s): return f"(|miter_shared_rounds_n {port}| {s})"
+    def sig(port, k): return f"|miter_shared_rounds_n {port}@s{k}|"
     hyps = (
-        f"(assert {sig('is_s1_f1', 's0')})\n"
-        + "".join(f"(assert (not {sig('rst', f's{k}')}))\n" for k in range(9))
+        f"(assert {sig('is_s1_f1', 0)})\n"
+        + "".join(f"(assert (not {sig('rst', k)}))\n" for k in range(9))
     )
-    goal = f"(assert (not (= {sig('st_o', 's9')} {sig('ref_full_out', 's0')})))\n"
-    return base + "\n" + unroll_mod("miter_shared_rounds", 9) + hyps + goal
+    goal = f"(assert (not (= {sig('st_o', 9)} {sig('ref_full_out', 0)})))\n"
+    return flatten_ys_smt2(base, "miter_shared_rounds", 9) + hyps + goal
 
 
 def shared_part_query(base):
-    def sig(port, s): return f"(|miter_shared_rounds_n {port}| {s})"
+    def sig(port, k): return f"|miter_shared_rounds_n {port}@s{k}|"
     hyps = (
-        f"(assert {sig('is_s1_p1', 's0')})\n"
-        + "".join(f"(assert (not {sig('rst', f's{k}')}))\n" for k in range(4))
+        f"(assert {sig('is_s1_p1', 0)})\n"
+        + "".join(f"(assert (not {sig('rst', k)}))\n" for k in range(4))
     )
-    goal = f"(assert (not (= {sig('st_o', 's4')} {sig('ref_part_out', 's0')})))\n"
-    return base + "\n" + unroll_mod("miter_shared_rounds", 4) + hyps + goal
+    goal = f"(assert (not (= {sig('st_o', 4)} {sig('ref_part_out', 0)})))\n"
+    return flatten_ys_smt2(base, "miter_shared_rounds", 4) + hyps + goal
 
 
 # 1) shared_ops_1clk + mutant

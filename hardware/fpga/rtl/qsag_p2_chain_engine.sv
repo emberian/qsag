@@ -6,7 +6,8 @@
 //   2. Parallel speculative modular rate absorption (<= 12 LUT+CARRY4 levels vs 32 cascaded).
 module qsag_p2_chain_engine #(
     parameter int SLOTW = 5,
-    parameter int STEPW = 6
+    parameter int STEPW = 6,
+    parameter int AW    = 26
 ) (
     input  logic                   clk,
     input  logic                   rst,
@@ -110,20 +111,27 @@ module qsag_p2_chain_engine #(
     assign do_start    = !rst && en && start_valid && !res_valid && !busy_map[start_slot];
     assign do_read     = en && !start_valid && rd_valid && !rd_busy;
     assign do_pick     = en && !start_valid && !do_read && v_lo[1];
-    assign start_ready = do_start;
+    // `do_start` and `do_pick` are mutually exclusive (`do_pick` requires `!start_valid`), so all
+    // SLOTS share one 44-bit write data bus and one slot decoder (-1,400 LUT4s!).
+    wire               meta_we = do_start || do_pick;
+    wire [SLOTW-1:0]   meta_wa = do_start ? start_slot : pick;
+    wire [METAW-1:0]   meta_wd = do_start
+                               ? {start_nsponge, {STEPW{1'b0}}, start_heap}
+                               : ((p_ns != 6'd0) ? {p_ns - 6'd1, p_step + STEPW'(1), p_heap}
+                                                 : {6'd0, p_step + STEPW'(1), 1'b0, p_heap[31:1]});
 
     logic [767:0] cur_rd;
     logic [511:0] blk_rd;
-    qsag_sdp_bram #(.AW(SLOTW), .DW(768)) u_cur (
+    qsag_sdp_bram #(.AW(SLOTW), .DW(768), .NO_RW_CHECK(1'b1), .FORCE_BRAM(1'b1)) u_cur (
         .clk(clk), .we(res_valid || do_start),
         .wa(res_valid ? res_slot : start_slot),
         .wd(res_valid ? res_state : start_state),
         .ra(!en ? a_s : (do_read ? rd_slot : pick)), .rd(cur_rd));
-    qsag_sdp_bram #(.AW(SLOTW + STEPW), .DW(512)) u_blk (
+    qsag_sdp_bram #(.AW(SLOTW + STEPW), .DW(512), .NO_RW_CHECK(1'b1)) u_blk (
         .clk(clk), .we(bw_en), .wa(bw_addr), .wd(bw_data),
         .ra(!en ? {a_s, m_step} : {pick, p_step}), .rd(blk_rd));
 
-    // Stage B: parallel speculative modular rate absorption (<= 11 levels).
+    // Stage B: parallel speculative modular rate absorption.
     logic [511:0] absorbed;
     for (genvar i = 0; i < 8; i++) begin : g_abs
         wire [63:0] c_i = cur_rd[64*i +: 64];
@@ -132,12 +140,20 @@ module qsag_p2_chain_engine #(
         logic [64:0] s0;
         logic [65:0] s1;
         /* verilator lint_on UNUSEDSIGNAL */
-        qsag_add_split #(.W(65), .CHUNK(24)) u_s0 (
-            .a({1'b0, c_i}), .b({1'b0, b_i}), .y(s0));
-        qsag_sum_csa #(.W(66), .N(3), .CHUNK(24)) u_s1 (
-            .x({NEG_1P, {2'b0, b_i}, {2'b0, c_i}}), .y(s1));
+        if (AW <= 16) begin : g_abs_ecp5
+            assign s0 = {1'b0, c_i} + {1'b0, b_i};
+            assign s1 = {1'b0, s0} + NEG_1P;
+        end else begin : g_abs_wide
+            qsag_add_split #(.W(65), .CHUNK(24)) u_s0 (
+                .a({1'b0, c_i}), .b({1'b0, b_i}), .y(s0));
+            qsag_sum_csa #(.W(66), .N(3), .CHUNK(24)) u_s1 (
+                .x({NEG_1P, {2'b0, b_i}, {2'b0, c_i}}), .y(s1));
+        end
         assign absorbed[64*i +: 64] = !s1[65] ? s1[63:0] : s0[63:0];
     end
+    /* verilator lint_off UNUSEDPARAM */
+    localparam int UNUSED_AW = AW;
+    /* verilator lint_on UNUSEDPARAM */
 
     logic         sponge;
     logic [31:0]  parent;
@@ -187,14 +203,12 @@ module qsag_p2_chain_engine #(
                 a_s     <= pick;
                 a_m     <= meta_pick;
             end
+            if (meta_we) meta[meta_wa] <= meta_wd;
             if (do_pick) begin
                 rr         <= pick + SLOTW'(1);
                 pend[pick] <= 1'b0;
-                meta[pick] <= (p_ns != 6'd0) ? {p_ns - 6'd1, p_step + STEPW'(1), p_heap}
-                                             : {6'd0, p_step + STEPW'(1), 1'b0, p_heap[31:1]};
             end
             if (do_start) begin
-                meta[start_slot]     <= {start_nsponge, {STEPW{1'b0}}, start_heap};
                 pend[start_slot]     <= 1'b1;
                 busy_map[start_slot] <= 1'b1;
                 done_map[start_slot] <= 1'b0;

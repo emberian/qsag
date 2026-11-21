@@ -49,7 +49,7 @@ rm -f logs/lec.log logs/lec_sorted.log
     echo "mi_lane $l"
     echo "mi_lane_mut $l"
   done
-} | xargs -P 8 -L 1 lec/run_lec.sh
+} | xargs -P "${LEC_JOBS:-4}" -L 1 lec/run_lec.sh
 
 python3 lec/run_composed.py
 python3 lec/check_anf.py

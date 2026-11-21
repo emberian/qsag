@@ -45,7 +45,8 @@
 //   0x20 KEC_LOAD           Keccak state = X[0..24]
 //   0x21 KEC_PERMUTE        XOR X[0..16] unless arg0[1]; permute (12r if arg0[0] else 24r); Y=st[0..11]
 //   0x22 KEC_STREAM_SPONGE  streams arg1 Keccak rate blocks on AXI4-Stream (3 beats/block: lanes 0..7,
-//                           lanes 8..15, {exp_dig[255:0], flags[63:0], lane16[63:0]})
+//                           lanes 8..15, {exp_dig[383:0], flags[63:0], lane16[63:0]} where flags[4]=chk256,
+//                           flags[6]=chk400 with exp_dig[399:384]=flags[63:48] covering all 50B of zk-Hem v2)
 //   0x24 TS_CANOPY_VERIFY   Steiner-deduplicated TurboSHAKE256/cSHAKE256 Canopy MultiProof verify:
 //                           arg0[0]=turbo, arg0[6:1]=log_leaves, arg1=num_leaves, ARG32=num_sibs,
 //                           X[0..3]=expected_root; Y[0..3]=computed_root, ok=verified
@@ -487,7 +488,7 @@ module qsag_ni_fpga_top #(
     wire stream_check_en = passive_stream && (stream_dst == 4'h0 || stream_dst == 4'h8);
     wire stream_bad      = (stream_dst == 4'h8) ? (|limb_bad[3:0]) : (|limb_bad);
 
-    qsag_p2_chain_engine #(.SLOTW(SLOTW), .STEPW(STEPW)) u_chain (
+    qsag_p2_chain_engine #(.SLOTW(SLOTW), .STEPW(STEPW), .AW(AW)) u_chain (
         .clk(clk), .rst(rst), .tree_key(tree_key_q), .exp_root(expect_q), .clr_maps(eng_clr),
         .bw_en(passive_stream && stream_dst == 4'h0),
         .bw_addr(stream_q[SLOTW+STEPW-1:0]),
@@ -513,16 +514,24 @@ module qsag_ni_fpga_top #(
     // Streamed EXT4_BATCH state (inputs registered via mac_valid_fsm so s_axis_tready never drives u_ext4)
     logic         eb_half, eb_wait_cmp, eb_fail_q;
     logic [15:0]  eb_rem, eb_ret_rem;
-    logic [255:0] eb_a_q, eb_b_q, eb_exp_cmp_q, eb_exp_cmp_val;
+    logic [255:0] eb_exp_cmp_q, eb_exp_cmp_val;
     logic [3:0][63:0] e5_tb_q;
     logic [2:0]       e5_step, e5_k_q;
     if (COMPACT_EXT4) begin : g_eb_cmp
         assign eb_exp_cmp_val = eb_exp_cmp_q;
     end else begin : g_eb_sr
-        logic [(EXT_LAT+1)*256-1:0] eb_exp_sr;
-        always_ff @(posedge clk)
-            eb_exp_sr <= {eb_exp_sr[EXT_LAT*256-1:0], s_axis_tdata[511:256]};
-        assign eb_exp_cmp_val = eb_exp_sr[EXT_LAT*256 +: 256];
+        logic [3:0] eb_cyc_q;
+        always_ff @(posedge clk) begin
+            if (rst) eb_cyc_q <= 4'd0;
+            else     eb_cyc_q <= eb_cyc_q + 4'd1;
+        end
+        qsag_sdp_bram #(.AW(9), .DW(256), .NO_RW_CHECK(1'b1)) u_eb_exp (
+            .clk(clk),
+            .we((op_st == O_EBATCH) && stream_fire && eb_half),
+            .wa({5'd0, eb_cyc_q}),
+            .wd(s_axis_tdata[511:256]),
+            .ra({5'd0, eb_cyc_q - 4'(EXT_LAT)}),
+            .rd(eb_exp_cmp_val));
         /* verilator lint_off UNUSEDSIGNAL */
         wire unused_eb = &{1'b0, eb_exp_cmp_q};
         /* verilator lint_on UNUSEDSIGNAL */
@@ -572,23 +581,28 @@ module qsag_ni_fpga_top #(
     logic [255:0]           sc_add_b;
     logic                   sc_add_c0;
 
-    always_comb begin
-        if (op_st == O_SC_SUM) begin
-            sc_add_b  = x_q[15:12];
-            sc_add_c0 = 1'b0;
-        end else if (op_st == O_SC_H) begin
-            case (sc_h_sub[2:1])
-                2'd1:    begin sc_add_b = x_q[11:8]; sc_add_c0 = 1'b0; end
-                2'd2:    begin sc_add_b = x_q[7:4];  sc_add_c0 = 1'b0; end
-                default: begin sc_add_b = x_q[3:0];  sc_add_c0 = 1'b1; end
-            endcase
-        end else begin
-            sc_add_b  = s_axis_tdata[255:0];
-            sc_add_c0 = sc_is_c0_q;
+    if (!PROFILE_COMPACT) begin : g_sc_par_mux
+        always_comb begin
+            if (op_st == O_SC_SUM) begin
+                sc_add_b  = x_q[15:12];
+                sc_add_c0 = 1'b0;
+            end else if (op_st == O_SC_H) begin
+                case (sc_h_sub[2:1])
+                    2'd1:    begin sc_add_b = x_q[11:8]; sc_add_c0 = 1'b0; end
+                    2'd2:    begin sc_add_b = x_q[7:4];  sc_add_c0 = 1'b0; end
+                    default: begin sc_add_b = x_q[3:0];  sc_add_c0 = 1'b1; end
+                endcase
+            end else begin
+                sc_add_b  = s_axis_tdata[255:0];
+                sc_add_c0 = sc_is_c0_q;
+            end
         end
+    end else begin : g_sc_cmp_nomux
+        assign sc_add_b  = '0;
+        assign sc_add_c0 = 1'b0;
     end
 
-    localparam int SC_CHUNK = (AW <= 16) ? 33 : 22;
+    localparam int SC_CHUNK = (AW <= 16) ? 66 : 22;
     for (genvar i = 0; i < SC_LANES; i++) begin : g_sc_pipe
         wire [63:0] a_l = sc_sum_q[64*i +: 64];
         wire [63:0] b_l = PROFILE_COMPACT ? sc_vec_q[63:0] : sc_add_b[64*i +: 64];
@@ -599,14 +613,23 @@ module qsag_ni_fpga_top #(
 
         wire [1:0]  hi = sc_raw_q[66*i + 64 +: 2];
         wire [63:0] lo = sc_raw_q[66*i      +: 64];
-        /* verilator lint_off UNUSEDSIGNAL */
-        logic [65:0] r0, r1;
-        /* verilator lint_on UNUSEDSIGNAL */
-        wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r0 (.x(tr0), .y(r0));
-        qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r1 (.x(tr1), .y(r1));
-        assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
+        if (AW <= 16) begin : g_sc_ecp5
+            wire [33:0] hi_f34 = (hi == 2'd0) ? 34'd0 : {hi - 2'd1, 30'h3FFF_FFFF, 2'd0 - hi};
+            /* verilator lint_off UNUSEDSIGNAL */
+            wire [64:0] r0 = {1'b0, lo} + {31'd0, hi_f34};
+            wire [65:0] r1 = {1'b0, r0} + NEG_1P66;
+            /* verilator lint_on UNUSEDSIGNAL */
+            assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
+        end else begin : g_sc_wide
+            /* verilator lint_off UNUSEDSIGNAL */
+            logic [65:0] r0, r1;
+            /* verilator lint_on UNUSEDSIGNAL */
+            wire [4*66-1:0] tr0 = {66'd1,            ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
+            wire [4*66-1:0] tr1 = {NEG_1P66 + 66'd1, ~{64'b0, hi}, {32'b0, hi, 32'b0}, {2'b0, lo}};
+            qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r0 (.x(tr0), .y(r0));
+            qsag_sum_csa #(.W(66), .N(4), .CHUNK(SC_CHUNK)) u_r1 (.x(tr1), .y(r1));
+            assign sc_can_d[64*i +: 64] = r1[65] ? r0[63:0] : r1[63:0];
+        end
     end
 
     // ------------------------------------------------------------------ Keccak + TS Canopy Engine
@@ -629,10 +652,11 @@ module qsag_ni_fpga_top #(
     // Streamed KEC_STREAM_SPONGE state
     logic [1:0]    ksp_beat;
     logic [15:0]   ksp_rem;
-    logic [1023:0] ksp_buf_q;
     logic [63:0]   ksp_lane16_q, ksp_flags_q;
-    logic [255:0]  ksp_exp_q;
+    logic [399:0]  ksp_exp_q;
     logic          ksp_fail_q;
+    logic [511:0]  ksp_par_we_data;
+    logic [1:0]    ksp_par_we;
 
     if (PROFILE_COMPACT) begin : g_kec_compact
         (* rom_style = "block" *) logic [63:0] mid_rom_mem [0:255];
@@ -657,7 +681,7 @@ module qsag_ni_fpga_top #(
         wire          ksp_bram_ra = (op_st == O_KSP_CMP_XOR)
                                   ? (kcmp_idx[3] | (kcmd_ready && (kcmp_idx[2:0] == 3'd7)))
                                   : 1'b0;
-        qsag_sdp_bram #(.AW(9), .DW(512)) u_ksp_bram (
+        qsag_sdp_bram #(.AW(9), .DW(512), .NO_RW_CHECK(1'b1)) u_ksp_bram (
             .clk(clk),
             .we((op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat < 2'd2)),
             .wa({8'd0, ksp_beat[0]}),
@@ -731,9 +755,14 @@ module qsag_ni_fpga_top #(
         assign kec_dig_out = '0;
         assign kec_y_out   = '0;
         logic unused_par_k;
-        assign unused_par_k = &{1'b0, kec_start_top, kec_load, kec_nr12_top, ts_kec_start, ts_kec_nr12, ts_kec_state};
+        assign unused_par_k = &{1'b0, kec_start_top, kec_load, kec_nr12_top, ts_kec_start, ts_kec_nr12, ts_kec_state, ksp_par_we, ksp_par_we_data};
     end else begin : g_kec_parallel
+        logic [1023:0] ksp_buf_q;
         logic [1599:0] kec_hold_q, kec_in, kec_state, ksp_base;
+        always_ff @(posedge clk) begin
+            if (ksp_par_we[0]) ksp_buf_q[511:0]   <= ksp_par_we_data;
+            if (ksp_par_we[1]) ksp_buf_q[1023:512] <= ksp_par_we_data;
+        end
         always_comb begin
             for (int l = 0; l < 25; l++)
                 ksp_base[64*l +: 64] = ksp_flags_q[0]
@@ -836,6 +865,10 @@ module qsag_ni_fpga_top #(
     logic [3:0]   rd_cnt;
     logic [447:0] ksp_dig_q;
     wire [511:0]  ksp_full_dig = {kcmd_rd_data, ksp_dig_q};
+    wire          ksp_par_bad  = (ksp_flags_q[4] && (kec_dig_out != ksp_exp_q[255:0]))
+                              || (ksp_flags_q[6] && (kec_y_out[399:0] != ksp_exp_q));
+    wire          ksp_cmp_bad  = (ksp_flags_q[4] && (ksp_full_dig[255:0] != ksp_exp_q[255:0]))
+                              || (ksp_flags_q[6] && (ksp_full_dig[399:0] != ksp_exp_q));
 
     assign op_job_valid    = (op_st == O_P2_OFFER);
     assign op_job_jive     = (cmd_op_q == 8'h02);
@@ -844,18 +877,25 @@ module qsag_ni_fpga_top #(
 
     wire engines_busy = op_busy || p2_busy || (|chain_busy) || fold_busy || kec_busy || ts_busy;
 
-    // Shared 64:1 read mux on `x_q` for both AXI4-Lite reads and partial-strobe writes.
-    wire [5:0]  x_rw_idx = wr_fire ? wr_word[5:0] : rd_word[5:0];
-    wire [31:0] x_rw_val = x_rw_idx[0] ? x_q[x_rw_idx[5:1]][63:32] : x_q[x_rw_idx[5:1]][31:0];
-    logic [31:0] x_new32;
-    always_comb begin
-        for (int b = 0; b < 4; b++)
-            x_new32[8*b +: 8] = wr_strb[b] ? wr_data[8*b +: 8] : x_rw_val[8*b +: 8];
+    // Native byte-enable writes on `x_q`; optional AXI4-Lite readback on non-compact profiles.
+    logic [31:0] x_rw_val;
+    if (!PROFILE_COMPACT) begin : g_x_rdback
+        assign x_rw_val = rd_word[0] ? x_q[rd_word[5:1]][63:32] : x_q[rd_word[5:1]][31:0];
+    end else begin : g_x_nordback
+        assign x_rw_val = 32'd0;
     end
+    assign ksp_par_we_data = s_axis_tdata;
+    assign ksp_par_we[0]   = !PROFILE_COMPACT && (op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat == 2'd0);
+    assign ksp_par_we[1]   = !PROFILE_COMPACT && (op_st == O_KSP_COLLECT) && stream_fire && (ksp_beat == 2'd1);
+
     always_ff @(posedge clk) begin
         if (wr_fire && !wr_error && (|wr_strb) && wr_word[9:6] == 4'h1) begin
-            if (wr_word[0]) x_q[wr_word[5:1]][63:32] <= x_new32;
-            else            x_q[wr_word[5:1]][31:0]  <= x_new32;
+            for (int b = 0; b < 4; b++) begin
+                if (wr_strb[b]) begin
+                    if (wr_word[0]) x_q[wr_word[5:1]][32 + 8*b +: 8] <= wr_data[8*b +: 8];
+                    else            x_q[wr_word[5:1]][     8*b +: 8] <= wr_data[8*b +: 8];
+                end
+            end
         end
     end
 
@@ -1150,32 +1190,12 @@ module qsag_ni_fpga_top #(
                                 mac_b_fsm     <= {x_q[8], x_q[7], x_q[6], x_q[5]};
                                 mac_c_fsm     <= {x_q[13], x_q[12], x_q[11], x_q[10]};
                             end
-                            3'd1: begin
+                            3'd1, 3'd2, 3'd3, 3'd4: begin
                                 y_q[3:0]      <= mac_y;
                                 mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[1]};
-                                mac_b_fsm     <= {x_q[7], x_q[6], x_q[5], e5_tb_q[3]};
-                                mac_c_fsm     <= mac_y;
-                            end
-                            3'd2: begin
-                                y_q[3:0]      <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[2]};
-                                mac_b_fsm     <= {x_q[6], x_q[5], e5_tb_q[3], e5_tb_q[2]};
-                                mac_c_fsm     <= mac_y;
-                            end
-                            3'd3: begin
-                                y_q[3:0]      <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[3]};
-                                mac_b_fsm     <= {x_q[5], e5_tb_q[3], e5_tb_q[2], e5_tb_q[1]};
-                                mac_c_fsm     <= mac_y;
-                            end
-                            3'd4: begin
-                                y_q[3:0]      <= mac_y;
-                                mac_valid_fsm <= 1'b1;
-                                mac_a_fsm     <= {192'd0, x_q[4]};
-                                mac_b_fsm     <= e5_tb_q;
+                                mac_a_fsm     <= {192'd0, x_q[{2'b00, e5_step}]};
+                                mac_b_fsm     <= {mac_b_fsm[191:0], e5_tb_q[3]};
+                                e5_tb_q       <= {e5_tb_q[2:0], 64'd0};
                                 mac_c_fsm     <= mac_y;
                             end
                             3'd5: begin
@@ -1201,7 +1221,7 @@ module qsag_ni_fpga_top #(
                 end
                 O_EXT5_FROB: begin
                     if (mac_done) begin
-                        y_q[e5_step] <= mac_y[63:0];
+                        y_q[4:0] <= {mac_y[63:0], y_q[4:1]};
                         if (e5_step == 3'd4) begin
                             op_st <= O_FIN;
                         end else begin
@@ -1367,22 +1387,13 @@ module qsag_ni_fpga_top #(
                 O_EBATCH: begin
                     if (stream_fire) begin
                         if (!eb_half) begin
-                            if (COMPACT_EXT4) begin
-                                mac_a_fsm <= s_axis_tdata[255:0];
-                                mac_b_fsm <= s_axis_tdata[511:256];
-                            end else begin
-                                eb_a_q <= s_axis_tdata[255:0];
-                                eb_b_q <= s_axis_tdata[511:256];
-                            end
-                            eb_half <= 1'b1;
+                            mac_a_fsm <= s_axis_tdata[255:0];
+                            mac_b_fsm <= s_axis_tdata[511:256];
+                            eb_half   <= 1'b1;
                         end else begin
                             eb_half       <= 1'b0;
                             eb_exp_cmp_q  <= s_axis_tdata[511:256];
                             mac_valid_fsm <= 1'b1;
-                            if (!COMPACT_EXT4) begin
-                                mac_a_fsm <= eb_a_q;
-                                mac_b_fsm <= eb_b_q;
-                            end
                             mac_c_fsm     <= s_axis_tdata[255:0];
                             if (COMPACT_EXT4) eb_wait_cmp <= 1'b1;
                             if (eb_rem == 16'd1) begin
@@ -1439,15 +1450,13 @@ module qsag_ni_fpga_top #(
                 O_KSP_COLLECT: begin
                     if (stream_fire) begin
                         if (ksp_beat == 2'd0) begin
-                            if (!PROFILE_COMPACT) ksp_buf_q[511:0] <= s_axis_tdata;
                             ksp_beat <= 2'd1;
                         end else if (ksp_beat == 2'd1) begin
-                            if (!PROFILE_COMPACT) ksp_buf_q[1023:512] <= s_axis_tdata;
                             ksp_beat <= 2'd2;
                         end else begin
                             ksp_lane16_q <= s_axis_tdata[63:0];
                             ksp_flags_q  <= s_axis_tdata[127:64];
-                            ksp_exp_q    <= s_axis_tdata[383:128];
+                            ksp_exp_q    <= {s_axis_tdata[127:112], s_axis_tdata[511:128]};
                             ksp_beat     <= 2'd0;
                             if (PROFILE_COMPACT) begin
                                 kcmp_idx <= 5'd0;
@@ -1463,9 +1472,9 @@ module qsag_ni_fpga_top #(
                 O_KSP_PERM: begin
                     if (kec_done) begin
                         y_q[7:0] <= kec_y_out[511:0];
-                        if (ksp_flags_q[4] && kec_dig_out != ksp_exp_q) ksp_fail_q <= 1'b1;
+                        if (ksp_par_bad) ksp_fail_q <= 1'b1;
                         if (ksp_rem == 16'd1) begin
-                            op_ok <= !(ksp_fail_q || (ksp_flags_q[4] && kec_dig_out != ksp_exp_q));
+                            op_ok <= !(ksp_fail_q || ksp_par_bad);
                             op_st <= O_FIN;
                         end else begin
                             ksp_rem <= ksp_rem - 16'd1;
@@ -1505,9 +1514,9 @@ module qsag_ni_fpga_top #(
                         ksp_dig_q <= ksp_full_dig[511:64];
                         if (rd_cnt == 4'd7) begin
                             y_q[7:0] <= ksp_full_dig;
-                            if (ksp_flags_q[4] && ksp_full_dig[255:0] != ksp_exp_q) ksp_fail_q <= 1'b1;
+                            if (ksp_cmp_bad) ksp_fail_q <= 1'b1;
                             if (ksp_rem == 16'd1) begin
-                                op_ok <= !(ksp_fail_q || (ksp_flags_q[4] && ksp_full_dig[255:0] != ksp_exp_q));
+                                op_ok <= !(ksp_fail_q || ksp_cmp_bad);
                                 op_st <= O_FIN;
                             end else begin
                                 ksp_rem <= ksp_rem - 16'd1;
@@ -1548,7 +1557,6 @@ module qsag_ni_fpga_top #(
     assign unused_top = &{1'b0, s_axil_awaddr[1:0], s_axil_araddr[1:0],
                           stream_q[27:20], cmd_a0_q, cmd_a1_q, ksp_flags_q, sc_h_sub,
                           sc_s2_en, sc_add_b, sc_add_c0, sc_vec_q, sc_c0_q, sc_k, sc_term,
-                          chain_busy, chain_done, chain_ok, kec_y_out,
-                          eb_a_q, eb_b_q, ksp_buf_q};
+                          chain_busy, chain_done, chain_ok, kec_y_out};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule

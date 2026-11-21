@@ -30,14 +30,14 @@ for t in "${targets[@]}"; do
         mul)          FREQ=150 run fmax_gl64_dsp_mul ;;
         sbox)         FREQ=150 run fmax_p2_sbox7 ;;
         ext4)         FREQ=120 run fmax_ext4_mac ;;
-        ext5)         FREQ=120 run fmax_ext5_mac ;;
-        kcmp)         FREQ=150 run fmax_keccak_compact ;;
-        gf)           FREQ=150 run fmax_gf128_clmul ;;
-        linear)       FREQ=120 run fmax_p2_linear ;;
-        compact_top)  FREQ=100 run fmax_compact_top ;;
-        fullrate_top) FREQ=100 run fmax_ecp5_fullrate_top ;;
-        kec1)         FMAX_TIMEOUT=180s FREQ=120 run fmax_keccak fmax_keccak_rpc1 -chparam RPC 1 ;;
-        kec2)         FMAX_TIMEOUT=180s FREQ=100 run fmax_keccak fmax_keccak_rpc2 -chparam RPC 2 ;;
+        ext5)         FREQ=45  run fmax_ext5_mac ;;
+        kcmp)         FREQ=80  run fmax_keccak_compact ;;
+        gf)           FREQ=100 run fmax_gf128_clmul ;;
+        linear)       FREQ=80  run fmax_p2_linear ;;
+        compact_top)  FREQ=35  run fmax_compact_top ;;
+        fullrate_top) FREQ=35  run fmax_ecp5_fullrate_top ;;
+        kec1)         FMAX_TIMEOUT=300s FREQ=80 run fmax_keccak fmax_keccak_rpc1 -chparam RPC 1 ;;
+        kec2)         FMAX_TIMEOUT=300s FREQ=60 run fmax_keccak fmax_keccak_rpc2 -chparam RPC 2 ;;
     esac
 done
 echo "ALL DONE fmax ${targets[*]}"

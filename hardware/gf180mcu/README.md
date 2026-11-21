@@ -1,32 +1,42 @@
-# QSAG-NI-180
+# Dregg-180 (`QSAG-NI-180`)
 
-A `qsag` coprocessor and signing enclave for the **wafer.space GF180MCU Run 3** shuttle
-(`gf180mcuD`, `SLOT_0P5X0P5`, 1,936 × 2,531 µm die, 1,052 × 1,647 µm core,
-`gf180mcu_fd_sc_mcu7t5v0` cells, no hard macros).
+A 5.0 V post-quantum `Cut-the-Hash` signing enclave, streamed `GoldilocksExt4` / Quintic `Fp5`
+proof verifier VM, and `CapTP` object-capability physical-presence co-processor for the
+**wafer.space GF180MCU Run 3** shuttle (`gf180mcuD`, smallest slot **`SLOT_0P5X0P5`**,
+`1,936 × 2,531 µm` die = `4.90 mm²`, `1,052 × 1,647 µm` core = `1,732,644 µm²`,
+`gf180mcu_fd_sc_mcu7t5v0` standard cells, **56 pads**, zero SRAM macros, and **zero dependency
+on unverified GF180 eFuse**).
 
-The chip computes, bit for bit as `qsag` does: Goldilocks and `GoldilocksExt4` arithmetic,
-the width-12 Poseidon2 permutation, sponge and Canopy node hash, Keccak-f[1600] /
-TurboSHAKE256 / SHAKE256, and GF(2^128) polynomial MACs. On top of these it runs a
-transcript-exact verifier virtual machine and a Cut-the-Hash signing oracle whose keys never
-leave the die and whose stateful signatures are gated on an external FRAM counter.
+The chip computes, bit for bit as `qsag` does: Goldilocks ($p = 2^{64} - 2^{32} + 1$),
+`GoldilocksExt4` ($\mathbb{F}_p[X]/(X^4 - 7)$) and `zk-Hem v2` Quintic `Fp5`
+($\mathbb{F}_p[X]/(X^5 - 3)$) arithmetic, the width-12 Poseidon2 permutation (rate-8
+Fiat-Shamir and canonical `sponge12_rate6`), Canopy Merkle path verification,
+Keccak-p[1600, 12/24] (`TurboSHAKE256` / `SHAKE256` / `cSHAKE256`), and `GF(2^128)` polynomial
+MACs. On top of these it runs a transcript-exact verifier virtual machine (`OP_FOLD` / `OP_HEM`)
+and a `Cut-the-Hash` (`FIPS 205` `SLH-DSA-SHAKE`) + Houyhnhnm `CapTP` signing enclave backed by
+five physical security organs (`dregg_captp_vat`, `dregg_ro_puf_bch`, `dregg_nfc_nco`,
+`dregg_distance_tdc`, `dregg_shield_canaries`), a matched **17-stage Coherent-Sampling
+Ring-Oscillator (`CoSO`) TRNG**, and an external 5.0 V SPI FRAM two-slot monotonic leaf counter.
 
-This directory is the wafer.space project template (commit `d99f6e1`) with `src/chip_core.sv`
-replaced; `src/chip_top.sv`, the padring, the slot geometry and the ID macros are untouched.
-
-> **Read [Status and open items](#status-and-open-items) before ordering.** It lists what was
-> measured, what differs from the original brief, and what is not yet done.
+This directory is built on the wafer.space project template (commit `d99f6e1`) with the 56-pad
+`SLOT_0P5X0P5` padring, power pad coordinates, slot geometry and wafer.space ID macros frozen
+and untouched (`rst_n_PAD` upgraded to Schmitt-trigger `gf180mcu_fd_io__in_s`). Note: the
+experimental `v2/` directory contains an earlier microcoded exploration (`Config S`, quarantined
+for historical reference; its standalone Python model test suite passes 5/5 in `v2/tests/`).
 
 ## Contents
 
 ```
-src/chip_core.sv, src/chip_top.sv     top level (template padring)
-rtl/                                   design (15 files, rtl/qsag_ni_180.f)
+src/chip_core.sv, src/chip_top.sv     56-pad SLOT_0P5X0P5 top level + unified Dregg-180 core
+rtl/                                   20 synthesizable SV modules (rtl/qsag_ni_180.f)
 model/                                 bit-exact Python reference and protocol golden model
-tb/                                    Verilator testbenches, script generator, fixtures
-lec/                                   Z3 SMT-LIB2 equivalence proofs and mutation checks
-synth/                                 Yosys synthesis scripts and area reports
-librelane/                             LibreLane configuration, multi-clock SDC, PDN
-scripts/                               remote-execution helpers (REMOTE_SETUP.md), constant generator
+tb/                                    Verilator testbenches, multi-mode scenarios, fixtures
+lec/                                   4 Z3 SMT-LIB2 equivalence & fault-injection suites (47/47)
+synth/                                 Yosys hierarchical & flat synthesis scripts
+librelane/                             Zero-virtual-clock multi-domain SDC, PDN & LibreLane config
+datasheet/dregg180-datasheet.typ       6-page standalone Typst production silicon datasheet
+pcb/                                   4-layer reference bring-up schematic guide & qualified BOM
+physics/trng/                          BSIM4 TRNOISE & Brownian CoSO 17-stage entropy models
 ```
 
 No EDA tool is run on the development Mac. `scripts/rsync_to_remote.sh` pushes the tree to the
@@ -111,6 +121,7 @@ The first byte after `CS_N` falls is a command, always one bit per clock on `DQ0
 |---|---|
 | `0x01` / `0x41` / `0x81` | write, payload on 1 / 4 / 8 data lines |
 | `0x02` / `0x42` / `0x82` | read on 1 / 4 / 8 data lines, after 8 dummy clocks |
+| `0x05` (`READ_DIAG`) | clockless 64-bit diagnostic read on `DQ1` (`SCK` domain only — answers even if `clk_core` is stopped or in `S_DEAD`) |
 
 ```
 write x8      CS_N ‾\________________________________________/‾
@@ -353,27 +364,38 @@ the anchor protocol:
 A torn write leaves the other slot valid. The high-water mark is volatile: after a reset the
 anchor alone decides, so the FRAM must be on the same board and not socketed.
 
-### TRNG (`rtl/qsag_trng.sv`)
+### CoSO Physical TRNG (`rtl/qsag_trng.sv`)
 
-Two free-running NAND rings (7 and 13 stages); the slow ring divided by 64 samples the fast
-one. Raw bits pass the SP 800-90B repetition-count (cutoff 41) and adaptive-proportion
-(window 1024, cutoff 821) tests for an assumed 0.5 bit per sample; a failure is sticky and
-blocks key generation. Raw bits are conditioned only by TurboSHAKE256 in the key load. The
-entropy claim has to be established on silicon.
+Two matched free-running **17-stage `gf180mcu_fd_sc_mcu7t5v0__nand2_1` ring oscillators**
+(`T_nom = 4.706 ns` at TT/5.0 V/27 °C, thermal jitter accumulation `κ = 4.80e-9 √s` from BSIM4
+`TRNOISE` in `physics/trng/`). Ring B coherently samples Ring A through a 2-FF synchronizer and
+4-cycle deglitch hysteresis filter to form the slow beat wave (`T_beat = T / |d|`), while a
+16-bit counter clocked by Ring B measures periods `C_k` between beat rising edges
+(`var(C) = 2·κ²·T² / dT³`, yielding `h_min(LSB) = 0.92..0.97` bit/beat across `d = 0.03%..0.30%`
+Pelgrom mismatch — replacing the earlier 7/13-stage divider sampler). Continuous hardware health
+supervision enforces:
+1. CoSO harmonic/overdrive lock (`2` consecutive `C_k < 12`) and 1:1 frequency-lock saturation
+   (`C_k = 65,535`) detection,
+2. NIST SP 800-90B Repetition Count Test (`cutoff = 41`),
+3. NIST SP 800-90B Adaptive Proportion Test (`window = 1024, cutoff = 821`).
+Raw CoSO bits are cryptographically conditioned by `TurboSHAKE256` during key generation.
 
 ## Architecture and timing of the datapath
 
-One 64-bit read port and one write port over a 33-word register file (25 sponge lanes, 8
-shadow words) serve everything:
+One 64-bit read port and one write port over a unified **56-word × 64-bit transparent-latch
+file** (`rtl/qsag_sponge.sv`: 42 public/scratch `latq_1` rows + 14 zeroizable secret `latrnq_1`
+rows behind sized `icgtp_4` per-row clock gates, with hardwired `e_rd >= 44 => out_data = 0`
+non-exfiltration) serve all cryptographic and enclave engines:
 
 | Unit | File | Operation | Core clocks |
 |---|---|---|---|
-| Goldilocks unit | `qsag_gl64_karatsuba_csa.sv` | `a·b mod p`, canonical | 4 |
-| | | add / sub / scale rows, canonical | 1 |
-| Field sequencer | `qsag_field_engine.sv` | `GoldilocksExt4` multiply | 122 |
-| | | Poseidon2-12 permutation | 3,074 |
-| Keccak | `qsag_keccak_serial.sv` | Keccak-p[1600, 12] / Keccak-f[1600] | 1,500 / 3,000 |
-| GF(2^128) | `qsag_gf128_clmul.sv` | one MAC word | 64 |
+| Goldilocks unit | `qsag_gl64_karatsuba_csa.sv` | `a·b mod p`, canonical (in-place shift-add CSA + Han-Carlson) | 66 |
+| | | 5:2 `addf_1` CSA add / sub / scale + Han-Carlson canon | 2 |
+| Field sequencer | `qsag_field_engine.sv` | `GoldilocksExt4` 9-mul tower multiply | 724 |
+| | | `zk-Hem v2` Quintic `Fp5` multiply ($\mathbb{F}_p[X]/(X^5 - 3)$) | 1,781 |
+| | | Poseidon2-12 permutation (8 full + 22 partial rounds) | 33,098 |
+| Keccak | `qsag_keccak_serial.sv` | 3-register in-place `N^k` Keccak-p[1600, 12] / Keccak-f[1600] | 3,504 / 7,008 |
+| GF(2^128) | `qsag_gf128_clmul.sv` | 1-bit/clk `GHASH` & `H_ZK_PIN` step (64-bit word) | 128 |
 
 The Goldilocks unit writes `a = a1·φ + a0`, `b = b1·φ + b0` with `φ = 2^32` and uses
 `φ² ≡ φ − 1`, `φ³ ≡ −1 (mod p)`:

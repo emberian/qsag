@@ -6,50 +6,45 @@ Delay = ABC `stime -p` of the mapped, buffered and sized netlist (no placement, 
 
 | module / stage | adders | sky130 kGE | ihp130 kGE | nangate45 kGE | asap7 kGE | sky130 ns | ihp130 ns | nangate45 ns | asap7 ns |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `qsag_ext4_coef0` | bk | 20.5 | - | - | - | 8.26 | - | - | - |
-| `qsag_ext4_coef1` | bk | 16.8 | - | - | - | 7.61 | - | - | - |
-| `qsag_ext4_coef2` | bk | 14.9 | - | - | - | 7.53 | - | - | - |
-| `qsag_ext4_coef3` | bk | 12.4 | - | - | - | 7.42 | - | - | - |
-| `qsag_gl64_addsub` | bk | 2.0 | - | - | - | 3.83 | - | - | - |
-| `qsag_gl64_fold` | bk | 2.2 | - | - | - | 1.83 | - | - | - |
-| `qsag_gl64_mul_tree` | bk | 35.7 | 44.0 | 35.5 | 30.1 | 3.49 | 2.63 | 0.82 | 0.45 |
-| `qsag_keccak_2rpc` | bk | 78.2 | - | - | - | 3.75 | - | - | - |
-| `qsag_p2_canopy_ff` | bk | 9.1 | - | - | - | 6.31 | - | - | - |
-| `qsag_p2_mi_fused` | bk | 56.2 | - | - | - | 10.90 | - | - | - |
-| `stage_ext4` | bk | 640.7 | - | - | 527.4 | 12.17 | - | - | 1.71 |
-| `stage_gf128` | bk | 43.6 | 39.8 | 39.4 | 42.5 | 2.84 | 1.72 | 0.62 | 0.38 |
+| `qsag_gl64_fold` | bk | 5.2 | 4.6 | 5.0 | 4.2 | 2.87 | 2.04 | 0.70 | 0.41 |
+| `qsag_gl64_mul_csa` | bk | 33.6 | 39.2 | 34.3 | 29.2 | 13.39 | 9.54 | 3.15 | 1.93 |
+| `qsag_gl64_mul_tree` | bk | 26.0 | 24.9 | 25.6 | 23.4 | 5.99 | 4.09 | 1.46 | 0.81 |
+| `qsag_keccak_round` | bk | 20.8 | 11.9 | 12.7 | 14.0 | 1.64 | 0.97 | 0.39 | 0.21 |
+| `stage_ext4` | bk | 341.6 | 532.4 | 342.1 | 299.4 | 40.15 | 36.66 | 9.09 | 5.85 |
+| `stage_gf128` | bk | 25.8 | 23.2 | 22.8 | 24.9 | 4.10 | 2.46 | 0.89 | 0.50 |
 | `stage_keccak2` | bk | 40.6 | 23.7 | 25.1 | 28.2 | 3.40 | 2.07 | 0.78 | 0.43 |
-| `stage_me` | bk | 70.0 | 113.5 | 77.4 | 61.7 | 10.69 | 8.02 | 2.41 | 1.48 |
-| `stage_partial` | bk | 92.4 | 139.3 | 93.7 | 78.4 | 14.42 | 11.77 | 3.45 | 2.09 |
-| `stage_partial` | ks | 101.1 | 160.6 | 107.6 | 91.0 | 14.25 | 12.16 | 3.45 | 1.98 |
-| `stage_reduce` | bk | 1.9 | 1.9 | 2.0 | 1.9 | 4.53 | 3.23 | 1.17 | 0.67 |
-| `stage_reduce` | ks | 3.1 | 2.8 | 3.2 | 2.6 | 4.62 | 2.89 | 1.04 | 0.63 |
+| `stage_me` | bk | 73.9 | 111.5 | 78.3 | 65.4 | 17.37 | 13.06 | 3.87 | 2.44 |
+| `stage_partial` | bk | 35.9 | 42.6 | 34.6 | 30.9 | 7.77 | 5.67 | 1.71 | 1.07 |
+| `stage_partial` | ks | 41.8 | 51.9 | 43.5 | 36.8 | 7.33 | 5.26 | 1.69 | 0.97 |
+| `stage_reduce` | bk | 2.0 | 1.8 | 2.0 | 1.8 | 4.38 | 3.34 | 1.13 | 0.69 |
+| `stage_reduce` | ks | 3.1 | 2.7 | 3.1 | 2.5 | 4.29 | 2.98 | 1.02 | 0.63 |
 | `stage_reduce_ref` | bk | 2.2 | 2.1 | 2.4 | 2.1 | 8.70 | 5.35 | 1.79 | 1.12 |
 | `stage_reduce_ref` | ks | 3.2 | 3.3 | 3.6 | 3.1 | 7.23 | 4.68 | 1.57 | 1.03 |
-| `stage_sbox` | bk | 41.0 | 54.7 | 46.0 | 35.5 | 10.04 | 7.53 | 2.55 | 1.41 |
-| `stage_sbox` | ks | 41.6 | 55.5 | 46.9 | 36.0 | 10.02 | 7.35 | 2.45 | 1.40 |
+| `stage_sbox` | bk | 34.4 | 41.0 | 35.9 | 29.8 | 13.15 | 9.85 | 3.22 | 1.88 |
+| `stage_sbox` | ks | 36.9 | 44.9 | 38.9 | 31.1 | 12.55 | 9.06 | 3.07 | 1.82 |
 | `stage_sbox_ref` | bk | 40.3 | 45.6 | 38.0 | 36.3 | 17.57 | 12.21 | 3.81 | 2.42 |
 | `stage_sbox_ref` | ks | 41.9 | 48.1 | 42.7 | 39.1 | 14.52 | 10.89 | 3.44 | 2.10 |
-| `stage_tower128` | bk | 79.1 | 96.7 | 64.3 | 69.9 | 7.04 | 6.58 | 1.62 | 0.92 |
+| `stage_tower128` | bk | 60.3 | 73.4 | 49.3 | 54.0 | 7.89 | 6.26 | 1.75 | 1.01 |
 
 ## Whole flat top (`abc -fast`, area only; SRAM macro is a black box and not counted)
 
 | library | cell area (um^2) | kGE | of which flip-flops (um^2) |
 |---|---:|---:|---:|
-| sky130 | 4378828 | 1167 | 145929.9584 |
-| ihp130 | 7616570 | 1049 | 265176.3744 |
-| nangate45 | 843383 | 1057 | 24477.586 |
-| asap7 | 68942 | 1182 | 1973.0385 |
+| sky130 | 3344491 | 891 | 316763.8016 |
+| ihp130 | 5913732 | 815 | 518350.4928 |
+| nangate45 | 661593 | 829 | 47847.282 |
+| asap7 | 53285 | 914 | 3856.7745 |
 
 ## Generic NAND2/INV mapping (`abc -g NAND`, `stat -tech cmos`, `ltp`)
 
 - nand stage_reduce: exit 0  1464 $_NAND_  730 $_NOT_     Estimated number of transistors:       7316 Longest topological path in stage_reduce (length=146):
 - nand stage_reduce_ref: exit 0  1713 $_NAND_  1017 $_NOT_     Estimated number of transistors:       8886 Longest topological path in stage_reduce_ref (length=264):
+- nand qsag_gl64_fold: exit 0  6419 $_NAND_  1500 $_NOT_     Estimated number of transistors:      28676 Longest topological path in qsag_gl64_fold (length=39):
 - nand stage_keccak2: exit 0  52643 $_NAND_  6387 $_NOT_     Estimated number of transistors:     223346 Longest topological path in stage_keccak2 (length=36):
-- nand qsag_gl64_mul_tree: exit 0  46422 $_NAND_  9046 $_NOT_     Estimated number of transistors:     203780 Longest topological path in qsag_gl64_mul_tree (length=42):
-- nand stage_gf128: exit 0  72629 $_NAND_  18253 $_NOT_     Estimated number of transistors:     327022 Longest topological path in stage_gf128 (length=35):
-- nand qsag_gl64_fold: exit 0  2585 $_NAND_  862 $_NOT_     Estimated number of transistors:      12064 Longest topological path in qsag_gl64_fold (length=24):
-- nand stage_me: exit 0  81484 $_NAND_  19148 $_NOT_     Estimated number of transistors:     364232 Longest topological path in stage_me (length=278):
+- nand qsag_gl64_mul_tree: exit 0  33365 $_NAND_  8181 $_NOT_     Estimated number of transistors:     149822 Longest topological path in qsag_gl64_mul_tree (length=106):
+- nand stage_gf128: exit 0  41561 $_NAND_  9644 $_NOT_     Estimated number of transistors:     185532 Longest topological path in stage_gf128 (length=41):
+- nand stage_me: exit 0  68360 $_NAND_  26095 $_NOT_     Estimated number of transistors:     325630 Longest topological path in stage_me (length=511):
+- nand qsag_gl64_mul_csa: exit 124
 
 ## Jobs that did not finish inside the 600 s build cap
 

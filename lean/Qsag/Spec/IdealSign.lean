@@ -1719,6 +1719,345 @@ theorem idealSignCorruptible_honest_run_epochs_increase :
 #tooth_pair idealSignCorruptibleMachine_uncorrupted_trace_safe vs
   idealSignCorruptible_corrupted_run_reuses_epoch
 
+/-! ## Per-Request Randomized Signing Refinement (`RandomizedSigScheme`)
+
+`SigScheme.sign` above takes `(sk, ep, msg)` without a per-request randomness parameter, modeling
+deterministic signing (or hedged signing at a fixed randomness slice). Here we model hedged /
+per-request randomized signing (`optRand : Bytes`, as in FIPS 205 `slh_sign_internal` and QSAG
+`prodSignQuery`) first-class:
+
+* `RandomizedSigScheme`: `derivePk`, `sign sk ep optRand msg`, `verify`, and `correct`.
+* `RandomizedSigScheme.atFixedRand`: every `RandomizedSigScheme` specializes at any fixed `optRand`
+  to a `SigScheme`.
+* `RandomizedSignRequest`, `RandomizedIdealSignState`, `idealRandomizedSignMachine`,
+  `latchedRandomizedSignerMachine`, and `latchedRandomizedSigner_refines_ideal`: exact forward
+  simulation (`latchedRandomizedSignerMachine ⊑ idealRandomizedSignMachine`) preserving
+  per-signature `optRand`, verified outputs, strictly increasing epochs in stateful mode, and epoch
+  consumption on failed signing. -/
+
+/-- Signature scheme interface with explicit per-request signer randomness `optRand : Bytes`. -/
+structure RandomizedSigScheme (PK SK Sig : Type) where
+  derivePk : SK → PK
+  sign : SK → Nat → Bytes → Bytes → Option Sig
+  verify : PK → Bytes → Sig → Bool
+  correct : ∀ (sk : SK) (ep : Nat) (optRand msg : Bytes) (sig : Sig),
+    sign sk ep optRand msg = some sig → verify (derivePk sk) msg sig = true
+
+/-- Fixing `optRand` projects a `RandomizedSigScheme` onto a deterministic-interface `SigScheme`. -/
+def RandomizedSigScheme.atFixedRand {PK SK Sig : Type}
+    (S : RandomizedSigScheme PK SK Sig) (optRand : Bytes) : SigScheme PK SK Sig where
+  derivePk := S.derivePk
+  sign sk ep msg := S.sign sk ep optRand msg
+  verify := S.verify
+  correct sk ep msg sig h := S.correct sk ep optRand msg sig h
+
+/-- Per-request randomized signing request: target `epoch`, per-signature `optRand`, and `message`. -/
+structure RandomizedSignRequest where
+  epoch : Nat
+  optRand : Bytes
+  message : Bytes
+  deriving DecidableEq, Repr
+
+/-- Persistent state of the ideal per-request randomized signing functionality. -/
+structure RandomizedIdealSignState (PK Sig : Type) where
+  enrolledPk : PK
+  statefulEpochs : Bool
+  nextEpoch : Nat
+  usedEpochs : List Nat
+  signedLog : List (Nat × Bytes × Bytes × Sig)
+
+def RandomizedIdealSignState.empty {PK Sig : Type} (pk : PK) (stateful : Bool) :
+    RandomizedIdealSignState PK Sig :=
+  { enrolledPk := pk
+    statefulEpochs := stateful
+    nextEpoch := 0
+    usedEpochs := []
+    signedLog := [] }
+
+def RandomizedIdealSignState.consume {PK Sig : Type}
+    (st : RandomizedIdealSignState PK Sig) (ep : Nat) :
+    RandomizedIdealSignState PK Sig :=
+  { st with nextEpoch := ep + 1, usedEpochs := ep :: st.usedEpochs }
+
+def RandomizedIdealSignState.record {PK Sig : Type}
+    (st : RandomizedIdealSignState PK Sig) (req : RandomizedSignRequest) (sig : Sig) :
+    RandomizedIdealSignState PK Sig :=
+  { st.consume req.epoch with
+      signedLog := (req.epoch, req.optRand, req.message, sig) :: st.signedLog }
+
+def verifiedRandomizedCandidate {PK SK Sig : Type} (S : RandomizedSigScheme PK SK Sig) (pk : PK)
+    (oracleSign : RandomizedSignRequest → Option Sig) (req : RandomizedSignRequest) : Option Sig :=
+  match oracleSign req with
+  | some sig => if S.verify pk req.message sig = true then some sig else none
+  | none => none
+
+theorem verifiedRandomizedCandidate_some {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk : PK}
+    {oracleSign : RandomizedSignRequest → Option Sig} {req : RandomizedSignRequest} {sig : Sig}
+    (h : verifiedRandomizedCandidate S pk oracleSign req = some sig) :
+    oracleSign req = some sig ∧ S.verify pk req.message sig = true := by
+  unfold verifiedRandomizedCandidate at h
+  cases hO : oracleSign req with
+  | none => rw [hO] at h; cases h
+  | some s =>
+    rw [hO] at h
+    obtain ⟨hV, hEq⟩ := signIteSome h
+    have hs : s = sig := Option.some.inj hEq
+    exact ⟨congrArg some hs, hs ▸ hV⟩
+
+theorem verifiedRandomizedCandidate_of_valid {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk : PK}
+    {oracleSign : RandomizedSignRequest → Option Sig} {req : RandomizedSignRequest} {sig : Sig}
+    (hO : oracleSign req = some sig) (hV : S.verify pk req.message sig = true) :
+    verifiedRandomizedCandidate S pk oracleSign req = some sig := by
+  unfold verifiedRandomizedCandidate
+  rw [hO]
+  dsimp only
+  rw [hV]
+  rfl
+
+/-- **Ideal per-request randomized signing machine.** -/
+def idealRandomizedSignMachine {PK SK Sig : Type} (S : RandomizedSigScheme PK SK Sig)
+    (pk₀ : PK) (stateful₀ : Bool) (maxWindow : Nat)
+    (oracleSign : RandomizedSignRequest → Option Sig) :
+    Machine (RandomizedIdealSignState PK Sig) RandomizedSignRequest Sig where
+  Init st := st = RandomizedIdealSignState.empty pk₀ stateful₀
+  step st req :=
+    if epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch = true then
+      (verifiedRandomizedCandidate S st.enrolledPk oracleSign req).map
+        (fun sig => (st.record req sig, sig))
+    else none
+  errStep st req :=
+    if epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch = true then
+      st.consume req.epoch
+    else st
+
+theorem idealRandomizedSignMachine_step_some {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig}
+    {st st' : RandomizedIdealSignState PK Sig} {req : RandomizedSignRequest} {sig : Sig}
+    (h : (idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st req =
+      some (st', sig)) :
+    epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch = true ∧
+    oracleSign req = some sig ∧
+    S.verify st.enrolledPk req.message sig = true ∧
+    st' = st.record req sig := by
+  unfold idealRandomizedSignMachine at h
+  dsimp only at h
+  obtain ⟨hA, hMap⟩ := signIteSome h
+  obtain ⟨s, hC, hPair⟩ := signMapSome hMap
+  have hs : s = sig := congrArg Prod.snd hPair
+  have hSt : st.record req s = st' := congrArg Prod.fst hPair
+  obtain ⟨hO, hV⟩ := verifiedRandomizedCandidate_some hC
+  exact ⟨hA, hs ▸ hO, hs ▸ hV, hs ▸ hSt.symm⟩
+
+theorem idealRandomizedSignMachine_step_emits_verified {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig}
+    {st st' : RandomizedIdealSignState PK Sig} {req : RandomizedSignRequest} {sig : Sig}
+    (h : (idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st req =
+      some (st', sig)) :
+    S.verify st.enrolledPk req.message sig = true :=
+  (idealRandomizedSignMachine_step_some h).2.2.1
+
+theorem idealRandomizedSignMachine_step_of_valid {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig}
+    {st : RandomizedIdealSignState PK Sig} {req : RandomizedSignRequest} {sig : Sig}
+    (hA : epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch = true)
+    (hO : oracleSign req = some sig)
+    (hV : S.verify st.enrolledPk req.message sig = true) :
+    (idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).step st req =
+      some (st.record req sig, sig) := by
+  unfold idealRandomizedSignMachine
+  dsimp only
+  rw [hA, verifiedRandomizedCandidate_of_valid hO hV]
+  rfl
+
+theorem idealRandomizedSignMachine_trace_outputs_verified {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig} :
+    ∀ {s₀ s_final : RandomizedIdealSignState PK Sig}
+      {tr : List (RandomizedSignRequest × Sig)},
+      (idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr s_final →
+      ∀ p ∈ tr, S.verify s₀.enrolledPk p.1.message p.2 = true
+  | _, _, _, .nil _ => fun _ h => nomatch h
+  | s₀, _, _, .accept hStep hRest => fun p hp => by
+    obtain ⟨_, _, hV, hEq⟩ := idealRandomizedSignMachine_step_some hStep
+    rcases List.mem_cons.mp hp with hHead | hTail
+    · rw [hHead]; exact hV
+    · have ih := idealRandomizedSignMachine_trace_outputs_verified hRest p hTail
+      rw [hEq] at ih
+      exact ih
+  | s₀, _, _, .reject inp _ hRest => fun p hp => by
+    have ih := idealRandomizedSignMachine_trace_outputs_verified hRest p hp
+    unfold idealRandomizedSignMachine at ih
+    dsimp only at ih
+    cases hA : epochAdmissible s₀.statefulEpochs maxWindow s₀.nextEpoch inp.epoch with
+    | false => rw [hA] at ih; exact ih
+    | true => rw [hA] at ih; exact ih
+
+theorem idealRandomizedSignMachine_errStep_facts {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig}
+    (st : RandomizedIdealSignState PK Sig) (req : RandomizedSignRequest) :
+    ((idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st req).enrolledPk =
+      st.enrolledPk ∧
+    ((idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st req).statefulEpochs =
+      st.statefulEpochs ∧
+    (st.statefulEpochs = true → st.nextEpoch ≤
+      ((idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).errStep st req).nextEpoch) := by
+  unfold idealRandomizedSignMachine
+  dsimp only
+  cases hA : epochAdmissible st.statefulEpochs maxWindow st.nextEpoch req.epoch with
+  | false =>
+    exact ⟨rfl, rfl, fun _ => Nat.le_refl _⟩
+  | true =>
+    refine ⟨rfl, rfl, fun hS => ?_⟩
+    rw [hS] at hA
+    exact Nat.le_trans (epochAdmissible_stateful hA).1 (Nat.le_succ _)
+
+theorem idealRandomizedSignMachine_trace_epochs_increasing {PK SK Sig : Type}
+    {S : RandomizedSigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool} {maxWindow : Nat}
+    {oracleSign : RandomizedSignRequest → Option Sig} :
+    ∀ {s₀ s_final : RandomizedIdealSignState PK Sig}
+      {tr : List (RandomizedSignRequest × Sig)},
+      s₀.statefulEpochs = true →
+      (idealRandomizedSignMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s₀ tr s_final →
+      (∀ p ∈ tr, s₀.nextEpoch ≤ p.1.epoch) ∧ tr.Pairwise (fun a b => a.1.epoch < b.1.epoch)
+  | _, _, _, _, .nil _ => ⟨fun _ h => (nomatch h), .nil⟩
+  | s₀, _, _, hS, .accept (s' := s') (inp := inp) hStep hRest => by
+    obtain ⟨hA, _, _, hEq⟩ := idealRandomizedSignMachine_step_some hStep
+    have hNext : s₀.nextEpoch ≤ inp.epoch := by
+      rw [hS] at hA
+      exact (epochAdmissible_stateful hA).1
+    have hS' : s'.statefulEpochs = true := by rw [hEq]; exact hS
+    have hN' : s'.nextEpoch = inp.epoch + 1 := by rw [hEq]; rfl
+    obtain ⟨ihLo, ihPw⟩ := idealRandomizedSignMachine_trace_epochs_increasing hS' hRest
+    rw [hN'] at ihLo
+    refine ⟨fun p hp => ?_, .cons (fun p hp => ihLo p hp) ihPw⟩
+    rcases List.mem_cons.mp hp with hHead | hTail
+    · rw [hHead]; exact hNext
+    · exact Nat.le_trans (Nat.le_trans hNext (Nat.le_succ _)) (ihLo p hTail)
+  | s₀, _, _, hS, .reject inp _ hRest => by
+    obtain ⟨_, hSt, hGe⟩ := idealRandomizedSignMachine_errStep_facts (S := S) (pk₀ := pk₀)
+      (stateful₀ := stateful₀) (maxWindow := maxWindow) (oracleSign := oracleSign) s₀ inp
+    obtain ⟨ihLo, ihPw⟩ := idealRandomizedSignMachine_trace_epochs_increasing (hSt.trans hS) hRest
+    exact ⟨fun p hp => Nat.le_trans (hGe hS) (ihLo p hp), ihPw⟩
+
+/-- **Concrete epoch-latched per-request randomized signer.** -/
+def latchedRandomizedSignerMachine {PK SK Sig : Type} (S : RandomizedSigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat) :
+    Machine LatchedSignerState RandomizedSignRequest Sig where
+  Init c := c = ⟨0⟩
+  step c req :=
+    if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then
+      (S.sign sk req.epoch req.optRand req.message).map (fun sig => (⟨req.epoch + 1⟩, sig))
+    else none
+  errStep c req :=
+    if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then ⟨req.epoch + 1⟩
+    else c
+
+/-- **Refinement (`latchedRandomizedSignerMachine ⊑ idealRandomizedSignMachine`).**
+    Models hedged per-signature randomness `req.optRand` first-class alongside epoch latching. -/
+def latchedRandomizedSigner_refines_ideal {PK SK Sig : Type}
+    (S : RandomizedSigScheme PK SK Sig) (sk : SK) (stateful₀ : Bool) (maxWindow : Nat) :
+    latchedRandomizedSignerMachine S sk stateful₀ maxWindow ⊑
+      idealRandomizedSignMachine S (S.derivePk sk) stateful₀ maxWindow
+        (fun req => S.sign sk req.epoch req.optRand req.message) where
+  Rel c a := a.nextEpoch = c.nextEpoch ∧ a.statefulEpochs = stateful₀ ∧
+    a.enrolledPk = S.derivePk sk
+  absInit _ := RandomizedIdealSignState.empty (S.derivePk sk) stateful₀
+  init_ok {c₀} hInit := by
+    have hC : c₀ = ⟨0⟩ := hInit
+    rw [hC]
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  sim_ok {c c' a req sig} hRel hStepC := by
+    obtain ⟨hN, hS, hPk⟩ := hRel
+    unfold latchedRandomizedSignerMachine at hStepC
+    dsimp only at hStepC
+    obtain ⟨hA, hMap⟩ := signIteSome hStepC
+    obtain ⟨s, hSign, hPair⟩ := signMapSome hMap
+    have hs : s = sig := congrArg Prod.snd hPair
+    have hc : (⟨req.epoch + 1⟩ : LatchedSignerState) = c' := congrArg Prod.fst hPair
+    rw [hs] at hSign
+    have hA' : epochAdmissible a.statefulEpochs maxWindow a.nextEpoch req.epoch = true := by
+      rw [hS, hN]; exact hA
+    have hV : S.verify a.enrolledPk req.message sig = true := by
+      rw [hPk]; exact S.correct sk req.epoch req.optRand req.message sig hSign
+    rw [idealRandomizedSignMachine_step_of_valid hA' hSign hV]
+    exact ⟨rfl, hc ▸ rfl, hS, hPk⟩
+  sim_err {c a req} hRel hNoneC := by
+    obtain ⟨hN, hS, hPk⟩ := hRel
+    unfold latchedRandomizedSignerMachine at hNoneC ⊢
+    dsimp only at hNoneC ⊢
+    cases hA : epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch with
+    | false =>
+      have hA' : epochAdmissible a.statefulEpochs maxWindow a.nextEpoch req.epoch = false := by
+        rw [hS, hN]; exact hA
+      unfold idealRandomizedSignMachine
+      dsimp only
+      rw [hA']
+      exact ⟨rfl, hN, hS, hPk⟩
+    | true =>
+      have hA' : epochAdmissible a.statefulEpochs maxWindow a.nextEpoch req.epoch = true := by
+        rw [hS, hN]; exact hA
+      have hSign : S.sign sk req.epoch req.optRand req.message = none := by
+        cases hSg : S.sign sk req.epoch req.optRand req.message with
+        | none => rfl
+        | some s => simp [hSg, hA] at hNoneC
+      unfold idealRandomizedSignMachine verifiedRandomizedCandidate
+      dsimp only
+      rw [hA', hSign]
+      exact ⟨rfl, rfl, hS, hPk⟩
+
+/-- Every initialized trace of the stateful latched randomized signer emits verified signatures at
+    strictly increasing epochs, regardless of adversary-chosen per-request `optRand`. -/
+theorem latchedRandomizedSigner_trace_safe {PK SK Sig : Type}
+    (S : RandomizedSigScheme PK SK Sig) (sk : SK) (maxWindow : Nat)
+    {tr : List (RandomizedSignRequest × Sig)}
+    (hAdmits : (latchedRandomizedSignerMachine S sk true maxWindow).AdmitsTrace tr) :
+    (∀ p ∈ tr, S.verify (S.derivePk sk) p.1.message p.2 = true) ∧
+    tr.Pairwise (fun a b => a.1.epoch < b.1.epoch) := by
+  have hIdeal := (latchedRandomizedSigner_refines_ideal S sk true maxWindow).preserve_admitsTrace
+    hAdmits
+  rcases hIdeal with ⟨s₀, s_final, hInit, hTrace⟩
+  have hInit' : s₀ = RandomizedIdealSignState.empty (S.derivePk sk) true := hInit
+  rw [hInit'] at hTrace
+  exact ⟨idealRandomizedSignMachine_trace_outputs_verified hTrace,
+    (idealRandomizedSignMachine_trace_epochs_increasing rfl hTrace).2⟩
+
+def acceptAllRandomizedSigScheme : RandomizedSigScheme Unit Unit Unit where
+  derivePk _ := ()
+  sign _ _ _ _ := some ()
+  verify _ _ _ := true
+  correct _ _ _ _ _ _ := rfl
+
+def rejectAllRandomizedSigScheme : RandomizedSigScheme Unit Unit Unit where
+  derivePk _ := ()
+  sign _ _ _ _ := none
+  verify _ _ _ := false
+  correct _ _ _ _ _ h := nomatch h
+
+theorem idealRandomizedSign_rejects_epoch_one_after_two :
+    ¬ (((idealRandomizedSignMachine acceptAllRandomizedSigScheme () true 8 (fun _ => some ())).step
+      ((idealRandomizedSignMachine acceptAllRandomizedSigScheme () true 8
+        (fun _ => some ())).runStep
+        (RandomizedIdealSignState.empty () true) ⟨2, [0xAA], []⟩).1 ⟨1, [0xBB], []⟩).isSome =
+        true) := by
+  decide
+
+theorem idealRandomizedSign_rejects_unverified_candidate :
+    ¬ (((idealRandomizedSignMachine rejectAllRandomizedSigScheme () false 0
+        (fun _ => some ())).step
+      (RandomizedIdealSignState.empty () false) ⟨0, [0xAA], []⟩).isSome = true) := by
+  decide
+
+#tooth_pair idealRandomizedSignMachine_trace_epochs_increasing vs
+  idealRandomizedSign_rejects_epoch_one_after_two
+#tooth_pair idealRandomizedSignMachine_step_emits_verified vs
+  idealRandomizedSign_rejects_unverified_candidate
+
 #verify_constructive
   Qsag.Spec.epochAdmissible_stateful
   Qsag.Spec.epochAdmissible_consumed
@@ -1795,6 +2134,16 @@ theorem idealSignCorruptible_honest_run_epochs_increase :
   Qsag.Spec.idealSignCorruptible_epoch_reuse_run
   Qsag.Spec.idealSignCorruptible_corrupted_run_reuses_epoch
   Qsag.Spec.idealSignCorruptible_honest_run_epochs_increase
+  Qsag.Spec.verifiedRandomizedCandidate_some
+  Qsag.Spec.verifiedRandomizedCandidate_of_valid
+  Qsag.Spec.idealRandomizedSignMachine_step_some
+  Qsag.Spec.idealRandomizedSignMachine_step_emits_verified
+  Qsag.Spec.idealRandomizedSignMachine_step_of_valid
+  Qsag.Spec.idealRandomizedSignMachine_trace_outputs_verified
+  Qsag.Spec.idealRandomizedSignMachine_trace_epochs_increasing
+  Qsag.Spec.latchedRandomizedSigner_trace_safe
+  Qsag.Spec.idealRandomizedSign_rejects_epoch_one_after_two
+  Qsag.Spec.idealRandomizedSign_rejects_unverified_candidate
 
 end Qsag.Spec
 end

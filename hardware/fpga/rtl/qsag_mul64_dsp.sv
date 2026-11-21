@@ -15,8 +15,9 @@ module qsag_mul64_dsp #(
 );
     localparam int CHUNK    = 24;
     localparam int CHUNK_SA = (AW <= 16) ? 33 : 17;
-    localparam logic [127:0] B33    = 128'h0000_0000_0000_0002_FFFF_FFFE_0000;
-    localparam logic [127:0] C_KARA = (B33 << 32) - B33 - (B33 << 64) + 128'd4;
+    localparam logic [127:0] B33      = 128'h0000_0000_0000_0002_FFFF_FFFE_0000;
+    localparam logic [65:0]  NEG_B33  = 66'd0 - B33[65:0];
+    localparam logic [127:0] C_KARA   = (B33 << 32) - B33 - (B33 << 64) + 128'd4;
 
     wire [31:0] a0 = a[31:0], a1 = a[63:32];
     wire [31:0] b0 = b[31:0], b1 = b[63:32];
@@ -40,7 +41,7 @@ module qsag_mul64_dsp #(
     qsag_mul33x32_dsp u_p2 (.clk(clk), .a({1'b0, a1}), .b(b1),   .s(p2_s), .c(p2_c));
     qsag_mul33x32_dsp u_ps (.clk(clk), .a(sa),         .b(beta), .s(ps_s), .c(ps_c));
 
-    // Stage 3: carry-save outer Karatsuba recombination + split parallel-prefix carry.
+    // Stage 3: outer Karatsuba recombination.
     wire [127:0] cb_term = cb_q2 ? (128'(sa_q2) << 64) : 128'd0;
     wire [12*128-1:0] outer_rows = {
         C_KARA,
@@ -57,22 +58,39 @@ module qsag_mul64_dsp #(
         128'(p0_s)
     };
 
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [65:0] r0_66, r2_66, rs_66;
+    /* verilator lint_on UNUSEDSIGNAL */
+    logic [95:0]  hi96;
     logic [127:0] sum;
-    if (AW <= 16) begin : g_ecp5_ccu2
-        wire [65:0] r0 = p0_s + p0_c - 66'h0_0002_FFFF_FFFE_0000;
-        wire [65:0] r2 = p2_s + p2_c - 66'h0_0002_FFFF_FFFE_0000;
-        wire [65:0] rs = ps_s + ps_c - 66'h0_0002_FFFF_FFFE_0000;
-        wire [65:0] ps_full = {1'b0, rs[64:0]} + (cb_q2 ? {1'b0, sa_q2, 32'd0} : 66'd0);
-        wire [65:0] mid = ps_full - ({2'b0, r0[63:0]} + {2'b0, r2[63:0]});
-        wire [95:0] hi96;
-        qsag_add_split #(.W(96), .CHUNK(32)) u_hi (
-            .a({r2[63:0], r0[63:32]}), .b({31'd0, mid[64:0]}), .y(hi96));
-        assign sum = {hi96, r0[31:0]};
+
+    if (AW <= 16) begin : g_ecp5
+        // Resolve the 3 non-overlapping 65-bit subproducts in parallel via native CCU2C chains,
+        // then combine the 5 single-rail Karatsuba rows (-2,000 TRELLIS_COMB/mul, <= 4.7 ns!).
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(66)) u_r0 (.x({NEG_B33, p0_c, p0_s}), .y(r0_66));
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(66)) u_r2 (.x({NEG_B33, p2_c, p2_s}), .y(r2_66));
+        qsag_sum_csa #(.W(66), .N(3), .CHUNK(66)) u_rs (.x({NEG_B33, ps_c, ps_s}), .y(rs_66));
+        wire [5*96-1:0] hi_rows = {
+            {31'd0, cb_q2 ? sa_q2 : 33'd0, 32'd2},
+            ~{32'd0, r2_66[63:0]},
+            ~{32'd0, r0_66[63:0]},
+            {31'd0, rs_66[64:0]},
+            {r2_66[63:0], r0_66[63:32]}
+        };
+        qsag_sum_csa #(.W(96), .N(5), .CHUNK(48)) u_hi (.x(hi_rows), .y(hi96));
+        assign sum = {hi96, r0_66[31:0]};
         /* verilator lint_off UNUSEDSIGNAL */
-        wire unused_ecp5 = &{1'b0, outer_rows, r0[65:64], r2[65:64], rs[65], mid[65]};
+        wire unused_or = &{1'b0, outer_rows};
         /* verilator lint_on UNUSEDSIGNAL */
     end else begin : g_csa
         qsag_sum_csa #(.W(128), .N(12), .CHUNK(CHUNK)) u_sum (.x(outer_rows), .y(sum));
+        assign r0_66 = '0;
+        assign r2_66 = '0;
+        assign rs_66 = '0;
+        assign hi96  = '0;
+        /* verilator lint_off UNUSEDSIGNAL */
+        wire unused_ecp5 = &{1'b0, r0_66, r2_66, rs_66, hi96};
+        /* verilator lint_on UNUSEDSIGNAL */
     end
     always_ff @(posedge clk) p <= sum;
 

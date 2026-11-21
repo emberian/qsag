@@ -24,12 +24,13 @@ module qsag_keccak_serial (
     output logic [63:0] wr_data
 );
     function automatic logic [2:0] mod5(input logic [4:0] v);
-        if (v >= 5'd25)      mod5 = 3'(v - 5'd25);
-        else if (v >= 5'd20) mod5 = 3'(v - 5'd20);
-        else if (v >= 5'd15) mod5 = 3'(v - 5'd15);
-        else if (v >= 5'd10) mod5 = 3'(v - 5'd10);
-        else if (v >= 5'd5)  mod5 = 3'(v - 5'd5);
-        else                 mod5 = v[2:0];
+        unique case (v)
+            5'd0,  5'd5,  5'd10, 5'd15, 5'd20, 5'd25, 5'd30: mod5 = 3'd0;
+            5'd1,  5'd6,  5'd11, 5'd16, 5'd21, 5'd26, 5'd31: mod5 = 3'd1;
+            5'd2,  5'd7,  5'd12, 5'd17, 5'd22, 5'd27:        mod5 = 3'd2;
+            5'd3,  5'd8,  5'd13, 5'd18, 5'd23, 5'd28:        mod5 = 3'd3;
+            default:                                         mod5 = 3'd4;
+        endcase
     endfunction
 
     function automatic logic [2:0] nrow(input logic [1:0] k, input logic [2:0] x, input logic [2:0] y);
@@ -74,6 +75,7 @@ module qsag_keccak_serial (
     logic       ph;
     logic [2:0] wy, j;
     logic [5:0] sh_rem;
+    logic [5:0] ra_q;
 
     assign busy = (st != K_IDLE);
 
@@ -150,7 +152,7 @@ module qsag_keccak_serial (
             end
             K_RD_D: rd_addr = da;
             K_RD_A: begin
-                rd_addr = ra;
+                rd_addr = ra_q;
                 if (rda_done && (j <= 3'd1)) begin
                     wr_en   = 1'b1;
                     wr_addr = 6'd30 + {5'd0, j[0]};
@@ -182,6 +184,7 @@ module qsag_keccak_serial (
             wy     <= '0;
             j      <= '0;
             sh_rem <= '0;
+            ra_q   <= '0;
         end else begin
             done <= 1'b0;
             unique case (st)
@@ -214,6 +217,7 @@ module qsag_keccak_serial (
                 end
                 K_RD_D: begin
                     sh_rem <= rho(xs, j);
+                    ra_q   <= ra;
                     st     <= K_RD_A;
                 end
                 K_RD_A: begin

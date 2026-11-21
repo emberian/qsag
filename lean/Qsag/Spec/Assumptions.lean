@@ -1446,18 +1446,18 @@ exhaustively search all inputs offline. This section bridges the gap constructiv
    `byteIdxHmsg_itsrHard_within`), while failing at `qEval ≥ 256` (`poly257Hash_smDtTcrHard_refuted`,
    `byteIdxHmsg_itsrHard_refuted`). -/
 
-private theorem sampleSum_ext {m : Nat} {f g : Fin m → Nat} (h : ∀ i, f i = g i) :
+theorem sampleSum_ext {m : Nat} {f g : Fin m → Nat} (h : ∀ i, f i = g i) :
     sampleSum m f = sampleSum m g :=
   congrArg (sampleSum m) (funext h)
 
-private theorem sampleSum_le :
+theorem sampleSum_le :
     ∀ (m : Nat) (f g : Fin m → Nat), (∀ i, f i ≤ g i) → sampleSum m f ≤ sampleSum m g
   | 0, _, _, _ => Nat.le_refl 0
   | m + 1, _f, _g, h =>
     Nat.add_le_add (h ⟨0, Nat.zero_lt_succ m⟩)
       (sampleSum_le m _ _ (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩))
 
-private theorem sampleSum_add_fn :
+theorem sampleSum_add_fn :
     ∀ (m : Nat) (f g : Fin m → Nat),
       sampleSum m (fun i => f i + g i) = sampleSum m f + sampleSum m g
   | 0, _, _ => rfl
@@ -1465,14 +1465,14 @@ private theorem sampleSum_add_fn :
     rw [sampleSum_succ, sampleSum_succ, sampleSum_succ, sampleSum_add_fn m]
     omega
 
-private theorem sampleSum_mul_right :
+theorem sampleSum_mul_right :
     ∀ (m : Nat) (f : Fin m → Nat) (c : Nat),
       sampleSum m (fun i => f i * c) = sampleSum m f * c
   | 0, _, _ => (Nat.zero_mul _).symm
   | m + 1, f, c => by
     rw [sampleSum_succ, sampleSum_succ, sampleSum_mul_right m, Nat.add_mul]
 
-private theorem sampleSum_const :
+theorem sampleSum_const :
     ∀ (m c : Nat), sampleSum m (fun _ => c) = m * c
   | 0, c => (Nat.zero_mul c).symm
   | m + 1, c => by
@@ -2365,7 +2365,7 @@ private theorem roLookup_append_of_absent {Dom : Type} [DecidableEq Dom] {cardD 
     simp only [List.cons_append, roLookup]
     split <;> simp_all
 
-private theorem sampleSum_comm (a b : Nat) (g : Fin a → Fin b → Nat) :
+theorem sampleSum_comm (a b : Nat) (g : Fin a → Fin b → Nat) :
     sampleSum a (fun i => sampleSum b (fun j => g i j)) =
       sampleSum b (fun j => sampleSum a (fun i => g i j)) := by
   induction a with
@@ -2378,7 +2378,7 @@ private theorem sampleSum_comm (a b : Nat) (g : Fin a → Fin b → Nat) :
           sampleSum a (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ j)) := rfl
     rw [hr, sampleSum_add_fn]
 
-private theorem sampleSum_bool_mono {n : Nat} (p q : Fin n → Bool)
+theorem sampleSum_bool_mono {n : Nat} (p q : Fin n → Bool)
     (h : ∀ i, p i = true → q i = true) :
     sampleSum n (fun i => if p i then 1 else 0) ≤
       sampleSum n (fun i => if q i then 1 else 0) := by
@@ -4336,6 +4336,129 @@ theorem CoinSplit.challengerOnly_chal (n : Nat) (z : Fin n) :
 theorem CoinSplit.prod_advc_val (nC nA : Nat) (z : Fin (nC * nA)) :
     ((prod nC nA).advc z).val = z.val % nA := by unfold prod; rfl
 #verify_constructive boundedPreAdv_singleton_hidden_wins
+
+theorem smDtTcrOracle_target (th : Bytes → Bytes → Bytes → Bytes) (q : Nat)
+    (st : TargetState) (t m : Bytes) :
+    smDtTcrOracle th q st (.target t m) =
+      if st.revealed = false ∧ st.targets.length < q ∧ t ∉ st.targets.map Prod.fst then
+        (some (th st.seed t m), { st with targets := st.targets ++ [(t, m)] })
+      else (none, st) := by unfold smDtTcrOracle; rfl
+
+theorem smDtTcrOracle_reveal (th : Bytes → Bytes → Bytes → Bytes) (q : Nat) (st : TargetState) :
+    smDtTcrOracle th q st .reveal = (some st.seed, { st with revealed := true }) := by
+  unfold smDtTcrOracle; rfl
+
+theorem smDtPreOracle_target (th : Bytes → Bytes → Bytes → Bytes) (q : Nat)
+    (hidden : Nat → Bytes) (st : TargetState) (t d : Bytes) :
+    smDtPreOracle th q hidden st (.target t d) =
+      if st.revealed = false ∧ st.targets.length < q ∧ t ∉ st.targets.map Prod.fst then
+        (some (th st.seed t (hidden st.targets.length)),
+          { st with targets := st.targets ++ [(t, hidden st.targets.length)] })
+      else (none, st) := by unfold smDtPreOracle; rfl
+
+theorem smDtPreOracle_reveal (th : Bytes → Bytes → Bytes → Bytes) (q : Nat)
+    (hidden : Nat → Bytes) (st : TargetState) :
+    smDtPreOracle th q hidden st .reveal = (some st.seed, { st with revealed := true }) := by
+  unfold smDtPreOracle; rfl
+
+theorem smDtTcrWin_eq (th : Bytes → Bytes → Bytes → Bytes) (st : TargetState) (out : TargetBreak) :
+    smDtTcrWin th st out =
+      (decide ((out.tweak, out.committed) ∈ st.targets) &&
+        (decide (out.candidate ≠ out.committed) &&
+          decide (th st.seed out.tweak out.candidate = th st.seed out.tweak out.committed))) := by
+  unfold smDtTcrWin; rfl
+
+theorem smDtPreWin_eq (th : Bytes → Bytes → Bytes → Bytes) (st : TargetState) (out : TargetBreak) :
+    smDtPreWin th st out =
+      st.targets.any (fun e =>
+        decide (e.1 = out.tweak) && decide (th st.seed e.1 out.candidate = th st.seed e.1 e.2)) := by
+  unfold smDtPreWin; rfl
+
+theorem smDtTcrRun_eq {n : Nat} (th : Bytes → Bytes → Bytes → Bytes) (q : Nat)
+    (seed : Fin n → Bytes) (adv : Fin n → Code targetIface TargetBreak) (ω : Fin n) :
+    smDtTcrRun th q seed adv ω = Code.play (smDtTcrOracle th q) (adv ω) ⟨seed ω, [], false⟩ := by
+  unfold smDtTcrRun; rfl
+
+theorem smDtTcrGame_win {n : Nat} (hPos : 0 < n) (th : Bytes → Bytes → Bytes → Bytes) (q : Nat)
+    (seed : Fin n → Bytes) (adv : Fin n → Code targetIface TargetBreak) (ω : Fin n) :
+    (smDtTcrGame hPos th q seed adv).win ω =
+      smDtTcrWin th (smDtTcrRun th q seed adv ω).2 (smDtTcrRun th q seed adv ω).1 := by
+  unfold smDtTcrGame; rfl
+
+theorem itsrOracle_eq (q : Nat) (rand : Nat → Bytes) (log : List (Bytes × Bytes)) (msg : Bytes) :
+    itsrOracle q rand log msg =
+      if log.length < q then (rand log.length, log ++ [(rand log.length, msg)]) else ([], log) := by
+  unfold itsrOracle; rfl
+
+theorem itsrWin_eq (hmsg : Bytes → Bytes → List Nat) (log : List (Bytes × Bytes))
+    (out : Bytes × Bytes) :
+    itsrWin hmsg log out =
+      (!decide (out ∈ log) &&
+        (hmsg out.1 out.2).all (fun x => log.any (fun e => decide (x ∈ hmsg e.1 e.2)))) := by
+  unfold itsrWin; rfl
+
+theorem itsrRun_eq {n : Nat} (q : Nat) (rand : Fin n → Nat → Bytes)
+    (adv : Fin n → Code byteOracleIface (Bytes × Bytes)) (ω : Fin n) :
+    itsrRun q rand adv ω = Code.play (itsrOracle q (rand ω)) (adv ω) [] := by
+  unfold itsrRun; rfl
+
+theorem itsrGame_win {n : Nat} (hPos : 0 < n) (hmsg : Bytes → Bytes → List Nat) (q : Nat)
+    (rand : Fin n → Nat → Bytes) (adv : Fin n → Code byteOracleIface (Bytes × Bytes)) (ω : Fin n) :
+    (itsrGame hPos hmsg q rand adv).win ω =
+      itsrWin hmsg (itsrRun q rand adv ω).2 (itsrRun q rand adv ω).1 := by
+  unfold itsrGame; rfl
+
+theorem SmDtPreSampleOk_eq (seedLen inputLen q : Nat) (x : Bytes × List Bytes) :
+    SmDtPreSampleOk seedLen inputLen q x =
+      (x.1.length = seedLen ∧ x.2.length = q ∧ ∀ h ∈ x.2, h.length = inputLen) := by
+  unfold SmDtPreSampleOk; rfl
+
+theorem ItsrSampleOk_eq (randLen q : Nat) (x : List Bytes) :
+    ItsrSampleOk randLen q x = (x.length = q ∧ ∀ r ∈ x, r.length = randLen) := by
+  unfold ItsrSampleOk; rfl
+
+theorem PrfSampleOk_eq (keyLen inLen outLen : Nat) (x : Bytes × (Bytes → Bytes)) :
+    PrfSampleOk keyLen inLen outLen x =
+      (x.1.length = keyLen ∧
+        ∀ inp : Bytes, (inp.length = inLen → (x.2 inp).length = outLen) ∧
+          (inp.length ≠ inLen → x.2 inp = [])) := by
+  unfold PrfSampleOk; rfl
+
+theorem WithinPreQueries_eq (qTarget qEval : Nat) (c : Code targetIface TargetBreak) :
+    WithinPreQueries qTarget qEval c =
+      (Within qTarget c ∧
+        ∃ dict : List Bytes, dict.length ≤ qEval ∧
+          ∀ (oracle : TargetState → (qr : targetIface.Query) → targetIface.Resp qr × TargetState)
+            (st : TargetState),
+            (Code.play oracle c st).1.candidate ∈ ([] : Bytes) :: dict) := by
+  unfold WithinPreQueries; rfl
+
+theorem WithinTcrQueries_eq (qTarget qEval : Nat) (c : Code targetIface TargetBreak) :
+    WithinTcrQueries qTarget qEval c =
+      (Within qTarget c ∧
+        ∃ cands : List Bytes, cands.length ≤ qEval ∧
+          ∀ (oracle : TargetState → (qr : targetIface.Query) → targetIface.Resp qr × TargetState)
+            (st : TargetState),
+            (Code.play oracle c st).1.candidate ∈ ([] : Bytes) :: cands) := by
+  unfold WithinTcrQueries; rfl
+
+theorem WithinItsrQueries_eq (qSign qEval : Nat) (c : Code byteOracleIface (Bytes × Bytes)) :
+    WithinItsrQueries qSign qEval c =
+      (Within qSign c ∧
+        ∃ pool : List (Bytes × Bytes), pool.length ≤ qEval ∧
+          ∀ (oracle : List (Bytes × Bytes) → (msg : Bytes) → Bytes × List (Bytes × Bytes))
+            (st : List (Bytes × Bytes)),
+            (Code.play oracle c st).1 ∈ (([], []) : Bytes × Bytes) :: pool) := by
+  unfold WithinItsrQueries; rfl
+
+theorem boundedPreAdv_eq (th : Bytes → Bytes → Bytes → Bytes) (tweak : Bytes)
+    (dict : List Bytes) :
+    boundedPreAdv th tweak dict =
+      .call (.target tweak []) (fun y =>
+        .call .reveal (fun s =>
+          .ret ⟨tweak, [], firstByteString
+            (fun m => decide (some (th (s.getD []) tweak m) = y)) dict⟩)) := by
+  unfold boundedPreAdv; rfl
 
 #export_eqns budgetedFunOracle prfRealGame prfIdealGame byte1SeedSampler smDtPreGame smDtPreRun
 #verify_constructive boundedPreAdv_singleton_wins
