@@ -613,3 +613,617 @@ def smDtOpenSeedTcrGame {n : Nat} (hPos : 0 < n)
 /-- **Interactive Open-Seed `SM-DT-TCR` Reduction (`openSeedTcrHopAdv`)** (`Spec.Within 2`).
     Calls `.reveal` to learn `pkSeed`, executes any unrestricted `pk`-dependent adaptive
     `(qHash, qSign)` adversary `A`, commits the extracted target, and returns `w.brk`. -/
+@[expose] def openSeedTcrHopAdv {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (rfMsg secFn : Spec.Bytes → Spec.Bytes)
+    (hRf : ∀ x, x.length = 65 → (rfMsg x).length = 32)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    Spec.Code Spec.targetIface Spec.TargetBreak :=
+  .call .reveal fun seedOpt =>
+    let pkSeed := seedOpt.getD []
+    match extractIdealPrfTcrWitnessOpt latchOn suite params hw pkSeed rfMsg secFn
+        hRf hOneTimeIfSt A with
+    | some w => .call (.target w.brk.tweak w.brk.committed) (fun _ => .ret w.brk)
+    | none => .ret ⟨[], [], []⟩
+
+theorem openSeedTcrHopAdv_within {qHash qSign : Nat} (latchOn : Bool) (suite : TweakableHashSuite)
+    (params : PqHashParams) (hw : params.w = 4 ∨ params.w = 16)
+    (rfMsg secFn : Spec.Bytes → Spec.Bytes)
+    (hRf : ∀ x, x.length = 65 → (rfMsg x).length = 32)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    Spec.Within 2
+      (openSeedTcrHopAdv latchOn suite params hw rfMsg secFn hRf hOneTimeIfSt A) := by
+  refine .call _ _ (fun seedOpt => ?_)
+  dsimp only
+  cases extractIdealPrfTcrWitnessOpt latchOn suite params hw (seedOpt.getD []) rfMsg secFn
+      hRf hOneTimeIfSt A with
+  | some _ => exact .call _ _ (fun _ => .ret 0 _)
+  | none => exact .ret 1 _
+
+/-- **Unconditional Tight `1×` Open-Seed `SM-DT-TCR` Bound (`hulsing_hop4b_openSeedTcr_tight_bound`)**
+    across all 7 tweakable-hash roles and unrestricted `pk`-dependent adaptive adversaries. -/
+theorem hulsing_hop4b_openSeedTcr_tight_bound {n nC nA qHash qSign : Nat} (latchOn : Bool)
+    (hPos : 0 < n) (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (seedLen qTcr : Nat) (hqTcr : 0 < qTcr)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (π : Spec.CoinSplit n nC nA)
+    (seed : Fin nC → Spec.Bytes) (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (rfMsgA secFnA : Fin nA → Spec.Bytes → Spec.Bytes)
+    (hRfA : ∀ a x, x.length = 65 → (rfMsgA a x).length = 32)
+    (advA : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜Tcr : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClass : ∀ a, 𝒜Tcr (openSeedTcrHopAdv latchOn suite params hw
+      (rfMsgA a) (secFnA a) (hRfA a) hOneTimeIfSt (advA a)))
+    {εTcr : Spec.RatBound}
+    (hTcr : SmDtOpenSeedTcrHard 𝒜Tcr (suiteTweakHash suite) seedLen qTcr εTcr) :
+    let tcrEv : Fin n → Bool := fun ω =>
+      (extractIdealPrfTcrWitnessOpt latchOn suite params hw (seed (π.chal ω))
+        (rfMsgA (π.advc ω)) (secFnA (π.advc ω)) (hRfA (π.advc ω)) hOneTimeIfSt
+        (advA (π.advc ω))).isSome
+    Spec.GameBound (Spec.FinGame.mk hPos tcrEv).winProb εTcr := by
+  intro tcrEv
+  let B : Fin nA → Spec.Code Spec.targetIface Spec.TargetBreak := fun a =>
+    openSeedTcrHopAdv latchOn suite params hw (rfMsgA a) (secFnA a)
+      (hRfA a) hOneTimeIfSt (advA a)
+  have hGameB := hTcr n nC nA hPos π seed hSeed B hClass
+  refine Spec.GameBound.trans (Spec.event_le_reduction_win (Spec.FinGame.mk hPos tcrEv) _
+    (fun ω hEv => ?_)) hGameB
+  dsimp only [tcrEv] at hEv
+  cases hEx : extractIdealPrfTcrWitnessOpt latchOn suite params hw (seed (π.chal ω))
+      (rfMsgA (π.advc ω)) (secFnA (π.advc ω)) (hRfA (π.advc ω)) hOneTimeIfSt
+      (advA (π.advc ω)) with
+  | none => rw [hEx] at hEv; cases hEv
+  | some w =>
+    dsimp only [smDtOpenSeedTcrGame, B, openSeedTcrHopAdv]
+    rw [Spec.Code.play_call]
+    unfold smDtOpenSeedTcrOracle
+    dsimp only [Option.getD]
+    rw [hEx, Spec.Code.play_call, Spec.Code.play_ret]
+    dsimp only
+    have hc : ([] : List (Spec.Bytes × Spec.Bytes)).length < qTcr ∧
+        w.brk.tweak ∉ ([] : List (Spec.Bytes × Spec.Bytes)).map Prod.fst :=
+      ⟨hqTcr, fun h => nomatch h⟩
+    rw [ite_eq_left hc, Spec.smDtTcrWin_eq]
+    dsimp only [List.nil_append]
+    exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true (.head _),
+      Bool.and_eq_true_iff.mpr ⟨decide_eq_true w.ne, decide_eq_true w.collides⟩⟩
+
+/-- `#tooth` A constant tweakable hash is NOT `SmDtOpenSeedTcrHard` for any `ε` with `ε.num < ε.den`. -/
+def constOpenSeedTcrAdv : Spec.Code Spec.targetIface Spec.TargetBreak :=
+  .call (.target [] [0x00]) (fun _ => .ret ⟨[], [0x00], [0x01]⟩)
+
+theorem smDtOpenSeedTcrHard_constHash_refuted {nC : Nat} (hPos : 0 < nC) (c : Spec.Bytes)
+    (seedLen q : Nat) (hq : 0 < q) (seed : Fin nC → Spec.Bytes)
+    (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seed)
+    (𝒜 : Spec.Code Spec.targetIface Spec.TargetBreak → Prop) (h𝒜 : 𝒜 constOpenSeedTcrAdv)
+    {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ SmDtOpenSeedTcrHard 𝒜 (fun _ _ _ => c) seedLen q ε := by
+  intro hHard
+  have hB := hHard nC nC 1 hPos (Spec.CoinSplit.challengerOnly nC) seed hSeed
+    (fun _ => constOpenSeedTcrAdv) (fun _ => h𝒜)
+  refine Spec.FinGame.not_bound_of_forall_win _ (fun ω => ?_) hε hB
+  dsimp only [smDtOpenSeedTcrGame, constOpenSeedTcrAdv]
+  rw [Spec.Code.play_call, Spec.Code.play_ret]
+  unfold smDtOpenSeedTcrOracle; dsimp only
+  have hc : ([] : List (Spec.Bytes × Spec.Bytes)).length < q ∧
+      ([] : Spec.Bytes) ∉ ([] : List (Spec.Bytes × Spec.Bytes)).map Prod.fst :=
+    ⟨hq, fun h => nomatch h⟩
+  rw [ite_eq_left hc, Spec.smDtTcrWin_eq]
+  simp only [List.nil_append, List.mem_cons, true_or, decide_true, Bool.true_and]
+  decide
+
+/-! ## §3. Interactive `Spec.smDtPreGame` (`Spec.SmDtPreHard`) + Hop-3 `SmDtUdHard` Reductions -/
+
+/-- Every `ExplicitPreBreak` (both `.fors` and `.wots`) yields an explicit `suiteTweakHash`
+    target preimage equation under `encodeChainFTweak`. -/
+theorem explicitPreBreak_gives_tweakHash_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed : List UInt8) (secFn : Spec.Bytes → Spec.Bytes)
+    (log : List (List UInt8 × PqHashSig)) (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hBrk : ExplicitPreBreak suite (secOverlaySuite suite pkSeed secFn) params ⟨[], [], pkSeed⟩
+      log msgStar sigStar) :
+    (∃ (j : Nat) (adrs : HashAdrs),
+      j < params.forsTrees ∧
+      suiteTweakHash suite pkSeed (encodeChainFTweak adrs)
+        (sigStar.forsOpenings.getD j ⟨[], []⟩).secretVal =
+      forsIndexedLeafFn (secOverlaySuite suite pkSeed secFn) ⟨[], [], pkSeed⟩
+        (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+        (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) j
+        ((prodSigForsIdxs suite params
+          (derivePublicKey (secOverlaySuite suite pkSeed secFn) params ⟨[], [], pkSeed⟩)
+          msgStar sigStar).getD j 0)) ∨
+    (∃ (i r step : Nat) (adrs : HashAdrs),
+      i < params.numLayers ∧ r < params.ell1 ∧ step + 1 ≤ params.w - 1 ∧
+      suiteTweakHash suite pkSeed (encodeChainFTweak adrs)
+        ((sigStar.layerSigs.getD i ⟨0, [], []⟩).wotsChains.getD r []) =
+      suiteTweakHash suite pkSeed (encodeChainFTweak adrs)
+        (honestChainNode (secOverlaySuite suite pkSeed secFn) ⟨[], [], pkSeed⟩
+          (UInt32.ofNat i)
+          (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+            2 ^ params.subtreeHeight))
+          (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight)
+          r step)) := by
+  cases hBrk with
+  | fors j hj _ _ _ _ hInv =>
+    refine .inl ⟨j, forsLeafHashAdrs
+      (UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ params.subtreeHeight))
+      (sigStar.leafGlobalIdx % 2 ^ params.subtreeHeight) j
+      ((prodSigForsIdxs suite params
+        (derivePublicKey (secOverlaySuite suite pkSeed secFn) params ⟨[], [], pkSeed⟩)
+        msgStar sigStar).getD j 0), hj, ?_⟩
+    rw [suiteTweakHash_chainF, ← forsIndexedLeafHash_eq_chainF_adrs]
+    exact hInv
+  | wots i hi r hr step hstep _ hInv _ =>
+    let treeI := UInt64.ofNat (sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) /
+      2 ^ params.subtreeHeight)
+    let kpI := sigStar.leafGlobalIdx / 2 ^ (i * params.subtreeHeight) % 2 ^ params.subtreeHeight
+    let adrs : HashAdrs := ⟨UInt32.ofNat i, treeI, .wotsHash, UInt32.ofNat kpI,
+      UInt32.ofNat r, UInt32.ofNat step⟩
+    refine .inr ⟨i, r, step, adrs, hi, hr, hstep, ?_⟩
+    rw [suiteTweakHash_chainF, suiteTweakHash_chainF, ← honestChainNode_secOv_succ]
+    exact hInv
+
+/-- **Interactive Punctured-Slot `SM-DT-PRE` Reduction (`puncturedSlotPreAdv`)** (`Spec.Within 2`,
+    zero `hCand` restriction!).
+    Calls `.target targetTweak []` to receive `yTarget`, calls `.reveal` to receive `pkSeed`,
+    reconstructs `pkSim pkSeed yTarget` and `signSim pkSeed yTarget`, runs the unrestricted
+    `pk`-dependent adaptive `(qHash, qSign)` adversary `A`, and outputs the forged preimage. -/
+@[expose] def puncturedSlotPreAdv {qHash qSign : Nat} (latchOn : Bool)
+    (suite : TweakableHashSuite) (targetTweak : Spec.Bytes)
+    (pkSim : Spec.Bytes → Spec.Bytes → PqPublicKey)
+    (signSim : Spec.Bytes → Spec.Bytes → ProdSigningQuery → Option PqHashSig)
+    (extractCand : (List UInt8 × PqHashSig) → Spec.Bytes)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    Spec.Code Spec.targetIface Spec.TargetBreak :=
+  .call (.target targetTweak []) fun yOpt =>
+    .call .reveal fun seedOpt =>
+      let yTarget := yOpt.getD []
+      let pkSeed := seedOpt.getD []
+      let pk := pkSim pkSeed yTarget
+      let out := (evalLatchedAdaptiveTree latchOn suite.rawHash (signSim pkSeed yTarget)
+        ((canonicalizeAdvOptRand A).run pk) 0).1
+      .ret ⟨targetTweak, [], extractCand out⟩
+
+theorem puncturedSlotPreAdv_within {qHash qSign : Nat} (latchOn : Bool)
+    (suite : TweakableHashSuite) (targetTweak : Spec.Bytes)
+    (pkSim : Spec.Bytes → Spec.Bytes → PqPublicKey)
+    (signSim : Spec.Bytes → Spec.Bytes → ProdSigningQuery → Option PqHashSig)
+    (extractCand : (List UInt8 × PqHashSig) → Spec.Bytes)
+    (A : SeedWithheldEufCmaAdv qHash qSign) :
+    Spec.Within 2
+      (puncturedSlotPreAdv latchOn suite targetTweak pkSim signSim extractCand A) :=
+  .call _ _ (fun _ => .call _ _ (fun _ => .ret 0 _))
+
+/-- **Hop 4c Interactive `SM-DT-PRE` Bound (`hulsing_hop4c_smDtPre_interactive_bound`)**
+    directly under `Spec.SmDtPreHard` (`0` `hCand` restriction!). -/
+theorem hulsing_hop4c_smDtPre_interactive_bound {n nC nA qHash qSign : Nat} (latchOn : Bool)
+    (hPos : 0 < n) (suite : TweakableHashSuite)
+    (seedLen inputLen qPre : Nat) (hqPre : 0 < qPre)
+    (targetTweak : Spec.Bytes)
+    (pkSim : Fin nA → Spec.Bytes → Spec.Bytes → PqPublicKey)
+    (signSim : Fin nA → Spec.Bytes → Spec.Bytes → ProdSigningQuery → Option PqHashSig)
+    (extractCand : Fin nA → (List UInt8 × PqHashSig) → Spec.Bytes)
+    (π : Spec.CoinSplit n nC nA)
+    (sample : Fin nC → Spec.Bytes × List Spec.Bytes)
+    (hSample : Spec.UniformOn (Spec.SmDtPreSampleOk seedLen inputLen qPre) sample)
+    (advA : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    (slotWin : Fin n → Bool)
+    (hSlotImp : ∀ ω, slotWin ω = true →
+      let pkSeed := (sample (π.chal ω)).1
+      let hidden0 := (sample (π.chal ω)).2.getD 0 []
+      let yTarget := suiteTweakHash suite pkSeed targetTweak hidden0
+      let a := π.advc ω
+      let out := (evalLatchedAdaptiveTree latchOn suite.rawHash (signSim a pkSeed yTarget)
+        ((canonicalizeAdvOptRand (advA a)).run (pkSim a pkSeed yTarget)) 0).1
+      suiteTweakHash suite pkSeed targetTweak (extractCand a out) = yTarget)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClassPre : ∀ a, 𝒜Pre (puncturedSlotPreAdv latchOn suite targetTweak
+      (pkSim a) (signSim a) (extractCand a) (advA a)))
+    {εPre : Spec.RatBound}
+    (hPre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen inputLen qPre εPre) :
+    Spec.GameBound (Spec.FinGame.mk hPos slotWin).winProb εPre := by
+  let B : Fin nA → Spec.Code Spec.targetIface Spec.TargetBreak := fun a =>
+    puncturedSlotPreAdv latchOn suite targetTweak (pkSim a) (signSim a) (extractCand a) (advA a)
+  have hGameB := hPre n nC nA hPos π sample hSample B hClassPre
+  refine Spec.GameBound.trans (Spec.event_le_reduction_win (Spec.FinGame.mk hPos slotWin) _
+    (fun ω hW => ?_)) hGameB
+  have hEqDigest := hSlotImp ω hW
+  rw [Spec.smDtPreGame.public_eqs]; dsimp only [B, puncturedSlotPreAdv]
+  rw [Spec.smDtPreRun.public_eqs]
+  have hc : false = false ∧ ([] : List (Spec.Bytes × Spec.Bytes)).length < qPre ∧
+      targetTweak ∉ ([] : List (Spec.Bytes × Spec.Bytes)).map Prod.fst :=
+    ⟨rfl, hqPre, fun h => nomatch h⟩
+  rw [Spec.Code.play_call, Spec.smDtPreOracle_target, ite_eq_left hc]
+  dsimp only [List.length_nil, List.nil_append, Option.getD]
+  rw [Spec.Code.play_call, Spec.smDtPreOracle_reveal, Spec.Code.play_ret, Spec.smDtPreWin_eq]
+  dsimp only [Option.getD, List.any]
+  rw [Bool.or_false]
+  exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true rfl, decide_eq_true hEqDigest⟩
+
+/-- **Hop 3 (`SmDtUdHard`) + Hop 4c (`Spec.SmDtPreHard`) WOTS+C Chain-Step Composition
+    (`hulsing_hop3_and_hop4c_wots_chain_bound`).**
+    Replaces a `step > 0` WOTS+C chain node with an independent uniform digest via
+    `hulsing_hop3_ud_chain_simulation` (`εUd`), then discharges preimage inversion via
+    `hulsing_hop4c_smDtPre_interactive_bound` (`εPre`). -/
+theorem hulsing_hop3_and_hop4c_wots_chain_bound {n nC_ud nA_ud nC_pre nA_pre qHash qSign : Nat}
+    (latchOn : Bool) (hPos : 0 < n) (suite : TweakableHashSuite)
+    (seedLen inputLen outLen qUd qPre : Nat) (hqPre : 0 < qPre)
+    (GReal : Spec.FinGame n)
+    (πUd : Spec.CoinSplit n nC_ud nA_ud)
+    (sampleUd : Fin nC_ud → Spec.Bytes × List Spec.Bytes × List Spec.Bytes)
+    (hSampleUd : Spec.UniformOn (SmDtUdSampleOk seedLen inputLen outLen qUd) sampleUd)
+    (DUd : Fin nA_ud → Spec.Code Spec.targetIface Bool)
+    {𝒜Ud : Spec.Code Spec.targetIface Bool → Prop} (hClassUd : ∀ a, 𝒜Ud (DUd a))
+    {εUd : Spec.RatBound}
+    (hUd : SmDtUdHard 𝒜Ud (suiteTweakHash suite) seedLen inputLen outLen qUd εUd)
+    (targetTweak : Spec.Bytes)
+    (pkSim : Fin nA_pre → Spec.Bytes → Spec.Bytes → PqPublicKey)
+    (signSim : Fin nA_pre → Spec.Bytes → Spec.Bytes → ProdSigningQuery → Option PqHashSig)
+    (extractCand : Fin nA_pre → (List UInt8 × PqHashSig) → Spec.Bytes)
+    (πPre : Spec.CoinSplit n nC_pre nA_pre)
+    (samplePre : Fin nC_pre → Spec.Bytes × List Spec.Bytes)
+    (hSamplePre : Spec.UniformOn (Spec.SmDtPreSampleOk seedLen inputLen qPre) samplePre)
+    (advPre : Fin nA_pre → SeedWithheldEufCmaAdv qHash qSign)
+    (slotSimWin : Fin n → Bool)
+    (hRealEq : ∀ ω, GReal.win ω =
+      (smDtUdRealGame hPos (suiteTweakHash suite) qUd (fun z => (sampleUd (πUd.chal z)).1)
+        (fun z i => (sampleUd (πUd.chal z)).2.1.getD i []) (fun z => DUd (πUd.advc z))).win ω)
+    (hSimEq : ∀ ω, slotSimWin ω =
+      (smDtUdIdealGame hPos qUd (fun z => (sampleUd (πUd.chal z)).1)
+        (fun z i => (sampleUd (πUd.chal z)).2.2.getD i []) (fun z => DUd (πUd.advc z))).win ω)
+    (hSlotImp : ∀ ω, slotSimWin ω = true →
+      let pkSeed := (samplePre (πPre.chal ω)).1
+      let hidden0 := (samplePre (πPre.chal ω)).2.getD 0 []
+      let yTarget := suiteTweakHash suite pkSeed targetTweak hidden0
+      let a := πPre.advc ω
+      let out := (evalLatchedAdaptiveTree latchOn suite.rawHash (signSim a pkSeed yTarget)
+        ((canonicalizeAdvOptRand (advPre a)).run (pkSim a pkSeed yTarget)) 0).1
+      suiteTweakHash suite pkSeed targetTweak (extractCand a out) = yTarget)
+    {𝒜Pre : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClassPre : ∀ a, 𝒜Pre (puncturedSlotPreAdv latchOn suite targetTweak
+      (pkSim a) (signSim a) (extractCand a) (advPre a)))
+    {εPre : Spec.RatBound}
+    (hPre : Spec.SmDtPreHard 𝒜Pre (suiteTweakHash suite) seedLen inputLen qPre εPre) :
+    Spec.GameBound GReal.winProb (εPre.add εUd) := by
+  have hHop3 := hulsing_hop3_ud_chain_simulation hPos GReal (Spec.FinGame.mk hPos slotSimWin)
+    (suiteTweakHash suite) seedLen inputLen outLen qUd πUd sampleUd hSampleUd DUd hClassUd hUd
+    hRealEq hSimEq
+  have hHop4c := hulsing_hop4c_smDtPre_interactive_bound latchOn hPos suite seedLen inputLen qPre
+    hqPre targetTweak pkSim signSim extractCand πPre samplePre hSamplePre advPre slotSimWin
+    hSlotImp hClassPre hPre
+  exact Spec.RatBound.le_trans hHop3
+    (Spec.RatBound.add_le_add hHop4c (Spec.RatBound.le_refl εUd))
+
+/-! ## §4. Master Multi-Hop Standard-Model EUF-CMA Theorem (`hulsing_full_multihop_euf_cma_bound`) -/
+
+/-- **Hop-4 Complete Idealized-PRF EUF-CMA Bound (`hulsing_hop4_idealPrf_euf_cma_bound`).**
+    Decomposes `ExecEufCmaIdealPrfGame` into `ExplicitItsrCover` (`εItsr`), interactive open-seed
+    `SM-DT-TCR` (`εTcr`, tight `1×`), and `ExplicitPreBreak` (`εPreTotal`). -/
+theorem hulsing_hop4_idealPrf_euf_cma_bound {n nSeed nRest qHash qSign : Nat} (latchOn : Bool)
+    (hPos : 0 < n) (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (seedLen qTcr : Nat) (hqTcr : 0 < qTcr)
+    (hOneTimeIfSt : params.statefulJorts = true → latchOn = true)
+    (πSeed : Spec.CoinSplit n nSeed nRest)
+    (seedS : Fin nSeed → Spec.Bytes)
+    (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seedS)
+    (rfMsgR rfSecR : Fin nRest → Spec.Bytes → Spec.Bytes)
+    (hRfR : ∀ r x, x.length = 65 → (rfMsgR r x).length = 32)
+    (advR : Fin nRest → SeedWithheldEufCmaAdv qHash qSign)
+    (itsrEv preEv : Fin n → Bool)
+    (hItsrImp : ∀ ω,
+      let pkSeed := seedS (πSeed.chal ω)
+      let pk := derivePublicKeyIdealPrf suite params pkSeed (rfSecR (πSeed.advc ω))
+      let signFn := signQueryIdealPrf suite params pkSeed (rfMsgR (πSeed.advc ω))
+        (rfSecR (πSeed.advc ω))
+      let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
+        ((canonicalizeAdvOptRand (advR (πSeed.advc ω))).run pk) 0
+      ExplicitItsrCover suite params pk (signLogFromOracle signFn run.2) run.1.1 run.1.2 →
+      itsrEv ω = true)
+    (hPreImp : ∀ ω,
+      let pkSeed := seedS (πSeed.chal ω)
+      let sov := secOverlaySuite suite pkSeed (rfSecR (πSeed.advc ω))
+      let pk := derivePublicKeyIdealPrf suite params pkSeed (rfSecR (πSeed.advc ω))
+      let signFn := signQueryIdealPrf suite params pkSeed (rfMsgR (πSeed.advc ω))
+        (rfSecR (πSeed.advc ω))
+      let run := evalLatchedAdaptiveTree latchOn suite.rawHash signFn
+        ((canonicalizeAdvOptRand (advR (πSeed.advc ω))).run pk) 0
+      ExplicitPreBreak suite sov params ⟨[], [], pkSeed⟩
+        (signLogFromOracle signFn run.2) run.1.1 run.1.2 →
+      preEv ω = true)
+    {𝒜Tcr : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClassTcr : ∀ r, 𝒜Tcr (openSeedTcrHopAdv latchOn suite params hw
+      (rfMsgR r) (rfSecR r) (hRfR r) hOneTimeIfSt (advR r)))
+    {εItsr εTcr εPreTotal : Spec.RatBound}
+    (hItsrB : Spec.GameBound (Spec.FinGame.mk hPos itsrEv).winProb εItsr)
+    (hTcr : SmDtOpenSeedTcrHard 𝒜Tcr (suiteTweakHash suite) seedLen qTcr εTcr)
+    (hPreB : Spec.GameBound (Spec.FinGame.mk hPos preEv).winProb εPreTotal) :
+    Spec.GameBound
+      (ExecEufCmaIdealPrfGame latchOn hPos suite params
+        (fun ω => seedS (πSeed.chal ω)) (fun ω => rfMsgR (πSeed.advc ω))
+        (fun ω => rfSecR (πSeed.advc ω)) (fun ω => advR (πSeed.advc ω))).winProb
+      ((εItsr.add εTcr).add εPreTotal) := by
+  have hTcrB := hulsing_hop4b_openSeedTcr_tight_bound latchOn hPos suite params hw seedLen qTcr
+    hqTcr hOneTimeIfSt πSeed seedS hSeed rfMsgR rfSecR hRfR advR hClassTcr hTcr
+  refine Spec.event_le_three_reductions _ (Spec.FinGame.mk hPos itsrEv) _
+    (Spec.FinGame.mk hPos preEv) (fun ω hW => ?_) hItsrB hTcrB hPreB
+  rcases execEufCmaIdealPrf_explicit_classify_opt latchOn hPos suite params hw
+      (fun z => seedS (πSeed.chal z)) (fun z => rfMsgR (πSeed.advc z))
+      (fun z => rfSecR (πSeed.advc z)) (fun z => advR (πSeed.advc z)) ω
+      (hRfR (πSeed.advc ω)) hOneTimeIfSt hW with hI | ⟨w, hwOpt⟩ | hP
+  · exact .inl (hItsrImp ω hI)
+  · refine .inr (.inl ?_)
+    show (extractIdealPrfTcrWitnessOpt latchOn suite params hw (seedS (πSeed.chal ω))
+      (rfMsgR (πSeed.advc ω)) (rfSecR (πSeed.advc ω)) (hRfR (πSeed.advc ω))
+      hOneTimeIfSt (advR (πSeed.advc ω))).isSome = true
+    rw [hwOpt]; rfl
+  · exact .inr (.inr (hPreImp ω hP))
+
+/-- Reassociate `(nC1, (nC2, (nSeed, nA)))` so `nSeed` sits at the outer challenger coordinate
+    `Fin nSeed` and `(nC1 * (nC2 * nA))` sits at the adversary coordinate for Hop 4. -/
+def reassocHop4SeedSplit {n nC1 nR1 nC2 nR2 nSeed nA : Nat}
+    (π1 : Spec.CoinSplit n nC1 nR1) (π2 : Spec.CoinSplit nR1 nC2 nR2)
+    (π3 : Spec.CoinSplit nR2 nSeed nA) :
+    Spec.CoinSplit n nSeed (nC1 * (nC2 * nA)) :=
+  let spInner := Spec.CoinSplit.prod nC2 nA
+  let spOuter := Spec.CoinSplit.prod nC1 (nC2 * nA)
+  { chal := fun ω => π3.chal (π2.advc (π1.advc ω))
+    advc := fun ω =>
+      spOuter.pair (π1.chal ω) (spInner.pair (π2.chal (π1.advc ω)) (π3.advc (π2.advc (π1.advc ω))))
+    pair := fun s rest =>
+      let c1 := spOuter.chal rest
+      let sub := spOuter.advc rest
+      let c2 := spInner.chal sub
+      let a := spInner.advc sub
+      π1.pair c1 (π2.pair c2 (π3.pair s a))
+    chal_pair := fun s rest => by
+      dsimp only
+      rw [π1.advc_pair, π2.advc_pair, π3.chal_pair]
+    advc_pair := fun s rest => by
+      dsimp only
+      rw [π1.chal_pair, π1.advc_pair, π2.chal_pair, π2.advc_pair, π3.advc_pair,
+        spInner.pair_eta, spOuter.pair_eta]
+    pair_eta := fun ω => by
+      dsimp only
+      rw [spOuter.chal_pair, spOuter.advc_pair, spInner.chal_pair, spInner.advc_pair,
+        π3.pair_eta, π2.pair_eta, π1.pair_eta] }
+
+/-- Full 3-way split key generator `(skSeed, skPrf, pkSeed)` for `hulsing_full_multihop_euf_cma_bound`. -/
+abbrev multiHopFullKeygen {n nC1 nR1 nC2 nR2 nSeed nA : Nat}
+    (π1 : Spec.CoinSplit n nC1 nR1) (π2 : Spec.CoinSplit nR1 nC2 nR2)
+    (π3 : Spec.CoinSplit nR2 nSeed nA)
+    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (seedS : Fin nSeed → Spec.Bytes) (ω : Fin n) : PqSecretKey :=
+  ⟨(sampleSec (π2.chal (π1.advc ω))).1,
+   (sampleMsg (π1.chal ω)).1,
+   seedS (π3.chal (π2.advc (π1.advc ω)))⟩
+
+/-- Full 3-way split canonicalized adversary family for `hulsing_full_multihop_euf_cma_bound`. -/
+abbrev multiHopFullAdv {n nC1 nR1 nC2 nR2 nSeed nA qHash qSign : Nat}
+    (π1 : Spec.CoinSplit n nC1 nR1) (π2 : Spec.CoinSplit nR1 nC2 nR2)
+    (π3 : Spec.CoinSplit nR2 nSeed nA)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign) (ω : Fin n) :
+    SeedWithheldEufCmaAdv qHash qSign :=
+  canonicalizeAdvOptRand (adv (π3.advc (π2.advc (π1.advc ω))))
+
+/-- **Master Hülsing–Kudinov / SPHINCS+ (`FIPS 205`) / XMSS-MT Multi-Hop EUF-CMA Theorem
+    (`hulsing_full_multihop_euf_cma_bound`).**
+    Composes:
+    * **Hop 1 (`PRF_msg`):** `hulsing_hop1_prfMsg_idealization` (`Spec.PrfHard` on `suitePrfMsg65`),
+    * **Hop 2 (`PRF`):** `hulsing_hop2_prfSec_idealization` (`Spec.PrfHard` on `suitePrfSec`, leaving
+      `suite.rawHash` 100% untouched for the adversary and verifier),
+    * **Hop 3 + Hop 4 (`ITSR` + `SM-DT-TCR` + `SmDtUdHard` / `SM-DT-PRE`):**
+      `hulsing_hop4_idealPrf_euf_cma_bound` over unrestricted `pk`-dependent adaptive `(qHash, qSign)`
+      adversaries `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign`. -/
+theorem hulsing_full_multihop_euf_cma_bound
+    {n nC1 nR1 nC2 nR2 nSeed nA qHash qSign : Nat}
+    (hPos : 0 < n) (suite : TweakableHashSuite) (params : PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16)
+    (seedLen keyLen qPrfMsg qPrfSec qTcr : Nat)
+    (hqPrfMsg : qSign ≤ qPrfMsg) (hqPrfSec : prfSecQueryBudget params qSign ≤ qPrfSec)
+    (hqTcr : 0 < qTcr)
+    (π1 : Spec.CoinSplit n nC1 nR1) (π2 : Spec.CoinSplit nR1 nC2 nR2)
+    (π3 : Spec.CoinSplit nR2 nSeed nA)
+    (sampleMsg : Fin nC1 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSampleMsg : Spec.UniformOn (Spec.PrfSampleOk keyLen 65 32) sampleMsg)
+    (sampleSec : Fin nC2 → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hSampleSec : Spec.UniformOn (Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
+    (seedS : Fin nSeed → Spec.Bytes)
+    (hSeed : Spec.UniformOn (fun s : Spec.Bytes => s.length = seedLen) seedS)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜Msg 𝒜Sec : Spec.Code Spec.byteOracleIface Bool → Prop}
+    (hClassMsg : ∀ r1 : Fin nR1, 𝒜Msg (prfMsgHopDistinguisher true suite params
+      (seedS (π3.chal (π2.advc r1))) (sampleSec (π2.chal r1)).1 (adv (π3.advc (π2.advc r1)))))
+    (hClassSec : ∀ b : Fin (nC1 * nR2),
+      let sp := Spec.CoinSplit.prod nC1 nR2
+      𝒜Sec (prfSecHopDistinguisher true suite params (seedS (π3.chal (sp.advc b)))
+        (sampleMsg (sp.chal b)).2 (adv (π3.advc (sp.advc b)))))
+    {𝒜Tcr : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClassTcr : ∀ r4 : Fin (nC1 * (nC2 * nA)),
+      let spO := Spec.CoinSplit.prod nC1 (nC2 * nA)
+      let spI := Spec.CoinSplit.prod nC2 nA
+      let c1 := spO.chal r4
+      let c2 := spI.chal (spO.advc r4)
+      let a := spI.advc (spO.advc r4)
+      𝒜Tcr (openSeedTcrHopAdv true suite params hw (sampleMsg c1).2 (sampleSec c2).2
+        (fun x hx => ((Spec.PrfSampleOk_eq keyLen 65 32 _).mp (hSampleMsg.mem c1)).2 x |>.1 hx)
+        (fun _ => rfl) (adv a)))
+    (itsrEv preEv : Fin n → Bool)
+    (hItsrImp : ∀ ω,
+      let pkSeed := seedS (π3.chal (π2.advc (π1.advc ω)))
+      let rfM := (sampleMsg (π1.chal ω)).2
+      let rfS := (sampleSec (π2.chal (π1.advc ω))).2
+      let pk := derivePublicKeyIdealPrf suite params pkSeed rfS
+      let signFn := signQueryIdealPrf suite params pkSeed rfM rfS
+      let run := evalLatchedAdaptiveTree true suite.rawHash signFn
+        ((canonicalizeAdvOptRand (adv (π3.advc (π2.advc (π1.advc ω))))).run pk) 0
+      ExplicitItsrCover suite params pk (signLogFromOracle signFn run.2) run.1.1 run.1.2 →
+      itsrEv ω = true)
+    (hPreImp : ∀ ω,
+      let pkSeed := seedS (π3.chal (π2.advc (π1.advc ω)))
+      let rfM := (sampleMsg (π1.chal ω)).2
+      let rfS := (sampleSec (π2.chal (π1.advc ω))).2
+      let sov := secOverlaySuite suite pkSeed rfS
+      let pk := derivePublicKeyIdealPrf suite params pkSeed rfS
+      let signFn := signQueryIdealPrf suite params pkSeed rfM rfS
+      let run := evalLatchedAdaptiveTree true suite.rawHash signFn
+        ((canonicalizeAdvOptRand (adv (π3.advc (π2.advc (π1.advc ω))))).run pk) 0
+      ExplicitPreBreak suite sov params ⟨[], [], pkSeed⟩
+        (signLogFromOracle signFn run.2) run.1.1 run.1.2 →
+      preEv ω = true)
+    {εPrfMsg εPrfSec εItsr εTcr εPreTotal : Spec.RatBound}
+    (hPrfMsg : Spec.PrfHard 𝒜Msg (suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
+    (hPrfSec : Spec.PrfHard 𝒜Sec (suitePrfSec seedLen suite) keyLen (seedLen + 32) 32 qPrfSec εPrfSec)
+    (hItsrB : Spec.GameBound (Spec.FinGame.mk hPos itsrEv).winProb εItsr)
+    (hTcr : SmDtOpenSeedTcrHard 𝒜Tcr (suiteTweakHash suite) seedLen qTcr εTcr)
+    (hPreB : Spec.GameBound (Spec.FinGame.mk hPos preEv).winProb εPreTotal) :
+    Spec.GameBound
+      (ExecEufCmaGame hPos suite params
+        (multiHopFullKeygen π1 π2 π3 sampleMsg sampleSec seedS)
+        (multiHopFullAdv π1 π2 π3 adv)).winProb
+      ((((εItsr.add εTcr).add εPreTotal).add εPrfSec).add εPrfMsg) := by
+  let pkSeedR2 : Fin nR2 → List UInt8 := fun r2 => seedS (π3.chal r2)
+  have hSeedLenR2 : ∀ r2, (pkSeedR2 r2).length = seedLen := fun r2 => hSeed.mem (π3.chal r2)
+  let advR2 : Fin nR2 → SeedWithheldEufCmaAdv qHash qSign := fun r2 => adv (π3.advc r2)
+  have hHop1 := hulsing_hop1_prfMsg_idealization true hPos suite params keyLen qPrfMsg hqPrfMsg
+    π1 sampleMsg hSampleMsg (fun r1 => pkSeedR2 (π2.advc r1)) (fun r1 => (sampleSec (π2.chal r1)).1)
+    (fun r1 => advR2 (π2.advc r1)) hClassMsg hPrfMsg
+  let sp := Spec.CoinSplit.prod nC1 nR2
+  let πHop2 : Spec.CoinSplit n nC2 (nC1 * nR2) :=
+    { chal := fun ω => π2.chal (π1.advc ω)
+      advc := fun ω => sp.pair (π1.chal ω) (π2.advc (π1.advc ω))
+      pair := fun c2 b => π1.pair (sp.chal b) (π2.pair c2 (sp.advc b))
+      chal_pair := fun c2 b => by dsimp only; rw [π1.advc_pair, π2.chal_pair]
+      advc_pair := fun c2 b => by dsimp only; rw [π1.chal_pair, π1.advc_pair, π2.advc_pair, sp.pair_eta]
+      pair_eta := fun ω => by dsimp only; rw [sp.chal_pair, sp.advc_pair, π2.pair_eta, π1.pair_eta] }
+  have hHop2Raw := hulsing_hop2_prfSec_idealization true hPos suite params seedLen keyLen qPrfSec
+    hqPrfSec πHop2 sampleSec hSampleSec (fun b => pkSeedR2 (sp.advc b))
+    (fun b => hSeedLenR2 (sp.advc b)) (fun b => (sampleMsg (sp.chal b)).2)
+    (fun b => advR2 (sp.advc b)) hClassSec hPrfSec
+  let gHop1 := ExecEufCmaRandIdealGame true hPos suite params
+    (fun ω => pkSeedR2 (π2.advc (π1.advc ω))) (fun ω => (sampleSec (π2.chal (π1.advc ω))).1)
+    (fun ω => (sampleMsg (π1.chal ω)).2) (fun ω => advR2 (π2.advc (π1.advc ω)))
+  let gHop2 := ExecEufCmaIdealPrfGame true hPos suite params
+    (fun ω => pkSeedR2 (π2.advc (π1.advc ω))) (fun ω => (sampleMsg (π1.chal ω)).2)
+    (fun ω => (sampleSec (π2.chal (π1.advc ω))).2) (fun ω => advR2 (π2.advc (π1.advc ω)))
+  have hG1Eq : ExecEufCmaRandIdealGame true hPos suite params
+      (fun ω => pkSeedR2 (sp.advc (πHop2.advc ω))) (fun ω => (sampleSec (πHop2.chal ω)).1)
+      (fun ω => (sampleMsg (sp.chal (πHop2.advc ω))).2)
+      (fun ω => advR2 (sp.advc (πHop2.advc ω))) = gHop1 := by
+    apply Spec.FinGame.ext_win; intro ω; dsimp only [πHop2, gHop1]
+    rw [ExecEufCmaRandIdealGame_win, ExecEufCmaRandIdealGame_win, sp.chal_pair, sp.advc_pair]
+  have hG2Eq : ExecEufCmaIdealPrfGame true hPos suite params
+      (fun ω => pkSeedR2 (sp.advc (πHop2.advc ω)))
+      (fun ω => (sampleMsg (sp.chal (πHop2.advc ω))).2)
+      (fun ω => (sampleSec (πHop2.chal ω)).2)
+      (fun ω => advR2 (sp.advc (πHop2.advc ω))) = gHop2 := by
+    apply Spec.FinGame.ext_win; intro ω; dsimp only [πHop2, gHop2]
+    rw [ExecEufCmaIdealPrfGame_win, ExecEufCmaIdealPrfGame_win, sp.chal_pair, sp.advc_pair]
+  have hHop2 : Spec.GameBound gHop1.winProb (gHop2.winProb.add εPrfSec) := by
+    dsimp only at hHop2Raw; rwa [hG1Eq, hG2Eq] at hHop2Raw
+  let π4 := reassocHop4SeedSplit π1 π2 π3
+  let spO := Spec.CoinSplit.prod nC1 (nC2 * nA)
+  let spI := Spec.CoinSplit.prod nC2 nA
+  let rfMsg4 : Fin (nC1 * (nC2 * nA)) → Spec.Bytes → Spec.Bytes :=
+    fun r4 => (sampleMsg (spO.chal r4)).2
+  let rfSec4 : Fin (nC1 * (nC2 * nA)) → Spec.Bytes → Spec.Bytes :=
+    fun r4 => (sampleSec (spI.chal (spO.advc r4))).2
+  let adv4 : Fin (nC1 * (nC2 * nA)) → SeedWithheldEufCmaAdv qHash qSign :=
+    fun r4 => adv (spI.advc (spO.advc r4))
+  have hRf4 : ∀ r4 x, x.length = 65 → (rfMsg4 r4 x).length = 32 :=
+    fun r4 x hx => ((Spec.PrfSampleOk_eq keyLen 65 32 _).mp (hSampleMsg.mem (spO.chal r4))).2 x |>.1 hx
+  have hHop4Raw := hulsing_hop4_idealPrf_euf_cma_bound true hPos suite params hw seedLen qTcr
+    hqTcr (fun _ => rfl) π4 seedS hSeed rfMsg4 rfSec4 hRf4 adv4 itsrEv preEv
+    (fun ω hI => by
+      dsimp only [π4, reassocHop4SeedSplit, rfMsg4, rfSec4, adv4] at hI
+      rw [spO.chal_pair, spO.advc_pair, spI.chal_pair, spI.advc_pair] at hI
+      exact hItsrImp ω hI)
+    (fun ω hP => by
+      dsimp only [π4, reassocHop4SeedSplit, rfMsg4, rfSec4, adv4] at hP
+      rw [spO.chal_pair, spO.advc_pair, spI.chal_pair, spI.advc_pair] at hP
+      exact hPreImp ω hP)
+    hClassTcr hItsrB hTcr hPreB
+  have hG2Eq4 : ExecEufCmaIdealPrfGame true hPos suite params
+      (fun ω => seedS (π4.chal ω)) (fun ω => rfMsg4 (π4.advc ω))
+      (fun ω => rfSec4 (π4.advc ω)) (fun ω => adv4 (π4.advc ω)) = gHop2 := by
+    apply Spec.FinGame.ext_win; intro ω
+    dsimp only [π4, reassocHop4SeedSplit, rfMsg4, rfSec4, adv4, gHop2, pkSeedR2, advR2]
+    rw [ExecEufCmaIdealPrfGame_win, ExecEufCmaIdealPrfGame_win,
+      spO.chal_pair, spO.advc_pair, spI.chal_pair, spI.advc_pair]
+  have hHop4 : Spec.GameBound gHop2.winProb ((εItsr.add εTcr).add εPreTotal) := by
+    rwa [hG2Eq4] at hHop4Raw
+  exact Spec.RatBound.le_trans hHop1
+    (Spec.RatBound.add_le_add
+      (Spec.RatBound.le_trans hHop2
+        (Spec.RatBound.add_le_add hHop4 (Spec.RatBound.le_refl εPrfSec)))
+      (Spec.RatBound.le_refl εPrfMsg))
+
+/-! ## §5. Inhabitedness Witnesses & Six-Kernel Assurance Audits -/
+
+/-- Joint inhabitedness witness for `hulsing_hop4b_openSeedTcr_tight_bound`. -/
+theorem inhabited_hulsing_hop4b_openSeedTcr_tight_bound :
+    ∃ (n nC nA qHash qSign : Nat) (_hPos : 0 < n) (_π : Spec.CoinSplit n nC nA)
+      (seed : Fin nC → Spec.Bytes) (_advA : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+      (εTcr : Spec.RatBound),
+      Spec.UniformOn (fun s : Spec.Bytes => s.length = 1) seed ∧
+      SmDtOpenSeedTcrHard (fun _ => True) (suiteTweakHash poly257MultiLeafSuite) 1 1 εTcr := by
+  refine ⟨256, 256, 1, 0, 0, by decide, Spec.CoinSplit.challengerOnly 256,
+    Spec.byte1SeedSampler, fun _ => ⟨fun _ => .pure ([], ⟨[], 0, 0, [], []⟩), fun _ => trivial⟩,
+    Spec.RatBound.one, Spec.uniformOn_byte1Seed, ?_⟩
+  intro _ _ _ _ _ _ _ _ _; exact Spec.FinGame.winProb_le_one _
+
+/-- Joint inhabitedness witness for `hulsing_hop4c_smDtPre_interactive_bound`. -/
+theorem inhabited_hulsing_hop4c_smDtPre_interactive_bound :
+    ∃ (n nC nA qHash qSign : Nat) (_hPos : 0 < n) (_π : Spec.CoinSplit n nC nA)
+      (sample : Fin nC → Spec.Bytes × List Spec.Bytes)
+      (_advA : Fin nA → SeedWithheldEufCmaAdv qHash qSign) (εPre : Spec.RatBound),
+      Spec.UniformOn (Spec.SmDtPreSampleOk 1 1 1) sample ∧
+      Spec.SmDtPreHard (fun _ => True) (suiteTweakHash poly257MultiLeafSuite) 1 1 1 εPre := by
+  refine ⟨256 * 256, 256 * 256, 1, 0, 0, by decide, Spec.CoinSplit.challengerOnly (256 * 256),
+    Spec.byte1SeedAndPreSampler,
+    fun _ => ⟨fun _ => .pure ([], ⟨[], 0, 0, [], []⟩), fun _ => trivial⟩,
+    Spec.RatBound.one, Spec.uniformOn_byte1SeedAndPre, ?_⟩
+  intro _ _ _ _ _ _ _ _ _; exact Spec.FinGame.winProb_le_one _
+
+#verify_kernel
+  Qsag.reassocHop4SeedSplit
+
+#verify_constructive
+  Qsag.encodeForsGlobalPos_inj
+  Qsag.seqSignWithRand_sound
+  Qsag.itsrHopReductionAdv_within
+  Qsag.stateful_itsr_zero_bound
+  Qsag.explicitItsrCover_implies_itsrWin
+  Qsag.hulsing_hop4a_itsr_bound
+  Qsag.commitTargetsThen_within
+  Qsag.preCommittedTcrAdv_within
+  Qsag.hulsing_hop4b_smDtTcr_precommitted_bound
+  Qsag.openSeedTcrHopAdv_within
+  Qsag.hulsing_hop4b_openSeedTcr_tight_bound
+  Qsag.smDtOpenSeedTcrHard_constHash_refuted
+  Qsag.explicitPreBreak_gives_tweakHash_eq
+  Qsag.puncturedSlotPreAdv_within
+  Qsag.hulsing_hop4c_smDtPre_interactive_bound
+  Qsag.hulsing_hop3_and_hop4c_wots_chain_bound
+  Qsag.hulsing_hop4_idealPrf_euf_cma_bound
+  Qsag.hulsing_full_multihop_euf_cma_bound
+  Qsag.inhabited_hulsing_hop4b_openSeedTcr_tight_bound
+  Qsag.inhabited_hulsing_hop4c_smDtPre_interactive_bound
+
+#verify_inhabited
+  Qsag.hulsing_hop4b_openSeedTcr_tight_bound
+  Qsag.inhabited_hulsing_hop4b_openSeedTcr_tight_bound
+#verify_inhabited
+  Qsag.hulsing_hop4c_smDtPre_interactive_bound
+  Qsag.inhabited_hulsing_hop4c_smDtPre_interactive_bound
+
+#tooth_pair Qsag.hulsing_hop4a_itsr_bound vs
+  Qsag.tooth_stateful_no_explicitItsrCover
+#tooth_pair Qsag.hulsing_hop4b_openSeedTcr_tight_bound vs
+  Qsag.smDtOpenSeedTcrHard_constHash_refuted
+#tooth_pair Qsag.hulsing_full_multihop_euf_cma_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+
+end Qsag
+end
