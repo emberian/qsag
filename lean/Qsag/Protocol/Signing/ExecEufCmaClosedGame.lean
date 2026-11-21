@@ -42,23 +42,22 @@ hypothesis. Here the experiment is closed:
   that the experiment under the real key generator is the real PRF game of an oracle
   distinguisher, and under the ideal key generator its ideal game.
 
-What is not here for an arbitrary `suite : TweakableHashSuite` (§4): the keyed games of §4 are
-not the `SM-DT-TCR` and `SM-DT-PRE` experiments of `Spec.Assumptions` and the subset-cover game
-is not its `ITSR` experiment, because for a black-box `suite` the targets and randomizers of
-`prodSignQuery` are functions of the secret key rather than target-oracle answers. By contrast,
-§6 constructs two concrete `ExecEufCmaReductionEmbedding` instances directly into
-`Spec.Assumptions` (`Spec.itsrGame`, `Spec.smDtTcrGame`, `Spec.smDtPreGame`): §6.1 is a
-zero-query single-byte warm-up (`concreteExecEufCmaReductionEmbedding`), and §6.2 constructs the
-full multi-leaf $q$-query adaptive signing reduction over `poly257MultiLeafSuite` and
-`multiLeaf4JortsParams` (`puncturedMultiLeafPreAdv`, `poly257MultiLeaf_adaptive_forger_bound`,
-`adaptiveMultiQueryReductionEmbedding`, and `adaptiveMultiQueryExecEufCma_forger_bound`),
-simulating arbitrary adaptive signing and raw-hash queries from a punctured key + `smDtPreOracle`
-when `BeltLatch` is active, paired with `tooth_poly257MultiLeaf_unlatched_reuse_forges` showing
-that removing the latch lets two same-leaf signing queries assemble a valid forgery on a fresh
-message with probability `1`.
-
-The key-generation hop of §5 replaces the key generator only. The signer's internal use of
-`skPrf` and `skSeed` on an arbitrary `suite` is not idealised there.
+Scope of §4–§6 and downstream multi-hop closure:
+* §4 sets up the public-key / oracle games `execSubsetCoverGame`, `execKeyedPathCollisionGame`, and
+  `execKeyedSecretPreimageGame`, and §5 proves the master-seed key-generation PRF hop.
+* §6 constructs concrete `ExecEufCmaReductionEmbedding` instances directly into `Spec.Assumptions`
+  (`Spec.itsrGame`, `Spec.smDtTcrGame`, `Spec.smDtPreGame`).
+* `Qsag.Protocol.Signing.FullAdaptiveEufCma` eliminates the offline `hCand` restriction of §6.2 via
+  an interactive `.target` / `.reveal` `Code Spec.targetIface Spec.TargetBreak` reduction for ALL
+  unrestricted `pk`-dependent adaptive adversaries, proves strict subsumption on an explicit
+  `pk`-dependent adaptive witness, and pairs load-bearing probability-`1` forgery refutations for
+  disabling `checkTargetSum` and zeroing `HashAdrs` leaf/layer tweaks.
+* `Qsag.Protocol.Signing.HulsingMultiHopReduction` and
+  `Qsag.Protocol.Signing.ProductionJortsBaggyBounds` close the full multi-hop standard-model
+  EUF-CMA game-playing reduction (`PRF_msg` randomizer hop, `PRF` secret-leaf hop, WOTS+C chain
+  simulation hop, and interactive reductions into `Spec.itsrGame`, `Spec.smDtTcrGame`, and
+  `Spec.smDtPreGame`) for arbitrary `TweakableHashSuite` and real `128`-bit production `Jorts`,
+  `Baggy`, `Corduroy`, and `FIPS 205` `SLH-DSA` parameter sets.
 -/
 
 public import Qsag.Protocol.Signing.ProdHashReductions
@@ -1054,8 +1053,11 @@ theorem ExecEufCmaReductionEmbedding.forger_bound {n qHash qSign : Nat} {hPos : 
 
 /-! ### §6.1 Concrete Non-Vacuous Instance of `ExecEufCmaReductionEmbedding` over 256 Uniform Keys -/
 
-private def zero32 : List UInt8 := List.replicate 32 0x00
-private def crumb32 : List UInt8 := List.replicate 32 0x1B
+def zero32 : List UInt8 := List.replicate 32 0x00
+def crumb32 : List UInt8 := List.replicate 32 0x1B
+
+#export_eqns zero32
+#export_eqns crumb32
 
 private def seedZeroBadInputs : List (List UInt8) :=
   ((List.range 255).map (fun k =>
@@ -1982,7 +1984,7 @@ def encodeMsg3Hmsg (m : Nat) : List UInt8 :=
   let b2 := if (m / 4) % 2 = 0 then 0x30 else 0xC0
   UInt8.ofNat (b0 + b1) :: UInt8.ofNat (b2 + 0x03) :: List.replicate 30 0x33
 
-private theorem sumDigits_eq_foldr : ∀ ds : List Nat, sumDigits ds = ds.foldr (· + ·) 0
+theorem sumDigits_eq_foldr : ∀ ds : List Nat, sumDigits ds = ds.foldr (· + ·) 0
   | [] => sumDigits_nil
   | d :: ds => (sumDigits_cons d ds).trans (congrArg (d + ·) (sumDigits_eq_foldr ds))
 
@@ -2061,7 +2063,7 @@ theorem encodeSubMsg3Hmsg_has_zero_digit :
   simp only [extractBaseWDigits_eq]
   decide +kernel
 
-private theorem encodeSubMsg3Hmsg_explicit_digits :
+theorem encodeSubMsg3Hmsg_explicit_digits :
     (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 0 0 = 0 ∧
     (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 1 0 = 3 ∧
     (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 2 0 = 0 ∧
@@ -2266,7 +2268,7 @@ private theorem poly257MultiLeafSuite_thCall (role pkSeed : List UInt8) (adrs : 
         | none => invalid32) = _
   rw [parseThPreimageLocal_thPreimage]
 
-private theorem byteXorHash_headD_inj (pkSeed tweak : Spec.Bytes) {b₁ b₂ : UInt8}
+theorem byteXorHash_headD_inj (pkSeed tweak : Spec.Bytes) {b₁ b₂ : UInt8}
     (h : (Spec.byteXorHash pkSeed tweak [b₁]).headD 0 =
       (Spec.byteXorHash pkSeed tweak [b₂]).headD 0) :
     b₁ = b₂ := by
@@ -2289,7 +2291,7 @@ private theorem multiLeaf_role_tags_ne :
     tagThF.public_eqs, tagThTl.public_eqs, tagThH.public_eqs]
   decide +kernel
 
-private theorem poly257MultiLeaf_thSecretPrf (pkSeed skSeed : List UInt8) (adrs : HashAdrs) :
+theorem poly257MultiLeaf_thSecretPrf (pkSeed skSeed : List UInt8) (adrs : HashAdrs) :
     thSecretPrf poly257MultiLeafSuite pkSeed skSeed adrs =
       if adrs.keyPair.toNat < 4 ∧ adrs.chainIdx.toNat < 3 then
         encodeStep0Secret (skSeed.getD (3 * adrs.keyPair.toNat + adrs.chainIdx.toNat) 0)
@@ -2715,7 +2717,7 @@ private theorem multiLeaf4JortsParams_targetSum : multiLeaf4JortsParams.targetSu
   rw [PqHashParams.targetSum_eq, multiLeaf4JortsParams.public_eqs]
   decide
 
-private theorem prodSignQuery_poly257MultiLeaf_valid (sk : PqSecretKey) {kp sub maxGrind : Nat}
+theorem prodSignQuery_poly257MultiLeaf_valid (sk : PqSecretKey) {kp sub maxGrind : Nat}
     (hkp : kp < 4) (hsub : sub < 3) (hGrind : 0 < maxGrind) (optRand : List UInt8) :
     prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams sk
       ⟨[UInt8.ofNat kp, UInt8.ofNat sub], optRand, kp, maxGrind⟩ =
@@ -3649,7 +3651,7 @@ private theorem evalLatchedAdaptiveTree_congr_on_log {α : Type}
           rw [evalLatchedAdaptiveTree_sign, ite_eq_right hNot]
           exact hq'))
 
-private theorem puncturedKeyAndAdvSplit_coords {nA : Nat} (s : Fin 12)
+theorem puncturedKeyAndAdvSplit_coords {nA : Nat} (s : Fin 12)
     (ω : Fin ((256 * pow256 24) * nA)) :
     let π₀ := Spec.CoinSplit.prod (256 * pow256 24) nA
     let πs := puncturedKeyAndAdvSplit nA (slot24Of12 s)
@@ -4060,7 +4062,7 @@ def stepChain3Adaptive {α : Type} (pkSeed : List UInt8) (kp r : Nat) (x : List 
             (thPreimage tagThF pkSeed ⟨0, 0, .wotsHash, UInt32.ofNat kp, UInt32.ofNat r, 2⟩ [s2])
             k))
 
-private theorem evalLatched_stepChain3Adaptive {α : Type} (latchOn : Bool)
+theorem evalLatched_stepChain3Adaptive {α : Type} (latchOn : Bool)
     (sign : ProdSigningQuery → Option PqHashSig)
     (pkSeed : List UInt8) (kp r : Nat) (x : List UInt8)
     (k : List UInt8 → ProdAdaptiveTree α) (lo : Nat) :
@@ -4282,7 +4284,7 @@ def zeroVecCoin : (k : Nat) → Fin (pow256 k)
   | 0 => ⟨0, Nat.one_pos⟩
   | k + 1 => (Spec.CoinSplit.prod 256 (pow256 k)).pair ⟨0, by decide⟩ (zeroVecCoin k)
 
-private theorem byteVecSampler_zeroVecCoin :
+theorem byteVecSampler_zeroVecCoin :
     ∀ k : Nat, byteVecSampler k (zeroVecCoin k) = List.replicate k 0x00
   | 0 => rfl
   | k + 1 => by
@@ -4291,7 +4293,7 @@ private theorem byteVecSampler_zeroVecCoin :
       (Spec.CoinSplit.prod 256 (pow256 k)).advc_pair, byteVecSampler_zeroVecCoin k]
     rfl
 
-private theorem verify_assembled_leaf_sig (sk : PqSecretKey) {kp sub : Nat}
+theorem verify_assembled_leaf_sig (sk : PqSecretKey) {kp sub : Nat}
     (hkp : kp < 4) (hsub : sub < 3)
     (c0 c1 c2 : List UInt8)
     (hc0 : c0 = wotsChainSteps poly257MultiLeafSuite sk.pkSeed 0 0 kp 0 0
@@ -4639,6 +4641,274 @@ theorem inhabited_poly257MultiLeaf_adaptive_forger_bound :
    adaptive4Leaf_punctured_cand,
    ⟨2, 256, by decide⟩,
    Spec.poly257Hash_smDtPreHard_within 2 1⟩
+
+/-! ### Public Frame/Address Decoders & Dispatch Exports for Downstream Reductions -/
+
+def decodeMultiFrameBytes (raw : List UInt8) : Option (List (List UInt8)) :=
+  decodeMultiFrameLocal raw
+
+theorem decodeMultiFrameBytes_encodeMultiFrame (fields : List (List UInt8)) :
+    decodeMultiFrameBytes (encodeMultiFrame fields) = some fields :=
+  decodeMultiFrameLocal_encodeMultiFrame fields
+
+def decodeAdrsBytes (bs : List UInt8) : Option HashAdrs :=
+  decodeAdrsLocal bs
+
+theorem decodeAdrsBytes_encodeAdrs (a : HashAdrs) :
+    decodeAdrsBytes (encodeAdrs a) = some a :=
+  decodeAdrsLocal_encodeAdrs a
+
+def parseThPreimage (raw : List UInt8) :
+    Option (List UInt8 × List UInt8 × HashAdrs × List (List UInt8)) :=
+  parseThPreimageLocal raw
+
+theorem parseThPreimage_thPreimage (role pkSeed : List UInt8)
+    (adrs : HashAdrs) (args : List (List UInt8)) :
+    parseThPreimage (thPreimage role pkSeed adrs args) = some (role, pkSeed, adrs, args) :=
+  parseThPreimageLocal_thPreimage role pkSeed adrs args
+
+def decodeChainNodeBytes (expectedTag : UInt8) (kp r : Nat) (x : List UInt8) :
+    Option (UInt8 × UInt8) :=
+  decodeChainNode expectedTag kp r x
+
+theorem decodeChainNodeBytes_encodeChainNode (tag : UInt8) (kp r : Nat) (hi lo : UInt8) :
+    decodeChainNodeBytes tag kp r (encodeChainNode tag kp r hi lo) = some (hi, lo) :=
+  decodeChainNode_encodeChainNode tag kp r hi lo
+
+theorem decodeChainNodeBytes_sound {tag : UInt8} {kp r : Nat} {x : List UInt8} {hi lo : UInt8}
+    (h : decodeChainNodeBytes tag kp r x = some (hi, lo)) :
+    x = encodeChainNode tag kp r hi lo :=
+  decodeChainNode_sound h
+
+theorem poly257MultiLeaf_thPreHash_eq (pkSeed pkRoot msg : List UInt8) :
+    thPreHash poly257MultiLeafSuite pkSeed pkRoot msg =
+      match msg with
+      | [kpB, subB] =>
+        if kpB.toNat < 4 ∧ subB.toNat < 3 then
+          [0xE0, kpB, subB] ++ List.replicate 29 0x00
+        else 0xFF :: List.replicate 31 0x00
+      | _ => 0xFF :: List.replicate 31 0x00 :=
+  poly257MultiLeaf_thPreHash pkSeed pkRoot msg
+
+theorem poly257MultiLeaf_thPrfMsg_eq (skPrf optRand mu : List UInt8) :
+    thPrfMsg poly257MultiLeafSuite skPrf optRand mu = zero32 :=
+  poly257MultiLeaf_thPrfMsg skPrf optRand mu
+
+theorem poly257MultiLeaf_thTweakTl_cases (pkSeed : List UInt8) {kp : Nat} (hkp : kp < 4)
+    (limbs : List (List UInt8)) :
+    (∃ ps, thTweakTl poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsPk, UInt32.ofNat kp, 0, 0⟩ limbs =
+      [0xC0, UInt8.ofNat kp] ++ packLeaf3 ps ++ List.replicate 24 0x00) ∨
+    thTweakTl poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsPk, UInt32.ofNat kp, 0, 0⟩ limbs =
+      0xFF :: List.replicate 31 0x00 := by
+  rw [poly257MultiLeaf_thTweakTl]
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  simp only [hkp32, hkp, and_self, ↓reduceIte]
+  cases extractActive3 kp limbs with
+  | some ps => exact .inl ⟨ps, rfl⟩
+  | none => exact .inr rfl
+
+theorem poly257MultiLeaf_thHashLeafMsg_eq (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32) (ctr : Nat) :
+    thHashLeafMsg poly257MultiLeafSuite rRand pkSeed pkRoot mu treeIdx kpIdx ctr =
+      match mu with
+      | 0xE0 :: kpB :: subB :: rest =>
+        if kpB.toNat < 4 ∧ subB.toNat < 3 ∧ kpB.toNat = kpIdx.toNat ∧
+            rest = List.replicate 29 0x00 then
+          encodeSubMsg3Hmsg subB.toNat
+        else zero32
+      | _ => zero32 :=
+  poly257MultiLeaf_thHashLeafMsg rRand pkSeed pkRoot mu treeIdx kpIdx ctr
+
+theorem poly257MultiLeaf_thChainF_eq (pkSeed : List UInt8) (adrs : HashAdrs) (x : List UInt8) :
+    thChainF poly257MultiLeafSuite pkSeed adrs x =
+      let kp := adrs.keyPair.toNat
+      let r := adrs.chainIdx.toNat
+      let st := adrs.hashStep.toNat
+      if adrs.layer = 0 ∧ adrs.tree = 0 ∧ adrs.kind = .wotsHash then
+        if kp < 4 ∧ r < 3 then
+          if st = 0 then
+            match decodeStep0Byte x with
+            | some b =>
+              let yx := Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]
+              let yp := Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]
+              encodeChainNode 0xB1 kp r (yx.headD 0) (yp.getD 2 0)
+            | none => 0xFF :: List.replicate 31 0x00
+          else if st = 1 then
+            match decodeChainNodeBytes 0xB1 kp r x with
+            | some (hi, lo) => encodeChainNode 0xB2 kp r hi lo
+            | none => 0xFF :: List.replicate 31 0x00
+          else if st = 2 then
+            match decodeChainNodeBytes 0xB2 kp r x with
+            | some (hi, lo) => encodeChainNode 0xB3 kp r hi lo
+            | none => 0xFF :: List.replicate 31 0x00
+          else 0xFF :: List.replicate 31 0x00
+        else
+          if x = crumb32 then crumb32 else 0xFF :: List.replicate 31 0x00
+      else 0xFF :: List.replicate 31 0x00 :=
+  poly257MultiLeaf_thChainF pkSeed adrs x
+
+theorem poly257MultiLeaf_thTweakTl_limb012_eq (pkSeed : List UInt8) {kp : Nat} (hkp : kp < 4)
+    {limbs : List (List UInt8)} {hi₀ lo₀ hi₁ lo₁ hi₂ lo₂ : UInt8}
+    (hEq : thTweakTl poly257MultiLeafSuite pkSeed ⟨0, 0, .wotsPk, UInt32.ofNat kp, 0, 0⟩ limbs =
+      [0xC0, UInt8.ofNat kp] ++ packLeaf3 [(hi₀, lo₀), (hi₁, lo₁), (hi₂, lo₂)] ++
+        List.replicate 24 0x00) :
+    limbs.getD 0 [] = encodeChainNode 0xB3 kp 0 hi₀ lo₀ ∧
+    limbs.getD 1 [] = encodeChainNode 0xB3 kp 1 hi₁ lo₁ ∧
+    limbs.getD 2 [] = encodeChainNode 0xB3 kp 2 hi₂ lo₂ := by
+  rw [poly257MultiLeaf_thTweakTl] at hEq
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  simp only [hkp32, hkp, and_self, ↓reduceIte] at hEq
+  cases hExt : extractActive3 kp limbs with
+  | none =>
+    rw [hExt] at hEq
+    have hHead := congrArg (fun l => l.headD 0) hEq
+    cases hHead
+  | some ps =>
+    rw [hExt] at hEq
+    dsimp only at hEq
+    unfold extractActive3 at hExt
+    rcases limbs with _ | ⟨l0, _ | ⟨l1, _ | ⟨l2, rest⟩⟩⟩
+    · cases hExt
+    · cases hExt
+    · cases hExt
+    · dsimp only [List.getD] at hExt ⊢
+      by_cases hRest : rest = List.replicate 125 crumb32
+      · rw [ite_eq_left hRest] at hExt
+        cases h0 : decodeChainNode 0xB3 kp 0 l0 with
+        | none => rw [h0] at hExt; cases hExt
+        | some p0 =>
+          cases h1 : decodeChainNode 0xB3 kp 1 l1 with
+          | none => rw [h0, h1] at hExt; cases hExt
+          | some p1 =>
+            cases h2 : decodeChainNode 0xB3 kp 2 l2 with
+            | none => rw [h0, h1, h2] at hExt; cases hExt
+            | some p2 =>
+              rw [h0, h1, h2] at hExt
+              injection hExt with hPs
+              subst hPs
+              have hPack : packLeaf3 [p0, p1, p2] =
+                  packLeaf3 [(hi₀, lo₀), (hi₁, lo₁), (hi₂, lo₂)] := by
+                have hSub := congrArg (fun l => (l.drop 2).take 6) hEq
+                simpa [packLeaf3] using hSub
+              obtain ⟨rfl, rfl, rfl⟩ := packLeaf3_inj hPack
+              exact ⟨decodeChainNode_sound h0, decodeChainNode_sound h1, decodeChainNode_sound h2⟩
+      · rw [ite_eq_right hRest] at hExt
+        cases hExt
+
+theorem poly257MultiLeaf_thChainF_step2_endpt (pkSeed : List UInt8) {kp r : Nat}
+    (hkp : kp < 4) (hr : r < 3) (b : UInt8) :
+    wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r 0 3 (encodeStep0Secret b) =
+      encodeChainNode 0xB3 kp r
+        ((Spec.byteXorHash pkSeed (chain0Tweak kp r) [b]).headD 0)
+        ((Spec.poly257Hash pkSeed (chain0Tweak kp r) [b]).getD 2 0) :=
+  active_chain_steps_3 pkSeed hkp hr b
+
+theorem poly257MultiLeaf_inactive_crumb (pkSeed : List UInt8) {kp r : Nat}
+    (hkp : kp < 4) (hr : 3 ≤ r) (hrLt : r < 128) (k start : Nat) :
+    wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r start k crumb32 = crumb32 :=
+  inactive_chain_steps_crumb pkSeed hkp hr hrLt k start
+
+theorem poly257MultiLeaf_computeWotsPk_eq (sk : PqSecretKey) {kp : Nat} (hkp : kp < 4) :
+    computeWotsPk poly257MultiLeafSuite multiLeaf4JortsParams sk 0 0 kp =
+      leafFromTbl (honestSlotHiLo sk) kp :=
+  computeWotsPk_poly257MultiLeaf sk hkp
+
+theorem extractSigChainCand_stepChain3_empty (pkSeed : List UInt8) (kp r : Nat) (x : List UInt8)
+    (hkp : kp < 4) (hr : r < 3) (authPath : List (List UInt8)) (tail : List (List UInt8)) :
+    extractSigChainCand
+      { rRand := zero32
+        msgTswCtr := 0
+        leafGlobalIdx := kp
+        forsOpenings := []
+        layerSigs := [⟨0, wotsChainSteps poly257MultiLeafSuite pkSeed 0 0 kp r 0 3 x :: tail,
+          authPath⟩] }
+      0 = [] := by
+  dsimp only [extractSigChainCand]
+  rw [List.getD_cons_zero, wotsChainSteps_succ, wotsChainSteps_succ, wotsChainSteps_succ,
+    wotsChainSteps_zero, poly257MultiLeaf_thChainF]
+  have hkp32 : (UInt32.ofNat kp).toNat = kp := u32_toNat_small (by omega)
+  have hr32 : (UInt32.ofNat r).toNat = r := u32_toNat_small (by omega)
+  have hu2 : (UInt32.ofNat (0 + 1 + 1)).toNat = 2 := rfl
+  dsimp only
+  rw [hkp32, hr32, hu2]
+  simp only [and_self, hkp, hr, (by decide : ¬ (2 = 0)), (by decide : ¬ (2 = 1)), ↓reduceIte]
+  cases decodeChainNode 0xB2 kp r _ with
+  | none => rfl
+  | some p => cases p; rfl
+
+#export_eqns evalLatchedAdaptiveTree
+#export_eqns encodeChainNode
+#export_eqns encodeSubMsg3Hmsg
+#export_eqns honestSlotHiLo
+#export_eqns honestMultiLeafSig
+#export_eqns packLeaf3
+#export_eqns leafFromTbl
+#export_eqns node1FromTbl
+#export_eqns rootFromTbl
+#export_eqns pkFromTbl
+#export_eqns authPathFromTbl
+#export_eqns extractSigChainCand
+#export_eqns stepChain3Adaptive
+
+theorem slot24Of12_val (s : Fin 12) : (slot24Of12 s).1 = s.1 := by
+  unfold slot24Of12
+  rfl
+
+theorem puncturedSignQuery_s1_00_isSome
+    (pkSeed : List UInt8) (endpt : UInt8 × UInt8) (other23 : Spec.Bytes) :
+    (puncturedSignQuery pkSeed ⟨1, by decide⟩ endpt other23 ⟨[0, 0], [], 0, 1⟩).isSome = true := by
+  unfold puncturedSignQuery queryMsgValidAt
+  have hc0 : (0 : UInt8).toNat = 0 ∧ 0 < 4 ∧ (0 : UInt8).toNat < 3 := by decide
+  have hu0 : (0 : UInt8).toNat = 0 := rfl
+  dsimp only
+  rw [ite_eq_left Nat.one_pos, ite_eq_left hc0]
+  dsimp only
+  rw [hu0]
+  have hNoAbort : ¬ (0 = 1 / 3 ∧
+      (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD (1 % 3) 0 ≠ 3) := by
+    intro hc
+    exact hc.2 encodeSubMsg3Hmsg_explicit_digits.2.1
+  rw [ite_eq_right hNoAbort]
+  rfl
+
+theorem puncturedSignQuery_s2_00_none
+    (pkSeed : List UInt8) (endpt : UInt8 × UInt8) (other23 : Spec.Bytes) :
+    puncturedSignQuery pkSeed ⟨2, by decide⟩ endpt other23 ⟨[0, 0], [], 0, 1⟩ = none := by
+  unfold puncturedSignQuery queryMsgValidAt
+  have hc0 : (0 : UInt8).toNat = 0 ∧ 0 < 4 ∧ (0 : UInt8).toNat < 3 := by decide
+  have hu0 : (0 : UInt8).toNat = 0 := rfl
+  dsimp only
+  rw [ite_eq_left Nat.one_pos, ite_eq_left hc0]
+  dsimp only
+  rw [hu0]
+  have hAbort : 0 = 2 / 3 ∧
+      (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD (2 % 3) 0 ≠ 3 := by
+    refine ⟨rfl, ?_⟩
+    change (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD 2 0 ≠ 3
+    rw [encodeSubMsg3Hmsg_explicit_digits.2.2.1]
+    decide
+  exact ite_eq_left hAbort
+
+theorem pkFromTbl_puncturedSlotTbl_s1_byte4
+    (pkSeed : List UInt8) (hi lo : UInt8) (other23 : Spec.Bytes) :
+    (pkFromTbl pkSeed (puncturedSlotTbl pkSeed ⟨1, by decide⟩ (hi, lo) other23)).pkRoot.getD 4 0 =
+      hi := by
+  unfold pkFromTbl rootFromTbl packLeaf3 puncturedSlotTbl
+  rfl
+
+theorem poly257MultiLeaf_walkAuthPath_honest (sk : PqSecretKey) {kp : Nat} (hkp : kp < 4) :
+    walkMerkleAuthPathKp poly257MultiLeafSuite sk.pkSeed 0 0 .tree 0 2 0 kp
+      (leafFromTbl (honestSlotHiLo sk) kp) (authPathFromTbl (honestSlotHiLo sk) kp) =
+      some (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams sk).pkRoot := by
+  have hWalk := walkMerkleAuthPathKp_buildMerkleAuthPathKp poly257MultiLeafSuite sk.pkSeed
+    0 0 .tree 0 (computeWotsPk poly257MultiLeafSuite multiLeaf4JortsParams sk 0 0) 2 0 0 kp hkp
+  simp only [Nat.zero_mul, Nat.zero_add] at hWalk
+  rw [← computeWotsPk_poly257MultiLeaf sk hkp, ← buildMerkleAuthPathKp_poly257MultiLeaf sk hkp,
+    hWalk, computeMerkleNodeKp_zero_eq]
+  unfold derivePublicKey
+  dsimp only
+  rw [computeXmssSubtreeRoot_eq]
+  rfl
 
 #verify_constructive
   Qsag.evalLatchedAdaptiveTree_log_increasing
