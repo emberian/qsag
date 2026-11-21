@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Prove HD=4, 0x000/0xFFF crowbar/laser rejection, and loop-counter shadow guard
-on the synthesized Dregg-180 `qsag_wire_engine` RTL.
+"""Prove HD=4, 0x000/0xFFF crowbar/laser rejection, loop-counter shadow guard, and
+hardwired enclave secret non-exfiltration (`e_rd >= 44 => out_data == 0`) on `qsag_wire_engine`.
 """
 import os
 import re
@@ -13,7 +13,7 @@ import run_lec as l  # noqa: E402
 path = "rtl/qsag_wire_engine.sv"
 source = open(path).read()
 codes = [int(x, 16) for x in re.findall(r"S_\w+\s*=\s*12'h([0-9a-f]+)", source)]
-assert len(codes) == 123 and len(set(codes)) == 123, f"expected 123 unique states, got {len(codes)}/{len(set(codes))}"
+assert len(codes) == 125 and len(set(codes)) == 125, f"expected 125 unique states, got {len(codes)}/{len(set(codes))}"
 assert 0x000 not in codes and 0xFFF not in codes, "0x000 and 0xFFF must never be legal states!"
 assert min(c.bit_count() for c in codes) >= 4, "dist(0x000, valid) must be >= 4"
 assert max(c.bit_count() for c in codes) <= 8, "dist(0xFFF, valid) must be >= 4"
@@ -21,7 +21,7 @@ assert min((a ^ b).bit_count() for a in codes for b in codes if a != b) == 4
 print(f"{len(codes)} actual RTL state constants: pairwise HD >= 4, dist(0x000) >= 4, dist(0xFFF) >= 4", flush=True)
 
 files = (
-    "rtl/qsag_cells.sv rtl/qsag_gl64_karatsuba_csa.sv rtl/qsag_p2_rc.sv "
+    "rtl/qsag_gl64_karatsuba_csa.sv rtl/qsag_p2_rc.sv "
     "rtl/qsag_sponge.sv rtl/qsag_keccak_serial.sv rtl/qsag_gf128_clmul.sv "
     "rtl/qsag_field_engine.sv rtl/dregg_captp_vat.sv "
 )
@@ -48,7 +48,7 @@ def hd4_query(rtl, reg):
 
 
 def collapse_query(rtl, bad_val):
-    n = lambda x: f"(|ctrl_n {x}| s)"
+    n = lambda x: f"(|ctrl_s_dummy|)" if False else f"(|ctrl_n {x}| s)"
     q = "(declare-fun s () |ctrl_s|)\n"
     q += f"(assert (= {n('steps_inv_q')} (bvnot {n('steps')})))\n"
     q += "(assert (or " + " ".join(f"(= {n(r)} {l.bv(bad_val, 12)})" for r in ("st", "ret", "ret2", "ret3")) + "))\n"
@@ -66,12 +66,22 @@ def counter_glitch_query(rtl):
     return rtl + q
 
 
+def non_exfil_query(rtl):
+    n = lambda x: f"(|ctrl_n {x}| s)"
+    q = "(declare-fun s () |ctrl_s|)\n"
+    q += f"(assert {n('emit_port')})\n"
+    q += f"(assert (bvuge {n('e_rd')} (_ bv44 6)))\n"
+    q += f"(assert (not (= {n('out_data')} (_ bv0 64))))\n"
+    return rtl + q
+
+
 for reg in ("st", "ret", "ret2", "ret3"):
     l.check(f"HD4: {reg} 1..3 flips block output, launch, input and detect", "unsat", hd4_query(rtl_main, reg))
 
 l.check("Crowbar 12'h000 zeroing collapse trapped & fail-closed", "unsat", collapse_query(rtl_main, 0x000))
 l.check("Laser 12'hFFF saturation collapse trapped & fail-closed", "unsat", collapse_query(rtl_main, 0xFFF))
 l.check("Loop counter steps != ~steps_inv_q fault trapped & fail-closed", "unsat", counter_glitch_query(rtl_main))
+l.check("Enclave non-exfiltration: emit_port & e_rd >= 44 => out_data == 0", "unsat", non_exfil_query(rtl_main))
 
 mut = f"{l.B}/control_mutant.sv"
 assert source.count("&& !(^c)") == 1
