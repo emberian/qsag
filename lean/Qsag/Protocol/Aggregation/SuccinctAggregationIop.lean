@@ -11271,6 +11271,218 @@ theorem canopyRootHashOf_val (H : ByteArray → ByteArray)
     (canopyRootHashOf H hOut i top).val = H (canopyRootFrame i top) := by rfl
 #export_eqns canopyNodeFrame canopyRootFrame
 -- Field values of the audit geometry for `Tests/CompositionInstances`; no body is exposed.
-#export_eqns compactAuditGeom
+#export_eqns compactAuditGeom domainMerkleNode poseidon2IvTag auditSkSeed auditPkSeed auditRRand auditMsg
+
+/-! ### Symbolic bridges from `compactAuditGeom` to `Oracle/Poseidon2` `compactJorts*` -/
+
+private theorem compactWotsStep_eq (pkSeed cur : Digest4)
+    (layer treeIdx kpIdx chainIdx stepIdx : Nat) :
+    wotsStepHash pkSeed cur layer treeIdx kpIdx chainIdx stepIdx =
+      compactWotsStep pkSeed cur layer treeIdx kpIdx chainIdx stepIdx := by
+  unfold wotsStepHash poseidon2Compress12FF domainWotsStep packWotsAddrLimb
+  rw [compactWotsStep_eq_def, compactPackWotsAddr_eq]
+
+private theorem compactWotsSecret_eq (skSeed pkSeed : Digest4)
+    (layer treeIdx kpIdx chainIdx : Nat) :
+    wotsSecretStart skSeed pkSeed layer treeIdx kpIdx chainIdx =
+      compactWotsSecret skSeed pkSeed layer treeIdx kpIdx chainIdx := by
+  unfold wotsSecretStart poseidon2Compress12FF domainPrfWots packWotsAddrLimb
+  rw [compactWotsSecret_eq_def, compactPackWotsAddr_eq]
+
+private theorem compactWotsWalk_eq (pkSeed : Digest4)
+    (layer treeIdx kpIdx chainIdx : Nat) :
+    ∀ (steps startStep : Nat) (cur : Digest4),
+      wotsChainWalk pkSeed layer treeIdx kpIdx chainIdx startStep steps cur =
+        compactWotsWalk pkSeed layer treeIdx kpIdx chainIdx steps startStep cur
+  | 0, startStep, cur => by
+    rw [compactWotsWalk_zero]
+    rfl
+  | steps + 1, startStep, cur => by
+    rw [compactWotsWalk_succ]
+    show wotsChainWalk pkSeed layer treeIdx kpIdx chainIdx (startStep + 1) steps
+        (wotsStepHash pkSeed cur layer treeIdx kpIdx chainIdx startStep) = _
+    rw [compactWotsStep_eq, compactWotsWalk_eq pkSeed layer treeIdx kpIdx chainIdx steps (startStep + 1)]
+
+private theorem compactWotsPk2_eq (pkSeed : Digest4) (layer treeIdx kpIdx : Nat)
+    (e0 e1 : Digest4) :
+    compressWotsEndpointsSponge pkSeed layer treeIdx kpIdx [e0, e1] =
+      compactWotsPk2 pkSeed layer treeIdx kpIdx e0 e1 := by
+  unfold compressWotsEndpointsSponge absorbDigest4Pairs absorbPairsPoly
+    domainWotsPk poseidon2IvTag
+  rw [compactWotsPk2_eq_def]
+  rfl
+
+private theorem compactHonestWotsPk_eq (skSeed pkSeed : Digest4)
+    (layer treeIdx kpIdx : Nat) :
+    honestWotsPk compactAuditGeom skSeed pkSeed layer treeIdx kpIdx =
+      compactHonestWotsPk skSeed pkSeed layer treeIdx kpIdx := by
+  unfold honestWotsPk honestWotsEndpoints compactAuditGeom
+  have hRange2 : List.range 2 = [0, 1] := rfl
+  dsimp only
+  rw [hRange2, List.map_cons, List.map_cons, List.map_nil,
+      compactWotsPk2_eq, compactWotsWalk_eq, compactWotsWalk_eq,
+      compactWotsSecret_eq, compactWotsSecret_eq,
+      ← compactHonestWotsPk_eq_def]
+
+private theorem compactMerkleNode_eq (pkSeed : Digest4)
+    (layer treeIdx level nodeIdx : Nat) (left right : Digest4) :
+    merkleNodeHash domainMerkleNode pkSeed layer treeIdx level nodeIdx left right =
+      compactMerkleNode pkSeed layer treeIdx level nodeIdx left right := by
+  unfold merkleNodeHash domainMerkleNode poseidon2IvTag
+  rw [compactMerkleNode_eq_def]
+
+theorem deriveAggPublicKey_compactAuditGeom (skSeed pkSeed : Digest4) :
+    deriveAggPublicKey compactAuditGeom skSeed pkSeed =
+      ⟨.xmssPoseidon2, pkSeed, compactJortsPkRoot skSeed pkSeed⟩ := by
+  have hProf : compactAuditGeom.profile = .xmssPoseidon2 := rfl
+  have hSubH : compactAuditGeom.subtreeHeight = 1 := rfl
+  have hTop : compactAuditGeom.numLayers - 1 = 0 := rfl
+  unfold deriveAggPublicKey honestSubtreeRoot buildMerkleNodeAt
+  rw [hProf, hSubH, hTop]
+  dsimp only [buildMerkleNodePoly, merkleAddrNodeHash, xmssNodeAddr]
+  rw [compactHonestWotsPk_eq, compactHonestWotsPk_eq, compactMerkleNode_eq,
+      ← compactJortsPkRoot_eq_def]
+
+private theorem bytes32ToDigest5_limbs (bs : List UInt8) :
+    let b := (bs ++ List.replicate (32 - bs.length) (0 : UInt8)).take 32
+    bytes32ToDigest5 bs =
+      ⟨Goldilocks.ofNat (ofBE (b.take 7)),
+       Goldilocks.ofNat (ofBE ((b.drop 7).take 7)),
+       Goldilocks.ofNat (ofBE ((b.drop 14).take 7)),
+       Goldilocks.ofNat (ofBE ((b.drop 21).take 7)),
+       Goldilocks.ofNat (ofBE ((b.drop 28).take 4))⟩ := by
+  dsimp only
+  have h7 : ∀ xs : List UInt8, xs.length ≤ 7 → ofBE xs < goldilocksPrime := fun xs hx =>
+    Nat.lt_of_lt_of_le (ofBE_lt xs)
+      (Nat.le_trans (Nat.pow_le_pow_right (by decide) hx) (by decide))
+  have h4 : ∀ xs : List UInt8, xs.length ≤ 4 → ofBE xs < goldilocksPrime := fun xs hx =>
+    Nat.lt_of_lt_of_le (ofBE_lt xs)
+      (Nat.le_trans (Nat.pow_le_pow_right (by decide) hx) (by decide))
+  unfold bytes32ToDigest5
+  dsimp only
+  congr 1
+  · exact Goldilocks.ext (Nat.mod_eq_of_lt (h7 _ (List.length_take_le _ _))).symm
+  · exact Goldilocks.ext (Nat.mod_eq_of_lt (h7 _ (List.length_take_le _ _))).symm
+  · exact Goldilocks.ext (Nat.mod_eq_of_lt (h7 _ (List.length_take_le _ _))).symm
+  · exact Goldilocks.ext (Nat.mod_eq_of_lt (h7 _ (List.length_take_le _ _))).symm
+  · exact Goldilocks.ext (Nat.mod_eq_of_lt (h4 _ (List.length_take_le _ _))).symm
+
+private theorem computeHmsgStateful_xmss_eq (pkSeed pkRoot rRand : Digest4)
+    (msg : List UInt8) (kpIdx tswCtr : Nat) :
+    let h := compactJortsHmsgStateful pkSeed pkRoot rRand msg kpIdx tswCtr
+    computeHmsgStateful ⟨.xmssPoseidon2, pkSeed, pkRoot⟩ rRand
+        (computeMessageMu ⟨.xmssPoseidon2, pkSeed, pkRoot⟩ msg) kpIdx tswCtr =
+      ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2⟩ := by
+  dsimp only
+  unfold computeMessageMu encodeAggValidatorPkBytes qsagMuTagBytes
+  dsimp only
+  rw [bytes32ToDigest5_limbs]
+  unfold computeHmsgStateful domainHMsgStateful poseidon2IvTag
+  rw [compactJortsHmsgStateful_eq_def]
+
+private theorem extractWotsDigitsChecked_compactAuditGeom (d : Digest5) :
+    extractWotsDigitsChecked compactAuditGeom d =
+      if checkDigest5Limbs63 d then
+        some [d.limb0.val % 4, (d.limb0.val / 4) % 4]
+      else none := by
+  unfold extractWotsDigitsChecked compactAuditGeom
+  dsimp only
+  cases checkDigest5Limbs63 d <;> rfl
+
+theorem signAggNative_compactAuditGeom (skSeed pkSeed pkRoot : Digest4)
+    (msg : List UInt8) (rRand : Digest4) (leafIdx ctr : Nat) :
+    signAggNative compactAuditGeom skSeed ⟨.xmssPoseidon2, pkSeed, pkRoot⟩
+        msg rRand leafIdx ctr [] =
+      let cp := compactJortsSign1 skSeed pkSeed pkRoot msg rRand leafIdx ctr
+      ⟨.xmssPoseidon2, rRand, leafIdx, [], [⟨ctr, cp.1, cp.2⟩]⟩ := by
+  have hProf : compactAuditGeom.profile = .xmssPoseidon2 := rfl
+  have hFors : (compactAuditGeom.forsTrees == 0) = true := rfl
+  have hSubH : compactAuditGeom.subtreeHeight = 1 := rfl
+  unfold signAggNative signUpperLayersAux signUpperPoly signWotsLayerWithDigits
+    buildMerkleAuthPathAt
+  simp only [hProf, hFors, hSubH, ↓reduceIte, Nat.pow_one]
+  dsimp only [buildMerkleAuthPathPoly]
+  rw [computeHmsgStateful_xmss_eq, extractWotsDigitsChecked_compactAuditGeom]
+  have hChk : checkDigest5Limbs63
+      (let h := compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr
+       ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2⟩) =
+    compactCheck5Limbs63
+      (compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr) := by
+    unfold checkDigest5Limbs63
+    rw [compactCheck5Limbs63_eq_def]
+  rw [hChk, compactJortsSign1_eq_def]
+  dsimp only
+  rw [compactHonestWotsPk_eq]
+  cases compactCheck5Limbs63
+      (compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr) with
+  | false => rfl
+  | true =>
+    simp only [↓reduceIte, Option.getD_some, List.length_cons, List.length_nil]
+    have hR2 : List.range 2 = [0, 1] := rfl
+    rw [hR2, List.map_cons, List.map_cons, List.map_nil]
+    have hGet0 : ∀ (a b : Nat), ([a, b])[0]! = a := fun _ _ => rfl
+    have hGet1 : ∀ (a b : Nat), ([a, b])[1]! = b := fun _ _ => rfl
+    rw [hGet0, hGet1, compactWotsWalk_eq, compactWotsWalk_eq,
+        compactWotsSecret_eq, compactWotsSecret_eq]
+
+theorem verifyAggNativeSig_compactAuditGeom (pkSeed pkRoot : Digest4)
+    (msg : List UInt8) (rRand : Digest4) (leafIdx ctr : Nat) (c0 c1 s0 : Digest4) :
+    verifyAggNativeSig compactAuditGeom ⟨.xmssPoseidon2, pkSeed, pkRoot⟩ msg
+        ⟨.xmssPoseidon2, rRand, leafIdx, [], [⟨ctr, [c0, c1], [s0]⟩]⟩ =
+      compactJortsVerify1 pkSeed pkRoot msg rRand leafIdx ctr c0 c1 s0 := by
+  have hWf : compactAuditGeom.wellFormed = true := deployedAggGeometries_wellFormed.2.2
+  have hTopGuard :
+      (!compactAuditGeom.wellFormed ||
+       (AggSigProfile.xmssPoseidon2 != compactAuditGeom.profile) ||
+       (AggSigProfile.xmssPoseidon2 != compactAuditGeom.profile) ||
+       (([⟨ctr, [c0, c1], [s0]⟩] : List WotsLayerSig).length != compactAuditGeom.numLayers)) =
+      false := by
+    rw [hWf]; rfl
+  have hFors : (compactAuditGeom.forsTrees == 0) = true := rfl
+  have hChainsOk :
+      ((([c0, c1] : List Digest4).length == compactAuditGeom.wotsChains) &&
+       (([s0] : List Digest4).length == compactAuditGeom.subtreeHeight)) = true := rfl
+  have hPow : 2 ^ (compactAuditGeom.numLayers * compactAuditGeom.subtreeHeight) = 2 := rfl
+  have hSubPow : 2 ^ compactAuditGeom.subtreeHeight = 2 := rfl
+  have hTsum : compactAuditGeom.targetSum = 3 := rfl
+  unfold verifyAggNativeSig verifyAggNativeSigStateful verifyWotsLayer
+    verifyUpperLayers verifyUpperPoly recoverAggWotsEndpoints recoverEndpointsPoly
+    merkleWalkRoot merkleWalkPoly merkleAddrNodeHash xmssNodeAddr listNatSum
+  simp only [hTopGuard, hFors, hPow, hSubPow, hChainsOk, hTsum,
+    Bool.false_eq_true, ↓reduceIte, List.isEmpty_nil, Bool.not_true, Bool.false_or]
+  rw [compactJortsVerify1_eq_def]
+  cases decide (leafIdx < 2) with
+  | false => rfl
+  | true =>
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    rw [computeHmsgStateful_xmss_eq, extractWotsDigitsChecked_compactAuditGeom]
+    have hChk : checkDigest5Limbs63
+        (let h := compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr
+         ⟨h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2⟩) =
+      compactCheck5Limbs63
+        (compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr) := by
+      unfold checkDigest5Limbs63
+      rw [compactCheck5Limbs63_eq_def]
+    rw [hChk]
+    cases compactCheck5Limbs63
+        (compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr) with
+    | false => rfl
+    | true =>
+      simp only [↓reduceIte, listNatSum]
+      cases ((compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr).1.val % 4 +
+          ((compactJortsHmsgStateful pkSeed pkRoot rRand msg (leafIdx % 2) ctr).1.val / 4 % 4 + 0) ==
+        3) with
+      | false => rfl
+      | true =>
+        simp only [↓reduceIte, recoverEndpointsPoly, merkleWalkPoly]
+        rw [compactWotsWalk_eq, compactWotsWalk_eq, compactWotsPk2_eq]
+        cases (leafIdx % 2 == 0) with
+        | false => simp only [compactMerkleNode_eq]
+        | true => simp only [compactMerkleNode_eq]
+
+#verify_constructive
+  Qsag.deriveAggPublicKey_compactAuditGeom
+  Qsag.signAggNative_compactAuditGeom
+  Qsag.verifyAggNativeSig_compactAuditGeom
 end Qsag
 end

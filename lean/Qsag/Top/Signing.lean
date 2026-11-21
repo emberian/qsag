@@ -408,14 +408,72 @@ theorem productionLatchedSigner_trace_safe
   Qsag.Spec.latchedSigner_trace_safe (productionSigScheme suite params optRand maxGrind) sk
     maxWindow hAdmits
 
+/-- **Multi-Leaf $q$-Query Adaptive EUF-CMA Forger Bound Over `poly257MultiLeafSuite`
+    (`poly257MultiLeaf_closed_adaptive_forger_bound`)**:
+    Top-level re-export of `Qsag.poly257MultiLeaf_adaptive_forger_bound` (`ExecEufCmaClosedGame` §6.2):
+    simulates arbitrary adaptive signing queries across the 4-leaf stateful Jorts tree under
+    `BeltLatch` and raw-hash queries from a punctured key (`Qsag.puncturedSignQuery`), bounding
+    `ExecEufCmaGame.winProb` by `12 · εPre` under `Spec.SmDtPreHard (Spec.WithinPreQueries 2 1)`. -/
+theorem poly257MultiLeaf_closed_adaptive_forger_bound {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * Qsag.pow256 24) * nA)
+    (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+    (candOf : Fin 12 → Fin (Qsag.pow256 23 * nA) → Qsag.Spec.Bytes)
+    (hCand : ∀ (s : Fin 12) (c : Fin (Qsag.pow256 23 * nA)) (pkSeed : List UInt8)
+        (endpt : UInt8 × UInt8),
+      let spAdv := Qsag.Spec.CoinSplit.prod (Qsag.pow256 23) nA
+      let other23 := Qsag.byteVecSampler 23 (spAdv.chal c)
+      let pkSim := Qsag.pkFromTbl pkSeed (Qsag.puncturedSlotTbl pkSeed s endpt other23)
+      let simOut := (Qsag.evalLatchedAdaptiveTree true Qsag.poly257MultiLeafSuite.rawHash
+        (Qsag.puncturedSignQuery pkSeed s endpt other23) ((adv (spAdv.advc c)).run pkSim) 0).1
+      simOut.2.leafGlobalIdx = s.1 / 3 →
+      Qsag.extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+      Qsag.extractSigChainCand simOut.2 (s.1 % 3) = candOf s c)
+    {εPre : Qsag.Spec.RatBound}
+    (hPre : Qsag.Spec.SmDtPreHard (Qsag.Spec.WithinPreQueries 2 1) Qsag.Spec.poly257Hash 1 1 1 εPre) :
+    Qsag.Spec.GameBound
+      (Qsag.ExecEufCmaGame hPos Qsag.poly257MultiLeafSuite Qsag.multiLeaf4JortsParams
+        (fun z => Qsag.multiLeaf24Keygen
+          ((Qsag.Spec.CoinSplit.prod (256 * Qsag.pow256 24) nA).chal z))
+        (fun z => adv ((Qsag.Spec.CoinSplit.prod (256 * Qsag.pow256 24) nA).advc z))).winProb
+      (Qsag.Spec.RatBound.scale 12 εPre) :=
+  Qsag.poly257MultiLeaf_adaptive_forger_bound hPos adv candOf hCand hPre
+
+theorem inhabited_poly257MultiLeaf_closed_adaptive_forger_bound :
+    ∃ (nA qHash qSign : Nat),
+      0 < (256 * Qsag.pow256 24) * nA ∧
+      ∃ (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+        (candOf : Fin 12 → Fin (Qsag.pow256 23 * nA) → Qsag.Spec.Bytes),
+        (∀ (s : Fin 12) (c : Fin (Qsag.pow256 23 * nA)) (pkSeed : List UInt8)
+            (endpt : UInt8 × UInt8),
+          let spAdv := Qsag.Spec.CoinSplit.prod (Qsag.pow256 23) nA
+          let other23 := Qsag.byteVecSampler 23 (spAdv.chal c)
+          let pkSim := Qsag.pkFromTbl pkSeed (Qsag.puncturedSlotTbl pkSeed s endpt other23)
+          let simOut := (Qsag.evalLatchedAdaptiveTree true Qsag.poly257MultiLeafSuite.rawHash
+            (Qsag.puncturedSignQuery pkSeed s endpt other23) ((adv (spAdv.advc c)).run pkSim) 0).1
+          simOut.2.leafGlobalIdx = s.1 / 3 →
+          Qsag.extractSigChainCand simOut.2 (s.1 % 3) ≠ [] →
+          Qsag.extractSigChainCand simOut.2 (s.1 % 3) = candOf s c) ∧
+        ∃ εPre : Qsag.Spec.RatBound,
+          Qsag.Spec.SmDtPreHard (Qsag.Spec.WithinPreQueries 2 1) Qsag.Spec.poly257Hash 1 1 1 εPre :=
+  Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+
 #verify_constructive
   Qsag.Top.production_euf_cma_gameBound
   Qsag.Top.productionLatchedSigner_trace_safe
+  Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
+  Qsag.Top.inhabited_poly257MultiLeaf_closed_adaptive_forger_bound
   Qsag.Top.waistbandCache_preserves_multiturn_traces
   Qsag.Top.sponge_and_spn_poly_basis_composition
   Qsag.Top.isa_zeroize_and_ret_ct_composition
   Qsag.Top.adaptive_within_and_compact1122_signing_chain
   Qsag.Top.public_spn_qrom_differential_walsh_and_isa_cosim
+
+#verify_inhabited
+  Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
+  Qsag.Top.inhabited_poly257MultiLeaf_closed_adaptive_forger_bound
+
+#tooth_pair Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
 
 open Qsag
 

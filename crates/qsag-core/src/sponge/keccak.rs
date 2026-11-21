@@ -1,7 +1,7 @@
 //! NIST FIPS 202 `Keccak-f[1600]` & `SHAKE256`, NIST SP 800-185 `cSHAKE256`, self-delimiting
 //! LEB128 `encode_multi_frame`, and compile-time typestate `FiatShamirTranscript<Phase>`.
 //!
-//! Matches `lean/Qsag/Keccak.lean` bit-for-bit across all rate boundaries, customization prefixes,
+//! Matches `lean/Qsag/Oracle/Keccak.lean` bit-for-bit across all rate boundaries, customization prefixes,
 //! and official FIPS 202 conformance vectors.
 
 use alloc::vec;

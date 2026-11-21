@@ -788,6 +788,9 @@ end Qsag.HybridSecurity
 public section
 
 #verify_inhabited Qsag.HybridSecurity.one_use_incomparable Qsag.HybridSecurity.incomparable_inhabited
+#export_eqns Qsag.HybridSecurity.suiteBytes Qsag.HybridSecurity.keyHash Qsag.HybridSecurity.idInput
+  Qsag.HybridSecurity.idCommit Qsag.HybridSecurity.addressOf Qsag.HybridSecurity.transcript
+  Qsag.HybridSecurity.validateForAddress Qsag.HybridSecurity.verifyWith
 
 end
 
@@ -1076,6 +1079,7 @@ theorem paid_ne_unpaid : paid ≠ unpaid := by decide
 #tooth_pair Qsag.HybridSecurity.ledger_trace_safety vs rejects_nonce_replay
 #tooth_pair Qsag.HybridSecurity.threshold_spending_safety vs rejects_window_overspend
 #tooth_pair Qsag.HybridSecurity.authorized_window_binding vs window_advance_rejects_wrong_tag
+#export_eqns encodePre transcriptFields hrpQs paid unpaid
 
 end Qsag.CompositionInstances
 end

@@ -69,6 +69,7 @@ pub fn keccak_f1600(state: &mut [u64; 25]) {
 }
 
 /// Generic stack-allocated Keccak sponge with volatile zeroization on `Drop`.
+/// (`Clone` is required for public cSHAKE256 customization-prefix `OnceLock` caching.)
 #[derive(Clone)]
 pub struct KeccakSponge<const RATE: usize> {
     state: [u64; 25],

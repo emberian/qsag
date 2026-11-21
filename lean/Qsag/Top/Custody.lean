@@ -2963,8 +2963,9 @@ private theorem sepCustody_validTrace_sim
     Assumed (fields of `SeparatedCustodyRunAssumptions`, none provable from `Qsag.Custody.*`):
     `noForgery`, `leavesIncrease`. Not covered: the ideal machine's signature
     output and WAL replay (the coordinator outputs a verdict only, so `S` and `oracleSign` are
-    arbitrary), and any bound on the probability of the forgery event. No run with an accepted
-    submission is exhibited in the tree; that needs an evaluated production signature. -/
+    arbitrary), and any bound on the probability of the forgery event. A concrete non-empty
+    multi-party 2-of-3 run with two accepted `"QSAG.CUSTODY.APPROVAL/v3"` submissions across leaves
+    `0` and `1` is exhibited below in `inhabited_separatedCustody_accepted_run`. -/
 theorem separatedCustody_refines_idealCustody_of
     (d : Qsag.Custody.Deployment) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
     (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
@@ -3050,6 +3051,422 @@ theorem sepForged_fresh_verifying_signature (d : Qsag.Custody.Deployment) (c : S
     exact List.any_eq_true.mpr ⟨a, ha, decide_eq_true ⟨hParty, hDep, hIntent⟩⟩
   rw [hIss] at hNotIssued
   exact absurd hNotIssued (by decide)
+
+/-! #### Non-Empty Multi-Party 2-of-3 Accepted Run Witness & Paired Tooth for `SeparatedCustodyRunAssumptions` -/
+
+private def sepWitnessC1B : List UInt8 := List.replicate 32 0x1B
+
+private def sepWitnessSuite : Qsag.TweakableHashSuite where
+  suiteId := []
+  rawHash := fun _ => sepWitnessC1B
+  rawHash_len := fun _ => List.length_replicate
+
+private def sepWitnessParams : Qsag.PqHashParams :=
+  ⟨4, 128, 1, 1, 0, 0, 1, true⟩
+
+private def sepWitnessCfg : Qsag.Custody.SigningConfig :=
+  ⟨sepWitnessSuite, sepWitnessParams, [], 1⟩
+
+private def sepWitnessSig (leaf : Nat) : Qsag.PqHashSig where
+  rRand := sepWitnessC1B
+  msgTswCtr := 0
+  leafGlobalIdx := leaf
+  forsOpenings := []
+  layerSigs := [⟨0, List.replicate 128 sepWitnessC1B, [sepWitnessC1B]⟩]
+
+private def sepWitnessRoundPolicy : Qsag.Custody.RoundPolicy where
+  keys := fun _ _ => ⟨Qsag.towerOne 7, Qsag.towerOne 7, fun _ => (Qsag.towerOne 7, Qsag.towerOne 7)⟩
+  roster := [0]
+  digest := fun _ => []
+
+/-- Concrete 2-of-3 separated-custody deployment (`numParties = 3, threshold = 2, capacity = 100`)
+    whose custodians sign `"QSAG.CUSTODY.APPROVAL/v3"` payloads via `Custody.sign`. -/
+def sepWitnessDep : Qsag.Custody.Deployment where
+  deploymentId := 7
+  signer := sepWitnessCfg
+  keys := fun _ => ⟨[], [], []⟩
+  rounds := fun _ => sepWitnessRoundPolicy
+  caps := fun _ => 100
+  policies := fun i => Qsag.demoQuorumCustodian i [] []
+  numParties := 3
+  threshold := 2
+  capacity := 100
+
+def sepWitnessQuorum : CustodyQuorumProfile where
+  numParties := 3
+  threshold := 2
+  spendCap := 100
+  h_pos := by decide
+  h_le := by decide
+
+theorem sepWitnessDep_profile : SepDeploymentProfile sepWitnessDep sepWitnessQuorum where
+  parties := rfl
+  threshold := rfl
+  capacity := rfl
+
+private theorem sepWitnessParams_wf : sepWitnessParams.productionWellFormed = true := by
+  rw [Qsag.PqHashParams.productionWellFormed_eq]
+  decide
+
+private theorem sepWitness_sumDigits_eq_foldr :
+    ∀ ds : List Nat, Qsag.sumDigits ds = ds.foldr (· + ·) 0
+  | [] => Qsag.sumDigits_nil
+  | d :: ds => (Qsag.sumDigits_cons d ds).trans (congrArg (d + ·) (sepWitness_sumDigits_eq_foldr ds))
+
+private theorem sepWitness_c1B_digits_eval :
+    Qsag.extractBaseWDigitsChecked 4 128 sepWitnessC1B =
+        some (Qsag.extractBaseWDigits 4 128 sepWitnessC1B) ∧
+      Qsag.checkTargetSum 4 128 192 (Qsag.extractBaseWDigits 4 128 sepWitnessC1B) = true := by
+  unfold sepWitnessC1B
+  simp only [Qsag.extractBaseWDigitsChecked_eq, Qsag.extractBaseWDigits_eq,
+    Qsag.checkTargetSum, sepWitness_sumDigits_eq_foldr]
+  decide +kernel
+
+private theorem sepWitness_wotsChainSteps (kp r : Nat) :
+    ∀ (k st : Nat),
+      Qsag.wotsChainSteps sepWitnessSuite [] 0 0 kp r st k sepWitnessC1B = sepWitnessC1B
+  | 0, _ => Qsag.wotsChainSteps_zero _ _ _ _ _ _ _ _
+  | k + 1, st => by
+    rw [Qsag.wotsChainSteps_succ]
+    dsimp only
+    rw [Qsag.thChainF_eq, Qsag.thCall_eq]
+    exact sepWitness_wotsChainSteps kp r k (st + 1)
+
+private theorem sepWitness_derivePk :
+    Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩ =
+      ⟨[], sepWitnessC1B⟩ := by
+  unfold Qsag.derivePublicKey
+  dsimp only
+  rw [Qsag.computeXmssSubtreeRoot_eq]
+  have hSubH : sepWitnessParams.subtreeHeight = 1 := rfl
+  have hTop : UInt32.ofNat (sepWitnessParams.numLayers - 1) = 0 := rfl
+  dsimp only
+  rw [hTop, hSubH, Qsag.computeMerkleNode_succ, Qsag.thNodeH_eq, Qsag.thCall_eq]
+  rfl
+
+private theorem sepWitness_authPath {leaf : Nat} (hLeaf : leaf < 2) :
+    Qsag.buildMerkleAuthPathKp sepWitnessSuite [] 0 0 .tree 0
+      (Qsag.computeWotsPk sepWitnessSuite sepWitnessParams ⟨[], [], []⟩ 0 0) 1 0 0 leaf =
+      [sepWitnessC1B] := by
+  have hCases : leaf = 0 ∨ leaf = 1 := by omega
+  rcases hCases with rfl | rfl
+  · rw [Qsag.buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : 0 < 1), ↓reduceIte]
+    rw [Qsag.buildMerkleAuthPathKp.public_eq_1, Qsag.computeMerkleNodeKp_zero,
+      Qsag.computeWotsPk_eq, Qsag.thTweakTl_eq, Qsag.thCall_eq]
+    rfl
+  · rw [Qsag.buildMerkleAuthPathKp.public_eq_2]
+    simp only [Nat.pow_zero, (by decide : ¬ (1 < 1)), ↓reduceIte]
+    rw [Qsag.buildMerkleAuthPathKp.public_eq_1, Qsag.computeMerkleNodeKp_zero,
+      Qsag.computeWotsPk_eq, Qsag.thTweakTl_eq, Qsag.thCall_eq]
+    rfl
+
+private theorem sepWitnessSign_eq_some (dep party : Nat) (r : Qsag.Custody.Intent)
+    (hLeaf : r.leaf < 2) :
+    Qsag.Custody.sign sepWitnessCfg ⟨[], [], []⟩ dep party r =
+      some (sepWitnessSig r.leaf) := by
+  rw [Qsag.Custody.sign_eq, Qsag.evalProductionStatefulSign_def]
+  have hSt : sepWitnessParams.statefulJorts = true := rfl
+  have hRange : sepWitnessParams.productionLeafIdxInRange r.leaf = true := by
+    rw [Qsag.PqHashParams.productionLeafIdxInRange_eq]
+    dsimp only [sepWitnessParams]
+    exact decide_eq_true (by simpa using hLeaf)
+  dsimp only [sepWitnessCfg]
+  simp only [hSt, sepWitnessParams_wf, hRange, Bool.not_true, Bool.or_self,
+    Bool.false_eq_true, ↓reduceIte]
+  rw [Qsag.signProductionHypertreeCore_def]
+  have hNumLayers : sepWitnessParams.numLayers = 1 := rfl
+  simp only [hSt, ↓reduceIte, hNumLayers]
+  have hPkSeed : (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkSeed =
+      [] := rfl
+  have hMu : Qsag.thPreHash sepWitnessSuite []
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkRoot
+      (Qsag.Custody.payload dep party r) = sepWitnessC1B := by
+    rw [Qsag.thPreHash_eq, Qsag.thCall_eq]; rfl
+  have hRand : Qsag.thPrfMsg sepWitnessSuite [] [] sepWitnessC1B = sepWitnessC1B := by
+    rw [Qsag.thPrfMsg_eq, Qsag.thCall_eq]; rfl
+  rw [hPkSeed, hMu, hRand]
+  have hDiv : r.leaf / 2 = 0 := Nat.div_eq_of_lt hLeaf
+  have hMod : r.leaf % 2 = r.leaf := Nat.mod_eq_of_lt hLeaf
+  have hHmsg0 : Qsag.thHashLeafMsg sepWitnessSuite sepWitnessC1B []
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkRoot
+      sepWitnessC1B (UInt64.ofNat (r.leaf / 2)) (UInt32.ofNat (r.leaf % 2)) 0 =
+      sepWitnessC1B := by
+    rw [Qsag.thHashLeafMsg_eq, Qsag.thCall_eq]; rfl
+  have hGrind0 : Qsag.grindTswLeafCounterAux sepWitnessSuite 4 128
+      sepWitnessParams.targetSum sepWitnessC1B []
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkRoot
+      sepWitnessC1B (UInt64.ofNat (r.leaf / 2)) (UInt32.ofNat (r.leaf % 2)) 0 1 =
+      some (0, Qsag.extractBaseWDigits 4 128 sepWitnessC1B, sepWitnessC1B) := by
+    have hTgt : sepWitnessParams.targetSum = 192 := by
+      rw [Qsag.PqHashParams.targetSum_eq]
+      decide
+    rw [hTgt, Qsag.grindTswLeafCounterAux_succ]
+    simp only [(by decide : 0 < 2 ^ 32), decide_true, Bool.not_true, Bool.false_eq_true,
+      ↓reduceIte, hHmsg0, sepWitness_c1B_digits_eval.1]
+    rw [cert_if_pos sepWitness_c1B_digits_eval.2]
+  have hChainsEq : (List.range 128).map (fun j =>
+      let dr := (Qsag.extractBaseWDigits 4 128 sepWitnessC1B).getD j 0
+      Qsag.wotsChainSteps sepWitnessSuite [] 0 (UInt64.ofNat (r.leaf / 2))
+        (r.leaf % 2) j 0 dr
+        (Qsag.wotsSecretBase sepWitnessSuite ⟨[], [], []⟩ 0
+          (UInt64.ofNat (r.leaf / 2)) (r.leaf % 2) j)) =
+      List.replicate 128 sepWitnessC1B := by
+    have hEach : ∀ j ∈ List.range 128,
+        Qsag.wotsChainSteps sepWitnessSuite [] 0 (UInt64.ofNat (r.leaf / 2))
+          (r.leaf % 2) j 0 ((Qsag.extractBaseWDigits 4 128 sepWitnessC1B).getD j 0)
+          (Qsag.wotsSecretBase sepWitnessSuite ⟨[], [], []⟩ 0
+            (UInt64.ofNat (r.leaf / 2)) (r.leaf % 2) j) = sepWitnessC1B := by
+      intro j _
+      rw [hDiv, hMod, Qsag.wotsSecretBase_eq, Qsag.thSecretPrf_eq, Qsag.thCall_eq]
+      exact sepWitness_wotsChainSteps r.leaf j _ 0
+    exact (List.map_congr_left hEach).trans (by decide)
+  have hLayers : Qsag.signProductionHypertreeLayers sepWitnessSuite sepWitnessParams ⟨[], [], []⟩
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkRoot
+      sepWitnessC1B 1 0 r.leaf sepWitnessC1B 1 =
+      some (sepWitnessSig r.leaf).layerSigs := by
+    rw [Qsag.signProductionHypertreeLayers_succ]
+    have hSubLeaves : 2 ^ sepWitnessParams.subtreeHeight = 2 := rfl
+    have hSubH : sepWitnessParams.subtreeHeight = 1 := rfl
+    have hEll : sepWitnessParams.ell1 = 128 := rfl
+    have hW : sepWitnessParams.w = 4 := rfl
+    have hu32_0 : UInt32.ofNat 0 = 0 := rfl
+    have hu64_0 : UInt64.ofNat 0 = 0 := rfl
+    simp only [hSubLeaves, hSt, decide_true, Bool.and_self, ↓reduceIte, hW, hEll, hGrind0]
+    rw [Qsag.signProductionHypertreeLayers_zero]
+    dsimp only
+    rw [hu32_0, hChainsEq, hDiv, hu64_0, hMod, hSubH, sepWitness_authPath hLeaf]
+    rfl
+  rw [hLayers]
+  dsimp only
+  have hVer : Qsag.verifyProductionPqHashSig sepWitnessSuite sepWitnessParams
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩)
+      (Qsag.Custody.payload dep party r) (sepWitnessSig r.leaf) = true := by
+    obtain ⟨_, hLsVer⟩ := Qsag.signProductionHypertreeLayers_sound sepWitnessSuite
+      sepWitnessParams ⟨[], [], []⟩
+      (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩).pkRoot
+      sepWitnessC1B 1 1 0 r.leaf sepWitnessC1B (sepWitnessSig r.leaf).layerSigs
+      (by decide) (by simpa [sepWitnessParams] using hLeaf) hLayers
+    rw [Qsag.verifyProductionPqHashSig_eq]
+    have hLsLen : (sepWitnessSig r.leaf).layerSigs.length = 1 := rfl
+    have hLeafF : (sepWitnessSig r.leaf).leafGlobalIdx = r.leaf := rfl
+    have hCtrF : (sepWitnessSig r.leaf).msgTswCtr = 0 := rfl
+    have hForsF : (sepWitnessSig r.leaf).forsOpenings = [] := rfl
+    have hRF : (sepWitnessSig r.leaf).rRand = sepWitnessC1B := rfl
+    simp only [sepWitnessParams_wf, hLeafF, hRange, Bool.not_true, Bool.or_self,
+      Bool.false_eq_true, ↓reduceIte, hLsLen, hNumLayers, hSt, hCtrF, ne_eq,
+      not_true_eq_false, hForsF, List.isEmpty_nil, hPkSeed, hMu, hRF]
+    rw [hLsVer]
+    simp only [decide_false, Bool.false_eq_true, ↓reduceIte]
+    exact decide_eq_true rfl
+  change (if Qsag.verifyProductionPqHashSig sepWitnessSuite sepWitnessParams
+        (Qsag.derivePublicKey sepWitnessSuite sepWitnessParams ⟨[], [], []⟩)
+        (Qsag.Custody.payload dep party r) (sepWitnessSig r.leaf) = true then
+      some (sepWitnessSig r.leaf)
+    else none) = some (sepWitnessSig r.leaf)
+  exact cert_if_pos hVer _ _
+
+private theorem sepWitness_submitRecorded_two_of_three
+    (s : Qsag.Custody.SharedHistory) (r : Qsag.Custody.Intent) (pA pB : Nat)
+    (hpA : pA < 3) (hpB : pB < 3) (hNe : pA ≠ pB) (hLeaf : r.leaf < 2)
+    (hFresh : r.session ∉ s.coordinator.consumedSessions)
+    (hBudget : s.coordinator.spent + r.spend ≤ s.coordinator.capacity) :
+    let cs : List Qsag.Custody.Certificate :=
+      [⟨pA, r, sepWitnessSig r.leaf⟩, ⟨pB, r, sepWitnessSig r.leaf⟩]
+    (Qsag.Custody.submitRecorded sepWitnessDep s r cs).2 = true ∧
+    (Qsag.Custody.submitRecorded sepWitnessDep s r cs).1 =
+      ⟨{ s.coordinator with
+          consumedSessions := r.session :: s.coordinator.consumedSessions
+          spent := s.coordinator.spent + r.spend },
+        ⟨r, cs⟩ :: s.accepted⟩ := by
+  intro cs
+  have hVerA : Qsag.Custody.verify sepWitnessCfg (Qsag.Custody.publicKeys sepWitnessDep pA)
+      7 pA r (sepWitnessSig r.leaf) = true :=
+    Qsag.Custody.sign_verifies sepWitnessCfg ⟨[], [], []⟩ 7 pA r _
+      (sepWitnessSign_eq_some 7 pA r hLeaf)
+  have hVerB : Qsag.Custody.verify sepWitnessCfg (Qsag.Custody.publicKeys sepWitnessDep pB)
+      7 pB r (sepWitnessSig r.leaf) = true :=
+    Qsag.Custody.sign_verifies sepWitnessCfg ⟨[], [], []⟩ 7 pB r _
+      (sepWitnessSign_eq_some 7 pB r hLeaf)
+  have hQuorum : Qsag.Custody.acceptQuorum sepWitnessCfg
+      (Qsag.Custody.publicKeys sepWitnessDep) 7 3 2
+      s.coordinator.consumedSessions r cs = true := by
+    refine (Qsag.Custody.acceptQuorum_spec _ _ _ _ _ _ _ _).mpr
+      ⟨hFresh, by decide, Nat.le_refl 2, ?_, ?_, ?_⟩
+    · dsimp only [cs, List.map]
+      exact List.Pairwise.cons
+        (fun _ hb hEq => hNe (hEq.trans (List.mem_singleton.mp hb)))
+        (List.Pairwise.cons (fun _ hb => False.elim (List.not_mem_nil hb)) .nil)
+    · intro p hp
+      simp only [cs, List.mem_cons, List.not_mem_nil, or_false] at hp
+      rcases hp with rfl | rfl
+      · exact hpA
+      · exact hpB
+    · intro c hc
+      simp only [cs, List.mem_cons, List.not_mem_nil, or_false] at hc
+      rcases hc with rfl | rfl
+      · exact ⟨rfl, hVerA⟩
+      · exact ⟨rfl, hVerB⟩
+  have hVerdict : (Qsag.Custody.submitRecorded sepWitnessDep s r cs).2 = true := by
+    rw [Qsag.Custody.submitRecorded_verdict]
+    exact (Qsag.Custody.submit_accepted_iff _ _ _ _ _ _ _ _).mpr ⟨hQuorum, hBudget⟩
+  exact ⟨hVerdict, (Qsag.Custody.submitRecorded_accepted sepWitnessDep s r cs hVerdict).2.2⟩
+
+private theorem sepForged_two_issued_nil (c : SepCustodyState) (dep pA pB : Nat)
+    (r : Qsag.Custody.Intent) (sig : Qsag.PqHashSig)
+    (hA : (⟨pA, dep, r⟩ : SepIssue) ∈ c.issued)
+    (hB : (⟨pB, dep, r⟩ : SepIssue) ∈ c.issued) :
+    sepForged c dep r [⟨pA, r, sig⟩, ⟨pB, r, sig⟩] = [] := by
+  have hIssA : sepIssuedBy c.issued pA dep r = true :=
+    List.any_eq_true.mpr ⟨⟨pA, dep, r⟩, hA, decide_eq_true ⟨rfl, rfl, rfl⟩⟩
+  have hIssB : sepIssuedBy c.issued pB dep r = true :=
+    List.any_eq_true.mpr ⟨⟨pB, dep, r⟩, hB, decide_eq_true ⟨rfl, rfl, rfl⟩⟩
+  unfold sepForged
+  simp only [List.filter, hIssA, hIssB, Bool.not_true, Bool.and_false]
+
+/-- **Non-Empty Accepted Multi-Party 2-of-3 Run Witness Satisfying `SeparatedCustodyRunAssumptions`
+    (`inhabited_separatedCustody_accepted_run`)**:
+    Exhibits a concrete 6-turn execution of `sepCustodyMachine sepWitnessDep` across rotating
+    2-of-3 custodian quorums `[0, 1]` (on `leaf = 0, session = 10, spend = 40`) and `[1, 2]`
+    (on `leaf = 1, session = 11, spend = 35`), signing `"QSAG.CUSTODY.APPROVAL/v3"` bytes via
+    `Custody.sign` and recording `c.shared.accepted.length = 2` (`spent = 75`) with
+    `SeparatedCustodyRunAssumptions tr c` (`forgeries = []` and strictly increasing leaves `0 < 1`). -/
+theorem inhabited_separatedCustody_accepted_run :
+    ∃ (d : Qsag.Custody.Deployment) (quorum₀ : CustodyQuorumProfile)
+      (c₀ c : SepCustodyState) (tr : List (SepCustodyInput × SepCustodyOutput))
+      (a : Qsag.Custody.AcceptedSubmission),
+      SepDeploymentProfile d quorum₀ ∧
+      (sepCustodyMachine d).Init c₀ ∧
+      (sepCustodyMachine d).ValidTrace c₀ tr c ∧
+      SeparatedCustodyRunAssumptions tr c ∧
+      a ∈ c.shared.accepted ∧
+      c.shared.accepted.length = 2 ∧
+      c.shared.coordinator.spent = 75 := by
+  let r0 : Qsag.Custody.Intent := ⟨10, 0, 0, 40, [0x41]⟩
+  let r1 : Qsag.Custody.Intent := ⟨11, 1, 1, 35, [0x42]⟩
+  let cs0 : List Qsag.Custody.Certificate :=
+    [⟨0, r0, sepWitnessSig 0⟩, ⟨1, r0, sepWitnessSig 0⟩]
+  let cs1 : List Qsag.Custody.Certificate :=
+    [⟨1, r1, sepWitnessSig 1⟩, ⟨2, r1, sepWitnessSig 1⟩]
+  let c₀ : SepCustodyState := ⟨⟨⟨[], 0, 100⟩, []⟩, [], [], []⟩
+  let c₁ : SepCustodyState := { c₀ with issued := [⟨0, 7, r0⟩] }
+  let c₂ : SepCustodyState := { c₁ with issued := [⟨1, 7, r0⟩, ⟨0, 7, r0⟩] }
+  have hSub0 := sepWitness_submitRecorded_two_of_three c₂.shared r0 0 1
+    (by decide) (by decide) (by decide) (by decide) List.not_mem_nil (by decide)
+  have hForg0 : sepForged c₂ 7 r0 cs0 = [] :=
+    sepForged_two_issued_nil c₂ 7 0 1 r0 (sepWitnessSig 0)
+      (List.mem_cons_of_mem _ List.mem_cons_self) List.mem_cons_self
+  let c₃ : SepCustodyState :=
+    { c₂ with shared := ⟨⟨[10], 40, 100⟩, [⟨r0, cs0⟩]⟩, forgeries := [] }
+  let c₄ : SepCustodyState := { c₃ with issued := ⟨1, 7, r1⟩ :: c₃.issued }
+  let c₅ : SepCustodyState := { c₄ with issued := ⟨2, 7, r1⟩ :: c₄.issued }
+  have hSub1 := sepWitness_submitRecorded_two_of_three c₅.shared r1 1 2
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+  have hForg1 : sepForged c₅ 7 r1 cs1 = [] :=
+    sepForged_two_issued_nil c₅ 7 1 2 r1 (sepWitnessSig 1)
+      (List.mem_cons_of_mem _ List.mem_cons_self) List.mem_cons_self
+  let c₆ : SepCustodyState :=
+    { c₅ with
+      shared := ⟨⟨[11, 10], 75, 100⟩, [⟨r1, cs1⟩, ⟨r0, cs0⟩]⟩
+      forgeries := [] }
+  have hs1 : sepCustodyStep sepWitnessDep c₀ (.approve 0 7 r0) =
+      some (c₁, .certificate ⟨0, r0, sepWitnessSig 0⟩) := by
+    unfold sepCustodyStep; dsimp only
+    have hg : 0 < sepWitnessDep.numParties ∧ 0 ∉ c₀.corruptParties := ⟨by decide, List.not_mem_nil⟩
+    rw [cert_if_pos hg]
+    dsimp only [sepWitnessDep]
+    rw [sepWitnessSign_eq_some 7 0 r0 (by decide)]
+  have hs2 : sepCustodyStep sepWitnessDep c₁ (.approve 1 7 r0) =
+      some (c₂, .certificate ⟨1, r0, sepWitnessSig 0⟩) := by
+    unfold sepCustodyStep; dsimp only
+    have hg : 1 < sepWitnessDep.numParties ∧ 1 ∉ c₁.corruptParties := ⟨by decide, List.not_mem_nil⟩
+    rw [cert_if_pos hg]
+    dsimp only [sepWitnessDep]
+    rw [sepWitnessSign_eq_some 7 1 r0 (by decide)]
+  have hs3 : sepCustodyStep sepWitnessDep c₂ (.submit r0 cs0) = some (c₃, .accepted) := by
+    unfold sepCustodyStep; dsimp only
+    have hV : (Qsag.Custody.submitRecorded sepWitnessDep c₂.shared r0 cs0).2 = true := hSub0.1
+    have hS : (Qsag.Custody.submitRecorded sepWitnessDep c₂.shared r0 cs0).1 =
+        ⟨⟨[10], 40, 100⟩, [⟨r0, cs0⟩]⟩ := hSub0.2
+    have hd : sepWitnessDep.deploymentId = 7 := rfl
+    rw [cert_if_pos hV, hS, hd, hForg0]
+    rfl
+  have hs4 : sepCustodyStep sepWitnessDep c₃ (.approve 1 7 r1) =
+      some (c₄, .certificate ⟨1, r1, sepWitnessSig 1⟩) := by
+    unfold sepCustodyStep; dsimp only
+    have hg : 1 < sepWitnessDep.numParties ∧ 1 ∉ c₃.corruptParties := ⟨by decide, List.not_mem_nil⟩
+    rw [cert_if_pos hg]
+    dsimp only [sepWitnessDep]
+    rw [sepWitnessSign_eq_some 7 1 r1 (by decide)]
+  have hs5 : sepCustodyStep sepWitnessDep c₄ (.approve 2 7 r1) =
+      some (c₅, .certificate ⟨2, r1, sepWitnessSig 1⟩) := by
+    unfold sepCustodyStep; dsimp only
+    have hg : 2 < sepWitnessDep.numParties ∧ 2 ∉ c₄.corruptParties := ⟨by decide, List.not_mem_nil⟩
+    rw [cert_if_pos hg]
+    dsimp only [sepWitnessDep]
+    rw [sepWitnessSign_eq_some 7 2 r1 (by decide)]
+  have hs6 : sepCustodyStep sepWitnessDep c₅ (.submit r1 cs1) = some (c₆, .accepted) := by
+    unfold sepCustodyStep; dsimp only
+    have hV : (Qsag.Custody.submitRecorded sepWitnessDep c₅.shared r1 cs1).2 = true := hSub1.1
+    have hS : (Qsag.Custody.submitRecorded sepWitnessDep c₅.shared r1 cs1).1 =
+        ⟨⟨[11, 10], 75, 100⟩, [⟨r1, cs1⟩, ⟨r0, cs0⟩]⟩ := hSub1.2
+    have hd : sepWitnessDep.deploymentId = 7 := rfl
+    rw [cert_if_pos hV, hS, hd, hForg1]
+    rfl
+  let tr : List (SepCustodyInput × SepCustodyOutput) :=
+    [(.approve 0 7 r0, .certificate ⟨0, r0, sepWitnessSig 0⟩),
+     (.approve 1 7 r0, .certificate ⟨1, r0, sepWitnessSig 0⟩),
+     (.submit r0 cs0, .accepted),
+     (.approve 1 7 r1, .certificate ⟨1, r1, sepWitnessSig 1⟩),
+     (.approve 2 7 r1, .certificate ⟨2, r1, sepWitnessSig 1⟩),
+     (.submit r1 cs1, .accepted)]
+  have hValid : (sepCustodyMachine sepWitnessDep).ValidTrace c₀ tr c₆ :=
+    .accept hs1 (.accept hs2 (.accept hs3 (.accept hs4 (.accept hs5 (.accept hs6 (.nil c₆))))))
+  have hFreshLeaves : sepLeavesFresh 0 tr :=
+    ⟨trivial, trivial, Nat.zero_le 0, trivial, trivial, Nat.le_refl 1, trivial⟩
+  exact ⟨sepWitnessDep, sepWitnessQuorum, c₀, c₆, tr, ⟨r1, cs1⟩,
+    sepWitnessDep_profile, rfl, hValid, ⟨rfl, hFreshLeaves⟩,
+    List.mem_cons_self, rfl, rfl⟩
+
+/-- **`#tooth` Omitting `SeparatedCustodyRunAssumptions` (`noForgery`) Breaks Honest-Approval Provenance
+    (`tooth_separatedCustody_forged_submit_violates_honest_approval`)**:
+    Without `noForgery`, submitting two verifying certificates directly from the initial state (with
+    ZERO `.approve` steps, `c.issued = []`) is accepted by `sepCustodyMachine sepWitnessDep`,
+    refuting the conclusion of `separatedCustody_accepted_honestly_approved`. -/
+theorem tooth_separatedCustody_forged_submit_violates_honest_approval :
+    ∃ (c₀ c : SepCustodyState) (tr : List (SepCustodyInput × SepCustodyOutput)),
+      SepDeploymentProfile sepWitnessDep sepWitnessQuorum ∧
+      (sepCustodyMachine sepWitnessDep).Init c₀ ∧
+      (sepCustodyMachine sepWitnessDep).ValidTrace c₀ tr c ∧
+      sepLeavesFresh 0 tr ∧
+      ¬ (∀ a ∈ c.shared.accepted, ∃ b ∈ c.issued,
+          b.party < sepWitnessDep.numParties ∧
+          b.deploymentId = sepWitnessDep.deploymentId ∧
+          b.intent = a.intent) := by
+  let r0 : Qsag.Custody.Intent := ⟨10, 0, 0, 40, [0x41]⟩
+  let cs0 : List Qsag.Custody.Certificate :=
+    [⟨0, r0, sepWitnessSig 0⟩, ⟨1, r0, sepWitnessSig 0⟩]
+  let c₀ : SepCustodyState := ⟨⟨⟨[], 0, 100⟩, []⟩, [], [], []⟩
+  have hSub0 := sepWitness_submitRecorded_two_of_three c₀.shared r0 0 1
+    (by decide) (by decide) (by decide) (by decide) List.not_mem_nil (by decide)
+  let c₁ : SepCustodyState :=
+    { c₀ with
+      shared := (Qsag.Custody.submitRecorded sepWitnessDep c₀.shared r0 cs0).1
+      forgeries := sepForged c₀ 7 r0 cs0 ++ c₀.forgeries }
+  have hs : sepCustodyStep sepWitnessDep c₀ (.submit r0 cs0) = some (c₁, .accepted) := by
+    unfold sepCustodyStep; dsimp only
+    have hV : (Qsag.Custody.submitRecorded sepWitnessDep c₀.shared r0 cs0).2 = true := hSub0.1
+    rw [cert_if_pos hV]
+    rfl
+  refine ⟨c₀, c₁, [(.submit r0 cs0, .accepted)], sepWitnessDep_profile, rfl,
+    .accept hs (.nil c₁), ⟨Nat.zero_le 0, trivial⟩, ?_⟩
+  intro hAll
+  have hMem : (⟨r0, cs0⟩ : Qsag.Custody.AcceptedSubmission) ∈ c₁.shared.accepted := by
+    dsimp only [c₁]
+    rw [hSub0.2]
+    exact List.mem_cons_self
+  obtain ⟨_, hbMem, _⟩ := hAll ⟨r0, cs0⟩ hMem
+  exact List.not_mem_nil hbMem
 
 /-! ### 8b. A guarded restriction of `sepCustodyMachine` and its `Spec.DataRefines` (`L-Ex-6b`)
 
@@ -4062,6 +4479,80 @@ theorem distributedShareCustody_dataRefines_or_collision
       x₂ ∈ Qsag.DistCustody.observedSharePreimages dep tr) :=
   Qsag.DistCustody.distCustody_dataRefines_or_collision dep hWf hTr
 
+/-- **Multi-Epoch (`ep < 2 ^ h`) Wire-Serialized Base-4 WOTS+C (`target_sum = 12`) Share-Opening
+    Custody Refinement (`multiEpochBase4WotsCShareCustody_dataRefines_or_collision`, `E4a`)**:
+    Specializes `distributedShareCustody_dataRefines_or_collision` to the concrete multi-epoch
+    8-chain base-4 WOTS+C (`w = 4, target_sum = 12`) + height-`h` Merkle deployment
+    `DistCustody.mkBase4WotsCShareDep h H sk depId spendCap` (`Sig = Bytes`) for ANY Merkle height
+    `h : Nat` and ANY 256-bit hash `H : Bytes → BitVec 256`, with zero secret-key reconstruction. -/
+theorem multiEpochBase4WotsCShareCustody_dataRefines_or_collision
+    (h : Nat) (H : Qsag.Spec.Bytes → BitVec 256)
+    (sk : Qsag.DistCustody.Base4WotsCMasterSk) (depId spendCap : Nat)
+    {stFinal : Qsag.DistCustody.ShareState Qsag.DistCustody.Base4CustodianShare
+      Qsag.DistCustody.Base4ShareContrib Qsag.DistCustody.Base4WotsCPk
+      Qsag.DistCustody.MultiEpochDigest Qsag.Spec.Bytes}
+    {tr : List (Qsag.DistCustody.ShareTurn Qsag.DistCustody.Base4ShareContrib ×
+      Qsag.DistCustody.ShareEvent Qsag.DistCustody.Base4CustodianShare Qsag.Spec.Bytes)}
+    (hTr : (Qsag.DistCustody.shareOpeningMachine
+      (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap)).ValidTrace
+      (Qsag.DistCustody.ShareState.init
+        (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap)) tr stFinal) :
+    let dep := Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap
+    ((Qsag.Spec.idealCustodyMachine dep.digests dep.idealOracle dep.deploymentId dep.pk
+        dep.quorum).AdmitsTrace
+        (Qsag.Spec.projectTrace (Qsag.DistCustody.shareVisIn dep) Qsag.DistCustody.shareVisOut tr) ∧
+      stFinal.corrupt.length < dep.quorum.threshold ∧
+      stFinal.ledger.spent ≤ dep.quorum.spendCap ∧
+      (∀ r : Qsag.Spec.CustodyRelease Qsag.DistCustody.MultiEpochDigest Qsag.Spec.Bytes,
+        r ∈ stFinal.ledger.releasedHistory →
+        dep.sigScheme.verify dep.pk (dep.encodeDigest r.digest) r.sig = true ∧
+        r.sig = dep.idealOracle (dep.digests.digest dep.deploymentId r.intent) ∧
+        ∃ p : Nat, p < dep.quorum.numParties ∧ r.intent ∈ (stFinal.nodes p).latched ∧
+          r.intent.epoch < (stFinal.nodes p).latch)) ∨
+    (∃ x₁ x₂ : Qsag.Spec.Bytes,
+      x₁ ≠ x₂ ∧ dep.commit x₁ = dep.commit x₂ ∧
+      x₁ ∈ Qsag.DistCustody.observedSharePreimages dep tr ∧
+      x₂ ∈ Qsag.DistCustody.observedSharePreimages dep tr) :=
+  Qsag.DistCustody.distCustody_dataRefines_or_collision
+    (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap)
+    (Qsag.DistCustody.mkBase4WotsCShareDep_wellFormed h H sk depId spendCap) hTr
+
+/-- Non-empty `h = 3` (`epoch = 5 < 2 ^ 3`) trace witness for
+    `multiEpochBase4WotsCShareCustody_dataRefines_or_collision`. -/
+theorem inhabited_multiEpochBase4WotsCShareCustody :
+    ∃ (h : Nat) (H : Qsag.Spec.Bytes → BitVec 256)
+      (sk : Qsag.DistCustody.Base4WotsCMasterSk) (depId spendCap : Nat)
+      (stFinal : Qsag.DistCustody.ShareState Qsag.DistCustody.Base4CustodianShare
+        Qsag.DistCustody.Base4ShareContrib Qsag.DistCustody.Base4WotsCPk
+        Qsag.DistCustody.MultiEpochDigest Qsag.Spec.Bytes)
+      (tr : List (Qsag.DistCustody.ShareTurn Qsag.DistCustody.Base4ShareContrib ×
+        Qsag.DistCustody.ShareEvent Qsag.DistCustody.Base4CustodianShare Qsag.Spec.Bytes)),
+      (Qsag.DistCustody.shareOpeningMachine
+        (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap)).ValidTrace
+        (Qsag.DistCustody.ShareState.init
+          (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap)) tr stFinal ∧
+      tr.length = 3 := by
+  let sk : Qsag.DistCustody.Base4WotsCMasterSk := ⟨1#256, 2#256, 3#256⟩
+  let H : Qsag.Spec.Bytes → BitVec 256 := fun _ => 0#256
+  let i5 : Qsag.Spec.CustodyIntent := ⟨50, 1, 5, 30, [0x05]⟩
+  obtain ⟨_, _, s3, sigBytes, _, _, _, _, hTr⟩ :=
+    Qsag.DistCustody.mkBase4WotsCShareDep_fresh_epoch_releases 3 H sk 7 100 i5
+      (by decide) (by decide)
+  exact ⟨3, H, sk, 7, 100, s3, _, hTr, rfl⟩
+
+/-- `#tooth` for `multiEpochBase4WotsCShareCustody_dataRefines_or_collision`: any wire-serialized
+    `MultiEpochWotsCSig` violating `checkBase4TargetSum12` (`sum ≠ 12`) is rejected by `verify`. -/
+theorem tooth_multiEpochBase4WotsC_bad_targetSum_rejected
+    (h : Nat) (H : Qsag.Spec.Bytes → BitVec 256)
+    (sk : Qsag.DistCustody.Base4WotsCMasterSk) (depId spendCap : Nat)
+    (msg : Qsag.Spec.Bytes) (sig : Qsag.DistCustody.MultiEpochWotsCSig)
+    (hBad : Qsag.DistCustody.checkBase4TargetSum12 sig.digits = false) :
+    (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap).sigScheme.verify
+      (Qsag.DistCustody.mkBase4WotsCShareDep h H sk depId spendCap).pk msg
+      (Qsag.DistCustody.encodeMultiEpochWotsCSig sig) = false := by
+  rw [Qsag.DistCustody.mkBase4WotsCShareDep_sigScheme]
+  exact Qsag.DistCustody.tooth_base4WotsCMerkle_bad_targetSum_rejected h H _ msg sig hBad
+
 /-- **The guarded authenticated custodian network refines the ideal custody functionality.**
     The concrete machine is `DistCustody.authGuardedMachine`: a `Fin n` family of custodians, each
     with a WAL record sealed under `"QSAG.BELT.LATCH.WAL.MAC/v3"` and an external anchor;
@@ -4798,11 +5289,27 @@ end Roster
   Qsag.Top.separatedCustody_forgery_wins_eufCma
   Qsag.Top.separatedCustody_forgery_eufCma_gameBound
   Qsag.Top.distributedShareCustody_dataRefines_or_collision
+  Qsag.Top.inhabited_separatedCustody_accepted_run
+  Qsag.Top.tooth_separatedCustody_forged_submit_violates_honest_approval
+  Qsag.Top.multiEpochBase4WotsCShareCustody_dataRefines_or_collision
+  Qsag.Top.inhabited_multiEpochBase4WotsCShareCustody
+  Qsag.Top.tooth_multiEpochBase4WotsC_bad_targetSum_rejected
+
+#verify_inhabited
+  Qsag.Top.separatedCustody_accepted_honestly_approved
+  Qsag.Top.inhabited_separatedCustody_accepted_run
+#verify_inhabited
+  Qsag.Top.multiEpochBase4WotsCShareCustody_dataRefines_or_collision
+  Qsag.Top.inhabited_multiEpochBase4WotsCShareCustody
 
 #tooth_pair Qsag.Top.certCustody_noForgery_no_unsafe_release vs
   Qsag.Top.certCustody_tooth_forged_certificates_unsafe_release
 #tooth_pair Qsag.Top.certRun_forgery_submitted vs
   Qsag.Top.certCustody_tooth_wrong_tag_rejected
+#tooth_pair Qsag.Top.separatedCustody_accepted_honestly_approved vs
+  Qsag.Top.tooth_separatedCustody_forged_submit_violates_honest_approval
+#tooth_pair Qsag.Top.multiEpochBase4WotsCShareCustody_dataRefines_or_collision vs
+  Qsag.Top.tooth_multiEpochBase4WotsC_bad_targetSum_rejected
 
 end Qsag.Top
 end

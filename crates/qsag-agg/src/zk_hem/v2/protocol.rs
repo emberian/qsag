@@ -1057,6 +1057,9 @@ fn row_sumcheck(
         }
     }
     let values = [ext[0][0], ext[1][0], ext[2][0]];
+    for e in &mut ext {
+        qsag_asm::volatile_fill(e, E::ZERO);
+    }
     (rounds, rx, values)
 }
 
@@ -1328,7 +1331,7 @@ fn prove_inner(
     let row_mask_sum = secrets.row_mask.sum();
     tr.absorb_fp5_slice(b"ROW_MASK_SUM", &[row_mask_sum]);
     let rho1 = tr.squeeze_fp5_nonzero(b"RHO1");
-    let (row_rounds, rx, row_values) = row_sumcheck(
+    let (row_rounds, rx, mut row_values) = row_sumcheck(
         &mut tr,
         &tau,
         shape.num_sbox,
@@ -1338,6 +1341,7 @@ fn prove_inner(
     );
     // (G1), before the row values exist outside the prover.
     if !row_challenge_good(shape, &rx) {
+        qsag_asm::volatile_fill(&mut row_values, E::ZERO);
         qsag_asm::volatile_fill(&mut z_var, F::ZERO);
         return Err(ZkHemV2Error::MaskRankDeficient);
     }

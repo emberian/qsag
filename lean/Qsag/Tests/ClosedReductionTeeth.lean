@@ -80,12 +80,54 @@ theorem tooth_sampled_query_zero_flip_claim_is_false :
   rw [h] at hAcc
   exact Bool.false_ne_true hAcc
 
+/-- **Inhabitedness of the unconditional multi-stage `[CWYZ26]` WHIR QROM certificate
+    (`flatHemSlicedCert`)**: `2` stages (`6` rounds), `johnsonOk = true`, `< 1` QROM error at
+    `Q = 256`, and a concrete statement outside `whirInLang`. -/
+theorem inhabited_flatHemSlicedWhir_closed_qrom_soundness_hypotheses :
+    ∃ (env : WhirEnv QuarticGoldilocks) (sched : WhirVerifierSchedule)
+      (_ : WhirScheduleCert env sched 256) (x : WhirStmt QuarticGoldilocks),
+      sched.stages.length = 2 ∧ sched.johnsonOk = true ∧
+      RatBound.lt (scheduleQromError sched 256) RatBound.one ∧
+      ¬ whirInLang env sched x :=
+  ⟨flatHemSlicedEnv, flatHemSlicedSched, flatHemSlicedCert,
+    ⟨List.replicate 64 (hemFoldQg 1), hemFoldQg 2⟩,
+    flatHemSlicedSched_shape.1, flatHemSlicedSched_shape.2.1,
+    flatHemSlicedSched_error_bits.2, flatHemSliced_false_not_inLang⟩
+
+/-- `#tooth` `flatHemSlicedCert` is not the all-rejecting certificate: its verifier accepts the
+    honest two-stage transcript, refuting `∀ x tr, state x tr = false`. -/
+theorem tooth_flatHemSliced_cert_state_not_constantly_false :
+    ¬ (∀ (x : WhirStmt QuarticGoldilocks) (tr : List (WhirMsg QuarticGoldilocks × Nat)),
+        flatHemSlicedCert.cert.state x tr = false) := by
+  intro h
+  have hAcc := flatHemSlicedCert.cert.accept _ _ flatHemSliced_honest_accepts
+  rw [h] at hAcc
+  exact Bool.false_ne_true hAcc
+
+/-- `#tooth` Soundness of the two-stage `[CWYZ26]` verifier is not perfect (`0`-error is false):
+    on challenge quadruple `(0, 0, 0, 0)` the false statement `claim = 2` is accepted. -/
+theorem tooth_flatHemSliced_zero_flip_claim_is_false :
+    ¬ (∀ (tr : List (WhirMsg QuarticGoldilocks × Nat)),
+        (whirOracleIop flatHemSlicedEnv flatHemSlicedSched 256).verify
+          ⟨List.replicate 64 (hemFoldQg 1), hemFoldQg 2⟩ tr = false) := by
+  intro h
+  have hAcc := flatHemSliced_false_accepted_once.1
+  rw [h] at hAcc
+  exact Bool.false_ne_true hAcc
+
 #verify_constructive Qsag.ClosedReductionTeeth.inhabited_whir_exec_closed_qrom_soundness_hypotheses
 #verify_constructive Qsag.ClosedReductionTeeth.tooth_sampled_query_cert_state_not_constantly_false
 #verify_constructive Qsag.ClosedReductionTeeth.tooth_sampled_query_zero_flip_claim_is_false
+#verify_constructive Qsag.ClosedReductionTeeth.inhabited_flatHemSlicedWhir_closed_qrom_soundness_hypotheses
+#verify_constructive Qsag.ClosedReductionTeeth.tooth_flatHemSliced_cert_state_not_constantly_false
+#verify_constructive Qsag.ClosedReductionTeeth.tooth_flatHemSliced_zero_flip_claim_is_false
 
 #tooth_pair Qsag.Top.sampledQueryWhir_closed_qrom_soundness vs
   Qsag.ClosedReductionTeeth.tooth_sampled_query_cert_state_not_constantly_false
+#tooth_pair Qsag.Top.flatHemSlicedWhir_closed_qrom_soundness vs
+  Qsag.ClosedReductionTeeth.tooth_flatHemSliced_cert_state_not_constantly_false
+#tooth_pair Qsag.Top.flatHemSlicedWhir_succinct_closed_qrom_soundness vs
+  Qsag.ClosedReductionTeeth.tooth_flatHemSliced_zero_flip_claim_is_false
 #tooth_pair Qsag.ClosedWhir.sampledQuery_query_round_flips vs
   Qsag.ClosedReductionTeeth.tooth_sampled_query_zero_flip_claim_is_false
 #tooth_pair Qsag.Top.whir_exec_closed_qrom_soundness vs

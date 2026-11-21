@@ -4,15 +4,18 @@
 use crate::field::{Goldilocks, GoldilocksOps as _};
 use alloc::vec::Vec;
 use qsag_accel::{
-    CertifiedBackend, CertifiedProverKernelPin, KernelTargetArch, ProverKernelSlot,
-    VerifiedKernelDigestRegistry, VulkanSpirvBackend,
+    BackendAttestationKey, CertifiedBackend, CertifiedProverKernelPin, KernelTargetArch,
+    ProverExecutionReceipt, ProverKernelSlot, ProverReceiptChain, VerifiedKernelDigestRegistry,
+    VulkanError, VulkanSpirvBackend, keccak::cshake256_framed_32,
 };
 
 struct Device {
     backend: CertifiedBackend<VulkanSpirvBackend>,
+    registry: VerifiedKernelDigestRegistry<4>,
     prover_pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
     session_owner: std::sync::Mutex<Option<std::thread::ThreadId>>,
     session_cv: std::sync::Condvar,
+    sessions_issued: core::sync::atomic::AtomicU64,
     stages: core::sync::atomic::AtomicU64,
     fallbacks: core::sync::atomic::AtomicU64,
 }
@@ -38,6 +41,9 @@ fn device() -> Option<&'static Device> {
                 registry
                     .register_measured_profile(KernelTargetArch::SpirV15, pins)
                     .map_err(|e| alloc::format!("{e:?}"))?;
+                registry
+                    .register_prover_arch_pins(KernelTargetArch::SpirV15, prover_pins)
+                    .map_err(|e| alloc::format!("{e:?}"))?;
                 let backend = CertifiedBackend::try_new_measured(raw, &registry, &pins)
                     .map_err(|e| alloc::format!("{e:?}"))?;
                 std::eprintln!(
@@ -46,9 +52,11 @@ fn device() -> Option<&'static Device> {
                 );
                 Ok(Device {
                     backend,
+                    registry,
                     prover_pins,
                     session_owner: std::sync::Mutex::new(None),
                     session_cv: std::sync::Condvar::new(),
+                    sessions_issued: core::sync::atomic::AtomicU64::new(0),
                     stages: core::sync::atomic::AtomicU64::new(0),
                     fallbacks: core::sync::atomic::AtomicU64::new(0),
                 })
@@ -69,6 +77,8 @@ fn device() -> Option<&'static Device> {
 pub(crate) struct GpuWhirSession {
     device: &'static Device,
     session: Option<qsag_accel::vulkan::ProverSessionGuard<'static>>,
+    attestation_key: BackendAttestationKey,
+    receipt_chain: std::sync::Mutex<ProverReceiptChain>,
     _admission: crate::prover_admission::Permit,
 }
 
@@ -118,9 +128,26 @@ pub(crate) fn try_acquire_whir_session_for(secret: bool) -> Option<GpuWhirSessio
     };
     if let Ok(session) = acquired {
         *owner = Some(cur_tid);
+        let serial = d
+            .sessions_issued
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let audit_digest = d.backend.inner().device_info().audit_evidence_digest();
+        let serial_bytes = serial.to_le_bytes();
+        let secret_flag = [u8::from(secret)];
+        let master = qsag_asm::wipe::SecretBytes::new(cshake256_framed_32(
+            b"ACCEL.PROVER.SESSION.KEY.V1",
+            &[&audit_digest, &serial_bytes, &secret_flag],
+        ));
+        let init_anchor = cshake256_framed_32(
+            b"ACCEL.PROVER.SESSION.ANCHOR.V1",
+            &[&audit_digest, &serial_bytes, &secret_flag],
+        );
+        let attestation_key = BackendAttestationKey::derive(&master, &serial_bytes);
         Some(GpuWhirSession {
             device: d,
             session: Some(session),
+            attestation_key,
+            receipt_chain: std::sync::Mutex::new(ProverReceiptChain::new(init_anchor)),
             _admission: admission,
         })
     } else {
@@ -133,6 +160,82 @@ impl GpuWhirSession {
     #[inline]
     pub(crate) fn raw(&self) -> &VulkanSpirvBackend {
         self.device.backend.inner()
+    }
+
+    /// Execute a stateful GPU prover step that emits `(T, ProverExecutionReceipt)` and verify the
+    /// receipt in monotonic sequence order via [`ProverReceiptChain::verify_next`].
+    pub(crate) fn exec_verified<T, F>(&self, op: F) -> Result<T, VulkanError>
+    where
+        F: FnOnce(
+            &VulkanSpirvBackend,
+            &BackendAttestationKey,
+            [u8; 32],
+        ) -> Result<(T, ProverExecutionReceipt), VulkanError>,
+    {
+        let mut chain = self
+            .receipt_chain
+            .lock()
+            .map_err(|_| VulkanError::WorkspacePoisoned)?;
+        let anchor = chain.current_anchor();
+        let (out, receipt) = op(self.raw(), &self.attestation_key, anchor)?;
+        let slot = receipt.descriptor.slot();
+        if self.raw().prover_kernel_pin(slot) != self.device.prover_pins[slot as usize]
+            || chain
+                .verify_next(&self.device.registry, &receipt, &self.attestation_key)
+                .is_err()
+        {
+            self.device
+                .fallbacks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return Err(VulkanError::WorkspacePoisoned);
+        }
+        Ok(out)
+    }
+
+    /// Execute a paired GPU prover dispatch (`AirRowGroupA` + `AirRowGroupB`) that emits two
+    /// [`ProverExecutionReceipt`]s bound to the same pre-dispatch anchor, and verify both via
+    /// [`ProverReceiptChain::verify_next_pair`].
+    pub(crate) fn exec_verified_pair<T, F>(&self, op: F) -> Result<T, VulkanError>
+    where
+        F: FnOnce(
+            &VulkanSpirvBackend,
+            &BackendAttestationKey,
+            [u8; 32],
+        ) -> Result<(T, [ProverExecutionReceipt; 2]), VulkanError>,
+    {
+        let mut chain = self
+            .receipt_chain
+            .lock()
+            .map_err(|_| VulkanError::WorkspacePoisoned)?;
+        let anchor = chain.current_anchor();
+        let (out, receipts) = op(self.raw(), &self.attestation_key, anchor)?;
+        let s0 = receipts[0].descriptor.slot();
+        let s1 = receipts[1].descriptor.slot();
+        if self.raw().prover_kernel_pin(s0) != self.device.prover_pins[s0 as usize]
+            || self.raw().prover_kernel_pin(s1) != self.device.prover_pins[s1 as usize]
+            || chain
+                .verify_next_pair(&self.device.registry, &receipts, &self.attestation_key)
+                .is_err()
+        {
+            self.device
+                .fallbacks
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            return Err(VulkanError::WorkspacePoisoned);
+        }
+        Ok(out)
+    }
+
+    /// Execute a stateful GPU prover step that emits `ProverExecutionReceipt` and verify it in
+    /// monotonic sequence order via [`ProverReceiptChain::verify_next`].
+    pub(crate) fn exec_verified_unit<F>(&self, op: F) -> Result<(), VulkanError>
+    where
+        F: FnOnce(
+            &VulkanSpirvBackend,
+            &BackendAttestationKey,
+            [u8; 32],
+        ) -> Result<ProverExecutionReceipt, VulkanError>,
+    {
+        self.exec_verified(|raw, key, anchor| op(raw, key, anchor).map(|r| ((), r)))
     }
 
     /// Record a completed stage against its actual embedded prover kernel pin.

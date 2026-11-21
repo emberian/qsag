@@ -32,9 +32,10 @@ case "$what" in
     lint)    ./lint.sh ;;
     units)   sim UNITS UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv" ;;
     top)     sim TOP TOP qsag_ni_fpga_top ;;
+    ecp5_fullrate) SIM_CFLAGS=-DQSAG_ECP5_FULLRATE SIM_PARAMS="-GPROFILE_COMPACT=1 -GECP5_FULLRATE=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim ECP5_FULLRATE TOP qsag_ni_fpga_top ;;
     compact) SIM_CFLAGS=-DQSAG_COMPACT SIM_PARAMS="-GPROFILE_COMPACT=1 -GFOLD_TAW=11 -GKECCAK_RPC=1 -GAW=16 -GBW=16" sim COMPACT TOP qsag_ni_fpga_top ;;
     pipe)    SIM_CFLAGS=-DQSAG_PIPE SIM_PARAMS="-GP2_UNROLLED=1 -GKECCAK_PIPE=1 -GCHAIN_SLOTW=8" sim PIPE TOP qsag_ni_fpga_top ;;
     lec-*)   ./lec/lec.sh "${what#lec-}" ;;
     all)     ./lint.sh; sim UNITS UNITS qsag_units_tb "$HERE/tb/qsag_units_tb.sv"; sim TOP TOP qsag_ni_fpga_top; ./lec/lec.sh ;;
-    *) echo "usage: $0 [lint|units|top|compact|pipe|lec-gl|lec-glmut|lec-gf|lec-tower|lec-try|lec-anf|all]"; exit 2 ;;
+    *) echo "usage: $0 [lint|units|top|ecp5_fullrate|compact|pipe|lec-gl|lec-glmut|lec-ext5|lec-gf|lec-tower|lec-comp|lec-anf|all]"; exit 2 ;;
 esac

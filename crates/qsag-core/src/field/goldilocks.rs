@@ -1,7 +1,7 @@
 //! Canonical 64-bit Goldilocks field ($\mathbb{F}_p, p = 2^{64} - 2^{32} + 1$) and
 //! 128-bit quadratic extension `GoldilocksExt2` ($\mathbb{F}_p[u]/(u^2 - 7)$).
 //!
-//! Matches `lean/Qsag/Goldilocks.lean` down to every reduction identity and non-aliasing guard.
+//! Matches `lean/Qsag/Math/Goldilocks.lean` down to every reduction identity and non-aliasing guard.
 
 use alloc::vec::Vec;
 use core::fmt;

@@ -111,22 +111,76 @@ counters `37` and `45` found by search. -/
 theorem fixtures_are_modelled_outputs : ∀ v : Fin 2,
     pkOf v = deriveAggPublicKey compactAuditGeom (skOf v) auditPkSeed ∧
     sigOf v = signAggNative compactAuditGeom (skOf v) (pkOf v) auditMsg auditRRand v.val
-      (if v.val = 0 then 37 else 45) [] := by decide +kernel
+      (if v.val = 0 then 37 else 45) [] := by
+  intro v
+  match v with
+  | ⟨0, _⟩ =>
+    simp only [pkOf, sigOf, skOf, lane, ↓reduceIte]
+    rw [deriveAggPublicKey_compactAuditGeom, signAggNative_compactAuditGeom,
+        auditSkSeed.public_eqs, auditPkSeed.public_eqs, auditRRand.public_eqs,
+        auditMsg.public_eqs, compactJortsPkRoot_kat0, compactJortsSign1_audit0]
+    exact ⟨rfl, rfl⟩
+  | ⟨1, _⟩ =>
+    have h10 : ¬ ((1 : Nat) = 0) := by decide
+    dsimp only [pkOf, sigOf, skOf, lane]
+    simp only [h10, ↓reduceIte]
+    rw [deriveAggPublicKey_compactAuditGeom, signAggNative_compactAuditGeom,
+        auditPkSeed.public_eqs, auditRRand.public_eqs, auditMsg.public_eqs,
+        compactJortsPkRoot_kat1, compactJortsSign1_audit1]
+    exact ⟨rfl, rfl⟩
 
 def otherMsg : List UInt8 := [0x51, 0x53, 0x41, 0x48]
 
 theorem native_accepts : ∀ v : Fin 2,
-    verifyAggNativeSig compactAuditGeom (pkOf v) auditMsg (sigOf v) = true := by decide +kernel
+    verifyAggNativeSig compactAuditGeom (pkOf v) auditMsg (sigOf v) = true := by
+  intro v
+  match v with
+  | ⟨0, _⟩ =>
+    simp only [pkOf, sigOf, lane, ↓reduceIte]
+    rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs,
+        auditRRand.public_eqs, auditMsg.public_eqs]
+    exact compactJortsVerify1_audit_accepts0
+  | ⟨1, _⟩ =>
+    have h10 : ¬ ((1 : Nat) = 0) := by decide
+    dsimp only [pkOf, sigOf, lane]
+    simp only [h10, ↓reduceIte]
+    rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs,
+        auditRRand.public_eqs, auditMsg.public_eqs]
+    exact compactJortsVerify1_audit_accepts1
 
 theorem native_rejects_other_message : ∀ v : Fin 2,
-    verifyAggNativeSig compactAuditGeom (pkOf v) otherMsg (sigOf v) = false := by decide +kernel
+    verifyAggNativeSig compactAuditGeom (pkOf v) otherMsg (sigOf v) = false := by
+  intro v
+  match v with
+  | ⟨0, _⟩ =>
+    simp only [pkOf, sigOf, lane, otherMsg, ↓reduceIte]
+    rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs]
+    exact compactJortsVerify1_audit_rejects_otherMsg0
+  | ⟨1, _⟩ =>
+    have h10 : ¬ ((1 : Nat) = 0) := by decide
+    dsimp only [pkOf, sigOf, lane, otherMsg]
+    simp only [h10, ↓reduceIte]
+    rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs]
+    exact compactJortsVerify1_audit_rejects_otherMsg1
 
 theorem native_rejects_other_key :
-    verifyAggNativeSig compactAuditGeom (pkOf 1) auditMsg (sigOf 0) = false := by decide +kernel
+    verifyAggNativeSig compactAuditGeom (pkOf 1) auditMsg (sigOf 0) = false := by
+  have h10 : ¬ ((1 : Nat) = 0) := by decide
+  change verifyAggNativeSig compactAuditGeom (pkOf ⟨1, by decide⟩) auditMsg (sigOf ⟨0, by decide⟩) = false
+  dsimp only [pkOf, sigOf, lane]
+  simp only [h10, ↓reduceIte]
+  rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs,
+      auditRRand.public_eqs, auditMsg.public_eqs]
+  exact compactJortsVerify1_audit_rejects_otherKey
 
 theorem native_rejects_tampered_randomizer :
     verifyAggNativeSig compactAuditGeom (pkOf 0) auditMsg
-      { sigOf 0 with rRand := auditPkSeed } = false := by decide +kernel
+      { sigOf 0 with rRand := auditPkSeed } = false := by
+  change verifyAggNativeSig compactAuditGeom (pkOf ⟨0, by decide⟩) auditMsg
+    { sigOf ⟨0, by decide⟩ with rRand := auditPkSeed } = false
+  simp only [pkOf, sigOf, lane, ↓reduceIte]
+  rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditMsg.public_eqs]
+  exact compactJortsVerify1_audit_rejects_tamperedRand
 
 /-- 2-of-3 custody with one corrupt party; honest party `1` logged `auditMsg` in epoch 7. -/
 def custodyOf (v : Fin 2) : Custody :=
@@ -143,9 +197,58 @@ def fullShard : Shard 2 := shardFor goodHeader 3#2
 def goodTree : MergeTree 2 :=
   .branch (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
 
-theorem good_full_accepts : goodVerify fullShard = true := by decide +kernel
-theorem good_tree_accepts : checkTree goodHeader goodVerify 16 goodTree = true := by
-  decide +kernel
+private theorem finRange_two : List.finRange 2 = [0, 1] := rfl
+
+private theorem goodVerify_shardFor (b : BitVec 2) :
+    goodVerify (shardFor goodHeader b) = true := by
+  unfold goodVerify transparentVerify
+  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
+  have hm0 : (SigningMode.shared auditMsg).message (0 : Fin 2).val = auditMsg := by
+    rw [SigningMode.message.public_eqs.1]
+  have hm1 : (SigningMode.shared auditMsg).message (1 : Fin 2).val = auditMsg := by
+    rw [SigningMode.message.public_eqs.1]
+  dsimp only [shardFor, goodHeader, headerFor, custodyOf]
+  rw [hm0, hm1, native_accepts 0, native_accepts 1, Bool.or_true, Bool.or_true]
+  rfl
+
+private theorem shardFor_leaf_accepts (mode : SigningMode) (verify : Shard 2 → Bool)
+    (d : Nat) (b : BitVec 2) (hw : 0 < weight b)
+    (hver : verify (shardFor (headerFor mode) b) = true) :
+    checkTree (headerFor mode) verify d (.leaf (shardFor (headerFor mode) b)) = true := by
+  have hh : (shardFor (headerFor mode) b).header = headerFor mode := rfl
+  have hv : 2 ≤ (shardFor (headerFor mode) b).numVars ∧
+      (shardFor (headerFor mode) b).numVars ≤ 28 ∧
+      (shardFor (headerFor mode) b).schedule =
+        (headerFor mode).regime.schedule (shardFor (headerFor mode) b).numVars :=
+    ⟨show (2 : Nat) ≤ 2 by decide, show (2 : Nat) ≤ 28 by decide, rfl⟩
+  have hw' : 0 < weight (shardFor (headerFor mode) b).bitmap := hw
+  cases d <;> simp only [checkTree] <;>
+    rw [decide_eq_true hh, decide_eq_true hv, decide_eq_true hw', hver] <;> rfl
+
+private theorem branch16_accepts (root : Header) (verify : Shard 2 → Bool)
+    (l r : MergeTree 2) (b : BitVec 2) (hd : l.bitmap &&& r.bitmap = 0#2)
+    (hb : b = l.bitmap ||| r.bitmap) (hf : firstActive l.bitmap < firstActive r.bitmap)
+    (hl : checkTree root verify 15 l = true) (hr : checkTree root verify 15 r = true) :
+    checkTree root verify 16 (.branch l r b) = true := by
+  change checkTree root verify (15 + 1) (.branch l r b) = true
+  generalize (15 : Nat) = d at hl hr ⊢
+  simp only [checkTree]
+  rw [decide_eq_true hd, decide_eq_true hb, decide_eq_true hf, hl, hr]
+  rfl
+
+theorem good_full_accepts : goodVerify fullShard = true :=
+  goodVerify_shardFor 3#2
+
+theorem good_tree_accepts : checkTree goodHeader goodVerify 16 goodTree = true :=
+  branch16_accepts goodHeader goodVerify
+    (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
+    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs, shardFor]; decide)
+    (shardFor_leaf_accepts (.shared auditMsg) goodVerify 15 1#2 (by decide)
+      (goodVerify_shardFor 1#2))
+    (shardFor_leaf_accepts (.shared auditMsg) goodVerify 15 2#2 (by decide)
+      (goodVerify_shardFor 2#2))
 /-- `SigningMode.message` on the shared mode, through its exported equation. -/
 theorem shared_message (m : List UInt8) (v : Nat) : (SigningMode.shared m).message v = m := by
   simp only [SigningMode.message.public_eqs]
@@ -258,7 +361,11 @@ theorem committee_trace_boundary :
       have h' : (goodVerify s && decide (s.header.mode = .shared auditMsg)) = true := h
       rw [of_decide_eq_true (Bool.and_eq_true_iff.mp h').2]
       exact (shared_message auditMsg v.val).symm⟩⟩)
-theorem shared_verify_accepts : sharedVerify fullShard = true := by decide +kernel
+theorem shared_verify_accepts : sharedVerify fullShard = true := by
+  show (goodVerify fullShard && decide (fullShard.header.mode = .shared auditMsg)) = true
+  have hm : fullShard.header.mode = SigningMode.shared auditMsg := rfl
+  rw [good_full_accepts, decide_eq_true hm]
+  rfl
 theorem shared_verify_rejects_per_signer_mode :
     sharedVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
   have hne : ¬ ((shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2).header.mode =
@@ -338,12 +445,40 @@ def hemOpeningShardVerify (s : Shard 2) : Bool :=
   decide (s.header = goodHeader)
 
 theorem compactHemInst_valid : HemStatementValid compactHemInst :=
-  ⟨by decide, ⟨[CommRingOps.one], by decide +kernel⟩, trivial⟩
+  verifyHemAffineWhir_oneOracleClaim_dom01_kat.1
 
-theorem hemOpeningShardVerify_accepts : hemOpeningShardVerify fullShard = true := by decide +kernel
+private theorem hemOpeningShardVerify_shardFor (b : BitVec 2) :
+    hemOpeningShardVerify (shardFor goodHeader b) = true := by
+  unfold hemOpeningShardVerify
+  have hh : (shardFor goodHeader b).header = goodHeader := rfl
+  rw [decide_eq_true hh, Bool.and_true,
+      verifyHemOpeningBatch.public_eqs, claimedOpeningValues.public_eqs]
+  dsimp only [List.map, compactHemSlot, compactHemDecode]
+  have hWhir : verifyHemAffineWhir compactHemInst
+      [.cascade [CommRingOps.zero] [(CommRingOps.one, CommRingOps.zero)] [[CommRingOps.one]],
+       .finalQuery [CommRingOps.one]] = true :=
+    verifyHemAffineWhir_oneOracleClaim_dom01_kat.2
+  rw [hWhir, Bool.and_true, verifyOpeningBatch.public_eqs]
+  simp only [List.all_cons, List.all_nil, Bool.and_true,
+    merkleOpeningShape_eq, merkleRootFromPath_cons, merkleRootFromPath_nil,
+    MerkleAddressLayout.hash_eq, compactMerkleLayout,
+    compactHemOracle]
+  decide +kernel
+
+theorem hemOpeningShardVerify_accepts : hemOpeningShardVerify fullShard = true :=
+  hemOpeningShardVerify_shardFor 3#2
 
 theorem hemOpeningShardVerify_tree_accepts :
-    checkTree goodHeader hemOpeningShardVerify 16 goodTree = true := by decide +kernel
+    checkTree goodHeader hemOpeningShardVerify 16 goodTree = true :=
+  branch16_accepts goodHeader hemOpeningShardVerify
+    (.leaf (shardFor goodHeader 1#2)) (.leaf (shardFor goodHeader 2#2)) 3#2
+    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs, shardFor]; decide)
+    (by simp only [MergeTree.bitmap.public_eqs, firstActive.public_eqs, shardFor]; decide)
+    (shardFor_leaf_accepts (.shared auditMsg) hemOpeningShardVerify 15 1#2 (by decide)
+      (hemOpeningShardVerify_shardFor 1#2))
+    (shardFor_leaf_accepts (.shared auditMsg) hemOpeningShardVerify 15 2#2 (by decide)
+      (hemOpeningShardVerify_shardFor 2#2))
 
 theorem hemOpeningShardVerify_rejects_per_signer :
     hemOpeningShardVerify (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2) = false := by
@@ -380,15 +515,41 @@ theorem hem_opening_regime_instance : ∃ geom custody verify bad,
 theorem rejects_unsigned_per_signer_message :
     checkTree (headerFor (.perSigner [auditMsg, otherMsg])) goodVerify 16
       (.leaf (shardFor (headerFor (.perSigner [auditMsg, otherMsg])) 3#2)) = false := by
-  decide +kernel
+  have hVer : goodVerify (shardFor (headerFor (.perSigner [auditMsg, otherMsg])) 3#2) = false := by
+    unfold goodVerify transparentVerify
+    rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
+    have hb1 : ((3#2 : BitVec 2).getLsbD (1 : Fin 2).val) = true := by decide
+    have hm1 : (SigningMode.perSigner [auditMsg, otherMsg]).message (1 : Fin 2).val = otherMsg := by
+      rw [SigningMode.message.public_eqs.2]; rfl
+    dsimp only [shardFor, headerFor, custodyOf]
+    rw [hb1, hm1, native_rejects_other_message 1]
+    simp only [Bool.not_true, Bool.false_or, Bool.false_and, Bool.and_false]
+  simp only [checkTree, hVer, Bool.and_false]
 /-- The same per-signer header with the signed message in both slots is accepted. -/
 theorem accepts_signed_per_signer_messages :
     checkTree (headerFor (.perSigner [auditMsg, auditMsg])) goodVerify 16
       (.leaf (shardFor (headerFor (.perSigner [auditMsg, auditMsg])) 3#2)) = true := by
-  decide +kernel
+  refine shardFor_leaf_accepts (.perSigner [auditMsg, auditMsg]) goodVerify 16 3#2 (by decide) ?_
+  unfold goodVerify transparentVerify
+  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
+  have hm0 : (SigningMode.perSigner [auditMsg, auditMsg]).message (0 : Fin 2).val = auditMsg := by
+    rw [SigningMode.message.public_eqs.2]; rfl
+  have hm1 : (SigningMode.perSigner [auditMsg, auditMsg]).message (1 : Fin 2).val = auditMsg := by
+    rw [SigningMode.message.public_eqs.2]; rfl
+  dsimp only [shardFor, headerFor, custodyOf]
+  rw [hm0, hm1, native_accepts 0, native_accepts 1, Bool.or_true, Bool.or_true]
+  rfl
 theorem rejects_swapped_signature_table :
     transparentVerify compactAuditGeom pkOf (fun v => sigOf (if v.val = 0 then 1 else 0))
-      fullShard = false := by decide +kernel
+      fullShard = false := by
+  unfold transparentVerify
+  rw [finRange_two, List.all_cons, List.all_cons, List.all_nil]
+  have hb1 : fullShard.bitmap.getLsbD (1 : Fin 2).val = true := fullShard_bits 1
+  have hm1 : fullShard.header.mode.message (1 : Fin 2).val = auditMsg := shared_message auditMsg 1
+  have h10 : ¬ ((1 : Fin 2).val = 0) := by decide
+  rw [hb1, hm1]
+  simp only [h10, ↓reduceIte, native_rejects_other_key, Bool.not_true, Bool.false_or,
+    Bool.false_and, Bool.and_false]
 /-- A leaf under another committee root cannot be merged, although its signature verifies. -/
 theorem rejects_foreign_committee_leaf :
     checkTree goodHeader goodVerify 16
@@ -423,7 +584,15 @@ theorem unapproved_signature_is_forgery (v : Fin 2) :
 def mixedCustody (v : Fin 2) : Custody := if v.val = 0 then custodyOf v else rogueCustody v
 def mixedVerify : Shard 2 → Bool :=
   transparentVerify compactAuditGeom (fun v => (mixedCustody v).state.pk) sigOf
-theorem mixed_accepts : mixedVerify fullShard = true := by decide +kernel
+theorem mixed_accepts : mixedVerify fullShard = true := by
+  have hPk : (fun v : Fin 2 => (mixedCustody v).state.pk) = (fun v => (custodyOf v).state.pk) := by
+    funext v
+    match v with
+    | ⟨0, _⟩ => rfl
+    | ⟨1, _⟩ => rfl
+  unfold mixedVerify
+  rw [hPk]
+  exact good_full_accepts
 theorem mixed_unapproved_is_one : ∀ v : Fin 2,
     quorumParticipated (mixedCustody v) auditMsg = false → decide (v.val = 1) = true := by
   intro v
@@ -562,12 +731,281 @@ def realHybridSig1 : AggNativeSignature :=
      lane 14010823692816899133 11663312065820974772 3799621797402719272 6812636063505864400],
     [lane 13388180661509288011 5130805258596798721 8406673262598715289 15360960474733464499]⟩]⟩
 
+private theorem encodeLane4Bytes_length (d : Digest4) :
+    (encodeLane4Bytes d).length = 32 := by
+  simp only [encodeLane4Bytes, List.length_append, length_be]
+
+private theorem decodeLane4Bytes_encodeLane4Bytes (d : Digest4) :
+    decodeLane4Bytes (encodeLane4Bytes d) = some d := by
+  have hLen : (encodeLane4Bytes d).length = 32 := encodeLane4Bytes_length d
+  unfold decodeLane4Bytes
+  simp only [hLen, ↓reduceIte]
+  dsimp only [encodeLane4Bytes]
+  have h8 : ∀ x : Nat, (be 8 x).length = 8 := length_be 8
+  let tail1 := be 8 d.x1.val ++ (be 8 d.x2.val ++ be 8 d.x3.val)
+  have ht0 : (be 8 d.x0.val ++ tail1).take 8 = be 8 d.x0.val := take_append_of_len_eq (h8 _)
+  have hd8 : (be 8 d.x0.val ++ tail1).drop 8 = tail1 := drop_append_of_len_eq (h8 _)
+  have ht1 : tail1.take 8 = be 8 d.x1.val := take_append_of_len_eq (h8 _)
+  have hd16 : (be 8 d.x0.val ++ tail1).drop 16 = be 8 d.x2.val ++ be 8 d.x3.val := by
+    have hdd : ((be 8 d.x0.val ++ tail1).drop 8).drop 8 = (be 8 d.x0.val ++ tail1).drop 16 := by
+      rw [List.drop_drop]
+    rw [← hdd, hd8]
+    exact drop_append_of_len_eq (h8 _)
+  have ht2 : (be 8 d.x2.val ++ be 8 d.x3.val).take 8 = be 8 d.x2.val :=
+    take_append_of_len_eq (h8 _)
+  have hd24 : (be 8 d.x0.val ++ tail1).drop 24 = be 8 d.x3.val := by
+    have hdd : ((be 8 d.x0.val ++ tail1).drop 16).drop 8 = (be 8 d.x0.val ++ tail1).drop 24 := by
+      rw [List.drop_drop]
+    rw [← hdd, hd16]
+    exact drop_append_of_len_eq (h8 _)
+  have ht3 : (be 8 d.x3.val).take 8 = be 8 d.x3.val :=
+    List.take_of_length_le (Nat.le_of_eq (h8 d.x3.val))
+  rw [ht0, hd8, ht1, hd16, ht2, hd24, ht3]
+  have hG : ∀ g : Goldilocks, Goldilocks.ofNat (beNat (be 8 g.val)) = g := fun g => by
+    have hLt : g.val < 256 ^ 8 := Nat.lt_trans g.isLt (by decide)
+    change Goldilocks.ofNat (ofBE (be 8 g.val)) = g
+    rw [ofBE_be hLt]
+    exact Goldilocks.ext (Nat.mod_eq_of_lt g.isLt)
+  rw [hG, hG, hG, hG]
+
+private theorem decodeCompactJortsPk_encode (s r : Digest4) :
+    decodeCompactJortsPk (encodeCompactJortsPk ⟨.xmssPoseidon2, s, r⟩) =
+      some ⟨.xmssPoseidon2, s, r⟩ := by
+  have h32s : (encodeLane4Bytes s).length = 32 := encodeLane4Bytes_length s
+  have h32r : (encodeLane4Bytes r).length = 32 := encodeLane4Bytes_length r
+  have h64 : (encodeCompactJortsPk ⟨.xmssPoseidon2, s, r⟩).length = 64 := by
+    simp only [encodeCompactJortsPk, List.length_append, h32s, h32r]
+  unfold decodeCompactJortsPk
+  simp only [h64, ↓reduceIte]
+  dsimp only [encodeCompactJortsPk]
+  rw [take_append_of_len_eq h32s, drop_append_of_len_eq h32s,
+      decodeLane4Bytes_encodeLane4Bytes, decodeLane4Bytes_encodeLane4Bytes]
+
+private theorem decodeCompactJortsSig_encode (rR c0 c1 s0 : Digest4) (idx ctr : Nat)
+    (hIdx : idx < 256 ^ 8) (hCtr : ctr < 256 ^ 8) :
+    decodeCompactJortsSig
+      (encodeCompactJortsSig ⟨.xmssPoseidon2, rR, idx, [], [⟨ctr, [c0, c1], [s0]⟩]⟩) =
+    some ⟨.xmssPoseidon2, rR, idx, [], [⟨ctr, [c0, c1], [s0]⟩]⟩ := by
+  let body := encodeLane4Bytes rR ++
+    (encodeLane4Bytes c0 ++ (encodeLane4Bytes c1 ++ encodeLane4Bytes s0))
+  have h144 : (encodeCompactJortsSig
+      ⟨.xmssPoseidon2, rR, idx, [], [⟨ctr, [c0, c1], [s0]⟩]⟩).length = 144 := by
+    simp only [encodeCompactJortsSig, List.length_append, length_be, encodeLane4Bytes_length]
+  unfold decodeCompactJortsSig
+  simp only [h144, ↓reduceIte]
+  dsimp only [encodeCompactJortsSig]
+  have h8i : (be 8 idx).length = 8 := length_be 8 idx
+  have h8c : (be 8 ctr).length = 8 := length_be 8 ctr
+  let full := be 8 idx ++ (be 8 ctr ++ body)
+  have ht0 : full.take 8 = be 8 idx := take_append_of_len_eq h8i
+  have hd8 : full.drop 8 = be 8 ctr ++ body := drop_append_of_len_eq h8i
+  have ht8 : (be 8 ctr ++ body).take 8 = be 8 ctr := take_append_of_len_eq h8c
+  have hd16 : full.drop 16 = body := by
+    have hdd : (full.drop 8).drop 8 = full.drop 16 := by rw [List.drop_drop]
+    rw [← hdd, hd8]
+    exact drop_append_of_len_eq h8c
+  have hd48 : full.drop 48 =
+      encodeLane4Bytes c0 ++ (encodeLane4Bytes c1 ++ encodeLane4Bytes s0) := by
+    have hdd : (full.drop 16).drop 32 = full.drop 48 := by rw [List.drop_drop]
+    rw [← hdd, hd16]
+    exact drop_append_of_len_eq (encodeLane4Bytes_length rR)
+  have hd80 : full.drop 80 = encodeLane4Bytes c1 ++ encodeLane4Bytes s0 := by
+    have hdd : (full.drop 48).drop 32 = full.drop 80 := by rw [List.drop_drop]
+    rw [← hdd, hd48]
+    exact drop_append_of_len_eq (encodeLane4Bytes_length c0)
+  have hd112 : full.drop 112 = encodeLane4Bytes s0 := by
+    have hdd : (full.drop 80).drop 32 = full.drop 112 := by rw [List.drop_drop]
+    rw [← hdd, hd80]
+    exact drop_append_of_len_eq (encodeLane4Bytes_length c1)
+  have htS : (encodeLane4Bytes s0).take 32 = encodeLane4Bytes s0 :=
+    List.take_of_length_le (Nat.le_of_eq (encodeLane4Bytes_length s0))
+  rw [ht0, hd8, ht8, hd16, take_append_of_len_eq (encodeLane4Bytes_length rR),
+      hd48, take_append_of_len_eq (encodeLane4Bytes_length c0),
+      hd80, take_append_of_len_eq (encodeLane4Bytes_length c1),
+      hd112, htS,
+      decodeLane4Bytes_encodeLane4Bytes, decodeLane4Bytes_encodeLane4Bytes,
+      decodeLane4Bytes_encodeLane4Bytes, decodeLane4Bytes_encodeLane4Bytes]
+  change some (⟨.xmssPoseidon2, rR, ofBE (be 8 idx), [],
+    [⟨ofBE (be 8 ctr), [c0, c1], [s0]⟩]⟩ : AggNativeSignature) = _
+  rw [ofBE_be hIdx, ofBE_be hCtr]
+
+private theorem be32_cshakeHybridHash (x : Preimage) :
+    be 32 (cshakeHybridHash x).val = cshake256Xof 32 hybridCshakeTag (encodePre x) := by
+  dsimp only [cshakeHybridHash]
+  rw [evalCshake256Sponge_keccak_eq_cshake256Xof]
+  let out := cshake256Xof 32 hybridCshakeTag (encodePre x)
+  have hLen : out.length = 32 := cshake256Xof_length 32 hybridCshakeTag (encodePre x)
+  have hLt : ofBE out < 256 ^ 32 := hLen ▸ ofBE_lt out
+  change be 32 (ofBE out % 256 ^ 32) = out
+  rw [Nat.mod_eq_of_lt hLt]
+  exact hLen ▸ be_ofBE out
+
+private theorem encPre_keyCl0 :
+    encodePre (.key false .secpMl44 (encodeCompactJortsPk (pkOf 0))) =
+      [1, 5, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 55, 0, 0, 0, 0, 0, 0, 0, 66,
+       0, 0, 0, 0, 0, 0, 0, 77, 0, 0, 0, 0, 0, 0, 0, 88, 61, 55, 123, 250, 231, 244, 53, 179,
+       171, 228, 148, 46, 202, 181, 172, 97, 67, 65, 47, 117, 121, 240, 1, 53,
+       183, 29, 98, 119, 78, 188, 107, 79] := by
+  rw [encodePre.public_eqs.1, suiteBytes.public_eqs.1]
+  change (1 : UInt8) :: ([5, 1, 0, 1, 1, 1] ++ encodeCompactJortsPk (pkOf ⟨0, by decide⟩)) = _
+  simp only [encodeCompactJortsPk, encodeLane4Bytes, pkOf, lane, ↓reduceIte]
+  rw [auditPkSeed.public_eqs]
+  decide +kernel
+
+private theorem encPre_keyPq1 :
+    encodePre (.key true .secpMl44 (encodeCompactJortsPk (pkOf 1))) =
+      [2, 5, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 55, 0, 0, 0, 0, 0, 0, 0, 66,
+       0, 0, 0, 0, 0, 0, 0, 77, 0, 0, 0, 0, 0, 0, 0, 88, 243, 236, 128, 81, 170, 206, 95, 106,
+       222, 195, 136, 76, 52, 227, 230, 42, 204, 98, 226, 187, 142, 144, 108, 228,
+       24, 10, 119, 74, 26, 57, 199, 54] := by
+  have h10 : ¬ ((1 : Nat) = 0) := by decide
+  rw [encodePre.public_eqs.1, suiteBytes.public_eqs.1]
+  change (2 : UInt8) :: ([5, 1, 0, 1, 1, 1] ++ encodeCompactJortsPk (pkOf ⟨1, by decide⟩)) = _
+  dsimp only [encodeCompactJortsPk, encodeLane4Bytes, pkOf, lane]
+  simp only [h10, ↓reduceIte]
+  rw [auditPkSeed.public_eqs]
+  decide +kernel
+
+private theorem encPre_keyCl1 :
+    encodePre (.key false .secpMl44 (encodeCompactJortsPk (pkOf 1))) =
+      [1, 5, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 55, 0, 0, 0, 0, 0, 0, 0, 66,
+       0, 0, 0, 0, 0, 0, 0, 77, 0, 0, 0, 0, 0, 0, 0, 88, 243, 236, 128, 81, 170, 206, 95, 106,
+       222, 195, 136, 76, 52, 227, 230, 42, 204, 98, 226, 187, 142, 144, 108, 228,
+       24, 10, 119, 74, 26, 57, 199, 54] := by
+  have h10 : ¬ ((1 : Nat) = 0) := by decide
+  rw [encodePre.public_eqs.1, suiteBytes.public_eqs.1]
+  change (1 : UInt8) :: ([5, 1, 0, 1, 1, 1] ++ encodeCompactJortsPk (pkOf ⟨1, by decide⟩)) = _
+  dsimp only [encodeCompactJortsPk, encodeLane4Bytes, pkOf, lane]
+  simp only [h10, ↓reduceIte]
+  rw [auditPkSeed.public_eqs]
+  decide +kernel
+
+private theorem be32_keyHash_real_false :
+    be 32 (keyHash cshakeHybridHash realHk false).val =
+      [43, 75, 67, 27, 105, 156, 92, 201, 184, 206, 75, 28, 48, 223, 0, 28,
+       57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39, 173, 45, 208, 180, 136] := by
+  rw [keyHash.public_eqs]
+  simp only [realHk, Bool.false_eq_true, ↓reduceIte]
+  rw [be32_cshakeHybridHash, encPre_keyCl0]
+  exact cshake256_hybridV2_keyCl0_kat
+
+private theorem be32_keyHash_real_true :
+    be 32 (keyHash cshakeHybridHash realHk true).val =
+      [201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7, 149,
+       86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127] := by
+  rw [keyHash.public_eqs]
+  simp only [realHk, ↓reduceIte]
+  rw [be32_cshakeHybridHash, encPre_keyPq1]
+  exact cshake256_hybridV2_keyPq1_kat
+
+private theorem be32_idCommit_real :
+    be 32 (idCommit cshakeHybridHash realHk).val =
+      [206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21] := by
+  rw [idCommit.public_eqs, idInput.public_eqs, be32_cshakeHybridHash, encodePre.public_eqs.2.1]
+  have hs : realHk.suite = .secpMl44 := rfl
+  rw [hs, suiteBytes.public_eqs.1, be32_keyHash_real_false, be32_keyHash_real_true]
+  exact cshake256_hybridV2_idReal_kat
+
+private theorem transcriptFields_real_paid_false :
+    transcriptFields (transcript cshakeHybridHash realHk false paid) =
+      [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121] := by
+  rw [transcript.public_eqs, transcriptFields.public_eqs]
+  have hs : realHk.suite = .secpMl44 := rfl
+  simp only [Bool.false_eq_true, ↓reduceIte, hs, suiteBytes.public_eqs.1,
+    be32_idCommit_real, be32_keyHash_real_false, be32_keyHash_real_true, paid.public_eqs]
+  rfl
+
+private theorem transcriptFields_real_paid_true :
+    transcriptFields (transcript cshakeHybridHash realHk true paid) =
+      [2, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121] := by
+  rw [transcript.public_eqs, transcriptFields.public_eqs]
+  have hs : realHk.suite = .secpMl44 := rfl
+  simp only [↓reduceIte, hs, suiteBytes.public_eqs.1,
+    be32_idCommit_real, be32_keyHash_real_false, be32_keyHash_real_true, paid.public_eqs]
+  rfl
+
+private theorem transcriptFields_real_unpaid_false :
+    transcriptFields (transcript cshakeHybridHash realHk false unpaid) =
+      [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 122] := by
+  rw [transcript.public_eqs, transcriptFields.public_eqs]
+  have hs : realHk.suite = .secpMl44 := rfl
+  simp only [Bool.false_eq_true, ↓reduceIte, hs, suiteBytes.public_eqs.1,
+    be32_idCommit_real, be32_keyHash_real_false, be32_keyHash_real_true, unpaid.public_eqs]
+  rfl
+
+private theorem transcriptFields_rogue_paid_true :
+    transcriptFields
+        (transcript cshakeHybridHash { realHk with classical := encodeCompactJortsPk (pkOf 1) } true paid) =
+      [2, 5, 1, 0, 1, 1, 1, 120, 130, 148, 209, 221, 48, 122, 11, 201, 31, 97, 23, 207, 212, 76, 157,
+       190, 150, 250, 193, 174, 105, 54, 248, 197, 104, 124, 130, 106, 159, 53, 46, 94, 59, 166, 234,
+       77, 144, 26, 197, 209, 246, 48, 107, 133, 48, 181, 232, 37, 98, 85, 103, 78, 54, 227, 77, 248,
+       234, 245, 170, 196, 166, 208, 0, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67,
+       25, 7, 149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121] := by
+  let rHk : Keys := { realHk with classical := encodeCompactJortsPk (pkOf 1) }
+  have hCl : be 32 (keyHash cshakeHybridHash rHk false).val =
+      [94, 59, 166, 234, 77, 144, 26, 197, 209, 246, 48, 107, 133, 48, 181, 232,
+       37, 98, 85, 103, 78, 54, 227, 77, 248, 234, 245, 170, 196, 166, 208, 0] := by
+    rw [keyHash.public_eqs]
+    simp only [rHk, realHk, Bool.false_eq_true, ↓reduceIte]
+    rw [be32_cshakeHybridHash, encPre_keyCl1]
+    exact cshake256_hybridV2_keyCl1_kat
+  have hPq : be 32 (keyHash cshakeHybridHash rHk true).val =
+      [201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7, 149,
+       86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127] := by
+    rw [keyHash.public_eqs]
+    simp only [rHk, realHk, ↓reduceIte]
+    rw [be32_cshakeHybridHash, encPre_keyPq1]
+    exact cshake256_hybridV2_keyPq1_kat
+  have hId : be 32 (idCommit cshakeHybridHash rHk).val =
+      [120, 130, 148, 209, 221, 48, 122, 11, 201, 31, 97, 23, 207, 212, 76, 157,
+       190, 150, 250, 193, 174, 105, 54, 248, 197, 104, 124, 130, 106, 159, 53, 46] := by
+    rw [idCommit.public_eqs, idInput.public_eqs, be32_cshakeHybridHash, encodePre.public_eqs.2.1]
+    have hs : rHk.suite = .secpMl44 := rfl
+    rw [hs, suiteBytes.public_eqs.1, hCl, hPq]
+    exact cshake256_hybridV2_idRogue_kat
+  change transcriptFields (transcript cshakeHybridHash rHk true paid) = _
+  rw [transcript.public_eqs, transcriptFields.public_eqs]
+  have hs : rHk.suite = .secpMl44 := rfl
+  simp only [↓reduceIte, hs, suiteBytes.public_eqs.1, hId, hCl, hPq, paid.public_eqs]
+  rfl
+
 theorem real_hybrid_sigs_are_modelled_outputs :
     realHybridSig0 = signAggNative compactAuditGeom (skOf 0) (pkOf 0)
       (transcriptFields (transcript cshakeHybridHash realHk false paid)) auditRRand 0 21 [] ∧
     realHybridSig1 = signAggNative compactAuditGeom (skOf 1) (pkOf 1)
       (transcriptFields (transcript cshakeHybridHash realHk true paid)) auditRRand 1 122 [] := by
-  decide +kernel
+  refine ⟨?_, ?_⟩
+  · rw [transcriptFields_real_paid_false]
+    change realHybridSig0 = signAggNative compactAuditGeom (skOf ⟨0, by decide⟩)
+      (pkOf ⟨0, by decide⟩) _ auditRRand 0 21 []
+    simp only [realHybridSig0, skOf, pkOf, lane, ↓reduceIte]
+    rw [signAggNative_compactAuditGeom, auditSkSeed.public_eqs, auditPkSeed.public_eqs,
+        auditRRand.public_eqs, compactJortsSign1_hybrid0]
+  · have h10 : ¬ ((1 : Nat) = 0) := by decide
+    rw [transcriptFields_real_paid_true]
+    change realHybridSig1 = signAggNative compactAuditGeom (skOf ⟨1, by decide⟩)
+      (pkOf ⟨1, by decide⟩) _ auditRRand 1 122 []
+    dsimp only [realHybridSig1, skOf, pkOf, lane]
+    simp only [h10, ↓reduceIte]
+    rw [signAggNative_compactAuditGeom, auditPkSeed.public_eqs,
+        auditRRand.public_eqs, compactJortsSign1_hybrid1]
 
 def realEnvelopePaid : HybridPinnedEnvelope :=
   ⟨realHk, encodeCompactJortsSig realHybridSig0, encodeCompactJortsSig realHybridSig1⟩
@@ -575,17 +1013,80 @@ def realEnvelopePaid : HybridPinnedEnvelope :=
 theorem real_hybrid_honest_accepts :
     validateForAddress cshakeHybridHash realEnvelopePaid (addressOf cshakeHybridHash realHk hrpQs 1) ∧
     verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid paid := by
-  unfold validateForAddress verifyWith; decide +kernel
+  refine ⟨?_, ?_⟩
+  · rw [validateForAddress.public_eqs, addressOf.public_eqs]
+    exact ⟨rfl, rfl⟩
+  · rw [verifyWith.public_eqs]
+    dsimp only [realEnvelopePaid, jortsNativeVerifier]
+    have hCl : realHk.classical = encodeCompactJortsPk (pkOf 0) := rfl
+    have hPq : realHk.pq = encodeCompactJortsPk (pkOf 1) := rfl
+    have hPk0 : decodeCompactJortsPk (encodeCompactJortsPk (pkOf 0)) = some (pkOf 0) :=
+      decodeCompactJortsPk_encode _ _
+    have hPk1 : decodeCompactJortsPk (encodeCompactJortsPk (pkOf 1)) = some (pkOf 1) :=
+      decodeCompactJortsPk_encode _ _
+    have hSig0 : decodeCompactJortsSig (encodeCompactJortsSig realHybridSig0) =
+        some realHybridSig0 :=
+      decodeCompactJortsSig_encode _ _ _ _ 0 21 (by decide) (by decide)
+    have hSig1 : decodeCompactJortsSig (encodeCompactJortsSig realHybridSig1) =
+        some realHybridSig1 :=
+      decodeCompactJortsSig_encode _ _ _ _ 1 122 (by decide) (by decide)
+    rw [hCl, hPq, hPk0, hPk1, hSig0, hSig1]
+    dsimp only
+    refine ⟨?_, ?_⟩
+    · rw [transcriptFields_real_paid_false]
+      change verifyAggNativeSig compactAuditGeom (pkOf ⟨0, by decide⟩) _ realHybridSig0 = true
+      simp only [pkOf, realHybridSig0, lane, ↓reduceIte]
+      rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs]
+      exact compactJortsVerify1_hybrid_paid0
+    · have h10 : ¬ ((1 : Nat) = 0) := by decide
+      rw [transcriptFields_real_paid_true]
+      change verifyAggNativeSig compactAuditGeom (pkOf ⟨1, by decide⟩) _ realHybridSig1 = true
+      dsimp only [pkOf, realHybridSig1, lane]
+      simp only [h10, ↓reduceIte]
+      rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs]
+      exact compactJortsVerify1_hybrid_paid1
 
 theorem real_hybrid_rejects_other_message :
     ¬ verifyWith cshakeHybridHash jortsNativeVerifier jortsNativeVerifier realEnvelopePaid unpaid := by
-  unfold verifyWith; decide +kernel
+  rw [verifyWith.public_eqs]
+  rintro ⟨h0, _⟩
+  dsimp only [realEnvelopePaid, jortsNativeVerifier] at h0
+  have hCl : realHk.classical = encodeCompactJortsPk (pkOf 0) := rfl
+  have hPk0 : decodeCompactJortsPk (encodeCompactJortsPk (pkOf 0)) = some (pkOf 0) :=
+    decodeCompactJortsPk_encode _ _
+  have hSig0 : decodeCompactJortsSig (encodeCompactJortsSig realHybridSig0) =
+      some realHybridSig0 :=
+    decodeCompactJortsSig_encode _ _ _ _ 0 21 (by decide) (by decide)
+  rw [hCl, hPk0, hSig0] at h0
+  dsimp only at h0
+  rw [transcriptFields_real_unpaid_false] at h0
+  change verifyAggNativeSig compactAuditGeom (pkOf ⟨0, by decide⟩) _ realHybridSig0 = true at h0
+  simp only [pkOf, realHybridSig0, lane, ↓reduceIte] at h0
+  rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs,
+      compactJortsVerify1_hybrid_unpaid0] at h0
+  exact Bool.noConfusion h0
 
 theorem real_hybrid_rejects_rogue_partner :
     ¬ (jortsNativeVerifier realHk.pq
         (transcript cshakeHybridHash { realHk with classical := encodeCompactJortsPk (pkOf 1) } true paid)
         realEnvelopePaid.pqSignature = true) := by
-  decide +kernel
+  intro h1
+  dsimp only [realEnvelopePaid, jortsNativeVerifier] at h1
+  have hPk1 : decodeCompactJortsPk realHk.pq = some (pkOf 1) :=
+    decodeCompactJortsPk_encode _ _
+  have hSig1 : decodeCompactJortsSig (encodeCompactJortsSig realHybridSig1) =
+      some realHybridSig1 :=
+    decodeCompactJortsSig_encode _ _ _ _ 1 122 (by decide) (by decide)
+  rw [hPk1, hSig1] at h1
+  dsimp only at h1
+  have h10 : ¬ ((1 : Nat) = 0) := by decide
+  rw [transcriptFields_rogue_paid_true] at h1
+  change verifyAggNativeSig compactAuditGeom (pkOf ⟨1, by decide⟩) _ realHybridSig1 = true at h1
+  dsimp only [pkOf, realHybridSig1, lane] at h1
+  simp only [h10, ↓reduceIte] at h1
+  rw [verifyAggNativeSig_compactAuditGeom, auditPkSeed.public_eqs, auditRRand.public_eqs,
+      compactJortsVerify1_hybrid_rogue1] at h1
+  exact Bool.noConfusion h1
 
 attribute [local irreducible] cshakeHybridHash jortsNativeVerifier realEnvelopePaid
 
@@ -701,14 +1202,37 @@ theorem real_transcript_instance :
 /-- The permutation moves the point and the compression output is nonzero. -/
 theorem real_poseidon_nondegenerate :
     poseidonEquiv.toFun realX ≠ realX ∧
-    poseidon2Compress12FF realX.1 realX.2.1 realX.2.2 ≠ lane4Zero := by decide +kernel
+    poseidon2Compress12FF realX.1 realX.2.1 realX.2.2 ≠ lane4Zero := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · have h0 := congrArg (fun s : State Lane4 => s.1.x0.val) h
+    have h1 : (Goldilocks.ofNat 1).val = 1 := by decide
+    dsimp only [poseidonEquiv, lane4State, realX] at h0
+    rw [domainMerkleNode.public_eqs, poseidon2IvTag.public_eqs, h1] at h0
+    exact poseidon2Perm12_realX_kat h0
+  · have h0 := congrArg (fun d : Lane4 => d.x0.val) h
+    have hz : Goldilocks.zero.val = 0 := rfl
+    rw [poseidon2Compress12FF.public_eqs, lane4Zero_eq] at h0
+    dsimp only [realX] at h0
+    rw [domainMerkleNode.public_eqs, poseidon2IvTag.public_eqs, hz] at h0
+    exact poseidon2CompressWeighted_realX_kat h0
 /-- On the modelled permutation: one inverse call hits a chosen raw-truncation target, and
 the same point misses that target under feed-forward. -/
 theorem real_poseidon_raw_vs_feedforward :
     rawTrunc poseidonEquiv (poseidonEquiv.invFun realY) = realY.1 ∧
     jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) ≠
-      realY.1 :=
-  ⟨raw_inverse poseidonEquiv _ _ _, by decide +kernel⟩
+      realY.1 := by
+  refine ⟨raw_inverse poseidonEquiv _ _ _, fun h => ?_⟩
+  rw [jiveCompress.public_eqs, poseidonEquiv.right_inv realY, relation.public_eqs] at h
+  have hLane : lane4Add realY.1
+      (lane4Add (poseidonEquiv.invFun realY).1
+        (weightedJiveExtra (poseidonEquiv.invFun realY))) = realY.1 := by
+    rw [lane4Add_eq, lane4Add_eq]
+    exact h
+  have h0 := congrArg (fun d : Lane4 => d.x0.val) hLane
+  have h7 : (Goldilocks.ofNat 7).val = 7 := by decide
+  dsimp only [poseidonEquiv, lane4State, weightedJiveExtra, realY] at h0
+  rw [h7] at h0
+  exact poseidon2Inv_realY_feedforward_kat h0
 theorem real_poseidon_feedforward_misses :
     ¬ (jiveCompress weightedJiveExtra poseidonEquiv (poseidonEquiv.invFun realY) =
       realY.1) := real_poseidon_raw_vs_feedforward.2
@@ -818,8 +1342,8 @@ end Cross
   real_transcript_instance small_field_bad_count digest_separates_distinct_hashes
   digest_collision_is_hash_collision real_label_partition_instance
   foreign_label_reprogram_instance same_label_reprogram_changes_game
--- Kernel-executed primitive fixtures (native signature, HEM opening batch, cSHAKE, Poseidon2):
--- red while the primitive modules are sealed; see scratch/lanes/fable-teeth-greenup.comp.md.
+-- Modelled primitive fixtures (native signature, HEM opening batch, cSHAKE, Poseidon2),
+-- discharged via owner-evaluated KATs and `#export_eqns` with sealed primitive modules:
 #verify_constructive compactHemInst_valid hemOpeningShardVerify_accepts hemOpeningShardVerify_tree_accepts
   hemOpeningShardVerify_boundary hem_opening_regime_instance fixtures_are_modelled_outputs
   native_accepts native_rejects_other_message native_rejects_other_key

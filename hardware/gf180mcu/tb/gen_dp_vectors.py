@@ -34,6 +34,10 @@ def rnd_e4():
     return [rnd_limb() for _ in range(4)]
 
 
+def rnd_fp5():
+    return [rnd_limb() for _ in range(5)]
+
+
 # base multiply through EMUL with embedded base elements (canonical operands)
 pairs = [(int(e["a_canon"]), int(e["b_canon"]), int(e["mul"])) for e in fx["goldilocks_edges"]]
 pairs += [(a, b, a * b % P) for a in EDGE for b in EDGE if a < P and b < P]
@@ -70,6 +74,15 @@ for _ in range(30):
     l, r = (y, x) if d else (x, y)
     c = [t0] + key
     emit("F", d, t0, *st, *x, *y, *key, *[(st[i] + l[i] + 2 * r[i] + 4 * c[i]) % P for i in range(4)])
+# Quintic Fp5 = F_p[X]/(X^5 - 3) (zk-Hem v2)
+emit("5", 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0)  # X * X^4 == 3
+for _ in range(25):
+    x, y = rnd_fp5(), rnd_fp5()
+    emit("5", *x, *y, *q.fp5_mul(x, y))
+    emit("a", *x, *y, *q.fp5_add(x, y))
+    emit("s", *x, *y, *q.fp5_sub(x, y))
+    emit("q", *x, *y, int(x == y))
+    emit("q", *x, *x, 1)
 # Keccak-f[1600] and Keccak-p[1600, 12]
 for rounds in (24, 12, 24, 12):
     st = [rng.randrange(2**64) for _ in range(25)]

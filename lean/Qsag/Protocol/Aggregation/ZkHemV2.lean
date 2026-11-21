@@ -21,6 +21,9 @@ Lean statements of `crates/qsag-agg/SECURITY.md`, section V2.2 (table of V2.6).
     `Qsag.ZkHem.evalAll` cannot be unfolded here).
 §6  Lemma V2.2 in interpolation form. `v2_blinding_count`, `v2_blinding_count_scaled`,
     `v2_opened_symbols_and_mask_values_perfectly_simulated`.
+§6b Lemma V2.2 in quotient-ring form (`E[X] / (X^(2^s) - z_j)`, `SECURITY.md` §§V2.2, V2.6, V2.9).
+    `divModBinomial`, `fiberRoots`, `blindPoints_fiberRoots_nodup`,
+    `v2_blinding_residue_ring_bijective`, `v2_blinding_residue_ring_perfectly_simulated`.
 §7  Profile roster and cell count: `ZkHemV2Profile`, `blindCells`.
 
 The negative statements (`tooth_*`) are paired in `Qsag.Tests.ZkHemV2Teeth`.
@@ -1568,6 +1571,1173 @@ theorem tooth_blinding_conjugate_points_not_surjective (qs : List Goldilocks)
 
 end BlindingCount
 
+/-! ## §6b. Lemma V2.2: point-interpolation to residue-ring (`E[X] / (X^(2^s) - z_j)`) bridge -/
+
+section ResidueRingBridge
+
+/-- Natural-number power in any `CommRingOps` carrier. -/
+def fpow {F : Type} [CommRingOps F] (x : F) : Nat → F
+  | 0 => one
+  | n + 1 => mul x (fpow x n)
+
+theorem fpow_add {F : Type} [LawfulCommRing F] (x : F) :
+    ∀ a b : Nat, fpow x (a + b) = mul (fpow x a) (fpow x b)
+  | 0, b => by
+    rw [Nat.zero_add]
+    show fpow x b = mul one (fpow x b)
+    rw [LawfulCommRing.one_mul]
+  | a + 1, b => by
+    have e : a + 1 + b = (a + b) + 1 := by omega
+    rw [e]
+    show mul x (fpow x (a + b)) = mul (mul x (fpow x a)) (fpow x b)
+    rw [fpow_add x a b, LawfulCommRing.mul_assoc]
+
+theorem fpow_mul_base {F : Type} [LawfulCommRing F] (x y : F) :
+    ∀ n : Nat, fpow (mul x y) n = mul (fpow x n) (fpow y n)
+  | 0 => by
+    show one = mul one one
+    constructive_ring
+  | n + 1 => by
+    show mul (mul x y) (fpow (mul x y) n) = mul (mul x (fpow x n)) (mul y (fpow y n))
+    rw [fpow_mul_base x y n]
+    constructive_ring
+
+theorem fpow_one {F : Type} [LawfulCommRing F] : ∀ n : Nat, fpow (one : F) n = one
+  | 0 => rfl
+  | n + 1 => by
+    show mul one (fpow one n) = one
+    rw [fpow_one n, LawfulCommRing.one_mul]
+
+theorem fpow_ne_zero {F : Type} [LawfulField F] {x : F} (hx : x ≠ zero) :
+    ∀ n : Nat, fpow x n ≠ zero
+  | 0 => LawfulField.one_ne_zero
+  | n + 1 => fun h => by
+    have hi := LawfulField.mul_inv_cancel hx
+    have h1 : mul (LawfulField.inv x) (mul x (fpow x n)) = mul (LawfulField.inv x) zero :=
+      congrArg (mul (LawfulField.inv x)) h
+    have e : mul (LawfulField.inv x) (mul x (fpow x n)) =
+        mul (mul x (LawfulField.inv x)) (fpow x n) := by constructive_ring
+    have e0 : mul (LawfulField.inv x) zero = (zero : F) := by constructive_ring
+    rw [e, hi, LawfulCommRing.one_mul, e0] at h1
+    exact fpow_ne_zero hx n h1
+
+theorem fpow_ofBase (a : Goldilocks) :
+    ∀ n : Nat, fpow (ofBase a) n = ofBase (fpow a n)
+  | 0 => QuinticGoldilocks.ofBase_one.symm
+  | n + 1 => by
+    show mul (ofBase a) (fpow (ofBase a) n) = ofBase (mul a (fpow a n))
+    rw [fpow_ofBase a n, QuinticGoldilocks.ofBase_mul]
+
+theorem fpow_frob (z : QuinticGoldilocks) :
+    ∀ n : Nat, fpow (frob z) n = frob (fpow z n)
+  | 0 => QuinticGoldilocks.frob_one.symm
+  | n + 1 => by
+    show mul (frob z) (fpow (frob z) n) = frob (mul z (fpow z n))
+    rw [fpow_frob z n, QuinticGoldilocks.frob_mul]
+
+/-- Iterated squaring `x^(2^k)`. -/
+def pow2Iter {F : Type} [CommRingOps F] : Nat → F → F
+  | 0, x => x
+  | k + 1, x =>
+    let y := pow2Iter k x
+    mul y y
+
+theorem pow2Iter_add {F : Type} [CommRingOps F] :
+    ∀ (a b : Nat) (x : F), pow2Iter (a + b) x = pow2Iter a (pow2Iter b x)
+  | 0, b, x => by
+    rw [Nat.zero_add]
+    rfl
+  | a + 1, b, x => by
+    have e : a + 1 + b = (a + b) + 1 := by omega
+    rw [e]
+    show mul (pow2Iter (a + b) x) (pow2Iter (a + b) x) =
+      mul (pow2Iter a (pow2Iter b x)) (pow2Iter a (pow2Iter b x))
+    rw [pow2Iter_add a b x]
+
+theorem pow2Iter_eq_fpow {F : Type} [LawfulCommRing F] :
+    ∀ (k : Nat) (x : F), pow2Iter k x = fpow x (2 ^ k)
+  | 0, x => by
+    show x = mul x one
+    constructive_ring
+  | k + 1, x => by
+    have e : 2 ^ (k + 1) = 2 ^ k + 2 ^ k := by omega
+    rw [e, fpow_add]
+    show mul (pow2Iter k x) (pow2Iter k x) = mul (fpow x (2 ^ k)) (fpow x (2 ^ k))
+    rw [pow2Iter_eq_fpow k x]
+
+/-- Monomial multiplication `X^k · P(X)`. -/
+def shiftMonomial {F : Type} [CommRingOps F] : Nat → List F → List F
+  | 0, P => P
+  | k + 1, P => zero :: shiftMonomial k P
+
+theorem evalCoeffs_shiftMonomial {F : Type} [LawfulCommRing F] :
+    ∀ (k : Nat) (P : List F) (x : F),
+      evalCoeffs (shiftMonomial k P) x = mul (fpow x k) (evalCoeffs P x)
+  | 0, P, x => by
+    show evalCoeffs P x = mul one (evalCoeffs P x)
+    rw [LawfulCommRing.one_mul]
+  | k + 1, P, x => by
+    show add zero (mul x (evalCoeffs (shiftMonomial k P) x)) =
+      mul (mul x (fpow x k)) (evalCoeffs P x)
+    rw [evalCoeffs_shiftMonomial k P x]
+    constructive_ring
+
+/-- Euclidean division `(rem, quot)` of `P(X)` by `X^(m + 1) - z`:
+    `rem` has exact length `m + 1`, and `P(x) = rem(x) + (x^(m + 1) - z) · quot(x)`. -/
+def divModBinomial {F : Type} [CommRingOps F] (m : Nat) (z : F) : List F → List F × List F
+  | [] => (List.replicate (m + 1) zero, [])
+  | c :: P =>
+    let rq := divModBinomial m z P
+    let top := rq.1.getD m zero
+    (add c (mul z top) :: rq.1.take m, top :: rq.2)
+
+theorem divModBinomial_rem_length {F : Type} [CommRingOps F] (m : Nat) (z : F) :
+    ∀ P : List F, (divModBinomial m z P).1.length = m + 1
+  | [] => List.length_replicate
+  | c :: P => by
+    have ih := divModBinomial_rem_length m z P
+    show ((divModBinomial m z P).1.take m).length + 1 = m + 1
+    rw [List.length_take, ih]
+    omega
+
+private theorem evalCoeffs_replicate_zero {F : Type} [LawfulCommRing F] :
+    ∀ (n : Nat) (x : F), evalCoeffs (List.replicate n (zero : F)) x = zero
+  | 0, _ => rfl
+  | n + 1, x => by
+    show add zero (mul x (evalCoeffs (List.replicate n zero) x)) = zero
+    rw [evalCoeffs_replicate_zero n x]
+    constructive_ring
+
+private theorem evalCoeffs_split_last {F : Type} [LawfulCommRing F] :
+    ∀ (m : Nat) (R : List F) (x : F), R.length = m + 1 →
+      evalCoeffs R x = add (evalCoeffs (R.take m) x) (mul (fpow x m) (R.getD m zero))
+  | 0, [], _, h => by cases h
+  | 0, r0 :: rs, x, h => by
+    have hrs : rs = [] := List.eq_nil_of_length_eq_zero (Nat.succ.inj h)
+    subst hrs
+    show add r0 (mul x zero) = add zero (mul one r0)
+    constructive_ring
+  | m + 1, [], _, h => by cases h
+  | m + 1, r0 :: rs, x, h => by
+    have ih := evalCoeffs_split_last m rs x (Nat.succ.inj h)
+    show add r0 (mul x (evalCoeffs rs x)) =
+      add (add r0 (mul x (evalCoeffs (rs.take m) x))) (mul (mul x (fpow x m)) (rs.getD m zero))
+    rw [ih]
+    constructive_ring
+
+/-- **Exact Binomial Division Identity (`evalCoeffs_divModBinomial`)**:
+    For every polynomial `P` and point `x`,
+    `P(x) = rem(x) + (x^(m + 1) - z) · quot(x)`. -/
+theorem evalCoeffs_divModBinomial {F : Type} [LawfulCommRing F] (m : Nat) (z : F) :
+    ∀ (P : List F) (x : F),
+      evalCoeffs P x =
+        add (evalCoeffs (divModBinomial m z P).1 x)
+          (mul (sub (fpow x (m + 1)) z) (evalCoeffs (divModBinomial m z P).2 x))
+  | [], x => by
+    show zero = add (evalCoeffs (List.replicate (m + 1) zero) x) (mul (sub (fpow x (m + 1)) z) zero)
+    rw [evalCoeffs_replicate_zero]
+    constructive_ring
+  | c :: P, x => by
+    have ih := evalCoeffs_divModBinomial m z P x
+    dsimp only [fpow] at ih
+    have hLen := divModBinomial_rem_length m z P
+    have hSplit := evalCoeffs_split_last m (divModBinomial m z P).1 x hLen
+    dsimp only [divModBinomial]
+    generalize (divModBinomial m z P).1 = R at ih hLen hSplit ⊢
+    generalize (divModBinomial m z P).2 = Q at ih ⊢
+    show add c (mul x (evalCoeffs P x)) =
+      add (add (add c (mul z (R.getD m zero))) (mul x (evalCoeffs (R.take m) x)))
+        (mul (sub (mul x (fpow x m)) z) (add (R.getD m zero) (mul x (evalCoeffs Q x))))
+    rw [ih, hSplit]
+    constructive_ring
+
+/-- At any root `r` of `X^(m + 1) - z`, `P(r)` equals the canonical remainder evaluated at `r`. -/
+theorem evalCoeffs_divModBinomial_at_root {F : Type} [LawfulCommRing F] (m : Nat) (z : F)
+    (P : List F) {r : F} (hr : fpow r (m + 1) = z) :
+    evalCoeffs (divModBinomial m z P).1 r = evalCoeffs P r := by
+  rw [evalCoeffs_divModBinomial m z P r, hr]
+  constructive_ring
+
+/-- Primitive `2^32`-th root of unity in `Goldilocks` (`7^((p - 1) / 2^32) mod p`). -/
+def twoAdicGen32 : Goldilocks := Goldilocks.ofNat 1753635133440165772
+
+theorem twoAdicGen32_pow31 : pow2Iter 31 twoAdicGen32 = neg one := by
+  decide +kernel
+
+theorem twoAdicGen32_pow32 : pow2Iter 32 twoAdicGen32 = one := by
+  decide +kernel
+
+/-- Canonical `2^s`-th root of unity in `Goldilocks` for `s ≤ 32`. -/
+def twoAdicElem (s : Nat) : Goldilocks := pow2Iter (32 - s) twoAdicGen32
+
+theorem twoAdicElem_pow2 (s : Nat) (hs : s ≤ 32) :
+    fpow (twoAdicElem s) (2 ^ s) = one := by
+  rw [← pow2Iter_eq_fpow]
+  unfold twoAdicElem
+  rw [← pow2Iter_add]
+  have e : s + (32 - s) = 32 := by omega
+  rw [e]
+  exact twoAdicGen32_pow32
+
+theorem twoAdicElem_sq (s : Nat) (hs : s + 1 ≤ 32) :
+    mul (twoAdicElem (s + 1)) (twoAdicElem (s + 1)) = twoAdicElem s := by
+  unfold twoAdicElem
+  have e : 32 - s = (32 - (s + 1)) + 1 := by omega
+  rw [e]
+  rfl
+
+theorem twoAdicElem_half_pow (s : Nat) (hs : s + 1 ≤ 32) :
+    fpow (twoAdicElem (s + 1)) (2 ^ s) = neg one := by
+  rw [← pow2Iter_eq_fpow]
+  unfold twoAdicElem
+  rw [← pow2Iter_add]
+  have e : s + (32 - (s + 1)) = 31 := by omega
+  rw [e]
+  exact twoAdicGen32_pow31
+
+theorem twoAdicElem_ne_zero (s : Nat) (hs : s ≤ 32) : twoAdicElem s ≠ zero := by
+  intro h0
+  have h1 := twoAdicElem_pow2 s hs
+  rw [h0] at h1
+  have h2Pos : 2 ^ s = (2 ^ s - 1) + 1 := by
+    have hp := Nat.two_pow_pos s
+    omega
+  rw [h2Pos] at h1
+  have hz : mul (zero : Goldilocks) (fpow zero (2 ^ s - 1)) = zero := by constructive_ring
+  exact LawfulField.zero_ne_one (hz.symm.trans h1)
+
+private theorem sub_mod_two_pow {s n : Nat} (hn : n < 2 ^ (s + 1)) (hGe : ¬ n < 2 ^ s) :
+    n % 2 ^ s = n - 2 ^ s := by
+  have hSubLt : n - 2 ^ s < 2 ^ s := by
+    have he2 : 2 ^ (s + 1) = 2 ^ s + 2 ^ s := by omega
+    omega
+  have hEq : n = (n - 2 ^ s) + 2 ^ s := by omega
+  conv => lhs; rw [hEq]
+  rw [Nat.add_mod_right, Nat.mod_eq_of_lt hSubLt]
+
+private theorem fpow_mod_two_pow {s : Nat} (hs : s ≤ 32) {n : Nat} (hn : n < 2 ^ (s + 1)) :
+    fpow (twoAdicElem s) n = fpow (twoAdicElem s) (n % 2 ^ s) := by
+  by_cases hLt : n < 2 ^ s
+  · rw [Nat.mod_eq_of_lt hLt]
+  · have hMod := sub_mod_two_pow hn hLt
+    have hEq : n = (n - 2 ^ s) + 2 ^ s := by omega
+    rw [hMod]
+    conv => lhs; rw [hEq]
+    rw [fpow_add, twoAdicElem_pow2 s hs, LawfulCommRing.mul_one]
+
+private theorem twoAdicElem_exp_inj :
+    ∀ (s : Nat), s ≤ 32 → ∀ (i j : Nat), i < 2 ^ s → j < 2 ^ s →
+      fpow (twoAdicElem s) i = fpow (twoAdicElem s) j → i = j
+  | 0, _, i, j, hi, hj, _ => by omega
+  | s + 1, hs, i, j, hi, hj, hEq => by
+    have hsLe : s ≤ 32 := by omega
+    have hSq : mul (fpow (twoAdicElem (s + 1)) i) (fpow (twoAdicElem (s + 1)) i) =
+        mul (fpow (twoAdicElem (s + 1)) j) (fpow (twoAdicElem (s + 1)) j) := by
+      rw [hEq]
+    rw [← fpow_mul_base, ← fpow_mul_base, twoAdicElem_sq s hs,
+      fpow_mod_two_pow hsLe hi, fpow_mod_two_pow hsLe hj] at hSq
+    have hModEq := twoAdicElem_exp_inj s hsLe (i % 2 ^ s) (j % 2 ^ s)
+      (Nat.mod_lt _ (Nat.two_pow_pos s)) (Nat.mod_lt _ (Nat.two_pow_pos s)) hSq
+    have hTri : i = j ∨ j = i + 2 ^ s ∨ i = j + 2 ^ s := by
+      by_cases hiLt : i < 2 ^ s <;> by_cases hjLt : j < 2 ^ s
+      · rw [Nat.mod_eq_of_lt hiLt, Nat.mod_eq_of_lt hjLt] at hModEq
+        exact .inl hModEq
+      · rw [Nat.mod_eq_of_lt hiLt, sub_mod_two_pow hj hjLt] at hModEq
+        exact .inr (.inl (by omega))
+      · rw [sub_mod_two_pow hi hiLt, Nat.mod_eq_of_lt hjLt] at hModEq
+        exact .inr (.inr (by omega))
+      · rw [sub_mod_two_pow hi hiLt, sub_mod_two_pow hj hjLt] at hModEq
+        exact .inl (by omega)
+    rcases hTri with hSame | hJ | hI
+    · exact hSame
+    · exfalso
+      rw [hJ, fpow_add, twoAdicElem_half_pow s hs] at hEq
+      have hTwoZero : mul (add (one : Goldilocks) one) (fpow (twoAdicElem (s + 1)) i) = zero := by
+        calc mul (add (one : Goldilocks) one) (fpow (twoAdicElem (s + 1)) i)
+            = add (fpow (twoAdicElem (s + 1)) i) (fpow (twoAdicElem (s + 1)) i) := by
+                constructive_ring
+          _ = add (fpow (twoAdicElem (s + 1)) i)
+                (mul (fpow (twoAdicElem (s + 1)) i) (neg one)) := by
+                conv => lhs; arg 2; rw [hEq]
+          _ = zero := by constructive_ring
+      have hTwoNe : add (one : Goldilocks) one ≠ zero := by decide +kernel
+      have hWiNe := fpow_ne_zero (twoAdicElem_ne_zero (s + 1) hs) i
+      have hInv := LawfulField.mul_inv_cancel hTwoNe
+      have h1 := congrArg (mul (LawfulField.inv (add (one : Goldilocks) one))) hTwoZero
+      have e1 : mul (LawfulField.inv (add (one : Goldilocks) one))
+          (mul (add one one) (fpow (twoAdicElem (s + 1)) i)) =
+          mul (mul (add one one) (LawfulField.inv (add one one)))
+            (fpow (twoAdicElem (s + 1)) i) := by constructive_ring
+      have e0 : mul (LawfulField.inv (add (one : Goldilocks) one)) zero = zero := by
+        constructive_ring
+      rw [e1, hInv, LawfulCommRing.one_mul, e0] at h1
+      exact hWiNe h1
+    · exfalso
+      have hSymm := hEq.symm
+      rw [hI, fpow_add, twoAdicElem_half_pow s hs] at hSymm
+      have hTwoZero : mul (add (one : Goldilocks) one) (fpow (twoAdicElem (s + 1)) j) = zero := by
+        calc mul (add (one : Goldilocks) one) (fpow (twoAdicElem (s + 1)) j)
+            = add (fpow (twoAdicElem (s + 1)) j) (fpow (twoAdicElem (s + 1)) j) := by
+                constructive_ring
+          _ = add (fpow (twoAdicElem (s + 1)) j)
+                (mul (fpow (twoAdicElem (s + 1)) j) (neg one)) := by
+                conv => lhs; arg 2; rw [hSymm]
+          _ = zero := by constructive_ring
+      have hTwoNe : add (one : Goldilocks) one ≠ zero := by decide +kernel
+      have hWjNe := fpow_ne_zero (twoAdicElem_ne_zero (s + 1) hs) j
+      have hInv := LawfulField.mul_inv_cancel hTwoNe
+      have h1 := congrArg (mul (LawfulField.inv (add (one : Goldilocks) one))) hTwoZero
+      have e1 : mul (LawfulField.inv (add (one : Goldilocks) one))
+          (mul (add one one) (fpow (twoAdicElem (s + 1)) j)) =
+          mul (mul (add one one) (LawfulField.inv (add one one)))
+            (fpow (twoAdicElem (s + 1)) j) := by constructive_ring
+      have e0 : mul (LawfulField.inv (add (one : Goldilocks) one)) zero = zero := by
+        constructive_ring
+      rw [e1, hInv, LawfulCommRing.one_mul, e0] at h1
+      exact hWjNe h1
+
+/-- Subgroup of `2^s`-th roots of unity in `Goldilocks` (`s ≤ 32`). -/
+def twoAdicCoset (s : Nat) : List Goldilocks :=
+  (List.range (2 ^ s)).map (fpow (twoAdicElem s))
+
+theorem twoAdicCoset_length (s : Nat) : (twoAdicCoset s).length = 2 ^ s := by
+  unfold twoAdicCoset
+  rw [List.length_map, List.length_range]
+
+private theorem nodup_map_on {α β : Type} (f : α → β) :
+    ∀ l : List α, l.Nodup → (∀ a ∈ l, ∀ b ∈ l, f a = f b → a = b) → (l.map f).Nodup
+  | [], _, _ => List.Pairwise.nil
+  | a :: l, hnd, hinj => by
+    obtain ⟨ha, hnd'⟩ := List.nodup_cons.mp hnd
+    refine List.nodup_cons.mpr ⟨?_, nodup_map_on f l hnd'
+      (fun x hx y hy => hinj x (List.mem_cons_of_mem _ hx) y (List.mem_cons_of_mem _ hy))⟩
+    intro hMem
+    obtain ⟨b, hb, hfb⟩ := List.mem_map.mp hMem
+    have hab := hinj b (List.mem_cons_of_mem _ hb) a List.mem_cons_self hfb
+    exact ha (hab ▸ hb)
+
+private theorem nodup_append_disj {α : Type} {a b : List α}
+    (ha : a.Nodup) (hb : b.Nodup) (hDisj : ∀ x ∈ a, ∀ y ∈ b, x ≠ y) :
+    (a ++ b).Nodup := by
+  induction a with
+  | nil => exact hb
+  | cons x xs ih =>
+    obtain ⟨hx, hxs⟩ := List.nodup_cons.mp ha
+    refine List.nodup_cons.mpr ⟨?_, ih hxs
+      (fun u hu v hv => hDisj u (List.mem_cons_of_mem _ hu) v hv)⟩
+    intro hMem
+    rcases List.mem_append.mp hMem with hInXs | hInB
+    · exact hx hInXs
+    · exact hDisj x List.mem_cons_self x hInB rfl
+
+private theorem nodup_range_constructive : ∀ n : Nat, (List.range n).Nodup
+  | 0 => List.Pairwise.nil
+  | n + 1 => by
+    rw [List.range_succ]
+    refine nodup_append_disj (nodup_range_constructive n)
+      (List.Pairwise.cons (fun _ h => nomatch h) List.Pairwise.nil) ?_
+    intro x hx y hy
+    obtain rfl := List.mem_singleton.mp hy
+    have hxLt := List.mem_range.mp hx
+    omega
+
+theorem twoAdicCoset_nodup (s : Nat) (hs : s ≤ 32) : (twoAdicCoset s).Nodup :=
+  nodup_map_on (fpow (twoAdicElem s)) (List.range (2 ^ s)) (nodup_range_constructive (2 ^ s))
+    (fun i hi j hj hEq =>
+      twoAdicElem_exp_inj s hs i j (List.mem_range.mp hi) (List.mem_range.mp hj) hEq)
+
+theorem twoAdicCoset_pow_eq_one (s : Nat) (hs : s ≤ 32) {u : Goldilocks}
+    (hu : u ∈ twoAdicCoset s) : fpow u (2 ^ s) = one ∧ u ≠ zero := by
+  obtain ⟨i, _, rfl⟩ := List.mem_map.mp hu
+  refine ⟨?_, fpow_ne_zero (twoAdicElem_ne_zero s hs) i⟩
+  rw [← pow2Iter_eq_fpow]
+  have hComm : ∀ k : Nat, pow2Iter k (fpow (twoAdicElem s) i) = fpow (pow2Iter k (twoAdicElem s)) i := by
+    intro k
+    induction k with
+    | zero => rfl
+    | succ k ih =>
+      show mul (pow2Iter k (fpow (twoAdicElem s) i)) (pow2Iter k (fpow (twoAdicElem s) i)) =
+        fpow (mul (pow2Iter k (twoAdicElem s)) (pow2Iter k (twoAdicElem s))) i
+      rw [ih, fpow_mul_base]
+  rw [hComm s, pow2Iter_eq_fpow, twoAdicElem_pow2 s hs, fpow_one]
+
+/-- The `2^s` roots of `X^(2^s) - ω^(2^s)` in `QuinticGoldilocks`. -/
+def fiberRoots (s : Nat) (ω : QuinticGoldilocks) : List QuinticGoldilocks :=
+  (twoAdicCoset s).map (fun u => mul (ofBase u) ω)
+
+theorem fiberRoots_length (s : Nat) (ω : QuinticGoldilocks) :
+    (fiberRoots s ω).length = 2 ^ s := by
+  unfold fiberRoots
+  rw [List.length_map, twoAdicCoset_length]
+
+theorem fiberRoots_pow (s : Nat) (hs : s ≤ 32) (ω : QuinticGoldilocks) {r : QuinticGoldilocks}
+    (hr : r ∈ fiberRoots s ω) : fpow r (2 ^ s) = fpow ω (2 ^ s) := by
+  obtain ⟨u, hu, rfl⟩ := List.mem_map.mp hr
+  rw [fpow_mul_base, fpow_ofBase, (twoAdicCoset_pow_eq_one s hs hu).1,
+    QuinticGoldilocks.ofBase_one, LawfulCommRing.one_mul]
+
+theorem fiberRoots_nodup (s : Nat) (hs : s ≤ 32) {ω : QuinticGoldilocks} (hω : ω ≠ zero) :
+    (fiberRoots s ω).Nodup :=
+  nodup_map_on (fun u => mul (ofBase u) ω) (twoAdicCoset s) (twoAdicCoset_nodup s hs)
+    (fun u₁ _ u₂ _ hEq => by
+      have hInv := LawfulField.mul_inv_cancel hω
+      have h1 := congrArg (fun z => mul z (LawfulField.inv ω)) hEq
+      have e1 : mul (mul (ofBase u₁) ω) (LawfulField.inv ω) =
+          mul (ofBase u₁) (mul ω (LawfulField.inv ω)) := by constructive_ring
+      have e2 : mul (mul (ofBase u₂) ω) (LawfulField.inv ω) =
+          mul (ofBase u₂) (mul ω (LawfulField.inv ω)) := by constructive_ring
+      rw [e1, e2, hInv, LawfulCommRing.mul_one, LawfulCommRing.mul_one] at h1
+      exact QuinticGoldilocks.ofBase_injective h1)
+
+/-- Iterated Frobenius `frob^[k]` on `QuinticGoldilocks`. -/
+def frobIter : Nat → QuinticGoldilocks → QuinticGoldilocks
+  | 0, z => z
+  | k + 1, z => frob (frobIter k z)
+
+theorem frobIter_add :
+    ∀ (a b : Nat) (z : QuinticGoldilocks), frobIter (a + b) z = frobIter a (frobIter b z)
+  | 0, b, z => by
+    rw [Nat.zero_add]
+    rfl
+  | a + 1, b, z => by
+    have e : a + 1 + b = (a + b) + 1 := by omega
+    rw [e]
+    exact congrArg frob (frobIter_add a b z)
+
+theorem frobIter_five (z : QuinticGoldilocks) : frobIter 5 z = z :=
+  QuinticGoldilocks.frob_pow5 z
+
+theorem frobIter_mod5 : ∀ (k : Nat) (z : QuinticGoldilocks), frobIter k z = frobIter (k % 5) z
+  | k, z => by
+    by_cases hk : k < 5
+    · rw [Nat.mod_eq_of_lt hk]
+    · have hSub : k = (k - 5) + 5 := by omega
+      have hMod : k % 5 = (k - 5) % 5 := by
+        conv => lhs; rw [hSub]
+        exact Nat.add_mod_right (k - 5) 5
+      rw [hMod]
+      conv => lhs; rw [hSub, frobIter_add (k - 5) 5, frobIter_five]
+      exact frobIter_mod5 (k - 5) z
+termination_by k => k
+
+theorem frobIter_inj :
+    ∀ (k : Nat) {x y : QuinticGoldilocks}, frobIter k x = frobIter k y → x = y
+  | 0, _, _, h => h
+  | k + 1, x, y, h => by
+    have h4 : frobIter 4 (frob (frobIter k x)) = frobIter 4 (frob (frobIter k y)) :=
+      congrArg (frobIter 4) h
+    have e1 : frobIter 4 (frob (frobIter k x)) = frobIter 5 (frobIter k x) := rfl
+    have e2 : frobIter 4 (frob (frobIter k y)) = frobIter 5 (frobIter k y) := rfl
+    rw [e1, e2, frobIter_five, frobIter_five] at h4
+    exact frobIter_inj k h4
+
+theorem frobIter_fixed_imp_frob {k : Nat} {z : QuinticGoldilocks}
+    (hkLt : k < 5) (hkNe : k ≠ 0) (hFix : frobIter k z = z) : frob z = z := by
+  rcases k with _ | _ | _ | _ | _ | k
+  · exact absurd rfl hkNe
+  · exact hFix
+  · have h2 : frob (frob z) = z := hFix
+    have h4 : frob (frob (frob (frob z))) = z := by
+      rw [h2, h2]
+    calc frob z = frob (frob (frob (frob (frob z)))) := by
+            conv => lhs; arg 1; rw [← h4]
+      _ = z := QuinticGoldilocks.frob_pow5 z
+  · have h3 : frob (frob (frob z)) = z := hFix
+    calc frob z = frob (frob (frob (frob (frob (frob z))))) := by
+            rw [QuinticGoldilocks.frob_pow5 z]
+      _ = frob (frob (frob z)) := by
+            conv => lhs; arg 1; arg 1; arg 1; rw [h3]
+      _ = z := h3
+  · have h4 : frob (frob (frob (frob z))) = z := hFix
+    calc frob z = frob (frob (frob (frob (frob z)))) := by
+            conv => lhs; arg 1; rw [← h4]
+      _ = z := QuinticGoldilocks.frob_pow5 z
+  · omega
+
+theorem fpow_frobIter (z : QuinticGoldilocks) :
+    ∀ (k n : Nat), fpow (frobIter k z) n = frobIter k (fpow z n)
+  | 0, _ => rfl
+  | k + 1, n => by
+    show fpow (frob (frobIter k z)) n = frob (frobIter k (fpow z n))
+    rw [fpow_frob, fpow_frobIter z k n]
+
+theorem frobIter_ofBase (a : Goldilocks) :
+    ∀ k : Nat, frobIter k (ofBase a) = ofBase a
+  | 0 => rfl
+  | k + 1 => by
+    show frob (frobIter k (ofBase a)) = ofBase a
+    rw [frobIter_ofBase a k, QuinticGoldilocks.frob_ofBase]
+
+theorem frobIter_mul :
+    ∀ (k : Nat) (x y : QuinticGoldilocks), frobIter k (mul x y) = mul (frobIter k x) (frobIter k y)
+  | 0, _, _ => rfl
+  | k + 1, x, y => by
+    show frob (frobIter k (mul x y)) = mul (frob (frobIter k x)) (frob (frobIter k y))
+    rw [frobIter_mul k x y, QuinticGoldilocks.frob_mul]
+
+/-- Protocol condition `(G2)` of `SECURITY.md` §V2.1 on the Stage-0 mask fiber generators `ωs`
+    (`z_j = ω_j^(2^s)`): `s ≤ 32`, each `z_j ∉ F_p`, and distinct `z_j` lie in distinct
+    `Gal(E / F_p)` orbits. -/
+def MaskRootsValid (s : Nat) (ωs : List QuinticGoldilocks) : Prop :=
+  s ≤ 32 ∧
+  (∀ ω ∈ ωs, frob (fpow ω (2 ^ s)) ≠ fpow ω (2 ^ s)) ∧
+  ωs.Pairwise (fun ω₁ ω₂ => ∀ k < 5, fpow ω₁ (2 ^ s) ≠ frobIter k (fpow ω₂ (2 ^ s)))
+
+theorem MaskRootsValid.omega_ne_zero {s : Nat} {ωs : List QuinticGoldilocks}
+    (hV : MaskRootsValid s ωs) {ω : QuinticGoldilocks} (hω : ω ∈ ωs) :
+    ω ≠ zero ∧ fpow ω (2 ^ s) ≠ zero := by
+  have hzNe : fpow ω (2 ^ s) ≠ zero := fun hz0 => by
+    have hf := hV.2.1 ω hω
+    rw [hz0, QuinticGoldilocks.frob_zero] at hf
+    exact hf rfl
+  refine ⟨fun h0 => ?_, hzNe⟩
+  apply hzNe
+  rw [h0]
+  have h2Pos : 2 ^ s = (2 ^ s - 1) + 1 := by
+    have hp := Nat.two_pow_pos s
+    omega
+  rw [h2Pos]
+  show mul (zero : QuinticGoldilocks) (fpow zero (2 ^ s - 1)) = zero
+  constructive_ring
+
+private theorem nodup_append_of_disjoint {α : Type} {a b : List α}
+    (ha : a.Nodup) (hb : b.Nodup) (hDisj : ∀ x ∈ a, ∀ y ∈ b, x ≠ y) :
+    (a ++ b).Nodup := by
+  induction a with
+  | nil => exact hb
+  | cons x xs ih =>
+    obtain ⟨hx, hxs⟩ := List.nodup_cons.mp ha
+    refine List.nodup_cons.mpr ⟨?_, ih hxs (fun u hu v hv => hDisj u (List.mem_cons_of_mem _ hu) v hv)⟩
+    intro hMem
+    rcases List.mem_append.mp hMem with hInXs | hInB
+    · exact hx hInXs
+    · exact hDisj x List.mem_cons_self x hInB rfl
+
+private theorem flatMap_fiberRoots_nodup (s : Nat) (hs : s ≤ 32) :
+    ∀ ωs : List QuinticGoldilocks,
+      (∀ ω ∈ ωs, frob (fpow ω (2 ^ s)) ≠ fpow ω (2 ^ s)) →
+      ωs.Pairwise (fun ω₁ ω₂ => ∀ k < 5, fpow ω₁ (2 ^ s) ≠ frobIter k (fpow ω₂ (2 ^ s))) →
+      (ωs.flatMap (fiberRoots s)).Nodup
+  | [], _, _ => List.Pairwise.nil
+  | ω :: rest, hNonBase, hPair => by
+    rw [List.flatMap_cons]
+    obtain ⟨hHeadRel, hTailPair⟩ := List.pairwise_cons.mp hPair
+    have hωNz : ω ≠ zero := by
+      intro h0
+      have hf := hNonBase ω List.mem_cons_self
+      rw [h0] at hf
+      have h2Pos : 2 ^ s = (2 ^ s - 1) + 1 := by have hp := Nat.two_pow_pos s; omega
+      rw [h2Pos] at hf
+      dsimp only [fpow] at hf
+      have hz : mul (zero : QuinticGoldilocks) (fpow zero (2 ^ s - 1)) = zero := by
+        constructive_ring
+      rw [hz, QuinticGoldilocks.frob_zero] at hf
+      exact hf rfl
+    refine nodup_append_of_disjoint (fiberRoots_nodup s hs hωNz)
+      (flatMap_fiberRoots_nodup s hs rest
+        (fun u hu => hNonBase u (List.mem_cons_of_mem _ hu)) hTailPair) ?_
+    intro r₁ hr₁ r₂ hr₂ hEq
+    obtain ⟨ω₂, hω₂, hr₂Mem⟩ := List.mem_flatMap.mp hr₂
+    have hp₁ := fiberRoots_pow s hs ω hr₁
+    have hp₂ := fiberRoots_pow s hs ω₂ hr₂Mem
+    have hzEq : fpow ω (2 ^ s) = frobIter 0 (fpow ω₂ (2 ^ s)) :=
+      hp₁.symm.trans ((congrArg (fun x => fpow x (2 ^ s)) hEq).trans hp₂)
+    exact hHeadRel ω₂ hω₂ 0 (by decide) hzEq
+
+private theorem maskRootsValid_pairSymm {s : Nat} {ωs : List QuinticGoldilocks}
+    (hV : MaskRootsValid s ωs) :
+    ∀ a ∈ ωs, ∀ b ∈ ωs, a ≠ b →
+      ∀ k < 5, fpow a (2 ^ s) ≠ frobIter k (fpow b (2 ^ s)) := by
+  induction ωs with
+  | nil => intro a ha; nomatch ha
+  | cons head tail ih =>
+    obtain ⟨hHead, hTail⟩ := List.pairwise_cons.mp hV.2.2
+    have hVTail : MaskRootsValid s tail :=
+      ⟨hV.1, fun u hu => hV.2.1 u (List.mem_cons_of_mem _ hu), hTail⟩
+    intro a ha b hb hab k hk hBad
+    rcases List.mem_cons.mp ha with rfl | haT
+    · rcases List.mem_cons.mp hb with rfl | hbT
+      · exact hab rfl
+      · exact hHead b hbT k hk hBad
+    · rcases List.mem_cons.mp hb with rfl | hbT
+      · let invK := (5 - k) % 5
+        have hRev : fpow b (2 ^ s) = frobIter invK (fpow a (2 ^ s)) := by
+          have h1 : frobIter invK (fpow a (2 ^ s)) =
+              frobIter (invK + k) (fpow b (2 ^ s)) := by
+            rw [frobIter_add, ← hBad]
+          have hm0 : (invK + k) % 5 = 0 := by omega
+          rw [frobIter_mod5 (invK + k), hm0] at h1
+          exact h1.symm
+        exact hHead a haT invK (Nat.mod_lt _ (by decide)) hRev
+      · exact ih hVTail a haT b hbT hab k hk hBad
+
+private theorem frobIter_fiberRoot_ne {s : Nat} (hs : s ≤ 32)
+    {ωs : List QuinticGoldilocks} (hV : MaskRootsValid s ωs)
+    {r₁ r₂ : QuinticGoldilocks} (hr₁ : r₁ ∈ ωs.flatMap (fiberRoots s))
+    (hr₂ : r₂ ∈ ωs.flatMap (fiberRoots s))
+    {k₁ k₂ : Nat} (hk₁ : k₁ < 5) (hk₂ : k₂ < 5)
+    (hEq : frobIter k₁ r₁ = frobIter k₂ r₂) :
+    k₁ = k₂ ∧ r₁ = r₂ := by
+  obtain ⟨ω₁, hω₁, hm₁⟩ := List.mem_flatMap.mp hr₁
+  obtain ⟨ω₂, hω₂, hm₂⟩ := List.mem_flatMap.mp hr₂
+  have hp : fpow (frobIter k₁ r₁) (2 ^ s) = fpow (frobIter k₂ r₂) (2 ^ s) :=
+    congrArg (fun x => fpow x (2 ^ s)) hEq
+  rw [fpow_frobIter, fpow_frobIter, fiberRoots_pow s hs ω₁ hm₁,
+    fiberRoots_pow s hs ω₂ hm₂] at hp
+  let sh := (5 - k₁) % 5
+  have hpShift : frobIter (sh + k₁) (fpow ω₁ (2 ^ s)) = frobIter (sh + k₂) (fpow ω₂ (2 ^ s)) := by
+    rw [frobIter_add, frobIter_add, hp]
+  have hMod1 : (sh + k₁) % 5 = 0 := by omega
+  rw [frobIter_mod5 (sh + k₁), hMod1, frobIter_mod5 (sh + k₂)] at hpShift
+  have hSameOmega : ω₁ = ω₂ := by
+    by_cases hEqO : ω₁ = ω₂
+    · exact hEqO
+    · exact absurd hpShift
+        (maskRootsValid_pairSymm hV ω₁ hω₁ ω₂ hω₂ hEqO ((sh + k₂) % 5) (Nat.mod_lt _ (by decide)))
+  subst hSameOmega
+  have hkEq : k₁ = k₂ := by
+    by_cases hMod0 : (sh + k₂) % 5 = 0
+    · omega
+    · exfalso
+      exact hV.2.1 ω₁ hω₁
+        (frobIter_fixed_imp_frob (Nat.mod_lt _ (by decide)) hMod0 hpShift.symm)
+  subst hkEq
+  exact ⟨rfl, frobIter_inj k₁ hEq⟩
+
+/-- **`(G2)` Discharges `blindPoints.Nodup` Across All `t · 2^s` Fiber Roots
+    (`blindPoints_fiberRoots_nodup`)**:
+    Under `qs.Nodup` and `MaskRootsValid s ωs`, all base-field query points `qs` together with
+    all `t · 2^s` roots of `X^(2^s) - z_j` and their four Frobenius conjugates are pairwise
+    distinct in `QuinticGoldilocks`. -/
+theorem blindPoints_fiberRoots_nodup {s : Nat} {qs : List Goldilocks}
+    {ωs : List QuinticGoldilocks} (hqs : qs.Nodup) (hV : MaskRootsValid s ωs) :
+    (blindPoints qs (ωs.flatMap (fiberRoots s))).Nodup := by
+  let ys := ωs.flatMap (fiberRoots s)
+  have hysNd : ys.Nodup := flatMap_fiberRoots_nodup s hV.1 ωs hV.2.1 hV.2.2
+  have hOrbNd : ∀ k < 5, (ys.map (frobIter k)).Nodup := fun k _ =>
+    nodup_map_on (frobIter k) ys hysNd (fun a _ b _ h => frobIter_inj k h)
+  have hOrbDisj : ∀ k₁ k₂ : Nat, k₁ < 5 → k₂ < 5 → k₁ ≠ k₂ →
+      ∀ x ∈ ys.map (frobIter k₁), ∀ y ∈ ys.map (frobIter k₂), x ≠ y := by
+    intro k₁ k₂ hk₁ hk₂ hNe x hx y hy hEq
+    obtain ⟨r₁, hr₁, rfl⟩ := List.mem_map.mp hx
+    obtain ⟨r₂, hr₂, rfl⟩ := List.mem_map.mp hy
+    exact hNe (frobIter_fiberRoot_ne hV.1 hV hr₁ hr₂ hk₁ hk₂ hEq).1
+  have hQsNd : (qs.map ofBase).Nodup :=
+    nodup_map_on ofBase qs hqs (fun _ _ _ _ h => QuinticGoldilocks.ofBase_injective h)
+  have hBaseDisj : ∀ k < 5, ∀ x ∈ qs.map ofBase, ∀ y ∈ ys.map (frobIter k), x ≠ y := by
+    intro k hk x hx y hy hEq
+    obtain ⟨q, _, rfl⟩ := List.mem_map.mp hx
+    obtain ⟨r, hr, rfl⟩ := List.mem_map.mp hy
+    obtain ⟨ω, hω, hm⟩ := List.mem_flatMap.mp hr
+    have hp := congrArg (fun z => fpow z (2 ^ s)) hEq
+    rw [fpow_ofBase, fpow_frobIter, fiberRoots_pow s hV.1 ω hm] at hp
+    let invK := (5 - k) % 5
+    have hp2 := congrArg (frobIter invK) hp
+    have hm0 : (invK + k) % 5 = 0 := by omega
+    rw [frobIter_ofBase, ← frobIter_add, frobIter_mod5 (invK + k), hm0] at hp2
+    have hp2' : ofBase (fpow q (2 ^ s)) = fpow ω (2 ^ s) := hp2
+    have hf : frob (fpow ω (2 ^ s)) = fpow ω (2 ^ s) := by
+      rw [← hp2', QuinticGoldilocks.frob_ofBase]
+    exact hV.2.1 ω hω hf
+  have hMap0 : ys = ys.map (frobIter 0) := (List.map_id' ys).symm
+  have hMap1 : ys.map frob = ys.map (frobIter 1) := rfl
+  have hMap2 : ys.map (fun z => frob (frob z)) = ys.map (frobIter 2) := rfl
+  have hMap3 : ys.map (fun z => frob (frob (frob z))) = ys.map (frobIter 3) := rfl
+  have hMap4 : ys.map (fun z => frob (frob (frob (frob z)))) = ys.map (frobIter 4) := rfl
+  show (qs.map ofBase ++ (ys ++ (ys.map frob ++ (ys.map (fun z => frob (frob z)) ++
+    (ys.map (fun z => frob (frob (frob z))) ++
+      ys.map (fun z => frob (frob (frob (frob z))))))))).Nodup
+  rw [hMap1, hMap2, hMap3, hMap4]
+  conv => arg 1; arg 2; arg 1; rw [hMap0]
+  have h34 := nodup_append_of_disjoint (hOrbNd 3 (by decide)) (hOrbNd 4 (by decide))
+    (hOrbDisj 3 4 (by decide) (by decide) (by decide))
+  have h234 := nodup_append_of_disjoint (hOrbNd 2 (by decide)) h34 (fun x hx y hy => by
+    rcases List.mem_append.mp hy with hy3 | hy4
+    · exact hOrbDisj 2 3 (by decide) (by decide) (by decide) x hx y hy3
+    · exact hOrbDisj 2 4 (by decide) (by decide) (by decide) x hx y hy4)
+  have h1234 := nodup_append_of_disjoint (hOrbNd 1 (by decide)) h234 (fun x hx y hy => by
+    rcases List.mem_append.mp hy with hy2 | hy34
+    · exact hOrbDisj 1 2 (by decide) (by decide) (by decide) x hx y hy2
+    · rcases List.mem_append.mp hy34 with hy3 | hy4
+      · exact hOrbDisj 1 3 (by decide) (by decide) (by decide) x hx y hy3
+      · exact hOrbDisj 1 4 (by decide) (by decide) (by decide) x hx y hy4)
+  have h01234 := nodup_append_of_disjoint (hOrbNd 0 (by decide)) h1234 (fun x hx y hy => by
+    rcases List.mem_append.mp hy with hy1 | hy234
+    · exact hOrbDisj 0 1 (by decide) (by decide) (by decide) x hx y hy1
+    · rcases List.mem_append.mp hy234 with hy2 | hy34
+      · exact hOrbDisj 0 2 (by decide) (by decide) (by decide) x hx y hy2
+      · rcases List.mem_append.mp hy34 with hy3 | hy4
+        · exact hOrbDisj 0 3 (by decide) (by decide) (by decide) x hx y hy3
+        · exact hOrbDisj 0 4 (by decide) (by decide) (by decide) x hx y hy4)
+  refine nodup_append_of_disjoint hQsNd h01234 (fun x hx y hy => ?_)
+  rcases List.mem_append.mp hy with hy0 | hy1234
+  · exact hBaseDisj 0 (by decide) x hx y hy0
+  · rcases List.mem_append.mp hy1234 with hy1 | hy234
+    · exact hBaseDisj 1 (by decide) x hx y hy1
+    · rcases List.mem_append.mp hy234 with hy2 | hy34
+      · exact hBaseDisj 2 (by decide) x hx y hy2
+      · rcases List.mem_append.mp hy34 with hy3 | hy4
+        · exact hBaseDisj 3 (by decide) x hx y hy3
+        · exact hBaseDisj 4 (by decide) x hx y hy4
+
+/-- Evaluate a list of canonical degree-`< 2^s` remainders across the fibers `fiberRoots s ω`. -/
+def evalResidues (s : Nat) :
+    List QuinticGoldilocks → List (List QuinticGoldilocks) → List QuinticGoldilocks
+  | [], _ => []
+  | _, [] => []
+  | ω :: ωs, rem :: rems => (fiberRoots s ω).map (evalCoeffs rem) ++ evalResidues s ωs rems
+
+/-- Interpolate canonical degree-`< 2^s` remainders from fiber evaluations. -/
+def interpResidues (s : Nat) :
+    List QuinticGoldilocks → List QuinticGoldilocks → List (List QuinticGoldilocks)
+  | [], _ => []
+  | ω :: ωs, vs =>
+    newtonInterp (fiberRoots s ω) (vs.take (2 ^ s)) :: interpResidues s ωs (vs.drop (2 ^ s))
+
+theorem flatMap_fiberRoots_length (s : Nat) :
+    ∀ ωs : List QuinticGoldilocks, (ωs.flatMap (fiberRoots s)).length = ωs.length * 2 ^ s
+  | [] => (Nat.zero_mul (2 ^ s)).symm
+  | ω :: ωs => by
+    rw [List.flatMap_cons, List.length_append, fiberRoots_length, flatMap_fiberRoots_length s ωs]
+    show 2 ^ s + ωs.length * 2 ^ s = (ωs.length + 1) * 2 ^ s
+    rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+theorem interpResidues_shape (s : Nat) :
+    ∀ (ωs : List QuinticGoldilocks) (vs : List QuinticGoldilocks),
+      vs.length = ωs.length * 2 ^ s →
+      (interpResidues s ωs vs).length = ωs.length ∧
+      ∀ r ∈ interpResidues s ωs vs, r.length = 2 ^ s
+  | [], _, _ => ⟨rfl, fun _ h => nomatch h⟩
+  | ω :: ωs, vs, hvs => by
+    have hGe : 2 ^ s ≤ vs.length := by
+      have e : (ω :: ωs).length * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s := by
+        show (ωs.length + 1) * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s
+        rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+      omega
+    have hTakeLen : (vs.take (2 ^ s)).length = 2 ^ s := by
+      rw [List.length_take]; omega
+    have hDropLen : (vs.drop (2 ^ s)).length = ωs.length * 2 ^ s := by
+      rw [List.length_drop]
+      have e : (ω :: ωs).length * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s := by
+        show (ωs.length + 1) * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s
+        rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+      omega
+    obtain ⟨ihLen, ihMem⟩ := interpResidues_shape s ωs (vs.drop (2 ^ s)) hDropLen
+    refine ⟨congrArg Nat.succ ihLen, fun r hr => ?_⟩
+    rcases List.mem_cons.mp hr with rfl | hrTail
+    · rw [newtonInterp_length _ _ ((fiberRoots_length s ω).trans hTakeLen.symm),
+        fiberRoots_length]
+    · exact ihMem r hrTail
+
+theorem evalResidues_length (s : Nat) :
+    ∀ (ωs : List QuinticGoldilocks) (rems : List (List QuinticGoldilocks)),
+      rems.length = ωs.length →
+      (∀ r ∈ rems, r.length = 2 ^ s) →
+      (evalResidues s ωs rems).length = ωs.length * 2 ^ s
+  | [], [], _, _ => (Nat.zero_mul (2 ^ s)).symm
+  | [], _ :: _, h, _ => by cases h
+  | _ :: _, [], h, _ => by cases h
+  | ω :: ωs, rem :: rems, hLen, hRems => by
+    show ((fiberRoots s ω).map (evalCoeffs rem) ++ evalResidues s ωs rems).length =
+      (ωs.length + 1) * 2 ^ s
+    rw [List.length_append, List.length_map, fiberRoots_length,
+      evalResidues_length s ωs rems (Nat.succ.inj hLen)
+        (fun r hr => hRems r (List.mem_cons_of_mem _ hr)),
+      Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+theorem interpResidues_evalResidues (s : Nat) (hs : s ≤ 32) :
+    ∀ (ωs : List QuinticGoldilocks) (rems : List (List QuinticGoldilocks)),
+      (∀ ω ∈ ωs, ω ≠ zero) →
+      rems.length = ωs.length →
+      (∀ r ∈ rems, r.length = 2 ^ s) →
+      interpResidues s ωs (evalResidues s ωs rems) = rems
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, _, h, _ => by cases h
+  | _ :: _, [], _, h, _ => by cases h
+  | ω :: ωs, rem :: rems, hNz, hLen, hRems => by
+    have hMapLen : ((fiberRoots s ω).map (evalCoeffs rem)).length = 2 ^ s := by
+      rw [List.length_map, fiberRoots_length]
+    have hTake : (((fiberRoots s ω).map (evalCoeffs rem)) ++ evalResidues s ωs rems).take (2 ^ s) =
+        (fiberRoots s ω).map (evalCoeffs rem) := by
+      rw [← hMapLen, List.take_left]
+    have hDrop : (((fiberRoots s ω).map (evalCoeffs rem)) ++ evalResidues s ωs rems).drop (2 ^ s) =
+        evalResidues s ωs rems := by
+      rw [← hMapLen, List.drop_left]
+    show newtonInterp (fiberRoots s ω)
+        ((((fiberRoots s ω).map (evalCoeffs rem)) ++ evalResidues s ωs rems).take (2 ^ s)) ::
+      interpResidues s ωs
+        ((((fiberRoots s ω).map (evalCoeffs rem)) ++ evalResidues s ωs rems).drop (2 ^ s)) =
+      rem :: rems
+    rw [hTake, hDrop,
+      newtonInterp_eval (fiberRoots s ω) rem (fiberRoots_nodup s hs (hNz ω List.mem_cons_self))
+        ((hRems rem List.mem_cons_self).trans (fiberRoots_length s ω).symm),
+      interpResidues_evalResidues s hs ωs rems
+        (fun u hu => hNz u (List.mem_cons_of_mem _ hu))
+        (Nat.succ.inj hLen) (fun r hr => hRems r (List.mem_cons_of_mem _ hr))]
+
+theorem evalResidues_interpResidues (s : Nat) (hs : s ≤ 32) :
+    ∀ (ωs : List QuinticGoldilocks) (vs : List QuinticGoldilocks),
+      (∀ ω ∈ ωs, ω ≠ zero) →
+      vs.length = ωs.length * 2 ^ s →
+      evalResidues s ωs (interpResidues s ωs vs) = vs
+  | [], vs, _, hvs => by
+    have h0 : vs.length = 0 := hvs.trans (Nat.zero_mul (2 ^ s))
+    exact (List.eq_nil_of_length_eq_zero h0).symm
+  | ω :: ωs, vs, hNz, hvs => by
+    have hGe : 2 ^ s ≤ vs.length := by
+      have e : (ω :: ωs).length * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s := by
+        show (ωs.length + 1) * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s
+        rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+      omega
+    have hTakeLen : (vs.take (2 ^ s)).length = 2 ^ s := by rw [List.length_take]; omega
+    have hDropLen : (vs.drop (2 ^ s)).length = ωs.length * 2 ^ s := by
+      rw [List.length_drop]
+      have e : (ω :: ωs).length * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s := by
+        show (ωs.length + 1) * 2 ^ s = 2 ^ s + ωs.length * 2 ^ s
+        rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+      omega
+    show (fiberRoots s ω).map (evalCoeffs (newtonInterp (fiberRoots s ω) (vs.take (2 ^ s)))) ++
+        evalResidues s ωs (interpResidues s ωs (vs.drop (2 ^ s))) = vs
+    rw [eval_newtonInterp (fiberRoots s ω) (vs.take (2 ^ s))
+        (fiberRoots_nodup s hs (hNz ω List.mem_cons_self))
+        ((fiberRoots_length s ω).trans hTakeLen.symm),
+      evalResidues_interpResidues s hs ωs (vs.drop (2 ^ s))
+        (fun u hu => hNz u (List.mem_cons_of_mem _ hu)) hDropLen,
+      List.take_append_drop]
+
+/-- Constructive equivalence between fiber evaluation vectors and canonical remainders in
+    `∏_{j=1}^t E[X] / (X^(2^s) - z_j)`. -/
+def residuesEquiv (s : Nat) (ωs : List QuinticGoldilocks) (hs : s ≤ 32)
+    (hNz : ∀ ω ∈ ωs, ω ≠ zero) :
+    SimpleEquiv
+      {vs : List QuinticGoldilocks // vs.length = (ωs.flatMap (fiberRoots s)).length}
+      {rems : List (List QuinticGoldilocks) //
+        rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s} where
+  toFun vs :=
+    ⟨interpResidues s ωs vs.1,
+      interpResidues_shape s ωs vs.1 (vs.2.trans (flatMap_fiberRoots_length s ωs))⟩
+  invFun rems :=
+    ⟨evalResidues s ωs rems.1,
+      (evalResidues_length s ωs rems.1 rems.2.1 rems.2.2).trans
+        (flatMap_fiberRoots_length s ωs).symm⟩
+  left_inv vs := Subtype.ext
+    (evalResidues_interpResidues s hs ωs vs.1 hNz
+      (vs.2.trans (flatMap_fiberRoots_length s ωs)))
+  right_inv rems := Subtype.ext
+    (interpResidues_evalResidues s hs ωs rems.1 hNz rems.2.1 rems.2.2)
+
+/-- Exact quotient-ring view of Lemma V2.2 (`SECURITY.md` §V2.2):
+    `B ↦ ((q^(N-b) · B(q))_{q ∈ qs}, (X^(N-b) · B(X) mod (X^(2^s) - ω_j^(2^s)))_{j = 1..t})`. -/
+def blindingResidueView (s shiftDeg : Nat) (qs : List Goldilocks)
+    (ωs : List QuinticGoldilocks) (cs : List Goldilocks) :
+    List Goldilocks × List (List QuinticGoldilocks) :=
+  (pmul (qs.map (evalCoeffs cs)) (qs.map (fun q => fpow q shiftDeg)),
+   ωs.map (fun ω =>
+     (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s)) (shiftMonomial shiftDeg (cs.map ofBase))).1))
+
+private theorem evalResidues_blindingResidueView (s shiftDeg : Nat) (hs : s ≤ 32)
+    (cs : List Goldilocks) :
+    ∀ ωs : List QuinticGoldilocks,
+      evalResidues s ωs
+        (ωs.map (fun ω =>
+          (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s))
+            (shiftMonomial shiftDeg (cs.map ofBase))).1)) =
+      pmul ((ωs.flatMap (fiberRoots s)).map (evalCoeffs (cs.map ofBase)))
+        ((ωs.flatMap (fiberRoots s)).map (fun r => fpow r shiftDeg))
+  | [] => rfl
+  | ω :: ωs => by
+    have h2Pos : (2 ^ s - 1) + 1 = 2 ^ s := by
+      have hp := Nat.two_pow_pos s
+      omega
+    have hHead : (fiberRoots s ω).map
+        (evalCoeffs (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s))
+          (shiftMonomial shiftDeg (cs.map ofBase))).1) =
+      pmul ((fiberRoots s ω).map (evalCoeffs (cs.map ofBase)))
+        ((fiberRoots s ω).map (fun r => fpow r shiftDeg)) := by
+      have hPt : ∀ r ∈ fiberRoots s ω,
+          evalCoeffs (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s))
+            (shiftMonomial shiftDeg (cs.map ofBase))).1 r =
+          mul (evalCoeffs (cs.map ofBase) r) (fpow r shiftDeg) := by
+        intro r hr
+        have hrPow : fpow r ((2 ^ s - 1) + 1) = fpow ω (2 ^ s) := by
+          rw [h2Pos]
+          exact fiberRoots_pow s hs ω hr
+        rw [evalCoeffs_divModBinomial_at_root (2 ^ s - 1) (fpow ω (2 ^ s)) _ hrPow,
+          evalCoeffs_shiftMonomial, LawfulCommRing.mul_comm]
+      have hZip : ∀ l : List QuinticGoldilocks,
+          pmul (l.map (evalCoeffs (cs.map ofBase))) (l.map (fun r => fpow r shiftDeg)) =
+            l.map (fun r => mul (evalCoeffs (cs.map ofBase) r) (fpow r shiftDeg)) := by
+        intro l
+        induction l with
+        | nil => rfl
+        | cons a l ih =>
+          show mul (evalCoeffs (cs.map ofBase) a) (fpow a shiftDeg) ::
+              pmul (l.map (evalCoeffs (cs.map ofBase))) (l.map (fun r => fpow r shiftDeg)) =
+            mul (evalCoeffs (cs.map ofBase) a) (fpow a shiftDeg) ::
+              l.map (fun r => mul (evalCoeffs (cs.map ofBase) r) (fpow r shiftDeg))
+          rw [ih]
+      rw [hZip]
+      exact map_congr_mem _ _ _ hPt
+    have hPmulAppend : ∀ (a₁ b₁ a₂ b₂ : List QuinticGoldilocks), a₁.length = b₁.length →
+        pmul (a₁ ++ a₂) (b₁ ++ b₂) = pmul a₁ b₁ ++ pmul a₂ b₂ := by
+      intro a₁ b₁ a₂ b₂ hL
+      induction a₁ generalizing b₁ with
+      | nil =>
+        have hb0 := List.eq_nil_of_length_eq_zero hL.symm
+        subst hb0
+        rfl
+      | cons x xs ih =>
+        cases b₁ with
+        | nil => cases hL
+        | cons y ys =>
+          show mul x y :: pmul (xs ++ a₂) (ys ++ b₂) = (mul x y :: pmul xs ys) ++ pmul a₂ b₂
+          rw [ih ys (Nat.succ.inj hL)]
+          rfl
+    show (fiberRoots s ω).map
+        (evalCoeffs (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s))
+          (shiftMonomial shiftDeg (cs.map ofBase))).1) ++
+      evalResidues s ωs
+        (ωs.map (fun ω =>
+          (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s))
+            (shiftMonomial shiftDeg (cs.map ofBase))).1)) =
+      pmul (((fiberRoots s ω) ++ ωs.flatMap (fiberRoots s)).map (evalCoeffs (cs.map ofBase)))
+        (((fiberRoots s ω) ++ ωs.flatMap (fiberRoots s)).map (fun r => fpow r shiftDeg))
+    rw [List.map_append, List.map_append,
+      hPmulAppend _ _ _ _ ((List.length_map _).trans (List.length_map _).symm),
+      hHead, evalResidues_blindingResidueView s shiftDeg hs cs ωs]
+
+/-- Constructive `SimpleEquiv` for **Lemma V2.2 in exact quotient-ring form**
+    (`F_p^{|qs| + 5 t 2^s} ≃ F_p^{|qs|} × ∏_{j=1}^t E[X] / (X^(2^s) - z_j)`). -/
+def blindingResidueEquiv (s shiftDeg : Nat) (qs : List Goldilocks)
+    (ωs : List QuinticGoldilocks) (hqs : qs.Nodup) (hqz : ∀ q ∈ qs, q ≠ zero)
+    (hV : MaskRootsValid s ωs) :
+    SimpleEquiv
+      {cs : List Goldilocks // cs.length = qs.length + 5 * (ωs.length * 2 ^ s)}
+      ({us : List Goldilocks // us.length = qs.length} ×
+        {rems : List (List QuinticGoldilocks) //
+          rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s}) :=
+  let ys := ωs.flatMap (fiberRoots s)
+  have hysLen : ys.length = ωs.length * 2 ^ s := flatMap_fiberRoots_length s ωs
+  have hLsNz : ∀ l ∈ qs.map (fun q => fpow q shiftDeg), l ≠ zero := by
+    intro l hl
+    obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hl
+    exact fpow_ne_zero (hqz q hq) shiftDeg
+  have hMsNz : ∀ m ∈ ys.map (fun r => fpow r shiftDeg), m ≠ zero := by
+    intro m hm
+    obtain ⟨r, hr, rfl⟩ := List.mem_map.mp hm
+    obtain ⟨ω, hω, hmR⟩ := List.mem_flatMap.mp hr
+    obtain ⟨u, hu, rfl⟩ := List.mem_map.mp hmR
+    have huNz := (twoAdicCoset_pow_eq_one s hV.1 hu).2
+    have hωNz := (hV.omega_ne_zero hω).1
+    have hrNz : mul (ofBase u) ω ≠ zero := by
+      intro h0
+      have h1 := congrArg (fun z => mul z (LawfulField.inv ω)) h0
+      have e1 : mul (mul (ofBase u) ω) (LawfulField.inv ω) =
+          mul (ofBase u) (mul ω (LawfulField.inv ω)) := by constructive_ring
+      have e0 : mul (zero : QuinticGoldilocks) (LawfulField.inv ω) = zero := by constructive_ring
+      rw [e1, LawfulField.mul_inv_cancel hωNz, LawfulCommRing.mul_one, e0,
+        ← QuinticGoldilocks.ofBase_zero] at h1
+      exact huNz (QuinticGoldilocks.ofBase_injective h1)
+    exact fpow_ne_zero hrNz shiftDeg
+  let lenCast : SimpleEquiv
+      {cs : List Goldilocks // cs.length = qs.length + 5 * (ωs.length * 2 ^ s)}
+      {cs : List Goldilocks // cs.length = qs.length + 5 * ys.length} :=
+    { toFun := fun cs => ⟨cs.1, by rw [hysLen]; exact cs.2⟩
+      invFun := fun cs => ⟨cs.1, by rw [← hysLen]; exact cs.2⟩
+      left_inv := fun _ => rfl
+      right_inv := fun _ => rfl }
+  let scaled := postProd
+    (blindingEquiv qs ys (blindPoints_fiberRoots_nodup hqs hV))
+    (scaleEquiv (qs.map (fun q => fpow q shiftDeg)) (List.length_map _) hLsNz)
+    (scaleEquiv (ys.map (fun r => fpow r shiftDeg)) (List.length_map _) hMsNz)
+  let resEq := residuesEquiv s ωs hV.1 (fun ω hω => (hV.omega_ne_zero hω).1)
+  { toFun := fun cs =>
+      let p := scaled.toFun (lenCast.toFun cs)
+      (p.1, resEq.toFun p.2)
+    invFun := fun o =>
+      lenCast.invFun (scaled.invFun (o.1, resEq.invFun o.2))
+    left_inv := fun cs => by
+      dsimp only
+      rw [resEq.left_inv, scaled.left_inv, lenCast.left_inv]
+    right_inv := fun o => by
+      dsimp only
+      rw [lenCast.right_inv, scaled.right_inv]
+      exact Prod.ext rfl (resEq.right_inv o.2) }
+
+theorem blindingResidueEquiv_apply (s shiftDeg : Nat) (qs : List Goldilocks)
+    (ωs : List QuinticGoldilocks) (hqs : qs.Nodup) (hqz : ∀ q ∈ qs, q ≠ zero)
+    (hV : MaskRootsValid s ωs)
+    (cs : {cs : List Goldilocks // cs.length = qs.length + 5 * (ωs.length * 2 ^ s)}) :
+    (((blindingResidueEquiv s shiftDeg qs ωs hqs hqz hV).toFun cs).1.1,
+     ((blindingResidueEquiv s shiftDeg qs ωs hqs hqz hV).toFun cs).2.1) =
+      blindingResidueView s shiftDeg qs ωs cs.1 := by
+  refine Prod.ext rfl ?_
+  show interpResidues s ωs
+      (pmul ((ωs.flatMap (fiberRoots s)).map (evalCoeffs (cs.1.map ofBase)))
+        ((ωs.flatMap (fiberRoots s)).map (fun r => fpow r shiftDeg))) =
+    ωs.map (fun ω =>
+      (divModBinomial (2 ^ s - 1) (fpow ω (2 ^ s)) (shiftMonomial shiftDeg (cs.1.map ofBase))).1)
+  rw [← evalResidues_blindingResidueView s shiftDeg hV.1 cs.1 ωs]
+  refine interpResidues_evalResidues s hV.1 ωs _
+    (fun ω hω => (hV.omega_ne_zero hω).1) (List.length_map _) ?_
+  intro r hr
+  obtain ⟨ω, _, rfl⟩ := List.mem_map.mp hr
+  have h2Pos : (2 ^ s - 1) + 1 = 2 ^ s := by
+    have hp := Nat.two_pow_pos s
+    omega
+  rw [divModBinomial_rem_length, h2Pos]
+
+/-- **Lemma V2.2 in Exact Quotient-Ring Form (`v2_blinding_residue_ring_bijective`,
+    `SECURITY.md` §§V2.2, V2.6, V2.9)**:
+    Under `qs.Nodup`, `0 ∉ qs`, and `(G2)` (`MaskRootsValid s ωs`), the linear map
+    `B ↦ ((q^(N-b) · B(q))_{q ∈ qs}, (X^(N-b) · B(X) mod (X^(2^s) - z_j))_{j = 1..t})`
+    on polynomials `B ∈ F_p[X]_{< |qs| + 5 t 2^s}` is an explicit constructive bijection onto
+    `F_p^{|qs|} × ∏_{j=1}^t E[X] / (X^(2^s) - z_j)`. -/
+theorem v2_blinding_residue_ring_bijective (s shiftDeg : Nat) (qs : List Goldilocks)
+    (ωs : List QuinticGoldilocks) (hqs : qs.Nodup) (hqz : ∀ q ∈ qs, q ≠ zero)
+    (hV : MaskRootsValid s ωs) :
+    ∃ Φ : SimpleEquiv
+        {cs : List Goldilocks // cs.length = qs.length + 5 * (ωs.length * 2 ^ s)}
+        ({us : List Goldilocks // us.length = qs.length} ×
+          {rems : List (List QuinticGoldilocks) //
+            rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s}),
+      ∀ cs, ((Φ.toFun cs).1.1, (Φ.toFun cs).2.1) = blindingResidueView s shiftDeg qs ωs cs.1 :=
+  ⟨blindingResidueEquiv s shiftDeg qs ωs hqs hqz hV,
+    blindingResidueEquiv_apply s shiftDeg qs ωs hqs hqz hV⟩
+
+/-- Componentwise vector addition on lists of residue polynomials. -/
+def vaddResidues : List (List QuinticGoldilocks) → List (List QuinticGoldilocks) →
+    List (List QuinticGoldilocks)
+  | r1 :: rs1, r2 :: rs2 => vadd r1 r2 :: vaddResidues rs1 rs2
+  | _, _ => []
+
+def vsubResidues : List (List QuinticGoldilocks) → List (List QuinticGoldilocks) →
+    List (List QuinticGoldilocks)
+  | r1 :: rs1, r2 :: rs2 => vsub r1 r2 :: vsubResidues rs1 rs2
+  | _, _ => []
+
+private theorem vaddResidues_shape (s : Nat) :
+    ∀ (a b : List (List QuinticGoldilocks)),
+      a.length = b.length →
+      (∀ r ∈ a, r.length = 2 ^ s) →
+      (∀ r ∈ b, r.length = 2 ^ s) →
+      (vaddResidues a b).length = b.length ∧ ∀ r ∈ vaddResidues a b, r.length = 2 ^ s
+  | [], [], _, _, _ => ⟨rfl, fun _ h => nomatch h⟩
+  | [], _ :: _, h, _, _ => by cases h
+  | _ :: _, [], h, _, _ => by cases h
+  | r1 :: rs1, r2 :: rs2, hL, ha, hb => by
+    obtain ⟨ihL, ihM⟩ := vaddResidues_shape s rs1 rs2 (Nat.succ.inj hL)
+      (fun r hr => ha r (List.mem_cons_of_mem _ hr))
+      (fun r hr => hb r (List.mem_cons_of_mem _ hr))
+    refine ⟨congrArg Nat.succ ihL, fun r hr => ?_⟩
+    rcases List.mem_cons.mp hr with rfl | hrT
+    · exact (vadd_length r1 r2
+        ((ha r1 List.mem_cons_self).trans (hb r2 List.mem_cons_self).symm)).trans
+        (hb r2 List.mem_cons_self)
+    · exact ihM r hrT
+
+private theorem vsubResidues_shape (s : Nat) :
+    ∀ (a b : List (List QuinticGoldilocks)),
+      a.length = b.length →
+      (∀ r ∈ a, r.length = 2 ^ s) →
+      (∀ r ∈ b, r.length = 2 ^ s) →
+      (vsubResidues a b).length = b.length ∧ ∀ r ∈ vsubResidues a b, r.length = 2 ^ s
+  | [], [], _, _, _ => ⟨rfl, fun _ h => nomatch h⟩
+  | [], _ :: _, h, _, _ => by cases h
+  | _ :: _, [], h, _, _ => by cases h
+  | r1 :: rs1, r2 :: rs2, hL, ha, hb => by
+    obtain ⟨ihL, ihM⟩ := vsubResidues_shape s rs1 rs2 (Nat.succ.inj hL)
+      (fun r hr => ha r (List.mem_cons_of_mem _ hr))
+      (fun r hr => hb r (List.mem_cons_of_mem _ hr))
+    refine ⟨congrArg Nat.succ ihL, fun r hr => ?_⟩
+    rcases List.mem_cons.mp hr with rfl | hrT
+    · exact (vsub_length r1 r2
+        ((ha r1 List.mem_cons_self).trans (hb r2 List.mem_cons_self).symm)).trans
+        (hb r2 List.mem_cons_self)
+    · exact ihM r hrT
+
+private theorem vsubResidues_vaddResidues (s : Nat) :
+    ∀ (d v : List (List QuinticGoldilocks)),
+      d.length = v.length →
+      (∀ r ∈ d, r.length = 2 ^ s) →
+      (∀ r ∈ v, r.length = 2 ^ s) →
+      vsubResidues (vaddResidues d v) d = v
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, h, _, _ => by cases h
+  | _ :: _, [], h, _, _ => by cases h
+  | r1 :: rs1, r2 :: rs2, hL, hd, hv => by
+    show vsub (vadd r1 r2) r1 :: vsubResidues (vaddResidues rs1 rs2) rs1 = r2 :: rs2
+    rw [vsub_vadd r1 r2 ((hd r1 List.mem_cons_self).trans (hv r2 List.mem_cons_self).symm),
+      vsubResidues_vaddResidues s rs1 rs2 (Nat.succ.inj hL)
+        (fun r hr => hd r (List.mem_cons_of_mem _ hr))
+        (fun r hr => hv r (List.mem_cons_of_mem _ hr))]
+
+private theorem vaddResidues_vsubResidues (s : Nat) :
+    ∀ (d o : List (List QuinticGoldilocks)),
+      d.length = o.length →
+      (∀ r ∈ d, r.length = 2 ^ s) →
+      (∀ r ∈ o, r.length = 2 ^ s) →
+      vaddResidues d (vsubResidues o d) = o
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, h, _, _ => by cases h
+  | _ :: _, [], h, _, _ => by cases h
+  | r1 :: rs1, r2 :: rs2, hL, hd, ho => by
+    show vadd r1 (vsub r2 r1) :: vaddResidues rs1 (vsubResidues rs2 rs1) = r2 :: rs2
+    rw [vadd_vsub r1 r2 ((hd r1 List.mem_cons_self).trans (ho r2 List.mem_cons_self).symm),
+      vaddResidues_vsubResidues s rs1 rs2 (Nat.succ.inj hL)
+        (fun r hr => hd r (List.mem_cons_of_mem _ hr))
+        (fun r hr => ho r (List.mem_cons_of_mem _ hr))]
+
+/-- **Lemma V2.2 Perfect Simulation in Residue-Ring Form
+    (`v2_blinding_residue_ring_perfectly_simulated`)**:
+    Witness-dependent base-field evaluations and `E[X] / (X^(2^s) - z_j)` quotient-ring coset
+    residues masked by `blindingResidueView` on uniform blinder coefficients are perfectly
+    simulated (`CoinBijectionSimulated`) by uniform elements of
+    `F_p^{|qs|} × ∏_{j=1}^t E[X] / (X^(2^s) - z_j)`. -/
+theorem v2_blinding_residue_ring_perfectly_simulated (s shiftDeg : Nat) (qs : List Goldilocks)
+    (ωs : List QuinticGoldilocks) (hqs : qs.Nodup) (hqz : ∀ q ∈ qs, q ≠ zero)
+    (hV : MaskRootsValid s ωs) :
+    CoinBijectionSimulated
+      (fun (d : {us : List Goldilocks // us.length = qs.length} ×
+            {rems : List (List QuinticGoldilocks) //
+              rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s})
+          (cs : {cs : List Goldilocks // cs.length = qs.length + 5 * (ωs.length * 2 ^ s)}) =>
+        let bw := blindingResidueView s shiftDeg qs ωs cs.1
+        (vadd d.1.1 bw.1, vaddResidues d.2.1 bw.2))
+      (fun (o : {us : List Goldilocks // us.length = qs.length} ×
+            {rems : List (List QuinticGoldilocks) //
+              rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s}) =>
+        (o.1.1, o.2.1)) := by
+  intro d
+  let baseEq := blindingResidueEquiv s shiftDeg qs ωs hqs hqz hV
+  let resOff : SimpleEquiv
+      {rems : List (List QuinticGoldilocks) //
+        rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s}
+      {rems : List (List QuinticGoldilocks) //
+        rems.length = ωs.length ∧ ∀ r ∈ rems, r.length = 2 ^ s} :=
+    { toFun := fun v =>
+        let sh := vaddResidues_shape s d.2.1 v.1 (d.2.2.1.trans v.2.1.symm) d.2.2.2 v.2.2
+        ⟨vaddResidues d.2.1 v.1, sh.1.trans v.2.1, sh.2⟩
+      invFun := fun o =>
+        let sh := vsubResidues_shape s o.1 d.2.1 (o.2.1.trans d.2.2.1.symm) o.2.2 d.2.2.2
+        ⟨vsubResidues o.1 d.2.1, sh.1.trans d.2.2.1, sh.2⟩
+      left_inv := fun v => Subtype.ext
+        (vsubResidues_vaddResidues s d.2.1 v.1 (d.2.2.1.trans v.2.1.symm) d.2.2.2 v.2.2)
+      right_inv := fun o => Subtype.ext
+        (vaddResidues_vsubResidues s d.2.1 o.1 (d.2.2.1.trans o.2.1.symm) d.2.2.2 o.2.2) }
+  refine ⟨postProd baseEq (offsetEquiv d.1) resOff, fun cs => ?_⟩
+  have hApp := blindingResidueEquiv_apply s shiftDeg qs ωs hqs hqz hV cs
+  obtain ⟨h1, h2⟩ := Prod.mk.inj hApp
+  show (vadd d.1.1 (blindingResidueView s shiftDeg qs ωs cs.1).1,
+        vaddResidues d.2.1 (blindingResidueView s shiftDeg qs ωs cs.1).2) =
+    (vadd d.1.1 ((baseEq.toFun cs).1).1, vaddResidues d.2.1 ((baseEq.toFun cs).2).1)
+  rw [h1, h2]
+  rfl
+
+end ResidueRingBridge
+
+#export_eqns MaskRootsValid blindingResidueView divModBinomial shiftMonomial fpow frobIter
+
 /-! ## §7. Profile roster and cell count -/
 
 /-- `zk_hem::v2::params::Profile`. -/
@@ -1705,6 +2875,12 @@ theorem blindCells_eq_blinding_count (s q : Nat) (qs : List Goldilocks)
   Qsag.ZkHemV2.v2_scaled_symbols_and_mask_values_perfectly_simulated
   Qsag.ZkHemV2.tooth_blinding_base_field_point_not_surjective
   Qsag.ZkHemV2.tooth_blinding_conjugate_points_not_surjective
+  Qsag.ZkHemV2.evalCoeffs_divModBinomial
+  Qsag.ZkHemV2.evalCoeffs_divModBinomial_at_root
+  Qsag.ZkHemV2.twoAdicCoset_nodup
+  Qsag.ZkHemV2.blindPoints_fiberRoots_nodup
+  Qsag.ZkHemV2.v2_blinding_residue_ring_bijective
+  Qsag.ZkHemV2.v2_blinding_residue_ring_perfectly_simulated
   Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_wireTag
   Qsag.ZkHemV2.ZkHemV2Profile.wireTag_of_ofWireTag
   Qsag.ZkHemV2.ZkHemV2Profile.ofWireTag_v1_tag

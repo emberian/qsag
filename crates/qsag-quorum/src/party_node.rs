@@ -52,9 +52,7 @@ use qsag_asm::{KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS};
 use qsag_core::belt_latch::DurableWal;
 use qsag_core::keccak_mpc::RssKeyShare256;
 use qsag_core::rss256::Shake256Prg256;
-#[cfg(any(test, feature = "testing-ephemeral"))]
-use qsag_core::wipe::ct_eq_bytes32;
-use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes};
+use qsag_core::wipe::{SecretBuffer, SecretVec, ct_eq_bytes, ct_eq_bytes32};
 
 use crate::dzk::{
     DzkShape, Gf128, NodeBasis, challenge_points, data_node_sum, decode_elements, derive_weights,
@@ -600,33 +598,41 @@ fn reconstruct_opened(
         .collect()
 }
 
-/// One party's replicated share of a `Keccak-f[1600]` state: share slot `party` and share
-/// slot `party + 1`. The state is the xor of the three slots.
-///
-/// Strictly move-only (`!Clone` in all profiles) and opaque outside this module (`R-Ex-10`):
-/// production callers enroll states exclusively via WAL/session-mediated
-/// [`IsolatedRss256Party::enroll_rss_key_block`], while test/`testing-ephemeral` harnesses
-/// consume party- and session-bound tickets once via [`IsolatedRss256Party::load_shares`].
-pub struct SharePair {
-    party: usize,
-    session_id: Option<[u8; 32]>,
-    mine: [u64; 25],
-    next: [u64; 25],
-}
-
-impl SharePair {
-    /// Custodian party index (`0..3`) bound to this state share pair.
-    #[inline]
-    pub const fn party(&self) -> usize {
-        self.party
+mod share_pair {
+    /// One party's replicated share of a `Keccak-f[1600]` state: share slot `party` and share
+    /// slot `party + 1`. The state is the xor of the three slots.
+    ///
+    /// Strictly move-only (`!Clone` in all profiles) and opaque outside `party_node` in production
+    /// builds (`R-Ex-10` / `R12`): production callers enroll states exclusively via WAL/session-
+    /// mediated [`super::IsolatedRss256Party::enroll_rss_key_block`], while test/`testing-ephemeral`
+    /// harnesses consume party- and session-bound tickets once via
+    /// [`super::IsolatedRss256Party::load_shares`].
+    pub struct SharePair {
+        pub(super) party: usize,
+        pub(super) session_id: Option<[u8; 32]>,
+        pub(super) mine: [u64; 25],
+        pub(super) next: [u64; 25],
     }
 
-    /// Optional session identifier bound to this state share pair.
-    #[inline]
-    pub const fn session_id(&self) -> Option<&[u8; 32]> {
-        self.session_id.as_ref()
+    impl SharePair {
+        /// Custodian party index (`0..3`) bound to this state share pair.
+        #[inline]
+        pub const fn party(&self) -> usize {
+            self.party
+        }
+
+        /// Optional session identifier bound to this state share pair.
+        #[inline]
+        pub const fn session_id(&self) -> Option<&[u8; 32]> {
+            self.session_id.as_ref()
+        }
     }
 }
+
+#[cfg(any(test, feature = "testing-ephemeral"))]
+pub use share_pair::SharePair;
+#[cfg(not(any(test, feature = "testing-ephemeral")))]
+pub(crate) use share_pair::SharePair;
 
 /// The secrets of one party of the replicated engine.
 #[derive(Clone)]
@@ -1091,6 +1097,15 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         let mut pad_mine = Shake256Prg256::new(&self.slot_keys[0], &self.session_id, domain);
         let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
         let (succ, pred) = (self.succ(), self.pred());
+        for state in &self.states {
+            if state.party() != self.party
+                || state
+                    .session_id()
+                    .is_some_and(|sid| !ct_eq_bytes32(sid, &self.session_id))
+            {
+                return Err(NodeError::InvalidParameters);
+            }
+        }
         self.unverified = true;
         self.record
             .reserve(n.checked_mul(25 * 24).ok_or(NodeError::Poisoned)?)?;
@@ -1602,6 +1617,9 @@ impl Drop for SharePair {
     fn drop(&mut self) {
         qsag_asm::volatile_fill(&mut self.mine[..], 0);
         qsag_asm::volatile_fill(&mut self.next[..], 0);
+        if let Some(ref mut sid) = self.session_id {
+            qsag_asm::volatile_fill(&mut sid[..], 0);
+        }
     }
 }
 impl core::fmt::Debug for Rss256PartyKeys {

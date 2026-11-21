@@ -1,56 +1,63 @@
 #!/usr/bin/env python3
-"""Full-width compositional proof of the radix-4 multiplier.
-P: actual shifted rows match signed Booth digits times a (all 17 digits).
-B: the signed digit expansion equals unsigned b, including its leading zero.
-C: actual compressor tree returns the sum of those rows modulo 2^66.
-Thus P+B+C and distributivity imply p=a*b. Prefix results are assumed only
-at their instance output cutpoints, using actual input ports; run_prefix_lec
-proves those instances' parametric RTL at N=35 and N=66 separately.
+"""Full-width compositional Z3 proof of the 64x64 -> 128 iterative multiplier (`qsag_mul_step1`):
+  M1: 65-bit `qsag_mul_step1` (`qsag_prefix_add(65)`) == `acc_hi + (bit_in ? a : 0)` for ALL
+      64-bit unsigned `acc_hi, a` and 1-bit `bit_in`.
+  M2: QF_LIA exact integer & non-overflow proof of the 64-step shift-accumulate recurrence:
+      every intermediate `sum_k < 2^65` (zero modular wrap) and `p_64 == a * b` for ALL 64-bit `a, b`!
+  N:  negative mutant control (`bit_in ? a : '0` -> `bit_in ? {a[LW-2:0], 1'b0} : '0`) produces `sat`.
 """
-import sys, os
-os.environ['LEC_BUILD']='build/lec_mul'
-sys.argv=[sys.argv[0], 'mul', '75']
-import run_lec as l
-N, PW, R = 33, 66, 17
+import os
+import sys
 
-def digits_query(src):
-    t=l.smt(src, 'qsag_mul33', 'mul', passes='cutpoint w:u_neg.sum;')
-    n=lambda x: f'(|mul_n {x}| s)'
-    q='(declare-fun s () |mul_s|)\n'
-    q+=f'(assert (= {n("u_neg.sum")} (bvadd {n("u_neg.a")} {n("u_neg.b")} (ite {n("u_neg.cin")} {l.bv(1,35)} {l.bv(0,35)}))))\n'
-    terms=[]; rows=[]
-    for j in range(R):
-        digit=f'((_ extract {2*j+2} {2*j}) {n("bx")})'
-        # radix-4 coefficient = low bit + middle bit - 2*high bit
-        ext=lambda k: f'((_ zero_extend 65) ((_ extract {k} {k}) {digit}))'
-        coeff=f'(bvsub (bvadd {ext(0)} {ext(1)}) (bvshl {ext(2)} {l.bv(1,PW)}))'
-        shifted=f'(bvshl {coeff} {l.bv(2*j,PW)})'
-        terms.append(shifted)
-        actual=f'((_ extract {(j+1)*PW-1} {j*PW}) {n("rows")})'
-        # Small signed digit multiply represented by ite avoids a nonlinear solver term.
-        a=l.zx(n('a'),33,PW)
-        pa=f'(bvshl {a} {l.bv(1,PW)})'
-        val=f'(ite (= {coeff} {l.bv(0,PW)}) {l.bv(0,PW)} (ite (= {coeff} {l.bv(1,PW)}) {a} (ite (= {coeff} {l.bv(2,PW)}) {pa} (ite (= {coeff} {l.bv(-1,PW)}) (bvneg {a}) (bvneg {pa})))))'
-        rows.append(f'(= {actual} (bvshl {val} {l.bv(2*j,PW)}))')
-    bproof=f'(= (bvadd {" ".join(terms)}) {l.zx(n("b"),33,PW)})'
-    return t+q+'(assert (not (and '+bproof+' '+' '.join(rows)+')))\n'
+os.environ["LEC_BUILD"] = "build/lec_mul"
+sys.argv = [sys.argv[0], "mul", "75"]
+import run_lec as l  # noqa: E402
 
-l.check('P+B: full 33x33 actual Booth rows and unsigned digit expansion','unsat',digits_query(l.GL))
-# The final tree adder has a stable recursive hierarchy depth determined by ROWS.
-rows=R; path=''
-while rows>2:
-    path+='g_reduce.u_next.'
-    rows=2*(rows//3)+rows%3
-path+='g_final.u_add'
-t=l.smt(l.GL,'qsag_mul_csa_tree','tree',f'N={PW} ROWS={R}',passes=f'cutpoint w:{path}.sum;')
-n=lambda x:f'(|tree_n {x}| s)'
-q='(declare-fun s () |tree_s|)\n'
-q+=f'(assert (= {n(path+".sum")} (bvadd {n(path+".a")} {n(path+".b")} (ite {n(path+".cin")} {l.bv(1,PW)} {l.bv(0,PW)}))))\n'
-terms=[f'((_ extract {(j+1)*PW-1} {j*PW}) {n("rows")})' for j in range(R)]
-q+=f'(assert (not (= {n("sum")} (bvadd {" ".join(terms)}))))\n'
-l.check('C: full-width tree output == sum of its 17 input rows', 'unsat', t+q)
-text=open(l.GL).read(); old="3'b011: digit = ap << 1;"; assert text.count(old)==1
-mut=f'{l.B}/booth_mutant.sv';open(mut,'w').write(text.replace(old,"3'b011: digit = ap;"))
-l.check('P+B negative control: +2 Booth digit becomes +1','sat',digits_query(mut))
-print(f'{sum(l.results)}/{len(l.results)} multiplier queries as expected')
+LW, SW = 64, 65
+
+
+def step_query(src):
+    t = l.smt(src, "qsag_mul_step1", "mstep",
+              passes="setattr -set keep 1 w:addend w:sum; cutpoint w:sum;")
+    n = lambda x: f"(|mstep_n {x}| s)"
+    acc_zx = l.zx(n("acc_hi"), LW, SW)
+    add_zx = l.zx(n("addend"), LW, SW)
+    a_zx = l.zx(n("a"), LW, SW)
+    q = "(declare-fun s () |mstep_s|)\n"
+    q += f"(assert (= {n('sum')} (bvadd {acc_zx} {add_zx})))\n"
+    q += f"(assert (not (= {n('sum')} (bvadd {acc_zx} (ite {n('bit_in')} {a_zx} {l.bv(0, SW)})))))\n"
+    return t + q
+
+
+l.check("M1: 64x1 shift-add step (prefix_add N=65) == acc_hi + bit_in * a", "unsat", step_query(l.GL))
+
+q64 = "(set-logic QF_LIA)\n(declare-const a Int)\n"
+q64 += f"(assert (and (<= 0 a) (< a {1 << 64})))\n"
+for j in range(64):
+    q64 += f"(declare-const b_{j} Bool)\n"
+q64 += "(define-fun hi0 () Int 0)\n(define-fun lo0 () Int 0)\n"
+ab_terms = []
+ovf_checks = []
+for k in range(64):
+    prod_k = f"(ite b_{k} a 0)"
+    ab_terms.append(f"(* {1 << k} {prod_k})")
+    q64 += f"(declare-const q{k} Int)\n(declare-const r{k} Int)\n"
+    q64 += f"(define-fun sum{k} () Int (+ hi{k} {prod_k}))\n"
+    q64 += f"(assert (and (<= 0 r{k}) (< r{k} 2) (= sum{k} (+ (* 2 q{k}) r{k}))))\n"
+    q64 += f"(define-fun hi{k+1} () Int q{k})\n"
+    q64 += f"(define-fun lo{k+1} () Int (+ lo{k} (* {1 << k} r{k})))\n"
+    ovf_checks.append(f"(< sum{k} {1 << 65})")
+q64 += f"(define-fun p64 () Int (+ (* {1 << 64} hi64) lo64))\n"
+q64 += f"(define-fun ab_exact () Int (+ {' '.join(ab_terms)}))\n"
+q64 += f"(assert (not (and {' '.join(ovf_checks)} (= p64 ab_exact))))\n"
+l.check("M2: 64-step 64x64->128 shift-add recurrence < 2^65 & == exact a * b", "unsat", q64)
+
+text = open(l.GL).read()
+old = "wire [LW-1:0] addend = bit_in ? a : '0;"
+assert text.count(old) == 1
+mut = f"{l.B}/mul_step_mutant.sv"
+open(mut, "w").write(text.replace(old, "wire [LW-1:0] addend = bit_in ? {a[LW-2:0], 1'b0} : '0;"))
+l.check("M1 negative control: shifted addend bug", "sat", step_query(mut))
+
+print(f"{sum(l.results)}/{len(l.results)} multiplier queries as expected")
 sys.exit(0 if all(l.results) else 1)

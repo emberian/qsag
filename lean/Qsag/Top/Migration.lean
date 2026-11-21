@@ -14,9 +14,11 @@ Top-level composition module (zero `import all`) connecting:
    and `Goldilocks³` (`PallasAndBlsMigration`),
 4. 438-repetition circuit-to-sacrifice ceremony defect bounds for the `D0_BITS = 16` bit-check
    packing, the staged bit-check count at the `outer_mpc.rs` geometry (`BIT_CHECK_NUMERATOR = 63`,
-   with the soundness of the stages ahead of the halving rounds as a hypothesis), QROM scaling
-   arithmetic, and five-way `𝔽_{2^{128}}` multiplication equivalence (`ActiveMigrationZeroTest`,
-   `Math.Gf2Pow128`),
+   both parameterized by `StagesSound` in `migration_bit_check_staged_count_numerator_63` and with
+   `StagesSound` discharged unconditionally on `MigrationExecution.rustBitStageStep` via
+   `MigrationExecution.rustBitCheckStages_sound` in `migration_bit_check_concrete_bound_63`), QROM
+   scaling arithmetic, and five-way `𝔽_{2^{128}}` multiplication equivalence
+   (`ActiveMigrationZeroTest`, `Math.Gf2Pow128`),
 5. The destination-bound discrete-log instance `dlogOwnershipScheme` of `Spec.LegacyOwnershipScheme`
    over finite canonical curve keys `CanonicalSwPk C` (`x < C.p`, `y < C.p`, `C.onCurve = true`),
    with no injectivity hypothesis on the nullifier; witness `DlogOwnershipWitness` binding
@@ -37,13 +39,20 @@ Top-level composition module (zero `import all`) connecting:
    injectivity hypothesis on the nullifier.
 7. The discrete-log instance of item 6 (`dlogSettlementWire`, `dlogSettlementVerify`,
    `dlogSettlement_circuitSound`, `dlogSettlement_dataRefines_idealMigrate`,
-   `dlogSettlement_schedule_refines_or_nullifierCollision`). What it assumes: an authorization
-   `DlogSettlementAuth` carries the opened views for two distinct ZKBoo challenges, and
-   `dlogSettlementVerify` reconstructs the scalar from them and checks `grp.smul sk = pk` itself.
-   That is the output of the special-soundness extractor taken as the input format; one ZKBoo
-   proof opens one challenge. `dlogSettlement_circuitSound` does not use the compiled circuit or
-   its run, and nothing here states that a compiled circuit enforces the discrete-log relation.
-   One joint instance is exhibited, on the toy curve:
+   `dlogSettlement_schedule_refines_or_nullifierCollision`), paired with the single-challenge ZKBoo
+   commitment verifier and special-soundness bridge (`SingleChallengeZkBooProof`,
+   `singleChallengeZkBooVerify`, `singleChallengeZkBoo_two_transcript_extract_or_collision`,
+   `tooth_singleChallengeZkBoo_hides_scalar`). What `DlogSettlementAuth` models: an authorization
+   that already carries the opened views for two distinct ZKBoo challenges (the output of the
+   2-transcript special-soundness knowledge extractor), from which `dlogSettlementVerify`
+   reconstructs the scalar and checks `grp.smul sk = pk`. By contrast, `SingleChallengeZkBooProof`
+   carries one challenge `e : Fin 3`, one opened share pair, and three share commitments: a single
+   accepted proof information-theoretically hides `sk` (`tooth_singleChallengeZkBoo_hides_scalar`),
+   while two accepted proofs on distinct challenges `e1 ≠ e2` with matching share commitments
+   constructively yield a verifying `DlogSettlementAuth` or an explicit share-commitment collision
+   (`singleChallengeZkBoo_two_transcript_extract_or_collision`). `dlogSettlement_circuitSound` does
+   not use the compiled circuit or its run, and nothing here states that a compiled circuit enforces
+   the discrete-log relation. One joint instance is exhibited, on the toy curve:
    `secp7Mod43_dlogSettlement_complete_refinement_witness` (two enrolled keys, three submissions;
    its circuit is the lane well-formedness circuit of `MigrationExecution.honestSubmission` for
    every statement). `bls381_dlogSettlement_refines_or_nullifierCollision` is the dichotomy over
@@ -227,6 +236,42 @@ theorem migration_bit_check_staged_count_numerator_63 {Cl Msg : Type}
         ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) :=
   ⟨staged_sacrifice_false_claim_accepting_coins_bound S Sb hS hSb r stage embed ds hStages p s hErr,
     rust_bit_check_numerator_63_bound.2.1, rust_bit_check_numerator_63_bound.2.2.1⟩
+
+open Qsag.MigrationExecution in
+/-- **Unconditional concrete staged bit-check bound at `BIT_CHECK_NUMERATOR = 63`
+    (`migration_bit_check_concrete_bound_63`).**
+    Specializes `migration_bit_check_staged_count_numerator_63` to the concrete `outer_mpc.rs`
+    13-stage transition `rustBitStageStep` (`7` degree-1 weight stages + `6` degree-3 ternary
+    sumcheck rounds) and discharges `StagesSound` unconditionally via `rustBitCheckStages_sound`. -/
+theorem migration_bit_check_concrete_bound_63
+    (p : StagedProver RustBitStageMsg (FoldProver rustBitCheckHalvingRounds)
+      rustBitCheckStageNumerators)
+    (cl : RustBitStageClaim) (hErr : (rustBitStageEmbed cl).err ≠ 0#128) :
+    StagesSound productionFoldCoins rustBitStageStep
+      (fun s => decide ((rustBitStageEmbed s).err ≠ 0#128)) rustBitCheckStageNumerators ∧
+    rustBitCheckStageNumerators.sum + 2 * rustBitCheckHalvingRounds + 2 = 63 ∧
+    ((stagedCoinVectors productionFoldCoins
+        (coinVectors productionFoldCoins productionBaseCoins rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators).filter
+      (stagedAccepts rustBitStageStep
+        (fun q c coins =>
+          sacrificeAccepts rustBitCheckHalvingRounds q (rustBitStageEmbed c) coins)
+        rustBitCheckStageNumerators p cl)).length * (2 ^ 128 - 1) ≤
+      BIT_CHECK_NUMERATOR *
+        (stagedCoinVectors productionFoldCoins
+          (coinVectors productionFoldCoins productionBaseCoins rustBitCheckHalvingRounds)
+          rustBitCheckStageNumerators).length ∧
+    stagedBadCoinBound (2 ^ 128) ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))
+        (sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) rustBitCheckHalvingRounds)
+        rustBitCheckStageNumerators * (2 ^ 128 - 1) ≤
+      63 * ((2 ^ 128) ^ rustBitCheckStageNumerators.length *
+        ((2 ^ 128) ^ rustBitCheckHalvingRounds * (2 ^ 128 - 1))) :=
+  let hSound := rustBitCheckStages_sound productionFoldCoins productionFoldCoins_nodup
+  let hSpec := migration_bit_check_staged_count_numerator_63
+    productionFoldCoins productionBaseCoins productionFoldCoins_nodup productionBaseCoins_nodup
+    rustBitCheckHalvingRounds rustBitStageStep rustBitStageEmbed rustBitCheckStageNumerators
+    hSound p cl hErr
+  ⟨hSound, hSpec.2.1, rust_bit_check_63_concrete_accepting_coins_bound p cl hErr, hSpec.2.2⟩
 
 /-! ## 3. Destination-Bound Discrete-Log Ownership Instance of `Spec.LegacyOwnershipScheme` -/
 
@@ -1534,6 +1579,147 @@ theorem dlogSettlement_circuitSound {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord :
     exact ⟨hDec.2.2.2.2.2.1, hDec.2.2.2.2.2.2.1, hDec.2.2.2.2.2.2.2,
       congrArg destinationBytes hDec.2.2.2.1⟩
 
+/-- Single-challenge ZKBoo proof for one repetition: carries one challenge `e : Fin 3`, the two
+    opened shares `opened = (s_e, s_{(e+1) mod 3})` for that challenge, three 256-bit share
+    commitments `shareCommits : Fin 3 → Spec.Digest256`, and `authorizedDest`. Unlike the
+    post-extraction `DlogSettlementAuth`, a single proof leaves one of the three additive shares
+    unopened (`tooth_singleChallengeZkBoo_hides_scalar`). -/
+structure SingleChallengeZkBooProof where
+  e : Fin 3
+  opened : Nat × Nat
+  shareCommits : Fin 3 → Spec.Digest256
+  authorizedDest : BitVec 256
+
+/-- Next ZKBoo party index `(e + 1) mod 3`. -/
+def zkbooNextParty (e : Fin 3) : Fin 3 :=
+  ⟨(e.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
+
+/-- Single-challenge ZKBoo submission verifier: checks campaign `(migrationDomain, epoch)`,
+    destination binding `pf.authorizedDest = st.destination`, nullifier derivation
+    `st.nullifier = deriveNullifier pk`, and that the two opened shares match the commitments at
+    `pf.e` and `zkbooNextParty pf.e` under `commitShare`. Never reconstructs the scalar or inspects
+    the unopened third share. -/
+def singleChallengeZkBooVerify {C : Qsag.SwCurve}
+    (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
+    (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
+    (commitShare : Fin 3 → Nat → Spec.Digest256)
+    (migrationDomain : BitVec 256) (epoch : UInt64)
+    (st : MigrationExecution.Statement) (pf : SingleChallengeZkBooProof) : Bool :=
+  match legacyPkOf st.legacyCommitment with
+  | none => false
+  | some pk =>
+    decide (st.migrationDomain = migrationDomain ∧
+      st.epoch = epoch ∧
+      pf.authorizedDest = st.destination ∧
+      st.nullifier = deriveNullifier pk ∧
+      commitShare pf.e pf.opened.1 = pf.shareCommits pf.e ∧
+      commitShare (zkbooNextParty pf.e) pf.opened.2 = pf.shareCommits (zkbooNextParty pf.e))
+
+/-- **2-transcript special-soundness extractor bridge from `SingleChallengeZkBooProof` to
+    `DlogSettlementAuth` (`singleChallengeZkBoo_two_transcript_extract_or_collision`).**
+    Given two accepted single-challenge proofs `pf1` (challenge `0`) and `pf2` (challenge `1`) for
+    statement `st` (`legacyPkOf` resolving to `pk`) with matching share commitments
+    (`∀ i, pf2.shareCommits i = pf1.shareCommits i`) committed to a valid discrete-log sharing
+    `shares` (`ZkBooDlogCommitted grp pk.toSwPoint shares`), EITHER:
+    1. the assembled `DlogSettlementAuth` `⟨0, 1, pf1.opened, pf2.opened, pf1.authorizedDest⟩`
+       passes `dlogSettlementVerify` and reconstructs the exact discrete-log scalar of `pk`, OR
+    2. one of the opened shares exhibits an explicit `commitShare` collision against `shares`. -/
+theorem singleChallengeZkBoo_two_transcript_extract_or_collision
+    {C : Qsag.SwCurve} {G : Qsag.SwPoint} {ord : Nat}
+    (grp : Qsag.PrimeSubgroup C G ord)
+    (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
+    (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
+    (commitShare : Fin 3 → Nat → Spec.Digest256)
+    (migrationDomain : BitVec 256) (epoch : UInt64)
+    {st : MigrationExecution.Statement} {pk : Qsag.CanonicalSwPk C}
+    (hPk : legacyPkOf st.legacyCommitment = some pk)
+    (shares : Fin 3 → Nat) (hDlog : Qsag.ZkBooDlogCommitted grp pk.toSwPoint shares)
+    {pf1 pf2 : SingleChallengeZkBooProof}
+    (hCom1 : ∀ i : Fin 3, pf1.shareCommits i = commitShare i (shares i))
+    (hCom2 : ∀ i : Fin 3, pf2.shareCommits i = pf1.shareCommits i)
+    (hE1 : pf1.e = 0) (hE2 : pf2.e = 1)
+    (hVer1 : singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+      migrationDomain epoch st pf1 = true)
+    (hVer2 : singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+      migrationDomain epoch st pf2 = true) :
+    (let auth : DlogSettlementAuth := ⟨0, 1, pf1.opened, pf2.opened, pf1.authorizedDest⟩;
+      dlogSettlementVerify grp deriveNullifier legacyPkOf migrationDomain epoch st auth = true ∧
+      auth.reconstructScalar ord =
+        Qsag.zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2)) ∨
+    (∃ (idx : Fin 3) (sForged : Nat),
+      sForged ≠ shares idx ∧ commitShare idx sForged = commitShare idx (shares idx)) := by
+  unfold singleChallengeZkBooVerify at hVer1 hVer2
+  rw [hPk] at hVer1 hVer2
+  obtain ⟨hDom, hEp, hDest1, hNull, hC1a, hC1b⟩ := of_decide_eq_true hVer1
+  obtain ⟨_, _, _, _, _, hC2b⟩ := of_decide_eq_true hVer2
+  have hNext0 : zkbooNextParty 0 = 1 := rfl
+  have hNext1 : zkbooNextParty 1 = 2 := rfl
+  rw [hE1, hCom1 0] at hC1a
+  rw [hE1, hNext0, hCom1 1] at hC1b
+  rw [hE2, hNext1, hCom2 2, hCom1 2] at hC2b
+  by_cases h0 : pf1.opened.1 = shares 0
+  · by_cases h1 : pf1.opened.2 = shares 1
+    · by_cases h2 : pf2.opened.2 = shares 2
+      · left
+        have hRec : (DlogSettlementAuth.mk 0 1 pf1.opened pf2.opened
+            pf1.authorizedDest).reconstructScalar ord =
+            Qsag.zkbooReconstructScalar ord (shares 0) (shares 1) (shares 2) := by
+          unfold DlogSettlementAuth.reconstructScalar
+          dsimp only
+          rw [Qsag.extractThreeShares_zero_one, h0, h1, h2]
+        obtain ⟨hPos, hLt, hSmul⟩ := (Qsag.ZkBooDlogCommitted_iff grp pk.toSwPoint shares).mp hDlog
+        refine ⟨dlogSettlementVerify_eq_true grp deriveNullifier legacyPkOf
+          migrationDomain epoch hPk ⟨(by decide : (0 : Fin 3) ≠ 1), hDom, hEp, hDest1, hNull, ?_, ?_, ?_⟩, hRec⟩
+        · rw [hRec]; exact hPos
+        · rw [hRec]; exact hLt
+        · rw [hRec]; exact hSmul
+      · exact .inr ⟨2, pf2.opened.2, h2, hC2b⟩
+    · exact .inr ⟨1, pf1.opened.2, h1, hC1b⟩
+  · exact .inr ⟨0, pf1.opened.1, h0, hC1a⟩
+
+/-- `#tooth` A single accepted `SingleChallengeZkBooProof` at challenge `e = 0` opens only
+    `(s0, s1)` and information-theoretically hides `sk`: for any two distinct scalars `skA ≠ skB`
+    below `ord`, there exist distinct third shares `s2A ≠ s2B` whose share vectors both pass
+    `singleChallengeZkBooVerify` with the identical opened pair `(s0, s1)`, yet reconstruct `skA`
+    and `skB` respectively. -/
+theorem tooth_singleChallengeZkBoo_hides_scalar
+    {C : Qsag.SwCurve}
+    (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
+    (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
+    (commitShare : Fin 3 → Nat → Spec.Digest256)
+    (migrationDomain : BitVec 256) (epoch : UInt64)
+    {st : MigrationExecution.Statement} {pk : Qsag.CanonicalSwPk C}
+    (hPk : legacyPkOf st.legacyCommitment = some pk)
+    (hDom : st.migrationDomain = migrationDomain)
+    (hEp : st.epoch = epoch)
+    (hNull : st.nullifier = deriveNullifier pk)
+    {ord s0 s1 skA skB : Nat} (hA : skA < ord) (hB : skB < ord) (hNe : skA ≠ skB) :
+    ∃ (sharesA sharesB : Fin 3 → Nat),
+      let pfA : SingleChallengeZkBooProof :=
+        ⟨0, (s0, s1), fun i => commitShare i (sharesA i), st.destination⟩
+      let pfB : SingleChallengeZkBooProof :=
+        ⟨0, (s0, s1), fun i => commitShare i (sharesB i), st.destination⟩
+      pfA.opened = (s0, s1) ∧ pfB.opened = (s0, s1) ∧
+      singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+        migrationDomain epoch st pfA = true ∧
+      singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+        migrationDomain epoch st pfB = true ∧
+      Qsag.zkbooReconstructScalar ord (sharesA 0) (sharesA 1) (sharesA 2) = skA ∧
+      Qsag.zkbooReconstructScalar ord (sharesB 0) (sharesB 1) (sharesB 2) = skB ∧
+      sharesA 2 ≠ sharesB 2 := by
+  obtain ⟨s2A, s2B, _, _, hS2Ne, hRecA, hRecB⟩ :=
+    Qsag.tooth_zkboo_single_challenge_information_theoretically_hides_witness
+      (s0 := s0) (s1 := s1) hA hB hNe
+  let sharesA : Fin 3 → Nat := fun i => if i.val = 0 then s0 else if i.val = 1 then s1 else s2A
+  let sharesB : Fin 3 → Nat := fun i => if i.val = 0 then s0 else if i.val = 1 then s1 else s2B
+  refine ⟨sharesA, sharesB, rfl, rfl, ?_, ?_, hRecA, hRecB, hS2Ne⟩
+  · unfold singleChallengeZkBooVerify
+    rw [hPk]
+    exact decide_eq_true ⟨hDom, hEp, rfl, hNull, rfl, rfl⟩
+  · unfold singleChallengeZkBooVerify
+    rw [hPk]
+    exact decide_eq_true ⟨hDom, hEp, rfl, hNull, rfl, rfl⟩
+
 /-- `Spec.DataRefines` from `rawSettlementMachine` with `dlogSettlementWire` and
     `dlogSettlementVerify` over `CanonicalSwPk C` into
     `Spec.idealMigrateMachine (dlogOwnershipScheme grp deriveNullifier) snapshot`, with no
@@ -2498,10 +2684,74 @@ theorem inhabited_dlogSettlement_schedule_complete :
     secp7Mod43Nullifier_injective.injOn _,
     secp7Mod43_dlogSettlement_complete_refinement_witness.2.2.2.2.1⟩
 
+/-- Joint witness for the premises of `singleChallengeZkBoo_two_transcript_extract_or_collision`
+    on `secp7Mod43`: two distinct single-challenge ZKBoo proofs (`e = 0` and `e = 1`) for `pk1`
+    (`sk = 1`) whose commitments agree and whose extracted `DlogSettlementAuth` verifies. -/
+theorem inhabited_singleChallengeZkBoo_two_transcript_extract :
+    ∃ (C : Qsag.SwCurve) (G : Qsag.SwPoint) (ord : Nat)
+      (grp : Qsag.PrimeSubgroup C G ord)
+      (deriveNullifier : Qsag.CanonicalSwPk C → Spec.Digest256)
+      (legacyPkOf : List UInt8 → Option (Qsag.CanonicalSwPk C))
+      (commitShare : Fin 3 → Nat → Spec.Digest256)
+      (migrationDomain : BitVec 256) (epoch : UInt64)
+      (st : MigrationExecution.Statement) (pk : Qsag.CanonicalSwPk C)
+      (shares : Fin 3 → Nat)
+      (pf1 pf2 : SingleChallengeZkBooProof),
+      legacyPkOf st.legacyCommitment = some pk ∧
+      Qsag.ZkBooDlogCommitted grp pk.toSwPoint shares ∧
+      (∀ i : Fin 3, pf1.shareCommits i = commitShare i (shares i)) ∧
+      (∀ i : Fin 3, pf2.shareCommits i = pf1.shareCommits i) ∧
+      pf1.e = 0 ∧ pf2.e = 1 ∧
+      singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+        migrationDomain epoch st pf1 = true ∧
+      singleChallengeZkBooVerify deriveNullifier legacyPkOf commitShare
+        migrationDomain epoch st pf2 = true := by
+  let shares : Fin 3 → Nat := fun i => if i.val = 0 then 1 else 0
+  let commitShare : Fin 3 → Nat → Spec.Digest256 :=
+    fun i s => BitVec.ofNat 256 (i.val + 4 * s)
+  let dom := MigrationExecution.honestSubmission.statement.migrationDomain
+  let ep := MigrationExecution.honestSubmission.statement.epoch
+  let st : MigrationExecution.Statement :=
+    { legacyCommitment := [2, 12]
+      migrationDomain := dom
+      epoch := ep
+      destination := 0xAA#256
+      nullifier := secp7Mod43Nullifier Qsag.secp7Mod43Pk1 }
+  let pf1 : SingleChallengeZkBooProof :=
+    ⟨0, (1, 0), fun i => commitShare i (shares i), 0xAA#256⟩
+  let pf2 : SingleChallengeZkBooProof :=
+    ⟨1, (0, 0), fun i => commitShare i (shares i), 0xAA#256⟩
+  have hPk : secp7Mod43DecodePk st.legacyCommitment = some Qsag.secp7Mod43Pk1 :=
+    secp7Mod43DecodePk_eq_some Qsag.secp7Mod43_canonicalPks_props.1
+  have hSmul1 : Qsag.secp7Mod43_primeSubgroup.smul 1 = Qsag.secp7Mod43Pk1.toSwPoint := by
+    rw [Qsag.secp7Mod43_primeSubgroup_smul_eq, Qsag.secp7Mod43_canonicalPks_props.1]
+    exact Qsag.Weierstrass.secp7Mod43_projection_coordinates.1
+  have hDlog : Qsag.ZkBooDlogCommitted Qsag.secp7Mod43_primeSubgroup
+      Qsag.secp7Mod43Pk1.toSwPoint shares := by
+    rw [Qsag.ZkBooDlogCommitted_iff]
+    have hRec : Qsag.zkbooReconstructScalar 31 (shares 0) (shares 1) (shares 2) = 1 :=
+      (Qsag.zkbooReconstructScalar_eq 31 _ _ _).trans rfl
+    rw [hRec]
+    exact ⟨by decide, by decide, hSmul1⟩
+  have hVer1 : singleChallengeZkBooVerify secp7Mod43Nullifier secp7Mod43DecodePk commitShare
+      dom ep st pf1 = true := by
+    unfold singleChallengeZkBooVerify
+    rw [hPk]
+    exact decide_eq_true ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  have hVer2 : singleChallengeZkBooVerify secp7Mod43Nullifier secp7Mod43DecodePk commitShare
+      dom ep st pf2 = true := by
+    unfold singleChallengeZkBooVerify
+    rw [hPk]
+    exact decide_eq_true ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  exact ⟨_, _, _, Qsag.secp7Mod43_primeSubgroup, secp7Mod43Nullifier, secp7Mod43DecodePk,
+    commitShare, dom, ep, st, Qsag.secp7Mod43Pk1, shares, pf1, pf2,
+    hPk, hDlog, fun _ => rfl, fun _ => rfl, rfl, rfl, hVer1, hVer2⟩
+
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
   Qsag.Top.active_migration_ceremony_qrom_and_gf2pow128_chain
   Qsag.Top.migration_bit_check_staged_count_numerator_63
+  Qsag.Top.migration_bit_check_concrete_bound_63
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
   Qsag.Top.tooth_dlogOwnership_rejects_destination_swap
   Qsag.Top.zkboo_extracted_scalar_claims_enrolled_entitlement_or_collision
@@ -2522,6 +2772,8 @@ theorem inhabited_dlogSettlement_schedule_complete :
   Qsag.Top.migrationToy_honest_submission_accepted
   Qsag.Top.tooth_migrationToy_forged_nullifier_rejected
   Qsag.Top.dlogSettlement_circuitSound
+  Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
+  Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
   Qsag.Top.dlogSettlement_refinement_exists
   Qsag.Top.dlogSettlement_schedule_refines_or_nullifierCollision
   Qsag.Top.dlogSettlement_schedule_complete_of_injOn
@@ -2538,6 +2790,7 @@ theorem inhabited_dlogSettlement_schedule_complete :
   Qsag.Top.inhabited_dlogOwnership_accepted_claim
   Qsag.Top.inhabited_zkboo_extracted_scalar_claim
   Qsag.Top.inhabited_dlogSettlement_schedule_complete
+  Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
 
 #verify_inhabited
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
@@ -2548,6 +2801,14 @@ theorem inhabited_dlogSettlement_schedule_complete :
 #verify_inhabited
   Qsag.Top.dlogSettlement_schedule_complete_of_injOn
   Qsag.Top.inhabited_dlogSettlement_schedule_complete
+#verify_inhabited
+  Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision
+  Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
+
+#tooth_pair Qsag.Top.migration_bit_check_concrete_bound_63 vs
+  Qsag.MigrationExecution.tooth_rust_bit_check_numerator_62_too_small
+#tooth_pair Qsag.Top.singleChallengeZkBoo_two_transcript_extract_or_collision vs
+  Qsag.Top.tooth_singleChallengeZkBoo_hides_scalar
 
 #tooth_pair Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar vs
   Qsag.Top.tooth_dlogOwnership_rejects_destination_swap

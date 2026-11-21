@@ -1522,7 +1522,7 @@ mod perm_kernel {
 }
 
 /// Full 30-round Width-12 `Poseidon2` permutation (`4` ext + `22` int + `4` ext),
-/// matching `lean/Qsag/Poseidon2.lean` and `qsag-core` bit-for-bit.
+/// matching `lean/Qsag/Oracle/Poseidon2.lean` and `qsag-core` bit-for-bit.
 #[inline]
 pub fn poseidon2_perm12(st: &mut [Goldilocks; 12]) {
     let out = perm_kernel::permute(&st.map(Goldilocks::to_canonical_u64));

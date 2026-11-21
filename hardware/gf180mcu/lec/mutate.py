@@ -5,8 +5,8 @@ import sys
 
 MUT = {
     # Goldilocks unit
-    "kmul": ("PRIME - (LW'(1) << (W + 1)) + LW'(2);", "PRIME - (LW'(1) << (W + 1)) + LW'(3);"),
-    "m2": ("r2 = AW'({hi, {(W-2){1'b0}}, ~m2});", "r2 = AW'({hi, {(W-2){1'b0}}, m2});"),
+    "kmul": ("localparam logic [AW-1:0] K_FOLD = AW'(4);", "localparam logic [AW-1:0] K_FOLD = AW'(5);"),
+    "m2": ("assign r3 = AW'({{(W-1){1'b1}}, 2'b00, ~p3});", "assign r3 = AW'({{(W-1){1'b1}}, 2'b00, p3});"),
     "canon": ("assign r = (u[LW] | v[LW]) ? v[LW-1:0] : u[LW-1:0];", "assign r = u[LW] ? v[LW-1:0] : u[LW-1:0];"),
     # GF(2^128) unit
     "poly": ("(D + 8)'(8'h87)", "(D + 8)'(8'h86)"),

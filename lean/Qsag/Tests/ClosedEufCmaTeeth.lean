@@ -24,11 +24,15 @@ empty key, one coin.
   even against the class of all programs with the reduction budgets: the forger wins with
   probability one, so one of the three games is won by an adversary that never sees the key.
 
-What the latch tooth does not show: it does not exhibit a forgery assembled from the two
-same-epoch signatures under a collision-resistant hash. The winning signature is the
-constant-hash forgery `prodToyForgery`, which also wins without any query. The tooth is about
-the derivation: without the latch, a run with probability-one winning falls outside the
-classification.
+What the constant-hash latch tooth above does not show: on `crumbToySuite` the winning signature is
+the constant-hash forgery `prodToyForgery`, which also wins without any query. That gap is closed on
+the non-constant 4-leaf `poly257` suite (`poly257MultiLeafSuite`, `multiLeaf4JortsParams`) by
+`Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges` (audited and paired below against
+`Qsag.poly257MultiLeaf_adaptive_forger_bound` and `Qsag.adaptiveMultiQueryExecEufCma_forger_bound`):
+with the latch on, even a 4-query adaptive adversary querying all 4 leaves has `winProb ≤ 6 / 256 < 1`,
+whereas with the latch off (`latchOn = false`), two signing queries `[0, 0]` and `[0, 1]` on leaf `0`
+plus three hash queries constructively assemble a valid signature on fresh `[0, 2]` and win on every
+single coin across all `256 * 256 ^ 24` keys (`winProb = 1`).
 -/
 
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
@@ -234,11 +238,25 @@ theorem tooth_constant_hash_refutes_zero_keyed_hardness :
   Qsag.ClosedEufCmaTeeth.witness_toy_forgery_reduction_adversary_wins
   Qsag.ClosedEufCmaTeeth.witness_keyed_target_bound_toy
   Qsag.ClosedEufCmaTeeth.tooth_constant_hash_refutes_zero_keyed_hardness
+  Qsag.poly257MultiLeaf_punctured_sim_sound
+  Qsag.poly257MultiLeaf_adaptive_forger_bound
+  Qsag.poly257MultiLeaf_adaptive_forger_bound_concrete
+  Qsag.adaptiveMultiQueryExecEufCma_forger_bound
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+  Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
+
+#verify_inhabited
+  Qsag.poly257MultiLeaf_adaptive_forger_bound
+  Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
 
 #tooth_pair Qsag.jorts_baggy_closed_euf_cma_same_trace_classification vs
   Qsag.ClosedEufCmaTeeth.tooth_reused_epoch_latch_wins_euf_cma_prob_one
 #tooth_pair Qsag.jorts_baggy_closed_euf_cma_keyed_target_bound vs
   Qsag.ClosedEufCmaTeeth.tooth_constant_hash_refutes_zero_keyed_hardness
+#tooth_pair Qsag.poly257MultiLeaf_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.adaptiveMultiQueryExecEufCma_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
 
 end Qsag.ClosedEufCmaTeeth
 end

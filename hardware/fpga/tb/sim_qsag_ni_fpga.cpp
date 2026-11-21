@@ -26,18 +26,26 @@ typedef Vqsag_units_tb Dut;
 typedef Vqsag_ni_fpga_top Dut;
 #endif
 
-static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7, GF128_LAT = 3;
+static const int GL_MUL_LAT = 5, RED_LAT = 2, P2_SBOX_LAT = 13, EXT4_MAC_LAT = 7, EXT5_MAC_LAT = 7, GF128_LAT = 3;
 static const int P2_RING_LEN = 16, P2_PASSES = 31, P2_PIPE_LAT = 453;
-#if defined(QSAG_COMPACT)
+#if defined(QSAG_ECP5_FULLRATE)
 static constexpr bool COMPACT = true;
-static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 24, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
+static constexpr bool COMPACT_EXT4 = false;
+static const int TOP_P2_LAT = 1314, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
+static const char* PROFILE_NAME = "ECP5_FULLRATE";
+#elif defined(QSAG_COMPACT)
+static constexpr bool COMPACT = true;
+static constexpr bool COMPACT_EXT4 = true;
+static const int TOP_P2_LAT = 1878, TOP_EXT_LAT = 18, TOP_KEC_RPC = 1, CHAIN_SLOTS = 32;
 static const char* PROFILE_NAME = "ECP5_COMPACT";
 #elif defined(QSAG_PIPE)
 static constexpr bool COMPACT = false;
+static constexpr bool COMPACT_EXT4 = false;
 static const int TOP_P2_LAT = P2_PIPE_LAT - 1, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 256;
 static const char* PROFILE_NAME = "VU9P_TURBO";
 #else
 static constexpr bool COMPACT = false;
+static constexpr bool COMPACT_EXT4 = false;
 static const int TOP_P2_LAT = P2_PASSES*P2_RING_LEN, TOP_EXT_LAT = EXT4_MAC_LAT, TOP_KEC_RPC = 2, CHAIN_SLOTS = 32;
 static const char* PROFILE_NAME = "XCUP_RING";
 #endif
@@ -103,7 +111,19 @@ static void model_selfcheck() {
           "11edc0e12e91ea60eb6b32df06dd7f002fbafabb6e13ec1cc20d995547600db0", "model turboshake256 rfc9861");
     // qsag-asm pins x * x^127 = x^128 = 0x87.
     check(gf128_mul(2, (u128)1 << 127) == 0x87, "model gf128 x^128");
-    section("reference model vs Lean oracle vectors / RFC 9861", c0, f0);
+    // zk-Hem v2 Fp5 = F_p[X]/(X^5 - 3) KATs (crates/qsag-agg/src/zk_hem/v2/field5.rs).
+    {
+        E5 a = {1, 2, 3, 4, 5}, b = {6, 7, 8, 9, 10};
+        E5 want_ab = {348, 337, 295, 220, 110}, want_sq = {133, 142, 130, 95, 35};
+        E5 want_frob = {1ULL, 2082576518476559110ULL, 10568986813412808496ULL, 846350220555798788ULL, 6865216354783480110ULL};
+        E5 ab = e5_mul(a, b), sq = e5_mul(a, a), fr = e5_frobenius(a, 1);
+        for (int i = 0; i < 5; i++) {
+            CHECK_EQ64(ab[i], want_ab[i], "model fp5 mul KAT");
+            CHECK_EQ64(sq[i], want_sq[i], "model fp5 sq KAT");
+            CHECK_EQ64(fr[i], want_frob[i], "model fp5 frobenius KAT");
+        }
+    }
+    section("reference model vs Lean oracle vectors / RFC 9861 / zk-Hem v2 Fp5", c0, f0);
 }
 
 // =====================================================================================
@@ -127,6 +147,7 @@ static void test_mul_red_sbox_ext4_gf() {
     Pipe<uint64_t> pm, ps;
     Pipe<std::pair<uint8_t, u128>> pr;
     Pipe<E4> pe;
+    Pipe<E5> pe5;
     Pipe<u128> pg, pt;
     for (size_t i = 0; i < N + 64; i++) {
         bool live = i < N;
@@ -155,6 +176,15 @@ static void test_mul_red_sbox_ext4_gf() {
         }
         for (int j = 0; j < 4; j++) { set64(dut->e_a, j, ea[j]); set64(dut->e_b, j, eb[j]); set64(dut->e_c, j, ec[j]); }
         if (live) pe.push(EXT4_MAC_LAT, e4_mul_add(ea, eb, ec));
+        // Ext5 MAC (zk-Hem v2 F_p[X]/(X^5 - 3))
+        E5 e5a = rng.e5(), e5b = rng.e5(), e5c = rng.e5();
+        if (i == 0) { e5a = {1, 2, 3, 4, 5}; e5b = {6, 7, 8, 9, 10}; e5c = {0, 0, 0, 0, 0}; }
+        else if (i == 1) { e5a = {1, 2, 3, 4, 5}; e5b = {1, 2, 3, 4, 5}; e5c = {0, 0, 0, 0, 0}; }
+        else if (i < 40) {
+            for (int j = 0; j < 5; j++) { e5a[j] = (rng.next() & 1) ? GLP - 1 : rng.gl(); e5b[j] = (rng.next() & 1) ? GLP - 1 : rng.gl(); e5c[j] = GLP - 1; }
+        }
+        for (int j = 0; j < 5; j++) { set64(dut->e5_a, j, e5a[j]); set64(dut->e5_b, j, e5b[j]); set64(dut->e5_c, j, e5c[j]); }
+        if (live) pe5.push(EXT5_MAC_LAT, e5_mul_add(e5a, e5b, e5c));
         // GF(2^128)
         u128 ga = ((u128)rng.next() << 64) | rng.next(), gb = ((u128)rng.next() << 64) | rng.next();
         if (i == 0) { ga = 2; gb = (u128)1 << 127; }
@@ -172,16 +202,17 @@ static void test_mul_red_sbox_ext4_gf() {
 
         tick();
 
-        uint64_t w; std::pair<uint8_t, u128> rw; E4 ew; u128 gw;
+        uint64_t w; std::pair<uint8_t, u128> rw; E4 ew; E5 e5w; u128 gw;
         if (pm.due(w)) { CHECK_EQ64(dut->mul_r, w, "gl64 mul 26x17"); CHECK_EQ64(dut->mul_r16, w, "gl64 mul 16x16"); }
         if (pr.due(rw)) CHECK_EQ64(dut->red_r, gl_red136(rw.first, rw.second), "gl64 reduce136");
         if (ps.due(w)) CHECK_EQ64(dut->sb_y, w, "sbox x^7");
         if (pe.due(ew)) for (int j = 0; j < 4; j++) CHECK_EQ64(get64(dut->e_y, j), ew[j], "ext4 mac");
+        if (pe5.due(e5w)) for (int j = 0; j < 5; j++) CHECK_EQ64(get64(dut->e5_y, j), e5w[j], "ext5 mac");
         if (pg.due(gw)) { CHECK_EQ64(get64(dut->gf_r, 0), (uint64_t)gw, "gf128 lo"); CHECK_EQ64(get64(dut->gf_r, 1), (uint64_t)(gw >> 64), "gf128 hi"); }
         if (pt.due(gw)) { CHECK_EQ64(get64(dut->tower_r,0),(uint64_t)gw,"tower KAT lo"); CHECK_EQ64(get64(dut->tower_r,1),(uint64_t)(gw>>64),"tower KAT hi"); }
     }
-    check(pm.q.empty() && pr.q.empty() && ps.q.empty() && pe.q.empty() && pg.q.empty(), "pipelines drained");
-    section("gl64 mul (both tilings) / reduce136 / x^7 / Ext4 MAC / GF(2^128): Lean KATs, edges, 200k random", c0, f0);
+    check(pm.q.empty() && pr.q.empty() && ps.q.empty() && pe.q.empty() && pe5.q.empty() && pg.q.empty(), "pipelines drained");
+    section("gl64 mul (9-DSP) / reduce136 / x^7 / Ext4 MAC / Ext5 MAC / GF(2^128): KATs, edges, 200k random", c0, f0);
 }
 
 struct P2Job { St12 in; bool jive; uint64_t t_in; };
@@ -321,9 +352,38 @@ static void rtl_keccak(KState& s, bool nr12) {
     for (int i = 0; i < 25; i++) s[i] = get64(dut->kec2_state_o, i);
 }
 
+static uint64_t kcmp_cycles[2];
+static void kcmp_issue(uint8_t op, bool nr12, uint8_t idx, uint64_t wdata) {
+    dut->kcmp_op = op; dut->kcmp_nr12 = nr12; dut->kcmp_idx = idx; dut->kcmp_wdata = wdata;
+    dut->kcmp_valid = 1;
+    for (;;) {
+        dut->clk = 0; dut->eval();
+        bool rdy = dut->kcmp_ready;
+        dut->clk = 1; dut->eval(); cyc++;
+        if (rdy) break;
+    }
+    dut->kcmp_valid = 0;
+}
+static void rtl_keccak_compact(KState& s, bool nr12) {
+    KState want = s;
+    keccak_p(want, nr12);
+    for (int i = 0; i < 25; i++) kcmp_issue(0, false, (uint8_t)i, s[i]);
+    kcmp_issue(2, nr12, 0, 0);
+    uint64_t t0 = cyc;
+    while (!dut->kcmp_done) tick();
+    kcmp_cycles[nr12] = cyc - t0;
+    for (int i = 0; i < 25; i++) {
+        kcmp_issue(3, false, (uint8_t)i, 0);
+        while (!dut->kcmp_rd_valid) tick();
+        CHECK_EQ64(dut->kcmp_rd_data, want[i], "keccak_compact N^4=I 1-RAM");
+        s[i] = dut->kcmp_rd_data;
+    }
+}
+
 static void test_keccak() {
     long c0 = checks, f0 = fails;
     KPerm hw = rtl_keccak;
+    KPerm hwc = rtl_keccak_compact;
     for (auto& k : KAT_SPONGE) {
         auto msg = from_hex(k.msg);
         check(to_hex(keccak_sponge(msg, 0x06, 32, false, hw)) == k.sha3_256, "rtl sha3-256 KAT");
@@ -333,17 +393,24 @@ static void test_keccak() {
     check(to_hex(keccak_sponge({}, 0x1F, 64, true, hw)) ==
           "367a329dafea871c7802ec67f905ae13c57695dc2c6663c61035f59a18f8e7db"
           "11edc0e12e91ea60eb6b32df06dd7f002fbafabb6e13ec1cc20d995547600db0", "rtl turboshake256 rfc9861");
-    // qsag's Role-1 domain byte 0x07, long input, against the model.
+    check(to_hex(keccak_sponge({}, 0x1F, 64, true, hwc)) ==
+          "367a329dafea871c7802ec67f905ae13c57695dc2c6663c61035f59a18f8e7db"
+          "11edc0e12e91ea60eb6b32df06dd7f002fbafabb6e13ec1cc20d995547600db0", "rtl compact turboshake256 rfc9861");
+    check(to_hex(keccak_sponge(from_hex(KAT_SPONGE[0].msg), 0x06, 32, false, hwc)) == KAT_SPONGE[0].sha3_256, "rtl compact sha3-256 KAT");
+    // qsag's Role-1 domain byte 0x07 (including 400-bit = 50-byte zk-Hem v2 commitment), against the model.
     Rng rng(7);
     std::vector<uint8_t> m(1000);
     for (auto& b : m) b = (uint8_t)rng.next();
     KPerm mp = [](KState& s, bool n) { keccak_p(s, n); };
     check(keccak_sponge(m, 0x07, 200, true, hw) == keccak_sponge(m, 0x07, 200, true, mp), "rtl turboshake256 D=07");
+    check(keccak_sponge(m, 0x07, 50, true, hwc) == keccak_sponge(m, 0x07, 50, true, mp), "rtl compact turboshake256 400-bit D=07");
     check(kec_cycles[0][0] == 24 && kec_cycles[0][1] == 12 && kec_cycles[1][0] == 12 && kec_cycles[1][1] == 6, "keccak cycle counts");
-    printf("  keccak clocks per permutation: 1 round/clk %llu (f1600) / %llu (p1600,12); 2 rounds/clk %llu / %llu\n",
+    check(kcmp_cycles[0] == 746 && kcmp_cycles[1] == 386, "keccak_compact 30-clk/rnd cycle counts (26+30*nr)");
+    printf("  keccak clocks per permutation: 1 round/clk %llu (f1600) / %llu (p1600,12); 2 rounds/clk %llu / %llu; compact N^4=I %llu / %llu\n",
            (unsigned long long)kec_cycles[0][0], (unsigned long long)kec_cycles[0][1],
-           (unsigned long long)kec_cycles[1][0], (unsigned long long)kec_cycles[1][1]);
-    section("Keccak core: Lean SHA3-256/SHAKE256/cSHAKE256 KATs (14 lengths), RFC 9861 TurboSHAKE256, D=0x07", c0, f0);
+           (unsigned long long)kec_cycles[1][0], (unsigned long long)kec_cycles[1][1],
+           (unsigned long long)kcmp_cycles[0], (unsigned long long)kcmp_cycles[1]);
+    section("Keccak cores (parallel 1/2-rpc + compact 1-RAM N^4=I): SHA3/SHAKE/cSHAKE, RFC 9861, 400-bit D=0x07", c0, f0);
 }
 
 int main(int argc, char** argv) {
@@ -352,6 +419,7 @@ int main(int argc, char** argv) {
     model_selfcheck();
     // --x-initial unique randomises the inputs too: drive every control input before reset.
     dut->ring_in_valid = 0; dut->pipe_in_valid = 0; dut->kec_start = 0; dut->kec_nr12 = 0;
+    dut->kcmp_valid = 0; dut->kcmp_op = 0; dut->kcmp_nr12 = 0; dut->kcmp_idx = 0; dut->kcmp_wdata = 0;
     dut->ring_in_jive = 0; dut->pipe_in_jive = 0; dut->ring_in_tag = 0; dut->pipe_in_tag = 0;
     dut->rst = 1;
     for (int i = 0; i < 4; i++) tick();
@@ -547,7 +615,7 @@ static void test_basic_ops() {
         for (int i = 0; i < 4; i++) { set_x(i, k.x[i]); set_x(4 + i, k.y[i]); set_x(8 + i, 0); }
         OpRes r = run_op(0x10);
         for (int i = 0; i < 4; i++) CHECK_EQ64(get_y(i), k.mul[i], "top EXT4_MAC KAT");
-        if (!COMPACT) CHECK_EQ64(r.cycles, (uint64_t)(TOP_EXT_LAT + 2), "EXT4_MAC cycles");
+        if (!COMPACT_EXT4) CHECK_EQ64(r.cycles, (uint64_t)(TOP_EXT_LAT + 2), "EXT4_MAC cycles");
     }
     // Sumcheck rounds: three honest rounds, then a wrong claim.
     {
@@ -640,6 +708,78 @@ static void test_top_keccak() {
         CHECK_EQ64(kec_op_cycles[1], 12/TOP_KEC_RPC + 3, "KEC_PERMUTE cycles (12 rounds) = 6 + start, capture, finish");
     }
     section("top: SHAKE256 Lean KATs, TurboSHAKE256 (RFC 9861, D=0x07) via KEC ops", c0, f0);
+}
+
+static void set_x5(int base, const E5& e) { for (int i = 0; i < 5; i++) set_x(base + i, e[i]); }
+static E5 get_y5() { return E5{get_y(0), get_y(1), get_y(2), get_y(3), get_y(4)}; }
+
+static void test_zk_hem_v2() {
+    long c0 = checks, f0 = fails;
+    Rng rng(0x20260205ULL);
+    // 1. EXT5_MAC (0x17): field5.rs KATs, P-1 corners, and 48 random F_{p^5} MACs.
+    {
+        E5 a = {1, 2, 3, 4, 5}, b = {6, 7, 8, 9, 10}, z = {0, 0, 0, 0, 0};
+        set_x5(0, a); set_x5(5, b); set_x5(10, z);
+        check(run_op(0x17).ok, "EXT5_MAC KAT ok");
+        E5 got = get_y5(), want = e5_mul_add(a, b, z);
+        for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "top EXT5_MAC KAT [348,337,295,220,110]");
+    }
+    for (int t = 0; t < 48; t++) {
+        E5 a = rng.e5(), b = rng.e5(), c = rng.e5();
+        if (t < 4) {
+            for (int i = 0; i < 5; i++) {
+                a[i] = (t & 1) ? GLP - 1 : rng.gl();
+                b[i] = (t & 2) ? GLP - 1 : rng.gl();
+                c[i] = GLP - 1;
+            }
+        }
+        set_x5(0, a); set_x5(5, b); set_x5(10, c);
+        check(run_op(0x17).ok, "EXT5_MAC random ok");
+        E5 got = get_y5(), want = e5_mul_add(a, b, c);
+        for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "top EXT5_MAC random/corner");
+    }
+    // 2. EXT5_FROB (0x18): KAT, ring homomorphism phi(a*b) == phi(a)*phi(b), and phi^5(a) == a.
+    {
+        E5 a = {1, 2, 3, 4, 5};
+        set_x5(0, a);
+        check(run_op(0x18, 1).ok, "EXT5_FROB k=1 ok");
+        E5 got = get_y5(), want = e5_frobenius(a, 1);
+        for (int i = 0; i < 5; i++) CHECK_EQ64(got[i], want[i], "top EXT5_FROB KAT");
+
+        E5 x = rng.e5(), y = rng.e5(), xy = e5_mul(x, y);
+        for (uint8_t k = 0; k <= 6; k++) {
+            set_x5(0, x); run_op(0x18, k); E5 fx = get_y5();
+            set_x5(0, y); run_op(0x18, k); E5 fy = get_y5();
+            set_x5(0, xy); run_op(0x18, k); E5 fxy = get_y5();
+            E5 prod_f = e5_mul(fx, fy);
+            for (int i = 0; i < 5; i++) {
+                CHECK_EQ64(fx[i], e5_frobenius(x, k)[i], "top EXT5_FROB phi^k(x)");
+                CHECK_EQ64(fxy[i], prod_f[i], "top EXT5_FROB homomorphism phi^k(x*y) == phi^k(x)*phi^k(y)");
+            }
+            if (k == 5) {
+                for (int i = 0; i < 5; i++) CHECK_EQ64(fx[i], x[i], "top EXT5_FROB order 5");
+            }
+        }
+    }
+    // 3. 400-bit (50-byte) Role-1 TurboSHAKE256 (D = 0x07) squeeze via 0x22 KEC_STREAM_SPONGE (Y[0..7]).
+    {
+        KState st{};
+        uint64_t lanes[17] = {};
+        for (int i = 0; i < 8; i++) { lanes[i] = rng.next(); st[i] = lanes[i]; }
+        lanes[8] = 0x07ULL;            st[8]  = 0x07ULL;
+        lanes[16] = 1ULL << 63;        st[16] = 1ULL << 63;
+        keccak_p(st, true);
+        axil_write(R_CMD, 0x22u | (1u << 16));
+        uint64_t flags = 1ULL | 8ULL | 16ULL; // init=1, nr12=1, chk=1
+        stream_beat(lanes, 8);
+        stream_beat(lanes + 8, 8);
+        uint64_t b2[8] = {lanes[16], flags, st[0], st[1], st[2], st[3], 0, 0};
+        stream_beat(b2, 6);
+        OpRes r = wait_op(0x22);
+        check(r.ok, "zk-Hem v2 400-bit Role-1 KEC_STREAM_SPONGE ok");
+        for (int i = 0; i < 8; i++) CHECK_EQ64(get_y(i), st[i], "zk-Hem v2 512b/400b KEC_STREAM_SPONGE Y[0..7]");
+    }
+    section("top: zk-Hem v2 F_{p^5} EXT5_MAC, EXT5_FROB homomorphism, 400-bit Role-1 KEC_STREAM_SPONGE", c0, f0);
 }
 
 // Fold a 2^n table by r.size() challenges with FOLD_MULTI (up to 8 rounds per command);
@@ -960,11 +1100,50 @@ static E4 parse_e4(std::istream& is) {
     return e;
 }
 
+static KState sponge_mid_host(uint8_t mid) {
+    static const uint64_t M[7][25] = {
+        {0},
+        {0x3977c693fff5d3b5ULL,0x246ec0d2e44a2873ULL,0x365c52c274ca962dULL,0xe4c0940fe6fd66d4ULL,0xb1e4c392785511c9ULL,
+         0x059cb6e43d871f0aULL,0x90cf0bb4b0f87926ULL,0x748c2b6d5ec3eb4aULL,0x21704f4eff4689b1ULL,0xada5e0392d80ff18ULL,
+         0x9f46820a99b7911cULL,0x82179d62d43b4832ULL,0x62985ba50bb8c831ULL,0x373719272b20bc28ULL,0x68d0d91f23c98a74ULL,
+         0xa00b662de840548fULL,0x8c8f04fc14e393a9ULL,0x47b4b6b3b7ce847fULL,0xce667e802a4096baULL,0xc7f30bf9849ae9c6ULL,
+         0x47b55bcbfe7c2542ULL,0x590c6116b1c143a0ULL,0xfd8df4474c3cc6e6ULL,0x9dab998b64eacbb6ULL,0xd1fe4043d17675a6ULL},
+        {0x460887f1cba4a839ULL,0x980803a3bfc02e65ULL,0x68bddb54ef8d20a8ULL,0x0b3372687f85bcafULL,0xcc2727c2077077dfULL,
+         0xec41d86c9b5f8d09ULL,0xfb5f5d561424cae1ULL,0x3268a335444cad6dULL,0x1946744824d4f99bULL,0xf0cc17364abb8f7bULL,
+         0x6555bd65801754f9ULL,0xfb65ea5772915117ULL,0x7abf03d078f82efaULL,0xe40b7e6f749e0f48ULL,0xa878894cf5a786fbULL,
+         0xaf50e05198f19f90ULL,0xe428425cb9274f77ULL,0x7cc9afdb9d39179eULL,0x68eb6cd4b52d2c93ULL,0x777f4fb40734c256ULL,
+         0xb61fe57e44cde167ULL,0x1f19e1e1f1a15293ULL,0x6ee7751ca38082bcULL,0x1790fc47c8fcf771ULL,0xd6bf84556451e94dULL},
+        {0x05c2a834d12f320bULL,0x6e01f76fb298e055ULL,0xc375c2049cde73b1ULL,0x14679f4eadebc00bULL,0x42c245e14e1d0612ULL,
+         0xaad978e09c60a94dULL,0x97421bfa48a78a3dULL,0x77731a35cbaaaec0ULL,0xd80e903986a24502ULL,0x56e5c86b0ad655c9ULL,
+         0xd0c677d357b05118ULL,0xca8b39da2a172feaULL,0xf6722b33b1d71db7ULL,0xcd992e2dafb9cc70ULL,0xa71ff26148978892ULL,
+         0x0ba73ad03b4e7b42ULL,0xf6edd8b825b1f4adULL,0x5696402b81c97ac2ULL,0x8f8cc5418a932adbULL,0xd329e076f57dd146ULL,
+         0xd485ee5d60978147ULL,0x11831024d5468d79ULL,0x881ae14ada384d82ULL,0x0c8208237c8abcf0ULL,0x21390810db15896aULL},
+        {0xec954fc7c2fc5381ULL,0x36020892bcb1e761ULL,0x748dc5bcea037dd5ULL,0xfc481597cf683315ULL,0x2ec2f3f44f0d3969ULL,
+         0x9c0dfc53513c2627ULL,0x5415c0edffcd33b8ULL,0x403107f0fc877484ULL,0x798d84e67c6dafa6ULL,0x6e6ea3127d335e8eULL,
+         0x5606ea8555392f99ULL,0xd3bac257bbe1d044ULL,0x1e5c61027d60223cULL,0x48c4972c4005a2deULL,0xe62560e08ebdd299ULL,
+         0xa3c6ce028dff6b56ULL,0x14e16d5699388c63ULL,0x8d68335c54a43ae4ULL,0x74a909e5002c19f7ULL,0x48a12fac4eec8f3dULL,
+         0x797c9923ea11dfb5ULL,0x2121d5b260157781ULL,0x704aa293b550c49aULL,0xddcb710a40908d75ULL,0x856c96f5dc9851aaULL},
+        {0x91d7c2b5d9c349d5ULL,0x0fe9e1320d052990ULL,0xbb49dcb163df0998ULL,0x41863aed68216b69ULL,0x9b36e33d0b572914ULL,
+         0x47fd0269a80e1a2fULL,0x0fd8d3b0bb052910ULL,0x777b25e68d3b55e4ULL,0xda8aea200595a598ULL,0x234b7b795b42b2f1ULL,
+         0x8931ca9d1d33d881ULL,0x265565cd4ead330aULL,0xeb457d90d1f36480ULL,0xea2ba3d9236057abULL,0x03572a55d68c5e72ULL,
+         0x997c789c6f5417f5ULL,0xd8fa575d2aa329b2ULL,0xa11c1a07edc22223ULL,0xee86f4bac42c763fULL,0xf9d93986d50c63f5ULL,
+         0x1d88a5c7c867f955ULL,0x394442877b64831dULL,0xcba53b397e6c7084ULL,0x8ad61a49d597e2adULL,0x4918107a763c890aULL},
+        {0x912cd4369f324315ULL,0x999c04d88741d72fULL,0x826e87f172a72886ULL,0x9ab34da963aec230ULL,0xe59866a9c4dee082ULL,
+         0x2e0d70596264312eULL,0x1f62aa1e3894cb9eULL,0x221e18927402f5ddULL,0x52411767f8e30a27ULL,0x38ed890d9450b4bdULL,
+         0xa7adc24cbbe0d095ULL,0xeb93ea9d288eb573ULL,0xa8e1b8213cc6bf0aULL,0x4f30b691a18fb10dULL,0x07d90cb270b3a2ceULL,
+         0xbc3100ec6f44ddeaULL,0x36d8b62669667d1aULL,0x0cd9a4529023823cULL,0x7d70c6da8ff3dd83ULL,0x10aad610c87ac7b3ULL,
+         0x288423a030b1eda5ULL,0xdc8757b91cac4cc1ULL,0x6fdc27bd98b433d0ULL,0x33985abee9b9cc90ULL,0x5f9bd4e625811719ULL}
+    };
+    KState s{};
+    if (mid < 7) for (int i = 0; i < 25; i++) s[i] = M[mid][i];
+    return s;
+}
+
 static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_cnt, long& p2_cnt,
                                              long& sc_cnt, long& emac_cnt, long& canopy_cnt) {
     std::ifstream in(path);
     if (!in) { printf("missing real trace fixture: %s\n", path.c_str()); exit(2); }
-    std::vector<TraceCmd> cmds;
+    std::vector<TraceCmd> raw;
     ks_cnt = p2_cnt = sc_cnt = emac_cnt = canopy_cnt = 0;
     std::string line;
     auto next_line = [&](std::istringstream& ss) -> bool {
@@ -984,15 +1163,13 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
             b.mid = (uint8_t)m; b.nr12 = (uint8_t)nr; b.init = (uint8_t)ini; b.chk = (uint8_t)ck;
             for (int i = 0; i < 17; i++) b.lanes[i] = parse_hex64(ss);
             b.exp = parse_e4(ss);
-            if (cmds.empty() || cmds.back().kind != TK_KS || cmds.back().ks.size() == 65535) {
-                TraceCmd c{}; c.kind = TK_KS; cmds.push_back(std::move(c));
-            }
-            cmds.back().ks.push_back(b);
+            TraceCmd c{}; c.kind = TK_KS; c.ks.push_back(b);
+            raw.push_back(std::move(c));
             ks_cnt++;
         } else if (tag == "KM") {
             TraceCmd c{}; c.kind = TK_KM;
             for (int i = 0; i < 25; i++) c.km[i] = parse_hex64(ss);
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
         } else if (tag == "TC") {
             TraceCmd c{}; c.kind = TK_TC;
             int tb, lg, nl, ns;
@@ -1011,7 +1188,7 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
                 std::string t2; ss >> t2;
                 c.tc.sibs[i] = parse_e4(ss);
             }
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
             canopy_cnt++;
         } else if (tag == "P" || tag == "J") {
             TraceCmd c{}; c.kind = TK_P2;
@@ -1019,7 +1196,7 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
             for (int i = 0; i < 12; i++) c.p2.in[i] = parse_hex64(ss);
             int nout = c.p2.jive ? 4 : 12;
             for (int i = 0; i < nout; i++) c.p2.out[i] = parse_hex64(ss);
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
             p2_cnt++;
         } else if (tag == "PL") {
             PlItem it{};
@@ -1029,10 +1206,8 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
             it.blocks.resize(nb);
             for (int b = 0; b < nb; b++)
                 for (int j = 0; j < 8; j++) it.blocks[b][j] = parse_hex64(ss);
-            if (cmds.empty() || cmds.back().kind != TK_PL) {
-                TraceCmd c{}; c.kind = TK_PL; cmds.push_back(std::move(c));
-            }
-            cmds.back().pl.push_back(std::move(it));
+            TraceCmd c{}; c.kind = TK_PL; c.pl.push_back(std::move(it));
+            raw.push_back(std::move(c));
             p2_cnt += nb;
         } else if (tag == "PC") {
             TraceCmd c{}; c.kind = TK_PC;
@@ -1055,7 +1230,7 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
                     p2_cnt++;
                 }
             }
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
             canopy_cnt++;
         } else if (tag == "SC") {
             TraceCmd c{}; c.kind = TK_SC;
@@ -1066,15 +1241,13 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
             c.sc.coeffs_hi_to_lo.resize(deg + 1);
             for (int i = 0; i <= deg; i++) c.sc.coeffs_hi_to_lo[i] = parse_e4(ss);
             c.sc.next = parse_e4(ss);
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
             sc_cnt++;
         } else if (tag == "E") {
             ExtMacItem e{};
             e.a = parse_e4(ss); e.b = parse_e4(ss); e.c = parse_e4(ss); e.out = parse_e4(ss);
-            if (cmds.empty() || cmds.back().kind != TK_EMAC || cmds.back().emac.size() == 65535) {
-                TraceCmd c{}; c.kind = TK_EMAC; cmds.push_back(std::move(c));
-            }
-            cmds.back().emac.push_back(e);
+            TraceCmd c{}; c.kind = TK_EMAC; c.emac.push_back(e);
+            raw.push_back(std::move(c));
             emac_cnt++;
         } else if (tag == "FD") {
             TraceCmd c{}; c.kind = TK_FD;
@@ -1095,7 +1268,87 @@ static std::vector<TraceCmd> load_trace_file(const std::string& path, long& ks_c
             if (!next_line(ss)) exit(2);
             std::string t3; ss >> t3;
             c.fd.out = parse_e4(ss);
-            cmds.push_back(std::move(c));
+            raw.push_back(std::move(c));
+        }
+    }
+
+    // Reassemble multi-block sponge calls (`ks_sponge`) whose per-block trace lines were interleaved
+    // across Rayon worker threads during trace capture, matching each continuation block (`init=0`)
+    // against its exact parent sponge state before emitting to the single-context hardware engine.
+    struct KsChain {
+        KState st{};
+        bool has_km = false;
+        std::array<uint64_t, 25> km{};
+        std::vector<KsBlk> blks;
+        size_t last_idx = 0;
+    };
+    std::vector<KsChain> chains;
+    bool pend_km = false;
+    std::array<uint64_t, 25> pend_km_val{};
+    for (size_t idx = 0; idx < raw.size(); idx++) {
+        if (raw[idx].kind == TK_KM) {
+            pend_km = true;
+            pend_km_val = raw[idx].km;
+        } else if (raw[idx].kind == TK_KS) {
+            const KsBlk& b = raw[idx].ks[0];
+            if (b.init) {
+                KState st = sponge_mid_host(b.mid);
+                for (int i = 0; i < 17; i++) st[i] ^= b.lanes[i];
+                keccak_p(st, b.nr12 != 0);
+                for (int i = 0; i < 4; i++) if (st[i] != b.exp[i]) { printf("bad KS init\n"); exit(2); }
+                chains.push_back(KsChain{st, false, {}, {b}, idx});
+            } else if (b.mid == 7 && pend_km) {
+                KState st = pend_km_val;
+                pend_km = false;
+                for (int i = 0; i < 17; i++) st[i] ^= b.lanes[i];
+                keccak_p(st, b.nr12 != 0);
+                for (int i = 0; i < 4; i++) if (st[i] != b.exp[i]) { printf("bad KM init\n"); exit(2); }
+                chains.push_back(KsChain{st, true, pend_km_val, {b}, idx});
+            } else {
+                bool ok_match = false;
+                for (size_t ci = chains.size(); ci-- > 0;) {
+                    KState tmp = chains[ci].st;
+                    for (int i = 0; i < 17; i++) tmp[i] ^= b.lanes[i];
+                    keccak_p(tmp, b.nr12 != 0);
+                    if (tmp[0] == b.exp[0] && tmp[1] == b.exp[1] && tmp[2] == b.exp[2] && tmp[3] == b.exp[3]) {
+                        chains[ci].st = tmp;
+                        chains[ci].blks.push_back(b);
+                        chains[ci].last_idx = idx;
+                        ok_match = true;
+                        break;
+                    }
+                }
+                if (!ok_match) { printf("unmatched KS continuation at raw %zu\n", idx); exit(2); }
+            }
+        }
+    }
+
+    std::vector<std::vector<size_t>> emit_at(raw.size());
+    for (size_t ci = 0; ci < chains.size(); ci++) emit_at[chains[ci].last_idx].push_back(ci);
+
+    std::vector<TraceCmd> cmds;
+    for (size_t idx = 0; idx < raw.size(); idx++) {
+        TraceKind k = raw[idx].kind;
+        if (k != TK_KS && k != TK_KM) {
+            if (k == TK_PL && !cmds.empty() && cmds.back().kind == TK_PL) {
+                cmds.back().pl.push_back(std::move(raw[idx].pl[0]));
+            } else if (k == TK_EMAC && !cmds.empty() && cmds.back().kind == TK_EMAC && cmds.back().emac.size() < 65535) {
+                cmds.back().emac.push_back(raw[idx].emac[0]);
+            } else {
+                cmds.push_back(std::move(raw[idx]));
+            }
+        }
+        for (size_t ci : emit_at[idx]) {
+            if (chains[ci].has_km) {
+                TraceCmd kmc{}; kmc.kind = TK_KM; kmc.km = chains[ci].km;
+                cmds.push_back(std::move(kmc));
+            }
+            for (const KsBlk& b : chains[ci].blks) {
+                if (cmds.empty() || cmds.back().kind != TK_KS || cmds.back().ks.size() == 65535) {
+                    TraceCmd c{}; c.kind = TK_KS; cmds.push_back(std::move(c));
+                }
+                cmds.back().ks.push_back(b);
+            }
         }
     }
     return cmds;
@@ -1427,6 +1680,7 @@ int main(int argc, char** argv) {
     test_top_keccak();
     test_fold_and_chains();
     replay_all_real_proofs(rep);
+    test_zk_hem_v2();
     if (!COMPACT && !std::getenv("QSAG_REAL_ONLY")) { trace_qsagsta1(rep); trace_edge_fold(rep); }
     check((axil_read(R_STATUS) & 0x18) == 0, "no sticky error flags");
     if (rep) fclose(rep);

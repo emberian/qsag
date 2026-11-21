@@ -7,9 +7,15 @@ rm -f logs/lec.log logs/lec_sorted.log
 
 {
   for c in \
-    mul_slice mul_slice_mut \
+    mul_slice32 mul_slice32_mut \
+    mul_slice33 mul_slice33_mut \
+    mul_comb33_top mul_comb33_top_mut \
     reduce reduce_ref reduce_gl reduce_mut \
-    fold_hi fold_hi_mut fold_s1 fold_s1_mut fold_s2 fold_s2_mut \
+    fold_hi fold_hi_mut \
+    sk_c0 sk_c0_mut sk_c1 sk_c1_mut \
+    sk_sh32 sk_sh32_mut \
+    sk_m0 sk_m0_mut sk_m1 sk_m1_mut \
+    fold_s2 fold_s2_mut \
     final final_mut step step_mut \
     kara_in kara_in_mut \
     fp2_re fp2_re_mut fp2_im fp2_im_mut \
@@ -29,9 +35,11 @@ rm -f logs/lec.log logs/lec_sorted.log
   do
     echo "$c"
   done
-  for lvl in 1 2 3 4; do
-    echo "mul_comb $lvl"
-    echo "mul_comb_mut $lvl"
+  for lvl in 1 2 3; do
+    echo "mul_comb32 $lvl"
+    echo "mul_comb32_mut $lvl"
+    echo "mul_comb33 $lvl"
+    echo "mul_comb33_mut $lvl"
   done
   for h in 8 16 32 64; do
     echo "clmul_kara $h"

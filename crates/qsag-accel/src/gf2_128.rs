@@ -64,7 +64,7 @@ pub const fn gf2_128_inv_or_zero(a: u128) -> u128 {
 }
 
 /// Constant-time Wiedemann binary tower $\mathcal{T}_k$ multiplication at level `k`, matching
-/// `lean/Qsag/BinaryTower.lean`. Operands are read modulo $2^{2^k}$.
+/// `lean/Qsag/Math/Gf2Pow128.lean`. Operands are read modulo $2^{2^k}$.
 ///
 /// # Panics
 /// Panics if `k > 7`: the tower stops at $\mathcal{T}_7 = \mathbb{F}_{2^{128}}$.

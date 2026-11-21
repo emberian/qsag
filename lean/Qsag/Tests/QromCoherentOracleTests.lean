@@ -92,6 +92,21 @@ namespace; this module audits and pairs them. -/
 #verify_inhabited Qsag.sliced_multifold_stage_supported_budget inhabited_sliced_multifold_stage_supported_budget
 #tooth_pair Qsag.sliced_multifold_stage_supported_budget vs tooth_multifold_step6_below_186_bits
 
+/-- Combined witness bundling the `nv = 24` stage-0 multifold inhabitedness and `175`-bit / `< 186`-bit
+    boundary control audited in this module. -/
+theorem multifold_nv24_stage0_witness_and_boundary :
+    (∃ (nv : Nat) (g : HemStageGeom),
+      2 ≤ nv ∧ nv ≤ 24 ∧ g ∈ hemStageGeoms nv ∧ hemJohnsonQromStageExhaustive g = false) ∧
+    (∃ g : HemStageGeom,
+      g ∈ hemStageGeoms 24 ∧
+      g.stepVars = 6 ∧
+      atLeastBits 175 (slicedMultiFoldStageProfile 24 g) ∧
+      ¬ atLeastBits 186 (slicedMultiFoldStageProfile 24 g)) := by
+  obtain ⟨g, hg, hs, h175, h186, _⟩ := tooth_multifold_step6_below_186_bits
+  exact ⟨inhabited_sliced_multifold_stage_supported_budget, ⟨g, hg, hs, h175, h186⟩⟩
+
+#verify_constructive multifold_nv24_stage0_witness_and_boundary
+
 end Cwyz26EqualDegreeAndMultiFoldTests
 
 end Qsag

@@ -141,9 +141,8 @@ module qsag_keccak_2rpc (
 
   wire [1599:0] r_in  = canopy_node_go ? cn_init : s_flat;
   wire [4:0]    r_idx = canopy_node_go ? 5'd12   : r;
-  wire [1599:0] m, n;
-  qsag_keccak_round u_r0 (.a(r_in), .rc(rcon(r_idx)),        .o(m));
-  qsag_keccak_round u_r1 (.a(m),    .rc(rcon(r_idx | 5'd1)), .o(n));
+  wire [1599:0] m;
+  qsag_keccak_round u_r0 (.a(r_in), .rc(rcon(r_idx)), .o(m));
 
   assign busy       = run;
   assign lane_rdata = (lane_idx < 5'd25) ? sl[lane_idx] : 64'd0;
@@ -157,15 +156,15 @@ module qsag_keccak_2rpc (
       r     <= '0;
     end else begin
       for (int i = 0; i < 25; i++) begin
-        if (run_l[i]) sl[i] <= n[64*i +: 64];
-        else if (canopy_node_go) sl[i] <= n[64*i +: 64];
+        if (run_l[i]) sl[i] <= m[64*i +: 64];
+        else if (canopy_node_go) sl[i] <= m[64*i +: 64];
         else sl[i] <= sl_idle[i];
       end
       if (run) begin
-        r <= r + 5'd2;
-        if (r == 5'd22) begin run <= 1'b0; run_l <= '0; end
+        r <= r + 5'd1;
+        if (r == 5'd23) begin run <= 1'b0; run_l <= '0; end
       end else if (canopy_node_go) begin
-        r     <= 5'd14;
+        r     <= 5'd13;
         run   <= 1'b1;
         run_l <= {25{1'b1}};
       end else begin

@@ -24,7 +24,7 @@ use super::params::{
     ROW_DEGREE, ROW_MASK_BITS, SALT_BYTES, Schedule, ShapeSize, schedule_with_stage0,
 };
 use crate::zk_hem::bounds::{
-    MilliBits, StageBound, johnson_list, log2_hi, log2_lo, siblings, stage_bound,
+    MilliBits, StageBound, johnson_list, log2_hi, log2_lo, siblings, stage_bound, sum_bits,
 };
 
 /// `floor(1000 log2(p^5 - 1)) - 1` for `p = 2^64 - 2^32 + 1`: the field, its nonzero elements
@@ -41,26 +41,6 @@ const QROM_ROUND_SLACK: MilliBits = 23;
 
 /// The level every accepted table size must reach, classically and in the QROM.
 pub const TARGET_LEVEL_MILLIBITS: MilliBits = 128_000;
-
-/// An upper bound on `1000 log2(1 + 2^(-d / 1000))` for `d >= 0`: `log2(1 + x) <= x / ln 2`
-/// with `x` rounded up to the next eighth of a bit, and never more than one bit.
-fn log2_one_plus(d: MilliBits) -> MilliBits {
-    // `ceil(1000 * 2^(-k / 8))`.
-    const EIGHTHS: [i64; 8] = [1000, 918, 841, 772, 708, 649, 595, 546];
-    assert!(d >= 0);
-    let steps = d / 125;
-    let shift = steps / 8;
-    if shift >= 40 {
-        return 1;
-    }
-    // `1443 >= 1000 / ln 2`.
-    (((1443 * EIGHTHS[(steps % 8) as usize] + 999) / 1000) >> shift).min(999) + 1
-}
-
-/// A lower bound on `-log2(2^(-a / 1000) + 2^(-b / 1000))`.
-fn sum_bits(a: MilliBits, b: MilliBits) -> MilliBits {
-    a.min(b) - log2_one_plus((a - b).abs())
-}
 
 /// A verifier round of v2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -506,6 +486,7 @@ mod tests {
         MAX_LOG_CELLS, MIN_LOG_CELLS, STAGE0_QUERIES, blind_cells_for, mask_cells, schedule,
     };
     use super::*;
+    use crate::zk_hem::bounds::log2_one_plus;
 
     #[test]
     fn stage0_queries_are_minimal() {

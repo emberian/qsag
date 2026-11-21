@@ -11,21 +11,35 @@ RTL="rtl/qsag_asic_gl64_csa.sv rtl/qsag_asic_gl64_csa_gen.sv rtl/qsag_asic_ext4_
 
 expect=unsat; synth=""; gpar=""
 case "$case" in
-  # 1. Goldilocks 64x64 4-Row Dadda Tree & CSA Reducer
-  mul_slice)      gold=lec_mul_slice_gold;  gate=lec_mul_slice_gate ;;
-  mul_slice_mut)  gold=lec_mul_slice_gold;  gate=lec_mul_slice_mut; expect=sat ;;
-  mul_comb)       gold=lec_mul_comb_gold;   gate=lec_mul_comb_gate; gpar="-G LVL=$param" ;;
-  mul_comb_mut)   gold=lec_mul_comb_gold;   gate=lec_mul_comb_mut;  gpar="-G LVL=$param"; expect=sat ;;
-  reduce)         gold=lec_reduce_gold;     gate=lec_reduce_gate ;;
-  reduce_ref)     gold=lec_reduce_gold;     gate=lec_reduce_ref ;;
-  reduce_gl)      gold=lec_reduce_gold;     gate=lec_reduce_gate; synth=1 ;;
-  reduce_mut)     gold=lec_reduce_gold;     gate=lec_reduce_mut; expect=sat ;;
-  fold_hi)        gold=lec_fold_hi_gold;    gate=lec_fold_hi_gate ;;
-  fold_hi_mut)    gold=lec_fold_hi_gold;    gate=lec_fold_hi_mut; expect=sat ;;
-  fold_s1)        gold=lec_fold_s1_gold;    gate=lec_fold_s1_gate ;;
-  fold_s1_mut)    gold=lec_fold_s1_gold;    gate=lec_fold_s1_mut; expect=sat ;;
-  fold_s2)        gold=lec_fold_s2_gold;    gate=lec_fold_s2_gate ;;
-  fold_s2_mut)    gold=lec_fold_s2_gold;    gate=lec_fold_s2_mut; expect=sat ;;
+  # 1. Goldilocks 3-Way Solinas-Karatsuba Dadda Tree & CSA Reducer
+  mul_slice32)      gold=lec_mul_slice32_gold;      gate=lec_mul_slice32_gate ;;
+  mul_slice32_mut)  gold=lec_mul_slice32_gold;      gate=lec_mul_slice32_mut; expect=sat ;;
+  mul_slice33)      gold=lec_mul_slice33_gold;      gate=lec_mul_slice33_gate ;;
+  mul_slice33_mut)  gold=lec_mul_slice33_gold;      gate=lec_mul_slice33_mut; expect=sat ;;
+  mul_comb32)       gold=lec_mul_comb32_gold;       gate=lec_mul_comb32_gate; gpar="-G LVL=$param" ;;
+  mul_comb32_mut)   gold=lec_mul_comb32_gold;       gate=lec_mul_comb32_mut;  gpar="-G LVL=$param"; expect=sat ;;
+  mul_comb33)       gold=lec_mul_comb33_gold;       gate=lec_mul_comb33_gate; gpar="-G LVL=$param" ;;
+  mul_comb33_mut)   gold=lec_mul_comb33_gold;       gate=lec_mul_comb33_mut;  gpar="-G LVL=$param"; expect=sat ;;
+  mul_comb33_top)     gold=lec_mul_comb33_top_gold; gate=lec_mul_comb33_top_gate ;;
+  mul_comb33_top_mut) gold=lec_mul_comb33_top_gold; gate=lec_mul_comb33_top_mut; expect=sat ;;
+  reduce)           gold=lec_reduce_gold;           gate=lec_reduce_gate ;;
+  reduce_ref)       gold=lec_reduce_gold;           gate=lec_reduce_ref ;;
+  reduce_gl)        gold=lec_reduce_gold;           gate=lec_reduce_gate; synth=1 ;;
+  reduce_mut)       gold=lec_reduce_gold;           gate=lec_reduce_mut; expect=sat ;;
+  fold_hi)          gold=lec_fold_hi_gold;          gate=lec_fold_hi_gate ;;
+  fold_hi_mut)      gold=lec_fold_hi_gold;          gate=lec_fold_hi_mut; expect=sat ;;
+  sk_c0)            gold=lec_sk_c0_gold;            gate=lec_sk_c0_gate ;;
+  sk_c0_mut)        gold=lec_sk_c0_gold;            gate=lec_sk_c0_mut; expect=sat ;;
+  sk_c1)            gold=lec_sk_c1_gold;            gate=lec_sk_c1_gate ;;
+  sk_c1_mut)        gold=lec_sk_c1_gold;            gate=lec_sk_c1_mut; expect=sat ;;
+  sk_sh32)          gold=lec_sk_sh32_gold;          gate=lec_sk_sh32_gate ;;
+  sk_sh32_mut)      gold=lec_sk_sh32_gold;          gate=lec_sk_sh32_mut; expect=sat ;;
+  sk_m0)            gold=lec_sk_m0_gold;            gate=lec_sk_m0_gate ;;
+  sk_m0_mut)        gold=lec_sk_m0_gold;            gate=lec_sk_m0_mut; expect=sat ;;
+  sk_m1)            gold=lec_sk_m1_gold;            gate=lec_sk_m1_gate ;;
+  sk_m1_mut)        gold=lec_sk_m1_gold;            gate=lec_sk_m1_mut; expect=sat ;;
+  fold_s2)          gold=lec_fold_s2_gold;          gate=lec_fold_s2_gate ;;
+  fold_s2_mut)      gold=lec_fold_s2_gold;          gate=lec_fold_s2_mut; expect=sat ;;
   final)          gold=lec_final_gold;      gate=lec_final_gate ;;
   final_mut)      gold=lec_final_gold;      gate=lec_final_mut; expect=sat ;;
   step)           gold=lec_step_gold;       gate=lec_step_gate ;;

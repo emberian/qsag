@@ -1785,7 +1785,6 @@ fn prove_shard_rows_gpu(
     let total_rows = num_signer_slots * r_rows;
     let log_rows = circuit.log_rows();
     let log_s = num_signer_slots.trailing_zeros() as usize;
-    let raw = session.raw();
 
     let tau = transcript.squeeze_ext4_vec(b"LEAF_TAU", log_rows);
     let gamma = transcript.squeeze_ext4(b"LEAF_GAMMA");
@@ -1854,13 +1853,17 @@ fn prove_shard_rows_gpu(
 
     let witness_word_offset = (shard_idx * total_rows * NUM_TRACE_COLS) as u32;
     let cols_base_word_offset = (num_shards * total_rows * NUM_TRACE_COLS) as u32;
-    raw.prover_air_init_shard(
-        witness_word_offset,
-        cols_base_word_offset,
-        total_rows,
-        &shift_tables_3m,
-        &static_gammas_ext4,
-    )?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_air_init_shard_with_receipt(
+            key,
+            anchor,
+            witness_word_offset,
+            cols_base_word_offset,
+            total_rows,
+            &shift_tables_3m,
+            &static_gammas_ext4,
+        )
+    })?;
 
     let mut active_tbl = vec![GoldilocksExt4::ZERO; num_signer_slots];
     let mut pk_seed_tbl = vec![[GoldilocksExt4::ZERO; 4]; num_signer_slots];
@@ -2019,22 +2022,26 @@ fn prove_shard_rows_gpu(
         };
         let sh_dst = if sh_cur == 0 { sh_pp_hi } else { 0 };
 
-        let raw8 = raw.prover_air_eval_round(
-            is_round0,
-            cur_m,
-            cur_r,
-            cur_s,
-            folding_signer,
-            col_src,
-            sh_cur,
-            dyn_ext4_off,
-            &dyn_words,
-            signers_off,
-            steps_off,
-            op_hdr_off,
-            op_ent_off,
-            sorted_u64_off,
-        )?;
+        let raw8 = session.exec_verified_pair(|raw, key, anchor| {
+            raw.prover_air_eval_round_with_receipt(
+                key,
+                anchor,
+                is_round0,
+                cur_m,
+                cur_r,
+                cur_s,
+                folding_signer,
+                col_src,
+                sh_cur,
+                dyn_ext4_off,
+                &dyn_words,
+                signers_off,
+                steps_off,
+                op_hdr_off,
+                op_ent_off,
+                sorted_u64_off,
+            )
+        })?;
 
         let mut sum_evals = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
         sum_evals[0] = crate::pcs::arr_to_ext4_checked(raw8[0])?;
@@ -2055,15 +2062,19 @@ fn prove_shard_rows_gpu(
         row_sumcheck_polys.push(wire_poly);
         challenges_msb_to_lsb.push(chal);
 
-        raw.prover_air_fold_round(
-            is_round0,
-            cur_m,
-            col_src,
-            col_dst,
-            sh_cur,
-            sh_dst,
-            crate::pcs::ext4_to_arr(chal),
-        )?;
+        session.exec_verified_unit(|raw, key, anchor| {
+            raw.prover_air_fold_round_with_receipt(
+                key,
+                anchor,
+                is_round0,
+                cur_m,
+                col_src,
+                col_dst,
+                sh_cur,
+                sh_dst,
+                crate::pcs::ext4_to_arr(chal),
+            )
+        })?;
         col_ext4_cur = col_dst;
         sh_cur = sh_dst;
 
@@ -2124,7 +2135,9 @@ fn prove_shard_rows_gpu(
     let mut col_evals_arr = [GoldilocksExt4::ZERO; NUM_TRACE_COLS];
     if gpu_rounds_done == log_rows {
         let mut raw_cols = [[0u64; 4]; NUM_TRACE_COLS];
-        raw.prover_air_read_folded_cols(col_ext4_cur, &mut raw_cols)?;
+        session.exec_verified_unit(|raw, key, anchor| {
+            raw.prover_air_read_folded_cols_with_receipt(key, anchor, col_ext4_cur, &mut raw_cols)
+        })?;
         for (dst, raw_c) in col_evals_arr.iter_mut().zip(raw_cols) {
             *dst = crate::pcs::arr_to_ext4_checked(raw_c)?;
         }
@@ -2133,7 +2146,16 @@ fn prove_shard_rows_gpu(
         debug_assert_eq!(cur_m, cur_r);
         let mut raw_cols = vec![[0u64; 4]; NUM_TRACE_COLS * cur_m];
         let mut raw_shifts = vec![[0u64; 4]; 3 * cur_m];
-        raw.prover_air_read_tail(col_ext4_cur, sh_cur, &mut raw_cols, &mut raw_shifts)?;
+        session.exec_verified_unit(|raw, key, anchor| {
+            raw.prover_air_read_tail_with_receipt(
+                key,
+                anchor,
+                col_ext4_cur,
+                sh_cur,
+                &mut raw_cols,
+                &mut raw_shifts,
+            )
+        })?;
 
         let mut cols_ext4 = vec![[GoldilocksExt4::ZERO; NUM_TRACE_COLS]; cur_m];
         for c in 0..NUM_TRACE_COLS {

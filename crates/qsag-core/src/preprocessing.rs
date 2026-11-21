@@ -55,8 +55,8 @@ use crate::wipe::{
 
 mod mac_blind;
 mod triple_f2;
-pub use mac_blind::{blind_open_additive_gf128_poly, blind_open_ext2};
 pub(crate) use mac_blind::blind_open_tower128;
+pub use mac_blind::{blind_open_additive_gf128_poly, blind_open_ext2};
 use mac_blind::{blind_open_degree_ext2, blind_open_degree_tower128};
 
 // ============================================================================
@@ -736,7 +736,7 @@ const OMEGA_INV_POWS: [u16; RLWE_N / 2] = {
     arr
 };
 
-/// Constant-time Ring-LWE bit decoder matching `lean/Qsag/Preprocessing.lean:rlweDecodeBit`
+/// Constant-time Ring-LWE bit decoder matching `lean/Qsag/Protocol/Threshold/Preprocessing.lean:rlweDecodeBit`
 /// (`true` iff `3072 <= z && z < 9216`, `0` secret-dependent branches).
 #[inline]
 pub fn rlwe_decode_bit_ct(z: u16) -> u8 {
@@ -3757,13 +3757,14 @@ impl BaseOtExtSenderRound3 {
             delta,
             combined_seeds,
             batch_ctr: 0,
-            poisoned: false,
+            poisoned: alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
 
 /// Established 128-column parity-combined Ring-LWE OT-Extension Sender channel (`!Clone`, wiped on
-/// `Drop`, permanently poisoned and zeroed on first `KosOtCheckFailed`!).
+/// `Drop`, permanently poisoned and zeroed across the entire `delta` family on first
+/// `KosOtCheckFailed`!).
 pub struct OtExtSenderChannel {
     pub session_id: [u8; 32],
     pub sender_id: usize,
@@ -3771,12 +3772,17 @@ pub struct OtExtSenderChannel {
     delta: u128,
     combined_seeds: [[u8; 32]; 128],
     batch_ctr: u64,
-    poisoned: bool,
+    poisoned: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl OtExtSenderChannel {
-    fn poison_and_wipe(&mut self) {
-        self.poisoned = true;
+    /// Whether this channel or any substream sharing its 128-bit `delta` correlation has aborted.
+    #[inline]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    fn wipe_local_secrets(&mut self) {
         self.delta = 0;
         black_box(&mut self.delta);
         for s in &mut self.combined_seeds {
@@ -3784,14 +3790,23 @@ impl OtExtSenderChannel {
         }
     }
 
+    fn poison_and_wipe(&mut self) {
+        self.poisoned
+            .store(true, core::sync::atomic::Ordering::Release);
+        self.wipe_local_secrets();
+    }
+
     /// Derive a domain-separated child sender channel over the same 128-bit `delta` correlation
     /// so independent concurrent repetition streams never contend or re-run Ring-LWE Base OT.
+    ///
+    /// Shares the parent's atomic poison latch so any consistency-check failure on any forked
+    /// substream permanently poisons the parent and every sibling substream sharing `delta`.
     pub fn fork_substream(
         &self,
         child_session_id: [u8; 32],
         stream_idx: u64,
     ) -> Result<Self, PreprocessError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(PreprocessError::ChannelPoisoned {
                 sender_id: self.sender_id,
                 receiver_id: self.receiver_id,
@@ -3815,6 +3830,16 @@ impl OtExtSenderChannel {
                 ],
             )
         });
+        if self.is_poisoned() {
+            let mut wiped = combined_seeds;
+            for s in &mut wiped {
+                wipe_bytes32(s);
+            }
+            return Err(PreprocessError::ChannelPoisoned {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
         Ok(Self {
             session_id: child_session_id,
             sender_id: self.sender_id,
@@ -3822,14 +3847,14 @@ impl OtExtSenderChannel {
             delta: self.delta,
             combined_seeds,
             batch_ctr: 0,
-            poisoned: false,
+            poisoned: alloc::sync::Arc::clone(&self.poisoned),
         })
     }
 }
 
 impl Drop for OtExtSenderChannel {
     fn drop(&mut self) {
-        self.poison_and_wipe();
+        self.wipe_local_secrets();
     }
 }
 
@@ -3961,7 +3986,7 @@ fn establish_ideal_ot_ext_channel_for_test(
             delta,
             combined_seeds: selected,
             batch_ctr: 0,
-            poisoned: false,
+            poisoned: alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false)),
         },
         OtExtReceiverChannel {
             session_id,
@@ -4886,7 +4911,8 @@ impl OtExtSenderChannel {
         u_msg: &KosOtUColsMsg,
         sender_rng: &mut PartyPrivateRng,
     ) -> Result<(KosOtSenderPending, KosOtChallengeMsg), PreprocessError> {
-        if self.poisoned {
+        if self.is_poisoned() {
+            self.wipe_local_secrets();
             return Err(PreprocessError::ChannelPoisoned {
                 sender_id: self.sender_id,
                 receiver_id: self.receiver_id,
@@ -4935,7 +4961,8 @@ impl OtExtSenderChannel {
         u_msg: &KosOtUColsMsg,
         chi_seed: [u8; 32],
     ) -> Result<(KosOtSenderPending, KosOtChallengeMsg), PreprocessError> {
-        if self.poisoned {
+        if self.is_poisoned() {
+            self.wipe_local_secrets();
             return Err(PreprocessError::ChannelPoisoned {
                 sender_id: self.sender_id,
                 receiver_id: self.receiver_id,
@@ -5078,7 +5105,8 @@ impl OtExtSenderChannel {
         pending: KosOtSenderPending,
         proof: &KosOtProofMsg,
     ) -> Result<Vec<OtPadPair>, PreprocessError> {
-        if self.poisoned {
+        if self.is_poisoned() {
+            self.wipe_local_secrets();
             return Err(PreprocessError::ChannelPoisoned {
                 sender_id: self.sender_id,
                 receiver_id: self.receiver_id,
@@ -15150,6 +15178,79 @@ mod silent_pcg_vault_integration_tests {
                 &bad_openings,
             ),
             Err(PreprocessError::CoinCommitMismatch { party_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn forked_substream_kos_abort_poisons_parent_and_siblings() {
+        let mut s_rng = PartyPrivateRng::from_seed([0x71; 32], b"ot_fork_s");
+        let mut r_rng = PartyPrivateRng::from_seed([0x72; 32], b"ot_fork_r");
+        let (mut s_parent, r_parent) =
+            establish_ideal_ot_ext_channel_for_test([0xA1; 32], 0, 1, &mut s_rng, &mut r_rng);
+
+        // Dropping a healthy finished child substream must NOT poison the parent or siblings.
+        {
+            let mut s_ok = s_parent.fork_substream([0xB0; 32], 0).unwrap();
+            let mut r_ok = r_parent.fork_substream([0xB0; 32], 0);
+            let (r_pend, u_msg) = r_ok.round1_send_u_cols(&[0xDEAD_BEEF_CAFE_BABEu64], &mut r_rng);
+            let (s_pend, chal) = s_ok.round2_sample_challenge(&u_msg, &mut s_rng).unwrap();
+            let (proof, _r_pads) = r_ok.round3_prove_and_finish(r_pend, &chal);
+            let _s_pads = s_ok.round4_verify_and_finish(s_pend, &proof).unwrap();
+        }
+        assert!(!s_parent.is_poisoned());
+
+        // Fork two concurrent child substreams sharing `delta`.
+        let mut s_child_a = s_parent.fork_substream([0xB1; 32], 1).unwrap();
+        let mut r_child_a = r_parent.fork_substream([0xB1; 32], 1);
+        let mut s_child_b = s_parent.fork_substream([0xB2; 32], 2).unwrap();
+        let mut r_child_b = r_parent.fork_substream([0xB2; 32], 2);
+
+        // Start `child_b` round 2 BEFORE `child_a` fails its KOS consistency check.
+        let (r_pend_b, u_msg_b) = r_child_b.round1_send_u_cols(&[0x1234_5678u64], &mut r_rng);
+        let (s_pend_b, chal_b) = s_child_b
+            .round2_sample_challenge(&u_msg_b, &mut s_rng)
+            .unwrap();
+        let (proof_b, _) = r_child_b.round3_prove_and_finish(r_pend_b, &chal_b);
+
+        // Corrupt `child_a`'s KOS proof -> selective-failure probe on `delta`!
+        let (r_pend_a, u_msg_a) = r_child_a.round1_send_u_cols(&[0xAAAA_5555u64], &mut r_rng);
+        let (s_pend_a, chal_a) = s_child_a
+            .round2_sample_challenge(&u_msg_a, &mut s_rng)
+            .unwrap();
+        let (mut bad_proof_a, _) = r_child_a.round3_prove_and_finish(r_pend_a, &chal_a);
+        bad_proof_a.t_kos.0 ^= 1;
+        assert!(matches!(
+            s_child_a.round4_verify_and_finish(s_pend_a, &bad_proof_a),
+            Err(PreprocessError::KosOtCheckFailed {
+                sender_id: 0,
+                receiver_id: 1
+            })
+        ));
+
+        // Parent and sibling `child_b` (including its in-flight round 4!) must now be poisoned.
+        assert!(s_parent.is_poisoned());
+        assert!(s_child_a.is_poisoned());
+        assert!(s_child_b.is_poisoned());
+        assert!(matches!(
+            s_parent.fork_substream([0xB3; 32], 3),
+            Err(PreprocessError::ChannelPoisoned {
+                sender_id: 0,
+                receiver_id: 1
+            })
+        ));
+        assert!(matches!(
+            s_parent.round2_sample_challenge(&u_msg_b, &mut s_rng),
+            Err(PreprocessError::ChannelPoisoned {
+                sender_id: 0,
+                receiver_id: 1
+            })
+        ));
+        assert!(matches!(
+            s_child_b.round4_verify_and_finish(s_pend_b, &proof_b),
+            Err(PreprocessError::ChannelPoisoned {
+                sender_id: 0,
+                receiver_id: 1
+            })
         ));
     }
 }

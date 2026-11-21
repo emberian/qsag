@@ -153,8 +153,8 @@ module chip_top #(
         .PD     (1'b0)
     );
     
-    // Normal input
-    `gf180mcu_xxx_io__in_c rst_n_pad (
+    // Schmitt trigger reset input with weak pull-down (holds reset low until released cleanly)
+    `gf180mcu_xxx_io__in_s rst_n_pad (
         `ifdef USE_POWER_PINS
         .DVDD   (DVDD),
         .DVSS   (DVSS),
@@ -166,7 +166,7 @@ module chip_top #(
         .PAD    (rst_n_PAD),
         
         .PU     (1'b0),
-        .PD     (1'b0)
+        .PD     (1'b1)
     );
 
     generate

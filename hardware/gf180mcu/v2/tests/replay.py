@@ -51,7 +51,9 @@ def translate_cth(req, k_ref, k_host):
     typ = int.from_bytes((s[4] & M32).to_bytes(4, "little"), "big")
     body = [0, 0, 0, 0]
     if typ == 0:
-        assert sw == 4
+        if sw != 4:
+            # Reference rejects WOTS PUBGEN with sw != 4 as E_LEN; v2 has no sw field and rejects len != 88 as E_LEN.
+            return [host.hdr(host.OP_CTH, flags & 1, 80, n)] + s[:5] + body[:3] + [0, 0]
         digits = sym + [0] * (32 - n)
         body[:2] = host.words_of(bytes((digits[2 * k] << 4) | digits[2 * k + 1] for k in range(16)))
     else:
@@ -120,6 +122,10 @@ def replay(config, quick=False):
                 record(name, op, "verbatim", chip.transact(tx), rx)
             elif op in (0x30, 0x31):
                 record(name, op, "deferred", chip.transact(tx), host.err(op, host.E_OPCODE))
+            elif op == 0x10 and (flags & 2) and config == "L":
+                # sponge12_rate6 (flags=2) was added in unified Dregg-180 RTL and is not in v2 field.uc
+                rows.append(dict(name=name, op=op, cls="deferred", ok=working_rows_clear(chip),
+                                 cycles=0, steps=0, keccak=0, field=0, fram=0, words_out=0))
             elif op in (0x10, 0x11) and config == "S":
                 record(name, op, "absent", chip.transact(tx), host.err(op, host.E_OPCODE))
             elif op == 0x40:
@@ -130,9 +136,15 @@ def replay(config, quick=False):
                     inserted.append("an enrolled, committed and booted chip at: " + name)
                 record(name, op, "changed", chip.transact(tx), host.err(op, host.E_OPCODE))
             elif op == host.OP_PRFMSG:
-                exp = rx if refused or dev is None else [host.rhdr(op, 16)] + host.words_of(
-                    hashlib.shake_256(dev.prf + host.bytes_of(tx[1:])[:(tx[0] >> 24) & 0xFFFFFF]).digest(16))
-                record(name, op, "recomputed", chip.transact(tx), exp)
+                if dev is None:
+                    record(name, op, "recomputed", chip.transact(tx), rx)
+                else:
+                    raw_len = (tx[0] >> 24) & 0xFFFFFF
+                    msg = host.bytes_of(tx[1:])[:max(0, raw_len - 16)]
+                    pad = b"\x00" * ((-len(msg)) % 8)
+                    v2_tx = [host.hdr(op, 0, len(msg))] + host.words_of(msg + pad)
+                    exp = [host.rhdr(op, 16)] + host.words_of(hashlib.shake_256(dev.prf + msg).digest(16))
+                    record(name, op, "changed" if refused else "recomputed", chip.transact(v2_tx), exp)
             elif op == host.OP_CTH:
                 if flags & 2 and not flags & 1 and dev and not state["counted"]:
                     state["dev"] = dev = provisioned(host.F_COUNTED, config=config)

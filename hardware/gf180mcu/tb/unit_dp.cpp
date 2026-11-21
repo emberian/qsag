@@ -54,7 +54,7 @@ static uint64_t run(int op, int d = 0, int s1 = 0, int s2 = 0, int n = 0, int di
     }
     return cycles - c0;
 }
-enum { PERM = 1, ABSW, SETW, MOV, EMUL, EADD, ESUB, EEQ, FFWD, LDRES };
+enum { PERM = 1, ABSW, SETW, MOV, EMUL, EADD, ESUB, EEQ, FFWD, LDRES, FP5_MUL, FP5_ADD, FP5_SUB, FP5_EQ };
 
 static std::vector<uint8_t> unhex(const std::string& h) {
     std::vector<uint8_t> b;
@@ -103,7 +103,7 @@ static bool sponge_kat(size_t rate, uint8_t suffix, int rounds, const std::vecto
     }
     return ok;
 }
-enum { T0 = 0, CH = 12, RA = 16, RB = 20, RX = 32, RY = 36 };
+enum { T0 = 0, CH = 12, RA = 16, RB = 20, RX = 32, RY = 36, RA5 = 17, RB5 = 22, RX5 = 32, RY5 = 37 };
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -147,6 +147,20 @@ int main(int argc, char** argv) {
             // aliasing: dst == src1
             run(t == 'E' ? EMUL : t == '+' ? EADD : ESUB, RX, RX, RY);
             for (int i = 0; i < 4; i++) ok &= rd(RX + i) == w[8 + i];
+        } else if (t == '5' || t == 'a' || t == 's') {
+            for (int i = 0; i < 5; i++) wr(RX5 + i, w[i]);
+            for (int i = 0; i < 5; i++) wr(RY5 + i, w[5 + i]);
+            int fop = (t == '5') ? FP5_MUL : (t == 'a') ? FP5_ADD : FP5_SUB;
+            run(fop, RA5, RX5, RY5);
+            for (int i = 0; i < 5; i++) ok &= rd(RA5 + i) == w[10 + i];
+            // aliasing: dst == src1
+            run(fop, RX5, RX5, RY5);
+            for (int i = 0; i < 5; i++) ok &= rd(RX5 + i) == w[10 + i];
+        } else if (t == 'q') {
+            for (int i = 0; i < 5; i++) wr(RA5 + i, w[i]);
+            for (int i = 0; i < 5; i++) wr(RB5 + i, w[5 + i]);
+            run(FP5_EQ, 0, RA5, RB5);
+            ok = top->eq == w[10];
         } else if (t == '=') {
             for (int i = 0; i < 4; i++) wr(RA + i, w[i]);
             for (int i = 0; i < 4; i++) wr(RB + i, w[4 + i]);

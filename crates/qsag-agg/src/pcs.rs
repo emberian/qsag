@@ -132,7 +132,7 @@ pub struct WhirStageSpec {
 /// accepted regime gives 127 bits classically and 81 bits in the QROM.
 ///
 /// The `Cdhz25*` regimes use the per-stage query tables of
-/// `lean/Qsag/QromSaltedMerkleStateRestoration.lean` (`HemOptimizedQromSchedule.minQueries`):
+/// `lean/Qsag/Protocol/Aggregation/QromSaltedMerkleStateRestoration.lean` (`HemOptimizedQromSchedule.minQueries`):
 /// `Cdhz25Johnson*` is `cdhzPow16At2pow38` (pure query target `2^-200`, 16-bit PoW, stated there
 /// for at most `2^38` oracle queries) and `Cdhz25ZeroPow*` is `unitaryZeroPow` (pure query target
 /// `2^-214`, no PoW, stated for `Q + 1 <= 2^40`). The `Poseidon2*` variants use the same query
@@ -3572,42 +3572,48 @@ fn whir_commit_batch_owned_with_schedule_inner(
         let domain_len = table_len * st0.blowup;
         let num_groups = domain_len / group_arity_0;
 
-        let gpu_res = session.raw().prover_whir_commit_round0_with_mode(
-            turbo,
-            polys.len(),
-            salt_seed,
-            num_vars,
-            st0.blowup,
-            group_arity_0,
-            max_stage_dom,
-            max_stage_grps,
-            extra_witness_words,
-            |poly_idx, pos, dst| {
-                let n = dst.len();
-                let src = &polys[poly_idx][pos..pos + n];
-                let wb = &mut wb_chunk[..n];
-                if n >= PAR_CHUNK && crate::parallel_workers() > 1 {
-                    let workers = crate::parallel_workers().min(n.div_ceil(PAR_CHUNK));
-                    let chunk_len = n.div_ceil(workers.max(1));
-                    std::thread::scope(|scope| {
-                        for (dst_chunk, src_chunk) in
-                            wb.chunks_mut(chunk_len).zip(src.chunks(chunk_len))
-                        {
-                            crate::spawn_bounded(scope, move || {
-                                for (d, v) in dst_chunk.iter_mut().zip(src_chunk.iter()) {
-                                    *d = v.to_canonical_u64();
-                                }
-                            });
+        let gpu_res = session.exec_verified(|raw, key, anchor| {
+            raw.prover_whir_commit_round0_with_mode_and_receipt(
+                key,
+                anchor,
+                turbo,
+                polys.len(),
+                qsag_accel::WhirRound0ReceiptParams {
+                    salt_seed,
+                    num_vars,
+                    blowup: st0.blowup,
+                    group_arity: group_arity_0,
+                    max_stage1_domain_ext4: max_stage_dom,
+                    max_stage1_groups: max_stage_grps,
+                    extra_witness_words,
+                },
+                |poly_idx, pos, dst| {
+                    let n = dst.len();
+                    let src = &polys[poly_idx][pos..pos + n];
+                    let wb = &mut wb_chunk[..n];
+                    if n >= PAR_CHUNK && crate::parallel_workers() > 1 {
+                        let workers = crate::parallel_workers().min(n.div_ceil(PAR_CHUNK));
+                        let chunk_len = n.div_ceil(workers.max(1));
+                        std::thread::scope(|scope| {
+                            for (dst_chunk, src_chunk) in
+                                wb.chunks_mut(chunk_len).zip(src.chunks(chunk_len))
+                            {
+                                crate::spawn_bounded(scope, move || {
+                                    for (d, v) in dst_chunk.iter_mut().zip(src_chunk.iter()) {
+                                        *d = v.to_canonical_u64();
+                                    }
+                                });
+                            }
+                        });
+                    } else {
+                        for (d, v) in wb.iter_mut().zip(src.iter()) {
+                            *d = v.to_canonical_u64();
                         }
-                    });
-                } else {
-                    for (d, v) in wb.iter_mut().zip(src.iter()) {
-                        *d = v.to_canonical_u64();
                     }
-                }
-                dst.copy_from_slice(wb);
-            },
-        );
+                    dst.copy_from_slice(wb);
+                },
+            )
+        });
         if secret {
             qsag_asm::volatile_fill(&mut wb_chunk, 0u64);
         }
@@ -4377,7 +4383,7 @@ fn whir_open_core(
                 });
                 claims
             } else {
-                let (prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
+                let (mut prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
                     Some(oracle) => oracle,
                     None => unreachable!("a noninitial stage follows a committed oracle"),
                 };
@@ -4412,6 +4418,9 @@ fn whir_open_core(
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
                     hash_ext4_group_mode(turbo, stage_u8, g as u32, &fiber[..arity])
                 });
+                if state.secret {
+                    qsag_asm::volatile_fill(&mut prev_cw, GoldilocksExt4::ZERO);
+                }
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
                     stage_ood_evals: prev_ood,
@@ -4531,7 +4540,7 @@ fn whir_open_core(
                     )
                 });
             } else {
-                let (prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
+                let (mut prev_cw, prev_tree, prev_ood) = match active_stage_oracle.take() {
                     Some(oracle) => oracle,
                     None => unreachable!("a noninitial stage follows a committed oracle"),
                 };
@@ -4564,6 +4573,9 @@ fn whir_open_core(
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
                     hash_ext4_group_mode(turbo, stage_u8, g as u32, &fiber[..arity])
                 });
+                if state.secret {
+                    qsag_asm::volatile_fill(&mut prev_cw, GoldilocksExt4::ZERO);
+                }
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
                     stage_ood_evals: prev_ood,
@@ -4711,12 +4723,16 @@ fn whir_open_single_gpu(
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Result<HemWhirOpeningProof, qsag_accel::VulkanError> {
     let mono_kron = mono_kronecker_1024(point);
-    session.raw().prover_whir_expand_monomial_and_dot_1024(
-        &mono_kron,
-        state.num_vars,
-        1,
-        &mut [],
-    )?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_whir_expand_monomial_and_dot_1024_with_receipt(
+            key,
+            anchor,
+            &mono_kron,
+            state.num_vars,
+            1,
+            &mut [],
+        )
+    })?;
     whir_open_core_gpu(
         state,
         session,
@@ -4736,7 +4752,6 @@ fn whir_open_batch_gpu(
 ) -> Result<HemWhirBatchOpeningProof, qsag_accel::VulkanError> {
     let num_polys = state.num_polys();
     let num_vars = state.num_vars;
-    let raw = session.raw();
 
     if num_polys == 1 {
         let opening = whir_open_single_gpu(state, session, points[0], evals[0], transcript)?;
@@ -4761,7 +4776,15 @@ fn whir_open_batch_gpu(
         eq_kron_flat.extend_from_slice(&eq_kronecker_1024(p));
     }
     let lam_arr: Vec<[u64; 4]> = lambda_pows.iter().copied().map(ext4_to_arr).collect();
-    raw.prover_whir_batch_sumcheck_init(&eq_kron_flat, &lam_arr, num_vars)?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_whir_batch_sumcheck_init_with_receipt(
+            key,
+            anchor,
+            &eq_kron_flat,
+            &lam_arr,
+            num_vars,
+        )
+    })?;
 
     let mut cur_len = 1usize << num_vars;
     let pp_hi = (num_polys * cur_len) as u32;
@@ -4771,8 +4794,11 @@ fn whir_open_batch_gpu(
     let mut rho = Vec::with_capacity(num_vars);
 
     while round < num_vars && (round == 0 || cur_len > 1_024) {
-        let (ev0_arr, ev2_arr) =
-            raw.prover_whir_batch_sumcheck_eval(round, cur_len, num_polys, src_base)?;
+        let [ev0_arr, ev2_arr] = session.exec_verified(|raw, key, anchor| {
+            raw.prover_whir_batch_sumcheck_eval_with_receipt(
+                key, anchor, round, cur_len, num_polys, src_base,
+            )
+        })?;
         let ev0 = arr_to_ext4_checked(ev0_arr)?;
         let ev2 = arr_to_ext4_checked(ev2_arr)?;
         let ev1 = claim - ev0;
@@ -4784,14 +4810,20 @@ fn whir_open_batch_gpu(
         let r = transcript.squeeze_ext4(b"PCS_BATCH_SC_CHAL");
         claim = eval_quadratic_wire(&wire, claim, r);
         let dst_base = if src_base == 0 { pp_hi } else { 0 };
-        raw.prover_whir_batch_sumcheck_fold(
-            round,
-            cur_len,
-            num_polys,
-            src_base,
-            dst_base,
-            ext4_to_arr(r),
-        )?;
+        session.exec_verified_unit(|raw, key, anchor| {
+            raw.prover_whir_batch_sumcheck_fold_with_receipt(
+                key,
+                anchor,
+                qsag_accel::WhirBatchSumcheckStep {
+                    round,
+                    cur_len,
+                    num_polys,
+                    src_base,
+                    dst_base,
+                },
+                ext4_to_arr(r),
+            )
+        })?;
         cur_len /= 2;
         src_base = dst_base;
         rho.push(r);
@@ -4800,7 +4832,21 @@ fn whir_open_batch_gpu(
 
     let mut raw_t = vec![[0u64; 4]; num_polys * cur_len];
     let mut raw_k = vec![[0u64; 4]; num_polys * cur_len];
-    raw.prover_whir_batch_sumcheck_read_tail(cur_len, num_polys, src_base, &mut raw_t, &mut raw_k)?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_whir_batch_sumcheck_read_tail_with_receipt(
+            key,
+            anchor,
+            qsag_accel::WhirBatchSumcheckStep {
+                round: 0,
+                cur_len,
+                num_polys,
+                src_base,
+                dst_base: 0,
+            },
+            &mut raw_t,
+            &mut raw_k,
+        )
+    })?;
     let mut tables: Vec<Vec<GoldilocksExt4>> = Vec::with_capacity(num_polys);
     let mut kernels: Vec<Vec<GoldilocksExt4>> = Vec::with_capacity(num_polys);
     for p in 0..num_polys {
@@ -4853,7 +4899,16 @@ fn whir_open_batch_gpu(
 
     let mono_kron = mono_kronecker_1024(&rho);
     let mut shifted_raw = vec![[0u64; 4]; num_polys];
-    raw.prover_whir_expand_monomial_and_dot_1024(&mono_kron, num_vars, 1, &mut shifted_raw)?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_whir_expand_monomial_and_dot_1024_with_receipt(
+            key,
+            anchor,
+            &mono_kron,
+            num_vars,
+            1,
+            &mut shifted_raw,
+        )
+    })?;
     let shifted_evals: Vec<GoldilocksExt4> = shifted_raw
         .into_iter()
         .map(arr_to_ext4_checked)
@@ -4890,7 +4945,6 @@ fn whir_open_core_gpu(
     let num_stages = sched.stages.len();
     let early_stop = sched.early_stop_vars;
     let fold_vars = state.num_vars - early_stop;
-    let raw = session.raw();
 
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
@@ -4909,8 +4963,16 @@ fn whir_open_core_gpu(
         .iter()
         .map(|w| [ext4_to_arr(w[0]), ext4_to_arr(w[1])])
         .collect();
-    let ood0_raw =
-        raw.prover_whir_open_init_1024(state.num_vars, single, &weights_arr, &z_ood_0_kron)?;
+    let ood0_raw = session.exec_verified(|raw, key, anchor| {
+        raw.prover_whir_open_init_1024_with_receipt(
+            key,
+            anchor,
+            state.num_vars,
+            single,
+            &weights_arr,
+            &z_ood_0_kron,
+        )
+    })?;
     let stage0_ood_evals = [
         arr_to_ext4_checked(ood0_raw[0])?,
         arr_to_ext4_checked(ood0_raw[1])?,
@@ -4924,7 +4986,9 @@ fn whir_open_core_gpu(
     let xi_1 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
     cur_sum_claim += xi_1 * stage0_ood_evals[1];
     let xi_z_0_kron = pair_geometric_kronecker_2048(xi_0, z_ood_0[0], xi_1, z_ood_0[1]);
-    raw.prover_whir_add_ood_claims_1024(k_len, 0, &xi_z_0_kron)?;
+    session.exec_verified_unit(|raw, key, anchor| {
+        raw.prover_whir_add_ood_claims_1024_with_receipt(key, anchor, k_len, 0, &xi_z_0_kron)
+    })?;
 
     let inv_two = Goldilocks::TWO.inv();
     let inv_zetas = build_inv_zetas();
@@ -4953,21 +5017,27 @@ fn whir_open_core_gpu(
             let k_half = (k_len / 2) as u32;
             let next_base = if c_base == 0 { pp_ck } else { 0 };
 
-            let w012 = raw.prover_whir_fold_pass_a(pairs_ck, c_base, k_base)?;
+            let w012 = session.exec_verified(|raw, key, anchor| {
+                raw.prover_whir_fold_pass_a_with_receipt(key, anchor, pairs_ck, c_base, k_base)
+            })?;
             let mut wire = [GoldilocksExt4::ZERO; 5];
             wire[0] = arr_to_ext4_checked(w012[0])?;
             wire[1] = arr_to_ext4_checked(w012[1])?;
             wire[2] = arr_to_ext4_checked(w012[2])?;
             let phi = bridge_prefix(&wire, transcript);
 
-            let w34 = raw.prover_whir_fold_pass_b(
-                pairs_c,
-                c_base,
-                k_base,
-                k_half,
-                next_base,
-                ext4_to_arr(phi),
-            )?;
+            let w34 = session.exec_verified(|raw, key, anchor| {
+                raw.prover_whir_fold_pass_b_with_receipt(
+                    key,
+                    anchor,
+                    pairs_c,
+                    c_base,
+                    k_base,
+                    k_half,
+                    next_base,
+                    ext4_to_arr(phi),
+                )
+            })?;
             wire[3] = arr_to_ext4_checked(w34[0])?;
             wire[4] = arr_to_ext4_checked(w34[1])?;
             k_len = k_half as usize + 1;
@@ -4980,16 +5050,20 @@ fn whir_open_core_gpu(
             let norm_zero = is_last_step && next_base != 0;
             c_len = pairs_c + 1;
             let norm_len = c_len.max(k_len);
-            raw.prover_whir_fold_pass_c(
-                pairs_c,
-                c_base,
-                next_base,
-                ext4_to_arr(chals[0]),
-                ext4_to_arr(chals[1]),
-                ext4_to_arr(chals[2]),
-                norm_zero,
-                norm_len,
-            )?;
+            session.exec_verified_unit(|raw, key, anchor| {
+                raw.prover_whir_fold_pass_c_with_receipt(
+                    key,
+                    anchor,
+                    pairs_c,
+                    c_base,
+                    next_base,
+                    ext4_to_arr(chals[0]),
+                    ext4_to_arr(chals[1]),
+                    ext4_to_arr(chals[2]),
+                    norm_zero,
+                    norm_len,
+                )
+            })?;
             if norm_zero {
                 c_base = 0;
                 k_base = 0;
@@ -5012,8 +5086,16 @@ fn whir_open_core_gpu(
             let num_groups_next = next_domain / next_arity;
             let log_leaves_next = num_groups_next.trailing_zeros() as u8;
 
-            let top_next =
-                raw.prover_whir_commit_stage(stage_idx + 1, c_len, next_domain, next_arity)?;
+            let top_next = session.exec_verified(|raw, key, anchor| {
+                raw.prover_whir_commit_stage_with_receipt(
+                    key,
+                    anchor,
+                    stage_idx + 1,
+                    c_len,
+                    next_domain,
+                    next_arity,
+                )
+            })?;
             if !session.record_stage(qsag_accel::ProverKernelSlot::WhirLdeCommitment) {
                 return Err(qsag_accel::VulkanError::WorkspacePoisoned);
             }
@@ -5032,7 +5114,15 @@ fn whir_open_core_gpu(
                 GoldilocksExt4::ONE,
                 z_ood_next[1],
             );
-            let ood_raw = raw.prover_whir_eval_univariate_2_1024(c_len, 0, &z_ood_next_kron)?;
+            let ood_raw = session.exec_verified(|raw, key, anchor| {
+                raw.prover_whir_eval_univariate_2_1024_with_receipt(
+                    key,
+                    anchor,
+                    c_len,
+                    0,
+                    &z_ood_next_kron,
+                )
+            })?;
             let ood_eval_next = [
                 arr_to_ext4_checked(ood_raw[0])?,
                 arr_to_ext4_checked(ood_raw[1])?,
@@ -5060,15 +5150,19 @@ fn whir_open_core_gpu(
                 let salt_words = 2 * q_indices.len();
                 let fiber_words = num_polys * arity * q_indices.len();
                 let mut raw_q = vec![0u64; salt_words + fiber_words + 4 * sib_indices.len()];
-                raw.prover_whir_gather_queries(
-                    0,
-                    arity,
-                    num_polys,
-                    num_groups_0,
-                    &q_u64,
-                    &sib_indices,
-                    &mut raw_q,
-                )?;
+                session.exec_verified_unit(|raw, key, anchor| {
+                    raw.prover_whir_gather_queries_with_receipt(
+                        key,
+                        anchor,
+                        0,
+                        arity,
+                        num_polys,
+                        num_groups_0,
+                        &q_u64,
+                        &sib_indices,
+                        &mut raw_q,
+                    )
+                })?;
 
                 round0_salts.reserve(q_indices.len());
                 round0_vals.reserve(fiber_words);
@@ -5132,15 +5226,19 @@ fn whir_open_core_gpu(
 
                 let fiber_words = 4 * arity * q_indices.len();
                 let mut raw_q = vec![0u64; fiber_words + 4 * sib_indices.len()];
-                raw.prover_whir_gather_queries(
-                    stage_idx,
-                    arity,
-                    1,
-                    num_groups_cur,
-                    &q_u64,
-                    &sib_indices,
-                    &mut raw_q,
-                )?;
+                session.exec_verified_unit(|raw, key, anchor| {
+                    raw.prover_whir_gather_queries_with_receipt(
+                        key,
+                        anchor,
+                        stage_idx,
+                        arity,
+                        1,
+                        num_groups_cur,
+                        &q_u64,
+                        &sib_indices,
+                        &mut raw_q,
+                    )
+                })?;
 
                 let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
                 let mut claims = Vec::with_capacity(q_indices.len());
@@ -5193,7 +5291,15 @@ fn whir_open_core_gpu(
             cur_sum_claim += xi_next_1 * ood_eval_next[1];
             let xi_z_next_kron =
                 pair_geometric_kronecker_2048(xi_next_0, z_ood_next[0], xi_next_1, z_ood_next[1]);
-            raw.prover_whir_add_ood_claims_1024(k_len, 0, &xi_z_next_kron)?;
+            session.exec_verified_unit(|raw, key, anchor| {
+                raw.prover_whir_add_ood_claims_1024_with_receipt(
+                    key,
+                    anchor,
+                    k_len,
+                    0,
+                    &xi_z_next_kron,
+                )
+            })?;
 
             let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
             let mut z_pow_256 = Vec::with_capacity(shift_claims.len() * 256);
@@ -5210,13 +5316,24 @@ fn whir_open_core_gpu(
                 claims_meta.push([z_u.to_canonical_u64(), 0, 0, 0, wa[0], wa[1], wa[2], wa[3]]);
                 w *= gamma_shift;
             }
-            raw.prover_whir_accumulate_shift_claims(k_len, 0, &z_pow_256, &claims_meta)?;
+            session.exec_verified_unit(|raw, key, anchor| {
+                raw.prover_whir_accumulate_shift_claims_with_receipt(
+                    key,
+                    anchor,
+                    k_len,
+                    0,
+                    &z_pow_256,
+                    &claims_meta,
+                )
+            })?;
 
             active_gpu_stage = Some((next_domain, comm_next, ood_eval_next));
         } else {
             let final_len = (1usize << early_stop) + 2;
             let mut final_raw = vec![[0u64; 4]; final_len];
-            raw.prover_whir_read_final_coeffs(0, &mut final_raw)?;
+            session.exec_verified_unit(|raw, key, anchor| {
+                raw.prover_whir_read_final_coeffs_with_receipt(key, anchor, 0, &mut final_raw)
+            })?;
             let final_coeffs: Vec<GoldilocksExt4> = final_raw
                 .into_iter()
                 .map(arr_to_ext4_checked)
@@ -5249,15 +5366,19 @@ fn whir_open_core_gpu(
                 let salt_words = 2 * q_indices.len();
                 let fiber_words = num_polys * arity * q_indices.len();
                 let mut raw_q = vec![0u64; salt_words + fiber_words + 4 * sib_indices.len()];
-                raw.prover_whir_gather_queries(
-                    0,
-                    arity,
-                    num_polys,
-                    num_groups_0,
-                    &q_u64,
-                    &sib_indices,
-                    &mut raw_q,
-                )?;
+                session.exec_verified_unit(|raw, key, anchor| {
+                    raw.prover_whir_gather_queries_with_receipt(
+                        key,
+                        anchor,
+                        0,
+                        arity,
+                        num_polys,
+                        num_groups_0,
+                        &q_u64,
+                        &sib_indices,
+                        &mut raw_q,
+                    )
+                })?;
 
                 round0_salts.reserve(q_indices.len());
                 round0_vals.reserve(fiber_words);
@@ -5320,15 +5441,19 @@ fn whir_open_core_gpu(
 
                 let fiber_words = 4 * arity * q_indices.len();
                 let mut raw_q = vec![0u64; fiber_words + 4 * sib_indices.len()];
-                raw.prover_whir_gather_queries(
-                    stage_idx,
-                    arity,
-                    1,
-                    num_groups_cur,
-                    &q_u64,
-                    &sib_indices,
-                    &mut raw_q,
-                )?;
+                session.exec_verified_unit(|raw, key, anchor| {
+                    raw.prover_whir_gather_queries_with_receipt(
+                        key,
+                        anchor,
+                        stage_idx,
+                        arity,
+                        1,
+                        num_groups_cur,
+                        &q_u64,
+                        &sib_indices,
+                        &mut raw_q,
+                    )
+                })?;
 
                 let mut opened_vals = Vec::with_capacity(q_indices.len() * arity);
                 for q_pos in 0..q_indices.len() {

@@ -49,23 +49,43 @@ module qsag_clkgate_1 (
 endmodule
 
 // Clock gate for a transparent-latch row that is fed by a posedge write-data hold register
-// (icgtp_1: the row is transparent during the high phase that follows the write strobe).
-// In silicon the gate and the hold register switch on the same clock edge and the row settles to
-// the new word. A zero-delay simulation would instead let every flop sampled on that edge see the
-// row momentarily holding the previous write word, so the behavioural gate opens with the
-// non-blocking update of that edge (together with the hold register) and closes on the falling edge.
+// (icgtp_4: sized high-drive clock gate driving <= 64 latch enables with sharp SS slew so OpenROAD
+// never inserts hold-buffer explosions).
 module qsag_latgate (
     input  wire clk,
     input  wire en,
     output wire gclk
 );
 `ifdef QSAG_GF180_CELLS
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_1 u_icg (.CLK(clk), .E(en), .TE(1'b0), .Q(gclk));
-`else
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__icgtp_4 u_icg (.CLK(clk), .E(en), .TE(1'b0), .Q(gclk));
+`elsif VERILATOR
     logic open_q;
     initial open_q = 1'b0;
     always_ff @(posedge clk or negedge clk) open_q <= clk ? en : 1'b0;
     assign gclk = open_q;
+`else
+    logic lat;
+    always_latch if (!clk) lat <= en;
+    assign gclk = clk & lat;
+`endif
+endmodule
+
+// Balanced explicit fanout tree for high-fanout asynchronous secret clear (`RN`), preventing
+// GRT-0281 multi-thousand-terminal net congestion while keeping pure cell-driven `RN` paths.
+module qsag_rst_tree #(
+    parameter int N = 8
+) (
+    input  wire         a,
+    output wire [N-1:0] y
+);
+`ifdef QSAG_GF180_CELLS
+    wire root_b;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__clkbuf_4 u_root (.I(a), .Z(root_b));
+    for (genvar i = 0; i < N; i++) begin : g_br
+        (* keep *) gf180mcu_fd_sc_mcu7t5v0__clkbuf_4 u_leaf (.I(root_b), .Z(y[i]));
+    end
+`else
+    assign y = {N{a}};
 `endif
 endmodule
 
@@ -550,10 +570,7 @@ module qsag_dly_aoi21 #(
     output wire y
 );
 `ifdef QSAG_GF180_CELLS
-    wire tie_hi, tie_lo;
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tieh    u_th  (.Z(tie_hi));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel    u_tl  (.ZN(tie_lo));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_1 u_aoi (.A1(a), .A2(tie_hi), .B(tie_lo), .ZN(y));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__aoi21_1 u_aoi (.A1(a), .A2(1'b1), .B(1'b0), .ZN(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
     initial yr = #(TD) ~a;
@@ -571,10 +588,7 @@ module qsag_dly_oai21 #(
     output wire y
 );
 `ifdef QSAG_GF180_CELLS
-    wire tie_hi, tie_lo;
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tieh    u_th  (.Z(tie_hi));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel    u_tl  (.ZN(tie_lo));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__oai21_1 u_oai (.A1(a), .A2(tie_lo), .B(tie_hi), .ZN(y));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__oai21_1 u_oai (.A1(a), .A2(1'b0), .B(1'b1), .ZN(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
     initial yr = #(TD) ~a;
@@ -592,9 +606,7 @@ module qsag_dly_xor2 #(
     output wire y
 );
 `ifdef QSAG_GF180_CELLS
-    wire tie_lo;
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__tiel   u_tl  (.ZN(tie_lo));
-    (* keep *) gf180mcu_fd_sc_mcu7t5v0__xor2_1 u_xor (.A1(a), .A2(tie_lo), .Z(y));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__xor2_1 u_xor (.A1(a), .A2(1'b0), .Z(y));
 `elsif QSAG_SIM_DELAYS
     logic yr;
     initial yr = #(TD) a;

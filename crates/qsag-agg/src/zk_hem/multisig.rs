@@ -260,6 +260,27 @@ impl Slot {
     }
 }
 
+impl Drop for Slot {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.active), false);
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.member_index), 0usize);
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.leaf_idx), 0u32);
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.tsw_ctr), 0u32);
+        qsag_asm::volatile_fill(&mut self.pk_seed, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.pk_root, F::ZERO);
+        qsag_asm::volatile_fill(&mut self.r_rand, F::ZERO);
+        for d in &mut self.policy_path {
+            qsag_asm::volatile_fill(d, F::ZERO);
+        }
+        for d in &mut self.chains {
+            qsag_asm::volatile_fill(d, F::ZERO);
+        }
+        for d in &mut self.xmss_path {
+            qsag_asm::volatile_fill(d, F::ZERO);
+        }
+    }
+}
+
 // ============================================================================
 // Gadgets
 // ============================================================================

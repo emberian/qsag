@@ -18,6 +18,11 @@ module qsag_units_tb (
     input  logic [255:0]  e_b,
     input  logic [255:0]  e_c,
     output logic [255:0]  e_y,
+    // Ext5 MAC (zk-Hem v2 F_p[X]/(X^5 - 3))
+    input  logic [319:0]  e5_a,
+    input  logic [319:0]  e5_b,
+    input  logic [319:0]  e5_c,
+    output logic [319:0]  e5_y,
     // Poseidon2 ring core
     input  logic          ring_in_valid,
     output logic          ring_in_ready,
@@ -48,6 +53,17 @@ module qsag_units_tb (
     output logic          kec2_busy,
     output logic          kec2_done,
     output logic [1599:0] kec2_state_o,
+    // Compact single-SDP-RAM N^4=I 30-clk/rnd Keccak
+    input  logic          kcmp_valid,
+    output logic          kcmp_ready,
+    input  logic [1:0]    kcmp_op,
+    input  logic          kcmp_nr12,
+    input  logic [4:0]    kcmp_idx,
+    input  logic [63:0]   kcmp_wdata,
+    output logic          kcmp_busy,
+    output logic          kcmp_done,
+    output logic          kcmp_rd_valid,
+    output logic [63:0]   kcmp_rd_data,
     // GF(2^128)
     input  logic [127:0]  gf_a,
     input  logic [127:0]  gf_b,
@@ -59,6 +75,7 @@ module qsag_units_tb (
     qsag_gl64_reduce u_red (.clk(clk), .x(red_x), .r(red_r));
     qsag_p2_sbox7 u_sbox (.clk(clk), .x(sb_x), .y(sb_y));
     qsag_ext4_mac u_ext4 (.clk(clk), .a(e_a), .b(e_b), .c(e_c), .y(e_y));
+    qsag_ext5_mac u_ext5 (.clk(clk), .a(e5_a), .b(e5_b), .c(e5_c), .y(e5_y));
 
     qsag_poseidon2_12_fpga #(.TAGW(16)) u_ring (
         .clk(clk), .rst(rst), .in_valid(ring_in_valid), .in_ready(ring_in_ready),
@@ -78,6 +95,10 @@ module qsag_units_tb (
     qsag_keccak_turboshake #(.RPC(2)) u_kec2 (
         .clk(clk), .rst(rst), .start(kec_start), .nr12(kec_nr12), .state_i(kec_state_i),
         .busy(kec2_busy), .done(kec2_done), .state_o(kec2_state_o));
+    qsag_keccak_compact u_kcmp (
+        .clk(clk), .rst(rst), .bank_sel(1'b0), .cmd_valid(kcmp_valid), .cmd_ready(kcmp_ready),
+        .cmd_op(kcmp_op), .cmd_nr12(kcmp_nr12), .cmd_idx(kcmp_idx), .cmd_wdata(kcmp_wdata),
+        .busy(kcmp_busy), .done(kcmp_done), .rd_valid(kcmp_rd_valid), .rd_data(kcmp_rd_data));
 
     qsag_gf128_tower_mul u_tower (.clk(clk), .a(gf_a), .b(gf_b), .r(tower_r));
     qsag_gf128_clmul u_gf (.clk(clk), .a(gf_a), .b(gf_b), .r(gf_r));

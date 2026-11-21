@@ -1349,6 +1349,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
                                 });
                             }
                         });
+                        qsag_asm::volatile_fill(&mut shifted, GoldilocksExt4::ZERO);
                         drop(shifted);
                         if inner_threads > 1 && n_c >= inner_threads * 2 {
                             ntt_ext4_parallel_stages(row, inner_threads);
@@ -1388,6 +1389,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
                 });
             }
         });
+        qsag_asm::volatile_fill(&mut cosets, GoldilocksExt4::ZERO);
         return out;
     }
 

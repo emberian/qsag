@@ -1,125 +1,122 @@
-// Dregg-180 (QSAG-NI-180) enclave register file: sponge state, scratchpad and key rows in one
-// zeroizable bank (R1 A1).
+// Dregg-180 (QSAG-NI-180) unified enclave register file: sponge state, Fp5/Ext4 verifier registers,
+// scratchpad, ZK statement/program pin, SLH-DSA keys, and CapTP Vat root key in one zeroizable bank.
 //
-//   rows  0..24  st   Keccak-f[1600] lanes; Poseidon2 width-12 state in lanes 0..11; verifier
-//                     registers CH/A/B in lanes 12..23                    scalar port (read/write)
-//   rows 32..39  sh   scratchpad / SpongeMacaroon staging                 scalar port + aux write
-//   key[0..5]         SK.seed, SK.prf, mask key (PK.seed)                 aux write, direct outputs
-//   kvat[0..3]        vat root key                                        aux write, direct outputs
+// Address map (56 rows x 64 bits = 3,584 bits):
+//   rows  0..31  st      Keccak-f[1600] (0..24 + D[0..4] in 25..29 + B[0..1] in 30..31),
+//                        Poseidon2-12 (0..11), verifier regs T0/CH/A/B (Ext4: 0..3, 12..23;
+//                        Fp5: 0..4, 12..26)            `latq_1`, wiped in 1 clock on `wipe`
+//   rows 32..41  sh      scratchpad / X, Y (32..41)    `latq_1`, wiped in 1 clock on `wipe`
+//   rows 44..47  zk_pin  verified (prog_digest, root)  `latrnq_1`, 0-clock clear on `srst_n`
+//   rows 48..53  key     SK.seed, SK.prf, K_MAC        `latrnq_1`, 0-clock clear on `srst_n`
+//   rows 54..57  kvat    CapTP Vat root key K_vat      `latrnq_1`, 0-clock clear on `srst_n`
 //
-// Under QSAG_LATCH_RF every row is 64 latrnq_1 cells behind one icgtp_1, fed by one of two
-// posedge write-data hold registers:
-//   main hold  rows st, from the scalar write port
-//   aux hold   rows sh / key / kvat, from the aux write port or, for sh, from the scalar write port
-// Two holds exist because the scratchpad is filled from the input stream while Keccak owns the
-// scalar port. The aux port wins when both address the aux hold in the same clock; the engine
-// only does that with identical data (PUF enrolment copies one word to sh and to a key row).
-//
-// Reset discipline (R1 B2): the asynchronous clear pin RN of every latch, and of the two hold
-// registers, is `srst_n` alone: a reset / tamper / fault signal built from flop outputs. It works
-// with the clock stopped. The command-level `wipe` is a decode of the engine state and never
-// reaches RN: it clears the st and sh rows synchronously through the write path in one clock.
-// Key rows are not touched by `wipe`.
-//
-// Without QSAG_LATCH_RF the rows are enable flops with the same clock-by-clock behaviour.
+// Single shared 64-bit write-hold register (`u_hold`) feeds all 56 latch rows AND external
+// latch consumers (`dregg_captp_vat`, `dregg_nfc_nco`), eliminating duplicate 64-bit hold FFs.
 `default_nettype none
 
 module qsag_sponge (
     input  wire          clk,
-    input  wire          srst_n,     // registered secret clear -> RN (asynchronous)
-    input  wire          wipe,       // synchronous clear of the st and sh rows
+    input  wire          srst_n,           // pure FF-registered secret clear -> RN (0-clock zeroize)
+    input  wire          wipe,             // synchronous 1-clock clear of public/scratch st & sh rows
     // scalar read/write port (wire engine, field engine, Keccak)
     input  wire          wr_en,
-    input  wire  [5:0]   wr_addr,    // 0..24 st, 32..39 sh
+    input  wire  [5:0]   wr_addr,          // 0..31 st, 32..41 sh
     input  wire  [63:0]  wr_data,
-    input  wire  [5:0]   rd_addr,
+    input  wire  [5:0]   rd_addr,          // 0..31 st, 32..41 sh, 44..47 zk_pin, 48..53 key, 54..57 kvat
     output logic [63:0]  rd_data,
-    // aux write port
+    // aux write port (mutually exclusive with wr_en except when writing identical in_data in S_VLD)
     input  wire          aux_we,
-    input  wire  [4:0]   aux_addr,   // 0..7 sh, 8..13 key[0..5], 14..17 kvat[0..3]
+    input  wire  [4:0]   aux_addr,         // 0..9 sh, 10..13 zk_pin, 14..19 key, 20..23 kvat
     input  wire  [63:0]  aux_wdata,
-    output wire  [383:0] key_q,      // key[i] = key_q[64*i +: 64]
-    output wire  [255:0] kvat_q
+    input  wire          ext_hold_en,      // latch aux_wdata into hold_q for external latch banks
+    output wire  [63:0]  hold_q,
+    output wire  [127:0] kmac_q            // {key[5], key[4]} direct feed to GF(2^128) unit
 );
-    localparam int N_AUX = 18;
+    localparam int N_ST  = 32;
+    localparam int N_AUX = 24;             // 10 sh + 4 zk_pin + 6 key + 4 kvat
 
-    wire [63:0] st [25];
-    wire [63:0] sh [8];
+    wire [63:0] st [N_ST];
+    wire [63:0] ax [N_AUX];
 
-    wire        sc_sh  = wr_en && (wr_addr[5:3] == 3'b100);   // scalar write into the scratchpad
-    wire        aux_ld = aux_we | sc_sh | wipe;
-    wire [63:0] aux_d  = wipe ? 64'd0 : (aux_we ? aux_wdata : wr_data);
-    wire        st_ld  = wr_en | wipe;
-    wire [63:0] st_d   = wipe ? 64'd0 : wr_data;
+    wire        sc_sh   = wr_en && (wr_addr >= 6'd32) && (wr_addr <= 6'd41);
+    wire        sc_st   = wr_en && (wr_addr < 6'd32);
+    wire        use_aux = aux_we | ext_hold_en;
+    wire [63:0] hold_d  = wipe ? 64'd0 : (use_aux ? aux_wdata : wr_data);
 
-    // row write strobes
-    logic [24:0]      st_we;
+    logic [N_ST-1:0]  st_we;
     logic [N_AUX-1:0] ax_we;
     always_comb begin
-        for (int i = 0; i < 25; i++) st_we[i] = wipe || (wr_en && (wr_addr == 6'(i)));
-        for (int i = 0; i < N_AUX; i++) ax_we[i] = aux_we && (aux_addr == 5'(i));
-        for (int i = 0; i < 8; i++)
-            ax_we[i] = wipe || (aux_we && (aux_addr == 5'(i))) || (sc_sh && (wr_addr[2:0] == 3'(i)));
+        for (int i = 0; i < N_ST; i++)
+            st_we[i] = wipe || (sc_st && (wr_addr == 6'(i)));
+        for (int i = 0; i < 10; i++)
+            ax_we[i] = wipe || (aux_we && (aux_addr == 5'(i))) || (sc_sh && (wr_addr == 6'(32 + i)));
+        for (int i = 10; i < N_AUX; i++)
+            ax_we[i] = aux_we && (aux_addr == 5'(i));
     end
 
-    wire [64*N_AUX-1:0] ax_q;
+    wire [6:0] rn_br;
+    qsag_rst_tree #(.N(7)) u_rntree (.a(srst_n), .y(rn_br));
+
     genvar i;
 `ifdef QSAG_LATCH_RF
-    wire [63:0] st_hold_q, ax_hold_q;
-    qsag_ereg #(.W(64)) u_st_hold (.clk(clk), .rst_n(srst_n), .en(st_ld),  .d(st_d),  .q(st_hold_q));
-    qsag_ereg #(.W(64)) u_ax_hold (.clk(clk), .rst_n(srst_n), .en(aux_ld), .d(aux_d), .q(ax_hold_q));
+    wire hold_ld = wipe | sc_st | sc_sh | use_aux;
+    qsag_ereg_nr #(.W(64)) u_hold (.clk(clk), .en(hold_ld), .d(hold_d), .q(hold_q));
     generate
-        for (i = 0; i < 25; i++) begin : g_lane
+        for (i = 0; i < N_ST; i++) begin : g_lane
             wire gate;
             qsag_latgate u_cg (.clk(clk), .en(st_we[i]), .gclk(gate));
-            qsag_latch_word_rst #(.W(64)) u_lat (.gate(gate), .rst_n(srst_n), .d(st_hold_q), .q(st[i]));
+            qsag_latch_word #(.W(64)) u_lat (.gate(gate), .d(hold_q), .q(st[i]));
         end
-        for (i = 0; i < N_AUX; i++) begin : g_aux
+        for (i = 0; i < 10; i++) begin : g_sh
             wire gate;
             qsag_latgate u_cg (.clk(clk), .en(ax_we[i]), .gclk(gate));
-            qsag_latch_word_rst #(.W(64)) u_lat (.gate(gate), .rst_n(srst_n), .d(ax_hold_q), .q(ax_q[64*i +: 64]));
+            qsag_latch_word #(.W(64)) u_lat (.gate(gate), .d(hold_q), .q(ax[i]));
+        end
+        for (i = 10; i < N_AUX; i++) begin : g_sec
+            wire gate;
+            qsag_latgate u_cg (.clk(clk), .en(ax_we[i]), .gclk(gate));
+            qsag_latch_word_rst #(.W(64)) u_lat (.gate(gate), .rst_n(rn_br[(i - 10) / 2]), .d(hold_q), .q(ax[i]));
         end
     endgenerate
-    /* verilator lint_off UNUSEDSIGNAL */
-    wire unused_ld = &{1'b0, st_ld, aux_ld};
-    /* verilator lint_on UNUSEDSIGNAL */
 `else
+    qsag_ereg_nr #(.W(64)) u_hold (.clk(clk), .en(ext_hold_en), .d(aux_wdata), .q(hold_q));
     generate
-        for (i = 0; i < 25; i++) begin : g_lane
-            qsag_ereg #(.W(64)) u_r (.clk(clk), .rst_n(srst_n), .en(st_we[i]), .d(st_d), .q(st[i]));
+        for (i = 0; i < N_ST; i++) begin : g_lane
+            qsag_ereg_nr #(.W(64)) u_r (.clk(clk), .en(st_we[i]), .d(hold_d), .q(st[i]));
         end
-        for (i = 0; i < N_AUX; i++) begin : g_aux
-            qsag_ereg #(.W(64)) u_r (.clk(clk), .rst_n(srst_n), .en(ax_we[i]), .d(aux_d), .q(ax_q[64*i +: 64]));
+        for (i = 0; i < 10; i++) begin : g_sh
+            qsag_ereg_nr #(.W(64)) u_r (.clk(clk), .en(ax_we[i]), .d(hold_d), .q(ax[i]));
+        end
+        for (i = 10; i < N_AUX; i++) begin : g_sec
+            qsag_ereg #(.W(64)) u_r (.clk(clk), .rst_n(rn_br[(i - 10) / 2]), .en(ax_we[i]), .d(aux_wdata), .q(ax[i]));
         end
     endgenerate
-    /* verilator lint_off UNUSEDSIGNAL */
-    wire unused_ld = &{1'b0, st_ld, aux_ld};
-    /* verilator lint_on UNUSEDSIGNAL */
 `endif
-    generate
-        for (i = 0; i < 8; i++) begin : g_sh
-            assign sh[i] = ax_q[64*i +: 64];
-        end
-    endgenerate
-    assign key_q  = ax_q[64*8  +: 384];
-    assign kvat_q = ax_q[64*14 +: 256];
 
+    assign kmac_q = {ax[19], ax[18]};
+
+    // Shared 56-line one-hot decoder + AOI22/NAND/NOR OR-bus
+    logic [N_ST-1:0]  rs_st;
+    logic [N_AUX-1:0] rs_ax;
     always_comb begin
-        rd_data = '0;
-        if (rd_addr[5]) begin
-            rd_data = sh[rd_addr[2:0]];
-        end else begin
-            for (int l = 0; l < 25; l++)
-                if (rd_addr[4:0] == 5'(l)) rd_data = st[l];
-        end
+        for (int k = 0; k < N_ST; k++)
+            rs_st[k] = (rd_addr == 6'(k));
+        for (int k = 0; k < 10; k++)
+            rs_ax[k] = (rd_addr == 6'(32 + k));
+        for (int k = 10; k < N_AUX; k++)
+            rs_ax[k] = (rd_addr == 6'(44 + k - 10));
+
+        rd_data = 64'd0;
+        for (int k = 0; k < N_ST; k++)
+            rd_data = rd_data | ({64{rs_st[k]}} & st[k]);
+        for (int k = 0; k < N_AUX; k++)
+            rd_data = rd_data | ({64{rs_ax[k]}} & ax[k]);
     end
 
 `ifndef SYNTHESIS
-    // The aux hold carries one word per clock: a scalar scratchpad write that coincides with an
-    // aux write must carry the same data (see the header).
     always_ff @(posedge clk)
-        if (srst_n && !wipe && aux_we && sc_sh && (aux_wdata != wr_data))
-            $error("qsag_sponge: aux and scalar scratchpad writes with different data in one clock");
+        if (srst_n && !wipe && aux_we && (sc_st || sc_sh) && (aux_wdata != wr_data))
+            $error("qsag_sponge: concurrent aux and scalar writes with different data");
 `endif
 endmodule
 `default_nettype wire

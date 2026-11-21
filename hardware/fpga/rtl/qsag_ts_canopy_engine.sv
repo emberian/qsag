@@ -393,7 +393,7 @@ module qsag_ts_canopy_engine #(
                     end
                 end
                 TS_PIPE_DRAIN: begin
-                    if (pipe_inflight == 5'd0 && !p12_out_valid) begin
+                    if (pipe_inflight == 5'd0 && !p12_out_valid && !local_wr_en) begin
                         active_len <= wr_issue;
                         wr_issue   <= '0;
                         k          <= '0;
@@ -413,16 +413,8 @@ module qsag_ts_canopy_engine #(
                             local_wr_en  <= 1'b1;
                             local_wr_idx <= wr_slot_q;
                             local_wr_dat <= {node_u_q, kec_digest_i};
-                            if (k >= active_len) begin
-                                active_len <= wr_issue;
-                                wr_issue   <= '0;
-                                k          <= '0;
-                                cur_depth  <= cur_depth - 6'd1;
-                                if (cur_depth == 6'd1) st <= TS_ROOT_WAIT;
-                                else                   st <= TS_RD_WAIT;
-                            end else begin
-                                st <= TS_RD_WAIT;
-                            end
+                            if (k >= active_len) st <= TS_PIPE_DRAIN;
+                            else                 st <= TS_RD_WAIT;
                         end
                     end
                 end
@@ -455,16 +447,8 @@ module qsag_ts_canopy_engine #(
                                 local_wr_en  <= 1'b1;
                                 local_wr_idx <= wr_slot_q;
                                 local_wr_dat <= {node_u_q, cmp_full_dig};
-                                if (k >= active_len) begin
-                                    active_len <= wr_issue;
-                                    wr_issue   <= '0;
-                                    k          <= '0;
-                                    cur_depth  <= cur_depth - 6'd1;
-                                    if (cur_depth == 6'd1) st <= TS_ROOT_WAIT;
-                                    else                   st <= TS_RD_WAIT;
-                                end else begin
-                                    st <= TS_RD_WAIT;
-                                end
+                                if (k >= active_len) st <= TS_PIPE_DRAIN;
+                                else                 st <= TS_RD_WAIT;
                             end
                         end
                     end

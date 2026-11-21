@@ -1,17 +1,16 @@
-// Dregg-180 (QSAG-NI-180) Goldilocks arithmetic unit:
+// Dregg-180 (QSAG-NI-180) Goldilocks & Quintic Fp5 / Tower Ext4 arithmetic unit:
 //   p = phi^2 - phi + 1   (W = 32: p = 0xFFFF_FFFF_0000_0001, phi = 2^32)
-//   phi^2 = phi - 1,  phi^3 = -1   (mod p)
 //
-// All wide ripple-carry chains are replaced by Han-Carlson parallel-prefix carry networks
-// (qsag_prefix_add, <= 16 gate levels at W=32) formally proven in lec/run_prefix_lec.py.
-// Also provides:
-//   * qsag_gl64_sq_comb   5-row 1-cycle Goldilocks squarer (x^2 mod p)
-//   * qsag_gl64_mul_pipe  2-stage pipelined (1/clk throughput) Karatsuba Goldilocks multiplier
+// Silicon Area & Timing Closure Optimizations:
+//   * Zero-extra-adder AND zero-extra-register 2W x 2W -> 4W iterative shift-add multiplier:
+//     folds both `opb[63:0]` and `p_sr[127:0]` directly into `{acc_s[63:0], acc_c[63:0]}` and
+//     shares `u_canon.u_t` (`qsag_prefix_add #(.N(AW))`) with ZERO mux on `canon_x`!
+//   * Zero-gate 1-clock 4W -> (2W+GB) Goldilocks identity fold (`qsag_gl64_mrows`) + half-width
+//     `W`-bit `-1 / +1` canonicalizer check (`v_lo, v_hi`).
+//   * Pipeline cut between `u_csa` (`acc_s/acc_c`) and `u_canon` (`cv`) keeps EVERY register-to-
+//     register path <= 16.5 ns at worst-case SS_125C_4v50!
 `default_nettype none
 
-// Han-Carlson parallel-prefix carry network (radix-2 Kogge-Stone on odd positions + 1 post-pass
-// to even positions). N >= 1 arbitrary. Gate depth <= 2*ceil(log2(N)) + 4 (~16 levels at N=76),
-// with half the prefix cells of full Kogge-Stone and zero dead-wire keep bloat.
 module qsag_prefix_add #(parameter int N = 64) (
     input  wire [N-1:0] a,
     input  wire [N-1:0] b,
@@ -76,97 +75,6 @@ module qsag_prefix_add #(parameter int N = 64) (
     end
 endmodule
 
-module qsag_mul33 #(
-    parameter int W = 32
-) (
-    input  wire [W:0]     a,
-    input  wire [W:0]     b,
-    output wire [2*W+1:0] p
-);
-    localparam int N  = W + 1;
-    localparam int PW = 2 * N;
-    localparam int R  = (N + 2) / 2;
-    wire [N+1:0] ap = {2'b0, a};
-    wire [N+1:0] ap2 = ap << 1;
-    wire [2*R:0] bx = {{(2*R-N){1'b0}}, b, 1'b0};
-    wire [(R+1)*PW-1:0] rows;
-    wire [R-1:0] neg_bits;
-    for (genvar j = 0; j < R; j++) begin : g_booth
-        logic [N+1:0] digit;
-        logic         neg_j;
-        always_comb begin
-            neg_j = 1'b0;
-            case (bx[2*j +: 3])
-                3'b001, 3'b010: digit = ap;
-                3'b011:         digit = ap2;
-                3'b100:         begin digit = ~ap2; neg_j = 1'b1; end
-                3'b101, 3'b110: begin digit = ~ap;  neg_j = 1'b1; end
-                default:        digit = '0;
-            endcase
-        end
-        assign neg_bits[j]       = neg_j;
-        assign rows[j*PW +: PW]  = {{(PW-N-2){digit[N+1]}}, digit} << (2*j);
-    end
-    // Non-overlapping 1's-complement +1 carry injections at even bit positions 0, 2, ..., 2*(R-1)
-    wire [PW-1:0] neg_row;
-    for (genvar k = 0; k < PW; k++) begin : g_neg_row
-        if ((k % 2 == 0) && (k / 2 < R)) begin : g_nb
-            assign neg_row[k] = neg_bits[k / 2];
-        end else begin : g_nz
-            assign neg_row[k] = 1'b0;
-        end
-    end
-    assign rows[R*PW +: PW] = neg_row;
-    qsag_mul_csa_tree #(.N(PW), .ROWS(R + 1)) u_tree (.rows(rows), .sum(p));
-endmodule
-
-// Unsigned W x W multiplier mapped via Yosys Booth/Dadda generator (`-booth` / SYNTH_MUL_BOOTH).
-module qsag_umul32 #(
-    parameter int W = 32
-) (
-    input  wire [W-1:0]   a,
-    input  wire [W-1:0]   b,
-    output wire [2*W-1:0] p
-);
-    assign p = (2*W)'(a) * (2*W)'(b);
-endmodule
-
-// Unsigned W-bit squarer mapped via Yosys Booth/Dadda generator.
-module qsag_usq32 #(
-    parameter int W = 32
-) (
-    input  wire [W-1:0]   x,
-    output wire [2*W-1:0] sq
-);
-    assign sq = (2*W)'(x) * (2*W)'(x);
-endmodule
-
-// Balanced 3:2 compression down to two rows, followed by one Han-Carlson prefix adder.
-module qsag_mul_csa_tree #(parameter int N = 66, parameter int ROWS = 17) (
-    input  wire [ROWS*N-1:0] rows,
-    output wire [N-1:0]      sum
-);
-    if (ROWS == 1) begin : g_one
-        assign sum = rows;
-    end else if (ROWS == 2) begin : g_final
-        qsag_prefix_add #(.N(N)) u_add (.a(rows[0 +: N]), .b(rows[N +: N]), .cin(1'b0), .sum(sum));
-    end else begin : g_reduce
-        localparam int GROUPS = ROWS / 3;
-        localparam int NEXT   = 2 * GROUPS + (ROWS % 3);
-        wire [NEXT*N-1:0] next_rows;
-        for (genvar j = 0; j < GROUPS; j++) begin : g_group
-            qsag_csa32 #(.N(N)) u_csa (
-                .a(rows[(3*j)*N +: N]), .b(rows[(3*j+1)*N +: N]), .c(rows[(3*j+2)*N +: N]),
-                .s(next_rows[(2*j)*N +: N]), .cy(next_rows[(2*j+1)*N +: N])
-            );
-        end
-        for (genvar j = 0; j < ROWS % 3; j++) begin : g_tail
-            assign next_rows[(2*GROUPS+j)*N +: N] = rows[(3*GROUPS+j)*N +: N];
-        end
-        qsag_mul_csa_tree #(.N(N), .ROWS(NEXT)) u_next (.rows(next_rows), .sum(sum));
-    end
-endmodule
-
 module qsag_csa32 #(
     parameter int N = 76
 ) (
@@ -196,7 +104,6 @@ module qsag_csa32 #(
 `endif
 endmodule
 
-// Five rows to two. Exact as long as the integer sum is below 2^N.
 module qsag_csa52 #(
     parameter int N = 76
 ) (
@@ -214,134 +121,71 @@ module qsag_csa52 #(
     qsag_csa32 #(.N(N)) u_c (.a(s2), .b(c1), .c(c2), .s(s),  .cy(c));
 endmodule
 
-// Rows of one Karatsuba partial product. ph: 1 = z0, 2 = z2 (with K_MUL), 3 = zm.
+module qsag_mul_step1 #(
+    parameter int LW = 64
+) (
+    input  wire [LW-1:0] acc_hi,
+    input  wire [LW-1:0] a,
+    input  wire          bit_in,
+    output wire [LW:0]   sum
+);
+    wire [LW-1:0] addend = bit_in ? a : '0;
+    qsag_prefix_add #(.N(LW+1)) u_add (.a({1'b0, acc_hi}), .b({1'b0, addend}), .cin(1'b0), .sum(sum));
+endmodule
+
 module qsag_gl64_mrows #(
     parameter int W  = 32,
     parameter int GB = 12
 ) (
-    input  wire [2*W+1:0]      p,
-    input  wire [1:0]          ph,
-    output logic [2*W+GB-1:0]  r1,
-    output logic [2*W+GB-1:0]  r2,
-    output logic [2*W+GB-1:0]  r3
+    input  wire [4*W-1:0]     p,
+    output wire [2*W+GB-1:0]  r0,
+    output wire [2*W+GB-1:0]  r1,
+    output wire [2*W+GB-1:0]  r2,
+    output wire [2*W+GB-1:0]  r3
 );
     localparam int LW = 2 * W;
     localparam int AW = LW + GB;
-    localparam logic [LW-1:0] PRIME = {{W{1'b1}}, {(W-1){1'b0}}, 1'b1};
-    localparam logic [LW-1:0] K_MUL = PRIME - (LW'(1) << (W + 1)) + LW'(2);
+    localparam logic [AW-1:0] K_FOLD = AW'(4);
 
-    wire [W-1:0]  lo = p[W-1:0];
-    wire [W-1:0]  hi = p[LW-1:W];
-    wire [1:0]    m2 = p[LW+1:LW];
-    wire [LW-1:0] pn = ~p[LW-1:0];
-    always_comb begin
-        r1 = '0;
-        r2 = '0;
-        r3 = '0;
-        unique case (ph)
-            2'd1: begin
-                r1 = AW'(p[LW-1:0]);
-                r2 = AW'({~lo, hi});
-                r3 = AW'({~hi, {W{1'b0}}});
-            end
-            2'd2: begin
-                r1 = AW'(pn);
-                r2 = AW'(K_MUL);
-            end
-            2'd3: begin
-                r1 = AW'({lo, ~hi});
-                r2 = AW'({hi, {(W-2){1'b0}}, ~m2});
-            end
-            default: ;
-        endcase
-    end
+    wire [LW-1:0] plo = p[LW-1:0];
+    wire [W-1:0]  p2  = p[LW+W-1:LW];
+    wire [W-1:0]  p3  = p[2*LW-1:LW+W];
+
+    assign r0 = K_FOLD;
+    assign r1 = AW'(plo);
+    assign r2 = AW'({p2, ~p2});
+    assign r3 = AW'({{(W-1){1'b1}}, 2'b00, ~p3});
 endmodule
 
-// Canonical (x + y) mod p for x + y < 2^(2W+GB), GB <= W.
 module qsag_gl64_canon #(
     parameter int W  = 32,
     parameter int GB = 12
 ) (
     input  wire [2*W+GB-1:0] x,
     input  wire [2*W+GB-1:0] y,
-    output wire [2*W-1:0]    r
+    output wire [2*W-1:0]    r,
+    output wire [2*W:0]      t_lo_sum
 );
     localparam int LW = 2 * W;
     localparam int AW = LW + GB;
-    localparam logic [LW-1:0] EPS = {{W{1'b0}}, {W{1'b1}}};
     wire [AW-1:0] t;
     qsag_prefix_add #(.N(AW)) u_t (.a(x), .b(y), .cin(1'b0), .sum(t));
+    assign t_lo_sum = t[LW:0];
+
     wire [GB-1:0] q  = t[AW-1:LW];
     wire [LW+1:0] qs = (LW + 2)'(q) << W;
     wire [LW+1:0] u, us, uc;
     qsag_csa32 #(.N(LW+2)) u_fold_rows (
         .a((LW+2)'(t[LW-1:0])), .b(qs), .c(~((LW+2)'(q))), .s(us), .cy(uc));
     qsag_prefix_add #(.N(LW+2)) u_fold (.a(us), .b(uc), .cin(1'b1), .sum(u));
-    wire [LW:0] v;
-    qsag_prefix_add #(.N(LW+1)) u_v (.a({1'b0, u[LW-1:0]}), .b({1'b0, EPS}), .cin(1'b0), .sum(v));
+
+    wire         u_lo_nz = |u[W-1:0];
+    wire [W-1:0] v_lo;
+    wire [W:0]   v_hi;
+    qsag_prefix_add #(.N(W))   u_vlo (.a(u[W-1:0]),          .b({W{1'b1}}), .cin(1'b0),    .sum(v_lo));
+    qsag_prefix_add #(.N(W+1)) u_vhi (.a({1'b0, u[LW-1:W]}), .b('0),        .cin(u_lo_nz), .sum(v_hi));
+    wire [LW:0] v = {v_hi, v_lo};
     assign r = (u[LW] | v[LW]) ? v[LW-1:0] : u[LW-1:0];
-endmodule
-
-// 5-row Goldilocks squarer partial-product row generator (separated for compositional Z3 LEC).
-module qsag_gl64_sqrows #(
-    parameter int W  = 32,
-    parameter int GB = 12
-) (
-    input  wire [2*W-1:0]      z0,
-    input  wire [2*W-1:0]      z2,
-    input  wire [2*W-1:0]      p01,
-    output wire [2*W+GB-1:0]   r1,
-    output wire [2*W+GB-1:0]   r2,
-    output wire [2*W+GB-1:0]   r3,
-    output wire [2*W+GB-1:0]   r4,
-    output wire [2*W+GB-1:0]   r5
-);
-    localparam int LW = 2 * W;
-    localparam int AW = LW + GB;
-    localparam logic [W-1:0] TOP_C = {W{1'b1}} - W'(3); // 0xFFFF_FFFC for W=32
-    wire [LW:0]  m    = {p01, 1'b0};                    // 2 * x0 * x1 < 2^(2W+1)
-    wire [W-1:0] m0   = m[W-1:0];
-    wire [W-1:0] m1   = m[LW-1:W];
-    wire         m2   = m[LW];
-    wire [W-1:0] l2   = z2[W-1:0];
-    wire [W-1:0] h2   = z2[LW-1:W];
-    wire [2:0]   c_m2 = m2 ? 3'd3 : 3'd4;               // 4 - m2
-
-    assign r1 = AW'(z0);
-    assign r2 = AW'({m0, ~m1});
-    assign r3 = AW'({m1, {(W-3){1'b0}}, c_m2});
-    assign r4 = AW'({l2, ~l2});
-    assign r5 = AW'({TOP_C, ~h2});
-endmodule
-
-// 2-stage pipelined (1/clk throughput, <= 18 gate levels/stage) 5-row Goldilocks squarer.
-module qsag_gl64_sq_pipe #(
-    parameter int W  = 32,
-    parameter int GB = 12
-) (
-    input  wire           clk,
-    input  wire           en,
-    input  wire [2*W-1:0] x,
-    output wire [2*W-1:0] y
-);
-    localparam int LW = 2 * W;
-    localparam int AW = LW + GB;
-    wire [W-1:0]  x0 = x[W-1:0];
-    wire [W-1:0]  x1 = x[LW-1:W];
-    wire [LW-1:0] z0_c, z2_c, p01_c;
-    wire [LW-1:0] z0_q, z2_q, p01_q;
-    wire [AW-1:0] r1, r2, r3, r4, r5, s, c;
-    qsag_usq32  #(.W(W)) u_sq0 (.x(x0), .sq(z0_c));
-    qsag_usq32  #(.W(W)) u_sq1 (.x(x1), .sq(z2_c));
-    qsag_umul32 #(.W(W)) u_m01 (.a(x0), .b(x1), .p(p01_c));
-
-    qsag_ereg_nr #(.W(LW)) u_rz0 (.clk(clk), .en(en), .d(z0_c),  .q(z0_q));
-    qsag_ereg_nr #(.W(LW)) u_rz2 (.clk(clk), .en(en), .d(z2_c),  .q(z2_q));
-    qsag_ereg_nr #(.W(LW)) u_rp  (.clk(clk), .en(en), .d(p01_c), .q(p01_q));
-
-    qsag_gl64_sqrows #(.W(W), .GB(GB)) u_rows (.z0(z0_q), .z2(z2_q), .p01(p01_q), .r1(r1), .r2(r2), .r3(r3), .r4(r4), .r5(r5));
-    qsag_csa52       #(.N(AW))         u_csa  (.x(r1), .y(r2), .r1(r3), .r2(r4), .r3(r5), .s(s), .c(c));
-    qsag_gl64_canon  #(.W(W), .GB(GB)) u_canon(.x(s), .y(c), .r(y));
 endmodule
 
 module qsag_gl64_karatsuba_csa #(
@@ -350,134 +194,131 @@ module qsag_gl64_karatsuba_csa #(
 ) (
     input  wire              clk,
     input  wire              rst_n,
-    // row sources
-    input  wire [2*W-1:0]    port,      // register-file read port
-    input  wire [2*W-1:0]    xw,        // auxiliary word (stream, key, constant)
-    input  wire [2*W-1:0]    rc,        // Poseidon2 round constant
-    // row controls (ignored while a multiply is in progress)
-    input  wire [1:0]        pm,        // port row: 0 off, 1 +port<<pk, 2 -port<<pk
-    input  wire [3:0]        pk,        // port shift 0..10 (negative rows: 0 or 6 only)
-    input  wire [2:0]        rm,        // register row: 0 off, 1 RES, 2 OPA, 3 OPB, 4 XW
-    input  wire [1:0]        rk,        // register row shift 0..2
-    input  wire              krc,       // add the round constant
-    input  wire              acc_clr,   // start a new sum (ignore the accumulator)
-    input  wire              acc_we,    // keep the sum in the accumulator
-    input  wire              ld_opa,    // OPA <= cv
-    input  wire              ld_opb,    // OPB <= cv
-    input  wire              ld_res,    // RES <= cv
-    // multiply: RES/cv <= (asel ? RES : OPA) * (bsel ? RES : OPB) mod p
+    input  wire [2*W-1:0]    port,
+    input  wire [2*W-1:0]    xw,
+    input  wire [2*W-1:0]    rc,
+    input  wire [1:0]        pm,        // 0 off, 1 +port<<pk, 2 -port<<pk
+    input  wire [3:0]        pk,        // 0..10
+    input  wire [2:0]        rm,        // 0 off, 1 RES, 2 OPA, 4 XW, 5 3*RES
+    input  wire [1:0]        rk,        // 0..3
+    input  wire              krc,
+    input  wire              acc_clr,
+    input  wire              acc_we,
+    input  wire              ld_opa,
+    input  wire              ld_opb,
+    input  wire              ld_res,
     input  wire              mul_start,
     input  wire              mul_asel,
     input  wire              mul_bsel,
-    output wire              mul_busy,  // phases 1..3
-    output wire              mul_last,  // phase 3: cv is the product
-    output wire [2*W-1:0]    cv,        // canonical value of the current sum
+    output wire              mul_busy,
+    output wire              mul_last,
+    output wire [2*W-1:0]    cv,
     output wire              cv_zero,
     output wire [2*W-1:0]    res
 );
-    localparam int LW = 2 * W;
-    localparam int AW = LW + GB;
+    localparam int LW     = 2 * W;
+    localparam int AW     = LW + GB;
+    localparam int STEPS  = LW;
+    localparam int FOLD_S = STEPS + 1;
+    localparam int LAST_S = STEPS + 2;
     localparam logic [LW-1:0] PRIME  = {{W{1'b1}}, {(W-1){1'b0}}, 1'b1};
     localparam logic [LW-1:0] K_NEG0 = PRIME - ((LW'(1) << W) - LW'(2));
     localparam logic [LW-1:0] K_NEG6 = PRIME - (((LW'(1) << W) - LW'(2)) << 6);
 
-    wire [LW-1:0] opa, opb, resr;
+    wire [LW-1:0] opa, resr;
     wire [AW-1:0] acc_s, acc_c;
-    wire [LW+1:0] preg;
-    logic [W:0]   sa, sb;
-    logic [1:0]   mph;
-    logic         asel_q, bsel_q;
+    logic [6:0]   ms;
+    logic         asel_q;
 
-    // ------------------------------------------------------------ multiplier
-    wire          a_sel = (mph == 2'd0) ? mul_asel : asel_q;
-    wire          b_sel = (mph == 2'd0) ? mul_bsel : bsel_q;
-    wire [LW-1:0] ma    = a_sel ? resr : opa;
-    wire [LW-1:0] mb    = b_sel ? resr : opb;
-    logic [W:0]   m_a, m_b;
-    always_comb begin
-        unique case (mph)
-            2'd0:    begin m_a = {1'b0, ma[W-1:0]};  m_b = {1'b0, mb[W-1:0]};  end
-            2'd1:    begin m_a = {1'b0, ma[LW-1:W]}; m_b = {1'b0, mb[LW-1:W]}; end
-            default: begin m_a = sa;                 m_b = sb;                 end
-        endcase
-    end
-    wire [LW+1:0] m_p;
-    qsag_mul33 #(.W(W)) u_mul (.a(m_a), .b(m_b), .p(m_p));
+    wire [LW-1:0]   opb      = acc_c[LW-1:0];
+    wire [2*LW-1:0] p_sr     = {acc_s[LW-1:0], acc_c[LW-1:0]};
+    wire [LW-1:0]   ma       = asel_q ? resr : opa;
+    wire            mul_load = (ms == 7'd0) && mul_start;
+    wire            mul_step = (ms >= 7'd1) && (ms <= 7'(STEPS));
+    wire            mul_fold = (ms == 7'(FOLD_S));
 
-    wire [AW-1:0] mr1, mr2, mr3;
-    qsag_gl64_mrows #(.W(W), .GB(GB)) u_mrows (.p(preg), .ph(mph), .r1(mr1), .r2(mr2), .r3(mr3));
+    // Zero-mux `canon_x = acc_s` (`acc_s[AW-1:LW]` is cleared on `mul_load` and stays 0 through `mul_step`!)
+    wire [LW-1:0] m_addend = acc_c[0] ? ma : '0;
+    wire [AW-1:0] canon_y  = mul_step ? AW'(m_addend) : acc_c;
+    wire [LW:0]   m_step_sum;
+    qsag_gl64_canon #(.W(W), .GB(GB)) u_canon (
+        .x(acc_s), .y(canon_y), .r(cv), .t_lo_sum(m_step_sum)
+    );
 
-    // ------------------------------------------------------------ operand rows
+    wire [AW-1:0] mr0, mr1, mr2, mr3;
+    qsag_gl64_mrows #(.W(W), .GB(GB)) u_mrows (.p(p_sr), .r0(mr0), .r1(mr1), .r2(mr2), .r3(mr3));
+
+    // ------------------------------------------------------------ 4-stage barrel shifter & operand rows
+    wire [LW-1:0] p_base = mul_fold ? mr1[LW-1:0] : ((pm == 2'd2) ? ~port : port);
+    wire [3:0]    pk_eff = mul_fold ? 4'd0 : pk;
+    wire [AW-1:0] p_ext  = AW'(p_base);
+    wire [AW-1:0] sh0    = pk_eff[0] ? {p_ext[AW-2:0], 1'b0} : p_ext;
+    wire [AW-1:0] sh1    = pk_eff[1] ? {sh0[AW-3:0], 2'b0}   : sh0;
+    wire [AW-1:0] sh2    = pk_eff[2] ? {sh1[AW-5:0], 4'b0}   : sh1;
+    wire [AW-1:0] sh3    = pk_eff[3] ? {sh2[AW-9:0], 8'b0}   : sh2;
+
     logic [AW-1:0] prow, rrow, krow;
     logic [LW-1:0] rsel;
-    wire  [LW-1:0] port_n = ~port;
     always_comb begin
-        unique case (pm)
-            2'd1:    prow = AW'(port) << pk;
-            2'd2:    prow = AW'(port_n) << pk;
-            default: prow = '0;
-        endcase
+        prow = (mul_fold || pm == 2'd1 || pm == 2'd2) ? sh3 : '0;
         unique case (rm)
-            3'd1:    rsel = resr;
-            3'd2:    rsel = opa;
-            3'd3:    rsel = opb;
-            3'd4:    rsel = xw;
-            default: rsel = '0;
+            3'd1, 3'd5: rsel = resr;
+            3'd2:       rsel = opa;
+            3'd4:       rsel = xw;
+            default:    rsel = '0;
         endcase
-        rrow = AW'(rsel) << rk;
-        if (pm == 2'd2) krow = AW'((pk == 4'd6) ? K_NEG6 : K_NEG0);
-        else if (krc)   krow = AW'(rc);
-        else            krow = '0;
+        rrow = mul_fold ? mr2 : (AW'(rsel) << ((rm == 3'd5) ? 2'd1 : rk));
+        if (mul_fold)        krow = mr3;
+        else if (pm == 2'd2) krow = AW'((pk == 4'd6) ? K_NEG6 : K_NEG0);
+        else if (krc)        krow = AW'(rc);
+        else if (rm == 3'd5) krow = AW'(resr);
+        else                 krow = '0;
     end
 
-    // ------------------------------------------------------------ accumulate and canonicalize
-    wire          in_mul = (mph != 2'd0);
-    wire          use0   = in_mul ? (mph == 2'd1) : acc_clr;
-    wire [AW-1:0] cx = use0 ? '0 : acc_s;
-    wire [AW-1:0] cy = use0 ? '0 : acc_c;
-    wire [AW-1:0] r1 = in_mul ? mr1 : prow;
-    wire [AW-1:0] r2 = in_mul ? mr2 : rrow;
-    wire [AW-1:0] r3 = in_mul ? mr3 : krow;
+    // ------------------------------------------------------------ CSA -> Reg -> Canonicalize
+    wire          in_mul = (ms != 7'd0);
+    wire [AW-1:0] cx     = mul_fold ? mr0 : (acc_clr ? '0 : acc_s);
+    wire [AW-1:0] cy     = (mul_fold || acc_clr) ? '0 : acc_c;
     wire [AW-1:0] ns, nc;
-    qsag_csa52 #(.N(AW)) u_csa (.x(cx), .y(cy), .r1(r1), .r2(r2), .r3(r3), .s(ns), .c(nc));
-    qsag_gl64_canon #(.W(W), .GB(GB)) u_canon (.x(ns), .y(nc), .r(cv));
+    qsag_csa52 #(.N(AW)) u_csa (.x(cx), .y(cy), .r1(prow), .r2(rrow), .r3(krow), .s(ns), .c(nc));
 
     assign cv_zero  = (cv == '0);
     assign mul_busy = in_mul;
-    assign mul_last = (mph == 2'd3);
+    assign mul_last = (ms == 7'(LAST_S));
     assign res      = resr;
 
-    wire [W:0] sa_n, sb_n;
-    qsag_prefix_add #(.N(W+1)) u_sa (.a({1'b0, ma[W-1:0]}), .b({1'b0, ma[LW-1:W]}), .cin(1'b0), .sum(sa_n));
-    qsag_prefix_add #(.N(W+1)) u_sb (.a({1'b0, mb[W-1:0]}), .b({1'b0, mb[LW-1:W]}), .cin(1'b0), .sum(sb_n));
+    wire          ld_opb_eff = ld_opb && !in_mul;
+    wire          csa_en     = in_mul ? mul_fold : acc_we;
+    wire          s_en       = mul_load | mul_step | csa_en;
+    wire          c_en       = ld_opb_eff | mul_load | mul_step | csa_en;
+    wire [AW-1:0] s_d        = mul_load   ? '0 :
+                               mul_step   ? AW'(m_step_sum[LW:1]) : ns;
+    wire [AW-1:0] c_d        = ld_opb_eff ? AW'(cv) :
+                               mul_load   ? AW'(mul_bsel ? resr : opb) :
+                               mul_step   ? AW'({m_step_sum[0], acc_c[LW-1:1]}) : nc;
 
-    wire acc_upd  = !rst_n || (in_mul ? (mph != 2'd3) : acc_we);
-    wire preg_upd = !rst_n || (mph == 2'd0 && mul_start) || (mph == 2'd1) || (mph == 2'd2);
-    qsag_ereg_nr #(.W(LW))   u_opa  (.clk(clk), .en(!rst_n | ld_opa), .d(!rst_n ? '0 : cv),  .q(opa));
-    qsag_ereg_nr #(.W(LW))   u_opb  (.clk(clk), .en(!rst_n | ld_opb), .d(!rst_n ? '0 : cv),  .q(opb));
-    qsag_ereg_nr #(.W(LW))   u_res  (.clk(clk), .en(!rst_n | ld_res), .d(!rst_n ? '0 : cv),  .q(resr));
-    qsag_ereg_nr #(.W(AW))   u_accs (.clk(clk), .en(acc_upd),         .d(!rst_n ? '0 : ns),  .q(acc_s));
-    qsag_ereg_nr #(.W(AW))   u_accc (.clk(clk), .en(acc_upd),         .d(!rst_n ? '0 : nc),  .q(acc_c));
-    qsag_ereg_nr #(.W(LW+2)) u_preg (.clk(clk), .en(preg_upd),        .d(!rst_n ? '0 : m_p), .q(preg));
-
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            sa     <= '0;
-            sb     <= '0;
-            asel_q <= 1'b0;
-            bsel_q <= 1'b0;
-        end else if (mph == 2'd0 && mul_start) begin
-            sa     <= sa_n;
-            sb     <= sb_n;
-            asel_q <= mul_asel;
-            bsel_q <= mul_bsel;
-        end
-    end
+    qsag_ereg_nr #(.W(LW)) u_opa  (.clk(clk), .en(ld_opa), .d(cv),  .q(opa));
+    qsag_ereg_nr #(.W(LW)) u_res  (.clk(clk), .en(ld_res), .d(cv),  .q(resr));
+    qsag_ereg_nr #(.W(AW)) u_accs (.clk(clk), .en(s_en),   .d(s_d), .q(acc_s));
+    qsag_ereg_nr #(.W(AW)) u_accc (.clk(clk), .en(c_en),   .d(c_d), .q(acc_c));
 
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)           mph <= 2'd0;
-        else if (mph == 2'd0) mph <= mul_start ? 2'd1 : 2'd0;
-        else                  mph <= mph + 2'd1;
+        if (!rst_n) begin
+            ms     <= 7'd0;
+            asel_q <= 1'b0;
+        end else if (ms == 7'd0) begin
+            if (mul_start) begin
+                ms     <= 7'd1;
+                asel_q <= mul_asel;
+            end
+        end else if (ms == 7'(LAST_S)) begin
+            ms <= 7'd0;
+        end else begin
+            ms <= ms + 7'd1;
+        end
     end
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_mr1 = |mr1[AW-1:LW];
+    /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire

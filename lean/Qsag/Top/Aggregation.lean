@@ -26,12 +26,14 @@ validator for which there is neither a collision of the oracle among the prover'
 (`Spec.TranscriptBreak`), nor a verifying signature in the extractor's output for that validator,
 nor quorum participation, is at most `ε`. Runs whose extractor output is a verifying signature
 of a non-participating validator are not bounded here: that is single-signature unforgeability.
-No instance of `Spec.AggregateExtractorSound` is constructed in this module. The per-slot
-extraction lemma for the 256-column `StepOp` AIR table is `stepOp256TableOk_xmss_extract`;
-packaging it as a `Spec.StraightLineExtractor` instance and a `Spec.DataRefines` against
-`Spec.idealAggregateMachine` needs introduction lemmas for `Spec.ValidAggregateWitness` and
-`Spec.AggregateSoundnessOutcome`, which `Spec.IdealAggregate` does not export. Succinct
-WHIR/Canopy compilation factors through `Qsag.Top.ClosedProtocolReductions`.
+Section 6b constructs a concrete,
+non-vacuous `Spec.AggregateExtractorSound` instance (`stepOp256Aggregate_extractorSound`) over
+`Spec.StraightLineExtractor` and a `Spec.DataRefines` simulation (`stepOp256Aggregate_dataRefines_ideal`,
+`stepOp256Aggregate_preserve_admitsTrace`)
+against `Spec.idealAggregateMachine` for the deterministic 256-column `StepOp` AIR committee
+execution table (`verifyStepOp256Aggregate`, extracting native signatures from trace columns via
+`stepOp256TableOk_xmss_extract`). Succinct Merkle-root-and-opening Fiat–Shamir WHIR compilation
+factors through `Qsag.Top.ClosedProtocolReductions`.
 -/
 
 public import Qsag.Protocol.Aggregation.FieldTransport
@@ -521,6 +523,291 @@ theorem aggregate_extractor_sound_valid_witness_of_injective
   Qsag.Top.qrom_hem_opening_and_invalid_coordinate_chain
   Qsag.Top.aggregate_merge_and_simt_gpu_noninterference
   Qsag.Top.multifold_salted_qrom_and_committee_boundary_chain
+
+/-! ## 6b. Concrete `Spec.AggregateExtractorSound` & `Spec.DataRefines` for the 256-Column `StepOp` AIR Committee Verifier -/
+
+/-- Non-transparent 256-column `StepOp` execution trace proof for a validator committee: the
+    proof carries trace rows (`StepOpRow`), not native signature records, and signatures are
+    reconstructed from auxiliary trace registers via `stepXmssSig`. -/
+abbrev StepOp256AggregateProof := List Qsag.StepOpRow
+
+/-- Public slot vector derived from an `AggregateStatement` for `stepOp256TableOk`. -/
+def stepOp256CommitteeSlots {nVal : Nat}
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal) : List Qsag.StepOpSlot :=
+  (List.finRange nVal).map fun i =>
+    if stmt.bitmap.getLsbD i.val then
+      some (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)
+    else
+      none
+
+/-- Deterministic 256-column `StepOp` AIR committee aggregate verifier over `.xmssPoseidon2`. -/
+def verifyStepOp256Aggregate {nVal : Nat} (_H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
+    (rows : StepOp256AggregateProof) : Bool :=
+  decide (0 < nVal) &&
+  (List.finRange nVal).all (fun i =>
+    !stmt.bitmap.getLsbD i.val || ((stmt.roster i).profile == .xmssPoseidon2)) &&
+  Qsag.stepOp256TableOk .xmssPoseidon2 (stepOp256CommitteeSlots stmt) rows
+
+/-- Proof-carried candidate list reconstructed slot-by-slot from the `StepOp` execution table. -/
+def stepOp256ProofSigs (nVal : Nat) (rows : StepOp256AggregateProof) :
+    List Qsag.AggNativeSignature :=
+  (List.finRange nVal).map fun i =>
+    Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val)
+
+/-- Straight-line extractor reading slot `i` of the `StepOp` execution table. -/
+def extractStepOp256Aggregate {nVal : Nat}
+    (_log : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes))
+    (_stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
+    (rows : StepOp256AggregateProof) (i : Fin nVal) : Option Qsag.AggNativeSignature :=
+  some (Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val))
+
+theorem extractStepOp256Aggregate_straightLine {nVal : Nat} :
+    Qsag.Spec.StraightLineExtractor (PK := Qsag.AggValidatorPk)
+      (fun _ => none) (stepOp256ProofSigs nVal) (extractStepOp256Aggregate (nVal := nVal)) :=
+  Qsag.Spec.StraightLineExtractor.of_proofSigs _ _ _ (fun _ _ rows i sig hs => by
+    have hEq : Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val) = sig :=
+      Option.some.inj hs
+    exact List.mem_map.mpr ⟨i, List.mem_finRange i, hEq⟩)
+
+private theorem finRange_getElem? (n k : Nat) (hk : k < n) :
+    (List.finRange n)[k]? = some ⟨k, hk⟩ := by
+  have hLen : (List.finRange n).length = n := List.length_finRange
+  have hk' : k < (List.finRange n).length := by rw [hLen]; exact hk
+  rw [List.getElem?_eq_getElem hk', List.getElem_finRange]
+  rfl
+
+private theorem stepOp256CommitteeSlots_getElem? {nVal : Nat}
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
+    (k : Nat) (hk : k < nVal) :
+    (stepOp256CommitteeSlots stmt)[k]? =
+      some (if stmt.bitmap.getLsbD k then
+        some (stmt.roster ⟨k, hk⟩, Qsag.computeMessageMu (stmt.roster ⟨k, hk⟩) stmt.message)
+      else none) := by
+  unfold stepOp256CommitteeSlots
+  rw [List.getElem?_map, finRange_getElem? nVal k hk]
+  rfl
+
+/-- Every active validator in an accepted `verifyStepOp256Aggregate` table yields a valid
+    native XMSS-Poseidon2 signature via `extractStepOp256Aggregate`. -/
+theorem verifyStepOp256Aggregate_validWitness {nVal : Nat}
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (log : List (Qsag.Spec.Bytes × Qsag.Spec.Bytes))
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
+    (rows : StepOp256AggregateProof)
+    (hAcc : verifyStepOp256Aggregate H stmt rows = true) :
+    Qsag.Spec.ValidAggregateWitness (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
+      stmt (extractStepOp256Aggregate log stmt rows) := by
+  unfold verifyStepOp256Aggregate at hAcc
+  rw [Bool.and_eq_true, Bool.and_eq_true] at hAcc
+  obtain ⟨⟨_, hProfAll⟩, hTable⟩ := hAcc
+  refine Qsag.Spec.ValidAggregateWitness.intro (fun i hAct => ?_)
+  refine ⟨Qsag.stepXmssSig (Qsag.stepOpSlotRow .xmssPoseidon2 rows i.val), rfl, ?_⟩
+  have hProfMem := List.all_eq_true.mp hProfAll i (List.mem_finRange i)
+  rw [hAct] at hProfMem
+  simp only [Bool.not_true, Bool.false_or, beq_iff_eq] at hProfMem
+  have hSlot : (stepOp256CommitteeSlots stmt)[i.val]? =
+      some (some (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message)) := by
+    rw [stepOp256CommitteeSlots_getElem? stmt i.val i.isLt]
+    have hFinEq : (⟨i.val, i.isLt⟩ : Fin nVal) = i := Fin.ext rfl
+    rw [hFinEq, hAct]
+    simp only [↓reduceIte]
+  exact Qsag.stepOp256TableOk_xmss_extract (stepOp256CommitteeSlots stmt) rows i.val
+    (stmt.roster i, Qsag.computeMessageMu (stmt.roster i) stmt.message) stmt.message
+    hTable hSlot hProfMem rfl
+
+/-- **Concrete `Spec.AggregateExtractorSound` Instance (`stepOp256Aggregate_extractorSound`)**:
+    Certifies the 256-column `StepOp` AIR committee aggregate verifier (`verifyStepOp256Aggregate`)
+    with `extractStepOp256Aggregate` in `Spec.StraightLineExtractor` at zero extraction failure
+    error (`Spec.RatBound.zero`). -/
+theorem stepOp256Aggregate_extractorSound {nVal nC : Nat}
+    (oracle : Fin nC → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat) :
+    Qsag.Spec.AggregateExtractorSound
+      (Qsag.Spec.StraightLineExtractor (fun _ => none) (stepOp256ProofSigs nVal))
+      (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
+      (verifyStepOp256Aggregate (nVal := nVal))
+      (extractStepOp256Aggregate (nVal := nVal))
+      oracle q Qsag.Spec.RatBound.zero :=
+  Qsag.Spec.AggregateExtractorSound.of_deterministic _ _ _ _
+    extractStepOp256Aggregate_straightLine oracle q
+    (fun H log stmt rows _ hAcc =>
+      Qsag.Spec.AggregateSoundnessOutcome.of_witness
+        (verifyStepOp256Aggregate_validWitness H log stmt rows hAcc))
+
+/-- **`Spec.DataRefines` Simulation Against `Spec.idealAggregateMachine`
+    (`stepOp256Aggregate_dataRefines_ideal`)**:
+    Every trace accepted by `Spec.rawAggregateVerifierMachine verifyStepOp256Aggregate`
+    is simulated step-for-step by `Spec.idealAggregateMachine (verifyAggNativeSig xmssPoseidon2Geom)`. -/
+def stepOp256Aggregate_dataRefines_ideal {nVal : Nat}
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes) :
+    Qsag.Spec.DataRefines
+      (Qsag.Spec.rawAggregateVerifierMachine (verifyStepOp256Aggregate (nVal := nVal)) H)
+      (Qsag.Spec.idealAggregateMachine (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom))
+      (Qsag.Spec.verifiedAggregateVisIn (extractStepOp256Aggregate (nVal := nVal)))
+      id :=
+  Qsag.Spec.unconditionalAggregate_dataRefines_ideal
+    (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
+    (verifyStepOp256Aggregate (nVal := nVal))
+    (extractStepOp256Aggregate (nVal := nVal)) H
+    (fun stmt rows log hAcc => verifyStepOp256Aggregate_validWitness H log stmt rows hAcc)
+
+/-- Multi-turn trace inclusion from `rawAggregateVerifierMachine verifyStepOp256Aggregate`
+    into `idealAggregateMachine` via `stepOp256Aggregate_dataRefines_ideal`. -/
+theorem stepOp256Aggregate_preserve_admitsTrace {nVal : Nat}
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    {trace : List (Qsag.Spec.AggregateSubmission Qsag.AggValidatorPk StepOp256AggregateProof nVal × Unit)}
+    (hAdmits : (Qsag.Spec.rawAggregateVerifierMachine (verifyStepOp256Aggregate (nVal := nVal)) H).AdmitsTrace
+      trace) :
+    (Qsag.Spec.idealAggregateMachine (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)).AdmitsTrace
+      (Qsag.Spec.projectTrace
+        (Qsag.Spec.verifiedAggregateVisIn (extractStepOp256Aggregate (nVal := nVal))) id trace) :=
+  (stepOp256Aggregate_dataRefines_ideal H).preserve_admitsTrace hAdmits
+
+/-- **End-to-End Quorum Bound Specialized to `verifyStepOp256Aggregate`
+    (`stepOp256Aggregate_quorum_bound`)**:
+    Discharges `C : Spec.AggregateExtractorSound` in `aggregate_extractor_sound_quorum_bound`
+    unconditionally via `stepOp256Aggregate_extractorSound`. -/
+theorem stepOp256Aggregate_quorum_bound {nVal nC n nA : Nat}
+    (custody : Fin nVal → Qsag.Composed.Custody)
+    (oracle : Fin nC → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat)
+    (hPos : 0 < n) (π : Qsag.Spec.CoinSplit n nC nA)
+    (prover : Fin nA → Qsag.Spec.Code Qsag.Spec.byteOracleIface
+      (Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal × StepOp256AggregateProof))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      (∀ v : Fin nVal,
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1.roster v =
+          (custody v).state.pk) ∧
+      verifyStepOp256Aggregate (oracle (π.chal ω))
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 = true ∧
+      ∃ v : Fin nVal,
+        (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+          (prover (π.advc ω))).1.1.bitmap.getLsbD v.val = true ∧
+        ¬ ((∃ b : Qsag.Spec.AggregateBreak,
+            Qsag.Spec.TranscriptBreak (oracle (π.chal ω))
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2 b) ∨
+          (∃ sig : Qsag.AggNativeSignature,
+            extractStepOp256Aggregate
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).2
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.1
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q (prover (π.advc ω))).1.2 v =
+                some sig ∧
+            Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom (custody v).state.pk
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+                (prover (π.advc ω))).1.1.message sig = true ∧
+            Qsag.Composed.quorumParticipated (custody v)
+              (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+                (prover (π.advc ω))).1.1.message = false) ∨
+          Qsag.Composed.quorumParticipated (custody v)
+            (Qsag.Spec.aggregateRun (oracle (π.chal ω)) q
+              (prover (π.advc ω))).1.1.message = true)) :
+    Qsag.Spec.GameBound (Qsag.Spec.FinGame.mk hPos fail).winProb Qsag.Spec.RatBound.zero :=
+  aggregate_extractor_sound_quorum_bound Qsag.xmssPoseidon2Geom custody
+    verifyStepOp256Aggregate extractStepOp256Aggregate oracle q Qsag.Spec.RatBound.zero
+    (stepOp256Aggregate_extractorSound oracle q) hPos π prover fail hFail
+
+/-- **Completeness of `verifyStepOp256Aggregate` on Valid Native Committee Signatures
+    (`verifyStepOp256Aggregate_complete`)**:
+    Any non-empty committee statement whose active validators hold valid `.xmssPoseidon2`
+    signatures produces an accepted 256-column `StepOp` table via `stepXmssSlotsRows`. -/
+theorem verifyStepOp256Aggregate_complete {nVal : Nat} (hn : 0 < nVal)
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk nVal)
+    (sig : Fin nVal → Qsag.AggNativeSignature)
+    (dflt : Qsag.AggNativeSignature)
+    (hValid : ∀ i : Fin nVal, stmt.bitmap.getLsbD i.val = true →
+      Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom (stmt.roster i) stmt.message (sig i) = true) :
+    verifyStepOp256Aggregate H stmt
+      (Qsag.stepXmssSlotsRows (stepOp256CommitteeSlots stmt) (fun _ => stmt.message)
+        (fun k => if hk : k < nVal then sig ⟨k, hk⟩ else dflt)) = true := by
+  unfold verifyStepOp256Aggregate
+  rw [Bool.and_eq_true, Bool.and_eq_true]
+  refine ⟨⟨decide_eq_true hn, ?_⟩, ?_⟩
+  · refine List.all_eq_true.mpr (fun i _ => ?_)
+    cases hAct : stmt.bitmap.getLsbD i.val
+    · rfl
+    · simp only [Bool.not_true, Bool.false_or, beq_iff_eq]
+      exact Qsag.stepXmssNative_profile (stmt.roster i) stmt.message (sig i) (hValid i hAct)
+  · have hSlotsLen : (stepOp256CommitteeSlots stmt).length = nVal := by
+      unfold stepOp256CommitteeSlots
+      rw [List.length_map, List.length_finRange]
+    refine Qsag.stepXmssSlotsRows_of_verify (stepOp256CommitteeSlots stmt)
+      (fun _ => stmt.message)
+      (fun k => if hk : k < nVal then sig ⟨k, hk⟩ else dflt)
+      (by rw [hSlotsLen]; exact hn) (fun k pub hSlot => ?_)
+    have hkSlots : k < (stepOp256CommitteeSlots stmt).length :=
+      (List.getElem?_eq_some_iff.mp hSlot).1
+    have hk : k < nVal := by rwa [hSlotsLen] at hkSlots
+    rw [stepOp256CommitteeSlots_getElem? stmt k hk] at hSlot
+    let idx : Fin nVal := ⟨k, hk⟩
+    cases hAct : stmt.bitmap.getLsbD k
+    · rw [hAct] at hSlot; cases hSlot
+    · rw [hAct] at hSlot
+      simp only [↓reduceIte, Option.some.injEq] at hSlot
+      subst hSlot
+      refine ⟨rfl, ?_⟩
+      rw [dite_eq_left hk]
+      exact hValid idx hAct
+
+/-- Unconditional inhabitedness witness: `verifyStepOp256Aggregate` accepts a concrete 512-row
+    committee table and inhabits `stepOp256Aggregate_extractorSound`. -/
+theorem inhabited_stepOp256Aggregate_accepts :
+    ∃ (oracle : Fin 1 → Qsag.Spec.Bytes → Qsag.Spec.Bytes) (q : Nat)
+      (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk 1)
+      (rows : StepOp256AggregateProof),
+      verifyStepOp256Aggregate (oracle ⟨0, by decide⟩) stmt rows = true ∧
+      Qsag.Spec.AggregateExtractorSound
+        (Qsag.Spec.StraightLineExtractor (fun _ => none) (stepOp256ProofSigs 1))
+        (Qsag.verifyAggNativeSig Qsag.xmssPoseidon2Geom)
+        (verifyStepOp256Aggregate (nVal := 1))
+        (extractStepOp256Aggregate (nVal := 1))
+        oracle q Qsag.Spec.RatBound.zero := by
+  let pk0 : Qsag.AggValidatorPk := ⟨.xmssPoseidon2, Qsag.auditPkSeed, Qsag.auditPkSeed⟩
+  let stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk 1 := ⟨fun _ => pk0, 0#1, Qsag.auditMsg⟩
+  let rows : StepOp256AggregateProof :=
+    List.replicate (1 * Qsag.stepOpRowsPerSigner .xmssPoseidon2) Qsag.stepInactiveRow
+  refine ⟨fun _ b => b, 0, stmt, rows, ?_, stepOp256Aggregate_extractorSound _ 0⟩
+  unfold verifyStepOp256Aggregate
+  rw [Bool.and_eq_true, Bool.and_eq_true]
+  refine ⟨⟨by decide, by decide⟩, ?_⟩
+  have hSlots : stepOp256CommitteeSlots stmt = List.replicate 1 none := by
+    have hFin1 : List.finRange 1 = [⟨0, by decide⟩] := by decide
+    have hBit0 : (0#1 : BitVec 1).getLsbD 0 = false := by decide
+    unfold stepOp256CommitteeSlots
+    rw [hFin1]
+    dsimp only [List.map, stmt]
+    rw [hBit0]
+    rfl
+  rw [hSlots]
+  exact Qsag.stepInactiveCommittee_table .xmssPoseidon2 1 (by decide)
+
+/-- `#tooth`: `verifyStepOp256Aggregate` rejects an empty trace `[]` on any non-empty committee. -/
+theorem tooth_stepOp256Aggregate_rejects_empty_rows
+    (H : Qsag.Spec.Bytes → Qsag.Spec.Bytes)
+    (stmt : Qsag.Spec.AggregateStatement Qsag.AggValidatorPk 1) :
+    ¬ (verifyStepOp256Aggregate H stmt [] = true) := by
+  intro hAcc
+  unfold verifyStepOp256Aggregate at hAcc
+  rw [Bool.and_eq_true] at hAcc
+  have hLen := ((Qsag.stepOp256TableOk_iff_rows .xmssPoseidon2
+    (stepOp256CommitteeSlots stmt) []).mp hAcc.2).2.1
+  have hSlotsLen : (stepOp256CommitteeSlots stmt).length = 1 := rfl
+  rw [hSlotsLen, Qsag.stepOpRowsPerSigner.public_eqs.1] at hLen
+  exact absurd hLen (by decide)
+
+#verify_constructive
+  Qsag.Top.extractStepOp256Aggregate_straightLine
+  Qsag.Top.verifyStepOp256Aggregate_validWitness
+  Qsag.Top.stepOp256Aggregate_extractorSound
+  Qsag.Top.stepOp256Aggregate_preserve_admitsTrace
+  Qsag.Top.stepOp256Aggregate_quorum_bound
+  Qsag.Top.verifyStepOp256Aggregate_complete
+  Qsag.Top.inhabited_stepOp256Aggregate_accepts
+  Qsag.Top.tooth_stepOp256Aggregate_rejects_empty_rows
+
+#verify_inhabited Qsag.Top.verifyStepOp256Aggregate_validWitness Qsag.Top.inhabited_stepOp256Aggregate_accepts
+#tooth_pair Qsag.Top.stepOp256Aggregate_extractorSound vs Qsag.Top.tooth_stepOp256Aggregate_rejects_empty_rows
 
 open Qsag
 

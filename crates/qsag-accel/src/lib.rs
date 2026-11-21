@@ -53,7 +53,8 @@ pub use poseidon2::{
 };
 pub use vulkan::{
     AIR_MAX_OP_TERMS, AIR_OP_GAMMA_BASE_EXT4, BatchExecution, CpuFallbackEvent, PipelineTelemetry,
-    VulkanDeviceInfo, VulkanError, VulkanSpirvBackend, air_op_term_count,
+    VulkanDeviceInfo, VulkanError, VulkanSpirvBackend, WhirBatchSumcheckStep,
+    WhirRound0ReceiptParams, air_op_term_count,
 };
 
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
@@ -905,6 +906,152 @@ pub fn prover_stage_io_digest(
     out
 }
 
+/// Monotonic sequence-bound transcript-anchor chain for stateful [`ProverExecutionReceipt`]
+/// sessions (`0` heap allocations, `#![no_std]`).
+///
+/// Binds every issued [`ProverExecutionReceipt`] to its strictly increasing step index `seq` and
+/// all preceding `(descriptor, input_digest, output_digest, mac)` tuples in the session, so
+/// replayed, reordered, or skipped stage receipts fail verification in constant time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProverReceiptChain {
+    state: [u8; 32],
+    seq: u64,
+}
+
+impl ProverReceiptChain {
+    const SEQ_CUSTOM: &'static [u8] = b"ACCEL.PROVER.RECEIPT.SEQ.V1";
+
+    /// Start a new prover receipt chain seeded by `initial_anchor` (e.g. witness/statement digest).
+    pub const fn new(initial_anchor: [u8; 32]) -> Self {
+        Self {
+            state: initial_anchor,
+            seq: 0,
+        }
+    }
+
+    /// Monotonic index of the next expected receipt in this session.
+    #[inline]
+    pub const fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// Expected `transcript_anchor` to pass into the next `*_with_receipt` call.
+    pub fn current_anchor(&self) -> [u8; 32] {
+        cshake256_framed_32(
+            Self::SEQ_CUSTOM,
+            &[b"ANCHOR", &self.state, &self.seq.to_le_bytes()],
+        )
+    }
+
+    fn ratchet_state_at(state: &[u8; 32], seq: u64, receipt: &ProverExecutionReceipt) -> [u8; 32] {
+        cshake256_framed_32(
+            Self::SEQ_CUSTOM,
+            &[
+                b"STEP",
+                state,
+                &seq.to_le_bytes(),
+                &receipt.descriptor.to_canonical_bytes(),
+                &receipt.input_digest,
+                &receipt.output_digest,
+                &receipt.mac,
+            ],
+        )
+    }
+
+    fn ratchet_state(&self, receipt: &ProverExecutionReceipt) -> [u8; 32] {
+        Self::ratchet_state_at(&self.state, self.seq, receipt)
+    }
+
+    /// Record a freshly issued `receipt` on the prover side, checking that its `transcript_anchor`
+    /// matches [`Self::current_anchor`] and advancing the monotonic counter.
+    pub fn record_issued(&mut self, receipt: &ProverExecutionReceipt) -> Result<u64, AccelError> {
+        let expected = self.current_anchor();
+        if ct_eq_bytes_mask(&receipt.transcript_anchor, &expected) != u64::MAX {
+            return Err(AccelError::BackendFailure);
+        }
+        let next_seq = self.seq.checked_add(1).ok_or(AccelError::LengthOverflow)?;
+        let issued_seq = self.seq;
+        self.state = self.ratchet_state(receipt);
+        self.seq = next_seq;
+        Ok(issued_seq)
+    }
+
+    /// Record a paired command-buffer dispatch (`AirRowGroupA` + `AirRowGroupB`) that issued two
+    /// receipts bound to the same pre-dispatch [`Self::current_anchor`], advancing `seq` by `2`.
+    pub fn record_issued_pair(
+        &mut self,
+        receipts: &[ProverExecutionReceipt; 2],
+    ) -> Result<u64, AccelError> {
+        let expected = self.current_anchor();
+        let anchors_ok = ct_eq_bytes_mask(&receipts[0].transcript_anchor, &expected)
+            & ct_eq_bytes_mask(&receipts[1].transcript_anchor, &expected);
+        if anchors_ok != u64::MAX {
+            return Err(AccelError::BackendFailure);
+        }
+        let seq_1 = self.seq.checked_add(1).ok_or(AccelError::LengthOverflow)?;
+        let seq_2 = seq_1.checked_add(1).ok_or(AccelError::LengthOverflow)?;
+        let issued_seq = self.seq;
+        let mid_state = Self::ratchet_state_at(&self.state, issued_seq, &receipts[0]);
+        self.state = Self::ratchet_state_at(&mid_state, seq_1, &receipts[1]);
+        self.seq = seq_2;
+        Ok(issued_seq)
+    }
+
+    /// Verify `receipt` against `registry` + `key` AND verify in constant time that its
+    /// `transcript_anchor` matches [`Self::current_anchor`] at step `self.seq`, advancing the
+    /// chain only on full authentication.
+    pub fn verify_next<const N: usize>(
+        &mut self,
+        registry: &VerifiedKernelDigestRegistry<N>,
+        receipt: &ProverExecutionReceipt,
+        key: &BackendAttestationKey,
+    ) -> Result<u64, KernelRegistryError> {
+        let anchor_ok = ct_eq_bytes_mask(&receipt.transcript_anchor, &self.current_anchor());
+        registry.verify_prover_keyed_receipt(receipt, key)?;
+        if anchor_ok != u64::MAX {
+            return Err(KernelRegistryError::ReceiptAuthenticationFailed);
+        }
+        let next_seq = self
+            .seq
+            .checked_add(1)
+            .ok_or(KernelRegistryError::ReceiptAuthenticationFailed)?;
+        let verified_seq = self.seq;
+        self.state = self.ratchet_state(receipt);
+        self.seq = next_seq;
+        Ok(verified_seq)
+    }
+
+    /// Verify a paired command-buffer dispatch (`[rec_a, rec_b]` sharing [`Self::current_anchor`])
+    /// against `registry` + `key`, advancing `self.seq` by `2` only when both receipts verify.
+    pub fn verify_next_pair<const N: usize>(
+        &mut self,
+        registry: &VerifiedKernelDigestRegistry<N>,
+        receipts: &[ProverExecutionReceipt; 2],
+        key: &BackendAttestationKey,
+    ) -> Result<u64, KernelRegistryError> {
+        let expected = self.current_anchor();
+        let anchors_ok = ct_eq_bytes_mask(&receipts[0].transcript_anchor, &expected)
+            & ct_eq_bytes_mask(&receipts[1].transcript_anchor, &expected);
+        registry.verify_prover_keyed_receipt(&receipts[0], key)?;
+        registry.verify_prover_keyed_receipt(&receipts[1], key)?;
+        if anchors_ok != u64::MAX {
+            return Err(KernelRegistryError::ReceiptAuthenticationFailed);
+        }
+        let seq_1 = self
+            .seq
+            .checked_add(1)
+            .ok_or(KernelRegistryError::ReceiptAuthenticationFailed)?;
+        let seq_2 = seq_1
+            .checked_add(1)
+            .ok_or(KernelRegistryError::ReceiptAuthenticationFailed)?;
+        let verified_seq = self.seq;
+        let mid_state = Self::ratchet_state_at(&self.state, verified_seq, &receipts[0]);
+        self.state = Self::ratchet_state_at(&mid_state, seq_1, &receipts[1]);
+        self.seq = seq_2;
+        Ok(verified_seq)
+    }
+}
+
 /// Zero-dependency `#![no_std]` hardware/GPU accelerator trait.
 ///
 /// External certified RDNA2 / SPIR-V / FPGA host crates implement this trait without forcing
@@ -1702,7 +1849,11 @@ pub fn spot_check_merkle_layer(
         loop {
             let digest = cshake256_framed_32(
                 b"QSAG.ACCEL.MERKLE_SAMPLE.V1",
-                &[challenge, &(sample as u64).to_be_bytes(), &ctr.to_be_bytes()],
+                &[
+                    challenge,
+                    &(sample as u64).to_be_bytes(),
+                    &ctr.to_be_bytes(),
+                ],
             );
             let mut word = [0u8; 8];
             word.copy_from_slice(&digest[..8]);
@@ -1728,11 +1879,17 @@ pub fn spot_check_merkle_layer(
             let r = sample + draw_unbiased(sample, rem as u64);
             #[cfg(feature = "alloc")]
             let lookup = |k: usize, tbl: &[(usize, usize)]| -> usize {
-                tbl.iter().rev().find(|&&(a, _)| a == k).map_or(k, |&(_, b)| b)
+                tbl.iter()
+                    .rev()
+                    .find(|&&(a, _)| a == k)
+                    .map_or(k, |&(_, b)| b)
             };
             #[cfg(not(feature = "alloc"))]
             let lookup = |k: usize, tbl: &[(usize, usize)]| -> usize {
-                tbl.iter().rev().find(|&&(a, _)| a == k).map_or(k, |&(_, b)| b)
+                tbl.iter()
+                    .rev()
+                    .find(|&&(a, _)| a == k)
+                    .map_or(k, |&(_, b)| b)
             };
             #[cfg(feature = "alloc")]
             let (chosen, cur_slot) = (lookup(r, &swaps), lookup(sample, &swaps));
@@ -2098,18 +2255,167 @@ mod tests {
     fn correctly_maced_spirv_receipts_without_audit_are_rejected() {
         let key = BackendAttestationKey::derive(&[29; 32], b"missing-audit");
         let pin = spirv_kernels::canonical_spirv_pin(KernelSlot::BatchKeccakF1600);
-        let mut receipt = ExecutionReceipt::compute_audited(&key, &pin,
-            BatchJobDescriptor::KeccakF1600 { num_states: 1 }, [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        let mut receipt = ExecutionReceipt::compute_audited(
+            &key,
+            &pin,
+            BatchJobDescriptor::KeccakF1600 { num_states: 1 },
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+        )
+        .unwrap();
         receipt.hardware_audit_digest = [0; 32];
         receipt.mac = receipt.mac_over_fields(&key);
         assert_eq!(receipt.verification_mask(&key, &pin), 0);
         let pin = spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::WhirLdeCommitment);
-        let mut receipt = ProverExecutionReceipt::compute_audited(&key, &pin,
-            ProverJobDescriptor::WhirCommitRound0 { num_polys: 1, num_vars: 4, blowup: 4, group_arity: 4 },
-            [1; 32], [2; 32], [3; 32], [4; 32]).unwrap();
+        let mut receipt = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin,
+            ProverJobDescriptor::WhirCommitRound0 {
+                num_polys: 1,
+                num_vars: 4,
+                blowup: 4,
+                group_arity: 4,
+            },
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+        )
+        .unwrap();
         receipt.hardware_audit_digest = [0; 32];
         receipt.mac = receipt.mac_over_fields(&key);
         assert_eq!(receipt.verification_mask(&key, &pin), 0);
+    }
+
+    #[test]
+    fn prover_receipt_chain_enforces_monotonic_order_and_rejects_replay_or_skip() {
+        let reg = VerifiedKernelDigestRegistry::<4>::with_cpu_and_spirv_pins();
+        let key = BackendAttestationKey::derive(&[41; 32], b"prover-seq-gpu");
+        let audit = [0xAA; 32];
+        let seed_anchor = [0x55; 32];
+
+        let mut prover_chain = ProverReceiptChain::new(seed_anchor);
+        let pin_lde =
+            spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::WhirLdeCommitment);
+        let pin_fold =
+            spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::WhirFoldSumcheck);
+        let pin_air = spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::AirRowGroupA);
+
+        let r0 = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin_lde,
+            ProverJobDescriptor::WhirCommitRound0 {
+                num_polys: 5,
+                num_vars: 20,
+                blowup: 4,
+                group_arity: 32,
+            },
+            prover_chain.current_anchor(),
+            [10; 32],
+            [11; 32],
+            audit,
+        )
+        .unwrap();
+        assert_eq!(prover_chain.record_issued(&r0), Ok(0));
+
+        let r1 = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin_fold,
+            ProverJobDescriptor::WhirFoldSumcheck {
+                op_code: 9,
+                num_elements: 66,
+                aux: 0,
+            },
+            prover_chain.current_anchor(),
+            [20; 32],
+            [21; 32],
+            audit,
+        )
+        .unwrap();
+        assert_eq!(prover_chain.record_issued(&r1), Ok(1));
+
+        let r2 = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin_air,
+            ProverJobDescriptor::AirRowGroupA {
+                mode: 3,
+                cur_m: 64,
+                cur_r: 64,
+            },
+            prover_chain.current_anchor(),
+            [30; 32],
+            [31; 32],
+            audit,
+        )
+        .unwrap();
+        assert_eq!(prover_chain.record_issued(&r2), Ok(2));
+
+        // Out-of-order / skipped receipt (`r1` at step 0) must be rejected without advancing state.
+        let mut verifier_chain = ProverReceiptChain::new(seed_anchor);
+        assert_eq!(
+            verifier_chain.verify_next(&reg, &r1, &key),
+            Err(KernelRegistryError::ReceiptAuthenticationFailed)
+        );
+        assert_eq!(verifier_chain.seq(), 0);
+
+        // In-order verification succeeds at steps 0, 1, 2; replaying `r0` or `r1` fails.
+        assert_eq!(verifier_chain.verify_next(&reg, &r0, &key), Ok(0));
+        assert_eq!(
+            verifier_chain.verify_next(&reg, &r0, &key),
+            Err(KernelRegistryError::ReceiptAuthenticationFailed)
+        );
+        assert_eq!(verifier_chain.verify_next(&reg, &r1, &key), Ok(1));
+        assert_eq!(verifier_chain.verify_next(&reg, &r2, &key), Ok(2));
+        assert_eq!(verifier_chain.seq(), 3);
+
+        let pin_air_b = spirv_kernels::canonical_prover_spirv_pin(ProverKernelSlot::AirRowGroupB);
+        let pair_anchor = prover_chain.current_anchor();
+        let p_a = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin_air,
+            ProverJobDescriptor::AirRowGroupA {
+                mode: 1,
+                cur_m: 64,
+                cur_r: 64,
+            },
+            pair_anchor,
+            [40; 32],
+            [41; 32],
+            audit,
+        )
+        .unwrap();
+        let p_b = ProverExecutionReceipt::compute_audited(
+            &key,
+            &pin_air_b,
+            ProverJobDescriptor::AirRowGroupB {
+                is_round0_base: true,
+                cur_m: 64,
+                cur_r: 64,
+                cur_s: 1,
+            },
+            pair_anchor,
+            [42; 32],
+            [43; 32],
+            audit,
+        )
+        .unwrap();
+        assert_eq!(prover_chain.record_issued_pair(&[p_a, p_b]), Ok(3));
+        assert_eq!(prover_chain.seq(), 5);
+
+        let mut swapped_verifier = verifier_chain.clone();
+        assert_eq!(
+            verifier_chain.verify_next_pair(&reg, &[p_a, p_b], &key),
+            Ok(3)
+        );
+        assert_eq!(verifier_chain.seq(), 5);
+        assert_eq!(verifier_chain, prover_chain);
+        assert_eq!(
+            swapped_verifier.verify_next_pair(&reg, &[p_b, p_a], &key),
+            Ok(3)
+        );
+        assert_ne!(swapped_verifier, prover_chain);
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -2118,10 +2424,14 @@ mod tests {
         let children = [[7u64; 4]; 256];
         let mut parents = [[0u64; 4]; 128];
         merkle_layer_poseidon2_at_cpu(&children, &[1; 4], 0, 0, &mut parents).unwrap();
-        assert!(spot_check_merkle_layer(&children, &[1; 4], 0, 0, &parents, &[2; 32], 65));
+        assert!(spot_check_merkle_layer(
+            &children, &[1; 4], 0, 0, &parents, &[2; 32], 65
+        ));
         for i in 0..parents.len() {
             parents[i][0] ^= 1;
-            assert!(!spot_check_merkle_layer(&children, &[1; 4], 0, 0, &parents, &[2; 32], 65));
+            assert!(!spot_check_merkle_layer(
+                &children, &[1; 4], 0, 0, &parents, &[2; 32], 65
+            ));
             parents[i][0] ^= 1;
         }
     }

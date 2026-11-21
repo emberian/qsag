@@ -22,7 +22,7 @@
 //!    (`a' = a_even + r a_odd`, `b' = r b_even + b_odd`, `c' = h0 + r c + r^2 h1`), ending in a
 //!    masked opening of one product. This is the protocol of
 //!    `recursive_sacrifice_false_claim_accepting_coins_bound` in
-//!    `lean/Qsag/ActiveMigrationZeroTest.lean` up to the fixed index permutation that turns
+//!    `lean/Qsag/Protocol/Migration/ActiveMigrationZeroTest.lean` up to the fixed index permutation that turns
 //!    halves into even/odd positions: a false claim survives `r` rounds on at most a
 //!    `2 (r + 1) / 2^128` fraction of coins. Two instances with independent coins run side by
 //!    side, so a false batch is accepted with probability at most `(2 (r + 1) / 2^128)^2`.

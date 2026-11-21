@@ -2504,8 +2504,8 @@ theorem slicedMultiFoldStageBound_den (g : HemStageGeom) (r : Nat × Nat × Nat 
     (slicedMultiFoldStageBound g r w).den = goldilocksExt4Card ^ 4 := by rfl
 -- (end exports for lane agg-whir-cert)
 
--- Equations for `Tests/HemMultistageCascadeTeeth` (no body exposed).
-#export_eqns splitEvenOdd threePool
+-- Equations for `Tests/HemMultistageCascadeTeeth` and `ClosedWhirSchedule` (no body exposed).
+#export_eqns splitEvenOdd threePool quadPool
 
 /-! ## Executed witnesses and teeth (audited and paired in `Tests/QromCoherentOracleTests`) -/
 

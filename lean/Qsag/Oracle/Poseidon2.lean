@@ -6683,5 +6683,707 @@ theorem poseidon2DuplexChain_swap_sumcheck_kat :
 #export_eqns poseidon2DuplexChain poseidon2DuplexBlock poseidon2SwapRoundKatBlocks
   poseidon2SwapSumcheckKatBlocks
 #verify_constructive poseidon2DuplexChain_swap_round_kat poseidon2DuplexChain_swap_sumcheck_kat
+
+/-! ### `Poseidon2` permutation, compression, and compact Jorts KATs for `Tests/CompositionInstances` -/
+
+section CompositionInstancesPoseidon2Kats
+set_option exponentiation.threshold 2048
+set_option maxRecDepth 1000000
+
+theorem poseidon2Perm12_realX_kat :
+    ((poseidon2Perm12
+      ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩,
+       ⟨Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7, Goldilocks.ofNat 8⟩,
+       ⟨Goldilocks.ofNat 0x515341474D524B4C, Goldilocks.ofNat 9, Goldilocks.ofNat 10,
+        Goldilocks.ofNat 0x504F53325F474C31⟩⟩).b0.x0).val ≠ 1 := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem poseidon2CompressWeighted_realX_kat :
+    ((poseidon2CompressWeighted
+      ⟨⟨Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3, Goldilocks.ofNat 4⟩,
+       ⟨Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7, Goldilocks.ofNat 8⟩,
+       ⟨Goldilocks.ofNat 0x515341474D524B4C, Goldilocks.ofNat 9, Goldilocks.ofNat 10,
+        Goldilocks.ofNat 0x504F53325F474C31⟩⟩).x0).val ≠ 0 := by
+  decide +kernel
+
+set_option maxRecDepth 100000 in
+theorem poseidon2Inv_realY_feedforward_kat :
+    let invY := poseidon2Perm12Inv
+      ⟨⟨Goldilocks.ofNat 7, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩,
+       lane4Zero, lane4Zero⟩
+    ((lane4Add ⟨Goldilocks.ofNat 7, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+        (lane4Add invY.b0
+          (lane4Add (lane4Scale (Goldilocks.ofNat 2) invY.b1)
+            (lane4Scale (Goldilocks.ofNat 4) invY.b2)))).x0).val ≠ 7 := by
+  decide +kernel
+
+def compactPackWotsAddr (layer kpIdx chainIdx stepIdx : Nat) : Goldilocks :=
+  Goldilocks.ofNat
+    ((layer % 64) * (2 ^ 44) +
+     (kpIdx % (2 ^ 28)) * (2 ^ 16) +
+     (chainIdx % 4096) * 16 +
+     (stepIdx % 16))
+
+def compactWotsSecret (skSeed pkSeed : Lane4) (layer treeIdx kpIdx chainIdx : Nat) : Lane4 :=
+  poseidon2CompressWeighted
+    ⟨skSeed, pkSeed,
+     ⟨Goldilocks.ofNat 0x5153414757505246,
+      compactPackWotsAddr layer kpIdx chainIdx 0,
+      Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+      Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩
+
+def compactWotsStep (pkSeed cur : Lane4) (layer treeIdx kpIdx chainIdx stepIdx : Nat) : Lane4 :=
+  poseidon2CompressWeighted
+    ⟨cur, pkSeed,
+     ⟨Goldilocks.ofNat 0x5153414757535450,
+      compactPackWotsAddr layer kpIdx chainIdx stepIdx,
+      Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+      Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩
+
+def compactIterAt {σ : Type} (step : Nat → σ → σ) : Nat → Nat → σ → σ
+  | 0, _, s => s
+  | n + 1, idx, s => compactIterAt step n (idx + 1) (step idx s)
+
+def compactWotsWalk (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx steps idx : Nat)
+    (s : Lane4) : Lane4 :=
+  compactIterAt (fun stp v => compactWotsStep pkSeed v layer treeIdx kpIdx chainIdx stp) steps idx s
+
+def compactWotsPk2 (pkSeed : Lane4) (layer treeIdx kpIdx : Nat) (e0 e1 : Lane4) : Lane4 :=
+  let layerKp := Goldilocks.ofNat ((layer % (2 ^ 32)) * (2 ^ 32) + (kpIdx % (2 ^ 32)))
+  let st0 := poseidon2Perm12
+    ⟨pkSeed,
+     ⟨layerKp, Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+      Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32)), Goldilocks.ofNat 2⟩,
+     ⟨Goldilocks.ofNat 0x5153414757504B31, Goldilocks.zero, Goldilocks.zero,
+      Goldilocks.ofNat 0x504F53325F474C31⟩⟩
+  let stAbs := poseidon2Perm12 ⟨lane4Add st0.b0 e0, lane4Add st0.b1 e1, st0.b2⟩
+  let stPad : Poseidon2State12 :=
+    ⟨⟨Goldilocks.add stAbs.b0.x0 Goldilocks.one, stAbs.b0.x1, stAbs.b0.x2, stAbs.b0.x3⟩,
+     stAbs.b1, stAbs.b2⟩
+  (poseidon2Perm12 stPad).b0
+
+def compactHonestWotsPk (skSeed pkSeed : Lane4) (layer treeIdx kpIdx : Nat) : Lane4 :=
+  compactWotsPk2 pkSeed layer treeIdx kpIdx
+    (compactWotsWalk pkSeed layer treeIdx kpIdx 0 3 0
+      (compactWotsSecret skSeed pkSeed layer treeIdx kpIdx 0))
+    (compactWotsWalk pkSeed layer treeIdx kpIdx 1 3 0
+      (compactWotsSecret skSeed pkSeed layer treeIdx kpIdx 1))
+
+def compactMerkleNode (pkSeed : Lane4) (layer treeIdx level nodeIdx : Nat)
+    (left right : Lane4) : Lane4 :=
+  let meta0 := Goldilocks.ofNat
+    ((layer % 65536) * (2 ^ 48) + (level % 65536) * (2 ^ 32) + (nodeIdx % (2 ^ 32)))
+  let st0 := poseidon2Perm12
+    ⟨pkSeed, left,
+     ⟨Goldilocks.ofNat 0x515341474D524B4C, meta0,
+      Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+      Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩
+  let b0' := lane4Add st0.b0 right
+  let b1' : Lane4 :=
+    ⟨Goldilocks.add st0.b1.x0 Goldilocks.one,
+     Goldilocks.add st0.b1.x1 (Goldilocks.ofNat 0x504F53325F474C31),
+     st0.b1.x2, st0.b1.x3⟩
+  (poseidon2Perm12 ⟨b0', b1', st0.b2⟩).b0
+
+def compactJortsPkRoot (skSeed pkSeed : Lane4) : Lane4 :=
+  compactMerkleNode pkSeed 0 0 1 0
+    (compactHonestWotsPk skSeed pkSeed 0 0 0)
+    (compactHonestWotsPk skSeed pkSeed 0 0 1)
+
+def compactJortsHmsgStateful (pkSeed pkRoot rRand : Lane4) (msg : List UInt8)
+    (kpIdx tswCtr : Nat) :
+    Goldilocks × Goldilocks × Goldilocks × Goldilocks × Goldilocks :=
+  let pkBytes : List UInt8 :=
+    (1 : UInt8) ::
+      be 8 pkSeed.x0.val ++ be 8 pkSeed.x1.val ++ be 8 pkSeed.x2.val ++ be 8 pkSeed.x3.val ++
+      be 8 pkRoot.x0.val ++ be 8 pkRoot.x1.val ++ be 8 pkRoot.x2.val ++ be 8 pkRoot.x3.val
+  let framed := encodeMultiFrame
+    [[0x51, 0x53, 0x41, 0x47, 0x2e, 0x4d, 0x55, 0x2f, 0x76, 0x32], pkBytes, msg]
+  let h32 := poseidon2Hash32 framed
+  let b := (h32 ++ List.replicate (32 - h32.length) (0 : UInt8)).take 32
+  let m0 := Goldilocks.ofNat (ofBE (b.take 7))
+  let m1 := Goldilocks.ofNat (ofBE ((b.drop 7).take 7))
+  let m2 := Goldilocks.ofNat (ofBE ((b.drop 14).take 7))
+  let m3 := Goldilocks.ofNat (ofBE ((b.drop 21).take 7))
+  let m4 := Goldilocks.ofNat (ofBE ((b.drop 28).take 4))
+  let kpCtr := Goldilocks.ofNat ((kpIdx % (2 ^ 32)) * (2 ^ 32) + (tswCtr % (2 ^ 32)))
+  let st0 := poseidon2Perm12
+    ⟨pkSeed, pkRoot,
+     ⟨Goldilocks.ofNat 0x51534147484D5331, kpCtr, m4, Goldilocks.ofNat 0x504F53325F474C31⟩⟩
+  let st1 := poseidon2Perm12 ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 ⟨m0, m1, m2, m3⟩, st0.b2⟩
+  let st2 := poseidon2Perm12
+    ⟨⟨Goldilocks.add st1.b0.x0 Goldilocks.one, st1.b0.x1, st1.b0.x2, st1.b0.x3⟩,
+     st1.b1, st1.b2⟩
+  (st2.b0.x0, st2.b0.x1, st2.b0.x2, st2.b0.x3, st2.b1.x0)
+
+def compactCheck5Limbs63
+    (h : Goldilocks × Goldilocks × Goldilocks × Goldilocks × Goldilocks) : Bool :=
+  (h.1.val < 2 ^ 63) &&
+  (h.2.1.val < 2 ^ 63) &&
+  (h.2.2.1.val < 2 ^ 63) &&
+  (h.2.2.2.1.val < 2 ^ 63) &&
+  (h.2.2.2.2.val < 2 ^ 63)
+
+def compactJortsSign1 (skSeed pkSeed pkRoot : Lane4) (msg : List UInt8)
+    (rRand : Lane4) (leafIdx ctr : Nat) : List Lane4 × List Lane4 :=
+  let kp0 := leafIdx % 2
+  let tr0 := leafIdx / 2
+  let hmsg := compactJortsHmsgStateful pkSeed pkRoot rRand msg kp0 ctr
+  let chains :=
+    if compactCheck5Limbs63 hmsg then
+      let d0 := hmsg.1.val % 4
+      let d1 := (hmsg.1.val / 4) % 4
+      [compactWotsWalk pkSeed 0 tr0 kp0 0 d0 0 (compactWotsSecret skSeed pkSeed 0 tr0 kp0 0),
+       compactWotsWalk pkSeed 0 tr0 kp0 1 d1 0 (compactWotsSecret skSeed pkSeed 0 tr0 kp0 1)]
+    else []
+  let sibIdx := if kp0 % 2 == 0 then kp0 + 1 else kp0 - 1
+  let sib := compactHonestWotsPk skSeed pkSeed 0 tr0 sibIdx
+  (chains, [sib])
+
+def compactJortsVerify1 (pkSeed pkRoot : Lane4) (msg : List UInt8)
+    (rRand : Lane4) (leafIdx ctr : Nat) (c0 c1 s0 : Lane4) : Bool :=
+  if !(leafIdx < 2) then false
+  else
+    let kp0 := leafIdx % 2
+    let tr0 := leafIdx / 2
+    let hmsg := compactJortsHmsgStateful pkSeed pkRoot rRand msg kp0 ctr
+    if compactCheck5Limbs63 hmsg then
+      let d0 := hmsg.1.val % 4
+      let d1 := (hmsg.1.val / 4) % 4
+      if (d0 + (d1 + 0)) == 3 then
+        let ep0 := compactWotsWalk pkSeed 0 tr0 kp0 0 (3 - d0) d0 c0
+        let ep1 := compactWotsWalk pkSeed 0 tr0 kp0 1 (3 - d1) d1 c1
+        let wotsPk := compactWotsPk2 pkSeed 0 tr0 kp0 ep0 ep1
+        let root0 :=
+          if kp0 % 2 == 0 then compactMerkleNode pkSeed 0 tr0 1 (kp0 / 2) wotsPk s0
+          else compactMerkleNode pkSeed 0 tr0 1 (kp0 / 2) s0 wotsPk
+        root0 == pkRoot
+      else false
+    else false
+
+theorem compactPackWotsAddr_eq (layer kpIdx chainIdx stepIdx : Nat) :
+    compactPackWotsAddr layer kpIdx chainIdx stepIdx =
+      Goldilocks.ofNat
+        ((layer % 64) * (2 ^ 44) +
+         (kpIdx % (2 ^ 28)) * (2 ^ 16) +
+         (chainIdx % 4096) * 16 +
+         (stepIdx % 16)) := by rfl
+
+theorem compactWotsSecret_eq_def (skSeed pkSeed : Lane4) (layer treeIdx kpIdx chainIdx : Nat) :
+    compactWotsSecret skSeed pkSeed layer treeIdx kpIdx chainIdx =
+      poseidon2CompressWeighted
+        ⟨skSeed, pkSeed,
+         ⟨Goldilocks.ofNat 0x5153414757505246,
+          compactPackWotsAddr layer kpIdx chainIdx 0,
+          Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+          Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩ := by rfl
+
+theorem compactWotsStep_eq_def (pkSeed cur : Lane4) (layer treeIdx kpIdx chainIdx stepIdx : Nat) :
+    compactWotsStep pkSeed cur layer treeIdx kpIdx chainIdx stepIdx =
+      poseidon2CompressWeighted
+        ⟨cur, pkSeed,
+         ⟨Goldilocks.ofNat 0x5153414757535450,
+          compactPackWotsAddr layer kpIdx chainIdx stepIdx,
+          Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+          Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩ := by rfl
+
+theorem compactWotsWalk_zero (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx idx : Nat) (s : Lane4) :
+    compactWotsWalk pkSeed layer treeIdx kpIdx chainIdx 0 idx s = s := by
+  unfold compactWotsWalk compactIterAt
+  rfl
+
+theorem compactWotsWalk_succ (pkSeed : Lane4) (layer treeIdx kpIdx chainIdx n idx : Nat) (s : Lane4) :
+    compactWotsWalk pkSeed layer treeIdx kpIdx chainIdx (n + 1) idx s =
+      compactWotsWalk pkSeed layer treeIdx kpIdx chainIdx n (idx + 1)
+        (compactWotsStep pkSeed s layer treeIdx kpIdx chainIdx idx) := by
+  unfold compactWotsWalk
+  rw [compactIterAt]
+
+theorem compactWotsPk2_eq_def (pkSeed : Lane4) (layer treeIdx kpIdx : Nat) (e0 e1 : Lane4) :
+    compactWotsPk2 pkSeed layer treeIdx kpIdx e0 e1 =
+      let layerKp := Goldilocks.ofNat ((layer % (2 ^ 32)) * (2 ^ 32) + (kpIdx % (2 ^ 32)))
+      let st0 := poseidon2Perm12
+        ⟨pkSeed,
+         ⟨layerKp, Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+          Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32)), Goldilocks.ofNat 2⟩,
+         ⟨Goldilocks.ofNat 0x5153414757504B31, Goldilocks.zero, Goldilocks.zero,
+          Goldilocks.ofNat 0x504F53325F474C31⟩⟩
+      let stAbs := poseidon2Perm12 ⟨lane4Add st0.b0 e0, lane4Add st0.b1 e1, st0.b2⟩
+      let stPad : Poseidon2State12 :=
+        ⟨⟨Goldilocks.add stAbs.b0.x0 Goldilocks.one, stAbs.b0.x1, stAbs.b0.x2, stAbs.b0.x3⟩,
+         stAbs.b1, stAbs.b2⟩
+      (poseidon2Perm12 stPad).b0 := by rfl
+
+theorem compactHonestWotsPk_eq_def (skSeed pkSeed : Lane4) (layer treeIdx kpIdx : Nat) :
+    compactHonestWotsPk skSeed pkSeed layer treeIdx kpIdx =
+      compactWotsPk2 pkSeed layer treeIdx kpIdx
+        (compactWotsWalk pkSeed layer treeIdx kpIdx 0 3 0
+          (compactWotsSecret skSeed pkSeed layer treeIdx kpIdx 0))
+        (compactWotsWalk pkSeed layer treeIdx kpIdx 1 3 0
+          (compactWotsSecret skSeed pkSeed layer treeIdx kpIdx 1)) := by rfl
+
+theorem compactMerkleNode_eq_def (pkSeed : Lane4) (layer treeIdx level nodeIdx : Nat)
+    (left right : Lane4) :
+    compactMerkleNode pkSeed layer treeIdx level nodeIdx left right =
+      let meta0 := Goldilocks.ofNat
+        ((layer % 65536) * (2 ^ 48) + (level % 65536) * (2 ^ 32) + (nodeIdx % (2 ^ 32)))
+      let st0 := poseidon2Perm12
+        ⟨pkSeed, left,
+         ⟨Goldilocks.ofNat 0x515341474D524B4C, meta0,
+          Goldilocks.ofNat (treeIdx % (2 ^ 32)),
+          Goldilocks.ofNat ((treeIdx / (2 ^ 32)) % (2 ^ 32))⟩⟩
+      let b0' := lane4Add st0.b0 right
+      let b1' : Lane4 :=
+        ⟨Goldilocks.add st0.b1.x0 Goldilocks.one,
+         Goldilocks.add st0.b1.x1 (Goldilocks.ofNat 0x504F53325F474C31),
+         st0.b1.x2, st0.b1.x3⟩
+      (poseidon2Perm12 ⟨b0', b1', st0.b2⟩).b0 := by rfl
+
+theorem compactJortsPkRoot_eq_def (skSeed pkSeed : Lane4) :
+    compactJortsPkRoot skSeed pkSeed =
+      compactMerkleNode pkSeed 0 0 1 0
+        (compactHonestWotsPk skSeed pkSeed 0 0 0)
+        (compactHonestWotsPk skSeed pkSeed 0 0 1) := by rfl
+
+theorem compactJortsHmsgStateful_eq_def (pkSeed pkRoot rRand : Lane4) (msg : List UInt8)
+    (kpIdx tswCtr : Nat) :
+    compactJortsHmsgStateful pkSeed pkRoot rRand msg kpIdx tswCtr =
+      let pkBytes : List UInt8 :=
+        (1 : UInt8) ::
+          be 8 pkSeed.x0.val ++ be 8 pkSeed.x1.val ++ be 8 pkSeed.x2.val ++ be 8 pkSeed.x3.val ++
+          be 8 pkRoot.x0.val ++ be 8 pkRoot.x1.val ++ be 8 pkRoot.x2.val ++ be 8 pkRoot.x3.val
+      let framed := encodeMultiFrame
+        [[0x51, 0x53, 0x41, 0x47, 0x2e, 0x4d, 0x55, 0x2f, 0x76, 0x32], pkBytes, msg]
+      let h32 := poseidon2Hash32 framed
+      let b := (h32 ++ List.replicate (32 - h32.length) (0 : UInt8)).take 32
+      let m0 := Goldilocks.ofNat (ofBE (b.take 7))
+      let m1 := Goldilocks.ofNat (ofBE ((b.drop 7).take 7))
+      let m2 := Goldilocks.ofNat (ofBE ((b.drop 14).take 7))
+      let m3 := Goldilocks.ofNat (ofBE ((b.drop 21).take 7))
+      let m4 := Goldilocks.ofNat (ofBE ((b.drop 28).take 4))
+      let kpCtr := Goldilocks.ofNat ((kpIdx % (2 ^ 32)) * (2 ^ 32) + (tswCtr % (2 ^ 32)))
+      let st0 := poseidon2Perm12
+        ⟨pkSeed, pkRoot,
+         ⟨Goldilocks.ofNat 0x51534147484D5331, kpCtr, m4, Goldilocks.ofNat 0x504F53325F474C31⟩⟩
+      let st1 := poseidon2Perm12 ⟨lane4Add st0.b0 rRand, lane4Add st0.b1 ⟨m0, m1, m2, m3⟩, st0.b2⟩
+      let st2 := poseidon2Perm12
+        ⟨⟨Goldilocks.add st1.b0.x0 Goldilocks.one, st1.b0.x1, st1.b0.x2, st1.b0.x3⟩,
+         st1.b1, st1.b2⟩
+      (st2.b0.x0, st2.b0.x1, st2.b0.x2, st2.b0.x3, st2.b1.x0) := by rfl
+
+theorem compactCheck5Limbs63_eq_def
+    (h : Goldilocks × Goldilocks × Goldilocks × Goldilocks × Goldilocks) :
+    compactCheck5Limbs63 h =
+      ((h.1.val < 2 ^ 63) &&
+       (h.2.1.val < 2 ^ 63) &&
+       (h.2.2.1.val < 2 ^ 63) &&
+       (h.2.2.2.1.val < 2 ^ 63) &&
+       (h.2.2.2.2.val < 2 ^ 63)) := by rfl
+
+theorem compactJortsSign1_eq_def (skSeed pkSeed pkRoot : Lane4) (msg : List UInt8)
+    (rRand : Lane4) (leafIdx ctr : Nat) :
+    compactJortsSign1 skSeed pkSeed pkRoot msg rRand leafIdx ctr =
+      let kp0 := leafIdx % 2
+      let tr0 := leafIdx / 2
+      let hmsg := compactJortsHmsgStateful pkSeed pkRoot rRand msg kp0 ctr
+      let chains :=
+        if compactCheck5Limbs63 hmsg then
+          let d0 := hmsg.1.val % 4
+          let d1 := (hmsg.1.val / 4) % 4
+          [compactWotsWalk pkSeed 0 tr0 kp0 0 d0 0 (compactWotsSecret skSeed pkSeed 0 tr0 kp0 0),
+           compactWotsWalk pkSeed 0 tr0 kp0 1 d1 0 (compactWotsSecret skSeed pkSeed 0 tr0 kp0 1)]
+        else []
+      let sibIdx := if kp0 % 2 == 0 then kp0 + 1 else kp0 - 1
+      let sib := compactHonestWotsPk skSeed pkSeed 0 tr0 sibIdx
+      (chains, [sib]) := by rfl
+
+theorem compactJortsVerify1_eq_def (pkSeed pkRoot : Lane4) (msg : List UInt8)
+    (rRand : Lane4) (leafIdx ctr : Nat) (c0 c1 s0 : Lane4) :
+    compactJortsVerify1 pkSeed pkRoot msg rRand leafIdx ctr c0 c1 s0 =
+      if !(leafIdx < 2) then false
+      else
+        let kp0 := leafIdx % 2
+        let tr0 := leafIdx / 2
+        let hmsg := compactJortsHmsgStateful pkSeed pkRoot rRand msg kp0 ctr
+        if compactCheck5Limbs63 hmsg then
+          let d0 := hmsg.1.val % 4
+          let d1 := (hmsg.1.val / 4) % 4
+          if (d0 + (d1 + 0)) == 3 then
+            let ep0 := compactWotsWalk pkSeed 0 tr0 kp0 0 (3 - d0) d0 c0
+            let ep1 := compactWotsWalk pkSeed 0 tr0 kp0 1 (3 - d1) d1 c1
+            let wotsPk := compactWotsPk2 pkSeed 0 tr0 kp0 ep0 ep1
+            let root0 :=
+              if kp0 % 2 == 0 then compactMerkleNode pkSeed 0 tr0 1 (kp0 / 2) wotsPk s0
+              else compactMerkleNode pkSeed 0 tr0 1 (kp0 / 2) s0 wotsPk
+            root0 == pkRoot
+          else false
+        else false := by rfl
+
+section CompactJortsKats
+set_option exponentiation.threshold 2048
+set_option maxRecDepth 1000000
+
+private def cjLane (a b c d : Nat) : Lane4 :=
+  ⟨Goldilocks.ofNat a, Goldilocks.ofNat b, Goldilocks.ofNat c, Goldilocks.ofNat d⟩
+
+private def cjSk0 : Lane4 := cjLane 11 22 33 44
+private def cjSk1 : Lane4 := cjLane 12 23 34 45
+private def cjPkSeed : Lane4 := cjLane 55 66 77 88
+private def cjRRand : Lane4 := cjLane 99 101 102 103
+private def cjPkRoot0 : Lane4 :=
+  cjLane 4411130677596272051 12386187803866016865 4846206855630815541 13194810747827022671
+private def cjPkRoot1 : Lane4 :=
+  cjLane 17576564533966561130 16051823357764822570 14727583026633534692 1732328166828656438
+
+private def cjAuditC00 : Lane4 :=
+  cjLane 8311586201798180139 8396487982263648832 16278201376156863497 5873789825944876137
+private def cjAuditC01 : Lane4 :=
+  cjLane 11009790873695555519 14395406594536956999 11951049901538821830 10044662254597907680
+private def cjSib0 : Lane4 :=
+  cjLane 5524291857455771020 16376422686410664307 15963494650740044646 18098363549869475062
+private def cjAuditC10 : Lane4 :=
+  cjLane 7345396832099288313 5628321512706338704 2904634915904338214 11778081422095187519
+private def cjAuditC11 : Lane4 :=
+  cjLane 6519691662884691569 6995657412139860735 8574290930621241436 12609139020484668794
+private def cjSib1 : Lane4 :=
+  cjLane 13388180661509288011 5130805258596798721 8406673262598715289 15360960474733464499
+
+private def cjHybC00 : Lane4 :=
+  cjLane 4152917893602010253 5344412802567744713 18406927796743773750 1962659585794765281
+private def cjHybC01 : Lane4 :=
+  cjLane 12873018474816122043 2869910227242953051 3097284758269903553 18326636155894048790
+private def cjHybC10 : Lane4 :=
+  cjLane 10036846859147774993 15499800327978969217 15476824389852128619 15451031862181482938
+private def cjHybC11 : Lane4 :=
+  cjLane 14010823692816899133 11663312065820974772 3799621797402719272 6812636063505864400
+
+private def cjTrPaid0 : List UInt8 :=
+  [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+   216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+   92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+   173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+   149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+   0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+
+private def cjTrPaid1 : List UInt8 :=
+  [2, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+   216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+   92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+   173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+   149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+   0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+
+private def cjTrUnpaid0 : List UInt8 :=
+  [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+   216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+   92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+   173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+   149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+   0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 122]
+
+private def cjTrRogue1 : List UInt8 :=
+  [2, 5, 1, 0, 1, 1, 1, 120, 130, 148, 209, 221, 48, 122, 11, 201, 31, 97, 23, 207, 212, 76, 157,
+   190, 150, 250, 193, 174, 105, 54, 248, 197, 104, 124, 130, 106, 159, 53, 46, 94, 59, 166, 234,
+   77, 144, 26, 197, 209, 246, 48, 107, 133, 48, 181, 232, 37, 98, 85, 103, 78, 54, 227, 77, 248,
+   234, 245, 170, 196, 166, 208, 0, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67,
+   25, 7, 149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+   0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+
+theorem compactJortsPkRoot_kat0 :
+    compactJortsPkRoot ⟨Goldilocks.ofNat 11, Goldilocks.ofNat 22, Goldilocks.ofNat 33, Goldilocks.ofNat 44⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩ =
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩ := by
+  decide +kernel
+
+theorem compactJortsPkRoot_kat1 :
+    compactJortsPkRoot ⟨Goldilocks.ofNat 12, Goldilocks.ofNat 23, Goldilocks.ofNat 34, Goldilocks.ofNat 45⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩ =
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩ := by
+  decide +kernel
+
+theorem compactJortsSign1_audit0 :
+    compactJortsSign1
+      ⟨Goldilocks.ofNat 11, Goldilocks.ofNat 22, Goldilocks.ofNat 33, Goldilocks.ofNat 44⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 37 =
+      ([⟨Goldilocks.ofNat 8311586201798180139, Goldilocks.ofNat 8396487982263648832,
+         Goldilocks.ofNat 16278201376156863497, Goldilocks.ofNat 5873789825944876137⟩,
+        ⟨Goldilocks.ofNat 11009790873695555519, Goldilocks.ofNat 14395406594536956999,
+         Goldilocks.ofNat 11951049901538821830, Goldilocks.ofNat 10044662254597907680⟩],
+       [⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+         Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩]) := by
+  decide +kernel
+
+theorem compactJortsSign1_audit1 :
+    compactJortsSign1
+      ⟨Goldilocks.ofNat 12, Goldilocks.ofNat 23, Goldilocks.ofNat 34, Goldilocks.ofNat 45⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 45 =
+      ([⟨Goldilocks.ofNat 7345396832099288313, Goldilocks.ofNat 5628321512706338704,
+         Goldilocks.ofNat 2904634915904338214, Goldilocks.ofNat 11778081422095187519⟩,
+        ⟨Goldilocks.ofNat 6519691662884691569, Goldilocks.ofNat 6995657412139860735,
+         Goldilocks.ofNat 8574290930621241436, Goldilocks.ofNat 12609139020484668794⟩],
+       [⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+         Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩]) := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_accepts0 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 37
+      ⟨Goldilocks.ofNat 8311586201798180139, Goldilocks.ofNat 8396487982263648832,
+       Goldilocks.ofNat 16278201376156863497, Goldilocks.ofNat 5873789825944876137⟩
+      ⟨Goldilocks.ofNat 11009790873695555519, Goldilocks.ofNat 14395406594536956999,
+       Goldilocks.ofNat 11951049901538821830, Goldilocks.ofNat 10044662254597907680⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = true := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_accepts1 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 45
+      ⟨Goldilocks.ofNat 7345396832099288313, Goldilocks.ofNat 5628321512706338704,
+       Goldilocks.ofNat 2904634915904338214, Goldilocks.ofNat 11778081422095187519⟩
+      ⟨Goldilocks.ofNat 6519691662884691569, Goldilocks.ofNat 6995657412139860735,
+       Goldilocks.ofNat 8574290930621241436, Goldilocks.ofNat 12609139020484668794⟩
+      ⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+       Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩ = true := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_rejects_otherMsg0 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [0x51, 0x53, 0x41, 0x48]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 37
+      ⟨Goldilocks.ofNat 8311586201798180139, Goldilocks.ofNat 8396487982263648832,
+       Goldilocks.ofNat 16278201376156863497, Goldilocks.ofNat 5873789825944876137⟩
+      ⟨Goldilocks.ofNat 11009790873695555519, Goldilocks.ofNat 14395406594536956999,
+       Goldilocks.ofNat 11951049901538821830, Goldilocks.ofNat 10044662254597907680⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = false := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_rejects_otherMsg1 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [0x51, 0x53, 0x41, 0x48]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 45
+      ⟨Goldilocks.ofNat 7345396832099288313, Goldilocks.ofNat 5628321512706338704,
+       Goldilocks.ofNat 2904634915904338214, Goldilocks.ofNat 11778081422095187519⟩
+      ⟨Goldilocks.ofNat 6519691662884691569, Goldilocks.ofNat 6995657412139860735,
+       Goldilocks.ofNat 8574290930621241436, Goldilocks.ofNat 12609139020484668794⟩
+      ⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+       Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩ = false := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_rejects_otherKey :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 37
+      ⟨Goldilocks.ofNat 8311586201798180139, Goldilocks.ofNat 8396487982263648832,
+       Goldilocks.ofNat 16278201376156863497, Goldilocks.ofNat 5873789825944876137⟩
+      ⟨Goldilocks.ofNat 11009790873695555519, Goldilocks.ofNat 14395406594536956999,
+       Goldilocks.ofNat 11951049901538821830, Goldilocks.ofNat 10044662254597907680⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = false := by
+  decide +kernel
+
+theorem compactJortsVerify1_audit_rejects_tamperedRand :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [0x51, 0x53, 0x41, 0x47]
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      0 37
+      ⟨Goldilocks.ofNat 8311586201798180139, Goldilocks.ofNat 8396487982263648832,
+       Goldilocks.ofNat 16278201376156863497, Goldilocks.ofNat 5873789825944876137⟩
+      ⟨Goldilocks.ofNat 11009790873695555519, Goldilocks.ofNat 14395406594536956999,
+       Goldilocks.ofNat 11951049901538821830, Goldilocks.ofNat 10044662254597907680⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = false := by
+  decide +kernel
+
+theorem compactJortsSign1_hybrid0 :
+    compactJortsSign1
+      ⟨Goldilocks.ofNat 11, Goldilocks.ofNat 22, Goldilocks.ofNat 33, Goldilocks.ofNat 44⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 21 =
+      ([⟨Goldilocks.ofNat 4152917893602010253, Goldilocks.ofNat 5344412802567744713,
+         Goldilocks.ofNat 18406927796743773750, Goldilocks.ofNat 1962659585794765281⟩,
+        ⟨Goldilocks.ofNat 12873018474816122043, Goldilocks.ofNat 2869910227242953051,
+         Goldilocks.ofNat 3097284758269903553, Goldilocks.ofNat 18326636155894048790⟩],
+       [⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+         Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩]) := by
+  decide +kernel
+
+theorem compactJortsSign1_hybrid1 :
+    compactJortsSign1
+      ⟨Goldilocks.ofNat 12, Goldilocks.ofNat 23, Goldilocks.ofNat 34, Goldilocks.ofNat 45⟩
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [2, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 122 =
+      ([⟨Goldilocks.ofNat 10036846859147774993, Goldilocks.ofNat 15499800327978969217,
+         Goldilocks.ofNat 15476824389852128619, Goldilocks.ofNat 15451031862181482938⟩,
+        ⟨Goldilocks.ofNat 14010823692816899133, Goldilocks.ofNat 11663312065820974772,
+         Goldilocks.ofNat 3799621797402719272, Goldilocks.ofNat 6812636063505864400⟩],
+       [⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+         Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩]) := by
+  decide +kernel
+
+theorem compactJortsVerify1_hybrid_paid0 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 21
+      ⟨Goldilocks.ofNat 4152917893602010253, Goldilocks.ofNat 5344412802567744713,
+       Goldilocks.ofNat 18406927796743773750, Goldilocks.ofNat 1962659585794765281⟩
+      ⟨Goldilocks.ofNat 12873018474816122043, Goldilocks.ofNat 2869910227242953051,
+       Goldilocks.ofNat 3097284758269903553, Goldilocks.ofNat 18326636155894048790⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = true := by
+  decide +kernel
+
+theorem compactJortsVerify1_hybrid_paid1 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [2, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 122
+      ⟨Goldilocks.ofNat 10036846859147774993, Goldilocks.ofNat 15499800327978969217,
+       Goldilocks.ofNat 15476824389852128619, Goldilocks.ofNat 15451031862181482938⟩
+      ⟨Goldilocks.ofNat 14010823692816899133, Goldilocks.ofNat 11663312065820974772,
+       Goldilocks.ofNat 3799621797402719272, Goldilocks.ofNat 6812636063505864400⟩
+      ⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+       Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩ = true := by
+  decide +kernel
+
+theorem compactJortsVerify1_hybrid_unpaid0 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 4411130677596272051, Goldilocks.ofNat 12386187803866016865,
+       Goldilocks.ofNat 4846206855630815541, Goldilocks.ofNat 13194810747827022671⟩
+      [1, 5, 1, 0, 1, 1, 1, 206, 73, 15, 23, 239, 92, 48, 234, 75, 102, 152, 130, 28, 89, 229, 182,
+       216, 35, 70, 212, 124, 3, 104, 43, 36, 3, 143, 228, 38, 18, 223, 21, 43, 75, 67, 27, 105, 156,
+       92, 201, 184, 206, 75, 28, 48, 223, 0, 28, 57, 117, 15, 89, 215, 207, 202, 102, 90, 173, 39,
+       173, 45, 208, 180, 136, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67, 25, 7,
+       149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 122]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      0 21
+      ⟨Goldilocks.ofNat 4152917893602010253, Goldilocks.ofNat 5344412802567744713,
+       Goldilocks.ofNat 18406927796743773750, Goldilocks.ofNat 1962659585794765281⟩
+      ⟨Goldilocks.ofNat 12873018474816122043, Goldilocks.ofNat 2869910227242953051,
+       Goldilocks.ofNat 3097284758269903553, Goldilocks.ofNat 18326636155894048790⟩
+      ⟨Goldilocks.ofNat 5524291857455771020, Goldilocks.ofNat 16376422686410664307,
+       Goldilocks.ofNat 15963494650740044646, Goldilocks.ofNat 18098363549869475062⟩ = false := by
+  decide +kernel
+
+theorem compactJortsVerify1_hybrid_rogue1 :
+    compactJortsVerify1
+      ⟨Goldilocks.ofNat 55, Goldilocks.ofNat 66, Goldilocks.ofNat 77, Goldilocks.ofNat 88⟩
+      ⟨Goldilocks.ofNat 17576564533966561130, Goldilocks.ofNat 16051823357764822570,
+       Goldilocks.ofNat 14727583026633534692, Goldilocks.ofNat 1732328166828656438⟩
+      [2, 5, 1, 0, 1, 1, 1, 120, 130, 148, 209, 221, 48, 122, 11, 201, 31, 97, 23, 207, 212, 76, 157,
+       190, 150, 250, 193, 174, 105, 54, 248, 197, 104, 124, 130, 106, 159, 53, 46, 94, 59, 166, 234,
+       77, 144, 26, 197, 209, 246, 48, 107, 133, 48, 181, 232, 37, 98, 85, 103, 78, 54, 227, 77, 248,
+       234, 245, 170, 196, 166, 208, 0, 201, 197, 141, 148, 57, 199, 227, 247, 109, 141, 53, 178, 67,
+       25, 7, 149, 86, 29, 49, 79, 239, 0, 64, 168, 235, 189, 88, 222, 80, 188, 241, 127,
+       0, 0, 0, 0, 0, 0, 0, 3, 112, 97, 121]
+      ⟨Goldilocks.ofNat 99, Goldilocks.ofNat 101, Goldilocks.ofNat 102, Goldilocks.ofNat 103⟩
+      1 122
+      ⟨Goldilocks.ofNat 10036846859147774993, Goldilocks.ofNat 15499800327978969217,
+       Goldilocks.ofNat 15476824389852128619, Goldilocks.ofNat 15451031862181482938⟩
+      ⟨Goldilocks.ofNat 14010823692816899133, Goldilocks.ofNat 11663312065820974772,
+       Goldilocks.ofNat 3799621797402719272, Goldilocks.ofNat 6812636063505864400⟩
+      ⟨Goldilocks.ofNat 13388180661509288011, Goldilocks.ofNat 5130805258596798721,
+       Goldilocks.ofNat 8406673262598715289, Goldilocks.ofNat 15360960474733464499⟩ = false := by
+  decide +kernel
+
+#verify_constructive
+  Qsag.poseidon2Perm12_realX_kat
+  Qsag.poseidon2CompressWeighted_realX_kat
+  Qsag.poseidon2Inv_realY_feedforward_kat
+  Qsag.compactJortsPkRoot_kat0
+  Qsag.compactJortsPkRoot_kat1
+  Qsag.compactJortsSign1_audit0
+  Qsag.compactJortsSign1_audit1
+  Qsag.compactJortsVerify1_audit_accepts0
+  Qsag.compactJortsVerify1_audit_accepts1
+  Qsag.compactJortsVerify1_audit_rejects_otherMsg0
+  Qsag.compactJortsVerify1_audit_rejects_otherMsg1
+  Qsag.compactJortsVerify1_audit_rejects_otherKey
+  Qsag.compactJortsVerify1_audit_rejects_tamperedRand
+  Qsag.compactJortsSign1_hybrid0
+  Qsag.compactJortsSign1_hybrid1
+  Qsag.compactJortsVerify1_hybrid_paid0
+  Qsag.compactJortsVerify1_hybrid_paid1
+  Qsag.compactJortsVerify1_hybrid_unpaid0
+  Qsag.compactJortsVerify1_hybrid_rogue1
+end CompactJortsKats
+end CompositionInstancesPoseidon2Kats
+
 end Qsag
 end

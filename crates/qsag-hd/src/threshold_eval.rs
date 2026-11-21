@@ -88,8 +88,8 @@ pub struct HdThresholdEvalRound2OpenShareAndCommitMac<'a>(EvalState<'a>);
 /// ```
 pub struct HdThresholdEvalRound3VerifyMac<'a>(EvalState<'a>);
 
-fn tags_bytes(tags: &[u32; SPDZ_LANES]) -> [u8; SPDZ_LANES * 4] {
-    let mut bytes = [0; SPDZ_LANES * 4];
+fn tags_bytes(tags: &[u32; SPDZ_LANES]) -> qsag_asm::wipe::SecretBuffer<[u8; SPDZ_LANES * 4]> {
+    let mut bytes = qsag_asm::wipe::SecretBuffer([0; SPDZ_LANES * 4]);
     for (chunk, tag) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(tags) {
         chunk.copy_from_slice(&tag.to_be_bytes());
     }
@@ -456,11 +456,12 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
         let mut tags: [u32; SPDZ_LANES] = core::array::from_fn(|lane| {
             mod_q_sub(self.0.gamma[lane], mod_q_mul(self.0.alpha[lane], value))
         });
+        let packed_tags = tags_bytes(&tags);
         self.0.mac_digest = commit_mpc_broadcast(
             &self.0.session,
             2,
             self.0.share.party_id,
-            &tags_bytes(&tags),
+            &*packed_tags,
             &self.0.mac_salt,
         );
         self.0.zero_test = Some(CommittedZeroGates::hold(
@@ -551,7 +552,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
                 &self.0.session,
                 2,
                 opening.party_id,
-                &tags_bytes(&opening.tags),
+                &*tags_bytes(&opening.tags),
                 &opening.salt,
             );
             if opening.party_id == own {
@@ -966,7 +967,7 @@ mod tests {
                 &first.session,
                 2,
                 first.share.party_id,
-                &tags_bytes(&tags),
+                &*tags_bytes(&tags),
                 &first.mac_salt,
             );
             first.zero_test = Some(CommittedZeroGates::hold(first.session, MODULE_Q, &mut tags));

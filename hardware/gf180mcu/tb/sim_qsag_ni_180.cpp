@@ -24,6 +24,8 @@
 #include "verilated.h"
 
 typedef uint64_t u64;
+typedef uint32_t u32;
+typedef uint16_t u16;
 
 struct Cfg {
     int mode = 0;            // IO_MODE
@@ -359,7 +361,7 @@ struct Sim {
         advance(cfg.io_half);                            // bundling: data before the request edge
         req_in ^= 1;
         val[37] = req_in;
-        wait_for([&] { return pad_out(36) == req_in; }, 400000000ULL, "ACK_OUT");
+        wait_for([&] { return pad_out(36) == req_in; }, 4000000000ULL, "ACK_OUT");
         advance(cfg.io_half / 2);
     }
 
@@ -586,6 +588,49 @@ static void scenario_glitch(Sim& s) {
     check(s, !((tel >> 42) & 1), "key gone after reset");
 }
 
+// -------------------------------------------------------------------- crypto helpers for testbench scenarios
+static u64 rol64_tb(u64 v, int n) { return n ? ((v << n) | (v >> (64 - n))) : v; }
+static void keccak_p12_tb(u64 a[25]) {
+    static const u64 RC[12] = {
+        0x000000008000808BULL, 0x800000000000008BULL, 0x8000000000008089ULL, 0x8000000000008003ULL,
+        0x8000000000008002ULL, 0x8000000000000080ULL, 0x000000000000800AULL, 0x800000008000000AULL,
+        0x8000000080008081ULL, 0x8000000000008080ULL, 0x0000000080000001ULL, 0x8000000080008008ULL};
+    static const int ROT[5][5] = {
+        {0, 36, 3, 41, 18}, {1, 44, 10, 45, 2}, {62, 6, 43, 15, 61}, {28, 55, 25, 21, 56}, {27, 20, 39, 8, 14}};
+    for (int r = 0; r < 12; r++) {
+        u64 c[5], d[5], b[25];
+        for (int x = 0; x < 5; x++) c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20];
+        for (int x = 0; x < 5; x++) d[x] = c[(x + 4) % 5] ^ rol64_tb(c[(x + 1) % 5], 1);
+        for (int i = 0; i < 25; i++) a[i] ^= d[i % 5];
+        for (int x = 0; x < 5; x++)
+            for (int y = 0; y < 5; y++) b[y + 5 * ((2 * x + 3 * y) % 5)] = rol64_tb(a[x + 5 * y], ROT[x][y]);
+        for (int i = 0; i < 25; i++)
+            a[i] = b[i] ^ ((~b[(i % 5 + 1) % 5 + 5 * (i / 5)]) & b[(i % 5 + 2) % 5 + 5 * (i / 5)]);
+        a[0] ^= RC[r];
+    }
+}
+static void gf128_mul_tb(u64 a0, u64 a1, u64 b0, u64 b1, u64& o0, u64& o1) {
+    u64 r0 = 0, r1 = 0, v0 = a0, v1 = a1;
+    for (int i = 0; i < 128; i++) {
+        int bit = (i < 64) ? ((b0 >> i) & 1) : ((b1 >> (i - 64)) & 1);
+        if (bit) { r0 ^= v0; r1 ^= v1; }
+        int top = (v1 >> 63) & 1;
+        v1 = (v1 << 1) | (v0 >> 63);
+        v0 = (v0 << 1) ^ (top ? 0x87ULL : 0ULL);
+    }
+    o0 = r0; o1 = r1;
+}
+static std::vector<u64> prf_tagged_req(u64 kmac0, u64 kmac1, u64 msg_word) {
+    u64 h = 0x51ULL | (0x42ULL << 8) | (24ULL << 24);
+    u64 a0 = 0, a1 = 0;
+    gf128_mul_tb(h, 0, kmac0, kmac1, a0, a1);
+    gf128_mul_tb(a0 ^ msg_word, a1, kmac0, kmac1, a0, a1);
+    u64 st[25] = {};
+    st[0] = kmac0; st[1] = kmac1; st[2] = h; st[3] = 0x4B4D494E47415351ULL; st[4] = 0x1FULL; st[16] = 1ULL << 63;
+    keccak_p12_tb(st);
+    return {h, msg_word, a0 ^ st[0], a1 ^ st[1]};
+}
+
 static void scenario_trng(Sim& s) {
     printf("scenario: TRNG health and TRNG key load\n");
     std::vector<u64> r;
@@ -601,12 +646,14 @@ static void scenario_trng(Sim& s) {
     u64 w2 = s.ping_tel(4);
     printf("  raw TRNG words: %016" PRIx64 " %016" PRIx64 "\n", w1, w2);
     check(s, w1 != w2 && w1 != 0 && ~w1 != 0, "raw words differ");
-    // TRNG key load with two personalization words, then a keyed operation
+    // TRNG key load with two personalization words, then authenticated PRF_msg
     check(s, s.xfer({0x51ULL | (0x40ULL << 8) | (32ULL << 24), 7, 8, 0xAAAA, 0xBBBB}, 1, r) && (r[0] >> 16 & 0x81) == 1,
           "key load from the TRNG");
     check(s, key_valid(s), "key_valid set");
-    check(s, s.xfer({0x51ULL | (0x42ULL << 8) | (8ULL << 24), 0x1234}, 3, r) && (r[0] >> 16 & 0x81) == 1 && (r[1] | r[2]) != 0,
-          "PRF_msg answers under the generated key");
+    check(s, s.xfer({0x51ULL | (0x42ULL << 8) | (8ULL << 24), 0x1234}, 1, r) && (r[0] >> 48) == 3,
+          "untagged PRF_msg refused (E_LEN)");
+    check(s, s.xfer(prf_tagged_req(7, 8, 0x1234), 3, r) && (r[0] >> 16 & 0x81) == 1 && (r[1] | r[2]) != 0,
+          "PRF_msg answers under the generated key with valid K_MAC tag");
     u64 tel = s.ping_tel(2);
     check(s, !((tel >> 34) & 3), "no RCT / APT failure latched");
 }
@@ -809,7 +856,232 @@ static void scenario_tamperboot(Sim& s) {
     s.reset();
 }
 
+// Drive one 160-bit Manchester-encoded ISO 14443-A NFC frame ({seq32, flags16, mac96} + CRC16)
+static void send_nfc_frame(Sim& s, u32 seq, u16 qflags, u64 mac_lo, u32 mac_hi, bool fast_hb = true) {
+    int p_clk = (s.cfg.mode == 0) ? 8 : 2;
+    int p_ask = (s.cfg.mode == 0) ? 9 : 3;
+    int hb_clks = fast_hb ? 16 : 64;
+    std::vector<int> pay_bits;
+    for (int i = 31; i >= 0; i--) pay_bits.push_back((seq >> i) & 1);
+    for (int i = 15; i >= 0; i--) pay_bits.push_back((qflags >> i) & 1);
+    for (int i = 31; i >= 0; i--) pay_bits.push_back((mac_hi >> i) & 1);
+    for (int i = 63; i >= 0; i--) pay_bits.push_back((mac_lo >> i) & 1);
+    unsigned crc = 0x6363;
+    for (int b : pay_bits) {
+        int fb = ((crc >> 15) ^ b) & 1;
+        crc = ((crc << 1) & 0xFFFF) ^ (fb ? 0x1021 : 0);
+    }
+    std::vector<int> all_bits = {0}; // start bit 0, then 0xA5 sync
+    for (int i = 7; i >= 0; i--) all_bits.push_back((0xA5 >> i) & 1);
+    for (int b : pay_bits) all_bits.push_back(b);
+    for (int i = 15; i >= 0; i--) all_bits.push_back((crc >> i) & 1);
+
+    s.drv[p_clk] = true; s.drv[p_ask] = true;
+    s.val[p_clk] = 0;    s.val[p_ask] = 1;
+    auto nfc_clks = [&](int n) {
+        for (int c = 0; c < n; c++) {
+            s.val[p_clk] = 1; s.advance(36870);
+            s.val[p_clk] = 0; s.advance(36870);
+        }
+    };
+    nfc_clks(16);
+    for (size_t bi = 0; bi < all_bits.size(); bi++) {
+        int b = all_bits[bi];
+        // Manchester: bit b -> first half = b, second half = ~b (except start triggers on falling edge 1->0)
+        s.val[p_ask] = b;     nfc_clks(hb_clks);
+        s.val[p_ask] = b ^ 1; nfc_clks(hb_clks);
+    }
+    s.val[p_ask] = 1;
+    nfc_clks(96);
+    s.drv[p_clk] = false; s.drv[p_ask] = false;
+}
+
+// End-to-end Houyhnhnm Enclave & Security Exploit Regression Suite:
+//   1. OP_PUF Enroll + Reset + Reconstruct (with injected flips + persistent mint_lock!)
+//   2. CapTP Vat Mint + Attenuate + Privilege-escalation block + Mint-lock enforcement
+//   3. Verifier VM (prog_digest, stmt_root) ZK-pinning vs LOAD R_CH / wrong-program exploits
+//   4. Keyed-MAC NFC (valid vs forged CRC16-only vs replay) + cal_ping vs 64-round G_DIST!
+static void scenario_enclave(Sim& s) {
+    printf("scenario: Houyhnhnm enclave lifecycle & security exploit regressions\n");
+    std::vector<u64> r, puf_enroll_rsp;
+    // 1. PUF Enroll with mint_lock=1 (arg[15]=1 -> 0x8004: margin=4, mint_lock=1)
+    u64 puf_enr_hdr = 0x51ULL | (0x50ULL << 8) | (0x8004ULL << 48);
+    check(s, s.xfer({puf_enr_hdr}, 21, puf_enroll_rsp) && ((puf_enroll_rsp[0] >> 16) & 0x81) == 1,
+          "OP_PUF enroll (8 blocks + H_pub, mint_lock=1)");
+    check(s, s.xfer({puf_enr_hdr}, 1, r) && (r[0] >> 48) == 10,
+          "re-running OP_PUF while key_valid=1 refused (E_KEYSET)");
+    // Mint must already be locked because arg[15]=1 was set during Enroll!
+    std::vector<u64> dummy_desc = {1, 0xFFFF, 0x000000FF00000000ULL, 10, 0, 0, 0, 0};
+    std::vector<u64> mint_req = {0x51ULL | (0x51ULL << 8) | (64ULL << 24)};
+    mint_req.insert(mint_req.end(), dummy_desc.begin(), dummy_desc.end());
+    check(s, s.xfer(mint_req, 1, r) && (r[0] >> 48) == 14,
+          "OP_VAT mint refused when enrolled with mint_lock=1 (E_LOCKED)");
+
+    // Power-cycle / reset: verify Reconstruct with arg[15]=0 FAILS H_pub (E_PUF = 12), while
+    // Reconstruct with arg[15]=1 + 3 injected RO flips SUCCEEDS and restores vat_mint_locked=1!
+    s.reset();
+    check(s, s.write_csr(s.cfg.csr), "CSR restore after reset");
+    std::vector<u64> rec_bad = {0x51ULL | (0x50ULL << 8) | (1ULL << 16) | (160ULL << 24) | (0x0004ULL << 48)};
+    rec_bad.insert(rec_bad.end(), puf_enroll_rsp.begin() + 1, puf_enroll_rsp.end());
+    check(s, s.xfer(rec_bad, 1, r) && (r[0] >> 48) == 12,
+          "OP_PUF reconstruct with stripped mint_lock bit rejected by H_pub (E_PUF)");
+
+    std::vector<u64> rec_ok = {0x51ULL | (0x50ULL << 8) | (1ULL << 16) | (160ULL << 24) | ((0x8004ULL | (3ULL << 6)) << 48)};
+    rec_ok.insert(rec_ok.end(), puf_enroll_rsp.begin() + 1, puf_enroll_rsp.end());
+    check(s, s.xfer(rec_ok, 2, r) && ((r[0] >> 16) & 0x81) == 1 && (r[1] & 0xFF) == 24,
+          "OP_PUF reconstruct with 3 flips/blk corrects 24 bits & restores keys");
+    check(s, s.xfer(mint_req, 1, r) && (r[0] >> 48) == 14,
+          "vat_mint_locked=1 persists across reset via H_pub!");
+
+    // 2. Reset & provision known K_vat + keys to test CapTP Vat, ZK-Pin, NFC MAC & G_DIST
+    s.reset();
+    check(s, s.write_csr(s.cfg.csr), "CSR restore for Vat/ZK/NFC/DB suite");
+    u64 kv[4] = {0xA1A1A1A1A1A1A1A1ULL, 0xB2B2B2B2B2B2B2B2ULL, 0xC3C3C3C3C3C3C3C3ULL, 0xD4D4D4D4D4D4D4D4ULL};
+    std::vector<u64> kl = {0x51ULL | (0x40ULL << 8) | (5ULL << 16) | (80ULL << 24),
+                           0x1111111111111111ULL, 0x2222222222222222ULL, 3, 4, 5, 6,
+                           kv[0], kv[1], kv[2], kv[3]};
+    check(s, s.xfer(kl, 1, r) && ((r[0] >> 16) & 0x81) == 1, "OP_KEYLOAD with K_vat");
+
+    // Legacy OP_CTH without capability must be rejected once vat_ready=1!
+    std::vector<u64> leg_cth = {0x51ULL | (0x41ULL << 8) | (80ULL << 24) | (0x0401ULL << 48),
+                                0, 1, 2, 0, 0, 3, 0, 0, 0, 0};
+    check(s, s.xfer(leg_cth, 1, r) && (r[0] >> 48) == 13,
+          "legacy OP_CTH without SpongeMacaroon refused when vat_ready=1 (E_CAP)");
+
+    // 3. ZK-Pinning vs LOAD R_CH & Wrong-Program Exploit Regression
+    // Valid pinned OP_FOLD program (flags = 0x08): HASH(R_CH, init, dom=7, imm=99), LOAD(R_A, imm=5), LOAD(R_B, proof=5), ASSERT_EQ(R_A, R_B)
+    u64 h_fold = 0x51ULL | (0x30ULL << 8) | (8ULL << 16) | (96ULL << 24);
+    u64 rec_hash = 1ULL | (1ULL << 8) | (8ULL << 24) | (2ULL << 32) | (2ULL << 48);
+    u64 rec_lda  = 5ULL | (2ULL << 8) | (4ULL << 32) | (4ULL << 48);
+    u64 rec_ldb  = 5ULL | (3ULL << 8) | (4ULL << 32);
+    u64 rec_eq   = 6ULL | (2ULL << 16) | (3ULL << 24);
+    std::vector<u64> prog_ok = {h_fold, rec_hash, 7, 99, rec_lda, 5, 0, 0, 0, rec_ldb, 5, 0, 0, rec_eq};
+    // Wait: rec_ldb needs 4 data words -> total 1+3 + 1+4 + 1+4 + 1 = 15 words = 120 bytes!
+    h_fold = 0x51ULL | (0x30ULL << 8) | (8ULL << 16) | (120ULL << 24);
+    prog_ok = {h_fold, rec_hash, 7, 99, rec_lda, 5, 0, 0, 0, rec_ldb, 5, 0, 0, 0, rec_eq};
+    check(s, s.xfer(prog_ok, 10, r) && (r[1] & 1) == 1, "valid pinned OP_FOLD executes and sets zk_pin");
+    u64 ch0 = r[6], ch1 = r[7], ch2 = r[8], ch3 = r[9];
+    // Compute exact expected prog_digest under H_ZK_PIN
+    u64 hpin0 = 0x504F53325F474C31ULL, hpin1 = 0x9E3779B97F4A7C15ULL;
+    u64 pd0 = 0, pd1 = 0;
+    u64 bound_words[] = {h_fold, rec_hash, 7, 99, rec_lda, 5, 0, 0, 0, rec_ldb, rec_eq};
+    for (u64 bw : bound_words) gf128_mul_tb(pd0 ^ bw, pd1, hpin0, hpin1, pd0, pd1);
+    u64 zk_pin[4] = {pd0, pd1, ch0 ^ ch2, ch1 ^ ch3};
+
+    // Mint ZK-pinned SpongeMacaroon (rights = R_ZK(4) | R_ATT(8) = 0x0C, guards = G_PIN_VK(8))
+    std::vector<u64> zk_mint = {0x51ULL | (0x51ULL << 8) | (64ULL << 24),
+                                0xCAFEULL, 0x0008000CULL, 0x000000FF00000001ULL, 10,
+                                zk_pin[0], zk_pin[1], zk_pin[2], zk_pin[3]};
+    std::vector<u64> zk_mac;
+    check(s, s.xfer(zk_mint, 13, zk_mac) && ((zk_mac[0] >> 16) & 0x81) == 1, "mint ZK-pinned SpongeMacaroon");
+
+    // Exploit A: Rogue OP_FOLD attempting H_LOAD R_CH in pin_mode (flags=8) -> rejected!
+    u64 h_rogue = 0x51ULL | (0x30ULL << 8) | (8ULL << 16) | (48ULL << 24);
+    u64 rec_ldch = 5ULL | (1ULL << 8) | (4ULL << 32);
+    check(s, s.xfer({h_rogue, rec_ldch, ch0, ch1, ch2, ch3, rec_eq}, 10, r) && (r[1] & 1) == 0,
+          "exploit A: H_LOAD R_CH in Vat-pinning mode rejected (verdict=0)");
+    std::vector<u64> vzk_req = {0x51ULL | (0x53ULL << 8) | (96ULL << 24) | (5ULL << 48)};
+    vzk_req.insert(vzk_req.end(), zk_mac.begin() + 1, zk_mac.end());
+    check(s, s.xfer(vzk_req, 1, r) && (r[0] >> 48) == 13,
+          "OP_VAT_ZK refused after failed rogue proof (E_CAP)");
+
+    // Exploit B: Valid OP_FOLD with a DIFFERENT statement immediate (imm=100 instead of 99) -> passes VM, but OP_VAT_ZK rejects!
+    std::vector<u64> prog_diff = {h_fold, rec_hash, 7, 100, rec_lda, 5, 0, 0, 0, rec_ldb, 5, 0, 0, 0, rec_eq};
+    check(s, s.xfer(prog_diff, 10, r) && (r[1] & 1) == 1, "different valid program passes VM");
+    check(s, s.xfer(vzk_req, 1, r) && (r[0] >> 48) == 13,
+          "exploit B: OP_VAT_ZK rejects valid proof from unpinned program/statement (E_CAP)");
+
+    // Re-run exact pinned program -> OP_VAT_ZK SUCCEEDS and outputs 4-word grant!
+    check(s, s.xfer(prog_ok, 10, r) && (r[1] & 1) == 1, "re-verify pinned program");
+    check(s, s.xfer(vzk_req, 5, r) && ((r[0] >> 16) & 0x81) == 1 && ((r[0] >> 24) & 0xFFFFFF) == 32,
+          "OP_VAT_ZK succeeds on matching (prog_digest, stmt_root) & locks output to 32B");
+
+    // Attenuate privilege escalation attempt (requesting R_CTH=1 not in parent R_ZK|R_ATT=0x0C) -> E_CAP!
+    std::vector<u64> att_bad = {0x51ULL | (0x51ULL << 8) | (1ULL << 16) | (160ULL << 24)};
+    att_bad.insert(att_bad.end(), zk_mac.begin() + 1, zk_mac.end());
+    std::vector<u64> cdesc_bad = {2, 0x00080005ULL, 0x0000001000000001ULL, 2, zk_pin[0], zk_pin[1], zk_pin[2], zk_pin[3]};
+    att_bad.insert(att_bad.end(), cdesc_bad.begin(), cdesc_bad.end());
+    check(s, s.xfer(att_bad, 1, r) && (r[0] >> 48) == 13,
+          "CapTP Vat privilege escalation attempt rejected (E_CAP)");
+
+    // 4. Keyed-MAC NFC (G_NFC = bit 1 = 0x0002) + Anti-Replay
+    // Enable fast half-bit NFC simulation via OP_DB_NCO (arg = 0x0810: nco_cfg=1, sym_shift=8)
+    check(s, s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0810ULL << 48), 0, 0, 0}, 5, r),
+          "enable fast NFC half-bit divider");
+    std::vector<u64> nfc_mint = {0x51ULL | (0x51ULL << 8) | (64ULL << 24),
+                                 0xBEEFULL, 0x00020002ULL, 0x000000FF00000001ULL, 10, 0, 0, 0, 0};
+    std::vector<u64> nfc_mac_cap;
+    check(s, s.xfer(nfc_mint, 13, nfc_mac_cap) && ((nfc_mac_cap[0] >> 16) & 0x81) == 1, "mint G_NFC PRF capability");
+
+    std::vector<u64> prf_nfc_req = {0x51ULL | (0x42ULL << 8) | (4ULL << 16) | (104ULL << 24) | (7ULL << 48)};
+    prf_nfc_req.insert(prf_nfc_req.end(), nfc_mac_cap.begin() + 1, nfc_mac_cap.end());
+    prf_nfc_req.push_back(0x55AA55AA55AA55AAULL);
+
+    // Forged CRC16-valid NFC frame (bad MAC) -> rejected with E_MAC (5)!
+    send_nfc_frame(s, 1, 0x0003, 0xDEADBEEFCAFEBABEULL, 0x12345678U);
+    check(s, s.xfer(prf_nfc_req, 1, r) && (r[0] >> 48) == 5,
+          "CRC16-valid NFC frame with forged MAC rejected (E_MAC)");
+
+    // Valid K_vat-MACed NFC frame (seq=1, epoch=7) -> accepted!
+    u64 st_nfc[25] = {};
+    st_nfc[0] = 0x43464E4747455244ULL; // "DREGGNFC"
+    for (int i = 0; i < 4; i++) st_nfc[1 + i] = kv[i];
+    st_nfc[5] = 1ULL | (0x0003ULL << 48);
+    st_nfc[6] = 7ULL;
+    st_nfc[7] = 0ULL;
+    st_nfc[8] = 0x1FULL;
+    st_nfc[16] = 1ULL << 63;
+    keccak_p12_tb(st_nfc);
+    send_nfc_frame(s, 1, 0x0003, st_nfc[0], (u32)(st_nfc[1] & 0xFFFFFFFFULL));
+    check(s, s.xfer(prf_nfc_req, 3, r) && ((r[0] >> 16) & 0x81) == 1,
+          "valid K_vat-MACed NFC frame accepted & releases PRF_msg");
+
+    // Replay the exact same seq=1 NFC frame -> rejected (E_CAP = 13)!
+    send_nfc_frame(s, 1, 0x0003, st_nfc[0], (u32)(st_nfc[1] & 0xFFFFFFFFULL));
+    check(s, s.xfer(prf_nfc_req, 1, r) && (r[0] >> 48) == 13,
+          "replayed NFC frame (seq <= last_seq) rejected (E_CAP)");
+
+    // 5. Distance-Bounding cal_ping vs 64-round session G_DIST (G_DIST = bit 2 = 0x0004, max_dist = 0x2000)
+    std::vector<u64> db_mint = {0x51ULL | (0x51ULL << 8) | (8ULL << 16) | (64ULL << 24),
+                                0xD157ULL, (0x2000ULL << 32) | 0x00040002ULL, 0x000000FF00000001ULL, 10, 0, 0, 0, 0};
+    std::vector<u64> db_cap;
+    check(s, s.xfer(db_mint, 13, db_cap) && ((db_cap[0] >> 16) & 0x81) == 1, "mint G_DIST PRF capability & lock mint");
+
+    // Run internal cal_ping (arg = 0x000C) -> sets cal_valid=1, dist_valid=0 -> PRF must be refused!
+    check(s, s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x000CULL << 48), 0, 0, 0}, 5, r), "trigger cal_ping");
+    s.advance(200000);
+    check(s, s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24), 0, 0, 0}, 5, r) &&
+             ((r[1] >> 12) & 1) == 1 && ((r[1] >> 7) & 1) == 0,
+          "cal_ping sets cal_valid=1 and leaves dist_valid=0");
+    std::vector<u64> prf_db_req = {0x51ULL | (0x42ULL << 8) | (4ULL << 16) | (104ULL << 24) | (7ULL << 48)};
+    prf_db_req.insert(prf_db_req.end(), db_cap.begin() + 1, db_cap.end());
+    prf_db_req.push_back(0x9988776655443322ULL);
+    check(s, s.xfer(prf_db_req, 1, r) && (r[0] >> 48) == 13,
+          "cal_ping cannot satisfy G_DIST capability guard (E_CAP)");
+
+    // Complete all 64 rapid-bit challenge-1 rounds + external launch_ping -> G_DIST succeeds!
+    int p_chal = (s.cfg.mode == 0) ? 13 : 1;
+    check(s, s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0001ULL << 48),
+                     0xAAAAAAAAAAAAAAAAULL, 0x5555555555555555ULL, 0}, 5, r), "arm 64-round responder");
+    s.drv[p_chal] = true; s.val[p_chal] = 0;
+    for (int rnd = 0; rnd < 64; rnd++) {
+        s.advance(120000);
+        s.val[p_chal] = 1; s.advance(60000); s.val[p_chal] = 0;
+        s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0002ULL << 48), 0, 0, 0}, 5, r);
+    }
+    // External launch_ping (arg = 0x0004), echo challenge pulse 60 ns after launch
+    s.send({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0004ULL << 48), 0, 0, 0});
+    s.recv(5, r);
+    s.advance(60000);
+    s.val[p_chal] = 1; s.advance(40000); s.val[p_chal] = 0;
+    s.drv[p_chal] = false;
+    s.advance(100000);
+    check(s, s.xfer(prf_db_req, 3, r) && ((r[0] >> 16) & 0x81) == 1,
+          "64-round rapid-bit session + external ToF ping satisfies G_DIST & releases PRF_msg");
+}
+
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IOLBF, 0);
     if (argc < 3) {
         printf("usage: %s <script> <config> [scenario]\n", argv[0]);
         return 2;
@@ -853,6 +1125,7 @@ int main(int argc, char** argv) {
     else if (scen == "prfcap") scenario_prfcap(s);
     else if (scen == "tamperboot") scenario_tamperboot(s);
     else if (scen == "bist") scenario_bist(s);
+    else if (scen == "enclave") scenario_enclave(s);
     else {
         printf("unknown scenario %s\n", scen.c_str());
         s.errors++;

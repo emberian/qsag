@@ -142,7 +142,7 @@ theorem honest_threshold (q : Custody) (msg : List UInt8)
   exact ⟨(hh p hp).1.2, h.2 p hp⟩
 /-- A fresh valid native signature outside the custody approval log is the quorum forgery
 bad event. Its probability is a cryptographic premise, not a consequence of signature syntax. -/
-def QuorumForgery (geom : AggSigGeometry) (q : Custody) (msg : List UInt8) : Prop :=
+@[expose] def QuorumForgery (geom : AggSigGeometry) (q : Custody) (msg : List UInt8) : Prop :=
   ∃ sig : AggNativeSignature,
     verifyAggNativeSig geom q.state.pk msg sig = true ∧ quorumParticipated q msg = false
 /-- The outer adapter must be discharged by WHIR/Merkle extraction for the deployed AIR.

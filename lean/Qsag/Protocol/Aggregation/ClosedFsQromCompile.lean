@@ -18,11 +18,14 @@ and a Boolean round-by-round state function (`BoolRbrCert`):
   acceptance mass of the executable verifier is at most
   `(2Q+1)² · Σ_r bad_r / 2^w` plus the mass of outputs on which `findCollision` succeeds.
 
-Modelling limits. The Fiat–Shamir oracle is queried on the whole message prefix, tables
-included, and the adversary's output carries the tables next to the openings: the reduction
-reads the tables from the output instead of extracting them from oracle queries. The Merkle
-hash is a fixed function, and the collision term is the success mass of the explicit
-collision finder, not a number.
+Modelling limits. Sections 2–4 model committed-table transcripts where the Fiat–Shamir oracle
+is queried on full round messages; Section 5 (`SuccinctRoundMsg`, `SuccinctIopBridge`,
+`succinctVerify`, `succinct_accept_reduces_to_table_or_collision`,
+`succinct_fs_qrom_closed_soundness`) lifts succinct Merkle-root-and-opening wire transcripts
+(where the Fiat–Shamir oracle hashes only optional roots and public messages, with zero full
+tables on the wire) to the committed-table IOP with an explicit `MerkleCollision` branch
+(`SuccinctSoundnessOutcome`, `succinctFsCollisionReduction`). The Merkle hash is a fixed
+function, and the collision term is the success mass of the explicit collision finder.
 -/
 
 public import Qsag.Protocol.Aggregation.MultiRoundFsQrom
@@ -880,6 +883,532 @@ def execFsCollisionWitness [DecidableEq D] [DecidableEq F] (iop : OracleIop Stmt
 
 end Closed
 
+/-! ## §5. Succinct Merkle-root-and-opening transcripts ⟶ committed-table IOP & MerkleCollision branch -/
+
+/-- Succinct round wire message: optional Merkle root committed in this round plus the small
+    public message `pub` (zero full tables on the wire or in the Fiat–Shamir transcript). -/
+structure SuccinctRoundMsg (D Pub : Type) where
+  root : Option D
+  pub : Pub
+  deriving DecidableEq, Repr
+
+/-- Deterministically lift a list of succinct round messages starting at round offset `r`. -/
+def liftMsgsAux {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) :
+    Nat → List (SuccinctRoundMsg D Pub) → List Msg
+  | _, [] => []
+  | r, sm :: rest => liftOne r sm tblOf :: liftMsgsAux liftOne tblOf (r + 1) rest
+
+theorem liftMsgsAux_getElem? {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) :
+    ∀ (sms : List (SuccinctRoundMsg D Pub)) (r idx : Nat),
+      (liftMsgsAux liftOne tblOf r sms)[idx]? =
+        (sms[idx]?).map (fun sm => liftOne (r + idx) sm tblOf)
+  | [], _, _ => rfl
+  | sm :: _, r, 0 => by
+    show some (liftOne r sm tblOf) = some (liftOne (r + 0) sm tblOf)
+    rw [Nat.add_zero]
+  | _ :: rest, r, idx + 1 => by
+    show (liftMsgsAux liftOne tblOf (r + 1) rest)[idx]? =
+      (rest[idx]?).map (fun sm => liftOne (r + (idx + 1)) sm tblOf)
+    rw [liftMsgsAux_getElem? liftOne tblOf rest (r + 1) idx]
+    have e : r + 1 + idx = r + (idx + 1) := by omega
+    rw [e]
+
+/-- Deterministically lift a succinct `(SuccinctRoundMsg, challenge)` transcript starting at
+    round offset `r`. -/
+def liftTrAux {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) :
+    Nat → List (SuccinctRoundMsg D Pub × Nat) → List (Msg × Nat)
+  | _, [] => []
+  | r, (sm, ch) :: rest => (liftOne r sm tblOf, ch) :: liftTrAux liftOne tblOf (r + 1) rest
+
+theorem liftTrAux_length {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) :
+    ∀ (str : List (SuccinctRoundMsg D Pub × Nat)) (r : Nat),
+      (liftTrAux liftOne tblOf r str).length = str.length
+  | [], _ => rfl
+  | _ :: rest, r => congrArg Nat.succ (liftTrAux_length liftOne tblOf rest (r + 1))
+
+theorem liftTrAux_map_fst {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) :
+    ∀ (str : List (SuccinctRoundMsg D Pub × Nat)) (r : Nat),
+      (liftTrAux liftOne tblOf r str).map Prod.fst =
+        liftMsgsAux liftOne tblOf r (str.map Prod.fst)
+  | [], _ => rfl
+  | _ :: rest, r => congrArg (List.cons _) (liftTrAux_map_fst liftOne tblOf rest (r + 1))
+
+theorem liftTrAux_append_single {D Pub Msg F : Type}
+    (liftOne : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg)
+    (tblOf : Nat → D → Nat → F) (sm : SuccinctRoundMsg D Pub) (ch : Nat) :
+    ∀ (str : List (SuccinctRoundMsg D Pub × Nat)) (r : Nat),
+      liftTrAux liftOne tblOf r (str ++ [(sm, ch)]) =
+        liftTrAux liftOne tblOf r str ++ [(liftOne (r + str.length) sm tblOf, ch)]
+  | [], r => by
+    show [(liftOne r sm tblOf, ch)] = [(liftOne (r + 0) sm tblOf, ch)]
+    rw [Nat.add_zero]
+  | (sm0, ch0) :: rest, r => by
+    show (liftOne r sm0 tblOf, ch0) :: liftTrAux liftOne tblOf (r + 1) (rest ++ [(sm, ch)]) =
+      (liftOne r sm0 tblOf, ch0) ::
+        (liftTrAux liftOne tblOf (r + 1) rest ++ [(liftOne (r + (rest.length + 1)) sm tblOf, ch)])
+    rw [liftTrAux_append_single liftOne tblOf sm ch rest (r + 1)]
+    have e : r + 1 + rest.length = r + (rest.length + 1) := by omega
+    rw [e]
+
+/-- Protocol-independent bridge lifting succinct `(PStmt, initRoots, SuccinctRoundMsg)` transcripts
+    into an `OracleIop` via any deterministic root-to-table map `tblOf : Nat → D → Nat → F`. -/
+structure SuccinctIopBridge {Stmt PStmt Msg Pub F : Type} {k : Nat}
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (D : Type) where
+  rootsOf : (Nat → D) → List (SuccinctRoundMsg D Pub) → Nat → D
+  liftStmt : PStmt → (Nat → D) → (Nat → D → Nat → F) → Stmt
+  liftMsg : Nat → SuccinctRoundMsg D Pub → (Nat → D → Nat → F) → Msg
+  pubStmt_lift : ∀ ps r0 tblOf, iop.pubStmt (liftStmt ps r0 tblOf) = ps
+  pubMsg_lift : ∀ r sm tblOf, iop.pubMsg (liftMsg r sm tblOf) = sm.pub
+  table_lift : ∀ (ps : PStmt) (r0 : Nat → D) (str : List (SuccinctRoundMsg D Pub × Nat))
+    (tblOf : Nat → D → Nat → F) (q : Nat × Nat),
+    str.length = k →
+    q ∈ iop.queries ps (str.map (fun sc => (sc.1.pub, sc.2))) →
+    q.2 < 2 ^ iop.depth q.1 →
+    iop.table (liftStmt ps r0 tblOf) (liftMsgsAux liftMsg tblOf 0 (str.map Prod.fst)) q.1 q.2 =
+      tblOf q.1 (rootsOf r0 (str.map Prod.fst) q.1) q.2
+
+/-- Explicit two-branch constructive classification of an accepted succinct Merkle-root-and-opening
+    proof against backing tables: either the lifted committed-table IOP accepts, or an explicit
+    `MerkleCollision` witness is extracted. -/
+inductive SuccinctSoundnessOutcome {D F : Type}
+    (TableAccepted : Prop) (node : Nat → Nat → D → D → D) (leaf : Nat → Nat → F → D) : Type where
+  | tableAccepted (h : TableAccepted) : SuccinctSoundnessOutcome TableAccepted node leaf
+  | merkleCollision (witness : CollisionWitness node leaf) :
+      SuccinctSoundnessOutcome TableAccepted node leaf
+
+section Succinct
+variable {Stmt PStmt Msg Pub F D : Type} {k cardX : Nat}
+
+def SuccinctIopBridge.liftTr (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (str : List (SuccinctRoundMsg D Pub × Nat))
+    (tblOf : Nat → D → Nat → F) : List (Msg × Nat) :=
+  liftTrAux B.liftMsg tblOf 0 str
+
+theorem SuccinctIopBridge.liftTr_append (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (sPref : List (SuccinctRoundMsg D Pub × Nat))
+    (sm : SuccinctRoundMsg D Pub) (ch : Nat) (tblOf : Nat → D → Nat → F) :
+    B.liftTr iop (sPref ++ [(sm, ch)]) tblOf =
+      B.liftTr iop sPref tblOf ++ [(B.liftMsg sPref.length sm tblOf, ch)] := by
+  unfold SuccinctIopBridge.liftTr
+  rw [liftTrAux_append_single, Nat.zero_add]
+
+private theorem pubTr_liftTrAux (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (tblOf : Nat → D → Nat → F) :
+    ∀ (str : List (SuccinctRoundMsg D Pub × Nat)) (r : Nat),
+      iop.pubTr (liftTrAux B.liftMsg tblOf r str) = str.map (fun sc => (sc.1.pub, sc.2))
+  | [], _ => rfl
+  | (sm, ch) :: rest, r => by
+    show (iop.pubMsg (B.liftMsg r sm tblOf), ch) ::
+        iop.pubTr (liftTrAux B.liftMsg tblOf (r + 1) rest) =
+      (sm.pub, ch) :: rest.map (fun sc => (sc.1.pub, sc.2))
+    rw [B.pubMsg_lift, pubTr_liftTrAux iop B tblOf rest (r + 1)]
+
+theorem SuccinctIopBridge.pubTr_liftTr (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (str : List (SuccinctRoundMsg D Pub × Nat))
+    (tblOf : Nat → D → Nat → F) :
+    iop.pubTr (B.liftTr iop str tblOf) = str.map (fun sc => (sc.1.pub, sc.2)) :=
+  pubTr_liftTrAux iop B tblOf str 0
+
+/-- **Succinct Merkle-root-and-opening verifier (`succinctVerify`)**:
+    Checks authentication paths directly against the wire-transmitted roots `B.rootsOf initRoots`
+    and decides by `iop.verdict` on the opened leaf values; zero tables are read or hashed. -/
+def succinctVerify [DecidableEq D] (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (M : MerkleSetup D F)
+    (ps : PStmt) (initRoots : Nat → D)
+    (str : List (SuccinctRoundMsg D Pub × Nat))
+    (ops : List (F × List D)) : Bool :=
+  execVerify iop M ps
+    (B.rootsOf initRoots (str.map Prod.fst))
+    (str.map (fun sc => (sc.1.pub, sc.2)))
+    ops
+
+theorem openings_in_bounds [DecidableEq D] (M : MerkleSetup D F) (depth : Nat → Nat)
+    (roots : Nat → D) :
+    ∀ (qs : List (Nat × Nat)) (ops : List (F × List D)),
+      openingsOk M depth roots qs ops = true →
+      ∀ q ∈ qs, q.2 < 2 ^ depth q.1
+  | [], [], _, _, hMem => nomatch hMem
+  | [], _ :: _, hOk, _, _ => absurd hOk Bool.false_ne_true
+  | _ :: _, [], hOk, _, _ => absurd hOk Bool.false_ne_true
+  | q0 :: qs, op0 :: ops, hOk, q, hMem => by
+    have hOk' : (openingOk M depth roots q0 op0 && openingsOk M depth roots qs ops) = true := hOk
+    rw [Bool.and_eq_true] at hOk'
+    rcases List.mem_cons.mp hMem with rfl | hTail
+    · unfold openingOk at hOk'
+      rw [Bool.and_eq_true, Bool.and_eq_true] at hOk'
+      exact of_decide_eq_true hOk'.1.1.1
+    · exact openings_in_bounds M depth roots qs ops hOk'.2 q hTail
+
+theorem openings_agree_on_roots [DecidableEq D] [DecidableEq F] (M : MerkleSetup D F)
+    (depth : Nat → Nat) (roots : Nat → D) (tbl : Nat → Nat → F) :
+    ∀ (qs : List (Nat × Nat)) (ops : List (F × List D)),
+      openingsOk M depth roots qs ops = true →
+      (∀ q ∈ qs, M.root q.1 (depth q.1) (tbl q.1) = roots q.1) →
+      findCollision M depth tbl qs ops = none →
+      ops.map Prod.fst = qs.map (fun q => tbl q.1 q.2)
+  | [], [], _, _, _ => rfl
+  | [], _ :: _, hOk, _, _ => absurd hOk Bool.false_ne_true
+  | _ :: _, [], hOk, _, _ => absurd hOk Bool.false_ne_true
+  | q :: qs, op :: ops, hOk, hRoots, hNone => by
+    have hOk' : (openingOk M depth roots q op && openingsOk M depth roots qs ops) = true := hOk
+    rw [Bool.and_eq_true] at hOk'
+    obtain ⟨hHead, hTail⟩ := hOk'
+    unfold openingOk at hHead
+    rw [Bool.and_eq_true, Bool.and_eq_true] at hHead
+    have hRootEq := hRoots q List.mem_cons_self
+    have hg : q.2 < 2 ^ depth q.1 ∧ op.2.length = depth q.1 ∧
+        merklePathRoot M.node 0 q.2 (M.leaf q.1 q.2 op.1) op.2 =
+          M.root q.1 (depth q.1) (tbl q.1) :=
+      ⟨of_decide_eq_true hHead.1.1, of_decide_eq_true hHead.1.2,
+        (of_decide_eq_true hHead.2).trans hRootEq.symm⟩
+    unfold findCollision at hNone
+    rw [dite_eq_left hg] at hNone
+    cases hc : openingCollisionOpt M q.1 (depth q.1) (tbl q.1) q.2 op hg.1 hg.2.1 hg.2.2 with
+    | some c =>
+      rw [hc] at hNone
+      cases hNone
+    | none =>
+      rw [hc] at hNone
+      have hv := openingCollisionOpt_none M q.1 (depth q.1) (tbl q.1) q.2 op
+        hg.1 hg.2.1 hg.2.2 hc
+      have ih := openings_agree_on_roots M depth roots tbl qs ops hTail
+        (fun q' hq' => hRoots q' (List.mem_cons_of_mem q hq')) hNone
+      show op.1 :: ops.map Prod.fst = tbl q.1 q.2 :: qs.map (fun q => tbl q.1 q.2)
+      rw [hv, ih]
+
+/-- If `succinctVerify` accepts and `findCollision` returns `none` against `tblOf`, the lifted
+    table-level `OracleIop` accepts `(B.liftStmt ps initRoots tblOf)` on `B.liftTr iop str tblOf`. -/
+theorem succinct_accept_reduces [DecidableEq D] [DecidableEq F]
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (ps : PStmt) (initRoots : Nat → D)
+    (str : List (SuccinctRoundMsg D Pub × Nat)) (ops : List (F × List D))
+    (tblOf : Nat → D → Nat → F)
+    (hRoots : ∀ q ∈ iop.queries ps (str.map (fun sc => (sc.1.pub, sc.2))),
+      M.root q.1 (iop.depth q.1) (tblOf q.1 (B.rootsOf initRoots (str.map Prod.fst) q.1)) =
+        B.rootsOf initRoots (str.map Prod.fst) q.1)
+    (hSucc : succinctVerify iop B M ps initRoots str ops = true)
+    (hNone : findCollision M iop.depth
+      (fun i => tblOf i (B.rootsOf initRoots (str.map Prod.fst) i))
+      (iop.queries ps (str.map (fun sc => (sc.1.pub, sc.2)))) ops = none) :
+    iop.verify (B.liftStmt ps initRoots tblOf) (B.liftTr iop str tblOf) = true := by
+  let roots := B.rootsOf initRoots (str.map Prod.fst)
+  let ptr := str.map (fun sc => (sc.1.pub, sc.2))
+  let qs := iop.queries ps ptr
+  let tbl := fun i => tblOf i (roots i)
+  have hExec := hSucc
+  unfold succinctVerify execVerify at hExec
+  rw [Bool.and_eq_true, Bool.and_eq_true] at hExec
+  obtain ⟨⟨hLenD, hOpen⟩, hVerd⟩ := hExec
+  have hStrLen : str.length = k := by
+    have h := of_decide_eq_true hLenD
+    rw [List.length_map] at h
+    exact h
+  have hLiftLen : (B.liftTr iop str tblOf).length = k := by
+    unfold SuccinctIopBridge.liftTr
+    rw [liftTrAux_length]
+    exact hStrLen
+  have hBounds := openings_in_bounds M iop.depth roots qs ops hOpen
+  have hAgree := openings_agree_on_roots M iop.depth roots tbl qs ops hOpen hRoots hNone
+  have hTableEq : qs.map (fun q => tbl q.1 q.2) =
+      iop.readValues (B.liftStmt ps initRoots tblOf) (B.liftTr iop str tblOf) := by
+    unfold OracleIop.readValues
+    rw [B.pubStmt_lift, B.pubTr_liftTr]
+    change qs.map (fun q => tbl q.1 q.2) =
+      qs.map (fun q => iop.table (B.liftStmt ps initRoots tblOf)
+        ((B.liftTr iop str tblOf).map Prod.fst) q.1 q.2)
+    apply List.map_congr_left
+    intro q hq
+    unfold SuccinctIopBridge.liftTr
+    rw [liftTrAux_map_fst]
+    exact (B.table_lift ps initRoots str tblOf q hStrLen hq (hBounds q hq)).symm
+  unfold OracleIop.verify
+  rw [Bool.and_eq_true]
+  refine ⟨decide_eq_true hLiftLen, ?_⟩
+  rw [B.pubStmt_lift, B.pubTr_liftTr, ← hTableEq, ← hAgree]
+  exact hVerd
+
+/-- **Constructive Succinct Root-and-Opening ⟶ Committed-Table / `MerkleCollision` Reduction
+    (`succinct_accept_reduces_to_table_or_collision`)**:
+    Given any succinct proof `(initRoots, str, ops)` accepted by `succinctVerify` and any
+    backing tables `tblOf` whose roots match the queried roots, constructively (`0 Classical.choice`)
+    either the lifted table-level `OracleIop` accepts `(B.liftStmt ps initRoots tblOf)` on
+    `B.liftTr iop str tblOf` (`.tableAccepted`), OR `findCollision` extracts an explicit
+    `CollisionWitness M.node M.leaf` (`.merkleCollision`). -/
+def succinct_accept_reduces_to_table_or_collision [DecidableEq D] [DecidableEq F]
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (ps : PStmt) (initRoots : Nat → D)
+    (str : List (SuccinctRoundMsg D Pub × Nat)) (ops : List (F × List D))
+    (tblOf : Nat → D → Nat → F)
+    (hRoots : ∀ q ∈ iop.queries ps (str.map (fun sc => (sc.1.pub, sc.2))),
+      M.root q.1 (iop.depth q.1) (tblOf q.1 (B.rootsOf initRoots (str.map Prod.fst) q.1)) =
+        B.rootsOf initRoots (str.map Prod.fst) q.1)
+    (hSucc : succinctVerify iop B M ps initRoots str ops = true) :
+    SuccinctSoundnessOutcome
+      (iop.verify (B.liftStmt ps initRoots tblOf) (B.liftTr iop str tblOf) = true)
+      M.node M.leaf :=
+  match hc : findCollision M iop.depth
+      (fun i => tblOf i (B.rootsOf initRoots (str.map Prod.fst) i))
+      (iop.queries ps (str.map (fun sc => (sc.1.pub, sc.2)))) ops with
+  | some col => .merkleCollision col
+  | none => .tableAccepted (succinct_accept_reduces iop B M ps initRoots str ops tblOf hRoots hSucc hc)
+
+/-- Succinct Fiat–Shamir acceptance: the random oracle `H` is queried ONLY on succinct
+    `(Option D, Pub)` message prefixes via `sc`, and `succinctVerify` checks openings against
+    the wire-transmitted roots. -/
+def succinctFsAccept [DecidableEq D] (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop D) (M : MerkleSetup D F)
+    (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D)
+    (H : Fin cardX → BitVec iop.w) (o : Fin cardX) : Bool :=
+  succinctVerify iop B M ps initRoots (fsTranscript sc H (sc.dec o)) (aux o)
+
+/-- Collision finder run on the succinct Fiat–Shamir output against `tblOf`. -/
+def succinctFsCollision [DecidableEq D] [DecidableEq F]
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (H : Fin cardX → BitVec iop.w) (o : Fin cardX) :
+    Option (CollisionWitness M.node M.leaf) :=
+  let str := fsTranscript sc H (sc.dec o)
+  let roots := B.rootsOf initRoots (str.map Prod.fst)
+  let ptr := str.map (fun sc' => (sc'.1.pub, sc'.2))
+  findCollision M iop.depth (fun i => tblOf i (roots i)) (iop.queries ps ptr) (aux o)
+
+/-- Event that `succinctFsAccept` accepts and `succinctFsCollision` outputs a Merkle collision. -/
+def succinctFsCollisionEvent [DecidableEq D] [DecidableEq F]
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (H : Fin cardX → BitVec iop.w) (o : Fin cardX) : Bool :=
+  succinctFsAccept iop B M sc aux ps initRoots H o &&
+    (succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome
+
+/-- Constructive collision witness extractor when `succinctFsCollisionEvent` fires. -/
+def succinctFsCollisionWitness [DecidableEq D] [DecidableEq F]
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (H : Fin cardX → BitVec iop.w) (o : Fin cardX)
+    (h : succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H o = true) :
+    CollisionWitness M.node M.leaf :=
+  match hc : succinctFsCollision iop B M sc aux ps initRoots tblOf H o with
+  | some wit => wit
+  | none => absurd h (by
+      unfold succinctFsCollisionEvent
+      rw [hc]
+      cases succinctFsAccept iop B M sc aux ps initRoots H o <;> exact Bool.false_ne_true)
+
+/-- With `framedSetup Hb nodeC leafC`, every `succinctFsCollisionEvent` output yields an explicit
+    `Spec.HashCollision Hb`. -/
+def succinctFsCollisionReduction [DecidableEq F]
+    (Hb : Spec.Bytes → Spec.Bytes)
+    (nodeC : Spec.FramedCodec (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (leafC : Spec.FramedCodec (Nat × Nat × F))
+    (iop : OracleIop Stmt PStmt Msg Pub F k)
+    (B : SuccinctIopBridge iop Spec.Bytes)
+    (sc : FsCodec (SuccinctRoundMsg Spec.Bytes Pub) k cardX)
+    (aux : Fin cardX → List (F × List Spec.Bytes))
+    (ps : PStmt) (initRoots : Nat → Spec.Bytes) (tblOf : Nat → Spec.Bytes → Nat → F)
+    (H : Fin cardX → BitVec iop.w) (o : Fin cardX)
+    (h : succinctFsCollisionEvent iop B (framedSetup Hb nodeC leafC) sc aux ps initRoots tblOf H o =
+      true) :
+    Spec.HashCollision Hb :=
+  CollisionWitness.toHashCollision Hb nodeC leafC
+    (succinctFsCollisionWitness iop B (framedSetup Hb nodeC leafC) sc aux ps initRoots tblOf H o h)
+
+/-- **Closed Succinct-Transcript Fiat–Shamir QROM Soundness (`succinct_fs_qrom_closed_soundness`)**:
+    With Fiat–Shamir hashing ONLY succinct `(Option D, Pub)` message prefixes, for any `Q`-query
+    quantum adversary `A` on a false lifted statement:
+    `Pr[succinctFsAccept] ≤ (2Q+1)² · Σ_r bad_r / 2^w + Pr[succinctFsCollisionEvent]`. -/
+theorem succinct_fs_qrom_closed_soundness [DecidableEq D] [DecidableEq F] {cardAnc Q : Nat}
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (cert : BoolRbrCert iop)
+    (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (hx : ¬ iop.inLang (B.liftStmt ps initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec iop.w) (o : Fin cardX),
+      succinctFsAccept iop B M sc aux ps initRoots H o = true →
+      let str := fsTranscript sc H (sc.dec o)
+      ∀ q ∈ iop.queries ps (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 (iop.depth q.1) (tblOf q.1 (B.rootsOf initRoots (str.map Prod.fst) q.1)) =
+          B.rootsOf initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX iop.w cardAnc Q) :
+    RatBound.le
+      ⟨uniformOracleSum iop.w cardX (fun H =>
+          QVec.queryMassOn (succinctFsAccept iop B M sc aux ps initRoots H) (runQuantumAdv A H)),
+        (2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos iop.w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.add
+        ⟨(2 * Q + 1) ^ 2 * qsum k cert.bad, 2 ^ iop.w, Nat.two_pow_pos iop.w⟩
+        ⟨uniformOracleSum iop.w cardX (fun H =>
+            QVec.queryMassOn (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H)
+              (runQuantumAdv A H)),
+          (2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+          Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos iop.w))
+            (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩) := by
+  let xLift := B.liftStmt ps initRoots tblOf
+  let stS : List (SuccinctRoundMsg D Pub × Nat) → Bool :=
+    fun sPref => cert.state xLift (B.liftTr iop sPref tblOf)
+  let noColl : (Fin cardX → BitVec iop.w) → Fin cardX → Bool := fun H o =>
+    succinctFsAccept iop B M sc aux ps initRoots H o &&
+      !(succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome
+  have hNo := fs_qrom_bool_rbr_soundness A sc stS cert.bad (cert.init xLift hx)
+    (fun r sPref sm hLen hDoomed => by
+      have hLiftLen : (B.liftTr iop sPref tblOf).length = r.1 :=
+        (liftTrAux_length B.liftMsg tblOf sPref 0).trans hLen
+      have hEq : qsum (2 ^ iop.w) (fun ch => if stS (sPref ++ [(sm, ch.1)]) = true then 1 else 0) =
+          qsum (2 ^ iop.w) (fun ch =>
+            if cert.state xLift (B.liftTr iop sPref tblOf ++
+              [(B.liftMsg sPref.length sm tblOf, ch.1)]) = true then 1 else 0) :=
+        qsum_congr (fun ch =>
+          congrArg (fun b : Bool => if b = true then 1 else 0)
+            (congrArg (cert.state xLift)
+              (SuccinctIopBridge.liftTr_append iop B sPref sm ch.1 tblOf)))
+      rw [hEq]
+      exact cert.flip xLift hx r (B.liftTr iop sPref tblOf) (B.liftMsg sPref.length sm tblOf)
+        hLiftLen hDoomed)
+    noColl
+    (by
+      intro H o ho
+      have ho' : (succinctFsAccept iop B M sc aux ps initRoots H o &&
+          !(succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome) = true := ho
+      rw [Bool.and_eq_true] at ho'
+      have hNone : succinctFsCollision iop B M sc aux ps initRoots tblOf H o = none := by
+        cases hc : succinctFsCollision iop B M sc aux ps initRoots tblOf H o with
+        | none => rfl
+        | some w =>
+          rw [hc] at ho'
+          exact absurd ho'.2 Bool.false_ne_true
+      have hVer := succinct_accept_reduces iop B M ps initRoots
+        (fsTranscript sc H (sc.dec o)) (aux o) tblOf (hRoots H o ho'.1) ho'.1 hNone
+      refine ⟨?_, cert.accept xLift _ hVer⟩
+      unfold OracleIop.verify at hVer
+      rw [Bool.and_eq_true] at hVer
+      have hLen := of_decide_eq_true hVer.1
+      unfold SuccinctIopBridge.liftTr at hLen
+      rw [liftTrAux_length] at hLen
+      unfold fsTranscript at hLen
+      rw [fsAux_length] at hLen
+      exact hLen)
+  have hSplit : ∀ H : Fin cardX → BitVec iop.w,
+      QVec.queryMassOn (succinctFsAccept iop B M sc aux ps initRoots H) (runQuantumAdv A H) ≤
+        QVec.queryMassOn (noColl H) (runQuantumAdv A H) +
+          QVec.queryMassOn (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H)
+            (runQuantumAdv A H) := by
+    intro H
+    refine Nat.le_trans ?_ (queryMassOn_union_le (noColl H)
+      (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H) (runQuantumAdv A H))
+    rw [QVec.queryMassOn_def, QVec.queryMassOn_def]
+    apply qsum_le_qsum
+    intro o
+    cases ha : succinctFsAccept iop B M sc aux ps initRoots H o with
+    | false =>
+      rw [ite_eq_right Bool.false_ne_true]
+      exact Nat.zero_le _
+    | true =>
+      have hOr : (noColl H o || succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H o) =
+          true := by
+        show ((succinctFsAccept iop B M sc aux ps initRoots H o &&
+            !(succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome) ||
+          (succinctFsAccept iop B M sc aux ps initRoots H o &&
+            (succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome)) = true
+        rw [ha]
+        cases (succinctFsCollision iop B M sc aux ps initRoots tblOf H o).isSome <;> rfl
+      rw [ite_eq_left rfl, ite_eq_left hOr]
+      exact Nat.le_refl _
+  have hSum := uniformOracleSum_le iop.w cardX _ _ hSplit
+  rw [uniformOracleSum_add] at hSum
+  have hNo' : uniformOracleSum iop.w cardX (fun H =>
+        QVec.queryMassOn (noColl H) (runQuantumAdv A H)) * 2 ^ iop.w ≤
+      (2 * Q + 1) ^ 2 * qsum k cert.bad *
+        ((2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)) := hNo
+  show uniformOracleSum iop.w cardX (fun H =>
+        QVec.queryMassOn (succinctFsAccept iop B M sc aux ps initRoots H) (runQuantumAdv A H)) *
+      (2 ^ iop.w * ((2 ^ iop.w) ^ cardX *
+        (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init))) ≤
+    ((2 * Q + 1) ^ 2 * qsum k cert.bad *
+        ((2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init)) +
+      uniformOracleSum iop.w cardX (fun H =>
+        QVec.queryMassOn (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H)
+          (runQuantumAdv A H)) * 2 ^ iop.w) *
+      ((2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init))
+  generalize (2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) = N
+    at hNo' ⊢
+  generalize uniformOracleSum iop.w cardX (fun H =>
+    QVec.queryMassOn (succinctFsAccept iop B M sc aux ps initRoots H) (runQuantumAdv A H)) = a
+    at hSum ⊢
+  generalize uniformOracleSum iop.w cardX (fun H =>
+    QVec.queryMassOn (noColl H) (runQuantumAdv A H)) = a1 at hSum hNo'
+  generalize uniformOracleSum iop.w cardX (fun H =>
+    QVec.queryMassOn (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H)
+      (runQuantumAdv A H)) = cc at hSum ⊢
+  generalize (2 * Q + 1) ^ 2 * qsum k cert.bad = Bnum at hNo' ⊢
+  generalize 2 ^ iop.w = W at hNo' ⊢
+  have h1 : a * (W * N) ≤ (a1 + cc) * (W * N) := Nat.mul_le_mul_right _ hSum
+  have h2 : (a1 + cc) * (W * N) = a1 * W * N + cc * W * N := by
+    rw [Nat.add_mul, ← Nat.mul_assoc, ← Nat.mul_assoc]
+  have h3 : a1 * W * N ≤ Bnum * N * N := Nat.mul_le_mul_right N hNo'
+  have h4 : (Bnum * N + cc * W) * N = Bnum * N * N + cc * W * N := Nat.add_mul _ _ _
+  rw [h4]
+  rw [h2] at h1
+  exact Nat.le_trans h1 (Nat.add_le_add_right h3 _)
+
+/-- **Total Succinct Error Budget (`succinct_fs_qrom_total_error_budget`)**:
+    Combines the Fiat–Shamir QROM RBR bound `ε_rbr` and any Merkle collision-resistance bound
+    `ε_merkle` into a single upper bound `ε_rbr + ε_merkle` on succinct-verifier cheating mass. -/
+theorem succinct_fs_qrom_total_error_budget [DecidableEq D] [DecidableEq F] {cardAnc Q : Nat}
+    (iop : OracleIop Stmt PStmt Msg Pub F k) (B : SuccinctIopBridge iop D)
+    (M : MerkleSetup D F) (cert : BoolRbrCert iop)
+    (sc : FsCodec (SuccinctRoundMsg D Pub) k cardX)
+    (aux : Fin cardX → List (F × List D))
+    (ps : PStmt) (initRoots : Nat → D) (tblOf : Nat → D → Nat → F)
+    (hx : ¬ iop.inLang (B.liftStmt ps initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec iop.w) (o : Fin cardX),
+      succinctFsAccept iop B M sc aux ps initRoots H o = true →
+      let str := fsTranscript sc H (sc.dec o)
+      ∀ q ∈ iop.queries ps (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 (iop.depth q.1) (tblOf q.1 (B.rootsOf initRoots (str.map Prod.fst) q.1)) =
+          B.rootsOf initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX iop.w cardAnc Q)
+    (ε_rbr ε_merkle : RatBound)
+    (hRbr : RatBound.le
+      ⟨(2 * Q + 1) ^ 2 * qsum k cert.bad, 2 ^ iop.w, Nat.two_pow_pos iop.w⟩ ε_rbr)
+    (hMerkle : RatBound.le
+      ⟨uniformOracleSum iop.w cardX (fun H =>
+          QVec.queryMassOn (succinctFsCollisionEvent iop B M sc aux ps initRoots tblOf H)
+            (runQuantumAdv A H)),
+        (2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos iop.w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩ ε_merkle) :
+    RatBound.le
+      ⟨uniformOracleSum iop.w cardX (fun H =>
+          QVec.queryMassOn (succinctFsAccept iop B M sc aux ps initRoots H) (runQuantumAdv A H)),
+        (2 ^ iop.w) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos iop.w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.add ε_rbr ε_merkle) :=
+  RatBound.le_trans
+    (succinct_fs_qrom_closed_soundness iop B M cert sc aux ps initRoots tblOf hx hRoots A)
+    (RatBound.add_le_add hRbr hMerkle)
+
+end Succinct
+
 #verify_constructive Qsag.ClosedFs.merklePathRoot_eq_merkleRootFromPath
 #verify_constructive Qsag.ClosedFs.treePathFrom_length
 #verify_constructive Qsag.ClosedFs.treePathFrom_opens
@@ -899,6 +1428,17 @@ end Closed
 #verify_constructive Qsag.ClosedFs.cover_mass
 #verify_constructive Qsag.ClosedFs.fs_qrom_bool_rbr_soundness
 #verify_constructive Qsag.ClosedFs.exec_fs_qrom_closed_soundness
+#verify_constructive Qsag.ClosedFs.liftMsgsAux_getElem?
+#verify_constructive Qsag.ClosedFs.liftTrAux_length
+#verify_constructive Qsag.ClosedFs.liftTrAux_map_fst
+#verify_constructive Qsag.ClosedFs.liftTrAux_append_single
+#verify_constructive Qsag.ClosedFs.SuccinctIopBridge.liftTr_append
+#verify_constructive Qsag.ClosedFs.SuccinctIopBridge.pubTr_liftTr
+#verify_constructive Qsag.ClosedFs.openings_in_bounds
+#verify_constructive Qsag.ClosedFs.openings_agree_on_roots
+#verify_constructive Qsag.ClosedFs.succinct_accept_reduces
+#verify_constructive Qsag.ClosedFs.succinct_fs_qrom_closed_soundness
+#verify_constructive Qsag.ClosedFs.succinct_fs_qrom_total_error_budget
 
 end Qsag.ClosedFs
 
