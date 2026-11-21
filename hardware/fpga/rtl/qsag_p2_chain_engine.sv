@@ -108,7 +108,8 @@ module qsag_p2_chain_engine #(
     assign {p_ns, p_step, p_heap} = meta_pick;
 
     logic rd_busy, rd_q, do_start, do_read, do_pick;
-    assign do_start    = !rst && en && start_valid && !res_valid && !busy_map[start_slot];
+    assign start_ready = !rst && en && !res_valid && !busy_map[start_slot];
+    assign do_start    = start_valid && start_ready;
     assign do_read     = en && !start_valid && rd_valid && !rd_busy;
     assign do_pick     = en && !start_valid && !do_read && v_lo[1];
     // `do_start` and `do_pick` are mutually exclusive (`do_pick` requires `!start_valid`), so all

@@ -168,7 +168,7 @@ module qsag_ext4_mac #(
         qsag_sum_csa #(.W(72), .N(5), .CHUNK(72)) u_y0 (.x(t_y0), .y(acc72_d[0]));
 
         wire [8*72-1:0] t_y1 = {
-            72'(2) * B66 + 72'd1, 72'(c1), pv[2], pv[3],
+            72'(3) * B66, 72'(c1), pv[2], pv[3],
             pv[4] << 3, nv[4],
             nv[0], nv[1]
         };

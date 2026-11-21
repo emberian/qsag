@@ -19,16 +19,18 @@ if [ ! -s "$out.json" ]; then
         yosys -l "$out.yosys.log" -q -p "read_verilog -sv $SRC; hierarchy -top $top $*; proc; $INLINE_CSA synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
     fi
 fi
-nextpnr-ecp5 $ECP5_DEV --json "$out.json" --freq "${FREQ:-120}" \
-    --timing-allow-fail --seed "${SEED:-1}" --threads 8 ${NEXTPNR_ARGS:---router router2} \
-    --report "$out.report.json" -q -l "$out.log"
-python3 - "$out.report.json" "$tag" "$ECP5_LABEL" <<'PY'
-import json, sys
+nextpnr-ecp5 $ECP5_DEV --json "$out.json" --textcfg "$out.config" --freq "${FREQ:-120}" \
+    --timing-allow-fail --seed "${SEED:-1}" --threads 4 ${NEXTPNR_ARGS:---router router2} \
+    --report "$out.report.json" > "$out.log" 2>&1
+ecppack --compress "$out.config" "$out.bit"
+python3 - "$out.report.json" "$tag" "$ECP5_LABEL" "$out.bit" <<'PY'
+import json, os, sys
 r = json.load(open(sys.argv[1]))
 fm = {k: v["achieved"] for k, v in r["fmax"].items()}
 u = r["utilization"]
 keep = {k: (v["used"], v["available"]) for k, v in u.items() if v["used"] and k in ("TRELLIS_COMB", "TRELLIS_FF", "MULT18X18D", "DP16KD", "TRELLIS_RAMW")}
-print(f"== {sys.argv[2]} [nextpnr-ecp5 {sys.argv[3]}]")
+bit_kb = os.path.getsize(sys.argv[4]) / 1024.0 if os.path.exists(sys.argv[4]) else 0.0
+print(f"== {sys.argv[2]} [nextpnr-ecp5 {sys.argv[3]} | bitstream {bit_kb:.1f} KiB]")
 for k, v in fm.items():
     print(f"  Fmax {k.split('$')[-1]:20s} {v:.2f} MHz")
 for k, (a, b) in keep.items():
