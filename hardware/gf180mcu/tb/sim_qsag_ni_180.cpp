@@ -386,16 +386,17 @@ struct Sim {
                 for (int k = 0; k < 4; k++) async_send16((w >> (16 * k)) & 0xFFFF);
         }
     }
+    u64 rx_timeout_ps = 100000000000ULL;
     bool recv(size_t n, std::vector<u64>& ws) {
         ws.clear();
         if (cfg.mode == 0) {
             for (size_t i = 0; i < n; i++) {
-                if (!wait_for([&] { return pad_out(20) == 1; }, 100000000000ULL, "TX_VALID_IRQ")) return false;
+                if (!wait_for([&] { return pad_out(20) == 1; }, rx_timeout_ps, "TX_VALID_IRQ")) return false;
                 static const int widths[3] = {4, 8, 1};
                 ws.push_back(spi_read_word(widths[spi_w++ % 3]));
             }
         } else {
-            if (!wait_for([&] { return rxq.size() >= 8 * n; }, 100000000000ULL, "egress bytes")) return false;
+            if (!wait_for([&] { return rxq.size() >= 8 * n; }, rx_timeout_ps, "egress bytes")) return false;
             for (size_t i = 0; i < n; i++) {
                 u64 w = 0;
                 for (int by = 0; by < 8; by++) {
@@ -892,7 +893,8 @@ static void send_nfc_frame(Sim& s, u32 seq, u16 qflags, u64 mac_lo, u32 mac_hi, 
         s.val[p_ask] = b ^ 1; nfc_clks(hb_clks);
     }
     s.val[p_ask] = 1;
-    nfc_clks(96);
+    // Clock out the 32-bit Manchester ACK (`N_TX_ACK`: 64 half-bits * hb_clks) back to `N_IDLE`
+    nfc_clks(fast_hb ? 1100 : 4200);
     s.drv[p_clk] = false; s.drv[p_ask] = false;
 }
 
@@ -956,8 +958,8 @@ static void scenario_enclave(Sim& s) {
     u64 rec_ldb  = 5ULL | (3ULL << 8) | (4ULL << 32);
     u64 rec_eq   = 6ULL | (2ULL << 16) | (3ULL << 24);
     std::vector<u64> prog_ok = {h_fold, rec_hash, 7, 99, rec_lda, 5, 0, 0, 0, rec_ldb, 5, 0, 0, rec_eq};
-    // Wait: rec_ldb needs 4 data words -> total 1+3 + 1+4 + 1+4 + 1 = 15 words = 120 bytes!
-    h_fold = 0x51ULL | (0x30ULL << 8) | (8ULL << 16) | (120ULL << 24);
+    // 14 payload words (rec_hash+2 + rec_lda+4 + rec_ldb+4 + rec_eq = 14 words = 112 bytes)
+    h_fold = 0x51ULL | (0x30ULL << 8) | (8ULL << 16) | (112ULL << 24);
     prog_ok = {h_fold, rec_hash, 7, 99, rec_lda, 5, 0, 0, 0, rec_ldb, 5, 0, 0, 0, rec_eq};
     check(s, s.xfer(prog_ok, 10, r) && (r[1] & 1) == 1, "valid pinned OP_FOLD executes and sets zk_pin");
     u64 ch0 = r[6], ch1 = r[7], ch2 = r[8], ch3 = r[9];
@@ -1069,12 +1071,12 @@ static void scenario_enclave(Sim& s) {
         s.val[p_chal] = 1; s.advance(60000); s.val[p_chal] = 0;
         s.xfer({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0002ULL << 48), 0, 0, 0}, 5, r);
     }
-    // External launch_ping (arg = 0x0004), echo challenge pulse 60 ns after launch
+    // External launch_ping (arg = 0x0004), echo challenge pulse 60 ns after launch (before SPI readout!)
     s.send({0x51ULL | (0x52ULL << 8) | (24ULL << 24) | (0x0004ULL << 48), 0, 0, 0});
-    s.recv(5, r);
     s.advance(60000);
     s.val[p_chal] = 1; s.advance(40000); s.val[p_chal] = 0;
     s.drv[p_chal] = false;
+    s.recv(5, r);
     s.advance(100000);
     check(s, s.xfer(prf_db_req, 3, r) && ((r[0] >> 16) & 0x81) == 1,
           "64-round rapid-bit session + external ToF ping satisfies G_DIST & releases PRF_msg");
@@ -1103,6 +1105,7 @@ int main(int argc, char** argv) {
     else { printf("unknown config %s\n", cfgname.c_str()); return 2; }
     if (scen == "loops") c.bypass = 0;
     if (scen == "coldboot") s.pad_stopped = true;        // no pad clock edge before, during or after reset
+    if (scen == "enclave") s.rx_timeout_ps = 5000000000ULL; // fail fast (5 ms) on unexpected error headers
     s.bypass = c.bypass;
     s.next_pad = c.half_pad;
     s.drive();

@@ -34,10 +34,20 @@ module qsag_dcro (
         end
     endgenerate
 
-    // 2-FF Gray-coded synchronizer from clk_core -> osc domain (prevents multi-bit CDC tearing!)
-    logic [4:0]  tg_m, tg_s, tap_q;
-    logic [31:0] oh;
+    // 2-FF Gray-coded synchronizer from clk_core -> osc domain (prevents multi-bit CDC tearing!).
+    // Reset-1 bits (`tg_*_inv4`, `tap_q_inv`, `oh_inv31`) use active-low polarity so every flop
+    // clears asynchronously to 1'b0: both 4-state GLS (`negedge rst_n`) and 2-state Verilator
+    // (`t=0` zero-init while `en=rst_n_pad` holds `osc=1`) start deterministically at tap 31.
+    logic [3:0]  tg_m_lo, tg_s_lo;
+    logic        tg_m_inv4, tg_s_inv4;
+    logic [4:0]  tap_q_inv;
+    logic [30:0] oh_lo;
+    logic        oh_inv31;
     logic [1:0]  fine_m, fine_q;
+    wire  [4:0]  tg_m  = {~tg_m_inv4, tg_m_lo};
+    wire  [4:0]  tg_s  = {~tg_s_inv4, tg_s_lo};
+    wire  [4:0]  tap_q = ~tap_q_inv;
+    wire  [31:0] oh    = {~oh_inv31, oh_lo};
     logic [4:0]  tap_m;
     always_comb begin
         tap_m[4] = tg_s[4];
@@ -48,24 +58,31 @@ module qsag_dcro (
     end
     wire  [4:0]  tap_lim = (tap_m < 5'd3) ? 5'd3 : tap_m;
     wire  [4:0]  tap_n   = (tap_lim > tap_q) ? tap_q + 5'd1 : tap_lim;
+    wire  [31:0] oh_nxt  = 32'd1 << tap_n;
     // Dedicated non-dont_touch clock output buffer isolates the 32-stage ring delay line from CTS
     // and core clock capacitance while providing a clean physical clock root (`u_osc_iso.u_iso/Z`).
     qsag_iso_buf u_osc_iso (.a(s[0]), .y(osc));
     always_ff @(posedge osc or negedge rst_n)
         if (!rst_n) begin
-            tg_m   <= 5'b10000; // Gray(31) = 31 ^ 15 = 16
-            tg_s   <= 5'b10000;
-            tap_q  <= 5'd31;
-            oh     <= 32'h8000_0000;
-            fine_m <= 2'd0;
-            fine_q <= 2'd0;
+            tg_m_lo   <= 4'd0;
+            tg_m_inv4 <= 1'b0; // Gray(31) = 5'b10000
+            tg_s_lo   <= 4'd0;
+            tg_s_inv4 <= 1'b0;
+            tap_q_inv <= 5'd0; // tap_q = 5'd31
+            oh_lo     <= 31'd0;
+            oh_inv31  <= 1'b0; // oh = 32'h8000_0000
+            fine_m    <= 2'd0;
+            fine_q    <= 2'd0;
         end else begin
-            tg_m   <= tap_gray;
-            tg_s   <= tg_m;
-            tap_q  <= tap_n;
-            oh     <= 32'd1 << tap_n;
-            fine_m <= fine;
-            fine_q <= fine_m;
+            tg_m_lo   <= tap_gray[3:0];
+            tg_m_inv4 <= ~tap_gray[4];
+            tg_s_lo   <= tg_m[3:0];
+            tg_s_inv4 <= ~tg_m[4];
+            tap_q_inv <= ~tap_n;
+            oh_lo     <= oh_nxt[30:0];
+            oh_inv31  <= ~oh_nxt[31];
+            fine_m    <= fine;
+            fine_q    <= fine_m;
         end
 
     wire [31:0] g;
@@ -201,7 +218,7 @@ module qsag_gals_clk_rst (
     logic       pad_alive, osc_dead;
     wire        sel_pad  = bypass & (pad_alive | osc_dead);
     wire        b_kill_n = ~bypass | ~osc_dead;
-    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(1'b1), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
+    qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(rst_n_pad), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
     qsag_clk_mux_glitchfree u_mux (
         .clk_a(clk_pad), .clk_b(osc), .sel_a(sel_pad), .arst_n(rst_n_pad),
         .a_kill_n(pad_alive | osc_dead), .b_kill_n(b_kill_n),
@@ -414,7 +431,7 @@ module qsag_gals_clk_rst (
             zero_q <= tamp_s | fault_glitch | any_glitch | (fault_shield & csr_shield_en) | ext_zeroize_req | csr_zero;
         end
     assign zeroize      = zero_q;
-    assign fault_tamper = tamp_s;
+    assign fault_tamper = tamp_q | tamp_s;
 
     // Async secret zeroize assertion (works with stopped clock via u_tamp!) + 2-FF sync release
     wire raw_srst_n = rst_n_pad & ~tamp_q & ~zero_q & (tamper_n | tamp_armed);

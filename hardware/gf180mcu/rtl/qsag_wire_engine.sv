@@ -386,7 +386,7 @@ module qsag_wire_engine #(
     wire         zkpin_wr  = (|zkpin_we) && permit_control;
     wire         key_wr    = (|key_we)   && permit_control;
     wire         kvat_wr   = (|kvat_we)  && permit_control;
-    wire         vld_pmeta = vat_pwe && permit_control && (cnt2 >= 5'd1) && (cnt2 <= 5'd3);
+    wire         vld_pmeta = fire && vat_pwe && permit_control && (cnt2 >= 5'd1) && (cnt2 <= 5'd3);
     wire         aux_we    = vld_pk_wr | zkpin_wr | key_wr | kvat_wr;
     wire  [63:0] aux_wdata = zkpin_wr ? zkpin_wdata
                            : (sid == S_KLK[11:5] || sid == S_PF4[11:5] || sid == S_PF5[11:5]) ? port
@@ -432,10 +432,10 @@ module qsag_wire_engine #(
         .clk(clk), .rst_n(sub_rst_n), .srst_n(secret_rst_n), .permit_control(permit_control),
         .kvat_commit(kvat_commit), .vat_ready(vat_ready),
         .zk_latch_valid_set(zk_latch_set), .zk_latch_clear(zk_latch_clr), .zk_root_valid(zk_root_valid),
-        .parent_chk_clr(vat_pchk_clr), .parent_we(vat_pwe), .parent_idx(cnt2[2:0]),
+        .parent_chk_clr(fire && vat_pchk_clr), .parent_we(fire && vat_pwe), .parent_idx(cnt2[2:0]),
         .desc_wdata(in_data), .sp_hold_q(sp_hold_q), .desc_eq_sp(cmp_eq),
-        .child_chk_clr(vat_cchk_clr), .child_we(vat_cwe), .child_idx(cnt2[2:0]),
-        .pk_chk_clr(vat_pk_clr), .pk_chk_we(vat_pk_we),
+        .child_chk_clr(fire && vat_cchk_clr), .child_we(fire && vat_cwe), .child_idx(cnt2[2:0]),
+        .pk_chk_clr(fire && vat_pk_clr), .pk_chk_we(fire && vat_pk_we),
         .nfc_auth_ok(nfc_auth_ok), .need_nfc_guard(vat_need_nfc),
         .nfc_consume_pulse(vat_nfc_consume),
         .dist_valid(db_dist_valid), .dist_timeout(db_dist_timeout), .dist_cycles(db_dist_cycles),
@@ -1167,7 +1167,7 @@ module qsag_wire_engine #(
                     4'd5: begin // Incremental PUF block XOR absorb (binds `arg[15]` mint_lock!)
                         e_rd   = {1'b0, cnt2};
                         wsel   = 3'd1;
-                        e_wreq = (cnt2 <= 5'd4) || (cnt2 == 5'd16);
+                        e_wreq = ((cnt2 <= 5'd4) && !(puf_recon_mode && cnt2 == 5'd2)) || (cnt2 == 5'd16);
                         unique case (cnt2)
                             5'd0:    begin xsel = 3'd1; isel = 6'd21; end
                             5'd1:    begin xsel = 3'd1; isel = 6'd22; end
@@ -1300,6 +1300,12 @@ module qsag_wire_engine #(
                 cond         = !puf_recon_mode || in_valid;
                 do_pop       = puf_recon_mode;
                 puf_vmask_ld = puf_recon_mode && in_valid;
+                // Absorb `vmask` (`in_data`) into `st[2]` before `S_HORN..S_BMU` reuses `vmsyn_q` for `syn_v`
+                e_rd         = 6'd2;
+                e_wa         = 6'd2;
+                xsel         = 3'd0;
+                wsel         = 3'd1;
+                e_wreq       = puf_recon_mode;
             end
             S_PF1[11:5]: begin
                 cond          = !puf_recon_mode || in_valid;
@@ -1347,7 +1353,7 @@ module qsag_wire_engine #(
                     kvat_commit = (!puf_any_err && !macdiff && cnt2 == 5'd7);
                     key_we      = (!puf_any_err && !macdiff && cnt2 >= 5'd8 && cnt2 <= 5'd13)
                                   ? (6'b000001 << (cnt2 - 5'd8)) : 6'd0;
-                    if (cnt2 == 5'd13) begin
+                    if (cnt2 == 5'd14) begin
                         e_wreq = 1'b1;
                         e_wa   = 6'd0;
                         xsel   = 3'd1;
@@ -1393,13 +1399,13 @@ module qsag_wire_engine #(
             S_DB0[11:5]: begin
                 cond             = in_valid;
                 do_pop           = 1'b1;
-                db_load_r0       = (cnt2 == 5'd0) && arg[0];
-                db_load_r1       = (cnt2 == 5'd1) && arg[0];
-                db_arm_responder = (cnt2 == 5'd2) && arg[0];
-                db_step_round    = (cnt2 == 5'd2) && arg[1];
-                db_launch_ping   = (cnt2 == 5'd2) && arg[2] && !arg[3];
-                db_cal_ping      = (cnt2 == 5'd2) && arg[2] &&  arg[3];
-                nco_pkt_load     = (cnt2 == 5'd1) && arg[4] &&  arg[12];
+                db_load_r0       = permit_control && in_valid && (cnt2 == 5'd0) && arg[0];
+                db_load_r1       = permit_control && in_valid && (cnt2 == 5'd1) && arg[0];
+                db_arm_responder = permit_control && in_valid && (cnt2 == 5'd2) && arg[0];
+                db_step_round    = permit_control && in_valid && (cnt2 == 5'd2) && arg[1];
+                db_launch_ping   = permit_control && in_valid && (cnt2 == 5'd2) && arg[2] && !arg[3];
+                db_cal_ping      = permit_control && in_valid && (cnt2 == 5'd2) && arg[2] &&  arg[3];
+                nco_pkt_load     = permit_control && in_valid && (cnt2 == 5'd1) && arg[4] &&  arg[12];
             end
             S_DBO[11:5]: begin
                 cond = out_ready;
@@ -1765,7 +1771,7 @@ module qsag_wire_engine #(
                     if (cnt2 == 5'd3) nxt_st_id = S_WIPE[11:5];
                 end else if (cnt2 == 5'd3) begin
                     if (puf_any_err || macdiff || cmp_ne) nxt_st_id = S_EHDR[11:5];
-                end else if (cnt2 == 5'd13) begin
+                end else if (cnt2 == 5'd14) begin
                     nxt_ret_id = S_BSO[11:5];
                     nxt_st_id  = S_HDR[11:5];
                 end
@@ -1927,7 +1933,7 @@ module qsag_wire_engine #(
                         key_valid       <= 1'b1;
                         vat_mint_locked <= arg[15];
                     end
-                    S_PF5[11:5]: if (puf_recon_mode && cnt2 == 5'd13) begin
+                    S_PF5[11:5]: if (puf_recon_mode && cnt2 == 5'd14) begin
                         key_valid       <= 1'b1;
                         vat_mint_locked <= arg[15];
                     end
@@ -2432,7 +2438,7 @@ module qsag_wire_engine #(
                             rok   <= 1'b0;
                             rlen  <= '0;
                             rcode <= E_PUF;
-                        end else if (puf_recon_mode && cnt2 == 5'd13) begin
+                        end else if (puf_recon_mode && cnt2 == 5'd14) begin
                             rlen <= 24'd8;
                             rok  <= 1'b1;
                         end

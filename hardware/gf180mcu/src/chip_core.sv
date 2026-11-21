@@ -203,7 +203,7 @@ module chip_core #(
         .bidir_sl(bidir_sl), .bidir_ie(bidir_ie), .bidir_pu(bidir_pu), .bidir_pd(bidir_pd),
         .in_valid(in_valid), .in_data(in_data), .in_pop(in_pop),
         .out_ready(out_ready), .out_data(out_data), .out_push(out_push),
-        .verify_ok(verify_ok), .fault(fault), .busy(eng_busy), .clk_mon(clk_mon),
+        .verify_ok(verify_ok & srst_n & ~fault_tamper), .fault(fault), .busy(eng_busy), .clk_mon(clk_mon),
         .an_cs_n(an_cs_n), .an_sck(an_sck), .an_mosi(an_mosi), .an_miso(an_miso),
         .tamper_n(tamper_n),
         .nfc_clk_in(nfc_clk_in), .nfc_ask_in(nfc_ask_in), .nfc_load_mod(nfc_load_mod),

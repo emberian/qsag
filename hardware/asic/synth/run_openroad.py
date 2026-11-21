@@ -146,7 +146,21 @@ set_power_activity -global -activity 0.15 -duty 0.5
 report_power -digits 4
 """
 
-    tcl_place = f"""set_thread_count 16
+    pad_l = cfg.get("pad_left", 1)
+    pad_r = cfg.get("pad_right", 1)
+    gp_route_setup = ""
+    pad_cmd = f"set_placement_padding -global -left {pad_l} -right {pad_r}"
+    gp_pad_args = f"-pad_left {pad_l} -pad_right {pad_r}"
+    if do_route:
+        gp_route_setup = f"""
+repair_tie_fanout -separation 100 LOGIC0_X1/Z
+repair_tie_fanout -separation 100 LOGIC1_X1/Z
+set_routing_layers -signal {cfg['route_layers']} -clock {cfg['clock_layers']}
+set_global_routing_layer_adjustment metal2 0.25
+set_global_routing_layer_adjustment metal3 0.20
+set_global_routing_layer_adjustment metal4 0.15
+"""
+    tcl_place = f"""set_thread_count 32
 read_lef {PDK / cfg['tech_lef']}
 read_lef {PDK / cfg['cell_lef']}
 read_lef {sram_lef}
@@ -214,12 +228,12 @@ set_io_pin_constraint -pin_names {{{cmd_hi}}} -region right:*
 place_pins -hor_layers {cfg['hor_layer']} -ver_layers {cfg['ver_layer']}
 
 source {PDK / cfg['set_rc']}
-
-global_placement -routability_driven -density {cfg['gp_density']} -overflow 0.12 -pad_left 1 -pad_right 1
+{gp_route_setup}
+global_placement -routability_driven -density {cfg['gp_density']} -overflow 0.08 {gp_pad_args}
 estimate_parasitics -placement
 buffer_ports
 set_false_path -from [get_ports rst]
-set_placement_padding -global -left 1 -right 1
+{pad_cmd}
 detailed_placement -max_displacement {{2000 2000}}
 check_placement -verbose
 write_db {placed_odb}
@@ -249,7 +263,7 @@ set_output_delay {cfg['io_delay']} -clock core [get_ports {{cmd_ready rsp_valid 
 set_false_path -from [get_ports rst]
 source {PDK / cfg['set_rc']}
 
-set_placement_padding -global -left 1 -right 1
+{pad_cmd}
 clock_tree_synthesis -root_buf {cfg['cts_root']} -buf_list {{{cfg['cts_bufs']}}} -sink_clustering_enable -post_cts_disable
 set_propagated_clock [all_clocks]
 detailed_placement -max_displacement {{2000 2000}}
@@ -295,10 +309,10 @@ set_false_path -from [get_ports rst]
 source {PDK / cfg['set_rc']}
 
 set_routing_layers -signal {cfg['route_layers']} -clock {cfg['clock_layers']}
-set_global_routing_layer_adjustment metal2 0.25
-set_global_routing_layer_adjustment metal3 0.20
+set_global_routing_layer_adjustment metal2 0.30
+set_global_routing_layer_adjustment metal3 0.25
 set_global_routing_layer_adjustment metal4 0.15
-global_route -guide_file {guide_file} -congestion_iterations 20 -verbose
+global_route -guide_file {guide_file} -congestion_iterations 25 -verbose
 exit
 """
             tcl_grt_path = out / "pnr_grt.tcl"
@@ -311,15 +325,18 @@ exit
                 raise RuntimeError(f"OpenROAD {lib} GRT failed:\n" + "\n".join(log_grt_path.read_text().splitlines()[-45:]))
         txt_grt = txt_cts + "\n" + ((out / "openroad_grt.log").read_text() if (out / "openroad_grt.log").exists() else "")
 
-        drt_ckpt = out / "drt_ckpt.odb"
-        drt_logs = []
-        p = type("R", (), {"returncode": 0})()
-
-        tcl_hdr = f"""set_thread_count 20
+        tcl_route = f"""set_thread_count 32
 read_liberty {PDK / cfg['liberty']}
 read_liberty {sram_lib}
-"""
-        tcl_sdc = f"""
+read_db {cts_odb}
+
+foreach net [[ord::get_db_block] getNets] {{
+  set st [$net getSigType]
+  if {{$st eq "GROUND" || $st eq "POWER"}} {{
+    $net setSpecial
+  }}
+}}
+
 create_clock -name core -period {period_ns} [get_ports clk]
 set_propagated_clock [all_clocks]
 set_input_delay {cfg['io_delay']} -clock core [get_ports {{cmd_valid cmd_op* cmd_idx* cmd_addr* cmd_data*}}]
@@ -327,73 +344,10 @@ set_output_delay {cfg['io_delay']} -clock core [get_ports {{cmd_ready rsp_valid 
 set_false_path -from [get_ports rst]
 source {PDK / cfg['set_rc']}
 set_routing_layers -signal {cfg['route_layers']} -clock {cfg['clock_layers']}
-"""
-        p0_log = out / "openroad_drt_p0.log"
-        if force or not drt_ckpt.exists():
-            for stale in out.glob("openroad_drt_p*.log"):
-                stale.unlink()
-            tcl_p0 = tcl_hdr + f"""read_db {cts_odb}
-foreach net [[ord::get_db_block] getNets] {{
-  set st [$net getSigType]
-  if {{$st eq "GROUND" || $st eq "POWER"}} {{
-    $net setSpecial
-  }}
-}}
-""" + tcl_sdc + f"""
-detailed_route -guide {guide_file} -bottom_routing_layer metal2 -top_routing_layer metal10 -droute_end_iter 0 -verbose 1
-write_db {drt_ckpt}
-exit
-"""
-            p0_tcl = out / "pnr_drt_p0.tcl"
-            p0_tcl.write_text(tcl_p0)
-            with p0_log.open("w") as f:
-                p = subprocess.run(RUN + [OPENROAD, "-threads", "20", "-exit", str(p0_tcl)], stdout=f, stderr=subprocess.STDOUT)
-            s0 = p0_log.read_text()
-            drt_logs.append(s0)
-            m0 = re.findall(r"Number of violations\s*=\s*(\d+)", s0)
-            v0 = int(m0[-1]) if m0 else -1
-            print(f"[OpenROAD {lib} DRT pass 0] exit={p.returncode} violations={v0}", flush=True)
-            if p.returncode != 0 or "\nError:" in s0:
-                raise RuntimeError(f"OpenROAD {lib} DRT pass 0 failed:\n" + "\n".join(s0.splitlines()[-45:]))
-            pass_idx = 1
-        else:
-            if p0_log.exists():
-                drt_logs.append(p0_log.read_text())
-            prev_logs = sorted(
-                [q for q in out.glob("openroad_drt_p*.log") if q.name != "openroad_drt_p0.log"],
-                key=lambda q: int(re.search(r"_p(\d+)\.log$", q.name).group(1)),
-            )
-            for pq in prev_logs:
-                drt_logs.append(pq.read_text())
-            pass_idx = (int(re.search(r"_p(\d+)\.log$", prev_logs[-1].name).group(1)) + 1) if prev_logs else 1
 
-        all_prev = "\n".join(drt_logs)
-        m_prev = re.findall(r"Number of violations\s*=\s*(\d+)", all_prev)
-        last_viols = int(m_prev[-1]) if m_prev else 999999
-
-        while last_viols > 0 and pass_idx <= 16:
-            end_it = 1 if last_viols > 120000 else (2 if last_viols > 15000 else (5 if last_viols > 1000 else 10))
-            pk_tcl = out / f"pnr_drt_p{pass_idx}.tcl"
-            pk_log = out / f"openroad_drt_p{pass_idx}.log"
-            tcl_pk = tcl_hdr + f"read_db {drt_ckpt}\n" + tcl_sdc + f"""
-detailed_route -bottom_routing_layer metal2 -top_routing_layer metal10 -droute_end_iter {end_it} -output_drc {drc_rpt} -verbose 1
-write_db {drt_ckpt}
-exit
-"""
-            pk_tcl.write_text(tcl_pk)
-            with pk_log.open("w") as f:
-                p = subprocess.run(RUN + [OPENROAD, "-threads", "20", "-exit", str(pk_tcl)], stdout=f, stderr=subprocess.STDOUT)
-            sk = pk_log.read_text()
-            drt_logs.append(sk)
-            mk = re.findall(r"Number of violations\s*=\s*(\d+)", sk)
-            last_viols = int(mk[-1]) if mk else last_viols
-            print(f"[OpenROAD {lib} DRT pass {pass_idx} (end_iter={end_it})] exit={p.returncode} violations={last_viols}", flush=True)
-            if p.returncode != 0 or "\nError:" in sk:
-                raise RuntimeError(f"OpenROAD {lib} DRT pass {pass_idx} failed:\n" + "\n".join(sk.splitlines()[-45:]))
-            pass_idx += 1
-
-        tcl_sta = tcl_hdr + f"read_db {drt_ckpt}\n" + tcl_sdc + f"""
+detailed_route -guide {guide_file} -bottom_routing_layer metal2 -top_routing_layer metal10 -output_drc {drc_rpt} -verbose 1
 write_def {def_out}
+
 read_guides {guide_file}
 estimate_parasitics -global_routing
 report_design_area
@@ -407,17 +361,14 @@ report_power -digits 4
 exit
 """
         tcl_route_path = out / "pnr_route.tcl"
-        sta_log_path = out / "openroad_postroute_sta.log"
         log_path = out / "openroad.log"
-        tcl_route_path.write_text(tcl_sta)
-        with sta_log_path.open("w") as f:
-            p = subprocess.run(RUN + [OPENROAD, "-threads", "20", "-exit", str(tcl_route_path)], stdout=f, stderr=subprocess.STDOUT)
-        s_sta = sta_log_path.read_text()
-        drt_logs.append(s_sta)
-        active_log = "\n".join(drt_logs)
+        tcl_route_path.write_text(tcl_route)
+        with log_path.open("w") as f:
+            p = subprocess.run(RUN + [OPENROAD, "-threads", "32", "-exit", str(tcl_route_path)], stdout=f, stderr=subprocess.STDOUT)
+        active_log = log_path.read_text()
         txt = txt_grt + "\n" + active_log
         log_path.write_text(txt)
-        print(f"[OpenROAD {lib} ROUTE+STA] exit={p.returncode} final_violations={last_viols}", flush=True)
+        print(f"[OpenROAD {lib} ROUTE+STA] exit={p.returncode}", flush=True)
     else:
         p = type("R", (), {"returncode": 0})()
         active_log = log_cts_path.read_text() if log_cts_path.exists() else ""
@@ -439,7 +390,7 @@ exit
         if drc_count != 0:
             raise RuntimeError(f"OpenROAD {lib} detailed_route had {drc_count} DRC violations!")
         render_def(def_out, png_out, cfg["macro_w"], cfg["macro_h"],
-                   f"QSAG-NI NAN45 BASIN-1 ROUTED ({die_w}X{die_h} UM = 1.39 MM2, 0 DRC)")
+                   f"QSAG-NI NAN45 BASIN-1 ROUTED ({die_w}X{die_h} UM = {round(die_w*die_h/1e6, 2):.2f} MM2, 0 DRC)")
 
     m_area = re.findall(r"Design area\s+([0-9.]+)\s+u\^2\s+([0-9.]+)%\s+utilization", txt)
     area_u2, util_pct = (float(m_area[-1][0]), float(m_area[-1][1])) if m_area else (None, None)
@@ -507,19 +458,21 @@ CONFIGS = [
         # 139.84 = 736 * 0.19 -> exact site_w multiple when rotated R90/R270!
         "macro_w": 190.40,
         "macro_h": 139.84,
-        "die_w": 1180,
-        "die_h": 1180,
+        "die_w": 1480,
+        "die_h": 1480,
         "margin": 20,
-        # Symmetric Basin-1: 2 West (`R90`, x=30.02=158*0.19) + 2 East (`R270`, x=1010.04=5316*0.19),
-        # y = 210.0 (150*1.40) and 770.0 (550*1.40), leaving wide unobstructed central channel!
+        # Symmetric Basin-1: 2 West (`R90`, x=30.02=158*0.19) + 2 East (`R270`, x=1310.05=6895*0.19),
+        # y = 280.0 (200*1.40) and 1008.0 (720*1.40), leaving wide unobstructed central channel!
         "banks": [
-            (30.02,   210.00, "R90"),
-            (30.02,   770.00, "R90"),
-            (1010.04, 210.00, "R270"),
-            (1010.04, 770.00, "R270"),
+            (30.02,   280.00, "R90"),
+            (30.02,   1008.00, "R90"),
+            (1310.05, 280.00, "R270"),
+            (1310.05, 1008.00, "R270"),
         ],
         "halo_um": 4.0,
-        "gp_density": 0.70,
+        "gp_density": 0.68,
+        "pad_left": 3,
+        "pad_right": 3,
         "cts_root": "CLKBUF_X3",
         "cts_bufs": "CLKBUF_X1 CLKBUF_X2 CLKBUF_X3",
         "full_route": True,

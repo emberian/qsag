@@ -2,22 +2,22 @@
 // Target: wafer.space GF180MCU Run 3 — Smallest Slot `SLOT_0P5X0P5` (56-Pad Die, 5.0 V CMOS)
 // Compiles standalone with `typst compile` (zero external package dependencies).
 
-// ---- Post-Layout Signoff Parameters (updated from LibreLane e5_signoff run) ----
+// ---- Post-Layout Measured Parameters (LibreLane e5_signoff_postpnr / e5_signoff_lvs on SLOT_0P5X0P5) ----
 #let rev_code      = "0x0180_0003"
 #let chip_id_ascii = "QSAGNI18 (0x3831_494E_4741_5351)"
 #let die_dims      = "1,936 × 2,531 µm (4.900 mm²)"
 #let core_dims     = "1,052 × 1,647 µm (1,732,644 µm²; 1,673,768 µm² placeable)"
-#let syn_area_um2  = "828,410 µm²"
-#let syn_core_pct  = "47.81%"
-#let pnr_fill_pct  = "54.9%"
-#let std_cells_cnt = "29,840"
-#let fmax_tt_mhz   = "68.4 MHz"
-#let fmax_ss_mhz   = "43.2 MHz"
-#let signoff_mhz   = "40.0 MHz (25.00 ns)"
-#let wns_ss_ns     = "+1.85 ns"
-#let wns_tt_ns     = "+10.38 ns"
-#let hold_wns_ns   = "+0.18 ns"
-#let drc_lvs_stat  = "0 Magic DRC / 0 KLayout DRC / 0 Antenna / 0 LVS"
+#let syn_area_um2  = "1,040,731 µm² (118.5 kGE @8.78 | 94.8 kGE @nand2)"
+#let syn_core_pct  = "60.07%"
+#let pnr_fill_pct  = "78.15%"
+#let std_cells_cnt = "47,318 active (59,320 w/ tap/endcap)"
+#let fmax_tt_mhz   = "12.93 MHz (SPEF nom_tt)"
+#let fmax_ss_mhz   = "7.27 MHz (SPEF nom_ss)"
+#let signoff_mhz   = "25.0 MHz target (12.9 MHz TT / 7.3 MHz SS measured)"
+#let wns_ss_ns     = "-97.61 ns (@40 ns)"
+#let wns_tt_ns     = "-37.33 ns (@40 ns)"
+#let hold_wns_ns   = "-1.02 ns (FF) / -2.33 ns (SS)"
+#let drc_lvs_stat  = "0 Density / 0.265 mV IR / 47,752=47,752 LVS dev (12,767 GRT ovf -> 32k DRC)"
 
 // ---- Typography & Corporate Datasheet Theme ----
 #let navy   = rgb("#0f2742")
@@ -173,7 +173,7 @@
       [Padring Total], [*56 pads* (`48` signal + `8` VDD/VSS)],
       [Synthesized Core], [#syn_area_um2 (#syn_core_pct of core)],
       [Post-PnR Std Cells], [#std_cells_cnt (#pnr_fill_pct placement fill)],
-      [Signoff Clock], [#signoff_mhz (`9` corners, 0 violations)],
+      [Signoff Clock Target], [#signoff_mhz (`9` SPEF corners, `0` virtual clocks)],
       [Implied $f_"max"$ (`SS` / `TT`)], [#fmax_ss_mhz (`125°C, 4.5V`) / #fmax_tt_mhz (`25°C, 5.0V`)],
       [Physical Verification], [#drc_lvs_stat],
       [Hardware ID / Rev], [`"QSAGNI18"` / #rev_code],

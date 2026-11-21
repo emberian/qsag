@@ -148,6 +148,22 @@ if { [info exists ::env(OPENLANE_SDC_IDEAL_CLOCKS)] && $::env(OPENLANE_SDC_IDEAL
     set_propagated_clock [all_clocks]
 }
 
+# Clear 2W2S CTS Non-Default Rules on dense 5LM core nets (especially the 71 x 64-fanout latch-gate
+# nets in `qsag_sponge`) so GlobalRouting uses standard-width Metal2..Metal5 tracks cleanly in 1 pass
+# instead of looping 5x over NDR rip-up (`GRT-0273`).
+if { [info exists ::db] } {
+    catch {
+        set _qsag_blk [[$::db getChip] getBlock]
+        if { "$_qsag_blk" != "NULL" } {
+            foreach _qsag_n [$_qsag_blk getNets] {
+                if { "[$_qsag_n getNonDefaultRule]" != "NULL" } {
+                    $_qsag_n setNonDefaultRule NULL
+                }
+            }
+        }
+    }
+}
+
 # OpenROAD 2026-02-17 renamed `-post_cts_disable` -> `-no_insertion_delay`. Since Dregg-180 has zero
 # clocked SRAM macros and two real physical clocks (`clk_pad` & `osc`) converging on `u_clk.u_mux.u_o`,
 # pass `-no_insertion_delay` to `clock_tree_synthesis` so TritonCTS builds all H-Trees cleanly without
