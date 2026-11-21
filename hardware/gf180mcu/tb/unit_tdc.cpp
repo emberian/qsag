@@ -141,6 +141,13 @@ int main(int argc, char** argv) {
             errors++;
         }
     }
+    // Verify calibration vs session distance separation (D6 #4):
+    // cal_ping sets cal_valid=1 and NEVER sets dist_valid!
+    top->cal_ping = 1;
+    tick();
+    top->cal_ping = 0;
+    for (int k = 0; k < 16; k++) tick();
+    expect(top->cal_valid == 1 && top->dist_valid == 0, "cal_ping sets cal_valid only, never dist_valid", 65);
     printf("unit_tdc: 2 sessions, %d challenge-1 rounds, %d challenge-0 rounds, %d rounds with r0 != r1, %" PRIu64
            " clocks, %d errors\n",
            c1_rounds, c0_rounds, both_possible, cycles, errors);

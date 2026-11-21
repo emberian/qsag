@@ -51,8 +51,16 @@ static u64 run_block(int recon, int blk, int margin, int flips, u64 vmask, unsig
     top->blk_sel = blk;
     top->margin_thresh = margin;
     top->noise_flips = flips;
-    top->vmask_in = vmask;
-    top->syn_in = syn;
+    if (recon) {
+        top->puf_wdata = vmask;
+        top->vmask_ld = 1;
+        tick();
+        top->vmask_ld = 0;
+        top->puf_wdata = syn;
+        top->syn_ld = 1;
+        tick();
+        top->syn_ld = 0;
+    }
     top->start_blk = 1;
     tick();
     top->start_blk = 0;

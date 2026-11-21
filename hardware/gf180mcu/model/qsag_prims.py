@@ -49,6 +49,34 @@ def ext4_scale(x, s):
     return [a * s % P for a in x]
 
 
+# ---------------------------------------------------------------- Quintic Fp5 = F_p[X]/(X^5 - 3) (zk-Hem v2)
+FP5_W = 3
+
+
+def fp5_mul(x, y):
+    a = [v % P for v in x]
+    b = [v % P for v in y]
+    out = [0] * 5
+    for k in range(5):
+        acc = 0
+        for i in range(5):
+            acc += a[i] * b[k - i] if i <= k else FP5_W * a[i] * b[k + 5 - i]
+        out[k] = acc % P
+    return out
+
+
+def fp5_add(x, y):
+    return [(a + b) % P for a, b in zip(x, y)]
+
+
+def fp5_sub(x, y):
+    return [(a - b) % P for a, b in zip(x, y)]
+
+
+def fp5_scale(x, s):
+    return [a * s % P for a in x]
+
+
 # ---------------------------------------------------------------- Poseidon2 width 12
 P2_IV = 0x504F53325F474C31
 
@@ -157,7 +185,52 @@ def p2_canopy_path(leaf, siblings, key3, leaf_index):
 
 
 def pack_bytes_7_limbs(b):
+    """qsag-agg Fiat-Shamir framing: [len(b)] ++ little-endian 7-byte limbs."""
     return [len(b)] + [int.from_bytes(b[i:i + 7], "little") for i in range(0, len(b), 7)]
+
+
+def pack_bytes_framed_accel(b):
+    """qsag-accel Poseidon2Sponge::absorb_bytes_framed parity: [len(b)] ++ big-endian 7-byte chunks with 0x01 delimiter."""
+    b = bytes(b)
+    rem = (len(b) + 1) % 7
+    padded = b + b"\x01" + (b"\x00" * (0 if rem == 0 else 7 - rem))
+    return [len(b)] + [int.from_bytes(padded[i:i + 7], "big") for i in range(0, len(padded), 7)]
+
+
+def sponge12_rate6(limbs):
+    """Canonical rate-6, capacity-6 Poseidon2-12 sponge (qsag-accel::poseidon2::sponge12_rate6)."""
+    st = [0] * 12
+    limbs = [x % P for x in limbs]
+    for off in range(0, len(limbs), 6):
+        chunk = limbs[off:off + 6]
+        for i, v in enumerate(chunk):
+            st[i] = (st[i] + v) % P
+        if len(chunk) < 6:
+            st[len(chunk)] = (st[len(chunk)] + 1) % P
+        st = p2_perm(st)
+    if len(limbs) % 6 == 0:
+        st[0] = (st[0] + 1) % P
+        st = p2_perm(st)
+    return st
+
+
+def poseidon2_sponge_accel(domain_tag, limbs):
+    """qsag-accel Poseidon2Sponge (rate=8, cap=[8, 4, domain_tag, P2_IV], 10*1 padding)."""
+    st = [0] * 8 + [8, 4, domain_tag % P, P2_IV % P]
+    pos = 0
+    for l in limbs:
+        st[pos] = (st[pos] + (l % P)) % P
+        pos += 1
+        if pos == 8:
+            st = p2_perm(st)
+            pos = 0
+    if pos == 7:
+        st[7] = (st[7] + (1 << 56) + 1) % P
+    else:
+        st[pos] = (st[pos] + 1) % P
+        st[7] = (st[7] + (1 << 56)) % P
+    st = p2_perm(st)
+    return st[:4]
 
 
 # ---------------------------------------------------------------- Keccak
@@ -327,6 +400,16 @@ def selfcheck(fixture_path):
         n += 1
     # RFC 9861 TurboSHAKE256(M = empty, D = 0x1F), first 8 output bytes.
     assert turboshake256(b"", 64, 0x1F).hex().startswith("367a329dafea871c")
+    # Fp5 = F_p[X]/(X^5 - 3): X^5 == 3 and distributivity check
+    x_el = [0, 1, 0, 0, 0]
+    x2 = fp5_mul(x_el, x_el)
+    x4 = fp5_mul(x2, x2)
+    assert fp5_mul(x4, x_el) == [3, 0, 0, 0, 0]
+    u5, v5, w5 = [1, 2, 3, 4, 5], [P - 1, 7, 0, 9, 11], [42, 0, P - 3, 8, 1]
+    assert fp5_mul(u5, fp5_add(v5, w5)) == fp5_add(fp5_mul(u5, v5), fp5_mul(u5, w5))
+    # sponge12_rate6 empty and exact-boundary self-check
+    assert sponge12_rate6([]) == p2_perm([1] + [0] * 11)
+    assert pack_bytes_framed_accel(b"abc") == [3, int.from_bytes(b"abc\x01\x00\x00\x00", "big")]
     return n
 
 

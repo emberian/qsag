@@ -59,6 +59,8 @@ for n in ((0, 7) if quick else (0, 3, 6, 7, 14, 21)):
 # non-canonical input limbs are reduced (the Lean oracle's a_raw / a_canon edge cases)
 edges = [int(e["a_raw"]) for e in fx["goldilocks_edges"]]
 xfer(m.p2_hash(q.P2_DOMAIN_FS_ABSORB_LIMBS, e4(), edges), "sponge hash over the Goldilocks edge words")
+for n6 in ((0, 6) if quick else (0, 5, 6, 7)):
+    xfer(m.p2_rate6([limb() for _ in range(n6)]), f"sponge12_rate6 (zk-Hem v2 / BlindVC), {n6} limbs")
 
 # Canopy: one node, a valid path, a path against the wrong root
 key3 = [limb() for _ in range(3)]
@@ -260,6 +262,44 @@ def run_vm(dev, op, builder, name):
 
 run_vm(dev, m.OP_FOLD, lambda vm: fold_program(vm, None), "duet fold step, unkeyed receipt")
 
+# Exploit regression (D6 #2): 0-assertion LOAD R_CH stream MUST be rejected!
+vm_bad = m.Hvm(dev, m.OP_FOLD)
+vm_bad.load(m.R_CH, [1, 2, 3, 4])
+req_bad = vm_bad.request()
+rsp_bad = vm_bad.run(req_bad)
+assert (rsp_bad[1] & 1) == 0
+xfer((req_bad, rsp_bad), "exploit regression: 0-assertion LOAD R_CH stream rejected")
+out.append("PIN VERIFY_OK 0")
+
+# zk-Hem v2 Quintic Fp5 = F_p[X]/(X^5 - 3) + sponge12_rate6 streamed verification (flags=0x18)
+def fp5_hem_v2_program(vm):
+    stmt = [limb() for _ in range(5)]
+    vm.hash_rate6(m.R_CH, stmt)
+    ch5 = q.sponge12_rate6(stmt)[:5]
+    c0 = [limb() for _ in range(5)]
+    c2 = [limb() for _ in range(5)]
+    r5 = q.sponge12_rate6(ch5 + c0 + c2)[:5]
+    c1 = [limb() for _ in range(5)]
+    claim = q.fp5_add(c0, q.fp5_mul(r5, q.fp5_add(c1, q.fp5_mul(r5, c2))))
+    vm.load(m.R_A, claim, imm=True)
+    vm.load(m.R_X, c0)
+    vm.load(m.R_Y, c2)
+    vm.hash_rate6(m.R_B, [], ch5 + c0 + c2)
+    vm.load(m.R_T0, c1)
+    vm.emul(m.R_Y, m.R_Y, m.R_B)
+    vm.eadd(m.R_Y, m.R_Y, m.R_T0)
+    vm.emul(m.R_Y, m.R_Y, m.R_B)
+    vm.eadd(m.R_Y, m.R_Y, m.R_X)
+    vm.assert_eq(m.R_A, m.R_Y)
+
+vm5 = m.Hvm(dev, m.OP_HEM, pin_mode=True, fp5_mode=True)
+fp5_hem_v2_program(vm5)
+req5 = vm5.request()
+rsp5 = vm5.run(req5)
+assert (rsp5[1] & 1) == 1 and dev.zk_pin is not None
+xfer((req5, rsp5), "zk-Hem v2 Quintic Fp5 + sponge12_rate6 verifier program: accept & pin")
+out.append("PIN VERIFY_OK 1")
+
 # ---------------------------------------------------------------- key load, PRF_msg, signing
 sk_seed, sk_prf = bytes.fromhex(f128s["sk_seed_hex"]), bytes.fromhex(f128s["sk_prf_hex"])
 k_mac = bytes(rng.randrange(256) for _ in range(16))
@@ -272,12 +312,16 @@ ctx, msgb = bytes.fromhex(f128s["ctx_hex"]), bytes.fromhex(f128s["msg_hex"])
 mprime = bytes([0, len(ctx)]) + ctx + msgb
 req, rsp = dev.prf_msg(bytes.fromhex(f128s["opt_rand_hex"]) + mprime)
 assert m.bytes_of(rsp[1:]).hex() == f128s["r_rand_hex"], "PRF_msg does not match the FIPS 205 oracle"
-xfer((req, rsp), "PRF_msg = FIPS 205 SLH-DSA-SHAKE-128s randomizer R (Lean oracle r_rand)")
+xfer((req, rsp), "PRF_msg = FIPS 205 SLH-DSA-SHAKE-128s randomizer R (authenticated K_MAC tag)")
+xfer(dev.prf_msg(b"forged-prf-attempt", bad_tag=True), "PRF_msg with forged K_MAC tag: refused")
+xfer(dev.prf_msg(b"tampered-prf-body", tamper_request=True), "PRF_msg with tampered body: refused")
 
 fors = [int(v) for v in f128s["fors_indices"]]
 req, rsp = dev.cth(0, 0, int(f128s["idx_tree"]), 3, f128s["idx_leaf"], pk_seed, fors[:3 if quick else 14], 12, pubgen=True)
 assert m.bytes_of(rsp[1:3]).hex() == f128s["fors_leaf0_hex"], "FORS leaf does not match the FIPS 205 oracle"
 xfer((req, rsp), "FORS public leaves (PUBGEN); leaf 0 = Lean oracle fors_leaf0")
+xfer(dev.cth(0, 0, 9, 0, 0, pk_seed, [15, 15], 4, pubgen=True, bad_tag=True), "WOTS PUBGEN with forged K_MAC tag: refused")
+xfer(dev.cth(0, 0, 9, 0, 0, pk_seed, [1, 1], 1, pubgen=True), "WOTS PUBGEN with sw=1 interior-leak attempt: refused")
 xfer(dev.cth(0, 0, int(f128s["idx_tree"]), 3, f128s["idx_leaf"], pk_seed, fors[:2 if quick else 5], 12),
      "FORS secret leaves released under a valid request tag")
 digits = [0, 1, 15, 7] if quick else [0, 1, 15, 7, 3, 2]
