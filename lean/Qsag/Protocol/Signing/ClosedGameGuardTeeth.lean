@@ -749,3 +749,329 @@ private theorem tswGuardSuite_prodSignQuery_eq (sk : PqSecretKey) (q : ProdSigni
           (sameTreeRoles_computeWotsPk hRoles multiLeaf4JortsParams sk _ _) 2 0 0 (q.epoch % 4)
         rw [hChEq, hApEq, ← multiLeaf4JortsParams.public_eqs, tswGuardSuite_verify_eq]
 
+def evalHashLocallyTree {α : Type} (rawHash : List UInt8 → List UInt8) :
+    ProdAdaptiveTree α → ProdAdaptiveTree α
+  | .pure ret => .pure ret
+  | .hashQuery x next => evalHashLocallyTree rawHash (next (rawHash x))
+  | .signQuery q next => .signQuery q (fun resp => evalHashLocallyTree rawHash (next resp))
+
+theorem evalHashLocallyTree_bounded {α : Type} (rawHash : List UInt8 → List UInt8) :
+    ∀ {qH qS : Nat} (prog : ProdAdaptiveTree α),
+      ProdDualBounded qH qS prog → ProdDualBounded 0 qS (evalHashLocallyTree rawHash prog)
+  | _, _, .pure _, _ => trivial
+  | 0, _, .hashQuery _ _, h => False.elim h
+  | _ + 1, _, .hashQuery x next, h => evalHashLocallyTree_bounded rawHash (next (rawHash x)) (h _)
+  | _, 0, .signQuery _ _, h => False.elim h
+  | _, _ + 1, .signQuery _ next, h =>
+    fun resp => evalHashLocallyTree_bounded rawHash (next resp) (h resp)
+
+theorem evalLatched_evalHashLocallyTree {α : Type}
+    (raw₁ raw₂ : List UInt8 → List UInt8)
+    (sign₁ sign₂ : ProdSigningQuery → Option PqHashSig)
+    (hSign : ∀ q, sign₁ q = sign₂ q) :
+    ∀ (prog : ProdAdaptiveTree α) (lo : Nat),
+      evalLatchedAdaptiveTree true raw₁ sign₁ prog lo =
+        evalLatchedAdaptiveTree true raw₂ sign₂ (evalHashLocallyTree raw₁ prog) lo
+  | .pure _, _ => by simp only [evalHashLocallyTree, evalLatchedAdaptiveTree.public_eqs]
+  | .hashQuery x next, lo => by
+    unfold evalHashLocallyTree
+    rw [evalLatchedAdaptiveTree.public_eq_2]
+    exact evalLatched_evalHashLocallyTree raw₁ raw₂ sign₁ sign₂ hSign (next (raw₁ x)) lo
+  | .signQuery q next, lo => by
+    unfold evalHashLocallyTree
+    rw [evalLatchedAdaptiveTree_sign, evalLatchedAdaptiveTree_sign, hSign q]
+    by_cases hLo : lo ≤ q.epoch
+    · rw [ite_eq_left (Or.inr hLo), ite_eq_left (Or.inr hLo),
+        evalLatched_evalHashLocallyTree raw₁ raw₂ sign₁ sign₂ hSign (next (sign₂ q)) (q.epoch + 1)]
+    · have hNot : ¬ ((true = false) ∨ lo ≤ q.epoch) := fun hOr =>
+        hOr.elim (fun hb => Bool.noConfusion hb) hLo
+      rw [ite_eq_right hNot, ite_eq_right hNot]
+      exact evalLatched_evalHashLocallyTree raw₁ raw₂ sign₁ sign₂ hSign (next none) lo
+
+def liftTswGuardAdv {qHash qSign : Nat} (adv : SeedWithheldEufCmaAdv qHash qSign) :
+    SeedWithheldEufCmaAdv 0 qSign where
+  run pk := evalHashLocallyTree tswGuardSuite.rawHash (adv.run pk)
+  bounded pk := evalHashLocallyTree_bounded tswGuardSuite.rawHash (adv.run pk) (adv.bounded pk)
+
+theorem tswGuardSuite_full_adaptive_forger_bound {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * pow256 24) * nA)
+    (adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜 : Spec.Code Spec.targetIface Spec.TargetBreak → Prop}
+    (hClass : ∀ (s : Fin 12) (c : Fin (pow256 23 * nA)),
+      𝒜 (multiLeafInteractivePreAdv (fun a => liftTswGuardAdv (adv a)) s c))
+    {εPre : Spec.RatBound}
+    (hPre : Spec.SmDtPreHard 𝒜 multiLeafStep0Th 1 1 1 εPre) :
+    Spec.GameBound
+      (execEufCmaGameWithTsw true hPos tswGuardSuite multiLeaf4JortsParams
+        (fun z => multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) nA).chal z))
+        (fun z => adv ((Spec.CoinSplit.prod (256 * pow256 24) nA).advc z))).winProb
+      (Spec.RatBound.scale 12 εPre) := by
+  have hBase := poly257MultiLeaf_full_adaptive_forger_bound hPos
+    (fun a => liftTswGuardAdv (adv a)) hClass hPre
+  refine Spec.GameBound.trans (Spec.event_le_reduction_win _ _ (fun ω hW => ?_)) hBase
+  rw [execEufCmaGameWithTsw_true_win_eq, ExecEufCmaGame, execEufCmaGameWith_win] at hW
+  rw [ExecEufCmaGame, execEufCmaGameWith_win]
+  let π₀ := Spec.CoinSplit.prod (256 * pow256 24) nA
+  let sk := multiLeaf24Keygen (π₀.chal ω)
+  have hPk := sameTreeRoles_derivePublicKey tswGuardSuite_sameTreeRoles multiLeaf4JortsParams sk
+  have hTree := evalLatched_evalHashLocallyTree tswGuardSuite.rawHash poly257MultiLeafSuite.rawHash
+    (prodSignQuery tswGuardSuite multiLeaf4JortsParams sk)
+    (prodSignQuery poly257MultiLeafSuite multiLeaf4JortsParams sk)
+    (tswGuardSuite_prodSignQuery_eq sk)
+    ((adv (π₀.advc ω)).run (derivePublicKey tswGuardSuite multiLeaf4JortsParams sk)) 0
+  have hLogEq : ∀ qs, productionSigningLog tswGuardSuite multiLeaf4JortsParams sk qs =
+      productionSigningLog poly257MultiLeafSuite multiLeaf4JortsParams sk qs := by
+    intro qs; induction qs with
+    | nil => rw [productionSigningLog_nil, productionSigningLog_nil]
+    | cons q rest ih =>
+      rw [productionSigningLog_cons, productionSigningLog_cons, tswGuardSuite_prodSignQuery_eq, ih]
+  unfold execEufCmaOutcome at hW ⊢
+  unfold liftTswGuardAdv
+  dsimp only at hW ⊢
+  rw [hPk] at hTree hW
+  rw [hTree] at hW
+  rw [prodEufCmaWin_eq, hPk, tswGuardSuite_verify_eq, hLogEq] at hW
+  rw [prodEufCmaWin_eq]
+  exact hW
+
+def oneQueryOneStepNoTswForger : SeedWithheldEufCmaAdv 1 1 where
+  run pk :=
+    .signQuery ⟨[0, 0], [], 0, 1⟩ (fun sig0Opt =>
+      let lsig0 := match sig0Opt with
+        | some s => s.layerSigs.headD ⟨0, [], []⟩
+        | none => ⟨0, [], []⟩
+      let c0 := lsig0.wotsChains.getD 0 zero32
+      .hashQuery
+        (thPreimage tagThF pk.pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩ [c0])
+        (fun c0Step1 =>
+          .pure ([0, 3],
+            { rRand := zero32
+              msgTswCtr := 0
+              leafGlobalIdx := 0
+              forsOpenings := []
+              layerSigs := [⟨0, c0Step1 :: lsig0.wotsChains.drop 1, lsig0.authPath⟩] })))
+  bounded _ := fun _ _ => trivial
+
+theorem tooth_disabled_checkTargetSum_one_query_forges_prob_one :
+    let hPos : 0 < (256 * pow256 24) * 1 :=
+      Nat.mul_pos (Nat.mul_pos (by decide) (pow256_pos 24)) Nat.one_pos
+    let keygen := fun z : Fin ((256 * pow256 24) * 1) =>
+      multiLeaf24Keygen ((Spec.CoinSplit.prod (256 * pow256 24) 1).chal z)
+    let adv := fun _ : Fin ((256 * pow256 24) * 1) => oneQueryOneStepNoTswForger
+    (∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaGameWithTsw false hPos tswGuardSuite multiLeaf4JortsParams keygen adv).win ω =
+        true) ∧
+    (∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaGameWithTsw true hPos tswGuardSuite multiLeaf4JortsParams keygen adv).win ω =
+        false) ∧
+    ¬ Spec.GameBound
+        (execEufCmaGameWithTsw false hPos tswGuardSuite multiLeaf4JortsParams keygen adv).winProb
+        (Spec.RatBound.scale 12 ⟨2, 256, by decide⟩) := by
+  intro hPos keygen adv
+  have hWinFalse : ∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaGameWithTsw false hPos tswGuardSuite multiLeaf4JortsParams keygen adv).win ω =
+        true := by
+    intro ω
+    have hRoles := tswGuardSuite_sameTreeRoles
+    have hS0 : prodSignQuery tswGuardSuite multiLeaf4JortsParams (keygen ω) ⟨[0, 0], [], 0, 1⟩ =
+        some (honestMultiLeafSig (keygen ω) 0 0) := by
+      rw [tswGuardSuite_prodSignQuery_eq]
+      exact prodSignQuery_poly257MultiLeaf_valid (keygen ω) (by decide : 0 < 4)
+        (by decide : 0 < 3) Nat.one_pos []
+    have hStep0 : ∀ x, tswGuardSuite.rawHash
+        (thPreimage tagThF (keygen ω).pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩ [x]) =
+        thChainF poly257MultiLeafSuite (keygen ω).pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩ x := by
+      intro x
+      rw [← thCall_eq, hRoles _ _ _ _ (.inr (.inr (.inl rfl))), thChainF_eq]
+    have hPkEq := sameTreeRoles_derivePublicKey hRoles multiLeaf4JortsParams (keygen ω)
+    have hPkSeed : (derivePublicKey tswGuardSuite multiLeaf4JortsParams (keygen ω)).pkSeed =
+        (keygen ω).pkSeed := by
+      rw [hPkEq, derivePublicKey_poly257MultiLeaf, pkFromTbl.public_eqs]
+    have hOut : execEufCmaOutcome true tswGuardSuite multiLeaf4JortsParams keygen adv ω =
+        let lsig0 := (honestMultiLeafSig (keygen ω) 0 0).layerSigs.headD ⟨0, [], []⟩
+        let c0 := lsig0.wotsChains.getD 0 zero32
+        let c0Step1 := thChainF poly257MultiLeafSuite (keygen ω).pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩ c0
+        ⟨keygen ω, [⟨[0, 0], [], 0, 1⟩], [0, 3],
+         { rRand := zero32
+           msgTswCtr := 0
+           leafGlobalIdx := 0
+           forsOpenings := []
+           layerSigs := [⟨0, c0Step1 :: lsig0.wotsChains.drop 1, lsig0.authPath⟩] }⟩ := by
+      unfold execEufCmaOutcome
+      dsimp only [adv, oneQueryOneStepNoTswForger]
+      rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0)), hS0]
+      simp only [evalLatchedAdaptiveTree.public_eqs, hPkSeed, hStep0]
+    dsimp only [execEufCmaGameWithTsw]
+    rw [hOut]
+    dsimp only
+    rw [productionSigningLog_cons, hS0, productionSigningLog_nil]
+    dsimp only [List.append, List.map]
+    refine Bool.and_eq_true_iff.mpr ⟨?_, decide_eq_true (by decide : ([0, 3] : List UInt8) ∉ [[0, 0]])⟩
+    unfold verifyProductionPqHashSigWithTsw
+    have hWf := multiLeaf4JortsParams_productionWellFormed
+    have hInRange : multiLeaf4JortsParams.productionLeafIdxInRange 0 = true := by
+      rw [PqHashParams.productionLeafIdxInRange_eq, multiLeaf4JortsParams.public_eqs]; decide
+    have hPkSeedPoly : (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams
+        (keygen ω)).pkSeed = (keygen ω).pkSeed := by
+      rw [derivePublicKey_poly257MultiLeaf, pkFromTbl.public_eqs]
+    rw [hPkEq, hPkSeedPoly]
+    have hShapeFalse : (decide ((1 : Nat) ≠ multiLeaf4JortsParams.numLayers) ||
+        decide ((0 : Nat) ≠ 0)) = false := by
+      rw [multiLeaf4JortsParams.public_eqs]; rfl
+    have hStT : multiLeaf4JortsParams.statefulJorts = true := rfl
+    simp only [hWf, hInRange, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
+      List.length_cons, List.length_nil, hShapeFalse, hStT, List.isEmpty_nil]
+    unfold verifyProductionHypertreeLayersWithTsw
+    simp only [(by decide : 0 < 2 ^ 32), decide_true, Bool.not_true, Bool.false_eq_true,
+      ↓reduceIte, Bool.false_and]
+    have hSubH : multiLeaf4JortsParams.subtreeHeight = 2 := rfl
+    have hEll : multiLeaf4JortsParams.ell1 = 128 := rfl
+    have hW4 : multiLeaf4JortsParams.w = 4 := rfl
+    simp only [hSubH, hEll, hW4]
+    have hLayerDig : productionLayerDigest tswGuardSuite multiLeaf4JortsParams zero32
+        (keygen ω).pkSeed
+        (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams (keygen ω)).pkRoot
+        (thPreHash tswGuardSuite (keygen ω).pkSeed
+          (derivePublicKey poly257MultiLeafSuite multiLeaf4JortsParams (keygen ω)).pkRoot [0, 3])
+        0 (UInt64.ofNat (0 / 2 ^ 2)) (UInt32.ofNat (0 % 2 ^ 2)) 0 = stepOneDomDigest := by
+      rw [productionLayerDigest_eq]
+      simp only [hStT, decide_true, Bool.true_and, ↓reduceIte]
+      rw [tswGuardSuite_thPreHash_eq]
+      dsimp only
+      rw [ite_eq_left (by decide : (0 : UInt8).toNat < 4), tswGuardSuite_thHashLeafMsg_eq]
+      dsimp only
+      exact ite_eq_left ⟨by decide, rfl, rfl⟩
+    rw [hLayerDig, stepOneDomDigest_props.2.1]
+    dsimp only
+    rw [honestMultiLeafSig.public_eqs]
+    dsimp only [List.headD]
+    have hLen128 : (thChainF poly257MultiLeafSuite (keygen ω).pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩
+        (((List.range 128).map (fun r =>
+          wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+            ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+            (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).getD 0 zero32) ::
+        ((List.range 128).map (fun r =>
+          wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+            ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+            (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).drop 1).length = 128 := by
+      simp
+    simp only [hLen128, ne_eq, not_true_eq_false, ↓reduceIte]
+    rw [sameTreeRoles_recoverWotsPk hRoles, sameTreeRoles_walkMerkleAuthPathKp hRoles]
+    have hRecPk : recoverWotsPkFromSig poly257MultiLeafSuite multiLeaf4JortsParams
+        (keygen ω).pkSeed 0 0 0 (extractBaseWDigits 4 128 stepOneDomDigest)
+        (thChainF poly257MultiLeafSuite (keygen ω).pkSeed ⟨0, 0, .wotsHash, 0, 0, 0⟩
+          (((List.range 128).map (fun r =>
+            wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+              ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+              (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).getD 0 zero32) ::
+          ((List.range 128).map (fun r =>
+            wotsChainSteps poly257MultiLeafSuite (keygen ω).pkSeed 0 0 0 r 0
+              ((extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD r 0)
+              (wotsSecretBase poly257MultiLeafSuite (keygen ω) 0 0 0 r))).drop 1) =
+        leafFromTbl (honestSlotHiLo (keygen ω)) 0 := by
+      rw [← poly257MultiLeaf_computeWotsPk_eq (keygen ω) (by decide : 0 < 4),
+        recoverWotsPkFromSig_eq, computeWotsPk_eq, recoverWotsEndpoints_eq,
+        multiLeaf4JortsParams.public_eqs]
+      congr 1
+      apply List.map_congr_left
+      intro r hrMem
+      have hr128 : r < 128 := List.mem_range.mp hrMem
+      cases r with
+      | zero =>
+        rw [List.getD_cons_zero,
+          list_getD_map_range 128 _ zero32 (by decide : 0 < 128),
+          encodeSubMsg3Hmsg_explicit_digits.1, wotsChainSteps_zero,
+          stepOneDomDigest_props.2.2.2.1]
+        dsimp only
+        rw [wotsChainSteps_succ]
+        rfl
+      | succ r' =>
+        have hDropGet : ∀ (l : List (List UInt8)) (k : Nat),
+            (l.drop 1).getD k [] = l.getD (k + 1) [] := by
+          intro l k; cases l <;> rfl
+        rw [List.getD_cons_succ, hDropGet,
+          list_getD_map_range 128 _ [] hr128,
+          stepOneDomDigest_props.2.2.2.2 (r' + 1) (Nat.succ_pos r') hr128]
+        have hdLt : (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD (r' + 1) 0 < 4 := by
+          have hAll : ∀ k ∈ List.range 128,
+              (extractBaseWDigits 4 128 (encodeSubMsg3Hmsg 0)).getD k 0 < 4 := by
+            rw [encodeSubMsg3Hmsg.public_eqs]; simp only [extractBaseWDigits_eq]; decide +kernel
+          exact hAll (r' + 1) (List.mem_range.mpr hr128)
+        rw [← wotsChainSteps_add]
+        congr 1
+        omega
+    rw [hRecPk]
+    have hWalk := poly257MultiLeaf_walkAuthPath_honest (keygen ω) (by decide : 0 < 4)
+    change (match walkMerkleAuthPathKp poly257MultiLeafSuite (keygen ω).pkSeed 0 0 .tree 0 2 0 0
+              (leafFromTbl (honestSlotHiLo (keygen ω)) 0)
+              (authPathFromTbl (honestSlotHiLo (keygen ω)) 0) with
+            | none => false | some c => _) = true
+    rw [hWalk]
+    exact decide_eq_true rfl
+  have hWinTrue : ∀ ω : Fin ((256 * pow256 24) * 1),
+      (execEufCmaGameWithTsw true hPos tswGuardSuite multiLeaf4JortsParams keygen adv).win ω =
+        false := by
+    intro ω
+    rw [execEufCmaGameWithTsw_true_win_eq, ExecEufCmaGame, execEufCmaGameWith_win, prodEufCmaWin_eq]
+    have hMsgStar : (execEufCmaOutcome true tswGuardSuite multiLeaf4JortsParams keygen adv ω).msgStar =
+        [0, 3] := by
+      unfold execEufCmaOutcome
+      dsimp only [adv, oneQueryOneStepNoTswForger]
+      rw [evalLatchedAdaptiveTree_sign, ite_eq_left (Or.inr (Nat.zero_le 0))]
+      simp only [evalLatchedAdaptiveTree.public_eqs]
+    rw [hMsgStar, tswGuardSuite_verify_eq]
+    have hVerFalse : ∀ pk sig,
+        verifyProductionPqHashSig poly257MultiLeafSuite multiLeaf4JortsParams pk [0, 3] sig =
+          false := by
+      intro pk sig
+      rw [verifyProductionPqHashSig_eq]
+      split
+      · rfl
+      · split
+        · rfl
+        · rename_i hShapeOk
+          simp only [multiLeaf4JortsParams.public_eqs, ↓reduceIte]
+          split
+          · rfl
+          · cases hLs : sig.layerSigs with
+            | nil =>
+              rw [hLs, multiLeaf4JortsParams.public_eqs] at hShapeOk
+              simp at hShapeOk
+            | cons lsig _ =>
+              rw [verifyProductionHypertreeLayers_cons]
+              dsimp only
+              cases (!decide (lsig.tswCtr < 2 ^ 32))
+              · simp only [Bool.false_eq_true, ↓reduceIte]
+                rw [productionLayerDigest_eq]
+                simp only [multiLeaf4JortsParams.public_eqs]
+                dsimp only [Bool.true_and, decide_true, ↓reduceIte]
+                rw [poly257MultiLeaf_thPreHash_eq]
+                dsimp only
+                rw [ite_eq_right (by decide : ¬ ((0 : UInt8).toNat < 4 ∧ (3 : UInt8).toNat < 3)),
+                  poly257MultiLeaf_thHashLeafMsg_eq]
+                have hZExt : extractBaseWDigitsChecked 4 128 zero32 =
+                    some (extractBaseWDigits 4 128 zero32) := by
+                  simp only [zero32.public_eqs, extractBaseWDigitsChecked_eq, extractBaseWDigits_eq]
+                  decide +kernel
+                rw [hZExt]
+                dsimp only
+                rw [zero32_tsw_false]
+                rfl
+              · simp only [↓reduceIte]
+    rw [hVerFalse]
+    rfl
+  exact ⟨hWinFalse, hWinTrue,
+    Spec.FinGame.not_bound_of_forall_win _ hWinFalse (by decide)⟩
+
+#verify_constructive
+  Qsag.verifyProductionHypertreeLayersWithTsw_true
+  Qsag.verifyProductionPqHashSigWithTsw_true_eq
+  Qsag.execEufCmaGameWithTsw_true_win_eq
+  Qsag.tswGuardSuite_full_adaptive_forger_bound
+  Qsag.tooth_disabled_checkTargetSum_one_query_forges_prob_one
+
+#tooth_pair Qsag.tswGuardSuite_full_adaptive_forger_bound vs
+  Qsag.tooth_disabled_checkTargetSum_one_query_forges_prob_one
+
+end Qsag
+end
