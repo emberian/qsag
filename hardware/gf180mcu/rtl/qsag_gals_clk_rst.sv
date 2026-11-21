@@ -48,7 +48,10 @@ module qsag_dcro (
     end
     wire  [4:0]  tap_lim = (tap_m < 5'd3) ? 5'd3 : tap_m;
     wire  [4:0]  tap_n   = (tap_lim > tap_q) ? tap_q + 5'd1 : tap_lim;
-    always_ff @(posedge s[0] or negedge rst_n)
+    // Dedicated non-dont_touch clock output buffer isolates the 32-stage ring delay line from CTS
+    // and core clock capacitance while providing a clean physical clock root (`u_osc_iso.u_iso/Z`).
+    qsag_iso_buf u_osc_iso (.a(s[0]), .y(osc));
+    always_ff @(posedge osc or negedge rst_n)
         if (!rst_n) begin
             tg_m   <= 5'b10000; // Gray(31) = 31 ^ 15 = 16
             tg_s   <= 5'b10000;
@@ -85,33 +88,30 @@ module qsag_dcro (
     qsag_dly_fine #(.TD(130)) u_f1a (.a(f0),  .y(f1a));
     qsag_dly_fine #(.TD(130)) u_f1b (.a(f1a), .y(f1d));
     qsag_dly_mux2             u_fm1 (.a(f0),  .b(f1d), .sel(fine_q[1]), .y(fb));
-    assign osc = s[0];
 endmodule
 
-// Glitch-free two-clock multiplexer. clk_b is the internal oscillator and is assumed to run
-// whenever the chip is powered; clk_a (the pad clock) may be absent.
-//   * Reset always selects clk_b, so the core has a clock without any edge on clk_a (R1 B4).
-//   * Handing over from a to b needs falling edges of clk_a to drop the a enable. If clk_a has
-//     stopped, `a_kill_n` (a flop of the clk_b domain, low while clk_a is seen dead) clears the a
-//     enable asynchronously instead; clk_a is static at that point, so no runt pulse results.
+// Glitch-free two-clock multiplexer with symmetric dead-clock watchdogs (`a_kill_n` in clk_b
+// domain when clk_a stops; `b_kill_n` in clk_a domain if osc ever stalls while bypass=1).
 module qsag_clk_mux_glitchfree (
     input  wire clk_a,
     input  wire clk_b,
     input  wire sel_a,
     input  wire arst_n,
     input  wire a_kill_n,
+    input  wire b_kill_n,
     output wire clk_o,
     output wire a_on,
     output wire b_on
 );
     wire a_m, a_q, b_m, b_q, clk_an, clk_bn, ga, gb;
     wire rn_a = arst_n & a_kill_n;
+    wire rn_b = ~arst_n ? 1'b1 : b_kill_n;
     qsag_clkinv u_ia (.a(clk_a), .y(clk_an));
     qsag_clkinv u_ib (.a(clk_b), .y(clk_bn));
     (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a0 (.clk(clk_a),  .rn(rn_a), .sn(1'b1),   .d(sel_a & ~b_q),  .q(a_m));
     (* ASYNC_REG = "TRUE" *) qsag_dffsr u_a1 (.clk(clk_an), .rn(rn_a), .sn(1'b1),   .d(a_m),           .q(a_q));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b0 (.clk(clk_b),  .rn(1'b1), .sn(arst_n), .d(~sel_a & ~a_q), .q(b_m));
-    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b1 (.clk(clk_bn), .rn(1'b1), .sn(arst_n), .d(b_m),           .q(b_q));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b0 (.clk(clk_b),  .rn(rn_b), .sn(arst_n), .d(~sel_a & ~a_q), .q(b_m));
+    (* ASYNC_REG = "TRUE" *) qsag_dffsr u_b1 (.clk(clk_bn), .rn(rn_b), .sn(arst_n), .d(b_m),           .q(b_q));
     qsag_clkand2 u_ga (.a(clk_a), .b(a_q), .y(ga));
     qsag_clkand2 u_gb (.a(clk_b), .b(b_q), .y(gb));
     qsag_clkor2  u_o  (.a(ga),    .b(gb),  .y(clk_o));
@@ -131,25 +131,26 @@ module qsag_trcp_chain (
 );
     wire launch_iso;
     qsag_iso_buf u_liso (.a(launch), .y(launch_iso));
-    wire [72:0] c;
-    wire [71:0] m1, m2;
+    wire [36:0] c;
+    wire [35:0] m1, m2;
     assign c[0] = launch_iso;
     genvar i;
     generate
-        for (i = 0; i < 72; i++) begin : g_st
-            qsag_dly_oai21 #(.TD(110)) u_n (.a(c[i]),  .y(m1[i]));
-            qsag_dly_aoi21 #(.TD(130)) u_a (.a(m1[i]), .y(m2[i]));
-            qsag_dly_xor2  #(.TD(120)) u_x (.a(m2[i]), .y(c[i+1]));
+        for (i = 0; i < 36; i++) begin : g_st
+            qsag_dly_oai21 #(.TD(220)) u_n (.a(c[i]),  .y(m1[i]));
+            qsag_dly_aoi21 #(.TD(260)) u_a (.a(m1[i]), .y(m2[i]));
+            qsag_dly_xor2  #(.TD(240)) u_x (.a(m2[i]), .y(c[i+1]));
         end
     endgenerate
     logic t1, t2;
     always_comb begin
-        t1 = c[4];
-        for (int k = 0; k < 16; k++) if (len == 4'(k)) t1 = c[4 * (k + 1)];
-        t2 = c[6];
+        t1 = 1'b0;
+        for (int k = 0; k < 16; k++)
+            if (len == 4'(k)) t1 = t1 | c[2 * (k + 1)];
+        t2 = 1'b0;
         for (int k = 0; k < 16; k++)
             for (int g = 0; g < 4; g++)
-                if (len == 4'(k) && gb == 2'(g)) t2 = c[4 * (k + 1) + 2 * (g + 1)];
+                if (len == 4'(k) && gb == 2'(g)) t2 = t2 | c[2 * (k + 1) + (g + 1)];
     end
     assign d1 = t1;
     assign d2 = t2;
@@ -197,27 +198,48 @@ module qsag_gals_clk_rst (
     // The oscillator runs whenever the chip is powered: it is the clock the chip boots on and the
     // time base of the pad-clock watchdog below (R1 B4). EXT_CLK_BYPASS only asks for the pad
     // clock; it is granted while the pad clock is seen alive.
-    logic       pad_alive;
-    wire        sel_pad = bypass & pad_alive;
+    logic       pad_alive, osc_dead;
+    wire        sel_pad  = bypass & (pad_alive | osc_dead);
+    wire        b_kill_n = ~bypass | ~osc_dead;
     qsag_dcro u_dcro (.rst_n(rst_n_pad), .en(1'b1), .tap_gray(tap_gray_q), .fine(csr_fine), .osc(osc));
     qsag_clk_mux_glitchfree u_mux (
-        .clk_a(clk_pad), .clk_b(osc), .sel_a(sel_pad), .arst_n(rst_n_pad), .a_kill_n(pad_alive),
+        .clk_a(clk_pad), .clk_b(osc), .sel_a(sel_pad), .arst_n(rst_n_pad),
+        .a_kill_n(pad_alive | osc_dead), .b_kill_n(b_kill_n),
         .clk_o(clk_core), .a_on(pad_on), .b_on(dcro_on)
     );
     wire rst_core_raw;
     qsag_rst_sync u_rs  (.clk(clk_core), .arst_n(rst_n_pad), .rst_n(rst_core_raw));
     qsag_clkbuf   u_rcb (.a(rst_core_raw), .y(rst_core_n));
 
-    // ------------------------------------------------------------ frequency counter
-    logic [8:0] refdiv;
-    always_ff @(posedge clk_pad or negedge rst_n_pad)
-        if (!rst_n_pad) refdiv <= '0;
-        else            refdiv <= refdiv + 9'd1;
-    wire win = refdiv[8];
-
+    // ------------------------------------------------------------ frequency counter & dead-DCRO guard
+    logic [8:0]  refdiv;
     wire         osc_rst_n, win_o;
     logic        win_oq;
     logic [15:0] ocnt, ofreq;
+    wire         osc_tick_p;
+    logic        osc_tick_pq;
+    logic [11:0] owd_cnt;
+    qsag_sync2 #(.RV(1'b0)) u_ots (.clk(clk_pad), .rst_n(rst_n_pad), .d(ocnt[3]), .q(osc_tick_p));
+    always_ff @(posedge clk_pad or negedge rst_n_pad)
+        if (!rst_n_pad) begin
+            refdiv      <= '0;
+            osc_tick_pq <= 1'b0;
+            owd_cnt     <= '0;
+            osc_dead    <= 1'b0;
+        end else begin
+            refdiv      <= refdiv + 9'd1;
+            osc_tick_pq <= osc_tick_p;
+            if (osc_tick_p != osc_tick_pq) begin
+                owd_cnt  <= '0;
+                osc_dead <= 1'b0;
+            end else if (&owd_cnt) begin
+                osc_dead <= 1'b1;
+            end else begin
+                owd_cnt  <= owd_cnt + 12'd1;
+            end
+        end
+    wire win = refdiv[8];
+
     qsag_rst_sync u_ors (.clk(osc), .arst_n(rst_n_pad), .rst_n(osc_rst_n));
     qsag_sync2    u_wo  (.clk(osc), .rst_n(osc_rst_n),  .d(win), .q(win_o));
     always_ff @(posedge osc or negedge osc_rst_n)

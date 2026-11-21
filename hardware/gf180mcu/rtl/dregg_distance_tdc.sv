@@ -55,13 +55,25 @@ module dregg_vernier_tdc32 (
         end
     endgenerate
 
-    logic [5:0] pop;
-    always_comb begin
-        pop = 6'd0;
-        for (int k = 0; k < 32; k++)
-            pop = pop + {5'd0, thermo_raw[k]};
-    end
-    assign fine_code = pop;
+    wire [1:0] p2 [16];
+    wire [2:0] p4 [8];
+    wire [3:0] p8 [4];
+    wire [4:0] p16 [2];
+    generate
+        for (i = 0; i < 16; i++) begin : g_p2
+            assign p2[i] = {1'b0, thermo_raw[2*i]} + {1'b0, thermo_raw[2*i+1]};
+        end
+        for (i = 0; i < 8; i++) begin : g_p4
+            assign p4[i] = {1'b0, p2[2*i]} + {1'b0, p2[2*i+1]};
+        end
+        for (i = 0; i < 4; i++) begin : g_p8
+            assign p8[i] = {1'b0, p4[2*i]} + {1'b0, p4[2*i+1]};
+        end
+        for (i = 0; i < 2; i++) begin : g_p16
+            assign p16[i] = {1'b0, p8[2*i]} + {1'b0, p8[2*i+1]};
+        end
+    endgenerate
+    assign fine_code = {1'b0, p16[0]} + {1'b0, p16[1]};
 endmodule
 
 module dregg_distance_tdc (
@@ -89,6 +101,7 @@ module dregg_distance_tdc (
     output wire  [63:0] chal_log_lo,
     output wire  [63:0] resp_log_lo,
     output logic        dist_valid,
+    output logic        cal_valid,
     output logic        dist_timeout,
     output logic [31:0] dist_cycles
 );
@@ -104,15 +117,17 @@ module dregg_distance_tdc (
     logic       lock_clr;
     logic [ROUND_WINDOW_LOG2-1:0] rw_cnt;
     logic [1:0] close_dly;
-    wire        step_now = responder_armed & step_round & (rph == 2'd0);
-    wire        rb_shift = (rph == 2'd1);
+    logic chal_lat_q, rbit_lat_q;
+    wire  rbit_cur = chal_s ? r1_sr[0] : r0_sr[0];
+    wire  step_now = responder_armed & step_round & (rph == 2'd0);
+    wire  rb_shift = (rph == 2'd1);
     qsag_ereg #(.W(64)) u_r0 (
         .clk(clk), .rst_n(srst_n), .en(load_r0 | rb_shift),
-        .d(load_r0 ? load_wdata : {1'b0, r0_sr[63:1]}), .q(r0_sr)
+        .d(load_r0 ? load_wdata : {chal_lat_q, r0_sr[63:1]}), .q(r0_sr)
     );
     qsag_ereg #(.W(64)) u_r1 (
         .clk(clk), .rst_n(srst_n), .en(load_r1 | rb_shift),
-        .d(load_r1 ? load_wdata : {1'b0, r1_sr[63:1]}), .q(r1_sr)
+        .d(load_r1 ? load_wdata : {rbit_lat_q, r1_sr[63:1]}), .q(r1_sr)
     );
 
     logic ping_active, ping_cal_mode, ping_tx_q, cal_stop_q;
@@ -167,18 +182,10 @@ module dregg_distance_tdc (
         .fine_code(vernier_fine), .thermo_raw(vernier_thermo)
     );
 
-    wire [63:0] clog_q, rlog_q;
-    wire        rbit_cur = chal_s ? r1_sr[0] : r0_sr[0];
-    qsag_ereg_nr #(.W(64)) u_clog (
-        .clk(clk), .en(arm_responder | step_now),
-        .d(arm_responder ? 64'd0 : {chal_s, clog_q[63:1]}), .q(clog_q)
-    );
-    qsag_ereg_nr #(.W(64)) u_rlog (
-        .clk(clk), .en(arm_responder | step_now),
-        .d(arm_responder ? 64'd0 : {rbit_cur, rlog_q[63:1]}), .q(rlog_q)
-    );
-    assign chal_log_lo = (rounds_done != 7'd0) ? clog_q : 64'd0;
-    assign resp_log_lo = (rounds_done != 7'd0) ? rlog_q : 64'd0;
+    // Transcript shifts into the vacated MSBs of `r0_sr` and `r1_sr` on each completed round, and is
+    // exposed only after all 64 rounds finish (never leaking unplayed secret r0/r1 bits mid-session!).
+    assign chal_log_lo = (rounds_done == 7'd64) ? r0_sr : 64'd0;
+    assign resp_log_lo = (rounds_done == 7'd64) ? r1_sr : 64'd0;
 
     logic [11:0] coarse_cnt;
 
@@ -190,6 +197,8 @@ module dregg_distance_tdc (
             round_open      <= 1'b0;
             locked0         <= 1'b0;
             lock_clr        <= 1'b1;
+            chal_lat_q      <= 1'b0;
+            rbit_lat_q      <= 1'b0;
             rw_cnt          <= '0;
             close_dly       <= '0;
             ping_active     <= 1'b0;
@@ -199,6 +208,7 @@ module dregg_distance_tdc (
             tdc_arm_n       <= 1'b0;
             coarse_cnt      <= '0;
             dist_valid      <= 1'b0;
+            cal_valid       <= 1'b0;
             dist_timeout    <= 1'b0;
             dist_cycles     <= 32'hFFFF_FFFF;
         end else begin
@@ -208,13 +218,15 @@ module dregg_distance_tdc (
                 // (re)start: everything closed and cleared, first round opens two clocks later
                 responder_armed <= 1'b1;
                 rounds_done     <= 7'd0;
+                dist_valid      <= 1'b0;
                 round_open      <= 1'b0;
                 locked0         <= 1'b0;
                 lock_clr        <= 1'b1;
                 rph             <= 2'd2;
             end else if (step_now) begin
-                // close the round: the response pad goes back to 0 and the lock is cleared before
-                // the registers shift (next clock)
+                // close the round: capture committed challenge/response bits, clear lock, then shift next clock
+                chal_lat_q <= chal_s;
+                rbit_lat_q <= rbit_cur;
                 round_open <= 1'b0;
                 locked0    <= 1'b0;
                 lock_clr   <= 1'b1;
@@ -260,6 +272,7 @@ module dregg_distance_tdc (
                 tdc_arm_n     <= 1'b0;
                 coarse_cnt    <= 12'd0;
                 dist_valid    <= 1'b0;
+                if (cal_ping) cal_valid <= 1'b0;
                 dist_timeout  <= 1'b0;
             end else if (ping_active) begin
                 if (!tdc_arm_n) begin
@@ -273,7 +286,10 @@ module dregg_distance_tdc (
                         ping_active <= 1'b0;
                         ping_tx_q   <= 1'b0;
                         cal_stop_q  <= 1'b0;
-                        dist_valid  <= 1'b1;
+                        // Security fix (D6 #4): internal `cal_ping` NEVER asserts `dist_valid`;
+                        // `dist_valid` requires BOTH external `launch_ping` AND 64 completed rapid-bit rounds!
+                        if (ping_cal_mode) cal_valid  <= 1'b1;
+                        else               dist_valid <= (rounds_done == 7'd64);
                         dist_cycles <= {14'd0, (coarse_cnt >= 12'd2) ? (coarse_cnt - 12'd2) : 12'd0, vernier_fine};
                     end else if (coarse_cnt == 12'hFFF) begin
                         ping_active  <= 1'b0;

@@ -19,21 +19,21 @@ module dregg_quad_canary_spine (
 );
     wire launch_iso;
     qsag_iso_buf u_iso_q (.a(launch), .y(launch_iso));
-    wire [32:0] c;
-    wire [31:0] h;
+    wire [16:0] c;
+    wire [15:0] h;
     assign c[0] = launch_iso;
     genvar i;
     generate
-        for (i = 0; i < 32; i++) begin : g_sp
-            qsag_dly_aoi21 #(.TD(180)) u_a (.a(c[i]), .y(h[i]));
-            qsag_dly_oai21 #(.TD(180)) u_b (.a(h[i]), .y(c[i+1]));
+        for (i = 0; i < 16; i++) begin : g_sp
+            qsag_dly_aoi21 #(.TD(510)) u_a (.a(c[i]), .y(h[i]));
+            qsag_dly_oai21 #(.TD(510)) u_b (.a(h[i]), .y(c[i+1]));
         end
     endgenerate
     logic tap_o;
     always_comb begin
-        tap_o = c[4];
+        tap_o = 1'b0;
         for (int k = 0; k < 8; k++)
-            if (tap_sel == 3'(k)) tap_o = c[4 * (k + 1)];
+            if (tap_sel == 3'(k)) tap_o = tap_o | c[2 * (k + 1)];
     end
     assign arrived = tap_o;
 endmodule
