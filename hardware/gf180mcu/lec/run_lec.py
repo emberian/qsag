@@ -80,19 +80,16 @@ def gl64(lemmas=True):
 
     def canon_query(src, tag):
         t = smt(src, "qsag_gl64_canon", tag,
-                passes="setattr -set keep 1 w:t w:us w:uc w:u w:v_lo w:v_hi; cutpoint w:t w:u w:v_lo w:v_hi;")
+                passes="setattr -set keep 1 w:t w:us w:uc w:u w:vs w:vc w:v_raw; cutpoint w:t w:u w:v_raw;")
         n = lambda w: f"(|{tag}_n {w}| s)"
         tt = f"(bvadd {n('x')} {n('y')})"
         q = f"((_ extract {AW-1} {LW}) {tt})"
         E = AW + 4
         lhs = lambda c: f"(bvadd {zx(n('r'), LW, E)} (bvmul (bvadd {zx(q, GB, E)} {bv(c, E)}) {bv(P, E)}))"
-        u_lo = f"((_ extract {W-1} 0) {n('u')})"
-        u_hi = f"((_ extract {LW-1} {W}) {n('u')})"
         lemmas_s = (
             f"(assert (= {n('t')} (bvadd {n('x')} {n('y')})))\n"
             f"(assert (= {n('u')} (bvadd {n('us')} {n('uc')} {bv(1, LW + 2)})))\n"
-            f"(assert (= {n('v_lo')} (bvadd {u_lo} {bv((1 << W) - 1, W)})))\n"
-            f"(assert (= {n('v_hi')} (bvadd (concat #b0 {u_hi}) (ite (not (= {u_lo} {bv(0, W)})) {bv(1, W + 1)} {bv(0, W + 1)}))))\n"
+            f"(assert (= {n('v_raw')} (bvadd {n('vs')} {n('vc')})))\n"
         )
         return (t + f"(declare-fun s () |{tag}_s|)\n" + lemmas_s + f"(assert (not (and (bvult {n('r')} {bv(P, LW)})\n"
                 f"  (or (= {lhs(0)} {zx(tt, AW, E)}) (= {lhs(1)} {zx(tt, AW, E)})))))")

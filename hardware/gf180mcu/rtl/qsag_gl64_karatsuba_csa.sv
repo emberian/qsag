@@ -11,6 +11,40 @@
 //     register path <= 16.5 ns at worst-case SS_125C_4v50!
 `default_nettype none
 
+module qsag_hc_black (
+    input  wire g_hi,
+    input  wire p_hi,
+    input  wire g_lo,
+    input  wire p_lo,
+    output wire g_o,
+    output wire p_o
+);
+`ifdef QSAG_GF180_CELLS
+    wire pg;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_2 u_pg (.A1(p_hi), .A2(g_lo), .Z(pg));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__or2_2  u_go (.A1(g_hi), .A2(pg),   .Z(g_o));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_2 u_po (.A1(p_hi), .A2(p_lo), .Z(p_o));
+`else
+    assign g_o = g_hi | (p_hi & g_lo);
+    assign p_o = p_hi & p_lo;
+`endif
+endmodule
+
+module qsag_hc_gray (
+    input  wire g_hi,
+    input  wire p_hi,
+    input  wire g_lo,
+    output wire g_o
+);
+`ifdef QSAG_GF180_CELLS
+    wire pg;
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_2 u_pg (.A1(p_hi), .A2(g_lo), .Z(pg));
+    (* keep *) gf180mcu_fd_sc_mcu7t5v0__or2_2  u_go (.A1(g_hi), .A2(pg),   .Z(g_o));
+`else
+    assign g_o = g_hi | (p_hi & g_lo);
+`endif
+endmodule
+
 module qsag_prefix_add #(parameter int N = 64) (
     input  wire [N-1:0] a,
     input  wire [N-1:0] b,
@@ -22,16 +56,27 @@ module qsag_prefix_add #(parameter int N = 64) (
     end else begin : g_hc
         localparam int N_ODD = (N + 1) / 2;
         localparam int HL    = (N_ODD <= 1) ? 0 : $clog2(N_ODD);
-        wire [N-1:0] p0 = a ^ b;
-        wire [N-1:0] g0 = a & b;
+        wire [N-1:0] p0;
+        wire [N-1:0] g0;
+`ifdef QSAG_GF180_CELLS
+        for (genvar i = 0; i < N; i++) begin : g_pg0
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__xor2_2 u_p0 (.A1(a[i]), .A2(b[i]), .Z(p0[i]));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__and2_2 u_g0 (.A1(a[i]), .A2(b[i]), .Z(g0[i]));
+        end
+`else
+        assign p0 = a ^ b;
+        assign g0 = a & b;
+`endif
 
         wire [N-1:0] po [HL+1];
         wire [N-1:0] go [HL+1];
 
         for (genvar i = 0; i < N; i++) begin : g_pre
             if (i[0]) begin : g_odd0
-                assign go[0][i] = g0[i] | (p0[i] & g0[i-1]);
-                assign po[0][i] = p0[i] & p0[i-1];
+                qsag_hc_black u_bk0 (
+                    .g_hi(g0[i]), .p_hi(p0[i]), .g_lo(g0[i-1]), .p_lo(p0[i-1]),
+                    .g_o(go[0][i]), .p_o(po[0][i])
+                );
             end else begin : g_even0
                 assign go[0][i] = g0[i];
                 assign po[0][i] = p0[i];
@@ -42,8 +87,11 @@ module qsag_prefix_add #(parameter int N = 64) (
             localparam int STEP = 2 << l;
             for (genvar i = 0; i < N; i++) begin : g_bit
                 if (i[0] && (i >= STEP)) begin : g_merge
-                    assign go[l+1][i] = go[l][i] | (po[l][i] & go[l][i - STEP]);
-                    assign po[l+1][i] = po[l][i] & po[l][i - STEP];
+                    qsag_hc_black u_bkl (
+                        .g_hi(go[l][i]), .p_hi(po[l][i]),
+                        .g_lo(go[l][i - STEP]), .p_lo(po[l][i - STEP]),
+                        .g_o(go[l+1][i]), .p_o(po[l+1][i])
+                    );
                 end else begin : g_pass
                     assign go[l+1][i] = go[l][i];
                     assign po[l+1][i] = po[l][i];
@@ -60,14 +108,22 @@ module qsag_prefix_add #(parameter int N = 64) (
                 assign gg_end[i] = go[HL][i];
                 assign pp_end[i] = po[HL][i];
             end else begin : g_post_even
-                assign gg_end[i] = g0[i] | (p0[i] & go[HL][i-1]);
-                assign pp_end[i] = p0[i] & po[HL][i-1];
+                qsag_hc_black u_bke (
+                    .g_hi(g0[i]), .p_hi(p0[i]), .g_lo(go[HL][i-1]), .p_lo(po[HL][i-1]),
+                    .g_o(gg_end[i]), .p_o(pp_end[i])
+                );
             end
         end
 
         assign sum[0] = p0[0] ^ cin;
         for (genvar i = 1; i < N; i++) begin : g_sum
+`ifdef QSAG_GF180_CELLS
+            wire cy_i;
+            qsag_hc_gray u_cy (.g_hi(gg_end[i-1]), .p_hi(pp_end[i-1]), .g_lo(cin), .g_o(cy_i));
+            (* keep *) gf180mcu_fd_sc_mcu7t5v0__xor2_2 u_sm (.A1(p0[i]), .A2(cy_i), .Z(sum[i]));
+`else
             assign sum[i] = p0[i] ^ (gg_end[i-1] | (pp_end[i-1] & cin));
+`endif
         end
         /* verilator lint_off UNUSEDSIGNAL */
         wire unused_top = &{1'b0, gg_end[N-1], pp_end[N-1], go[HL][0], po[HL][0]};
@@ -179,13 +235,17 @@ module qsag_gl64_canon #(
         .a((LW+2)'(t[LW-1:0])), .b(qs), .c(~((LW+2)'(q))), .s(us), .cy(uc));
     qsag_prefix_add #(.N(LW+2)) u_fold (.a(us), .b(uc), .cin(1'b1), .sum(u));
 
-    wire         u_lo_nz = |u[W-1:0];
-    wire [W-1:0] v_lo;
-    wire [W:0]   v_hi;
-    qsag_prefix_add #(.N(W))   u_vlo (.a(u[W-1:0]),          .b({W{1'b1}}), .cin(1'b0),    .sum(v_lo));
-    qsag_prefix_add #(.N(W+1)) u_vhi (.a({1'b0, u[LW-1:W]}), .b('0),        .cin(u_lo_nz), .sum(v_hi));
-    wire [LW:0] v = {v_hi, v_lo};
-    assign r = (u[LW] | v[LW]) ? v[LW-1:0] : u[LW-1:0];
+    // Compute `v = u - PRIME = (us + uc + 1) + (2^W - 1) = us + uc + 2^W` IN PARALLEL with `u_fold`!
+    // Eliminates the third serial adder stage on `qsag_gl64_canon`'s critical path (`(u[LW] | v_raw[LW])`
+    // is boolean-identical to `(u[LW] | v[LW])` since `v_raw[LW] = u[LW] ^ v[LW]`).
+    wire [LW:0] vs, vc, v_raw;
+    qsag_csa32 #(.N(LW+1)) u_v_rows (
+        .a(us[LW:0]), .b(uc[LW:0]), .c((LW+1)'(1) << W), .s(vs), .cy(vc));
+    qsag_prefix_add #(.N(LW+1)) u_v (.a(vs), .b(vc), .cin(1'b0), .sum(v_raw));
+    assign r = (u[LW] | v_raw[LW]) ? v_raw[LW-1:0] : u[LW-1:0];
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire unused_canon_u = u[LW+1];
+    /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 
 module qsag_gl64_karatsuba_csa #(

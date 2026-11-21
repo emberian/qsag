@@ -23,10 +23,10 @@ for width in (1, 2, 3, 4, 11, 32, 33, 34, 35, 53, 64, 65, 66, 68, 76):
     l.check(f"Han-Carlson prefix N={width} == a+b+cin modulo 2^N", "unsat", rtl + q)
     if width == 68:
         text = open(src).read()
-        old = "go[l][i] | (po[l][i] & go[l][i - STEP])"
-        assert text.count(old) == 1
+        old = "assign g_o = g_hi | (p_hi & g_lo);"
+        assert text.count(old) >= 1
         path = f"{l.B}/prefix_mutant.sv"
-        open(path, "w").write(text.replace(old, "go[l][i] ^ (po[l][i] | go[l][i - STEP])"))
+        open(path, "w").write(text.replace(old, "assign g_o = g_hi ^ (p_hi | g_lo);", 1))
         mutant = l.smt(path, "qsag_prefix_add", tag, f"N={width}")
         l.check("Han-Carlson negative control: corrupted generate merge", "sat", mutant + q)
 

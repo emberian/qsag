@@ -154,7 +154,19 @@ module dregg_ro_puf_bch (
     qsag_clkbuf u_cb (.a(ro_b_out[sel_b]), .y(clk_b));
 
     wire [1:0]  win_shift = mon_en ? 2'd0 : mon_idx[1:0];
+`ifndef SYNTHESIS
+`ifndef QSAG_GF180_CELLS
+`ifdef QSAG_SIM_FAST_PUF
+    wire [15:0] win_last  = (16'd16 << win_shift) - 16'd1;
+`else
     wire [15:0] win_last  = (16'd4096 << win_shift) - 16'd1;
+`endif
+`else
+    wire [15:0] win_last  = (16'd4096 << win_shift) - 16'd1;
+`endif
+`else
+    wire [15:0] win_last  = (16'd4096 << win_shift) - 16'd1;
+`endif
 
     logic          cnt_clr_n;
     wire           cnt_rn = rst_n & (cnt_clr_n | mon_en);

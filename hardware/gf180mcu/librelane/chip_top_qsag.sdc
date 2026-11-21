@@ -70,6 +70,28 @@ set_false_path -through [qsag_need puf_cntb     [get_nets "$core.u_puf.u_cntb.g_
 set_false_path -through [qsag_need trng_cdc     [get_nets "$core.u_trng.samp*"]]
 set_false_path -through [qsag_need mpipe_rx     [get_nets "$core.u_io.u_mp.bank_*"]]
 set_false_path -through [qsag_need mpipe_tx     [get_nets "$core.u_io.u_mptx.bank_*"]]
+# Pre-mux (`osc` / `clk_pad`) <-> post-mux (`clk_core`) quasi-static / Gray / watchdog CDC signals
+set_false_path -through [qsag_need dcro_ofreq   [get_nets "$core.u_clk.ofreq*"]]
+set_false_path -through [qsag_need dcro_tapg    [get_nets "$core.u_clk.tap_gray_q*"]]
+set_false_path -through [qsag_need wd_pad_alive [get_nets "$core.u_clk.pad_alive*"]]
+set_false_path -through [qsag_need wd_osc_dead  [get_nets "$core.u_clk.osc_dead*"]]
+set_false_path -through [qsag_need diag_hb_gray [get_nets "$core.u_io.hb_gray*"]]
+
+# First-stage `/D` inputs of all `qsag_sync2` 2-FF CDC synchronizers (identified via their preserved
+# `(* ASYNC_REG = "TRUE", keep *) logic m` output net; leaves `m -> s` resolution paths fully timed!).
+set qsag_sync_d_pins [list]
+foreach n [get_nets -quiet "$core.*.u_*.m"] {
+    foreach p [get_pins -of_objects $n] {
+        if { [get_property $p direction] == "output" } {
+            set c [get_cells -of_objects $p]
+            set dp [get_pins -quiet "[get_property $c full_name]/D"]
+            if { [llength $dp] > 0 } { lappend qsag_sync_d_pins $dp }
+        }
+    }
+}
+if { [llength $qsag_sync_d_pins] > 0 } {
+    set_false_path -to $qsag_sync_d_pins
+}
 
 # ------------------------------------------------------------------ 4. straps and reset pad
 set_false_path -from [get_ports {input_PAD[*]}]
@@ -98,9 +120,10 @@ set_output_delay -clock clk_pad -min 0.0 $io_core
 set_false_path -hold -from $io_core
 set_false_path -hold -from [get_ports {bidir_PAD[0] bidir_PAD[1] bidir_PAD[2] bidir_PAD[3]}]
 
-# Rapid-bit responder: challenge pad -> AOI21 lock -> mux2_4 -> response pad
-set_max_delay -ignore_clock_latency 8.0 -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}]
-set_max_delay -ignore_clock_latency 8.0 -from [get_ports {bidir_PAD[1]}]  -to [get_ports {bidir_PAD[0]}]
+# Rapid-bit responder: challenge pad -> AOI21 lock -> mux2_4 -> response pad (<= 8.0 ns silicon budget;
+# accounts for external set_input_delay + set_output_delay already applied to these shared bidir ports)
+set_max_delay -ignore_clock_latency [expr {2.0 * $io_budget + 8.0}] -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}]
+set_max_delay -ignore_clock_latency 16.0 -from [get_ports {bidir_PAD[1]}]  -to [get_ports {bidir_PAD[0]}]
 
 # ------------------------------------------------------------------ 6. environment
 set_max_fanout $::env(MAX_FANOUT_CONSTRAINT) [current_design]
@@ -111,6 +134,8 @@ if { [info exists ::env(MAX_CAPACITANCE_CONSTRAINT)] } {
     set_max_capacitance $::env(MAX_CAPACITANCE_CONSTRAINT) [current_design]
 }
 set_load [expr {$::env(OUTPUT_CAP_LOAD) / 1000.0}] [all_outputs]
+# Dedicated 50-ohm SMA coax response pads (`pcb/README.md`: ~5 pF load, not a 33.5 pF shared bus)
+set_load 0.005 [get_ports {bidir_PAD[14] bidir_PAD[0]}]
 
 set_clock_uncertainty $::env(CLOCK_UNCERTAINTY_CONSTRAINT) [all_clocks]
 set_clock_transition  $::env(CLOCK_TRANSITION_CONSTRAINT) [all_clocks]

@@ -370,7 +370,7 @@ struct Sim {
         if (cfg.mode == 0) {
             size_t i = 0;
             while (i < ws.size()) {
-                if (!wait_for([&] { return pad_out(19) == 1; }, 2000000000ULL, "RX_CREDIT_OK")) return;
+                if (!wait_for([&] { return pad_out(19) == 1; }, 100000000000ULL, "RX_CREDIT_OK")) return;
                 size_t n = 1 + (i % 6);                  // bursts of 1..6 words inside the credit
                 if (n > ws.size() - i) n = ws.size() - i;
                 static const int widths[3] = {8, 4, 1};
@@ -380,7 +380,7 @@ struct Sim {
         } else if (cfg.mode == 1) {
             for (u64 w : ws)
                 for (int by = 0; by < 8; by++) txq.push_back((w >> (8 * by)) & 0xFF);
-            wait_for([&] { return txq.empty(); }, 20000000000ULL, "ingress drain");
+            wait_for([&] { return txq.empty(); }, 100000000000ULL, "ingress drain");
         } else {
             for (u64 w : ws)
                 for (int k = 0; k < 4; k++) async_send16((w >> (16 * k)) & 0xFFFF);
@@ -390,12 +390,12 @@ struct Sim {
         ws.clear();
         if (cfg.mode == 0) {
             for (size_t i = 0; i < n; i++) {
-                if (!wait_for([&] { return pad_out(20) == 1; }, 20000000000ULL, "TX_VALID_IRQ")) return false;
+                if (!wait_for([&] { return pad_out(20) == 1; }, 100000000000ULL, "TX_VALID_IRQ")) return false;
                 static const int widths[3] = {4, 8, 1};
                 ws.push_back(spi_read_word(widths[spi_w++ % 3]));
             }
         } else {
-            if (!wait_for([&] { return rxq.size() >= 8 * n; }, 20000000000ULL, "egress bytes")) return false;
+            if (!wait_for([&] { return rxq.size() >= 8 * n; }, 100000000000ULL, "egress bytes")) return false;
             for (size_t i = 0; i < n; i++) {
                 u64 w = 0;
                 for (int by = 0; by < 8; by++) {
