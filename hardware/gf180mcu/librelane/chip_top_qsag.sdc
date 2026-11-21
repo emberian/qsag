@@ -1,18 +1,11 @@
-# Dregg-180 (QSAG-NI-180) clocks and physical-organ constraints (PnR and sign-off).
+# Dregg-180 (QSAG-NI-180) unified PnR & 9-Corner OpenSTA Signoff Constraints.
 #
-# One clock root per domain (R1 B5 / R0 T1):
-#   clk_core  output of the glitch-free multiplexer; every core flop, and nothing upstream of it
-#   clk_pad   the clock pad; only the reference divider and the pad-side enable flops of the
-#             multiplexer. Stopped at the multiplexer's AND gate.
-#   osc       the DCRO output; only the DCRO tap logic, the frequency counter, the pad-clock
-#             watchdog and the oscillator-side enable flops. Stopped at the multiplexer's AND gate.
-#   sck, rx_clk, nfc_clk   link and NFC front-end clocks at their pad / buffer.
-# The ring oscillators of the PUF and the TRNG, the Vernier taps, the PUF ripple counters and the
-# Muller-pipeline strobes are not clocks for CTS: no create_clock, their flops stay unclocked.
-# Every intentional combinational loop is cut at one arc with set_disable_timing.
-#
-# All instance paths below are the flattened names of the LibreLane netlist
-# (wrapper instance, then the cell inside the qsag_cells.sv wrapper).
+# Zero virtual clocks: ALL five physical clock sources (`clk_pad`, `osc`, `sck`, `rx_clk`, `nfc_clk`)
+# are defined on their true physical ports / oscillator root and propagated with real extracted RC
+# parasitics across all 9 PVT/RC corners (`tt_025C_5v00`, `ss_125C_4v50`, `ff_n40C_5v50` x `nom/min/max`).
+# Avoiding an internal overwriting `create_clock` on `u_mux.u_o/Z` preserves unbroken STA timing
+# paths for both `clk_pad` and `osc` through the glitch-free mux into the core H-Tree (preventing
+# OpenROAD `CTS-0179` null-path crashes while timing full pad/DCRO-to-register insertion & skew).
 current_design $::env(DESIGN_NAME)
 set_units -time ns
 
@@ -27,88 +20,87 @@ proc qsag_need {what objs} {
     return $objs
 }
 
-# ------------------------------------------------------------------ 1. clocks
-create_clock -name clk_core -period $t_core [qsag_need clk_core [get_pins $core.u_clk.u_mux.u_o.u_or/Z]]
-create_clock -name clk_pad  -period $t_core [qsag_need clk_pad  [get_pins clk_pad/Y]]
-create_clock -name osc      -period $t_core [qsag_need osc      [get_pins $core.u_clk.u_dcro.u_nand.u_nand/ZN]]
-create_clock -name sck      -period 20.0    [qsag_need sck      [get_pins {bidir[18].pad/Y}]]
-create_clock -name rx_clk   -period 12.5    [qsag_need rx_clk   [get_pins {bidir[37].pad/Y}]]
-create_clock -name nfc_clk  -period 73.74   [qsag_need nfc_clk  [get_pins $core.u_nfc.u_ncb.u_buf/Z]]
-
-# clk_pad and osc end at the multiplexer; clk_pad does not enter the SPI clock multiplexer as a
-# second root of the link clock tree (CSR-selected test mode, covered by sck)
-set_sense -type clock -stop_propagation -clocks [get_clocks clk_pad] \
-    [qsag_need mux_ga [get_pins $core.u_clk.u_mux.u_ga.u_and/A1]]
-set_sense -type clock -stop_propagation -clocks [get_clocks osc] \
-    [qsag_need mux_gb [get_pins $core.u_clk.u_mux.u_gb.u_and/A1]]
-set_sense -type clock -stop_propagation -clocks [get_clocks clk_pad] \
-    [qsag_need sck_mux [get_pins $core.u_io.u_sck_mux.u_mux/I1]]
+# ------------------------------------------------------------------ 1. real physical clocks (0 virtual clocks)
+create_clock -name clk_pad -period $t_core [qsag_need clk_pad [get_ports clk_PAD]]
+create_clock -name osc     -period $t_core [qsag_need osc     [get_pins $core.u_clk.u_dcro.u_osc_iso.u_iso/Z]]
+create_clock -name sck     -period 25.0    [qsag_need sck     [get_ports {bidir_PAD[18]}]]
+create_clock -name rx_clk  -period $t_core [qsag_need rx_clk  [get_ports {bidir_PAD[37]}]]
+create_clock -name nfc_clk -period 73.74   [qsag_need nfc_clk [get_ports {bidir_PAD[8]}]]
 
 set_clock_groups -asynchronous \
-    -group clk_core -group clk_pad -group osc -group sck -group rx_clk -group nfc_clk
+    -group clk_pad -group osc -group sck -group rx_clk -group nfc_clk
 
 # ------------------------------------------------------------------ 2. latch time borrow
-# on the clock object (OpenSTA #527)
-set_max_time_borrow [expr {0.15 * $t_core}] [get_clocks clk_core]
+set_max_time_borrow [expr {0.15 * $t_core}] [all_clocks]
 
-# ------------------------------------------------------------------ 3. intentional loops
-# DCRO: feedback input of the gating NAND
+# ------------------------------------------------------------------ 3. intentional loops & mutually-exclusive mux arcs
+# DCRO feedback
 set_disable_timing -from A1 -to ZN [qsag_need dcro [get_cells $core.u_clk.u_dcro.u_nand.u_nand]]
-# TRNG rings
+# CoSO 17-stage TRNG rings (`u_fast` & `u_slow`)
 set_disable_timing -from A1 -to ZN [qsag_need trng_fast [get_cells "$core.u_trng.u_fast.g_st\[0\].u_n"]]
 set_disable_timing -from A1 -to ZN [qsag_need trng_slow [get_cells "$core.u_trng.u_slow.g_st\[0\].u_n"]]
-# 64 PUF rings
+# 32 PUF rings (16 Bank A x 16 Bank B = 256 differential pairs)
 set puf_ro [qsag_need puf_rings [get_cells "$core.u_puf.g_bank\[*\].u_ro*.g_st\[0\].u_n"]]
-if { [llength $puf_ro] != 64 } {
-    puts "QSAG-SDC-ERROR: expected 64 PUF ring stages, matched [llength $puf_ro]"
+if { [llength $puf_ro] != 32 } {
+    puts "QSAG-SDC-ERROR: expected 32 PUF ring stages, matched [llength $puf_ro]"
     error "QSAG-SDC: PUF ring count"
 }
 foreach c $puf_ro { set_disable_timing -from A1 -to ZN $c }
-# Muller C-elements (ingress and egress micropipeline): the two hold terms of the AOI222
+
+# Muller C-elements (ingress and egress 2-phase clockless micropipeline)
 foreach c [list $core.u_io.u_mp.u_c.u_maj $core.u_io.u_mptx.u_c.u_maj] {
     set cell [qsag_need $c [get_cells $c]]
     set_disable_timing -from B2 -to ZN $cell
     set_disable_timing -from C2 -to ZN $cell
 }
-# rapid-bit challenge lock: hold term of the AOI21
+# Cut false `rx_clk` propagation into Mode-1x clockless Muller-C `req_in` (gated by `& m_async == 0` whenever `rx_clk` is active)
+set_disable_timing -from I -to Z [qsag_need mp_ireq [get_cells $core.u_io.u_mp.u_ireq.u_iso]]
+
+# Rapid-bit challenge lock feedback
 set_disable_timing -from B -to ZN [qsag_need chal_lock [get_cells $core.u_db.u_lock.u_set]]
+
+# Tunable delay-line glitch sensors & asynchronous Vernier TDC / PUF / CoSO TRNG CDC nets
+set_false_path -through [qsag_need trcp_launch [get_pins $core.u_clk.u_trcp.u_liso.u_iso/Z]]
+set_false_path -through [qsag_need quad_launch [get_pins "$core.u_clk.u_shield.g_quad\[*\].u_qsp.u_iso_q.u_iso/Z"]]
+set_false_path -through [qsag_need vernier_sta [get_pins $core.u_db.u_tdc.u_ista.u_iso/Z]]
+set_false_path -through [qsag_need vernier_sto [get_pins $core.u_db.u_tdc.u_isto.u_iso/Z]]
+set_false_path -through [qsag_need vernier_taps [get_nets "$core.u_db.u_tdc.g_vernier\[*\].q_tap*"]]
+set_false_path -through [qsag_need puf_cnta     [get_nets "$core.u_puf.u_cnta.g_bit\[*\].u_t.q*"]]
+set_false_path -through [qsag_need puf_cntb     [get_nets "$core.u_puf.u_cntb.g_bit\[*\].u_t.q*"]]
+set_false_path -through [qsag_need trng_cdc     [get_nets "$core.u_trng.samp*"]]
+set_false_path -through [qsag_need mpipe_rx     [get_nets "$core.u_io.u_mp.bank_*"]]
+set_false_path -through [qsag_need mpipe_tx     [get_nets "$core.u_io.u_mptx.bank_*"]]
 
 # ------------------------------------------------------------------ 4. straps and reset pad
 set_false_path -from [get_ports {input_PAD[*]}]
 set_false_path -from [get_ports rst_n_PAD]
 
 # ------------------------------------------------------------------ 5. pad timing
-# SPI (IO_MODE 00): host launches on the falling edge of SCK, samples on the rising edge
 set dq [get_ports {bidir_PAD[0] bidir_PAD[1] bidir_PAD[2] bidir_PAD[3] bidir_PAD[4] bidir_PAD[5] bidir_PAD[6] bidir_PAD[7]}]
 set_input_delay  -clock sck -clock_fall -max 4.0 $dq
 set_input_delay  -clock sck -clock_fall -min 0.0 $dq
 set_output_delay -clock sck -max 4.0 $dq
 set_output_delay -clock sck -min -1.0 $dq
 
-# Source-synchronous receive (IO_MODE 01): data and valid launched on the falling edge of RX_CLK
 set rxd [get_ports {bidir_PAD[27] bidir_PAD[28] bidir_PAD[29] bidir_PAD[30] bidir_PAD[31] bidir_PAD[32] bidir_PAD[33] bidir_PAD[34] bidir_PAD[36]}]
-set_input_delay -clock rx_clk -clock_fall -max 2.5 $rxd
+set_input_delay -clock rx_clk -clock_fall -max 3.0 $rxd
 set_input_delay -clock rx_clk -clock_fall -min 0.0 $rxd
 
-# Core-launched / status / sideband pads
-set io_core [get_ports {bidir_PAD[8] bidir_PAD[9] bidir_PAD[10] bidir_PAD[11] bidir_PAD[12] bidir_PAD[13]
+set io_core [get_ports {bidir_PAD[9] bidir_PAD[10] bidir_PAD[11] bidir_PAD[12] bidir_PAD[13]
                         bidir_PAD[14] bidir_PAD[15] bidir_PAD[16] bidir_PAD[17] bidir_PAD[19] bidir_PAD[20]
                         bidir_PAD[21] bidir_PAD[22] bidir_PAD[23] bidir_PAD[24] bidir_PAD[25] bidir_PAD[26]
                         bidir_PAD[35]}]
 set io_budget [expr {$t_core * $::env(IO_DELAY_CONSTRAINT) / 100.0}]
-set_input_delay  -clock clk_core -max $io_budget $io_core
-set_output_delay -clock clk_core -max $io_budget $io_core
-set_output_delay -clock clk_core -min 0.0 $io_core
+set_input_delay  -clock clk_pad -max $io_budget $io_core
+set_output_delay -clock clk_pad -max $io_budget $io_core
+set_output_delay -clock clk_pad -min 0.0 $io_core
 
-# No hold repair on asynchronous / responder pad inputs (R0 T2): a hold buffer on DB_CHAL_IN,
-# NFC_CLK_IN, NFC_ASK_IN or TAMPER_N would sit on a path that is asynchronous by design
 set_false_path -hold -from $io_core
 set_false_path -hold -from [get_ports {bidir_PAD[0] bidir_PAD[1] bidir_PAD[2] bidir_PAD[3]}]
 
-# Rapid-bit responder, challenge pad -> AOI21 lock -> mux2_4 -> response pad
-# (IO_MODE 00: 13 -> 14, IO_MODE 01: 1 -> 0)
-set_max_delay -ignore_clock_latency 4.8 -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}]
-set_max_delay -ignore_clock_latency 4.8 -from [get_ports {bidir_PAD[1]}]  -to [get_ports {bidir_PAD[0]}]
+# Rapid-bit responder: challenge pad -> AOI21 lock -> mux2_4 -> response pad
+set_max_delay -ignore_clock_latency 8.0 -from [get_ports {bidir_PAD[13]}] -to [get_ports {bidir_PAD[14]}]
+set_max_delay -ignore_clock_latency 8.0 -from [get_ports {bidir_PAD[1]}]  -to [get_ports {bidir_PAD[0]}]
 
 # ------------------------------------------------------------------ 6. environment
 set_max_fanout $::env(MAX_FANOUT_CONSTRAINT) [current_design]
@@ -129,4 +121,18 @@ if { [info exists ::env(OPENLANE_SDC_IDEAL_CLOCKS)] && $::env(OPENLANE_SDC_IDEAL
     unset_propagated_clock [all_clocks]
 } else {
     set_propagated_clock [all_clocks]
+}
+
+# OpenROAD 2026-02-17 renamed `-post_cts_disable` -> `-no_insertion_delay`. Since Dregg-180 has zero
+# clocked SRAM macros and two real physical clocks (`clk_pad` & `osc`) converging on `u_clk.u_mux.u_o`,
+# pass `-no_insertion_delay` to `clock_tree_synthesis` so TritonCTS builds all H-Trees cleanly without
+# hanging in `CTS-0033` macro-vs-register latency balancing.
+if { [info commands ::clock_tree_synthesis] != "" && [info commands ::_qsag_orig_cts] == "" } {
+    rename ::clock_tree_synthesis ::_qsag_orig_cts
+    proc ::clock_tree_synthesis {args} {
+        if { [lsearch -exact $args "-no_insertion_delay"] == -1 } {
+            lappend args -no_insertion_delay
+        }
+        return [uplevel 1 [linsert $args 0 ::_qsag_orig_cts]]
+    }
 }

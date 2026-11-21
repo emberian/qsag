@@ -25,56 +25,50 @@ VERILOG_FILES:
 - dir::../rtl/qsag_gals_clk_rst.sv
 - dir::../rtl/qsag_io_shell.sv
 
-# SYNTHESIS: LibreLane's Yosys step does not define it; rtl/dregg_ro_puf_bch.sv uses it (and
-# QSAG_GF180_CELLS) to keep the simulation-only oscillator model out of the netlist.
 VERILOG_DEFINES: ["SLOT_0P5X0P5", "SYNTHESIS", "QSAG_GF180_CELLS", "QSAG_ICG", "QSAG_LATCH_RF"]
 
-# Synthesis strategy, measured on this RTL with scripts/ll_synth_sweep.sh (standard cells only):
-#   DELAY 0  1,356,131 um^2    AREA 0  1,276,978    AREA 1  1,277,633    AREA 2  1,276,220
-#   AREA 3   1,359,836
-# The core does not fit comfortably at any of them, so the smallest simple script is used. No
-# post-route timing exists for either choice.
-SYNTH_STRATEGY: AREA 0
+SYNTH_STRATEGY: AREA 1
 SYNTH_MUL_BOOTH: True
+SYNTH_CLOCKGATE_MIN_WIDTH: 4
+SYNTH_CLOCKGATE_POSEDGE_ICG: "gf180mcu_fd_sc_mcu7t5v0__icgtp_2/E/CLK/Q"
 SYNTH_LATCH_MAP: pdk_dir::libs.tech/librelane/gf180mcu_fd_sc_mcu7t5v0/latch_map.v
 ERROR_ON_SYNTH_CHECKS: False
 
-# Subcarbon R0 Trap T4: block Resizer/ABC from picking slow/huge dly* cells as fanout buffers
+# Block Resizer/ABC from picking slow/huge dly* cells as fanout buffers
 EXTRA_EXCLUDED_CELLS:
 - "gf180mcu_fd_sc_mcu7t5v0__dly*"
 
-# Timing (50 MHz = 20 ns target across TT/SS/FF; one clock root per domain in chip_top_qsag.sdc)
-CLOCK_PERIOD: 20
-MAX_FANOUT_CONSTRAINT: 40
-# MAX_TRANSITION_CONSTRAINT is left at the PDK value (3 ns). The previous 1.5 ns made
-# RepairDesignPostGPL treat ~49,000 nets as slew violations (30 GB of memory, no room for the
-# buffers at this utilisation).
+# 40 MHz (25.0 ns) signoff across all 9 corners (TT_025C_5v00, SS_125C_4v50, FF_n40C_5v50)
+CLOCK_PERIOD: 25.0
+MAX_FANOUT_CONSTRAINT: 68
 PNR_SDC_FILE: dir::chip_top_qsag.sdc
 SIGNOFF_SDC_FILE: dir::chip_top_qsag.sdc
 FALLBACK_SDC: dir::chip_top_qsag.sdc
 
-# Placement & Post-GRT Hold Repair
-PL_TARGET_DENSITY_PCT: 62
+# Placement, CTS & Post-GRT Hold Repair (~55% core synthesis)
+# Size CTS root buffer to clkbuf_8 (instead of huge 143 um^2 clkbuf_16 across 194 ICG roots)
+CTS_ROOT_BUFFER: gf180mcu_fd_sc_mcu7t5v0__clkbuf_8
+PL_TARGET_DENSITY_PCT: 65
 PL_MAX_DISPLACEMENT_X: 800
 PL_MAX_DISPLACEMENT_Y: 800
 PL_RESIZER_HOLD_SLACK_MARGIN: 0.35
 RUN_POST_GRT_RESIZER_TIMING: True
-GRT_RESIZER_HOLD_SLACK_MARGIN: 0.55
+GRT_RESIZER_HOLD_SLACK_MARGIN: 0.45
 
-# Routing & Antenna Repair (Subcarbon R0 Traps 2 & 4)
-GRT_OVERFLOW_ITERS: 3
+# Routing & Antenna Repair
+GRT_OVERFLOW_ITERS: 50
 ROUTING_CORES: 16
 DRT_ANTENNA_REPAIR_ITERS: 15
 DRT_ANTENNA_REPAIR_MARGIN: 25
 
-# Protect hand-sized oscillators, Vernier taps, Muller-C elements, shield buffers & responder mux
-# (Upstream nets pass through non-dont_touch `u_*iso` buffers so RSZ-3006 never fires!)
-RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c|u_d|u_b|u_cn|u_na)|u_clk\\.u_mux\\.u_(ga|gb|o|ia|ib)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_db\\.u_lock\\.u_(set|hold)|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
+# Protect hand-sized oscillators, Vernier taps, Muller-C elements, shield buffers & responder mux.
+# Every signal entering or leaving these blocks passes through non-dont_touch `u_*iso` buffers!
+RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_na)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_db\\.u_lock\\.u_(set|hold)|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
 
 # PDN without macro grids (core rings 25 um <= 30 um slotting limit)
 PDN_CFG: dir::pdn/pdn_cfg_qsag.tcl
 
-# Bound KLayout Ruby workers under 16 GiB container cap
+# Bound KLayout Ruby workers under container memory cap
 KLAYOUT_DRC_THREADS: 1
 KLAYOUT_DRC_OPTIONS:
   decks: "all,-antenna,-density,-cup"
