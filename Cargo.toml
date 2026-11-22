@@ -14,6 +14,7 @@ members = [
     "crates/qsag-cred",
     "crates/qsag-policy",
     "crates/qsag-quorum",
+    "crates/qsag-ass2",
 ]
 
 [workspace.package]

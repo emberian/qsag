@@ -1,0 +1,24 @@
+[package]
+name = "qsag-ass2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "ASS2 / Dregg-64: fixed-width 32-bit little-endian constant-time cryptographic RISC. Zero-dependency no_std instruction codec, two-pass assembler, disassembler, and cycle-accurate reference VM with a built-in DIT taint auditor."
+
+[features]
+default = ["alloc"]
+alloc = []
+# VM-only nonblocking debug receiver at CSR 0x0B. The base RTL reserves this address.
+vm-debug-rx = []
+std = ["alloc", "qsag-core/std", "qsag-accel/std"]
+
+[dependencies]
+# Strictly zero external crates.io dependencies.
+qsag-core = { path = "../qsag-core", default-features = false }
+qsag-accel = { path = "../qsag-accel", default-features = false }
+
+[dev-dependencies]
+# Independent references for the differential tests (Fp5, Keccak-p[1600, 12], Goldilocks).
+qsag-agg = { path = "../qsag-agg" }
+qsag-fts = { path = "../qsag-fts" }
