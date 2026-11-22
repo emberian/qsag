@@ -3,13 +3,18 @@ module
 # Qsag.Math.Tactic.MaskBijection — `SimpleEquiv` Pad Combinators and `mask_bijection_hop`
 
 **`by mask_bijection_hop` / `by mask_bijection_hop <equiv>`**: relational pad-bijection synthesizer
-discharging `qsum` uniform-mask invariance goals via `SimpleEquiv` combinators (`bvXorEquiv`,
-`u64XorEquiv`, `boolXorEquiv`, `ringAddEquiv`, `SimpleEquiv.prodCongr`) and `bv_xor_cancel` with
-`0 Classical.choice`. The combinators and the `qsum` hop lemma are stated over the finite-sum and
-ring interfaces of `Qsag.Math.Algebra`.
+discharging both `qsum` uniform-mask invariance goals AND existential coin-bijection simulation
+goals (`∀ w, ∃ Φ : SimpleEquiv R R, ∀ r, ...`, matching `ZkHemV2.CoinBijectionSimulated`) across:
+- XOR pads (`BitVec w`, `UInt64`, `Bool`),
+- Arbitrary `LawfulCommRing` additive shifts (`x + Δ` and `Δ + x`, covering `Goldilocks`,
+  `QuarticGoldilocks` / `GoldilocksExt4`, `QuinticGoldilocks`, and `TowerElem k`),
+- Nonzero `LawfulField` affine masks (`p + β * x` and `x * β + p`), and
+- Nested Cartesian products (`SimpleEquiv.prodCongr`),
+with `0 Classical.choice`.
 -/
 
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Tactic.CathedralKit
 public import Qsag.Math.Algebra
 public meta import Lean
 
@@ -28,6 +33,18 @@ theorem ring_add_sub_cancel_right {R : Type} [LawfulCommRing R] (a b : R) :
 theorem ring_sub_add_cancel_right {R : Type} [LawfulCommRing R] (a b : R) :
     CommRingOps.add (CommRingOps.sub a b) b = a := by
   rw [LawfulCommRing.add_comm, LawfulCommRing.add_sub_cancel_left]
+
+theorem ring_left_add_sub_cancel {R : Type} [LawfulCommRing R] (delta x : R) :
+    CommRingOps.sub (CommRingOps.add delta x) delta = x := by
+  rw [LawfulCommRing.add_comm delta x, ring_add_sub_cancel_right]
+
+theorem ring_left_add_sub_right {R : Type} [LawfulCommRing R] (delta y : R) :
+    CommRingOps.add delta (CommRingOps.sub y delta) = y :=
+  LawfulCommRing.add_sub_cancel_left delta y
+
+theorem ring_add_cancel_mid {R : Type} [LawfulCommRing R] (a b : R) :
+    CommRingOps.sub (CommRingOps.add a b) a = b :=
+  ring_left_add_sub_cancel a b
 
 /-! ## 2. Constructive `SimpleEquiv` Pad-Bijection Combinators (`0 Classical.choice`) -/
 
@@ -72,12 +89,31 @@ abbrev boolXorEquiv (mask : Bool) : SimpleEquiv Bool Bool where
   left_inv x := bool_bne_cancel_right x mask
   right_inv y := bool_bne_cancel_right y mask
 
-/-- Constructive additive shift bijection `x ↦ x + delta` over any `LawfulCommRing R`. -/
+/-- Constructive right-additive shift bijection `x ↦ x + delta` over any `LawfulCommRing R`. -/
 @[expose] def ringAddEquiv {R : Type} [LawfulCommRing R] (delta : R) : SimpleEquiv R R where
   toFun x := CommRingOps.add x delta
   invFun y := CommRingOps.sub y delta
   left_inv x := ring_add_sub_cancel_right x delta
   right_inv y := ring_sub_add_cancel_right y delta
+
+/-- Constructive left-additive shift bijection `x ↦ delta + x` over any `LawfulCommRing R`. -/
+abbrev ringLeftAddEquiv {R : Type} [LawfulCommRing R] (delta : R) : SimpleEquiv R R where
+  toFun x := CommRingOps.add delta x
+  invFun y := CommRingOps.sub y delta
+  left_inv x := ring_left_add_sub_cancel delta x
+  right_inv y := ring_left_add_sub_right delta y
+
+/-- Constructive affine mask bijection `x ↦ base + scale * x` (`scale ≠ 0`) over any `LawfulField F`. -/
+abbrev fieldAffineEquiv {F : Type} [LawfulField F] (base scale : F)
+    (hScale : scale ≠ CommRingOps.zero) : SimpleEquiv F F where
+  toFun x := CommRingOps.add base (CommRingOps.mul scale x)
+  invFun y := CommRingOps.mul (LawfulField.inv scale) (CommRingOps.sub y base)
+  left_inv x := by
+    rw [ring_left_add_sub_cancel, ← LawfulCommRing.mul_assoc,
+        LawfulField.inv_mul_cancel hScale, LawfulCommRing.one_mul]
+  right_inv y := by
+    rw [← LawfulCommRing.mul_assoc, LawfulField.mul_inv_cancel hScale,
+        LawfulCommRing.one_mul, ring_left_add_sub_right]
 
 theorem SimpleEquiv.refl_toFun {α : Type} (x : α) :
     (SimpleEquiv.refl α).toFun x = x := rfl
@@ -104,6 +140,9 @@ theorem boolXorEquiv_toFun (mask x : Bool) :
 
 theorem ringAddEquiv_toFun {R : Type} [LawfulCommRing R] (delta x : R) :
     (ringAddEquiv delta).toFun x = CommRingOps.add x delta := rfl
+
+theorem ringLeftAddEquiv_toFun {R : Type} [LawfulCommRing R] (delta x : R) :
+    (ringLeftAddEquiv delta).toFun x = CommRingOps.add delta x := rfl
 
 /-- Relational `qsum` pad-bijection hop reducing distributional equality over a sample space `Ω`
     enumerated by `enum` to pointwise equality after applying mask bijection `e`. -/
@@ -139,6 +178,13 @@ private meta partial def findEnumInExpr? (e : Expr) : Option Expr :=
 private meta def matchesSample (sub sampleExpr : Expr) : MetaM Bool :=
   withoutModifyingState (isDefEq (stripMData sub) (stripMData sampleExpr))
 
+/-- Check that `e` has no loose bound variables and does not depend on `sampleExpr`. -/
+private meta def independentOfSample (e sampleExpr : Expr) : Bool :=
+  if e.hasLooseBVars then false
+  else match sampleExpr with
+    | .fvar fid => !e.containsFVar fid
+    | _ => true
+
 /-- Search `body` for a mask expression `mask ^^^ sampleExpr`, `sampleExpr ^^^ mask`,
     `mask != sampleExpr`, or `sampleExpr != mask` applied to `sampleExpr`. -/
 private meta partial def findXorMaskForSample? (body sampleExpr : Expr) : MetaM (Option Expr) := do
@@ -149,23 +195,23 @@ private meta partial def findXorMaskForSample? (body sampleExpr : Expr) : MetaM 
     let lhs := args[4]!
     let rhs := args[5]!
     if ← matchesSample rhs sampleExpr then
-      if !(lhs.hasLooseBVars) then return some lhs
+      if independentOfSample lhs sampleExpr then return some lhs
     if ← matchesSample lhs sampleExpr then
-      if !(rhs.hasLooseBVars) then return some rhs
+      if independentOfSample rhs sampleExpr then return some rhs
   if fn.isConstOf ``bne && args.size == 4 then
     let lhs := args[2]!
     let rhs := args[3]!
     if ← matchesSample rhs sampleExpr then
-      if !(lhs.hasLooseBVars) then return some lhs
+      if independentOfSample lhs sampleExpr then return some lhs
     if ← matchesSample lhs sampleExpr then
-      if !(rhs.hasLooseBVars) then return some rhs
+      if independentOfSample rhs sampleExpr then return some rhs
   if fn.isConstOf ``Bool.xor && args.size == 2 then
     let lhs := args[0]!
     let rhs := args[1]!
     if ← matchesSample rhs sampleExpr then
-      if !(lhs.hasLooseBVars) then return some lhs
+      if independentOfSample lhs sampleExpr then return some lhs
     if ← matchesSample lhs sampleExpr then
-      if !(rhs.hasLooseBVars) then return some rhs
+      if independentOfSample rhs sampleExpr then return some rhs
   for a in args do
     if let some m ← findXorMaskForSample? a sampleExpr then
       return some m
@@ -176,17 +222,54 @@ private meta partial def findXorMaskForSample? (body sampleExpr : Expr) : MetaM 
   | .proj _ _ inner => findXorMaskForSample? inner sampleExpr
   | _ => return none
 
-/-- Synthesize a `SimpleEquiv Ω Ω` pad bijection for sample `sampleExpr : Ω` appearing in `body`. -/
-private meta partial def synthesizePadEquiv (omegaTy body sampleExpr : Expr) : MetaM Expr := do
+/-- Extract `(lhs, rhs)` of a ring/field/tower addition node (`CommRingOps.add`, `HAdd.hAdd`, or
+    concrete carrier `.add` / `towerAdd` whose carrier implements `LawfulCommRing`). -/
+private meta def asRingAddArgs? (e : Expr) : Option (Expr × Expr) :=
+  let fn := stripMData e.getAppFn
+  let args := e.getAppArgs
+  if fn.isConstOf ``Qsag.CommRingOps.add && args.size == 4 then
+    some (args[2]!, args[3]!)
+  else if fn.isConstOf ``HAdd.hAdd && args.size == 6 then
+    some (args[4]!, args[5]!)
+  else match fn.constName? with
+    | some nm =>
+      let s := nm.toString
+      if (s.endsWith ".add" || s.endsWith ".extAdd") && args.size == 2 then
+        some (args[0]!, args[1]!)
+      else if s == "Qsag.towerAdd" && args.size == 3 then
+        some (args[1]!, args[2]!)
+      else none
+    | none => none
+
+/-- Search `body` for a ring additive shift `sampleExpr + delta` (`isRight = true`) or
+    `delta + sampleExpr` (`isRight = false`). -/
+private meta partial def findRingAddMaskForSample? (body sampleExpr : Expr) :
+    MetaM (Option (Bool × Expr)) := do
+  let body := stripMData body
+  if let some (lhs, rhs) := asRingAddArgs? body then
+    if ← matchesSample lhs sampleExpr then
+      if independentOfSample rhs sampleExpr then return some (true, rhs)
+    if ← matchesSample rhs sampleExpr then
+      if independentOfSample lhs sampleExpr then return some (false, lhs)
+  for a in body.getAppArgs do
+    if let some hit ← findRingAddMaskForSample? a sampleExpr then
+      return some hit
+  match body with
+  | .letE _ _ v b _ =>
+    if let some hit ← findRingAddMaskForSample? v sampleExpr then return some hit
+    return (← findRingAddMaskForSample? (b.instantiate1 v) sampleExpr)
+  | .proj _ _ inner => findRingAddMaskForSample? inner sampleExpr
+  | _ => return none
+
+/-- Synthesize a `SimpleEquiv Ω Ω` pad bijection for sample `sampleExpr : Ω` appearing in `body`.
+    For `qsum` goals (`invertForQsum = true`), synthesizes the *inverse* shift (`symm`) when needed
+    so `f (e.toFun ω) = g ω` cancels `ω + Δ` down to `ω`; for `CoinBijectionSimulated` existential
+    goals (`invertForQsum = false`), synthesizes the *forward* shift `Φ.toFun r = r + Δ` directly! -/
+private meta partial def synthesizePadEquivAux (invertForQsum : Bool)
+    (omegaTy body sampleExpr : Expr) : MetaM Expr := do
   let omegaWhnf := stripMData (← whnf omegaTy)
   let fn := stripMData omegaWhnf.getAppFn
   let args := omegaWhnf.getAppArgs
-  if fn.isConstOf ``Prod && args.size == 2 then
-    let fstSample ← mkAppM ``Prod.fst #[sampleExpr]
-    let sndSample ← mkAppM ``Prod.snd #[sampleExpr]
-    let e1 ← synthesizePadEquiv args[0]! body fstSample
-    let e2 ← synthesizePadEquiv args[1]! body sndSample
-    return (← mkAppM ``Qsag.SimpleEquiv.prodCongr #[e1, e2])
   if fn.isConstOf ``BitVec && args.size == 1 then
     if let some mask ← findXorMaskForSample? body sampleExpr then
       return (← mkAppM ``Qsag.bvXorEquiv #[mask])
@@ -199,13 +282,32 @@ private meta partial def synthesizePadEquiv (omegaTy body sampleExpr : Expr) : M
     if let some mask ← findXorMaskForSample? body sampleExpr then
       return (← mkAppM ``Qsag.boolXorEquiv #[mask])
     return (← mkAppM ``Qsag.SimpleEquiv.refl #[omegaTy])
+  let ringTy ← mkAppM ``Qsag.LawfulCommRing #[omegaTy]
+  if (← synthInstance? ringTy).isSome then
+    if let some (isRight, delta) ← findRingAddMaskForSample? body sampleExpr then
+      let fwd ←
+        if isRight then mkAppM ``Qsag.ringAddEquiv #[delta]
+        else mkAppM ``Qsag.ringLeftAddEquiv #[delta]
+      if invertForQsum then
+        return (← mkAppM ``Qsag.SimpleEquiv.symm #[fwd])
+      else
+        return fwd
+  if fn.isConstOf ``Prod && args.size == 2 then
+    let fstSample ← mkAppM ``Prod.fst #[sampleExpr]
+    let sndSample ← mkAppM ``Prod.snd #[sampleExpr]
+    let e1 ← synthesizePadEquivAux invertForQsum args[0]! body fstSample
+    let e2 ← synthesizePadEquivAux invertForQsum args[1]! body sndSample
+    return (← mkAppM ``Qsag.SimpleEquiv.prodCongr #[e1, e2])
   return (← mkAppM ``Qsag.SimpleEquiv.refl #[omegaTy])
 
-/-- Discharge the pointwise obligation produced by `qsum_bijection_hop_eq`. -/
+private meta def synthesizePadEquiv (omegaTy body sampleExpr : Expr) : MetaM Expr :=
+  synthesizePadEquivAux true omegaTy body sampleExpr
+
+/-- Discharge the pointwise obligation produced by `qsum_bijection_hop_eq` or existential hops. -/
 private meta def dischargeMaskPointwise (goal : MVarId) : TacticM (List MVarId) := do
   let (omegaFVar, goalIntro) ← goal.intro `_ω
   let isProd ← goalIntro.withContext do
-    let ty ← whnf (← omegaFVar.getType)
+    let ty := stripMData (← instantiateMVars (← omegaFVar.getType))
     pure ((stripMData ty.getAppFn).isConstOf ``Prod && ty.getAppArgs.size == 2)
   let postIntroGoals ←
     if isProd then
@@ -217,13 +319,13 @@ private meta def dischargeMaskPointwise (goal : MVarId) : TacticM (List MVarId) 
     try dsimp only [
       Qsag.SimpleEquiv.prodCongr, Qsag.SimpleEquiv.refl, Qsag.SimpleEquiv.symm,
       Qsag.SimpleEquiv.trans, Qsag.bvXorEquiv, Qsag.u64XorEquiv, Qsag.boolXorEquiv,
-      Qsag.ringAddEquiv
+      Qsag.ringAddEquiv, Qsag.ringLeftAddEquiv
     ]
     try simp only [
       Qsag.SimpleEquiv.refl_toFun, Qsag.SimpleEquiv.symm_toFun,
       Qsag.SimpleEquiv.trans_toFun, Qsag.SimpleEquiv.prodCongr_toFun,
       Qsag.bvXorEquiv_toFun, Qsag.u64XorEquiv_toFun, Qsag.boolXorEquiv_toFun,
-      Qsag.ringAddEquiv_toFun
+      Qsag.ringAddEquiv_toFun, Qsag.ringLeftAddEquiv_toFun
     ]
     try simp only [
       Qsag.bv_xor_self, Qsag.bv_xor_zero, Qsag.bv_zero_xor,
@@ -241,7 +343,9 @@ private meta def dischargeMaskPointwise (goal : MVarId) : TacticM (List MVarId) 
       Qsag.bool_bne_self, Qsag.bool_bne_false, Qsag.bool_false_bne,
       Qsag.bool_bne_cancel_right, Qsag.bool_bne_cancel_left, Qsag.bool_bne_cancel_mid,
       Qsag.bool_bne_cancel_outer,
-      Qsag.ring_add_sub_cancel_right, Qsag.ring_sub_add_cancel_right
+      Qsag.ring_add_sub_cancel_right, Qsag.ring_sub_add_cancel_right,
+      Qsag.ring_left_add_sub_cancel, Qsag.ring_left_add_sub_right,
+      Qsag.ring_add_cancel_mid, Qsag.LawfulCommRing.add_sub_cancel_left
     ]
     try simp only [
       Qsag.bv_xor_assoc, Qsag.bv_xor_self, Qsag.bv_xor_zero, Qsag.bv_zero_xor,
@@ -270,6 +374,50 @@ private meta def dischargeMaskPointwise (goal : MVarId) : TacticM (List MVarId) 
         rem := rem ++ (← solveSingleXorGoal g)
   return rem
 
+/-- Try to solve a `[∀ w*,] ∃ Φ : SimpleEquiv R R, ∀ r : R, real r = sim (Φ.toFun r)` goal
+    (including `ZkHemV2.CoinBijectionSimulated`). -/
+private meta partial def trySolveExistsEquivHop? (goal : MVarId) :
+    TacticM (Option (List MVarId)) := do
+  goal.withContext do
+    let tgtWhnf := stripMData (← whnf (← instantiateMVars (← goal.getType)))
+    match tgtWhnf with
+    | .forallE _ _ _ _ =>
+      let (_, g') ← goal.intro1P
+      trySolveExistsEquivHop? g'
+    | _ =>
+      let fn := stripMData tgtWhnf.getAppFn
+      let args := tgtWhnf.getAppArgs
+      unless fn.isConstOf ``Exists && args.size == 2 do return none
+      let eqTy := stripMData (← whnf args[0]!)
+      unless (stripMData eqTy.getAppFn).isConstOf ``Qsag.SimpleEquiv && eqTy.getAppArgs.size == 2 do
+        return none
+      let rTy := eqTy.getAppArgs[0]!
+      let cTy := eqTy.getAppArgs[1]!
+      unless ← withoutModifyingState (isDefEq rTy cTy) do return none
+      let _ ← isDefEq rTy cTy
+      let predFn ← whnf args[1]!
+      let eExpr ← match stripMData predFn with
+        | .lam phiNm phiDom phiBody phiBi =>
+          let reflR ← mkAppM ``Qsag.SimpleEquiv.refl #[rTy]
+          let instPred ← whnf (phiBody.instantiate1 reflR)
+          match stripMData instPred with
+          | .forallE rNm rDom eqBody rBi =>
+            withLocalDecl rNm rBi rDom fun rVar => do
+              let eqInst ← instantiateMVars (eqBody.instantiate1 rVar)
+              match eqInst.eq? with
+              | some (_, lhs, _) => synthesizePadEquivAux false rTy lhs rVar
+              | none =>
+                let _ := (phiNm, phiDom, phiBi)
+                mkAppM ``Qsag.SimpleEquiv.refl #[rTy]
+          | _ => mkAppM ``Qsag.SimpleEquiv.refl #[rTy]
+        | _ => mkAppM ``Qsag.SimpleEquiv.refl #[rTy]
+      let exProof ← mkAppOptM ``Exists.intro #[some args[0]!, some args[1]!, some eExpr]
+      let subgs ← goal.apply exProof
+      let mut rem : List MVarId := []
+      for sg in subgs do
+        rem := rem ++ (← dischargeMaskPointwise sg)
+      return some rem
+
 /-- Abstract `(enum.toFun idx)` out of a `qsum C (fun idx => body)` integrand to form `Ω → Nat`. -/
 private meta def extractFinSumWeightFn (omegaTy enumExpr sumExpr : Expr) : MetaM Expr := do
   let args := (stripMData sumExpr).getAppArgs
@@ -282,10 +430,6 @@ private meta def extractFinSumWeightFn (omegaTy enumExpr sumExpr : Expr) : MetaM
       let bodyInst ← instantiateMVars (body.instantiate1 idxVar)
       let sampleExpr ← mkAppM ``Qsag.SimpleEquiv.toFun #[enumExpr, idxVar]
       let absBody ← kabstract bodyInst sampleExpr
-      if absBody.hasLooseBVars then
-        -- `kabstract` turned `sampleExpr` into `.bvar 0`; verify `idxVar` no longer occurs freely
-        let checkClosed := absBody.instantiate1 (mkBVar 0)
-        let _ := checkClosed
       if (absBody.instantiate1 enumExpr).containsFVar idxVar.fvarId! then
         throwError "mask_bijection_hop: `qsum` body depends on loop index `{nm}` outside `enum.toFun`"
       return Expr.lam `_ω omegaTy absBody .default
@@ -299,24 +443,45 @@ elab_rules : tactic
     let goal ← getMainGoal
     goal.withContext do
       let tgt := stripMData (← instantiateMVars (← goal.getType))
-      let some (_, lhs, rhs) := tgt.eq?
-        | throwError "mask_bijection_hop: expected `qsum C ... = qsum C ...` equality goal"
-      let some enumExpr := findEnumInExpr? lhs <|> findEnumInExpr? rhs
-        | throwError "mask_bijection_hop: could not locate `enum.toFun` inside `qsum` goal"
-      let enumTy := stripMData (← whnf (← inferType enumExpr))
-      unless (stripMData enumTy.getAppFn).isConstOf ``Qsag.SimpleEquiv && enumTy.getAppArgs.size == 2 do
-        throwError "mask_bijection_hop: `{enumExpr}` is not a `SimpleEquiv`"
-      let omegaTy := enumTy.getAppArgs[1]!
-      let fExpr ← extractFinSumWeightFn omegaTy enumExpr lhs
-      let gExpr ← extractFinSumWeightFn omegaTy enumExpr rhs
-      let eExpr ← Tactic.elabTermEnsuringType eStx (← mkAppM ``Qsag.SimpleEquiv #[omegaTy, omegaTy])
-      let hopThm ← mkAppOptM ``Qsag.qsum_bijection_hop_eq
-        #[some omegaTy, none, some enumExpr, some eExpr, some fExpr, some gExpr]
-      let subgoals ← goal.apply hopThm
-      let mut rem : List MVarId := []
-      for sg in subgoals do
-        rem := rem ++ (← dischargeMaskPointwise sg)
-      replaceMainGoal rem
+      if let some (_, lhs, rhs) := tgt.eq? then
+        let some enumExpr := findEnumInExpr? lhs <|> findEnumInExpr? rhs
+          | throwError "mask_bijection_hop: could not locate `enum.toFun` inside `qsum` goal"
+        let enumTy := stripMData (← whnf (← inferType enumExpr))
+        unless (stripMData enumTy.getAppFn).isConstOf ``Qsag.SimpleEquiv && enumTy.getAppArgs.size == 2 do
+          throwError "mask_bijection_hop: `{enumExpr}` is not a `SimpleEquiv`"
+        let omegaTy := enumTy.getAppArgs[1]!
+        let fExpr ← extractFinSumWeightFn omegaTy enumExpr lhs
+        let gExpr ← extractFinSumWeightFn omegaTy enumExpr rhs
+        let eExpr ← Tactic.elabTermEnsuringType eStx (← mkAppM ``Qsag.SimpleEquiv #[omegaTy, omegaTy])
+        let hopThm ← mkAppOptM ``Qsag.qsum_bijection_hop_eq
+          #[some omegaTy, none, some enumExpr, some eExpr, some fExpr, some gExpr]
+        let subgoals ← goal.apply hopThm
+        let mut rem : List MVarId := []
+        for sg in subgoals do
+          rem := rem ++ (← dischargeMaskPointwise sg)
+        replaceMainGoal rem
+      else
+        -- Existential `[∀ w*,] ∃ Φ : SimpleEquiv R C, ...` with user-supplied `Φ`
+        let rec introAndApply : Nat → MVarId → TacticM (List MVarId)
+          | 0, g => return [g]
+          | fuel + 1, g => g.withContext do
+            let tw := stripMData (← whnf (← instantiateMVars (← g.getType)))
+            match tw with
+            | .forallE _ _ _ _ =>
+              let (_, g') ← g.intro1P
+              introAndApply fuel g'
+            | _ =>
+              let args := tw.getAppArgs
+              unless (stripMData tw.getAppFn).isConstOf ``Exists && args.size == 2 do
+                throwError "mask_bijection_hop: expected `qsum` equality or `∃ Φ : SimpleEquiv ..., ...` goal"
+              let eExpr ← Tactic.elabTermEnsuringType eStx args[0]!
+              let exProof ← mkAppOptM ``Exists.intro #[some args[0]!, some args[1]!, some eExpr]
+              let subgs ← g.apply exProof
+              let mut rem : List MVarId := []
+              for sg in subgs do
+                rem := rem ++ (← dischargeMaskPointwise sg)
+              return rem
+        replaceMainGoal (← introAndApply 64 goal)
   | `(tactic| mask_bijection_hop) => do
     let goal ← getMainGoal
     goal.withContext do
@@ -329,8 +494,11 @@ elab_rules : tactic
           goal.assign reflEq
           replaceMainGoal []
           return
+      if let some rem ← trySolveExistsEquivHop? goal then
+        replaceMainGoal rem
+        return
       let some (_, lhs, rhs) := tgt.eq?
-        | throwError "mask_bijection_hop: expected `qsum` equality or `SimpleEquiv` goal"
+        | throwError "mask_bijection_hop: expected `qsum` equality, `SimpleEquiv`, or existential coin-bijection goal"
       let lhsArgs := lhs.getAppArgs
       unless (stripMData lhs.getAppFn).isConstOf ``Qsag.qsum && lhsArgs.size == 2 do
         throwError "mask_bijection_hop: LHS `{lhs}` is not a `Qsag.qsum` application"
@@ -360,7 +528,15 @@ elab_rules : tactic
 
 end Qsag.Tactic.AssuranceKit
 
+theorem Qsag.fieldAffineEquiv_apply {F : Type} [Qsag.LawfulField F]
+    (base scale : F) (hScale : scale ≠ Qsag.CommRingOps.zero) (x : F) :
+    (Qsag.fieldAffineEquiv base scale hScale).toFun x =
+      Qsag.CommRingOps.add base (Qsag.CommRingOps.mul scale x) := rfl
+
 #verify_constructive
+  Qsag.ring_left_add_sub_cancel
+  Qsag.ring_left_add_sub_right
+  Qsag.fieldAffineEquiv_apply
   Qsag.qsum_bijection_hop_eq
 
 end

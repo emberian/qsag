@@ -1,28 +1,200 @@
 module
 /-
-# Qsag.Exec.Tactic.SimulationKit — Simulation Spine Synthesis, `DataRefinement`, `LawfulFramedCodec` & `frame_prefix_inj`
+# Qsag.Exec.Tactic.SimulationKit — Simulation Spine Synthesis, `DataRefinement`, `LawfulFramedCodec`, `frame_prefix_inj` & Coalgebraic Machine Repair
 
-Zero-`Classical.choice` proof-automation and refinement combinator kit for `Spec ↔ Exec ↔ MIR`:
+Zero-`Classical.choice` proof-automation and coalgebraic refinement combinator kit for `Spec ↔ Exec ↔ MIR`:
 1. **`by compose_forward_sim` / `by compose_refines`**: Goal-directed `TacticM` DFS synthesizer
-   chaining `ForwardSim.refl`/`ForwardSim.trans`/`LockstepSim.toForwardSim` AND
-   `Spec.Refines.refl`/`Spec.Refines.trans`/`Spec.LockstepSim.toRefines` with `0` `partial` / `!` / `Classical.choice`.
+   chaining `ForwardSim`, `LockstepSim`, `Spec.Refines`, `Spec.LockstepSim`, AND `MachineStateEquiv`
+   links with a bounded search.
 2. **`by mir_sim_step`**: Bounded structural symbolic splitter over `Option` and `Except`.
 3. **`DataRefinement α_spec α_exec` (`Rel1`, `Rel2`, `option_rel`, `list_rel`, `vec_rel`, carrier bridges)**:
    Composable relational & functional data-refinement combinators connecting `List UInt8`, `Nat`,
    `BitVec`, `Digest256` specs to `ByteArray`, `UInt64`, `UInt32`, and length-indexed byte slices.
 4. **`LawfulFramedCodec`, `FramedField`, `framePair_inj`, `frameList_inj` & `by frame_prefix_inj`**:
    Composable prefix-free byte-framing combinators + automatic prefix-peeling tactic collapsing
-   multi-field Merkle/transcript/intent preimage injectivity proofs to 1 line!
+   multi-field Merkle/transcript/intent preimage injectivity (including `boundedList` / `frameList_inj`
+   and `tagged`) to 1 line!
+5. **Coalgebraic State-Machine Equivalence & Scar-Free Repair (`MachineStateEquiv`, `MealyCoalg`)**:
+   Connects `Spec.Machine S₁ In Out ⇄ Spec.Machine S₂ In Out` to `Qsag.Repair.PCoalg` and transports
+   both `Spec.Refines` and `Spec.DataRefines` across isomorphic state representations (`S₁ ≃ S₂`),
+   with `#assert_no_scar` verification.
 -/
 
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.Tactic.CathedralKit
 public import Qsag.Math.Tactic.MaskBijection
+public import Qsag.Math.AlgebraicRepair
 public import Qsag.Spec.Encoding
 public import Qsag.Exec.SimulationSpine
 public import Qsag.Exec.RefinesBridges
 public meta import Lean
 
 public section
+
+namespace Qsag
+
+set_option autoImplicit false
+
+/-! ## 0. Coalgebraic State-Machine Equivalence & Repair Transport (`MachineStateEquiv`) -/
+
+/-- Equivalence between two `Spec.Machine`s over a state bijection `e : SimpleEquiv S₁ S₂`
+    commuting with `Init`, `step`, and `errStep`. -/
+structure MachineStateEquiv {S₁ S₂ In Out : Type}
+    (M₁ : Spec.Machine S₁ In Out) (M₂ : Spec.Machine S₂ In Out) where
+  equiv : SimpleEquiv S₁ S₂
+  init_iff : ∀ s₁ : S₁, M₁.Init s₁ ↔ M₂.Init (equiv.toFun s₁)
+  step_comm : ∀ (s₁ : S₁) (inp : In),
+    M₂.step (equiv.toFun s₁) inp =
+      (M₁.step s₁ inp).map (fun p => (equiv.toFun p.1, p.2))
+  errStep_comm : ∀ (s₁ : S₁) (inp : In),
+    M₂.errStep (equiv.toFun s₁) inp = equiv.toFun (M₁.errStep s₁ inp)
+
+namespace MachineStateEquiv
+
+/-- Symmetric `MachineStateEquiv` (`M₂ ⇄ M₁`). -/
+def symm {S₁ S₂ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out}
+    (E : MachineStateEquiv M₁ M₂) : MachineStateEquiv M₂ M₁ where
+  equiv := SimpleEquiv.symm E.equiv
+  init_iff s₂ := by
+    have h := E.init_iff (E.equiv.invFun s₂)
+    rw [E.equiv.right_inv] at h
+    exact h.symm
+  step_comm s₂ inp := by
+    dsimp only [SimpleEquiv.symm]
+    have h := E.step_comm (E.equiv.invFun s₂) inp
+    rw [E.equiv.right_inv] at h
+    rw [h]
+    cases M₁.step (E.equiv.invFun s₂) inp with
+    | none => rfl
+    | some p =>
+      rcases p with ⟨s₁', out⟩
+      dsimp only [Option.map]
+      rw [E.equiv.left_inv]
+  errStep_comm s₂ inp := by
+    dsimp only [SimpleEquiv.symm]
+    have h := congrArg E.equiv.invFun (E.errStep_comm (E.equiv.invFun s₂) inp)
+    rw [E.equiv.right_inv, E.equiv.left_inv] at h
+    exact h.symm
+
+/-- Forward `Spec.Refines` (`M₁ ⊑ M₂`) induced by a `MachineStateEquiv`. -/
+def toRefines {S₁ S₂ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out}
+    (E : MachineStateEquiv M₁ M₂) : Spec.Refines M₁ M₂ :=
+  Spec.LockstepSim.toRefines
+    { Inv := fun _ => True
+      abs := E.equiv.toFun
+      init_inv := fun {s₀} hInit => ⟨trivial, (E.init_iff s₀).mp hInit⟩
+      step_eq := fun {s₁} inp _ => by
+        have hStep := E.step_comm s₁ inp
+        cases hs : M₁.step s₁ inp with
+        | some pair =>
+          rw [hs] at hStep
+          exact ⟨trivial, hStep⟩
+        | none =>
+          rw [hs] at hStep
+          exact ⟨trivial, hStep, (E.errStep_comm s₁ inp).symm⟩ }
+
+/-- Backward `Spec.Refines` (`M₂ ⊑ M₁`) induced by a `MachineStateEquiv`. -/
+def toRefinesSymm {S₁ S₂ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out}
+    (E : MachineStateEquiv M₁ M₂) : Spec.Refines M₂ M₁ :=
+  E.symm.toRefines
+
+/-- Exact trace-set equivalence (`M₁.AdmitsTrace tr ↔ M₂.AdmitsTrace tr`) across `MachineStateEquiv`. -/
+theorem admitsTrace_iff {S₁ S₂ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out}
+    (E : MachineStateEquiv M₁ M₂) (tr : List (In × Out)) :
+    M₁.AdmitsTrace tr ↔ M₂.AdmitsTrace tr :=
+  ⟨E.toRefines.preserve_admitsTrace, E.toRefinesSymm.preserve_admitsTrace⟩
+
+/-- **Coalgebraic `DataRefines` Repair (`transportDataRefinesLeft`)**:
+    Any interface-abstracting stuttering refinement `Spec.DataRefines M₁ A visIn visOut` repairs
+    automatically along `E : MachineStateEquiv M₁ M₂` to `Spec.DataRefines M₂ A visIn visOut`! -/
+def transportDataRefinesLeft {S₁ S₂ S_a In_c In_a Out_c Out_a : Type}
+    {M₁ : Spec.Machine S₁ In_c Out_c} {M₂ : Spec.Machine S₂ In_c Out_c}
+    {A : Spec.Machine S_a In_a Out_a}
+    {visIn : In_c → Option In_a} {visOut : Out_c → Out_a}
+    (E : MachineStateEquiv M₁ M₂)
+    (D : Spec.DataRefines M₁ A visIn visOut) :
+    Spec.DataRefines M₂ A visIn visOut where
+  Rel s₂ a := D.Rel (E.equiv.invFun s₂) a
+  absInit s₂ := D.absInit (E.equiv.invFun s₂)
+  init_ok {s₂} hInit₂ := by
+    have hInit₁ : M₁.Init (E.equiv.invFun s₂) :=
+      (E.init_iff (E.equiv.invFun s₂)).mpr (by rw [E.equiv.right_inv]; exact hInit₂)
+    exact D.init_ok hInit₁
+  sim_visible {s₂ s₂' a inp out j} hRel hStep₂ hVis := by
+    have hComm := E.symm.step_comm s₂ inp
+    dsimp only [MachineStateEquiv.symm, SimpleEquiv.symm] at hComm
+    rw [hStep₂] at hComm
+    dsimp only [Option.map] at hComm
+    exact D.sim_visible hRel hComm hVis
+  sim_internal {s₂ s₂' a inp out} hRel hStep₂ hNone := by
+    have hComm := E.symm.step_comm s₂ inp
+    dsimp only [MachineStateEquiv.symm, SimpleEquiv.symm] at hComm
+    rw [hStep₂] at hComm
+    dsimp only [Option.map] at hComm
+    exact D.sim_internal hRel hComm hNone
+  sim_reject {s₂ a inp} hRel hNone₂ := by
+    have hComm := E.symm.step_comm s₂ inp
+    dsimp only [MachineStateEquiv.symm, SimpleEquiv.symm] at hComm
+    rw [hNone₂] at hComm
+    dsimp only [Option.map] at hComm
+    have hRej := D.sim_reject hRel hComm
+    have hEqInv : M₁.errStep (E.equiv.invFun s₂) inp = E.equiv.invFun (M₂.errStep s₂ inp) := by
+      have hE := E.symm.errStep_comm s₂ inp
+      dsimp only [MachineStateEquiv.symm, SimpleEquiv.symm] at hE
+      exact hE
+    rw [← hEqInv]
+    exact hRej
+
+/-- View any `Spec.Machine S In Out` as a polynomial coalgebra `Repair.PCoalg (In → Option Out) (fun _ => In) S`
+    via `Machine.runStep`. -/
+def toMealyPCoalg {S In Out : Type} (M : Spec.Machine S In Out) :
+    Repair.PCoalg (In → Option Out) (fun _ => In) S where
+  out s := ⟨fun inp => (M.runStep s inp).2, fun inp => (M.runStep s inp).1⟩
+
+private theorem const_pos_cast {A C In : Type} {a₁ a₂ : A}
+    (f : In → C) (h : a₁ = a₂) (inp : (fun _ : A => In) a₁) :
+    (f (h ▸ inp : (fun _ : A => In) a₂)) = f inp := by
+  subst h
+  rfl
+
+/-- Every `MachineStateEquiv M₁ M₂` induces a coalgebraic bisimulation between `M₁` and `M₂` on
+    the sum carrier `Sum S₁ S₂`. -/
+theorem machineStateEquiv_sum_bisim {S₁ S₂ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out}
+    (E : MachineStateEquiv M₁ M₂) :
+    let sumCoalg : Repair.PCoalg (In → Option Out) (fun _ => In) (Sum S₁ S₂) :=
+      { out := fun
+          | .inl s₁ => ⟨fun i => (M₁.runStep s₁ i).2, fun i => .inl (M₁.runStep s₁ i).1⟩
+          | .inr s₂ => ⟨fun i => (M₂.runStep s₂ i).2, fun i => .inr (M₂.runStep s₂ i).1⟩ }
+    Repair.Bisim (In → Option Out) (fun _ => In) sumCoalg
+      (fun x y => match x, y with | .inl s₁, .inr s₂ => s₂ = E.equiv.toFun s₁ | _, _ => False) := by
+  intro sumCoalg x y hRel
+  cases x with
+  | inr _ => exact False.elim hRel
+  | inl s₁ =>
+    cases y with
+    | inl _ => exact False.elim hRel
+    | inr s₂ =>
+      subst hRel
+      have hShape : sumCoalg.shape (.inl s₁) = sumCoalg.shape (.inr (E.equiv.toFun s₁)) := by
+        funext inp
+        dsimp only [sumCoalg, Repair.PCoalg.shape, Spec.Machine.runStep]
+        rw [E.step_comm s₁ inp]
+        cases M₁.step s₁ inp <;> rfl
+      refine ⟨hShape, fun inp => ?_⟩
+      dsimp only [sumCoalg, Repair.PCoalg.pos]
+      rw [const_pos_cast (fun i => (M₂.runStep (E.equiv.toFun s₁) i).1) hShape inp]
+      dsimp only [Spec.Machine.runStep]
+      rw [E.step_comm s₁ inp, E.errStep_comm s₁ inp]
+      cases M₁.step s₁ inp <;> rfl
+
+end MachineStateEquiv
+
+end Qsag
 
 namespace Qsag.Tactic.AssuranceKit
 open Lean Meta Elab Tactic Command
@@ -52,23 +224,28 @@ private meta def asForwardSimLink? (e : Expr) : MetaM (Option (Expr × Expr × E
       return some (src, dst, fsExpr)
   return none
 
-/-- Coerce a `Spec.Refines` or `Spec.LockstepSim` expression into `(srcMachine, dstMachine, refinesExpr)`. -/
-private meta def asSpecRefinesLink? (e : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
+/-- Coerce `Spec.Refines`, `Spec.LockstepSim`, or `MachineStateEquiv` into `(srcMachine, dstMachine, refinesExpr)`. -/
+private meta def asSpecRefinesLinks (e : Expr) : MetaM (List (Expr × Expr × Expr)) := do
   let ty := stripMData (← instantiateMVars (← inferType e))
   let fn := stripMData ty.getAppFn
   let args := ty.getAppArgs
   if fn.isConstOf ``Qsag.Spec.Refines then
     if let some (src, dst) := lastTwoArgs? args then
-      return some (src, dst, e)
+      return [(src, dst, e)]
   if fn.isConstOf ``Qsag.Spec.LockstepSim then
     if let some (src, dst) := lastTwoArgs? args then
       let refExpr ← mkAppM ``Qsag.Spec.LockstepSim.toRefines #[e]
-      return some (src, dst, refExpr)
-  return none
+      return [(src, dst, refExpr)]
+  if fn.isConstOf ``Qsag.MachineStateEquiv then
+    if let some (src, dst) := lastTwoArgs? args then
+      let fwd ← mkAppM ``Qsag.MachineStateEquiv.toRefines #[e]
+      let bwd ← mkAppM ``Qsag.MachineStateEquiv.toRefinesSymm #[e]
+      return [(src, dst, fwd), (dst, src, bwd)]
+  return []
 
-/-- Structurally recursive DFS search (`0 partial`, `0 Classical.choice`) over simulation links. -/
-private meta def searchSimPath (reflConst transConst : Name) :
-    Nat → Array FVarId → List (FVarId × Expr × Expr × Expr) → Expr → Expr → MetaM (Option Expr)
+/-- Fuel-bounded DFS search over simulation links. -/
+private meta partial def searchSimPath (reflConst transConst : Name) :
+    Nat → Array Nat → List (Nat × Expr × Expr × Expr) → Expr → Expr → MetaM (Option Expr)
   | 0, _, _, curM, endM => do
     if ← withoutModifyingState (isDefEq curM endM) then
       let _ ← isDefEq curM endM
@@ -78,30 +255,21 @@ private meta def searchSimPath (reflConst transConst : Name) :
     if ← withoutModifyingState (isDefEq curM endM) then
       let _ ← isDefEq curM endM
       return some (← mkAppM reflConst #[curM])
-    let rec tryLinks : List (FVarId × Expr × Expr × Expr) → MetaM (Option Expr)
-      | [] => return none
-      | (fid, srcM, dstM, linkExpr) :: rest => do
-        if used.contains fid then
-          tryLinks rest
-        else if ← withoutModifyingState (isDefEq curM srcM) then
+    for (lid, srcM, dstM, linkExpr) in links do
+      if !used.contains lid then
+        if ← withoutModifyingState (isDefEq curM srcM) then
           if ← withoutModifyingState (isDefEq dstM endM) then
             let _ ← isDefEq curM srcM
             let _ ← isDefEq dstM endM
             return some linkExpr
           let tail? ← withoutModifyingState do
             let _ ← isDefEq curM srcM
-            searchSimPath reflConst transConst fuel' (used.push fid) links dstM endM
-          match tail? with
-          | some _ =>
+            searchSimPath reflConst transConst fuel' (used.push lid) links dstM endM
+          if tail?.isSome then
             let _ ← isDefEq curM srcM
-            if let some tailExpr ← searchSimPath reflConst transConst fuel' (used.push fid) links dstM endM then
+            if let some tailExpr ← searchSimPath reflConst transConst fuel' (used.push lid) links dstM endM then
               return some (← mkAppM transConst #[linkExpr, tailExpr])
-            else
-              tryLinks rest
-          | none => tryLinks rest
-        else
-          tryLinks rest
-    tryLinks links
+    return none
 
 syntax "compose_forward_sim" (" [" term,* "]")? : tactic
 
@@ -129,7 +297,9 @@ elab_rules : tactic
         let mut chainExpr? : Option Expr := none
         for t in ts do
           let raw ← Tactic.elabTerm t none
-          let linkOpt ← if isParty then asForwardSimLink? raw else asSpecRefinesLink? raw
+          let linkOpt ←
+            if isParty then asForwardSimLink? raw
+            else pure (← asSpecRefinesLinks raw).head?
           let some (_, _, fsLink) := linkOpt
             | throwErrorAt t "compose_forward_sim: `{t}` is not a compatible simulation link"
           match chainExpr? with
@@ -154,12 +324,18 @@ elab_rules : tactic
         | throwError "compose_forward_sim: malformed simulation target `{tgt}`"
       let reflConst := if isParty then ``Qsag.ForwardSim.refl else ``Qsag.Spec.Refines.refl
       let transConst := if isParty then ``Qsag.ForwardSim.trans else ``Qsag.Spec.Refines.trans
-      let mut links : List (FVarId × Expr × Expr × Expr) := []
+      let mut links : List (Nat × Expr × Expr × Expr) := []
+      let mut nextId : Nat := 0
       for ldecl in ← getLCtx do
         if ldecl.isImplementationDetail then continue
-        let linkOpt ← if isParty then asForwardSimLink? ldecl.toExpr else asSpecRefinesLink? ldecl.toExpr
-        if let some (srcM, dstM, fsExpr) := linkOpt then
-          links := links ++ [(ldecl.fvarId, srcM, dstM, fsExpr)]
+        if isParty then
+          if let some (srcM, dstM, fsExpr) ← asForwardSimLink? ldecl.toExpr then
+            links := links ++ [(nextId, srcM, dstM, fsExpr)]
+            nextId := nextId + 1
+        else
+          for (srcM, dstM, refExpr) in ← asSpecRefinesLinks ldecl.toExpr do
+            links := links ++ [(nextId, srcM, dstM, refExpr)]
+            nextId := nextId + 1
       let some proof ← searchSimPath reflConst transConst (links.length + 1) #[] links startM endM
         | throwError "compose_forward_sim: could not find a simulation path from `{startM}` to `{endM}` in local context"
       unless ← isDefEq (← goal.getType) (← inferType proof) do
@@ -181,18 +357,13 @@ private meta def mirStep : Nat → MVarId → TacticM (List MVarId)
       | skip)) goal
     if rem.isEmpty then return []
     goal.withContext do
-      let rec scanCtx : List LocalDecl → TacticM (Option FVarId)
-        | [] => return none
-        | decl :: rest => do
-          if decl.isImplementationDetail then
-            scanCtx rest
-          else
-            let ty ← whnf decl.type
-            if ty.getAppFn.isConstOf ``Option || ty.getAppFn.isConstOf ``Except then
-              return some decl.fvarId
-            else
-              scanCtx rest
-      if let some fid ← scanCtx (← getLCtx).decls.toList.reduceOption then
+      let mut found? : Option FVarId := none
+      for decl in (← getLCtx).decls.toList.reduceOption do
+        if found?.isNone && !decl.isImplementationDetail then
+          let ty ← whnf decl.type
+          if ty.getAppFn.isConstOf ``Option || ty.getAppFn.isConstOf ``Except then
+            found? := some decl.fvarId
+      if let some fid := found? then
         let cases ← goal.cases fid
         let mut out := []
         for c in cases do
@@ -481,6 +652,25 @@ theorem frameList_inj {α : Type} (c : LawfulFramedCodec α)
   obtain ⟨hSub, hRest⟩ := (c.boundedList).prefix_inj (x := ⟨xs, hx⟩) (y := ⟨ys, hy⟩) h
   exact ⟨congrArg Subtype.val hSub, hRest⟩
 
+theorem frameList_flat_inj {α : Type} (c : LawfulFramedCodec α)
+    {xs ys : List α} {r₁ r₂ : List UInt8}
+    (hx : xs.length < 2 ^ 32) (hy : ys.length < 2 ^ 32)
+    (h : encodeU32BeNat xs.length ++ (xs.flatMap c.encode ++ r₁) =
+         encodeU32BeNat ys.length ++ (ys.flatMap c.encode ++ r₂)) :
+    xs = ys ∧ r₁ = r₂ := by
+  rw [← List.append_assoc, ← List.append_assoc] at h
+  exact frameList_inj c hx hy h
+
+theorem frameList_end_inj {α : Type} (c : LawfulFramedCodec α)
+    {xs ys : List α}
+    (hx : xs.length < 2 ^ 32) (hy : ys.length < 2 ^ 32)
+    (h : encodeU32BeNat xs.length ++ xs.flatMap c.encode =
+         encodeU32BeNat ys.length ++ ys.flatMap c.encode) :
+    xs = ys := by
+  have hApp : (encodeU32BeNat xs.length ++ xs.flatMap c.encode) ++ [] =
+      (encodeU32BeNat ys.length ++ ys.flatMap c.encode) ++ [] := by simpa using h
+  exact (frameList_inj c hx hy hApp).1
+
 end LawfulFramedCodec
 
 end Qsag
@@ -510,6 +700,9 @@ private meta def peelFramedHyp : Nat → Ident → TacticM Unit
     if ← tryRunTactic (← `(tactic| first
         | replace $hId:ident := Qsag.LawfulFramedCodec.encode_injective _ $hId:ident
         | replace $hId:ident := Qsag.FixedCodec.encode_injective _ $hId:ident
+        | replace $hId:ident := Qsag.LawfulFramedCodec.frameList_end_inj _
+            (by first | assumption | decide | omega)
+            (by first | assumption | decide | omega) $hId:ident
         | replace $hId:ident := Qsag.FramedBytesCodec.frameBytes_injective
             (by first | assumption | decide | omega)
             (by first | assumption | decide | omega) $hId:ident)) then
@@ -518,6 +711,10 @@ private meta def peelFramedHyp : Nat → Ident → TacticM Unit
         | (replace $hId:ident := Qsag.LawfulFramedCodec.prefix_inj _ $hId:ident;
            rcases $hId:ident with ⟨_, $hId:ident⟩)
         | (replace $hId:ident := Qsag.FixedCodec.prefix_injective _ $hId:ident;
+           rcases $hId:ident with ⟨_, $hId:ident⟩)
+        | (replace $hId:ident := Qsag.LawfulFramedCodec.frameList_flat_inj _
+             (by first | assumption | decide | omega)
+             (by first | assumption | decide | omega) $hId:ident;
            rcases $hId:ident with ⟨_, $hId:ident⟩)
         | (replace $hId:ident := (Qsag.FramedBytesCodec.prefix_free_injective
              (by first | assumption | decide | omega)
@@ -572,7 +769,7 @@ elab "frame_prefix_inj" h?:(ppSpace colGt ident)? : tactic => do
 
 end Qsag.Tactic.AssuranceKit
 
-/-! ## 5. Regression & Constructive Soundness Checks (`0 Classical.choice`) -/
+/-! ## 5. Regression & Coalgebraic Repair Checks (`0 Classical.choice`) -/
 
 namespace Qsag
 
@@ -596,8 +793,13 @@ def spec_compose_refines_test {S₁ S₂ S₃ In Out : Type}
     (r₁₂ : Spec.Refines M₁ M₂) (r₂₃ : Spec.Refines M₂ M₃) : Spec.Refines M₁ M₃ := by
   compose_refines
 
+def spec_compose_machine_equiv_test {S₁ S₂ S₃ In Out : Type}
+    {M₁ : Spec.Machine S₁ In Out} {M₂ : Spec.Machine S₂ In Out} {M₃ : Spec.Machine S₃ In Out}
+    (e₁₂ : MachineStateEquiv M₁ M₂) (r₂₃ : Spec.Refines M₂ M₃) : Spec.Refines M₁ M₃ := by
+  compose_refines
+
 /-- 4-field mixed fixed-width + variable-length framed transcript message:
-    injectivity collapses to a single `by frame_prefix_inj [hEq]` line! -/
+    injectivity collapses to a single `by frame_prefix_inj hEq` line! -/
 theorem frame_prefix_inj_four_field_exemplar
     (tag₁ tag₂ : List UInt8) (ep₁ ep₂ : UInt64) (role₁ role₂ : UInt8) (msg₁ msg₂ : List UInt8)
     (ht₁ : tag₁.length < 2 ^ 32) (ht₂ : tag₂.length < 2 ^ 32)
@@ -620,9 +822,130 @@ theorem frame_prefix_inj_auto_ctx_exemplar
     d₁ = d₂ ∧ w₁ = w₂ ∧ ep₁ = ep₂ ∧ p₁ = p₂ := by
   frame_prefix_inj
 
+/-- Tagged + count-prefixed variable-length list + fixed-width epoch + trailing payload peeled in 1 line! -/
+theorem frame_prefix_inj_tagged_list_exemplar
+    (c : LawfulFramedCodec UInt64)
+    (xs₁ xs₂ : List UInt64) (ep₁ ep₂ : UInt64) (tail₁ tail₂ : List UInt8)
+    (hx₁ : xs₁.length < 2 ^ 32) (hx₂ : xs₂.length < 2 ^ 32)
+    (ht₁ : tail₁.length < 2 ^ 32) (ht₂ : tail₂.length < 2 ^ 32) :
+    (0x42 : UInt8) :: (encodeU32BeNat xs₁.length ++ xs₁.flatMap c.encode) ++
+        FixedCodec.u64le.encode ep₁ ++ frameBytes tail₁ =
+      (0x42 : UInt8) :: (encodeU32BeNat xs₂.length ++ xs₂.flatMap c.encode) ++
+        FixedCodec.u64le.encode ep₂ ++ frameBytes tail₂ →
+    xs₁ = xs₂ ∧ ep₁ = ep₂ ∧ tail₁ = tail₂ := by
+  frame_prefix_inj
+
+/-! ### Scar-Free Coalgebraic Machine State-Packing Repair Exemplar -/
+
+/-- Retired unpacked `(epoch, spent)` state carrier. -/
+structure RetiredUnpackedCounter where
+  epoch : UInt64
+  spent : UInt64
+
+/-- Packed `BitVec 128` (`spent_hi64 || epoch_lo64`) hardware register state carrier. -/
+structure Packed128Counter where
+  word : BitVec 128
+
+def unpackedCounterMachine (cap : Nat) : Spec.Machine RetiredUnpackedCounter UInt64 UInt64 where
+  Init s := s.epoch = 0 ∧ s.spent = 0
+  step s req :=
+    if s.epoch.toNat + 1 < 2 ^ 64 ∧ s.spent.toNat + req.toNat ≤ cap ∧ cap < 2 ^ 64 then
+      some (⟨UInt64.ofNat (s.epoch.toNat + 1), UInt64.ofNat (s.spent.toNat + req.toNat)⟩,
+            UInt64.ofNat (s.epoch.toNat + 1))
+    else none
+
+def packedCounterEpoch (s : Packed128Counter) : UInt64 :=
+  UInt64.ofNat (s.word.toNat % 2 ^ 64)
+
+def packedCounterSpent (s : Packed128Counter) : UInt64 :=
+  UInt64.ofNat (s.word.toNat / 2 ^ 64)
+
+def mkPackedCounter (ep sp : UInt64) : Packed128Counter :=
+  ⟨BitVec.ofNat 128 (sp.toNat * 2 ^ 64 + ep.toNat)⟩
+
+def packedCounterMachine (cap : Nat) : Spec.Machine Packed128Counter UInt64 UInt64 where
+  Init s := s = mkPackedCounter 0 0
+  step s req :=
+    let ep := packedCounterEpoch s
+    let sp := packedCounterSpent s
+    if ep.toNat + 1 < 2 ^ 64 ∧ sp.toNat + req.toNat ≤ cap ∧ cap < 2 ^ 64 then
+      some (mkPackedCounter (UInt64.ofNat (ep.toNat + 1)) (UInt64.ofNat (sp.toNat + req.toNat)),
+            UInt64.ofNat (ep.toNat + 1))
+    else none
+
+private theorem packed_epoch_mk (ep sp : UInt64) :
+    packedCounterEpoch (mkPackedCounter ep sp) = ep := by
+  have hep : ep.toNat < 2 ^ 64 := ep.toNat_lt
+  have hsp : sp.toNat < 2 ^ 64 := sp.toNat_lt
+  have h128 : sp.toNat * 2 ^ 64 + ep.toNat < 2 ^ 128 := by omega
+  unfold packedCounterEpoch mkPackedCounter
+  dsimp only
+  rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h128]
+  have hMod : (sp.toNat * 2 ^ 64 + ep.toNat) % 2 ^ 64 = ep.toNat := by omega
+  rw [hMod]
+  exact UInt64.ofNat_toNat
+
+private theorem packed_spent_mk (ep sp : UInt64) :
+    packedCounterSpent (mkPackedCounter ep sp) = sp := by
+  have hep : ep.toNat < 2 ^ 64 := ep.toNat_lt
+  have hsp : sp.toNat < 2 ^ 64 := sp.toNat_lt
+  have h128 : sp.toNat * 2 ^ 64 + ep.toNat < 2 ^ 128 := by omega
+  unfold packedCounterSpent mkPackedCounter
+  dsimp only
+  rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h128]
+  have hDiv : (sp.toNat * 2 ^ 64 + ep.toNat) / 2 ^ 64 = sp.toNat := by omega
+  rw [hDiv]
+  exact UInt64.ofNat_toNat
+
+private theorem mk_packed_eta (s : Packed128Counter) :
+    mkPackedCounter (packedCounterEpoch s) (packedCounterSpent s) = s := by
+  cases s with
+  | mk w =>
+    have hw : w.toNat < 2 ^ 128 := w.isLt
+    apply congrArg Packed128Counter.mk
+    apply BitVec.eq_of_toNat_eq
+    unfold packedCounterEpoch packedCounterSpent
+    dsimp only
+    have hModLt : w.toNat % 2 ^ 64 < 2 ^ 64 := by omega
+    have hDivLt : w.toNat / 2 ^ 64 < 2 ^ 64 := by omega
+    rw [BitVec.toNat_ofNat, UInt64.toNat_ofNat', UInt64.toNat_ofNat',
+        Nat.mod_eq_of_lt hModLt, Nat.mod_eq_of_lt hDivLt]
+    omega
+
+def unpackedToPackedCounterEquiv (cap : Nat) :
+    MachineStateEquiv (unpackedCounterMachine cap) (packedCounterMachine cap) where
+  equiv :=
+    { toFun := fun s => mkPackedCounter s.epoch s.spent
+      invFun := fun p => ⟨packedCounterEpoch p, packedCounterSpent p⟩
+      left_inv := fun ⟨ep, sp⟩ => by rw [packed_epoch_mk, packed_spent_mk]
+      right_inv := mk_packed_eta }
+  init_iff s := by
+    rcases s with ⟨ep, sp⟩
+    dsimp only [unpackedCounterMachine, packedCounterMachine]
+    constructor
+    · rintro ⟨rfl, rfl⟩; rfl
+    · intro h
+      have h1 := congrArg packedCounterEpoch h
+      have h2 := congrArg packedCounterSpent h
+      rw [packed_epoch_mk, packed_epoch_mk] at h1
+      rw [packed_spent_mk, packed_spent_mk] at h2
+      exact ⟨h1, h2⟩
+  step_comm s req := by
+    dsimp only [unpackedCounterMachine, packedCounterMachine]
+    rw [packed_epoch_mk, packed_spent_mk]
+    by_cases hCond : s.epoch.toNat + 1 < 2 ^ 64 ∧ s.spent.toNat + req.toNat ≤ cap ∧ cap < 2 ^ 64
+    · simp only [hCond, and_self, ↓reduceIte]; rfl
+    · simp only [hCond, ↓reduceIte]; rfl
+  errStep_comm _ _ := rfl
+
+-- `packedCounterMachine` is 100% scar-free with respect to `RetiredUnpackedCounter`!
+#assert_no_scar RetiredUnpackedCounter in packedCounterMachine
+
 #verify_constructive
   mir_option_test
   mir_except_test
+  MachineStateEquiv.admitsTrace_iff
+  MachineStateEquiv.machineStateEquiv_sum_bisim
   DataRefinement.digest256Bytes32_injective
   Rel1.comp
   Rel1.map_option
@@ -631,8 +954,11 @@ theorem frame_prefix_inj_auto_ctx_exemplar
   LawfulFramedCodec.framePair_inj
   LawfulFramedCodec.tagged_disjoint
   LawfulFramedCodec.frameList_inj
+  LawfulFramedCodec.frameList_flat_inj
+  LawfulFramedCodec.frameList_end_inj
   frame_prefix_inj_four_field_exemplar
   frame_prefix_inj_auto_ctx_exemplar
+  frame_prefix_inj_tagged_list_exemplar
 
 end Qsag
 end
