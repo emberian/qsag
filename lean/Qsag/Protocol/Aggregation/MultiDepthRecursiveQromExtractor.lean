@@ -600,3 +600,593 @@ private theorem foldr_bounded_le_scale {n m : Nat} (ε : RatBound) (nodeBad : Na
        ALL `2^d` leaf shards**, and
     2. Across all tapes `ω : Fin n`, the extraction-failure probability is bounded **strictly additively**
        by `(2^{d+1} - 1) · ε_step + ε_qromColl` — **ZERO `2^d` rewinding blowup on `Q`!** -/
+theorem multidepth_recursive_qrom_extractor_sound {params : IvcWhirParams} {nVal n nC nA : Nat}
+    (env : SuccinctIvcEnv params nVal) (hDep : IsDeployedAggProfile env.profile)
+    (d Q : Nat) (hPos : 0 < n) (π : Spec.CoinSplit n nC nA)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes)
+    (runProver : (Spec.Bytes → Spec.Bytes) → Nat → Fin nA →
+      (IvcTreeStatement × FixedShapeWhirProof params) × QromQueryTranscript)
+    (nodeBadAt : Nat → Fin n → Bool)
+    (ε_step ε_qromColl : RatBound)
+    (hNodeCover : ∀ (ω : Fin n) (idx lvl : Nat) (sN : IvcTreeStatement)
+        (pN : FixedShapeWhirProof params),
+      let H := oracle (π.chal ω)
+      let run := runProver H Q (π.advc ω)
+      idx < treeNodeCount d → lvl ≤ d →
+      ivcStepNodeBad env H run.2 lvl sN pN = true →
+      nodeBadAt idx ω = true)
+    (hStepBound : ∀ k, k < treeNodeCount d →
+      Spec.GameBound (Spec.FinGame.mk hPos (nodeBadAt k)).winProb (toSpecRatBound ε_step))
+    (hCollBound :
+      Spec.GameBound
+        (Spec.FinGame.mk hPos (fun ω =>
+          hasQueryCollision (runProver (oracle (π.chal ω)) Q (π.advc ω)).2)).winProb
+        (toSpecRatBound ε_qromColl)) :
+    let failEvent : Fin n → Bool := fun ω =>
+      let H := oracle (π.chal ω)
+      let run := runProver H Q (π.advc ω)
+      verifySuccinctIvcRoot env H d run.1.1 run.1.2 &&
+      match extractMultiDepthQrom env H d run.2 run.1.1 run.1.2 with
+      | some shards =>
+        !(decide (shards.length = 2 ^ d ∧
+            shards.map ExtractedLeafShard.shardId = List.range' run.1.1.lo (2 ^ d) ∧
+            (shards.map ExtractedLeafShard.quorumCount).sum = run.1.1.totalQuorums) &&
+          shards.all (fun sh =>
+            decide (0 < sh.quorumCount ∧ sh.threshold ≤ Composed.weight sh.stmt.bitmap ∧
+              sh.stmt.message = run.1.1.message) &&
+            (List.finRange nVal).all (fun i =>
+              !sh.stmt.bitmap.getLsbD i.val || ((sh.stmt.roster i).profile == env.profile)) &&
+            stepOp256TableOk env.profile (succinctCommitteeSlots sh.stmt) sh.rows))
+      | none => true
+    let totalBound := RatBound.add (RatBound.scale (2 ^ (d + 1) - 1) ε_step) ε_qromColl
+    (∀ ω : Fin n, failEvent ω = false →
+      let H := oracle (π.chal ω)
+      let run := runProver H Q (π.advc ω)
+      verifySuccinctIvcRoot env H d run.1.1 run.1.2 = true →
+      ∃ shards : List (ExtractedLeafShard nVal),
+        extractMultiDepthQrom env H d run.2 run.1.1 run.1.2 = some shards ∧
+        shards.length = 2 ^ d ∧
+        shards.map ExtractedLeafShard.shardId = List.range' run.1.1.lo (2 ^ d) ∧
+        (shards.map ExtractedLeafShard.quorumCount).sum = run.1.1.totalQuorums ∧
+        ∀ shard ∈ shards,
+          ValidQuorumSignatures env.profile run.1.1.policyRegistryRoot run.1.1.message shard) ∧
+    Spec.GameBound (Spec.FinGame.mk hPos failEvent).winProb (toSpecRatBound totalBound) := by
+  intro failEvent totalBound
+  refine ⟨fun ω hFailFalse hVer => ?_, ?_⟩
+  · dsimp only [failEvent] at hFailFalse
+    let H := oracle (π.chal ω)
+    let run := runProver H Q (π.advc ω)
+    change (verifySuccinctIvcRoot env H d run.1.1 run.1.2 && _) = false at hFailFalse
+    rw [hVer, Bool.true_and] at hFailFalse
+    cases hEx : extractMultiDepthQrom env H d run.2 run.1.1 run.1.2 with
+    | none => rw [hEx] at hFailFalse; cases hFailFalse
+    | some shards =>
+      rw [hEx] at hFailFalse
+      dsimp only at hFailFalse
+      rw [Bool.not_eq_false', Bool.and_eq_true] at hFailFalse
+      have hMeta := of_decide_eq_true hFailFalse.1
+      have hAllShards := hFailFalse.2
+      refine ⟨shards, rfl, hMeta.1, hMeta.2.1, hMeta.2.2, fun sh hMem => ?_⟩
+      have hShOk := List.all_eq_true.mp hAllShards sh hMem
+      rw [Bool.and_eq_true, Bool.and_eq_true] at hShOk
+      obtain ⟨⟨hShDec, hProf⟩, hTbl⟩ := hShOk
+      obtain ⟨hPosQ, hWtQ, hMsgQ⟩ := of_decide_eq_true hShDec
+      exact ⟨hPosQ, hWtQ, hMsgQ, hProf, hTbl,
+        stepOp256TableOk_bothProfiles_extract env.profile hDep sh.stmt sh.rows hProf hTbl, rfl⟩
+  · let anyNode : Fin n → Bool := fun ω => (List.range (treeNodeCount d)).any (fun k => nodeBadAt k ω)
+    let collEv : Fin n → Bool := fun ω =>
+      hasQueryCollision (runProver (oracle (π.chal ω)) Q (π.advc ω)).2
+    have hCover : ∀ ω : Fin n, failEvent ω = true → anyNode ω = true ∨ collEv ω = true := by
+      intro ω hF
+      cases hColl : collEv ω with
+      | true => exact .inr rfl
+      | false =>
+        left
+        dsimp only [failEvent] at hF
+        let H := oracle (π.chal ω)
+        let run := runProver H Q (π.advc ω)
+        rw [Bool.and_eq_true] at hF
+        obtain ⟨hVer, hBadOut⟩ := hF
+        rcases extractMultiDepthQrom_inductive_sound env hDep H run.2 hColl d run.1.1 run.1.2 hVer with
+          ⟨shards, hEx, hLen, hIds, hSum, hVal⟩ | ⟨idx, lvl, sN, pN, hIdxLt, hLvl, hNodeB⟩
+        · exfalso
+          rw [hEx] at hBadOut
+          dsimp only at hBadOut
+          have hAllTrue :
+              (decide (shards.length = 2 ^ d ∧
+                shards.map ExtractedLeafShard.shardId = List.range' run.1.1.lo (2 ^ d) ∧
+                (shards.map ExtractedLeafShard.quorumCount).sum = run.1.1.totalQuorums) &&
+              shards.all (fun sh =>
+                decide (0 < sh.quorumCount ∧ sh.threshold ≤ Composed.weight sh.stmt.bitmap ∧
+                  sh.stmt.message = run.1.1.message) &&
+                (List.finRange nVal).all (fun i =>
+                  !sh.stmt.bitmap.getLsbD i.val || ((sh.stmt.roster i).profile == env.profile)) &&
+                stepOp256TableOk env.profile (succinctCommitteeSlots sh.stmt) sh.rows)) = true := by
+            rw [Bool.and_eq_true]
+            refine ⟨decide_eq_true ⟨hLen, hIds, hSum⟩, List.all_eq_true.mpr (fun sh hMem => ?_)⟩
+            obtain ⟨h1, h2, h3, h4, h5, _, _⟩ := hVal sh hMem
+            rw [Bool.and_eq_true, Bool.and_eq_true]
+            exact ⟨⟨decide_eq_true ⟨h1, h2, h3⟩, h4⟩, h5⟩
+          rw [hAllTrue] at hBadOut; cases hBadOut
+        · exact List.any_eq_true.mpr ⟨idx, List.mem_range.mpr hIdxLt,
+            hNodeCover ω idx lvl sN pN hIdxLt hLvl hNodeB⟩
+    have hUnion := Spec.event_le_two_reductions
+      (Spec.FinGame.mk hPos failEvent)
+      (Spec.FinGame.mk hPos anyNode)
+      (Spec.FinGame.mk hPos collEv) hCover
+    have hAnyLe : Spec.GameBound (Spec.FinGame.mk hPos anyNode).winProb
+        (toSpecRatBound (RatBound.scale (2 ^ (d + 1) - 1) ε_step)) := by
+      show Spec.sampleSum n (fun ω => if anyNode ω then 1 else 0) * ε_step.den ≤
+        ((2 ^ (d + 1) - 1) * ε_step.num) * n
+      have h1 := Nat.mul_le_mul_right ε_step.den (sampleSum_any_fin_le (treeNodeCount d) nodeBadAt)
+      have h2 := foldr_bounded_le_scale ε_step nodeBadAt hStepBound (treeNodeCount d) (Nat.le_refl _)
+      exact Nat.le_trans h1 h2
+    refine Spec.GameBound.trans hUnion ?_
+    exact Spec.RatBound.add_le_add hAnyLe hCollBound
+
+/-! ## §5. Arbitrary-Depth `Spec.IdealAggregate` Refinement, `EUF-CMA` Reduction & `< 2^{-128}` Corollary -/
+
+/-- **Arbitrary-Depth `d` Refinement of `Spec.IdealAggregate` (`multidepth_recursive_refines_idealAggregate`):**
+    1. Every shard `sh ∈ shards` extracted by `extractMultiDepthQrom` at arbitrary depth `d : Nat`
+       yields a `Spec.ValidAggregateWitness` for `Spec.idealAggregateMachine`, and
+    2. `Spec.verifiedAggregateMachine` over depth-`d` recursive root proofs simulates
+       `Spec.idealAggregateMachine` via `Spec.DataRefines` (`AdmitsTrace` preservation)! -/
+theorem multidepth_recursive_refines_idealAggregate {params : IvcWhirParams} {nVal : Nat}
+    (env : SuccinctIvcEnv params nVal) (hDep : IsDeployedAggProfile env.profile)
+    (H : Spec.Bytes → Spec.Bytes) (d : Nat)
+    (T : QromQueryTranscript) (stmt : IvcTreeStatement)
+    (rootProof : FixedShapeWhirProof params)
+    (shards : List (ExtractedLeafShard nVal))
+    (hEx : extractMultiDepthQrom env H d T stmt rootProof = some shards) :
+    (∀ sh ∈ shards,
+      Spec.ValidAggregateWitness (verifyAggNativeSig (profileGeom env.profile)) sh.stmt
+        (fun i => some (extractSlotNativeSig env.profile sh.rows i.val))) ∧
+    (∀ (verifyRootAgg : (Spec.Bytes → Spec.Bytes) →
+          Spec.AggregateStatement AggValidatorPk nVal → FixedShapeWhirProof params → Bool)
+       (extractRootAgg : QromQueryTranscript →
+          Spec.AggregateStatement AggValidatorPk nVal → FixedShapeWhirProof params →
+          Fin nVal → Option AggNativeSignature)
+       (trace : List (Spec.AggregateSubmission AggValidatorPk (FixedShapeWhirProof params) nVal × Unit)),
+      (Spec.verifiedAggregateMachine
+        (verifyAggNativeSig (profileGeom env.profile)) verifyRootAgg extractRootAgg H).AdmitsTrace trace →
+      (Spec.idealAggregateMachine (verifyAggNativeSig (profileGeom env.profile))).AdmitsTrace
+        (Spec.projectTrace (Spec.verifiedAggregateVisIn extractRootAgg) id trace)) := by
+  have hEachValid : ∀ (lvl : Nat) (s0 : IvcTreeStatement) (p0 : FixedShapeWhirProof params)
+      (out : List (ExtractedLeafShard nVal)),
+      extractMultiDepthQrom env H lvl T s0 p0 = some out →
+      ∀ sh ∈ out,
+        (List.finRange nVal).all (fun i =>
+          !sh.stmt.bitmap.getLsbD i.val || ((sh.stmt.roster i).profile == env.profile)) = true ∧
+        stepOp256TableOk env.profile (succinctCommitteeSlots sh.stmt) sh.rows = true := by
+    intro lvl; induction lvl with
+    | zero =>
+      intro s0 p0 out hOut sh hMem
+      unfold extractMultiDepthQrom at hOut
+      cases hV : verifySuccinctIvcRoot env H 0 s0 p0 <;> rw [hV] at hOut
+      · cases hOut
+      · cases hL : env.lookupNodeWitness T p0.stage0Nonce p0.stage0Root <;> rw [hL] at hOut
+        · cases hOut
+        · rename_i w; cases w with
+          | parent _ _ _ _ => cases hOut
+          | leaf shard =>
+            dsimp only at hOut
+            cases hg : leafNodeCheck env.profile s0 shard <;> rw [hg] at hOut
+            · cases hOut
+            · injection hOut with hEq; subst hEq
+              rcases List.mem_singleton.mp hMem with rfl
+              unfold leafNodeCheck at hg; rw [Bool.and_eq_true, Bool.and_eq_true] at hg
+              exact ⟨hg.1.2, hg.2⟩
+    | succ k ih =>
+      intro s0 p0 out hOut sh hMem
+      unfold extractMultiDepthQrom at hOut
+      cases hV : verifySuccinctIvcRoot env H (k + 1) s0 p0 <;> rw [hV] at hOut
+      · cases hOut
+      · cases hL : env.lookupNodeWitness T p0.stage0Nonce p0.stage0Root <;> rw [hL] at hOut
+        · cases hOut
+        · rename_i w; cases w with
+          | leaf _ => cases hOut
+          | parent sL sR pL pR =>
+            dsimp only at hOut
+            cases hg : parentStitchCheck env H k s0 sL sR pL pR <;> rw [hg] at hOut
+            · cases hOut
+            · cases heL : extractMultiDepthQrom env H k T sL pL <;> rw [heL] at hOut
+              · cases hOut
+              · cases heR : extractMultiDepthQrom env H k T sR pR <;> rw [heR] at hOut
+                · cases hOut
+                · injection hOut with hEq; subst hEq
+                  rcases List.mem_append.mp hMem with hmL | hmR
+                  · exact ih sL pL _ heL sh hmL
+                  · exact ih sR pR _ heR sh hmR
+  refine ⟨fun sh hMem => ?_, fun verifyRootAgg extractRootAgg _ hAdmits =>
+    (Spec.verifiedAggregate_dataRefines_ideal _ verifyRootAgg extractRootAgg H).preserve_admitsTrace hAdmits⟩
+  obtain ⟨hProf, hTbl⟩ := hEachValid d stmt rootProof shards hEx sh hMem
+  exact stepOp256TableOk_bothProfiles_extract env.profile hDep sh.stmt sh.rows hProf hTbl
+
+/-- **Arbitrary-Depth `d` Reduction to Leaf `EUF-CMA` (`multidepth_recursive_euf_cma_reduction`):**
+    If a depth-`d` succinct recursive root proof is accepted (`verifySuccinctIvcRoot = true`), then
+    EITHER QROM collision occurs on `T` (`hasQueryCollision T = true`), OR one of the `2^{d+1} - 1`
+    tree nodes hits `ivcStepNodeBad`, OR for **every** extracted leaf shard `sh ∈ shards` and **every**
+    active validator `v` in `sh`, either `v`'s quorum participated OR a single-signer leaf `EUF-CMA`
+    forgery (`Composed.QuorumForgery`) is constructively extracted! -/
+theorem multidepth_recursive_euf_cma_reduction {params : IvcWhirParams} {nVal : Nat}
+    (env : SuccinctIvcEnv params nVal) (hDep : IsDeployedAggProfile env.profile)
+    (H : Spec.Bytes → Spec.Bytes) (T : QromQueryTranscript)
+    (d : Nat) (stmt : IvcTreeStatement) (rootProof : FixedShapeWhirProof params)
+    (custodyOf : Nat → Fin nVal → Composed.Custody)
+    (hAcc : verifySuccinctIvcRoot env H d stmt rootProof = true) :
+    hasQueryCollision T = true ∨
+    (∃ (nodeIdx lvl : Nat) (sN : IvcTreeStatement) (pN : FixedShapeWhirProof params),
+      nodeIdx < treeNodeCount d ∧ lvl ≤ d ∧ ivcStepNodeBad env H T lvl sN pN = true) ∨
+    (∃ shards : List (ExtractedLeafShard nVal),
+      extractMultiDepthQrom env H d T stmt rootProof = some shards ∧
+      shards.length = 2 ^ d ∧
+      ∀ sh ∈ shards,
+        (∀ v : Fin nVal, sh.stmt.roster v = (custodyOf sh.shardId v).state.pk) →
+        ∀ v : Fin nVal, sh.stmt.bitmap.getLsbD v.val = true →
+          Composed.QuorumForgery (profileGeom env.profile) (custodyOf sh.shardId v) stmt.message ∨
+          Composed.quorumParticipated (custodyOf sh.shardId v) stmt.message = true) := by
+  cases hColl : hasQueryCollision T with
+  | true => exact .inl rfl
+  | false =>
+    rcases extractMultiDepthQrom_inductive_sound env hDep H T hColl d stmt rootProof hAcc with
+      ⟨shards, hEx, hLen, _, _, hVal⟩ | hBad
+    · right; right
+      refine ⟨shards, hEx, hLen, fun sh hMem hRoster v hAct => ?_⟩
+      obtain ⟨_, _, hMsg, _, _, hWit, _⟩ := hVal sh hMem
+      obtain ⟨sig, _, hSigVer⟩ := (Spec.ValidAggregateWitness_iff _ _ _).mp hWit v hAct
+      rw [hRoster v, hMsg] at hSigVer
+      cases hq : Composed.quorumParticipated (custodyOf sh.shardId v) stmt.message with
+      | false => exact .inl ⟨sig, hSigVer, hq⟩
+      | true => exact .inr rfl
+    · exact .inr (.inl hBad)
+
+/-- **Concrete Deployment-Scale `< 2^{-128}` Multi-Depth Corollary (`multidepth_recursive_qrom_lt_2_neg_128`):**
+    For ALL recursion depths `d ≤ 16` (`≤ 65,536` regional leaf shards, `≤ 131,071` tree nodes!)
+    and ALL quantum oracle query budgets `Q ≤ 2^{64}`, across BOTH 448-bit `Poseidon2-GL-w24` and
+    400-bit `TurboSHAKE256` QROM commitments, the additive `(2^{d+1} - 1)`-node tree error under BOTH
+    `zkHemV2RecursiveMarginSched` AND `zkHemV2Uncond128Sched` is **strictly `< 2^{-128}`** (`⟨1, 2 ^ 128, by decide⟩`)! -/
+theorem multidepth_recursive_qrom_lt_2_neg_128
+    (prof : WhirCommitmentProfile) {d Q : Nat} (hd : d ≤ 16) (hQ : Q ≤ 2 ^ 64) :
+    RatBound.lt
+      (RatBound.add
+        (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2RecursiveMarginSched Q))
+        (merkleProfileQromBound prof Q))
+      ⟨1, 2 ^ 128, by decide⟩ ∧
+    RatBound.lt
+      (RatBound.add
+        (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2Uncond128Sched Q))
+        (merkleProfileQromBound prof Q))
+      ⟨1, 2 ^ 128, by decide⟩ :=
+  ⟨zkHemV2RecursiveMargin_tree_lt_128 prof hd hQ,
+   zkHemV2Uncond128_tree_qrom_lt_128_at_2pow64 prof hd hQ⟩
+
+/-! ## §6. Depth-2 (`4`-Shard, `7`-Node) `#verify_inhabited` Witness, Active-XMSS Completeness & `#tooth_pair` -/
+
+/-- Minimal fixed-shape IVC parameters (`earlyStopVars = 0`, 1 stage, `376` wire bytes) for concrete tests. -/
+def auditIvcParams : IvcWhirParams :=
+  ⟨4, 0, [⟨0, 5, 1, 1, 0⟩]⟩
+
+def mkAuditRoot (idTag : Fin 256) : Poseidon2Gl24.Digest7 :=
+  ⟨⟨idTag.val, Nat.lt_trans idTag.isLt (by decide)⟩, Goldilocks.zero, Goldilocks.zero,
+   Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+
+def ivcTestMsg : Spec.Bytes := [0x51, 0x53, 0x41, 0x47]
+
+def mkAuditFixedProof (idTag : Fin 256) : FixedShapeWhirProof auditIvcParams :=
+  { stage0Nonce := 0#256
+    stages := [⟨mkAuditRoot idTag, List.replicate 25 Goldilocks.zero, [],
+                [Goldilocks.zero], []⟩]
+    maskClaimWords := List.replicate 5 Goldilocks.zero
+    finalCoeffWords := List.replicate 15 Goldilocks.zero }
+
+theorem mkAuditFixedProof_wellFormed (idTag : Fin 256) :
+    (mkAuditFixedProof idTag).wellFormed = true := by
+  unfold mkAuditFixedProof FixedShapeWhirProof.wellFormed stagesFit auditIvcParams
+  rfl
+
+/-- Mutated digest-only recursive verifier (`#tooth` target): internal nodes (`d + 1`) check ONLY
+    public interval/quorum bounds and child header digests, omitting in-circuit child WHIR verification! -/
+def verifyDigestOnlyRecursion {params : IvcWhirParams} {nVal : Nat}
+    (lookup : QromQueryTranscript → BitVec 256 → Poseidon2Gl24.Digest7 →
+      Option (CommittedIvcNodeWitness params nVal)) :
+    Nat → QromQueryTranscript → IvcTreeStatement → FixedShapeWhirProof params → Bool
+  | 0, _, stmt, pi =>
+    pi.wellFormed && decide (stmt.hi = stmt.lo + 1 ∧ 0 < stmt.totalQuorums)
+  | d + 1, T, stmt, pi =>
+    pi.wellFormed && decide (stmt.hi = stmt.lo + 2 ^ (d + 1) ∧ 0 < stmt.totalQuorums) &&
+    match lookup T pi.stage0Nonce pi.stage0Root with
+    | some (.parent sL sR _ _) =>
+      decide (sL.lo = stmt.lo ∧ sL.hi = stmt.lo + 2 ^ d ∧ sL.hi = sR.lo ∧ sR.hi = stmt.hi ∧
+        stmt.totalQuorums = sL.totalQuorums + sR.totalQuorums)
+    | _ => false
+
+def digestOnlyForgedEnv : SuccinctIvcEnv auditIvcParams 1 :=
+  { profile := .xmssPoseidon2
+    whirStepAccepts := fun _ d _ pi =>
+      if d = 0 then false else decide (pi.stage0Root.d0.val = 100)
+    lookupNodeWitness := fun _ _ rt =>
+      if rt.d0.val == 100 then
+        some (.parent ⟨[], 0, 0, 2, 2, ivcTestMsg⟩ ⟨[], 0, 2, 4, 2, ivcTestMsg⟩
+          (mkAuditFixedProof 10) (mkAuditFixedProof 20))
+      else none }
+
+/-- **`#tooth` Digest-Only Recursion Forges Depth-2 Root Proof With `0` Valid Leaf Signatures
+    (`tooth_digestOnly_recursion_forges_without_child_verifier`):**
+    If internal nodes check ONLY child header interval/quorum stitches without running the child WHIR
+    verifier constraints in-circuit, `verifyDigestOnlyRecursion` accepts (`≠ false`) while
+    `extractMultiDepthQrom` recovers `0` leaf signatures (`isSome ≠ true`)! -/
+theorem tooth_digestOnly_recursion_forges_without_child_verifier :
+    ¬ (verifyDigestOnlyRecursion digestOnlyForgedEnv.lookupNodeWitness 2 []
+        ⟨[], 0, 0, 4, 4, ivcTestMsg⟩ (mkAuditFixedProof 100) = false ∨
+      (extractMultiDepthQrom digestOnlyForgedEnv (fun b => b) 2 []
+        ⟨[], 0, 0, 4, 4, ivcTestMsg⟩ (mkAuditFixedProof 100)).isSome = true) := by
+  decide +kernel
+
+/-- Build a 2-level (`d = 2`, `4`-shard, `7`-node) honest witness lookup table parameterized by
+    `(threshold, bitmap, pk, msg, rows)`. -/
+def mkHonestDepth2Env (threshold : Nat) (bitmap : BitVec 1)
+    (pk : AggValidatorPk) (msg : Spec.Bytes) (rows : List StepOpRow) :
+    SuccinctIvcEnv auditIvcParams 1 :=
+  let leafStmt (k : Nat) : IvcTreeStatement := ⟨[], 0, k, k + 1, 1, msg⟩
+  let midL : IvcTreeStatement := ⟨[], 0, 0, 2, 2, msg⟩
+  let midR : IvcTreeStatement := ⟨[], 0, 2, 4, 2, msg⟩
+  let mkLeaf (k : Nat) : ExtractedLeafShard 1 :=
+    ⟨k, threshold, 1, ⟨fun _ => pk, bitmap, msg⟩, rows⟩
+  { profile := .xmssPoseidon2
+    whirStepAccepts := fun _ _ _ _ => true
+    lookupNodeWitness := fun _ _ rt =>
+      if rt.d0.val == 100 then
+        some (.parent midL midR (mkAuditFixedProof 10) (mkAuditFixedProof 20))
+      else if rt.d0.val == 10 then
+        some (.parent (leafStmt 0) (leafStmt 1) (mkAuditFixedProof 0) (mkAuditFixedProof 1))
+      else if rt.d0.val == 20 then
+        some (.parent (leafStmt 2) (leafStmt 3) (mkAuditFixedProof 2) (mkAuditFixedProof 3))
+      else if rt.d0.val == 0 then some (.leaf (mkLeaf 0))
+      else if rt.d0.val == 1 then some (.leaf (mkLeaf 1))
+      else if rt.d0.val == 2 then some (.leaf (mkLeaf 2))
+      else if rt.d0.val == 3 then some (.leaf (mkLeaf 3))
+      else none }
+
+private theorem mkHonestDepth2Env_verify_ok (threshold : Nat) (bitmap : BitVec 1)
+    (pk : AggValidatorPk) (msg : Spec.Bytes) (rows : List StepOpRow)
+    (d lo hi q : Nat) (tag : Fin 256) (hHi : hi = lo + 2 ^ d) (hQ : 0 < q) :
+    verifySuccinctIvcRoot (mkHonestDepth2Env threshold bitmap pk msg rows)
+      (fun b => b) d ⟨[], 0, lo, hi, q, msg⟩ (mkAuditFixedProof tag) = true := by
+  unfold verifySuccinctIvcRoot mkHonestDepth2Env
+  dsimp only
+  rw [mkAuditFixedProof_wellFormed tag, decide_eq_true hHi, decide_eq_true hQ]
+  rfl
+
+/-- Shared 2-level (`d = 2`, `4`-shard) tree evaluation lemma for both inactive and active `StepOp256` leaves. -/
+private theorem mkHonestDepth2Env_extracts (threshold : Nat) (bitmap : BitVec 1)
+    (pk : AggValidatorPk) (msg : Spec.Bytes) (rows : List StepOpRow)
+    (hThr : threshold ≤ Composed.weight bitmap)
+    (hProf : (List.finRange 1).all (fun i =>
+      !bitmap.getLsbD i.val || (pk.profile == .xmssPoseidon2)) = true)
+    (hTable : stepOp256TableOk .xmssPoseidon2
+      (succinctCommitteeSlots (⟨fun _ => pk, bitmap, msg⟩ :
+        Spec.AggregateStatement AggValidatorPk 1)) rows = true) :
+    let env := mkHonestDepth2Env threshold bitmap pk msg rows
+    let mkSh (k : Nat) : ExtractedLeafShard 1 := ⟨k, threshold, 1, ⟨fun _ => pk, bitmap, msg⟩, rows⟩
+    verifySuccinctIvcRoot env (fun b => b) 2 ⟨[], 0, 0, 4, 4, msg⟩ (mkAuditFixedProof 100) = true ∧
+    extractMultiDepthQrom env (fun b => b) 2 [] ⟨[], 0, 0, 4, 4, msg⟩ (mkAuditFixedProof 100) =
+      some [mkSh 0, mkSh 1, mkSh 2, mkSh 3] := by
+  intro env mkSh
+  have hVLeaf (k : Nat) (tag : Fin 256) :
+      verifySuccinctIvcRoot env (fun b => b) 0 ⟨[], 0, k, k + 1, 1, msg⟩
+        (mkAuditFixedProof tag) = true :=
+    mkHonestDepth2Env_verify_ok threshold bitmap pk msg rows 0 k (k + 1) 1 tag rfl Nat.one_pos
+  have hOneLeaf (k : Nat) (tag : Fin 256)
+      (hL0 : env.lookupNodeWitness [] (mkAuditFixedProof tag).stage0Nonce
+        (mkAuditFixedProof tag).stage0Root = some (.leaf (mkSh k))) :
+      extractMultiDepthQrom env (fun b => b) 0 [] ⟨[], 0, k, k + 1, 1, msg⟩
+        (mkAuditFixedProof tag) = some [mkSh k] := by
+    unfold extractMultiDepthQrom leafNodeCheck
+    rw [hVLeaf k tag, hL0]
+    dsimp only [mkSh]
+    have hEnvP : env.profile = .xmssPoseidon2 := rfl
+    have hD1 : decide (k = k ∧ k + 1 = k + 1 ∧ 1 = 1 ∧ 0 < 1 ∧
+        threshold ≤ Composed.weight bitmap ∧ msg = msg) = true :=
+      decide_eq_true ⟨rfl, rfl, rfl, Nat.one_pos, hThr, rfl⟩
+    rw [hD1, hEnvP, hProf, hTable]; rfl
+  have hVMidL : verifySuccinctIvcRoot env (fun b => b) 1 ⟨[], 0, 0, 2, 2, msg⟩
+      (mkAuditFixedProof 10) = true :=
+    mkHonestDepth2Env_verify_ok threshold bitmap pk msg rows 1 0 2 2 10 rfl (by decide)
+  have hVMidR : verifySuccinctIvcRoot env (fun b => b) 1 ⟨[], 0, 2, 4, 2, msg⟩
+      (mkAuditFixedProof 20) = true :=
+    mkHonestDepth2Env_verify_ok threshold bitmap pk msg rows 1 2 4 2 20 rfl (by decide)
+  have hMidL : extractMultiDepthQrom env (fun b => b) 1 [] ⟨[], 0, 0, 2, 2, msg⟩
+      (mkAuditFixedProof 10) = some [mkSh 0, mkSh 1] := by
+    unfold extractMultiDepthQrom
+    rw [hVMidL]
+    have hL1 : env.lookupNodeWitness [] (mkAuditFixedProof 10).stage0Nonce
+        (mkAuditFixedProof 10).stage0Root =
+        some (.parent ⟨[], 0, 0, 1, 1, msg⟩ ⟨[], 0, 1, 2, 1, msg⟩
+          (mkAuditFixedProof 0) (mkAuditFixedProof 1)) := rfl
+    have hG1 : parentStitchCheck env (fun b => b) 0 ⟨[], 0, 0, 2, 2, msg⟩
+        ⟨[], 0, 0, 1, 1, msg⟩ ⟨[], 0, 1, 2, 1, msg⟩
+        (mkAuditFixedProof 0) (mkAuditFixedProof 1) = true := by
+      unfold parentStitchCheck
+      rw [hVLeaf 0 0, hVLeaf 1 1, Bool.and_true, Bool.and_true]
+      exact decide_eq_true ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    rw [hL1]; dsimp only; rw [hG1]
+    rw [hOneLeaf 0 0 rfl, hOneLeaf 1 1 rfl]; rfl
+  have hMidR : extractMultiDepthQrom env (fun b => b) 1 [] ⟨[], 0, 2, 4, 2, msg⟩
+      (mkAuditFixedProof 20) = some [mkSh 2, mkSh 3] := by
+    unfold extractMultiDepthQrom
+    rw [hVMidR]
+    have hL1 : env.lookupNodeWitness [] (mkAuditFixedProof 20).stage0Nonce
+        (mkAuditFixedProof 20).stage0Root =
+        some (.parent ⟨[], 0, 2, 3, 1, msg⟩ ⟨[], 0, 3, 4, 1, msg⟩
+          (mkAuditFixedProof 2) (mkAuditFixedProof 3)) := rfl
+    have hG1 : parentStitchCheck env (fun b => b) 0 ⟨[], 0, 2, 4, 2, msg⟩
+        ⟨[], 0, 2, 3, 1, msg⟩ ⟨[], 0, 3, 4, 1, msg⟩
+        (mkAuditFixedProof 2) (mkAuditFixedProof 3) = true := by
+      unfold parentStitchCheck
+      rw [hVLeaf 2 2, hVLeaf 3 3, Bool.and_true, Bool.and_true]
+      exact decide_eq_true ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+    rw [hL1]; dsimp only; rw [hG1]
+    rw [hOneLeaf 2 2 rfl, hOneLeaf 3 3 rfl]; rfl
+  have hRootVer : verifySuccinctIvcRoot env (fun b => b) 2 ⟨[], 0, 0, 4, 4, msg⟩
+      (mkAuditFixedProof 100) = true :=
+    mkHonestDepth2Env_verify_ok threshold bitmap pk msg rows 2 0 4 4 100 rfl (by decide)
+  refine ⟨hRootVer, ?_⟩
+  unfold extractMultiDepthQrom
+  rw [hRootVer]
+  have hL2 : env.lookupNodeWitness [] (mkAuditFixedProof 100).stage0Nonce
+      (mkAuditFixedProof 100).stage0Root =
+      some (.parent ⟨[], 0, 0, 2, 2, msg⟩ ⟨[], 0, 2, 4, 2, msg⟩
+        (mkAuditFixedProof 10) (mkAuditFixedProof 20)) := rfl
+  have hG2 : parentStitchCheck env (fun b => b) 1 ⟨[], 0, 0, 4, 4, msg⟩
+      ⟨[], 0, 0, 2, 2, msg⟩ ⟨[], 0, 2, 4, 2, msg⟩
+      (mkAuditFixedProof 10) (mkAuditFixedProof 20) = true := by
+    unfold parentStitchCheck
+    rw [hVMidL, hVMidR, Bool.and_true, Bool.and_true]
+    exact decide_eq_true ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  rw [hL2]; dsimp only; rw [hG2]
+  rw [hMidL, hMidR]; rfl
+
+/-- **Non-Vacuous Depth-2 (`d = 2`, `4` Leaf Shards, `7` Tree Nodes) Honest Inhabitedness Witness
+    (`inhabited_multidepth_d2_four_shards_accepts_and_extracts`):**
+    Constructs a closed 0-premise 2-level, 4-shard (`2^2 = 4`) recursive IVC tree where ONLY a single
+    constant-size `FixedShapeWhirProof` (`376` bytes, identical byte length at `d = 0` and `d = 2`!)
+    is verified at the root and `extractMultiDepthQrom` extracts all `4` contiguous shards `[0, 1, 2, 3]`! -/
+theorem inhabited_multidepth_d2_four_shards_accepts_and_extracts :
+    ∃ (env : SuccinctIvcEnv auditIvcParams 1)
+      (T : QromQueryTranscript)
+      (d : Nat)
+      (rootStmt : IvcTreeStatement)
+      (rootProof : FixedShapeWhirProof auditIvcParams)
+      (shards : List (ExtractedLeafShard 1)),
+      IsDeployedAggProfile env.profile ∧
+      hasQueryCollision T = false ∧
+      rootProof.wellFormed = true ∧
+      encodedByteLen rootProof = auditIvcParams.openingByteLen ∧
+      verifySuccinctIvcRoot env (fun b => b) d rootStmt rootProof = true ∧
+      extractMultiDepthQrom env (fun b => b) d T rootStmt rootProof = some shards ∧
+      shards.length = 4 ∧
+      shards.map ExtractedLeafShard.shardId = [0, 1, 2, 3] ∧
+      (shards.map ExtractedLeafShard.quorumCount).sum = 4 := by
+  let pk0 : AggValidatorPk := ⟨.xmssPoseidon2, auditPkSeed, auditPkSeed⟩
+  let rows0 : List StepOpRow := List.replicate (1 * stepOpRowsPerSigner .xmssPoseidon2) stepInactiveRow
+  have hSlots : succinctCommitteeSlots (⟨fun _ => pk0, 0#1, ivcTestMsg⟩ :
+      Spec.AggregateStatement AggValidatorPk 1) = List.replicate 1 none := by
+    have hFin1 : List.finRange 1 = [⟨0, by decide⟩] := by decide
+    have hBit0 : (0#1 : BitVec 1).getLsbD 0 = false := by decide
+    unfold succinctCommitteeSlots; rw [hFin1]; dsimp only [List.map]; rw [hBit0]; rfl
+  have hTable : stepOp256TableOk .xmssPoseidon2
+      (succinctCommitteeSlots (⟨fun _ => pk0, 0#1, ivcTestMsg⟩ :
+        Spec.AggregateStatement AggValidatorPk 1)) rows0 = true := by
+    rw [hSlots]; exact stepInactiveCommittee_table .xmssPoseidon2 1 (by decide)
+  obtain ⟨hVer, hEx⟩ := mkHonestDepth2Env_extracts 0 0#1 pk0 ivcTestMsg rows0
+    (Nat.zero_le _) (by decide) hTable
+  exact ⟨_, [], 2, ⟨[], 0, 0, 4, 4, ivcTestMsg⟩, mkAuditFixedProof 100, _,
+    .inl rfl, rfl, mkAuditFixedProof_wellFormed 100,
+    wellFormed_encodedByteLen (mkAuditFixedProof 100) (mkAuditFixedProof_wellFormed 100),
+    hVer, hEx, rfl, rfl, rfl⟩
+
+/-- Inhabitedness witness specifically matching `ivcRootProof_byteSize_independent_of_depth`. -/
+theorem inhabited_ivcRootProof_byteSize :
+    ∃ (d₁ d₂ : Nat)
+      (r₁ : SuccinctIvcRootProof auditIvcParams d₁)
+      (r₂ : SuccinctIvcRootProof auditIvcParams d₂),
+      r₁.rootProof.wellFormed = true ∧ r₂.rootProof.wellFormed = true ∧
+      encodedByteLen r₁.rootProof = encodedByteLen r₂.rootProof :=
+  ⟨0, 16, ⟨mkAuditFixedProof 0⟩, ⟨mkAuditFixedProof 100⟩,
+   mkAuditFixedProof_wellFormed 0, mkAuditFixedProof_wellFormed 100, rfl⟩
+
+/-- Inhabitedness witness specifically matching `multidepth_recursive_qrom_lt_2_neg_128`. -/
+theorem inhabited_multidepth_lt_128 :
+    ∃ (prof : WhirCommitmentProfile) (d Q : Nat),
+      d ≤ 16 ∧ Q ≤ 2 ^ 64 ∧ 0 < (merkleProfileQromBound prof Q).den :=
+  ⟨.poseidon2Gl24, 16, 2 ^ 64, Nat.le_refl _, Nat.le_refl _,
+   (merkleProfileQromBound .poseidon2Gl24 (2 ^ 64)).h_pos⟩
+
+/-- **Active-Signer (`1#1`, `threshold = 1`) Depth-2 `XMSS-Poseidon2` Tree Completeness
+    (`multidepth_d2_active_xmss_completeness`):**
+    Given valid XMSS signing counters `ctrs`, constructs a depth-2 (`4`-shard) recursive tree where
+    every shard has `threshold = 1`, `bitmap = 1#1`, `Composed.weight (1#1) = 1`, and a real 512-row
+    `stepXmssRows` execution trace whose extracted signatures all pass `verifyAggNativeSig xmssPoseidon2Geom`! -/
+theorem multidepth_d2_active_xmss_completeness
+    (ctrs : ValidSigningCtrs xmssPoseidon2Geom auditSkSeed
+      (deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed)
+      auditMsg auditRRand 0) :
+    let pk := deriveAggPublicKey xmssPoseidon2Geom auditSkSeed auditPkSeed
+    let sig := signAggNative xmssPoseidon2Geom auditSkSeed pk
+      auditMsg auditRRand 0 ctrs.layer0Ctr ctrs.upperCtrs
+    let rows := stepXmssRows pk (computeMessageMu pk auditMsg) sig
+    let env := mkHonestDepth2Env 1 1#1 pk auditMsg rows
+    verifySuccinctIvcRoot env (fun b => b) 2 ⟨[], 0, 0, 4, 4, auditMsg⟩ (mkAuditFixedProof 100) = true ∧
+    ∃ shards : List (ExtractedLeafShard 1),
+      extractMultiDepthQrom env (fun b => b) 2 [] ⟨[], 0, 0, 4, 4, auditMsg⟩ (mkAuditFixedProof 100) = some shards ∧
+      shards.length = 4 ∧
+      ∀ sh ∈ shards,
+        sh.threshold = 1 ∧
+        verifyAggNativeSig xmssPoseidon2Geom pk auditMsg
+          (extractSlotNativeSig .xmssPoseidon2 sh.rows 0) = true := by
+  intro pk sig rows env
+  have hVerSig : verifyAggNativeSig xmssPoseidon2Geom pk auditMsg sig = true :=
+    (inhabited_aggNativeSig_euf_cma_pipeline.2.2.2 ctrs).1
+  have hPkProf : pk.profile = .xmssPoseidon2 := stepXmssNative_profile pk auditMsg sig hVerSig
+  have hSlots : succinctCommitteeSlots (⟨fun _ => pk, 1#1, auditMsg⟩ :
+      Spec.AggregateStatement AggValidatorPk 1) = [some (pk, computeMessageMu pk auditMsg)] := by
+    have hFin1 : List.finRange 1 = [⟨0, by decide⟩] := by decide
+    have hBit1 : (1#1 : BitVec 1).getLsbD 0 = true := by decide
+    unfold succinctCommitteeSlots; rw [hFin1]; dsimp only [List.map]; rw [hBit1]; rfl
+  have hTable : stepOp256TableOk .xmssPoseidon2
+      (succinctCommitteeSlots (⟨fun _ => pk, 1#1, auditMsg⟩ :
+        Spec.AggregateStatement AggValidatorPk 1)) rows = true := by
+    rw [hSlots]; exact stepXmssRows_of_verify pk auditMsg sig hVerSig
+  have hProf : (List.finRange 1).all (fun i =>
+      !(1#1 : BitVec 1).getLsbD i.val || (pk.profile == .xmssPoseidon2)) = true := by
+    have hFin1 : List.finRange 1 = [⟨0, by decide⟩] := by decide
+    rw [hFin1]; simp [hPkProf]
+  obtain ⟨hVer, hEx⟩ := mkHonestDepth2Env_extracts 1 1#1 pk auditMsg rows (by decide) hProf hTable
+  have hRoundTrip := stepXmssRows_roundTrip pk auditMsg sig hVerSig
+  refine ⟨hVer, _, hEx, rfl, fun sh hMem => ?_⟩
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hMem
+  rcases hMem with rfl | rfl | rfl | rfl <;> exact ⟨rfl, hRoundTrip⟩
+
+#verify_constructive
+  Qsag.MultiDepthQrom.goldilocksToBytesLE_length
+  Qsag.MultiDepthQrom.wellFormed_encodedByteLen
+  Qsag.MultiDepthQrom.ivcRootProof_byteSize_independent_of_depth
+  Qsag.MultiDepthQrom.tooth_unbounded_proof_violates_constant_openingByteLen
+  Qsag.MultiDepthQrom.poseidon2W24_twoChildStep_fits_2pow20_rows
+  Qsag.MultiDepthQrom.tooth_poseidon2_w12_twoChildStep_exceeds_2pow20_rows
+  Qsag.MultiDepthQrom.hasQueryCollision_sound
+  Qsag.MultiDepthQrom.treeNodeCount_zero
+  Qsag.MultiDepthQrom.treeNodeCount_succ
+  Qsag.MultiDepthQrom.extractMultiDepthQrom_inductive_sound
+  Qsag.MultiDepthQrom.multidepth_recursive_qrom_extractor_sound
+  Qsag.MultiDepthQrom.multidepth_recursive_refines_idealAggregate
+  Qsag.MultiDepthQrom.multidepth_recursive_euf_cma_reduction
+  Qsag.MultiDepthQrom.multidepth_recursive_qrom_lt_2_neg_128
+  Qsag.MultiDepthQrom.tooth_digestOnly_recursion_forges_without_child_verifier
+  Qsag.MultiDepthQrom.inhabited_multidepth_d2_four_shards_accepts_and_extracts
+  Qsag.MultiDepthQrom.inhabited_ivcRootProof_byteSize
+  Qsag.MultiDepthQrom.inhabited_multidepth_lt_128
+  Qsag.MultiDepthQrom.multidepth_d2_active_xmss_completeness
+
+#verify_inhabited
+  Qsag.MultiDepthQrom.ivcRootProof_byteSize_independent_of_depth
+  Qsag.MultiDepthQrom.inhabited_ivcRootProof_byteSize
+#verify_inhabited
+  Qsag.MultiDepthQrom.extractMultiDepthQrom_inductive_sound
+  Qsag.MultiDepthQrom.inhabited_multidepth_d2_four_shards_accepts_and_extracts
+#verify_inhabited
+  Qsag.MultiDepthQrom.multidepth_recursive_refines_idealAggregate
+  Qsag.MultiDepthQrom.inhabited_multidepth_d2_four_shards_accepts_and_extracts
+#verify_inhabited
+  Qsag.MultiDepthQrom.multidepth_recursive_qrom_lt_2_neg_128
+  Qsag.MultiDepthQrom.inhabited_multidepth_lt_128
+
+#tooth_pair Qsag.MultiDepthQrom.ivcRootProof_byteSize_independent_of_depth vs
+  Qsag.MultiDepthQrom.tooth_unbounded_proof_violates_constant_openingByteLen
+#tooth_pair Qsag.MultiDepthQrom.poseidon2W24_twoChildStep_fits_2pow20_rows vs
+  Qsag.MultiDepthQrom.tooth_poseidon2_w12_twoChildStep_exceeds_2pow20_rows
+#tooth_pair Qsag.MultiDepthQrom.extractMultiDepthQrom_inductive_sound vs
+  Qsag.MultiDepthQrom.tooth_digestOnly_recursion_forges_without_child_verifier
+
+end Qsag.MultiDepthQrom
+end
