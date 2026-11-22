@@ -605,35 +605,121 @@ challenges). A Poseidon2 profile needs a node function for two seven-limb childr
 permutations, or a wider permutation) and a rate-5 sponge, in software, in the recursion
 gadgets and in every Poseidon2 canopy unit; none of that is designed here.
 
-### V2.11 Lookups and virtual product rows (constraint-system features; not implemented)
+### V2.11 Single-prover LogUp and virtual product rows
 
-**Lookups.** The argument to port is `dregg-sig`'s (`crates/agg/src/zk_hem/protocol.rs`,
-module section "Lookups", steps L1 to L4: logUp with committed helpers,
-`logup-2022-1530` Lemma 5). **[open] Porting assessment, not a v2 lookup theorem:**
+**Checked fractions and poles.** In `v2/protocol.rs`, `gamma` compresses the
+tuple (including its table tag), and `alpha` selects the pole. For a checked
+entry let `v_i = sum_j gamma^j D_j[i] z` and `n_i = N[i] z`. The helper
+is `h_i = n_i / (alpha - v_i)`. The prover checks the product of *all*
+checked denominators in the extension field before its one batch inversion.
+A zero product returns `LookupPoleHit` before the helper commitment. In a
+satisfying witness, every queried tuple occurs in the public table. All table
+rows are checked, including rows of multiplicity zero. Thus the pole set is
+exactly the set of compressed public table rows, augmented by zero if there
+are checked padding rows. The simulator can reproduce this abort given only
+the relation and challenges. Its probability is at most `(T+1)/|E|`.
 
-- *Second commitment.* The helper table `H` is committed after `gamma, alpha`, so it is a
-  second Stage-0 commitment `(H, R_H)` with its own blinders, five mask points and mask line,
-  opened by a second run of rounds 7 to 13. Fresh independent blinders and masks allow
-  V2.2--V2.4 to simulate each opening conditional on its claimed functional and values.
-  They do not prove that the joint lookup front end is simulated: `H` depends on the first
-  witness and the lookup challenges. That conditional front-end proof, pole handling and
-  an explicit helper kernel avoiding its blinders are required before applying V2.Z.
-- *Limbs and masking entries.* `h` has five limb tables, not four (5 cells per fraction; v1
-  paid 20 with companions). The values `(n, v, h)(rl)` revealed in L3 are three elements of
-  `E`, so five masking entries are needed where the v1-field design has four, with the
-  basis condition on the lookup point. A count alone is not a rank proof for the three
-  correlated values; the masking rows and their joint map must be specified.
-- *Soundness candidates.* Substitution of `|E| = p^5` into the proposed accounting gives
-  `(w - 1) L T l_0 / |E|` (`gamma`), `(L + 2T + 1) l_0 / |E|` (`alpha`),
-  `max(d, 5) l_0 l_0' / |E|` (lookup sumcheck), and Theorem V2.1 once more for the helper
-  opening at its own size. These formulas require checking the port's polynomial identities
-  and lists. `L,T <= 2^24` alone does not imply 264.4 bits: the first numerator also depends
-  on tuple width `w` and list size `l_0`. All such parameters, helper layout and extra rounds
-  must enter a new calculator before a security level is assigned.
-- *Cost estimate.* One more root, proposed `5 d + 8` field elements, and a second opening.
-  Its size depends on the helper layout; the previous 330 KB estimate is not a bound.
-  This is a cost of this proposed construction, not a lower bound for every hash-based
-  lookup scheme. Batching fractions may reduce the helper table and its opening geometry.
+**Joint lookup evaluations.** The last eight entries lie outside the checked
+prefix. The first five have independent uniform base cells `a_j` in the
+numerator and `b_j` in denominator column zero. All higher tuple columns
+on these rows vanish. The helper samples an independent extension cell on
+each of the eight entries. Write `u_j = eq(rl[0..3],j)` and let `k` denote
+the product of the remaining corner coordinates. The implementation checks
+that the five limb columns of the `u_j` have nonzero determinant over the
+base field. Hence `A = sum_j u_j a_j` and `B = sum_j u_j b_j` are independent
+uniform elements of `E`. Hold seven helper pads fixed and vary the first,
+`C`. Conditional on these pads and the checked rows, the three disclosures
+are a translation of `diag(k,k,k*u_0) (A,B,C)`. Both prover and replay
+check its extension-field determinant before accepting the disclosures.
+This supplies rank 15 over the base field even though the checked helper is
+a nonlinear function of the witness. The extra rank abort probability is
+bounded by `15/p + (d-3)/|E|` using the basis determinant witness of V2.1;
+basis independence already implies `u_0 != 0`.
+
+**Front simulator.** Fix a satisfying witness and verifier coins, treating
+commitments as opaque oracle handles. For a non-pole `alpha`, the rational
+identity gives zero initial unmasked claim. Conditional on every entry of
+`n,v,h`, sample the lookup mask sum uniformly in `E`. Each degree-four
+lookup round is uniform subject to the endpoint sum specified by the
+running claim. Indeed the four nonconstant coefficients in round `i`
+receive independent fresh offsets scaled by the nonzero
+`rho * 2^(d-i-1)`. Conditioning on the initial sum fixes one combination
+of constant coefficients with coefficient `2^d`. The endpoint condition
+then fixes that round's constant term. This also describes every prefix
+before a rank abort. Thus observing all the masked rounds gives no
+information about the corner pads. On the good event sample the final
+triple uniformly, and compute the terminal mask value from the public gate
+and the running claim. The row pads in V2.Z occupy disjoint assignment
+cells. Its row and column mask argument applies conditionally, with the
+two extra matrix terms for the lookup numerator and compressed tuple in
+the column claim.
+
+**Both openings.** The helper claim batches the mask sum, terminal mask
+evaluation and `h(rl)` with weights `1, eta, eta²`. Its cell weights read
+only the five limb columns and the lookup-mask blocks ending at
+`5*2^d + 8*5*d`. The layout places that end at or below `N_H-b_H`.
+The transpose subset transform sums only over supersets, so its monomial
+kernel also vanishes on every helper blinder. The functional on lower cells
+surjects onto `E`. For `eta != 0`, vary the five limbs of any helper entry
+with nonzero equality weight (their weights sum to one). At `eta = 0`,
+vary a constant mask coefficient, scaled by `2^d`. The main functional
+retains the row-mask surjection in V2.Z. A simulator can therefore choose
+lower tables satisfying the two public scalar claims independently. After
+fixing **both** lower tables and the complete front, each commitment still
+has independent top blinders and an independent mask polynomial. Apply
+V2.2–V2.4 first to the assignment opening and then conditional on it to the
+helper opening. This couples all opened symbols, fold messages and subsequent
+oracles jointly on good coins. Each abort prefix has the same law by the
+same argument stopped at the first failed public check.
+
+For hashed commitments use the unopened-leaf coupling of V2.4 with the
+tree nonce of V2.12. A batch of `P` single-prover lookup proofs has `2P`
+Stage-0 trees. Use that count in the leaf-guessing and nonce-collision
+bounds, and add the secret-seed and Fiat–Shamir hybrids of V2.2 and V2.5.
+Exact equality is in the interactive ideal-oracle model. The compiled
+classical result uses a programmable random oracle; the quantum
+Fiat–Shamir simulation remains open. The calculator checks each tree's
+blinder budget separately. The constructive regression
+`coupled_lookup_front_for_distinct_witnesses` translates the two sets of
+pads and sumcheck coefficients to identical disclosures, solves the
+observed Stage-0 blinding systems on a small PCS schedule, and exercises
+the mask-line and unopened-label couplings for both trees.
+
+**Round-by-round soundness.** Let `L,T,w,d` be the query count, public table
+row count, tuple width including tag, and lookup cube dimension. Write
+`l_0,l_0'` for the two Stage-0 word list sizes. For each inconsistent first
+list word choose a tuple with nonzero net residue. For its residue to
+disappear on compression it must collide with another distinct tuple, among
+at most `L+T-1 <= L*T` alternatives when both counts are positive. Each
+difference polynomial has degree at most `w-1`. Multiplying the nonzero
+compressed rational sum by its distinct linear factors gives a nonzero
+numerator of degree at most `L+T-1`. At a query pole the local equation
+with numerator one fails. Table poles and the possible padding pole add at
+most `T+1` exceptional challenges. These counts give the conservative
+numerators below. The rational identity uses the characteristic bound
+`L < p` for lookup membership. [LogUp, Lemma 5](https://eprint.iacr.org/2022/1530)
+
+| Round | Error upper bound |
+| --- | --- |
+| Tuple compression | `(w-1) L T l_0 / |E|` |
+| Pole and rational identity | `(L+2T+1) l_0 / |E|` |
+| Lookup algebraic rounds | `max(d,5) l_0 l_0' / |E|` |
+
+For an unused registered table (`L=0`), the calculator keeps `T-1` in place
+of `L*T` to cover inconsistent auxiliary multiplicities. For a fixed pair of
+list words, a false local identity on the Boolean cube has a multilinear
+equality-weight test of total degree at most `d`. The subsequent scalar
+batch has degree one, each sumcheck variable has degree at most four in
+`sel * (h + lambda * eq * (h*(alpha-v)-n))`, and the final three-claim
+batch has degree two. The degree-five envelope covers these individual
+rounds. Verifier mask evaluation also has degree four for arbitrary helper
+cells: the lower four subset-sum cells define degrees zero through three,
+and cell four minus cell zero is the quartic coefficient. Unused higher
+subset-sum cells have zero weight in both the sum and point functionals.
+Both sparse and dense helper kernels use these weights. The lookup layout
+transcript includes this kernel revision; earlier lookup proof bytes require
+the earlier verifier. `report_with_lookup` additionally accounts for the
+helper PCS, its queries and digests, and the extra protocol rounds.
 
 **Virtual product rows.** The proposal (`zkhem-frontier.md` 5.3): commit only the bits of
 the SHA-2 state words; `Sigma`, `Ch`, `Maj` outputs are products that are never committed,
@@ -677,6 +763,44 @@ statement, every SHA-2 and RIPEMD-160 gadget and the witness generator. The savi
 times fewer committed cells for SHA-512 in the frontier measurement) is on top of v2 and
 does not itself require a different challenge field or digest, but its masks, layout and
 opening composition must be designed and analysed before assigning the v2 guarantees.
+
+### V2.12 Wave E9 Upgrades: DKT26 (`2026/2056`) Soundness, Per-Tree Nonce, LogUp Lookups, Split-Share Opening, and `v1` Hiding Retirement
+
+Implemented in `src/zk_hem/v2/{bounds,hash,params,pcs,protocol}.rs` and `src/zk_hem/protocol.rs`:
+
+1. **DKT26 (`eprint 2026/2056`) Proximity-Gap Upgrade (`v2/bounds.rs`, `v2/params.rs`):**
+   - Replaces the quadratic-in-block-length `[BCGM25]` Lemma 9.3 error on the `beta_R` mask line
+     with **Dao–Kominers–Thaler (`2026/2056`) Theorem 5.12** (two-element line generator inside
+     the Johnson radius: linear in `|D'| = 4N / 2^s` rather than `|D'|^2`).
+   - Lifts the `zk-Hem v2` cell-table ceiling from `N <= 2^24` to **`N <= 2^28`** (`MAX_LOG_CELLS = 28`)
+     while reducing Stage-0 queries across `2^16..=2^28` cells from `281..342` to **`267`** (`2^16..=2^23`)
+     and **`266`** (`2^24..=2^28`, `STAGE0_QUERIES`), exceeding the 128-bit QROM target at every supported
+     domain size.
+   - Also exposes the **DKT26 beyond-Johnson** calculator (`dkt26_beyond_johnson_first_order`,
+     Proposition 5.10 + Lemma 5.6 + Corollary 7.8, first-order list-2 regime giving `209..220` Stage-0
+     queries while keeping `MCA > 265` bits), verified by exact integer/rational cross-checks in
+     `v2::bounds::tests`.
+2. **Per-Tree 256-bit `tree_nonce` Eliminating `delta_salt` (`v2/hash.rs`, `v2/pcs.rs`):**
+   - Every Stage-0 commitment samples an independent 32-byte `tree_nonce` absorbed into every
+     Stage-0 leaf hash (`hash_stage0_leaf` / `hash_stage0_leaf_with_nonce`) and serialized in
+     `Opening` / `SplitOpening` (`32 + 50 = 82` bytes per Stage-0 commitment).
+   - Because two proofs (or two custodian share trees in a `ZkHemV2SplitProof`) collide in domain
+     prefix only if their 256-bit `tree_nonce`s collide, the cross-proof multi-leaf birthday term drops
+     from `H * binom(P, 2) / 2^256` (which scaled with `H = |D'| = 2^(l - s + 2)`) to
+     **`binom(P, 2) / 2^256`**, independent of table size (`hiding_bound` in `v2/bounds.rs`).
+3. **LogUp `LookupV2Proof` & Split-Share `ZkHemV2SplitProof` (`QSAGZKS2`) (`v2/protocol.rs`, `v2/pcs.rs`):**
+   - Implements the committed-helper LogUp argument over `F_{p^5}` (`5` helper limbs, `5` masking
+     entries in an `8`-entry corner, degree-4 lookup sumcheck, and a second Stage-0 `(H, R_H)`
+     commitment + opening, accounted in `report_with_lookup` and `max_proof_bytes`).
+   - Implements `ZkHemV2SplitProof` (`QSAGZKS2`) and `pcs::open_from_reduced_split` / `verify_split`
+     over `c in 1..=255` additive Stage-0 share trees (`Z = sum_p Z^(p)`, `R = sum_p R^(p)`), where
+     even one honest custodian's uniform blinders, `R^(p)`, `tree_nonce`, and 256-bit leaf salts
+     statistically mask the reconstructed joint view.
+4. **Retirement of `zk-Hem v1` Hiding (`src/zk_hem/protocol.rs`):**
+   - All hiding proof paths (`blind_vc`, `multisig`, `capability`, `full_shard`, `recursive`, and
+     `qsag-migrate` single-party + threshold `collab` + Zcash relations) now run exclusively on
+     `zk-Hem v2`. Only the non-hiding public PCS / hologram batch verification entry points remain in
+     `src/zk_hem/protocol.rs`.
 
 ## 0. Verdicts
 
@@ -1400,6 +1524,33 @@ introduced in this change.
 | `src/lib.rs`, `src/arithmetize.rs`, `AFFINE_PROTOCOL.md`, profile-policy descriptions | Replaced generic QROM-128-floor language with the actual acceptance policy. |
 | `src/sponge.rs`, `keccak_p1600_12` | Removed unsupported implication of composed WHIR QROM security from the permutation description. |
 
+
+### Registered capability presentation privacy
+
+`CapabilityRelation` discloses a scoped pseudonym for each token and
+caller-supplied context. A verifier holding candidate capabilities can
+recompute those tags. `UnlinkableCapabilityRelation` compiles a separate
+registered-capability shape with exactly 92 public field elements and wire
+magic `QSAGCAU1`. Its public vector ends with the digest of a framed
+verifier identity, scope and challenge nonce. The full context also enters
+the Fiat–Shamir statement. The directory path still binds the final tag
+and caveat count, the revocation interval is authenticated, and the circuit
+checks request predicates and distinctness across the batch.
+
+For any two eligible candidate batches with the same public request,
+directory, revocation snapshot and geometry, V2.Z gives the same simulated
+view. This holds when the observer knows both candidates, including their
+paths. For multiple adaptively chosen challenges in the classical
+programmable ROM, replace each fresh-seed proof by the simulator for
+its public statement in sequence. Both choices reach the same hybrid,
+including when verifiers pool the transcripts. Distinguishing advantage
+is bounded by the two real-to-simulated hybrid losses of V2.2, V2.4 and
+V2.5. Different eligibility, public metadata or the choice to present can
+reveal information outside this game. The concrete ledger governs
+acceptance independently of token identity: proof verification precedes
+consumption of the issued nonce under the same framed verifier and scope.
+The in-memory ledger has the same lifetime and single-process semantics as
+BlindVC. Offline WOTS+C delegation continues to use its scoped presentation.
 
 ### 9.4 Validation commands of the earlier audit
 
