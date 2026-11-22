@@ -51,6 +51,7 @@ Threshold Jorts custody ceremonies:
     JortsPoseidon2 keys & signatures directly aggregatable by untrusted `qsag aggregate`!
 
 subcommands:
+  wire     run one isolated CNF custodian over TCP (qsag quorum wire --help)
   keygen   enroll a quorum custody vault (--vault-dir) and write --public-out
   sign     threshold-sign one monotone leaf epoch across the active quorum
   reanchor-tpm  move a jorts-2of3 quorum that was enrolled on one shared TPM2 NV counter
@@ -661,6 +662,7 @@ pub fn run(raw: &[String]) -> Result<(), CliError> {
             print!("{QUORUM_HELP}");
             Ok(())
         }
+        "wire" => crate::quorum_wire::run(rest),
         "keygen" => keygen(rest),
         "sign" => sign(rest),
         "reanchor-tpm" => reanchor_tpm(rest),

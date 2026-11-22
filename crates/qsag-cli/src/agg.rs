@@ -7,6 +7,7 @@ use qsag_agg::{
     ValidatorPublicKey, ValidatorSignature, aggregate_signatures, compute_committee_root,
     merge_aggregates, verify_aggregate, verify_individual_signature,
 };
+use qsag_agg::{HemQuinticProfile, HemQuinticProof, prove_hem_quintic_128, verify_hem_quintic_128};
 use qsag_core::ceremony_journal::{CeremonyContext, CeremonyReservation, FsCeremonyJournal};
 use std::collections::HashMap;
 
@@ -18,6 +19,7 @@ use crate::codec::{Json, from_hex_exact};
 use crate::keys::{PUBLIC_FORMAT, SECRET_FORMAT, derive, derive_secret, load_json, scheme_of};
 use crate::schemes::Scheme;
 
+const QUINTIC_FORMAT: &str = "qsag-hem-quintic-proof-v2";
 pub const PROOF_FORMAT: &str = "qsag-aggregate-proof-v1";
 
 /// Deterministic validator keypair `index` of a committee seed.
@@ -274,7 +276,10 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
             if let Some(scheme_str) = scheme
                 && !matches!(
                     scheme_str,
-                    crate::quorum_hem::HEM_SCHEME_NAME | "agg-jorts-poseidon2" | "jorts-poseidon2"
+                    crate::quorum_hem::HEM_SCHEME_NAME
+                        | "agg-jorts-poseidon2"
+                        | "jorts-poseidon2"
+                        | "corduroy-poseidon2"
                 )
             {
                 return Err(CliError::input(format!(
@@ -306,16 +311,23 @@ pub fn load_public_validators(spec: &str) -> Result<Vec<ValidatorPublicKey>, Cli
     Ok(out)
 }
 
-/// Load a standalone `JortsPoseidon2` signature from raw canonical bytes or a JSON signature file
+/// Load a native validator signature from raw canonical bytes or a JSON signature file
 /// (`qsag-quorum-signature-v1` / `qsag-signature-v1`).
 fn load_validator_signature(
     path: &str,
+    committee: &[ValidatorPublicKey],
 ) -> Result<(ValidatorSignature, Option<ValidatorPublicKey>), CliError> {
     let raw = read_bounded_file(path, MAX_SIG_PROOF_BYTES)?;
-    if raw.0.len() == AggSigProfile::JortsPoseidon2.raw_signature_bytes() {
-        return ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &raw.0)
+    let scheme = |len| {
+        committee
+            .iter()
+            .map(|pk| pk.profile)
+            .find(|p| p.raw_signature_bytes() == len)
+    };
+    if let Some(profile) = scheme(raw.0.len()) {
+        return ValidatorSignature::from_bytes_canonical(profile, &raw.0)
             .map(|sig| (sig, None))
-            .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 sig")));
+            .map_err(|_| CliError::verify(format!("{path}: malformed signature")));
     }
     let text =
         std::str::from_utf8(&raw.0).map_err(|_| CliError::input(format!("{path} is not UTF-8")))?;
@@ -331,9 +343,11 @@ fn load_validator_signature(
         None => None,
     };
     let sig_bytes = json.field_hex("signature")?;
-    ValidatorSignature::from_bytes_canonical(AggSigProfile::JortsPoseidon2, &sig_bytes)
+    let profile = scheme(sig_bytes.len())
+        .ok_or_else(|| CliError::verify("signature length does not match a committee profile"))?;
+    ValidatorSignature::from_bytes_canonical(profile, &sig_bytes)
         .map(|sig| (sig, author))
-        .map_err(|_| CliError::verify(format!("{path}: non-canonical JortsPoseidon2 signature")))
+        .map_err(|_| CliError::verify(format!("{path}: non-canonical validator signature")))
 }
 
 fn resolve_signature_authors(
@@ -415,8 +429,8 @@ qsag aggregate --merge <proofA,proofB> --public <committee|pk1,pk2,..> --in <fil
 qsag aggregate --secret <committee> --signers <i,j,..> --epoch <n> --wal-dir <dir> --in <file|-> --out <path>
 
 First form (untrusted public aggregator — zero secret keys!): aggregate pre-existing
-JortsPoseidon2 signatures (from `qsag quorum sign --scheme hem-jorts-poseidon2` or
-individual validators) using ONLY public keys, signatures, and the message.
+JortsPoseidon2 or CorduroyPoseidon2 validator signatures using public keys, signatures,
+and the message. Choose --hem-profile quintic-turbo or quintic-gl24 for a deterministic quintic proof.
 Without --signers, each JSON signature must include validator_public_key.
 Raw and legacy signature files require explicit --signers.
 
@@ -425,6 +439,7 @@ Second form: merge two verified proofs over disjoint signer sets into one.
 Third form: committee-vault demo signing + aggregation backed by per-validator FsWalEpochSink.
 
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock a sealed committee vault
+  --hem-profile <quintic-turbo|quintic-gl24>  public quintic proof with --sigs
   --deterministic     derive the proof blinding seed from the inputs instead of OS entropy
   --anchor-dir <dir>  verify and advance external monotone anchors before releasing proof
   --anchor-tpm-nv <base>  use the committee's reserved range: validator i=base+i,
@@ -489,6 +504,17 @@ fn reanchor_committee(
     Ok(())
 }
 
+fn parse_quintic_profile(args: &Args) -> Result<Option<HemQuinticProfile>, CliError> {
+    match args.get("hem-profile") {
+        None => Ok(None),
+        Some("quintic-turbo") => Ok(Some(HemQuinticProfile::TurboShake400)),
+        Some("quintic-gl24") => Ok(Some(HemQuinticProfile::Poseidon2Gl24)),
+        _ => Err(CliError::usage(
+            "--hem-profile must be quintic-turbo or quintic-gl24",
+        )),
+    }
+}
+
 pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
@@ -496,6 +522,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             "secret",
             "public",
             "pubkeys",
+            "hem-profile",
             "sigs",
             "signers",
             "epoch",
@@ -530,6 +557,16 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
     args.no_positionals()?;
+    let quintic = parse_quintic_profile(&args)?;
+    if quintic.is_some()
+        && (args.get("sigs").is_none()
+            || args.get("merge").is_some()
+            || args.get("reanchor-tpm-nv").is_some())
+    {
+        return Err(CliError::usage(
+            "--hem-profile requires public signature aggregation with --sigs",
+        ));
+    }
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
     if let Some(new_base) = args.get("reanchor-tpm-nv") {
         return reanchor_committee(&args, anchor_cfg.as_ref(), new_base);
@@ -610,7 +647,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         }
         let mut loaded_sigs = Vec::with_capacity(sig_paths.len());
         for p in &sig_paths {
-            loaded_sigs.push(load_validator_signature(p)?);
+            loaded_sigs.push(load_validator_signature(p, &committee)?);
         }
 
         let (signers, ordered_sigs): (Vec<usize>, Vec<ValidatorSignature>) =
@@ -649,6 +686,38 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
 
         let bitmap = SignerBitmap::from_active_indices(size, &signers)
             .ok_or_else(|| CliError::usage("invalid signer set"))?;
+        if let Some(profile) = quintic {
+            let proof =
+                prove_hem_quintic_128(profile, &committee, &bitmap, &mode, &ordered_sigs)
+                    .map_err(|e| CliError::verify(format!("quintic aggregation failed: {e:?}")))?;
+            if !verify_hem_quintic_128(&committee, &mode, &proof) {
+                return Err(CliError::verify(
+                    "the produced quintic aggregate failed verification",
+                ));
+            }
+            let bytes = proof.to_bytes();
+            let file = Json::object(vec![
+                ("format", Json::str(QUINTIC_FORMAT)),
+                ("proof", Json::hex(&bytes)),
+                ("proof_bytes", Json::num(bytes.len())),
+                (
+                    "signers",
+                    Json::Array(signers.iter().map(Json::num).collect()),
+                ),
+            ]);
+            let json = file.to_pretty();
+            write_new(out_path, json.as_bytes(), false)?;
+            if args.flag("json") {
+                print!("{json}");
+            } else {
+                println!(
+                    "wrote {out_path}: {} signers, {} proof bytes",
+                    signers.len(),
+                    bytes.len()
+                );
+            }
+            return Ok(());
+        }
         let committee_root = compute_committee_root(&committee);
         let blinding = if args.flag("deterministic") {
             let mut sig_digest_acc = [0u8; 32];
@@ -927,13 +996,13 @@ qsag verify-aggregate --pubkeys <pk1,pk2,..|committee> --message <file|-> --proo
 qsag verify-agg       --public  <committee|pk1,pk2,..> --in      <file|-> --proof <path> [--json]
 
 Verify an aggregate proof against public keys and a message. Exit code 0 means valid; exit code 2
-means invalid. The signer set is read from the proof and reported.
+means invalid. Use --hem-profile quintic-turbo or quintic-gl24 to require a quintic proof. The signer set is read from the proof and reported.
 ";
 
 pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["public", "pubkeys", "in", "message", "proof"],
+        &["public", "pubkeys", "in", "message", "proof", "hem-profile"],
         &["json", "help"],
     )?;
     if args.flag("help") {
@@ -959,9 +1028,22 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::usage("missing required option --message (or --in)"))?;
     let committee = load_public_validators(pub_arg)?;
     let message = read_input(msg_arg)?;
-    let proof = load_proof(args.require("proof")?)?;
-    let valid = verify_aggregate(&committee, &SigningMode::SharedMessage(&message), &proof);
-    let signers = proof.bitmap().active_indices();
+    let mode = SigningMode::SharedMessage(&message);
+    let (valid, signers) = if let Some(profile) = parse_quintic_profile(&args)? {
+        let json = load_json(args.require("proof")?, QUINTIC_FORMAT)?;
+        let proof = HemQuinticProof::from_bytes(&json.field_hex("proof")?)
+            .ok_or_else(|| CliError::verify("malformed quintic proof"))?;
+        (
+            proof.profile == profile && verify_hem_quintic_128(&committee, &mode, &proof),
+            proof.bitmap.active_indices(),
+        )
+    } else {
+        let proof = load_proof(args.require("proof")?)?;
+        (
+            verify_aggregate(&committee, &mode, &proof),
+            proof.bitmap().active_indices(),
+        )
+    };
     if args.flag("json") {
         let verdict = Json::object(vec![
             ("valid", Json::Bool(valid)),

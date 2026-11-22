@@ -140,7 +140,7 @@ fn run_cnf_example() -> Result<(), Box<dyn std::error::Error>> {
         run_dealerless_cnf_rss_dkg([0xC1; 32], &config, params.n, &mut demo_rngs(5, 0x80))?;
     let mut keys: Vec<CnfPartyKeys> = shares
         .iter()
-        .map(CnfPartyKeys::from_custody)
+        .map(|share| CnfPartyKeys::from_custody([0xDA; 32], share))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("loading CNF custodian keys failed: {e:?}"))?;
 

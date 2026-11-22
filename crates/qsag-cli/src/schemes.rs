@@ -186,6 +186,7 @@ pub fn info_json() -> Json {
                 ("pow_bits", Json::num(qsag_agg::PCS_POW_BITS)),
             ]),
         ),
+        ("migration", crate::migrate::info()),
         (
             "address",
             Json::object(vec![
@@ -235,6 +236,7 @@ pub fn info_text() -> String {
         qsag_agg::RS_BLOWUP,
         qsag_agg::PCS_POW_BITS
     ));
+    out.push_str(&crate::migrate::info_text());
     out
 }
 

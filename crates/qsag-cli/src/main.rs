@@ -24,6 +24,7 @@ mod policy_ledger;
 mod quorum;
 mod quorum_coupon;
 mod quorum_hem;
+mod quorum_wire;
 mod schemes;
 mod vault;
 
@@ -47,15 +48,17 @@ commands:
   verify-aggregate  verify an aggregate proof (alias: verify-agg)
   cred              dealerless Poseidon2 TOPRF (replicated or Shamir-SPDZ) & threshold FIPS 204 ML-DSA ceremonies
   hd                dealerless post-quantum HD inventory & 0-round watch-only child derivation
-  migrate           zero-knowledge classical-to-post-quantum ownership migration (438-rep ZKBoo)
+  migrate           prove that a legacy key (Bitcoin, Ethereum, Ed25519, BIP-32) authorises a
+                    post-quantum address; verify; one-way migration registry
   policy            persistent custody policy ledger (init, propose, approve, status) and
                     attenuated capabilities (macaroon, biscuit)
   kat               run the built-in known-answer tests
 
 exit codes:
   0  success                     3  denied by policy
-  1  usage or malformed input    4  stateful key refused (budget, epoch, or journal conflict)
-  2  verification failed         5  file system or entropy failure
+  1  usage or malformed input    4  stateful key or registry refused (budget, epoch, journal,
+  2  verification failed            rollback, or a migration already recorded differently)
+                                 5  file system or entropy failure
 
 Secret keys are only ever read from files, never from the command line.
 ";

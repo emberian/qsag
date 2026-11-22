@@ -87,7 +87,7 @@ fn threshold_setup(
     )
     .map_err(|e| {
         CliError::usage(format!(
-            "dealerless threshold setup failed ({e:?}; pass --fast-demo or --tree-height <1..=10>, or use `qsag quorum --scheme hem-jorts-poseidon2`)"
+            "dealerless threshold setup failed ({e:?})"
         ))
     })
 }
@@ -586,7 +586,8 @@ The secret file is created with owner-only permissions.
   --deterministic-test-only  allow reproducible stateful seed enrollment (UNSAFE for custody)
   --force-overwrite     replace an authenticated stateless vault; stateful overwrite is refused
   --hrp <hrp>           address human-readable part (default: qsp)
-  --fast-demo          fts-threshold only: use an eight-epoch demonstration tree
+  --tree-height <h>     fts-threshold: Merkle height 1..=10 (default: 10, 1024 epochs)
+  --fast-demo           fts-threshold: eight-epoch disposable tree; external anchor optional
   --parties <n>         fts-threshold: number of signing parties, 2..=255 (default: 3)
   --validators <k>      agg-jorts-poseidon2: committee size (default: 8; bounded by public-key file size)
   --wal-dir <dir>       agg-jorts-poseidon2: directory in which each validator's epoch
@@ -703,10 +704,13 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
+    if args.flag("fast-demo") && !matches!(scheme, Scheme::ThresholdFts) {
+        return Err(CliError::usage("--fast-demo applies only to fts-threshold"));
+    }
     require_stateful_anchor(
         scheme,
         anchor_cfg.as_ref(),
-        args.flag("ephemeral-unanchored"),
+        args.flag("ephemeral-unanchored") || (args.flag("fast-demo") && anchor_cfg.is_none()),
     )?;
     if matches!(scheme, Scheme::Slh(_)) && anchor_cfg.is_some() {
         return Err(CliError::usage(
