@@ -4258,5 +4258,393 @@ theorem tooth_missing_barrier_causes_cross_wave_lds_race :
    List.replicate 4 0 ++ List.replicate 4 1 ++ List.replicate 8 0 ++ List.replicate 8 1,
    by decide +kernel⟩
 
+/-! ## §5 Production `poseidon2_perm12.spv` (`5,478`-Word) Binary Decode, Zero-LDS & Helper AST Audit -/
+
+/-- True iff `inst` performs no control-flow branching, no loop/switch merge, no barrier, and no
+    shared/global memory indexing (pure SSA + `Function`-local frame operations). -/
+@[expose] def isBranchlessLocalSpirvInst : SpirvInst → Bool
+  | .opLabel _ => true
+  | .opVariable _ _ .function _ => true
+  | .opFunctionCall _ _ _ _ => true
+  | .opLoad _ _ _ => true
+  | .opStore _ _ => true
+  | .opCompositeConstruct _ _ _ => true
+  | .opCompositeExtract _ _ _ _ => true
+  | .opUConvert _ _ _ => true
+  | .opIAdd _ _ _ _ => true
+  | .opISub _ _ _ _ => true
+  | .opIMul _ _ _ _ => true
+  | .opUMulExtended _ _ _ _ => true
+  | .opLogicalOr _ _ _ _ => true
+  | .opLogicalAnd _ _ _ _ => true
+  | .opLogicalNot _ _ _ => true
+  | .opSelect _ _ _ _ _ => true
+  | .opIEqual _ _ _ _ => true
+  | .opINotEqual _ _ _ _ => true
+  | .opUGreaterThan _ _ _ _ => true
+  | .opUGreaterThanEqual _ _ _ _ => true
+  | .opULessThan _ _ _ _ => true
+  | .opULessThanEqual _ _ _ _ => true
+  | .opShiftRightLogical _ _ _ _ => true
+  | .opShiftLeftLogical _ _ _ _ => true
+  | .opBitwiseOr _ _ _ _ => true
+  | .opBitwiseXor _ _ _ _ => true
+  | .opBitwiseAnd _ _ _ _ => true
+  | .opNot _ _ _ => true
+  | .opReturn => true
+  | .opReturnValue _ => true
+  | _ => false
+
+/-- True iff `fn` is branchless, loop-free, barrier-free, and uses only `Function` locals. -/
+@[expose] def isBranchlessHelperFn (fn : SpirvFunction) : Bool :=
+  fn.body.all isBranchlessLocalSpirvInst
+
+/-- True iff `m` declares zero `Workgroup` shared-memory variables globally or locally. -/
+def hasZeroWorkgroupVars (m : SpirvModule) : Bool :=
+  m.tyGlobals.all (fun
+    | .glob (.variable _ _ .workgroup _) => false
+    | _ => true) &&
+  m.functions.all (fun fn => fn.body.all (fun
+    | .opVariable _ _ .workgroup _ => false
+    | _ => true))
+
+/-- Lookup a `SpirvFunction` by `funcId` in `m.functions`. -/
+def findSpirvFunction (m : SpirvModule) (fid : UInt32) : Option SpirvFunction :=
+  m.functions.find? (fun f => f.funcId == fid)
+
+/-- Lookup a 64-bit constant `%resId` in `m.tyGlobals`. -/
+def findSpirvConst64 (m : SpirvModule) (cid : UInt32) : Option UInt64 :=
+  m.tyGlobals.findSome? fun
+    | .glob (.const64 _ id val) => if id == cid then some val else none
+    | _ => none
+
+/-- Decoded SPIR-V AST of `fp_reduce_u64` (`%10`) in `poseidon2_perm12.spv`. -/
+@[expose] def expectedFpReduceU64Fn : SpirvFunction :=
+  { resultTyId := 6, funcId := 10, control := 0, funcTyId := 8
+    params := [(7, 9)]
+    body := [
+      .opLabel 11,
+      .opLoad 6 62 9,
+      .opLoad 6 65 9,
+      .opUGreaterThanEqual 66 67 65 63,
+      .opSelect 6 69 67 68 64,
+      .opISub 6 70 64 69,
+      .opBitwiseAnd 6 71 63 70,
+      .opISub 6 72 62 71,
+      .opReturnValue 72
+    ] }
+
+/-- Decoded SPIR-V AST of `fp_add` (`%15`) in `poseidon2_perm12.spv`. -/
+@[expose] def expectedFpAddFn : SpirvFunction :=
+  { resultTyId := 6, funcId := 15, control := 0, funcTyId := 12
+    params := [(7, 13), (7, 14)]
+    body := [
+      .opLabel 16,
+      .opVariable 7 75 .function none,
+      .opVariable 7 76 .function none,
+      .opVariable 7 79 .function none,
+      .opVariable 7 80 .function none,
+      .opVariable 7 83 .function none,
+      .opVariable 7 86 .function none,
+      .opLoad 6 77 13,
+      .opStore 76 77,
+      .opFunctionCall 6 78 10 [76],
+      .opStore 75 78,
+      .opLoad 6 81 14,
+      .opStore 80 81,
+      .opFunctionCall 6 82 10 [80],
+      .opStore 79 82,
+      .opLoad 6 84 79,
+      .opISub 6 85 63 84,
+      .opStore 83 85,
+      .opLoad 6 87 75,
+      .opLoad 6 88 83,
+      .opULessThan 66 89 87 88,
+      .opSelect 6 90 89 68 64,
+      .opISub 6 91 64 90,
+      .opStore 86 91,
+      .opLoad 6 92 75,
+      .opLoad 6 93 79,
+      .opIAdd 6 94 92 93,
+      .opLoad 6 95 86,
+      .opBitwiseAnd 6 96 94 95,
+      .opLoad 6 97 75,
+      .opLoad 6 98 83,
+      .opISub 6 99 97 98,
+      .opLoad 6 100 86,
+      .opNot 6 101 100,
+      .opBitwiseAnd 6 102 99 101,
+      .opBitwiseOr 6 103 96 102,
+      .opReturnValue 103
+    ] }
+
+/-- Decoded SPIR-V AST of `fp_sub` (`%19`) in `poseidon2_perm12.spv`. -/
+@[expose] def expectedFpSubFn : SpirvFunction :=
+  { resultTyId := 6, funcId := 19, control := 0, funcTyId := 12
+    params := [(7, 17), (7, 18)]
+    body := [
+      .opLabel 20,
+      .opVariable 7 106 .function none,
+      .opVariable 7 107 .function none,
+      .opVariable 7 110 .function none,
+      .opVariable 7 111 .function none,
+      .opVariable 7 114 .function none,
+      .opLoad 6 108 17,
+      .opStore 107 108,
+      .opFunctionCall 6 109 10 [107],
+      .opStore 106 109,
+      .opLoad 6 112 18,
+      .opStore 111 112,
+      .opFunctionCall 6 113 10 [111],
+      .opStore 110 113,
+      .opLoad 6 115 106,
+      .opLoad 6 116 110,
+      .opISub 6 117 115 116,
+      .opStore 114 117,
+      .opLoad 6 118 114,
+      .opLoad 6 119 106,
+      .opLoad 6 120 110,
+      .opULessThan 66 121 119 120,
+      .opSelect 6 122 121 68 64,
+      .opISub 6 123 64 122,
+      .opBitwiseAnd 6 124 63 123,
+      .opIAdd 6 125 118 124,
+      .opReturnValue 125
+    ] }
+
+/-- Decoded SPIR-V AST of `fp_neg` (`%22`) in `poseidon2_perm12.spv`. -/
+@[expose] def expectedFpNegFn : SpirvFunction :=
+  { resultTyId := 6, funcId := 22, control := 0, funcTyId := 8
+    params := [(7, 21)]
+    body := [
+      .opLabel 23,
+      .opVariable 7 128 .function none,
+      .opVariable 7 129 .function none,
+      .opStore 128 64,
+      .opLoad 6 130 21,
+      .opStore 129 130,
+      .opFunctionCall 6 131 19 [128, 129],
+      .opReturnValue 131
+    ] }
+
+private def splitWordsExact : Nat → List UInt32 → Option (List UInt32 × List UInt32)
+  | 0, xs => some ([], xs)
+  | _ + 1, [] => none
+  | n + 1, x :: xs =>
+    match splitWordsExact n xs with
+    | some (hd, tl) => some (x :: hd, tl)
+    | none => none
+
+private theorem splitWordsExact_eq : ∀ (k : Nat) (xs : List UInt32),
+    splitWordsExact k xs = if xs.length < k then none else some (xs.take k, xs.drop k)
+  | 0, xs => by simp [splitWordsExact]
+  | k + 1, [] => by simp [splitWordsExact]
+  | k + 1, x :: xs => by
+    simp only [splitWordsExact, splitWordsExact_eq k xs, List.length_cons,
+      Nat.succ_lt_succ_iff, List.take_succ_cons, List.drop_succ_cons]
+    by_cases h : xs.length < k <;> simp [h]
+
+private def fastParseRawInstStreamAux : Nat → List UInt32 → Except SpirvDecodeError (List RawSpirvInst)
+  | _, [] => .ok []
+  | 0, _ :: _ => .error .truncatedInstruction
+  | fuel + 1, w0 :: rest =>
+    let wc := unpackSpirvWordCount w0
+    let op := unpackSpirvOpcode w0
+    if wc == 0 then
+      .error .zeroWordCount
+    else
+      match splitWordsExact (wc - 1) rest with
+      | none => .error .truncatedInstruction
+      | some (args, rem) =>
+        match fastParseRawInstStreamAux fuel rem with
+        | .ok tail => .ok (⟨op, args⟩ :: tail)
+        | .error e => .error e
+
+private theorem fastParseRawInstStreamAux_eq : ∀ (fuel : Nat) (ws : List UInt32),
+    fastParseRawInstStreamAux fuel ws = parseRawInstStreamAux fuel ws
+  | fuel, [] => by cases fuel <;> rfl
+  | 0, _ :: _ => rfl
+  | fuel + 1, w0 :: rest => by
+    simp only [fastParseRawInstStreamAux, parseRawInstStreamAux,
+      splitWordsExact_eq (unpackSpirvWordCount w0 - 1) rest]
+    by_cases hwc : (unpackSpirvWordCount w0 == 0) = true
+    · simp [hwc]
+    · simp only [hwc, Bool.false_eq_true, ↓reduceIte]
+      by_cases hlt : rest.length < unpackSpirvWordCount w0 - 1
+      · simp [hlt]
+      · simp [hlt, fastParseRawInstStreamAux_eq fuel]
+
+/-- Linear-time word-stream decoder proven identical to `decodeSpirvModuleWords`. -/
+def fastDecodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError SpirvModule :=
+  match words with
+  | magic :: ver :: gen :: bound :: schema :: instWords =>
+    if magic != spirvMagic then
+      .error (.badMagic magic)
+    else
+      match SpirvVersion.ofWord? ver with
+      | none => .error (.badVersion ver)
+      | some parsedVer =>
+        if schema != 0 then
+          .error (.badSchema schema)
+        else if bound.toNat == 0 then
+          .error .zeroIdBound
+        else
+          match fastParseRawInstStreamAux 5480 instWords with
+          | .error e => .error e
+          | .ok raws =>
+            match takeSection (· == 17) decodeCapabilityRaw raws with
+            | .error e => .error e
+            | .ok (caps, r0) =>
+            match takeSection (· == 11) decodeExtInstImportRaw r0 with
+            | .error e => .error e
+            | .ok (exts, r1) =>
+            match r1 with
+            | ⟨14, [addrW, memW]⟩ :: ⟨15, epModel :: entryFuncId :: m0 :: m1 :: ifaceIds⟩ :: r2 =>
+              if epModel != spirvExecModelGLCompute || m0 != spirvMainWord0 || m1 != spirvMainWord1 then
+                .error (.malformedSection "bad OpEntryPoint header")
+              else
+                match SpirvAddressingModel.ofWord? addrW, SpirvMemoryModelKind.ofWord? memW with
+                | some addrM, some memM =>
+                  match takeSection (· == 16) (decodeExecModeRaw entryFuncId) r2 with
+                  | .error e => .error e
+                  | .ok (ems, r3) =>
+                  match takeSection isDebugOpcode decodeDebugRaw r3 with
+                  | .error e => .error e
+                  | .ok (dbg, r4) =>
+                  match takeSection isAnnotationOpcode decodeAnnotationRaw r4 with
+                  | .error e => .error e
+                  | .ok (anns, r5) =>
+                  match takeSection isTyGlobalOpcode decodeTyGlobalRaw r5 with
+                  | .error e => .error e
+                  | .ok (tgs, r6) =>
+                  match parseFunctionsAux r6.length r6 with
+                  | .error e => .error e
+                  | .ok fns =>
+                    .ok {
+                      version := parsedVer
+                      generator := gen
+                      idBound := bound
+                      capabilities := caps
+                      extInstImports := exts
+                      addrModel := addrM
+                      memModel := memM
+                      entryFuncId := entryFuncId
+                      interfaceIds := ifaceIds
+                      execModes := ems
+                      debug := dbg
+                      annotations := anns
+                      tyGlobals := tgs
+                      functions := fns
+                    }
+                | _, _ => .error (.malformedSection "bad OpMemoryModel operands")
+            | _ => .error (.malformedSection "expected OpMemoryModel; OpEntryPoint")
+  | _ => .error .truncatedHeader
+
+private theorem fastDecodeSpirvModuleWords_eq_of_len {words : List UInt32} (hLen : words.length ≤ 5485) :
+    fastDecodeSpirvModuleWords words = decodeSpirvModuleWords words := by
+  unfold fastDecodeSpirvModuleWords decodeSpirvModuleWords
+  cases words with
+  | nil => rfl
+  | cons magic r1 =>
+    cases r1 with
+    | nil => rfl
+    | cons ver r2 =>
+      cases r2 with
+      | nil => rfl
+      | cons gen r3 =>
+        cases r3 with
+        | nil => rfl
+        | cons bound r4 =>
+          cases r4 with
+          | nil => rfl
+          | cons schema instWords =>
+            have hInstLen : instWords.length ≤ 5480 := by
+              simp only [List.length_cons] at hLen; omega
+            dsimp only
+            rw [fastParseRawInstStreamAux_eq, parseRawInstStream,
+                parseRawInstStreamAux_fuel_mono hInstLen (Nat.le_refl _)]
+
+/-- Single-pass `O(N)` binary audit certificate over `words : List UInt32`. -/
+def verifyPoseidon2SpvWords (words : List UInt32) : Bool :=
+  match fastDecodeSpirvModuleWords words with
+  | .error _ => false
+  | .ok m =>
+    decide (encodeSpirvModuleWords m = words) &&
+    WellFormedSpirvModule m &&
+    decide (m.version = .v1_5) &&
+    decide (m.capabilities = [.shader, .int64]) &&
+    decide (m.addrModel = .logical) &&
+    decide (m.memModel = .glsl450) &&
+    decide (m.entryFuncId = 4) &&
+    decide (m.execModes = [.localSize 64 1 1]) &&
+    decide (m.functions.map (·.funcId) = [4, 10, 15, 19, 22, 26, 30, 33, 40, 43, 50, 57, 60]) &&
+    hasZeroWorkgroupVars m &&
+    ([10, 15, 19, 22, 26, 30, 33, 40, 43].all fun fid =>
+      match findSpirvFunction m fid with
+      | some fn => isBranchlessHelperFn fn
+      | none => false) &&
+    decide (findSpirvConst64 m 63 = some (UInt64.ofNat goldilocksPrime)) &&
+    decide (findSpirvConst64 m 64 = some 0) &&
+    decide (findSpirvConst64 m 68 = some 1) &&
+    decide (findSpirvFunction m 10 = some expectedFpReduceU64Fn) &&
+    decide (findSpirvFunction m 15 = some expectedFpAddFn) &&
+    decide (findSpirvFunction m 19 = some expectedFpSubFn) &&
+    decide (findSpirvFunction m 22 = some expectedFpNegFn)
+
+/-- **Kernel-Checked Binary Certificate of `poseidon2Perm12SpvWords` (`Eq.refl true`)**. -/
+theorem poseidon2Spv_bundle_verified :
+    verifyPoseidon2SpvWords poseidon2Perm12SpvWords.toList = true := by
+  kernel_rfl
+
+/-- Corrupting word 0 (SPIR-V magic) of `poseidon2Perm12SpvWords` fails `verifyPoseidon2SpvWords`. -/
+theorem tooth_poseidon2Spv_corrupted_magic :
+    verifyPoseidon2SpvWords (0 :: poseidon2Perm12SpvWords.toList.drop 1) = false := by
+  kernel_rfl
+
+/-- **Binary Decode, Lossless Roundtrip & Structural/CT Profile of `poseidon2Perm12SpvWords`**. -/
+theorem poseidon2Spv_decodes_and_roundtrips :
+    ∃ m : SpirvModule,
+      decodeSpirvModule poseidon2Perm12SpvWords = .ok m ∧
+      encodeSpirvModule m = poseidon2Perm12SpvWords ∧
+      WellFormedSpirvModule m = true ∧
+      m.version = .v1_5 ∧
+      m.capabilities = [.shader, .int64] ∧
+      m.execModes = [.localSize 64 1 1] ∧
+      hasZeroWorkgroupVars m = true ∧
+      ([10, 15, 19, 22, 26, 30, 33, 40, 43].all fun fid =>
+        match findSpirvFunction m fid with
+        | some fn => isBranchlessHelperFn fn
+        | none => false) = true ∧
+      findSpirvConst64 m 63 = some (UInt64.ofNat goldilocksPrime) ∧
+      findSpirvConst64 m 64 = some 0 ∧
+      findSpirvConst64 m 68 = some 1 ∧
+      findSpirvFunction m 10 = some expectedFpReduceU64Fn ∧
+      findSpirvFunction m 15 = some expectedFpAddFn ∧
+      findSpirvFunction m 19 = some expectedFpSubFn ∧
+      findSpirvFunction m 22 = some expectedFpNegFn := by
+  have hLen : poseidon2Perm12SpvWords.toList.length ≤ 5485 := by
+    have hs := poseidon2Perm12SpvWords_size
+    rw [Array.length_toList]; omega
+  have hCert := poseidon2Spv_bundle_verified
+  unfold verifyPoseidon2SpvWords at hCert
+  rw [fastDecodeSpirvModuleWords_eq_of_len hLen] at hCert
+  cases hDec : decodeSpirvModuleWords poseidon2Perm12SpvWords.toList with
+  | error _ => rw [hDec] at hCert; cases hCert
+  | ok m =>
+    rw [hDec] at hCert
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hCert
+    rcases hCert with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨hEncW, hWf⟩, hVer⟩, hCap⟩, _⟩, _⟩, _⟩, hExec⟩, _⟩,
+      hZeroWg⟩, hCt⟩, hC63⟩, hC64⟩, hC68⟩, hF10⟩, hF15⟩, hF19⟩, hF22⟩
+    have hEncArr : encodeSpirvModule m = poseidon2Perm12SpvWords := by
+      unfold encodeSpirvModule
+      rw [hEncW]
+    exact ⟨m, hDec, hEncArr, hWf, hVer, hCap, hExec, hZeroWg, hCt,
+      hC63, hC64, hC68, hF10, hF15, hF19, hF22⟩
+
+#verify_constructive
+  Qsag.poseidon2Spv_bundle_verified
+  Qsag.tooth_poseidon2Spv_corrupted_magic
+  Qsag.poseidon2Spv_decodes_and_roundtrips
+
 end Qsag
 end
