@@ -618,3 +618,617 @@ theorem corruptibleSignSimulator_register_rejected_unexposed (S : SigScheme PK S
     (idealSignCorruptibleMachine_inject_step_of_uncorrupted req sig hU)).1
 
 /-- **Before `.corrupt` the simulator cannot emit an offline signature.** -/
+theorem corruptibleSignSimulator_offlineSign_rejected_unexposed (S : SigScheme PK SK Sig)
+    (skSim : SK) (stateful₀ : Bool) (maxWindow : Nat) {a : CorruptibleSignState PK Sig}
+    (hU : a.corrupted = false) (req : SignRequest) :
+    (corruptibleSignSimulator S skSim stateful₀ maxWindow).step a (.offlineSign req) = none := by
+  cases hSg : S.sign skSim req.epoch req.message with
+  | none =>
+    exact (corruptibleSignSimulator_refuse_of S skSim stateful₀ maxWindow a
+      (corruptibleSignSimIn_offlineSign_none hSg)).1
+  | some sig =>
+    exact (corruptibleSignSimulator_reject_of S skSim stateful₀ maxWindow (.offlineSign req)
+      (corruptibleSignSimIn_offlineSign hSg)
+      (idealSignCorruptibleMachine_inject_step_of_uncorrupted req sig hU)).1
+
+end Simulator
+
+/-! ## 5. Injections of the functionality happen after a corruption -/
+
+section IdealOrder
+variable {PK SK Sig : Type} {S : SigScheme PK SK Sig} {pk₀ : PK} {stateful₀ : Bool}
+  {maxWindow : Nat} {oracleSign : SignRequest → Option Sig}
+
+/-- A run of the functionality that starts uncorrupted and ends corrupted contains an accepted
+    `.corrupt`. -/
+theorem idealSignCorruptibleMachine_trace_corrupt_event :
+    ∀ {s s' : CorruptibleSignState PK Sig} {tr : List (SignCommand Sig × SignReply Sig)},
+      (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace s tr s' →
+      s.corrupted = false → s'.corrupted = true →
+      (SignCommand.corrupt, SignReply.corrupted) ∈ tr
+  | _, _, _, .nil _, hF, hT => Bool.noConfusion (hF.symm.trans hT)
+  | _, _, _, .accept (s' := s₁) (inp := inp) hStep hRest, hF, hT => by
+    cases inp with
+    | sign req =>
+      obtain ⟨inner', sig, _, hSt, _⟩ := idealSignCorruptibleMachine_sign_step_some hStep
+      have hF' : s₁.corrupted = false := by
+        rw [hSt]
+        exact hF
+      exact List.mem_cons_of_mem _
+        (idealSignCorruptibleMachine_trace_corrupt_event hRest hF' hT)
+    | corrupt =>
+      obtain ⟨_, hOut⟩ := idealSignCorruptibleMachine_corrupt_step_some hStep
+      rw [hOut]
+      exact List.mem_cons.mpr (.inl rfl)
+    | inject req sig =>
+      obtain ⟨hc, _, _, _⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+      exact Bool.noConfusion (hF.symm.trans hc)
+  | s, _, _, .reject inp _ hRest, hF, hT => by
+    have hF' : ((idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).errStep s
+        inp).corrupted = false := by
+      cases inp <;> exact hF
+    exact idealSignCorruptibleMachine_trace_corrupt_event hRest hF' hT
+
+/-- **In an initialized run of the functionality every accepted `.inject` is preceded by an
+    accepted `.corrupt`.** -/
+theorem idealSignCorruptibleMachine_inject_after_corrupt
+    {pre post : List (SignCommand Sig × SignReply Sig)} {req : SignRequest} {sig : Sig}
+    {out : SignReply Sig} {s_final : CorruptibleSignState PK Sig}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀)
+      (pre ++ (SignCommand.inject req sig, out) :: post) s_final) :
+    (SignCommand.corrupt, SignReply.corrupted) ∈ pre := by
+  obtain ⟨m, m', hPre, hStep, _⟩ := Machine.validTrace_split pre hTrace
+  obtain ⟨hc, _, _, _⟩ := idealSignCorruptibleMachine_inject_step_some hStep
+  exact idealSignCorruptibleMachine_trace_corrupt_event hPre rfl hc
+
+/-- **Before `.corrupt` the functionality rejects `.inject`.** After any initialized run that
+    accepted no `.corrupt`, every `.inject` is rejected, for every request and signature, the
+    ones the verifier accepts included. -/
+theorem idealSignCorruptible_inject_rejected_before_corrupt
+    {tr : List (SignCommand Sig × SignReply Sig)} {s : CorruptibleSignState PK Sig}
+    (hTrace : (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).ValidTrace
+      (CorruptibleSignState.empty pk₀ stateful₀) tr s)
+    (hNo : (SignCommand.corrupt, SignReply.corrupted) ∉ tr) (req : SignRequest) (sig : Sig) :
+    (idealSignCorruptibleMachine S pk₀ stateful₀ maxWindow oracleSign).step s
+      (.inject req sig) = none := by
+  cases hC : s.corrupted with
+  | false => exact idealSignCorruptibleMachine_inject_step_of_uncorrupted req sig hC
+  | true => exact absurd (idealSignCorruptibleMachine_trace_corrupt_event hTrace rfl hC) hNo
+
+end IdealOrder
+
+/-! ## 6. The real machine refines the simulated ideal world -/
+
+/-- **The corruptible latched signer refines the simulated ideal world** whose simulator holds
+    the same key: on every input, in every pair of related states, both accept or both reject,
+    with equal outputs — the key included — and related successor states. The relation equates
+    the latch position, the mode, the enrolled public key and the exposure flag. -/
+def latchedCorruptibleSigner_refines_simulator {PK SK Sig : Type} (S : SigScheme PK SK Sig)
+    (sk : SK) (stateful₀ : Bool) (maxWindow : Nat) :
+    latchedCorruptibleSignerMachine S sk stateful₀ maxWindow ⊑
+      corruptibleSignSimulator S sk stateful₀ maxWindow where
+  Rel c a := c.sk = sk ∧ a.inner.nextEpoch = c.nextEpoch ∧ a.inner.statefulEpochs = stateful₀ ∧
+    a.inner.enrolledPk = S.derivePk sk ∧ a.corrupted = c.corrupted
+  absInit _ := CorruptibleSignState.empty (S.derivePk sk) stateful₀
+  init_ok {c₀} hInit := by
+    have hC : c₀ = ⟨sk, 0, false⟩ := hInit
+    rw [hC]
+    exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+  sim_ok {c c' a inp out} hRel hStepC := by
+    obtain ⟨hSk, hN, hS, hPk, hCor⟩ := hRel
+    cases inp with
+    | sign req =>
+      obtain ⟨sig, hA, hSign, hc, hOut⟩ := latchedCorruptibleSigner_sign_step_some hStepC
+      rw [hSk] at hSign
+      have hA' : epochAdmissible a.inner.statefulEpochs maxWindow a.inner.nextEpoch req.epoch =
+          true := by
+        rw [hS, hN]
+        exact hA
+      have hV : S.verify a.inner.enrolledPk req.message sig = true := by
+        rw [hPk]
+        exact S.correct sk req.epoch req.message sig hSign
+      rw [corruptibleSignSimulator_step_of S sk stateful₀ maxWindow (.sign req) rfl
+        (idealSignCorruptibleMachine_sign_step_of_ideal
+          (idealSignMachine_step_of_valid (S := S) (pk₀ := S.derivePk sk)
+            (stateful₀ := stateful₀) (maxWindow := maxWindow)
+            (oracleSign := fun r => S.sign sk r.epoch r.message) hA' hSign hV)), hc, hOut]
+      exact ⟨rfl, hSk, rfl, hS, hPk, hCor⟩
+    | exposeKey =>
+      obtain ⟨hc, hOut⟩ := latchedCorruptibleSigner_exposeKey_step_some hStepC
+      rw [corruptibleSignSimulator_step_of S sk stateful₀ maxWindow .exposeKey rfl
+        (idealSignCorruptibleMachine_corrupt_step a), hc, hOut]
+      exact ⟨congrArg CorruptibleSignerReply.key hSk.symm, hSk, hN, hS, hPk, rfl⟩
+    | offlineSign req =>
+      obtain ⟨sig, hC, hSign, hc, hOut⟩ :=
+        latchedCorruptibleSigner_offlineSign_step_some hStepC
+      rw [hSk] at hSign
+      have hV : S.verify a.inner.enrolledPk req.message sig = true := by
+        rw [hPk]
+        exact S.correct sk req.epoch req.message sig hSign
+      rw [corruptibleSignSimulator_step_of S sk stateful₀ maxWindow (.offlineSign req)
+        (corruptibleSignSimIn_offlineSign hSign)
+        (idealSignCorruptibleMachine_inject_step_of_corrupted (hCor.trans hC) hV), hc, hOut]
+      exact ⟨rfl, hSk, hN, hS, hPk, hCor⟩
+    | register req sig =>
+      obtain ⟨hC, hVer, hc, hOut⟩ := latchedCorruptibleSigner_register_step_some hStepC
+      rw [hSk] at hVer
+      have hV : S.verify a.inner.enrolledPk req.message sig = true := by
+        rw [hPk]
+        exact hVer
+      rw [corruptibleSignSimulator_step_of S sk stateful₀ maxWindow (.register req sig) rfl
+        (idealSignCorruptibleMachine_inject_step_of_corrupted (hCor.trans hC) hV), hc, hOut]
+      exact ⟨rfl, hSk, hN, hS, hPk, hCor⟩
+  sim_err {c a inp} hRel hNoneC := by
+    obtain ⟨hSk, hN, hS, hPk, hCor⟩ := hRel
+    cases inp with
+    | sign req =>
+      have hNoneC' : (if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then
+          (S.sign c.sk req.epoch req.message).map
+            (fun sig => (({ c with nextEpoch := req.epoch + 1 } : CorruptibleSignerState SK),
+              (CorruptibleSignerReply.signature sig : CorruptibleSignerReply SK Sig)))
+          else none) = none := hNoneC
+      cases hA : epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch with
+      | false =>
+        have hA' : epochAdmissible a.inner.statefulEpochs maxWindow a.inner.nextEpoch
+            req.epoch = false := by
+          rw [hS, hN]
+          exact hA
+        have hErrC : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).errStep c
+            (.sign req) = c := by
+          show (if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then
+            ({ c with nextEpoch := req.epoch + 1 } : CorruptibleSignerState SK) else c) = c
+          rw [hA]
+          rfl
+        obtain ⟨hNoneW, hErrW⟩ := corruptibleSignSimulator_reject_of S sk stateful₀ maxWindow
+          (a := a) (.sign req) rfl
+          (idealSignCorruptibleMachine_sign_step_none_iff.mpr
+            (idealSignMachine_step_of_inadmissible hA'))
+        rw [hErrC, hErrW, idealSignCorruptibleMachine_sign_errStep,
+          idealSignMachine_errStep_of_inadmissible hA']
+        exact ⟨hNoneW, hSk, hN, hS, hPk, hCor⟩
+      | true =>
+        rw [hA] at hNoneC'
+        have hSignC : S.sign c.sk req.epoch req.message = none := by
+          cases hSg : S.sign c.sk req.epoch req.message with
+          | none => rfl
+          | some s =>
+            rw [hSg] at hNoneC'
+            cases hNoneC'
+        rw [hSk] at hSignC
+        have hA' : epochAdmissible a.inner.statefulEpochs maxWindow a.inner.nextEpoch
+            req.epoch = true := by
+          rw [hS, hN]
+          exact hA
+        have hErrC : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).errStep c
+            (.sign req) = { c with nextEpoch := req.epoch + 1 } := by
+          show (if epochAdmissible stateful₀ maxWindow c.nextEpoch req.epoch = true then
+            ({ c with nextEpoch := req.epoch + 1 } : CorruptibleSignerState SK) else c) =
+            { c with nextEpoch := req.epoch + 1 }
+          rw [hA]
+          rfl
+        obtain ⟨hNoneW, hErrW⟩ := corruptibleSignSimulator_reject_of S sk stateful₀ maxWindow
+          (a := a) (.sign req) rfl
+          (idealSignCorruptibleMachine_sign_step_none_iff.mpr
+            (idealSignMachine_step_of_no_candidate
+              (oracleSign := fun r => S.sign sk r.epoch r.message) hSignC))
+        rw [hErrC, hErrW, idealSignCorruptibleMachine_sign_errStep,
+          idealSignMachine_errStep_of_admissible hA']
+        exact ⟨hNoneW, hSk, rfl, hS, hPk, hCor⟩
+    | exposeKey =>
+      rw [latchedCorruptibleSigner_exposeKey_step] at hNoneC
+      cases hNoneC
+    | offlineSign req =>
+      have hErrC : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).errStep c
+          (.offlineSign req) = c := rfl
+      cases hSg : S.sign sk req.epoch req.message with
+      | none =>
+        obtain ⟨hNoneW, hErrW⟩ := corruptibleSignSimulator_refuse_of S sk stateful₀ maxWindow a
+          (corruptibleSignSimIn_offlineSign_none hSg)
+        rw [hErrC, hErrW]
+        exact ⟨hNoneW, hSk, hN, hS, hPk, hCor⟩
+      | some sig =>
+        have hCf : c.corrupted = false := by
+          cases hCc : c.corrupted with
+          | false => rfl
+          | true =>
+            have hNoneC' : (if c.corrupted = true then
+                (S.sign c.sk req.epoch req.message).map
+                  (fun sig => (c, (CorruptibleSignerReply.signature sig :
+                    CorruptibleSignerReply SK Sig)))
+                else none) = none := hNoneC
+            rw [hCc, hSk, hSg] at hNoneC'
+            cases hNoneC'
+        obtain ⟨hNoneW, hErrW⟩ := corruptibleSignSimulator_reject_of S sk stateful₀ maxWindow
+          (a := a) (.offlineSign req) (corruptibleSignSimIn_offlineSign hSg)
+          (idealSignCorruptibleMachine_inject_step_of_uncorrupted req sig (hCor.trans hCf))
+        rw [hErrC, hErrW, idealSignCorruptibleMachine_inject_errStep]
+        exact ⟨hNoneW, hSk, hN, hS, hPk, hCor⟩
+    | register req sig =>
+      have hErrC : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).errStep c
+          (.register req sig) = c := rfl
+      have hNoneC' : (if (c.corrupted && S.verify (S.derivePk c.sk) req.message sig) = true then
+          some (c, (CorruptibleSignerReply.signature sig : CorruptibleSignerReply SK Sig))
+          else none) = none := hNoneC
+      have hI : (idealSignCorruptibleMachine S (S.derivePk sk) stateful₀ maxWindow
+          (fun r => S.sign sk r.epoch r.message)).step a (.inject req sig) = none := by
+        cases hCc : c.corrupted with
+        | false =>
+          exact idealSignCorruptibleMachine_inject_step_of_uncorrupted req sig (hCor.trans hCc)
+        | true =>
+          cases hVv : S.verify (S.derivePk sk) req.message sig with
+          | false =>
+            exact idealSignCorruptibleMachine_inject_step_of_unverified (by rw [hPk]; exact hVv)
+          | true =>
+            rw [hCc, hSk, hVv] at hNoneC'
+            cases hNoneC'
+      obtain ⟨hNoneW, hErrW⟩ := corruptibleSignSimulator_reject_of S sk stateful₀ maxWindow
+        (a := a) (.register req sig) rfl hI
+      rw [hErrC, hErrW, idealSignCorruptibleMachine_inject_errStep]
+      exact ⟨hNoneW, hSk, hN, hS, hPk, hCor⟩
+
+section Headline
+variable {PK SK Sig : Type}
+
+/-- **Perfect simulation against adaptive environments.** For every environment that chooses
+    its inputs from the replies it has seen (the revealed key among them) and every number of
+    rounds, the transcript against the corruptible latched signer equals the transcript against
+    the simulated ideal world. -/
+theorem latchedCorruptibleSigner_adaptive_view_eq_simulator (S : SigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat)
+    (env : List (Option (CorruptibleSignerReply SK Sig)) → Option (CorruptibleSignerCommand Sig))
+    (fuel : Nat) :
+    (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).interact env fuel
+        ⟨sk, 0, false⟩ [] =
+      (corruptibleSignSimulator S sk stateful₀ maxWindow).interact env fuel
+        (CorruptibleSignState.empty (S.derivePk sk) stateful₀) [] :=
+  (latchedCorruptibleSigner_refines_simulator S sk stateful₀ maxWindow).interact_eq env fuel []
+    ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- **Every run of the real machine is a run of the simulated world and projects to a run of
+    the functionality**, ending in a functionality state with the same exposure flag and latch
+    position. -/
+theorem latchedCorruptibleSigner_run_projects_to_ideal (S : SigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat)
+    {tr : List (CorruptibleSignerCommand Sig × CorruptibleSignerReply SK Sig)}
+    {c_final : CorruptibleSignerState SK}
+    (hTrace : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).ValidTrace
+      ⟨sk, 0, false⟩ tr c_final) :
+    ∃ a_final : CorruptibleSignState PK Sig,
+      (corruptibleSignSimulator S sk stateful₀ maxWindow).ValidTrace
+        (CorruptibleSignState.empty (S.derivePk sk) stateful₀) tr a_final ∧
+      (idealSignCorruptibleMachine S (S.derivePk sk) stateful₀ maxWindow
+        (fun req => S.sign sk req.epoch req.message)).ValidTrace
+        (CorruptibleSignState.empty (S.derivePk sk) stateful₀)
+        (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut tr) a_final ∧
+      a_final.corrupted = c_final.corrupted ∧ a_final.inner.nextEpoch = c_final.nextEpoch := by
+  obtain ⟨a_final, hW, hRel⟩ :=
+    (latchedCorruptibleSigner_refines_simulator S sk stateful₀ maxWindow).lift_validTrace
+      (a₀ := CorruptibleSignState.empty (S.derivePk sk) stateful₀) ⟨rfl, rfl, rfl, rfl, rfl⟩
+      hTrace
+  obtain ⟨_, hN, _, _, hCor⟩ := hRel
+  exact ⟨a_final, hW,
+    Machine.simulate_validTrace_project (corruptibleSignVisOut_simOut sk) hW, hCor, hN⟩
+
+/-- **The corruptible latched signer is simulated by `idealSignCorruptibleMachine`.** For
+    every initialized trace `tr` of the real machine with key `sk`:
+    1. `tr` is, event for event, an initialized trace of the simulated ideal world;
+    2. its translation is an initialized trace of the functionality;
+    3. every signature the simulator injected verifies under the enrolled public key;
+    4. every `.inject` of the translated trace is preceded by a `.corrupt`. -/
+theorem latchedCorruptibleSigner_simulated_by_idealSignCorruptible (S : SigScheme PK SK Sig)
+    (sk : SK) (stateful₀ : Bool) (maxWindow : Nat)
+    {tr : List (CorruptibleSignerCommand Sig × CorruptibleSignerReply SK Sig)}
+    (hAdmits : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).AdmitsTrace tr) :
+    (corruptibleSignSimulator S sk stateful₀ maxWindow).AdmitsTrace tr ∧
+    (idealSignCorruptibleMachine S (S.derivePk sk) stateful₀ maxWindow
+      (fun req => S.sign sk req.epoch req.message)).AdmitsTrace
+      (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut tr) ∧
+    (∀ p ∈ injectedEvents (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut tr),
+      S.verify (S.derivePk sk) p.1.message p.2 = true) ∧
+    (∀ (pre post : List (SignCommand Sig × SignReply Sig)) (req : SignRequest) (sig : Sig)
+      (out : SignReply Sig),
+      projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut tr =
+        pre ++ (SignCommand.inject req sig, out) :: post →
+      (SignCommand.corrupt, SignReply.corrupted) ∈ pre) := by
+  obtain ⟨c₀, c_final, hInit, hTrace⟩ := hAdmits
+  have hInit' : c₀ = ⟨sk, 0, false⟩ := hInit
+  rw [hInit'] at hTrace
+  obtain ⟨a_final, hW, hI, _, _⟩ :=
+    latchedCorruptibleSigner_run_projects_to_ideal S sk stateful₀ maxWindow hTrace
+  refine ⟨⟨_, a_final, rfl, hW⟩, ⟨_, a_final, rfl, hI⟩,
+    idealSignCorruptibleMachine_trace_injected_verified hI, ?_⟩
+  intro pre post req sig out hEq
+  rw [hEq] at hI
+  exact idealSignCorruptibleMachine_inject_after_corrupt hI
+
+/-- For a run of the real machine whose key is the simulator's, the emitted signatures of the
+    translated trace are the emitted signatures of the run. -/
+theorem latchedCorruptibleSigner_trace_emitted_eq_projected {S : SigScheme PK SK Sig} {sk : SK}
+    {stateful₀ : Bool} {maxWindow : Nat} :
+    ∀ {s s' : CorruptibleSignerState SK}
+      {tr : List (CorruptibleSignerCommand Sig × CorruptibleSignerReply SK Sig)},
+      (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).ValidTrace s tr s' →
+      s.sk = sk →
+      emittedEvents (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut tr) =
+        corruptibleSignerEmitted tr
+  | _, _, _, .nil _, _ => rfl
+  | s, _, _, .accept (s' := s₁) (inp := inp) (out := out) (rest := rest) hStep hRest, hSk => by
+    cases inp with
+    | sign req =>
+      obtain ⟨sig, _, _, hc, hOut⟩ := latchedCorruptibleSigner_sign_step_some hStep
+      have hSk₁ : s₁.sk = sk := by
+        rw [hc]
+        exact hSk
+      have ih := latchedCorruptibleSigner_trace_emitted_eq_projected hRest hSk₁
+      rw [hOut]
+      show (req, sig) :: emittedEvents
+          (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut rest) =
+        (req, sig) :: corruptibleSignerEmitted rest
+      rw [ih]
+    | exposeKey =>
+      obtain ⟨hc, hOut⟩ := latchedCorruptibleSigner_exposeKey_step_some hStep
+      have hSk₁ : s₁.sk = sk := by
+        rw [hc]
+        exact hSk
+      have ih := latchedCorruptibleSigner_trace_emitted_eq_projected hRest hSk₁
+      rw [hOut]
+      exact ih
+    | offlineSign req =>
+      obtain ⟨sig, _, hSign, hc, hOut⟩ := latchedCorruptibleSigner_offlineSign_step_some hStep
+      have hSk₁ : s₁.sk = sk := by
+        rw [hc]
+        exact hSk
+      have ih := latchedCorruptibleSigner_trace_emitted_eq_projected hRest hSk₁
+      rw [hSk] at hSign
+      rw [hOut, projectTrace_cons_some (corruptibleSignSimIn_offlineSign hSign)]
+      show (req, sig) :: emittedEvents
+          (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut rest) =
+        (req, sig) :: corruptibleSignerEmitted rest
+      rw [ih]
+    | register req sig =>
+      obtain ⟨_, _, hc, hOut⟩ := latchedCorruptibleSigner_register_step_some hStep
+      have hSk₁ : s₁.sk = sk := by
+        rw [hc]
+        exact hSk
+      have ih := latchedCorruptibleSigner_trace_emitted_eq_projected hRest hSk₁
+      rw [hOut]
+      show (req, sig) :: emittedEvents
+          (projectTrace (corruptibleSignSimIn S sk) corruptibleSignVisOut rest) =
+        (req, sig) :: corruptibleSignerEmitted rest
+      rw [ih]
+  | s, _, _, .reject inp _ hRest, hSk =>
+    latchedCorruptibleSigner_trace_emitted_eq_projected hRest
+      ((latchedCorruptibleSigner_errStep_facts s inp).1.trans hSk)
+
+/-- **Every signature the corruptible signer emits verifies under its public key**: honest,
+    offline or registered, before or after the key is exposed. The guarantee is that of
+    `idealSignCorruptibleMachine`, carried to the real machine by the simulation. -/
+theorem latchedCorruptibleSigner_emitted_verified (S : SigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat)
+    {tr : List (CorruptibleSignerCommand Sig × CorruptibleSignerReply SK Sig)}
+    (hAdmits : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).AdmitsTrace tr) :
+    ∀ p ∈ corruptibleSignerEmitted tr, S.verify (S.derivePk sk) p.1.message p.2 = true := by
+  obtain ⟨c₀, c_final, hInit, hTrace⟩ := hAdmits
+  have hInit' : c₀ = ⟨sk, 0, false⟩ := hInit
+  rw [hInit'] at hTrace
+  obtain ⟨a_final, _, hI, _, _⟩ :=
+    latchedCorruptibleSigner_run_projects_to_ideal S sk stateful₀ maxWindow hTrace
+  have hVer := idealSignCorruptibleMachine_trace_emitted_verified hI
+  rw [latchedCorruptibleSigner_trace_emitted_eq_projected hTrace rfl] at hVer
+  exact hVer
+
+/-- **Unexposed runs are honest runs.** If an initialized run of the corruptible signer ends
+    with the key unexposed, then each of its events is an honest signature (no output is the
+    key and no signature bypassed the latch), every signature verifies, and in stateful mode
+    the epochs strictly increase. The epoch clause fails for exposed runs
+    (`latchedCorruptibleSigner_exposed_run_reuses_epoch`). -/
+theorem latchedCorruptibleSigner_unexposed_run_safe (S : SigScheme PK SK Sig) (sk : SK)
+    (stateful₀ : Bool) (maxWindow : Nat)
+    {tr : List (CorruptibleSignerCommand Sig × CorruptibleSignerReply SK Sig)}
+    {c_final : CorruptibleSignerState SK}
+    (hTrace : (latchedCorruptibleSignerMachine S sk stateful₀ maxWindow).ValidTrace
+      ⟨sk, 0, false⟩ tr c_final)
+    (hU : c_final.corrupted = false) :
+    (∀ ev ∈ tr, ∃ (req : SignRequest) (sig : Sig),
+      ev = (CorruptibleSignerCommand.sign req, CorruptibleSignerReply.signature sig)) ∧
+    (∀ p ∈ corruptibleSignerEmitted tr, S.verify (S.derivePk sk) p.1.message p.2 = true) ∧
+    (stateful₀ = true →
+      (corruptibleSignerEmitted tr).Pairwise (fun a b => a.1.epoch < b.1.epoch)) := by
+  obtain ⟨a_final, _, hI, hCor, _⟩ :=
+    latchedCorruptibleSigner_run_projects_to_ideal S sk stateful₀ maxWindow hTrace
+  obtain ⟨_, hVer, hPw, _, _⟩ :=
+    idealSignCorruptibleMachine_uncorrupted_trace_safe hI (hCor.trans hU)
+  rw [latchedCorruptibleSigner_trace_emitted_eq_projected hTrace rfl] at hVer hPw
+  exact ⟨(latchedCorruptibleSigner_trace_unexposed hTrace hU).2, hVer, hPw⟩
+
+end Headline
+
+/-! ## 7. Rejected behaviours -/
+
+/-- Scheme with two secret keys and one public key: every key signs every message with `()`,
+    and the verifier accepts everything. -/
+def corruptToyTwoKeyScheme : SigScheme Unit Bool Unit where
+  derivePk _ := ()
+  sign _ _ _ := some ()
+  verify _ _ _ := true
+  correct _ _ _ _ _ := rfl
+
+/-- **A simulator holding another key is told apart in one round.** If `skSim ≠ sk₀`, the
+    environment that asks for the key sees `sk₀` from the real machine and `skSim` from the
+    simulated world, whether or not the two keys have the same public key. -/
+theorem corruptibleSignSimulator_wrong_key_view_differs {PK SK Sig : Type}
+    (S : SigScheme PK SK Sig) {sk₀ skSim : SK} (hNe : skSim ≠ sk₀) (stateful₀ : Bool)
+    (maxWindow : Nat) :
+    (latchedCorruptibleSignerMachine S sk₀ stateful₀ maxWindow).interact
+        (fun _ => some CorruptibleSignerCommand.exposeKey) 1 ⟨sk₀, 0, false⟩ [] ≠
+      (corruptibleSignSimulator S skSim stateful₀ maxWindow).interact
+        (fun _ => some CorruptibleSignerCommand.exposeKey) 1
+        (CorruptibleSignState.empty (S.derivePk skSim) stateful₀) [] := by
+  intro h
+  have h' : [some (CorruptibleSignerReply.key sk₀ : CorruptibleSignerReply SK Sig)] =
+      [some (CorruptibleSignerReply.key skSim)] := h
+  injection h' with h1 _
+  injection h1 with h2
+  injection h2 with h3
+  exact hNe h3.symm
+
+/-- **No refinement to a simulator holding another key.** -/
+theorem corruptibleSignSimulator_wrong_key_not_refinement {PK SK Sig : Type}
+    (S : SigScheme PK SK Sig) {sk₀ skSim : SK} (hNe : skSim ≠ sk₀) (stateful₀ : Bool)
+    (maxWindow : Nat) :
+    ¬ Nonempty (latchedCorruptibleSignerMachine S sk₀ stateful₀ maxWindow ⊑
+      corruptibleSignSimulator S skSim stateful₀ maxWindow) := by
+  rintro ⟨sim⟩
+  obtain ⟨hInitA, hRel⟩ := sim.init_ok (c₀ := ⟨sk₀, 0, false⟩) rfl
+  have hInitA' : sim.absInit ⟨sk₀, 0, false⟩ =
+      CorruptibleSignState.empty (S.derivePk skSim) stateful₀ := hInitA
+  have hEq := sim.interact_eq (fun _ => some CorruptibleSignerCommand.exposeKey) 1 [] hRel
+  rw [hInitA'] at hEq
+  exact corruptibleSignSimulator_wrong_key_view_differs S hNe stateful₀ maxWindow hEq
+
+/-- The two keys of `corruptToyTwoKeyScheme` have the same public key and sign identically, and
+    a simulator holding the other one is still told apart. -/
+theorem corruptToyTwoKey_same_pk_wrong_key_view_differs :
+    (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).interact
+        (fun _ => some CorruptibleSignerCommand.exposeKey) 1 ⟨false, 0, false⟩ [] ≠
+      (corruptibleSignSimulator corruptToyTwoKeyScheme true true 8).interact
+        (fun _ => some CorruptibleSignerCommand.exposeKey) 1
+        (CorruptibleSignState.empty (corruptToyTwoKeyScheme.derivePk true) true) [] :=
+  corruptibleSignSimulator_wrong_key_view_differs corruptToyTwoKeyScheme (by decide) true 8
+
+/-- The run `sign` at epoch `0`, `exposeKey`, `offlineSign` at epoch `0` of the stateful toy
+    signer: an initialized trace that ends exposed. -/
+theorem witness_latchedCorruptibleSigner_exposed_run :
+    ∃ tr : List (CorruptibleSignerCommand Unit × CorruptibleSignerReply Bool Unit),
+      (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).AdmitsTrace tr ∧
+      corruptibleSignerEmitted tr =
+        [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] :=
+  ⟨[(.sign ⟨0, []⟩, .signature ()), (.exposeKey, .key false),
+      (.offlineSign ⟨0, [1]⟩, .signature ())],
+    ⟨⟨false, 0, false⟩, ⟨false, 1, true⟩, rfl,
+      .accept (s' := ⟨false, 1, false⟩) rfl
+        (.accept (s' := ⟨false, 1, true⟩) rfl
+          (.accept (s' := ⟨false, 1, true⟩) rfl (.nil _)))⟩, rfl⟩
+
+/-- **The one-time-epoch property fails once the key is exposed.** Without the hypothesis that
+    the run ends unexposed, the epoch clause of `latchedCorruptibleSigner_unexposed_run_safe`
+    is false: after `sign` at epoch `0` and `exposeKey`, an `offlineSign` at epoch `0` is
+    accepted, so two emitted signatures share an epoch. -/
+theorem latchedCorruptibleSigner_exposed_run_reuses_epoch :
+    ¬ (∀ (tr : List (CorruptibleSignerCommand Unit × CorruptibleSignerReply Bool Unit))
+        (c_final : CorruptibleSignerState Bool),
+        (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).ValidTrace
+          ⟨false, 0, false⟩ tr c_final →
+        (corruptibleSignerEmitted tr).Pairwise (fun a b => a.1.epoch < b.1.epoch)) := by
+  intro h
+  have hTr : (latchedCorruptibleSignerMachine corruptToyTwoKeyScheme false true 8).ValidTrace
+      ⟨false, 0, false⟩
+      [(.sign ⟨0, []⟩, .signature ()), (.exposeKey, .key false),
+        (.offlineSign ⟨0, [1]⟩, .signature ())] ⟨false, 1, true⟩ :=
+    .accept (s' := ⟨false, 1, false⟩) rfl
+      (.accept (s' := ⟨false, 1, true⟩) rfl
+        (.accept (s' := ⟨false, 1, true⟩) rfl (.nil _)))
+  have hPw : List.Pairwise (fun a b : SignRequest × Unit => a.1.epoch < b.1.epoch)
+      [((⟨0, []⟩ : SignRequest), ()), ((⟨0, [1]⟩ : SignRequest), ())] := h _ _ hTr
+  exact Nat.lt_irrefl 0 ((List.pairwise_cons.mp hPw).1 _ (List.mem_cons.mpr (.inl rfl)))
+
+/-- Scheme whose signer fails exactly at epoch `0`; the verifier accepts everything. -/
+def corruptToyBurnScheme : SigScheme Unit Unit Unit where
+  derivePk _ := ()
+  sign _ ep _ := if ep = 0 then none else some ()
+  verify _ _ _ := true
+  correct _ _ _ _ _ := rfl
+
+/-- **The projection to the functionality is not a `DataRefines`.** For the stateful signer of
+    `corruptToyBurnScheme` with window `0`, no `DataRefines` witness relates the real machine
+    to `idealSignCorruptibleMachine` through the simulator's interface maps: the failed
+    signature at epoch `0` consumes that epoch in the real machine, `sim_reject` keeps the
+    functionality's state fixed, and the request for epoch `1` that the real machine then
+    accepts is outside the functionality's window. -/
+theorem latchedCorruptibleSigner_no_dataRefines_to_ideal :
+    ¬ Nonempty (DataRefines (latchedCorruptibleSignerMachine corruptToyBurnScheme () true 0)
+      (idealSignCorruptibleMachine corruptToyBurnScheme () true 0
+        (fun req => corruptToyBurnScheme.sign () req.epoch req.message))
+      (corruptibleSignSimIn corruptToyBurnScheme ()) corruptibleSignVisOut) := by
+  rintro ⟨D⟩
+  obtain ⟨hInitA, hRel₀⟩ := D.init_ok (c₀ := ⟨(), 0, false⟩) rfl
+  have hA₀ : D.absInit ⟨(), 0, false⟩ = CorruptibleSignState.empty () true := hInitA
+  rw [hA₀] at hRel₀
+  have hRel₁ := D.sim_reject (inp := .sign ⟨0, []⟩) hRel₀ rfl
+  obtain ⟨a', hStepA, _⟩ := D.sim_visible (inp := .sign ⟨1, []⟩) (out := .signature ())
+    (j := .sign ⟨1, []⟩) (c' := ⟨(), 2, false⟩) hRel₁ rfl rfl
+  have hNone : (idealSignCorruptibleMachine corruptToyBurnScheme () true 0
+      (fun req => corruptToyBurnScheme.sign () req.epoch req.message)).step
+      (CorruptibleSignState.empty () true) (.sign ⟨1, []⟩) = none := rfl
+  rw [hNone] at hStepA
+  cases hStepA
+
+#tooth_pair latchedCorruptibleSigner_adaptive_view_eq_simulator vs
+  corruptibleSignSimulator_wrong_key_view_differs
+#tooth_pair latchedCorruptibleSigner_adaptive_view_eq_simulator vs
+  corruptToyTwoKey_same_pk_wrong_key_view_differs
+#tooth_pair latchedCorruptibleSigner_simulated_by_idealSignCorruptible vs
+  idealSignCorruptible_inject_rejected_before_corrupt
+#tooth_pair latchedCorruptibleSigner_simulated_by_idealSignCorruptible vs
+  corruptibleSignSimulator_wrong_key_not_refinement
+#tooth_pair latchedCorruptibleSigner_run_projects_to_ideal vs
+  corruptibleSignSimulator_register_rejected_unexposed
+#tooth_pair latchedCorruptibleSigner_unexposed_run_safe vs
+  latchedCorruptibleSigner_exposed_run_reuses_epoch
+#tooth_pair latchedCorruptibleSigner_run_projects_to_ideal vs
+  latchedCorruptibleSigner_no_dataRefines_to_ideal
+
+#verify_kernel
+  Qsag.Spec.latchedCorruptibleSigner_refines_simulator
+
+#verify_constructive
+  Qsag.Spec.Machine.simulate_step_of
+  Qsag.Spec.Machine.simulate_step_some
+  Qsag.Spec.Machine.simulate_reject_of
+  Qsag.Spec.Machine.simulate_refuse_of
+  Qsag.Spec.Machine.simulate_validTrace_project
+  Qsag.Spec.Machine.validTrace_split
+  Qsag.Spec.Refines.interact_eq
+  Qsag.Spec.latchedCorruptibleSigner_sign_step_some
+  Qsag.Spec.latchedCorruptibleSigner_exposeKey_step
+  Qsag.Spec.latchedCorruptibleSigner_exposeKey_step_some
+  Qsag.Spec.latchedCorruptibleSigner_offlineSign_step_some
+  Qsag.Spec.latchedCorruptibleSigner_register_step_some
+  Qsag.Spec.latchedCorruptibleSigner_errStep_facts
+  Qsag.Spec.latchedCorruptibleSigner_trace_key
+  Qsag.Spec.latchedCorruptibleSigner_trace_unexposed
+  Qsag.Spec.corruptibleSignVisOut_simOut
+  Qsag.Spec.corruptibleSignSimIn_offlineSign
+  Qsag.Spec.corruptibleSignSimIn_offlineSign_none
+  Qsag.Spec.corruptibleSignSimulator_step_of
+  Qsag.Spec.corruptibleSignSimulator_reject_of
+  Qsag.Spec.corruptibleSignSimulator_refuse_of
+  Qsag.Spec.corruptibleSignSimulator_register_rejected_unexposed
+  Qsag.Spec.corruptibleSignSimulator_offlineSign_rejected_unexposed
+  Qsag.Spec.idealSignCorruptibleMachine_trace_corrupt_event
+  Qsag.Spec.idealSignCorruptibleMachine_inject_after_corrupt
+  Qsag.Spec.latchedCorruptibleSigner_adaptive_view_eq_simulator
+  Qsag.Spec.latchedCorruptibleSigner_run_projects_to_ideal
+  Qsag.Spec.latchedCorruptibleSigner_simulated_by_idealSignCorruptible
+  Qsag.Spec.latchedCorruptibleSigner_trace_emitted_eq_projected
+  Qsag.Spec.latchedCorruptibleSigner_emitted_verified
+  Qsag.Spec.latchedCorruptibleSigner_unexposed_run_safe
+  Qsag.Spec.idealSignCorruptible_inject_rejected_before_corrupt
+  Qsag.Spec.corruptibleSignSimulator_wrong_key_view_differs
+  Qsag.Spec.corruptibleSignSimulator_wrong_key_not_refinement
+  Qsag.Spec.corruptToyTwoKey_same_pk_wrong_key_view_differs
+  Qsag.Spec.witness_latchedCorruptibleSigner_exposed_run
+  Qsag.Spec.latchedCorruptibleSigner_exposed_run_reuses_epoch
+  Qsag.Spec.latchedCorruptibleSigner_no_dataRefines_to_ideal
+
+#verify_inhabited Qsag.Spec.latchedCorruptibleSigner_simulated_by_idealSignCorruptible
+  Qsag.Spec.witness_latchedCorruptibleSigner_exposed_run
+
+#print axioms Qsag.Spec.latchedCorruptibleSigner_refines_simulator
+#print axioms Qsag.Spec.latchedCorruptibleSigner_adaptive_view_eq_simulator
+#print axioms Qsag.Spec.latchedCorruptibleSigner_simulated_by_idealSignCorruptible
+#print axioms Qsag.Spec.latchedCorruptibleSigner_unexposed_run_safe
+
+end Qsag.Spec
+end
