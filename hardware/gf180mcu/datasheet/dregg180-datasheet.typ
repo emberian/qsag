@@ -325,26 +325,26 @@ Dregg-180 unifies a formally verified post-quantum cryptographic verifier (`qsag
 All core logic is synthesized and routed inside the `1,052 × 1,647 µm` (`1,732,644 µm²`) `SLOT_0P5X0P5` core boundary with `gf180mcu_fd_sc_mcu7t5v0` standard cells and `wafer.space` mandatory ID/logo macros (`qrcode_id`, `shuttle_id`, `project_id`, `marker`, `wafer_space_logo`). No custom analog blocks or hard SRAMs are required.
 
 #table(
-  columns: (1.5fr, 0.8fr, 0.7fr, 2.2fr),
-  inset: 4.2pt,
+  columns: (1.5fr, 0.85fr, 0.72fr, 2.13fr),
+  inset: 4.0pt,
   stroke: 0.4pt + steel,
   fill: (x, y) => if y == 0 { navy } else if calc.odd(y) { tint } else { white },
   text(fill: white, weight: "bold")[Subsystem / RTL Module],
-  text(fill: white, weight: "bold")[Cell Type],
+  text(fill: white, weight: "bold")[Area (`µm²` incl / excl)],
   text(fill: white, weight: "bold")[Share],
   text(fill: white, weight: "bold")[Key Architectural Role & Physical Implementation],
-  [`qsag_sponge` (`u_sp`)], [`latq_1` + `latrnq_1`], [`~21%`], [42 wiped public/scratch rows (`latq_1`) + 14 secret rows (`latrnq_1` behind `icgtp_4`), 1-hot OR-bus],
-  [`qsag_wire_engine` (`u_engine`)], [7T CMOS + `ereg`], [`~19%`], [125-state `[12,7,4]` HD=4 FSM, flat 36-source `imm` OR-bus, Verifier VM, `Cut-the-Hash`],
-  [`qsag_gl64_karatsuba_csa` (`u_alu`)], [`addf_1` + prefix], [`~12%`], [5:2 `addf_1` CSA -> reg -> Han-Carlson canonicalizer; in-place `{acc_s, acc_c}` shift-add mul],
-  [`qsag_io_shell` (`u_io`)], [`latq_1` + Muller-C], [`~10%`], [SPI/QSPI/OSPI + `0x05 READ_DIAG` + Source-Sync + 2-phase Sutherland RX/TX FIFOs],
-  [`dregg_ro_puf_bch` (`u_puf`)], [`nand2_1` + `ereg`], [`~5.5%`], [32× 5-stage ROs (`256` pairs), 20-bit ripple counters, 10-root Horner + Chien `BCH(63,36,5)`],
-  [`qsag_gals_clk_rst` + `u_shield`], [`dlya_1` + `dffsr`], [`~5.5%`], [32-tap DCRO, dual-watchdog glitch-free mux, TRCP replica, 4-quadrant spines, `Metal5` loop],
-  [`dregg_nfc_nco` (`u_nfc`)], [7T CMOS + `ereg`], [`~4.5%`], [13.56 MHz Manchester decoder (`144b` token + `CRC16-A`), 847.5 kHz ACK, 32-bit RF NCO],
-  [`qsag_keccak_serial` (`u_kc`)], [`dffq_1` + 7T CMOS], [`~4.0%`], [3-register (`acc_q, b0_q, b1_q`) in-place `N^k` `Keccak-p[1600, 12/24]`],
-  [`qsag_gf128_clmul` (`u_gf`)], [`ereg` + XOR], [`~3.8%`], [128-bit `GF(2^128)` accumulator (`g(z) = z^128 + z^7 + z^2 + z + 1`)],
-  [`dregg_captp_vat` (`u_vat`)], [`latrnq_1` + cmp], [`~3.5%`], [160-bit policy latch bank, capability attenuation lattice & spend/epoch/guard membrane],
-  [`dregg_distance_tdc` (`u_db`)], [`aoi21_2`+`mux2_4`], [`~3.5%`], [`qsag_chal_lock` `< 6 ns` 64-round responder + 32-tap Vernier TDC],
-  [`qsag_field_engine` + `u_rc` + `u_trng` + `u_anchor`], [7T CMOS], [`~7.7%`], [Field micro-sequencer, Poseidon2 constants, SP 800-90B TRNG, FRAM SPI master],
+  [`qsag_sponge` (`u_sp`)], [`222.1k / 51.8k`], [`20.78%`], [42 public/scratch rows (`latq_1`) + 14 secret rows (`latrnq_1` behind `icgtp_4`), 1-hot OR-bus],
+  [`qsag_wire_engine` (`u_engine`)], [`215.5k / 191.1k`], [`20.16%`], [125-state `[12,7,4]` HD=4 FSM, flat 36-source `imm` OR-bus, Verifier VM, `Cut-the-Hash`],
+  [`qsag_gl64_karatsuba_csa` (`u_alu`)], [`159.1k / 41.8k`], [`14.88%`], [5:2 `addf_1` CSA -> reg -> explicit Han-Carlson prefix trees (`26.9k`) + parallel `u_v` canon],
+  [`qsag_io_shell` (`u_io`)], [`92.2k / 26.5k`], [`8.62%`], [SPI/QSPI/OSPI + `0x05 READ_DIAG` + Source-Sync + 2-phase Sutherland RX/TX latch FIFOs],
+  [`qsag_keccak_serial` (`u_kc`)], [`59.3k / 45.6k`], [`5.55%`], [3-register (`acc_q, b0_q, b1_q`) + LUT `mod5` in-place `N^k` `Keccak-p[1600, 12/24]`],
+  [`dregg_ro_puf_bch` (`u_puf`)], [`58.1k / 35.1k`], [`5.44%`], [32× 5-stage ROs (`256` pairs), 20-bit ripple counters, 10-root Horner + Chien `BCH(63,36,5)`],
+  [`qsag_gals_clk_rst` + `u_shield`], [`49.0k / 21.7k`], [`4.58%`], [32-tap DCRO (`.en(rst_n_pad)`), dual-watchdog mux, TRCP, 4-quadrant spines, `Metal5` loop],
+  [`dregg_nfc_nco` (`u_nfc`)], [`45.5k / 28.6k`], [`4.26%`], [13.56 MHz Manchester decoder (`144b` token + `CRC16-A`), 847.5 kHz ACK, 32-bit RF NCO],
+  [`qsag_gf128_clmul` (`u_gf`)], [`35.0k / 10.6k`], [`3.27%`], [128-bit `GF(2^128)` accumulator (`g(z) = z^128 + z^7 + z^2 + z + 1`)],
+  [`dregg_distance_tdc` (`u_db`)], [`33.8k / 16.5k`], [`3.17%`], [`qsag_chal_lock` `< 6 ns` 64-round responder + 32-tap Vernier TDC (`7.2k`)],
+  [`dregg_captp_vat` (`u_vat`)], [`31.6k / 21.0k`], [`2.95%`], [160-bit policy `latrnq_1` bank, capability attenuation lattice & spend/epoch/guard membrane],
+  [`u_fe`+`u_rc`+`u_trng`+`u_anchor`], [`67.3k / 66.6k`], [`6.29%`], [Field sequencer (`19.9k`), P2 RC (`19.3k`), 17-stage CoSO TRNG (`15.5k`), FRAM SPI (`12.6k`)],
 )
 
 #pagebreak()
@@ -505,25 +505,26 @@ Dregg-180 preserves the *exact 56-pad count, order, and power-pad positions* def
   [Internal Pad Pull-Up / Pull-Down Resistance], [$R_"PU" / R_"PD"$], [35], [55], [90], [kΩ],
 )
 
-== Post-Layout 9-Corner OpenSTA Timing Signoff (`CLOCK_PERIOD = 25.0 ns`, 40 MHz)
+== Post-Layout 9-Corner Propagated-Clock OpenSTA (`CLOCK_PERIOD = 40.0 ns`, 25.0 MHz Target)
 
-Post-PnR parasitic extraction (`OpenROAD.RCX` `nom`/`min`/`max` SPEF) and multi-corner `OpenSTA` signoff (`librelane/chip_top_qsag.sdc`) verify zero setup, hold, slew, or capacitance violations across all 9 process-voltage-temperature-RC corners:
+Post-PnR parasitic extraction (`OpenROAD.RCX` `nom`/`min`/`max` SPEF) and zero-virtual-clock propagated `OpenSTA` (`unpropagated.rpt = 0 B`, `librelane/chip_top_qsag.sdc`) measure real silicon timing on `SLOT_0P5X0P5` (`78.15%` placeable fill; `ResizerTimingPostCTS/GRT` disabled to avoid OpenROAD's latch time-borrowing hang across 4,512 `latq_1`/`latrnq_1` cells, leaving un-upsized `buf_1` loads on the `st -> qsag_sponge -> nxt_st_id` path):
 
 #table(
-  columns: (1.55fr, 0.95fr, 0.85fr, 0.85fr, 0.85fr, 0.95fr),
-  inset: 4pt,
+  columns: (1.55fr, 0.98fr, 0.88fr, 0.82fr, 0.82fr, 0.95fr),
+  inset: 3.8pt,
   stroke: 0.4pt + steel,
   fill: (x, y) => if y == 0 { navy } else if calc.odd(y) { tint } else { white },
-  text(fill: white, weight: "bold")[PVT Corner (`nom/min/max` RC)],
-  text(fill: white, weight: "bold")[`clk_core` WNS],
+  text(fill: white, weight: "bold")[PVT × RC Corner (`SPEF`)],
+  text(fill: white, weight: "bold")[Setup WNS],
   text(fill: white, weight: "bold")[Hold WNS],
-  text(fill: white, weight: "bold")[Max Slew],
-  text(fill: white, weight: "bold")[Max Cap],
+  text(fill: white, weight: "bold")[Slew Viol],
+  text(fill: white, weight: "bold")[Cap Viol],
   text(fill: white, weight: "bold")[Implied $f_"max"$],
-  [`tt_025C_5v00` (25 °C, 5.00 V)], [#wns_tt_ns], [+0.42 ns], [0 viol], [0 viol], [#fmax_tt_mhz],
-  [`ss_125C_4v50` (125 °C, 4.50 V)], [#wns_ss_ns], [+0.89 ns], [0 viol], [0 viol], [#fmax_ss_mhz],
-  [`ff_n40C_5v50` (-40 °C, 5.50 V)], [+14.10 ns], [#hold_wns_ns], [0 viol], [0 viol], [> 90 MHz],
-  [`DB_CHAL_IN -> DB_RESP_OUT` (`bi_24t`×2)], [`<= 7.6 ns` (`SS`)], [`~3.6 ns` (`TT`)], [`SL=0` fast], [15 pF load], [`< 8.0 ns` max],
+  [`nom_tt_025C_5v00` (`min`/`max`)], [`-37.33 ns` (`-29.6/-44.7`)], [`-1.43 ns`], [`842`], [`1,265`], [`12.93 MHz` (`14.4` min)],
+  [`nom_ss_125C_4v50` (`min`/`max`)], [`-97.61 ns` (`-88.7/-120.4`)], [`-2.33 ns`], [`5,198`], [`1,295`], [`7.27 MHz` (`13.9` pre-rt)],
+  [`nom_ff_n40C_5v50` (`min`/`max`)], [`-8.01 ns` (`-4.1/-12.6`)], [`-1.02 ns`], [`433`], [`1,239`], [`20.83 MHz` (`22.7` min)],
+  [`SCK` / `RX_CLK` / `NFC_CLK` (`SS`)], [`23.0 / 23.0 / 7.7 ns`], [propagated], [`0` `STA-0450`], [5 pF DB], [`43.4 / 43.4 / 130.4 MHz`],
+  [`DB_CHAL_IN -> DB_RESP_OUT`], [`3.99–5.56 ns` (`FF`)], [pad-to-pad], [`SL=0` fast], [5 pF coax], [`< 8.0 ns` rapid-bit],
 )
 
 == Exact Measured Cryptographic & Enclave Operation Latencies

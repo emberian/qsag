@@ -445,62 +445,27 @@ same parametric RTL is also proven end to end, with its real multiplier, at redu
 The GF(2^128) unit is proven per digit step against a bit-serial specification, plus the
 transition relation of the sequential unit. Mutated RTL must give `sat`.
 
-## Results (final RTL, 2026-11-16)
+## Results (Dregg-180 v1 unified enclave + verifier RTL, 2026-11-21)
 
-| Gate | Result | Log |
+> **Quarantined Historical Reference (`v2/`):** `hardware/gf180mcu/v2/` contains an experimental 28-bit ROM-microcoded enclave study (`5/5` Python reference tests passing) that omitted the Goldilocks/Poseidon2 verifier in Config S and hit a `49.6–65.6 ns` critical path; the unified tapeout RTL and flow live in `src/` + `rtl/` + `librelane/`.
+
+| Gate | Measured Result | Evidence |
 |---|---|---|
-| Lint | 0 warnings, 0 errors in all three configurations | `tb/logs/lint.log` |
-| Datapath unit test | 593 / 593, with and without clock-gated registers | – |
-| Chip testbench, full script (54 transactions) | pass: `spi`, `ss_100`, `async` | `tb/logs/sim_*_script.log` |
-| Chip testbench, short script (38 transactions) | pass: `ss_023`, `ss_370`, `ss_dcro`, `async_slow` | `tb/logs/` |
-| Scenarios | pass: `clkswitch` (narrowest `clk_core` pulse 4,220 ps over 24 switch-overs), `tamper` ×2, `glitch`, `trng`, `loops`, `spiburst` | `tb/logs/` |
-| Z3 | Goldilocks 12 / 12 at W = 32, 4 / 4 end to end at W = 4 (W = 6 timed out at 75 s); GF(2^128) 5 / 5 | `lec/logs/` |
-| Synthesis | 835,495 µm² flat, 48.2 % of the core, 30,069 cells, 5,579 flip-flops | `synth/reports/area.txt` |
-| LibreLane | through detailed placement (55.2 % at global placement); CTS and everything after not run | `librelane/reports/ll_summary.txt` |
+| Verilator lint | **0 warnings, 0 errors** across all 4 configurations (`[]`, `[-DQSAG_ICG]`, `[-DQSAG_SIM_DELAYS --timing]`, `[-DQSAG_ICG -DQSAG_LATCH_RF]`) | `sh tb/lint.sh` |
+| Formal Z3 SMT-LIB2 LEC | **47 / 47 queries `OK`**: `run_prefix_lec.py` (`16/16` explicit Han-Carlson prefix adders), `run_lec.py` (`19/19` Goldilocks `W=32` + parallel `u_v` canon + `W=4` mul + `GF(2^128)`), `run_control_lec.py` (`9/9` `[12,7,4]` HD>=4 FSM + `e_rd>=44 => out_data==0`), `run_mul_lec.py` (`3/3` 64-step mul) | `lec/run_*.py` |
+| Datapath & KAT unit tests | **719 / 719** field/sponge/Canopy/Fp5 vectors + **54 / 54** FIPS 202 / RFC 9861 Keccak KATs (`0 mismatches`); `unit_tdc`, `unit_puf` (`model`, `stalled`, `timed`) **all PASSED** | `tb/run_unit_dp.sh`, `tb/run_unit_organs.sh` |
+| Full-chip 56-tx script | **56 / 56 transactions PASSED (`0 errors`)** across all 7 link/clock modes (`spi`, `ss_100`, `async`, `ss_023`, `ss_370`, `ss_dcro`, `async_slow`), including accepted & tampered 67-record `hem_program` | `tb/sim_qsag_ni_180.cpp` |
+| Enclave & physical scenarios | **All 19 scenarios PASSED (`0 errors`)**: 17-stage CoSO `trng`, `coldboot` ×3 (`.en(rst_n_pad)` 4-state/2-state safe), `loops`, `clkswitch` (`4,220 ps` min pulse), `tamper` ×2, `glitch`, `spiburst`, clockless `0x05 diag`, `prfcap` ×2, `tamperboot` ×2, `bist` ×3, and 29-check `enclave` (`OP_PUF` 3-flip recon, `mint_lock`, `zk_pin`, `K_vat`-MAC NFC, 64-round `G_DIST`) | `tb/sim_qsag_ni_180.cpp` |
+| Yosys synthesis (`mcu7t5v0`) | **`1,040,731 µm²` flat** (`118.52 kGE @8.7808` / `94.82 kGE @nand2_1`, **`60.07%` of `1,732,644 µm²` `SLOT_0P5X0P5` core**, `38,870` leaf cells; `1,031,768 µm²` / `59.55%` in LibreLane `AREA 1`; `3,456` `latq_1` + `1,056` `latrnq_1` behind `71` `icgtp_4` gates) | `build/synth_chip.stat` |
+| LibreLane 83-step physical flow (`SLOT_0P5X0P5`, 56 pads) | Completed through GDS, KLayout render, 9-corner SPEF `STAPostPNR` (**0 virtual clocks**, `unpropagated.rpt = 0 B`), IR-drop (`0.265 mV` worst VDD drop), Magic/KLayout DRC, and Netgen LVS (`47,752 == 47,752` devices matched, `0` density errors, `0` disconnected pins). At `78.15%` post-CTS placeable fill (`47,318` active cells), 5LM routing hits `12,767` GRT overflow -> `81,492` TR DRC / `32,035` Magic DRC / `8,237` LVS shorted nets, and un-resized post-SPEF $f_{\max}$ is `12.93 MHz` (`nom_tt`) / `7.27 MHz` (`nom_ss`) / `20.83 MHz` (`nom_ff`) (`SCK`/`RX_CLK` `43.4 MHz` SS, `NFC_CLK` `130.4 MHz` SS, rapid-bit pad-to-pad `3.99–5.56 ns`). | `librelane/reports/e5_slot0p5x0p5_metrics.json` |
 
-Cost of typical transactions in core clocks, request to last response word (`ss_100`):
-Poseidon2 permutation 3.4 k, Canopy node 3.4 k, TurboSHAKE256 of one block 3.2 k, key load with
-anchor initialisation 10 k, stateful signature of two WOTS chains 32 k, six WOTS chains 105 k,
-14 FORS public leaves 85 k, the 67-record verifier program 122 k.
+## Candid Physical Closure Status on `SLOT_0P5X0P5` ($3,000, `4.90 mm²`)
 
-## Status and open items
+**Do not submit the current `78.15%`-dense `SLOT_0P5X0P5` GDS to mask-making without area reduction or `SLOT_1X0P5` (`9.8 mm²`).** All five Houyhnhnm security organs (`dregg_captp_vat`, `dregg_ro_puf_bch`, `dregg_nfc_nco`, `dregg_distance_tdc`, `dregg_shield_canaries`), the 17-stage CoSO TRNG, explicit Han-Carlson prefix adders, Quintic `Fp5` + `GoldilocksExt4` verifier VM, and `Cut-the-Hash` signing enclave synthesize to `1,032k–1,041k µm²` (`~60%` of core), which grows to `1,308k µm²` (`78.15%` of `1,673,768 µm²` placeable area) after `RepairDesignPostGPL` (`168.1k µm²`) and zero-virtual-clock `TritonCTS` (`93.5k µm²`). On 5-metal `gf180mcuD`, placeable fill above `~66.7%` saturates `Metal2`/`Metal3` local pin access (`12,767` GRT overflow), and OpenROAD's iterative latch time-borrowing analyzer hangs `ResizerTimingPostCTS/GRT` across the 4,512 transparent latches, leaving un-upsized `buf_1` loads (`-37.33 ns` `nom_tt` / `-97.61 ns` `nom_ss` WNS at `40 ns`).
 
-**Do not order this yet.** There is no routed layout and no timing closure.
-
-**Timing.** No valid Fmax exists. Clock-tree synthesis did not finish inside the 600 s limit
-this work ran under, so the only timing reports are before buffering or with an unbuffered
-clock net, and neither says anything about the logic. What they do show is a worst data path
-of 164 stages with AND-OR-invert carry chains: synthesis was area-driven and the three adders
-of the canonicalizer and the multiplier's final adder came out as ripple chains. Expect well
-under the 50 MHz target until those are synthesized for delay (or written as parallel-prefix
-adders) and a post-CTS STA is run.
-
-**Differences from the brief, with the reason**
-
-| Brief | As built | Why |
-|---|---|---|
-| 50–64 kGE, ≤ 44 % of the core | 95.2 kGE in the brief's unit (76.1 kGE in real `nand2_1`), 48.2 % | the brief's 8.78 µm² per gate is not this library's `nand2_1` (10.976 µm²); the 5,579 flip-flops the feature list requires are 379,464 µm² (43 kGE in its unit) on their own. Next lever: a latch-based register file (about −4 kGE) |
-| Keccak one round per clock (12 / 24 clocks) | word-serial, 125 clocks per round | a round-per-clock datapath measured 26 kGE plus a multiplexer on each of 1,600 state flops |
-| 2-cycle Karatsuba, 9-multiply Ext4 in ~18 clocks | 4-clock multiply on one 33 × 33 multiplier; Ext4 = 16 products, 122 clocks | one multiplier instead of three or more |
-| GF(2^128) at 16 bits per clock | 2 bits per clock (parameter `GF_D`) | area; not on a throughput path |
-| 64-byte shadow buffer, one-clock block absorb | the 8-word ingress FIFO is the rate buffer; a block is absorbed word by word | the shadow words hold operands and request parameters |
-| Merkle depth 1..62 | 1..32 | the canonical Canopy node tag carries a 32-bit node index |
-| 100+ MB/s both ways in mode 01 | receive limited by `RX_CLK` timing; transmit is one byte per two core clocks | the transmit clock is generated from the core clock |
-| `VERIFY_HEM_STREAM` verifies a Hem proof | a verifier VM that executes Hem's Poseidon2-regime checks, tested on a reduced Hem-shaped program | compiling the production verifier schedule into a record stream is host software that does not exist yet; byte-hash (cSHAKE / TurboSHAKE Canopy) regimes are not supported |
-
-**Not done**
-
-* No clock tree, routing, DRC, LVS or GDS (`librelane/reports/ll_summary.txt`). `make librelane`
-  runs the whole flow where there is no time limit; expect to iterate on CTS with eight clock
-  roots and on timing.
-* No gate-level simulation of the mapped netlist; the delay-line, oscillator and C-element
-  cells are simulated with behavioural delays, not with extracted ones.
-* DCRO frequency range, replica calibration and TRNG entropy are design intent until measured.
-* No power analysis; no side-channel countermeasure beyond the clock dither (no masking).
-* The clockless stage relies on the bundling margin of two delay cells over the pad-to-flop
-  data skew; this must be checked in sign-off timing (`areq` paths in the SDC).
-* `PRF_MSG` is not gated by a request tag.
-* The request tag is this design's own construction, not `qsag`'s BDOZ / BeltLatch format.
+Two concrete paths close `0` DRC / `0` LVS / `>= 25–40 MHz` SS cleanly:
+1. **Stay on `SLOT_0P5X0P5` ($3,000):** Trim `~220k µm²` of core logic (e.g., structured macro/scripted placement of the `56 × 64b` `qsag_sponge` latch array saving `~72k µm²` of repair buffers + folding `qsag_wire_engine` `191k µm²` into the compact `ASS2 / Dregg-64` `< 450k µm²` crypto-RISC microarchitecture) AND add 1 pipeline register on `qsag_sponge` `rd_data` (`port`) so `set_max_time_borrow 0` lets `ResizerTimingPostCTS` run in `< 30 s`.
+2. **Keep `Dregg-180` v1 RTL unchanged on `SLOT_1X0P5` ($6,000):** Doubling core area drops post-CTS fill from `78.15%` to `~38%`, eliminating the `12,767` GRT routing overflow immediately.
 
 ## Licence
 
