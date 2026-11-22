@@ -12,6 +12,7 @@ alloc = []
 std = ["alloc", "qsag-asm/std"]
 # Select the live Linux Vulkan loader rather than the no_std unavailable stub.
 vulkan = ["std"]
+fault-injection-audit = ["std"]
 
 [dependencies]
 # Strictly zero external crates.io dependencies.

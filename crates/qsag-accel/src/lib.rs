@@ -26,6 +26,11 @@ extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+#[cfg(feature = "alloc")]
+pub mod aws_f2;
+#[cfg(feature = "alloc")]
+pub use aws_f2::{AwsF2Backend, F2Ass2Cluster, F2NiSession};
+
 pub mod ct;
 pub mod gf2_128;
 pub mod goldilocks;
