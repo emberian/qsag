@@ -1,0 +1,6 @@
+`ifndef CL_QSAG_F2_DEFINES_VH
+`define CL_QSAG_F2_DEFINES_VH
+`define QSAG_MAGIC 32'h5153_4147
+`define QSAG_ABI 32'h0002_0000
+`define QSAG_TEST_ID 32'h1d0f_f201
+`endif
