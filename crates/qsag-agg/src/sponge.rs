@@ -1064,6 +1064,43 @@ pub fn cshake256_pow_u64_x8(midstate: &[u64; 25], chal: &[u8; 32], base_nonce: u
     st.0[0]
 }
 
+/// Four consecutive counter-mode blocks at once: lanes `0..4` of
+/// `cSHAKE256(customization, seed || le64(counter + k))` for `k in 0..4`, where `midstate`
+/// is `cshake256_static_midstate(customization)` and `seed` is given as its four
+/// little-endian words. `out[k]` read as little-endian bytes is exactly
+/// `cshake256_from_midstate_32(midstate, seed || le64(counter + k))`; the 40-byte input
+/// fits one rate block, so this is one 4-way permutation.
+#[inline]
+pub fn cshake256_seed_counter_words_x4(
+    midstate: &[u64; 25],
+    seed: &[u64; 4],
+    counter: u64,
+) -> [[u64; 4]; 4] {
+    let mut st = qsag_asm::KeccakState4x([[0u64; 4]; 25]);
+    for (dst_lane, &ms_val) in st.0.iter_mut().zip(midstate.iter()) {
+        *dst_lane = [ms_val; 4];
+    }
+    for (lane, &w) in seed.iter().enumerate() {
+        for dst in &mut st.0[lane] {
+            *dst ^= w;
+        }
+    }
+    for (k, dst) in st.0[4].iter_mut().enumerate() {
+        *dst ^= counter.wrapping_add(k as u64);
+    }
+    // Byte 40 is byte 0 of lane 5 (`0x04`); byte 135 is byte 7 of lane 16 (`0x80`).
+    for k in 0..4 {
+        st.0[5][k] ^= 0x04;
+        st.0[16][k] ^= 0x8000_0000_0000_0000;
+    }
+    qsag_asm::keccak_f1600_x4(&mut st);
+    let out = core::array::from_fn(|k| core::array::from_fn(|lane| st.0[lane][k]));
+    for lane in &mut st.0 {
+        qsag_asm::volatile_fill(lane, 0u64);
+    }
+    out
+}
+
 /// Single-nonce verifier counterpart to [`cshake256_pow_u64_x4`].
 #[inline]
 pub fn cshake256_pow_u64_single(midstate: &[u64; 25], chal: &[u8; 32], nonce: u64) -> u64 {
@@ -1553,6 +1590,17 @@ fn poseidon2_perm12_layered(st: &mut [Goldilocks; 12]) {
 
 /// 256-bit `Poseidon2` sponge hash of a byte string (`Qsag.poseidon2Hash32`).
 pub use qsag_core::sponge::poseidon2_hash32;
+
+/// Width-24 Goldilocks `Poseidon2-GL-w24` (`rate = 16, capacity = 8`, 7-limb = 448-bit digest)
+/// re-exported from `qsag_core::sponge` (`SECURITY.md §V2.10` resolution).
+pub use qsag_core::sponge::{
+    POSEIDON2_GL24_CAPACITY, POSEIDON2_GL24_DIGEST_LIMBS, POSEIDON2_GL24_HALF_EXTERNAL_ROUNDS,
+    POSEIDON2_GL24_INTERNAL_DIAG, POSEIDON2_GL24_INTERNAL_ROUNDS, POSEIDON2_GL24_IV,
+    POSEIDON2_GL24_MERKLE_TAG, POSEIDON2_GL24_RATE, POSEIDON2_GL24_RC, POSEIDON2_GL24_SBOX_COUNT,
+    POSEIDON2_GL24_WIDTH, Poseidon2Gl24Sponge, Poseidon2State24, goldilocks_shl_small,
+    poseidon2_gl24_apply_me, poseidon2_gl24_apply_mi, poseidon2_gl24_compress_merkle,
+    poseidon2_gl24_grain_constants, poseidon2_gl24_hash56, poseidon2_gl24_perm,
+};
 
 /// Algebraic 256-bit (4-limb) compression `H_comp(left4, right4, tweak4) -> [Goldilocks; 4]`:
 /// runs `poseidon2_perm12([left4, right4, tweak4])` with weighted Jive feed-forward `+ left4 + 2*right4 + 4*tweak4` so the
@@ -2662,6 +2710,26 @@ mod canonical_compression_tests {
                 );
                 assert_eq!(st[i], entry);
                 assert_eq!(ext[i].to_limbs(), [entry; 4]);
+            }
+        }
+    }
+    #[test]
+    fn seed_counter_words_x4_matches_single_block_cshake256() {
+        let midstate = cshake256_static_midstate(b"QSAG.ZKHEM2.COINS/v1");
+        let seed_bytes: [u8; 32] = core::array::from_fn(|i| (0xA5u8).wrapping_add(i as u8 * 7));
+        let seed_words: [u64; 4] = core::array::from_fn(|lane| {
+            u64::from_le_bytes(core::array::from_fn(|b| seed_bytes[8 * lane + b]))
+        });
+        for base_ctr in [0u64, 1, 17, u64::MAX - 2] {
+            let quad = cshake256_seed_counter_words_x4(&midstate, &seed_words, base_ctr);
+            for (k, got) in quad.iter().enumerate() {
+                let mut input = [0u8; 40];
+                input[..32].copy_from_slice(&seed_bytes);
+                input[32..].copy_from_slice(&base_ctr.wrapping_add(k as u64).to_le_bytes());
+                let want = cshake256_from_midstate_32(&midstate, &input);
+                for (lane, &w) in got.iter().enumerate() {
+                    assert_eq!(&w.to_le_bytes()[..], &want[8 * lane..8 * (lane + 1)]);
+                }
             }
         }
     }

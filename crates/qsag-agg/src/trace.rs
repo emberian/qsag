@@ -2497,15 +2497,64 @@ pub fn eval_batched_row_constraints_generic<F: TraceField>(
     pub_in: &RowPublicEval<'_, F>,
     gamma: F,
 ) -> F {
+    eval_row_with_weights(unique_ops, cols, pub_in, gamma, None)
+}
+
+/// Cache the public constraint-batching powers once per proof. An absent selector
+/// advances over the same residuals as the dense evaluator.
+pub(crate) struct RowWeights<F> {
+    op_sizes: Vec<usize>,
+    powers: Vec<F>,
+}
+
+impl<F: TraceField> RowWeights<F> {
+    pub(crate) fn new(ops: &[ConstraintKind], gamma: F) -> Self {
+        let op_sizes: Vec<_> = ops.iter().map(|&op| count_op_constraints(op)).collect();
+        let len =
+            NUM_GROUP_A_AND_BOUNDARY_CONSTRAINTS + op_sizes.iter().sum::<usize>() + NUM_STATE_LIMBS;
+        let mut power = F::ONE;
+        let powers = (0..len)
+            .map(|_| {
+                let w = power;
+                power = power * gamma;
+                w
+            })
+            .collect();
+        Self { op_sizes, powers }
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.powers.len()
+    }
+}
+
+pub(crate) fn eval_row_with_weights<F: TraceField>(
+    unique_ops: &[ConstraintKind],
+    cols: &[F; NUM_TRACE_COLS],
+    pub_in: &RowPublicEval<'_, F>,
+    gamma: F,
+    weights: Option<&RowWeights<F>>,
+) -> F {
     let mut eq_acc = F::ZERO;
-    let mut g_pow = F::ONE;
+    let mut power = F::ONE;
+    let mut index = 0;
+    let mut next_weight = |index: &mut usize| {
+        let w = if let Some(weights) = weights {
+            weights.powers[*index]
+        } else {
+            let w = power;
+            power = power * gamma;
+            w
+        };
+        *index += 1;
+        w
+    };
     let perm_out = eval_group_a_and_boundaries_generic(
         cols,
         pub_in.is_row_first,
         pub_in.is_row_last,
         |_, res| {
-            eq_acc += g_pow * res;
-            g_pow = g_pow * gamma;
+            eq_acc += next_weight(&mut index) * res;
         },
     );
     let prev = &cols[COL_PREV_STATE..COL_PREV_STATE + NUM_STATE_LIMBS];
@@ -2515,6 +2564,12 @@ pub fn eval_batched_row_constraints_generic<F: TraceField>(
 
     for (op_uid, &kind) in unique_ops.iter().enumerate() {
         let sel = pub_in.gated_op_sels[op_uid];
+        if let Some(weights) = weights
+            && sel == F::ZERO
+        {
+            index += weights.op_sizes[op_uid];
+            continue;
+        }
         let mut op_acc = F::ZERO;
         eval_single_op_constraints_generic(
             kind,
@@ -2530,8 +2585,7 @@ pub fn eval_batched_row_constraints_generic<F: TraceField>(
                 mu: &pub_in.mu,
             },
             &mut |expr| {
-                op_acc += g_pow * expr;
-                g_pow = g_pow * gamma;
+                op_acc += next_weight(&mut index) * expr;
             },
         );
         eq_acc += sel * op_acc;
@@ -2540,8 +2594,7 @@ pub fn eval_batched_row_constraints_generic<F: TraceField>(
     let mut total = pub_in.eq_tau * eq_acc;
     for j in 0..NUM_STATE_LIMBS {
         let shift_res = pub_in.eq_not_last * next[j] - pub_in.shift_tau * prev[j];
-        total += g_pow * shift_res;
-        g_pow = g_pow * gamma;
+        total += next_weight(&mut index) * shift_res;
     }
     total
 }

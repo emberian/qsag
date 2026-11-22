@@ -2814,7 +2814,9 @@ where
     }
 }
 
-pub(crate) fn hypercube_to_monomial_in_place<T>(coeffs: &mut [T], parallel_min_len: usize)
+/// In-place multilinear Möbius transform over `[0, 1]^\ell` (`coeffs.len() == 2^\ell`),
+/// parallelized when `std` is enabled and `coeffs.len() >= parallel_min_len`.
+pub fn hypercube_to_monomial_in_place<T>(coeffs: &mut [T], parallel_min_len: usize)
 where
     T: Copy + Send + Sync + core::ops::SubAssign,
 {
@@ -3511,6 +3513,7 @@ pub fn whir_commit_batch_owned_with_schedule(
     whir_commit_batch_owned_with_schedule_inner(polys, salt_seed, schedule, 0, false)
 }
 
+#[allow(dead_code)]
 pub(crate) fn whir_commit_batch_secret_with_schedule(
     polys: Vec<Vec<Goldilocks>>,
     salt_seed: &[u8; 32],
