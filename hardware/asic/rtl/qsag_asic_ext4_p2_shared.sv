@@ -22,6 +22,9 @@ module qsag_asic_ext4_p2_shared (
   input  wire         op_eadd,      // slot 0: E0 <- E0 + E2       (1 clock)
   input  wire         op_esub,      // slot 0: E0 <- E0 - E2       (1 clock)
   input  wire         op_glmul,     // slot 0: st[0] <- st[0]*st[1](1 clock)
+  input  wire         fp5_active,
+  input  wire [63:0]  fp5_a, fp5_b,
+  output wire [63:0]  fp5_product,
   // Slot-addressed register bank read/write
   input  wire [1:0]   wr_slot,
   input  wire [11:0]  wr_en,
@@ -103,7 +106,9 @@ module qsag_asic_ext4_p2_shared (
       mb[m] = kb[64*m +: 64];
       unique case (state_m[m])
         S_IDLE: begin
-          if (op_emulbase && (m < 4)) begin
+          if (fp5_active && m == 0) begin
+            ma[0] = fp5_a; mb[0] = fp5_b;
+          end else if (op_emulbase && (m < 4)) begin
             ma[m] = st_b[0][m];
             mb[m] = st_b[0][4];
           end else if (op_glmul && (m == 0)) begin
@@ -148,6 +153,8 @@ module qsag_asic_ext4_p2_shared (
   for (genvar m = 0; m < 9; m++) begin : g_mul
     qsag_gl64_mul_csa u_mul (.a(ma[m]), .b(mb[m]), .r(pr[m]));
   end
+
+  assign fp5_product = pr[0];
 
   // 9-product Karatsuba reconstruction
   wire [575:0] kp;

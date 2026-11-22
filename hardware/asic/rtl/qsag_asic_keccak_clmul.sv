@@ -74,6 +74,8 @@ module qsag_keccak_2rpc (
   input  wire          restore,         // idle only: state <- shadow
   output wire [63:0]   lane_rdata,
   output wire [255:0]  digest_o,
+  output wire [399:0]  digest400_o,
+  output wire [1087:0] rate136_o,
   output wire          busy
 );
   function automatic logic [63:0] rcon(input logic [4:0] i);
@@ -146,6 +148,8 @@ module qsag_keccak_2rpc (
 
   assign busy       = run;
   assign lane_rdata = (lane_idx < 5'd25) ? sl[lane_idx] : 64'd0;
+  assign digest400_o = s_flat[399:0];
+  assign rate136_o = s_flat[1087:0];
   assign digest_o   = {sl[3], sl[2], sl[1], sl[0]};
 
   always_ff @(posedge clk) begin

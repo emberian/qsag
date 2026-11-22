@@ -63,7 +63,9 @@ module qsag_ni_asic_top #(
     T_D_RD, T_D_OP,
     T_KA_RD, T_KA_GO,
     T_TS_LD, T_TS_GO, T_TS_WAIT, T_TS_WB0, T_TS_WB1,
-    T_GF, T_A0, T_ABS, T_A5
+    T_GF, T_A0, T_ABS, T_A5,
+    T_CHK3, T_CHK4, T_SQUEEZE, T_DOMAIN, T_DOMAIN_GO, T_DOMAIN_WAIT,
+    T_PATH_LD, T_PATH_XOR, T_PATH_GO, T_PATH_WAIT, T_NONCE, T_FP5
   } tstate_t;
   tstate_t ts;
 
@@ -82,6 +84,13 @@ module qsag_ni_asic_top #(
   logic        chk_bad;
   logic        verify_fail;
   logic [31:0] verify_checks;
+
+  logic [255:0] nonce;
+  logic [7:0] path_stage;
+  logic path_load;
+  logic [399:0] path_child;
+
+  wire [63:0] fp_mul_a, fp_mul_b, fp_product;
 
   // ------------------------------------------------------------ Shared field & 4-slot Poseidon2 engine
   logic         op_perm, op_canopy, op_perm4, op_canopy4, op_emuladd, op_emulbase, op_eadd, op_esub, op_glmul;
@@ -102,6 +111,10 @@ module qsag_ni_asic_top #(
     .op_eadd    (op_eadd),
     .op_esub    (op_esub),
     .op_glmul   (op_glmul),
+    .fp5_active (ts == T_FP5),
+    .fp5_a      (fp_mul_a),
+    .fp5_b      (fp_mul_b),
+    .fp5_product(fp_product),
     .wr_slot    (wr_slot),
     .wr_en      (wr_en),
     .wr_data    (wr_data),
@@ -118,13 +131,44 @@ module qsag_ni_asic_top #(
   logic [63:0] a_wdata, b_wdata;
   wire  [63:0] a_rdata, b_rdata;
 
+  wire fp_done, fp_checked, fp_bad, fp_rd_a, fp_rd_b, fp_store;
+  wire [15:0] fp_addr_a, fp_addr_b, fp_next;
+  wire [63:0] fp_data;
+  wire [4:0] fp_we;
+  wire [319:0] fp_lanes;
+  qsag_fp5_seq u_fp5 (
+    .clk(clk), .rst(rst), .start(ts == T_IDLE && cmd_valid && cmd_op[7:2] == 6'h0a),
+    .op(cmd_op[1:0]), .count(cmd_data[31:0]), .base(cmd_addr[15:0]),
+    .dest(cmd_idx[0] ? r_wptr : cmd_addr[15:0]), .a(st[319:0]), .r(st[639:320]),
+    .mul_a(fp_mul_a), .mul_b(fp_mul_b), .product(fp_product),
+    .rd_a(fp_rd_a), .rd_b(fp_rd_b), .write_a(fp_store),
+    .addr_a(fp_addr_a), .addr_b(fp_addr_b), .qa(a_rdata), .qb(b_rdata),
+    .store_data(fp_data), .lane_we(fp_we), .lane_data(fp_lanes), .done(fp_done),
+    .checked(fp_checked), .bad(fp_bad), .next_dest(fp_next)
+  );
+
   // ------------------------------------------------------------ Keccak + Canopy framing
   logic         k_start, k_r12, k_we, k_xor, k_save, k_restore;
   logic         k_pair_en, k_pair_single, k_pad_end, k_cn_go;
   logic [4:0]   k_pair_idx;
   wire  [63:0]  k_rdata;
   wire  [255:0] k_digest;
+  wire [399:0] k_digest400;
+  wire [1087:0] k_rate;
   wire          k_busy;
+  logic [4:0]   k_lane;
+  logic [63:0]  k_word;
+  wire [63:0] domain_word;
+  qsag_v2_domain u_domain (.domain(path_load ? 3'd6 : r_idx[2:0]), .lane(r_sub), .word_o(domain_word));
+
+  // Rust hash.rs node and root frames, including TurboSHAKE suffix and final rate bit.
+  wire [399:0] sibling = st_rd[399:0];
+  wire [399:0] path_left = r_node[0] ? sibling : path_child;
+  wire [399:0] path_right = r_node[0] ? path_child : sibling;
+  wire [1087:0] node_frame = {8'h80,232'b0,8'h07,path_right,path_left,1'b0,r_node[31:1],8'h00};
+  wire [1087:0] root_frame = {8'h80,648'b0,8'h07,path_child,3'b0,r_idx,path_stage,8'h01};
+  wire [1087:0] path_frame = r_left == 0 ? root_frame : node_frame;
+  wire [319:0] salt_frame = {16'b0,nonce,48'b0};
   qsag_keccak_2rpc u_keccak (
     .clk            (clk),
     .rst            (rst),
@@ -132,8 +176,8 @@ module qsag_ni_asic_top #(
     .rounds12       (k_r12),
     .lane_we        (k_we),
     .lane_xor       (k_xor),
-    .lane_idx       (cmd_idx),
-    .lane_wdata     (cmd_data),
+    .lane_idx       (k_lane),
+    .lane_wdata     (k_word),
     .pair_xor_en    (k_pair_en),
     .pair_idx       (k_pair_idx),
     .pair_single    (k_pair_single),
@@ -148,6 +192,8 @@ module qsag_ni_asic_top #(
     .restore        (k_restore),
     .lane_rdata     (k_rdata),
     .digest_o       (k_digest),
+    .digest400_o    (k_digest400),
+    .rate136_o      (k_rate),
     .busy           (k_busy)
   );
 
@@ -184,7 +230,9 @@ module qsag_ni_asic_top #(
   qsag_gl64_addsub u_ab1 (.a(ab_a1), .b(b_rdata), .sub(1'b0), .r(ab_r1));
 
   // Comparison targets for CHECK_EQ4
-  wire [255:0] chk_vec = r_idx[0] ? k_digest : st[255:0];
+  wire chk_keccak = r_idx == 1 || r_idx == 2;
+  wire [255:0] chk_vec = chk_keccak ? k_digest : st[255:0];
+  wire [143:0] chk_upper = chk_keccak ? k_digest400[399:256] : st[399:256];
 
   assign cmd_ready = (ts == T_IDLE);
 
@@ -207,6 +255,7 @@ module qsag_ni_asic_top #(
   endtask
 
   always_comb begin
+    k_lane = cmd_idx; k_word = cmd_data;
     op_perm = 1'b0; op_canopy = 1'b0; op_perm4 = 1'b0; op_canopy4 = 1'b0;
     op_emuladd = 1'b0; op_emulbase = 1'b0; op_eadd = 1'b0; op_esub = 1'b0; op_glmul = 1'b0;
     wr_slot = 2'd0; rd_slot = 2'd0; wr_en = '0; wr_data = '0;
@@ -249,6 +298,31 @@ module qsag_ni_asic_top #(
       // CHECK_EQ4
       T_CHK0: rd_pair(r_base);
       T_CHK1: rd_pair(r_base + 16'd2);
+
+      T_CHK2: if (r_idx >= 2) rd_pair(r_base + 16'd4);
+      T_CHK3: if (r_idx != 4) begin a_en = 1; a_addr = r_base + 16'd6; end
+      T_SQUEEZE: begin
+        wr_mem_pair(r_wbase, k_rate[64*r_sub +: 64], k_rate[64*(int'(r_sub)+1) +: 64]);
+        b_en = r_pairs != 1; b_we = b_en;
+      end
+      T_DOMAIN: begin k_lane = r_sub; k_word = domain_word; k_we = 1; end
+      T_DOMAIN_GO, T_PATH_GO: begin k_start = 1; k_r12 = 1; end
+      T_PATH_LD: begin
+        if (r_sub < 4) rd_pair(r_base + {10'd0,r_sub,1'b0});
+        if (r_sub >= 1 && r_sub <= 3) wr_pair(3, 2*(int'(r_sub)-1));
+        if (r_sub == 4) begin wr_slot = 3; wr_en[6] = 1; wr_data[447:384] = a_rdata; end
+      end
+      T_PATH_XOR: begin
+        rd_slot = 3; k_lane = r_sub; k_word = path_frame[64*r_sub +: 64];
+        k_we = 1; k_xor = 1;
+      end
+      T_NONCE: begin
+        k_lane = r_sub; k_word = salt_frame[64*r_sub +: 64]; k_we = 1; k_xor = 1;
+      end
+      T_FP5: begin
+        a_en = fp_rd_a; a_we = fp_store; a_addr = fp_addr_a; a_wdata = fp_data;
+        b_en = fp_rd_b; b_addr = fp_addr_b; wr_en[4:0] = fp_we; wr_data[319:0] = fp_lanes;
+      end
 
       // Single Canopy Merkle path
       T_M0: begin
@@ -415,6 +489,7 @@ module qsag_ni_asic_top #(
   always_ff @(posedge clk) begin
     rsp_valid <= 1'b0;
     if (rst) begin
+      nonce         <= '0;
       ts            <= T_IDLE;
       r_wptr        <= '0;
       verify_fail   <= 1'b0;
@@ -437,6 +512,30 @@ module qsag_ni_asic_top #(
             end
             8'h09: begin r_wptr <= r_wptr + 16'd1; rsp_valid <= 1'b1; end
             8'h0A: ts <= T_CHK0;
+            8'h0C: begin nonce[64*cmd_idx[1:0] +: 64] <= cmd_data; rsp_valid <= 1; end
+            8'h0D: begin r_sub <= 0; ts <= T_NONCE; end
+            8'h16: begin
+              path_child <= k_digest400; path_stage <= cmd_data[39:32];
+              r_node <= (32'd1 << cmd_idx) | cmd_data[31:0];
+              r_left <= cmd_idx; r_sub <= 0; path_load <= 1;
+              if (cmd_idx > 28 || cmd_data[31:0] >= (32'd1 << cmd_idx)) begin
+                verify_fail <= 1; ts <= T_RSP;
+              end else ts <= cmd_idx == 0 ? T_DOMAIN : T_PATH_LD;
+            end
+            8'h28, 8'h29, 8'h2A, 8'h2B: begin
+              ts <= T_FP5; r_poly <= cmd_op == 8'h2A && cmd_idx[0];
+            end
+            8'h39: begin
+              r_wbase <= cmd_idx[0] ? r_wptr : cmd_addr[15:0];
+              r_sub <= 0; r_pairs <= cmd_data[31:0];
+              if (cmd_data < 1 || cmd_data > 17) begin verify_fail <= 1; ts <= T_RSP; end
+              else ts <= T_SQUEEZE;
+            end
+            8'h3A: begin
+              path_load <= 0; r_sub <= 0;
+              if (cmd_idx > 7) begin verify_fail <= 1; ts <= T_RSP; end
+              else ts <= T_DOMAIN;
+            end
             8'h0B: begin rsp_data <= {31'd0, ~verify_fail, verify_checks}; rsp_valid <= 1'b1; end
             8'h01, 8'h03, 8'h20, 8'h21, 8'h22, 8'h23, 8'h27,
             8'h30, 8'h31, 8'h35, 8'h36: rsp_valid <= 1'b1;
@@ -516,11 +615,76 @@ module qsag_ni_asic_top #(
         end
         T_CHK2: begin
           automatic bit mism = chk_bad || (a_rdata != chk_vec[191:128]) || (b_rdata != chk_vec[255:192]);
-          if (mism) verify_fail <= 1'b1;
-          verify_checks <= verify_checks + 32'd1;
-          rsp_data      <= {63'd0, ~mism};
-          rsp_valid     <= 1'b1;
-          ts            <= T_IDLE;
+          if (r_idx >= 2) begin chk_bad <= mism; ts <= T_CHK3; end
+          else begin
+            if (mism) verify_fail <= 1'b1;
+            verify_checks <= verify_checks + 32'd1;
+            rsp_data <= {63'd0, ~mism};
+            rsp_valid <= 1'b1;
+            ts <= T_IDLE;
+          end
+        end
+        T_CHK3: begin
+          if (r_idx == 4) begin
+            automatic bit mism = chk_bad || a_rdata != chk_upper[63:0];
+            if (mism) verify_fail <= 1;
+            rsp_data <= {63'b0,~mism}; verify_checks <= verify_checks + 1;
+            rsp_valid <= 1; ts <= T_IDLE;
+          end else begin
+            chk_bad <= chk_bad || a_rdata != chk_upper[63:0] || b_rdata != chk_upper[127:64];
+            ts <= T_CHK4;
+          end
+        end
+        T_CHK4: begin
+          automatic bit mism = chk_bad || (r_idx == 2 ? a_rdata[15:0] != chk_upper[143:128] :
+                                          (r_idx != 3 || a_rdata != st[447:384]));
+          if (mism) verify_fail <= 1;
+          rsp_data <= {63'b0,~mism}; verify_checks <= verify_checks + 1;
+          rsp_valid <= 1; ts <= T_IDLE;
+        end
+        T_SQUEEZE: begin
+          if (r_pairs <= 2) begin
+            if (r_idx[0]) r_wptr <= r_wbase + r_pairs[15:0];
+            rsp_valid <= 1; ts <= T_IDLE;
+          end else begin r_pairs <= r_pairs - 2; r_wbase <= r_wbase + 2; r_sub <= r_sub + 2; end
+        end
+        T_DOMAIN: begin
+          if (r_sub == 24) ts <= T_DOMAIN_GO;
+          else r_sub <= r_sub + 1'b1;
+        end
+        T_DOMAIN_GO: ts <= T_DOMAIN_WAIT;
+        T_DOMAIN_WAIT: if (!k_busy) begin
+          if (path_load) begin r_sub <= 0; ts <= T_PATH_XOR; end
+          else begin rsp_valid <= 1; ts <= T_IDLE; end
+        end
+        T_PATH_LD: begin
+          if (r_sub == 4) begin r_sub <= 0; ts <= T_DOMAIN; end
+          else r_sub <= r_sub + 1'b1;
+        end
+        T_PATH_XOR: begin
+          if (r_sub == 16) ts <= T_PATH_GO;
+          else r_sub <= r_sub + 1'b1;
+        end
+        T_PATH_GO: ts <= T_PATH_WAIT;
+        T_PATH_WAIT: if (!k_busy) begin
+          if (r_left == 0) begin rsp_valid <= 1; ts <= T_IDLE; end
+          else begin
+            path_child <= k_digest400; r_node <= r_node >> 1;
+            r_base <= r_base + 7; r_left <= r_left - 1'b1; r_sub <= 0;
+            ts <= r_left == 1 ? T_DOMAIN : T_PATH_LD;
+          end
+        end
+        T_NONCE: begin
+          if (r_sub == 4) begin rsp_valid <= 1; ts <= T_IDLE; end
+          else r_sub <= r_sub + 1'b1;
+        end
+        T_FP5: if (fp_done) begin
+          if (fp_checked) begin
+            if (fp_bad) verify_fail <= 1;
+            verify_checks <= verify_checks + 1;
+          end
+          if (r_poly) r_wptr <= fp_next;
+          rsp_valid <= 1; ts <= T_IDLE;
         end
 
         // Single Canopy Merkle path
