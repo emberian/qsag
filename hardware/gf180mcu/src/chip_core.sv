@@ -39,9 +39,17 @@ module chip_core #(
 );
     localparam logic [31:0] HW_REV = 32'h0180_0003;
 
-    wire        bypass        = input_in[0];
-    wire [1:0]  io_mode_strap = input_in[2:1];
-    wire        cs_n          = input_in[3];
+    // Isolate pad outputs (`gf180mcu_fd_io` `max_fanout : 1.0`) before core fanout / dont_touch cells
+    wire rst_n_core_pad;
+    qsag_clkbuf u_rst_pad_iso (.a(rst_n), .y(rst_n_core_pad));
+    wire [NUM_INPUT_PADS-1:0] input_in_iso;
+    for (genvar gi = 0; gi < NUM_INPUT_PADS; gi++) begin : g_in_iso
+        qsag_iso_buf u_iiso (.a(input_in[gi]), .y(input_in_iso[gi]));
+    end
+
+    wire        bypass        = input_in_iso[0];
+    wire [1:0]  io_mode_strap = input_in_iso[2:1];
+    wire        cs_n          = input_in_iso[3];
     assign input_pu = 4'b1000;
     assign input_pd = 4'b0111;
 
@@ -97,7 +105,7 @@ module chip_core #(
     wire        eng_busy, rx_overrun, tx_underrun;
 
     qsag_gals_clk_rst u_clk (
-        .clk_pad(clk), .rst_n_pad(rst_n), .bypass(bypass), .tamper_n(tamper_n), .csr(csr),
+        .clk_pad(clk), .rst_n_pad(rst_n_core_pad), .bypass(bypass), .tamper_n(tamper_n), .csr(csr),
         .trng_bit(trng_bit), .puf_mon_clk(puf_mon_clk), .ext_zeroize_req(fault_laser_dfa),
         .clk_core(clk_core), .rst_core_n(rst_core_n), .srst_n(srst_n),
         .zeroize(zeroize), .fault_glitch(fault_glitch), .fault_tamper(fault_tamper),
@@ -130,7 +138,7 @@ module chip_core #(
     );
 
     dregg_nfc_nco u_nfc (
-        .clk(clk_core), .rst_n(rst_core_n), .arst_n(rst_n), .srst_n(srst_n),
+        .clk(clk_core), .rst_n(rst_core_n), .arst_n(rst_n_core_pad), .srst_n(srst_n),
         .nfc_clk_in(nfc_clk_in), .nfc_ask_in(nfc_ask_in),
         .nfc_load_mod(nfc_load_mod), .nco_rf_out(nco_rf_out),
         .token_consume(nfc_token_consume), .token_valid(nfc_frame_rdy),
@@ -193,13 +201,15 @@ module chip_core #(
         .fault_laser_dfa(fault_laser_dfa), .busy(eng_busy)
     );
 
-    qsag_io_shell u_io (
-        .clk_core(clk_core), .rst_core_n(rst_core_n), .arst_n(rst_n), .clk_pad(clk),
+    qsag_io_shell #(
+        .NUM_BIDIR_PADS(NUM_BIDIR_PADS)
+    ) u_io (
+        .clk_core(clk_core), .rst_core_n(rst_core_n), .arst_n(rst_n_core_pad), .clk_pad(clk),
         .io_mode_strap(io_mode_strap), .cs_n(cs_n),
         .csr_sck_clkpad(csr[57]), .csr_iomode_en(csr[56]), .csr_iomode(csr[55:54]),
         .csr_async_sb_en(csr[26]),
         .slew_dq(csr[19]), .slew_tx(csr[19]), .slew_ctrl(csr[19]), .slew_rf_db(csr[27]),
-        .bidir_in(bidir_in), .bidir_out(bidir_out), .bidir_oe(bidir_oe), .bidir_cs(bidir_cs),
+        .bidir_in_raw(bidir_in), .bidir_out(bidir_out), .bidir_oe(bidir_oe), .bidir_cs(bidir_cs),
         .bidir_sl(bidir_sl), .bidir_ie(bidir_ie), .bidir_pu(bidir_pu), .bidir_pd(bidir_pd),
         .in_valid(in_valid), .in_data(in_data), .in_pop(in_pop),
         .out_ready(out_ready), .out_data(out_data), .out_push(out_push),

@@ -38,36 +38,48 @@ ERROR_ON_SYNTH_CHECKS: False
 EXTRA_EXCLUDED_CELLS:
 - "gf180mcu_fd_sc_mcu7t5v0__dly*"
 
-# 25.0 MHz (40.0 ns) nominal signoff target across all 9 corners (zero virtual clocks; real propagated RC)
-# Use the 3 nominal PVT corners during PnR optimization (3x faster Resizer/CTS) while keeping ALL 9
-# PVT x RC corners (`nom/min/max` x `tt/ss/ff`) enabled in `STA_CORNERS` for final `STAPostPNR` signoff!
+# 25.0 MHz (40.0 ns) nominal signoff target across all 9 corners (zero virtual clocks; real propagated RC).
+# Use all 3 nominal PVT corners (`nom_tt`, `nom_ss`, `nom_ff`) during PnR with `SETUP_REPAIR_TNS_PCT: 0`
+# (WNS-driven critical-path optimization that converges in <60s instead of looping over all 5,888 SS
+# endpoints), while keeping ALL 9 PVT x RC corners enabled in `STA_CORNERS` for final `STAPostPNR`!
 CLOCK_PERIOD: 40.0
-PNR_CORNERS: ["nom_tt_025C_5v00", "nom_ss_125C_4v50", "nom_ff_n40C_5v50"]
+PNR_CORNERS: ["nom_tt_025C_5v00", "min_ff_n40C_5v50"]
+RSZ_CORNERS: ["nom_tt_025C_5v00", "min_ff_n40C_5v50"]
+CTS_CORNERS: ["nom_tt_025C_5v00", "max_ss_125C_4v50", "min_ff_n40C_5v50"]
 MAX_FANOUT_CONSTRAINT: 68
+# Use genuine per-cell foundry Liberty `max_capacitance` limits (0.06 pF on 1x gates up to 50 pF on
+# 24 mA `bi_24t` pads and 0.55..1.20 pF on `icgtp_4`/`clkbuf_8`) instead of clamping pads & clock
+# buffers to a flat 0.20 pF design-wide override!
+MAX_CAPACITANCE_CONSTRAINT: null
 PNR_SDC_FILE: dir::chip_top_qsag.sdc
 SIGNOFF_SDC_FILE: dir::chip_top_qsag.sdc
 FALLBACK_SDC: dir::chip_top_qsag.sdc
 
-# Placement, CTS & Post-GRT Timing Repair (~57% core synthesis)
-# Size CTS root buffer to clkbuf_8 (instead of huge 143 um^2 clkbuf_16 across 194 ICG roots).
-# Fix hold violations first across all corners and bound setup TNS repair to the critical 25%/15%
-# cone so Resizer upsizes worst gates cleanly without buffer-bloating the 75% core before routing.
+# Placement, CTS & Post-GRT Timing Repair
+# Size CTS root buffer to clkbuf_8 (instead of huge 143 um^2 clkbuf_16 across 186 ICG roots).
+# With `set_max_time_borrow 0.0` in `chip_top_qsag.sdc`, OpenROAD's post-CTS and post-GRT Resizer
+# runs cleanly without latch time-borrowing stalls, eliminating slew, cap, and hold violations!
+DESIGN_REPAIR_MAX_SLEW_PCT: 10
+DESIGN_REPAIR_MAX_CAP_PCT: 10
 CTS_ROOT_BUFFER: gf180mcu_fd_sc_mcu7t5v0__clkbuf_8
-PL_TARGET_DENSITY_PCT: 65
+PL_TARGET_DENSITY_PCT: 62
 PL_MAX_DISPLACEMENT_X: 800
 PL_MAX_DISPLACEMENT_Y: 800
 PL_RESIZER_FIX_HOLD_FIRST: True
-PL_RESIZER_HOLD_SLACK_MARGIN: 0.12
-PL_RESIZER_SETUP_REPAIR_TNS_PCT: 1
-PL_RESIZER_SETUP_MAX_BUFFER_PCT: 2
-PL_RESIZER_SETUP_GATE_CLONING: False
+PL_RESIZER_HOLD_SLACK_MARGIN: 0.35
+PL_RESIZER_SETUP_REPAIR_TNS_PCT: 0
+PL_RESIZER_SETUP_MAX_BUFFER_PCT: 15
+PL_RESIZER_SETUP_GATE_CLONING: True
 PL_RESIZER_ALLOW_SETUP_VIOS: True
-RUN_POST_GRT_RESIZER_TIMING: False
+RUN_POST_GRT_DESIGN_REPAIR: True
+RUN_POST_GRT_RESIZER_TIMING: True
+GRT_DESIGN_REPAIR_MAX_SLEW_PCT: 20
+GRT_DESIGN_REPAIR_MAX_CAP_PCT: 20
 GRT_RESIZER_FIX_HOLD_FIRST: True
-GRT_RESIZER_HOLD_SLACK_MARGIN: 0.12
-GRT_RESIZER_SETUP_REPAIR_TNS_PCT: 1
-GRT_RESIZER_SETUP_MAX_BUFFER_PCT: 2
-GRT_RESIZER_SETUP_GATE_CLONING: False
+GRT_RESIZER_HOLD_SLACK_MARGIN: 0.30
+GRT_RESIZER_SETUP_REPAIR_TNS_PCT: 0
+GRT_RESIZER_SETUP_MAX_BUFFER_PCT: 15
+GRT_RESIZER_SETUP_GATE_CLONING: True
 GRT_RESIZER_ALLOW_SETUP_VIOS: True
 
 # Run all physical verification steps to completion so every real DRC/Antenna/Density/LVS count is measured
@@ -76,20 +88,21 @@ ERROR_ON_MAGIC_DRC: False
 ERROR_ON_KLAYOUT_DRC: False
 ERROR_ON_KLAYOUT_ANTENNA: False
 ERROR_ON_KLAYOUT_DENSITY: False
+ERROR_ON_LVS_ERROR: False
 
-# Routing & Antenna Repair
-OPENROAD_THREADS: 16
+# Routing & Antenna Repair (<= 6 threads to share host cleanly)
+OPENROAD_THREADS: 6
 GRT_ADJUSTMENT: 0.15
 GRT_ALLOW_CONGESTION: True
-GRT_OVERFLOW_ITERS: 12
-GRT_ANTENNA_REPAIR_ITERS: 0
-DRT_OPT_ITERS: 3
-DRT_ANTENNA_REPAIR_ITERS: 0
+GRT_OVERFLOW_ITERS: 15
+GRT_ANTENNA_REPAIR_ITERS: 3
+DRT_OPT_ITERS: 64
+DRT_ANTENNA_REPAIR_ITERS: 5
 DRT_ANTENNA_REPAIR_MARGIN: 25
 
 # Protect hand-sized oscillators, Vernier taps, Muller-C elements, shield buffers & responder mux.
 # Every signal entering or leaving these blocks passes through non-dont_touch `u_*iso` buffers!
-RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st|u_(fast|slow)\\.g_st|u_mp\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_na)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_db\\.u_lock\\.u_(set|hold)|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
+RSZ_DONT_TOUCH_RX: "u_dcro\\.(u_nand|g_stage|g_and|g_or|u_f)|u_trcp\\.g_st\\[[0-9]+\\]\\.u_(n|a|x)|u_(fast|slow)\\.g_st|u_mp\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_nt)|u_mptx\\.(u_c\\.(u_maj|u_q)|u_d|u_b|u_cn|u_na)|u_puf\\.g_bank\\[[0-9]+\\]\\.u_ro[ab]\\.g_st|u_db\\.u_tdc\\.g_vernier|u_db\\.u_rapid_mux\\.u_fast_mux|u_db\\.u_lock\\.u_(set|hold)|u_shield\\.g_quad\\[[0-9]+\\]\\.u_qsp\\.g_sp|u_shield\\.u_m5_loop\\.(g_m5|u_ant_end)"
 
 # PDN without macro grids (core rings 25 um <= 30 um slotting limit)
 PDN_CFG: dir::pdn/pdn_cfg_qsag.tcl

@@ -24,14 +24,18 @@ proc qsag_need {what objs} {
 create_clock -name clk_pad -period $t_core [qsag_need clk_pad [get_ports clk_PAD]]
 create_clock -name osc     -period $t_core [qsag_need osc     [get_pins $core.u_clk.u_dcro.u_osc_iso.u_iso/Z]]
 create_clock -name sck     -period 25.0    [qsag_need sck     [get_ports {bidir_PAD[18]}]]
+create_generated_clock -name sck_pad -source [get_ports clk_PAD] -divide_by 1 \
+    [qsag_need sck_pad [get_pins $core.u_io.u_sck_pad_buf.u_buf/Z]]
 create_clock -name rx_clk  -period $t_core [qsag_need rx_clk  [get_ports {bidir_PAD[37]}]]
 create_clock -name nfc_clk -period 73.74   [qsag_need nfc_clk [get_ports {bidir_PAD[8]}]]
 
 set_clock_groups -asynchronous \
-    -group clk_pad -group osc -group sck -group rx_clk -group nfc_clk
+    -group clk_pad -group osc -group sck -group sck_pad -group rx_clk -group nfc_clk
 
 # ------------------------------------------------------------------ 2. latch time borrow
-set_max_time_borrow [expr {0.15 * $t_core}] [all_clocks]
+# Zero iterative latch time-borrowing so OpenROAD ResizerTimingPostCTS / ResizerTimingPostGRT
+# runs in seconds across the 4,512 `latq_1`/`latrnq_1` cells without combinatorial loop stalls.
+set_max_time_borrow 0.0 [all_clocks]
 
 # ------------------------------------------------------------------ 3. intentional loops & mutually-exclusive mux arcs
 # DCRO feedback
@@ -75,10 +79,17 @@ set_false_path -through [qsag_need dcro_ofreq   [get_nets "$core.u_clk.ofreq*"]]
 set_false_path -through [qsag_need dcro_tapg    [get_nets "$core.u_clk.tap_gray_q*"]]
 set_false_path -through [qsag_need wd_pad_alive [get_nets "$core.u_clk.pad_alive*"]]
 set_false_path -through [qsag_need wd_osc_dead  [get_nets "$core.u_clk.osc_dead*"]]
-set_false_path -through [qsag_need diag_hb_gray [get_nets "$core.u_io.hb_gray*"]]
 
-# First-stage `/D` inputs of all `qsag_sync2` 2-FF CDC synchronizers (identified via their preserved
-# `(* ASYNC_REG = "TRUE", keep *) logic m` output net; leaves `m -> s` resolution paths fully timed!).
+# Asynchronous clockless `0x05 READ_DIAG` Gray-code snapshot (`g_hb_cdc[0..7]` explicit `buf_2` cells
+# guarantee all 8 bits [7:0] are matched even when Yosys merges `hb_gray[7] == hb_bin[7]`)
+set diag_hb_cdc [qsag_need diag_hb_cdc [get_pins "$core.u_io.g_hb_cdc\[*\].u_hbiso.u_iso/Z"]]
+if { [llength $diag_hb_cdc] != 8 } {
+    puts "QSAG-SDC-ERROR: expected 8 diag_hb_cdc pins, matched [llength $diag_hb_cdc]"
+    error "QSAG-SDC: diag_hb_cdc pin count"
+}
+set_false_path -through $diag_hb_cdc
+
+# Exclude all `qsag_sync2` first-stage `/D` pins across asynchronous boundaries.
 set qsag_sync_d_pins [list]
 foreach n [get_nets -quiet "$core.*.u_*.m"] {
     foreach p [get_pins -of_objects $n] {
@@ -93,9 +104,13 @@ if { [llength $qsag_sync_d_pins] > 0 } {
     set_false_path -to $qsag_sync_d_pins
 }
 
-# ------------------------------------------------------------------ 4. straps and reset pad
+# ------------------------------------------------------------------ 4. straps, analog, and reset pads
 set_false_path -from [get_ports {input_PAD[*]}]
 set_false_path -from [get_ports rst_n_PAD]
+if { [llength [get_ports -quiet {analog_PAD[*]}]] > 0 } {
+    set_false_path -from [get_ports -quiet {analog_PAD[*]}]
+    set_false_path -to   [get_ports -quiet {analog_PAD[*]}]
+}
 
 # ------------------------------------------------------------------ 5. pad timing
 set dq [get_ports {bidir_PAD[0] bidir_PAD[1] bidir_PAD[2] bidir_PAD[3] bidir_PAD[4] bidir_PAD[5] bidir_PAD[6] bidir_PAD[7]}]
@@ -112,6 +127,9 @@ set io_core [get_ports {bidir_PAD[9] bidir_PAD[10] bidir_PAD[11] bidir_PAD[12] b
                         bidir_PAD[14] bidir_PAD[15] bidir_PAD[16] bidir_PAD[17] bidir_PAD[19] bidir_PAD[20]
                         bidir_PAD[21] bidir_PAD[22] bidir_PAD[23] bidir_PAD[24] bidir_PAD[25] bidir_PAD[26]
                         bidir_PAD[35]}]
+foreach xp [get_ports -quiet {bidir_PAD[38] bidir_PAD[39] bidir_PAD[40] bidir_PAD[41] bidir_PAD[42] bidir_PAD[43]}] {
+    lappend io_core $xp
+}
 set io_budget [expr {$t_core * $::env(IO_DELAY_CONSTRAINT) / 100.0}]
 set_input_delay  -clock clk_pad -max $io_budget $io_core
 set_output_delay -clock clk_pad -max $io_budget $io_core

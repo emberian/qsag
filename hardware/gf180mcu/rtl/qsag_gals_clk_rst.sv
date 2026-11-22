@@ -149,25 +149,27 @@ module qsag_trcp_chain (
     wire launch_iso;
     qsag_iso_buf u_liso (.a(launch), .y(launch_iso));
     wire [36:0] c;
+    wire [36:1] c_tap;
     wire [35:0] m1, m2;
     assign c[0] = launch_iso;
     genvar i;
     generate
         for (i = 0; i < 36; i++) begin : g_st
-            qsag_dly_oai21 #(.TD(220)) u_n (.a(c[i]),  .y(m1[i]));
-            qsag_dly_aoi21 #(.TD(260)) u_a (.a(m1[i]), .y(m2[i]));
-            qsag_dly_xor2  #(.TD(240)) u_x (.a(m2[i]), .y(c[i+1]));
+            qsag_dly_oai21 #(.TD(220)) u_n    (.a(c[i]),    .y(m1[i]));
+            qsag_dly_aoi21 #(.TD(260)) u_a    (.a(m1[i]),   .y(m2[i]));
+            qsag_dly_xor2  #(.TD(240)) u_x    (.a(m2[i]),   .y(c[i+1]));
+            qsag_iso_buf               u_tiso (.a(c[i+1]),  .y(c_tap[i+1]));
         end
     endgenerate
     logic t1, t2;
     always_comb begin
         t1 = 1'b0;
         for (int k = 0; k < 16; k++)
-            if (len == 4'(k)) t1 = t1 | c[2 * (k + 1)];
+            if (len == 4'(k)) t1 = t1 | c_tap[2 * (k + 1)];
         t2 = 1'b0;
         for (int k = 0; k < 16; k++)
             for (int g = 0; g < 4; g++)
-                if (len == 4'(k) && gb == 2'(g)) t2 = t2 | c[2 * (k + 1) + (g + 1)];
+                if (len == 4'(k) && gb == 2'(g)) t2 = t2 | c_tap[2 * (k + 1) + (g + 1)];
     end
     assign d1 = t1;
     assign d2 = t2;

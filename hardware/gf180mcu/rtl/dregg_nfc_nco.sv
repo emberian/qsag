@@ -119,9 +119,19 @@ module dregg_nfc_nco (
     logic [7:0]  rx_cnt_q;
 
     wire pay_shift = (nst == N_PAY) && hb_mid_ev && half_idx && (h0_sample != hb_val_c) && (bit_cnt < 8'd144);
-    qsag_ereg_nr #(.W(144)) u_paysr (
+    wire h0_sr_in;
+    qsag_iso_buf u_h0_iso (.a(h0_sample), .y(h0_sr_in));
+    qsag_ereg_nr #(.W(48)) u_paysr0 (
         .clk(clk), .en(pay_shift),
-        .d({pay_sr[142:0], h0_sample}), .q(pay_sr)
+        .d({pay_sr[46:0], h0_sr_in}), .q(pay_sr[47:0])
+    );
+    qsag_ereg_nr #(.W(48)) u_paysr1 (
+        .clk(clk), .en(pay_shift),
+        .d(pay_sr[94:47]), .q(pay_sr[95:48])
+    );
+    qsag_ereg_nr #(.W(48)) u_paysr2 (
+        .clk(clk), .en(pay_shift),
+        .d(pay_sr[142:95]), .q(pay_sr[143:96])
     );
 
     assign token_seq          = pay_sr[143:112];

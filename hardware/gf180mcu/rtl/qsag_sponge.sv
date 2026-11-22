@@ -95,22 +95,39 @@ module qsag_sponge (
 
     assign kmac_q = {ax[19], ax[18]};
 
-    // Shared 56-line one-hot decoder + AOI22/NAND/NOR OR-bus
-    logic [N_ST-1:0]  rs_st;
-    logic [N_AUX-1:0] rs_ax;
+    // Hierarchical 8x8 binary-octet read mux: shares one 3-to-8 low-address decoder (`lsel[7:0]`)
+    // and one 3-to-8 octet-select decoder (`osel[7:0]`), clustering each 8-row x 64b read group
+    // locally with its latch rows to cut both global wire congestion and critical-path gate depth.
+    logic [7:0]  lsel, osel;
+    logic [63:0] oct [8];
     always_comb begin
-        for (int k = 0; k < N_ST; k++)
-            rs_st[k] = (rd_addr == 6'(k));
-        for (int k = 0; k < 10; k++)
-            rs_ax[k] = (rd_addr == 6'(32 + k));
-        for (int k = 10; k < N_AUX; k++)
-            rs_ax[k] = (rd_addr == 6'(44 + k - 10));
+        for (int j = 0; j < 8; j++) begin
+            lsel[j] = (rd_addr[2:0] == 3'(j));
+            osel[j] = (rd_addr[5:3] == 3'(j));
+        end
+        for (int g = 0; g < 4; g++) begin
+            oct[g] = 64'd0;
+            for (int j = 0; j < 8; j++)
+                oct[g] = oct[g] | ({64{lsel[j]}} & st[8 * g + j]);
+        end
+        oct[4] = 64'd0;
+        for (int j = 0; j < 8; j++)
+            oct[4] = oct[4] | ({64{lsel[j]}} & ax[j]);
 
-        rd_data = 64'd0;
-        for (int k = 0; k < N_ST; k++)
-            rd_data = rd_data | ({64{rs_st[k]}} & st[k]);
-        for (int k = 0; k < N_AUX; k++)
-            rd_data = rd_data | ({64{rs_ax[k]}} & ax[k]);
+        oct[5] = ({64{lsel[0]}} & ax[8])  | ({64{lsel[1]}} & ax[9])
+               | ({64{lsel[4]}} & ax[10]) | ({64{lsel[5]}} & ax[11])
+               | ({64{lsel[6]}} & ax[12]) | ({64{lsel[7]}} & ax[13]);
+
+        oct[6] = 64'd0;
+        for (int j = 0; j < 8; j++)
+            oct[6] = oct[6] | ({64{lsel[j]}} & ax[14 + j]);
+
+        oct[7] = ({64{lsel[0]}} & ax[22]) | ({64{lsel[1]}} & ax[23]);
+
+        rd_data = (({64{osel[0]}} & oct[0]) | ({64{osel[1]}} & oct[1]))
+                | (({64{osel[2]}} & oct[2]) | ({64{osel[3]}} & oct[3]))
+                | (({64{osel[4]}} & oct[4]) | ({64{osel[5]}} & oct[5]))
+                | (({64{osel[6]}} & oct[6]) | ({64{osel[7]}} & oct[7]));
     end
 
 `ifndef SYNTHESIS

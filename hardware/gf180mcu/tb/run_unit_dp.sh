@@ -8,7 +8,7 @@ python3 tb/gen_kat_vectors.py build/kat_vectors.txt
 RTL="rtl/qsag_cells.sv rtl/qsag_gl64_karatsuba_csa.sv rtl/qsag_sponge.sv rtl/qsag_keccak_serial.sv rtl/qsag_p2_rc.sv rtl/qsag_field_engine.sv tb/dp_top.sv"
 for cfg in "" "-DQSAG_ICG" "-DQSAG_ICG -DQSAG_LATCH_RF"; do
     rm -rf build/obj_dp
-    verilator --cc --exe --build -j 8 -Wall -Wno-DECLFILENAME $cfg --top-module dp_top -Mdir build/obj_dp \
+    verilator --cc --exe --build -j ${JOBS:-6} -Wall -Wno-DECLFILENAME $cfg --top-module dp_top -Mdir build/obj_dp \
         $RTL tb/unit_dp.cpp -o unit_dp > build/unit_dp_build.log 2>&1 || { tail -40 build/unit_dp_build.log; exit 1; }
     grep -c '%Warning' build/unit_dp_build.log || true
     echo "config: [$cfg]"

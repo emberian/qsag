@@ -17,7 +17,9 @@
 //     independently slew-controlled via CSR (`SL=1` slow default to prevent L*di/dt bounce).
 `default_nettype none
 
-module qsag_io_shell (
+module qsag_io_shell #(
+    parameter int NUM_BIDIR_PADS = 38
+) (
     input  wire         clk_core,
     input  wire         rst_core_n,
     input  wire         arst_n,
@@ -34,14 +36,14 @@ module qsag_io_shell (
     input  wire         slew_ctrl,        // default 1 (slow)
     input  wire         slew_rf_db,       // default 0 (FAST for < 6 ns DB & RF NCO!)
     // pads
-    input  wire  [37:0] bidir_in,
-    output logic [37:0] bidir_out,
-    output logic [37:0] bidir_oe,
-    output logic [37:0] bidir_cs,
-    output logic [37:0] bidir_sl,
-    output logic [37:0] bidir_ie,
-    output logic [37:0] bidir_pu,
-    output logic [37:0] bidir_pd,
+    input  wire  [NUM_BIDIR_PADS-1:0] bidir_in_raw,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_out,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_oe,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_cs,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_sl,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_ie,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_pu,
+    output logic [NUM_BIDIR_PADS-1:0] bidir_pd,
     // core streams
     output wire         in_valid,
     output wire  [63:0] in_data,
@@ -73,6 +75,20 @@ module qsag_io_shell (
     output wire         rx_overrun,
     output wire         tx_underrun
 );
+    // Buffer `bi_24t/Y` pad outputs (`max_fanout : 1.0` in `gf180mcu_fd_io.lib`) on all non-clock
+    // signal pads (`gp != 8, 18, 37`) so no pad `/Y` pin ever drives multi-load / `dont_touch` nets.
+    wire [37:0] bidir_in;
+    genvar gp;
+    generate
+        for (gp = 0; gp < 38; gp++) begin : g_pad_in
+            if (gp != 8 && gp != 18 && gp != 37) begin : g_iso
+                qsag_iso_buf u_piso (.a(bidir_in_raw[gp]), .y(bidir_in[gp]));
+            end else begin : g_dir
+                assign bidir_in[gp] = bidir_in_raw[gp];
+            end
+        end
+    endgenerate
+
     wire [1:0] io_mode = csr_iomode_en ? csr_iomode : io_mode_strap;
     assign active_io_mode = io_mode;
 
@@ -81,8 +97,10 @@ module qsag_io_shell (
     wire m_async = io_mode[1];
 
     // ------------------------------------------------------------ link clocks and resets
-    wire sck;
-    qsag_clkmux2 u_sck_mux (.a(bidir_in[18]), .b(clk_pad), .sel(csr_sck_clkpad), .y(sck));
+    wire sck_from_pad, sck, sck_n;
+    qsag_clkbuf  u_sck_pad_buf (.a(clk_pad), .y(sck_from_pad));
+    qsag_clkmux2 u_sck_mux (.a(bidir_in[18]), .b(sck_from_pad), .sel(csr_sck_clkpad), .y(sck));
+    qsag_clkinv  u_sckn    (.a(sck), .y(sck_n));
     wire rxc = bidir_in[37];
     wire c_ext, clk_rx, clk_tx, clk_txn;
     qsag_clkmux2 u_cm0 (.a(sck),   .b(rxc),      .sel(io_mode[0]),              .y(c_ext));
@@ -320,6 +338,10 @@ module qsag_io_shell (
             hb_bin  <= hb_nxt;
             hb_gray <= hb_nxt ^ {1'b0, hb_nxt[7:1]};
         end
+    wire [7:0] hb_gray_cdc;
+    for (genvar ghb = 0; ghb < 8; ghb++) begin : g_hb_cdc
+        qsag_iso_buf u_hbiso (.a(hb_gray[ghb]), .y(hb_gray_cdc[ghb]));
+    end
     logic [7:0] dg_hb1, dg_hb2;
     wire [63:0] diag_word = {8'h5A,
                              i_wcount_u, 1'b0, e_rcount_u,
@@ -350,8 +372,8 @@ module qsag_io_shell (
             dg_hb1  <= '0;
             dg_hb2  <= '0;
         end else if (m_spi) begin
-            if (spi_rd && s_diag && !tx_act && dummy == 4'd0) dg_hb1 <= hb_gray;
-            if (spi_rd && s_diag && tx_act && tpos == 6'd16)  dg_hb2 <= hb_gray;
+            if (spi_rd && s_diag && !tx_act && dummy == 4'd0) dg_hb1 <= hb_gray_cdc;
+            if (spi_rd && s_diag && tx_act && tpos == 6'd16)  dg_hb2 <= hb_gray_cdc;
             if (spi_rd) begin
                 if (!tx_act) dummy <= dummy + 4'd1;
                 else         tpos  <= tpos + tstep;
@@ -400,7 +422,7 @@ module qsag_io_shell (
     wire [7:0]  tbyte = t_src[8*tpos[5:3] +: 8];
     logic [7:0] sdq_o;
     logic       soe_o;
-    always_ff @(posedge clk_txn or negedge spi_rst_n)
+    always_ff @(posedge sck_n or negedge spi_rst_n)
         if (!spi_rst_n) begin
             sdq_o <= '0;
             soe_o <= 1'b0;
@@ -441,6 +463,12 @@ module qsag_io_shell (
         bidir_sl[7:0]   = {8{slew_dq}};
         bidir_sl[15:8]  = {8{slew_tx}};
         bidir_sl[37:16] = {22{slew_ctrl}};
+        if (NUM_BIDIR_PADS > 38) begin
+            for (int xp = 38; xp < NUM_BIDIR_PADS; xp++) begin
+                bidir_sl[xp] = slew_ctrl;
+                bidir_pd[xp] = 1'b1;
+            end
+        end
 
         // Common sideband: CLK_MON, ANCHOR_SPI, TAMPER_ZEROIZE_N
         bidir_out[21]   = clk_mon;
@@ -562,7 +590,8 @@ module qsag_io_shell (
     end
 
     /* verilator lint_off UNUSEDSIGNAL */
-    wire unused = &{1'b0, bidir_in[35], bidir_in[24:19], bidir_in[16:15], bidir_in[12:10]};
+    wire unused_hi = (NUM_BIDIR_PADS > 38) ? (&bidir_in_raw[NUM_BIDIR_PADS-1:(NUM_BIDIR_PADS>38 ? 38 : 0)]) : 1'b0;
+    wire unused = &{1'b0, unused_hi, bidir_in[35], bidir_in[24:19], bidir_in[16:15], bidir_in[12:10]};
     /* verilator lint_on UNUSEDSIGNAL */
 endmodule
 `default_nettype wire
