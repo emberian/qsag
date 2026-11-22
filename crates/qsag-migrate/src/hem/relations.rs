@@ -1203,3 +1203,1153 @@ impl OwnershipStatement {
     }
 }
 
+// ============================================================================
+// Relation gadgets
+// ============================================================================
+
+/// Reverse the byte order of a byte string: a big-endian integer's bytes become its
+/// little-endian bits and back.
+fn reverse_bytes(bits: &[Lc]) -> Vec<Lc> {
+    bits.chunks(8).rev().flatten().cloned().collect()
+}
+
+/// `got = want` for Boolean bit strings, 60 bits per row.
+fn pin(cs: &mut ConstraintSystem, got: &[Lc], want: &[Lc]) {
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.chunks(60).zip(want.chunks(60)) {
+        cs.enforce_equal(&pack_bits(g), &pack_bits(w));
+    }
+}
+
+fn alloc_bool(cs: &mut ConstraintSystem, value: bool) -> Lc {
+    let source = cs.source(|| Source::Input { bits: 1 });
+    let bit: Lc = cs
+        .alloc_defined(fu(u64::from(value)), || Def::Bits {
+            source,
+            lo: 0,
+            width: 1,
+        })
+        .into();
+    cs.enforce_boolean(&bit);
+    bit
+}
+
+fn select_bits(cs: &mut ConstraintSystem, bit: &Lc, on_one: &[Lc], on_zero: &[Lc]) -> Vec<Lc> {
+    assert_eq!(on_one.len(), on_zero.len());
+    on_one
+        .iter()
+        .zip(on_zero)
+        .map(|(a, b)| select(cs, bit, a, b))
+        .collect()
+}
+
+fn flat(bytes: Vec<[Lc; 8]>) -> Vec<Lc> {
+    bytes.into_iter().flatten().collect()
+}
+
+/// `bits <= n - 1` for little-endian bits and the secp256k1 group order.
+fn enforce_below_order(cs: &mut ConstraintSystem, order: &Modulus, bits_le: &[Lc]) -> Element {
+    let element = Element {
+        bytes_le: bits_le.chunks(8).map(pack_bits).collect(),
+        bits_le: bits_le.to_vec(),
+    };
+    order.enforce_canonical(cs, &element);
+    element
+}
+
+/// One derivation step's index.
+enum Step {
+    Public(u32),
+    /// `active` is zero for the unused tail of a hidden path; `bits` are the 32 index
+    /// bits, least significant first.
+    Hidden {
+        active: Lc,
+        bits: Vec<Lc>,
+    },
+}
+
+impl Step {
+    /// The index as four big-endian bytes.
+    fn be_bits(&self) -> Vec<Lc> {
+        match self {
+            Self::Public(index) => const_bits(&index.to_be_bytes()),
+            Self::Hidden { bits, .. } => reverse_bytes(bits),
+        }
+    }
+}
+
+/// The steps of a path. A hidden path's flags are a Boolean prefix indicator: once a step
+/// is inactive every later one is. With `hardened_only` the top index bit is the
+/// constant one.
+fn alloc_steps(
+    cs: &mut ConstraintSystem,
+    spec: &PathSpec,
+    witness_path: &[u32],
+    hardened_only: bool,
+) -> Vec<Step> {
+    match spec {
+        PathSpec::Public(path) => path.iter().map(|&i| Step::Public(i)).collect(),
+        PathSpec::Hidden { max_depth } => {
+            let mut previous: Option<Lc> = None;
+            (0..usize::from(*max_depth))
+                .map(|j| {
+                    let index = witness_path.get(j).copied().unwrap_or(0);
+                    let active = alloc_bool(cs, j < witness_path.len());
+                    if let Some(before) = &previous {
+                        cs.enforce_mul(
+                            active.clone(),
+                            Lc::constant(F::ONE).minus(before),
+                            Lc::zero(),
+                        );
+                    }
+                    previous = Some(active.clone());
+                    let mut bits: Vec<Lc> = (0..31)
+                        .map(|k| alloc_bool(cs, (index >> k) & 1 == 1))
+                        .collect();
+                    bits.push(if hardened_only {
+                        Lc::constant(F::ONE)
+                    } else {
+                        alloc_bool(cs, index >= HARDENED)
+                    });
+                    Step::Hidden { active, bits }
+                })
+                .collect()
+        }
+    }
+}
+
+/// `HMAC-SHA512(hmac_key, seed)` for a constant key and a seed of hidden length in
+/// [`SEED_BYTES`]: the 512 output bits and the 512 bits of the inner digest.
+///
+/// The seed is 64 witness bytes with every byte from its length on forced to zero, and a
+/// one-hot length selector. The padding bit and the length field of the single message
+/// block are linear in the selector, so hiding the length costs about a hundred rows.
+fn seed_master(cs: &mut ConstraintSystem, hmac_key: &[u8], seed: &[u8]) -> (Vec<Lc>, Vec<Lc>) {
+    let (min, max) = (*SEED_BYTES.start(), *SEED_BYTES.end());
+    let mut padded = [0u8; 64];
+    padded[..seed.len()].copy_from_slice(seed);
+    let bits = alloc_bits(cs, &padded);
+    wipe(&mut padded);
+    let one_hot: Vec<Lc> = (min..=max)
+        .map(|l| alloc_bool(cs, l == seed.len()))
+        .collect();
+    let ones: Vec<(F, &Lc)> = one_hot.iter().map(|b| (F::ONE, b)).collect();
+    cs.enforce_equal(&Lc::combine(&ones), &Lc::constant(F::ONE));
+
+    let mut block: Vec<Lc> = bits.clone();
+    block.resize(1024, Lc::zero());
+    // `longer` is one exactly when the length exceeds `j`.
+    let mut longer = Lc::zero();
+    for j in (min..max).rev() {
+        longer = longer.plus(&one_hot[j + 1 - min]);
+        cs.enforce_mul(
+            Lc::constant(F::ONE).minus(&longer),
+            pack_bits(&bits[8 * j..8 * j + 8]),
+            Lc::zero(),
+        );
+    }
+    // The `0x80` after the last seed byte; that byte is zero whenever its selector is set.
+    for (l, selected) in (min..=max).zip(&one_hot) {
+        block[8 * l + 7] = block[8 * l + 7].plus(selected);
+    }
+    // Bit length `1024 + 8 len` in the last two bytes, big-endian.
+    for k in 0..7 {
+        let parts: Vec<(F, &Lc)> = (min..=max)
+            .zip(&one_hot)
+            .filter(|(l, _)| (l >> k) & 1 == 1)
+            .map(|(_, b)| (F::ONE, b))
+            .collect();
+        let at = 3 + k;
+        let index = if at < 8 {
+            8 * 127 + at
+        } else {
+            8 * 126 + at - 8
+        };
+        block[index] = Lc::combine(&parts);
+    }
+    block[8 * 126 + 2] = Lc::constant(F::ONE);
+
+    let key = HmacKey::sha512(cs, &const_bits(hmac_key));
+    let words = be_words(&block, 8);
+    let words: &[Word; 16] = words.as_slice().try_into().expect("one block");
+    let inner = be_bits(&sha512_compress(cs, key.inner_state(), words));
+    (key.finish(cs, &inner), inner)
+}
+
+/// BIP-32 `k_child = (I_L + k_par) mod n` on little-endian bits, with the rejection rules
+/// as constraints: `I_L <= n - 1` and `1 <= k_child <= n - 1`.
+fn bip32_child_key(
+    cs: &mut ConstraintSystem,
+    order: &Modulus,
+    tweak_le: &[Lc],
+    parent_le: &[Lc],
+) -> Vec<Lc> {
+    let tweak = enforce_below_order(cs, order, tweak_le);
+    let child = order.reduce(cs, &tweak.lazy().add(&Lazy::from_bits(parent_le)));
+    secp256k1_enforce_scalar_range(cs, &child.bits_le);
+    child.bits_le
+}
+
+/// A BIP-32 secp256k1 node: the key as little-endian bits, the chain code as a byte
+/// string.
+#[derive(Clone)]
+struct SecpNode {
+    key: Vec<Lc>,
+    chain: Vec<Lc>,
+}
+
+/// A node prepared for deriving children: its HMAC key state and, once a non-hardened or
+/// hidden step needs it, its compressed public key. Both are shared by all its children.
+struct SecpParent {
+    node: SecpNode,
+    hmac: HmacKey,
+    public_key: Option<Vec<Lc>>,
+}
+
+impl SecpParent {
+    fn new(cs: &mut ConstraintSystem, node: SecpNode) -> Self {
+        let hmac = HmacKey::sha512(cs, &node.chain);
+        Self {
+            node,
+            hmac,
+            public_key: None,
+        }
+    }
+
+    fn public_key(&mut self, cs: &mut ConstraintSystem) -> Vec<Lc> {
+        let key = &self.node.key;
+        self.public_key
+            .get_or_insert_with(|| flat(secp256k1_fixed_base_mul(cs, key).compressed_bits()))
+            .clone()
+    }
+
+    fn child(&mut self, cs: &mut ConstraintSystem, order: &Modulus, step: &Step) -> SecpNode {
+        let hardened_data = |key: &[Lc]| {
+            let mut data = const_bits(&[0]);
+            data.extend(reverse_bytes(key));
+            data
+        };
+        let mut data = match step {
+            Step::Public(index) if *index >= HARDENED => hardened_data(&self.node.key),
+            Step::Public(_) => self.public_key(cs),
+            Step::Hidden { bits, .. } => {
+                let soft = self.public_key(cs);
+                select_bits(cs, &bits[31], &hardened_data(&self.node.key), &soft)
+            }
+        };
+        data.extend(step.be_bits());
+        let i = self.hmac.mac(cs, &data);
+        let key = bip32_child_key(cs, order, &reverse_bytes(&i[..256]), &self.node.key);
+        let chain = i[256..].to_vec();
+        match step {
+            Step::Public(_) => SecpNode { key, chain },
+            // An inactive step passes the node through. Its unused HMAC output is still
+            // subject to the rejection rules, which fail with probability about 2^-127.
+            Step::Hidden { active, .. } => SecpNode {
+                key: select_bits(cs, active, &key, &self.node.key),
+                chain: select_bits(cs, active, &chain, &self.node.chain),
+            },
+        }
+    }
+}
+
+/// The root node of a BIP-32 statement and the nullifier secret of that root.
+fn bip32_root(cs: &mut ConstraintSystem, root: Bip32Root, secret: &[u8]) -> (SecpNode, Vec<Lc>) {
+    let (key, chain, nullifier_secret) = match root {
+        Bip32Root::Seed => {
+            let (i, inner) = seed_master(cs, BIP32_MASTER_KEY, secret);
+            (
+                reverse_bytes(&i[..256]),
+                i[256..].to_vec(),
+                inner[..256].to_vec(),
+            )
+        }
+        Bip32Root::ExtendedKey => {
+            let bits = alloc_bits(cs, secret);
+            (
+                reverse_bytes(&bits[..256]),
+                bits[256..].to_vec(),
+                bits[256..].to_vec(),
+            )
+        }
+    };
+    secp256k1_enforce_scalar_range(cs, &key);
+    (SecpNode { key, chain }, nullifier_secret)
+}
+
+fn bip32_descend_gadget(
+    cs: &mut ConstraintSystem,
+    order: &Modulus,
+    mut node: SecpNode,
+    steps: &[Step],
+) -> SecpNode {
+    for step in steps {
+        node = SecpParent::new(cs, node).child(cs, order, step);
+    }
+    node
+}
+
+/// The credential bits of a secp256k1 key (little-endian bits, in `1..n`) under `lock`.
+fn secp_lock(cs: &mut ConstraintSystem, lock: Lock, key: &[Lc], merkle_root: &[u8; 32]) -> Vec<Lc> {
+    let public_key = secp256k1_fixed_base_mul(cs, key);
+    match lock {
+        Lock::P2pkh => hash160(cs, &flat(public_key.compressed_bits())),
+        Lock::P2pkhUncompressed => {
+            let mut sec1 = const_bits(&[4]);
+            sec1.extend(flat(public_key.uncompressed_bits()));
+            hash160(cs, &sec1)
+        }
+        Lock::P2shP2wpkh => {
+            let mut script = const_bits(&[0, 0x14]);
+            script.extend(hash160(cs, &flat(public_key.compressed_bits())));
+            hash160(cs, &script)
+        }
+        Lock::Ethereum => keccak256(cs, &flat(public_key.uncompressed_bits()))[96..].to_vec(),
+        Lock::TaprootKeyPath | Lock::TaprootScriptTree => {
+            let mut message = flat(public_key.x_only_bits());
+            if lock == Lock::TaprootScriptTree {
+                message.extend(alloc_bits(cs, merkle_root));
+            }
+            let tag = sha2_native::sha256(b"TapTweak");
+            let midstate =
+                sha256_midstate(&[tag, tag].concat()).map(|w| Word::constant(u64::from(w), 32));
+            let tweak = reverse_bytes(&sha256_from_midstate(cs, &midstate, 64, &message));
+            // BIP-341 fails for a tweak that is not below the group order; a zero tweak or
+            // an output at infinity has no rows that hold.
+            enforce_below_order(cs, &Modulus::secp256k1_order(), &tweak);
+            let output = secp256k1_taproot_tweak_x_only(cs, &public_key, &tweak);
+            reverse_bytes(&output.bits_le)
+        }
+        Lock::Ed25519 | Lock::BlsWithdrawal => unreachable!("a secp256k1 lock"),
+    }
+}
+
+/// The Ed25519 public key of an RFC 8032 seed, as credential bits.
+fn ed25519_seed_lock(cs: &mut ConstraintSystem, seed: &[Lc]) -> Vec<Lc> {
+    let digest = sha512(cs, seed);
+    ed25519_fixed_base_mul(cs, &ed25519_clamp(&digest[..256])).encoding_bits()
+}
+
+/// The witness in the shape the relation consumes.
+struct RelationWitness<'a> {
+    secret: &'a [u8],
+    path: &'a [u32],
+    merkle_root: [u8; 32],
+}
+
+/// Key derivation and lock of one statement: the credential bits and the nullifier
+/// secret's bits.
+fn credential_gadget(
+    cs: &mut ConstraintSystem,
+    lock: Lock,
+    source: &KeySource,
+    witness: &RelationWitness<'_>,
+) -> (Vec<Lc>, Vec<Lc>) {
+    match source {
+        KeySource::Secp256k1Key => {
+            let secret = alloc_bits(cs, witness.secret);
+            let key = reverse_bytes(&secret);
+            secp256k1_enforce_scalar_range(cs, &key);
+            (secp_lock(cs, lock, &key, &witness.merkle_root), secret)
+        }
+        KeySource::Bip32 { root, path } => {
+            let (node, nullifier_secret) = bip32_root(cs, *root, witness.secret);
+            let steps = alloc_steps(cs, path, witness.path, false);
+            let order = Modulus::secp256k1_order();
+            let leaf = bip32_descend_gadget(cs, &order, node, &steps);
+            (
+                secp_lock(cs, lock, &leaf.key, &witness.merkle_root),
+                nullifier_secret,
+            )
+        }
+        KeySource::Bls12381Key => {
+            let secret = alloc_bits(cs, witness.secret);
+            let key = reverse_bytes(&secret);
+            // The group order has 255 bits.
+            cs.enforce_zero(key[255].clone());
+            bls12_381_enforce_scalar_range(cs, &key[..255]);
+            let public_key = bls12_381_g1_fixed_base_mul(cs, &key[..255]);
+            let mut credential = sha256(cs, &flat(public_key.compressed_bits()));
+            credential[..8].fill(Lc::zero());
+            (credential, secret)
+        }
+        KeySource::Ed25519Seed => {
+            let seed = alloc_bits(cs, witness.secret);
+            (ed25519_seed_lock(cs, &seed), seed)
+        }
+        KeySource::Slip10 { path } => {
+            let (i, _) = seed_master(cs, SLIP10_ED25519_KEY, witness.secret);
+            let (mut key, mut chain) = (i[..256].to_vec(), i[256..].to_vec());
+            for step in alloc_steps(cs, path, witness.path, true) {
+                let mut data = const_bits(&[0]);
+                data.extend(key.iter().cloned());
+                data.extend(step.be_bits());
+                let i = HmacKey::sha512(cs, &chain).mac(cs, &data);
+                match &step {
+                    Step::Public(_) => (key, chain) = (i[..256].to_vec(), i[256..].to_vec()),
+                    Step::Hidden { active, .. } => {
+                        key = select_bits(cs, active, &i[..256], &key);
+                        chain = select_bits(cs, active, &i[256..], &chain);
+                    }
+                }
+            }
+            (ed25519_seed_lock(cs, &key), key)
+        }
+        KeySource::Bip32Ed25519 { path } => {
+            let bits = alloc_bits(cs, witness.secret);
+            let (mut kl, mut kr, mut chain) = (
+                bits[..256].to_vec(),
+                bits[256..512].to_vec(),
+                bits[512..].to_vec(),
+            );
+            for &index in path {
+                let mut data = if index >= HARDENED {
+                    let mut data = const_bits(&[0]);
+                    data.extend(kl.iter().chain(&kr).cloned());
+                    data
+                } else {
+                    let mut data = const_bits(&[2]);
+                    data.extend(ed25519_fixed_base_mul(cs, &kl).encoding_bits());
+                    data
+                };
+                data.extend(const_bits(&index.to_le_bytes()));
+                let hmac = HmacKey::sha512(cs, &chain);
+                let z = hmac.mac(cs, &data);
+                // The chain-code tag is the scalar tag plus one: only bit 0 of byte 0 differs.
+                data[0] = Lc::constant(F::ONE);
+                let c = hmac.mac(cs, &data);
+                // `8 * Z[0..28]` as a 256-bit integer.
+                let mut eight_zl = vec![Lc::zero(); 3];
+                eight_zl.extend_from_slice(&z[..224]);
+                eight_zl.resize(256, Lc::zero());
+                kl = add_wide(cs, &kl, &eight_zl);
+                kr = add_wide(cs, &kr, &z[256..]);
+                chain = c[256..].to_vec();
+            }
+            (ed25519_fixed_base_mul(cs, &kl).encoding_bits(), kr)
+        }
+    }
+}
+
+/// Pin one credential's public inputs: its bits, and the nullifier of `nullifier_secret`
+/// under the public chaining value.
+fn bind_credential(
+    cs: &mut ConstraintSystem,
+    public: &[Lc],
+    credential: &[Lc],
+    nullifier_secret: &[Lc],
+) {
+    let (claimed, rest) = public.split_at(credential.len());
+    let (midstate, nullifier) = rest.split_at(256);
+    pin(cs, credential, claimed);
+    let midstate: Vec<Word> = midstate
+        .chunks(32)
+        .map(|w| Word::from_bits(w.to_vec()))
+        .collect();
+    let midstate: &[Word; 8] = midstate.as_slice().try_into().expect("eight words");
+    let digest = sha256_from_midstate(cs, midstate, 128, nullifier_secret);
+    pin(cs, &digest, nullifier);
+}
+
+fn alloc_public(cs: &mut ConstraintSystem, bits: &[bool]) -> Vec<Lc> {
+    bits.iter()
+        .map(|&b| cs.public_input(fu(u64::from(b))).into())
+        .collect()
+}
+
+/// The relation of one statement with its assignment, and the row count before padding.
+fn build(
+    lock: Lock,
+    source: &KeySource,
+    public_bits: &[bool],
+    witness: &RelationWitness<'_>,
+) -> (Shape, Vec<F>, usize) {
+    let cs = build_in(ConstraintSystem::new(), lock, source, public_bits, witness);
+    let rows = cs.num_rows();
+    let (shape, assignment) = cs.finish_v2();
+    (shape, assignment, rows)
+}
+
+fn build_in(
+    mut cs: ConstraintSystem,
+    lock: Lock,
+    source: &KeySource,
+    public_bits: &[bool],
+    witness: &RelationWitness<'_>,
+) -> ConstraintSystem {
+    assert_eq!(public_bits.len(), 8 * lock.credential_bytes() + 512);
+    let public = alloc_public(&mut cs, public_bits);
+    let (credential, nullifier_secret) = credential_gadget(&mut cs, lock, source, witness);
+    bind_credential(&mut cs, &public, &credential, &nullifier_secret);
+    cs
+}
+
+/// The relation of `statement` with the definition of every variable in terms of
+/// earlier ones, for a prover that holds the witness in shares. The first
+/// [`Source::Input`] is the statement's secret, bit `k` of byte `i` at bit `8 i + k`.
+/// `None` for a malformed statement.
+pub fn ownership_definitions(statement: &OwnershipStatement) -> Option<(Shape, Definitions)> {
+    if !statement.is_well_formed() {
+        return None;
+    }
+    let mut secret = placeholder_secret(&statement.source);
+    let cs = build_in(
+        ConstraintSystem::new_recording(),
+        statement.lock,
+        &statement.source,
+        &vec![false; 8 * statement.lock.credential_bytes() + 512],
+        &RelationWitness {
+            secret: &secret,
+            path: &[],
+            merkle_root: [0; 32],
+        },
+    );
+    wipe(&mut secret);
+    let (shape, mut assignment, definitions) = cs.finish_recorded();
+    qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+    Some((shape, definitions))
+}
+
+/// The inputs of the relation of `statement` after its secret, in the order of the
+/// relation's [`Source::Input`]s, for a prover that holds the secret in shares: the
+/// one-hot length of a master seed of `secret_bytes` bytes, the steps of a hidden
+/// derivation path (active flag, 31 index bits and, where the relation has it, the
+/// hardened flag of each of the `max_depth` steps), and the script-tree root. These are
+/// witness to the verifier and known to every prover. The secret itself is the first
+/// input, zero-padded to that input's width (a master seed to 64 bytes).
+///
+/// `None` for a malformed statement, a secret length the source does not take, a path
+/// longer than the hidden depth or with an index the source forbids, and a script-tree
+/// root that is missing or not called for.
+pub fn ownership_auxiliary_inputs(
+    statement: &OwnershipStatement,
+    secret_bytes: usize,
+    path: &[u32],
+    merkle_root: Option<&[u8; 32]>,
+) -> Option<Vec<Vec<bool>>> {
+    if !statement.is_well_formed() {
+        return None;
+    }
+    let mut out: Vec<Vec<bool>> = Vec::new();
+    let seed_length = |out: &mut Vec<Vec<bool>>| {
+        SEED_BYTES.contains(&secret_bytes).then(|| {
+            out.extend(SEED_BYTES.map(|l| vec![l == secret_bytes]));
+        })
+    };
+    let steps = |out: &mut Vec<Vec<bool>>, spec: &PathSpec, hardened_only: bool| match spec {
+        PathSpec::Public(_) => path.is_empty().then_some(()),
+        PathSpec::Hidden { max_depth } => {
+            if path.len() > usize::from(*max_depth) {
+                return None;
+            }
+            for j in 0..usize::from(*max_depth) {
+                let index = path.get(j).copied().unwrap_or(0);
+                out.push(vec![j < path.len()]);
+                out.extend((0..31).map(|k| vec![(index >> k) & 1 == 1]));
+                if !hardened_only {
+                    out.push(vec![index >= HARDENED]);
+                } else if j < path.len() && index < HARDENED {
+                    return None;
+                }
+            }
+            Some(())
+        }
+    };
+    match &statement.source {
+        KeySource::Bip32 { root, path: spec } => {
+            match root {
+                Bip32Root::Seed => seed_length(&mut out)?,
+                Bip32Root::ExtendedKey => (secret_bytes == 64).then_some(())?,
+            }
+            steps(&mut out, spec, false)?;
+        }
+        KeySource::Slip10 { path: spec } => {
+            seed_length(&mut out)?;
+            steps(&mut out, spec, true)?;
+        }
+        KeySource::Secp256k1Key | KeySource::Bls12381Key | KeySource::Ed25519Seed => {
+            (secret_bytes == 32 && path.is_empty()).then_some(())?;
+        }
+        KeySource::Bip32Ed25519 { .. } => (secret_bytes == 96 && path.is_empty()).then_some(())?,
+    }
+    match (statement.lock, merkle_root) {
+        (Lock::TaprootScriptTree, Some(root)) => {
+            out.push((0..256).map(|i| (root[i / 8] >> (i % 8)) & 1 == 1).collect());
+        }
+        (Lock::TaprootScriptTree, None) | (_, Some(_)) => return None,
+        _ => {}
+    }
+    Some(out)
+}
+
+/// A valid secret for building a shape without a witness.
+fn placeholder_secret(source: &KeySource) -> Vec<u8> {
+    match source {
+        KeySource::Secp256k1Key | KeySource::Bls12381Key => {
+            let mut key = vec![0u8; 32];
+            key[31] = 1;
+            key
+        }
+        KeySource::Bip32 {
+            root: Bip32Root::ExtendedKey,
+            ..
+        } => {
+            let mut key = vec![0u8; 64];
+            key[31] = 1;
+            key
+        }
+        KeySource::Bip32 { .. } | KeySource::Slip10 { .. } => vec![0u8; 16],
+        KeySource::Ed25519Seed => vec![0u8; 32],
+        KeySource::Bip32Ed25519 { .. } => {
+            let mut key = vec![0u8; 96];
+            key[0] = 8;
+            key
+        }
+    }
+}
+
+/// What selects a relation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Relation {
+    Single(Lock, KeySource),
+    Batch {
+        lock: Lock,
+        root: Bip32Root,
+        prefix: Vec<u32>,
+        tails: Vec<Vec<u32>>,
+    },
+}
+
+fn build_shape(relation: &Relation) -> Shape {
+    let (shape, mut assignment, _) = match relation {
+        Relation::Single(lock, source) => {
+            let mut secret = placeholder_secret(source);
+            let built = build(
+                *lock,
+                source,
+                &vec![false; 8 * lock.credential_bytes() + 512],
+                &RelationWitness {
+                    secret: &secret,
+                    path: &[],
+                    merkle_root: [0; 32],
+                },
+            );
+            wipe(&mut secret);
+            built
+        }
+        Relation::Batch {
+            lock,
+            root,
+            prefix,
+            tails,
+        } => {
+            let source = KeySource::Bip32 {
+                root: *root,
+                path: PathSpec::Public(Vec::new()),
+            };
+            let mut secret = placeholder_secret(&source);
+            let public = vec![false; tails.len() * (8 * lock.credential_bytes() + 512)];
+            let built = build_batch(*lock, *root, prefix, tails, &public, &secret);
+            wipe(&mut secret);
+            built
+        }
+    };
+    qsag_asm::volatile_fill(&mut assignment, F::ZERO);
+    shape
+}
+
+/// Matrix entries the shape cache may hold in total: about 1.5 GB. A shape larger than
+/// this (a batch of more than about 30 entries) is built for its caller and not kept.
+#[cfg(feature = "std")]
+const SHAPE_CACHE_ENTRIES: usize = 1 << 27;
+
+#[cfg(feature = "std")]
+fn shape_entries(shape: &Shape) -> usize {
+    shape.a.nnz() + shape.b.nnz() + shape.c.nnz()
+}
+
+/// Shapes are a pure function of the relation; with `std` the most recent ones are kept,
+/// up to 32 of them and [`SHAPE_CACHE_ENTRIES`] matrix entries.
+#[cfg(feature = "std")]
+static SHAPE_CACHE: std::sync::Mutex<Vec<(Relation, Arc<Shape>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The kept shape of `relation`, if there is one.
+#[cfg(feature = "std")]
+fn kept_shape(relation: &Relation) -> Option<Arc<Shape>> {
+    SHAPE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(r, _)| r == relation)
+        .map(|(_, shape)| shape.clone())
+}
+
+#[cfg(not(feature = "std"))]
+fn kept_shape(_: &Relation) -> Option<Arc<Shape>> {
+    None
+}
+
+/// Keep `shape`, the shape of `relation`, unless it is too large or one is already kept
+/// (which is then returned).
+#[cfg(feature = "std")]
+fn keep_shape(relation: &Relation, shape: Shape) -> Arc<Shape> {
+    const KEEP: usize = 32;
+    let shape = Arc::new(shape);
+    let size = shape_entries(&shape);
+    if size > SHAPE_CACHE_ENTRIES {
+        return shape;
+    }
+    let mut cache = SHAPE_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, hit)) = cache.iter().find(|(r, _)| r == relation) {
+        return hit.clone();
+    }
+    while cache.len() == KEEP
+        || cache.iter().map(|(_, s)| shape_entries(s)).sum::<usize>() + size > SHAPE_CACHE_ENTRIES
+    {
+        cache.remove(0);
+    }
+    cache.push((relation.clone(), shape.clone()));
+    shape
+}
+
+#[cfg(not(feature = "std"))]
+fn keep_shape(_: &Relation, shape: Shape) -> Arc<Shape> {
+    Arc::new(shape)
+}
+
+fn shape_of(relation: &Relation) -> Arc<Shape> {
+    kept_shape(relation).unwrap_or_else(|| keep_shape(relation, build_shape(relation)))
+}
+
+/// The shape of `relation` and the assignment `synthesize` produces. When the shape is
+/// kept, only the assignment is computed (no matrices, no digest); otherwise both come
+/// from one synthesis and the shape is kept for the next call. The shape does not depend
+/// on the witness, so both ways give the same pair.
+fn synthesize_shared(
+    relation: &Relation,
+    synthesize: impl Fn(ConstraintSystem) -> ConstraintSystem,
+) -> (Arc<Shape>, Vec<F>) {
+    match kept_shape(relation) {
+        Some(shape) => {
+            let assignment = synthesize(ConstraintSystem::witness_only())
+                .finish_assignment(&shape)
+                .expect("a relation's synthesis allocates the variables of its shape");
+            (shape, assignment)
+        }
+        None => {
+            let (shape, assignment) = synthesize(ConstraintSystem::new()).finish_v2();
+            (keep_shape(relation, shape), assignment)
+        }
+    }
+}
+
+/// The public relation of a statement: it depends on the lock and the source (with its
+/// path specification) and on nothing else. `None` for a malformed statement.
+pub fn ownership_shape(statement: &OwnershipStatement) -> Option<Arc<Shape>> {
+    statement
+        .is_well_formed()
+        .then(|| shape_of(&Relation::Single(statement.lock, statement.source.clone())))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnershipError {
+    /// The statement's parts do not fit together or are outside the supported ranges.
+    MalformedStatement,
+    /// The witness does not produce the statement's credential and nullifier.
+    WitnessMismatch,
+    Proof(ZkHemV2Error),
+}
+
+/// The relation of `statement` with the assignment for `witness`, after checking natively
+/// that the witness produces the statement. The assignment is secret. This is what a
+/// prover that does not go through [`prove_ownership`] (the collaborative one) starts from;
+/// its transcript statement is [`ownership_transcript`].
+pub fn synthesize_ownership(
+    statement: &OwnershipStatement,
+    witness: &OwnershipWitness,
+) -> Result<(Shape, Vec<F>), OwnershipError> {
+    check_ownership(statement, witness)?;
+    let (shape, assignment, _) = build(
+        statement.lock,
+        &statement.source,
+        &statement.public_bits(),
+        &RelationWitness {
+            secret: &witness.secret,
+            path: &witness.path,
+            merkle_root: witness.merkle_root.unwrap_or([0; 32]),
+        },
+    );
+    Ok((shape, assignment))
+}
+
+/// That `statement` is well formed and `witness` produces it, natively.
+fn check_ownership(
+    statement: &OwnershipStatement,
+    witness: &OwnershipWitness,
+) -> Result<(), OwnershipError> {
+    if !statement.is_well_formed() {
+        return Err(OwnershipError::MalformedStatement);
+    }
+    let derived = OwnershipStatement::derive(
+        statement.lock,
+        statement.source.clone(),
+        witness,
+        statement.pq_commitment,
+        statement.migration_domain,
+        statement.epoch,
+    );
+    if derived.as_ref() != Some(statement) {
+        return Err(OwnershipError::WitnessMismatch);
+    }
+    Ok(())
+}
+
+/// [`synthesize_ownership`] with the relation's kept shape ([`synthesize_shared`]).
+fn synthesize_ownership_shared(
+    statement: &OwnershipStatement,
+    witness: &OwnershipWitness,
+) -> Result<(Arc<Shape>, Vec<F>), OwnershipError> {
+    check_ownership(statement, witness)?;
+    let public_bits = statement.public_bits();
+    let relation_witness = RelationWitness {
+        secret: &witness.secret,
+        path: &witness.path,
+        merkle_root: witness.merkle_root.unwrap_or([0; 32]),
+    };
+    Ok(synthesize_shared(
+        &Relation::Single(statement.lock, statement.source.clone()),
+        |cs| {
+            build_in(
+                cs,
+                statement.lock,
+                &statement.source,
+                &public_bits,
+                &relation_witness,
+            )
+        },
+    ))
+}
+
+fn with_regime(mut bytes: Vec<u8>, regime: Profile) -> Vec<u8> {
+    bytes.push(regime.wire_tag());
+    bytes
+}
+
+/// The statement bytes [`prove_ownership`] and [`verify_ownership`] hand to zk-Hem.
+pub fn ownership_transcript(statement: &OwnershipStatement, regime: Profile) -> Vec<u8> {
+    with_regime(statement.to_bytes(), regime)
+}
+
+// ============================================================================
+// Batches
+// ============================================================================
+
+/// One credential of a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchEntry {
+    /// The path from the batch's shared node to this credential's key.
+    pub tail: Vec<u32>,
+    pub credential: Credential,
+    pub pq_commitment: [u8; 32],
+    pub nullifier: [u8; 32],
+}
+
+/// Many secp256k1 credentials below one BIP-32 node, proved together: the root step and
+/// the shared `prefix` are proved once, and children of one node share its HMAC key state
+/// and its public key. All paths are public.
+///
+/// Entry `i` is the same claim as the single statement [`Self::statement`]`(i)`, with the
+/// same credential identifier and nullifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BatchStatement {
+    pub lock: Lock,
+    pub root: Bip32Root,
+    pub prefix: Vec<u32>,
+    pub entries: Vec<BatchEntry>,
+    pub migration_domain: [u8; 32],
+    pub epoch: u64,
+}
+
+impl BatchStatement {
+    /// The batch a holder derives from its root secret for the given tails and target
+    /// commitments. `None` under the conditions of [`OwnershipStatement::derive`], or when
+    /// the batch is empty or too large.
+    pub fn derive(
+        lock: Lock,
+        root: Bip32Root,
+        prefix: &[u32],
+        targets: &[(Vec<u32>, [u8; 32])],
+        witness: &OwnershipWitness,
+        migration_domain: [u8; 32],
+        epoch: u64,
+    ) -> Option<Self> {
+        let kind = Self::source(root, Vec::new()).nullifier_kind();
+        let shared = bip32_descend(bip32_root_node(root, &witness.secret)?, prefix)?;
+        let mut secret = bip32_nullifier_secret(root, &witness.secret);
+        let entries = targets
+            .iter()
+            .map(|(tail, pq_commitment)| {
+                let leaf = bip32_descend(shared.clone(), tail)?;
+                let credential = secp256k1_credential(lock, &leaf.private_key, None)?;
+                Some(BatchEntry {
+                    tail: tail.clone(),
+                    credential,
+                    pq_commitment: *pq_commitment,
+                    nullifier: migration_nullifier(kind, &secret, &migration_domain, &credential),
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        wipe(&mut secret);
+        let batch = Self {
+            lock,
+            root,
+            prefix: prefix.to_vec(),
+            entries: entries?,
+            migration_domain,
+            epoch,
+        };
+        batch.is_well_formed().then_some(batch)
+    }
+
+    fn source(root: Bip32Root, path: Vec<u32>) -> KeySource {
+        KeySource::Bip32 {
+            root,
+            path: PathSpec::Public(path),
+        }
+    }
+
+    /// Whether the lock is a secp256k1 lock without a witness of its own, the batch holds
+    /// 1 to [`MAX_BATCH_ENTRIES`] entries and no path exceeds [`MAX_PATH_DEPTH`].
+    pub fn is_well_formed(&self) -> bool {
+        self.lock.curve() == Curve::Secp256k1
+            && self.lock != Lock::TaprootScriptTree
+            && (1..=MAX_BATCH_ENTRIES).contains(&self.entries.len())
+            && self.entries.iter().all(|e| {
+                self.prefix.len() + e.tail.len() <= MAX_PATH_DEPTH
+                    && self.lock.credential(e.credential.value()) == Some(e.credential)
+            })
+    }
+
+    /// The batch cut into consecutive batches of at most `max_entries` entries each, with
+    /// the same lock, root, prefix, domain and epoch. Every entry keeps its credential,
+    /// target and nullifier, so the pieces make exactly the claims of the whole: their
+    /// [`Self::statement`]s, and with them the registry bindings, are those of the whole in
+    /// order.
+    ///
+    /// Proving memory follows the padded row count of one proof, not the number of
+    /// entries proved in total. With the P2PKH lock below a seed-rooted
+    /// `m/44'/0'/0'/0`, a proof of up to 43 entries pads to 2^23 rows (11 GB measured at
+    /// 30 entries), where one proof of 100 entries pads to 2^25. Each piece repeats the
+    /// root and prefix derivation (about 0.93 million rows) and is its own proof of
+    /// about 950 KiB.
+    pub fn chunks(&self, max_entries: usize) -> Vec<BatchStatement> {
+        assert!(max_entries > 0, "a batch holds at least one entry");
+        self.entries
+            .chunks(max_entries)
+            .map(|entries| BatchStatement {
+                lock: self.lock,
+                root: self.root,
+                prefix: self.prefix.clone(),
+                entries: entries.to_vec(),
+                migration_domain: self.migration_domain,
+                epoch: self.epoch,
+            })
+            .collect()
+    }
+
+    /// The single statement that makes the same claim as entry `index`.
+    pub fn statement(&self, index: usize) -> Option<OwnershipStatement> {
+        let entry = self.entries.get(index)?;
+        let mut path = self.prefix.clone();
+        path.extend_from_slice(&entry.tail);
+        Some(OwnershipStatement {
+            lock: self.lock,
+            source: Self::source(self.root, path),
+            credential: entry.credential,
+            pq_commitment: entry.pq_commitment,
+            migration_domain: self.migration_domain,
+            epoch: self.epoch,
+            nullifier: entry.nullifier,
+        })
+    }
+
+    fn encode_path(out: &mut Vec<u8>, path: &[u32]) {
+        out.push(path.len() as u8);
+        for index in path {
+            out.extend_from_slice(&index.to_be_bytes());
+        }
+    }
+
+    /// Canonical encoding; also the bytes the proof transcript absorbs.
+    ///
+    /// `tag(25) || lock || root || epoch(8, BE) || domain(32) || prefix || count(2, BE) ||
+    /// count * (tail || credential value || pq(32) || nullifier(32))`, a path being
+    /// `depth || depth * index(4, BE)`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = BATCH_TAG.to_vec();
+        out.push(self.lock as u8);
+        out.push(self.root as u8);
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&self.migration_domain);
+        Self::encode_path(&mut out, &self.prefix);
+        out.extend_from_slice(&(self.entries.len() as u16).to_be_bytes());
+        for entry in &self.entries {
+            Self::encode_path(&mut out, &entry.tail);
+            out.extend_from_slice(entry.credential.value());
+            out.extend_from_slice(&entry.pq_commitment);
+            out.extend_from_slice(&entry.nullifier);
+        }
+        out
+    }
+
+    /// Strict inverse of [`Self::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let mut rest = bytes.strip_prefix(BATCH_TAG.as_slice())?;
+        let mut take = |n: usize| -> Option<Vec<u8>> {
+            let (head, tail) = rest.split_at_checked(n)?;
+            rest = tail;
+            Some(head.to_vec())
+        };
+        let path = |take: &mut dyn FnMut(usize) -> Option<Vec<u8>>| -> Option<Vec<u32>> {
+            let depth = usize::from(take(1)?[0]);
+            Some(
+                take(4 * depth)?
+                    .chunks_exact(4)
+                    .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect(),
+            )
+        };
+        let lock = Lock::from_tag(take(1)?[0])?;
+        let root = match take(1)?[0] {
+            0 => Bip32Root::Seed,
+            1 => Bip32Root::ExtendedKey,
+            _ => return None,
+        };
+        let epoch = u64::from_be_bytes(take(8)?.try_into().ok()?);
+        let migration_domain: [u8; 32] = take(32)?.try_into().ok()?;
+        let prefix = path(&mut take)?;
+        let count = usize::from(u16::from_be_bytes(take(2)?.try_into().ok()?));
+        let mut entries = Vec::with_capacity(count.min(MAX_BATCH_ENTRIES));
+        for _ in 0..count {
+            let tail = path(&mut take)?;
+            entries.push(BatchEntry {
+                tail,
+                credential: lock.credential(&take(lock.credential_bytes())?)?,
+                pq_commitment: take(32)?.try_into().ok()?,
+                nullifier: take(32)?.try_into().ok()?,
+            });
+        }
+        let batch = Self {
+            lock,
+            root,
+            prefix,
+            entries,
+            migration_domain,
+            epoch,
+        };
+        (rest.is_empty() && batch.is_well_formed()).then_some(batch)
+    }
+
+    fn relation(&self) -> Relation {
+        Relation::Batch {
+            lock: self.lock,
+            root: self.root,
+            prefix: self.prefix.clone(),
+            tails: self.entries.iter().map(|e| e.tail.clone()).collect(),
+        }
+    }
+
+    fn public_bits(&self) -> Vec<bool> {
+        let kind = Self::source(self.root, Vec::new()).nullifier_kind();
+        let mut out = Vec::new();
+        for entry in &self.entries {
+            credential_public_bits(
+                &mut out,
+                kind,
+                &entry.credential,
+                &self.migration_domain,
+                &entry.nullifier,
+            );
+        }
+        out
+    }
+
+    /// The relation's public inputs: those of each entry in order. `None` for a malformed
+    /// batch.
+    pub fn public_inputs(&self) -> Option<Vec<F>> {
+        self.is_well_formed().then(|| {
+            self.public_bits()
+                .into_iter()
+                .map(|b| fu(u64::from(b)))
+                .collect()
+        })
+    }
+
+    /// The bindings a verified batch asks the registry to record, one per entry.
+    #[cfg(feature = "std")]
+    pub fn bindings(&self) -> Vec<super::registry::MigrationBinding> {
+        (0..self.entries.len())
+            .filter_map(|i| self.statement(i))
+            .map(|statement| statement.binding())
+            .collect()
+    }
+}
+
+/// The relation of a batch with its assignment, and the row count before padding.
+fn build_batch(
+    lock: Lock,
+    root: Bip32Root,
+    prefix: &[u32],
+    tails: &[Vec<u32>],
+    public_bits: &[bool],
+    secret: &[u8],
+) -> (Shape, Vec<F>, usize) {
+    let cs = build_batch_in(
+        ConstraintSystem::new(),
+        lock,
+        root,
+        prefix,
+        tails,
+        public_bits,
+        secret,
+    );
+    let rows = cs.num_rows();
+    let (shape, assignment) = cs.finish_v2();
+    (shape, assignment, rows)
+}
+
+fn build_batch_in(
+    mut cs: ConstraintSystem,
+    lock: Lock,
+    root: Bip32Root,
+    prefix: &[u32],
+    tails: &[Vec<u32>],
+    public_bits: &[bool],
+    secret: &[u8],
+) -> ConstraintSystem {
+    let per_entry = 8 * lock.credential_bytes() + 512;
+    assert_eq!(public_bits.len(), tails.len() * per_entry);
+    let public = alloc_public(&mut cs, public_bits);
+    let (node, nullifier_secret) = bip32_root(&mut cs, root, secret);
+    let order = Modulus::secp256k1_order();
+    let steps = |path: &[u32]| -> Vec<Step> { path.iter().map(|&i| Step::Public(i)).collect() };
+    let shared = bip32_descend_gadget(&mut cs, &order, node, &steps(prefix));
+    let mut parent = SecpParent::new(&mut cs, shared.clone());
+    for (tail, public) in tails.iter().zip(public.chunks(per_entry)) {
+        let leaf = match tail.split_first() {
+            None => shared.clone(),
+            Some((&first, rest)) => {
+                let child = parent.child(&mut cs, &order, &Step::Public(first));
+                bip32_descend_gadget(&mut cs, &order, child, &steps(rest))
+            }
+        };
+        let credential = secp_lock(&mut cs, lock, &leaf.key, &[0; 32]);
+        bind_credential(&mut cs, public, &credential, &nullifier_secret);
+    }
+    cs
+}
+
+/// The public relation of a batch. `None` for a malformed batch.
