@@ -72,16 +72,13 @@ impl Gf128 {
 
     /// Multiplicative inverse (`None` for zero), by `x^(2^128 - 2)`.
     pub fn inv(self) -> Option<Self> {
-        if self == Self::ZERO {
-            return None;
-        }
         let mut square = self;
         let mut acc = Self::ONE;
         for _ in 1..128 {
             square = square.mul(square);
             acc = acc.mul(square);
         }
-        Some(acc)
+        (!qsag_asm::ct_eq_bytes(&self.to_bytes(), &[0u8; 16])).then_some(acc)
     }
 
     pub fn to_bytes(self) -> [u8; 16] {

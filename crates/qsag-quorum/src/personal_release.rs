@@ -13,7 +13,8 @@
 //!   derives pairwise Encrypt-then-MAC [`MacSealedWireChannel`] keys from its enrolled
 //!   [`PersonalBeltLatch`], exchanges latch acknowledgements, collapses its own MSP rows
 //!   locally, reshares its 4 `Goldilocks` lanes over encrypted point-to-point links,
-//!   establishes pairwise PQ Ring-LWE + interactive KOS15 OT channels ([`PartyOtEndpoint`]),
+//!   establishes pairwise PQ Ring-LWE + interactive `SoftSpokenOT (n_C = 256, k = 2)` channels
+//!   ([`PartyOtEndpoint`]),
 //!   authenticates inputs and 118 `Π_pow7` S-box tuples under a dealerless `GoldilocksExt2`
 //!   SPDZ MAC key, evaluates `poseidon2_compress12_ff`, and verifies a two-stage
 //!   multiplicatively blinded `MacCheck` strictly before opening the PRF-check digest.
@@ -53,6 +54,9 @@ use crate::access::{
 use crate::hash::h32;
 use crate::party_node::{PersonalMspInput, PersonalMspInputError, PoisonJournal, ROUND_ABORT};
 use crate::wire_channel::{MacSealedWireChannel, TransportError, WireTransport};
+
+mod dkg;
+pub use dkg::{DealerlessPersonalReleaseDkg, run_dealerless_personal_release_dkg_over_wire};
 
 /// Wire round tags for isolated [`PersonalReleaseParty::ceremony_over_wire`].
 pub const ROUND_PREL_ACK: u32 = 0x0500_0001;
@@ -116,6 +120,7 @@ impl From<TransportError> for PersonalReleaseError {
 /// Public description of one release ceremony.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonalReleaseContext {
+    deployment_id: [u8; 32],
     key_epoch_context: [u8; 32],
     policy_digest: [u8; 32],
     program_digest: [u8; 32],
@@ -137,6 +142,7 @@ impl PersonalReleaseContext {
         reason = "Every argument is a separately bound public ceremony field"
     )]
     pub fn new(
+        deployment_id: [u8; 32],
         system: &AsymmetricQuorumSystem,
         program: &MonotoneSpanProgram,
         key_epoch_context: [u8; 32],
@@ -153,6 +159,7 @@ impl PersonalReleaseContext {
             return Err(PersonalReleaseError::ContextMismatch);
         }
         Ok(Self {
+            deployment_id,
             key_epoch_context,
             policy_digest: system.policy_digest(&key_epoch_context),
             program_digest: span_program_digest(program),
@@ -176,11 +183,12 @@ impl PersonalReleaseContext {
         &self.pk_seed
     }
 
-    /// Fixed-order `QPRC0001` frame of every field. All fields but the signer list have
+    /// Fixed-order `QPRC0002` frame of every field. All fields but the signer list have
     /// fixed width and the list carries its length, so the encoding is injective.
     fn frame(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(8 + 4 * 32 + 8 + 8 + 2 * self.signers.len() + 64);
-        out.extend_from_slice(b"QPRC0001");
+        let mut out = Vec::with_capacity(8 + 5 * 32 + 8 + 8 + 2 * self.signers.len() + 64);
+        out.extend_from_slice(b"QPRC0002");
+        out.extend_from_slice(&self.deployment_id);
         out.extend_from_slice(&self.key_epoch_context);
         out.extend_from_slice(&self.policy_digest);
         out.extend_from_slice(&self.program_digest);
@@ -209,9 +217,9 @@ impl PersonalReleaseContext {
     }
 
     /// Session identifier of the authenticated evaluation, bound to the latch binding.
-    pub fn mpc_session_id(&self) -> [u8; 32] {
+    pub fn mpc_session_id(&self) -> [u8; 32]{
         let mut framed = [0u8; 40];
-        framed[..8].copy_from_slice(b"QPRS0001");
+        framed[..8].copy_from_slice(b"QPRS0002");
         framed[8..].copy_from_slice(&self.record().binding());
         shake256_32(&framed)
     }
@@ -268,7 +276,8 @@ impl Drop for WireExt2BlindTriple {
     }
 }
 
-/// One custodian's end of a pairwise PQ Ring-LWE + interactive KOS15 OT mesh over
+/// One custodian's end of a pairwise PQ Ring-LWE + interactive `SoftSpokenOT (n_C = 256, k = 2)`
+/// mesh over
 /// [`WireTransport`], with pooled single-use `GoldilocksExt2` multiplicative blinding triples.
 ///
 /// Holds **only** local `me -> peer` [`OtExtSenderChannel`]s and `peer -> me`
@@ -285,6 +294,8 @@ pub struct PartyOtEndpoint {
     ext2_blind_cursor: usize,
     ext2_blind_serial: u64,
     poisoned: bool,
+    #[cfg(test)]
+    tamper_next_ext2_c: Option<(usize, GoldilocksExt2)>,
 }
 
 impl Drop for PartyOtEndpoint {
@@ -294,7 +305,8 @@ impl Drop for PartyOtEndpoint {
 }
 
 impl PartyOtEndpoint {
-    /// Establish active-secure PQ Ring-LWE + 4-ciphertext parity-combined KOS15 OT channels
+    /// Establish active-secure PQ Ring-LWE + 4-ciphertext parity-combined
+    /// `SoftSpokenOT (n_C = 256, k = 2)` channels
     /// with every peer in `roster` over `wire` using deadlock-free lexicographic pair scheduling.
     pub fn establish_over_wire<T: WireTransport>(
         session_id: [u8; 32],
@@ -423,6 +435,8 @@ impl PartyOtEndpoint {
             ext2_blind_cursor: 0,
             ext2_blind_serial: 0,
             poisoned: false,
+            #[cfg(test)]
+            tamper_next_ext2_c: None,
         })
     }
 
@@ -580,12 +594,19 @@ impl PartyOtEndpoint {
         if wire.party() != self.me || wire.parties() != self.parties {
             return Err(PersonalReleaseError::LaneRosterMismatch);
         }
-        // Bound the largest ciphertext frame, including the sealed-channel overhead,
-        // before any multiplication or allocation derived from this public count.
-        let frame_bytes = additional.checked_mul(640 * 32)
+        // Bound the largest ciphertext frame, including two sacrifice companions per staged
+        // triple (`3 * additional` OLE items) and the sealed-channel overhead, before any
+        // multiplication or allocation derived from this public count.
+        const SAC_COMPANIONS: usize = 2;
+        let ole_items = additional
+            .checked_mul(1 + SAC_COMPANIONS)
             .ok_or(TransportError::PayloadTooLarge)?;
-        if frame_bytes > crate::wire_channel::MAX_FRAME_PAYLOAD
-            - crate::wire_channel::FRAME_HEADER_BYTES - 33 {
+        let frame_bytes = ole_items
+            .checked_mul(640 * 32)
+            .ok_or(TransportError::PayloadTooLarge)?;
+        if frame_bytes
+            > crate::wire_channel::MAX_FRAME_PAYLOAD - crate::wire_channel::FRAME_HEADER_BYTES - 33
+        {
             return Err(TransportError::PayloadTooLarge.into());
         }
         if additional == 0 {
@@ -614,12 +635,12 @@ impl PartyOtEndpoint {
         const WORDS_PER_ITEM: usize = 10;
         const BITS_PER_ITEM: usize = 64 * WORDS_PER_ITEM;
         let r_shares = SecretBuffer(
-            (0..additional)
+            (0..ole_items)
                 .map(|_| rng.next_ext2())
                 .collect::<Vec<GoldilocksExt2>>(),
         );
-        let total_words = additional * WORDS_PER_ITEM;
-        let total_bits = additional * BITS_PER_ITEM;
+        let total_words = ole_items * WORDS_PER_ITEM;
+        let total_bits = ole_items * BITS_PER_ITEM;
         let choices = SecretBuffer(
             (0..total_words)
                 .map(|_| rng.next_u64())
@@ -720,7 +741,9 @@ impl PartyOtEndpoint {
         xof.absorb(b"personal-release/ext2-blind-h");
         xof.absorb(&coin);
 
-        for k in 0..additional {
+        let mut a_shares = SecretBuffer(Vec::with_capacity(ole_items));
+        let mut c_shares = SecretBuffer(Vec::with_capacity(ole_items));
+        for k in 0..ole_items {
             let base_bit = k * BITS_PER_ITEM;
             let mut a_me = GoldilocksExt2::ZERO;
             let mut w_me = GoldilocksExt2::ZERO;
@@ -737,11 +760,111 @@ impl PartyOtEndpoint {
                 );
                 w_me += g * raw_acc[bit];
             }
-            let c_me = r_shares[k] * a_me + w_me;
+            a_shares.push(a_me);
+            c_shares.push(r_shares[k] * a_me + w_me);
+        }
+        #[cfg(test)]
+        if let Some((item, delta)) = self.tamper_next_ext2_c.take() {
+            c_shares[item] += delta;
+        }
+
+        // Active Beaver triple sacrifice over `wire`: check each live triple `0..additional`
+        // against `SAC_COMPANIONS = 2` companion triples (`(p^2 - 1)^-2 < 2^-255` soundness)
+        // before sealing any triple into `ext2_blind_pool`.
+        let sac_view = h32(
+            b"personal-release/ext2-blind-sac-view",
+            &[&refill_sid, &coin, &self.transcript],
+        );
+        let sac_coin = joint_coin_over_wire(
+            wire,
+            &self.roster,
+            &refill_sid,
+            b"ext2-blind-sac",
+            &sac_view,
+            false,
+            rng,
+        )?;
+        let mut sac_xof = Cshake256Xof::new_shake256();
+        sac_xof.absorb(b"personal-release/ext2-blind-sac-theta");
+        sac_xof.absorb(&refill_sid);
+        sac_xof.absorb(&sac_coin);
+        let sac_pairs = additional * SAC_COMPANIONS;
+        let mut thetas = Vec::with_capacity(sac_pairs);
+        for _ in 0..sac_pairs {
+            let t = loop {
+                let mut bytes = [0u8; 48];
+                sac_xof.squeeze(&mut bytes);
+                let cand = decode_pad48_ext2(&bytes);
+                wipe_bytes(&mut bytes);
+                if !cand.ct_eq(GoldilocksExt2::ZERO) {
+                    break cand;
+                }
+            };
+            thetas.push(t);
+        }
+
+        let mut uv_me = SecretBuffer(Vec::with_capacity(2 * sac_pairs));
+        for k in 0..additional {
+            for j in 0..SAC_COMPANIONS {
+                let comp = (1 + j) * additional + k;
+                let theta = thetas[k * SAC_COMPANIONS + j];
+                uv_me.push(theta * r_shares[k] - r_shares[comp]);
+                uv_me.push(a_shares[k] - a_shares[comp]);
+            }
+        }
+        let uv_open = commit_and_open_ext2_vec_over_wire(
+            wire,
+            &self.roster,
+            &refill_sid,
+            b"ext2-blind-sac-uv",
+            0,
+            &uv_me,
+            rng,
+        )?;
+
+        let mut s_me = SecretBuffer(Vec::with_capacity(sac_pairs));
+        for k in 0..additional {
+            for j in 0..SAC_COMPANIONS {
+                let comp = (1 + j) * additional + k;
+                let pair_idx = k * SAC_COMPANIONS + j;
+                let theta = thetas[pair_idx];
+                let u = uv_open[2 * pair_idx];
+                let v = uv_open[2 * pair_idx + 1];
+                let mut s =
+                    theta * c_shares[k] - c_shares[comp] - v * r_shares[comp] - u * a_shares[comp];
+                if self.me == 0 {
+                    s -= u * v;
+                }
+                s_me.push(s);
+            }
+        }
+        let s_open = commit_and_open_ext2_vec_over_wire(
+            wire,
+            &self.roster,
+            &refill_sid,
+            b"ext2-blind-sac-s",
+            1,
+            &s_me,
+            rng,
+        )?;
+        let mut all_zero = true;
+        for &s in &s_open {
+            all_zero &= s.ct_eq(GoldilocksExt2::ZERO);
+        }
+        if !all_zero {
+            return Err(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                PreprocessError::SacrificeResidualNonZero {
+                    phase: "personal_release_ext2_blind",
+                },
+            )));
+        }
+
+        self.ext2_blind_pool.reserve(additional);
+        for k in 0..additional {
             self.ext2_blind_pool.push(WireExt2BlindTriple {
                 r: r_shares[k],
-                a: a_me,
-                c: c_me,
+                a: a_shares[k],
+                c: c_shares[k],
             });
         }
         Ok(())
@@ -1098,6 +1221,116 @@ fn commit_and_open_ext2_over_wire<T: WireTransport>(
         total += sh;
     }
     Ok(total)
+}
+
+/// Commit-before-open elementwise sum of additive `GoldilocksExt2` vectors across all `m` signers.
+fn commit_and_open_ext2_vec_over_wire<T: WireTransport>(
+    wire: &mut T,
+    roster: &[u16],
+    session_id: &[u8; 32],
+    phase: &[u8],
+    sub_step: u64,
+    my_shares: &[GoldilocksExt2],
+    rng: &mut PartyPrivateRng,
+) -> Result<Vec<GoldilocksExt2>, PersonalReleaseError> {
+    let me = wire.party();
+    let m = wire.parties();
+    let count = my_shares.len();
+    let salt = SecretBuffer(rng.next_bytes32());
+    let mut shares_be = SecretBuffer(Vec::with_capacity(16 * count));
+    for &sh in my_shares {
+        shares_be.extend_from_slice(&sh.to_be_bytes());
+    }
+    let step_be = sub_step.to_be_bytes();
+    let len_be = (count as u64).to_be_bytes();
+    let my_com = h32(
+        b"personal-release/ext2-vec-open-com",
+        &[
+            session_id,
+            phase,
+            &step_be,
+            &len_be,
+            &(me as u64).to_be_bytes(),
+            &shares_be,
+            &*salt,
+        ],
+    );
+    let coms = broadcast_collect(wire, roster, ROUND_PREL_COMMIT, &my_com)?;
+
+    let mut all_coms_flat = Vec::with_capacity(m * 32);
+    for p in 0..m {
+        if coms[p].len() != 32 {
+            return Err(PersonalReleaseError::MalformedWireMessage {
+                from: roster[p],
+                round: ROUND_PREL_COMMIT,
+            });
+        }
+        all_coms_flat.extend_from_slice(&coms[p]);
+    }
+    let echo = h32(
+        b"personal-release/ext2-vec-open-echo",
+        &[session_id, phase, &step_be, &len_be, &all_coms_flat],
+    );
+    let expected_open_len = 16 * count + 64;
+    let mut open_frame = SecretBuffer(Vec::with_capacity(expected_open_len));
+    open_frame.extend_from_slice(&shares_be);
+    open_frame.extend_from_slice(&*salt);
+    open_frame.extend_from_slice(&echo);
+    let opens = broadcast_collect(wire, roster, ROUND_PREL_OPEN, &open_frame)?;
+
+    let mut totals = vec![GoldilocksExt2::ZERO; count];
+    for p in 0..m {
+        if opens[p].len() != expected_open_len {
+            return Err(PersonalReleaseError::MalformedWireMessage {
+                from: roster[p],
+                round: ROUND_PREL_OPEN,
+            });
+        }
+        let share_bytes = &opens[p][0..16 * count];
+        let salt_bytes = &opens[p][16 * count..16 * count + 32];
+        let mut peer_echo = [0u8; 32];
+        peer_echo.copy_from_slice(&opens[p][16 * count + 32..expected_open_len]);
+        if !ct_eq_bytes32(&peer_echo, &echo) {
+            return Err(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                PreprocessError::ShareCommitMismatch {
+                    phase: "personal_release_ext2_vec_open",
+                    party_id: p,
+                },
+            )));
+        }
+        let exp = h32(
+            b"personal-release/ext2-vec-open-com",
+            &[
+                session_id,
+                phase,
+                &step_be,
+                &len_be,
+                &(p as u64).to_be_bytes(),
+                share_bytes,
+                salt_bytes,
+            ],
+        );
+        let mut peer_com = [0u8; 32];
+        peer_com.copy_from_slice(&coms[p]);
+        if !ct_eq_bytes32(&exp, &peer_com) {
+            return Err(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                PreprocessError::ShareCommitMismatch {
+                    phase: "personal_release_ext2_vec_open",
+                    party_id: p,
+                },
+            )));
+        }
+        for k in 0..count {
+            let sh = decode_ext2_be(&share_bytes[16 * k..16 * k + 16]).ok_or(
+                PersonalReleaseError::MalformedWireMessage {
+                    from: roster[p],
+                    round: ROUND_PREL_OPEN,
+                },
+            )?;
+            totals[k] += sh;
+        }
+    }
+    Ok(totals)
 }
 
 #[derive(Clone, Copy)]
@@ -2148,6 +2381,8 @@ fn eval_sbox7_round_over_wire<T: WireTransport>(
 
 /// One custodian: its own latch and its own span-program rows, nothing of any peer.
 pub struct PersonalReleaseParty<W: DurableWal> {
+    deployment_id: [u8; 32],
+    enrolled_key: Option<(HemDigest4, HemDigest4)>,
     latch: PersonalBeltLatch<W>,
     program_digest: [u8; 32],
     program: MonotoneSpanProgram,
@@ -2156,6 +2391,7 @@ pub struct PersonalReleaseParty<W: DurableWal> {
 
 impl<W: DurableWal> PersonalReleaseParty<W> {
     pub fn new(
+        deployment_id: [u8; 32],
         latch: PersonalBeltLatch<W>,
         input: PersonalMspInput,
     ) -> Result<Self, PersonalReleaseError> {
@@ -2163,6 +2399,8 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
             return Err(PersonalReleaseError::ContextMismatch);
         }
         Ok(Self {
+            deployment_id,
+            enrolled_key: None,
             latch,
             program_digest: span_program_digest(input.program()),
             program: input.program().clone(),
@@ -2209,7 +2447,9 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
         ctx: &PersonalReleaseContext,
     ) -> Result<BeltLatchRecord, PersonalReleaseError> {
         let own_context = self.latch.key_epoch_context();
-        if ctx.key_epoch_context != *own_context
+        if ctx.deployment_id != self.deployment_id
+            || self.enrolled_key.is_some_and(|key| key != (ctx.pk_seed, ctx.commitment))
+            || ctx.key_epoch_context != *own_context
             || ctx.policy_digest != self.latch.system().policy_digest(own_context)
             || ctx.program_digest != self.program_digest
             || !ctx.signers.is_subset(self.latch.system().participants())
@@ -2276,7 +2516,8 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
     /// 2. Exchanges receiver-bound [`PersonalLatchAck`]s, verifies the B³ quorum certificate, and
     ///    collapses only this custodian's MSP rows locally;
     /// 3. Reshares the 4 `Goldilocks` lanes into uniform additive shares over the encrypted links,
-    ///    establishes pairwise PQ Ring-LWE + KOS15 OT channels, runs dealerless `Π_MAC` + `Π_pow7`,
+    ///    establishes pairwise PQ Ring-LWE + `SoftSpokenOT (n_C = 256, k = 2)` channels, runs
+    ///    dealerless `Π_MAC` + `Π_pow7`,
     ///    evaluates `poseidon2_compress12_ff`, and verifies a two-stage multiplicatively blinded
     ///    `GoldilocksExt2` `MacCheck` **strictly before** opening the PRF-check digest.
     pub fn ceremony_over_wire<T: WireTransport, J: PoisonJournal>(
@@ -2329,7 +2570,8 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
         }
         let mut wire_keys = self.derive_wire_keys(ctx)?;
         let raw_keys = core::mem::take(&mut wire_keys.0);
-        let mut wire = MacSealedWireChannel::new_encrypted(transport, mpc_sid, raw_keys)?;
+        let mut wire =
+            MacSealedWireChannel::new_encrypted(transport, self.deployment_id, mpc_sid, raw_keys)?;
 
         match ot_override {
             Some(ot) => self.ceremony_with_established_ot_reserved(
@@ -2392,7 +2634,13 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
         let Some(me) = roster.iter().position(|&p| p == self.party()) else {
             return Err(PersonalReleaseError::NotASigner);
         };
-        if wire.parties() != m || wire.party() != me || ot.parties != m || ot.me != me {
+        if !wire.matches_encrypted(&self.deployment_id, &ctx.mpc_session_id())
+            || wire.parties() != m
+            || wire.party() != me
+            || ot.roster != roster
+            || ot.parties != m
+            || ot.me != me
+        {
             return Err(PersonalReleaseError::LaneRosterMismatch);
         }
         let mpc_sid = ctx.mpc_session_id();
@@ -2549,17 +2797,6 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
             &*x_me,
             rng,
         )?;
-        let pow7_sid = h32(b"personal-release/pow7-vault", &[&spdz_sid]);
-        let pow7_tuples = generate_pow7_tuples_over_wire(
-            wire,
-            ot,
-            roster,
-            &pow7_sid,
-            POSEIDON2_SBOXES_PER_PERM,
-            *alpha_me,
-            rng,
-        )?;
-
         let mut in0: SecretBuffer<[LocalAuthWire; 4]> = SecretBuffer(core::array::from_fn(|i| {
             LocalAuthWire {
                 val: x_me[i],
@@ -2571,186 +2808,206 @@ impl<W: DurableWal> PersonalReleaseParty<W> {
             in0[0].val += Goldilocks::ONE;
         }
 
-        // 4. Evaluate `poseidon2_compress12_ff(secret, ctx.pk_seed, [HEM_DOMAIN_PRF_CHECK, 0, 0, IV])`
-        //    on authenticated shares (`30` S-box rounds, `118` S-boxes).
-        let tweak = [
-            Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
-            Goldilocks::ZERO,
-            Goldilocks::ZERO,
-            Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
-        ];
-        let mut st = SecretBuffer([
-            in0[0],
-            in0[1],
-            in0[2],
-            in0[3],
-            LocalAuthWire::public_const(ctx.pk_seed[0], me, *alpha_me),
-            LocalAuthWire::public_const(ctx.pk_seed[1], me, *alpha_me),
-            LocalAuthWire::public_const(ctx.pk_seed[2], me, *alpha_me),
-            LocalAuthWire::public_const(ctx.pk_seed[3], me, *alpha_me),
-            LocalAuthWire::public_const(tweak[0], me, *alpha_me),
-            LocalAuthWire::public_const(tweak[1], me, *alpha_me),
-            LocalAuthWire::public_const(tweak[2], me, *alpha_me),
-            LocalAuthWire::public_const(tweak[3], me, *alpha_me),
-        ]);
-        apply_me_local(&mut st);
-
-        let mut tup_cursor = 0usize;
-        let mut pending_wires = SecretBuffer(Vec::with_capacity(POSEIDON2_SBOXES_PER_PERM));
-        let mut pending_opened = Vec::with_capacity(POSEIDON2_SBOXES_PER_PERM);
-
-        for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-            let mut sbox_in = SecretBuffer(Vec::with_capacity(12));
-            for (lane, w) in st.iter().enumerate() {
-                let rc =
-                    LocalAuthWire::public_const(poseidon2_const_at(0, r, lane as u64), me, *alpha_me);
-                sbox_in.push(w.add(rc));
-            }
-            let sbox_out = eval_sbox7_round_over_wire(
-                wire,
-                roster,
-                &sbox_in,
-                &pow7_tuples[tup_cursor..tup_cursor + 12],
-                me,
-                *alpha_me,
-                &mut pending_wires,
-                &mut pending_opened,
-            )?;
-            tup_cursor += 12;
-            st.copy_from_slice(&sbox_out);
-            apply_me_local(&mut st);
-        }
-
-        for r in 0..POSEIDON2_INTERNAL_ROUNDS {
-            let rc0 = LocalAuthWire::public_const(poseidon2_const_at(1, r, 0), me, *alpha_me);
-            let sbox_in = SecretBuffer([st[0].add(rc0)]);
-            let sbox_out = eval_sbox7_round_over_wire(
-                wire,
-                roster,
-                &*sbox_in,
-                &pow7_tuples[tup_cursor..tup_cursor + 1],
-                me,
-                *alpha_me,
-                &mut pending_wires,
-                &mut pending_opened,
-            )?;
-            tup_cursor += 1;
-            st[0] = sbox_out[0];
-            apply_mi_local(&mut st);
-        }
-
-        for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
-            let mut sbox_in = SecretBuffer(Vec::with_capacity(12));
-            for (lane, w) in st.iter().enumerate() {
-                let rc =
-                    LocalAuthWire::public_const(poseidon2_const_at(2, r, lane as u64), me, *alpha_me);
-                sbox_in.push(w.add(rc));
-            }
-            let sbox_out = eval_sbox7_round_over_wire(
-                wire,
-                roster,
-                &sbox_in,
-                &pow7_tuples[tup_cursor..tup_cursor + 12],
-                me,
-                *alpha_me,
-                &mut pending_wires,
-                &mut pending_opened,
-            )?;
-            tup_cursor += 12;
-            st.copy_from_slice(&sbox_out);
-            apply_me_local(&mut st);
-        }
-        debug_assert_eq!(tup_cursor, POSEIDON2_SBOXES_PER_PERM);
-
-        let c4 = Goldilocks::from_u64_reduced(4);
-        let cut_wires = SecretBuffer([
-            st[0]
-                .add(in0[0])
-                .add(LocalAuthWire::public_const(
-                    ctx.pk_seed[0] * Goldilocks::TWO + tweak[0] * c4,
-                    me,
-                    *alpha_me,
-                )),
-            st[1]
-                .add(in0[1])
-                .add(LocalAuthWire::public_const(
-                    ctx.pk_seed[1] * Goldilocks::TWO + tweak[1] * c4,
-                    me,
-                    *alpha_me,
-                )),
-            st[2]
-                .add(in0[2])
-                .add(LocalAuthWire::public_const(
-                    ctx.pk_seed[2] * Goldilocks::TWO + tweak[2] * c4,
-                    me,
-                    *alpha_me,
-                )),
-            st[3]
-                .add(in0[3])
-                .add(LocalAuthWire::public_const(
-                    ctx.pk_seed[3] * Goldilocks::TWO + tweak[3] * c4,
-                    me,
-                    *alpha_me,
-                )),
-        ]);
-        drop((st, in0, pow7_tuples));
-
-        // 5. Stage A Pre-Cut Blinded `MacCheck`: verify ALL 118 intermediate S-box openings
-        //    STRICTLY BEFORE any cut-boundary commitment or share leaves this custodian!
-        let mut pend_bytes = Vec::with_capacity(pending_opened.len() * 8);
-        for &y in &pending_opened {
-            pend_bytes.extend_from_slice(&y.to_be_bytes());
-        }
-        let stage_a_dig = h32(b"personal-release/stage-a-dig", &[&spdz_sid, &pend_bytes]);
-        let stage_a_coin = joint_coin_over_wire(
-            wire,
-            roster,
-            &spdz_sid,
-            b"stage-a-mac",
-            &stage_a_dig,
-            true,
-            rng,
-        )?;
-        let mut a_xof = Cshake256Xof::new_shake256();
-        a_xof.absorb(b"personal-release/stage-a-chis");
-        a_xof.absorb(&stage_a_coin);
-        let mut x_fold = GoldilocksExt2::ZERO;
-        let mut m_fold = SecretBuffer(GoldilocksExt2::ZERO);
-        for (w, &y) in pending_wires.iter().zip(&pending_opened) {
-            let mut b48 = [0u8; 48];
-            a_xof.squeeze(&mut b48);
-            let chi = decode_pad48_ext2(&b48);
-            x_fold += chi.mul_base(y);
-            *m_fold += chi * w.mac;
-        }
-        let stage_a_res = SecretBuffer(*m_fold - *alpha_me * x_fold);
-        ot.blind_check_zero_ext2(
-            wire,
-            &spdz_sid,
-            "personal_release_stage_a_mac",
-            *stage_a_res,
-            rng,
-        )?;
-
-        // 6. Stage B Cut-Boundary Commit-Open + Blinded `MacCheck`: open ONLY the 4-limb digest!
-        let opened_vec = commit_open_and_check_goldilocks_over_wire(
-            wire,
-            ot,
-            roster,
-            &spdz_sid,
-            "personal_release_cut_digest",
-            ROUND_PREL_CUT_COM,
-            ROUND_PREL_CUT_OPEN,
-            &*cut_wires,
-            *alpha_me,
-            rng,
-        )?;
-        let opened: HemDigest4 = [opened_vec[0], opened_vec[1], opened_vec[2], opened_vec[3]];
+        let opened =
+            authenticated_prf_check(wire, ot, roster, spdz_sid, &ctx.pk_seed, alpha_me, in0, rng)?;
         if opened != ctx.commitment {
             return Err(PersonalReleaseError::CommitmentMismatch);
         }
         Ok(opened)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authenticated_prf_check<T: WireTransport>(
+    wire: &mut MacSealedWireChannel<T>,
+    ot: &mut PartyOtEndpoint,
+    roster: &[u16],
+    spdz_sid: [u8; 32],
+    pk_seed: &HemDigest4,
+    alpha_me: SecretBuffer<GoldilocksExt2>,
+    in0: SecretBuffer<[LocalAuthWire; 4]>,
+    rng: &mut PartyPrivateRng,
+) -> Result<HemDigest4, PersonalReleaseError> {
+    let me = wire.party();
+    let pow7_sid = h32(b"personal-release/pow7-vault", &[&spdz_sid]);
+    let pow7_tuples = generate_pow7_tuples_over_wire(
+        wire,
+        ot,
+        roster,
+        &pow7_sid,
+        POSEIDON2_SBOXES_PER_PERM,
+        *alpha_me,
+        rng,
+    )?;
+
+    // 4. Evaluate `poseidon2_compress12_ff(secret, pk_seed, [HEM_DOMAIN_PRF_CHECK, 0, 0, IV])`
+    //    on authenticated shares (`30` S-box rounds, `118` S-boxes).
+    let tweak = [
+        Goldilocks::from_u64_reduced(HEM_DOMAIN_PRF_CHECK),
+        Goldilocks::ZERO,
+        Goldilocks::ZERO,
+        Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+    ];
+    let mut st = SecretBuffer([
+        in0[0],
+        in0[1],
+        in0[2],
+        in0[3],
+        LocalAuthWire::public_const(pk_seed[0], me, *alpha_me),
+        LocalAuthWire::public_const(pk_seed[1], me, *alpha_me),
+        LocalAuthWire::public_const(pk_seed[2], me, *alpha_me),
+        LocalAuthWire::public_const(pk_seed[3], me, *alpha_me),
+        LocalAuthWire::public_const(tweak[0], me, *alpha_me),
+        LocalAuthWire::public_const(tweak[1], me, *alpha_me),
+        LocalAuthWire::public_const(tweak[2], me, *alpha_me),
+        LocalAuthWire::public_const(tweak[3], me, *alpha_me),
+    ]);
+    apply_me_local(&mut st);
+
+    let mut tup_cursor = 0usize;
+    let mut pending_wires = SecretBuffer(Vec::with_capacity(POSEIDON2_SBOXES_PER_PERM));
+    let mut pending_opened = Vec::with_capacity(POSEIDON2_SBOXES_PER_PERM);
+
+    for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
+        let mut sbox_in = SecretBuffer(Vec::with_capacity(12));
+        for (lane, w) in st.iter().enumerate() {
+            let rc =
+                LocalAuthWire::public_const(poseidon2_const_at(0, r, lane as u64), me, *alpha_me);
+            sbox_in.push(w.add(rc));
+        }
+        let sbox_out = eval_sbox7_round_over_wire(
+            wire,
+            roster,
+            &sbox_in,
+            &pow7_tuples[tup_cursor..tup_cursor + 12],
+            me,
+            *alpha_me,
+            &mut pending_wires,
+            &mut pending_opened,
+        )?;
+        tup_cursor += 12;
+        st.copy_from_slice(&sbox_out);
+        apply_me_local(&mut st);
+    }
+
+    for r in 0..POSEIDON2_INTERNAL_ROUNDS {
+        let rc0 = LocalAuthWire::public_const(poseidon2_const_at(1, r, 0), me, *alpha_me);
+        let sbox_in = SecretBuffer([st[0].add(rc0)]);
+        let sbox_out = eval_sbox7_round_over_wire(
+            wire,
+            roster,
+            &*sbox_in,
+            &pow7_tuples[tup_cursor..tup_cursor + 1],
+            me,
+            *alpha_me,
+            &mut pending_wires,
+            &mut pending_opened,
+        )?;
+        tup_cursor += 1;
+        st[0] = sbox_out[0];
+        apply_mi_local(&mut st);
+    }
+
+    for r in 0..POSEIDON2_HALF_EXTERNAL_ROUNDS {
+        let mut sbox_in = SecretBuffer(Vec::with_capacity(12));
+        for (lane, w) in st.iter().enumerate() {
+            let rc =
+                LocalAuthWire::public_const(poseidon2_const_at(2, r, lane as u64), me, *alpha_me);
+            sbox_in.push(w.add(rc));
+        }
+        let sbox_out = eval_sbox7_round_over_wire(
+            wire,
+            roster,
+            &sbox_in,
+            &pow7_tuples[tup_cursor..tup_cursor + 12],
+            me,
+            *alpha_me,
+            &mut pending_wires,
+            &mut pending_opened,
+        )?;
+        tup_cursor += 12;
+        st.copy_from_slice(&sbox_out);
+        apply_me_local(&mut st);
+    }
+    debug_assert_eq!(tup_cursor, POSEIDON2_SBOXES_PER_PERM);
+
+    let c4 = Goldilocks::from_u64_reduced(4);
+    let cut_wires = SecretBuffer([
+        st[0].add(in0[0]).add(LocalAuthWire::public_const(
+            pk_seed[0] * Goldilocks::TWO + tweak[0] * c4,
+            me,
+            *alpha_me,
+        )),
+        st[1].add(in0[1]).add(LocalAuthWire::public_const(
+            pk_seed[1] * Goldilocks::TWO + tweak[1] * c4,
+            me,
+            *alpha_me,
+        )),
+        st[2].add(in0[2]).add(LocalAuthWire::public_const(
+            pk_seed[2] * Goldilocks::TWO + tweak[2] * c4,
+            me,
+            *alpha_me,
+        )),
+        st[3].add(in0[3]).add(LocalAuthWire::public_const(
+            pk_seed[3] * Goldilocks::TWO + tweak[3] * c4,
+            me,
+            *alpha_me,
+        )),
+    ]);
+    drop((st, in0, pow7_tuples));
+
+    // 5. Stage A Pre-Cut Blinded `MacCheck`: verify ALL 118 intermediate S-box openings
+    //    STRICTLY BEFORE any cut-boundary commitment or share leaves this custodian!
+    let mut pend_bytes = Vec::with_capacity(pending_opened.len() * 8);
+    for &y in &pending_opened {
+        pend_bytes.extend_from_slice(&y.to_be_bytes());
+    }
+    let stage_a_dig = h32(b"personal-release/stage-a-dig", &[&spdz_sid, &pend_bytes]);
+    let stage_a_coin = joint_coin_over_wire(
+        wire,
+        roster,
+        &spdz_sid,
+        b"stage-a-mac",
+        &stage_a_dig,
+        true,
+        rng,
+    )?;
+    let mut a_xof = Cshake256Xof::new_shake256();
+    a_xof.absorb(b"personal-release/stage-a-chis");
+    a_xof.absorb(&stage_a_coin);
+    let mut x_fold = GoldilocksExt2::ZERO;
+    let mut m_fold = SecretBuffer(GoldilocksExt2::ZERO);
+    for (w, &y) in pending_wires.iter().zip(&pending_opened) {
+        let mut b48 = [0u8; 48];
+        a_xof.squeeze(&mut b48);
+        let chi = decode_pad48_ext2(&b48);
+        x_fold += chi.mul_base(y);
+        *m_fold += chi * w.mac;
+    }
+    let stage_a_res = SecretBuffer(*m_fold - *alpha_me * x_fold);
+    ot.blind_check_zero_ext2(
+        wire,
+        &spdz_sid,
+        "personal_release_stage_a_mac",
+        *stage_a_res,
+        rng,
+    )?;
+
+    // 6. Stage B Cut-Boundary Commit-Open + Blinded `MacCheck`: open ONLY the 4-limb digest!
+    let opened_vec = commit_open_and_check_goldilocks_over_wire(
+        wire,
+        ot,
+        roster,
+        &spdz_sid,
+        "personal_release_cut_digest",
+        ROUND_PREL_CUT_COM,
+        ROUND_PREL_CUT_OPEN,
+        &*cut_wires,
+        *alpha_me,
+        rng,
+    )?;
+    let opened: HemDigest4 = [opened_vec[0], opened_vec[1], opened_vec[2], opened_vec[3]];
+    Ok(opened)
 }
 
 /// Returned `(digest, Vec<(party, journal)>)` from [`run_isolated_personal_release_ceremony`].
@@ -2948,7 +3205,7 @@ mod tests {
                 let input =
                     PersonalMspInput::new(u16::from(p), program.clone(), SecretBuffer(local))
                         .unwrap();
-                PersonalReleaseParty::new(latch(&system, p, KEY_EPOCH), input).unwrap()
+                PersonalReleaseParty::new([0xDA; 32], latch(&system, p, KEY_EPOCH), input).unwrap()
             })
             .collect();
         Fixture {
@@ -2960,8 +3217,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dealerless_msp_rows_release_the_enrolled_key_and_refuse_tampering() {
+        let system = system();
+        let program = QuorumTopology::PersonalSlices(system.clone())
+            .to_span_program(0)
+            .unwrap();
+        for corrupt in [true, false] {
+            let (endpoints, _) = InMemoryWireMesh::connect(4, [3; 32]);
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = endpoints
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut ep)| {
+                        let latch = latch(&system, i as u8, KEY_EPOCH);
+                        let program = program.clone();
+                        ep.set_timeout(std::time::Duration::from_secs(120));
+                        scope.spawn(move || {
+                            dkg::CORRUPT_ROW.with(|flag| flag.set(corrupt && i == 0));
+                            let mut rng =
+                                PartyPrivateRng::from_seed([23 + i as u8; 32], b"dkg-test");
+                            run_dealerless_personal_release_dkg_over_wire(
+                                [0xDA; 32],
+                                [5; 32],
+                                latch,
+                                program,
+                                f4(555),
+                                ep,
+                                &mut rng,
+                                &mut MemoryPoisonJournal::new(),
+                            )
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            if corrupt {
+                assert!(results.iter().all(Result::is_err));
+                assert!(
+                    results
+                        .iter()
+                        .any(|r| matches!(r, Err(PersonalReleaseError::CommitmentMismatch)))
+                );
+                continue;
+            }
+            let outputs = results.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
+            let commitment = outputs[0].commitment;
+            assert!(outputs.iter().all(|o| o.commitment == commitment));
+            let mut fx = Fixture {
+                system: system.clone(),
+                program: program.clone(),
+                pk_seed: f4(555),
+                commitment,
+                parties: outputs.into_iter().map(|o| o.party).collect(),
+            };
+            let ctx = context(&fx, 0x45, 0, &[0, 2, 3]);
+            let mut foreign = ctx.clone();
+            foreign.deployment_id[0] ^= 1;
+            assert_eq!(
+                fx.parties[0].acknowledge(&foreign, 2),
+                Err(PersonalReleaseError::ContextMismatch)
+            );
+            // Only this test oracle sums a certified authorized subset for comparison.
+            let shares = release_all(&mut fx, &ctx);
+            let root = SecretBuffer(core::array::from_fn(|k| {
+                shares.iter().fold(F::ZERO, |v, (_, s)| v + s[k])
+            }));
+            assert_eq!(hem_prf_check_digest_clear(*root, fx.pk_seed), commitment);
+        }
+    }
+
     fn context(fx: &Fixture, ceremony: u8, epoch: u64, signers: &[u16]) -> PersonalReleaseContext {
         PersonalReleaseContext::new(
+            [0xDA; 32],
             &fx.system,
             &fx.program,
             KEY_EPOCH,
@@ -3217,6 +3548,7 @@ mod tests {
                 ext2_blind_pool: vec![WireExt2BlindTriple {
                     r: GoldilocksExt2::ONE, a: GoldilocksExt2::ONE, c: GoldilocksExt2::ONE,
                 }], ext2_blind_cursor: 0, ext2_blind_serial: 0, poisoned: false,
+                tamper_next_ext2_c: None,
             };
             let mut rng = PartyPrivateRng::from_seed([48; 32], b"failed-refill");
             let error = ot.prestage_ext2_blinding(&mut wire, additional, &mut rng).unwrap_err();
@@ -3230,6 +3562,55 @@ mod tests {
             assert!(ot.ext2_blind_pool.is_empty());
             assert_eq!(ot.transcript, [0; 32]);
             assert!(ot.prestage_ext2_blinding(&mut wire, 0, &mut rng).is_err());
+        }
+    }
+
+    #[test]
+    fn tooth_wire_blinding_sacrifice_rejects_corrupted_triple_and_poisons_endpoint() {
+        let roster = [0u16, 1, 2];
+        let sid = [0x61; 32];
+        for bad_item in [0usize, 3usize] {
+            let (endpoints, _) = InMemoryWireMesh::connect(3, sid);
+            let outcomes = std::thread::scope(|scope| {
+                let handles: Vec<_> = endpoints
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, mut wire)| {
+                        wire.set_timeout(std::time::Duration::from_secs(60));
+                        scope.spawn(move || {
+                            let mut rng = PartyPrivateRng::from_seed(
+                                [0xa0 + idx as u8; 32],
+                                b"wire-blind-sac-tamper",
+                            );
+                            let mut ot = PartyOtEndpoint::establish_over_wire(
+                                sid, &roster, &mut wire, &mut rng,
+                            )
+                            .unwrap();
+                            if idx == 1 {
+                                ot.tamper_next_ext2_c = Some((bad_item, GoldilocksExt2::ONE));
+                            }
+                            let res = ot.prestage_ext2_blinding(&mut wire, 2, &mut rng);
+                            (res, ot.poisoned, ot.staged_ext2_blinding())
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            for (res, poisoned, staged) in outcomes {
+                assert_eq!(
+                    res,
+                    Err(PersonalReleaseError::Mpc(Poseidon2MpcError::Preprocess(
+                        PreprocessError::SacrificeResidualNonZero {
+                            phase: "personal_release_ext2_blind",
+                        }
+                    )))
+                );
+                assert!(poisoned);
+                assert_eq!(staged, 0);
+            }
         }
     }
 
@@ -3261,6 +3642,7 @@ mod tests {
                         let raw_keys = core::mem::take(&mut wire_keys.0);
                         let mut wire = MacSealedWireChannel::new_encrypted(
                             endpoint,
+                            ctx_ref.deployment_id,
                             ctx_ref.mpc_session_id(),
                             raw_keys,
                         )
@@ -3322,7 +3704,7 @@ mod tests {
         )
         .unwrap();
         fx_bad.parties[2] =
-            PersonalReleaseParty::new(latch(&fx_bad.system, 2, KEY_EPOCH), bad_input).unwrap();
+            PersonalReleaseParty::new([0xDA; 32], latch(&fx_bad.system, 2, KEY_EPOCH), bad_input).unwrap();
         let bundle: Vec<_> = fx_bad
             .parties
             .into_iter()
@@ -3389,6 +3771,7 @@ mod tests {
         for bad in [vec![0u16, 1], vec![2], vec![], vec![0, 1, 9]] {
             assert_eq!(
                 PersonalReleaseContext::new(
+                    [0xDA; 32],
                     &fx.system,
                     &fx.program,
                     KEY_EPOCH,
@@ -3493,7 +3876,8 @@ mod tests {
         })
         .unwrap();
         let mut outsider =
-            PersonalReleaseParty::new(latch(&fx.system, 1, [8; 32]), outsider_input).unwrap();
+            PersonalReleaseParty::new([0xDA; 32], latch(&fx.system, 1, [8; 32]), outsider_input)
+                .unwrap();
         let mut outsider_ctx = ctx.clone();
         outsider_ctx.key_epoch_context = [8; 32];
         outsider_ctx.policy_digest = fx.system.policy_digest(&[8; 32]);

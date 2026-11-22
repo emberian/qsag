@@ -19,7 +19,7 @@
 //!      256-bit shares `y_i^(0)` (`0` communication for `y^(0)`) and evaluate the three tweaked
 //!      `SHAKE256` steps `y^(0) -> y^(1) -> y^(2) -> y^(3)` across all `128 * leaves_per_committee`
 //!      chains via authenticated binary `GF(2)` Subfield-SPDZ MPC (post-quantum Ring-LWE Base OTs
-//!      via [`OtMesh`], KOS15 correlated OT extension for inputs, Beaver triples from
+//!      via [`OtMesh`], `SoftSpokenOT (n_C = 256, k = 2)` correlated OT extension for inputs, Beaver triples from
 //!      qsag-core's `Π_triple_f2` in its additive output mode, and committed SPDZ `MacCheck`).
 //!    - Secret chain states `y^(0), y^(1), y^(2)` remain strictly `t`-of-`t` XOR-shared inside `C`
 //!      and are never reconstructed by staging; **only** `y^(3)` is released after `MacCheck`
@@ -59,12 +59,13 @@ use qsag_core::field::tower::{
 };
 use qsag_core::field::tower::{Tower128, wipe_tower128};
 use qsag_core::preprocessing::{
-    OtMesh, PartyPrivateRng, PreprocessError, blind_open_additive_gf128_poly,
-    run_dealerless_pi_triple_f2_additive_with_fault,
+    OT_EXT_F4_SLICES, OT_EXT_SUBSPACE_BITS, OtExtCheckKey, OtMesh, PartyPrivateRng,
+    PreprocessError, blind_open_additive_gf128_poly, run_dealerless_pi_triple_f2_additive_with_fault,
+    softspoken_f4_slice_setup_receiver, softspoken_f4_slice_setup_sender_ct,
 };
 use qsag_core::sponge::keccak::{Cshake256Xof, KECCAK_ROUND_CONSTANTS};
 use qsag_core::wipe::{
-    SecretBuffer, SecretWipe, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
+    SecretBuffer, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
 };
 
 use crate::hash::{expand, h32};
@@ -113,7 +114,7 @@ pub enum DealerlessStagingError {
     OutputRejected,
     /// Underlying quorum parameter or custodian error.
     Quorum(QuorumError),
-    /// Underlying Ring-LWE Base-OT or KOS15 preprocessing error.
+    /// Underlying Ring-LWE Base-OT or `SoftSpokenOT` preprocessing error.
     Preprocess(PreprocessError),
     /// Caller supplied the wrong number of custodian RNGs or custodians.
     PartyCountMismatch { expected: usize, got: usize },
@@ -121,7 +122,8 @@ pub enum DealerlessStagingError {
     CommitmentMismatch { phase: &'static str, party: usize },
     /// Pairwise symmetric MAC key agreement failed consistency.
     PairwiseKeyMismatch { party_a: usize, party_b: usize },
-    /// KOS15 correlated-OT consistency check failed inside a committee.
+    /// `SoftSpokenOT (n_C = 256, k = 2)` correlated-OT consistency check failed inside a
+    /// committee. The variant keeps its earlier name.
     KosOtCheckFailed {
         committee: usize,
         sender: usize,
@@ -176,7 +178,7 @@ impl fmt::Display for DealerlessStagingError {
                 receiver,
             } => write!(
                 f,
-                "KOS15 OT check failed in committee {committee} ({sender} -> {receiver})"
+                "SoftSpokenOT check failed in committee {committee} ({sender} -> {receiver})"
             ),
             Self::TripleSacrificeFailed { committee } => {
                 write!(f, "Beaver triple sacrifice failed in committee {committee}")
@@ -544,11 +546,6 @@ fn unpack_256_planes_to_nodes(planes: &[u64; 256], count: usize) -> Vec<Node> {
 // =============================================================================================
 
 #[inline]
-fn word_bit(words: &[u64], bit_idx: usize) -> u64 {
-    (black_box(words[bit_idx / 64]) >> (bit_idx % 64)) & 1
-}
-
-#[inline]
 fn bit_mask128(bit: u64) -> u128 {
     0u128.wrapping_sub((black_box(bit) & 1) as u128)
 }
@@ -685,20 +682,20 @@ fn transpose_128_cols_to_u128_rows(cols: &[Vec<u64>], words: usize) -> Vec<u128>
     rows
 }
 
-/// Pairwise KOS15 Subfield-VOLE channel seeded from `128` active Ring-LWE Base-OT correlations.
+/// Pairwise `SoftSpokenOT (n_C = 256, k = 2)` $\mathbb{F}_4$-VOLE channel seeded from `256` active
+/// Ring-LWE Base-OT correlations (`128` 2-bit punctured GGM slices, $2^{-241}$ consistency soundness).
 struct PairwiseSubfieldVole {
     holder: usize,
     owner: usize,
-    seeds0: SecretBuffer<[[u8; 32]; 128]>,
-    seeds1: SecretBuffer<[[u8; 32]; 128]>,
-    chosen: SecretBuffer<[[u8; 32]; 128]>,
-    delta_holder: u128,
+    owner_slices: SecretBuffer<[[[u8; 32]; 4]; OT_EXT_F4_SLICES]>,
+    holder_punctured: SecretBuffer<[[[u8; 32]; 4]; OT_EXT_F4_SLICES]>,
+    delta_holder: [u128; 2],
     ext_ctr: u64,
 }
 
 impl Drop for PairwiseSubfieldVole {
     fn drop(&mut self) {
-        self.delta_holder.secret_wipe();
+        wipe_u128s(&mut self.delta_holder);
     }
 }
 
@@ -759,8 +756,10 @@ fn run_pairs<T: Send>(
 
 impl PairwiseSubfieldVole {
     /// Authenticate `payload_words` `u64` words owned by `self.owner` under `self.holder`'s
-    /// 128-bit `delta_holder` key via KOS15 correlated OT extension (`+256` sacrificial bits).
-    /// Returns `(t_rows_for_owner, q_rows_for_holder)` satisfying `q_rows[k] ^ t_rows[k] = bit_k * delta_holder`.
+    /// 256-bit `delta_holder = [delta_0, delta_1]` key via `SoftSpokenOT (n_C = 256, k = 2)`
+    /// (`128` $\mathbb{F}_4$ GGM slices, `+256` sacrificial bits, `[X | I_256]` per-column check).
+    /// Returns lane-0 `(t_rows_for_owner, q_rows_for_holder)` satisfying
+    /// `q_rows[k] ^ t_rows[k] = bit_k * delta_holder[0]`.
     fn extend_authenticated_bits(
         &mut self,
         committee: usize,
@@ -770,7 +769,7 @@ impl PairwiseSubfieldVole {
         holder_rng: &mut PartyPrivateRng,
     ) -> Result<AuthBitRowsPair, DealerlessStagingError> {
         let payload_words = owner_words.len();
-        let total_words = payload_words + 4; // +256 sacrificial bits masking KOS linear combination
+        let total_words = payload_words + 4; // +256 sacrificial OTP bits for `[X | I_256]`
         let ext_ctr = self.ext_ctr;
         self.ext_ctr = self.ext_ctr.wrapping_add(1);
 
@@ -784,90 +783,156 @@ impl PairwiseSubfieldVole {
         let owner_le = (self.owner as u64).to_le_bytes();
         let ctr_le = ext_ctr.to_le_bytes();
 
-        let mut t0_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
-        let mut t1_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
-        let mut q_cols = SecretBuffer(vec![vec![0u64; total_words]; 128]);
-        let mut u_cols = vec![vec![0u64; total_words]; 128];
+        let mut t_cols = SecretBuffer(vec![vec![0u64; total_words]; OT_EXT_SUBSPACE_BITS]);
+        let mut q_cols = SecretBuffer(vec![vec![0u64; total_words]; OT_EXT_SUBSPACE_BITS]);
+        let mut u_cols = vec![vec![0u64; total_words]; OT_EXT_F4_SLICES];
 
-        // Three streams per column (the two sender seeds and the receiver's chosen seed),
-        // eight columns per permutation.
+        // Expand two 4-leaf `F_4` slices (`8` streams) per `keccak_f1600_x8` permutation on both sides.
         let backend = qsag_asm::detect_backend();
-        for base in (0..128).step_by(8) {
-            for (seeds, cols) in [
-                (&self.seeds0, &mut t0_cols),
-                (&self.seeds1, &mut t1_cols),
-                (&self.chosen, &mut q_cols),
-            ] {
-                let msgs: Vec<SecretBuffer<Vec<u8>>> = (base..base + 8)
-                    .map(|col| {
-                        stream_message(
-                            TAG_ABIT_COL,
-                            &[
-                                session_id,
-                                &holder_le,
-                                &owner_le,
-                                &ctr_le,
-                                &(col as u64).to_le_bytes(),
-                                &seeds[col],
-                            ],
-                        )
-                    })
-                    .collect();
-                let mut outs: Vec<&mut [u64]> = cols[base..base + 8]
-                    .iter_mut()
-                    .map(Vec::as_mut_slice)
-                    .collect();
-                expand_u64_streams_x8(&msgs, &mut outs, backend);
+        let mut g_owner = SecretBuffer(vec![vec![0u64; total_words]; 8]);
+        let mut g_holder = SecretBuffer(vec![vec![0u64; total_words]; 8]);
+        for base_j in (0..OT_EXT_F4_SLICES).step_by(2) {
+            let owner_msgs: Vec<SecretBuffer<Vec<u8>>> = (0..8)
+                .map(|k| {
+                    let leaf = 4 * base_j + k;
+                    stream_message(
+                        TAG_ABIT_COL,
+                        &[
+                            session_id,
+                            &holder_le,
+                            &owner_le,
+                            &ctr_le,
+                            &(leaf as u64).to_le_bytes(),
+                            &self.owner_slices[base_j + (k / 4)][k % 4],
+                        ],
+                    )
+                })
+                .collect();
+            {
+                let mut outs: Vec<&mut [u64]> =
+                    g_owner.iter_mut().map(Vec::as_mut_slice).collect();
+                expand_u64_streams_x8(&owner_msgs, &mut outs, backend);
+            }
+
+            let holder_msgs: Vec<SecretBuffer<Vec<u8>>> = (0..8)
+                .map(|k| {
+                    let leaf = 4 * base_j + k;
+                    stream_message(
+                        TAG_ABIT_COL,
+                        &[
+                            session_id,
+                            &holder_le,
+                            &owner_le,
+                            &ctr_le,
+                            &(leaf as u64).to_le_bytes(),
+                            &self.holder_punctured[base_j + (k / 4)][k % 4],
+                        ],
+                    )
+                })
+                .collect();
+            {
+                let mut outs: Vec<&mut [u64]> =
+                    g_holder.iter_mut().map(Vec::as_mut_slice).collect();
+                expand_u64_streams_x8(&holder_msgs, &mut outs, backend);
+            }
+
+            for sub in 0..2 {
+                let j = base_j + sub;
+                let off = 4 * sub;
+                for w in 0..total_words {
+                    let g0 = g_owner[off][w];
+                    let g1 = g_owner[off + 1][w];
+                    let g2 = g_owner[off + 2][w];
+                    let g3 = g_owner[off + 3][w];
+                    t_cols[j][w] = g2 ^ g3;
+                    t_cols[OT_EXT_F4_SLICES + j][w] = g1 ^ g3;
+                    u_cols[j][w] = g0 ^ g1 ^ g2 ^ g3 ^ full_owner[w];
+                }
+
+                let b0 = ((black_box(self.delta_holder[0]) >> j) & 1) as u64;
+                let b1 = ((black_box(self.delta_holder[1]) >> j) & 1) as u64;
+                let v_star = ((b0 as u8) << 1) | (b1 as u8);
+                for v in 0..4usize {
+                    let diff = black_box((v as u8) ^ v_star);
+                    let is_neq = (((diff | diff.wrapping_neg()) >> 7) & 1) as u64;
+                    let keep = 0u64.wrapping_sub(is_neq);
+                    for gw in &mut g_holder[off + v] {
+                        *gw &= keep;
+                    }
+                }
+                let m0 = 0u64.wrapping_sub(b0);
+                let m1 = 0u64.wrapping_sub(b1);
+                for w in 0..total_words {
+                    let h0 = g_holder[off][w];
+                    let h1 = g_holder[off + 1][w];
+                    let h2 = g_holder[off + 2][w];
+                    let h3 = g_holder[off + 3][w];
+                    let w_corr = u_cols[j][w] ^ h0 ^ h1 ^ h2 ^ h3;
+                    q_cols[j][w] = h2 ^ h3 ^ (m0 & w_corr);
+                    q_cols[OT_EXT_F4_SLICES + j][w] = h1 ^ h3 ^ (m1 & w_corr);
+                }
             }
         }
-        for col in 0..128 {
-            for w in 0..total_words {
-                u_cols[col][w] = t0_cols[col][w] ^ t1_cols[col][w] ^ full_owner[w];
-            }
-            let d_bit = ((black_box(self.delta_holder) >> col) & 1) as u64;
-            let d_mask = 0u64.wrapping_sub(d_bit);
-            for w in 0..total_words {
-                q_cols[col][w] ^= d_mask & u_cols[col][w];
-            }
+        for s in g_owner.iter_mut() {
+            wipe_u64s(s);
+        }
+        for s in g_holder.iter_mut() {
+            wipe_u64s(s);
         }
         for col in &mut u_cols {
             wipe_u64s(col);
         }
 
-        let mut t_rows = SecretBuffer(transpose_128_cols_to_u128_rows(&t0_cols, total_words));
-        let mut q_rows = SecretBuffer(transpose_128_cols_to_u128_rows(&q_cols, total_words));
-        for col in t0_cols.iter_mut() {
+        // Holder samples `chi_seed` strictly after `u_cols` is locked, masks it with the
+        // pre-challenge `TAG_ABIT_CHI` stream (uniform OTP bijection on `{0, 1}^256`), and
+        // verifies all 256 columns individually under `OtExtCheckKey` (`[X | I_256]`, Roy Thm 4.5).
+        let chi_seed = holder_rng.next_bytes32();
+        let mut chi_mask_words = [0u64; 4];
+        expand_u64_stream(
+            TAG_ABIT_CHI,
+            &[session_id, &holder_le, &owner_le, &ctr_le],
+            &mut chi_mask_words,
+        );
+        let mut check_seed = chi_seed;
+        for (i, &w) in chi_mask_words.iter().enumerate() {
+            let bytes = w.to_le_bytes();
+            for b in 0..8 {
+                check_seed[8 * i + b] ^= bytes[b];
+            }
+        }
+        wipe_u64s(&mut chi_mask_words);
+
+        let key = OtExtCheckKey::new(&check_seed, payload_words);
+        wipe_bytes32(&mut check_seed);
+        let mut x_hash = key.hash(&full_owner);
+        wipe_u64s(&mut full_owner);
+
+        let mut diff = 0u128;
+        for col in 0..OT_EXT_SUBSPACE_BITS {
+            let mut t_hash = key.hash(&t_cols[col]);
+            let mut q_hash = key.hash(&q_cols[col]);
+            let d_bit =
+                ((black_box(self.delta_holder[col / 128]) >> (col % 128)) & 1) as u64;
+            let mask = bit_mask128(d_bit);
+            for lane in 0..2 {
+                diff |= q_hash[lane] ^ t_hash[lane] ^ (mask & x_hash[lane]);
+            }
+            wipe_u128s(&mut t_hash);
+            wipe_u128s(&mut q_hash);
+        }
+        wipe_u128s(&mut x_hash);
+
+        let mut t_rows =
+            SecretBuffer(transpose_128_cols_to_u128_rows(&t_cols[..128], payload_words));
+        let mut q_rows =
+            SecretBuffer(transpose_128_cols_to_u128_rows(&q_cols[..128], payload_words));
+        for col in t_cols.iter_mut() {
             wipe_u64s(col);
         }
         for col in q_cols.iter_mut() {
             wipe_u64s(col);
         }
-
-        // Holder samples `chi_seed` strictly after `u_cols` is locked.
-        let chi_seed = holder_rng.next_bytes32();
-        let total_rows = 64 * total_words;
-        let mut chi_words = vec![0u64; 2 * total_rows];
-        expand_u64_stream(
-            TAG_ABIT_CHI,
-            &[session_id, &holder_le, &owner_le, &ctr_le, &chi_seed],
-            &mut chi_words,
-        );
-        let chis: Vec<u128> = chi_words
-            .chunks_exact(2)
-            .map(|w| (w[0] as u128) | ((w[1] as u128) << 64))
-            .collect();
-        wipe_u64s(&mut chi_words);
-
-        let mut x_bar = 0u128;
-        for (k, &chi_k) in chis.iter().enumerate() {
-            x_bar ^= chi_k & bit_mask128(word_bit(&full_owner, k));
-        }
-        wipe_u64s(&mut full_owner);
-
-        let t_bar = qsag_asm::gf2_128_dot(&t_rows, &chis);
-        let q_bar = qsag_asm::gf2_128_dot(&q_rows, &chis);
-        let check = q_bar ^ t_bar ^ gf128_mul(x_bar, self.delta_holder);
-        if black_box(check) != 0 {
+        if black_box(diff) != 0 {
             wipe_u128s(&mut t_rows);
             wipe_u128s(&mut q_rows);
             return Err(DealerlessStagingError::KosOtCheckFailed {
@@ -876,12 +941,6 @@ impl PairwiseSubfieldVole {
                 receiver: self.owner,
             });
         }
-
-        let keep_rows = 64 * payload_words;
-        wipe_u128s(&mut t_rows[keep_rows..]);
-        wipe_u128s(&mut q_rows[keep_rows..]);
-        t_rows.truncate(keep_rows);
-        q_rows.truncate(keep_rows);
         Ok((t_rows, q_rows))
     }
 }
@@ -1018,31 +1077,72 @@ impl CommitteeBeaverReservoir {
 
         let mut pair_voles = Vec::with_capacity(m * (m - 1));
         for holder in 0..m {
-            let choice = [deltas[holder] as u64, (deltas[holder] >> 64) as u64];
+            let d_lo = deltas[holder];
+            let d_hi = factory_lane[holder];
+            let mut choice = [
+                d_lo as u64,
+                (d_lo >> 64) as u64,
+                d_hi as u64,
+                (d_hi >> 64) as u64,
+            ];
             for owner in 0..m {
                 if owner == holder {
                     continue;
                 }
                 let (send, recv) =
                     ot_mesh.run_correlated_ot_words(owner, holder, &choice, party_rngs)?;
-                let mut seeds0 = SecretBuffer([[0u8; 32]; 128]);
-                let mut seeds1 = SecretBuffer([[0u8; 32]; 128]);
-                let mut chosen = SecretBuffer([[0u8; 32]; 128]);
-                for col in 0..128 {
-                    seeds0[col].copy_from_slice(&send[col].0[..32]);
-                    seeds1[col].copy_from_slice(&send[col].1[..32]);
-                    chosen[col].copy_from_slice(&recv[col][..32]);
+                let mut owner_slices = SecretBuffer([[[0u8; 32]; 4]; OT_EXT_F4_SLICES]);
+                let mut holder_punctured = SecretBuffer([[[0u8; 32]; 4]; OT_EXT_F4_SLICES]);
+                for j in 0..OT_EXT_F4_SLICES {
+                    let mut r_seed = [0u8; 32];
+                    let mut l_seed = [0u8; 32];
+                    let mut k1_0 = [0u8; 32];
+                    let mut k1_1 = [0u8; 32];
+                    let mut sub_known = [0u8; 32];
+                    let mut k1_known = [0u8; 32];
+                    r_seed.copy_from_slice(&send[j].0[..32]);
+                    l_seed.copy_from_slice(&send[j].1[..32]);
+                    k1_0.copy_from_slice(&send[OT_EXT_F4_SLICES + j].0[..32]);
+                    k1_1.copy_from_slice(&send[OT_EXT_F4_SLICES + j].1[..32]);
+                    sub_known.copy_from_slice(&recv[j][..32]);
+                    k1_known.copy_from_slice(&recv[OT_EXT_F4_SLICES + j][..32]);
+                    let (leaves, sib2) = softspoken_f4_slice_setup_receiver(
+                        &session_id,
+                        j,
+                        &r_seed,
+                        &l_seed,
+                        &k1_0,
+                        &k1_1,
+                    );
+                    let b0 = ((black_box(d_lo) >> j) & 1) as u8;
+                    let b1 = ((black_box(d_hi) >> j) & 1) as u8;
+                    owner_slices[j] = leaves;
+                    holder_punctured[j] = softspoken_f4_slice_setup_sender_ct(
+                        &session_id,
+                        j,
+                        b0,
+                        b1,
+                        &sub_known,
+                        &k1_known,
+                        &sib2,
+                    );
+                    wipe_bytes32(&mut r_seed);
+                    wipe_bytes32(&mut l_seed);
+                    wipe_bytes32(&mut k1_0);
+                    wipe_bytes32(&mut k1_1);
+                    wipe_bytes32(&mut sub_known);
+                    wipe_bytes32(&mut k1_known);
                 }
                 pair_voles.push(PairwiseSubfieldVole {
                     holder,
                     owner,
-                    seeds0,
-                    seeds1,
-                    chosen,
-                    delta_holder: deltas[holder],
+                    owner_slices,
+                    holder_punctured,
+                    delta_holder: [d_lo, d_hi],
                     ext_ctr: 0,
                 });
             }
+            wipe_u64s(&mut choice);
         }
 
         Ok(Self {
