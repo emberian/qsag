@@ -1081,3 +1081,898 @@ private theorem red_sim_step {R : Type} (r : Fin (k + 1)) (keys keys' : Fin (k +
     oracle of `prf (keys r)` and holding only keys `keys'` that agree with `keys` away from `r`,
     outputs a correct tag on a permit its oracle was not asked. Up to that output the reduction
     gives `A` the answers of the certificate world. -/
+theorem red_sim {R : Type} (r : Fin (k + 1)) (keys keys' : Fin (k + 1) → Spec.Bytes)
+    (hK : ∀ i, i ≠ r → keys' i = keys i) :
+    ∀ (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+      (c : CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval))
+      (tr : List (CertCustodyInput (Spec.Bytes × CustodyApproval)))
+      (n : Nat) (_ : tr.length = n)
+      (tags : List (CustodyApproval × Spec.Bytes)) (log : List CustodyApproval),
+      RedInv prf enc k r (keys r) c tags log n →
+      rForg k r (Code.play (RO keys) A (c, tr)).2.1 ≠ [] →
+      ∃ j, j < budget - n ∧ redWin prf enc (keys r)
+        (Code.play (tagOracle enc (prf (keys r)) budget) (RC r keys' A j c n tags) log)
+  | .ret _, c, tr, _, _, tags, log, hI, hF => by
+    rw [Code.play_ret] at hF
+    exact absurd hI.noForg hF
+  | .call inp kont, c, tr, n, hlen, tags, log, hI, hF =>
+    red_sim_step prf enc S oracleSign dep₀ pk₀ quorum₀ budget k r keys keys' hK inp kont
+      (fun ρ c' tr' n' h' tags' log' =>
+        red_sim r keys keys' hK (kont ρ) c' tr' n' h' tags' log') c tr n hlen tags log hI hF
+
+end Reduction
+
+/-! ## 6. The game and the bound -/
+
+/-- Shifting a single answer preserves the full keyed-function challenger support. -/
+theorem prfSample_shiftClosed (keyLen inLen outLen : Nat) :
+    SupportShiftClosed inLen outLen (PrfSampleOk keyLen inLen outLen) :=
+  prfSampleOk_shiftClosed keyLen inLen outLen
+
+section Game
+
+variable {PK D Sig : Type} [DecidableEq D]
+
+/-- **The tag-forgery adversary** for key index `r` and guess `j`, built from an adaptive
+    adversary `A` of the certificate world with `quorum₀.numParties + 1` keys: `redCode` from the
+    initial state. `keys'` is read at indices other than `r` only where it matters. -/
+def certTagForger {R : Type} (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys' : Fin (quorum₀.numParties + 1) → Spec.Bytes)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (r : Fin (quorum₀.numParties + 1)) (j : Nat) :
+    Code (tagIface CustodyApproval) (CustodyApproval × Spec.Bytes) :=
+  redCode prf enc S oracleSign dep₀ pk₀ quorum₀ budget quorum₀.numParties r keys' A j
+    (CertCustodyState.init dep₀ pk₀ quorum₀) 0 []
+
+/-- The tag-forgery adversary asks its oracle at most `budget` times, whatever `A` does. -/
+theorem certTagForger_within {R : Type} (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys' : Fin (quorum₀.numParties + 1) → Spec.Bytes)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (r : Fin (quorum₀.numParties + 1)) (j : Nat) :
+    Within budget (certTagForger prf enc S oracleSign dep₀ pk₀ quorum₀ budget keys' A r j) :=
+  Within.mono (Nat.sub_le budget 0)
+    (redCode_within prf enc S oracleSign dep₀ pk₀ quorum₀ budget quorum₀.numParties r keys' A j
+      (CertCustodyState.init dep₀ pk₀ quorum₀) 0 [])
+
+/-- **Per-coin reduction.** If an adaptive run of `A` in the certificate world over tag
+    certificates ends in an unsafe release, then for some key index `r`, every reduction that
+    holds keys agreeing with the real ones away from `r` has a guess `j < budget` with which it
+    wins the fresh-message tag experiment under key `r` with `budget` oracle queries. -/
+theorem certAdaptiveRun_unsafe_release_tag_forgery {R : Type}
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys : Fin (quorum₀.numParties + 1) → Spec.Bytes)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (hU : certUnsafeRelease quorum₀.numParties dep₀
+      (certAdaptiveRun (encTagCertLayer prf enc (custKey quorum₀.numParties keys))
+        (custKey quorum₀.numParties keys) S oracleSign dep₀ pk₀ quorum₀ budget A).2.1 = true) :
+    ∃ r : Fin (quorum₀.numParties + 1),
+      ∀ keys' : Fin (quorum₀.numParties + 1) → Spec.Bytes, (∀ i, i ≠ r → keys' i = keys i) →
+        ∃ j, j < budget ∧
+          msgFreshWin enc (prf (keys r)) (tagRun enc (prf (keys r)) budget
+            (certTagForger prf enc S oracleSign dep₀ pk₀ quorum₀ budget keys' A r j)) = true := by
+  have hne := certAdaptiveRun_unsafe_release_forgery _ _ S oracleSign dep₀ pk₀ quorum₀ budget A hU
+  cases hf : (certAdaptiveRun (encTagCertLayer prf enc (custKey quorum₀.numParties keys))
+      (custKey quorum₀.numParties keys) S oracleSign dep₀ pk₀ quorum₀ budget A).2.1.forgeries with
+  | nil => exact absurd hf hne
+  | cons x rest =>
+    refine ⟨custIdx quorum₀.numParties x.2.party, fun keys' hK => ?_⟩
+    have hm : x ∈ rForg quorum₀.numParties (custIdx quorum₀.numParties x.2.party)
+        (certAdaptiveRun (encTagCertLayer prf enc (custKey quorum₀.numParties keys))
+          (custKey quorum₀.numParties keys) S oracleSign dep₀ pk₀ quorum₀ budget A).2.1 :=
+      List.mem_filter.mpr ⟨by rw [hf]; exact List.mem_cons_self, decide_eq_true rfl⟩
+    have hF : rForg quorum₀.numParties (custIdx quorum₀.numParties x.2.party)
+        (certAdaptiveRun (encTagCertLayer prf enc (custKey quorum₀.numParties keys))
+          (custKey quorum₀.numParties keys) S oracleSign dep₀ pk₀ quorum₀ budget A).2.1 ≠ [] :=
+      fun h => by rw [h] at hm; cases hm
+    obtain ⟨j, hj, hW⟩ := red_sim prf enc S oracleSign dep₀ pk₀ quorum₀ budget quorum₀.numParties
+      (custIdx quorum₀.numParties x.2.party) keys keys' hK A
+      (CertCustodyState.init dep₀ pk₀ quorum₀) [] 0 rfl [] []
+      { noForg := by rw [CertCustodyState.init.public_eqs]; rfl
+        enrolled := by rw [CertCustodyState.init.public_eqs]; exact Nat.le_refl _
+        tagged := by rw [CertCustodyState.init.public_eqs]; intro a ha; cases ha
+        tagsOk := fun a t h => by cases h
+        logIssued := fun a h => by cases h
+        logLen := Nat.le_refl 0 } hF
+    refine ⟨j, by omega, ?_⟩
+    rw [msgFreshWin.public_eqs, tagRun.public_eqs]
+    exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hW.1, decide_eq_true hW.2⟩
+
+/-- **Witness-extraction form.** With permits encoded by `permitInput dg` to `inLen` bytes, the
+    winning run of the reduction is a correct tag on a fresh input of the keyed function, or it
+    exhibits an explicit collision of the digest `dg`. -/
+theorem certAdaptiveRun_unsafe_release_fresh_forgery_or_collision {R : Type}
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes) (dg : Spec.Bytes → Spec.Bytes) (inLen : Nat)
+    (hLen : ∀ x : Spec.Bytes, (dg x).length = inLen)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys : Fin (quorum₀.numParties + 1) → Spec.Bytes)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (hU : certUnsafeRelease quorum₀.numParties dep₀
+      (certAdaptiveRun (encTagCertLayer prf (permitInput dg) (custKey quorum₀.numParties keys))
+        (custKey quorum₀.numParties keys) S oracleSign dep₀ pk₀ quorum₀ budget A).2.1 = true) :
+    ∃ r : Fin (quorum₀.numParties + 1),
+      ∀ keys' : Fin (quorum₀.numParties + 1) → Spec.Bytes, (∀ i, i ≠ r → keys' i = keys i) →
+        ∃ j, j < budget ∧
+          (encFreshWin (permitInput dg) inLen (prf (keys r))
+              (tagRun (permitInput dg) (prf (keys r)) budget
+                (certTagForger prf (permitInput dg) S oracleSign dep₀ pk₀ quorum₀ budget keys' A
+                  r j)) = true ∨
+            Nonempty (HashCollision dg)) := by
+  obtain ⟨r, hr⟩ := certAdaptiveRun_unsafe_release_tag_forgery prf (permitInput dg) S oracleSign
+    dep₀ pk₀ quorum₀ budget keys A hU
+  refine ⟨r, fun keys' hK => ?_⟩
+  obtain ⟨j, hj, hW⟩ := hr keys' hK
+  refine ⟨j, hj, ?_⟩
+  rcases msgFreshWin_encFresh_or_collision (permitInput dg) inLen
+      (fun m => by rw [permitInput.public_eqs]; exact hLen _) _ _ hW with h | h
+  · exact .inl h
+  · exact .inr (permitCollision_yields_digest_collision dg _ h)
+
+/-- The coin with adversary coordinate `a` and the challenger coordinate of coin `0`. -/
+def repCoin {N nC nA : Nat} (hN : 0 < N) (π : CoinSplit N nC nA) (a : Fin nA) : Fin N :=
+  π.pair (π.chal ⟨0, hN⟩) a
+
+/-- **Independence of the custodian keys.** For every key index `r`, with `π r` the coin split
+    whose challenger coordinate carries key `r`: the adversary's program, the signing oracle and
+    every other key are functions of the adversary coordinate of `π r`. -/
+def KeyIndependent {R : Type} {N k : Nat} {nC nA : Fin (k + 1) → Nat}
+    (π : (r : Fin (k + 1)) → CoinSplit N (nC r) (nA r))
+    (keys : Fin N → Fin (k + 1) → Spec.Bytes) (oracleSign : Fin N → D → Sig)
+    (adv : Fin N → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R) : Prop :=
+  ∀ (r : Fin (k + 1)) (ω ω' : Fin N), (π r).advc ω = (π r).advc ω' →
+    adv ω = adv ω' ∧ oracleSign ω = oracleSign ω' ∧ ∀ i, i ≠ r → keys ω i = keys ω' i
+
+/-- The tag-forgery adversary of key index `r` and guess `j` as a function of the adversary
+    coordinate `a` of the split `π`: `certTagForger` on the data of the coin `repCoin hN π a`. -/
+def coinTagForger {R : Type} {N nC nA : Nat} (hN : 0 < N)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys : Fin N → Fin (quorum₀.numParties + 1) → Spec.Bytes) (oracleSign : Fin N → D → Sig)
+    (adv : Fin N → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (π : CoinSplit N nC nA) (r : Fin (quorum₀.numParties + 1)) (j : Nat) (a : Fin nA) :
+    Code (tagIface CustodyApproval) (CustodyApproval × Spec.Bytes) :=
+  certTagForger prf enc S (oracleSign (repCoin hN π a)) dep₀ pk₀ quorum₀ budget
+    (keys (repCoin hN π a)) (adv (repCoin hN π a)) r j
+
+/-- The fresh-message tag experiment of key index `r` and guess `j`. -/
+def certForgeGame {R : Type} {N : Nat} (hN : 0 < N)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys : Fin N → Fin (quorum₀.numParties + 1) → Spec.Bytes) (oracleSign : Fin N → D → Sig)
+    (adv : Fin N → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    {nC nA : Fin (quorum₀.numParties + 1) → Nat}
+    (π : (r : Fin (quorum₀.numParties + 1)) → CoinSplit N (nC r) (nA r))
+    (sample : (r : Fin (quorum₀.numParties + 1)) → Fin (nC r) →
+      Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (r : Fin (quorum₀.numParties + 1)) (j : Fin budget) : FinGame N :=
+  eufCmaTagGame hN enc budget (fun ω => prf (sample r ((π r).chal ω)).1)
+    (fun ω => coinTagForger hN prf enc S dep₀ pk₀ quorum₀ budget keys oracleSign adv (π r) r
+      j.val ((π r).advc ω))
+
+/-- **`Pr[unsafe release] ≤ Pr[some tag experiment is won]`, per coin.** Over a coin space with
+    independent custodian keys, every coin with an unsafe release in the adaptive certificate
+    world is a winning coin of the tag experiment `certForgeGame r j` for some key index `r` and
+    guess `j`. No assumption on `prf`. -/
+theorem certCustody_adaptive_unsafe_release_extract {R : Type} {N : Nat} (hN : 0 < N)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (S : CustodyDigestScheme D)
+    (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile) (budget : Nat)
+    (keys : Fin N → Fin (quorum₀.numParties + 1) → Spec.Bytes) (oracleSign : Fin N → D → Sig)
+    (adv : Fin N → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    {nC nA : Fin (quorum₀.numParties + 1) → Nat}
+    (π : (r : Fin (quorum₀.numParties + 1)) → CoinSplit N (nC r) (nA r))
+    (sample : (r : Fin (quorum₀.numParties + 1)) → Fin (nC r) →
+      Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hKey : ∀ (r : Fin (quorum₀.numParties + 1)) (ω : Fin N),
+      keys ω r = (sample r ((π r).chal ω)).1)
+    (hInd : KeyIndependent π keys oracleSign adv) (ω : Fin N)
+    (hU : certUnsafeRelease quorum₀.numParties dep₀
+      (certAdaptiveRun (encTagCertLayer prf enc (custKey quorum₀.numParties (keys ω)))
+        (custKey quorum₀.numParties (keys ω)) S (oracleSign ω) dep₀ pk₀ quorum₀ budget
+        (adv ω)).2.1 = true) :
+    ∃ (r : Fin (quorum₀.numParties + 1)) (j : Fin budget),
+      (certForgeGame hN prf enc S dep₀ pk₀ quorum₀ budget keys oracleSign adv π sample r j).win ω =
+        true := by
+  obtain ⟨r, hr⟩ := certAdaptiveRun_unsafe_release_tag_forgery prf enc S (oracleSign ω) dep₀ pk₀
+    quorum₀ budget (keys ω) (adv ω) hU
+  obtain ⟨hA, hS, hKo⟩ := hInd r (repCoin hN (π r) ((π r).advc ω)) ω ((π r).advc_pair _ _)
+  obtain ⟨j, hj, hW⟩ := hr (keys (repCoin hN (π r) ((π r).advc ω))) hKo
+  refine ⟨r, ⟨j, hj⟩, ?_⟩
+  rw [← hA, ← hS, hKey r ω] at hW
+  unfold certForgeGame
+  rw [eufCmaTagGame.public_eqs]
+  exact hW
+
+/-- **Adaptive unsafe-release bound for the certificate-pool coordinator over PRF tags.**
+
+    The game: `quorum₀.numParties + 1` keys (one per enrolled custodian, and one under which
+    certificates naming an unenrolled party identifier are verified; no honest port issues under
+    it), a signing oracle and an adaptive adversary `adv` are functions of a coin `ω`. The
+    adversary runs against `certCustodyMachine` over `encTagCertLayer prf (permitInput dg)`
+    (certificate tag `prfCustodyTag prf dg key`) for at most `budget` queries: honest approvals
+    (it receives the certificate), submissions of arbitrary certificates, corruptions (it
+    receives the key; each accepted corruption keeps the total below `threshold`), and signing requests. It
+    wins when the WAL holds a release no enrolled custodian issued a permit for.
+
+    Hypotheses: `PrfHard` for `prf` with `budget + 1` queries against a class `𝒜` containing the
+    forgery distinguishers of the reduction adversaries `coinTagForger` (`hD`); `dg` maps to `inLen` bytes; key `r` is the first component of a
+    uniform PRF sample on the challenger coordinate of `π r` (`hU`, `hKey`) and everything else
+    is independent of it (`hInd`); and collision resistance of the permit digest against the
+    reduction adversaries: each of their runs exhibits two different permits with one digest
+    with probability at most `εColl` (`hColl`).
+
+    Conclusion:
+    `Pr[unsafe release] ≤ (numParties + 1) * budget * (εPrf + 256 ^ (-outLen) + εColl)`.
+    The factor `budget` pays for the guess of which submission is the first forgery. -/
+theorem certCustody_adaptive_unsafe_release_bound {R : Type} {N : Nat} (hN : 0 < N)
+    (S : CustodyDigestScheme D) (dep₀ : Nat) (pk₀ : PK) (quorum₀ : CustodyQuorumProfile)
+    (budget : Nat)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes) (dg : Spec.Bytes → Spec.Bytes) (inLen : Nat)
+    (hLen : ∀ x : Spec.Bytes, (dg x).length = inLen) (keyLen outLen : Nat)
+    {𝒜 : Code byteOracleIface Bool → Prop} {εPrf εColl : Spec.RatBound}
+    (hPrf : PrfHard 𝒜 prf keyLen inLen outLen (budget + 1) εPrf)
+    {nC nA : Fin (quorum₀.numParties + 1) → Nat}
+    (π : (r : Fin (quorum₀.numParties + 1)) → CoinSplit N (nC r) (nA r))
+    (sample : (r : Fin (quorum₀.numParties + 1)) → Fin (nC r) →
+      Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+    (hU : ∀ r, UniformOn (PrfSampleOk keyLen inLen outLen) (sample r))
+    (keys : Fin N → Fin (quorum₀.numParties + 1) → Spec.Bytes) (oracleSign : Fin N → D → Sig)
+    (adv : Fin N → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R)
+    (hKey : ∀ (r : Fin (quorum₀.numParties + 1)) (ω : Fin N),
+      keys ω r = (sample r ((π r).chal ω)).1)
+    (hInd : KeyIndependent π keys oracleSign adv)
+    (hD : ∀ (r : Fin (quorum₀.numParties + 1)) (j : Fin budget) (a : Fin (nA r)),
+      𝒜 (tagForgeDistinguisher (permitInput dg) budget inLen
+        (coinTagForger hN prf (permitInput dg) S dep₀ pk₀ quorum₀ budget keys oracleSign adv
+          (π r) r j.val a)))
+    (hColl : ∀ (r : Fin (quorum₀.numParties + 1)) (j : Fin budget),
+      GameBound
+        (encCollisionGame hN (permitInput dg) budget (fun ω => prf (sample r ((π r).chal ω)).1)
+          (fun ω => coinTagForger hN prf (permitInput dg) S dep₀ pk₀ quorum₀ budget keys
+            oracleSign adv (π r) r j.val ((π r).advc ω))).winProb εColl) :
+    GameBound
+      (FinGame.mk hN (fun ω => certUnsafeRelease quorum₀.numParties dep₀
+        (certAdaptiveRun
+          (encTagCertLayer prf (permitInput dg) (custKey quorum₀.numParties (keys ω)))
+          (custKey quorum₀.numParties (keys ω)) S (oracleSign ω) dep₀ pk₀ quorum₀ budget
+          (adv ω)).2.1)).winProb
+      (((εPrf.add (tagGuessBound outLen)).add εColl).scale
+        ((quorum₀.numParties + 1) * budget)) :=
+  event_le_family_reductions _
+    (fun z => certForgeGame hN prf (permitInput dg) S dep₀ pk₀ quorum₀ budget keys oracleSign
+      adv π sample ((CoinSplit.prod (quorum₀.numParties + 1) budget).chal z)
+      ((CoinSplit.prod (quorum₀.numParties + 1) budget).advc z))
+    (fun ω hWin => by
+      obtain ⟨r, j, hW⟩ := certCustody_adaptive_unsafe_release_extract hN prf (permitInput dg) S
+        dep₀ pk₀ quorum₀ budget keys oracleSign adv π sample hKey hInd ω hWin
+      refine ⟨(CoinSplit.prod (quorum₀.numParties + 1) budget).pair r j, ?_⟩
+      rw [(CoinSplit.prod (quorum₀.numParties + 1) budget).chal_pair,
+        (CoinSplit.prod (quorum₀.numParties + 1) budget).advc_pair]
+      exact hW)
+    (fun z => GameBound.trans
+      (prfCustodyTag_unforgeable hN dg budget inLen hLen prf keyLen outLen hPrf
+        (π ((CoinSplit.prod (quorum₀.numParties + 1) budget).chal z))
+        (sample ((CoinSplit.prod (quorum₀.numParties + 1) budget).chal z)) (hU _)
+        (fun a => coinTagForger hN prf (permitInput dg) S dep₀ pk₀ quorum₀ budget keys oracleSign
+          adv (π ((CoinSplit.prod (quorum₀.numParties + 1) budget).chal z))
+          ((CoinSplit.prod (quorum₀.numParties + 1) budget).chal z)
+          ((CoinSplit.prod (quorum₀.numParties + 1) budget).advc z).val a)
+        (hD _ _)).1
+      (Spec.RatBound.add_le_add (Spec.RatBound.le_refl _) (hColl _ _)))
+
+end Game
+
+/-! ## 7. Negative results and inhabitants -/
+
+section Teeth
+
+variable {PK D Sig : Type} [DecidableEq D]
+
+/-- 1-of-1 custody with spend cap `100`. -/
+def toothQuorum : CustodyQuorumProfile :=
+  { numParties := 1, threshold := 1, spendCap := 100, h_pos := by decide, h_le := by decide }
+
+/-- The intent the tooth adversaries get released. -/
+def toothTarget : CustodyIntent :=
+  { sessionId := 1, round := 0, epoch := 0, spend := 40, payload := [] }
+
+/-- The intent the key-reading adversary asks an honest certificate for. -/
+def toothDecoy : CustodyIntent :=
+  { sessionId := 2, round := 0, epoch := 0, spend := 0, payload := [] }
+
+private theorem pooled_sign_unsafe {Cert : Type} (L : CustodyCertLayer Cert)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig) (dep₀ : Nat) (pk₀ : PK)
+    (c : CertCustodyState PK D Sig Cert) (x : Cert)
+    (hL : c.ledger = (IdealCustodyState.init (D := D) (Sig := Sig) dep₀ pk₀ toothQuorum).ledger)
+    (hx : x ∈ c.pool) (hcl : L.claim x = ⟨0, dep₀, toothTarget⟩)
+    (hni : (⟨0, dep₀, toothTarget⟩ : CustodyApproval) ∉ c.issued) :
+    certUnsafeRelease 1 dep₀ ((certCustodyMachine L S oracleSign dep₀ pk₀ toothQuorum).runStep c
+      (.sign dep₀ toothTarget false)).1 = true := by
+  have hv : certVoted L c.pool 0 dep₀ toothTarget = true := by
+    rw [certVoted.public_eqs]
+    exact List.any_eq_true.mpr ⟨x, hx, decide_eq_true hcl⟩
+  have hApp : (certApprovers L c.ledger.quorum.numParties c.pool c.ledger.deploymentId
+      toothTarget).length = 1 := by
+    rw [hL, certApprovers.public_eqs]
+    exact congrArg List.length (List.filter_cons_of_pos
+      (p := fun p => certVoted L c.pool p dep₀ toothTarget) (a := 0) (l := []) hv)
+  have hStep := custodyLedgerSign_fresh_release (S := S) (oracleSign := oracleSign)
+    (L := c.ledger) (n := 1) (dep := dep₀) (i := toothTarget)
+    (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; rfl) (by rw [hL]; exact Nat.zero_le _)
+    (by rw [hL]; intro h; cases h) (by rw [hL]; exact Nat.le_refl 1)
+    (by rw [hL]; show 0 + 40 ≤ 100; decide)
+  rw [certRunStep_of_some L S oracleSign dep₀ pk₀ toothQuorum
+    (by rw [certCustodyStep.public_eq_4, hApp, hStep]; rfl), certUnsafeRelease.public_eqs]
+  refine List.any_eq_true.mpr ⟨⟨toothTarget, _, _⟩, List.mem_cons_self, ?_⟩
+  show (!(decide ((⟨0, dep₀, toothTarget⟩ : CustodyApproval) ∈ c.issued) || false)) = true
+  rw [decide_eq_false hni]
+  rfl
+
+omit [DecidableEq D] in
+private theorem submitWith_pool_valid (c : CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval))
+    (x : Spec.Bytes × CustodyApproval) (hd : x.2.deploymentId = c.ledger.deploymentId) :
+    x ∈ (submitWith true c x).1.pool := by
+  unfold submitWith
+  rw [ifP (And.intro rfl hd)]
+  exact List.mem_cons_self
+
+omit [DecidableEq D] in
+private theorem submitWith_pool_mono (v : Bool)
+    (c : CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval))
+    (x y : Spec.Bytes × CustodyApproval) (h : y ∈ c.pool) : y ∈ (submitWith v c x).1.pool := by
+  unfold submitWith
+  by_cases hg : v = true ∧ x.2.deploymentId = c.ledger.deploymentId
+  · rw [ifP hg]; exact List.mem_cons_of_mem _ h
+  · rw [ifN hg]; exact h
+
+/-- Submit the certificates `(t, a)` for the tags `t` of a list, then continue. -/
+def submitAll (a : CustodyApproval) :
+    List Spec.Bytes → Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) Unit →
+      Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) Unit
+  | [], rest => rest
+  | t :: ts, rest =>
+    .call (E := certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) (.submit (t, a))
+      (fun _ => submitAll a ts rest)
+
+/-- Ask the coordinator to sign `toothTarget`. -/
+def signTarget (dep : Nat) :
+    Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) Unit :=
+  .call (E := certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig)
+    (.sign dep toothTarget false) (fun _ => .ret ())
+
+private theorem submitAll_sign_unsafe (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (enc : CustodyApproval → Spec.Bytes) (key : Nat → Spec.Bytes) (S : CustodyDigestScheme D)
+    (oracleSign : D → Sig) (dep₀ : Nat) (pk₀ : PK) (budget : Nat) :
+    ∀ (ts : List Spec.Bytes) (c : CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval))
+      (tr : List (CertCustodyInput (Spec.Bytes × CustodyApproval))),
+      tr.length + ts.length < budget →
+      c.ledger = (IdealCustodyState.init (D := D) (Sig := Sig) dep₀ pk₀ toothQuorum).ledger →
+      (⟨0, dep₀, toothTarget⟩ : CustodyApproval) ∉ c.issued →
+      (prf (key 0) (enc ⟨0, dep₀, toothTarget⟩) ∈ ts ∨
+        (prf (key 0) (enc ⟨0, dep₀, toothTarget⟩), ⟨0, dep₀, toothTarget⟩) ∈ c.pool) →
+      certUnsafeRelease 1 dep₀
+        (Code.play (certWorldOracle (encTagCertLayer prf enc key) key S oracleSign dep₀ pk₀
+          toothQuorum budget) (submitAll ⟨0, dep₀, toothTarget⟩ ts (signTarget dep₀))
+          (c, tr)).2.1 = true
+  | [], c, tr, hb, hL, hni, hv => by
+    rw [submitAll]
+    unfold signTarget
+    rw [Code.play_call, certWorldOracle_pos _ _ S oracleSign dep₀ pk₀ toothQuorum budget c tr
+      (Nat.lt_of_le_of_lt (Nat.le_add_right _ _) hb), Code.play_ret]
+    exact pooled_sign_unsafe (encTagCertLayer prf enc key) S oracleSign dep₀ pk₀ c _ hL
+      (hv.resolve_left (fun h => by cases h)) rfl hni
+  | t :: ts, c, tr, hb, hL, hni, hv => by
+    have h1 : (tr ++ [CertCustodyInput.submit
+        (t, (⟨0, dep₀, toothTarget⟩ : CustodyApproval))]).length = tr.length + 1 := by
+      rw [List.length_append]; rfl
+    have h2 : (t :: ts).length = ts.length + 1 := rfl
+    rw [h2] at hb
+    rw [submitAll, Code.play_call, certWorldOracle_pos _ _ S oracleSign dep₀ pk₀ toothQuorum
+      budget c tr (by omega), encTag_runStep_submit]
+    refine submitAll_sign_unsafe prf enc key S oracleSign dep₀ pk₀ budget ts _ _ (by omega)
+      ((submitWith_frame _ c _).1.trans hL)
+      (by rw [(submitWith_frame _ c _).2.1]; exact hni) ?_
+    rcases hv with hmem | hpool
+    · rcases List.mem_cons.mp hmem with hEq | hT
+      · refine .inr ?_
+        show (prf (key 0) (enc ⟨0, dep₀, toothTarget⟩),
+            (⟨0, dep₀, toothTarget⟩ : CustodyApproval)) ∈
+          (submitWith (decide (t = prf (key 0) (enc ⟨0, dep₀, toothTarget⟩))) c
+            (t, ⟨0, dep₀, toothTarget⟩)).1.pool
+        rw [decide_eq_true hEq.symm, hEq]
+        exact submitWith_pool_valid c _ (by rw [hL]; rfl)
+      · exact .inl hT
+    · exact .inr (submitWith_pool_mono _ c _ _ hpool)
+
+/-- The key-reading adversary: one honest certificate from custodian `0` for `toothDecoy`, then
+    a certificate for `toothTarget` carrying the tag of the first one, then a signing request. -/
+def toothKeyReadAdv (dep : Nat) :
+    Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) Unit :=
+  .call (E := certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig)
+    (.approve 0 dep toothDecoy)
+    (fun ρ =>
+      match ρ.2.1 with
+      | some cert => submitAll ⟨0, dep, toothTarget⟩ [cert.1] (signTarget dep)
+      | none => .ret ())
+
+private theorem toothKeyReadAdv_unsafe (enc : CustodyApproval → Spec.Bytes) (key : Nat → Spec.Bytes)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig) (dep₀ : Nat) (pk₀ : PK) {budget : Nat}
+    (hb : 3 ≤ budget) :
+    certUnsafeRelease 1 dep₀
+      (certAdaptiveRun (encTagCertLayer (fun kk _ => kk) enc key) key S oracleSign dep₀ pk₀
+        toothQuorum budget (toothKeyReadAdv dep₀)).2.1 = true := by
+  have hA : (certCustodyMachine (encTagCertLayer (fun kk _ => kk) enc key) S oracleSign dep₀ pk₀
+        toothQuorum).runStep (CertCustodyState.init dep₀ pk₀ toothQuorum)
+        (.approve 0 dep₀ toothDecoy) =
+      ({ (CertCustodyState.init dep₀ pk₀ toothQuorum :
+            CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)) with
+          issued := CustodyApproval.mk 0 dep₀ toothDecoy ::
+            (CertCustodyState.init dep₀ pk₀ toothQuorum :
+              CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)).issued },
+        some .approvalRecorded) := by
+    rw [certRunStep_approve]
+    have g1 : 0 < (CertCustodyState.init dep₀ pk₀ toothQuorum :
+        CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)).ledger.quorum.numParties := by
+      rw [CertCustodyState.init.public_eqs]; exact Nat.one_pos
+    have g2 : 0 ∉ (CertCustodyState.init dep₀ pk₀ toothQuorum :
+        CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)).corruptParties := by
+      rw [CertCustodyState.init.public_eqs]; intro h; cases h
+    have g3 : dep₀ = (CertCustodyState.init dep₀ pk₀ toothQuorum :
+        CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)).ledger.deploymentId := by
+      rw [CertCustodyState.init.public_eqs]; rfl
+    exact ifP (And.intro g1 (And.intro g2 g3)) _ _
+  unfold certAdaptiveRun toothKeyReadAdv
+  rw [Code.play_call, certWorldOracle_pos _ _ S oracleSign dep₀ pk₀ toothQuorum budget _ []
+    (Nat.lt_of_lt_of_le (by decide) hb), hA]
+  refine submitAll_sign_unsafe (fun kk _ => kk) enc key S oracleSign dep₀ pk₀ budget [key 0] _ _
+    (Nat.lt_of_lt_of_le (by decide : 2 < 3) hb)
+    (by rw [CertCustodyState.init.public_eqs]) ?_ (.inl List.mem_cons_self)
+  rw [CertCustodyState.init.public_eqs]
+  intro h
+  rcases List.mem_cons.mp h with h | h
+  · have h' : (1 : Nat) = 2 := congrArg (fun a : CustodyApproval => a.intent.sessionId) h
+    exact absurd h' (by decide)
+  · cases h
+
+/-- **A certificate layer whose tags reveal the key is broken by an adaptive adversary.** With
+    the tag equal to the custodian's key (the tag of `macCertLayer`), in the game of
+    `certCustody_adaptive_unsafe_release_bound` for 1-of-1 custody, the adversary that asks one
+    honest certificate, reads the key off it and certifies an intent the custodian never approved
+    obtains an unsafe release on every coin: no bound below `1` holds. -/
+theorem certCustody_tooth_key_revealing_tag_adaptive_unsafe_release {N : Nat} (hN : 0 < N)
+    (enc : CustodyApproval → Spec.Bytes) (keys : Fin N → Nat → Spec.Bytes)
+    (S : CustodyDigestScheme D) (oracleSign : Fin N → D → Sig) (dep₀ : Nat) (pk₀ : PK)
+    {budget : Nat} (hb : 3 ≤ budget) {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound
+      (FinGame.mk hN (fun ω => certUnsafeRelease 1 dep₀
+        (certAdaptiveRun (encTagCertLayer (fun kk _ => kk) enc (keys ω)) (keys ω) S
+          (oracleSign ω) dep₀ pk₀ toothQuorum budget (toothKeyReadAdv dep₀)).2.1)).winProb ε :=
+  FinGame.not_bound_of_forall_win _
+    (fun ω => toothKeyReadAdv_unsafe enc (keys ω) S (oracleSign ω) dep₀ pk₀ hb) hε
+
+/-- All one-byte tags. -/
+def allByteTags : List Spec.Bytes :=
+  (List.range 256).map (fun n => [UInt8.ofNat n])
+
+private theorem mem_allByteTags : ∀ t : Spec.Bytes, t.length = 1 → t ∈ allByteTags
+  | [], h => absurd h (by decide)
+  | [b], _ => List.mem_map.mpr ⟨b.toNat, List.mem_range.mpr b.toBitVec.isLt, by
+      rw [UInt8.ofNat_toNat]⟩
+  | _ :: _ :: _, h => absurd (Nat.succ.inj h) (Nat.succ_ne_zero _)
+
+/-- The guessing adversary: submit a certificate for `toothTarget` with every one-byte tag, then
+    request the signature. `257` queries, no honest certificate. -/
+def toothGuessAdv (dep : Nat) :
+    Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) Unit :=
+  submitAll ⟨0, dep, toothTarget⟩ allByteTags (signTarget dep)
+
+/-- **Exhausting the tag space forces release.** For every keyed function with
+    one-byte outputs (`outLen = 1`), every encoding and every key, the guessing adversary obtains
+    an unsafe release on every coin with `257` queries. A bound
+    `(numParties + 1) * (εPrf + 256 ^ (-outLen) + εColl)` without the number of submissions would
+    be `2 * (εPrf + 1 / 256 + εColl)` here, below `1` for small `εPrf`, `εColl`. -/
+theorem certCustody_tooth_guess_all_tags_unsafe_release {N : Nat} (hN : 0 < N)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes)
+    (hOut : ∀ kk x : Spec.Bytes, (prf kk x).length = 1)
+    (enc : CustodyApproval → Spec.Bytes) (keys : Fin N → Nat → Spec.Bytes)
+    (S : CustodyDigestScheme D) (oracleSign : Fin N → D → Sig) (dep₀ : Nat) (pk₀ : PK)
+    {budget : Nat} (hb : 257 ≤ budget) {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound
+      (FinGame.mk hN (fun ω => certUnsafeRelease 1 dep₀
+        (certAdaptiveRun (encTagCertLayer prf enc (keys ω)) (keys ω) S (oracleSign ω) dep₀ pk₀
+          toothQuorum budget (toothGuessAdv dep₀)).2.1)).winProb ε :=
+  FinGame.not_bound_of_forall_win _
+    (fun ω => by
+      have hl : allByteTags.length = 256 := by
+        unfold allByteTags
+        rw [List.length_map, List.length_range]
+      exact submitAll_sign_unsafe prf enc (keys ω) S (oracleSign ω) dep₀ pk₀ budget allByteTags
+        (CertCustodyState.init dep₀ pk₀ toothQuorum) []
+        (by rw [hl]; exact Nat.lt_of_lt_of_le (by decide : 0 + 256 < 257) hb)
+        (by rw [CertCustodyState.init.public_eqs])
+        (by rw [CertCustodyState.init.public_eqs]; intro h; cases h)
+        (.inl (mem_allByteTags _ (hOut _ _)))) hε
+
+/-- **A certificate naming any party identifier is a forgery event when that party did not
+    issue it**, enrolled or not: from the initial state, the honest-format certificate
+    `L.issue p dep₀ i` for an arbitrary `p` (in particular `p ≥ numParties`) is admitted and
+    logged in `forgeries`. This is why the bound counts `numParties + 1` keys: the layer must
+    verify certificates for unenrolled identifiers under some key. -/
+theorem certCustody_tooth_unissued_claim_flagged {Cert : Type} (L : CustodyCertLayer Cert)
+    (S : CustodyDigestScheme D) (oracleSign : D → Sig) (dep₀ : Nat) (pk₀ : PK)
+    (quorum₀ : CustodyQuorumProfile) (p : Nat) (i : CustodyIntent) :
+    ¬ (((certCustodyMachine L S oracleSign dep₀ pk₀ quorum₀).runStep
+        (CertCustodyState.init dep₀ pk₀ quorum₀) (.submit (L.issue p dep₀ i))).1.forgeries =
+      []) := by
+  rw [certRunStep_forgery_flagged L S oracleSign dep₀ pk₀ quorum₀ _ _ (L.issue_valid p dep₀ i)
+    (by rw [L.issue_claim, CertCustodyState.init.public_eqs]; rfl)
+    (by rw [L.issue_claim, CertCustodyState.init.public_eqs]; intro h; cases h)
+    (by rw [L.issue_claim, CertCustodyState.init.public_eqs]; intro h; cases h)]
+  exact List.cons_ne_nil _ _
+
+/-- The coin split of `Fin (n * n)` with the two coordinates exchanged. -/
+def swapSplit (n : Nat) : CoinSplit (n * n) n n where
+  chal := (CoinSplit.prod n n).advc
+  advc := (CoinSplit.prod n n).chal
+  pair c a := (CoinSplit.prod n n).pair a c
+  chal_pair c a := (CoinSplit.prod n n).advc_pair a c
+  advc_pair c a := (CoinSplit.prod n n).chal_pair a c
+  pair_eta := (CoinSplit.prod n n).pair_eta
+
+omit [DecidableEq D] in
+/-- **The independence hypotheses of the bound are satisfiable with two keys.** On the coin
+    space `Fin (n * n)`, key `0` read from the first coordinate and key `1` from the second, with
+    any fixed adversary and signing oracle: each key is the challenger coordinate of its split
+    (`hKey` of the bound), and `KeyIndependent` holds. -/
+theorem keyIndependent_two_keys {R : Type} (n : Nat)
+    (sample : Fin n → Spec.Bytes × (Spec.Bytes → Spec.Bytes)) (sign : D → Sig)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R) :
+    ∃ (π : (r : Fin (1 + 1)) → CoinSplit (n * n) n n)
+      (keys : Fin (n * n) → Fin (1 + 1) → Spec.Bytes),
+      (∀ (r : Fin (1 + 1)) (ω : Fin (n * n)), keys ω r = (sample ((π r).chal ω)).1) ∧
+      KeyIndependent π keys (fun _ => sign) (fun _ => A) := by
+  refine ⟨fun r => match r with
+      | ⟨0, _⟩ => CoinSplit.prod n n
+      | ⟨_ + 1, _⟩ => swapSplit n,
+    fun ω r => match r with
+      | ⟨0, _⟩ => (sample ((CoinSplit.prod n n).chal ω)).1
+      | ⟨_ + 1, _⟩ => (sample ((CoinSplit.prod n n).advc ω)).1, ?_, ?_⟩
+  · intro r ω
+    match r with
+    | ⟨0, _⟩ => rfl
+    | ⟨_ + 1, _⟩ => rfl
+  · intro r ω ω' h
+    refine ⟨rfl, rfl, fun i hi => ?_⟩
+    match r, i, h, hi with
+    | ⟨0, _⟩, ⟨0, _⟩, _, hi => exact absurd rfl hi
+    | ⟨0, _⟩, ⟨_ + 1, _⟩, h, _ =>
+      have h' : (CoinSplit.prod n n).advc ω = (CoinSplit.prod n n).advc ω' := h
+      show (sample ((CoinSplit.prod n n).advc ω)).1 = (sample ((CoinSplit.prod n n).advc ω')).1
+      rw [h']
+    | ⟨_ + 1, _⟩, ⟨0, _⟩, h, _ =>
+      have h' : (CoinSplit.prod n n).chal ω = (CoinSplit.prod n n).chal ω' := h
+      show (sample ((CoinSplit.prod n n).chal ω)).1 = (sample ((CoinSplit.prod n n).chal ω')).1
+      rw [h']
+    | ⟨a + 1, ha⟩, ⟨b + 1, hb⟩, _, hi =>
+      have ha' : a = 0 := by omega
+      have hb' : b = 0 := by omega
+      subst ha'
+      subst hb'
+      exact absurd rfl hi
+
+/-- Cardinality of a vector of independent coins, keeping its head/tail product explicit. -/
+def partyCoinCard (n : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => n * partyCoinCard n k
+
+theorem partyCoinCard_pos {n : Nat} (hn : 0 < n) : ∀ k, 0 < partyCoinCard n k
+  | 0 => Nat.one_pos
+  | k + 1 => Nat.mul_pos hn (partyCoinCard_pos hn k)
+
+/-- Extract a coordinate in the tail, keeping the head among the remaining coins. -/
+private def liftPartySplit {n t a : Nat} (tail : CoinSplit t n a) :
+    CoinSplit (n * t) n (n * a) where
+  chal w := tail.chal ((CoinSplit.prod n t).advc w)
+  advc w := (CoinSplit.prod n a).pair ((CoinSplit.prod n t).chal w)
+    (tail.advc ((CoinSplit.prod n t).advc w))
+  pair c v := (CoinSplit.prod n t).pair ((CoinSplit.prod n a).chal v)
+    (tail.pair c ((CoinSplit.prod n a).advc v))
+  chal_pair _ _ := by rw [CoinSplit.advc_pair, CoinSplit.chal_pair]
+  advc_pair _ _ := by rw [CoinSplit.chal_pair, CoinSplit.advc_pair, CoinSplit.advc_pair,
+    CoinSplit.pair_eta]
+  pair_eta _ := by rw [CoinSplit.chal_pair, CoinSplit.advc_pair, CoinSplit.pair_eta,
+    CoinSplit.pair_eta]
+
+/-- Split all party samples at the selected index. Its complement contains exactly the
+    other coordinates, in their original order. -/
+def partyCoinSplit (n : Nat) : (k : Nat) → Fin (k + 1) →
+    CoinSplit (partyCoinCard n (k + 1)) n (partyCoinCard n k)
+  | 0, _ => CoinSplit.prod n 1
+  | k + 1, ⟨0, _⟩ => CoinSplit.prod n (partyCoinCard n (k + 1))
+  | k + 1, ⟨r + 1, hr⟩ => liftPartySplit (partyCoinSplit n k ⟨r, Nat.lt_of_succ_lt_succ hr⟩)
+
+private theorem otherPartyCoin (n : Nat) : ∀ (k : Nat) (r i : Fin (k + 1))
+    (w v : Fin (partyCoinCard n (k + 1))), i ≠ r →
+    (partyCoinSplit n k r).advc w = (partyCoinSplit n k r).advc v →
+    (partyCoinSplit n k i).chal w = (partyCoinSplit n k i).chal v
+  | 0, i, r, _, _, hi, _ => False.elim (hi (Fin.ext (by have := i.isLt; have := r.isLt; omega)))
+  | _ + 1, ⟨0, _⟩, ⟨0, _⟩, _, _, hi, _ => False.elim (hi rfl)
+  | k + 1, ⟨0, _⟩, ⟨i + 1, _⟩, _, _, _, h =>
+    congrArg (partyCoinSplit n k ⟨i, by omega⟩).chal h
+  | k + 1, ⟨r + 1, _⟩, i, w, v, hi, h => by
+    let head := CoinSplit.prod n (partyCoinCard n (k + 1))
+    let rest := CoinSplit.prod n (partyCoinCard n k)
+    let t := partyCoinSplit n k ⟨r, by omega⟩
+    change rest.pair (head.chal w) (t.advc (head.advc w)) =
+      rest.pair (head.chal v) (t.advc (head.advc v)) at h
+    match i with
+    | ⟨0, _⟩ =>
+      have hh := congrArg rest.chal h
+      rwa [rest.chal_pair, rest.chal_pair] at hh
+    | ⟨i + 1, _⟩ =>
+      have hh := congrArg rest.advc h
+      rw [rest.advc_pair, rest.advc_pair] at hh
+      exact otherPartyCoin n k ⟨r, by omega⟩ ⟨i, by omega⟩ _ _
+        (fun eq => hi (Fin.ext (congrArg Nat.succ (congrArg Fin.val eq)))) hh
+
+omit [DecidableEq D] in
+theorem keyIndependent_product {R : Type} (n k : Nat)
+    (sample : Fin n → Spec.Bytes × (Spec.Bytes → Spec.Bytes)) (sign : D → Sig)
+    (A : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Sig) R) :
+    KeyIndependent (partyCoinSplit n k)
+      (fun w i => (sample ((partyCoinSplit n k i).chal w)).1) (fun _ => sign) (fun _ => A) :=
+  fun r w v hw => ⟨rfl, rfl, fun i hi =>
+    congrArg (fun c => (sample c).1) (otherPartyCoin n k r i w v hi hw)⟩
+
+/-- One-entry function table. Inputs outside the zero-byte domain return the sentinel. -/
+def singletonTable (value : Spec.Bytes) : Spec.Bytes → Spec.Bytes
+  | [] => value
+  | _ :: _ => []
+
+private theorem singletonTable_eta {k l : Nat} {x : Spec.Bytes × (Spec.Bytes → Spec.Bytes)}
+    (hx : PrfSampleOk k 0 l x) : singletonTable (x.2 []) = x.2 := by
+  rw [PrfSampleOk.public_eqs] at hx
+  funext y
+  cases y with
+  | nil => rfl
+  | cons a t => exact ((hx.2 (a :: t)).2 (Nat.succ_ne_zero _)).symm
+
+/-- When key and tag have the same length, a uniformly sampled key is an exact
+    random function on the singleton domain. This includes arbitrary off-domain queries. -/
+theorem singletonTable_prfHard (len q : Nat) (classify : Code byteOracleIface Bool → Prop) :
+    PrfHard classify singletonTable len 0 len q Spec.RatBound.zero := by
+  intro n nc na hn π sample hu adv _
+  let read (c : Fin nc) := ((sample c).1, (sample c).2 [])
+  let valid (z : Spec.Bytes × Spec.Bytes) := z.1.length = len ∧ z.2.length = len
+  have uniform : UniformOn valid read := by
+    constructor
+    · intro c
+      have h := hu.mem c
+      rw [PrfSampleOk.public_eqs] at h
+      exact ⟨h.1, (h.2 []).1 rfl⟩
+    · intro i j h
+      apply hu.injective
+      refine Prod.ext (congrArg (Prod.fst (β := Spec.Bytes)) h) ?_
+      rw [← singletonTable_eta (hu.mem i), ← singletonTable_eta (hu.mem j)]
+      exact congrArg singletonTable (congrArg (Prod.snd (α := Spec.Bytes)) h)
+    · intro z hz
+      have hm : PrfSampleOk len 0 len (z.1, singletonTable z.2) := by
+        rw [PrfSampleOk.public_eqs]
+        refine ⟨hz.1, fun y => ?_⟩
+        cases y with
+        | nil => exact ⟨fun _ => hz.2, fun hh => False.elim (hh rfl)⟩
+        | cons a t => exact ⟨fun hh => False.elim (Nat.succ_ne_zero _ hh), fun _ => rfl⟩
+      obtain ⟨i, hi⟩ := hu.surjective _ hm
+      exact ⟨i, (congrArg (fun x : Spec.Bytes × (Spec.Bytes → Spec.Bytes) => (x.1, x.2 [])) hi)⟩
+  have swapped : UniformOn valid (fun c => (read c).swap) :=
+    ⟨fun c => ⟨(uniform.mem c).2, (uniform.mem c).1⟩,
+     fun i j h => uniform.injective i j (congrArg Prod.swap h),
+     fun z hz => by
+       obtain ⟨i, hi⟩ := uniform.surjective z.swap ⟨hz.2, hz.1⟩
+       exact ⟨i, congrArg Prod.swap hi⟩⟩
+  let verdict (f : Spec.Bytes → Spec.Bytes) (a : Fin na) : Nat :=
+    if (Code.play (budgetedFunOracle f q) (adv a) 0).1 then 1 else 0
+  have same : sampleSum n (fun w => verdict (singletonTable (sample (π.chal w)).1) (π.advc w)) =
+      sampleSum n (fun w => verdict (sample (π.chal w)).2 (π.advc w)) := by
+    rw [π.sampleSum_eq, π.sampleSum_eq (fun w => verdict (sample (π.chal w)).2 (π.advc w))]
+    simp only [π.chal_pair, π.advc_pair]
+    refine (uniform.card_and_sampleSum_eq swapped (fun z =>
+      sampleSum na (verdict (singletonTable z.1)))).2.trans ?_
+    apply sampleSum_ext
+    intro c
+    change sampleSum na (verdict (singletonTable ((sample c).2 []))) = _
+    rw [singletonTable_eta (hu.mem c)]
+  change Spec.natAbsDiff _ _ * 1 ≤ 0 * n
+  unfold FinGame.winCount
+  simp only [prfRealGame.public_eqs, prfIdealGame.public_eqs]
+  change Spec.natAbsDiff (sampleSum n (fun w => verdict (singletonTable (sample (π.chal w)).1) (π.advc w)))
+    (sampleSum n (fun w => verdict (sample (π.chal w)).2 (π.advc w))) * 1 ≤ _
+  rw [same]
+  simp only [Spec.natAbsDiff, Nat.le_refl, ↓reduceIte, Nat.sub_self, Nat.zero_mul]
+
+/-- The reduction against a submit-then-sign adversary makes no tag queries. Its returned
+    candidate can be a valid guess, but there is no pair of colliding permits in its log. -/
+private theorem guessForger_ret {k : Nat}
+    (S : CustodyDigestScheme D) (sign : D → Sig) (pk : PK) (profile : CustodyQuorumProfile)
+    (prf : Spec.Bytes → Spec.Bytes → Spec.Bytes) (enc : CustodyApproval → Spec.Bytes)
+    (r : Fin (k+1)) (keys : Fin (k+1) → Spec.Bytes) (j : Nat)
+    (c : CertCustodyState PK D Sig (Spec.Bytes × CustodyApproval)) :
+    ∃ z, redCode prf enc S sign 0 pk profile 2 k r keys
+      (submitAll ⟨0, 0, toothTarget⟩ [[0]] (signTarget 0)) j c 0 [] = .ret z := by
+  by_cases hr : custIdx k 0 = r <;>
+    by_cases issued : (⟨0, 0, toothTarget⟩ : CustodyApproval) ∈ c.issued <;>
+    cases j <;>
+    simp only [submitAll, signTarget, redCode, redAct, Nat.reduceLT, hr, issued, ↓reduceIte] <;>
+    exact ⟨_, rfl⟩
+
+abbrev jointSampler := MacBlind.prgPrfSampler (MacBlind.bytesSampler 1) (MacBlind.bytesSampler 1)
+abbrev jointCard := 256 ^ 1 * 256 ^ 1
+abbrev jointProfile (k : Nat) : CustodyQuorumProfile :=
+  ⟨k + 1, 1, 100, Nat.one_pos, Nat.succ_le_succ (Nat.zero_le _)⟩
+abbrev jointAdv : Code (certAdvIface (Spec.Bytes × CustodyApproval) Spec.Bytes Unit) Unit :=
+  submitAll ⟨0, 0, toothTarget⟩ [[0]] (signTarget 0)
+
+private theorem jointUniform : UniformOn (PrfSampleOk 1 0 1) jointSampler :=
+  MacBlind.uniformOn_prgPrfSampler
+    (MacBlind.uniformOn_bytesSampler 1) (MacBlind.uniformOn_bytesSampler 1)
+
+abbrev guessKeys (k : Nat) (w : Fin (partyCoinCard jointCard (k+1))) (r : Fin (k+1)) :=
+  (jointSampler ((partyCoinSplit jointCard k r).chal w)).1
+
+private theorem guessCollision (k : Nat) (r : Fin ((jointProfile k).numParties+1)) (j : Fin 2) :
+    let π := partyCoinSplit jointCard (k+1) r
+    let hn := partyCoinCard_pos (by decide : 0 < jointCard) (k+1+1)
+    let enc := permitInput (fun _ => [])
+    GameBound (encCollisionGame hn enc 2 (fun w => singletonTable (jointSampler (π.chal w)).1)
+      (fun w => coinTagForger hn singletonTable enc CustodyDigestScheme.transparent 0 () (jointProfile k)
+        2 (guessKeys (k+1)) (fun _ _ => ()) (fun _ => jointAdv) π r j.val (π.advc w))).winProb
+      Spec.RatBound.zero := by
+  apply FinGame.bound_zero_of_forall_lose
+  intro w
+  rw [encCollisionGame.public_eqs]
+  dsimp only
+  unfold coinTagForger certTagForger
+  obtain ⟨z, he⟩ := guessForger_ret CustodyDigestScheme.transparent (fun _ => ()) () (jointProfile k)
+    singletonTable (permitInput (fun _ => [])) r _ j.val _
+  rw [he, tagRun.public_eqs, Code.play_ret, encCollision.public_eqs]
+  rfl
+
+/-- All premises of the adaptive bound, on one common product of independent one-byte
+    keys and tables. The adversary guesses a tag and requests release. Both error terms
+    vanish: a singleton-domain PRF is perfect and this reduction's tag log is empty. -/
+theorem inhabited_certCustody_adaptive (k : Nat) :
+    ∃ (profile : CustodyQuorumProfile) (N : Nat) (hn : 0 < N)
+      (π : (r : Fin (profile.numParties+1)) → CoinSplit N jointCard (partyCoinCard jointCard profile.numParties))
+      (sample : (r : Fin (profile.numParties+1)) → Fin jointCard → Spec.Bytes × (Spec.Bytes → Spec.Bytes))
+      (keys : Fin N → Fin (profile.numParties+1) → Spec.Bytes)
+      (dg : Spec.Bytes → Spec.Bytes),
+    profile = jointProfile k ∧
+    (∀ x : Spec.Bytes, (dg x).length = 0) ∧
+    PrfHard (fun c => Within (2+1) c) singletonTable 1 0 1 (2+1) Spec.RatBound.zero ∧
+    (∀ r, UniformOn (PrfSampleOk 1 0 1) (sample r)) ∧
+    (∀ r w, keys w r = (sample r ((π r).chal w)).1) ∧
+    KeyIndependent π keys (fun _ (_ : Nat × CustodyIntent) => ()) (fun _ => jointAdv) ∧
+    (∀ (r : Fin (profile.numParties+1)) (j : Fin 2) (a : Fin (partyCoinCard jointCard profile.numParties)),
+      Within (2+1) (tagForgeDistinguisher (permitInput dg) 2 0
+        (coinTagForger hn singletonTable (permitInput dg) CustodyDigestScheme.transparent 0 ()
+          profile 2 keys (fun _ _ => ()) (fun _ => jointAdv) (π r) r j.val a))) ∧
+    (∀ (r : Fin (profile.numParties+1)) (j : Fin 2),
+      GameBound (encCollisionGame hn (permitInput dg) 2 (fun w => singletonTable (sample r ((π r).chal w)).1)
+        (fun w => coinTagForger hn singletonTable (permitInput dg) CustodyDigestScheme.transparent 0 ()
+          profile 2 keys (fun _ _ => ()) (fun _ => jointAdv) (π r) r j.val ((π r).advc w))).winProb
+        Spec.RatBound.zero) := by
+  exact ⟨jointProfile k, _, partyCoinCard_pos (by decide : 0 < jointCard) _, partyCoinSplit jointCard (k+1),
+    fun _ => jointSampler, guessKeys (k+1), fun _ => [], rfl, fun _ => rfl,
+    singletonTable_prfHard 1 3 _, fun _ => jointUniform, fun _ _ => rfl,
+    keyIndependent_product _ _ jointSampler _ jointAdv,
+    fun _ _ _ => tagForgeDistinguisher_within .., guessCollision k⟩
+
+/-- The finite game on two independent one-byte key/table coordinates. -/
+def oneGuessReleaseGame : FinGame (partyCoinCard jointCard 2) :=
+  ⟨partyCoinCard_pos (by decide : 0 < jointCard) 2, fun w =>
+    let key := custKey 1 (guessKeys 1 w)
+    certUnsafeRelease 1 0 (certAdaptiveRun (encTagCertLayer singletonTable (permitInput (fun _ => [])) key)
+      key CustodyDigestScheme.transparent (fun _ => ()) 0 () toothQuorum 2 jointAdv).2.1⟩
+
+/-- For one custodian the joint example admits a winning coin and has winning probability
+    at most 4/256 in the very same game. -/
+theorem certCustody_one_guess_nontrivial :
+    (∃ w, oneGuessReleaseGame.win w = true) ∧
+      GameBound oneGuessReleaseGame.winProb ⟨4,256,by decide⟩ := by
+  let hn := partyCoinCard_pos (by decide : 0 < jointCard) 2
+  let π := partyCoinSplit jointCard 1
+  let S := CustodyDigestScheme.transparent
+  let dg := fun _ : Spec.Bytes => ([] : Spec.Bytes)
+  constructor
+  · let r := custIdx 1 0
+    have ok : PrfSampleOk 1 0 1 ([0], singletonTable [0]) := by
+      rw [PrfSampleOk.public_eqs]
+      refine ⟨rfl, fun y => ?_⟩
+      cases y with
+      | nil => exact ⟨fun _ => rfl, fun h => False.elim (h rfl)⟩
+      | cons a t => exact ⟨fun h => False.elim (Nat.succ_ne_zero _ h), fun _ => rfl⟩
+    obtain ⟨c,hs⟩ := jointUniform.surjective _ ok
+    let w := (π r).pair c ((π r).advc ⟨0,hn⟩)
+    have hk : custKey 1 (guessKeys 1 w) 0 = [0] := by
+      change (jointSampler ((π r).chal w)).1 = _
+      rw [show (π r).chal w = c from (π r).chal_pair .., hs]
+    refine ⟨w,submitAll_sign_unsafe singletonTable (permitInput dg) (custKey 1 (guessKeys 1 w))
+      S (fun _ => ()) 0 () 2 [[0]] _ [] (by decide)
+      (by rw [CertCustodyState.init.public_eqs])
+      (by rw [CertCustodyState.init.public_eqs]; intro h; cases h) (.inl ?_)⟩
+    rw [permitInput.public_eqs, hk]
+    exact List.mem_cons_self
+  · have hb := certCustody_adaptive_unsafe_release_bound
+      (nC := fun _ => jointCard) (nA := fun _ => partyCoinCard jointCard 1)
+      (εColl := Spec.RatBound.zero) hn S 0 () toothQuorum 2 singletonTable
+      dg 0 (fun _ => rfl) 1 1 (singletonTable_prfHard 1 3 (Within 3)) π (fun _ => jointSampler)
+      (fun _ => jointUniform) (guessKeys 1) (fun _ _ => ()) (fun _ => jointAdv) (fun _ _ => rfl)
+      (keyIndependent_product _ _ jointSampler _ jointAdv) (fun _ _ _ => tagForgeDistinguisher_within ..)
+      (guessCollision 0)
+    exact hb
+
+end Teeth
+
+#print axioms certCustody_adaptive_unsafe_release_bound
+#print axioms prfSample_shiftClosed
+#print axioms keyIndependent_product
+#print axioms singletonTable_prfHard
+#print axioms inhabited_certCustody_adaptive
+#print axioms certCustody_one_guess_nontrivial
+
+#verify_constructive
+  Qsag.Top.certRunStep_approve
+  Qsag.Top.certRunStep_submit
+  Qsag.Top.certRunStep_corrupt
+  Qsag.Top.certRunStep_sign_frame
+  Qsag.Top.certRunStep_forgery_origin
+  Qsag.Top.certRunStep_forgery_flagged
+  Qsag.Top.certRun_nil
+  Qsag.Top.certRun_snoc
+  Qsag.Top.certWorldOracle_pos
+  Qsag.Top.certWorldOracle_neg
+  Qsag.Top.certAdaptiveRun_state_eq_certRun
+  Qsag.Top.certAdaptiveRun_length_le
+  Qsag.Top.certAdaptiveRun_unsafe_release_forgery
+  Qsag.Top.encTagCertLayer_claim
+  Qsag.Top.encTagCertLayer_valid_iff
+  Qsag.Top.encTagCertLayer_issue
+  Qsag.Top.encTagCertLayer_permitInput_valid_iff
+  Qsag.Top.certApprovers_claim_congr
+  Qsag.Top.redCode_within
+  Qsag.Top.red_sim
+  Qsag.Top.certTagForger_within
+  Qsag.Top.certAdaptiveRun_unsafe_release_tag_forgery
+  Qsag.Top.certAdaptiveRun_unsafe_release_fresh_forgery_or_collision
+  Qsag.Top.certCustody_adaptive_unsafe_release_extract
+  Qsag.Top.certCustody_adaptive_unsafe_release_bound
+  Qsag.Top.certCustody_tooth_key_revealing_tag_adaptive_unsafe_release
+  Qsag.Top.certCustody_tooth_guess_all_tags_unsafe_release
+  Qsag.Top.certCustody_tooth_unissued_claim_flagged
+  Qsag.Top.keyIndependent_two_keys
+  Qsag.Top.prfSample_shiftClosed
+  Qsag.Top.partyCoinCard_pos
+  Qsag.Top.keyIndependent_product
+  Qsag.Top.singletonTable_prfHard
+  Qsag.Top.inhabited_certCustody_adaptive
+  Qsag.Top.certCustody_one_guess_nontrivial
+
+#verify_inhabited Qsag.Top.certCustody_adaptive_unsafe_release_bound Qsag.Top.inhabited_certCustody_adaptive
+
+#tooth_pair Qsag.Top.certCustody_adaptive_unsafe_release_bound vs
+  Qsag.Top.certCustody_tooth_key_revealing_tag_adaptive_unsafe_release
+#tooth_pair Qsag.Top.certCustody_adaptive_unsafe_release_bound vs
+  Qsag.Top.certCustody_tooth_guess_all_tags_unsafe_release
+#tooth_pair Qsag.Top.certRunStep_forgery_origin vs
+  Qsag.Top.certCustody_tooth_unissued_claim_flagged
+
+end Qsag.Top
+end

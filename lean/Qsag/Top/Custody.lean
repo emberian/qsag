@@ -1,4 +1,7 @@
 module
+public import Qsag.Custody.IsolatedCnfTraceAndCoinBinding
+public import Qsag.Oracle.LazyPermutationUniformEquiv
+public import Qsag.Custody.CommitteeHandoffAndDealerlessDkg
 public import Qsag.Custody.VolatileCoupon
 /-
 # Qsag.Top.Custody — End-to-End Composed Separated Threshold Custody Refinements and Mediation
@@ -11,7 +14,10 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
 2. Equality of the shared-evaluation RSS release machine and the reference release machine
    (`rssSharedReleaseMachine_eq_reference`), and of the shared and ideal threshold services
    (`thresholdServiceShared_eq_ideal`, `thresholdDurableShared_eq_ideal`). These are equalities of
-   machines over one state type; no `Spec.Refines` witness is packaged for them,
+   machines over one state type. The `Spec.Refines` witnesses packaged from them, with the
+   identity relation, are `rssSharedRelease_refines_reference`,
+   `thresholdServiceShared_refines_ideal` and `thresholdDurableShared_refines_ideal` in
+   `Qsag.Top.CustodyKeyHidingBound`; they carry no information beyond the equalities,
 3. End-to-end authenticated custody quorum submission → `validThresholdApproval` → `IdealTsig`
    execution + policy-mediation provenance / `prodEufCmaWin` reduction (`SeparatedCustodyUcBridge`,
    `CompleteMediationBoundary`, `SeparatedCustodyCollision`), and
@@ -41,7 +47,11 @@ complete-mediation, and 4-layer ELF-to-Ideal simulation proofs through `Qsag.Spe
    unguarded machine is an ideal execution or exhibits a tag forgery, a message-tag collision or a
    hash collision (`authenticatedCustody_ideal_or_forgery`); and over any finite coin space
    `Pr[unsafe release] ≤ Pr[acknowledgement violation] + Pr[WAL violation]`
-   (`authenticatedCustody_unsafe_release_le_violations`). The two right-hand probabilities are not
+   (`authenticatedCustody_unsafe_release_le_violations`). Relative to an
+   `AuthCustodyReductionEmbedding` (`Qsag.Top.CustodyKeyHidingBound`) the two right-hand
+   probabilities are at most `custodians * (εPrf + 256^(-outLen)) + εTcr` and `εTcr` under
+   `Spec.PrfHard` and `Spec.SmDtTcrHard`. No embedding is constructed for
+   `DistCustody.authMachine`, so for the machine itself the two probabilities are still not
    bounded in this library.
 -/
 
@@ -1679,7 +1689,13 @@ def certRun {PK D Sig Cert : Type} [DecidableEq D] (L : CustodyCertLayer Cert)
 
 /-- A toy MAC-style layer: party `p`'s certificate for a permit is the permit tagged with `key p`.
     Tags reveal the key, so this layer is unforgeable only against adversaries whose submissions do
-    not depend on the keys. -/
+    not depend on the keys: in the tag experiment of `Qsag.Custody.KeyHidingAuthCustodyBound` a
+    tag equal to the key is forged with probability one after one honest tag
+    (`KeyHidingCustody.tooth_toyCustodyTag_one_query_forgery`, stated for a copy of this tag
+    map). `prfCertLayer` (`Qsag.Top.CustodyKeyHidingBound`) tags with
+    `KeyHidingCustody.prfCustodyTag`, which is unforgeable after `q` adaptive honest tags under
+    `Spec.PrfHard` up to a digest-collision term (`KeyHidingCustody.prfCustodyTag_unforgeable`).
+    The forgery event of `certRun` is not reduced to that experiment. -/
 def macCertLayer (key : Nat → Nat) : CustodyCertLayer (Nat × CustodyApproval) where
   claim c := c.2
   valid c := c.1 == key c.2.party
@@ -4627,8 +4643,9 @@ theorem authenticatedCustody_reachable_safe {F C PK D Sig : Type}
     coordinator's WAL ends up holding a release no enrolled custodian approved is at most the sum
     of the probabilities of the two violation events.
 
-    The two events on the right are what an unforgeability argument has to bound, and this
-    library does not bound them. By `DistCustody.deliver_violation_classified` the first is a tag
+    The two events on the right are what an unforgeability argument has to bound. This library
+    bounds them only relative to an `AuthCustodyReductionEmbedding`
+    (`Qsag.Top.CustodyKeyHidingBound`), which is not constructed for this machine. By `DistCustody.deliver_violation_classified` the first is a tag
     forgery under an uncorrupted custodian's key or a message-tag collision; by
     `DistCustody.crash_violation_collision` the second is a hash collision. -/
 theorem authenticatedCustody_unsafe_release_le_violations {F C PK D Sig : Type}
@@ -4657,7 +4674,9 @@ theorem authenticatedCustody_unsafe_release_le_violations {F C PK D Sig : Type}
     has probability at most `εAck + εWal`; if that sum is at most `2^{-b}`, so is the probability
     of an unsafe release. `hAck` and `hWal` are hypotheses: they are the unforgeability of
     `custodianAckTag` under uncorrupted keys together with collision resistance of the message
-    tag, and collision resistance of the hash. Nothing in this library discharges them. -/
+    tag, and collision resistance of the hash. They are discharged only relative to an
+    `AuthCustodyReductionEmbedding` (`Qsag.Top.CustodyKeyHidingBound`), under `Spec.PrfHard` and
+    `Spec.SmDtTcrHard`; no embedding is constructed for this machine. -/
 theorem authenticatedCustody_unsafe_release_bound {F C PK D Sig : Type}
     [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C] [DecidableEq D]
     {N : Nat} (hN : 0 < N)
@@ -5310,6 +5329,11 @@ end Roster
   Qsag.Top.tooth_separatedCustody_forged_submit_violates_honest_approval
 #tooth_pair Qsag.Top.multiEpochBase4WotsCShareCustody_dataRefines_or_collision vs
   Qsag.Top.tooth_multiEpochBase4WotsC_bad_targetSum_rejected
+
+/-! Kernel-checked defining equations of the certificate-pool coordinator, for importers that
+    reason about its runs step by step (`Qsag.Top.CertCustodyAdaptiveBound`). No body is exposed. -/
+#export_eqns CertCustodyState.init certAdvClaims certForgeries certCustodyStep certCustodyMachine
+  certUnsafeRelease certRun certVoted certApprovers
 
 end Qsag.Top
 end
