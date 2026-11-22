@@ -57,10 +57,20 @@ Layer-0 ideal specification for standalone and one-time-epoch-stateful digital s
    refinement the secret key is a parameter of `latchedSignerMachine`, and every value that
    machine returns is the output of `S.sign sk` on the admitted request
    (`latchedSigner_output_is_sign`); what `S.sign` itself reveals about `sk` is a property of
-   the scheme. Gap: only the corruption-free fragment is refined by a real machine
-   (`latchedSigner_refines_ideal`). No machine with a key-reveal output is shown to refine the
-   behaviour after `.corrupt`; `Refines` demands equal outputs on equal inputs and cannot
-   express a simulator that turns a revealed key into `.inject` inputs.
+   the scheme. The corruption-free fragment is refined by `latchedSignerMachine`
+   (`latchedSigner_refines_ideal`). The behaviour after `.corrupt` is covered in
+   `Qsag.Spec.CorruptibleSignSimulation`, which sits above this module:
+   `latchedCorruptibleSignerMachine` (the latched signer with an `.exposeKey` input that
+   outputs the key, and post-exposure `.offlineSign` / `.register` inputs that bypass the
+   latch) refines `corruptibleSignSimulator`, which is this functionality behind an interface
+   simulator that holds the same key, answers `.exposeKey` by sending `.corrupt`, and turns
+   post-exposure signatures into `.inject` inputs
+   (`latchedCorruptibleSigner_refines_simulator`,
+   `latchedCorruptibleSigner_adaptive_view_eq_simulator`,
+   `latchedCorruptibleSigner_simulated_by_idealSignCorruptible`). The coupling is equality of
+   the real key and the simulator's key; equal public keys do not suffice
+   (`corruptibleSignSimulator_wrong_key_view_differs`). The statements are exact and
+   deterministic; no probabilistic or computational claim is made about a revealed key.
 -/
 
 public import Qsag.Spec.Primitives
@@ -900,9 +910,9 @@ structure CorruptibleSignState (PK Sig : Type) where
 
     This is the ideal view of a key exposure: after `.corrupt` the adversary may have the
     interface emit any signature the verifier accepts, at any epoch. The state has no secret
-    key and no output carries key material. No machine with a key-reveal output is shown to
-    refine the behaviour after `.corrupt`: `Refines` demands equal outputs on equal inputs and
-    cannot express a simulator that turns a revealed key into `.inject` inputs. -/
+    key and no output carries key material. A real machine with a key-reveal output is related
+    to this functionality, through an interface simulator that holds the key, in
+    `Qsag.Spec.CorruptibleSignSimulation` (`latchedCorruptibleSigner_refines_simulator`). -/
 @[expose] def idealSignCorruptibleMachine {PK SK Sig : Type} (S : SigScheme PK SK Sig)
     (pk₀ : PK) (stateful₀ : Bool) (maxWindow : Nat) (oracleSign : SignRequest → Option Sig) :
     Machine (CorruptibleSignState PK Sig) (SignCommand Sig) (SignReply Sig) where

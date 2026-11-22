@@ -270,6 +270,12 @@ def CoinSplit.prod (nC nA : Nat) : CoinSplit (nC * nA) nC nA where
   advc_pair c a := Fin.ext (prodCoin_pair_rem c a)
   pair_eta ω := Fin.ext (Nat.div_add_mod' ω.val nA)
 
+theorem CoinSplit.prod_pair_val {c a : Nat} (i : Fin c) (j : Fin a) :
+    ((CoinSplit.prod c a).pair i j).val = i.val * a + j.val := by unfold CoinSplit.prod; rfl
+
+theorem CoinSplit.prod_chal_val {c a : Nat} (i : Fin (c*a)) :
+    ((CoinSplit.prod c a).chal i).val = i.val / a := by unfold CoinSplit.prod; rfl
+
 /-- `sample` is a uniform sampler on `support`: a bijection from its coin space onto that set. -/
 structure UniformOn {n : Nat} {α : Type} (support : α → Prop) (sample : Fin n → α) : Prop where
   mem : ∀ c : Fin n, support (sample c)
@@ -901,6 +907,59 @@ def RegularDualLpnHard (𝒜 : (List Bool → Bool) → Prop) (H : List (List Bo
             (lpnSyndrome H (sample (π.chal ω)).noise)))
           (FinGame.mk hPos (fun ω => dist (π.advc ω) (sample (π.chal ω)).uniform))) ε
 
+/-- Step-indicator parity of a tree's tap list `taps` on leaf `p` (`⨁_{a ∈ taps} [p ≤ a]`),
+    matching `accumulate_receiver_lpn_tree` (`crates/qsag-core/src/pcg_dense.rs`) after prefix-XOR
+    accumulation of a unit puncture at `p`. -/
+def expandAccTreeBit (taps : List Nat) (p : Nat) : Bool :=
+  taps.foldl (fun acc a => Bool.xor acc (decide (p ≤ a))) false
+
+/-- Number of leaves `0 ..< blockLen` on which `expandAccTreeBit taps` evaluates to `true`. -/
+def expandAccTreeWeight (blockLen : Nat) (taps : List Nat) : Nat :=
+  (List.range blockLen).countP (expandAccTreeBit taps)
+
+/-- Explicit `(blocks * blockLen)`-column parity-check row of `H_EA` induced by per-tree tap lists
+    `rowTaps : List (List Nat)` under prefix-XOR accumulation (`[p ≤ tap]`). -/
+def expandAccRow (blockLen : Nat) (rowTaps : List (List Nat)) : List Bool :=
+  rowTaps.flatMap (fun taps => (List.range blockLen).map (expandAccTreeBit taps))
+
+/-- Explicit `r × (blocks * blockLen)` parity-check matrix `H_EA = H_tap · A_prefix` of the
+    deployed 11-tap regular expand-accumulate PCG (`M = 2^21, T = 64, r = 139264, k_tap = 11`). -/
+def expandAccMatrix (blockLen : Nat) (tapMatrix : List (List (List Nat))) : List (List Bool) :=
+  tapMatrix.map (expandAccRow blockLen)
+
+/-- Well-formedness of a balanced `k_tap`-per-tree expand-accumulate tap matrix (`pcg_dense.rs`):
+    `rows` rows, `blocks` trees per row, `tapsPerTree` taps `< blockLen` per tree, and every tree's
+    accumulated step-indicator imbalance `|blockLen - 2 · w_t|` bounded by `maxBlockImbalance`
+    (`7593` at `Depth15`, certifying unconditional `< 2^-135` single-row parity bias across all rows). -/
+def ExpandAccTapMatrixOk (blocks blockLen rows tapsPerTree maxBlockImbalance : Nat)
+    (tapMatrix : List (List (List Nat))) : Prop :=
+  tapMatrix.length = rows ∧
+  ∀ row ∈ tapMatrix,
+    row.length = blocks ∧
+    ∀ taps ∈ row,
+      taps.length = tapsPerTree ∧
+      (∀ a ∈ taps, a < blockLen) ∧
+      ((blockLen : Int) - 2 * (expandAccTreeWeight blockLen taps : Int)).natAbs ≤ maxBlockImbalance
+
+/-- **Regular Expand-Accumulate Dual-LPN Hardness (`RegularExpandAccumulateDualLpnHard`)**:
+    Explicit computational assumption of `crates/qsag-core/src/pcg_dense.rs` (`DENSE_PCG_TAPS_PER_TREE = 11`,
+    `M = 64 · 2^15 = 2^21`, `T = 64`, `r = 139264`, `maxBlockImbalance = 7593`):
+    for a public-coin balanced `k_tap`-tap expand-accumulate matrix `H_EA = expandAccMatrix blockLen tapMatrix`
+    satisfying `ExpandAccTapMatrixOk`, distinguishing `H_EA · e` (with uniform regular noise `e` of
+    one puncture per `blockLen`-leaf tree) from uniform `𝔽₂^rows` has advantage at most `ε` against `𝒜`. -/
+def RegularExpandAccumulateDualLpnHard (𝒜 : (List Bool → Bool) → Prop)
+    (tapMatrix : List (List (List Nat)))
+    (blocks blockLen rows tapsPerTree maxBlockImbalance : Nat) (ε : RatBound) : Prop :=
+  ExpandAccTapMatrixOk blocks blockLen rows tapsPerTree maxBlockImbalance tapMatrix ∧
+  RegularDualLpnHard 𝒜 (expandAccMatrix blockLen tapMatrix) blocks blockLen ε
+
+theorem RegularExpandAccumulateDualLpnHard.toRegularDualLpnHard
+    {𝒜 : (List Bool → Bool) → Prop} {tapMatrix : List (List (List Nat))}
+    {blocks blockLen rows tapsPerTree maxBlockImbalance : Nat} {ε : RatBound}
+    (h : RegularExpandAccumulateDualLpnHard 𝒜 tapMatrix blocks blockLen rows tapsPerTree maxBlockImbalance ε) :
+    RegularDualLpnHard 𝒜 (expandAccMatrix blockLen tapMatrix) blocks blockLen ε :=
+  h.2
+
 /-- A vector with one set bit in each of two blocks of two bits is regular. -/
 theorem regularNoise_example : regularNoiseOk 2 2 [true, false, false, true] = true := by decide
 
@@ -928,6 +987,11 @@ theorem regularDualLpnHard_noRows (𝒜 : (List Bool → Bool) → Prop) (blocks
     rfl
   rw [hEq]
   exact adv_refl _
+
+theorem regularExpandAccumulateDualLpnHard_noRows (𝒜 : (List Bool → Bool) → Prop)
+    (blocks blockLen tapsPerTree maxBlockImbalance : Nat) :
+    RegularExpandAccumulateDualLpnHard 𝒜 [] blocks blockLen 0 tapsPerTree maxBlockImbalance RatBound.zero :=
+  ⟨⟨rfl, fun _ h => nomatch h⟩, regularDualLpnHard_noRows 𝒜 blocks blockLen⟩
 
 /-- Hardness weakens along the bound. -/
 theorem SmDtTcrHard.mono {𝒜 : Code targetIface TargetBreak → Prop}
@@ -4460,6 +4524,20 @@ theorem boundedPreAdv_eq (th : Bytes → Bytes → Bytes → Bytes) (tweak : Byt
             (fun m => decide (some (th (s.getD []) tweak m) = y)) dict⟩)) := by
   unfold boundedPreAdv; rfl
 
+theorem preSampleOk_iff (seedLen inputLen q : Nat) (x : Bytes × List Bytes) :
+    SmDtPreSampleOk seedLen inputLen q x ↔
+      (x.1.length = seedLen ∧ x.2.length = q ∧ ∀ h ∈ x.2, h.length = inputLen) := Iff.rfl
+
+theorem itsrSampleOk_iff (randLen q : Nat) (x : List Bytes) :
+    ItsrSampleOk randLen q x ↔ (x.length = q ∧ ∀ r ∈ x, r.length = randLen) := Iff.rfl
+
+theorem prfSampleOk_iff (keyLen inLen outLen : Nat) (x : Bytes × (Bytes → Bytes)) :
+    PrfSampleOk keyLen inLen outLen x ↔
+      (x.1.length = keyLen ∧ ∀ inp : Bytes,
+        (inp.length = inLen → (x.2 inp).length = outLen) ∧ (inp.length ≠ inLen → x.2 inp = [])) :=
+  Iff.rfl
+
+
 #export_eqns budgetedFunOracle prfRealGame prfIdealGame byte1SeedSampler smDtPreGame smDtPreRun
 #verify_constructive boundedPreAdv_singleton_wins
 
@@ -5374,6 +5452,7 @@ theorem read_racing_simt_not_wellFormed : ¬ WellFormedSimtContract readRacingSi
 
 -- Equation used by `Tests/CredentialsTeeth`; no body is exposed.
 #export_eqns honestChannelRun
+#export_eqns PrfSampleOk
 
 end Qsag.Spec
 end

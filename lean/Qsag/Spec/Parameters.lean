@@ -2,7 +2,8 @@ module
 /-
 # Qsag.Spec.Parameters — Normative Cryptographic Parameter Profiles
 
-Parameter records transcribed from the production Rust crates, each constant citing its source line:
+These records describe the referenced Rust profiles. The balanced eleven-tap PCG profile
+tracks the E10 Rust overlay. The live Rust checkout inspected during integration uses three taps.
 1. Tweakable-hash hypertree signing (`pq128StatelessProfile`, `corduroyCustody128Profile`,
    `jortsPoseidon2HashProfile`: `crates/qsag-core/src/tsw_baggy.rs`) with `HashSigProfile.WellFormed`
    following `PqHashParams::is_well_formed`, and the NIST FIPS-205 reference shape
@@ -12,8 +13,8 @@ Parameter records transcribed from the production Rust crates, each constant cit
 4. `PiBlindVc` credentials (`pqCredentialProfile`): at most `32` attributes, a 2-of-5 replicated
    TOPRF, `438` ZKBoo issuance repetitions, and `N = 256`, `33`-repetition `GF(p^5)`
    selective-disclosure presentations; FIPS-204 `ML-DSA-44`,
-5. Dense dual-LPN PCG (`densePcgV3Profile`: `64` trees, `2^21` columns at depth `15`, row weight
-   `192`) and `RLWE-1024` preprocessing, and
+5. Dense dual-LPN PCG (`densePcgV3Profile`: `64` trees, `2^21` columns at depth `15`, `11` balanced
+   taps per tree, row weight `704`) and `RLWE-1024` preprocessing, and
 6. Separated threshold custody quorum geometry (`CustodyQuorumProfile`).
 
 The `WellFormed` predicates state the parameter equations the Rust validators enforce together
@@ -704,7 +705,7 @@ structure DensePcgProfile where
 
 /-- Production dense-PCG profile (`crates/qsag-core/src/pcg_dense.rs`):
     * `treesPerBundle = 64`: `DENSE_PCG_NUM_TREES`, `pcg_dense.rs:59`;
-    * `tapsPerTree = 3`: `DENSE_PCG_TAPS_PER_TREE`, `pcg_dense.rs:62`; row weight `64 · 3 = 192`;
+    * `tapsPerTree = 11`: `DENSE_PCG_TAPS_PER_TREE`, `pcg_dense.rs:62`; row weight `64 · 11 = 704`;
     * depth `15`, `2^15 = 32768` leaves per tree, `64 · 2^15 = 2^21 = 2097152` columns:
       `PcgTreeDepth::Depth15`, `pcg_dense.rs:137`–`138`;
     * `numPackedWords = 1024`: `DENSE_PCG_NUM_WORDS`, `pcg_dense.rs:65`;
@@ -719,8 +720,8 @@ structure DensePcgProfile where
   leavesPerTree := 32768
   treesPerBundle := 64
   bundleAmbientDim := 2097152
-  tapsPerTree := 3
-  lpnRowWeight := 192
+  tapsPerTree := 11
+  lpnRowWeight := 704
   numPackedWords := 1024
   numBoolTriples := 65536
   numFullFieldCompanions := 64
@@ -752,15 +753,16 @@ theorem pqCredentialProfile_soundness_params :
 
 /-- Rust-parity literals added with the `voprf.rs` / `pcg_dense.rs` update: five TOPRF servers with
     threshold two, `438` issuance repetitions against `33` presentation repetitions, and the dense
-    PCG geometry with its exact 2-party seed length. -/
+    PCG geometry (`tapsPerTree = 11`, `lpnRowWeight = 704`) with its exact 2-party seed length. -/
 theorem pqCredentialProfile_rust_parity :
     pqCredentialProfile.toprfServers = 5 ∧
     pqCredentialProfile.toprfThreshold = 2 ∧
     pqCredentialProfile.issuanceRepsQuantum = 438 ∧
     pqCredentialProfile.sdRepsQuantum = 33 ∧
     densePcgV3Profile.treesPerBundle = 64 ∧
+    densePcgV3Profile.tapsPerTree = 11 ∧
     densePcgV3Profile.bundleAmbientDim = 2097152 ∧
-    densePcgV3Profile.lpnRowWeight = 192 ∧
+    densePcgV3Profile.lpnRowWeight = 704 ∧
     densePcgV3Profile.numPackedWords = 1024 ∧
     densePcgV3Profile.numBoolTriples = 65536 ∧
     densePcgV3Profile.numFullFieldCompanions = 64 ∧
