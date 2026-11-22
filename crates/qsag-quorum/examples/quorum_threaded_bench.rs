@@ -77,7 +77,7 @@ fn confidential_tcp_mesh(
     let confidential = tcp_endpoints
         .into_iter()
         .zip(link_keys)
-        .map(|(ep, keys)| ConfidentialWireChannel::new(ep, session, keys).expect("confidential"))
+        .map(|(ep, keys)| ConfidentialWireChannel::new(ep, [0xDA; 32], session, keys).expect("confidential"))
         .collect();
     (confidential, stats)
 }

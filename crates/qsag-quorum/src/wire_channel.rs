@@ -29,8 +29,10 @@ use core::fmt;
 pub const FRAME_MAGIC: [u8; 4] = *b"QSWF";
 /// Bytes before the payload.
 pub const FRAME_HEADER_BYTES: usize = 4 + 32 + 2 + 2 + 4 + 8 + 4;
-/// Largest payload a frame may carry.
-pub const MAX_FRAME_PAYLOAD: usize = 1 << 22;
+/// Header, mode, deployment id and authentication tag on each sealed packet.
+pub const SEALED_FRAME_OVERHEAD: usize = FRAME_HEADER_BYTES + 1 + 32 + 32;
+/// Largest payload a frame may carry (`8 MiB`, accommodating 512-slot RLWE `BaseOtRound2Msg`).
+pub const MAX_FRAME_PAYLOAD: usize = 1 << 23;
 /// Maximum complete wire frame, including its fixed header.
 pub const MAX_WIRE_FRAME_BYTES: usize = FRAME_HEADER_BYTES + MAX_FRAME_PAYLOAD;
 
@@ -341,12 +343,14 @@ fn derive_mac_subkey(chain_key: &[u8; 32]) -> [u8; 32] {
 }
 
 fn derive_directional_key(
+    deployment_id: &[u8; 32],
     pairwise_key: &[u8; 32],
     session_id: &[u8; 32],
     from: usize,
     to: usize,
 ) -> [u8; 32] {
-    let mut xof = qsag_core::sponge::keccak::Cshake256Xof::new(b"QSAG.QUORUM.WIRE_DIRECTION/v1");
+    let mut xof = qsag_core::sponge::keccak::Cshake256Xof::new(b"QSAG.CUSTODY.DEPLOYMENT/v2");
+    xof.absorb(deployment_id);
     xof.absorb(pairwise_key);
     xof.absorb(session_id);
     xof.absorb(&(from as u16).to_be_bytes());
@@ -400,6 +404,7 @@ fn ratchet_wire_key(key: &mut [u8; 32], tag: &[u8; 32]) {
 /// sequence numbers and payloads are MAC-bound. Use [`ConfidentialWireChannel`] or
 /// `new_encrypted` for secret shares; `new` authenticates while leaving payloads visible.
 pub struct MacSealedWireChannel<T: WireTransport> {
+    deployment_id: [u8; 32],
     transport: T,
     sequencer: FrameSequencer,
     keys: Vec<[u8; 32]>,
@@ -412,6 +417,7 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
     /// `keys[peer]` is the provisioned pairwise link key; the local entry is wiped and unused.
     pub fn new(
         transport: T,
+        deployment_id: [u8; 32],
         session_id: [u8; 32],
         mut keys: Vec<[u8; 32]>,
     ) -> Result<Self, TransportError> {
@@ -430,13 +436,16 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
         let mut recv_keys = vec![[0u8; 32]; parties];
         for (peer, raw_key) in keys.iter_mut().enumerate() {
             if peer != me {
-                send_keys[peer] = derive_directional_key(raw_key, &session_id, me, peer);
-                recv_keys[peer] = derive_directional_key(raw_key, &session_id, peer, me);
+                send_keys[peer] =
+                    derive_directional_key(&deployment_id, raw_key, &session_id, me, peer);
+                recv_keys[peer] =
+                    derive_directional_key(&deployment_id, raw_key, &session_id, peer, me);
             }
             qsag_asm::volatile_fill(raw_key, 0);
         }
         let sequencer = FrameSequencer::new(session_id, me, parties);
         Ok(Self {
+            deployment_id,
             transport,
             sequencer,
             keys: send_keys,
@@ -450,22 +459,30 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
     /// Both peers must select the same mode.
     pub fn new_encrypted(
         transport: T,
+        deployment_id: [u8; 32],
         session_id: [u8; 32],
         keys: Vec<[u8; 32]>,
     ) -> Result<Self, TransportError> {
-        let mut channel = Self::new(transport, session_id, keys)?;
+        let mut channel = Self::new(transport, deployment_id, session_id, keys)?;
         channel.encrypted = true;
         Ok(channel)
+    }
+
+    pub(crate) fn matches_encrypted(&self, deployment: &[u8; 32], session: &[u8; 32]) -> bool {
+        self.encrypted
+            && &self.deployment_id == deployment
+            && self.sequencer.session_id() == session
     }
 
     fn seal(&mut self, peer: usize, round: u32, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
         self.sequencer.check_peer(peer)?;
         // The outer transport must fit both our authenticated header, mode byte, and tag.
-        if payload.len() > MAX_FRAME_PAYLOAD - FRAME_HEADER_BYTES - 33 {
+        if payload.len() > MAX_FRAME_PAYLOAD - SEALED_FRAME_OVERHEAD {
             return Err(TransportError::PayloadTooLarge);
         }
-        let mut body = Vec::with_capacity(payload.len() + 1);
+        let mut body = Vec::with_capacity(payload.len() + 33);
         body.push(u8::from(self.encrypted));
+        body.extend_from_slice(&self.deployment_id);
         body.extend_from_slice(payload);
         let framed = self.sequencer.seal(peer, round, &body);
         qsag_core::wipe::wipe_bytes(&mut body);
@@ -473,7 +490,7 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
         if self.encrypted {
             let mut enc_key = derive_enc_subkey(&self.keys[peer]);
             let (header, body) = raw.split_at_mut(FRAME_HEADER_BYTES);
-            wire_crypt(&enc_key, header, &mut body[1..]);
+            wire_crypt(&enc_key, header, &mut body[33..]);
             qsag_core::wipe::wipe_bytes32(&mut enc_key);
         }
         let mut mac_key = derive_mac_subkey(&self.keys[peer]);
@@ -488,7 +505,7 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
 
     fn open(&mut self, peer: usize, round: u32, raw: &[u8]) -> Result<Vec<u8>, TransportError> {
         self.sequencer.check_peer(peer)?;
-        if raw.len() < FRAME_HEADER_BYTES + 33 || raw.len() > MAX_FRAME_PAYLOAD {
+        if raw.len() < SEALED_FRAME_OVERHEAD || raw.len() > MAX_FRAME_PAYLOAD {
             return Err(TransportError::Malformed);
         }
         let (frame, tag) = raw.split_at(raw.len() - 32);
@@ -501,7 +518,12 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
             return Err(TransportError::AuthenticationFailed);
         }
         let (header, body) = decode_frame(frame)?;
-        if body.first() != Some(&u8::from(self.encrypted)) {
+        // Mode and deployment are compared without an early exit, and a mismatch is
+        // reported exactly as a bad tag is.
+        let bound = body.len() >= 33
+            && body[0] == u8::from(self.encrypted)
+            && qsag_core::wipe::ct_eq_bytes(&body[1..33], &self.deployment_id);
+        if !bound {
             return Err(TransportError::AuthenticationFailed);
         }
         if header.session_id != *self.sequencer.session_id() {
@@ -528,7 +550,7 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
             });
         }
         self.sequencer.recv_seq[peer] = next_seq;
-        let mut payload = body[1..].to_vec();
+        let mut payload = body[33..].to_vec();
         if self.encrypted {
             let mut enc_key = derive_enc_subkey(&self.recv_keys[peer]);
             wire_crypt(&enc_key, &frame[..FRAME_HEADER_BYTES], &mut payload);
@@ -639,10 +661,12 @@ impl<T: WireTransport> ConfidentialWireChannel<T> {
     /// Provision an encrypted, direction-bound channel from per-peer 32-byte secrets.
     pub fn new(
         transport: T,
+        deployment_id: [u8; 32],
         session_id: [u8; 32],
         keys: Vec<[u8; 32]>,
     ) -> Result<Self, TransportError> {
-        let inner = MacSealedWireChannel::new_encrypted(transport, session_id, keys)?;
+        let inner =
+            MacSealedWireChannel::new_encrypted(transport, deployment_id, session_id, keys)?;
         let parties = inner.parties();
         Ok(Self {
             inner,
@@ -1243,7 +1267,7 @@ mod tests {
                     .into_iter()
                     .map(|endpoint| {
                         let mut channel =
-                            MacSealedWireChannel::new(endpoint, SESSION, vec![[3; 32]; 3]).unwrap();
+                            MacSealedWireChannel::new(endpoint, [0xDA; 32], SESSION, vec![[3; 32]; 3]).unwrap();
                         channel.encrypted = encrypted;
                         channel
                     })
@@ -1500,13 +1524,41 @@ mod authenticated_tests {
     use super::*;
 
     #[test]
+    fn cross_deployment_replay_with_identical_link_session_and_sequence_is_refused() {
+        for encrypted in [false, true] {
+            let (mut endpoints, _) = InMemoryWireMesh::connect(2, [9; 32]);
+            let b = endpoints.pop().unwrap();
+            let a = endpoints.pop().unwrap();
+            let mut sender =
+                MacSealedWireChannel::new(a, [1; 32], [9; 32], vec![[4; 32]; 2]).unwrap();
+            let mut receiver =
+                MacSealedWireChannel::new(b, [2; 32], [9; 32], vec![[4; 32]; 2]).unwrap();
+            sender.encrypted = encrypted;
+            receiver.encrypted = encrypted;
+            let mut packet = sender.seal(1, 7, b"permit").unwrap();
+            assert_eq!(
+                receiver.open(0, 7, &packet),
+                Err(TransportError::AuthenticationFailed)
+            );
+            packet[FRAME_HEADER_BYTES + 1..FRAME_HEADER_BYTES + 33].fill(2);
+            assert_eq!(
+                receiver.open(0, 7, &packet),
+                Err(TransportError::AuthenticationFailed)
+            );
+            assert_eq!(receiver.sequencer.recv_seq[0], 0);
+        }
+    }
+
+    #[test]
     fn rejected_packet_and_timeout_do_not_latch_confidential_link() {
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [0x39; 32]);
         let mut bob = endpoints.pop().unwrap();
         bob.set_timeout(std::time::Duration::from_millis(10));
         let alice = endpoints.pop().unwrap();
-        let mut alice = ConfidentialWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
-        let mut bob = ConfidentialWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut alice =
+            ConfidentialWireChannel::new(alice, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob =
+            ConfidentialWireChannel::new(bob, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
         assert_eq!(
             bob.recv_frame(0, 7),
             Err(TransportError::Timeout { peer: 0 })
@@ -1549,11 +1601,14 @@ mod authenticated_tests {
         let bob = endpoints.pop().unwrap();
         let alice = endpoints.pop().unwrap();
         let mut alice =
-            MacSealedWireChannel::new_encrypted(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
-        let mut bob = MacSealedWireChannel::new_encrypted(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+            MacSealedWireChannel::new_encrypted(alice, [0xDA; 32], [2; 32], vec![[3; 32]; 2])
+                .unwrap();
+        let mut bob =
+            MacSealedWireChannel::new_encrypted(bob, [0xDA; 32], [2; 32], vec![[3; 32]; 2])
+                .unwrap();
         let payload = [0x5A; 300];
         let raw = alice.seal(1, 1, &payload).unwrap();
-        assert_ne!(&raw[FRAME_HEADER_BYTES + 1..raw.len() - 32], &payload);
+        assert_ne!(&raw[FRAME_HEADER_BYTES + 33..raw.len() - 32], &payload);
         for index in 0..raw.len() {
             let mut tampered = raw.clone();
             tampered[index] ^= 1;
@@ -1585,8 +1640,10 @@ mod authenticated_tests {
         let (mut endpoints, _) = TcpWireMesh::loopback(2, [1; 32]).unwrap();
         let bob = endpoints.pop().unwrap();
         let alice = endpoints.pop().unwrap();
-        let mut alice = MacSealedWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
-        let mut bob = MacSealedWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut alice =
+            MacSealedWireChannel::new(alice, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob =
+            MacSealedWireChannel::new(bob, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
         alice.send_frame(1, 7, b"share").unwrap();
         assert_eq!(bob.recv_frame(0, 7).unwrap(), b"share");
         let valid = alice.seal(1, 7, b"next").unwrap();
@@ -1620,7 +1677,8 @@ mod authenticated_tests {
 
         // Even unencrypted `MacSealedWireChannel::new` derives distinct directional keys
         // and wipes the local party slot.
-        let plain_alice = MacSealedWireChannel::new(alice_ep, [5; 32], shared.clone()).unwrap();
+        let plain_alice =
+            MacSealedWireChannel::new(alice_ep, [0xDA; 32], [5; 32], shared.clone()).unwrap();
         assert_eq!(plain_alice.keys[0], [0u8; 32]);
         assert_eq!(plain_alice.recv_keys[0], [0u8; 32]);
         assert_ne!(plain_alice.keys[1], plain_alice.recv_keys[1]);
@@ -1632,8 +1690,9 @@ mod authenticated_tests {
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [4; 32]);
         let bob_ep = endpoints.pop().unwrap();
         let alice_ep = endpoints.pop().unwrap();
-        let mut alice = ConfidentialWireChannel::new(alice_ep, [6; 32], shared.clone()).unwrap();
-        let mut bob = ConfidentialWireChannel::new(bob_ep, [6; 32], shared).unwrap();
+        let mut alice =
+            ConfidentialWireChannel::new(alice_ep, [0xDA; 32], [6; 32], shared.clone()).unwrap();
+        let mut bob = ConfidentialWireChannel::new(bob_ep, [0xDA; 32], [6; 32], shared).unwrap();
 
         // 1. Reflection attack: Alice's outbound frame cannot be fed back into Alice's inbound
         //    `open` (neither as self-peer 0 nor masquerading as peer 1, even if header route bytes
@@ -1693,12 +1752,12 @@ mod authenticated_tests {
                 round_tag: 14,
                 seq: u64::MAX,
             },
-            &[1u8, b'x'],
+            &[&[1u8][..], &[0xDA; 32], b"x"].concat(),
         )
         .unwrap();
         let enc_key = derive_enc_subkey(&alice.inner.keys[1]);
         let (hdr, body) = raw_max.split_at_mut(FRAME_HEADER_BYTES);
-        wire_crypt(&enc_key, hdr, &mut body[1..]);
+        wire_crypt(&enc_key, hdr, &mut body[33..]);
         let mac_key = derive_mac_subkey(&alice.inner.keys[1]);
         let tag = wire_mac(&mac_key, &raw_max);
         raw_max.extend_from_slice(&tag);
@@ -1734,13 +1793,13 @@ mod authenticated_tests {
             let keys = vec![[3; 32]; 2];
             let (mut alice, mut bob) = if encrypted {
                 (
-                    MacSealedWireChannel::new_encrypted(alice, [2; 32], keys.clone()).unwrap(),
-                    MacSealedWireChannel::new_encrypted(bob, [2; 32], keys).unwrap(),
+                    MacSealedWireChannel::new_encrypted(alice, [0xDA; 32], [2; 32], keys.clone()).unwrap(),
+                    MacSealedWireChannel::new_encrypted(bob, [0xDA; 32], [2; 32], keys).unwrap(),
                 )
             } else {
                 (
-                    MacSealedWireChannel::new(alice, [2; 32], keys.clone()).unwrap(),
-                    MacSealedWireChannel::new(bob, [2; 32], keys).unwrap(),
+                    MacSealedWireChannel::new(alice, [0xDA; 32], [2; 32], keys.clone()).unwrap(),
+                    MacSealedWireChannel::new(bob, [0xDA; 32], [2; 32], keys).unwrap(),
                 )
             };
             let raw = alice.seal(1, 7, b"abc").unwrap();
@@ -1770,8 +1829,10 @@ mod authenticated_tests {
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [1; 32]);
         let bob = endpoints.pop().unwrap();
         let alice = endpoints.pop().unwrap();
-        let mut alice = MacSealedWireChannel::new(alice, [2; 32], vec![[3; 32]; 2]).unwrap();
-        let mut bob = MacSealedWireChannel::new(bob, [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut alice =
+            MacSealedWireChannel::new(alice, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
+        let mut bob =
+            MacSealedWireChannel::new(bob, [0xDA; 32], [2; 32], vec![[3; 32]; 2]).unwrap();
         let honest = alice.seal(1, 7, b"abc").unwrap();
         let frame = &honest[..honest.len() - 32];
         let remac = |inner: &[u8]| {

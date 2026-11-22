@@ -482,7 +482,7 @@ mod tests {
                     parent,
                     parties: n,
                     members: members.clone(),
-                    expires_at: now().unwrap() + 600,
+                    expires_at: now().unwrap() + 3600,
                     coupons: count,
                 },
             )
