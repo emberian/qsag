@@ -238,9 +238,8 @@ fn lane_coins(coin: &[u8; 32]) -> [u128; 2] {
 struct PairExtension {
     holder: usize,
     owner: usize,
-    seeds0: SecretBuffer<Vec<[u8; 32]>>,
-    seeds1: SecretBuffer<Vec<[u8; 32]>>,
-    chosen: SecretBuffer<Vec<[u8; 32]>>,
+    owner_slices: SecretBuffer<Vec<[[u8; 32]; 4]>>,
+    holder_punctured: SecretBuffer<Vec<[[u8; 32]; 4]>>,
     chi_seed: [u8; 32],
     /// `(owner rows, holder rows)`, lane-major.
     rows: Option<Result<PairRows, PreprocessError>>,
@@ -306,143 +305,150 @@ fn extend_pair(
     rows: usize,
 ) -> Result<PairRows, PreprocessError> {
     let words = rho.len();
-    let total_rows = 64 * words;
+    let payload_words = words - SACRIFICIAL_ROWS / 64;
+    debug_assert_eq!(rows, 64 * payload_words);
     let holder_le = (job.holder as u64).to_le_bytes();
     let owner_le = (job.owner as u64).to_le_bytes();
 
-    // Owner: `t0`, `t1` columns and the message `u = t0 ^ t1 ^ rho`. Holder: the column of its
-    // base-OT choice, plus `u` where that choice bit of `alpha` is set, giving `t0 ^ alpha_m rho`.
-    let mut t_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(256));
-    let mut q_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(256));
-    let mut t1_a = SecretBuffer(vec![0u64; words]);
-    let mut t1_b = SecretBuffer(vec![0u64; words]);
-    for pair in 0..128 {
-        let col_a = 2 * pair;
-        let col_b = col_a + 1;
-        let col_a_le = (col_a as u64).to_le_bytes();
-        let col_b_le = (col_b as u64).to_le_bytes();
-        let mut t0_a = vec![0u64; words];
-        let mut t0_b = vec![0u64; words];
-        let mut q_a = vec![0u64; words];
-        let mut q_b = vec![0u64; words];
-        stream_words_pair(
-            &ABIT_COL_MID,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_a_le,
-                &job.seeds0[col_a],
-            ],
-            &mut t0_a,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_a_le,
-                &job.seeds1[col_a],
-            ],
-            &mut t1_a,
-        );
-        stream_words_pair(
-            &ABIT_COL_MID,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_b_le,
-                &job.seeds0[col_b],
-            ],
-            &mut t0_b,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_b_le,
-                &job.seeds1[col_b],
-            ],
-            &mut t1_b,
-        );
-        stream_words_pair(
-            &ABIT_COL_MID,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_a_le,
-                &job.chosen[col_a],
-            ],
-            &mut q_a,
-            &[
-                session_id,
-                &holder_le,
-                &owner_le,
-                &col_b_le,
-                &job.chosen[col_b],
-            ],
-            &mut q_b,
-        );
-        let mask_a = 0u64.wrapping_sub(black_box(
-            ((delta[col_a / 128] >> (col_a % 128)) & 1) as u64,
-        ));
-        let mask_b = 0u64.wrapping_sub(black_box(
-            ((delta[col_b / 128] >> (col_b % 128)) & 1) as u64,
-        ));
-        for w in 0..words {
-            q_a[w] ^= mask_a & (t0_a[w] ^ t1_a[w] ^ rho[w]);
-            q_b[w] ^= mask_b & (t0_b[w] ^ t1_b[w] ^ rho[w]);
-        }
-        t_cols.push(t0_a);
-        t_cols.push(t0_b);
-        q_cols.push(q_a);
-        q_cols.push(q_b);
-    }
-    let mut t_lanes: [Vec<u128>; 2] =
-        core::array::from_fn(|l| transpose_cols128_to_rows(&t_cols[128 * l..128 * (l + 1)], words));
-    let mut q_lanes: [Vec<u128>; 2] =
-        core::array::from_fn(|l| transpose_cols128_to_rows(&q_cols[128 * l..128 * (l + 1)], words));
-    drop((t_cols, q_cols, t1_a, t1_b));
+    // SoftSpokenOT (n_C = 256, k = 2) over 128 F_4 slices:
+    // Owner expands 4 streams `g0..g3` per slice `j`, locks `u_j = g0 ^ g1 ^ g2 ^ g3 ^ rho`
+    // (`128` columns), and forms `t_{0, j} = g2 ^ g3` (lane 0) and `t_{1, j} = g1 ^ g3` (lane 1).
+    // Holder expands its 3 non-punctured leaves (`v* = 2 * b0 + b1` zeroed in constant time) and
+    // computes `q_{0, j} = g2 ^ g3 ^ (mask(b0) & w_j)` and `q_{1, j} = g1 ^ g3 ^ (mask(b1) & w_j)`.
+    let mut t_lo_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(128));
+    let mut t_hi_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(128));
+    let mut q_lo_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(128));
+    let mut q_hi_cols = SecretBuffer(Vec::<Vec<u64>>::with_capacity(128));
+    let mut g0 = SecretBuffer(vec![0u64; words]);
+    let mut g1 = SecretBuffer(vec![0u64; words]);
+    let mut g2 = SecretBuffer(vec![0u64; words]);
+    let mut g3 = SecretBuffer(vec![0u64; words]);
+    let mut h0 = SecretBuffer(vec![0u64; words]);
+    let mut h1 = SecretBuffer(vec![0u64; words]);
+    let mut h2 = SecretBuffer(vec![0u64; words]);
+    let mut h3 = SecretBuffer(vec![0u64; words]);
 
-    // KOS consistency check. The challenge is the holder's fresh randomness, sent only after
-    // the owner's `u` columns; the sacrificial rows keep `x_bar` and `t_bar` uniform.
-    let mut chi_words = vec![0u64; 2 * total_rows];
+    for j in 0..128 {
+        let l0_le = ((4 * j) as u64).to_le_bytes();
+        let l1_le = ((4 * j + 1) as u64).to_le_bytes();
+        let l2_le = ((4 * j + 2) as u64).to_le_bytes();
+        let l3_le = ((4 * j + 3) as u64).to_le_bytes();
+        let o_slice = &job.owner_slices[j];
+        let h_slice = &job.holder_punctured[j];
+        stream_words_pair(
+            &ABIT_COL_MID,
+            &[session_id, &holder_le, &owner_le, &l0_le, &o_slice[0]],
+            &mut g0,
+            &[session_id, &holder_le, &owner_le, &l1_le, &o_slice[1]],
+            &mut g1,
+        );
+        stream_words_pair(
+            &ABIT_COL_MID,
+            &[session_id, &holder_le, &owner_le, &l2_le, &o_slice[2]],
+            &mut g2,
+            &[session_id, &holder_le, &owner_le, &l3_le, &o_slice[3]],
+            &mut g3,
+        );
+        stream_words_pair(
+            &ABIT_COL_MID,
+            &[session_id, &holder_le, &owner_le, &l0_le, &h_slice[0]],
+            &mut h0,
+            &[session_id, &holder_le, &owner_le, &l1_le, &h_slice[1]],
+            &mut h1,
+        );
+        stream_words_pair(
+            &ABIT_COL_MID,
+            &[session_id, &holder_le, &owner_le, &l2_le, &h_slice[2]],
+            &mut h2,
+            &[session_id, &holder_le, &owner_le, &l3_le, &h_slice[3]],
+            &mut h3,
+        );
+
+        let b0 = ((black_box(delta[0]) >> j) & 1) as u64;
+        let b1 = ((black_box(delta[1]) >> j) & 1) as u64;
+        let v_star = ((b0 as u8) << 1) | (b1 as u8);
+        for (v, hv) in [&mut *h0, &mut *h1, &mut *h2, &mut *h3]
+            .into_iter()
+            .enumerate()
+        {
+            let diff = black_box((v as u8) ^ v_star);
+            let is_neq = (((diff | diff.wrapping_neg()) >> 7) & 1) as u64;
+            let keep = 0u64.wrapping_sub(is_neq);
+            for w in hv.iter_mut() {
+                *w &= keep;
+            }
+        }
+        let m0 = 0u64.wrapping_sub(b0);
+        let m1 = 0u64.wrapping_sub(b1);
+
+        let mut t_lo = vec![0u64; words];
+        let mut t_hi = vec![0u64; words];
+        let mut q_lo = vec![0u64; words];
+        let mut q_hi = vec![0u64; words];
+        for w in 0..words {
+            let u_w = g0[w] ^ g1[w] ^ g2[w] ^ g3[w] ^ rho[w];
+            let w_corr = u_w ^ h0[w] ^ h1[w] ^ h2[w] ^ h3[w];
+            t_lo[w] = g2[w] ^ g3[w];
+            t_hi[w] = g1[w] ^ g3[w];
+            q_lo[w] = h2[w] ^ h3[w] ^ (m0 & w_corr);
+            q_hi[w] = h1[w] ^ h3[w] ^ (m1 & w_corr);
+        }
+        t_lo_cols.push(t_lo);
+        t_hi_cols.push(t_hi);
+        q_lo_cols.push(q_lo);
+        q_hi_cols.push(q_hi);
+    }
+    drop((g0, g1, g2, g3, h0, h1, h2, h3));
+
+    // SoftSpokenOT `[X | I_256]` per-column consistency check across all 256 columns individually!
+    let mut chi_mask_words = [0u64; 4];
     stream_words(
         &ABIT_CHI_MID,
-        &[session_id, &holder_le, &owner_le, &job.chi_seed],
-        &mut chi_words,
+        &[session_id, &holder_le, &owner_le],
+        &mut chi_mask_words,
     );
-    let chi: Vec<u128> = chi_words
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|w| gf_join([w[0], w[1]]))
-        .collect();
-    let mut x_bar = 0u128;
-    for (k, weight) in chi.iter().enumerate() {
-        x_bar ^= *weight & bit_mask(word_bit(rho, k));
-    }
-    let mut consistent = true;
-    for lane in 0..2 {
-        let t_bar = gf_dot(&t_lanes[lane], &chi);
-        let q_bar = gf_dot(&q_lanes[lane], &chi);
-        consistent &= black_box(q_bar ^ t_bar ^ gf_mul(x_bar, delta[lane])) == 0;
-    }
-    for lane in 0..2 {
-        wipe_u128s(&mut t_lanes[lane][rows..]);
-        wipe_u128s(&mut q_lanes[lane][rows..]);
-        t_lanes[lane].truncate(rows);
-        q_lanes[lane].truncate(rows);
-    }
-    if !consistent {
-        for lane in 0..2 {
-            wipe_u128s(&mut t_lanes[lane]);
-            wipe_u128s(&mut q_lanes[lane]);
+    let mut check_seed = job.chi_seed;
+    for (i, w) in chi_mask_words.iter().enumerate() {
+        let b = w.to_le_bytes();
+        for k in 0..8 {
+            check_seed[8 * i + k] ^= b[k];
         }
+    }
+    wipe_u64s(&mut chi_mask_words);
+    let key = OtExtCheckKey::new(&check_seed, payload_words);
+    wipe_bytes32(&mut check_seed);
+
+    let x_hash = key.hash(rho);
+    let mut diff = 0u128;
+    for j in 0..128 {
+        let t0_h = key.hash(&t_lo_cols[j]);
+        let q0_h = key.hash(&q_lo_cols[j]);
+        let t1_h = key.hash(&t_hi_cols[j]);
+        let q1_h = key.hash(&q_hi_cols[j]);
+        let m0 = 0u128.wrapping_sub((black_box(delta[0]) >> j) & 1);
+        let m1 = 0u128.wrapping_sub((black_box(delta[1]) >> j) & 1);
+        for lane in 0..2 {
+            diff |= q0_h[lane] ^ t0_h[lane] ^ (m0 & x_hash[lane]);
+            diff |= q1_h[lane] ^ t1_h[lane] ^ (m1 & x_hash[lane]);
+        }
+    }
+    if black_box(diff) != 0 {
+        drop((t_lo_cols, t_hi_cols, q_lo_cols, q_hi_cols));
         return Err(PreprocessError::KosOtCheckFailed {
             sender_id: job.holder,
             receiver_id: job.owner,
         });
     }
+
+    let t_lanes: [Vec<u128>; 2] = [
+        transpose_cols128_to_rows(&t_lo_cols, payload_words),
+        transpose_cols128_to_rows(&t_hi_cols, payload_words),
+    ];
+    let q_lanes: [Vec<u128>; 2] = [
+        transpose_cols128_to_rows(&q_lo_cols, payload_words),
+        transpose_cols128_to_rows(&q_hi_cols, payload_words),
+    ];
+    drop((t_lo_cols, t_hi_cols, q_lo_cols, q_hi_cols));
     Ok((t_lanes, q_lanes))
 }
 
@@ -572,12 +578,40 @@ impl DeltaCotPool {
                 );
                 let send = s_chan.round4_verify_and_finish(s_pend, &proof_msg)?;
                 let take = |pad: &[u8; 48]| -> [u8; 32] { core::array::from_fn(|i| pad[i]) };
+                let pair_sid = s_chan.session_id;
+                let d0 = (bjob.choice[0] as u128) | ((bjob.choice[1] as u128) << 64);
+                let d1 = (bjob.choice[2] as u128) | ((bjob.choice[3] as u128) << 64);
+                let mut owner_slices = Vec::with_capacity(128);
+                let mut holder_punctured = Vec::with_capacity(128);
+                for j in 0..128 {
+                    let r_seed = take(&send[j].0);
+                    let l_seed = take(&send[j].1);
+                    let k1_0 = take(&send[128 + j].0);
+                    let k1_1 = take(&send[128 + j].1);
+                    let (leaves, sib2) = softspoken_f4_slice_setup_receiver(
+                        &pair_sid, j, &r_seed, &l_seed, &k1_0, &k1_1,
+                    );
+                    let sub_known = take(&recv[j]);
+                    let k1_known = take(&recv[128 + j]);
+                    let b0 = ((d0 >> j) & 1) as u8;
+                    let b1 = ((d1 >> j) & 1) as u8;
+                    let punc = softspoken_f4_slice_setup_sender_ct(
+                        &pair_sid,
+                        j,
+                        b0,
+                        b1,
+                        &sub_known,
+                        &k1_known,
+                        &sib2,
+                    );
+                    owner_slices.push(leaves);
+                    holder_punctured.push(punc);
+                }
                 Ok(PairExtension {
                     holder: bjob.holder,
                     owner: bjob.owner,
-                    seeds0: SecretBuffer(send.iter().map(|pair| take(&pair.0)).collect()),
-                    seeds1: SecretBuffer(send.iter().map(|pair| take(&pair.1)).collect()),
-                    chosen: SecretBuffer(recv.iter().map(take).collect()),
+                    owner_slices: SecretBuffer(owner_slices),
+                    holder_punctured: SecretBuffer(holder_punctured),
                     chi_seed: bjob.chi_seed,
                     rows: None,
                 })
