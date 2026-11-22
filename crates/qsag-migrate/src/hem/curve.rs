@@ -1961,3 +1961,708 @@ cached_curve!(with_bls12_381_g1, Curve::bls12_381_g1);
 
 // ============================================================================
 // Point addition and the fixed-base ladder
+// ============================================================================
+
+/// Accumulator: `x` in limbs, `y` as an unreduced integer.
+struct Acc {
+    x: Poly,
+    y: Poly,
+    x_element: Option<Element>,
+}
+
+fn byte_poly(bytes: &[Lc]) -> Poly {
+    Poly(
+        bytes
+            .iter()
+            .map(|lc| Coef {
+                lc: lc.clone(),
+                lo: 0,
+                hi: 255,
+            })
+            .collect(),
+    )
+}
+
+/// The table point a scalar window selects, as `(x limbs, y)`.
+fn window_point(cs: &mut Ctx, table: &WindowTable, bits: &[Lc]) -> (Poly, Poly) {
+    assert_eq!(bits.len(), table.width);
+    let limbs = table.limbs;
+    if !table.signed {
+        assert!(table.width <= LOW_INDEX_BITS);
+        let out = lookup(cs, bits, table.outputs(), &|i, o| table.entry(i, o));
+        return (byte_poly(&out[..limbs]), byte_poly(&out[limbs..]));
+    }
+    // Window value u = 2^(w-1) s + r selects (2u + 1 - 2^w): index r with sign + when the
+    // top bit s is set, index (complement of r) with sign - otherwise.
+    let s = &bits[table.width - 1];
+    let flip = Lc::constant(F::ONE).minus(s);
+    let index: Vec<Lc> = bits[..table.width - 1]
+        .iter()
+        .map(|b| {
+            let both = cs.mul(b, &flip);
+            b.plus(&flip).minus(&Lc::from(both).scaled(F::TWO))
+        })
+        .collect();
+    let out = lookup(cs, &index, table.outputs(), &|i, o| table.entry(i, o));
+    let sign = s.scaled(F::TWO).plus_const(F::NEG_ONE);
+    let mut y = vec![Coef::zero(); limbs];
+    for (c, lc) in out[limbs..].iter().enumerate() {
+        let width = 8 * (limbs - Y_CHUNK_LIMBS * c).min(Y_CHUNK_LIMBS);
+        let max = (1i128 << width) - 1;
+        y[Y_CHUNK_LIMBS * c] = Coef {
+            lc: cs.mul(&sign, lc).into(),
+            lo: -max,
+            hi: max,
+        };
+    }
+    (byte_poly(&out[..limbs]), Poly(y))
+}
+
+/// `acc + (xt, yt)` in affine coordinates.
+///
+/// Rows: `lambda (xt - x1) = yt - y1` and `lambda^2 = a2 + x1 + xt + x3`, both modulo `p`,
+/// with `lambda` and `x3` fresh. The new `y` is the integer `lambda (xt - x3) - yt`.
+///
+/// These two equations fix the sum when `x1 != xt`. With `complete`, the further equation
+/// `2 lambda y1 + x3 xt - x1 (x3 + 2 x1 + xt) - 2 a2 x1 - a4 = 0` is enforced. It follows
+/// from the first two and the curve equation when `x1 != xt`, and for `(xt, yt) = (x1, y1)`
+/// it reads `2 lambda y1 = 3 x1^2 + 2 a2 x1 + a4`, the tangent slope. For
+/// `(xt, yt) = (x1, -y1)` the first equation reads `0 = 2 yt`, which no point of odd order
+/// satisfies. So a `complete` step is exact for every pair of points of odd order whose sum
+/// is not the identity, and unsatisfiable when it is.
+fn add_step(cs: &mut Ctx, curve: &Curve, acc: &Acc, xt: &Poly, yt: &Poly, complete: bool) -> Acc {
+    let f = &curve.f;
+    let x1 = f.poly_value(cs, &acc.x);
+    let y1 = f.poly_value(cs, &acc.y);
+    let x2 = f.poly_value(cs, xt);
+    let y2 = f.poly_value(cs, yt);
+    let dx = f.msub(&x2, &x1);
+    let mut lam = f.mmul(&f.msub(&y2, &y1), &f.inv(&dx));
+    if complete {
+        let num = f.madd(
+            &f.madd(
+                &f.mmul(&f.small(3), &f.mmul(&x1, &x1)),
+                &f.mmul(&f.small(2 * curve.a2), &x1),
+            ),
+            &f.small(curve.a4),
+        );
+        let tangent = f.mmul(&num, &f.inv(&f.madd(&y1, &y1)));
+        lam = big_select(big_zero_mask(&dx), &tangent, &lam);
+    }
+    let x3 = f.msub(
+        &f.msub(&f.msub(&f.mmul(&lam, &lam), &f.small(curve.a2)), &x1),
+        &x2,
+    );
+    cs.hints.divisions += 1;
+    let a2 = Poly::constant_bytes(&curve.a2.to_le_bytes()[..3]);
+    let source = if complete {
+        // Where the two points share `x` the slope is the tangent at the accumulator.
+        let tangent_linear = acc
+            .x
+            .mul_const(&(2 * curve.a2).to_le_bytes()[..3])
+            .add(&Poly::constant_bytes(&curve.a4.to_le_bytes()[..1]));
+        cs.source(|| Source::Slope {
+            num: int_coefs(&yt.sub(&acc.y)),
+            den: int_coefs(&xt.sub(&acc.x)),
+            tangent_products: vec![(int_coefs(&acc.x.scale(3)), int_coefs(&acc.x))],
+            tangent_linear: int_coefs(&tangent_linear),
+            tangent_den: int_coefs(&acc.y.scale(2)),
+            modulus: big_to_bytes(&f.p)[..f.limbs].to_vec(),
+        })
+    } else {
+        residue_source(cs, f, &[], &yt.sub(&acc.y), Some(&xt.sub(&acc.x)))
+    };
+    let lam = alloc_int(cs, source, &big_to_bytes(&f.canon(&lam)), f.bits);
+    let lam_p = lam.poly();
+    let source = residue_source(
+        cs,
+        f,
+        &[(&lam_p, &lam_p)],
+        &acc.x.scale(-1).sub(xt).sub(&a2),
+        None,
+    );
+    let x3 = alloc_int(cs, source, &big_to_bytes(&f.canon(&x3)), f.bits);
+    let x3_p = x3.poly();
+
+    let chord = mul_poly(cs, &lam_p, &xt.sub(&acc.x));
+    enforce_zero_mod(cs, f, &chord.sub(yt).add(&acc.y));
+    let square = mul_poly(cs, &lam_p, &lam_p);
+    enforce_zero_mod(cs, f, &square.sub(&acc.x).sub(xt).sub(&x3_p).sub(&a2));
+
+    if complete {
+        let y1_p = if acc.y.is_narrow() {
+            acc.y.clone()
+        } else {
+            reduce_poly(cs, f, &acc.y).poly()
+        };
+        let t1 = mul_poly(cs, &lam_p, &y1_p);
+        let t2 = mul_poly(cs, &x3_p, xt);
+        let t3 = mul_poly(cs, &acc.x, &x3_p.add(&acc.x.scale(2)).add(xt));
+        let linear = acc
+            .x
+            .mul_const(&(2 * curve.a2).to_le_bytes()[..3])
+            .add(&Poly::constant_bytes(&curve.a4.to_le_bytes()[..1]));
+        enforce_zero_mod(cs, f, &t1.scale(2).add(&t2).sub(&t3).sub(&linear));
+    }
+
+    let back = mul_poly(cs, &lam_p, &xt.sub(&x3_p));
+    Acc {
+        x: x3_p,
+        y: back.sub(yt),
+        x_element: Some(x3),
+    }
+}
+
+/// `[k] G` for the Boolean little-endian scalar bits: the final `x` (a reduced witness) and
+/// the unreduced `y`. Unsatisfiable when `k` is a multiple of the group order.
+fn fixed_base_mul(cs: &mut Ctx, curve: &Curve, scalar_bits_le: &[Lc]) -> Acc {
+    assert_eq!(scalar_bits_le.len(), curve.scalar_bits, "scalar width");
+    let mut acc: Option<Acc> = None;
+    for table in &curve.windows {
+        let bits = &scalar_bits_le[table.lo..table.lo + table.width];
+        let (xt, yt) = window_point(cs, table, bits);
+        acc = Some(match acc {
+            None => Acc {
+                x: xt,
+                y: yt,
+                x_element: None,
+            },
+            Some(prev) if table.signed => add_step(cs, curve, &prev, &xt, &yt, false),
+            // The unsigned window's point has `y` in limbs, so it takes the accumulator
+            // role and the tangent equation needs no reduction of the running `y`.
+            Some(prev) => {
+                let last = Acc {
+                    x: xt,
+                    y: yt,
+                    x_element: None,
+                };
+                add_step(cs, curve, &last, &prev.x, &prev.y, true)
+            }
+        });
+    }
+    acc.expect("at least one window")
+}
+
+/// `P + [k] G` for a point `P` of the curve given in limbs (possibly negated limbs for
+/// `y`): one ladder and one complete addition with `P` in the accumulator role.
+fn add_to_fixed_base(
+    cs: &mut Ctx,
+    curve: &Curve,
+    px: &Poly,
+    py: &Poly,
+    scalar_bits_le: &[Lc],
+) -> Acc {
+    assert!(px.is_narrow() && py.is_narrow());
+    let multiple = fixed_base_mul(cs, curve, scalar_bits_le);
+    let point = Acc {
+        x: px.clone(),
+        y: py.clone(),
+        x_element: None,
+    };
+    add_step(cs, curve, &point, &multiple.x, &multiple.y, true)
+}
+
+/// A field element in its canonical representation.
+#[derive(Clone)]
+pub struct CanonicalCoordinate {
+    /// Little-endian bytes, one per limb of the field (32, or 48 for BLS12-381).
+    pub bytes_le: Vec<Lc>,
+    /// Little-endian bits (bit `8i + k` is bit `k` of byte `i`); bits above the field's
+    /// width are the constant zero.
+    pub bits_le: Vec<Lc>,
+}
+
+impl CanonicalCoordinate {
+    fn from_element(mut e: Element) -> Self {
+        e.bits_le.resize(8 * e.bytes_le.len(), Lc::zero());
+        Self {
+            bytes_le: e.bytes_le,
+            bits_le: e.bits_le,
+        }
+    }
+
+    /// The eight bits of byte `i`, least significant first.
+    pub fn byte_bits(&self, i: usize) -> [Lc; 8] {
+        core::array::from_fn(|k| self.bits_le[8 * i + k].clone())
+    }
+}
+
+fn canonical_x(cs: &mut Ctx, f: &Modulus, acc: &Acc) -> CanonicalCoordinate {
+    let x = acc.x_element.clone().expect("at least one addition");
+    canonical(cs, f, &x);
+    CanonicalCoordinate::from_element(x)
+}
+
+fn canonical_y(cs: &mut Ctx, f: &Modulus, acc: &Acc) -> CanonicalCoordinate {
+    let y = reduce_poly(cs, f, &acc.y);
+    canonical(cs, f, &y);
+    CanonicalCoordinate::from_element(y)
+}
+
+fn enforce_scalar_range(cs: &mut Ctx, bits_le: &[Lc], order: &Big) {
+    let (max, _) = big_sub(order, &big(1));
+    enforce_le_const(cs, bits_le, &big_to_bytes(&max));
+    enforce_nonzero(cs, bits_le);
+}
+
+// ============================================================================
+// secp256k1
+// ============================================================================
+
+/// An affine point with unreduced coordinates.
+#[derive(Clone)]
+pub struct AffinePoint {
+    pub x: Lazy,
+    pub y: Lazy,
+}
+
+/// `p + q` on secp256k1 for two points of the curve with `p != -q` (which is
+/// unsatisfiable); `p = q` is handled. Both coordinates of the result are fresh elements.
+pub fn secp256k1_point_add(cs: &mut impl Host, p: &AffinePoint, q: &AffinePoint) -> AffinePoint {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let f = &curve.f;
+            let narrow = |cs: &mut Ctx, a: &Lazy| {
+                if a.0.is_narrow() && a.0.0.len() <= f.limbs {
+                    a.0.clone()
+                } else {
+                    reduce_poly(cs, f, &a.0).poly()
+                }
+            };
+            let acc = Acc {
+                x: narrow(cs, &p.x),
+                y: narrow(cs, &p.y),
+                x_element: None,
+            };
+            let (qx, qy) = (narrow(cs, &q.x), narrow(cs, &q.y));
+            let sum = add_step(cs, curve, &acc, &qx, &qy, true);
+            AffinePoint {
+                x: Lazy(sum.x),
+                y: reduce_poly(cs, f, &sum.y).lazy(),
+            }
+        })
+    })
+}
+
+/// A secp256k1 point with canonical affine coordinates.
+#[derive(Clone)]
+pub struct Secp256k1PublicKey {
+    pub x: CanonicalCoordinate,
+    pub y: CanonicalCoordinate,
+}
+
+impl Secp256k1PublicKey {
+    /// Parity of `y`.
+    pub fn y_is_odd(&self) -> Lc {
+        self.y.bits_le[0].clone()
+    }
+
+    /// The point as an operand of [`secp256k1_point_add`].
+    pub fn point(&self) -> AffinePoint {
+        AffinePoint {
+            x: Lazy(byte_poly(&self.x.bytes_le)),
+            y: Lazy(byte_poly(&self.y.bytes_le)),
+        }
+    }
+
+    /// SEC1 compressed encoding: `02 | parity(y)`, then `x` big-endian (33 bytes).
+    pub fn compressed_bytes(&self) -> Vec<Lc> {
+        let mut out = vec![self.y_is_odd().plus_const(F::TWO)];
+        out.extend(self.x.bytes_le.iter().rev().cloned());
+        out
+    }
+
+    /// Bits of [`Self::compressed_bytes`], per byte and least significant first.
+    pub fn compressed_bits(&self) -> Vec<[Lc; 8]> {
+        let mut prefix: [Lc; 8] = core::array::from_fn(|_| Lc::zero());
+        prefix[0] = self.y_is_odd();
+        prefix[1] = Lc::constant(F::ONE);
+        let mut out = vec![prefix];
+        out.extend((0..32).rev().map(|i| self.x.byte_bits(i)));
+        out
+    }
+
+    /// `x || y`, both big-endian (64 bytes).
+    pub fn uncompressed_bytes(&self) -> Vec<Lc> {
+        let mut out: Vec<Lc> = self.x.bytes_le.iter().rev().cloned().collect();
+        out.extend(self.y.bytes_le.iter().rev().cloned());
+        out
+    }
+
+    /// Bits of [`Self::uncompressed_bytes`], per byte and least significant first.
+    pub fn uncompressed_bits(&self) -> Vec<[Lc; 8]> {
+        let mut out: Vec<[Lc; 8]> = (0..32).rev().map(|i| self.x.byte_bits(i)).collect();
+        out.extend((0..32).rev().map(|i| self.y.byte_bits(i)));
+        out
+    }
+
+    /// BIP340 x-only encoding: `x` big-endian (32 bytes). It names the point of this `x`
+    /// with even `y`; see [`Self::enforce_even_y`].
+    pub fn x_only_bytes(&self) -> Vec<Lc> {
+        self.x.bytes_le.iter().rev().cloned().collect()
+    }
+
+    /// Bits of [`Self::x_only_bytes`], per byte and least significant first.
+    pub fn x_only_bits(&self) -> Vec<[Lc; 8]> {
+        (0..32).rev().map(|i| self.x.byte_bits(i)).collect()
+    }
+
+    /// Require `y` even, so that the scalar itself is the BIP340 secret key of
+    /// [`Self::x_only_bytes`].
+    pub fn enforce_even_y(&self, cs: &mut impl Host) {
+        cs.constraint_system().enforce_zero(self.y_is_odd());
+    }
+}
+
+fn secp_key(cs: &mut Ctx, curve: &Curve, acc: &Acc) -> Secp256k1PublicKey {
+    Secp256k1PublicKey {
+        x: canonical_x(cs, &curve.f, acc),
+        y: canonical_y(cs, &curve.f, acc),
+    }
+}
+
+/// `[k] G` on secp256k1 for the 256 little-endian scalar bits, which the caller has
+/// constrained Boolean. The result is `[k mod n] G`; the rows are unsatisfiable when
+/// `k = 0 (mod n)`. Use [`secp256k1_enforce_scalar_range`] where `1 <= k < n` is part of
+/// the statement.
+pub fn secp256k1_fixed_base_mul(cs: &mut impl Host, scalar_bits_le: &[Lc]) -> Secp256k1PublicKey {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let acc = fixed_base_mul(cs, curve, scalar_bits_le);
+            secp_key(cs, curve, &acc)
+        })
+    })
+}
+
+/// The canonical `x` of `[k] G` only (BIP340 public key bytes are its big-endian bytes),
+/// without materialising `y`. Same contract as [`secp256k1_fixed_base_mul`].
+pub fn secp256k1_fixed_base_mul_x_only(
+    cs: &mut impl Host,
+    scalar_bits_le: &[Lc],
+) -> CanonicalCoordinate {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let acc = fixed_base_mul(cs, curve, scalar_bits_le);
+            canonical_x(cs, &curve.f, &acc)
+        })
+    })
+}
+
+/// `1 <= k <= n - 1` for Boolean little-endian scalar bits.
+pub fn secp256k1_enforce_scalar_range(cs: &mut impl Host, scalar_bits_le: &[Lc]) {
+    assert_eq!(scalar_bits_le.len(), 256);
+    run(cs, |cs| {
+        enforce_scalar_range(cs, scalar_bits_le, &big4(&crate::secp256k1_ct::SECP_N))
+    })
+}
+
+/// A witness point of secp256k1: both coordinates canonical and `y^2 = x^3 + 7` enforced.
+/// The curve has prime order, so every such point is a valid operand of the additions
+/// here. For points that do not come out of a multiplication in the same relation (an
+/// extended public key, an internal key with unknown discrete logarithm).
+pub fn secp256k1_alloc_point(
+    cs: &mut impl Host,
+    x_le: &[u8; 32],
+    y_le: &[u8; 32],
+) -> Secp256k1PublicKey {
+    run(cs, |cs| {
+        let f = Modulus::secp256k1_base();
+        let input = |cs: &mut Ctx| {
+            cs.source(|| Source::Input {
+                bits: f.bits as u32,
+            })
+        };
+        let source = input(cs);
+        let x = alloc_int(cs, source, x_le, f.bits);
+        let source = input(cs);
+        let y = alloc_int(cs, source, y_le, f.bits);
+        canonical(cs, &f, &x);
+        canonical(cs, &f, &y);
+        let xx = mul_poly(cs, &x.poly(), &x.poly());
+        let xx = reduce_poly(cs, &f, &xx);
+        let xxx = mul_poly(cs, &xx.poly(), &x.poly());
+        let yy = mul_poly(cs, &y.poly(), &y.poly());
+        enforce_zero_mod(cs, &f, &yy.sub(&xxx).sub(&Poly::constant_bytes(&[7])));
+        Secp256k1PublicKey {
+            x: CanonicalCoordinate::from_element(x),
+            y: CanonicalCoordinate::from_element(y),
+        }
+    })
+}
+
+/// `point + [k] G` on secp256k1: the BIP32 public child `K_child = K_par + [I_L] G`.
+///
+/// Costs one fixed-base multiplication and one complete addition. It does not save a
+/// multiplication over the scalar route (`[(k_par + I_L) mod n] G`); it is the route for
+/// a parent whose secret scalar is not in the relation.
+///
+/// `point` must be a point of the curve: an output of a gadget here or of
+/// [`secp256k1_alloc_point`]. Exactly two cases are unsatisfiable: `k = 0 (mod n)`, and
+/// `point = -[k] G` (the sum is the identity; BIP32 declares that child invalid).
+/// `point = [k] G` is handled by the tangent equation.
+pub fn secp256k1_add_fixed_base(
+    cs: &mut impl Host,
+    point: &Secp256k1PublicKey,
+    scalar_bits_le: &[Lc],
+) -> Secp256k1PublicKey {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let (px, py) = (byte_poly(&point.x.bytes_le), byte_poly(&point.y.bytes_le));
+            let acc = add_to_fixed_base(cs, curve, &px, &py, scalar_bits_le);
+            secp_key(cs, curve, &acc)
+        })
+    })
+}
+
+fn taproot(
+    cs: &mut Ctx,
+    curve: &Curve,
+    internal: &Secp256k1PublicKey,
+    tweak_bits_le: &[Lc],
+) -> Acc {
+    // lift_x: the point of the internal key's x with even y is (x, y) or (x, p - y).
+    let sign = Lc::constant(F::ONE).minus(&internal.y_is_odd().scaled(F::TWO));
+    let px = byte_poly(&internal.x.bytes_le);
+    let py = Poly(
+        internal
+            .y
+            .bytes_le
+            .iter()
+            .map(|b| Coef {
+                lc: cs.mul(&sign, b).into(),
+                lo: -255,
+                hi: 255,
+            })
+            .collect(),
+    );
+    add_to_fixed_base(cs, curve, &px, &py, tweak_bits_le)
+}
+
+/// BIP341 output key `Q = lift_x(x(P)) + [t] G` for the internal key `P` and the tweak
+/// `t` (256 Boolean little-endian bits; the caller hashes them and, as BIP341 requires,
+/// rejects `t >= n` with [`secp256k1_enforce_scalar_range`]).
+///
+/// `lift_x` is applied here: `P` is negated when its `y` is odd. The output key is
+/// `Q.x_only_bytes()`; `Q.y_is_odd()` is the parity bit of the control block.
+///
+/// Unsatisfiable exactly when `t = 0 (mod n)` or `Q` is the identity (`lift_x(P) = -[t] G`,
+/// which BIP341 also rejects). `lift_x(P) = [t] G` is handled by the tangent equation.
+pub fn secp256k1_taproot_tweak(
+    cs: &mut impl Host,
+    internal: &Secp256k1PublicKey,
+    tweak_bits_le: &[Lc],
+) -> Secp256k1PublicKey {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let acc = taproot(cs, curve, internal, tweak_bits_le);
+            secp_key(cs, curve, &acc)
+        })
+    })
+}
+
+/// The canonical `x` of [`secp256k1_taproot_tweak`] only: the 32-byte output key, without
+/// materialising `y(Q)`. Same contract.
+pub fn secp256k1_taproot_tweak_x_only(
+    cs: &mut impl Host,
+    internal: &Secp256k1PublicKey,
+    tweak_bits_le: &[Lc],
+) -> CanonicalCoordinate {
+    run(cs, |cs| {
+        with_secp256k1(|curve| {
+            let acc = taproot(cs, curve, internal, tweak_bits_le);
+            canonical_x(cs, &curve.f, &acc)
+        })
+    })
+}
+
+// ============================================================================
+// Ed25519
+// ============================================================================
+
+/// An Ed25519 point `[k] B` in its RFC 8032 encoding.
+#[derive(Clone)]
+pub struct Ed25519PublicKey {
+    /// Canonical Edwards `y` (bit 255 is the constant zero).
+    pub y: CanonicalCoordinate,
+    /// Parity of the canonical Edwards `x`.
+    pub x_is_odd: Lc,
+    /// The same point on the Montgomery model `v^2 = u^3 + 486662 u^2 + u`, in limbs; the
+    /// operand of [`ed25519_add_fixed_base`].
+    pub montgomery: AffinePoint,
+}
+
+impl Ed25519PublicKey {
+    /// The 32-byte encoding: `y` little-endian with the parity of `x` in the top bit.
+    pub fn encoding_bytes(&self) -> Vec<Lc> {
+        let mut out = self.y.bytes_le.clone();
+        out[31] = out[31].plus(&self.x_is_odd.scaled(F::from_u64_reduced(128)));
+        out
+    }
+
+    /// The 256 bits of the encoding, little-endian.
+    pub fn encoding_bits(&self) -> Vec<Lc> {
+        let mut out = self.y.bits_le.clone();
+        out[255] = self.x_is_odd.clone();
+        out
+    }
+}
+
+/// Map a Montgomery point of order `l` to its Edwards encoding:
+/// `y = (u - 1) / (u + 1)`, `x = sqrt(-486664) u / v`. Such a point has `u != -1` and
+/// `v != 0`, so both quotients are determined.
+fn ed_key(cs: &mut Ctx, curve: &Curve, acc: Acc) -> Ed25519PublicKey {
+    let f = &curve.f;
+    let u = acc.x;
+    let v = reduce_poly(cs, f, &acc.y).poly();
+    let (un, vn) = (f.poly_value(cs, &u), f.poly_value(cs, &v));
+    let yn = f.mmul(&f.msub(&un, &f.one), &f.inv(&f.madd(&un, &f.one)));
+    let root = big4(&ED_SQRT_M486664);
+    let xn = f.mmul(&f.mmul(&f.mont(&root), &un), &f.inv(&vn));
+    cs.hints.divisions += 2;
+    let one = Poly::constant_bytes(&[1]);
+    let source = residue_source(cs, f, &[], &u.sub(&one), Some(&u.add(&one)));
+    let y = alloc_int(cs, source, &big_to_bytes(&f.canon(&yn)), f.bits);
+    let source = residue_source(
+        cs,
+        f,
+        &[],
+        &u.mul_const(&big_to_bytes(&root)[..32]),
+        Some(&v),
+    );
+    let x = alloc_int(cs, source, &big_to_bytes(&f.canon(&xn)), f.bits);
+
+    let yu = mul_poly(cs, &y.poly(), &u.add(&one));
+    enforce_zero_mod(cs, f, &yu.sub(&u).add(&one));
+    let xv = mul_poly(cs, &x.poly(), &v);
+    enforce_zero_mod(cs, f, &xv.sub(&u.mul_const(&big_to_bytes(&root)[..32])));
+    canonical(cs, f, &y);
+    canonical(cs, f, &x);
+    Ed25519PublicKey {
+        x_is_odd: x.bits_le[0].clone(),
+        y: CanonicalCoordinate::from_element(y),
+        montgomery: AffinePoint {
+            x: Lazy(u),
+            y: Lazy(v),
+        },
+    }
+}
+
+/// `[k] B` on Ed25519 for the 256 little-endian scalar bits, which the caller has
+/// constrained Boolean. The result is `[k mod l] B`; the rows are unsatisfiable when
+/// `k = 0 (mod l)`, which no clamped scalar is.
+///
+/// The ladder runs on the Montgomery model; the result is mapped to Edwards coordinates.
+pub fn ed25519_fixed_base_mul(cs: &mut impl Host, scalar_bits_le: &[Lc]) -> Ed25519PublicKey {
+    run(cs, |cs| {
+        with_curve25519(|curve| {
+            let acc = fixed_base_mul(cs, curve, scalar_bits_le);
+            ed_key(cs, curve, acc)
+        })
+    })
+}
+
+/// `point + [k] B` on Ed25519: the BIP32-Ed25519 public child `A_child = A_par + [8 Z_L] B`
+/// (pass the bits of `8 Z_L`, i.e. three zero bits below those of `Z_L`).
+///
+/// `point` must come out of a gadget here (it is a point of order `l`). Unsatisfiable
+/// exactly when `k = 0 (mod l)` or the sum is the identity; `point = [k] B` is handled.
+/// Like its secp256k1 counterpart it costs a full multiplication plus one addition.
+pub fn ed25519_add_fixed_base(
+    cs: &mut impl Host,
+    point: &Ed25519PublicKey,
+    scalar_bits_le: &[Lc],
+) -> Ed25519PublicKey {
+    run(cs, |cs| {
+        with_curve25519(|curve| {
+            let (px, py) = (&point.montgomery.x.0, &point.montgomery.y.0);
+            let acc = add_to_fixed_base(cs, curve, px, py, scalar_bits_le);
+            ed_key(cs, curve, acc)
+        })
+    })
+}
+
+/// RFC 8032 clamping of 256 little-endian bits: clear bits 0, 1, 2 and 255, set bit 254.
+pub fn ed25519_clamp(bits_le: &[Lc]) -> Vec<Lc> {
+    assert_eq!(bits_le.len(), 256);
+    let mut out = bits_le.to_vec();
+    for i in [0, 1, 2, 255] {
+        out[i] = Lc::zero();
+    }
+    out[254] = Lc::constant(F::ONE);
+    out
+}
+
+/// `1 <= k <= l - 1` for Boolean little-endian scalar bits.
+pub fn ed25519_enforce_scalar_range(cs: &mut impl Host, scalar_bits_le: &[Lc]) {
+    assert_eq!(scalar_bits_le.len(), 256);
+    run(cs, |cs| {
+        enforce_scalar_range(cs, scalar_bits_le, &big4(&ED_L))
+    })
+}
+
+// ============================================================================
+// BLS12-381 G1
+// ============================================================================
+
+/// A BLS12-381 G1 point `[k] G` with canonical affine coordinates.
+#[derive(Clone)]
+pub struct Bls12381G1PublicKey {
+    pub x: CanonicalCoordinate,
+    pub y: CanonicalCoordinate,
+    /// The sign flag of the compressed encoding: `y > (p - 1) / 2`.
+    pub y_is_largest: Lc,
+}
+
+impl Bls12381G1PublicKey {
+    /// The 48-byte compressed encoding (ZCash / IETF): `x` big-endian, with the
+    /// compression flag (bit 7 of the first byte) set, the infinity flag (bit 6) clear and
+    /// the sign flag (bit 5) set when `y` is the lexicographically larger root.
+    pub fn compressed_bytes(&self) -> Vec<Lc> {
+        let mut out: Vec<Lc> = self.x.bytes_le.iter().rev().cloned().collect();
+        out[0] = out[0]
+            .plus(&self.y_is_largest.scaled(F::from_u64_reduced(32)))
+            .plus_const(F::from_u64_reduced(128));
+        out
+    }
+
+    /// Bits of [`Self::compressed_bytes`], per byte and least significant first.
+    pub fn compressed_bits(&self) -> Vec<[Lc; 8]> {
+        let mut out: Vec<[Lc; 8]> = (0..48).rev().map(|i| self.x.byte_bits(i)).collect();
+        out[0][5] = self.y_is_largest.clone();
+        out[0][7] = Lc::constant(F::ONE);
+        out
+    }
+}
+
+/// `[k] G` on BLS12-381 G1 for the 255 little-endian scalar bits, which the caller has
+/// constrained Boolean. The result is `[k mod r] G`; the rows are unsatisfiable when
+/// `k = 0 (mod r)`. Use [`bls12_381_enforce_scalar_range`] where `1 <= k < r` is part of
+/// the statement.
+///
+/// The sign flag is the low bit of the canonical `z = 2 y mod p`: with `y` and `z`
+/// canonical, `2 y - z` is `0` (then `z` is even and `y <= (p - 1) / 2`) or `p` (then `z`
+/// is odd and `y > (p - 1) / 2`).
+pub fn bls12_381_g1_fixed_base_mul(
+    cs: &mut impl Host,
+    scalar_bits_le: &[Lc],
+) -> Bls12381G1PublicKey {
+    run(cs, |cs| {
+        with_bls12_381_g1(|curve| {
+            let f = &curve.f;
+            let acc = fixed_base_mul(cs, curve, scalar_bits_le);
+            let x = canonical_x(cs, f, &acc);
+            let y = reduce_poly(cs, f, &acc.y);
+            canonical(cs, f, &y);
+            let twice = y.poly().scale(2);
+            let z = reduce_poly(cs, f, &twice);
+            canonical(cs, f, &z);
+            Bls12381G1PublicKey {
+                x,
+                y_is_largest: z.bits_le[0].clone(),
+                y: CanonicalCoordinate::from_element(y),
+            }
+        })
+    })
+}
+
+/// `1 <= k <= r - 1` for 255 Boolean little-endian scalar bits.
