@@ -159,7 +159,7 @@ impl FsDurablePoisonAndSessionJournal {
         mode: JournalOpenMode,
         anchor: Box<dyn ExternalMonotoneAnchor>,
     ) -> Result<Self, NodeError> {
-        Self::open_inner(path.as_ref(), key, session, mode, Some(anchor))
+        Self::open_inner(path.as_ref(), key, Some(session), mode, Some(anchor))
     }
 
     /// Unanchored journal: a truncated prefix of the file is accepted on recovery, so this
@@ -171,16 +171,36 @@ impl FsDurablePoisonAndSessionJournal {
         session: [u8; 32],
         mode: JournalOpenMode,
     ) -> Result<Self, NodeError> {
-        Self::open_inner(path.as_ref(), key, session, mode, None)
+        Self::open_inner(path.as_ref(), key, Some(session), mode, None)
+    }
+
+    /// Recover the authenticated head under the exclusive lock and atomically
+    /// allocate a fresh session. A restored prefix or a reused id fails closed.
+    pub fn start_next_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        session: [u8; 32],
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<Self, NodeError> {
+        let mut journal = Self::open_inner(
+            path.as_ref(),
+            key,
+            None,
+            JournalOpenMode::RecoverExisting,
+            Some(anchor),
+        )?;
+        journal.advance_session(session)?;
+        Ok(journal)
     }
 
     fn open_inner(
         path: &Path,
         key: [u8; 32],
-        session: [u8; 32],
+        expected_session: Option<[u8; 32]>,
         mode: JournalOpenMode,
         anchor: Option<Box<dyn ExternalMonotoneAnchor>>,
     ) -> Result<Self, NodeError> {
+        let session = expected_session.unwrap_or_default();
         let key = crate::hash::SecretKey(key);
         // Consult the anchor before touching the directory.
         let retained = match (&anchor, mode) {
@@ -376,7 +396,7 @@ impl FsDurablePoisonAndSessionJournal {
                 {
                     return Err(NodeError::Journal);
                 }
-                if journal.session != session {
+                if expected_session.is_some_and(|id| journal.session != id) {
                     return Err(NodeError::Journal);
                 }
             }

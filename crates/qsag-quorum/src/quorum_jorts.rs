@@ -59,6 +59,9 @@ use qsag_core::wipe::{SecretBuffer, SecretBytes, SecretVec};
 
 use crate::hash::{SeedRng, h32, mac32, mac32_verify};
 
+pub mod committee_handoff;
+pub use committee_handoff::CommitteeHandoffJorts;
+
 /// A 32-byte hash value or chain state.
 pub type Node = [u8; 32];
 
@@ -917,6 +920,7 @@ struct CommitteeSlot<W: DurableWal> {
 
 /// One custodian of Mode QS-A: its own shares, latches and MAC keys, nothing of its peers.
 pub struct CommitteeCustodian<W: DurableWal> {
+    wire_deployment: Option<Node>,
     party: usize,
     layout: CommitteeLayout,
     tree: Arc<QuorumTree>,
@@ -952,6 +956,7 @@ impl<W: DurableWal> CommitteeCustodian<W> {
             );
         }
         Ok(Self {
+            wire_deployment: None,
             party: material.party,
             layout,
             tree,
@@ -1014,13 +1019,45 @@ impl<W: DurableWal> CommitteeCustodian<W> {
             .ok_or(QuorumError::NotCommitteeMember { party, committee })
     }
 
+    pub(crate) fn deployed_wire_keys(
+        &mut self,
+        deployment: Node,
+    ) -> Result<Vec<Node>, QuorumError> {
+        if self.wire_deployment.is_some_and(|old| old != deployment) {
+            return Err(QuorumError::InvalidConfig(
+                "custodian belongs to another deployment",
+            ));
+        }
+        if self.wire_deployment.is_none() {
+            let keys = self.mac_keys.to_vec();
+            self.wire_deployment = Some(deployment);
+            // The deployment is recorded only together with the keys bound to it.
+            if let Err(refused) = self.replace_mac_keys(keys) {
+                self.wire_deployment = None;
+                return Err(refused);
+            }
+        }
+        Ok(self
+            .mac_keys
+            .iter()
+            .map(|k| mac32(k, b"QSAG.JORTS.WIRE/v2", &[&deployment]))
+            .collect())
+    }
+
     pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) -> Result<(), QuorumError> {
+        // Guarded from here on: a refused replacement erases the keys it was handed.
+        let mut new_keys = SecretBuffer(new_keys);
+        if let Some(deployment) = self.wire_deployment {
+            for key in new_keys.iter_mut() {
+                *key = mac32(key, b"QSAG.JORTS.PERMIT/v2", &[&deployment]);
+            }
+        }
         if new_keys.len() != self.layout.n {
             return Err(QuorumError::InvalidConfig(
                 "one MAC key per custodian required",
             ));
         }
-        self.mac_keys = SecretBuffer(new_keys);
+        self.mac_keys = new_keys;
         Ok(())
     }
 
@@ -1631,6 +1668,7 @@ fn build_verified_belt_guard(
 /// One custodian of Mode QS-B: its Shamir shares, its latch, its persistent extracted
 /// `VerifiedBeltQuorumGuard`, and its pairwise MAC keys.
 pub struct ShamirCustodian<W: DurableWal> {
+    wire_deployment: Option<Node>,
     party: usize,
     cfg: QuorumConfig,
     tree: Arc<QuorumTree>,
@@ -1666,6 +1704,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
             latch.in_flight(),
         )?;
         Ok(Self {
+            wire_deployment: None,
             party: material.party,
             cfg,
             tree,
@@ -1713,7 +1752,39 @@ impl<W: DurableWal> ShamirCustodian<W> {
         self.guard_poisoned || self.verified_guard.as_ref().is_none_or(|g| g.is_poisoned())
     }
 
+    pub(crate) fn deployed_wire_keys(
+        &mut self,
+        deployment: Node,
+    ) -> Result<Vec<Node>, QuorumError> {
+        if self.wire_deployment.is_some_and(|old| old != deployment) {
+            return Err(QuorumError::InvalidConfig(
+                "custodian belongs to another deployment",
+            ));
+        }
+        if self.wire_deployment.is_none() {
+            let keys = self.mac_keys.to_vec();
+            self.wire_deployment = Some(deployment);
+            // The deployment is recorded only together with the keys bound to it.
+            if let Err(refused) = self.replace_mac_keys(keys) {
+                self.wire_deployment = None;
+                return Err(refused);
+            }
+        }
+        Ok(self
+            .mac_keys
+            .iter()
+            .map(|k| mac32(k, b"QSAG.JORTS.WIRE/v2", &[&deployment]))
+            .collect())
+    }
+
     pub(crate) fn replace_mac_keys(&mut self, new_keys: Vec<Node>) -> Result<(), QuorumError> {
+        // Guarded from here on: a refused replacement erases the keys it was handed.
+        let mut new_keys = SecretBuffer(new_keys);
+        if let Some(deployment) = self.wire_deployment {
+            for key in new_keys.iter_mut() {
+                *key = mac32(key, b"QSAG.JORTS.PERMIT/v2", &[&deployment]);
+            }
+        }
         if new_keys.len() != self.cfg.n {
             return Err(QuorumError::InvalidConfig(
                 "one MAC key per custodian required",
@@ -1736,7 +1807,7 @@ impl<W: DurableWal> ShamirCustodian<W> {
             self.guard_poisoned = true;
             self.last_authorized_grant = None;
         }
-        self.mac_keys = SecretBuffer(new_keys);
+        self.mac_keys = new_keys;
         self.verified_guard = Some(next_guard);
         self.wal_receipt_key = next_wal_key;
         Ok(())
