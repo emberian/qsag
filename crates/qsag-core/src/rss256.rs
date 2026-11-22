@@ -822,14 +822,27 @@ fn fe_from_xof(xof: &mut Cshake256Xof) -> Fe {
     [u64::from_le_bytes(lo), u64::from_le_bytes(hi)]
 }
 
-/// `v * x^i` for `i < 128`.
+/// `v * x^i` for `i < 128`, evaluated with branchless/cmov-free 64-bit limb masks.
 #[inline]
 fn fe_mul_x_pow(v: Fe, i: u32) -> Fe {
     debug_assert!(i < 128);
-    let v = u128::from(v[0]) | (u128::from(v[1]) << 64);
-    let low = v << i;
-    // The coefficients pushed past x^127, as a polynomial of degree below `i`.
-    let high = (v >> 1) >> (127 - i);
+    let (v0, v1) = (v[0], v[1]);
+    let s = i & 63;
+    let inv_s = 64u32.wrapping_sub(s) & 63;
+    let ge64 = 0u64.wrapping_sub(core::hint::black_box(u64::from((i >> 6) & 1)));
+    let nz = 0u64.wrapping_sub(core::hint::black_box(u64::from(s).wrapping_neg() >> 63));
+
+    let shl0 = v0 << s;
+    let shl1 = (v1 << s) | (nz & (v0 >> inv_s));
+    let low = u128::from(!ge64 & shl0) | (u128::from((!ge64 & shl1) | (ge64 & shl0)) << 64);
+
+    // Coefficients pushed past x^127 (`v >> (128 - i)` for `1 <= i < 128`, `0` for `i == 0`).
+    let shr_v1 = nz & (v1 >> inv_s);
+    let shr_pair = (nz & (v0 >> inv_s)) | (v1 << s);
+    let high0 = (!ge64 & shr_v1) | (ge64 & shr_pair);
+    let high1 = ge64 & shr_v1;
+    let high = u128::from(high0) | (u128::from(high1) << 64);
+
     // x^128 = x^7 + x^2 + x + 1; a second fold absorbs what the first pushes out again.
     let fold = |h: u128| h ^ (h << 1) ^ (h << 2) ^ (h << 7);
     let again = (high >> 127) ^ (high >> 126) ^ (high >> 121);
@@ -1313,8 +1326,7 @@ fn tensor_tables(
 
 fn bind_planes_chunk(
     planes: &[Plane],
-    pat_lo: &qsag_asm::XorCombinePattern,
-    pat_hi: &qsag_asm::XorCombinePattern,
+    pats: &[qsag_asm::XorCombinePattern; 2],
     lane_weights: bool,
     out: &mut [Fe],
 ) {
@@ -1325,8 +1337,8 @@ fn bind_planes_chunk(
         let [rows_lo, rows_hi] = src.as_chunks::<64>().0 else {
             unreachable!("GROUP_PLANES is 2 * 64");
         };
-        qsag_asm::gf2_xor_combine_planes(rows_lo, pat_lo, &mut combined_lo);
-        qsag_asm::gf2_xor_combine_planes(rows_hi, pat_hi, &mut combined_hi);
+        qsag_asm::gf2_xor_combine_planes(rows_lo, &pats[0], &mut combined_lo);
+        qsag_asm::gf2_xor_combine_planes(rows_hi, &pats[1], &mut combined_hi);
         for half in 0..2 {
             for r in 0..64 {
                 combined_lo[half][r] = combined_lo[half][r].xor(combined_hi[half][r]);
@@ -1335,15 +1347,19 @@ fn bind_planes_chunk(
         let [lo, hi] = &mut *combined_lo;
         qsag_asm::transpose64x256(lo);
         qsag_asm::transpose64x256(hi);
-        for q in 0..4 {
-            for c in 0..64 {
-                let lane = 64 * q + c;
-                let v = [lo[c][q], hi[c][q]];
-                dst[lane] = if lane_weights {
-                    fe_mul_x_pow(v, (lane % BLOCK_LANES) as u32)
-                } else {
-                    v
-                };
+        if lane_weights {
+            for q in 0..4 {
+                for c in 0..64 {
+                    let lane = 64 * q + c;
+                    dst[lane] =
+                        fe_mul_x_pow([lo[c][q], hi[c][q]], (lane % BLOCK_LANES) as u32);
+                }
+            }
+        } else {
+            for q in 0..4 {
+                for c in 0..64 {
+                    dst[64 * q + c] = [lo[c][q], hi[c][q]];
+                }
             }
         }
     }
@@ -1354,8 +1370,7 @@ fn bind_planes_chunk(
 fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) {
     debug_assert_eq!(eq.len(), GROUP_PLANES);
     debug_assert_eq!((planes.len() / GROUP_PLANES) * LANES, out.len());
-    let mut pat_lo: qsag_asm::XorCombinePattern = [[0u8; 16]; 128];
-    let mut pat_hi: qsag_asm::XorCombinePattern = [[0u8; 16]; 128];
+    let mut pats: [qsag_asm::XorCombinePattern; 2] = [[[0u8; 16]; 128]; 2];
     for t in 0..128 {
         for n in 0..16 {
             let mut nib_lo = 0u8;
@@ -1364,8 +1379,8 @@ fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) 
                 nib_lo |= (((eq[4 * n + d][t / 64] >> (t % 64)) & 1) as u8) << d;
                 nib_hi |= (((eq[64 + 4 * n + d][t / 64] >> (t % 64)) & 1) as u8) << d;
             }
-            pat_lo[t][n] = nib_lo;
-            pat_hi[t][n] = nib_hi;
+            pats[0][t][n] = nib_lo;
+            pats[1][t][n] = nib_hi;
         }
     }
     #[cfg(feature = "std")]
@@ -1391,24 +1406,23 @@ fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) 
                     let (o_head, o_tail) = rest_out.split_at_mut(take_g * LANES);
                     rest_planes = p_tail;
                     rest_out = o_tail;
-                    let pat_lo_ref = &pat_lo;
-                    let pat_hi_ref = &pat_hi;
+                    let pats_ref = &pats;
                     scope.spawn(move || {
-                        bind_planes_chunk(p_head, pat_lo_ref, pat_hi_ref, lane_weights, o_head);
+                        bind_planes_chunk(p_head, pats_ref, lane_weights, o_head);
                     });
                 }
             });
             return;
         }
     }
-    bind_planes_chunk(planes, &pat_lo, &pat_hi, lane_weights, out);
+    bind_planes_chunk(planes, &pats, lane_weights, out);
 }
 
 /// Scratch of [`fold_round_sums`]: the expansions of both vectors of every slot.
 struct FoldScratch {
     ex: [Vec<Fe>; 3],
     ey: [Vec<Fe>; 3],
-    pending: Vec<Fe>,
+    pending: crate::wipe::SecretScratch<Fe>,
 }
 
 impl FoldScratch {
@@ -1417,7 +1431,7 @@ impl FoldScratch {
         Self {
             ex: core::array::from_fn(|_| vec![FE_ZERO; cells]),
             ey: core::array::from_fn(|_| vec![FE_ZERO; cells]),
-            pending: Vec::new(),
+            pending: crate::wipe::SecretScratch::new(),
         }
     }
 }
@@ -1428,7 +1442,6 @@ impl Drop for FoldScratch {
             qsag_asm::volatile_fill(&mut self.ex[s], FE_ZERO);
             qsag_asm::volatile_fill(&mut self.ey[s], FE_ZERO);
         }
-        qsag_asm::volatile_fill(&mut self.pending, FE_ZERO);
     }
 }
 

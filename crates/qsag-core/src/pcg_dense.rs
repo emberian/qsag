@@ -17,9 +17,14 @@
 //!      $H_{\mathrm{lpn}} \cdot s_{\neq p^*_r} \oplus H_{\mathrm{lpn}}[:, p^*_r] \cdot \Delta_{\mathrm{corr}}$,
 //!      guaranteeing exact algebraic cancellation to $(H_{\mathrm{lpn}} \cdot e_{p^*}) \cdot \Delta_S$.
 //!    - At production [`PcgTreeDepth::Depth15`] ($M = 2^{21}, r = 139{,}264, t = 64$), the prefix
-//!      accumulator transforms single-leaf regular noise into step-vector blocks whose 64-tree
-//!      piling-up bias is $< 2^{-256}$ on balanced dual test blocks, while Prange and Stern–Dumer
-//!      Information-Set Decoding require $\ge 2^{256}$ classical operations ($\ge 2^{128}$ Grover).
+//!      accumulator with `DENSE_PCG_TAPS_PER_TREE = 11` public-coin balanced taps per tree
+//!      (`|N - 2 w_t| <= 7,593` at `Depth15`, `<= 3,796` at `Depth14`) guarantees an **unconditional
+//!      deterministic worst-case single-row parity bias $< (7593 / 32768)^{64} < 2^{-135} \ll 2^{-128}$**
+//!      across all $139{,}264$ rows and all sessions (`Qsag.TapRowBias.pcg_dense_11tap_all_rows_bias_lt_two_neg_135`,
+//!      empirical `auditSession` worst row $\approx 2^{-188.4}$), while multi-row pseudorandomness rests
+//!      on the expand-accumulate regular-noise Dual-LPN assumption (`Spec.RegularExpandAccumulateDualLpnHard`)
+//!      and Prange / Stern–Dumer Information-Set Decoding require $\ge 2^{256}$ classical operations
+//!      ($\ge 2^{128}$ Grover).
 //!      Expanded material converts silently into authenticated Shamir-SPDZ Beaver vaults via
 //!      [`crate::preprocessing::materialize_silent_pcg_keccak_vaults`] and into silent 384-bit OT
 //!      pads via [`DensePcgExpandedVault::derive_silent_sender_ot_pads`] /
@@ -58,8 +63,13 @@ use crate::wipe::{
 /// Number of regular-noise GGM trees per ordered peer pair (`t = 64`).
 pub const DENSE_PCG_NUM_TREES: usize = 64;
 
-/// Number of pseudorandom accumulator taps per tree in $H_{\mathrm{lpn}} = E \circ \mathrm{Acc}$.
-pub const DENSE_PCG_TAPS_PER_TREE: usize = 3;
+/// Number of balanced pseudorandom accumulator taps per tree in $H_{\mathrm{lpn}} = E \circ \mathrm{Acc}$.
+pub const DENSE_PCG_TAPS_PER_TREE: usize = 11;
+
+/// Maximum per-tree step-weight imbalance `|N - 2 * w_t|` accepted at `Depth15` (`N = 32,768`).
+/// Since `7593^64 * 2^135 < 32768^64` (and `3796^64 * 2^135 < 16384^64` at `Depth14`),
+/// every single row of `H_lpn` has unconditional regular-noise parity bias strictly `< 2^-135`.
+pub const DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE: usize = 7_593;
 
 /// Number of 64-bit words of Boolean Beaver triples and BDOZ Subfield-VOLEs (`N = 1024`).
 pub const DENSE_PCG_NUM_WORDS: usize = 1024;
@@ -544,10 +554,36 @@ struct LpnTapStreamCtx {
     depth: u8,
 }
 
-/// Deterministic 4-way batched `Keccak-f[1600]` stream producing uniform masked tap indices in `0..2^d`.
+/// Exact step-indicator Hamming weight on `[0..2^d)` of an odd-tap accumulator parity row
+/// `⊕_{k=0}^{10} [tap_k >= p*]`, computed purely on public tap indices (`0` secret data).
+#[inline]
+fn odd_tap_tree_weight(taps: &[usize; DENSE_PCG_TAPS_PER_TREE]) -> usize {
+    let mut s = *taps;
+    for i in 1..DENSE_PCG_TAPS_PER_TREE {
+        let x = s[i];
+        let mut j = i;
+        while j > 0 && s[j - 1] > x {
+            s[j] = s[j - 1];
+            j -= 1;
+        }
+        s[j] = x;
+    }
+    let mut w = s[0] + 1;
+    let mut k = 1usize;
+    while k + 1 < DENSE_PCG_TAPS_PER_TREE {
+        w += s[k + 1] - s[k];
+        k += 2;
+    }
+    w
+}
+
+/// Deterministic 4-way batched `Keccak-f[1600]` stream producing public-coin balanced 11-tap
+/// tuples in `0..2^d` (`|N - 2 * w_t| <= (N * 7593) >> 15`, guaranteeing `< 2^-135` bias on every row).
 struct BatchedTapGenerator {
     ctx: LpnTapStreamCtx,
+    num_leaves: usize,
     leaf_mask: usize,
+    max_imbalance: usize,
     next_block_ctr: u64,
     buf_u16: [u16; 272],
     pos: usize,
@@ -556,10 +592,14 @@ struct BatchedTapGenerator {
 
 impl BatchedTapGenerator {
     fn new(ctx: LpnTapStreamCtx) -> Self {
-        let leaf_mask = (1usize << (ctx.depth as usize)) - 1;
+        let num_leaves = 1usize << (ctx.depth as usize);
+        let leaf_mask = num_leaves - 1;
+        let max_imbalance = (num_leaves * DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE) >> 15;
         Self {
             ctx,
+            num_leaves,
             leaf_mask,
+            max_imbalance,
             next_block_ctr: 0,
             buf_u16: [0u16; 272],
             pos: 0,
@@ -603,16 +643,21 @@ impl BatchedTapGenerator {
     }
 
     #[inline]
-    fn next_three_taps(&mut self) -> [usize; DENSE_PCG_TAPS_PER_TREE] {
-        let mut out = [0usize; DENSE_PCG_TAPS_PER_TREE];
-        for slot in &mut out {
-            if self.pos >= self.filled {
-                self.refill();
+    fn next_taps(&mut self) -> [usize; DENSE_PCG_TAPS_PER_TREE] {
+        loop {
+            let mut out = [0usize; DENSE_PCG_TAPS_PER_TREE];
+            for slot in &mut out {
+                if self.pos >= self.filled {
+                    self.refill();
+                }
+                *slot = (self.buf_u16[self.pos] as usize) & self.leaf_mask;
+                self.pos += 1;
             }
-            *slot = (self.buf_u16[self.pos] as usize) & self.leaf_mask;
-            self.pos += 1;
+            let w = odd_tap_tree_weight(&out);
+            if self.num_leaves.abs_diff(2 * w) <= self.max_imbalance {
+                return out;
+            }
         }
-        out
     }
 }
 
@@ -655,8 +700,12 @@ fn accumulate_sender_lpn_tree(ctx: LpnTapStreamCtx, full_leaves: &[u128], out_ke
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
     for key_row in out_keys.iter_mut() {
-        let taps = tap_gen.next_three_taps();
-        *key_row ^= acc[taps[0]] ^ acc[taps[1]] ^ acc[taps[2]];
+        let taps = tap_gen.next_taps();
+        let mut term = 0u128;
+        for &tap in &taps {
+            term ^= acc[tap];
+        }
+        *key_row ^= term;
     }
 }
 
@@ -679,15 +728,17 @@ fn accumulate_receiver_lpn_tree(
     }
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
+    let p = p_star as u64;
     for (row_idx, mac_row) in out_macs.iter_mut().enumerate() {
-        let taps = tap_gen.next_three_taps();
-        let punc_term = acc[taps[0]] ^ acc[taps[1]] ^ acc[taps[2]];
-        // `tap >= p_star` as the complement of the borrow of `tap - p_star` (both below 2^16).
-        let p = p_star as u64;
-        let h_bit = 1
-            ^ ((taps[0] as u64).wrapping_sub(p) >> 63)
-            ^ ((taps[1] as u64).wrapping_sub(p) >> 63)
-            ^ ((taps[2] as u64).wrapping_sub(p) >> 63);
+        let taps = tap_gen.next_taps();
+        let mut punc_term = 0u128;
+        // `tap >= p_star` is `1 ^ ((tap - p_star) >> 63)` (both below 2^16); XORing 11 odd
+        // terms keeps the leading `1` parity and XORs all 11 borrow bits in constant time.
+        let mut h_bit = 1u64;
+        for &tap in &taps {
+            punc_term ^= acc[tap];
+            h_bit ^= (tap as u64).wrapping_sub(p) >> 63;
+        }
         let corr_mask = 0u128.wrapping_sub(black_box(h_bit as u128));
         *mac_row ^= punc_term ^ (corr_mask & delta_corr);
         out_choice_words[row_idx >> 6] ^= h_bit << (row_idx & 63);
@@ -4155,5 +4206,51 @@ mod frame_budget_tests {
         for len in 0..=wire.len() {
             assert!(DensePcgPartySeed::from_wire_bytes(&wire[..len]).is_err());
         }
+    }
+
+    #[test]
+    fn eleven_tap_all_139264_rows_parity_bias_below_2_neg_135() {
+        const TOTAL_ROWS: usize = DENSE_PCG_NUM_WORDS * 2 * 64 + DENSE_PCG_NUM_VOLE128 * 128;
+        assert_eq!(TOTAL_ROWS, 139_264);
+        assert_eq!(DENSE_PCG_TAPS_PER_TREE, 11);
+
+        let session_id: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let mut row_log2_bias = vec![0.0f64; TOTAL_ROWS];
+        let mut row_zero = vec![false; TOTAL_ROWS];
+
+        for tree_idx in 0..DENSE_PCG_NUM_TREES {
+            let mut tap_gen = BatchedTapGenerator::new(LpnTapStreamCtx {
+                session_id,
+                sender_id: 0,
+                receiver_id: 1,
+                tree_idx: tree_idx as u8,
+                depth: 15,
+            });
+            for r in 0..TOTAL_ROWS {
+                let taps = tap_gen.next_taps();
+                let w = odd_tap_tree_weight(&taps);
+                let imb = 32768usize.abs_diff(2 * w);
+                assert!(
+                    imb <= DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE,
+                    "tree {tree_idx} row {r} violated <= 7593 imbalance cap: {imb}"
+                );
+                if imb == 0 {
+                    row_zero[r] = true;
+                } else {
+                    row_log2_bias[r] += (imb as f64).log2() - 15.0;
+                }
+            }
+        }
+
+        let mut worst_log2 = f64::NEG_INFINITY;
+        for r in 0..TOTAL_ROWS {
+            if !row_zero[r] && row_log2_bias[r] > worst_log2 {
+                worst_log2 = row_log2_bias[r];
+            }
+        }
+        assert!(
+            worst_log2 < -135.0,
+            "worst single-row log2 parity bias across 139,264 rows must be < -135, got {worst_log2}"
+        );
     }
 }

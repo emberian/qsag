@@ -325,6 +325,52 @@ impl CnfRssKeyShare256 {
         self.slot_indices.binary_search(&global_slot_idx).ok()
     }
 
+    /// Enroll one endpoint's private DKG output in the canonical custody format.
+    /// All secret vectors are move-only and erased on an invalid shape or encoding.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_dkg_slots(
+        cfg: CnfRssConfig,
+        party_id: usize,
+        key_len: usize,
+        pk_seed: [u8; 32],
+        sk_seed_slots: SecretVec<[u8; 32]>,
+        sk_prf_slots: SecretVec<[u8; 32]>,
+        slot_prg_seeds: SecretVec<[u8; 32]>,
+        pair_prf_keys: SecretVec<[u8; 32]>,
+    ) -> Result<Self, CnfRssError> {
+        let slot_indices = cfg.party_slot_indices(party_id)?;
+        let k = slot_indices.len();
+        if !matches!(key_len, 16 | 24 | 32)
+            || pk_seed[key_len..].iter().any(|&v| v != 0)
+            || sk_seed_slots.len() != k
+            || sk_prf_slots.len() != k
+            || slot_prg_seeds.len() != k
+            || pair_prf_keys.len() != cfg.n
+        {
+            return Err(CnfRssError::InvalidParameters);
+        }
+        let mut noncanonical = pair_prf_keys[party_id].iter().fold(0u8, |acc, &b| acc | b);
+        for s in sk_seed_slots.iter().chain(sk_prf_slots.iter()) {
+            noncanonical |= s[key_len..].iter().fold(0u8, |acc, &b| acc | b);
+        }
+        if black_box(noncanonical) != 0 {
+            return Err(CnfRssError::InvalidParameters);
+        }
+        Ok(Self {
+            cfg,
+            party_id,
+            key_len,
+            pk_seed,
+            slot_indices,
+            sk_seed_slots,
+            sk_prf_slots,
+            slot_prg_seeds,
+            pair_prf_keys,
+            scheme_identity: None,
+            slh_profile_digest: None,
+        })
+    }
+
     /// Canonical secret byte serialization (`QSCNFK01` header). Legacy encodings
     /// stay unchanged; byte 13 equal to 1 appends the 32-byte SLH profile lock.
     pub fn to_secret_bytes(&self) -> SecretVec<u8> {
@@ -446,27 +492,19 @@ impl CnfRssKeyShare256 {
         let sk_prf_slots = read_vec32(&mut pos, k);
         let slot_prg_seeds = read_vec32(&mut pos, k);
         let pair_prf_keys = read_vec32(&mut pos, n);
-        // One accumulated verdict over secret bytes: no data-dependent early exit.
-        let mut noncanonical = pair_prf_keys[party_id].iter().fold(0u8, |acc, &b| acc | b);
-        for s in sk_seed_slots.iter().chain(sk_prf_slots.iter()) {
-            noncanonical |= s[key_len..].iter().fold(0u8, |acc, &b| acc | b);
-        }
-        if black_box(noncanonical) != 0 {
-            return Err(CnfRssError::InvalidParameters);
-        }
-        Ok(Self {
+        let mut share = Self::from_dkg_slots(
             cfg,
             party_id,
             key_len,
             pk_seed,
-            slot_indices: expected_slots,
             sk_seed_slots,
             sk_prf_slots,
             slot_prg_seeds,
             pair_prf_keys,
-            scheme_identity,
-            slh_profile_digest,
-        })
+        )?;
+        share.scheme_identity = scheme_identity;
+        share.slh_profile_digest = slh_profile_digest;
+        Ok(share)
     }
 }
 
