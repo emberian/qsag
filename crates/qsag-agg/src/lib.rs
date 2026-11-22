@@ -11,6 +11,11 @@
 //!   `GoldilocksExt4` Sumcheck + `[P0-01]`-hardened `Hem` WHIR rate-escalated Reed–Solomon /
 //!   `CANOPY_MIDSTATE` Steiner-deduplicated Merkle-Canopy PCS.
 //!
+//! Use [`prove_hem_quintic_128`] for a deterministic public proof over the quintic
+//! extension. [`verify_hem_quintic_128`] verifies the supplied committee and messages
+//! against its signer bitmap. Both [`HemQuinticProfile`] choices support Jorts and Corduroy.
+//! The quintic format carries one trace and one WHIR opening across the active signers.
+//!
 //! # What an aggregate proof is, and how it scales
 //!
 //! Signers are packed into *shards* (at most [`max_shard_signers`] signers each, the largest
@@ -65,11 +70,18 @@ extern crate std;
 
 pub mod arithmetize;
 pub mod field;
+pub mod hem_quintic;
+pub use hem_quintic::{
+    HemQuinticProfile, HemQuinticProof, prove_hem_quintic_128, verify_hem_quintic_128,
+};
 pub mod pcs;
 #[cfg(feature = "std")]
 mod pool;
 pub mod recursive;
 pub use recursive::{
+    FixedPathWhirW24, IvcPolicyRegistry, IvcRowCensus, IvcShard, IvcStepConfig,
+    IvcSubtreeStatement, IvcTableCommitment, IvcTreeStepRelation, SuccinctIvcProof, SuccinctIvcStep,
+    ivc_signing_message, prove_ivc_tree, verify_ivc_tree,
     FullShardAggregateStatement, HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate,
     MAX_HIERARCHY_SHARDS, OuterHemChainProof, PreparedPolicyRegistry, SUBTREE_PUBLIC_WORDS,
     SUCCINCT_FULL_SHARD_WIRE_MAGIC, SUCCINCT_HIERARCHICAL_HEM_WIRE_MAGIC,

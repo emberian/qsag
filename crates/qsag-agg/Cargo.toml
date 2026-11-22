@@ -13,6 +13,7 @@ std = ["alloc", "qsag-asm/std", "qsag-core/std"]
 vulkan = ["std", "dep:qsag-accel", "qsag-accel/vulkan"]
 
 [dependencies]
+qsag-cred = { path = "../qsag-cred", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-accel = { path = "../qsag-accel", optional = true, default-features = false }
 qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
