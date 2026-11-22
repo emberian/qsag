@@ -462,3 +462,468 @@ fn sumcheck_live_transcript_and_all_400_digest_bits() {
             padded.mem[EXPECTED + 50..EXPECTED + 56].fill(0x5a);
             assert_eq!(execute(&code, &padded).r[4], 1);
         }
+        baseline = Some(valid.trace);
+    }
+}
+
+#[test]
+fn sumcheck_rejects_every_bit_of_digest_bytes_32_to_49() {
+    let fx = fixtures::sumcheck(0, &mut 0x1503_3871_aab0_cdef);
+    let digest = fx.input.expected;
+    let rejects = |byte: usize, bit: u8| {
+        let mut bad = fx.input.clone();
+        bad.expected[byte] ^= 1 << bit;
+        let out = firmware::run_zkhem_v2_fp5_sumcheck(&bad).unwrap();
+        assert_eq!(
+            out,
+            SumcheckOutput {
+                accepted: false,
+                value: fx.value,
+                digest
+            },
+            "byte {byte} bit {bit}"
+        );
+    };
+    // The evaluation point is bytes 0..40. The check has to reach the ten bytes after it,
+    // through the sixteen-bit tail of the seventh word.
+    for byte in 32..50 {
+        for bit in 0..8 {
+            rejects(byte, bit);
+        }
+    }
+    rejects(49, 0);
+    rejects(49, 7);
+}
+
+#[test]
+fn sumcheck_rejects_a_noncanonical_challenge_draw() {
+    use abi::sumcheck::*;
+    let code = firmware::fw_zkhem_v2_fp5_sumcheck();
+    let input = fixtures::sumcheck_noncanonical_draw();
+    let mut vm = machine(&code);
+    input.install(&mut vm).unwrap();
+    let got = execute(&code, &vm);
+    // The round sum holds and every digest bit matches: the draw itself is the reject.
+    assert_eq!(got.digest(DIGEST), input.expected);
+    assert_eq!(got.r[4], 0);
+    let out = firmware::run_zkhem_v2_fp5_sumcheck(&input).unwrap();
+    assert!(!out.accepted && out.digest == input.expected);
+    // Same public trace as an accepted run.
+    let fx = fixtures::sumcheck(0, &mut 0x1503_3871_aab0_cdef);
+    let mut vm = machine(&code);
+    fx.input.install(&mut vm).unwrap();
+    let valid = execute(&code, &vm);
+    assert_eq!(valid.r[4], 1);
+    assert_eq!(got.trace, valid.trace);
+}
+
+#[test]
+fn sumcheck_absorb_frame_at_rate_boundary() {
+    use abi::sumcheck::*;
+    let code = firmware::fw_zkhem_v2_fp5_sumcheck();
+    let fx = fixtures::sumcheck_rate_boundary();
+    assert_eq!(fx.input.block[135], 0x87);
+    let mut vm = machine(&code);
+    fx.input.install(&mut vm).unwrap();
+    let got = execute(&code, &vm);
+    assert_eq!(got.r[4], 1);
+    assert_eq!(got.digest(DIGEST), fx.input.expected);
+    assert_eq!(got.words(VALUE), [0; 5]);
+}
+
+#[test]
+fn canopy_real_tree_secret_paths_and_tampers() {
+    use abi::canopy::*;
+    let code = firmware::fw_zkhem_v2_canopy50_verify();
+    assert_eq!(count(&code, |i| matches!(i, I::Sel { .. })), 14);
+    let stage = 7;
+    let (tree, leaves) = fixtures::canopy_tree(stage);
+    let root = tree.root();
+    let mut baseline = None;
+    for index in 0..leaves.len() {
+        let input = fixtures::canopy(&tree, &leaves, stage, index);
+        let mut vm = machine(&code);
+        input.install(&mut vm).unwrap();
+        let good = execute(&code, &vm);
+        assert_eq!(good.r[4], 1, "index {index}");
+        assert_eq!(good.digest(ROOT), root);
+        assert_eq!(&good.mem[ROOT + 50..ROOT + 56], &[0; 6]);
+        assert_eq!(
+            good.words(MIDSTATE_SCRATCH),
+            turboshake256_static_midstate(fixtures::TREE_CUSTOMIZATION)
+        );
+        assert_eq!(
+            firmware::run_zkhem_v2_canopy50_verify(&input),
+            Ok(CanopyOutput {
+                accepted: true,
+                root
+            })
+        );
+        // The secret index selects children by SEL only: every leaf has the same trace.
+        if let Some(trace) = &baseline {
+            assert_eq!(&good.trace, trace);
+        }
+        if index == 0 {
+            report("canopy depth 4", &code, &good);
+        }
+        if index == 5 {
+            for offset in [
+                LEAF,
+                LEAF + 49,
+                SIBLINGS + 49,
+                SIBLINGS + 3 * 56,
+                STAGE,
+                INDEX,
+            ] {
+                let mut bad = vm.clone();
+                bad.mem[offset] ^= 1;
+                let got = execute(&code, &bad);
+                assert_eq!(got.r[4], 0, "offset {offset:#x}");
+                assert_eq!(got.trace, good.trace);
+            }
+            for bit in 0..400 {
+                let mut bad = vm.clone();
+                bad.mem[EXPECTED + bit / 8] ^= 1 << (bit % 8);
+                let got = execute(&code, &bad);
+                assert_eq!(got.r[4], 0, "root bit {bit}");
+                assert_eq!(got.digest(ROOT), root);
+                assert_eq!(got.trace, good.trace);
+            }
+            let mut other_depth = vm.clone();
+            other_depth.mem[DEPTH] ^= 1;
+            assert_eq!(execute(&code, &other_depth).r[4], 0);
+            for invalid in [16, 1 << 40, u64::MAX] {
+                let mut bad = vm.clone();
+                bad.load_tainted(INDEX as u64, &invalid.to_le_bytes(), Secret)
+                    .unwrap();
+                let got = execute(&code, &bad);
+                assert_eq!(got.r[4], 0);
+                assert_eq!(got.trace, good.trace);
+            }
+        }
+        baseline = Some(good.trace);
+    }
+}
+
+#[test]
+fn canopy_public_depth_bounds() {
+    use abi::canopy::*;
+    let code = firmware::fw_zkhem_v2_canopy50_verify();
+    for depth in 1..=16u8 {
+        let input = fixtures::canopy_synthetic_path(depth);
+        let mut vm = machine(&code);
+        input.install(&mut vm).unwrap();
+        let got = execute(&code, &vm);
+        assert_eq!(got.r[4], 1);
+        assert_eq!(got.digest(ROOT), input.expected_root);
+        if depth == 16 {
+            report("canopy depth 16", &code, &got);
+        }
+    }
+    for depth in [0, 17, 255] {
+        let mut vm = machine(&code);
+        vm.load_tainted(DEPTH as u64, &[depth], Public).unwrap();
+        let got = execute(&code, &vm);
+        assert_eq!(got.r[4], 0);
+        assert_eq!(got.trace.accesses, [(DEPTH, 1, false)]);
+    }
+    let crowded = CanopyInput {
+        siblings: vec![[0; 50]; 17],
+        ..fixtures::canopy_synthetic_path(1)
+    };
+    assert_eq!(
+        firmware::run_zkhem_v2_canopy50_verify(&crowded),
+        Err(FirmwareError::TooManySiblings { count: 17 })
+    );
+    // The hasher under test is the profile the fixtures use.
+    let _ = Hasher::new(PROFILE);
+}
+
+#[test]
+fn gl24_jive_known_answer_boundaries_and_random_inputs() {
+    use abi::jive::*;
+    let code = firmware::fw_poseidon2_gl24_jive();
+    assert_eq!(count(&code, |i| i == I::Poseidon2Gl24), 1);
+    let (kat, kat_digest) = fixtures::jive_kat();
+    let mut rng = 0xf06c_e6b1_5294_03a1;
+    let mut baseline: Option<Trace> = None;
+    for case in 0..131 {
+        let input = match case {
+            0 => kat,
+            1 => JiveInput {
+                left: [P - 1; 7],
+                right: [P; 7],
+                tweak: [P + 1, u64::MAX],
+            },
+            2 => JiveInput {
+                left: [u64::MAX; 7],
+                right: [P + 1; 7],
+                tweak: [P, u64::MAX],
+            },
+            _ => JiveInput {
+                left: core::array::from_fn(|_| next(&mut rng)),
+                right: core::array::from_fn(|_| next(&mut rng)),
+                tweak: core::array::from_fn(|_| next(&mut rng)),
+            },
+        };
+        let want = fixtures::jive_digest(&input);
+        let mut vm = machine(&code);
+        input.install(&mut vm).unwrap();
+        let got = execute(&code, &vm);
+        assert_eq!(got.r[4], 1);
+        assert_eq!(got.words(DIGEST), want);
+        assert!(want.iter().all(|&limb| limb < P));
+        assert_eq!(firmware::run_poseidon2_gl24_jive(&input), Ok(want));
+        if let Some(trace) = &baseline {
+            assert_eq!(&got.trace, trace);
+        }
+        if case == 0 {
+            assert_eq!(want, kat_digest);
+            report("GL24 Jive", &code, &got);
+            // Any single input bit moves the digest off the known answer.
+            for word in 0..16 {
+                for bit in [0, 31, 63] {
+                    let mut bad = vm.clone();
+                    bad.mem[LEFT + 8 * word + bit / 8] ^= 1 << (bit % 8);
+                    let tampered = execute(&code, &bad);
+                    assert_ne!(
+                        tampered.words::<7>(DIGEST),
+                        kat_digest,
+                        "word {word} bit {bit}"
+                    );
+                    assert_eq!(tampered.trace, got.trace);
+                }
+            }
+        }
+        baseline = Some(got.trace);
+    }
+}
+
+// Reconstruct products from the live FTS Gilboa sender and receiver. This
+// in-process chosen-message OT fixture delivers the requested alternative for
+// each bit. All field multiplication and share folding stays in qsag-fts.
+fn fts_tags(values: [u128; 4], weights: [(u128, u128); 4]) -> [u128; 2] {
+    use qsag_core::wipe::{SecretBuffer, SecretVec};
+    use qsag_fts::{
+        ParallelSeededDkgOt, ParallelSeededDkgOtPads, ParallelSeededDkgOtPeer,
+        ParallelSeededDkgProducts, ParallelSeededError as Error, ParallelSeededGilboaProducts,
+    };
+    use std::{cell::RefCell, rc::Rc};
+    type Batch = ([u8; 32], Vec<[u128; 2]>);
+    #[derive(Clone, Default)]
+    struct ChosenOt(Rc<RefCell<Option<Batch>>>);
+    impl ParallelSeededDkgOt for ChosenOt {
+        fn send(&mut self, peer: u16, ctx: [u8; 32], pairs: &[[u128; 2]]) -> Result<(), Error> {
+            assert_eq!(peer, 1);
+            assert!(self.0.borrow_mut().replace((ctx, pairs.to_vec())).is_none());
+            Ok(())
+        }
+        fn receive(
+            &mut self,
+            peer: u16,
+            ctx: [u8; 32],
+            choices: &[u128],
+        ) -> Result<SecretVec<u128>, Error> {
+            assert_eq!(peer, 0);
+            let (sent, pairs) = self.0.borrow_mut().take().unwrap();
+            assert_eq!(sent, ctx);
+            assert_eq!(pairs.len(), 128 * choices.len());
+            Ok(SecretBuffer(
+                pairs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| p[((choices[i / 128] >> (i % 128)) & 1) as usize])
+                    .collect(),
+            ))
+        }
+        fn random_ots(
+            &mut self,
+            _: [u8; 32],
+            _: &[ParallelSeededDkgOtPeer<'_>],
+        ) -> Result<Vec<ParallelSeededDkgOtPads>, Error> {
+            unreachable!()
+        }
+        fn send_words(&mut self, _: u16, _: [u8; 32], _: Vec<u128>) -> Result<(), Error> {
+            unreachable!()
+        }
+        fn receive_words(&mut self, _: u16, _: [u8; 32], _: usize) -> Result<Vec<u128>, Error> {
+            unreachable!()
+        }
+    }
+    let ot = ChosenOt::default();
+    let mut sender = ParallelSeededGilboaProducts::new(0, [0x21; 32], ot.clone());
+    let mut receiver = ParallelSeededGilboaProducts::new(1, [0x37; 32], ot);
+    let mut tags = [0; 2];
+    for (j, tag) in tags.iter_mut().enumerate() {
+        let context = [j as u8; 32];
+        let column = weights.map(|(a, b)| if j == 0 { a } else { b });
+        let a = sender.product_shares(context, 0, 1, &values).unwrap();
+        let b = receiver.product_shares(context, 0, 1, &column).unwrap();
+        assert_eq!((a.len(), b.len()), (4, 4));
+        *tag = a.iter().zip(b).fold(0, |acc, (&x, y)| acc ^ x ^ y);
+    }
+    tags
+}
+
+#[test]
+fn dual_mac_and_all_four_secret_wots_digits() {
+    use abi::cth::*;
+    use qsag_accel::{AcceleratorBackend, CpuReferenceBackend};
+    let code = firmware::fw_cth_gf128_and_wots();
+    assert_eq!(count(&code, |i| i == I::Poseidon2Gl12), 3);
+    assert_eq!(count(&code, |i| matches!(i, I::Gf128Mul { .. })), 8);
+    assert_eq!(count(&code, |i| matches!(i, I::Gf128Xor { .. })), 8);
+    let mut rng = 0x7be6_b753_fcc8_11d4;
+    let (values, weights, tags) = fixtures::cth_mac(&mut rng);
+    let weight_pairs = weights.map(|w| (w[0], w[1]));
+    assert_eq!(fts_tags(values, weight_pairs), tags);
+    assert_eq!(
+        CpuReferenceBackend::new()
+            .bdoz_gf2_128_batch_dot(&values.map(|v| (v, v)), &weight_pairs)
+            .unwrap(),
+        (tags[0], tags[1])
+    );
+    let mut baseline = None;
+    for (layer, tree, keypair, chain) in [
+        (0, 0, 0, 0),
+        (13, 0xfeab_8291_0157_aa03, 0xabcde, 127),
+        (63, u64::MAX, 0xfffff, 255),
+    ] {
+        let seed: [u64; 4] = core::array::from_fn(|_| next(&mut rng) % P);
+        let start = [P - 1, 0, next(&mut rng) % P, next(&mut rng) % P];
+        let ends = fixtures::wots_chain(seed, start, layer, tree, keypair, chain);
+        for digit in 0..4 {
+            let input = CthWotsInput {
+                values,
+                weights,
+                tags,
+                start,
+                seed,
+                layer: layer.into(),
+                tree,
+                keypair: keypair.into(),
+                chain: chain.into(),
+                digit: digit as u64,
+            };
+            let end = ends[digit];
+            let mut vm = machine(&code);
+            input.install(&mut vm).unwrap();
+            let got = execute(&code, &vm);
+            assert_eq!(got.words(END), end);
+            assert_eq!(got.word(STATUS), 1);
+            let mut wiped = [0u64; 16];
+            wiped[4] = 1;
+            assert_eq!(got.r, wiped);
+            assert_eq!(got.s, [0; 25]);
+            assert_eq!(
+                firmware::run_cth_gf128_and_wots(&input),
+                Ok(CthWotsOutput {
+                    accepted: true,
+                    end
+                })
+            );
+            // Zero variance in cycles, PCs and addresses across digits and addresses.
+            if let Some(t) = &baseline {
+                assert_eq!(&got.trace, t);
+            } else {
+                report("dual MAC + WOTS", &code, &got);
+            }
+            // One flipped bit in either half of either expected tag, or in an opened
+            // value, rejects and releases no chain value.
+            for (offset, mask) in [
+                (TAGS, 0x80),
+                (TAGS + 15, 0x80),
+                (TAGS + 16, 0x80),
+                (TAGS + 31, 0x80),
+            ]
+            .into_iter()
+            .chain([(TAGS, 1), (TAGS + 31, 1), (VALUES, 1), (VALUES + 63, 0x80)])
+            {
+                let mut bad = vm.clone();
+                bad.mem[offset] ^= mask;
+                let reject = execute(&code, &bad);
+                assert_eq!(reject.r, [0; 16], "offset {offset:#x}");
+                assert_eq!(reject.s, [0; 25]);
+                assert_eq!(reject.word(STATUS), 0);
+                assert_eq!(reject.words(END), [0; 4]);
+                assert_eq!(reject.trace, got.trace);
+            }
+            // A coordinate outside the injective address packing, or a digit above three,
+            // would hash under another chain's tweak.
+            for (field, value) in [
+                (LAYER, 64),
+                (KP, 1 << 20),
+                (CHAIN, 256),
+                (DIGIT, 4),
+                (DIGIT, u64::MAX),
+            ] {
+                let mut bad = vm.clone();
+                let tag = if field == DIGIT { Secret } else { Public };
+                bad.load_tainted(field as u64, &value.to_le_bytes(), tag)
+                    .unwrap();
+                let reject = execute(&code, &bad);
+                assert_eq!(reject.r, [0; 16], "field {field:#x}");
+                assert_eq!(reject.word(STATUS), 0);
+                assert_eq!(reject.words(END), [0; 4]);
+                assert_eq!(reject.trace, got.trace);
+            }
+            baseline = Some(got.trace);
+        }
+    }
+    // A start value given by noncanonical representatives is the same chain.
+    let (canonical, end) = fixtures::cth_wots(&mut 0x51e5_7a11_0bad_c0de)[2];
+    assert_eq!(canonical.start[..2], [P - 1, 0]);
+    let alias = CthWotsInput {
+        start: [u64::MAX, P, canonical.start[2], canonical.start[3]],
+        ..canonical
+    };
+    assert_eq!(alias.start[0] % P, 0xffff_fffe);
+    let shifted = CthWotsInput {
+        start: [0xffff_fffe, 0, alias.start[2], alias.start[3]],
+        ..alias
+    };
+    assert_eq!(
+        firmware::run_cth_gf128_and_wots(&canonical),
+        Ok(CthWotsOutput {
+            accepted: true,
+            end
+        })
+    );
+    let via_alias = firmware::run_cth_gf128_and_wots(&alias).unwrap();
+    assert_eq!(Ok(via_alias), firmware::run_cth_gf128_and_wots(&shifted));
+    assert!(via_alias.accepted && via_alias.end != end);
+    // Digit zero releases the start value itself, canonical.
+    let unstepped = CthWotsInput { digit: 0, ..alias };
+    assert_eq!(
+        firmware::run_cth_gf128_and_wots(&unstepped).unwrap().end,
+        [0xffff_fffe, 0, alias.start[2], alias.start[3]]
+    );
+}
+
+#[test]
+fn runners_report_traps_and_dit_violations() {
+    // An image that faults fail-closed is an error, not a result.
+    let mut vm = firmware::boot(&assemble("LD64 R1,[R0+8192]\nHALT").unwrap()).unwrap();
+    assert_eq!(
+        firmware::run_to_halt(&mut vm),
+        Err(FirmwareError::Exit(RunExit::Trap(VmTrap::MemFault)))
+    );
+    // A branch on a secret mailbox byte stops the run before the branch executes.
+    let mut vm = firmware::boot(&assemble("LDBU R1,[R0+4096]\nBNEZ R1,0\nHALT").unwrap()).unwrap();
+    vm.load_tainted(4096, &[1], Secret).unwrap();
+    match firmware::run_to_halt(&mut vm) {
+        Err(FirmwareError::Exit(RunExit::DitViolation(v))) => {
+            assert_eq!(
+                (v.pc, v.reg, v.kind),
+                (4, 1, DitViolationKind::SecretBranchCond)
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(vm.pc, 4);
+    // An image larger than the SRAM does not boot.
+    assert!(matches!(
+        firmware::boot(&vec![0; SRAM_BYTES + 4]),
+        Err(FirmwareError::Mem(_))
+    ));
+}

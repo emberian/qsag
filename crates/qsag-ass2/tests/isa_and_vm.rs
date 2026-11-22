@@ -663,3 +663,668 @@ fn goldilocks_and_quintic_reference_products() {
             };
             let mut expect = m.spg;
             expect[d * 5..d * 5 + 5]
+                .copy_from_slice(&result.to_limbs().map(Goldilocks::to_canonical_u64));
+            m.pc = 0;
+            let before = m.csrs.cycles;
+            assert_eq!(m.step(), StepOutcome::Retired);
+            assert_eq!(m.spg, expect);
+            assert_eq!(m.csrs.cycles - before, cost);
+        }
+    }
+}
+
+#[test]
+fn binary_field_reduction_and_aliasing() {
+    let mut m = vm(
+        "GF128.MUL P11,P0,P11\nGF128.MUL P0,P0,P0\nGF128.XOR P0,P11,P0",
+        12,
+    );
+    m.spg[0] = 2;
+    m.spg[23] = 1 << 63;
+    m.spg[24] = 99;
+    m.step();
+    assert_eq!(&m.spg[22..], &[0x87, 0, 99]);
+    m.step();
+    assert_eq!(&m.spg[..2], &[4, 0]);
+    m.step();
+    assert_eq!(&m.spg[..2], &[0x83, 0]);
+    assert_eq!((m.csrs.cycles, m.csrs.instret), (9, 3));
+    // A high operand limb contributes even when the destination overwrites both inputs.
+    let mut m = vm("GF128.MUL P0,P0,P0", 4);
+    m.spg[1] = 1; // x^64 squared = x^128
+    m.step();
+    assert_eq!(&m.spg[..2], &[0x87, 0]);
+}
+
+#[test]
+fn keccak_last_rounds_match_independent_reference() {
+    let mut seed = 42;
+    for rounds in [12, 24] {
+        for sample in 0..16 {
+            let mut m = vm(&format!("KECCAK.F1600 {rounds}"), 4);
+            if sample > 0 {
+                m.spg = core::array::from_fn(|_| random(&mut seed));
+            }
+            let mut expected = m.spg;
+            if rounds == 12 {
+                qsag_agg::sponge::keccak_p1600_12(&mut expected);
+            } else {
+                qsag_agg::sponge::keccak_f1600(&mut expected);
+            }
+            assert_eq!(m.step(), StepOutcome::Retired);
+            assert_eq!(m.spg, expected);
+            assert_eq!((m.csrs.cycles, m.csrs.instret), (rounds, 1));
+        }
+    }
+}
+
+#[test]
+fn poseidon_known_answers_and_bank_boundaries() {
+    let mut m = vm("POSEIDON2.GL24", 4);
+    m.spg = core::array::from_fn(|i| i as u64);
+    m.spg_taint[0] = Taint::Secret;
+    assert_eq!(m.step(), StepOutcome::Retired);
+    // Sequence KAT from the lane's qsag-accel, also computed by the Python RTL model.
+    assert_eq!(
+        m.spg,
+        [
+            9262813872168818283,
+            14473920968081642809,
+            3132432025506878070,
+            739327372316014541,
+            13930273445042610257,
+            9887230855574303117,
+            10411529172945029295,
+            2610146355123527807,
+            15800955794096892263,
+            126337761019280528,
+            15741922631823646152,
+            12261346758669164007,
+            2093389069744887410,
+            3165987204040455923,
+            14526830091420603371,
+            2537012170462392522,
+            17818886402825694850,
+            14929111493621950133,
+            16221575831479706027,
+            10965213893411960579,
+            16472025002487739980,
+            12534132784495569014,
+            13110610053613593246,
+            5468252370409873572,
+            24
+        ]
+    );
+    assert_eq!(m.csrs.cycles, 216);
+    assert_eq!(m.spg_taint[..24], [Taint::Secret; 24]);
+    assert_eq!(m.spg_taint[24], Taint::Public);
+    let mut m = vm("POSEIDON2.GL12", 4);
+    m.spg = core::array::from_fn(|i| i as u64);
+    m.spg_taint[12] = Taint::Secret;
+    let mut expected = m.spg;
+    let mut state = core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
+    qsag_agg::sponge::poseidon2_perm12(&mut state);
+    expected[..12].copy_from_slice(&state.map(Goldilocks::to_canonical_u64));
+    assert_eq!(m.step(), StepOutcome::Retired);
+    assert_eq!(m.spg, expected);
+    assert_eq!(m.csrs.cycles, 120);
+    assert_eq!(m.spg_taint[..12], [Taint::Public; 12]);
+}
+
+#[test]
+fn dit_traces_match_across_secrets() {
+    let image = assemble(
+        "
+        LDBU R3,[R1]
+        SEL R4,R5,R6,R3
+        ST64 [R1+8],R4
+        SLD64 S0,[R1+8]
+        FP5.MUL E0,E0,E0
+        KECCAK.F1600 12
+        SST64 [R1+16],S24
+        LD64 R7,[R1+16]
+        HALT
+    ",
+    )
+    .unwrap();
+    let execute = |secret| {
+        let mut m = Ass2Vm::new(88);
+        m.load_image(0, &image).unwrap();
+        m.regs[1] = 64;
+        m.regs[5] = 0xFEED;
+        m.regs[6] = 0xFACE;
+        m.mem[64] = secret;
+        m.mem_taint[64] = Taint::Secret;
+        m.dit_mode = DitMode::Trap;
+        assert_eq!(m.run(9), RunExit::Halted);
+        assert!(m.violations.is_empty());
+        for i in [3, 4, 7] {
+            assert_eq!(m.reg_taint[i], Taint::Secret);
+        }
+        assert_eq!(m.spg_taint, [Taint::Secret; 25]);
+        assert_eq!(m.mem_taint[72..88], [Taint::Secret; 16]);
+        assert_eq!((m.csrs.instret, m.csrs.cycles), (9, 128));
+        m
+    };
+    let (a, b) = (execute(0), execute(255));
+    assert_ne!(a.regs[4], b.regs[4]);
+    assert_ne!(a.spg, b.spg);
+    assert_eq!(a.trace, b.trace);
+    assert_eq!(a.trace.observations.len(), 9);
+    for (i, observation) in a.trace.observations.iter().enumerate() {
+        assert_eq!(observation.pc, i as u64 * 4);
+        assert_eq!(
+            observation.insn_word,
+            Some(u32::from_le_bytes(
+                image[4 * i..4 * i + 4].try_into().unwrap()
+            ))
+        );
+        assert_eq!(observation.instret_after, i as u64 + 1);
+    }
+    for secret_operand in [1, 2, 3] {
+        let mut m = vm("SEL R1,R1,R2,R3", 4);
+        m.reg_taint[secret_operand] = Taint::Secret;
+        assert_eq!(m.step(), StepOutcome::Retired);
+        assert_eq!(m.reg_taint[1], Taint::Secret);
+        assert!(m.violations.is_empty());
+    }
+}
+
+#[test]
+fn dit_audit_and_stop_for_each_sensitive_operand() {
+    use DitViolationKind::*;
+    for (src, kind) in [
+        ("BNEZ R5,0", SecretBranchCond),
+        ("JALR R5,R5,0", SecretJumpTarget),
+        ("LD64 R5,[R5]", SecretMemAddr),
+        ("ST64 [R5],R2", SecretMemAddr),
+        ("LDBU R5,[R5]", SecretMemAddr),
+        ("STB [R5],R2", SecretMemAddr),
+        ("SLD64 S24,[R5]", SecretMemAddr),
+        ("SST64 [R5],S24", SecretMemAddr),
+    ] {
+        for mode in [DitMode::Audit, DitMode::Trap] {
+            let mut m = vm(src, 24);
+            m.regs[5] = 16;
+            m.reg_taint[5] = Taint::Secret;
+            m.dit_mode = mode;
+            let v = DitViolation {
+                pc: 0,
+                reg: 5,
+                kind,
+            };
+            let before = (m.regs, m.mem.clone(), m.spg);
+            let outcome = m.step();
+            assert_eq!(m.violations, [v], "{src}");
+            if mode == DitMode::Trap {
+                assert_eq!(outcome, StepOutcome::DitViolation(v));
+                assert_eq!((m.pc, m.csrs.cycles, m.csrs.instret), (0, 0, 0));
+                assert_eq!(m.trace.observations[0].mem_access, None);
+                assert_eq!((m.regs, m.mem, m.spg), before);
+            } else {
+                assert_eq!(outcome, StepOutcome::Retired);
+                assert_eq!(m.csrs.instret, 1);
+            }
+        }
+    }
+    // A CSR round trip cannot launder a branch operand.
+    let mut m = vm("CSRW R1,EPC\nCSRR R2,EPC\nBEQZ R2,0", 12);
+    m.reg_taint[1] = Taint::Secret;
+    assert_eq!(m.run(3), RunExit::StepLimit);
+    assert_eq!(
+        m.violations,
+        [DitViolation {
+            pc: 8,
+            reg: 2,
+            kind: SecretBranchCond
+        }]
+    );
+}
+
+#[test]
+fn r0_is_a_sink_for_every_writer() {
+    // Every instruction with a register destination, aimed at R0 with a non-zero result.
+    for (src, cost) in [
+        ("CSRR R0,ARCH_ID", 1),
+        ("JAL R0,0", 1),
+        ("JALR R0,R1,0", 1),
+        ("LD64 R0,[R2]", 2),
+        ("LDBU R0,[R2+7]", 2),
+        ("SGET R0,S3", 1),
+        ("ADD R0,R3,R3", 1),
+        ("SUB R0,R3,R4", 1),
+        ("ROL R0,R3,R3", 1),
+        ("MUL64 R0,R3,R3", 4),
+        ("MULHU64 R0,R4,R4", 4),
+        ("ADDI R0,R3,1", 1),
+        ("SLK16 R0,R3,1", 1),
+        ("MOVZ20 R0,5", 1),
+        ("MOVS20 R0,-1", 1),
+        ("AUIPC R0,1", 1),
+        ("LUT4 R0,R3,R3,15", 1),
+        ("CMP.EQ R0,R3,R3", 1),
+        ("SEL R0,R3,R3,R3", 1),
+        ("BEXTU R0,R3,0,8", 1),
+        ("BEXTS R0,R4,0,1", 1),
+        ("BSWAP64 R0,R3", 1),
+        ("GL.MAC R0,R3,R3,R3", 4),
+        ("GL.ADD R0,R3,R3", 1),
+        ("GL.SUB R0,R3,R4", 1),
+        ("GL.SBOX7 R0,R3", 12),
+    ] {
+        let mut m = vm(&format!("{src}\nADDI R6,R0,7\nHALT"), 40);
+        m.regs[1] = 4;
+        m.regs[2] = 32;
+        m.regs[3] = 0x1234_5678_9abc_def1;
+        m.regs[4] = u64::MAX;
+        m.spg[3] = 77;
+        m.mem[32..40].fill(0xff);
+        m.mem_taint[32..40].fill(Taint::Secret);
+        m.reg_taint[3] = Taint::Secret;
+        m.reg_taint[4] = Taint::Secret;
+        m.spg_taint[3] = Taint::Secret;
+        m.dit_mode = DitMode::Trap;
+        let before = m.regs;
+        assert_eq!(m.step(), StepOutcome::Retired, "{src}");
+        assert_eq!(m.regs, before, "{src}");
+        assert_eq!((m.regs[0], m.reg_taint[0]), (0, Taint::Public), "{src}");
+        // The discarded write still retires at the fixed cost and transfers control.
+        assert_eq!((m.pc, m.csrs.cycles, m.csrs.instret), (4, cost, 1), "{src}");
+        assert_eq!(m.run(2), RunExit::Halted, "{src}");
+        assert_eq!((m.regs[6], m.reg_taint[6]), (7, Taint::Public), "{src}");
+        assert!(m.violations.is_empty(), "{src}");
+    }
+    // A load into R0 still performs and reports its access, and still faults.
+    let mut m = vm("LD64 R0,[R2]", 16);
+    m.regs[2] = 8;
+    m.mem[8] = 9;
+    assert_eq!(m.step(), StepOutcome::Retired);
+    assert_eq!(
+        m.trace.observations[0].mem_access,
+        Some(MemAccess {
+            addr: 8,
+            size: 8,
+            write: false
+        })
+    );
+    for (base, cause) in [(9, VmTrap::MisalignedMem), (16, VmTrap::MemFault)] {
+        let mut m = vm("LD64 R0,[R2]", 16);
+        m.regs[2] = base;
+        assert_eq!(m.step(), StepOutcome::Trap(cause));
+    }
+    // An undefined CSR read traps even when the destination is R0.
+    let mut m = vm("CSRR R0,0x07", 4);
+    assert_eq!(m.step(), StepOutcome::Trap(VmTrap::IllegalInsn));
+    // Stores, branches and lane writes read R0 as zero.
+    let mut m = vm(
+        "ST64 [R0+32],R0\nSPUT S1,R0\nSXOR S2,R0\nBEQZ R0,1\nHALT\nBNEZ R0,-2\nHALT",
+        40,
+    );
+    m.mem[32..40].fill(0xee);
+    m.spg[1] = 5;
+    m.spg[2] = 6;
+    assert_eq!(m.run(8), RunExit::Halted);
+    assert_eq!(
+        (&m.mem[32..40], m.spg[1], m.spg[2], m.pc),
+        (&[0u8; 8][..], 0, 6, 28)
+    );
+    assert_eq!(m.csrs.instret, 6);
+}
+
+#[test]
+fn counter_writes_take_the_written_value_exactly() {
+    let mut m = vm(
+        "CSRW R1,INSTRET\nCSRR R2,INSTRET\nCSRR R3,INSTRET\nCSRW R1,CYCLES\nMUL64 R4,R1,R1\nCSRR R5,CYCLES\nCSRW R0,CYCLES\nCSRR R6,CYCLES\nCSRR R7,INSTRET\nCSRW R0,INSTRET\nHALT",
+        44,
+    );
+    m.regs[1] = 1000;
+    // The writing instruction leaves exactly the written value and still costs its cycle.
+    assert_eq!(m.step(), StepOutcome::Retired);
+    assert_eq!((m.csrs.instret, m.csrs.cycles), (1000, 1));
+    assert_eq!(m.run(3), RunExit::StepLimit);
+    assert_eq!((m.csrs.instret, m.csrs.cycles), (1003, 1000));
+    assert_eq!(m.run(5), RunExit::StepLimit);
+    // A read sees the counter before its own retirement.
+    assert_eq!(&m.regs[2..8], &[1000, 1001, 1_000_000, 1004, 0, 1007]);
+    assert_eq!(m.step(), StepOutcome::Retired);
+    assert_eq!((m.csrs.instret, m.csrs.cycles), (0, 3));
+    assert_eq!(m.step(), StepOutcome::Halted);
+    assert_eq!((m.csrs.instret, m.csrs.cycles), (1, 4));
+    let observed: Vec<_> = m
+        .trace
+        .observations
+        .iter()
+        .map(|o| (o.instret_after, o.cycles_after))
+        .collect();
+    assert_eq!(observed[0], (1000, 1));
+    assert_eq!(observed[3], (1003, 1000));
+    assert_eq!(observed[6], (1006, 0));
+}
+
+#[test]
+fn zeroize_csr_acts_on_bit_zero_only() {
+    for (value, wipes) in [
+        (0, false),
+        (2, false),
+        (u64::MAX - 1, false),
+        (1, true),
+        (3, true),
+        (1 << 63 | 1, true),
+        (u64::MAX, true),
+    ] {
+        let mut m = vm("CSRW R9,ZEROIZE\nHALT", 16);
+        m.regs = core::array::from_fn(|i| 0x100 + i as u64);
+        m.regs[9] = value;
+        m.spg = core::array::from_fn(|i| 0x200 + i as u64);
+        m.reg_taint.fill(Taint::Secret);
+        m.spg_taint.fill(Taint::Secret);
+        m.reg_taint[9] = Taint::Public;
+        m.csrs.evec = 0x40;
+        m.csrs.epc = 0x44;
+        m.csrs.ecause = 3;
+        m.mem[8] = 0x5a;
+        m.mem_taint[8] = Taint::Secret;
+        let (regs, spg) = (m.regs, m.spg);
+        assert_eq!(m.step(), StepOutcome::Retired, "{value:#x}");
+        if wipes {
+            assert_eq!((m.regs, m.spg), ([0; 16], [0; 25]), "{value:#x}");
+            assert_eq!(m.reg_taint, [Taint::Public; 16]);
+            assert_eq!(m.spg_taint, [Taint::Public; 25]);
+        } else {
+            let mut expect = regs;
+            expect[0] = 0;
+            assert_eq!((m.regs, m.spg), (expect, spg), "{value:#x}");
+            assert_eq!(m.reg_taint[1], Taint::Secret);
+            assert_eq!(m.spg_taint, [Taint::Secret; 25]);
+        }
+        // The wipe is the register banks only.
+        assert_eq!((m.csrs.evec, m.csrs.epc, m.csrs.ecause), (0x40, 0x44, 3));
+        assert_eq!((m.mem[8], m.mem_taint[8]), (0x5a, Taint::Secret));
+        assert_eq!(
+            (m.pc, m.csrs.cycles, m.csrs.instret, m.halted),
+            (4, 1, 1, false)
+        );
+    }
+}
+
+#[test]
+fn jalr_links_after_reading_its_own_base() {
+    for (base, simm, target) in [
+        (24u64, -2i64, 16u64),
+        (8, 2, 16),
+        (16, 0, 16),
+        (u64::MAX - 3, 5, 16),
+        (0x2_0010, -32768, 16),
+    ] {
+        let mut m = vm(&format!("JALR R5,R5,{simm}\nHALT\nHALT\nHALT\nHALT"), 20);
+        m.regs[5] = base;
+        assert_eq!(m.step(), StepOutcome::Retired, "{base:#x} {simm}");
+        assert_eq!((m.pc, m.regs[5]), (target, 4), "{base:#x} {simm}");
+        assert_eq!(m.reg_taint[5], Taint::Public);
+    }
+    // A misaligned target traps before the link is written.
+    for low in 1..4 {
+        let mut m = vm("JALR R5,R5,1", 4);
+        m.regs[5] = 8 + low;
+        assert_eq!(m.step(), StepOutcome::Trap(VmTrap::MisalignedPc));
+        assert_eq!((m.pc, m.regs[5]), (0, 8 + low));
+    }
+}
+
+#[test]
+fn byte_extract_every_index_and_length() {
+    for a in [0x80f1_e2d3_c4b5_a697u64, 0x0123_4567_89ab_cdef, u64::MAX, 0] {
+        for idx in 0..8u32 {
+            for len in 1..=8u32 {
+                // Bytes past the top of the word read as zero, so a field that runs off the
+                // end has a clear sign bit.
+                let field = (u128::from(a) >> (8 * idx)) & ((1u128 << (8 * len)) - 1);
+                let unsigned = field as u64;
+                let signed = if len < 8 && (field >> (8 * len - 1)) & 1 == 1 {
+                    unsigned | (u64::MAX << (8 * len))
+                } else {
+                    unsigned
+                };
+                assert_eq!(
+                    one(&format!("BEXTU R4,R1,{idx},{len}"), a, 0, 0, 1),
+                    unsigned,
+                    "BEXTU {a:#x} {idx} {len}"
+                );
+                assert_eq!(
+                    one(&format!("BEXTS R4,R1,{idx},{len}"), a, 0, 0, 1),
+                    signed,
+                    "BEXTS {a:#x} {idx} {len}"
+                );
+            }
+        }
+    }
+    // Length eight is the encoding with a zero length field.
+    assert_eq!(
+        assemble("BEXTU R4,R1,0,8").unwrap(),
+        0x6001_0014u32.to_le_bytes()
+    );
+    assert_eq!(
+        assemble("BEXTS R4,R1,7,8").unwrap(),
+        0x6002_0714u32.to_le_bytes()
+    );
+    // Spot values: a whole word, a field that runs off the end, and one that does not.
+    let a = 0x80f1_e2d3_c4b5_a697;
+    assert_eq!(one("BEXTS R4,R1,0,8", a, 0, 0, 1), a);
+    assert_eq!(one("BEXTS R4,R1,6,4", a, 0, 0, 1), 0x80f1);
+    assert_eq!(one("BEXTU R4,R1,6,4", a, 0, 0, 1), 0x80f1);
+    assert_eq!(one("BEXTS R4,R1,6,2", a, 0, 0, 1), 0xffff_ffff_ffff_80f1);
+    assert_eq!(one("BEXTS R4,R1,7,1", a, 0, 0, 1), 0xffff_ffff_ffff_ff80);
+}
+
+#[test]
+fn register_shifts_saturate_on_the_full_amount() {
+    let amounts = [
+        0,
+        1,
+        31,
+        63,
+        64,
+        65,
+        127,
+        128,
+        1 << 32,
+        1 << 40,
+        (1 << 40) + 1,
+        (1 << 40) + 63,
+        1 << 63,
+        u64::MAX,
+    ];
+    for a in [0x8000_0000_0000_0081u64, 0x7fff_ffff_ffff_ff7e, 1, u64::MAX] {
+        for b in amounts {
+            // Shifts use the whole amount, in wide arithmetic. Rotates use its low six bits.
+            let shl = if b >= 64 {
+                0
+            } else {
+                ((u128::from(a) << b) & u128::from(u64::MAX)) as u64
+            };
+            let shr = if b >= 64 {
+                0
+            } else {
+                (u128::from(a) >> b) as u64
+            };
+            let fill = if a >> 63 == 1 { u64::MAX } else { 0 };
+            let asr = if b >= 64 {
+                fill
+            } else {
+                (i128::from(a as i64) >> b) as u64
+            };
+            let k = b & 63;
+            let rol = if k == 0 {
+                a
+            } else {
+                (a << k) | (a >> (64 - k))
+            };
+            let ror = if k == 0 {
+                a
+            } else {
+                (a >> k) | (a << (64 - k))
+            };
+            for (op, want) in [
+                ("SHL", shl),
+                ("SHR", shr),
+                ("ASR", asr),
+                ("ROL", rol),
+                ("ROR", ror),
+            ] {
+                assert_eq!(
+                    one(&format!("{op} R4,R1,R2"), a, b, 0, 1),
+                    want,
+                    "{op} {a:#x} {b:#x}"
+                );
+            }
+        }
+    }
+    // An amount whose low six bits are zero is not a shift by zero.
+    let a = 0x8000_0000_0000_0081;
+    assert_eq!(one("SHL R4,R1,R2", a, 1 << 40, 0, 1), 0);
+    assert_eq!(one("SHR R4,R1,R2", a, 1 << 40, 0, 1), 0);
+    assert_eq!(one("ASR R4,R1,R2", a, 1 << 40, 0, 1), u64::MAX);
+    assert_eq!(one("ASR R4,R1,R2", a >> 1, 1 << 40, 0, 1), 0);
+    assert_eq!(one("ROL R4,R1,R2", a, 1 << 40, 0, 1), a);
+    // Shifting a register by itself reads the operand once.
+    let mut m = vm("SHL R1,R1,R1\nASR R2,R2,R2", 8);
+    m.regs[1] = 3;
+    m.regs[2] = 1 << 63;
+    m.run(2);
+    assert_eq!((m.regs[1], m.regs[2]), (24, u64::MAX));
+}
+
+#[test]
+fn keccak_round_window_matches_published_vectors() {
+    // Keccak-f[1600] of the zero state (the Keccak team's reference state, first lane).
+    let mut m = vm("KECCAK.F1600 24", 4);
+    m.step();
+    assert_eq!(m.spg[0], 0xF125_8F79_40E1_DDE7);
+    // RFC 9861 TurboSHAKE256 of the empty message with D = 0x1F, first 32 bytes: one block
+    // through the last twelve rounds.
+    let mut m = vm(
+        "SZERO\nMOVZ20 R1,0x1F\nSPUT S0,R1\nLI64 R2,0x8000000000000000\nSPUT S16,R2\nKECCAK.F1600 12\nHALT",
+        44,
+    );
+    assert_eq!(m.run(16), RunExit::Halted);
+    let out: Vec<u8> = m.spg[..4].iter().flat_map(|w| w.to_le_bytes()).collect();
+    assert_eq!(
+        out,
+        [
+            0x36, 0x7A, 0x32, 0x9D, 0xAF, 0xEA, 0x87, 0x1C, 0x78, 0x02, 0xEC, 0x67, 0xF9, 0x05,
+            0xAE, 0x13, 0xC5, 0x76, 0x95, 0xDC, 0x2C, 0x66, 0x63, 0xC6, 0x10, 0x35, 0xF5, 0x9A,
+            0x18, 0xF8, 0xE7, 0xDB
+        ]
+    );
+    // Twelve rounds are the last twelve: twelve more from the first-half state is not f.
+    let mut twice = vm("KECCAK.F1600 12\nKECCAK.F1600 12", 8);
+    twice.spg[0] = 1;
+    twice.run(2);
+    let mut full = vm("KECCAK.F1600 24", 4);
+    full.spg[0] = 1;
+    full.step();
+    assert_ne!(twice.spg, full.spg);
+    assert_eq!((twice.csrs.cycles, full.csrs.cycles), (24, 24));
+}
+
+#[test]
+fn dit_auditor_covers_control_csrs_eret_and_fetch() {
+    use DitViolationKind::*;
+    // A secret written to a CSR that steers control flow or the public counters.
+    for name in ["EVEC", "POWER", "INSTRET", "CYCLES", "EXC_EN", "ZEROIZE"] {
+        for mode in [DitMode::Audit, DitMode::Trap] {
+            let mut m = vm(&format!("CSRW R5,{name}"), 4);
+            m.regs[5] = 0x41;
+            m.regs[7] = 9;
+            m.reg_taint[5] = Taint::Secret;
+            m.dit_mode = mode;
+            let outcome = m.step();
+            let v = DitViolation {
+                pc: 0,
+                reg: 5,
+                kind: SecretControlCsr,
+            };
+            assert_eq!(m.violations, [v], "{name}");
+            if mode == DitMode::Trap {
+                assert_eq!(outcome, StepOutcome::DitViolation(v));
+                assert_eq!(
+                    (m.csrs, m.halted, m.pc, m.regs[7]),
+                    (Csrs::default(), false, 0, 9)
+                );
+            }
+        }
+        let mut m = vm(&format!("CSRW R5,{name}"), 4);
+        m.dit_mode = DitMode::Trap;
+        assert!(!matches!(m.step(), StepOutcome::DitViolation(_)), "{name}");
+        assert!(m.violations.is_empty());
+    }
+    // Secrets may pass through the data CSRs and leave through DBG_OUT.
+    let mut m = vm(
+        "CSRW R5,EPC\nCSRW R5,ECAUSE\nCSRW R5,DBG_OUT\nCSRR R6,ECAUSE\nERET",
+        20,
+    );
+    m.regs[5] = 16;
+    m.reg_taint[5] = Taint::Secret;
+    m.dit_mode = DitMode::Trap;
+    assert_eq!(m.run(4), RunExit::StepLimit);
+    assert!(m.violations.is_empty());
+    assert_eq!(
+        (m.regs[6], m.reg_taint[6], &m.debug_out[..]),
+        (16, Taint::Secret, &[16u8][..])
+    );
+    // Returning to that secret EPC is a secret jump.
+    let v = DitViolation {
+        pc: 16,
+        reg: 0,
+        kind: SecretJumpTarget,
+    };
+    assert_eq!(m.step(), StepOutcome::DitViolation(v));
+    assert_eq!((m.pc, m.csrs.exc_en), (16, false));
+    // A trap entry replaces EPC with the public PC, and ERET is clean again.
+    let mut m = vm("CSRW R5,EPC\nCSRW R1,EXC_EN\nEXC\nHALT\nERET", 20);
+    m.regs[1] = 1;
+    m.reg_taint[5] = Taint::Secret;
+    m.csrs.evec = 16;
+    m.dit_mode = DitMode::Trap;
+    assert_eq!(m.run(8), RunExit::Halted);
+    assert!(m.violations.is_empty());
+    assert_eq!(m.pc, 16);
+    // Instruction bytes that are secret make the fetched word, and so the trace, secret.
+    for mode in [DitMode::Audit, DitMode::Trap] {
+        let mut m = vm("NOP\nADDI R1,R0,5\nHALT", 12);
+        m.mem_taint[7] = Taint::Secret;
+        m.dit_mode = mode;
+        let v = DitViolation {
+            pc: 4,
+            reg: 0,
+            kind: SecretInsnFetch,
+        };
+        if mode == DitMode::Trap {
+            assert_eq!(m.run(3), RunExit::DitViolation(v));
+            assert_eq!((m.pc, m.regs[1], m.csrs.instret), (4, 0, 1));
+        } else {
+            assert_eq!(m.run(3), RunExit::Halted);
+            assert_eq!(m.regs[1], 5);
+        }
+        assert_eq!(m.violations, [v]);
+    }
+    // Secret data beside public operands is not a violation.
+    let mut m = vm(
+        "BNEZ R1,0\nLD64 R6,[R2]\nST64 [R2+8],R5\nSLD64 S0,[R2]\nSST64 [R2+16],S1\nJALR R7,R3,0\nHALT",
+        56,
+    );
+    m.regs[2] = 32;
+    m.regs[3] = 24;
+    m.regs[5] = 0xdead;
+    m.reg_taint[5] = Taint::Secret;
+    m.reg_taint[6] = Taint::Secret;
+    m.spg_taint.fill(Taint::Secret);
+    m.mem_taint[32..56].fill(Taint::Secret);
+    m.dit_mode = DitMode::Trap;
+    assert_eq!(m.run(8), RunExit::Halted);
+    assert!(m.violations.is_empty());
+    assert_eq!(
+        (m.reg_taint[6], m.reg_taint[7]),
+        (Taint::Secret, Taint::Public)
+    );
+}
