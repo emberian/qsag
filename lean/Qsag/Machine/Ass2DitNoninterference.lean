@@ -704,3 +704,559 @@ theorem exec_noninterference (heq : Ass2PubEquiv cfg s₁ s₂) (i : Ass2Insn)
 
 end Exec
 
+/-! ## 5. One step and a run -/
+
+/-- What one step shows the adversary: the `PC` it starts at, the data address it accesses, and
+    the two counters. -/
+structure Ass2Obs where
+  pc : UInt64
+  addr : Option UInt64
+  cycles : UInt64
+  instret : UInt64
+  deriving DecidableEq, Repr
+
+/-- The data address of the next step. -/
+def stepAddr (s : Ass2State) : Option UInt64 :=
+  match currentInsn s with
+  | some i => effAddr i s
+  | none => none
+
+/-- The observation of the next step. -/
+def obsAss2 (s : Ass2State) : Ass2Obs := ⟨s.pc, stepAddr s, s.cycles, s.instret⟩
+
+/-- The labels after the next step. -/
+def ditStepCfg (cfg : PubCfg) (s : Ass2State) : PubCfg :=
+  match currentInsn s with
+  | some i => ditPost cfg i s
+  | none => cfg
+
+/-- The next step is safe: the four code bytes at `PC` are public and the instruction, if one
+    executes, meets its side conditions. -/
+@[expose] def DitSafeStep (cfg : PubCfg) (s : Ass2State) : Prop :=
+  (s.halted = false → s.pc.toNat % 4 = 0 → memPub cfg.mem s.pc 4 = true) ∧
+  (∀ i, currentInsn s = some i → ditOk cfg i = true)
+
+/-- The observations of `n` steps. -/
+@[expose] def traceAss2 : Nat → Ass2State → List Ass2Obs
+  | 0, _ => []
+  | n + 1, s => obsAss2 s :: traceAss2 n (stepAss2 s)
+
+/-- The labels after `n` steps. -/
+@[expose] def cfgRun : Nat → PubCfg → Ass2State → PubCfg
+  | 0, cfg, _ => cfg
+  | n + 1, cfg, s => cfgRun n (ditStepCfg cfg s) (stepAss2 s)
+
+/-- Each of the next `n` steps is safe under the labels transferred up to it. -/
+@[expose] def DitSafeRun : Nat → PubCfg → Ass2State → Prop
+  | 0, _, _ => True
+  | n + 1, cfg, s => DitSafeStep cfg s ∧ DitSafeRun n (ditStepCfg cfg s) (stepAss2 s)
+
+theorem currentInsn_equiv {cfg : PubCfg} {s₁ s₂ : Ass2State} (heq : Ass2PubEquiv cfg s₁ s₂)
+    (hcode : s₁.halted = false → s₁.pc.toNat % 4 = 0 → memPub cfg.mem s₁.pc 4 = true) :
+    currentInsn s₁ = currentInsn s₂ := by
+  rw [currentInsn_eq, currentInsn_eq, ← heq.halted, ← heq.pc]
+  by_cases hh : s₁.halted = true
+  · rw [ite_eq_left hh, ite_eq_left hh]
+  · rw [ite_eq_right hh, ite_eq_right hh]
+    by_cases hpc : s₁.pc.toNat % 4 = 0
+    · have hb : s₁.halted = false := by
+        cases hx : s₁.halted with
+        | false => rfl
+        | true => exact absurd hx hh
+      rw [ite_eq_left hpc, ite_eq_left hpc,
+        fetch32_congr (fun k hk => heq.mem _ (allBelow_spec (hcode hb hpc) k hk))]
+    · rw [ite_eq_right hpc, ite_eq_right hpc]
+
+/-- **Step noninterference.** Two states that agree on everything public take a safe step to
+    the same `PC`, the same data address, the same `CYCLES` and the same `INSTRET`, and agree on
+    everything the transferred labels mark public. -/
+theorem ass2_dit_step_noninterference (cfg : PubCfg) (s₁ s₂ : Ass2State)
+    (heq : Ass2PubEquiv cfg s₁ s₂) (hsafe : DitSafeStep cfg s₁) :
+    (stepAss2 s₁).pc = (stepAss2 s₂).pc ∧ stepAddr s₁ = stepAddr s₂ ∧
+    (stepAss2 s₁).cycles = (stepAss2 s₂).cycles ∧
+    (stepAss2 s₁).instret = (stepAss2 s₂).instret ∧
+    Ass2PubEquiv (ditStepCfg cfg s₁) (stepAss2 s₁) (stepAss2 s₂) := by
+  have hcur := currentInsn_equiv heq hsafe.1
+  have key : stepAddr s₁ = stepAddr s₂ ∧
+      Ass2PubEquiv (ditStepCfg cfg s₁) (stepAss2 s₁) (stepAss2 s₂) := by
+    cases hc : currentInsn s₁ with
+    | none =>
+      have hc₂ : currentInsn s₂ = none := by rw [← hcur]; exact hc
+      rw [stepAss2_of_currentInsn_none hc, stepAss2_of_currentInsn_none hc₂]
+      unfold stepAddr ditStepCfg
+      rw [hc, hc₂]
+      refine ⟨rfl, ?_⟩
+      exact equiv_ite_same (by rw [heq.halted]) (fun _ => heq)
+        (fun _ => by rw [heq.pc]; exact equiv_trap heq _)
+    | some i =>
+      have hc₂ : currentInsn s₂ = some i := by rw [← hcur]; exact hc
+      rw [stepAss2_of_currentInsn_some hc, stepAss2_of_currentInsn_some hc₂]
+      unfold stepAddr ditStepCfg
+      rw [hc, hc₂]
+      exact exec_noninterference heq i (hsafe.2 i hc)
+  exact ⟨key.2.pc, key.1, key.2.cycles, key.2.instret, key.2⟩
+
+/-- **Trace noninterference.** Two states that agree on everything public produce, over a safe
+    run of `n` steps, the same sequence of `PC`s, data addresses, `CYCLES` and `INSTRET`, and end
+    agreeing on everything the transferred labels mark public. Safety is assumed of the first run
+    only. -/
+theorem ass2_dit_run_trace_noninterference (n : Nat) :
+    ∀ (cfg : PubCfg) (s₁ s₂ : Ass2State), Ass2PubEquiv cfg s₁ s₂ → DitSafeRun n cfg s₁ →
+      traceAss2 n s₁ = traceAss2 n s₂ ∧
+      Ass2PubEquiv (cfgRun n cfg s₁) (runAss2 n s₁) (runAss2 n s₂) := by
+  induction n with
+  | zero => intro cfg s₁ s₂ heq _; exact ⟨rfl, heq⟩
+  | succ n ih =>
+    intro cfg s₁ s₂ heq hsafe
+    obtain ⟨hstep, hrest⟩ := hsafe
+    obtain ⟨_, haddr, _, _, heq'⟩ := ass2_dit_step_noninterference cfg s₁ s₂ heq hstep
+    obtain ⟨htr, hfin⟩ := ih _ _ _ heq' hrest
+    refine ⟨?_, hfin⟩
+    have hobs : obsAss2 s₁ = obsAss2 s₂ := by
+      show (⟨s₁.pc, stepAddr s₁, s₁.cycles, s₁.instret⟩ : Ass2Obs) =
+        ⟨s₂.pc, stepAddr s₂, s₂.cycles, s₂.instret⟩
+      rw [heq.pc, haddr, heq.cycles, heq.instret]
+    show obsAss2 s₁ :: traceAss2 n (stepAss2 s₁) = obsAss2 s₂ :: traceAss2 n (stepAss2 s₂)
+    rw [htr, hobs]
+
+/-- A finite RAM exposes an attempted data address only after a successful fetch. -/
+abbrev obsInRam (size : Nat) (s : Ass2State) : Ass2Obs :=
+  ⟨s.pc, if fetchFault size s then none else stepAddr s, s.cycles, s.instret⟩
+
+/-- A memory fault preserves the labels of every data byte, lane and register. -/
+abbrev cfgInRam (size : Nat) (cfg : PubCfg) (s : Ass2State) : PubCfg :=
+  if ramFault size s then cfg else ditStepCfg cfg s
+
+/-- Successful fetches obey the usual code and operand label conditions. Out-of-range
+    fetches have a public outcome before the contents of any RAM byte can matter. -/
+abbrev safeInRam (size : Nat) (cfg : PubCfg) (s : Ass2State) : Prop :=
+  fetchFault size s = false → DitSafeStep cfg s
+
+theorem stepInRam_noninterference (size : Nat) (cfg : PubCfg) (s₁ s₂ : Ass2State)
+    (heq : Ass2PubEquiv cfg s₁ s₂) (hs : safeInRam size cfg s₁) :
+    obsInRam size s₁ = obsInRam size s₂ ∧
+    Ass2PubEquiv (cfgInRam size cfg s₁) (stepAss2InRam size s₁) (stepAss2InRam size s₂) := by
+  have hf : fetchFault size s₁ = fetchFault size s₂ := by
+    simp only [fetchFault, heq.halted, heq.pc]
+  cases h : fetchFault size s₁ with
+  | true =>
+    have h₂ := hf.symm.trans h
+    simp only [obsInRam, h, h₂, ↓reduceIte, heq.pc, heq.cycles, heq.instret,
+      stepAss2InRam_eq, cfgInRam, ramFault, Bool.true_or]
+    exact ⟨trivial, equiv_trap heq 5⟩
+  | false =>
+    have h₂ := hf.symm.trans h
+    have safe := hs h
+    have hc := currentInsn_equiv heq safe.1
+    obtain ⟨_, ha, _, _, post⟩ := ass2_dit_step_noninterference cfg s₁ s₂ heq safe
+    have hr : ramFault size s₁ = ramFault size s₂ := by
+      unfold ramFault
+      rw [hf, ← hc]
+      cases hi : currentInsn s₁ with
+      | none => rfl
+      | some i =>
+        have hi₂ := hc.symm.trans hi
+        unfold stepAddr at ha
+        rw [hi, hi₂] at ha
+        change effAddr i s₁ = effAddr i s₂ at ha
+        simp only [ha]
+    constructor
+    · simp only [obsInRam, h, h₂, Bool.false_eq_true, ↓reduceIte, heq.pc, ha, heq.cycles, heq.instret]
+    · rw [stepAss2InRam_eq, stepAss2InRam_eq]
+      unfold cfgInRam
+      rw [← hr]
+      split
+      · exact equiv_trap heq 5
+      · exact post
+
+/-- Predict labels and require safety along the first bounded-RAM execution only. -/
+def DitSafeRamRun (size : Nat) : Nat → PubCfg → Ass2State → Prop
+  | 0, _, _ => True
+  | n + 1, cfg, s => safeInRam size cfg s ∧
+      DitSafeRamRun size n (cfgInRam size cfg s) (stepAss2InRam size s)
+
+/-- Observation trace over the same bounded-RAM steps used by the lockstep checker. -/
+def traceInRam (size : Nat) : Nat → Ass2State → List Ass2Obs
+  | 0, _ => []
+  | n + 1, s => obsInRam size s :: traceInRam size n (stepAss2InRam size s)
+
+theorem traceInRam_noninterference (size n : Nat) (cfg : PubCfg) (s₁ s₂ : Ass2State)
+    (heq : Ass2PubEquiv cfg s₁ s₂) (hs : DitSafeRamRun size n cfg s₁) :
+    traceInRam size n s₁ = traceInRam size n s₂ := by
+  induction n generalizing cfg s₁ s₂ with
+  | zero => rfl
+  | succ n ih =>
+    obtain ⟨obs, post⟩ := stepInRam_noninterference size cfg s₁ s₂ heq hs.1
+    simp only [traceInRam, obs, ih _ _ _ post hs.2]
+
+/-! ## 6. The `DitHardwareContract` of the ISA -/
+
+theorem memPub_four (lab : UInt64 → Bool) (a : UInt64) :
+    memPub lab a 4 = (lab (a + 3) && (lab (a + 2) && (lab (a + 1) && (lab (a + 0) && true)))) := by
+  simp only [memPub, allBelow]
+  rfl
+
+/-- The state with the public part of `pub` and the secret registers, lanes and bytes of `d`. -/
+def injectSecrets (cfg : PubCfg) (pub d : Ass2State) : Ass2State :=
+  { pub with regs := fun r => if cfg.regPub r then pub.regs r else d.regs r,
+             spg := fun k => if cfg.lane k then pub.spg k else d.spg k,
+             mem := fun a => if cfg.mem a then pub.mem a else d.mem a }
+
+theorem injectSecrets_secret_reg (cfg : PubCfg) (pub d : Ass2State) (r : Reg)
+    (h : cfg.regPub r = false) : (injectSecrets cfg pub d).rget r = d.rget r := by
+  unfold injectSecrets Ass2State.rget
+  simp only [h, Bool.false_eq_true, ↓reduceIte]
+
+theorem injectSecrets_equiv (cfg : PubCfg) (pub d₁ d₂ : Ass2State) :
+    Ass2PubEquiv cfg (injectSecrets cfg pub d₁) (injectSecrets cfg pub d₂) := by
+  refine ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun r hr => ?_, fun k hk => ?_,
+    fun a ha => ?_⟩
+  · show (if r = 0 then (0 : UInt64)
+        else (if cfg.regPub r = true then pub.regs r else d₁.regs r)) =
+      (if r = 0 then (0 : UInt64) else (if cfg.regPub r = true then pub.regs r else d₂.regs r))
+    rw [ite_eq_left hr, ite_eq_left hr]
+  · show (if cfg.lane k = true then pub.spg k else d₁.spg k) =
+      (if cfg.lane k = true then pub.spg k else d₂.spg k)
+    rw [ite_eq_left hk, ite_eq_left hk]
+  · show (if cfg.mem a = true then pub.mem a else d₁.mem a) =
+      (if cfg.mem a = true then pub.mem a else d₂.mem a)
+    rw [ite_eq_left ha, ite_eq_left ha]
+
+/-- An enclave entry: a public initial state, the labels of its secrets, a step count, and
+    safety of the run for every value of the secrets. -/
+structure Ass2CtEntry where
+  cfg : PubCfg
+  steps : Nat
+  pub : Ass2State
+  safe : ∀ d : Ass2State, DitSafeRun steps cfg (injectSecrets cfg pub d)
+
+/-- The leakage of an entry on secrets `d`: the observation trace of its run. The execution mode
+    does not enter: the `DIT` control register is hardwired to `1` and no instruction has an
+    operand-dependent latency. -/
+def ass2Leakage (_mode : Spec.ExecMode) (e : Ass2CtEntry) (d : Ass2State) : List Ass2Obs :=
+  traceAss2 e.steps (injectSecrets e.cfg e.pub d)
+
+/-- The leakage of a safe entry does not depend on its secrets. -/
+def ass2DitContract : Spec.DitHardwareContract Ass2CtEntry Ass2State (List Ass2Obs) where
+  observe := ass2Leakage
+  dataIndependent e d₁ d₂ :=
+    (ass2_dit_run_trace_noninterference e.steps e.cfg _ _
+      (injectSecrets_equiv e.cfg e.pub d₁ d₂) (e.safe d₁)).1
+
+/-- The contract's observation is the trace of the run from the injected state. -/
+theorem ass2DitContract_observe (mode : Spec.ExecMode) (e : Ass2CtEntry) (d : Ass2State) :
+    ass2DitContract.observe mode e d = traceAss2 e.steps (injectSecrets e.cfg e.pub d) := by
+  rfl
+
+/-! ## 7. Straight-line programs are safe -/
+
+/-- The `4 * n` code bytes from `a` are public. -/
+@[expose] def CodePub (lab : UInt64 → Bool) : UInt64 → Nat → Prop
+  | _, 0 => True
+  | a, n + 1 => memPub lab a 4 = true ∧ CodePub lab (a + 4) n
+
+theorem ditOk_straight (cfg : PubCfg) {i : Ass2Insn} (h : i.isStraight = true) :
+    ditOk cfg i = true := by
+  cases i <;> first | rfl | exact absurd h Bool.false_ne_true
+
+theorem ditPost_mem_straight (cfg : PubCfg) {i : Ass2Insn} (h : i.isStraight = true)
+    (s : Ass2State) : (ditPost cfg i s).mem = cfg.mem := by
+  cases i <;> first | rfl | exact absurd h Bool.false_ne_true
+
+/-- A loaded program of well-formed straight instructions with public code is safe from every
+    state: no condition is placed on the registers or lanes. -/
+theorem ditSafeRun_straight (prog : List Ass2Insn) :
+    ∀ (cfg : PubCfg) (s : Ass2State), s.halted = false → s.pc.toNat % 4 = 0 →
+      LoadedAt s.mem s.pc prog → CodePub cfg.mem s.pc prog.length →
+      (∀ i, i ∈ prog → i.WellFormed ∧ i.isStraight = true) →
+      DitSafeRun prog.length cfg s := by
+  induction prog with
+  | nil => intro _ _ _ _ _ _ _; exact True.intro
+  | cons i rest ih =>
+    intro cfg s hh hpc hl hcode hs
+    obtain ⟨hwf, hst⟩ := hs i (List.mem_cons_self ..)
+    obtain ⟨hf, hrest⟩ := hl
+    obtain ⟨hc4, hcrest⟩ := hcode
+    have hcur : currentInsn s = some i :=
+      currentInsn_of_fetch hh hpc (by rw [hf]; exact decodeAss2_encodeAss2 i hwf)
+    obtain ⟨epc, emem, ehalt⟩ := execAss2_straight hst s
+    have hstep : stepAss2 s = execAss2 i s := stepAss2_of_currentInsn_some hcur
+    have hcfg : ditStepCfg cfg s = ditPost cfg i s := by unfold ditStepCfg; rw [hcur]
+    show DitSafeStep cfg s ∧ DitSafeRun rest.length (ditStepCfg cfg s) (stepAss2 s)
+    refine ⟨⟨fun _ _ => hc4, fun j hj => ?_⟩, ?_⟩
+    · rw [hcur] at hj
+      cases hj
+      exact ditOk_straight cfg hst
+    · rw [hstep, hcfg]
+      exact ih _ _ (by rw [ehalt]; exact hh) (by rw [epc]; exact aligned_add4 _ hpc)
+        (by rw [epc, emem]; exact hrest)
+        (by rw [ditPost_mem_straight cfg hst, epc]; exact hcrest)
+        (fun j hj => hs j (List.mem_cons_of_mem _ hj))
+
+/-! ## 8. Verified enclave microcode: `zk-Hem v2` Horner step and `TurboSHAKE256` leaf block
+
+Register roles: `E0 = x`, `E1 = c2` (and the result), `E2 = c1`, `E3 = c0`; `R4 = left`,
+`R5 = right`, `R6 = direction bit` of the Merkle path; `R7 .. R14` are scratch. -/
+
+/-- `E1 := (E1 * E0 + E2) * E0 + E3`. -/
+@[expose] def zkhemHornerProg : List Ass2Insn :=
+  [.fp5Mul 1 1 0, .fp5Add 1 1 2, .fp5Mul 1 1 0, .fp5Add 1 1 3]
+
+/-- Order `(left, right)` by the direction bit without branching, move `E1` out of the bank,
+    load the 56-byte message `first ‖ second ‖ E1` with the `TurboSHAKE256` domain byte `0x1F`
+    and the final rate bit, and permute. -/
+@[expose] def zkhemHashProg : List Ass2Insn :=
+  [.sel 7 4 5 6, .sel 8 5 4 6,
+   .sget 9 5, .sget 10 6, .sget 11 7, .sget 12 8, .sget 13 9,
+   .szero,
+   .sput 0 7, .sput 1 8, .sput 2 9, .sput 3 10, .sput 4 11, .sput 5 12, .sput 6 13,
+   .movz20 14 0x1F, .sxor 7 14,
+   .movz20 14 0x80, .alui .shli 14 14 56, .sxor 16 14,
+   .keccak 12]
+
+/-- The kernel: Horner evaluation, then the leaf block. -/
+@[expose] def zkhemLeafProg : List Ass2Insn := zkhemHornerProg ++ zkhemHashProg
+
+/-- The kernel as 25 instruction words. -/
+@[expose] def zkhemLeafWords : List UInt32 :=
+  [0xD0040011, 0xD0050211, 0xD0040011, 0xD0050311,
+   0x60006547, 0x60006458,
+   0xC0005009, 0xC000600A, 0xC000700B, 0xC000800C, 0xC000900D,
+   0xC0000300,
+   0xC0000170, 0xC0001180, 0xC0002190, 0xC00031A0, 0xC00041B0, 0xC00051C0, 0xC00061D0,
+   0x40001F0E, 0xC00072E0,
+   0x4000800E, 0x300385EE, 0xC00102E0,
+   0xF0C00000]
+
+/-- The degree-2 Horner value `(c2 * x + c1) * x + c0` of the quintic registers
+    `x = E0`, `c2 = E1`, `c1 = E2`, `c0 = E3`. -/
+@[expose] def zkhemHorner (σ : Fin 25 → UInt64) : QuinticGoldilocks :=
+  QuinticGoldilocks.add
+    (QuinticGoldilocks.mul
+      (QuinticGoldilocks.add (QuinticGoldilocks.mul (fp5Read σ 1) (fp5Read σ 0)) (fp5Read σ 2))
+      (fp5Read σ 0))
+    (fp5Read σ 3)
+
+/-- The `TurboSHAKE256` input block of a 56-byte message `m0 ‖ .. ‖ m6` (little-endian lanes)
+    with domain byte `0x1F`: the message in lanes `0..6`, the domain byte at byte 56, and bit 7 of
+    byte 135, the last byte of the 136-byte rate. -/
+abbrev zkhemLeafBlock (m0 m1 m2 m3 m4 m5 m6 : UInt64) : KState :=
+  ⟨m0, m1, m2, m3, m4, m5, m6, 0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0x8000000000000000,
+    0, 0, 0, 0, 0, 0, 0, 0⟩
+
+/-- `E1 := E_a * E_b`. -/
+private def bankMul (σ : Fin 25 → UInt64) (a b : Nat) : Fin 25 → UInt64 :=
+  fp5Write σ 1 (QuinticGoldilocks.mul (fp5Read σ a) (fp5Read σ b))
+
+/-- `E1 := E_a + E_b`. -/
+private def bankAdd (σ : Fin 25 → UInt64) (a b : Nat) : Fin 25 → UInt64 :=
+  fp5Write σ 1 (QuinticGoldilocks.add (fp5Read σ a) (fp5Read σ b))
+
+private theorem bankMul_same (σ : Fin 25 → UInt64) (a b : Nat) :
+    fp5Read (bankMul σ a b) 1 = QuinticGoldilocks.mul (fp5Read σ a) (fp5Read σ b) :=
+  fp5Read_fp5Write_same σ (by decide) _
+
+private theorem bankMul_other (σ : Fin 25 → UInt64) (a b e : Nat) (he : e ≠ 1) :
+    fp5Read (bankMul σ a b) e = fp5Read σ e :=
+  fp5Read_fp5Write_other σ he _
+
+private theorem bankAdd_same (σ : Fin 25 → UInt64) (a b : Nat) :
+    fp5Read (bankAdd σ a b) 1 = QuinticGoldilocks.add (fp5Read σ a) (fp5Read σ b) :=
+  fp5Read_fp5Write_same σ (by decide) _
+
+private theorem bankAdd_other (σ : Fin 25 → UInt64) (a b e : Nat) (he : e ≠ 1) :
+    fp5Read (bankAdd σ a b) e = fp5Read σ e :=
+  fp5Read_fp5Write_other σ he _
+
+/-- The bank after the Horner program. -/
+private def hornerBank (σ : Fin 25 → UInt64) : Fin 25 → UInt64 :=
+  bankAdd (bankMul (bankAdd (bankMul σ 1 0) 1 2) 1 0) 1 3
+
+private theorem hornerBank_eq (σ : Fin 25 → UInt64) :
+    hornerBank σ = fp5Write (bankMul (bankAdd (bankMul σ 1 0) 1 2) 1 0) 1 (zkhemHorner σ) := by
+  have a1 := bankMul_same σ 1 0
+  have a1_0 := bankMul_other σ 1 0 0 (by decide)
+  have a1_2 := bankMul_other σ 1 0 2 (by decide)
+  have a1_3 := bankMul_other σ 1 0 3 (by decide)
+  have a2 := bankAdd_same (bankMul σ 1 0) 1 2
+  have a2_0 := bankAdd_other (bankMul σ 1 0) 1 2 0 (by decide)
+  have a2_3 := bankAdd_other (bankMul σ 1 0) 1 2 3 (by decide)
+  have a3 := bankMul_same (bankAdd (bankMul σ 1 0) 1 2) 1 0
+  have a3_3 := bankMul_other (bankAdd (bankMul σ 1 0) 1 2) 1 0 3 (by decide)
+  rw [a1, a1_2] at a2
+  rw [a2, a2_0, a1_0] at a3
+  rw [a2_3, a1_3] at a3_3
+  show fp5Write (bankMul (bankAdd (bankMul σ 1 0) 1 2) 1 0) 1
+      (QuinticGoldilocks.add (fp5Read (bankMul (bankAdd (bankMul σ 1 0) 1 2) 1 0) 1)
+        (fp5Read (bankMul (bankAdd (bankMul σ 1 0) 1 2) 1 0) 3)) = _
+  rw [a3, a3_3]
+  rfl
+
+/-- The Horner program leaves `zkhemHorner` in `E1` and the registers unchanged. -/
+theorem zkhemHorner_exec (s : Ass2State) :
+    fp5Read (zkhemHornerProg.foldl (fun t i => execAss2 i t) s).spg 1 = zkhemHorner s.spg ∧
+    (zkhemHornerProg.foldl (fun t i => execAss2 i t) s).regs = s.regs := by
+  refine ⟨?_, rfl⟩
+  show fp5Read (hornerBank s.spg) 1 = zkhemHorner s.spg
+  rw [hornerBank_eq]
+  exact fp5Read_fp5Write_same _ (by decide) _
+
+private theorem hornerBank_lanes (σ : Fin 25 → UInt64) :
+    lane (hornerBank σ) 5 = glTo (zkhemHorner σ).c0 ∧
+    lane (hornerBank σ) 6 = glTo (zkhemHorner σ).c1 ∧
+    lane (hornerBank σ) 7 = glTo (zkhemHorner σ).c2 ∧
+    lane (hornerBank σ) 8 = glTo (zkhemHorner σ).c3 ∧
+    lane (hornerBank σ) 9 = glTo (zkhemHorner σ).c4 := by
+  rw [hornerBank_eq]
+  have hl := fp5Limb_eq (zkhemHorner σ)
+  exact ⟨(lane_fp5Write_same _ (by decide) _ (by decide : 0 < 5)).trans hl.1,
+    (lane_fp5Write_same _ (by decide) _ (by decide : 1 < 5)).trans hl.2.1,
+    (lane_fp5Write_same _ (by decide) _ (by decide : 2 < 5)).trans hl.2.2.1,
+    (lane_fp5Write_same _ (by decide) _ (by decide : 3 < 5)).trans hl.2.2.2.1,
+    (lane_fp5Write_same _ (by decide) _ (by decide : 4 < 5)).trans hl.2.2.2.2⟩
+
+/-- The hash program leaves in the bank the 12-round permutation of the leaf block built from
+    the two ordered children and lanes `5..9`. -/
+theorem zkhemHash_exec (t : Ass2State) :
+    (zkhemHashProg.foldl (fun u i => execAss2 i u) t).spg =
+      kLane (keccakRounds 12
+        (zkhemLeafBlock (if t.rget 6 = 0 then t.rget 4 else t.rget 5)
+          (if t.rget 6 = 0 then t.rget 5 else t.rget 4)
+          (lane t.spg 5) (lane t.spg 6) (lane t.spg 7) (lane t.spg 8) (lane t.spg 9))) := by
+  have h7 : (0 : UInt64) ^^^ zext (0x1F : BitVec 20) = 0x1F := by decide
+  have h16 : (0 : UInt64) ^^^ aluiEval .shli (zext (0x80 : BitVec 20)) (56 : BitVec 16) =
+      0x8000000000000000 := by
+    rw [(aluiEval_eq _ _).1]
+    decide
+  refine congrArg (fun K => kLane (keccakRounds 12 K))
+    (kRead_eq_mk _ _ rfl rfl rfl rfl rfl rfl rfl h7 rfl rfl rfl rfl rfl rfl rfl rfl h16
+      rfl rfl rfl rfl rfl rfl rfl rfl)
+
+theorem zkhemLeafProg_straight :
+    ∀ i, i ∈ zkhemLeafProg → i.WellFormed ∧ i.isStraight = true := by
+  decide
+
+/-- **The `zk-Hem v2` Horner and `TurboSHAKE256` leaf kernel.**
+
+    1. `zkhemLeafWords` is the encoding of `zkhemLeafProg`, word for word.
+    2. Run for 25 steps from any state it is loaded in, the kernel leaves in the bank the
+       12-round `Keccak-f[1600]` permutation of the `TurboSHAKE256` block whose message is the
+       two children, ordered by the direction bit `R6`, followed by the five limbs of the Horner
+       value `(E1 * E0 + E2) * E0 + E3` in `QuinticGoldilocks`. Memory is unchanged and `PC`
+       advances by 100.
+    3. If the code is public, two runs from states that agree on everything public produce the
+       same `PC`, address, `CYCLES` and `INSTRET` trace. The children, the direction bit and
+       every lane may be secret: no register or lane is required to be public. -/
+theorem ass2_zkhem_v2_fp5_horner_and_turboshake_leaf_verified :
+    zkhemLeafWords = zkhemLeafProg.map encodeAss2 ∧
+    (∀ s : Ass2State, s.halted = false → s.pc.toNat % 4 = 0 →
+      LoadedAt s.mem s.pc zkhemLeafProg →
+      (runAss2 25 s).spg =
+        kLane (keccakRounds 12
+          (zkhemLeafBlock (if s.rget 6 = 0 then s.rget 4 else s.rget 5)
+            (if s.rget 6 = 0 then s.rget 5 else s.rget 4)
+            (glTo (zkhemHorner s.spg).c0) (glTo (zkhemHorner s.spg).c1)
+            (glTo (zkhemHorner s.spg).c2) (glTo (zkhemHorner s.spg).c3)
+            (glTo (zkhemHorner s.spg).c4))) ∧
+      (runAss2 25 s).mem = s.mem ∧ (runAss2 25 s).pc = s.pc + 100 ∧
+      (runAss2 25 s).halted = false) ∧
+    (∀ (cfg : PubCfg) (s₁ s₂ : Ass2State), Ass2PubEquiv cfg s₁ s₂ → s₁.halted = false →
+      s₁.pc.toNat % 4 = 0 → LoadedAt s₁.mem s₁.pc zkhemLeafProg → CodePub cfg.mem s₁.pc 25 →
+      traceAss2 25 s₁ = traceAss2 25 s₂ ∧
+      Ass2PubEquiv (cfgRun 25 cfg s₁) (runAss2 25 s₁) (runAss2 25 s₂)) := by
+  refine ⟨by decide, fun s hh hpc hl => ?_, fun cfg s₁ s₂ heq hh hpc hl hcode => ?_⟩
+  · have hrun : runAss2 25 s = zkhemLeafProg.foldl (fun t i => execAss2 i t) s :=
+      runAss2_straight zkhemLeafProg s hh hpc hl zkhemLeafProg_straight
+    obtain ⟨fpc, fmem, fhalt⟩ :=
+      foldl_straight_frame zkhemLeafProg s (fun i hi => (zkhemLeafProg_straight i hi).2)
+    rw [hrun]
+    refine ⟨?_, fmem, fpc, fhalt.trans hh⟩
+    have hsplit : zkhemLeafProg.foldl (fun t i => execAss2 i t) s =
+        zkhemHashProg.foldl (fun t i => execAss2 i t)
+          (zkhemHornerProg.foldl (fun t i => execAss2 i t) s) := List.foldl_append
+    rw [hsplit, zkhemHash_exec]
+    obtain ⟨l0, l1, l2, l3, l4⟩ := hornerBank_lanes s.spg
+    show kLane (keccakRounds 12
+        (zkhemLeafBlock (if s.rget 6 = 0 then s.rget 4 else s.rget 5)
+          (if s.rget 6 = 0 then s.rget 5 else s.rget 4)
+          (lane (hornerBank s.spg) 5) (lane (hornerBank s.spg) 6) (lane (hornerBank s.spg) 7)
+          (lane (hornerBank s.spg) 8) (lane (hornerBank s.spg) 9))) = _
+    rw [l0, l1, l2, l3, l4]
+  · exact ass2_dit_run_trace_noninterference 25 cfg s₁ s₂ heq
+      (ditSafeRun_straight zkhemLeafProg cfg s₁ hh hpc hl hcode zkhemLeafProg_straight)
+
+/-- Substituting the secret bytes preserves a program whose instruction bytes are public. -/
+theorem loadedAt_injectSecrets (cfg : PubCfg) (pub d : Ass2State) (prog : List Ass2Insn)
+    (a : UInt64) (hl : LoadedAt pub.mem a prog) (hc : CodePub cfg.mem a prog.length) :
+    LoadedAt (injectSecrets cfg pub d).mem a prog := by
+  induction prog generalizing a with
+  | nil => trivial
+  | cons i rest ih =>
+    obtain ⟨hf, ht⟩ := hl
+    obtain ⟨hp, hc⟩ := hc
+    refine ⟨Eq.trans (fetch32_congr (fun k hk => ?_)) hf, ih _ ht hc⟩
+    exact ite_eq_left (allBelow_spec hp k hk)
+
+/-- The 25-word kernel is a hardware-contract entry for arbitrary secret registers, lanes
+    and private data bytes. Its caller supplies the loaded public code and the entry PC. -/
+def zkhemLeafEntry (cfg : PubCfg) (pub : Ass2State) (hh : pub.halted = false)
+    (ha : pub.pc.toNat % 4 = 0) (hl : LoadedAt pub.mem pub.pc zkhemLeafProg)
+    (hc : CodePub cfg.mem pub.pc 25) : Ass2CtEntry where
+  cfg := cfg
+  steps := 25
+  pub := pub
+  safe d := ditSafeRun_straight zkhemLeafProg cfg (injectSecrets cfg pub d) hh ha
+    (loadedAt_injectSecrets cfg pub d zkhemLeafProg pub.pc hl hc) hc zkhemLeafProg_straight
+
+/-- The hardware contract compares the actual kernel traces after secret injection. -/
+theorem zkhemLeafEntry_trace (cfg : PubCfg) (pub d₁ d₂ : Ass2State) (hh : pub.halted = false)
+    (ha : pub.pc.toNat % 4 = 0) (hl : LoadedAt pub.mem pub.pc zkhemLeafProg)
+    (hc : CodePub cfg.mem pub.pc 25) :
+    traceAss2 25 (injectSecrets cfg pub d₁) = traceAss2 25 (injectSecrets cfg pub d₂) :=
+  ass2DitContract.dataIndependent (zkhemLeafEntry cfg pub hh ha hl hc) d₁ d₂
+
+#verify_constructive
+  Qsag.Ass2.loadedAt_injectSecrets
+  Qsag.Ass2.zkhemLeafEntry_trace
+  Qsag.Ass2.band_split
+  Qsag.Ass2.allBelow_spec
+  Qsag.Ass2.allBelow_of
+  Qsag.Ass2.lane_eq
+  Qsag.Ass2.equiv_update
+  Qsag.Ass2.regs_setReg
+  Qsag.Ass2.equiv_setRegTo
+  Qsag.Ass2.equiv_setReg
+  Qsag.Ass2.equiv_setSpg
+  Qsag.Ass2.equiv_setMem
+  Qsag.Ass2.equiv_retireTo
+  Qsag.Ass2.equiv_trap
+  Qsag.Ass2.equiv_ite
+  Qsag.Ass2.equiv_ite_same
+  Qsag.Ass2.write64_pub
+  Qsag.Ass2.store8_pub
+  Qsag.Ass2.setLane_pub
+  Qsag.Ass2.fp5Write_pub
+  Qsag.Ass2.gfWrite_pub
+  Qsag.Ass2.prefix_pub
+  Qsag.Ass2.csrGet_equiv
+  Qsag.Ass2.csrApply_equiv
+  Qsag.Ass2.fp5Read_pub
+  Qsag.Ass2.gfRead_pub
+  Qsag.Ass2.equiv_reg1
+  Qsag.Ass2.equiv_reg2
+  Qsag.Ass2.equiv_reg3
+  Qsag.Ass2.exec_noninterference
+  Qsag.Ass2.currentInsn_equiv
+  Qsag.Ass2.ass2_dit_step_noninterference
+  Qsag.Ass2.ass2_dit_run_trace_noninterference
+  Qsag.Ass2.injectSecrets_equiv
+  Qsag.Ass2.ass2DitContract_observe
+  Qsag.Ass2.ditOk_straight
+  Qsag.Ass2.ditPost_mem_straight
+  Qsag.Ass2.ditSafeRun_straight
+  Qsag.Ass2.zkhemHorner_exec
+  Qsag.Ass2.zkhemHash_exec
+  Qsag.Ass2.zkhemLeafProg_straight
+  Qsag.Ass2.ass2_zkhem_v2_fp5_horner_and_turboshake_leaf_verified
+
+end Qsag.Ass2
