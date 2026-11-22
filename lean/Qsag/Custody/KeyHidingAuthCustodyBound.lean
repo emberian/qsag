@@ -668,3 +668,675 @@ theorem prfTag_view_key_hiding {n nC nA : Nat} (hPos : 0 < n) {M : Type} (enc : 
 /-! ## 5. Forgery against a uniformly sampled function: an exact count -/
 
 /-- Bytewise XOR, truncated to the shorter argument. -/
+@[expose] def xorBytes (a b : Bytes) : Bytes :=
+  List.zipWith (fun x y => x ^^^ y) a b
+
+theorem xorBytes_length : ∀ (a b : Bytes), a.length = b.length → (xorBytes a b).length = a.length
+  | [], _, _ => by rfl
+  | _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | _ :: a, _ :: b, h => congrArg Nat.succ (xorBytes_length a b (Nat.succ.inj h))
+
+theorem xorBytes_cancel : ∀ (a p : Bytes), a.length = p.length → xorBytes (xorBytes a p) p = a
+  | [], [], _ => by rfl
+  | [], _ :: _, h => absurd h.symm (Nat.succ_ne_zero _)
+  | _ :: _, [], h => absurd h (Nat.succ_ne_zero _)
+  | x :: a, y :: p, h => by
+    show ((x ^^^ y) ^^^ y) :: xorBytes (xorBytes a p) p = x :: a
+    rw [u8_xor_cancel_right, xorBytes_cancel a p (Nat.succ.inj h)]
+
+theorem xorBytes_right_inj :
+    ∀ (a p p' : Bytes), a.length = p.length → a.length = p'.length →
+      xorBytes a p = xorBytes a p' → p = p'
+  | [], [], [], _, _, _ => rfl
+  | [], _ :: _, _, h, _, _ => absurd h.symm (Nat.succ_ne_zero _)
+  | [], [], _ :: _, _, h, _ => absurd h.symm (Nat.succ_ne_zero _)
+  | _ :: _, [], _, h, _, _ => absurd h (Nat.succ_ne_zero _)
+  | _ :: _, _ :: _, [], _, h, _ => absurd h (Nat.succ_ne_zero _)
+  | x :: a, y :: p, y' :: p', h, h', hx => by
+    have hx' : (x ^^^ y) :: xorBytes a p = (x ^^^ y') :: xorBytes a p' := hx
+    obtain ⟨h1, h2⟩ := List.cons.inj hx'
+    have hy : y = y' :=
+      calc y = x ^^^ (x ^^^ y) := (u8_xor_cancel_left x y).symm
+        _ = x ^^^ (x ^^^ y') := by rw [h1]
+        _ = y' := u8_xor_cancel_left x y'
+    rw [hy, xorBytes_right_inj a p p' (Nat.succ.inj h) (Nat.succ.inj h') h2]
+
+/-- `f` with its value at `x` XOR-shifted by `pad`. -/
+@[expose] def shiftAt (x pad : Bytes) (f : Bytes → Bytes) : Bytes → Bytes :=
+  fun y => if y = x then xorBytes (f y) pad else f y
+
+theorem shiftAt_self (x pad : Bytes) (f : Bytes → Bytes) :
+    shiftAt x pad f x = xorBytes (f x) pad :=
+  ifPos rfl _ _
+
+theorem shiftAt_ne (x pad : Bytes) (f : Bytes → Bytes) {y : Bytes} (h : y ≠ x) :
+    shiftAt x pad f y = f y :=
+  ifNeg h _ _
+
+/-- The sample set of keyed-function experiments is closed under resampling one in-domain value:
+    members map `inLen`-byte inputs to `outLen`-byte outputs, and shifting the value at one
+    `inLen`-byte input by an `outLen`-byte pad gives a member with the same key. -/
+@[expose] def SupportShiftClosed (inLen outLen : Nat)
+    (support : Bytes × (Bytes → Bytes) → Prop) : Prop :=
+  (∀ (k : Bytes) (f : Bytes → Bytes), support (k, f) →
+    ∀ x : Bytes, x.length = inLen → (f x).length = outLen) ∧
+  (∀ (k : Bytes) (f : Bytes → Bytes), support (k, f) →
+    ∀ x pad : Bytes, x.length = inLen → pad.length = outLen → support (k, shiftAt x pad f))
+
+/-- The full PRF sample space admits every length-preserving shift at an in-domain input. -/
+theorem prfSampleOk_shiftClosed (keyLen inLen outLen : Nat) :
+    SupportShiftClosed inLen outLen (PrfSampleOk keyLen inLen outLen) := by
+  constructor
+  · intro k f h x hx
+    exact ((prfSampleOk_iff _ _ _ _).mp h).2 x |>.1 hx
+  · intro k f h x pad hx hp
+    obtain ⟨hk, hf⟩ := (prfSampleOk_iff _ _ _ _).mp h
+    refine (prfSampleOk_iff _ _ _ _).mpr ⟨hk, fun y => ?_⟩
+    dsimp only [Prod.snd]
+    by_cases hxy : y = x
+    · subst y
+      have hl := (hf x).1 hx
+      rw [shiftAt_self]
+      exact ⟨fun _ => (xorBytes_length _ _ (hl.trans hp.symm)).trans hl, fun hn => (hn hx).elim⟩
+    · rw [shiftAt_ne _ _ _ hxy]
+      exact hf y
+
+theorem pow256_pos : ∀ k : Nat, 0 < 256 ^ k
+  | 0 => Nat.one_pos
+  | k + 1 => by
+    rw [Nat.pow_succ]
+    exact Nat.mul_pos (pow256_pos k) (by decide)
+
+/-- The probability `256 ^ (-outLen)` of guessing one uniform `outLen`-byte value. -/
+@[expose] def tagGuessBound (outLen : Nat) : Spec.RatBound :=
+  ⟨1, 256 ^ outLen, pow256_pos outLen⟩
+
+private theorem tagPlay_log_mono {M R : Type} (enc : M → Bytes) (f : Bytes → Bytes) (q : Nat)
+    (c : Code (tagIface M) R) (log : List M) (m : M) (hm : m ∈ log) :
+    m ∈ (Code.play (tagOracle enc f q) c log).2 :=
+  Code.play_invariant (tagOracle enc f q) (fun st => m ∈ st)
+    (fun st qr h => by
+      by_cases hc : st.length < q
+      · rw [tagOracle_pos enc f q hc]
+        exact List.mem_append_left _ h
+      · rw [tagOracle_neg enc f q hc]
+        exact h)
+    c log hm
+
+/-- A run reads the keyed function only at the encodings of the answered queries. -/
+private theorem tagPlay_congr {M R : Type} (enc : M → Bytes) (f g : Bytes → Bytes) (q : Nat) :
+    ∀ (c : Code (tagIface M) R) (log : List M),
+      (∀ m ∈ (Code.play (tagOracle enc f q) c log).2, f (enc m) = g (enc m)) →
+      Code.play (tagOracle enc g q) c log = Code.play (tagOracle enc f q) c log
+  | .ret r, log, _ => by rw [Code.play_ret, Code.play_ret]
+  | .call m k, log, h => by
+    rw [Code.play_call] at h
+    rw [Code.play_call, Code.play_call (tagOracle enc f q)]
+    by_cases hc : log.length < q
+    · rw [tagOracle_pos enc f q hc] at h
+      rw [tagOracle_pos enc f q hc, tagOracle_pos enc g q hc]
+      have hm : f (enc m) = g (enc m) :=
+        h m (tagPlay_log_mono enc f q _ _ m
+          (List.mem_append_right _ (List.mem_singleton.mpr rfl)))
+      rw [← hm]
+      exact tagPlay_congr enc f g q (k (f (enc m))) (log ++ [m]) h
+    · rw [tagOracle_neg enc f q hc] at h
+      rw [tagOracle_neg enc f q hc, tagOracle_neg enc g q hc]
+      exact tagPlay_congr enc f g q (k []) log h
+
+private theorem freshPointOk_spec {M : Type} (enc : M → Bytes) (inLen : Nat)
+    (r : (M × Bytes) × List M) (h : freshPointOk enc inLen r = true) :
+    enc r.1.1 ∉ r.2.map enc ∧ (enc r.1.1).length = inLen := by
+  unfold freshPointOk at h
+  obtain ⟨h1, h2⟩ := Bool.and_eq_true_iff.mp h
+  exact ⟨of_decide_eq_true h1, of_decide_eq_true h2⟩
+
+/-- Shifting the value at a fresh output point does not change the run. -/
+private theorem shift_run_eq {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes)
+    (hC : freshPointOk enc inLen (tagRun enc f q A) = true) :
+    tagRun enc (shiftAt (enc (tagRun enc f q A).1.1) pad f) q A = tagRun enc f q A := by
+  have hFresh := (freshPointOk_spec enc inLen _ hC).1
+  unfold tagRun at hFresh ⊢
+  exact tagPlay_congr enc f _ q A [] (fun m hm =>
+    (shiftAt_ne _ pad f (fun he => hFresh (List.mem_map.mpr ⟨m, hm, he⟩))).symm)
+
+/-- The shift used by the count: at a run with a fresh in-domain output point, XOR `pad` into the
+    value there; otherwise leave the function alone. -/
+private def forgeShift {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes) : Bytes → Bytes :=
+  if freshPointOk enc inLen (tagRun enc f q A) then
+    shiftAt (enc (tagRun enc f q A).1.1) pad f
+  else f
+
+private def idealWin {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (f : Bytes → Bytes) : Bool :=
+  encFreshWin enc inLen f (tagRun enc f q A)
+
+private theorem forgeShift_false {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes)
+    (hC : freshPointOk enc inLen (tagRun enc f q A) = false) :
+    forgeShift enc q inLen A pad f = f := by
+  unfold forgeShift
+  rw [hC]
+  rfl
+
+private theorem forgeShift_true {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes)
+    (hC : freshPointOk enc inLen (tagRun enc f q A) = true) :
+    forgeShift enc q inLen A pad f = shiftAt (enc (tagRun enc f q A).1.1) pad f := by
+  unfold forgeShift
+  rw [hC]
+  rfl
+
+private theorem forgeShift_invol {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes)
+    (hLen : freshPointOk enc inLen (tagRun enc f q A) = true →
+      (f (enc (tagRun enc f q A).1.1)).length = pad.length) :
+    forgeShift enc q inLen A pad (forgeShift enc q inLen A pad f) = f := by
+  cases hC : freshPointOk enc inLen (tagRun enc f q A) with
+  | false =>
+    have h1 := forgeShift_false enc q inLen A pad f hC
+    rw [h1, h1]
+  | true =>
+    have hRun := shift_run_eq enc q inLen A pad f hC
+    have hC' : freshPointOk enc inLen
+        (tagRun enc (shiftAt (enc (tagRun enc f q A).1.1) pad f) q A) = true := by
+      rw [hRun]; exact hC
+    rw [forgeShift_true enc q inLen A pad f hC, forgeShift_true enc q inLen A pad _ hC', hRun]
+    funext y
+    by_cases hy : y = enc (tagRun enc f q A).1.1
+    · rw [hy, shiftAt_self, shiftAt_self]
+      exact xorBytes_cancel _ _ (hLen hC)
+    · rw [shiftAt_ne _ _ _ hy, shiftAt_ne _ _ _ hy]
+
+/-- If the shifted function is forged against, the unshifted run has a fresh in-domain output
+    point and its output tag is the shifted value there. -/
+private theorem shift_win {M : Type} (enc : M → Bytes) (q inLen : Nat)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (f : Bytes → Bytes)
+    (hW : idealWin enc q inLen A (forgeShift enc q inLen A pad f) = true) :
+    freshPointOk enc inLen (tagRun enc f q A) = true ∧
+      (tagRun enc f q A).1.2 = xorBytes (f (enc (tagRun enc f q A).1.1)) pad := by
+  cases hC : freshPointOk enc inLen (tagRun enc f q A) with
+  | false =>
+    rw [forgeShift_false enc q inLen A pad f hC] at hW
+    unfold idealWin encFreshWin at hW
+    rw [hC] at hW
+    exact absurd hW Bool.false_ne_true
+  | true =>
+    rw [forgeShift_true enc q inLen A pad f hC] at hW
+    unfold idealWin encFreshWin at hW
+    rw [shift_run_eq enc q inLen A pad f hC] at hW
+    have h3 := of_decide_eq_true (Bool.and_eq_true_iff.mp hW).2
+    rw [shiftAt_self] at h3
+    exact ⟨rfl, h3⟩
+
+private theorem forgeShift_support {M : Type} (enc : M → Bytes) (q inLen outLen : Nat)
+    {support : Bytes × (Bytes → Bytes) → Prop} (hClosed : SupportShiftClosed inLen outLen support)
+    (A : Code (tagIface M) (M × Bytes)) (pad : Bytes) (hPad : pad.length = outLen)
+    (k : Bytes) (f : Bytes → Bytes) (hS : support (k, f)) :
+    support (k, forgeShift enc q inLen A pad f) := by
+  cases hC : freshPointOk enc inLen (tagRun enc f q A) with
+  | false => rw [forgeShift_false enc q inLen A pad f hC]; exact hS
+  | true =>
+    rw [forgeShift_true enc q inLen A pad f hC]
+    exact hClosed.2 k f hS _ pad (freshPointOk_spec enc inLen _ hC).2 hPad
+
+/-- The `outLen`-byte pad with index `p`. -/
+private def padOf (outLen : Nat) (p : Fin (256 ^ outLen)) : Bytes :=
+  encodeNatLeBytes outLen p.val
+
+private theorem padOf_injective (outLen : Nat) (p p' : Fin (256 ^ outLen))
+    (h : padOf outLen p = padOf outLen p') : p = p' := by
+  apply Fin.ext
+  have h1 := decodeNatLeBytes_encodeNatLeBytes outLen p.val p.2
+  have h2 := decodeNatLeBytes_encodeNatLeBytes outLen p'.val p'.2
+  unfold padOf at h
+  rw [h] at h1
+  exact h1.symm.trans h2
+
+/-- For one adversary program: among the coins of a uniform sampler on a shift-closed set, the
+    forging ones are at most a `256 ^ (-outLen)` fraction. -/
+private theorem idealWin_count {nC : Nat} {M : Type} (enc : M → Bytes) (q inLen outLen : Nat)
+    {support : Bytes × (Bytes → Bytes) → Prop} (hClosed : SupportShiftClosed inLen outLen support)
+    (sample : Fin nC → Bytes × (Bytes → Bytes)) (hU : UniformOn support sample)
+    (A : Code (tagIface M) (M × Bytes)) :
+    sampleSum nC (fun c => if idealWin enc q inLen A (sample c).2 then 1 else 0) * 256 ^ outLen ≤
+      nC := by
+  refine shift_count (fun c => idealWin enc q inLen A (sample c).2)
+    (fun p c => idealWin enc q inLen A (forgeShift enc q inLen A (padOf outLen p) (sample c).2))
+    (fun p => ?_) (fun c p p' hp hp' => ?_)
+  · have hPadLen : (padOf outLen p).length = outLen := encodeNatLeBytes_length outLen p.val
+    obtain ⟨s, hs⟩ := fin_choice nC
+      (fun c c' => sample c' =
+        ((sample c).1, forgeShift enc q inLen A (padOf outLen p) (sample c).2))
+      (fun c => hU.surjective _
+        (forgeShift_support enc q inLen outLen hClosed A _ hPadLen _ _ (hU.mem c)))
+    refine ⟨s, fun c => hU.injective _ _ ?_, fun c => by rw [hs c]⟩
+    have hInv := forgeShift_invol enc q inLen A (padOf outLen p) (sample c).2 (fun hC =>
+      (hClosed.1 _ _ (hU.mem c) _ (freshPointOk_spec enc inLen _ hC).2).trans hPadLen.symm)
+    rw [hs (s c), hs c]
+    show ((sample c).1, forgeShift enc q inLen A (padOf outLen p)
+      (forgeShift enc q inLen A (padOf outLen p) (sample c).2)) = sample c
+    rw [hInv]
+  · obtain ⟨hC, h1⟩ := shift_win enc q inLen A (padOf outLen p) (sample c).2 hp
+    obtain ⟨_, h2⟩ := shift_win enc q inLen A (padOf outLen p') (sample c).2 hp'
+    have hLen := hClosed.1 _ _ (hU.mem c) _ (freshPointOk_spec enc inLen _ hC).2
+    exact padOf_injective outLen p p'
+      (xorBytes_right_inj _ _ _
+        (hLen.trans (encodeNatLeBytes_length outLen p.val).symm)
+        (hLen.trans (encodeNatLeBytes_length outLen p'.val).symm) (h1.symm.trans h2))
+
+/-- **Forgery against a uniformly sampled function has probability at most `256 ^ (-outLen)`.**
+    The function is the second component of a sample that is uniform on a set closed under
+    resampling one in-domain value (`SupportShiftClosed`); the adversary is randomized, adaptive
+    and unbounded, and the challenger answers `q` queries. The count pairs every forging coin
+    with the `256 ^ outLen` coins whose function differs from it by an XOR pad at the forged
+    input: the adversary's run is the same on all of them, and at most one carries the tag it
+    outputs. -/
+theorem encFreshTagGame_random_function_bound {n nC nA : Nat} (hPos : 0 < n) {M : Type}
+    (enc : M → Bytes) (q inLen outLen : Nat)
+    {support : Bytes × (Bytes → Bytes) → Prop} (hClosed : SupportShiftClosed inLen outLen support)
+    (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × (Bytes → Bytes))
+    (hU : UniformOn support sample)
+    (adv : Fin nA → Code (tagIface M) (M × Bytes)) :
+    GameBound
+      (encFreshTagGame hPos enc q inLen (fun ω => (sample (π.chal ω)).2)
+        (fun ω => adv (π.advc ω))).winProb
+      (tagGuessBound outLen) := by
+  show (encFreshTagGame hPos enc q inLen (fun ω => (sample (π.chal ω)).2)
+    (fun ω => adv (π.advc ω))).winCount * 256 ^ outLen ≤ 1 * n
+  rw [Nat.one_mul, FinGame.winCount_eq]
+  let π' : CoinSplit n nA nC :=
+    { chal := π.advc
+      advc := π.chal
+      pair := fun a c => π.pair c a
+      chal_pair := fun a c => π.advc_pair c a
+      advc_pair := fun a c => π.chal_pair c a
+      pair_eta := π.pair_eta }
+  rw [CoinSplit.sampleSum_eq π']
+  have hRe : ∀ a : Fin nA,
+      sampleSum nC (fun c => if (encFreshTagGame hPos enc q inLen
+        (fun ω => (sample (π.chal ω)).2) (fun ω => adv (π.advc ω))).win (π'.pair a c)
+        then 1 else 0) =
+      sampleSum nC (fun c => if idealWin enc q inLen (adv a) (sample c).2 then 1 else 0) :=
+    fun a => ssum_congr (fun c => by
+      show (if encFreshWin enc inLen (sample (π.chal (π.pair c a))).2
+        (tagRun enc (sample (π.chal (π.pair c a))).2 q (adv (π.advc (π.pair c a)))) = true
+        then 1 else 0) = _
+      rw [π.chal_pair, π.advc_pair]
+      rfl)
+  rw [ssum_congr hRe, ← ssum_mul_right]
+  have h1 := ssum_le nA _ _
+    (fun a => idealWin_count enc q inLen outLen hClosed sample hU (adv a))
+  rw [ssum_const] at h1
+  rw [CoinSplit.card_eq π, Nat.mul_comm nC nA]
+  exact h1
+
+/-! ## 6. Forgery bounds under `Spec.PrfHard` -/
+
+/-- **A PRF is an unforgeable tag.** Under `Spec.PrfHard` with `q + 1` queries, an adaptive
+    adversary that sees `q` tags under a uniform key outputs a correct tag on a fresh `inLen`-byte
+    input with probability at most `ε + 256 ^ (-outLen)`. The reduction is
+    `tagForgeDistinguisher`; `hD` places it in the class the hardness is assumed for. -/
+theorem prfTag_forgery_bound {n nC nA : Nat} (hPos : 0 < n) {M : Type} (enc : M → Bytes)
+    (q inLen : Nat) (prf : Bytes → Bytes → Bytes) (keyLen outLen : Nat)
+    {𝒜 : Code byteOracleIface Bool → Prop} {ε : Spec.RatBound}
+    (hPrf : PrfHard 𝒜 prf keyLen inLen outLen (q + 1) ε)
+    (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × (Bytes → Bytes))
+    (hU : UniformOn (PrfSampleOk keyLen inLen outLen) sample)
+    (adv : Fin nA → Code (tagIface M) (M × Bytes))
+    (hD : ∀ a : Fin nA, 𝒜 (tagForgeDistinguisher enc q inLen (adv a))) :
+    GameBound
+      (encFreshTagGame hPos enc q inLen (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω))).winProb
+      (ε.add (tagGuessBound outLen)) :=
+  GameBound.trans
+    (winProb_le_advDist_add _
+      (encFreshTagGame hPos enc q inLen (fun ω => (sample (π.chal ω)).2)
+        (fun ω => adv (π.advc ω))))
+    (Spec.RatBound.add_le_add
+      (tagForge_prf_hop hPos enc q inLen prf keyLen outLen hPrf π sample hU adv hD)
+      (encFreshTagGame_random_function_bound hPos enc q inLen outLen (prfSampleOk_shiftClosed keyLen inLen outLen) π sample hU adv))
+
+/-- **Existential unforgeability under adaptive chosen-message attack**, for messages encoded to
+    the input length of the PRF. A forgery on a message that was not queried has probability at
+    most `ε + 256 ^ (-outLen)` plus the probability that the run exhibits two different messages
+    with one encoding. -/
+theorem eufCmaTag_forgery_bound {n nC nA : Nat} (hPos : 0 < n) {M : Type} [DecidableEq M]
+    (enc : M → Bytes) (q inLen : Nat) (hLen : ∀ m : M, (enc m).length = inLen)
+    (prf : Bytes → Bytes → Bytes) (keyLen outLen : Nat)
+    {𝒜 : Code byteOracleIface Bool → Prop} {ε : Spec.RatBound}
+    (hPrf : PrfHard 𝒜 prf keyLen inLen outLen (q + 1) ε)
+    (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × (Bytes → Bytes))
+    (hU : UniformOn (PrfSampleOk keyLen inLen outLen) sample)
+    (adv : Fin nA → Code (tagIface M) (M × Bytes))
+    (hD : ∀ a : Fin nA, 𝒜 (tagForgeDistinguisher enc q inLen (adv a))) :
+    GameBound
+      (eufCmaTagGame hPos enc q (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω))).winProb
+      ((ε.add (tagGuessBound outLen)).add
+        (encCollisionGame hPos enc q (fun ω => prf (sample (π.chal ω)).1)
+          (fun ω => adv (π.advc ω))).winProb) :=
+  GameBound.trans
+    (event_le_two_reductions _
+      (encFreshTagGame hPos enc q inLen (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω)))
+      (encCollisionGame hPos enc q (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω)))
+      (fun _ h => msgFreshWin_encFresh_or_collision enc inLen hLen _ _ h))
+    (Spec.RatBound.add_le_add
+      (prfTag_forgery_bound hPos enc q inLen prf keyLen outLen hPrf π sample hU adv hD)
+      (Spec.RatBound.le_refl _))
+
+/-- In the permit experiment the challenger's answer to an admitted query is `prfCustodyTag`. -/
+theorem tagOracle_answers_prfCustodyTag (prf : Bytes → Bytes → Bytes) (dg : Bytes → Bytes)
+    (key : Bytes) (q : Nat) {log : List CustodyApproval} (h : log.length < q)
+    (permit : CustodyApproval) :
+    (tagOracle (permitInput dg) (prf key) q log permit).1 = prfCustodyTag prf dg key permit := by
+  rw [tagOracle_pos _ _ _ h, prfCustodyTag_eq]
+
+/-- A collision of permit inputs between two different permits is a collision of the digest. -/
+theorem permitCollision_yields_digest_collision (dg : Bytes → Bytes)
+    (r : (CustodyApproval × Bytes) × List CustodyApproval)
+    (h : encCollision (permitInput dg) r = true) : Nonempty (HashCollision dg) := by
+  unfold encCollision at h
+  obtain ⟨m, _, hm⟩ := List.any_eq_true.mp h
+  obtain ⟨hNe, hEq⟩ := Bool.and_eq_true_iff.mp hm
+  exact ⟨⟨encodePermit m, encodePermit r.1.1,
+    fun hEnc => (of_decide_eq_true hNe) (encodePermit_injective hEnc), of_decide_eq_true hEq⟩⟩
+
+/-- **`prfCustodyTag` is unforgeable after `q` adaptive honest tags.** The adversary asks for the
+    tags of `q` permits of its choice under a uniform custodian key and outputs a permit it did
+    not ask for together with a tag. With a digest `dg` to `inLen` bytes, the output tag is
+    `prfCustodyTag prf dg key` of that permit with probability at most `ε + 256 ^ (-outLen)` plus
+    the probability that two different permits of the run have one digest. -/
+theorem prfCustodyTag_unforgeable {n nC nA : Nat} (hPos : 0 < n)
+    (dg : Bytes → Bytes) (q inLen : Nat) (hLen : ∀ x : Bytes, (dg x).length = inLen)
+    (prf : Bytes → Bytes → Bytes) (keyLen outLen : Nat)
+    {𝒜 : Code byteOracleIface Bool → Prop} {ε : Spec.RatBound}
+    (hPrf : PrfHard 𝒜 prf keyLen inLen outLen (q + 1) ε)
+    (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × (Bytes → Bytes))
+    (hU : UniformOn (PrfSampleOk keyLen inLen outLen) sample)
+    (adv : Fin nA → Code (tagIface CustodyApproval) (CustodyApproval × Bytes))
+    (hD : ∀ a : Fin nA, 𝒜 (tagForgeDistinguisher (permitInput dg) q inLen (adv a))) :
+    GameBound
+      (eufCmaTagGame hPos (permitInput dg) q (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω))).winProb
+      ((ε.add (tagGuessBound outLen)).add
+        (encCollisionGame hPos (permitInput dg) q (fun ω => prf (sample (π.chal ω)).1)
+          (fun ω => adv (π.advc ω))).winProb) ∧
+    (∀ ω : Fin n,
+      (eufCmaTagGame hPos (permitInput dg) q (fun ω => prf (sample (π.chal ω)).1)
+        (fun ω => adv (π.advc ω))).win ω = true →
+      (tagRun (permitInput dg) (prf (sample (π.chal ω)).1) q (adv (π.advc ω))).1.1 ∉
+        (tagRun (permitInput dg) (prf (sample (π.chal ω)).1) q (adv (π.advc ω))).2 ∧
+      (tagRun (permitInput dg) (prf (sample (π.chal ω)).1) q (adv (π.advc ω))).1.2 =
+        prfCustodyTag prf dg (sample (π.chal ω)).1
+          (tagRun (permitInput dg) (prf (sample (π.chal ω)).1) q (adv (π.advc ω))).1.1) := by
+  refine ⟨eufCmaTag_forgery_bound hPos (permitInput dg) q inLen
+    (fun m => hLen (encodePermit m)) prf keyLen outLen hPrf π sample hU adv hD, ?_⟩
+  intro ω hWin
+  obtain ⟨h1, h2⟩ := eufCmaTagGame_win_sound hPos (permitInput dg) q _ _ ω hWin
+  exact ⟨h1, h2.trans (prfCustodyTag_eq prf dg _ _).symm⟩
+
+/-- **Union over `k` custodian keys.** `G₀` is any event of the coin space such that each of its
+    coins is a fresh-input forgery under the key of one of `k` custodians; custodian `p`'s key is
+    the challenger coordinate of its own split `π p`, and its forger `adv p` reads the other
+    coordinate. Under `Spec.PrfHard`, `G₀` has probability at most
+    `k * (ε + 256 ^ (-outLen))`. -/
+theorem custodianKeys_forgery_union_bound {n k : Nat} (hPos : 0 < n) {M : Type}
+    (enc : M → Bytes) (q inLen : Nat) (prf : Bytes → Bytes → Bytes) (keyLen outLen : Nat)
+    {𝒜 : Code byteOracleIface Bool → Prop} {ε : Spec.RatBound}
+    (hPrf : PrfHard 𝒜 prf keyLen inLen outLen (q + 1) ε)
+    (nC nA : Fin k → Nat) (π : (p : Fin k) → CoinSplit n (nC p) (nA p))
+    (sample : (p : Fin k) → Fin (nC p) → Bytes × (Bytes → Bytes))
+    (hU : ∀ p : Fin k, UniformOn (PrfSampleOk keyLen inLen outLen) (sample p))
+    (adv : (p : Fin k) → Fin (nA p) → Code (tagIface M) (M × Bytes))
+    (hD : ∀ (p : Fin k) (a : Fin (nA p)), 𝒜 (tagForgeDistinguisher enc q inLen (adv p a)))
+    (G₀ : FinGame n)
+    (hExtract : ∀ ω : Fin n, G₀.win ω = true → ∃ p : Fin k,
+      (encFreshTagGame hPos enc q inLen (fun ω => prf (sample p ((π p).chal ω)).1)
+        (fun ω => adv p ((π p).advc ω))).win ω = true) :
+    GameBound G₀.winProb ((ε.add (tagGuessBound outLen)).scale k) :=
+  event_le_family_reductions G₀
+    (fun p => encFreshTagGame hPos enc q inLen (fun ω => prf (sample p ((π p).chal ω)).1)
+      (fun ω => adv p ((π p).advc ω)))
+    hExtract
+    (fun p => prfTag_forgery_bound hPos enc q inLen prf keyLen outLen hPrf (π p)
+      (sample p) (hU p) (adv p) (hD p))
+
+/-! ## 7. Negative results -/
+
+/-- The toy tag of a MAC-style layer whose certificate carries the key: the tag is the key. -/
+def toyCustodyTag (key : Bytes) : Bytes → Bytes :=
+  fun _ => key
+
+/-- One honest tag on `m₀`, then the same tag on `m₁`. -/
+def toyKeyRecoveryAdv {M : Type} (m₀ m₁ : M) : Code (tagIface M) (M × Bytes) :=
+  .call (E := tagIface M) m₀ (fun t => .ret (m₁, t))
+
+/-- The key-recovery adversary forges against the toy tag on every coin. -/
+theorem toyKeyRecoveryAdv_wins {n : Nat} (hPos : 0 < n) {M : Type} (enc : M → Bytes)
+    (key : Fin n → Bytes) (m₀ m₁ : M) (hNe : enc m₀ ≠ enc m₁) {q : Nat} (hq : 0 < q)
+    (ω : Fin n) :
+    (encFreshTagGame hPos enc q (enc m₁).length (fun ω => toyCustodyTag (key ω))
+      (fun _ => toyKeyRecoveryAdv m₀ m₁)).win ω = true := by
+  have hRun : tagRun enc (toyCustodyTag (key ω)) q (toyKeyRecoveryAdv m₀ m₁) =
+      ((m₁, key ω), [m₀]) := by
+    unfold tagRun toyKeyRecoveryAdv
+    have h0 : ([] : List M).length < q := hq
+    rw [Code.play_call, tagOracle_pos enc _ q h0, Code.play_ret]
+    rfl
+  have hWin : encFreshWin enc (enc m₁).length (toyCustodyTag (key ω))
+      (tagRun enc (toyCustodyTag (key ω)) q (toyKeyRecoveryAdv m₀ m₁)) = true := by
+    rw [hRun]
+    have h1 : enc m₁ ∉ [m₀].map enc := fun h => hNe (List.mem_singleton.mp h).symm
+    have h3 : key ω = toyCustodyTag (key ω) (enc m₁) := by rfl
+    show (decide (enc m₁ ∉ [m₀].map enc) && decide ((enc m₁).length = (enc m₁).length) &&
+      decide (key ω = toyCustodyTag (key ω) (enc m₁))) = true
+    rw [decide_eq_true h1, decide_eq_true (rfl : (enc m₁).length = (enc m₁).length),
+      decide_eq_true h3]
+    rfl
+  have hGame : (encFreshTagGame hPos enc q (enc m₁).length (fun ω => toyCustodyTag (key ω))
+      (fun _ => toyKeyRecoveryAdv m₀ m₁)).win ω = true := hWin
+  exact hGame
+
+/-- **A tag that reveals the key is forged after one honest tag.** In the experiment in which
+    `prfTag_forgery_bound` holds for a PRF, the toy tag is forged with probability one by an
+    adversary that makes a single query: no bound below `1` holds for it. -/
+theorem tooth_toyCustodyTag_one_query_forgery {n : Nat} (hPos : 0 < n) {M : Type}
+    (enc : M → Bytes) (key : Fin n → Bytes) (m₀ m₁ : M) (hNe : enc m₀ ≠ enc m₁)
+    {q : Nat} (hq : 0 < q) {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound
+      (encFreshTagGame hPos enc q (enc m₁).length (fun ω => toyCustodyTag (key ω))
+        (fun _ => toyKeyRecoveryAdv m₀ m₁)).winProb ε :=
+  FinGame.not_bound_of_forall_win _
+    (fun ω => toyKeyRecoveryAdv_wins hPos enc key m₀ m₁ hNe hq ω) hε
+
+/-- The same for approval permits under `encodePermit`: after one honest toy tag on a permit, a
+    different permit is certified with probability one. -/
+theorem tooth_toyPermitTag_one_query_forgery {n : Nat} (hPos : 0 < n) (key : Fin n → Bytes)
+    (p₀ p₁ : CustodyApproval) (hNe : p₀ ≠ p₁) {q : Nat} (hq : 0 < q)
+    {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound
+      (encFreshTagGame hPos encodePermit q (encodePermit p₁).length
+        (fun ω => toyCustodyTag (key ω)) (fun _ => toyKeyRecoveryAdv p₀ p₁)).winProb ε :=
+  tooth_toyCustodyTag_one_query_forgery hPos encodePermit key p₀ p₁
+    (fun h => hNe (encodePermit_injective h)) hq hε
+
+/-- **The closure hypothesis of the count is necessary.** A sampler that is uniform on a
+    one-element set (`Spec.uniformOn_unique`) fixes the function; an adversary that outputs the
+    value of that function without any query forges on every coin, so the bound
+    `256 ^ (-(outLen + 1))` of `encFreshTagGame_random_function_bound` fails. -/
+theorem tooth_singleFunction_support_forged {M : Type} (enc : M → Bytes) (m : M)
+    (f₀ : Bytes → Bytes) (q outLen : Nat) :
+    ¬ GameBound
+      (encFreshTagGame Nat.one_pos enc q (enc m).length (fun _ : Fin 1 => f₀)
+        (fun _ => Code.ret (m, f₀ (enc m)))).winProb
+      (tagGuessBound (outLen + 1)) := by
+  refine FinGame.not_bound_of_forall_win _ (fun ω => ?_) ?_
+  · have hRun : tagRun enc f₀ q (Code.ret (E := tagIface M) (m, f₀ (enc m))) =
+        ((m, f₀ (enc m)), []) := by
+      unfold tagRun
+      rw [Code.play_ret]
+    show encFreshWin enc (enc m).length f₀
+      (tagRun enc f₀ q (Code.ret (E := tagIface M) (m, f₀ (enc m)))) = true
+    rw [hRun]
+    have h1 : enc m ∉ ([] : List M).map enc := fun h => nomatch h
+    show (decide (enc m ∉ ([] : List M).map enc) && decide ((enc m).length = (enc m).length) &&
+      decide (f₀ (enc m) = f₀ (enc m))) = true
+    rw [decide_eq_true h1, decide_eq_true (rfl : (enc m).length = (enc m).length),
+      decide_eq_true (rfl : f₀ (enc m) = f₀ (enc m))]
+    rfl
+  · show 1 < 256 ^ (outLen + 1)
+    rw [Nat.pow_succ]
+    have := pow256_pos outLen
+    omega
+
+/-! ## 8. A non-degenerate instance of the count -/
+
+/-- The keyed-function sample set with empty key, the single input `[]` and one-byte values. -/
+def oneByteSupport (x : Bytes × (Bytes → Bytes)) : Prop :=
+  x.1 = [] ∧ (x.2 []).length = 1 ∧ ∀ y : Bytes, y ≠ [] → x.2 y = []
+
+/-- Its sampler: coin `i` gives the function with value `[i]` at `[]`. -/
+def oneByteSample (i : Fin 256) : Bytes × (Bytes → Bytes) :=
+  ([], fun y => if y = [] then [UInt8.ofNat i.val] else [])
+
+theorem oneByteSample_uniform : UniformOn oneByteSupport oneByteSample where
+  mem i := ⟨rfl, by
+    show (if ([] : Bytes) = [] then [UInt8.ofNat i.val] else []).length = 1
+    rw [ifPos rfl]
+    rfl, fun y hy => ifNeg hy _ _⟩
+  injective c c' h := by
+    have h1 : (oneByteSample c).2 [] = (oneByteSample c').2 [] := by rw [h]
+    have h2 : [UInt8.ofNat c.val] = [UInt8.ofNat c'.val] := by
+      have e1 : (oneByteSample c).2 [] = [UInt8.ofNat c.val] := by
+        show (if ([] : Bytes) = [] then [UInt8.ofNat c.val] else []) = [UInt8.ofNat c.val]
+        rw [ifPos rfl]
+      have e2 : (oneByteSample c').2 [] = [UInt8.ofNat c'.val] := by
+        show (if ([] : Bytes) = [] then [UInt8.ofNat c'.val] else []) = [UInt8.ofNat c'.val]
+        rw [ifPos rfl]
+      rw [← e1, ← e2]
+      exact h1
+    have h3 := congrArg UInt8.toNat (List.cons.inj h2).1
+    rw [UInt8.toNat_ofNat', UInt8.toNat_ofNat', Nat.mod_eq_of_lt c.2, Nat.mod_eq_of_lt c'.2] at h3
+    exact Fin.ext h3
+  surjective x hx := by
+    obtain ⟨k, f⟩ := x
+    obtain ⟨hk, hLen, hOff⟩ := hx
+    have hk' : k = [] := hk
+    have hLen' : (f []).length = 1 := hLen
+    have hOff' : ∀ y : Bytes, y ≠ [] → f y = [] := hOff
+    cases hv : f [] with
+    | nil => rw [hv] at hLen'; exact absurd hLen' (by decide)
+    | cons b rest =>
+      rw [hv] at hLen'
+      have hRest : rest = [] := List.length_eq_zero_iff.mp (Nat.succ.inj hLen')
+      refine ⟨⟨b.toNat, b.toBitVec.isLt⟩, ?_⟩
+      rw [hk']
+      show (([] : Bytes), fun y => if y = [] then [UInt8.ofNat b.toNat] else []) = ([], f)
+      have hf : (fun y : Bytes => if y = [] then [UInt8.ofNat b.toNat] else []) = f := by
+        funext y
+        by_cases hy : y = []
+        · rw [ifPos hy, hy, hv, hRest, UInt8.ofNat_toNat]
+        · rw [ifNeg hy, hOff' y hy]
+      rw [hf]
+
+theorem oneByteSupport_shiftClosed : SupportShiftClosed 0 1 oneByteSupport := by
+  refine ⟨fun k f hS x hx => ?_, fun k f hS x pad hx hPad => ?_⟩
+  · rw [List.length_eq_zero_iff.mp hx]
+    exact hS.2.1
+  · have hx' : x = [] := List.length_eq_zero_iff.mp hx
+    obtain ⟨hk, hLen, hOff⟩ := hS
+    have hLen' : (f []).length = 1 := hLen
+    refine ⟨hk, ?_, fun y hy => ?_⟩
+    · show (shiftAt x pad f []).length = 1
+      rw [hx', shiftAt_self, xorBytes_length _ _ (hLen'.trans hPad.symm)]
+      exact hLen'
+    · show shiftAt x pad f y = []
+      rw [hx', shiftAt_ne _ _ _ hy]
+      exact hOff y hy
+
+/-- **The count on a 256-element sample set.** Against a uniform one-byte value, every adaptive
+    adversary with any query budget forges on a fresh input with probability at most `1 / 256`:
+    `encFreshTagGame_random_function_bound` at a sampler and a closure proof constructed here. -/
+theorem witness_oneByte_random_function_bound {n nA : Nat} (hPos : 0 < n) {M : Type}
+    (enc : M → Bytes) (q : Nat) (π : CoinSplit n 256 nA)
+    (adv : Fin nA → Code (tagIface M) (M × Bytes)) :
+    GameBound
+      (encFreshTagGame hPos enc q 0 (fun ω => (oneByteSample (π.chal ω)).2)
+        (fun ω => adv (π.advc ω))).winProb
+      (tagGuessBound 1) :=
+  encFreshTagGame_random_function_bound hPos enc q 0 1 oneByteSupport_shiftClosed π
+    oneByteSample oneByteSample_uniform adv
+
+#verify_constructive
+  Qsag.KeyHidingCustody.event_le_family_reductions
+  Qsag.KeyHidingCustody.refinesOfEq_rel
+  Qsag.KeyHidingCustody.refinesOfEq_absInit
+  Qsag.KeyHidingCustody.refinesOfEq_runStep
+  Qsag.KeyHidingCustody.encodePermit_injective
+  Qsag.KeyHidingCustody.prfCustodyTag_eq
+  Qsag.KeyHidingCustody.tagOracle_pos
+  Qsag.KeyHidingCustody.tagOracle_neg
+  Qsag.KeyHidingCustody.tagRun_log_length_le
+  Qsag.KeyHidingCustody.eufCmaTagGame_win_sound
+  Qsag.KeyHidingCustody.msgFreshWin_encFresh_or_collision
+  Qsag.KeyHidingCustody.play_bind
+  Qsag.KeyHidingCustody.relay_ret
+  Qsag.KeyHidingCustody.relay_call
+  Qsag.KeyHidingCustody.relay_within
+  Qsag.KeyHidingCustody.relay_play
+  Qsag.KeyHidingCustody.tagForgeDistinguisher_within
+  Qsag.KeyHidingCustody.tagViewDistinguisher_within
+  Qsag.KeyHidingCustody.tagForgeDistinguisher_play
+  Qsag.KeyHidingCustody.tagViewDistinguisher_play
+  Qsag.KeyHidingCustody.tagForge_prf_hop
+  Qsag.KeyHidingCustody.prfTag_view_key_hiding
+  Qsag.KeyHidingCustody.xorBytes_length
+  Qsag.KeyHidingCustody.xorBytes_cancel
+  Qsag.KeyHidingCustody.xorBytes_right_inj
+  Qsag.KeyHidingCustody.shiftAt_self
+  Qsag.KeyHidingCustody.shiftAt_ne
+  Qsag.KeyHidingCustody.pow256_pos
+  Qsag.KeyHidingCustody.encFreshTagGame_random_function_bound
+  Qsag.KeyHidingCustody.prfTag_forgery_bound
+  Qsag.KeyHidingCustody.eufCmaTag_forgery_bound
+  Qsag.KeyHidingCustody.tagOracle_answers_prfCustodyTag
+  Qsag.KeyHidingCustody.permitCollision_yields_digest_collision
+  Qsag.KeyHidingCustody.prfCustodyTag_unforgeable
+  Qsag.KeyHidingCustody.custodianKeys_forgery_union_bound
+  Qsag.KeyHidingCustody.toyKeyRecoveryAdv_wins
+  Qsag.KeyHidingCustody.tooth_toyCustodyTag_one_query_forgery
+  Qsag.KeyHidingCustody.tooth_toyPermitTag_one_query_forgery
+  Qsag.KeyHidingCustody.tooth_singleFunction_support_forged
+  Qsag.KeyHidingCustody.oneByteSample_uniform
+  Qsag.KeyHidingCustody.oneByteSupport_shiftClosed
+  Qsag.KeyHidingCustody.witness_oneByte_random_function_bound
+
+#tooth_pair Qsag.KeyHidingCustody.prfTag_forgery_bound vs
+  Qsag.KeyHidingCustody.tooth_toyCustodyTag_one_query_forgery
+#tooth_pair Qsag.KeyHidingCustody.prfCustodyTag_unforgeable vs
+  Qsag.KeyHidingCustody.tooth_toyPermitTag_one_query_forgery
+#tooth_pair Qsag.KeyHidingCustody.encFreshTagGame_random_function_bound vs
+  Qsag.KeyHidingCustody.tooth_singleFunction_support_forged
+
+/-! Kernel-checked defining equations of the tag experiments, for importers that build new
+    adversaries against them (`Qsag.Top.CertCustodyAdaptiveBound`). No body is exposed. -/
+#export_eqns tagRun encFreshWin msgFreshWin encCollision encFreshTagGame eufCmaTagGame
+  encCollisionGame permitInput prfCustodyTag
+
+/-- Projection lemma for `freshPointOk` (its compiler equation mentions a private proof term). -/
+theorem freshPointOk_eq_true_iff {M : Type} (enc : M → Bytes) (inLen : Nat)
+    (r : (M × Bytes) × List M) :
+    freshPointOk enc inLen r = true ↔
+      enc r.1.1 ∉ r.2.map enc ∧ (enc r.1.1).length = inLen := by
+  unfold freshPointOk
+  rw [Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq]
+
+#verify_constructive Qsag.KeyHidingCustody.freshPointOk_eq_true_iff
+
+end Qsag.KeyHidingCustody
+end
