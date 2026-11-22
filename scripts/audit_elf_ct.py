@@ -492,12 +492,24 @@ def is_rust_non_crypto_helper(sym: str) -> bool:
         return True
     # Destructors are storage management, except those of the secret-erasing guards: their
     # glue is the code that walks and wipes the secret, so it is screened like a kernel.
-    if "drop_in_place" in sym or "drop_glue" in sym:
+    if ("drop_in_place" in sym or "drop_glue" in sym
+            or " as core::ops::drop::Drop>::drop" in sym):
         return secret_guard_drop_kind(sym) != "flat"
     return False
 
 
-_GUARD_DROP = re.compile(r"drop_(?:in_place|glue)::<qsag_asm::wipe::(SecretBuffer|SecretScratch)<(.*)$")
+_GUARD_DROP_GLUE = re.compile(
+    r"drop_(?:in_place|glue)::<qsag_asm::wipe::(SecretBuffer|SecretScratch)<(.*)>(?:\s*\([^)]*\))?$"
+)
+_GUARD_DROP_TRAIT = re.compile(
+    r"^<qsag_asm::wipe::(SecretBuffer|SecretScratch)<(.*)>\s+as\s+core::ops::drop::Drop>::drop(?:\s*\([^)]*\))?$"
+)
+
+
+def _match_guard_drop(sym: str) -> tuple[str, str] | None:
+    s = sym.strip()
+    m = _GUARD_DROP_GLUE.search(s) or _GUARD_DROP_TRAIT.match(s)
+    return (m.group(1), m.group(2)) if m else None
 
 
 def secret_guard_drop_kind(sym: str) -> str | None:
@@ -509,10 +521,10 @@ def secret_guard_drop_kind(sym: str) -> str | None:
     cannot tell them from secret words, so those destructors are counted and reported, not
     checked.
     """
-    match = _GUARD_DROP.search(sym)
-    if not match:
+    parsed = _match_guard_drop(sym)
+    if not parsed:
         return None
-    guard, payload = match.groups()
+    guard, payload = parsed
     if guard == "SecretBuffer" and payload.startswith("alloc::vec::Vec<"):
         payload = payload[len("alloc::vec::Vec<"):]
     return "nested" if "alloc::" in payload else "flat"
@@ -527,9 +539,9 @@ def has_public_vec_header_argument(sym: str) -> bool:
     """
     if "qsag_asm::wipe::secret_vec_" in sym:
         return True
-    match = _GUARD_DROP.search(sym)
-    return bool(match) and secret_guard_drop_kind(sym) == "flat" and (
-        match[1] == "SecretScratch" or match[2].startswith("alloc::vec::Vec<"))
+    parsed = _match_guard_drop(sym)
+    return bool(parsed) and secret_guard_drop_kind(sym) == "flat" and (
+        parsed[0] == "SecretScratch" or parsed[1].startswith("alloc::vec::Vec<"))
 
 
 def is_branchless_portable_primitive(sym: str) -> bool:
@@ -551,8 +563,56 @@ def is_branchless_portable_primitive(sym: str) -> bool:
     return any(name in sym for name in straight_line_names)
 
 
+PROTOCOL_RUST_MODULES = (
+    "qsag_hd::linear_module::",
+    "qsag_core::rss256::",
+    "qsag_core::wots_c::",
+    "qsag_quorum::dzk::",
+)
+PROTOCOL_FLAT_PRIMITIVES = (
+    "ct_reduce_mod_q_",
+    "const_reduce_mod_q_",
+    "::mod_q_",
+    "Gf128::add",
+    "Gf128::mul",
+    "Gf128::from_bytes",
+    "Gf128::to_bytes",
+    "::keccak_linear_layer",
+    "::ternary_expand",
+)
+
+
+def has_flat_kernel_abi(sym: str) -> bool:
+    """True when `sym` obeys the flat-slice / scalar primitive kernel entry ABI of `rust_errors`.
+
+    All `qsag_asm::*` kernels, flat `SecretBuffer`/`SecretScratch` destructors, and scalar/flat
+    arithmetic helpers in protocol crates use the full taint screen by default. Higher-level
+    protocol functions in `PROTOCOL_RUST_MODULES` pass struct/Vec descriptors or public protocol
+    state; in default mode they enforce upper-YMM/ZMM hygiene, vector-wipe rules, and zero
+    hardware dividers or gathers (`--strict-rust-branches` applies `rust_errors` to them too).
+    """
+    outer = outer_rust_symbol(sym)
+    if not any(m in outer for m in PROTOCOL_RUST_MODULES):
+        return True
+    return any(p in outer for p in PROTOCOL_FLAT_PRIMITIVES)
+
+
+def protocol_instruction_errors(sym: str, instrs: list[tuple[str, str]], machine: int) -> list[str]:
+    """Instruction-class screen for struct-ABI protocol functions (`0` dividers, `0` gathers)."""
+    if not instrs:
+        return [f"{sym}: empty instruction stream"]
+    errors = []
+    for idx, (mnemonic, operands) in enumerate(instrs):
+        if (mnemonic in X86_DIV_MNEMONICS | AARCH64_DIV_MNEMONICS
+                or mnemonic.startswith(("fdiv", "vdiv"))):
+            errors.append(f"{sym}[{idx}]: forbidden divider `{mnemonic} {operands}`")
+        if machine == 62 and mnemonic in X86_GATHER_MNEMONICS:
+            errors.append(f"{sym}[{idx}]: gather requires an address contract `{mnemonic} {operands}`")
+    return errors
+
+
 def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
-    """Check upper-YMM/ZMM hygiene and the shared architecture-aware taint screen."""
+    """Check upper-YMM/ZMM hygiene and the shared architecture-aware taint or protocol screen."""
     errors = []
     relocations = getattr(instrs, "relocations", {})
     ymm_dirty = False
@@ -565,7 +625,12 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]], stri
         is_tail_call = idx in relocations and (mnem in ("jmp", "jmpq") or conditional(mnem))
         if (mnem in ("call", "callq", "ret", "retq") or is_tail_call) and ymm_dirty:
             errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM/ZMM state")
-    return errors + vector_wipe_errors(sym, instrs, 62) + rust_errors(sym, instrs, strict, machine=62)
+    body_errors = (
+        rust_errors(sym, instrs, strict, machine=62)
+        if (strict or has_flat_kernel_abi(sym))
+        else protocol_instruction_errors(sym, instrs, 62)
+    )
+    return errors + vector_wipe_errors(sym, instrs, 62) + body_errors
 
 
 def audit_compiled_rust_aarch64_symbol(sym: str, instrs: list[tuple[str, str]], strict=False) -> list[str]:
@@ -574,7 +639,12 @@ def audit_compiled_rust_aarch64_symbol(sym: str, instrs: list[tuple[str, str]], 
     The wipe check does not depend on `strict`: a kernel that leaves a register is a finding in
     every mode.
     """
-    return vector_wipe_errors(sym, instrs, 183) + rust_errors(sym, instrs, strict, machine=183)
+    body_errors = (
+        rust_errors(sym, instrs, strict, machine=183)
+        if (strict or has_flat_kernel_abi(sym))
+        else protocol_instruction_errors(sym, instrs, 183)
+    )
+    return vector_wipe_errors(sym, instrs, 183) + body_errors
 
 
 # Compiled Rust functions that must return, or tail-call, with every caller-saved vector
@@ -2152,7 +2222,24 @@ def self_tests():
     cond_tail_clean.addresses = [0, 4, 8, 12, 16]
     cond_tail_clean.relocations[3] = 'external_tail_target'
     assert not audit_compiled_rust_x86_symbol('probe_cond_tail', cond_tail_clean, True)
-    count += 5
+    # #tooth: `<qsag_asm::wipe::SecretBuffer<...> as core::ops::drop::Drop>::drop` emitted in `.rlib`s
+    # must classify flat vs nested payloads identically to `drop_glue`, and protocol functions in
+    # `PROTOCOL_RUST_MODULES` must still reject hardware dividers, gathers, and dirty YMM state.
+    trait_vec_guard = '<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<u8>> as core::ops::drop::Drop>::drop'
+    trait_nested_guard = '<qsag_asm::wipe::SecretBuffer<alloc::vec::Vec<alloc::vec::Vec<u8>>> as core::ops::drop::Drop>::drop'
+    outer_vec_drop = '<alloc::vec::Vec<qsag_asm::wipe::SecretBuffer<u8>> as core::ops::drop::Drop>::drop'
+    assert secret_guard_drop_kind(trait_vec_guard) == 'flat'
+    assert is_rust_crypto_symbol(trait_vec_guard) and has_public_vec_header_argument(trait_vec_guard)
+    assert secret_guard_drop_kind(trait_nested_guard) == 'nested' and not is_rust_crypto_symbol(trait_nested_guard)
+    assert secret_guard_drop_kind(outer_vec_drop) is None and not is_rust_crypto_symbol(outer_vec_drop)
+    proto_sym = '<qsag_core::rss256::Rss256Engine>::permute'
+    assert not has_flat_kernel_abi(proto_sym)
+    assert has_flat_kernel_abi('qsag_core::rss256::keccak_linear_layer')
+    assert audit_compiled_rust_x86_symbol(proto_sym, [('div', 'rcx'), ('ret', '')], False)
+    assert audit_compiled_rust_x86_symbol(proto_sym, [('vpgatherdd', 'ymm0, [rdi + ymm1*4], ymm2'), ('vzeroupper', ''), ('ret', '')], False)
+    assert audit_compiled_rust_x86_symbol(proto_sym, [('vpxor', 'ymm0, ymm0, ymm0'), ('ret', '')], False)
+    assert audit_compiled_rust_aarch64_symbol('qsag_quorum::dzk::prove', [('udiv', 'x0, x1, x2'), ('ret', '')], False)
+    count += 11
     return count
 
 
@@ -2322,7 +2409,15 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=(), requir
             continue
         audited.append(symbol)
     missing = [s for s in expected if not functions.get(s)]
-    if require_bitslice:
+    asm_base = kernel_audit.EXPECTED_X86_SYMBOLS if machine == 62 else kernel_audit.EXPECTED_AARCH64_SYMBOLS
+    has_asm_surface = (
+        kind in (2, 3)
+        or any(s in functions for s in asm_base)
+        or any(outer_rust_symbol(s).startswith(('qsag_asm::bitslice::', 'qsag_asm::portable::'))
+               for s in functions)
+        or 'bitslice' in path.name
+    )
+    if require_bitslice and has_asm_surface:
         errors.extend(f'missing required bitslice kernel: {s}' for s in BITSLICE[machine] if s in missing)
     if kind in (2, 3):
         errors.extend(f'missing required linked assembly kernel: {symbol}' for symbol in missing)
@@ -2455,6 +2550,8 @@ def check_fixtures(fixture, x86_rlib, aarch64_rlib, binding="object", generation
 
 
 def main():
+    if not __debug__:
+        sys.exit("audit self-tests require Python assertions (disable -O / PYTHONOPTIMIZE)")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--elf-bin', action='append', default=[], help='final linked ELF, repeatable')
     parser.add_argument('--rlib', action='append', default=[], help='native archive or object, repeatable')

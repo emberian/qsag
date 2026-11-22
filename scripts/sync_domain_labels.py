@@ -52,6 +52,8 @@ SHARED: dict[str, str] = {
                           "recomputes it for its ledger",
     "QSAG.SEED_BURN.V1": "durable seed-burn ledger tag: qsag-core (pcg_dense) and the "
                          "qsag-quorum durable custody open the same ledger format",
+    "QSAG.ZKHEM2.TREE/v1": "zk-Hem v2 Canopy tree customization: qsag-agg and the "
+                           "qsag-ass2 enclave firmware",
     "QSAGFNOD": "Poseidon2 FORS node domain: one constant in qsag-agg and qsag-accel",
     "QSAGHMS1": "stateful H_msg domain: qsag-agg signature, qsag-core Poseidon2 MPC",
     "QSAGMRKL": "Poseidon2 Merkle node domain: qsag-agg, qsag-accel and qsag-core",
@@ -299,6 +301,21 @@ def scan() -> dict[str, list[str]]:
     return inventory
 
 
+def projected_label_differences(source: Path, mirror: Path) -> list[str]:
+    """Compare wire magics and domain labels before and after crate renaming."""
+    errors = []
+    for root in SCAN_ROOTS:
+        for src in sorted((source / root).glob("qsag-*/src")):
+            crate = src.parent.name.removeprefix("qsag-")
+            exported = mirror / "crates" / crate / "src"
+            original, projected = crate_labels(src), crate_labels(exported)
+            for label in sorted(original - projected):
+                errors.append(f"{crate}: missing projected label {label!r}")
+            for label in sorted(projected - original):
+                errors.append(f"{crate}: unexpected projected label {label!r}")
+    return errors
+
+
 def shared_labels(inventory: dict[str, list[str]]) -> list[str]:
     owners: dict[str, int] = {}
     for labels in inventory.values():
@@ -417,6 +434,7 @@ def problems(inventory: dict[str, list[str]]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--check", action="store_true", help="verify the generated Lean block and shared labels (default)")
     ap.add_argument("--write", action="store_true", help="rewrite the generated Lean block")
     ap.add_argument("--json", action="store_true", help="print the scanned inventory")
     args = ap.parse_args()
