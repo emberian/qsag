@@ -7,12 +7,25 @@ Byte-level sponge padding and framing over `Qsag.Oracle.Keccak`.
 **Scope.** Every separation result in this file is a statement about ENCODINGS: complete padded
 block sequences (`absorbPayload`, a `List` of rate-`r` blocks) and byte strings
 (`pad10star1`, `cshakePrefix N S ++ m`). The theorems say these encodings are injective in the
-message and unequal across domain bytes or `(N, S)` pairs. They do not say that the permutation
-queries made while absorbing two such sequences are disjoint (two unequal block sequences may
-share a prefix of blocks, hence of intermediate states), and they prove no sponge or
-ideal-permutation indifferentiability statement. Any security claim of the form "distinct
-domains behave as independent random oracles" needs that reduction, which is a separate
-obligation and is not proved in this module.
+message and unequal across domain bytes or `(N, S)` pairs. They do not by themselves say that
+the permutation queries made while absorbing two such sequences are disjoint: two unequal block
+sequences may share a prefix of blocks, hence of intermediate states. That statement is in
+`Qsag.Oracle.SpongeDomainSeparation`, which sits above this module:
+* for every transformation on a state with a capacity part that absorption leaves alone,
+  distinct `(domain byte, message, output block)` triples and distinct
+  `(N, S, message, output block)` quadruples end in different permutation inputs unless the
+  earlier queries contain an explicit capacity event
+  (`absorbPayload_output_queries_disjoint_or_cap_collision`,
+  `cshake256_output_queries_disjoint_or_cap_collision`, at `Keccak-f[1600]` with its 512-bit
+  capacity `keccak_qsag_tags_output_queries_disjoint_or_cap_collision`);
+* over a lazily sampled random transformation that the adversary reaches only through the
+  sponge, the sponge is indistinguishable from a lazily sampled function on block paths up to
+  `K (K + 1) / (2 C)` for `K` transformation calls and `C` capacity values
+  (`sponge_multi_domain_ro_indistinguishability_bound`,
+  `rateCap_sponge_ro_indistinguishability_bound`).
+Not proved in this library: indifferentiability (an adversary with direct access to the
+permutation and its inverse, which needs a simulator), and the gap between sampling a
+permutation and sampling a function.
 
 1. **Multi-block rate-`r` sponge specification and padded-encoding injectivity
    (`pad10star1_joint_injective`, `pad10star1_injective`,

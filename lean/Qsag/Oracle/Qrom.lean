@@ -7394,6 +7394,13 @@ end Qsag
 public section
 namespace Qsag
 
+/-- A depth-zero batch authenticates its sole leaf directly against the root. -/
+theorem verifyCanopyMultiproof_depth0_leaf0 {D : Type} [DecidableEq D]
+    (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D) (commitment leaf : D) :
+    verifyCanopyMultiproof nodeHash rootHash 0 commitment [(0, leaf)] [] =
+      decide (rootHash 0 leaf = commitment) := by
+  simp [verifyCanopyMultiproof, canopyIndicesOk, canopyLevels]
+
 theorem verifyCanopyMultiproof_depth1_leaf0 {D : Type} [DecidableEq D]
     (nodeHash : Nat → D → D → D) (rootHash : Nat → D → D) (commitment a b : D) :
     verifyCanopyMultiproof nodeHash rootHash 1 commitment [(0, a)] [b] =

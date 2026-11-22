@@ -3203,7 +3203,7 @@ inductive PublicPermutationDirection where
   | forward | inverse
   deriving DecidableEq
 
-def publicPermutationQuery {State : Type} (p : PublicPermutation State)
+@[expose] def publicPermutationQuery {State : Type} (p : PublicPermutation State)
     (direction : PublicPermutationDirection) (x : State) : State :=
   match direction with
   | .forward => p.forward x
