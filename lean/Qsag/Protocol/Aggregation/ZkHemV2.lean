@@ -60,6 +60,10 @@ def postProd {R A B A' B' : Type} (e : SimpleEquiv R (A × B)) (a : SimpleEquiv 
     show (a.toFun (a.invFun o.1), b.toFun (b.invFun o.2)) = o
     rw [a.right_inv, b.right_inv]
 
+theorem postProd_apply {R A B A' B' : Type} (e : SimpleEquiv R (A × B))
+    (a : SimpleEquiv A A') (b : SimpleEquiv B B') (r : R) :
+    (postProd e a b).toFun r = (a.toFun (e.toFun r).1, b.toFun (e.toFun r).2) := by unfold postProd; rfl
+
 section Offsets
 variable {F : Type} [LawfulField F]
 
@@ -70,6 +74,9 @@ def offsetEquiv {n : Nat} (d : {l : List F // l.length = n}) :
   invFun o := ⟨vsub o.1 d.1, (vsub_length _ _ (o.2.trans d.2.symm)).trans d.2⟩
   left_inv v := Subtype.ext (vsub_vadd _ _ (d.2.trans v.2.symm))
   right_inv o := Subtype.ext (vadd_vsub _ _ (d.2.trans o.2.symm))
+
+theorem offsetEquiv_apply {n : Nat} (d v : {l : List F // l.length = n}) :
+    ((offsetEquiv d).toFun v).val = vadd d.val v.val := by unfold offsetEquiv; rfl
 
 /-- A view that is a witness-dependent offset plus a bijective image of the coins is simulated
     by a uniform vector. -/
@@ -819,6 +826,10 @@ def foldScalarEquiv (φ : F) (xs ws : List F) (hnd : xs.Nodup) (hx : ∀ x ∈ x
   invFun ss := ⟨foldScalarsInv φ xs ws ss.1, foldScalarsInv_length φ xs ws ss.1 hxl hwl ss.2⟩
   left_inv fs := Subtype.ext (foldScalarsInv_foldScalars φ xs ws fs.1 hnd hx hw hφ hxl hwl fs.2)
   right_inv ss := Subtype.ext (foldScalars_foldScalarsInv φ xs ws ss.1 hnd hx hw hφ hxl hwl ss.2)
+
+theorem foldScalarEquiv_apply (φ : F) (xs ws : List F) (hnd : xs.Nodup) (hx : ∀ x ∈ xs, x ≠ zero)
+    (hw : ∀ w ∈ ws, w ≠ zero) (hφ : φ ≠ zero) (hxl : xs.length = 5) (hwl : ws.length = 5) (v : {l : List F // l.length = 5}) :
+    ((foldScalarEquiv φ xs ws hnd hx hw hφ hxl hwl).toFun v).val = foldScalars φ xs ws v.val := by unfold foldScalarEquiv; rfl
 
 /-- **Lemma V2.3 (c), linear part.** For five pairwise distinct nonzero points, five nonzero
     weights and `φ ≠ 0`, `foldScalars φ xs ws` is a bijection of `F^5` with inverse
@@ -2890,5 +2901,11 @@ theorem blindCells_eq_blinding_count (s q : Nat) (qs : List Goldilocks)
   Qsag.ZkHemV2.blindCells_eq
   Qsag.ZkHemV2.blindCells_eq_blinding_count
 
+end Qsag.ZkHemV2
+end
+
+public section
+namespace Qsag.ZkHemV2
+#export_eqns unmaskLine vaddResidues
 end Qsag.ZkHemV2
 end

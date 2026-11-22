@@ -1686,6 +1686,11 @@ def scanFillDistinct (target : Nat) : List Nat → List Nat → List Nat
     if target ≤ acc.length then acc
     else scanFillDistinct target xs (sortedInsertDistinct x acc)
 
+/-- One draw from a singleton domain fills the query quota before scan-fill. -/
+theorem scanFill_sample_singleton (cand : Nat → Nat) (h : cand 0 = 0) :
+    scanFillDistinct 1 (List.range 1) (sampleDistinctLoop cand 1 2 0 []) = [0] := by
+  simp [List.range_succ, sampleDistinctLoop, sortedInsertDistinct, scanFillDistinct, h]
+
 def squeezeQueryIndex (seed : List UInt8) (groups k : Nat) : Nat :=
   ofBE ((cshake256Bytes "WHIR_QUERIES_S00".toUTF8.toList
     (encodeMultiFrame [seed, (toString k).toUTF8.toList])).take 8) % groups

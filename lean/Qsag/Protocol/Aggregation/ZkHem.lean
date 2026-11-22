@@ -4757,3 +4757,9 @@ end CubeSumcheckSoundness
 
 end Qsag.ZkHem
 end
+
+public section
+namespace Qsag.ZkHem
+#export_eqns evalAll vadd
+end Qsag.ZkHem
+end

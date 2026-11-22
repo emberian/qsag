@@ -829,14 +829,14 @@ theorem far_codeword_coset_queries_survive_bound
 /-! ### §2.3 Explicit `Hem` v6 Multi-Round Protocol, `hemAffineWhirStateFunction` & Verifier -/
 
 /-- Exact coset agreement count between oracle `O : Nat → F` and polynomial `P` over `domPts`. -/
-def hemCosetAgreeCount {F : Type} [CommRingOps F] [DecidableEq F]
+@[expose] def hemCosetAgreeCount {F : Type} [CommRingOps F] [DecidableEq F]
     (domPts : List F) (oracleAt : Nat → F) (P : List F) : Nat :=
   qsum domPts.length (fun idx =>
     if oracleAt idx.1 = RoundPoly.evalCoeffs P (domPts.get idx) then 1 else 0)
 
 /-- Checks whether polynomial `P` has degree `≤ degBound`, coset agreement `≥ minAgree` with
     `oracleAt` on `domPts`, and linear-functional evaluation `ringDot P kernel = claim`. -/
-def polyWitnessValid {F : Type} [CommRingOps F] [DecidableEq F]
+@[expose] def polyWitnessValid {F : Type} [CommRingOps F] [DecidableEq F]
     (domPts : List F) (minAgree degBound : Nat)
     (oracleAt : Nat → F) (kernel : List F) (claim : F) (P : List F) : Bool :=
   decide (P.length ≤ degBound + 1) &&
@@ -854,7 +854,7 @@ def evalCascadePolySum {F : Type} [CommRingOps F] :
       (evalCascadePolySum ws abs)
 
 /-- Asymmetric cascade combined claim `∑_i (α_i * e_i + β_i * s_i)` matching `PCS_BATCH_SHIFT`. -/
-def evalCascadeClaim {F : Type} [CommRingOps F] :
+@[expose] def evalCascadeClaim {F : Type} [CommRingOps F] :
     List F → List F → List (F × F) → F
   | [], _, _ => CommRingOps.zero
   | _, [], _ => CommRingOps.zero
@@ -865,7 +865,7 @@ def evalCascadeClaim {F : Type} [CommRingOps F] :
       (evalCascadeClaim es ss abs)
 
 /-- Asymmetric cascade combined oracle `O_cascade(idx) = ∑_i (α_i + β_i * dom[idx]) * O_i(idx)`. -/
-def evalCascadeOracle {F : Type} [CommRingOps F] (domPts : List F) :
+@[expose] def evalCascadeOracle {F : Type} [CommRingOps F] (domPts : List F) :
     List (Nat → F) → List (F × F) → Nat → F
   | [], _, _ => CommRingOps.zero
   | _, [], _ => CommRingOps.zero
@@ -947,7 +947,7 @@ def HemStatementValid {F : Type} [CommRingOps F] [DecidableEq F]
   HemBatchValid inst.initDomainPts inst.initMinAgree inst.initDegBound inst.initKernel
     inst.batchOracles inst.batchClaims
 
-def checkQueriedCosets {F : Type} [CommRingOps F] [DecidableEq F]
+@[expose] def checkQueriedCosets {F : Type} [CommRingOps F] [DecidableEq F]
     (domPts : List F) (oracleAt : Nat → F) (P : List F) : List Nat → Bool
   | [] => true
   | idx :: rest =>
@@ -958,7 +958,7 @@ def checkQueriedCosets {F : Type} [CommRingOps F] [DecidableEq F]
 /-- `affine.rs::fold_kernel`: `k'_i = k_{2i} + φ k_{2i+1}` followed by the extra zero overflow slot
     (`chunks_exact(2)` drops an unpaired tail element). The NEXT kernel is computed by the
     verifier from the challenge `φ`; it is never a prover-supplied transcript field. -/
-def hemKernelFold {F : Type} [CommRingOps F] (φ : F) : List F → List F
+@[expose] def hemKernelFold {F : Type} [CommRingOps F] (φ : F) : List F → List F
   | a :: b :: rest => CommRingOps.add a (CommRingOps.mul φ b) :: hemKernelFold φ rest
   | _ => [CommRingOps.zero]
 
@@ -971,7 +971,7 @@ theorem hemKernelFold_pair {F : Type} [LawfulCommRing F] (φ k : F) :
     `(φ, θ, α, β)`, the verifier DERIVES `f = w₀ + φ w₁`, `g = w₂ + φ (claim - w₀)` and the next
     claim `g + α (f + θ g) + β (c_F + θ c_G)`. There is no separate consistency check: the
     fourth cross term is forced to `claim - w₀`. -/
-def hemBridgeFoldClaim {F : Type} [CommRingOps F]
+@[expose] def hemBridgeFoldClaim {F : Type} [CommRingOps F]
     (claim w₀ w₁ w₂ c_F c_G φ θ α β : F) : F :=
   CommRingOps.add
     (CommRingOps.add w₂ (CommRingOps.mul φ (CommRingOps.sub claim w₀)))
@@ -1046,7 +1046,7 @@ theorem hem_bridge_fold_claim_eq_dot {F : Type} [LawfulCommRing F]
 
 /-- A monomial-shift round spends one point of agreement slack. At an exhaustive
     threshold no slack remains to spend; thresholds already above the domain stay invalid. -/
-def hemNextMinAgree (domainSize curAgree : Nat) : Nat :=
+@[expose] def hemNextMinAgree (domainSize curAgree : Nat) : Nat :=
   if curAgree < domainSize then curAgree + 1 else curAgree
 
 @[simp] theorem hemNextMinAgree_exhaustive (n : Nat) : hemNextMinAgree n n = n := by

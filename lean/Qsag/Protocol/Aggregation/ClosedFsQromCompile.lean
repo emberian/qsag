@@ -1462,3 +1462,9 @@ theorem inhabited_honest_opening_no_collision :
 
 end Qsag.ClosedReductionTeeth
 end
+
+public section
+namespace Qsag.ClosedFs
+#export_eqns openingOk fsTranscript treeNode MerkleSetup.root MerkleSetup.oracleLeaves
+end Qsag.ClosedFs
+end

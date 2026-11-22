@@ -98,11 +98,11 @@ structure WhirStage where
   mcaNum : Nat
   deriving DecidableEq, Repr
 
-def WhirStage.domainSize (s : WhirStage) : Nat := 2 ^ s.logDomain
+@[expose] def WhirStage.domainSize (s : WhirStage) : Nat := 2 ^ s.logDomain
 
 /-- `(1 - δ) > √ρ + η` with `ρ = d / n`, the nominal rate `ρ ≥ 2^-logInvRate`, and
     `L = ⌈1 / (2 η √ρ)⌉`. -/
-def WhirStage.johnsonOk (s : WhirStage) : Bool :=
+@[expose] def WhirStage.johnsonOk (s : WhirStage) : Bool :=
   decide (0 < s.etaNum ∧ 0 < s.degBound ∧ s.agree ≤ s.domainSize ∧
     s.domainSize ≤ s.degBound * 2 ^ s.logInvRate ∧
     s.etaNum * s.domainSize < s.agree * s.etaDen ∧
@@ -269,16 +269,16 @@ structure WhirVerifierSchedule where
   fieldPos : 0 < fieldCard
   stages : List WhirStage
 
-def WhirVerifierSchedule.johnsonOk (sched : WhirVerifierSchedule) : Bool :=
+@[expose] def WhirVerifierSchedule.johnsonOk (sched : WhirVerifierSchedule) : Bool :=
   sched.stages.all (fun s => s.johnsonOk)
 
-def stageRounds (s : WhirStage) : Nat := s.foldK + 2
+@[expose] def stageRounds (s : WhirStage) : Nat := s.foldK + 2
 
-def roundsOf : List WhirStage → Nat
+@[expose] def roundsOf : List WhirStage → Nat
   | [] => 0
   | s :: rest => stageRounds s + roundsOf rest
 
-def WhirVerifierSchedule.numRounds (sched : WhirVerifierSchedule) : Nat := roundsOf sched.stages
+@[expose] def WhirVerifierSchedule.numRounds (sched : WhirVerifierSchedule) : Nat := roundsOf sched.stages
 
 /-- Fold / sumcheck round: `(L · d* + mca) / q`. -/
 def WhirStage.foldBound (q : Nat) (hq : 0 < q) (s : WhirStage) : RatBound :=
@@ -544,13 +544,13 @@ def stageDepth (stages : List WhirStage) (i : Nat) : Nat :=
   | some st => st.logDomain + st.foldK
   | none => 0
 
-def agreeCount (env : WhirEnv F) (size : Nat) (table P : List F) : Nat :=
+@[expose] def agreeCount (env : WhirEnv F) (size : Nat) (table P : List F) : Nat :=
   ((List.range size).filter (fun p =>
     decide (RoundPoly.evalCoeffs P (env.domPt 0 p) = table.getD p CommRingOps.zero))).length
 
 /-- The statement language: some polynomial within the first stage's degree bound agrees with
     the committed table on the first stage's agreement threshold and carries the claim. -/
-def whirInLang (env : WhirEnv F) (sched : WhirVerifierSchedule) (x : WhirStmt F) : Prop :=
+@[expose] def whirInLang (env : WhirEnv F) (sched : WhirVerifierSchedule) (x : WhirStmt F) : Prop :=
   match sched.stages with
   | [] => False
   | st :: _ =>
@@ -762,6 +762,10 @@ def whirSuccinctBridge {D : Type} (env : WhirEnv F) (sched : WhirVerifierSchedul
       dsimp only
       exact range_map_getD_of_lt (tblOf (j + 1) (sm.root.getD dfltRoot)) CommRingOps.zero
         (2 ^ stageDepth sched.stages (j + 1)) q.2 hp
+
+theorem whirSuccinctBridge_rootsOf {D : Type} (env : WhirEnv F) (sched : WhirVerifierSchedule)
+    (w : Nat) (dflt : D) :
+    (whirSuccinctBridge env sched w dflt).rootsOf = whirSuccinctRootsOf sched.stages dflt := by unfold whirSuccinctBridge; rfl
 
 /-- **Closed Succinct-Transcript QROM Soundness of Multi-Round WHIR
     (`whir_succinct_closed_qrom_soundness`)**:
@@ -4420,6 +4424,173 @@ theorem tooth_empty_schedule_rejects (env : WhirEnv F) (nv q w : Nat) (hq : 0 < 
 
 end EmptySchedule
 
+theorem WhirStage.foldBound_eq (q : Nat) (hq : 0 < q) (s : WhirStage) :
+    s.foldBound q hq = ⟨s.listSize * s.sumcheckDeg + s.mcaNum, q, hq⟩ := by rfl
+
+theorem WhirStage.oodBound_eq (q : Nat) (hq : 0 < q) (s : WhirStage) :
+    s.oodBound q hq =
+      ⟨binom2 s.listSize * s.degBound ^ s.oodCount, q ^ s.oodCount, Nat.pow_pos hq⟩ := by rfl
+
+theorem WhirStage.shiftBound_eq (q : Nat) (hq : 0 < q) (s : WhirStage) :
+    s.shiftBound q hq =
+      RatBound.add
+        ⟨(s.agree + s.foldK) ^ s.queryCount, s.domainSize ^ s.queryCount,
+          Nat.pow_pos (Nat.two_pow_pos s.logDomain)⟩
+        ⟨s.listSize * (s.queryCount + s.oodCount), q, hq⟩ := by rfl
+
+theorem WhirStage.roundBounds_eq (q : Nat) (hq : 0 < q) (s : WhirStage) :
+    s.roundBounds q hq =
+      List.replicate s.foldK (s.foldBound q hq) ++ [s.oodBound q hq, s.shiftBound q hq] := by rfl
+
+theorem stagesRoundBounds_nil (q : Nat) (hq : 0 < q) :
+    stagesRoundBounds q hq [] = [] := by rfl
+
+theorem stagesRoundBounds_cons (q : Nat) (hq : 0 < q) (s : WhirStage) (rest : List WhirStage) :
+    stagesRoundBounds q hq (s :: rest) =
+      s.roundBounds q hq ++ stagesRoundBounds q hq rest := by rfl
+
+theorem WhirVerifierSchedule.roundBounds_eq (sched : WhirVerifierSchedule) :
+    sched.roundBounds = stagesRoundBounds sched.fieldCard sched.fieldPos sched.stages := by rfl
+
+theorem scheduleQromError_eq (sched : WhirVerifierSchedule) (Q : Nat) :
+    scheduleQromError sched Q = RatBound.sumList (sched.roundBounds.map (dfmRoundScale Q)) := by rfl
+
+/-- Exact evaluation of `(whirOracleIop env ⟨nv, q, hq, [st]⟩ w).verify x [(m0, c0), (m1, c1)]`
+    for a single-stage schedule with `st.foldK = 0` and default hooks (`none`). -/
+theorem whirOracleIop_verify_oneStage_noFold_eq {F : Type} [CommRingOps F] [DecidableEq F]
+    (env : WhirEnv F) (nv q : Nat) (hq : 0 < q) (st : WhirStage) (w : Nat)
+    (hfk : st.foldK = 0)
+    (hStep : env.foldClaimStep = none)
+    (hRaw : env.foldBlockRaw = none)
+    (hViews : env.finalClaimViews = none)
+    (x : WhirStmt F) (m0 m1 : WhirMsg F) (c0 c1 : Nat) :
+    let sched : WhirVerifierSchedule := ⟨nv, q, hq, [st]⟩
+    let zs := (List.range st.oodCount).map (env.chalField c0)
+    let ys := m1.answers
+    let folded := (List.range st.queryCount).map (fun j =>
+      x.table.getD (env.chalPos c1 j st.domainSize) CommRingOps.zero)
+    (whirOracleIop env sched w).verify x [(m0, c0), (m1, c1)] =
+      (decide (ys.length = st.oodCount) &&
+       decide (m0.poly.length ≤ env.finalDeg + 1) &&
+       (zs.zip ys).all (fun zy => decide (RoundPoly.evalCoeffs m0.poly zy.1 = zy.2)) &&
+       ((List.range st.queryCount).zip folded).all (fun jv =>
+         decide (RoundPoly.evalCoeffs m0.poly
+           (env.domPt 1 (env.chalPos c1 jv.1 st.domainSize)) = jv.2)) &&
+       decide (x.claim = env.finalClaim m0.poly [])) := by
+  dsimp only
+  rw [OracleIop.verify_eq]
+  have hNumR : (⟨nv, q, hq, [st]⟩ : WhirVerifierSchedule).numRounds = 2 := by
+    show (st.foldK + 2) + 0 = 2; rw [hfk]
+  let trPub : List (WhirPub F × Nat) :=
+    [(⟨m0.poly, m0.answers⟩, c0), (⟨m1.poly, m1.answers⟩, c1)]
+  let vals : List F := (List.range st.queryCount).map (fun j =>
+    x.table.getD (env.chalPos c1 j st.domainSize) CommRingOps.zero)
+  have hLenV : vals.length = st.queryCount := by
+    dsimp only [vals]; rw [List.length_map, List.length_range]
+  have hSplit : splitStages [st] trPub =
+      some [⟨[], (⟨m0.poly, m0.answers⟩, c0), (⟨m1.poly, m1.answers⟩, c1)⟩] := by
+    unfold splitStages; dsimp only [trPub]; rw [hfk]; rfl
+  have hQueries : whirQueries env ⟨nv, q, hq, [st]⟩ trPub =
+      (List.range st.queryCount).map (fun j => (0, env.chalPos c1 j st.domainSize)) := by
+    unfold whirQueries
+    rw [hSplit]
+    change stageQueries env 0 st ⟨[], (⟨m0.poly, m0.answers⟩, c0), (⟨m1.poly, m1.answers⟩, c1)⟩ ++
+        [] = _
+    rw [List.append_nil]
+    unfold stageQueries
+    rw [hfk]
+    have hFlat : ∀ r : List Nat,
+        r.flatMap (fun j => List.map (fun b => (0, env.chalPos c1 j st.domainSize + b * st.domainSize))
+          (List.range (2 ^ 0))) =
+        r.map (fun j => (0, env.chalPos c1 j st.domainSize)) := by
+      intro r; induction r with
+      | nil => rfl
+      | cons k ks ih =>
+        show (0, env.chalPos c1 k st.domainSize + 0 * st.domainSize) :: _ =
+          (0, env.chalPos c1 k st.domainSize) :: _
+        rw [Nat.zero_mul, Nat.add_zero]
+        exact congrArg (_ :: ·) ih
+    exact hFlat (List.range st.queryCount)
+  have hMapVals :
+      (whirQueries env ⟨nv, q, hq, [st]⟩ trPub).map
+        (fun q' => whirTable ⟨nv, q, hq, [st]⟩ x [m0, m1] q'.1 q'.2) = vals := by
+    rw [hQueries, List.map_map]; rfl
+  unfold whirOracleIop
+  change (decide ([(m0, c0), (m1, c1)].length = (⟨nv, q, hq, [st]⟩ : WhirVerifierSchedule).numRounds) &&
+    whirVerdict env ⟨nv, q, hq, [st]⟩ x.claim trPub
+      ((whirQueries env ⟨nv, q, hq, [st]⟩ trPub).map
+        (fun q' => whirTable ⟨nv, q, hq, [st]⟩ x [m0, m1] q'.1 q'.2))) = _
+  rw [hNumR, hMapVals]
+  have hDropMap : ∀ (r : List Nat) (f : Nat → F) (idx : Nat),
+      idx < r.length → (((r.map f).drop idx).take 1).headD CommRingOps.zero = f (r.getD idx 0) := by
+    intro r f idx
+    induction r generalizing idx with
+    | nil => intro h; nomatch h
+    | cons _ as ih =>
+      cases idx with
+      | zero => intro _; rfl
+      | succ idx => intro h; exact ih idx (Nat.lt_of_succ_lt_succ h)
+  have hRangeGetD : ∀ (n j : Nat), j < n → (List.range n).getD j 0 = j := by
+    intro n j hj; unfold List.getD; rw [List.getElem?_range hj]; rfl
+  have hFoldEq :
+      (List.range st.queryCount).map (fun j =>
+        foldBlock env [] (env.domPt 0 (env.chalPos c1 j st.domainSize)) ((vals.drop (j * 1)).take 1)) =
+      vals := by
+    apply List.ext_getElem
+    · rw [List.length_map, List.length_range, hLenV]
+    · intro j _ hj2
+      rw [List.getElem_map, List.getElem_range, Nat.mul_one]
+      unfold foldBlock
+      have hjLt : j < st.queryCount := by rwa [← hLenV]
+      have hjR : j < (List.range st.queryCount).length := by rwa [List.length_range]
+      rw [hDropMap (List.range st.queryCount) _ j hjR, hRangeGetD st.queryCount j hjLt]
+      dsimp only [vals]
+      rw [List.getElem_map, List.getElem_range]
+  unfold whirVerdict
+  rw [hSplit]
+  change (decide ([(m0, c0), (m1, c1)].length = 2) &&
+    whirCheckStages env 0 [st]
+      [⟨[], (⟨m0.poly, m0.answers⟩, c0), (⟨m1.poly, m1.answers⟩, c1)⟩] x.claim vals) = _
+  unfold whirCheckStages whirCheckStagesAux stageFoldRun sumcheckRun
+  rw [hfk, hStep, hRaw, hViews]
+  let sv0 : StageView F := ⟨[], (⟨m0.poly, m0.answers⟩, c0), (⟨m1.poly, m1.answers⟩, c1)⟩
+  let flds := (List.range st.queryCount).map (fun j =>
+    foldBlock env [] (env.domPt 0 (env.chalPos c1 j st.domainSize)) ((vals.drop (j * 1)).take 1))
+  change (decide ([(m0, c0), (m1, c1)].length = 2) &&
+    (decide (m1.answers.length = st.oodCount) &&
+     decide (st.queryCount * 1 ≤ vals.length) &&
+     (if ([] : List WhirStage).isEmpty then
+        decide (m0.poly.length ≤ env.finalDeg + 1) &&
+        (((List.range st.oodCount).map (env.chalField c0)).zip m1.answers).all
+          (fun zy => decide (RoundPoly.evalCoeffs m0.poly zy.1 = zy.2)) &&
+        ((List.range st.queryCount).zip flds).all
+          (fun jv => decide (RoundPoly.evalCoeffs m0.poly
+            (env.domPt (0 + 1) (env.chalPos c1 jv.1 st.domainSize)) = jv.2)) &&
+        decide (x.claim = env.finalClaim m0.poly []) &&
+        decide (vals.length = st.queryCount * 1)
+      else
+        whirCheckStagesAux env [sv0] (0 + 1) [] [sv0]
+          (combineClaim x.claim (env.chalField c1 st.queryCount) (m1.answers ++ flds))
+          (vals.drop (st.queryCount * 1))))) = _
+  have hEmpty : ([] : List WhirStage).isEmpty = true := rfl
+  have hZeroAdd : 0 + 1 = 1 := rfl
+  have hLen2 : ([(m0, c0), (m1, c1)].length = 2) := rfl
+  rw [hEmpty]
+  dsimp only [↓reduceIte, flds]
+  rw [hFoldEq, hZeroAdd, Nat.mul_one, hLenV, decide_eq_true hLen2,
+      decide_eq_true (Nat.le_refl st.queryCount)]
+  simp only [decide_true, Bool.true_and, Bool.and_true, Bool.and_assoc]
+  rfl
+
+#verify_constructive Qsag.ClosedWhir.WhirStage.foldBound_eq
+#verify_constructive Qsag.ClosedWhir.WhirStage.oodBound_eq
+#verify_constructive Qsag.ClosedWhir.WhirStage.shiftBound_eq
+#verify_constructive Qsag.ClosedWhir.WhirStage.roundBounds_eq
+#verify_constructive Qsag.ClosedWhir.stagesRoundBounds_nil
+#verify_constructive Qsag.ClosedWhir.stagesRoundBounds_cons
+#verify_constructive Qsag.ClosedWhir.WhirVerifierSchedule.roundBounds_eq
+#verify_constructive Qsag.ClosedWhir.scheduleQromError_eq
+#verify_constructive Qsag.ClosedWhir.whirOracleIop_verify_oneStage_noFold_eq
 #verify_constructive Qsag.ClosedWhir.johnson_core
 #verify_constructive Qsag.ClosedWhir.WhirStage.johnson_list_le
 #verify_constructive Qsag.ClosedWhir.WhirStage.johnsonOk_false_of_beyond_radius
@@ -4471,5 +4642,11 @@ end EmptySchedule
 #tooth_pair Qsag.ClosedWhir.whir_exec_closed_qrom_soundness vs
   Qsag.ClosedWhir.tooth_empty_schedule_rejects
 
+end Qsag.ClosedWhir
+end
+
+public section
+namespace Qsag.ClosedWhir
+#export_eqns stageDepth whirSuccinctRootsOf whirQueries commitRoundIdx
 end Qsag.ClosedWhir
 end

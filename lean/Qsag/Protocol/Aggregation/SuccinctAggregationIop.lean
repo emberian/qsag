@@ -8308,7 +8308,7 @@ private theorem stepOpBatchedExt4_zero_of_allZero (gamma : GoldilocksExt4) :
       LawfulCommRing.add_zero]
     exact GoldilocksExt4.embedBase_zero
 
-private theorem exists_ne_zero_of_not_allZero :
+theorem exists_ne_zero_of_not_allZero :
     ∀ (l : List Goldilocks), allZeroGoldilocks l = false →
       ∃ c, c ∈ l ∧ c ≠ Goldilocks.zero
   | [], h => absurd h (by decide)
@@ -11219,15 +11219,38 @@ theorem wotsPackSlot_range3 : ∀ c < 128,
 theorem wotsPackSlot_range4 : ∀ c < 128,
     wotsPackSlot c = 4 ↔ 103 ≤ c ∧ c < 103 + 25 := by decide +kernel
 
+theorem stepXmssProgram_at_469 :
+    (buildSignerProgram .xmssPoseidon2).getD 469 .idle = .xmssMerkleBlockB true true :=
+  (stepXmssProgram_merkle 5 (by decide)).2
+
 theorem signerProgramBody_xmss_last :
-    (signerProgramBody .xmssPoseidon2)[469]? = some (.xmssMerkleBlockB true true) := by rfl
+    (signerProgramBody .xmssPoseidon2)[469]? = some (.xmssMerkleBlockB true true) := by
+  have hi : 469 < (signerProgramBody .xmssPoseidon2).length := by
+    rw [buildSignerProgram_length.1]; decide
+  have h := stepXmssProgram_at_469
+  rw [buildSignerProgram.public_eqs, List.getD_eq_getElem?_getD,
+    List.getElem?_append_left hi, List.getElem?_eq_getElem hi, Option.getD_some] at h
+  rw [List.getElem?_eq_getElem hi, h]
 
 #export_eqns forsLeafHash forsLeafAddr forsTreeNodeAddr
 
-set_option maxRecDepth 4096 in
+/-- Skip the initial WOTS row and the 64 seven-row chain pairs when looking up a suffix row. -/
+private theorem getElem?_after_wots_pairs (layer : Nat) (pairs : Nat → List StepOp)
+    (h : ∀ p, (pairs p).length = 7) (tail : List StepOp) (i : Nat) :
+    (([StepOp.wotsTellInit layer] ++ (List.range 64).flatMap pairs) ++ tail)[449 + i]? =
+      tail[i]? := by
+  have hlen : ([StepOp.wotsTellInit layer] ++ (List.range 64).flatMap pairs).length = 449 := by
+    rw [List.length_append, List.length_flatMap]
+    simp only [h, List.map_const', List.length_range, List.sum_replicate_nat]
+    rfl
+  rw [List.getElem?_append_right (by rw [hlen]; omega), hlen]
+  simp
+
 theorem pushLayerWotsAndMerkle_four_last (layer : Nat) (isTop : Bool) :
     (pushLayerWotsAndMerkle layer 4 isTop)[457]? =
-      some (.xmssMerkleBlockB true isTop) := by rfl
+      some (.xmssMerkleBlockB true isTop) := by
+  rw [pushLayerWotsAndMerkle.public_eqs, List.append_assoc (_ ++ _)]
+  exact (getElem?_after_wots_pairs layer _ (fun _ => rfl) _ 8).trans (by rfl)
 
 #export_eqns wotsPackSlotStart
 
@@ -11235,10 +11258,15 @@ theorem pushLayerWotsAndMerkle_four_last (layer : Nat) (isTop : Bool) :
 #export_eqns forsKpIdx forsHyperTreeIdx forsLeafTweak4
 
 theorem stepXmssProgram_at_457 :
-    (buildSignerProgram .xmssPoseidon2).getD 457 .idle = .wotsTellFinalSqueeze := by rfl
-
-theorem stepXmssProgram_at_469 :
-    (buildSignerProgram .xmssPoseidon2).getD 469 .idle = .xmssMerkleBlockB true true := by rfl
+    (buildSignerProgram .xmssPoseidon2).getD 457 .idle = .wotsTellFinalSqueeze := by
+  have hi : 457 < (signerProgramBody .xmssPoseidon2).length := by
+    rw [buildSignerProgram_length.1]; decide
+  rw [buildSignerProgram.public_eqs, List.getD_eq_getElem?_getD, List.getElem?_append_left hi,
+    signerProgramBody.public_eqs.1, List.getElem?_append_right (by decide)]
+  change ((pushLayerWotsAndMerkle 0 6 true)[449]?).getD .idle = _
+  rw [pushLayerWotsAndMerkle.public_eqs, List.append_assoc (_ ++ _),
+    show 449 = 449 + 0 from rfl, getElem?_after_wots_pairs _ _ (fun _ => rfl)]
+  rfl
 
 #export_eqns deriveStatelessLeafAndForsChecked
 

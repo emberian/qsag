@@ -79,7 +79,7 @@ theorem verifyHemAffineWhir_invalid_coordinate
 
 /-- A single zero oracle carrying the false constant functional claim `1`. The stage list
     is arbitrary: acceptance must already pass the initial cascade witness check. -/
-def hemZeroOracleClaimInstance {F : Type} [CommRingOps F]
+@[expose] def hemZeroOracleClaimInstance {F : Type} [CommRingOps F]
     (dom : List F) (degree agree : Nat) (stages : List (HemWhirStageSpec F)) :
     HemWhirInstance F :=
   { batchOracles := [fun _ => CommRingOps.zero]

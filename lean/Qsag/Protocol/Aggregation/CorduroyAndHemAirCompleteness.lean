@@ -6215,8 +6215,17 @@ local macro "gzz% " h:ident k:num : term =>
       Poseidon2State12.toList_eq, Lane4.toList_eq, stepRegsAt, stepRegs, stepPrev, stCurRoot.public_eqs, stKpIdx.public_eqs, stTreeLo.public_eqs, stTreeHi.public_eqs, stRemPack.public_eqs, stMainSponge.public_eqs, stSubSponge.public_eqs, stWork.public_eqs, stCursorIdx.public_eqs, stAccOrU1.public_eqs, stWotsU2.public_eqs] using
       (allZero_getElem hNorm $k (Nat.le_of_ble_eq_true rfl)))
 
+/-- Compare register limbs separately so kernel conversion does not have to unfold a whole
+    symbolic Poseidon permutation to establish a structure equality. -/
 local macro "regs% " h:ident : term =>
-  `(by simpa only [Nat.reduceAdd, Nat.reduceSub, Nat.reduceMul, Nat.reducePow,
+  `(by
+    refine ($h).regs.trans ?_
+    simp only [stepRegs, StepRegs.mk.injEq]
+    repeat' apply And.intro
+    all_goals try apply Poseidon2State12.ext
+    all_goals try apply Lane4.ext
+    all_goals as_aux_lemma =>
+      simp only [Nat.reduceAdd, Nat.reduceSub, Nat.reduceMul, Nat.reducePow,
       Nat.reduceLT, Nat.reduceLeDiff, Nat.reduceEqDiff, Nat.reduceBEq,
       reduceIte, decide_true, decide_false, Bool.not_false, Bool.not_true,
       Bool.true_eq_false, Bool.false_eq_true, Bool.and_true, Bool.true_and,
@@ -6232,7 +6241,7 @@ local macro "regs% " h:ident : term =>
       stepStatelessDecompExpected_six, stepHmsgDecompExpected_frame,
       stepHi28.public_eqs,
       List.getD_eq_getElem?_getD, List.getElem?_cons_zero, List.getElem?_cons_succ,
-      List.getElem?_nil, Option.getD_none, Option.getD_some, stCurRoot.public_eqs, stKpIdx.public_eqs, stTreeLo.public_eqs, stTreeHi.public_eqs, stRemPack.public_eqs, stMainSponge.public_eqs, stSubSponge.public_eqs, stWork.public_eqs, stCursorIdx.public_eqs, stAccOrU1.public_eqs, stWotsU2.public_eqs] using ($h).regs)
+      List.getElem?_nil, Option.getD_none, Option.getD_some, stCurRoot.public_eqs, stKpIdx.public_eqs, stTreeLo.public_eqs, stTreeHi.public_eqs, stRemPack.public_eqs, stMainSponge.public_eqs, stSubSponge.public_eqs, stWork.public_eqs, stCursorIdx.public_eqs, stAccOrU1.public_eqs, stWotsU2.public_eqs])
 
 /-- The tweak block `[domain, addr, tree_lo, tree_hi]` of a WOTS+C chain step. -/
 def stepWotsTweak (r : StepRegs) (c0 : Nat) : Lane4 :=
@@ -6272,11 +6281,6 @@ private theorem allZero_take {l : List Goldilocks} (h : allZeroGoldilocks l = tr
   simp only [allZeroGoldilocks_eq] at h ⊢
   exact List.all_eq_true.mpr fun x hx => List.all_eq_true.mp h x (List.mem_of_mem_take hx)
 
-private theorem allZero_drop {l : List Goldilocks} (h : allZeroGoldilocks l = true) (n : Nat) :
-    allZeroGoldilocks (l.drop n) = true := by
-  simp only [allZeroGoldilocks_eq] at h ⊢
-  exact List.all_eq_true.mpr fun x hx => List.all_eq_true.mp h x (List.mem_of_mem_drop hx)
-
 /-- Limbwise selection `(1 - u) * a + u * c` (the left child of a Merkle node). -/
 def lane4MuxL (u : Goldilocks) (a c : Lane4) : Lane4 :=
   ⟨((Goldilocks.one -ₚ u) *ₚ a.x0) +ₚ (u *ₚ c.x0),
@@ -6303,6 +6307,7 @@ def stepMerkleBIn (r : StepRegs) : Poseidon2State12 :=
    ⟨r.sub.b1.x0 +ₚ Goldilocks.one, r.sub.b1.x1 +ₚ poseidon2IvTag, r.sub.b1.x2, r.sub.b1.x3⟩,
    r.sub.b2⟩
 
+set_option maxHeartbeats 800000 in
 theorem stepSem_wotsChainStep0 {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
     {layer chain slot t : Nat} (hs : slot < 6)
     (h : StepRowSem pub R (.wotsChainStep0 layer chain slot) t) :
@@ -6463,16 +6468,15 @@ theorem stepSem_statefulHmsgBlock0 {pub : AggValidatorPk × Digest5} {R : Nat �
         cursor := Goldilocks.zero
         acc := Goldilocks.zero
         u2 := Goldilocks.zero } := by
-  have hG := by simpa only [stepOpKindAndC0.public_eqs] using h.guard
-  try simp only [stepOpKindAndC0.public_eqs] at hG
-  have hA : allZeroGoldilocks ((List.range 6).map
-      (fun i => stepBoolCheck (stepAux R t i))) = true := allZero_take hG 6
-  have hB : allZeroGoldilocks ((List.range 32).map
-      (fun i => stepBoolCheck (stepAux R t (6 + i)))) = true := allZero_take (allZero_drop hG 6) 32
+  have hG := h.guard
+  simp only [stepOpKindAndC0.public_eqs, stepOpGuardResiduals, allZeroGoldilocks_append,
+    Bool.and_eq_true] at hG
+  obtain ⟨⟨⟨hA, hB⟩, hKeys⟩, hDomain⟩ := hG
   exact ⟨fun i hi => (stepBoolCheck_eq_zero_iff _).mp ((allZero_map_iff 6 _).mp hA i hi),
     fun i hi => (stepBoolCheck_eq_zero_iff _).mp ((allZero_map_iff 32 _).mp hB i hi),
-    state12_ext12 (gz% hG 38) (gz% hG 40) (gz% hG 42) (gz% hG 44) (gz% hG 39) (gz% hG 41)
-      (gz% hG 43) (gz% hG 45) (gz% hG 46) (gz% hG 47) (gz% hG 48) (gz% hG 49), (regs% h)⟩
+    state12_ext12 (gz% hKeys 0) (gz% hKeys 2) (gz% hKeys 4) (gz% hKeys 6)
+      (gz% hKeys 1) (gz% hKeys 3) (gz% hKeys 5) (gz% hKeys 7)
+      (gz% hDomain 0) (gz% hDomain 1) (gz% hDomain 2) (gz% hDomain 3), (regs% h)⟩
 
 theorem stepSem_statefulHmsgBlock1 {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
     {t : Nat} (h : StepRowSem pub R .statefulHmsgBlock1 t) :
@@ -8268,6 +8272,7 @@ theorem stepSem_forsRootsSpongeInit {pub : AggValidatorPk × Digest5} {R : Nat �
 
 
 
+set_option maxHeartbeats 800000 in
 theorem stepSem_forsLeafHash {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
     {j slot t : Nat} (hs : slot < 6) (h : StepRowSem pub R (.forsLeafHash j slot) t) :
     (∀ k < 4, (stepAux R t (4 + k)).val < 4) ∧
@@ -8336,6 +8341,7 @@ theorem stepSem_forsMerkleBlockB_odd {pub : AggValidatorPk × Digest5} {R : Nat 
   exact ⟨state12_ext12 (gz% hG 0) (gz% hG 1) (gz% hG 2) (gz% hG 3) (gz% hG 4) (gz% hG 5)
     (gz% hG 6) (gz% hG 7) (gz% hG 8) (gz% hG 9) (gz% hG 10) (gz% hG 11), gzz% hG 12, (regs% h)⟩
 
+set_option maxHeartbeats 800000 in
 theorem stepSem_forsRootsPairAbsorb {pub : AggValidatorPk × Digest5} {R : Nat → StepOpRow}
     {pair t : Nat} (h : StepRowSem pub R (.forsRootsPairAbsorb pair) t) :
     ((pair + 1 == 16) = true → ∀ s < 6, (stepRegsAt R t).rem.get s = Goldilocks.zero) ∧
@@ -8398,13 +8404,14 @@ theorem stepSem_detTreeHmsgBlock1 {pub : AggValidatorPk × Digest5} {R : Nat →
         rem := stepRemZero
         main := stepPermAt R t
         acc := Goldilocks.zero } := by
-  have hG := by simpa only [stepOpKindAndC0.public_eqs] using h.guard
-  try simp only [stepOpKindAndC0.public_eqs] at hG
-  have hB : allZeroGoldilocks ((List.range 32).map
-      (fun i => stepBoolCheck (stepAux R t i))) = true := allZero_take hG 32
+  have hG := h.guard
+  simp only [stepOpKindAndC0.public_eqs, stepOpGuardResiduals, allZeroGoldilocks_append,
+    Bool.and_eq_true] at hG
+  obtain ⟨⟨⟨hB, hRoot⟩, hSum⟩, hFrame⟩ := hG
   exact ⟨fun i hi => (stepBoolCheck_eq_zero_iff _).mp ((allZero_map_iff 32 _).mp hB i hi),
-    state12_ext12 (gz% hG 32) (gz% hG 33) (gz% hG 34) (gz% hG 35) (gz% hG 36) (gz% hG 37)
-      (gz% hG 38) (gz% hG 39) (gz% hG 40) (gz% hG 41) (gz% hG 42) (gz% hG 43), (regs% h)⟩
+    state12_ext12 (gz% hRoot 0) (gz% hRoot 1) (gz% hRoot 2) (gz% hRoot 3)
+      (gz% hSum 0) (gz% hSum 1) (gz% hFrame 0) (gz% hFrame 1) (gz% hFrame 2) (gz% hFrame 3)
+      (gz% hFrame 4) (gz% hFrame 5), (regs% h)⟩
 
 /-- `XmssMerkleBlockB` closing a non-top layer: the layer root moves to `ST_CUR_ROOT` and the
     64-bit tree index is shifted right by the subtree height (4 bits) into `kp_idx`. -/
@@ -8429,24 +8436,17 @@ theorem stepSem_xmssMerkleBlockB_link {pub : AggValidatorPk × Digest5} {R : Nat
         treeLo := stepWeightedSum (fun i => stepAux R t (4 + i)) (fun i => 4 ^ i) 14 +ₚ
           (stepWeightedSum (fun i => stepAux R t (18 + i)) (fun i => 4 ^ i) 2 *ₚ ‹2 ^ 28›)
         treeHi := stepWeightedSum (fun i => stepAux R t (20 + i)) (fun i => 4 ^ i) 14 } := by
-  have hG := by simpa only [stepOpKindAndC0.public_eqs] using h.guard
-  try simp only [stepOpKindAndC0.public_eqs] at hG
-  step_guard_nf hG
-  have hB4 : allZeroGoldilocks ((List.range 4).map
-      (fun i => stepBoolCheck (stepAux R t i))) = true := allZero_take (allZero_drop hG 13) 4
-  have hQa : allZeroGoldilocks ((List.range 14).map
-      (fun i => quarticBase4 (stepAux R t (4 + i)))) = true := allZero_take (allZero_drop hG 17) 14
-  have hQ2 : allZeroGoldilocks ((List.range 2).map
-      (fun i => quarticBase4 (stepAux R t (18 + i)))) = true := allZero_take (allZero_drop hG 31) 2
-  have hQb : allZeroGoldilocks ((List.range 14).map
-      (fun i => quarticBase4 (stepAux R t (20 + i)))) = true := allZero_take (allZero_drop hG 33) 14
-  exact ⟨state12_ext12 (gz% hG 0) (gz% hG 1) (gz% hG 2) (gz% hG 3) (gz% hG 4) (gz% hG 5)
-      (gz% hG 6) (gz% hG 7) (gz% hG 8) (gz% hG 9) (gz% hG 10) (gz% hG 11), gzz% hG 12,
+  have hG := h.guard
+  simp only [stepOpKindAndC0.public_eqs, stepOpGuardResiduals, Bool.not_true, Bool.false_eq_true,
+    ↓reduceIte, allZeroGoldilocks_append, Bool.and_eq_true] at hG
+  obtain ⟨hIn, ⟨⟨⟨⟨⟨hCursor, hB4⟩, hQa⟩, hQ2⟩, hQb⟩, hTree⟩⟩ := hG
+  exact ⟨state12_ext12 (gz% hIn 0) (gz% hIn 1) (gz% hIn 2) (gz% hIn 3) (gz% hIn 4) (gz% hIn 5)
+      (gz% hIn 6) (gz% hIn 7) (gz% hIn 8) (gz% hIn 9) (gz% hIn 10) (gz% hIn 11), gzz% hCursor 0,
     fun i hi => (stepBoolCheck_eq_zero_iff _).mp ((allZero_map_iff 4 _).mp hB4 i hi),
     fun i hi => (quarticBase4_eq_zero_iff _).mp ((allZero_map_iff 14 _).mp hQa i hi),
     fun i hi => (quarticBase4_eq_zero_iff _).mp ((allZero_map_iff 2 _).mp hQ2 i hi),
     fun i hi => (quarticBase4_eq_zero_iff _).mp ((allZero_map_iff 14 _).mp hQb i hi),
-    gz% hG 47, gz% hG 48, (regs% h)⟩
+    gz% hTree 0, gz% hTree 1, (regs% h)⟩
 
 
 /-- Executable decision and witness extraction for an active XMSS slot. The success branch
@@ -10476,11 +10476,28 @@ theorem stepXmss_hmsg0_guards (pk : AggValidatorPk) (mu : Digest5) (sig : AggNat
     (prev : List Goldilocks) :
     allZeroGoldilocks (stepOpGuardResiduals .statefulHmsgBlock0 (Goldilocks.ofNat 0)
       (stepOpRowInputs (pk, mu) (stepXmssSeedRow pk mu sig .statefulHmsgBlock0 prev))) = true := by
-  step_forward_reduce
-  simp only [stepWeightedSum_eq, List.range_succ, List.range_zero, List.foldl_append,
-    List.foldl_cons, List.foldl_nil, Nat.reduceAdd, Nat.reduceSub,
-    Nat.reduceLT, dite_true, Option.getD_some, stepXmssAux, ↓reduceIte,
-    stepForward_bit, beq_self_eq_true, Bool.and_true, g_sub_self]
+  have hAux : (stepOpRowInputs (pk, mu)
+      (stepXmssSeedRow pk mu sig .statefulHmsgBlock0 prev)).aux =
+      stepXmssAux sig .statefulHmsgBlock0 prev := by
+    funext i
+    by_cases hi : i < 38
+    · exact stepXmssSeedRow_aux _ _ _ _ _ _ hi
+    · have h6 : ¬i < 6 := by omega
+      change (List.ofFn (fun j : Fin 38 => stepXmssAux sig .statefulHmsgBlock0 prev j.val)).getD i _ = _
+      simp only [List.getD_eq_getElem?_getD, List.getElem?_ofFn, hi, h6, stepXmssAux,
+        ↓reduceDIte, ↓reduceIte, Option.getD_none]
+  simp only [stepOpGuardResiduals, hAux, allZeroGoldilocks_append, Bool.and_eq_true]
+  refine ⟨⟨⟨?_, ?_⟩, ?_⟩, ?_⟩
+  · apply (allZero_map_iff _ _).mpr
+    intro i hi
+    simp only [stepXmssAux, hi, ↓reduceIte, stepForward_bit]
+  · apply (allZero_map_iff _ _).mpr
+    intro i hi
+    have hlo : ¬6 + i < 6 := by omega
+    have hhi : 6 + i < 38 := by omega
+    simp only [stepXmssAux, hlo, hhi, ↓reduceIte, stepForward_bit]
+  · step_forward_reduce
+  · step_forward_reduce
 
 set_option maxRecDepth 4096 in
 set_option maxHeartbeats 800000 in
