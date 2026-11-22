@@ -989,3 +989,659 @@ fn open_table<T: Transport>(
 }
 
 /// Prove that the shared assignment satisfies `shape`, bound to `statement`, under `profile`.
+pub fn prove_party<T: Transport>(
+    e: &mut Engine<T>,
+    shape: &Shape,
+    public_inputs: &[F],
+    statement: &[u8],
+    profile: Profile,
+    z: Vec<Sb>,
+) -> Result<ZkHemV2SplitProof, ProveError> {
+    prove_party_with_fault(e, shape, public_inputs, statement, profile, z, &mut |_| {})
+}
+
+/// [`prove_party`] with a hook at each [`Fault`] point.
+pub fn prove_party_with_fault<T: Transport>(
+    e: &mut Engine<T>,
+    shape: &Shape,
+    public_inputs: &[F],
+    statement: &[u8],
+    profile: Profile,
+    z: Vec<Sb>,
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<ZkHemV2SplitProof, ProveError> {
+    let mut z = SecretScratch::from(z);
+    let (me, parties) = (e.me(), e.parties());
+    if shape.num_sbox != 0 {
+        return Err(ProveError::SboxRows);
+    }
+    let layout = layout_of(shape).ok_or(ProveError::Unsupported)?;
+    if !(1..=MAX_STAGE0_SHARES).contains(&parties) {
+        return Err(ProveError::Unsupported);
+    }
+    if z.len() != shape.num_vars || public_inputs.len() != shape.num_public {
+        return Err(ProveError::Malformed);
+    }
+    let cells = 1usize << layout.log_cells;
+
+    z[0] = e.public(F::ONE);
+    for (slot, &value) in z[1..].iter_mut().zip(public_inputs) {
+        *slot = e.public(value);
+    }
+    for slot in &mut z[shape.mask_var_base..] {
+        *slot = e.random()?;
+    }
+    let mut table = SecretScratch::from(vec![Sb::ZERO; cells]);
+    let row_mask = sample_mask(
+        e,
+        &mut table,
+        shape.log_rows,
+        ROW_DEGREE,
+        ROW_MASK_BITS,
+        |i, j| layout.row_mask_block(i, j),
+    )?;
+    let col_mask = sample_mask(
+        e,
+        &mut table,
+        layout.var_bits,
+        COL_DEGREE,
+        COL_MASK_BITS,
+        |i, j| layout.col_mask_block(shape.log_rows, i, j),
+    )?;
+    table[..shape.num_vars].copy_from_slice(&z);
+    for slot in &mut table[cells - layout.blind_cells..] {
+        *slot = e.random()?;
+    }
+    let row_base: [SecretScratch<Sb>; 3] = [&shape.a, &shape.b, &shape.c].map(|matrix| {
+        (0..shape.num_rows())
+            .map(|i| {
+                matrix
+                    .row(i)
+                    .fold(Sb::ZERO, |acc, (col, val)| acc + z[col].scale(val))
+            })
+            .collect()
+    });
+    drop(z);
+
+    let state = commit_shares(
+        e,
+        profile,
+        layout.log_cells,
+        &table,
+        &layout.schedule,
+        fault,
+    );
+    let (tree_nonces, roots) = exchange_roots(
+        e,
+        &state.tree_nonce(),
+        &state.root(),
+    )?;
+
+    let mut tr = split_transcript(
+        profile,
+        shape,
+        &layout,
+        statement,
+        public_inputs,
+        &tree_nonces,
+        &roots,
+    );
+    let mut lookup = match (shape.lookups(), &layout.lookup) {
+        (Some(lookups), Some(ll)) => Some((
+            lookups,
+            ll,
+            lookup_front(e, profile, &mut tr, lookups, ll, &table[..shape.num_vars])?,
+        )),
+        _ => None,
+    };
+    let tau: Vec<E> = (0..shape.log_rows)
+        .map(|_| tr.squeeze_fp5(b"TAU"))
+        .collect();
+    let row = row_sumcheck(e, shape, &mut tr, &tau, row_base, &row_mask, fault)?;
+    tr.absorb_fp5_slice(b"ROW_VALUES", &row.values);
+    let combine: Vec<E> = (0..if lookup.is_some() { 5 } else { 3 })
+        .map(|_| tr.squeeze_fp5(b"COMBINE"))
+        .collect();
+    let var_cube = 1usize << layout.var_bits;
+    let mut z_var = SecretScratch::from(vec![Sb::ZERO; var_cube]);
+    let live = layout.var_cells.min(var_cube);
+    z_var[..live].copy_from_slice(&table[..live]);
+    let mut matrix = column_table(shape, &eq_table(&row.point), &combine[..3], var_cube);
+    if let Some((lookups, _, out)) = &lookup {
+        lookup_column_add(
+            &mut matrix,
+            lookups,
+            &eq_table(&out.point),
+            [combine[3], combine[4]],
+            out.gamma,
+        );
+    }
+    let (col_mask_sum, col_rounds) = column_sumcheck(
+        e,
+        &mut tr,
+        matrix,
+        &z_var,
+        &col_mask,
+    )?;
+    drop(z_var);
+
+    // Verifier front-end replay to obtain the exact cell weights & claimed values.
+    let mut tr = split_transcript(
+        profile,
+        shape,
+        &layout,
+        statement,
+        public_inputs,
+        &tree_nonces,
+        &roots,
+    );
+    let front = replay_front(
+        shape,
+        &layout,
+        public_inputs,
+        &mut tr,
+        &FrontMessages {
+            lookup: lookup.as_ref().map(|(_, _, out)| LookupMessages {
+                helper_tree_nonces: &out.helper_tree_nonces,
+                helper_roots: &out.helper_roots,
+                mask_sum: out.mask_sum,
+                rounds: &out.rounds,
+                values: out.values,
+            }),
+            row_mask_sum: row.mask_sum,
+            row_rounds: &row.rounds,
+            row_values: row.values,
+            col_mask_sum,
+            col_rounds: &col_rounds,
+        },
+        true,
+    )
+    .ok_or(ProveError::Rejected)?;
+
+    // SPDZ zero test before opening anything that depends on the linear claims:
+    // `rho * (<Z, weights> - V)` for a fresh uniform shared `rho` is 0 iff satisfied.
+    let gap_of = |e: &Engine<T>, tbl: &[Sb], weights: &[E], value: E| {
+        tbl.iter()
+            .zip(weights)
+            .fold(Sh::ZERO, |acc, (s, &w)| acc + s.scale_ext(w))
+            - e.public_ext(value)
+    };
+    let mut gaps = SecretScratch::with_capacity(2);
+    gaps.push(gap_of(e, &table, &front.cell_weights, front.value));
+    if let (Some((_, _, out)), Some(hc)) = (&lookup, &front.helper) {
+        gaps.push(gap_of(e, &out.table, &hc.cell_weights, hc.value));
+    } else if lookup.is_some() != front.helper.is_some() {
+        return Err(ProveError::Rejected);
+    }
+    let mut blinds = SecretScratch::with_capacity(gaps.len());
+    for _ in &gaps {
+        blinds.push(e.random_ext()?);
+    }
+    let test = SecretScratch::from(e.mul_ext(&gaps, &blinds)?);
+    e.check()?;
+    let verdict = e.open_ext(&test)?;
+    e.check()?;
+    if verdict.iter().any(|v| !v.is_zero()) {
+        return Err(ProveError::Unsatisfied);
+    }
+
+    let kernel = cell_weights_to_kernel(front.cell_weights, cells);
+    let opening = open_table(
+        e,
+        profile,
+        &mut tr,
+        &tree_nonces,
+        &roots,
+        layout.log_cells,
+        &layout.schedule,
+        &state,
+        table,
+        kernel,
+        front.value,
+        fault,
+    )?;
+
+    let lookup_proof = match (lookup.take(), front.helper) {
+        (None, None) => None,
+        (Some((_, ll, out)), Some(hc)) => {
+            let h_kernel = cell_weights_to_kernel(hc.cell_weights, 1 << ll.log_cells);
+            let h_opening = open_table(
+                e,
+                profile,
+                &mut tr,
+                &out.helper_tree_nonces,
+                &out.helper_roots,
+                ll.log_cells,
+                &ll.schedule,
+                &out.state,
+                out.table,
+                h_kernel,
+                hc.value,
+                fault,
+            )?;
+            Some(SplitLookupV2Proof {
+                helper_tree_nonces: out.helper_tree_nonces,
+                helper_roots: out.helper_roots,
+                mask_sum: out.mask_sum,
+                rounds: out.rounds,
+                values: out.values,
+                opening: h_opening,
+            })
+        }
+        _ => return Err(ProveError::Rejected),
+    };
+
+    debug_assert_eq!(me, e.me());
+    let proof = ZkHemV2SplitProof {
+        profile,
+        log_cells: layout.log_cells as u8,
+        tree_nonces,
+        roots,
+        lookup: lookup_proof,
+        row_mask_sum: row.mask_sum,
+        row_rounds: row.rounds,
+        row_values: row.values,
+        col_mask_sum,
+        col_rounds,
+        opening,
+    };
+    if !verify_split(shape, public_inputs, statement, profile, &proof) {
+        return Err(ProveError::Rejected);
+    }
+    Ok(proof)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use super::super::engine::tests::run_parties;
+    use super::super::engine::{Dealer, Stats};
+    use super::*;
+    use qsag_agg::zk_hem::relation::{ConstraintSystem, Lc};
+
+    fn f(x: u64) -> F {
+        F::from_u64_reduced(x)
+    }
+
+    /// `x * y = 35`, a cube and a Boolean: multiplication rows only, closed for `v2`.
+    pub(in super::super) fn small_relation(x: u64) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        let p = cs.public_input(f(35));
+        let xv: Lc = cs.alloc(f(x)).into();
+        let y: Lc = cs.alloc(f(7)).into();
+        let prod = cs.mul(&xv, &y);
+        cs.enforce_equal(&prod.into(), &p.into());
+        let sq = cs.mul(&xv, &xv);
+        let cube = cs.mul(&sq.into(), &xv);
+        cs.enforce_zero(Lc::from(cube).plus_const(F::ZERO - f(125)));
+        let bit: Lc = cs.alloc(f(1)).into();
+        cs.enforce_boolean(&bit);
+        cs.finish_v2()
+    }
+
+    pub(in super::super) fn deal_clear_assignment_and_prove(
+        shape: &Shape,
+        assignment: &[F],
+        statement: &[u8],
+        parties: usize,
+        seed: u8,
+        tamper: impl Fn(usize, &mut Vec<Sb>) + Sync,
+        fault: impl Fn(usize, Fault<'_>) + Sync,
+    ) -> Vec<(Result<ZkHemV2SplitProof, ProveError>, Stats)> {
+        static CALL_SEQ: AtomicU64 = AtomicU64::new(1);
+        let seq = CALL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let profile = Profile::default();
+        let mut dseed = [seed; 32];
+        // Keep `Dealer` deterministic for equal `seed` when comparing message patterns, while
+        // re-randomizing MAC shares via `seq` only for tape_id uniqueness? Wait: `two_witness_relation`
+        // compares `(rounds, triples_used, randoms_used, mac_checks)` AND wants deterministic
+        // Fiat-Shamir coins for `seed`! If we vary `dseed[24..]` by `seq` ONLY in `preprocessing`?
+        // No: `Dealer` uses `dseed` to sample shares & triples; `Engine::new` uses `BURNED_TAPES`.
+        // Varying `dseed[24..]` by `seq` gives fresh `tape_id`s on every call while keeping exact
+        // round/triple/random/mac_check counts deterministic (`pattern(stats)` does not depend on coin values!).
+        dseed[24..].copy_from_slice(&seq.to_le_bytes());
+        let mut dealer = Dealer::new(parties, &dseed);
+        let mut shares: Vec<Vec<Sb>> = (0..parties)
+            .map(|_| Vec::with_capacity(assignment.len()))
+            .collect();
+        for &value in assignment {
+            for (p, s) in dealer.share(value).into_iter().enumerate() {
+                shares[p].push(s);
+            }
+        }
+        let (triples, randoms) = prover_demand(shape, profile).unwrap();
+        let preps = dealer.preprocessing(triples, randoms);
+        let publics = assignment[1..=shape.num_public].to_vec();
+        run_parties(preps, |mut e| {
+            let mut z = shares[e.me()].clone();
+            tamper(e.me(), &mut z);
+            let me = e.me();
+            let result = prove_party_with_fault(
+                &mut e,
+                shape,
+                &publics,
+                statement,
+                profile,
+                z,
+                &mut |point| fault(me, point),
+            );
+            if result.is_ok() {
+                assert_eq!(e.remaining(), (0, 0), "demand is exact");
+                assert!(!e.has_pending());
+            }
+            (result, e.stats)
+        })
+    }
+
+    #[test]
+    fn a_quorum_proves_and_the_split_verifier_accepts() {
+        let profile = Profile::default();
+        let (shape, assignment) = small_relation(5);
+        let publics = assignment[1..=shape.num_public].to_vec();
+        for parties in [2usize, 3, 5] {
+            let out = deal_clear_assignment_and_prove(
+                &shape,
+                &assignment,
+                b"stmt",
+                parties,
+                1,
+                |_, _| {},
+                |_, _| {},
+            );
+            let proof = out[0].0.clone().unwrap();
+            assert!(out.iter().all(|(p, _)| p.as_ref() == Ok(&proof)));
+            assert_eq!(proof.profile, profile);
+            assert_eq!(proof.roots.len(), parties);
+            assert_eq!(proof.tree_nonces.len(), parties);
+            assert!(verify_split(&shape, &publics, b"stmt", profile, &proof));
+            assert!(!verify_split(&shape, &publics, b"other", profile, &proof));
+            assert!(!verify_split(&shape, &[f(36)], b"stmt", profile, &proof));
+
+            let bytes = proof.to_bytes();
+            assert_eq!(
+                ZkHemV2SplitProof::from_bytes(&bytes, &shape).as_ref(),
+                Some(&proof)
+            );
+            assert!(ZkHemV2SplitProof::from_bytes(&bytes[..bytes.len() - 1], &shape).is_none());
+            let mut swapped = proof.clone();
+            swapped.roots.swap(0, 1);
+            assert!(!verify_split(&shape, &publics, b"stmt", profile, &swapped));
+            let mut swapped_nonces = proof.clone();
+            swapped_nonces.tree_nonces.swap(0, 1);
+            assert!(!verify_split(
+                &shape,
+                &publics,
+                b"stmt",
+                profile,
+                &swapped_nonces
+            ));
+            let mut wrong = proof.clone();
+            wrong.row_values[0] += E::ONE;
+            assert!(!verify_split(&shape, &publics, b"stmt", profile, &wrong));
+        }
+    }
+
+    /// Range-checked bytes, a two-column table lookup and one multiplication row (`v2`).
+    fn lookup_relation(x: [u64; 3], square: u64) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        let p = cs.public_input(f(35));
+        let squares: Vec<F> = (0..8u64).flat_map(|t| [f(t), f(t * t)]).collect();
+        let table = cs.table(2, squares);
+        let vars: Vec<Lc> = x.iter().map(|&v| cs.alloc(f(v)).into()).collect();
+        for v in &vars {
+            cs.enforce_byte(v);
+        }
+        cs.enforce_byte(&vars[0].plus(&vars[2]));
+        let sq: Lc = cs.alloc(f(square)).into();
+        cs.enforce_in_table(table, &[vars[0].clone(), sq]);
+        let prod = cs.mul(&vars[0], &vars[1]);
+        cs.enforce_equal(&prod.into(), &p.into());
+        cs.finish_v2()
+    }
+
+    #[test]
+    fn a_quorum_proves_a_relation_with_lookups() {
+        let (shape, assignment) = lookup_relation([5, 7, 250], 25);
+        assert!(shape.is_satisfied(&assignment));
+        let publics = assignment[1..=shape.num_public].to_vec();
+        for parties in [2usize, 3] {
+            let out = deal_clear_assignment_and_prove(
+                &shape,
+                &assignment,
+                b"stmt",
+                parties,
+                3,
+                |_, _| {},
+                |_, _| {},
+            );
+            let proof = out[0].0.clone().unwrap();
+            assert!(out.iter().all(|(p, _)| p.as_ref() == Ok(&proof)));
+            let lookup = proof.lookup.as_ref().unwrap();
+            assert_eq!(lookup.helper_roots.len(), parties);
+            assert_eq!(lookup.helper_tree_nonces.len(), parties);
+            assert!(verify_split(
+                &shape,
+                &publics,
+                b"stmt",
+                proof.profile,
+                &proof
+            ));
+            assert!(!verify_split(
+                &shape,
+                &publics,
+                b"other",
+                proof.profile,
+                &proof
+            ));
+
+            let bytes = proof.to_bytes();
+            assert_eq!(
+                ZkHemV2SplitProof::from_bytes(&bytes, &shape).as_ref(),
+                Some(&proof)
+            );
+            assert!(ZkHemV2SplitProof::from_bytes(&bytes[..bytes.len() - 1], &shape).is_none());
+            type Mutation = fn(&mut SplitLookupV2Proof);
+            let mutations: [Mutation; 9] = [
+                |l| l.helper_roots.swap(0, 1),
+                |l| l.helper_tree_nonces.swap(0, 1),
+                |l| l.helper_roots[0][0] ^= 1,
+                |l| l.mask_sum += E::ONE,
+                |l| l.rounds[1][3] += E::ONE,
+                |l| l.values[0] += E::ONE,
+                |l| l.values[1] += E::ONE,
+                |l| l.values[2] += E::ONE,
+                |l| l.opening.stage0_shares[1].leaves[0].z[0] += F::ONE,
+            ];
+            for (k, mutate) in mutations.iter().enumerate() {
+                let mut bad = proof.clone();
+                mutate(bad.lookup.as_mut().unwrap());
+                assert!(
+                    !verify_split(&shape, &publics, b"stmt", bad.profile, &bad),
+                    "mutation {k} accepted"
+                );
+            }
+            let mut stripped = proof.clone();
+            stripped.lookup = None;
+            assert!(!verify_split(
+                &shape,
+                &publics,
+                b"stmt",
+                stripped.profile,
+                &stripped
+            ));
+        }
+    }
+
+    #[test]
+    fn a_failed_lookup_aborts_at_the_zero_test() {
+        let (shape, good) = lookup_relation([5, 7, 250], 25);
+        let mut wrong_count = good.clone();
+        wrong_count[shape.lookups().unwrap().mult_var_base + 30] += F::ONE;
+        let cases = [
+            lookup_relation([5, 7, 251], 25).1,
+            lookup_relation([5, 7, 250], 24).1,
+            wrong_count,
+        ];
+        for (k, bad) in cases.iter().enumerate() {
+            assert!(!shape.is_satisfied(bad), "case {k}");
+            let out =
+                deal_clear_assignment_and_prove(&shape, bad, b"stmt", 3, 4, |_, _| {}, |_, _| {});
+            for (result, _) in &out {
+                assert_eq!(
+                    result.as_ref().err(),
+                    Some(&ProveError::Unsatisfied),
+                    "case {k}"
+                );
+            }
+        }
+        let ok =
+            deal_clear_assignment_and_prove(&shape, &good, b"stmt", 3, 4, |_, _| {}, |_, _| {});
+        let bad =
+            deal_clear_assignment_and_prove(&shape, &cases[0], b"stmt", 3, 4, |_, _| {}, |_, _| {});
+        assert_eq!(ok[0].1.triples_used, bad[0].1.triples_used);
+        assert!(bad[0].1.rounds < ok[0].1.rounds);
+    }
+
+    #[test]
+    fn a_wrong_helper_table_is_rejected_by_every_custodian() {
+        let (shape, assignment) = lookup_relation([5, 7, 250], 25);
+        let words_sent = core::sync::atomic::AtomicUsize::new(0);
+        let out = deal_clear_assignment_and_prove(
+            &shape,
+            &assignment,
+            b"stmt",
+            3,
+            5,
+            |_, _| {},
+            |me, point| {
+                if let (1, Fault::Word(word)) = (me, point)
+                    && words_sent.fetch_add(1, core::sync::atomic::Ordering::Relaxed) == 1
+                {
+                    word[0] ^= 1;
+                }
+            },
+        );
+        for (result, _) in &out {
+            assert_eq!(result.as_ref().err(), Some(&ProveError::Rejected));
+        }
+    }
+
+    #[test]
+    fn an_unsatisfying_assignment_aborts_at_the_zero_test() {
+        let (shape, _) = small_relation(5);
+        let (_, bad) = small_relation(6);
+        let out =
+            deal_clear_assignment_and_prove(&shape, &bad, b"stmt", 3, 2, |_, _| {}, |_, _| {});
+        for (result, _) in &out {
+            assert_eq!(result.as_ref().err(), Some(&ProveError::Unsatisfied));
+        }
+    }
+
+    fn pattern(stats: Stats) -> (u64, u64, u64, u64) {
+        (
+            stats.rounds,
+            stats.triples_used,
+            stats.randoms_used,
+            stats.mac_checks,
+        )
+    }
+
+    fn two_witness_relation(bit: u64) -> (Shape, Vec<F>) {
+        let mut cs = ConstraintSystem::new();
+        let p = cs.public_input(f(35));
+        let x: Lc = cs.alloc(f(if bit == 0 { 5 } else { 7 })).into();
+        let y: Lc = cs.alloc(f(if bit == 0 { 7 } else { 5 })).into();
+        let prod = cs.mul(&x, &y);
+        cs.enforce_equal(&prod.into(), &p.into());
+        let b: Lc = cs.alloc(f(bit)).into();
+        cs.enforce_boolean(&b);
+        cs.finish_v2()
+    }
+
+    #[test]
+    fn a_deviating_custodian_makes_every_honest_custodian_abort() {
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Attack {
+            Table,
+            RoundShare,
+            Word,
+            Leaf,
+            MacShare,
+            ValueShare,
+        }
+        let expected = |attack: Attack| match attack {
+            Attack::Table | Attack::Word | Attack::Leaf => ProveError::Rejected,
+            _ => ProveError::Mpc(MpcError::MacCheck),
+        };
+        for attack in [
+            Attack::Table,
+            Attack::RoundShare,
+            Attack::Word,
+            Attack::Leaf,
+            Attack::MacShare,
+            Attack::ValueShare,
+        ] {
+            let mut traces = Vec::new();
+            for bit in [0u64, 1] {
+                let (shape, assignment) = two_witness_relation(bit);
+                let secret = shape.num_public + 1;
+                let out = deal_clear_assignment_and_prove(
+                    &shape,
+                    &assignment,
+                    b"stmt",
+                    3,
+                    7,
+                    |me, z| match attack {
+                        Attack::MacShare if me == 2 => z[secret].m[0] += F::ONE,
+                        Attack::ValueShare if me == 2 => z[secret].v += F::ONE,
+                        _ => {}
+                    },
+                    |me, point| {
+                        if me != 2 {
+                            return;
+                        }
+                        match (attack, point) {
+                            (Attack::Table, Fault::Table(table)) => table[secret] += F::ONE,
+                            (Attack::RoundShare, Fault::RoundShare(share)) => share[1].v += E::ONE,
+                            (Attack::Word, Fault::Word(bytes)) => bytes[80] ^= 1,
+                            (Attack::Leaf, Fault::Leaves(leaves)) => {
+                                leaves.leaves[0].z[0] += F::ONE;
+                            }
+                            _ => {}
+                        }
+                    },
+                );
+                for (result, _) in &out[..2] {
+                    assert_eq!(result.as_ref().err(), Some(&expected(attack)), "{attack:?}");
+                }
+                traces.push([pattern(out[0].1), pattern(out[1].1)]);
+            }
+            assert_eq!(traces[0], traces[1], "{attack:?}");
+        }
+    }
+
+    #[test]
+    fn two_witnesses_of_one_statement_give_the_same_message_pattern() {
+        let runs: Vec<_> = [0u64, 1]
+            .into_iter()
+            .map(|bit| {
+                let (shape, assignment) = two_witness_relation(bit);
+                let out = deal_clear_assignment_and_prove(
+                    &shape,
+                    &assignment,
+                    b"stmt",
+                    3,
+                    7,
+                    |_, _| {},
+                    |_, _| {},
+                );
+                let proof = out[0].0.clone().unwrap();
+                assert!(verify_split(&shape, &[f(35)], b"stmt", proof.profile, &proof));
+                (proof, pattern(out[0].1))
+            })
+            .collect();
+        assert_eq!(runs[0].1, runs[1].1);
+        assert_ne!(runs[0].0, runs[1].0);
+    }
+}
