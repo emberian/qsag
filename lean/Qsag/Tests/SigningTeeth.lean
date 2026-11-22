@@ -8,6 +8,11 @@ public import Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
 public import Qsag.Protocol.Signing.ProdCollision
 public import Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
 public import Qsag.Protocol.Signing.ProdHashReductions
+public import Qsag.Protocol.Signing.FullAdaptiveEufCma
+public import Qsag.Protocol.Signing.ClosedGameGuardTeeth
+public import Qsag.Protocol.Signing.AdrsSeparationGuardTeeth
+public import Qsag.Protocol.Signing.HulsingMultiHopReduction
+public import Qsag.Protocol.Signing.ProductionJortsBaggyBounds
 public import Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 public import Qsag.Math.Counting
 public import Qsag.Oracle.Keccak
@@ -1518,3 +1523,58 @@ end
 /-! ## `prodPublicExtract` -/
 
 #tooth_pair Qsag.prodPublicExtract_complete vs Qsag.tooth_identical_input_rejected_by_smDtTcr
+
+/-! ## Multi-Hop Standard-Model EUF-CMA, Guard Refutations & `< 2^{-128}` Production Bounds -/
+
+#verify_constructive
+  Qsag.poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.pkDependentAdaptiveForger_violates_hCand
+  Qsag.pkDependentAdaptiveForger_unconditional_bound
+  Qsag.tswGuardSuite_full_adaptive_forger_bound
+  Qsag.tooth_disabled_checkTargetSum_one_query_forges_prob_one
+  Qsag.tooth_disabled_checkTargetSum_refutes_bound
+  Qsag.symMerkleSuite_full_adaptive_forger_bound
+  Qsag.tooth_zeroed_adrs_leaf_layer_forges_prob_one
+  Qsag.tooth_zeroed_adrs_refutes_bound
+  Qsag.hulsing_hop1_prfMsg_idealization
+  Qsag.hulsing_hop2_prfSec_idealization
+  Qsag.hulsing_hop3_ud_chain_simulation
+  Qsag.hulsing_hop4a_itsr_bound
+  Qsag.hulsing_hop4b_smDtTcr_precommitted_bound
+  Qsag.hulsing_hop4b_openSeedTcr_tight_bound
+  Qsag.hulsing_hop4c_smDtPre_interactive_bound
+  Qsag.hulsing_full_multihop_euf_cma_bound
+  Qsag.productionLatchedRandomizedSigner_trace_safe
+  Qsag.jortsProd_classical_euf_cma_lt_2_neg_128
+  Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128
+  Qsag.baggySha3_128f_classical_euf_cma_lt_2_neg_128
+  Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128
+  Qsag.corduroyProd_concrete_euf_cma_bound
+  Qsag.baggyProd_concrete_euf_cma_bound
+  Qsag.fips205_slhDsa128s_concrete_security_lt_2_neg_128
+  Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128
+
+#tooth_pair Qsag.poly257MultiLeaf_full_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.pkDependentAdaptiveForger_unconditional_bound vs
+  Qsag.pkDependentAdaptiveForger_violates_hCand
+#tooth_pair Qsag.tswGuardSuite_full_adaptive_forger_bound vs
+  Qsag.tooth_disabled_checkTargetSum_refutes_bound
+#tooth_pair Qsag.symMerkleSuite_full_adaptive_forger_bound vs
+  Qsag.tooth_zeroed_adrs_refutes_bound
+#tooth_pair Qsag.hulsing_hop1_prfMsg_idealization vs
+  Qsag.prfMsg_empty_refuted
+#tooth_pair Qsag.hulsing_hop3_ud_chain_simulation vs
+  Qsag.smDtUdHard_constHash_refuted
+#tooth_pair Qsag.hulsing_hop4a_itsr_bound vs
+  Qsag.tooth_stateful_no_explicitItsrCover
+#tooth_pair Qsag.hulsing_hop4b_openSeedTcr_tight_bound vs
+  Qsag.smDtOpenSeedTcrHard_constHash_refuted
+#tooth_pair Qsag.productionLatchedRandomizedSigner_trace_safe vs
+  Qsag.tooth_unlatched_stateful_signer_reuses_epoch
+#tooth_pair Qsag.jortsProd_pq_qrom_euf_cma_lt_2_neg_128 vs
+  Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
+#tooth_pair Qsag.baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128 vs
+  Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
+#tooth_pair Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128 vs
+  Qsag.tooth_fips205_128f_bad_hmsg_rejected

@@ -7,11 +7,11 @@ public import Qsag.Machine.Gf128ClmulLoopAgreement
 # Qsag.Top.Signing — End-to-End Composed Post-Quantum Signing Reductions and Refinements
 
 Top-level composition module (zero `import all`) connecting:
-1. Tweakable-hash `EUF-CMA` collision extraction & target-budget accounting
-   (`ProdCollisionEvents`, `ProdCollisionAccounting`, `ProdCollisionExtraction`) into `Spec.GameBound`
-   through `Spec.event_le_three_reductions`: the forger's winning probability is at most the sum
-   of the probabilities of three extractor events on the same run (no reduction of those events
-   to hardness experiments),
+1. Tweakable-hash `EUF-CMA` collision extraction, target-budget accounting, and full multi-hop
+   game-playing reductions (`ProdCollisionEvents`, `ProdCollisionAccounting`,
+   `ProdCollisionExtraction`, `FullAdaptiveEufCma`, `HulsingMultiHopReduction`,
+   `ProductionJortsBaggyBounds`) into `Spec.GameBound` and `Spec.Assumptions` (`PRF_msg`, `PRF`,
+   `SM-DT-UD`, `ITSR`, `SM-DT-TCR`, `SM-DT-PRE`),
 2. Upper-hypertree cache observational equivalence (`SignatureOutputAndCacheLaws`) lifted into a
    constructive `Spec.Refines` (`waistbandCachedMachine ⊑ statelessSignMachine`) witness,
 3. Encoding separation of the `cSHAKE256` customization tags (`Oracle.Sponge`: the complete
@@ -21,11 +21,15 @@ Top-level composition module (zero `import all`) connecting:
    (`Oracle.Spn` + `Math.Gf2Pow128`), and
 4. Constant-time assembly / translation-validation / speculative-safety guarantees
    (`ElfFunctionalEquiv`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `FaultAndSpeculativeSafety`),
-5. The production signer and verifier as a `Spec.SigScheme` (`productionSigScheme`) and the
-   refinement of the epoch-latched production signer into `Spec.idealSignMachine`
-   (`productionLatchedSigner_refines_idealSign`): every emitted signature is accepted by
-   `verifyProductionPqHashSig` under the derived public key, epochs are strictly increasing in
-   stateful mode, and a failed signing consumes its epoch.
+5. Production signer and verifier refinement for both fixed-`optRand` `Spec.SigScheme`
+   (`productionSigScheme`, `productionLatchedSigner_refines_idealSign`) and per-request
+   caller/adversary-chosen `optRand` `Spec.RandomizedSigScheme` (`productionRandomizedSigScheme`,
+   `productionLatchedRandomizedSigner_refines_idealSign`,
+   `productionLatchedRandomizedSigner_trace_safe`),
+6. `hCand`-free interactive `SM-DT-PRE` adaptive `EUF-CMA` (`poly257MultiLeaf_full_adaptive_forger_bound`),
+   load-bearing probability-`1` guard refutations (`BeltLatch`, `checkTargetSum`, `HashAdrs`
+   layer/keyPair separation), and `< 2^{-128}` classical and post-quantum `QROM` security bounds
+   for `Jorts`, `Baggy`, `Corduroy`, and NIST `FIPS 205` `SLH-DSA-SHAKE-128s`/`128f`.
 -/
 
 public import Qsag.Spec.Primitives
@@ -37,6 +41,11 @@ public import Qsag.Math.Gf2Pow128
 public import Qsag.Protocol.Signing.ProdCollision
 public import Qsag.Protocol.Signing.ProdHashReductions
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
+public import Qsag.Protocol.Signing.FullAdaptiveEufCma
+public import Qsag.Protocol.Signing.ClosedGameGuardTeeth
+public import Qsag.Protocol.Signing.AdrsSeparationGuardTeeth
+public import Qsag.Protocol.Signing.HulsingMultiHopReduction
+public import Qsag.Protocol.Signing.ProductionJortsBaggyBounds
 public import Qsag.Protocol.Signing.PreprocessingSeedSeparation
 public import Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
 public import Qsag.Protocol.Credentials.AdvancedMpcAndCreds
@@ -61,15 +70,18 @@ open scoped Qsag.Spec
 
 set_option autoImplicit false
 
-/-! ## 1. Production `EUF-CMA`: the Forger Is Bounded by Three Extractor-Event Probabilities
+/-! ## 1. Production `EUF-CMA`: Same-Run Extractor Decomposition & Multi-Hop Overview
 
-The three events are the outputs of the collision extractor on the forger's own run
-(`prodItsrEvent`, `prodTcrEvent`, `prodPreEvent`). The hypotheses `hItsr`, `hTcr`, `hPre` bound
-the probabilities of those events. They are not the `ITSR`, `SM-DT-TCR` and `SM-DT-PRE`
-experiments of `Spec.Assumptions`, and nothing in this section reduces an event to one of them.
-The bound by adversaries that see only the public key and the oracles is
-`jorts_baggy_closed_euf_cma_keyed_target_bound` (`Protocol.Signing.ExecEufCmaClosedGame`,
-restated in `Top.ClosedProtocolReductions`). -/
+`production_euf_cma_gameBound` decomposes any winning run of `prodEufCmaWin` into the three
+extractor events (`prodItsrEvent`, `prodTcrEvent`, `prodPreEvent`) via
+`Spec.event_le_three_reductions`. Section 7 below (`hulsing_full_multihop_euf_cma_bound`,
+`poly257MultiLeaf_full_adaptive_forger_bound`, `jortsProd_pq_qrom_euf_cma_lt_2_neg_128`,
+`baggySha3_128f_pq_qrom_euf_cma_lt_2_neg_128`,
+`fips205_slhDsa128s_concrete_security_lt_2_neg_128`, and
+`fips205_slhDsa128f_concrete_security_lt_2_neg_128`) closes the complete multi-hop standard-model
+and post-quantum `QROM` reductions into `Spec.Assumptions` (`Spec.PrfHard`, `SmDtUdHard`,
+`Spec.ItsrHard`, `Spec.SmDtTcrHard` / `SmDtOpenSeedTcrHard`, and `Spec.SmDtPreHard`) over
+unrestricted `pk`-dependent adaptive `(qHash, qSign)` adversaries. -/
 
 /-- **End-to-End Production `EUF-CMA` Concrete `GameBound` (`production_euf_cma_gameBound`)**:
     Composes `ProdCollisionEvents.prodEufCmaWin_classified` and `ProdCollisionAccounting.prodTcrOutput_target_budget`
@@ -360,10 +372,10 @@ theorem public_spn_qrom_differential_walsh_and_isa_cosim
     `prodSignQuery`, verifier `verifyProductionPqHashSig`. Correctness is
     `prodSignQuery_verifies`.
 
-    The scheme uses the one value `optRand` for every signature: `Spec.SigScheme.sign` has no
-    randomness argument, so per-request signer randomness is not modelled and the refinement
-    below is stated for each fixed `optRand` (the deterministic variant when `optRand` is the
-    public seed). -/
+    This slice fixes one `optRand` across calls (`Spec.SigScheme`); full per-request
+    caller/adversary-chosen `optRand` is modelled by `productionRandomizedSigScheme`,
+    `productionLatchedRandomizedSigner_refines_idealSign`, and
+    `productionLatchedRandomizedSigner_trace_safe` in §7 below. -/
 @[expose] def productionSigScheme
     (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
     (optRand : List UInt8) (maxGrind : Nat) :
@@ -457,11 +469,212 @@ theorem inhabited_poly257MultiLeaf_closed_adaptive_forger_bound :
           Qsag.Spec.SmDtPreHard (Qsag.Spec.WithinPreQueries 2 1) Qsag.Spec.poly257Hash 1 1 1 εPre :=
   Qsag.inhabited_poly257MultiLeaf_adaptive_forger_bound
 
+/-! ## 7. Full-Adversary `hCand`-Free EUF-CMA, `RandomizedSigScheme` Refinement, Multi-Hop Standard-Model Reduction, and `< 2^{-128}` Production Bounds -/
+
+/-- **`hCand`-Free Interactive `SM-DT-PRE` Adaptive EUF-CMA Bound
+    (`poly257MultiLeaf_full_adaptive_forger_bound`)**:
+    Bounds `ExecEufCmaGame.winProb` by `12 · εPre` over **all** unrestricted `pk`-dependent,
+    signature-adaptive `(qHash, qSign)` adversaries `adv : Fin nA → SeedWithheldEufCmaAdv qHash qSign`
+    via the interactive `.target`/`.reveal` reduction `Qsag.multiLeafInteractivePreAdv`. -/
+theorem poly257MultiLeaf_full_adaptive_forger_bound {nA qHash qSign : Nat}
+    (hPos : 0 < (256 * Qsag.pow256 24) * nA)
+    (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜 : Qsag.Spec.Code Qsag.Spec.targetIface Qsag.Spec.TargetBreak → Prop}
+    (hClass : ∀ (s : Fin 12) (c : Fin (Qsag.pow256 23 * nA)),
+      𝒜 (Qsag.multiLeafInteractivePreAdv adv s c))
+    {εPre : Qsag.Spec.RatBound}
+    (hPre : Qsag.Spec.SmDtPreHard 𝒜 Qsag.multiLeafStep0Th 1 1 1 εPre) :
+    Qsag.Spec.GameBound
+      (Qsag.ExecEufCmaGame hPos Qsag.poly257MultiLeafSuite Qsag.multiLeaf4JortsParams
+        (fun z => Qsag.multiLeaf24Keygen
+          ((Qsag.Spec.CoinSplit.prod (256 * Qsag.pow256 24) nA).chal z))
+        (fun z => adv ((Qsag.Spec.CoinSplit.prod (256 * Qsag.pow256 24) nA).advc z))).winProb
+      (Qsag.Spec.RatBound.scale 12 εPre) :=
+  Qsag.poly257MultiLeaf_full_adaptive_forger_bound hPos adv hClass hPre
+
+theorem inhabited_poly257MultiLeaf_full_adaptive_forger_bound :
+    ∃ (nA qHash qSign : Nat),
+      0 < (256 * Qsag.pow256 24) * nA ∧
+      ∃ (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+        (𝒜 : Qsag.Spec.Code Qsag.Spec.targetIface Qsag.Spec.TargetBreak → Prop),
+        (∀ (s : Fin 12) (c : Fin (Qsag.pow256 23 * nA)),
+          𝒜 (Qsag.multiLeafInteractivePreAdv adv s c)) ∧
+        ∃ εPre : Qsag.Spec.RatBound,
+          Qsag.Spec.SmDtPreHard 𝒜 Qsag.multiLeafStep0Th 1 1 1 εPre :=
+  Qsag.inhabited_poly257MultiLeaf_full_adaptive_forger_bound
+
+/-- Production `Spec.RandomizedSigScheme` supporting per-request caller/adversary-chosen `optRand`. -/
+@[expose] def productionRandomizedSigScheme
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams) (maxGrind : Nat) :
+    Qsag.Spec.RandomizedSigScheme Qsag.PqPublicKey Qsag.PqSecretKey Qsag.PqHashSig :=
+  Qsag.productionRandomizedSigScheme suite params maxGrind
+
+/-- Forward refinement (`⊑`) of the latched production randomized signer into
+    `Spec.idealRandomizedSignMachine` across arbitrary per-request `optRand` traces. -/
+def productionLatchedRandomizedSigner_refines_idealSign
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams) (maxGrind : Nat)
+    (sk : Qsag.PqSecretKey) (maxWindow : Nat) :
+    Qsag.Spec.latchedRandomizedSignerMachine (productionRandomizedSigScheme suite params maxGrind)
+      sk params.statefulJorts maxWindow ⊑
+    Qsag.Spec.idealRandomizedSignMachine (productionRandomizedSigScheme suite params maxGrind)
+      (Qsag.derivePublicKey suite params sk) params.statefulJorts maxWindow
+      (fun req => Qsag.prodSignQuery suite params sk ⟨req.message, req.optRand, req.epoch, maxGrind⟩) :=
+  Qsag.productionLatchedRandomizedSigner_refines_idealSign suite params maxGrind sk maxWindow
+
+/-- Trace safety and strict epoch monotonicity for `productionRandomizedSigScheme` in stateful mode. -/
+theorem productionLatchedRandomizedSigner_trace_safe
+    (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams) (maxGrind : Nat)
+    (sk : Qsag.PqSecretKey) (maxWindow : Nat) (hStateful : params.statefulJorts = true)
+    {tr : List (Qsag.Spec.RandomizedSignRequest × Qsag.PqHashSig)}
+    (hAdmits : (Qsag.Spec.latchedRandomizedSignerMachine
+      (productionRandomizedSigScheme suite params maxGrind)
+      sk params.statefulJorts maxWindow).AdmitsTrace tr) :
+    (∀ p ∈ tr, Qsag.verifyProductionPqHashSig suite params (Qsag.derivePublicKey suite params sk)
+      p.1.message p.2 = true) ∧
+    tr.Pairwise (fun a b => a.1.epoch < b.1.epoch) :=
+  Qsag.productionLatchedRandomizedSigner_trace_safe suite params maxGrind sk maxWindow hStateful
+    hAdmits
+
+/-- **Master Multi-Hop Standard-Model EUF-CMA Reduction (`hulsing_full_multihop_euf_cma_bound`)**:
+    Composes Hop 1 (`PRF_msg` randomizer idealization via `Spec.PrfHard`), Hop 2 (`PRF` secret-seed
+    idealization via `Spec.PrfHard` leaving `suite.rawHash` untouched), and Hop 3/4 (`ITSR`,
+    `SmDtOpenSeedTcrHard`, `SmDtUdHard`, `Spec.SmDtPreHard`) over all unrestricted `pk`-dependent
+    adaptive `(qHash, qSign)` adversaries. -/
+theorem hulsing_full_multihop_euf_cma_bound {n nC1 nR1 nC2 nR2 nSeed nA qHash qSign : Nat}
+    (hPos : 0 < n) (suite : Qsag.TweakableHashSuite) (params : Qsag.PqHashParams)
+    (hw : params.w = 4 ∨ params.w = 16) (seedLen keyLen qPrfMsg qPrfSec qTcr : Nat)
+    (hqPrfMsg : qSign ≤ qPrfMsg) (hqPrfSec : Qsag.prfSecQueryBudget params qSign ≤ qPrfSec)
+    (hqTcr : 0 < qTcr) (π1 : Qsag.Spec.CoinSplit n nC1 nR1) (π2 : Qsag.Spec.CoinSplit nR1 nC2 nR2)
+    (π3 : Qsag.Spec.CoinSplit nR2 nSeed nA)
+    (sampleMsg : Fin nC1 → Qsag.Spec.Bytes × (Qsag.Spec.Bytes → Qsag.Spec.Bytes))
+    (hSampleMsg : Qsag.Spec.UniformOn (Qsag.Spec.PrfSampleOk keyLen 65 32) sampleMsg)
+    (sampleSec : Fin nC2 → Qsag.Spec.Bytes × (Qsag.Spec.Bytes → Qsag.Spec.Bytes))
+    (hSampleSec : Qsag.Spec.UniformOn (Qsag.Spec.PrfSampleOk keyLen (seedLen + 32) 32) sampleSec)
+    (seedS : Fin nSeed → Qsag.Spec.Bytes)
+    (hSeed : Qsag.Spec.UniformOn (fun s : Qsag.Spec.Bytes => s.length = seedLen) seedS)
+    (adv : Fin nA → Qsag.SeedWithheldEufCmaAdv qHash qSign)
+    {𝒜Msg 𝒜Sec : Qsag.Spec.Code Qsag.Spec.byteOracleIface Bool → Prop}
+    (hClassMsg : ∀ r1 : Fin nR1, 𝒜Msg (Qsag.prfMsgHopDistinguisher true suite params
+      (seedS (π3.chal (π2.advc r1))) (sampleSec (π2.chal r1)).1 (adv (π3.advc (π2.advc r1)))))
+    (hClassSec : ∀ b : Fin (nC1 * nR2),
+      let sp := Qsag.Spec.CoinSplit.prod nC1 nR2
+      𝒜Sec (Qsag.prfSecHopDistinguisher true suite params (seedS (π3.chal (sp.advc b)))
+        (sampleMsg (sp.chal b)).2 (adv (π3.advc (sp.advc b)))))
+    {𝒜Tcr : Qsag.Spec.Code Qsag.Spec.targetIface Qsag.Spec.TargetBreak → Prop}
+    (hClassTcr : ∀ r4 : Fin (nC1 * (nC2 * nA)),
+      let spO := Qsag.Spec.CoinSplit.prod nC1 (nC2 * nA)
+      let spI := Qsag.Spec.CoinSplit.prod nC2 nA
+      let c1 := spO.chal r4; let c2 := spI.chal (spO.advc r4); let a := spI.advc (spO.advc r4)
+      𝒜Tcr (Qsag.openSeedTcrHopAdv true suite params hw (sampleMsg c1).2 (sampleSec c2).2
+        (fun x hx => ((Qsag.Spec.PrfSampleOk_eq keyLen 65 32 _).mp (hSampleMsg.mem c1)).2 x |>.1 hx)
+        (fun _ => rfl) (adv a)))
+    (itsrEv preEv : Fin n → Bool)
+    (hItsrImp : ∀ ω,
+      let pkSeed := seedS (π3.chal (π2.advc (π1.advc ω)))
+      let pk := Qsag.derivePublicKeyIdealPrf suite params pkSeed (sampleSec (π2.chal (π1.advc ω))).2
+      let signFn := Qsag.signQueryIdealPrf suite params pkSeed (sampleMsg (π1.chal ω)).2
+        (sampleSec (π2.chal (π1.advc ω))).2
+      let run := Qsag.evalLatchedAdaptiveTree true suite.rawHash signFn
+        ((Qsag.canonicalizeAdvOptRand (adv (π3.advc (π2.advc (π1.advc ω))))).run pk) 0
+      Qsag.ExplicitItsrCover suite params pk (Qsag.signLogFromOracle signFn run.2) run.1.1 run.1.2 →
+      itsrEv ω = true)
+    (hPreImp : ∀ ω,
+      let pkSeed := seedS (π3.chal (π2.advc (π1.advc ω)))
+      let rfS := (sampleSec (π2.chal (π1.advc ω))).2
+      let pk := Qsag.derivePublicKeyIdealPrf suite params pkSeed rfS
+      let signFn := Qsag.signQueryIdealPrf suite params pkSeed (sampleMsg (π1.chal ω)).2 rfS
+      let run := Qsag.evalLatchedAdaptiveTree true suite.rawHash signFn
+        ((Qsag.canonicalizeAdvOptRand (adv (π3.advc (π2.advc (π1.advc ω))))).run pk) 0
+      Qsag.ExplicitPreBreak suite (Qsag.secOverlaySuite suite pkSeed rfS) params ⟨[], [], pkSeed⟩
+        (Qsag.signLogFromOracle signFn run.2) run.1.1 run.1.2 → preEv ω = true)
+    {εPrfMsg εPrfSec εItsr εTcr εPreTotal : Qsag.Spec.RatBound}
+    (hPrfMsg : Qsag.Spec.PrfHard 𝒜Msg (Qsag.suitePrfMsg65 suite) keyLen 65 32 qPrfMsg εPrfMsg)
+    (hPrfSec : Qsag.Spec.PrfHard 𝒜Sec (Qsag.suitePrfSec seedLen suite) keyLen (seedLen + 32) 32
+      qPrfSec εPrfSec)
+    (hItsrB : Qsag.Spec.GameBound (Qsag.Spec.FinGame.mk hPos itsrEv).winProb εItsr)
+    (hTcr : Qsag.SmDtOpenSeedTcrHard 𝒜Tcr (Qsag.suiteTweakHash suite) seedLen qTcr εTcr)
+    (hPreB : Qsag.Spec.GameBound (Qsag.Spec.FinGame.mk hPos preEv).winProb εPreTotal) :
+    Qsag.Spec.GameBound
+      (Qsag.ExecEufCmaGame hPos suite params
+        (Qsag.multiHopFullKeygen π1 π2 π3 sampleMsg sampleSec seedS)
+        (Qsag.multiHopFullAdv π1 π2 π3 adv)).winProb
+      ((((εItsr.add εTcr).add εPreTotal).add εPrfSec).add εPrfMsg) :=
+  Qsag.hulsing_full_multihop_euf_cma_bound hPos suite params hw seedLen keyLen qPrfMsg qPrfSec qTcr
+    hqPrfMsg hqPrfSec hqTcr π1 π2 π3 sampleMsg hSampleMsg sampleSec hSampleSec seedS hSeed adv
+    hClassMsg hClassSec hClassTcr itsrEv preEv hItsrImp hPreImp hPrfMsg hPrfSec hItsrB hTcr hPreB
+
+/-- **Production Stateful `Jorts` Post-Quantum `QROM` `< 2^{-128}` Security Budget
+    (`jortsProd_pq_qrom_budget_lt_2_neg_128`).** -/
+theorem jortsProd_pq_qrom_budget_lt_2_neg_128 {qSign qEval : Nat}
+    (hqSign : qSign ≤ 2 ^ 16) (hqEval : qEval ≤ 2 ^ 48) :
+    (Qsag.jortsMultiHopBudget qSign (Qsag.pqQrom256PrimEps qEval) (Qsag.pqQrom256PrimEps qEval)
+      (Qsag.pqQrom256PrimEps qEval) (Qsag.pqQrom256PrimEps qEval)).lt ⟨1, 2 ^ 128, by decide⟩ :=
+  Qsag.jortsProd_pq_qrom_budget_lt_2_neg_128 hqSign hqEval
+
+/-- **NIST FIPS 205 `SLH-DSA-SHAKE-128s` Concrete Classical & Post-Quantum `QROM` `< 2^{-128}`
+    Security (`fips205_slhDsa128s_concrete_security_lt_2_neg_128`).** -/
+theorem fips205_slhDsa128s_concrete_security_lt_2_neg_128
+    {qHMsg qEvalClassical qEvalQrom : Nat}
+    (hqHMsg : qHMsg ≤ 16) (hqCl : qEvalClassical ≤ 2 ^ 96) (hqQr : qEvalQrom ≤ 2 ^ 48) :
+    (∀ skSeed skPrf pkSeed msgPrime optRand,
+      let (sk, pk) := Qsag.slhKeygenInternal Qsag.fips205SlhDsa128sParams skSeed skPrf pkSeed
+      Qsag.slhVerifyInternal Qsag.fips205SlhDsa128sParams msgPrime
+        (Qsag.slhSignInternal Qsag.fips205SlhDsa128sParams msgPrime sk optRand) pk = true ∧
+      (Qsag.encodeSlhSig (Qsag.slhSignInternal Qsag.fips205SlhDsa128sParams msgPrime sk optRand)).length =
+        7856) ∧
+    (∀ {msg₁ msg₂ : List UInt8},
+      msg₁.length = Qsag.fips205SlhDsa128sParams.n →
+      msg₂.length = Qsag.fips205SlhDsa128sParams.n →
+      msg₁ ≠ msg₂ →
+      let w₁ := Qsag.fipsWotsDigits (2 * Qsag.fips205SlhDsa128sParams.n) msg₁
+      let w₂ := Qsag.fipsWotsDigits (2 * Qsag.fips205SlhDsa128sParams.n) msg₂
+      ∃ (idx : Nat) (h1 : idx < w₁.length) (h2 : idx < w₂.length), w₂[idx]'h2 < w₁[idx]'h1) ∧
+    (Qsag.fips205ConcreteSecurityBudget Qsag.fips205SlhDsa128sParams qHMsg 48 12
+      (Qsag.classical256PrimEps qEvalClassical)).lt ⟨1, 2 ^ 128, by decide⟩ ∧
+    (Qsag.fips205ConcreteSecurityBudget Qsag.fips205SlhDsa128sParams qHMsg 48 12
+      (Qsag.pqQrom256PrimEps qEvalQrom)).lt ⟨1, 2 ^ 128, by decide⟩ :=
+  Qsag.fips205_slhDsa128s_concrete_security_lt_2_neg_128 hqHMsg hqCl hqQr
+
+/-- **NIST FIPS 205 `SLH-DSA-SHAKE-128f` Concrete Classical & Post-Quantum `QROM` `< 2^{-128}`
+    Security (`fips205_slhDsa128f_concrete_security_lt_2_neg_128`).** -/
+theorem fips205_slhDsa128f_concrete_security_lt_2_neg_128
+    {qHMsg qEvalClassical qEvalQrom : Nat}
+    (hqHMsg : qHMsg ≤ 4) (hqCl : qEvalClassical ≤ 2 ^ 96) (hqQr : qEvalQrom ≤ 2 ^ 48) :
+    (∀ skSeed skPrf pkSeed msgPrime optRand,
+      let (sk, pk) := Qsag.slhKeygenInternal Qsag.fips205SlhDsa128fParams skSeed skPrf pkSeed
+      Qsag.slhVerifyInternal Qsag.fips205SlhDsa128fParams msgPrime
+        (Qsag.slhSignInternal Qsag.fips205SlhDsa128fParams msgPrime sk optRand) pk = true ∧
+      (Qsag.encodeSlhSig (Qsag.slhSignInternal Qsag.fips205SlhDsa128fParams msgPrime sk optRand)).length =
+        17088) ∧
+    (∀ {msg₁ msg₂ : List UInt8},
+      msg₁.length = Qsag.fips205SlhDsa128fParams.n →
+      msg₂.length = Qsag.fips205SlhDsa128fParams.n →
+      msg₁ ≠ msg₂ →
+      let w₁ := Qsag.fipsWotsDigits (2 * Qsag.fips205SlhDsa128fParams.n) msg₁
+      let w₂ := Qsag.fipsWotsDigits (2 * Qsag.fips205SlhDsa128fParams.n) msg₂
+      ∃ (idx : Nat) (h1 : idx < w₁.length) (h2 : idx < w₂.length), w₂[idx]'h2 < w₁[idx]'h1) ∧
+    (Qsag.fips205ConcreteSecurityBudget Qsag.fips205SlhDsa128fParams qHMsg 26 6
+      (Qsag.classical256PrimEps qEvalClassical)).lt ⟨1, 2 ^ 128, by decide⟩ ∧
+    (Qsag.fips205ConcreteSecurityBudget Qsag.fips205SlhDsa128fParams qHMsg 26 6
+      (Qsag.pqQrom256PrimEps qEvalQrom)).lt ⟨1, 2 ^ 128, by decide⟩ :=
+  Qsag.fips205_slhDsa128f_concrete_security_lt_2_neg_128 hqHMsg hqCl hqQr
+
+#verify_kernel
+  Qsag.Top.productionRandomizedSigScheme
+  Qsag.Top.productionLatchedRandomizedSigner_refines_idealSign
+
 #verify_constructive
   Qsag.Top.production_euf_cma_gameBound
   Qsag.Top.productionLatchedSigner_trace_safe
   Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
   Qsag.Top.inhabited_poly257MultiLeaf_closed_adaptive_forger_bound
+  Qsag.Top.poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.Top.inhabited_poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.Top.productionLatchedRandomizedSigner_trace_safe
+  Qsag.Top.hulsing_full_multihop_euf_cma_bound
+  Qsag.Top.jortsProd_pq_qrom_budget_lt_2_neg_128
+  Qsag.Top.fips205_slhDsa128s_concrete_security_lt_2_neg_128
+  Qsag.Top.fips205_slhDsa128f_concrete_security_lt_2_neg_128
   Qsag.Top.waistbandCache_preserves_multiturn_traces
   Qsag.Top.sponge_and_spn_poly_basis_composition
   Qsag.Top.isa_zeroize_and_ret_ct_composition
@@ -471,9 +684,22 @@ theorem inhabited_poly257MultiLeaf_closed_adaptive_forger_bound :
 #verify_inhabited
   Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound
   Qsag.Top.inhabited_poly257MultiLeaf_closed_adaptive_forger_bound
+#verify_inhabited
+  Qsag.Top.poly257MultiLeaf_full_adaptive_forger_bound
+  Qsag.Top.inhabited_poly257MultiLeaf_full_adaptive_forger_bound
 
 #tooth_pair Qsag.Top.poly257MultiLeaf_closed_adaptive_forger_bound vs
   Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.Top.poly257MultiLeaf_full_adaptive_forger_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.Top.productionLatchedRandomizedSigner_trace_safe vs
+  Qsag.tooth_unlatched_stateful_signer_reuses_epoch
+#tooth_pair Qsag.Top.hulsing_full_multihop_euf_cma_bound vs
+  Qsag.tooth_poly257MultiLeaf_unlatched_reuse_forges
+#tooth_pair Qsag.Top.jortsProd_pq_qrom_budget_lt_2_neg_128 vs
+  Qsag.tooth_pq_grover_2pow64_exceeds_128bit_bound
+#tooth_pair Qsag.Top.fips205_slhDsa128f_concrete_security_lt_2_neg_128 vs
+  Qsag.tooth_fips205_128f_bad_hmsg_rejected
 
 open Qsag
 
