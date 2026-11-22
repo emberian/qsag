@@ -29,10 +29,10 @@ use qsag_asm::wipe::SecretBuffer;
 
 use crate::u384::U384;
 
-const TAG_LEAF: &[u8] = b"QSAG.FTS.LEAF.V1";
-const TAG_MERGE: &[u8] = b"QSAG.FTS.MERGE.V1";
-const TAG_CHAIN: &[u8] = b"QSAG.FTS.CHAIN.V1";
-const TAG_RAND: &[u8] = b"QSAG.FTS.RAND.V1";
+pub const TAG_LEAF: &[u8] = b"QSAG.FTS.LEAF.V1";
+pub const TAG_MERGE: &[u8] = b"QSAG.FTS.MERGE.V1";
+pub const TAG_CHAIN: &[u8] = b"QSAG.FTS.CHAIN.V1";
+pub const TAG_RAND: &[u8] = b"QSAG.FTS.RAND.V1";
 const TAG_MSG_PRE: &[u8] = b"QSAG.FTS.MSG256.V1";
 const TAG_HMSG: &[u8] = b"QSAG.FTS.HMSG.V1";
 
@@ -559,7 +559,7 @@ pub struct FrontierFtsSigningKey {
     released_uses: Vec<Option<(Vec<u8>, u16)>>,
     /// Optional flat cache of `[X_{v, j}]` across `v in 2..2^{h+1}, j in 0..w` (`32` bytes each)
     /// wiped via `ct_zeroize_bytes` on `Drop`.
-    cached_chains: Option<Vec<u8>>,
+    cached_chains: Option<SecretBuffer<Vec<u8>>>,
     #[cfg(test)]
     test_fault: Option<FrontierFaultInjection>,
 }
@@ -576,13 +576,7 @@ impl fmt::Debug for FrontierFtsSigningKey {
     }
 }
 
-impl Drop for FrontierFtsSigningKey {
-    fn drop(&mut self) {
-        if let Some(ref mut buf) = self.cached_chains {
-            ct_zeroize_bytes(buf);
-        }
-    }
-}
+
 
 /// Compact `FrontierSumFts` signature (size is determined by its profile).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -775,6 +769,50 @@ impl RotatedEpochVote {
     }
 }
 
+impl FrontierFtsPublicKey {
+    pub fn message_digest(&self, msg: &[u8]) -> [u8; 32] {
+        prehash_message_256(&self.profile.pid_bytes(), &self.pk_seed, &self.root, msg)
+    }
+
+    /// The first admissible counter and exactly the nodes and offsets opened by
+    /// either a standalone signer or a custodian holding shared chain states.
+    pub fn signing_frontier(
+        &self,
+        dp: &FrontierDpTable,
+        digest: &[u8; 32],
+        randomizer: &[u8; 32],
+    ) -> Result<(u16, Vec<u32>, Vec<u8>), FrontierFtsError> {
+        let p = self.profile.params();
+        if p != dp.params || self.root.len() != p.node_bytes {
+            return Err(FrontierFtsError::ProfileMismatch);
+        }
+        let pid = self.profile.pid_bytes();
+        for ctr in 0..1u64 << p.counter_bits {
+            let rank = squeeze_target_index(
+                &pid,
+                &self.pk_seed,
+                &self.root,
+                randomizer,
+                digest,
+                ctr as u16,
+                p.index_bits,
+            );
+            if rank.ct_lt(dp.total_cardinality) {
+                let (nodes, offsets) = dp.unrank(rank)?;
+                return Ok((ctr as u16, nodes, offsets));
+            }
+        }
+        Err(FrontierFtsError::GrindingExhausted)
+    }
+
+    pub fn wal_key(&self) -> [u8; 32] {
+        qsag_accel::keccak::cshake256_framed_32(
+            b"QSAG.FRONTIER.WAL.V1",
+            &[&self.profile.pid_bytes(), &self.pk_seed, &self.root],
+        )
+    }
+}
+
 impl FrontierFtsSigningKey {
     /// Sign the current vote and the next key together, spending the normal durable use budget.
     /// Reusing the public `pk_seed` lets the envelope carry only the next 32-byte root.
@@ -944,7 +982,7 @@ impl FrontierFtsSigningKey {
         // Compute bottom-up: if caching, store `[total_nodes * w * n]`; else store endpoints `[total_nodes * n]`.
         let mut endpoints = SecretBuffer(vec![0u8; total_nodes * n]);
         let mut cache = if cache_tree {
-            Some(vec![0u8; total_nodes * w * n])
+            Some(SecretBuffer(vec![0u8; total_nodes * w * n]))
         } else {
             None
         };
@@ -1040,11 +1078,8 @@ impl FrontierFtsSigningKey {
     }
 
     /// Identity binds the profile and complete public key to the use journal.
-    pub fn wal_key(&self) -> [u8; 32] {
-        qsag_accel::keccak::cshake256_framed_32(
-            b"QSAG.FRONTIER.WAL.V1",
-            &[&self.profile.pid_bytes(), &self.pk.pk_seed, &self.pk.root],
-        )
+    pub fn wal_key(&self) -> [u8; 32]{
+        self.pk.wal_key()
     }
     pub fn attach_wal(
         mut self,
