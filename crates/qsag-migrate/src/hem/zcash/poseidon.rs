@@ -1379,3 +1379,64 @@ fn words_le(w: &[u64; 4]) -> [u8; 32] {
 }
 
 /// The Poseidon permutation.
+pub fn permute(state: &mut [Fp; 3]) {
+    let pow5 = |x: Fp| x.square().square() * x;
+    for r in 0..FULL_ROUNDS + PARTIAL_ROUNDS {
+        for (j, word) in state.iter_mut().enumerate() {
+            *word = *word + round_constant(r, j);
+        }
+        let full = !(FULL_ROUNDS / 2..FULL_ROUNDS / 2 + PARTIAL_ROUNDS).contains(&r);
+        state[0] = pow5(state[0]);
+        if full {
+            state[1] = pow5(state[1]);
+            state[2] = pow5(state[2]);
+        }
+        let s = *state;
+        for (i, word) in state.iter_mut().enumerate() {
+            *word = mds(i, 0) * s[0] + mds(i, 1) * s[1] + mds(i, 2) * s[2];
+        }
+    }
+}
+
+/// The capacity element of the constant-length-2 sponge: `2 * 2^64`.
+pub(super) fn capacity_two() -> Fp {
+    let mut b = [0u8; 32];
+    b[8] = 2;
+    Fp::from_bytes(&b).expect("small")
+}
+
+/// Poseidon hash of two field elements (`ConstantLength<2>`, one output element).
+pub fn hash2(a: Fp, b: Fp) -> Fp {
+    let mut state = [a, b, capacity_two()];
+    permute(&mut state);
+    state[0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::vectors::{POSEIDON_HASH, POSEIDON_PERMUTE, hex32};
+    use super::*;
+
+    fn fp(s: &str) -> Fp {
+        Fp::from_bytes(&hex32(s)).unwrap()
+    }
+
+    #[test]
+    fn permutation_vectors() {
+        assert!(POSEIDON_PERMUTE.len() >= 10);
+        for (input, output) in POSEIDON_PERMUTE {
+            let mut st = input.map(fp);
+            permute(&mut st);
+            assert_eq!(st, output.map(fp));
+        }
+    }
+
+    #[test]
+    fn hash_vectors() {
+        assert!(POSEIDON_HASH.len() >= 10);
+        for (a, b, out) in POSEIDON_HASH {
+            assert_eq!(hash2(fp(a), fp(b)), fp(out));
+            assert_ne!(hash2(fp(b), fp(a)), fp(out));
+        }
+    }
+}

@@ -496,3 +496,501 @@ impl FixedBase {
 
 /// The fixed bases of the Orchard protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Base {
+    /// `G^Orchard = GroupHash^P("z.cash:Orchard", "G")`: spend authorization.
+    SpendAuth,
+    /// `K^Orchard = GroupHash^P("z.cash:Orchard", "K")`: nullifiers.
+    Nullifier,
+    /// The randomness base of `Commit^ivk`.
+    CommitIvkR,
+    /// The randomness base of `NoteCommit^Orchard`.
+    NoteCommitR,
+}
+
+impl Base {
+    pub fn point(self) -> Point {
+        match self {
+            Self::SpendAuth => hash_to_curve("z.cash:Orchard", b"G"),
+            Self::Nullifier => hash_to_curve("z.cash:Orchard", b"K"),
+            Self::CommitIvkR => hash_to_curve("z.cash:Orchard-CommitIvk-r", b""),
+            Self::NoteCommitR => hash_to_curve("z.cash:Orchard-NoteCommit-r", b""),
+        }
+    }
+
+    /// The window tables; kept for the life of the process with `std`.
+    pub fn tables(self) -> Arc<FixedBase> {
+        #[cfg(feature = "std")]
+        {
+            use std::sync::OnceLock;
+            static TABLES: [OnceLock<Arc<FixedBase>>; 4] = [
+                OnceLock::new(),
+                OnceLock::new(),
+                OnceLock::new(),
+                OnceLock::new(),
+            ];
+            TABLES[self as usize]
+                .get_or_init(|| Arc::new(FixedBase::new(&self.point())))
+                .clone()
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Arc::new(FixedBase::new(&self.point()))
+        }
+    }
+}
+
+// ============================================================================
+// Variable-base scalar multiplication
+// ============================================================================
+
+/// Digits of the variable-base multiplication are three bits wide.
+const VAR_DIGITS: usize = 85;
+
+/// The public constant `2 * 8^85 + (8^85 - 1) / 7 (mod q)`.
+fn var_base_offset() -> Fq {
+    let eight = Fq::from_u64(8);
+    let mut pow = Fq::ONE;
+    let mut ones = Fq::ZERO;
+    for _ in 0..VAR_DIGITS {
+        ones = ones + pow;
+        pow = pow * eight;
+    }
+    pow.double() + ones
+}
+
+/// `[k] g` for a witness point `g` on the curve (canonical `x`, reduced `y`) and the
+/// Boolean bits of a scalar `k` (any 255-bit representative of its residue modulo `q`).
+///
+/// The prover supplies `s = k - c (mod q)` with `c` the constant of
+/// `var_base_offset`, and the gadget computes `[2 * 8^85 + sum_j (s_j + 1) 8^j] g` with
+/// `s_j` the base-8 digits of `s`: a Horner chain from `2 g` over a table of
+/// `g, 2 g, .., 8 g`, with no zero digit. The integer in brackets is `s + c`, congruent to
+/// `k`. Every addition of the chain enforces distinct `x`.
+pub fn var_base_mul(
+    cs: &mut ConstraintSystem,
+    fp: &Field,
+    fq: &Field,
+    g: &Pt,
+    k_bits: &[Lc],
+    canonical: bool,
+) -> Pt {
+    assert_eq!(k_bits.len(), Field::BITS);
+    assert!(g.x_canonical);
+    let k_num = Num::from_bits(k_bits);
+    let offset = var_base_offset();
+    let k_value = Fq::from_bytes(&fq.value(cs, &k_num)).expect("canonical residue");
+    let s = fq.alloc(cs, &(k_value - offset).to_bytes());
+    fq.enforce_zero(
+        cs,
+        &s.num().add(&Num::constant(&offset.to_bytes())).sub(&k_num),
+    );
+
+    // Table of 1 g .. 8 g with canonical x and reduced y.
+    let mut table: Vec<Pt> = Vec::with_capacity(8);
+    table.push(g.clone());
+    for m in 2..=8usize {
+        let mut p = if m % 2 == 0 {
+            double(cs, fp, &table[m / 2 - 1], true)
+        } else {
+            add(cs, fp, &table[m - 2], &table[0], true, true)
+        };
+        p.settle(cs, fp);
+        table.push(p);
+    }
+    let table_y: Vec<Vec<Lc>> = table
+        .iter()
+        .map(|p| {
+            // After `settle`, `y` is the limbs of an element.
+            let limbs = p.y.limb_forms();
+            assert_eq!(limbs.len(), LIMBS);
+            limbs
+        })
+        .collect();
+    let xs: Vec<&[Lc]> = table.iter().map(|p| p.x.as_slice()).collect();
+    let ys: Vec<&[Lc]> = table_y.iter().map(|y| y.as_slice()).collect();
+
+    let mut acc = table[1].clone();
+    for j in (0..VAR_DIGITS).rev() {
+        for i in 0..3 {
+            acc = double(cs, fp, &acc, i == 2);
+        }
+        let monos = monomials(cs, &s.bits[3 * j..3 * j + 3]);
+        let t = Pt::from_table(select_limbs(cs, &monos, &xs), select_limbs(cs, &monos, &ys));
+        acc = add(cs, fp, &acc, &t, true, j == 0 && canonical);
+    }
+    acc
+}
+
+// ============================================================================
+// Sinsemilla
+// ============================================================================
+
+/// The lookup table of the 1024 Sinsemilla points `S(j)`.
+pub fn sinsemilla_table() -> Arc<PointTable> {
+    #[cfg(feature = "std")]
+    {
+        static TABLE: std::sync::OnceLock<Arc<PointTable>> = std::sync::OnceLock::new();
+        TABLE
+            .get_or_init(|| Arc::new(PointTable::new(&super::sinsemilla::s_table(), 10)))
+            .clone()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        Arc::new(PointTable::new(&super::sinsemilla::s_table(), 10))
+    }
+}
+
+/// `SinsemillaHashToPoint` from the public starting point `q` over Boolean message bits.
+/// The message is padded with zero bits to a multiple of ten.
+///
+/// Each chunk computes `Acc' = (Acc + S) + Acc` with slopes `l1`, `l2`:
+///
+/// ```text
+/// l1 (x_S - x_A) = y_S - y_A        x_R = l1^2 - x_A - x_S
+/// (l1 + l2) (x_A - x_R) = 2 y_A     x_A' = l2^2 - x_R - x_A,  y_A' = l2 (x_A - x_A') - y_A
+/// ```
+///
+/// `x_A != x_S` is enforced on canonical limbs, which excludes `Acc = S` and `Acc = -S`.
+/// If `x_R = x_A` the second slope equation reads `0 = 2 y_A`, which no point of the curve
+/// satisfies. So every case in which the specification returns `⊥` is unsatisfiable, and
+/// otherwise both slopes are unique. `x_R` stays unreduced.
+pub fn sinsemilla_hash_to_point(
+    cs: &mut ConstraintSystem,
+    f: &Field,
+    q: &Point,
+    bits: &[Lc],
+) -> Pt {
+    let table = sinsemilla_table();
+    let (qx, qy) = q.to_affine().expect("Q is not the identity");
+    let mut acc = Pt::constant(qx, qy);
+    let zero = Lc::zero();
+    for chunk in bits.chunks(10) {
+        let mut padded: Vec<Lc> = chunk.to_vec();
+        padded.resize(10, zero.clone());
+        let (sx, sy) = table.lookup(cs, &padded);
+        let s = Pt::from_table(sx, sy);
+        enforce_limbs_differ(cs, &acc.x, &s.x);
+        acc.relax(cs, f);
+
+        let ((ax, ay), (sxv, syv)) = (acc.values(cs, f), s.values(cs, f));
+        let l1_v = (syv - ay) * (sxv - ax).invert();
+        let xr_v = l1_v.square() - ax - sxv;
+        let l2_v = ay.double() * (ax - xr_v).invert() - l1_v;
+        let xa_v = l2_v.square() - xr_v - ax;
+
+        let (axn, sxn) = (acc.x_num(), s.x_num());
+        let l1 = f.alloc(cs, &l1_v.to_bytes()).num();
+        let t1 = Num::mul(cs, &l1, &sxn.sub(&axn));
+        f.enforce_zero(cs, &t1.sub(&s.y).add(&acc.y));
+        let l1_sq = Num::square(cs, &l1);
+        let xr = l1_sq.sub(&axn).sub(&sxn);
+
+        let l2 = f.alloc(cs, &l2_v.to_bytes()).num();
+        let t2 = Num::mul(cs, &l1.add(&l2), &axn.sub(&xr));
+        f.enforce_zero(cs, &t2.sub(&acc.y.scale(2)));
+
+        let xa = f.alloc(cs, &xa_v.to_bytes());
+        let l2_sq = Num::square(cs, &l2);
+        f.enforce_zero(cs, &l2_sq.sub(&l1_sq).add(&sxn).sub(&xa.num()));
+        f.enforce_canonical(cs, &xa);
+        let ya = Num::mul(cs, &l2, &axn.sub(&xa.num())).sub(&acc.y);
+        acc = Pt {
+            x: xa.limbs,
+            x_bits: Some(xa.bits),
+            x_canonical: true,
+            y: ya,
+            lazy: acc.lazy + 1,
+        };
+    }
+    acc
+}
+
+/// `SinsemillaCommit_r(D, M) = SinsemillaHashToPoint(D || "-M", M) + [r] R` with the
+/// last addition constrained to distinct `x` (see the module documentation). The result
+/// has canonical `x`.
+pub fn sinsemilla_commit(
+    cs: &mut ConstraintSystem,
+    f: &Field,
+    q: &Point,
+    r_base: Base,
+    message: &[Lc],
+    r_bits: &[Lc],
+) -> Pt {
+    let m = sinsemilla_hash_to_point(cs, f, q, message);
+    let blind = r_base.tables().mul(cs, f, r_bits, true);
+    add(cs, f, &m, &blind, true, true)
+}
+
+// ============================================================================
+// Poseidon
+// ============================================================================
+
+/// `Poseidon(a, b)` over the Pallas base field (`P128Pow5T3`, constant length 2). The
+/// result is a reduced element, not necessarily canonical.
+pub fn poseidon_hash2(cs: &mut ConstraintSystem, f: &Field, a: &Num, b: &Num) -> Elem {
+    let constant = |x: Fp| Num::constant(&x.to_bytes());
+    let mut state: [Num; 3] = [a.clone(), b.clone(), constant(poseidon::capacity_two())];
+    let rounds = poseidon::FULL_ROUNDS + poseidon::PARTIAL_ROUNDS;
+    let mut out = None;
+    for r in 0..rounds {
+        let full = !(poseidon::FULL_ROUNDS / 2
+            ..poseidon::FULL_ROUNDS / 2 + poseidon::PARTIAL_ROUNDS)
+            .contains(&r);
+        let terms: Vec<Num> = (0..3)
+            .map(|j| {
+                let x = state[j].add(&constant(poseidon::round_constant(r, j)));
+                if j == 0 || full {
+                    let sq = Num::square(cs, &x);
+                    let x2 = f.reduce(cs, &sq).num();
+                    let sq = Num::square(cs, &x2);
+                    let x4 = f.reduce(cs, &sq).num();
+                    Num::mul(cs, &x4, &x)
+                } else {
+                    x
+                }
+            })
+            .collect();
+        let next: Vec<Elem> = (0..3)
+            .map(|i| {
+                let mut sum = Num::zero();
+                for (j, t) in terms.iter().enumerate() {
+                    sum = sum.add(&Num::mul(cs, &constant(poseidon::mds(i, j)), t));
+                }
+                f.reduce(cs, &sum)
+            })
+            .collect();
+        state = [next[0].num(), next[1].num(), next[2].num()];
+        out = Some(next[0].clone());
+    }
+    out.expect("at least one round")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::sinsemilla::{CommitDomain, HashDomain};
+    use super::*;
+    use crate::hem::hash::alloc_bits;
+    use std::println;
+
+    fn sample_scalar(i: u64) -> Fq {
+        let mut x = Fq::from_u64(0x1234_5678_9abc_def1 ^ i);
+        for _ in 0..5 {
+            x = x * x + Fq::from_u64(i + 1);
+        }
+        x
+    }
+
+    fn finish_ok(cs: ConstraintSystem) {
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn lookup_returns_table_points() {
+        let table = sinsemilla_table();
+        let points = super::super::sinsemilla::s_table();
+        for index in [0usize, 1, 255, 256, 513, 1023] {
+            let mut cs = ConstraintSystem::new();
+            let bytes = [(index & 0xff) as u8, (index >> 8) as u8];
+            let bits = alloc_bits(&mut cs, &bytes);
+            let rows0 = cs.num_rows();
+            let (x, y) = table.lookup(&mut cs, &bits[..10]);
+            if index == 0 {
+                println!("10-bit lookup: {} rows", cs.num_rows() - rows0);
+            }
+            let f = Field::pallas_base();
+            assert_eq!(fp_value(&cs, &f, &Num::from_limbs(&x)), points[index].0);
+            assert_eq!(fp_value(&cs, &f, &Num::from_limbs(&y)), points[index].1);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            // A changed output limb breaks the row that defines it.
+            let var = x[3].terms()[0].0 as usize;
+            let mut bad = z.clone();
+            bad[var] += F::ONE;
+            assert!(!shape.is_satisfied(&bad));
+        }
+    }
+
+    #[test]
+    fn fixed_base_matches_native() {
+        let f = Field::pallas_base();
+        for (base, k) in [
+            (Base::SpendAuth, sample_scalar(1)),
+            (Base::Nullifier, Fq::ONE),
+            (Base::CommitIvkR, -Fq::ONE),
+            (Base::NoteCommitR, sample_scalar(2)),
+        ] {
+            let mut cs = ConstraintSystem::new();
+            let bits = alloc_bits(&mut cs, &k.to_bytes());
+            let rows0 = cs.num_rows();
+            let mut p = base.tables().mul(&mut cs, &f, &bits[..255], true);
+            println!("fixed-base multiplication: {} rows", cs.num_rows() - rows0);
+            let (x, y) = p.canonical_coordinates(&mut cs, &f);
+            let want = base.point().mul(&k).to_affine().unwrap();
+            assert_eq!(x.value(&cs), want.0.to_bytes());
+            assert_eq!(y.value(&cs), want.1.to_bytes());
+            finish_ok(cs);
+        }
+    }
+
+    #[test]
+    fn fixed_base_rejects_the_zero_scalar() {
+        // [0] B is the identity, which has no affine form: unsatisfiable.
+        let f = Field::pallas_base();
+        let mut cs = ConstraintSystem::new();
+        let bits = alloc_bits(&mut cs, &[0u8; 32]);
+        let _ = Base::SpendAuth
+            .tables()
+            .mul(&mut cs, &f, &bits[..255], true);
+        let (shape, z) = cs.finish();
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn variable_base_matches_native() {
+        let (fp, fq) = (Field::pallas_base(), Field::pallas_scalar());
+        let g = hash_to_curve("z.cash:Orchard-gd", b"test point");
+        let (gx, gy) = g.to_affine().unwrap();
+        for k in [
+            sample_scalar(3),
+            Fq::ONE,
+            Fq::from_u64(8),
+            -Fq::ONE,
+            sample_scalar(4),
+        ] {
+            let mut cs = ConstraintSystem::new();
+            let bits = alloc_bits(&mut cs, &k.to_bytes());
+            let (ex, ey) = (
+                fp.alloc(&mut cs, &gx.to_bytes()),
+                fp.alloc(&mut cs, &gy.to_bytes()),
+            );
+            fp.enforce_canonical(&mut cs, &ex);
+            enforce_on_curve(&mut cs, &fp, &ex, &ey);
+            let rows0 = cs.num_rows();
+            let mut p = var_base_mul(
+                &mut cs,
+                &fp,
+                &fq,
+                &Pt::from_elems(&ex, true, &ey),
+                &bits[..255],
+                true,
+            );
+            println!(
+                "variable-base multiplication: {} rows",
+                cs.num_rows() - rows0
+            );
+            let (x, y) = p.canonical_coordinates(&mut cs, &fp);
+            let want = g.mul(&k).to_affine().unwrap();
+            assert_eq!(x.value(&cs), want.0.to_bytes());
+            assert_eq!(y.value(&cs), want.1.to_bytes());
+            finish_ok(cs);
+        }
+    }
+
+    #[test]
+    fn off_curve_point_is_rejected() {
+        let fp = Field::pallas_base();
+        let g = hash_to_curve("z.cash:Orchard-gd", b"test point");
+        let (gx, gy) = g.to_affine().unwrap();
+        for (dy, ok) in [(Fp::ZERO, true), (Fp::ONE, false)] {
+            let mut cs = ConstraintSystem::new();
+            let (ex, ey) = (
+                fp.alloc(&mut cs, &gx.to_bytes()),
+                fp.alloc(&mut cs, &(gy + dy).to_bytes()),
+            );
+            enforce_on_curve(&mut cs, &fp, &ex, &ey);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), ok);
+        }
+    }
+
+    #[test]
+    fn sinsemilla_matches_native() {
+        let f = Field::pallas_base();
+        let domain = HashDomain::new("z.cash:Orchard-MerkleCRH");
+        for len in [10usize, 37, 520] {
+            let bytes: Vec<u8> = (0..len.div_ceil(8)).map(|i| (i * 73 + 5) as u8).collect();
+            let mut cs = ConstraintSystem::new();
+            let bits = alloc_bits(&mut cs, &bytes);
+            let rows0 = cs.num_rows();
+            let mut p = sinsemilla_hash_to_point(&mut cs, &f, &domain.q(), &bits[..len]);
+            println!(
+                "Sinsemilla, {} chunks: {} rows",
+                len.div_ceil(10),
+                cs.num_rows() - rows0
+            );
+            let (x, y) = p.canonical_coordinates(&mut cs, &f);
+            let native_bits: Vec<bool> = (0..len)
+                .map(|i| (bytes[i / 8] >> (i % 8)) & 1 == 1)
+                .collect();
+            let want = domain
+                .hash_to_point(&native_bits)
+                .unwrap()
+                .to_affine()
+                .unwrap();
+            assert_eq!(x.value(&cs), want.0.to_bytes());
+            assert_eq!(y.value(&cs), want.1.to_bytes());
+            finish_ok(cs);
+        }
+    }
+
+    #[test]
+    fn sinsemilla_bottom_is_unsatisfiable() {
+        // From Q = S(0) the chunk 0 adds S(0) to itself; the specification returns ⊥.
+        let f = Field::pallas_base();
+        let (x, y) = super::super::sinsemilla::s_table()[0];
+        let q = Point::from_affine(x, y).unwrap();
+        for (byte, ok) in [(0u8, false), (1u8, true)] {
+            let mut cs = ConstraintSystem::new();
+            let bits = alloc_bits(&mut cs, &[byte, 0]);
+            let _ = sinsemilla_hash_to_point(&mut cs, &f, &q, &bits[..10]);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), ok);
+        }
+    }
+
+    #[test]
+    fn sinsemilla_commit_matches_native() {
+        let f = Field::pallas_base();
+        let domain = CommitDomain::new("z.cash:Orchard-CommitIvk");
+        let r = sample_scalar(9);
+        let bytes: Vec<u8> = (0..64).map(|i| (i * 29 + 1) as u8).collect();
+        let mut cs = ConstraintSystem::new();
+        let bits = alloc_bits(&mut cs, &bytes);
+        let r_bits = alloc_bits(&mut cs, &r.to_bytes());
+        let mut p = sinsemilla_commit(
+            &mut cs,
+            &f,
+            &domain.q(),
+            Base::CommitIvkR,
+            &bits[..510],
+            &r_bits[..255],
+        );
+        let (x, _) = p.canonical_coordinates(&mut cs, &f);
+        let native_bits: Vec<bool> = (0..510)
+            .map(|i| (bytes[i / 8] >> (i % 8)) & 1 == 1)
+            .collect();
+        assert_eq!(
+            x.value(&cs),
+            domain.short_commit(&native_bits, &r).unwrap().to_bytes()
+        );
+        finish_ok(cs);
+    }
+
+    #[test]
+    fn poseidon_matches_native() {
+        let f = Field::pallas_base();
+        let (a, b) = (Fp::from_u64(7).square().invert(), Fp::from_u64(11).invert());
+        let mut cs = ConstraintSystem::new();
+        let (ea, eb) = (
+            f.alloc(&mut cs, &a.to_bytes()),
+            f.alloc(&mut cs, &b.to_bytes()),
+        );
+        let rows0 = cs.num_rows();
+        let out = poseidon_hash2(&mut cs, &f, &ea.num(), &eb.num());
+        println!("Poseidon: {} rows", cs.num_rows() - rows0);
+        f.enforce_canonical(&mut cs, &out);
+        assert_eq!(out.value(&cs), poseidon::hash2(a, b).to_bytes());
+        finish_ok(cs);
+    }
+}
