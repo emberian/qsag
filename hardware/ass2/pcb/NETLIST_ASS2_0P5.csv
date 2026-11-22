@@ -1,0 +1,457 @@
+Reference,Pin,Pin function,Electrical type,Net,Population
+U1,1,CLK_IN,input,CLK_IN,FIT
+U1,2,RST_N,input,RST_N,FIT
+U1,3,DVSS,power_in,GND,FIT
+U1,4,DVDD,power_in,V5_CHIP,FIT
+U1,5,HOST_DQ0,bidirectional,HOST_DQ0,FIT
+U1,6,HOST_DQ1,bidirectional,HOST_DQ1,FIT
+U1,7,HOST_DQ2,bidirectional,HOST_DQ2,FIT
+U1,8,HOST_DQ3,bidirectional,HOST_DQ3,FIT
+U1,9,HOST_DQ4,bidirectional,HOST_DQ4,FIT
+U1,10,HOST_DQ5,bidirectional,HOST_DQ5,FIT
+U1,11,HOST_DQ6,bidirectional,HOST_DQ6,FIT
+U1,12,HOST_DQ7,bidirectional,HOST_DQ7,FIT
+U1,13,GPIO0,bidirectional,GPIO0,FIT
+U1,14,GPIO1,bidirectional,GPIO1,FIT
+U1,15,GPIO2,bidirectional,GPIO2,FIT
+U1,16,GPIO3,bidirectional,GPIO3,FIT
+U1,17,GPIO4,bidirectional,GPIO4,FIT
+U1,18,GPIO5,bidirectional,GPIO5,FIT
+U1,19,GPIO6,bidirectional,GPIO6,FIT
+U1,20,DVSS,power_in,GND,FIT
+U1,21,DVDD,power_in,V5_CHIP,FIT
+U1,22,GPIO7,bidirectional,GPIO7,FIT
+U1,23,VERIFY_OK,output,VERIFY_OK,FIT
+U1,24,FAULT,output,FAULT,FIT
+U1,25,HOST_SCK,input,HOST_SCK,FIT
+U1,26,HOST_RDY,output,HOST_RDY,FIT
+U1,27,HOST_IRQ,output,HOST_IRQ,FIT
+U1,28,CLK_MON,output,CLK_MON,FIT
+U1,29,AN3_NC,no_connect,NC,FIT
+U1,30,AN2_NC,no_connect,NC,FIT
+U1,31,DVSS,power_in,GND,FIT
+U1,32,DVDD,power_in,V5_CHIP,FIT
+U1,33,AN1_NC,no_connect,NC,FIT
+U1,34,AN0_NC,no_connect,NC,FIT
+U1,35,TAMPER_ZEROIZE_N,input,TAMPER_ZEROIZE_N,FIT
+U1,36,FRAM_MISO,input,FRAM_MISO,FIT
+U1,37,FRAM_MOSI,output,FRAM_MOSI,FIT
+U1,38,FRAM_SCK,output,FRAM_SCK,FIT
+U1,39,FRAM_CS_N,output,FRAM_CS_N,FIT
+U1,40,JTAG_TCK,input,JTAG_TCK,FIT
+U1,41,JTAG_TMS,input,JTAG_TMS,FIT
+U1,42,JTAG_TDI,input,JTAG_TDI,FIT
+U1,43,JTAG_TDO,output,JTAG_TDO,FIT
+U1,44,NFC_CLK_IN,input,NFC_CLK_IN,FIT
+U1,45,NFC_ASK_IN,input,NFC_ASK_IN,FIT
+U1,46,NFC_LOAD_MOD,output,NFC_LOAD_MOD,FIT
+U1,47,DB_CHAL_IN,input,DB_CHAL_IN,FIT
+U1,48,DB_RESP_OUT,output,DB_RESP_OUT,FIT
+U1,49,DBG_UART_TX,output,DBG_UART_TX,FIT
+U1,50,DBG_UART_RX,input,DBG_UART_RX,FIT
+U1,51,HOST_CS_N,input,HOST_CS_N,FIT
+U1,52,BOOT_MODE1,input,BOOT_MODE1,FIT
+U1,53,VSS,power_in,GND,FIT
+U1,54,VDD,power_in,V5_CHIP,FIT
+U1,55,BOOT_MODE0,input,BOOT_MODE0,FIT
+U1,56,CLK_EXT_EN,input,CLK_EXT_EN,FIT
+U1,EP,EP,power_in,GND,FIT
+CP1,1,~,passive,V5_CHIP,FIT
+CP1,2,~,passive,GND,FIT
+CP2,1,~,passive,V5_CHIP,FIT
+CP2,2,~,passive,GND,FIT
+CP3,1,~,passive,V5_CHIP,FIT
+CP3,2,~,passive,GND,FIT
+CP4,1,~,passive,V5_CHIP,FIT
+CP4,2,~,passive,GND,FIT
+J1,1,1,passive,BENCH_5V,FIT
+J1,2,2,passive,GND,FIT
+JP1,1,1,passive,V5_FEED,FIT
+JP1,2,2,passive,V5_CHIP,FIT
+JP2,1,1,passive,BENCH_5V,FIT
+JP2,2,2,passive,V5_FEED,FIT
+JP2,3,3,passive,LDO_5V,FIT
+CB1,1,~,passive,V5_CHIP,FIT
+CB1,2,~,passive,GND,FIT
+U2,1,GND,power_in,GND,FIT
+U2,2,RESET_N,output,POR_N,FIT
+U2,3,VDD,power_in,V5_CHIP,FIT
+CA1,1,~,passive,V5_CHIP,FIT
+CA1,2,~,passive,GND,FIT
+RRST1,1,~,passive,POR_N,FIT
+RRST1,2,~,passive,RST_N,FIT
+RPD1,1,~,passive,RST_N,FIT
+RPD1,2,~,passive,GND,FIT
+RT1,1,~,passive,V5_CHIP,FIT
+RT1,2,~,passive,TAMPER_ZEROIZE_N,FIT
+CT4,1,~,passive,TAMPER_ZEROIZE_N,FIT
+CT4,2,~,passive,GND,FIT
+RS1,1,~,passive,TAMPER_ZEROIZE_N,FIT
+RS1,2,~,passive,CONTACT,FIT
+J5,1,1,passive,CONTACT,FIT
+J5,2,2,passive,GND,FIT
+J6,1,1,passive,CLK_IN,FIT
+J6,2,2,passive,GND,FIT
+RSTR1,1,~,passive,CLK_IN,FIT
+RSTR1,2,~,passive,GND,FIT
+RSTR2,1,~,passive,CLK_EXT_EN,FIT
+RSTR2,2,~,passive,V5_CHIP,FIT
+JP3,1,1,passive,V5_CHIP,FIT
+JP3,2,2,passive,CLK_EXT_EN,FIT
+JP3,3,3,passive,GND,FIT
+RSTR3,1,~,passive,BOOT_MODE0,FIT
+RSTR3,2,~,passive,GND,FIT
+JP4,1,1,passive,V5_CHIP,FIT
+JP4,2,2,passive,BOOT_MODE0,FIT
+JP4,3,3,passive,GND,FIT
+RSTR4,1,~,passive,BOOT_MODE1,FIT
+RSTR4,2,~,passive,GND,FIT
+JP5,1,1,passive,V5_CHIP,FIT
+JP5,2,2,passive,BOOT_MODE1,FIT
+JP5,3,3,passive,GND,FIT
+U3,1,CS_N,input,FRAM_CS_N,FIT
+U3,2,SO,tri_state,FRAM_MISO,FIT
+U3,3,WP_N,input,V5_CHIP,FIT
+U3,4,VSS,power_in,GND,FIT
+U3,5,SI,input,FRAM_MOSI,FIT
+U3,6,SCK,input,FRAM_SCK,FIT
+U3,7,HOLD_N,input,V5_CHIP,FIT
+U3,8,VDD,power_in,V5_CHIP,FIT
+CA2,1,~,passive,V5_CHIP,FIT
+CA2,2,~,passive,GND,FIT
+RF1,1,~,passive,FRAM_CS_N,FIT
+RF1,2,~,passive,V5_CHIP,FIT
+RF2,1,~,passive,FRAM_MISO,FIT
+RF2,2,~,passive,GND,FIT
+RF3,1,~,passive,FRAM_MOSI,FIT
+RF3,2,~,passive,GND,FIT
+RF4,1,~,passive,FRAM_SCK,FIT
+RF4,2,~,passive,GND,FIT
+J4,1,1,passive,FRAM_CS_N,FIT
+J4,2,2,passive,GND,FIT
+J4,3,3,passive,FRAM_SCK,FIT
+J4,4,4,passive,GND,FIT
+J4,5,5,passive,FRAM_MOSI,FIT
+J4,6,6,passive,GND,FIT
+J4,7,7,passive,FRAM_MISO,FIT
+J4,8,8,passive,GND,FIT
+RDQ1,1,~,passive,HOST_DQ0,FIT
+RDQ1,2,~,passive,DQ0_BUS,FIT
+RDQ2,1,~,passive,HOST_DQ1,FIT
+RDQ2,2,~,passive,DQ1_BUS,FIT
+RDQ3,1,~,passive,HOST_DQ2,FIT
+RDQ3,2,~,passive,DQ2_BUS,FIT
+RDQ4,1,~,passive,HOST_DQ3,FIT
+RDQ4,2,~,passive,DQ3_BUS,FIT
+RDQ5,1,~,passive,HOST_DQ4,FIT
+RDQ5,2,~,passive,DQ4_BUS,FIT
+RDQ6,1,~,passive,HOST_DQ5,FIT
+RDQ6,2,~,passive,DQ5_BUS,FIT
+RDQ7,1,~,passive,HOST_DQ6,FIT
+RDQ7,2,~,passive,DQ6_BUS,FIT
+RDQ8,1,~,passive,HOST_DQ7,FIT
+RDQ8,2,~,passive,DQ7_BUS,FIT
+RSCK1,1,~,passive,SCK_BUS,FIT
+RSCK1,2,~,passive,HOST_SCK,FIT
+RCS1,1,~,passive,HOST_CS_N,FIT
+RCS1,2,~,passive,V5_CHIP,FIT
+RSCK2,1,~,passive,SCK_BUS,FIT
+RSCK2,2,~,passive,GND,FIT
+J2,1,1,passive,SCK_BUS,FIT
+J2,2,2,passive,GND,FIT
+J2,3,3,passive,DQ0_BUS,FIT
+J2,4,4,passive,GND,FIT
+J2,5,5,passive,DQ1_BUS,FIT
+J2,6,6,passive,GND,FIT
+J2,7,7,passive,HOST_CS_N,FIT
+J2,8,8,passive,RST_N,FIT
+J2,9,9,passive,V5_CHIP,FIT
+J2,10,10,passive,GND,FIT
+J3,1,1,passive,DQ2_BUS,FIT
+J3,2,2,passive,DQ3_BUS,FIT
+J3,3,3,passive,DQ4_BUS,FIT
+J3,4,4,passive,DQ5_BUS,FIT
+J3,5,5,passive,DQ6_BUS,FIT
+J3,6,6,passive,DQ7_BUS,FIT
+J3,7,7,passive,HOST_RDY,FIT
+J3,8,8,passive,HOST_IRQ,FIT
+J3,9,9,passive,DBG_UART_TX,FIT
+J3,10,10,passive,DBG_UART_RX,FIT
+J3,11,11,passive,GPIO0,FIT
+J3,12,12,passive,GPIO1,FIT
+J3,13,13,passive,GPIO2,FIT
+J3,14,14,passive,GPIO3,FIT
+J3,15,15,passive,GPIO4,FIT
+J3,16,16,passive,GPIO5,FIT
+J3,17,17,passive,GPIO6,FIT
+J3,18,18,passive,GPIO7,FIT
+J3,19,19,passive,VERIFY_OK,FIT
+J3,20,20,passive,FAULT,FIT
+J3,21,21,passive,JTAG_TCK,FIT
+J3,22,22,passive,JTAG_TMS,FIT
+J3,23,23,passive,JTAG_TDI,FIT
+J3,24,24,passive,JTAG_TDO,FIT
+J3,25,25,passive,NFC_CLK_IN,FIT
+J3,26,26,passive,NFC_ASK_IN,FIT
+J3,27,27,passive,NFC_LOAD_MOD,FIT
+J3,28,28,passive,CLK_MON,FIT
+J3,29,29,passive,GND,FIT
+J3,30,30,passive,GND,FIT
+RID1,1,~,passive,JTAG_TCK,FIT
+RID1,2,~,passive,GND,FIT
+RID2,1,~,passive,JTAG_TMS,FIT
+RID2,2,~,passive,GND,FIT
+RID3,1,~,passive,JTAG_TDI,FIT
+RID3,2,~,passive,GND,FIT
+RID4,1,~,passive,DBG_UART_RX,FIT
+RID4,2,~,passive,V5_CHIP,FIT
+RID5,1,~,passive,DB_CHAL_IN,FIT
+RID5,2,~,passive,GND,FIT
+JRF1,1,CENTRE,passive,DB_CHAL_IN,FIT
+JRF1,2,SHIELD,passive,GND,FIT
+JRF2,1,CENTRE,passive,DB_RESP_OUT,FIT
+JRF2,2,SHIELD,passive,GND,FIT
+U4,1,VCCA,power_in,HOST_3V3,3V3 host
+U4,2,DIR,input,DQ_DIR,3V3 host
+U4,3,A1,bidirectional,H_DQ0,3V3 host
+U4,4,A2,bidirectional,H_DQ1,3V3 host
+U4,5,A3,bidirectional,H_DQ2,3V3 host
+U4,6,A4,bidirectional,H_DQ3,3V3 host
+U4,7,A5,bidirectional,H_DQ4,3V3 host
+U4,8,A6,bidirectional,H_DQ5,3V3 host
+U4,9,A7,bidirectional,H_DQ6,3V3 host
+U4,10,A8,bidirectional,H_DQ7,3V3 host
+U4,11,GND,power_in,GND,3V3 host
+U4,12,GND,power_in,GND,3V3 host
+U4,13,GND,power_in,GND,3V3 host
+U4,14,B8,bidirectional,DQ7_BUS,3V3 host
+U4,15,B7,bidirectional,DQ6_BUS,3V3 host
+U4,16,B6,bidirectional,DQ5_BUS,3V3 host
+U4,17,B5,bidirectional,DQ4_BUS,3V3 host
+U4,18,B4,bidirectional,DQ3_BUS,3V3 host
+U4,19,B3,bidirectional,DQ2_BUS,3V3 host
+U4,20,B2,bidirectional,DQ1_BUS,3V3 host
+U4,21,B1,bidirectional,DQ0_BUS,3V3 host
+U4,22,OE_N,input,DATA_OE_N,3V3 host
+U4,23,VCCB,power_in,V5_CHIP,3V3 host
+U4,24,VCCB,power_in,V5_CHIP,3V3 host
+U5,1,VCCA,power_in,HOST_3V3,3V3 host
+U5,2,DIR,input,HOST_3V3,3V3 host
+U5,3,A1,bidirectional,H_SCK,3V3 host
+U5,4,A2,bidirectional,H_CS_N,3V3 host
+U5,5,A3,bidirectional,H_MOSI,3V3 host
+U5,6,A4,bidirectional,CTRL_UNUSED,3V3 host
+U5,7,A5,bidirectional,CTRL_UNUSED,3V3 host
+U5,8,A6,bidirectional,CTRL_UNUSED,3V3 host
+U5,9,A7,bidirectional,CTRL_UNUSED,3V3 host
+U5,10,A8,bidirectional,CTRL_UNUSED,3V3 host
+U5,11,GND,power_in,GND,3V3 host
+U5,12,GND,power_in,GND,3V3 host
+U5,13,GND,power_in,GND,3V3 host
+U5,14,B8,bidirectional,NC,3V3 host
+U5,15,B7,bidirectional,NC,3V3 host
+U5,16,B6,bidirectional,NC,3V3 host
+U5,17,B5,bidirectional,NC,3V3 host
+U5,18,B4,bidirectional,NC,3V3 host
+U5,19,B3,bidirectional,MOSI_5V,3V3 host
+U5,20,B2,bidirectional,HOST_CS_N,3V3 host
+U5,21,B1,bidirectional,SCK_BUS,3V3 host
+U5,22,OE_N,input,CTRL_OE_N,3V3 host
+U5,23,VCCB,power_in,V5_CHIP,3V3 host
+U5,24,VCCB,power_in,V5_CHIP,3V3 host
+RH15,1,~,passive,CTRL_UNUSED,3V3 host
+RH15,2,~,passive,GND,3V3 host
+JP6,1,1,passive,MOSI_5V,3V3 host
+JP6,2,2,passive,DQ0_BUS,3V3 host
+J9,1,1,passive,HOST_3V3,3V3 host
+J9,2,2,passive,GND,3V3 host
+J9,3,3,passive,H_SCK,3V3 host
+J9,4,4,passive,H_CS_N,3V3 host
+J9,5,5,passive,H_MOSI,3V3 host
+J9,6,6,passive,GND,3V3 host
+J9,7,7,passive,H_DQ0,3V3 host
+J9,8,8,passive,H_DQ1,3V3 host
+J9,9,9,passive,H_DQ2,3V3 host
+J9,10,10,passive,H_DQ3,3V3 host
+J9,11,11,passive,H_DQ4,3V3 host
+J9,12,12,passive,H_DQ5,3V3 host
+J9,13,13,passive,H_DQ6,3V3 host
+J9,14,14,passive,H_DQ7,3V3 host
+J9,15,15,passive,DQ_DIR,3V3 host
+J9,16,16,passive,DATA_OE_N,3V3 host
+J9,17,17,passive,CTRL_OE_N,3V3 host
+J9,18,18,passive,GND,3V3 host
+RH1,1,~,passive,DQ_DIR,3V3 host
+RH1,2,~,passive,GND,3V3 host
+RH2,1,~,passive,DATA_OE_N,3V3 host
+RH2,2,~,passive,HOST_3V3,3V3 host
+RH3,1,~,passive,CTRL_OE_N,3V3 host
+RH3,2,~,passive,HOST_3V3,3V3 host
+RH4,1,~,passive,H_SCK,3V3 host
+RH4,2,~,passive,GND,3V3 host
+RH5,1,~,passive,H_CS_N,3V3 host
+RH5,2,~,passive,HOST_3V3,3V3 host
+RH6,1,~,passive,H_MOSI,3V3 host
+RH6,2,~,passive,GND,3V3 host
+RH7,1,~,passive,H_DQ0,3V3 host
+RH7,2,~,passive,GND,3V3 host
+RH8,1,~,passive,H_DQ1,3V3 host
+RH8,2,~,passive,GND,3V3 host
+RH9,1,~,passive,H_DQ2,3V3 host
+RH9,2,~,passive,GND,3V3 host
+RH10,1,~,passive,H_DQ3,3V3 host
+RH10,2,~,passive,GND,3V3 host
+RH11,1,~,passive,H_DQ4,3V3 host
+RH11,2,~,passive,GND,3V3 host
+RH12,1,~,passive,H_DQ5,3V3 host
+RH12,2,~,passive,GND,3V3 host
+RH13,1,~,passive,H_DQ6,3V3 host
+RH13,2,~,passive,GND,3V3 host
+RH14,1,~,passive,H_DQ7,3V3 host
+RH14,2,~,passive,GND,3V3 host
+RBI1,1,~,passive,DQ0_BUS,FIT
+RBI1,2,~,passive,GND,FIT
+RBI2,1,~,passive,DQ1_BUS,FIT
+RBI2,2,~,passive,GND,FIT
+RBI3,1,~,passive,DQ2_BUS,FIT
+RBI3,2,~,passive,GND,FIT
+RBI4,1,~,passive,DQ3_BUS,FIT
+RBI4,2,~,passive,GND,FIT
+RBI5,1,~,passive,DQ4_BUS,FIT
+RBI5,2,~,passive,GND,FIT
+RBI6,1,~,passive,DQ5_BUS,FIT
+RBI6,2,~,passive,GND,FIT
+RBI7,1,~,passive,DQ6_BUS,FIT
+RBI7,2,~,passive,GND,FIT
+RBI8,1,~,passive,DQ7_BUS,FIT
+RBI8,2,~,passive,GND,FIT
+CH1,1,~,passive,HOST_3V3,3V3 host
+CH1,2,~,passive,GND,3V3 host
+CH2,1,~,passive,V5_CHIP,3V3 host
+CH2,2,~,passive,GND,3V3 host
+CH3,1,~,passive,HOST_3V3,3V3 host
+CH3,2,~,passive,GND,3V3 host
+CH4,1,~,passive,V5_CHIP,3V3 host
+CH4,2,~,passive,GND,3V3 host
+J8,1,1,passive,VIN_AUX,Aux LDO
+J8,2,2,passive,GND,Aux LDO
+U6,1,VREG,output,VREG,Aux LDO
+U6,2,VOUT,power_out,LDO_5V,Aux LDO
+U6,3,BYP,passive,BYP,Aux LDO
+U6,4,GND,power_in,GND,Aux LDO
+U6,5,REF_SENSE,input,LDO_REF,Aux LDO
+U6,6,REF,output,LDO_REF,Aux LDO
+U6,7,EN,input,VIN_AUX,Aux LDO
+U6,8,VIN,power_in,VIN_AUX,Aux LDO
+U6,9,EP,power_in,GND,Aux LDO
+CL1,1,~,passive,VIN_AUX,Aux LDO
+CL1,2,~,passive,GND,Aux LDO
+CL2,1,~,passive,LDO_5V,Aux LDO
+CL2,2,~,passive,GND,Aux LDO
+CL3,1,~,passive,VREG,Aux LDO
+CL3,2,~,passive,GND,Aux LDO
+CL4,1,~,passive,LDO_REF,Aux LDO
+CL4,2,~,passive,GND,Aux LDO
+CL5,1,~,passive,BYP,Aux LDO
+CL5,2,~,passive,GND,Aux LDO
+L1,1,OUTER,passive,COIL_OUT,FIT
+L1,2,INNER,passive,GND,FIT
+RD1,1,~,passive,COIL_OUT,FIT
+RD1,2,~,passive,TANK,FIT
+RB1,1,~,passive,TANK,FIT
+RB1,2,~,passive,GND,FIT
+CT1,1,~,passive,TANK,FIT
+CT1,2,~,passive,GND,FIT
+CT2,1,~,passive,TANK,FIT
+CT2,2,~,passive,GND,FIT
+CT3,1,RF,passive,TANK,FIT
+CT3,2,RETURN,passive,GND,FIT
+RR1,1,~,passive,TANK,FIT
+RR1,2,~,passive,RECT_IN,FIT
+D1,1,A,passive,RECT_IN,FIT
+D1,2,NC,no_connect,NC,FIT
+D1,3,K,passive,RECT,FIT
+D2,1,A,passive,GND,FIT
+D2,2,NC,no_connect,NC,FIT
+D2,3,K,passive,RECT_IN,FIT
+DZ1,1,K,passive,RECT,FIT
+DZ1,2,A,passive,GND,FIT
+CR1,1,~,passive,RECT,FIT
+CR1,2,~,passive,GND,FIT
+RRECT1,1,~,passive,RECT,FIT
+RRECT1,2,~,passive,GND,FIT
+RG1,1,~,passive,TANK,FIT
+RG1,2,~,passive,RF_GATE,FIT
+D3,1,A,passive,RF_GATE,FIT
+D3,2,NC,no_connect,NC,FIT
+D3,3,K,passive,RECT,FIT
+D4,1,A,passive,GND,FIT
+D4,2,NC,no_connect,NC,FIT
+D4,3,K,passive,RF_GATE,FIT
+RGS1,1,~,passive,RF_GATE,FIT
+RGS1,2,~,passive,GND,FIT
+Q1,1,G,input,RF_GATE,FIT
+Q1,2,S,passive,GND,FIT
+Q1,3,D,open_collector,NFC_CLK_IN,FIT
+RP1,1,~,passive,V5_CHIP,FIT
+RP1,2,~,passive,NFC_CLK_IN,FIT
+RE1,1,~,passive,TANK,ASK evaluation
+RE1,2,~,passive,ENV_IN,ASK evaluation
+D5,1,A,passive,ENV_IN,ASK evaluation
+D5,2,NC,no_connect,NC,ASK evaluation
+D5,3,K,passive,ENV_HI,ASK evaluation
+D6,1,A,passive,ENV_FILT,ASK evaluation
+D6,2,NC,no_connect,NC,ASK evaluation
+D6,3,K,passive,RECT,ASK evaluation
+RE2,1,~,passive,ENV_HI,ASK evaluation
+RE2,2,~,passive,ENV_FILT,ASK evaluation
+RE4,1,~,passive,ENV_FILT,ASK evaluation
+RE4,2,~,passive,GND,ASK evaluation
+CE1,1,~,passive,ENV_FILT,ASK evaluation
+CE1,2,~,passive,GND,ASK evaluation
+RE5,1,~,passive,ENV_FILT,ASK evaluation
+RE5,2,~,passive,ASK_REF,ASK evaluation
+RE6,1,~,passive,ASK_REF,ASK evaluation
+RE6,2,~,passive,GND,ASK evaluation
+CE2,1,~,passive,ASK_REF,ASK evaluation
+CE2,2,~,passive,GND,ASK evaluation
+U7,1,OUT,output,ASK_GATE,ASK evaluation
+U7,2,GND,power_in,GND,ASK evaluation
+U7,3,IN+,input,ENV_FILT,ASK evaluation
+U7,4,IN-,input,ASK_REF,ASK evaluation
+U7,5,VCC,power_in,RECT,ASK evaluation
+CE3,1,~,passive,RECT,ASK evaluation
+CE3,2,~,passive,GND,ASK evaluation
+RGS2,1,~,passive,ASK_GATE,ASK evaluation
+RGS2,2,~,passive,GND,ASK evaluation
+Q2,1,G,input,ASK_GATE,ASK evaluation
+Q2,2,S,passive,GND,ASK evaluation
+Q2,3,D,open_collector,ASK_OD,ASK evaluation
+JP7,1,1,passive,ASK_OD,ASK evaluation
+JP7,2,2,passive,NFC_ASK_IN,ASK evaluation
+RP2,1,~,passive,V5_CHIP,FIT
+RP2,2,~,passive,NFC_ASK_IN,FIT
+TP1,1,TP,passive,BENCH_5V,FIT
+TP2,1,TP,passive,V5_FEED,FIT
+TP3,1,TP,passive,V5_CHIP,FIT
+TP4,1,TP,passive,RST_N,FIT
+TP5,1,TP,passive,TAMPER_ZEROIZE_N,FIT
+TP6,1,TP,passive,CLK_MON,FIT
+TP7,1,TP,passive,HOST_SCK,FIT
+TP8,1,TP,passive,HOST_CS_N,FIT
+TP9,1,TP,passive,HOST_DQ0,FIT
+TP10,1,TP,passive,HOST_DQ1,FIT
+TP11,1,TP,passive,HOST_RDY,FIT
+TP12,1,TP,passive,HOST_IRQ,FIT
+TP13,1,TP,passive,TANK,FIT
+TP14,1,TP,passive,RECT,FIT
+TP15,1,TP,passive,NFC_CLK_IN,FIT
+TP16,1,TP,passive,NFC_ASK_IN,FIT
+TP17,1,TP,passive,FRAM_CS_N,FIT
+TP18,1,TP,passive,FRAM_SCK,FIT
+TP19,1,TP,passive,FRAM_MOSI,FIT
+TP20,1,TP,passive,FRAM_MISO,FIT
+TP21,1,TP,passive,GND,FIT
+TP22,1,TP,passive,GND,FIT
+TP23,1,TP,passive,GND,FIT
+TP24,1,TP,passive,GND,FIT
