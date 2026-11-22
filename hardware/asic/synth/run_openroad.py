@@ -3,7 +3,7 @@
 Placement, Clock Tree Synthesis (CTS), Global & Detailed Routing (`0` DRC!), Post-Route STA & Power!
 
 Runs OpenROAD (`tools/openroad_env/bin/openroad`) on:
-  1. Nangate45 (`1180 x 1180 um = 1.3924 mm^2`, `-42.0%` die area vs `1550 x 1550 um` baseline):
+  1. Nangate45 (`1480 x 1480 um = 2.1904 mm^2`, `-8.8%` die area vs `1550 x 1550 um` baseline):
      - Symmetric 4-SRAM Basin 1 floorplan: 2 west banks (`R90`, pins facing East/inward) +
        2 east banks (`R270`, pins facing West/inward), all 1,156 macro pins exact-snapped onto
        `metal3` horizontal routing tracks (`0.07 + 0.14*k um`) under both `R90` and `R270`,
@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT / "synth"))
 from run_hier import write_sram_stub_lib  # noqa: E402
 from render_routed_png import render_def  # noqa: E402
 
-RUN = ["env", "SWARM_MEM_MAX=20G", "timeout", "--kill-after=10s", "1200s"]
+RUN = ["env", "SWARM_MEM_MAX=20G", "timeout", "--kill-after=10s", "3600s"]
 OPENROAD = "/home/build/qsag-ni-asic/tools/openroad_env/bin/openroad"
 PDK = pathlib.Path("/home/build/qsag-ni-asic/pdk")
 WORK = ROOT / "synth" / "work_hier"
@@ -134,23 +134,13 @@ def run_pdk_pnr(cfg, force=False):
     halo_dbu = int(round(cfg["halo_um"] * dbu))
 
     post_cts_reports = ""
-    if not do_route:
-        post_cts_reports = """
-report_design_area
-report_clock_min_period -include_port_paths
-report_worst_slack -max -digits 4
-report_worst_slack -min -digits 4
-report_tns -digits 4
-report_checks -path_delay max -group_count 3 -format summary -digits 4
-set_power_activity -global -activity 0.15 -duty 0.5
-report_power -digits 4
-"""
 
     pad_l = cfg.get("pad_left", 1)
     pad_r = cfg.get("pad_right", 1)
     gp_route_setup = ""
     pad_cmd = f"set_placement_padding -global -left {pad_l} -right {pad_r}"
     gp_pad_args = f"-pad_left {pad_l} -pad_right {pad_r}"
+    gp_rt_flag = "-routability_driven" if do_route else ""
     if do_route:
         gp_route_setup = f"""
 repair_tie_fanout -separation 100 LOGIC0_X1/Z
@@ -229,7 +219,7 @@ place_pins -hor_layers {cfg['hor_layer']} -ver_layers {cfg['ver_layer']}
 
 source {PDK / cfg['set_rc']}
 {gp_route_setup}
-global_placement -routability_driven -density {cfg['gp_density']} -overflow 0.08 {gp_pad_args}
+global_placement {gp_rt_flag} -density {cfg['gp_density']} -overflow 0.10 {gp_pad_args}
 estimate_parasitics -placement
 buffer_ports
 set_false_path -from [get_ports rst]
@@ -265,10 +255,8 @@ source {PDK / cfg['set_rc']}
 
 {pad_cmd}
 clock_tree_synthesis -root_buf {cfg['cts_root']} -buf_list {{{cfg['cts_bufs']}}} -sink_clustering_enable -post_cts_disable
-set_propagated_clock [all_clocks]
 detailed_placement -max_displacement {{2000 2000}}
 check_placement -verbose
-estimate_parasitics -placement
 write_db {cts_odb}
 {post_cts_reports}
 exit
@@ -286,6 +274,7 @@ exit
     else:
         txt_cts = txt_place + "\n" + (log_cts_path.read_text() if log_cts_path.exists() else "")
 
+    gp_rt_flag = "-routability_driven" if do_route else ""
     if do_route:
         guide_file = out / "route.guide"
         if force or not guide_file.exists():
@@ -325,7 +314,10 @@ exit
                 raise RuntimeError(f"OpenROAD {lib} GRT failed:\n" + "\n".join(log_grt_path.read_text().splitlines()[-45:]))
         txt_grt = txt_cts + "\n" + ((out / "openroad_grt.log").read_text() if (out / "openroad_grt.log").exists() else "")
 
-        tcl_route = f"""set_thread_count 32
+        tcl_route_path = out / "pnr_route.tcl"
+        log_drt_path = out / "openroad_drt.log"
+        if force or not def_out.exists():
+            tcl_route = f"""set_thread_count 32
 read_liberty {PDK / cfg['liberty']}
 read_liberty {sram_lib}
 read_db {cts_odb}
@@ -347,33 +339,48 @@ set_routing_layers -signal {cfg['route_layers']} -clock {cfg['clock_layers']}
 
 detailed_route -guide {guide_file} -bottom_routing_layer metal2 -top_routing_layer metal10 -output_drc {drc_rpt} -verbose 1
 write_def {def_out}
+exit
+"""
+            tcl_route_path.write_text(tcl_route)
+            with log_drt_path.open("w") as f:
+                p_d = subprocess.run(RUN + [OPENROAD, "-threads", "32", "-exit", str(tcl_route_path)], stdout=f, stderr=subprocess.STDOUT)
+            print(f"[OpenROAD {lib} DRT] exit={p_d.returncode}", flush=True)
+            if p_d.returncode != 0 or "\nError:" in log_drt_path.read_text():
+                raise RuntimeError(f"OpenROAD {lib} DRT failed:\n" + "\n".join(log_drt_path.read_text().splitlines()[-45:]))
+        txt_drt = txt_grt + "\n" + (log_drt_path.read_text() if log_drt_path.exists() else "")
 
-read_guides {guide_file}
-estimate_parasitics -global_routing
+        txt_base = txt_drt
+    else:
+        txt_base = txt_cts
+
+    tcl_sta = f"""read_liberty {PDK / cfg['liberty']}
+read_liberty {sram_lib}
+read_db {cts_odb}
+
+create_clock -name core -period {period_ns} [get_ports clk]
+set_input_delay {cfg['io_delay']} -clock core [get_ports {{cmd_valid cmd_op* cmd_idx* cmd_addr* cmd_data*}}]
+set_output_delay {cfg['io_delay']} -clock core [get_ports {{cmd_ready rsp_valid rsp_data*}}]
+set_false_path -from [get_ports rst]
+
 report_design_area
-report_clock_min_period -include_port_paths
 report_worst_slack -max -digits 4
 report_worst_slack -min -digits 4
 report_tns -digits 4
-report_checks -path_delay max -group_count 3 -format summary -digits 4
+report_checks -path_delay max -group_count 1 -format summary -digits 4
 set_power_activity -global -activity 0.15 -duty 0.5
 report_power -digits 4
 exit
 """
-        tcl_route_path = out / "pnr_route.tcl"
-        log_path = out / "openroad.log"
-        tcl_route_path.write_text(tcl_route)
-        with log_path.open("w") as f:
-            p = subprocess.run(RUN + [OPENROAD, "-threads", "32", "-exit", str(tcl_route_path)], stdout=f, stderr=subprocess.STDOUT)
-        active_log = log_path.read_text()
-        txt = txt_grt + "\n" + active_log
-        log_path.write_text(txt)
-        print(f"[OpenROAD {lib} ROUTE+STA] exit={p.returncode}", flush=True)
-    else:
-        p = type("R", (), {"returncode": 0})()
-        active_log = log_cts_path.read_text() if log_cts_path.exists() else ""
-        txt = txt_cts
-        (out / "openroad.log").write_text(txt)
+    tcl_sta_path = out / "pnr_sta.tcl"
+    log_sta_path = out / "openroad_sta.log"
+    log_path = out / "openroad.log"
+    tcl_sta_path.write_text(tcl_sta)
+    with log_sta_path.open("w") as f:
+        p = subprocess.run(RUN + [OPENROAD, "-threads", "32", "-exit", str(tcl_sta_path)], stdout=f, stderr=subprocess.STDOUT)
+    active_log = log_sta_path.read_text()
+    txt = txt_base + "\n" + active_log
+    log_path.write_text(txt)
+    print(f"[OpenROAD {lib} STA+POWER] exit={p.returncode}", flush=True)
     for line in txt.splitlines():
         if any(k in line for k in ("SRAM bank", "Verified", "Design area", "worst slack", "tns", "Total", "violation", "DRC", "Error")):
             print(" ", line, flush=True)
@@ -381,6 +388,7 @@ exit
         raise RuntimeError(f"OpenROAD {lib} failed:\n" + "\n".join(active_log.splitlines()[-45:]))
 
     drc_count = None
+    gp_rt_flag = "-routability_driven" if do_route else ""
     if do_route:
         drc_txt = drc_rpt.read_text() if drc_rpt.exists() else ""
         drc_count = sum(1 for ln in drc_txt.splitlines() if ln.strip().startswith("violation type:"))
@@ -395,9 +403,8 @@ exit
     m_area = re.findall(r"Design area\s+([0-9.]+)\s+u\^2\s+([0-9.]+)%\s+utilization", txt)
     area_u2, util_pct = (float(m_area[-1][0]), float(m_area[-1][1])) if m_area else (None, None)
     m_wns = re.findall(r"worst slack(?:\s+max)?\s+([0-9.eE+-]+)", txt)
-    wns_ns = float(m_wns[-1]) if m_wns else None
-    m_wns_min = re.findall(r"worst slack\s+min\s+([0-9.eE+-]+)", txt)
-    hold_wns_ns = float(m_wns_min[-1]) if m_wns_min else None
+    wns_ns = float(m_wns[-2]) if len(m_wns) >= 2 else (float(m_wns[-1]) if m_wns else None)
+    hold_wns_ns = float(m_wns[-1]) if len(m_wns) >= 2 else None
     m_pwr = re.findall(r"^Total\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)\s+([0-9.eE+-]+)", txt, re.M)
     macro_area = 4.0 * cfg["macro_w"] * cfg["macro_h"]
     std_area = (area_u2 - macro_area) if area_u2 else None

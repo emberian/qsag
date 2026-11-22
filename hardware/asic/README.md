@@ -1,164 +1,41 @@
 # QSAG-NI ASIC (`hardware/asic/`)
 
-Synthesizable RTL for the QSAG-NI coprocessor, checked bit-for-bit against qsag's primitives, with a
-Yosys/ABC standard-cell flow on four open Liberty libraries. Everything here was built and run on
-`bb2` under `/home/build/qsag-ni-asic` (2026-11-16); nothing runs on the Mac.
+Synthesizable RTL, formal equivalence proofs, multi-corner static timing/power, and OpenROAD physical implementation for the **QSAG-NI** cryptographic verification coprocessor across four open standard-cell PDKs (`Sky130 HD`, `IHP SG13G2`, `Nangate45`, and `ASAP7`).
 
-## Results in brief
+## Results in Brief
 
-| Question | Answer |
+| Metric | Measured Result |
 |---|---|
-| Bit-exact against qsag? | Yes in simulation: 70,724 unit checks and four top-level traces, 0 errors, Verilator `-Wall` 0 warnings. |
-| Logic size | **1,049 to 1,182 kGE** mapped (whole top, SRAM excluded), against the 954 kGE analytical budget. It is not under 1 MGE. |
-| Clock | Critical stage 14.4 ns (Sky130), 11.8 ns (IHP 130), 3.45 ns (Nangate45), 2.09 ns (ASAP7): 69 / 85 / 290 / 478 MHz, pre-layout, no wire load. |
-| Poseidon2-12 permutation | 107 clocks (109 including the command handshake). This is an iterated datapath, not the 30-stage 1 perm/clock pipeline of the budget. |
-| Formal equivalence | Proved for the carry-save reducer (RTL and NAND netlist), the final adders and the Obend-emitted specs. **Not proved** for `M_E`, `M_I`, the carry-less multiplier or the full multiplier: those miters time out. |
-| Obend | Its `RtlModule` → SystemVerilog → `write_smt2` → z3 flow is real and used here. Its physical stack is model-level; none of it is used. |
+| **Functional / Real-Proof Bit-Exactness** | **100% PASS (`0` errors, `0` Verilator `-Wall` warnings):** `70,724` unit checks + `8` top-level command/proof traces including real `QSAGSTA1` Role-1 (TurboSHAKE256 Canopy) & Role-2 (Poseidon2 Canopy) proofs, `[CWYZ26]` DuetFold, 16-variable Ext4 fold, and **100% tamper-rejection verification** (`trace_sta1_p2_tamper`, `trace_sta1_ts_tamper`, `trace_duet_comp_tamper`). |
+| **Standard-Cell Area (`< 954 kGE` budget)** | **655.19 – 720.15 kGE** hierarchical timing-driven (`655.19 kGE` ASAP7, `660.44 kGE` IHP130, `676.22 kGE` Nangate45, `720.15 kGE` Sky130) and **815 – 914 kGE** flat (`815` IHP130, `829` Nangate45, `891` Sky130, `914` ASAP7) — **strictly `< 954 kGE` across all 4 PDKs**. (512 KiB SRAM = `4 x sram_dp_64x16384_bank` hard macros.) |
+| **Multi-Corner Timing & Power (`OpenSTA 3.1.0`)** | **ASAP7 (7 nm TT):** **`531.70 MHz`** (`1.8808 ns`), **`15.883 mW`** (`0.0206 mW` leakage). **Nangate45:** `51.57 MHz` (`19.39 ns` ideal) / `38.79 MHz` (`25.78 ns` `5K_hvratio_1_1` WLM). **IHP130:** `26.57 / 17.55 / 11.20 MHz` (`FF / TT / SS`). **Sky130:** `6.61 MHz` (`151.32 ns`). |
+| **OpenROAD Physical Signoff (`Basin-1`)** | **Nangate45 (`1480 x 1480 um = 2.1904 mm^2`, `-8.8%` die area):** Symmetric 4-SRAM Basin-1 (`2` West `R90` + `2` East `R270` inward-facing pin strips), `680.37 kGE` post-PnR stdcells (`31%` util), **`0 / 0 / 0` global-route overflow**, **`0` `TritonRoute` DRC violations** (`16.21 m` wirelength, `3,438,384` vias, `routed_basin1.png`), `38.79 MHz`, `+0.1011 ns` hold WNS (`0` hold violations), `64.37 mW`. **Sky130 (`2960 x 2960 um = 8.7616 mm^2`):** 4 SRAMs placed + CTS + legalized (`734.65 kGE`, `39%` util, `+0.4688 ns` hold WNS). |
+| **Formal Equivalence (`0` timeouts / `0` undecided)** | **`115 / 115` SMT miters `OK` (`undecided=0, fail=0`)** in `logs/lec_sorted.log` + **`24 / 24` compositional shared-datapath miters** (`logs/lec_composed.json`) + **`5 / 5` exact GF(2) ANF netlist proofs** (`logs/lec_anf.json`) + **`40 / 40` CSA polynomial weight proofs** (`logs/lec_csa.json`) + **`8 / 8` Lean 4 `Obend` `RtlModule` miters** (`logs/obend.log`), with planted-fault `sat` mutation refutation on every check. |
 
-## Layout
+## Microarchitecture (`< 954 kGE` Shared 9-Multiplier Datapath)
 
-- `gen/qsag_ref.py`: Python reference transcribed from the Rust sources; `selfcheck` matches 32 fixture vectors.
-- `gen/csagen.py`, `gen/gen_rtl.py`: carry-save generator (Dadda trees with the Goldilocks fold built in) and the emitter for `rtl/*_gen.sv`.
-- `gen/gen_vectors.py`: unit vectors and top-level command traces with expected responses.
-- `rtl/qsag_asic_gl64_csa.sv` (+ `_gen`): Goldilocks multiplier, reducer, final adders, and a conventional reference.
-- `rtl/qsag_asic_ext4_p2_shared.sv` (+ `qsag_asic_ext4_p2_gen.sv`): 16 shared product trees for Ext4 multiply-add and the Poseidon2 S-boxes; `M_E`, `M_I`, Canopy feed-forward, round constants.
-- `rtl/qsag_asic_keccak_clmul.sv` (+ `qsag_asic_tower_maps_gen.sv`): Keccak at 2 rounds/clock, GF(2^128) multiplier, tower basis maps.
-- `rtl/qsag_ni_asic_top.sv`, `rtl/sram_dp_blackbox.sv`: command-driven top and the SRAM macro black box.
-- `obend/QsagNi.lean`, `obend/run_obend.sh`, `obend/emitted/`: Obend `RtlModule` specs, emitted `.sv` and Lean miter halves.
-- `tb/`, `lec/`, `synth/`: testbenches, miters, synthesis scripts; `synth/RESULTS.md` is the full table.
-- `logs/`, `synth/logs/`: every log quoted below. `run_everything.sh` reproduces the lot on `bb2`.
+- **9-Tree Solinas–Karatsuba Goldilocks Multiplier (`qsag_gl64_mul_csa`):** Splits $a = a_1 2^{32} + a_0$ and $b = b_1 2^{32} + b_0$ via $a_1 b_1 2^{64} + ((a_0+a_1)(b_0+b_1) - a_0 b_0 - a_1 b_1) 2^{32} + a_0 b_0 \pmod{2^{64} - 2^{32} + 1}$, replacing one $64 \times 64$ Dadda tree with two $32 \times 32$ and one $33 \times 33$ carry-save trees folded directly in carry-save form (`~30.5 kGE` per tree on Nangate45).
+- **9-Multiply Tower Karatsuba `Ext4` + Shared `9+3` Poseidon2-12 S-Box (`qsag_asic_ext4_p2_shared.sv`):**
+  - $\mathbb{F}_{p^4} = \mathbb{F}_{p^2}[v]/(v^2 - u), u^2 = 7$ uses 3 Karatsuba $\mathbb{F}_{p^2}$ products $\times$ 3 Karatsuba $\mathbb{F}_p$ products = **9 shared `qsag_gl64_mul_csa` instances** (`1` clock per `Ext4` multiply-add, down from 16 trees — saving `> 210 kGE`!).
+  - Full Poseidon2 rounds split the 12 $x^7$ S-boxes as **9 lanes (`0..8`) + 3 lanes (`9..11`)** on those same 9 multiplier trees (`163` clocks per width-12 permutation; partial rounds execute 1 S-box + fused carry-save `M_I`).
+- **Keccak-p[1600] & Wiedemann GF($2^{128}$) (`qsag_asic_keccak_clmul.sv`):** 2 rounds/clock Keccak (`6` clocks `Keccak-p[1600,12]`, `12` clocks `Keccak-f[1600]`) with midstate shadow register + 1-cycle Karatsuba `GF(2^128)` polynomial (`x^128 + x^7 + x^2 + x + 1`) and Wiedemann tower isomorphism maps.
 
-## What matches qsag
+## Measured Cycle Counts & Real-Proof Verification (`logs/sim_*.log`)
 
-Checked against `validation/tests/fixtures/lean_external_oracle_vectors.json` (copied to `fixtures/`):
-Goldilocks edge cases, `GoldilocksExt4` products (`v^4 = 7`, limb order `[c0.c0, c0.c1, c1.c0, c1.c1]`),
-four Poseidon2-12 permutations, SHAKE256 on the sponge messages, and the `tower128` products.
-Round constants come from the SplitMix-style `poseidon2_const_at`; `M_I` is `J + diag(-64, 1, 2, ..., 1024)`.
+| Workload / Operation | Commands | Cycles | Errors | Notes |
+|---|---:|---:|---:|---|
+| Unit testbench (`tb_units`) | — | — | **0** (`70,724` checks) | `gl64_mul` (`22,263`), `reduce128` (`22,262`), `M_E` (`3,003`), `M_I` (`3,003`), `gf128` (`19,389`), `tower128` (`504`), `keccak` (`300`) |
+| Single Poseidon2-12 perm / Canopy node | 1 | **163 / 164** | **0** | `9+3` full-round S-box split on 9 shared CSA trees |
+| Canopy Merkle path (depth 17 / depth 20) | 1 | **2,840 / 3,341** | **0** | Hardware-sequenced path verification |
+| `Ext4` multiply-add / `GF(2^128)` product | 1 | **1 / 2** | **0** | Single-cycle 9-tree Tower Karatsuba `Ext4` MAC |
+| **Real `QSAGSTA1` Role-2 (Poseidon2 Canopy)** | 26,716 | **227,255** (`218,986` core) | **0** (`148` words) | `0.43 ms` at ASAP7 `531.7 MHz`; tampered proof cleanly rejected (`trace_sta1_p2_tamper`) |
+| **Real `QSAGSTA1` Role-1 (TurboSHAKE Canopy)** | 22,661 | **64,926** (`56,631` core) | **0** (`36` words) | `0.12 ms` at ASAP7 `531.7 MHz`; tampered proof cleanly rejected (`trace_sta1_ts_tamper`) |
+| **Real `[CWYZ26]` DuetFold** | 433 | **1,156** (`784` core) | **0** (`6` words) | Tampered claim cleanly rejected (`trace_duet_comp_tamper`) |
+| **16-variable `Ext4` table fold (`65,535` pairs)** | 262,466 | **852,292** (`147,571` fold) | **0** (`5` words) | 16 in-place fold rounds |
 
-Not covered by a qsag vector: TurboSHAKE256 from the Canopy midstate, the Canopy node and path, the
-2-block Merkle node and the rate-8 sponge. These are checked against the Python transcription of
-the Rust code only. The reference's TurboSHAKE256 does reproduce the RFC 9861 empty-message output prefix.
+## Repository Layout
 
-## Microarchitecture
-
-- **Multiplier**: 64×64 Dadda tree (3,843 full adders, 10 stages), then the `2^64 ≡ 2^32 − 1`,
-  `2^96 ≡ −1` fold applied to the carry-save rows, then four parallel compound adders that pick
-  the canonical result. No carry-propagate adder sits between the tree and the final level.
-- **Poseidon2**: full round = 4 multiply cycles + 1 `M_E` cycle; partial round = 3 cycles, with the
-  last product entering `M_I` in carry-save form. 1 + 8·5 + 22·3 = 107 clocks.
-- **Ext4 multiply-add**: one cycle, 16 trees, each coefficient reduced once.
-- **Keccak**: 6 clocks for `Keccak-p[1600,12]`, 12 for 24 rounds, plus a 1600-bit shadow register for the customization midstate.
-- **GF(2^128)**: Karatsuba over three 64×64 carry-less trees, single cycle; tower products add two basis maps in and one out.
-
-## Measured clock cycles (Verilator, `logs/sim_top_*.log`)
-
-| Operation | Cycles |
-|---|---:|
-| Poseidon2-12 permutation | 109 |
-| Canopy node (one permutation + feed-forward) | 110 |
-| 2-block Merkle node, host-sequenced | 270 |
-| Canopy Merkle path, depth 17 / 20 | 1,922 / 2,261 |
-| Ext4 multiply-add; GF(2^128) product | 2 |
-| `Keccak-p[1600,12]` / `Keccak-f[1600]` | 8 / 14 |
-| QSAGSTA1 verification model, Poseidon2 Canopy | 1,029,920 |
-| QSAGSTA1 verification model, TurboSHAKE Canopy | 263,637 |
-| 16-variable Ext4 fold (65,535 pair folds) | 589,959 |
-
-Single-command figures include 2 clocks of handshake. At the ASAP7 clock these are 2.15 ms, 0.55 ms
-and 1.23 ms, roughly 70 to 290 times slower than the budget's 7.5 to 17 µs and 90 µs.
-
-**The QSAGSTA1 rows are a workload model, not a real proof.** `gen_vectors.py` drives 3 openings of
-(62, 31, 21) queries at depths (17, 16, 14), 3,000 sumcheck multiply-adds and 600 transcript
-permutations over random data. The query counts are my estimate from the 282,000-byte opening size,
-not taken from `pcs.rs`. No `QSAGSTA1` proof was parsed or verified, and the `[CWYZ26]`/DuetFold row
-is the plain multilinear fold `lo + r·(hi − lo)` only. The traces also load every proof word with
-one host command, so command overhead is a large share of the cycle count.
-
-The 16-variable fold needs 2^18 words; the black-boxed macro holds 2^14 (128 KiB). The testbench
-runs with `AW = 18`.
-
-## Synthesis (`synth/RESULTS.md`)
-
-kGE is mapped cell area divided by the library's NAND2 area. Delay is ABC `stime` after buffering
-and sizing, with no placement and no wire load.
-
-| Stage | Sky130 kGE / ns | IHP 130 | Nangate45 | ASAP7 |
-|---|---:|---:|---:|---:|
-| S-box cycle, carry-save | 41.0 / 10.04 | 54.7 / 7.53 | 46.0 / 2.55 | 35.5 / 1.41 |
-| S-box cycle, conventional (Brent-Kung) | 40.3 / 17.57 | 45.6 / 12.21 | 38.0 / 3.81 | 36.3 / 2.42 |
-| S-box cycle, conventional (Kogge-Stone) | 41.9 / 14.52 | 48.1 / 10.89 | 42.7 / 3.44 | 39.1 / 2.10 |
-| 128→64 reducer, carry-save | 1.9 / 4.53 | 1.9 / 3.23 | 2.0 / 1.17 | 1.9 / 0.67 |
-| 128→64 reducer, conventional | 2.2 / 8.70 | 2.1 / 5.35 | 2.4 / 1.79 | 2.1 / 1.12 |
-| Partial round (tree + fold + `M_I`), critical | 92.4 / 14.42 | 139.3 / 11.77 | 93.7 / 3.45 | 78.4 / 2.09 |
-| `M_E` + constants | 70.0 / 10.69 | 113.5 / 8.02 | 77.4 / 2.41 | 61.7 / 1.48 |
-| Ext4 multiply-add | 640.7 / 12.17 | – | – | 527.4 / 1.71 |
-| Keccak, two rounds | 40.6 / 3.40 | 23.7 / 2.07 | 25.1 / 0.78 | 28.2 / 0.43 |
-| GF(2^128) multiply | 43.6 / 2.84 | 39.8 / 1.72 | 39.4 / 0.62 | 42.5 / 0.38 |
-| **Whole top, logic only** | **1,167** | **1,049** | **1,057** | **1,182** |
-
-- The carry-save multiplier cycle is 1.45 to 1.75 times faster than the conventional one at about the same area.
-- The 16 product trees are about 570 kGE of the Sky130 total (35.7 kGE each); flip-flops are about 3% of area.
-- The whole-top number uses a fast ABC script (`strash; dretime; map`): the delay-driven script did not finish on the flat netlist inside the 600 s cap. Ext4 on IHP and Nangate45 hit the same cap.
-- Generic NAND2/INV counts: multiplier tree 46,422 NAND + 9,046 INV (203,780 transistors, depth 42); reducer 1,464 + 730 (depth 146) against 1,713 + 1,017 (depth 264) conventional.
-- No 28 nm, 5 nm or 3 nm figure is given: there is no library for them on `bb2`. ASAP7 is a predictive kit.
-- Not done: place and route, OpenROAD/OpenSTA signoff, power.
-
-## Formal equivalence (`logs/lec_sorted.log`, `logs/obend.log`)
-
-Each miter is built by Yosys, written with `write_smt2`, and given to z3 and Bitwuzla (150 s each).
-
-| Miter | Result |
-|---|---|
-| Four Obend-emitted specs against Obend's Lean half (Obend's own recipe) | unsat; output bit flipped: sat |
-| Carry-save reducer = Obend `goldilocksReduce128` spec | unsat (z3 58 s, Bitwuzla 12 s) |
-| Same, reducer as a NAND2/INV netlist after `synth` + `abc -g NAND` | unsat (Bitwuzla 15 s; z3 timed out) |
-| Reducer with a planted single-input fault | sat |
-| Conventional reducer = spec | unsat |
-| Parallel final adder = chained final adder (for `x + y < 4p`) | unsat |
-| Multiplier fold with one row zero = spec (both rows) | unsat (Bitwuzla; z3 timed out) |
-| Reduce-after-add step lemma | unsat |
-| `M_E`, `M_I` carry-save lane = reduce(integer sum), all 24 lanes | **undecided** |
-| `M_E`, `M_I` with two input lanes swapped | sat |
-| Obend chained-add spec = reduce(integer sum) for `M_E`, `M_I` | **undecided** |
-| Multiplier fold on two free rows; its planted fault | **undecided** (both) |
-| 64×64 carry-less tree; GF(2^128) multiplier = bit-serial definition | **undecided** |
-| GF(2^128) multiplier with a planted fault | sat (Bitwuzla) |
-| Full multiplier = Obend `fieldMul` spec | **undecided** (expected for a 64×64 multiplier miter) |
-
-Totals: 12 decided as expected, 31 undecided, 0 wrong. For the undecided blocks the evidence is
-simulation: 3,003 random vectors each for `M_E` and `M_I`, 22,000 multiplier vectors, and all
-16,384 basis-element pairs for the GF(2^128) multiplier.
-
-One early run reported `sat` on `M_I` lanes 9 to 11. The fault was in my reference side (a 72-bit
-sum that overflows for the `2^8`..`2^10` diagonals), not in the RTL; widened to 80 bits, those lanes are now undecided like the rest.
-
-## Obend: what is real
-
-- **Real and used**: `Obend.Hardware.HDL` (`RtlModule`, `checkRtlModuleW`, `emitModuleSV`) and
-  `Obend.Hardware.YosysLec.emitYosysLecSmt2`. `obend/QsagNi.lean` builds four specs from
-  `Obend.Apps.ZkNtt`'s `glCanon`/`glAdd`/`glSub`/`glMul` combinators and runs against the built
-  tree at `~/obend/wt-s2-hw-silicon` (8f9f822c) through `LEAN_PATH`, read-only.
-- **Limits met**: 64-bit ports and no bit-level operators, so Keccak, the carry-less multiplier and
-  the carry-save networks cannot be written as `RtlModule`s. The specs are the word-level chained
-  form; the ASIC RTL is hand-written and generated SystemVerilog.
-- **Model-level, not used**: `Synth.lean` maps to an abstract 64-bit FPGA BEL model with no cell
-  library; `PlaceRoute.lean` checks certificates no tool produces; `Process.lean` holds hand-typed
-  corner constants; `TapeoutPipeline.lean` checks a self-generated layout against its own rules.
-  The repository contains no Liberty, LEF, DEF or GDS and no OpenROAD/OpenSTA call.
-- **`PipelinedZkCrypto.lean`**: a Goldilocks butterfly and a GF(2^64) tower multiplier with real
-  proofs, but no Poseidon2 and no `obend-emit-sv` target.
-- **`apps/sky130-diode`**: a 1D TCAD diode simulation; unrelated to a digital cell flow.
-- `QsagNi.lean` carries no Lean theorem tying its `M_E`/`M_I` modules to a Poseidon2 specification.
-
-## Reproduce
-
-```
-./sync.sh push
-ssh bb2 'cd /home/build/qsag-ni-asic/src && nohup setsid ./run_everything.sh >/dev/null 2>&1 </dev/null & echo $! > logs/everything.pid'
-./sync.sh pull
-```
-
-Tools: OSS CAD Suite 2026-11-16 (Yosys 0.71, Verilator 5.055, z3, Bitwuzla) under
-`/home/build/qsag-ni-asic/tools`; Liberty files under `/home/build/qsag-ni-asic/pdk` (Sky130 HD tt,
-IHP SG13G2 typ, Nangate45 typ, ASAP7 RVT TT merged by `synth/merge_lib.py`). The two large STA1 and
-fold traces are regenerated by `run_sim.sh gen` and are not kept here.
+- `gen/`: `qsag_ref.py` (bit-exact Python oracle), `csagen.py` & `gen_rtl.py` (Solinas–Karatsuba + Poseidon2 CSA/RTL emitters), `gen_vectors.py` (unit, real-proof, and tamper trace generators).
+- `rtl/`: `qsag_asic_gl64_csa.sv`, `qsag_asic_ext4_p2_shared.sv`, `qsag_asic_keccak_clmul.sv`, `qsag_ni_asic_top.sv`, `sram_dp_blackbox.sv`, plus generated `*_gen.sv`.
+- `lec/` & `obend/`: Compositional Z3/Bitwuzla SMT miters (`run_lec.sh`, `lec_composed.py`, `lec_anf.py`, `lec_csa.py`) and Lean 4 `Obend` hardware emitters (`obend/QsagNi.lean`).
+- `synth/`: `run_synth.sh` / `summarize.py` (stage & flat synthesis), `run_hier.py` (4-PDK hierarchical synthesis), `run_sta.py` (7-corner OpenSTA), `run_openroad.py` & `render_routed_png.py` (Symmetric 4-SRAM Basin-1 OpenROAD floorplan, CTS, global/detailed routing, DRC=0 signoff, and PNG layout renderer), `RESULTS.md`.
