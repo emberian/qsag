@@ -475,3 +475,458 @@ pub fn fw_zkhem_v2_canopy50_verify() -> Vec<u8> {
 /// Compress two seven-limb children with a two-limb tweak in one `POSEIDON2.GL24` call.
 /// Accepts arbitrary u64 words, including noncanonical representatives of Goldilocks
 /// elements. There is nothing to reject: `R4` is always `1`.
+pub fn fw_poseidon2_gl24_jive() -> Vec<u8> {
+    use abi::jive::*;
+    let mut a = Image::default();
+    a.emit(I::Szero);
+    for i in 0..16 {
+        a.ld(5, LEFT + 8 * usize::from(i));
+        a.gl_add(5, 5, 0);
+        a.put(i, 5);
+    }
+    for (i, value) in [
+        (16, 16),
+        (17, 8),
+        (18, 7),
+        (19, 0x4D52_4B4C_474C_3234),
+        (23, 0x504F_5332_474C_3234),
+    ] {
+        a.imm(5, value);
+        a.put(i, 5);
+    }
+    a.emit(I::Poseidon2Gl24);
+    for i in 0..7 {
+        let offset = 8 * usize::from(i);
+        a.get(5, i);
+        a.ld(6, LEFT + offset);
+        a.gl_add(5, 5, 6);
+        a.ld(6, RIGHT + offset);
+        a.gl_add(6, 6, 6);
+        a.gl_add(5, 5, 6);
+        if i < 2 {
+            a.ld(6, TWEAK + offset);
+            a.gl_add(6, 6, 6);
+            a.gl_add(6, 6, 6);
+            a.gl_add(5, 5, 6);
+        }
+        a.st(5, DIGEST + offset);
+    }
+    a.imm(4, 1);
+    a.finish()
+}
+
+/// Fold four opened field elements against two independent weight columns.
+/// Tag j is XOR_i (value[i] * weights[i][j]) in the little-endian GF128 basis.
+/// Advance the WOTS+C chain by its base-four digit: all three steps always run, and a
+/// `SEL` on `digit > step` keeps or replaces the chain value, so the digit changes neither
+/// the cycle count, the program counter trace nor any address.
+/// The address coordinates must lie inside the injective packing (`LAYER < 64`,
+/// `KP < 2^20`, `CHAIN < 256`) and the digit below four: anything else would hash under
+/// another chain's tweak, and is rejected.
+/// The chain value is released only on accept: after a tag mismatch or a range reject `END`
+/// is four zero words. Store both results, wipe both register banks, and reload only the
+/// released status bit.
+pub fn fw_cth_gf128_and_wots() -> Vec<u8> {
+    use abi::cth::*;
+    let mut a = Image::default();
+    a.imm(1, INPUT as u64);
+    a.imm(4, 0);
+    a.emit(I::Szero);
+    // P0/P1 are tags, P2 is u_i, P3 is the weight and then the product.
+    for i in 0..4 {
+        a.sload(4, 2, 1, VALUES - INPUT + 16 * i);
+        for j in 0..2u8 {
+            a.sload(6, 2, 1, WEIGHTS - INPUT + 32 * i + 16 * usize::from(j));
+            a.emit(I::Gf128Mul {
+                pd: 3,
+                pa: 2,
+                pb: 3,
+            });
+            a.emit(I::Gf128Xor {
+                pd: j,
+                pa: j,
+                pb: 3,
+            });
+        }
+    }
+    for i in 0..4 {
+        a.compare_lane(i, TAGS + 8 * usize::from(i), false);
+    }
+    for (field, bound) in [(LAYER, 64), (KP, 1 << 20), (CHAIN, 256), (DIGIT, 4)] {
+        a.ld(5, field);
+        a.imm(7, bound);
+        a.reject_at_or_above(5, 7);
+    }
+    a.status();
+
+    // R8..11 hold the selected chain, canonical from here on. S12..15 save the tweak
+    // across GL12.
+    for i in 0..4 {
+        a.ld(8 + i, START + 8 * usize::from(i));
+        a.gl_add(8 + i, 8 + i, 0);
+    }
+    a.ld(12, DIGIT);
+    a.imm(5, 0x5153_4147_5753_5450);
+    a.put(12, 5);
+    a.ld(13, LAYER);
+    a.ui(AluiOp::Shli, 13, 13, 44);
+    a.ld(5, KP);
+    a.ui(AluiOp::Shli, 5, 5, 16);
+    a.lut(14, 13, 13, 5);
+    a.ld(5, CHAIN);
+    a.ui(AluiOp::Shli, 5, 5, 4);
+    a.lut(14, 13, 13, 5);
+    a.ld(5, TREE);
+    a.emit(I::Bextu {
+        rd: 6,
+        ra: 5,
+        idx: 0,
+        len: 4,
+    });
+    a.put(14, 6);
+    a.ui(AluiOp::Shri, 6, 5, 32);
+    a.put(15, 6);
+    for step in 0..3 {
+        a.ui(AluiOp::Ori, 5, 13, step);
+        a.put(13, 5);
+        for i in 0..4 {
+            a.put(i, 8 + i);
+            a.ld(5, SEED + 8 * usize::from(i));
+            a.put(4 + i, 5);
+            a.get(5, 12 + i);
+            a.put(8 + i, 5);
+        }
+        a.emit(I::Poseidon2Gl12);
+        a.imm(5, step.into());
+        a.emit(I::Cmp {
+            rd: 7,
+            ra: 12,
+            rb: 5,
+            flags: 2,
+        });
+        for i in 0..4 {
+            a.get(5, i);
+            a.gl_add(5, 5, 8 + i);
+            a.ld(6, SEED + 8 * usize::from(i));
+            a.gl_add(6, 6, 6);
+            a.gl_add(5, 5, 6);
+            a.get(6, 12 + i);
+            a.gl_add(6, 6, 6);
+            a.gl_add(6, 6, 6);
+            a.gl_add(5, 5, 6);
+            a.emit(I::Sel {
+                rd: 8 + i,
+                ra: 8 + i,
+                rb: 5,
+                rc: 7,
+            });
+        }
+    }
+    for i in 0..4 {
+        // Check before reveal: R4 is 0 on a tag mismatch and selects the zero register.
+        a.emit(I::Sel {
+            rd: 8 + i,
+            ra: 0,
+            rb: 8 + i,
+            rc: 4,
+        });
+        a.st(8 + i, END + 8 * usize::from(i));
+    }
+    a.st(4, STATUS);
+    a.emit(I::Zeroize);
+    a.ld(4, STATUS);
+    a.finish()
+}
+
+/// Why a firmware run did not produce a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirmwareError {
+    /// The image or a mailbox field does not fit the machine's memory.
+    Mem(MemRangeError),
+    /// More sibling digests than the canopy mailbox has slots.
+    TooManySiblings { count: usize },
+    /// The machine stopped on something other than `HALT`: a trap, a DIT violation or the
+    /// step limit.
+    Exit(RunExit),
+}
+impl fmt::Display for FirmwareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mem(e) => e.fmt(f),
+            Self::TooManySiblings { count } => {
+                write!(
+                    f,
+                    "{count} sibling digests exceed the {} slots",
+                    abi::canopy::MAX_DEPTH
+                )
+            }
+            Self::Exit(exit) => write!(f, "firmware stopped with {exit:?} instead of HALT"),
+        }
+    }
+}
+impl core::error::Error for FirmwareError {}
+impl From<MemRangeError> for FirmwareError {
+    fn from(e: MemRangeError) -> Self {
+        Self::Mem(e)
+    }
+}
+
+/// A reset machine with [`SRAM_BYTES`] of zeroed memory, `image` at PC 0 and the DIT
+/// auditor in trap mode.
+pub fn boot(image: &[u8]) -> Result<Ass2Vm, FirmwareError> {
+    let mut vm = Ass2Vm::new(SRAM_BYTES);
+    vm.load_image(0, image)?;
+    vm.dit_mode = DitMode::Trap;
+    Ok(vm)
+}
+
+/// Run to `HALT` within [`STEP_LIMIT`] steps. A trap, a DIT violation or an exhausted
+/// budget is an error.
+pub fn run_to_halt(vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+    match vm.run(STEP_LIMIT) {
+        RunExit::Halted => Ok(()),
+        exit => Err(FirmwareError::Exit(exit)),
+    }
+}
+
+fn put_words(vm: &mut Ass2Vm, addr: usize, words: &[u64], tag: Taint) -> Result<(), MemRangeError> {
+    for (i, word) in words.iter().enumerate() {
+        vm.load_tainted((addr + 8 * i) as u64, &word.to_le_bytes(), tag)?;
+    }
+    Ok(())
+}
+fn put_wide(
+    vm: &mut Ass2Vm,
+    addr: usize,
+    values: &[u128],
+    tag: Taint,
+) -> Result<(), MemRangeError> {
+    for (i, value) in values.iter().enumerate() {
+        vm.load_tainted((addr + 16 * i) as u64, &value.to_le_bytes(), tag)?;
+    }
+    Ok(())
+}
+fn get_words<const N: usize>(vm: &Ass2Vm, addr: usize) -> Result<[u64; N], MemRangeError> {
+    let mut words = [0; N];
+    for (i, word) in words.iter_mut().enumerate() {
+        *word = vm.read_word((addr + 8 * i) as u64)?;
+    }
+    Ok(words)
+}
+fn get_digest(vm: &Ass2Vm, addr: usize) -> Result<[u8; DIGEST_BYTES], MemRangeError> {
+    Ok(vm
+        .read_bytes(addr as u64, DIGEST_BYTES)?
+        .try_into()
+        .expect("digest length"))
+}
+
+/// Mailbox of [`fw_zkhem_v2_fp5_sumcheck`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SumcheckInput {
+    /// Coefficients `c0..c9`, low degree first, five limbs each. Secret.
+    pub coeffs: [[u64; 5]; 10],
+    /// Claimed round sum `p(0) + p(1)` as canonical limbs. Secret.
+    pub claim: [u64; 5],
+    /// Fiat-Shamir sponge state before the squeeze frame. Public.
+    pub midstate: [u64; 25],
+    /// The padded 136-byte squeeze frame. Secret: it carries the transcript chain value.
+    pub block: [u8; 136],
+    /// The 50 squeezed bytes the frame must produce. Public.
+    pub expected: [u8; DIGEST_BYTES],
+}
+/// Result of [`fw_zkhem_v2_fp5_sumcheck`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SumcheckOutput {
+    /// The round sum and all 400 squeezed bits matched and the draw was canonical.
+    pub accepted: bool,
+    /// The polynomial at the squeezed point, canonical limbs.
+    pub value: [u64; 5],
+    /// The 50 bytes the image squeezed.
+    pub digest: [u8; DIGEST_BYTES],
+}
+impl SumcheckInput {
+    pub fn install(&self, vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+        use abi::sumcheck::*;
+        for (i, c) in self.coeffs.iter().enumerate() {
+            put_words(vm, COEFFS + 40 * i, c, Taint::Secret)?;
+        }
+        put_words(vm, CLAIM, &self.claim, Taint::Secret)?;
+        put_words(vm, MIDSTATE, &self.midstate, Taint::Public)?;
+        vm.load_tainted(BLOCK as u64, &self.block, Taint::Secret)?;
+        vm.load_tainted(EXPECTED as u64, &self.expected, Taint::Public)?;
+        Ok(())
+    }
+}
+impl SumcheckOutput {
+    pub fn read(vm: &Ass2Vm) -> Result<Self, FirmwareError> {
+        use abi::sumcheck::*;
+        Ok(Self {
+            accepted: vm.regs[4] == 1,
+            value: get_words(vm, VALUE)?,
+            digest: get_digest(vm, DIGEST)?,
+        })
+    }
+}
+/// Boot, install, run and read [`fw_zkhem_v2_fp5_sumcheck`].
+pub fn run_zkhem_v2_fp5_sumcheck(input: &SumcheckInput) -> Result<SumcheckOutput, FirmwareError> {
+    let mut vm = boot(&fw_zkhem_v2_fp5_sumcheck())?;
+    input.install(&mut vm)?;
+    run_to_halt(&mut vm)?;
+    SumcheckOutput::read(&vm)
+}
+
+/// Mailbox of [`fw_zkhem_v2_canopy50_verify`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanopyInput {
+    /// Path length, `1..=16`. Public.
+    pub depth: u8,
+    /// Commitment stage bound into the root hash. Public.
+    pub stage: u8,
+    /// Leaf position, below `2^depth`. Secret.
+    pub index: u64,
+    /// The leaf digest. Secret.
+    pub leaf: [u8; DIGEST_BYTES],
+    /// The committed root. Secret.
+    pub expected_root: [u8; DIGEST_BYTES],
+    /// Sibling digests, bottom-up, at most 16. Secret.
+    pub siblings: Vec<[u8; DIGEST_BYTES]>,
+}
+/// Result of [`fw_zkhem_v2_canopy50_verify`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanopyOutput {
+    /// The depth and index were in range and the recomputed root matched in all 400 bits.
+    pub accepted: bool,
+    /// The recomputed root. Not written when the depth is out of range.
+    pub root: [u8; DIGEST_BYTES],
+}
+impl CanopyInput {
+    pub fn install(&self, vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+        use abi::canopy::*;
+        if self.siblings.len() > MAX_DEPTH {
+            return Err(FirmwareError::TooManySiblings {
+                count: self.siblings.len(),
+            });
+        }
+        vm.load_tainted(DEPTH as u64, &[self.depth], Taint::Public)?;
+        vm.load_tainted(STAGE as u64, &[self.stage], Taint::Public)?;
+        put_words(vm, INDEX, &[self.index], Taint::Secret)?;
+        vm.load_tainted(LEAF as u64, &self.leaf, Taint::Secret)?;
+        vm.load_tainted(EXPECTED as u64, &self.expected_root, Taint::Secret)?;
+        for (level, sibling) in self.siblings.iter().enumerate() {
+            vm.load_tainted((SIBLINGS + 56 * level) as u64, sibling, Taint::Secret)?;
+        }
+        Ok(())
+    }
+}
+impl CanopyOutput {
+    pub fn read(vm: &Ass2Vm) -> Result<Self, FirmwareError> {
+        Ok(Self {
+            accepted: vm.regs[4] == 1,
+            root: get_digest(vm, abi::canopy::ROOT)?,
+        })
+    }
+}
+/// Boot, install, run and read [`fw_zkhem_v2_canopy50_verify`].
+pub fn run_zkhem_v2_canopy50_verify(input: &CanopyInput) -> Result<CanopyOutput, FirmwareError> {
+    let mut vm = boot(&fw_zkhem_v2_canopy50_verify())?;
+    input.install(&mut vm)?;
+    run_to_halt(&mut vm)?;
+    CanopyOutput::read(&vm)
+}
+
+/// Mailbox of [`fw_poseidon2_gl24_jive`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JiveInput {
+    /// Left child. Secret.
+    pub left: [u64; 7],
+    /// Right child. Secret.
+    pub right: [u64; 7],
+    /// Node tweak. Public.
+    pub tweak: [u64; 2],
+}
+impl JiveInput {
+    pub fn install(&self, vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+        use abi::jive::*;
+        put_words(vm, LEFT, &self.left, Taint::Secret)?;
+        put_words(vm, RIGHT, &self.right, Taint::Secret)?;
+        put_words(vm, TWEAK, &self.tweak, Taint::Public)?;
+        Ok(())
+    }
+}
+/// The seven canonical digest limbs [`fw_poseidon2_gl24_jive`] stored.
+pub fn read_jive_digest(vm: &Ass2Vm) -> Result<[u64; 7], FirmwareError> {
+    Ok(get_words(vm, abi::jive::DIGEST)?)
+}
+/// Boot, install, run and read [`fw_poseidon2_gl24_jive`].
+pub fn run_poseidon2_gl24_jive(input: &JiveInput) -> Result<[u64; 7], FirmwareError> {
+    let mut vm = boot(&fw_poseidon2_gl24_jive())?;
+    input.install(&mut vm)?;
+    run_to_halt(&mut vm)?;
+    read_jive_digest(&vm)
+}
+
+/// Mailbox of [`fw_cth_gf128_and_wots`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CthWotsInput {
+    /// The four opened `GF(2^128)` values. Secret.
+    pub values: [u128; 4],
+    /// Per value, its weight in each of the two MAC columns. Public.
+    pub weights: [[u128; 2]; 4],
+    /// The two expected tags. Secret.
+    pub tags: [u128; 2],
+    /// Chain value to advance. Secret.
+    pub start: [u64; 4],
+    /// Public seed, canonical limbs.
+    pub seed: [u64; 4],
+    /// Hypertree layer, below 64. Public.
+    pub layer: u64,
+    /// Tree address. Public.
+    pub tree: u64,
+    /// Key pair, below `2^20`. Public.
+    pub keypair: u64,
+    /// Chain index, below 256. Public.
+    pub chain: u64,
+    /// Number of steps, `0..=3`. Secret.
+    pub digit: u64,
+}
+/// Result of [`fw_cth_gf128_and_wots`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CthWotsOutput {
+    /// Both tags matched and the address coordinates and digit were in range.
+    pub accepted: bool,
+    /// The advanced chain value as canonical limbs, or zero on a reject.
+    pub end: [u64; 4],
+}
+impl CthWotsInput {
+    pub fn install(&self, vm: &mut Ass2Vm) -> Result<(), FirmwareError> {
+        use abi::cth::*;
+        put_wide(vm, VALUES, &self.values, Taint::Secret)?;
+        put_wide(vm, WEIGHTS, self.weights.as_flattened(), Taint::Public)?;
+        put_wide(vm, TAGS, &self.tags, Taint::Secret)?;
+        put_words(vm, START, &self.start, Taint::Secret)?;
+        put_words(vm, SEED, &self.seed, Taint::Public)?;
+        put_words(
+            vm,
+            LAYER,
+            &[self.layer, self.tree, self.keypair, self.chain],
+            Taint::Public,
+        )?;
+        put_words(vm, DIGIT, &[self.digit], Taint::Secret)?;
+        Ok(())
+    }
+}
+impl CthWotsOutput {
+    pub fn read(vm: &Ass2Vm) -> Result<Self, FirmwareError> {
+        Ok(Self {
+            accepted: vm.regs[4] == 1,
+            end: get_words(vm, abi::cth::END)?,
+        })
+    }
+}
+/// Boot, install, run and read [`fw_cth_gf128_and_wots`].
+pub fn run_cth_gf128_and_wots(input: &CthWotsInput) -> Result<CthWotsOutput, FirmwareError> {
+    let mut vm = boot(&fw_cth_gf128_and_wots())?;
+    input.install(&mut vm)?;
+    run_to_halt(&mut vm)?;
+    CthWotsOutput::read(&vm)
+}
