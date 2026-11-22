@@ -381,7 +381,7 @@ impl DelegatedCapabilityRelation {
         }
         let mut cs = ConstraintSystem::new();
         populate(&mut cs, params, &statement, b"", &slots);
-        let (shape, mut z) = cs.finish();
+        let (shape, mut z) = cs.finish_v2();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
         Ok(Self {
             inner: CapabilityRelation { params, shape },
@@ -401,7 +401,7 @@ impl DelegatedCapabilityRelation {
         statement: &CapabilityBatchStatement,
         inputs: &[DelegatedPresentationInput],
         context: &[u8],
-        regime: WhirSecurityRegime,
+        profile: Profile,
         seed: &[u8; 32],
     ) -> Result<ZkCapabilityBatchProof, CapabilityZkError> {
         if inputs.len() != self.inner.params.batch_size
@@ -418,11 +418,11 @@ impl DelegatedCapabilityRelation {
         let assignment = cs
             .finish_assignment(&self.inner.shape)
             .ok_or(CapabilityZkError::InvalidParams)?;
-        let proof = protocol::prove(
+        let proof = v2::prove(
             &self.inner.shape,
             assignment,
             &self.statement_bytes(context),
-            regime,
+            profile,
             seed,
         )
         .map_err(CapabilityZkError::Proof)?;
@@ -432,24 +432,20 @@ impl DelegatedCapabilityRelation {
         &self,
         statement: &CapabilityBatchStatement,
         context: &[u8],
-        regime: WhirSecurityRegime,
+        profile: Profile,
         proof: &ZkCapabilityBatchProof,
     ) -> bool {
         statement.presentation_tags.len() == self.inner.params.batch_size
-            && protocol::verify(
+            && v2::verify(
                 &self.inner.shape,
                 &public_inputs_vec(statement, context),
                 &self.statement_bytes(context),
-                regime,
+                profile,
                 &proof.proof,
             )
     }
-    pub fn decode(
-        &self,
-        bytes: &[u8],
-        regime: WhirSecurityRegime,
-    ) -> Option<ZkCapabilityBatchProof> {
-        ZkCapabilityBatchProof::from_bytes(bytes, &self.inner, regime)
+    pub fn decode(&self, bytes: &[u8], profile: Profile) -> Option<ZkCapabilityBatchProof> {
+        ZkCapabilityBatchProof::from_bytes(bytes, &self.inner, profile)
     }
 }
 
@@ -546,17 +542,17 @@ mod tests {
         denied.request.amount = 51;
         assert!(!satisfied(&slot, &denied));
         let start = Instant::now();
-        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let profile = Profile::TurboShakeJohnson400;
         let proof = relation
-            .prove(&statement, &[input], b"offline test", regime, &[91; 32])
+            .prove(&statement, &[input], b"offline test", profile, &[91; 32])
             .unwrap();
         let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
         let start = Instant::now();
-        assert!(relation.verify(&statement, b"offline test", regime, &proof));
+        assert!(relation.verify(&statement, b"offline test", profile, &proof));
         let verify_ms = start.elapsed().as_secs_f64() * 1000.0;
-        assert!(!relation.verify(&statement, b"other context", regime, &proof));
-        assert!(!relation.verify(&denied, b"offline test", regime, &proof));
-        assert_eq!(relation.decode(&proof.to_bytes(), regime).unwrap(), proof);
+        assert!(!relation.verify(&statement, b"other context", profile, &proof));
+        assert!(!relation.verify(&denied, b"offline test", profile, &proof));
+        assert_eq!(relation.decode(&proof.to_bytes(), profile).unwrap(), proof);
         std::println!(
             "OFFLINE_WOTS_C hops=2 rows={} delegate_ms={delegate_ms:.2} prove_ms={prove_ms:.2} verify_ms={verify_ms:.2} bytes={}",
             relation.shape().num_rows(),

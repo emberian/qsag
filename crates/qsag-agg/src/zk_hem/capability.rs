@@ -3,7 +3,8 @@
 //!
 //! Witness privacy and knowledge soundness are those of the masking protocol, summarised
 //! on [`protocol::prove`] and stated in `crates/qsag-agg/SECURITY.md`. A presentation reveals
-//! its public inputs and tags. The constraints below specify the relation being checked.
+//! its public inputs. The scoped relation also reveals a tag per slot.
+//! [`UnlinkableCapabilityRelation`] omits the tag and consumes a verifier-issued challenge. The constraints below specify the relation being checked.
 //!
 //! # Capability model
 //!
@@ -63,15 +64,21 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use super::protocol::{self, ZkHemError, ZkHemProof};
 use super::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm, sponge12, sponge12_native};
+use super::v2::params::Profile;
+use super::v2::protocol::{self as v2, ZkHemV2Error, ZkHemV2Proof};
 use crate::field::{GOLDILOCKS_PRIME, Goldilocks};
-use crate::pcs::WhirSecurityRegime;
 use crate::sponge::{POSEIDON2_CONST_IV, cshake256_32, poseidon2_compress12_ff};
 
 mod offline;
+mod unlinkable;
 pub use offline::{
     DelegatedBearerCapability, DelegatedCapabilityRelation, DelegatedPresentationInput,
+};
+
+pub use unlinkable::{
+    CapabilityChallenge, UnlinkableCapabilityPresentation, UnlinkableCapabilityRelation,
+    UnlinkableCapabilityStatement, VerifierChallengeLedger,
 };
 
 type F = Goldilocks;
@@ -204,7 +211,7 @@ pub enum CapabilityZkError {
     UnsortedOrDuplicateBatch,
     BatchLengthMismatch,
     StatementMismatch,
-    Proof(ZkHemError),
+    Proof(ZkHemV2Error),
 }
 
 /// Conjunctive first-party capability caveats matching `qsag_policy::macaroon::Caveat`.
@@ -917,6 +924,17 @@ impl Drop for CapSlot {
         for hop in &mut self.hops {
             qsag_asm::volatile_fill(&mut hop.payload, F::ZERO);
         }
+        // The openings locate the holder's leaf; `RevocationNonMembershipWitness` erases
+        // its copies of the same paths.
+        for path in [
+            &mut self.issuer_siblings,
+            &mut self.path_lo,
+            &mut self.path_hi,
+        ] {
+            for node in path.iter_mut() {
+                qsag_asm::volatile_fill(node, F::ZERO);
+            }
+        }
     }
 }
 
@@ -1178,7 +1196,7 @@ fn slot_gadget(
     req_amount_limbs32: &[Lc; 4],
     req_now_limbs32: &[Lc; 2],
     ctx_digest: &[Lc; 4],
-    want_pres_tag: &[Lc; 4],
+    want_pres_tag: Option<&[Lc; 4]>,
 ) -> [Lc; 8] {
     let token_id = alloc4(cs, &slot.token_id);
     let token_halves = canonical_digest_halves8(cs, &token_id);
@@ -1340,13 +1358,15 @@ fn slot_gadget(
     enforce_equal4(cs, &mint_node, issuer_root);
 
     // 3. Presentation nullifier binding `(final_tag, token_id, context_digest)`.
-    let mut pres_msg: Vec<Lc> = Vec::with_capacity(13);
-    pres_msg.extend_from_slice(&final_tag);
-    pres_msg.extend_from_slice(&token_id);
-    pres_msg.extend_from_slice(ctx_digest);
-    pres_msg.push(Lc::constant(f(CAP_PRESENT_TAG_DOM)));
-    let computed_pres = first4_lc(&sponge12(cs, &pres_msg));
-    enforce_equal4(cs, &computed_pres, want_pres_tag);
+    if let Some(want_pres_tag) = want_pres_tag {
+        let mut pres_msg: Vec<Lc> = Vec::with_capacity(13);
+        pres_msg.extend_from_slice(&final_tag);
+        pres_msg.extend_from_slice(&token_id);
+        pres_msg.extend_from_slice(ctx_digest);
+        pres_msg.push(Lc::constant(f(CAP_PRESENT_TAG_DOM)));
+        let computed_pres = first4_lc(&sponge12(cs, &pres_msg));
+        enforce_equal4(cs, &computed_pres, want_pres_tag);
+    }
 
     // 4. `SortedRevocationTree` adjacent-leaf interval non-membership:
     //    `idx_hi == idx_lo + 1 < 2^D`, both authenticate to `revocation_root`, and
@@ -1398,7 +1418,10 @@ fn populate(
     slots: &[CapSlot],
 ) {
     assert_eq!(slots.len(), params.batch_size);
-    assert_eq!(statement.presentation_tags.len(), params.batch_size);
+    assert!(
+        statement.presentation_tags.is_empty()
+            || statement.presentation_tags.len() == params.batch_size
+    );
 
     let pub_lcs: Vec<Lc> = public_inputs_vec(statement, context)
         .into_iter()
@@ -1420,8 +1443,10 @@ fn populate(
     let one = Lc::constant(F::ONE);
     let mut prev_token_halves: Option<[Lc; 8]> = None;
     for (b, slot) in slots.iter().enumerate() {
-        let want_pres: [Lc; 4] =
-            core::array::from_fn(|i| pub_lcs[pres_tags_base + 4 * b + i].clone());
+        let want_pres = statement
+            .presentation_tags
+            .get(b)
+            .map(|_| core::array::from_fn(|i| pub_lcs[pres_tags_base + 4 * b + i].clone()));
         let token_halves = slot_gadget(
             cs,
             params,
@@ -1436,7 +1461,7 @@ fn populate(
             &req_amount_limbs32,
             &req_now_limbs32,
             &ctx_digest,
-            &want_pres,
+            want_pres.as_ref(),
         );
         if let Some(prev) = &prev_token_halves {
             // Strictly increasing `token_id` across slots forbids duplicate capability replay.
@@ -1446,12 +1471,11 @@ fn populate(
     }
 }
 
-/// Self-delimiting wire wrapper (`b"QSAGCAP1"`) around a committed-mask [`ZkHemProof`]
-/// for [`CapabilityRelation`]. The `Zk` name identifies the protocol; it does not establish
-/// the privacy or knowledge-soundness properties left open in [`protocol::prove`].
+/// Self-delimiting wire wrapper (`b"QSAGCAP1"`) around a `zk-Hem v2` [`ZkHemV2Proof`]
+/// for [`CapabilityRelation`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ZkCapabilityBatchProof {
-    pub proof: ZkHemProof,
+    pub proof: ZkHemV2Proof,
 }
 
 impl ZkCapabilityBatchProof {
@@ -1463,17 +1487,18 @@ impl ZkCapabilityBatchProof {
         out
     }
 
-    /// Strict canonical wire decoder; rejects wrong magic, non-canonical limbs, or trailing bytes.
+    /// Strict canonical wire decoder; rejects wrong magic, wrong profile, non-canonical limbs,
+    /// or trailing bytes.
     pub fn from_bytes(
         bytes: &[u8],
         relation: &CapabilityRelation,
-        regime: WhirSecurityRegime,
+        profile: Profile,
     ) -> Option<Self> {
         if bytes.get(..8)? != CAPABILITY_WIRE_MAGIC {
             return None;
         }
-        let proof = ZkHemProof::from_bytes(bytes.get(8..)?, &relation.shape, regime)?;
-        Some(Self { proof })
+        let proof = ZkHemV2Proof::from_bytes(bytes.get(8..)?, &relation.shape)?;
+        (proof.profile == profile).then_some(Self { proof })
     }
 }
 
@@ -1486,6 +1511,10 @@ pub struct CapabilityRelation {
 
 impl CapabilityRelation {
     pub fn new(params: CapabilityParams) -> Result<Self, CapabilityZkError> {
+        Self::compile(params, true)
+    }
+
+    fn compile(params: CapabilityParams, scoped: bool) -> Result<Self, CapabilityZkError> {
         if !params.valid() {
             return Err(CapabilityZkError::InvalidParams);
         }
@@ -1500,12 +1529,16 @@ impl CapabilityRelation {
                 amount: 0,
                 now: 0,
             },
-            presentation_tags: vec![[F::ZERO; 4]; params.batch_size],
+            presentation_tags: if scoped {
+                vec![[F::ZERO; 4]; params.batch_size]
+            } else {
+                Vec::new()
+            },
         };
         let slots = vec![CapSlot::placeholder(params); params.batch_size];
         let mut cs = ConstraintSystem::new();
         populate(&mut cs, params, &dummy_statement, b"", &slots);
-        let (shape, mut z) = cs.finish();
+        let (shape, mut z) = cs.finish_v2();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
         Ok(Self { params, shape })
     }
@@ -1546,7 +1579,7 @@ impl CapabilityRelation {
         context: &[u8],
     ) -> Result<Vec<CapSlot>, CapabilityZkError> {
         if inputs.len() != self.params.batch_size
-            || statement.presentation_tags.len() != self.params.batch_size
+            || 92 + 4 * statement.presentation_tags.len() != self.shape.num_public
         {
             return Err(CapabilityZkError::BatchLengthMismatch);
         }
@@ -1559,15 +1592,17 @@ impl CapabilityRelation {
         }
         let ctx = context_digest(context);
         let mut slots = Vec::with_capacity(self.params.batch_size);
-        for (item, want_pres) in inputs.iter().zip(&statement.presentation_tags) {
+        for (index, item) in inputs.iter().enumerate() {
             item.capability.verify_native(&statement.request)?;
-            let got_pres = compute_presentation_tag(
-                &item.capability.final_tag,
-                &item.capability.token_id,
-                &ctx,
-            );
-            if got_pres != *want_pres {
-                return Err(CapabilityZkError::StatementMismatch);
+            if let Some(want_pres) = statement.presentation_tags.get(index) {
+                let got_pres = compute_presentation_tag(
+                    &item.capability.final_tag,
+                    &item.capability.token_id,
+                    &ctx,
+                );
+                if got_pres != *want_pres {
+                    return Err(CapabilityZkError::StatementMismatch);
+                }
             }
             // Verify issuer directory path natively.
             if item.issuer_index >= (1usize << self.params.issuer_depth)
@@ -1627,7 +1662,7 @@ impl CapabilityRelation {
         statement: &CapabilityBatchStatement,
         inputs: &[CapabilityPresentationInput],
         context: &[u8],
-        regime: WhirSecurityRegime,
+        profile: Profile,
         seed: &[u8; 32],
     ) -> Result<ZkCapabilityBatchProof, CapabilityZkError> {
         let slots = self.validate_and_build_slots(statement, inputs, context)?;
@@ -1636,11 +1671,11 @@ impl CapabilityRelation {
         let assignment = cs
             .finish_assignment(&self.shape)
             .ok_or(CapabilityZkError::InvalidParams)?;
-        let proof = protocol::prove(
+        let proof = v2::prove(
             &self.shape,
             assignment,
             &self.statement_bytes(context),
-            regime,
+            profile,
             seed,
         )
         .map_err(CapabilityZkError::Proof)?;
@@ -1652,17 +1687,17 @@ impl CapabilityRelation {
         &self,
         statement: &CapabilityBatchStatement,
         context: &[u8],
-        regime: WhirSecurityRegime,
+        profile: Profile,
         proof: &ZkCapabilityBatchProof,
     ) -> bool {
         if statement.presentation_tags.len() != self.params.batch_size {
             return false;
         }
-        protocol::verify(
+        v2::verify(
             &self.shape,
             &public_inputs_vec(statement, context),
             &self.statement_bytes(context),
-            regime,
+            profile,
             &proof.proof,
         )
     }
@@ -1787,7 +1822,7 @@ mod tests {
     ) -> (Shape, Vec<F>) {
         let mut cs = ConstraintSystem::new();
         populate(&mut cs, params, statement, context, slots);
-        cs.finish()
+        cs.finish_v2()
     }
 
     fn set_bit(z: &mut [F], bit: &Lc, value: F) {
@@ -2344,7 +2379,7 @@ mod tests {
                     &fx.statement,
                     &tampered_nm,
                     b"challenge-ctx-v1",
-                    WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+                    Profile::TurboShakeJohnson400,
                     &[7; 32],
                 )
                 .unwrap_err(),
@@ -2376,7 +2411,7 @@ mod tests {
                     &fx.statement,
                     &bad_chain_input,
                     b"challenge-ctx-v1",
-                    WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+                    Profile::TurboShakeJohnson400,
                     &[7; 32],
                 )
                 .unwrap_err(),
@@ -2410,7 +2445,7 @@ mod tests {
 
     #[test]
     fn batched_capability_proof_roundtrips_and_verifies() {
-        let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+        let profile = Profile::TurboShakeJohnson400;
         let fx = build_fixture(2, 5, 6, 8);
         let proof = fx
             .relation
@@ -2418,53 +2453,49 @@ mod tests {
                 &fx.statement,
                 &fx.inputs,
                 b"challenge-ctx-v1",
-                regime,
+                profile,
                 &[33; 32],
             )
             .unwrap();
         let bytes = proof.to_bytes();
-        let decoded = ZkCapabilityBatchProof::from_bytes(&bytes, &fx.relation, regime).unwrap();
+        let decoded = ZkCapabilityBatchProof::from_bytes(&bytes, &fx.relation, profile).unwrap();
         assert_eq!(decoded, proof);
         assert_eq!(decoded.to_bytes(), bytes);
         assert!(
             fx.relation
-                .verify(&fx.statement, b"challenge-ctx-v1", regime, &decoded)
+                .verify(&fx.statement, b"challenge-ctx-v1", profile, &decoded)
+        );
+        assert!(
+            ZkCapabilityBatchProof::from_bytes(&bytes, &fx.relation, Profile::CshakeJohnson400)
+                .is_none()
         );
 
         // Trailing byte and wrong magic are rejected.
         let mut trailing = bytes.clone();
         trailing.push(0);
-        assert!(ZkCapabilityBatchProof::from_bytes(&trailing, &fx.relation, regime).is_none());
+        assert!(ZkCapabilityBatchProof::from_bytes(&trailing, &fx.relation, profile).is_none());
         for cut in (0..bytes.len()).step_by(997).chain([bytes.len() - 1]) {
             assert!(
-                ZkCapabilityBatchProof::from_bytes(&bytes[..cut], &fx.relation, regime).is_none()
+                ZkCapabilityBatchProof::from_bytes(&bytes[..cut], &fx.relation, profile).is_none()
             );
         }
+        // First Fp5 limb (`row_mask_sum.0[0]`) starts after 8B wrapper magic + 10B v2 header + 32B tree_nonce + 50B root = 100.
         for word in [GOLDILOCKS_PRIME, GOLDILOCKS_PRIME + 1, u64::MAX] {
             let mut alias = bytes.clone();
-            alias[41..49].copy_from_slice(&word.to_le_bytes()); // first Ext4 limb
-            assert!(ZkCapabilityBatchProof::from_bytes(&alias, &fx.relation, regime).is_none());
+            alias[100..108].copy_from_slice(&word.to_le_bytes());
+            assert!(ZkCapabilityBatchProof::from_bytes(&alias, &fx.relation, profile).is_none());
         }
-        let layout = protocol::Layout::new(fx.relation.shape(), regime).unwrap();
-        let fold_count = 8
-            + 33
-            + 32 * (9
-                + fx.relation.shape().log_rows * (protocol::ROW_DEGREE + 1)
-                + layout.var_bits * (protocol::COL_DEGREE + 1))
-            + 64;
-        let mut huge_count = bytes[..fold_count + 4].to_vec();
-        huge_count[fold_count..].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(ZkCapabilityBatchProof::from_bytes(&huge_count, &fx.relation, regime).is_none());
         let mut tampered = bytes.clone();
-        tampered[8] ^= 1; // canonical commitment mutation must fail verification
-        let tampered = ZkCapabilityBatchProof::from_bytes(&tampered, &fx.relation, regime).unwrap();
+        tampered[50] ^= 1; // canonical root mutation must fail verification
+        let tampered =
+            ZkCapabilityBatchProof::from_bytes(&tampered, &fx.relation, profile).unwrap();
         assert!(
             !fx.relation
-                .verify(&fx.statement, b"challenge-ctx-v1", regime, &tampered)
+                .verify(&fx.statement, b"challenge-ctx-v1", profile, &tampered)
         );
         let mut wrong_magic = bytes;
         wrong_magic[7] ^= 1;
-        assert!(ZkCapabilityBatchProof::from_bytes(&wrong_magic, &fx.relation, regime).is_none());
+        assert!(ZkCapabilityBatchProof::from_bytes(&wrong_magic, &fx.relation, profile).is_none());
 
         // Every public statement component is bound, including full-width integers.
         for component in 0..8 {
@@ -2481,31 +2512,31 @@ mod tests {
             }
             assert!(
                 !fx.relation
-                    .verify(&changed, b"challenge-ctx-v1", regime, &decoded)
+                    .verify(&changed, b"challenge-ctx-v1", profile, &decoded)
             );
         }
         // Statement and context mutations fail verification.
         assert!(
             !fx.relation
-                .verify(&fx.statement, b"challenge-ctx-v2", regime, &decoded)
+                .verify(&fx.statement, b"challenge-ctx-v2", profile, &decoded)
         );
         let mut wrong_rev = fx.statement.clone();
         wrong_rev.revocation_root[0] += F::ONE;
         assert!(
             !fx.relation
-                .verify(&wrong_rev, b"challenge-ctx-v1", regime, &decoded)
+                .verify(&wrong_rev, b"challenge-ctx-v1", profile, &decoded)
         );
         let mut wrong_epoch = fx.statement.clone();
         wrong_epoch.revocation_epoch += 1;
         assert!(
             !fx.relation
-                .verify(&wrong_epoch, b"challenge-ctx-v1", regime, &decoded)
+                .verify(&wrong_epoch, b"challenge-ctx-v1", profile, &decoded)
         );
         let mut wrong_nullifier = fx.statement.clone();
         wrong_nullifier.presentation_tags[1][2] += F::ONE;
         assert!(
             !fx.relation
-                .verify(&wrong_nullifier, b"challenge-ctx-v1", regime, &decoded)
+                .verify(&wrong_nullifier, b"challenge-ctx-v1", profile, &decoded)
         );
     }
 
@@ -2527,13 +2558,10 @@ mod tests {
                 DEFAULT_REVOCATION_DEPTH,
             ),
         ] {
-            for regime in [
-                WhirSecurityRegime::BciksJohnsonQrom128,
-                WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
-            ] {
+            for profile in Profile::ALL {
                 let fx = build_fixture(batch_size, max_hops, iss_d, rev_d);
                 let shape = fx.relation.shape();
-                let layout = protocol::Layout::new(shape, regime).unwrap();
+                let layout = v2::layout_of(shape).unwrap();
                 let median = |mut v: Vec<f64>| {
                     v.sort_by(f64::total_cmp);
                     v[v.len() / 2]
@@ -2548,7 +2576,7 @@ mod tests {
                                 &fx.statement,
                                 &fx.inputs,
                                 b"challenge-ctx-v1",
-                                regime,
+                                profile,
                                 &[40 + run; 32],
                             )
                             .unwrap(),
@@ -2565,13 +2593,13 @@ mod tests {
                                 let decoded = ZkCapabilityBatchProof::from_bytes(
                                     &bytes,
                                     &fx.relation,
-                                    regime,
+                                    profile,
                                 )
                                 .unwrap();
                                 assert!(fx.relation.verify(
                                     &fx.statement,
                                     b"challenge-ctx-v1",
-                                    regime,
+                                    profile,
                                     &decoded
                                 ));
                                 t.elapsed().as_secs_f64() * 1e3
@@ -2582,7 +2610,7 @@ mod tests {
                 let verify_all = time_verify();
                 let verify_one = crate::with_worker_limit(1, time_verify);
                 std::println!(
-                    "ZKHEM_CAPABILITY batch={batch_size} regime={regime:?} sbox_rows={} \
+                    "ZKHEM_CAPABILITY batch={batch_size} profile={profile:?} sbox_rows={} \
                      rows=2^{} vars={} cells=2^{} blind_cells={} proof_bytes={} \
                      proof_kib={:.2} prove_ms_median={:.1} verify_ms_all_workers={verify_all:.2} \
                      verify_ms_1_worker={verify_one:.2} workers={}",
