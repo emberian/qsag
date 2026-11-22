@@ -576,7 +576,7 @@ fn run_qsb_dvt_cluster_bench(
             let ep = endpoints_opt[p].take().expect("unique endpoint");
             let cust = ShamirCustodian::new(cfg, tree.clone(), mat, MemBeltWal::default())
                 .expect("build ShamirCustodian");
-            Some(IsolatedQuorumParty::new(cust, ep).expect("build IsolatedQuorumParty"))
+            Some(IsolatedQuorumParty::new_deployed([0xDA; 32], seed32(0x95, cfg.parties() as u64), cust, ep).expect("build IsolatedQuorumParty"))
         })
         .collect();
 
