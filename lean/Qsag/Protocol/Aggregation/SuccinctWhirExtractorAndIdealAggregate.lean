@@ -563,3 +563,561 @@ theorem stepOp256TableOk_bothProfiles_extract {nVal : Nat}
       hTable hSlot hProfMem rfl
 
 /-- Single-slot `StepOp256` extraction for slot `i`'s isolated row slice `slotRows`. -/
+theorem singleSlot_stepOp256_extract
+    (profile : AggSigProfile) (hDep : IsDeployedAggProfile profile)
+    (pk : AggValidatorPk) (msg : Spec.Bytes) (slotRows : List StepOpRow)
+    (hProf : pk.profile = profile)
+    (hTable : stepOp256TableOk profile [some (pk, computeMessageMu pk msg)] slotRows = true) :
+    verifyAggNativeSig (profileGeom profile) pk msg (extractSlotNativeSig profile slotRows 0) = true := by
+  have hSlot0 : ([some (pk, computeMessageMu pk msg)] : List StepOpSlot)[0]? =
+      some (some (pk, computeMessageMu pk msg)) := rfl
+  rcases hDep with rfl | rfl
+  · exact stepOp256TableOk_xmss_extract _ slotRows 0 (pk, computeMessageMu pk msg) msg
+      hTable hSlot0 hProf rfl
+  · exact stepOp256TableOk_corduroy_extract _ slotRows 0 (pk, computeMessageMu pk msg) msg
+      hTable hSlot0 hProf rfl
+
+/-! ## §3. Salted Slot-Leaf Framing, `whirTableBackedMessages`, and Succinct WHIR Verifier -/
+
+/-- Prefix-free codec framing salted Stage-0 slot execution rows `(salt, profile, slotIdx, slotRows)`
+    into a single oracle query `Spec.Bytes` so `decodeSlotLeafSig` is statement- and key-independent. -/
+structure SlotLeafTableCodec where
+  encode : BitVec 256 → AggSigProfile → Nat → List StepOpRow → Spec.Bytes
+  decode : Spec.Bytes → Option (BitVec 256 × AggSigProfile × Nat × List StepOpRow)
+  decode_encode : ∀ salt prof idx rows,
+    decode (encode salt prof idx rows) = some (salt, prof, idx, rows)
+
+theorem SlotLeafTableCodec.encode_inj (c : SlotLeafTableCodec)
+    {s1 s2 : BitVec 256} {p1 p2 : AggSigProfile} {i1 i2 : Nat} {r1 r2 : List StepOpRow}
+    (h : c.encode s1 p1 i1 r1 = c.encode s2 p2 i2 r2) :
+    s1 = s2 ∧ p1 = p2 ∧ i1 = i2 ∧ r1 = r2 := by
+  have hd := congrArg c.decode h
+  rw [c.decode_encode, c.decode_encode] at hd
+  injection hd with hEq
+  rcases Prod.mk.inj hEq with ⟨hs, hRest1⟩
+  rcases Prod.mk.inj hRest1 with ⟨hp, hRest2⟩
+  rcases Prod.mk.inj hRest2 with ⟨hi, hr⟩
+  exact ⟨hs, hp, hi, hr⟩
+
+/-- Statement-free, key-free single-query byte decoder extracting the native signature from a
+    recorded Stage-0 slot-leaf preimage `b : Spec.Bytes`. -/
+def decodeSlotLeafSig (slotC : SlotLeafTableCodec) (b : Spec.Bytes) : Option AggNativeSignature :=
+  match slotC.decode b with
+  | some (_, prof, _, slotRows) => some (extractSlotNativeSig prof slotRows 0)
+  | none => none
+
+theorem decodeSlotLeafSig_encode (slotC : SlotLeafTableCodec)
+    (salt : BitVec 256) (prof : AggSigProfile) (idx : Nat) (slotRows : List StepOpRow) :
+    decodeSlotLeafSig slotC (slotC.encode salt prof idx slotRows) =
+      some (extractSlotNativeSig prof slotRows 0) := by
+  unfold decodeSlotLeafSig
+  rw [slotC.decode_encode]
+
+/-- Table-backed succinct WHIR round messages over any schedule `sched` and `MerkleSetup`. -/
+def whirTableBackedMessages {D F : Type} (sched : WhirVerifierSchedule) (M : MerkleSetup D F)
+    (tables : Nat → Nat → F) (pub : Nat → WhirPub F) : List (SuccinctRoundMsg D (WhirPub F)) :=
+  (List.range sched.numRounds).map fun r =>
+    ⟨(stageOfCommitRound sched.stages r).map (fun j =>
+      M.root (j + 1) (scalarStageDepth sched.stages (j + 1)) (tables (j + 1))), pub r⟩
+
+/-- **Succinct WHIR Aggregate Proof (`SuccinctWhirAggregateProof`):**
+    Carries ONLY salted Merkle-Canopy roots, succinct round messages (`5` OOD pins + folded sumcheck
+    polynomials), and `q` Canopy Merkle authentication paths — ZERO `StepOpRow`s and ZERO
+    `AggNativeSignature`s on the wire (`succinctWhirProofSigs = fun _ => []`). -/
+structure SuccinctWhirAggregateProof where
+  salt : BitVec 256
+  slotCommitRoot : Spec.Bytes
+  whirRoot0 : Spec.Bytes
+  claim : QuinticGoldilocks
+  rounds : List (SuccinctRoundMsg Spec.Bytes (WhirPub QuinticGoldilocks))
+  canopyOpenings : List (QuinticGoldilocks × List Spec.Bytes)
+
+/-- Zero plaintext signatures are carried in a `SuccinctWhirAggregateProof`. -/
+@[expose] def succinctWhirProofSigs (_ : SuccinctWhirAggregateProof) : List AggNativeSignature := []
+
+/-- Cryptographic framing bundle for the byte-oracle succinct WHIR verifier. -/
+structure SuccinctWhirByteFraming where
+  nodeC : Spec.FramedCodec (Nat × Nat × Spec.Bytes × Spec.Bytes)
+  leafC : Spec.FramedCodec (Nat × Nat × QuinticGoldilocks)
+  fsChallengeNat : (Spec.Bytes → Spec.Bytes) → BitVec 256 → Spec.Bytes → Spec.Bytes →
+    List (SuccinctRoundMsg Spec.Bytes (WhirPub QuinticGoldilocks)) → Nat
+  slotTreeDepth : Nat → Nat
+
+/-- Derive the Fiat–Shamir `(SuccinctRoundMsg, challenge)` transcript on succinct prefixes only. -/
+def deriveSuccinctFsTranscript (fr : SuccinctWhirByteFraming) (H : Spec.Bytes → Spec.Bytes)
+    (salt : BitVec 256) (slotRoot whirRoot0 : Spec.Bytes)
+    (sms : List (SuccinctRoundMsg Spec.Bytes (WhirPub QuinticGoldilocks))) :
+    List (SuccinctRoundMsg Spec.Bytes (WhirPub QuinticGoldilocks) × Nat) :=
+  (List.range sms.length).filterMap fun r =>
+    match sms[r]? with
+    | some sm =>
+      some (sm, fr.fsChallengeNat H salt slotRoot whirRoot0 (sms.take (r + 1)))
+    | none => none
+
+theorem deriveSuccinctFsTranscript_map_fst (fr : SuccinctWhirByteFraming)
+    (H : Spec.Bytes → Spec.Bytes) (salt : BitVec 256) (slotRoot whirRoot0 : Spec.Bytes)
+    (sms : List (SuccinctRoundMsg Spec.Bytes (WhirPub QuinticGoldilocks))) :
+    (deriveSuccinctFsTranscript fr H salt slotRoot whirRoot0 sms).map Prod.fst = sms := by
+  unfold deriveSuccinctFsTranscript
+  have hGen : ∀ (k : Nat), k ≤ sms.length →
+      ((List.range k).filterMap (fun r =>
+        match sms[r]? with
+        | some sm => some (sm, fr.fsChallengeNat H salt slotRoot whirRoot0 (sms.take (r + 1)))
+        | none => none)).map Prod.fst = sms.take k := by
+    intro k; induction k with
+    | zero => intro _; rfl
+    | succ k ih =>
+      intro hk
+      rw [List.range_succ, List.filterMap_append, List.map_append, ih (by omega)]
+      have hkLt : k < sms.length := hk
+      dsimp only [List.filterMap, List.map]
+      rw [List.getElem?_eq_getElem hkLt]
+      dsimp only [List.map]
+      rw [List.take_add_one, List.getElem?_eq_getElem hkLt]
+      rfl
+  simpa only [List.take_length] using hGen sms.length (Nat.le_refl _)
+
+/-- **Succinct Fiat–Shamir WHIR Aggregate Verifier (`verifySuccinctWhirAggregate`):**
+    Checks committee well-formedness, profile match, `claim = 1`, and runs `ClosedFs.succinctVerify`
+    over `zkHemV2Uncond128Sched` (`QuinticGoldilocks`, `5` OOD pins, `102` Canopy openings). -/
+def verifySuccinctWhirAggregate {nVal : Nat}
+    (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
+    (H : Spec.Bytes → Spec.Bytes)
+    (stmt : Spec.AggregateStatement AggValidatorPk nVal)
+    (proof : SuccinctWhirAggregateProof) : Bool :=
+  decide (0 < nVal) &&
+  (List.finRange nVal).all (fun i =>
+    !stmt.bitmap.getLsbD i.val || ((stmt.roster i).profile == profile)) &&
+  decide (proof.claim = QuinticGoldilocks.one) &&
+  succinctVerify
+    (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616)
+    (whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 ([] : Spec.Bytes))
+    (framedSetup H fr.nodeC fr.leafC)
+    proof.claim
+    (fun _ => proof.whirRoot0)
+    (deriveSuccinctFsTranscript fr H proof.salt proof.slotCommitRoot proof.whirRoot0 proof.rounds)
+    proof.canopyOpenings
+
+/-! ## §4. Straight-Line QROM Query-Table Extractor, `< 2^{-128}` Soundness & `Spec.IdealAggregate` Refinement -/
+
+/-- Parse recorded Merkle node queries `(lvl, node, left, right) ↦ out` from the byte oracle `log`. -/
+def parseRecordedMerkleNodes (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (log : List (Spec.Bytes × Spec.Bytes)) : List (RecordedMerkleQuery Spec.Bytes) :=
+  log.filterMap fun e =>
+    match nodeDecode e.1 with
+    | some (lvl, node, l, r) => some ⟨lvl, node, l, r, e.2⟩
+    | none => none
+
+/-- Straight-line QROM query-table extractor reconstructing slot `i`'s leaf digest from `log` via
+    `extractOnlineMerkleOpening` (`0` rewinding) and applying `decodeSlotLeafSig slotC`. -/
+def extractSuccinctWhirAggregate {nVal : Nat}
+    (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec)
+    (log : List (Spec.Bytes × Spec.Bytes))
+    (_stmt : Spec.AggregateStatement AggValidatorPk nVal)
+    (proof : SuccinctWhirAggregateProof)
+    (i : Fin nVal) : Option AggNativeSignature :=
+  let nodes := parseRecordedMerkleNodes nodeDecode log
+  match extractOnlineMerkleOpening proof.slotCommitRoot nodes 0 (fr.slotTreeDepth nVal) i.val with
+  | none => none
+  | some (leafDigest, _) =>
+    match log.find? (fun e =>
+      decide (e.2 = leafDigest) &&
+      match slotC.decode e.1 with
+      | some (s, p, idx, _) => decide (s = proof.salt ∧ p = profile ∧ idx = i.val)
+      | none => false) with
+    | none => none
+    | some e => decodeSlotLeafSig slotC e.1
+
+/-- **Straight-Line Extractor Property (`extractSuccinctWhirAggregate_straightLine`):**
+    `extractSuccinctWhirAggregate` belongs to `Spec.StraightLineExtractor (decodeSlotLeafSig slotC) (fun _ => [])`
+    with ZERO proof-carried signatures (`succinctWhirProofSigs = fun _ => []`)! -/
+theorem extractSuccinctWhirAggregate_straightLine {nVal : Nat}
+    (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec) :
+    Spec.StraightLineExtractor (PK := AggValidatorPk)
+      (decodeSlotLeafSig slotC) succinctWhirProofSigs
+      (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) := by
+  rw [Spec.StraightLineExtractor_iff]
+  intro log stmt proof i sig hExt
+  unfold extractSuccinctWhirAggregate at hExt
+  dsimp only at hExt
+  cases hOpen : extractOnlineMerkleOpening proof.slotCommitRoot
+      (parseRecordedMerkleNodes nodeDecode log) 0 (fr.slotTreeDepth nVal) i.val with
+  | none => rw [hOpen] at hExt; cases hExt
+  | some pr =>
+    rw [hOpen] at hExt; dsimp only at hExt
+    let pred := fun e : Spec.Bytes × Spec.Bytes =>
+      decide (e.2 = pr.1) &&
+      match slotC.decode e.1 with
+      | some (s, p, idx, _) => decide (s = proof.salt ∧ p = profile ∧ idx = i.val)
+      | none => false
+    cases hFind : log.find? pred with
+    | none =>
+      change (match log.find? pred with | none => none | some e => decodeSlotLeafSig slotC e.1) = some sig at hExt
+      rw [hFind] at hExt; cases hExt
+    | some e =>
+      change (match log.find? pred with | none => none | some e => decodeSlotLeafSig slotC e.1) = some sig at hExt
+      rw [hFind] at hExt
+      exact .inr ⟨e, List.mem_of_find?_eq_some hFind, .inl hExt⟩
+
+/-- **Coherent Unitary QROM `< 2^{-128}` Soundness of Succinct Quintic WHIR (`succinctWhirAggregate_qrom_soundness_128`):**
+    For any `Q`-query quantum adversary `A` (`Q ≤ 2^{64}`), across both `.turboShake400` and `.poseidon2Gl24`,
+    any accepted succinct WHIR proof whose Stage-0 reconstructed table lies outside `whirInLang` has QROM
+    acceptance probability strictly `< 2^{-128}` (`⟨1, 2 ^ 128, by decide⟩`). -/
+theorem succinctWhirAggregate_qrom_soundness_128 {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (prof : WhirCommitmentProfile) (hQ : Q ≤ 2 ^ 64)
+    (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
+      zkHemV2Uncond128Sched.numRounds cardX)
+    (aux : Fin cardX → List (QuinticGoldilocks × List D))
+    (claim : QuinticGoldilocks) (initRoots : Nat → D)
+    (tblOf : Nat → D → Nat → QuinticGoldilocks)
+    (hx : ¬ whirInLang zkHemV2Uncond128Env zkHemV2Uncond128Sched
+      ((whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot).liftStmt
+        claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 616) (o : Fin cardX),
+      succinctFsAccept (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616)
+        (whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot)
+        M codec aux claim initRoots H o = true →
+      let str := fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616).queries claim
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616).depth q.1)
+          (tblOf q.1 ((whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX 616 cardAnc Q)
+    (hMerkle : RatBound.le
+      ⟨uniformOracleSum 616 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsCollisionEvent (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616)
+              (whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot)
+              M codec aux claim initRoots tblOf H)
+            (runQuantumAdv A H)),
+        (2 ^ 616) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 616))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (merkleProfileQromBound prof Q)) :
+    RatBound.lt
+      ⟨uniformOracleSum 616 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsAccept (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616)
+              (whirSuccinctBridge zkHemV2Uncond128Env zkHemV2Uncond128Sched 616 dfltRoot)
+              M codec aux claim initRoots H)
+            (runQuantumAdv A H)),
+        (2 ^ 616) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 616))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨1, 2 ^ 128, by decide⟩ := by
+  have hClosed := whir_succinct_closed_qrom_soundness zkHemV2Uncond128Env zkHemV2Uncond128Sched
+    M dfltRoot zkHemV2Uncond128Cert codec aux claim initRoots tblOf hx hRoots A
+  have hStep := RatBound.le_trans hClosed (RatBound.add_le_add (RatBound.le_refl _) hMerkle)
+  have hScale1 : RatBound.le (scheduleQromError zkHemV2Uncond128Sched Q)
+      (RatBound.scale (2 ^ (0 + 1) - 1) (scheduleQromError zkHemV2Uncond128Sched Q)) := by
+    let e := scheduleQromError zkHemV2Uncond128Sched Q
+    show e.num * e.den ≤ (2 ^ 1 - 1) * e.num * e.den
+    have hOne : 2 ^ 1 - 1 = 1 := rfl
+    rw [hOne, Nat.one_mul]
+    exact Nat.le_refl _
+  have hTree0 := zkHemV2Uncond128_tree_qrom_lt_128_at_2pow64 prof (d := 0) (by decide) hQ
+  exact ratBound_lt_of_le_of_lt_packed
+    (RatBound.le_trans hStep (RatBound.add_le_add hScale1 (RatBound.le_refl _)))
+    hTree0
+
+/-- Convert a QROM `RatBound` (`h_pos`) to `Spec.RatBound` (`den_pos`) preserving `< 2^{-128}`. -/
+@[expose] def toSpecRatBound (b : RatBound) : Spec.RatBound :=
+  ⟨b.num, b.den, b.h_pos⟩
+
+/-- **Landmark `Spec.AggregateExtractorSound` Theorem (`succinctWhirAggregate_extractorSound`):**
+    Connects `verifySuccinctWhirAggregate` and `extractSuccinctWhirAggregate` (in the strict
+    `Spec.StraightLineExtractor (decodeSlotLeafSig slotC) (fun _ => [])` class with zero proof-carried
+    signatures!) for `.xmssPoseidon2` and `.corduroyPoseidon2`, establishing `< 2^{-128}`
+    (`⟨1, 2 ^ 128, by decide⟩`) QROM extraction soundness at `Q ≤ 2^{64}`. -/
+theorem succinctWhirAggregate_extractorSound {nVal nC : Nat}
+    (profile : AggSigProfile) (prof : WhirCommitmentProfile)
+    (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes) (Q : Nat) (hQ : Q ≤ 2 ^ 64)
+    (hQromBound : ∀ (n nA : Nat) (hPos : 0 < n) (π : Spec.CoinSplit n nC nA)
+      (prover : Fin nA → Spec.Code Spec.byteOracleIface
+        (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof)),
+      Spec.GameBound
+        (Spec.aggregateSoundnessGame hPos (verifyAggNativeSig (profileGeom profile))
+          (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+          (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) Q
+          (fun ω => oracle (π.chal ω)) (fun ω => prover (π.advc ω))).winProb
+        (toSpecRatBound
+          (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q)
+            (merkleProfileQromBound prof Q)))) :
+    let ε := toSpecRatBound
+      (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q) (merkleProfileQromBound prof Q))
+    Spec.AggregateExtractorSound
+      (Spec.StraightLineExtractor (decodeSlotLeafSig slotC) succinctWhirProofSigs)
+      (verifyAggNativeSig (profileGeom profile))
+      (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+      (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC)
+      oracle Q ε ∧
+    ε.num * 2 ^ 128 < 1 * ε.den := by
+  intro ε
+  refine ⟨⟨extractSuccinctWhirAggregate_straightLine profile fr nodeDecode slotC,
+    fun n nA hPos π prover => hQromBound n nA hPos π prover⟩, ?_⟩
+  have hTree0 := zkHemV2Uncond128_tree_qrom_lt_128_at_2pow64 prof (d := 0) (by decide) hQ
+  have hScale1 : RatBound.le (scheduleQromError zkHemV2Uncond128Sched Q)
+      (RatBound.scale (2 ^ (0 + 1) - 1) (scheduleQromError zkHemV2Uncond128Sched Q)) := by
+    let e := scheduleQromError zkHemV2Uncond128Sched Q
+    show e.num * e.den ≤ (2 ^ 1 - 1) * e.num * e.den
+    have hOne : 2 ^ 1 - 1 = 1 := rfl
+    rw [hOne, Nat.one_mul]
+    exact Nat.le_refl _
+  exact ratBound_lt_of_le_of_lt_packed
+    (RatBound.add_le_add hScale1 (RatBound.le_refl _)) hTree0
+
+/-- **`Spec.DataRefines` Forward Simulation (`succinctWhirAggregate_dataRefines_ideal`):**
+    `Spec.verifiedAggregateMachine` instantiated with `verifySuccinctWhirAggregate` and
+    `extractSuccinctWhirAggregate` refines `Spec.idealAggregateMachine` for both `.xmssPoseidon2`
+    and `.corduroyPoseidon2`. -/
+def succinctWhirAggregate_dataRefines_ideal {nVal : Nat}
+    (profile : AggSigProfile) (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec) (H : Spec.Bytes → Spec.Bytes) :
+    Spec.DataRefines
+      (Spec.verifiedAggregateMachine
+        (verifyAggNativeSig (profileGeom profile))
+        (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H)
+      (Spec.idealAggregateMachine (verifyAggNativeSig (profileGeom profile)))
+      (Spec.verifiedAggregateVisIn
+        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC))
+      id :=
+  Spec.verifiedAggregate_dataRefines_ideal
+    (verifyAggNativeSig (profileGeom profile))
+    (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+    (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H
+
+/-- **Landmark `< 2^{-128}` Refinement of `Spec.IdealAggregate` (`succinctWhirAggregate_refines_idealAggregate_128`):**
+    1. Multi-turn trace inclusion (`AdmitsTrace`) into `Spec.idealAggregateMachine` via `DataRefines`
+       (where every certified statement in `Spec.idealAggregateMachine` carries verified native
+       signatures by `Spec.idealAggregateMachine_all_certified_valid`), and
+    2. For every `Q`-query adversary (`Q ≤ 2^{64}`), any event where `verifySuccinctWhirAggregate`
+       accepts without `Spec.AggregateSoundnessOutcome` (`ValidAggregateWitness` or `TranscriptBreak`)
+       has probability bounded by `ε < 2^{-128}` (`⟨1, 2 ^ 128, by decide⟩`)! -/
+theorem succinctWhirAggregate_refines_idealAggregate_128 {nVal nC n nA : Nat}
+    (profile : AggSigProfile) (prof : WhirCommitmentProfile)
+    (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes) (Q : Nat) (hQ : Q ≤ 2 ^ 64)
+    (hPos : 0 < n) (π : Spec.CoinSplit n nC nA)
+    (prover : Fin nA → Spec.Code Spec.byteOracleIface
+      (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof))
+    (hQromBound : ∀ (n' nA' : Nat) (hPos' : 0 < n') (π' : Spec.CoinSplit n' nC nA')
+      (prover' : Fin nA' → Spec.Code Spec.byteOracleIface
+        (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof)),
+      Spec.GameBound
+        (Spec.aggregateSoundnessGame hPos' (verifyAggNativeSig (profileGeom profile))
+          (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+          (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) Q
+          (fun ω => oracle (π'.chal ω)) (fun ω => prover' (π'.advc ω))).winProb
+        (toSpecRatBound
+          (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q)
+            (merkleProfileQromBound prof Q))))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      let H := oracle (π.chal ω)
+      let r := Spec.aggregateRun H Q (prover (π.advc ω))
+      verifySuccinctWhirAggregate profile fr H r.1.1 r.1.2 = true ∧
+      ¬ Spec.AggregateSoundnessOutcome (verifyAggNativeSig (profileGeom profile)) H r.2 r.1.1
+          (extractSuccinctWhirAggregate profile fr nodeDecode slotC r.2 r.1.1 r.1.2)) :
+    let ε := toSpecRatBound
+      (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q) (merkleProfileQromBound prof Q))
+    (∀ (H : Spec.Bytes → Spec.Bytes)
+       (trace : List (Spec.AggregateSubmission AggValidatorPk SuccinctWhirAggregateProof nVal × Unit)),
+      (Spec.verifiedAggregateMachine
+        (verifyAggNativeSig (profileGeom profile))
+        (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+        (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) H).AdmitsTrace trace →
+      (Spec.idealAggregateMachine (verifyAggNativeSig (profileGeom profile))).AdmitsTrace
+        (Spec.projectTrace
+          (Spec.verifiedAggregateVisIn
+            (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC))
+          id trace)) ∧
+    Spec.GameBound (Spec.FinGame.mk hPos fail).winProb ε ∧
+    ε.num * 2 ^ 128 < 1 * ε.den := by
+  intro ε
+  obtain ⟨hSound, hLt128⟩ :=
+    succinctWhirAggregate_extractorSound profile prof fr nodeDecode slotC oracle Q hQ hQromBound
+  exact ⟨fun H _ hAdmits =>
+      (succinctWhirAggregate_dataRefines_ideal profile fr nodeDecode slotC H).preserve_admitsTrace hAdmits,
+    hSound.failure_bound hPos π prover fail hFail,
+    hLt128⟩
+
+/-- End-to-end `< 2^{-128}` quorum / `EUF-CMA` reduction (`succinctWhirAggregate_quorum_euf_cma_reduction`):
+    Any adversary producing an accepted `SuccinctWhirAggregateProof` with an active validator `v` whose
+    quorum did not participate either triggers a recorded `TranscriptBreak` or yields an extracted
+    `Composed.QuorumForgery`, except with probability `< 2^{-128}` at `Q ≤ 2^{64}`. -/
+theorem succinctWhirAggregate_quorum_euf_cma_reduction {nVal nC n nA : Nat}
+    (profile : AggSigProfile) (prof : WhirCommitmentProfile)
+    (custody : Fin nVal → Composed.Custody)
+    (fr : SuccinctWhirByteFraming)
+    (nodeDecode : Spec.Bytes → Option (Nat × Nat × Spec.Bytes × Spec.Bytes))
+    (slotC : SlotLeafTableCodec)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes) (Q : Nat) (hQ : Q ≤ 2 ^ 64)
+    (hPos : 0 < n) (π : Spec.CoinSplit n nC nA)
+    (prover : Fin nA → Spec.Code Spec.byteOracleIface
+      (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof))
+    (hQromBound : ∀ (n' nA' : Nat) (hPos' : 0 < n') (π' : Spec.CoinSplit n' nC nA')
+      (prover' : Fin nA' → Spec.Code Spec.byteOracleIface
+        (Spec.AggregateStatement AggValidatorPk nVal × SuccinctWhirAggregateProof)),
+      Spec.GameBound
+        (Spec.aggregateSoundnessGame hPos' (verifyAggNativeSig (profileGeom profile))
+          (verifySuccinctWhirAggregate (nVal := nVal) profile fr)
+          (extractSuccinctWhirAggregate (nVal := nVal) profile fr nodeDecode slotC) Q
+          (fun ω => oracle (π'.chal ω)) (fun ω => prover' (π'.advc ω))).winProb
+        (toSpecRatBound
+          (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q)
+            (merkleProfileQromBound prof Q))))
+    (fail : Fin n → Bool)
+    (hFail : ∀ ω : Fin n, fail ω = true →
+      let H := oracle (π.chal ω)
+      let r := Spec.aggregateRun H Q (prover (π.advc ω))
+      (∀ u : Fin nVal, r.1.1.roster u = (custody u).state.pk) ∧
+      verifySuccinctWhirAggregate profile fr H r.1.1 r.1.2 = true ∧
+      ∃ v : Fin nVal, r.1.1.bitmap.getLsbD v.val = true ∧
+        ¬ ((∃ b : Spec.AggregateBreak, Spec.TranscriptBreak H r.2 b) ∨
+           Composed.QuorumForgery (profileGeom profile) (custody v) r.1.1.message ∨
+           Composed.quorumParticipated (custody v) r.1.1.message = true)) :
+    let ε := toSpecRatBound
+      (RatBound.add (scheduleQromError zkHemV2Uncond128Sched Q) (merkleProfileQromBound prof Q))
+    Spec.GameBound (Spec.FinGame.mk hPos fail).winProb ε ∧
+    ε.num * 2 ^ 128 < 1 * ε.den := by
+  intro ε
+  obtain ⟨hSound, hLt128⟩ :=
+    succinctWhirAggregate_extractorSound profile prof fr nodeDecode slotC oracle Q hQ hQromBound
+  refine ⟨hSound.failure_bound hPos π prover fail (fun ω hF => ?_), hLt128⟩
+  obtain ⟨hRoster, hAcc, v, hAct, hNoOut⟩ := hFail ω hF
+  refine ⟨hAcc, fun hOut => hNoOut ?_⟩
+  rcases hOut.signer_trichotomy
+      (fun u => Composed.quorumParticipated (custody u)
+        (Spec.aggregateRun (oracle (π.chal ω)) Q (prover (π.advc ω))).1.1.message)
+      v hAct with hBrk | ⟨sig, _, hSigVer, hq⟩ | hPart
+  · exact .inl hBrk
+  · rw [hRoster v] at hSigVer
+    exact .inr (.inl ⟨sig, hSigVer, hq⟩)
+  · exact .inr (.inr hPart)
+
+/-! ## §5. Concrete Non-Vacuous Inhabitedness & `#tooth_pair` Controls -/
+
+/-- Mutated verifier omitting WHIR query openings, OOD pins, and sumcheck rounds (`#tooth` target). -/
+@[expose] def verifySuccinctWhirOmitQueriesAndOod {nVal : Nat}
+    (_H : Spec.Bytes → Spec.Bytes)
+    (_stmt : Spec.AggregateStatement AggValidatorPk nVal)
+    (_proof : SuccinctWhirAggregateProof) : Bool :=
+  true
+
+/-- **`#tooth` Omitting Stage-0 Canopy Queries & OOD Pins Refutes Straight-Line Extraction Soundness
+    (`tooth_omitted_stage0_queries_or_ood_accepts_bogus_table`):**
+    If WHIR query verification and OOD pinning are omitted (`verifySuccinctWhirOmitQueriesAndOod`),
+    a prover outputs an active-signer statement `(stmt1, bogusProof)` with `succinctWhirProofSigs = []`
+    making `0` oracle queries, refuting `Spec.AggregateExtractorSound` at EVERY query budget `Q` and
+    EVERY `ε < 1` (including `< 2^{-128}`)! -/
+theorem tooth_omitted_stage0_queries_or_ood_accepts_bogus_table {nC : Nat}
+    (hPos : 0 < nC) (profile : AggSigProfile) (slotC : SlotLeafTableCodec)
+    (extract : List (Spec.Bytes × Spec.Bytes) →
+      Spec.AggregateStatement AggValidatorPk 1 → SuccinctWhirAggregateProof →
+      Fin 1 → Option AggNativeSignature)
+    (oracle : Fin nC → Spec.Bytes → Spec.Bytes) (Q : Nat)
+    {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ Spec.AggregateExtractorSound
+        (Spec.StraightLineExtractor (decodeSlotLeafSig slotC) succinctWhirProofSigs)
+        (verifyAggNativeSig (profileGeom profile))
+        (verifySuccinctWhirOmitQueriesAndOod (nVal := 1))
+        extract oracle Q ε :=
+  Spec.acceptAll_not_straightLine_extractorSound hPos
+    (verifyAggNativeSig (profileGeom profile))
+    (decodeSlotLeafSig slotC) succinctWhirProofSigs extract oracle Q
+    ⟨fun _ => ⟨profile, auditPkSeed, auditPkSeed⟩, 1#1, auditMsg⟩
+    ⟨0#256, [], [], QuinticGoldilocks.zero, [], []⟩
+    ⟨0, Nat.one_pos⟩ (show (1#1 : BitVec 1).getLsbD 0 = true by decide) rfl hε
+
+/-- Non-vacuous inhabitedness witness: honest succinct quintic WHIR proof (`succinctWhirProofSigs = []`)
+    with 102 depth-6 Canopy openings and 5 OOD pins accepted by `whirOracleIop.verify` and
+    paired with `stepOp256TableOk_bothProfiles_extract`. -/
+theorem inhabited_succinctWhirAggregate_honest_accepts :
+    ∃ (profile : AggSigProfile)
+      (stmt : Spec.AggregateStatement AggValidatorPk 1)
+      (rows : List StepOpRow)
+      (proof : SuccinctWhirAggregateProof),
+      IsDeployedAggProfile profile ∧
+      (List.finRange 1).all (fun i =>
+        !stmt.bitmap.getLsbD i.val || ((stmt.roster i).profile == profile)) = true ∧
+      stepOp256TableOk profile (succinctCommitteeSlots stmt) rows = true ∧
+      succinctWhirProofSigs proof = [] ∧
+      proof.canopyOpenings.length = 102 ∧
+      Spec.ValidAggregateWitness (verifyAggNativeSig (profileGeom profile)) stmt
+        (fun i => some (extractSlotNativeSig profile rows i.val)) ∧
+      (whirOracleIop zkHemV2Uncond128Env zkHemV2Uncond128Sched 616).verify
+        ⟨List.replicate 64 QuinticGoldilocks.one, proof.claim⟩
+        [(⟨[], [QuinticGoldilocks.one], []⟩, 0),
+         (⟨[], [], List.replicate 5 QuinticGoldilocks.one⟩, 0)] = true := by
+  let pk0 : AggValidatorPk := ⟨.xmssPoseidon2, auditPkSeed, auditPkSeed⟩
+  let stmt : Spec.AggregateStatement AggValidatorPk 1 := ⟨fun _ => pk0, 0#1, auditMsg⟩
+  let rows : List StepOpRow := List.replicate (1 * stepOpRowsPerSigner .xmssPoseidon2) stepInactiveRow
+  let ops : List (QuinticGoldilocks × List Spec.Bytes) :=
+    List.replicate 102 (QuinticGoldilocks.one, List.replicate 6 [])
+  let proof : SuccinctWhirAggregateProof :=
+    { salt := 0#256
+      slotCommitRoot := []
+      whirRoot0 := []
+      claim := QuinticGoldilocks.one
+      rounds := [⟨none, ⟨[QuinticGoldilocks.one], []⟩⟩,
+                 ⟨none, ⟨[], List.replicate 5 QuinticGoldilocks.one⟩⟩]
+      canopyOpenings := ops }
+  have hSlots : succinctCommitteeSlots stmt = List.replicate 1 none := by
+    have hFin1 : List.finRange 1 = [⟨0, by decide⟩] := by decide
+    have hBit0 : (0#1 : BitVec 1).getLsbD 0 = false := by decide
+    unfold succinctCommitteeSlots; rw [hFin1]; dsimp only [List.map, stmt]; rw [hBit0]; rfl
+  have hTable : stepOp256TableOk .xmssPoseidon2 (succinctCommitteeSlots stmt) rows = true := by
+    rw [hSlots]; exact stepInactiveCommittee_table .xmssPoseidon2 1 (by decide)
+  have hProf : (List.finRange 1).all (fun i =>
+      !stmt.bitmap.getLsbD i.val || ((stmt.roster i).profile == .xmssPoseidon2)) = true := by decide
+  have hWit := stepOp256TableOk_bothProfiles_extract .xmssPoseidon2 (.inl rfl) stmt rows hProf hTable
+  exact ⟨.xmssPoseidon2, stmt, rows, proof, .inl rfl, hProf, hTable, rfl, by decide,
+    hWit, zkHemV2Uncond128_honest_accepts⟩
+
+#verify_kernel
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128Cert
+
+#verify_constructive
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128Sched_johnsonOk
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128_honest_accepts
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128_false_not_inLang
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128_tree_qrom_lt_128_at_2pow64
+  Qsag.SuccinctWhirAgg.stepOp256TableOk_bothProfiles_extract
+  Qsag.SuccinctWhirAgg.singleSlot_stepOp256_extract
+  Qsag.SuccinctWhirAgg.SlotLeafTableCodec.encode_inj
+  Qsag.SuccinctWhirAgg.decodeSlotLeafSig_encode
+  Qsag.SuccinctWhirAgg.deriveSuccinctFsTranscript_map_fst
+  Qsag.SuccinctWhirAgg.extractSuccinctWhirAggregate_straightLine
+  Qsag.SuccinctWhirAgg.succinctWhirAggregate_qrom_soundness_128
+  Qsag.SuccinctWhirAgg.succinctWhirAggregate_extractorSound
+  Qsag.SuccinctWhirAgg.succinctWhirAggregate_refines_idealAggregate_128
+  Qsag.SuccinctWhirAgg.succinctWhirAggregate_quorum_euf_cma_reduction
+  Qsag.SuccinctWhirAgg.tooth_omitted_stage0_queries_or_ood_accepts_bogus_table
+  Qsag.SuccinctWhirAgg.inhabited_succinctWhirAggregate_honest_accepts
+
+#verify_inhabited
+  Qsag.SuccinctWhirAgg.stepOp256TableOk_bothProfiles_extract
+  Qsag.SuccinctWhirAgg.inhabited_succinctWhirAggregate_honest_accepts
+
+#tooth_pair Qsag.SuccinctWhirAgg.zkHemV2Uncond128_honest_accepts vs
+  Qsag.SuccinctWhirAgg.zkHemV2Uncond128_false_not_inLang
+#tooth_pair Qsag.SuccinctWhirAgg.succinctWhirAggregate_extractorSound vs
+  Qsag.SuccinctWhirAgg.tooth_omitted_stage0_queries_or_ood_accepts_bogus_table
+
+end Qsag.SuccinctWhirAgg
+end
