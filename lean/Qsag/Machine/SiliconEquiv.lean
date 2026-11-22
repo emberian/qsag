@@ -1173,3 +1173,1111 @@ theorem rtlFpgaGl64Reduce_sound (x : BitVec 136) :
 /-- **2-Stage Pipelined FPGA `REG_OUT = 1` Latency-2 Equivalence (`rtlFpgaGl64Step_two_clocks`)**:
     Feeding `x` at clock `t` and any next input `x_next` at clock `t + 1` registers the exact
     canonical Goldilocks residue `(Goldilocks.ofNat x.toNat).val` in `r_q`! -/
+theorem rtlFpgaGl64Step_two_clocks (st₀ : FpgaGl64PipeState) (x x_next : BitVec 136) :
+    (rtlFpgaGl64Step (rtlFpgaGl64Step st₀ x) x_next).r_q.toNat =
+      (Goldilocks.ofNat x.toNat).val :=
+  rtlFpgaGl64Reduce_sound x
+
+/-! ## 5. ASIC `Dregg-180` Canonicalizer, Radix-4 Booth Multiplier, Squarer & Karatsuba FSM -/
+
+private def rtlGl64CanonMux (u : BitVec 66) (v : BitVec 65) : BitVec 64 :=
+  if u.getLsbD 64 || v.getLsbD 64 then v.extractLsb' 0 64 else u.extractLsb' 0 64
+
+private def rtlGl64CanonStage2 (u : BitVec 66) : BitVec 64 :=
+  let eps : BitVec 65 := BitVec.ofNat 65 (2 ^ 32 - 1)
+  let uLo65 : BitVec 65 := BitVec.ofNat 65 (u.extractLsb' 0 64).toNat
+  let v := rtlPrefixAdd 65 uLo65 eps false
+  rtlGl64CanonMux u v
+
+private def rtlGl64CanonStage1 (t : BitVec 76) : BitVec 66 :=
+  let q := t.extractLsb' 64 12
+  let tLo := t.extractLsb' 0 64
+  let qs : BitVec 66 := BitVec.ofNat 66 (q.toNat * 2 ^ 32)
+  let qInv : BitVec 66 := ~~~(BitVec.ofNat 66 q.toNat)
+  let u_sc := rtlCsa32 66 (BitVec.ofNat 66 tLo.toNat) qs qInv
+  rtlPrefixAdd 66 u_sc.1 u_sc.2 true
+
+/-- Exact RTL model of `qsag_gl64_canon` (`W = 32, GB = 12`, `qsag_gl64_karatsuba_csa.sv:261-283`). -/
+def rtlGl64Canon (x y : BitVec 76) : BitVec 64 :=
+  rtlGl64CanonStage2 (rtlGl64CanonStage1 (rtlPrefixAdd 76 x y false))
+
+private theorem rtlGl64CanonMux_sound (u : BitVec 66) (v : BitVec 65)
+    (huLt2P : u.toNat < 2 * goldilocksPrime)
+    (hvToNat : v.toNat = (u.extractLsb' 0 64).toNat + (2 ^ 32 - 1)) :
+    (rtlGl64CanonMux u v).toNat = u.toNat % goldilocksPrime := by
+  let uVal := u.toNat
+  let uLo := (u.extractLsb' 0 64).toNat
+  have huLoEq : uLo = uVal % 2 ^ 64 := by
+    dsimp only [uLo, uVal]; simp [BitVec.extractLsb'_toNat]
+  have huBit64 : u.getLsbD 64 = decide (2 ^ 64 ≤ uVal) := by
+    rw [BitVec.getLsbD, Nat.testBit_eq_decide_div_mod_eq]
+    change decide (uVal / 18446744073709551616 % 2 = 1) = decide (18446744073709551616 ≤ uVal)
+    by_cases hGe : 18446744073709551616 ≤ uVal
+    · have hDiv1 : uVal / 18446744073709551616 = 1 := by
+        dsimp only [uVal] at *; unfold goldilocksPrime at huLt2P; omega
+      rw [decide_eq_true hGe, hDiv1]; rfl
+    · have hDiv0 : uVal / 18446744073709551616 = 0 := by omega
+      rw [decide_eq_false hGe, hDiv0]; rfl
+  have hvBit64 : v.getLsbD 64 = decide (2 ^ 64 ≤ v.toNat) := by
+    have hvLt65 : v.toNat < 36893488147419103232 := v.isLt
+    rw [BitVec.getLsbD, Nat.testBit_eq_decide_div_mod_eq]
+    change decide (v.toNat / 18446744073709551616 % 2 = 1) = decide (18446744073709551616 ≤ v.toNat)
+    by_cases hGe : 18446744073709551616 ≤ v.toNat
+    · have hDiv1 : v.toNat / 18446744073709551616 = 1 := by omega
+      rw [decide_eq_true hGe, hDiv1]; rfl
+    · have hDiv0 : v.toNat / 18446744073709551616 = 0 := by omega
+      rw [decide_eq_false hGe, hDiv0]; rfl
+  unfold rtlGl64CanonMux
+  rw [huBit64, hvBit64]
+  have hPLt64 : goldilocksPrime < 2 ^ 64 := by decide
+  by_cases hLtP : uVal < goldilocksPrime
+  · have hNotU64 : ¬ (2 ^ 64 ≤ uVal) := by
+      change ¬ (18446744073709551616 ≤ uVal); unfold goldilocksPrime at hLtP; omega
+    have huLt64 : uVal < 2 ^ 64 := Nat.lt_trans hLtP hPLt64
+    have huLoId : uLo = uVal := by rw [huLoEq, Nat.mod_eq_of_lt huLt64]
+    have hNotV64 : ¬ (2 ^ 64 ≤ v.toNat) := by
+      rw [hvToNat]; change ¬ (18446744073709551616 ≤ uLo + 4294967295)
+      rw [huLoId]; unfold goldilocksPrime at hLtP; omega
+    have hCondF : (decide (2 ^ 64 ≤ uVal) || decide (2 ^ 64 ≤ v.toNat)) = false := by
+      rw [decide_eq_false hNotU64, decide_eq_false hNotV64]; rfl
+    rw [hCondF, ite_neg Bool.false_ne_true]
+    change uLo = uVal % goldilocksPrime
+    rw [huLoId, Nat.mod_eq_of_lt hLtP]
+  · have hSubLtP : uVal - goldilocksPrime < goldilocksPrime := by
+      dsimp only [uVal] at *; omega
+    have hSubLt64 : uVal - goldilocksPrime < 2 ^ 64 := Nat.lt_trans hSubLtP hPLt64
+    change _ = uVal % goldilocksPrime
+    rw [Nat.mod_eq_sub_mod (by omega), Nat.mod_eq_of_lt hSubLtP]
+    by_cases hGe64 : 2 ^ 64 ≤ uVal
+    · have hCondT : (decide (2 ^ 64 ≤ uVal) || decide (2 ^ 64 ≤ v.toNat)) = true := by
+        rw [decide_eq_true hGe64, Bool.true_or]
+      rw [hCondT, ite_pos rfl, BitVec.extractLsb'_toNat, Nat.shiftRight_zero, hvToNat]
+      change (uLo + (2 ^ 32 - 1)) % 2 ^ 64 = uVal - goldilocksPrime
+      rw [huLoEq]
+      have huDiffLt64 : uVal - 2 ^ 64 < 2 ^ 64 := by
+        change uVal - 18446744073709551616 < 18446744073709551616
+        dsimp only [uVal] at *; unfold goldilocksPrime at huLt2P; omega
+      have huMod64 : uVal % 2 ^ 64 = uVal - 2 ^ 64 := by
+        rw [Nat.mod_eq_sub_mod hGe64, Nat.mod_eq_of_lt huDiffLt64]
+      rw [huMod64]
+      have hEqSub : uVal - 2 ^ 64 + (2 ^ 32 - 1) = uVal - goldilocksPrime := by
+        change uVal - 18446744073709551616 + 4294967295 = uVal - goldilocksPrime
+        unfold goldilocksPrime at *; omega
+      rw [hEqSub, Nat.mod_eq_of_lt hSubLt64]
+    · have huLt64 : uVal < 2 ^ 64 := by omega
+      have huLoId : uLo = uVal := by rw [huLoEq, Nat.mod_eq_of_lt huLt64]
+      have hvGe64 : 2 ^ 64 ≤ v.toNat := by
+        rw [hvToNat]; change 18446744073709551616 ≤ uLo + 4294967295
+        rw [huLoId]; unfold goldilocksPrime at *; omega
+      have hCondT : (decide (2 ^ 64 ≤ uVal) || decide (2 ^ 64 ≤ v.toNat)) = true := by
+        rw [decide_eq_true hvGe64, Bool.or_true]
+      rw [hCondT, ite_pos rfl, BitVec.extractLsb'_toNat, Nat.shiftRight_zero, hvToNat]
+      change (uLo + (2 ^ 32 - 1)) % 2 ^ 64 = uVal - goldilocksPrime
+      rw [huLoId]
+      have hEq : uVal + (2 ^ 32 - 1) = (uVal - goldilocksPrime) + 2 ^ 64 * 1 := by
+        change uVal + 4294967295 = (uVal - goldilocksPrime) + 18446744073709551616 * 1
+        unfold goldilocksPrime at *; omega
+      rw [hEq, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hSubLt64]
+
+private theorem rtlGl64CanonStage1_sound (t : BitVec 76) :
+    (rtlGl64CanonStage1 t).toNat < 2 * goldilocksPrime ∧
+    (rtlGl64CanonStage1 t).toNat % goldilocksPrime = t.toNat % goldilocksPrime := by
+  let q := (t.extractLsb' 64 12).toNat
+  let tLo := (t.extractLsb' 0 64).toNat
+  have hqLt : q < 4096 := (t.extractLsb' 64 12).isLt
+  have htLoLt : tLo < 18446744073709551616 := (t.extractLsb' 0 64).isLt
+  have htSplit : t.toNat = tLo + 2 ^ 64 * q := by
+    dsimp only [q, tLo]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one]
+    have hDivLt : t.toNat / 2 ^ 64 < 2 ^ 12 := by
+      rw [Nat.div_lt_iff_lt_mul (by decide)]
+      exact Nat.lt_of_lt_of_eq t.isLt (by decide)
+    rw [Nat.mod_eq_of_lt hDivLt]
+    exact (Nat.mod_add_div t.toNat (2 ^ 64)).symm
+  let uVal := tLo + 4294967296 * q - q
+  have huLt2P : uVal < 2 * goldilocksPrime ∧ 2 * goldilocksPrime < 73786976294838206464 := by
+    refine ⟨?_, by decide⟩
+    dsimp only [uVal]; unfold goldilocksPrime; omega
+  have huToNat : (rtlGl64CanonStage1 t).toNat = uVal := by
+    unfold rtlGl64CanonStage1
+    dsimp only
+    rw [rtlPrefixAdd_toNat, show true.toNat = 1 from rfl]
+    have hCsa := rtlCsa32_mod 66 (BitVec.ofNat 66 tLo) (BitVec.ofNat 66 (q * 2 ^ 32))
+      (~~~(BitVec.ofNat 66 q))
+    rw [Nat.add_mod _ 1, hCsa, ← Nat.add_mod]
+    simp only [bitVec_not_toNat, BitVec.toNat_ofNat]
+    have htLo66 : tLo < 2 ^ 66 := by change tLo < 73786976294838206464; omega
+    have hqSh66 : q * 2 ^ 32 < 2 ^ 66 := by change q * 4294967296 < 73786976294838206464; omega
+    have hq66 : q < 2 ^ 66 := by change q < 73786976294838206464; omega
+    have hu66 : uVal < 2 ^ 66 := by change uVal < 73786976294838206464; omega
+    change ((tLo % 2 ^ 66) + ((q * 2 ^ 32) % 2 ^ 66) + (2 ^ 66 - 1 - (q % 2 ^ 66)) + 1) % 2 ^ 66 = uVal
+    rw [Nat.mod_eq_of_lt htLo66, Nat.mod_eq_of_lt hqSh66, Nat.mod_eq_of_lt hq66]
+    have hWrap : tLo + q * 2 ^ 32 + (2 ^ 66 - 1 - q) + 1 = uVal + 2 ^ 66 * 1 := by
+      change tLo + q * 4294967296 + (73786976294838206464 - 1 - q) + 1 =
+        uVal + 73786976294838206464 * 1
+      dsimp only [uVal]; omega
+    rw [hWrap, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hu66]
+  refine ⟨by rw [huToNat]; exact huLt2P.1, ?_⟩
+  rw [huToNat, htSplit]
+  have hLin : tLo + 2 ^ 64 * q = uVal + goldilocksPrime * q := by
+    change tLo + 18446744073709551616 * q = uVal + goldilocksPrime * q
+    dsimp only [uVal]; unfold goldilocksPrime; omega
+  rw [hLin, Nat.add_mul_mod_self_left]
+
+/-- **ASIC 76-Bit Guard-Bit Canonicalizer Soundness (`rtlGl64Canon_sound`)**:
+    For all `x, y : BitVec 76` with `x.toNat + y.toNat < 2 ^ 76`, `rtlGl64Canon x y` equals
+    `(x.toNat + y.toNat) % goldilocksPrime`! -/
+theorem rtlGl64Canon_sound (x y : BitVec 76) (hSum : x.toNat + y.toNat < 2 ^ 76) :
+    (rtlGl64Canon x y).toNat = (x.toNat + y.toNat) % goldilocksPrime := by
+  have hStage2 : ∀ u : BitVec 66, u.toNat < 2 * goldilocksPrime →
+      (rtlGl64CanonStage2 u).toNat = u.toNat % goldilocksPrime := by
+    intro u huLt2P
+    unfold rtlGl64CanonStage2
+    dsimp only
+    apply rtlGl64CanonMux_sound u _ huLt2P
+    rw [rtlPrefixAdd_toNat, show false.toNat = 0 from rfl, Nat.add_zero,
+        BitVec.toNat_ofNat, BitVec.toNat_ofNat]
+    have huLoLt64 : (u.extractLsb' 0 64).toNat < 18446744073709551616 := (u.extractLsb' 0 64).isLt
+    have huLoLt65 : (u.extractLsb' 0 64).toNat < 2 ^ 65 := by
+      change (u.extractLsb' 0 64).toNat < 36893488147419103232; omega
+    have hEpsLt65 : 2 ^ 32 - 1 < 2 ^ 65 := by decide
+    have hSumLt65 : (u.extractLsb' 0 64).toNat + (2 ^ 32 - 1) < 2 ^ 65 := by
+      change (u.extractLsb' 0 64).toNat + 4294967295 < 36893488147419103232; omega
+    rw [Nat.mod_eq_of_lt huLoLt65, Nat.mod_eq_of_lt hEpsLt65, Nat.mod_eq_of_lt hSumLt65]
+  unfold rtlGl64Canon
+  obtain ⟨huLt2P, huMod⟩ := rtlGl64CanonStage1_sound (rtlPrefixAdd 76 x y false)
+  rw [hStage2 _ huLt2P, huMod, rtlPrefixAdd_toNat, show false.toNat = 0 from rfl,
+      Nat.add_zero, Nat.mod_eq_of_lt hSum]
+
+/-- Signed radix-4 Booth digit `b_{2j-1} + b_{2j} - 2 * b_{2j+1} ∈ {-2, -1, 0, +1, +2}`. -/
+def boothDigitInt (b0 b1 b2 : Bool) : Int :=
+  (b0.toNat : Int) + (b1.toNat : Int) - 2 * (b2.toNat : Int)
+
+/-- Parameterized Booth row generator on explicit window bits `(b0, b1, b2)`. -/
+def rtlBoothRow66Core (a : BitVec 33) (b0 b1 b2 : Bool) (j : Nat) : BitVec 66 × Bool :=
+  let ap : BitVec 66 := BitVec.ofNat 66 a.toNat
+  let ap2 : BitVec 66 := ap <<< 1
+  let code := b0.toNat + 2 * b1.toNat + 4 * b2.toNat
+  let (extDigit, negJ) : BitVec 66 × Bool :=
+    if code == 1 || code == 2 then (ap, false)
+    else if code == 3 then (ap2, false)
+    else if code == 4 then (~~~ap2, true)
+    else if code == 5 || code == 6 then (~~~ap, true)
+    else (0, false)
+  (extDigit <<< (2 * j), negJ)
+
+/-- One 66-bit radix-4 Booth row + `neg_j` bit matching `qsag_mul33` (`qsag_gl64_karatsuba_csa.sv:94-109`). -/
+def rtlBoothRow66 (a : BitVec 33) (bx : BitVec 35) (j : Nat) : BitVec 66 × Bool :=
+  rtlBoothRow66Core a (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) j
+
+/-- Exact RTL model of `qsag_mul33` (`W = 32`, `qsag_gl64_karatsuba_csa.sv:79-121`) compressing 17
+    radix-4 Booth rows + `neg_row` via `rtlCsaReduce2` and `rtlPrefixAdd` (RTL `qsag_mul_csa_tree`). -/
+def rtlMul33 (a : BitVec 33) (b : BitVec 33) : BitVec 66 :=
+  let bx : BitVec 35 := BitVec.ofNat 35 (2 * b.toNat)
+  let pairs := (List.range 17).map (rtlBoothRow66 a bx)
+  let negRowVal := ((List.range 17).map fun j =>
+    if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum
+  let rows : List (BitVec 66) := pairs.map Prod.fst ++ [BitVec.ofNat 66 negRowVal]
+  let sc := rtlCsaReduce2 66 rows
+  rtlPrefixAdd 66 sc.1 sc.2 false
+
+private theorem boothRow66Core_int_congr (a : BitVec 33) (b0 b1 b2 : Bool) (j : Nat) :
+    (((rtlBoothRow66Core a b0 b1 b2 j).1.toNat : Int) +
+        (if (rtlBoothRow66Core a b0 b1 b2 j).2 then (4 ^ j : Int) else 0)) % (2 ^ 66 : Int) =
+      (boothDigitInt b0 b1 b2 * (a.toNat : Int) * (4 ^ j : Int)) % (2 ^ 66 : Int) := by
+  have haLt : a.toNat < 8589934592 := a.isLt
+  have ha66 : a.toNat < 2 ^ 66 := by change a.toNat < 73786976294838206464; omega
+  have h2a66 : 2 * a.toNat < 2 ^ 66 := by change 2 * a.toNat < 73786976294838206464; omega
+  have hSh1 : ((BitVec.ofNat 66 a.toNat) <<< 1).toNat = 2 * a.toNat := by
+    rw [BitVec.toNat_shiftLeft, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha66,
+        Nat.shiftLeft_eq, Nat.pow_one, Nat.mul_comm, Nat.mod_eq_of_lt h2a66]
+  have h4j : (2 : Nat) ^ (2 * j) = 4 ^ j := Nat.pow_mul 2 2 j
+  generalize hPj : (4 : Int) ^ j = P
+  have h4jInt : ((4 ^ j : Nat) : Int) = P := by rw [← hPj]; exact Int.natCast_pow 4 j
+  have h2Pow66Cast : ((2 ^ 66 : Nat) : Int) = (2 ^ 66 : Int) := Int.natCast_pow 2 66
+  cases b0 <;> cases b1 <;> cases b2
+  -- 000 (`code = 0`, digit = 0)
+  · change (((0#66 <<< (2 * j)).toNat : Int) + 0) % (2 ^ 66 : Int) =
+      ((0 + 0 - 2 * 0) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    simp
+  -- 001 (`code = 4`, digit = -2, `~~~ap2`)
+  · change (((((~~~(BitVec.ofNat 66 a.toNat <<< 1)) <<< (2 * j)).toNat : Int) + P) % (2 ^ 66 : Int)) =
+      ((0 + 0 - 2 * 1) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [BitVec.toNat_shiftLeft, bitVec_not_toNat, hSh1, Nat.shiftLeft_eq, h4j,
+        Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, h4jInt, Int.emod_add_emod]
+    have hSub : ((2 ^ 66 - 1 - 2 * a.toNat : Nat) : Int) = (2 ^ 66 : Int) - 1 - 2 * (a.toNat : Int) := by
+      change ((73786976294838206464 - 1 - 2 * a.toNat : Nat) : Int) =
+        73786976294838206464 - 1 - 2 * (a.toNat : Int)
+      omega
+    have hEq : (((2 ^ 66 - 1 - 2 * a.toNat : Nat) : Int) * P + P) =
+        ((0 + 0 - 2 * 1) * (a.toNat : Int) * P) + (2 ^ 66 : Int) * P := by
+      rw [hSub, Int.sub_mul, Int.sub_mul]
+      change (2 ^ 66 : Int) * P - 1 * P - 2 * (a.toNat : Int) * P + P =
+        (-(2 : Int)) * (a.toNat : Int) * P + (2 ^ 66 : Int) * P
+      rw [Int.one_mul, Int.neg_mul, Int.neg_mul]
+      omega
+    rw [hEq, Int.add_mul_emod_self_left]
+  -- 010 (`code = 2`, digit = +1, `ap`)
+  · change ((((BitVec.ofNat 66 a.toNat <<< (2 * j)).toNat : Int) + 0) % (2 ^ 66 : Int)) =
+      ((0 + 1 - 2 * 0) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [Int.add_zero, BitVec.toNat_shiftLeft, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha66,
+        Nat.shiftLeft_eq, h4j, Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, h4jInt]
+    simp
+  -- 011 (`code = 6`, digit = -1, `~~~ap`)
+  · change (((((~~~(BitVec.ofNat 66 a.toNat)) <<< (2 * j)).toNat : Int) + P) % (2 ^ 66 : Int)) =
+      ((0 + 1 - 2 * 1) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [BitVec.toNat_shiftLeft, bitVec_not_toNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha66,
+        Nat.shiftLeft_eq, h4j, Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, h4jInt, Int.emod_add_emod]
+    have hSub : ((2 ^ 66 - 1 - a.toNat : Nat) : Int) = (2 ^ 66 : Int) - 1 - (a.toNat : Int) := by
+      change ((73786976294838206464 - 1 - a.toNat : Nat) : Int) =
+        73786976294838206464 - 1 - (a.toNat : Int)
+      omega
+    have hEq : (((2 ^ 66 - 1 - a.toNat : Nat) : Int) * P + P) =
+        ((0 + 1 - 2 * 1) * (a.toNat : Int) * P) + (2 ^ 66 : Int) * P := by
+      rw [hSub, Int.sub_mul, Int.sub_mul]
+      change (2 ^ 66 : Int) * P - 1 * P - (a.toNat : Int) * P + P =
+        (-(1 : Int)) * (a.toNat : Int) * P + (2 ^ 66 : Int) * P
+      rw [Int.one_mul, Int.neg_mul, Int.one_mul, Int.neg_mul]
+      omega
+    rw [hEq, Int.add_mul_emod_self_left]
+  -- 100 (`code = 1`, digit = +1, `ap`)
+  · change ((((BitVec.ofNat 66 a.toNat <<< (2 * j)).toNat : Int) + 0) % (2 ^ 66 : Int)) =
+      ((1 + 0 - 2 * 0) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [Int.add_zero, BitVec.toNat_shiftLeft, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha66,
+        Nat.shiftLeft_eq, h4j, Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, h4jInt]
+    simp
+  -- 101 (`code = 5`, digit = -1, `~~~ap`)
+  · change (((((~~~(BitVec.ofNat 66 a.toNat)) <<< (2 * j)).toNat : Int) + P) % (2 ^ 66 : Int)) =
+      ((1 + 0 - 2 * 1) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [BitVec.toNat_shiftLeft, bitVec_not_toNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha66,
+        Nat.shiftLeft_eq, h4j, Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, h4jInt, Int.emod_add_emod]
+    have hSub : ((2 ^ 66 - 1 - a.toNat : Nat) : Int) = (2 ^ 66 : Int) - 1 - (a.toNat : Int) := by
+      change ((73786976294838206464 - 1 - a.toNat : Nat) : Int) =
+        73786976294838206464 - 1 - (a.toNat : Int)
+      omega
+    have hEq : (((2 ^ 66 - 1 - a.toNat : Nat) : Int) * P + P) =
+        ((1 + 0 - 2 * 1) * (a.toNat : Int) * P) + (2 ^ 66 : Int) * P := by
+      rw [hSub, Int.sub_mul, Int.sub_mul]
+      change (2 ^ 66 : Int) * P - 1 * P - (a.toNat : Int) * P + P =
+        (-(1 : Int)) * (a.toNat : Int) * P + (2 ^ 66 : Int) * P
+      rw [Int.one_mul, Int.neg_mul, Int.one_mul, Int.neg_mul]
+      omega
+    rw [hEq, Int.add_mul_emod_self_left]
+  -- 110 (`code = 3`, digit = +2, `ap2`)
+  · change (((((BitVec.ofNat 66 a.toNat <<< 1) <<< (2 * j)).toNat : Int) + 0) % (2 ^ 66 : Int)) =
+      ((1 + 1 - 2 * 0) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    rw [Int.add_zero, BitVec.toNat_shiftLeft, hSh1, Nat.shiftLeft_eq, h4j,
+        Int.natCast_emod, h2Pow66Cast, Int.natCast_mul, Int.natCast_mul, h4jInt]
+    simp
+  -- 111 (`code = 7`, digit = 0)
+  · change (((0#66 <<< (2 * j)).toNat : Int) + 0) % (2 ^ 66 : Int) =
+      ((1 + 1 - 2 * 1) * (a.toNat : Int) * P) % (2 ^ 66 : Int)
+    simp
+
+private theorem booth_telescope (fb : Nat → Bool) :
+    ∀ R : Nat,
+      ((List.range R).map fun j =>
+        boothDigitInt (fb (2 * j)) (fb (2 * j + 1)) (fb (2 * j + 2)) * (4 ^ j : Int)).sum =
+      (natOfBits (2 * R) (fun k => fb (k + 1)) : Int) +
+        ((fb 0).toNat : Int) - (2 ^ (2 * R) : Int) * ((fb (2 * R)).toNat : Int)
+  | 0 => by simp [natOfBits]
+  | R + 1 => by
+    rw [List.range_succ, List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+        booth_telescope fb R]
+    have hSplitBits : ∀ (m : Nat) (g : Nat → Bool),
+        natOfBits (m + 2) g = natOfBits m g + 2 ^ m * ((g m).toNat + 2 * (g (m + 1)).toNat) := by
+      intro m
+      induction m with
+      | zero => intro g; simp [natOfBits]
+      | succ m ih =>
+        intro g
+        change (g 0).toNat + 2 * natOfBits (m + 2) (fun i => g (i + 1)) =
+          ((g 0).toNat + 2 * natOfBits m (fun i => g (i + 1))) +
+            2 ^ (m + 1) * ((g (m + 1)).toNat + 2 * (g (m + 1 + 1)).toNat)
+        rw [ih (fun i => g (i + 1)), Nat.pow_succ]
+        have hAssoc : 2 ^ m * 2 * ((g (m + 1)).toNat + 2 * (g (m + 1 + 1)).toNat) =
+            2 * (2 ^ m * ((g (m + 1)).toNat + 2 * (g (m + 1 + 1)).toNat)) := by
+          rw [Nat.mul_comm (2 ^ m) 2, Nat.mul_assoc]
+        rw [hAssoc]; omega
+    have hBits := hSplitBits (2 * R) (fun k => fb (k + 1))
+    have h2R2 : 2 * (R + 1) = 2 * R + 2 := by omega
+    rw [h2R2, hBits]
+    dsimp only [boothDigitInt]
+    have h2Pow : (2 : Nat) ^ (2 * R) = 4 ^ R := Nat.pow_mul 2 2 R
+    have h2PowInt : (2 : Int) ^ (2 * R) = (4 : Int) ^ R := by
+      have hCast : ((2 ^ (2 * R) : Nat) : Int) = ((4 ^ R : Nat) : Int) := congrArg Int.ofNat h2Pow
+      simpa [Int.natCast_pow] using hCast
+    have h2PowNext : (2 : Int) ^ (2 * R + 2) = 4 * (4 : Int) ^ R := by
+      rw [Int.pow_add, h2PowInt]; omega
+    have h2PowNatInt : ((2 ^ (2 * R) : Nat) : Int) = (4 : Int) ^ R := by
+      rw [h2Pow]; exact Int.natCast_pow 4 R
+    rw [Int.natCast_add, Int.natCast_mul, h2PowInt, h2PowNext, h2PowNatInt]
+    have hIdx1 : 2 * R + 1 + 1 = 2 * R + 2 := by omega
+    rw [hIdx1]
+    generalize (4 : Int) ^ R = P
+    generalize fb (2 * R) = c0
+    generalize fb (2 * R + 1) = c1
+    generalize fb (2 * R + 2) = c2
+    cases c0 <;> cases c1 <;> cases c2 <;> dsimp only [Bool.toNat, cond] <;> omega
+
+private theorem boothRow66_int_congr (a : BitVec 33) (bx : BitVec 35) (j : Nat) :
+    (((rtlBoothRow66 a bx j).1.toNat : Int) +
+        (if (rtlBoothRow66 a bx j).2 then (4 ^ j : Int) else 0)) % (2 ^ 66 : Int) =
+      (boothDigitInt (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) *
+        (a.toNat : Int) * (4 ^ j : Int)) % (2 ^ 66 : Int) :=
+  boothRow66Core_int_congr a (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) j
+
+private theorem rtlMul33_aux (a b : BitVec 33)
+    (bx : BitVec 35) (hbxDef : BitVec.ofNat 35 (2 * b.toNat) = bx)
+    (negRowVal : Nat)
+    (hNegDef : ((List.range 17).map fun j =>
+      if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum = negRowVal)
+    (rows : List (BitVec 66))
+    (hRowsDef : ((List.range 17).map (rtlBoothRow66 a bx)).map Prod.fst ++
+      [BitVec.ofNat 66 negRowVal] = rows) :
+    (rtlPrefixAdd 66 (rtlCsaReduce2 66 rows).1 (rtlCsaReduce2 66 rows).2 false).toNat =
+      a.toNat * b.toNat := by
+  have hbLt : b.toNat < 2 ^ 33 := b.isLt
+  have haLt : a.toNat < 2 ^ 33 := a.isLt
+  have hProdLt : a.toNat * b.toNat < 2 ^ 66 :=
+    Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' haLt hbLt) (by decide)
+  have hNegLt : negRowVal < 2 ^ 66 := by
+    rw [← hNegDef]
+    have hBound17 : ∀ k : Nat, k ≤ 17 →
+        ((List.range k).map fun j => if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum ≤ 4 ^ k := by
+      intro k hk
+      induction k with
+      | zero => exact Nat.zero_le 1
+      | succ k ih =>
+        rw [List.range_succ, List.map_append, List.sum_append, List.map_singleton, List.sum_singleton]
+        have ih' := ih (by omega)
+        have hPow1 : 1 ≤ 4 ^ k := Nat.one_le_pow k 4 (by decide)
+        rw [Nat.pow_succ]
+        cases (rtlBoothRow66 a bx k).2
+        · rw [ite_neg Bool.false_ne_true]; omega
+        · rw [ite_pos rfl]; omega
+    exact Nat.lt_of_le_of_lt (hBound17 17 (Nat.le_refl 17)) (by decide)
+  rw [rtlPrefixAdd_toNat, show false.toNat = 0 from rfl, Nat.add_zero, rtlCsaReduce2_mod]
+  have hRowsSum : (rows.map BitVec.toNat).sum =
+      ((List.range 17).map fun j =>
+        (rtlBoothRow66 a bx j).1.toNat + if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum := by
+    rw [← hRowsDef, List.map_append, List.sum_append, List.map_map, List.map_map,
+        List.map_singleton, List.sum_singleton,
+        BitVec.toNat_ofNat, Nat.mod_eq_of_lt hNegLt, ← hNegDef]
+    have hZipSum : ∀ k : Nat,
+        ((List.range k).map (fun j => (rtlBoothRow66 a bx j).1.toNat)).sum +
+        ((List.range k).map (fun j => if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0)).sum =
+        ((List.range k).map (fun j =>
+          (rtlBoothRow66 a bx j).1.toNat + if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0)).sum := by
+      intro k
+      induction k with
+      | zero => rfl
+      | succ k ih =>
+        rw [List.range_succ, List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+            List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+            List.map_append, List.sum_append, List.map_singleton, List.sum_singleton]
+        omega
+    exact hZipSum 17
+  rw [hRowsSum]
+  have hIntMod :
+      ((((List.range 17).map fun j =>
+          (rtlBoothRow66 a bx j).1.toNat + if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum : Nat) : Int) %
+        (2 ^ 66 : Int) =
+      (((List.range 17).map fun j =>
+          boothDigitInt (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) *
+            (a.toNat : Int) * (4 ^ j : Int)).sum) % (2 ^ 66 : Int) := by
+    have hK : ∀ k : Nat, k ≤ 17 →
+        ((((List.range k).map fun j =>
+            (rtlBoothRow66 a bx j).1.toNat + if (rtlBoothRow66 a bx j).2 then 4 ^ j else 0).sum : Nat) : Int) %
+          (2 ^ 66 : Int) =
+        (((List.range k).map fun j =>
+            boothDigitInt (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) *
+              (a.toNat : Int) * (4 ^ j : Int)).sum) % (2 ^ 66 : Int) := by
+      intro k hk
+      induction k with
+      | zero => rfl
+      | succ k ih =>
+        rw [List.range_succ, List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+            List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+            Int.natCast_add, Int.natCast_add]
+        have hCastIf : (((if (rtlBoothRow66 a bx k).2 then 4 ^ k else 0 : Nat) : Int)) =
+            (if (rtlBoothRow66 a bx k).2 then (4 ^ k : Int) else 0) := by
+          cases (rtlBoothRow66 a bx k).2
+          · rw [ite_neg Bool.false_ne_true, ite_neg Bool.false_ne_true]; rfl
+          · rw [ite_pos rfl, ite_pos rfl]; exact Int.natCast_pow 4 k
+        rw [hCastIf, Int.add_emod, ih (by omega), boothRow66_int_congr a bx k, ← Int.add_emod]
+    exact hK 17 (Nat.le_refl 17)
+  have hFactorA : ∀ k : Nat,
+      ((List.range k).map fun j =>
+        boothDigitInt (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) *
+          (a.toNat : Int) * (4 ^ j : Int)).sum =
+      (a.toNat : Int) * ((List.range k).map fun j =>
+        boothDigitInt (bx.getLsbD (2 * j)) (bx.getLsbD (2 * j + 1)) (bx.getLsbD (2 * j + 2)) *
+          (4 ^ j : Int)).sum := by
+    intro k
+    induction k with
+    | zero =>
+      change (0 : Int) = (a.toNat : Int) * 0
+      rw [Int.mul_zero]
+    | succ k ih =>
+      rw [List.range_succ, List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+          List.map_append, List.sum_append, List.map_singleton, List.sum_singleton,
+          ih, Int.mul_add]
+      congr 1
+      rw [← Int.mul_assoc, Int.mul_comm _ (a.toNat : Int), Int.mul_assoc]
+  rw [hFactorA 17, booth_telescope bx.getLsbD 17] at hIntMod
+  have h2bLt35 : 2 * b.toNat < 2 ^ 35 := by
+    change 2 * b.toNat < 34359738368
+    change b.toNat < 8589934592 at hbLt; omega
+  have hbxVal : bx.toNat = 2 * b.toNat := by
+    rw [← hbxDef, BitVec.toNat_ofNat, Nat.mod_eq_of_lt h2bLt35]
+  have hbx0 : bx.getLsbD 0 = false := by
+    rw [BitVec.getLsbD, hbxVal, Nat.testBit_zero]
+    exact decide_eq_false (by omega)
+  have hbx34 : bx.getLsbD 34 = false := by
+    simp only [BitVec.getLsbD, hbxVal]
+    apply Nat.testBit_lt_two_pow
+    change 2 * b.toNat < 17179869184
+    change b.toNat < 8589934592 at hbLt; omega
+  have hbxShift : natOfBits 34 (fun k => bx.getLsbD (k + 1)) = b.toNat := by
+    have hDecomp := bitVec_toNat_eq_natOfBits bx
+    rw [natOfBits, hbxVal, hbx0] at hDecomp
+    exact eq_of_two_mul_eq hDecomp
+  rw [hbx0, hbx34, hbxShift] at hIntMod
+  have hZeroBool : ((false.toNat : Nat) : Int) = 0 := rfl
+  rw [hZeroBool, Int.add_zero, Int.mul_zero, Int.sub_zero, ← Int.natCast_mul] at hIntMod
+  have hPow66Cast : (2 ^ 66 : Int) = ((2 ^ 66 : Nat) : Int) := (Int.natCast_pow 2 66).symm
+  rw [hPow66Cast, ← Int.natCast_emod, ← Int.natCast_emod] at hIntMod
+  have hNatModEq := Int.ofNat_inj.mp hIntMod
+  rw [hNatModEq, Nat.mod_eq_of_lt hProdLt]
+
+/-- **33×33 Radix-4 Booth Multiplier Soundness (`rtlMul33_sound`)**:
+    For all 33-bit operands `a, b : BitVec 33`, `rtlMul33 a b` equals the exact unsigned product
+    `a.toNat * b.toNat` (`< 2^66`)! -/
+theorem rtlMul33_sound (a b : BitVec 33) :
+    (rtlMul33 a b).toNat = a.toNat * b.toNat :=
+  rtlMul33_aux a b _ rfl _ rfl _ rfl
+
+attribute [local irreducible] rtlMul33 rtlGl64Canon
+
+/-- Exact RTL model of `qsag_gl64_sqrows` + `qsag_csa52` + `qsag_gl64_canon` (`qsag_gl64_sq_pipe`,
+    `qsag_gl64_karatsuba_csa.sv:286-345`). -/
+def rtlGl64SqPipe (x : BitVec 64) : BitVec 64 :=
+  let x0 := (x.extractLsb' 0 32).toNat
+  let x1 := (x.extractLsb' 32 32).toNat
+  let z0 := x0 * x0
+  let z2 := x1 * x1
+  let p01 := x0 * x1
+  let m := 2 * p01
+  let m0 := m % 2 ^ 32
+  let m1 := (m / 2 ^ 32) % 2 ^ 32
+  let m2 := m / 2 ^ 64
+  let l2 := z2 % 2 ^ 32
+  let h2 := z2 / 2 ^ 32
+  let c_m2 := if m2 == 1 then 3 else 4
+  let topC := 2 ^ 32 - 4
+  let r1 : BitVec 76 := BitVec.ofNat 76 z0
+  let r2 : BitVec 76 := BitVec.ofNat 76 (m0 * 2 ^ 32 + (2 ^ 32 - 1 - m1))
+  let r3 : BitVec 76 := BitVec.ofNat 76 (m1 * 2 ^ 32 + c_m2)
+  let r4 : BitVec 76 := BitVec.ofNat 76 (l2 * 2 ^ 32 + (2 ^ 32 - 1 - l2))
+  let r5 : BitVec 76 := BitVec.ofNat 76 (topC * 2 ^ 32 + (2 ^ 32 - 1 - h2))
+  let sc := rtlCsa52 76 r1 r2 r3 r4 r5
+  rtlGl64Canon sc.1 sc.2
+
+/-- **5-Row Goldilocks Squarer Soundness (`rtlGl64SqPipe_sound`)**:
+    Matches `(Goldilocks.mul a a).val` bit-for-bit across all 64-bit inputs `x`! -/
+theorem rtlGl64SqPipe_sound (x : BitVec 64) :
+    (rtlGl64SqPipe x).toNat = (Goldilocks.mul (Goldilocks.ofNat x.toNat) (Goldilocks.ofNat x.toNat)).val := by
+  unfold rtlGl64SqPipe
+  dsimp only
+  let x0 := (x.extractLsb' 0 32).toNat
+  let x1 := (x.extractLsb' 32 32).toNat
+  have hx0Lt : x0 < 2 ^ 32 := (x.extractLsb' 0 32).isLt
+  have hx1Lt : x1 < 2 ^ 32 := (x.extractLsb' 32 32).isLt
+  have hxDecomp : x.toNat = x0 + 4294967296 * x1 := by
+    dsimp only [x0, x1]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one]
+    have hDivLt : x.toNat / 2 ^ 32 < 2 ^ 32 := by
+      rw [Nat.div_lt_iff_lt_mul (by decide)]; exact x.isLt
+    rw [Nat.mod_eq_of_lt hDivLt]
+    exact (Nat.mod_add_div x.toNat 4294967296).symm
+  let z0 := x0 * x0
+  let z2 := x1 * x1
+  let m  := 2 * (x0 * x1)
+  have hz0Lt : z0 < 18446744073709551616 :=
+    Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' hx0Lt hx0Lt) (by decide)
+  have hz2Lt : z2 < 18446744073709551616 :=
+    Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' hx1Lt hx1Lt) (by decide)
+  have hmLt  : m < 2 * 18446744073709551616 := by
+    have hp01 : x0 * x1 < 18446744073709551616 :=
+      Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' hx0Lt hx1Lt) (by decide)
+    dsimp only [m]; omega
+  let m0 := m % 2 ^ 32
+  let m1 := (m / 2 ^ 32) % 2 ^ 32
+  let m2 := m / 2 ^ 64
+  let l2 := z2 % 2 ^ 32
+  let h2 := z2 / 2 ^ 32
+  have hm0Lt : m0 < 4294967296 := Nat.mod_lt _ (by decide)
+  have hm1Lt : m1 < 4294967296 := Nat.mod_lt _ (by decide)
+  have hm2Le1 : m2 ≤ 1 := by change m / 18446744073709551616 ≤ 1; omega
+  have hl2Lt : l2 < 4294967296 := Nat.mod_lt _ (by decide)
+  have hh2Lt : h2 < 4294967296 := by change z2 / 4294967296 < 4294967296; omega
+  have hmDecomp : m = m0 + 4294967296 * m1 + 18446744073709551616 * m2 := by
+    change m = m % 4294967296 + 4294967296 * ((m / 4294967296) % 4294967296) +
+      18446744073709551616 * (m / 18446744073709551616)
+    have d0 := Nat.mod_add_div m 4294967296
+    have d1 := Nat.mod_add_div (m / 4294967296) 4294967296
+    have h64 : (m / 4294967296) / 4294967296 = m / 18446744073709551616 := by
+      rw [Nat.div_div_eq_div_mul]
+    rw [h64] at d1; omega
+  have hz2Decomp : z2 = l2 + 4294967296 * h2 := (Nat.mod_add_div z2 4294967296).symm
+  have hcM2 : (if m2 == 1 then 3 else 4) = 4 - m2 := by
+    by_cases h1 : m2 = 1
+    · rw [h1]; rfl
+    · rw [beq_eq_false_iff_ne.mpr h1, ite_neg Bool.false_ne_true]; omega
+  let r1 : BitVec 76 := BitVec.ofNat 76 z0
+  let r2 : BitVec 76 := BitVec.ofNat 76 (m0 * 2 ^ 32 + (2 ^ 32 - 1 - m1))
+  let r3 : BitVec 76 := BitVec.ofNat 76 (m1 * 2 ^ 32 + (if m2 == 1 then 3 else 4))
+  let r4 : BitVec 76 := BitVec.ofNat 76 (l2 * 2 ^ 32 + (2 ^ 32 - 1 - l2))
+  let r5 : BitVec 76 := BitVec.ofNat 76 ((2 ^ 32 - 4) * 2 ^ 32 + (2 ^ 32 - 1 - h2))
+  have hr1Val : r1.toNat = z0 := by
+    dsimp only [r1]; rw [BitVec.toNat_ofNat]
+    exact Nat.mod_eq_of_lt (by change z0 < 75557863725914323419136; omega)
+  have hr2Val : r2.toNat = m0 * 4294967296 + (4294967295 - m1) := by
+    dsimp only [r2]; rw [BitVec.toNat_ofNat]
+    change (m0 * 4294967296 + (4294967295 - m1)) % 75557863725914323419136 = _
+    exact Nat.mod_eq_of_lt (by omega)
+  have hr3Val : r3.toNat = m1 * 4294967296 + (4 - m2) := by
+    dsimp only [r3]; rw [hcM2, BitVec.toNat_ofNat]
+    change (m1 * 4294967296 + (4 - m2)) % 75557863725914323419136 = _
+    exact Nat.mod_eq_of_lt (by omega)
+  have hr4Val : r4.toNat = l2 * 4294967296 + (4294967295 - l2) := by
+    dsimp only [r4]; rw [BitVec.toNat_ofNat]
+    change (l2 * 4294967296 + (4294967295 - l2)) % 75557863725914323419136 = _
+    exact Nat.mod_eq_of_lt (by omega)
+  have hr5Val : r5.toNat = 4294967292 * 4294967296 + (4294967295 - h2) := by
+    dsimp only [r5]; rw [BitVec.toNat_ofNat]
+    change (4294967292 * 4294967296 + (4294967295 - h2)) % 75557863725914323419136 = _
+    exact Nat.mod_eq_of_lt (by omega)
+  let sSq := (z0 + 4294967296 * m0 + 4294967295 * (m1 + l2) + goldilocksPrime) - (m2 + h2)
+  have hsSqLe : m2 + h2 ≤ z0 + 4294967296 * m0 + 4294967295 * (m1 + l2) + goldilocksPrime := by
+    clear hxDecomp hmDecomp hz2Decomp; unfold goldilocksPrime; omega
+  have hsSqCast : (sSq : Int) =
+      (z0 : Int) + 4294967296 * (m0 : Int) + 4294967295 * ((m1 : Int) + (l2 : Int)) +
+      (goldilocksPrime : Int) - ((m2 : Int) + (h2 : Int)) := by
+    dsimp only [sSq]
+    rw [int_natCast_sub hsSqLe]
+    simp only [Int.natCast_add, Int.natCast_mul]
+    clear hxDecomp hmDecomp hz2Decomp hsSqLe; omega
+  have hrSum : r1.toNat + r2.toNat + r3.toNat + r4.toNat + r5.toNat = sSq := by
+    rw [hr1Val, hr2Val, hr3Val, hr4Val, hr5Val]
+    apply nat_eq_of_int_eq
+    rw [hsSqCast]
+    have sub1 : m1 ≤ 4294967295 := by clear hsSqCast; omega
+    have sub2 : m2 ≤ 4 := by clear hsSqCast; omega
+    have sub3 : l2 ≤ 4294967295 := by clear hsSqCast; omega
+    have sub4 : h2 ≤ 4294967295 := by clear hsSqCast; omega
+    simp only [Int.natCast_add, Int.natCast_mul,
+      int_natCast_sub sub1, int_natCast_sub sub2, int_natCast_sub sub3, int_natCast_sub sub4]
+    clear hxDecomp hmDecomp hz2Decomp hsSqLe hsSqCast hr1Val hr2Val hr3Val hr4Val hr5Val hcM2 sub1 sub2 sub3 sub4
+    unfold goldilocksPrime
+    omega
+  have hrLt76 : r1.toNat + r2.toNat + r3.toNat + r4.toNat + r5.toNat < 2 ^ 76 := by
+    rw [hrSum]
+    change sSq < 75557863725914323419136
+    apply nat_lt_of_int_lt
+    rw [hsSqCast]
+    clear hxDecomp hmDecomp hz2Decomp hsSqLe hsSqCast hr1Val hr2Val hr3Val hr4Val hr5Val hrSum hcM2
+    unfold goldilocksPrime
+    omega
+  have hCsa := rtlCsa52_exact r1 r2 r3 r4 r5 hrLt76
+  change (rtlGl64Canon (rtlCsa52 76 r1 r2 r3 r4 r5).1 (rtlCsa52 76 r1 r2 r3 r4 r5).2).toNat = _
+  rw [rtlGl64Canon_sound _ _ (by rw [hCsa]; exact hrLt76), hCsa, hrSum,
+      Goldilocks.mul_val, Goldilocks.ofNat_val, Nat.mod_mul_mod, Nat.mul_mod_mod]
+  have hSqExpand : x.toNat * x.toNat = z0 + 4294967296 * m + 18446744073709551616 * z2 := by
+    rw [hxDecomp]
+    exact sq_split32_expand x0 x1
+  have hCongr : x.toNat * x.toNat + goldilocksPrime * 1 =
+      sSq + goldilocksPrime * (m1 + l2 + 4294967297 * (m2 + h2)) := by
+    rw [hSqExpand, hmDecomp, hz2Decomp]
+    apply nat_eq_of_int_eq
+    rw [Int.natCast_add sSq _, hsSqCast]
+    simp only [Int.natCast_add, Int.natCast_mul]
+    clear hxDecomp hmDecomp hz2Decomp hsSqLe hsSqCast hr1Val hr2Val hr3Val hr4Val hr5Val hrSum hrLt76 hCsa hSqExpand hcM2
+    unfold goldilocksPrime
+    omega
+  rw [← Nat.add_mul_mod_self_left (x.toNat * x.toNat) goldilocksPrime 1, hCongr,
+      Nat.add_mul_mod_self_left]
+
+/-- Exact RTL model of `qsag_gl64_mrows` (`W = 32, GB = 12`, `qsag_gl64_karatsuba_csa.sv:218-258`). -/
+def rtlGl64Mrows (p : BitVec 66) (ph : Fin 4) : BitVec 76 × BitVec 76 × BitVec 76 :=
+  let lo := (p.extractLsb' 0 32).toNat
+  let hi := (p.extractLsb' 32 32).toNat
+  let m2 := (p.extractLsb' 64 2).toNat
+  let p64 := (p.extractLsb' 0 64).toNat
+  let kMul := goldilocksPrime - 2 ^ 33 + 2
+  match ph.1 with
+  | 1 =>
+    (BitVec.ofNat 76 p64,
+     BitVec.ofNat 76 ((2 ^ 32 - 1 - lo) * 2 ^ 32 + hi),
+     BitVec.ofNat 76 ((2 ^ 32 - 1 - hi) * 2 ^ 32))
+  | 2 =>
+    (BitVec.ofNat 76 (2 ^ 64 - 1 - p64),
+     BitVec.ofNat 76 kMul,
+     0)
+  | 3 =>
+    (BitVec.ofNat 76 (lo * 2 ^ 32 + (2 ^ 32 - 1 - hi)),
+     BitVec.ofNat 76 (hi * 2 ^ 32 + (3 - m2)),
+     0)
+  | _ => (0, 0, 0)
+
+/-- Cycle-accurate register state of `qsag_gl64_karatsuba_csa` (`qsag_gl64_karatsuba_csa.sv:384-390`)
+    during a 4-cycle multiply (`mph = 0 → 1 → 2 → 3`). -/
+structure KaratsubaState where
+  opa : BitVec 64
+  opb : BitVec 64
+  acc_s : BitVec 76
+  acc_c : BitVec 76
+  preg : BitVec 66
+  sa : BitVec 33
+  sb : BitVec 33
+  mph : Fin 4
+
+/-- Combinational outputs `(mul_busy, mul_last, cv)` of `qsag_gl64_karatsuba_csa.sv:434-447`. -/
+def rtlKaratsubaOutputs (st : KaratsubaState) : Bool × Bool × BitVec 64 :=
+  let in_mul := st.mph.1 != 0
+  let use0 := st.mph.1 == 1
+  let cx := if use0 then 0 else st.acc_s
+  let cy := if use0 then 0 else st.acc_c
+  let mr := rtlGl64Mrows st.preg st.mph
+  let nsc := rtlCsa52 76 cx cy mr.1 mr.2.1 mr.2.2
+  let cv := rtlGl64Canon nsc.1 nsc.2
+  (in_mul, st.mph.1 == 3, cv)
+
+/-- One positive clock edge of `qsag_gl64_karatsuba_csa.sv:397-481` (`rst_n = 1`, `asel = bsel = 0`). -/
+def rtlKaratsubaStep (st : KaratsubaState) (mul_start : Bool) : KaratsubaState :=
+  let ab : BitVec 33 × BitVec 33 :=
+    match st.mph.1 with
+    | 0 => (BitVec.ofNat 33 (st.opa.extractLsb' 0 32).toNat,
+            BitVec.ofNat 33 (st.opb.extractLsb' 0 32).toNat)
+    | 1 => (BitVec.ofNat 33 (st.opa.extractLsb' 32 32).toNat,
+            BitVec.ofNat 33 (st.opb.extractLsb' 32 32).toNat)
+    | _ => (st.sa, st.sb)
+  let m_p := rtlMul33 ab.1 ab.2
+  let use0 := st.mph.1 == 1
+  let cx := if use0 then 0 else st.acc_s
+  let cy := if use0 then 0 else st.acc_c
+  let mr := rtlGl64Mrows st.preg st.mph
+  let nsc := rtlCsa52 76 cx cy mr.1 mr.2.1 mr.2.2
+  let sa_n := rtlPrefixAdd 33
+    (BitVec.ofNat 33 (st.opa.extractLsb' 0 32).toNat)
+    (BitVec.ofNat 33 (st.opa.extractLsb' 32 32).toNat) false
+  let sb_n := rtlPrefixAdd 33
+    (BitVec.ofNat 33 (st.opb.extractLsb' 0 32).toNat)
+    (BitVec.ofNat 33 (st.opb.extractLsb' 32 32).toNat) false
+  let in_mul := st.mph.1 != 0
+  let acc_upd := in_mul && (st.mph.1 != 3)
+  let preg_upd := (st.mph.1 == 0 && mul_start) || (st.mph.1 == 1) || (st.mph.1 == 2)
+  let next_mph : Fin 4 :=
+    match st.mph.1 with
+    | 0 => if mul_start then ⟨1, by decide⟩ else ⟨0, by decide⟩
+    | 1 => ⟨2, by decide⟩
+    | 2 => ⟨3, by decide⟩
+    | _ => ⟨0, by decide⟩
+  { opa := st.opa
+    opb := st.opb
+    acc_s := if acc_upd then nsc.1 else st.acc_s
+    acc_c := if acc_upd then nsc.2 else st.acc_c
+    preg := if preg_upd then m_p else st.preg
+    sa := if st.mph.1 == 0 && mul_start then sa_n else st.sa
+    sb := if st.mph.1 == 0 && mul_start then sb_n else st.sb
+    mph := next_mph }
+
+private theorem rtlKaratsuba_four_cycle_aux (st₀ st₁ st₂ st₃ : KaratsubaState)
+    (hIdle : st₀.mph = ⟨0, by decide⟩)
+    (hst₁ : rtlKaratsubaStep st₀ true = st₁)
+    (hst₂ : rtlKaratsubaStep st₁ false = st₂)
+    (hst₃ : rtlKaratsubaStep st₂ false = st₃) :
+    let (busy, last, cv) := rtlKaratsubaOutputs st₃
+    busy = true ∧
+    last = true ∧
+    cv.toNat = (Goldilocks.mul (Goldilocks.ofNat st₀.opa.toNat) (Goldilocks.ofNat st₀.opb.toNat)).val := by
+  dsimp only
+  have hMph0Val : st₀.mph.1 = 0 := congrArg Fin.val hIdle
+  have hMph1 : st₁.mph = ⟨1, by decide⟩ := by
+    rw [← hst₁]; dsimp only [rtlKaratsubaStep]; rw [hMph0Val]; rfl
+  have hMph1Val : st₁.mph.1 = 1 := congrArg Fin.val hMph1
+  have hMph2 : st₂.mph = ⟨2, by decide⟩ := by
+    rw [← hst₂]; dsimp only [rtlKaratsubaStep]; rw [hMph1Val]; rfl
+  have hMph2Val : st₂.mph.1 = 2 := congrArg Fin.val hMph2
+  have hMph3 : st₃.mph = ⟨3, by decide⟩ := by
+    rw [← hst₃]; dsimp only [rtlKaratsubaStep]; rw [hMph2Val]; rfl
+  have hMph3Val : st₃.mph.1 = 3 := congrArg Fin.val hMph3
+  let a0 := (st₀.opa.extractLsb' 0 32).toNat
+  let a1 := (st₀.opa.extractLsb' 32 32).toNat
+  let b0 := (st₀.opb.extractLsb' 0 32).toNat
+  let b1 := (st₀.opb.extractLsb' 32 32).toNat
+  have ha0Lt : a0 < 4294967296 := (st₀.opa.extractLsb' 0 32).isLt
+  have ha1Lt : a1 < 4294967296 := (st₀.opa.extractLsb' 32 32).isLt
+  have hb0Lt : b0 < 4294967296 := (st₀.opb.extractLsb' 0 32).isLt
+  have hb1Lt : b1 < 4294967296 := (st₀.opb.extractLsb' 32 32).isLt
+  have haSplit : st₀.opa.toNat = a0 + 4294967296 * a1 := by
+    dsimp only [a0, a1]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one]
+    have hDivLt : st₀.opa.toNat / 2 ^ 32 < 2 ^ 32 := by
+      rw [Nat.div_lt_iff_lt_mul (by decide)]; exact st₀.opa.isLt
+    rw [Nat.mod_eq_of_lt hDivLt]
+    exact (Nat.mod_add_div st₀.opa.toNat 4294967296).symm
+  have hbSplit : st₀.opb.toNat = b0 + 4294967296 * b1 := by
+    dsimp only [b0, b1]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one]
+    have hDivLt : st₀.opb.toNat / 2 ^ 32 < 2 ^ 32 := by
+      rw [Nat.div_lt_iff_lt_mul (by decide)]; exact st₀.opb.isLt
+    rw [Nat.mod_eq_of_lt hDivLt]
+    exact (Nat.mod_add_div st₀.opb.toNat 4294967296).symm
+  -- Cycle 0 -> `st₁`:
+  have hOpa1 : st₁.opa = st₀.opa := by rw [← hst₁]; rfl
+  have hOpb1 : st₁.opb = st₀.opb := by rw [← hst₁]; rfl
+  have hPreg1 : st₁.preg.toNat = a0 * b0 := by
+    have hSt1Preg : st₁.preg = rtlMul33 (BitVec.ofNat 33 a0) (BitVec.ofNat 33 b0) := by
+      rw [← hst₁]; dsimp only [rtlKaratsubaStep]; rw [hMph0Val]; rfl
+    rw [hSt1Preg, rtlMul33_sound, BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        Nat.mod_eq_of_lt (show a0 < 2 ^ 33 by change a0 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show b0 < 2 ^ 33 by change b0 < 8589934592; omega)]
+  have hSa1 : st₁.sa.toNat = a0 + a1 := by
+    have hSt1Sa : st₁.sa = rtlPrefixAdd 33 (BitVec.ofNat 33 a0) (BitVec.ofNat 33 a1) false := by
+      rw [← hst₁]; dsimp only [rtlKaratsubaStep]; rw [hMph0Val]; rfl
+    rw [hSt1Sa, rtlPrefixAdd_toNat, show false.toNat = 0 from rfl, Nat.add_zero,
+        BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        Nat.mod_eq_of_lt (show a0 < 2 ^ 33 by change a0 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show a1 < 2 ^ 33 by change a1 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show a0 + a1 < 2 ^ 33 by change a0 + a1 < 8589934592; omega)]
+  have hSb1 : st₁.sb.toNat = b0 + b1 := by
+    have hSt1Sb : st₁.sb = rtlPrefixAdd 33 (BitVec.ofNat 33 b0) (BitVec.ofNat 33 b1) false := by
+      rw [← hst₁]; dsimp only [rtlKaratsubaStep]; rw [hMph0Val]; rfl
+    rw [hSt1Sb, rtlPrefixAdd_toNat, show false.toNat = 0 from rfl, Nat.add_zero,
+        BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        Nat.mod_eq_of_lt (show b0 < 2 ^ 33 by change b0 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show b1 < 2 ^ 33 by change b1 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show b0 + b1 < 2 ^ 33 by change b0 + b1 < 8589934592; omega)]
+  -- Cycle 1 -> `st₂`:
+  let z0 := a0 * b0
+  let z0_lo := z0 % 4294967296
+  let z0_hi := z0 / 4294967296
+  have hz0Lt : z0 < 18446744073709551616 :=
+    Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' ha0Lt hb0Lt) (by decide)
+  have hz0LoLt : z0_lo < 4294967296 := Nat.mod_lt _ (by decide)
+  have hz0HiLt : z0_hi < 4294967296 := by dsimp only [z0_hi]; omega
+  have hz0Decomp : z0 = z0_lo + 4294967296 * z0_hi := (Nat.mod_add_div z0 4294967296).symm
+  let acc2Val := (2 * (goldilocksPrime - 1) + z0) - (4294967296 * z0_lo + 4294967295 * z0_hi)
+  have hAcc2Le : 4294967296 * z0_lo + 4294967295 * z0_hi ≤ 2 * (goldilocksPrime - 1) + z0 := by
+    clear haSplit hbSplit hPreg1 hz0Decomp; unfold goldilocksPrime; omega
+  have hAcc2Cast : (acc2Val : Int) =
+      2 * ((goldilocksPrime : Int) - 1) + (z0 : Int) -
+      (4294967296 * (z0_lo : Int) + 4294967295 * (z0_hi : Int)) := by
+    dsimp only [acc2Val]
+    have hp1 : 1 ≤ goldilocksPrime := by decide
+    rw [int_natCast_sub hAcc2Le]
+    simp only [Int.natCast_add, Int.natCast_mul, int_natCast_sub hp1]
+    clear haSplit hbSplit hPreg1 hz0Decomp hAcc2Le hp1; omega
+  have hAcc2 : st₂.acc_s.toNat + st₂.acc_c.toNat = acc2Val := by
+    let m1_1 : BitVec 76 := BitVec.ofNat 76 (st₁.preg.extractLsb' 0 64).toNat
+    let m1_2 : BitVec 76 := BitVec.ofNat 76
+      ((2 ^ 32 - 1 - (st₁.preg.extractLsb' 0 32).toNat) * 2 ^ 32 + (st₁.preg.extractLsb' 32 32).toNat)
+    let m1_3 : BitVec 76 := BitVec.ofNat 76 ((2 ^ 32 - 1 - (st₁.preg.extractLsb' 32 32).toNat) * 2 ^ 32)
+    have hSt2AccS : st₂.acc_s = (rtlCsa52 76 0 0 m1_1 m1_2 m1_3).1 := by
+      rw [← hst₂]; dsimp only [rtlKaratsubaStep, rtlGl64Mrows]; rw [hMph1Val]; rfl
+    have hSt2AccC : st₂.acc_c = (rtlCsa52 76 0 0 m1_1 m1_2 m1_3).2 := by
+      rw [← hst₂]; dsimp only [rtlKaratsubaStep, rtlGl64Mrows]; rw [hMph1Val]; rfl
+    have hm1_1 : m1_1.toNat = z0 := by
+      dsimp only [m1_1]
+      rw [BitVec.toNat_ofNat, BitVec.extractLsb'_toNat, Nat.shiftRight_zero, hPreg1]
+      have hz0Lt64 : z0 < 2 ^ 64 := hz0Lt
+      have hz0Lt76 : z0 < 2 ^ 76 := by clear hAcc2Cast; change z0 < 75557863725914323419136; omega
+      rw [Nat.mod_eq_of_lt hz0Lt64, Nat.mod_eq_of_lt hz0Lt76]
+    have hm1_2 : m1_2.toNat = (4294967295 - z0_lo) * 4294967296 + z0_hi := by
+      dsimp only [m1_2]; rw [BitVec.toNat_ofNat]
+      simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one, hPreg1]
+      change (((4294967295 - z0_lo) * 4294967296 + z0_hi % 4294967296) %
+        75557863725914323419136) = _
+      rw [Nat.mod_eq_of_lt hz0HiLt]
+      exact Nat.mod_eq_of_lt (by clear hAcc2Cast hz0Decomp; omega)
+    have hm1_3 : m1_3.toNat = (4294967295 - z0_hi) * 4294967296 := by
+      dsimp only [m1_3]; rw [BitVec.toNat_ofNat]
+      simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, hPreg1]
+      change (((4294967295 - z0_hi % 4294967296) * 4294967296) %
+        75557863725914323419136) = _
+      rw [Nat.mod_eq_of_lt hz0HiLt]
+      exact Nat.mod_eq_of_lt (by clear hAcc2Cast hz0Decomp; omega)
+    rw [hSt2AccS, hSt2AccC, rtlCsa52_exact]
+    · change 0 + 0 + m1_1.toNat + m1_2.toNat + m1_3.toNat = acc2Val
+      rw [hm1_1, hm1_2, hm1_3]
+      apply nat_eq_of_int_eq
+      have s1 : z0_lo ≤ 4294967295 := by clear hAcc2Cast; omega
+      have s2 : z0_hi ≤ 4294967295 := by clear hAcc2Cast; omega
+      simp only [Int.natCast_add, Int.natCast_mul, int_natCast_sub s1, int_natCast_sub s2, hAcc2Cast]
+      clear haSplit hbSplit hm1_1 hm1_2 hm1_3 hSt2AccS hSt2AccC hPreg1 hAcc2Le hz0Decomp s1 s2
+      unfold goldilocksPrime
+      omega
+    · change 0 + 0 + m1_1.toNat + m1_2.toNat + m1_3.toNat < 75557863725914323419136
+      rw [hm1_1, hm1_2, hm1_3]
+      apply nat_lt_of_int_lt
+      have s1 : z0_lo ≤ 4294967295 := by clear hAcc2Cast; omega
+      have s2 : z0_hi ≤ 4294967295 := by clear hAcc2Cast; omega
+      simp only [Int.natCast_add, Int.natCast_mul, int_natCast_sub s1, int_natCast_sub s2]
+      clear haSplit hbSplit hm1_1 hm1_2 hm1_3 hSt2AccS hSt2AccC hPreg1 hAcc2Le hAcc2Cast hz0Decomp s1 s2
+      omega
+  have hPreg2 : st₂.preg.toNat = a1 * b1 := by
+    have hSt2Preg : st₂.preg = rtlMul33 (BitVec.ofNat 33 a1) (BitVec.ofNat 33 b1) := by
+      rw [← hst₂]; dsimp only [rtlKaratsubaStep]; rw [hMph1Val, hOpa1, hOpb1]; rfl
+    rw [hSt2Preg, rtlMul33_sound, BitVec.toNat_ofNat, BitVec.toNat_ofNat,
+        Nat.mod_eq_of_lt (show a1 < 2 ^ 33 by clear hAcc2Cast; change a1 < 8589934592; omega),
+        Nat.mod_eq_of_lt (show b1 < 2 ^ 33 by clear hAcc2Cast; change b1 < 8589934592; omega)]
+  have hSa2 : st₂.sa = st₁.sa := by rw [← hst₂]; dsimp only [rtlKaratsubaStep]; rw [hMph1Val]; rfl
+  have hSb2 : st₂.sb = st₁.sb := by rw [← hst₂]; dsimp only [rtlKaratsubaStep]; rw [hMph1Val]; rfl
+  -- Cycle 2 -> `st₃`:
+  let z2 := a1 * b1
+  have hz2Lt : z2 < 18446744073709551616 :=
+    Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' ha1Lt hb1Lt) (by decide)
+  let acc3Add := 2 * goldilocksPrime - 4294967296 - z2
+  have hAcc3AddCast : (acc3Add : Int) = 2 * (goldilocksPrime : Int) - 4294967296 - (z2 : Int) := by
+    dsimp only [acc3Add]
+    have s0 : 4294967296 ≤ 2 * goldilocksPrime := by decide
+    have s1 : z2 ≤ 2 * goldilocksPrime - 4294967296 := by
+      clear haSplit hbSplit hAcc2 hAcc2Le hAcc2Cast hz0Decomp; unfold goldilocksPrime; omega
+    rw [int_natCast_sub s1, int_natCast_sub s0, Int.natCast_mul]
+    clear haSplit hbSplit hAcc2 hAcc2Le hAcc2Cast hz0Decomp s0 s1; omega
+  have hAcc3 : st₃.acc_s.toNat + st₃.acc_c.toNat =
+      (st₂.acc_s.toNat + st₂.acc_c.toNat) + acc3Add := by
+    let m2_1 : BitVec 76 := BitVec.ofNat 76 (2 ^ 64 - 1 - (st₂.preg.extractLsb' 0 64).toNat)
+    let m2_2 : BitVec 76 := BitVec.ofNat 76 (goldilocksPrime - 2 ^ 33 + 2)
+    have hSt3AccS : st₃.acc_s = (rtlCsa52 76 st₂.acc_s st₂.acc_c m2_1 m2_2 0).1 := by
+      rw [← hst₃]; dsimp only [rtlKaratsubaStep, rtlGl64Mrows]; rw [hMph2Val]; rfl
+    have hSt3AccC : st₃.acc_c = (rtlCsa52 76 st₂.acc_s st₂.acc_c m2_1 m2_2 0).2 := by
+      rw [← hst₃]; dsimp only [rtlKaratsubaStep, rtlGl64Mrows]; rw [hMph2Val]; rfl
+    have hm2_1 : m2_1.toNat = 18446744073709551615 - z2 := by
+      dsimp only [m2_1]
+      rw [BitVec.toNat_ofNat, BitVec.extractLsb'_toNat, Nat.shiftRight_zero, hPreg2]
+      have hz2Lt64 : z2 < 2 ^ 64 := hz2Lt
+      rw [Nat.mod_eq_of_lt hz2Lt64]
+      change (18446744073709551615 - z2) % 75557863725914323419136 = _
+      exact Nat.mod_eq_of_lt (by clear hAcc2 hAcc2Le hAcc2Cast hAcc3AddCast hz0Decomp; omega)
+    have hm2_2 : m2_2.toNat = goldilocksPrime - 8589934592 + 2 := by decide
+    rw [hSt3AccS, hSt3AccC, rtlCsa52_exact]
+    · change st₂.acc_s.toNat + st₂.acc_c.toNat + m2_1.toNat + m2_2.toNat + 0 =
+        (st₂.acc_s.toNat + st₂.acc_c.toNat) + acc3Add
+      rw [hm2_1, hm2_2]
+      apply nat_eq_of_int_eq
+      have sz2 : z2 ≤ 18446744073709551615 := by clear hAcc2Cast hAcc3AddCast; omega
+      have sp : 8589934592 ≤ goldilocksPrime := by decide
+      simp only [Int.natCast_add, int_natCast_sub sz2, int_natCast_sub sp, hAcc3AddCast]
+      clear haSplit hbSplit hm2_1 hm2_2 hSt3AccS hSt3AccC hPreg1 hPreg2 hAcc2 hAcc2Le hAcc2Cast hz0Decomp sz2 sp
+      unfold goldilocksPrime
+      omega
+    · change st₂.acc_s.toNat + st₂.acc_c.toNat + m2_1.toNat + m2_2.toNat + 0 < 75557863725914323419136
+      rw [hAcc2, hm2_1, hm2_2]
+      apply nat_lt_of_int_lt
+      have sz2 : z2 ≤ 18446744073709551615 := by clear hAcc2Cast hAcc3AddCast; omega
+      have sp : 8589934592 ≤ goldilocksPrime := by decide
+      simp only [Int.natCast_add, int_natCast_sub sz2, int_natCast_sub sp, hAcc2Cast]
+      clear haSplit hbSplit hm2_1 hm2_2 hSt3AccS hSt3AccC hPreg1 hPreg2 hAcc2 hAcc2Le hAcc3AddCast hz0Decomp sz2 sp
+      unfold goldilocksPrime
+      omega
+  have hPreg3 : st₃.preg.toNat = (a0 + a1) * (b0 + b1) := by
+    have hSt3Preg : st₃.preg = rtlMul33 st₁.sa st₁.sb := by
+      rw [← hst₃]; dsimp only [rtlKaratsubaStep]; rw [hMph2Val, hSa2, hSb2]; rfl
+    rw [hSt3Preg, rtlMul33_sound, hSa1, hSb1]
+  -- Phase 3 combinational outputs (`rtlKaratsubaOutputs st₃`):
+  unfold rtlKaratsubaOutputs rtlGl64Mrows
+  dsimp only
+  rw [hMph3Val]
+  refine ⟨rfl, rfl, ?_⟩
+  let zm := (a0 + a1) * (b0 + b1)
+  have hzmLt : zm < 4 * 18446744073709551616 := by
+    have hsa : a0 + a1 < 8589934592 := by clear hAcc2 hAcc3 hAcc2Cast hAcc3AddCast; omega
+    have hsb : b0 + b1 < 8589934592 := by clear hAcc2 hAcc3 hAcc2Cast hAcc3AddCast; omega
+    exact Nat.lt_of_lt_of_eq (Nat.mul_lt_mul'' hsa hsb) (by decide)
+  let zm_lo := zm % 4294967296
+  let zm_hi := (zm / 4294967296) % 4294967296
+  let zm_m2 := zm / 18446744073709551616
+  have hzmLoLt : zm_lo < 4294967296 := Nat.mod_lt _ (by decide)
+  have hzmHiLt : zm_hi < 4294967296 := Nat.mod_lt _ (by decide)
+  have hzmM2Le3 : zm_m2 ≤ 3 := by
+    clear haSplit hbSplit hAcc2 hAcc3 hAcc2Cast hAcc3AddCast hz0Decomp; dsimp only [zm_m2]; omega
+  have hzmDecomp : zm = zm_lo + 4294967296 * zm_hi + 18446744073709551616 * zm_m2 := by
+    clear haSplit hbSplit hAcc2 hAcc3 hAcc2Cast hAcc3AddCast hz0Decomp
+    dsimp only [zm_lo, zm_hi, zm_m2]
+    have d0 := Nat.mod_add_div zm 4294967296
+    have d1 := Nat.mod_add_div (zm / 4294967296) 4294967296
+    have h64 : (zm / 4294967296) / 4294967296 = zm / 18446744073709551616 := by
+      rw [Nat.div_div_eq_div_mul]
+    rw [h64] at d1; omega
+  let m3_1 : BitVec 76 := BitVec.ofNat 76
+    ((st₃.preg.extractLsb' 0 32).toNat * 2 ^ 32 + (2 ^ 32 - 1 - (st₃.preg.extractLsb' 32 32).toNat))
+  let m3_2 : BitVec 76 := BitVec.ofNat 76
+    ((st₃.preg.extractLsb' 32 32).toNat * 2 ^ 32 + (3 - (st₃.preg.extractLsb' 64 2).toNat))
+  change (rtlGl64Canon (rtlCsa52 76 st₃.acc_s st₃.acc_c m3_1 m3_2 0).1
+      (rtlCsa52 76 st₃.acc_s st₃.acc_c m3_1 m3_2 0).2).toNat = _
+  have hm3_1Val : m3_1.toNat = zm_lo * 4294967296 + (4294967295 - zm_hi) := by
+    dsimp only [m3_1]; rw [BitVec.toNat_ofNat]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, Nat.pow_zero, Nat.div_one, hPreg3]
+    change (zm_lo * 4294967296 + (4294967295 - zm_hi)) % 75557863725914323419136 = _
+    exact Nat.mod_eq_of_lt (by clear haSplit hbSplit hAcc2 hAcc3 hAcc2Cast hAcc3AddCast hz0Decomp hzmDecomp; omega)
+  have hm3_2Val : m3_2.toNat = zm_hi * 4294967296 + (3 - zm_m2) := by
+    dsimp only [m3_2]; rw [BitVec.toNat_ofNat]
+    simp only [BitVec.extractLsb'_toNat, Nat.shiftRight_eq_div_pow, hPreg3]
+    change (zm_hi * 4294967296 + (3 - zm_m2 % 4)) % 75557863725914323419136 = _
+    rw [Nat.mod_eq_of_lt (show zm_m2 < 4 by clear hAcc2 hAcc3 hAcc2Cast hAcc3AddCast; omega)]
+    exact Nat.mod_eq_of_lt (by clear haSplit hbSplit hAcc2 hAcc3 hAcc2Cast hAcc3AddCast hz0Decomp hzmDecomp; omega)
+  have hFinalSumLt76 : st₃.acc_s.toNat + st₃.acc_c.toNat + m3_1.toNat + m3_2.toNat + (0#76).toNat < 2 ^ 76 := by
+    change st₃.acc_s.toNat + st₃.acc_c.toNat + m3_1.toNat + m3_2.toNat + 0 < 75557863725914323419136
+    rw [hAcc3, hAcc2, hm3_1Val, hm3_2Val]
+    apply nat_lt_of_int_lt
+    have sm1 : zm_hi ≤ 4294967295 := by clear hAcc2 hAcc3 hAcc2Cast hAcc3AddCast; omega
+    have sm2 : zm_m2 ≤ 3 := hzmM2Le3
+    rw [Int.natCast_add, Int.natCast_add, Int.natCast_add, Int.natCast_add, hAcc2Cast, hAcc3AddCast]
+    simp only [Int.natCast_add, Int.natCast_mul, int_natCast_sub sm1, int_natCast_sub sm2]
+    clear haSplit hbSplit hAcc3 hAcc2 hm3_1Val hm3_2Val hAcc2Le hAcc2Cast hAcc3AddCast
+      hPreg1 hPreg2 hPreg3 hz0Decomp hzmDecomp sm1 sm2
+    unfold goldilocksPrime
+    omega
+  have hCsaFinal := rtlCsa52_exact st₃.acc_s st₃.acc_c m3_1 m3_2 0 hFinalSumLt76
+  rw [rtlGl64Canon_sound _ _ (by rw [hCsaFinal]; exact hFinalSumLt76),
+      hCsaFinal, hAcc3, hAcc2, hm3_1Val, hm3_2Val,
+      Goldilocks.mul_val, Goldilocks.ofNat_val, Goldilocks.ofNat_val,
+      Nat.mod_mul_mod, Nat.mul_mod_mod]
+  have hKara : st₀.opa.toNat * st₀.opb.toNat + 4294967296 * (z0 + z2) =
+      z0 + 4294967296 * zm + 18446744073709551616 * z2 := by
+    rw [haSplit, hbSplit]
+    exact karatsuba_split32_identity a0 a1 b0 b1
+  let S_total := (acc2Val + acc3Add) +
+      (zm_lo * 4294967296 + (4294967295 - zm_hi)) + (zm_hi * 4294967296 + (3 - zm_m2)) + 0
+  change S_total % goldilocksPrime = (st₀.opa.toNat * st₀.opb.toNat) % goldilocksPrime
+  generalize st₀.opa.toNat * st₀.opb.toNat = prodAB at hKara ⊢
+  have hCongr : S_total + goldilocksPrime * (z2 + zm_hi + 4294967297 * zm_m2) =
+      prodAB + goldilocksPrime * (4 + z0_hi) := by
+    dsimp only [S_total]
+    apply nat_eq_of_int_eq
+    have sm1 : zm_hi ≤ 4294967295 := by clear hAcc2 hAcc3 hAcc2Cast hAcc3AddCast; omega
+    have sm2 : zm_m2 ≤ 3 := hzmM2Le3
+    rw [Int.natCast_add, Int.natCast_add, Int.natCast_add, Int.natCast_add, Int.natCast_add,
+        hAcc2Cast, hAcc3AddCast]
+    simp only [Int.natCast_add, Int.natCast_mul, int_natCast_sub sm1, int_natCast_sub sm2]
+    clear haSplit hbSplit hAcc2 hAcc3 hm3_1Val hm3_2Val hFinalSumLt76 hCsaFinal hAcc2Le
+      hAcc2Cast hAcc3AddCast hPreg1 hPreg2 hPreg3 sm1 sm2
+    unfold goldilocksPrime at *
+    omega
+  have hModSides := congrArg (· % goldilocksPrime) hCongr
+  rw [Nat.add_mul_mod_self_left, Nat.add_mul_mod_self_left] at hModSides
+  exact hModSides
+
+/-- **End-to-End 4-Cycle ASIC `Dregg-180` Booth-Karatsuba-CSA Theorem (`rtlKaratsuba_four_cycle_mul_sound`)**:
+    Starting in idle `mph = 0` with arbitrary `opa, opb : BitVec 64` (and arbitrary prior accumulator
+    contents!), pulsing `mul_start = true` and clocking 3 pipeline cycles (`mph = 1 → 2 → 3`)
+    reaches `mul_last = true` with `cv.toNat = (Goldilocks.mul (Goldilocks.ofNat opa.toNat) (Goldilocks.ofNat opb.toNat)).val`! -/
+theorem rtlKaratsuba_four_cycle_mul_sound (st₀ : KaratsubaState) (hIdle : st₀.mph = ⟨0, by decide⟩) :
+    let st₁ := rtlKaratsubaStep st₀ true
+    let st₂ := rtlKaratsubaStep st₁ false
+    let st₃ := rtlKaratsubaStep st₂ false
+    let (busy, last, cv) := rtlKaratsubaOutputs st₃
+    busy = true ∧
+    last = true ∧
+    cv.toNat = (Goldilocks.mul (Goldilocks.ofNat st₀.opa.toNat) (Goldilocks.ofNat st₀.opb.toNat)).val :=
+  rtlKaratsuba_four_cycle_aux st₀ _ _ _ hIdle rfl rfl rfl
+
+/-! ## 6. Mutation-Kill Teeth & Inhabitedness Witnesses -/
+
+/-- **Tooth (`tooth_fpga_wrong_c_bias_corrupts_residue`)**:
+    Mutating `C_BIAS` in `qsag_gl64_reduce.sv:19` from `GL_P + 3` to `GL_P + 2` produces an
+    off-by-one corrupted residue on `x = 1`! -/
+theorem tooth_fpga_wrong_c_bias_corrupts_residue :
+    (rtlFpgaGl64Stage2
+      (rtlFpgaGl64Stage1 (BitVec.ofNat 66 (goldilocksPrime + 2)) (BitVec.ofNat 136 1))).toNat ≠
+    (rtlFpgaGl64Reduce (BitVec.ofNat 136 1)).toNat := by
+  rw [rtlFpgaGl64Reduce_sound (BitVec.ofNat 136 1)]
+  have hx1 : (BitVec.ofNat 136 1).toNat = 1 := rfl
+  have hGood : (Goldilocks.ofNat (BitVec.ofNat 136 1).toNat).val = 1 := by
+    rw [Goldilocks.ofNat_val, hx1]
+    unfold goldilocksPrime; omega
+  rw [hGood]
+  let vqBad := rtlFpgaGl64Stage1 (BitVec.ofNat 66 (goldilocksPrime + 2)) (BitVec.ofNat 136 1)
+  have hP66 : 2 ^ 66 = 73786976294838206464 := by decide
+  have hP67 : 2 ^ 67 = 147573952589676412928 := by decide
+  have hBadStage1 : vqBad.toNat = goldilocksPrime := by
+    dsimp only [vqBad]
+    unfold rtlFpgaGl64Stage1
+    dsimp only
+    rw [rtlAddSplit3Chunk_toNat (by decide), rtlCsaReduce2_mod]
+    dsimp only [List.map]
+    rw [List.sum_cons, List.sum_cons, List.sum_cons, List.sum_cons, List.sum_cons, List.sum_cons,
+        List.sum_nil]
+    have hEx0 : ((BitVec.ofNat 136 1).extractLsb' 0 64).toNat = 1 := rfl
+    have hEx64 : ((BitVec.ofNat 136 1).extractLsb' 64 32).toNat = 0 := rfl
+    have hEx96 : ((BitVec.ofNat 136 1).extractLsb' 96 32).toNat = 0 := rfl
+    have hEx128 : ((BitVec.ofNat 136 1).extractLsb' 128 8).toNat = 0 := rfl
+    rw [hEx0, hEx64, hEx96, hEx128]
+    decide
+  have hBadStage2 : (rtlFpgaGl64Stage2 vqBad).toNat = 0 := by
+    unfold rtlFpgaGl64Stage2
+    dsimp only
+    let v1 := rtlAddSplit3Chunk 67 24 (BitVec.ofNat 67 vqBad.toNat) (BitVec.ofNat 67 (2 ^ 67 - goldilocksPrime))
+    let v2 := rtlAddSplit3Chunk 67 24 (BitVec.ofNat 67 vqBad.toNat) (BitVec.ofNat 67 (2 ^ 67 - 2 * goldilocksPrime))
+    have hv1Zero : v1.toNat = 0 := by
+      dsimp only [v1]
+      rw [rtlAddSplit3Chunk_toNat (by decide), BitVec.toNat_ofNat, BitVec.toNat_ofNat, hBadStage1, hP67]
+      unfold goldilocksPrime; omega
+    have hv2Val : v2.toNat = 147573952589676412928 - goldilocksPrime := by
+      dsimp only [v2]
+      rw [rtlAddSplit3Chunk_toNat (by decide), BitVec.toNat_ofNat, BitVec.toNat_ofNat, hBadStage1, hP67]
+      unfold goldilocksPrime; omega
+    have hv2Bit : v2.getLsbD 66 = true := by
+      rw [BitVec.getLsbD, hv2Val, Nat.testBit_eq_decide_div_mod_eq, hP66]
+      unfold goldilocksPrime; decide
+    have hv1Bit : v1.getLsbD 66 = false := by
+      simp only [BitVec.getLsbD, hv1Zero, Nat.zero_testBit]
+    change (rtlFpgaGl64Mux vqBad v1 v2).toNat = 0
+    unfold rtlFpgaGl64Mux
+    rw [hv2Bit, hv1Bit, Bool.not_true, ite_neg Bool.false_ne_true,
+        Bool.not_false, ite_pos rfl, BitVec.extractLsb'_toNat, hv1Zero,
+        Nat.shiftRight_zero, Nat.zero_mod]
+  change (rtlFpgaGl64Stage2 vqBad).toNat ≠ 1
+  rw [hBadStage2]
+  omega
+
+theorem inhabited_karatsuba_mul :
+    ∃ st₀ : KaratsubaState,
+      st₀.mph = ⟨0, by decide⟩ ∧
+      (rtlKaratsubaOutputs (rtlKaratsubaStep (rtlKaratsubaStep (rtlKaratsubaStep st₀ true) false) false)).1 = true := by
+  let st₀ : KaratsubaState :=
+    { opa := BitVec.ofNat 64 (goldilocksPrime - 1)
+      opb := BitVec.ofNat 64 (goldilocksPrime - 1)
+      acc_s := 0, acc_c := 0, preg := 0, sa := 0, sb := 0, mph := ⟨0, by decide⟩ }
+  exact ⟨st₀, rfl, (rtlKaratsuba_four_cycle_mul_sound st₀ rfl).1⟩
+
+#verify_constructive
+  Qsag.Silicon.rtlCsa32_mod
+  Qsag.Silicon.rtlCsa32_exact
+  Qsag.Silicon.rtlCsa52_exact
+  Qsag.Silicon.rtlCsaReduce2_mod
+  Qsag.Silicon.rtlPrefixAdd_toNat
+  Qsag.Silicon.rtlAddSplit3Chunk_toNat
+  Qsag.Silicon.rtlFpgaGl64Reduce_sound
+  Qsag.Silicon.rtlFpgaGl64Step_two_clocks
+  Qsag.Silicon.rtlGl64Canon_sound
+  Qsag.Silicon.rtlMul33_sound
+  Qsag.Silicon.rtlGl64SqPipe_sound
+  Qsag.Silicon.rtlKaratsuba_four_cycle_mul_sound
+  Qsag.Silicon.tooth_fpga_wrong_c_bias_corrupts_residue
+  Qsag.Silicon.inhabited_karatsuba_mul
+
+#tooth_pair
+  Qsag.Silicon.rtlFpgaGl64Reduce_sound
+  vs
+  Qsag.Silicon.tooth_fpga_wrong_c_bias_corrupts_residue
+
+#verify_inhabited
+  Qsag.Silicon.rtlKaratsuba_four_cycle_mul_sound
+  Qsag.Silicon.inhabited_karatsuba_mul
+
+end Qsag.Silicon
+end
