@@ -327,6 +327,73 @@ fn ole_blind_ext2_batch(
     Ok(w.into_inner())
 }
 
+fn commit_and_open_additive_ext2_batch(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    shares_per_party: &[Vec<GoldilocksExt2>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<GoldilocksExt2>, PreprocessError> {
+    let n = shares_per_party.len();
+    if n == 0 || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t: n, n });
+    }
+    let m = shares_per_party[0].len();
+    if shares_per_party.iter().any(|row| row.len() != m) {
+        return Err(PreprocessError::InvalidThreshold { t: m, n });
+    }
+    if m == 0 {
+        return Ok(Vec::new());
+    }
+    let len_be = (m as u64).to_be_bytes();
+    let mut salts = SecretBuffer(vec![[0u8; 32]; n]);
+    let mut payloads = SecretBuffer(vec![Vec::new(); n]);
+    let mut coms = Vec::with_capacity(n);
+    for p in 0..n {
+        salts[p] = party_rngs[p].next_bytes32();
+        let mut buf = Vec::with_capacity(16 * m);
+        for &val in &shares_per_party[p] {
+            buf.extend_from_slice(&val.to_be_bytes());
+        }
+        payloads[p] = buf;
+        let pid = (p as u64).to_be_bytes();
+        // Six frames vs three (`blind_open_degree_ext2`), five (`blind_open_ext2_pooled`),
+        // and seven (`refill_ext2_blind_pool`), preserving strict multi-frame disjointness.
+        coms.push(cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BLIND.EXT2.DEG/v1",
+            &[
+                session_id,
+                phase.as_bytes(),
+                &pid,
+                &len_be,
+                &payloads[p],
+                &salts[p],
+            ],
+        ));
+    }
+    let mut sums = vec![GoldilocksExt2::ZERO; m];
+    for p in 0..n {
+        let pid = (p as u64).to_be_bytes();
+        let exp = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.BLIND.EXT2.DEG/v1",
+            &[
+                session_id,
+                phase.as_bytes(),
+                &pid,
+                &len_be,
+                &payloads[p],
+                &salts[p],
+            ],
+        );
+        if !ct_eq_bytes32(&exp, &coms[p]) {
+            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: p });
+        }
+        for k in 0..m {
+            sums[k] += shares_per_party[p][k];
+        }
+    }
+    Ok(sums)
+}
+
 fn commit_and_open_additive_tower128(
     session_id: &[u8; 32],
     phase: &'static str,
@@ -362,6 +429,72 @@ fn commit_and_open_additive_tower128(
         sum = sum.add(shares[p]);
     }
     Ok(sum)
+}
+
+fn commit_and_open_additive_tower128_batch(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    shares_per_party: &[Vec<Tower128>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<Tower128>, PreprocessError> {
+    let n = shares_per_party.len();
+    if n == 0 || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t: n, n });
+    }
+    let m = shares_per_party[0].len();
+    if shares_per_party.iter().any(|row| row.len() != m) {
+        return Err(PreprocessError::InvalidThreshold { t: m, n });
+    }
+    if m == 0 {
+        return Ok(Vec::new());
+    }
+    let len_be = (m as u64).to_be_bytes();
+    let mut salts = SecretBuffer(vec![[0u8; 32]; n]);
+    let mut payloads = SecretBuffer(vec![Vec::new(); n]);
+    let mut coms = Vec::with_capacity(n);
+    for p in 0..n {
+        salts[p] = party_rngs[p].next_bytes32();
+        let mut buf = Vec::with_capacity(16 * m);
+        for &val in &shares_per_party[p] {
+            buf.extend_from_slice(&val.0.to_le_bytes());
+        }
+        payloads[p] = buf;
+        let pid = (p as u64).to_be_bytes();
+        // Six frames vs five in scalar `commit_and_open_additive_tower128`.
+        coms.push(cshake256_32_multi_frame(
+            b"QSAG.SPDZ.T128.OPEN.COM/v1",
+            &[
+                session_id,
+                phase.as_bytes(),
+                &pid,
+                &len_be,
+                &payloads[p],
+                &salts[p],
+            ],
+        ));
+    }
+    let mut sums = vec![Tower128::ZERO; m];
+    for p in 0..n {
+        let pid = (p as u64).to_be_bytes();
+        let exp = cshake256_32_multi_frame(
+            b"QSAG.SPDZ.T128.OPEN.COM/v1",
+            &[
+                session_id,
+                phase.as_bytes(),
+                &pid,
+                &len_be,
+                &payloads[p],
+                &salts[p],
+            ],
+        );
+        if !ct_eq_bytes32(&exp, &coms[p]) {
+            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: p });
+        }
+        for k in 0..m {
+            sums[k] = sums[k].add(shares_per_party[p][k]);
+        }
+    }
+    Ok(sums)
 }
 
 pub(crate) fn blind_open_tower128(
@@ -471,12 +604,16 @@ pub(super) struct BlindPool {
     poisoned: bool,
     #[cfg(test)]
     fail_next_refill: bool,
+    #[cfg(test)]
+    tamper_next_refill_c: Option<(usize, usize, Tower128)>,
     ext2_triples: Vec<Ext2BlindTriple>,
     ext2_staged: u64,
     ext2_refills: u64,
     ext2_poisoned: bool,
     #[cfg(test)]
     fail_next_ext2_refill: bool,
+    #[cfg(test)]
+    tamper_next_ext2_refill_c: Option<(usize, usize, GoldilocksExt2)>,
 }
 
 const BLIND_POOL_POISONED: PreprocessError = PreprocessError::VaultPoisoned {
@@ -494,6 +631,8 @@ const EXT2_BLIND_POOL_EXHAUSTED: PreprocessError = PreprocessError::VaultExhaust
 
 /// Independent blinding rounds per check; see [`blind_open_tower128`].
 const BLIND_ROUNDS: usize = 2;
+/// Sacrifice companions verified per staged `GoldilocksExt2` blinding triple (`(p^2 - 1)^-2 < 2^-255`).
+const EXT2_SAC_COMPANIONS: usize = 2;
 /// Checks staged by an automatic refill when a check finds the pool empty.
 const BLIND_AUTO_REFILL_CHECKS: usize = 8;
 
@@ -518,6 +657,28 @@ impl OtMesh {
     #[cfg(test)]
     pub(crate) fn fail_next_ext2_blinding_refill(&mut self) {
         self.blind_pool.fail_next_ext2_refill = true;
+    }
+
+    /// Inject an additive product fault on `(party, ole_col)` during the next `Tower128` refill.
+    #[cfg(test)]
+    pub(crate) fn tamper_next_blinding_refill_c(
+        &mut self,
+        party: usize,
+        ole_col: usize,
+        delta: Tower128,
+    ) {
+        self.blind_pool.tamper_next_refill_c = Some((party, ole_col, delta));
+    }
+
+    /// Inject an additive product fault on `(party, ole_col)` during the next `GoldilocksExt2` refill.
+    #[cfg(test)]
+    pub(crate) fn tamper_next_ext2_blinding_refill_c(
+        &mut self,
+        party: usize,
+        ole_col: usize,
+        delta: GoldilocksExt2,
+    ) {
+        self.blind_pool.tamper_next_ext2_refill_c = Some((party, ole_col, delta));
     }
 
     /// Joint randomizer of the triple the next pooled round will consume.
@@ -606,6 +767,9 @@ impl OtMesh {
         party_rngs: &mut [PartyPrivateRng],
     ) -> Result<(), PreprocessError> {
         let n = self.n;
+        let ole_count = checks
+            .checked_mul(1 + EXT2_SAC_COMPANIONS)
+            .ok_or(EXT2_BLIND_POOL_EXHAUSTED)?;
         let first_serial = self.blind_pool.ext2_staged;
         let next_staged = first_serial
             .checked_add(checks as u64)
@@ -633,7 +797,7 @@ impl OtMesh {
         let draw = |rngs: &mut [PartyPrivateRng]| {
             SecretBuffer(
                 rngs.iter_mut()
-                    .map(|rng| (0..checks).map(|_| rng.next_ext2()).collect::<Vec<_>>())
+                    .map(|rng| (0..ole_count).map(|_| rng.next_ext2()).collect::<Vec<_>>())
                     .collect::<Vec<_>>(),
             )
         };
@@ -646,6 +810,108 @@ impl OtMesh {
             &masks,
             party_rngs,
         )?);
+        #[cfg(test)]
+        let mut products = products;
+        #[cfg(test)]
+        if let Some((party, col, delta)) = self.blind_pool.tamper_next_ext2_refill_c.take() {
+            products[party][col] += delta;
+        }
+
+        // Active Beaver triple sacrifice: verify each staged triple `(r_k, a_k, c_k)` against
+        // `EXT2_SAC_COMPANIONS = 2` independent companion triples `(x_{j,k}, y_{j,k}, z_{j,k})`
+        // under post-OLE committed challenges (`(p^2 - 1)^-2 < 2^-255` soundness per triple).
+        let sac_coin = run_commit_and_open_coin(
+            &refill_sid,
+            b"EXT2_POOL_SAC_COIN",
+            &self.transcript,
+            party_rngs,
+        )?;
+        let mut sac_xof = Cshake256Xof::new(b"QSAG.SPDZ.BLIND.EXT2.H/v1");
+        sac_xof.absorb(b"ext2_pool_sac");
+        sac_xof.absorb(&refill_sid);
+        sac_xof.absorb(&sac_coin);
+        let sac_pairs = checks * EXT2_SAC_COMPANIONS;
+        let mut thetas = Vec::with_capacity(sac_pairs);
+        for _ in 0..sac_pairs {
+            let t = loop {
+                let mut bytes = [0u8; 48];
+                sac_xof.squeeze(&mut bytes);
+                let cand = GoldilocksExt2::new(
+                    Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[i])),
+                    Goldilocks::from_bytes24_unbiased(&core::array::from_fn(|i| bytes[24 + i])),
+                );
+                wipe_bytes(&mut bytes);
+                if !cand.ct_eq(GoldilocksExt2::ZERO) {
+                    break cand;
+                }
+            };
+            thetas.push(t);
+        }
+
+        let uv_shares = SecretBuffer(
+            (0..n)
+                .map(|p| {
+                    let mut row = Vec::with_capacity(2 * sac_pairs);
+                    for k in 0..checks {
+                        for j in 0..EXT2_SAC_COMPANIONS {
+                            let comp = (1 + j) * checks + k;
+                            let theta = thetas[k * EXT2_SAC_COMPANIONS + j];
+                            row.push(blinding_ext2_product(theta, randomizers[p][k]) - randomizers[p][comp]);
+                            row.push(masks[p][k] - masks[p][comp]);
+                        }
+                    }
+                    row
+                })
+                .collect::<Vec<_>>(),
+        );
+        let uv_open = commit_and_open_additive_ext2_batch(
+            &refill_sid,
+            "ext2_blind_pool_sac_uv",
+            &uv_shares,
+            party_rngs,
+        )?;
+
+        let s_shares = SecretBuffer(
+            (0..n)
+                .map(|p| {
+                    let mut row = Vec::with_capacity(sac_pairs);
+                    for k in 0..checks {
+                        for j in 0..EXT2_SAC_COMPANIONS {
+                            let comp = (1 + j) * checks + k;
+                            let pair_idx = k * EXT2_SAC_COMPANIONS + j;
+                            let theta = thetas[pair_idx];
+                            let u = uv_open[2 * pair_idx];
+                            let v = uv_open[2 * pair_idx + 1];
+                            let mut s = blinding_ext2_product(theta, products[p][k])
+                                - products[p][comp]
+                                - blinding_ext2_product(v, randomizers[p][comp])
+                                - blinding_ext2_product(u, masks[p][comp]);
+                            if p == 0 {
+                                s -= blinding_ext2_product(u, v);
+                            }
+                            row.push(s);
+                        }
+                    }
+                    row
+                })
+                .collect::<Vec<_>>(),
+        );
+        let s_open = commit_and_open_additive_ext2_batch(
+            &refill_sid,
+            "ext2_blind_pool_sac_s",
+            &s_shares,
+            party_rngs,
+        )?;
+        let mut all_zero = true;
+        for &s in &s_open {
+            all_zero &= s.ct_eq(GoldilocksExt2::ZERO);
+        }
+        if !all_zero {
+            return Err(PreprocessError::SacrificeResidualNonZero {
+                phase: "ext2_blind_pool_refill",
+            });
+        }
+
         self.blind_pool.ext2_triples.reserve(checks);
         for k in 0..checks {
             let column = |rows: &[Vec<GoldilocksExt2>]| {
@@ -771,6 +1037,7 @@ impl OtMesh {
         let count = checks
             .checked_mul(BLIND_ROUNDS)
             .ok_or(BLIND_POOL_EXHAUSTED)?;
+        let ole_count = count.checked_mul(2).ok_or(BLIND_POOL_EXHAUSTED)?;
         let first_serial = self.blind_pool.staged;
         let next_staged = first_serial
             .checked_add(count as u64)
@@ -798,7 +1065,7 @@ impl OtMesh {
         let draw = |rngs: &mut [PartyPrivateRng]| {
             SecretBuffer(
                 rngs.iter_mut()
-                    .map(|rng| (0..count).map(|_| rng.next_tower128()).collect::<Vec<_>>())
+                    .map(|rng| (0..ole_count).map(|_| rng.next_tower128()).collect::<Vec<_>>())
                     .collect::<Vec<_>>(),
             )
         };
@@ -813,6 +1080,101 @@ impl OtMesh {
             &randomizers,
             party_rngs,
         )?);
+        #[cfg(test)]
+        let mut products = products;
+        #[cfg(test)]
+        if let Some((party, col, delta)) = self.blind_pool.tamper_next_refill_c.take() {
+            products[party][col] = products[party][col].add(delta);
+        }
+
+        // 2-for-1 active Beaver triple sacrifice: consume companion `[count..2*count]` under
+        // post-OLE random challenges `theta_k in GF(2^128)*` and committed two-round openings.
+        // Because each check consumes `BLIND_ROUNDS = 2` independent sacrificed triples, active
+        // consistency soundness per check is `(2^128 - 1)^-2 < 2^-255`.
+        let sac_coin = run_commit_and_open_coin(
+            &refill_sid,
+            b"T128_POOL_SAC_COIN",
+            &self.transcript,
+            party_rngs,
+        )?;
+        let mut sac_xof = Cshake256Xof::new(b"QSAG.PCG.OLE.T128.LHL/v1");
+        sac_xof.absorb(b"blind_pool_sac");
+        sac_xof.absorb(&refill_sid);
+        sac_xof.absorb(&sac_coin);
+        let mut thetas = Vec::with_capacity(count);
+        for _ in 0..count {
+            let t = loop {
+                let mut tb = [0u8; 16];
+                sac_xof.squeeze(&mut tb);
+                let cand = Tower128(u128::from_le_bytes(tb));
+                wipe_bytes(&mut tb);
+                if !cand.ct_eq(Tower128::ZERO) {
+                    break cand;
+                }
+            };
+            thetas.push(t);
+        }
+
+        let uv_shares = SecretBuffer(
+            (0..n)
+                .map(|p| {
+                    let mut row = Vec::with_capacity(2 * count);
+                    for k in 0..count {
+                        let comp = count + k;
+                        row.push(
+                            blinding_tower_product(thetas[k], randomizers[p][k])
+                                .add(randomizers[p][comp]),
+                        );
+                        row.push(masks[p][k].add(masks[p][comp]));
+                    }
+                    row
+                })
+                .collect::<Vec<_>>(),
+        );
+        let uv_open = commit_and_open_additive_tower128_batch(
+            &refill_sid,
+            "blind_pool_sac_uv",
+            &uv_shares,
+            party_rngs,
+        )?;
+
+        let s_shares = SecretBuffer(
+            (0..n)
+                .map(|p| {
+                    (0..count)
+                        .map(|k| {
+                            let comp = count + k;
+                            let u = uv_open[2 * k];
+                            let v = uv_open[2 * k + 1];
+                            let mut s = blinding_tower_product(thetas[k], products[p][k])
+                                .add(products[p][comp])
+                                .add(blinding_tower_product(v, randomizers[p][comp]))
+                                .add(blinding_tower_product(u, masks[p][comp]));
+                            if p == 0 {
+                                s = s.add(blinding_tower_product(u, v));
+                            }
+                            s
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let s_open = commit_and_open_additive_tower128_batch(
+            &refill_sid,
+            "blind_pool_sac_s",
+            &s_shares,
+            party_rngs,
+        )?;
+        let mut all_zero = true;
+        for &s in &s_open {
+            all_zero &= s.ct_eq(Tower128::ZERO);
+        }
+        if !all_zero {
+            return Err(PreprocessError::SacrificeResidualNonZero {
+                phase: "blind_pool_refill",
+            });
+        }
+
         self.blind_pool.triples.reserve(count);
         for k in 0..count {
             let column = |rows: &[Vec<Tower128>]| {
@@ -1578,6 +1940,45 @@ mod tests {
                 let honest_r = target * residual.inv().unwrap() - corrupt_r;
                 assert_eq!((honest_r + corrupt_r) * residual, target);
             }
+        }
+    }
+
+    #[test]
+    fn tooth_beaver_sacrifice_rejects_corrupted_pooled_blinding_triples_and_poisons_mesh() {
+        let n = 3;
+        let sid = [0x5a; 32];
+        // Test single-bit corruption on BOTH live (`col = 1`) and companion (`col = 5`) Tower128 triples.
+        for bad_col in [1usize, 5usize] {
+            let mut rngs = tower_rngs(n, 0x91 ^ (bad_col as u8));
+            let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+            mesh.prestage_blinded_checks(1, &mut rngs).unwrap();
+            assert_eq!(mesh.staged_blinded_checks(), 1);
+            mesh.tamper_next_blinding_refill_c(2, bad_col, Tower128(1));
+            assert_eq!(
+                mesh.prestage_blinded_checks(2, &mut rngs),
+                Err(PreprocessError::SacrificeResidualNonZero {
+                    phase: "blind_pool_refill",
+                })
+            );
+            assert!(mesh.blinding_poisoned());
+            assert_eq!(mesh.staged_blinded_checks(), 0);
+        }
+
+        // Test corruption on live (`col = 0`) and both companion (`col = 2`, `col = 5`) GoldilocksExt2 triples.
+        for bad_col in [0usize, 2usize, 5usize] {
+            let mut rngs = tower_rngs(n, 0xa1 ^ (bad_col as u8));
+            let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+            mesh.prestage_ext2_blinded_checks(1, &mut rngs).unwrap();
+            assert_eq!(mesh.staged_ext2_blinded_checks(), 1);
+            mesh.tamper_next_ext2_blinding_refill_c(1, bad_col, GoldilocksExt2::ONE);
+            assert_eq!(
+                mesh.prestage_ext2_blinded_checks(2, &mut rngs),
+                Err(PreprocessError::SacrificeResidualNonZero {
+                    phase: "ext2_blind_pool_refill",
+                })
+            );
+            assert!(mesh.ext2_blinding_poisoned());
+            assert_eq!(mesh.staged_ext2_blinded_checks(), 0);
         }
     }
 
