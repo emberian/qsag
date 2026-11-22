@@ -43,11 +43,11 @@ use fips204::traits::{SerDes as Fips204SerDes, Verifier as Fips204Verifier};
 use qsag_accel::CpuReferenceBackend;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag, policy_signing_key_id};
 use qsag_agg::field::Goldilocks as AggGoldilocks;
-use qsag_agg::pcs::WhirSecurityRegime;
 use qsag_agg::zk_hem::blind_vc::{
     BlindVcStatement, BlindVcWitness, prove_presentation, verify_presentation,
 };
-use qsag_agg::zk_hem::protocol::{ZkHemError, ZkHemProof};
+use qsag_agg::zk_hem::v2::params::Profile as ZkHemProfile;
+use qsag_agg::zk_hem::v2::protocol::{ZkHemV2Error, ZkHemV2Proof};
 use qsag_asm::durable::{
     CounterOrder, HWM_PAGE_BYTES, HWM_SLOT_BYTES, RECORD_HEADER_BYTES, TwoSlotHwm, file_dev_ino,
     file_identity as asm_file_identity,
@@ -594,34 +594,34 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
         ]
     );
 
-    // 5. Prove & verify succinct `~239 KiB` `zk-Hem` presentation!
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+    // 5. Prove & verify succinct `zk-Hem v2` presentation!
+    let profile = ZkHemProfile::TurboShakeJohnson400;
     let verifier_ctx = b"qsag-e2e-verifier-challenge-nonce-v1";
     let zk_proof = prove_presentation(
         &zk_statement,
         &zk_witness,
         verifier_ctx,
-        regime,
+        profile,
         &[0x7A; 32],
     )
     .expect("prove_presentation");
 
     let proof_bytes = zk_proof.to_bytes();
     assert!(
-        (200_000..=265_000).contains(&proof_bytes.len()),
-        "expected ~239 KiB succinct BlindVC zk-Hem proof, got {} B",
+        (200_000..=360_000).contains(&proof_bytes.len()),
+        "expected succinct BlindVC zk-Hem v2 proof, got {} B",
         proof_bytes.len()
     );
     let shape = zk_statement
         .shape()
         .expect("well-formed BlindVcStatement shape");
     let decoded =
-        ZkHemProof::from_bytes(&proof_bytes, &shape, regime).expect("ZkHemProof::from_bytes");
+        ZkHemV2Proof::from_bytes(&proof_bytes, &shape).expect("ZkHemV2Proof::from_bytes");
     assert_eq!(decoded, zk_proof);
     assert!(verify_presentation(
         &zk_statement,
         verifier_ctx,
-        regime,
+        profile,
         &decoded
     ));
 
@@ -630,7 +630,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     assert!(!verify_presentation(
         &zk_statement,
         b"replayed-context",
-        regime,
+        profile,
         &decoded
     ));
     let mut forged_attr = zk_statement.clone();
@@ -638,7 +638,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     assert!(!verify_presentation(
         &forged_attr,
         verifier_ctx,
-        regime,
+        profile,
         &decoded
     ));
     let mut forged_root = zk_statement.clone();
@@ -646,7 +646,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     assert!(!verify_presentation(
         &forged_root,
         verifier_ctx,
-        regime,
+        profile,
         &decoded
     ));
     let mut forged_scope = zk_statement.clone();
@@ -654,7 +654,7 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
     assert!(!verify_presentation(
         &forged_scope,
         verifier_ctx,
-        regime,
+        profile,
         &decoded
     ));
     let mut forged_witness = zk_witness;
@@ -664,10 +664,10 @@ fn e2e_blind_vc_spdz_toprf_issuance_to_239kib_zk_hem_selective_disclosure() {
             &zk_statement,
             &forged_witness,
             verifier_ctx,
-            regime,
+            profile,
             &[0x7B; 32]
         ),
-        Err(ZkHemError::Unsatisfied)
+        Err(ZkHemV2Error::Unsatisfied)
     );
 }
 

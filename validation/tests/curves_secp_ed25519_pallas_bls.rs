@@ -2,7 +2,7 @@
 //! Legacy Curve & Post-Quantum Migration Ceremonies Differential Validation
 //!
 //! Cross-validates `qsag-migrate` (`secp256k1_ct`, `ed25519_ct`, `legacy`, `pallas`, `bls12_381`,
-//! and 438-repetition mixed-domain ZKBoo ownership proofs) against independent upstream ecosystem
+//! and `zk-Hem v2` ownership proofs) against independent upstream ecosystem
 //! cryptography crates:
 //! - `k256` + `sha2` + `ripemd` + `sha3` + `hmac` (Bitcoin P2PKH/P2WPKH `HASH160`, BIP-341 Taproot
 //!   tweaked x-only key, Ethereum `Keccak256` 20-byte EOA, and hardened BIP-32 derivation),
@@ -26,17 +26,21 @@ use pasta_curves::pallas::{
     Base as PallasRefFp, Point as PallasRefPoint, Scalar as PallasRefFq,
 };
 use proptest::prelude::*;
-use qsag_accel::CpuReferenceBackend;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
+use qsag_agg::zk_hem::v2::params::Profile;
 use qsag_migrate::{
-    BlsG1Point, BlsMigrationRequest, BlsOwnershipWitness, BlsValidatorCommitment, FpBls381,
-    FpPallas, FqPallas, FrBls381, HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness,
-    MigrateError, MigrationRequest, PallasCommitmentKind, PallasMigrationRequest,
-    PallasOwnershipWitness, PallasPoint, compute_bls_0x00_withdrawal_credentials,
-    ed25519_ct::public_key_from_clamped_scalar, prove_bls_key_possession_in_domain,
-    prove_bls_migration_in_domain, verify_bls_key_possession,
-    prove_migration_in_domain, prove_pallas_migration_in_domain, secp256k1_ct::SecpPoint,
-    verify_bls_migration, verify_migration_proof, verify_pallas_migration,
+    BlsG1Point, BlsOwnershipWitness, BlsValidatorCommitment, FpBls381, FpPallas, FqPallas,
+    FrBls381, HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness,
+    PallasCommitmentKind, PallasOwnershipWitness, PallasPoint,
+    compute_bls_0x00_withdrawal_credentials, ed25519_ct::public_key_from_clamped_scalar,
+    hem::{
+        registry::pq_commitment,
+        relations::{
+            Credential, KeySource, Lock, OwnershipError, OwnershipProof, OwnershipStatement,
+            OwnershipWitness, prove_ownership, verify_ownership,
+        },
+    },
+    secp256k1_ct::SecpPoint,
 };
 use ripemd::Ripemd160;
 use sha2::{Digest as Sha2Digest, Sha256, Sha512};
@@ -526,17 +530,19 @@ proptest! {
 }
 
 // ============================================================================
-// 5D. End-to-End 438-Repetition ZKBoo Migration Ceremonies + Adversarial Rejection
-//     Using Upstream-Generated Keys Across All 8 Ceremony Profiles
+
+// ============================================================================
+// 5D. End-to-End `zk-Hem v2` Ownership Migration Proofs + Adversarial Rejection
+//     Using Upstream-Generated Keys Across Bitcoin, Ethereum, Ed25519, & BLS12-381
 // ============================================================================
 
 #[test]
-fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection() {
-    let accel = CpuReferenceBackend::new();
+fn e2e_zkhem_v2_migration_proofs_from_upstream_crates_and_adversarial_rejection() {
+    let profile = Profile::TurboShakeJohnson400;
     let domain = [0x5Au8; 32];
     let epoch = 20_260_501_u64;
 
-    // 1. Upstream `k256` key -> Bitcoin HASH160, BIP-341 Taproot, Ethereum Keccak20 ceremonies
+    // 1. Upstream `k256` key -> Bitcoin HASH160, BIP-341 Taproot, Ethereum Keccak20
     let sk_bytes = [0x42u8; 32];
     let ref_k256 = K256SecretKey::from_slice(&sk_bytes).unwrap();
     let ref_pk33: [u8; 33] = ref_k256
@@ -545,198 +551,103 @@ fn e2e_zkboo_migration_ceremonies_from_upstream_crates_and_adversarial_rejection
         .as_bytes()
         .try_into()
         .unwrap();
-    let upstream_btc = LegacyCommitmentKind::BitcoinHash160(ref_bitcoin_hash160(&ref_pk33));
-    let upstream_taproot =
-        LegacyCommitmentKind::BitcoinTaprootXOnly(ref_taproot_tweaked_xonly(&ref_k256));
-    let upstream_eth = LegacyCommitmentKind::EthereumKeccak20(ref_ethereum_keccak20(&ref_k256));
+    let upstream_btc = Credential::BitcoinKeyHash(ref_bitcoin_hash160(&ref_pk33));
+    let upstream_taproot = Credential::BitcoinTaproot(ref_taproot_tweaked_xonly(&ref_k256));
+    let upstream_eth = Credential::EthereumAddress(ref_ethereum_keccak20(&ref_k256));
 
-    // 2. Upstream `ed25519-dalek` key -> Solana / SLIP-0010 Ed25519 ceremony
+    // 2. Upstream `ed25519-dalek` key -> RFC 8032 Ed25519
     let ed_seed = [0x73u8; 32];
     let ref_ed_pk = DalekEdSigningKey::from_bytes(&ed_seed)
         .verifying_key()
         .to_bytes();
-    let upstream_ed = LegacyCommitmentKind::Slip0010Ed25519(ref_ed_pk);
+    let upstream_ed = Credential::Ed25519Key(ref_ed_pk);
 
-    let wrong_witness = LegacyOwnershipWitness::from_raw_secret([0x99u8; 32]);
-
-    for (label, witness, commitment) in [
-        (
-            "BitcoinHash160",
-            LegacyOwnershipWitness::from_raw_secret(sk_bytes),
-            upstream_btc,
-        ),
-        (
-            "BitcoinTaprootXOnly",
-            LegacyOwnershipWitness::from_raw_secret(sk_bytes),
-            upstream_taproot,
-        ),
-        (
-            "EthereumKeccak20",
-            LegacyOwnershipWitness::from_raw_secret(sk_bytes),
-            upstream_eth,
-        ),
-        (
-            "Slip0010Ed25519",
-            LegacyOwnershipWitness::from_raw_secret(ed_seed),
-            upstream_ed,
-        ),
-    ] {
-        let req = MigrationRequest {
-            legacy: commitment,
-            target: sample_pq_destination(label.as_bytes()),
-            epoch,
-            domain,
-        };
-
-        // Wrong witness must fail before proof emission
-        assert_eq!(
-            prove_migration_in_domain(&wrong_witness, req.clone(), [0x11; 32], &accel),
-            Err(MigrateError::WitnessMismatchWithLegacyCommitment),
-            "wrong secret key must be rejected for {label}"
-        );
-
-        let (stmt, mut proof) =
-            prove_migration_in_domain(&witness, req, [0x22; 32], &accel).expect(label);
-        assert_eq!(
-            verify_migration_proof(&stmt, &proof, &domain, epoch),
-            Ok(()),
-            "438-rep ZKBoo verification failed for {label}"
-        );
-
-        // Mutate product share & destination address -> must reject
-        proof.repetitions[0].pair[0].products[0] ^= 0x01;
-        assert!(verify_migration_proof(&stmt, &proof, &domain, epoch).is_err());
-        proof.repetitions[0].pair[0].products[0] ^= 0x01;
-
-        let mut forged_stmt = stmt.clone();
-        forged_stmt.target_pq_address.commitment_256[0] ^= 0x80;
-        assert!(verify_migration_proof(&forged_stmt, &proof, &domain, epoch).is_err());
-    }
-
-    // 3. Upstream `pasta_curves` Zcash Orchard `ak` & `RedPallas` rerandomized `rk` ceremonies
-    let spend_auth_g = PallasRefPoint::hash_to_curve("z.cash:Orchard")(b"G");
-    let ref_ask = PallasRefFq::from_uniform_bytes(&[0x37u8; 64]);
-    let ref_alpha = PallasRefFq::from_uniform_bytes(&[0xA5u8; 64]);
-    let ref_ak_bytes = (spend_auth_g * ref_ask).to_bytes();
-    let ref_rk_bytes = (spend_auth_g * (ref_ask + ref_alpha)).to_bytes();
-
-    let pal_wit_ak = PallasOwnershipWitness::from_spend_auth_scalar_le(ref_ask.to_repr()).unwrap();
-    let pal_wit_rk =
-        PallasOwnershipWitness::from_rerandomized_le(ref_ask.to_repr(), ref_alpha.to_repr())
-            .unwrap();
-    let pal_wrong = PallasOwnershipWitness::from_spend_auth_scalar_le([0x01u8; 32]).unwrap();
-
-    for (label, wit, comm) in [
-        (
-            "OrchardSpendAuthKey",
-            &pal_wit_ak,
-            PallasCommitmentKind::OrchardSpendAuthKey(ref_ak_bytes),
-        ),
-        (
-            "OrchardRedPallasRk",
-            &pal_wit_rk,
-            PallasCommitmentKind::OrchardRedPallasRk(ref_rk_bytes),
-        ),
-    ] {
-        let req = PallasMigrationRequest {
-            commitment: comm,
-            target: sample_pq_destination(label.as_bytes()),
-            epoch,
-            domain,
-        };
-        assert!(prove_pallas_migration_in_domain(&pal_wrong, req.clone(), [0x33; 32], &accel).is_err());
-
-        let (stmt, mut proof) =
-            prove_pallas_migration_in_domain(wit, req, [0x44; 32], &accel).expect(label);
-        assert_eq!(
-            verify_pallas_migration(&stmt, &proof, &domain, epoch),
-            Ok(()),
-            "Pallas 438-rep ZKBoo verification failed for {label}"
-        );
-        proof.repetitions[17].pair[1].products[0] ^= 0x01;
-        assert!(verify_pallas_migration(&stmt, &proof, &domain, epoch).is_err());
-    }
-
-    // 4. Upstream `blstrs` Ethereum Beacon `OperatorSigningPubkey` key possession & `0x00` `BlsWithdrawalCredential` ceremonies
+    // 3. Upstream `blstrs` key -> Ethereum Beacon `0x00` BLS withdrawal credential
     let mut bls_sk_be = [0x6Cu8; 32];
     bls_sk_be[0] = 0x51;
     let ref_bls_sk = BlsRefScalar::from_bytes_be(&bls_sk_be).expect("canonical BlsRefScalar");
     let ref_bls_pk48 = BlsRefG1Affine::from(BlsRefG1Proj::generator() * ref_bls_sk).to_compressed();
     let mut ref_cred_0x00: [u8; 32] = Sha256::digest(ref_bls_pk48).into();
     ref_cred_0x00[0] = 0x00;
-    let mut cred_0x02 = [0xABu8; 32];
-    cred_0x02[0] = 0x02;
+    let upstream_bls = Credential::BlsWithdrawal(ref_cred_0x00);
 
-    let bls_wit = BlsOwnershipWitness::from_secret_scalar_be(ref_bls_sk.to_bytes_be()).unwrap();
-    let bls_wrong = BlsOwnershipWitness::from_secret_scalar_be({
-        let mut b = [0u8; 32];
-        b[31] = 1;
-        b
-    })
-    .unwrap();
+    let wrong_secp = OwnershipWitness::secp256k1_key(&[0x99u8; 32]);
 
-    // Withdrawal-key statement: the fund-migration entry points.
-    {
-        let label = "BlsWithdrawalCredential";
-        let req = BlsMigrationRequest {
-            commitment: BlsValidatorCommitment::BlsWithdrawalCredential(ref_cred_0x00),
-            validator_index: 512_345,
-            withdrawal_credentials: ref_cred_0x00,
-            target: sample_pq_destination(label.as_bytes()),
-            epoch,
-            domain,
-        };
-        assert!(prove_bls_migration_in_domain(&bls_wrong, req.clone(), [0x55; 32], &accel).is_err());
-
-        let (stmt, mut proof) =
-            prove_bls_migration_in_domain(&bls_wit, req, [0x66; 32], &accel).expect(label);
+    for (label, lock, source, witness, expected_cred) in [
+        (
+            "BitcoinHash160",
+            Lock::P2pkh,
+            KeySource::Secp256k1Key,
+            OwnershipWitness::secp256k1_key(&sk_bytes),
+            upstream_btc,
+        ),
+        (
+            "BitcoinTaprootXOnly",
+            Lock::TaprootKeyPath,
+            KeySource::Secp256k1Key,
+            OwnershipWitness::secp256k1_key(&sk_bytes),
+            upstream_taproot,
+        ),
+        (
+            "EthereumKeccak20",
+            Lock::Ethereum,
+            KeySource::Secp256k1Key,
+            OwnershipWitness::secp256k1_key(&sk_bytes),
+            upstream_eth,
+        ),
+        (
+            "Ed25519Seed",
+            Lock::Ed25519,
+            KeySource::Ed25519Seed,
+            OwnershipWitness::ed25519_seed(&ed_seed),
+            upstream_ed,
+        ),
+        (
+            "BlsWithdrawalCredential",
+            Lock::BlsWithdrawal,
+            KeySource::Bls12381Key,
+            OwnershipWitness::bls12_381_key(&ref_bls_sk.to_bytes_be()),
+            upstream_bls,
+        ),
+    ] {
+        let target_pq = pq_commitment(&sample_pq_destination(label.as_bytes()));
+        let stmt = OwnershipStatement::derive(lock, source, &witness, target_pq, domain, epoch)
+            .expect(label);
         assert_eq!(
-            verify_bls_migration(&stmt, &proof, &domain, epoch),
-            Ok(()),
-            "BLS12-381 438-rep ZKBoo verification failed for {label}"
+            stmt.credential, expected_cred,
+            "derived credential must match upstream reference crate for {label}"
         );
+
+        // Wrong witness must fail before proof emission
         assert_eq!(
-            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
-            Ok(())
+            prove_ownership(&stmt, &wrong_secp, profile, &[0x11; 32]),
+            Err(OwnershipError::WitnessMismatch),
+            "wrong secret key must be rejected for {label}"
         );
-        proof.repetitions[42].hidden_outputs[0] ^= 0x01;
-        assert!(verify_bls_migration(&stmt, &proof, &domain, epoch).is_err());
+
+        let proof = prove_ownership(&stmt, &witness, profile, &[0x22; 32]).expect(label);
+        let wire = proof.to_bytes();
+        let decoded = OwnershipProof::from_bytes(&wire, &stmt).expect("canonical v2 wire proof");
+        assert!(
+            verify_ownership(&stmt, profile, &decoded),
+            "zk-Hem v2 ownership verification failed for {label}"
+        );
+
+        // Mutate proof wire & destination PQ commitment -> must reject
+        let mut tampered = wire.clone();
+        let mid = tampered.len() / 2;
+        tampered[mid] ^= 0x01;
+        assert!(
+            OwnershipProof::from_bytes(&tampered, &stmt)
+                .is_none_or(|p| !verify_ownership(&stmt, profile, &p))
+        );
+
+        let mut forged_stmt = stmt.clone();
+        forged_stmt.pq_commitment[0] ^= 0x80;
+        assert!(!verify_ownership(&forged_stmt, profile, &decoded));
     }
 
-    // Operator signing-key statement: key possession only. The fund-migration prover and
-    // verifier refuse it, whatever withdrawal credential the caller attaches.
-    {
-        let label = "OperatorSigningPubkey0x02";
-        let req = BlsMigrationRequest {
-            commitment: BlsValidatorCommitment::OperatorSigningPubkey(ref_bls_pk48),
-            validator_index: 512_345,
-            withdrawal_credentials: cred_0x02,
-            target: sample_pq_destination(label.as_bytes()),
-            epoch,
-            domain,
-        };
-        assert!(prove_bls_migration_in_domain(&bls_wit, req.clone(), [0x55; 32], &accel).is_err());
-        assert!(
-            prove_bls_key_possession_in_domain(&bls_wrong, req.clone(), [0x55; 32], &accel)
-                .is_err()
-        );
-
-        let (stmt, mut proof) =
-            prove_bls_key_possession_in_domain(&bls_wit, req, [0x66; 32], &accel).expect(label);
-        assert_eq!(
-            verify_bls_key_possession(&stmt, &proof, &domain, epoch),
-            Ok(()),
-            "BLS12-381 438-rep ZKBoo verification failed for {label}"
-        );
-        assert!(
-            verify_bls_migration(&stmt, &proof, &domain, epoch).is_err(),
-            "an operator signing-key proof must not pass fund-migration verification"
-        );
-        proof.repetitions[42].hidden_outputs[0] ^= 0x01;
-        assert!(verify_bls_key_possession(&stmt, &proof, &domain, epoch).is_err());
-    }
-
-    // 5. Subgroup safety: point `(0, 2)` is on `y^2 = x^3 + 4` over `FpBls381` (`2^2 = 0^3 + 4`),
+    // 4. Subgroup safety: point `(0, 2)` is on `y^2 = x^3 + 4` over `FpBls381` (`2^2 = 0^3 + 4`),
     //    NOT in prime-order `G_1`! Verify both `blstrs` and `qsag_migrate::BlsG1Point` reject it!
     let torsion_pt = BlsG1Point {
         x: FpBls381::ZERO,

@@ -43,12 +43,17 @@ use qsag_agg::zk_hem::full_shard::{
     verify_full_shard_merge, verify_recursive_shard,
 };
 use qsag_agg::zk_hem::protocol::{
-    Layout, PublicHemProof, ZkHemError, ZkHemProof, prove as zkhem_prove,
-    prove_public as zkhem_prove_public, verify as zkhem_verify,
+    PublicHemProof, ZkHemError, prove_public as zkhem_prove_public,
     verify_public as zkhem_verify_public,
 };
 use qsag_agg::zk_hem::relation::{
-    ConstraintSystem, Lc, MASK_ROWS, Shape, sponge12, sponge12_native,
+    ConstraintSystem, Lc, MASK_ROWS, sponge12, sponge12_native,
+};
+use qsag_agg::zk_hem::v2::field5::Fp5;
+use qsag_agg::zk_hem::v2::params::Profile as ZkHemProfile;
+use qsag_agg::zk_hem::v2::protocol::{
+    ZkHemV2Error, ZkHemV2Proof, layout_of as zkhem_v2_layout, prove as zkhem_v2_prove,
+    verify as zkhem_v2_verify,
 };
 use qsag_agg::{
     AggSigProfile, HemAggConfig, HemAggregatedProof, HemAggregator, SignerBitmap, SigningMode,
@@ -629,11 +634,11 @@ fn corduroy_poseidon2_76896b_sign_verify_shard_aggregation_merge_and_retired_wir
     ));
 }
 
-fn build_demo_zkhem_relation(
+fn build_demo_zkhem_cs(
     pub_x: u64,
     secret_bit: u64,
     secret_preimage: u64,
-) -> (Shape, Vec<Goldilocks>, [Goldilocks; 2]) {
+) -> (ConstraintSystem, [Goldilocks; 2]) {
     let expected_digest = sponge12_native(&[gl(secret_bit), gl(secret_preimage), gl(pub_x)])[0];
     let mut cs = ConstraintSystem::new();
     let p_in = cs.public_input(gl(pub_x));
@@ -646,29 +651,20 @@ fn build_demo_zkhem_relation(
     cs.enforce_zero(Lc::from(prod).minus(&w));
     let st = sponge12(&mut cs, &[b, w, Lc::from(p_in)]);
     cs.enforce_zero(st[0].minus(&Lc::from(p_dig)));
-    let (shape, z) = cs.finish();
-    (shape, z, [gl(pub_x), expected_digest])
+    (cs, [gl(pub_x), expected_digest])
 }
 
 #[test]
 fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
-    let (shape, z, public_inputs) = build_demo_zkhem_relation(42, 1, 9_876_543);
+    let (cs_pub, public_inputs) = build_demo_zkhem_cs(42, 1, 9_876_543);
+    let (shape, z) = cs_pub.finish();
+    let (v2_shape, v2_z) = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish_v2();
     assert!(shape.is_satisfied(&z));
+    assert!(v2_shape.is_satisfied(&v2_z));
     assert_eq!(shape.num_public, 2);
     assert!(shape.num_rows() > MASK_ROWS);
 
-    // Classical tag `2` is refused by both `Layout::new` (hiding) and `prove_public`!
-    assert!(Layout::new(&shape, WhirSecurityRegime::BciksJohnsonClassical128).is_none());
-    assert_eq!(
-        zkhem_prove(
-            &shape,
-            z.clone(),
-            b"stmt",
-            WhirSecurityRegime::BciksJohnsonClassical128,
-            &[1; 32],
-        ),
-        Err(ZkHemError::RelationTooLarge)
-    );
+    // Classical tag `2` is refused by `prove_public`!
     assert_eq!(
         zkhem_prove_public(
             &shape,
@@ -681,47 +677,54 @@ fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
     );
 
     let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    let profile = ZkHemProfile::TurboShakeJohnson400;
     let stmt = b"zk-hem-hiding-vs-public-parity";
 
-    // 1. 5-table hiding `zk_hem::protocol::prove` & `verify`:
+    // 1. Quintic `zk-Hem v2` hiding `zk_hem::v2::protocol::prove` & `verify`:
     //    - `Layout` allocates `blind_cells > 0`
-    //    - Two distinct seeds produce distinct commitments & companion claims!
-    let hiding_layout = Layout::new(&shape, regime).unwrap();
+    //    - Two distinct seeds produce distinct roots & 32B tree nonces!
+    let hiding_layout = zkhem_v2_layout(&v2_shape).unwrap();
     assert!(hiding_layout.blind_cells > 0);
-    let zk_proof_1 = zkhem_prove(&shape, z.clone(), stmt, regime, &[0x11; 32]).unwrap();
-    let zk_proof_2 = zkhem_prove(&shape, z.clone(), stmt, regime, &[0x22; 32]).unwrap();
-    assert_ne!(zk_proof_1.commitment, zk_proof_2.commitment);
-    assert_ne!(zk_proof_1.companion_claims, zk_proof_2.companion_claims);
+    let zk_proof_1 = zkhem_v2_prove(&v2_shape, v2_z.clone(), stmt, profile, &[0x11; 32]).unwrap();
+    let zk_proof_2 = zkhem_v2_prove(&v2_shape, v2_z, stmt, profile, &[0x22; 32]).unwrap();
+    assert_ne!(zk_proof_1.root, zk_proof_2.root);
+    assert_ne!(zk_proof_1.tree_nonce, zk_proof_2.tree_nonce);
 
     let zk_bytes = zk_proof_1.to_bytes();
-    let zk_decoded = ZkHemProof::from_bytes(&zk_bytes, &shape, regime).unwrap();
+    let zk_decoded = ZkHemV2Proof::from_bytes(&zk_bytes, &v2_shape).unwrap();
     assert_eq!(zk_decoded, zk_proof_1);
-    assert!(zkhem_verify(
-        &shape,
+    assert!(zkhem_v2_verify(
+        &v2_shape,
         &public_inputs,
         stmt,
-        regime,
+        profile,
         &zk_decoded
     ));
 
-    // Tamper checks on hiding proof: wrong public input, wrong statement, mutated companion claim.
-    assert!(!zkhem_verify(
-        &shape,
+    // Tamper checks on hiding proof: wrong public input, wrong statement, mutated mask claim.
+    assert!(!zkhem_v2_verify(
+        &v2_shape,
         &[gl(43), public_inputs[1]],
         stmt,
-        regime,
+        profile,
         &zk_decoded
     ));
-    assert!(!zkhem_verify(
-        &shape,
+    assert!(!zkhem_v2_verify(
+        &v2_shape,
         &public_inputs,
         b"other-stmt",
-        regime,
+        profile,
         &zk_decoded
     ));
     let mut bad_zk = zk_decoded;
-    bad_zk.companion_claims[2] += GoldilocksExt4::ONE;
-    assert!(!zkhem_verify(&shape, &public_inputs, stmt, regime, &bad_zk));
+    bad_zk.opening.mask_claim += Fp5::ONE;
+    assert!(!zkhem_v2_verify(
+        &v2_shape,
+        &public_inputs,
+        stmt,
+        profile,
+        &bad_zk
+    ));
 
     // 2. 1-table public `zk_hem::protocol::prove_public` & `verify_public`:
     //    Exercises the 3 independent `ZKHEM_COMBINE` challenges and `HEM_PUBLIC_CELLS` batching
@@ -730,7 +733,7 @@ fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
     let pub_bytes = pub_proof.to_bytes();
     assert!(
         pub_bytes.len() < zk_bytes.len(),
-        "1-table PublicHemProof ({}) should be more compact than 5-table ZkHemProof ({})",
+        "1-table PublicHemProof ({}) should be more compact than hiding ZkHemV2Proof ({})",
         pub_bytes.len(),
         zk_bytes.len()
     );
@@ -773,12 +776,14 @@ fn zk_hem_hiding_5table_vs_public_1table_parity_and_tamper_rejection() {
     ));
 
     // Unsatisfied assignment (`secret_bit = 2`, non-Boolean) is refused by both provers.
-    let mut bad_z = build_demo_zkhem_relation(42, 1, 9_876_543).1;
-    bad_z[3] = gl(2);
+    let mut bad_v2_z = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish_v2().1;
+    bad_v2_z[3] = gl(2);
     assert_eq!(
-        zkhem_prove(&shape, bad_z.clone(), stmt, regime, &[0x44; 32]),
-        Err(ZkHemError::Unsatisfied)
+        zkhem_v2_prove(&v2_shape, bad_v2_z, stmt, profile, &[0x44; 32]),
+        Err(ZkHemV2Error::Unsatisfied)
     );
+    let mut bad_z = build_demo_zkhem_cs(42, 1, 9_876_543).0.finish().1;
+    bad_z[3] = gl(2);
     assert_eq!(
         zkhem_prove_public(&shape, bad_z, stmt, regime, &[0x44; 32]),
         Err(ZkHemError::Unsatisfied)
@@ -793,6 +798,7 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
     static FULL_SHARD_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = FULL_SHARD_TEST.lock().unwrap_or_else(|e| e.into_inner());
     let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    let parent_profile = ZkHemProfile::TurboShakeJohnson400;
     let fs_params = FullShardParams::new(regime, 2).expect("FullShardParams(slots=2)");
     assert_eq!(fs_params.slots(), 2);
 
@@ -857,23 +863,34 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
         &corrupt_proofs[last]
     ));
     assert!(matches!(
-        prove_full_shard_merge(&relation, &statements, &corrupt_proofs, regime, &[0x77; 32]),
+        prove_full_shard_merge(
+            &relation,
+            &statements,
+            &corrupt_proofs,
+            parent_profile,
+            &[0x77; 32]
+        ),
         Err(FullShardError::InvalidChild)
     ));
 
     // The honest parent proof verifies against the shards' public statements alone.
-    let parent_proof =
-        prove_full_shard_merge(&relation, &statements, &child_proofs, regime, &[0x88; 32])
-            .expect("prove_full_shard_merge");
+    let parent_proof = prove_full_shard_merge(
+        &relation,
+        &statements,
+        &child_proofs,
+        parent_profile,
+        &[0x88; 32],
+    )
+    .expect("prove_full_shard_merge");
     let parent_wire = parent_proof.to_bytes();
     assert_eq!(&parent_wire[..8], b"QSAGFSM2");
-    let decoded_parent =
-        FullShardMergeProof::from_bytes(&parent_wire, &relation, regime).expect("decode QSAGFSM2");
+    let decoded_parent = FullShardMergeProof::from_bytes(&parent_wire, &relation, parent_profile)
+        .expect("decode QSAGFSM2");
     assert_eq!(decoded_parent, parent_proof);
     assert!(verify_full_shard_merge(
         &relation,
         &publics,
-        regime,
+        parent_profile,
         &decoded_parent
     ));
 
@@ -889,7 +906,7 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
         assert!(!verify_full_shard_merge(
             &relation,
             &tampered,
-            regime,
+            parent_profile,
             &decoded_parent
         ));
     }
@@ -898,7 +915,7 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
         assert!(!verify_full_shard_merge(
             &relation,
             &swapped,
-            regime,
+            parent_profile,
             &decoded_parent
         ));
     }
@@ -906,11 +923,11 @@ fn full_shard_merge_and_tamper_rejection(children: usize) {
     // Wire tamper rejection: wrong magic, then payload bit flips.
     let mut bad_magic = parent_wire.clone();
     bad_magic[7] = b'1'; // the version-1 (non-hiding hologram) carrier
-    assert!(FullShardMergeProof::from_bytes(&bad_magic, &relation, regime).is_none());
+    assert!(FullShardMergeProof::from_bytes(&bad_magic, &relation, parent_profile).is_none());
     assert_wire_bit_flips_rejected(
         &parent_wire,
-        |bytes| FullShardMergeProof::from_bytes(bytes, &relation, regime),
-        |proof| verify_full_shard_merge(&relation, &publics, regime, proof),
+        |bytes| FullShardMergeProof::from_bytes(bytes, &relation, parent_profile),
+        |proof| verify_full_shard_merge(&relation, &publics, parent_profile, proof),
     );
 }
 
@@ -1084,21 +1101,21 @@ fn jorts_configurable_heights_bridge_and_zk_capability_revocation_batch_parity()
     )
     .expect("prepare_sorted");
 
-    let regime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    let profile = ZkHemProfile::default();
     let proof = cap_rel
-        .prove(&stmt, &inputs, ctx, regime, &[0xCC; 32])
+        .prove(&stmt, &inputs, ctx, profile, &[0xCC; 32])
         .expect("CapabilityRelation::prove");
     let wire = proof.to_bytes();
     assert_eq!(&wire[..8], CAPABILITY_WIRE_MAGIC);
-    let decoded = ZkCapabilityBatchProof::from_bytes(&wire, &cap_rel, regime)
+    let decoded = ZkCapabilityBatchProof::from_bytes(&wire, &cap_rel, profile)
         .expect("ZkCapabilityBatchProof::from_bytes");
     assert_eq!(decoded.to_bytes(), wire);
-    assert!(cap_rel.verify(&stmt, ctx, regime, &decoded));
-    assert!(!cap_rel.verify(&stmt, b"wrong-context", regime, &decoded));
+    assert!(cap_rel.verify(&stmt, ctx, profile, &decoded));
+    assert!(!cap_rel.verify(&stmt, b"wrong-context", profile, &decoded));
 
     assert_wire_bit_flips_rejected(
         &wire,
-        |bytes| ZkCapabilityBatchProof::from_bytes(bytes, &cap_rel, regime),
-        |proof| cap_rel.verify(&stmt, ctx, regime, proof),
+        |bytes| ZkCapabilityBatchProof::from_bytes(bytes, &cap_rel, profile),
+        |proof| cap_rel.verify(&stmt, ctx, profile, proof),
     );
 }
