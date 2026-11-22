@@ -897,3 +897,906 @@ def preBreak (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List
 
 /-- **`SM-DT-PRE` reduction adversary at chain position `(i, j)`.** Its coin supplies the starts
     of the other chains, the signing randomizer and the forger. -/
+def preAdv (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (starts : Nat → Bytes) (i j : Nat) (rand : Bytes)
+    (F : Forger) : Code targetIface TargetBreak :=
+  .call (.target (tw (i * 95 + j)) [])
+    (fun y => .call .reveal
+      (fun s => .ret (preBreak th tw code frame (s.getD []) starts i j (y.getD []) rand F)))
+
+theorem preAdv_within (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (starts : Nat → Bytes) (i j : Nat) (rand : Bytes)
+    (F : Forger) : Within 2 (preAdv th tw code frame starts i j rand F) :=
+  .call _ _ (fun _ => .call _ _ (fun _ => .ret 0 _))
+
+private theorem honestVal_congr (th : TwHash) (tw : Nat → Bytes) (seed : Bytes)
+    (starts starts' : Nat → Bytes) (k p : Nat) (h : starts' k = starts k) :
+    honestVal th tw seed starts' k p = honestVal th tw seed starts k p := by
+  unfold honestVal
+  rw [h]
+
+/-- The forger's transcript depends on the chain values only through the chain ends and the
+    positions the signer opens. -/
+theorem eufOutcome_congr (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (hv hv' : Nat → Nat → Bytes)
+    (rand : Bytes) (F : Forger)
+    (hEnds : ∀ k, k < 34 → hv' k 95 = hv k 95)
+    (hSig : ∀ m₁, F.query seed (pkRoot th tw seed hv) = some m₁ → ∀ k, k < 34 →
+      hv' k ((code rand (frame seed (pkRoot th tw seed hv) m₁)).getD k 0) =
+        hv k ((code rand (frame seed (pkRoot th tw seed hv) m₁)).getD k 0)) :
+    eufOutcome th tw code frame seed hv' rand F = eufOutcome th tw code frame seed hv rand F := by
+  have hRoot : pkRoot th tw seed hv' = pkRoot th tw seed hv := by
+    unfold pkRoot rootInput
+    exact congrArg (fun l => th seed (tw 3230) (List.flatten l))
+      (List.map_congr_left (fun k hk => hEnds k (List.mem_range.mp hk)))
+  unfold eufOutcome
+  rw [hRoot]
+  cases hQ : F.query seed (pkRoot th tw seed hv) with
+  | none => rfl
+  | some m₁ =>
+    have hVals : signVals hv' (code rand (frame seed (pkRoot th tw seed hv) m₁)) =
+        signVals hv (code rand (frame seed (pkRoot th tw seed hv) m₁)) := by
+      unfold signVals
+      exact List.map_congr_left (fun k hk => hSig m₁ hQ k (List.mem_range.mp hk))
+    show Outcome.mk _ _ _ _ _ = Outcome.mk _ _ _ _ _
+    rw [hVals]
+
+theorem eufOutcome_queried (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (hv : Nat → Nat → Bytes)
+    (rand : Bytes) (F : Forger) (m₁ : Bytes)
+    (hQ : F.query seed (pkRoot th tw seed hv) = some m₁) :
+    (eufOutcome th tw code frame seed hv rand F).queried =
+      some (m₁, code rand (frame seed (pkRoot th tw seed hv) m₁)) := by
+  unfold eufOutcome
+  rw [hQ]
+
+/-- From the challenge image of the honest value at `(i, j)` and the other chain starts, the
+    reduction reproduces the forger's transcript of the real run, provided the signer opens
+    chain `i` above position `j`. -/
+theorem puncturedOutcome_eq (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (starts starts' : Nat → Bytes)
+    (i j : Nat) (hj : j < 95) (rand : Bytes) (F : Forger)
+    (hStarts : ∀ k, k ≠ i → starts' k = starts k)
+    (hQ : ∀ q, (eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F).queried =
+      some q → q.2.getD i 0 = j + 1) :
+    eufOutcome th tw code frame seed
+      (puncturedVal th tw seed starts' i j (honestVal th tw seed starts i (j + 1))) rand F =
+      eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F := by
+  refine eufOutcome_congr th tw code frame seed _ _ rand F (fun k _ => ?_) (fun m₁ hm k _ => ?_)
+  · unfold puncturedVal
+    by_cases hk : k = i
+    · rw [itePos hk, itePos (by omega : j + 1 ≤ 95), honestVal_advance, hk]
+      congr 1
+      omega
+    · rw [iteNeg hk]
+      exact honestVal_congr th tw seed starts starts' k 95 (hStarts k hk)
+  · unfold puncturedVal
+    by_cases hk : k = i
+    · have hOpen := hQ _ (eufOutcome_queried th tw code frame seed _ rand F m₁ hm)
+      have hOpen' : (code rand (frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁)).getD
+          i 0 = j + 1 := hOpen
+      rw [itePos hk, hk, hOpen', itePos (Nat.le_refl _), Nat.sub_self]
+      rfl
+    · rw [iteNeg hk]
+      exact honestVal_congr th tw seed starts starts' k _ (hStarts k hk)
+
+/-- Transcript of the reduction adversary against the one-target `SM-DT-PRE` challenger. -/
+theorem preAdv_play {th : TwHash} (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes)
+    (starts : Nat → Bytes) (i j : Nat) (rand : Bytes) (F : Forger) (hidden : Nat → Bytes) :
+    Code.play (smDtPreOracle th 1 hidden) (preAdv th tw code frame starts i j rand F)
+        ⟨seed, [], false⟩ =
+      (preBreak th tw code frame seed starts i j (th seed (tw (i * 95 + j)) (hidden 0)) rand F,
+        ⟨seed, [(tw (i * 95 + j), hidden 0)], true⟩) := by
+  have hCond : (⟨seed, [], false⟩ : TargetState).revealed = false ∧
+      (⟨seed, [], false⟩ : TargetState).targets.length < 1 ∧
+      tw (i * 95 + j) ∉ (⟨seed, [], false⟩ : TargetState).targets.map Prod.fst :=
+    ⟨rfl, Nat.one_pos, fun h => nomatch h⟩
+  unfold preAdv
+  rw [Code.play_call, smDtPreOracle_target, itePos hCond, Code.play_call, smDtPreOracle_reveal,
+    Code.play_ret]
+  dsimp only [Option.getD_some, List.nil_append, List.length_nil]
+
+private theorem preWin_of_preimage {th : TwHash} (seed tweak hid cand : Bytes)
+    (h : th seed tweak cand = th seed tweak hid) :
+    smDtPreWin th ⟨seed, [(tweak, hid)], true⟩ ⟨tweak, [], cand⟩ = true := by
+  rw [smDtPreWin_eq]
+  dsimp only [List.any_cons, List.any_nil]
+  rw [decide_eq_true (rfl : tweak = tweak), decide_eq_true h]
+  rfl
+
+/-- **The `SM-DT-PRE` reduction wins when the forgery carries the honest value at `(i, j)`.**
+    `starts` are the chain starts of the real run and `hidden 0` is the honest value of chain
+    `i` at position `j`; the adversary is run on `starts'`, which agrees with `starts` off
+    chain `i`. -/
+theorem preAdv_wins {th : TwHash} (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes)
+    (starts starts' : Nat → Bytes) (i j : Nat) (hj : j < 95) (rand : Bytes) (F : Forger)
+    (hidden : Nat → Bytes)
+    (hStarts : ∀ k, k ≠ i → starts' k = starts k)
+    (hHid : hidden 0 = honestVal th tw seed starts i j)
+    (hQ : ∀ q, (eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F).queried =
+      some q → q.2.getD i 0 = j + 1)
+    (hCand : chainFrom th tw seed i
+        ((forgedCode code frame seed
+          (eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F)).getD i 0)
+        (j - (forgedCode code frame seed
+          (eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F)).getD i 0)
+        ((eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F).vals.getD i []) =
+      honestVal th tw seed starts i j) :
+    smDtPreWin th
+      (Code.play (smDtPreOracle th 1 hidden) (preAdv th tw code frame starts' i j rand F)
+        ⟨seed, [], false⟩).2
+      (Code.play (smDtPreOracle th 1 hidden) (preAdv th tw code frame starts' i j rand F)
+        ⟨seed, [], false⟩).1 = true := by
+  have hY : th seed (tw (i * 95 + j)) (hidden 0) = honestVal th tw seed starts i (j + 1) := by
+    rw [hHid, honestVal_succ]
+  have hBreak : preBreak th tw code frame seed starts' i j
+      (th seed (tw (i * 95 + j)) (hidden 0)) rand F =
+      ⟨tw (i * 95 + j), [], honestVal th tw seed starts i j⟩ := by
+    unfold preBreak
+    rw [hY, puncturedOutcome_eq th tw code frame seed starts starts' i j hj rand F hStarts hQ, hCand]
+  rw [preAdv_play (th := th) tw code frame seed starts' i j rand F hidden, hBreak]
+  exact preWin_of_preimage (th := th) seed _ _ _ (by rw [hHid])
+
+/-! ## 6. Reduction to `ITSR`
+
+The subset selected by a randomizer and a framed message is the set of opened positions of its
+codeword. The adversary owns the whole key, asks the challenger for the signing randomizer, and
+outputs the forger's randomizer and framed message. -/
+
+/-- Opened positions of a codeword: digit `d` of chain `i` is the number `i * 96 + d`. -/
+@[expose] def codeSubset (code : Bytes → Bytes → List Nat) (rand msg : Bytes) : List Nat :=
+  (List.range (code rand msg).length).map (fun i => i * 96 + (code rand msg).getD i 0)
+
+/-- **`ITSR` reduction adversary.** Its coin supplies the seed, the chain starts and the
+    forger. -/
+def itsrAdv (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (starts : Nat → Bytes) (F : Forger) :
+    Code byteOracleIface (Bytes × Bytes) :=
+  match F.query seed (pkRoot th tw seed (honestVal th tw seed starts)) with
+  | none =>
+    .ret ((F.forge seed (pkRoot th tw seed (honestVal th tw seed starts)) none).2.1,
+      frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+        (F.forge seed (pkRoot th tw seed (honestVal th tw seed starts)) none).1)
+  | some m₁ =>
+    .call (frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁)
+      (fun rand =>
+        .ret ((eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F).rand,
+          frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+            (eufOutcome th tw code frame seed (honestVal th tw seed starts) rand F).msg))
+
+theorem itsrAdv_within (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (starts : Nat → Bytes) (F : Forger) :
+    Within 1 (itsrAdv th tw code frame seed starts F) := by
+  unfold itsrAdv
+  cases F.query seed (pkRoot th tw seed (honestVal th tw seed starts)) with
+  | none => exact .ret 1 _
+  | some m₁ => exact .call _ _ (fun _ => .ret 0 _)
+
+theorem eufOutcome_root (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (seed : Bytes) (hv : Nat → Nat → Bytes)
+    (rand : Bytes) (F : Forger) :
+    (eufOutcome th tw code frame seed hv rand F).root = pkRoot th tw seed hv := by
+  unfold eufOutcome
+  cases F.query seed (pkRoot th tw seed hv) <;> rfl
+
+/-- **The `ITSR` reduction wins when the forgery repeats the signed codeword.** -/
+theorem itsrAdv_wins {code : Bytes → Bytes → List Nat}
+    (th : TwHash) (tw : Nat → Bytes) (frame : Bytes → Bytes → Bytes → Bytes)
+    (hFrame : ∀ s r m m' : Bytes, frame s r m = frame s r m' → m = m')
+    (seed : Bytes) (starts : Nat → Bytes) (F : Forger) (randOf : Nat → Bytes) (q : Nat)
+    (hq : 1 ≤ q)
+    (hCase : ∃ q₀,
+      (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).queried =
+        some q₀ ∧
+      (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).msg ≠ q₀.1 ∧
+      forgedCode code frame seed
+        (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F) = q₀.2) :
+    itsrWin (codeSubset code)
+      (Code.play (itsrOracle q randOf) (itsrAdv th tw code frame seed starts F) []).2
+      (Code.play (itsrOracle q randOf) (itsrAdv th tw code frame seed starts F) []).1 = true := by
+  obtain ⟨q₀, hQd, hFresh, hSame⟩ := hCase
+  cases hQ : F.query seed (pkRoot th tw seed (honestVal th tw seed starts)) with
+  | none =>
+    have hNone : (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0)
+        F).queried = none := by
+      unfold eufOutcome
+      rw [hQ]
+    rw [hNone] at hQd
+    cases hQd
+  | some m₁ =>
+    have hQd' := eufOutcome_queried th tw code frame seed (honestVal th tw seed starts)
+      (randOf 0) F m₁ hQ
+    rw [hQd] at hQd'
+    injection hQd' with hq₀
+    have hPlay : Code.play (itsrOracle q randOf) (itsrAdv th tw code frame seed starts F) [] =
+        (((eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).rand,
+          frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+            (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).msg),
+          [(randOf 0, frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁)]) := by
+      unfold itsrAdv
+      rw [hQ]
+      show Code.play (itsrOracle q randOf) (.call _ _) [] = _
+      rw [Code.play_call, itsrOracle_eq, itePos (show ([] : List (Bytes × Bytes)).length < q from hq),
+        Code.play_ret]
+      rfl
+    rw [hPlay, itsrWin_eq]
+    have hMsgNe : (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0)
+        F).msg ≠ m₁ := by
+      rw [hq₀] at hFresh
+      exact hFresh
+    have hFreshPair : ¬ (((eufOutcome th tw code frame seed (honestVal th tw seed starts)
+        (randOf 0) F).rand,
+        frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+          (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).msg) ∈
+        [(randOf 0, frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁)]) := by
+      intro hMem
+      have hEq := List.mem_singleton.mp hMem
+      injection hEq with _ hFr
+      exact hMsgNe (hFrame _ _ _ _ hFr)
+    have hSub : codeSubset code
+        (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).rand
+        (frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+          (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).msg) =
+        codeSubset code (randOf 0)
+          (frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁) := by
+      have hSame' : code
+          (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).rand
+          (frame seed (pkRoot th tw seed (honestVal th tw seed starts))
+            (eufOutcome th tw code frame seed (honestVal th tw seed starts) (randOf 0) F).msg) =
+          code (randOf 0) (frame seed (pkRoot th tw seed (honestVal th tw seed starts)) m₁) := by
+        have h1 := hSame
+        unfold forgedCode at h1
+        rw [eufOutcome_root] at h1
+        rw [h1, hq₀]
+      unfold codeSubset
+      rw [hSame']
+    dsimp only
+    rw [decide_eq_false hFreshPair, hSub]
+    refine (Bool.and_eq_true _ _).mpr ⟨rfl, List.all_eq_true.mpr (fun x hx => ?_)⟩
+    exact List.any_eq_true.mpr ⟨_, List.mem_singleton.mpr rfl, decide_eq_true hx⟩
+
+/-! ## 7. The closed experiment
+
+The coin of the forgery experiment has four independent uniform coordinates: the public seed,
+the signing randomizer, the `34` chain starts (`32` bytes each) and the forger's coin. Each
+reduction reads its challenger's sample from one presentation of the same coin space:
+`splitSeed` (the seed) for `SM-DT-TCR`, `splitItsr` (the randomizer) for `ITSR`, and
+`splitLink i` (the seed and the start of chain `i`) for the preimage experiments of chain
+`i`. -/
+
+/-- Number of coins of the uniform `32`-byte sampler. -/
+abbrev nB : Nat := Qsag.pow256 32
+
+theorem nB_pos : 0 < nB := Qsag.pow256_pos 32
+
+/-- Coin space of the forgery experiment for a forger with `nF` coins. -/
+abbrev eufCoins (nF : Nat) : Nat := nB * (nB * (powN nB 34 * nF))
+
+theorem eufCoins_pos {nF : Nat} (hF : 0 < nF) : 0 < eufCoins nF :=
+  Nat.mul_pos nB_pos (Nat.mul_pos nB_pos (Nat.mul_pos (powN_pos nB_pos 34) hF))
+
+private theorem ditePos {α : Type} {p : Prop} [Decidable p] (hp : p) (t : p → α) (e : ¬ p → α) :
+    dite p t e = t hp := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem diteNeg {α : Type} {p : Prop} [Decidable p] (hnp : ¬ p) (t : p → α) (e : ¬ p → α) :
+    dite p t e = e hnp := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+/-- Chain starts encoded by a vector of `34` digits: start `k` is the `k`-th digit. -/
+def startsOf (v : Fin (powN nB 34)) (k : Nat) : Bytes :=
+  if h : k < 34 then Qsag.byteVecSampler 32 ((digitSplit nB 33 ⟨k, h⟩).chal v) else []
+
+/-- The seed is the challenger coordinate. -/
+abbrev splitSeed (nF : Nat) : CoinSplit (eufCoins nF) nB (nB * (powN nB 34 * nF)) :=
+  CoinSplit.prod nB (nB * (powN nB 34 * nF))
+
+/-- Inside the remaining coordinates, the signing randomizer. -/
+abbrev splitRand (nF : Nat) : CoinSplit (nB * (powN nB 34 * nF)) nB (powN nB 34 * nF) :=
+  CoinSplit.prod nB (powN nB 34 * nF)
+
+/-- Inside the remaining coordinates, the vector of chain starts and the forger's coin. -/
+abbrev splitStarts (nF : Nat) : CoinSplit (powN nB 34 * nF) (powN nB 34) nF :=
+  CoinSplit.prod (powN nB 34) nF
+
+/-- The signing randomizer is the challenger coordinate. -/
+def splitItsr (nF : Nat) : CoinSplit (eufCoins nF) nB (nB * (powN nB 34 * nF)) :=
+  pullFromAdv (splitSeed nF) (splitRand nF)
+
+/-- The seed and the start of chain `i` are the challenger coordinate. -/
+def splitLink (nF : Nat) (i : Fin 34) :
+    CoinSplit (eufCoins nF) (nB * nB) (nB * (powN nB 33 * nF)) :=
+  joinChal (splitSeed nF)
+    (pullFromAdv (splitRand nF) (pullFromChal (splitStarts nF) (digitSplit nB 33 i)))
+
+/-- Seed of the run on coin `ω`. -/
+def seedAt {nF : Nat} (ω : Fin (eufCoins nF)) : Bytes :=
+  Qsag.byteVecSampler 32 ((splitSeed nF).chal ω)
+
+/-- Signing randomizer of the run on coin `ω`. -/
+def randAt {nF : Nat} (ω : Fin (eufCoins nF)) : Bytes :=
+  Qsag.byteVecSampler 32 ((splitRand nF).chal ((splitSeed nF).advc ω))
+
+/-- Digit vector of the chain starts of the run on coin `ω`. -/
+def startsIxAt {nF : Nat} (ω : Fin (eufCoins nF)) : Fin (powN nB 34) :=
+  (splitStarts nF).chal ((splitRand nF).advc ((splitSeed nF).advc ω))
+
+/-- Forger coin of the run on coin `ω`. -/
+def forgerIxAt {nF : Nat} (ω : Fin (eufCoins nF)) : Fin nF :=
+  (splitStarts nF).advc ((splitRand nF).advc ((splitSeed nF).advc ω))
+
+/-- **Closed one-time EUF-CMA experiment** of the target-sum Winternitz scheme: the challenger
+    samples the seed, the chain starts and the signing randomizer; the forger sees the public
+    key, may obtain one signature, and wins with a verifying signature on another message. -/
+def eufGame {nF : Nat} (hPos : 0 < eufCoins nF) (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) : FinGame (eufCoins nF) :=
+  ⟨hPos, fun ω =>
+    eufWin th tw code frame (seedAt ω)
+      (eufOutcome th tw code frame (seedAt ω)
+        (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+        (forger (forgerIxAt ω)))⟩
+
+theorem eufGame_win_eq {nF : Nat} (hPos : 0 < eufCoins nF) (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) (ω : Fin (eufCoins nF)) :
+    (eufGame hPos th tw code frame forger).win ω =
+      eufWin th tw code frame (seedAt ω)
+        (eufOutcome th tw code frame (seedAt ω)
+          (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+          (forger (forgerIxAt ω))) := by rfl
+
+theorem honestVal_eq (th : TwHash) (tw : Nat → Bytes) (seed : Bytes) (starts : Nat → Bytes)
+    (i p : Nat) : honestVal th tw seed starts i p = chainFrom th tw seed i 0 p (starts i) := by rfl
+
+theorem seedAt_length {nF : Nat} (ω : Fin (eufCoins nF)) : (seedAt ω).length = 32 :=
+  Qsag.byteVecSampler_length 32 _
+
+theorem randAt_length {nF : Nat} (ω : Fin (eufCoins nF)) : (randAt ω).length = 32 :=
+  Qsag.byteVecSampler_length 32 _
+
+theorem startsOf_length_eq (v : Fin (powN nB 34)) (i : Nat) (hi : i < 34) :
+    (startsOf v i).length = 32 := by
+  unfold startsOf
+  rw [ditePos hi]
+  exact Qsag.byteVecSampler_length 32 _
+
+/-! ### The reduction adversaries as functions of their coin coordinate -/
+
+/-- `SM-DT-TCR` adversary on the adversary coordinate of `splitSeed`. -/
+def tcrAdvAt {nF : Nat} (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (forger : Fin nF → Forger)
+    (a : Fin (nB * (powN nB 34 * nF))) : Code targetIface TargetBreak :=
+  tcrAdv th tw code frame (startsOf ((splitStarts nF).chal ((splitRand nF).advc a)))
+    (Qsag.byteVecSampler 32 ((splitRand nF).chal a))
+    (forger ((splitStarts nF).advc ((splitRand nF).advc a)))
+
+/-- `ITSR` adversary on the adversary coordinate of `splitItsr`. -/
+def itsrAdvAt {nF : Nat} (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (forger : Fin nF → Forger)
+    (b : Fin (nB * (powN nB 34 * nF))) : Code byteOracleIface (Bytes × Bytes) :=
+  itsrAdv th tw code frame
+    (Qsag.byteVecSampler 32 ((CoinSplit.prod nB (powN nB 34 * nF)).chal b))
+    (startsOf ((splitStarts nF).chal ((CoinSplit.prod nB (powN nB 34 * nF)).advc b)))
+    (forger ((splitStarts nF).advc ((CoinSplit.prod nB (powN nB 34 * nF)).advc b)))
+
+/-- Preimage adversary for position `j` of chain `i`, on the adversary coordinate of
+    `splitLink i`. The start of chain `i` is not among its coordinates; digit `0` stands in. -/
+def linkAdvAt {nF : Nat} (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (forger : Fin nF → Forger) (i : Fin 34) (j : Nat)
+    (b : Fin (nB * (powN nB 33 * nF))) : Code targetIface TargetBreak :=
+  preAdv th tw code frame
+    (startsOf ((digitSplit nB 33 i).pair ⟨0, nB_pos⟩
+      ((CoinSplit.prod (powN nB 33) nF).chal ((CoinSplit.prod nB (powN nB 33 * nF)).advc b))))
+    i.1 j
+    (Qsag.byteVecSampler 32 ((CoinSplit.prod nB (powN nB 33 * nF)).chal b))
+    (forger ((CoinSplit.prod (powN nB 33) nF).advc ((CoinSplit.prod nB (powN nB 33 * nF)).advc b)))
+
+/-- Challenger sample of the preimage experiments: a seed and one chain start. -/
+def linkSample (z : Fin (nB * nB)) : Bytes × Bytes :=
+  (Qsag.byteVecSampler 32 ((CoinSplit.prod nB nB).chal z),
+    Qsag.byteVecSampler 32 ((CoinSplit.prod nB nB).advc z))
+
+/-- **Preimage experiment for position `j` of chain `i`**: the `SM-DT-PRE` experiment with one
+    target whose hidden input is the honest value of chain `i` at position `j`. -/
+def linkGame {nF : Nat} (hPos : 0 < eufCoins nF) (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) (i : Fin 34) (j : Nat) : FinGame (eufCoins nF) :=
+  smDtPreGame hPos th 1 (fun ω => (linkSample ((splitLink nF i).chal ω)).1)
+    (fun ω k =>
+      [chainFrom th tw (linkSample ((splitLink nF i).chal ω)).1 i.1 0 j
+        (linkSample ((splitLink nF i).chal ω)).2].getD k [])
+    (fun ω => linkAdvAt th tw code frame forger i j ((splitLink nF i).advc ω))
+
+/-! ### Coordinates of a coin under the three presentations -/
+
+private theorem linkSample_seed {nF : Nat} (i : Fin 34) (ω : Fin (eufCoins nF)) :
+    (linkSample ((splitLink nF i).chal ω)).1 = seedAt ω := by
+  show Qsag.byteVecSampler 32 ((CoinSplit.prod nB nB).chal ((CoinSplit.prod nB nB).pair _ _)) = _
+  rw [(CoinSplit.prod nB nB).chal_pair]
+  rfl
+
+private theorem linkSample_start {nF : Nat} (i : Fin 34) (ω : Fin (eufCoins nF)) :
+    (linkSample ((splitLink nF i).chal ω)).2 = startsOf (startsIxAt ω) i.1 := by
+  show Qsag.byteVecSampler 32 ((CoinSplit.prod nB nB).advc ((CoinSplit.prod nB nB).pair _ _)) = _
+  rw [(CoinSplit.prod nB nB).advc_pair]
+  unfold startsOf
+  rw [ditePos i.2]
+  rfl
+
+private theorem linkAdvAt_eq {nF : Nat} (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) (i : Fin 34) (j : Nat) (ω : Fin (eufCoins nF)) :
+    linkAdvAt th tw code frame forger i j ((splitLink nF i).advc ω) =
+      preAdv th tw code frame
+        (startsOf ((digitSplit nB 33 i).pair ⟨0, nB_pos⟩
+          ((digitSplit nB 33 i).advc (startsIxAt ω))))
+        i.1 j (randAt ω) (forger (forgerIxAt ω)) := by
+  unfold linkAdvAt
+  show preAdv th tw code frame
+      (startsOf ((digitSplit nB 33 i).pair ⟨0, nB_pos⟩
+        ((CoinSplit.prod (powN nB 33) nF).chal ((CoinSplit.prod nB (powN nB 33 * nF)).advc
+          ((CoinSplit.prod nB (powN nB 33 * nF)).pair _
+            ((CoinSplit.prod (powN nB 33) nF).pair _ _))))))
+      i.1 j
+      (Qsag.byteVecSampler 32 ((CoinSplit.prod nB (powN nB 33 * nF)).chal
+        ((CoinSplit.prod nB (powN nB 33 * nF)).pair _ _)))
+      (forger ((CoinSplit.prod (powN nB 33) nF).advc ((CoinSplit.prod nB (powN nB 33 * nF)).advc
+        ((CoinSplit.prod nB (powN nB 33 * nF)).pair _
+          ((CoinSplit.prod (powN nB 33) nF).pair _ _))))) = _
+  rw [(CoinSplit.prod nB (powN nB 33 * nF)).advc_pair, (CoinSplit.prod nB (powN nB 33 * nF)).chal_pair,
+    (CoinSplit.prod (powN nB 33) nF).chal_pair, (CoinSplit.prod (powN nB 33) nF).advc_pair]
+  rfl
+
+/-- Off chain `i`, the starts the preimage adversary computes are the starts of the run. -/
+private theorem startsOf_punctured (i : Fin 34) (v : Fin (powN nB 34)) (k : Nat) (hk : k ≠ i.1) :
+    startsOf ((digitSplit nB 33 i).pair ⟨0, nB_pos⟩ ((digitSplit nB 33 i).advc v)) k =
+      startsOf v k := by
+  unfold startsOf
+  by_cases h : k < 34
+  · rw [ditePos h, ditePos h]
+    have hne : i ≠ ⟨k, h⟩ := fun e => hk (by rw [e])
+    have hEta : v = (digitSplit nB 33 i).pair ((digitSplit nB 33 i).chal v)
+        ((digitSplit nB 33 i).advc v) := ((digitSplit nB 33 i).pair_eta v).symm
+    have hInd := digitSplit_chal_pair_ne nB 33 i ⟨k, h⟩ hne ⟨0, nB_pos⟩
+      ((digitSplit nB 33 i).chal v) ((digitSplit nB 33 i).advc v)
+    rw [hInd, ← hEta]
+  · rw [diteNeg h, diteNeg h]
+
+private theorem itsrAdvAt_eq {nF : Nat} (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) (ω : Fin (eufCoins nF)) :
+    itsrAdvAt th tw code frame forger ((splitItsr nF).advc ω) =
+      itsrAdv th tw code frame (seedAt ω) (startsOf (startsIxAt ω)) (forger (forgerIxAt ω)) := by
+  unfold itsrAdvAt
+  show itsrAdv th tw code frame
+      (Qsag.byteVecSampler 32 ((CoinSplit.prod nB (powN nB 34 * nF)).chal
+        ((CoinSplit.prod nB (powN nB 34 * nF)).pair _ _)))
+      (startsOf ((splitStarts nF).chal ((CoinSplit.prod nB (powN nB 34 * nF)).advc
+        ((CoinSplit.prod nB (powN nB 34 * nF)).pair _ _))))
+      (forger ((splitStarts nF).advc ((CoinSplit.prod nB (powN nB 34 * nF)).advc
+        ((CoinSplit.prod nB (powN nB 34 * nF)).pair _ _)))) = _
+  rw [(CoinSplit.prod nB (powN nB 34 * nF)).chal_pair, (CoinSplit.prod nB (powN nB 34 * nF)).advc_pair]
+  rfl
+
+/-! ### Uniformity of the challenger samplers -/
+
+theorem uniformOn_linkSample :
+    UniformOn (fun x : Bytes × Bytes => x.1.length = 32 ∧ x.2.length = 32) linkSample where
+  mem z := ⟨Qsag.byteVecSampler_length 32 _, Qsag.byteVecSampler_length 32 _⟩
+  injective z z' h := by
+    have h1 : (CoinSplit.prod nB nB).chal z = (CoinSplit.prod nB nB).chal z' :=
+      (Qsag.uniformOn_byteVecSampler 32).injective _ _ (congrArg Prod.fst h)
+    have h2 : (CoinSplit.prod nB nB).advc z = (CoinSplit.prod nB nB).advc z' :=
+      (Qsag.uniformOn_byteVecSampler 32).injective _ _ (congrArg Prod.snd h)
+    rw [← (CoinSplit.prod nB nB).pair_eta z, ← (CoinSplit.prod nB nB).pair_eta z', h1, h2]
+  surjective x hx := by
+    obtain ⟨c₁, hc₁⟩ := (Qsag.uniformOn_byteVecSampler 32).surjective x.1 hx.1
+    obtain ⟨c₂, hc₂⟩ := (Qsag.uniformOn_byteVecSampler 32).surjective x.2 hx.2
+    refine ⟨(CoinSplit.prod nB nB).pair c₁ c₂, ?_⟩
+    unfold linkSample
+    rw [(CoinSplit.prod nB nB).chal_pair, (CoinSplit.prod nB nB).advc_pair, hc₁, hc₂]
+
+/-- The start-of-chain sample in the shape of the `SM-DT-PRE` challenger. -/
+def startSample (z : Fin (nB * nB)) : Bytes × List Bytes :=
+  ((linkSample z).1, [(linkSample z).2])
+
+theorem uniformOn_startSample :
+    UniformOn (SmDtPreSampleOk 32 32 1) startSample where
+  mem z := (preSampleOk_iff 32 32 1 _).mpr
+    ⟨(uniformOn_linkSample.mem z).1, rfl, fun h hh => by
+      rw [List.mem_singleton.mp hh]
+      exact (uniformOn_linkSample.mem z).2⟩
+  injective z z' h := by
+    have h1a : (startSample z).1 = (startSample z').1 := congrArg Prod.fst h
+    have h2a : (startSample z).2 = (startSample z').2 := congrArg Prod.snd h
+    have h1 : (linkSample z).1 = (linkSample z').1 := h1a
+    have h2 : [(linkSample z).2] = [(linkSample z').2] := h2a
+    injection h2 with h3
+    exact uniformOn_linkSample.injective z z' (Prod.ext h1 h3)
+  surjective x hx := by
+    obtain ⟨h1, h2, h3⟩ := (preSampleOk_iff 32 32 1 x).mp hx
+    obtain ⟨s, l⟩ := x
+    match l, h2, h3 with
+    | [y], _, h3 =>
+      obtain ⟨z, hz⟩ := uniformOn_linkSample.surjective (s, y) ⟨h1, h3 y (List.mem_singleton.mpr rfl)⟩
+      refine ⟨z, ?_⟩
+      unfold startSample
+      rw [hz]
+
+/-- The signing-randomizer sample in the shape of the `ITSR` challenger. -/
+def randSample (c : Fin nB) : List Bytes := [Qsag.byteVecSampler 32 c]
+
+theorem uniformOn_randSample :
+    UniformOn (ItsrSampleOk 32 1) randSample where
+  mem c := (itsrSampleOk_iff 32 1 _).mpr ⟨rfl, fun r hr => by
+    rw [List.mem_singleton.mp hr]
+    exact Qsag.byteVecSampler_length 32 c⟩
+  injective c c' h := by
+    have h2 : [Qsag.byteVecSampler 32 c] = [Qsag.byteVecSampler 32 c'] := h
+    injection h2 with h3
+    exact (Qsag.uniformOn_byteVecSampler 32).injective c c' h3
+  surjective x hx := by
+    obtain ⟨h1, h2⟩ := (itsrSampleOk_iff 32 1 x).mp hx
+    match x, h1, h2 with
+    | [y], _, h2 =>
+      obtain ⟨c, hc⟩ := (Qsag.uniformOn_byteVecSampler 32).surjective y
+        (h2 y (List.mem_singleton.mpr rfl))
+      exact ⟨c, by unfold randSample; rw [hc]⟩
+
+/-! ### Every winning coin is a winning coin of a reduction -/
+
+/-- The `ITSR` experiment of the reduction. -/
+def itsrGameOf {nF : Nat} (hPos : 0 < eufCoins nF) (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) : FinGame (eufCoins nF) :=
+  itsrGame hPos (codeSubset code) 1 (fun ω k => (randSample ((splitItsr nF).chal ω)).getD k [])
+    (fun ω => itsrAdvAt th tw code frame forger ((splitItsr nF).advc ω))
+
+/-- The `SM-DT-TCR` experiment of the reduction: `3231` targets. -/
+def tcrGameOf {nF : Nat} (hPos : 0 < eufCoins nF) (th : TwHash) (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (forger : Fin nF → Forger) : FinGame (eufCoins nF) :=
+  smDtTcrGame hPos th 3231 (fun ω => Qsag.byteVecSampler 32 ((splitSeed nF).chal ω))
+    (fun ω => tcrAdvAt th tw code frame forger ((splitSeed nF).advc ω))
+
+/-- A coin on which the forgery carries the honest value of chain `i` at position `j`, below
+    what the signer opened, is a winning coin of the preimage experiment at `(i, j)`. -/
+theorem linkGame_win {th : TwHash} (tw : Nat → Bytes)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes) {nF : Nat}
+    (hPos : 0 < eufCoins nF) (forger : Fin nF → Forger) (i : Fin 34) (j : Nat) (hj : j < 95)
+    (ω : Fin (eufCoins nF))
+    (hQ : ∀ q, (eufOutcome th tw code frame (seedAt ω)
+        (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+        (forger (forgerIxAt ω))).queried = some q → q.2.getD i.1 0 = j + 1)
+    (hCand : chainFrom th tw (seedAt ω) i.1
+        ((forgedCode code frame (seedAt ω)
+          (eufOutcome th tw code frame (seedAt ω)
+            (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+            (forger (forgerIxAt ω)))).getD i.1 0)
+        (j - (forgedCode code frame (seedAt ω)
+          (eufOutcome th tw code frame (seedAt ω)
+            (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+            (forger (forgerIxAt ω)))).getD i.1 0)
+        ((eufOutcome th tw code frame (seedAt ω)
+          (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+          (forger (forgerIxAt ω))).vals.getD i.1 []) =
+      honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)) i.1 j) :
+    (linkGame hPos th tw code frame forger i j).win ω = true := by
+  unfold linkGame
+  rw [smDtPreGame.public_eqs]
+  show smDtPreWin th (smDtPreRun th 1 _ _ _ ω).2 (smDtPreRun th 1 _ _ _ ω).1 = true
+  rw [smDtPreRun.public_eqs, linkSample_seed, linkSample_start, linkAdvAt_eq]
+  exact preAdv_wins (th := th) tw code frame (seedAt ω) (startsOf (startsIxAt ω)) _ i.1 j hj (randAt ω)
+    (forger (forgerIxAt ω)) _ (fun k hk => startsOf_punctured i (startsIxAt ω) k hk) rfl hQ hCand
+
+/-- **Per-coin reduction.** On every winning coin of the forgery experiment, the `ITSR`
+    adversary wins, or the `SM-DT-TCR` adversary wins, or the preimage adversary of some chain
+    position `(i, j)` wins. -/
+theorem eufGame_win_reduction {th : TwHash} (tw : Nat → Bytes)
+    (hTw : ∀ a b : Nat, tw a = tw b → a = b)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32)
+    (code : Bytes → Bytes → List Nat) (hCode : ∀ r m : Bytes, CodeOk (code r m))
+    (frame : Bytes → Bytes → Bytes → Bytes)
+    (hFrame : ∀ s r m m' : Bytes, frame s r m = frame s r m' → m = m')
+    {nF : Nat} (hPos : 0 < eufCoins nF) (forger : Fin nF → Forger) (ω : Fin (eufCoins nF))
+    (hWin : (eufGame hPos th tw code frame forger).win ω = true) :
+    (itsrGameOf hPos th tw code frame forger).win ω = true ∨
+    (tcrGameOf hPos th tw code frame forger).win ω = true ∨
+    ∃ (i : Fin 34) (j : Nat), j < 95 ∧ (linkGame hPos th tw code frame forger i j).win ω = true := by
+  have hW : eufWin th tw code frame (seedAt ω)
+      (eufOutcome th tw code frame (seedAt ω)
+        (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+        (forger (forgerIxAt ω))) = true := hWin
+  rcases forgery_classified th tw hOut code hCode frame (seedAt ω) (startsOf (startsIxAt ω))
+      (randAt ω) (forger (forgerIxAt ω)) hW with hRepeat | hCol | ⟨i, j, hi, hj, _, hQ, hCand⟩
+  · refine .inl ?_
+    unfold itsrGameOf
+    rw [itsrGame_win, itsrRun_eq, itsrAdvAt_eq]
+    exact itsrAdv_wins (code := code) th tw frame hFrame (seedAt ω) (startsOf (startsIxAt ω))
+      (forger (forgerIxAt ω)) _ 1 (Nat.le_refl 1) hRepeat
+  · refine .inr (.inl ?_)
+    unfold tcrGameOf
+    rw [smDtTcrGame_win, smDtTcrRun_eq]
+    exact tcrAdv_wins (th := th) tw hTw code frame (seedAt ω) (startsOf (startsIxAt ω)) (randAt ω)
+      (forger (forgerIxAt ω)) 3231 (Nat.le_refl _) hCol
+  · exact .inr (.inr ⟨⟨i, hi⟩, j, hj,
+      linkGame_win (th := th) tw code frame hPos forger ⟨i, hi⟩ j hj ω hQ hCand⟩)
+
+/-! ### The bound -/
+
+/-- **One-wayness of the interior chain links** against the adversary class `𝒜`: for a uniform
+    seed and a uniform `32`-byte start, every adversary with programs in `𝒜` wins the one-target
+    `SM-DT-PRE` experiment whose hidden input is the value of chain `i` at position `j`,
+    `1 ≤ j < 95`, with probability at most `ε`. At `j = 0` the hidden input is the uniform start
+    and the experiment is the one of `SmDtPreHard`; for `j ≥ 1` the hidden input is a hash
+    output, which `SmDtPreHard` does not cover. -/
+@[expose] def ChainLinkHard (𝒜 : Code targetIface TargetBreak → Prop) (th : TwHash) (tw : Nat → Bytes)
+    (ε : Spec.RatBound) : Prop :=
+  ∀ (n nC nA : Nat) (hPos : 0 < n) (π : CoinSplit n nC nA) (sample : Fin nC → Bytes × Bytes),
+    UniformOn (fun x : Bytes × Bytes => x.1.length = 32 ∧ x.2.length = 32) sample →
+    ∀ (i j : Nat), i < 34 → 1 ≤ j → j < 95 →
+    ∀ adv : Fin nA → Code targetIface TargetBreak, (∀ a : Fin nA, 𝒜 (adv a)) →
+      GameBound (smDtPreGame hPos th 1 (fun ω => (sample (π.chal ω)).1)
+        (fun ω k =>
+          [chainFrom th tw (sample (π.chal ω)).1 i 0 j (sample (π.chal ω)).2].getD k [])
+        (fun ω => adv (π.advc ω))).winProb ε
+
+/-- **One-time EUF-CMA bound for the target-sum Winternitz layer of `Compact1122`**
+    (`w = 96`, `34` chains, digit sum `1615`). For every forger family,
+
+    `Pr[forgery] ≤ εItsr + εTcr + 34 · εPre + 3196 · εLink`,
+
+    where `εItsr` bounds `ITSR` of the codeword subset hash, `εTcr` bounds `SM-DT-TCR` of `th`
+    with `3231` targets, `εPre` bounds one-target `SM-DT-PRE` of `th` (the `34` chain starts),
+    and `εLink` bounds `ChainLinkHard` (the `34 · 94` interior chain positions), each against a
+    class containing the corresponding reduction adversaries. -/
+theorem compact1122_closed_euf_cma_bound {th : TwHash}
+    (tw : Nat → Bytes) (hTw : ∀ a b : Nat, tw a = tw b → a = b)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32)
+    (code : Bytes → Bytes → List Nat) (hCode : ∀ r m : Bytes, CodeOk (code r m))
+    (frame : Bytes → Bytes → Bytes → Bytes)
+    (hFrame : ∀ s r m m' : Bytes, frame s r m = frame s r m' → m = m')
+    {nF : Nat} (hPos : 0 < eufCoins nF) (forger : Fin nF → Forger)
+    {𝒜I : Code byteOracleIface (Bytes × Bytes) → Prop}
+    {𝒜T 𝒜P : Code targetIface TargetBreak → Prop}
+    {εItsr εTcr εPre εLink : Spec.RatBound}
+    (hItsr : ItsrHard 𝒜I (codeSubset code) 32 1 εItsr)
+    (hTcr : SmDtTcrHard 𝒜T th 32 3231 εTcr)
+    (hPre : SmDtPreHard 𝒜P th 32 32 1 εPre)
+    (hLink : ChainLinkHard 𝒜P th tw εLink)
+    (hAdvI : ∀ b, 𝒜I (itsrAdvAt th tw code frame forger b))
+    (hAdvT : ∀ a, 𝒜T (tcrAdvAt th tw code frame forger a))
+    (hAdvP : ∀ (i : Fin 34) (j : Nat) b, 𝒜P (linkAdvAt th tw code frame forger i j b)) :
+    GameBound (eufGame hPos th tw code frame forger).winProb
+      ((εItsr.add εTcr).add ((Spec.RatBound.scale 34 εPre).add (Spec.RatBound.scale 3196 εLink))) := by
+  let A : Fin 34 → FinGame (eufCoins nF) := fun i => linkGame hPos th tw code frame forger i 0
+  let B : Fin 3196 → FinGame (eufCoins nF) := fun t =>
+    linkGame hPos th tw code frame forger ⟨t.1 / 94, by have := t.2; omega⟩ (t.1 % 94 + 1)
+  have hA : ∀ i, GameBound (A i).winProb εPre := fun i =>
+    hPre (eufCoins nF) (nB * nB) (nB * (powN nB 33 * nF)) hPos (splitLink nF i) startSample
+      uniformOn_startSample (linkAdvAt th tw code frame forger i 0) (hAdvP i 0)
+  have hB : ∀ t, GameBound (B t).winProb εLink := fun t =>
+    hLink (eufCoins nF) (nB * nB) (nB * (powN nB 33 * nF)) hPos
+      (splitLink nF ⟨t.1 / 94, by have := t.2; omega⟩) linkSample uniformOn_linkSample
+      (t.1 / 94) (t.1 % 94 + 1) (by have := t.2; omega) (by omega) (by omega)
+      (linkAdvAt th tw code frame forger ⟨t.1 / 94, by have := t.2; omega⟩ (t.1 % 94 + 1))
+      (hAdvP _ _)
+  let RA : FinGame (eufCoins nF) := ⟨hPos, Qsag.anySlotWins 34 A⟩
+  let RB : FinGame (eufCoins nF) := ⟨hPos, Qsag.anySlotWins 3196 B⟩
+  let RP : FinGame (eufCoins nF) :=
+    ⟨hPos, fun ω => Qsag.anySlotWins 34 A ω || Qsag.anySlotWins 3196 B ω⟩
+  have hRP : GameBound RP.winProb ((Spec.RatBound.scale 34 εPre).add (Spec.RatBound.scale 3196 εLink)) :=
+    GameBound.trans
+      (event_le_two_reductions RP RA RB (fun ω h => Bool.or_eq_true_iff.mp h))
+      (Spec.RatBound.add_le_add (Qsag.anySlotWins_bound hPos 34 A hA)
+        (Qsag.anySlotWins_bound hPos 3196 B hB))
+  refine event_le_three_reductions (eufGame hPos th tw code frame forger)
+    (itsrGameOf hPos th tw code frame forger) (tcrGameOf hPos th tw code frame forger) RP
+    (fun ω hWin => ?_)
+    (hItsr (eufCoins nF) nB (nB * (powN nB 34 * nF)) hPos (splitItsr nF) randSample
+      uniformOn_randSample (itsrAdvAt th tw code frame forger) hAdvI)
+    (hTcr (eufCoins nF) nB (nB * (powN nB 34 * nF)) hPos (splitSeed nF) (Qsag.byteVecSampler 32)
+      (Qsag.uniformOn_byteVecSampler 32) (tcrAdvAt th tw code frame forger) hAdvT)
+    hRP
+  rcases eufGame_win_reduction (th := th) tw hTw hOut code hCode frame hFrame hPos forger ω hWin with
+    h | h | ⟨i, j, hj, h⟩
+  · exact .inl h
+  · exact .inr (.inl h)
+  · refine .inr (.inr ?_)
+    show (Qsag.anySlotWins 34 A ω || Qsag.anySlotWins 3196 B ω) = true
+    cases j with
+    | zero =>
+      rw [Qsag.anySlotWins_of_win 34 A ω i h]
+      rfl
+    | succ j' =>
+      have hIdx : i.1 * 94 + j' < 3196 := by have := i.2; omega
+      have hBwin : (B ⟨i.1 * 94 + j', hIdx⟩).win ω = true := by
+        have hTransport : ∀ (i' : Fin 34) (jj : Nat), i' = i → jj = j' + 1 →
+            (linkGame hPos th tw code frame forger i' jj).win ω = true := by
+          intro i' jj h1 h2
+          rw [h1, h2]
+          exact h
+        exact hTransport _ _ (Fin.ext (by show (i.1 * 94 + j') / 94 = i.1; omega))
+          (by show (i.1 * 94 + j') % 94 + 1 = j' + 1; omega)
+      rw [Qsag.anySlotWins_of_win 3196 B ω ⟨i.1 * 94 + j', hIdx⟩ hBwin]
+      exact Bool.or_true _
+
+/-! ## 8. Without the digit-sum constraint the scheme is forged by stepping chains forward -/
+
+/-- Forger against a code whose codeword for `m₂` dominates the codeword for `m₁`: obtain a
+    signature on `m₁` and advance every opened value to the position the codeword of `m₂`
+    opens. It never inverts a hash. -/
+def forwardForger (th : TwHash) (tw : Nat → Bytes) (code : Bytes → Bytes → List Nat)
+    (frame : Bytes → Bytes → Bytes → Bytes) (m₁ m₂ r₂ : Bytes) : Forger where
+  query _ _ := some m₁
+  forge seed root sig :=
+    match sig with
+    | none => (m₂, r₂, [])
+    | some s =>
+      (m₂, r₂, (List.range 34).map (fun i =>
+        chainFrom th tw seed i ((code s.1 (frame seed root m₁)).getD i 0)
+          ((code r₂ (frame seed root m₂)).getD i 0 - (code s.1 (frame seed root m₁)).getD i 0)
+          (s.2.getD i [])))
+
+private theorem honestVal_length (th : TwHash) (tw : Nat → Bytes)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32) (seed : Bytes) (starts : Nat → Bytes)
+    (i : Nat) (hStart : (starts i).length = 32) :
+    ∀ p : Nat, (honestVal th tw seed starts i p).length = 32
+  | 0 => hStart
+  | p + 1 => by rw [honestVal_succ]; exact hOut _ _ _
+
+private theorem startsOf_length (v : Fin (powN nB 34)) (i : Nat) (hi : i < 34) :
+    (startsOf v i).length = 32 := by
+  unfold startsOf
+  rw [ditePos hi]
+  exact Qsag.byteVecSampler_length 32 _
+
+/-- **Correctness.** For `32`-byte chain starts and a codeword with digits at most `95`, the
+    honest signature verifies under the honest root. -/
+theorem verify_signVals (th : TwHash) (tw : Nat → Bytes)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32) (seed : Bytes) (starts : Nat → Bytes)
+    (hStarts : ∀ i, i < 34 → (starts i).length = 32) (c : List Nat)
+    (hc : ∀ i, i < 34 → c.getD i 0 ≤ 95) :
+    verify th tw seed (pkRoot th tw seed (honestVal th tw seed starts)) c
+      (signVals (honestVal th tw seed starts) c) = true := by
+  have hLen : (signVals (honestVal th tw seed starts) c).length = 34 := by
+    unfold signVals
+    rw [List.length_map, List.length_range]
+  have hAll : (signVals (honestVal th tw seed starts) c).all (fun v => decide (v.length = 32)) =
+      true := by
+    refine List.all_eq_true.mpr (fun v hv => ?_)
+    unfold signVals at hv
+    obtain ⟨i, hi, rfl⟩ := List.mem_map.mp hv
+    exact decide_eq_true (honestVal_length th tw hOut seed starts i
+      (hStarts i (List.mem_range.mp hi)) _)
+  have hEnds : sigEnds th tw seed c (signVals (honestVal th tw seed starts) c) =
+      (List.range 34).map (fun i => honestVal th tw seed starts i 95) := by
+    unfold sigEnds signVals
+    refine List.map_congr_left (fun i hi => ?_)
+    have hi' : i < 34 := List.mem_range.mp hi
+    rw [getD_map_range _ 34 i hi', honestVal_advance]
+    congr 1
+    have := hc i hi'
+    omega
+  have hRoot : th seed (tw 3230)
+      ((List.range 34).map (fun i => honestVal th tw seed starts i 95)).flatten =
+      pkRoot th tw seed (honestVal th tw seed starts) := rfl
+  unfold verify
+  rw [decide_eq_true hLen, hAll, hEnds, decide_eq_true hRoot]
+  rfl
+
+/-- **The forward-stepping forger wins on every coin** when the codeword of `m₂` dominates the
+    codeword of `m₁` digit by digit. Two target-sum codewords never dominate one another unless
+    they are equal, so this needs a code that violates `CodeOk`. -/
+theorem forwardForger_wins (th : TwHash) (tw : Nat → Bytes)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32)
+    (code : Bytes → Bytes → List Nat) (frame : Bytes → Bytes → Bytes → Bytes)
+    (m₁ m₂ r₂ : Bytes) (hNe : m₂ ≠ m₁)
+    (hDom : ∀ (rand seed root : Bytes) (i : Nat), i < 34 →
+      (code rand (frame seed root m₁)).getD i 0 ≤ (code r₂ (frame seed root m₂)).getD i 0 ∧
+      (code r₂ (frame seed root m₂)).getD i 0 ≤ 95)
+    {nF : Nat} (hPos : 0 < eufCoins nF) (ω : Fin (eufCoins nF)) :
+    (eufGame hPos th tw code frame
+      (fun _ => forwardForger th tw code frame m₁ m₂ r₂)).win ω = true := by
+  show eufWin th tw code frame (seedAt ω)
+    (eufOutcome th tw code frame (seedAt ω)
+      (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+      (forwardForger th tw code frame m₁ m₂ r₂)) = true
+  have hOutc : eufOutcome th tw code frame (seedAt ω)
+      (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))) (randAt ω)
+      (forwardForger th tw code frame m₁ m₂ r₂) =
+      ⟨pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))),
+        some (m₁, code (randAt ω) (frame (seedAt ω)
+          (pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)))) m₁)),
+        m₂, r₂,
+        (List.range 34).map (fun i =>
+          honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)) i
+            ((code r₂ (frame (seedAt ω)
+              (pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω))))
+              m₂)).getD i 0))⟩ := by
+    show Outcome.mk _ _ _ _ _ = Outcome.mk _ _ _ _ _
+    refine congrArg (Outcome.mk _ _ m₂ r₂) (List.map_congr_left (fun i hi => ?_))
+    have hi' : i < 34 := List.mem_range.mp hi
+    show chainFrom th tw (seedAt ω) i _ _ ((signVals _ _).getD i []) = _
+    unfold signVals
+    rw [getD_map_range _ 34 i hi', honestVal_advance]
+    dsimp only
+    congr 1
+    have := (hDom (randAt ω) (seedAt ω)
+      (pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)))) i hi').1
+    omega
+  rw [hOutc]
+  unfold eufWin forgedCode
+  dsimp only
+  have hVer := verify_signVals th tw hOut (seedAt ω) (startsOf (startsIxAt ω))
+    (fun i hi => startsOf_length _ i hi)
+    (code r₂ (frame (seedAt ω)
+      (pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)))) m₂))
+    (fun i hi => (hDom (randAt ω) (seedAt ω)
+      (pkRoot th tw (seedAt ω) (honestVal th tw (seedAt ω) (startsOf (startsIxAt ω)))) i hi).2)
+  unfold signVals at hVer
+  rw [decide_eq_true hNe, hVer]
+  rfl
+
+/-- Code without the digit-sum constraint: digit `0` everywhere for the empty message, digit
+    `1` everywhere otherwise. -/
+def stepCode (_ msg : Bytes) : List Nat :=
+  if msg = [] then List.replicate 34 0 else List.replicate 34 1
+
+theorem stepCode_not_codeOk : ¬ ∀ r m : Bytes, CodeOk (stepCode r m) := by
+  intro h
+  have hSum := (h [] []).2.1
+  have hZero : (stepCode [] []).sum = 0 := by decide
+  rw [hZero] at hSum
+  exact absurd hSum (by decide)
+
+/-- Against `stepCode` the forward-stepping forger wins the experiment on every coin, for every
+    tweakable hash with `32`-byte digests. -/
+theorem forwardForger_wins_stepCode (th : TwHash) (tw : Nat → Bytes)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32) {nF : Nat} (hPos : 0 < eufCoins nF)
+    (ω : Fin (eufCoins nF)) :
+    (eufGame hPos th tw stepCode (fun _ _ m => m)
+      (fun _ => forwardForger th tw stepCode (fun _ _ m => m) [] [0] [])).win ω = true := by
+  refine forwardForger_wins th tw hOut stepCode (fun _ _ m => m) [] [0] [] (by decide)
+    (fun rand seed root i hi => ?_) hPos ω
+  have h0 : (stepCode rand []).getD i 0 = 0 := by
+    show (List.replicate 34 0).getD i 0 = 0
+    rw [List.getD_eq_getElem?_getD, List.getElem?_replicate]
+    split <;> rfl
+  have h1 : (stepCode [] [0]).getD i 0 = 1 := by
+    show (List.replicate 34 1).getD i 0 = 1
+    rw [List.getD_eq_getElem?_getD, List.getElem?_replicate, itePos hi]
+    rfl
+  show (stepCode rand []).getD i 0 ≤ (stepCode [] [0]).getD i 0 ∧
+    (stepCode [] [0]).getD i 0 ≤ 95
+  rw [h0, h1]
+  exact ⟨by decide, by decide⟩
+
+/-- **Tooth: the digit-sum constraint is load-bearing.** For the code `stepCode`, which violates
+    `CodeOk` (`stepCode_not_codeOk`), no bound below `1` holds for the forgery experiment: the
+    forward-stepping forger wins on every coin. -/
+theorem tooth_drop_target_sum_forward_step_forges (th : TwHash) (tw : Nat → Bytes)
+    (hOut : ∀ s t m : Bytes, (th s t m).length = 32) {nF : Nat} (hPos : 0 < eufCoins nF)
+    {ε : Spec.RatBound} (hε : ε.num < ε.den) :
+    ¬ GameBound (eufGame hPos th tw stepCode (fun _ _ m => m)
+      (fun _ => forwardForger th tw stepCode (fun _ _ m => m) [] [0] [])).winProb ε :=
+  FinGame.not_bound_of_forall_win _ (fun ω => forwardForger_wins_stepCode th tw hOut hPos ω) hε
+
+#verify_constructive tcrAdv_wins tcrAdv_within commitLoop_play forgery_classified tcrAdv_play
+  preAdv_wins preAdv_within itsrAdv_wins itsrAdv_within puncturedOutcome_eq
+  eufGame_win_reduction compact1122_closed_euf_cma_bound verify_signVals
+  forwardForger_wins forwardForger_wins_stepCode stepCode_not_codeOk
+  tooth_drop_target_sum_forward_step_forges
+  uniformOn_linkSample uniformOn_startSample uniformOn_randSample digitSplit_chal_pair_ne
+
+#tooth_pair compact1122_closed_euf_cma_bound vs tooth_drop_target_sum_forward_step_forges
+
+end Qsag.Compact1122
+end

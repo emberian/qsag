@@ -1471,10 +1471,17 @@ inductive FrontierForgeryBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 2
       (r₂ ≠ r₁ ∨ d₂ ≠ d₁ ∨ c₂ ≠ c₁) →
       (H.squeezeRank pkSeed pkRoot r₂ d₂ c₂).toNat = (H.squeezeRank pkSeed pkRoot r₁ d₁ c₁).toNat →
       FrontierForgeryBreak H pkSeed skSeed w
-  | merkleCollision (v : Nat) (l₁ r₁ l₂ r₂ : BitVec 256) :
-      (l₁ ≠ l₂ ∨ r₁ ≠ r₂) → H.mergeNode pkSeed v l₁ r₁ = H.mergeNode pkSeed v l₂ r₂ → FrontierForgeryBreak H pkSeed skSeed w
-  | chainStepCollision (v step : Nat) (x₁ x₂ : BitVec 256) :
-      x₁ ≠ x₂ → H.chainStep pkSeed v step x₁ = H.chainStep pkSeed v step x₂ → FrontierForgeryBreak H pkSeed skSeed w
+  | merkleCollision (t v : Nat) (l₁ r₁ l₂ r₂ : BitVec 256) :
+      l₂ = honestNodeOut H pkSeed skSeed w t (2 * v) →
+      r₂ = honestNodeOut H pkSeed skSeed w t (2 * v + 1) →
+      (l₁ ≠ l₂ ∨ r₁ ≠ r₂) →
+      H.mergeNode pkSeed v l₁ r₁ = H.mergeNode pkSeed v l₂ r₂ →
+      FrontierForgeryBreak H pkSeed skSeed w
+  | chainStepCollision (t v step : Nat) (x₁ x₂ : BitVec 256) :
+      x₂ = chainAdvance H pkSeed v 0 step (honestNodeBase H pkSeed skSeed w t v) →
+      x₁ ≠ x₂ →
+      H.chainStep pkSeed v step x₁ = H.chainStep pkSeed v step x₂ →
+      FrontierForgeryBreak H pkSeed skSeed w
   | unrevealedSubtreeMergePreimage (t v : Nat) (lEnd rEnd : BitVec 256) :
       0 < t → 1 < v → H.mergeNode pkSeed v lEnd rEnd = honestNodeBase H pkSeed skSeed w t v →
       FrontierForgeryBreak H pkSeed skSeed w
@@ -1483,15 +1490,22 @@ inductive FrontierForgeryBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 2
       H.chainStep pkSeed v (revStep - 1) pre = chainAdvance H pkSeed v 0 revStep (honestNodeBase H pkSeed skSeed w t v) →
       FrontierForgeryBreak H pkSeed skSeed w
 
-def findChainStepCollision (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w v : Nat) :
-    (step rem : Nat) → (x₁ x₂ : BitVec 256) → x₁ ≠ x₂ →
+def findChainStepCollision (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w t v : Nat) :
+    (step rem : Nat) → (x₁ x₂ : BitVec 256) →
+    x₂ = chainAdvance H pkSeed v 0 step (honestNodeBase H pkSeed skSeed w t v) →
+    x₁ ≠ x₂ →
     chainAdvance H pkSeed v step rem x₁ = chainAdvance H pkSeed v step rem x₂ →
     FrontierForgeryBreak H pkSeed skSeed w
-  | _, 0, _, _, hNe, hAdv => False.elim (hNe hAdv)
-  | step, rem + 1, x₁, x₂, hNe, hAdv =>
+  | _, 0, _, _, _, hNe, hAdv => False.elim (hNe hAdv)
+  | step, rem + 1, x₁, x₂, hHon₂, hNe, hAdv =>
     let y₁ := H.chainStep pkSeed v step x₁; let y₂ := H.chainStep pkSeed v step x₂
-    if hEq : y₁ = y₂ then .chainStepCollision v step x₁ x₂ hNe hEq
-    else findChainStepCollision H pkSeed skSeed w v (step + 1) rem y₁ y₂ hEq hAdv
+    if hEq : y₁ = y₂ then .chainStepCollision t v step x₁ x₂ hHon₂ hNe hEq
+    else
+      have hHonNext : y₂ = chainAdvance H pkSeed v 0 (step + 1) (honestNodeBase H pkSeed skSeed w t v) := by
+        have hStep := chainAdvance_add H pkSeed v 0 step 1 (honestNodeBase H pkSeed skSeed w t v)
+        rw [Nat.zero_add, ← hHon₂] at hStep
+        exact hStep.symm
+      findChainStepCollision H pkSeed skSeed w t v (step + 1) rem y₁ y₂ hHonNext hEq hAdv
 
 def inspectSplitNode (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w t v : Nat)
     (hv : 0 < v) (lEnd₂ rEnd₂ : BitVec 256)
@@ -1508,13 +1522,13 @@ def inspectSplitNode (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w t v
     unfold m₁ hL hR honestNodeBase honestNodeOut; simp [show 2 * v > 1 by omega, show 2 * v + 1 > 1 by omega]
   if hmNe : m₂ ≠ m₁ then
     if hvGt : v > 1 then
-      .inl (findChainStepCollision H pkSeed skSeed w v 0 (w - 1) m₂ m₁ hmNe
+      .inl (findChainStepCollision H pkSeed skSeed w (t + 1) v 0 (w - 1) m₂ m₁ rfl hmNe
         (by unfold honestNodeOut at hOut; dsimp only [m₂, m₁] at *; simp [hvGt] at hOut; exact hOut))
     else False.elim (hmNe (by unfold honestNodeOut at hOut; dsimp only [m₂, m₁] at *; simp [hvGt] at hOut; exact hOut))
   else
     have hmEq := Decidable.of_not_not hmNe
-    if hlNe : lEnd₂ ≠ hL then .inl (.merkleCollision v lEnd₂ rEnd₂ hL hR (.inl hlNe) (hmEq.trans hm₁Eq))
-    else if hrNe : rEnd₂ ≠ hR then .inl (.merkleCollision v lEnd₂ rEnd₂ hL hR (.inr hrNe) (hmEq.trans hm₁Eq))
+    if hlNe : lEnd₂ ≠ hL then .inl (.merkleCollision t v lEnd₂ rEnd₂ hL hR rfl rfl (.inl hlNe) (hmEq.trans hm₁Eq))
+    else if hrNe : rEnd₂ ≠ hR then .inl (.merkleCollision t v lEnd₂ rEnd₂ hL hR rfl rfl (.inr hrNe) (hmEq.trans hm₁Eq))
     else .inr ⟨Decidable.of_not_not hlNe, Decidable.of_not_not hrNe, hmEq⟩
 
 def extractAntichainDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) (w : Nat) :
@@ -1573,7 +1587,7 @@ def extractOffsetDiffBreak (H : FrontierHashSuite) (pkSeed skSeed : BitVec 256) 
         simp [chainAdvance, show d₂ + (d₁ - 1 - d₂) = d₁ - 1 by omega, pre, yAtD1]
       if hHit : yAtD1 = honestD1 then .chainPreimageInversion t v d₁ pre (by omega) hd₁W hHit
       else
-        findChainStepCollision H pkSeed skSeed w v d₁ (w - 1 - d₁) yAtD1 honestD1 hHit (by
+        findChainStepCollision H pkSeed skSeed w t v d₁ (w - 1 - d₁) yAtD1 honestD1 rfl hHit (by
           unfold evalAntichainTree honestNodeOut at hEv; simp only [List.headD_cons, hv1, ↓reduceIte] at hEv
           have hAdd₂ := chainAdvance_add H pkSeed v d₂ (d₁ - d₂) (w - 1 - d₁) y
           have hAdd₁ := chainAdvance_add H pkSeed v 0 d₁ (w - 1 - d₁) (honestNodeBase H pkSeed skSeed w t v)
@@ -1881,6 +1895,46 @@ theorem frontierOneUseEufCmaWin_none (H : FrontierHashSuite) (p : FrontierFtsPar
   unfold frontierOneUseEufCmaWin
   exact Bool.true_and _
 
+theorem frontierOneUseEufCmaWin_signed (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (sk : FrontierSecretKey) (hg : BitVec 256) (ctr : UInt16) (msg target : List UInt8)
+    (sig forgery : FrontierSignature) (hs : signFrontierFts H p sk hg ctr msg = some sig) :
+    frontierOneUseEufCmaWin H p ⟨sk, some (hg, ctr, msg), target, forgery⟩ =
+      (decide (target ≠ msg) && verifyFrontierFts H p (deriveFrontierPk H p sk) target forgery) := by
+  simp only [frontierOneUseEufCmaWin, hs]
+
+/-- Quantifying over every inhabitant of the break type would charge the PRE event on
+    every coin: the defining input of the first honest chain step is always a preimage. -/
+theorem compact1122_all_breaks_charge_pre (H : FrontierHashSuite) (pk sk : BitVec 256) :
+    ∃ b : FrontierForgeryBreak H pk sk 96, b.isOneWayPreimage = true :=
+  ⟨.chainPreimageInversion 0 2 1 (honestNodeBase H pk sk 96 0 2) (by decide) (by decide)
+    (by unfold chainAdvance; rfl), rfl⟩
+
+/-- The deterministic break produced from this winning outcome. A failed prior signature
+    gives the same information as zero successful signing queries. -/
+def compact1122BreakOfWin (H : FrontierHashSuite) (o : FrontierOneUseEufCmaOutcome)
+    (hWin : frontierOneUseEufCmaWin H compact1122Params o = true) :
+    FrontierForgeryBreak H o.sk.pkSeed o.sk.skSeed 96 := by
+  have hWinU : frontierOneUseEufCmaWin H compact1122Params o = true := hWin
+  unfold frontierOneUseEufCmaWin at hWinU
+  obtain ⟨hFrBool, hVer⟩ := band_eq_true hWinU
+  have hL : 2 ≤ compact1122Params.frontierLen := by decide
+  have hSl : compact1122Params.targetSum <
+      compact1122Params.frontierLen * (compact1122Params.winternitzW - 1) := by decide
+  cases hPr : o.prior with
+  | none =>
+    exact extractCompact1122ZeroQueryBreak H compact1122Params hSl o.sk
+      o.msgStar o.sigStar hVer
+  | some q =>
+    obtain ⟨hg, ctr, m₁⟩ := q
+    cases hSign : signFrontierFts H compact1122Params o.sk hg ctr m₁ with
+    | none =>
+      exact extractCompact1122ZeroQueryBreak H compact1122Params hSl o.sk
+        o.msgStar o.sigStar hVer
+    | some sig₁ =>
+      simp only [hPr, hSign] at hFrBool
+      exact extractCompact1122ForgeryBreak H compact1122Params hL o.sk hg ctr m₁ sig₁
+        hSign o.msgStar o.sigStar (of_decide_eq_true hFrBool) hVer
+
 /-- **Closed `Spec.GameBound` `Compact1122` Target-Sum EUF-CMA Reduction (`compact1122_closed_euf_cma_gameBound`)**:
     Over any finite coin space `Fin n` (supporting both classical ROM and QROM measurement
     distributions), the `≤ 1`-query `Compact1122` EUF-CMA winning probability is bounded by the
@@ -1892,7 +1946,8 @@ theorem compact1122_closed_euf_cma_gameBound {n : Nat} (hPos : 0 < n)
     (H : FrontierHashSuite) (game : Fin n → FrontierOneUseEufCmaOutcome)
     (isTcr isCol isPre : Fin n → Bool)
     {εTcr εCol εPre : Spec.RatBound}
-    (hClassify : ∀ (ω : Fin n) (brk : FrontierForgeryBreak H (game ω).sk.pkSeed (game ω).sk.skSeed 96),
+    (hClassify : ∀ (ω : Fin n) (hw : frontierOneUseEufCmaWin H compact1122Params (game ω) = true),
+      let brk := compact1122BreakOfWin H (game ω) hw
       (brk.isMsgOrRankTcr = true → isTcr ω = true) ∧
       (brk.isTreeOrChainCollision = true → isCol ω = true) ∧
       (brk.isOneWayPreimage = true → isPre ω = true))
@@ -1906,29 +1961,8 @@ theorem compact1122_closed_euf_cma_gameBound {n : Nat} (hPos : 0 < n)
     (Spec.FinGame.mk hPos (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω)))
     (Spec.FinGame.mk hPos isTcr) (Spec.FinGame.mk hPos isCol) (Spec.FinGame.mk hPos isPre)
     (fun ω hWin => ?_) hBTcr hBCol hBPre
-  have hWinU : frontierOneUseEufCmaWin H compact1122Params (game ω) = true := hWin
-  unfold frontierOneUseEufCmaWin at hWinU
-  obtain ⟨hFrBool, hVer⟩ := band_eq_true hWinU
-  have hL : 2 ≤ compact1122Params.frontierLen := by decide
-  have hSl : compact1122Params.targetSum <
-      compact1122Params.frontierLen * (compact1122Params.winternitzW - 1) := by decide
-  have hBrk : Nonempty (FrontierForgeryBreak H (game ω).sk.pkSeed (game ω).sk.skSeed 96) := by
-    cases hPr : (game ω).prior with
-    | none =>
-      exact ⟨extractCompact1122ZeroQueryBreak H compact1122Params hSl (game ω).sk
-        (game ω).msgStar (game ω).sigStar hVer⟩
-    | some q =>
-      obtain ⟨hg, ctr, m₁⟩ := q
-      cases hSign : signFrontierFts H compact1122Params (game ω).sk hg ctr m₁ with
-      | none =>
-        exact ⟨extractCompact1122ZeroQueryBreak H compact1122Params hSl (game ω).sk
-          (game ω).msgStar (game ω).sigStar hVer⟩
-      | some sig₁ =>
-        simp only [hPr, hSign] at hFrBool
-        exact ⟨extractCompact1122ForgeryBreak H compact1122Params hL (game ω).sk hg ctr m₁ sig₁
-          hSign (game ω).msgStar (game ω).sigStar (of_decide_eq_true hFrBool) hVer⟩
-  obtain ⟨brk⟩ := hBrk
-  obtain ⟨c1, c2, c3⟩ := hClassify ω brk
+  let brk := compact1122BreakOfWin H (game ω) hWin
+  obtain ⟨c1, c2, c3⟩ := hClassify ω hWin
   rcases brk.exhausts_three_events with e1 | e2 | e3
   · exact .inl (c1 e1)
   · exact .inr (.inl (c2 e2))
@@ -1949,13 +1983,17 @@ theorem compact1122_cshake256_concrete_break_lift (p : FrontierFtsParams) (pkSee
        ftsSqueezeRankFrames p pkSeed pkR r₂ d₂ c₂ ≠ ftsSqueezeRankFrames p pkSeed pkR r₁ d₁ c₁ ∧
        evalFtsCshake256_32 ftsTagHmsg (ftsSqueezeRankFrames p pkSeed pkR r₂ d₂ c₂) =
          evalFtsCshake256_32 ftsTagHmsg (ftsSqueezeRankFrames p pkSeed pkR r₁ d₁ c₁)
-     | .merkleCollision v l₁ r₁ l₂ r₂ _ _ =>
+     | .merkleCollision t v l₁ r₁ l₂ r₂ _ _ _ _ =>
        v < 256 ^ 8 →
+         l₂ = honestNodeOut (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW t (2 * v) ∧
+         r₂ = honestNodeOut (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW t (2 * v + 1) ∧
          ftsMergeNodeFrames p pkSeed v l₁ r₁ ≠ ftsMergeNodeFrames p pkSeed v l₂ r₂ ∧
          evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v l₁ r₁) =
            evalFtsCshake256_32 ftsTagMerge (ftsMergeNodeFrames p pkSeed v l₂ r₂)
-     | .chainStepCollision v step x₁ x₂ _ _ =>
+     | .chainStepCollision t v step x₁ x₂ _ _ _ =>
        v < 256 ^ 8 → step < 256 ^ 8 →
+         x₂ = chainAdvance (cshakeFrontierHashSuite p) pkSeed v 0 step
+           (honestNodeBase (cshakeFrontierHashSuite p) pkSeed skSeed p.winternitzW t v) ∧
          ftsChainStepFrames p pkSeed v step x₁ ≠ ftsChainStepFrames p pkSeed v step x₂ ∧
          evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v step x₁) =
            evalFtsCshake256_32 ftsTagChain (ftsChainStepFrames p pkSeed v step x₂)
@@ -1977,18 +2015,115 @@ theorem compact1122_cshake256_concrete_break_lift (p : FrontierFtsParams) (pkSee
     · exact h hr
     · exact h hd
     · exact h hc
-  | merkleCollision v l₁ r₁ l₂ r₂ hDiff hEq =>
+  | merkleCollision t v l₁ r₁ l₂ r₂ hL₂ hR₂ hDiff hEq =>
     intro hv
-    refine ⟨fun hF => ?_, hEq⟩
+    refine ⟨hL₂, hR₂, fun hF => ?_, hEq⟩
     obtain ⟨_, _, hl, hr⟩ := ftsMergeNodeFrames_injective p hv hv hF
     rcases hDiff with h | h
     · exact h hl
     · exact h hr
-  | chainStepCollision v step x₁ x₂ hNe hEq =>
+  | chainStepCollision t v step x₁ x₂ hX₂ hNe hEq =>
     intro hv hs
-    exact ⟨fun hF => hNe (ftsChainStepFrames_injective p hv hs hv hs hF).2.2.2, hEq⟩
+    exact ⟨hX₂, fun hF => hNe (ftsChainStepFrames_injective p hv hs hv hs hF).2.2.2, hEq⟩
   | unrevealedSubtreeMergePreimage _ _ _ _ _ _ hEq => exact hEq
   | chainPreimageInversion _ _ _ _ _ _ hEq => exact hEq
+
+private theorem sign_ctr_zero_of_rank_lt (H : FrontierHashSuite) (p : FrontierFtsParams)
+    (hw : 1 ≤ p.winternitzW) (hL : 2 ≤ p.frontierLen)
+    (hCtr : ¬ ((0 : UInt16).toNat >= 2 ^ p.counterBits))
+    (hM : 2 ^ 256 < frontierRootSubCount p.treeHeight p.frontierLen *
+        frontierDecCount p.winternitzW p.frontierLen p.targetSum)
+    (sk : FrontierSecretKey) (hedge : BitVec 256) (msg : List UInt8) :
+    ∃ sig : FrontierSignature,
+      signFrontierFts H p sk hedge 0 msg = some sig ∧
+      sig.grindCounter = 0 ∧
+      verifyFrontierFts H p (deriveFrontierPk H p sk) msg sig = true := by
+  let pk := deriveFrontierPk H p sk
+  let d := H.prehashMsg pk.pkSeed pk.root msg
+  let rand := H.prfRand sk.skPrf pk.pkSeed pk.root hedge d
+  let rk := (H.squeezeRank pk.pkSeed pk.root rand d 0).toNat
+  have hLt : rk < frontierRootSubCount p.treeHeight p.frontierLen *
+      frontierDecCount p.winternitzW p.frontierLen p.targetSum :=
+    Nat.lt_trans (H.squeezeRank pk.pkSeed pk.root rand d 0).isLt hM
+  obtain ⟨tr, paths, offs, hUnr, _⟩ := unrankFrontierFts_bijective p rk hLt
+  have hSign : signFrontierFts H p sk hedge 0 msg =
+      some ⟨rand, 0, honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW
+        p.treeHeight 1 tr offs⟩ := by
+    unfold signFrontierFts
+    simp only [hCtr, ↓reduceIte]
+    change (match unrankFrontierFts p rk with
+            | none => none
+            | some (t0, _, os0) =>
+              some (FrontierSignature.mk rand 0
+                (honestSignSubtree H pk.pkSeed sk.skSeed p.winternitzW p.treeHeight 1 t0 os0))) = _
+    rw [hUnr]
+  exact ⟨_, hSign, rfl, verifyFrontierFts_signFrontierFts H p hw hL sk hedge 0 msg _ hSign⟩
+
+/-- **First-Iteration `ctr = 0` Completeness (`compact1122_ctr_zero_always_succeeds`)**:
+    Because `2^256 < M(8, 96, 34, 1615)` (`Compact1122`) and `2^256 < M(8, 5, 72, 144)` (`Full256Bit`),
+    every 256-bit `squeezeRank` output strictly precedes `M`, so `signFrontierFts` with `ctr = 0`
+    ALWAYS succeeds on the first try (`sig.grindCounter = 0`) and passes `verifyFrontierFts`,
+    certifying that the `ctr > 0` grinding branch in `frontier.rs` is dead on both 256-bit profiles. -/
+theorem compact1122_ctr_zero_always_succeeds (H : FrontierHashSuite)
+    (sk : FrontierSecretKey) (hedge : BitVec 256) (msg : List UInt8) :
+    (∃ sig : FrontierSignature,
+      signFrontierFts H compact1122Params sk hedge 0 msg = some sig ∧
+      sig.grindCounter = 0 ∧
+      verifyFrontierFts H compact1122Params (deriveFrontierPk H compact1122Params sk) msg sig = true) ∧
+    (∃ sig : FrontierSignature,
+      signFrontierFts H full256BitParams sk hedge 0 msg = some sig ∧
+      sig.grindCounter = 0 ∧
+      verifyFrontierFts H full256BitParams (deriveFrontierPk H full256BitParams sk) msg sig = true) :=
+  ⟨sign_ctr_zero_of_rank_lt H compact1122Params (by decide) (by decide) (by decide)
+      compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.1 sk hedge msg,
+   sign_ctr_zero_of_rank_lt H full256BitParams (by decide) (by decide) (by decide)
+      compact1122_rank_domain_gt_2pow256.2.2.2.2.2.2.2.1 sk hedge msg⟩
+
+/-- Arithmetic budget obtained by summing the three assumed event budgets. -/
+def compact1122QromSmDtTcrBound (qHash : Nat) : Spec.RatBound :=
+  ⟨(qHash + 1) ^ 2, 2 ^ 251, Nat.two_pow_pos 251⟩
+
+/-- Conditional finite-game bound at the stated query ceiling. The caller embeds the actual
+    extracted break in three events and supplies their probability bounds. The middle event
+    has twice the budget of either outer event. -/
+theorem compact1122_qrom_sm_dt_tcr_128bit_bound (qHash : Nat) (hq : qHash + 1 ≤ 2 ^ 61) :
+    (compact1122QromSmDtTcrBound qHash).atLeastBits 128 ∧
+    ∀ {n : Nat} (hPos : 0 < n) (H : FrontierHashSuite)
+      (game : Fin n → FrontierOneUseEufCmaOutcome)
+      (isTcr isSmDtTcr isPre : Fin n → Bool),
+      (∀ (ω : Fin n) (hw : frontierOneUseEufCmaWin H compact1122Params (game ω) = true),
+        let brk := compact1122BreakOfWin H (game ω) hw
+        (brk.isMsgOrRankTcr = true → isTcr ω = true) ∧
+        (brk.isTreeOrChainCollision = true → isSmDtTcr ω = true) ∧
+        (brk.isOneWayPreimage = true → isPre ω = true)) →
+      Spec.GameBound (Spec.FinGame.mk hPos isTcr).winProb ⟨(qHash + 1) ^ 2, 2 ^ 253, Nat.two_pow_pos 253⟩ →
+      Spec.GameBound (Spec.FinGame.mk hPos isSmDtTcr).winProb ⟨(qHash + 1) ^ 2, 2 ^ 252, Nat.two_pow_pos 252⟩ →
+      Spec.GameBound (Spec.FinGame.mk hPos isPre).winProb ⟨(qHash + 1) ^ 2, 2 ^ 253, Nat.two_pow_pos 253⟩ →
+      Spec.GameBound
+        (Spec.FinGame.mk hPos (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω))).winProb
+        (compact1122QromSmDtTcrBound qHash) ∧
+      (Spec.FinGame.mk hPos (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω))).winProb.atLeastBits 128 := by
+  have hSq : (qHash + 1) ^ 2 ≤ (2 ^ 61) ^ 2 := Nat.pow_le_pow_left hq 2
+  have hBits : (compact1122QromSmDtTcrBound qHash).atLeastBits 128 := by
+    unfold compact1122QromSmDtTcrBound Spec.RatBound.atLeastBits; dsimp only
+    exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ 128) hSq) (by decide +kernel)
+  refine ⟨hBits, fun {n} hPos H game isTcr isSmDtTcr isPre hCl hB1 hB2 hB3 => ?_⟩
+  have hRaw := compact1122_closed_euf_cma_gameBound hPos H game isTcr isSmDtTcr isPre hCl hB1 hB2 hB3
+  have hSumLe : (((⟨(qHash + 1) ^ 2, 2 ^ 253, Nat.two_pow_pos 253⟩ : Spec.RatBound).add
+      ⟨(qHash + 1) ^ 2, 2 ^ 252, Nat.two_pow_pos 252⟩).add
+      ⟨(qHash + 1) ^ 2, 2 ^ 253, Nat.two_pow_pos 253⟩).le (compact1122QromSmDtTcrBound qHash) := by
+    unfold Spec.RatBound.le Spec.RatBound.add compact1122QromSmDtTcrBound; dsimp only
+    have hEq : (((qHash + 1) ^ 2 * 2 ^ 252 + (qHash + 1) ^ 2 * 2 ^ 253) * 2 ^ 253 +
+        (qHash + 1) ^ 2 * (2 ^ 253 * 2 ^ 252)) * 2 ^ 251 =
+        (qHash + 1) ^ 2 * (2 ^ 253 * 2 ^ 252 * 2 ^ 253) := by
+      have c1 : (2 : Nat) ^ 252 + 2 ^ 253 = 3 * 2 ^ 252 := by decide +kernel
+      have c2 : (3 * 2 ^ 252) * 2 ^ 253 + 2 ^ 253 * 2 ^ 252 = 4 * (2 ^ 252 * 2 ^ 253) := by decide +kernel
+      have c3 : 4 * (2 ^ 252 * 2 ^ 253) * 2 ^ 251 = 2 ^ 253 * 2 ^ 252 * 2 ^ 253 := by decide +kernel
+      rw [← Nat.mul_add ((qHash + 1) ^ 2), c1, Nat.mul_assoc ((qHash + 1) ^ 2),
+          ← Nat.mul_add ((qHash + 1) ^ 2), c2, Nat.mul_assoc ((qHash + 1) ^ 2), c3]
+    exact Nat.le_of_eq hEq
+  have hBound := Spec.GameBound.trans hRaw hSumLe
+  exact ⟨hBound, Spec.GameBound.atLeastBits hBound hBits⟩
 
 /-! ## §2. `RotatedEpochVote` Forward-Secure Key-Chain Induction (`rotatedEpochVote_forward_secure_chain`) -/
 
@@ -2584,6 +2719,8 @@ set_option maxRecDepth 32768
   Qsag.compact1122_one_time_euf_cma_reduction
   Qsag.compact1122_closed_euf_cma_gameBound
   Qsag.compact1122_cshake256_concrete_break_lift
+  Qsag.compact1122_ctr_zero_always_succeeds
+  Qsag.compact1122_qrom_sm_dt_tcr_128bit_bound
   Qsag.rotatedEpochVote_forward_secure_chain
   Qsag.rotatedEpochVote_cshake_chain_reduction
   Qsag.corduroy_real_profiles_audit
@@ -2640,6 +2777,36 @@ theorem compact1122_forgery_witness :
         m₂ ≠ m₁ ∧ verifyFrontierFts H p (deriveFrontierPk H p sk) m₂ sig₂ = true :=
   ⟨witCompact1122H, compact1122Params, witCompact1122_hL, witCompact1122Sk, 0#256, 0, [1], witCompact1122Sig,
     witCompact1122_hSign, [2], witCompact1122Sig, witCompact1122_hNe, witCompact1122_hVer⟩
+
+/-- The repaired classification premise admits an actual winning coin with a subunit
+    total budget. The other three coins replay the signed message. -/
+theorem compact1122_closed_game_subunit_witness :
+    ∃ (H : FrontierHashSuite) (game : Fin 4 → FrontierOneUseEufCmaOutcome),
+      frontierOneUseEufCmaWin H compact1122Params (game 0) = true ∧
+      Spec.GameBound (Spec.FinGame.mk (by decide : 0 < 4)
+        (fun ω => frontierOneUseEufCmaWin H compact1122Params (game ω))).winProb
+        ⟨3, 4, by decide⟩ := by
+  let game (ω : Fin 4) : FrontierOneUseEufCmaOutcome :=
+    ⟨witCompact1122Sk, some (0#256, 0, [1]), if ω = 0 then [2] else [1], witCompact1122Sig⟩
+  let event (ω : Fin 4) := decide (ω = 0)
+  have hBudget : Spec.GameBound (Spec.FinGame.mk (by decide : 0 < 4) event).winProb
+      ⟨1, 4, by decide⟩ := by exact Nat.le_refl 4
+  refine ⟨witCompact1122H, game, ?_, ?_⟩
+  · change frontierOneUseEufCmaWin _ _ ⟨_, some (_, _, [1]), [2], _⟩ = true
+    rw [frontierOneUseEufCmaWin_signed _ _ _ _ _ _ _ _ _ witCompact1122_hSign,
+      witCompact1122_hVer] <;> rfl
+  · have h := compact1122_closed_euf_cma_gameBound (by decide : 0 < 4) witCompact1122H
+        game event event event (fun ω hw => by
+          have hCoin : ω = 0 := by
+            by_cases hz : ω = 0
+            · exact hz
+            · dsimp only [game] at hw
+              rw [ite_eq_right hz, frontierOneUseEufCmaWin_signed _ _ _ _ _ _ _ _ _ witCompact1122_hSign] at hw
+              exact (Bool.false_ne_true hw).elim
+          have he : event ω = true := decide_eq_true hCoin
+          exact ⟨fun _ => he, fun _ => he, fun _ => he⟩)
+        hBudget hBudget hBudget
+    exact Spec.GameBound.trans h (by decide)
 
 /-- The premises of `rotatedEpochVote_forward_secure_chain` hold on a one-epoch chain. -/
 theorem rotatedEpochVote_chain_witness :
