@@ -5,3 +5,4 @@ public import QsagWhirVerified.Arithmetic
 public import QsagWhirVerified.Proofs
 
 public import QsagWhirVerified.Canonical
+public import QsagWhirVerified.ProtocolWeld

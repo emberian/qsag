@@ -2,7 +2,9 @@ module
 import Lean
 import all Lean.Util.CollectAxioms
 import all QsagWhirVerified
+import all QsagWhirSpecWeld
 import all QsagWhirVerified.Canonical
+import all QsagWhirVerified.ProtocolWeld
 import all QsagWhirVerified.Proofs
 import all QsagWhirVerified.Arithmetic
 import all QsagWhirVerified.Funs
@@ -170,7 +172,25 @@ private def requiredWhirMirTheorems : Array Name := #[
   ``qsag_whir_verified.proofs.cwyz_bridge_claim_step_wp_ext4Refines,
   ``qsag_whir_verified.proofs.eval_quadratic_sumcheck_wire_wp_ext4Refines,
   ``qsag_whir_verified.proofs.verify_ood_pin_eq_wp_ext4Refines,
-  ``qsag_whir_verified.proofs.checked_quorum_sum_wp_u64NatRefines
+  ``qsag_whir_verified.proofs.checked_quorum_sum_wp_u64NatRefines,
+  ``qsag_whir_verified.proofs.goldilocks_p_eq_qsag_prime,
+  ``qsag_whir_verified.proofs.max_u64_word_lt_two_pow_64_qsag,
+  ``qsag_whir_verified.proofs.tag_canopy_merkle_internal_qsag,
+  ``qsag_whir_verified.proofs.add_refines_qsag,
+  ``qsag_whir_verified.proofs.sub_refines_qsag,
+  ``qsag_whir_verified.proofs.mul_refines_qsag,
+  ``qsag_whir_verified.proofs.ext_eq_iff_qsag,
+  ``qsag_whir_verified.proofs.ext_add_refines_qsag,
+  ``qsag_whir_verified.proofs.ext_sub_refines_qsag,
+  ``qsag_whir_verified.proofs.ext_scale_refines_qsag,
+  ``qsag_whir_verified.proofs.cwyz_duet_fold_refines_foldDuetExt4,
+  ``qsag_whir_verified.proofs.eval_univariate_ext4_at_base_refines_evalCoeffs,
+  ``qsag_whir_verified.proofs.canonical_query_group_idx_refines_qsag,
+  ``qsag_whir_verified.proofs.affine_combine_refines_zkHemV2_maskLine,
+  ``qsag_whir_verified.proofs.mir_affine_combine_coin_bijection_simulated,
+  ``qsag_whir_verified.proofs.mirVerifyShiftSumcheckChain_iff_qsag,
+  ``qsag_whir_verified.proofs.mirEvalCascadeBatch_refines_evalCascadeClaim,
+  ``qsag_whir_verified.proofs.mirStageGates_sound_for_verifyHemAffineWhir
 ]
 
 /-! ## Symbol coverage
@@ -281,7 +301,7 @@ run_cmd do
   for (name, _) in env.constants.toList do
     if let some idx := env.getModuleIdxFor? name then
       let owner := env.header.moduleNames[idx.toNat]!.toString
-      if (owner == "QsagWhirVerified" || owner.startsWith "QsagWhirVerified." ||
+      if (owner == "QsagWhirSpecWeld" || owner == "QsagWhirVerified" || owner.startsWith "QsagWhirVerified." ||
           owner == "Aeneas" || owner.startsWith "Aeneas.") &&
           !(owner == "Aeneas.Elab.Attrs" && isMarkedMeta env name) then
         checked := checked + 1
@@ -315,7 +335,7 @@ public def main : IO UInt32 := do
     for (name, _) in env.constants.toList do
       if let some idx := env.getModuleIdxFor? name then
         let owner := env.header.moduleNames[idx.toNat]!.toString
-        if (owner == "QsagWhirVerified" || owner.startsWith "QsagWhirVerified." ||
+        if (owner == "QsagWhirSpecWeld" || owner == "QsagWhirVerified" || owner.startsWith "QsagWhirVerified." ||
             owner == "Aeneas" || owner.startsWith "Aeneas.") &&
             !(owner == "Aeneas.Elab.Attrs" && isMarkedMeta env name) then
           checked := checked + 1
