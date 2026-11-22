@@ -502,3 +502,600 @@ const fn word16(op: u32, f0: u32, f4: u32, f8: u32, imm16: u16) -> u32 {
 ///
 /// Fails exactly when a field is outside its documented range; on success
 /// `decode_insn(word) == Some(*insn)`.
+pub fn encode_insn(insn: &Ass2Insn) -> Result<u32, CodecError> {
+    use Ass2Insn::*;
+    Ok(match *insn {
+        Exc => 0,
+        Eret => word(0x0, 0, 0, 0, 0, 1, 0),
+        Csrr { rd, csr } => word(0x0, reg("rd", rd)?, 0, 0, 0, 2, csr as u32),
+        Csrw { ra, csr } => word(0x0, 0, reg("ra", ra)?, 0, 0, 3, csr as u32),
+        Zeroize => word(0x0, 0, 0, 0, 0, 4, 0),
+        Halt => word(0x0, 0, 0, 0, 0, 5, 0),
+        Nop => NOP_WORD,
+        Lut4 { rd, ra, rb, m } => word(
+            0x1,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            reg("rb", rb)?,
+            0,
+            index("M", m, 16)?,
+            0,
+        ),
+        Alu { op, rd, ra, rb } => word(
+            0x2,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            reg("rb", rb)?,
+            0,
+            op.code() as u32,
+            0,
+        ),
+        Alui { op, rd, ra, imm16 } => {
+            if op.is_shift() && imm16 >= 64 {
+                return Err(CodecError::Immediate {
+                    field: "shamt",
+                    value: imm16 as i64,
+                    bits: 6,
+                });
+            }
+            word16(0x3, reg("rd", rd)?, reg("ra", ra)?, op.code() as u32, imm16)
+        }
+        Imm20 { mode, rd, imm20 } => {
+            if imm20 >> 20 != 0 {
+                return Err(CodecError::Immediate {
+                    field: "imm20",
+                    value: imm20 as i64,
+                    bits: 20,
+                });
+            }
+            (0x4 << 28) | (imm20 << 8) | ((mode.code() as u32) << 4) | reg("rd", rd)?
+        }
+        Cmp { rd, ra, rb, flags } => word(
+            0x5,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            reg("rb", rb)?,
+            index("flags4", flags, 16)?,
+            0,
+            0,
+        ),
+        Sel { rd, ra, rb, rc } => word(
+            0x6,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            reg("rb", rb)?,
+            reg("rc", rc)?,
+            0,
+            0,
+        ),
+        Bextu { rd, ra, idx, len } => word(
+            0x6,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            index("byte_idx", idx, 8)?,
+            byte_len_code(len)?,
+            1,
+            0,
+        ),
+        Bexts { rd, ra, idx, len } => word(
+            0x6,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            index("byte_idx", idx, 8)?,
+            byte_len_code(len)?,
+            2,
+            0,
+        ),
+        Bswap64 { rd, ra } => word(0x6, reg("rd", rd)?, reg("ra", ra)?, 0, 0, 3, 0),
+        Load {
+            mode,
+            rd,
+            ra,
+            simm16,
+        } => word16(
+            0x7,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            mode.code() as u32,
+            simm16 as u16,
+        ),
+        Store {
+            mode,
+            rs,
+            ra,
+            simm16,
+        } => word16(
+            0x8,
+            reg("rs", rs)?,
+            reg("ra", ra)?,
+            mode.code() as u32,
+            simm16 as u16,
+        ),
+        Br { op, cond, off20 } => {
+            (0x9 << 28)
+                | (simm("off20", off20, 20)? << 8)
+                | ((op.code() as u32) << 4)
+                | reg("cond", cond)?
+        }
+        Jal { rd, off24 } => (0xA << 28) | (simm("off24", off24, 24)? << 4) | reg("rd", rd)?,
+        Jalr { rd, ra, simm16 } => word16(0xB, reg("rd", rd)?, reg("ra", ra)?, 0, simm16 as u16),
+        Sget { rd, sidx } => (0xC << 28) | (index("sidx", sidx, SPG_LANES)? << 12) | reg("rd", rd)?,
+        Sput { sidx, ra } => {
+            (0xC << 28) | (index("sidx", sidx, SPG_LANES)? << 12) | (1 << 8) | (reg("ra", ra)? << 4)
+        }
+        Sxor { sidx, ra } => {
+            (0xC << 28) | (index("sidx", sidx, SPG_LANES)? << 12) | (2 << 8) | (reg("ra", ra)? << 4)
+        }
+        Szero => (0xC << 28) | (3 << 8),
+        Sld64 { sidx, ra, off8 } => {
+            (0xC << 28)
+                | ((off8 as u8 as u32) << 20)
+                | (index("sidx", sidx, SPG_LANES)? << 12)
+                | (4 << 8)
+                | (reg("ra", ra)? << 4)
+        }
+        Sst64 { sidx, ra, off8 } => {
+            (0xC << 28)
+                | ((off8 as u8 as u32) << 20)
+                | (index("sidx", sidx, SPG_LANES)? << 12)
+                | (5 << 8)
+                | (reg("ra", ra)? << 4)
+        }
+        GlMac { rd, ra, rb, rc } => word(
+            0xD,
+            reg("rd", rd)?,
+            reg("ra", ra)?,
+            reg("rb", rb)?,
+            reg("rc", rc)?,
+            0,
+            0,
+        ),
+        GlAdd { rd, ra, rb } => word(0xD, reg("rd", rd)?, reg("ra", ra)?, reg("rb", rb)?, 0, 1, 0),
+        GlSub { rd, ra, rb } => word(0xD, reg("rd", rd)?, reg("ra", ra)?, reg("rb", rb)?, 0, 2, 0),
+        GlSbox7 { rd, ra } => word(0xD, reg("rd", rd)?, reg("ra", ra)?, 0, 0, 3, 0),
+        Fp5Mul { ed, ea, eb } => fp5_word(4, ed, ea, eb)?,
+        Fp5Add { ed, ea, eb } => fp5_word(5, ed, ea, eb)?,
+        Fp5Sub { ed, ea, eb } => fp5_word(6, ed, ea, eb)?,
+        Gf128Mul { pd, pa, pb } => gf128_word(0, pd, pa, pb)?,
+        Gf128Xor { pd, pa, pb } => gf128_word(1, pd, pa, pb)?,
+        KeccakF1600 { rounds } => {
+            if rounds != 12 && rounds != 24 {
+                return Err(CodecError::KeccakRounds { value: rounds });
+            }
+            word(0xF, 0, 0, 0, 0, 0, rounds as u32)
+        }
+        Poseidon2Gl24 => word(0xF, 0, 0, 0, 0, 1, 0),
+        Poseidon2Gl12 => word(0xF, 0, 0, 0, 0, 2, 0),
+    })
+}
+
+fn fp5_word(sub: u32, ed: u8, ea: u8, eb: u8) -> Result<u32, CodecError> {
+    Ok(word(
+        0xD,
+        index("ed", ed, FP5_REGS)?,
+        index("ea", ea, FP5_REGS)?,
+        index("eb", eb, FP5_REGS)?,
+        0,
+        sub,
+        0,
+    ))
+}
+
+fn gf128_word(sub: u32, pd: u8, pa: u8, pb: u8) -> Result<u32, CodecError> {
+    Ok(word(
+        0xE,
+        index("pd", pd, GF128_REGS)?,
+        index("pa", pa, GF128_REGS)?,
+        index("pb", pb, GF128_REGS)?,
+        0,
+        sub,
+        0,
+    ))
+}
+
+/// Sign-extend the low `bits` bits of `value`.
+const fn sext(value: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((value << shift) as i32) >> shift
+}
+
+/// Decode a 32-bit word. `None` means `IllegalInsn` by encoding: a reserved opcode
+/// sub-function, a non-zero reserved field or an out-of-range index.
+pub fn decode_insn(w: u32) -> Option<Ass2Insn> {
+    use Ass2Insn::*;
+    let rd = (w & 0xF) as u8;
+    let ra = ((w >> 4) & 0xF) as u8;
+    let rb = ((w >> 8) & 0xF) as u8;
+    let rc = ((w >> 12) & 0xF) as u8;
+    let sub = ((w >> 16) & 0xF) as u8;
+    let imm8 = ((w >> 20) & 0xFF) as u8;
+    let imm16 = ((w >> 12) & 0xFFFF) as u16;
+    match w >> 28 {
+        0x0 => match sub {
+            0 => (w == 0).then_some(Exc),
+            1 => (w & 0x0FF0_FFFF == 0).then_some(Eret),
+            2 => (ra == 0 && rb == 0 && rc == 0).then_some(Csrr { rd, csr: imm8 }),
+            3 => (rd == 0 && rb == 0 && rc == 0).then_some(Csrw { ra, csr: imm8 }),
+            4 => (w & 0x0FF0_FFFF == 0).then_some(Zeroize),
+            5 => (w & 0x0FF0_FFFF == 0).then_some(Halt),
+            6 => (w == NOP_WORD).then_some(Nop),
+            _ => None,
+        },
+        0x1 => (rc == 0 && imm8 == 0).then_some(Lut4 { rd, ra, rb, m: sub }),
+        0x2 => {
+            if rc != 0 || imm8 != 0 {
+                return None;
+            }
+            Some(Alu {
+                op: AluOp::from_code(sub)?,
+                rd,
+                ra,
+                rb,
+            })
+        }
+        0x3 => {
+            let op = AluiOp::from_code(rb)?;
+            if op.is_shift() && (imm16 >> 6) != 0 {
+                return None;
+            }
+            Some(Alui { op, rd, ra, imm16 })
+        }
+        0x4 => Some(Imm20 {
+            mode: Imm20Mode::from_code(ra)?,
+            rd,
+            imm20: (w >> 8) & 0xF_FFFF,
+        }),
+        0x5 => (sub == 0 && imm8 == 0).then_some(Cmp {
+            rd,
+            ra,
+            rb,
+            flags: rc,
+        }),
+        0x6 => {
+            if imm8 != 0 {
+                return None;
+            }
+            let len = if rc & 7 == 0 { 8 } else { rc & 7 };
+            match sub {
+                0 => Some(Sel { rd, ra, rb, rc }),
+                1 => ((rb >> 3) == 0 && (rc >> 3) == 0).then_some(Bextu {
+                    rd,
+                    ra,
+                    idx: rb,
+                    len,
+                }),
+                2 => ((rb >> 3) == 0 && (rc >> 3) == 0).then_some(Bexts {
+                    rd,
+                    ra,
+                    idx: rb,
+                    len,
+                }),
+                3 => (rb == 0 && rc == 0).then_some(Bswap64 { rd, ra }),
+                _ => None,
+            }
+        }
+        0x7 => Some(Load {
+            mode: LoadMode::from_code(rb)?,
+            rd,
+            ra,
+            simm16: imm16 as i16,
+        }),
+        0x8 => Some(Store {
+            mode: StoreMode::from_code(rb)?,
+            rs: rd,
+            ra,
+            simm16: imm16 as i16,
+        }),
+        0x9 => Some(Br {
+            op: BrOp::from_code(ra)?,
+            cond: rd,
+            off20: sext((w >> 8) & 0xF_FFFF, 20),
+        }),
+        0xA => Some(Jal {
+            rd,
+            off24: sext((w >> 4) & 0xFF_FFFF, 24),
+        }),
+        0xB => (rb == 0).then_some(Jalr {
+            rd,
+            ra,
+            simm16: imm16 as i16,
+        }),
+        0xC => {
+            let sidx = ((w >> 12) & 0xFF) as u8;
+            let off8 = imm8;
+            match rb {
+                3 => (rd == 0 && ra == 0 && sidx == 0 && off8 == 0).then_some(Szero),
+                0..=5 if sidx >= SPG_LANES => None,
+                0 => (ra == 0 && off8 == 0).then_some(Sget { rd, sidx }),
+                1 => (rd == 0 && off8 == 0).then_some(Sput { sidx, ra }),
+                2 => (rd == 0 && off8 == 0).then_some(Sxor { sidx, ra }),
+                4 => (rd == 0).then_some(Sld64 {
+                    sidx,
+                    ra,
+                    off8: off8 as i8,
+                }),
+                5 => (rd == 0).then_some(Sst64 {
+                    sidx,
+                    ra,
+                    off8: off8 as i8,
+                }),
+                _ => None,
+            }
+        }
+        0xD => {
+            if imm8 != 0 {
+                return None;
+            }
+            let ext = rd < FP5_REGS && ra < FP5_REGS && rb < FP5_REGS && rc == 0;
+            match sub {
+                0 => Some(GlMac { rd, ra, rb, rc }),
+                1 => (rc == 0).then_some(GlAdd { rd, ra, rb }),
+                2 => (rc == 0).then_some(GlSub { rd, ra, rb }),
+                3 => (rb == 0 && rc == 0).then_some(GlSbox7 { rd, ra }),
+                4 => ext.then_some(Fp5Mul {
+                    ed: rd,
+                    ea: ra,
+                    eb: rb,
+                }),
+                5 => ext.then_some(Fp5Add {
+                    ed: rd,
+                    ea: ra,
+                    eb: rb,
+                }),
+                6 => ext.then_some(Fp5Sub {
+                    ed: rd,
+                    ea: ra,
+                    eb: rb,
+                }),
+                _ => None,
+            }
+        }
+        0xE => {
+            if imm8 != 0 || rc != 0 || rd >= GF128_REGS || ra >= GF128_REGS || rb >= GF128_REGS {
+                return None;
+            }
+            match sub {
+                0 => Some(Gf128Mul {
+                    pd: rd,
+                    pa: ra,
+                    pb: rb,
+                }),
+                1 => Some(Gf128Xor {
+                    pd: rd,
+                    pa: ra,
+                    pb: rb,
+                }),
+                _ => None,
+            }
+        }
+        _ => {
+            if rd != 0 || ra != 0 || rb != 0 || rc != 0 {
+                return None;
+            }
+            match sub {
+                0 => (imm8 == 12 || imm8 == 24).then_some(KeccakF1600 { rounds: imm8 }),
+                1 => (imm8 == 0).then_some(Poseidon2Gl24),
+                2 => (imm8 == 0).then_some(Poseidon2Gl12),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Encode an instruction as its four little-endian bytes.
+pub fn encode_insn_le(insn: &Ass2Insn) -> Result<[u8; 4], CodecError> {
+    encode_insn(insn).map(u32::to_le_bytes)
+}
+
+/// Decode four little-endian bytes.
+pub fn decode_insn_le(bytes: [u8; 4]) -> Option<Ass2Insn> {
+    decode_insn(u32::from_le_bytes(bytes))
+}
+
+/// Fixed latency of an instruction in clock cycles. It depends only on the opcode and
+/// sub-function (and, for `KECCAK.F1600`, on the public round count), never on operand values.
+pub const fn cycle_cost(insn: &Ass2Insn) -> u64 {
+    use Ass2Insn::*;
+    match *insn {
+        Alu {
+            op: AluOp::Mul64 | AluOp::Mulhu64,
+            ..
+        } => 4,
+        Load { .. } | Store { .. } | Sld64 { .. } | Sst64 { .. } => 2,
+        GlMac { .. } => 4,
+        GlSbox7 { .. } => 12,
+        Fp5Mul { .. } => 104,
+        Fp5Add { .. } | Fp5Sub { .. } => 5,
+        Gf128Mul { .. } => 4,
+        KeccakF1600 { rounds } => rounds as u64,
+        Poseidon2Gl24 => 216,
+        Poseidon2Gl12 => 120,
+        _ => 1,
+    }
+}
+
+impl Ass2Insn {
+    /// The major opcode `0x0..=0xF`.
+    pub const fn major_opcode(&self) -> u8 {
+        use Ass2Insn::*;
+        match self {
+            Exc | Eret | Csrr { .. } | Csrw { .. } | Zeroize | Halt | Nop => 0x0,
+            Lut4 { .. } => 0x1,
+            Alu { .. } => 0x2,
+            Alui { .. } => 0x3,
+            Imm20 { .. } => 0x4,
+            Cmp { .. } => 0x5,
+            Sel { .. } | Bextu { .. } | Bexts { .. } | Bswap64 { .. } => 0x6,
+            Load { .. } => 0x7,
+            Store { .. } => 0x8,
+            Br { .. } => 0x9,
+            Jal { .. } => 0xA,
+            Jalr { .. } => 0xB,
+            Sget { .. } | Sput { .. } | Sxor { .. } | Szero | Sld64 { .. } | Sst64 { .. } => 0xC,
+            GlMac { .. }
+            | GlAdd { .. }
+            | GlSub { .. }
+            | GlSbox7 { .. }
+            | Fp5Mul { .. }
+            | Fp5Add { .. }
+            | Fp5Sub { .. } => 0xD,
+            Gf128Mul { .. } | Gf128Xor { .. } => 0xE,
+            KeccakF1600 { .. } | Poseidon2Gl24 | Poseidon2Gl12 => 0xF,
+        }
+    }
+}
+
+/// `CMP` predicate aliases: `(suffix, flags4)`.
+pub const CMP_ALIASES: [(&str, u8); 10] = [
+    ("EQ", 0b0001),
+    ("NE", 0b1001),
+    ("LTU", 0b1011),
+    ("GEU", 0b0011),
+    ("GTU", 0b0010),
+    ("LEU", 0b1010),
+    ("LTS", 0b1111),
+    ("GES", 0b0111),
+    ("GTS", 0b0110),
+    ("LES", 0b1110),
+];
+
+fn mem_operand(ra: u8, disp: i64) -> String {
+    match disp {
+        0 => format!("[R{ra}]"),
+        d if d > 0 => format!("[R{ra} + {d}]"),
+        d => format!("[R{ra} - {}]", -d),
+    }
+}
+
+fn csr_operand(csr: u8) -> String {
+    match csr::name(csr) {
+        Some(name) => String::from(name),
+        None => format!("0x{csr:02X}"),
+    }
+}
+
+/// Canonical assembly text of one instruction; [`crate::asm::assemble`] maps it back to the
+/// same word. Memory displacements are printed in bytes, branch and jump offsets in
+/// instruction words.
+pub fn disassemble_insn(insn: &Ass2Insn) -> String {
+    use Ass2Insn::*;
+    match *insn {
+        Exc => String::from("EXC"),
+        Eret => String::from("ERET"),
+        Csrr { rd, csr } => format!("CSRR R{rd}, {}", csr_operand(csr)),
+        Csrw { ra, csr } => format!("CSRW R{ra}, {}", csr_operand(csr)),
+        Zeroize => String::from("ZEROIZE"),
+        Halt => String::from("HALT"),
+        Nop => String::from("NOP"),
+        Lut4 { rd, ra, rb, m } => match (m, rb) {
+            (12, 0) => format!("MOV R{rd}, R{ra}"),
+            (3, 0) => format!("NOT R{rd}, R{ra}"),
+            (6, _) => format!("XOR R{rd}, R{ra}, R{rb}"),
+            (8, _) => format!("AND R{rd}, R{ra}, R{rb}"),
+            (14, _) => format!("OR R{rd}, R{ra}, R{rb}"),
+            (9, _) => format!("XNOR R{rd}, R{ra}, R{rb}"),
+            _ => format!("LUT4 R{rd}, R{ra}, R{rb}, 0x{m:X}"),
+        },
+        Alu { op, rd, ra, rb } => format!("{} R{rd}, R{ra}, R{rb}", op.mnemonic()),
+        Alui { op, rd, ra, imm16 } => match op {
+            AluiOp::Addi => format!("ADDI R{rd}, R{ra}, {}", imm16 as i16),
+            _ if op.is_shift() => format!("{} R{rd}, R{ra}, {imm16}", op.mnemonic()),
+            _ => format!("{} R{rd}, R{ra}, 0x{imm16:04X}", op.mnemonic()),
+        },
+        Imm20 { mode, rd, imm20 } => match mode {
+            Imm20Mode::Movz20 => format!("MOVZ20 R{rd}, 0x{imm20:05X}"),
+            _ => format!("{} R{rd}, {}", mode.mnemonic(), sext(imm20, 20)),
+        },
+        Cmp { rd, ra, rb, flags } => match CMP_ALIASES.iter().find(|(_, f)| *f == flags) {
+            Some((suffix, _)) => format!("CMP.{suffix} R{rd}, R{ra}, R{rb}"),
+            None => format!("CMP R{rd}, R{ra}, R{rb}, 0x{flags:X}"),
+        },
+        Sel { rd, ra, rb, rc } => format!("SEL R{rd}, R{ra}, R{rb}, R{rc}"),
+        Bextu { rd, ra, idx, len } => format!("BEXTU R{rd}, R{ra}, {idx}, {len}"),
+        Bexts { rd, ra, idx, len } => format!("BEXTS R{rd}, R{ra}, {idx}, {len}"),
+        Bswap64 { rd, ra } => format!("BSWAP64 R{rd}, R{ra}"),
+        Load {
+            mode,
+            rd,
+            ra,
+            simm16,
+        } => {
+            let scale = if matches!(mode, LoadMode::Ld64) { 8 } else { 1 };
+            format!(
+                "{} R{rd}, {}",
+                mode.mnemonic(),
+                mem_operand(ra, i64::from(simm16) * scale)
+            )
+        }
+        Store {
+            mode,
+            rs,
+            ra,
+            simm16,
+        } => {
+            let scale = if matches!(mode, StoreMode::St64) {
+                8
+            } else {
+                1
+            };
+            format!(
+                "{} {}, R{rs}",
+                mode.mnemonic(),
+                mem_operand(ra, i64::from(simm16) * scale)
+            )
+        }
+        Br { op, cond, off20 } => format!("{} R{cond}, {off20}", op.mnemonic()),
+        Jal { rd, off24 } => format!("JAL R{rd}, {off24}"),
+        Jalr { rd, ra, simm16 } => format!("JALR R{rd}, R{ra}, {simm16}"),
+        Sget { rd, sidx } => format!("SGET R{rd}, S{sidx}"),
+        Sput { sidx, ra } => format!("SPUT S{sidx}, R{ra}"),
+        Sxor { sidx, ra } => format!("SXOR S{sidx}, R{ra}"),
+        Szero => String::from("SZERO"),
+        Sld64 { sidx, ra, off8 } => {
+            format!("SLD64 S{sidx}, {}", mem_operand(ra, i64::from(off8) * 8))
+        }
+        Sst64 { sidx, ra, off8 } => {
+            format!("SST64 {}, S{sidx}", mem_operand(ra, i64::from(off8) * 8))
+        }
+        GlMac { rd, ra, rb, rc } => format!("GL.MAC R{rd}, R{ra}, R{rb}, R{rc}"),
+        GlAdd { rd, ra, rb } => format!("GL.ADD R{rd}, R{ra}, R{rb}"),
+        GlSub { rd, ra, rb } => format!("GL.SUB R{rd}, R{ra}, R{rb}"),
+        GlSbox7 { rd, ra } => format!("GL.SBOX7 R{rd}, R{ra}"),
+        Fp5Mul { ed, ea, eb } => format!("FP5.MUL E{ed}, E{ea}, E{eb}"),
+        Fp5Add { ed, ea, eb } => format!("FP5.ADD E{ed}, E{ea}, E{eb}"),
+        Fp5Sub { ed, ea, eb } => format!("FP5.SUB E{ed}, E{ea}, E{eb}"),
+        Gf128Mul { pd, pa, pb } => format!("GF128.MUL P{pd}, P{pa}, P{pb}"),
+        Gf128Xor { pd, pa, pb } => format!("GF128.XOR P{pd}, P{pa}, P{pb}"),
+        KeccakF1600 { rounds } => format!("KECCAK.F1600 {rounds}"),
+        Poseidon2Gl24 => String::from("POSEIDON2.GL24"),
+        Poseidon2Gl12 => String::from("POSEIDON2.GL12"),
+    }
+}
+
+/// Disassemble a little-endian image, one line per 32-bit word with its offset and raw word in
+/// a trailing comment. A word that does not decode is listed as `.WORD32`, and up to three
+/// trailing bytes as `.BYTES`, so the listing assembles back to exactly `bytes`.
+pub fn disassemble_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let (words, tail) = bytes.as_chunks::<INSN_BYTES>();
+    for (i, chunk) in words.iter().enumerate() {
+        let w = u32::from_le_bytes(*chunk);
+        let text = match decode_insn(w) {
+            Some(insn) => disassemble_insn(&insn),
+            None => format!(".WORD32 0x{w:08X}"),
+        };
+        // Writing to a `String` cannot fail.
+        let _ = writeln!(out, "{text:<32}; {:08X}: {w:08X}", i * INSN_BYTES);
+    }
+    if !tail.is_empty() {
+        out.push_str(".BYTES ");
+        for (i, byte) in tail.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "0x{byte:02X}");
+        }
+        out.push('\n');
+    }
+    out
+}
