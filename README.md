@@ -2,19 +2,19 @@
 
 # qsag
 
-**Post-quantum threshold signing and signature aggregation for wallets, custodians, and validators.** Split control of a signing key among custodians, change which quorum signs without changing the public key, and compress signatures from independent validators into hash-based proofs. Rust, with Lean 4 proofs at the protocol, extracted-MIR, and assembly layers; CPU and Vulkan provers; synthesizable verifier and custody hardware.
+**Post-quantum threshold signing, succinct WHIR signature aggregation, multi-ecosystem key migration, and verified custody/verifier silicon.** Split control of a signing key among custodians, switch quorums without changing the public key, and compress validator signatures into hash-based proofs—backed by a 331-module constructive Lean 4.35 library (replayed across six independent kernels), `#![no_std]` zero-dependency Rust (bijectively synced with `dregg-sig`), a Vulkan GPU prover, and ASIC/FPGA/AWS-F2 hardware.
 
-Two ideas do most of the work. **Cut-the-Hash** runs only the secret parts of a hash-based signature inside MPC, then builds its public Merkle layers in the clear. **Hem** proves that a batch of signatures verifies, using Goldilocks-field sumcheck and WHIR polynomial commitments, with recursive merges for larger sets. Neither needs elliptic-curve pairings or a trusted setup.
+Two ideas do most of the work. **Cut-the-Hash** evaluates only the four secret oracle families of a hash-based signature inside MPC, then builds the public Merkle layers in the clear. **Hem** proves that a batch of signatures verifies using Goldilocks-field sumcheck and Johnson-radius WHIR polynomial commitments (`[CWYZ26]`, `[DKT26]`), with constant-verifier-state recursive merges (`SuccinctSubtreeAggregate`, contractive `SplitSubtreeAggregate`, and depth-independent `QSAGIVC1`). Neither uses elliptic-curve pairings or a trusted setup.
 
-**Measured:** 128 signatures aggregated in **1.33–1.56 s on a Radeon RX 6750 XT**, verified in **3.0 ms**, with a **435 KiB proof**. Full GPU shards now reach **512 signers in 5.10 s**. Hierarchy demos have exercised **16,384 distinct validator keys**; contractive binary recursion has run through **depth 3**. These are different workloads, detailed below.
+**Measured:** 128 signatures aggregated in **1.33–1.56 s on a Radeon RX 6750 XT**, verified in **3.0 ms** (`445,566 B` default `Ext4` tag 4; **`362,391 B` / `381,045 B` in the 128-bit QROM quintic public profile `QSAGHQM2`**). Full GPU shards reach **512 signers in 5.10 s**. Hierarchy demos have exercised **16,384 distinct validator keys**; contractive split recursion and constant-byte-size `QSAGIVC1` (`26,185 B` diagnostic / `639,673 B` `[DKT26]` root at every depth) have run through **depth 3 (`8` shards)**.
 
 [Results and demos](#performance-and-scaling) · [How it works](#how-it-works) · [Try it](#quickstart) · [Paper](paper/qsag.typ) · [Assurance boundaries](ASSURANCE.md)
 
-Research prototype; no external audit. The proofs cover named components and models, with open obligations in the deployed end-to-end security composition. `qsag` supplies the signing layer; applications supply their consensus and settlement rules.
+Research prototype; no external audit. [ASSURANCE.md](ASSURANCE.md) states exact theorem scopes, QROM regimes, hardware signoff status, and the trusted computing base. `qsag` supplies the signing, aggregation, and custody layer; applications supply their consensus and settlement rules.
 
 ## Performance and scaling
 
-Recorded release runs, with settings and selected raw output in [the benchmark record](docs/PERFORMANCE.md). GPU measurements use an RX 6750 XT (12 GiB, RADV); the newer 256/512-signer runs use an i9-12900 host, 22 workers, LTO off, and 16 codegen units. Proving excludes key generation and signing.
+Recorded release runs, with settings and raw output in [the benchmark record](docs/PERFORMANCE.md). GPU measurements use an RX 6750 XT (12 GiB, RADV). Proving excludes key generation and signing.
 
 | Full Hem shard, default tag 4 | Prove, GPU | Prove, CPU | Verify, multi-core / one worker | Serialized proof |
 | --- | ---: | ---: | ---: | ---: |
@@ -22,9 +22,7 @@ Recorded release runs, with settings and selected raw output in [the benchmark r
 | 256 signers | **2.82 s** | 5.68 s | 5.59 / 7.68 ms | 480,342 B |
 | 512 signers | **5.10 s** | 11.08 s | 4.25 / 10.54 ms | 556,830 B |
 
-CPU prove timings are earlier i9-12900 / Ryzen 9 9950X runs. The newer rows' verify timings come from their GPU-prover host. These are separate measurements on shared machines, not a controlled CPU/GPU speedup comparison.
-
-**Measured validator-set scaling.** The Beam harness generated distinct validator keys and proved and verified all subnet signatures on one i9-12900 + RX 6750 XT. These November 14 runs use the hierarchy format: a new verifier receives and checks every shard proof.
+**Measured validator-set scaling.** The Beam harness generated distinct validator keys and proved and verified all subnet signatures on one i9-12900 + RX 6750 XT:
 
 | Validators | 128-signer shards | Prove all shards, one host | Full verification, multi-core p50 | Full hierarchy |
 | --- | ---: | ---: | ---: | ---: |
@@ -32,11 +30,10 @@ CPU prove timings are earlier i9-12900 / Ryzen 9 9950X runs. The newer rows' ver
 | 8,192 | 64 | 99.2 s | 109.34 ms | 27.24 MiB |
 | 16,384 | 128 | 181.9 s | 107.63 ms | 54.47 MiB |
 
-Warm per-subnet proving was 1.26–1.46 s, with zero reported GPU fallbacks. The [run record](docs/PERFORMANCE.md#distinct-validator-hierarchy-demos--2026-11-14) includes the historical source configuration, single-core timings, and network-model boundary. The example's compact summary commitment needs already-verified child evidence; it is not a standalone signature certificate.
-
-**Measured recursive depth.** The newer split construction verifies child sumchecks in-circuit and folds deferred PCS claims into one WHIR opening per level below the root. Real signature fixtures passed depth-2 and depth-3 proving, root verification, wire roundtrips, and tamper rejection. The internal circuit shrinks from **1,048,576 to 524,288 rows**. In the November 16 CPU run, complete depth-2/depth-3 objects were **2.34 / 4.15 MB**, verifying in **42.02 / 77.55 ms**. These fixtures have **2 / 4 active signers**, use bounded-query tags 7/10, and measure recursion rather than validator population. [Timings, total wire sizes, and commands](docs/PERFORMANCE.md#contractive-split-recursion--2026-11-16).
-
-**Projected million-validator scaling.** The separate [hologram merge model (fan-in up to 16)](docs/QUORUM_AND_CONSENSUS_SCALING.md) explores up to 1,048,576 validators: approximately **321 KiB** and **4.28 s critical-path proving**, with one GPU per tree node and no inter-node transfer time. Merge timings and root-opening sizes are modelled. This is a target for the recursive pipeline, not a measured million-validator run or the wire size of today's split proofs.
+**Measured recursive depth.**
+- **Depth-independent `QSAGIVC1` (`crates/qsag-agg/src/recursive_ivc/`):** Folds binary subtrees over `Poseidon2-GL-w24` and $\mathbb{F}_{p^5}$ into a single root proof whose byte length is strictly constant in depth (**`26,185 B`** identically across depths `1, 2, 3` / `2, 4, 8` shards; **`639,673 B`** fixed `[DKT26]` $2^{23}$-cell production format).
+- **Contractive split recursion (`SplitSubtreeAggregate`):** Verifies child sumchecks in-circuit (`1,048,576` to `524,288` rows) and folds deferred PCS claims into one WHIR opening per level (`2.34 / 4.15 MB`, verifying in `42.02 / 77.55 ms` at depths 2 and 3).
+- **Projected million-validator scaling:** The [hologram merge model (fan-in up to 16)](docs/QUORUM_AND_CONSENSUS_SCALING.md) projects 1,048,576 validators at **~321 KiB** and **4.28 s critical-path proving** with one GPU per tree node.
 
 Other measured operations ([paper §7](paper/qsag.typ)):
 
@@ -45,8 +42,9 @@ Other measured operations ([paper §7](paper/qsag.typ)):
 | Prepared Jorts threshold signature, 2-of-3 | 1.0 ms in memory; 81 ms over a simulated WAN |
 | QS-A 2-of-3 / QS-B 3-of-7, encrypted channels and synced journal | 4.37 / 5.21 ms |
 | Isolated CNF, one 256-hash Keccak wave, 2-of-3 / 3-of-5 | 39.5 / 96.2 ms; 1.8 / 5.9 MiB traffic |
-| Pooled blinded MAC check, 3 parties | 31 µs online; 4.04 ms amortized offline refill |
+| Pooled blinded MAC check (`OtMesh`, active Beaver sacrifice), 3 parties | 31 µs online; 4.04 ms amortized offline refill |
 | Compact1122, verify 1,200 votes | 1.23 s on one core; 158–187 ms on eight threads |
+| Public `HemQuintic128` (`QSAGHQM2`, `< 2^-128` QROM at $Q \le 2^{64}$) | 362,391 B (`TurboShake400`) / 381,045 B (`Poseidon2-GL-w24`) |
 | zk-Hem credential, 32 attributes, tag 7 | 0.28 s prove; 19.6 ms one-core verify; 239,507 B |
 | SpongeMacaroon, three caveats | 161 B; 1.8 µs verify |
 
@@ -54,33 +52,26 @@ Other measured operations ([paper §7](paper/qsag.typ)):
 
 ### Threshold signing: keep only the secret hashes in MPC
 
-A hash-based signature publishes most of the digests its signer computes. Cut-the-Hash evaluates four classes of secret operation under MPC, checks the custodians' contributions, opens the boundary digests, and computes the public tree above them normally. Secret computation is at most 16 hashes deep for SLH-DSA and 4 for the native formats, independent of tree height.
+Cut-the-Hash evaluates four secret oracle families under MPC, checks the custodians' contributions, opens the boundary digests, and computes the public tree above them in the clear. Secret computation is at most 16 hashes deep for SLH-DSA and 4 for the native formats, independent of tree height.
 
-For **SLH-DSA (FIPS 205)**, the result is byte-identical to a single signer's output with the same key and randomness, so existing verifiers work unchanged. A bitsliced 2-of-3 engine supplies the fast path; isolated per-custodian CNF parties support honest-majority thresholds including 3-of-5. An authenticated MPC engine supports dishonest-majority configurations with abort. A separate protocol threshold-signs **ML-DSA-44/65/87 (FIPS 204)**.
-
-The native hash-based formats trade signature size, state, and proving cost:
+For **SLH-DSA (FIPS 205)**, the output is byte-identical to a single signer's signature on matched key and randomness. Three engines serve it: a 256-lane bitsliced 2-of-3 engine, isolated per-custodian CNF parties (`IsolatedCnfParty`) for honest-majority thresholds ($2(t-1) < n$) over deployment-bound encrypted wire channels, and an authenticated SPDZ engine (`SoftSpokenOT` + active-sacrifice `OtMesh`) for dishonest majorities. A separate dealerless protocol threshold-signs **ML-DSA-44/65/87 (FIPS 204)**.
 
 | Format | Purpose | Signature size |
 | --- | --- | --- |
-| **Baggy** | Stateless signing; cached public upper layers, pruned few-time tree | At most 71,654 B |
+| **Baggy** | Stateless signing; cached public upper layers, pruned PORS+FP few-time tree | At most 71,654 B |
 | **Jorts** / **JortsPoseidon2** | Stateful, one online round after preprocessing; Poseidon2 variant feeds Hem | 4,328–4,776 B |
-| **Compact1122** | Single-use live votes; SIMD batch verification | 1,122 B; 1,218 B with the demo's 96-byte header |
+| **Compact1122** | Single-use live votes; SIMD batch verification | 1,122 B; 1,218 B with 96-byte header |
 
 ### Quorum switching: share a key without reusing a leaf
 
-Stateful signatures require each one-time leaf to be spent at most once, even across partitions, crashes, and snapshots. **BeltLatch** logs and syncs `(leaf, intent)` before releasing a share. External TPM, hypervisor, or disjoint-device anchors detect rollback beyond the journal's own failure model.
-
-**QS-A** assigns disjoint leaf spaces to signing committees. **QS-B** requires a certificate that a quorum logged the same leaf and message before release. Safety requires every pair of certifying quorums to intersect outside each tolerated fault set ($2q > n + f$ for symmetric quorums). Weighted, threshold-tree, and asymmetric quorum systems use the same release machinery. Public equivocation evidence supports applications that slash a signer for signing two messages at one leaf.
+**BeltLatch** logs and syncs `(leaf, intent)` on two separate 4,096-byte high-water-mark pages before releasing a share, backed by external TPM 2.0 NV counters (`--anchor-tpm-nv`), disjoint-device mounts (`--anchor-dir`), and hypervisor `VMGENID` fork guards (`--anchor-vmgenid`). **QS-A** assigns disjoint leaf spaces to committees; **QS-B** and **3-of-5 / 4-of-5 CommitteeHandoffJorts** certify leaves under symmetric, weighted, tree-composed, or Cachin–Tackmann $B^3$ asymmetric quorum intersection (including dealerless wire MSP enrollment).
 
 ### Hem: prove signature verification, then merge proofs
 
-Hem starts from public `JortsPoseidon2` signatures. It encodes their verification over the 64-bit Goldilocks field and its quartic extension, checks the trace with LogUp-GKR sumcheck, and commits multilinear witnesses using affine-combiner WHIR. The query schedules use the proven Johnson radius; retired capacity-proximity profiles are rejected.
-
-The default tag-4 profile uses cSHAKE256 and a 16-bit proof of work; tag 9 uses TurboSHAKE256 for the outer commitment hash. Explicit opt-in profiles use bounded-query salted-Merkle accounting. The analysed knowledge-soundness level of every profile is 127 bits in the classical random-oracle model and 81 bits in the quantum one, limited by 256-bit digests ([aggregation security](crates/qsag-agg/SECURITY.md)); the profile names and their nominal per-round figures are not security levels. [Security parameters and composition boundaries](docs/SECURITY_AND_CT_PROOFS.md#hem-profile-and-qrom-accounting) matter when comparing proof sizes and timings.
-
-Above a shard, the implementation has full in-circuit hologram merges and **contractive split recursion**. Split nodes verify child sumchecks, bind deferred PCS claims into an accumulator root, and fold homogeneous claims at each level. The native verifier checks the root proof, claim ledger, and folded openings against a **32-byte roster root**. Ordered, nonoverlapping shard-index intervals prevent double-counting within a tree; roster enrollment must enforce validator-key uniqueness across shards. [Implementation](crates/qsag-agg/src/recursive/split.rs) · [affine protocol](crates/qsag-agg/AFFINE_PROTOCOL.md).
-
-Threshold custody and aggregation compose: a custodian committee produces one validator signature; Hem aggregates signatures from many independent validator keys. Custody adds no signature bytes to the aggregate.
+Hem encodes `JortsPoseidon2` and `CorduroyPoseidon2` verification over the Goldilocks field, checks the trace with sumcheck, and commits multilinear witnesses using Johnson-radius affine-combiner WHIR:
+- **128-bit QROM quintic profiles (`HemQuintic128` `QSAGHQM2` & `zk-Hem v2` `QSAGZKH2`):** Over $\mathbb{F}_{p^5}$ with 400-bit `TurboSHAKE256` or 448-bit `Poseidon2-GL-w24` commitments and `[DKT26]` query schedules, sustaining `< 2^{-128}` QROM soundness error across all 13 schedules ($2^{16}..2^{28}$ cells) through $Q \le 2^{64}$ quantum queries.
+- **Legacy `Ext4` regimes (`WhirSecurityRegime` tags `4–10`):** 256-bit commitments (`127` bits classical / `81` bits composed QROM due to 256-bit digest collision terms; see [ASSURANCE.md](ASSURANCE.md)).
+- **Subtree recursion:** `QSAGIVC1` (`prove_ivc_tree` / `verify_ivc_tree`), `SuccinctSubtreeAggregate`, and `SplitSubtreeAggregate` compress arbitrary-depth validator trees against a 32-byte roster root, with straight-line multi-depth QROM knowledge extraction mechanized in Lean.
 
 ## Quickstart
 
@@ -94,68 +85,47 @@ cargo run --release -p qsag-cli -- info
 # Generate an SLH-DSA key, sign a file, verify it.
 umask 077 && D=$(mktemp -d /tmp/qsag.XXXXXX) && printf 'hello\n' > "$D/msg"
 cargo run --release -p qsag-cli -- keygen --scheme slh-dsa-shake-128f \
-  --secret-out "$D/sk.json" --public-out "$D/pk.json"
-cargo run --release -p qsag-cli -- sign --secret "$D/sk.json" --in "$D/msg" --out "$D/sig.json"
+  --secret-out "$D/sk.json" --public-out "$D/pk.json" --ephemeral-unanchored
+cargo run --release -p qsag-cli -- sign --secret "$D/sk.json" --in "$D/msg" \
+  --out "$D/sig.json" --ephemeral-unanchored
 cargo run --release -p qsag-cli -- verify --public "$D/pk.json" --in "$D/msg" --sig "$D/sig.json"
-```
 
-Runnable integration and scaling examples:
-
-```sh
-cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
+# 128-bit QROM quintic public aggregation (--hem-profile quintic-turbo | quintic-gl24):
 cargo run --release -p qsag-cli --example succinct_k_to_1_aggregation
-cargo run --release -p qsag-agg --example mock_solana_alpenglow
-cargo run --release -p qsag-agg --example mock_ethereum_beam
-
-# Explicit Vulkan shard benchmark; CPU is available without the feature/env setting.
-QSAG_ACCEL=vulkan QSAG_BENCH_N=512 QSAG_BENCH_SHARD=512 \
-  cargo test --release -p qsag-agg --features vulkan --lib \
-    bench_consensus_scale -- --ignored --nocapture
+cargo run --release -p qsag-cli --example threshold_slh_dsa_quickstart
 ```
-
-The consensus examples are single-host protocol harnesses with explicit network models. [Benchmark commands](docs/PERFORMANCE.md) specify the measured configurations. Stateful CLI vaults require `--anchor-dir <dir>` on a disjoint device or `--anchor-tpm-nv <index>` (one never-written counter per anchored domain); `--anchor-vmgenid` adds snapshot and clone detection to one of them and is refused alone; use `--ephemeral-unanchored` for disposable test keys.
 
 ## Wallets, migration, and capabilities
-
-The same custody machinery supports the rest of a wallet's signing lifecycle:
 
 | Component | What it provides |
 | --- | --- |
 | `qsag-hd`, `qsag-addr` | Dealerless module-lattice key hierarchies, committed watch-only inventories, Bech32m PQ addresses, and hybrid keys |
-| `qsag-migrate` | Local and threshold zero-knowledge proofs of knowledge of a secp256k1, Ed25519, Pallas, or BLS12-381 (withdrawal-key) scalar, bound to a PQ address—even when the chain has only seen a public-key hash. Commitments are 256-bit: about 85 bits of generic quantum collision binding ([migration security](crates/qsag-migrate/SECURITY.md)) |
+| `qsag-migrate` | Local and hardware-anchored collaborative MPC proofs (`zk-Hem v2` Toom-3 $\mathbb{F}_{p^5}$ and 4-curve `CoZK`) across 19 CLI kinds: Bitcoin/Ethereum `secp256k1`, Solana `Ed25519`, Zcash NU7 (`Sapling`, `Orchard`, `Ironwood` ZIP-2005, `Transparent` ZIP-2007), and `BLS12-381` withdrawal keys |
 | `qsag-policy` | Stateful velocity, allowlist, and window rules checked before custodians release shares |
-| `SpongeMacaroon`, `PqBiscuit` | Offline attenuation using a keyed sponge chain or a public-key-verifiable one-time-signature chain; third-party discharges for macaroons. A `PqBiscuit` seal binds the complete intent and is accepted once per audience, through a consumption store the verifier must supply |
-| `qsag-cred`, zk-Hem | Threshold ML-DSA, threshold symmetric (Poseidon2) oblivious PRFs, issuer-accumulator selective-disclosure credentials whose presentations a verifier accepts once, multisignatures with witnessed policies, and delegated capability presentations |
-
-A migration proof establishes ownership; the receiving chain or application must implement the settlement rule. [Migration security](crates/qsag-migrate/SECURITY.md).
+| `SpongeMacaroon`, `PqBiscuit`, `QSAGCAU1` | Keyed-sponge macaroons, offline one-time-signature biscuits, and unlinkable zero-knowledge capability presentations |
+| `qsag-cred` | Threshold ML-DSA, threshold Poseidon2 OPRFs, one-time verifier-ledger `BlindVC` credentials, and private multisignatures |
 
 ## Verification and hardware
 
-Lean 4 covers protocol models, compiler-extracted Rust functions, and decoded assembly routines. The proof library forbids `sorry`, custom axioms, `native_decide`, and `Classical.choice`; selected top-level and MIR theorems are replayed across six independent kernels. The [extraction coverage map](aeneas/qsag-verified/extraction-coverage.md) identifies which extracted functions sit on production paths. Differential tests compare executable Lean models and Rust against independent implementations.
-
-This is component-level assurance. Whole-binary Rust refinement, full deployed WHIR/QROM composition, and a mechanized zk-Hem simulator remain open (the simulator and the composed bounds are argued on paper in `crates/qsag-agg/SECURITY.md`). [ASSURANCE.md](ASSURANCE.md) states the theorem premises, trusted base, and current boundaries; [proof architecture](docs/PROOF_ARCHITECTURE.md) and [MIR verification](docs/AENEAS_VERIFICATION.md) map the code to the proofs.
-
-Two hardware projects exercise the same primitives:
-
-- **QSAG-NI:** synthesizable verifier coprocessor, ASIC and FPGA flows, simulation, and formal-equivalence checks. [ASIC results](hardware/asic/synth/RESULTS.md) · [FPGA results](hardware/fpga/RESULTS.md).
-- **Dregg-180:** 180 nm, 5 V physical custody enclave with capability checks, tamper response, PUF/fuzzy extraction, and NFC circuitry. [Design and physical implementation status](hardware/gf180mcu/README.md).
-
-Synthesis, simulation, and placement results are distinct from fabricated-silicon measurements. Timing closure and physical signoff are tracked in the hardware directories.
+- **Constructive Lean 4.35 Cathedral (`lean/Qsag/`, `aeneas/`):** `331` `Qsag` modules (`496,915` lines, `136,585` audited declarations, `73,117` theorems, `0` rejected, axioms strictly `⊆ {propext, Quot.sound}`, `0` `Classical.choice`, `0` `sorry`, `0` `import all`), welded to `aeneas/lean` (`6,890` decls) and `aeneas/lean-whir` (`1,911` decls, `37/37` WHIR functions), `28` `.rlib` assembly kernels (`ELF ≃ Math ≃ MIR`), and universal `poseidon2_perm12.spv` equivalence. **`312` challenge theorems and `32` definitions pass all 6 independent replay kernels** (`lean`, `leanchecker-paranoid`, `lean4lean`, `nanoda_bin`, `con-leche`, `con-ron`).
+- **Four hardware targets (`hardware/`):**
+  - **QSAG-NI v2 (`hardware/asic/`, `hardware/fpga/`):** Stateful `zk-Hem v2` + `QSAGSTA1` verifier coprocessor (`258,104`-byte live proof verified over streaming hardware port, `194/194` faults caught, `105+` Z3/Bitwuzla miters, `Obend` Lean 4, `Nangate45` 0-DRC full route, `ECP5-85F` bitstreams).
+  - **ASS2-0P5 / Dregg-64 (`hardware/ass2/`, `crates/qsag-ass2/`):** 64-bit `GF180MCU` 5 V capability enclave (`512`-RO `252`-pair `144`-bit `BCH(63,36,5)` PUF, PQ owner `I-ROM` bootstrap, `0.60 ns` async latch wipe, `37.75 MHz` worst-case `SS` / `54.44 MHz` `TT` core, KiCad 8 carrier PCB).
+  - **Dregg-180 (`hardware/gf180mcu/`):** 5-organ 180 nm 5 V physical custody enclave (`CapTP` vat, `RO-PUF`, `13.56 MHz` NFC + NCO, sub-5 ns `Brands–Chaum` Vernier TDC, staggered `WOTS+C` self-check).
+  - **CL_QSAG_F2 (`hardware/aws_f2/`, `qsag_accel::aws_f2`):** Turnkey AWS EC2 F2 (`VU47P`, HDK 2.3.5) custom logic shell integrating 2 `QSAG-NI v2` engines and 3 isolated `ASS2` enclaves (`2.52%` `LUT6`, `3.21%` `DSP48E2`, `14.83%` `RAMB36E2`).
 
 ## Repository map
 
-Library crates use `no_std` + `alloc`; OS storage, anchors, and transports use `std`.
-
 | Crates / directory | Contents |
 | --- | --- |
-| `qsag-core`, `qsag-quorum`, `qsag-fts` | Hash-based signatures, MPC engines, quorum switching, durable leaf allocation, few-time votes |
-| `qsag-agg`, `qsag-accel`, `qsag-asm` | Hem, recursive and zero-knowledge relations, Vulkan compute, SIMD and certified assembly kernels |
-| `qsag-hd`, `qsag-addr`, `qsag-policy`, `qsag-cred`, `qsag-migrate` | Wallet and application protocols above |
-| `qsag-cli` | CLI and end-to-end examples |
-| `lean/`, `aeneas/`, `validation/` | Protocol proofs, extracted Rust proofs, differential validation |
-| `hardware/` | ASIC, FPGA, and custody-enclave implementations |
+| `qsag-core`, `qsag-quorum`, `qsag-fts` | Hash-based signatures, MPC engines, quorum switching, hardware anchors, few-time votes |
+| `qsag-agg`, `qsag-accel`, `qsag-asm` | Hem / `HemQuintic128` / `zk-Hem v2` / `QSAGIVC1`, Vulkan & AWS F2 backends, SIMD & certified assembly kernels |
+| `qsag-hd`, `qsag-addr`, `qsag-policy`, `qsag-cred`, `qsag-migrate`, `qsag-ass2` | Wallet, capability, credential, 19-kind migration, and `ASS2-0P5` enclave host SDK |
+| `qsag-cli` | CLI (`qsag`, synced bijectively to `dregg-sig`) and runnable examples |
+| `lean/`, `aeneas/`, `validation/` | 331-module Lean 4.35 proofs, MIR extractions, 6-kernel comparator, 86 differential suites |
+| `hardware/` | `asic/` (`QSAG-NI v2`), `fpga/`, `ass2/` (`ASS2-0P5` + PCB), `gf180mcu/` (`Dregg-180`), `aws_f2/` (`VU47P`) |
 
-[Paper](paper/qsag.typ) · [Measured performance](docs/PERFORMANCE.md) · [Scaling model](docs/QUORUM_AND_CONSENSUS_SCALING.md) · [Security and constant-time proofs](docs/SECURITY_AND_CT_PROOFS.md)
+[Paper](paper/qsag.typ) · [Assurance boundaries](ASSURANCE.md) · [Measured performance](docs/PERFORMANCE.md) · [Scaling model](docs/QUORUM_AND_CONSENSUS_SCALING.md) · [Security and constant-time proofs](docs/SECURITY_AND_CT_PROOFS.md)
 
 ## License
 
