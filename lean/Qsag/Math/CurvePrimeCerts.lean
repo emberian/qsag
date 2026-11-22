@@ -623,3 +623,613 @@ instance : CurveFactPrime p_bls381 := ⟨p_bls381_isPrimeNat⟩
 instance : CurveFactPrime r_bls381 := ⟨r_bls381_isPrimeNat⟩
 
 /-- Canonical prime-field element mod `p`: natural residue `val < p`. -/
+structure PrimeMod (p : Nat) where
+  val : Nat
+  isLt : val < p
+  deriving DecidableEq, Repr
+
+namespace PrimeMod
+
+theorem ext {p : Nat} {a b : PrimeMod p} (h : a.val = b.val) : a = b := by
+  cases a; cases b; cases h; rfl
+
+theorem pos_of_factPrime (p : Nat) [hp : CurveFactPrime p] : 0 < p := by
+  have h2 := hp.isPrime.1; omega
+
+theorem one_lt_of_factPrime (p : Nat) [hp : CurveFactPrime p] : 1 < p := by
+  have h2 := hp.isPrime.1; omega
+
+@[expose] def ofNat (p : Nat) [CurveFactPrime p] (n : Nat) : PrimeMod p :=
+  ⟨n % p, Nat.mod_lt n (pos_of_factPrime p)⟩
+
+@[expose] def zero (p : Nat) [CurveFactPrime p] : PrimeMod p :=
+  ⟨0, pos_of_factPrime p⟩
+
+@[expose] def one (p : Nat) [CurveFactPrime p] : PrimeMod p :=
+  ⟨1, one_lt_of_factPrime p⟩
+
+@[expose] def add {p : Nat} [CurveFactPrime p] (a b : PrimeMod p) : PrimeMod p :=
+  ⟨(a.val + b.val) % p, Nat.mod_lt _ (pos_of_factPrime p)⟩
+
+@[expose] def mul {p : Nat} [CurveFactPrime p] (a b : PrimeMod p) : PrimeMod p :=
+  ⟨(a.val * b.val) % p, Nat.mod_lt _ (pos_of_factPrime p)⟩
+
+@[expose] def neg {p : Nat} [CurveFactPrime p] (a : PrimeMod p) : PrimeMod p :=
+  ⟨(p - a.val) % p, Nat.mod_lt _ (pos_of_factPrime p)⟩
+
+@[expose] def sub {p : Nat} [CurveFactPrime p] (a b : PrimeMod p) : PrimeMod p :=
+  ⟨(a.val + (p - b.val)) % p, Nat.mod_lt _ (pos_of_factPrime p)⟩
+
+/-- Total natural residue of a Bézout coefficient `x : Int` modulo `p`. -/
+def bezoutResidue (p : Nat) : Int → Nat
+  | Int.ofNat u => u % p
+  | Int.negSucc u => (p - ((u + 1) % p)) % p
+
+/-- Constructive modular inverse via extended Euclidean `extGcd` (`inv 0 = 0`). -/
+@[expose] def inv {p : Nat} [CurveFactPrime p] (a : PrimeMod p) : PrimeMod p :=
+  if a.val = 0 then zero p
+  else ⟨bezoutResidue p (extGcd a.val p).2.1 % p, Nat.mod_lt _ (pos_of_factPrime p)⟩
+
+instance instCommRingOps (p : Nat) [CurveFactPrime p] : CommRingOps (PrimeMod p) where
+  zero := zero p
+  one := one p
+  add := add
+  mul := mul
+  neg := neg
+  sub := sub
+
+instance instLawfulCommRing (p : Nat) [CurveFactPrime p] : LawfulCommRing (PrimeMod p) where
+  add_assoc a b c := ext (by
+    show ((a.val + b.val) % p + c.val) % p = (a.val + (b.val + c.val) % p) % p
+    rw [Nat.mod_add_mod, Nat.add_mod_mod, Nat.add_assoc])
+  add_comm a b := ext (by show (a.val + b.val) % p = (b.val + a.val) % p; rw [Nat.add_comm])
+  zero_add a := ext (by show (0 + a.val) % p = a.val; rw [Nat.zero_add, Nat.mod_eq_of_lt a.isLt])
+  add_zero a := ext (by show (a.val + 0) % p = a.val; rw [Nat.add_zero, Nat.mod_eq_of_lt a.isLt])
+  add_left_neg a := ext (by
+    show ((p - a.val) % p + a.val) % p = 0
+    rw [Nat.mod_add_mod]
+    have hEq : p - a.val + a.val = p := Nat.sub_add_cancel (Nat.le_of_lt a.isLt)
+    rw [hEq, Nat.mod_self])
+  sub_eq_add_neg a b := ext (by
+    show (a.val + (p - b.val)) % p = (a.val + (p - b.val) % p) % p
+    rw [Nat.add_mod_mod])
+  mul_assoc a b c := ext (by
+    show ((a.val * b.val) % p * c.val) % p = (a.val * ((b.val * c.val) % p)) % p
+    rw [Nat.mod_mul_mod, Nat.mul_mod_mod, Nat.mul_assoc])
+  mul_comm a b := ext (by show (a.val * b.val) % p = (b.val * a.val) % p; rw [Nat.mul_comm])
+  one_mul a := ext (by show (1 * a.val) % p = a.val; rw [Nat.one_mul, Nat.mod_eq_of_lt a.isLt])
+  mul_one a := ext (by show (a.val * 1) % p = a.val; rw [Nat.mul_one, Nat.mod_eq_of_lt a.isLt])
+  left_distrib a b c := ext (by
+    show (a.val * ((b.val + c.val) % p)) % p = ((a.val * b.val) % p + (a.val * c.val) % p) % p
+    rw [Nat.mul_mod_mod, Nat.add_mod_mod, Nat.mod_add_mod, Nat.left_distrib])
+  right_distrib a b c := ext (by
+    show ((a.val + b.val) % p * c.val) % p = ((a.val * c.val) % p + (b.val * c.val) % p) % p
+    rw [Nat.mod_mul_mod, Nat.add_mod_mod, Nat.mod_add_mod, Nat.right_distrib])
+
+private theorem int_ofNat_eq (n : Nat) : Int.ofNat n = (n : Int) := rfl
+
+private theorem int_negSucc_mul_right (a u : Nat) :
+    (a : Int) * Int.negSucc u = - ((a * (u + 1) : Nat) : Int) := by
+  have h1 : (u : Int) + 1 = ((u + 1 : Nat) : Int) := rfl
+  rw [Int.negSucc_eq, Int.mul_neg, h1, ← Int.natCast_mul]
+
+private theorem bezout_inv_cancel_nat {p a : Nat} (hp : IsPrimeNat p) (ha0 : a ≠ 0) (haLt : a < p) :
+    (a * (bezoutResidue p (extGcd a p).2.1 % p)) % p = 1 := by
+  have hp2 : 2 ≤ p := hp.1
+  obtain ⟨hdA, hdP⟩ := extGcd_dvd a p
+  have hg1 : (extGcd a p).1 = 1 := by
+    rcases hp.2 (extGcd a p).1 hdP with h1 | hEqP
+    · exact h1
+    · rw [hEqP] at hdA
+      have := Nat.le_of_dvd (Nat.pos_of_ne_zero ha0) hdA
+      omega
+  have hBez := extGcd_bezout a p
+  rw [hg1] at hBez
+  rw [Nat.mul_mod_mod]
+  cases hx : (extGcd a p).2.1 with
+  | ofNat u =>
+    rw [hx, int_ofNat_eq u, ← Int.natCast_mul] at hBez
+    dsimp only [bezoutResidue]
+    rw [Nat.mul_mod_mod]
+    cases hy : (extGcd a p).2.2 with
+    | ofNat v =>
+      rw [hy, int_ofNat_eq v, ← Int.natCast_mul] at hBez
+      have hNat : a * u + p * v = 1 := by omega
+      have hv0 : v = 0 := by
+        rcases Nat.eq_zero_or_pos v with rfl | hvPos
+        · rfl
+        · have : 2 ≤ p * v := Nat.le_trans hp2 (Nat.le_mul_of_pos_right p hvPos)
+          omega
+      subst hv0
+      rw [Nat.mul_zero, Nat.add_zero] at hNat
+      rw [hNat]; exact Nat.mod_eq_of_lt hp2
+    | negSucc v =>
+      rw [hy, int_negSucc_mul_right p v] at hBez
+      have hNat : a * u = 1 + p * (v + 1) := by omega
+      rw [hNat, Nat.add_mul_mod_self_left]
+      exact Nat.mod_eq_of_lt hp2
+  | negSucc u =>
+    rw [hx, int_negSucc_mul_right a u] at hBez
+    dsimp only [bezoutResidue]
+    rw [Nat.mul_mod_mod]
+    cases hy : (extGcd a p).2.2 with
+    | ofNat v =>
+      rw [hy, int_ofNat_eq v, ← Int.natCast_mul] at hBez
+      have hNat : p * v = a * (u + 1) + 1 := by omega
+      let q := (u + 1) / p
+      let r := (u + 1) % p
+      have hDivMod : p * q + r = u + 1 := Nat.div_add_mod (u + 1) p
+      have hrLe : r ≤ p := Nat.le_of_lt (Nat.mod_lt (u + 1) (by omega))
+      have hSum : a * (u + 1) + a * (p - r) = p * (a * (q + 1)) := by
+        calc a * (u + 1) + a * (p - r)
+            = a * ((u + 1) + (p - r)) := (Nat.mul_add a _ _).symm
+          _ = a * (p * q + (r + (p - r))) := by rw [← hDivMod, Nat.add_assoc]
+          _ = a * (p * q + p * 1) := by rw [Nat.add_sub_of_le hrLe, Nat.mul_one]
+          _ = a * (p * (q + 1)) := by rw [← Nat.mul_add]
+          _ = p * (a * (q + 1)) := by rw [← Nat.mul_assoc, Nat.mul_comm a p, Nat.mul_assoc]
+      have hvLeK : v ≤ a * (q + 1) := by
+        rcases Nat.lt_or_ge (a * (q + 1)) v with hgt | hle
+        · exfalso
+          have hMul : p * (a * (q + 1) + 1) ≤ p * v := Nat.mul_le_mul_left p hgt
+          rw [Nat.mul_add, Nat.mul_one] at hMul
+          omega
+        · exact hle
+      have hSubP : p * (a * (q + 1)) = p * v + p * (a * (q + 1) - v) := by
+        rw [← Nat.mul_add, Nat.add_sub_of_le hvLeK]
+      have hDiff : a * (p - r) = 1 + p * (a * (q + 1) - v) := by omega
+      change (a * (p - r)) % p = 1
+      rw [hDiff, Nat.add_mul_mod_self_left]
+      exact Nat.mod_eq_of_lt hp2
+    | negSucc v =>
+      rw [hy, int_negSucc_mul_right p v] at hBez
+      omega
+
+/-- **Constructive Prime Field Instance (`LawfulField (PrimeMod p)`)**:
+    Certifies `PrimeMod p` as a total constructive field for every certified prime `p`. -/
+instance instLawfulField (p : Nat) [hp : CurveFactPrime p] : LawfulField (PrimeMod p) where
+  inv := inv
+  zero_ne_one := fun h => by
+    have hv : (0 : Nat) = 1 := congrArg PrimeMod.val h
+    exact absurd hv (by decide)
+  inv_zero := by unfold inv zero; rfl
+  mul_inv_cancel := fun {a} ha => ext (by
+    have ha0 : a.val ≠ 0 := fun h0 => ha (ext h0)
+    show (a.val * (inv a).val) % p = 1
+    unfold inv
+    rw [ite_eq_right ha0]
+    exact bezout_inv_cancel_nat hp.isPrime ha0 a.isLt)
+
+end PrimeMod
+
+/-- Canonical constructive prime base & scalar fields of all deployed migration curves. -/
+abbrev FpSecp256k1 := PrimeMod SECP256K1_FIELD_P
+abbrev FrSecp256k1 := PrimeMod SECP256K1_ORDER_N
+abbrev FpEd25519   := PrimeMod P_ED25519
+abbrev FrEd25519   := PrimeMod R_ED25519
+abbrev FpPallas    := PrimeMod p_pallas
+abbrev FqPallas    := PrimeMod q_pallas
+abbrev FpVesta     := PrimeMod p_vesta
+abbrev FqVesta     := PrimeMod q_vesta
+abbrev FqJubjub    := PrimeMod q_jubjub
+abbrev FrJubjub    := PrimeMod R_JUBJUB
+abbrev FpBls381    := PrimeMod p_bls381
+abbrev FrBls381    := PrimeMod r_bls381
+
+/-! ## §3. Fast Binary Short-Weierstrass & Complete Twisted-Edwards Generator Order Verification -/
+
+/-- `secp256k1` short-Weierstrass curve `y² = x³ + 7` over `SECP256K1_FIELD_P`. -/
+def secp256k1SwCurve : SwCurve := ⟨SECP256K1_FIELD_P, 0, 7⟩
+
+/-- Standard `secp256k1` generator `G`. -/
+def secp256k1G : SwPoint :=
+  some (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+        0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+/-- `Vesta` short-Weierstrass curve `y² = x³ + 5` over `p_vesta = q_pallas`. -/
+def vestaSwCurve : SwCurve := ⟨p_vesta, 0, 5⟩
+
+/-- Standard Zcash `Vesta` generator `(-1, 2)`. -/
+def pastaVestaG : SwPoint :=
+  some (p_vesta - 1, 2)
+
+/-- Local coordinates of `orchardSpendAuthG` and `bls381G1` for kernel-evaluated `swRcbSmul`. -/
+def orchardSpendAuthGLocal : SwPoint :=
+  some (0x375523b328f1d6063b8d187c3e5f445f0c7f0ce37b70a10c8d1a7284b875c963,
+        0x1ad0357fdf1a66db7b10bcfcfed624fbdfc914fec005bdd84ce33e817b0c3bc9)
+
+def bls381G1Local : SwPoint :=
+  some (0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb,
+        0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1)
+
+private def strictNatSw (n : Nat) (k : Nat → RcbProjPoint) : RcbProjPoint :=
+  match n with | 0 => k 0 | m + 1 => k (m + 1)
+
+private def mkStrictSw (x y z : Nat) : RcbProjPoint :=
+  strictNatSw x fun vx => strictNatSw y fun vy => strictNatSw z fun vz => ⟨vx, vy, vz⟩
+
+def swToProj : SwPoint → RcbProjPoint
+  | none => ⟨0, 1, 0⟩
+  | some (x, y) => ⟨x, y, 1⟩
+
+def swIsIdentity (p : Nat) (P : RcbProjPoint) : Bool :=
+  (P.x % p == 0) && (P.y % p != 0) && (P.z % p == 0)
+
+def swEqAffine (p : Nat) (P : RcbProjPoint) : SwPoint → Bool
+  | none => swIsIdentity p P
+  | some (ax, ay) =>
+    (P.z % p != 0) && ((P.x % p) == (ax * P.z) % p) && ((P.y % p) == (ay * P.z) % p)
+
+/-- Complete `a = 0` Renes–Costello–Batina projective addition (`b3 = 3 * b`). -/
+def swRcbAdd (p b3 : Nat) (P Q : RcbProjPoint) : RcbProjPoint :=
+  let addM := fun u v => (u + v) % p
+  let subM := fun u v => (u + p - (v % p)) % p
+  let mulM := fun u v => (u * v) % p
+  strictNatSw (mulM P.x Q.x) fun t0 =>
+  strictNatSw (mulM P.y Q.y) fun t1 =>
+  strictNatSw (mulM P.z Q.z) fun zz =>
+  strictNatSw (subM (mulM (addM P.x P.y) (addM Q.x Q.y)) (addM t0 t1)) fun t3 =>
+  strictNatSw (subM (mulM (addM P.y P.z) (addM Q.y Q.z)) (addM t1 zz)) fun t4 =>
+  strictNatSw (subM (mulM (addM P.x P.z) (addM Q.x Q.z)) (addM t0 zz)) fun y30 =>
+  strictNatSw ((3 * t0) % p) fun t03 =>
+  strictNatSw (mulM b3 zz) fun t2 =>
+  strictNatSw (addM t1 t2) fun z30 =>
+  strictNatSw (subM t1 t2) fun t1s =>
+  strictNatSw (mulM b3 y30) fun cross =>
+  mkStrictSw (subM (mulM t3 t1s) (mulM t4 cross))
+             (addM (mulM t1s z30) (mulM cross t03))
+             (addM (mulM z30 t4) (mulM t03 t3))
+
+def swRcbSmulFuel (p b3 : Nat) (base : RcbProjPoint) : Nat → Nat → RcbProjPoint
+  | 0, _ => ⟨0, 1, 0⟩
+  | fuel + 1, k =>
+    if k = 0 then ⟨0, 1, 0⟩
+    else
+      let half := swRcbSmulFuel p b3 base fuel (k / 2)
+      let dbl := swRcbAdd p b3 half half
+      if k % 2 = 1 then swRcbAdd p b3 dbl base else dbl
+
+def swRcbSmul (p b3 : Nat) (base : RcbProjPoint) (k : Nat) : RcbProjPoint :=
+  swRcbSmulFuel p b3 base 256 k
+
+/-- Kernel-checked curve membership and binary `swRcbSmul` order for `secp256k1G` (`b3 = 21`) and
+    `pastaVestaG` (`b3 = 15`). -/
+theorem secp256k1G_and_vestaG_rcbSmul_order :
+    secp256k1SwCurve.onCurve secp256k1G = true ∧
+    swIsIdentity SECP256K1_FIELD_P
+      (swRcbSmul SECP256K1_FIELD_P 21 (swToProj secp256k1G) SECP256K1_ORDER_N) = true ∧
+    swEqAffine SECP256K1_FIELD_P
+      (swRcbSmul SECP256K1_FIELD_P 21 (swToProj secp256k1G) (SECP256K1_ORDER_N - 1))
+      (secp256k1SwCurve.neg secp256k1G) = true ∧
+    vestaSwCurve.onCurve pastaVestaG = true ∧
+    swIsIdentity p_vesta
+      (swRcbSmul p_vesta 15 (swToProj pastaVestaG) q_vesta) = true ∧
+    swEqAffine p_vesta
+      (swRcbSmul p_vesta 15 (swToProj pastaVestaG) (q_vesta - 1))
+      (vestaSwCurve.neg pastaVestaG) = true :=
+  ⟨by decide +kernel, by decide +kernel, by decide +kernel,
+   by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- Projective coordinates of the scalar-order multiple of the Vesta generator in its base
+    field. A nonzero middle coordinate distinguishes the identity from the zero triple. -/
+theorem pastaVestaG_order_fpVesta :
+    let P := swRcbSmul p_vesta 15 (swToProj pastaVestaG) q_vesta
+    let zero : FpVesta := PrimeMod.zero p_vesta
+    PrimeMod.ofNat p_vesta P.x = zero ∧ PrimeMod.ofNat p_vesta P.y ≠ zero ∧
+      PrimeMod.ofNat p_vesta P.z = zero := by
+  decide +kernel
+
+/-- Extended twisted-Edwards coordinates `(U : V : Z : T)` for `-u² + v² = 1 + d u² v²` (`a = -1`),
+    matching `ed25519_ct.rs:94-127` and `hem/zcash/sapling.rs:323-358`. -/
+structure EdwardsProjPoint where
+  u : Nat
+  v : Nat
+  z : Nat
+  t : Nat
+  deriving DecidableEq, Repr
+
+private def strictNatEd (n : Nat) (k : Nat → EdwardsProjPoint) : EdwardsProjPoint :=
+  match n with | 0 => k 0 | m + 1 => k (m + 1)
+
+private def mkStrictEd (u v z t : Nat) : EdwardsProjPoint :=
+  strictNatEd u fun vu => strictNatEd v fun vv =>
+    strictNatEd z fun vz => strictNatEd t fun vt => ⟨vu, vv, vz, vt⟩
+
+/-- Boolean affine curve-equation check for `-u² + v² ≡ 1 + d u² v² (mod p)`. -/
+def edwardsOnCurve (p d u v : Nat) : Bool :=
+  decide (u < p) && decide (v < p) &&
+  ((((p - (u * u) % p) + (v * v) % p) % p) ==
+    ((1 + ((d * ((u * u) % p)) % p * ((v * v) % p)) % p) % p))
+
+def toEdwardsProj (p u v : Nat) : EdwardsProjPoint :=
+  ⟨u % p, v % p, 1, (u * v) % p⟩
+
+def edwardsIsIdentity (p : Nat) (P : EdwardsProjPoint) : Bool :=
+  (P.u % p == 0) && (P.z % p != 0) && (P.v % p == P.z % p)
+
+def edwardsEqAffine (p : Nat) (P : EdwardsProjPoint) (au av : Nat) : Bool :=
+  (P.z % p != 0) && ((P.u % p) == (au * P.z) % p) && ((P.v % p) == (av * P.z) % p)
+
+/-- Complete `a = -1` twisted-Edwards addition with `d2 = (2 * d) % p`. -/
+def edwardsAdd (p d2 : Nat) (P Q : EdwardsProjPoint) : EdwardsProjPoint :=
+  let addM := fun x y => (x + y) % p
+  let subM := fun x y => (x + p - (y % p)) % p
+  let mulM := fun x y => (x * y) % p
+  strictNatEd (mulM (subM P.v P.u) (subM Q.v Q.u)) fun a =>
+  strictNatEd (mulM (addM P.v P.u) (addM Q.v Q.u)) fun b =>
+  strictNatEd (mulM (mulM P.t d2) Q.t) fun c =>
+  strictNatEd (addM (mulM P.z Q.z) (mulM P.z Q.z)) fun d =>
+  strictNatEd (subM b a) fun e =>
+  strictNatEd (subM d c) fun f =>
+  strictNatEd (addM d c) fun g =>
+  strictNatEd (addM b a) fun h =>
+  mkStrictEd (mulM e f) (mulM g h) (mulM f g) (mulM e h)
+
+def edwardsSmulFuel (p d2 : Nat) (base : EdwardsProjPoint) : Nat → Nat → EdwardsProjPoint
+  | 0, _ => ⟨0, 1, 1, 0⟩
+  | fuel + 1, k =>
+    if k = 0 then ⟨0, 1, 1, 0⟩
+    else
+      let half := edwardsSmulFuel p d2 base fuel (k / 2)
+      let dbl := edwardsAdd p d2 half half
+      if k % 2 = 1 then edwardsAdd p d2 dbl base else dbl
+
+def edwardsSmul (p d2 : Nat) (base : EdwardsProjPoint) (k : Nat) : EdwardsProjPoint :=
+  edwardsSmulFuel p d2 base 256 k
+
+/-- RFC 8032 `Ed25519` curve constant `d = -121665 / 121666 mod (2^255 - 19)` and basepoint `B`. -/
+def D_ED25519 : Nat :=
+  0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
+def ED25519_BX : Nat :=
+  0x216936d3cd6e53fec0a4e231fdd6dc5c692cc7609525a7b2c9562d608f25d51a
+def ED25519_BY : Nat :=
+  0x6666666666666666666666666666666666666666666666666666666666666658
+
+/-- Zcash Sapling `Jubjub` curve constant `d_J = -10240 / 10241 mod r_bls381` and `G^Sapling`. -/
+def D_JUBJUB : Nat :=
+  0x2a9318e74bfa2b48f5fd9207e6bd7fd4292d7f6d37579d2601065fd6d6343eb1
+def JUBJUB_GU : Nat :=
+  0x0926d4f32059c712d418a7ff26753b6ad5b9a7d3ef8e282747bf46920a95a753
+def JUBJUB_GV : Nat :=
+  0x57a1019e6de9b67553bb37d0c21cfd056d65674dcedbddbc305632adaaf2b530
+
+/-- Kernel-checked curve equations and binary `edwardsSmul` subgroup order evaluations for
+    RFC 8032 `Ed25519` basepoint `B` (`R_ED25519`) and Zcash Sapling `Jubjub` `G^Sapling`
+    (`R_JUBJUB`). -/
+theorem ed25519B_and_jubjubG_edwardsSmul_order :
+    edwardsOnCurve P_ED25519 D_ED25519 ED25519_BX ED25519_BY = true ∧
+    edwardsIsIdentity P_ED25519
+      (edwardsSmul P_ED25519 ((2 * D_ED25519) % P_ED25519)
+        (toEdwardsProj P_ED25519 ED25519_BX ED25519_BY) R_ED25519) = true ∧
+    edwardsEqAffine P_ED25519
+      (edwardsSmul P_ED25519 ((2 * D_ED25519) % P_ED25519)
+        (toEdwardsProj P_ED25519 ED25519_BX ED25519_BY) (R_ED25519 - 1))
+      (P_ED25519 - ED25519_BX) ED25519_BY = true ∧
+    edwardsOnCurve q_jubjub D_JUBJUB JUBJUB_GU JUBJUB_GV = true ∧
+    edwardsIsIdentity q_jubjub
+      (edwardsSmul q_jubjub ((2 * D_JUBJUB) % q_jubjub)
+        (toEdwardsProj q_jubjub JUBJUB_GU JUBJUB_GV) R_JUBJUB) = true ∧
+    edwardsEqAffine q_jubjub
+      (edwardsSmul q_jubjub ((2 * D_JUBJUB) % q_jubjub)
+        (toEdwardsProj q_jubjub JUBJUB_GU JUBJUB_GV) (R_JUBJUB - 1))
+      (q_jubjub - JUBJUB_GU) JUBJUB_GV = true :=
+  ⟨by decide +kernel, by decide +kernel, by decide +kernel,
+   by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- Compare canonical coordinates with the scalar multiple of a short Weierstrass generator. -/
+def swPublicKeyMatches (p b3 : Nat) (g : SwPoint) (sk x y : Nat) : Bool :=
+  decide (x < p ∧ y < p) && swEqAffine p (swRcbSmul p b3 (swToProj g) sk) (some (x, y))
+
+/-- Compare canonical coordinates with the scalar multiple of a twisted Edwards generator. -/
+def edwardsPublicKeyMatches (p d gx gy sk x y : Nat) : Bool :=
+  decide (x < p ∧ y < p) && edwardsEqAffine p
+    (edwardsSmul p ((2 * d) % p) (toEdwardsProj p gx gy) sk) x y
+
+/-! ## §4. Real-Curve Prime-Order Scalar Subgroup Certificates (`CertifiedPrimeScalarCurve`) -/
+
+/-- Unified constructive certificate for a deployed migration curve:
+    certifies primality and oddness of both `baseP` and `scalarOrd` (yielding constructive
+    `LawfulField (PrimeMod baseP)` and `LawfulField (PrimeMod scalarOrd)`), together with a
+    canonical affine generator `(genX, genY)` and binary scalar multiplication `binSmulIsId`
+    annihilated at `scalarOrd` and non-identity at `1`. -/
+structure CertifiedPrimeScalarCurve where
+  name : String
+  baseP : Nat
+  scalarOrd : Nat
+  genX : Nat
+  genY : Nat
+  baseP_prime : IsPrimeNat baseP
+  baseP_odd : baseP % 2 = 1
+  scalarOrd_prime : IsPrimeNat scalarOrd
+  scalarOrd_odd : scalarOrd % 2 = 1
+  gen_in_range : genX < baseP ∧ genY < baseP
+  publicKeyMatches : Nat → Nat → Nat → Bool
+  generator_matches : publicKeyMatches 1 genX genY = true
+  generator_rejects_changed_x : publicKeyMatches 1 ((genX + 1) % baseP) genY = false
+  binSmulIsId : Nat → Bool
+  smul_zero_id : binSmulIsId 0 = true
+  smul_one_nonid : binSmulIsId 1 = false
+  smul_ord_id : binSmulIsId scalarOrd = true
+
+@[expose] def secp256k1CurveCert : CertifiedPrimeScalarCurve where
+  name := "secp256k1"
+  baseP := SECP256K1_FIELD_P
+  scalarOrd := SECP256K1_ORDER_N
+  genX := 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+  genY := 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+  baseP_prime := p_secp256k1_isPrime
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := n_secp256k1_isPrime
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := swPublicKeyMatches SECP256K1_FIELD_P 21 secp256k1G
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    swIsIdentity SECP256K1_FIELD_P (swRcbSmul SECP256K1_FIELD_P 21 (swToProj secp256k1G) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := secp256k1G_and_vestaG_rcbSmul_order.2.1
+
+def ed25519CurveCert : CertifiedPrimeScalarCurve where
+  name := "Ed25519"
+  baseP := P_ED25519
+  scalarOrd := R_ED25519
+  genX := ED25519_BX
+  genY := ED25519_BY
+  baseP_prime := p_ed25519_isPrime
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := r_ed25519_isPrime
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := edwardsPublicKeyMatches P_ED25519 D_ED25519 ED25519_BX ED25519_BY
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    edwardsIsIdentity P_ED25519
+      (edwardsSmul P_ED25519 ((2 * D_ED25519) % P_ED25519)
+        (toEdwardsProj P_ED25519 ED25519_BX ED25519_BY) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := ed25519B_and_jubjubG_edwardsSmul_order.2.1
+
+@[expose] def pallasOrchardCurveCert : CertifiedPrimeScalarCurve where
+  name := "Pallas-Orchard"
+  baseP := p_pallas
+  scalarOrd := q_pallas
+  genX := 0x375523b328f1d6063b8d187c3e5f445f0c7f0ce37b70a10c8d1a7284b875c963
+  genY := 0x1ad0357fdf1a66db7b10bcfcfed624fbdfc914fec005bdd84ce33e817b0c3bc9
+  baseP_prime := p_pallas_isPrimeNat
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := q_pallas_isPrimeNat
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := swPublicKeyMatches p_pallas 15 orchardSpendAuthGLocal
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    swIsIdentity p_pallas (swRcbSmul p_pallas 15 (swToProj orchardSpendAuthGLocal) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := by decide +kernel
+
+def vestaCurveCert : CertifiedPrimeScalarCurve where
+  name := "Vesta"
+  baseP := p_vesta
+  scalarOrd := q_vesta
+  genX := p_vesta - 1
+  genY := 2
+  baseP_prime := q_pallas_isPrimeNat
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := p_pallas_isPrimeNat
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := swPublicKeyMatches p_vesta 15 pastaVestaG
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    swIsIdentity p_vesta (swRcbSmul p_vesta 15 (swToProj pastaVestaG) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := secp256k1G_and_vestaG_rcbSmul_order.2.2.2.2.1
+
+def jubjubSaplingCurveCert : CertifiedPrimeScalarCurve where
+  name := "Jubjub-Sapling"
+  baseP := q_jubjub
+  scalarOrd := R_JUBJUB
+  genX := JUBJUB_GU
+  genY := JUBJUB_GV
+  baseP_prime := r_bls381_isPrimeNat
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := r_jubjub_isPrime
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := edwardsPublicKeyMatches q_jubjub D_JUBJUB JUBJUB_GU JUBJUB_GV
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    edwardsIsIdentity q_jubjub
+      (edwardsSmul q_jubjub ((2 * D_JUBJUB) % q_jubjub)
+        (toEdwardsProj q_jubjub JUBJUB_GU JUBJUB_GV) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := ed25519B_and_jubjubG_edwardsSmul_order.2.2.2.2.1
+
+def bls381CurveCert : CertifiedPrimeScalarCurve where
+  name := "BLS12-381-G1"
+  baseP := p_bls381
+  scalarOrd := r_bls381
+  genX := 0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb
+  genY := 0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1
+  baseP_prime := p_bls381_isPrimeNat
+  baseP_odd := by decide +kernel
+  scalarOrd_prime := r_bls381_isPrimeNat
+  scalarOrd_odd := by decide +kernel
+  gen_in_range := ⟨by decide +kernel, by decide +kernel⟩
+  publicKeyMatches := swPublicKeyMatches p_bls381 12 bls381G1Local
+  generator_matches := by decide +kernel
+  generator_rejects_changed_x := by decide +kernel
+  binSmulIsId := fun k =>
+    swIsIdentity p_bls381 (swRcbSmul p_bls381 12 (swToProj bls381G1Local) k)
+  smul_zero_id := by decide +kernel
+  smul_one_nonid := by decide +kernel
+  smul_ord_id := by decide +kernel
+
+/-- Scalar-model Taproot projection using the actual group order `SECP256K1_ORDER_N` backed by certified primality
+    and oddness (`n_secp256k1_isPrime`), requiring zero toy `secp7Mod43` assumptions. -/
+def secp256k1TaprootScalarProjection : TaprootCurveProjection SECP256K1_ORDER_N Nat :=
+  scalarModelTaprootProjection SECP256K1_ORDER_N secp256k1CurveCert.scalarOrd_odd
+
+theorem secp256k1Taproot_real_order_even_y_injective
+    {s₁ s₂ : Nat} (h1p : 0 < s₁) (h1l : s₁ < SECP256K1_ORDER_N)
+    (h2p : 0 < s₂) (h2l : s₂ < SECP256K1_ORDER_N)
+    (he₁ : secp256k1TaprootScalarProjection.yParity s₁ = secp256k1TaprootScalarProjection.yParity s₂)
+    (hx : secp256k1TaprootScalarProjection.xOf s₁ = secp256k1TaprootScalarProjection.xOf s₂) :
+    s₁ = s₂ :=
+  secp256k1TaprootScalarProjection.compressed_injective.1 s₁ s₂ h1p h1l h2p h2l hx he₁
+
+theorem inhabited_secp256k1Taproot_even_y :
+    ∃ s₁ s₂ : Nat,
+      0 < s₁ ∧ s₁ < SECP256K1_ORDER_N ∧
+      0 < s₂ ∧ s₂ < SECP256K1_ORDER_N ∧
+      secp256k1TaprootScalarProjection.yParity s₁ = secp256k1TaprootScalarProjection.yParity s₂ ∧
+      secp256k1TaprootScalarProjection.xOf s₁ = secp256k1TaprootScalarProjection.xOf s₂ :=
+  ⟨2, 2, by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel, rfl, rfl⟩
+
+theorem inhabited_primeMod_inv_secp256k1 :
+    ∃ a : FpSecp256k1, a ≠ CommRingOps.zero ∧
+      CommRingOps.mul a (LawfulField.inv a) = CommRingOps.one := by
+  let a : FpSecp256k1 := PrimeMod.ofNat SECP256K1_FIELD_P 7
+  have ha : a ≠ CommRingOps.zero := by
+    intro h
+    have hv : a.val = 0 := congrArg PrimeMod.val h
+    exact absurd hv (by decide +kernel)
+  exact ⟨a, ha, LawfulField.mul_inv_cancel ha⟩
+
+#verify_kernel
+  Qsag.PrimeMod.instLawfulCommRing
+  Qsag.PrimeMod.instLawfulField
+
+#verify_constructive
+  Qsag.certCheckStep_sound
+  Qsag.certVerifyPrime_sound
+  Qsag.p_ed25519_isPrime
+  Qsag.r_ed25519_isPrime
+  Qsag.r_jubjub_isPrime
+  Qsag.all_production_curve_moduli_prime
+  Qsag.tooth_cofactor8_edwards_orders_not_prime
+  Qsag.secp256k1G_and_vestaG_rcbSmul_order
+  Qsag.pastaVestaG_order_fpVesta
+  Qsag.ed25519B_and_jubjubG_edwardsSmul_order
+  Qsag.secp256k1Taproot_real_order_even_y_injective
+  Qsag.inhabited_secp256k1Taproot_even_y
+  Qsag.inhabited_primeMod_inv_secp256k1
+
+#verify_inhabited
+  Qsag.secp256k1Taproot_real_order_even_y_injective
+  Qsag.inhabited_secp256k1Taproot_even_y
+
+#tooth_pair Qsag.all_production_curve_moduli_prime vs
+  Qsag.tooth_cofactor8_edwards_orders_not_prime
+
+end Qsag
+end
