@@ -608,3 +608,578 @@ private theorem prod_rearr_gs (K A B d : Nat) :
     _ = (K * A + K * B) * d := (Nat.add_mul _ _ _).symm
     _ = K * (A + B) * d := by rw [← Nat.mul_add]
 
+theorem gsList_single_ood_bad_seeds_le (N d : Nat) :
+    ∀ (cands : List (GsUniPoly QuinticGoldilocks)),
+      cands.Nodup → (∀ P ∈ cands, P.coeffs.length ≤ d + 1) →
+      qsum N (fun c => if gsListHasOodCollision cands (decodeQuintic400 c.1) = true then 1 else 0) ≤
+        (N / quinticGoldilocksCard + 1) * binom2 cands.length * d
+  | [], _, _ => by
+    have hZ : ∀ c : Fin N,
+        (if gsListHasOodCollision [] (decodeQuintic400 c.1) = true then 1 else 0) = 0 :=
+      fun _ => rfl
+    rw [qsum_congr hZ, qsum_const, Nat.mul_zero]; exact Nat.zero_le _
+  | P :: rest, hNd, hDeg => by
+    obtain ⟨hNotMem, hNdRest⟩ := List.nodup_cons.mp hNd
+    have hHead := any_pair_seed_roots_le N d P (hDeg P List.mem_cons_self) rest hNotMem
+      (fun Q hQ => hDeg Q (List.mem_cons_of_mem _ hQ))
+    have ih := gsList_single_ood_bad_seeds_le N d rest hNdRest
+      (fun Q hQ => hDeg Q (List.mem_cons_of_mem _ hQ))
+    have hPt : ∀ c : Fin N,
+        (if gsListHasOodCollision (P :: rest) (decodeQuintic400 c.1) = true then 1 else 0) ≤
+        (if rest.any (fun Q => decide (RoundPoly.evalCoeffs P.coeffs (decodeQuintic400 c.1) =
+            RoundPoly.evalCoeffs Q.coeffs (decodeQuintic400 c.1))) = true then 1 else 0) +
+        (if gsListHasOodCollision rest (decodeQuintic400 c.1) = true then 1 else 0) :=
+      fun _ => ite_or_le_add _ _
+    have hSum := Nat.le_trans (qsum_le_qsum hPt) (Nat.le_of_eq (qsum_add _ _))
+    have hComb := Nat.le_trans hSum (Nat.add_le_add hHead ih)
+    simp only [List.length_cons, binom2_succ_eq]
+    rwa [prod_rearr_gs (N / quinticGoldilocksCard + 1) rest.length (binom2 rest.length) d] at hComb
+
+/-! ## §4. All 13 Deployed Schedules (`16 ≤ logCells ≤ 28`): Packed-Fiber Depth, `< 2^{-277}` OOD & `< 2^{-128}` QROM -/
+
+/-- Explicit stage table matching `zkHemV2ProdStages` (`16 ≤ logCells ≤ 28`) with `@[expose]` transparency. -/
+@[expose] def packedProdStages : Nat → List WhirStage
+  | 16 => [⟨4, 14, 2, 5, 267, 4097, 8203, 1, 2048, 2048, 16, 23519292652270⟩, ⟨3, 13, 4, 2, 136, 514, 2069, 1, 512, 1023, 3, 9210⟩, ⟨3, 12, 6, 2, 92, 66, 525, 1, 1024, 4034, 3, 36309⟩]
+  | 17 => [⟨5, 14, 2, 5, 267, 4097, 8203, 1, 2048, 2048, 17, 23519292652270⟩, ⟨3, 13, 4, 2, 136, 514, 2069, 1, 512, 1023, 3, 9210⟩, ⟨4, 11, 6, 2, 92, 34, 266, 1, 1024, 3974, 3, 47692⟩]
+  | 18 => [⟨5, 15, 2, 5, 267, 8193, 16403, 1, 2048, 2048, 18, 47044326618137⟩, ⟨3, 14, 4, 2, 136, 1026, 4133, 1, 512, 1024, 3, 9219⟩, ⟨4, 12, 6, 2, 92, 66, 525, 1, 1024, 4034, 3, 48412⟩]
+  | 19 => [⟨5, 16, 2, 5, 267, 16385, 32803, 1, 2048, 2048, 19, 94094395601011⟩, ⟨3, 15, 4, 2, 136, 2050, 8261, 1, 512, 1024, 3, 9219⟩, ⟨4, 13, 6, 2, 92, 130, 1041, 1, 1024, 4065, 3, 48784⟩]
+  | 20 => [⟨5, 17, 2, 5, 267, 32769, 65603, 1, 2048, 2048, 20, 188194534092434⟩, ⟨3, 16, 4, 2, 136, 4098, 16517, 1, 512, 1024, 3, 9219⟩, ⟨4, 14, 6, 2, 92, 258, 2073, 1, 1024, 4081, 3, 48976⟩]
+  | 21 => [⟨6, 17, 2, 5, 267, 32769, 65603, 1, 2048, 2048, 21, 188194534092434⟩, ⟨3, 16, 4, 2, 136, 4098, 16517, 1, 512, 1024, 3, 9219⟩, ⟨4, 14, 6, 2, 92, 258, 2073, 1, 1024, 4081, 3, 48976⟩]
+  | 22 => [⟨6, 18, 2, 5, 267, 65537, 131203, 1, 2048, 2048, 22, 376394811338141⟩, ⟨4, 16, 4, 2, 136, 4098, 16517, 1, 512, 1024, 3, 12292⟩, ⟨4, 14, 6, 2, 92, 258, 2073, 1, 1024, 4081, 3, 48976⟩]
+  | 23 => [⟨6, 19, 2, 5, 267, 131073, 262403, 1, 2048, 2048, 23, 752795365960994⟩, ⟨4, 17, 4, 2, 136, 8194, 33029, 1, 512, 1024, 3, 12292⟩, ⟨3, 16, 6, 2, 92, 1026, 8265, 1, 1024, 4093, 3, 36840⟩, ⟨3, 15, 8, 2, 70, 130, 2081, 1, 2048, 16258, 3, 146325⟩]
+  | 24 => [⟨6, 20, 2, 5, 266, 262145, 524803, 1, 2048, 2048, 24, 1505596475272420⟩, ⟨4, 18, 4, 2, 136, 16386, 66053, 1, 512, 1024, 3, 12292⟩, ⟨3, 17, 6, 2, 92, 2050, 16521, 1, 1024, 4095, 3, 36858⟩, ⟨3, 16, 8, 2, 70, 258, 4145, 1, 2048, 16321, 3, 146892⟩]
+  | 25 => [⟨6, 21, 2, 5, 266, 524289, 1049603, 1, 2048, 2048, 25, 3011198693928133⟩, ⟨4, 19, 4, 2, 136, 32770, 132101, 1, 512, 1024, 3, 12292⟩, ⟨4, 17, 6, 2, 92, 2050, 16521, 1, 1024, 4095, 3, 49144⟩, ⟨3, 16, 8, 2, 70, 258, 4145, 1, 2048, 16321, 3, 146892⟩]
+  | 26 => [⟨6, 22, 2, 5, 266, 1048577, 2099203, 1, 2048, 2048, 26, 6022403131255990⟩, ⟨5, 19, 4, 2, 136, 32770, 132101, 1, 512, 1024, 3, 15365⟩, ⟨4, 17, 6, 2, 92, 2050, 16521, 1, 1024, 4095, 3, 49144⟩, ⟨3, 16, 8, 2, 70, 258, 4145, 1, 2048, 16321, 3, 146892⟩]
+  | 27 => [⟨6, 23, 2, 5, 266, 2097153, 4198403, 1, 2048, 2048, 27, 12044812005919918⟩, ⟨5, 20, 4, 2, 136, 65538, 264197, 1, 512, 1024, 3, 15365⟩, ⟨4, 18, 6, 2, 92, 4098, 33033, 1, 1024, 4096, 3, 49156⟩, ⟨4, 16, 8, 2, 70, 258, 4145, 1, 2048, 16321, 3, 195856⟩]
+  | 28 => [⟨6, 24, 2, 5, 266, 4194305, 8396803, 1, 2048, 2048, 28, 24089629755251882⟩, ⟨6, 20, 4, 2, 136, 65538, 264197, 1, 512, 1024, 3, 18438⟩, ⟨4, 18, 6, 2, 92, 4098, 33033, 1, 1024, 4096, 3, 49156⟩, ⟨4, 16, 8, 2, 70, 258, 4145, 1, 2048, 16321, 3, 195856⟩]
+  | _ => []
+
+@[expose] def packedProdSched (logCells : Nat) : WhirVerifierSchedule :=
+  ⟨logCells, quinticGoldilocksCard, quinticGoldilocksCard_pos, packedProdStages logCells⟩
+
+theorem packedProdSched_johnsonOk (logCells : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) :
+    (packedProdSched logCells).johnsonOk = true := by
+  have hc : logCells = 16 ∨ logCells = 17 ∨ logCells = 18 ∨ logCells = 19 ∨ logCells = 20 ∨
+      logCells = 21 ∨ logCells = 22 ∨ logCells = 23 ∨ logCells = 24 ∨ logCells = 25 ∨
+      logCells = 26 ∨ logCells = 27 ∨ logCells = 28 := by omega
+  rcases hc with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;> decide +kernel
+
+/-- Packed-fiber Merkle tree depth `st.logDomain` (one leaf per `2^{st.foldK}`-element fiber). -/
+@[expose] def packedStageDepth (stages : List WhirStage) (i : Nat) : Nat :=
+  match stages[i]? with
+  | some st => st.logDomain
+  | none => 0
+
+/-- Scalar-leaf Merkle tree depth `st.logDomain + st.foldK` (matching `ClosedWhir.stageDepth`). -/
+@[expose] def scalarStageDepth (stages : List WhirStage) (i : Nat) : Nat :=
+  match stages[i]? with
+  | some st => st.logDomain + st.foldK
+  | none => 0
+
+/-- Single-opening Merkle path verifier checking path length `depth q.1` and `merklePathRoot`. -/
+@[expose] def checkMerkleOpening {D : Type} [DecidableEq D]
+    (node : Nat → Nat → D → D → D) (depth : Nat → Nat) (roots : Nat → D)
+    (q : Nat × Nat) (op : D × List D) : Bool :=
+  decide (q.2 < 2 ^ depth q.1) && decide (op.2.length = depth q.1) &&
+    decide (merklePathRoot node 0 q.2 op.1 op.2 = roots q.1)
+
+private theorem prodStages_geom_ok (logCells : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) :
+    ((packedProdSched logCells).stages.all fun st =>
+      decide (0 < st.foldK ∧ st.logDomain + st.foldK ≤ 32 ∧ 2 ≤ st.listSize)) = true := by
+  have hc : logCells = 16 ∨ logCells = 17 ∨ logCells = 18 ∨ logCells = 19 ∨ logCells = 20 ∨
+      logCells = 21 ∨ logCells = 22 ∨ logCells = 23 ∨ logCells = 24 ∨ logCells = 25 ∨
+      logCells = 26 ∨ logCells = 27 ∨ logCells = 28 := by omega
+  rcases hc with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;> decide +kernel
+
+/-- Honest `logDomain`-length packed-fiber authentication paths pass `checkMerkleOpening` under `packedStageDepth`. -/
+theorem packed_stage_accepts_logDomain_path {D : Type} [DecidableEq D]
+    (logCells : Nat) (i : Nat) (st : WhirStage)
+    (hst : (packedProdSched logCells).stages[i]? = some st)
+    (node : Nat → Nat → D → D → D) (leafDigests : Nat → Nat → D)
+    (j : Nat) (hj : j < st.domainSize) :
+    let depth := packedStageDepth (packedProdSched logCells).stages
+    let leafD := treeNode node (leafDigests i) 0 j
+    let path := treePathFrom node (leafDigests i) 0 j st.logDomain
+    checkMerkleOpening node depth (fun k => treeNode node (leafDigests k) (depth k) 0)
+      (i, j) (leafD, path) = true := by
+  dsimp only
+  have hDepth : packedStageDepth (packedProdSched logCells).stages i = st.logDomain := by
+    simp [packedStageDepth, hst]
+  unfold checkMerkleOpening
+  dsimp only
+  rw [Bool.and_eq_true, Bool.and_eq_true]
+  refine ⟨⟨decide_eq_true (by rw [hDepth]; exact hj),
+           decide_eq_true (by rw [hDepth]; exact treePathFrom_length ..)⟩,
+         decide_eq_true ?_⟩
+  rw [hDepth]
+  have h := treePathFrom_opens node (leafDigests i) st.logDomain 0 j
+  rw [Nat.zero_add, Nat.div_eq_of_lt (show j < 2 ^ st.logDomain from hj)] at h
+  exact h
+
+/-- `#tooth` Scalar `scalarStageDepth` (`logDomain + foldK`) rejects every `logDomain`-length packed-fiber path. -/
+theorem tooth_scalar_stage_rejects_logDomain_path {D : Type} [DecidableEq D]
+    (logCells : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28)
+    (i : Nat) (st : WhirStage)
+    (hst : (packedProdSched logCells).stages[i]? = some st)
+    (node : Nat → Nat → D → D → D) (roots : Nat → D)
+    (j : Nat) (leafD : D) (path : List D) (hLen : path.length = st.logDomain) :
+    checkMerkleOpening node (scalarStageDepth (packedProdSched logCells).stages)
+      roots (i, j) (leafD, path) = false := by
+  have hs := List.mem_of_getElem? hst
+  have hg := of_decide_eq_true (List.all_eq_true.mp (prodStages_geom_ok logCells hLo hHi) st hs)
+  have hDepth : scalarStageDepth (packedProdSched logCells).stages i = st.logDomain + st.foldK := by
+    simp [scalarStageDepth, hst]
+  have hNe : path.length ≠ st.logDomain + st.foldK := by omega
+  unfold checkMerkleOpening
+  dsimp only
+  rw [hDepth, decide_eq_false hNe, Bool.and_false, Bool.false_and]
+
+/-- Realizable single-OOD 400-bit seed bound (`≥ 1` seed, `< 2^{-277}`). -/
+@[expose] def singleOodSeedBound (s : WhirStage) : RatBound :=
+  ⟨(2 ^ 400 / quinticGoldilocksCard + 1) * binom2 s.listSize * s.degBound,
+   2 ^ 400, Nat.two_pow_pos 400⟩
+
+/-- Packed-fiber per-stage round bounds replacing `< 2^{-400}` OOD with `singleOodSeedBound` (`< 2^{-277}`). -/
+def packedStageRoundBounds (q : Nat) (hq : 0 < q) (s : WhirStage) : List RatBound :=
+  List.replicate s.foldK (s.foldBound q hq) ++ [singleOodSeedBound s, s.shiftBound q hq]
+
+def packedStagesRoundBounds (q : Nat) (hq : 0 < q) : List WhirStage → List RatBound
+  | [] => []
+  | s :: rest => packedStageRoundBounds q hq s ++ packedStagesRoundBounds q hq rest
+
+def packedProdQromError (logCells Q : Nat) : RatBound :=
+  RatBound.sumList
+    ((packedStagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos
+      (packedProdStages logCells)).map (dfmRoundScale Q))
+
+theorem deployed_single_ood_gs_bad_lt_277
+    (logCells : Nat) (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28)
+    (st : WhirStage) (hst : st ∈ (packedProdSched logCells).stages)
+    (shift : QuinticGoldilocks) (hnz : shift ≠ CommRingOps.zero)
+    (word : QuinticGoldilocks → QuinticGoldilocks) :
+    let dom := ZkHemV2.fiberRoots st.logDomain shift
+    let cands := gsDecodeList st.degBound st.agree dom word
+    1 ≤ (singleOodSeedBound st).num ∧
+    cands.length ≤ st.listSize ∧
+    qsum (2 ^ 400) (fun c =>
+      if gsListHasOodCollision cands (decodeQuintic400 c.1) = true then 1 else 0) ≤
+      (singleOodSeedBound st).num ∧
+    RatBound.lt (singleOodSeedBound st) (RatBound.invPow2 277) := by
+  intro dom cands
+  have hg := of_decide_eq_true (List.all_eq_true.mp (prodStages_geom_ok logCells hLo hHi) st hst)
+  have hj := List.all_eq_true.mp (packedProdSched_johnsonOk logCells hLo hHi) st hst
+  have hDomNd := ZkHemV2.fiberRoots_nodup st.logDomain (by omega) hnz
+  have hDomLen : dom.length = st.domainSize := ZkHemV2.fiberRoots_length _ _
+  have hListLe : cands.length ≤ st.listSize :=
+    st.decode_list_le hj dom word hDomNd hDomLen
+  have hdA : st.degBound + 1 ≤ st.agree := by
+    obtain ⟨hnd, _⟩ := st.johnson_list_le hj
+    unfold WhirStage.johnsonOk at hj
+    obtain ⟨_, _, hAn, _⟩ := of_decide_eq_true hj
+    apply Nat.lt_of_not_ge; intro hge
+    exact Nat.not_le_of_gt hnd (Nat.mul_le_mul hAn hge)
+  have hSeeds := gsList_single_ood_bad_seeds_le (2 ^ 400) st.degBound cands
+    (gsDecodeList_nodup st.degBound st.agree dom word)
+    (fun P hP => ((mem_gsDecodeList_iff word hDomNd hdA P).mp hP).1)
+  have hSeedsCap :
+      (2 ^ 400 / quinticGoldilocksCard + 1) * binom2 cands.length * st.degBound ≤
+      (singleOodSeedBound st).num :=
+    Nat.mul_le_mul_right _ (Nat.mul_le_mul_left _ (binom2_mono hListLe))
+  have hCheck277 :
+      ((packedProdSched logCells).stages.all fun s =>
+        decide (1 ≤ (2 ^ 400 / quinticGoldilocksCard + 1) * (s.listSize * (s.listSize - 1) / 2) * s.degBound ∧
+          (2 ^ 400 / quinticGoldilocksCard + 1) * (s.listSize * (s.listSize - 1) / 2) * s.degBound * 2 ^ 277 <
+            1 * 2 ^ 400)) = true := by
+    have hc : logCells = 16 ∨ logCells = 17 ∨ logCells = 18 ∨ logCells = 19 ∨ logCells = 20 ∨
+        logCells = 21 ∨ logCells = 22 ∨ logCells = 23 ∨ logCells = 24 ∨ logCells = 25 ∨
+        logCells = 26 ∨ logCells = 27 ∨ logCells = 28 := by omega
+    rcases hc with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;> decide +kernel
+  obtain ⟨hPos1, hLt277⟩ := of_decide_eq_true (List.all_eq_true.mp hCheck277 st hst)
+  have hPos' : 1 ≤ (singleOodSeedBound st).num := by
+    unfold singleOodSeedBound; dsimp only; rwa [binom2_eq]
+  have hLt' : RatBound.lt (singleOodSeedBound st) (RatBound.invPow2 277) := by
+    show (singleOodSeedBound st).num * 2 ^ 277 < 1 * 2 ^ 400
+    unfold singleOodSeedBound; dsimp only; rwa [binom2_eq]
+  exact ⟨hPos', hListLe, Nat.le_trans hSeeds hSeedsCap, hLt'⟩
+
+private inductive RBoundsLeP : List RatBound → List RatBound → Prop where
+  | nil : RBoundsLeP [] []
+  | cons {x y xs ys} : RatBound.le x y → RBoundsLeP xs ys → RBoundsLeP (x :: xs) (y :: ys)
+
+private theorem RBoundsLeP.append {xs ys us vs : List RatBound}
+    (h : RBoundsLeP xs ys) (k : RBoundsLeP us vs) : RBoundsLeP (xs ++ us) (ys ++ vs) := by
+  induction h with | nil => exact k | cons hxy _ ih => exact .cons hxy ih
+
+private theorem scaled_sum_mono_packed (Q : Nat) {xs ys : List RatBound} (h : RBoundsLeP xs ys) :
+    RatBound.le (RatBound.sumList (xs.map (dfmRoundScale Q)))
+      (RatBound.sumList (ys.map (dfmRoundScale Q))) := by
+  induction h with
+  | nil => exact RatBound.le_refl _
+  | @cons x y _ _ hxy _ ih =>
+    exact RatBound.add_le_add
+      (by show (2 * Q + 1) ^ 2 * x.num * y.den ≤ (2 * Q + 1) ^ 2 * y.num * x.den
+          simpa only [Nat.mul_assoc] using Nat.mul_le_mul_left ((2 * Q + 1) ^ 2) hxy) ih
+
+private theorem dfmRoundScale_mono {Q Q' : Nat} (h : Q ≤ Q') (b : RatBound) :
+    RatBound.le (dfmRoundScale Q b) (dfmRoundScale Q' b) := by
+  show (2 * Q + 1) ^ 2 * b.num * b.den ≤ (2 * Q' + 1) ^ 2 * b.num * b.den
+  exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ (Nat.pow_le_pow_left (by omega) 2))
+
+private theorem sumList_map_dfm_mono {Q Q' : Nat} (h : Q ≤ Q') :
+    ∀ bs : List RatBound,
+      RatBound.le (RatBound.sumList (bs.map (dfmRoundScale Q)))
+        (RatBound.sumList (bs.map (dfmRoundScale Q')))
+  | [] => RatBound.le_refl _
+  | b :: bs => RatBound.add_le_add (dfmRoundScale_mono h b) (sumList_map_dfm_mono h bs)
+
+private def shiftCapNumP (qCount : Nat) : Nat :=
+  if qCount = 267 then 2052 else if qCount = 266 then 2051 else if qCount = 136 then 1036
+  else if qCount = 92 then 540 else 261
+
+private theorem shiftCapNumP_pow_ok {t : Nat} (ht : t = 267 ∨ t = 266 ∨ t = 136 ∨ t = 92 ∨ t = 70) :
+    (shiftCapNumP t) ^ t * 2 ^ 267 ≤ 3 * 4096 ^ t := by
+  rcases ht with rfl | rfl | rfl | rfl | rfl <;> decide +kernel
+
+private def checkPackedStage265 (q : Nat) (s : WhirStage) : Bool :=
+  decide ((s.listSize * s.sumcheckDeg + s.mcaNum) * 2 ^ 265 ≤ q ∧
+    (2 ^ 400 / quinticGoldilocksCard + 1) * (s.listSize * (s.listSize - 1) / 2) * s.degBound * 2 ^ 265 ≤ 2 ^ 400 ∧
+    (s.queryCount = 267 ∨ s.queryCount = 266 ∨ s.queryCount = 136 ∨ s.queryCount = 92 ∨ s.queryCount = 70) ∧
+    (s.agree + s.foldK) * 4096 ≤ shiftCapNumP s.queryCount * s.domainSize ∧
+    s.listSize * (s.queryCount + s.oodCount) * 2 ^ 267 ≤ q)
+
+private theorem replicate_add_p {α : Type} (x : α) :
+    ∀ (a b : Nat), List.replicate (a + b) x = List.replicate a x ++ List.replicate b x
+  | 0, _ => by simp only [Nat.zero_add, List.replicate_zero, List.nil_append]
+  | a + 1, b => by simp only [Nat.succ_add, List.replicate_succ, List.cons_append, replicate_add_p x a b]
+
+private theorem packed_stage_covers_265 (q : Nat) (hq : 0 < q) (s : WhirStage)
+    (hOk : checkPackedStage265 q s = true) :
+    RBoundsLeP (packedStageRoundBounds q hq s)
+      (List.replicate (stageRounds s) (RatBound.invPow2 265)) := by
+  obtain ⟨hf, ho, hQt, hRatio, hComb⟩ := of_decide_eq_true hOk
+  have hFold : RatBound.le (s.foldBound q hq) (RatBound.invPow2 265) := by
+    rw [WhirStage.foldBound_eq]; show _ ≤ 1 * q; rw [Nat.one_mul]; exact hf
+  have hOod : RatBound.le (singleOodSeedBound s) (RatBound.invPow2 265) := by
+    show (singleOodSeedBound s).num * 2 ^ 265 ≤ 1 * 2 ^ 400
+    unfold singleOodSeedBound; dsimp only; rw [binom2_eq, Nat.one_mul]; exact ho
+  have hShift1 : RatBound.le ⟨(s.agree + s.foldK) ^ s.queryCount, s.domainSize ^ s.queryCount,
+        Nat.pow_pos (Nat.two_pow_pos s.logDomain)⟩ ⟨3, 2 ^ 267, Nat.two_pow_pos 267⟩ := by
+    show (s.agree + s.foldK) ^ s.queryCount * 2 ^ 267 ≤ 3 * s.domainSize ^ s.queryCount
+    have hPow := Nat.pow_le_pow_left hRatio s.queryCount
+    rw [Nat.mul_pow, Nat.mul_pow] at hPow
+    have hMul : ((s.agree + s.foldK) ^ s.queryCount * 2 ^ 267) * 4096 ^ s.queryCount ≤
+        (3 * s.domainSize ^ s.queryCount) * 4096 ^ s.queryCount := by
+      calc ((s.agree + s.foldK) ^ s.queryCount * 2 ^ 267) * 4096 ^ s.queryCount
+          = ((s.agree + s.foldK) ^ s.queryCount * 4096 ^ s.queryCount) * 2 ^ 267 := by
+              simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+        _ ≤ ((shiftCapNumP s.queryCount) ^ s.queryCount * s.domainSize ^ s.queryCount) * 2 ^ 267 :=
+              Nat.mul_le_mul_right _ hPow
+        _ = ((shiftCapNumP s.queryCount) ^ s.queryCount * 2 ^ 267) * s.domainSize ^ s.queryCount := by
+              simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+        _ ≤ (3 * 4096 ^ s.queryCount) * s.domainSize ^ s.queryCount :=
+              Nat.mul_le_mul_right _ (shiftCapNumP_pow_ok hQt)
+        _ = (3 * s.domainSize ^ s.queryCount) * 4096 ^ s.queryCount := by
+              simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+    exact nat_le_of_mul_le_mul_right' hMul (Nat.pow_pos (by decide : 0 < 4096))
+  have hShift2 : RatBound.le ⟨s.listSize * (s.queryCount + s.oodCount), q, hq⟩
+      ⟨1, 2 ^ 267, Nat.two_pow_pos 267⟩ := by
+    show _ ≤ 1 * q; rw [Nat.one_mul]; exact hComb
+  have h3Plus1 : RatBound.le
+      (RatBound.add ⟨3, 2 ^ 267, Nat.two_pow_pos 267⟩ ⟨1, 2 ^ 267, Nat.two_pow_pos 267⟩)
+      (RatBound.invPow2 265) := by decide +kernel
+  have hShift : RatBound.le (s.shiftBound q hq) (RatBound.invPow2 265) := by
+    rw [WhirStage.shiftBound_eq]; exact RatBound.le_trans (RatBound.add_le_add hShift1 hShift2) h3Plus1
+  unfold packedStageRoundBounds stageRounds
+  rw [replicate_add_p _ s.foldK 2]
+  refine RBoundsLeP.append ?_ (.cons hOod (.cons hShift .nil))
+  induction s.foldK with | zero => exact .nil | succ _ ih => exact .cons hFold ih
+
+private theorem packed_stages_cover_265 (q : Nat) (hq : 0 < q) :
+    ∀ stages : List WhirStage, stages.all (checkPackedStage265 q) = true →
+      RBoundsLeP (packedStagesRoundBounds q hq stages)
+        (List.replicate (roundsOf stages) (RatBound.invPow2 265))
+  | [], _ => .nil
+  | s :: rest, hAll => by
+    rw [List.all_cons, Bool.and_eq_true] at hAll
+    unfold packedStagesRoundBounds roundsOf
+    rw [replicate_add_p _ (stageRounds s) (roundsOf rest)]
+    exact RBoundsLeP.append (packed_stage_covers_265 q hq s hAll.1)
+      (packed_stages_cover_265 q hq rest hAll.2)
+
+private theorem sumList_replicate_le_scale_p (b : RatBound) :
+    ∀ r : Nat, RatBound.le (RatBound.sumList (List.replicate r b)) ⟨r * b.num, b.den, b.h_pos⟩
+  | 0 => by show 0 * b.den ≤ 0 * b.num * 1; simp
+  | r + 1 => by
+    have ih := sumList_replicate_le_scale_p b r
+    let sr := RatBound.sumList (List.replicate r b)
+    show (b.num * sr.den + sr.num * b.den) * b.den ≤ ((r + 1) * b.num) * (b.den * sr.den)
+    calc (b.num * sr.den + sr.num * b.den) * b.den
+        ≤ (b.num * sr.den + r * b.num * sr.den) * b.den :=
+          Nat.mul_le_mul_right b.den (Nat.add_le_add_left ih _)
+      _ = ((r + 1) * b.num) * (b.den * sr.den) := by
+          rw [Nat.succ_mul, Nat.add_comm (r * b.num) b.num, Nat.add_mul, Nat.add_mul]
+          have e1 : b.num * sr.den * b.den = b.num * (b.den * sr.den) := by
+            simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+          have e2 : r * b.num * sr.den * b.den = r * b.num * (b.den * sr.den) := by
+            simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+          rw [e1, e2]
+
+/-- **All 13 Deployed Packed-Fiber Schedules (`16 ≤ logCells ≤ 28`) Clear `< 2^{-128}` at `Q ≤ 2^{64}`:**
+    Replaces the `< 2^{-400}` OOD bound with the realizable `< 2^{-277}` `singleOodSeedBound` and supports
+    both `.turboShake400` and `.poseidon2Gl24` commitment profiles. -/
+theorem zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+    (prof : WhirCommitmentProfile) (logCells Q : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64) :
+    RatBound.lt
+      (RatBound.add (packedProdQromError logCells Q) (merkleProfileQromBound prof Q))
+      (RatBound.invPow2 128) := by
+  have hAll265 :
+      (packedProdStages logCells).all (checkPackedStage265 quinticGoldilocksCard) = true ∧
+      roundsOf (packedProdStages logCells) ≤ 28 := by
+    have hc : logCells = 16 ∨ logCells = 17 ∨ logCells = 18 ∨ logCells = 19 ∨ logCells = 20 ∨
+        logCells = 21 ∨ logCells = 22 ∨ logCells = 23 ∨ logCells = 24 ∨ logCells = 25 ∨
+        logCells = 26 ∨ logCells = 27 ∨ logCells = 28 := by omega
+    rcases hc with rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl|rfl <;>
+      exact ⟨by decide +kernel, by decide +kernel⟩
+  have hMonoQ : RatBound.le
+      (RatBound.add (packedProdQromError logCells Q) (merkleProfileQromBound prof Q))
+      (RatBound.add (packedProdQromError logCells (2 ^ 64)) (merkle400QromBound (2 ^ 64))) :=
+    RatBound.add_le_add (sumList_map_dfm_mono hQ _)
+      (RatBound.le_trans (merkleProfileQromBound_mono prof hQ) (merkleProfileQromBound_le_400 prof (2 ^ 64)))
+  let b265 := dfmRoundScale (2 ^ 64) (RatBound.invPow2 265)
+  have hCov := packed_stages_cover_265 quinticGoldilocksCard quinticGoldilocksCard_pos
+    (packedProdStages logCells) hAll265.1
+  have hEnv1 : RatBound.le (packedProdQromError logCells (2 ^ 64))
+      (RatBound.sumList (List.replicate (roundsOf (packedProdStages logCells)) b265)) := by
+    unfold packedProdQromError
+    rw [← List.map_replicate]
+    exact scaled_sum_mono_packed (2 ^ 64) hCov
+  have hEnv2 := sumList_replicate_le_scale_p b265 (roundsOf (packedProdStages logCells))
+  have hEnv3 : RatBound.le
+      ⟨roundsOf (packedProdStages logCells) * b265.num, b265.den, b265.h_pos⟩
+      ⟨28 * b265.num, b265.den, b265.h_pos⟩ := by
+    show roundsOf (packedProdStages logCells) * b265.num * b265.den ≤ 28 * b265.num * b265.den
+    exact Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hAll265.2)
+  have hCap28 : RatBound.lt
+      (RatBound.add ⟨28 * b265.num, b265.den, b265.h_pos⟩ (merkle400QromBound (2 ^ 64)))
+      (RatBound.invPow2 128) := by
+    dsimp only [b265]; decide +kernel
+  exact ratBound_lt_of_le_of_lt_packed
+    (RatBound.le_trans hMonoQ
+      (RatBound.add_le_add (RatBound.le_trans hEnv1 (RatBound.le_trans hEnv2 hEnv3))
+        (RatBound.le_refl _)))
+    hCap28
+
+/-! ## §5. `[DKT26]` Quintic `Fp5` Recursive Margin Schedule (`logCells = 20`, `d ≤ 16`, `Q ≤ 2^{64}`) -/
+
+/-- Recursive `2^{20}`-row (`logCells = 20`) 3-stage `[DKT26]` margin schedule (`m = 24`, `q = (304, 148, 100)`),
+    sizing every round below `2^{-285}` so `131,071` (`d = 16`) recursive nodes clear `< 2^{-128}` at `Q ≤ 2^{64}`. -/
+@[expose] def zkHemV2RecursiveMarginStages : List WhirStage :=
+  [⟨5, 17, 2, 5, 304, 32769, 66904, 1, 128, 128, 20, 20560025553⟩,
+   ⟨3, 16, 4, 2, 148, 4098, 16517, 1, 512, 1024, 3, 9219⟩,
+   ⟨4, 14, 6, 2, 100, 258, 2073, 1, 1024, 4081, 3, 48976⟩]
+
+@[expose] def zkHemV2RecursiveMarginSched : WhirVerifierSchedule :=
+  ⟨20, quinticGoldilocksCard, quinticGoldilocksCard_pos, zkHemV2RecursiveMarginStages⟩
+
+theorem zkHemV2RecursiveMarginSched_johnson_and_dkt26 :
+    zkHemV2RecursiveMarginSched.johnsonOk = true ∧
+    (2 * 24 + 1) * (2 * 24 + 1) * (4 * 2 ^ 15) * (2 ^ 15 + 2) ≤ (2 * 24 * 66904) * (2 * 24 * 66904) := by
+  exact ⟨by decide +kernel, by decide +kernel⟩
+
+private def shiftCapRec (qCount : Nat) : Nat :=
+  if qCount = 304 then 2092 else if qCount = 148 then 1036 else 540
+
+private theorem shiftCapRec_pow_ok {t : Nat} (ht : t = 304 ∨ t = 148 ∨ t = 100) :
+    (shiftCapRec t) ^ t * 2 ^ 286 ≤ 4096 ^ t := by
+  rcases ht with rfl | rfl | rfl <;> decide +kernel
+
+private theorem rec_stage_covers_285 (s : WhirStage)
+    (hs : s ∈ zkHemV2RecursiveMarginStages) :
+    RBoundsLeP (s.roundBounds quinticGoldilocksCard quinticGoldilocksCard_pos)
+      (List.replicate (stageRounds s) (RatBound.invPow2 285)) := by
+  have hChk : decide (
+      (s.listSize * s.sumcheckDeg + s.mcaNum) * 2 ^ 285 ≤ quinticGoldilocksCard ∧
+      (s.listSize * (s.listSize - 1) / 2) * s.degBound ^ s.oodCount * 2 ^ 285 ≤ quinticGoldilocksCard ^ s.oodCount ∧
+      (s.queryCount = 304 ∨ s.queryCount = 148 ∨ s.queryCount = 100) ∧
+      (s.agree + s.foldK) * 4096 ≤ shiftCapRec s.queryCount * s.domainSize ∧
+      s.listSize * (s.queryCount + s.oodCount) * 2 ^ 286 ≤ quinticGoldilocksCard) = true := by
+    simp only [zkHemV2RecursiveMarginStages, List.mem_cons, List.not_mem_nil, or_false] at hs
+    rcases hs with rfl | rfl | rfl <;> decide +kernel
+  obtain ⟨hf, ho, hQt, hRatio, hComb⟩ := of_decide_eq_true hChk
+  have hq := quinticGoldilocksCard_pos
+  have hFold : RatBound.le (s.foldBound quinticGoldilocksCard hq) (RatBound.invPow2 285) := by
+    rw [WhirStage.foldBound_eq]; show _ ≤ 1 * _; rw [Nat.one_mul]; exact hf
+  have hOod : RatBound.le (s.oodBound quinticGoldilocksCard hq) (RatBound.invPow2 285) := by
+    rw [WhirStage.oodBound_eq]; show binom2 _ * _ * _ ≤ 1 * _; rw [binom2_eq, Nat.one_mul]; exact ho
+  have hShift1 : RatBound.le ⟨(s.agree + s.foldK) ^ s.queryCount, s.domainSize ^ s.queryCount,
+        Nat.pow_pos (Nat.two_pow_pos s.logDomain)⟩ (RatBound.invPow2 286) := by
+    show (s.agree + s.foldK) ^ s.queryCount * 2 ^ 286 ≤ 1 * s.domainSize ^ s.queryCount
+    rw [Nat.one_mul]
+    have hPow := Nat.pow_le_pow_left hRatio s.queryCount
+    rw [Nat.mul_pow, Nat.mul_pow] at hPow
+    have hMul : ((s.agree + s.foldK) ^ s.queryCount * 2 ^ 286) * 4096 ^ s.queryCount ≤
+        s.domainSize ^ s.queryCount * 4096 ^ s.queryCount := by
+      calc ((s.agree + s.foldK) ^ s.queryCount * 2 ^ 286) * 4096 ^ s.queryCount
+          = ((s.agree + s.foldK) ^ s.queryCount * 4096 ^ s.queryCount) * 2 ^ 286 := by
+              simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+        _ ≤ ((shiftCapRec s.queryCount) ^ s.queryCount * s.domainSize ^ s.queryCount) * 2 ^ 286 :=
+              Nat.mul_le_mul_right _ hPow
+        _ = ((shiftCapRec s.queryCount) ^ s.queryCount * 2 ^ 286) * s.domainSize ^ s.queryCount := by
+              simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+        _ ≤ 4096 ^ s.queryCount * s.domainSize ^ s.queryCount :=
+              Nat.mul_le_mul_right _ (shiftCapRec_pow_ok hQt)
+        _ = s.domainSize ^ s.queryCount * 4096 ^ s.queryCount := Nat.mul_comm _ _
+    exact nat_le_of_mul_le_mul_right' hMul (Nat.pow_pos (by decide : 0 < 4096))
+  have hShift2 : RatBound.le ⟨s.listSize * (s.queryCount + s.oodCount), quinticGoldilocksCard, hq⟩
+      (RatBound.invPow2 286) := by
+    show _ ≤ 1 * _; rw [Nat.one_mul]; exact hComb
+  have hHalf : RatBound.le (RatBound.add (RatBound.invPow2 286) (RatBound.invPow2 286))
+      (RatBound.invPow2 285) := by decide +kernel
+  have hShift : RatBound.le (s.shiftBound quinticGoldilocksCard hq) (RatBound.invPow2 285) := by
+    rw [WhirStage.shiftBound_eq]; exact RatBound.le_trans (RatBound.add_le_add hShift1 hShift2) hHalf
+  rw [WhirStage.roundBounds_eq]; unfold stageRounds; rw [replicate_add_p _ s.foldK 2]
+  refine RBoundsLeP.append ?_ (.cons hOod (.cons hShift .nil))
+  induction s.foldK with | zero => exact .nil | succ _ ih => exact .cons hFold ih
+
+/-- **Deployment-Scale Recursive Margin Schedule `< 2^{-128}` Bound (`zkHemV2RecursiveMargin_tree_lt_128`):**
+    For all tree depths `d ≤ 16` (`≤ 65,536` regional leaf shards, `≤ 131,071` tree nodes) and
+    `Q ≤ 2^{64}` quantum oracle queries, `(2^{d+1} - 1) · ε_step + ε_qromColl(Q) < 2^{-128}`. -/
+theorem zkHemV2RecursiveMargin_tree_lt_128
+    (prof : WhirCommitmentProfile) {d Q : Nat} (hd : d ≤ 16) (hQ : Q ≤ 2 ^ 64) :
+    RatBound.lt
+      (RatBound.add
+        (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2RecursiveMarginSched Q))
+        (merkleProfileQromBound prof Q))
+      (RatBound.invPow2 128) := by
+  have hNodesLe : 2 ^ (d + 1) - 1 ≤ 131071 := by
+    have hPow : 2 ^ (d + 1) ≤ 2 ^ 17 := Nat.pow_le_pow_right (by decide) (by omega)
+    omega
+  have hCovAll : RBoundsLeP
+      (stagesRoundBounds quinticGoldilocksCard quinticGoldilocksCard_pos zkHemV2RecursiveMarginStages)
+      (List.replicate 18 (RatBound.invPow2 285)) := by
+    unfold zkHemV2RecursiveMarginStages
+    rw [stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_cons, stagesRoundBounds_nil,
+        List.append_nil]
+    have h18 : List.replicate 18 (RatBound.invPow2 285) =
+        List.replicate 7 (RatBound.invPow2 285) ++
+        (List.replicate 5 (RatBound.invPow2 285) ++ List.replicate 6 (RatBound.invPow2 285)) := rfl
+    rw [h18]
+    exact RBoundsLeP.append (rec_stage_covers_285 _ List.mem_cons_self)
+      (RBoundsLeP.append (rec_stage_covers_285 _ (List.mem_cons_of_mem _ List.mem_cons_self))
+        (rec_stage_covers_285 _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ List.mem_cons_self))))
+  let b285 := dfmRoundScale (2 ^ 64) (RatBound.invPow2 285)
+  have hSchedLe : RatBound.le (scheduleQromError zkHemV2RecursiveMarginSched Q)
+      ⟨18 * b285.num, b285.den, b285.h_pos⟩ := by
+    refine RatBound.le_trans (scheduleQromError_mono zkHemV2RecursiveMarginSched hQ) ?_
+    refine RatBound.le_trans ?_ (sumList_replicate_le_scale_p b285 18)
+    rw [← List.map_replicate, scheduleQromError_eq, WhirVerifierSchedule.roundBounds_eq]
+    exact scaled_sum_mono_packed (2 ^ 64) hCovAll
+  have hScaleLe : RatBound.le
+      (RatBound.scale (2 ^ (d + 1) - 1) (scheduleQromError zkHemV2RecursiveMarginSched Q))
+      ⟨131071 * (18 * b285.num), b285.den, b285.h_pos⟩ := by
+    let e := scheduleQromError zkHemV2RecursiveMarginSched Q
+    show (2 ^ (d + 1) - 1) * e.num * b285.den ≤ 131071 * (18 * b285.num) * e.den
+    calc (2 ^ (d + 1) - 1) * e.num * b285.den
+        ≤ 131071 * e.num * b285.den :=
+          Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hNodesLe)
+      _ = 131071 * (e.num * b285.den) := Nat.mul_assoc _ _ _
+      _ ≤ 131071 * (18 * b285.num * e.den) := Nat.mul_le_mul_left _ hSchedLe
+      _ = 131071 * (18 * b285.num) * e.den := (Nat.mul_assoc _ _ _).symm
+  have hMerkleLe := RatBound.le_trans (merkleProfileQromBound_mono prof hQ)
+    (merkleProfileQromBound_le_400 prof (2 ^ 64))
+  have hTop : RatBound.lt
+      (RatBound.add ⟨131071 * (18 * b285.num), b285.den, b285.h_pos⟩ (merkle400QromBound (2 ^ 64)))
+      (RatBound.invPow2 128) := by
+    dsimp only [b285]; decide +kernel
+  exact ratBound_lt_of_le_of_lt_packed (RatBound.add_le_add hScaleLe hMerkleLe) hTop
+
+def unadjustedStage20 : WhirStage :=
+  ⟨5, 17, 2, 5, 267, 32769, 65603, 1, 2048, 2048, 20, 188194534092434⟩
+
+/-- `#tooth` Unadjusted single-proof Stage-0 fold budget (`packedProdSched 20`, `L_0 = 2048`, `mca0 = 188,194,534,092,434`)
+    exceeds `2^{-128}` when summed across `131,071` (`d = 16`) recursive nodes at `Q = 2^{64}`,
+    demonstrating why `zkHemV2RecursiveMarginSched` (`[DKT26]` `m = 24`, `q = (304, 148, 100)`) is necessary. -/
+theorem tooth_unadjusted_single_sched_fails_d16 (prof : WhirCommitmentProfile) :
+    ¬ RatBound.lt
+        (RatBound.add
+          (RatBound.scale 131071
+            (dfmRoundScale (2 ^ 64)
+              (unadjustedStage20.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos)))
+          (merkleProfileQromBound prof (2 ^ 64)))
+        (RatBound.invPow2 128) := by
+  intro hLt
+  have hSub : RatBound.le
+      (RatBound.scale 131071
+        (dfmRoundScale (2 ^ 64)
+          (unadjustedStage20.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos)))
+      (RatBound.add
+        (RatBound.scale 131071
+          (dfmRoundScale (2 ^ 64)
+            (unadjustedStage20.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos)))
+        (merkleProfileQromBound prof (2 ^ 64))) := by
+    let a := RatBound.scale 131071
+      (dfmRoundScale (2 ^ 64)
+        (unadjustedStage20.foldBound quinticGoldilocksCard quinticGoldilocksCard_pos))
+    let b := merkleProfileQromBound prof (2 ^ 64)
+    show a.num * (a.den * b.den) ≤ (a.num * b.den + b.num * a.den) * a.den
+    have e : a.num * (a.den * b.den) = a.num * b.den * a.den := by
+      simp only [Nat.mul_assoc, Nat.mul_left_comm, Nat.mul_comm]
+    rw [e]; exact Nat.mul_le_mul_right a.den (Nat.le_add_right _ _)
+  have hBad := ratBound_lt_of_le_of_lt_packed hSub hLt
+  rw [WhirStage.foldBound_eq] at hBad
+  revert hBad
+  unfold dfmRoundScale RatBound.scale RatBound.lt RatBound.invPow2 unadjustedStage20
+  decide +kernel
+
+theorem inhabited_packedFiberCerts :
+    ∃ (prof : WhirCommitmentProfile) (logCells Q : Nat),
+      16 ≤ logCells ∧ logCells ≤ 28 ∧ Q ≤ 2 ^ 64 ∧
+      0 < (merkleProfileQromBound prof Q).den ∧
+      (packedProdSched logCells).johnsonOk = true :=
+  ⟨.poseidon2Gl24, 20, 2 ^ 64, by decide, by decide, Nat.le_refl _,
+   (merkleProfileQromBound .poseidon2Gl24 (2 ^ 64)).h_pos, by decide +kernel⟩
+
+theorem inhabited_recursiveMargin_tree :
+    ∃ (prof : WhirCommitmentProfile) (d Q : Nat),
+      d ≤ 16 ∧ Q ≤ 2 ^ 64 ∧
+      0 < (merkleProfileQromBound prof Q).den ∧
+      zkHemV2RecursiveMarginSched.johnsonOk = true :=
+  ⟨.poseidon2Gl24, 16, 2 ^ 64, Nat.le_refl _, Nat.le_refl _,
+   (merkleProfileQromBound .poseidon2Gl24 (2 ^ 64)).h_pos,
+   zkHemV2RecursiveMarginSched_johnson_and_dkt26.1⟩
+
+#verify_constructive
+  Qsag.ZkHemV2Packed.poseidon2Gl24DigestCard_gt_2pow447
+  Qsag.ZkHemV2Packed.merkleProfileQromBound_le_400
+  Qsag.ZkHemV2Packed.merkleProfileQromBound_mono
+  Qsag.ZkHemV2Packed.encodeQuinticNat_lt
+  Qsag.ZkHemV2Packed.encodeQuinticNat_decodeQuinticNat
+  Qsag.ZkHemV2Packed.decodeQuinticNat_encodeQuinticNat
+  Qsag.ZkHemV2Packed.decodeQuintic400_preimage_le
+  Qsag.ZkHemV2Packed.gsList_single_ood_bad_seeds_le
+  Qsag.ZkHemV2Packed.packedProdSched_johnsonOk
+  Qsag.ZkHemV2Packed.packed_stage_accepts_logDomain_path
+  Qsag.ZkHemV2Packed.tooth_scalar_stage_rejects_logDomain_path
+  Qsag.ZkHemV2Packed.deployed_single_ood_gs_bad_lt_277
+  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+  Qsag.ZkHemV2Packed.zkHemV2RecursiveMarginSched_johnson_and_dkt26
+  Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128
+  Qsag.ZkHemV2Packed.tooth_unadjusted_single_sched_fails_d16
+  Qsag.ZkHemV2Packed.inhabited_packedFiberCerts
+  Qsag.ZkHemV2Packed.inhabited_recursiveMargin_tree
+
+#verify_inhabited
+  Qsag.ZkHemV2Packed.zkHemV2_packed_all13_qrom_lt_128_at_2pow64
+  Qsag.ZkHemV2Packed.inhabited_packedFiberCerts
+#verify_inhabited
+  Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128
+  Qsag.ZkHemV2Packed.inhabited_recursiveMargin_tree
+
+#tooth_pair Qsag.ZkHemV2Packed.packed_stage_accepts_logDomain_path vs
+  Qsag.ZkHemV2Packed.tooth_scalar_stage_rejects_logDomain_path
+#tooth_pair Qsag.ZkHemV2Packed.zkHemV2RecursiveMargin_tree_lt_128 vs
+  Qsag.ZkHemV2Packed.tooth_unadjusted_single_sched_fails_d16
+
+end Qsag.ZkHemV2Packed
+end
