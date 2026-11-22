@@ -1501,3 +1501,993 @@ fn ceremony(
 /// All steps of all members run here on separated per-party state. On any failed check
 /// the result is [`PrepError::Check`], nothing is returned, and all key shares and
 /// material are erased as their owners go out of scope.
+pub fn run_preprocessing(
+    session: [u8; 32],
+    parties: usize,
+    demand: &PrepDemand,
+    mesh: &mut OtMesh,
+    rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<Preprocessing>, PrepError> {
+    run_preprocessing_with_fault(session, parties, demand, mesh, rngs, &mut |_| {})
+}
+
+/// [`run_preprocessing`] with a hook that may alter what a party uses or sends at each
+/// [`Fault`] point, for adversarial tests.
+pub fn run_preprocessing_with_fault(
+    session: [u8; 32],
+    parties: usize,
+    demand: &PrepDemand,
+    mesh: &mut OtMesh,
+    rngs: &mut [PartyPrivateRng],
+    fault: &mut dyn FnMut(Fault<'_>),
+) -> Result<Vec<Preprocessing>, PrepError> {
+    ceremony(session, parties, demand, mesh, rngs, fault, BATCH_TRIPLES).map(|(stores, _)| stores)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::engine::tests::run_parties;
+    use super::super::prover::{self, tests::small_relation};
+    use super::*;
+    use qsag_agg::zk_hem::v2::params::Profile;
+    use qsag_agg::zk_hem::v2::protocol::verify_split;
+    use std::{println, time::Instant};
+
+    /// Real OT mesh over `parties` quorum members and their private generators.
+    fn setup(seed: u8, parties: usize) -> (OtMesh, Vec<PartyPrivateRng>) {
+        let mut rngs: Vec<_> = (0..parties as u8)
+            .map(|p| {
+                PartyPrivateRng::from_seed(
+                    [seed, p, 7, 1].repeat(8).try_into().unwrap(),
+                    b"TEST.COLLAB.PREP",
+                )
+            })
+            .collect();
+        let mesh = OtMesh::establish([seed; 32], &mut rngs).unwrap();
+        (mesh, rngs)
+    }
+
+    fn honest(_: Fault<'_>) {}
+
+    /// Reconstructs everything from all parties' stores and asserts every relation the
+    /// engine relies on. Returns the keys and the reconstructed `a`, `b` and randoms.
+    fn verify_material(demand: &PrepDemand, stores: &[Preprocessing]) -> ([F; 2], Vec<F>) {
+        let key = stores.iter().fold([F::ZERO; 2], |k, s| mac_add(k, s.key));
+        assert_ne!(key[0], F::ZERO);
+        assert_ne!(key[1], F::ZERO);
+        assert_ne!(key[0], key[1], "the two keys are independent");
+        let element = |shares: Vec<Sb>| {
+            let total = shares.iter().fold(Sb::ZERO, |sum, s| sum + *s);
+            assert_eq!(total.m, mac_scale(key, total.v), "MAC");
+            total.v
+        };
+        let mut seen = Vec::new();
+        for store in stores {
+            assert_eq!(store.triples.len(), demand.triples);
+            assert_eq!(store.randoms.len(), demand.randoms);
+        }
+        for item in 0..demand.triples {
+            let [a, b, c] = [0, 1, 2]
+                .map(|part| element(stores.iter().map(|s| s.triples[item][part]).collect()));
+            assert_eq!(c, a * b, "triple {item}");
+            seen.extend([a, b]);
+        }
+        for item in 0..demand.randoms {
+            seen.push(element(stores.iter().map(|s| s.randoms[item]).collect()));
+        }
+        // Uniform values: not zero and not repeated.
+        for (i, value) in seen.iter().enumerate() {
+            assert_ne!(*value, F::ZERO);
+            assert!(!seen[..i].contains(value));
+        }
+        (key, seen)
+    }
+
+    /// Runs the ceremony honestly (must succeed and satisfy the oracle), then with
+    /// `fault`, and returns the deviating outcome after checking that a successful
+    /// deviating run still satisfies the oracle.
+    fn deviate(
+        seed: u8,
+        demand: &PrepDemand,
+        mesh: &mut OtMesh,
+        rngs: &mut [PartyPrivateRng],
+        mut fault: impl FnMut(Fault<'_>) -> bool,
+    ) -> Result<(), PrepError> {
+        let (out, _) = ceremony(
+            [seed; 32],
+            3,
+            demand,
+            mesh,
+            rngs,
+            &mut honest,
+            BATCH_TRIPLES,
+        )
+        .unwrap();
+        verify_material(demand, &out);
+        let mut fired = false;
+        let outcome = ceremony(
+            [seed ^ 0x80; 32],
+            3,
+            demand,
+            mesh,
+            rngs,
+            &mut |point| fired |= fault(point),
+            BATCH_TRIPLES,
+        );
+        assert!(fired, "the deviation was never injected");
+        outcome.map(|(out, _)| {
+            verify_material(demand, &out);
+        })
+    }
+
+    #[test]
+    fn stores_satisfy_the_share_algebra_for_two_and_three_members() {
+        for parties in [2usize, 3] {
+            let (mut mesh, mut rngs) = setup(30 + parties as u8, parties);
+            let demand = PrepDemand {
+                triples: 5,
+                randoms: 4,
+            };
+            let first = run_preprocessing([1; 32], parties, &demand, &mut mesh, &mut rngs).unwrap();
+            let (key, seen) = verify_material(&demand, &first);
+            for p in 0..parties {
+                for q in p + 1..parties {
+                    assert_ne!(first[p].key, first[q].key);
+                    assert_ne!(first[p].triples, first[q].triples);
+                    assert_ne!(first[p].randoms, first[q].randoms);
+                }
+                // No member holds a value or a key alone.
+                assert_ne!(first[p].key, key);
+                assert_ne!(first[p].triples[0][0].v, seen[0]);
+            }
+            let second =
+                run_preprocessing([2; 32], parties, &demand, &mut mesh, &mut rngs).unwrap();
+            let (other_key, other) = verify_material(&demand, &second);
+            assert_ne!(other_key, key);
+            assert!(other.iter().all(|value| !seen.contains(value)));
+            for p in 0..parties {
+                assert_ne!(second[p].triples, first[p].triples);
+                assert_ne!(second[p].randoms, first[p].randoms);
+            }
+        }
+    }
+
+    /// A demand that spans several batches, including one of randoms only, under one
+    /// pair of keys.
+    #[test]
+    fn a_demand_larger_than_one_batch_is_consistent() {
+        let (mut mesh, mut rngs) = setup(33, 3);
+        let demand = PrepDemand {
+            triples: 5,
+            randoms: 40,
+        };
+        let mut stages = 0;
+        let (out, sent) = ceremony(
+            [3; 32],
+            3,
+            &demand,
+            &mut mesh,
+            &mut rngs,
+            // One commit-then-open of this label per batch.
+            &mut |point| {
+                if let Fault::KeyConsistencySigma { party: 0, .. } = point {
+                    stages += 1;
+                }
+            },
+            2,
+        )
+        .unwrap();
+        // Batches: (2, 0), (2, 0), (1, 7), (0, 14), (0, 14), (0, 5); two items each.
+        assert_eq!(stages, 6 * KEYS);
+        verify_material(&demand, &out);
+        // Every member plays every role towards every other member equally often.
+        assert_ne!(sent[0], 0);
+        assert_eq!(sent, [sent[0]; 3]);
+    }
+
+    #[test]
+    fn pad_elements_are_canonical() {
+        let top = qsag_core::field::goldilocks::GOLDILOCKS_PRIME;
+        assert_eq!(pad_element(&[0; 48]), F::ZERO);
+        // Six non-canonical candidates: the last is reduced.
+        assert_eq!(
+            pad_element(&[0xff; 48]),
+            F::from_u64_reduced(u64::MAX - top)
+        );
+        assert!(pad_element(&[0xff; 48]).to_canonical_u64() < top);
+        let mut pad = [0xff; 48];
+        pad[40..].copy_from_slice(&5u64.to_le_bytes());
+        assert_eq!(pad_element(&pad), F::from_u64_reduced(5));
+        pad[8..16].copy_from_slice(&(top - 1).to_le_bytes());
+        assert_eq!(pad_element(&pad), F::from_u64_reduced(top - 1));
+    }
+
+    /// The pad stream yields the canonical words of its sponge in order, whatever the
+    /// length of the request.
+    #[test]
+    fn pad_streams_do_not_depend_on_how_they_are_read() {
+        let prg = || Prg::new(&[4; 32], 0, 1, 7, &[9; 48]);
+        let mut whole = vec![F::ZERO; 300];
+        prg().elements(&mut whole);
+        let mut stream = prg();
+        let mut parts = vec![F::ZERO; 300];
+        let (head, tail) = parts.split_at_mut(136);
+        stream.elements(head);
+        stream.elements(tail);
+        assert_eq!(parts, whole);
+        assert!(whole.iter().any(|v| *v != whole[0]));
+        let mut other = vec![F::ZERO; 300];
+        Prg::new(&[4; 32], 0, 1, 8, &[9; 48]).elements(&mut other);
+        assert_ne!(other, whole);
+    }
+
+    /// Authentication on its own: authenticated values reconstruct with valid MACs and
+    /// only the owner holds a value share.
+    #[test]
+    fn owners_authenticate_their_values() {
+        let (mut mesh, mut rngs) = setup(1, 3);
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([1; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.sample_keys();
+        ceremony.establish_pairs().unwrap();
+        let key = (0..3).fold([F::ZERO; 2], |key, p| mac_add(key, ceremony.keys[p]));
+        let inputs: Vec<SecretVec<F>> = (0..3)
+            .map(|owner| {
+                let mut values: SecretVec<F> = [
+                    F::ZERO,
+                    F::ONE,
+                    F::NEG_ONE,
+                    F::from_u64_reduced(owner as u64 + 2),
+                ]
+                .into_iter()
+                .collect();
+                values.push(ceremony.sample(owner));
+                values
+            })
+            .collect();
+        for _ in 0..2 {
+            let shares = ceremony.authenticate(&inputs).unwrap();
+            for owner in 0..3 {
+                for k in 0..inputs[owner].len() {
+                    let mut total = [F::ZERO; 3];
+                    for p in 0..3 {
+                        let share = shares[owner][p][k];
+                        assert_eq!(
+                            share[0] != F::ZERO,
+                            p == owner && inputs[owner][k] != F::ZERO
+                        );
+                        total = share_add(total, share);
+                    }
+                    assert_eq!(total[0], inputs[owner][k]);
+                    assert_eq!(mac_of(total), mac_scale(key, total[0]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inconsistent_owner_and_wrong_holder_share_are_caught() {
+        let (mut mesh, mut rngs) = setup(2, 3);
+        let demand = PrepDemand {
+            triples: 0,
+            randoms: 2,
+        };
+        // Owner 1 encodes another value under the low 16 bits of holder 2's key.
+        for target in 0..KEYS {
+            let outcome = deviate(20, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::CopeInput {
+                    owner: 1,
+                    holder: 2,
+                    key,
+                    bit,
+                    values,
+                } if key == target && bit < 16 => {
+                    values[0] += F::ONE;
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(PrepError::Check(Check::InputConsistency)),
+                "key {target}"
+            );
+        }
+        // Holder 0 holds a MAC share of one of owner 2's values that its key does not give.
+        for target in 0..KEYS {
+            let outcome = deviate(21, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::CopeHolderShare {
+                    owner: 2,
+                    holder: 0,
+                    macs,
+                } => {
+                    macs[0][target] += F::ONE;
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(PrepError::Check(Check::InputConsistency)),
+                "key {target}"
+            );
+        }
+        // Holder 2 commits to another key towards owner 0 than towards owner 1, in one
+        // key or in both.
+        for bump in [[1u64, 0], [0, 1], [1, 1]] {
+            let outcome = deviate(22, &demand, &mut mesh, &mut rngs, |point| match point {
+                Fault::FieldKey {
+                    owner: 0,
+                    holder: 2,
+                    key,
+                } => {
+                    key[0] += F::from_u64_reduced(bump[0]);
+                    key[1] += F::from_u64_reduced(bump[1]);
+                    true
+                }
+                _ => false,
+            });
+            assert_eq!(
+                outcome,
+                Err(PrepError::Check(Check::KeyConsistency)),
+                "{bump:?}"
+            );
+        }
+    }
+
+    /// The selective failure of the input check, in a later batch than the first: an
+    /// owner that encodes another value under one bit of one key share of an honest
+    /// holder, and does nothing else, passes exactly when that bit is zero, and then the
+    /// material is intact. So a pass tells the owner one predicate of the key and a
+    /// failure discards the key (module documentation, selective failure, item 1).
+    #[test]
+    fn a_wrong_encoding_under_one_key_bit_passes_exactly_when_the_bit_is_zero() {
+        let (mut mesh, mut rngs) = setup(16, 3);
+        // Batches of two triples' worth of values: (0, 14), (0, 14), (0, 2).
+        let demand = PrepDemand {
+            triples: 0,
+            randoms: 30,
+        };
+        let (mut passed, mut failed) = (0, 0);
+        for target in 0..KEYS {
+            for bit_at in [0usize, 1, 2, 3, 31, 32, 62, 63] {
+                let (mut share, mut calls) = (0u64, 0);
+                let outcome = ceremony(
+                    [(8 * target + bit_at) as u8; 32],
+                    3,
+                    &demand,
+                    &mut mesh,
+                    &mut rngs,
+                    &mut |point| match point {
+                        Fault::FieldKey {
+                            owner: 1,
+                            holder: 2,
+                            key,
+                        } => share = key[target].to_canonical_u64(),
+                        Fault::CopeInput {
+                            owner: 1,
+                            holder: 2,
+                            key,
+                            bit,
+                            values,
+                        } if key == target && bit == bit_at => {
+                            calls += 1;
+                            // The second batch only.
+                            if calls == 2 {
+                                values[3] += F::ONE;
+                            }
+                        }
+                        _ => {}
+                    },
+                    2,
+                );
+                if (share >> bit_at) & 1 == 0 {
+                    assert_eq!(calls, 3, "one authentication per batch");
+                    verify_material(&demand, &outcome.unwrap().0);
+                    passed += 1;
+                } else {
+                    assert_eq!(calls, 2, "the second batch aborts");
+                    assert_eq!(
+                        outcome.err(),
+                        Some(PrepError::Check(Check::InputConsistency)),
+                        "key {target} bit {bit_at}"
+                    );
+                    failed += 1;
+                }
+            }
+        }
+        println!("wrong encodings under one key bit: {passed} passed, {failed} caught");
+        assert!(passed != 0 && failed != 0);
+    }
+
+    /// A holder that used another key towards one owner knows the difference `eps`, and
+    /// it commits to its check share only after the value shares are public. If an
+    /// owner's share were its item, the holder could subtract `eps` times it and pass.
+    /// No triple is demanded here, so no later check of the ceremony would see the
+    /// inconsistency either.
+    #[test]
+    fn a_holder_cannot_cancel_its_key_inconsistency_from_what_the_owner_sent() {
+        let (mut mesh, mut rngs) = setup(12, 3);
+        let demand = PrepDemand {
+            triples: 0,
+            randoms: 2,
+        };
+        let epsilon = [F::ONE; 2];
+        let mut corrected = 0;
+        let outcome = deviate(60, &demand, &mut mesh, &mut rngs, |point| match point {
+            Fault::FieldKey {
+                owner: 0,
+                holder: 2,
+                key,
+            } => {
+                *key = mac_add(*key, epsilon);
+                true
+            }
+            Fault::KeyConsistencySigma {
+                party: 2,
+                sent,
+                sigma,
+            } => {
+                *sigma = mac_sub(*sigma, mac_scale(epsilon, sent[0]));
+                corrected += 1;
+                true
+            }
+            _ => false,
+        });
+        assert_eq!(corrected, KEYS);
+        assert_eq!(outcome, Err(PrepError::Check(Check::KeyConsistency)));
+    }
+
+    fn commit_payloads() -> Vec<SecretVec<u64>> {
+        (0..3).map(|p| [p, 7, 9].into_iter().collect()).collect()
+    }
+
+    /// One commit-then-open of a fixed label and payload by a fresh ceremony whose
+    /// counter stands at `start`: party 1's commitment, its nonce, and the transcript
+    /// digest. The generators are in the same state every time.
+    fn commit_once(start: u64) -> ([u8; 32], [u8; 32], [u8; 32]) {
+        let (mut mesh, mut rngs) = setup(13, 3);
+        let (mut sent, mut opened) = ([0; 32], [0; 32]);
+        let mut hook = |point: Fault<'_>| match point {
+            Fault::Commitment {
+                invocation,
+                party: 1,
+                commitment: c,
+            } => {
+                assert_eq!(invocation, start);
+                sent = *c;
+            }
+            Fault::CommitmentNonce {
+                party: 1, nonce, ..
+            } => opened = *nonce,
+            _ => {}
+        };
+        let mut ceremony = Ceremony::new([13; 32], &mut mesh, &mut rngs, &mut hook).unwrap();
+        ceremony.commits = start;
+        ceremony
+            .commit_then_open(b"replay", &commit_payloads())
+            .unwrap();
+        assert_eq!(ceremony.commits, start + 1);
+        let digest = ceremony.transcript.digest();
+        drop(ceremony);
+        (sent, opened, digest)
+    }
+
+    #[test]
+    fn commit_then_open_binds_its_invocation_counter() {
+        let (first, first_nonce, first_digest) = commit_once(0);
+        assert_eq!(commit_once(0), (first, first_nonce, first_digest));
+        let (later, later_nonce, later_digest) = commit_once(1);
+        // Same session, label, party, payload and nonce: only the counter differs.
+        assert_eq!(later_nonce, first_nonce);
+        assert_ne!(later, first);
+        assert_ne!(later_digest, first_digest);
+        let payload = &commit_payloads()[1];
+        for (invocation, sent) in [(0, first), (1, later)] {
+            assert_eq!(
+                sent,
+                commitment(&[13; 32], b"replay", invocation, 1, payload, &first_nonce)
+            );
+        }
+    }
+
+    /// Two invocations with the same label and payloads. In the second, party 1 opens
+    /// with its nonce of the first and sends either its commitment of the first
+    /// (`stale`) or a commitment to the same payload and nonce under the second
+    /// invocation.
+    fn reuse_in_second_invocation(stale: bool) -> Result<(), PrepError> {
+        let (mut mesh, mut rngs) = setup(14, 3);
+        let session = [14; 32];
+        let payloads = commit_payloads();
+        let (mut sent, mut opened) = ([0; 32], [0; 32]);
+        let mut hook = |point: Fault<'_>| match point {
+            Fault::Commitment {
+                invocation: 0,
+                party: 1,
+                commitment: c,
+            } => sent = *c,
+            Fault::CommitmentNonce {
+                invocation: 0,
+                party: 1,
+                nonce,
+            } => opened = *nonce,
+            Fault::Commitment {
+                invocation: 1,
+                party: 1,
+                commitment: c,
+            } => {
+                *c = if stale {
+                    sent
+                } else {
+                    commitment(&session, b"replay", 1, 1, &payloads[1], &opened)
+                };
+            }
+            Fault::CommitmentNonce {
+                invocation: 1,
+                party: 1,
+                nonce,
+            } => *nonce = opened,
+            _ => {}
+        };
+        let mut ceremony = Ceremony::new(session, &mut mesh, &mut rngs, &mut hook).unwrap();
+        ceremony.commit_then_open(b"replay", &payloads).unwrap();
+        let outcome = ceremony.commit_then_open(b"replay", &payloads);
+        assert_eq!(ceremony.commits, 2);
+        outcome
+    }
+
+    #[test]
+    fn a_commitment_replayed_from_an_earlier_invocation_is_rejected() {
+        assert_eq!(reuse_in_second_invocation(false), Ok(()));
+        assert_eq!(
+            reuse_in_second_invocation(true),
+            Err(PrepError::Check(Check::Commitment))
+        );
+    }
+
+    #[test]
+    fn the_invocation_counter_does_not_wrap() {
+        let (mut mesh, mut rngs) = setup(15, 3);
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([15; 32], &mut mesh, &mut rngs, hook).unwrap();
+        ceremony.commits = u64::MAX - 1;
+        assert_eq!(
+            ceremony.commit_then_open(b"replay", &commit_payloads()),
+            Ok(())
+        );
+        assert_eq!(
+            ceremony.commit_then_open(b"replay", &commit_payloads()),
+            Err(PrepError::Check(Check::Commitment))
+        );
+        assert_eq!(ceremony.commits, u64::MAX);
+    }
+
+    /// A coin drawn by generators in a fixed state, on the mesh of `setup(18)` as
+    /// established or after one further OT batch; with the coin, the mesh's chain.
+    fn coin_on_mesh(extra_batch: bool) -> (F, [u8; 32]) {
+        let (mut mesh, mut rngs) = setup(18, 3);
+        if extra_batch {
+            mesh.run_correlated_ot_words(0, 1, &[5], &mut rngs).unwrap();
+        }
+        let chain = mesh.transcript_digest();
+        let mut rngs: Vec<_> = (0..3u8)
+            .map(|p| PartyPrivateRng::from_seed([p; 32], b"TEST.COLLAB.PREP.COIN"))
+            .collect();
+        let hook: &mut dyn FnMut(Fault<'_>) = &mut honest;
+        let mut ceremony = Ceremony::new([18; 32], &mut mesh, &mut rngs, hook).unwrap();
+        (ceremony.coin(b"test").unwrap().element(), chain)
+    }
+
+    #[test]
+    fn coins_depend_on_all_ot_traffic() {
+        let (coin, chain) = coin_on_mesh(false);
+        assert_eq!(coin_on_mesh(false), (coin, chain));
+        let (later_coin, later_chain) = coin_on_mesh(true);
+        assert_ne!(later_chain, chain);
+        assert_ne!(later_coin, coin);
+    }
+
+    #[test]
+    fn wrong_triple_correlation_product_and_opening_are_caught() {
+        let (mut mesh, mut rngs) = setup(4, 3);
+        let demand = PrepDemand {
+            triples: 1,
+            randoms: 0,
+        };
+        // One wrong correlation in one OT changes the product only if the receiver's
+        // choice bit is 1: each run is either caught or harmless.
+        let mut caught = 0;
+        for target in 0..8 {
+            let outcome =
+                deviate(
+                    40 + target as u8,
+                    &demand,
+                    &mut mesh,
+                    &mut rngs,
+                    |point| match point {
+                        Fault::TripleCorrelation {
+                            sender: 1,
+                            receiver: 0,
+                            triple: 0,
+                            slot: 0,
+                            bit,
+                            correlation,
+                        } if bit == target => {
+                            *correlation += F::ONE;
+                            true
+                        }
+                        _ => false,
+                    },
+                );
+            match outcome {
+                Ok(()) => {}
+                Err(abort) => {
+                    assert_eq!(abort, PrepError::Check(Check::TripleSacrifice));
+                    caught += 1;
+                }
+            }
+        }
+        println!("single wrong correlations caught: {caught} of 8");
+        assert!((1..8).contains(&caught));
+
+        let demand = PrepDemand {
+            triples: 2,
+            randoms: 1,
+        };
+        let outcome = deviate(50, &demand, &mut mesh, &mut rngs, |point| match point {
+            Fault::TripleProduct { party: 2, products } => {
+                products[1] += F::ONE;
+                true
+            }
+            _ => false,
+        });
+        assert_eq!(outcome, Err(PrepError::Check(Check::TripleSacrifice)));
+
+        // A wrong value share in an opening of the sacrifice.
+        let mut openings = 0;
+        let outcome = deviate(51, &demand, &mut mesh, &mut rngs, |point| match point {
+            Fault::FieldOpening {
+                party: 1,
+                check: Check::TripleSacrifice,
+                share,
+            } => {
+                openings += 1;
+                if openings == 3 {
+                    *share += F::ONE;
+                }
+                true
+            }
+            _ => false,
+        });
+        assert_eq!(openings, 2 * SACRIFICES);
+        assert_eq!(outcome, Err(PrepError::Check(Check::TripleSacrifice)));
+    }
+
+    #[test]
+    fn invalid_configurations_are_rejected() {
+        let (mut mesh, mut rngs) = setup(9, 2);
+        let demand = PrepDemand {
+            triples: 1,
+            randoms: 1,
+        };
+        // Three members claimed on a two-party mesh, and one generator too few.
+        for parties in [3, 1] {
+            assert_eq!(
+                run_preprocessing([9; 32], parties, &demand, &mut mesh, &mut rngs).err(),
+                Some(PrepError::InvalidConfiguration)
+            );
+        }
+        let (mut wide, mut wide_rngs) = setup(10, 3);
+        assert_eq!(
+            run_preprocessing([9; 32], 2, &demand, &mut wide, &mut rngs).err(),
+            Some(PrepError::InvalidConfiguration)
+        );
+        assert_eq!(
+            run_preprocessing([9; 32], 2, &demand, &mut mesh, &mut wide_rngs[..1]).err(),
+            Some(PrepError::InvalidConfiguration)
+        );
+        assert_eq!(
+            run_preprocessing(
+                [9; 32],
+                2,
+                &PrepDemand {
+                    triples: usize::MAX,
+                    randoms: 0
+                },
+                &mut mesh,
+                &mut rngs
+            )
+            .err(),
+            Some(PrepError::InvalidConfiguration)
+        );
+        // An empty demand still yields key shares.
+        let empty = PrepDemand::default();
+        let out = run_preprocessing([9; 32], 2, &empty, &mut mesh, &mut rngs).unwrap();
+        verify_material(&empty, &out);
+        let out = run_preprocessing([8; 32], 2, &demand, &mut mesh, &mut rngs).unwrap();
+        verify_material(&demand, &out);
+    }
+
+    /// The ceremony's output drives the engine and the threshold prover: party 0 inputs
+    /// a clear assignment, the quorum proves, the split verifier accepts.
+    fn prove_on_ceremony_output(parties: usize) {
+        let regime = Profile::default();
+        let (shape, assignment) = small_relation(5);
+        let publics = assignment[1..=shape.num_public].to_vec();
+        let (triples, randoms) = prover::prover_demand(&shape, regime).unwrap();
+        let demand = PrepDemand {
+            triples,
+            randoms: randoms + assignment.len(),
+        };
+        let started = Instant::now();
+        let (mut mesh, mut rngs) = setup(60 + parties as u8, parties);
+        let mesh_s = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        let preps = run_preprocessing([6; 32], parties, &demand, &mut mesh, &mut rngs).unwrap();
+        let ceremony_s = started.elapsed().as_secs_f64();
+        verify_material(&demand, &preps);
+
+        let started = Instant::now();
+        let out = run_parties(preps, |mut e| {
+            let mine = (e.me() == 0).then_some(&assignment[..]);
+            let z = e.input(0, mine, assignment.len()).unwrap();
+            let proof = prover::prove_party(&mut e, &shape, &publics, b"stmt", regime, z);
+            (proof, e.remaining(), e.has_pending(), e.stats)
+        });
+        let prove_s = started.elapsed().as_secs_f64();
+        let proof = out[0].0.clone().unwrap();
+        for (result, remaining, pending, stats) in &out {
+            assert_eq!(result.as_ref(), Ok(&proof));
+            assert_eq!(*remaining, (0, 0), "the demand is exact");
+            assert!(!pending);
+            assert_eq!(stats.triples_used as usize, demand.triples);
+            assert_eq!(stats.randoms_used as usize, demand.randoms);
+        }
+        assert_eq!(proof.roots.len(), parties);
+        assert!(proof.profile == regime && verify_split(&shape, &publics, b"stmt", regime, &proof));
+        assert!(!verify_split(&shape, &publics, b"other", regime, &proof));
+        println!(
+            "N={parties}: {} triples, {} randoms per member; mesh {mesh_s:.2} s, ceremony \
+             {ceremony_s:.2} s, input+proof {prove_s:.2} s",
+            demand.triples, demand.randoms
+        );
+    }
+
+    #[test]
+    fn ceremony_output_drives_the_threshold_prover() {
+        prove_on_ceremony_output(3);
+    }
+
+    #[test]
+    fn ceremony_output_drives_the_threshold_prover_for_two_members() {
+        prove_on_ceremony_output(2);
+    }
+
+    /// A store whose MAC key share is not the ceremony's makes the engine's MAC check
+    /// fail: the proof above depends on the keys the ceremony returned.
+    #[test]
+    fn a_store_with_a_foreign_key_share_fails_the_engine_check() {
+        let (mut mesh, mut rngs) = setup(70, 2);
+        let demand = PrepDemand {
+            triples: 1,
+            randoms: 2,
+        };
+        let honest_run = |mesh: &mut OtMesh, rngs: &mut [PartyPrivateRng], session: u8| {
+            run_preprocessing([session; 32], 2, &demand, mesh, rngs).unwrap()
+        };
+        let open_product = |preps: Vec<Preprocessing>| {
+            run_parties(preps, |mut e| {
+                let x = e.random().unwrap();
+                let y = e.random().unwrap();
+                let product = e.mul(&[x], &[y]).unwrap();
+                let opened = e.open(&[product[0], x, y]).unwrap();
+                (opened, e.check())
+            })
+        };
+        for (opened, verdict) in open_product(honest_run(&mut mesh, &mut rngs, 1)) {
+            assert_eq!(verdict, Ok(()));
+            assert_eq!(opened[0], opened[1] * opened[2]);
+        }
+        // Member 1 keeps its material of one ceremony and takes the key of another.
+        let mut mixed = honest_run(&mut mesh, &mut rngs, 2);
+        let other = honest_run(&mut mesh, &mut rngs, 3);
+        mixed[1].key = other[1].key;
+        for (_, verdict) in open_product(mixed) {
+            assert_eq!(verdict, Err(super::super::engine::MpcError::MacCheck));
+        }
+    }
+
+    /// Reconstructs every triple and uniform value of `stores` and checks its MACs under
+    /// the reconstructed keys and, for triples, the product. Linear in the demand.
+    fn check_all_material(demand: &PrepDemand, stores: &[Preprocessing]) {
+        let key = stores.iter().fold([F::ZERO; 2], |k, s| mac_add(k, s.key));
+        assert_ne!(key[0], F::ZERO);
+        assert_ne!(key[1], F::ZERO);
+        let element = |part: &dyn Fn(&Preprocessing) -> Sb| {
+            let total = stores.iter().fold(Sb::ZERO, |sum, s| sum + part(s));
+            assert_eq!(total.m, mac_scale(key, total.v), "MAC");
+            total.v
+        };
+        let mut zeros = 0;
+        for store in stores {
+            assert_eq!(store.triples.len(), demand.triples);
+            assert_eq!(store.randoms.len(), demand.randoms);
+        }
+        for item in 0..demand.triples {
+            let [a, b, c] = [0, 1, 2].map(|part| element(&|s| s.triples[item][part]));
+            assert_eq!(c, a * b, "triple {item}");
+            zeros += usize::from(a == F::ZERO) + usize::from(b == F::ZERO);
+        }
+        for item in 0..demand.randoms {
+            zeros += usize::from(element(&|s| s.randoms[item]) == F::ZERO);
+        }
+        assert_eq!(zeros, 0, "uniform 64-bit values are not zero");
+    }
+
+    /// A field of `/proc/self/status` in kB (Linux; `None` elsewhere).
+    fn status_kb(field: &str) -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with(field))?;
+        line.split_whitespace().nth(1)?.parse().ok()
+    }
+
+    /// User plus system CPU seconds of this process, all threads (Linux, 100 ticks per
+    /// second; `None` elsewhere).
+    fn cpu_seconds() -> Option<f64> {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+        let user: u64 = fields.nth(11)?.parse().ok()?;
+        let system: u64 = fields.next()?.parse().ok()?;
+        Some((user + system) as f64 / 100.0)
+    }
+
+    /// The real ceremony for one demand on the real mesh, with the cost figures:
+    /// `cargo test --release -p qsag-migrate --features std --lib --
+    /// hem::collab::prep::tests::measure_ceremony --ignored --nocapture`.
+    ///
+    /// `COLLAB_PREP_TRIPLES`, `COLLAB_PREP_RANDOMS` and `COLLAB_PREP_PARTIES` set the
+    /// demand per member and the quorum size (default 4096, 16384, 3); one custodian's
+    /// proof of the Bitcoin HASH160 ownership statement consumes 2228208 triples and
+    /// 9156 uniform values. A progress line is printed every `COLLAB_PREP_PROGRESS`
+    /// batches (default 64). All of the output is reconstructed and checked.
+    ///
+    /// The ceremony's own steps run on one thread; with `--features std` the mesh
+    /// expands each OT batch on up to 16 worker threads.
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_ceremony() {
+        let count = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let demand = PrepDemand {
+            triples: count("COLLAB_PREP_TRIPLES", 4096),
+            randoms: count("COLLAB_PREP_RANDOMS", 16384),
+        };
+        let parties = count("COLLAB_PREP_PARTIES", 3);
+        let every = count("COLLAB_PREP_PROGRESS", 64).max(1);
+        // The batches `Ceremony::run` forms, as (triples, randoms).
+        let mut batches = Vec::new();
+        let (mut triples, mut randoms) = (demand.triples, demand.randoms);
+        while triples != 0 || randoms != 0 {
+            let t = triples.min(BATCH_TRIPLES);
+            let r = randoms.min((BATCH_TRIPLES - t) * TRIPLE_INPUTS);
+            batches.push((t, r));
+            triples -= t;
+            randoms -= r;
+        }
+        println!(
+            "demand per member: {} triples, {} randoms; {parties} members; {} batches of at \
+             most {BATCH_TRIPLES} triples; available parallelism {}",
+            demand.triples,
+            demand.randoms,
+            batches.len(),
+            std::thread::available_parallelism().map_or(1, usize::from)
+        );
+
+        let started = Instant::now();
+        let (mut mesh, mut rngs) = setup(9, parties);
+        let mesh_s = started.elapsed().as_secs_f64();
+        println!("OT mesh: {mesh_s:.2} s");
+
+        // The key-consistency check runs once per batch, after the batch's
+        // multiplication and authentication and before its sacrifice.
+        let started = Instant::now();
+        let cpu_before = cpu_seconds();
+        let (mut calls, mut marks) = (0, Vec::with_capacity(batches.len()));
+        let (stores, sent) = ceremony(
+            [1; 32],
+            parties,
+            &demand,
+            &mut mesh,
+            &mut rngs,
+            &mut |point| {
+                if let Fault::KeyConsistencySigma { party: 0, .. } = point {
+                    calls += 1;
+                    if calls % KEYS != 0 {
+                        return;
+                    }
+                    let elapsed = started.elapsed().as_secs_f64();
+                    marks.push(elapsed);
+                    let done = marks.len();
+                    if done % every == 0 || done == batches.len() {
+                        let triples: usize = batches[..done].iter().map(|b| b.0).sum();
+                        println!(
+                            "batch {done}/{}: {elapsed:.1} s, {triples} triples, RSS {} MB",
+                            batches.len(),
+                            status_kb("VmRSS:").map_or(0, |kb| kb / 1024)
+                        );
+                    }
+                }
+            },
+            BATCH_TRIPLES,
+        )
+        .unwrap();
+        let wall = started.elapsed().as_secs_f64();
+        let cpu = cpu_seconds()
+            .zip(cpu_before)
+            .map(|(after, before)| after - before);
+        assert_eq!(marks.len(), batches.len());
+
+        let started = Instant::now();
+        check_all_material(&demand, &stores);
+        println!(
+            "checked: all {} triples (product and both MACs) and {} randoms (both MACs), \
+             reconstructed over {parties} members, {:.2} s",
+            demand.triples,
+            demand.randoms,
+            started.elapsed().as_secs_f64()
+        );
+
+        println!("ceremony wall-clock: {wall:.1} s = {:.3} h", wall / 3600.0);
+        match cpu {
+            Some(cpu) => println!("ceremony CPU time (user + system, all threads): {cpu:.1} s"),
+            None => println!("ceremony CPU time: not available on this system"),
+        }
+        match status_kb("VmHWM:") {
+            Some(kb) => println!("peak RSS (VmHWM): {} MB", kb / 1024),
+            None => println!("peak RSS: not available on this system"),
+        }
+        for (party, bytes) in sent.iter().enumerate() {
+            println!(
+                "member {party} sent {bytes} bytes = {:.3} GiB",
+                *bytes as f64 / (1u64 << 30) as f64
+            );
+        }
+        // Rates from the batches of one kind: a batch's span is from the previous
+        // batch's key-consistency check to its own, so the span of the batch after a
+        // triple batch holds that batch's sacrifice and is left out of the random rate.
+        let span = |i: usize| marks[i] - if i == 0 { 0.0 } else { marks[i - 1] };
+        let full: Vec<usize> = (1..batches.len())
+            .filter(|&i| batches[i] == (BATCH_TRIPLES, 0) && batches[i - 1].1 == 0)
+            .collect();
+        if !full.is_empty() {
+            let seconds: f64 = full.iter().map(|&i| span(i)).sum();
+            println!(
+                "per triple, over {} whole triple batches: {:.4} ms",
+                full.len(),
+                1e3 * seconds / (full.len() * BATCH_TRIPLES) as f64
+            );
+        }
+        let plain: Vec<usize> = (1..batches.len())
+            .filter(|&i| batches[i].0 == 0 && batches[i - 1].0 == 0)
+            .collect();
+        if !plain.is_empty() {
+            let seconds: f64 = plain.iter().map(|&i| span(i)).sum();
+            let randoms: usize = plain.iter().map(|&i| batches[i].1).sum();
+            println!(
+                "per random, over {} random-only batches ({randoms} randoms): {:.2} us",
+                plain.len(),
+                1e6 * seconds / randoms as f64
+            );
+        }
+        if demand.triples != 0 {
+            println!(
+                "whole ceremony per triple demanded: {:.4} ms",
+                1e3 * wall / demand.triples as f64
+            );
+        }
+    }
+}
