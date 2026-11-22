@@ -1122,7 +1122,7 @@ theorem det_perm_rows (k : Nat) (B : Nat → Nat → R) (σ : Nat → Nat)
           det_idMat, LawfulCommRing.one_mul]
   exact aux (k * k * k - phiPot k σ) σ hBound (Nat.le_refl _)
 
-private theorem det_updRow_rangeSum (k r : Nat) (M : Nat → Nat → R) (hr : r < k) :
+theorem det_updRow_rangeSum (k r : Nat) (M : Nat → Nat → R) (hr : r < k) :
     ∀ (m : Nat) (c : Nat → R) (v : Nat → Nat → R),
       det k (updRow M r (fun j => rangeSum m (fun l => mul (c l) (v l j)))) =
         rangeSum m (fun l => mul (c l) (det k (updRow M r (v l))))
@@ -2530,7 +2530,7 @@ end Qsag
 #export_eqns Qsag.PreFrac.Rel
 #export_eqns Qsag.Frac.mk
 #export_eqns Qsag.UPoly.wdegFrom
-#export_eqns Qsag.Mat.det
+#export_eqns Qsag.Mat.det Qsag.Mat.updRow
 #export_eqns Qsag.Mat.minor
 #export_eqns Qsag.Mat.skipIdx
 #export_eqns Qsag.Mat.rangeSum

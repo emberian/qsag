@@ -637,6 +637,7 @@ theorem bernoulli_dual_min_weight_bias_lt_two_neg_256 (dMin : Nat) (hd : 1536 �
   rw [show 6 * (255 + 1) + (dMin - 1536) = dMin from by omega] at hk; exact hk
 
 def depth15TreeRate (w : Nat) : ExactRat := ⟨(w : Int), 32768, by decide⟩
+def depth14TreeRate (w : Nat) : ExactRat := ⟨(w : Int), 16384, by decide⟩
 
 theorem pcg_dense_dual_lpn_linear_bias_lt_two_neg_256
     (weights : List Nat) (hLen : weights.length = 64)
@@ -662,6 +663,51 @@ theorem pcg_dense_dual_lpn_linear_bias_lt_two_neg_256
   rw [← hScale 64]
   exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 256) h64.1)
     (Nat.mul_lt_mul_of_pos_right (Nat.pow_lt_pow_left (by decide) (by decide)) (Nat.two_pow_pos 256))
+
+/-- **11-Tap Balanced `pcg_dense` Unconditional All-Rows Bias Bound (`< 2^-135` at `Depth15`)**:
+    Every row emitted by `BatchedTapGenerator::next_taps` (`DENSE_PCG_TAPS_PER_TREE = 11`,
+    `DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE = 7593`) satisfies `|32768 - 2·w_t| ≤ 7593` on all 64
+    trees, and `7593^64 · 2^135 < 32768^64`, bounding every single-row parity bias strictly below `2^-135`. -/
+theorem pcg_dense_11tap_all_rows_bias_lt_two_neg_135
+    (weights : List Nat) (hLen : weights.length = 64)
+    (hBal : ∀ w ∈ weights, ((32768 : Int) - 2 * (w : Int)).natAbs ≤ 7593) :
+    ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb (weights.map depth15TreeRate))))
+      (ExactRat.twoNegPow 135) := by
+  rw [piling_up_lemma_regular_blocks_rat]; apply ExactRat.abs_lt_twoNegPow
+  have hProd : ∀ ws : List Nat, (∀ w ∈ ws, ((32768 : Int) - 2 * (w : Int)).natAbs ≤ 7593) →
+      ((ws.map depth15TreeRate).foldr (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).num.natAbs ≤ 7593 ^ ws.length ∧
+      ((ws.map depth15TreeRate).foldr (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).den = 32768 ^ ws.length := by
+    intro ws hW; induction ws with
+    | nil => exact ⟨by decide, rfl⟩
+    | cons w tl ih =>
+      have htl := ih (fun x hx => hW x (.tail w hx))
+      rw [List.map_cons, List.foldr_cons, ExactRat.mul_num, ExactRat.mul_den, List.length_cons]
+      exact ⟨by rw [Int.natAbs_mul, Nat.pow_succ']; exact Nat.mul_le_mul (hW w (.head tl)) htl.1,
+             by rw [htl.2, Nat.pow_succ']; rfl⟩
+  have h64 := hProd weights hBal; rw [hLen] at h64; rw [h64.2]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 135) h64.1) (by decide +kernel)
+
+/-- **11-Tap Balanced `pcg_dense` Unconditional All-Rows Bias Bound (`< 2^-135` at `Depth14`)**:
+    At `Depth14` (`N = 16384`, scaled threshold `(16384 * 7593) >> 15 = 3796`),
+    `3796^64 · 2^135 < 16384^64`, bounding every single-row parity bias strictly below `2^-135`. -/
+theorem pcg_dense_depth14_11tap_all_rows_bias_lt_two_neg_135
+    (weights : List Nat) (hLen : weights.length = 64)
+    (hBal : ∀ w ∈ weights, ((16384 : Int) - 2 * (w : Int)).natAbs ≤ 3796) :
+    ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb (weights.map depth14TreeRate))))
+      (ExactRat.twoNegPow 135) := by
+  rw [piling_up_lemma_regular_blocks_rat]; apply ExactRat.abs_lt_twoNegPow
+  have hProd : ∀ ws : List Nat, (∀ w ∈ ws, ((16384 : Int) - 2 * (w : Int)).natAbs ≤ 3796) →
+      ((ws.map depth14TreeRate).foldr (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).num.natAbs ≤ 3796 ^ ws.length ∧
+      ((ws.map depth14TreeRate).foldr (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).den = 16384 ^ ws.length := by
+    intro ws hW; induction ws with
+    | nil => exact ⟨by decide, rfl⟩
+    | cons w tl ih =>
+      have htl := ih (fun x hx => hW x (.tail w hx))
+      rw [List.map_cons, List.foldr_cons, ExactRat.mul_num, ExactRat.mul_den, List.length_cons]
+      exact ⟨by rw [Int.natAbs_mul, Nat.pow_succ']; exact Nat.mul_le_mul (hW w (.head tl)) htl.1,
+             by rw [htl.2, Nat.pow_succ']; rfl⟩
+  have h64 := hProd weights hBal; rw [hLen] at h64; rw [h64.2]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 135) h64.1) (by decide +kernel)
 
 /-! ## 5. Prange & Universal Stern–Dumer ISD Work-Factor Lower Bounds (`Depth15`) -/
 
@@ -1097,6 +1143,8 @@ end
   Qsag.acceptProbExact_safe_cancels_shift
   Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128
   Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256
+  Qsag.pcg_dense_11tap_all_rows_bias_lt_two_neg_135
+  Qsag.pcg_dense_depth14_11tap_all_rows_bias_lt_two_neg_135
   Qsag.rlwe_accept_box_preimage_in_proposal_box
 
 /-! ## Executed controls for `Tests/MathAndCoding`
@@ -1166,6 +1214,23 @@ theorem tooth_omitting_accumulator_collapses_dual_lpn_bias :
     (Nat.mul_lt_mul_of_pos_right (Nat.pow_lt_pow_left (by decide) (by decide)) (Nat.two_pow_pos 64))
     (Nat.mul_le_mul_left _ (Nat.pow_le_pow_right (by decide) (by decide)))
 
+theorem tooth_omitting_accumulator_collapses_dual_lpn_bias_135 :
+    ¬ ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb ((List.replicate 64 11).map depth15TreeRate))))
+      (ExactRat.twoNegPow 135) := by
+  rw [piling_up_lemma_regular_blocks_rat]; apply ExactRat.not_lt_twoNegPow_of_gt
+  have hRep : ∀ n : Nat, (((List.replicate n 11).map depth15TreeRate).foldr
+        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).num = ((32746 ^ n : Nat) : Int) ∧
+      (((List.replicate n 11).map depth15TreeRate).foldr
+        (fun tau acc => ExactRat.mul (parityBias tau) acc) (ExactRat.ofInt 1)).den = 32768 ^ n := by
+    intro n; induction n with
+    | zero => exact ⟨rfl, rfl⟩
+    | succ n' ih =>
+      rw [List.replicate_succ, List.map_cons, List.foldr_cons, ExactRat.mul_num, ExactRat.mul_den, ih.1, ih.2]
+      exact ⟨by change (32746 : Int) * ((32746 ^ n' : Nat) : Int) = _; rw [Nat.pow_succ', Int.natCast_mul]; rfl,
+             by change 32768 * 32768 ^ n' = 32768 ^ (n' + 1); rw [Nat.pow_succ']⟩
+  rw [(hRep 64).1, (hRep 64).2, Int.natAbs_natCast]
+  decide +kernel
+
 -- (math-teeth anchor Qsag )
 end Qsag
 end
@@ -1179,3 +1244,4 @@ end
 #verify_constructive
   Qsag.tooth_pcg_dense_depth14_stern_dumer_below_256
   Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias
+  Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias_135

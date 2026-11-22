@@ -2,10 +2,16 @@ module
 /-
 # Qsag.Math.TapRowParityBias — parity bias of a regular-noise linear test, block by block
 
-`pcg_dense_dual_lpn_linear_bias_lt_two_neg_256` (`Qsag/Math/Lattices.lean`) bounds the bias of
-a 64-block regular-noise parity by `2^-256` under the premise that every block is balanced to
-within `2047 / 32768`. That premise is false for a row of the deployed tap generator. This
-module removes the premise and evaluates the row.
+`pcg_dense_11tap_all_rows_bias_lt_two_neg_135` (`Qsag/Math/Lattices.lean`) bounds the parity bias
+of every 64-block regular-noise linear test of the deployed 11-tap generator (`DENSE_PCG_TAPS_PER_TREE = 11`,
+`DENSE_PCG_DEPTH15_MAX_TREE_IMBALANCE = 7593`, `crates/qsag-core/src/pcg_dense.rs`) strictly below
+`2^-135`, while `pcg_dense_dual_lpn_linear_bias_lt_two_neg_256` states the legacy `2047 / 32768`
+uniform special case. This module proves the general odd-tap leaf-weight formula (`oddTap_weight`,
+`elevenTap_weight`), bridges `noiseSignedSum` directly to `Lattices.parityBias` (`regularRates_parityBias_bridge`),
+certifies unconditional `< 2^-135` parity bias across all balanced 11-tap rows
+(`elevenTap_balanced_all_rows_bias_lt_two_neg_135`), evaluates Row 0 of the deployed 11-tap generator
+(`prodRow0Bal11_bias_bracket`: strictly between `2^-220` and `2^-219`), and retains the un-filtered
+3-tap diagnostic (`prodRow0_bias_bracket`: between `2^-118` and `2^-117`).
 
 Model. There are `T` trees of `N` leaves. The noise is one punctured leaf per tree, the trees
 independent and each leaf uniform (regular noise). A linear test restricted to tree `t` is a
@@ -361,6 +367,439 @@ theorem prodRow0_heterogeneous_instance :
   rw [hLen, prodRow0_bias_exact.2.1]
   exact prodRow0_bias_bracket.1
 
+/-! ## 3b. General Odd-Tap Weight (`elevenTap_weight`), `ExactRat` Bridge & 11-Tap Balanced `< 2^-135` Bound -/
+
+/-- Insert `x` into a nondecreasing `List Nat`. -/
+def insTap (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | y :: ys => if x ≤ y then x :: y :: ys else y :: insTap x ys
+
+/-- Insertion sort on `List Nat`. -/
+def sortTaps : List Nat → List Nat
+  | [] => []
+  | x :: xs => insTap x (sortTaps xs)
+
+theorem tapFn_insTap (x : Nat) : ∀ (ts : List Nat) (p : Nat),
+    tapFn (insTap x ts) p = Bool.xor (tapGe x p) (tapFn ts p)
+  | [], _ => rfl
+  | y :: ys, p => by
+    unfold insTap
+    by_cases hxy : x ≤ y
+    · simp only [hxy, ↓reduceIte, tapFn]
+    · simp only [hxy, ↓reduceIte, tapFn, tapFn_insTap x ys p]
+      cases tapGe x p <;> cases tapGe y p <;> cases tapFn ys p <;> rfl
+
+theorem tapFn_sortTaps : ∀ (ts : List Nat) (p : Nat), tapFn (sortTaps ts) p = tapFn ts p
+  | [], _ => rfl
+  | x :: xs, p => by
+    unfold sortTaps
+    rw [tapFn_insTap, tapFn_sortTaps xs p]; rfl
+
+theorem leafWeight_congr {n : Nat} {f g : Nat → Bool} (h : ∀ p < n, f p = g p) :
+    leafWeight n f = leafWeight n g := by
+  induction n with
+  | zero => rfl
+  | succ k ih =>
+    unfold leafWeight
+    rw [ih (fun p hp => h p (Nat.lt_succ_of_lt hp)), h k (Nat.lt_succ_self k)]
+
+theorem insTap_length (x : Nat) : ∀ ts : List Nat, (insTap x ts).length = ts.length + 1
+  | [] => rfl
+  | y :: ys => by
+    unfold insTap
+    by_cases hxy : x ≤ y
+    · simp [hxy]
+    · simp [hxy, insTap_length x ys]
+
+theorem sortTaps_length : ∀ ts : List Nat, (sortTaps ts).length = ts.length
+  | [] => rfl
+  | x :: xs => by unfold sortTaps; rw [insTap_length, sortTaps_length xs]; rfl
+
+theorem mem_insTap {x z : Nat} : ∀ {ts : List Nat}, z ∈ insTap x ts → z = x ∨ z ∈ ts
+  | [], hz => .inl (by cases hz; rfl; rename_i h; nomatch h)
+  | y :: ys, hz => by
+    unfold insTap at hz
+    by_cases hxy : x ≤ y
+    · simp only [hxy, ↓reduceIte, List.mem_cons] at hz
+      rcases hz with rfl | rfl | hy
+      · exact .inl rfl
+      · exact .inr (.head ys)
+      · exact .inr (.tail y hy)
+    · simp only [hxy, ↓reduceIte, List.mem_cons] at hz
+      rcases hz with rfl | hy
+      · exact .inr (.head ys)
+      · rcases mem_insTap hy with rfl | hr
+        · exact .inl rfl
+        · exact .inr (.tail y hr)
+
+theorem sortTaps_all_lt {N : Nat} : ∀ {ts : List Nat},
+    (∀ a ∈ ts, a < N) → ∀ z ∈ sortTaps ts, z < N
+  | [], _, _, hz => nomatch hz
+  | x :: xs, hAll, z, hz => by
+    unfold sortTaps at hz
+    rcases mem_insTap hz with rfl | hr
+    · exact hAll z (.head xs)
+    · exact sortTaps_all_lt (fun a ha => hAll a (.tail x ha)) z hr
+
+def SortedChain (lb : Nat) : List Nat → Prop
+  | [] => True
+  | a :: rest => lb ≤ a ∧ SortedChain a rest
+
+theorem sortedChain_mono {u v : Nat} (huv : u ≤ v) : ∀ {ts : List Nat}, SortedChain v ts → SortedChain u ts
+  | [], _ => trivial
+  | _ :: _, ⟨hva, hRest⟩ => ⟨Nat.le_trans huv hva, hRest⟩
+
+theorem insTap_chain (lb x : Nat) (hlx : lb ≤ x) :
+    ∀ (ts : List Nat), SortedChain lb ts → SortedChain lb (insTap x ts)
+  | [], _ => ⟨hlx, trivial⟩
+  | y :: ys, ⟨hly, hRest⟩ => by
+    unfold insTap
+    by_cases hxy : x ≤ y
+    · simp only [hxy, ↓reduceIte]; exact ⟨hlx, hxy, hRest⟩
+    · simp only [hxy, ↓reduceIte]
+      exact ⟨hly, insTap_chain y x (by omega) ys hRest⟩
+
+theorem sortTaps_chain : ∀ ts : List Nat, SortedChain 0 (sortTaps ts)
+  | [] => trivial
+  | x :: xs => insTap_chain 0 x (Nat.zero_le x) (sortTaps xs) (sortTaps_chain xs)
+
+def EvenSorted (lb : Nat) : List Nat → Prop
+  | [] => True
+  | [_] => False
+  | a :: b :: rest => lb ≤ a ∧ a ≤ b ∧ EvenSorted b rest
+
+theorem evenSorted_of_chain : ∀ (ts : List Nat) (lb : Nat),
+    SortedChain lb ts → ts.length % 2 = 0 → EvenSorted lb ts
+  | [], _, _, _ => trivial
+  | [_], _, _, hMod => nomatch hMod
+  | a :: b :: rest, lb, ⟨hla, hba, hRest⟩, hMod =>
+    ⟨hla, hba, evenSorted_of_chain rest b hRest (by simp only [List.length_cons] at hMod; omega)⟩
+
+theorem tapFn_evenSorted_le : ∀ (ts : List Nat) (lb p : Nat),
+    EvenSorted lb ts → p ≤ lb → tapFn ts p = false
+  | [], _, _, _, _ => rfl
+  | [_], _, _, hEv, _ => nomatch hEv
+  | a :: b :: rest, lb, p, ⟨hla, hab, hRest⟩, hple => by
+    have hpa : p ≤ a := Nat.le_trans hple hla
+    have hpb : p ≤ b := Nat.le_trans hpa hab
+    simp only [tapFn, tapGe, hpa, hpb, decide_true, tapFn_evenSorted_le rest b p hRest hpb]
+    rfl
+
+theorem leafWeight_xor_disjoint (n : Nat) (f g : Nat → Bool)
+    (hDisj : ∀ p < n, f p = true → g p = false) :
+    leafWeight n (fun p => Bool.xor (f p) (g p)) = leafWeight n f + leafWeight n g := by
+  induction n with
+  | zero => rfl
+  | succ k ih =>
+    unfold leafWeight
+    rw [ih (fun p hp => hDisj p (Nat.lt_succ_of_lt hp))]
+    dsimp only
+    by_cases hf : f k = true
+    · have hg : g k = false := hDisj k (Nat.lt_succ_self k) hf
+      simp only [hf, hg, Bool.xor_false, Bool.false_eq_true, ↓reduceIte]; omega
+    · have hff : f k = false := Bool.eq_false_iff.mpr hf
+      by_cases hg : g k = true
+      · simp only [hff, hg, Bool.xor_true, Bool.not_false, Bool.false_eq_true, ↓reduceIte]; omega
+      · have hgf : g k = false := Bool.eq_false_iff.mpr hg
+        simp only [hff, hgf, Bool.xor_false, Bool.false_eq_true, ↓reduceIte]; omega
+
+private theorem leafWeight_single (a : Nat) : ∀ n : Nat, leafWeight n (tapGe a) = min n (a + 1)
+  | 0 => by unfold leafWeight; omega
+  | n + 1 => by
+    unfold leafWeight; rw [leafWeight_single a n]; simp only [tapGe]
+    by_cases h : n ≤ a <;> simp only [h, decide_true, decide_false, Bool.false_eq_true, ↓reduceIte] <;> omega
+
+private theorem leafWeight_pair (a b : Nat) (hab : a ≤ b) : ∀ n : Nat,
+    leafWeight n (fun p => Bool.xor (tapGe a p) (tapGe b p)) = min n (b + 1) - min n (a + 1)
+  | 0 => by unfold leafWeight; omega
+  | n + 1 => by
+    unfold leafWeight; rw [leafWeight_pair a b hab n]; simp only [tapGe]
+    by_cases h1 : n ≤ a <;> by_cases h2 : n ≤ b <;>
+      simp only [h1, h2, decide_true, decide_false, Bool.xor_true, Bool.xor_false,
+        Bool.not_true, Bool.not_false, Bool.false_eq_true, ↓reduceIte] <;> omega
+
+def evenPairPrefix (n : Nat) : List Nat → Nat
+  | [] => 0
+  | [_] => 0
+  | a :: b :: rest => (min n (b + 1) - min n (a + 1)) + evenPairPrefix n rest
+
+theorem leafWeight_evenSorted : ∀ (ts : List Nat) (lb n : Nat),
+    EvenSorted lb ts → leafWeight n (tapFn ts) = evenPairPrefix n ts
+  | [], _, n, _ => leafWeight_false n
+  | [_], _, _, hEv => nomatch hEv
+  | a :: b :: rest, lb, n, ⟨_, hab, hRest⟩ => by
+    have hAssoc : ∀ p < n, tapFn (a :: b :: rest) p =
+        Bool.xor (Bool.xor (tapGe a p) (tapGe b p)) (tapFn rest p) := fun p _ => by
+      simp only [tapFn]; cases tapGe a p <;> cases tapGe b p <;> cases tapFn rest p <;> rfl
+    rw [leafWeight_congr hAssoc, leafWeight_xor_disjoint n _ _ (fun p _ hPair => by
+      unfold tapGe at hPair
+      by_cases hpb : p ≤ b
+      · exact tapFn_evenSorted_le rest b p hRest hpb
+      · have hpa : ¬ (p ≤ a) := by omega
+        simp [hpa, hpb] at hPair)]
+    rw [leafWeight_pair a b hab n, leafWeight_evenSorted rest b n hRest]; rfl
+
+def evenPairTail : List Nat → Nat
+  | [] => 0
+  | [_] => 0
+  | a :: b :: rest => (b - a) + evenPairTail rest
+
+private theorem evenPairPrefix_eq_tail (N : Nat) : ∀ (ts : List Nat),
+    (∀ x ∈ ts, x < N) → evenPairPrefix N ts = evenPairTail ts
+  | [], _ => rfl
+  | [_], _ => rfl
+  | a :: b :: rest, hLt => by
+    have ha : a < N := hLt a (.head _)
+    have hb : b < N := hLt b (.tail a (.head _))
+    unfold evenPairPrefix evenPairTail
+    rw [evenPairPrefix_eq_tail N rest (fun x hx => hLt x (.tail a (.tail b hx)))]
+    omega
+
+/-- Closed-form leaf weight of any odd-length tap list `ts`, matching Rust `odd_tap_tree_weight`
+    (`(s[0] + 1) + (s[2] - s[1]) + ... + (s[2k] - s[2k-1])`, `crates/qsag-core/src/pcg_dense.rs`). -/
+def oddTapWeight (ts : List Nat) : Nat :=
+  match sortTaps ts with
+  | [] => 0
+  | a0 :: rest => (a0 + 1) + evenPairTail rest
+
+/-- **General Odd-Tap Tree Weight Theorem (`oddTap_weight`)**:
+    For every odd-length tap list `ts` (`ts.length % 2 = 1`, e.g. `3` or `11`) with entries `< N`,
+    `leafWeight N (tapFn ts) = oddTapWeight ts`. -/
+theorem oddTap_weight (N : Nat) (ts : List Nat)
+    (hOdd : ts.length % 2 = 1) (hLt : ∀ a ∈ ts, a < N) :
+    leafWeight N (tapFn ts) = oddTapWeight ts := by
+  rw [leafWeight_congr (fun p _ => (tapFn_sortTaps ts p).symm)]
+  have hLen := sortTaps_length ts
+  have hCh := sortTaps_chain ts
+  have hSLt := sortTaps_all_lt hLt
+  unfold oddTapWeight
+  cases hS : sortTaps ts with
+  | nil => rw [hS] at hLen; rw [← hLen] at hOdd; cases hOdd
+  | cons a0 rest =>
+    rw [hS] at hLen hCh hSLt
+    have hRestEven : rest.length % 2 = 0 := by simp only [List.length_cons] at hLen; omega
+    have hEv : EvenSorted a0 rest := evenSorted_of_chain rest a0 hCh.2 hRestEven
+    have hStep : ∀ p < N, tapFn (a0 :: rest) p = Bool.xor (tapGe a0 p) (tapFn rest p) :=
+      fun _ _ => rfl
+    rw [leafWeight_congr hStep,
+        leafWeight_xor_disjoint N (tapGe a0) (tapFn rest) (fun p _ hp => by
+          unfold tapGe at hp
+          exact tapFn_evenSorted_le rest a0 p hEv (of_decide_eq_true hp))]
+    rw [leafWeight_single a0 N, leafWeight_evenSorted rest a0 N hEv,
+        evenPairPrefix_eq_tail N rest (fun x hx => hSLt x (.tail a0 hx))]
+    have ha0 : a0 < N := hSLt a0 (.head rest)
+    dsimp only
+    omega
+
+/-- Specialization of `oddTap_weight` to the deployed `DENSE_PCG_TAPS_PER_TREE = 11` profile. -/
+theorem elevenTap_weight (N : Nat) (ts : List Nat)
+    (hLen : ts.length = 11) (hLt : ∀ a ∈ ts, a < N) :
+    leafWeight N (tapFn ts) = oddTapWeight ts :=
+  oddTap_weight N ts (by rw [hLen]) hLt
+
+/-- Direct bridge connecting `TapRowBias.noiseSignedSum` to `Lattices.parityBias` over `ExactRat`. -/
+theorem regularRates_parityBias_bridge : ∀ gs : List (Nat → Bool),
+    (Qsag.parityBias (Qsag.regularBlockXorOneProb
+        (gs.map (fun g => Qsag.depth15TreeRate (leafWeight 32768 g))))).num =
+      noiseSignedSum 32768 gs false ∧
+    (Qsag.parityBias (Qsag.regularBlockXorOneProb
+        (gs.map (fun g => Qsag.depth15TreeRate (leafWeight 32768 g))))).den = 32768 ^ gs.length
+  | [] => by
+    simp only [List.map_nil, Qsag.regularBlockXorOneProb_nil, Qsag.parityBias_num, Qsag.parityBias_den]
+    exact ⟨rfl, rfl⟩
+  | g :: gs => by
+    have ih := regularRates_parityBias_bridge gs
+    rw [noiseSignedSum_eq] at ih ⊢
+    have hb : bsign false = 1 := rfl
+    rw [hb, Int.one_mul] at ih ⊢
+    rw [List.map_cons, Qsag.regularBlockXorOneProb_cons, Qsag.parityBias_xorStepProb,
+        Qsag.ExactRat.mul_num, Qsag.ExactRat.mul_den, ih.1, ih.2, List.length_cons, Nat.pow_succ']
+    simp only [signedProd, treeSigned, Qsag.parityBias_num, Qsag.parityBias_den,
+               Qsag.depth15TreeRate_num, Qsag.depth15TreeRate_den]
+    constructor <;> first | rfl | trivial | exact Nat.mul_comm _ _
+
+/-- **Unconditional `< 2^-135` All-Rows Parity Bias Bound for 11-Tap Balanced `pcg_dense`
+    (`elevenTap_balanced_all_rows_bias_lt_two_neg_135`)**:
+    For every 64-tree row of 11-tap lists emitted by `BatchedTapGenerator::next_taps`
+    (`imbalance 32768 (oddTapWeight ts) ≤ 7593` on every tree), BOTH the exact signed count
+    `noiseSignedSum` AND the `Lattices.ExactRat` `parityBias` lie strictly below `2^-135`. -/
+theorem elevenTap_balanced_all_rows_bias_lt_two_neg_135 (row : List (List Nat))
+    (hTrees : row.length = 64)
+    (hOk : ∀ ts ∈ row, ts.length = 11 ∧ (∀ a ∈ ts, a < 32768) ∧ imbalance 32768 (oddTapWeight ts) ≤ 7593) :
+    (noiseSignedSum 32768 (row.map tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64 ∧
+    Qsag.ExactRat.lt
+      (Qsag.ExactRat.abs (Qsag.parityBias (Qsag.regularBlockXorOneProb
+        ((row.map (fun ts => leafWeight 32768 (tapFn ts))).map Qsag.depth15TreeRate))))
+      (Qsag.ExactRat.twoNegPow 135) := by
+  have hWeightsBal : ∀ w ∈ (row.map tapFn).map (leafWeight 32768), imbalance 32768 w ≤ 7593 := by
+    intro w hw
+    rw [List.mem_map] at hw
+    obtain ⟨g, hg, rfl⟩ := hw
+    rw [List.mem_map] at hg
+    obtain ⟨ts, hts, rfl⟩ := hg
+    obtain ⟨h11, hLt, hB⟩ := hOk ts hts
+    rwa [elevenTap_weight 32768 ts h11 hLt]
+  have hWLen : ((row.map tapFn).map (leafWeight 32768)).length = 64 := by
+    rw [List.length_map, List.length_map, hTrees]
+  refine ⟨?_, ?_⟩
+  · rw [piling_up_signed_count]
+    have hPow := imbalanceProd_le_pow 32768 7593 _ hWeightsBal
+    rw [hWLen] at hPow
+    exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 135) hPow) (by decide +kernel)
+  · have hMapEq : ∀ l : List (List Nat),
+        l.map (fun ts => leafWeight 32768 (tapFn ts)) = (l.map tapFn).map (leafWeight 32768) :=
+      fun l => by induction l with | nil => rfl | cons _ _ ih => simp [ih]
+    rw [hMapEq row]
+    exact Qsag.pcg_dense_11tap_all_rows_bias_lt_two_neg_135 _
+      hWLen (fun w hw => hWeightsBal w hw)
+
+/-- `#tooth` Without the `≤ 7593` per-tree balance filter, an 11-tap row can have bias `> 2^-135`
+    (witnessed by 64 trees of degenerate taps `[0, ..., 0]` with leaf weight `1` and imbalance `32766`). -/
+theorem tooth_elevenTap_unfiltered_tail_exceeds_two_neg_135 :
+    ∃ row : List (List Nat),
+      row.length = 64 ∧
+      (∀ ts ∈ row, ts.length = 11 ∧ ∀ a ∈ ts, a < 32768) ∧
+      ¬ ((noiseSignedSum 32768 (row.map tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64) := by
+  refine ⟨List.replicate 64 (List.replicate 11 0), by decide +kernel,
+    fun ts hts => by rw [List.eq_of_mem_replicate hts]; exact ⟨by decide, by decide⟩, ?_⟩
+  rw [piling_up_signed_count]
+  have hMap : ((List.replicate 64 (List.replicate 11 0)).map tapFn).map (leafWeight 32768) =
+      List.replicate 64 1 := by
+    have h1 : leafWeight 32768 (tapFn (List.replicate 11 0)) = 1 :=
+      (elevenTap_weight 32768 (List.replicate 11 0) rfl (by decide)).trans (by decide +kernel)
+    rw [List.map_replicate, List.map_replicate, h1]
+  rw [hMap]
+  decide +kernel
+
+/-- Row 0 of the deployed 11-tap balanced generator (`BatchedTapGenerator::next_taps`,
+    session `00..1f`, sender 0, receiver 1, depth 15). -/
+def prodRow0Bal11Taps : List (List Nat) := [
+  [4430, 2576, 30300, 32731, 25182, 12204, 18602, 8947, 5307, 28304, 26936],
+  [28959, 27309, 27789, 12422, 9887, 1826, 19325, 26766, 2140, 24907, 8591],
+  [29933, 21455, 13890, 13408, 22228, 10207, 4878, 5671, 30378, 9843, 12339],
+  [25266, 30473, 28783, 17966, 9368, 32270, 12268, 28961, 6255, 2052, 11424],
+  [12769, 24894, 19235, 8009, 31709, 14434, 29970, 4044, 17130, 6219, 7241],
+  [26606, 18521, 2161, 8210, 27215, 3793, 6684, 32454, 5841, 27576, 10258],
+  [30691, 23070, 12567, 12598, 18673, 1262, 22866, 27192, 5344, 345, 739],
+  [32266, 26427, 30521, 27706, 26470, 13941, 11121, 3950, 23694, 12112, 21170],
+  [25329, 13937, 29430, 647, 13390, 15132, 25169, 19256, 18964, 27776, 3013],
+  [28420, 26068, 19290, 3402, 13865, 13972, 1195, 7510, 11548, 7930, 21882],
+  [24981, 25590, 28227, 17062, 12961, 4859, 30197, 7903, 25098, 7200, 53],
+  [839, 19819, 20844, 6822, 5069, 15939, 9170, 14834, 17906, 8654, 31859],
+  [4759, 12931, 15757, 8763, 20509, 10457, 17585, 25993, 31660, 12544, 29722],
+  [7500, 28443, 8415, 22355, 27120, 23466, 25808, 25527, 18554, 21933, 23086],
+  [10779, 25419, 9636, 26746, 2240, 7322, 5803, 8077, 1005, 18351, 11408],
+  [23772, 30491, 13210, 15805, 18918, 2987, 6971, 9940, 25429, 19567, 14996],
+  [20037, 26420, 11458, 12411, 25716, 14968, 13031, 27904, 18075, 3912, 19135],
+  [12704, 10757, 6266, 3641, 24770, 25906, 11907, 8611, 26520, 29662, 14324],
+  [10226, 25558, 31699, 27498, 27272, 31929, 27761, 14309, 9704, 2323, 27649],
+  [9430, 11566, 23931, 23491, 24033, 28349, 21454, 16732, 4947, 23330, 6580],
+  [27800, 10825, 24184, 1673, 26175, 4324, 29798, 20835, 30872, 18449, 24289],
+  [14486, 11348, 835, 13553, 3903, 2436, 31959, 26505, 6285, 5481, 21758],
+  [21940, 8040, 19776, 17397, 6708, 11763, 6559, 22025, 20683, 17063, 23019],
+  [5884, 3847, 10883, 24995, 22578, 17896, 5925, 29374, 27830, 3765, 7518],
+  [22127, 26317, 10766, 27203, 8029, 27013, 29539, 419, 28879, 26934, 8615],
+  [1004, 6269, 26243, 28396, 1958, 12690, 32731, 5816, 8248, 24037, 7770],
+  [32124, 5360, 23795, 27944, 19891, 12789, 9392, 23144, 2254, 670, 3572],
+  [24398, 12260, 27282, 31291, 3878, 15804, 25641, 5237, 19205, 6657, 7323],
+  [22707, 18717, 7, 2200, 8957, 6522, 25737, 15098, 13550, 11569, 26699],
+  [26923, 12898, 25142, 22082, 32408, 8508, 21785, 16064, 21656, 31773, 4722],
+  [31345, 5021, 5098, 28394, 1885, 31152, 11908, 32535, 9822, 15301, 27311],
+  [5584, 16326, 1179, 24912, 23817, 19513, 11516, 29534, 10292, 28180, 25432],
+  [2379, 24396, 14072, 15025, 24414, 21206, 17085, 17528, 9765, 4064, 16558],
+  [15749, 11676, 5604, 15343, 5201, 25850, 22335, 31660, 4961, 8181, 18720],
+  [24961, 13743, 13324, 16706, 5046, 9592, 14372, 7861, 20976, 9269, 24370],
+  [5907, 17538, 12693, 17380, 26558, 27446, 18105, 4521, 1154, 14895, 30634],
+  [1006, 7805, 31591, 4285, 4641, 19005, 2295, 14038, 24777, 5657, 18558],
+  [18900, 25779, 11341, 17201, 21147, 32604, 14296, 32359, 25692, 22379, 18145],
+  [2267, 8958, 7005, 31023, 28180, 5253, 22369, 11323, 17998, 308, 3623],
+  [27561, 4303, 8460, 6049, 23294, 9320, 4004, 8876, 8876, 2471, 12552],
+  [31872, 6855, 5957, 18618, 26290, 8487, 28907, 5885, 26328, 31976, 29792],
+  [9897, 9041, 8576, 14033, 31767, 29039, 15757, 21942, 18417, 4659, 18123],
+  [3556, 31984, 17206, 31890, 16060, 1824, 26335, 14377, 13657, 23345, 19741],
+  [19463, 7644, 486, 22843, 13715, 29993, 218, 10036, 28421, 9168, 19523],
+  [21633, 25933, 31494, 25726, 22549, 18471, 5985, 22468, 5581, 14875, 1869],
+  [23584, 23945, 25252, 23010, 15383, 7816, 31009, 15061, 30006, 30836, 21031],
+  [28062, 18634, 18572, 9863, 11792, 31405, 8987, 24093, 12372, 12218, 23441],
+  [25951, 9770, 7205, 7404, 14289, 20931, 29999, 17188, 11922, 20792, 13993],
+  [26978, 20744, 23304, 6335, 16374, 22995, 93, 3379, 27910, 11911, 5190],
+  [21575, 24252, 31309, 32566, 23026, 26084, 3971, 800, 6369, 17285, 3494],
+  [19738, 31952, 2650, 11675, 23275, 6839, 25839, 14014, 9731, 22039, 6291],
+  [25291, 26721, 15997, 258, 9147, 28843, 14787, 14733, 6514, 26916, 28505],
+  [9370, 15993, 4163, 24626, 14418, 23671, 31751, 11790, 15785, 22913, 32048],
+  [17827, 20997, 15750, 29697, 3220, 1801, 5731, 25461, 24332, 32040, 28971],
+  [23994, 18341, 12260, 2625, 32045, 17545, 30122, 19303, 24998, 28385, 30592],
+  [17170, 1875, 28479, 4677, 30973, 8729, 27333, 16815, 613, 16279, 10361],
+  [27784, 26558, 3012, 31250, 23193, 21080, 16525, 18090, 12000, 24042, 8668],
+  [25935, 22509, 2203, 10664, 1406, 5015, 27951, 25255, 16895, 30305, 16273],
+  [13000, 25159, 13085, 28210, 28373, 2040, 16250, 7524, 30062, 23357, 11469],
+  [30269, 15692, 11451, 19043, 10368, 5205, 29463, 4008, 24689, 8535, 9258],
+  [16408, 15963, 18928, 1962, 14169, 4761, 21012, 24210, 22283, 12146, 18207],
+  [4142, 2581, 15835, 19728, 10020, 4176, 9864, 3131, 3751, 32288, 13165],
+  [13328, 19222, 18276, 46, 29777, 5914, 21586, 30947, 24254, 25882, 13035],
+  [11823, 28796, 13636, 7728, 14763, 6337, 14390, 659, 17313, 13677, 21574]]
+
+def prodRow0Bal11Weights : List Nat := [
+  17090, 18108, 12883, 15285, 19921, 19486, 17870, 17885,
+  14326, 13973, 17834, 17142, 16091, 20046, 14737, 20123,
+  15026, 13035, 14663, 19596, 13365, 18038, 17822, 18370,
+  13834, 17347, 17954, 18889, 13442, 17418, 20007, 16876,
+  13257, 18691, 15677, 16542, 17507, 16566, 12996, 12681,
+  17942, 17880, 19228, 18885, 15443, 15406, 15128, 18729,
+  13092, 16734, 18216, 12773, 16123, 15578, 13067, 18241,
+  16005, 18476, 17918, 19142, 16952, 18622, 17278, 14349]
+
+theorem prodRow0Bal11Weights_eq :
+    prodRow0Bal11Taps.map oddTapWeight = prodRow0Bal11Weights := by decide +kernel
+
+private theorem prodRow0Bal11_ok :
+    (prodRow0Bal11Taps.all (fun ts =>
+      decide (ts.length = 11) && ts.all (fun a => decide (a < 32768)) &&
+        decide (imbalance 32768 (oddTapWeight ts) ≤ 7593))) = true := by
+  decide +kernel
+
+private theorem map_leafWeight_eq_oddTapWeight :
+    ∀ row : List (List Nat),
+      (row.all (fun ts => decide (ts.length = 11) && ts.all (fun a => decide (a < 32768)))) = true →
+      (row.map tapFn).map (leafWeight 32768) = row.map oddTapWeight
+  | [], _ => rfl
+  | ts :: rest, h => by
+    rw [List.all_cons, Bool.and_eq_true, Bool.and_eq_true] at h
+    simp only [List.map_cons]
+    rw [elevenTap_weight 32768 ts (of_decide_eq_true h.1.1)
+          (fun a ha => of_decide_eq_true (List.all_eq_true.mp h.1.2 a ha)),
+        map_leafWeight_eq_oddTapWeight rest h.2]
+
+/-- Row 0 of the deployed 11-tap balanced generator satisfies `imbalance ≤ 7593` on all 64 trees
+    and has exact regular-noise parity bias strictly between `2^-220` and `2^-219` (`< 2^-135`). -/
+theorem prodRow0Bal11_bias_bracket :
+    prodRow0Bal11Taps.length = 64 ∧
+    (∀ w ∈ prodRow0Bal11Weights, imbalance 32768 w ≤ 7593) ∧
+    (noiseSignedSum 32768 (prodRow0Bal11Taps.map tapFn) false).natAbs =
+      imbalanceProd 32768 prodRow0Bal11Weights ∧
+    imbalanceProd 32768 prodRow0Bal11Weights * 2 ^ 219 < 32768 ^ 64 ∧
+    32768 ^ 64 < imbalanceProd 32768 prodRow0Bal11Weights * 2 ^ 220 ∧
+    (noiseSignedSum 32768 (prodRow0Bal11Taps.map tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64 := by
+  have hCount : (noiseSignedSum 32768 (prodRow0Bal11Taps.map tapFn) false).natAbs =
+      imbalanceProd 32768 prodRow0Bal11Weights := by
+    rw [piling_up_signed_count,
+        map_leafWeight_eq_oddTapWeight prodRow0Bal11Taps (by decide +kernel),
+        prodRow0Bal11Weights_eq]
+  refine ⟨by decide +kernel, by decide +kernel, hCount,
+          by decide +kernel, by decide +kernel, ?_⟩
+  rw [hCount]; decide +kernel
+
+theorem inhabited_elevenTap_balanced :
+    ∃ row : List (List Nat),
+      row.length = 64 ∧
+      ∀ ts ∈ row, ts.length = 11 ∧ (∀ a ∈ ts, a < 32768) ∧ imbalance 32768 (oddTapWeight ts) ≤ 7593 := by
+  refine ⟨prodRow0Bal11Taps, by decide +kernel, fun ts hts => ?_⟩
+  have h := List.all_eq_true.mp prodRow0Bal11_ok ts hts
+  rw [Bool.and_eq_true, Bool.and_eq_true] at h
+  exact ⟨of_decide_eq_true h.1.1,
+         fun a ha => of_decide_eq_true (List.all_eq_true.mp h.1.2 a ha),
+         of_decide_eq_true h.2⟩
+
 /-! ## 4. Geometric tails -/
 
 /-- `rho z0 + rho (z0 + 1) + … + rho (z0 + n − 1)`. -/
@@ -477,6 +916,12 @@ The audit commands read proof bodies, which a module does not export, so they ru
 #verify_constructive prodRow0_balance_premise_fails
 #verify_constructive prodRow0_bias_not_lt_two_neg_256
 #verify_constructive prodRow0_heterogeneous_instance
+#verify_constructive oddTap_weight
+#verify_constructive elevenTap_weight
+#verify_constructive regularRates_parityBias_bridge
+#verify_constructive elevenTap_balanced_all_rows_bias_lt_two_neg_135
+#verify_constructive tooth_elevenTap_unfiltered_tail_exceeds_two_neg_135
+#verify_constructive prodRow0Bal11_bias_bracket
 #verify_constructive tooth_unbalanced_blocks_exceed_two_neg_256
 #verify_constructive geometric_tail_domination
 #verify_constructive gaussian_sigma700_tail_domination
@@ -486,6 +931,7 @@ The audit commands read proof bodies, which a module does not export, so they ru
 #verify_inhabited heterogeneous_bias_lt inhabited_heterogeneous_bias_lt
 #verify_inhabited balanced_blocks_special_case inhabited_balanced_blocks_special_case
 #verify_inhabited row_signed_count inhabited_row_signed_count
+#verify_inhabited elevenTap_balanced_all_rows_bias_lt_two_neg_135 inhabited_elevenTap_balanced
 #verify_inhabited geometric_tail_domination inhabited_geometric_tail_domination
 #verify_inhabited gaussian_sigma700_tail_domination inhabited_gaussian_sigma700_tail_domination
 
@@ -493,6 +939,7 @@ The audit commands read proof bodies, which a module does not export, so they ru
 #tooth_pair balanced_blocks_special_case vs tooth_unbalanced_blocks_exceed_two_neg_256
 #tooth_pair balanced_blocks_special_case vs prodRow0_bias_not_lt_two_neg_256
 #tooth_pair prodRow0_bias_bracket vs prodRow0_bias_not_lt_two_neg_256
+#tooth_pair elevenTap_balanced_all_rows_bias_lt_two_neg_135 vs tooth_elevenTap_unfiltered_tail_exceeds_two_neg_135
 #tooth_pair gaussian_sigma700_tail_domination vs tooth_constant_weights_tail_unbounded
 #tooth_pair geometric_tail_domination vs tooth_constant_weights_tail_unbounded
 
