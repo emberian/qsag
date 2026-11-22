@@ -2,7 +2,8 @@
 // Drives commands synchronously on negedge clk with zero-bubble II = 1 throughput!
 `timescale 1ns/1ps
 module tb_top;
-  logic clk = 0, rst = 1;
+  bit clk;
+  logic rst = 1;
   always #1 clk = ~clk;
 
   logic        cmd_valid = 0;
@@ -15,8 +16,9 @@ module tb_top;
   wire  [63:0] rsp_data;
   qsag_ni_asic_top dut (.*);
 
-  longint cyc = 0, mark_cyc = 0, cmds = 0, mark_cmds = 0, checks = 0, errors = 0;
-  always @(posedge clk) cyc++;
+  bit [63:0] cyc;
+  longint mark_cyc = 0, cmds = 0, mark_cmds = 0, checks = 0, errors = 0;
+  always @(posedge clk) cyc <= cyc + 1;
 
   typedef struct packed {
     logic        chk;
@@ -50,7 +52,7 @@ module tb_top;
 
   int fd;
   logic [7:0]  op;
-  logic [7:0]  idx;
+  logic [4:0]  idx;
   logic [23:0] addr;
   logic [63:0] data, exp;
   logic [3:0]  chk;
