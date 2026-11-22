@@ -497,3 +497,607 @@ where
 
 /-! ## 7. Round trips -/
 
+theorem encodeNat_lt (i : Ass2Insn) : encodeNat i < 4294967296 := by
+  cases i with
+  | alu op rd ra rb =>
+    have := op.code_lt
+    simp only [encodeNat, packStd]; omega
+  | alui op rd ra imm =>
+    have := op.code_lt
+    simp only [encodeNat, packI16]; omega
+  | br op rc off =>
+    have := op.code_lt
+    simp only [encodeNat, packI20]; omega
+  | _ => simp only [encodeNat, packStd, packI16, packI20, packI24, packSpg]; omega
+
+private theorem fields_std {op imm8 sub rc rb ra rd : Nat} (h8 : imm8 < 256)
+    (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    packStd op imm8 sub rc rb ra rd / 268435456 = op ∧
+    packStd op imm8 sub rc rb ra rd / 1048576 % 256 = imm8 ∧
+    packStd op imm8 sub rc rb ra rd / 65536 % 16 = sub ∧
+    packStd op imm8 sub rc rb ra rd / 4096 % 16 = rc ∧
+    packStd op imm8 sub rc rb ra rd / 256 % 16 = rb ∧
+    packStd op imm8 sub rc rb ra rd / 16 % 16 = ra ∧
+    packStd op imm8 sub rc rb ra rd % 16 = rd := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [packStd] <;> omega
+
+private theorem fields_i16 {op imm16 rb ra rd : Nat} (hi : imm16 < 65536)
+    (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    packI16 op imm16 rb ra rd / 268435456 = op ∧
+    packI16 op imm16 rb ra rd / 4096 % 65536 = imm16 ∧
+    packI16 op imm16 rb ra rd / 256 % 16 = rb ∧
+    packI16 op imm16 rb ra rd / 16 % 16 = ra ∧
+    packI16 op imm16 rb ra rd % 16 = rd := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> simp only [packI16] <;> omega
+
+private theorem fields_i20 {op imm20 ra rd : Nat} (hi : imm20 < 1048576)
+    (hra : ra < 16) (hrd : rd < 16) :
+    packI20 op imm20 ra rd / 268435456 = op ∧
+    packI20 op imm20 ra rd / 256 % 1048576 = imm20 ∧
+    packI20 op imm20 ra rd / 16 % 16 = ra ∧
+    packI20 op imm20 ra rd % 16 = rd := by
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> simp only [packI20] <;> omega
+
+private theorem fields_i24 {op imm24 rd : Nat} (hi : imm24 < 16777216)
+    (hrd : rd < 16) :
+    packI24 op imm24 rd / 268435456 = op ∧
+    packI24 op imm24 rd / 16 % 16777216 = imm24 ∧
+    packI24 op imm24 rd % 16 = rd := by
+  refine ⟨?_, ?_, ?_⟩ <;> simp only [packI24] <;> omega
+
+private theorem fields_spg {off8 sidx sub ra rd : Nat} (ho : off8 < 256) (hx : sidx < 256)
+    (hs : sub < 16) (hra : ra < 16) (hrd : rd < 16) :
+    packSpg off8 sidx sub ra rd / 268435456 = 12 ∧
+    packSpg off8 sidx sub ra rd / 1048576 % 256 = off8 ∧
+    packSpg off8 sidx sub ra rd / 4096 % 256 = sidx ∧
+    packSpg off8 sidx sub ra rd / 256 % 16 = sub ∧
+    packSpg off8 sidx sub ra rd / 16 % 16 = ra ∧
+    packSpg off8 sidx sub ra rd % 16 = rd := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> simp only [packSpg] <;> omega
+
+section FieldDecoders
+variable {imm8 sub rc rb ra rd imm16 imm20 : Nat}
+
+private theorem decodeNat_op0 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 0 imm8 sub rc rb ra rd) = decodeNat.decSys imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 0) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op1 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 1 imm8 sub rc rb ra rd) = decodeNat.decLut4 imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 1) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op2 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 2 imm8 sub rc rb ra rd) = decodeNat.decAlu imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 2) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op3 (hi : imm16 < 65536) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packI16 3 imm16 rb ra rd) = decodeNat.decAlui imm16 rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4⟩ := fields_i16 (op := 3) hi hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4]
+private theorem decodeNat_op4 (hi : imm20 < 1048576) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packI20 4 imm20 ra rd) = decodeNat.decImm20 imm20 ra rd := by
+  obtain ⟨h0, h1, h2, h3⟩ := fields_i20 (op := 4) hi hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3]
+private theorem decodeNat_op5 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 5 imm8 sub rc rb ra rd) = decodeNat.decCmp imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 5) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op6 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 6 imm8 sub rc rb ra rd) = decodeNat.decSel imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 6) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op7 (hi : imm16 < 65536) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packI16 7 imm16 rb ra rd) = decodeNat.decLoad imm16 rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4⟩ := fields_i16 (op := 7) hi hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4]
+private theorem decodeNat_op8 (hi : imm16 < 65536) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packI16 8 imm16 rb ra rd) = decodeNat.decStore imm16 rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4⟩ := fields_i16 (op := 8) hi hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4]
+private theorem decodeNat_op9 (hi : imm20 < 1048576) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packI20 9 imm20 ra rd) = decodeNat.decBr imm20 ra rd := by
+  obtain ⟨h0, h1, h2, h3⟩ := fields_i20 (op := 9) hi hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3]
+private theorem decodeNat_op10 {imm24 : Nat} (hi : imm24 < 16777216) (hrd : rd < 16) :
+    decodeNat (packI24 10 imm24 rd) = some (.jal (reg rd) (BitVec.ofNat 24 imm24)) := by
+  obtain ⟨h0, h1, h2⟩ := fields_i24 (op := 10) hi hrd
+  unfold decodeNat
+  simp only [h0, h1, h2]
+private theorem decodeNat_op11 (hi : imm16 < 65536) (hrb : rb < 16) (hra : ra < 16)
+    (hrd : rd < 16) :
+    decodeNat (packI16 11 imm16 rb ra rd) = decodeNat.decJalr imm16 rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4⟩ := fields_i16 (op := 11) hi hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4]
+private theorem decodeNat_op12 {off8 sidx : Nat} (ho : off8 < 256) (hx : sidx < 256)
+    (hs : sub < 16) (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packSpg off8 sidx sub ra rd) = decodeNat.decSpg off8 sidx sub ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5⟩ := fields_spg ho hx hs hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5]
+private theorem decodeNat_op13 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 13 imm8 sub rc rb ra rd) = decodeNat.decGl imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 13) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op14 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 14 imm8 sub rc rb ra rd) = decodeNat.decGf128 imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 14) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+private theorem decodeNat_op15 (h8 : imm8 < 256) (hs : sub < 16) (hrc : rc < 16) (hrb : rb < 16)
+    (hra : ra < 16) (hrd : rd < 16) :
+    decodeNat (packStd 15 imm8 sub rc rb ra rd) = decodeNat.decPerm imm8 sub rc rb ra rd := by
+  obtain ⟨h0, h1, h2, h3, h4, h5, h6⟩ := fields_std (op := 15) h8 hs hrc hrb hra hrd
+  unfold decodeNat
+  simp only [h0, h1, h2, h3, h4, h5, h6]
+
+end FieldDecoders
+
+/-- Evaluate a field decoder on the fields of an encoded instruction. -/
+local macro "dec_close" : tactic => `(tactic|
+  first
+  | rfl
+  | (simp only [decodeNat.decSys, decodeNat.decLut4, decodeNat.decAlu, decodeNat.decAlui,
+      decodeNat.decImm20, decodeNat.decCmp, decodeNat.decSel, decodeNat.decLoad,
+      decodeNat.decStore, decodeNat.decBr, decodeNat.decJalr, decodeNat.decSpg, decodeNat.decGl,
+      decodeNat.decGf128, decodeNat.decPerm, AluOp.code, AluiOp.code, BrOp.code, reg_val,
+      bv_ofNat_toNat, and_self, ↓reduceIte]))
+
+/-- `decodeNat` inverts `encodeNat` on well-formed instructions. -/
+theorem decodeNat_encodeNat (i : Ass2Insn) (hwf : i.WellFormed) :
+    decodeNat (encodeNat i) = some i := by
+  have z : (0 : Nat) < 16 := by decide
+  have z8 : (0 : Nat) < 256 := by decide
+  cases i with
+  | exc => rfl
+  | eret => rfl
+  | csrr rd csr =>
+    rw [encodeNat, decodeNat_op0 csr.isLt (by decide) z z z rd.isLt]; dec_close
+  | csrw ra csr =>
+    rw [encodeNat, decodeNat_op0 csr.isLt (by decide) z z ra.isLt z]; dec_close
+  | zeroize => rfl
+  | halt => rfl
+  | nop => rfl
+  | lut4 m rd ra rb =>
+    rw [encodeNat, decodeNat_op1 z8 m.isLt z rb.isLt ra.isLt rd.isLt]; dec_close
+  | alu op rd ra rb =>
+    rw [encodeNat, decodeNat_op2 z8 op.code_lt z rb.isLt ra.isLt rd.isLt]
+    cases op <;> dec_close
+  | alui op rd ra imm =>
+    rw [encodeNat, decodeNat_op3 imm.isLt op.code_lt ra.isLt rd.isLt]
+    cases op <;>
+      first
+      | (have hlt : imm.toNat < 64 := hwf
+         simp only [decodeNat.decAlui, AluiOp.code, reg_val, bv_ofNat_toNat, hlt, ↓reduceIte])
+      | dec_close
+  | movz20 rd imm => rw [encodeNat, decodeNat_op4 imm.isLt z rd.isLt]; dec_close
+  | movs20 rd imm => rw [encodeNat, decodeNat_op4 imm.isLt (by decide) rd.isLt]; dec_close
+  | auipc rd imm => rw [encodeNat, decodeNat_op4 imm.isLt (by decide) rd.isLt]; dec_close
+  | cmp flags rd ra rb =>
+    rw [encodeNat, decodeNat_op5 z8 z flags.isLt rb.isLt ra.isLt rd.isLt]; dec_close
+  | sel rd ra rb rc =>
+    rw [encodeNat, decodeNat_op6 z8 z rc.isLt rb.isLt ra.isLt rd.isLt]; dec_close
+  | bextu rd ra idx len =>
+    have hwf' : idx.val < 8 ∧ len.val < 8 := hwf
+    rw [encodeNat, decodeNat_op6 z8 (by decide) len.isLt idx.isLt ra.isLt rd.isLt]
+    simp only [decodeNat.decSel, reg_val, hwf'.1, hwf'.2, and_self, ↓reduceIte]
+  | bexts rd ra idx len =>
+    have hwf' : idx.val < 8 ∧ len.val < 8 := hwf
+    rw [encodeNat, decodeNat_op6 z8 (by decide) len.isLt idx.isLt ra.isLt rd.isLt]
+    simp only [decodeNat.decSel, reg_val, hwf'.1, hwf'.2, and_self, ↓reduceIte]
+  | bswap64 rd ra =>
+    rw [encodeNat, decodeNat_op6 z8 (by decide) z z ra.isLt rd.isLt]; dec_close
+  | ld64 rd ra off => rw [encodeNat, decodeNat_op7 off.isLt z ra.isLt rd.isLt]; dec_close
+  | ldbu rd ra off =>
+    rw [encodeNat, decodeNat_op7 off.isLt (by decide) ra.isLt rd.isLt]; dec_close
+  | st64 rv ra off => rw [encodeNat, decodeNat_op8 off.isLt z ra.isLt rv.isLt]; dec_close
+  | stb rv ra off =>
+    rw [encodeNat, decodeNat_op8 off.isLt (by decide) ra.isLt rv.isLt]; dec_close
+  | br op rc off =>
+    rw [encodeNat, decodeNat_op9 off.isLt op.code_lt rc.isLt]
+    cases op <;> dec_close
+  | jal rd off =>
+    rw [encodeNat, decodeNat_op10 off.isLt rd.isLt, reg_val, bv_ofNat_toNat]
+  | jalr rd ra off => rw [encodeNat, decodeNat_op11 off.isLt z ra.isLt rd.isLt]; dec_close
+  | sget rd sidx =>
+    have hwf' : sidx.toNat < 25 := hwf
+    rw [encodeNat, decodeNat_op12 z8 sidx.isLt z z rd.isLt]
+    simp only [decodeNat.decSpg, reg_val, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | sput sidx ra =>
+    have hwf' : sidx.toNat < 25 := hwf
+    rw [encodeNat, decodeNat_op12 z8 sidx.isLt (by decide) ra.isLt z]
+    simp only [decodeNat.decSpg, reg_val, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | sxor sidx ra =>
+    have hwf' : sidx.toNat < 25 := hwf
+    rw [encodeNat, decodeNat_op12 z8 sidx.isLt (by decide) ra.isLt z]
+    simp only [decodeNat.decSpg, reg_val, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | szero => rfl
+  | sld64 sidx ra off =>
+    have hwf' : sidx.toNat < 25 := hwf
+    rw [encodeNat, decodeNat_op12 off.isLt sidx.isLt (by decide) ra.isLt z]
+    simp only [decodeNat.decSpg, reg_val, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | sst64 sidx ra off =>
+    have hwf' : sidx.toNat < 25 := hwf
+    rw [encodeNat, decodeNat_op12 off.isLt sidx.isLt (by decide) ra.isLt z]
+    simp only [decodeNat.decSpg, reg_val, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | glMac rd ra rb rc =>
+    rw [encodeNat, decodeNat_op13 z8 z rc.isLt rb.isLt ra.isLt rd.isLt]; dec_close
+  | glAdd rd ra rb =>
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z rb.isLt ra.isLt rd.isLt]; dec_close
+  | glSub rd ra rb =>
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z rb.isLt ra.isLt rd.isLt]; dec_close
+  | glSbox7 rd ra =>
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z z ra.isLt rd.isLt]; dec_close
+  | fp5Mul ed ea eb =>
+    have hwf' : ed.val < 5 ∧ ea.val < 5 ∧ eb.val < 5 := hwf
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z eb.isLt ea.isLt ed.isLt]
+    simp only [decodeNat.decGl, reg_val, hwf'.1, hwf'.2.1, hwf'.2.2, and_self, ↓reduceIte]
+  | fp5Add ed ea eb =>
+    have hwf' : ed.val < 5 ∧ ea.val < 5 ∧ eb.val < 5 := hwf
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z eb.isLt ea.isLt ed.isLt]
+    simp only [decodeNat.decGl, reg_val, hwf'.1, hwf'.2.1, hwf'.2.2, and_self, ↓reduceIte]
+  | fp5Sub ed ea eb =>
+    have hwf' : ed.val < 5 ∧ ea.val < 5 ∧ eb.val < 5 := hwf
+    rw [encodeNat, decodeNat_op13 z8 (by decide) z eb.isLt ea.isLt ed.isLt]
+    simp only [decodeNat.decGl, reg_val, hwf'.1, hwf'.2.1, hwf'.2.2, and_self, ↓reduceIte]
+  | gf128Mul pd pa pb =>
+    have hwf' : pd.val < 12 ∧ pa.val < 12 ∧ pb.val < 12 := hwf
+    rw [encodeNat, decodeNat_op14 z8 z z pb.isLt pa.isLt pd.isLt]
+    simp only [decodeNat.decGf128, reg_val, hwf'.1, hwf'.2.1, hwf'.2.2, and_self, ↓reduceIte]
+  | gf128Xor pd pa pb =>
+    have hwf' : pd.val < 12 ∧ pa.val < 12 ∧ pb.val < 12 := hwf
+    rw [encodeNat, decodeNat_op14 z8 (by decide) z pb.isLt pa.isLt pd.isLt]
+    simp only [decodeNat.decGf128, reg_val, hwf'.1, hwf'.2.1, hwf'.2.2, and_self, ↓reduceIte]
+  | keccak rounds =>
+    have hwf' : rounds.toNat = 12 ∨ rounds.toNat = 24 := hwf
+    rw [encodeNat, decodeNat_op15 rounds.isLt z z z z z]
+    simp only [decodeNat.decPerm, bv_ofNat_toNat, hwf', and_self, ↓reduceIte]
+  | poseidon2Gl24 => rfl
+  | poseidon2Gl12 => rfl
+
+/-- Close one accepted branch of a field decoder: well-formedness and the re-encoded word. -/
+local macro "sound_close" : tactic => `(tactic|
+  (refine ⟨?_, ?_⟩
+   · first
+     | trivial
+     | (simp only [Ass2Insn.WellFormed, BitVec.toNat_ofNat]
+        first
+        | (refine ⟨?_, ?_, ?_⟩ <;> omega)
+        | (refine ⟨?_, ?_⟩ <;> omega)
+        | omega)
+   · simp only [encodeNat, packStd, packI16, packI20, packI24, packSpg, AluOp.code, AluiOp.code,
+       BrOp.code, BitVec.toNat_ofNat]
+     omega))
+
+section FieldSoundness
+variable {imm8 sub rc rb ra rd imm16 imm20 : Nat} {i : Ass2Insn}
+
+private theorem decSys_sound (h : decodeNat.decSys imm8 sub rc rb ra rd = some i)
+    (h8 : imm8 < 256) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 0 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decSys at h
+  split at h <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decLut4_sound (h : decodeNat.decLut4 imm8 sub rc rb ra rd = some i)
+    (hs : sub < 16) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 1 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decLut4 at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decAlu_sound (h : decodeNat.decAlu imm8 sub rc rb ra rd = some i)
+    (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 2 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decAlu at h
+  split at h <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decAlui_sound (h : decodeNat.decAlui imm16 rb ra rd = some i)
+    (hi : imm16 < 65536) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI16 3 imm16 rb ra rd := by
+  unfold decodeNat.decAlui at h
+  split at h <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decImm20_sound (h : decodeNat.decImm20 imm20 ra rd = some i)
+    (hi : imm20 < 1048576) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI20 4 imm20 ra rd := by
+  unfold decodeNat.decImm20 at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decCmp_sound (h : decodeNat.decCmp imm8 sub rc rb ra rd = some i)
+    (hrc : rc < 16) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 5 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decCmp at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decSel_sound (h : decodeNat.decSel imm8 sub rc rb ra rd = some i)
+    (hrc : rc < 16) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 6 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decSel at h
+  split at h <;> (try split at h) <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decLoad_sound (h : decodeNat.decLoad imm16 rb ra rd = some i)
+    (hi : imm16 < 65536) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI16 7 imm16 rb ra rd := by
+  unfold decodeNat.decLoad at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decStore_sound (h : decodeNat.decStore imm16 rb ra rd = some i)
+    (hi : imm16 < 65536) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI16 8 imm16 rb ra rd := by
+  unfold decodeNat.decStore at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decBr_sound (h : decodeNat.decBr imm20 ra rd = some i)
+    (hi : imm20 < 1048576) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI20 9 imm20 ra rd := by
+  unfold decodeNat.decBr at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decJalr_sound (h : decodeNat.decJalr imm16 rb ra rd = some i)
+    (hi : imm16 < 65536) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packI16 11 imm16 rb ra rd := by
+  unfold decodeNat.decJalr at h
+  split at h <;> cases h <;> sound_close
+
+private theorem decSpg_sound {off8 sidx : Nat} (h : decodeNat.decSpg off8 sidx sub ra rd = some i)
+    (ho : off8 < 256) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packSpg off8 sidx sub ra rd := by
+  unfold decodeNat.decSpg at h
+  split at h <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decGl_sound (h : decodeNat.decGl imm8 sub rc rb ra rd = some i)
+    (hrc : rc < 16) (hrb : rb < 16) (hra : ra < 16) (hrd : rd < 16) :
+    i.WellFormed ∧ encodeNat i = packStd 13 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decGl at h
+  split at h <;> (try split at h) <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decGf128_sound (h : decodeNat.decGf128 imm8 sub rc rb ra rd = some i) :
+    i.WellFormed ∧ encodeNat i = packStd 14 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decGf128 at h
+  split at h <;> (try split at h) <;> cases h <;> sound_close
+
+private theorem decPerm_sound (h : decodeNat.decPerm imm8 sub rc rb ra rd = some i) :
+    i.WellFormed ∧ encodeNat i = packStd 15 imm8 sub rc rb ra rd := by
+  unfold decodeNat.decPerm at h
+  split at h <;> (try split at h) <;> (try split at h) <;> cases h <;> sound_close
+
+end FieldSoundness
+
+/-- Every accepted natural number is the encoding of the well-formed instruction it decodes
+    to. -/
+theorem decodeNat_sound {n : Nat} {i : Ass2Insn}
+    (h : decodeNat n = some i) : i.WellFormed ∧ encodeNat i = n := by
+  unfold decodeNat at h
+  dsimp only at h
+  generalize hq : n / 268435456 = q at h
+  match q, hq, h with
+  | 0, hq, h =>
+    obtain ⟨hw, he⟩ := decSys_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 1, hq, h =>
+    obtain ⟨hw, he⟩ := decLut4_sound h (by omega) (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 2, hq, h =>
+    obtain ⟨hw, he⟩ := decAlu_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 3, hq, h =>
+    obtain ⟨hw, he⟩ := decAlui_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI16]; omega⟩
+  | 4, hq, h =>
+    obtain ⟨hw, he⟩ := decImm20_sound h (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI20]; omega⟩
+  | 5, hq, h =>
+    obtain ⟨hw, he⟩ := decCmp_sound h (by omega) (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 6, hq, h =>
+    obtain ⟨hw, he⟩ := decSel_sound h (by omega) (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 7, hq, h =>
+    obtain ⟨hw, he⟩ := decLoad_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI16]; omega⟩
+  | 8, hq, h =>
+    obtain ⟨hw, he⟩ := decStore_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI16]; omega⟩
+  | 9, hq, h =>
+    obtain ⟨hw, he⟩ := decBr_sound h (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI20]; omega⟩
+  | 10, hq, h =>
+    cases h
+    refine ⟨trivial, ?_⟩
+    simp only [encodeNat, packI24, BitVec.toNat_ofNat]
+    omega
+  | 11, hq, h =>
+    obtain ⟨hw, he⟩ := decJalr_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packI16]; omega⟩
+  | 12, hq, h =>
+    obtain ⟨hw, he⟩ := decSpg_sound h (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packSpg]; omega⟩
+  | 13, hq, h =>
+    obtain ⟨hw, he⟩ := decGl_sound h (by omega) (by omega) (by omega) (by omega)
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 14, hq, h =>
+    obtain ⟨hw, he⟩ := decGf128_sound h
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | 15, hq, h =>
+    obtain ⟨hw, he⟩ := decPerm_sound h
+    exact ⟨hw, by rw [he]; simp only [packStd]; omega⟩
+  | _ + 16, _, h => nomatch h
+
+/-- **Codec round trip, encode then decode.** Every well-formed instruction encodes to a word
+    that decodes back to it. -/
+theorem decodeAss2_encodeAss2 (i : Ass2Insn) (h : i.WellFormed) :
+    decodeAss2 (encodeAss2 i) = some i := by
+  unfold decodeAss2 encodeAss2
+  rw [UInt32.toNat_ofNat_of_lt' (encodeNat_lt i)]
+  exact decodeNat_encodeNat i h
+
+/-- **Codec round trip, decode then encode.** A word accepted by the decoder yields a well-formed
+    instruction whose encoding is that word: no two words decode to the same instruction and no
+    word with a nonzero reserved field is accepted. -/
+theorem encodeAss2_decodeAss2 (w : UInt32) (i : Ass2Insn) (h : decodeAss2 w = some i) :
+    i.WellFormed ∧ encodeAss2 i = w := by
+  obtain ⟨hw, he⟩ := decodeNat_sound h
+  refine ⟨hw, ?_⟩
+  unfold encodeAss2
+  rw [he]
+  exact UInt32.ofNat_toNat
+
+/-- The round trips determine the decoder: `w` decodes to `i` exactly when `i` is well formed and
+    encodes to `w`. -/
+theorem decodeAss2_eq_some_iff (w : UInt32) (i : Ass2Insn) :
+    decodeAss2 w = some i ↔ i.WellFormed ∧ encodeAss2 i = w :=
+  ⟨encodeAss2_decodeAss2 w i, fun h => h.2 ▸ decodeAss2_encodeAss2 i h.1⟩
+
+/-- The encoder is injective on well-formed instructions. -/
+theorem encodeAss2_injective {i j : Ass2Insn} (hi : i.WellFormed) (hj : j.WellFormed)
+    (h : encodeAss2 i = encodeAss2 j) : i = j := by
+  have h1 := decodeAss2_encodeAss2 i hi
+  rw [h, decodeAss2_encodeAss2 j hj] at h1
+  exact (Option.some.inj h1).symm
+
+/-! ## 8. The spec's shift-and-mask field extraction -/
+
+private theorem u32_field (w : UInt32) (k : UInt32) (m : UInt32) (kn mn : Nat)
+    (hk : k.toNat % 32 = kn) (hm : m.toNat = 2 ^ mn - 1) :
+    ((w >>> k) &&& m).toNat = w.toNat / 2 ^ kn % 2 ^ mn := by
+  rw [UInt32.toNat_and, UInt32.toNat_shiftRight, hk, hm, Qsag.Constructive.and_mask,
+    Nat.shiftRight_eq_div_pow]
+
+/-- `op = (w >> 28) & 0xF`. -/
+theorem ass2_field_op (w : UInt32) : ((w >>> 28) &&& 0xF).toNat = w.toNat / 268435456 % 16 :=
+  u32_field w 28 0xF 28 4 (by decide) (by decide)
+/-- `rd = w & 0xF`. -/
+theorem ass2_field_rd (w : UInt32) : (w &&& 0xF).toNat = w.toNat % 16 := by
+  rw [UInt32.toNat_and]
+  exact Qsag.Constructive.and_mask w.toNat 4
+/-- `ra = (w >> 4) & 0xF`. -/
+theorem ass2_field_ra (w : UInt32) : ((w >>> 4) &&& 0xF).toNat = w.toNat / 16 % 16 :=
+  u32_field w 4 0xF 4 4 (by decide) (by decide)
+/-- `rb = (w >> 8) & 0xF`. -/
+theorem ass2_field_rb (w : UInt32) : ((w >>> 8) &&& 0xF).toNat = w.toNat / 256 % 16 :=
+  u32_field w 8 0xF 8 4 (by decide) (by decide)
+/-- `rc = (w >> 12) & 0xF`. -/
+theorem ass2_field_rc (w : UInt32) : ((w >>> 12) &&& 0xF).toNat = w.toNat / 4096 % 16 :=
+  u32_field w 12 0xF 12 4 (by decide) (by decide)
+/-- `sub = (w >> 16) & 0xF`. -/
+theorem ass2_field_sub (w : UInt32) : ((w >>> 16) &&& 0xF).toNat = w.toNat / 65536 % 16 :=
+  u32_field w 16 0xF 16 4 (by decide) (by decide)
+/-- `imm8 = (w >> 20) & 0xFF`. -/
+theorem ass2_field_imm8 (w : UInt32) : ((w >>> 20) &&& 0xFF).toNat = w.toNat / 1048576 % 256 :=
+  u32_field w 20 0xFF 20 8 (by decide) (by decide)
+/-- `imm16 = (w >> 12) & 0xFFFF`. -/
+theorem ass2_field_imm16 (w : UInt32) :
+    ((w >>> 12) &&& 0xFFFF).toNat = w.toNat / 4096 % 65536 :=
+  u32_field w 12 0xFFFF 12 16 (by decide) (by decide)
+/-- `imm20 = (w >> 8) & 0xFFFFF`. -/
+theorem ass2_field_imm20 (w : UInt32) :
+    ((w >>> 8) &&& 0xFFFFF).toNat = w.toNat / 256 % 1048576 :=
+  u32_field w 8 0xFFFFF 8 20 (by decide) (by decide)
+/-- `imm24 = (w >> 4) & 0xFFFFFF`. -/
+theorem ass2_field_imm24 (w : UInt32) :
+    ((w >>> 4) &&& 0xFFFFFF).toNat = w.toNat / 16 % 16777216 :=
+  u32_field w 4 0xFFFFFF 4 24 (by decide) (by decide)
+
+/-! ## 9. Known encodings and rejected words -/
+
+/-- The all-zero word is `EXC`, the software trap. -/
+theorem decodeAss2_zero : decodeAss2 0x00000000 = some .exc := by decide
+/-- `NOP` is `0x0006_0000`. -/
+theorem decodeAss2_nop : decodeAss2 0x00060000 = some .nop := by decide
+/-- A `NOP` with a nonzero reserved field is illegal. -/
+theorem decodeAss2_nop_reserved_bit : decodeAss2 0x00060001 = none := by decide
+/-- `SYS` sub-opcode 7 is reserved. -/
+theorem decodeAss2_sys_reserved_sub : decodeAss2 0x00070000 = none := by decide
+/-- `KECCAK.F1600` with a round count other than 12 or 24 is illegal. -/
+theorem decodeAss2_keccak_13_rounds : decodeAss2 0xF0D00000 = none := by decide
+/-- `SGET` from lane 25 is illegal. -/
+theorem decodeAss2_sget_lane_25 : decodeAss2 0xC0019001 = none := by decide
+/-- `FP5.MUL` naming quintic register 5 is illegal. -/
+theorem decodeAss2_fp5_mul_register_5 : decodeAss2 0xD0040005 = none := by decide
+
+/-- Words produced by the encoders of the reference model `ass2_model.py`, one or more per
+    major opcode, decode to the instruction they were built from. -/
+theorem decodeAss2_reference_model_words :
+    decodeAss2 0x04020005 = some (.csrr 5 0x40#8) ∧
+    decodeAss2 0x04130070 = some (.csrw 7 0x41#8) ∧
+    decodeAss2 0x10060321 = some (.lut4 6 1 2 3) ∧
+    decodeAss2 0x20080321 = some (.alu .mulhu64 1 2 3) ∧
+    decodeAss2 0x3BEEF954 = some (.alui .slk16 4 5 0xBEEF#16) ∧
+    decodeAss2 0x3003F754 = some (.alui .asri 4 5 63#16) ∧
+    decodeAss2 0x4ABCDE29 = some (.auipc 9 0xABCDE#20) ∧
+    decodeAss2 0x5000D321 = some (.cmp 13 1 2 3) ∧
+    decodeAss2 0x60004321 = some (.sel 1 2 3 4) ∧
+    decodeAss2 0x60025321 = some (.bexts 1 2 3 5) ∧
+    decodeAss2 0x60010721 = some (.bextu 1 2 7 0) ∧
+    decodeAss2 0x60030076 = some (.bswap64 6 7) ∧
+    decodeAss2 0x7FFFD021 = some (.ld64 1 2 0xFFFD#16) ∧
+    decodeAss2 0x70005121 = some (.ldbu 1 2 5#16) ∧
+    decodeAss2 0x8FFFF029 = some (.st64 9 2 0xFFFF#16) ∧
+    decodeAss2 0x80007129 = some (.stb 9 2 7#16) ∧
+    decodeAss2 0x9FFFFE16 = some (.br .bnez 6 0xFFFFE#20) ∧
+    decodeAss2 0x90000936 = some (.br .bgez 6 9#20) ∧
+    decodeAss2 0xAFFFFFC3 = some (.jal 3 0xFFFFFC#24) ∧
+    decodeAss2 0xB0000033 = some (.jalr 3 3 0#16) ∧
+    decodeAss2 0xC0018005 = some (.sget 5 24#8) ∧
+    decodeAss2 0xC0007160 = some (.sput 7#8 6) ∧
+    decodeAss2 0xC00102E0 = some (.sxor 16#8 14) ∧
+    decodeAss2 0xC0000300 = some (.szero) ∧
+    decodeAss2 0xC8003420 = some (.sld64 3#8 2 0x80#8) ∧
+    decodeAss2 0xC0104520 = some (.sst64 4#8 2 1#8) ∧
+    decodeAss2 0xD0004321 = some (.glMac 1 2 3 4) ∧
+    decodeAss2 0xD0030021 = some (.glSbox7 1 2) ∧
+    decodeAss2 0xD0040011 = some (.fp5Mul 1 1 0) ∧
+    decodeAss2 0xD0060234 = some (.fp5Sub 4 3 2) ∧
+    decodeAss2 0xE00009AB = some (.gf128Mul 11 10 9) ∧
+    decodeAss2 0xE0010210 = some (.gf128Xor 0 1 2) ∧
+    decodeAss2 0xF0C00000 = some (.keccak 12#8) ∧
+    decodeAss2 0xF1800000 = some (.keccak 24#8) ∧
+    decodeAss2 0xF0010000 = some (.poseidon2Gl24) ∧
+    decodeAss2 0xF0020000 = some (.poseidon2Gl12) := by
+  decide
+
+#verify_constructive
+  Qsag.Ass2.encodeNat_lt
+  Qsag.Ass2.decodeNat_encodeNat
+  Qsag.Ass2.decodeNat_sound
+  Qsag.Ass2.decodeAss2_encodeAss2
+  Qsag.Ass2.encodeAss2_decodeAss2
+  Qsag.Ass2.decodeAss2_eq_some_iff
+  Qsag.Ass2.encodeAss2_injective
+  Qsag.Ass2.ass2_field_op
+  Qsag.Ass2.ass2_field_rd
+  Qsag.Ass2.ass2_field_ra
+  Qsag.Ass2.ass2_field_rb
+  Qsag.Ass2.ass2_field_rc
+  Qsag.Ass2.ass2_field_sub
+  Qsag.Ass2.ass2_field_imm8
+  Qsag.Ass2.ass2_field_imm16
+  Qsag.Ass2.ass2_field_imm20
+  Qsag.Ass2.ass2_field_imm24
+  Qsag.Ass2.decodeAss2_zero
+  Qsag.Ass2.decodeAss2_nop
+  Qsag.Ass2.decodeAss2_nop_reserved_bit
+  Qsag.Ass2.decodeAss2_sys_reserved_sub
+  Qsag.Ass2.decodeAss2_keccak_13_rounds
+  Qsag.Ass2.decodeAss2_sget_lane_25
+  Qsag.Ass2.decodeAss2_fp5_mul_register_5
+  Qsag.Ass2.decodeAss2_reference_model_words
+
+end Qsag.Ass2
