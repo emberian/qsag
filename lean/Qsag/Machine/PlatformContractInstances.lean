@@ -16,11 +16,8 @@ module
   (`twoWaveNoBarrier_schedule_dependent`).
 * §2 `faial_disjointStorageBindings`: the access cells of an `EpochAccessProtocol` that satisfies
   `FaialMapRaceFree` are disjoint storage bindings.
-* §3 `nttStageAddressModel`: an address-formula model of one fused stage of
-  `goldilocks_ntt.comp` (256 invocations, 8 Wave32 subgroups). It is not an instance built from
-  a kernel: the Machine layer has no instruction stream for that shader, so the block traces
-  are empty and the access sets are written by hand from the formulas `productionButterflyIndex`
-  and `productionLdsIndex`. The one fact proved is that these formulas give disjoint cells.
+* §3 `nttStageAddressModel` runs the decoded fused butterfly of `goldilocks_ntt.spv`
+  and projects its block labels and LDS accesses. Its read set includes both twiddle planes.
 * §4 `armDitContract`, `x86DitContract`: `observe` is the leakage trace of `execArmProg` /
   `execX86Prog` on a checker-accepted kernel entry; the data are the secret-labelled registers,
   flags and memory. The `ExecMode` enters through the initial `ditEnabled` / `doitEnabled` /
@@ -31,6 +28,7 @@ module
   `aarch64` symbols in `currentAarch64SymbolContracts`).
 -/
 public import Qsag.Spec.Assumptions
+public import Qsag.Machine.SpirvNttAndRlibCert
 public import Qsag.Machine.SpirvSimt
 public import Qsag.Machine.ConstantTimeIsa
 public import Qsag.Machine.ElfFixtureVerify
@@ -502,7 +500,7 @@ theorem faial_disjointStorageBindings {cfg : WorkgroupConfig} {proto : EpochAcce
     hKey proto.ldsWrite proto.ldsRead proto.ssboWrite proto.ssboRead hF.1 hF.2 hci
       proto.ldsRead proto.ssboRead (fun a h => (hF.1 a h).2) (fun b a h => (hF.2 b a h).2)⟩
 
-/-! ## §3. Address-formula model of one fused NTT stage of `goldilocks_ntt.comp` -/
+/-! ## §3. Decoded SPIR-V execution of one fused NTT stage of `goldilocks_ntt.comp` -/
 
 /-- Workgroup geometry of `goldilocks_ntt.comp`: `local_size_x = 256`, eight Wave32 subgroups. -/
 def productionNttCfg : WorkgroupConfig :=
@@ -521,49 +519,17 @@ def productionNttWriter (stage cell : Nat) : Nat :=
   ((productionLdsIndex (cell % 512) >>> (stage + 1)) <<< stage) +
     (productionLdsIndex (cell % 512) &&& (2 ^ stage - 1))
 
-/-- **Address-formula model** of one fused NTT stage; not a contract derived from the shader.
-    The Machine layer has no instruction stream for `goldilocks_ntt.comp`, so nothing here is
-    read off an execution: the block traces are empty (uniform control flow holds trivially and
-    says nothing about the shader), and the access sets are the hand-written address formulas.
-    The read set is set equal to the write set on the assumption that the butterfly is in
-    place and the twiddle factors come from a read-only table outside the LDS; that the shader
-    accesses exactly these cells is not proved. -/
-def nttStageAddressModel (stage : Nat) : Spec.SimtWorkgroupContract where
-  subgroupSize := wave32Lanes
-  workgroupSize := productionNttCfg.totalThreads
-  blockTrace _ := []
-  writeSet := productionNttStageWrites stage
-  readSet := productionNttStageWrites stage
-  h_divides := ⟨by rw [wave32Lanes_eq]; decide,
-    ⟨productionNttCfg.numWaves, by rw [productionNttCfg.totalThreads_eq, Nat.mul_comm]⟩⟩
+/-- Operational contract for one zero-based fused NTT stage. -/
+def nttStageAddressModel (stage : Nat) : Spec.SimtWorkgroupContract :=
+  Spv.decodedStageContract stage
 
-set_option maxRecDepth 8192 in
-private theorem productionNttWriter_checked :
-    ∀ stage : Fin 9, ∀ lid : Fin 256,
-      (productionNttStageWrites stage lid).all
-        (fun cell => productionNttWriter stage cell == lid.val) = true := by
-  simp only [productionNttStageWrites, productionNttWriter, productionLdsIndex.public_eq_1,
-    productionButterflyIndex.public_eq_1]
-  decide +kernel
-
-/-- In each of the nine fused stages the address formulas assign no LDS cell to two of the
-    `256` invocations. This is a fact about the formulas of `nttStageAddressModel`, not about
-    an execution of the shader. -/
 theorem nttStageAddressModel_disjointStorageBindings (stage : Fin 9) :
-    (nttStageAddressModel stage).DisjointStorageBindings := by
-  intro i j hi hj hne cell hci
-  have hT : productionNttCfg.totalThreads = 256 := by
-    have h := productionNttCfg.totalThreads_eq
-    rw [wave32Lanes_eq] at h
-    exact h
-  have hi' : i < 256 := hT ▸ hi
-  have hj' : j < 256 := hT ▸ hj
-  have h1 := Nat.eq_of_beq_eq_true
-    (List.all_eq_true.mp (productionNttWriter_checked stage ⟨i, hi'⟩) cell hci)
-  have hNot : cell ∉ productionNttStageWrites stage j := fun hcj =>
-    hne (h1.symm.trans (Nat.eq_of_beq_eq_true
-      (List.all_eq_true.mp (productionNttWriter_checked stage ⟨j, hj'⟩) cell hcj)))
-  exact ⟨hNot, hNot⟩
+    (nttStageAddressModel stage).DisjointStorageBindings :=
+  Spv.ntt_decoded_stage_disjoint stage
+
+theorem nttStageAddressModel_nonempty (stage : Fin 9) (lid : Nat) :
+    (nttStageAddressModel stage).blockTrace lid ≠ [] :=
+  Spv.ntt_decoded_stage_nonempty stage lid
 
 end Qsag
 

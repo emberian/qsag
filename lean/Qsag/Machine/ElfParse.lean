@@ -241,10 +241,10 @@ theorem currentAarch64_rlib_archive_nat_fits :
 /-- Certified extraction boundary: the parser applied to the compiled `x86_64` archive returns
     exactly the slices consumed by downstream proofs. -/
 theorem currentX86_rlib_extracted_slices :
-    extractAllRlibFuncs currentX86RlibArchiveBytes = currentX86ExtractedSlices := by rfl
+    extractAllRlibFuncs currentX86RlibArchiveBytes = currentX86ExtractedSlices := by decide +kernel
 
 theorem currentAarch64_rlib_extracted_slices :
-    extractAllRlibFuncs currentAarch64RlibArchiveBytes = currentAarch64ExtractedSlices := by rfl
+    extractAllRlibFuncs currentAarch64RlibArchiveBytes = currentAarch64ExtractedSlices := by decide +kernel
 
 /-- `parseArArchive` + `extractAllElfFuncs` discover exactly the 19 exported `x86_64` symbols. -/
 theorem currentX86_symbol_names_exact :
