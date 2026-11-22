@@ -754,6 +754,28 @@ impl VulkanSpirvBackend {
     /// ([`VulkanDeviceInfo::secret_slot_audit`]). As with `try_new`, unavailable telemetry is an
     /// error. This checks compiler reports, not a formal constant-time or physical
     /// side-channel proof.
+    #[cfg(all(
+        feature = "fault-injection-audit",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    #[doc(hidden)]
+    pub fn audit_replace_kernel_spirv(&self, slot: KernelSlot, spv: &[u32]) -> Result<(), VulkanError> {
+        let mut eng = self.engine.lock().map_err(|_| VulkanError::WorkspacePoisoned)?;
+        eng.replace_kernel_pipeline_for_audit(slot, spv)
+    }
+
+    #[cfg(all(
+        feature = "fault-injection-audit",
+        any(target_os = "linux", target_os = "macos"),
+        target_pointer_width = "64"
+    ))]
+    #[doc(hidden)]
+    pub fn audit_replace_prover_spirv(&self, slot: ProverKernelSlot, spv: &[u32]) -> Result<(), VulkanError> {
+        let mut eng = self.engine.lock().map_err(|_| VulkanError::WorkspacePoisoned)?;
+        eng.replace_prover_pipeline_for_audit(slot, spv)
+    }
+
     pub fn try_new_audited() -> Result<Self, VulkanError> {
         let backend = Self::try_new()?;
         backend.device_info().secret_slot_audit()?;

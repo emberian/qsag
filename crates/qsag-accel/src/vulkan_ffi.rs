@@ -2790,6 +2790,73 @@ impl RawVulkanEngine {
         Ok(dsl)
     }
 
+    #[cfg(feature = "fault-injection-audit")]
+    pub(crate) fn replace_kernel_pipeline_for_audit(
+        &mut self,
+        slot: KernelSlot,
+        spv: &[u32],
+    ) -> Result<(), VulkanError> {
+        let (dsl, pc_size) = match slot {
+            KernelSlot::BatchKeccakF1600 | KernelSlot::BatchPoseidon2Perm12 => {
+                (self.dsl_1buf, size_of::<BatchStatesPushConsts>() as u32)
+            }
+            KernelSlot::GoldilocksNtt => (self.dsl_1buf, size_of::<NttPushConsts>() as u32),
+            KernelSlot::CosetLdeExt2 => (self.dsl_1buf, size_of::<CosetLdePushConsts>() as u32),
+            KernelSlot::MerkleLayerPoseidon2 => (self.dsl_2buf, size_of::<MerklePushConsts>() as u32),
+            KernelSlot::BdozGf2128BatchDot => (self.dsl_3buf, size_of::<BdozDotPushConsts>() as u32),
+        };
+        let (kp, rc) = unsafe { self.build_one_pipeline(spv, dsl, pc_size)? };
+        if let Err(e) = check_vk("vkCreateComputePipelines(audit)", rc) {
+            unsafe {
+                if kp.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, kp.pipeline, null()); }
+                if kp.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, kp.pipeline_layout, null()); }
+                if kp.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, kp.shader_module, null()); }
+            }
+            return Err(e);
+        }
+        let old = self.pipelines[slot as usize];
+        self.pipelines[slot as usize] = kp;
+        unsafe {
+            (self.fns.device_wait_idle)(self.device);
+            if old.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, old.pipeline, null()); }
+            if old.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, old.pipeline_layout, null()); }
+            if old.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, old.shader_module, null()); }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "fault-injection-audit")]
+    pub(crate) fn replace_prover_pipeline_for_audit(
+        &mut self,
+        slot: ProverKernelSlot,
+        spv: &[u32],
+    ) -> Result<(), VulkanError> {
+        let pc_size = match slot {
+            ProverKernelSlot::WhirLdeCommitment => size_of::<WhirLdePushConsts>() as u32,
+            ProverKernelSlot::WhirFoldSumcheck => size_of::<WhirFoldPushConsts>() as u32,
+            ProverKernelSlot::AirRowGroupA => size_of::<AirGroupAPushConsts>() as u32,
+            ProverKernelSlot::AirRowGroupB => size_of::<AirGroupBPushConsts>() as u32,
+        };
+        let (kp, rc) = unsafe { self.build_one_pipeline(spv, self.dsl_6buf, pc_size)? };
+        if let Err(e) = check_vk("vkCreateComputePipelines(prover_audit)", rc) {
+            unsafe {
+                if kp.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, kp.pipeline, null()); }
+                if kp.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, kp.pipeline_layout, null()); }
+                if kp.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, kp.shader_module, null()); }
+            }
+            return Err(e);
+        }
+        let old = self.prover_pipelines[slot as usize];
+        self.prover_pipelines[slot as usize] = kp;
+        unsafe {
+            (self.fns.device_wait_idle)(self.device);
+            if old.pipeline != 0 { (self.fns.destroy_pipeline)(self.device, old.pipeline, null()); }
+            if old.pipeline_layout != 0 { (self.fns.destroy_pipeline_layout)(self.device, old.pipeline_layout, null()); }
+            if old.shader_module != 0 { (self.fns.destroy_shader_module)(self.device, old.shader_module, null()); }
+        }
+        Ok(())
+    }
+
     unsafe fn build_one_pipeline(
         &self,
         spv: &[u32],
