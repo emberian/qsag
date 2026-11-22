@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::field5::Fp5;
-use super::params::{DIGEST_BYTES, EXT_BYTES, Profile, SALT_BYTES};
+use super::params::{DIGEST_BYTES, EXT_BYTES, Profile, SALT_BYTES, TREE_NONCE_BYTES};
 use crate::field::{Goldilocks, GoldilocksOps as _};
 use crate::sponge::{
     cshake256_from_midstate_into, cshake256_static_midstate, turboshake256_from_midstate_into,
@@ -42,12 +42,14 @@ pub const MAX_LOG_LEAVES: usize = 28;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hasher {
     turbo: bool,
+    turbo_fs_domain: &'static [u64; 25],
 }
 
 impl Hasher {
     pub const fn new(profile: Profile) -> Self {
         Self {
             turbo: profile.uses_turboshake(),
+            turbo_fs_domain: &TURBO_FS_MIDSTATE,
         }
     }
 
@@ -70,7 +72,7 @@ impl Hasher {
     #[inline]
     fn fs_into(self, input: &[u8], out: &mut [u8]) {
         if self.turbo {
-            turboshake256_from_midstate_into(&TURBO_FS_MIDSTATE, input, out);
+            turboshake256_from_midstate_into(self.turbo_fs_domain, input, out);
         } else {
             cshake256_from_midstate_into(&FS_MIDSTATE, input, out);
         }
@@ -111,23 +113,30 @@ impl Hasher {
         out
     }
 
-    /// Stage-0 leaf: the salt, the symbols of the table codeword on one fiber and the symbol
-    /// of the mask codeword at the point below the fiber.
+    /// Stage-0 leaf: the per-tree 256-bit nonce, the per-leaf salt, the symbols of the table
+    /// codeword on one fiber and the symbol of the mask codeword at the point below the fiber.
+    ///
+    /// Binding `tree_nonce` into every Stage-0 leaf domain-separates Stage-0 trees across
+    /// proofs and split-share committers, eliminating the `|D'|` multi-proof salt birthday
+    /// factor (cross-proof collision probability drops to `binom(P, 2) / 2^256`).
     pub fn leaf_stage0(
         self,
+        tree_nonce: &[u8; TREE_NONCE_BYTES],
         leaf_idx: u32,
         salt: &[u8; SALT_BYTES],
         z: &[Goldilocks],
         r: Fp5,
     ) -> Digest {
         debug_assert!(z.len().is_power_of_two() && z.len() <= 64);
-        let mut buf = [0u8; 6 + SALT_BYTES + 8 * 64 + EXT_BYTES];
-        let used = 6 + SALT_BYTES + 8 * z.len() + EXT_BYTES;
+        let mut buf = [0u8; 6 + TREE_NONCE_BYTES + SALT_BYTES + 8 * 64 + EXT_BYTES];
+        let header = 6 + TREE_NONCE_BYTES + SALT_BYTES;
+        let used = header + 8 * z.len() + EXT_BYTES;
         buf[0] = TAG_LEAF_STAGE0;
         buf[1] = z.len().trailing_zeros() as u8;
         buf[2..6].copy_from_slice(&leaf_idx.to_le_bytes());
-        buf[6..6 + SALT_BYTES].copy_from_slice(salt);
-        let (zs, rs) = buf[6 + SALT_BYTES..used].split_at_mut(8 * z.len());
+        buf[6..6 + TREE_NONCE_BYTES].copy_from_slice(tree_nonce);
+        buf[6 + TREE_NONCE_BYTES..header].copy_from_slice(salt);
+        let (zs, rs) = buf[header..used].split_at_mut(8 * z.len());
         for (dst, v) in zs.as_chunks_mut::<8>().0.iter_mut().zip(z) {
             *dst = v.to_le_bytes();
         }
@@ -158,21 +167,49 @@ impl Hasher {
     }
 }
 
-/// A Merkle tree over `2^log_leaves` leaf digests, all nodes kept (`nodes[1]` is the top node,
-/// leaf `i` is `nodes[2^log_leaves + i]`).
-pub struct MerkleTree {
-    log_leaves: usize,
-    nodes: Vec<Digest>,
-    root: Digest,
+/// Hash operations used by the binary Canopy multiproof traversal.
+pub trait CanopyHash<const N: usize>: Copy + Sync {
+    fn node(self, index: u32, left: &[u8; N], right: &[u8; N]) -> [u8; N];
+    fn root(self, stage: u8, depth: u8, top: &[u8; N]) -> [u8; N];
 }
 
-impl MerkleTree {
+impl CanopyHash<DIGEST_BYTES> for Hasher {
+    fn node(self, index: u32, left: &Digest, right: &Digest) -> Digest {
+        self.node(index, left, right)
+    }
+    fn root(self, stage: u8, depth: u8, top: &Digest) -> Digest {
+        self.root(stage, depth, top)
+    }
+}
+
+pub type MerkleTree = CanopyTree<DIGEST_BYTES>;
+
+pub fn verify_multiproof(
+    hasher: Hasher,
+    stage: u8,
+    depth: usize,
+    root: &Digest,
+    leaves: &[(usize, Digest)],
+    siblings: &[Digest],
+) -> bool {
+    verify_canopy(hasher, stage, depth, root, leaves, siblings)
+}
+
+/// A Merkle tree over `2^log_leaves` leaf digests, all nodes kept (`nodes[1]` is the top node,
+/// leaf `i` is `nodes[2^log_leaves + i]`).
+pub struct CanopyTree<const N: usize> {
+    log_leaves: usize,
+    nodes: Vec<[u8; N]>,
+    root: [u8; N],
+}
+
+impl<const N: usize> CanopyTree<N> {
     /// Build the tree of `stage` over `leaves`, whose number is a power of two.
-    pub fn build(hasher: Hasher, stage: u8, leaves: Vec<Digest>) -> Self {
+    pub fn build(hasher: impl CanopyHash<N>, stage: u8, leaves: Vec<[u8; N]>) -> Self {
         let n = leaves.len();
         assert!(n.is_power_of_two() && n <= 1 << MAX_LOG_LEAVES);
         let log_leaves = n.trailing_zeros() as usize;
-        let mut nodes = vec![[0u8; DIGEST_BYTES]; n];
+        let mut nodes = vec![[0u8; N]; n];
         nodes.extend(leaves);
         let mut width = n / 2;
         while width >= 1 {
@@ -191,7 +228,7 @@ impl MerkleTree {
         }
     }
 
-    pub fn root(&self) -> Digest {
+    pub fn root(&self) -> [u8; N] {
         self.root
     }
 
@@ -201,7 +238,7 @@ impl MerkleTree {
 
     /// Sibling digests outside the subtree spanned by `sorted_leaves` (strictly increasing),
     /// bottom-up and left to right: the order [`verify_multiproof`] consumes.
-    pub fn open(&self, sorted_leaves: &[usize]) -> Vec<Digest> {
+    pub fn open(&self, sorted_leaves: &[usize]) -> Vec<[u8; N]> {
         let n = 1usize << self.log_leaves;
         assert!(sorted_leaves.windows(2).all(|w| w[0] < w[1]));
         assert!(sorted_leaves.last().is_some_and(|&i| i < n));
@@ -229,13 +266,13 @@ impl MerkleTree {
 /// Check that `sorted_leaves` (strictly increasing indices with their leaf digests) are leaves
 /// of the tree of `stage` and depth `log_leaves` committed to by `root`, consuming `siblings`
 /// exactly.
-pub fn verify_multiproof(
-    hasher: Hasher,
+pub(crate) fn verify_canopy<const N: usize>(
+    hasher: impl CanopyHash<N>,
     stage: u8,
     log_leaves: usize,
-    root: &Digest,
-    sorted_leaves: &[(usize, Digest)],
-    siblings: &[Digest],
+    root: &[u8; N],
+    sorted_leaves: &[(usize, [u8; N])],
+    siblings: &[[u8; N]],
 ) -> bool {
     if log_leaves > MAX_LOG_LEAVES || sorted_leaves.is_empty() {
         return false;
@@ -246,7 +283,8 @@ pub fn verify_multiproof(
     {
         return false;
     }
-    let mut active: Vec<(usize, Digest)> = sorted_leaves.iter().map(|&(i, h)| (n + i, h)).collect();
+    let mut active: Vec<(usize, [u8; N])> =
+        sorted_leaves.iter().map(|&(i, h)| (n + i, h)).collect();
     let mut cursor = 0usize;
     for _ in 0..log_leaves {
         let mut write = 0usize;
@@ -318,21 +356,59 @@ pub struct Transcript {
     hasher: Hasher,
     chain: Digest,
     counter: u64,
+    // Unlimited for the existing v2 channel. Public Hem charges every draw, including retries.
+    remaining: Option<u16>,
 }
 
 impl Transcript {
     /// A transcript bound to the profile and to `binding`, the fields round 0 of the protocol
     /// lists.
     pub fn new(profile: Profile, binding: &[&[u8]]) -> Self {
-        let hasher = Hasher::new(profile);
+        Self::init(Hasher::new(profile), profile.wire_tag(), binding)
+    }
+
+    pub(crate) fn turbo_domain(
+        domain: &'static [u64; 25],
+        tag: u8,
+        binding: &[&[u8]],
+        calls: u16,
+    ) -> Self {
+        let mut transcript = Self::init(
+            Hasher {
+                turbo: true,
+                turbo_fs_domain: domain,
+            },
+            tag,
+            binding,
+        );
+        transcript.remaining = Some(calls.saturating_sub(1));
+        transcript
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.remaining == Some(0)
+    }
+
+    fn charge(&mut self) -> bool {
+        if let Some(left) = &mut self.remaining {
+            if *left == 0 {
+                return false;
+            }
+            *left -= 1;
+        }
+        true
+    }
+
+    fn init(hasher: Hasher, tag: u8, binding: &[&[u8]]) -> Self {
         let inner = frame(binding);
-        let input = frame(&[b"INIT", &[profile.wire_tag()], &inner]);
+        let input = frame(&[b"INIT", &[tag], &inner]);
         let mut chain = [0u8; DIGEST_BYTES];
         hasher.fs_into(&input, &mut chain);
         Self {
             hasher,
             chain,
             counter: 0,
+            remaining: None,
         }
     }
 
@@ -341,6 +417,9 @@ impl Transcript {
     }
 
     pub fn absorb(&mut self, label: &[u8], payload: &[u8]) {
+        if !self.charge() {
+            return;
+        }
         let input = frame(&[b"ABSORB", &self.chain, label, payload]);
         self.hasher.fs_into(&input, &mut self.chain);
         self.counter = 0;
@@ -358,7 +437,10 @@ impl Transcript {
         self.absorb(label, &bytes);
     }
 
-    fn squeeze_into(&mut self, kind: &[u8], label: &[u8], attempt: u64, out: &mut [u8]) {
+    fn squeeze_into(&mut self, kind: &[u8], label: &[u8], attempt: u64, out: &mut [u8]) -> bool {
+        if !self.charge() {
+            return false;
+        }
         let input = frame(&[
             kind,
             &self.chain,
@@ -367,6 +449,7 @@ impl Transcript {
             &attempt.to_le_bytes(),
         ]);
         self.hasher.fs_into(&input, out);
+        true
     }
 
     /// A uniform base-field challenge: eight bytes, redrawn while they encode a value `>= p`.
@@ -374,7 +457,9 @@ impl Transcript {
         let mut attempt = 0u64;
         loop {
             let mut raw = [0u8; 8];
-            self.squeeze_into(b"SQUEEZE_F", label, attempt, &mut raw);
+            if !self.squeeze_into(b"SQUEEZE_F", label, attempt, &mut raw) {
+                return Goldilocks::ONE;
+            }
             if let Some(x) = Goldilocks::from_canonical_u64(u64::from_le_bytes(raw)) {
                 self.counter += 1;
                 return x;
@@ -389,7 +474,9 @@ impl Transcript {
         let mut attempt = 0u64;
         loop {
             let mut raw = [0u8; EXT_BYTES];
-            self.squeeze_into(b"SQUEEZE_E", label, attempt, &mut raw);
+            if !self.squeeze_into(b"SQUEEZE_E", label, attempt, &mut raw) {
+                return Fp5::ONE;
+            }
             if let Some(x) = Fp5::from_le_bytes_canonical(raw) {
                 self.counter += 1;
                 return x;
@@ -422,7 +509,9 @@ impl Transcript {
         let mut set = BTreeSet::new();
         while set.len() < target {
             let mut raw = vec![0u8; 8 * (target - set.len())];
-            self.squeeze_into(b"SQUEEZE_IDX", label, 0, &mut raw);
+            if !self.squeeze_into(b"SQUEEZE_IDX", label, 0, &mut raw) {
+                return (0..target).collect();
+            }
             self.counter += 1;
             for word in raw.as_chunks::<8>().0 {
                 set.insert((u64::from_le_bytes(*word) & mask) as usize);
@@ -527,20 +616,24 @@ mod tests {
     fn leaf_digests_bind_every_field() {
         let h = Hasher::new(Profile::CshakeJohnson400);
         let z: Vec<Goldilocks> = (0..8).map(Goldilocks::from_u64_reduced).collect();
+        let nonce = [0x42u8; TREE_NONCE_BYTES];
         let salt = [9u8; SALT_BYTES];
         let r = Fp5::from_u64(5);
-        let base = h.leaf_stage0(3, &salt, &z, r);
-        assert_ne!(base, h.leaf_stage0(4, &salt, &z, r));
+        let base = h.leaf_stage0(&nonce, 3, &salt, &z, r);
+        let mut nonce2 = nonce;
+        nonce2[31] ^= 0x01;
+        assert_ne!(base, h.leaf_stage0(&nonce2, 3, &salt, &z, r));
+        assert_ne!(base, h.leaf_stage0(&nonce, 4, &salt, &z, r));
         let mut salt2 = salt;
         salt2[31] ^= 0x80;
-        assert_ne!(base, h.leaf_stage0(3, &salt2, &z, r));
+        assert_ne!(base, h.leaf_stage0(&nonce, 3, &salt2, &z, r));
         for i in 0..8 {
             let mut z2 = z.clone();
             z2[i] += Goldilocks::ONE;
-            assert_ne!(base, h.leaf_stage0(3, &salt, &z2, r));
+            assert_ne!(base, h.leaf_stage0(&nonce, 3, &salt, &z2, r));
         }
-        assert_ne!(base, h.leaf_stage0(3, &salt, &z, r + Fp5::X.pow(4)));
-        assert_ne!(base, h.leaf_stage0(3, &salt, &z[..4], r));
+        assert_ne!(base, h.leaf_stage0(&nonce, 3, &salt, &z, r + Fp5::X.pow(4)));
+        assert_ne!(base, h.leaf_stage0(&nonce, 3, &salt, &z[..4], r));
 
         let vals = [Fp5::from_u64(1), Fp5::X];
         let e = h.leaf_ext(1, 3, &vals);

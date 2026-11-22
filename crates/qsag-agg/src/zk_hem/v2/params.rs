@@ -5,9 +5,12 @@
 use alloc::vec::Vec;
 
 use crate::pcs::WhirSecurityRegime;
+use crate::zk_hem::relation::{LOOKUP_CORNER_ENTRIES, Lookups};
 
 /// Bytes of a Merkle digest and of the Fiat-Shamir chaining value.
 pub const DIGEST_BYTES: usize = 50;
+/// Bytes of the per-tree Stage-0 domain-separation nonce (`tree_nonce`).
+pub const TREE_NONCE_BYTES: usize = 32;
 /// Bytes of the salt in every Stage-0 leaf.
 pub const SALT_BYTES: usize = 32;
 /// Base-field limbs of a challenge-field element.
@@ -23,36 +26,40 @@ pub const LATER_OOD_POINTS: usize = 2;
 pub const ROW_DEGREE: usize = 9;
 /// Individual degree of the column sumcheck.
 pub const COL_DEGREE: usize = 2;
+/// Individual degree of the LogUp lookup sumcheck (`sel * eq * h * v`).
+pub const LOOKUP_DEGREE: usize = 4;
 /// `log2` of the cells holding one limb of one row-mask round.
 pub const ROW_MASK_BITS: usize = 4;
 /// `log2` of the cells holding one limb of one column-mask round.
 pub const COL_MASK_BITS: usize = 2;
+/// `log2` of the cells holding one limb of one lookup-mask round.
+pub const LOOKUP_MASK_BITS: usize = 3;
 /// Variables per masking group of a v2 relation: one per limb.
 pub const PAD_VARS: usize = LIMBS;
 /// Rows reserved at the top of a v2 relation: three corners of eight rows, five used in each.
 pub const PAD_ROWS: usize = 24;
 /// Cells of the variable region are a multiple of `2^VAR_ALIGN_MIN` at least.
 pub const VAR_ALIGN_MIN: usize = 4;
-/// Smallest and largest table (`log2` cells) a v2 profile accepts. Above the maximum the mask
-/// line of SECURITY.md Theorem V2.1 no longer reaches the round error the profiles are
-/// computed for; below the minimum the table cannot hold the blinders.
+/// Smallest and largest table (`log2` cells) a v2 profile accepts (`2^16..=2^28`, unlocked by
+/// Dao-Kominers-Thaler `[DKT26]` Theorem 5.12).
 pub const MIN_LOG_CELLS: usize = 16;
-pub const MAX_LOG_CELLS: usize = 24;
+pub const MAX_LOG_CELLS: usize = 28;
 
 /// A v2 parameter set. The names say which hash builds the trees and the transcript and how
 /// long its digests are; the security levels are computed by [`super::bounds::report`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Profile {
     /// cSHAKE256 with 400-bit digests, Johnson-radius schedule, no grinding.
     CshakeJohnson400,
     /// TurboSHAKE256 with 400-bit digests, Johnson-radius schedule, no grinding.
+    #[default]
     TurboShakeJohnson400,
 }
 
 impl Profile {
     pub const ALL: [Self; 2] = [Self::CshakeJohnson400, Self::TurboShakeJohnson400];
 
-    /// Wire tag. Tags `0..=10` belong to the v1 regimes (`WhirSecurityRegime`).
+    /// Wire tag. Tags `0..=10` belong to public WHIR regimes (`WhirSecurityRegime`).
     pub const fn wire_tag(self) -> u8 {
         match self {
             Self::CshakeJohnson400 => 16,
@@ -71,6 +78,15 @@ impl Profile {
     pub const fn uses_turboshake(self) -> bool {
         matches!(self, Self::TurboShakeJohnson400)
     }
+
+    /// Canonical v2 profile matching the sponge family of a recursion child's regime.
+    pub fn for_regime(regime: WhirSecurityRegime) -> Self {
+        if regime.uses_turboshake_canopy() {
+            Self::TurboShakeJohnson400
+        } else {
+            Self::CshakeJohnson400
+        }
+    }
 }
 
 /// One WHIR stage: rate `1 / blowup`, `step_vars` folds, `num_queries` distinct fibers.
@@ -88,19 +104,19 @@ pub struct Schedule {
     pub stages: Vec<StageSpec>,
 }
 
-/// Stage-0 queries for a table of `2^log_cells` cells, indexed from [`MIN_LOG_CELLS`]. Each is
-/// the smallest count at which the QROM level computed by `bounds::Report::qrom_work_bits`
-/// (the sum of the round term and the digest term, SECURITY.md Theorem 3) is at least 128
-/// bits; `bounds::tests::stage0_queries_are_minimal` recomputes the table.
+/// Stage-0 queries for a table of `2^log_cells` cells (`16..=28`), indexed from
+/// [`MIN_LOG_CELLS`]. Under `[DKT26]` Theorem 5.12 (`(2m + 1)^3 * n^2 / (3 D)`), proximity
+/// parameter `m <= 512` makes the mask-line round non-binding across all `2^16..=2^28` tables;
+/// `bounds::tests::stage0_queries_are_minimal` recomputes and pins every entry.
 pub const STAGE0_QUERIES: [usize; MAX_LOG_CELLS - MIN_LOG_CELLS + 1] =
-    [281, 281, 287, 295, 300, 300, 320, 342, 342];
+    [267, 267, 267, 267, 267, 267, 267, 267, 266, 266, 266, 266, 266];
 
 /// Queries of a stage after the first at rate `1 / blowup`.
 pub const fn later_stage_queries(blowup: usize) -> usize {
     (532usize).div_ceil(blowup.trailing_zeros() as usize) + 3
 }
 
-/// The folding geometry of v1 (`pcs.rs`, `stage_geometry`) with the v2 query counts.
+/// The folding geometry of `pcs.rs` (`stage_geometry`) with the v2 query counts.
 pub fn schedule(log_cells: usize) -> Option<Schedule> {
     if !(MIN_LOG_CELLS..=MAX_LOG_CELLS).contains(&log_cells) {
         return None;
@@ -134,24 +150,92 @@ pub fn schedule_with_stage0(log_cells: usize, stage0_queries: usize) -> Option<S
     })
 }
 
-/// Size of a v2 relation.
+/// Size of a v2 relation's row/variable core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeSize {
     pub log_rows: usize,
-    /// Variables, including the constant and the fifteen masking variables.
+    /// Variables, including the constant and the masking variables.
     pub num_vars: usize,
     pub num_public: usize,
 }
 
-/// Cell layout of the assignment table.
-///
-/// ```text
-/// [ variables | zeros | row masks | column masks | zeros | blinders ]
-///   0           num_vars  mask_base                        cells - blind_cells
-/// ```
-///
-/// Everything sits in one cube of `2^log_cells` cells; the column sumcheck runs over the
-/// `var_bits`-cube and its terminal functional reads the cells below `var_cells` only.
+/// Size of the optional LogUp [`Lookups`] of a v2 relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LookupSize {
+    pub lookups: usize,
+    pub table_rows: usize,
+    pub width: usize,
+}
+
+impl LookupSize {
+    pub fn of(lookups: &Lookups) -> Self {
+        Self {
+            lookups: lookups.num_lookups,
+            table_rows: lookups.num_table_rows,
+            width: lookups.width(),
+        }
+    }
+
+    pub fn log_entries(&self) -> usize {
+        (self.lookups + self.table_rows + LOOKUP_CORNER_ENTRIES)
+            .next_power_of_two()
+            .trailing_zeros()
+            .max(3) as usize
+    }
+}
+
+/// Cell layout of the LogUp helper table `H`:
+/// `[ limb 0..4 of h (5 * 2^d) | lookup sumcheck masks (d * 5 * 2^3) | zeros | blinders ]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LookupLayout {
+    pub log_cells: usize,
+    pub log_entries: usize,
+    pub blind_cells: usize,
+    pub schedule: Schedule,
+}
+
+impl LookupLayout {
+    pub fn new(log_entries: usize) -> Option<Self> {
+        Self::search(log_entries, schedule)
+    }
+
+    pub fn search(
+        log_entries: usize,
+        schedule_fn: impl Fn(usize) -> Option<Schedule>,
+    ) -> Option<Self> {
+        const _: () = assert!(1u64 << (MAX_LOG_CELLS - 3) < crate::field::GOLDILOCKS_PRIME);
+        let d = log_entries;
+        if !(3..=MAX_LOG_CELLS - 3).contains(&d) {
+            return None;
+        }
+        let used = (LIMBS << d).checked_add((d * LIMBS) << LOOKUP_MASK_BITS)?;
+        ((d + 3).max(MIN_LOG_CELLS)..=MAX_LOG_CELLS).find_map(|log_cells| {
+            let schedule = schedule_fn(log_cells)?;
+            let st0 = schedule.stages[0];
+            let cells = 1usize << log_cells;
+            let fibers = (cells * st0.blowup) >> st0.step_vars;
+            let blind_cells = blind_cells_for(st0.step_vars, st0.num_queries.min(fibers));
+            (used + blind_cells <= cells).then_some(Self {
+                log_cells,
+                log_entries: d,
+                blind_cells,
+                schedule,
+            })
+        })
+    }
+
+    #[inline]
+    pub fn limb_block(&self, limb: usize) -> usize {
+        limb << self.log_entries
+    }
+
+    #[inline]
+    pub fn mask_block(&self, round: usize, limb: usize) -> usize {
+        (LIMBS << self.log_entries) + ((round * LIMBS + limb) << LOOKUP_MASK_BITS)
+    }
+}
+
+/// Cell layout of the assignment table, plus the optional LogUp helper table layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub log_cells: usize,
@@ -166,6 +250,7 @@ pub struct Layout {
     /// challenge-field value of the Stage-0 mask points (SECURITY.md, Lemma V2.2).
     pub blind_cells: usize,
     pub schedule: Schedule,
+    pub lookup: Option<LookupLayout>,
 }
 
 /// Cells of the two sumcheck masks.
@@ -180,18 +265,24 @@ pub const fn blind_cells_for(step_vars: usize, opened_fibers: usize) -> usize {
 }
 
 impl Layout {
-    /// The smallest table holding the variables, the masks and the blinders.
+    /// The smallest table holding the variables, the masks and the blinders (no lookups).
     pub fn new(size: ShapeSize) -> Option<Self> {
         Self::search(size, schedule)
     }
 
+    /// [`Self::new`] with an optional LogUp fraction table of `2^log_entries` entries.
+    pub fn with_lookup(size: ShapeSize, log_entries: Option<usize>) -> Option<Self> {
+        let mut layout = Self::new(size)?;
+        if let Some(d) = log_entries {
+            layout.lookup = Some(LookupLayout::new(d)?);
+        }
+        Some(layout)
+    }
+
     /// [`Self::new`] over an arbitrary schedule function, for the calculator.
     pub fn search(size: ShapeSize, schedule: impl Fn(usize) -> Option<Schedule>) -> Option<Self> {
-        // A v2 relation has a constant, fifteen pads and at least 24 reserved rows.
-        // Bound before rounding or shifting: malformed sizes must not overflow, and the
-        // finite row cube also keeps the round count within the calculator's envelope.
         if size.num_vars < 1 + 3 * PAD_VARS
-            || size.num_vars > 1usize << crate::pcs::MAX_PCS_NUM_VARS
+            || size.num_vars > 1usize << MAX_LOG_CELLS
             || size.num_public > size.num_vars - 1 - 3 * PAD_VARS
             || !(5..usize::BITS as usize).contains(&size.log_rows)
         {
@@ -201,7 +292,7 @@ impl Layout {
         let var_align = VAR_ALIGN_MIN.max(var_bits.saturating_sub(8));
         let var_cells = size.num_vars.next_multiple_of(1 << var_align);
         let masks = mask_cells(size.log_rows, var_bits);
-        (var_bits.max(MIN_LOG_CELLS)..=crate::pcs::MAX_PCS_NUM_VARS).find_map(|log_cells| {
+        (var_bits.max(MIN_LOG_CELLS)..=MAX_LOG_CELLS).find_map(|log_cells| {
             let schedule = schedule(log_cells)?;
             let st0 = schedule.stages[0];
             let cells = 1usize << log_cells;
@@ -215,6 +306,7 @@ impl Layout {
                 mask_base: var_cells,
                 blind_cells,
                 schedule,
+                lookup: None,
             })
         })
     }
