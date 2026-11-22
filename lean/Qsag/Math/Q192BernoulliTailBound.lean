@@ -919,3 +919,926 @@ theorem jointL1_mul_le (e d : Nat) :
 
 /-- Event probabilities transfer on one coordinate:
     `2 * |impl(E) * B - ideal(E) * A| ≤ coordL1`. -/
+theorem coordEvent_cross_le (p : WeightPair) (E : Nat → Bool) :
+    2 * Spec.natAbsDiff (coordEventMass p.size p.impl E * coordSum p.size p.ideal)
+        (coordEventMass p.size p.ideal E * coordSum p.size p.impl) ≤ coordL1 p :=
+  (sampleSum_isFinSum p.size).event_cross_le (fun x : Fin p.size => p.impl x.val)
+    (fun x : Fin p.size => p.ideal x.val) (fun x : Fin p.size => E x.val)
+
+/-- Event probabilities transfer on outcome vectors:
+    `2 * |impl(E) * ∏B - ideal(E) * ∏A| ≤ jointL1`. -/
+theorem jointEvent_cross_le (ps : List WeightPair) (E : List Nat → Bool) :
+    2 * Spec.natAbsDiff
+        (jointEventMass WeightPair.impl ps E * jointTotal WeightPair.ideal ps)
+        (jointEventMass WeightPair.ideal ps E * jointTotal WeightPair.impl ps) ≤ jointL1 ps := by
+  have h := (jointSum_isFinSum ps).event_cross_le (jointWeight WeightPair.impl ps)
+    (jointWeight WeightPair.ideal ps) E
+  rw [jointSum_jointWeight, jointSum_jointWeight] at h
+  exact h
+
+/-! ## 5. The Gaussian box coordinate -/
+
+/-- Acceptance threshold of `sample_gaussian_box` for proposal index `i`, i.e. for the signed
+    proposal `x = i - half` with exponent `x * x`. -/
+@[expose] def gaussianBoxWeight (half i : Nat) : Nat :=
+  gaussianExpProbability 24 (Spec.natAbsDiff i half * Spec.natAbsDiff i half)
+
+/-- The box coordinate with `2 * half` proposals, the production thresholds as `impl` weights
+    and a given `ideal` weight vector. -/
+def gaussianBoxPair (half : Nat) (ideal : Nat → Nat) : WeightPair :=
+  ⟨2 * half, gaussianBoxWeight half, ideal⟩
+
+theorem gaussianBoxPair_eq (half : Nat) (ideal : Nat → Nat) :
+    gaussianBoxPair half ideal = ⟨2 * half, gaussianBoxWeight half, ideal⟩ := by rfl
+
+/-- `ideal` is, after one common positive rational rescaling `D / c`, pointwise between the
+    production threshold and the production threshold plus 49 units of `2^-192`. -/
+def GaussianIdealBracket (half : Nat) (ideal : Nat → Nat) : Prop :=
+  ∃ c D : Nat, 0 < c ∧ 0 < D ∧ ∀ i, i < 2 * half →
+    gaussianBoxWeight half i * D ≤ c * ideal i ∧
+      c * ideal i ≤ (gaussianBoxWeight half i + 49) * D
+
+theorem gaussianIdealBracket_iff (half : Nat) (ideal : Nat → Nat) :
+    GaussianIdealBracket half ideal ↔
+      ∃ c D : Nat, 0 < c ∧ 0 < D ∧ ∀ i, i < 2 * half →
+        gaussianBoxWeight half i * D ≤ c * ideal i ∧
+          c * ideal i ≤ (gaussianBoxWeight half i + 49) * D := by
+  exact Iff.rfl
+
+/-- Exact total of the production thresholds over the response box `[-3070, 3070)`. -/
+theorem gaussianBoxTotal_3070 :
+    coordSum 6140 (gaussianBoxWeight 3070) =
+      11013925155604111574515082536301237377902248349108807478188184 :=
+  (coordSum_eq_weightPrefixSum (gaussianBoxWeight 3070) 6140).trans (by decide +kernel)
+
+/-- Exact total of the production thresholds over the mask box `[-3072, 3072)`. -/
+theorem gaussianBoxTotal_3072 :
+    coordSum 6144 (gaussianBoxWeight 3072) =
+      11013926816664343041883888503581869188773652656392113139093142 :=
+  (coordSum_eq_weightPrefixSum (gaussianBoxWeight 3072) 6144).trans (by decide +kernel)
+
+theorem gaussianBoxTotal_lower (half : Nat) (hHalf : half = 3070 ∨ half = 3072) :
+    1754 * 2 ^ 192 ≤ coordSum (2 * half) (gaussianBoxWeight half) := by
+  rcases hHalf with h | h
+  · subst h
+    show 1754 * 2 ^ 192 ≤ coordSum 6140 (gaussianBoxWeight 3070)
+    rw [gaussianBoxTotal_3070]
+    decide +kernel
+  · subst h
+    show 1754 * 2 ^ 192 ≤ coordSum 6144 (gaussianBoxWeight 3072)
+    rw [gaussianBoxTotal_3072]
+    decide +kernel
+
+theorem gaussianBox_idealTotal_pos (half : Nat) (hHalf : half = 3070 ∨ half = 3072)
+    (ideal : Nat → Nat) (hB : GaussianIdealBracket half ideal) :
+    0 < coordSum (2 * half) ideal := by
+  obtain ⟨c, D, _, hD, h⟩ := hB
+  have hT : coordSum (2 * half) (gaussianBoxWeight half) * D ≤ c * coordSum (2 * half) ideal :=
+    (sampleSum_isFinSum (2 * half)).total_le_of_bracket
+      (fun x : Fin (2 * half) => gaussianBoxWeight half x.val) (fun x => ideal x.val) c D
+      (fun x => (h x.val x.isLt).1)
+  have hA := gaussianBoxTotal_lower half hHalf
+  have hApos : 0 < coordSum (2 * half) (gaussianBoxWeight half) :=
+    Nat.lt_of_lt_of_le (Nat.mul_pos (by decide) (Nat.two_pow_pos 192)) hA
+  have hAD := Nat.mul_pos hApos hD
+  by_cases h0 : coordSum (2 * half) ideal = 0
+  · rw [h0, Nat.mul_zero] at hT
+    omega
+  · exact Nat.pos_of_ne_zero h0
+
+/-- One coordinate, any `half`: `∑ |impl i * B - ideal i * A| ≤ 2 * (n * 49) * B` with
+    `n = 2 * half` proposals, i.e. `TV ≤ n * 49 / A`. -/
+theorem gaussianBox_coordL1_le (half : Nat) (ideal : Nat → Nat)
+    (hB : GaussianIdealBracket half ideal) :
+    coordL1 (gaussianBoxPair half ideal) ≤ 2 * (2 * half * 49) * coordSum (2 * half) ideal := by
+  obtain ⟨c, D, hc, _, h⟩ := hB
+  have hL := (sampleSum_isFinSum (2 * half)).cross_l1_le_of_bracket
+    (fun x : Fin (2 * half) => gaussianBoxWeight half x.val) (fun x => ideal x.val) c D 49 hc
+    (fun x => (h x.val x.isLt).1) (fun x => (h x.val x.isLt).2)
+  have hOne : Spec.sampleSum (2 * half) (fun _ => 1) = 2 * half := coordSum_one (2 * half)
+  rw [hOne] at hL
+  exact hL
+
+private theorem tv_bits_arith {L n B A K d : Nat} (hL : L ≤ 2 * n * B) (hn : n * K < d)
+    (hA : d ≤ A) (hB : 0 < B) : L * K < 2 * (A * B) := by
+  have h1 : L * K ≤ 2 * n * B * K := Nat.mul_le_mul_right _ hL
+  have h2 : 2 * n * B * K = 2 * (n * K * B) := by ac_rfl
+  have h3 : n * K * B < A * B := Nat.mul_lt_mul_of_pos_right (Nat.lt_of_lt_of_le hn hA) hB
+  omega
+
+private theorem half_lt_of_two_mul {x l w k : Nat} (hE : 2 * x ≤ l) (hTv : l * k < 2 * w) :
+    x * k < w := by
+  have h := Nat.mul_le_mul_right k hE
+  rw [Nat.mul_assoc] at h
+  omega
+
+/-- **Per-coordinate total-variation bound.** For the response box (`half = 3070`) and the
+    mask box (`half = 3072`), and every ideal weight vector inside the 49-unit bracket, the
+    law `impl / A` of an accepted proposal and the law `ideal / B` satisfy
+    `coordL1 / (2 * A * B) < 2^-184`. -/
+theorem q192_gaussian_coordinate_tvd_bound (half : Nat) (hHalf : half = 3070 ∨ half = 3072)
+    (ideal : Nat → Nat) (hB : GaussianIdealBracket half ideal) :
+    coordL1 (gaussianBoxPair half ideal) * 2 ^ 184 <
+      2 * (coordSum (2 * half) (gaussianBoxWeight half) * coordSum (2 * half) ideal) := by
+  have hL := gaussianBox_coordL1_le half ideal hB
+  have hA := gaussianBoxTotal_lower half hHalf
+  have hBpos := gaussianBox_idealTotal_pos half hHalf ideal hB
+  have hn : 2 * half * 49 * 2 ^ 184 < 1754 * 2 ^ 192 := by
+    rcases hHalf with h | h <;> subst h <;> decide
+  exact tv_bits_arith hL hn hA hBpos
+
+/-- Per-coordinate event transfer: for every event on the proposals,
+    `|P_impl(E) - P_ideal(E)| < 2^-184`. -/
+theorem q192_gaussian_coordinate_event_transfer (half : Nat)
+    (hHalf : half = 3070 ∨ half = 3072) (ideal : Nat → Nat)
+    (hB : GaussianIdealBracket half ideal) (E : Nat → Bool) :
+    Spec.natAbsDiff
+        (coordEventMass (2 * half) (gaussianBoxWeight half) E * coordSum (2 * half) ideal)
+        (coordEventMass (2 * half) ideal E * coordSum (2 * half) (gaussianBoxWeight half)) *
+        2 ^ 184 <
+      coordSum (2 * half) (gaussianBoxWeight half) * coordSum (2 * half) ideal := by
+  have hTv := q192_gaussian_coordinate_tvd_bound half hHalf ideal hB
+  have hE : 2 * Spec.natAbsDiff
+      (coordEventMass (2 * half) (gaussianBoxWeight half) E * coordSum (2 * half) ideal)
+      (coordEventMass (2 * half) ideal E * coordSum (2 * half) (gaussianBoxWeight half)) ≤
+      coordL1 (gaussianBoxPair half ideal) := coordEvent_cross_le (gaussianBoxPair half ideal) E
+  exact half_lt_of_two_mul hE hTv
+
+/-- A batch of box coordinates: each entry is `(half, ideal)`. -/
+def gaussianBatch (cs : List (Nat × (Nat → Nat))) : List WeightPair :=
+  cs.map (fun c => gaussianBoxPair c.1 c.2)
+
+theorem gaussianBatch_eq (cs : List (Nat × (Nat → Nat))) :
+    gaussianBatch cs = cs.map (fun c => gaussianBoxPair c.1 c.2) := by rfl
+
+/-- **Batch bound, any number of coordinates.** With `m` box coordinates (response or mask),
+    each with its own ideal weights inside the bracket, the product laws satisfy
+    `TV ≤ m * 6144 * 49 / (1754 * 2^192)`. -/
+theorem gaussianBatch_jointL1_le (cs : List (Nat × (Nat → Nat)))
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2) :
+    jointL1 (gaussianBatch cs) * (1754 * 2 ^ 192) ≤
+      cs.length * (2 * (6144 * 49)) *
+        (jointTotal WeightPair.impl (gaussianBatch cs) *
+          jointTotal WeightPair.ideal (gaussianBatch cs)) := by
+  have hCoord : ∀ p, p ∈ gaussianBatch cs →
+      coordL1 p * (1754 * 2 ^ 192) ≤
+        2 * (6144 * 49) * (coordSum p.size p.impl * coordSum p.size p.ideal) := by
+    intro p hp
+    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp hp
+    obtain ⟨hHalf, hB⟩ := hCs c hc
+    have hL := gaussianBox_coordL1_le c.1 c.2 hB
+    have hA := gaussianBoxTotal_lower c.1 hHalf
+    have hn : 2 * (2 * c.1 * 49) ≤ 2 * (6144 * 49) := by omega
+    show coordL1 (gaussianBoxPair c.1 c.2) * (1754 * 2 ^ 192) ≤
+      2 * (6144 * 49) * (coordSum (2 * c.1) (gaussianBoxWeight c.1) * coordSum (2 * c.1) c.2)
+    calc coordL1 (gaussianBoxPair c.1 c.2) * (1754 * 2 ^ 192)
+        ≤ 2 * (2 * c.1 * 49) * coordSum (2 * c.1) c.2 * (1754 * 2 ^ 192) :=
+          Nat.mul_le_mul_right _ hL
+      _ ≤ 2 * (6144 * 49) * coordSum (2 * c.1) c.2 *
+            coordSum (2 * c.1) (gaussianBoxWeight c.1) :=
+          Nat.mul_le_mul (Nat.mul_le_mul_right _ hn) hA
+      _ = 2 * (6144 * 49) *
+            (coordSum (2 * c.1) (gaussianBoxWeight c.1) * coordSum (2 * c.1) c.2) := by
+          rw [Nat.mul_assoc, Nat.mul_comm (coordSum (2 * c.1) c.2)]
+  have h := jointL1_mul_le (2 * (6144 * 49)) (1754 * 2 ^ 192) (gaussianBatch cs) hCoord
+  have hLen : (gaussianBatch cs).length = cs.length := List.length_map _
+  rw [hLen] at h
+  exact h
+
+theorem gaussianBatch_totals_pos (cs : List (Nat × (Nat → Nat)))
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2) :
+    0 < jointTotal WeightPair.impl (gaussianBatch cs) *
+      jointTotal WeightPair.ideal (gaussianBatch cs) := by
+  refine Nat.mul_pos (jointTotal_pos _ _ ?_) (jointTotal_pos _ _ ?_)
+  · intro p hp
+    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp hp
+    exact Nat.lt_of_lt_of_le (Nat.mul_pos (by decide) (Nat.two_pow_pos 192))
+      (gaussianBoxTotal_lower c.1 (hCs c hc).1)
+  · intro p hp
+    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp hp
+    exact gaussianBox_idealTotal_pos c.1 (hCs c hc).1 c.2 (hCs c hc).2
+
+/-- Batch bound in bits: if `m * 6144 * 49 * 2^t < 1754 * 2^192` then the product laws have
+    `TV < 2^-t`. -/
+theorem gaussianBatch_tvd_lt (cs : List (Nat × (Nat → Nat)))
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2)
+    (t : Nat) (hBudget : cs.length * (6144 * 49) * 2 ^ t < 1754 * 2 ^ 192) :
+    jointL1 (gaussianBatch cs) * 2 ^ t <
+      2 * (jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs)) := by
+  have hJ := gaussianBatch_jointL1_le cs hCs
+  have hP := gaussianBatch_totals_pos cs hCs
+  generalize jointL1 (gaussianBatch cs) = J at hJ ⊢
+  generalize jointTotal WeightPair.impl (gaussianBatch cs) *
+    jointTotal WeightPair.ideal (gaussianBatch cs) = P at hJ hP ⊢
+  apply Spec.nat_lt_of_mul_lt_mul_right (k := 1754 * 2 ^ 192)
+  have h1 : J * 2 ^ t * (1754 * 2 ^ 192) = J * (1754 * 2 ^ 192) * 2 ^ t := by ac_rfl
+  have h2 : J * (1754 * 2 ^ 192) * 2 ^ t ≤ cs.length * (2 * (6144 * 49)) * P * 2 ^ t :=
+    Nat.mul_le_mul_right _ hJ
+  have h3 : cs.length * (2 * (6144 * 49)) * P * 2 ^ t =
+      2 * (cs.length * (6144 * 49) * 2 ^ t * P) := by ac_rfl
+  have h4 : cs.length * (6144 * 49) * 2 ^ t * P < 1754 * 2 ^ 192 * P :=
+    Nat.mul_lt_mul_of_pos_right hBudget hP
+  have h5 : 2 * P * (1754 * 2 ^ 192) = 2 * (1754 * 2 ^ 192 * P) := by ac_rfl
+  omega
+
+/-- **Batch total-variation bound for the RLWE proof.** For at most
+    `49152 = 24 * 2 * 1024` box coordinates, each response or mask, and any ideal weights
+    inside the brackets, the joint law of the accepted proposals and the product of the
+    ideal laws satisfy `jointL1 / (2 * ∏A * ∏B) < 2^-168`. -/
+theorem q192_rlwe_batch_tvd_bound (cs : List (Nat × (Nat → Nat)))
+    (hLen : cs.length ≤ 49152)
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2) :
+    jointL1 (gaussianBatch cs) * 2 ^ 168 <
+      2 * (jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs)) :=
+  gaussianBatch_tvd_lt cs hCs 168 (by omega)
+
+/-- The same bound for at most `24576 = 24 * 1024` coordinates (one polynomial across the 24
+    repetitions): `TV < 2^-169`. -/
+theorem q192_rlwe_poly_batch_tvd_bound (cs : List (Nat × (Nat → Nat)))
+    (hLen : cs.length ≤ 24576)
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2) :
+    jointL1 (gaussianBatch cs) * 2 ^ 169 <
+      2 * (jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs)) :=
+  gaussianBatch_tvd_lt cs hCs 169 (by omega)
+
+/-- Batch event transfer in bits: under the budget of `gaussianBatch_tvd_lt`, every event on
+    outcome vectors has `|P_impl(E) - P_ideal(E)| < 2^-t`. -/
+theorem gaussianBatch_event_transfer (cs : List (Nat × (Nat → Nat)))
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2)
+    (t : Nat) (hBudget : cs.length * (6144 * 49) * 2 ^ t < 1754 * 2 ^ 192)
+    (E : List Nat → Bool) :
+    Spec.natAbsDiff
+        (jointEventMass WeightPair.impl (gaussianBatch cs) E *
+          jointTotal WeightPair.ideal (gaussianBatch cs))
+        (jointEventMass WeightPair.ideal (gaussianBatch cs) E *
+          jointTotal WeightPair.impl (gaussianBatch cs)) * 2 ^ t <
+      jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs) := by
+  have hTv := gaussianBatch_tvd_lt cs hCs t hBudget
+  exact half_lt_of_two_mul (jointEvent_cross_le (gaussianBatch cs) E) hTv
+
+/-- Event transfer for the full batch of at most 49152 coordinates:
+    `|P_impl(E) - P_ideal(E)| < 2^-168` for every event `E`. -/
+theorem q192_rlwe_batch_event_transfer (cs : List (Nat × (Nat → Nat)))
+    (hLen : cs.length ≤ 49152)
+    (hCs : ∀ c, c ∈ cs → (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2)
+    (E : List Nat → Bool) :
+    Spec.natAbsDiff
+        (jointEventMass WeightPair.impl (gaussianBatch cs) E *
+          jointTotal WeightPair.ideal (gaussianBatch cs))
+        (jointEventMass WeightPair.ideal (gaussianBatch cs) E *
+          jointTotal WeightPair.impl (gaussianBatch cs)) * 2 ^ 168 <
+      jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs) :=
+  gaussianBatch_event_transfer cs hCs 168 (by omega) E
+
+/-- Squared Euclidean norm of the signed vector `(i - half)_i` of an index vector. -/
+def centeredSqNorm (half : Nat) : List Nat → Nat
+  | [] => 0
+  | i :: v => Spec.natAbsDiff i half * Spec.natAbsDiff i half + centeredSqNorm half v
+
+theorem centeredSqNorm_nil (half : Nat) : centeredSqNorm half [] = 0 := by rfl
+
+theorem centeredSqNorm_cons (half i : Nat) (v : List Nat) :
+    centeredSqNorm half (i :: v) =
+      Spec.natAbsDiff i half * Spec.natAbsDiff i half + centeredSqNorm half v := by rfl
+
+/-- **Tail event of one `(z_s, z_e)` pair.** For 2048 box coordinates of one kind, the event
+    `‖z‖_2^2 > 1_500_000_000` (`RLWE_ZKPOK_PAIR_L2_SQ_BOUND`) has probabilities under the
+    production law and under any bracketed ideal product law that differ by less than
+    `2^-173`. The probability itself is not computed here. -/
+theorem q192_rlwe_pair_l2_tail_transfer (half : Nat) (hHalf : half = 3070 ∨ half = 3072)
+    (cs : List (Nat × (Nat → Nat))) (hLen : cs.length = 2048)
+    (hCs : ∀ c, c ∈ cs → c.1 = half ∧ GaussianIdealBracket half c.2) :
+    Spec.natAbsDiff
+        (jointEventMass WeightPair.impl (gaussianBatch cs)
+            (fun v => decide (1500000000 < centeredSqNorm half v)) *
+          jointTotal WeightPair.ideal (gaussianBatch cs))
+        (jointEventMass WeightPair.ideal (gaussianBatch cs)
+            (fun v => decide (1500000000 < centeredSqNorm half v)) *
+          jointTotal WeightPair.impl (gaussianBatch cs)) * 2 ^ 173 <
+      jointTotal WeightPair.impl (gaussianBatch cs) *
+        jointTotal WeightPair.ideal (gaussianBatch cs) :=
+  gaussianBatch_event_transfer cs
+    (fun c hc => ⟨(hCs c hc).1 ▸ hHalf, (hCs c hc).1 ▸ (hCs c hc).2⟩) 173 (by omega) _
+
+/-! ## 6. One trial of the box sampler -/
+
+/-- One trial of `sample_gaussian_box`: `r` is the 13-bit proposal draw and `u` the 192-bit
+    coin. The draw is valid iff `r < 2 * half`; a valid draw proposes `x = r - half`, which is
+    accepted iff `u` is below the threshold for the exponent `x * x`. The result is the
+    accepted value, or `none` when the sampler draws again. -/
+@[expose] def gaussianBoxTrial (half : Nat) (r : Fin 8192) (u : Fin (2 ^ 192)) : Option Int :=
+  if r.val < 2 * half ∧ u.val < gaussianBoxWeight half r.val then
+    some ((r.val : Int) - (half : Int))
+  else none
+
+/-- Every accepted value lies in the box `[-half, half)`. -/
+theorem gaussianBoxTrial_range (half : Nat) (r : Fin 8192) (u : Fin (2 ^ 192)) (x : Int)
+    (h : gaussianBoxTrial half r u = some x) : -(half : Int) ≤ x ∧ x < (half : Int) := by
+  by_cases hc : r.val < 2 * half ∧ u.val < gaussianBoxWeight half r.val
+  · have hT : gaussianBoxTrial half r u = some ((r.val : Int) - (half : Int)) := by
+      unfold gaussianBoxTrial
+      exact ite_eq_left hc
+    rw [hT] at h
+    have hx : (r.val : Int) - (half : Int) = x := Option.some.inj h
+    have hr := hc.1
+    exact ⟨by omega, by omega⟩
+  · have hT : gaussianBoxTrial half r u = none := by
+      unfold gaussianBoxTrial
+      exact ite_eq_right hc
+    rw [hT] at h
+    cases h
+
+/-- Every accepted response coordinate lies in `[-3070, 3069]`, so the verifier's bound
+    `RLWE_ZKPOK_Z_BOUND = 3070` on `|z|_∞` holds for every coin sequence. -/
+theorem gaussianBoxTrial_response_inf_bound (r : Fin 8192) (u : Fin (2 ^ 192)) (x : Int)
+    (h : gaussianBoxTrial 3070 r u = some x) : -3070 ≤ x ∧ x ≤ 3069 ∧ x.natAbs ≤ 3070 := by
+  have h' := gaussianBoxTrial_range 3070 r u x h
+  exact ⟨by omega, by omega, by omega⟩
+
+/-- **Output count of one trial.** Among the `8192 * 2^192` coin pairs `(r, u)`, exactly
+    `gaussianBoxWeight half i` produce the value `i - half`. Hence, conditioned on acceptance,
+    a trial outputs `i - half` with probability `gaussianBoxWeight half i / A`, the `impl` law
+    of `gaussianBoxPair`. -/
+theorem gaussianBoxTrial_output_count (half i : Nat) (hi : i < 2 * half)
+    (hHalf : 2 * half ≤ 8192) :
+    Spec.sampleSum 8192 (fun r : Fin 8192 =>
+      Spec.sampleSum (2 ^ 192) (fun u : Fin (2 ^ 192) =>
+        if gaussianBoxTrial half r u = some ((i : Int) - (half : Int)) then 1 else 0)) =
+      gaussianBoxWeight half i := by
+  have hW : gaussianBoxWeight half i ≤ 2 ^ 192 := gaussianExpProbability_le 24 (by decide) _
+  have hInner : ∀ r : Fin 8192,
+      Spec.sampleSum (2 ^ 192) (fun u : Fin (2 ^ 192) =>
+        if gaussianBoxTrial half r u = some ((i : Int) - (half : Int)) then 1 else 0) =
+        (if r.val = i then gaussianBoxWeight half i else 0) := by
+    intro r
+    by_cases hr : r.val = i
+    · rw [ite_eq_left hr]
+      refine (sampleSum_congr (fun u => ?_)).trans
+        (q192_accepting_coin_count (gaussianBoxWeight half i) hW)
+      by_cases hu : u.val < gaussianBoxWeight half i
+      · have hc : r.val < 2 * half ∧ u.val < gaussianBoxWeight half r.val :=
+          ⟨by omega, by rw [hr]; exact hu⟩
+        have hT : gaussianBoxTrial half r u = some ((i : Int) - (half : Int)) := by
+          unfold gaussianBoxTrial
+          rw [ite_eq_left hc, hr]
+        rw [ite_eq_left hT, ite_eq_left hu]
+      · have hnc : ¬ (r.val < 2 * half ∧ u.val < gaussianBoxWeight half r.val) :=
+          fun hc => hu (by rw [← hr]; exact hc.2)
+        have hT : ¬ gaussianBoxTrial half r u = some ((i : Int) - (half : Int)) := by
+          unfold gaussianBoxTrial
+          rw [ite_eq_right hnc]
+          intro h
+          cases h
+        rw [ite_eq_right hT, ite_eq_right hu]
+    · rw [ite_eq_right hr]
+      have hZero : ∀ u : Fin (2 ^ 192),
+          (if gaussianBoxTrial half r u = some ((i : Int) - (half : Int)) then 1 else 0) = 0 := by
+        intro u
+        refine ite_eq_right (fun hT => hr ?_)
+        unfold gaussianBoxTrial at hT
+        split at hT
+        · have hx := Option.some.inj hT
+          omega
+        · cases hT
+      rw [sampleSum_congr hZero]
+      exact (sampleSum_isFinSum (2 ^ 192)).zero
+  rw [sampleSum_congr hInner]
+  have h := coordSum_point_indicator i (gaussianBoxWeight half i) 8192
+  rw [ite_eq_left (by omega : i < 8192)] at h
+  exact h
+
+/-- **Acceptance count of one trial.** Exactly `A = ∑_i gaussianBoxWeight half i` of the
+    `8192 * 2^192` coin pairs are accepted. -/
+theorem gaussianBoxTrial_accept_count (half : Nat) (hHalf : 2 * half ≤ 8192) :
+    Spec.sampleSum 8192 (fun r : Fin 8192 =>
+      Spec.sampleSum (2 ^ 192) (fun u : Fin (2 ^ 192) =>
+        if (gaussianBoxTrial half r u).isSome then 1 else 0)) =
+      coordSum (2 * half) (gaussianBoxWeight half) := by
+  have hInner : ∀ r : Fin 8192,
+      Spec.sampleSum (2 ^ 192) (fun u : Fin (2 ^ 192) =>
+        if (gaussianBoxTrial half r u).isSome then 1 else 0) =
+        (if r.val < 2 * half then gaussianBoxWeight half r.val else 0) := by
+    intro r
+    have hW : gaussianBoxWeight half r.val ≤ 2 ^ 192 :=
+      gaussianExpProbability_le 24 (by decide) _
+    by_cases hr : r.val < 2 * half
+    · rw [ite_eq_left hr]
+      refine (sampleSum_congr (fun u => ?_)).trans
+        (q192_accepting_coin_count (gaussianBoxWeight half r.val) hW)
+      by_cases hu : u.val < gaussianBoxWeight half r.val
+      · have hT : gaussianBoxTrial half r u = some ((r.val : Int) - (half : Int)) := by
+          unfold gaussianBoxTrial
+          exact ite_eq_left ⟨hr, hu⟩
+        rw [hT, ite_eq_left hu]
+        rfl
+      · have hT : gaussianBoxTrial half r u = none := by
+          unfold gaussianBoxTrial
+          exact ite_eq_right (fun hc => hu hc.2)
+        rw [hT, ite_eq_right hu]
+        rfl
+    · rw [ite_eq_right hr]
+      have hZero : ∀ u : Fin (2 ^ 192),
+          (if (gaussianBoxTrial half r u).isSome then 1 else 0) = 0 := by
+        intro u
+        have hT : gaussianBoxTrial half r u = none := by
+          unfold gaussianBoxTrial
+          exact ite_eq_right (fun hc => hr hc.1)
+        rw [hT]
+        rfl
+      rw [sampleSum_congr hZero]
+      exact (sampleSum_isFinSum (2 ^ 192)).zero
+  rw [sampleSum_congr hInner]
+  exact coordSum_truncate (2 * half) (gaussianBoxWeight half) 8192 hHalf
+
+/-! ## 7. Eight-bit truncation violates the bounds -/
+
+/-- **Truncation witness.** Replace the Q192 comparison by an 8-bit one: threshold
+    `⌊p / 2^184⌋`, coin uniform on `2^8` values. At exponent `e = 1`
+    (a) its acceptance probability is more than `2^-128` below that of the Q192 comparison, and
+    (b) it is more than `2^-128` below the ideal probability of every factor vector inside the
+    table bracket, so the 49-unit bound of
+    `q192_sampler_pointwise_error_le_pow2_neg192` fails for it. -/
+theorem tooth_q8_truncation_violates_2pow_neg128_floor :
+    ∃ e : Nat, e < 2 ^ 24 ∧
+      (thresholdGame (2 ^ 8) (Nat.two_pow_pos 8) (gaussianExpProbability 24 e / 2 ^ 184)).winCount *
+          2 ^ 184 + 2 ^ 64 <
+        (q192BernoulliGame (gaussianExpProbability 24 e)).winCount ∧
+      ∀ f : Nat → Nat,
+        (∀ i, i < 24 → gaussianExpPower i ≤ f i ∧ f i ≤ gaussianExpPower i + 1) →
+        ((thresholdGame (2 ^ 8) (Nat.two_pow_pos 8)
+              (gaussianExpProbability 24 e / 2 ^ 184)).winCount * 2 ^ 184 + 2 ^ 64) *
+            (2 ^ 192) ^ bitCount e 24 <
+          2 ^ 192 * bitSelProd f (fun _ => 1) e 24 := by
+  have ha : (thresholdGame (2 ^ 8) (Nat.two_pow_pos 8)
+        (gaussianExpProbability 24 1 / 2 ^ 184)).winCount * 2 ^ 184 + 2 ^ 64 <
+      (q192BernoulliGame (gaussianExpProbability 24 1)).winCount := by
+    rw [thresholdGame_winCount,
+      q192BernoulliGame_winCount _ (gaussianExpProbability_le 24 (by decide) 1)]
+    decide +kernel
+  refine ⟨1, by decide, ha, fun f hf => ?_⟩
+  exact Nat.lt_of_lt_of_le
+    (Nat.mul_lt_mul_of_pos_right ha (Nat.pow_pos (Nat.two_pow_pos 192)))
+    (q192_sampler_pointwise_error_le_pow2_neg192 1 f hf).1
+
+#tooth_pair Qsag.q192_sampler_pointwise_error_le_pow2_neg192 vs
+  Qsag.tooth_q8_truncation_violates_2pow_neg128_floor
+
+/-- **Truncation witness for the coordinate law.** The Q192 thresholds are themselves an ideal
+    weight vector inside the bracket, and the response-box law built from the 8-bit truncated
+    thresholds `⌊p / 2^184⌋` is at total-variation distance more than `2^-9` from it. The
+    bound `2^-184` of `q192_gaussian_coordinate_tvd_bound` therefore fails for the truncated
+    sampler by a wide margin, in particular at the `2^-128` level. -/
+theorem tooth_q8_truncation_coordinate_tvd_exceeds_2pow_neg9 :
+    ∃ ideal : Nat → Nat, GaussianIdealBracket 3070 ideal ∧
+      2 * (coordSum 6140 (fun i => gaussianBoxWeight 3070 i / 2 ^ 184) * coordSum 6140 ideal) <
+        coordL1 ⟨6140, fun i => gaussianBoxWeight 3070 i / 2 ^ 184, ideal⟩ * 2 ^ 9 := by
+  refine ⟨gaussianBoxWeight 3070, ⟨1, 1, by decide, by decide, fun i _ => ⟨by omega, by omega⟩⟩, ?_⟩
+  have hA := gaussianBoxTotal_3070
+  have hA8 : coordSum 6140 (fun i => gaussianBoxWeight 3070 i / 2 ^ 184) = 446449 :=
+    (coordSum_eq_weightPrefixSum _ 6140).trans (by decide +kernel)
+  rw [coordL1_mk, hA, hA8, coordSum_eq_weightPrefixSum]
+  decide +kernel
+
+#tooth_pair Qsag.q192_gaussian_coordinate_tvd_bound vs
+  Qsag.tooth_q8_truncation_coordinate_tvd_exceeds_2pow_neg9
+
+/-! ## 8. The table against a rational enclosure of the Gaussian base -/
+
+/-- Numerator of the alternating partial sum `∑_{j ≤ J} (-1)^j / (j! * c^j)` over the
+    denominator `expNegTaylorDenom c J = J! * c^J`: `N_0 = 1`, `N_j = N_{j-1} * (j * c) ± 1`. -/
+def expNegTaylorNumer (c : Nat) : Nat → Nat
+  | 0 => 1
+  | j + 1 =>
+    if (j + 1) % 2 = 0 then expNegTaylorNumer c j * ((j + 1) * c) + 1
+    else expNegTaylorNumer c j * ((j + 1) * c) - 1
+
+/-- `J! * c^J`. -/
+def expNegTaylorDenom (c : Nat) : Nat → Nat
+  | 0 => 1
+  | j + 1 => expNegTaylorDenom c j * ((j + 1) * c)
+
+theorem expNegTaylorNumer_zero (c : Nat) : expNegTaylorNumer c 0 = 1 := by rfl
+
+theorem expNegTaylorNumer_succ (c j : Nat) :
+    expNegTaylorNumer c (j + 1) =
+      if (j + 1) % 2 = 0 then expNegTaylorNumer c j * ((j + 1) * c) + 1
+      else expNegTaylorNumer c j * ((j + 1) * c) - 1 := by rfl
+
+theorem expNegTaylorDenom_zero (c : Nat) : expNegTaylorDenom c 0 = 1 := by rfl
+
+theorem expNegTaylorDenom_succ (c j : Nat) :
+    expNegTaylorDenom c (j + 1) = expNegTaylorDenom c j * ((j + 1) * c) := by rfl
+
+/-- The rational `a / b` lies between the partial sums of orders 19 and 20 of the series
+    `∑ (-1)^j x^j / j!` at `x = 1/980000`. The alternating-series estimate, which is not
+    formalised here, places `e^(-1/980000)` strictly inside this interval. -/
+def InExpNegEnclosure (a b : Nat) : Prop :=
+  0 < b ∧ expNegTaylorNumer 980000 19 * b ≤ a * expNegTaylorDenom 980000 19 ∧
+    a * expNegTaylorDenom 980000 20 ≤ expNegTaylorNumer 980000 20 * b
+
+theorem inExpNegEnclosure_iff (a b : Nat) :
+    InExpNegEnclosure a b ↔
+      0 < b ∧ expNegTaylorNumer 980000 19 * b ≤ a * expNegTaylorDenom 980000 19 ∧
+        a * expNegTaylorDenom 980000 20 ≤ expNegTaylorNumer 980000 20 * b := by
+  exact Iff.rfl
+
+/-- The enclosure is a nonempty interval of width at most `2^-459`, and no subtraction in the
+    numerator recurrence truncates. -/
+theorem expNegEnclosure_nonempty_and_narrow :
+    InExpNegEnclosure (expNegTaylorNumer 980000 20) (expNegTaylorDenom 980000 20) ∧
+    (expNegTaylorNumer 980000 20 * expNegTaylorDenom 980000 19 -
+        expNegTaylorNumer 980000 19 * expNegTaylorDenom 980000 20) * 2 ^ 459 ≤
+      expNegTaylorDenom 980000 19 * expNegTaylorDenom 980000 20 ∧
+    ∀ j, j < 20 → 1 ≤ expNegTaylorNumer 980000 j * ((j + 1) * 980000) :=
+  ⟨⟨by decide +kernel, by decide +kernel, Nat.le_refl _⟩, by decide +kernel, by decide +kernel⟩
+
+/-- Lower end of a fixed-point squaring chain at precision `P`: `x ↦ ⌊x^2 / P⌋`. -/
+private def sqChainLo (P x0 : Nat) : Nat → Nat
+  | 0 => x0
+  | i + 1 => sqChainLo P x0 i ^ 2 / P
+
+/-- Upper end of the chain: `x ↦ ⌊x^2 / P⌋ + 1`. -/
+private def sqChainHi (P x0 : Nat) : Nat → Nat
+  | 0 => x0
+  | i + 1 => sqChainHi P x0 i ^ 2 / P + 1
+
+private theorem div_succ_mul_gt (x m : Nat) (hm : 0 < m) : x < (x / m + 1) * m := by
+  have h := Nat.lt_mul_div_succ x hm
+  rw [Nat.mul_comm] at h
+  exact h
+
+private theorem sq_step (P l h A B : Nat) (hP : 0 < P) (hLo : l * B ≤ P * A)
+    (hHi : P * A ≤ h * B) :
+    l ^ 2 / P * B ^ 2 ≤ P * A ^ 2 ∧ P * A ^ 2 ≤ (h ^ 2 / P + 1) * B ^ 2 := by
+  rw [Nat.pow_two l, Nat.pow_two h, Nat.pow_two A, Nat.pow_two B]
+  have hl : l * l / P * P ≤ l * l := Nat.div_mul_le_self _ _
+  have hh : h * h ≤ (h * h / P + 1) * P := Nat.le_of_lt (div_succ_mul_gt (h * h) P hP)
+  generalize l * l / P = l' at hl ⊢
+  generalize h * h / P = h' at hh ⊢
+  refine ⟨Nat.le_of_mul_le_mul_left ?_ hP, Nat.le_of_mul_le_mul_left ?_ hP⟩
+  · calc P * (l' * (B * B)) = l' * P * (B * B) := by ac_rfl
+      _ ≤ l * l * (B * B) := Nat.mul_le_mul_right _ hl
+      _ = l * B * (l * B) := by ac_rfl
+      _ ≤ P * A * (P * A) := Nat.mul_le_mul hLo hLo
+      _ = P * (P * (A * A)) := by ac_rfl
+  · calc P * (P * (A * A)) = P * A * (P * A) := by ac_rfl
+      _ ≤ h * B * (h * B) := Nat.mul_le_mul hHi hHi
+      _ = h * h * (B * B) := by ac_rfl
+      _ ≤ (h' + 1) * P * (B * B) := Nat.mul_le_mul_right _ hh
+      _ = P * ((h' + 1) * (B * B)) := by ac_rfl
+
+private theorem sqChain_bracket (P : Nat) (hP : 0 < P) (lo0 hi0 a b : Nat)
+    (hLo : lo0 * b ≤ P * a) (hHi : P * a ≤ hi0 * b) :
+    ∀ i : Nat, sqChainLo P lo0 i * b ^ 2 ^ i ≤ P * a ^ 2 ^ i ∧
+      P * a ^ 2 ^ i ≤ sqChainHi P hi0 i * b ^ 2 ^ i
+  | 0 => by
+    show lo0 * b ^ 2 ^ 0 ≤ P * a ^ 2 ^ 0 ∧ P * a ^ 2 ^ 0 ≤ hi0 * b ^ 2 ^ 0
+    rw [Nat.pow_zero, Nat.pow_one, Nat.pow_one]
+    exact ⟨hLo, hHi⟩
+  | i + 1 => by
+    obtain ⟨ihLo, ihHi⟩ := sqChain_bracket P hP lo0 hi0 a b hLo hHi i
+    have hpa : a ^ 2 ^ (i + 1) = (a ^ 2 ^ i) ^ 2 := by rw [Nat.pow_succ, Nat.pow_mul]
+    have hpb : b ^ 2 ^ (i + 1) = (b ^ 2 ^ i) ^ 2 := by rw [Nat.pow_succ, Nat.pow_mul]
+    rw [hpa, hpb]
+    exact sq_step P _ _ _ _ hP ihLo ihHi
+
+private theorem chain_base (P N19 M19 N20 M20 a b : Nat) (hM19 : 0 < M19) (hM20 : 0 < M20)
+    (hLoE : N19 * b ≤ a * M19) (hHiE : a * M20 ≤ N20 * b) :
+    N19 * P / M19 * b ≤ P * a ∧ P * a ≤ (N20 * P / M20 + 1) * b := by
+  have hl : N19 * P / M19 * M19 ≤ N19 * P := Nat.div_mul_le_self _ _
+  have hh : N20 * P ≤ (N20 * P / M20 + 1) * M20 :=
+    Nat.le_of_lt (div_succ_mul_gt (N20 * P) M20 hM20)
+  generalize N19 * P / M19 = l at hl ⊢
+  generalize N20 * P / M20 = h at hh ⊢
+  refine ⟨Nat.le_of_mul_le_mul_left ?_ hM19, Nat.le_of_mul_le_mul_left ?_ hM20⟩
+  · calc M19 * (l * b) = l * M19 * b := by ac_rfl
+      _ ≤ N19 * P * b := Nat.mul_le_mul_right _ hl
+      _ = N19 * b * P := by ac_rfl
+      _ ≤ a * M19 * P := Nat.mul_le_mul_right _ hLoE
+      _ = M19 * (P * a) := by ac_rfl
+  · calc M20 * (P * a) = a * M20 * P := by ac_rfl
+      _ ≤ N20 * b * P := Nat.mul_le_mul_right _ hHiE
+      _ = N20 * P * b := by ac_rfl
+      _ ≤ (h + 1) * M20 * b := Nat.mul_le_mul_right _ hh
+      _ = M20 * ((h + 1) * b) := by ac_rfl
+
+private theorem chain_conclude (t P Q lo hi A B : Nat) (hP : 0 < P) (hB : 0 < B)
+    (hcLo : lo * B ≤ P * A) (hcHi : P * A ≤ hi * B) (htLo : t * P ≤ lo * Q)
+    (htHi : hi * Q < (t + 1) * P) : t * B ≤ Q * A ∧ Q * A < (t + 1) * B := by
+  refine ⟨Nat.le_of_mul_le_mul_left ?_ hP, Spec.nat_lt_of_mul_lt_mul_right (k := P) ?_⟩
+  · calc P * (t * B) = t * P * B := by ac_rfl
+      _ ≤ lo * Q * B := Nat.mul_le_mul_right _ htLo
+      _ = Q * (lo * B) := by ac_rfl
+      _ ≤ Q * (P * A) := Nat.mul_le_mul_left _ hcLo
+      _ = P * (Q * A) := by ac_rfl
+  · calc Q * A * P = Q * (P * A) := by ac_rfl
+      _ ≤ Q * (hi * B) := Nat.mul_le_mul_left _ hcHi
+      _ = hi * Q * B := by ac_rfl
+      _ < (t + 1) * P * B := Nat.mul_lt_mul_of_pos_right htHi hB
+      _ = (t + 1) * B * P := by ac_rfl
+
+/-- Chain start at precision `2^512`: floor of the order-19 partial sum. -/
+private def expNegChainLo0 : Nat :=
+  expNegTaylorNumer 980000 19 * 2 ^ 512 / expNegTaylorDenom 980000 19
+
+/-- Chain start at precision `2^512`: floor plus one of the order-20 partial sum. -/
+private def expNegChainHi0 : Nat :=
+  expNegTaylorNumer 980000 20 * 2 ^ 512 / expNegTaylorDenom 980000 20 + 1
+
+private theorem expNegChain_table_check : ∀ i, i < 30 →
+    gaussianExpPower i * 2 ^ 512 ≤ sqChainLo (2 ^ 512) expNegChainLo0 i * 2 ^ 192 ∧
+    sqChainHi (2 ^ 512) expNegChainHi0 i * 2 ^ 192 < (gaussianExpPower i + 1) * 2 ^ 512 := by
+  decide +kernel
+
+/-- **The table is the floor of `2^192 * q^(2^i)` for every rational `q` in the enclosure.**
+    For `q = a / b` with `InExpNegEnclosure a b` and every `i < 30`:
+    `table[i] ≤ 2^192 * (a / b)^(2^i) < table[i] + 1`. -/
+theorem rlweGaussianExpPowers_floor_of_rational_base (a b : Nat) (hq : InExpNegEnclosure a b) :
+    ∀ i, i < 30 →
+      gaussianExpPower i * b ^ 2 ^ i ≤ 2 ^ 192 * a ^ 2 ^ i ∧
+      2 ^ 192 * a ^ 2 ^ i < (gaussianExpPower i + 1) * b ^ 2 ^ i := by
+  obtain ⟨hb, hLoE, hHiE⟩ := hq
+  have hBase := chain_base (2 ^ 512) _ _ _ _ a b (by decide +kernel) (by decide +kernel)
+    hLoE hHiE
+  intro i hi
+  obtain ⟨hcLo, hcHi⟩ := sqChain_bracket (2 ^ 512) (Nat.two_pow_pos 512) expNegChainLo0
+    expNegChainHi0 a b hBase.1 hBase.2 i
+  obtain ⟨htLo, htHi⟩ := expNegChain_table_check i hi
+  exact chain_conclude _ _ _ _ _ _ _ (Nat.two_pow_pos 512) (Nat.pow_pos hb) hcLo hcHi htLo htHi
+
+private theorem mod_mul_two (e m : Nat) (hm : 0 < m) :
+    e % (m * 2) = e % m + m * (e / m % 2) := by
+  have h1 := Nat.div_add_mod e m
+  have h2 := Nat.div_add_mod (e / m) 2
+  have hr := Nat.mod_lt e hm
+  have hb : e / m % 2 < 2 := Nat.mod_lt _ (by decide)
+  have h3 : m * (e / m) = m * 2 * (e / m / 2) + m * (e / m % 2) := by
+    rw [Nat.mul_assoc m 2, ← Nat.mul_add, h2]
+  have hDecomp : e = m * 2 * (e / m / 2) + (e % m + m * (e / m % 2)) := by omega
+  have hLt : e % m + m * (e / m % 2) < m * 2 := by
+    have h4 : m * (e / m % 2) ≤ m * 1 := Nat.mul_le_mul_left m (Nat.le_of_lt_succ hb)
+    omega
+  have h5 := Nat.mul_add_mod (m * 2) (e / m / 2) (e % m + m * (e / m % 2))
+  rw [← hDecomp, Nat.mod_eq_of_lt hLt] at h5
+  exact h5
+
+/-- The product of `a^(2^i)` over the set bits of `e` below `bits` is `a^(e mod 2^bits)`. -/
+theorem bitSelProd_pow_two_pow (a e : Nat) :
+    ∀ bits : Nat, bitSelProd (fun i => a ^ 2 ^ i) (fun _ => 1) e bits = a ^ (e % 2 ^ bits)
+  | 0 => by
+    show 1 = a ^ (e % 2 ^ 0)
+    rw [Nat.pow_zero, Nat.mod_one, Nat.pow_zero]
+  | bits + 1 => by
+    have hd0 : ¬ decide ((0 : Nat) = 1) = true := by decide
+    have hd1 : decide ((1 : Nat) = 1) = true := by decide
+    rw [bitSelProd_succ, bitSelProd_pow_two_pow a e bits, Nat.pow_succ 2 bits,
+      mod_mul_two e (2 ^ bits) (Nat.two_pow_pos bits), Nat.testBit_eq_decide_div_mod_eq]
+    rcases Nat.mod_two_eq_zero_or_one (e / 2 ^ bits) with h | h
+    · rw [h, ite_eq_right hd0, Nat.mul_zero, Nat.add_zero, Nat.mul_one]
+    · rw [h, ite_eq_left hd1, Nat.mul_one, Nat.pow_add]
+
+/-- **Evaluator error against the exact power `q^e`.** For every rational `q = a / b` in the
+    enclosure, every `bits ≤ 30` and every exponent `e < 2^bits`, the evaluator output `p`
+    satisfies `p / 2^192 ≤ q^e ≤ (p + 1 + 2 * bits) / 2^192`. -/
+theorem gaussianExpProbability_rational_base (bits : Nat) (hBits : bits ≤ 30) (e : Nat)
+    (he : e < 2 ^ bits) (a b : Nat) (hq : InExpNegEnclosure a b) :
+    gaussianExpProbability bits e * b ^ e ≤ 2 ^ 192 * a ^ e ∧
+    2 ^ 192 * a ^ e ≤ (gaussianExpProbability bits e + (1 + 2 * bits)) * b ^ e := by
+  have hT := rlweGaussianExpPowers_floor_of_rational_base a b hq
+  have hB := gaussianExpProbability_bracket bits hBits e (fun i => a ^ 2 ^ i)
+    (fun i => b ^ 2 ^ i) (fun _ => 1)
+    (fun i hi => ⟨(hT i (Nat.lt_of_lt_of_le hi hBits)).1,
+      Nat.le_of_lt (hT i (Nat.lt_of_lt_of_le hi hBits)).2⟩)
+  rw [bitSelProd_pow_two_pow, bitSelProd_pow_two_pow, Nat.mod_eq_of_lt he] at hB
+  refine ⟨hB.1, Nat.le_trans hB.2 (Nat.mul_le_mul_right _ ?_)⟩
+  have hCnt := bitCount_le e bits
+  omega
+
+/-- The production Bernoulli step against the exact power: for `e < 2^24` and every rational
+    `q = a / b` in the enclosure, `Pr[accept] ≤ q^e ≤ Pr[accept] + 49 / 2^192`. -/
+theorem q192_sampler_pointwise_error_rational_base (e : Nat) (he : e < 2 ^ 24) (a b : Nat)
+    (hq : InExpNegEnclosure a b) :
+    (q192BernoulliGame (gaussianExpProbability 24 e)).winCount * b ^ e ≤ 2 ^ 192 * a ^ e ∧
+    2 ^ 192 * a ^ e ≤ ((q192BernoulliGame (gaussianExpProbability 24 e)).winCount + 49) * b ^ e := by
+  rw [q192BernoulliGame_winCount _ (gaussianExpProbability_le 24 (by decide) e)]
+  exact gaussianExpProbability_rational_base 24 (by decide) e he a b hq
+
+/-- Weights of the discrete Gaussian with base `q = a / b` on the box, over the common
+    denominator `b^(half^2)`: index `i` (value `x = i - half`) has weight
+    `a^(x^2) * b^(half^2 - x^2)`, proportional to `q^(x^2)`. -/
+def rationalGaussianWeight (a b half i : Nat) : Nat :=
+  a ^ (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+    b ^ (half * half - Spec.natAbsDiff i half * Spec.natAbsDiff i half)
+
+theorem rationalGaussianWeight_eq (a b half i : Nat) :
+    rationalGaussianWeight a b half i =
+      a ^ (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+        b ^ (half * half - Spec.natAbsDiff i half * Spec.natAbsDiff i half) := by rfl
+
+/-- The discrete Gaussian with any rational base in the enclosure is inside the 49-unit
+    bracket of the production thresholds. -/
+theorem rationalGaussian_idealBracket (half : Nat) (hHalf : half * half < 2 ^ 24) (a b : Nat)
+    (hq : InExpNegEnclosure a b) :
+    GaussianIdealBracket half (rationalGaussianWeight a b half) := by
+  refine ⟨2 ^ 192, b ^ (half * half), Nat.two_pow_pos 192, Nat.pow_pos hq.1, fun i hi => ?_⟩
+  have hAbs : Spec.natAbsDiff i half ≤ half := by
+    unfold Spec.natAbsDiff
+    split <;> omega
+  have he : Spec.natAbsDiff i half * Spec.natAbsDiff i half ≤ half * half :=
+    Nat.mul_le_mul hAbs hAbs
+  obtain ⟨h1, h2⟩ := gaussianExpProbability_rational_base 24 (by decide)
+    (Spec.natAbsDiff i half * Spec.natAbsDiff i half) (Nat.lt_of_le_of_lt he hHalf) a b hq
+  have hSplit : b ^ (half * half) =
+      b ^ (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+        b ^ (half * half - Spec.natAbsDiff i half * Spec.natAbsDiff i half) := by
+    rw [← Nat.pow_add]
+    congr 1
+    omega
+  show gaussianExpProbability 24 (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+        b ^ (half * half) ≤
+      2 ^ 192 * (a ^ (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+        b ^ (half * half - Spec.natAbsDiff i half * Spec.natAbsDiff i half)) ∧
+    2 ^ 192 * (a ^ (Spec.natAbsDiff i half * Spec.natAbsDiff i half) *
+        b ^ (half * half - Spec.natAbsDiff i half * Spec.natAbsDiff i half)) ≤
+      (gaussianExpProbability 24 (Spec.natAbsDiff i half * Spec.natAbsDiff i half) + 49) *
+        b ^ (half * half)
+  rw [hSplit, ← Nat.mul_assoc, ← Nat.mul_assoc, ← Nat.mul_assoc]
+  exact ⟨Nat.mul_le_mul_right _ h1, Nat.mul_le_mul_right _ h2⟩
+
+/-- A batch of box coordinates, one per entry of `halves`, each paired with the discrete
+    Gaussian of base `a / b` on its box. -/
+def rationalGaussianBatch (a b : Nat) (halves : List Nat) : List WeightPair :=
+  gaussianBatch (halves.map (fun h => (h, rationalGaussianWeight a b h)))
+
+theorem rationalGaussianBatch_eq (a b : Nat) (halves : List Nat) :
+    rationalGaussianBatch a b halves =
+      gaussianBatch (halves.map (fun h => (h, rationalGaussianWeight a b h))) := by rfl
+
+private theorem rationalGaussianBatch_coords (a b : Nat) (hq : InExpNegEnclosure a b)
+    (halves : List Nat) (hHalves : ∀ h, h ∈ halves → h = 3070 ∨ h = 3072) :
+    ∀ c, c ∈ halves.map (fun h => (h, rationalGaussianWeight a b h)) →
+      (c.1 = 3070 ∨ c.1 = 3072) ∧ GaussianIdealBracket c.1 c.2 := by
+  intro c hc
+  obtain ⟨h, hh, rfl⟩ := List.mem_map.mp hc
+  have hSq : h * h < 2 ^ 24 := by
+    rcases hHalves h hh with r | r <;> subst r <;> decide
+  exact ⟨hHalves h hh, rationalGaussian_idealBracket h hSq a b hq⟩
+
+/-- **Batch bound against the discrete Gaussian with base in the enclosure.** For at most
+    49152 box coordinates and every rational `q = a / b` in the enclosure, the joint law of the
+    accepted proposals is at total-variation distance less than `2^-168` from the product of
+    the discrete Gaussians with weights proportional to `q^(x^2)`. -/
+theorem q192_rlwe_batch_tvd_bound_rational_base (a b : Nat) (hq : InExpNegEnclosure a b)
+    (halves : List Nat) (hLen : halves.length ≤ 49152)
+    (hHalves : ∀ h, h ∈ halves → h = 3070 ∨ h = 3072) :
+    jointL1 (rationalGaussianBatch a b halves) * 2 ^ 168 <
+      2 * (jointTotal WeightPair.impl (rationalGaussianBatch a b halves) *
+        jointTotal WeightPair.ideal (rationalGaussianBatch a b halves)) :=
+  q192_rlwe_batch_tvd_bound _ (by rw [List.length_map]; exact hLen)
+    (rationalGaussianBatch_coords a b hq halves hHalves)
+
+/-- Event transfer against the discrete Gaussian with base in the enclosure: every event on
+    the outcome vectors of at most 49152 coordinates has probabilities under the two laws
+    that differ by less than `2^-168`. -/
+theorem q192_rlwe_batch_event_transfer_rational_base (a b : Nat) (hq : InExpNegEnclosure a b)
+    (halves : List Nat) (hLen : halves.length ≤ 49152)
+    (hHalves : ∀ h, h ∈ halves → h = 3070 ∨ h = 3072) (E : List Nat → Bool) :
+    Spec.natAbsDiff
+        (jointEventMass WeightPair.impl (rationalGaussianBatch a b halves) E *
+          jointTotal WeightPair.ideal (rationalGaussianBatch a b halves))
+        (jointEventMass WeightPair.ideal (rationalGaussianBatch a b halves) E *
+          jointTotal WeightPair.impl (rationalGaussianBatch a b halves)) * 2 ^ 168 <
+      jointTotal WeightPair.impl (rationalGaussianBatch a b halves) *
+        jointTotal WeightPair.ideal (rationalGaussianBatch a b halves) :=
+  q192_rlwe_batch_event_transfer _ (by rw [List.length_map]; exact hLen)
+    (rationalGaussianBatch_coords a b hq halves hHalves) E
+
+/-- The pair tail event `‖z‖_2^2 > 1_500_000_000` over 2048 coordinates of one kind: its
+    probability under the production law is within `2^-173` of its probability under the
+    discrete Gaussian with any rational base in the enclosure. -/
+theorem q192_rlwe_pair_l2_tail_transfer_rational_base (a b : Nat) (hq : InExpNegEnclosure a b)
+    (half : Nat) (hHalf : half = 3070 ∨ half = 3072) :
+    Spec.natAbsDiff
+        (jointEventMass WeightPair.impl (rationalGaussianBatch a b (List.replicate 2048 half))
+            (fun v => decide (1500000000 < centeredSqNorm half v)) *
+          jointTotal WeightPair.ideal (rationalGaussianBatch a b (List.replicate 2048 half)))
+        (jointEventMass WeightPair.ideal (rationalGaussianBatch a b (List.replicate 2048 half))
+            (fun v => decide (1500000000 < centeredSqNorm half v)) *
+          jointTotal WeightPair.impl (rationalGaussianBatch a b (List.replicate 2048 half))) *
+        2 ^ 173 <
+      jointTotal WeightPair.impl (rationalGaussianBatch a b (List.replicate 2048 half)) *
+        jointTotal WeightPair.ideal (rationalGaussianBatch a b (List.replicate 2048 half)) := by
+  have hSq : half * half < 2 ^ 24 := by
+    rcases hHalf with r | r <;> subst r <;> decide
+  refine q192_rlwe_pair_l2_tail_transfer half hHalf _
+    (by rw [List.length_map, List.length_replicate]) (fun c hc => ?_)
+  obtain ⟨h, hh, rfl⟩ := List.mem_map.mp hc
+  have hEq : h = half := List.eq_of_mem_replicate hh
+  subst hEq
+  exact ⟨rfl, rationalGaussian_idealBracket h hSq a b hq⟩
+
+#verify_constructive
+  Qsag.gaussianExpProbability_zero
+  Qsag.gaussianExpProbability_succ
+  Qsag.bitSelProd_zero
+  Qsag.bitSelProd_succ
+  Qsag.bitCount_zero
+  Qsag.bitCount_succ
+  Qsag.bitCount_le
+  Qsag.bitSelProd_const_pow
+  Qsag.bitSelProd_pad_self
+  Qsag.bitSelProd_pos
+  Qsag.rlweGaussianExpPowers_length
+  Qsag.gaussianExpPower_succ_le
+  Qsag.gaussianExpProbability_reference_values
+  Qsag.gaussianExpProbability_bracket
+  Qsag.gaussianExpProbability_le
+  Qsag.IsFinSum.zero
+  Qsag.IsFinSum.mul_left
+  Qsag.IsFinSum.mul_right
+  Qsag.IsFinSum.const
+  Qsag.IsFinSum.natAbsDiff_le
+  Qsag.IsFinSum.split
+  Qsag.IsFinSum.nest
+  Qsag.sampleSum_isFinSum
+  Qsag.coordSum_succ
+  Qsag.coordSum_isFinSum
+  Qsag.coordSum_one
+  Qsag.coordSum_lt_indicator
+  Qsag.coordSum_point_indicator
+  Qsag.coordSum_truncate
+  Qsag.coordSum_eq_weightPrefixSum
+  Qsag.IsFinSum.cross_l1_le_of_bracket
+  Qsag.IsFinSum.total_le_of_bracket
+  Qsag.IsFinSum.cross_l1_prod_le
+  Qsag.IsFinSum.event_cross_le
+  Qsag.thresholdGame_winCount
+  Qsag.q192_accepting_coin_count
+  Qsag.q192BernoulliGame_winCount
+  Qsag.q192BernoulliGame_winProb
+  Qsag.q192BernoulliAccept_eq_fastFiltered
+  Qsag.q192_sampler_pointwise_error_le_pow2_neg192
+  Qsag.q192_sampler_pointwise_error_ratBound
+  Qsag.q192_gaussian_accept_pointwise_error_61_ulp
+  Qsag.coordL1_eq
+  Qsag.coordL1_mk
+  Qsag.jointL1_eq
+  Qsag.coordEventMass_eq
+  Qsag.jointEventMass_eq
+  Qsag.jointSum_isFinSum
+  Qsag.jointSum_jointWeight
+  Qsag.jointTotal_pos
+  Qsag.jointL1_cons_le
+  Qsag.jointL1_mul_le
+  Qsag.coordEvent_cross_le
+  Qsag.jointEvent_cross_le
+  Qsag.gaussianBoxPair_eq
+  Qsag.gaussianIdealBracket_iff
+  Qsag.gaussianBoxTotal_3070
+  Qsag.gaussianBoxTotal_3072
+  Qsag.gaussianBoxTotal_lower
+  Qsag.gaussianBox_idealTotal_pos
+  Qsag.gaussianBox_coordL1_le
+  Qsag.q192_gaussian_coordinate_tvd_bound
+  Qsag.q192_gaussian_coordinate_event_transfer
+  Qsag.gaussianBatch_eq
+  Qsag.gaussianBatch_jointL1_le
+  Qsag.gaussianBatch_totals_pos
+  Qsag.gaussianBatch_tvd_lt
+  Qsag.q192_rlwe_batch_tvd_bound
+  Qsag.q192_rlwe_poly_batch_tvd_bound
+  Qsag.gaussianBatch_event_transfer
+  Qsag.q192_rlwe_batch_event_transfer
+  Qsag.centeredSqNorm_nil
+  Qsag.centeredSqNorm_cons
+  Qsag.q192_rlwe_pair_l2_tail_transfer
+  Qsag.gaussianBoxTrial_range
+  Qsag.gaussianBoxTrial_response_inf_bound
+  Qsag.gaussianBoxTrial_output_count
+  Qsag.gaussianBoxTrial_accept_count
+  Qsag.tooth_q8_truncation_violates_2pow_neg128_floor
+  Qsag.tooth_q8_truncation_coordinate_tvd_exceeds_2pow_neg9
+  Qsag.expNegTaylorNumer_zero
+  Qsag.expNegTaylorNumer_succ
+  Qsag.expNegTaylorDenom_zero
+  Qsag.expNegTaylorDenom_succ
+  Qsag.inExpNegEnclosure_iff
+  Qsag.expNegEnclosure_nonempty_and_narrow
+  Qsag.rlweGaussianExpPowers_floor_of_rational_base
+  Qsag.bitSelProd_pow_two_pow
+  Qsag.gaussianExpProbability_rational_base
+  Qsag.q192_sampler_pointwise_error_rational_base
+  Qsag.rationalGaussianWeight_eq
+  Qsag.rationalGaussian_idealBracket
+  Qsag.rationalGaussianBatch_eq
+  Qsag.q192_rlwe_batch_tvd_bound_rational_base
+  Qsag.q192_rlwe_batch_event_transfer_rational_base
+  Qsag.q192_rlwe_pair_l2_tail_transfer_rational_base
+
+end Qsag
+end
