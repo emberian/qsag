@@ -1000,3 +1000,964 @@ fn mul_poly(cs: &mut Ctx, a: &Poly, b: &Poly) -> Poly {
     Poly(out)
 }
 
+// ============================================================================
+// Bit-decomposed witnesses
+// ============================================================================
+
+/// A witness in `[0, 2^bits)`: 8-bit limbs and their bits, one row per bit.
+///
+/// It is a residue representative, not necessarily the canonical one; see
+/// [`Modulus::enforce_canonical`].
+#[derive(Clone)]
+pub struct Element {
+    /// Little-endian limbs; limb `i` holds bits `8i..8i+8`.
+    pub bytes_le: Vec<Lc>,
+    /// Little-endian bits.
+    pub bits_le: Vec<Lc>,
+}
+
+impl Element {
+    fn poly(&self) -> Poly {
+        let nbits = self.bits_le.len();
+        Poly(
+            self.bytes_le
+                .iter()
+                .enumerate()
+                .map(|(i, lc)| Coef {
+                    lc: lc.clone(),
+                    lo: 0,
+                    hi: (1i128 << (nbits - 8 * i).min(8)) - 1,
+                })
+                .collect(),
+        )
+    }
+
+    /// The value as an unreduced operand.
+    pub fn lazy(&self) -> Lazy {
+        Lazy(self.poly())
+    }
+}
+
+/// The coefficients of `p` for a recorded definition.
+fn int_coefs(p: &Poly) -> Vec<IntCoef> {
+    p.0.iter()
+        .map(|c| IntCoef {
+            lc: c.lc.clone(),
+            lo: c.lo,
+            hi: c.hi,
+        })
+        .collect()
+}
+
+/// The source of the canonical residue of `(sum of products + linear) / den` modulo `m`.
+fn residue_source(
+    cs: &mut Ctx,
+    m: &Modulus,
+    products: &[(&Poly, &Poly)],
+    linear: &Poly,
+    den: Option<&Poly>,
+) -> SourceId {
+    cs.source(|| Source::Residue {
+        products: products
+            .iter()
+            .map(|(a, b)| (int_coefs(a), int_coefs(b)))
+            .collect(),
+        linear: int_coefs(linear),
+        den: den.map(int_coefs).unwrap_or_default(),
+        modulus: big_to_bytes(&m.p)[..m.limbs].to_vec(),
+    })
+}
+
+/// Allocate `value mod 2^nbits`. Each limb is one variable; its low bits are variables and
+/// its top bit is the linear form that completes it, so a limb costs as many rows as bits.
+fn alloc_int(cs: &mut Ctx, source: SourceId, value_le: &[u8], nbits: usize) -> Element {
+    cs.hints.elements += 1;
+    cs.hints.element_bits += nbits;
+    cs.hints.range_lookups += range_lookups(nbits);
+    alloc_bits(cs, source, value_le, nbits)
+}
+
+fn alloc_bits(cs: &mut Ctx, source: SourceId, value_le: &[u8], nbits: usize) -> Element {
+    let part = |lo: usize, width: usize| Def::Bits {
+        source,
+        lo: lo as u32,
+        width: width as u32,
+    };
+    let mut bytes_le = Vec::with_capacity(nbits.div_ceil(8));
+    let mut bits_le = Vec::with_capacity(nbits);
+    for i in 0..nbits.div_ceil(8) {
+        let width = (nbits - 8 * i).min(8);
+        let byte = value_le.get(i).copied().unwrap_or(0) & (0xffu16 >> (8 - width)) as u8;
+        if width == 1 {
+            let bit: Lc = cs
+                .alloc_defined(F::from_u64_reduced(byte as u64), || part(8 * i, 1))
+                .into();
+            cs.enforce_boolean(&bit);
+            bits_le.push(bit.clone());
+            bytes_le.push(bit);
+            continue;
+        }
+        let limb: Lc = cs
+            .alloc_defined(F::from_u64_reduced(byte as u64), || part(8 * i, width))
+            .into();
+        let mut top = limb.clone();
+        for k in 0..width - 1 {
+            let bit = cs.alloc_defined(F::from_u64_reduced(((byte >> k) & 1) as u64), || {
+                part(8 * i + k, 1)
+            });
+            cs.enforce_boolean(&bit.into());
+            top = top.minus(&Lc::term(bit, F::from_u64_reduced(1 << k)));
+            bits_le.push(bit.into());
+        }
+        let top = top.scaled(F::from_u64_reduced(1 << (width - 1)).inv());
+        cs.enforce_boolean(&top);
+        bits_le.push(top);
+        bytes_le.push(limb);
+    }
+    Element { bytes_le, bits_le }
+}
+
+/// An unreduced integer operand: sums, differences and constants are free.
+#[derive(Clone)]
+pub struct Lazy(Poly);
+
+impl Lazy {
+    /// A public constant, little-endian.
+    pub fn constant(value_le: &[u8]) -> Self {
+        Self(Poly::constant_bytes(value_le))
+    }
+
+    /// Bits the caller has constrained Boolean, little-endian.
+    pub fn from_bits(bits_le: &[Lc]) -> Self {
+        Self(Poly(
+            bits_le
+                .chunks(8)
+                .map(|chunk| {
+                    let parts: Vec<(F, &Lc)> = chunk
+                        .iter()
+                        .enumerate()
+                        .map(|(k, b)| (F::from_u64_reduced(1 << k), b))
+                        .collect();
+                    Coef {
+                        lc: Lc::combine(&parts),
+                        lo: 0,
+                        hi: (1 << chunk.len()) - 1,
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    pub fn add(&self, rhs: &Lazy) -> Lazy {
+        Lazy(self.0.add(&rhs.0))
+    }
+
+    pub fn sub(&self, rhs: &Lazy) -> Lazy {
+        Lazy(self.0.sub(&rhs.0))
+    }
+
+    /// Multiply by a small public integer.
+    pub fn scale(&self, k: i32) -> Lazy {
+        Lazy(self.0.scale(k as i64))
+    }
+}
+
+fn reduce_poly(cs: &mut Ctx, m: &Modulus, a: &Poly) -> Element {
+    let value = big_to_bytes(&m.canon(&m.poly_value(cs, a)));
+    let source = residue_source(cs, m, &[], a, None);
+    let out = alloc_int(cs, source, &value, m.bits);
+    enforce_zero_mod(cs, m, &out.poly().sub(a));
+    out
+}
+
+impl Modulus {
+    /// A fresh witness of [`Self::bits`] bits holding `value_le mod 2^bits`.
+    pub fn alloc(&self, cs: &mut impl Host, value_le: &[u8]) -> Element {
+        run(cs, |cs| {
+            let source = cs.source(|| Source::Input {
+                bits: self.bits as u32,
+            });
+            alloc_int(cs, source, value_le, self.bits)
+        })
+    }
+
+    /// The canonical residue of `a` under the current assignment, little-endian, one byte
+    /// per limb of the modulus.
+    pub fn value(&self, cs: &ConstraintSystem, a: &Lazy) -> Vec<u8> {
+        big_to_bytes(&self.canon(&self.poly_value(cs, &a.0)))[..self.limbs].to_vec()
+    }
+
+    /// A fresh element congruent to `a`.
+    pub fn reduce(&self, cs: &mut impl Host, a: &Lazy) -> Element {
+        run(cs, |cs| reduce_poly(cs, self, &a.0))
+    }
+
+    /// A fresh element congruent to `a b`.
+    pub fn mul(&self, cs: &mut impl Host, a: &Lazy, b: &Lazy) -> Element {
+        run(cs, |cs| {
+            let product = mul_poly(cs, &a.0, &b.0);
+            reduce_poly(cs, self, &product)
+        })
+    }
+
+    /// `a = 0 (mod p)`.
+    pub fn enforce_zero(&self, cs: &mut impl Host, a: &Lazy) {
+        run(cs, |cs| {
+            enforce_zero_mod(cs, self, &a.0);
+        })
+    }
+
+    /// `a = b (mod p)`.
+    pub fn enforce_equal(&self, cs: &mut impl Host, a: &Lazy, b: &Lazy) {
+        run(cs, |cs| {
+            enforce_zero_mod(cs, self, &a.0.sub(&b.0));
+        })
+    }
+
+    /// `a <= p - 1`, which makes `a` the unique representative of its residue.
+    pub fn enforce_canonical(&self, cs: &mut impl Host, a: &Element) {
+        run(cs, |cs| canonical(cs, self, a))
+    }
+}
+
+fn canonical(cs: &mut Ctx, m: &Modulus, a: &Element) {
+    let (pm1, _) = big_sub(&m.p, &big(1));
+    enforce_le_const(cs, &a.bits_le, &big_to_bytes(&pm1));
+}
+
+/// The integer `a` as a fresh witness of `bits` bits: an exact equality, with no modulus.
+/// Unsatisfiable when `a` is negative or does not fit. Use it for the integer sums of
+/// BIP32-Ed25519 (`k_L + 8 Z_L`, and `k_R + Z_R` whose low 256 of 257 bits are the sum
+/// modulo `2^256`).
+pub fn integer_bits(cs: &mut impl Host, a: &Lazy, bits: usize) -> Element {
+    run(cs, |cs| {
+        assert!(a.0.0.len() <= 8 * WIDE - 8 && bits <= 64 * (WIDE - 1));
+        let value = wide_to_bytes(&signed_value(cs, &a.0));
+        let source = cs.source(|| Source::Integer {
+            products: Vec::new(),
+            linear: int_coefs(&a.0),
+            bits: bits as u32,
+        });
+        let out = alloc_int(cs, source, &value, bits);
+        let diff = a.0.sub(&out.poly());
+        for c in &diff.0 {
+            assert!(c.lo > -COEF_BOUND && c.hi < COEF_BOUND);
+        }
+        enforce_integer_zero(cs, &diff.0);
+        out
+    })
+}
+
+/// The integer of a polynomial under the current assignment, modulo `2^(64 WIDE)`.
+fn signed_value(cs: &ConstraintSystem, d: &Poly) -> Wide {
+    let (mut vpos, mut vneg) = ([0u64; WIDE], [0u64; WIDE]);
+    for (k, c) in d.0.iter().enumerate() {
+        let v = coef_value(cs, c);
+        let sign = v >> 127;
+        let mag = ((v ^ sign) - sign) as u128;
+        wide_add_shifted(&mut vpos, mag & !(sign as u128) & (u64::MAX as u128), k);
+        wide_add_shifted(&mut vneg, mag & (sign as u128) & (u64::MAX as u128), k);
+    }
+    wide_sub(&vpos, &vneg)
+}
+
+// ============================================================================
+// Reduction
+// ============================================================================
+
+/// Enforce that the integer `d` is a multiple of the modulus. Returns the quotient witness
+/// (shifted by the public offset that makes it non-negative).
+///
+/// With `[lo_k, hi_k]` the coefficient intervals, `K = ceil(sum max(-lo_k, 0) 2^(8k) / p)`
+/// and the quotient is range-checked to the bit length of `K + floor(sum hi_k 2^(8k) / p)`.
+/// The identity `d + K p - q p = 0` is then split into groups of consecutive coefficients.
+/// Group `g` with value `V_g` and incoming carry `c_(g-1)` defines the outgoing carry as the
+/// linear form `(V_g + c_(g-1)) / 2^(8 len)`, which is range-checked by bits to an interval
+/// that contains every integer the quotient `(V_g + c_(g-1)) / 2^(8 len)` can take. The
+/// group length is the largest for which
+/// `|V_g + c_(g-1) - 2^(8 len) c_g| < 2^64 - 2^32 + 1` over the admitted intervals, so the
+/// range check on the form implies the integer equation. The last group must be zero.
+fn enforce_zero_mod(cs: &mut Ctx, m: &Modulus, d: &Poly) -> Element {
+    let folded;
+    let d = if d.0.len() > m.limbs {
+        folded = m.fold(d);
+        &folded
+    } else {
+        d
+    };
+    assert!(d.0.len() <= 8 * WIDE - 6, "operand too long");
+    let (mut pos, mut neg) = ([0u64; WIDE], [0u64; WIDE]);
+    for (k, c) in d.0.iter().enumerate() {
+        assert!(c.lo <= c.hi && c.lo > -COEF_BOUND && c.hi < COEF_BOUND);
+        if c.hi > 0 {
+            wide_add_shifted(&mut pos, c.hi as u128, k);
+        }
+        if c.lo < 0 {
+            wide_add_shifted(&mut neg, (-c.lo) as u128, k);
+        }
+    }
+    let pw = wide_from(&m.p);
+    let mut pm1 = pw;
+    pm1[0] -= 1;
+    let (offset, _) = wide_divrem(&wide_add(&neg, &pm1), &m.p);
+    let (qpos, _) = wide_divrem(&pos, &m.p);
+    let qbits = wide_bitlen(&wide_add(&offset, &qpos)).max(1);
+    let offset_p = wide_mul_lo(&offset, &pw);
+    assert!(qbits + 264 <= 64 * WIDE, "quotient too wide");
+
+    // Witness: q = (d + K p) / p by multiplication with p^-1 mod 2^576 (exact when d is a
+    // multiple of p; any other assignment is rejected by the rows below).
+    let numer = wide_add(&signed_value(cs, d), &offset_p);
+    let q_bytes = wide_to_bytes(&wide_mul_lo(&numer, &m.pinv));
+    cs.hints.quotients += 1;
+    cs.hints.quotient_bits += qbits;
+    let source = cs.source(|| {
+        let offset_bytes = wide_to_bytes(&offset_p);
+        let mut num = int_coefs(d);
+        num.resize(
+            num.len().max(wide_bitlen(&offset_p).div_ceil(8)),
+            int_coefs(&Poly(vec![Coef::zero()])).remove(0),
+        );
+        for (k, c) in num.iter_mut().enumerate() {
+            let b = offset_bytes[k] as i128;
+            c.lc = c.lc.plus_const(f_int(b));
+            c.lo += b;
+            c.hi += b;
+        }
+        Source::Quotient {
+            num,
+            divisor: big_to_bytes(&m.p)[..m.limbs].to_vec(),
+            bits: qbits as u32,
+        }
+    });
+    cs.hints.range_lookups += range_lookups(qbits);
+    let q = alloc_bits(cs, source, &q_bytes, qbits);
+    let qp = q.poly();
+
+    // e = d + K p - q p, coefficient by coefficient.
+    let offset_bytes = wide_to_bytes(&offset_p);
+    let offset_len = wide_bitlen(&offset_p).div_ceil(8);
+    let top = m.sparse.iter().map(|&(k, _)| k).max().unwrap();
+    let len = d.0.len().max(offset_len).max(qp.0.len() + top);
+    let mut e: Vec<Coef> = (0..len)
+        .map(|k| d.0.get(k).cloned().unwrap_or_else(Coef::zero))
+        .collect();
+    for (k, slot) in e.iter_mut().enumerate().take(offset_len) {
+        let b = offset_bytes[k] as i128;
+        slot.lc = slot.lc.plus_const(f_int(b));
+        slot.lo += b;
+        slot.hi += b;
+    }
+    for (i, qc) in qp.0.iter().enumerate() {
+        for &(k, c) in &m.sparse {
+            let c = -(c as i128);
+            let slot = &mut e[i + k];
+            slot.lc = slot.lc.plus(&qc.lc.scaled(f_int(c)));
+            slot.lo += (qc.lo * c).min(qc.hi * c);
+            slot.hi += (qc.lo * c).max(qc.hi * c);
+        }
+    }
+
+    enforce_integer_zero(cs, &e);
+    q
+}
+
+/// The integer `sum e_k 2^(8k)` is zero: the carry chain described on
+/// [`enforce_zero_mod`]. Every coefficient interval must lie within [`COEF_BOUND`].
+fn enforce_integer_zero(cs: &mut Ctx, e: &[Coef]) {
+    let len = e.len();
+    let mut at = 0;
+    let mut carry = Coef::zero();
+    let mut carry_value = 0i128;
+    while at < len {
+        // (group length, carry interval and bit count); `None` for the closing group.
+        let mut choice: Option<(usize, Option<(i128, u32)>)> = None;
+        for g in (1..=(len - at).min(8)).rev() {
+            let (mut lo, mut hi) = (carry.lo, carry.hi);
+            for i in 0..g {
+                lo += e[at + i].lo << (8 * i);
+                hi += e[at + i].hi << (8 * i);
+            }
+            if at + g == len {
+                if lo > -PG && hi < PG {
+                    choice = Some((g, None));
+                    break;
+                }
+                continue;
+            }
+            let weight = 1i128 << (8 * g);
+            let clo = lo.div_euclid(weight) + (lo.rem_euclid(weight) != 0) as i128;
+            // An empty interval means no assignment can satisfy the identity; the carry is
+            // then pinned to one value and its row cannot hold.
+            let chi = hi.div_euclid(weight).max(clo);
+            let nbits = 128 - ((chi - clo) as u128).leading_zeros();
+            let admitted_hi = clo + (1i128 << nbits) - 1;
+            if lo - weight * admitted_hi > -PG && hi - weight * clo < PG {
+                choice = Some((g, Some((clo, nbits))));
+                break;
+            }
+        }
+        let (g, out) = choice.expect("no carry group fits the field");
+
+        let mut parts: Vec<(F, &Lc)> = vec![(F::ONE, &carry.lc)];
+        let mut value = carry_value;
+        for i in 0..g {
+            parts.push((F::TWO.pow(8 * i as u64), &e[at + i].lc));
+            value = value.wrapping_add(coef_value(cs, &e[at + i]).wrapping_shl(8 * i as u32));
+        }
+        let group = Lc::combine(&parts);
+        at += g;
+        let Some((clo, nbits)) = out else {
+            cs.enforce_zero(group);
+            break;
+        };
+        let next = group.scaled(F::TWO.pow(8 * g as u64).inv());
+        carry_value = value >> (8 * g);
+        if nbits == 0 {
+            cs.enforce_zero(next.plus_const(f_int(-clo)));
+        } else {
+            let shifted = (carry_value.wrapping_sub(clo)) as u128;
+            let mut top = next.plus_const(f_int(-clo));
+            cs.hints.carries += 1;
+            cs.hints.carry_bits += nbits as usize;
+            let source = cs.source(|| Source::Form {
+                lc: top.clone(),
+                bits: nbits,
+            });
+            cs.hints.range_lookups += range_lookups(nbits as usize);
+            for k in 0..nbits - 1 {
+                let bit =
+                    cs.alloc_defined(F::from_u64_reduced(((shifted >> k) & 1) as u64), || {
+                        Def::Bits {
+                            source,
+                            lo: k,
+                            width: 1,
+                        }
+                    });
+                cs.enforce_boolean(&bit.into());
+                top = top.minus(&Lc::term(bit, F::from_u64_reduced(1 << k)));
+            }
+            cs.enforce_boolean(&top.scaled(F::from_u64_reduced(1 << (nbits - 1)).inv()));
+        }
+        carry = Coef {
+            lc: next,
+            lo: clo,
+            hi: clo + (1i128 << nbits) - 1,
+        };
+    }
+}
+
+// ============================================================================
+// Comparisons with public constants
+// ============================================================================
+
+/// `1` iff every bit is one, as a linear form: two rows (none for one bit, one for two),
+/// or a product chain under [`Options::product_only_comparisons`].
+fn all_ones(cs: &mut Ctx, bits: &[Lc]) -> Lc {
+    match bits {
+        [one] => one.clone(),
+        [a, b] => cs.mul(a, b).into(),
+        // Three bits cost two rows either way; the chain leaves no free inverse.
+        _ if bits.len() == 3 || cs.options.product_only_comparisons => {
+            let mut acc = bits[0].clone();
+            for b in &bits[1..] {
+                acc = cs.mul(&acc, b).into();
+            }
+            acc
+        }
+        _ => {
+            let parts: Vec<(F, &Lc)> = bits.iter().map(|b| (F::NEG_ONE, b)).collect();
+            let missing = Lc::combine(&parts).plus_const(F::from_u64_reduced(bits.len() as u64));
+            cs.hints.zero_tests += 1;
+            let inverse = cs.eval(&missing).inv_or_zero();
+            let inv = cs.alloc_defined(inverse, || Def::InverseOrZero {
+                of: missing.clone(),
+                max: bits.len() as u32,
+            });
+            let nonzero = cs.mul(&missing, &inv.into());
+            let flag = Lc::constant(F::ONE).minus(&nonzero.into());
+            cs.enforce_mul(missing, flag.clone(), Lc::zero());
+            flag
+        }
+    }
+}
+
+/// `sum bits_i 2^i <= bound` for Boolean `bits` and a public `bound` (little-endian bytes).
+///
+/// Scanning from the top, `run` is one while every bit seen under a one of `bound` was one.
+/// Under a zero of `bound` the bit must then be zero. A block of ones of `bound` costs at
+/// most three rows and a block of zeros one row.
+fn enforce_le_const(cs: &mut Ctx, bits_le: &[Lc], bound_le: &[u8]) {
+    let n = bits_le.len();
+    let bound_bit = |i: usize| (bound_le.get(i / 8).copied().unwrap_or(0) >> (i % 8)) & 1 == 1;
+    assert!((n..8 * bound_le.len()).all(|i| !bound_bit(i)));
+    let Some(lowest_zero) = (0..n).find(|&i| !bound_bit(i)) else {
+        return;
+    };
+    let mut run: Option<Lc> = None;
+    let mut hi = n;
+    while hi > lowest_zero {
+        let ones = bound_bit(hi - 1);
+        let mut lo = hi - 1;
+        while lo > lowest_zero && bound_bit(lo - 1) == ones {
+            lo -= 1;
+        }
+        let block = &bits_le[lo..hi];
+        if ones {
+            let all = all_ones(cs, block);
+            run = Some(match run {
+                None => all,
+                Some(r) => cs.mul(&r, &all).into(),
+            });
+        } else {
+            let parts: Vec<(F, &Lc)> = block.iter().map(|b| (F::ONE, b)).collect();
+            let sum = Lc::combine(&parts);
+            match &run {
+                None => cs.enforce_zero(sum),
+                Some(r) => cs.enforce_mul(r.clone(), sum, Lc::zero()),
+            }
+        }
+        hi = lo;
+    }
+}
+
+/// At least one of the Boolean `bits` is one: one row, or a product chain under
+/// [`Options::product_only_comparisons`].
+fn enforce_nonzero(cs: &mut Ctx, bits: &[Lc]) {
+    if cs.options.product_only_comparisons {
+        let one = Lc::constant(F::ONE);
+        let (last, rest) = bits.split_last().expect("at least one bit");
+        let mut acc = one.clone();
+        for b in rest {
+            acc = cs.mul(&acc, &one.minus(b)).into();
+        }
+        cs.enforce_mul(acc, one.minus(last), Lc::zero());
+        return;
+    }
+    let parts: Vec<(F, &Lc)> = bits.iter().map(|b| (F::ONE, b)).collect();
+    let sum = Lc::combine(&parts);
+    cs.hints.zero_tests += 1;
+    let inverse = cs.eval(&sum).inv_or_zero();
+    let inv = cs.alloc_defined(inverse, || Def::InverseOrZero {
+        of: sum.clone(),
+        max: bits.len() as u32,
+    });
+    cs.enforce_mul(sum, inv.into(), Lc::constant(F::ONE));
+}
+
+// ============================================================================
+// Public-table lookup
+// ============================================================================
+
+/// Products of every subset of `bits`, indexed by the subset mask: `2^k - k - 1` rows.
+fn monomials(cs: &mut Ctx, bits: &[Lc]) -> Vec<Lc> {
+    let mut out: Vec<Lc> = Vec::with_capacity(1 << bits.len());
+    out.push(Lc::constant(F::ONE));
+    for mask in 1usize..1 << bits.len() {
+        let top = usize::BITS as usize - 1 - mask.leading_zeros() as usize;
+        let rest = mask ^ (1 << top);
+        let lc = if rest == 0 {
+            bits[top].clone()
+        } else {
+            cs.mul(&out[rest], &bits[top]).into()
+        };
+        out.push(lc);
+    }
+    out
+}
+
+/// `outputs` values of the public table row selected by the Boolean `index_bits`
+/// (little-endian). The low [`LOW_INDEX_BITS`] bits are resolved through their subset
+/// products, where every table column is a linear form; the high bits pick among those
+/// forms with one row per form but the first. Each output is a single variable, or the
+/// linear form itself when there are no high bits.
+fn lookup(
+    cs: &mut Ctx,
+    index_bits: &[Lc],
+    outputs: usize,
+    entry: &dyn Fn(usize, usize) -> u64,
+) -> Vec<Lc> {
+    let low = index_bits.len().min(LOW_INDEX_BITS);
+    let high = index_bits.len() - low;
+    let low_monos = monomials(cs, &index_bits[..low]);
+    let high_monos = monomials(cs, &index_bits[low..]);
+    // One-hot selectors of the high index, as linear forms of its subset products.
+    let selectors: Vec<Lc> = (0..1usize << high)
+        .map(|h| {
+            let parts: Vec<(F, &Lc)> = (0..1usize << high)
+                .filter(|s| s & h == h)
+                .map(|s| {
+                    let sign = if (s ^ h).count_ones() % 2 == 0 {
+                        F::ONE
+                    } else {
+                        F::NEG_ONE
+                    };
+                    (sign, &high_monos[s])
+                })
+                .collect();
+            Lc::combine(&parts)
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(outputs);
+    let mut column = vec![F::ZERO; 1 << low];
+    for o in 0..outputs {
+        let forms: Vec<Lc> = (0..1usize << high)
+            .map(|h| {
+                for (l, slot) in column.iter_mut().enumerate() {
+                    *slot = F::from_u64_reduced(entry((h << low) | l, o));
+                }
+                // Subset-sum inversion: column[l] = sum over S subset of l of coefficient[S].
+                for i in 0..low {
+                    for mask in 0..1usize << low {
+                        if mask >> i & 1 == 1 {
+                            let below = column[mask ^ (1 << i)];
+                            column[mask] -= below;
+                        }
+                    }
+                }
+                let parts: Vec<(F, &Lc)> = column.iter().copied().zip(&low_monos).collect();
+                Lc::combine(&parts)
+            })
+            .collect();
+        if high == 0 {
+            out.push(forms.into_iter().next().unwrap());
+            continue;
+        }
+        // out = form_0 + sum over h >= 1 of selector_h (form_h - form_0); the last product
+        // is the row that defines the output variable.
+        let mut value = F::ZERO;
+        for (sel, form) in selectors.iter().zip(&forms) {
+            value += cs.eval(sel).const_mul(cs.eval(form));
+        }
+        let var: Lc = cs
+            .alloc_defined(value, || Def::SumOfProducts {
+                base: forms[0].clone(),
+                products: selectors
+                    .iter()
+                    .zip(&forms)
+                    .skip(1)
+                    .map(|(sel, form)| (sel.clone(), form.minus(&forms[0])))
+                    .collect(),
+            })
+            .into();
+        let mut rest = var.minus(&forms[0]);
+        let last = forms.len() - 1;
+        for h in 1..last {
+            rest = rest.minus(&cs.mul(&selectors[h], &forms[h].minus(&forms[0])).into());
+        }
+        cs.enforce_mul(selectors[last].clone(), forms[last].minus(&forms[0]), rest);
+        out.push(var);
+    }
+    out
+}
+
+// ============================================================================
+// Curves and window tables
+// ============================================================================
+
+/// Affine point in Montgomery-form coordinates.
+type Pt = (Big, Big);
+
+struct WindowTable {
+    lo: usize,
+    width: usize,
+    signed: bool,
+    limbs: usize,
+    /// Canonical little-endian `(x, y)` per table index.
+    points: Vec<[[u8; 8 * NW]; 2]>,
+}
+
+impl WindowTable {
+    fn outputs(&self) -> usize {
+        if self.signed {
+            self.limbs + self.limbs.div_ceil(Y_CHUNK_LIMBS)
+        } else {
+            2 * self.limbs
+        }
+    }
+
+    /// Output `o` of a table row: the bytes of `x`, then `y` in 48-bit chunks (signed
+    /// windows) or in bytes (the unsigned window, whose outputs cost no rows).
+    fn entry(&self, index: usize, o: usize) -> u64 {
+        let [x, y] = &self.points[index];
+        if o < self.limbs {
+            return x[o] as u64;
+        }
+        if !self.signed {
+            return y[o - self.limbs] as u64;
+        }
+        let from = Y_CHUNK_LIMBS * (o - self.limbs);
+        let mut v = 0u64;
+        for (k, &b) in y[from..(from + Y_CHUNK_LIMBS).min(self.limbs)]
+            .iter()
+            .enumerate()
+        {
+            v |= (b as u64) << (8 * k);
+        }
+        v
+    }
+}
+
+/// `y^2 = x^3 + a2 x^2 + a4 x + a6` with the window tables of its base point.
+struct Curve {
+    f: Modulus,
+    a2: u64,
+    a4: u64,
+    scalar_bits: usize,
+    windows: Vec<WindowTable>,
+}
+
+impl Curve {
+    fn double(&self, p: &Pt) -> Pt {
+        let f = &self.f;
+        let xx = f.mmul(&p.0, &p.0);
+        let num = f.madd(
+            &f.madd(
+                &f.mmul(&f.small(3), &xx),
+                &f.mmul(&f.small(2 * self.a2), &p.0),
+            ),
+            &f.small(self.a4),
+        );
+        let lam = f.mmul(&num, &f.inv(&f.madd(&p.1, &p.1)));
+        self.chord(p, p, &lam)
+    }
+
+    fn chord(&self, p: &Pt, q: &Pt, lam: &Big) -> Pt {
+        let f = &self.f;
+        let x3 = f.msub(
+            &f.msub(&f.msub(&f.mmul(lam, lam), &f.small(self.a2)), &p.0),
+            &q.0,
+        );
+        let y3 = f.msub(&f.mmul(lam, &f.msub(&p.0, &x3)), &p.1);
+        (x3, y3)
+    }
+
+    /// Group law on public points.
+    fn add(&self, p: &Option<Pt>, q: &Option<Pt>) -> Option<Pt> {
+        let f = &self.f;
+        let (Some(p), Some(q)) = (p, q) else {
+            return p.or(*q);
+        };
+        if p.0 == q.0 {
+            if p.1 == q.1 && p.1 != [0; NW] {
+                return Some(self.double(p));
+            }
+            return None;
+        }
+        let lam = f.mmul(&f.msub(&q.1, &p.1), &f.inv(&f.msub(&q.0, &p.0)));
+        Some(self.chord(p, q, &lam))
+    }
+
+    fn scalar_mul(&self, k: &Big, p: &Pt) -> Option<Pt> {
+        let mut acc = None;
+        for i in (0..64 * NW).rev() {
+            acc = self.add(&acc, &acc);
+            if (k[i / 64] >> (i % 64)) & 1 == 1 {
+                acc = self.add(&acc, &Some(*p));
+            }
+        }
+        acc
+    }
+
+    /// `base_i + q` for every `i`, with one field inversion. No sum may be exceptional.
+    fn batch_add(&self, base: &[Pt], q: &Pt) -> Vec<Pt> {
+        let f = &self.f;
+        let dx: Vec<Big> = base.iter().map(|p| f.msub(&q.0, &p.0)).collect();
+        let mut prefix = Vec::with_capacity(dx.len());
+        let mut acc = f.one;
+        for d in &dx {
+            assert!(*d != [0; NW], "exceptional table addition");
+            prefix.push(acc);
+            acc = f.mmul(&acc, d);
+        }
+        let mut inv = f.inv(&acc);
+        let mut out = vec![([0u64; NW], [0u64; NW]); base.len()];
+        for i in (0..base.len()).rev() {
+            let dinv = f.mmul(&inv, &prefix[i]);
+            inv = f.mmul(&inv, &dx[i]);
+            let lam = f.mmul(&f.msub(&q.1, &base[i].1), &dinv);
+            out[i] = self.chord(&base[i], q, &lam);
+        }
+        out
+    }
+
+    fn build(
+        f: Modulus,
+        a2: u64,
+        a4: u64,
+        base: (Big, Big),
+        order: Big,
+        scalar_bits: usize,
+    ) -> Self {
+        let mut curve = Self {
+            f,
+            a2,
+            a4,
+            scalar_bits,
+            windows: Vec::new(),
+        };
+        let f = &curve.f;
+        let g: Pt = (f.mont(&base.0), f.mont(&base.1));
+        // H = [1/2] G, and its doublings.
+        let mut half = order;
+        for i in 0..NW {
+            half[i] = (order[i] >> 1) | if i + 1 < NW { order[i + 1] << 63 } else { 0 };
+        }
+        let (half, _) = big_add(&half, &big(1));
+        let h = curve.scalar_mul(&half, &g).expect("base point order");
+        assert_eq!(curve.add(&Some(h), &Some(h)), Some(g));
+
+        // The signed windows cover the bits below `last_lo`. Their partial sums are odd
+        // integers of absolute value below 2^last_lo, which must not wrap modulo the order.
+        let last_lo = scalar_bits - LAST_WINDOW;
+        assert!(big_bitlen(&order) > last_lo, "signed windows would wrap");
+        let mut pow2 = Vec::with_capacity(last_lo + 2);
+        pow2.push(h);
+        for i in 0..=last_lo {
+            let next = curve.double(&pow2[i]);
+            pow2.push(next);
+        }
+
+        let canonical = |p: &Pt| [big_to_bytes(&f.canon(&p.0)), big_to_bytes(&f.canon(&p.1))];
+        let mut windows = Vec::new();
+        let mut lo = 0;
+        while lo < last_lo {
+            let width = SIGNED_WINDOW.min(last_lo - lo);
+            assert!(width >= 2);
+            // Index r holds [(2r + 1) 2^lo] H.
+            let mut pts = vec![pow2[lo]];
+            for k in 0..width - 1 {
+                let more = curve.batch_add(&pts, &pow2[lo + k + 1]);
+                pts.extend(more);
+            }
+            windows.push(WindowTable {
+                lo,
+                width,
+                signed: true,
+                limbs: f.limbs,
+                points: pts.iter().map(canonical).collect(),
+            });
+            lo += width;
+        }
+        // Index v holds [2 v 2^last_lo + 2^last_lo - 1] H.
+        let neg_h = (h.0, f.msub(&[0; NW], &h.1));
+        let mut pt = curve.add(&Some(pow2[last_lo]), &Some(neg_h));
+        let mut pts = Vec::new();
+        for _ in 0..1usize << LAST_WINDOW {
+            pts.push(canonical(&pt.expect("table point at infinity")));
+            pt = curve.add(&pt, &Some(pow2[last_lo + 1]));
+        }
+        windows.push(WindowTable {
+            lo: last_lo,
+            width: LAST_WINDOW,
+            signed: false,
+            limbs: f.limbs,
+            points: pts,
+        });
+        curve.windows = windows;
+        curve
+    }
+
+    fn secp256k1() -> Self {
+        use crate::secp256k1_ct::{SECP_GX, SECP_GY, SECP_N};
+        Self::build(
+            Modulus::secp256k1_base(),
+            0,
+            0,
+            (big4(&SECP_GX), big4(&SECP_GY)),
+            big4(&SECP_N),
+            256,
+        )
+    }
+
+    /// Curve25519 in Montgomery form `v^2 = u^3 + 486662 u^2 + u`, base point `u = 9`.
+    fn curve25519() -> Self {
+        Self::build(
+            Modulus::curve25519_base(),
+            ED_MONT_A,
+            1,
+            (big(9), big4(&ED_BASE_V)),
+            big4(&ED_L),
+            256,
+        )
+    }
+
+    /// BLS12-381 G1, `y^2 = x^3 + 4`, with 255-bit scalars.
+    fn bls12_381_g1() -> Self {
+        Self::build(
+            Modulus::bls12_381_base(),
+            0,
+            0,
+            (BLS_G1_X, BLS_G1_Y),
+            big4(&BLS_R),
+            255,
+        )
+    }
+}
+
+const BLS_P: Big = [
+    0xb9feffffffffaaab,
+    0x1eabfffeb153ffff,
+    0x6730d2a0f6b0f624,
+    0x64774b84f38512bf,
+    0x4b1ba7b6434bacd7,
+    0x1a0111ea397fe69a,
+];
+const BLS_R: [u64; 4] = [
+    0xffffffff00000001,
+    0x53bda402fffe5bfe,
+    0x3339d80809a1d805,
+    0x73eda753299d7d48,
+];
+const BLS_G1_X: Big = [
+    0xfb3af00adb22c6bb,
+    0x6c55e83ff97a1aef,
+    0xa14e3a3f171bac58,
+    0xc3688c4f9774b905,
+    0x2695638c4fa9ac0f,
+    0x17f1d3a73197d794,
+];
+const BLS_G1_Y: Big = [
+    0x0caa232946c5e7e1,
+    0xd03cc744a2888ae4,
+    0x00db18cb2c04b3ed,
+    0xfcf5e095d5d00af6,
+    0xa09e30ed741d8ae4,
+    0x08b3f481e3aaa0f1,
+];
+
+impl Modulus {
+    /// The BLS12-381 base field (381 bits).
+    pub fn bls12_381_base() -> Self {
+        Self::new(&big_to_bytes(&BLS_P))
+    }
+
+    /// The BLS12-381 scalar field (255 bits), the order of G1.
+    pub fn bls12_381_order() -> Self {
+        Self::new(&big_to_bytes(&big4(&BLS_R)))
+    }
+}
+
+macro_rules! cached_curve {
+    ($name:ident, $build:path) => {
+        fn $name<R>(run: impl FnOnce(&Curve) -> R) -> R {
+            #[cfg(any(feature = "std", test))]
+            {
+                static CURVE: std::sync::OnceLock<Curve> = std::sync::OnceLock::new();
+                run(CURVE.get_or_init($build))
+            }
+            #[cfg(not(any(feature = "std", test)))]
+            {
+                run(&$build())
+            }
+        }
+    };
+}
+
+cached_curve!(with_secp256k1, Curve::secp256k1);
+cached_curve!(with_curve25519, Curve::curve25519);
+cached_curve!(with_bls12_381_g1, Curve::bls12_381_g1);
+
+// ============================================================================
+// Point addition and the fixed-base ladder
