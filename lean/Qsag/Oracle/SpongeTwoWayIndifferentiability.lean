@@ -2220,3 +2220,1160 @@ private theorem sti_walk {β : Type} [DecidableEq β] {R C : Nat} (s0 : SpSt R C
         · exact Nat.mul_le_mul_right _
             (sti_Bd_step K ps.length rt.length tF.length _ _ (by omega) (Nat.le_refl _))
 
+/-! ### The count -/
+
+/-- A simulator call on an unrooted or inverse query: the capacity `v` of the query is a guess
+    at the hidden values, and the answer is a fresh state recorded in `tF`. -/
+private theorem sti_case_guess {β : Type} {R C : Nat} (s0 : SpSt R C)
+    (rt : List (List β × SpSt R C × SpSt R C)) (tF : List (SpSt R C × SpSt R C))
+    (ps : List (List β × Fin R)) (v : Fin C)
+    (fl : List (List β × Fin R × Fin C) → List (SpSt R C) → Bool)
+    (rest : Fin R → Fin C → List (List β × Fin R × Fin C) → List (SpSt R C) → Bool)
+    (h0 : ∀ t, fl t [] = capIn v (t.map (fun e => e.2.2)))
+    (h1 : ∀ t r c ω, fl t ((r, c) :: ω) =
+      ((capIn v (t.map (fun e => e.2.2)) || capIn c (capsOf s0 (SimSt.mk rt t tF))) ||
+        rest r c t ω))
+    (ih : ∀ r c K, sti_sumG C ps (fun t => sumC R C K (fun ω => sti_ind (rest r c t ω))) * C ≤
+      sti_Bd K (ps.length + rt.length + (tF.length + 1)) ps.length *
+        (C ^ ps.length * Spec.roCoinPow (R * C) K)) :
+    ∀ K, sti_sumG C ps (fun t => sumC R C K (fun ω => sti_ind (fl t ω))) * C ≤
+      sti_Bd K (ps.length + rt.length + tF.length) ps.length *
+        (C ^ ps.length * Spec.roCoinPow (R * C) K)
+  | 0 => by
+    have e : sti_sumG C ps (fun t => sumC R C 0 (fun ω => sti_ind (fl t ω))) =
+        sti_sumG C ps (fun t => sti_ind (capIn v (t.map (fun e => e.2.2)))) :=
+      sti_sumG_congr ps _ _ (fun t _ => congrArg sti_ind (h0 t))
+    rw [e]
+    refine Nat.le_trans (sti_guess v ps) ?_
+    show ps.length * C ^ ps.length ≤ sti_Bd 0 _ ps.length * (C ^ ps.length * 1)
+    rw [Nat.mul_one]
+    exact Nat.mul_le_mul_right _ (by unfold sti_Bd; omega)
+  | K + 1 => by
+    refine Nat.le_trans (sti_step s0 rt tF ps K _ _ rfl
+      (fun t ht => Nat.le_of_eq (sti_caps_len s0 rt tF t ps ht))
+      (fun t ω => sti_ind (fl t ω))
+      (fun t => sti_ind (capIn v (t.map (fun e => e.2.2))))
+      (fun r c t ω => sti_ind (rest r c t ω))
+      (sti_Bd K (ps.length + rt.length + (tF.length + 1)) ps.length)
+      ?_ (sti_guess v ps) ?_) ?_
+    · intro t _ r c ω
+      show sti_ind (fl t ((r, c) :: ω)) ≤ _
+      rw [h1]
+      exact sti_ind_or3 _ _ _
+    · exact sti_hG_pair R C _ _ _ _ (fun r c => ih r c K)
+    · exact Nat.mul_le_mul_right _
+        (sti_Bd_step K ps.length rt.length tF.length _ _ (by omega) (Nat.le_succ _))
+
+private def sti_optApp {α τ : Type} (F : α → τ → Nat) : Option α → τ → Nat
+  | some e, t => F e t
+  | none, _ => 0
+
+private theorem sti_optApp_some {α τ : Type} (F : α → τ → Nat) (e : α) (t : τ) :
+    sti_optApp F (some e) t = F e t := rfl
+
+private theorem sti_expose_arith (C K n' rtl tFl N n : Nat) (hn : n = n' + 1) :
+    C * (sti_Bd K (n' + (rtl + 1) + tFl) n' * (C ^ n' * N)) ≤
+      sti_Bd K (n + rtl + tFl) n * (C ^ n * N) := by
+  subst hn
+  have hB : sti_Bd K (n' + (rtl + 1) + tFl) n' ≤ sti_Bd K (n' + 1 + rtl + tFl) (n' + 1) := by
+    unfold sti_Bd
+    rw [show n' + (rtl + 1) + tFl = n' + 1 + rtl + tFl by omega]
+    omega
+  rw [Nat.pow_succ]
+  calc C * (sti_Bd K (n' + (rtl + 1) + tFl) n' * (C ^ n' * N))
+      = sti_Bd K (n' + (rtl + 1) + tFl) n' * (C ^ n' * C * N) := by ac_rfl
+    _ ≤ sti_Bd K (n' + 1 + rtl + tFl) (n' + 1) * (C ^ n' * C * N) := Nat.mul_le_mul_right _ hB
+
+/-- The count, for an arbitrary state of the ideal world and summed over the hidden capacity
+    values. -/
+private theorem sti_main {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out) :
+    ∀ (rt : List (List β × SpSt R C × SpSt R C)) (tF : List (SpSt R C × SpSt R C))
+      (ps : List (List β × Fin R)) (K : Nat),
+      sti_sumG C ps (fun t => sumC R C K (fun ω =>
+        sti_ind (idealRun ops s0 A (SimSt.mk rt t tF) ω).2)) * C ≤
+      sti_Bd K (ps.length + rt.length + tF.length) ps.length *
+        (C ^ ps.length * Spec.roCoinPow (R * C) K) := by
+  induction A with
+  | done o =>
+    intro rt tF ps K
+    exact sti_zero ps _ _ (fun t _ => (sti_sumC_const K 0).trans (Nat.zero_mul _))
+  | node m k ih =>
+    intro rt tF ps K
+    rw [sti_Phi_congr ps K
+      (fun t ω => sti_ind (idealRun ops s0 (SpAdv.node m k) (SimSt.mk rt t tF) ω).2)
+      (fun t ω => sti_ind (sti_walkFlag s0 (fun r S' ω' => (idealRun ops s0 (k r) S' ω').2)
+        (SimSt.mk rt t tF) ω [] s0.1 false m))
+      (fun t _ ω => congrArg sti_ind (sti_run_node ops s0 m k _ ω))]
+    exact sti_walk s0 rt tF _ (fun r ps K => ih r rt tF ps K) m [] s0.1 ps K
+  | inv y k ih =>
+    intro rt tF ps K
+    cases hk : simInvKnown (SimSt.mk rt ([] : List (List β × Fin R × Fin C)) tF) y with
+    | some x =>
+      rw [sti_Phi_congr ps K
+        (fun t ω => sti_ind (idealRun ops s0 (SpAdv.inv y k) (SimSt.mk rt t tF) ω).2)
+        (fun t ω => sti_ind (idealRun ops s0 (k x) (SimSt.mk rt t tF) ω).2)
+        (fun t _ ω => congrArg sti_ind
+          (sti_inv_known ops s0 y k (SimSt.mk rt t tF) ω x hk))]
+      exact ih x rt tF ps K
+    | none =>
+      exact sti_case_guess s0 rt tF ps y.2
+        (fun t ω => (idealRun ops s0 (SpAdv.inv y k) (SimSt.mk rt t tF) ω).2)
+        (fun r c t ω => (idealRun ops s0 (k (r, c)) (SimSt.mk rt t (((r, c), y) :: tF)) ω).2)
+        (fun t => sti_inv_nil ops s0 y k (SimSt.mk rt t tF) hk)
+        (fun t r c ω => sti_inv_cons ops s0 y k (SimSt.mk rt t tF) (r, c) ω hk)
+        (fun r c K => ih (r, c) rt (((r, c), y) :: tF) ps K) K
+  | fwd x k ih =>
+    intro rt tF ps K
+    cases hk : simFwdKnown (SimSt.mk rt ([] : List (List β × Fin R × Fin C)) tF) x with
+    | some z =>
+      rw [sti_Phi_congr ps K
+        (fun t ω => sti_ind (idealRun ops s0 (SpAdv.fwd x k) (SimSt.mk rt t tF) ω).2)
+        (fun t ω => sti_ind (idealRun ops s0 (k z) (SimSt.mk rt t tF) ω).2)
+        (fun t _ ω => congrArg sti_ind
+          (sti_fwd_known ops s0 x k (SimSt.mk rt t tF) ω z hk))]
+      exact ih z rt tF ps K
+    | none =>
+      cases hr : simFindRoot s0 (SimSt.mk rt ([] : List (List β × Fin R × Fin C)) tF) x.2 with
+      | none =>
+        exact sti_case_guess s0 rt tF ps x.2
+          (fun t ω => (idealRun ops s0 (SpAdv.fwd x k) (SimSt.mk rt t tF) ω).2)
+          (fun r c t ω => (idealRun ops s0 (k (r, c)) (SimSt.mk rt t ((x, (r, c)) :: tF)) ω).2)
+          (fun t => sti_fwd_un_nil ops s0 x k (SimSt.mk rt t tF) hk hr)
+          (fun t r c ω => sti_fwd_un_cons ops s0 x k (SimSt.mk rt t tF) (r, c) ω hk hr)
+          (fun r c K => ih (r, c) rt ((x, (r, c)) :: tF) ps K) K
+      | some pt =>
+        obtain ⟨p, tt⟩ := pt
+        cases hf : ps.find? (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1])) with
+        | some e0 =>
+          have hlen := sti_erase_len (fun e : List β × Fin R =>
+            decide (e.1 = p ++ [ops.diffB tt.1 x.1])) ps e0 hf
+          have e1 : sti_sumG C ps (fun t => sumC R C K (fun ω =>
+                sti_ind (idealRun ops s0 (SpAdv.fwd x k) (SimSt.mk rt t tF) ω).2)) =
+              sti_sumG C ps (fun t => sti_optApp
+                (fun (e : List β × Fin R × Fin C) (t' : List (List β × Fin R × Fin C)) =>
+                  sumC R C K (fun ω => sti_ind (idealRun ops s0 (k (e.2.1, e.2.2))
+                    (SimSt.mk ((p ++ [ops.diffB tt.1 x.1], x, (e.2.1, e.2.2)) :: rt) t' tF)
+                    ω).2))
+                (t.find? (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1])))
+                (t.eraseP (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1])))) :=
+            sti_sumG_congr ps _ _ (fun t ht => by
+              obtain ⟨c, hc⟩ := sti_sk_find_some _ t ps e0 ht hf
+              rw [hc]
+              exact congrArg (sumC R C K) (funext (fun ω => congrArg sti_ind
+                (sti_fwd_expose ops s0 x k (SimSt.mk rt t tF) ω p tt _ hk hr hc))))
+          rw [e1, sti_sumG_expose (p ++ [ops.diffB tt.1 x.1]) ps e0 _ hf]
+          simp only [sti_optApp_some]
+          refine Nat.le_trans (sti_sum1_scale C _ C
+            (sti_Bd K ((ps.eraseP (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1]))).length +
+                (rt.length + 1) + tF.length)
+              (ps.eraseP (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1]))).length *
+              (C ^ (ps.eraseP (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1]))).length *
+                Spec.roCoinPow (R * C) K))
+            (fun c => ih (e0.2, c) ((p ++ [ops.diffB tt.1 x.1], x, (e0.2, c)) :: rt) tF
+              (ps.eraseP (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1]))) K)) ?_
+          exact sti_expose_arith C K _ rt.length tF.length _ ps.length hlen
+        | none =>
+          have hno : ∀ t : List (List β × Fin R × Fin C), sti_sk t = ps →
+              t.find? (fun e => decide (e.1 = p ++ [ops.diffB tt.1 x.1])) = none :=
+            fun t ht => sti_sk_find_none _ t ps ht hf
+          cases K with
+          | zero =>
+            exact sti_zero ps _ _ (fun t ht => congrArg sti_ind
+              (sti_fwd_root_nil ops s0 x k (SimSt.mk rt t tF) p tt hk hr (hno t ht)))
+          | succ K =>
+            refine Nat.le_trans (sti_step s0 rt tF ps K _ _ rfl
+              (fun t ht => Nat.le_of_eq (sti_caps_len s0 rt tF t ps ht))
+              (fun t ω => sti_ind (idealRun ops s0 (SpAdv.fwd x k) (SimSt.mk rt t tF) ω).2)
+              (fun _ => 0)
+              (fun r c t ω => sti_ind (idealRun ops s0 (k (r, c))
+                (SimSt.mk ((p ++ [ops.diffB tt.1 x.1], x, (r, c)) :: rt) t tF) ω).2)
+              (sti_Bd K (ps.length + (rt.length + 1) + tF.length) ps.length)
+              ?_ (sti_g0 ps) ?_) ?_
+            · intro t ht r c ω
+              show sti_ind (idealRun ops s0 (SpAdv.fwd x k) (SimSt.mk rt t tF)
+                ((r, c) :: ω)).2 ≤ _
+              rw [sti_fwd_root_cons ops s0 x k (SimSt.mk rt t tF) (r, c) ω p tt hk hr
+                (hno t ht)]
+              exact sti_ind_or2 _ _
+            · exact sti_hG_pair R C _ _ _ _ (fun r c =>
+                ih (r, c) ((p ++ [ops.diffB tt.1 x.1], x, (r, c)) :: rt) tF ps K)
+            · exact Nat.mul_le_mul_right _
+                (sti_Bd_step K ps.length rt.length tF.length _ _ (by omega) (Nat.le_succ _))
+
+/-- **Count of the bad coins.** Among the `(R C)^K` coin lists of length `K`, at most a
+    `K (K + 1) / C` fraction sets the bad flag of the ideal world. -/
+theorem idealRun_bad_count {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out) (K : Nat) :
+    sumC R C K (fun ω => if (idealRun ops s0 A (SimSt.init β R C) ω).2 = true then 1 else 0) * C ≤
+      K * (K + 1) * Spec.roCoinPow (R * C) K := by
+  have h := sti_main ops s0 A [] [] [] K
+  have e1 : sti_Bd K (0 + 0 + 0) 0 = K * (K + 1) := by
+    unfold sti_Bd
+    rw [show 2 * (0 + 0 + 0) + K + 1 = K + 1 by omega]
+    rfl
+  have e2 : C ^ 0 * Spec.roCoinPow (R * C) K = Spec.roCoinPow (R * C) K := by
+    rw [Nat.pow_zero, Nat.one_mul]
+  calc sumC R C K (fun ω =>
+        if (idealRun ops s0 A (SimSt.init β R C) ω).2 = true then 1 else 0) * C
+      ≤ sti_Bd K (0 + 0 + 0) 0 * (C ^ 0 * Spec.roCoinPow (R * C) K) := h
+    _ = K * (K + 1) * Spec.roCoinPow (R * C) K := by rw [e1, e2]
+
+/-- The game whose winning coins are those with a bad event in the ideal world. -/
+def spongeIndiffBadGame {β : Type} [DecidableEq β] {R C : Nat} {Out : Type} (hR : 0 < R)
+    (hC : 0 < C) (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow (R * C) K) where
+  samplePos := Spec.roCoinPow_pos (Nat.mul_pos hR hC) K
+  win ω := (idealRun ops s0 A (SimSt.init β R C) (coinList K ω)).2
+
+/-- **The bad event of the ideal world has probability at most `K (K + 1) / C`** over `K`
+    uniform coins. -/
+theorem sponge_two_way_bad_bound {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (hR : 0 < R) (hC : 0 < C) (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out)
+    (K : Nat) :
+    Spec.GameBound (spongeIndiffBadGame hR hC ops s0 A K).winProb ⟨K * (K + 1), C, hC⟩ := by
+  have h := idealRun_bad_count ops s0 A K
+  rw [← sampleSum_coinList K (fun ω =>
+    if (idealRun ops s0 A (SimSt.init β R C) ω).2 = true then 1 else 0)] at h
+  have hb : (spongeIndiffBadGame hR hC ops s0 A K).winCount * C ≤
+      K * (K + 1) * Spec.roCoinPow (R * C) K := h
+  exact hb
+
+
+/-! ## Ideal-world oracle marginal
+
+The reference machine has a permanent lazy random function on paths. A node query can
+read only its rate projection. The simulator's private state consists of its two edge
+lists; the only operation that gives it a path's full label is rooting that path.
+All draws use the next independent product coin, including after a capacity collision. -/
+
+abbrev PathMemo (β : Type) (R C : Nat) := List β → Option (SpSt R C)
+
+def memoPut {β : Type} [DecidableEq β] {R C : Nat} (F : PathMemo β R C)
+    (q : List β) (z : SpSt R C) : PathMemo β R C := fun p => if p = q then some z else F p
+
+def readLabel {β : Type} [DecidableEq β] {R C : Nat} (F : PathMemo β R C) (q : List β)
+    (ω : List (SpSt R C)) : Option (SpSt R C × PathMemo β R C × List (SpSt R C)) :=
+  match F q with
+  | some z => some (z, F, ω)
+  | none => match ω with
+    | [] => none
+    | z :: tail => some (z, memoPut F q z, tail)
+
+/-- Marginal law against every test of the rate, for every past memo and fixed unused tail.
+    The fresh capacity contributes exactly a factor of C to the count. -/
+theorem readLabel_fresh_rate_law {β : Type} [DecidableEq β] {R C : Nat}
+    (F : PathMemo β R C) (q : List β) (fresh : F q = none) (ω : List (SpSt R C))
+    (test : Option (Fin R) → Nat) :
+    Spec.sampleSum R (fun r => Spec.sampleSum C (fun c =>
+      test ((readLabel F q ((r,c)::ω)).map (fun v => v.1.1)))) =
+      Spec.sampleSum R (fun r => test (some r)) * C := by
+  simp only [readLabel, fresh, Option.map_some, sti_sum_const]
+  rw [← sti_sum_mul_right]
+  exact sti_sum_ext (fun _ => Nat.mul_comm ..)
+
+/-- Observe the rate projection of the same path oracle used by both interfaces. -/
+def readRates {β : Type} [DecidableEq β] {R C : Nat} :
+    List (List β) → PathMemo β R C → List (SpSt R C) → Option (List (Fin R))
+  | [], _, _ => some []
+  | p :: ps, F, ω =>
+    match readLabel F p ω with
+    | none => none
+    | some (z,F',tail) => (readRates ps F' tail).map (z.1 :: ·)
+
+/-- Sum a test against the counting measure on independent rate words. -/
+def rateSum (R : Nat) : Nat → (List (Fin R) → Nat) → Nat
+  | 0, test => test []
+  | n+1, test => Spec.sampleSum R (fun r => rateSum R n (fun rs => test (r::rs)))
+
+/-- Exact finite-dimensional law. For any list of distinct fresh paths and every joint
+    observation, forgetting the hidden capacities multiplies the independent-rate count
+    by C to the number of paths. The initial memo may contain any earlier observations. -/
+theorem readRates_product_law {β : Type} [DecidableEq β] {R C : Nat} (ps : List (List β))
+    (distinct : ps.Nodup) (F : PathMemo β R C) (fresh : ∀ p ∈ ps, F p = none)
+    (test : List (Fin R) → Nat) :
+    sumC R C ps.length (fun ω => ((readRates ps F ω).map test).getD 0) =
+      rateSum R ps.length test * C ^ ps.length := by
+  induction ps generalizing F test with
+  | nil => exact (Nat.mul_one _).symm
+  | cons p ps ih =>
+    obtain ⟨hn,hd⟩ := List.nodup_cons.mp distinct
+    have hp := fresh p List.mem_cons_self
+    change Spec.sampleSum R (fun r => Spec.sampleSum C (fun c => sumC R C ps.length
+      (fun ω => ((readRates (p::ps) F ((r,c)::ω)).map test).getD 0))) = _
+    have head (r : Fin R) (c : Fin C) : sumC R C ps.length
+        (fun ω => ((readRates (p::ps) F ((r,c)::ω)).map test).getD 0) =
+        rateSum R ps.length (fun rs => test (r::rs)) * C ^ ps.length := by
+      refine Eq.trans (congrArg (sumC R C ps.length) (funext fun ω => ?_))
+        (ih hd (memoPut F p (r,c)) (fun q hq => ?_) (fun rs => test (r::rs)))
+      · simp only [readRates, readLabel, hp]
+        cases readRates ps (memoPut F p (r,c)) ω <;> rfl
+      · rw [memoPut, ite_eq_right (show q ≠ p from fun e => hn (e ▸ hq))]
+        exact fresh _ (List.mem_cons_of_mem _ hq)
+    simp only [head, sti_sum_const, List.length_cons, rateSum, Nat.pow_succ]
+    rw [← sti_sum_mul_right]
+    exact sti_sum_ext (fun r => by ac_rfl)
+
+def labelWalk {β : Type} [DecidableEq β] {R C : Nat} :
+    List β → Fin R → List β → PathMemo β R C → List (SpSt R C) →
+    Option (Fin R × PathMemo β R C × List (SpSt R C))
+  | _, r, [], F, ω => some (r, F, ω)
+  | p, _, b::bs, F, ω => do
+    let (z, F', tail) ← readLabel F (p ++ [b]) ω
+    labelWalk (p ++ [b]) z.1 bs F' tail
+
+/-- Public permutation state, with no access to the path memo. -/
+structure RootGraph (β : Type) (R C : Nat) where
+  rooted : List (List β × SpSt R C × SpSt R C)
+  other : PermTable R C
+
+private def graphOf {β : Type} {R C : Nat} (S : SimSt β R C) : RootGraph β R C :=
+  ⟨S.rt, S.tF⟩
+
+inductive SimRequest (β : Type) (R C : Nat) where
+  | known (z : SpSt R C)
+  | draw
+  | root (path : List β)
+
+/-- The request depends solely on previously exposed edges and the public query. -/
+def simRequest {β : Type} {R C : Nat} (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (G : RootGraph β R C) (inv : Bool) (x : SpSt R C) : SimRequest β R C :=
+  let pub := SimSt.mk G.rooted [] G.other
+  if inv then
+    match simInvKnown pub x with
+    | some z => .known z
+    | none => .draw
+  else
+    match simFwdKnown pub x with
+    | some z => .known z
+    | none => match simFindRoot s0 pub x.2 with
+      | none => .draw
+      | some (p,t) => .root (p ++ [ops.diffB t.1 x.1])
+
+def labelSim {β : Type} [DecidableEq β] {R C : Nat} (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (G : RootGraph β R C) (inv : Bool) (x : SpSt R C) (F : PathMemo β R C) (ω : List (SpSt R C)) :
+    Option (SpSt R C × RootGraph β R C × PathMemo β R C × List (SpSt R C)) :=
+  match simRequest ops s0 G inv x with
+  | .known z => some (z, G, F, ω)
+  | .draw => match ω with
+    | [] => none
+    | z::tail => some (z, { G with other := (if inv then (z,x) else (x,z)) :: G.other }, F, tail)
+  | .root p => do
+    let (z, F', tail) ← readLabel F p ω
+    return (z, { G with rooted := (p,x,z)::G.rooted }, F', tail)
+
+def labelRun {β : Type} [DecidableEq β] {R C : Nat} {Out : Type} (ops : AbsorbOps β R)
+    (s0 : SpSt R C) : SpAdv β R C Out → RootGraph β R C → PathMemo β R C →
+    List (SpSt R C) → Option Out
+  | .done o, _, _, _ => some o
+  | .node m k, G, F, ω => do
+    let (r,F',tail) ← labelWalk [] s0.1 m F ω
+    labelRun ops s0 (k r) G F' tail
+  | .fwd x k, G, F, ω => do
+    let (z,G',F',tail) ← labelSim ops s0 G false x F ω
+    labelRun ops s0 (k z) G' F' tail
+  | .inv x k, G, F, ω => do
+    let (z,G',F',tail) ← labelSim ops s0 G true x F ω
+    labelRun ops s0 (k z) G' F' tail
+
+private structure MemoInv {β : Type} {R C : Nat} (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (S : SimSt β R C) (F : PathMemo β R C) : Prop where
+  nodes : ∀ p z, nodeAt s0 S p z ↔ F p = some z
+  edges : ∀ q x z, (q,x,z) ∈ S.rt →
+    ∃ p b t, q = p ++ [b] ∧ F p = some t ∧ x = (ops.xorB t.1 b,t.2)
+
+private theorem memoPut_spec {β : Type} [DecidableEq β] {R C : Nat} (F : PathMemo β R C)
+    {q : List β} (hf : F q = none) (d : SpSt R C) (p : List β) (z : SpSt R C) :
+    (F p = some z ∨ p = q ∧ z = d) ↔ memoPut F q d p = some z := by
+  by_cases h : p = q
+  · subst p; simp only [memoPut, ↓reduceIte, hf, reduceCtorEq, false_or, true_and,
+      Option.some.injEq, eq_comm]
+  · simp only [memoPut, ↓reduceIte, h, false_and, or_false]
+
+private theorem memo_lookup {β : Type} [DecidableEq β] {R C : Nat} {ops : AbsorbOps β R}
+    {s0 : SpSt R C} {S : SimSt β R C} {F : PathMemo β R C} (I : MemoInv ops s0 S F)
+    (q : List β) (hq : q ≠ []) : roLookup S q = (F q).map Prod.fst := by
+  cases h : roLookup S q with
+  | none =>
+    cases hf : F q with
+    | none => rfl
+    | some z => exact False.elim (no_node_of_lookup s0 hq h z ((I.nodes q z).mpr hf))
+  | some r =>
+    obtain ⟨z, hz, hr⟩ := node_of_lookup s0 h
+    rw [(I.nodes q z).mp hz, Option.map_some, hr]
+
+private abbrev WalkAgrees {β : Type} {R C : Nat} (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (G : RootGraph β R C) (r : Option (Fin R × SimSt β R C × List (SpSt R C)))
+    (ref : Option (Fin R × PathMemo β R C × List (SpSt R C))) : Prop :=
+  match r, ref with
+  | none, none => True
+  | some (x,S,ω), some (y,F,t) => x = y ∧ ω = t ∧ graphOf S = G ∧ MemoInv ops s0 S F
+  | _, _ => False
+
+private theorem labelWalk_agrees {β : Type} [DecidableEq β] {R C : Nat} (ops : AbsorbOps β R)
+    (s0 : SpSt R C) : ∀ (m p : List β) (r : Fin R) (S : SimSt β R C) (F : PathMemo β R C)
+    (ω : List (SpSt R C)) (bad : Bool), MemoInv ops s0 S F →
+    WalkAgrees ops s0 (graphOf S) (roWalk s0 S ω p r bad m).1 (labelWalk p r m F ω)
+  | [], _, _, _, _, _, _, I => ⟨rfl, rfl, rfl, I⟩
+  | b::bs, p, r, S, F, ω, bad, I => by
+    have hl := memo_lookup I (p ++ [b]) (snoc_ne_nil p b)
+    cases hf : F (p ++ [b]) with
+    | some d =>
+      rw [hf] at hl
+      simp only [roWalk, roStep, hl, labelWalk, readLabel, hf, Option.map_some,
+        Bool.or_false]
+      exact labelWalk_agrees ops s0 bs _ _ S F ω bad I
+    | none =>
+      rw [hf] at hl
+      cases ω with
+      | nil => simp only [roWalk, roStep, hl, labelWalk, readLabel, hf]; exact True.intro
+      | cons d t =>
+        simp only [roWalk, roStep, hl, labelWalk, readLabel, hf]
+        apply labelWalk_agrees ops s0 bs
+        refine ⟨fun p' z => (node_add_tH s0 S _ d p' z).trans
+          ((or_congr (I.nodes p' z) Iff.rfl).trans (memoPut_spec F hf d p' z)), ?_⟩
+        intro q x z h
+        obtain ⟨p',b',t',hq,ht,hx⟩ := I.edges q x z h
+        exact ⟨p',b',t',hq,(memoPut_spec F hf d p' t').mp (.inl ht),hx⟩
+
+private theorem child_memo {β : Type} [DecidableEq β] {R C : Nat} {ops : AbsorbOps β R}
+    {s0 : SpSt R C} {S : SimSt β R C} {F : PathMemo β R C} (I : MemoInv ops s0 S F)
+    {x t : SpSt R C} {p : List β} (hk : simFwdKnown S x = none)
+    (hr : simFindRoot s0 S x.2 = some (p,t)) :
+    F (p ++ [ops.diffB t.1 x.1]) =
+      (S.tH.find? (fun e => decide (e.1 = p ++ [ops.diffB t.1 x.1]))).map Prod.snd := by
+  obtain ⟨hp,hcap⟩ := root_spec hr
+  have ht := (I.nodes _ _).mp hp
+  cases he : S.tH.find? _ with
+  | some e =>
+    have hm := List.mem_of_find?_eq_some he
+    have test := List.find?_some he
+    have heq : e.1 = p ++ [ops.diffB t.1 x.1] := of_decide_eq_true test
+    exact (I.nodes _ _).mp (.inr (.inr (by rw [← heq]; exact hm)))
+  | none =>
+    cases hf : F _ with
+    | none => rfl
+    | some z =>
+      rcases (I.nodes _ _).mpr hf with ⟨h0,_⟩ | ⟨x',hm⟩ | hm
+      · exact False.elim (snoc_ne_nil _ _ h0)
+      · obtain ⟨p',b',t',hq,ht',hx'⟩ := I.edges _ _ _ hm
+        obtain ⟨e1,e2⟩ := List.append_inj' hq rfl
+        subst p'
+        have et := Option.some.inj (ht.symm.trans ht')
+        subst t'
+        have eb := (List.cons.inj e2).1
+        subst b'
+        have xx : x' = x := by rw [hx', ops.xor_diff, hcap]
+        rw [xx] at hm
+        exact False.elim (fwd_known_of_rt hm hk)
+      · exact False.elim (List.find?_eq_none.mp he _ hm (decide_eq_true rfl))
+
+private theorem root_memo_update {β : Type} {R C : Nat} {ops : AbsorbOps β R} {s0 : SpSt R C}
+    {S S' : SimSt β R C} {F F' : PathMemo β R C} (I : MemoInv ops s0 S F)
+    {x t z : SpSt R C} {p : List β} (hr : simFindRoot s0 S x.2 = some (p,t))
+    (edges : S'.rt = (p ++ [ops.diffB t.1 x.1],x,z)::S.rt)
+    (keep : ∀ a s, F a = some s → F' a = some s)
+    (nodes : ∀ a s, nodeAt s0 S' a s ↔ F' a = some s) : MemoInv ops s0 S' F' := by
+  refine ⟨nodes, fun q x' z' hm => ?_⟩
+  rw [edges] at hm
+  rcases List.mem_cons.mp hm with h | h
+  · cases h
+    obtain ⟨hp, hc⟩ := root_spec hr
+    exact ⟨p, _, t, rfl, keep _ _ ((I.nodes _ _).mp hp), by rw [ops.xor_diff, hc]⟩
+  · obtain ⟨a,b,s,eq,hs,hx⟩ := I.edges _ _ _ h
+    exact ⟨a,b,s,eq,keep _ _ hs,hx⟩
+
+private abbrev SimAgrees {β : Type} {R C : Nat} (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (r : Option (SpSt R C × SimSt β R C × List (SpSt R C)))
+    (ref : Option (SpSt R C × RootGraph β R C × PathMemo β R C × List (SpSt R C))) : Prop :=
+  match r, ref with
+  | none, none => True
+  | some (x,S,ω), some (y,G,F,t) => x = y ∧ ω = t ∧ graphOf S = G ∧ MemoInv ops s0 S F
+  | _, _ => False
+
+private theorem labelSim_agrees {β : Type} [DecidableEq β] {R C : Nat} (ops : AbsorbOps β R)
+    (s0 : SpSt R C) (S : SimSt β R C) (F : PathMemo β R C) (ω : List (SpSt R C))
+    (inv : Bool) (x : SpSt R C) (I : MemoInv ops s0 S F) :
+    SimAgrees ops s0 (spongeSimulator ops s0 S ω inv x).1
+      (labelSim ops s0 (graphOf S) inv x F ω) := by
+  cases inv with
+  | true =>
+    have req : simRequest ops s0 (graphOf S) true x =
+      (match simInvKnown S x with | some z => .known z | none => .draw) := rfl
+    cases hk : simInvKnown S x with
+    | some z =>
+      simp only [labelSim, req, hk, spongeSimulator, spongeSimInv, ↓reduceIte]
+      exact ⟨rfl,rfl,rfl,I⟩
+    | none =>
+      cases ω with
+      | nil => simp only [labelSim, req, hk, spongeSimulator, spongeSimInv, ↓reduceIte]; exact True.intro
+      | cons d t =>
+        simp only [labelSim, req, hk, spongeSimulator, spongeSimInv, ↓reduceIte]
+        exact ⟨rfl,rfl,rfl,⟨I.nodes,I.edges⟩⟩
+  | false =>
+    have req : simRequest ops s0 (graphOf S) false x =
+      (match simFwdKnown S x with
+       | some z => .known z
+       | none => match simFindRoot s0 S x.2 with
+         | none => .draw
+         | some (p,t) => .root (p ++ [ops.diffB t.1 x.1])) := rfl
+    cases hk : simFwdKnown S x with
+    | some z =>
+      simp only [labelSim, req, hk, spongeSimulator, spongeSimFwd, Bool.false_eq_true, ↓reduceIte]
+      exact ⟨rfl,rfl,rfl,I⟩
+    | none =>
+      cases hr : simFindRoot s0 S x.2 with
+      | none =>
+        cases ω with
+        | nil =>
+          simp only [labelSim, req, hk, hr, spongeSimulator, spongeSimFwd, Bool.false_eq_true, ↓reduceIte]
+          exact True.intro
+        | cons d t =>
+          simp only [labelSim, req, hk, hr, spongeSimulator, spongeSimFwd, Bool.false_eq_true, ↓reduceIte]
+          exact ⟨rfl,rfl,rfl,⟨I.nodes,I.edges⟩⟩
+      | some root =>
+        obtain ⟨p,t⟩ := root
+        have hf := child_memo I hk hr
+        cases he : S.tH.find? (fun e => decide (e.1 = p ++ [ops.diffB t.1 x.1])) with
+        | some e =>
+          rw [he] at hf
+          simp only [labelSim, req, hk, hr, spongeSimulator, spongeSimFwd, Bool.false_eq_true,
+            ↓reduceIte, he, readLabel, hf, Option.map_some]
+          refine ⟨rfl,rfl,rfl,root_memo_update I hr rfl (fun _ _ h => h) (fun a s => ?_)⟩
+          exact (node_move s0 x he a s).trans (I.nodes a s)
+        | none =>
+          rw [he] at hf
+          cases ω with
+          | nil =>
+            simp only [labelSim, req, hk, hr, spongeSimulator, spongeSimFwd, Bool.false_eq_true,
+              ↓reduceIte, he, readLabel, hf]
+            exact True.intro
+          | cons d tail =>
+            simp only [labelSim, req, hk, hr, spongeSimulator, spongeSimFwd, Bool.false_eq_true,
+              ↓reduceIte, he, readLabel, hf]
+            refine ⟨rfl,rfl,rfl,root_memo_update I hr rfl
+              (fun a s h => (memoPut_spec F hf d a s).mp (.inl h)) (fun a s => ?_)⟩
+            exact (node_add_rt s0 S _ x d a s).trans
+              ((or_congr (I.nodes a s) Iff.rfl).trans (memoPut_spec F hf d a s))
+
+private theorem labelRun_agrees {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out) :
+    ∀ S F ω, MemoInv ops s0 S F →
+    (idealRun ops s0 A S ω).1 = labelRun ops s0 A (graphOf S) F ω := by
+  induction A with
+  | done o => intros; rfl
+  | node m k ih =>
+    intro S F ω I
+    have step := labelWalk_agrees ops s0 m [] s0.1 S F ω false I
+    cases he : roWalk s0 S ω [] s0.1 false m with
+    | mk old flag =>
+      rw [he] at step
+      cases href : labelWalk [] s0.1 m F ω <;> rw [href] at step <;> cases old <;>
+        simp only [idealRun, he, labelRun, href] <;> first | rfl | contradiction | skip
+      rename_i ref old
+      rcases ref with ⟨y,F',tail⟩
+      rcases old with ⟨x,S',t⟩
+      obtain ⟨rfl,rfl,hg,I'⟩ := step
+      exact hg ▸ ih _ _ _ _ I'
+  | fwd x k ih | inv x k ih =>
+    intro S F ω I
+    first
+    | have step := labelSim_agrees ops s0 S F ω false x I
+      change (idealRun ops s0 (.fwd x k) S ω).1 = _
+    | have step := labelSim_agrees ops s0 S F ω true x I
+      change (idealRun ops s0 (.inv x k) S ω).1 = _
+    generalize he : spongeSimulator ops s0 S ω _ x = oldPair at step
+    obtain ⟨old, flag⟩ := oldPair
+    generalize href : labelSim ops s0 (graphOf S) _ x F ω = ref at step
+    cases ref <;> cases old <;> simp only [idealRun, he, labelRun, href] <;>
+      first | rfl | contradiction | skip
+    rename_i ref old
+    rcases ref with ⟨y,G,F',tail⟩
+    rcases old with ⟨z,S',t⟩
+    obtain ⟨rfl,rfl,hg,I'⟩ := step
+    exact hg ▸ ih _ _ _ _ I'
+
+/-- The ideal public output is exactly that of a simulator with a private graph and an
+    independent lazy product-label oracle, on every tape (even after a bad event). -/
+theorem idealRun_eq_private_oracle {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Out) (ω : List (SpSt R C)) :
+    (idealRun ops s0 A (SimSt.init β R C) ω).1 =
+      labelRun ops s0 A ⟨[],[]⟩ (fun p => if p = [] then some s0 else none) ω := by
+  apply labelRun_agrees
+  constructor
+  · intro p z
+    simp only [nodeAt, SimSt.init, List.not_mem_nil, exists_false, or_false]
+    by_cases hp : p = [] <;> simp only [hp, ↓reduceIte, Option.some.injEq,
+      true_and, false_and, reduceCtorEq, eq_comm]
+  · intro q x z h
+    exact False.elim (List.not_mem_nil h)
+
+/-- Worst-case block cost on every adaptive branch, charging one for either direct
+    permutation query and the full path length for an indexed sponge read. -/
+inductive BlockCost {β : Type} {R C : Nat} {Out : Type} : SpAdv β R C Out → Nat → Prop where
+  | done (o : Out) (K : Nat) : BlockCost (.done o) K
+  | node (m : List β) (k : Fin R → SpAdv β R C Out) {K : Nat} (fits : m.length ≤ K)
+      (next : ∀ r, BlockCost (k r) (K - m.length)) : BlockCost (.node m k) K
+  | fwd (x : SpSt R C) (k : SpSt R C → SpAdv β R C Out) {K : Nat}
+      (next : ∀ z, BlockCost (k z) K) : BlockCost (.fwd x k) (K+1)
+  | inv (y : SpSt R C) (k : SpSt R C → SpAdv β R C Out) {K : Nat}
+      (next : ∀ z, BlockCost (k z) K) : BlockCost (.inv y k) (K+1)
+
+private theorem readLabel_total {β : Type} [DecidableEq β] {R C : Nat}
+    (F : PathMemo β R C) (p : List β) (ω : List (SpSt R C)) (h : 0 < ω.length) :
+    ∃ z F' tail, readLabel F p ω = some (z,F',tail) ∧ ω.length ≤ tail.length + 1 := by
+  cases ω with
+  | nil => exact False.elim (Nat.not_lt_zero _ h)
+  | cons d tail =>
+    cases he : F p with
+    | none => exact ⟨_,_,_,by rw [readLabel,he], Nat.le_refl _⟩
+    | some z => exact ⟨_,_,_,by rw [readLabel,he], Nat.le_succ _⟩
+
+private theorem labelWalk_total {β : Type} [DecidableEq β] {R C : Nat} :
+    ∀ (m p : List β) (r : Fin R) (F : PathMemo β R C) (ω : List (SpSt R C)), m.length ≤ ω.length →
+    ∃ s F' tail, labelWalk p r m F ω = some (s,F',tail) ∧ ω.length ≤ tail.length + m.length
+  | [], _, r, F, ω, _ => ⟨r,F,ω,rfl,Nat.le_refl _⟩
+  | b::bs, p, r, F, ω, h => by
+    have hb : bs.length + 1 ≤ ω.length := h
+    obtain ⟨d,F',t,he,ht⟩ := readLabel_total F (p ++ [b]) ω (by omega)
+    obtain ⟨s,F'',tail,hw,hl⟩ := labelWalk_total bs _ d.1 F' t (by omega)
+    refine ⟨s,F'',tail,?_,by simp only [List.length_cons]; omega⟩
+    simp only [labelWalk, he]
+    exact hw
+
+private theorem labelSim_total {β : Type} [DecidableEq β] {R C : Nat} (ops : AbsorbOps β R)
+    (s0 : SpSt R C) (G : RootGraph β R C) (inv : Bool) (x : SpSt R C)
+    (F : PathMemo β R C) (ω : List (SpSt R C)) (h : 0 < ω.length) :
+    ∃ z G' F' tail, labelSim ops s0 G inv x F ω = some (z,G',F',tail) ∧
+      ω.length ≤ tail.length + 1 := by
+  unfold labelSim
+  split
+  · exact ⟨_,_,_,_,rfl,Nat.le_succ _⟩
+  · cases ω with
+    | nil => exact False.elim (Nat.not_lt_zero _ h)
+    | cons d t => exact ⟨_,_,_,_,rfl,Nat.le_refl _⟩
+  · rename_i p _
+    obtain ⟨z,F',t,he,ht⟩ := readLabel_total F p ω h
+    rw [he]
+    exact ⟨_,_,_,_,rfl,ht⟩
+
+/-- With sufficient block budget every branch returns an oracle output, including on bad tapes. -/
+theorem labelRun_total {β : Type} [DecidableEq β] {R C : Nat} {Out : Type} (ops : AbsorbOps β R)
+    (s0 : SpSt R C) {A : SpAdv β R C Out} {K : Nat} (bound : BlockCost A K) :
+    ∀ G F (ω : List (SpSt R C)), K ≤ ω.length → ∃ o, labelRun ops s0 A G F ω = some o := by
+  induction bound with
+  | done o K => intros; exact ⟨o,rfl⟩
+  | node m k fits _ ih =>
+    intro G F ω hw
+    obtain ⟨r,F',t,he,ht⟩ := labelWalk_total m [] s0.1 F ω (Nat.le_trans fits hw)
+    obtain ⟨o,ho⟩ := ih r G F' t (by omega)
+    exact ⟨o, by simp only [labelRun, he]; exact ho⟩
+  | fwd x k _ ih | inv x k _ ih =>
+    intro G F ω hw
+    unfold labelRun
+    first
+    | obtain ⟨z,G',F',t,he,ht⟩ := labelSim_total ops s0 G false x F ω (by omega)
+      rw [he]
+    | obtain ⟨z,G',F',t,he,ht⟩ := labelSim_total ops s0 G true x F ω (by omega)
+      rw [he]
+    exact ih z G' F' t (by omega)
+
+theorem idealRun_total_of_blockCost {β : Type} [DecidableEq β] {R C : Nat} {Out : Type}
+    (ops : AbsorbOps β R) (s0 : SpSt R C) {A : SpAdv β R C Out} {K : Nat}
+    (bound : BlockCost A K) (ω : List (SpSt R C)) (hw : K ≤ ω.length) :
+    ∃ o, (idealRun ops s0 A (SimSt.init β R C) ω).1 = some o := by
+  rw [idealRun_eq_private_oracle]
+  exact labelRun_total ops s0 bound _ _ ω hw
+
+/-! ## §7. The two games and the indifferentiability bound -/
+
+/-- A distinguisher wins when it outputs `true`; a run that exhausts its coins does not win. -/
+def spWin : Option Bool → Bool
+  | some true => true
+  | _ => false
+
+/-- Real game: the distinguisher talks to `(sponge^π, π, π⁻¹)` for a lazily sampled two-way
+    permutation `π`, with `K` coins (one per fresh permutation point, plus rejected draws). -/
+def spongeTwoWayRealGame {β : Type} [DecidableEq β] {R C : Nat} (hR : 0 < R) (hC : 0 < C)
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow (R * C) K) where
+  samplePos := Spec.roCoinPow_pos (Nat.mul_pos hR hC) K
+  win ω := spWin (realRun ops s0 A [] (coinList K ω))
+
+/-- Ideal game: the distinguisher talks to `(RO, sim_π, sim_π⁻¹)` on the same coins. -/
+def spongeTwoWayIdealGame {β : Type} [DecidableEq β] {R C : Nat} (hR : 0 < R) (hC : 0 < C)
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow (R * C) K) where
+  samplePos := Spec.roCoinPow_pos (Nat.mul_pos hR hC) K
+  win ω := spWin (idealRun ops s0 A (SimSt.init β R C) (coinList K ω)).1
+
+/-- Ideal game with an explicit lazy path oracle and a simulator that holds only its graph. -/
+def privateOracleGame {β : Type} [DecidableEq β] {R C : Nat} (hR : 0 < R) (hC : 0 < C)
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow (R * C) K) where
+  samplePos := Spec.roCoinPow_pos (Nat.mul_pos hR hC) K
+  win w := spWin (labelRun ops s0 A ⟨[],[]⟩ (fun p => if p = [] then some s0 else none) (coinList K w))
+
+theorem spongeIdealGame_eq_privateOracleGame {β : Type} [DecidableEq β] {R C : Nat}
+    (hR : 0 < R) (hC : 0 < C) (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (A : SpAdv β R C Bool) (K : Nat) :
+    spongeTwoWayIdealGame hR hC ops s0 A K = privateOracleGame hR hC ops s0 A K :=
+  Spec.FinGame.ext_win (fun w => congrArg spWin (idealRun_eq_private_oracle ops s0 A (coinList K w)))
+
+/-- **Two-way sponge indifferentiability.** Against every adaptive distinguisher with oracle
+    access to the sponge and to both directions of the permutation, and `K` coins, the real
+    world `(sponge^π, π, π⁻¹)` and the ideal world `(RO, sim_π, sim_π⁻¹)` are within
+    `K (K + 1) / C`, where `C` is the number of capacity values. -/
+theorem sponge_two_way_indifferentiability_bound {β : Type} [DecidableEq β] {R C : Nat}
+    (hR : 0 < R) (hC : 0 < C) (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool)
+    (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist (spongeTwoWayRealGame hR hC ops s0 A K)
+        (spongeTwoWayIdealGame hR hC ops s0 A K))
+      ⟨K * (K + 1), C, hC⟩ :=
+  Spec.GameBound.trans
+    (Spec.adv_until_bad (spongeTwoWayRealGame hR hC ops s0 A K)
+      (spongeTwoWayIdealGame hR hC ops s0 A K)
+      (fun ω => (idealRun ops s0 A (SimSt.init β R C) (coinList K ω)).2)
+      (fun ω h => congrArg spWin (sponge_two_way_views_eq ops s0 A (coinList K ω) h)))
+    (sponge_two_way_bad_bound hR hC ops s0 A K)
+
+theorem coinList_length {R C : Nat} :
+    ∀ K (w : Fin (Spec.roCoinPow (R*C) K)), (coinList (R := R) (C := C) K w).length = K
+  | 0, _ => rfl
+  | K+1, w => by
+    simp only [coinList, List.length_cons, coinList_length K]
+
+/-- Give the real game an arbitrary final verdict if rejection sampling exhausts its tape. -/
+def realGameWithCompletion {β : Type} {R C : Nat} (hR : 0 < R) (hC : 0 < C)
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool) (K : Nat)
+    (complete : Fin (Spec.roCoinPow (R*C) K) → Bool) : Spec.FinGame (Spec.roCoinPow (R*C) K) :=
+  ⟨Spec.roCoinPow_pos (Nat.mul_pos hR hC) K, fun w =>
+    (realRun ops s0 A [] (coinList K w)).getD (complete w)⟩
+
+/-- With block cost at most K, the ideal oracle always answers. Any completion of the real
+    rejection sampler on exhaustion satisfies the original advantage bound, with one bad-event term. -/
+theorem sponge_completed_two_way_bound {β : Type} [DecidableEq β] {R C : Nat}
+    (hR : 0 < R) (hC : 0 < C) (ops : AbsorbOps β R) (s0 : SpSt R C)
+    (A : SpAdv β R C Bool) (K : Nat) (bound : BlockCost A K)
+    (complete : Fin (Spec.roCoinPow (R*C) K) → Bool) :
+    Spec.GameBound (Spec.AdvDist (realGameWithCompletion hR hC ops s0 A K complete)
+      (privateOracleGame hR hC ops s0 A K)) ⟨K*(K+1),C,hC⟩ := by
+  rw [← spongeIdealGame_eq_privateOracleGame]
+  refine Spec.GameBound.trans (Spec.adv_until_bad _ _
+    (fun w => (idealRun ops s0 A (SimSt.init β R C) (coinList K w)).2)
+    (fun w good => ?_)) (sponge_two_way_bad_bound hR hC ops s0 A K)
+  obtain ⟨o, ho⟩ := idealRun_total_of_blockCost ops s0 bound (coinList K w) (Nat.le_of_eq (coinList_length K w).symm)
+  change (realRun ops s0 A [] (coinList K w)).getD _ = spWin _
+  rw [sponge_two_way_views_eq ops s0 A (coinList K w) good, ho]
+  cases o <;> rfl
+
+/-! ## §8. Bit-string instance: rate `BitVec n`, absorption by XOR -/
+
+/-- XOR absorption of an `n`-bit block into an `n`-bit rate part. -/
+def bvAbsorbOps (n : Nat) : AbsorbOps (BitVec n) (2 ^ n) where
+  xorB r b := (BitVec.ofFin r ^^^ b).toFin
+  diffB r r' := BitVec.ofFin r ^^^ BitVec.ofFin r'
+  xor_diff r r' := by
+    show (BitVec.ofFin r ^^^ (BitVec.ofFin r ^^^ BitVec.ofFin r')).toFin = r'
+    rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
+  diff_xor r b := by
+    show BitVec.ofFin r ^^^ BitVec.ofFin (BitVec.ofFin r ^^^ b).toFin = b
+    show BitVec.ofFin r ^^^ (BitVec.ofFin r ^^^ b) = b
+    rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
+
+/-- The bound at an `n`-bit rate and a `c`-bit capacity: `K (K + 1) / 2^c`. -/
+theorem bitSponge_two_way_indifferentiability_bound (n c : Nat) (s0 : SpSt (2 ^ n) (2 ^ c))
+    (A : SpAdv (BitVec n) (2 ^ n) (2 ^ c) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist
+        (spongeTwoWayRealGame (Nat.two_pow_pos n) (Nat.two_pow_pos c) (bvAbsorbOps n) s0 A K)
+        (spongeTwoWayIdealGame (Nat.two_pow_pos n) (Nat.two_pow_pos c) (bvAbsorbOps n) s0 A K))
+      ⟨K * (K + 1), 2 ^ c, Nat.two_pow_pos c⟩ :=
+  sponge_two_way_indifferentiability_bound _ _ _ s0 A K
+
+set_option exponentiation.threshold 2048 in
+theorem keccak_budget_margin (K : Nat) (hK : K ≤ 2 ^ 40) :
+    K * (K + 1) * 2 ^ 431 ≤ 2 ^ 512 := by
+  have h1 : K * (K + 1) ≤ 2 ^ 40 * (2 ^ 40 + 1) := Nat.mul_le_mul hK (Nat.succ_le_succ hK)
+  exact Nat.le_trans (Nat.mul_le_mul_right _ h1) (by decide +kernel)
+
+set_option exponentiation.threshold 2048 in
+/-- Ideal 1600-bit permutation at rate 1088 and capacity 512: with at most `2^40` coins the distinguishing
+    advantage is at most `2^-431`. -/
+theorem keccak_two_way_indifferentiability_431_bits_at_q2pow40
+    (s0 : SpSt (2 ^ 1088) (2 ^ 512)) (A : SpAdv (BitVec 1088) (2 ^ 1088) (2 ^ 512) Bool)
+    (K : Nat) (hK : K ≤ 2 ^ 40) :
+    (Spec.AdvDist
+      (spongeTwoWayRealGame (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512) (bvAbsorbOps 1088)
+        s0 A K)
+      (spongeTwoWayIdealGame (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512) (bvAbsorbOps 1088)
+        s0 A K)).atLeastBits 431 := by
+  refine Spec.GameBound.atLeastBits
+    (bitSponge_two_way_indifferentiability_bound 1088 512 s0 A K) ?_
+  exact keccak_budget_margin K hK
+
+/-! ## Byte domains and indexed squeeze blocks -/
+
+abbrev RateBlock := BitVec 1088
+abbrev KeccakPoint := SpSt (2 ^ 1088) (2 ^ 512)
+
+/-- Byte-aligned input to the rate-136 sponge, before multi-rate padding. -/
+structure DomainMsg where
+  suffix : UInt8
+  valid : ValidDomByte suffix
+  payload : List UInt8
+
+/-- The suffix and SP 800-185 prefix used by cSHAKE, including its empty-customization case. -/
+def cshakeDomainMsg (N S m : List UInt8) : DomainMsg :=
+  if N = [] ∧ S = [] then
+    ⟨domShake256, by rw [domShake256.public_eqs]; exact ⟨by decide, by decide⟩, m⟩
+  else
+    ⟨domCshake256, by rw [domCshake256.public_eqs]; exact ⟨by decide, by decide⟩,
+      cshakePrefix N S ++ m⟩
+
+def turboDomainMsg (m : List UInt8) : DomainMsg :=
+  ⟨domTurboShake256, by rw [domTurboShake256.public_eqs]; exact ⟨by decide, by decide⟩, m⟩
+
+/-- Pack the first byte into the least significant eight bits of the rate. -/
+def packRate (b : List UInt8) : RateBlock := BitVec.ofNat 1088 (decodeNatLeBytes b)
+
+def unpackRate (b : RateBlock) : List UInt8 := encodeNatLeBytes 136 b.toNat
+
+set_option exponentiation.threshold 2048 in
+theorem unpack_pack_rate {b : List UInt8} (hb : b.length = 136) : unpackRate (packRate b) = b := by
+  have h := decodeNatLeBytes_lt b
+  rw [hb] at h
+  have he : 256 ^ 136 = 2 ^ 1088 := by decide +kernel
+  rw [he] at h
+  unfold unpackRate packRate
+  rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt h, ← hb, encodeNatLeBytes_decodeNatLeBytes]
+
+set_option exponentiation.threshold 2048 in
+theorem pack_unpack_rate (r : RateBlock) : packRate (unpackRate r) = r := by
+  have hlt : r.toNat < 256 ^ 136 := r.isLt
+  unfold packRate unpackRate
+  rw [decodeNatLeBytes_encodeNatLeBytes _ _ hlt, BitVec.ofNat_toNat, BitVec.setWidth_eq]
+
+private theorem decode_zero_block (n : Nat) : decodeNatLeBytes (List.replicate n 0) = 0 := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp only [List.replicate_succ, decodeNatLeBytes, ih]; rfl
+
+private def domainBlocks (q : DomainMsg) (j : Nat) :=
+  absorbPayload 136 q.suffix q.payload ++ List.replicate j (List.replicate 136 (0 : UInt8))
+
+/-- Output block zero terminates at the padded message. Each later squeeze applies the
+    permutation once more, equivalently absorbing a 136-byte all-zero block. -/
+def encodeDomainMsg (q : DomainMsg) (j : Nat) : List RateBlock :=
+  (domainBlocks q j).map packRate
+
+private theorem slice_count (r : Nat) : ∀ k bs, (sliceBlocks r k bs).length = k
+  | 0, _ => rfl
+  | k+1, bs => congrArg Nat.succ (slice_count r k (bs.drop r))
+
+/-- Padded absorption costs one block beyond the quotient, even at a rate boundary. -/
+theorem encodeDomainMsg_length (q : DomainMsg) (j : Nat) :
+    (encodeDomainMsg q j).length = q.payload.length / 136 + 1 + j := by
+  rw [encodeDomainMsg, List.length_map, domainBlocks, List.length_append, List.length_replicate,
+    absorbPayload, slice_count, (pad10star1_length (by decide : 0 < 136) q.suffix q.payload).1]
+  omega
+
+private theorem unpack_domainBlocks (q : DomainMsg) (j : Nat) :
+    (encodeDomainMsg q j).map unpackRate = domainBlocks q j := by
+  rw [encodeDomainMsg, List.map_map]
+  refine Eq.trans ?_ (List.map_id _)
+  apply List.map_congr_left
+  intro b hb
+  apply unpack_pack_rate
+  rcases List.mem_append.mp hb with hm | hz
+  · exact (absorbPayload_flatten (by decide : 0 < 136) q.suffix q.payload).2 b hm
+  · rw [List.eq_of_mem_replicate hz, List.length_replicate]
+
+theorem encodeDomainMsg_unpad_blocks (q : DomainMsg) :
+    ((encodeDomainMsg q 0).map unpackRate).flatten = pad10star1 136 q.suffix q.payload := by
+  rw [unpack_domainBlocks]
+  simp only [domainBlocks, List.replicate_zero, List.append_nil]
+  exact (absorbPayload_flatten (by decide : 0 < 136) q.suffix q.payload).1
+
+theorem encodeDomainMsg_squeeze (q : DomainMsg) (j : Nat) :
+    encodeDomainMsg q j = encodeDomainMsg q 0 ++ List.replicate j (0#1088) := by
+  simp only [encodeDomainMsg, domainBlocks, List.map_append, List.map_replicate,
+    List.replicate_zero, List.append_nil, packRate, decode_zero_block]
+
+theorem encodeDomainMsg_nonempty (q : DomainMsg) (j : Nat) : encodeDomainMsg q j ≠ [] := by
+  intro h
+  have e := unpack_domainBlocks q j
+  rw [h] at e
+  exact absorbPayload_ne_nil (by decide : 0 < 136) q.suffix q.payload
+    (List.append_eq_nil_iff.mp e.symm).1
+
+theorem encodeDomainMsg_injective {a b : DomainMsg} {i j : Nat}
+    (h : encodeDomainMsg a i = encodeDomainMsg b j) : a = b ∧ i = j := by
+  have e := congrArg (List.map unpackRate) h
+  rw [unpack_domainBlocks, unpack_domainBlocks] at e
+  obtain ⟨hd, hm, hj⟩ := absorbPayload_output_path_injective (by decide : 0 < 136) a.valid b.valid e
+  cases a; cases b
+  exact ⟨by cases hd; cases hm; rfl, hj⟩
+
+private theorem cshake_blocks (N S m : List UInt8) (j : Nat) :
+    domainBlocks (cshakeDomainMsg N S m) j =
+    cshake256PaddedBlocks N S m ++ List.replicate j (List.replicate 136 0) := by
+  unfold domainBlocks cshakeDomainMsg cshake256PaddedBlocks
+  split <;> rfl
+
+theorem encode_cshake_injective {N S m N' S' m' : List UInt8} {i j : Nat}
+    (hn : 8 * N.length < 256 ^ 255) (hs : 8 * S.length < 256 ^ 255)
+    (hn' : 8 * N'.length < 256 ^ 255) (hs' : 8 * S'.length < 256 ^ 255)
+    (h : encodeDomainMsg (cshakeDomainMsg N S m) i = encodeDomainMsg (cshakeDomainMsg N' S' m') j) :
+    N = N' ∧ S = S' ∧ m = m' ∧ i = j := by
+  have e := congrArg (List.map unpackRate) h
+  rw [unpack_domainBlocks, unpack_domainBlocks, cshake_blocks, cshake_blocks] at e
+  exact cshake256_output_path_injective hn hs hn' hs' e
+
+theorem encode_cshake_ne_turbo {N S : List UInt8} (custom : ¬ (N = [] ∧ S = []))
+    (m t : List UInt8) (i j : Nat) :
+    encodeDomainMsg (cshakeDomainMsg N S m) i ≠ encodeDomainMsg (turboDomainMsg t) j := by
+  intro h
+  have e := congrArg DomainMsg.suffix (encodeDomainMsg_injective h).1
+  unfold cshakeDomainMsg turboDomainMsg at e
+  rw [ite_eq_right custom] at e
+  change domCshake256 = domTurboShake256 at e
+  rw [domCshake256.public_eqs, domTurboShake256.public_eqs] at e
+  contradiction
+
+theorem empty_cshake_eq_turbo_path (m : List UInt8) (j : Nat) :
+    encodeDomainMsg (cshakeDomainMsg [] [] m) j = encodeDomainMsg (turboDomainMsg m) j := by
+  unfold encodeDomainMsg domainBlocks cshakeDomainMsg turboDomainMsg
+  rw [ite_eq_left (show ([] : List UInt8) = [] ∧ ([] : List UInt8) = [] from ⟨rfl, rfl⟩)]
+  change (absorbPayload 136 domShake256 m ++ _).map packRate =
+    (absorbPayload 136 domTurboShake256 m ++ _).map packRate
+  rw [domShake256.public_eqs, domTurboShake256.public_eqs]
+
+/-- The jointly separated, named domains for a single ideal permutation. The empty
+    cSHAKE customization has the SHAKE suffix and is covered by the alias theorem above. -/
+inductive NamedDomainMsg where
+  | cshake (N S m : List UInt8) (custom : ¬(N = [] ∧ S = []))
+      (nameFits : 8 * N.length < 256 ^ 255) (customFits : 8 * S.length < 256 ^ 255)
+  | turbo (m : List UInt8)
+
+def NamedDomainMsg.input : NamedDomainMsg → DomainMsg
+  | .cshake N S m _ _ _ => cshakeDomainMsg N S m
+  | .turbo m => turboDomainMsg m
+
+theorem named_output_path_injective {a b : NamedDomainMsg} {i j : Nat}
+    (h : encodeDomainMsg a.input i = encodeDomainMsg b.input j) : a = b ∧ i = j := by
+  cases a with
+  | cshake N S m hc hn hs =>
+    cases b with
+    | cshake N' S' m' _ hn' hs' =>
+      obtain ⟨rfl,rfl,rfl,rfl⟩ := encode_cshake_injective hn hs hn' hs' h
+      exact ⟨rfl,rfl⟩
+    | turbo t => exact False.elim (encode_cshake_ne_turbo hc m t i j h)
+  | turbo t =>
+    cases b with
+    | cshake N S m hc _ _ => exact False.elim (encode_cshake_ne_turbo hc m t j i h.symm)
+    | turbo t' =>
+      obtain ⟨he,hj⟩ := encodeDomainMsg_injective h
+      exact ⟨congrArg NamedDomainMsg.turbo (congrArg DomainMsg.payload he),hj⟩
+
+/-- Adaptive byte queries read one indexed squeeze block at a time. -/
+inductive ByteAdv (Out : Type) where
+  | done (o : Out)
+  | block (q : DomainMsg) (j : Nat) (k : List UInt8 → ByteAdv Out)
+  | fwd (x : KeccakPoint) (k : KeccakPoint → ByteAdv Out)
+  | inv (y : KeccakPoint) (k : KeccakPoint → ByteAdv Out)
+
+def ByteAdv.toBlocks {Out : Type} : ByteAdv Out → SpAdv RateBlock (2 ^ 1088) (2 ^ 512) Out
+  | .done o => .done o
+  | .block q j k => .node (encodeDomainMsg q j) (fun r => (k (unpackRate (BitVec.ofFin r))).toBlocks)
+  | .fwd x k => .fwd x (fun z => (k z).toBlocks)
+  | .inv y k => .inv y (fun x => (k x).toBlocks)
+
+def ByteAdv.named {Out : Type} (q : NamedDomainMsg) (j : Nat)
+    (k : List UInt8 → ByteAdv Out) : ByteAdv Out := .block q.input j k
+
+set_option exponentiation.threshold 2048 in
+theorem byte_two_way_indifferentiability_431_bits_at_q2pow40 (A : ByteAdv Bool)
+    (K : Nat) (hK : K ≤ 2 ^ 40) :
+    (Spec.AdvDist
+      (spongeTwoWayRealGame (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512) (bvAbsorbOps 1088)
+        (0, 0) A.toBlocks K)
+      (privateOracleGame (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512) (bvAbsorbOps 1088)
+        (0, 0) A.toBlocks K)).atLeastBits 431 := by
+  rw [← spongeIdealGame_eq_privateOracleGame]
+  exact keccak_two_way_indifferentiability_431_bits_at_q2pow40 _ _ K hK
+
+set_option exponentiation.threshold 2048 in
+theorem byte_completed_two_way_431_bits (A : ByteAdv Bool) (K : Nat) (hK : K ≤ 2 ^ 40)
+    (bound : BlockCost A.toBlocks K) (complete : Fin (Spec.roCoinPow (2 ^ 1088 * 2 ^ 512) K) → Bool) :
+    (Spec.AdvDist (realGameWithCompletion (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512)
+      (bvAbsorbOps 1088) (0,0) A.toBlocks K complete)
+      (privateOracleGame (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512)
+        (bvAbsorbOps 1088) (0,0) A.toBlocks K)).atLeastBits 431 := by
+  apply Spec.GameBound.atLeastBits (sponge_completed_two_way_bound _ _ _ _ _ _ bound complete)
+  exact keccak_budget_margin K hK
+
+set_option exponentiation.threshold 2048 in
+/-- Read the canopy-leaf cSHAKE block and a Turbo squeeze block, then query both
+    permutation directions on values selected from the responses. -/
+def mixedByteQueries : ByteAdv Bool :=
+  .block (cshakeDomainMsg [] qsagTagCanopyLeaf []) 0 (fun first =>
+    .block (turboDomainMsg []) 1 (fun second =>
+      .fwd ((packRate first).toFin, 0) (fun z =>
+        .inv z (fun x => .done (decide (x.1 = (packRate second).toFin))))))
+
+theorem mixedByteQueries_cost : BlockCost mixedByteQueries.toBlocks 6 := by
+  have hc : ¬ (([] : List UInt8) = [] ∧ qsagTagCanopyLeaf = []) := by
+    rw [qsagTagCanopyLeaf.public_eqs]; decide
+  have hlen : (encodeDomainMsg (cshakeDomainMsg [] qsagTagCanopyLeaf []) 0).length = 2 := by
+    rw [encodeDomainMsg_length, cshakeDomainMsg, ite_eq_right hc]
+    simp only [List.append_nil, qsag_all_tags_single_block.1]
+  have ht : (encodeDomainMsg (turboDomainMsg []) 1).length = 2 := by
+    rw [encodeDomainMsg_length]; rfl
+  apply BlockCost.node
+  · rw [hlen]; decide
+  · intro first
+    rw [hlen]
+    apply BlockCost.node
+    · rw [ht]; decide
+    · intro second
+      rw [ht]
+      exact .fwd _ _ (fun _ => .inv _ _ (fun _ => .done _ _))
+
+theorem byte_budget_witness : ∃ A : ByteAdv Bool, ∃ K : Nat,
+    K ≤ 2 ^ 40 ∧ BlockCost A.toBlocks K :=
+  ⟨mixedByteQueries, 6, by decide, mixedByteQueries_cost⟩
+
+/-! ## §9. Teeth: one capacity value -/
+
+/-- The inversion distinguisher: ask the sponge for the value `r` at the one-block path `[1]`,
+    invert the state `(r, 0)`, and output whether the preimage's rate part is the absorbed
+    block. With one capacity value the sponge output is the whole state after `π`. -/
+def invertOutputAdv : SpAdv (BitVec 1) (2 ^ 1) 1 Bool :=
+  .node [1#1] (fun r => .inv (r, 0) (fun x => .done (decide (x.1.val = 1))))
+
+/-- All four two-coin tapes win in the real world; exactly two win in the ideal world. -/
+theorem invertOutputAdv_winCounts :
+    (spongeTwoWayRealGame (R := 2) (C := 1) (by decide) (by decide) (bvAbsorbOps 1)
+        (0, 0) invertOutputAdv 2).winCount = 4 ∧
+    (spongeTwoWayIdealGame (R := 2) (C := 1) (by decide) (by decide) (bvAbsorbOps 1)
+        (0, 0) invertOutputAdv 2).winCount = 2 := by decide +kernel
+
+/-- **No capacity, trivial `π⁻¹` distinguisher.** With a single capacity value the inversion
+    distinguisher has advantage `1/2` with two coins: in the real world the preimage is always
+    the absorbed state, in the ideal world the simulator cannot know which path the oracle
+    value came from. So no bound below `1/2` holds without capacity; in particular the two
+    games are different games. -/
+theorem tooth_no_capacity_inverse_distinguisher_advantage_half :
+    ¬ Spec.GameBound
+      (Spec.AdvDist
+        (spongeTwoWayRealGame (R := 2 ^ 1) (C := 1) (by decide) (by decide) (bvAbsorbOps 1)
+          (0, 0) invertOutputAdv 2)
+        (spongeTwoWayIdealGame (R := 2 ^ 1) (C := 1) (by decide) (by decide) (bvAbsorbOps 1)
+          (0, 0) invertOutputAdv 2))
+      ⟨1, 4, by decide⟩ :=
+  fun h => absurd (show Spec.RatBound.le _ _ from h) (by decide +kernel)
+
+/-- **The bad-event hypothesis of the view equality cannot be dropped.** With a single capacity
+    value there is a coin list on which the two worlds give the inversion distinguisher
+    different views. -/
+theorem tooth_views_differ_on_bad_coin :
+    ∃ ω : List (SpSt (2 ^ 1) 1),
+      realRun (bvAbsorbOps 1) (0, 0) invertOutputAdv [] ω ≠
+        (idealRun (bvAbsorbOps 1) (0, 0) invertOutputAdv (SimSt.init (BitVec 1) (2 ^ 1) 1) ω).1 :=
+  ⟨[(0, 0), (0, 0)], by decide +kernel⟩
+
+/-- With a single capacity value the bad event of the ideal world is certain for the
+    inversion distinguisher, so `sponge_two_way_bad_bound` is not below `1/2` there. -/
+theorem tooth_no_capacity_bad_event_certain :
+    ¬ Spec.GameBound
+      (spongeIndiffBadGame (R := 2 ^ 1) (C := 1) (by decide) (by decide) (bvAbsorbOps 1)
+        (0, 0) invertOutputAdv 2).winProb
+      ⟨1, 2, by decide⟩ :=
+  fun h => absurd (show Spec.RatBound.le _ _ from h) (by decide +kernel)
+
+#print axioms spongeSimulator
+#print axioms sponge_two_way_views_eq
+#print axioms sponge_two_way_bad_bound
+#print axioms sponge_two_way_indifferentiability_bound
+#print axioms readRates_product_law
+#print axioms idealRun_eq_private_oracle
+#print axioms named_output_path_injective
+#print axioms byte_two_way_indifferentiability_431_bits_at_q2pow40
+#print axioms byte_completed_two_way_431_bits
+#print axioms mixedByteQueries_cost
+
+#verify_constructive
+  Qsag.SpongeIndiff.readRates_product_law
+  Qsag.SpongeIndiff.readLabel_fresh_rate_law
+  Qsag.SpongeIndiff.coinList_length
+  Qsag.SpongeIndiff.sponge_completed_two_way_bound
+  Qsag.SpongeIndiff.byte_completed_two_way_431_bits
+  Qsag.SpongeIndiff.idealRun_eq_private_oracle
+  Qsag.SpongeIndiff.labelRun_total
+  Qsag.SpongeIndiff.idealRun_total_of_blockCost
+  Qsag.SpongeIndiff.spongeIdealGame_eq_privateOracleGame
+  Qsag.SpongeIndiff.unpack_pack_rate
+  Qsag.SpongeIndiff.pack_unpack_rate
+  Qsag.SpongeIndiff.encodeDomainMsg_unpad_blocks
+  Qsag.SpongeIndiff.encodeDomainMsg_squeeze
+  Qsag.SpongeIndiff.encodeDomainMsg_nonempty
+  Qsag.SpongeIndiff.encodeDomainMsg_length
+  Qsag.SpongeIndiff.mixedByteQueries_cost
+  Qsag.SpongeIndiff.byte_budget_witness
+  Qsag.SpongeIndiff.encodeDomainMsg_injective
+  Qsag.SpongeIndiff.encode_cshake_injective
+  Qsag.SpongeIndiff.encode_cshake_ne_turbo
+  Qsag.SpongeIndiff.named_output_path_injective
+  Qsag.SpongeIndiff.empty_cshake_eq_turbo_path
+  Qsag.SpongeIndiff.byte_two_way_indifferentiability_431_bits_at_q2pow40
+  Qsag.SpongeIndiff.capIn_eq_true
+  Qsag.SpongeIndiff.capIn_eq_false
+  Qsag.SpongeIndiff.sponge_two_way_views_eq
+  Qsag.SpongeIndiff.idealRun_bad_count
+  Qsag.SpongeIndiff.sampleSum_coinList
+  Qsag.SpongeIndiff.sponge_two_way_bad_bound
+  Qsag.SpongeIndiff.sponge_two_way_indifferentiability_bound
+  Qsag.SpongeIndiff.bitSponge_two_way_indifferentiability_bound
+  Qsag.SpongeIndiff.keccak_two_way_indifferentiability_431_bits_at_q2pow40
+  Qsag.SpongeIndiff.invertOutputAdv_winCounts
+  Qsag.SpongeIndiff.tooth_no_capacity_inverse_distinguisher_advantage_half
+  Qsag.SpongeIndiff.tooth_views_differ_on_bad_coin
+  Qsag.SpongeIndiff.tooth_no_capacity_bad_event_certain
+
+#verify_inhabited byte_completed_two_way_431_bits byte_budget_witness
+
+#tooth_pair Qsag.SpongeIndiff.sponge_two_way_indifferentiability_bound vs
+  Qsag.SpongeIndiff.tooth_no_capacity_inverse_distinguisher_advantage_half
+#tooth_pair Qsag.SpongeIndiff.sponge_two_way_views_eq vs
+  Qsag.SpongeIndiff.tooth_views_differ_on_bad_coin
+#tooth_pair Qsag.SpongeIndiff.sponge_two_way_bad_bound vs
+  Qsag.SpongeIndiff.tooth_no_capacity_bad_event_certain
+
+end Qsag.SpongeIndiff
+end
+
+public section
+namespace Qsag.SpongeIndiff
+#export_eqns permFwd? permInv? drawFreshIn drawFreshOut realFwd realInv realRun realWalk
+theorem realGameWithCompletion_win {β : Type} {R C : Nat} (hR : 0 < R) (hC : 0 < C)
+    (ops : AbsorbOps β R) (s0 : SpSt R C) (A : SpAdv β R C Bool) (K : Nat)
+    (complete : Fin (Spec.roCoinPow (R*C) K) → Bool) (w) :
+    (realGameWithCompletion hR hC ops s0 A K complete).win w =
+      (realRun ops s0 A [] (coinList K w)).getD (complete w) := by unfold realGameWithCompletion; rfl
+
+theorem coinList_zero {R C : Nat} (w) : coinList (R := R) (C := C) 0 w = [] := by unfold coinList; rfl
+
+theorem coinList_pair {R C : Nat} (k : Nat) (i : Fin (R*C)) (j : Fin (Spec.roCoinPow (R*C) k)) :
+    coinList (k+1) ((Spec.CoinSplit.prod _ _).pair i j) =
+      ((Spec.CoinSplit.prod R C).chal i, (Spec.CoinSplit.prod R C).advc i) :: coinList k j := by
+  rw [show (Spec.CoinSplit.prod _ _).pair i j = ⟨_, sti_pair_lt i j⟩ from Fin.ext (Spec.CoinSplit.prod_pair_val i j)]
+  rw [sti_coinList_pair]
+  congr 1
+  apply Prod.ext <;> apply Fin.ext
+  · exact (Spec.CoinSplit.prod_chal_val i).symm
+  · exact (Spec.CoinSplit.prod_advc_val R C i).symm
+
+end Qsag.SpongeIndiff
+end
