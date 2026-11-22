@@ -1,0 +1,28 @@
+# Differential tests of `qsag_migrate::hem::zcash` against the reference Zcash
+# crates. A workspace of its own: the libraries have no crates.io dependencies and this
+# crate has many.
+[workspace]
+resolver = "2"
+
+[package]
+name = "qsag-validation-zcash"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[dependencies]
+qsag-migrate = { path = "../../crates/qsag-migrate", features = ["std"] }
+
+# The reference implementation of the Orchard protocol, with note version 3 (ZIP 2005).
+orchard = { version = "=0.16.0", default-features = false, features = ["std"] }
+incrementalmerkletree = "0.9"
+zip32 = "0.3"
+zcash_address = "0.14"
+zcash_protocol = "0.11"
+rand = "0.10"
+pasta_curves = "0.6"
+ff = "0.14"
+
+[profile.release]
+opt-level = 3
