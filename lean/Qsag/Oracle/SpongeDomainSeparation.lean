@@ -1155,3 +1155,1152 @@ private theorem capBudget_step (L K : Nat) :
 /-- **Capacity-event weight bound for the lazy sampler.** From a table of `L` entries with no
     bad draw, a program run with `K` coins records a bad draw on at most
     `K (2 L + K + 1) · R · cardD^K / (2 · cardD)` coins. -/
+theorem spongeLazyRun_cap_bad_bound {Dom R σ κ : Type} [DecidableEq Dom] [DecidableEq κ]
+    {cardD Rfib : Nat} (capOf : σ → κ) (dec : Fin cardD → σ) (s0 : σ)
+    (hFib : ∀ c : κ, Spec.sampleSum cardD (fun d => if capOf (dec d) = c then 1 else 0) ≤ Rfib) :
+    ∀ (c : Spec.Code (Spec.roOracleIface Dom cardD) R) (K : Nat) (st : List (Dom × Fin cardD)),
+      capTableBad capOf dec s0 st = false →
+      Spec.sampleSum (Spec.roCoinPow cardD K)
+          (fun ω => if capTableBad capOf dec s0 (spongeLazyRun c K st ω).2 = true then 1 else 0) *
+          (2 * cardD) ≤
+        capBudget st.length K * (Rfib * Spec.roCoinPow cardD K)
+  | .ret v, K, st, hClean => by
+    have hZero : (fun ω : Fin (Spec.roCoinPow cardD K) =>
+        if capTableBad capOf dec s0 (spongeLazyRun (Spec.Code.ret v) K st ω).2 = true
+          then 1 else 0) = (fun _ => 0) := by
+      funext ω; rw [spongeLazyRun_ret, hClean]; rfl
+    rw [hZero, sds_sum_const, Nat.mul_zero, Nat.zero_mul]
+    exact Nat.zero_le _
+  | .call q next, 0, st, hClean => by
+    have hZero : (fun ω : Fin (Spec.roCoinPow cardD 0) =>
+        if capTableBad capOf dec s0 (spongeLazyRun (Spec.Code.call q next) 0 st ω).2 = true
+          then 1 else 0) = (fun _ => 0) := by
+      funext ω; rw [spongeLazyRun_call_zero, hClean]; rfl
+    rw [hZero, sds_sum_const, Nat.mul_zero, Nat.zero_mul]
+    exact Nat.zero_le _
+  | .call q next, K + 1, st, hClean => by
+    change Spec.sampleSum (cardD * Spec.roCoinPow cardD K) _ * (2 * cardD) ≤
+      capBudget st.length (K + 1) * (Rfib * (cardD * Spec.roCoinPow cardD K))
+    rw [sds_sum_prod cardD (Spec.roCoinPow cardD K)]
+    cases hLook : spongeLookup st q with
+    | some y =>
+      have hInner : ∀ (d : Fin cardD) (τ : Fin (Spec.roCoinPow cardD K)),
+          (if capTableBad capOf dec s0 (spongeLazyRun (Spec.Code.call q next) (K + 1) st
+              ⟨d.1 * Spec.roCoinPow cardD K + τ.1, Spec.prodCoin_pair_lt d τ⟩).2 = true
+            then 1 else 0) =
+          (if capTableBad capOf dec s0 (spongeLazyRun (next y) K st τ).2 = true
+            then 1 else 0) := by
+        intro d τ
+        rw [spongeLazyRun_call_hit q next K st _ y hLook, spongeCoinTail_pair]
+      rw [sds_sum_ext (fun d => sds_sum_ext (fun τ => hInner d τ)), sds_sum_const]
+      have ih := spongeLazyRun_cap_bad_bound capOf dec s0 hFib (next y) K st hClean
+      have h1 := Nat.mul_le_mul_left cardD ih
+      have h2 := Nat.mul_le_mul_right (Rfib * (cardD * Spec.roCoinPow cardD K))
+        (capBudget_mono st.length K)
+      refine Nat.le_trans (Nat.le_of_eq ?_) (Nat.le_trans h1 (Nat.le_trans (Nat.le_of_eq ?_) h2))
+      · ac_rfl
+      · ac_rfl
+    | none =>
+      have hInner : ∀ (d : Fin cardD) (τ : Fin (Spec.roCoinPow cardD K)),
+          (if capTableBad capOf dec s0 (spongeLazyRun (Spec.Code.call q next) (K + 1) st
+              ⟨d.1 * Spec.roCoinPow cardD K + τ.1, Spec.prodCoin_pair_lt d τ⟩).2 = true
+            then 1 else 0) =
+          (if capTableBad capOf dec s0
+              (spongeLazyRun (next d) K ((q, d) :: st) τ).2 = true then 1 else 0) := by
+        intro d τ
+        rw [spongeLazyRun_call_miss q next K st _ hLook, spongeCoinTail_pair,
+          spongeCoinHead_pair]
+      rw [sds_sum_ext (fun d => sds_sum_ext (fun τ => hInner d τ))]
+      have hPt : ∀ d : Fin cardD,
+          Spec.sampleSum (Spec.roCoinPow cardD K) (fun τ =>
+              if capTableBad capOf dec s0
+                (spongeLazyRun (next d) K ((q, d) :: st) τ).2 = true then 1 else 0) *
+              (2 * cardD) ≤
+            (if capOutBad capOf dec s0 (st.map Prod.snd) d = true then 1 else 0) *
+                (2 * (cardD * Spec.roCoinPow cardD K)) +
+              capBudget (st.length + 1) K * (Rfib * Spec.roCoinPow cardD K) := by
+        intro d
+        cases hBad : capOutBad capOf dec s0 (st.map Prod.snd) d with
+        | true =>
+          have hTriv := sds_sum_le_card (Spec.roCoinPow cardD K) (fun τ =>
+            capTableBad capOf dec s0 (spongeLazyRun (next d) K ((q, d) :: st) τ).2)
+          have h1 := Nat.mul_le_mul_right (2 * cardD) hTriv
+          refine Nat.le_trans h1 (Nat.le_trans (Nat.le_of_eq ?_) (Nat.le_add_right _ _))
+          simp only [↓reduceIte, Nat.one_mul]
+          ac_rfl
+        | false =>
+          have hClean' : capTableBad capOf dec s0 ((q, d) :: st) = false := by
+            show capOutsBad capOf dec s0 (d :: st.map Prod.snd) = false
+            show (capOutBad capOf dec s0 (st.map Prod.snd) d ||
+              capOutsBad capOf dec s0 (st.map Prod.snd)) = false
+            rw [hBad, Bool.false_or]
+            exact hClean
+          have ih := spongeLazyRun_cap_bad_bound capOf dec s0 hFib (next d) K ((q, d) :: st)
+            hClean'
+          rw [List.length_cons] at ih
+          exact Nat.le_trans ih (Nat.le_add_left _ _)
+      have hSum := sds_sum_le cardD _ _ hPt
+      rw [sds_sum_mul_right, sds_sum_add, sds_sum_mul_right, sds_sum_const] at hSum
+      have hCount := capOutBad_count capOf dec s0 hFib (st.map Prod.snd)
+      rw [List.length_map] at hCount
+      have hC2 := Nat.mul_le_mul_right (2 * (cardD * Spec.roCoinPow cardD K)) hCount
+      refine Nat.le_trans hSum (Nat.le_trans (Nat.add_le_add_right hC2 _) (Nat.le_of_eq ?_))
+      have e1 : (st.length + 1) * Rfib * (2 * (cardD * Spec.roCoinPow cardD K)) =
+          2 * (st.length + 1) * (Rfib * (cardD * Spec.roCoinPow cardD K)) := by
+        simp only [Nat.mul_comm, Nat.mul_left_comm, Nat.mul_assoc]
+      have e2 : cardD * (capBudget (st.length + 1) K * (Rfib * Spec.roCoinPow cardD K)) =
+          capBudget (st.length + 1) K * (Rfib * (cardD * Spec.roCoinPow cardD K)) := by
+        simp only [Nat.mul_left_comm]
+      rw [e1, e2, ← capBudget_step st.length K,
+        Nat.add_mul (2 * (st.length + 1)) (capBudget (st.length + 1) K)]
+
+/-- The game whose winning coins are those on which a capacity event is recorded. -/
+def spongeCapBadGame {Dom R σ κ : Type} [DecidableEq Dom] [DecidableEq κ] {cardD : Nat}
+    (hCard : 0 < cardD) (capOf : σ → κ) (dec : Fin cardD → σ) (s0 : σ)
+    (c : Spec.Code (Spec.roOracleIface Dom cardD) R) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow cardD K) where
+  samplePos := Spec.roCoinPow_pos hCard K
+  win ω := capTableBad capOf dec s0 (spongeLazyRun c K [] ω).2
+
+/-- **`Pr[capacity event] ≤ K (K + 1) · R / (2 · cardD)`** for every adaptive program making at
+    most `K` calls to a lazily sampled function, when every capacity value has at most `R`
+    preimages among the `cardD` states. -/
+theorem sponge_cap_bad_bound {Dom R σ κ : Type} [DecidableEq Dom] [DecidableEq κ]
+    {cardD Rfib : Nat} (hCard : 0 < cardD) (capOf : σ → κ) (dec : Fin cardD → σ) (s0 : σ)
+    (hFib : ∀ c : κ, Spec.sampleSum cardD (fun d => if capOf (dec d) = c then 1 else 0) ≤ Rfib)
+    (c : Spec.Code (Spec.roOracleIface Dom cardD) R) (K : Nat) :
+    Spec.GameBound (spongeCapBadGame hCard capOf dec s0 c K).winProb
+      ⟨K * (K + 1) * Rfib, 2 * cardD, Nat.mul_pos (by decide) hCard⟩ := by
+  have h := spongeLazyRun_cap_bad_bound capOf dec s0 hFib c K [] rfl
+  show Spec.sampleSum (Spec.roCoinPow cardD K)
+      (fun ω => if capTableBad capOf dec s0 (spongeLazyRun c K [] ω).2 = true then 1 else 0) *
+      (2 * cardD) ≤ K * (K + 1) * Rfib * Spec.roCoinPow cardD K
+  refine Nat.le_trans h (Nat.le_of_eq ?_)
+  show K * (2 * 0 + K + 1) * (Rfib * Spec.roCoinPow cardD K) =
+    K * (K + 1) * Rfib * Spec.roCoinPow cardD K
+  rw [Nat.mul_zero, Nat.zero_add]
+  simp only [Nat.mul_assoc]
+
+/-! ## §6. Real and ideal worlds agree until a capacity event -/
+
+/-- Sponge-level interface: a block path is answered by the rate part of the state at its node. -/
+@[expose, reducible] def spongeNodeIface (β ρ : Type) : Spec.Iface where
+  Query := List β
+  Resp _ := ρ
+
+/-- Real world: walk the remaining blocks through the transformation, one call per block. -/
+def spongeWalkReal {σ β R : Type} {cardD : Nat} (dec : Fin cardD → σ) (xorBlk : σ → β → σ) :
+    σ → List β → (σ → Spec.Code (Spec.roOracleIface σ cardD) R) →
+      Spec.Code (Spec.roOracleIface σ cardD) R
+  | s, [], k => k s
+  | s, b :: rest, k =>
+    Spec.Code.call (E := Spec.roOracleIface σ cardD) (xorBlk s b)
+      (fun d => spongeWalkReal dec xorBlk (dec d) rest k)
+
+/-- Ideal world: one call per node of the path, keyed by the reversed path itself. -/
+def spongeWalkIdeal {σ β R : Type} {cardD : Nat} (dec : Fin cardD → σ) :
+    List β → σ → List β → (σ → Spec.Code (Spec.roOracleIface (List β) cardD) R) →
+      Spec.Code (Spec.roOracleIface (List β) cardD) R
+  | _, s, [], k => k s
+  | p, _, b :: rest, k =>
+    Spec.Code.call (E := Spec.roOracleIface (List β) cardD) (b :: p)
+      (fun d => spongeWalkIdeal dec (b :: p) (dec d) rest k)
+
+/-- The sponge over a lazily sampled transformation: a path of valid blocks is answered by the
+    rate part of the state reached by absorbing it from `s0`; any other path by `rate s0`. -/
+def spongeRealWorld {σ β ρ R : Type} {cardD : Nat} (dec : Fin cardD → σ) (xorBlk : σ → β → σ)
+    (rate : σ → ρ) (s0 : σ) (validB : β → Bool) :
+    Spec.Code (spongeNodeIface β ρ) R → Spec.Code (Spec.roOracleIface σ cardD) R
+  | .ret v => .ret v
+  | .call w k =>
+    if w.all validB = true then
+      spongeWalkReal dec xorBlk s0 w
+        (fun s => spongeRealWorld dec xorBlk rate s0 validB (k (rate s)))
+    else spongeRealWorld dec xorBlk rate s0 validB (k (rate s0))
+
+/-- A lazily sampled function on block paths: a path of valid blocks is answered by the rate
+    part of the draw recorded for that path (its proper prefixes are drawn too, keeping the coin
+    positions of the real world); any other path by `rate s0`. -/
+def spongeIdealWorld {σ β ρ R : Type} {cardD : Nat} (dec : Fin cardD → σ)
+    (rate : σ → ρ) (s0 : σ) (validB : β → Bool) :
+    Spec.Code (spongeNodeIface β ρ) R → Spec.Code (Spec.roOracleIface (List β) cardD) R
+  | .ret v => .ret v
+  | .call w k =>
+    if w.all validB = true then
+      spongeWalkIdeal dec [] s0 w
+        (fun s => spongeIdealWorld dec rate s0 validB (k (rate s)))
+    else spongeIdealWorld dec rate s0 validB (k (rate s0))
+
+/-- State the ideal table assigns to a reversed path. -/
+def idealStateOf {σ β : Type} [DecidableEq β] {cardD : Nat} (dec : Fin cardD → σ) (s0 : σ)
+    (tI : List (List β × Fin cardD)) : List β → σ
+  | [] => s0
+  | b :: r =>
+    match spongeLookup tI (b :: r) with
+    | some d => dec d
+    | none => s0
+
+/-- The transformation input the real world uses at the node of a reversed path. -/
+def idealNodeIn {σ β : Type} [DecidableEq β] {cardD : Nat} (dec : Fin cardD → σ)
+    (xorBlk : σ → β → σ) (s0 : σ) (tI : List (List β × Fin cardD)) : List β → σ
+  | [] => s0
+  | b :: r => xorBlk (idealStateOf dec s0 tI r) b
+
+/-- The reversed path is the root or has a recorded draw. -/
+def idealHas {β : Type} [DecidableEq β] {cardD : Nat} (tI : List (List β × Fin cardD))
+    (p : List β) : Prop :=
+  p = [] ∨ ∃ d, spongeLookup tI p = some d
+
+/-- Coupling invariant: the real table is the ideal table with every path replaced by its
+    transformation input, and the ideal table is closed under parents. -/
+structure SpongeCoupled {σ β : Type} [DecidableEq β] {cardD : Nat} (dec : Fin cardD → σ)
+    (xorBlk : σ → β → σ) (s0 : σ) (validB : β → Bool) (tR : List (σ × Fin cardD))
+    (tI : List (List β × Fin cardD)) : Prop where
+  map_eq : tR = tI.map (fun e => (idealNodeIn dec xorBlk s0 tI e.1, e.2))
+  keys : ∀ e, e ∈ tI → ∃ b r, e.1 = b :: r ∧ validB b = true ∧ idealHas tI r
+
+private theorem sds_if_pos.{u} {α : Sort u} {p : Prop} [Decidable p] (hp : p) {a b : α} :
+    (if p then a else b) = a := by
+  cases ‹Decidable p› with
+  | isTrue _ => rfl
+  | isFalse hn => exact False.elim (hn hp)
+
+private theorem sds_if_neg.{u} {α : Sort u} {p : Prop} [Decidable p] (hnp : ¬ p) {a b : α} :
+    (if p then a else b) = b := by
+  cases ‹Decidable p› with
+  | isTrue hp => exact False.elim (hnp hp)
+  | isFalse _ => rfl
+
+private theorem spongeLookup_mem {Dom V : Type} [DecidableEq Dom] :
+    ∀ (t : List (Dom × V)) (q : Dom) (v : V), spongeLookup t q = some v → (q, v) ∈ t
+  | [], _, _, h => by cases h
+  | e :: rest, q, v, h => by
+    unfold spongeLookup at h
+    by_cases hq : q = e.1
+    · rw [sds_if_pos hq] at h
+      have hv : e.2 = v := Option.some.inj h
+      have he : e = (q, v) := by rw [hq, ← hv]
+      rw [he]
+      exact List.mem_cons_self
+    · rw [sds_if_neg hq] at h
+      exact List.mem_cons_of_mem _ (spongeLookup_mem rest q v h)
+
+private theorem spongeLookup_map_inj {A B V : Type} [DecidableEq A] [DecidableEq B] (g : A → B)
+    (q : A) :
+    ∀ (t : List (A × V)), (∀ e, e ∈ t → g e.1 = g q → e.1 = q) →
+      spongeLookup (t.map (fun e => (g e.1, e.2))) (g q) = spongeLookup t q
+  | [], _ => rfl
+  | e :: rest, h => by
+    have ih := spongeLookup_map_inj g q rest (fun e' he' => h e' (List.mem_cons_of_mem _ he'))
+    show (if g q = g e.1 then some e.2 else
+        spongeLookup (rest.map (fun e => (g e.1, e.2))) (g q)) =
+      (if q = e.1 then some e.2 else spongeLookup rest q)
+    by_cases hq : q = e.1
+    · rw [sds_if_pos hq, sds_if_pos (congrArg g hq)]
+    · have hg : ¬ g q = g e.1 := fun hEq => hq (h e List.mem_cons_self hEq.symm).symm
+      rw [sds_if_neg hq, sds_if_neg hg, ih]
+
+private theorem any_false_of_mem {α : Type} {l : List α} {p : α → Bool} (h : l.any p = false)
+    {x : α} (hx : x ∈ l) : p x = false := by
+  cases hp : p x with
+  | false => rfl
+  | true =>
+    have hT : l.any p = true := List.any_eq_true.mpr ⟨x, hx, hp⟩
+    rw [h] at hT
+    cases hT
+
+private theorem bool_or_false_split {a b : Bool} (h : (a || b) = false) :
+    a = false ∧ b = false := by
+  cases a <;> cases b <;> first | exact ⟨rfl, rfl⟩ | cases h
+
+section CouplingLemmas
+
+variable {σ κ β : Type} [DecidableEq κ] {cardD : Nat}
+  (capOf : σ → κ) (dec : Fin cardD → σ) (s0 : σ)
+
+/-- With no capacity event recorded, a recorded draw never has the initial capacity. -/
+private theorem capTable_ne_init {Dom : Type} [DecidableEq Dom] :
+    ∀ (t : List (Dom × Fin cardD)), capTableBad capOf dec s0 t = false →
+      ∀ (p : Dom) (d : Fin cardD), spongeLookup t p = some d → capOf (dec d) ≠ capOf s0
+  | [], _, _, _, h => by cases h
+  | e :: rest, hBad, p, d, h => by
+    have hSplit := bool_or_false_split (a := capOutBad capOf dec s0 (rest.map Prod.snd) e.2)
+      (b := capOutsBad capOf dec s0 (rest.map Prod.snd)) hBad
+    unfold spongeLookup at h
+    by_cases hq : p = e.1
+    · rw [sds_if_pos hq] at h
+      have hd : e.2 = d := Option.some.inj h
+      have h1 := (bool_or_false_split (a := decide (capOf (dec e.2) = capOf s0)) hSplit.1).1
+      rw [hd] at h1
+      exact of_decide_eq_false h1
+    · rw [sds_if_neg hq] at h
+      exact capTable_ne_init rest hSplit.2 p d h
+
+/-- With no capacity event recorded, the capacity of a recorded draw determines its key. -/
+private theorem capTable_key_inj {Dom : Type} [DecidableEq Dom] :
+    ∀ (t : List (Dom × Fin cardD)), capTableBad capOf dec s0 t = false →
+      ∀ (p p' : Dom) (d d' : Fin cardD), spongeLookup t p = some d →
+        spongeLookup t p' = some d' → capOf (dec d) = capOf (dec d') → p = p'
+  | [], _, _, _, _, _, h, _, _ => by cases h
+  | e :: rest, hBad, p, p', d, d', h, h', hCap => by
+    have hSplit := bool_or_false_split (a := capOutBad capOf dec s0 (rest.map Prod.snd) e.2)
+      (b := capOutsBad capOf dec s0 (rest.map Prod.snd)) hBad
+    have hAny := (bool_or_false_split (a := decide (capOf (dec e.2) = capOf s0)) hSplit.1).2
+    have hOld : ∀ (q : Dom) (x : Fin cardD), spongeLookup rest q = some x →
+        capOf (dec e.2) ≠ capOf (dec x) := by
+      intro q x hx
+      have hMem : x ∈ rest.map Prod.snd :=
+        List.mem_map.mpr ⟨(q, x), spongeLookup_mem rest q x hx, rfl⟩
+      exact of_decide_eq_false (any_false_of_mem hAny hMem)
+    unfold spongeLookup at h h'
+    by_cases hq : p = e.1
+    · by_cases hq' : p' = e.1
+      · rw [hq, hq']
+      · rw [sds_if_pos hq] at h
+        rw [sds_if_neg hq'] at h'
+        have hd : e.2 = d := Option.some.inj h
+        rw [← hd] at hCap
+        exact absurd hCap (hOld p' d' h')
+    · by_cases hq' : p' = e.1
+      · rw [sds_if_neg hq] at h
+        rw [sds_if_pos hq'] at h'
+        have hd : e.2 = d' := Option.some.inj h'
+        rw [← hd] at hCap
+        exact absurd hCap.symm (hOld p d h)
+      · rw [sds_if_neg hq] at h
+        rw [sds_if_neg hq'] at h'
+        exact capTable_key_inj rest hSplit.2 p p' d d' h h' hCap
+
+variable [DecidableEq β]
+
+private theorem idealStateOf_of_lookup (tI : List (List β × Fin cardD)) (b : β) (r : List β)
+    (d : Fin cardD) (h : spongeLookup tI (b :: r) = some d) :
+    idealStateOf dec s0 tI (b :: r) = dec d := by
+  show (match spongeLookup tI (b :: r) with | some d => dec d | none => s0) = dec d
+  rw [h]
+
+/-- With no capacity event recorded, the capacity of the state at a recorded node determines
+    the node. -/
+private theorem idealState_cap_inj (tI : List (List β × Fin cardD))
+    (hBad : capTableBad capOf dec s0 tI = false) :
+    ∀ (r r' : List β), idealHas tI r → idealHas tI r' →
+      capOf (idealStateOf dec s0 tI r) = capOf (idealStateOf dec s0 tI r') → r = r'
+  | [], [], _, _, _ => rfl
+  | [], c :: t, _, h', hCap => by
+    rcases h' with hNil | ⟨d, hd⟩
+    · cases hNil
+    · rw [idealStateOf_of_lookup dec s0 tI c t d hd] at hCap
+      exact absurd hCap.symm (capTable_ne_init capOf dec s0 tI hBad (c :: t) d hd)
+  | c :: t, [], h, _, hCap => by
+    rcases h with hNil | ⟨d, hd⟩
+    · cases hNil
+    · rw [idealStateOf_of_lookup dec s0 tI c t d hd] at hCap
+      exact absurd hCap (capTable_ne_init capOf dec s0 tI hBad (c :: t) d hd)
+  | c :: t, c' :: t', h, h', hCap => by
+    rcases h with hNil | ⟨d, hd⟩
+    · cases hNil
+    · rcases h' with hNil' | ⟨d', hd'⟩
+      · cases hNil'
+      · rw [idealStateOf_of_lookup dec s0 tI c t d hd,
+          idealStateOf_of_lookup dec s0 tI c' t' d' hd'] at hCap
+        exact capTable_key_inj capOf dec s0 tI hBad (c :: t) (c' :: t') d d' hd hd' hCap
+
+end CouplingLemmas
+
+section Coupling
+
+variable {σ κ β : Type} [DecidableEq σ] [DecidableEq κ] [DecidableEq β] {cardD : Nat}
+  {capOf : σ → κ} {xorBlk : σ → β → σ} {validB : β → Bool}
+
+omit [DecidableEq σ] in
+private theorem capTableBad_coupled (dec : Fin cardD → σ) (s0 : σ)
+    {tR : List (σ × Fin cardD)} {tI : List (List β × Fin cardD)}
+    (hC : SpongeCoupled dec xorBlk s0 validB tR tI) :
+    capTableBad capOf dec s0 tR = capTableBad capOf dec s0 tI := by
+  unfold capTableBad
+  rw [hC.map_eq, List.map_map]
+  rfl
+
+private theorem coupled_lookup_eq (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ)
+    {tR : List (σ × Fin cardD)} {tI : List (List β × Fin cardD)}
+    (hC : SpongeCoupled dec xorBlk s0 validB tR tI)
+    (hBad : capTableBad capOf dec s0 tI = false) (p : List β) (hp : idealHas tI p) (b : β)
+    (hb : validB b = true) :
+    spongeLookup tR (xorBlk (idealStateOf dec s0 tI p) b) = spongeLookup tI (b :: p) := by
+  rw [hC.map_eq]
+  refine spongeLookup_map_inj (idealNodeIn dec xorBlk s0 tI) (b :: p) tI ?_
+  intro e he hEq
+  obtain ⟨b', r', hKey, hb', hr'⟩ := hC.keys e he
+  rw [hKey] at hEq ⊢
+  have hEq' : xorBlk (idealStateOf dec s0 tI r') b' = xorBlk (idealStateOf dec s0 tI p) b := hEq
+  have hCap : capOf (idealStateOf dec s0 tI r') = capOf (idealStateOf dec s0 tI p) := by
+    rw [← hL.cap_xor _ b' hb', ← hL.cap_xor (idealStateOf dec s0 tI p) b hb, hEq']
+  have hr : r' = p := idealState_cap_inj capOf dec s0 tI hBad r' p hr' hp hCap
+  subst hr
+  rw [hL.xor_inj _ b' b hb' hb hEq']
+
+omit [DecidableEq σ] in
+private theorem idealStateOf_cons_table (dec : Fin cardD → σ) (s0 : σ)
+    (tI : List (List β × Fin cardD)) (b : β) (p : List β) (d : Fin cardD)
+    (hNone : spongeLookup tI (b :: p) = none) (r : List β) (hr : idealHas tI r) :
+    idealStateOf dec s0 ((b :: p, d) :: tI) r = idealStateOf dec s0 tI r := by
+  cases r with
+  | nil => rfl
+  | cons c t =>
+    rcases hr with hNil | ⟨x, hx⟩
+    · cases hNil
+    · have hNe : ¬ (c :: t = b :: p) := fun hEq => by
+        rw [hEq, hNone] at hx; cases hx
+      have hLk : spongeLookup ((b :: p, d) :: tI) (c :: t) = spongeLookup tI (c :: t) := by
+        show (if c :: t = b :: p then some d else spongeLookup tI (c :: t)) = _
+        rw [sds_if_neg hNe]
+      show (match spongeLookup ((b :: p, d) :: tI) (c :: t) with
+        | some d => dec d | none => s0) = _
+      rw [hLk]
+      rfl
+
+private theorem idealHas_cons_table (tI : List (List β × Fin cardD)) (key : List β)
+    (d : Fin cardD) (r : List β) (hr : idealHas tI r) : idealHas ((key, d) :: tI) r := by
+  rcases hr with hNil | ⟨x, hx⟩
+  · exact .inl hNil
+  · refine .inr ?_
+    show ∃ d', (if r = key then some d else spongeLookup tI r) = some d'
+    by_cases h : r = key
+    · exact ⟨d, by rw [sds_if_pos h]⟩
+    · exact ⟨x, by rw [sds_if_neg h]; exact hx⟩
+
+omit [DecidableEq σ] in
+private theorem coupled_extend (dec : Fin cardD → σ) (s0 : σ)
+    {tR : List (σ × Fin cardD)} {tI : List (List β × Fin cardD)}
+    (hC : SpongeCoupled dec xorBlk s0 validB tR tI) (p : List β) (hp : idealHas tI p) (b : β)
+    (hb : validB b = true) (d : Fin cardD) (hNone : spongeLookup tI (b :: p) = none) :
+    SpongeCoupled dec xorBlk s0 validB ((xorBlk (idealStateOf dec s0 tI p) b, d) :: tR)
+      ((b :: p, d) :: tI) where
+  map_eq := by
+    have hHead : idealNodeIn dec xorBlk s0 ((b :: p, d) :: tI) (b :: p) =
+        xorBlk (idealStateOf dec s0 tI p) b := by
+      show xorBlk (idealStateOf dec s0 ((b :: p, d) :: tI) p) b = _
+      rw [idealStateOf_cons_table dec s0 tI b p d hNone p hp]
+    have hTail : tI.map (fun e => (idealNodeIn dec xorBlk s0 ((b :: p, d) :: tI) e.1, e.2)) =
+        tI.map (fun e => (idealNodeIn dec xorBlk s0 tI e.1, e.2)) := by
+      apply List.map_congr_left
+      intro e he
+      obtain ⟨b', r', hKey, _, hr'⟩ := hC.keys e he
+      rw [hKey]
+      show (xorBlk (idealStateOf dec s0 ((b :: p, d) :: tI) r') b', e.2) =
+        (xorBlk (idealStateOf dec s0 tI r') b', e.2)
+      rw [idealStateOf_cons_table dec s0 tI b p d hNone r' hr']
+    show _ = (idealNodeIn dec xorBlk s0 ((b :: p, d) :: tI) (b :: p), d) ::
+      tI.map (fun e => (idealNodeIn dec xorBlk s0 ((b :: p, d) :: tI) e.1, e.2))
+    rw [hHead, hTail, ← hC.map_eq]
+  keys := by
+    intro e he
+    rcases List.mem_cons.mp he with hNew | hOld
+    · rw [hNew]
+      exact ⟨b, p, rfl, hb, idealHas_cons_table tI (b :: p) d p hp⟩
+    · obtain ⟨b', r', hKey, hb', hr'⟩ := hC.keys e hOld
+      exact ⟨b', r', hKey, hb', idealHas_cons_table tI (b :: p) d r' hr'⟩
+
+omit [DecidableEq σ] in
+/-- A recorded capacity event stays recorded: tables only grow. -/
+theorem capTableBad_run_mono {Dom R : Type} [DecidableEq Dom] (capOf : σ → κ)
+    (dec : Fin cardD → σ) (s0 : σ) :
+    ∀ (c : Spec.Code (Spec.roOracleIface Dom cardD) R) (K : Nat) (st : List (Dom × Fin cardD))
+      (ω : Fin (Spec.roCoinPow cardD K)), capTableBad capOf dec s0 st = true →
+      capTableBad capOf dec s0 (spongeLazyRun c K st ω).2 = true
+  | .ret v, K, st, ω, h => by rw [spongeLazyRun_ret]; exact h
+  | .call q next, 0, st, ω, h => by rw [spongeLazyRun_call_zero]; exact h
+  | .call q next, K + 1, st, ω, h => by
+    cases hLook : spongeLookup st q with
+    | some y =>
+      rw [spongeLazyRun_call_hit q next K st ω y hLook]
+      exact capTableBad_run_mono capOf dec s0 (next y) K st _ h
+    | none =>
+      rw [spongeLazyRun_call_miss q next K st ω hLook]
+      refine capTableBad_run_mono capOf dec s0 (next _) K _ _ ?_
+      show (capOutBad capOf dec s0 (st.map Prod.snd) _ ||
+        capOutsBad capOf dec s0 (st.map Prod.snd)) = true
+      rw [show capOutsBad capOf dec s0 (st.map Prod.snd) = true from h, Bool.or_true]
+
+private theorem spongeWalk_coupled (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ) {R : Type}
+    (kR : σ → Spec.Code (Spec.roOracleIface σ cardD) R)
+    (kI : σ → Spec.Code (Spec.roOracleIface (List β) cardD) R)
+    (hCont : ∀ (s : σ) (K : Nat) (tR : List (σ × Fin cardD)) (tI : List (List β × Fin cardD))
+        (ω : Fin (Spec.roCoinPow cardD K)), SpongeCoupled dec xorBlk s0 validB tR tI →
+        capTableBad capOf dec s0 (spongeLazyRun (kR s) K tR ω).2 = false →
+        (spongeLazyRun (kR s) K tR ω).1 = (spongeLazyRun (kI s) K tI ω).1) :
+    ∀ (rest p : List β) (K : Nat) (tR : List (σ × Fin cardD)) (tI : List (List β × Fin cardD))
+      (ω : Fin (Spec.roCoinPow cardD K)),
+      SpongeCoupled dec xorBlk s0 validB tR tI → idealHas tI p →
+      (∀ b, b ∈ rest → validB b = true) →
+      capTableBad capOf dec s0
+        (spongeLazyRun (spongeWalkReal dec xorBlk (idealStateOf dec s0 tI p) rest kR)
+          K tR ω).2 = false →
+      (spongeLazyRun (spongeWalkReal dec xorBlk (idealStateOf dec s0 tI p) rest kR) K tR ω).1 =
+        (spongeLazyRun (spongeWalkIdeal dec p (idealStateOf dec s0 tI p) rest kI) K tI ω).1
+  | [], _, K, tR, tI, ω, hC, _, _, hF => hCont _ K tR tI ω hC hF
+  | b :: rest, p, 0, tR, tI, ω, _, _, _, _ => by
+    show (spongeLazyRun (Spec.Code.call _ _) 0 tR ω).1 =
+      (spongeLazyRun (Spec.Code.call _ _) 0 tI ω).1
+    rw [spongeLazyRun_call_zero, spongeLazyRun_call_zero]
+  | b :: rest, p, K + 1, tR, tI, ω, hC, hp, hV, hF => by
+    have hb : validB b = true := hV b List.mem_cons_self
+    have hVrest : ∀ c, c ∈ rest → validB c = true :=
+      fun c hc => hV c (List.mem_cons_of_mem _ hc)
+    have hBadR : capTableBad capOf dec s0 tR = false := by
+      cases hB : capTableBad capOf dec s0 tR with
+      | false => rfl
+      | true =>
+        have hT := capTableBad_run_mono capOf dec s0
+          (spongeWalkReal dec xorBlk (idealStateOf dec s0 tI p) (b :: rest) kR) (K + 1) tR ω hB
+        rw [hF] at hT
+        cases hT
+    have hBadI : capTableBad capOf dec s0 tI = false := by
+      rw [← capTableBad_coupled dec s0 hC]; exact hBadR
+    have hLk := coupled_lookup_eq hL dec s0 hC hBadI p hp b hb
+    cases hI : spongeLookup tI (b :: p) with
+    | some y =>
+      have hRunR : spongeLazyRun
+            (spongeWalkReal dec xorBlk (idealStateOf dec s0 tI p) (b :: rest) kR) (K + 1) tR ω =
+          spongeLazyRun (spongeWalkReal dec xorBlk (dec y) rest kR) K tR
+            (spongeCoinTail (a := cardD) ω) :=
+        spongeLazyRun_call_hit _ _ K tR ω y (hLk.trans hI)
+      have hRunI : spongeLazyRun
+            (spongeWalkIdeal dec p (idealStateOf dec s0 tI p) (b :: rest) kI) (K + 1) tI ω =
+          spongeLazyRun (spongeWalkIdeal dec (b :: p) (dec y) rest kI) K tI
+            (spongeCoinTail (a := cardD) ω) :=
+        spongeLazyRun_call_hit _ _ K tI ω y hI
+      have hState : dec y = idealStateOf dec s0 tI (b :: p) :=
+        (idealStateOf_of_lookup dec s0 tI b p y hI).symm
+      rw [hRunR] at hF ⊢
+      rw [hRunI]
+      rw [hState] at hF ⊢
+      exact spongeWalk_coupled hL dec s0 kR kI hCont rest (b :: p) K tR tI _ hC
+        (.inr ⟨y, hI⟩) hVrest hF
+    | none =>
+      have hRunR : spongeLazyRun
+            (spongeWalkReal dec xorBlk (idealStateOf dec s0 tI p) (b :: rest) kR) (K + 1) tR ω =
+          spongeLazyRun
+            (spongeWalkReal dec xorBlk (dec (spongeCoinHead (b := Spec.roCoinPow cardD K) ω))
+              rest kR) K
+            ((xorBlk (idealStateOf dec s0 tI p) b,
+              spongeCoinHead (b := Spec.roCoinPow cardD K) ω) :: tR)
+            (spongeCoinTail (a := cardD) ω) :=
+        spongeLazyRun_call_miss _ _ K tR ω (hLk.trans hI)
+      have hRunI : spongeLazyRun
+            (spongeWalkIdeal dec p (idealStateOf dec s0 tI p) (b :: rest) kI) (K + 1) tI ω =
+          spongeLazyRun
+            (spongeWalkIdeal dec (b :: p)
+              (dec (spongeCoinHead (b := Spec.roCoinPow cardD K) ω)) rest kI) K
+            ((b :: p, spongeCoinHead (b := Spec.roCoinPow cardD K) ω) :: tI)
+            (spongeCoinTail (a := cardD) ω) :=
+        spongeLazyRun_call_miss _ _ K tI ω hI
+      have hC' := coupled_extend dec s0 hC p hp b hb
+        (spongeCoinHead (b := Spec.roCoinPow cardD K) ω) hI
+      have hLkNew : spongeLookup
+          ((b :: p, spongeCoinHead (b := Spec.roCoinPow cardD K) ω) :: tI) (b :: p) =
+          some (spongeCoinHead (b := Spec.roCoinPow cardD K) ω) := by
+        show (if b :: p = b :: p then some _ else spongeLookup tI (b :: p)) = _
+        rw [sds_if_pos rfl]
+      have hState : dec (spongeCoinHead (b := Spec.roCoinPow cardD K) ω) =
+          idealStateOf dec s0
+            ((b :: p, spongeCoinHead (b := Spec.roCoinPow cardD K) ω) :: tI) (b :: p) :=
+        (idealStateOf_of_lookup dec s0 _ b p _ hLkNew).symm
+      rw [hRunR] at hF ⊢
+      rw [hRunI]
+      rw [hState] at hF ⊢
+      exact spongeWalk_coupled hL dec s0 kR kI hCont rest (b :: p) K _ _ _ hC'
+        (.inr ⟨_, hLkNew⟩) hVrest hF
+
+/-- **Identical until a capacity event.** From coupled tables, on every coin on which the real
+    run records no capacity event, the real and ideal worlds return the same result. -/
+theorem spongeWorlds_agree_until_cap_bad
+    (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ) {ρ R : Type} (rate : σ → ρ) :
+    ∀ (A : Spec.Code (spongeNodeIface β ρ) R) (K : Nat) (tR : List (σ × Fin cardD))
+      (tI : List (List β × Fin cardD)) (ω : Fin (Spec.roCoinPow cardD K)),
+      SpongeCoupled dec xorBlk s0 validB tR tI →
+      capTableBad capOf dec s0
+        (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K tR ω).2 = false →
+      (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K tR ω).1 =
+        (spongeLazyRun (spongeIdealWorld dec rate s0 validB A) K tI ω).1 := by
+  intro A
+  induction A with
+  | ret v =>
+    intro K tR tI ω _ _
+    show (spongeLazyRun (Spec.Code.ret v) K tR ω).1 = (spongeLazyRun (Spec.Code.ret v) K tI ω).1
+    rw [spongeLazyRun_ret, spongeLazyRun_ret]
+  | call w k ih =>
+    intro K tR tI ω hC hF
+    by_cases hv : List.all w validB = true
+    · have hRW : spongeRealWorld dec xorBlk rate s0 validB (Spec.Code.call w k) =
+          spongeWalkReal dec xorBlk s0 w
+            (fun s => spongeRealWorld dec xorBlk rate s0 validB (k (rate s))) := by
+        show (if List.all w validB = true then _ else _) = _
+        rw [sds_if_pos hv]
+      have hIW : spongeIdealWorld dec rate s0 validB (Spec.Code.call w k) =
+          spongeWalkIdeal dec [] s0 w
+            (fun s => spongeIdealWorld dec rate s0 validB (k (rate s))) := by
+        show (if List.all w validB = true then _ else _) = _
+        rw [sds_if_pos hv]
+      rw [hRW] at hF ⊢
+      rw [hIW]
+      exact spongeWalk_coupled hL dec s0 _ _
+        (fun s K tR tI ω hC hF => ih (rate s) K tR tI ω hC hF) w [] K tR tI ω hC (.inl rfl)
+        (fun b hb => List.all_eq_true.mp hv b hb) hF
+    · have hRW : spongeRealWorld dec xorBlk rate s0 validB (Spec.Code.call w k) =
+          spongeRealWorld dec xorBlk rate s0 validB (k (rate s0)) := by
+        show (if List.all w validB = true then _ else _) = _
+        rw [sds_if_neg hv]
+      have hIW : spongeIdealWorld dec rate s0 validB (Spec.Code.call w k) =
+          spongeIdealWorld dec rate s0 validB (k (rate s0)) := by
+        show (if List.all w validB = true then _ else _) = _
+        rw [sds_if_neg hv]
+      rw [hRW] at hF ⊢
+      rw [hIW]
+      exact ih (rate s0) K tR tI ω hC hF
+
+end Coupling
+
+/-! ### The two games and the advantage bound -/
+
+/-- Real game: the adversary's verdict against the sponge over a lazily sampled transformation. -/
+def spongeRealGame {σ β ρ : Type} [DecidableEq σ] {cardD : Nat} (hCard : 0 < cardD)
+    (dec : Fin cardD → σ) (xorBlk : σ → β → σ) (rate : σ → ρ) (s0 : σ) (validB : β → Bool)
+    (A : Spec.Code (spongeNodeIface β ρ) Bool) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow cardD K) where
+  samplePos := Spec.roCoinPow_pos hCard K
+  win ω := (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K [] ω).1 == some true
+
+/-- Ideal game: the adversary's verdict against a lazily sampled function on block paths. -/
+def spongeIdealGame {σ β ρ : Type} [DecidableEq β] {cardD : Nat} (hCard : 0 < cardD)
+    (dec : Fin cardD → σ) (rate : σ → ρ) (s0 : σ) (validB : β → Bool)
+    (A : Spec.Code (spongeNodeIface β ρ) Bool) (K : Nat) :
+    Spec.FinGame (Spec.roCoinPow cardD K) where
+  samplePos := Spec.roCoinPow_pos hCard K
+  win ω := (spongeLazyRun (spongeIdealWorld dec rate s0 validB A) K [] ω).1 == some true
+
+section Games
+
+variable {σ κ β ρ : Type} [DecidableEq σ] [DecidableEq κ] [DecidableEq β] {cardD : Nat}
+  {capOf : σ → κ} {xorBlk : σ → β → σ} {validB : β → Bool}
+
+/-- **Run-level equality.** On every coin on which the real run records no capacity event, the
+    sponge over the lazily sampled transformation and the lazily sampled function on paths
+    return the same result to the adversary. -/
+theorem spongeReal_eq_ideal_of_no_cap_bad
+    (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ) {R : Type} (rate : σ → ρ)
+    (A : Spec.Code (spongeNodeIface β ρ) R) (K : Nat) (ω : Fin (Spec.roCoinPow cardD K))
+    (hNoBad : capTableBad capOf dec s0
+      (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K [] ω).2 = false) :
+    (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K [] ω).1 =
+      (spongeLazyRun (spongeIdealWorld dec rate s0 validB A) K [] ω).1 :=
+  spongeWorlds_agree_until_cap_bad hL dec s0 rate A K [] [] ω
+    ⟨rfl, fun _ he => by cases he⟩ hNoBad
+
+/-- `AdvDist real ideal ≤ Pr[capacity event in the real run]`. -/
+theorem sponge_real_ideal_adv_le_cap_bad (hCard : 0 < cardD)
+    (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ) (rate : σ → ρ)
+    (A : Spec.Code (spongeNodeIface β ρ) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist (spongeRealGame hCard dec xorBlk rate s0 validB A K)
+        (spongeIdealGame hCard dec rate s0 validB A K))
+      (spongeCapBadGame hCard capOf dec s0
+        (spongeRealWorld dec xorBlk rate s0 validB A) K).winProb :=
+  Spec.adv_until_bad (spongeRealGame hCard dec xorBlk rate s0 validB A K)
+    (spongeIdealGame hCard dec rate s0 validB A K)
+    (fun ω => capTableBad capOf dec s0
+      (spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K [] ω).2)
+    (fun ω hBad => by
+      show ((spongeLazyRun (spongeRealWorld dec xorBlk rate s0 validB A) K [] ω).1 == some true) =
+        ((spongeLazyRun (spongeIdealWorld dec rate s0 validB A) K [] ω).1 == some true)
+      rw [spongeReal_eq_ideal_of_no_cap_bad hL dec s0 rate A K ω hBad])
+
+/-- **Sponge indistinguishability from a random function on block paths.** Every adaptive
+    adversary whose run makes at most `K` calls to a lazily sampled transformation on `cardD`
+    states distinguishes the sponge from a lazily sampled function on paths with advantage at
+    most `K (K + 1) · R / (2 · cardD)`, where every capacity value has at most `R` preimages. -/
+theorem sponge_multi_domain_ro_indistinguishability_bound {Rfib : Nat} (hCard : 0 < cardD)
+    (hL : SpongeCapLaws capOf xorBlk (fun b => validB b = true))
+    (dec : Fin cardD → σ) (s0 : σ)
+    (hFib : ∀ c : κ, Spec.sampleSum cardD (fun d => if capOf (dec d) = c then 1 else 0) ≤ Rfib)
+    (rate : σ → ρ) (A : Spec.Code (spongeNodeIface β ρ) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist (spongeRealGame hCard dec xorBlk rate s0 validB A K)
+        (spongeIdealGame hCard dec rate s0 validB A K))
+      ⟨K * (K + 1) * Rfib, 2 * cardD, Nat.mul_pos (by decide) hCard⟩ :=
+  Spec.GameBound.trans (sponge_real_ideal_adv_le_cap_bad hCard hL dec s0 rate A K)
+    (sponge_cap_bad_bound hCard capOf dec s0 hFib _ K)
+
+end Games
+
+/-! ### Tag-level adversaries: `cSHAKE256` customizations as domains -/
+
+/-- Tag-level interface: `(S, m, j)` asks for output block `j` of `cSHAKE256` with empty
+    function name and customization `S` on message `m`. -/
+@[expose, reducible] def cshakeTagIface (ρ : Type) : Spec.Iface where
+  Query := List UInt8 × List UInt8 × Nat
+  Resp _ := ρ
+
+/-- The block path addressed by a tag-level query. -/
+def cshakeTagPath (q : List UInt8 × List UInt8 × Nat) : List (List UInt8) :=
+  cshake256PaddedBlocks [] q.1 q.2.1 ++ List.replicate q.2.2 (List.replicate 136 0)
+
+/-- A tag-level adversary as a block-path adversary. -/
+def cshakeTagAdversary {ρ R : Type} :
+    Spec.Code (cshakeTagIface ρ) R → Spec.Code (spongeNodeIface (List UInt8) ρ) R
+  | .ret v => .ret v
+  | .call q k =>
+    Spec.Code.call (E := spongeNodeIface (List UInt8) ρ) (cshakeTagPath q)
+      (fun r => cshakeTagAdversary (k r))
+
+/-- Tag-level queries with customizations of `qsagSpongeTags` address pairwise different block
+    paths: in the ideal world no two of them read the same draw. -/
+theorem cshakeTagPath_injective_on_qsag_tags {q₁ q₂ : List UInt8 × List UInt8 × Nat}
+    (h₁ : q₁.1 ∈ qsagSpongeTags) (h₂ : q₂.1 ∈ qsagSpongeTags)
+    (h : cshakeTagPath q₁ = cshakeTagPath q₂) : q₁ = q₂ := by
+  obtain ⟨_, hS, hm, hj⟩ := cshake256_output_path_injective
+    (bitlen_lt_sp800_bound (by decide)) (qsagSpongeTags_short h₁)
+    (bitlen_lt_sp800_bound (by decide)) (qsagSpongeTags_short h₂) h
+  exact Prod.ext hS (Prod.ext hm hj)
+
+/-- **Multi-tag form of the bound.** Every adaptive adversary that asks for output blocks of
+    `cSHAKE256` under arbitrary customizations (the `QSAG.*` tags among them) distinguishes the
+    sponge over a lazily sampled transformation from a lazily sampled function on block paths
+    with advantage at most `K (K + 1) · R / (2 · cardD)`. -/
+theorem qsag_tags_sponge_ro_indistinguishability_bound {σ κ ρ : Type} [DecidableEq σ]
+    [DecidableEq κ] {cardD Rfib : Nat} {capOf : σ → κ} {xorBlk : σ → List UInt8 → σ}
+    (hCard : 0 < cardD)
+    (hL : SpongeCapLaws capOf xorBlk (fun b => (b.length == 136) = true))
+    (dec : Fin cardD → σ) (s0 : σ)
+    (hFib : ∀ c : κ, Spec.sampleSum cardD (fun d => if capOf (dec d) = c then 1 else 0) ≤ Rfib)
+    (rate : σ → ρ) (A : Spec.Code (cshakeTagIface ρ) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist
+        (spongeRealGame hCard dec xorBlk rate s0 (fun b => b.length == 136)
+          (cshakeTagAdversary A) K)
+        (spongeIdealGame hCard dec rate s0 (fun b => b.length == 136)
+          (cshakeTagAdversary A) K))
+      ⟨K * (K + 1) * Rfib, 2 * cardD, Nat.mul_pos (by decide) hCard⟩ :=
+  sponge_multi_domain_ro_indistinguishability_bound hCard hL dec s0 hFib rate
+    (cshakeTagAdversary A) K
+
+/-! ### Product-coded state spaces: `cardD = R · C`, bound `K (K + 1) / (2 C)` -/
+
+private theorem sds_sum_indicator_le_one :
+    ∀ (m : Nat) (P : Fin m → Prop) [DecidablePred P], (∀ i j, P i → P j → i = j) →
+      Spec.sampleSum m (fun i => if P i then 1 else 0) ≤ 1
+  | 0, _, _, _ => Nat.zero_le 1
+  | m + 1, P, _, hU => by
+    rw [Spec.sampleSum_succ]
+    by_cases h0 : P ⟨0, Nat.zero_lt_succ m⟩
+    · have hRest : (fun i : Fin m => if P ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ then 1 else 0) =
+          (fun _ => 0) := by
+        funext i
+        have hNot : ¬ P ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ := fun hi =>
+          absurd (congrArg Fin.val (hU _ _ hi h0)) (Nat.succ_ne_zero i.1)
+        rw [sds_if_neg hNot]
+      rw [hRest, sds_sum_const, Nat.mul_zero, sds_if_pos h0]
+      exact Nat.le_refl 1
+    · rw [sds_if_neg h0, Nat.zero_add]
+      exact sds_sum_indicator_le_one m (fun i => P ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        (fun i j hi hj => Fin.ext (Nat.succ.inj (congrArg Fin.val (hU _ _ hi hj))))
+
+/-- If the capacity of the state coded by `i * C + j` is an injective function of `j`, every
+    capacity value has at most `R` preimages among the `R * C` codes. -/
+theorem sponge_fiber_count_of_product_coding {σ κ : Type} [DecidableEq κ] {R C : Nat}
+    (capOf : σ → κ) (dec : Fin (R * C) → σ) (capIdx : Fin C → κ)
+    (hInj : ∀ i j, capIdx i = capIdx j → i = j)
+    (hDec : ∀ (i : Fin R) (j : Fin C),
+      capOf (dec ⟨i.1 * C + j.1, Spec.prodCoin_pair_lt i j⟩) = capIdx j) (c : κ) :
+    Spec.sampleSum (R * C) (fun d => if capOf (dec d) = c then 1 else 0) ≤ R := by
+  rw [sds_sum_prod R C]
+  have hPt : ∀ i : Fin R, Spec.sampleSum C (fun j =>
+      if capOf (dec ⟨i.1 * C + j.1, Spec.prodCoin_pair_lt i j⟩) = c then 1 else 0) ≤ 1 := by
+    intro i
+    have hEq : (fun j : Fin C =>
+        if capOf (dec ⟨i.1 * C + j.1, Spec.prodCoin_pair_lt i j⟩) = c then 1 else 0) =
+        (fun j => if capIdx j = c then 1 else 0) := by
+      funext j; rw [hDec i j]
+    rw [hEq]
+    exact sds_sum_indicator_le_one C (fun j => capIdx j = c)
+      (fun i j hi hj => hInj i j (hi.trans hj.symm))
+  have h := sds_sum_le R _ (fun _ => 1) hPt
+  rw [sds_sum_const, Nat.mul_one] at h
+  exact h
+
+private theorem sds_bound_rescale (a R C : Nat) : a * R * (2 * C) = a * (2 * (R * C)) := by
+  simp only [Nat.mul_assoc, Nat.mul_left_comm]
+
+/-- Product state space `BitVec n × Fin C` coded by `Fin (2 ^ n * C)`. -/
+def rateCapDec (n C : Nat) (ω : Fin (2 ^ n * C)) : BitVec n × Fin C :=
+  (BitVec.ofFin (spongeCoinHead ω), spongeCoinTail ω)
+
+private theorem rateCapXor_laws_bool {n : Nat} {κ : Type} :
+    SpongeCapLaws (σ := BitVec n × κ) (β := BitVec n) Prod.snd rateCapXor
+      (fun b => (fun _ : BitVec n => true) b = true) where
+  cap_xor _ _ _ := rfl
+  xor_inj s b₁ b₂ _ _ h := rateCapXor_laws.xor_inj s b₁ b₂ True.intro True.intro h
+
+/-- **`AdvDist ≤ K (K + 1) / (2 C)` for the rate/capacity product sponge.** State space
+    `BitVec n × Fin C`, XOR absorption on the rate, any rate read-out, any initial state, any
+    adaptive adversary, at most `K` transformation calls. No hypothesis is left. -/
+theorem rateCap_sponge_ro_indistinguishability_bound (n C : Nat) (hC : 0 < C) {ρ : Type}
+    (rate : BitVec n × Fin C → ρ) (s0 : BitVec n × Fin C)
+    (A : Spec.Code (spongeNodeIface (BitVec n) ρ) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist
+        (spongeRealGame (Nat.mul_pos (Nat.two_pow_pos n) hC) (rateCapDec n C) rateCapXor rate s0
+          (fun _ => true) A K)
+        (spongeIdealGame (Nat.mul_pos (Nat.two_pow_pos n) hC) (rateCapDec n C) rate s0
+          (fun _ => true) A K))
+      ⟨K * (K + 1), 2 * C, Nat.mul_pos (by decide) hC⟩ := by
+  have hFib := sponge_fiber_count_of_product_coding (R := 2 ^ n) (C := C)
+    (Prod.snd : BitVec n × Fin C → Fin C) (rateCapDec n C) id (fun _ _ h => h)
+    (fun i j => by
+      show spongeCoinTail (⟨i.1 * C + j.1, Spec.prodCoin_pair_lt i j⟩ : Fin (2 ^ n * C)) = j
+      exact spongeCoinTail_pair i j)
+  have h := sponge_multi_domain_ro_indistinguishability_bound
+    (Nat.mul_pos (Nat.two_pow_pos n) hC) rateCapXor_laws_bool (rateCapDec n C) s0 hFib rate A K
+  refine Spec.GameBound.trans h ?_
+  show K * (K + 1) * 2 ^ n * (2 * C) ≤ K * (K + 1) * (2 * (2 ^ n * C))
+  exact Nat.le_of_eq (sds_bound_rescale _ _ _)
+
+set_option exponentiation.threshold 2048 in
+/-- At a 512-bit capacity and at most `2^40` transformation calls the bound is below
+    `2^-430`. -/
+theorem sponge_ro_bound_430_bits_at_c512_q2pow40 (n : Nat) {ρ : Type}
+    (rate : BitVec n × Fin (2 ^ 512) → ρ) (s0 : BitVec n × Fin (2 ^ 512))
+    (A : Spec.Code (spongeNodeIface (BitVec n) ρ) Bool) (K : Nat) (hK : K ≤ 2 ^ 40) :
+    (Spec.AdvDist
+      (spongeRealGame (Nat.mul_pos (Nat.two_pow_pos n) (Nat.two_pow_pos 512))
+        (rateCapDec n (2 ^ 512)) rateCapXor rate s0 (fun _ => true) A K)
+      (spongeIdealGame (Nat.mul_pos (Nat.two_pow_pos n) (Nat.two_pow_pos 512))
+        (rateCapDec n (2 ^ 512)) rate s0 (fun _ => true) A K)).atLeastBits 430 := by
+  refine Spec.GameBound.atLeastBits
+    (rateCap_sponge_ro_indistinguishability_bound n (2 ^ 512) (Nat.two_pow_pos 512) rate s0 A K)
+    ?_
+  show K * (K + 1) * 2 ^ 430 ≤ 2 * 2 ^ 512
+  have h1 : K * (K + 1) ≤ 2 ^ 40 * (2 ^ 40 + 1) := Nat.mul_le_mul hK (Nat.succ_le_succ hK)
+  exact Nat.le_trans (Nat.mul_le_mul_right _ h1) (by decide +kernel)
+
+/-! ### The `Keccak-f[1600]` state space: `2^1088 · 2^512` codes, 512-bit capacity -/
+
+/-- Number of rate values of the Keccak state at rate 136: `2^1088`. -/
+def keccakRateCard : Nat := 2 ^ 1088
+
+/-- Number of capacity values of the Keccak state at rate 136: `2^512`. -/
+def keccakCapCard : Nat := 2 ^ 512
+
+set_option exponentiation.threshold 2048 in
+theorem keccakRateCard_eq : keccakRateCard = 2 ^ 1088 := by rfl
+
+set_option exponentiation.threshold 2048 in
+theorem keccakCapCard_eq : keccakCapCard = 2 ^ 512 := by rfl
+
+set_option exponentiation.threshold 2048 in
+theorem keccakStateCard_pos : 0 < keccakRateCard * keccakCapCard := by
+  rw [keccakRateCard_eq, keccakCapCard_eq]
+  exact Nat.mul_pos (Nat.two_pow_pos 1088) (Nat.two_pow_pos 512)
+
+/-- The 64-bit lane of `x` at bit offset `e`. -/
+def keccakLaneOf (x e : Nat) : UInt64 := UInt64.ofNat (x / 2 ^ e)
+
+/-- Decode a draw of `Fin (keccakRateCard * keccakCapCard)` to a Keccak state by base-`2^64` digits: the
+    quotient gives the 17 rate lanes `a0 … a16`, the remainder the 8 capacity lanes
+    `a17 … a24`. -/
+def keccakDec (ω : Fin (keccakRateCard * keccakCapCard)) : KState :=
+  ⟨keccakLaneOf (spongeCoinHead ω).val 0, keccakLaneOf (spongeCoinHead ω).val 64, keccakLaneOf (spongeCoinHead ω).val 128, keccakLaneOf (spongeCoinHead ω).val 192, keccakLaneOf (spongeCoinHead ω).val 256, keccakLaneOf (spongeCoinHead ω).val 320, keccakLaneOf (spongeCoinHead ω).val 384, keccakLaneOf (spongeCoinHead ω).val 448,
+    keccakLaneOf (spongeCoinHead ω).val 512, keccakLaneOf (spongeCoinHead ω).val 576, keccakLaneOf (spongeCoinHead ω).val 640, keccakLaneOf (spongeCoinHead ω).val 704, keccakLaneOf (spongeCoinHead ω).val 768, keccakLaneOf (spongeCoinHead ω).val 832, keccakLaneOf (spongeCoinHead ω).val 896, keccakLaneOf (spongeCoinHead ω).val 960, keccakLaneOf (spongeCoinHead ω).val 1024,
+    keccakLaneOf (spongeCoinTail ω).val 0, keccakLaneOf (spongeCoinTail ω).val 64, keccakLaneOf (spongeCoinTail ω).val 128, keccakLaneOf (spongeCoinTail ω).val 192, keccakLaneOf (spongeCoinTail ω).val 256, keccakLaneOf (spongeCoinTail ω).val 320, keccakLaneOf (spongeCoinTail ω).val 384, keccakLaneOf (spongeCoinTail ω).val 448⟩
+
+/-- The capacity lanes coded by a remainder `j < keccakCapCard`. -/
+def keccakCapIdx (j : Fin keccakCapCard) : List UInt64 :=
+  [keccakLaneOf j.val 0, keccakLaneOf j.val 64, keccakLaneOf j.val 128, keccakLaneOf j.val 192, keccakLaneOf j.val 256, keccakLaneOf j.val 320, keccakLaneOf j.val 384, keccakLaneOf j.val 448]
+
+private theorem keccakLaneOf_toNat_eq {x y e : Nat} (h : keccakLaneOf x e = keccakLaneOf y e) :
+    (x / 2 ^ e) % 2 ^ 64 = (y / 2 ^ e) % 2 ^ 64 := by
+  have h2 : (UInt64.ofNat (x / 2 ^ e)).toNat = (UInt64.ofNat (y / 2 ^ e)).toNat :=
+    congrArg UInt64.toNat h
+  rw [UInt64.toNat_ofNat', UInt64.toNat_ofNat'] at h2
+  exact h2
+
+set_option exponentiation.threshold 2048 in
+private theorem digits8_inj (i j : Nat) (hi : i < 2 ^ 512) (hj : j < 2 ^ 512)
+    (h0 : (i / 2 ^ 0) % 2 ^ 64 = (j / 2 ^ 0) % 2 ^ 64)
+    (h1 : (i / 2 ^ 64) % 2 ^ 64 = (j / 2 ^ 64) % 2 ^ 64)
+    (h2 : (i / 2 ^ 128) % 2 ^ 64 = (j / 2 ^ 128) % 2 ^ 64)
+    (h3 : (i / 2 ^ 192) % 2 ^ 64 = (j / 2 ^ 192) % 2 ^ 64)
+    (h4 : (i / 2 ^ 256) % 2 ^ 64 = (j / 2 ^ 256) % 2 ^ 64)
+    (h5 : (i / 2 ^ 320) % 2 ^ 64 = (j / 2 ^ 320) % 2 ^ 64)
+    (h6 : (i / 2 ^ 384) % 2 ^ 64 = (j / 2 ^ 384) % 2 ^ 64)
+    (h7 : (i / 2 ^ 448) % 2 ^ 64 = (j / 2 ^ 448) % 2 ^ 64) : i = j := by
+  omega
+
+set_option exponentiation.threshold 2048 in
+private theorem keccakCapIdx_injective (i j : Fin keccakCapCard)
+    (h : keccakCapIdx i = keccakCapIdx j) : i = j := by
+  obtain ⟨e0, h⟩ := List.cons.inj h
+  obtain ⟨e1, h⟩ := List.cons.inj h
+  obtain ⟨e2, h⟩ := List.cons.inj h
+  obtain ⟨e3, h⟩ := List.cons.inj h
+  obtain ⟨e4, h⟩ := List.cons.inj h
+  obtain ⟨e5, h⟩ := List.cons.inj h
+  obtain ⟨e6, h⟩ := List.cons.inj h
+  obtain ⟨e7, _⟩ := List.cons.inj h
+  exact Fin.ext (digits8_inj i.val j.val (keccakCapCard_eq ▸ i.isLt)
+    (keccakCapCard_eq ▸ j.isLt) (keccakLaneOf_toNat_eq e0)
+    (keccakLaneOf_toNat_eq e1) (keccakLaneOf_toNat_eq e2) (keccakLaneOf_toNat_eq e3)
+    (keccakLaneOf_toNat_eq e4) (keccakLaneOf_toNat_eq e5) (keccakLaneOf_toNat_eq e6)
+    (keccakLaneOf_toNat_eq e7))
+
+set_option exponentiation.threshold 2048 in
+/-- Every 512-bit capacity value has at most `keccakRateCard = 2^1088` preimages among the
+    `2^1600` codes. -/
+theorem keccak_capacity_fiber_count (c : List UInt64) :
+    Spec.sampleSum (keccakRateCard * keccakCapCard)
+      (fun d => if keccakCap512 (keccakDec d) = c then 1 else 0) ≤ keccakRateCard :=
+  sponge_fiber_count_of_product_coding keccakCap512 keccakDec keccakCapIdx
+    keccakCapIdx_injective
+    (fun i j => by
+      show keccakCapIdx (spongeCoinTail
+        (⟨i.1 * keccakCapCard + j.1, Spec.prodCoin_pair_lt i j⟩ :
+          Fin (keccakRateCard * keccakCapCard))) = _
+      rw [spongeCoinTail_pair]) c
+
+private theorem keccakRate136_laws_bool :
+    SpongeCapLaws keccakCap512 xorRate136 (fun b => (b.length == 136) = true) where
+  cap_xor s b _ := keccakRate136_cap_xor s b
+  xor_inj s b₁ b₂ h₁ h₂ h :=
+    keccakRate136_xor_inj s b₁ b₂ (beq_iff_eq.mp h₁) (beq_iff_eq.mp h₂) h
+
+set_option exponentiation.threshold 2048 in
+/-- **`cSHAKE256` over a hidden random transformation of the Keccak state.** State space
+    `KState` (1600 bits, coded by `keccakDec`), rate-136 absorption `xorRate136`, read-out
+    `rateBlockBytes`, initial state `zeroKState`. Every adaptive adversary that asks for output
+    blocks of `cSHAKE256` under arbitrary customizations, with at most `K` transformation calls
+    in the run, distinguishes it from a lazily sampled function on block paths with advantage
+    at most `K (K + 1) / 2^513`. No hypothesis is left. -/
+theorem keccak_cshake_tags_ro_indistinguishability_bound
+    (A : Spec.Code (cshakeTagIface (List UInt8)) Bool) (K : Nat) :
+    Spec.GameBound
+      (Spec.AdvDist
+        (spongeRealGame keccakStateCard_pos keccakDec
+          xorRate136 rateBlockBytes zeroKState (fun b => b.length == 136)
+          (cshakeTagAdversary A) K)
+        (spongeIdealGame keccakStateCard_pos keccakDec
+          rateBlockBytes zeroKState (fun b => b.length == 136) (cshakeTagAdversary A) K))
+      ⟨K * (K + 1), 2 * 2 ^ 512, Nat.mul_pos (by decide) (Nat.two_pow_pos 512)⟩ := by
+  refine Spec.GameBound.trans
+    (qsag_tags_sponge_ro_indistinguishability_bound
+      keccakStateCard_pos keccakRate136_laws_bool
+      keccakDec zeroKState keccak_capacity_fiber_count rateBlockBytes A K) ?_
+  show K * (K + 1) * keccakRateCard * (2 * 2 ^ 512) ≤
+    K * (K + 1) * (2 * (keccakRateCard * keccakCapCard))
+  rw [keccakCapCard_eq]
+  exact Nat.le_of_eq (sds_bound_rescale _ _ _)
+
+set_option exponentiation.threshold 2048 in
+/-- At most `2^40` transformation calls: the `cSHAKE256` bound is below `2^-430`. -/
+theorem keccak_cshake_tags_ro_bound_430_bits_at_q2pow40
+    (A : Spec.Code (cshakeTagIface (List UInt8)) Bool) (K : Nat) (hK : K ≤ 2 ^ 40) :
+    (Spec.AdvDist
+      (spongeRealGame keccakStateCard_pos keccakDec
+        xorRate136 rateBlockBytes zeroKState (fun b => b.length == 136)
+        (cshakeTagAdversary A) K)
+      (spongeIdealGame keccakStateCard_pos keccakDec
+        rateBlockBytes zeroKState (fun b => b.length == 136)
+        (cshakeTagAdversary A) K)).atLeastBits 430 := by
+  refine Spec.GameBound.atLeastBits (keccak_cshake_tags_ro_indistinguishability_bound A K) ?_
+  show K * (K + 1) * 2 ^ 430 ≤ 2 * 2 ^ 512
+  have h1 : K * (K + 1) ≤ 2 ^ 40 * (2 ^ 40 + 1) := Nat.mul_le_mul hK (Nat.succ_le_succ hK)
+  exact Nat.le_trans (Nat.mul_le_mul_right _ h1) (by decide +kernel)
+
+/-! ## §7. Teeth -/
+
+/-- **No capacity, no separation.** When the whole state is rate (`xorBlk = XOR` on the full
+    state), for every transformation `π`, every initial state and every one-block input there
+    is a different two-block input with the same terminal query. -/
+theorem tooth_zero_capacity_state_collision {n : Nat} (π : BitVec n → BitVec n)
+    (s0 b₁ b₂ : BitVec n) :
+    ∃ b₃ : BitVec n, [b₁] ≠ [b₂, b₃] ∧
+      spongeTerminalQuery π (fun s b => s ^^^ b) s0 [b₂, b₃] =
+        spongeTerminalQuery π (fun s b => s ^^^ b) s0 [b₁] := by
+  refine ⟨π (s0 ^^^ b₂) ^^^ (s0 ^^^ b₁), fun h => ?_, ?_⟩
+  · have hLen : (1 : Nat) = 2 := congrArg List.length h
+    exact absurd hLen (by decide)
+  · show π (s0 ^^^ b₂) ^^^ (π (s0 ^^^ b₂) ^^^ (s0 ^^^ b₁)) = s0 ^^^ b₁
+    rw [bv_xor_cancel_left]
+
+/-- Toy transformation on `BitVec 1 × BitVec 1`: flip the capacity bit. -/
+def toyCapFlip (s : BitVec 1 × BitVec 1) : BitVec 1 × BitVec 1 := (s.1, s.2 ^^^ 1#1)
+
+/-- **Padding is load-bearing.** Without the property that the last block is not the zero
+    block, the pairs `([1], output block 1)` and `([1, 0], output block 0)` are different but
+    make the same terminal query, and the earlier queries contain no capacity event. -/
+theorem tooth_unpadded_length_extension_shares_output_query :
+    ∃ (w₁ w₂ : List (BitVec 1)) (j₁ j₂ : Nat), (w₁, j₁) ≠ (w₂, j₂) ∧
+      spongeTerminalQuery toyCapFlip rateCapXor (0#1, 0#1) (w₁ ++ List.replicate j₁ 0#1) =
+        spongeTerminalQuery toyCapFlip rateCapXor (0#1, 0#1) (w₂ ++ List.replicate j₂ 0#1) ∧
+      ¬ SpongeCapEvent toyCapFlip Prod.snd (0#1, 0#1)
+        (spongeInnerQueries toyCapFlip rateCapXor (0#1, 0#1) (w₁ ++ List.replicate j₁ 0#1) ++
+          spongeInnerQueries toyCapFlip rateCapXor (0#1, 0#1)
+            (w₂ ++ List.replicate j₂ 0#1)) := by
+  refine ⟨[1#1], [1#1, 0#1], 1, 0, by decide, rfl, ?_⟩
+  have hQ : spongeInnerQueries toyCapFlip rateCapXor (0#1, 0#1) ([1#1] ++ List.replicate 1 0#1) ++
+      spongeInnerQueries toyCapFlip rateCapXor (0#1, 0#1) ([1#1, 0#1] ++ List.replicate 0 0#1) =
+      [(1#1, 0#1), (1#1, 0#1)] := by decide
+  rw [hQ]
+  intro hEv
+  rcases hEv with ⟨x, hx, hc⟩ | ⟨x, y, hx, hy, hne, _⟩
+  · simp only [List.mem_cons, List.not_mem_nil, or_false, or_self] at hx
+    rw [hx] at hc
+    exact absurd hc (by decide)
+  · simp only [List.mem_cons, List.not_mem_nil, or_false, or_self] at hx hy
+    exact hne (hx.trans hy.symm)
+
+/-- **One capacity value, certain bad event.** With a single capacity value every first draw
+    is bad, so the capacity event has probability one and `sponge_cap_bad_bound` gives nothing:
+    here it is not below `1/2`. -/
+theorem tooth_zero_capacity_bad_event_certain {Dom σ : Type} [DecidableEq Dom] {cardD : Nat}
+    (hCard : 0 < cardD) (dec : Fin cardD → σ) (s0 : σ) (q : Dom) :
+    ¬ Spec.GameBound
+      (spongeCapBadGame hCard (fun _ : σ => ()) dec s0
+        (Spec.Code.call (E := Spec.roOracleIface Dom cardD) q
+          (fun _ => Spec.Code.ret true)) 1).winProb
+      ⟨1, 2, by decide⟩ := by
+  intro h
+  have hWin : (spongeCapBadGame hCard (fun _ : σ => ()) dec s0
+      (Spec.Code.call (E := Spec.roOracleIface Dom cardD) q
+        (fun _ => Spec.Code.ret true)) 1).winCount = Spec.roCoinPow cardD 1 := by
+    apply Spec.FinGame.winCount_of_forall_win
+    intro ω
+    show capTableBad (fun _ : σ => ()) dec s0 (spongeLazyRun _ 1 [] ω).2 = true
+    rw [spongeLazyRun_call_miss q _ 0 [] ω rfl, spongeLazyRun_ret]
+    rfl
+  have h2 : (spongeCapBadGame hCard (fun _ : σ => ()) dec s0
+      (Spec.Code.call (E := Spec.roOracleIface Dom cardD) q
+        (fun _ => Spec.Code.ret true)) 1).winCount * 2 ≤ 1 * Spec.roCoinPow cardD 1 := h
+  rw [hWin] at h2
+  have hPos := Spec.roCoinPow_pos hCard 1
+  omega
+
+/-- State-collision adversary against a sponge with no capacity: read the state after block
+    `0`, read the answer for block `1`, then ask for the two-block path `[0, b₃]` with `b₃`
+    chosen so that its second transformation input is the one of `[1]`, and compare. -/
+def zeroCapacityDistinguisher : Spec.Code (spongeNodeIface (BitVec 1) (BitVec 1)) Bool :=
+  Spec.Code.call (E := spongeNodeIface (BitVec 1) (BitVec 1)) [0#1] (fun s₂ =>
+    Spec.Code.call (E := spongeNodeIface (BitVec 1) (BitVec 1)) [1#1] (fun t₁ =>
+      Spec.Code.call (E := spongeNodeIface (BitVec 1) (BitVec 1)) [0#1, s₂ ^^^ 1#1] (fun t₂ =>
+        Spec.Code.ret (t₁ == t₂))))
+
+/-- **The games are different when there is no capacity.** On the one-bit state with full-state
+    XOR absorption (one capacity value), `zeroCapacityDistinguisher` wins the real game on all
+    16 coins and the ideal game on 8: its advantage is `1/2`, in particular not below `1/4`.
+    The indistinguishability bound is therefore not a statement about two equal games. -/
+theorem tooth_zero_capacity_distinguisher_advantage_half :
+    ¬ Spec.GameBound
+      (Spec.AdvDist
+        (spongeRealGame (cardD := 2) (by decide) (fun d => BitVec.ofFin d)
+          (fun (s b : BitVec 1) => s ^^^ b) (fun s => s) 0#1 (fun _ => true)
+          zeroCapacityDistinguisher 4)
+        (spongeIdealGame (cardD := 2) (by decide) (fun d => BitVec.ofFin d)
+          (fun (s : BitVec 1) => s) 0#1 (fun _ => true) zeroCapacityDistinguisher 4))
+      ⟨1, 4, by decide⟩ :=
+  fun h => absurd (show Spec.RatBound.le _ _ from h) (by decide +kernel)
+
+/-- The hypotheses of `keccak_qsag_tags_output_queries_disjoint_or_cap_collision` are jointly
+    satisfiable (one tag of the list, two different messages), in a model that satisfies the
+    capacity laws. -/
+theorem witness_keccak_qsag_tags_distinct :
+    ∃ (S₁ S₂ m₁ m₂ : List UInt8) (j₁ j₂ : Nat),
+      S₁ ∈ qsagSpongeTags ∧ S₂ ∈ qsagSpongeTags ∧ (S₁, m₁, j₁) ≠ (S₂, m₂, j₂) ∧
+      SpongeCapLaws keccakCap512 xorRate136 (fun b => b.length = 136) := by
+  refine ⟨qsagTagCanopyLeaf, qsagTagCanopyLeaf, [0x01], [0x02], 0, 0, ?_, ?_, ?_,
+    keccakRate136_laws⟩
+  · rw [qsagSpongeTags_eq]; exact List.mem_cons_self
+  · rw [qsagSpongeTags_eq]; exact List.mem_cons_self
+  · intro h
+    exact absurd (congrArg (fun t => t.2.1) h) (by decide)
+
+#verify_constructive
+  Qsag.qsagSpongeTags_eq
+  Qsag.witness_keccak_qsag_tags_distinct
+  Qsag.SpongeCapEvent.mono
+  Qsag.spongeAbsorbBlocks_eq_spongeFold
+  Qsag.spongeFold_append
+  Qsag.spongeTrace_append
+  Qsag.spongeNodeState_reverse
+  Qsag.spongeNodeQueries_reverse
+  Qsag.spongeTerminalQuery_snoc
+  Qsag.spongeTrace_snoc
+  Qsag.sponge_node_query_injective_or_cap_event
+  Qsag.sponge_distinct_inputs_terminal_disjoint_or_cap_collision
+  Qsag.mem_spongeInnerQueries_snoc
+  Qsag.sponge_terminal_query_ne_or_cap_event
+  Qsag.sponge_output_path_injective
+  Qsag.sponge_output_queries_disjoint_or_cap_collision
+  Qsag.spongeFold_replicate_zero
+  Qsag.spongeTerminalQuery_squeeze
+  Qsag.spongeFold_congr
+  Qsag.spongeSqueezeFuel_congr
+  Qsag.evalSponge_congr_on_queries
+  Qsag.absorbPayload_ne_nil
+  Qsag.absorbPayload_last_block_ne_zero
+  Qsag.absorbPayload_output_path_injective
+  Qsag.absorbPayload_output_queries_disjoint_or_cap_collision
+  Qsag.evalCshake256Sponge_eq_paddedBlocks
+  Qsag.cshake256_output_path_injective
+  Qsag.cshake256_output_queries_disjoint_or_cap_collision
+  Qsag.qsagSpongeTags_pairwise_distinct
+  Qsag.qsag_tags_output_queries_disjoint_or_cap_collision
+  Qsag.rateCapXor_laws
+  Qsag.rateCapXor_zero
+  Qsag.keccakRate136_cap_xor
+  Qsag.keccakRate136_zero
+  Qsag.keccakRate136_xor_inj
+  Qsag.keccakRate136_laws
+  Qsag.keccak_qsag_tags_output_queries_disjoint_or_cap_collision
+  Qsag.spongeLazyRun_ret
+  Qsag.spongeLazyRun_call_zero
+  Qsag.spongeLazyRun_call_hit
+  Qsag.spongeLazyRun_call_miss
+  Qsag.spongeLazyRun_cap_bad_bound
+  Qsag.sponge_cap_bad_bound
+  Qsag.capTableBad_run_mono
+  Qsag.spongeWorlds_agree_until_cap_bad
+  Qsag.spongeReal_eq_ideal_of_no_cap_bad
+  Qsag.sponge_real_ideal_adv_le_cap_bad
+  Qsag.sponge_multi_domain_ro_indistinguishability_bound
+  Qsag.cshakeTagPath_injective_on_qsag_tags
+  Qsag.qsag_tags_sponge_ro_indistinguishability_bound
+  Qsag.sponge_fiber_count_of_product_coding
+  Qsag.keccakRateCard_eq
+  Qsag.keccakCapCard_eq
+  Qsag.keccakStateCard_pos
+  Qsag.keccak_capacity_fiber_count
+  Qsag.keccak_cshake_tags_ro_indistinguishability_bound
+  Qsag.keccak_cshake_tags_ro_bound_430_bits_at_q2pow40
+  Qsag.rateCap_sponge_ro_indistinguishability_bound
+  Qsag.sponge_ro_bound_430_bits_at_c512_q2pow40
+  Qsag.tooth_zero_capacity_state_collision
+  Qsag.tooth_unpadded_length_extension_shares_output_query
+  Qsag.tooth_zero_capacity_bad_event_certain
+  Qsag.tooth_zero_capacity_distinguisher_advantage_half
+
+#tooth_pair Qsag.sponge_terminal_query_ne_or_cap_event vs
+  Qsag.tooth_zero_capacity_state_collision
+#tooth_pair Qsag.sponge_output_queries_disjoint_or_cap_collision vs
+  Qsag.tooth_unpadded_length_extension_shares_output_query
+#tooth_pair Qsag.sponge_cap_bad_bound vs Qsag.tooth_zero_capacity_bad_event_certain
+#tooth_pair Qsag.sponge_multi_domain_ro_indistinguishability_bound vs
+  Qsag.tooth_zero_capacity_distinguisher_advantage_half
+#verify_inhabited Qsag.keccak_qsag_tags_output_queries_disjoint_or_cap_collision
+  Qsag.witness_keccak_qsag_tags_distinct
+
+end Qsag
+end
