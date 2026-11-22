@@ -615,3 +615,624 @@ structure ZkHemV2MigrateState where
 @[expose] def ZkHemV2MigrateState.init : ZkHemV2MigrateState :=
   ⟨NullifierRegistry.empty, 0, [], []⟩
 
+def submissionBinding {D : Type} (sub : ZkHemV2MigrationSubmission D) : MigrationBinding :=
+  { nullifier := sub.claim.nullifier
+    migrationDomain := sub.domain
+    legacyId := sub.claim.legacyPk.legacyId
+    pqCommitment := sub.pqCommitment
+    epoch := sub.epoch
+    exposure := sub.exposure }
+
+/-- Concrete reactive `Machine` for single-transcript `ZkHemV2` R1CS migration settlement backed
+    by `NullifierRegistry`: verifies the `ZkHemV2` proof, checks snapshot enrollment and derived
+    nullifier, atomically registers in `NullifierRegistry` (refusing both `NullifierConflict` and
+    `LegacyConflict`, and ignoring duplicate idempotent retries without double-minting!), and
+    mints the enrolled entitlement. -/
+@[expose] def zkHemV2MigrationMachine {D : Type}
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential) :
+    Spec.Machine ZkHemV2MigrateState (ZkHemV2MigrationSubmission D)
+      (Spec.MigrationReceipt LegacyCredential) where
+  Init st := st = ZkHemV2MigrateState.init
+  step st sub :=
+    if !verifyProof sub then none
+    else if sub.claim.nullifier != deriveNullifier sub.claim.legacyPk then none
+    else if decide (sub.claim.nullifier ∈ st.spentNullifiers) then none
+    else
+      match Spec.EnrolledSnapshot.entitlement snapshot sub.claim.legacyPk with
+      | none => none
+      | some amount =>
+        match st.registry.register (submissionBinding sub) with
+        | .error _ => none
+        | .ok (reg', true) =>
+          let receipt : Spec.MigrationReceipt LegacyCredential :=
+            { claim := sub.claim, amount := amount }
+          some ({ registry := reg'
+                  totalMigrated := st.totalMigrated + amount
+                  spentNullifiers := sub.claim.nullifier :: st.spentNullifiers
+                  settledClaims := receipt :: st.settledClaims },
+                receipt)
+        | .ok (_, false) => none
+  errStep st _ := st
+
+/-- Inversion of an accepting `zkHemV2MigrationMachine` step: every guard held, the registry
+    performed a fresh atomic registration, and the post-state and receipt are the minted ones. -/
+theorem zkHemV2MigrationMachine_step_eq_some {D : Type}
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    {st st' : ZkHemV2MigrateState} {sub : ZkHemV2MigrationSubmission D}
+    {out : Spec.MigrationReceipt LegacyCredential}
+    (hStep : (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot).step st sub =
+      some (st', out)) :
+    verifyProof sub = true ∧
+    sub.claim.nullifier = deriveNullifier sub.claim.legacyPk ∧
+    sub.claim.nullifier ∉ st.spentNullifiers ∧
+    ∃ amount reg',
+      Spec.EnrolledSnapshot.entitlement snapshot sub.claim.legacyPk = some amount ∧
+      st.registry.register (submissionBinding sub) = .ok (reg', true) ∧
+      out = { claim := sub.claim, amount := amount } ∧
+      st' = { registry := reg'
+              totalMigrated := st.totalMigrated + amount
+              spentNullifiers := sub.claim.nullifier :: st.spentNullifiers
+              settledClaims := out :: st.settledClaims } := by
+  unfold zkHemV2MigrationMachine at hStep
+  dsimp only at hStep
+  cases hVer : verifyProof sub with
+  | false => rw [hVer] at hStep; cases hStep
+  | true =>
+    rw [hVer] at hStep
+    cases hNfBne : (sub.claim.nullifier != deriveNullifier sub.claim.legacyPk) with
+    | true => rw [hNfBne] at hStep; cases hStep
+    | false =>
+      rw [hNfBne] at hStep
+      have hNfEq : sub.claim.nullifier = deriveNullifier sub.claim.legacyPk :=
+        Decidable.of_not_not fun hne =>
+          Bool.false_ne_true (hNfBne.symm.trans (bne_iff_ne.mpr hne))
+      if hMem : sub.claim.nullifier ∈ st.spentNullifiers then
+        rw [decide_eq_true hMem] at hStep; cases hStep
+      else
+        rw [decide_eq_false hMem] at hStep
+        cases hEnt : Spec.EnrolledSnapshot.entitlement snapshot sub.claim.legacyPk with
+        | none => rw [hEnt] at hStep; cases hStep
+        | some amount =>
+          rw [hEnt] at hStep
+          cases hReg : st.registry.register (submissionBinding sub) with
+          | error _ => rw [hReg] at hStep; cases hStep
+          | ok pair =>
+            rw [hReg] at hStep
+            rcases pair with ⟨reg', ins⟩
+            cases ins with
+            | false => cases hStep
+            | true =>
+              injection hStep with hPair
+              obtain ⟨rfl, rfl⟩ := Prod.mk.inj hPair
+              exact ⟨rfl, hNfEq, hMem, amount, reg', rfl, rfl, rfl, rfl⟩
+
+/-- Extraction-soundness predicate bridged from `ZkHemV2ScheduleCert`: every submission accepted by
+    `verifyProof` yields a valid R1CS + prime-order scalar ownership witness via `extract`. -/
+def ZkHemV2ExtractorSound {D : Type}
+    (shapeOf : MigrationCurveKind → R1csShape)
+    (pubInputsOf : Spec.MigrationClaim LegacyCredential → List Goldilocks)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (extract : StraightLineExtractor D) : Prop :=
+  ∀ sub : ZkHemV2MigrationSubmission D,
+    verifyProof sub = true →
+    (realCurveR1csScheme shapeOf pubInputsOf deriveNullifier).ownsKey
+      sub.claim.legacyPk (extract sub) sub.claim
+
+/-- **Forward Simulation (`Spec.DataRefines`) of Single-Transcript `ZkHemV2` R1CS Migration into
+    `Spec.idealMigrateMachine` (`zkHemV2Migration_dataRefines_idealMigrate`)**:
+    Under `ZkHemV2ExtractorSound`, `zkHemV2MigrationMachine` forward-simulates
+    `Spec.idealMigrateMachine` via the straight-line witness extractor `extract`! -/
+def zkHemV2Migration_dataRefines_idealMigrate {D : Type}
+    (shapeOf : MigrationCurveKind → R1csShape)
+    (pubInputsOf : Spec.MigrationClaim LegacyCredential → List Goldilocks)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (extract : StraightLineExtractor D)
+    (hSound : ZkHemV2ExtractorSound shapeOf pubInputsOf deriveNullifier verifyProof extract) :
+    let scheme := realCurveR1csScheme shapeOf pubInputsOf deriveNullifier
+    Spec.DataRefines
+      (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot)
+      (Spec.idealMigrateMachine scheme snapshot)
+      (fun sub => some (sub.claim, extract sub))
+      id where
+  Rel c a :=
+    a.totalMigrated = c.totalMigrated ∧
+    a.spentNullifiers = c.spentNullifiers ∧
+    a.settledClaims = c.settledClaims
+  absInit c := ⟨c.totalMigrated, c.spentNullifiers, c.settledClaims⟩
+  init_ok {c₀} hInit := by
+    have hc : c₀ = ZkHemV2MigrateState.init := hInit
+    subst hc
+    exact ⟨rfl, rfl, rfl, rfl⟩
+  sim_visible {c c' a sub out j} hRel hStepC hVis := by
+    injection hVis with hJ
+    subst hJ
+    obtain ⟨hTot, hSpent, hSettled⟩ := hRel
+    obtain ⟨hVer, hNfEq, hMem, amount, reg', hEnt, _, rfl, rfl⟩ :=
+      zkHemV2MigrationMachine_step_eq_some verifyProof deriveNullifier snapshot hStepC
+    have hFreshA : sub.claim.nullifier ∉ a.spentNullifiers := by rwa [hSpent]
+    refine ⟨{ totalMigrated := a.totalMigrated + amount
+              spentNullifiers := sub.claim.nullifier :: a.spentNullifiers
+              settledClaims := { claim := sub.claim, amount := amount } :: a.settledClaims },
+      ?_, by rw [hTot], by rw [hSpent], by rw [hSettled]⟩
+    exact (Spec.idealMigrateMachine_step_eq_some_iff _ snapshot a _
+      sub.claim (extract sub) { claim := sub.claim, amount := amount }).mpr
+      ⟨⟨hEnt, hNfEq, hSound sub hVer⟩, hFreshA, rfl, rfl⟩
+  sim_internal _ _ hVis := nomatch hVis
+  sim_reject hRel _ := hRel
+
+/-- **End-to-End Single-Transcript `ZkHemV2` R1CS Straight-Line Extraction + `< 2^{-128}` QROM
+    Soundness Dichotomy (`zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break`)**:
+    For **every deployed table size `logCells ∈ [16, 28]`**, **every quantum query budget
+    `Q ≤ 2 ^ 64`**, and any R1CS encoding whose `whirInLang` membership implies `ownsKey` on the
+    straight-line extracted witness `extract sub`, any single-transcript submission `sub` accepted
+    by `zkHemV2MigrationMachine` either:
+    1. **Extracts a valid `(sk, nullifier, pq_pk)` witness** (`0 < sk < scalarOrd` on the real
+       certified curve, `r1csSatisfied = true`, `authorizedDest = pqDestinationPk`, `EnrolledEntitlement`,
+       and `NullifierRegistry` registration with strict double-nullifier & double-`legacyId` refusal!), OR
+    2. **Has a statement outside the WHIR language** (`¬ whirInLang`), for which every quantum
+       adversary's `succinctFsAccept` mass is **strictly `< 2^{-128}`**, given root consistency of
+       the committed tables and the 400-bit Merkle collision bound `merkle400QromBound Q`. -/
+theorem zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (logCells : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
+    (shapeOf : MigrationCurveKind → R1csShape)
+    (pubInputsOf : Spec.MigrationClaim LegacyCredential → List Goldilocks)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (extract : StraightLineExtractor D)
+    (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
+    (sc : WhirScheduleCert env (zkHemV2ProdSched logCells) 400)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
+      (zkHemV2ProdSched logCells).numRounds cardX)
+    (aux : Fin cardX → List (QuinticGoldilocks × List D))
+    (claimOf : ZkHemV2MigrationSubmission D → QuinticGoldilocks)
+    (tblOf : Nat → D → Nat → QuinticGoldilocks)
+    (hCodeSound : ∀ sub : ZkHemV2MigrationSubmission D,
+      whirInLang env (zkHemV2ProdSched logCells)
+        ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
+          (claimOf sub) (fun _ => sub.proof.initRoot) tblOf) →
+      (realCurveR1csScheme shapeOf pubInputsOf deriveNullifier).ownsKey
+        sub.claim.legacyPk (extract sub) sub.claim)
+    {st st' : ZkHemV2MigrateState} {sub : ZkHemV2MigrationSubmission D}
+    {out : Spec.MigrationReceipt LegacyCredential}
+    (hStep : (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot).step st sub =
+      some (st', out)) :
+    (Spec.ValidLegacyOwnership (realCurveR1csScheme shapeOf pubInputsOf deriveNullifier)
+        snapshot sub.claim (extract sub) out.amount ∧
+      IsPrimeNat sub.claim.legacyPk.curve.cert.scalarOrd ∧
+      sub.claim.nullifier ∉ st.spentNullifiers ∧
+      out.claim = sub.claim) ∨
+    (¬ whirInLang env (zkHemV2ProdSched logCells)
+        ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
+          (claimOf sub) (fun _ => sub.proof.initRoot) tblOf) ∧
+      ∀ (_hRoots : ∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
+          succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+            (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+            M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) H o = true →
+          let str := fsTranscript codec H (codec.dec o)
+          ∀ q ∈ (whirOracleIop env (zkHemV2ProdSched logCells) 400).queries (claimOf sub)
+              (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+            M.root q.1 ((whirOracleIop env (zkHemV2ProdSched logCells) 400).depth q.1)
+              (tblOf q.1 ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+                (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1)) =
+              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+                (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1)
+        (A : QuantumAdv cardX 400 cardAnc Q),
+        RatBound.le
+          ⟨uniformOracleSum 400 cardX (fun H =>
+              QVec.queryMassOn
+                (succinctFsCollisionEvent (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+                  (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+                  M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf H)
+                (runQuantumAdv A H)),
+            (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+            Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+              (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+          (merkle400QromBound Q) →
+        RatBound.lt
+          ⟨uniformOracleSum 400 cardX (fun H =>
+              QVec.queryMassOn
+                (succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+                  (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+                  M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) H)
+                (runQuantumAdv A H)),
+            (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+            Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+              (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+          (RatBound.invPow2 128)) := by
+  obtain ⟨_, hNfEq, hMem, amount, reg', hEnt, _, rfl, rfl⟩ :=
+    zkHemV2MigrationMachine_step_eq_some verifyProof deriveNullifier snapshot hStep
+  let scheme := realCurveR1csScheme shapeOf pubInputsOf deriveNullifier
+  cases hOwnB : scheme.checkOwnership sub.claim.legacyPk (extract sub) sub.claim with
+  | true =>
+    have hOwn : scheme.ownsKey sub.claim.legacyPk (extract sub) sub.claim :=
+      (scheme.check_iff _ _ _).mp hOwnB
+    exact .inl ⟨⟨hEnt, hNfEq, hOwn⟩,
+      sub.claim.legacyPk.curve.cert.scalarOrd_prime, hMem, rfl⟩
+  | false =>
+    have hNotInLang : ¬ whirInLang env (zkHemV2ProdSched logCells)
+        ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
+          (claimOf sub) (fun _ => sub.proof.initRoot) tblOf) := by
+      intro hIn
+      have hOwnTrue := (scheme.check_iff _ _ _).mpr (hCodeSound sub hIn)
+      rw [hOwnB] at hOwnTrue
+      exact Bool.false_ne_true hOwnTrue
+    exact .inr ⟨hNotInLang, fun hRoots A hMerkle =>
+      zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M dfltRoot
+        sc codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf
+        hNotInLang hRoots A hMerkle⟩
+
+/-- For a fixed false statement, bound the probability that the settlement machine
+    issues a receipt when its verification gate runs the succinct WHIR experiment.
+    Enrollment, nullifier freshness and the registry can further reduce that probability. -/
+theorem zkHemV2_whir_settlement_false_statement_lt_128 {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (logCells : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
+    (env : WhirEnv QuinticGoldilocks) (M : MerkleSetup D QuinticGoldilocks) (dfltRoot : D)
+    (sc : WhirScheduleCert env (zkHemV2ProdSched logCells) 400)
+    (codec : FsCodec (SuccinctRoundMsg D (WhirPub QuinticGoldilocks))
+      (zkHemV2ProdSched logCells).numRounds cardX)
+    (aux : Fin cardX → List (QuinticGoldilocks × List D))
+    (claimOf : ZkHemV2MigrationSubmission D → QuinticGoldilocks)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    (st : ZkHemV2MigrateState) (sub : ZkHemV2MigrationSubmission D)
+    (tblOf : Nat → D → Nat → QuinticGoldilocks)
+    (hx : ¬ whirInLang env (zkHemV2ProdSched logCells)
+      ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).liftStmt
+        (claimOf sub) (fun _ => sub.proof.initRoot) tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
+      succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+        (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+        M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) H o = true →
+      let str := fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (whirOracleIop env (zkHemV2ProdSched logCells) 400).queries (claimOf sub)
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((whirOracleIop env (zkHemV2ProdSched logCells) 400).depth q.1)
+          (tblOf q.1 ((whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1)) =
+          (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1)
+    (A : QuantumAdv cardX 400 cardAnc Q)
+    (hMerkle : RatBound.le
+      ⟨uniformOracleSum 400 cardX (fun H =>
+          QVec.queryMassOn
+            (succinctFsCollisionEvent (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+              (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+              M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf H)
+            (runQuantumAdv A H)),
+        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (merkle400QromBound Q)) :
+    RatBound.lt
+      ⟨uniformOracleSum 400 cardX (fun H =>
+          QVec.queryMassOn
+            (fun o => ((zkHemV2MigrationMachine (fun s =>
+              succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+                (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+                M codec aux (claimOf s) (fun _ => s.proof.initRoot) H o)
+              deriveNullifier snapshot).step st sub).isSome)
+            (runQuantumAdv A H)),
+        (2 ^ 400) ^ cardX * (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init),
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      (RatBound.invPow2 128) := by
+  let verify (H : Fin cardX → BitVec 400) (o : Fin cardX) (s : ZkHemV2MigrationSubmission D) :=
+    succinctFsAccept (whirOracleIop env (zkHemV2ProdSched logCells) 400)
+      (whirSuccinctBridge env (zkHemV2ProdSched logCells) 400 dfltRoot)
+      M codec aux (claimOf s) (fun _ => s.proof.initRoot) H o
+  let settled H o := ((zkHemV2MigrationMachine (verify H o) deriveNullifier snapshot).step st sub).isSome
+  have hMass : uniformOracleSum 400 cardX (fun H => QVec.queryMassOn (settled H) (runQuantumAdv A H)) ≤
+      uniformOracleSum 400 cardX (fun H => QVec.queryMassOn (fun o => verify H o sub) (runQuantumAdv A H)) := by
+    apply uniformOracleSum_le
+    intro H
+    rw [QVec.queryMassOn_def, QVec.queryMassOn_def]
+    apply qsum_le_qsum
+    intro o
+    cases hs : (zkHemV2MigrationMachine (verify H o) deriveNullifier snapshot).step st sub with
+    | none => simp only [settled, hs, Option.isSome_none, Bool.false_eq_true, ↓reduceIte, Nat.zero_le]
+    | some pair =>
+      obtain ⟨st', out⟩ := pair
+      have hv := (zkHemV2MigrationMachine_step_eq_some _ _ _ hs).1
+      simp only [settled, hs, Option.isSome_some, hv, ↓reduceIte, Nat.le_refl]
+  have hBudget := zkHemV2_deployed_succinct_qrom_soundness_128 logCells hLo hHi hQ env M
+    dfltRoot sc codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf hx hRoots A hMerkle
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right _ hMass) hBudget
+
+/-- Trace-level conservation and no-double-claim corollary inherited directly from
+    `zkHemV2Migration_dataRefines_idealMigrate` + `Spec.idealMigrateMachine_reachable_inv`. -/
+theorem zkHemV2Migration_trace_conservation_and_nodup {D : Type}
+    (shapeOf : MigrationCurveKind → R1csShape)
+    (pubInputsOf : Spec.MigrationClaim LegacyCredential → List Goldilocks)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (extract : StraightLineExtractor D)
+    (hSound : ZkHemV2ExtractorSound shapeOf pubInputsOf deriveNullifier verifyProof extract)
+    {st : ZkHemV2MigrateState}
+    (hReach : (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot).Reachable st) :
+    st.totalMigrated ≤ Spec.EnrolledSnapshot.total snapshot ∧
+    st.spentNullifiers.Nodup ∧
+    (st.settledClaims.map (fun r => r.claim.legacyPk)).Nodup := by
+  let sim := zkHemV2Migration_dataRefines_idealMigrate shapeOf pubInputsOf deriveNullifier
+    snapshot verifyProof extract hSound
+  obtain ⟨a, hReachA, hTot, hSpent, hSettled⟩ := sim.reachable_rel hReach
+  have hInvA := Spec.idealMigrateMachine_reachable_inv _ snapshot hReachA
+  have hLe := hInvA.totalMigrated_le_enrolled
+  have hPkNd := hInvA.settled_legacyPk_nodup
+  rw [hTot] at hLe
+  rw [hSettled] at hPkNd
+  exact ⟨hLe, hSpent ▸ hInvA.2.1, hPkNd⟩
+
+/-- `#tooth` Single-conclusion `.error .nullifierConflict` refusal on `NullifierRegistry.register`. -/
+theorem tooth_nullifierRegistry_register_refuses_rebinding
+    (reg : NullifierRegistry) (b₁ b₂ : MigrationBinding) (st : EntryStatus)
+    (hRec : reg.findByNullifier b₁.nullifier = some (b₁, st))
+    (hSameNf : b₂.nullifier = b₁.nullifier) (hDiff : b₁ ≠ b₂) :
+    reg.register b₂ = .error .nullifierConflict :=
+  (nullifierRegistry_refuses_nullifier_rebinding reg b₁ b₂ st hRec hSameNf hDiff).2.2
+
+/-- `#tooth` Single-conclusion `.error .legacyConflict` refusal on `NullifierRegistry.register`. -/
+theorem tooth_nullifierRegistry_register_refuses_second_nullifier
+    (reg : NullifierRegistry) (b₁ b₂ : MigrationBinding) (st : EntryStatus)
+    (hFreshNf : reg.findByNullifier b₂.nullifier = none)
+    (hRecLid : reg.findByLegacyId b₁.legacyId = some (b₁, st))
+    (hSameLid : b₂.legacyId = b₁.legacyId) :
+    reg.register b₂ = .error .legacyConflict :=
+  (nullifierRegistry_refuses_second_nullifier_for_legacyId reg b₁ b₂ st hFreshNf hRecLid hSameLid).2
+
+/-! ### Concrete execution on the `Pallas` Ironwood `0x03` and `secp256k1` credentials -/
+
+def demoR1csShape : R1csShape :=
+  { logCells := 17
+    numPublic := 1
+    numPriv := 2
+    rows := [r1csBitRow 2, ⟨[(1, Goldilocks.one)], [(3, Goldilocks.one)], [(3, Goldilocks.one)]⟩] }
+
+def demoPallasCred : LegacyCredential :=
+  ⟨.pallasIronwood03, 0x11#256, pallasOrchardCurveCert.genX, pallasOrchardCurveCert.genY⟩
+
+def demoSecpCred : LegacyCredential :=
+  ⟨.secp256k1, 0x22#256, secp256k1CurveCert.genX, secp256k1CurveCert.genY⟩
+
+def demoSnapshot : Spec.EnrolledSnapshot LegacyCredential :=
+  [(demoPallasCred, 500), (demoSecpCred, 300)]
+
+def demoDeriveNullifier (c : LegacyCredential) : Spec.Digest256 := c.legacyId
+
+def demoClaimPallas : Spec.MigrationClaim LegacyCredential :=
+  ⟨demoPallasCred, 0x11#256, [0xAA, 0xBB]⟩
+
+def demoClaimSecp : Spec.MigrationClaim LegacyCredential :=
+  ⟨demoSecpCred, 0x22#256, [0xAA, 0xBB]⟩
+
+def demoSubPallas : ZkHemV2MigrationSubmission Nat :=
+  { claim := demoClaimPallas
+    domain := 0x01#256
+    pqCommitment := 0x99#256
+    epoch := 1
+    exposure := .hidden
+    proof := ⟨.turboShakeJohnson400, 0x77#256, 0, [], []⟩ }
+
+def demoSubSecp : ZkHemV2MigrationSubmission Nat :=
+  { demoSubPallas with claim := demoClaimSecp, pqCommitment := 0x66#256 }
+
+def demoReplayOtherNfSameLegacyId : ZkHemV2MigrationSubmission Nat :=
+  { demoSubPallas with
+    claim := ⟨demoPallasCred, 0xFF#256, [0xCC]⟩
+    pqCommitment := 0x88#256 }
+
+/-- The fixture knows scalar one for both enrolled generators and supplies a fixed R1CS
+    assignment. It exercises the ownership relation directly. -/
+def demoWitness : ExtractedR1csMigrationWitness :=
+  ⟨1, [Goldilocks.one, Goldilocks.ofNat 7], [0xAA, 0xBB]⟩
+
+def demoScheme := realCurveR1csScheme (fun _ => demoR1csShape)
+  (fun _ => [Goldilocks.one]) demoDeriveNullifier
+
+def demoVerify (sub : ZkHemV2MigrationSubmission Nat) : Bool :=
+  demoScheme.checkOwnership sub.claim.legacyPk demoWitness sub.claim
+
+theorem demoExtractorSound :
+    ZkHemV2ExtractorSound (fun _ => demoR1csShape) (fun _ => [Goldilocks.one])
+      demoDeriveNullifier demoVerify (fun _ => demoWitness) := by
+  intro sub h
+  exact (demoScheme.check_iff _ _ _).mp h
+
+def demoMachine : Spec.Machine ZkHemV2MigrateState (ZkHemV2MigrationSubmission Nat)
+    (Spec.MigrationReceipt LegacyCredential) :=
+  zkHemV2MigrationMachine demoVerify demoDeriveNullifier demoSnapshot
+
+/-- The state `demoMachine` reaches after settling `demoSubPallas`. -/
+def demoStateAfterPallas : ZkHemV2MigrateState :=
+  { registry := ⟨[(submissionBinding demoSubPallas, .finalized)]⟩
+    totalMigrated := 500
+    spentNullifiers := [0x11#256]
+    settledClaims := [⟨demoClaimPallas, 500⟩] }
+
+/-- Concrete real-curve execution, evaluated in the kernel:
+    1. the honest `Pallas` Ironwood `0x03` submission settles `500` units,
+    2. re-submitting it is rejected (`step = none`, no double mint),
+    3. a second nullifier `0xFF#256` for the same `legacyId` is refused by `NullifierRegistry`
+       with `.error .legacyConflict`, and
+    4. the `secp256k1` submission then settles `300`, reaching the enrolled total `800`. -/
+theorem realCurves_pallas_and_secp256k1_settlement_and_double_claim_refusal :
+    demoMachine.step ZkHemV2MigrateState.init demoSubPallas =
+      some (demoStateAfterPallas, ⟨demoClaimPallas, 500⟩) ∧
+    demoMachine.step demoStateAfterPallas demoSubPallas = none ∧
+    demoStateAfterPallas.registry.register (submissionBinding demoReplayOtherNfSameLegacyId) =
+      .error .legacyConflict ∧
+    (demoMachine.step demoStateAfterPallas demoSubSecp).map
+      (fun p => (p.2.amount, p.1.totalMigrated)) = some (300, 800) ∧
+    Spec.EnrolledSnapshot.total demoSnapshot = 800 := by
+  have hp : demoVerify demoSubPallas = true :=
+    (demoScheme.check_iff _ _ _).mpr
+      ⟨by decide, by decide, pallasOrchardCurveCert.generator_matches, rfl, by decide +kernel⟩
+  have hs : demoVerify demoSubSecp = true :=
+    (demoScheme.check_iff _ _ _).mpr
+      ⟨by decide, by decide, secp256k1CurveCert.generator_matches, rfl, by decide +kernel⟩
+  simp only [demoMachine, zkHemV2MigrationMachine, hp, hs, Bool.not_true, Bool.false_eq_true,
+    ↓reduceIte]
+  exact ⟨rfl, by decide +kernel,
+   tooth_nullifierRegistry_register_refuses_second_nullifier demoStateAfterPallas.registry
+     (submissionBinding demoSubPallas) (submissionBinding demoReplayOtherNfSameLegacyId)
+     .finalized (by decide +kernel) (by decide +kernel) (by decide +kernel),
+   by decide +kernel, by decide +kernel⟩
+
+/-- `#tooth` `zkHemV2MigrationMachine` deterministically rejects (`= none`) any submission whose
+    nullifier is already in `st.spentNullifiers`. -/
+theorem tooth_zkHemV2MigrationMachine_rejects_double_nullifier {D : Type}
+    (verifyProof : ZkHemV2MigrationSubmission D → Bool)
+    (deriveNullifier : LegacyCredential → Spec.Digest256)
+    (snapshot : Spec.EnrolledSnapshot LegacyCredential)
+    (st : ZkHemV2MigrateState) (sub : ZkHemV2MigrationSubmission D)
+    (hSpent : sub.claim.nullifier ∈ st.spentNullifiers) :
+    (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot).step st sub = none := by
+  cases hS : (zkHemV2MigrationMachine verifyProof deriveNullifier snapshot).step st sub with
+  | none => rfl
+  | some p =>
+    obtain ⟨st', out⟩ := p
+    exact absurd hSpent
+      (zkHemV2MigrationMachine_step_eq_some verifyProof deriveNullifier snapshot hS).2.2.1
+
+/-- `#tooth` Pre-Ironwood `0x02` value-independent `rcm` existential forgery witness:
+    whenever `gRcm ≠ 0`, `gVal ≠ 0`, and `val ≠ val'` in `FqPallas`, there exists `rcm' ≠ rcm`
+    producing the exact same Pedersen commitment `orchardPedersenScalarModel`! -/
+theorem tooth_preIronwood02_reopens_different_value
+    (gRcm gVal rcm val val' rest : FqPallas)
+    (hgRcm : gRcm ≠ CommRingOps.zero) (hgVal : gVal ≠ CommRingOps.zero) (hValNe : val ≠ val') :
+    ∃ rcm' : FqPallas, rcm' ≠ rcm ∧
+      orchardPedersenScalarModel gRcm gVal rcm' val' rest =
+        orchardPedersenScalarModel gRcm gVal rcm val rest := by
+  let rcm' : FqPallas := rcm +ᵍ (val -ᵍ val') *ᵍ gVal *ᵍ LawfulField.inv gRcm
+  refine ⟨rcm', fun hEq => ?_,
+    tooth_preIronwood02_value_independent_rcm_forges_value gRcm gVal rcm val val' rest hgRcm⟩
+  have hZero : (val -ᵍ val') *ᵍ gVal *ᵍ LawfulField.inv gRcm = CommRingOps.zero := by
+    calc (val -ᵍ val') *ᵍ gVal *ᵍ LawfulField.inv gRcm
+        = rcm' -ᵍ rcm := by dsimp only [rcm']; constructive_ring
+      _ = rcm -ᵍ rcm := by rw [hEq]
+      _ = CommRingOps.zero := by constructive_ring
+  have hMulRcm := congrArg (· *ᵍ gRcm) hZero
+  have hSimp : ((val -ᵍ val') *ᵍ gVal *ᵍ LawfulField.inv gRcm) *ᵍ gRcm = (val -ᵍ val') *ᵍ gVal := by
+    calc ((val -ᵍ val') *ᵍ gVal *ᵍ LawfulField.inv gRcm) *ᵍ gRcm
+        = ((val -ᵍ val') *ᵍ gVal) *ᵍ (gRcm *ᵍ LawfulField.inv gRcm) := by constructive_ring
+      _ = ((val -ᵍ val') *ᵍ gVal) *ᵍ CommRingOps.one := by rw [LawfulField.mul_inv_cancel hgRcm]
+      _ = (val -ᵍ val') *ᵍ gVal := LawfulCommRing.mul_one _
+  rw [hSimp, LawfulCommRing.zero_mul] at hMulRcm
+  have hMulVal := congrArg (· *ᵍ LawfulField.inv gVal) hMulRcm
+  have hSimp2 : ((val -ᵍ val') *ᵍ gVal) *ᵍ LawfulField.inv gVal = val -ᵍ val' := by
+    rw [LawfulCommRing.mul_assoc, LawfulField.mul_inv_cancel hgVal, LawfulCommRing.mul_one]
+  rw [hSimp2, LawfulCommRing.zero_mul] at hMulVal
+  exact hValNe (LawfulCommRing.sub_eq_zero_iff.mp hMulVal)
+
+/-- **`ZIP-2005` Ironwood (`0x03`) value-bound `rcm`**: with `rcm = hRcm03 val` derived from the
+    value, two openings of one `orchardPedersenScalarModel` commitment to distinct values force
+    distinct `hRcm03` outputs that hit the single target of the `0x02` reopening tooth,
+    `hRcm03 val₂ = hRcm03 val₁ + (val₁ - val₂) · gVal · gRcm⁻¹`. Under `0x02` the forger sets `rcm'`
+    to that target freely; under `0x03` it is a relation the hash outputs must satisfy. -/
+theorem ironwood03_pedersen_value_bound_sound
+    (gRcm gVal rest : FqPallas) (hRcm03 : FqPallas → FqPallas) (val₁ val₂ : FqPallas)
+    (hgRcm : gRcm ≠ CommRingOps.zero) (hgVal : gVal ≠ CommRingOps.zero) (hValNe : val₁ ≠ val₂)
+    (hCmEq : orchardPedersenScalarModel gRcm gVal (hRcm03 val₁) val₁ rest =
+             orchardPedersenScalarModel gRcm gVal (hRcm03 val₂) val₂ rest) :
+    hRcm03 val₁ ≠ hRcm03 val₂ ∧
+    hRcm03 val₂ = hRcm03 val₁ +ᵍ (val₁ -ᵍ val₂) *ᵍ gVal *ᵍ LawfulField.inv gRcm := by
+  dsimp only [orchardPedersenScalarModel] at hCmEq
+  generalize hRcm03 val₁ = h₁ at hCmEq ⊢
+  generalize hRcm03 val₂ = h₂ at hCmEq ⊢
+  have hLin : (h₂ -ᵍ h₁) *ᵍ gRcm = (val₁ -ᵍ val₂) *ᵍ gVal := by
+    calc (h₂ -ᵍ h₁) *ᵍ gRcm
+        = (h₂ *ᵍ gRcm +ᵍ val₂ *ᵍ gVal +ᵍ rest) -ᵍ (h₁ *ᵍ gRcm +ᵍ val₁ *ᵍ gVal +ᵍ rest) +ᵍ
+            (val₁ -ᵍ val₂) *ᵍ gVal := by constructive_ring
+      _ = (h₁ *ᵍ gRcm +ᵍ val₁ *ᵍ gVal +ᵍ rest) -ᵍ (h₁ *ᵍ gRcm +ᵍ val₁ *ᵍ gVal +ᵍ rest) +ᵍ
+            (val₁ -ᵍ val₂) *ᵍ gVal := by rw [← hCmEq]
+      _ = (val₁ -ᵍ val₂) *ᵍ gVal := by constructive_ring
+  refine ⟨fun hH => ?_, ?_⟩
+  · have hZero : (val₁ -ᵍ val₂) *ᵍ gVal = CommRingOps.zero := by
+      rw [← hLin, hH]
+      constructive_ring
+    have hSub : val₁ -ᵍ val₂ = CommRingOps.zero := by
+      calc val₁ -ᵍ val₂
+          = (val₁ -ᵍ val₂) *ᵍ CommRingOps.one := by constructive_ring
+        _ = (val₁ -ᵍ val₂) *ᵍ (gVal *ᵍ LawfulField.inv gVal) := by
+            rw [LawfulField.mul_inv_cancel hgVal]
+        _ = ((val₁ -ᵍ val₂) *ᵍ gVal) *ᵍ LawfulField.inv gVal := by constructive_ring
+        _ = CommRingOps.zero := by rw [hZero, LawfulCommRing.zero_mul]
+    exact hValNe (LawfulCommRing.sub_eq_zero_iff.mp hSub)
+  · calc h₂ = h₁ +ᵍ (h₂ -ᵍ h₁) *ᵍ CommRingOps.one := by constructive_ring
+      _ = h₁ +ᵍ (h₂ -ᵍ h₁) *ᵍ (gRcm *ᵍ LawfulField.inv gRcm) := by
+          rw [LawfulField.mul_inv_cancel hgRcm]
+      _ = h₁ +ᵍ ((h₂ -ᵍ h₁) *ᵍ gRcm) *ᵍ LawfulField.inv gRcm := by constructive_ring
+      _ = h₁ +ᵍ (val₁ -ᵍ val₂) *ᵍ gVal *ᵍ LawfulField.inv gRcm := by rw [hLin]
+
+theorem inhabited_preIronwood02_forgery :
+    ∃ gRcm : FqPallas, gRcm ≠ CommRingOps.zero := by
+  refine ⟨PrimeMod.ofNat q_pallas 5, fun h => ?_⟩
+  have hv : (PrimeMod.ofNat q_pallas 5).val = 0 := congrArg PrimeMod.val h
+  exact absurd hv (by decide +kernel)
+
+#verify_kernel
+  Qsag.ZkHemV2Migration.zkHemV2Migration_dataRefines_idealMigrate
+
+#verify_constructive
+  Qsag.ZkHemV2Migration.r1csBitConstraint_sound
+  Qsag.ZkHemV2Migration.migrationCurveKind_all_certified_prime
+  Qsag.ZkHemV2Migration.tooth_preIronwood02_value_independent_rcm_forges_value
+  Qsag.ZkHemV2Migration.tooth_preIronwood02_reopens_different_value
+  Qsag.ZkHemV2Migration.ironwood03_pedersen_value_bound_sound
+  Qsag.ZkHemV2Migration.tooth_raw_redpallas_rk_hides_ask
+  Qsag.ZkHemV2Migration.zkHemV2Migration_wire_perfectly_simulated
+  Qsag.ZkHemV2Migration.nullifierRegistry_refuses_nullifier_rebinding
+  Qsag.ZkHemV2Migration.nullifierRegistry_refuses_second_nullifier_for_legacyId
+  Qsag.ZkHemV2Migration.nullifierRegistry_register_idempotent
+  Qsag.ZkHemV2Migration.find?_promoteToFinalized
+  Qsag.ZkHemV2Migration.nullifierRegistry_lifecycle_absent_enrolled_finalized
+  Qsag.ZkHemV2Migration.nullifierRegistry_one_way_durable
+  Qsag.ZkHemV2Migration.zkHemV2MigrationMachine_step_eq_some
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_rebinding
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_second_nullifier
+  Qsag.ZkHemV2Migration.tooth_zkHemV2MigrationMachine_rejects_double_nullifier
+  Qsag.ZkHemV2Migration.zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break
+  Qsag.ZkHemV2Migration.zkHemV2_whir_settlement_false_statement_lt_128
+  Qsag.ZkHemV2Migration.zkHemV2Migration_trace_conservation_and_nodup
+  Qsag.ZkHemV2Migration.realCurves_pallas_and_secp256k1_settlement_and_double_claim_refusal
+  Qsag.ZkHemV2Migration.inhabited_preIronwood02_forgery
+
+#verify_inhabited
+  Qsag.ZkHemV2Migration.tooth_preIronwood02_value_independent_rcm_forges_value
+  Qsag.ZkHemV2Migration.inhabited_preIronwood02_forgery
+
+#tooth_pair Qsag.ZkHemV2Migration.ironwood03_pedersen_value_bound_sound vs
+  Qsag.ZkHemV2Migration.tooth_preIronwood02_reopens_different_value
+#tooth_pair Qsag.ZkHemV2Migration.nullifierRegistry_register_idempotent vs
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_rebinding
+#tooth_pair Qsag.ZkHemV2Migration.nullifierRegistry_register_idempotent vs
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_second_nullifier
+#tooth_pair Qsag.ZkHemV2Migration.nullifierRegistry_one_way_durable vs
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_rebinding
+#tooth_pair Qsag.ZkHemV2Migration.nullifierRegistry_lifecycle_absent_enrolled_finalized vs
+  Qsag.ZkHemV2Migration.tooth_nullifierRegistry_register_refuses_second_nullifier
+#tooth_pair Qsag.ZkHemV2Migration.zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break vs
+  Qsag.ZkHemV2Migration.tooth_zkHemV2MigrationMachine_rejects_double_nullifier
+
+theorem realCurveR1csScheme_ownsKey_iff (shapeOf pubInputsOf deriveNullifier)
+    (cred : LegacyCredential) (wit : ExtractedR1csMigrationWitness) (claim) :
+    (realCurveR1csScheme shapeOf pubInputsOf deriveNullifier).ownsKey cred wit claim ↔
+      0 < wit.sk ∧ wit.sk < cred.curve.cert.scalarOrd ∧
+      cred.curve.cert.publicKeyMatches wit.sk cred.pubKeyCoordX cred.pubKeyCoordY = true ∧
+      wit.authorizedDest = claim.pqDestinationPk ∧
+      r1csSatisfied (shapeOf cred.curve) (pubInputsOf claim) wit.wires = true := Iff.rfl
+
+#export_eqns ZkHemV2ExtractorSound
+
+end Qsag.ZkHemV2Migration
+end

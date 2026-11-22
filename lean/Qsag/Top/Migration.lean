@@ -57,6 +57,16 @@ Top-level composition module (zero `import all`) connecting:
    its circuit is the lane well-formedness circuit of `MigrationExecution.honestSubmission` for
    every statement). `bls381_dlogSettlement_refines_or_nullifierCollision` is the dichotomy over
    BLS12-381 coordinates, conditional on a `PrimeOrderGroup` hypothesis for `bls381G1`.
+8. `zk-Hem v2` R1CS migration (`ZkHemV2Migration`): `production_curves_all_certified_prime`
+   (primality of the twelve base-field and scalar-order moduli; integers only, no group-order
+   statement), `zkHemV2_r1cs_migration_extract_or_qrom_128_break` and
+   `zkHemV2_r1cs_migration_trace_conservation_and_nodup` for `zkHemV2MigrationMachine` (an
+   uninterpreted `verifyProof`, snapshot and nullifier checks, `NullifierRegistry.register`).
+   Standing hypotheses of these two: `hCodeSound` / `ZkHemV2ExtractorSound` (the extractor's
+   output owns the key; no extractor is constructed), a `WhirScheduleCert` for
+   `ZkHemV2Cert.zkHemV2ProdSched logCells` (none is constructed for a deployed size), and the
+   Merkle collision bound `merkle400QromBound Q`. `realCurveR1csScheme` is parameterised by the
+   R1CS shape and public-input map; no compiled relation of `crates/qsag-migrate` is instantiated.
 -/
 
 public import Qsag.Spec.Primitives
@@ -65,11 +75,13 @@ public import Qsag.Spec.Refines
 public import Qsag.Spec.GameBound
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealMigrate
+public import Qsag.Math.CurvePrimeCerts
 public import Qsag.Math.Gf2Pow128
 public import Qsag.Math.Primality
 public import Qsag.Protocol.Migration.PallasAndBlsMigration
 public import Qsag.Protocol.Migration.ActiveMigrationZeroTest
 public import Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
+public import Qsag.Protocol.Migration.ZkHemV2Migration
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -2747,6 +2759,184 @@ theorem inhabited_singleChallengeZkBoo_two_transcript_extract :
     commitShare, dom, ep, st, Qsag.secp7Mod43Pk1, shares, pf1, pf2,
     hPk, hDlog, fun _ => rfl, fun _ => rfl, rfl, rfl, hVer1, hVer2⟩
 
+/-! ## 8. Curve moduli primality and the `zk-Hem v2` R1CS migration machine -/
+
+/-- **Primality of the migration curve moduli (`production_curves_all_certified_prime`).**
+    `IsPrimeNat` of the base-field and scalar-order moduli of `secp256k1`, `Ed25519`,
+    `Pallas`/`Vesta`, `Jubjub` and `BLS12-381` (Pocklington certificates checked by the kernel,
+    `Math.CurvePrimeCerts` and its imports), and of `baseP` and `scalarOrd` of every
+    `ZkHemV2Migration.MigrationCurveKind`. The statement is about twelve integers; the generator
+    checks of `CertifiedPrimeScalarCurve` (`smul_ord_id`, `smul_one_nonid`) are not restated. -/
+theorem production_curves_all_certified_prime :
+    Qsag.IsPrimeNat Qsag.SECP256K1_FIELD_P ∧
+    Qsag.IsPrimeNat Qsag.SECP256K1_ORDER_N ∧
+    Qsag.IsPrimeNat Qsag.P_ED25519 ∧
+    Qsag.IsPrimeNat Qsag.R_ED25519 ∧
+    Qsag.IsPrimeNat Qsag.p_pallas ∧
+    Qsag.IsPrimeNat Qsag.q_pallas ∧
+    Qsag.IsPrimeNat Qsag.p_vesta ∧
+    Qsag.IsPrimeNat Qsag.q_vesta ∧
+    Qsag.IsPrimeNat Qsag.q_jubjub ∧
+    Qsag.IsPrimeNat Qsag.R_JUBJUB ∧
+    Qsag.IsPrimeNat Qsag.p_bls381 ∧
+    Qsag.IsPrimeNat Qsag.r_bls381 ∧
+    (∀ k : Qsag.ZkHemV2Migration.MigrationCurveKind,
+      Qsag.IsPrimeNat k.cert.baseP ∧ Qsag.IsPrimeNat k.cert.scalarOrd) :=
+  ⟨Qsag.all_production_curve_moduli_prime.1,
+   Qsag.all_production_curve_moduli_prime.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.2.2.2.2.1,
+   Qsag.all_production_curve_moduli_prime.2.2.2.2.2.2.2.2.2.2.2,
+   fun k =>
+     ⟨(Qsag.ZkHemV2Migration.migrationCurveKind_all_certified_prime k).1,
+      (Qsag.ZkHemV2Migration.migrationCurveKind_all_certified_prime k).2.1⟩⟩
+
+/-- **Accepted `zkHemV2MigrationMachine` step: owning witness, or a statement outside the WHIR
+    language whose Fiat–Shamir acceptance is below `2^-128`
+    (`zkHemV2_r1cs_migration_extract_or_qrom_128_break`).**
+    For `16 ≤ logCells ≤ 28` and `Q ≤ 2^64`, if `zkHemV2MigrationMachine` accepts `sub`, then
+    either `extract sub` satisfies `Spec.ValidLegacyOwnership` for
+    `ZkHemV2Migration.realCurveR1csScheme` (snapshot entitlement, derived nullifier, `ownsKey`),
+    the nullifier was unspent and the receipt carries the claim; or the lifted statement of `sub`
+    is outside `whirInLang` of `ZkHemV2Cert.zkHemV2ProdSched logCells`, and then every `Q`-query
+    adversary's succinct Fiat–Shamir acceptance probability on it is below `2^-128`.
+    The split is the decidable `checkOwnership` on `extract sub`. Hypotheses, none discharged here:
+    * `hCodeSound`: language membership of the lifted statement implies `ownsKey` for
+      `extract sub`. This is the knowledge-soundness content; `extract`, `claimOf` and `tblOf` are
+      parameters and no extractor is constructed.
+    * `sc`: a `ClosedWhir.WhirScheduleCert` for `zkHemV2ProdSched logCells` at width `400`. None
+      is constructed for a deployed table size.
+    * In the second branch, the Merkle-root consistency premise and the collision-event bound
+      `ZkHemV2Cert.merkle400QromBound Q` are premises of the implication.
+    `verifyProof` is an arbitrary Boolean function: nothing relates it to `succinctFsAccept`, so
+    the second branch bounds the WHIR verifier's acceptance, not `verifyProof`'s.
+    `realCurveR1csScheme.ownsKey` asks for `0 < sk < scalarOrd`, equality of both canonical affine coordinates
+    with the computed scalar multiple of the curve generator, destination binding, and
+    `r1csSatisfied (shapeOf curve) (pubInputsOf claim) wires`; `shapeOf` and `pubInputsOf` are
+    parameters. Mapping the proof-system wires to the extracted scalar remains part of extractor soundness.
+    `IsPrimeNat … scalarOrd` holds for every `MigrationCurveKind` regardless of the step. -/
+theorem zkHemV2_r1cs_migration_extract_or_qrom_128_break {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (logCells : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
+    (shapeOf : Qsag.ZkHemV2Migration.MigrationCurveKind → Qsag.ZkHemV2Migration.R1csShape)
+    (pubInputsOf : Qsag.Spec.MigrationClaim Qsag.ZkHemV2Migration.LegacyCredential →
+      List Qsag.Goldilocks)
+    (deriveNullifier : Qsag.ZkHemV2Migration.LegacyCredential → Qsag.Spec.Digest256)
+    (snapshot : Qsag.Spec.EnrolledSnapshot Qsag.ZkHemV2Migration.LegacyCredential)
+    (verifyProof : Qsag.ZkHemV2Migration.ZkHemV2MigrationSubmission D → Bool)
+    (extract : Qsag.ZkHemV2Migration.StraightLineExtractor D)
+    (env : Qsag.ClosedWhir.WhirEnv Qsag.QuinticGoldilocks)
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuinticGoldilocks) (dfltRoot : D)
+    (sc : Qsag.ClosedWhir.WhirScheduleCert env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub Qsag.QuinticGoldilocks))
+      (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells).numRounds cardX)
+    (aux : Fin cardX → List (Qsag.QuinticGoldilocks × List D))
+    (claimOf : Qsag.ZkHemV2Migration.ZkHemV2MigrationSubmission D → Qsag.QuinticGoldilocks)
+    (tblOf : Nat → D → Nat → Qsag.QuinticGoldilocks)
+    (hCodeSound : ∀ sub : Qsag.ZkHemV2Migration.ZkHemV2MigrationSubmission D,
+      Qsag.ClosedWhir.whirInLang env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+        ((Qsag.ClosedWhir.whirSuccinctBridge env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+          400 dfltRoot).liftStmt (claimOf sub) (fun _ => sub.proof.initRoot) tblOf) →
+      (Qsag.ZkHemV2Migration.realCurveR1csScheme shapeOf pubInputsOf deriveNullifier).ownsKey
+        sub.claim.legacyPk (extract sub) sub.claim)
+    {st st' : Qsag.ZkHemV2Migration.ZkHemV2MigrateState}
+    {sub : Qsag.ZkHemV2Migration.ZkHemV2MigrationSubmission D}
+    {out : Qsag.Spec.MigrationReceipt Qsag.ZkHemV2Migration.LegacyCredential}
+    (hStep : (Qsag.ZkHemV2Migration.zkHemV2MigrationMachine verifyProof deriveNullifier
+      snapshot).step st sub = some (st', out)) :
+    (Qsag.Spec.ValidLegacyOwnership
+        (Qsag.ZkHemV2Migration.realCurveR1csScheme shapeOf pubInputsOf deriveNullifier)
+        snapshot sub.claim (extract sub) out.amount ∧
+      Qsag.IsPrimeNat sub.claim.legacyPk.curve.cert.scalarOrd ∧
+      sub.claim.nullifier ∉ st.spentNullifiers ∧
+      out.claim = sub.claim) ∨
+    (¬ Qsag.ClosedWhir.whirInLang env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+        ((Qsag.ClosedWhir.whirSuccinctBridge env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+          400 dfltRoot).liftStmt (claimOf sub) (fun _ => sub.proof.initRoot) tblOf) ∧
+      ((∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
+          Qsag.ClosedFs.succinctFsAccept
+            (Qsag.ClosedWhir.whirOracleIop env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+            (Qsag.ClosedWhir.whirSuccinctBridge env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+              400 dfltRoot)
+            M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) H o = true →
+          let str := Qsag.ClosedFs.fsTranscript codec H (codec.dec o)
+          ∀ q ∈ (Qsag.ClosedWhir.whirOracleIop env
+              (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400).queries (claimOf sub)
+              (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+            M.root q.1 ((Qsag.ClosedWhir.whirOracleIop env
+                (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400).depth q.1)
+              (tblOf q.1 ((Qsag.ClosedWhir.whirSuccinctBridge env
+                (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+                (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1)) =
+              (Qsag.ClosedWhir.whirSuccinctBridge env
+                (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+                (fun _ => sub.proof.initRoot) (str.map Prod.fst) q.1) →
+        ∀ (A : Qsag.QuantumAdv cardX 400 cardAnc Q),
+        Qsag.RatBound.le
+          ⟨Qsag.uniformOracleSum 400 cardX (fun H =>
+              Qsag.QVec.queryMassOn
+                (Qsag.ClosedFs.succinctFsCollisionEvent
+                  (Qsag.ClosedWhir.whirOracleIop env
+                    (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+                  (Qsag.ClosedWhir.whirSuccinctBridge env
+                    (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot)
+                  M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) tblOf H)
+                (Qsag.runQuantumAdv A H)),
+            (2 ^ 400) ^ cardX * (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+            Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+              (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+          (Qsag.ZkHemV2Cert.merkle400QromBound Q) →
+        Qsag.RatBound.lt
+          ⟨Qsag.uniformOracleSum 400 cardX (fun H =>
+              Qsag.QVec.queryMassOn
+                (Qsag.ClosedFs.succinctFsAccept
+                  (Qsag.ClosedWhir.whirOracleIop env
+                    (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+                  (Qsag.ClosedWhir.whirSuccinctBridge env
+                    (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot)
+                  M codec aux (claimOf sub) (fun _ => sub.proof.initRoot) H)
+                (Qsag.runQuantumAdv A H)),
+            (2 ^ 400) ^ cardX * (Qsag.prefixScale A Q (Nat.le_refl Q) * Qsag.QVec.stateNormSq A.init),
+            Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos 400))
+              (Nat.mul_pos (Qsag.prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+          (Qsag.RatBound.invPow2 128))) :=
+  Qsag.ZkHemV2Migration.zkHemV2_r1cs_single_transcript_extract_or_qrom_128_break
+    logCells hLo hHi hQ shapeOf pubInputsOf deriveNullifier snapshot verifyProof extract env M
+    dfltRoot sc codec aux claimOf tblOf hCodeSound hStep
+
+/-- **Conservation and no double claim along every reachable trace of
+    `zkHemV2MigrationMachine`**, given `ZkHemV2Migration.ZkHemV2ExtractorSound` (every submission
+    `verifyProof` accepts has `ownsKey` for `extract`; a hypothesis, not proved for any verifier):
+    the total migrated is at most the enrolled total, spent nullifiers are distinct, and settled
+    legacy keys are distinct. Obtained from the `Spec.DataRefines` simulation into
+    `Spec.idealMigrateMachine`. -/
+theorem zkHemV2_r1cs_migration_trace_conservation_and_nodup {D : Type}
+    (shapeOf : Qsag.ZkHemV2Migration.MigrationCurveKind → Qsag.ZkHemV2Migration.R1csShape)
+    (pubInputsOf : Qsag.Spec.MigrationClaim Qsag.ZkHemV2Migration.LegacyCredential →
+      List Qsag.Goldilocks)
+    (deriveNullifier : Qsag.ZkHemV2Migration.LegacyCredential → Qsag.Spec.Digest256)
+    (snapshot : Qsag.Spec.EnrolledSnapshot Qsag.ZkHemV2Migration.LegacyCredential)
+    (verifyProof : Qsag.ZkHemV2Migration.ZkHemV2MigrationSubmission D → Bool)
+    (extract : Qsag.ZkHemV2Migration.StraightLineExtractor D)
+    (hSound : Qsag.ZkHemV2Migration.ZkHemV2ExtractorSound shapeOf pubInputsOf deriveNullifier
+      verifyProof extract)
+    {st : Qsag.ZkHemV2Migration.ZkHemV2MigrateState}
+    (hReach : (Qsag.ZkHemV2Migration.zkHemV2MigrationMachine verifyProof deriveNullifier
+      snapshot).Reachable st) :
+    st.totalMigrated ≤ Qsag.Spec.EnrolledSnapshot.total snapshot ∧
+    st.spentNullifiers.Nodup ∧
+    (st.settledClaims.map (fun r => r.claim.legacyPk)).Nodup :=
+  Qsag.ZkHemV2Migration.zkHemV2Migration_trace_conservation_and_nodup
+    shapeOf pubInputsOf deriveNullifier snapshot verifyProof extract hSound hReach
+
 #verify_constructive
   Qsag.Top.legacy_curve_primality_extraction_and_ideal_migration_chain
   Qsag.Top.active_migration_ceremony_qrom_and_gf2pow128_chain
@@ -2791,6 +2981,9 @@ theorem inhabited_singleChallengeZkBoo_two_transcript_extract :
   Qsag.Top.inhabited_zkboo_extracted_scalar_claim
   Qsag.Top.inhabited_dlogSettlement_schedule_complete
   Qsag.Top.inhabited_singleChallengeZkBoo_two_transcript_extract
+  Qsag.Top.production_curves_all_certified_prime
+  Qsag.Top.zkHemV2_r1cs_migration_extract_or_qrom_128_break
+  Qsag.Top.zkHemV2_r1cs_migration_trace_conservation_and_nodup
 
 #verify_inhabited
   Qsag.Top.dlogOwnership_accepted_claim_has_unique_scalar
@@ -2831,6 +3024,10 @@ theorem inhabited_singleChallengeZkBoo_two_transcript_extract :
   Qsag.Top.tooth_rawSettlement_resubmission_other_destination_rejected
 #tooth_pair Qsag.Top.migrationToy_honest_submission_accepted vs
   Qsag.Top.tooth_migrationToy_forged_nullifier_rejected
+#tooth_pair Qsag.Top.production_curves_all_certified_prime vs
+  Qsag.tooth_cofactor8_edwards_orders_not_prime
+#tooth_pair Qsag.Top.zkHemV2_r1cs_migration_extract_or_qrom_128_break vs
+  Qsag.ZkHemV2Migration.tooth_zkHemV2MigrationMachine_rejects_double_nullifier
 
 end Qsag.Top
 end
