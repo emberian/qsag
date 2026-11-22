@@ -500,7 +500,7 @@ theorem encodeBeltWalHeader_injective {s₁ s₂ : BeltWalTicketSeal}
     (h : encodeBeltWalHeader s₁ = encodeBeltWalHeader s₂) : s₁ = s₂ := by
   rw [← decodeBeltWalHeader_encodeBeltWalHeader s₁, ← decodeBeltWalHeader_encodeBeltWalHeader s₂, h]
 
-private theorem list6_eq_iff {α : Type} {a₁ b₁ c₁ d₁ e₁ f₁ a₂ b₂ c₂ d₂ e₂ f₂ : α}
+theorem list6_eq_iff {α : Type} {a₁ b₁ c₁ d₁ e₁ f₁ a₂ b₂ c₂ d₂ e₂ f₂ : α}
     (h : [a₁, b₁, c₁, d₁, e₁, f₁] = [a₂, b₂, c₂, d₂, e₂, f₂]) :
     a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ ∧ e₁ = e₂ ∧ f₁ = f₂ := by
   have h1 := List.cons.inj h
@@ -7499,5 +7499,11 @@ theorem QsBQuorumConfig.valid_iff (c : QsBQuorumConfig) :
 
 #export_eqns beltLatchBindStep BeltLatchNodeState.init verifyQuorumEchoCertificate verifyAuthenticatedBeltEcho beltLatchEmitEcho stepBeltNetwork
 
+end Qsag
+end
+
+public section
+namespace Qsag
+#export_eqns computeBeltWalSealTag beltWalSealTagFields
 end Qsag
 end

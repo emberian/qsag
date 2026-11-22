@@ -4961,3 +4961,9 @@ end MultiEpochBase4WotsCMerkleBody
 
 end Qsag.DistCustody
 end
+
+public section
+namespace Qsag.DistCustody
+#export_eqns AuthDeployment.approveAck AuthDeployment.approveParty AuthDeployment.crashParty AuthState.latchedOf AuthState.init AuthDeployment.sealTag authStep authViolation authRun authMachine
+end Qsag.DistCustody
+end
