@@ -158,11 +158,27 @@ theorem rss_sign_step_frozen_against_swapped
    fun A hF => (rssSacrificedSignStep_frozen_ext6_soundness chalHash sampleInBall st A chisExt hNd hF).1,
    tooth_rssSacrificedSignStep_swapped_order_forges chalHash sampleInBall st chisExt⟩
 
+/-- Row 0 of the 11-tap balanced generator (`DENSE_PCG_TAPS_PER_TREE = 11`, `imbalance ≤ 7593`)
+has bias strictly between `2^-220` and `2^-219` (`< 2^-135`), whereas an unfiltered degenerate
+11-tap row fails `< 2^-135`. -/
+theorem elevenTap_balanced_against_unfiltered :
+    (∀ row : List (List Nat),
+      row.length = 64 →
+      (∀ ts ∈ row, ts.length = 11 ∧ (∀ a ∈ ts, a < 32768) ∧ imbalance 32768 (oddTapWeight ts) ≤ 7593) →
+      (noiseSignedSum 32768 (row.map tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64) ∧
+    (∃ row : List (List Nat),
+      row.length = 64 ∧
+      (∀ ts ∈ row, ts.length = 11 ∧ ∀ a ∈ ts, a < 32768) ∧
+      ¬ ((noiseSignedSum 32768 (row.map tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64)) :=
+  ⟨fun row hL hOk => (elevenTap_balanced_all_rows_bias_lt_two_neg_135 row hL hOk).1,
+   tooth_elevenTap_unfiltered_tail_exceeds_two_neg_135⟩
+
 #verify_constructive mldsa_six_challenges_frozen_against_swapped
 #verify_constructive sacrifice_empty_challenge_vector_rejected
 #verify_constructive limbo256_bounds_are_instantiated
 #verify_constructive prodRow0_cannot_satisfy_balance_premise
 #verify_constructive prodRow0_signed_count_bracket
+#verify_constructive elevenTap_balanced_against_unfiltered
 #verify_constructive macBlind_spdz_zero_leakage_against_unblinded_recovery
 #verify_constructive macBlind_boolean_projections_and_adaptive_arity_against_fixed3
 #verify_constructive fts_frobenius_frozen_against_swapped_and_deg0

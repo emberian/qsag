@@ -2,10 +2,12 @@ module
 import Qsag
 import all Qsag.Tactic.AssuranceKit
 import all Qsag.Tactic.AuditRegistry
+import all Qsag.Tactic.CathedralKit
 import all Qsag.Tactic.Prelude
 import all Qsag.Spec.Algebra
 import all Qsag.Spec.Assumptions
 import all Qsag.Spec.Bounds
+import all Qsag.Spec.CorruptibleSignSimulation
 import all Qsag.Spec.Encoding
 import all Qsag.Spec.GameBound
 import all Qsag.Spec.IdealAggregate
@@ -18,10 +20,12 @@ import all Qsag.Spec.Primitives
 import all Qsag.Spec.Refines
 import all Qsag.Spec.Sessions
 import all Qsag.Math.Algebra
+import all Qsag.Math.AlgebraicRepair
 import all Qsag.Math.CoeffPoly
 import all Qsag.Math.CommitteeMasks
 import all Qsag.Math.ConstructiveAmplitudeRing
 import all Qsag.Math.Counting
+import all Qsag.Math.CurvePrimeCerts
 import all Qsag.Math.CyclotomicRlwe
 import all Qsag.Math.EllipticCurves
 import all Qsag.Math.Gf2Pow128
@@ -32,9 +36,12 @@ import all Qsag.Math.Lattices
 import all Qsag.Math.MlDsaField
 import all Qsag.Math.MlDsaNtt
 import all Qsag.Math.PolyRing
+import all Qsag.Math.Poseidon2Gl24
 import all Qsag.Math.Primality
+import all Qsag.Math.Q192BernoulliTailBound
 import all Qsag.Math.QuarticExt4
 import all Qsag.Math.QuinticExt5
+import all Qsag.Math.QuinticToom3
 import all Qsag.Math.TapRowParityBias
 import all Qsag.Math.Tactic.CommRing
 import all Qsag.Math.Tactic.MaskBijection
@@ -51,6 +58,7 @@ import all Qsag.Oracle.ConstructiveQuantumHilbert
 import all Qsag.Oracle.FiatShamir
 import all Qsag.Oracle.FrozenChallengeGame
 import all Qsag.Oracle.Keccak
+import all Qsag.Oracle.LazyPermutationUniformEquiv
 import all Qsag.Oracle.Poseidon2
 import all Qsag.Oracle.PrefixMerkleExtraction
 import all Qsag.Oracle.ProbPkgBridge
@@ -58,6 +66,8 @@ import all Qsag.Oracle.Qrom
 import all Qsag.Oracle.SpecRatBridges
 import all Qsag.Oracle.Spn
 import all Qsag.Oracle.Sponge
+import all Qsag.Oracle.SpongeDomainSeparation
+import all Qsag.Oracle.SpongeTwoWayIndifferentiability
 import all Qsag.Oracle.TwoWayQipmCompression
 import all Qsag.Oracle.TwoWayQipmSwapAverage
 import all Qsag.Protocol.Aggregation.Aggregation
@@ -75,40 +85,63 @@ import all Qsag.Protocol.Aggregation.HemHighCapSlicedBudget
 import all Qsag.Protocol.Aggregation.HemMultistageCascadeRbr
 import all Qsag.Protocol.Aggregation.HemOpening
 import all Qsag.Protocol.Aggregation.HemRbrSoundness
+import all Qsag.Protocol.Aggregation.MultiDepthRecursiveQromExtractor
 import all Qsag.Protocol.Aggregation.MultiRoundFsQrom
 import all Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem
+import all Qsag.Protocol.Aggregation.PublicHemQuintic128
 import all Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 import all Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness
 import all Qsag.Protocol.Aggregation.SuccinctAggregationIop
+import all Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate
 import all Qsag.Protocol.Aggregation.UcGames
 import all Qsag.Protocol.Aggregation.ZkHem
 import all Qsag.Protocol.Aggregation.ZkHemV2
+import all Qsag.Protocol.Aggregation.ZkHemV2ComposedZkAndCerts
+import all Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts
+import all Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert
 import all Qsag.Protocol.Credentials.AdvancedMpcAndCreds
 import all Qsag.Protocol.Credentials.BlindVcCollisionFinder
 import all Qsag.Protocol.Credentials.BlindVcQromSecurity
 import all Qsag.Protocol.Credentials.RepetitionCutAndChoose
 import all Qsag.Protocol.Credentials.ToprfMachine
+import all Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement
 import all Qsag.Protocol.Migration.ActiveMigrationZeroTest
+import all Qsag.Protocol.Migration.ClosedIdealMigrateConnection
 import all Qsag.Protocol.Migration.HdToprfAndMigrationSecurity
 import all Qsag.Protocol.Migration.PallasAndBlsMigration
+import all Qsag.Protocol.Migration.ZkHemV2Migration
+import all Qsag.Protocol.Signing.AdrsSeparationGuardTeeth
+import all Qsag.Protocol.Signing.ClosedGameGuardTeeth
+import all Qsag.Protocol.Signing.Compact1122ClosedEufCma
 import all Qsag.Protocol.Signing.ExecEufCmaClosedGame
 import all Qsag.Protocol.Signing.Fips205
 import all Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity
+import all Qsag.Protocol.Signing.FullAdaptiveEufCma
 import all Qsag.Protocol.Signing.HashSigs
+import all Qsag.Protocol.Signing.HulsingExplicitClassify
+import all Qsag.Protocol.Signing.HulsingFullOverlay
+import all Qsag.Protocol.Signing.HulsingMultiHopReduction
+import all Qsag.Protocol.Signing.HulsingPrfMsgHop
+import all Qsag.Protocol.Signing.HulsingPrfUdHops
+import all Qsag.Protocol.Signing.HulsingSecOverlay
 import all Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity
 import all Qsag.Protocol.Signing.HypertreeEufCma
 import all Qsag.Protocol.Signing.PorsFpSecurity
 import all Qsag.Protocol.Signing.PreprocessingSeedSeparation
 import all Qsag.Protocol.Signing.ProdCollision
 import all Qsag.Protocol.Signing.ProdHashReductions
+import all Qsag.Protocol.Signing.ProductionJortsBaggyBounds
+import all Qsag.Protocol.Signing.ProductionParamRefinement
 import all Qsag.Protocol.Signing.SignatureOutputAndCacheLaws
 import all Qsag.Protocol.Threshold.BaggyAndRss256Security
+import all Qsag.Protocol.Threshold.ComputationalMacBlind
 import all Qsag.Protocol.Threshold.DensePcgTaps
 import all Qsag.Protocol.Threshold.IdealTsig
 import all Qsag.Protocol.Threshold.LatticePreprocessingFull
 import all Qsag.Protocol.Threshold.MacBlind
 import all Qsag.Protocol.Threshold.MaliciousSecurity
 import all Qsag.Protocol.Threshold.MlDsa44Parameters
+import all Qsag.Protocol.Threshold.MultiSessionMacBlindHybrid
 import all Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa
 import all Qsag.Protocol.Threshold.Preprocessing
 import all Qsag.Protocol.Threshold.ProductionCoinReduction
@@ -117,13 +150,17 @@ import all Qsag.Protocol.Threshold.Rss256TernaryRound
 import all Qsag.Protocol.Threshold.Rss256TwoPassProductProof
 import all Qsag.Protocol.Threshold.RssSlhFullSecurity
 import all Qsag.Protocol.Threshold.SacrificeFreezeSample
+import all Qsag.Protocol.Threshold.SoftSpokenAndToprfConnections
 import all Qsag.Protocol.Threshold.ThresholdApproval
 import all Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf
 import all Qsag.Protocol.Threshold.ThresholdMlDsaSecurity
 import all Qsag.Protocol.Threshold.ThresholdMpc
+import all Qsag.Custody.CommitteeHandoffAndDealerlessDkg
 import all Qsag.Custody.CustodySuiteFull
 import all Qsag.Custody.DistributedThresholdCustodyRefinement
+import all Qsag.Custody.IsolatedCnfTraceAndCoinBinding
 import all Qsag.Custody.JortsBeltLatchAndQuorumSwitching
+import all Qsag.Custody.KeyHidingAuthCustodyBound
 import all Qsag.Custody.MacaroonAttenuation
 import all Qsag.Custody.SeparatedCustody
 import all Qsag.Custody.ShamirThresholdCustodyRefinement
@@ -172,6 +209,7 @@ import all Qsag.Exec.ThresholdIdealDurableService
 import all Qsag.Exec.ThresholdIdealService
 import all Qsag.Exec.TwoSlotHwmBase
 import all Qsag.Exec.TwoSlotHwmCrashModel
+import all Qsag.Exec.WhirFullDriverConnection
 import all Qsag.Exec.WhirKernels
 import all Qsag.Exec.Tactic.SimulationKit
 import all Qsag.Machine.ArParse
@@ -179,6 +217,9 @@ import all Qsag.Machine.Arm64AbsDomain
 import all Qsag.Machine.Arm64AbsTransfer
 import all Qsag.Machine.Arm64Semantics
 import all Qsag.Machine.Arm64Step
+import all Qsag.Machine.Ass2DitNoninterference
+import all Qsag.Machine.Ass2Dregg64Codec
+import all Qsag.Machine.Ass2Dregg64Isa
 import all Qsag.Machine.ClmulSimd
 import all Qsag.Machine.ConstantTimeIsa
 import all Qsag.Machine.Elf64Headers
@@ -205,7 +246,15 @@ import all Qsag.Machine.MirSpecBridge
 import all Qsag.Machine.MirSpecBridgeCore
 import all Qsag.Machine.MirSpecBridgeWitnesses
 import all Qsag.Machine.PlatformContractInstances
+import all Qsag.Machine.SiliconEquiv
 import all Qsag.Machine.SpirvFixtures
+import all Qsag.Machine.SpirvKernelImages
+import all Qsag.Machine.SpirvKernelSem
+import all Qsag.Machine.SpirvNttAndRlibCert
+import all Qsag.Machine.SpirvNttFixture
+import all Qsag.Machine.SpirvPoseidon2Audit
+import all Qsag.Machine.SpirvPoseidon2FullEquiv
+import all Qsag.Machine.SpirvPoseidon2UniversalEntry
 import all Qsag.Machine.SpirvSimt
 import all Qsag.Machine.SydTv
 import all Qsag.Machine.X86AbsDomain
@@ -220,15 +269,23 @@ import all Qsag.Machine.X86Syntax
 import all Qsag.Machine.X86VectorEval
 import all Qsag.Machine.Tactic.KernelRfl
 import all Qsag.Top.Aggregation
+import all Qsag.Top.ApologyRetirements
+import all Qsag.Top.Ass2
+import all Qsag.Top.CertCustodyAdaptiveBound
 import all Qsag.Top.ClosedProtocolReductions
 import all Qsag.Top.Credentials
 import all Qsag.Top.Custody
+import all Qsag.Top.CustodyKeyHidingBound
+import all Qsag.Top.DerivedSecuritySummary
+import all Qsag.Top.DistributedAuthRunBound
 import all Qsag.Top.Foundations
 import all Qsag.Top.Migration
 import all Qsag.Top.ProbPkgGames
 import all Qsag.Top.SecurityBounds
 import all Qsag.Top.Signing
 import all Qsag.Tests.AggregationParityTeeth
+import all Qsag.Tests.ApologyRetirementTeeth
+import all Qsag.Tests.Ass2Teeth
 import all Qsag.Tests.BlockCompressedOracleTeeth
 import all Qsag.Tests.CapabilityTeeth
 import all Qsag.Tests.ClosedEufCmaTeeth
@@ -242,6 +299,7 @@ import all Qsag.Tests.CustodyTeeth
 import all Qsag.Tests.DistributedCustodyChecks
 import all Qsag.Tests.EquationExportOwner
 import all Qsag.Tests.EquationExports
+import all Qsag.Tests.FrontierApologyTeeth
 import all Qsag.Tests.FrozenAndLpnTeeth
 import all Qsag.Tests.GuardedMachineSimInstance
 import all Qsag.Tests.HemExtractedOpeningBridgeTests
@@ -305,6 +363,7 @@ run_cmd do
   let infrastructureModules : Array Name := #[
     `Qsag.Tactic.AssuranceKit,
     `Qsag.Tactic.AuditRegistry,
+    `Qsag.Tactic.CathedralKit,
     `Qsag.Tactic.Prelude,
     `Qsag.Math.Tactic.CommRing,
     `Qsag.Math.Tactic.MaskBijection,
@@ -317,12 +376,15 @@ run_cmd do
     `Qsag.Protocol.Threshold.RlweExtraction,
     `Qsag.Machine.MirSpecBridge,
     `Qsag.Machine.MirSpecBridgeWitnesses,
-    `Qsag.Tests.CrashAndGuardKitTeeth
+    `Qsag.Top.ApologyRetirements,
+    `Qsag.Tests.ApologyRetirementTeeth,
+    `Qsag.Tests.RecursiveAggregationTeeth
   ]
   let auditedProofModules : Array Name := #[
     `Qsag.Spec.Algebra,
     `Qsag.Spec.Assumptions,
     `Qsag.Spec.Bounds,
+    `Qsag.Spec.CorruptibleSignSimulation,
     `Qsag.Spec.Encoding,
     `Qsag.Spec.GameBound,
     `Qsag.Spec.IdealAggregate,
@@ -334,10 +396,12 @@ run_cmd do
     `Qsag.Spec.Primitives,
     `Qsag.Spec.Refines,
     `Qsag.Spec.Sessions,
+    `Qsag.Math.AlgebraicRepair,
     `Qsag.Math.CoeffPoly,
     `Qsag.Math.CommitteeMasks,
     `Qsag.Math.ConstructiveAmplitudeRing,
     `Qsag.Math.Counting,
+    `Qsag.Math.CurvePrimeCerts,
     `Qsag.Math.CyclotomicRlwe,
     `Qsag.Math.EllipticCurves,
     `Qsag.Math.Gf2Pow128,
@@ -348,9 +412,12 @@ run_cmd do
     `Qsag.Math.MlDsaField,
     `Qsag.Math.MlDsaNtt,
     `Qsag.Math.PolyRing,
+    `Qsag.Math.Poseidon2Gl24,
     `Qsag.Math.Primality,
+    `Qsag.Math.Q192BernoulliTailBound,
     `Qsag.Math.QuarticExt4,
     `Qsag.Math.QuinticExt5,
+    `Qsag.Math.QuinticToom3,
     `Qsag.Math.TapRowParityBias,
     `Qsag.Coding.AffineProximity,
     `Qsag.Coding.Cwyz26,
@@ -365,6 +432,7 @@ run_cmd do
     `Qsag.Oracle.FiatShamir,
     `Qsag.Oracle.FrozenChallengeGame,
     `Qsag.Oracle.Keccak,
+    `Qsag.Oracle.LazyPermutationUniformEquiv,
     `Qsag.Oracle.Poseidon2,
     `Qsag.Oracle.PrefixMerkleExtraction,
     `Qsag.Oracle.ProbPkgBridge,
@@ -372,6 +440,8 @@ run_cmd do
     `Qsag.Oracle.SpecRatBridges,
     `Qsag.Oracle.Spn,
     `Qsag.Oracle.Sponge,
+    `Qsag.Oracle.SpongeDomainSeparation,
+    `Qsag.Oracle.SpongeTwoWayIndifferentiability,
     `Qsag.Oracle.TwoWayQipmCompression,
     `Qsag.Oracle.TwoWayQipmSwapAverage,
     `Qsag.Protocol.Aggregation.Aggregation,
@@ -389,40 +459,63 @@ run_cmd do
     `Qsag.Protocol.Aggregation.HemMultistageCascadeRbr,
     `Qsag.Protocol.Aggregation.HemOpening,
     `Qsag.Protocol.Aggregation.HemRbrSoundness,
+    `Qsag.Protocol.Aggregation.MultiDepthRecursiveQromExtractor,
     `Qsag.Protocol.Aggregation.MultiRoundFsQrom,
     `Qsag.Protocol.Aggregation.Poseidon2AlgebraicAndRecursiveHem,
+    `Qsag.Protocol.Aggregation.PublicHemQuintic128,
     `Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration,
     `Qsag.Protocol.Aggregation.RecursivePoseidon2WhirSoundness,
     `Qsag.Protocol.Aggregation.SuccinctAggregationIop,
+    `Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate,
     `Qsag.Protocol.Aggregation.UcGames,
     `Qsag.Protocol.Aggregation.ZkHem,
     `Qsag.Protocol.Aggregation.ZkHemV2,
+    `Qsag.Protocol.Aggregation.ZkHemV2ComposedZkAndCerts,
+    `Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts,
+    `Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert,
     `Qsag.Protocol.Credentials.AdvancedMpcAndCreds,
     `Qsag.Protocol.Credentials.BlindVcCollisionFinder,
     `Qsag.Protocol.Credentials.BlindVcQromSecurity,
     `Qsag.Protocol.Credentials.RepetitionCutAndChoose,
     `Qsag.Protocol.Credentials.ToprfMachine,
+    `Qsag.Protocol.Credentials.ToprfSpdzArithmeticRefinement,
     `Qsag.Protocol.Migration.ActiveMigrationZeroTest,
+    `Qsag.Protocol.Migration.ClosedIdealMigrateConnection,
     `Qsag.Protocol.Migration.HdToprfAndMigrationSecurity,
     `Qsag.Protocol.Migration.PallasAndBlsMigration,
+    `Qsag.Protocol.Migration.ZkHemV2Migration,
+    `Qsag.Protocol.Signing.AdrsSeparationGuardTeeth,
+    `Qsag.Protocol.Signing.ClosedGameGuardTeeth,
+    `Qsag.Protocol.Signing.Compact1122ClosedEufCma,
     `Qsag.Protocol.Signing.ExecEufCmaClosedGame,
     `Qsag.Protocol.Signing.Fips205,
     `Qsag.Protocol.Signing.FrontierCompact1122AndCorduroySecurity,
+    `Qsag.Protocol.Signing.FullAdaptiveEufCma,
     `Qsag.Protocol.Signing.HashSigs,
+    `Qsag.Protocol.Signing.HulsingExplicitClassify,
+    `Qsag.Protocol.Signing.HulsingFullOverlay,
+    `Qsag.Protocol.Signing.HulsingMultiHopReduction,
+    `Qsag.Protocol.Signing.HulsingPrfMsgHop,
+    `Qsag.Protocol.Signing.HulsingPrfUdHops,
+    `Qsag.Protocol.Signing.HulsingSecOverlay,
     `Qsag.Protocol.Signing.HybridAddrPolicyAndFullPresetSecurity,
     `Qsag.Protocol.Signing.HypertreeEufCma,
     `Qsag.Protocol.Signing.PorsFpSecurity,
     `Qsag.Protocol.Signing.PreprocessingSeedSeparation,
     `Qsag.Protocol.Signing.ProdCollision,
     `Qsag.Protocol.Signing.ProdHashReductions,
+    `Qsag.Protocol.Signing.ProductionJortsBaggyBounds,
+    `Qsag.Protocol.Signing.ProductionParamRefinement,
     `Qsag.Protocol.Signing.SignatureOutputAndCacheLaws,
     `Qsag.Protocol.Threshold.BaggyAndRss256Security,
+    `Qsag.Protocol.Threshold.ComputationalMacBlind,
     `Qsag.Protocol.Threshold.DensePcgTaps,
     `Qsag.Protocol.Threshold.IdealTsig,
     `Qsag.Protocol.Threshold.LatticePreprocessingFull,
     `Qsag.Protocol.Threshold.MacBlind,
     `Qsag.Protocol.Threshold.MaliciousSecurity,
     `Qsag.Protocol.Threshold.MlDsa44Parameters,
+    `Qsag.Protocol.Threshold.MultiSessionMacBlindHybrid,
     `Qsag.Protocol.Threshold.ParametricThresholdAndUnlinkableQsa,
     `Qsag.Protocol.Threshold.Preprocessing,
     `Qsag.Protocol.Threshold.ProductionCoinReduction,
@@ -430,13 +523,17 @@ run_cmd do
     `Qsag.Protocol.Threshold.Rss256TwoPassProductProof,
     `Qsag.Protocol.Threshold.RssSlhFullSecurity,
     `Qsag.Protocol.Threshold.SacrificeFreezeSample,
+    `Qsag.Protocol.Threshold.SoftSpokenAndToprfConnections,
     `Qsag.Protocol.Threshold.ThresholdApproval,
     `Qsag.Protocol.Threshold.ThresholdMlDsaAndToprf,
     `Qsag.Protocol.Threshold.ThresholdMlDsaSecurity,
     `Qsag.Protocol.Threshold.ThresholdMpc,
+    `Qsag.Custody.CommitteeHandoffAndDealerlessDkg,
     `Qsag.Custody.CustodySuiteFull,
     `Qsag.Custody.DistributedThresholdCustodyRefinement,
+    `Qsag.Custody.IsolatedCnfTraceAndCoinBinding,
     `Qsag.Custody.JortsBeltLatchAndQuorumSwitching,
+    `Qsag.Custody.KeyHidingAuthCustodyBound,
     `Qsag.Custody.MacaroonAttenuation,
     `Qsag.Custody.SeparatedCustody,
     `Qsag.Custody.ShamirThresholdCustodyRefinement,
@@ -485,12 +582,16 @@ run_cmd do
     `Qsag.Exec.ThresholdIdealService,
     `Qsag.Exec.TwoSlotHwmBase,
     `Qsag.Exec.TwoSlotHwmCrashModel,
+    `Qsag.Exec.WhirFullDriverConnection,
     `Qsag.Exec.WhirKernels,
     `Qsag.Machine.ArParse,
     `Qsag.Machine.Arm64AbsDomain,
     `Qsag.Machine.Arm64AbsTransfer,
     `Qsag.Machine.Arm64Semantics,
     `Qsag.Machine.Arm64Step,
+    `Qsag.Machine.Ass2DitNoninterference,
+    `Qsag.Machine.Ass2Dregg64Codec,
+    `Qsag.Machine.Ass2Dregg64Isa,
     `Qsag.Machine.ClmulSimd,
     `Qsag.Machine.ConstantTimeIsa,
     `Qsag.Machine.Elf64Headers,
@@ -515,7 +616,15 @@ run_cmd do
     `Qsag.Machine.McSymbols,
     `Qsag.Machine.MirSpecBridgeCore,
     `Qsag.Machine.PlatformContractInstances,
+    `Qsag.Machine.SiliconEquiv,
     `Qsag.Machine.SpirvFixtures,
+    `Qsag.Machine.SpirvKernelImages,
+    `Qsag.Machine.SpirvKernelSem,
+    `Qsag.Machine.SpirvNttAndRlibCert,
+    `Qsag.Machine.SpirvNttFixture,
+    `Qsag.Machine.SpirvPoseidon2Audit,
+    `Qsag.Machine.SpirvPoseidon2FullEquiv,
+    `Qsag.Machine.SpirvPoseidon2UniversalEntry,
     `Qsag.Machine.SpirvSimt,
     `Qsag.Machine.SydTv,
     `Qsag.Machine.X86AbsDomain,
@@ -529,15 +638,21 @@ run_cmd do
     `Qsag.Machine.X86Syntax,
     `Qsag.Machine.X86VectorEval,
     `Qsag.Top.Aggregation,
+    `Qsag.Top.Ass2,
+    `Qsag.Top.CertCustodyAdaptiveBound,
     `Qsag.Top.ClosedProtocolReductions,
     `Qsag.Top.Credentials,
     `Qsag.Top.Custody,
+    `Qsag.Top.CustodyKeyHidingBound,
+    `Qsag.Top.DerivedSecuritySummary,
+    `Qsag.Top.DistributedAuthRunBound,
     `Qsag.Top.Foundations,
     `Qsag.Top.Migration,
     `Qsag.Top.ProbPkgGames,
     `Qsag.Top.SecurityBounds,
     `Qsag.Top.Signing,
     `Qsag.Tests.AggregationParityTeeth,
+    `Qsag.Tests.Ass2Teeth,
     `Qsag.Tests.BlockCompressedOracleTeeth,
     `Qsag.Tests.CapabilityTeeth,
     `Qsag.Tests.ClosedEufCmaTeeth,
@@ -545,11 +660,13 @@ run_cmd do
     `Qsag.Tests.CompositionInstances,
     `Qsag.Tests.ConcreteSecurityBudgetTeeth,
     `Qsag.Tests.ConstructiveQuantumHilbertTeeth,
+    `Qsag.Tests.CrashAndGuardKitTeeth,
     `Qsag.Tests.CredentialsTeeth,
     `Qsag.Tests.CustodyTeeth,
     `Qsag.Tests.DistributedCustodyChecks,
     `Qsag.Tests.EquationExportOwner,
     `Qsag.Tests.EquationExports,
+    `Qsag.Tests.FrontierApologyTeeth,
     `Qsag.Tests.FrozenAndLpnTeeth,
     `Qsag.Tests.GuardedMachineSimInstance,
     `Qsag.Tests.HemExtractedOpeningBridgeTests,
@@ -564,7 +681,6 @@ run_cmd do
     `Qsag.Tests.QipmTeeth,
     `Qsag.Tests.QromCoherentOracleTests,
     `Qsag.Tests.QuinticExt5Teeth,
-    `Qsag.Tests.RecursiveAggregationTeeth,
     `Qsag.Tests.RssParticipantChecks,
     `Qsag.Tests.RssParticipantGateChecksRun,
     `Qsag.Tests.RssParticipantGateEvidenceRun,
@@ -670,3 +786,32 @@ run_cmd do
   logInfo m!"Axiom inventory: {checked} declarations across {auditedProofModules.size} proof modules (0 excluded), {rejected} rejected"
   if rejected > 0 then
     throwError "Axiom policy failed for {rejected} of {checked} declarations. Examples: {examples}"
+
+-- Print representative dependencies alongside the exhaustive inventory above.
+#print axioms Qsag.Silicon.rtlKaratsuba_four_cycle_mul_sound
+#print axioms Qsag.poseidon2Spv_fp_helpers_refine_goldilocks
+#print axioms Qsag.compact1122_all_breaks_charge_pre
+#print axioms Qsag.compact1122_closed_euf_cma_gameBound
+#print axioms Qsag.compact1122_qrom_sm_dt_tcr_128bit_bound
+#print axioms Qsag.TapRowBias.prodRow0Bal11_bias_bracket
+#print axioms Qsag.softspoken_vole_subspace_soundness
+#print axioms Qsag.toom3MulFp5_eq_quinticMul
+#print axioms Qsag.Top.production_curves_all_certified_prime
+#print axioms Qsag.Top.zkHemV2_r1cs_migration_extract_or_qrom_128_break
+#print axioms Qsag.Spec.latchedCorruptibleSigner_refines_simulator
+#print axioms Qsag.SpdzToprf.piToprfRealSpdzGuarded_dataRefines
+#print axioms Qsag.KeyHidingCustody.prfSampleOk_shiftClosed
+#print axioms Qsag.Top.AuthCustodyReductionEmbedding.unsafe_release_prf_tcr_bound
+#print axioms Qsag.Compact1122.compact1122_closed_euf_cma_bound
+#print axioms Qsag.MacBlind.computational_macBlind_tower128_security_bound
+#print axioms Qsag.q192_rlwe_batch_tvd_bound_rational_base
+#print axioms Qsag.Top.qsag_composed_game_security_summary
+#print axioms Qsag.compact1122_closed_game_subunit_witness
+#print axioms Qsag.ZkHemV2Migration.zkHemV2_whir_settlement_false_statement_lt_128
+#print axioms Qsag.pastaVestaG_order_fpVesta
+#print axioms Qsag.Ass2.ass2_straight_line_program_constant_time
+#print axioms Qsag.Spv.spirv_poseidon2_perm12_entry_kat_and_equiv
+#print axioms Qsag.Spv.ntt_no_secret_branch_or_address
+#print axioms Qsag.SpongeIndiff.byte_completed_two_way_431_bits
+#print axioms Qsag.MacBlind.multiSession_blindedMac_tower128_bound
+#print axioms Qsag.Top.certCustody_adaptive_unsafe_release_bound

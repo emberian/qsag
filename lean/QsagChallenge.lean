@@ -36,6 +36,7 @@ public section
 namespace Qsag.Top
 open Qsag CommRingOps Qsag.Aggregation Qsag.RustDurability
 set_option autoImplicit false
+set_option warn.sorry false
 
 /-! # Roster of `Qsag.Top.Signing` -/
 

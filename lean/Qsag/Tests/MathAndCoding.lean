@@ -1467,10 +1467,21 @@ theorem witness_depth15_isd :
   ⟨2, 52, by decide, (pcg_dense_depth15_prange_and_stern_dumer_pq128 2 52 (by decide)).1⟩
 
 
+theorem witness_dual_lpn_11tap_bias_135 :
+    ∃ weights : List Nat, weights.length = 64 ∧
+      (∀ w ∈ weights, ((32768 : Int) - 2 * (w : Int)).natAbs ≤ 7593) ∧
+      ExactRat.lt (ExactRat.abs (parityBias (regularBlockXorOneProb (weights.map depth15TreeRate))))
+        (ExactRat.twoNegPow 135) :=
+  ⟨List.replicate 64 12588, by decide, fun _ hw => by rw [List.eq_of_mem_replicate hw]; decide,
+   pcg_dense_11tap_all_rows_bias_lt_two_neg_135 (List.replicate 64 12588) (by decide)
+     (fun _ hw => by rw [List.eq_of_mem_replicate hw]; decide)⟩
+
 #verify_constructive tooth_pcg_dense_depth14_stern_dumer_below_256
 #tooth_pair Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 vs Qsag.tooth_pcg_dense_depth14_stern_dumer_below_256
 #verify_constructive tooth_omitting_accumulator_collapses_dual_lpn_bias
 #tooth_pair Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 vs Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias
+#verify_constructive tooth_omitting_accumulator_collapses_dual_lpn_bias_135
+#tooth_pair Qsag.pcg_dense_11tap_all_rows_bias_lt_two_neg_135 vs Qsag.tooth_omitting_accumulator_collapses_dual_lpn_bias_135
 #verify_constructive tooth_omitting_rejection_scaling_breaks_hvzk
 #tooth_pair Qsag.acceptProbExact_safe_cancels_shift vs Qsag.tooth_omitting_rejection_scaling_breaks_hvzk
 #verify_constructive tooth_tight_clipping_loses_boundary_preimage
@@ -1481,6 +1492,8 @@ theorem witness_depth15_isd :
 #verify_inhabited Qsag.acceptProbExact_safe_cancels_shift Qsag.witness_acceptProb_cancellation
 #verify_constructive witness_dual_lpn_bias
 #verify_inhabited Qsag.pcg_dense_dual_lpn_linear_bias_lt_two_neg_256 Qsag.witness_dual_lpn_bias
+#verify_constructive witness_dual_lpn_11tap_bias_135
+#verify_inhabited Qsag.pcg_dense_11tap_all_rows_bias_lt_two_neg_135 Qsag.witness_dual_lpn_11tap_bias_135
 #verify_constructive witness_depth15_isd
 #verify_inhabited Qsag.pcg_dense_depth15_prange_and_stern_dumer_pq128 Qsag.witness_depth15_isd
 

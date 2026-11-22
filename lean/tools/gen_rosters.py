@@ -9,7 +9,7 @@ Both rosters must list every `lean/Qsag/**/*.lean` module: `scripts/check_lean_p
 
 `--exclude` drops a module that does not compile yet (it then shows up as unregistered in the
 policy check, which is the intended signal). Only the import block of `Qsag.lean` and the
-import block and `auditedProofModules` array of `AuditAxioms.lean` are rewritten.
+import block and the three audit manifest arrays of `AuditAxioms.lean` are rewritten.
 """
 import re
 import sys
@@ -84,7 +84,14 @@ end = text.index("import Lean\n")
 ordered = [m for g in groups for m in modules if group(m) == g]
 text = text[:start] + "".join(f"import all {m}\n" for m in ordered) + text[end:]
 infra = [m for m in ordered if is_infrastructure(m)]
-reexport = [m for m in ordered if not is_infrastructure(m) and is_reexport(m)]
+# These modules run assurance commands over imports. AuditAxioms verifies that
+# every re-export module owns zero declarations in the compiled environment.
+check_only = {
+    "Qsag.Top.ApologyRetirements",
+    "Qsag.Tests.ApologyRetirementTeeth",
+    "Qsag.Tests.RecursiveAggregationTeeth",
+}
+reexport = [m for m in ordered if not is_infrastructure(m) and (m in check_only or is_reexport(m))]
 proof = [m for m in ordered if m not in infra and m not in reexport]
 text = set_array(text, "infrastructureModules", infra)
 text = set_array(text, "reexportModules", reexport)
