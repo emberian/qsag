@@ -2272,3 +2272,1138 @@ impl<'a, B: Backend> Witgen<'a, B> {
 }
 
 /// Bit counts of the relation's input sources, in the order [`generate`] takes them.
+pub fn input_bits(defs: &Definitions) -> Vec<usize> {
+    defs.sources
+        .iter()
+        .filter_map(|s| match s {
+            Source::Input { bits } => Some(*bits as usize),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What one custodian's [`generate`] consumes: triples, uniform values, and the counts
+/// of opened values, rounds and MAC checks.
+pub fn demand(shape: &Shape, defs: &Definitions) -> Result<Count, WitgenError> {
+    demand_with(shape, defs, CHAINS)
+}
+
+/// The random bits and exact masks the subprotocols of a relation ask for.
+fn plan(shape: &Shape, defs: &Definitions, chains: Chains) -> Result<(usize, usize), WitgenError> {
+    let mut count = Count::default();
+    let inputs: Vec<Vec<Unit>> = input_bits(defs)
+        .into_iter()
+        .map(|bits| vec![Unit; bits])
+        .collect();
+    let public = vec![F::ZERO; shape.num_public];
+    let mut w = Witgen::with_chains(&mut count, chains);
+    w.planning = true;
+    w.run(shape, defs, &public, &inputs)?;
+    Ok(w.asked.get())
+}
+
+/// [`demand`] for a choice of carry chains.
+pub fn demand_with(
+    shape: &Shape,
+    defs: &Definitions,
+    chains: Chains,
+) -> Result<Count, WitgenError> {
+    let mut count = Count::default();
+    let inputs: Vec<Vec<Unit>> = input_bits(defs)
+        .into_iter()
+        .map(|bits| vec![Unit; bits])
+        .collect();
+    let public = vec![F::ZERO; shape.num_public];
+    Witgen::with_chains(&mut count, chains).run(shape, defs, &public, &inputs)?;
+    Ok(count)
+}
+
+/// One custodian's side of witness generation: authenticated shares of the assignment of
+/// `shape` from authenticated shares of the bits of its inputs.
+pub fn generate<T: Transport>(
+    e: &mut Engine<T>,
+    shape: &Shape,
+    defs: &Definitions,
+    public_inputs: &[F],
+    inputs: &[Vec<Sb>],
+) -> Result<Vec<Sb>, WitgenError> {
+    Witgen::new(e).run(shape, defs, public_inputs, inputs)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use qsag_agg::zk_hem::SeedStream;
+
+    /// The clear reference: the same code on plain field values.
+    pub(in super::super) struct Plain {
+        stream: SeedStream,
+        pub count: Count,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in super::super) struct Clear(pub F);
+
+    impl Add for Clear {
+        type Output = Clear;
+        fn add(self, r: Clear) -> Clear {
+            Clear(self.0 + r.0)
+        }
+    }
+
+    impl Sub for Clear {
+        type Output = Clear;
+        fn sub(self, r: Clear) -> Clear {
+            Clear(self.0 - r.0)
+        }
+    }
+
+    impl Plain {
+        pub(in super::super) fn new(tag: u8) -> Self {
+            Self {
+                stream: SeedStream::new(b"QSAG.TEST.WITGEN", &[tag; 32]),
+                count: Count::default(),
+            }
+        }
+    }
+
+    impl SecretWipe for Clear {
+        fn secret_wipe(&mut self) { self.0.secret_wipe(); }
+    }
+
+    impl Backend for Plain {
+        type S = Clear;
+        fn scale(s: Clear, k: F) -> Clear {
+            Clear(s.0 * k)
+        }
+        fn public(&self, c: F) -> Clear {
+            Clear(c)
+        }
+        fn random(&mut self) -> Result<Clear, MpcError> {
+            self.count.randoms += 1;
+            Ok(Clear(self.stream.next_base()))
+        }
+        fn round(
+            &mut self,
+            xs: &[Clear],
+            ys: &[Clear],
+            opens: &[Clear],
+        ) -> Result<(Vec<Clear>, Vec<F>), MpcError> {
+            self.count.triples += xs.len();
+            self.count.rounds += 1;
+            Ok((
+                xs.iter().zip(ys).map(|(x, y)| Clear(x.0 * y.0)).collect(),
+                opens.iter().map(|x| x.0).collect(),
+            ))
+        }
+        fn check(&mut self) -> Result<(), MpcError> {
+            Ok(())
+        }
+    }
+
+    fn f(x: u64) -> F {
+        F::from_u64_reduced(x)
+    }
+
+    fn value(bits: &[Clear]) -> Nat {
+        let mut out = vec![0u64; bits.len() / 64 + 1];
+        for (i, b) in bits.iter().enumerate() {
+            let v = b.0.to_canonical_u64();
+            assert!(v <= 1, "bit {i} is {v}");
+            out[i / 64] |= v << (i % 64);
+        }
+        nat_trim(out)
+    }
+
+    const SECP_P: [u8; 32] = {
+        let mut p = [0xff; 32];
+        p[0] = 0x2f;
+        p[1] = 0xfc;
+        p[4] = 0xfe;
+        p
+    };
+    const ED_P: [u8; 32] = {
+        let mut p = [0xff; 32];
+        p[0] = 0xed;
+        p[31] = 0x7f;
+        p
+    };
+
+    #[test]
+    fn public_integer_arithmetic_and_square_roots() {
+        let mut s = SeedStream::new(b"QSAG.TEST.WITGEN", &[1; 32]);
+        for _ in 0..200 {
+            let a = s.next_base();
+            if a != F::ZERO {
+                let r = sqrt(a * a).unwrap();
+                assert!(r == a || r == F::ZERO - a);
+                assert_eq!(sqrt(a * a), sqrt((F::ZERO - a) * (F::ZERO - a)));
+                // 7 generates the group, so 7 a^2 is not a square.
+                assert_eq!(sqrt(f(7) * a * a), None);
+            }
+        }
+        for p in [SECP_P, ED_P] {
+            let q = Modulus::new(&p);
+            let mut back = vec![0u64; 6];
+            for &(pos, d) in &q.digits {
+                nat_add_signed(&mut back, i128::from(d), pos);
+            }
+            assert_eq!(nat_trim(back), q.p);
+            for _ in 0..5 {
+                let a: Nat = (0..4).map(|_| s.next_base().to_canonical_u64()).collect();
+                let a = nat_divrem(&a, &q.p).1;
+                let inverse = nat_invmod(&a, &q.p);
+                assert_eq!(nat_mulmod(&a, &inverse, &q.p), vec![1]);
+                let (quotient, rest) = nat_divrem(&nat_mul(&a, &a), &q.p);
+                assert_eq!(nat_add(&nat_mul(&quotient, &q.p), &rest), nat_mul(&a, &a));
+            }
+        }
+        let m = interpolation_matrix(5);
+        // 3 t^4 - t + 7 at 0..5, back to its coefficients.
+        let values: Vec<F> = (0..5u64).map(|t| f(3 * t.pow(4) + 7) - f(t)).collect();
+        let coefficients: Vec<F> = m
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&values)
+                    .fold(F::ZERO, |a, (&k, &v)| a + k * v)
+            })
+            .collect();
+        assert_eq!(
+            coefficients,
+            [f(7), F::ZERO - F::ONE, F::ZERO, F::ZERO, f(3)]
+        );
+    }
+
+    #[test]
+    fn decomposition_is_exact_at_every_width_and_boundary() {
+        let mut plain = Plain::new(2);
+        let mut s = SeedStream::new(b"QSAG.TEST.WITGEN", &[3; 32]);
+        let w = Witgen::new(&mut plain);
+        for m in [1u32, 2, 8, 22, 23, 31, 32, 33, 40, 63, 64] {
+            let top = if m == 64 {
+                0xFFFF_FFFF_0000_0000
+            } else {
+                (1u64 << m) - 1
+            };
+            let mut cases = vec![0, 1, top, top - 1, top / 2];
+            cases.extend((0..12).map(|_| s.next_base().to_canonical_u64() & top));
+            for x in cases {
+                let x = x.min(top);
+                let bits = w.wait(w.decompose(Clear(f(x)), m)).unwrap();
+                assert_eq!(bits.len(), m as usize);
+                assert_eq!(value(&bits), nat_trim(vec![x]), "m={m} x={x}");
+            }
+        }
+        // The counter is an upper bound on what a real run uses.
+        drop(w);
+        let used = plain.count;
+        let mut count = Count::default();
+        let c = Witgen::new(&mut count);
+        for m in [1u32, 2, 8, 22, 23, 31, 32, 33, 40, 63, 64] {
+            for _ in 0..17 {
+                c.wait(c.decompose(Unit, m)).unwrap();
+            }
+        }
+        drop(c);
+        assert!(count.triples >= used.triples && count.triples <= used.triples + used.triples / 4);
+        assert!(count.randoms <= used.randoms && count.randoms + 64 * 8 >= used.randoms);
+    }
+
+    fn int(values: &[i128], lo: i128, hi: i128) -> Int<Clear> {
+        Int {
+            c: values.iter().map(|&v| Clear(f_signed(v))).collect(),
+            lo: vec![lo; values.len()],
+            hi: vec![hi; values.len()],
+        }
+    }
+
+    fn int_value(values: &[i128]) -> (Nat, Nat) {
+        let mut pos = vec![0u64; values.len() / 8 + 4];
+        let mut neg = pos.clone();
+        for (k, &v) in values.iter().enumerate() {
+            nat_add_signed(if v < 0 { &mut neg } else { &mut pos }, v.abs(), k);
+        }
+        (nat_trim(pos), nat_trim(neg))
+    }
+
+    #[test]
+    fn residues_quotients_and_inverses_match_public_arithmetic() {
+        let mut s = SeedStream::new(b"QSAG.TEST.WITGEN", &[4; 32]);
+        let mut plain = Plain::new(5);
+        let w = Witgen::new(&mut plain);
+        let mut limbs = |n: usize, lo: i128, hi: i128| -> Vec<i128> {
+            (0..n)
+                .map(|_| lo + (s.next_base().to_canonical_u64() as i128) % (hi - lo + 1))
+                .collect()
+        };
+        for p in [SECP_P, ED_P] {
+            let q = Modulus::new(&p);
+            for round in 0..3 {
+                // A product of two integers minus a third, with signed wide coefficients.
+                let (a, b) = (limbs(32, 0, 255), limbs(32, -255, 255));
+                let c = limbs(40, -(1 << 40), 1 << 40);
+                let (ia, ib, ic) = (
+                    int(&a, 0, 255),
+                    int(&b, -255, 255),
+                    int(&c, -(1 << 40), 1 << 40),
+                );
+                let product = w.wait(w.int_mul(&ia, &ib)).unwrap();
+                let x = w.int_add(&product, &ic);
+                let (ap, an) = int_value(&a);
+                let (bp, bn) = int_value(&b);
+                let (cp, cn) = int_value(&c);
+                let reduce = |pos: &Nat, neg: &Nat| {
+                    let (pos, neg) = (nat_divrem(pos, &q.p).1, nat_divrem(neg, &q.p).1);
+                    nat_divrem(&nat_sub(&nat_add(&pos, &q.p), &neg), &q.p).1
+                };
+                let (am, bm, cm) = (reduce(&ap, &an), reduce(&bp, &bn), reduce(&cp, &cn));
+                let want = nat_divrem(&nat_add(&nat_mulmod(&am, &bm, &q.p), &cm), &q.p).1;
+                let got = w.wait(w.canonical(&x, &q)).unwrap();
+                assert_eq!(got.len(), q.bits);
+                assert_eq!(value(&got), want, "residue, round {round}");
+
+                // The same over a denominator.
+                let d = limbs(32, -255, 255);
+                let id = int(&d, -255, 255);
+                let (dp, dn) = int_value(&d);
+                let dm = reduce(&dp, &dn);
+                let got = w.wait(w.quotient_mod(&x, &id, &q)).unwrap();
+                assert_eq!(
+                    value(&got),
+                    nat_mulmod(&want, &nat_invmod(&dm, &q.p), &q.p),
+                    "quotient, round {round}"
+                );
+            }
+            // A zero denominator is refused.
+            let zero = int(&[0; 32], -255, 255);
+            let one = int(&[1], 0, 255);
+            assert_eq!(
+                w.wait(w.quotient_mod(&one, &zero, &q)).err(),
+                Some(WitgenError::ZeroDenominator)
+            );
+
+            // Exact division: N = Q q with Q < 2^27, coefficients shifted off their digits.
+            let quotient = 0x5a5_1234u64;
+            let n = nat_mul(&[quotient], &q.p);
+            let mut coefficients: Vec<i128> = (0..36).map(|k| nat_byte(&n, k) as i128).collect();
+            coefficients[0] += 256 * 1000;
+            coefficients[1] -= 1000;
+            coefficients[2] -= 256 * 77;
+            coefficients[3] += 77;
+            let num = int(&coefficients, -(1 << 20), 1 << 20);
+            let got = w.wait(w.exact_quotient(&num, &q, 27)).unwrap();
+            assert_eq!(value(&got), vec![quotient]);
+        }
+        for max in [1usize, 2, 5, 40] {
+            for x in 0..=max as u64 {
+                let got = w.wait(w.inverse_or_zero(Clear(f(x)), max)).unwrap();
+                assert_eq!(got.0, f(x).inv_or_zero(), "max={max} x={x}");
+            }
+        }
+    }
+
+    use crate::hem::relations::{
+        Bip32Root, Ed25519ExtendedKey, KeySource, Lock, OwnershipStatement, OwnershipWitness,
+        PathSpec, bip32_derive, ownership_auxiliary_inputs, ownership_definitions, ownership_shape,
+        synthesize_ownership,
+    };
+
+    fn statement(lock: Lock, source: KeySource, witness: &OwnershipWitness) -> OwnershipStatement {
+        OwnershipStatement::derive(lock, source, witness, [5; 32], [6; 32], 9)
+            .expect("a witness for the statement")
+    }
+
+    /// The property a threshold prover needs of a relation: no variable without a
+    /// definition, and the recorded relation is the one the verifier builds.
+    #[test]
+    fn every_ownership_statement_defines_every_variable() {
+        const H: u32 = 1 << 31;
+        let key = OwnershipWitness::secp256k1_key(&[0x11; 32]);
+        let mut extended = [0u8; 96];
+        extended[0] = 8;
+        extended[31] = 0x40;
+        extended[40] = 3;
+        let mut cases = vec![
+            statement(Lock::P2pkhUncompressed, KeySource::Secp256k1Key, &key),
+            statement(Lock::P2shP2wpkh, KeySource::Secp256k1Key, &key),
+            statement(Lock::Ethereum, KeySource::Secp256k1Key, &key),
+            statement(Lock::TaprootKeyPath, KeySource::Secp256k1Key, &key),
+            statement(
+                Lock::TaprootScriptTree,
+                KeySource::Secp256k1Key,
+                &OwnershipWitness::secp256k1_key(&[0x11; 32]).with_merkle_root([3; 32]),
+            ),
+            statement(
+                Lock::BlsWithdrawal,
+                KeySource::Bls12381Key,
+                &OwnershipWitness::bls12_381_key(&[0x13; 32]),
+            ),
+            statement(
+                Lock::P2pkh,
+                KeySource::Bip32 {
+                    root: Bip32Root::Seed,
+                    path: PathSpec::Public(vec![H, 1]),
+                },
+                &OwnershipWitness::seed(&[7; 16]),
+            ),
+            statement(
+                Lock::P2pkh,
+                KeySource::Bip32 {
+                    root: Bip32Root::Seed,
+                    path: PathSpec::Hidden { max_depth: 1 },
+                },
+                &OwnershipWitness::seed(&[7; 16]).with_path(&[H + 2]),
+            ),
+            statement(
+                Lock::Ed25519,
+                KeySource::Slip10 {
+                    path: PathSpec::Public(vec![H]),
+                },
+                &OwnershipWitness::seed(&[7; 16]),
+            ),
+            statement(
+                Lock::Ed25519,
+                KeySource::Bip32Ed25519 { path: vec![1] },
+                &OwnershipWitness::ed25519_extended_key(&Ed25519ExtendedKey(extended)),
+            ),
+        ];
+        cases.extend(reference_cases().into_iter().map(|(st, _, _)| st));
+        for st in &cases {
+            let (shape, defs) = ownership_definitions(st).unwrap();
+            assert_eq!(shape.digest(), ownership_shape(st).unwrap().digest());
+            assert_eq!(defs.vars.len(), shape.num_vars);
+            assert_eq!(
+                defs.undefined(),
+                Vec::<usize>::new(),
+                "{:?} {:?}",
+                st.lock,
+                st.source
+            );
+            assert!(matches!(defs.sources.first(), Some(Source::Input { .. })));
+        }
+    }
+
+    /// The two statements the threshold prover is exercised on, with their witness and
+    /// the witness secret.
+    pub(in super::super) fn reference_cases() -> Vec<(OwnershipStatement, OwnershipWitness, Vec<u8>)>
+    {
+        let key = OwnershipWitness::secp256k1_key(&[0x11; 32]);
+        let seed = OwnershipWitness::ed25519_seed(&[0x22; 32]);
+        vec![
+            (
+                statement(Lock::P2pkh, KeySource::Secp256k1Key, &key),
+                key,
+                vec![0x11; 32],
+            ),
+            (
+                statement(Lock::Ed25519, KeySource::Ed25519Seed, &seed),
+                seed,
+                vec![0x22; 32],
+            ),
+        ]
+    }
+
+    /// Statements whose relation takes inputs besides the secret, with their witness, the
+    /// secret, the hidden path and the script-tree root: a master seed with a public
+    /// path (`m/44'`), a longer seed with a hidden path under a Taproot script tree, a
+    /// SLIP-0010 seed with a hidden path, and an extended key with a hidden public step.
+    #[allow(clippy::type_complexity)]
+    pub(in super::super) fn derived_cases() -> Vec<(
+        OwnershipStatement,
+        OwnershipWitness,
+        Vec<u8>,
+        Vec<u32>,
+        Option<[u8; 32]>,
+    )> {
+        const H: u32 = 1 << 31;
+        let mut out = Vec::new();
+        let seed = vec![0x31; 16];
+        let witness = OwnershipWitness::seed(&seed);
+        let source = KeySource::Bip32 {
+            root: Bip32Root::Seed,
+            path: PathSpec::Public(vec![H + 44]),
+        };
+        out.push((
+            statement(Lock::P2pkh, source, &witness),
+            witness,
+            seed,
+            Vec::new(),
+            None,
+        ));
+        let seed: Vec<u8> = (0..33).map(|i| 0x40 + i as u8).collect();
+        let (path, root) = (vec![H + 86], [0x5a; 32]);
+        let witness = OwnershipWitness::seed(&seed)
+            .with_path(&path)
+            .with_merkle_root(root);
+        let source = KeySource::Bip32 {
+            root: Bip32Root::Seed,
+            path: PathSpec::Hidden { max_depth: 2 },
+        };
+        out.push((
+            statement(Lock::TaprootScriptTree, source, &witness),
+            witness,
+            seed,
+            path,
+            Some(root),
+        ));
+        let seed = vec![0x77; 64];
+        let path = vec![H + 5];
+        let witness = OwnershipWitness::seed(&seed).with_path(&path);
+        let source = KeySource::Slip10 {
+            path: PathSpec::Hidden { max_depth: 1 },
+        };
+        out.push((
+            statement(Lock::Ed25519, source, &witness),
+            witness,
+            seed,
+            path,
+            None,
+        ));
+        let node = bip32_derive(&[0x21; 32], &[H]).unwrap();
+        let secret = [node.private_key, node.chain_code].concat();
+        let path = vec![7];
+        let witness = OwnershipWitness::extended_key(&node).with_path(&path);
+        let source = KeySource::Bip32 {
+            root: Bip32Root::ExtendedKey,
+            path: PathSpec::Hidden { max_depth: 1 },
+        };
+        out.push((
+            statement(Lock::P2pkh, source, &witness),
+            witness,
+            secret,
+            path,
+            None,
+        ));
+        out
+    }
+
+    /// The inputs of a relation as plain values: the secret padded to the first input's
+    /// width, then the auxiliary inputs.
+    fn clear_inputs(defs: &Definitions, secret: &[u8], auxiliary: &[Vec<bool>]) -> Vec<Vec<Clear>> {
+        let widths = input_bits(defs);
+        assert_eq!(widths.len(), 1 + auxiliary.len());
+        assert!(widths[0] >= 8 * secret.len());
+        let mut first: Vec<Clear> = (0..8 * secret.len())
+            .map(|i| Clear(f(u64::from((secret[i / 8] >> (i % 8)) & 1))))
+            .collect();
+        first.resize(widths[0], Clear(F::ZERO));
+        let mut out = vec![first];
+        for (bits, &width) in auxiliary.iter().zip(&widths[1..]) {
+            assert_eq!(bits.len(), width);
+            out.push(bits.iter().map(|&b| Clear(f(u64::from(b)))).collect());
+        }
+        out
+    }
+
+    /// Seeds of hidden length, hidden paths and script-tree roots: the auxiliary inputs
+    /// are the ones the gadgets allocate, in their order, so the definitions evaluated on
+    /// the secret and those inputs give the gadget's assignment.
+    #[test]
+    fn auxiliary_inputs_reproduce_the_gadget_assignment() {
+        const H: u32 = 1 << 31;
+        for (st, witness, secret, path, root) in derived_cases() {
+            let (shape, assignment) = synthesize_ownership(&st, &witness).unwrap();
+            let (recorded, defs) = ownership_definitions(&st).unwrap();
+            assert_eq!(recorded.digest(), shape.digest());
+            let auxiliary =
+                ownership_auxiliary_inputs(&st, secret.len(), &path, root.as_ref()).unwrap();
+            let inputs = clear_inputs(&defs, &secret, &auxiliary);
+            let run = |inputs: &[Vec<Clear>]| {
+                Witgen::new(&mut Plain::new(6)).run(
+                    &shape,
+                    &defs,
+                    &st.public_inputs().unwrap(),
+                    inputs,
+                )
+            };
+            let z = run(&inputs).unwrap();
+            let wrong = (0..shape.mask_var_base).find(|&i| z[i].0 != assignment[i]);
+            assert_eq!(
+                wrong.map(|i| (i, defs.vars[i].clone())),
+                None,
+                "{:?}",
+                st.source
+            );
+
+            // The auxiliary inputs matter: flipping the first or the last of them moves
+            // the assignment (or leaves the relation without one).
+            for k in [1, inputs.len() - 1] {
+                let mut other = inputs.clone();
+                other[k][0] = Clear(F::ONE - other[k][0].0);
+                assert!(run(&other).map_or(true, |o| o != z), "input {k}");
+            }
+
+            // What does not fit the statement is refused.
+            let aux = |bytes: usize, path: &[u32], root: Option<&[u8; 32]>| {
+                ownership_auxiliary_inputs(&st, bytes, path, root)
+            };
+            assert_eq!(aux(secret.len(), &path, root.as_ref()), Some(auxiliary));
+            assert_eq!(aux(15, &path, root.as_ref()), None);
+            assert_eq!(aux(65, &path, root.as_ref()), None);
+            let long = [path.clone(), vec![H, H, H]].concat();
+            assert_eq!(aux(secret.len(), &long, root.as_ref()), None);
+            let flipped = if root.is_some() {
+                None
+            } else {
+                Some(&[1u8; 32])
+            };
+            assert_eq!(aux(secret.len(), &path, flipped), None);
+        }
+        // A SLIP-0010 path has hardened steps only.
+        let (st, _, secret, _, _) = derived_cases().swap_remove(2);
+        assert_eq!(
+            ownership_auxiliary_inputs(&st, secret.len(), &[5], None),
+            None
+        );
+    }
+
+    /// An addition that may be a doubling: the chord where the denominator is nonzero
+    /// modulo the prime, the tangent where it is zero modulo the prime (as an integer it
+    /// need not be zero), and the same consumption either way.
+    #[test]
+    fn slopes_select_chord_or_tangent_without_showing_which() {
+        let q = Modulus::new(&SECP_P);
+        let reduce = |values: &[i128]| {
+            let (pos, neg) = int_value(values);
+            let (pos, neg) = (nat_divrem(&pos, &q.p).1, nat_divrem(&neg, &q.p).1);
+            nat_divrem(&nat_sub(&nat_add(&pos, &q.p), &neg), &q.p).1
+        };
+        let num: Vec<i128> = (0..32).map(|k| 3 * k as i128 - 40).collect();
+        let alt_num: Vec<i128> = (0..40).map(|k| 1000 - 77 * k as i128).collect();
+        let alt_den: Vec<i128> = (0..32).map(|k| 2 * (k as i128 % 100) + 1).collect();
+        // The secp256k1 prime written with signed limbs: a denominator that is zero
+        // modulo the prime and not zero as an integer.
+        let mut prime: Vec<i128> = SECP_P.iter().map(|&b| i128::from(b)).collect();
+        prime[0] -= 256;
+        prime[1] += 1;
+        let mut nonzero = vec![0i128; 32];
+        nonzero[5] = -9;
+        let mut counts = Vec::new();
+        for (den, tangent) in [
+            (nonzero, false),
+            (vec![0i128; 32], true),
+            (prime.clone(), true),
+        ] {
+            let mut plain = Plain::new(8);
+            let w = Witgen::new(&mut plain);
+            let got = w
+                .wait(w.slope(
+                    &int(&num, -300, 300),
+                    &int(&den, -300, 300),
+                    &int(&alt_num, -3000, 3000),
+                    &int(&alt_den, -300, 300),
+                    &q,
+                ))
+                .unwrap();
+            drop(w);
+            let (n, d) = if tangent {
+                (reduce(&alt_num), reduce(&alt_den))
+            } else {
+                (reduce(&num), reduce(&den))
+            };
+            assert_eq!(
+                value(&got),
+                nat_mulmod(&n, &nat_invmod(&d, &q.p), &q.p),
+                "tangent={tangent}"
+            );
+            counts.push((plain.count.triples, plain.count.randoms));
+        }
+        assert_eq!(reduce(&prime), Nat::new());
+        assert!(counts.iter().all(|c| c == &counts[0]), "{counts:?}");
+    }
+
+    /// The secp256k1 key `2^250 - 1`: the last addition of its multiplication doubles the
+    /// last window's point. The quorum computes its assignment like any other, with the
+    /// same preprocessing.
+    #[test]
+    fn a_key_whose_last_addition_doubles_is_computed_like_any_other() {
+        let mut key = [0xff; 32];
+        key[0] = 0x03;
+        let mut used = Vec::new();
+        for secret in [key, [0x11; 32]] {
+            let witness = OwnershipWitness::secp256k1_key(&secret);
+            let st = statement(Lock::P2pkh, KeySource::Secp256k1Key, &witness);
+            let (shape, assignment) = synthesize_ownership(&st, &witness).unwrap();
+            let (_, defs) = ownership_definitions(&st).unwrap();
+            let inputs = clear_inputs(&defs, &secret, &[]);
+            let mut plain = Plain::new(6);
+            let z = Witgen::new(&mut plain)
+                .run(&shape, &defs, &st.public_inputs().unwrap(), &inputs)
+                .unwrap();
+            let wrong = (0..shape.mask_var_base).find(|&i| z[i].0 != assignment[i]);
+            assert_eq!(wrong.map(|i| (i, defs.vars[i].clone())), None);
+            used.push((plain.count.triples, plain.count.randoms));
+        }
+        assert_eq!(used[0], used[1]);
+    }
+
+    /// Triples and rounds of the two reference statements under each kind of chain.
+    /// `cargo test --release -p qsag-migrate --features std --lib --
+    /// hem::collab::witgen::tests::measure_chains --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_chains() {
+        let mut cases: Vec<OwnershipStatement> =
+            reference_cases().into_iter().map(|c| c.0).collect();
+        cases.push(derived_cases().swap_remove(0).0);
+        // m/44'/0'/0'/0/0 from a master seed.
+        const H: u32 = 1 << 31;
+        let seed = OwnershipWitness::seed(&[0x31; 16]);
+        let source = KeySource::Bip32 {
+            root: Bip32Root::Seed,
+            path: PathSpec::Public(vec![H + 44, H, H, 0, 0]),
+        };
+        cases.push(statement(Lock::P2pkh, source, &seed));
+        for st in cases {
+            let (shape, defs) = ownership_definitions(&st).unwrap();
+            for chains in [Chains::Ripple, Chains::Prefix, Chains::Mixed] {
+                let c = demand_with(&shape, &defs, chains).unwrap();
+                std::println!(
+                    "{:?} {:?} {chains:?}: triples={} randoms={} rounds={} checks={} opened={}",
+                    st.lock,
+                    st.source,
+                    c.triples,
+                    c.randoms,
+                    c.rounds,
+                    c.checks,
+                    c.opened
+                );
+            }
+        }
+    }
+
+    /// The definitions mean what the gadgets compute: evaluated on plain values from the
+    /// secret alone they give the gadget's assignment, variable for variable.
+    #[test]
+    fn definitions_reproduce_the_gadget_assignment() {
+        for (st, witness, secret) in reference_cases() {
+            let (shape, assignment) = synthesize_ownership(&st, &witness).unwrap();
+            let (recorded, defs) = ownership_definitions(&st).unwrap();
+            assert_eq!(recorded.digest(), shape.digest());
+            assert_eq!(input_bits(&defs), [8 * secret.len()]);
+            let bits: Vec<Clear> = (0..8 * secret.len())
+                .map(|i| Clear(f(u64::from((secret[i / 8] >> (i % 8)) & 1))))
+                .collect();
+            let mut plain = Plain::new(6);
+            let z = Witgen::new(&mut plain)
+                .run(
+                    &shape,
+                    &defs,
+                    &st.public_inputs().unwrap(),
+                    core::slice::from_ref(&bits),
+                )
+                .unwrap();
+            let wrong = (0..shape.mask_var_base).find(|&i| z[i].0 != assignment[i]);
+            assert_eq!(wrong.map(|i| (i, defs.vars[i].clone())), None);
+            let bound = demand(&shape, &defs).unwrap();
+            std::println!(
+                "{:?}: vars={} used triples={} randoms={}; bound triples={} randoms={} rounds={} checks={}",
+                st.lock,
+                shape.num_vars,
+                plain.count.triples,
+                plain.count.randoms,
+                bound.triples,
+                bound.randoms,
+                bound.rounds,
+                bound.checks,
+            );
+            // The run consumes exactly what the count says, in as many rounds, and the
+            // rounds are the relation's depth (pinned), not its size.
+            assert_eq!(
+                (bound.triples, bound.randoms, bound.rounds),
+                (plain.count.triples, plain.count.randoms, plain.count.rounds)
+            );
+            let pinned = match st.lock {
+                Lock::P2pkh => (2_151_917, 14_049),
+                _ => (2_286_466, 13_443),
+            };
+            assert_eq!((bound.triples, bound.rounds), pinned);
+
+            // A wrong input bit gives a different assignment, and too few inputs are refused.
+            let mut flipped = bits.clone();
+            flipped[3] = Clear(F::ONE - flipped[3].0);
+            let other = Witgen::new(&mut Plain::new(6)).run(
+                &shape,
+                &defs,
+                &st.public_inputs().unwrap(),
+                &[flipped],
+            );
+            assert!(other.map_or(true, |o| o != z));
+            assert_eq!(
+                Witgen::new(&mut Plain::new(6))
+                    .run(
+                        &shape,
+                        &defs,
+                        &st.public_inputs().unwrap(),
+                        &[bits[1..].to_vec()]
+                    )
+                    .err(),
+                Some(WitgenError::Inputs)
+            );
+        }
+    }
+
+    use super::super::engine::{Dealer, Engine, Preprocessing};
+    use super::super::net::{ChannelLink, Framed, NetError, channel_mesh};
+    use crate::hem::curve::{Lazy, Modulus as CurveModulus};
+    use crate::hem::hash::{add_wide, alloc_bits, maj, pack_bits, xor3};
+    use qsag_agg::zk_hem::relation::ConstraintSystem;
+
+    /// A relation over a 4-byte secret that uses the hash and curve gadgets: Boolean
+    /// functions, a wide addition, and a product modulo the secp256k1 base prime.
+    fn small_recorded(secret: &[u8; 4]) -> (Shape, Vec<F>, Definitions) {
+        let mut cs = ConstraintSystem::new_recording();
+        let public: Lc = cs
+            .public_input(f(u64::from(secret[0]) * u64::from(secret[1])))
+            .into();
+        let bits = alloc_bits(&mut cs, secret);
+        let product = cs.mul(&pack_bits(&bits[..8]), &pack_bits(&bits[8..16]));
+        cs.enforce_equal(&product.into(), &public);
+        let sum = add_wide(&mut cs, &bits[..16], &bits[16..]);
+        let mixed: Vec<Lc> = (0..16)
+            .map(|i| {
+                let x = xor3(&mut cs, &bits[i], &bits[i + 16], &sum[i]);
+                maj(&mut cs, &x, &bits[i], &sum[i])
+            })
+            .collect();
+        let field = CurveModulus::secp256k1_base();
+        let reduced = field.mul(&mut cs, &Lazy::from_bits(&bits), &Lazy::from_bits(&mixed));
+        field.enforce_canonical(&mut cs, &reduced);
+        cs.finish_recorded()
+    }
+
+    /// A relation over a 4-byte secret, with or without byte lookups of six values: the
+    /// four secret bytes, one of them again, and a constant.
+    fn byte_lookup_recorded(secret: &[u8; 4], lookups: bool) -> (Shape, Vec<F>, Definitions) {
+        let mut cs = ConstraintSystem::new_recording();
+        let public: Lc = cs
+            .public_input(f(u64::from(secret[0]) * u64::from(secret[1])))
+            .into();
+        let bits = alloc_bits(&mut cs, secret);
+        let bytes: Vec<Lc> = bits.chunks(8).map(pack_bits).collect();
+        let product = cs.mul(&bytes[0], &bytes[1]);
+        cs.enforce_equal(&product.into(), &public);
+        if lookups {
+            for byte in bytes.iter().chain([&bytes[2], &Lc::constant(f(200))]) {
+                cs.enforce_byte(byte);
+            }
+        }
+        cs.finish_recorded()
+    }
+
+    /// Multiplicities on shares: the count of each table row over the lookups, at 302
+    /// triples and 48 uniform values a byte lookup, in the rounds the rest takes.
+    #[test]
+    fn multiplicities_of_byte_lookups_are_counted_on_shares() {
+        let secret = [0xa7, 0x00, 0xff, 0xa7];
+        let (shape, assignment, defs) = byte_lookup_recorded(&secret, true);
+        assert!(shape.is_satisfied(&assignment));
+        assert_eq!(defs.undefined(), Vec::<usize>::new());
+        let l = shape.lookups().unwrap();
+        assert_eq!((l.num_lookups, l.num_table_rows), (6, 256));
+        // 0xa7 twice, 0xff twice (bytes[2] is looked up again), 0x00 and 200 once.
+        let count = |row: usize| assignment[l.mult_var_base + row].to_canonical_u64();
+        assert_eq!(
+            (count(0xa7), count(0xff), count(0), count(200), count(1)),
+            (2, 2, 1, 1, 0)
+        );
+
+        let inputs = clear_inputs(&defs, &secret, &[]);
+        let publics = assignment[1..=shape.num_public].to_vec();
+        let mut plain = Plain::new(9);
+        let z = Witgen::new(&mut plain)
+            .run(&shape, &defs, &publics, &inputs)
+            .unwrap();
+        let wrong = (0..shape.mask_var_base).find(|&i| z[i].0 != assignment[i]);
+        assert_eq!(wrong.map(|i| (i, defs.vars[i].clone())), None);
+
+        let with = demand(&shape, &defs).unwrap();
+        assert_eq!(
+            (with.triples, with.randoms),
+            (plain.count.triples, plain.count.randoms)
+        );
+        let (bare, _, bare_defs) = byte_lookup_recorded(&secret, false);
+        let without = demand(&bare, &bare_defs).unwrap();
+        assert_eq!(with.triples - without.triples, 6 * 302);
+        assert_eq!(with.randoms - without.randoms, 6 * 48);
+        std::println!(
+            "rounds with lookups {} without {}",
+            with.rounds,
+            without.rounds
+        );
+        assert!(with.rounds <= without.rounds + 14);
+    }
+
+    /// A table that is not a range table is refused by name.
+    #[test]
+    fn a_lookup_into_a_table_that_is_not_a_range_is_refused() {
+        let mut cs = ConstraintSystem::new_recording();
+        let bits = alloc_bits(&mut cs, &[5]);
+        let table = cs.table(1, vec![f(5), f(9)]);
+        cs.enforce_in_table(table, &[pack_bits(&bits)]);
+        let (shape, _, defs) = cs.finish_recorded();
+        assert_eq!(
+            demand(&shape, &defs).err(),
+            Some(WitgenError::Table { lookup: 0 })
+        );
+    }
+
+    /// From shares of the secret to a proof of a relation with lookups that the split
+    /// verifier accepts; a wrong message during it makes the honest custodians abort.
+    #[test]
+    fn a_quorum_proves_a_relation_with_lookups_from_shares_of_its_inputs() {
+        use super::super::prover::{prove_party, prover_demand};
+        use qsag_agg::zk_hem::v2::params::Profile;
+        use qsag_agg::zk_hem::v2::protocol::verify_split;
+        let regime = Profile::default();
+        let secret = [0x31, 0x07, 0xe0, 0x31];
+        let (shape, assignment, defs) = byte_lookup_recorded(&secret, true);
+        let publics = assignment[1..=shape.num_public].to_vec();
+        let need = demand(&shape, &defs).unwrap();
+        let prove = prover_demand(&shape, regime).unwrap();
+        for (idx, fault) in [None, Some(2 * need.rounds / 3)].into_iter().enumerate() {
+            let mut dealer = Dealer::new(3, &[11 + idx as u8; 32]);
+            let inputs = deal_bits(&mut dealer, 3, &secret);
+            let preps = dealer.preprocessing(need.triples + prove.0, need.randoms + prove.1);
+            let out = run_engines(preps, fault, |e| {
+                let z = generate(e, &shape, &defs, &publics, &[inputs[e.me()].clone()])
+                    .map_err(|e| std::format!("{e:?}"))?;
+                prove_party(e, &shape, &publics, b"lookups", regime, z)
+                    .map_err(|e| std::format!("{e:?}"))
+            });
+            match fault {
+                None => {
+                    let proof = out[0].0.clone().unwrap();
+                    assert!(out.iter().all(|(p, _)| p.as_ref() == Ok(&proof)));
+                    assert!(
+                        proof.profile == regime
+                            && verify_split(&shape, &publics, b"lookups", regime, &proof)
+                    );
+                    let mut other = publics.clone();
+                    other[0] += F::ONE;
+                    assert!(!verify_split(&shape, &other, b"lookups", regime, &proof));
+                }
+                Some(_) => assert!(out[0].0.is_err() && out[2].0.is_err(), "{:?}", out[0].0),
+            }
+        }
+    }
+
+    /// A transport that flips one bit of its `at`-th outgoing message.
+    struct Faulty<T> {
+        inner: T,
+        sent: usize,
+        at: usize,
+    }
+
+    impl<T: Transport> Transport for Faulty<T> {
+        fn parties(&self) -> usize {
+            self.inner.parties()
+        }
+        fn me(&self) -> usize {
+            self.inner.me()
+        }
+        fn send(&mut self, to: usize, payload: &[u8]) -> Result<(), NetError> {
+            self.sent += 1;
+            if self.sent - 1 == self.at && !payload.is_empty() {
+                let mut wrong = payload.to_vec();
+                wrong[0] ^= 1;
+                return self.inner.send(to, &wrong);
+            }
+            self.inner.send(to, payload)
+        }
+        fn recv(&mut self, from: usize) -> Result<Vec<u8>, NetError> {
+            self.inner.recv(from)
+        }
+    }
+
+    /// Every custodian on its own thread; custodian 1 flips a bit of its `fault`-th
+    /// message. Returns each custodian's result with its round count.
+    fn run_engines<R: Send>(
+        preps: Vec<Preprocessing>,
+        fault: Option<usize>,
+        party: impl Fn(&mut Engine<Faulty<Framed<ChannelLink>>>) -> R + Sync,
+    ) -> Vec<(R, u64)> {
+        let session = [4u8; 32];
+        let mesh = channel_mesh(session, preps.len());
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = mesh
+                .into_iter()
+                .zip(preps)
+                .enumerate()
+                .map(|(p, (net, prep))| {
+                    let party = &party;
+                    scope.spawn(move || {
+                        let net = Faulty {
+                            inner: net,
+                            sent: 0,
+                            at: fault.filter(|_| p == 1).unwrap_or(usize::MAX),
+                        };
+                        let mut e = Engine::new(net, prep, &session, &[p as u8 + 50; 32]);
+                        let out = party(&mut e);
+                        (out, e.stats.rounds)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        })
+    }
+
+    fn deal_bits(dealer: &mut Dealer, parties: usize, secret: &[u8]) -> Vec<Vec<Sb>> {
+        let mut out = vec![Vec::new(); parties];
+        for i in 0..8 * secret.len() {
+            let bit = f(u64::from((secret[i / 8] >> (i % 8)) & 1));
+            for (p, s) in dealer.share(bit).into_iter().enumerate() {
+                out[p].push(s);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn custodians_compute_the_assignment_on_shares() {
+        let secret = [0xa7, 0x3c, 0xf1, 0x5e];
+        let (shape, assignment, defs) = small_recorded(&secret);
+        assert!(shape.is_satisfied(&assignment));
+        assert_eq!(defs.undefined(), Vec::<usize>::new());
+        let need = demand(&shape, &defs).unwrap();
+        let publics = assignment[1..=shape.num_public].to_vec();
+        for parties in [2usize, 3] {
+            let mut dealer = Dealer::new(parties, &[parties as u8; 32]);
+            let inputs = deal_bits(&mut dealer, parties, &secret);
+            let preps = dealer.preprocessing(need.triples, need.randoms);
+            let out = run_engines(preps, None, |e| {
+                let z = generate(e, &shape, &defs, &publics, &[inputs[e.me()].clone()]).unwrap();
+                assert_eq!(e.remaining(), (0, 0), "demand is exact");
+                assert!(!e.has_pending());
+                z
+            });
+            for i in 0..shape.mask_var_base {
+                let value = out.iter().fold(F::ZERO, |acc, (z, _)| acc + z[i].v);
+                assert_eq!(value, assignment[i], "variable {i}");
+            }
+            // A single custodian's shares of the secret's bits are not the bits.
+            let first = 1 + shape.num_public;
+            let own = (first..first + 32)
+                .filter(|&i| out[1].0[i].v == assignment[i])
+                .count();
+            assert_eq!(own, 0);
+        }
+    }
+
+    #[test]
+    fn a_wrong_message_makes_every_honest_custodian_abort_at_the_same_point() {
+        let need = {
+            let (shape, _, defs) = small_recorded(&[1, 2, 3, 4]);
+            demand(&shape, &defs).unwrap()
+        };
+        // Message indices of custodian 1 (two peers, so two sends a round) spread over
+        // the run: random-bit squares, masked openings, Beaver openings, check rounds.
+        let total = 2 * need.rounds;
+        let mut aborted = 0;
+        for (at_idx, at) in [
+            0,
+            1,
+            2,
+            5,
+            40,
+            41,
+            total / 7,
+            total / 3,
+            total / 2,
+            total - total / 5,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut rounds = Vec::new();
+            for secret in [[0xa7, 0x3c, 0xf1, 0x5e], [0x19, 0x80, 0x02, 0xff]] {
+                let (shape, assignment, defs) = small_recorded(&secret);
+                let publics = assignment[1..=shape.num_public].to_vec();
+                let mut dealer = Dealer::new(3, &[70 + at_idx as u8; 32]);
+                let inputs = deal_bits(&mut dealer, 3, &secret);
+                let preps = dealer.preprocessing(need.triples, need.randoms);
+                let session = [4u8; 32];
+                let mesh = channel_mesh(session, preps.len());
+                let out: Vec<_> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = mesh
+                        .into_iter()
+                        .zip(preps)
+                        .enumerate()
+                        .map(|(p, (net, prep))| {
+                            let (shape, defs, publics, inputs) = (&shape, &defs, &publics, &inputs);
+                            scope.spawn(move || {
+                                let net = Faulty {
+                                    inner: net,
+                                    sent: 0,
+                                    at: if p == 1 { at } else { usize::MAX },
+                                };
+                                let mut e = Engine::new_for_obliviousness_test(
+                                    net,
+                                    prep,
+                                    &session,
+                                    &[p as u8 + 50; 32],
+                                );
+                                let res = generate(
+                                    &mut e,
+                                    shape,
+                                    defs,
+                                    publics,
+                                    &[inputs[p].clone()],
+                                )
+                                .map(|_| ());
+                                (res, e.stats.rounds)
+                            })
+                        })
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                for p in [0, 2] {
+                    assert!(
+                        matches!(out[p].0, Err(WitgenError::Mpc(_))),
+                        "message {at}: custodian {p} got {:?}",
+                        out[p].0
+                    );
+                }
+                // The custodian that detects the fault first; the other may only see it
+                // leave.
+                let closed = |r: &Result<(), WitgenError>| {
+                    matches!(r, Err(WitgenError::Mpc(MpcError::Net(_))))
+                };
+                let first = if closed(&out[0].0) || (!closed(&out[2].0) && out[2].1 < out[0].1) {
+                    2
+                } else {
+                    0
+                };
+                assert!(!closed(&out[first].0));
+                rounds.push((out[first].1, out[first].0));
+            }
+            // Where and how the fault is detected does not depend on the secret.
+            assert_eq!(rounds[0], rounds[1], "message {at}");
+            aborted += 1;
+        }
+        assert_eq!(aborted, 10);
+    }
+
+    #[test]
+    fn a_wrong_input_share_is_caught_before_the_assignment_is_used() {
+        let secret = [0xa7, 0x3c, 0xf1, 0x5e];
+        let (shape, assignment, defs) = small_recorded(&secret);
+        let need = demand(&shape, &defs).unwrap();
+        let publics = assignment[1..=shape.num_public].to_vec();
+        let mut dealer = Dealer::new(3, &[8; 32]);
+        let inputs = deal_bits(&mut dealer, 3, &secret);
+        let preps = dealer.preprocessing(need.triples, need.randoms);
+        let out = run_engines(preps, None, |e| {
+            let mut mine = inputs[e.me()].clone();
+            if e.me() == 1 {
+                // A different value under the old MAC share.
+                mine[9].v += F::ONE;
+            }
+            generate(e, &shape, &defs, &publics, &[mine]).map(|_| ())
+        });
+        for (result, _) in &out {
+            assert_eq!(*result, Err(WitgenError::Mpc(MpcError::MacCheck)));
+        }
+    }
+}
