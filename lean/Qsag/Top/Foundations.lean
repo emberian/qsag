@@ -1,4 +1,6 @@
 module
+public import Qsag.Tactic.CathedralKit
+public import Qsag.Math.AlgebraicRepair
 public import Qsag.Exec.SpecOracle
 public import Qsag.Exec.Tactic.SimulationKit
 /-

@@ -36,6 +36,14 @@ Standing assumptions and explicit boundaries, stated where they enter:
   it takes `ClosedWhir.WhirScheduleCert env deployedSched w` as a hypothesis, and `deployedStages`
   uses the profile input `whirAffineStageSimpleNum`, which the proved sliced MCA counts do not
   reach;
+* **`zk-Hem v2` schedules (§1c).** `zkHemV2QuinticWhir_closed_qrom_soundness` discharges the
+  certificate on `ZkHemV2Cert.zkHemV2QuinticSched`: one stage, no fold round, a 64-point coset
+  over `QuinticGoldilocks`, challenge width `400`. It is not a deployed table size.
+  `zkHemV2_deployed_succinct_qrom_gameBound_128` concerns the deployed family
+  `ZkHemV2Cert.zkHemV2ProdSched logCells` (`16 ≤ logCells ≤ 28`, `Q ≤ 2^64`) and is conditional:
+  it takes `ClosedWhir.WhirScheduleCert env (zkHemV2ProdSched logCells) 400` and the Merkle
+  collision bound `ZkHemV2Cert.merkle400QromBound Q` as hypotheses. Proved without hypotheses:
+  `scheduleQromError (zkHemV2ProdSched logCells) Q + 6680 · Q^3 / 2^400 < 2^-128`;
 * **Succinct vs. table-carrying Fiat–Shamir:** `whir_succinct_closed_qrom_soundness` and
   `whirSuccinctCollisionReduction` (`whirSuccinctCollisionReduction_validBreak`) hash ONLY succinct
   `(Option D, WhirPub F)` message prefixes in the Fiat–Shamir oracle and verify authentication
@@ -54,6 +62,7 @@ public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealAggregate
 public import Qsag.Protocol.Aggregation.ClosedFsQromCompile
 public import Qsag.Protocol.Aggregation.ClosedWhirSchedule
+public import Qsag.Protocol.Aggregation.ZkHemV2ScheduleCert
 public import Qsag.Protocol.Signing.ExecEufCmaClosedGame
 import Qsag.Tactic.AssuranceKit
 
@@ -489,6 +498,111 @@ theorem flatHemSlicedWhir_nonvacuity :
    Qsag.ClosedWhir.flatHemSliced_false_accepted_once.1,
    Qsag.ClosedWhir.flatHemSlicedCert_fold0_bad_pos⟩
 
+/-! ### 1c. `zk-Hem v2`: `QuinticGoldilocks`, width-400 challenges, 9-product Toom-3 -/
+
+/-- **Nine-product Toom-3 multiplication in `𝔽_{p^5} = 𝔽_p[u] / (u^5 - 3)` equals the schoolbook
+    product (`toom3_fp5_nine_triple_mul_eq`).** `Qsag.toom3MulFp5` evaluates both operands at
+    `{0, ±1, ±2, ±3, 4, ∞}`, multiplies pointwise (nine base-field products), interpolates and
+    reduces; the result is `QuinticGoldilocks.mul` for all inputs. A ring identity: it says
+    nothing about the secret-shared execution of those nine products. -/
+theorem toom3_fp5_nine_triple_mul_eq (x y : Qsag.QuinticGoldilocks) :
+    Qsag.toom3MulFp5 x y = Qsag.QuinticGoldilocks.mul x y :=
+  Qsag.toom3MulFp5_eq_quinticMul x y
+
+/-- **`whir_exec_closed_qrom_soundness` with its certificate discharged over `QuinticGoldilocks`
+    at challenge width `400` (`zkHemV2QuinticWhir_closed_qrom_soundness`).** The certificate is
+    `ZkHemV2Cert.zkHemV2QuinticCert` for `ZkHemV2Cert.zkHemV2QuinticSched`: one stage with no fold
+    round on a 64-point coset (rate `2^-6`, degree bound `1`), `5` out-of-domain points and `66`
+    queries. It is not one of the deployed table sizes of `ZkHemV2Cert.zkHemV2ProdSched`; it shows
+    the certificate hypothesis is satisfiable over the degree-5 field at width `400`. -/
+theorem zkHemV2QuinticWhir_closed_qrom_soundness {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat}
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuinticGoldilocks)
+    (c : Qsag.ClosedFs.FsCodec (Qsag.ClosedWhir.WhirMsg Qsag.QuinticGoldilocks)
+      Qsag.ZkHemV2Cert.zkHemV2QuinticSched.numRounds cardX)
+    (aux : Fin cardX → List (Qsag.QuinticGoldilocks × List D))
+    (x : Qsag.ClosedWhir.WhirStmt Qsag.QuinticGoldilocks)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang Qsag.ZkHemV2Cert.zkHemV2QuinticEnv
+      Qsag.ZkHemV2Cert.zkHemV2QuinticSched x)
+    (A : Qsag.QuantumAdv cardX 400 cardAnc Q) :
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSoundnessWinProb Qsag.ZkHemV2Cert.zkHemV2QuinticEnv
+          Qsag.ZkHemV2Cert.zkHemV2QuinticSched M c aux x A))
+      (Qsag.Spec.RatBound.ofBudget
+        (Qsag.RatBound.add
+          (Qsag.ClosedWhir.scheduleQromError Qsag.ZkHemV2Cert.zkHemV2QuinticSched Q)
+          (WhirMerkleCollisionWinProb Qsag.ZkHemV2Cert.zkHemV2QuinticEnv
+            Qsag.ZkHemV2Cert.zkHemV2QuinticSched M c aux x A))) :=
+  whir_exec_closed_qrom_soundness Qsag.ZkHemV2Cert.zkHemV2QuinticEnv
+    Qsag.ZkHemV2Cert.zkHemV2QuinticSched M Qsag.ZkHemV2Cert.zkHemV2QuinticCert c aux x hx A
+
+/-- **Conditional on `WhirScheduleCert` for `zkHemV2ProdSched logCells` and on the Merkle
+    collision bound: succinct Fiat–Shamir acceptance below `2^-128`
+    (`zkHemV2_deployed_succinct_qrom_gameBound_128`).** For `16 ≤ logCells ≤ 28` and `Q ≤ 2^64`,
+    a statement outside the language is accepted with probability strictly below `2^-128`, hence
+    `Spec.GameBound` against `2^-128`. Hypotheses, none discharged here:
+    * `sc`: a `ClosedWhir.WhirScheduleCert` for `ZkHemV2Cert.zkHemV2ProdSched logCells` at width
+      `400`. None is constructed for a deployed table size; the `mcaNum` entries of
+      `zkHemV2ProdStages` are numeric inputs (Stage 0 is pinned to the `[DKT26]` Theorem 5.12
+      count by `ZkHemV2Cert.zkHemV2ProdStages_dkt26_exact`).
+    * `hMerkle`: the collision-event probability is at most `ZkHemV2Cert.merkle400QromBound Q`
+      (`6680 · Q^3 / 2^400`).
+    * `hRoots`: the Merkle-root consistency premise of `whir_succinct_closed_qrom_soundness`.
+    What is proved with no hypothesis is the arithmetic
+    `scheduleQromError (zkHemV2ProdSched logCells) Q + 6680 · Q^3 / 2^400 < 2^-128`
+    (`ZkHemV2Cert.zkHemV2_prod_qrom_error_lt_128_at_2pow64`). -/
+theorem zkHemV2_deployed_succinct_qrom_gameBound_128 {D : Type} [DecidableEq D]
+    {cardX cardAnc Q : Nat} (logCells : Nat)
+    (hLo : 16 ≤ logCells) (hHi : logCells ≤ 28) (hQ : Q ≤ 2 ^ 64)
+    (env : Qsag.ClosedWhir.WhirEnv Qsag.QuinticGoldilocks)
+    (M : Qsag.ClosedFs.MerkleSetup D Qsag.QuinticGoldilocks) (dfltRoot : D)
+    (sc : Qsag.ClosedWhir.WhirScheduleCert env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+    (codec : Qsag.ClosedFs.FsCodec
+      (Qsag.ClosedFs.SuccinctRoundMsg D (Qsag.ClosedWhir.WhirPub Qsag.QuinticGoldilocks))
+      (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells).numRounds cardX)
+    (aux : Fin cardX → List (Qsag.QuinticGoldilocks × List D))
+    (claim : Qsag.QuinticGoldilocks) (initRoots : Nat → D)
+    (tblOf : Nat → D → Nat → Qsag.QuinticGoldilocks)
+    (hx : ¬ Qsag.ClosedWhir.whirInLang env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+      ((Qsag.ClosedWhir.whirSuccinctBridge env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+        400 dfltRoot).liftStmt claim initRoots tblOf))
+    (hRoots : ∀ (H : Fin cardX → BitVec 400) (o : Fin cardX),
+      Qsag.ClosedFs.succinctFsAccept
+        (Qsag.ClosedWhir.whirOracleIop env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400)
+        (Qsag.ClosedWhir.whirSuccinctBridge env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+          400 dfltRoot)
+        M codec aux claim initRoots H o = true →
+      let str := Qsag.ClosedFs.fsTranscript codec H (codec.dec o)
+      ∀ q ∈ (Qsag.ClosedWhir.whirOracleIop env
+          (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400).queries claim
+          (str.map (fun sc' => (sc'.1.pub, sc'.2))),
+        M.root q.1 ((Qsag.ClosedWhir.whirOracleIop env
+            (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400).depth q.1)
+          (tblOf q.1 ((Qsag.ClosedWhir.whirSuccinctBridge env
+            (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)) =
+          (Qsag.ClosedWhir.whirSuccinctBridge env
+            (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells) 400 dfltRoot).rootsOf
+            initRoots (str.map Prod.fst) q.1)
+    (A : Qsag.QuantumAdv cardX 400 cardAnc Q)
+    (hMerkle : Qsag.RatBound.le
+      (WhirSuccinctMerkleCollisionWinProb env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+        M dfltRoot codec aux claim initRoots tblOf A)
+      (Qsag.ZkHemV2Cert.merkle400QromBound Q)) :
+    Qsag.RatBound.lt
+      (WhirSuccinctSoundnessWinProb env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+        M dfltRoot codec aux claim initRoots A)
+      (Qsag.RatBound.invPow2 128) ∧
+    Qsag.Spec.GameBound
+      (Qsag.Spec.RatBound.ofBudget
+        (WhirSuccinctSoundnessWinProb env (Qsag.ZkHemV2Cert.zkHemV2ProdSched logCells)
+          M dfltRoot codec aux claim initRoots A))
+      (Qsag.Spec.RatBound.ofBudget (Qsag.RatBound.invPow2 128)) := by
+  have hLt := Qsag.ZkHemV2Cert.zkHemV2_deployed_succinct_qrom_soundness_128
+    logCells hLo hHi hQ env M dfltRoot sc codec aux claim initRoots tblOf hx hRoots A hMerkle
+  exact ⟨hLt, (Qsag.Spec.RatBound.ofBudget_le_iff _ _).mpr (Nat.le_of_lt hLt)⟩
+
 /-! ## 2. Closed adaptive EUF-CMA experiment with the epoch latch -/
 
 /-- **Same-trace classification of the closed EUF-CMA experiment.** The adversary-driven
@@ -617,11 +731,19 @@ theorem concrete_exec_euf_cma_spec_assumptions_witness :
   Qsag.Top.flatHemSlicedWhir_closed_qrom_soundness
   Qsag.Top.flatHemSlicedWhir_succinct_closed_qrom_soundness
   Qsag.Top.flatHemSlicedWhir_nonvacuity
+  Qsag.Top.toom3_fp5_nine_triple_mul_eq
+  Qsag.Top.zkHemV2QuinticWhir_closed_qrom_soundness
+  Qsag.Top.zkHemV2_deployed_succinct_qrom_gameBound_128
   Qsag.Top.jorts_baggy_closed_euf_cma_same_trace_classification
   Qsag.Top.jorts_baggy_closed_euf_cma_keyed_target_bound
   Qsag.Top.jorts_baggy_closed_euf_cma_prf_keygen_hop
   Qsag.Top.jorts_baggy_closed_euf_cma_spec_assumptions_bound
   Qsag.Top.concrete_exec_euf_cma_spec_assumptions_witness
+
+#tooth_pair Qsag.Top.toom3_fp5_nine_triple_mul_eq vs
+  Qsag.tooth_toom3_wrong_reduction_ne_quinticMul
+#tooth_pair Qsag.Top.zkHemV2_deployed_succinct_qrom_gameBound_128 vs
+  Qsag.ZkHemV2Cert.tooth_v1_256bit_digest_violates_qrom_128_at_2pow64
 
 end Qsag.Top
 end

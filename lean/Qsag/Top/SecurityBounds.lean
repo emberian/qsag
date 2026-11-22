@@ -41,10 +41,9 @@ and the separated-custody forgery bound (`Top.separatedCustody_forgery_eufCma_ga
 
 The platform-contract instances for the real storage, GPU and constant-time models
 (`Exec.PlatformContractInstances`, `Machine.PlatformContractInstances`) are re-exported here; no
-clause of the summary theorem below consumes a platform contract. One of them,
-`Machine.nttStageAddressModel`, is not built from a kernel: the Machine layer has no instruction
-stream for `goldilocks_ntt.comp`, so its block traces are empty and its access sets are written by
-hand from the address formulas.
+clause of the summary theorem below consumes a platform contract. The fused NTT stage contract takes its block trace and access sets from the
+decoded SPIR-V butterfly, including its twiddle reads and terminating barrier. Separate
+Machine theorems establish per-stage uniformity, secret independence and storage disjointness.
 -/
 
 public import Qsag.Math.TapRowParityBias
@@ -57,6 +56,8 @@ public import Qsag.Top.Credentials
 public import Qsag.Top.Migration
 public import Qsag.Exec.PlatformContractInstances
 public import Qsag.Machine.PlatformContractInstances
+public import Qsag.Machine.SpirvPoseidon2Audit
+public import Qsag.Machine.SpirvPoseidon2FullEquiv
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -75,8 +76,12 @@ theorem qsag_unified_concrete_security_summary
     (qQrom : Nat) (hqQrom : qQrom + 1 ≤ 2 ^ 40)
     (qMig : Nat) (hqMig : qMig + 1 ≤ 2 ^ 56) :
     -- === Clause I: facts with no cryptographic hypothesis ===
-    ((Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 117 < 32768 ^ 64 ∧
-      32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 118) ∧
+    (((Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Bal11Weights * 2 ^ 219 < 32768 ^ 64 ∧
+        32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Bal11Weights * 2 ^ 220 ∧
+        (Qsag.TapRowBias.noiseSignedSum 32768
+          (Qsag.TapRowBias.prodRow0Bal11Taps.map Qsag.TapRowBias.tapFn) false).natAbs * 2 ^ 135 < 32768 ^ 64) ∧
+      (Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 117 < 32768 ^ 64 ∧
+        32768 ^ 64 < Qsag.TapRowBias.imbalanceProd 32768 Qsag.TapRowBias.prodRow0Weights * 2 ^ 118)) ∧
      8 * (qMig + 1) ^ 2 * 2 ^ 438 * 2 ^ 128 ≤ 3 ^ 438 ∧
      (∀ (F C PK D Sig : Type) [Qsag.LawfulField F] [DecidableEq F] [DecidableEq C]
         [DecidableEq D] (dep : Qsag.DistCustody.AuthDeployment F C PK D Sig),
@@ -145,13 +150,13 @@ theorem qsag_unified_concrete_security_summary
         (Qsag.Spec.FinGame.mk hPos (fun ω =>
           Qsag.prodEufCmaWin suite params (game ω))).winProb.atLeastBits 128)) := by
   -- Clause I
-  have hBias := Qsag.TapRowBias.prodRow0_bias_bracket
+  obtain ⟨_, _, _, hB219, hB220, hB135⟩ := Qsag.TapRowBias.prodRow0Bal11_bias_bracket
   obtain ⟨hMigQrom, _⟩ := Qsag.MigrationExecution.migration_438_zkboo_and_ceremony_qrom_soundness qMig hqMig
   -- Clause II
   obtain ⟨hPortLen, hPortEntries⟩ := Qsag.qsag_pq128_portfolio_soundness_budget budget hqSess
   obtain ⟨hRlweC, hRlweQ⟩ := Qsag.rlwe_or_sigma_24_pq128_within_ceiling budget hqRlwe
   obtain ⟨_, hHemPow⟩ := Qsag.hemNv24_unitaryPow16_sound_up_to_2pow40 qQrom hqQrom
-  refine ⟨⟨hBias, hMigQrom, ?_⟩, ⟨hPortLen, ?_, ?_, ?_, ?_⟩, ⟨?_, ?_⟩⟩
+  refine ⟨⟨⟨⟨hB219, hB220, hB135⟩, Qsag.TapRowBias.prodRow0_bias_bracket⟩, hMigQrom, ?_⟩, ⟨hPortLen, ?_, ?_, ?_, ?_⟩, ⟨?_, ?_⟩⟩
   · intro F C PK D Sig _ _ _ _ dep hWf tr hAdmits
     exact authenticatedCustody_ideal_or_forgery dep hWf hAdmits
   · intro entry hMem hCeil

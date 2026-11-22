@@ -1,4 +1,5 @@
 module
+public import Qsag.Protocol.Threshold.SoftSpokenAndToprfConnections
 public import Qsag.Protocol.Signing.PorsFpSecurity
 public import Qsag.Exec.Rss256OneCorruptViewPrivacy
 public import Qsag.Exec.RssSlhFullSecurityUc

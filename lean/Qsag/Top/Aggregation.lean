@@ -1,4 +1,12 @@
 module
+public import Qsag.Exec.WhirFullDriverConnection
+public import Qsag.Protocol.Migration.ClosedIdealMigrateConnection
+public import Qsag.Protocol.Aggregation.PublicHemQuintic128
+public import Qsag.Protocol.Aggregation.ZkHemV2ComposedZkAndCerts
+public import Qsag.Protocol.Aggregation.ZkHemV2PackedFiberCerts
+public import Qsag.Protocol.Aggregation.SuccinctWhirExtractorAndIdealAggregate
+public import Qsag.Protocol.Aggregation.MultiDepthRecursiveQromExtractor
+public import Qsag.Machine.SpirvPoseidon2UniversalEntry
 public import Qsag.Protocol.Aggregation.HemCommitteeBoundary
 public import Qsag.Protocol.Aggregation.HemHighCapSlicedBudget
 public import Qsag.Protocol.Aggregation.HemMultistageCascadeRbr
@@ -41,6 +49,7 @@ public import Qsag.Spec.Primitives
 public import Qsag.Spec.Parameters
 public import Qsag.Spec.Assumptions
 public import Qsag.Spec.IdealAggregate
+public import Qsag.Math.Poseidon2Gl24
 public import Qsag.Math.QuarticExt4
 public import Qsag.Math.QuinticExt5
 public import Qsag.Protocol.Aggregation.Cwyz26JohnsonCertificate
@@ -54,6 +63,8 @@ public import Qsag.Protocol.Aggregation.HemRbrSoundness
 public import Qsag.Oracle.Qrom
 public import Qsag.Protocol.Aggregation.QromSaltedMerkleStateRestoration
 public import Qsag.Protocol.Aggregation.ComposedQsAgAndMergeSecurity
+public import Qsag.Machine.SiliconEquiv
+public import Qsag.Machine.SpirvPoseidon2Audit
 public import Qsag.Machine.SpirvSimt
 import Qsag.Tactic.AssuranceKit
 
