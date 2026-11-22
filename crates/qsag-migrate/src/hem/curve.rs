@@ -2666,3 +2666,1261 @@ pub fn bls12_381_g1_fixed_base_mul(
 }
 
 /// `1 <= k <= r - 1` for 255 Boolean little-endian scalar bits.
+pub fn bls12_381_enforce_scalar_range(cs: &mut impl Host, scalar_bits_le: &[Lc]) {
+    assert_eq!(scalar_bits_le.len(), 255);
+    run(cs, |cs| {
+        enforce_scalar_range(cs, scalar_bits_le, &big4(&BLS_R))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ed25519_ct::public_key_from_clamped_scalar;
+    use crate::secp256k1_ct::{Fp256, SECP_N, SECP_P, SecpPoint};
+    use qsag_agg::zk_hem::relation::Shape;
+    use std::println;
+
+    type U256 = [u64; 4];
+
+    fn u256_add(a: &U256, b: &U256) -> (U256, u64) {
+        let (s, _) = big_add(&big4(a), &big4(b));
+        ([s[0], s[1], s[2], s[3]], s[4])
+    }
+
+    fn u256_sub(a: &U256, b: &U256) -> (U256, u64) {
+        let (d, _) = big_sub(&big4(a), &big4(b));
+        ([d[0], d[1], d[2], d[3]], d[4] & 1)
+    }
+
+    fn u256_from_bytes(bytes: &[u8; 32]) -> U256 {
+        let b = big_from_bytes(bytes);
+        [b[0], b[1], b[2], b[3]]
+    }
+
+    fn u256_to_bytes(a: &U256) -> [u8; 32] {
+        big_to_bytes(&big4(a))[..32].try_into().unwrap()
+    }
+
+    fn narrow(a: &Big) -> U256 {
+        assert_eq!(a[4] | a[5], 0);
+        [a[0], a[1], a[2], a[3]]
+    }
+
+    /// A context over a plain constraint system, for the internal gadgets.
+    fn ctx(cs: &mut ConstraintSystem) -> Ctx<'_> {
+        Ctx {
+            cs,
+            options: Options::default(),
+            hints: HintCount::default(),
+        }
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn bytes(&mut self) -> [u8; 32] {
+            u256_to_bytes(&core::array::from_fn(|_| self.next()))
+        }
+    }
+
+    fn bit_vars(cs: &mut ConstraintSystem, le: &[u8; 32]) -> Vec<Lc> {
+        (0..256)
+            .map(|i| {
+                let bit: Lc = cs
+                    .alloc(F::from_u64_reduced(((le[i / 8] >> (i % 8)) & 1) as u64))
+                    .into();
+                cs.enforce_boolean(&bit);
+                bit
+            })
+            .collect()
+    }
+
+    fn eval_bytes(cs: &ConstraintSystem, lcs: &[Lc]) -> Vec<u8> {
+        lcs.iter()
+            .map(|lc| {
+                let v = cs.eval(lc).to_canonical_u64();
+                assert!(v < 256, "byte out of range");
+                v as u8
+            })
+            .collect()
+    }
+
+    fn eval_bit_bytes(cs: &ConstraintSystem, bits: &[[Lc; 8]]) -> Vec<u8> {
+        bits.iter()
+            .map(|byte| {
+                byte.iter().enumerate().fold(0u8, |acc, (k, lc)| {
+                    let v = cs.eval(lc).to_canonical_u64();
+                    assert!(v < 2, "bit out of range");
+                    acc | ((v as u8) << k)
+                })
+            })
+            .collect()
+    }
+
+    fn var_of(lc: &Lc) -> usize {
+        assert_eq!(lc.terms().len(), 1);
+        lc.terms()[0].0 as usize
+    }
+
+    /// Violated rows as `(range rows, other rows)`. A range row is `v (1 - v) = 0`: an
+    /// empty right side and a second factor of more than one term. Product rows have a
+    /// right side and the closing row of a reduction has the constant one as second factor.
+    fn violated_rows(shape: &Shape, z: &[F]) -> (usize, usize) {
+        assert_eq!(shape.num_sbox, 0);
+        let (mut range, mut other) = (0, 0);
+        for i in 0..shape.num_rows() {
+            if shape.a.row_dot(i, z).const_mul(shape.b.row_dot(i, z)) != shape.c.row_dot(i, z) {
+                if shape.c.row(i).count() == 0 && shape.b.row(i).count() > 1 {
+                    range += 1;
+                } else {
+                    other += 1;
+                }
+            }
+        }
+        (range, other)
+    }
+
+    fn le(a: &U256) -> [u8; 32] {
+        u256_to_bytes(a)
+    }
+
+    fn be(le: &[u8; 32]) -> [u8; 32] {
+        let mut out = *le;
+        out.reverse();
+        out
+    }
+
+    /// Shift-and-add reference, independent of the Montgomery code under test.
+    fn ref_mulmod(a: &U256, b: &U256, p: &U256) -> U256 {
+        let reduce = |x: U256, carry: u64| {
+            let (d, borrow) = u256_sub(&x, p);
+            if carry == 1 || borrow == 0 { d } else { x }
+        };
+        let a = reduce(*a, 0);
+        let mut acc = [0u64; 4];
+        for i in (0..256).rev() {
+            let (s, c) = u256_add(&acc, &acc);
+            acc = reduce(s, c);
+            if (b[i / 64] >> (i % 64)) & 1 == 1 {
+                let (s, c) = u256_add(&acc, &a);
+                acc = reduce(s, c);
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn field_mul_matches_references_for_four_moduli() {
+        let mut rng = Rng(1);
+        let moduli = [
+            (Modulus::secp256k1_base(), SECP_P),
+            (Modulus::curve25519_base(), ED_P),
+            (Modulus::secp256k1_order(), SECP_N),
+            (Modulus::ed25519_order(), ED_L),
+        ];
+        for (m, p) in &moduli {
+            for round in 0..3 {
+                let (mut a, mut b) = (rng.bytes(), rng.bytes());
+                if round == 0 {
+                    // Largest representable operands.
+                    a = [0xff; 32];
+                    b = [0xff; 32];
+                }
+                let mut cs = ConstraintSystem::new();
+                let (ea, eb) = (m.alloc(&mut cs, &a), m.alloc(&mut cs, &b));
+                let c = m.mul(&mut cs, &ea.lazy(), &eb.lazy());
+                m.enforce_canonical(&mut cs, &c);
+                // `alloc` keeps the low `bits` bits.
+                let mask = |x: &[u8; 32]| {
+                    let mut v = u256_from_bytes(x);
+                    if m.bits() < 256 {
+                        v[3] &= (1u64 << (m.bits() - 192)) - 1;
+                    }
+                    v
+                };
+                let want = ref_mulmod(&mask(&a), &mask(&b), p);
+                assert_eq!(eval_bytes(&cs, &c.bytes_le), le(&want));
+                assert_eq!(m.value(&cs, &c.lazy()), le(&want));
+                if *p == SECP_P {
+                    let native = Fp256(ref_mulmod(&mask(&a), &[1, 0, 0, 0], p))
+                        * Fp256(ref_mulmod(&mask(&b), &[1, 0, 0, 0], p));
+                    assert_eq!(native.normalize().0, want);
+                }
+                let (shape, z) = cs.finish();
+                assert!(shape.is_satisfied(&z));
+                for lc in [
+                    &c.bytes_le[0],
+                    &c.bytes_le[17],
+                    &c.bits_le[9],
+                    &ea.bytes_le[31],
+                ] {
+                    let mut bad = z.clone();
+                    bad[var_of(lc)] += F::ONE;
+                    assert!(!shape.is_satisfied(&bad));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_sums_and_differences_reduce_correctly() {
+        let m = Modulus::secp256k1_base();
+        let mut rng = Rng(2);
+        let (a, b, c) = (rng.bytes(), rng.bytes(), rng.bytes());
+        let mut cs = ConstraintSystem::new();
+        let (ea, eb, ec) = (
+            m.alloc(&mut cs, &a),
+            m.alloc(&mut cs, &b),
+            m.alloc(&mut cs, &c),
+        );
+        // (a - b + 3c + 5) * (b - a)
+        let left = ea
+            .lazy()
+            .sub(&eb.lazy())
+            .add(&ec.lazy().scale(3))
+            .add(&Lazy::constant(&[5]));
+        let right = eb.lazy().sub(&ea.lazy());
+        let out = m.mul(&mut cs, &left, &right);
+        m.enforce_canonical(&mut cs, &out);
+        let (fa, fb, fc) = (
+            Fp256(u256_from_bytes(&a)).normalize(),
+            Fp256(u256_from_bytes(&b)).normalize(),
+            Fp256(u256_from_bytes(&c)).normalize(),
+        );
+        let three_c = fc + fc + fc;
+        let want = (fa - fb + three_c + Fp256([5, 0, 0, 0])) * (fb - fa);
+        assert_eq!(eval_bytes(&cs, &out.bytes_le), le(&want.normalize().0));
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn non_canonical_limbs_and_out_of_range_quotients_are_rejected_by_range_rows_alone() {
+        let m = Modulus::secp256k1_base();
+        let mut rng = Rng(3);
+        let (a, b) = (rng.bytes(), rng.bytes());
+        let mut cs = ConstraintSystem::new();
+        let (ea, eb) = (m.alloc(&mut cs, &a), m.alloc(&mut cs, &b));
+        let product = mul_poly(&mut ctx(&mut cs), &ea.poly(), &eb.poly());
+        let value = m.value(&cs, &Lazy(product.clone()));
+        let mut c = ctx(&mut cs);
+        let source = c.source(|| Source::Input {
+            bits: m.bits() as u32,
+        });
+        let r = alloc_int(&mut c, source, &value, m.bits());
+        let q = enforce_zero_mod(&mut ctx(&mut cs), &m, &r.poly().sub(&product));
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        assert_eq!(violated_rows(&shape, &z), (0, 0));
+
+        // Move 256 from one limb into the next: the represented integer, and with it every
+        // product row and the closing row, is unchanged. Only range rows can object: the two
+        // limbs, and a carry whose integer value moved while its bits did not.
+        for (element, most) in [(&r, 2), (&q, 3)] {
+            let mut bad = z.clone();
+            bad[var_of(&element.bytes_le[0])] += F::from_u64_reduced(256);
+            bad[var_of(&element.bytes_le[1])] -= F::ONE;
+            let (range, other) = violated_rows(&shape, &bad);
+            assert!((2..=most).contains(&range), "{range} range rows");
+            assert_eq!(other, 0);
+        }
+        // A forged carry: every variable after the quotient is a carry bit, and each one is
+        // pinned.
+        let first_carry = var_of(&q.bits_le[q.bits_le.len() - 2]) + 1;
+        assert!(shape.mask_var_base - first_carry > 60);
+        for i in first_carry..shape.mask_var_base {
+            let mut bad = z.clone();
+            bad[i] = F::ONE - bad[i];
+            assert!(!shape.is_satisfied(&bad), "carry bit {i} is free");
+        }
+        // The reduction no longer needs a wide quotient: the high limbs are folded first.
+        assert!(q.bits_le.len() < 48, "quotient of {} bits", q.bits_le.len());
+        assert!(q.bytes_le.len() >= 2);
+        // A quotient that is off by one breaks the identity itself.
+        let mut bad = z.clone();
+        let bit = var_of(&q.bits_le[0]);
+        let delta = F::ONE - bad[bit] - bad[bit];
+        bad[bit] += delta;
+        bad[var_of(&q.bytes_le[0])] += delta;
+        assert!(!shape.is_satisfied(&bad));
+    }
+
+    #[test]
+    fn enforce_zero_accepts_exactly_the_multiples_of_p() {
+        let m = Modulus::curve25519_base();
+        let twice = u256_add(&ED_P, &ED_P).0;
+        for (value, ok) in [
+            ([0u64; 4], true),
+            (ED_P, true),
+            (twice, true),
+            ([1, 0, 0, 0], false),
+            (u256_sub(&ED_P, &[1, 0, 0, 0]).0, false),
+            (u256_add(&ED_P, &[1, 0, 0, 0]).0, false),
+            (u256_add(&twice, &[1 << 40, 0, 0, 0]).0, false),
+        ] {
+            // As a constant, and as a witness minus zero.
+            let mut cs = ConstraintSystem::new();
+            m.enforce_zero(&mut cs, &Lazy::constant(&le(&value)));
+            let bits = bit_vars(&mut cs, &le(&value));
+            m.enforce_equal(&mut cs, &Lazy::from_bits(&bits), &Lazy::constant(&[0]));
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), ok);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "factor too wide")]
+    fn operands_too_wide_for_the_field_are_refused_at_synthesis() {
+        let m = Modulus::secp256k1_base();
+        let mut cs = ConstraintSystem::new();
+        let a = m.alloc(&mut cs, &[7; 32]);
+        let wide = a.lazy().scale(1 << 20).scale(1 << 20);
+        let _ = m.mul(&mut cs, &wide, &a.lazy());
+    }
+
+    #[test]
+    fn canonical_check_separates_p_minus_one_from_p() {
+        for (m, p) in [
+            (Modulus::secp256k1_base(), SECP_P),
+            (Modulus::curve25519_base(), ED_P),
+        ] {
+            let (pm1, _) = u256_sub(&p, &[1, 0, 0, 0]);
+            let (pp1, _) = u256_add(&p, &[1, 0, 0, 0]);
+            let top = if m.bits() == 256 {
+                [u64::MAX; 4]
+            } else {
+                [u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]
+            };
+            for (value, ok) in [
+                ([0u64; 4], true),
+                ([5, 0, 0, 0], true),
+                (pm1, true),
+                (p, false),
+                (pp1, false),
+                (top, false),
+            ] {
+                let mut cs = ConstraintSystem::new();
+                let e = m.alloc(&mut cs, &le(&value));
+                assert_eq!(eval_bytes(&cs, &e.bytes_le), le(&value));
+                m.enforce_canonical(&mut cs, &e);
+                let (shape, z) = cs.finish();
+                assert_eq!(shape.is_satisfied(&z), ok);
+            }
+        }
+    }
+
+    #[test]
+    fn le_const_agrees_with_integer_comparison() {
+        for bound in [
+            0u8, 1, 2, 0b011_1000, 0b101_0101, 0b111_0111, 63, 64, 77, 126, 127,
+        ] {
+            for x in 0u8..128 {
+                let mut cs = ConstraintSystem::new();
+                let bits: Vec<Lc> = (0..7)
+                    .map(|i| cs.alloc(F::from_u64_reduced(((x >> i) & 1) as u64)).into())
+                    .collect();
+                enforce_le_const(&mut ctx(&mut cs), &bits, &[bound]);
+                let (shape, z) = cs.finish();
+                assert_eq!(shape.is_satisfied(&z), x <= bound, "x={x} bound={bound}");
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_range_gadgets_accept_exactly_one_to_order_minus_one() {
+        let run = |secp: bool, k: U256| {
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            if secp {
+                secp256k1_enforce_scalar_range(&mut cs, &bits);
+            } else {
+                ed25519_enforce_scalar_range(&mut cs, &bits);
+            }
+            let (shape, z) = cs.finish();
+            shape.is_satisfied(&z)
+        };
+        let mut rng = Rng(4);
+        for (secp, order) in [(true, SECP_N), (false, ED_L)] {
+            let minus = |d: u64| u256_sub(&order, &[d, 0, 0, 0]).0;
+            let plus = |d: u64| u256_add(&order, &[d, 0, 0, 0]).0;
+            assert!(!run(secp, [0; 4]));
+            assert!(run(secp, [1, 0, 0, 0]));
+            assert!(run(secp, minus(2)));
+            assert!(run(secp, minus(1)));
+            assert!(!run(secp, order));
+            assert!(!run(secp, plus(1)));
+            assert!(!run(secp, [u64::MAX; 4]));
+            for _ in 0..20 {
+                let k = u256_from_bytes(&rng.bytes());
+                let (_, borrow) = u256_sub(&k, &order);
+                assert_eq!(run(secp, k), borrow == 1);
+                // Values within a few low bits of the order.
+                let near = [
+                    order[0] ^ (rng.next() & 0xffff),
+                    order[1],
+                    order[2],
+                    order[3],
+                ];
+                let (_, borrow) = u256_sub(&near, &order);
+                assert_eq!(run(secp, near), borrow == 1);
+            }
+        }
+    }
+
+    fn secp_scalars() -> Vec<U256> {
+        let mut rng = Rng(5);
+        let n = SECP_N;
+        let mut out = vec![
+            [1, 0, 0, 0],
+            [2, 0, 0, 0],
+            u256_sub(&n, &[1, 0, 0, 0]).0,
+            u256_sub(&n, &[2, 0, 0, 0]).0,
+            // Zero windows almost everywhere.
+            [0, 0, 0, 1 << 8],
+            [0, 1 << 12, 0, 0],
+            [0x0000_0fff_0000_0000, 0, 0, 0xf000_0000_0000_0000],
+            // Above the order: the result is [k - n] G.
+            [u64::MAX; 4],
+            u256_add(&n, &[7, 0, 0, 0]).0,
+            secp_doubling_scalar(),
+        ];
+        out.extend((0..4).map(|_| u256_from_bytes(&rng.bytes())));
+        out
+    }
+
+    /// The scalar whose last addition has equal operands: `k_low = 2^256 - 1 - n` under the
+    /// top window value 63.
+    fn secp_doubling_scalar() -> U256 {
+        let n = SECP_N;
+        let low: U256 = core::array::from_fn(|i| !n[i]);
+        u256_add(&low, &[0, 0, 0, 0xfc00_0000_0000_0000]).0
+    }
+
+    #[test]
+    fn doubling_scalars_really_double_the_last_table_point() {
+        with_secp256k1(|curve| {
+            let f = &curve.f;
+            let [tx, ty] = curve.windows.last().unwrap().points[63];
+            let t = (f.mont(&big_from_bytes(&tx)), f.mont(&big_from_bytes(&ty)));
+            let twice = curve.double(&t);
+            let native = SecpPoint::generator_mul_ct(&be(&le(&secp_doubling_scalar())))
+                .to_affine()
+                .unwrap();
+            assert_eq!(narrow(&f.canon(&twice.0)), native.0.normalize().0);
+            assert_eq!(narrow(&f.canon(&twice.1)), native.1.normalize().0);
+        });
+    }
+
+    #[test]
+    fn secp256k1_fixed_base_matches_native_encodings() {
+        for k in secp_scalars() {
+            let native = SecpPoint::generator_mul_ct(&be(&le(&k)));
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let pk = secp256k1_fixed_base_mul(&mut cs, &bits);
+            let compressed = native.to_compressed_bytes().unwrap();
+            let uncompressed = native.to_uncompressed_64().unwrap();
+            assert_eq!(eval_bytes(&cs, &pk.compressed_bytes()), compressed);
+            assert_eq!(eval_bit_bytes(&cs, &pk.compressed_bits()), compressed);
+            assert_eq!(eval_bytes(&cs, &pk.uncompressed_bytes()), uncompressed);
+            assert_eq!(eval_bit_bytes(&cs, &pk.uncompressed_bits()), uncompressed);
+            assert_eq!(eval_bytes(&cs, &pk.x_only_bytes()), compressed[1..]);
+            assert_eq!(eval_bit_bytes(&cs, &pk.x_only_bits()), compressed[1..]);
+            let odd = cs.eval(&pk.y_is_odd()).to_canonical_u64();
+            assert_eq!(odd as u8, compressed[0] & 1);
+            pk.enforce_even_y(&mut cs);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), odd == 0, "k = {k:x?}");
+        }
+    }
+
+    #[test]
+    fn secp256k1_x_only_matches_native() {
+        for k in [secp_scalars()[2], secp_scalars()[9], secp_scalars()[11]] {
+            let native = SecpPoint::generator_mul_ct(&be(&le(&k)));
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let x = secp256k1_fixed_base_mul_x_only(&mut cs, &bits);
+            let mut got = eval_bytes(&cs, &x.bytes_le);
+            got.reverse();
+            assert_eq!(got, native.to_compressed_bytes().unwrap()[1..]);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+        }
+    }
+
+    /// Every private variable of the relation is pinned: changing any single one breaks it.
+    fn assert_single_changes_rejected(shape: &Shape, z: &[F], seed: u64, samples: usize) {
+        let mut rng = Rng(seed);
+        for _ in 0..samples {
+            let i = 1 + (rng.next() as usize) % (shape.mask_var_base - 1);
+            let mut bad = z.to_vec();
+            bad[i] += F::from_u64_reduced(1 + rng.next() % 3);
+            assert!(!shape.is_satisfied(&bad), "variable {i} is free");
+        }
+    }
+
+    #[test]
+    fn secp256k1_rejects_tampered_witnesses_and_multiples_of_the_order() {
+        let k = secp_scalars()[12];
+        let mut cs = ConstraintSystem::new();
+        let bits = bit_vars(&mut cs, &le(&k));
+        let pk = secp256k1_fixed_base_mul(&mut cs, &bits);
+        let outputs = [
+            var_of(&pk.x.bits_le[0]),
+            var_of(&pk.x.bits_le[100]),
+            var_of(&pk.y.bits_le[0]),
+            var_of(&pk.y.bytes_le[31]),
+            var_of(&pk.x.bytes_le[0]),
+        ];
+        let (shape, z) = cs.finish();
+        assert!(shape.is_satisfied(&z));
+        for i in outputs {
+            let mut bad = z.clone();
+            bad[i] += F::ONE;
+            assert!(!shape.is_satisfied(&bad));
+            // A flipped bit that stays Boolean.
+            let mut bad = z.clone();
+            bad[i] = F::ONE - bad[i];
+            assert!(!shape.is_satisfied(&bad));
+        }
+        assert_single_changes_rejected(&shape, &z, 6, 600);
+
+        for k in [[0u64; 4], SECP_N] {
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let _ = secp256k1_fixed_base_mul(&mut cs, &bits);
+            let (other, z) = cs.finish();
+            assert_eq!(other, shape, "row structure depends on the witness");
+            assert!(!other.is_satisfied(&z));
+        }
+    }
+
+    #[test]
+    fn secp256k1_point_add_matches_native_including_doubling() {
+        let m = Modulus::secp256k1_base();
+        let affine = |k: u64| {
+            let (x, y) = SecpPoint::generator_mul_ct(&be(&le(&[k, 0, 0, 0])))
+                .to_affine()
+                .unwrap();
+            (x.normalize().0, y.normalize().0)
+        };
+        let neg = |p: (U256, U256)| (p.0, (-Fp256(p.1)).normalize().0);
+        for (a, b, sum) in [
+            (affine(5), affine(11), Some(affine(16))),
+            (affine(9), affine(9), Some(affine(18))),
+            (affine(3), neg(affine(1)), Some(affine(2))),
+            (affine(7), neg(affine(7)), None),
+        ] {
+            let mut cs = ConstraintSystem::new();
+            let point = |cs: &mut ConstraintSystem, p: (U256, U256)| AffinePoint {
+                x: m.alloc(cs, &le(&p.0)).lazy(),
+                y: m.alloc(cs, &le(&p.1)).lazy(),
+            };
+            let (pa, pb) = (point(&mut cs, a), point(&mut cs, b));
+            let out = secp256k1_point_add(&mut cs, &pa, &pb);
+            let got = (m.value(&cs, &out.x), m.value(&cs, &out.y));
+            let (shape, z) = cs.finish();
+            match sum {
+                Some(want) => {
+                    assert_eq!(got, (le(&want.0).to_vec(), le(&want.1).to_vec()));
+                    assert!(shape.is_satisfied(&z));
+                }
+                None => assert!(!shape.is_satisfied(&z)),
+            }
+        }
+    }
+
+    fn ed_scalars() -> Vec<U256> {
+        let mut rng = Rng(7);
+        let mut out = vec![
+            [1, 0, 0, 0],
+            [8, 0, 0, 0],
+            u256_sub(&ED_L, &[1, 0, 0, 0]).0,
+            u256_add(&ED_L, &[1, 0, 0, 0]).0,
+            // The last addition doubles: k_low = 2^250 - 1 under the top window value 0.
+            [u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 6],
+            [0, 0, 1 << 20, 1 << 62],
+            [u64::MAX; 4],
+        ];
+        out.extend((0..3).map(|_| u256_from_bytes(&rng.bytes())));
+        out
+    }
+
+    #[test]
+    fn ed25519_fixed_base_matches_native_encoding() {
+        for k in ed_scalars() {
+            let want = public_key_from_clamped_scalar(&le(&k));
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let pk = ed25519_fixed_base_mul(&mut cs, &bits);
+            assert_eq!(eval_bytes(&cs, &pk.encoding_bytes()), want);
+            let enc_bits = pk.encoding_bits();
+            let per_byte: Vec<[Lc; 8]> = (0..32)
+                .map(|i| core::array::from_fn(|j| enc_bits[8 * i + j].clone()))
+                .collect();
+            assert_eq!(eval_bit_bytes(&cs, &per_byte), want);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z), "k = {k:x?}");
+        }
+    }
+
+    #[test]
+    fn ed25519_clamped_keys_match_native_and_tampering_is_rejected() {
+        let mut rng = Rng(8);
+        let mut shapes = Vec::new();
+        for round in 0..3 {
+            let raw = rng.bytes();
+            let mut clamped = raw;
+            clamped[0] &= 248;
+            clamped[31] &= 127;
+            clamped[31] |= 64;
+            let want = public_key_from_clamped_scalar(&clamped);
+            let mut cs = ConstraintSystem::new();
+            let bits = ed25519_clamp(&bit_vars(&mut cs, &raw));
+            let pk = ed25519_fixed_base_mul(&mut cs, &bits);
+            assert_eq!(eval_bytes(&cs, &pk.encoding_bytes()), want);
+            let outputs = [
+                var_of(&pk.x_is_odd),
+                var_of(&pk.y.bits_le[3]),
+                var_of(&pk.y.bytes_le[31]),
+            ];
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            if round == 0 {
+                for i in outputs {
+                    let mut bad = z.clone();
+                    bad[i] = F::ONE - bad[i];
+                    assert!(!shape.is_satisfied(&bad));
+                }
+                // Skip the scalar bits the clamp discards (variables 1..=256).
+                let mut rng = Rng(9);
+                for _ in 0..400 {
+                    let i = 257 + (rng.next() as usize) % (shape.mask_var_base - 257);
+                    let mut bad = z.clone();
+                    bad[i] += F::ONE;
+                    assert!(!shape.is_satisfied(&bad), "variable {i} is free");
+                }
+            }
+            shapes.push(shape);
+        }
+        assert!(shapes.windows(2).all(|w| w[0] == w[1]));
+
+        for k in [[0u64; 4], ED_L, u256_add(&ED_L, &ED_L).0] {
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let _ = ed25519_fixed_base_mul(&mut cs, &bits);
+            let (shape, z) = cs.finish();
+            assert!(!shape.is_satisfied(&z));
+        }
+    }
+
+    // ---- BLS12-381 G1 ------------------------------------------------------
+
+    fn bls_scalars() -> Vec<U256> {
+        let mut rng = Rng(11);
+        let r = BLS_R;
+        // The last addition doubles: k_low = 58 * 2^249 - 1 - r under the top window value 57.
+        let doubling = u256_sub(&[u64::MAX, u64::MAX, u64::MAX, (115 << 57) - 1], &r).0;
+        let mut out = vec![
+            [1, 0, 0, 0],
+            [2, 0, 0, 0],
+            u256_sub(&r, &[1, 0, 0, 0]).0,
+            doubling,
+            [0, 0, 1 << 20, 1 << 60],
+        ];
+        out.extend((0..3).map(|_| {
+            let mut k = u256_from_bytes(&rng.bytes());
+            k[3] &= (1 << 62) - 1;
+            k
+        }));
+        out
+    }
+
+    /// Compressed public keys of [`bls_scalars`], recorded from the constant-time native
+    /// implementation `crate::bls12_381::BlsG1Point::generator_mul_ct(..).to_compressed_48()`
+    /// (commit 661e5a8), which this module does not depend on.
+    const BLS_VECTORS: [&str; 8] = [
+        "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "a572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "b7f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "83abcb46d14b9b55848c30bc7b8afba5bd023ab3c2be1434b64b28df5acfceb6bf55bb8c02ef4adb0b781fef2c19747c",
+        "965ca2ee2d4a16bb7894c9f1a93754fc4f8e3f5f0d0044148d52c365922982fdfcfbf5b5f4945b80fb41570afe3889a1",
+        "a3011056d0cb7b38ed291a2c396c1fed3acb496c6aed45ff4474974a3ee8f519ff8239b200c228bb9426fc020b2b0c21",
+        "b4b9d9caaba9000db3d2f077010c6eb827d1eaacb35edbc1b60755923511c2a34b9f8073d45d6885e0f0f60d44df359e",
+        "80f1b9b03db910e1fbf1e29126270d11136b6cc640f6fbd5b66f78dc1be547a55b5f348d928e65eb3abe2a49427403a6",
+    ];
+
+    fn hex(bytes: &[u8]) -> std::string::String {
+        bytes.iter().map(|b| std::format!("{b:02x}")).collect()
+    }
+
+    fn bits255(cs: &mut ConstraintSystem, k: &U256) -> Vec<Lc> {
+        let mut bits = bit_vars(cs, &le(k));
+        bits.truncate(255);
+        bits
+    }
+
+    #[test]
+    fn bls12_381_g1_matches_recorded_native_encodings() {
+        assert_eq!(
+            BLS_VECTORS[0],
+            "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+            "the generator's standard encoding"
+        );
+        let mut signs = [0usize; 2];
+        for (k, want) in bls_scalars().iter().zip(BLS_VECTORS) {
+            let mut cs = ConstraintSystem::new();
+            let bits = bits255(&mut cs, k);
+            let pk = bls12_381_g1_fixed_base_mul(&mut cs, &bits);
+            assert_eq!(hex(&eval_bytes(&cs, &pk.compressed_bytes())), want);
+            assert_eq!(hex(&eval_bit_bytes(&cs, &pk.compressed_bits())), want);
+            // Double-and-add on the table-free group law, and the sign by comparison.
+            with_bls12_381_g1(|curve| {
+                let f = &curve.f;
+                let g = (f.mont(&BLS_G1_X), f.mont(&BLS_G1_Y));
+                let (x, y) = curve.scalar_mul(&big4(k), &g).unwrap();
+                let (x, y) = (f.canon(&x), f.canon(&y));
+                assert_eq!(eval_bytes(&cs, &pk.x.bytes_le), big_to_bytes(&x));
+                assert_eq!(eval_bytes(&cs, &pk.y.bytes_le), big_to_bytes(&y));
+                let (neg, _) = big_sub(&f.p, &y);
+                let largest = big_sub(&neg, &y).1;
+                assert_eq!(cs.eval(&pk.y_is_largest).to_canonical_u64(), largest);
+                signs[largest as usize] += 1;
+            });
+            let outputs = [
+                var_of(&pk.y_is_largest),
+                var_of(&pk.x.bits_le[6]),
+                var_of(&pk.x.bytes_le[47]),
+            ];
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z), "k = {k:x?}");
+            for i in outputs {
+                let mut bad = z.clone();
+                bad[i] = F::ONE - bad[i];
+                assert!(!shape.is_satisfied(&bad));
+            }
+        }
+        assert!(signs[0] > 0 && signs[1] > 0, "both sign flags must occur");
+
+        for k in [[0u64; 4], BLS_R] {
+            let mut cs = ConstraintSystem::new();
+            let bits = bits255(&mut cs, &k);
+            let _ = bls12_381_g1_fixed_base_mul(&mut cs, &bits);
+            let (shape, z) = cs.finish();
+            assert!(!shape.is_satisfied(&z));
+        }
+    }
+
+    #[test]
+    fn bls12_381_scalar_range_accepts_exactly_one_to_r_minus_one() {
+        let run = |k: U256| {
+            let mut cs = ConstraintSystem::new();
+            let bits = bits255(&mut cs, &k);
+            bls12_381_enforce_scalar_range(&mut cs, &bits);
+            let (shape, z) = cs.finish();
+            shape.is_satisfied(&z)
+        };
+        let r = BLS_R;
+        assert!(!run([0; 4]));
+        assert!(run([1, 0, 0, 0]));
+        assert!(run(u256_sub(&r, &[1, 0, 0, 0]).0));
+        assert!(!run(r));
+        assert!(!run(u256_add(&r, &[1, 0, 0, 0]).0));
+        assert!(!run([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]));
+        let mut rng = Rng(12);
+        for _ in 0..20 {
+            let near = [r[0] ^ (rng.next() & 0xffff), r[1], r[2], r[3]];
+            assert_eq!(run(near), u256_sub(&near, &r).1 == 1);
+        }
+    }
+
+    /// Shift-and-add reference on six words.
+    fn ref_mulmod_big(a: &Big, b: &Big, p: &Big) -> Big {
+        let reduce = |x: Big| {
+            let (d, borrow) = big_sub(&x, p);
+            if borrow == 0 { d } else { x }
+        };
+        let mut acc = [0u64; NW];
+        for i in (0..64 * NW).rev() {
+            acc = reduce(big_add(&acc, &acc).0);
+            if (b[i / 64] >> (i % 64)) & 1 == 1 {
+                acc = reduce(big_add(&acc, a).0);
+            }
+        }
+        acc
+    }
+
+    #[test]
+    fn field_mul_matches_reference_for_the_381_bit_field() {
+        let m = Modulus::bls12_381_base();
+        assert_eq!(m.bits(), 381);
+        let mut rng = Rng(13);
+        for round in 0..3 {
+            let bytes = |rng: &mut Rng| {
+                let mut v = [0u8; 48];
+                v[..32].copy_from_slice(&rng.bytes());
+                v[32..].copy_from_slice(&rng.bytes()[..16]);
+                if round == 0 {
+                    v = [0xff; 48];
+                }
+                v[47] &= 0x1f;
+                v
+            };
+            let (a, b) = (bytes(&mut rng), bytes(&mut rng));
+            let mut cs = ConstraintSystem::new();
+            let (ea, eb) = (m.alloc(&mut cs, &a), m.alloc(&mut cs, &b));
+            let c = m.mul(&mut cs, &ea.lazy(), &eb.lazy());
+            m.enforce_canonical(&mut cs, &c);
+            let reduced = |x: &[u8; 48]| ref_mulmod_big(&big_from_bytes(x), &big(1), &BLS_P);
+            let want = ref_mulmod_big(&reduced(&a), &reduced(&b), &BLS_P);
+            assert_eq!(eval_bytes(&cs, &c.bytes_le), big_to_bytes(&want));
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            for lc in [&c.bytes_le[0], &c.bytes_le[47], &c.bits_le[200]] {
+                let mut bad = z.clone();
+                bad[var_of(lc)] += F::ONE;
+                assert!(!shape.is_satisfied(&bad));
+            }
+        }
+    }
+
+    // ---- Taproot and child keys ----------------------------------------------
+
+    use crate::secp256k1_ct::{secp_scalar_add_mod_n, secp_scalar_neg_mod_n};
+
+    fn native_affine(k_be: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+        let (x, y) = SecpPoint::generator_mul_ct(k_be).to_affine().unwrap();
+        (le(&x.normalize().0), le(&y.normalize().0))
+    }
+
+    #[test]
+    fn taproot_tweak_matches_native_for_both_parities_and_the_exceptional_cases() {
+        let mut rng = Rng(14);
+        let mut parities = [0usize; 2];
+        let mut cases: Vec<([u8; 32], [u8; 32], bool)> = Vec::new();
+        for _ in 0..4 {
+            let mut d = rng.bytes();
+            let mut t = rng.bytes();
+            d[31] &= 0x7f;
+            t[31] &= 0x7f;
+            cases.push((d, t, true));
+        }
+        // lift_x(P) = [t] G (a doubling) and lift_x(P) = -[t] G (the identity).
+        let d = cases[0].0;
+        let odd = native_affine(&be(&d)).1[0] & 1 == 1;
+        let lifted_be = if odd {
+            secp_scalar_neg_mod_n(&be(&d))
+        } else {
+            be(&d)
+        };
+        cases.push((d, be(&lifted_be), true));
+        cases.push((d, be(&secp_scalar_neg_mod_n(&lifted_be)), false));
+        cases.push((d, [0; 32], false));
+
+        for (d, t, satisfiable) in cases {
+            let (px, py) = native_affine(&be(&d));
+            let odd = py[0] & 1 == 1;
+            parities[odd as usize] += 1;
+            let lifted = if odd {
+                secp_scalar_neg_mod_n(&be(&d))
+            } else {
+                be(&d)
+            };
+            let q_scalar = secp_scalar_add_mod_n(&lifted, &be(&t));
+
+            let mut cs = ConstraintSystem::new();
+            let d_bits = bit_vars(&mut cs, &d);
+            let t_bits = bit_vars(&mut cs, &t);
+            let internal = secp256k1_fixed_base_mul(&mut cs, &d_bits);
+            assert_eq!(eval_bytes(&cs, &internal.x.bytes_le), px);
+            let q = secp256k1_taproot_tweak(&mut cs, &internal, &t_bits);
+            let qx = secp256k1_taproot_tweak_x_only(&mut cs, &internal, &t_bits);
+            if satisfiable {
+                let want = SecpPoint::generator_mul_ct(&q_scalar)
+                    .to_compressed_bytes()
+                    .unwrap();
+                assert_eq!(eval_bytes(&cs, &q.x_only_bytes()), want[1..]);
+                assert_eq!(cs.eval(&q.y_is_odd()).to_canonical_u64() as u8, want[0] & 1);
+                let mut x_only = eval_bytes(&cs, &qx.bytes_le);
+                x_only.reverse();
+                assert_eq!(x_only, want[1..]);
+            }
+            let out = var_of(&q.x.bits_le[1]);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), satisfiable);
+            if satisfiable {
+                let mut bad = z.clone();
+                bad[out] = F::ONE - bad[out];
+                assert!(!shape.is_satisfied(&bad));
+            }
+        }
+        assert!(
+            parities[0] > 0 && parities[1] > 0,
+            "both parities of P must occur"
+        );
+    }
+
+    #[test]
+    fn add_fixed_base_matches_native_and_alloc_point_rejects_points_off_the_curve() {
+        let mut rng = Rng(15);
+        let mut k = rng.bytes();
+        k[31] &= 0x7f;
+        let mut i = rng.bytes();
+        i[31] &= 0x7f;
+        let minus_k = be(&secp_scalar_neg_mod_n(&be(&k)));
+        for (step, satisfiable) in [(i, true), (k, true), (minus_k, false), ([0; 32], false)] {
+            let (px, py) = native_affine(&be(&k));
+            let mut cs = ConstraintSystem::new();
+            let parent = secp256k1_alloc_point(&mut cs, &px, &py);
+            let bits = bit_vars(&mut cs, &step);
+            let child = secp256k1_add_fixed_base(&mut cs, &parent, &bits);
+            if satisfiable {
+                let sum = secp_scalar_add_mod_n(&be(&k), &be(&step));
+                let want = SecpPoint::generator_mul_ct(&sum)
+                    .to_compressed_bytes()
+                    .unwrap();
+                assert_eq!(eval_bytes(&cs, &child.compressed_bytes()), want);
+            }
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), satisfiable);
+        }
+
+        let (px, py) = native_affine(&be(&k));
+        let mut off = py;
+        off[0] ^= 1;
+        let mut swapped = px;
+        swapped[3] ^= 0x10;
+        for (x, y, ok) in [
+            (px, py, true),
+            (px, off, false),
+            (swapped, py, false),
+            (py, px, false),
+        ] {
+            let mut cs = ConstraintSystem::new();
+            let _ = secp256k1_alloc_point(&mut cs, &x, &y);
+            let (shape, z) = cs.finish();
+            assert_eq!(shape.is_satisfied(&z), ok);
+        }
+    }
+
+    #[test]
+    fn ed25519_add_fixed_base_matches_native_including_doubling() {
+        let mut rng = Rng(16);
+        let mut a = rng.bytes();
+        a[31] &= 0x03;
+        // BIP32-Ed25519 shape: the step is 8 Z_L for a 224-bit Z_L.
+        let mut step = rng.bytes();
+        step[0] &= 0xf8;
+        step[28] &= 0x07;
+        step[29..].fill(0);
+        for b in [step, a] {
+            let sum = u256_add(&u256_from_bytes(&a), &u256_from_bytes(&b)).0;
+            let want = public_key_from_clamped_scalar(&le(&sum));
+            let mut cs = ConstraintSystem::new();
+            let (a_bits, b_bits) = (bit_vars(&mut cs, &a), bit_vars(&mut cs, &b));
+            let parent = ed25519_fixed_base_mul(&mut cs, &a_bits);
+            let child = ed25519_add_fixed_base(&mut cs, &parent, &b_bits);
+            assert_eq!(eval_bytes(&cs, &child.encoding_bytes()), want);
+            let out = var_of(&child.x_is_odd);
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            let mut bad = z.clone();
+            bad[out] = F::ONE - bad[out];
+            assert!(!shape.is_satisfied(&bad));
+        }
+        // a + (l - a) is the identity.
+        let minus_a = u256_sub(&ED_L, &u256_from_bytes(&a)).0;
+        let mut cs = ConstraintSystem::new();
+        let (a_bits, b_bits) = (bit_vars(&mut cs, &a), bit_vars(&mut cs, &le(&minus_a)));
+        let parent = ed25519_fixed_base_mul(&mut cs, &a_bits);
+        let _ = ed25519_add_fixed_base(&mut cs, &parent, &b_bits);
+        let (shape, z) = cs.finish();
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn integer_bits_is_an_exact_sum_and_rejects_overflow_and_forged_carries() {
+        let mut rng = Rng(17);
+        let (a, b) = (rng.bytes(), [0xff; 32]);
+        let build = |width: usize| {
+            let mut cs = ConstraintSystem::new();
+            let (a_bits, b_bits) = (bit_vars(&mut cs, &a), bit_vars(&mut cs, &b));
+            // a + 8 b, the shape of k_L + 8 Z_L.
+            let sum = Lazy::from_bits(&a_bits).add(&Lazy::from_bits(&b_bits).scale(8));
+            let mut metered = Metered::new(&mut cs, Options::default());
+            let out = integer_bits(&mut metered, &sum, width);
+            let hints = metered.hints;
+            let value = eval_bytes(&cs, &out.bytes_le);
+            let limb = var_of(&out.bytes_le[5]);
+            let (shape, z) = cs.finish();
+            (shape, z, value, limb, hints)
+        };
+        let (shape, z, value, limb, hints) = build(260);
+        assert!(shape.is_satisfied(&z));
+        let (lo, carry) = u256_add(&u256_from_bytes(&a), &[!7, u64::MAX, u64::MAX, u64::MAX]);
+        // 8 * (2^256 - 1) = 2^259 - 8: low 256 bits are 2^256 - 8, plus 7 * 2^256.
+        assert_eq!(value[..32], le(&lo));
+        assert_eq!(value[32] as u64, 7 + carry);
+        assert!(hints.carries > 0 && hints.quotients == 0);
+        // Limb moved by one, with the neighbour compensating: only range rows object.
+        let mut bad = z.clone();
+        bad[limb] += F::from_u64_reduced(256);
+        bad[limb + 8] -= F::ONE;
+        let (range, other) = violated_rows(&shape, &bad);
+        assert!(
+            range >= 2 && other == 0,
+            "{range} range rows, {other} others"
+        );
+        // A changed limb alone breaks the chain.
+        let mut bad = z.clone();
+        bad[limb] += F::ONE;
+        assert!(!shape.is_satisfied(&bad));
+        // Too narrow an output cannot hold the sum.
+        let (shape, z, ..) = build(256);
+        assert!(!shape.is_satisfied(&z));
+    }
+
+    #[test]
+    fn hint_counts_and_product_only_comparisons() {
+        let k = secp_scalars()[11];
+        let build = |options: Options| {
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &le(&k));
+            let mut metered = Metered::new(&mut cs, options);
+            secp256k1_enforce_scalar_range(&mut metered, &bits);
+            let pk = secp256k1_fixed_base_mul(&mut metered, &bits);
+            let hints = metered.hints;
+            let bytes = eval_bytes(&cs, &pk.compressed_bytes());
+            let rows = cs.num_rows();
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            (hints, bytes, rows, shape.num_vars)
+        };
+        let (plain, bytes, rows, vars) = build(Options::default());
+        let (strict, strict_bytes, strict_rows, _) = build(Options {
+            product_only_comparisons: true,
+        });
+        assert_eq!(bytes, strict_bytes);
+        // 24 windows: 23 additions with a slope and an x each, plus the final y.
+        assert_eq!((plain.elements, plain.divisions), (47, 23));
+        assert_eq!(plain.element_bits, 47 * 256);
+        // Two reductions per addition, the tangent equation, the final y.
+        assert_eq!(plain.quotients, 48);
+        assert!(plain.zero_tests > 0);
+        assert_eq!(strict.zero_tests, 0);
+        assert_eq!(
+            (strict.elements, strict.quotient_bits, strict.carry_bits),
+            (plain.elements, plain.quotient_bits, plain.carry_bits)
+        );
+        assert!(strict_rows > rows && strict_rows * 2 < rows * 3);
+        // Every variable that is not a hint is a product or a linear image of products.
+        assert!(plain.variables() < vars);
+        println!("secp256k1 mul + range: {plain:?}; product-only rows {strict_rows} vs {rows}");
+    }
+
+    #[test]
+    #[ignore = "measurement"]
+    fn row_census() {
+        let mut rng = Rng(10);
+        let report = |name: &str, build: &dyn Fn(&mut ConstraintSystem)| {
+            let mut cs = ConstraintSystem::new();
+            let start = std::time::Instant::now();
+            build(&mut cs);
+            let synthesis = start.elapsed();
+            let rows = cs.num_rows();
+            let (shape, z) = cs.finish();
+            assert!(shape.is_satisfied(&z));
+            println!(
+                "{name}: rows={rows} vars={} nnz={} synthesis={synthesis:?}",
+                shape.num_vars,
+                shape.a.nnz() + shape.b.nnz() + shape.c.nnz(),
+            );
+        };
+        let (a, b) = (rng.bytes(), rng.bytes());
+        let k = rng.bytes();
+        let m = Modulus::secp256k1_base();
+        let operands = |cs: &mut ConstraintSystem| {
+            // Operand allocation, subtracted below.
+            (m.alloc(cs, &a), m.alloc(cs, &b))
+        };
+        report("two operand allocations (overhead)", &|cs| {
+            let _ = operands(cs);
+        });
+        report("non-native mul incl. operand allocations", &|cs| {
+            let (ea, eb) = operands(cs);
+            let _ = m.mul(cs, &ea.lazy(), &eb.lazy());
+        });
+        let affine = |s: u64| {
+            let (x, y) = SecpPoint::generator_mul_ct(&be(&le(&[s, 0, 0, 0])))
+                .to_affine()
+                .unwrap();
+            (le(&x.normalize().0), le(&y.normalize().0))
+        };
+        let (p, q) = (affine(5), affine(11));
+        report("four coordinate allocations (overhead)", &|cs| {
+            for v in [&p.0, &p.1, &q.0, &q.1] {
+                let _ = m.alloc(cs, v);
+            }
+        });
+        report(
+            "complete point addition incl. coordinate allocations",
+            &|cs| {
+                let pa = AffinePoint {
+                    x: m.alloc(cs, &p.0).lazy(),
+                    y: m.alloc(cs, &p.1).lazy(),
+                };
+                let pb = AffinePoint {
+                    x: m.alloc(cs, &q.0).lazy(),
+                    y: m.alloc(cs, &q.1).lazy(),
+                };
+                let _ = secp256k1_point_add(cs, &pa, &pb);
+            },
+        );
+        report("256 scalar bits (overhead)", &|cs| {
+            let _ = bit_vars(cs, &k);
+        });
+        report(
+            "secp256k1 fixed-base mul, x and y, incl. scalar bits",
+            &|cs| {
+                let bits = bit_vars(cs, &k);
+                let _ = secp256k1_fixed_base_mul(cs, &bits);
+            },
+        );
+        report(
+            "secp256k1 fixed-base mul, x only, incl. scalar bits",
+            &|cs| {
+                let bits = bit_vars(cs, &k);
+                let _ = secp256k1_fixed_base_mul_x_only(cs, &bits);
+            },
+        );
+        report("ed25519 fixed-base mul incl. scalar bits", &|cs| {
+            let bits = ed25519_clamp(&bit_vars(cs, &k));
+            let _ = ed25519_fixed_base_mul(cs, &bits);
+        });
+        report("255 scalar bits (overhead)", &|cs| {
+            let _ = bits255(cs, &u256_from_bytes(&k));
+        });
+        report("bls12-381 g1 fixed-base mul incl. scalar bits", &|cs| {
+            let mut scalar = u256_from_bytes(&k);
+            scalar[3] &= (1 << 62) - 1;
+            let bits = bits255(cs, &scalar);
+            let _ = bls12_381_g1_fixed_base_mul(cs, &bits);
+        });
+        let (px, py) = native_affine(&be(&[9; 32]));
+        report("secp256k1 alloc_point (curve membership)", &|cs| {
+            let _ = secp256k1_alloc_point(cs, &px, &py);
+        });
+        report(
+            "secp256k1 add_fixed_base incl. alloc_point and scalar bits",
+            &|cs| {
+                let parent = secp256k1_alloc_point(cs, &px, &py);
+                let bits = bit_vars(cs, &k);
+                let _ = secp256k1_add_fixed_base(cs, &parent, &bits);
+            },
+        );
+        report(
+            "secp256k1 taproot_tweak incl. alloc_point and tweak bits",
+            &|cs| {
+                let internal = secp256k1_alloc_point(cs, &px, &py);
+                let bits = bit_vars(cs, &k);
+                let _ = secp256k1_taproot_tweak(cs, &internal, &bits);
+            },
+        );
+        report(
+            "secp256k1 taproot_tweak_x_only incl. alloc_point and tweak bits",
+            &|cs| {
+                let internal = secp256k1_alloc_point(cs, &px, &py);
+                let bits = bit_vars(cs, &k);
+                let _ = secp256k1_taproot_tweak_x_only(cs, &internal, &bits);
+            },
+        );
+        report(
+            "ed25519 parent mul + add_fixed_base incl. 512 scalar bits",
+            &|cs| {
+                let a = ed25519_clamp(&bit_vars(cs, &k));
+                let b = ed25519_clamp(&bit_vars(cs, &k));
+                let parent = ed25519_fixed_base_mul(cs, &a);
+                let _ = ed25519_add_fixed_base(cs, &parent, &b);
+            },
+        );
+        let hints = |name: &str, build: &dyn Fn(&mut Metered)| {
+            let mut cs = ConstraintSystem::new();
+            let mut metered = Metered::new(&mut cs, Options::default());
+            build(&mut metered);
+            let hints = metered.hints;
+            let rows = cs.num_rows();
+            let bit_rows = hints.element_bits + hints.quotient_bits + hints.carry_bits;
+            println!(
+                "hints {name}: {hints:?}; with a range row type: {} rows + {} lookups (now {rows} rows)",
+                rows - bit_rows,
+                hints.range_lookups,
+            );
+        };
+        hints("non-native mul", &|m| {
+            let (ea, eb) = (
+                Modulus::secp256k1_base().alloc(m, &a),
+                Modulus::secp256k1_base().alloc(m, &b),
+            );
+            let before = m.hints;
+            let _ = Modulus::secp256k1_base().mul(m, &ea.lazy(), &eb.lazy());
+            m.hints.elements -= before.elements;
+            m.hints.element_bits -= before.element_bits;
+        });
+        hints("secp256k1 fixed-base mul", &|m| {
+            let bits = bit_vars(m.cs, &k);
+            let _ = secp256k1_fixed_base_mul(m, &bits);
+        });
+        hints("ed25519 fixed-base mul", &|m| {
+            let bits = bit_vars(m.cs, &k);
+            let _ = ed25519_fixed_base_mul(m, &ed25519_clamp(&bits));
+        });
+        hints("bls12-381 g1 fixed-base mul", &|m| {
+            let mut scalar = u256_from_bytes(&k);
+            scalar[3] &= (1 << 62) - 1;
+            let bits = bits255(m.cs, &scalar);
+            let _ = bls12_381_g1_fixed_base_mul(m, &bits);
+        });
+        hints("secp256k1 taproot_tweak", &|m| {
+            let internal = secp256k1_alloc_point(m, &px, &py);
+            let before = m.hints;
+            let bits = bit_vars(m.cs, &k);
+            let _ = secp256k1_taproot_tweak(m, &internal, &bits);
+            m.hints.elements -= before.elements;
+            m.hints.element_bits -= before.element_bits;
+            m.hints.quotients -= before.quotients;
+        });
+
+        let start = std::time::Instant::now();
+        let fresh = Curve::secp256k1();
+        println!(
+            "secp256k1 window tables: {} points, built in {:?}",
+            fresh.windows.iter().map(|w| w.points.len()).sum::<usize>(),
+            start.elapsed()
+        );
+        with_secp256k1(|curve| {
+            let mut cs = ConstraintSystem::new();
+            let bits = bit_vars(&mut cs, &k);
+            let before = cs.num_rows();
+            let table = &curve.windows[1];
+            let _ = window_point(
+                &mut ctx(&mut cs),
+                table,
+                &bits[table.lo..table.lo + table.width],
+            );
+            println!(
+                "one 11-bit signed window lookup: rows={}",
+                cs.num_rows() - before
+            );
+        });
+    }
+}
