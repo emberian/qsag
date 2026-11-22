@@ -1,60 +1,35 @@
-//! Concrete security accounting for committed-mask zk-Hem ([`super::protocol`]) over the Hem
-//! WHIR commitment ([`crate::pcs`]): the round-by-round (RBR) soundness error of every
-//! verifier round as implemented, its composition through the BCS transformation in the ROM
-//! and the QROM, the zero-knowledge accounting, and a proof-size model. `crates/qsag-agg/SECURITY.md`
-//! states the theorems; this module computes their numbers.
+//! Concrete security accounting for the public Hem WHIR commitment ([`crate::pcs`]) and shared
+//! integer-logarithm / Reed-Solomon proximity helpers used by [`super::v2::bounds`].
 //!
 //! All quantities are integers. An error `eps` is carried as a lower bound on `-log2(eps)`
 //! in thousandths of a bit ([`MilliBits`]); logarithms round against the claim.
 //!
-//! Sources (file names in `/Users/ember/paperbin`), with what each one proves:
-//!
-//! * `[CWYZ26]` `2026-affine-combiners-reed-solomon-proximity-gaps-2611.15128`: Theorem 4.10
-//!   (finite form of the affine-combiner MCA bound with one coordinate of agreement loss) and
-//!   Theorem 5.1 with its linear-claim guarantee (5.5). Proven, every field and domain.
-//! * `[BCGM25]` `bordage-chiesa-guan-manzur-all-polynomial-generators-MCA-2025-2051`:
-//!   Lemma 9.3, mutual correlated agreement of the powers generator `(1, x, .., x^d)` for
-//!   Reed-Solomon codes up to the Johnson bound, error
-//!   `(m + 1/2)^7 d n^2 / (3 rho^(3/2) |F|)`. Proven.
-//! * `[ACFY24b]` `whir`: Theorem 5.2, the shape of the RBR errors (fold, out-of-domain,
-//!   shift, final). Proven for WHIR as specified there; applying it to the affine fold of
-//!   this crate is this project's argument (SECURITY.md, section 2.1).
-//! * `[CDHZ25]` `2025-cdhz-pq-snrdx-bcs-2025-2166`: Theorem 6.9 (RBR soundness implies
-//!   post-quantum state-restoration soundness with error
-//!   `80 (t + k + 1)(w + k) eps_rbr + (t + k + 1) k / 2^r_min`), Theorem 8.3 (Merkle
-//!   commitments, `O(t^3 / 2^sigma)`) and Theorem A.1 / 11.3 (their composition). Proven.
-//!
-//! What is this project's own argument and not a cited theorem: the per-round application of
-//! `[CWYZ26]` Theorem 5.1 to domain-halving folds (one fiber of agreement lost per fold), the
-//! state function of the composed protocol, and the simulator of SECURITY.md section 4.
+//! Note: the quartic `zk-Hem v1` hiding wrapper (`81`-bit QROM digest ceiling, `128`-bit leaf
+//! salts) has been retired in favor of quintic `zk-Hem v2` ([`super::v2::bounds`], `400`-bit
+//! digests, `256`-bit salts + `32`-byte per-tree nonces, and DKT26 Theorem 5.12). Only the
+//! non-hiding public WHIR opening report ([`pcs_report`]) and shared schedule bounds remain here.
 
 use alloc::vec::Vec;
 
-use super::protocol::{COL_DEGREE, COL_MASK_BITS, COMPANIONS, ROW_DEGREE, ROW_MASK_BITS};
+use super::protocol::{ROW_DEGREE, ROW_MASK_BITS};
 use crate::pcs::{MAX_PCS_NUM_VARS, WhirSecurityRegime};
 
 /// A lower bound on `-log2` of a probability, in thousandths of a bit.
 pub type MilliBits = i64;
 
-/// `floor(1000 log2 |F_{p^4} \ F_{p^2}|) - 1`: every challenge set used by the protocol (the
-/// field, its nonzero elements, the elements outside the quadratic subfield) has at least
-/// `2^255.998` elements.
+/// `floor(1000 log2 |F_{p^4} \ F_{p^2}|) - 1`: every challenge set used by public Hem WHIR
+/// over `GoldilocksExt4` has at least `2^255.998` elements.
 pub const CHALLENGE_SET_MILLIBITS: MilliBits = 255_998;
 
 /// Cap on `folds * (l + 2 l0 + 1) + 1` per stage, the list budget the finite witnesses of
 /// `pcs/affine_schedule.rs` certify.
 pub const STAGE_LIST_CAP: u128 = 2000;
 
-/// Committed tables: the assignment table and its companions.
-const TABLES: usize = 1 + COMPANIONS;
-
 /// `log2(320)` rounded up: the constant `4 * 80` of `[CDHZ25]` Theorems A.1 and 6.9.
 const QROM_RBR_CONST: MilliBits = 8_322;
 /// `log2(6380)` rounded up. `8 * 160 * 4 + 4 * 240 = 6080` is the leading `t^3 / 2^sigma`
 /// coefficient of `8 kappa_offline(2t + 1) + 4 kappa_online(t)` in `[CDHZ25]` Theorems 11.3
-/// and 8.3; `300 >= 40 e^2` bounds collisions in the 256-bit transcript chain
-/// (`2020-cfhl-compressed-oracle-technique-pq-proofs-sequential-work-2010.11658`,
-/// Theorem 5.29 with `k = 1`).
+/// and 8.3; `300 >= 40 e^2` bounds collisions in the 256-bit transcript chain.
 const QROM_MERKLE_CONST: MilliBits = 12_640;
 /// Slack for `(t + k + 1)(t + k) <= t^2 (1 + 2^-7)^2` and for the verifier's own
 /// `q_V + k <= 2^15` queries inside `kappa_online`, when `t >= 2^24`.
@@ -65,7 +40,6 @@ pub fn log2_lo(x: u128) -> MilliBits {
     assert!(x > 0);
     let lz = x.leading_zeros();
     let exponent = (127 - lz) as i64;
-    // Top 64 bits, truncated: `y / 2^63` is in `[1, 2)` and at most the true mantissa.
     let mut y = (x << lz) >> 64;
     let mut frac = 0i64;
     for bit in (0..24).rev() {
@@ -90,7 +64,6 @@ pub fn log2_hi(x: u128) -> MilliBits {
 /// An upper bound on `1000 log2(1 + 2^(-d / 1000))` for `d >= 0`: `log2(1 + x) <= x / ln 2`
 /// with `x` rounded up to the next eighth of a bit, and never more than one bit.
 pub(crate) fn log2_one_plus(d: MilliBits) -> MilliBits {
-    // `ceil(1000 * 2^(-k / 8))`.
     const EIGHTHS: [i64; 8] = [1000, 918, 841, 772, 708, 649, 595, 546];
     assert!(d >= 0);
     let steps = d / 125;
@@ -98,7 +71,6 @@ pub(crate) fn log2_one_plus(d: MilliBits) -> MilliBits {
     if shift >= 40 {
         return 1;
     }
-    // `1443 >= 1000 / ln 2`.
     (((1443 * EIGHTHS[(steps % 8) as usize] + 999) / 1000) >> shift).min(999) + 1
 }
 
@@ -114,7 +86,6 @@ pub fn query_bits(n: u128, agreement: u128, queries: usize) -> Option<MilliBits>
         return None;
     }
     assert!(agreement <= n);
-    // Normalized dyadic product; every division rounds up (`pcs/affine_schedule.rs`).
     let mut mantissa = 1u128 << 64;
     let mut exponent = 0i64;
     for i in 0..queries as u128 {
@@ -168,8 +139,6 @@ pub fn interpolation_holds(n: u128, d: u128, a: u128, m: u128, big_d: u128) -> O
 /// The smallest `D` found for which (4.5) holds at multiplicity `m`, with its `M`.
 fn interpolation_witness(n: u128, d: u128, a: u128, m: u128) -> Option<(u128, u128)> {
     let margin = |big_d: u128| interpolation_margin(n, d, a, m, big_d).map_or(i128::MIN, |v| v.1);
-    // The margin rises and then falls in `D` ((4.1) puts the useful range below
-    // `(m + 1/2)^2 / (3 rho)`): locate its peak, then the first `D` left of it that qualifies.
     let (mut lo, mut hi) = (
         1u128,
         ((2 * m + 1) * (2 * m + 1) * n).div_ceil(12 * d).max(2),
@@ -210,7 +179,6 @@ pub fn affine_fold_numerator(n: u128, d: u128, a: u128) -> Option<u128> {
     let mut m = 1u128;
     while m <= 256 {
         if let Some((big_d, big_m)) = interpolation_witness(n, d, a, m) {
-            // Second term of (4.13) with `A - B = 1`: `(D^2 + 4 d^2 M^2 D^3) n^2 < |F|`.
             let nonpersistent = (2 * log2_hi(big_d))
                 .max(2000 + 2 * log2_hi(d) + 2 * log2_hi(big_m) + 3 * log2_hi(big_d))
                 + 1000
@@ -224,45 +192,29 @@ pub fn affine_fold_numerator(n: u128, d: u128, a: u128) -> Option<u128> {
     None
 }
 
-/// How the five committed tables enter the opened word.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Blend {
-    /// `U = Z + beta C_0 + .. + beta^4 C_3`, as implemented by [`super::protocol::prove`].
-    ScalarPowers,
-    /// `U = sum_i (a_i + b_i X) W_i` with the weights of `pcs::affine::cascade_weights`, four
-    /// applications of `[CWYZ26]` Theorem 5.1. Not implemented for the hiding protocol: its
-    /// blended word reveals one `Ext4`-valued functional of `Z` and needs four more blinding
-    /// cells and its own simulation lemma (SECURITY.md, section 6, R4).
-    AffineCascade,
-    /// No blend: the opening of a single public table (non-hiding Hem).
-    Public,
-}
-
-/// Parameters that are not part of [`WhirSecurityRegime`].
+/// Parameters for a single-table public WHIR opening report that are not part of
+/// [`WhirSecurityRegime`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Params {
     /// Length of Merkle digests and of the Fiat-Shamir chaining value.
     pub digest_bits: u32,
     /// Length of the per-leaf Stage-0 salt.
     pub salt_bits: u32,
-    pub blend: Blend,
-    /// Grinding bits in front of the challenges that have none today: sumcheck, batching,
-    /// blend, out-of-domain and kernel-fold challenges.
+    /// Grinding bits in front of algebraic challenges.
     pub algebraic_pow_bits: u32,
 }
 
 impl Params {
-    /// The protocol as implemented.
-    pub const IMPLEMENTED: Self = Self {
+    /// Default parameters of a public `CanopyCommitment` opening.
+    pub const PUBLIC: Self = Self {
         digest_bits: 256,
         salt_bits: 128,
-        blend: Blend::ScalarPowers,
         algebraic_pow_bits: 0,
     };
 }
 
-/// Size of a relation: [`super::relation::Shape::log_rows`], `log2` of the variable subcube
-/// and the number of public inputs.
+/// Size of a public relation: [`super::relation::Shape::log_rows`], `log2` of the variable
+/// subcube and the number of public inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeSize {
     pub log_rows: usize,
@@ -270,49 +222,13 @@ pub struct ShapeSize {
     pub num_public: usize,
 }
 
-/// `(log_cells, blind_cells)` of [`super::protocol::Layout::new`].
-pub fn zk_layout(regime: WhirSecurityRegime, size: ShapeSize) -> Option<(usize, usize)> {
-    if !regime.is_accepted_aggregate_profile()
-        || !(1..usize::BITS as usize).contains(&size.log_rows)
-        || !(1..MAX_PCS_NUM_VARS).contains(&size.var_bits)
-    {
-        return None;
-    }
-    let var_cells = 1usize.checked_shl(size.var_bits as u32)?;
-    if size.num_public > var_cells.saturating_sub(1) {
-        return None;
-    }
-    let row_masks = size.log_rows.checked_mul(4 << ROW_MASK_BITS)?;
-    let col_masks = size.var_bits.checked_mul(4 << COL_MASK_BITS)?;
-    let masks = row_masks.checked_add(col_masks)?;
-    (size.var_bits + 1..=MAX_PCS_NUM_VARS).find_map(|log_cells| {
-        let cells = 1usize << log_cells;
-        let st0 = regime.schedule(log_cells).stages[0];
-        let arity = 1usize << st0.step_vars;
-        let blind = st0.num_queries.min(cells * st0.blowup / arity) * arity;
-        var_cells
-            .checked_add(masks)?
-            .checked_add(blind)
-            .is_some_and(|used| used <= cells)
-            .then_some((log_cells, blind))
-    })
-}
-
-/// A verifier round. Each is one random-oracle call of the compiled protocol.
+/// A verifier round of public Hem WHIR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Round {
-    /// Row or column sumcheck, zero-check point, mask and batching challenges.
     Sumcheck,
-    /// The blend challenge.
-    Blend,
-    /// Out-of-domain points of a stage, and the weights of the Stage-0 samples.
     OutOfDomain(usize),
-    /// Kernel fold `phi` of a stage.
     KernelFold(usize),
-    /// Affine fold `(theta, alpha, beta)` of a stage; preceded by the regime's grinding.
     AffineFold(usize),
-    /// Fiber queries of a stage together with the weights that batch the resulting shift
-    /// claims and the next stage's out-of-domain claims; preceded by the regime's grinding.
     Query(usize),
 }
 
@@ -322,26 +238,17 @@ pub struct StageBound {
     pub blowup: usize,
     pub step_vars: usize,
     pub queries: usize,
-    /// Fibers of the committed oracle (points of the fully folded word).
     pub fibers: u128,
-    /// Agreement threshold `A` in fibers used by the analysis.
     pub agreement: u128,
-    /// Johnson list bound of the committed word at that threshold.
     pub word_list: u128,
-    /// `max (l + 2 l0 + 1)` over the stage's fold levels (`[CWYZ26]` (5.5)).
     pub list: u128,
-    /// Query error before grinding; `None` when it is zero (`A + folds < queries`).
     pub query_bits: Option<MilliBits>,
-    /// Affine-fold error before grinding.
     pub fold_bits: MilliBits,
 }
 
-/// The list numerator `max (l + 2 l0 + 1)` over the fold levels of a stage at threshold `a`
-/// fibers, when every level has an interpolation witness within [`STAGE_LIST_CAP`].
 fn stage_lists(fibers: u128, blowup: u128, folds: u32, a: u128) -> Option<u128> {
     let mut worst = 0u128;
     for level in 0..folds {
-        // The output of fold `folds - level` lives on `fibers << level` points.
         let scale = 1u128 << level;
         let n = fibers * scale;
         worst = worst.max(affine_fold_numerator(n, n / blowup + 2, a * scale)?);
@@ -387,7 +294,6 @@ pub(crate) fn stage_bound(
         agreement,
         word_list: johnson_list(points, agreement << folds, points / blowup as u128 + 2)?,
         list,
-        // One fiber of agreement is lost per fold (`[CWYZ26]` agreement loss `s = 1`).
         query_bits: query_bits(
             fibers,
             agreement + u128::from(folds),
@@ -420,167 +326,32 @@ pub fn min_queries(
     Some(lo)
 }
 
-/// `[BCGM25]` Lemma 9.3 for the blend of five words on the Stage-0 domain: the smallest
-/// agreement threshold in fibers covered by proximity parameter `m`, and `-log2` of the error
-/// `(m + 1/2)^7 * 4 * n^2 / (3 * rho^(3/2) * |F_{p^4} \ F_{p^2}|)` for `beta` uniform in the
-/// primitive challenge set.
-fn scalar_blend(log_cells: usize, st0: &StageBound, m: u128) -> (u128, MilliBits) {
-    assert!((3..=4096).contains(&m));
-    assert!(st0.blowup.is_power_of_two() && st0.blowup <= 256 && log_cells <= MAX_PCS_NUM_VARS);
-    let points = (st0.blowup as u128) << log_cells;
-    let k = (1u128 << log_cells) + 2;
-    // `A / fibers >= (1 + 1/(2m)) sqrt(k / points)`, squared and cleared of denominators.
-    let covers = |a: u128| {
-        (2 * m * a) * (2 * m * a) * points
-            >= (2 * m + 1) * (2 * m + 1) * st0.fibers * st0.fibers * k
-    };
-    assert!(
-        covers(st0.fibers),
-        "scalar blend threshold exceeds Stage-0 domain"
-    );
-    let (mut lo, mut hi) = (1u128, st0.fibers);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if covers(mid) {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    // `(m + 1/2)^7 / (3 rho^(3/2)) * d * n^2` with `d = 4` and `rho >= 1 / blowup`.
-    // `CHALLENGE_SET_MILLIBITS` lower-bounds `log2 |F_{p^4} \ F_{p^2}|`, covering the
-    // `|E| / |E \ F_{p^2}|` factor from sampling `beta` via `PrimitiveChallenge`.
-    let numerator = 7 * log2_hi(2 * m + 1)
-        + 1500 * i64::from(st0.blowup.trailing_zeros())
-        + 2000
-        + 2 * log2_hi(points)
-        - log2_lo(384);
-    (lo, CHALLENGE_SET_MILLIBITS - numerator)
-}
-
-/// The largest round-by-round error of a protocol and where it occurs.
+/// The largest round-by-round error of a public WHIR opening and where it occurs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RbrBound {
-    /// `-log2` of the largest per-round error.
     pub bits: MilliBits,
     pub round: Round,
-    /// Proximity parameter `m` of `[BCGM25]` Lemma 9.3 at which the analysis is run.
-    pub blend_m: Option<u128>,
-    /// Stage-0 agreement threshold in fibers at which the analysis is run.
     pub stage0_agreement: u128,
-    /// Error of the blend round.
-    pub blend_bits: Option<MilliBits>,
 }
 
-/// Zero-knowledge accounting (SECURITY.md section 4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZkBound {
-    /// Uniform cells at the top of the assignment table.
-    pub blind_cells: usize,
-    /// Symbols of the assignment codeword opened by the Stage-0 queries.
-    pub opened_symbols: usize,
-    /// Whether the verifier's view of the interactive oracle proof is perfectly simulated:
-    /// `blind_cells >= opened_symbols`. The remaining loss is the hiding of unopened leaves
-    /// and Fiat-Shamir challenge programming.
-    pub view_perfectly_simulated: bool,
-    pub salt_bits: u32,
-    /// Stage-0 leaves per proof (`stages[0].fibers`), used to bound cross-proof salt collisions.
-    pub stage0_fibers: u128,
-    /// Programmed Fiat-Shamir challenge-derivation oracle inputs per simulated proof (including
-    /// limb-expansion squeezes), used in `M(t + M) / 2^(sigma - 1)`.
-    pub programmed_inputs_per_proof: usize,
-    /// Effective chaining-state entropy in millibits (`sigma`).
-    pub digest_millibits: MilliBits,
-}
-
-impl ZkBound {
-    /// Add the cross-proof salt-collision hybrid for `P = 2^log_proofs` proofs, each with at
-    /// most `stage0_fibers` Stage-0 leaves: `stage0_fibers * binom(P, 2) / 2^salt_bits <=
-    /// stage0_fibers * P^2 / 2^(salt_bits + 1)`.
-    fn with_salt_collisions(&self, query_bits: MilliBits, log_proofs: u32) -> MilliBits {
-        if log_proofs == 0 {
-            return query_bits; // One proof: leaf indices separate every pair of its leaves.
-        }
-        let collision_bits = 1000 * (i64::from(self.salt_bits) + 1 - 2 * i64::from(log_proofs))
-            - log2_hi(self.stage0_fibers);
-        sum_bits(query_bits, collision_bits)
-    }
-
-    /// Classical ROM unopened-leaf hiding: `-log2` of `t P / 2^salt + delta_salt` across
-    /// `2^log_proofs` proofs against `2^log_queries` hash queries.
-    pub fn classical_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        self.with_salt_collisions(
-            1000 * (i64::from(self.salt_bits) - i64::from(log_queries) - i64::from(log_proofs)),
-            log_proofs,
-        )
-    }
-
-    /// QROM unopened-leaf hiding: `2 t sqrt(P / 2^salt) + delta_salt`, by one-way to hiding
-    /// (`2018-ahu-semi-classical-oracles-o2h-2018-904`, Theorem 3).
-    pub fn quantum_hiding_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        self.with_salt_collisions(
-            500 * (i64::from(self.salt_bits) - i64::from(log_proofs))
-                - 1000 * (i64::from(log_queries) + 1),
-            log_proofs,
-        )
-    }
-
-    /// Classical programmable-ROM Fiat-Shamir programming-collision loss
-    /// `M(t + M) / 2^(sigma - 1)`, where `M = P * programmed_inputs_per_proof` counts all
-    /// programmed challenge-derivation oracle inputs across `P = 2^log_proofs` simulated proofs
-    /// (not merely `P`).
-    pub fn classical_programming_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        let log_t = 1000 * i64::from(log_queries);
-        let log_m = 1000 * i64::from(log_proofs)
-            + log2_hi(u128::try_from(self.programmed_inputs_per_proof.max(1)).unwrap());
-        sum_bits(
-            self.digest_millibits - 1000 - log_t - log_m,
-            self.digest_millibits - 1000 - 2 * log_m,
-        )
-    }
-
-    /// Combined classical ROM non-interactive zero-knowledge distance: unopened-leaf hiding
-    /// (including cross-proof salt collisions) summed with Fiat-Shamir programming collisions.
-    pub fn classical_nizk_bits(&self, log_queries: u32, log_proofs: u32) -> MilliBits {
-        sum_bits(
-            self.classical_hiding_bits(log_queries, log_proofs),
-            self.classical_programming_bits(log_queries, log_proofs),
-        )
-    }
-}
-
-/// The security bounds of one regime at one relation size.
+/// The security bounds of one regime for a public WHIR commitment opening.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecurityReport {
     pub regime: WhirSecurityRegime,
     pub params: Params,
-    /// Variables of the committed tables.
     pub log_cells: usize,
-    /// Stage bounds at the thresholds of [`Self::classical`].
     pub stages: Vec<StageBound>,
-    /// Verifier rounds `k`.
     pub rounds: usize,
-    /// Round-by-round error with grinding credited as a factor `2^-bits` on the rounds it
-    /// precedes (`2026-aborting-random-oracles-grinding-fiat-shamir-2026-016`, Corollary 3).
-    /// Used for the classical bound.
     pub classical: RbrBound,
-    /// Round-by-round error without any credit for grinding. Used for the QROM bound: no
-    /// cited theorem covers grinding against quantum queries.
     pub ungrounded: RbrBound,
-    pub zk: Option<ZkBound>,
-    /// Upper bound on the serialized proof.
     pub proof_bytes: usize,
-    /// Merkle digests in that bound (roots and authentication siblings).
     pub digests: usize,
-    /// Leaf and node hashes of the prover's Merkle trees.
     pub merkle_hashes: u128,
-    /// Expected hash evaluations spent on grinding.
     pub grinding_hashes: u128,
 }
 
 impl SecurityReport {
     fn digest_millibits(&self) -> MilliBits {
-        // Four Goldilocks limbs carry `4 log2 p > 255.999` bits.
         1000 * i64::from(self.params.digest_bits) - i64::from(self.regime.uses_poseidon2_canopy())
     }
 
@@ -591,17 +362,11 @@ impl SecurityReport {
         )
     }
 
-    /// `-log2` of the ROM knowledge-soundness error against `2^log_queries >= 4` classical
-    /// queries, `t eps_rbr + 4 t^2 / 2^sigma`: state restoration from round-by-round
-    /// soundness and `3 (t^2 + 1) / 2^sigma` from
-    /// `2016-bcs-interactive-oracle-proofs-2016-116`, Theorem 7.1 (`t >= 3`).
     pub fn classical_error_bits(&self, log_queries: u32) -> MilliBits {
         assert!(log_queries >= 2);
-        let t = 1000 * i64::from(log_queries);
-        self.classical_sum_bits(t)
+        self.classical_sum_bits(1000 * i64::from(log_queries))
     }
 
-    /// Certified classical crossover of the SUM `t eps_rbr + 4 t^2 / 2^sigma`.
     pub fn classical_work_bits(&self) -> MilliBits {
         let (mut lo, mut hi) = (
             0,
@@ -632,19 +397,11 @@ impl SecurityReport {
         self.qrom_sum_bits_with(self.ungrounded.bits, log_t)
     }
 
-    /// `-log2` of the QROM knowledge-soundness error against `2^log_queries >= 2^24` quantum
-    /// queries, by `[CDHZ25]` Theorems 11.3, 6.10 and 8.3:
-    /// `320 (t + k + 1)(t + k) eps_rbr + 6380 t^3 / 2^sigma`, where `6380 = 5120 + 960 + 300`
-    /// collects `8 kappa_offline(2t + 1)`, `4 kappa_online(t)` and collisions in the
-    /// transcript chain. Terms of lower order in `t` are below `0.02` bits.
     pub fn qrom_error_bits(&self, log_queries: u32) -> MilliBits {
         assert!(log_queries >= 24 && self.rounds < 1 << 9);
-        let t = 1000 * i64::from(log_queries);
-        self.qrom_sum_bits(t)
+        self.qrom_sum_bits(1000 * i64::from(log_queries))
     }
 
-    /// The two terms of [`Self::qrom_error_bits`] as query counts at which each becomes
-    /// vacuous alone: `(round-by-round, digest)`.
     pub fn qrom_work_terms(&self) -> (MilliBits, MilliBits) {
         (
             (self.ungrounded.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2,
@@ -652,8 +409,6 @@ impl SecurityReport {
         )
     }
 
-    /// The QROM security level proven by the cited theorems: largest millibit `log2 t`
-    /// certified by the rounded upper bound on the SUM of the round and digest terms.
     pub fn qrom_work_bits(&self) -> MilliBits {
         let (rbr, digest) = self.qrom_work_terms();
         let (mut lo, mut hi) = (24_000, rbr.min(digest));
@@ -661,29 +416,6 @@ impl SecurityReport {
         while lo < hi {
             let mid = lo + (hi - lo + 1) / 2;
             if self.qrom_sum_bits(mid) >= 0 {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    }
-
-    /// [`Self::qrom_work_bits`] with grinding credited as in the classical bound. Heuristic:
-    /// this is the accounting behind `WhirSecurityRegime::qrom_grover_round_bits`, and no
-    /// cited theorem supports it.
-    pub fn qrom_work_bits_crediting_grinding(&self) -> MilliBits {
-        let rbr_ground = (self.classical.bits - QROM_RBR_CONST - QROM_ROUND_SLACK) / 2;
-        let digest = self.qrom_work_terms().1;
-        let (mut lo, mut hi) = (24_000, rbr_ground.min(digest));
-        assert!(
-            self.rounds < 1 << 9
-                && self.qrom_sum_bits_with(self.classical.bits, lo) >= 0
-                && hi >= lo
-        );
-        while lo < hi {
-            let mid = lo + (hi - lo + 1) / 2;
-            if self.qrom_sum_bits_with(self.classical.bits, mid) >= 0 {
                 lo = mid;
             } else {
                 hi = mid - 1;
@@ -701,42 +433,7 @@ pub(crate) fn siblings(queries: usize, log_leaves: usize) -> usize {
     queries * (log_leaves - queries.ilog2() as usize)
 }
 
-/// The report for the committed-mask protocol on a relation of `size`.
-pub fn security_report(
-    regime: WhirSecurityRegime,
-    size: ShapeSize,
-    params: Params,
-) -> Option<SecurityReport> {
-    let (log_cells, blind_cells) = zk_layout(regime, size)?;
-    let front =
-        33 + 32
-            * (1 + (ROW_DEGREE + 1) * size.log_rows + 3 + 1 + (COL_DEGREE + 1) * size.var_bits + 4);
-    let mut report = pcs_report(regime, log_cells, params, Some(size))?;
-    let st0 = &report.stages[0];
-    let stage0_fibers = st0.fibers;
-    let opened_symbols = st0.queries.min(stage0_fibers as usize) << st0.step_vars;
-    let fold_vars = log_cells - regime.schedule(log_cells).early_stop_vars;
-    let ext4_challenges =
-        (2 * size.log_rows + size.var_bits + 7) + 4 + 4 * fold_vars + 5 * (report.stages.len() - 1);
-    let limb_squeezes_per_ext4 = if regime.uses_poseidon2_canopy() { 1 } else { 4 };
-    let programmed_inputs_per_proof =
-        limb_squeezes_per_ext4 * ext4_challenges + report.stages.len();
-    let digest_millibits = report.digest_millibits();
-    report.zk = Some(ZkBound {
-        blind_cells,
-        opened_symbols,
-        view_perfectly_simulated: blind_cells >= opened_symbols,
-        salt_bits: params.salt_bits,
-        stage0_fibers,
-        programmed_inputs_per_proof,
-        digest_millibits,
-    });
-    report.proof_bytes += front;
-    Some(report)
-}
-
-/// The report for an opening of a `log_cells`-variable commitment. With `size`, the rounds of
-/// the committed-mask protocol in front of the opening are included.
+/// The report for a public opening of a `log_cells`-variable commitment.
 pub fn pcs_report(
     regime: WhirSecurityRegime,
     log_cells: usize,
@@ -754,14 +451,8 @@ pub fn pcs_report(
         return None;
     }
     let schedule = regime.schedule(log_cells);
-    let tables = if params.blend == Blend::Public {
-        1
-    } else {
-        TABLES
-    };
-
     let mut rem = log_cells;
-    let base: Vec<StageBound> = schedule
+    let stages: Vec<StageBound> = schedule
         .stages
         .iter()
         .map(|spec| {
@@ -769,27 +460,8 @@ pub fn pcs_report(
             stage_bound(spec.blowup, spec.step_vars, spec.num_queries, rem, None)
         })
         .collect::<Option<_>>()?;
-    // The same stages with a larger Stage-0 agreement threshold.
-    let with_stage0 = |agreement: u128| -> Option<Vec<StageBound>> {
-        let spec = schedule.stages[0];
-        let mut stages = base.clone();
-        stages[0] = stage_bound(
-            spec.blowup,
-            spec.step_vars,
-            spec.num_queries,
-            log_cells - spec.step_vars,
-            Some(agreement),
-        )?;
-        Some(stages)
-    };
 
-    // The largest round error, with `pow` bits credited to the rounds the regime grinds and
-    // `algebraic` bits to the others.
-    let evaluate = |stages: &[StageBound],
-                    blend: Option<MilliBits>,
-                    pow: MilliBits,
-                    algebraic: MilliBits|
-     -> (MilliBits, Round) {
+    let evaluate = |pow: MilliBits, algebraic: MilliBits| -> RbrBound {
         let mut worst = (MilliBits::MAX, Round::Sumcheck);
         let mut note = |bits: MilliBits, round: Round| {
             if bits < worst.0 {
@@ -797,11 +469,6 @@ pub fn pcs_report(
             }
         };
         if let Some(size) = size {
-            // Zero-check point, mask challenges, sumcheck rounds, row-value and claim batching:
-            // one polynomial identity of at most this degree per member of the Stage-0 list. A
-            // committed row-mask block is any univariate of degree below `2^ROW_MASK_BITS`: the
-            // verifier does not check that its coefficients above `ROW_DEGREE` are zero.
-            // `CHALLENGE_SET_MILLIBITS` covers the nonzero `rho1, rho2` denominator `|E| - 1`.
             let degree = size
                 .log_rows
                 .max(ROW_DEGREE)
@@ -812,13 +479,8 @@ pub fn pcs_report(
                 Round::Sumcheck,
             );
         }
-        if let Some(bits) = blend {
-            note(bits + algebraic, Round::Blend);
-        }
         let mut rem = log_cells;
         for (i, st) in stages.iter().enumerate() {
-            // Two points: two of the `l` list members agree on both with probability at most
-            // `(l^2 / 2) (deg / |F|)^2`. Stage 0 also draws its two weights here.
             let degree = (1u128 << rem) + 2;
             let mut ood =
                 2 * (CHALLENGE_SET_MILLIBITS - log2_hi(degree)) + 1000 - 2 * log2_hi(st.word_list);
@@ -831,8 +493,6 @@ pub fn pcs_report(
                 Round::KernelFold(i),
             );
             note(st.fold_bits + pow, Round::AffineFold(i));
-            // Queries and, in the same round, the weights batching `queries + 2` claims on
-            // the next oracle: one linear identity per member of its list.
             let batch = stages.get(i + 1).map_or(MilliBits::MAX, |next| {
                 CHALLENGE_SET_MILLIBITS - log2_hi((st.queries as u128 + 2) * next.word_list) - 1000
             });
@@ -842,68 +502,21 @@ pub fn pcs_report(
             }
             rem -= st.step_vars;
         }
-        worst
-    };
-
-    // The analysis may use any Stage-0 agreement threshold at or above the smallest one with
-    // an interpolation witness. A larger threshold lowers the blend error of `[BCGM25]` and
-    // raises the query error: take the best for each objective.
-    let optimise = |pow: MilliBits, algebraic: MilliBits| -> Option<(RbrBound, Vec<StageBound>)> {
-        let finish = |stages: Vec<StageBound>, m: Option<u128>, blend: Option<MilliBits>| {
-            let (bits, round) = evaluate(&stages, blend, pow, algebraic);
-            let bound = RbrBound {
-                bits,
-                round,
-                blend_m: m,
-                stage0_agreement: stages[0].agreement,
-                blend_bits: blend,
-            };
-            (bound, stages)
-        };
-        match params.blend {
-            Blend::Public => Some(finish(base.clone(), None, None)),
-            Blend::AffineCascade => {
-                let blend = CHALLENGE_SET_MILLIBITS - log2_hi(4 * base[0].list);
-                Some(finish(base.clone(), None, Some(blend)))
-            }
-            Blend::ScalarPowers => {
-                let mut best: Option<(RbrBound, Vec<StageBound>)> = None;
-                for m in 3..=4096u128 {
-                    let (threshold, mca) = scalar_blend(log_cells, &base[0], m);
-                    let binding = threshold > base[0].agreement;
-                    let stages = if binding {
-                        with_stage0(threshold)?
-                    } else {
-                        base.clone()
-                    };
-                    // Besides the exceptional challenges of the lemma, at most four roots of
-                    // the degree-4 claim identity per member of the list.
-                    let claim = CHALLENGE_SET_MILLIBITS - log2_hi(4 * stages[0].word_list);
-                    let candidate = finish(stages, Some(m), Some(mca.min(claim) - 1000));
-                    if best.as_ref().is_none_or(|b| candidate.0.bits > b.0.bits) {
-                        best = Some(candidate);
-                    }
-                    if !binding {
-                        break;
-                    }
-                }
-                best
-            }
+        RbrBound {
+            bits: worst.0,
+            round: worst.1,
+            stage0_agreement: stages[0].agreement,
         }
     };
     let pow = 1000 * i64::from(regime.pow_bits());
     let algebraic = 1000 * i64::from(params.algebraic_pow_bits);
-    let (classical, stages) = optimise(pow, algebraic)?;
-    let (ungrounded, _) = optimise(0, 0)?;
+    let classical = evaluate(pow, algebraic);
+    let ungrounded = evaluate(0, 0);
 
-    // Rounds, proof bytes, digests and hash counts.
     let fold_vars = log_cells - schedule.early_stop_vars;
-    // Per fold: phi, then (theta, alpha, beta). Per stage: out-of-domain points, queries.
-    // Stage 0 also has its out-of-domain weights.
     let mut rounds = 2 * fold_vars + 2 * stages.len() + 1;
     let mut algebraic_rounds = fold_vars + stages.len() + 1;
     if let Some(size) = size {
-        // tau, rho1, row rounds, combine, rho2, column rounds, lambda, beta.
         rounds += 6 + size.log_rows + size.var_bits;
         algebraic_rounds += 6 + size.log_rows + size.var_bits;
     }
@@ -921,7 +534,7 @@ pub fn pcs_report(
         merkle_hashes += 2 * st.fibers;
         proof_bytes += 4 + 4 + digest_bytes * sib;
         proof_bytes += if i == 0 {
-            opened * (params.salt_bits.div_ceil(8) as usize + tables * 8 * (1usize << st.step_vars))
+            opened * (params.salt_bits.div_ceil(8) as usize + 8 * (1usize << st.step_vars))
         } else {
             digest_bytes + 1 + 64 + 8 + opened * 32 * (1usize << st.step_vars)
         };
@@ -938,7 +551,6 @@ pub fn pcs_report(
         rounds,
         classical,
         ungrounded,
-        zk: None,
         proof_bytes,
         digests,
         merkle_hashes,
@@ -946,46 +558,9 @@ pub fn pcs_report(
     })
 }
 
-/// Smallest Stage-0 query count at which the query error of a rate-`1/blowup` stage is at
-/// most `2^-target_bits` before grinding when the analysis runs at `[BCGM25]` proximity
-/// parameter `m`, where the agreement fraction is `(1 + 1/(2m)) / sqrt(blowup)`. The fold
-/// loss and the slack of the code dimension are ignored.
-pub fn stage0_queries_for(blowup: usize, m: u128, target_bits: u32) -> usize {
-    // Bits per query: `log2(sqrt(blowup) * 2m / (2m + 1))`.
-    let per_query = 500 * i64::from(blowup.trailing_zeros()) + log2_lo(2 * m) - log2_hi(2 * m + 1);
-    (1000 * target_bits as usize).div_ceil(per_query as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::zk_hem::protocol::{Layout, prove, verify};
-    use crate::zk_hem::relation::{ConstraintSystem, Lc};
-
-    type F = crate::field::Goldilocks;
-
-    const ZK_REGIMES: [WhirSecurityRegime; 7] = [
-        WhirSecurityRegime::BciksJohnsonQrom128,
-        WhirSecurityRegime::Cdhz25JohnsonQrom128,
-        WhirSecurityRegime::Cdhz25ZeroPowQrom128,
-        WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
-        WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
-        WhirSecurityRegime::TurboShakeBciksJohnsonQrom128,
-        WhirSecurityRegime::TurboShakeCdhz25JohnsonQrom128,
-    ];
-
-    const PUBLIC: Params = Params {
-        blend: Blend::Public,
-        ..Params::IMPLEMENTED
-    };
-
-    fn square(rows: usize) -> ShapeSize {
-        ShapeSize {
-            log_rows: rows,
-            var_bits: rows,
-            num_public: 8,
-        }
-    }
 
     #[test]
     fn logarithms_bracket_the_true_value() {
@@ -999,33 +574,23 @@ mod tests {
             assert!(log2_lo(x) <= milli + 1 && log2_lo(x) >= milli - 2, "{x}");
             assert!(log2_hi(x) >= milli && log2_hi(x) <= milli + 3, "{x}");
         }
-        // `log2(7^7) = 19.6514...`, `log2(384) = 8.5849...`.
         assert_eq!(log2_lo(823_543) / 10, 1965);
         assert_eq!(log2_lo(384) / 10, 858);
-        // The constants of the QROM bound.
         assert!(log2_lo(320) < QROM_RBR_CONST && QROM_RBR_CONST <= log2_hi(320));
         assert!(log2_lo(6380) < QROM_MERKLE_CONST && QROM_MERKLE_CONST <= log2_hi(6380));
-        // Every challenge denominator used by v1 (`|E| = p^4`, nonzero `|E| - 1`, and primitive
-        // `|F_{p^4} \ F_{p^2}| = p^4 - p^2`) exceeds `2^255.998`: `p > 2^64 (1 - 2^-31)` gives
-        // `p^4 - p^2 > 2^256 (1 - 2^-28)`, and `log2(1 - 2^-28) > -0.001`.
         let p = u128::from(crate::field::GOLDILOCKS_PRIME);
         assert!(p > (1u128 << 64) - (1u128 << 33));
         assert!(p * p > (1u128 << 127));
     }
 
-    /// The query error against a direct product over a small case, and its zero case.
     #[test]
     fn query_error_matches_the_hypergeometric_product() {
-        // C(6, 3) / C(16, 3) = 20 / 560 = 1 / 28.
         let bits = query_bits(16, 6, 3).unwrap();
         assert!(bits <= log2_lo(28) && bits >= log2_lo(28) - 3, "{bits}");
         assert_eq!(query_bits(16, 2, 3), None);
         assert_eq!(query_bits(16, 16, 3), Some(0));
     }
 
-    /// Rows of `pcs/affine_schedule.rs` (`WITNESSES`, `HIGH_CAPACITY_WITNESSES`): the stored
-    /// `(A, m, D)` satisfy this module's reading of (4.5), and the searched threshold is at
-    /// most the stored one.
     #[test]
     fn finite_witnesses_of_the_schedule_are_reproduced() {
         for (nv, stage, a, m, big_d) in [
@@ -1056,37 +621,28 @@ mod tests {
                 "{nv}/{stage}: {} > {a}",
                 found.agreement
             );
-            // The stored threshold meets the regime's pure query target, so does the search.
             assert!(found.query_bits.unwrap() >= 256_000, "{nv}/{stage}");
             assert!(spec.step_vars as u128 * found.list + 1 < STAGE_LIST_CAP);
         }
-        // At the Johnson radius there is no list bound and no witness.
         assert_eq!(johnson_list(1 << 17, 65_536, 32_770), None);
         assert_eq!(affine_fold_numerator(1 << 17, 32_770, 65_537), None);
-        // (4.5) fails for a multiplicity that is too small for the slack.
         assert_eq!(interpolation_holds(1 << 17, 32_770, 65_948, 1, 2), None);
     }
 
-    /// Every stage of every QROM regime meets the constants `pcs.rs` asserts for it, at the
-    /// sizes the project commits (`2^17 .. 2^24` cells). Tag 2 does not.
     #[test]
     fn stage_bounds_against_the_constants_asserted_by_the_regimes() {
         for regime in WhirSecurityRegime::ALL {
             let mut least = MilliBits::MAX;
             for log_cells in 17..=24 {
-                let report = pcs_report(regime, log_cells, PUBLIC, None).unwrap();
+                let report = pcs_report(regime, log_cells, Params::PUBLIC, None).unwrap();
                 for st in &report.stages {
                     least = least.min(st.query_bits.unwrap());
-                    // `2000 / p^4`: more than 245 bits (`AFFINE_PROTOCOL.md`).
                     assert!(st.fold_bits > 245_000);
                 }
-                // Without grinding no round is better than a list size over the field.
                 assert!(report.ungrounded.bits <= report.classical.bits.min(249_000));
             }
             let target = 1000 * i64::from(regime.pure_query_target_bits());
             if regime == WhirSecurityRegime::BciksJohnsonClassical128 {
-                // `ceil(256 / log2 B) + 1` queries leave no room for the Johnson slack; two
-                // more per stage restore 128 bits at these sizes.
                 assert_eq!(least, 124_467);
                 let mut short = 0usize;
                 for log_cells in 17..=24 {
@@ -1104,82 +660,19 @@ mod tests {
         }
     }
 
-    /// The numbers of SECURITY.md, section 5.
     #[test]
-    fn reports_are_pinned_at_the_project_sizes() {
+    fn public_pcs_reports_are_pinned() {
         use WhirSecurityRegime as R;
-        // (regime, rows): log_cells, classical RBR and its round, RBR without grinding and
-        // its round, proof bytes.
-        let pins = [
-            (
-                (R::BciksJohnsonQrom128, 17),
-                (18, 198_919, Round::Blend, 198_919, Round::Blend, 528_380),
-            ),
-            (
-                (R::BciksJohnsonQrom128, 20),
-                (21, 192_919, Round::Blend, 192_919, Round::Blend, 896_644),
-            ),
-            (
-                (R::BciksJohnsonQrom128, 22),
-                (23, 188_919, Round::Blend, 188_919, Round::Blend, 966_957),
-            ),
-            (
-                (R::Cdhz25JohnsonQrom128, 20),
-                (21, 188_355, Round::Blend, 183_499, Round::Query(0), 716_932),
-            ),
-            (
-                (R::Cdhz25JohnsonQrom128, 22),
-                (23, 184_355, Round::Blend, 180_934, Round::Query(0), 773_101),
-            ),
-            (
-                (R::Cdhz25ZeroPowQrom128, 20),
-                (21, 186_668, Round::Blend, 186_668, Round::Blend, 764_580),
-            ),
-            (
-                (R::Poseidon2Cdhz25ZeroPowQrom128, 21),
-                (
-                    22,
-                    185_388,
-                    Round::Query(0),
-                    185_388,
-                    Round::Query(0),
-                    799_980,
-                ),
-            ),
-        ];
-        for ((regime, rows), want) in pins {
-            let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
-            let got = (
-                r.log_cells,
-                r.classical.bits,
-                r.classical.round,
-                r.ungrounded.bits,
-                r.ungrounded.round,
-                r.proof_bytes,
-            );
-            assert_eq!(got, want, "{regime:?} {rows}");
-            assert_eq!(r.classical_work_bits(), 126_999, "{regime:?} {rows}");
-            let want_qrom = if regime == R::Poseidon2Cdhz25ZeroPowQrom128
-                || (regime == R::Cdhz25JohnsonQrom128 && rows == 22)
-            {
-                81_111
-            } else {
-                81_112
-            };
-            assert_eq!(r.qrom_work_bits(), want_qrom, "{regime:?} {rows}");
-        }
-        // Small-row relation (`log_rows = 10 < 15`, `num_public = 5`): the unchecked 16-cell
-        // row-mask block sets the frontend degree to `max(10, 15, 9) = 15`, not `ROW_DEGREE = 9`.
         let small = ShapeSize {
             log_rows: 10,
             var_bits: 10,
             num_public: 5,
         };
-        let r_small = pcs_report(R::BciksJohnsonQrom128, 18, PUBLIC, Some(small)).unwrap();
+        let r_small = pcs_report(R::BciksJohnsonQrom128, 18, Params::PUBLIC, Some(small)).unwrap();
         let r_deg15 = pcs_report(
             R::BciksJohnsonQrom128,
             18,
-            PUBLIC,
+            Params::PUBLIC,
             Some(ShapeSize {
                 log_rows: 15,
                 var_bits: 10,
@@ -1188,9 +681,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r_small.classical.bits, r_deg15.classical.bits);
-        // The public opening of the default regime: every round sits at a list size over the
-        // field; the weakest is the batching of the 260 claims produced by the Stage-0 queries.
-        let public = pcs_report(R::BciksJohnsonQrom128, 21, PUBLIC, None).unwrap();
+        let public = pcs_report(R::BciksJohnsonQrom128, 21, Params::PUBLIC, None).unwrap();
         assert_eq!(
             (public.classical.bits, public.classical.round),
             (247_505, Round::KernelFold(1))
@@ -1201,436 +692,14 @@ mod tests {
         );
         assert_eq!(public.qrom_work_terms(), (115_879, 81_112));
         assert_eq!(public.qrom_work_bits(), 81_112);
-    }
 
-    /// No regime reaches the level its name or `qrom_grover_round_bits` states, for the
-    /// committed-mask protocol as implemented, at any project size.
-    #[test]
-    fn no_regime_reaches_its_nominal_level_as_implemented() {
-        use WhirSecurityRegime as R;
-        for regime in ZK_REGIMES {
-            for rows in 17..=22 {
-                let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
-                let zk = r.zk.unwrap();
-                assert!(zk.view_perfectly_simulated && zk.blind_cells == zk.opened_symbols);
-                // Classical: bound by collisions in 256-bit digests, with more than 50 bits of
-                // round-by-round margin.
-                assert_eq!(r.classical_work_bits(), 126_999);
-                assert!(
-                    (180_000..200_000).contains(&r.classical.bits),
-                    "{regime:?} {rows}"
-                );
-                // The regime's per-round figure counts queries and grinding only.
-                assert!(r.classical.bits < 1000 * i64::from(regime.classical_fs_round_bits()));
-                // QROM: the 256-bit digests bind at 81.111..81.112 bits.
-                // The round-by-round term alone is 86 to 96 bits, below the nominal 107, 108 and 136.
-                let is_poseidon2 = matches!(
-                    regime,
-                    R::Poseidon2Cdhz25JohnsonQrom128 | R::Poseidon2Cdhz25ZeroPowQrom128
-                );
-                let (rbr, digest) = r.qrom_work_terms();
-                assert_eq!(digest, 81_112);
-                let want_qrom = if is_poseidon2
-                    || (rows == 22
-                        && matches!(
-                            regime,
-                            R::Cdhz25JohnsonQrom128 | R::TurboShakeCdhz25JohnsonQrom128
-                        )) {
-                    81_111
-                } else {
-                    81_112
-                };
-                assert_eq!(r.qrom_work_bits(), want_qrom, "{regime:?} {rows}");
-                assert!((86_000..96_000).contains(&rbr), "{regime:?} {rows}: {rbr}");
-                assert!(rbr < 1000 * i64::from(regime.qrom_grover_round_bits()));
-                assert_eq!(
-                    r.qrom_work_bits_crediting_grinding(),
-                    if is_poseidon2 { 81_111 } else { 81_112 }
-                );
-                // Bounded-query profiles: at the stated cap the proven error is not `2^-128`.
-                if regime.is_bounded_query_profile() {
-                    let cap = if regime.pow_bits() == 0 { 40 } else { 38 };
-                    let bits = r.qrom_error_bits(cap);
-                    assert!(
-                        (92_000..104_000).contains(&bits),
-                        "{regime:?} {rows}: {bits}"
-                    );
-                }
-            }
-        }
-        // The public opening at the bounded-query caps, for comparison (`sum_bits`).
         let at = |regime, cap| {
-            pcs_report(regime, 21, PUBLIC, None)
+            pcs_report(regime, 21, Params::PUBLIC, None)
                 .unwrap()
                 .qrom_error_bits(cap)
         };
         assert_eq!(at(R::Cdhz25JohnsonQrom128, 38), 115_512);
         assert_eq!(at(R::Cdhz25ZeroPowQrom128, 40), 122_976);
         assert_eq!(at(R::BciksJohnsonQrom128, 40), 123_336);
-    }
-
-    /// Section 6 of SECURITY.md: what each change buys and costs, at `2^20` rows.
-    #[test]
-    fn required_changes_are_costed() {
-        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
-        let size = square(20);
-        let now = security_report(regime, size, Params::IMPLEMENTED).unwrap();
-        assert_eq!(
-            (now.proof_bytes, now.digests, now.stages[0].queries),
-            (896_644, 4_199, 258)
-        );
-
-        // 32-byte salts: 16 more bytes per opened Stage-0 leaf; hiding 2 t / 2^128.
-        let salted = Params {
-            salt_bits: 256,
-            ..Params::IMPLEMENTED
-        };
-        let r = security_report(regime, size, salted).unwrap();
-        assert_eq!(r.proof_bytes - now.proof_bytes, 16 * 258);
-        assert_eq!(now.zk.unwrap().quantum_hiding_bits(40, 0), 23_000);
-        assert_eq!(r.zk.unwrap().quantum_hiding_bits(40, 0), 87_000);
-        assert_eq!(now.zk.unwrap().classical_hiding_bits(64, 20), 43_999);
-        assert_eq!(r.zk.unwrap().classical_hiding_bits(64, 20), 171_999);
-
-        // 48-byte digests: the digest term rises from 81 to 123 bits and the blend binds.
-        let wide = Params {
-            digest_bits: 384,
-            ..Params::IMPLEMENTED
-        };
-        let r = security_report(regime, size, wide).unwrap();
-        assert_eq!(r.qrom_work_terms(), (92_287, 123_779));
-        assert_eq!(r.proof_bytes - now.proof_bytes, 16 * 4_199);
-        assert_eq!(r.merkle_hashes, now.merkle_hashes);
-        // 50-byte digests are the shortest whose term exceeds 128.
-        let wider = Params {
-            digest_bits: 400,
-            ..Params::IMPLEMENTED
-        };
-        assert_eq!(
-            security_report(regime, size, wider)
-                .unwrap()
-                .qrom_work_terms()
-                .1,
-            129_112
-        );
-
-        // An affine blend removes the `n^2` loss: 115 bits, the ceiling of the quartic field.
-        let cascade = Params {
-            blend: Blend::AffineCascade,
-            ..wide
-        };
-        let r = security_report(regime, size, cascade).unwrap();
-        assert_eq!(
-            (r.ungrounded.bits, r.ungrounded.round),
-            (240_104, Round::Query(0))
-        );
-        assert_eq!(r.qrom_work_bits(), 115_879);
-        // No parameter reaches a proven 128: every round is at least a list size over a
-        // field of `2^256` elements, and the level is half of that less the constant.
-        assert!(r.ungrounded.bits < CHALLENGE_SET_MILLIBITS && r.qrom_work_terms().0 < 128_000);
-
-        // Grinding the remaining rounds helps the classical bound only.
-        let ground = Params {
-            algebraic_pow_bits: 24,
-            ..cascade
-        };
-        let r = security_report(regime, size, ground).unwrap();
-        assert_eq!(r.qrom_work_bits(), 115_879);
-        assert_eq!(r.qrom_work_bits_crediting_grinding(), 123_379);
-        assert_eq!(r.grinding_hashes, 1_058_013_184);
-
-        // Stage-0 queries that keep the query error at `2^-256` under the scalar blend.
-        assert_eq!(stage0_queries_for(4, 3, 256), 331);
-        assert_eq!(stage0_queries_for(4, 80, 256), 259);
-    }
-
-    #[test]
-    fn directed_rounding_summed_crossovers_salt_collisions_and_programming_inputs() {
-        for regime in ZK_REGIMES {
-            for rows in [17usize, 20, 22] {
-                let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
-                let c = r.classical_work_bits();
-                let q = r.qrom_work_bits();
-                let qg = r.qrom_work_bits_crediting_grinding();
-                assert!(r.classical_sum_bits(c) >= 0 && r.classical_sum_bits(c + 1) < 0);
-                assert!(r.qrom_sum_bits(q) >= 0 && r.qrom_sum_bits(q + 1) < 0);
-                assert!(
-                    r.qrom_sum_bits_with(r.classical.bits, qg) >= 0
-                        && r.qrom_sum_bits_with(r.classical.bits, qg + 1) < 0
-                );
-                let (a, b) = r.qrom_work_terms();
-                assert!(q <= a.min(b) && r.qrom_sum_bits(a.min(b) + 1) < 0);
-            }
-        }
-        // When both QROM terms sit near the same crossover, the summed bound is strictly tighter
-        // than `min(a, b)`.
-        let r_close = security_report(
-            WhirSecurityRegime::BciksJohnsonQrom128,
-            square(20),
-            Params {
-                digest_bits: 384,
-                blend: Blend::AffineCascade,
-                algebraic_pow_bits: 24,
-                ..Params::IMPLEMENTED
-            },
-        )
-        .unwrap();
-        let digest_only = r_close.qrom_work_terms().1;
-        assert_eq!(digest_only, 123_779);
-        assert_eq!(r_close.qrom_work_bits_crediting_grinding(), 123_379);
-        assert!(r_close.qrom_sum_bits_with(r_close.classical.bits, digest_only) < 0);
-        // Cross-proof salt collisions on 128-bit salts: at P = 2^40, t = 1, `2^17 * 2^80 / 2^129 = 2^-32`
-        // dominates `t P / 2^128 = 2^-88`.
-        let r = security_report(
-            WhirSecurityRegime::BciksJohnsonQrom128,
-            square(20),
-            Params::IMPLEMENTED,
-        )
-        .unwrap();
-        let zk = r.zk.unwrap();
-        assert_eq!(zk.stage0_fibers, 1 << 17);
-        assert_eq!(zk.classical_hiding_bits(0, 40), 31_999);
-        assert!(zk.quantum_hiding_bits(0, 40) <= 31_999);
-
-        // Programming collisions count programmed oracle inputs `M = P * inputs_per_proof`, not `P`.
-        assert!(zk.programmed_inputs_per_proof > r.rounds);
-        let prog_one_proof = zk.classical_programming_bits(64, 0);
-        // `256 - 1 - 64 - log2(inputs_per_proof)`: strictly tighter than naïve `255 - 64 = 191` by > 8 bits.
-        assert!(prog_one_proof < 191_000 - 8_000, "{prog_one_proof}");
-        assert!(zk.classical_nizk_bits(64, 20) <= zk.classical_hiding_bits(64, 20));
-    }
-
-    /// The size model against the measured full-shard proof of SECURITY.md, section 9.2
-    /// (780,091 bytes including eight bytes of framing; tag 8, `2^21` rows).
-    #[test]
-    fn proof_size_model_brackets_the_measured_full_shard_proof() {
-        let r = security_report(
-            WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
-            square(21),
-            Params::IMPLEMENTED,
-        )
-        .unwrap();
-        assert_eq!(r.log_cells, 22);
-        // The model counts every authentication sibling as distinct; shared ones are not sent.
-        assert!(
-            (780_083..780_083 * 103 / 100).contains(&r.proof_bytes),
-            "{}",
-            r.proof_bytes
-        );
-    }
-
-    fn tiny_relation() -> (crate::zk_hem::relation::Shape, Vec<F>) {
-        let mut cs = ConstraintSystem::new();
-        let x: Lc = cs.alloc(F::from_u64_reduced(3)).into();
-        let y: Lc = cs.alloc(F::from_u64_reduced(5)).into();
-        let prod = cs.mul(&x, &y);
-        cs.enforce_zero(Lc::from(prod).plus_const(F::ZERO - F::from_u64_reduced(15)));
-        cs.finish()
-    }
-
-    #[test]
-    fn layout_matches_the_protocol() {
-        let (shape, _) = tiny_relation();
-        let size = ShapeSize {
-            log_rows: shape.log_rows,
-            var_bits: shape.num_vars.next_power_of_two().trailing_zeros().max(1) as usize,
-            num_public: shape.num_public,
-        };
-        for regime in ZK_REGIMES {
-            let layout = Layout::new(&shape, regime).unwrap();
-            assert_eq!(
-                zk_layout(regime, size),
-                Some((layout.log_cells, layout.blind_cells))
-            );
-        }
-        assert_eq!(
-            zk_layout(WhirSecurityRegime::BciksJohnsonClassical128, size),
-            None
-        );
-    }
-
-    /// One seed, one witness, one statement, two regimes: the masks must not repeat. Before
-    /// the schedule entered the coin derivation both proofs carried the same mask sums and
-    /// the same twelve masking variables under two different row points, which determines
-    /// twelve base-field linear functionals of the witness.
-    #[test]
-    fn coins_do_not_repeat_across_regimes() {
-        let (shape, witness) = tiny_relation();
-        let seed = [9u8; 32];
-        let prove_with = |regime| prove(&shape, witness.clone(), b"s", regime, &seed).unwrap();
-        let a = prove_with(WhirSecurityRegime::BciksJohnsonQrom128);
-        let b = prove_with(WhirSecurityRegime::Cdhz25ZeroPowQrom128);
-        assert!(verify(
-            &shape,
-            &[],
-            b"s",
-            WhirSecurityRegime::BciksJohnsonQrom128,
-            &a
-        ));
-        assert!(verify(
-            &shape,
-            &[],
-            b"s",
-            WhirSecurityRegime::Cdhz25ZeroPowQrom128,
-            &b
-        ));
-        assert_ne!(a.row_mask_sum, b.row_mask_sum);
-        assert_ne!(a.col_mask_sum, b.col_mask_sum);
-    }
-
-    /// Prints the tables of SECURITY.md:
-    /// `cargo test --release -p qsag-agg --lib -- zk_hem::bounds::tests::print_security_tables --ignored --nocapture`.
-    #[test]
-    #[ignore = "table printer"]
-    fn print_security_tables() {
-        let row = |r: &SecurityReport, label: &str| {
-            let (rbr, digest) = r.qrom_work_terms();
-            std::println!(
-                "{label} tag {:2} cells 2^{} | classical rbr {} {:?} m {:?} A0 {} | no-grind rbr {} {:?} m {:?} A0 {} | level classical {} qrom {} (rbr {} digest {}) qrom+grind {} | err@2^40 {} err@2^64 {} | bytes {} digests {} k {} merkle {} grind {}",
-                r.regime as u8,
-                r.log_cells,
-                r.classical.bits,
-                r.classical.round,
-                r.classical.blend_m,
-                r.classical.stage0_agreement,
-                r.ungrounded.bits,
-                r.ungrounded.round,
-                r.ungrounded.blend_m,
-                r.ungrounded.stage0_agreement,
-                r.classical_work_bits(),
-                r.qrom_work_bits(),
-                rbr,
-                digest,
-                r.qrom_work_bits_crediting_grinding(),
-                r.qrom_error_bits(40),
-                r.qrom_error_bits(64),
-                r.proof_bytes,
-                r.digests,
-                r.rounds,
-                r.merkle_hashes,
-                r.grinding_hashes,
-            );
-        };
-        for regime in ZK_REGIMES {
-            for rows in 17..=22 {
-                let r = security_report(regime, square(rows), Params::IMPLEMENTED).unwrap();
-                row(&r, &alloc::format!("zk rows 2^{rows}"));
-                for (i, st) in r.stages.iter().enumerate() {
-                    std::println!(
-                        "    stage {i}: B {} s {} q {} n {} A {} wl {} list {} query {:?} fold {}",
-                        st.blowup,
-                        st.step_vars,
-                        st.queries,
-                        st.fibers,
-                        st.agreement,
-                        st.word_list,
-                        st.list,
-                        st.query_bits,
-                        st.fold_bits
-                    );
-                }
-            }
-        }
-        for regime in WhirSecurityRegime::ALL {
-            for log_cells in [18, 21, 23] {
-                let r = pcs_report(regime, log_cells, PUBLIC, None).unwrap();
-                row(&r, "public");
-            }
-        }
-        let size = square(20);
-        for (label, params) in [
-            (
-                "salt256",
-                Params {
-                    salt_bits: 256,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-            (
-                "digest384",
-                Params {
-                    digest_bits: 384,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-            (
-                "digest400",
-                Params {
-                    digest_bits: 400,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-            (
-                "digest384+cascade",
-                Params {
-                    digest_bits: 384,
-                    blend: Blend::AffineCascade,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-            (
-                "digest384+cascade+pow24",
-                Params {
-                    digest_bits: 384,
-                    blend: Blend::AffineCascade,
-                    algebraic_pow_bits: 24,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-            (
-                "pow24",
-                Params {
-                    algebraic_pow_bits: 24,
-                    ..Params::IMPLEMENTED
-                },
-            ),
-        ] {
-            for regime in [
-                WhirSecurityRegime::BciksJohnsonQrom128,
-                WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
-            ] {
-                let r = security_report(regime, size, params).unwrap();
-                row(&r, label);
-            }
-        }
-        for (label, params) in [
-            (
-                "public digest384",
-                Params {
-                    digest_bits: 384,
-                    ..PUBLIC
-                },
-            ),
-            (
-                "public digest400",
-                Params {
-                    digest_bits: 400,
-                    ..PUBLIC
-                },
-            ),
-        ] {
-            let r = pcs_report(WhirSecurityRegime::BciksJohnsonQrom128, 21, params, None).unwrap();
-            row(&r, label);
-        }
-        for log_cells in 17..=24 {
-            let schedule = WhirSecurityRegime::BciksJohnsonClassical128.schedule(log_cells);
-            let mut rem = log_cells;
-            for spec in &schedule.stages {
-                rem -= spec.step_vars;
-                let need = min_queries(spec.blowup, spec.step_vars, rem, 128_000).unwrap();
-                std::println!(
-                    "tag 2 cells 2^{log_cells} B {} has {} needs {need} (+{})",
-                    spec.blowup,
-                    spec.num_queries,
-                    need as i64 - spec.num_queries as i64
-                );
-            }
-        }
-        for m in [3u128, 4, 6, 8, 16, 80] {
-            std::println!(
-                "stage0 queries for 2^-256 at m={m}: {}",
-                stage0_queries_for(4, m, 256)
-            );
-        }
     }
 }

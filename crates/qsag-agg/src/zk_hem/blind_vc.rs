@@ -1,8 +1,7 @@
 //! `BlindVC` selective-disclosure presentation as a zk-Hem relation.
 //!
-//! Presentations use the committed-mask protocol, whose zero-knowledge and knowledge-
-//! soundness statements are summarised on [`protocol::prove`] and given in
-//! `crates/qsag-agg/SECURITY.md`. Selective disclosure describes which attributes are public
+//! Presentations use `zk-Hem v2` ([`v2::prove`]), whose zero-knowledge and knowledge-
+//! soundness statements are given in `crates/qsag-agg/SECURITY.md`, section V2. Selective disclosure describes which attributes are public
 //! inputs; the proof reveals nothing else about the witness within those bounds.
 //!
 //! The statement is the one of `qsag-cred::blind_vc::eval_sd_plaintext_circuit`: the holder
@@ -21,10 +20,10 @@
 
 use alloc::vec::Vec;
 
-use super::protocol::{self, ZkHemError, ZkHemProof};
 use super::relation::{ConstraintSystem, Lc, Shape, sponge12, sponge12_native};
+use super::v2::params::Profile;
+use super::v2::protocol::{self as v2, ZkHemV2Error, ZkHemV2Proof};
 use crate::field::Goldilocks;
-use crate::pcs::WhirSecurityRegime;
 use crate::sponge::POSEIDON2_CONST_IV;
 
 type F = Goldilocks;
@@ -185,16 +184,15 @@ impl BlindVcStatement {
         out
     }
 
-    /// The relation, with the assignment for `witness`. Its structure depends only on
-    /// `arity` and the disclosed index set.
+    /// The relation, with the assignment for `witness` closed for `zk-Hem v2`.
+    /// Its structure depends only on `arity` and the disclosed index set.
     pub(crate) fn synthesize(&self, witness: &BlindVcWitness) -> (Shape, Vec<F>) {
-        self.constraints(witness).finish()
+        self.constraints(witness).finish_v2()
     }
 
-    /// [`Self::synthesize`] with the closing of zk-Hem v2 (`ConstraintSystem::finish_v2`):
-    /// the same rows and variables, for `zk_hem::v2::protocol`.
+    /// Alias of [`Self::synthesize`] (`ConstraintSystem::finish_v2`).
     pub fn synthesize_v2(&self, witness: &BlindVcWitness) -> (Shape, Vec<F>) {
-        self.constraints(witness).finish_v2()
+        self.synthesize(witness)
     }
 
     /// The rows and variables of the relation, before it is closed.
@@ -279,24 +277,24 @@ impl BlindVcStatement {
     }
 }
 
-/// Prove a presentation. `context` is the verifier's fresh challenge; `seed` must be uniform
-/// and secret.
+/// Prove a presentation (`zk-Hem v2`). `context` is the verifier's fresh challenge; `seed`
+/// must be uniform and secret.
 pub fn prove_presentation(
     statement: &BlindVcStatement,
     witness: &BlindVcWitness,
     context: &[u8],
-    regime: WhirSecurityRegime,
+    profile: Profile,
     seed: &[u8; 32],
-) -> Result<ZkHemProof, ZkHemError> {
+) -> Result<ZkHemV2Proof, ZkHemV2Error> {
     if !statement.well_formed() || witness.attrs.len() != statement.arity {
-        return Err(ZkHemError::Unsatisfied);
+        return Err(ZkHemV2Error::Unsatisfied);
     }
     let (shape, assignment) = statement.synthesize(witness);
-    protocol::prove(
+    v2::prove(
         &shape,
         assignment,
         &statement.statement_bytes(context),
-        regime,
+        profile,
         seed,
     )
 }
@@ -306,15 +304,15 @@ pub fn prove_presentation(
 pub fn verify_presentation(
     statement: &BlindVcStatement,
     context: &[u8],
-    regime: WhirSecurityRegime,
-    proof: &ZkHemProof,
+    profile: Profile,
+    proof: &ZkHemV2Proof,
 ) -> bool {
     statement.shape().is_some_and(|shape| {
-        protocol::verify(
+        v2::verify(
             &shape,
             &[],
             &statement.statement_bytes(context),
-            regime,
+            profile,
             proof,
         )
     })
@@ -352,57 +350,54 @@ mod tests {
 
     #[test]
     fn presentation_verifies_and_binds_statement_and_context() {
-        let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+        let profile = Profile::TurboShakeJohnson400;
         let w = witness(8);
         let st = BlindVcStatement::derive(&w, 7, 99, scope(), &[1, 6]);
-        let proof = prove_presentation(&st, &w, b"nonce-1", regime, &[21; 32]).unwrap();
-        assert!(verify_presentation(&st, b"nonce-1", regime, &proof));
-        assert!(!verify_presentation(&st, b"nonce-2", regime, &proof));
+        let proof = prove_presentation(&st, &w, b"nonce-1", profile, &[21; 32]).unwrap();
+        assert!(verify_presentation(&st, b"nonce-1", profile, &proof));
+        assert!(!verify_presentation(&st, b"nonce-2", profile, &proof));
 
         let mut other = st.clone();
         other.disclosed[0].1 += F::ONE;
-        assert!(!verify_presentation(&other, b"nonce-1", regime, &proof));
+        assert!(!verify_presentation(&other, b"nonce-1", profile, &proof));
         let mut other = st.clone();
         other.accumulator_root[3] += F::ONE;
-        assert!(!verify_presentation(&other, b"nonce-1", regime, &proof));
+        assert!(!verify_presentation(&other, b"nonce-1", profile, &proof));
         let mut other = st.clone();
         other.scope_tag[0] += F::ONE;
-        assert!(!verify_presentation(&other, b"nonce-1", regime, &proof));
+        assert!(!verify_presentation(&other, b"nonce-1", profile, &proof));
         let mut other = st.clone();
         other.disclosed.pop();
-        assert!(!verify_presentation(&other, b"nonce-1", regime, &proof));
+        assert!(!verify_presentation(&other, b"nonce-1", profile, &proof));
     }
 
     #[test]
     fn prover_refuses_a_credential_outside_the_accumulator() {
-        let regime = WhirSecurityRegime::BciksJohnsonQrom128;
+        let profile = Profile::CshakeJohnson400;
         let w = witness(6);
         let st = BlindVcStatement::derive(&w, 1, 2, scope(), &[]);
         let mut wrong = witness(6);
         wrong.siblings[4][2] += F::ONE;
         assert_eq!(
-            prove_presentation(&st, &wrong, b"n", regime, &[1; 32]),
-            Err(ZkHemError::Unsatisfied)
+            prove_presentation(&st, &wrong, b"n", profile, &[1; 32]),
+            Err(ZkHemV2Error::Unsatisfied)
         );
         let mut wrong = witness(6);
         wrong.holder_blind[0] += F::ONE;
         assert_eq!(
-            prove_presentation(&st, &wrong, b"n", regime, &[1; 32]),
-            Err(ZkHemError::Unsatisfied)
+            prove_presentation(&st, &wrong, b"n", profile, &[1; 32]),
+            Err(ZkHemV2Error::Unsatisfied)
         );
     }
 
     #[test]
     #[ignore = "measurement: run with --ignored --nocapture"]
     fn bench_blind_vc_presentation() {
-        for regime in [
-            WhirSecurityRegime::BciksJohnsonQrom128,
-            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
-        ] {
+        for profile in Profile::ALL {
             let w = witness(MAX_VC_ATTRS);
             let st = BlindVcStatement::derive(&w, 7, 0x1234_5678_9ABC, scope(), &[0, 5, 9]);
             let shape = st.shape().unwrap();
-            let layout = protocol::Layout::new(&shape, regime).unwrap();
+            let layout = v2::layout_of(&shape).unwrap();
             let median = |mut v: Vec<f64>| {
                 v.sort_by(f64::total_cmp);
                 v[v.len() / 2]
@@ -411,7 +406,7 @@ mod tests {
             let mut proof = None;
             for run in 0..3u8 {
                 let t = std::time::Instant::now();
-                proof = Some(prove_presentation(&st, &w, b"ctx", regime, &[run; 32]).unwrap());
+                proof = Some(prove_presentation(&st, &w, b"ctx", profile, &[run; 32]).unwrap());
                 prove_ms.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let proof = proof.unwrap();
@@ -421,8 +416,8 @@ mod tests {
                     (0..5)
                         .map(|_| {
                             let t = std::time::Instant::now();
-                            let decoded = ZkHemProof::from_bytes(&bytes, &shape, regime).unwrap();
-                            assert!(verify_presentation(&st, b"ctx", regime, &decoded));
+                            let decoded = ZkHemV2Proof::from_bytes(&bytes, &shape).unwrap();
+                            assert!(verify_presentation(&st, b"ctx", profile, &decoded));
                             t.elapsed().as_secs_f64() * 1e3
                         })
                         .collect(),
@@ -431,7 +426,7 @@ mod tests {
             let verify_all = time_verify();
             let verify_one = crate::with_worker_limit(1, time_verify);
             std::println!(
-                "ZKHEM_BLINDVC regime={regime:?} sbox_rows={} rows=2^{} vars={} cells=2^{} \
+                "ZKHEM_BLINDVC profile={profile:?} sbox_rows={} rows=2^{} vars={} cells=2^{} \
                  blind_cells={} proof_bytes={} proof_kib={:.2} prove_ms_median={:.1} \
                  verify_ms_all_workers={verify_all:.2} verify_ms_1_worker={verify_one:.2} \
                  workers={}",
