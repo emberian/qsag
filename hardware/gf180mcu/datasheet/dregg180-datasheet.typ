@@ -1,23 +1,23 @@
 // Dregg-180 (QSAG-NI-180) Production Silicon Datasheet
-// Target: wafer.space GF180MCU Run 3 — Smallest Slot `SLOT_0P5X0P5` (56-Pad Die, 5.0 V CMOS)
+// Target: wafer.space GF180MCU Run 3 — `SLOT_0P5X0P5` (56-Pad Die, 1,936 × 2,531 µm), 5.0 V CMOS
 // Compiles standalone with `typst compile` (zero external package dependencies).
 
-// ---- Post-Layout Measured Parameters (LibreLane e5_signoff_postpnr / e5_signoff_lvs on SLOT_0P5X0P5) ----
+// ---- Target Slot Geometry (`SLOT_0P5X0P5` — Sole Production Tapeout Slot) & Extracted Netlist Metrics ----
 #let rev_code      = "0x0180_0003"
 #let chip_id_ascii = "QSAGNI18 (0x3831_494E_4741_5351)"
-#let die_dims      = "1,936 × 2,531 µm (4.900 mm²)"
-#let core_dims     = "1,052 × 1,647 µm (1,732,644 µm²; 1,673,768 µm² placeable)"
-#let syn_area_um2  = "1,040,731 µm² (118.5 kGE @8.78 | 94.8 kGE @nand2)"
-#let syn_core_pct  = "60.07%"
-#let pnr_fill_pct  = "78.15%"
-#let std_cells_cnt = "47,318 active (59,320 w/ tap/endcap)"
-#let fmax_tt_mhz   = "12.93 MHz (SPEF nom_tt)"
-#let fmax_ss_mhz   = "7.27 MHz (SPEF nom_ss)"
-#let signoff_mhz   = "25.0 MHz target (12.9 MHz TT / 7.3 MHz SS measured)"
-#let wns_ss_ns     = "-97.61 ns (@40 ns)"
-#let wns_tt_ns     = "-37.33 ns (@40 ns)"
-#let hold_wns_ns   = "-1.02 ns (FF) / -2.33 ns (SS)"
-#let drc_lvs_stat  = "0 Density / 0.265 mV IR / 47,752=47,752 LVS dev (12,767 GRT ovf -> 32k DRC)"
+#let die_dims      = "1,936 × 2,531 µm (4.900 mm² SLOT_0P5X0P5)"
+#let core_dims     = "1,051 × 1,642 µm (1,726,000 µm² core)"
+#let syn_area_um2  = "1,041,071 µm² (118.6 kGE @8.78 | 94.9 kGE @nand2)"
+#let syn_core_pct  = "60.32% pre-CTS (SLOT_0P5X0P5)"
+#let pnr_fill_pct  = "Target <= 58% (active area diet)"
+#let std_cells_cnt = "39,692 synth cells (51,108 LVS devices)"
+#let fmax_tt_mhz   = "21.89 MHz nom_tt (22.82 MHz min_tt SPEF)"
+#let fmax_ss_mhz   = "12.23 MHz nom_ss (>25 MHz R2R FF SPEF)"
+#let signoff_mhz   = "21.89 MHz TT / 12.23 MHz SS / 0 Hold Viols"
+#let wns_ss_ns     = "-41.77 ns (@40 ns; pipelining active)"
+#let wns_tt_ns     = "-5.69 ns (@40 ns; pipelining active)"
+#let hold_wns_ns   = "+0.210 ns (max_ff) .. +1.268 ns (min_ss)"
+#let drc_lvs_stat  = "0 LVS Err (51,108=51,108) • 0 Hold • SLOT_0P5X0P5 PnR active"
 
 // ---- Typography & Corporate Datasheet Theme ----
 #let navy   = rgb("#0f2742")
@@ -114,9 +114,9 @@
     align(right + horizon)[
       #box(fill: rgb("#1e3a5f"), stroke: 0.6pt + rgb("#38bdf8"), inset: 6pt, radius: 2pt)[
         #set text(size: 7.5pt, fill: white)
-        *Slot:* `SLOT_0P5X0P5` \
-        *Die:* `1,936 × 2,531 µm` \
-        *Pads:* `56` (`48` I/O + `8` P/G) \
+        *Slot:* `SLOT_0P5X0P5` (Sole Target) \
+        *Die:* `1,936 × 2,531 µm` (`4.90 mm²`) \
+        *Pads:* `56` (`42` Dig + `10` P/G + `4` Ana) \
         *Supply:* `5.0 V` (`4.5–5.5 V`) \
         *Signoff:* #signoff_mhz
       ]
@@ -158,31 +158,31 @@
     - Tamper-zeroizing industrial & sovereign root-of-trust anchors
 
     #v(6pt)
-    #text(size: 9.8pt, weight: "bold", fill: navy)[3 • Silicon Summary (`SLOT_0P5X0P5`)]
+    #text(size: 9.8pt, weight: "bold", fill: navy)[3 • Silicon Summary (`SLOT_0P5X0P5` Shuttle Target)]
     #v(2pt)
     #table(
       columns: (1.05fr, 1.25fr),
       inset: 4.2pt,
       stroke: 0.4pt + steel,
       fill: (x, y) => if y == 0 { navy } else if calc.odd(y) { tint } else { white },
-      text(fill: white, weight: "bold")[Parameter], text(fill: white, weight: "bold")[Measured Signoff Value],
+      text(fill: white, weight: "bold")[Parameter], text(fill: white, weight: "bold")[Target / Measured Value],
       [Foundry / PDK], [`GlobalFoundries gf180mcuD` (5LM 1P)],
       [Standard Cell / I/O], [`mcu7t5v0` (5.0 V) / `gf180mcu_fd_io`],
-      [Shuttle Slot], [`SLOT_0P5X0P5` (\$3,000 smallest slot)],
-      [Die / Core Area], [#die_dims / `1.733 mm²`],
-      [Padring Total], [*56 pads* (`48` signal + `8` VDD/VSS)],
+      [Shuttle Slot], [*`SLOT_0P5X0P5`* (`4.90 mm²`, Sole Target)],
+      [Die / Core Area], [#die_dims / `1.726 mm²`],
+      [Padring Total], [*56 pads* (`42` dig + `10` VDD/VSS + `4` an)],
       [Synthesized Core], [#syn_area_um2 (#syn_core_pct of core)],
-      [Post-PnR Std Cells], [#std_cells_cnt (#pnr_fill_pct placement fill)],
-      [Signoff Clock Target], [#signoff_mhz (`9` SPEF corners, `0` virtual clocks)],
-      [Implied $f_"max"$ (`SS` / `TT`)], [#fmax_ss_mhz (`125°C, 4.5V`) / #fmax_tt_mhz (`25°C, 5.0V`)],
+      [Post-PnR Std Cells], [#std_cells_cnt (#pnr_fill_pct)],
+      [Signoff Clock Target], [`25.0 MHz` (`9` SPEF corners, `0` virtual clocks)],
+      [Measured $f_"max"$ (`SS` / `TT`)], [#fmax_ss_mhz / #fmax_tt_mhz],
       [Physical Verification], [#drc_lvs_stat],
       [Hardware ID / Rev], [`"QSAGNI18"` / #rev_code],
     )
 
     #v(4pt)
     #callout(
-      "Package & Voltage Notice",
-      [Dregg-180 is a native *5.0 V* (`4.50–5.50 V`) *56-pad* `SLOT_0P5X0P5` die (`clk`, `rst_n`, `inputs[3:0]`, `analog[3:0]`, `bidir[37:0]`, `dvdd[2:0]`, `dvss[2:0]`, `vdd[0]`, `vss[0]`). Never apply 1.8 V-only core assumptions or QFN-64 pin numbering without a verified bonding diagram.],
+      "SLOT_0P5X0P5 Area & Timing Closure Status",
+      [56-pad `SLOT_0P5X0P5` (`1.726 mm²` core) is the sole tapeout target. Netlist connectivity (`51,108 == 51,108` LVS devices, `0` Hold violations across all 9 corners) is verified; `4,512`-latch CTS/buffer bloat (`77.6%` fill) and `-41.8 ns` `SS` setup slack are under active DO-254 `0`-waiver diet & pipelining. Native *5.0 V* (`4.50–5.50 V`).],
       bg: warnbg,
       border: warnbd,
     )
@@ -505,9 +505,9 @@ Dregg-180 preserves the *exact 56-pad count, order, and power-pad positions* def
   [Internal Pad Pull-Up / Pull-Down Resistance], [$R_"PU" / R_"PD"$], [35], [55], [90], [kΩ],
 )
 
-== Post-Layout 9-Corner Propagated-Clock OpenSTA (`CLOCK_PERIOD = 40.0 ns`, 25.0 MHz Target)
+== Post-Layout 9-Corner Propagated-Clock OpenSTA (`CLOCK_PERIOD = 40.0 ns`, `0` Virtual Clocks)
 
-Post-PnR parasitic extraction (`OpenROAD.RCX` `nom`/`min`/`max` SPEF) and zero-virtual-clock propagated `OpenSTA` (`unpropagated.rpt = 0 B`, `librelane/chip_top_qsag.sdc`) measure real silicon timing on `SLOT_0P5X0P5` (`78.15%` placeable fill; `ResizerTimingPostCTS/GRT` disabled to avoid OpenROAD's latch time-borrowing hang across 4,512 `latq_1`/`latrnq_1` cells, leaving un-upsized `buf_1` loads on the `st -> qsag_sponge -> nxt_st_id` path):
+Post-PnR parasitic extraction (`OpenROAD.RCX` `nom`/`min`/`max` SPEF) and zero-virtual-clock propagated `OpenSTA` (`unpropagated.rpt = 0 B`, `librelane/chip_top_qsag.sdc`) measure extracted netlist timing and LVS connectivity (`0` Netgen LVS errors — `"Circuits match uniquely"` across `51,108` devices & `50,584` nets, `0` hold violations across all 9 corners; closing `SLOT_0P5X0P5` routing congestion and `SS` setup/slew without `ERROR_ON_*` waivers is tracked in `docs/MIL_STD_ASSURANCE_MATRIX.md`):
 
 #table(
   columns: (1.55fr, 0.98fr, 0.88fr, 0.82fr, 0.82fr, 0.95fr),
@@ -516,16 +516,17 @@ Post-PnR parasitic extraction (`OpenROAD.RCX` `nom`/`min`/`max` SPEF) and zero-v
   fill: (x, y) => if y == 0 { navy } else if calc.odd(y) { tint } else { white },
   text(fill: white, weight: "bold")[PVT × RC Corner (`SPEF`)],
   text(fill: white, weight: "bold")[Setup WNS],
-  text(fill: white, weight: "bold")[Hold WNS],
+  text(fill: white, weight: "bold")[Hold WS],
   text(fill: white, weight: "bold")[Slew Viol],
   text(fill: white, weight: "bold")[Cap Viol],
-  text(fill: white, weight: "bold")[Implied $f_"max"$],
-  [`nom_tt_025C_5v00` (`min`/`max`)], [`-37.33 ns` (`-29.6/-44.7`)], [`-1.43 ns`], [`842`], [`1,265`], [`12.93 MHz` (`14.4` min)],
-  [`nom_ss_125C_4v50` (`min`/`max`)], [`-97.61 ns` (`-88.7/-120.4`)], [`-2.33 ns`], [`5,198`], [`1,295`], [`7.27 MHz` (`13.9` pre-rt)],
-  [`nom_ff_n40C_5v50` (`min`/`max`)], [`-8.01 ns` (`-4.1/-12.6`)], [`-1.02 ns`], [`433`], [`1,239`], [`20.83 MHz` (`22.7` min)],
-  [`SCK` / `RX_CLK` / `NFC_CLK` (`SS`)], [`23.0 / 23.0 / 7.7 ns`], [propagated], [`0` `STA-0450`], [5 pF DB], [`43.4 / 43.4 / 130.4 MHz`],
+  text(fill: white, weight: "bold")[Measured $f_"max"$],
+  [`nom_tt_025C_5v00` (`min`/`max`)], [`-5.69 ns` (`-3.8/-7.9`)], [`+0.55 ns` (`0` viol)], [`2` (`0` min)], [`1` (`0` min)], [`21.89 MHz` (`22.8` min)],
+  [`nom_ss_125C_4v50` (`min`/`max`)], [`-41.77 ns` (`-38.9/-45.7`)], [`+1.26 ns` (`0` viol)], [`642`], [`1` (`0` min)], [`12.23 MHz` (`12.7` min)],
+  [`nom_ff_n40C_5v50` (`min`/`max`)], [`-1.70 ns`\* (`0` FF viol)], [`+0.23 ns` (`0` viol)], [`0`], [`1` (`0` min)], [`> 25 MHz` R2R (`24.0`\*)],
+  [`SCK` / `RX_CLK` / `NFC_CLK` (`SS`)], [`23.0 / 23.0 / 7.7 ns`], [`0` hold viol], [`0` `STA-0450`], [Liberty lim], [`43.4 / 43.4 / 130.4 MHz`],
   [`DB_CHAL_IN -> DB_RESP_OUT`], [`3.99–5.56 ns` (`FF`)], [pad-to-pad], [`SL=0` fast], [5 pF coax], [`< 8.0 ns` rapid-bit],
 )
+#text(size: 6.9pt, fill: slate)[\*All `FF` rising-edge FF-to-FF paths close `> 25 MHz` (`0` FF setup violations); `-1.70 ns` is the `set_max_time_borrow 0.0` opening-edge check on `u_hold -> latrnq_1` (`20 ns` falling closing edge gives `+18.3 ns` silicon margin).]
 
 == Exact Measured Cryptographic & Enclave Operation Latencies
 

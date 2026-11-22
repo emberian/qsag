@@ -12,11 +12,12 @@ out="build/synth/$tag.pnr"
 ECP5_DEV="${ECP5_DEV:---85k --package CABGA381 --speed 6}"
 ECP5_LABEL="${ECP5_LABEL:-LFE5U-85F-6BG381C}"
 INLINE_CSA="flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; flatten t:*qsag_csa_reduce2*; opt -fast;"
+CARRY_FLAT="flatten t:*qsag_sum_csa*; flatten t:*qsag_sum_csa*; flatten t:*qsag_sum_csa*; flatten t:*qsag_sum_csa*; flatten t:*qsag_add_split*; opt -fast;"
 if [ ! -s "$out.json" ]; then
     if [ "${NOFLAT:-0}" = "1" ]; then
-        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; flatten t:*qsag_sum_csa*; flatten t:*qsag_add_split*; opt -fast; synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; $CARRY_FLAT synth_ecp5 -nowidelut -noflatten -top $top -json $out.json" > /dev/null
     else
-        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; flatten t:*qsag_sum_csa*; flatten t:*qsag_add_split*; opt -fast; synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
+        yosys -l "$out.yosys.log" -q -p "read_verilog -sv -DQSAG_ECP5_CARRY $SRC; hierarchy -top $top $*; proc; $CARRY_FLAT synth_ecp5 -nowidelut -top $top -json $out.json" > /dev/null
     fi
 fi
 stdbuf -oL -eL nextpnr-ecp5 $ECP5_DEV --json "$out.json" --textcfg "$out.config" --freq "${FREQ:-120}" \
