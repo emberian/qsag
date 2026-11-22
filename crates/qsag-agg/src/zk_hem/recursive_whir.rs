@@ -766,7 +766,7 @@ pub(crate) fn select<B: Backend>(b: &mut B, bit: &B::W, yes: &B::W, no: &B::W) -
 }
 // Canonical integer remainder of a uniform field challenge; the quotient and remainder
 // bounds exclude modular wrap. At most ceil(p/divisor) preimages per remainder.
-fn remainder<B: Backend>(b: &mut B, word: &B::W, divisor: u64) -> B::W {
+pub(super) fn remainder<B: Backend>(b: &mut B, word: &B::W, divisor: u64) -> B::W {
     if divisor.is_power_of_two() {
         let binary = bits(b, word, 64);
         return binary[..divisor.trailing_zeros() as usize]

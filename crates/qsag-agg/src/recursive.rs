@@ -27,6 +27,11 @@
 //!    [`full_shard_signing_message`].
 
 pub mod split;
+pub use crate::zk_hem::recursive_ivc::{
+    FixedPathWhirW24, IvcPolicyRegistry, IvcRowCensus, IvcShard, IvcStepConfig,
+    IvcSubtreeStatement, IvcTableCommitment, IvcTreeStepRelation, SuccinctIvcProof, SuccinctIvcStep,
+    ivc_signing_message, prove_ivc_tree, verify_ivc_tree,
+};
 
 /// The `k`-child PCS-verifier relation behind [`SuccinctShardWhirAggregate`]; unlike the
 /// legacy digest hierarchy, it checks the child openings in the outer relation. It does not
@@ -2709,7 +2714,11 @@ impl SuccinctFullShardAggregate {
             }
             signer_counts.push(c);
         }
-        let proof = FullShardMergeProof::from_bytes(bytes.get(counts_end..)?, relation, regime)?;
+        if !regime.is_accepted_aggregate_profile() {
+            return None;
+        }
+        let profile = crate::zk_hem::v2::params::Profile::for_regime(regime);
+        let proof = FullShardMergeProof::from_bytes(bytes.get(counts_end..)?, relation, profile)?;
         Some(Self {
             signer_counts,
             proof,
@@ -2823,13 +2832,11 @@ pub fn prove_succinct_full_shard_aggregate(
         .map(prove_one)
         .collect::<Result<Vec<_>, _>>()?;
 
-    let proof = prove_full_shard_merge(
-        relation,
-        &statements,
-        &proofs,
-        relation.params().regime(),
-        seed,
-    )?;
+    if !relation.params().regime().is_accepted_aggregate_profile() {
+        return Err(FullShardError::InvalidParameters);
+    }
+    let profile = crate::zk_hem::v2::params::Profile::for_regime(relation.params().regime());
+    let proof = prove_full_shard_merge(relation, &statements, &proofs, profile, seed)?;
     Ok(SuccinctFullShardAggregate {
         signer_counts: counts.iter().map(|&c| c as u32).collect(),
         proof,
@@ -2882,12 +2889,11 @@ pub fn verify_succinct_full_shard_aggregate(
             signers,
         })
         .collect();
-    verify_full_shard_merge(
-        relation,
-        &publics,
-        relation.params().regime(),
-        &aggregate.proof,
-    )
+    if !relation.params().regime().is_accepted_aggregate_profile() {
+        return false;
+    }
+    let profile = crate::zk_hem::v2::params::Profile::for_regime(relation.params().regime());
+    verify_full_shard_merge(relation, &publics, profile, &aggregate.proof)
 }
 
 // ============================================================================

@@ -33,13 +33,16 @@
 //! CDHZ25 profiles retain their bounded-query assumptions: 108-bit nominal Grover work
 //! for the PoW profile at `Q <= 2^38`, or 107 bits without PoW at `Q + 1 <= 2^40`.
 
-use super::protocol::{self, ZkHemProof};
 use super::recursive_whir::{
     Assignment, Backend, Base, ChildWhirStatement, Digest, Ext, FixedPathWhirParams,
     FixedPathWhirProof, Native, RecursiveWhirError, Transcript, bits, commit_for_recursion, f,
     open_for_recursion, verify_gadget,
 };
+#[cfg(test)]
+use super::protocol;
 use super::relation::{ConstraintSystem, Lc, Shape};
+use super::v2::params::Profile;
+use super::v2::protocol::{self as v2, ZkHemV2Proof};
 use crate::arithmetize::{
     ROW_SUMCHECK_WIRE_COEFFS, RowTranscript, ShardCircuit, ShardSigner, build_shard_witness,
     prove_shard_rows,
@@ -1267,7 +1270,7 @@ impl FullShardMergeRelation {
         let mut cs = ConstraintSystem::new_hologram_aligned();
         populate(&mut cs, &params, &publics, &witnesses);
         let used = cs.num_rows();
-        let (shape, mut z) = cs.finish();
+        let (shape, mut z) = cs.finish_v2();
         qsag_asm::volatile_fill(&mut z, F::ZERO);
         let stats = FullShardRelationStats {
             sbox_rows: shape.num_sbox,
@@ -1388,11 +1391,10 @@ fn populate(
     }
 }
 
-/// One committed-mask parent proof for the shards named by its statement.
-/// Verification reads the relation; security limitations are those of [`protocol::prove`].
+/// One `zk-Hem v2` parent proof (`QSAGFSM2`) for the shards named by its statement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FullShardMergeProof {
-    pub proof: ZkHemProof,
+    pub proof: ZkHemV2Proof,
 }
 impl FullShardMergeProof {
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -1403,44 +1405,40 @@ impl FullShardMergeProof {
     pub fn from_bytes(
         bytes: &[u8],
         relation: &FullShardMergeRelation,
-        regime: WhirSecurityRegime,
+        profile: Profile,
     ) -> Option<Self> {
-        if bytes.get(..8)? != b"QSAGFSM2" || !regime.is_accepted_aggregate_profile() {
+        if bytes.get(..8)? != b"QSAGFSM2" {
             return None;
         }
-        let proof = ZkHemProof::from_bytes(bytes.get(8..)?, &relation.shape, regime)?;
-        Some(Self { proof })
+        let proof = ZkHemV2Proof::from_bytes(bytes.get(8..)?, &relation.shape)?;
+        (proof.profile == profile).then_some(Self { proof })
     }
 }
 
-/// Prove that every child verifies. The children are witnesses: the result carries none of
-/// them verbatim. The parent uses committed masks rather than the public hologram path;
-/// see [`protocol::prove`] for the remaining security-analysis gaps. `regime` is the
-/// parent proof's own regime. `seed` must be uniform and secret; it supplies all masks,
-/// companions, opening blinders and salts.
+/// Prove that every child verifies under `zk-Hem v2`.
 pub fn prove_full_shard_merge(
     relation: &FullShardMergeRelation,
     statements: &[RecursiveShardStatement],
     proofs: &[RecursiveShardProof],
-    regime: WhirSecurityRegime,
+    profile: Profile,
     seed: &[u8; 32],
 ) -> Result<FullShardMergeProof, FullShardError> {
-    if !regime.is_accepted_aggregate_profile()
-        || statements.len() != relation.children
-        || proofs.len() != relation.children
-    {
+    if statements.len() != relation.children || proofs.len() != relation.children {
         return Err(FullShardError::InvalidParameters);
     }
     if !proofs.iter().all(|p| p.well_formed(&relation.params)) {
         return Err(FullShardError::InvalidChild);
     }
     let z = relation.assignment(statements, proofs)?;
-    let map_err = |e: protocol::ZkHemError| match e {
-        protocol::ZkHemError::Unsatisfied => FullShardError::InvalidChild,
-        protocol::ZkHemError::MaskRankDeficient => FullShardError::MaskRankDeficient,
-        protocol::ZkHemError::RelationTooLarge => FullShardError::InvalidParameters,
+    let map_err = |e: v2::ZkHemV2Error| match e {
+        v2::ZkHemV2Error::Unsatisfied => FullShardError::InvalidChild,
+        v2::ZkHemV2Error::MaskRankDeficient => FullShardError::MaskRankDeficient,
+        // This relation contains no lookup table.
+        v2::ZkHemV2Error::UnsupportedRelation | v2::ZkHemV2Error::LookupPoleHit => {
+            FullShardError::InvalidParameters
+        }
     };
-    let proof = protocol::prove(&relation.shape, z, PROOF_LABEL, regime, seed).map_err(map_err)?;
+    let proof = v2::prove(&relation.shape, z, PROOF_LABEL, profile, seed).map_err(map_err)?;
     Ok(FullShardMergeProof { proof })
 }
 
@@ -1448,14 +1446,14 @@ pub fn prove_full_shard_merge(
 pub fn verify_full_shard_merge(
     relation: &FullShardMergeRelation,
     shards: &[ShardPublic],
-    regime: WhirSecurityRegime,
+    profile: Profile,
     proof: &FullShardMergeProof,
 ) -> bool {
-    if !regime.is_accepted_aggregate_profile() || shards.len() != relation.children {
+    if shards.len() != relation.children {
         return false;
     }
     let public: Vec<F> = shards.iter().flat_map(ShardPublic::words).collect();
-    protocol::verify(&relation.shape, &public, PROOF_LABEL, regime, &proof.proof)
+    v2::verify(&relation.shape, &public, PROOF_LABEL, profile, &proof.proof)
 }
 
 #[cfg(test)]
@@ -1463,9 +1461,11 @@ mod tests {
     use super::*;
     use crate::sig::ValidatorKeypair;
     use crate::trace::{RowPublicEvalExt4, eval_batched_row_constraints_ext4};
+    use crate::zk_hem::v2::field5::Fp5;
     use std::time::Instant;
 
     const REGIME: WhirSecurityRegime = WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128;
+    const PARENT_PROFILE: Profile = Profile::CshakeJohnson400;
 
     fn sample(i: usize) -> E {
         E::from_limbs(core::array::from_fn(|j| {
@@ -1599,7 +1599,7 @@ mod tests {
             &relation,
             &candidates[1..],
             &children[1..],
-            REGIME,
+            PARENT_PROFILE,
             &[0x59; 32],
         )
         .unwrap();
@@ -1609,11 +1609,11 @@ mod tests {
             start.elapsed().as_secs_f64()
         );
         let wire = parent.to_bytes();
-        let parent = FullShardMergeProof::from_bytes(&wire, &relation, REGIME).unwrap();
+        let parent = FullShardMergeProof::from_bytes(&wire, &relation, PARENT_PROFILE).unwrap();
         assert_eq!(parent.to_bytes(), wire);
         let mut old_version = wire.clone();
         old_version[..8].copy_from_slice(b"QSAGFSM1");
-        assert!(FullShardMergeProof::from_bytes(&old_version, &relation, REGIME).is_none());
+        assert!(FullShardMergeProof::from_bytes(&old_version, &relation, PARENT_PROFILE).is_none());
         let aggregate = crate::recursive::SuccinctFullShardAggregate {
             signer_counts: vec![1],
             proof: parent.clone(),
@@ -1641,7 +1641,7 @@ mod tests {
         assert!(verify_full_shard_merge(
             &relation,
             core::slice::from_ref(&public),
-            REGIME,
+            PARENT_PROFILE,
             &parent
         ));
         std::println!(
@@ -1651,9 +1651,9 @@ mod tests {
         let matches: Vec<_> = assignments
             .iter()
             .map(|z| {
-                protocol::candidate_matches_masked_evaluation(
+                v2::candidate_matches_masked_evaluation(
                     relation.shape(),
-                    REGIME,
+                    PARENT_PROFILE,
                     &public.words(),
                     PROOF_LABEL,
                     &parent.proof,
@@ -1849,7 +1849,7 @@ mod tests {
                 &relation,
                 &statements,
                 &[tampered[0].1.clone(), proofs[1].clone()],
-                REGIME,
+                PARENT_PROFILE,
                 &[5; 32]
             ),
             Err(FullShardError::InvalidChild)
@@ -1888,7 +1888,8 @@ mod tests {
 
         // The parent proof.
         let parent =
-            prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[5; 32]).unwrap();
+            prove_full_shard_merge(&relation, &statements, &proofs, PARENT_PROFILE, &[5; 32])
+                .unwrap();
         let publics: Vec<ShardPublic> = statements
             .iter()
             .map(|s| s.public(&params).unwrap())
@@ -1896,17 +1897,25 @@ mod tests {
         assert_eq!(publics[0].signers, 2);
         assert_eq!(publics[1].signers, 1);
         assert!(verify_full_shard_merge(
-            &relation, &publics, REGIME, &parent
+            &relation,
+            &publics,
+            PARENT_PROFILE,
+            &parent
         ));
         let bytes = parent.to_bytes();
         assert_eq!(
-            FullShardMergeProof::from_bytes(&bytes, &relation, REGIME).unwrap(),
+            FullShardMergeProof::from_bytes(&bytes, &relation, PARENT_PROFILE).unwrap(),
             parent
         );
         let alter = |edit: &dyn Fn(&mut Vec<ShardPublic>)| {
             let mut bad = publics.clone();
             edit(&mut bad);
-            assert!(!verify_full_shard_merge(&relation, &bad, REGIME, &parent));
+            assert!(!verify_full_shard_merge(
+                &relation,
+                &bad,
+                PARENT_PROFILE,
+                &parent
+            ));
         };
         alter(&|p| p[0].message[0] ^= 1);
         alter(&|p| p[1].message[31] ^= 0x80);
@@ -1921,12 +1930,17 @@ mod tests {
         assert!(!verify_full_shard_merge(
             &relation,
             &publics,
-            WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+            Profile::TurboShakeJohnson400,
             &parent
         ));
         let mut bad = parent.clone();
-        bad.proof.row_rounds[0][0] += E::ONE;
-        assert!(!verify_full_shard_merge(&relation, &publics, REGIME, &bad));
+        bad.proof.row_rounds[0][0] += Fp5::ONE;
+        assert!(!verify_full_shard_merge(
+            &relation,
+            &publics,
+            PARENT_PROFILE,
+            &bad
+        ));
     }
 
     #[test]
@@ -1960,7 +1974,7 @@ mod tests {
             &relation,
             core::slice::from_ref(&stmt),
             core::slice::from_ref(&child_proof),
-            REGIME,
+            PARENT_PROFILE,
             &[0x66; 32],
         )
         .unwrap();
@@ -1969,7 +1983,7 @@ mod tests {
         assert!(verify_full_shard_merge(
             &relation,
             core::slice::from_ref(&pub_shard),
-            REGIME,
+            PARENT_PROFILE,
             &parent
         ));
         let ver_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -2021,8 +2035,14 @@ mod tests {
             proofs.push(proof);
         }
         let start = Instant::now();
-        let parent =
-            prove_full_shard_merge(&relation, &statements, &proofs, REGIME, &[9; 32]).unwrap();
+        let parent = prove_full_shard_merge(
+            &relation,
+            &statements,
+            &proofs,
+            PARENT_PROFILE,
+            &[9; 32],
+        )
+        .unwrap();
         let prove_ms = start.elapsed().as_secs_f64() * 1000.;
         let publics: Vec<ShardPublic> = statements
             .iter()
@@ -2030,7 +2050,10 @@ mod tests {
             .collect();
         let start = Instant::now();
         assert!(verify_full_shard_merge(
-            &relation, &publics, REGIME, &parent
+            &relation,
+            &publics,
+            PARENT_PROFILE,
+            &parent
         ));
         let verify_ms = start.elapsed().as_secs_f64() * 1000.;
         std::println!(

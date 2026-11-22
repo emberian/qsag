@@ -32,10 +32,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::protocol::{self, ZkHemError, ZkHemProof};
 use super::relation::{ConstraintSystem, Lc, Shape, poseidon2_perm, sponge12, sponge12_native};
+use super::v2::params::Profile;
+use super::v2::protocol::{self as v2, ZkHemV2Error, ZkHemV2Proof};
 use crate::field::Goldilocks;
-use crate::pcs::WhirSecurityRegime;
 use crate::sig::{
     AggSigProfile, DOMAIN_H_MSG_STATEFUL, DOMAIN_MERKLE_NODE, DOMAIN_WOTS_PK, DOMAIN_WOTS_STEP,
     JORTS_XMSS_HEIGHT, ValidatorPublicKey, ValidatorSignature, WOTS_CHAINS, WOTS_MAX_STEP,
@@ -109,7 +109,7 @@ pub enum MultisigError {
     InvalidSignerSet,
     /// A signer is not the policy member at its index or its signature does not verify.
     InvalidSignature,
-    Proof(ZkHemError),
+    Proof(ZkHemV2Error),
 }
 
 /// A threshold policy over `JortsPoseidon2` public keys.
@@ -230,7 +230,7 @@ fn public_inputs(address: &Digest, message: &[u8; 32]) -> Vec<F> {
 
 /// Assigned contents of one slot.
 #[derive(Clone)]
-struct Slot {
+pub(super) struct Slot {
     active: bool,
     member_index: usize,
     policy_path: Vec<Digest>,
@@ -244,7 +244,12 @@ struct Slot {
 }
 
 impl Slot {
-    fn placeholder(depth: usize) -> Self {
+    #[cfg(test)]
+    pub(super) fn corrupt_chain_for_test(&mut self) {
+        self.chains[0][0] += F::ONE;
+    }
+
+    pub(super) fn placeholder(depth: usize) -> Self {
         Self {
             active: false,
             member_index: 0,
@@ -578,19 +583,6 @@ fn synthesize(
 ) -> (Shape, Vec<F>) {
     let mut cs = ConstraintSystem::new();
     populate(&mut cs, params, address, message, threshold, slots);
-    cs.finish()
-}
-
-/// [`synthesize`] with the closing of zk-Hem v2 (`ConstraintSystem::finish_v2`).
-fn synthesize_v2(
-    params: MultisigParams,
-    address: &Digest,
-    message: &[u8; 32],
-    threshold: u32,
-    slots: &[Slot],
-) -> (Shape, Vec<F>) {
-    let mut cs = ConstraintSystem::new();
-    populate(&mut cs, params, address, message, threshold, slots);
     cs.finish_v2()
 }
 
@@ -608,6 +600,18 @@ fn populate(
         .map(|v| cs.public_input(v).into())
         .collect();
     let (address_lc, message_limbs) = publics.split_at(4);
+    check_slots(cs, params, address_lc, message_limbs, threshold, slots);
+}
+
+pub(super) fn check_slots(
+    cs: &mut ConstraintSystem,
+    params: MultisigParams,
+    address_lc: &[Lc],
+    message_limbs: &[Lc],
+    threshold: u32,
+    slots: &[Slot],
+) -> Lc {
+    assert_eq!(slots.len(), params.capacity);
     let threshold_lc: Lc = cs.alloc(f(u64::from(threshold))).into();
 
     // Bound the hidden threshold independently of Policy::new and the active slots.
@@ -684,6 +688,55 @@ fn populate(
     for (got, want) in computed.iter().zip(address_lc) {
         cs.enforce_equal(got, want);
     }
+    active_sum
+}
+
+pub(super) fn slots_for(
+    params: MultisigParams,
+    policy: &Policy,
+    message: &[u8; 32],
+    signers: &[MultisigSigner],
+) -> Result<Vec<Slot>, MultisigError> {
+    if policy.depth != params.depth {
+        return Err(MultisigError::InvalidPolicy);
+    }
+    if signers.len() < policy.threshold as usize
+        || signers.len() > params.capacity
+        || signers.is_empty()
+        || signers
+            .windows(2)
+            .any(|w| w[0].member_index >= w[1].member_index)
+    {
+        return Err(MultisigError::InvalidSignerSet);
+    }
+    let mut slots = Vec::with_capacity(params.capacity);
+    for signer in signers {
+        let pk = policy
+            .members
+            .get(signer.member_index)
+            .ok_or(MultisigError::InvalidSignature)?;
+        let sig = &signer.signature;
+        if !crate::sig::verify_individual_signature(pk, message, sig) || sig.layers.len() != 1 {
+            return Err(MultisigError::InvalidSignature);
+        }
+        slots.push(Slot {
+            active: true,
+            member_index: signer.member_index,
+            policy_path: policy.path(signer.member_index),
+            pk_seed: pk.pk_seed,
+            pk_root: pk.pk_root,
+            r_rand: sig.r_rand,
+            leaf_idx: sig.stateful_leaf_idx,
+            tsw_ctr: sig.layers[0].tsw_ctr,
+            chains: sig.layers[0].wots_chains.clone(),
+            xmss_path: sig.layers[0].merkle_path.clone(),
+        });
+    }
+    // Inactive slots repeat the first signer; only their `active` bit differs.
+    let mut filler = slots[0].clone();
+    filler.active = false;
+    slots.resize(params.capacity, filler);
+    Ok(slots)
 }
 
 /// The relation for one `(capacity, depth)`, built once and reused by provers and verifiers.
@@ -703,16 +756,9 @@ impl MultisigRelation {
         Ok(Self { params, shape })
     }
 
-    /// [`Self::new`] with the relation closed for zk-Hem v2: the same rows and variables,
-    /// for `zk_hem::v2::protocol` with [`Self::assignment`]. [`Self::prove`] and
-    /// [`Self::verify`] are v1 only.
+    /// Alias of [`Self::new`] (`ConstraintSystem::finish_v2`).
     pub fn new_v2(params: MultisigParams) -> Result<Self, MultisigError> {
-        if !params.valid() {
-            return Err(MultisigError::InvalidParams);
-        }
-        let slots = vec![Slot::placeholder(params.depth); params.capacity];
-        let (shape, _) = synthesize_v2(params, &[F::ZERO; 4], &[0u8; 32], 0, &slots);
-        Ok(Self { params, shape })
+        Self::new(params)
     }
 
     pub fn params(&self) -> MultisigParams {
@@ -736,46 +782,7 @@ impl MultisigRelation {
         message: &[u8; 32],
         signers: &[MultisigSigner],
     ) -> Result<Vec<Slot>, MultisigError> {
-        if policy.depth != self.params.depth {
-            return Err(MultisigError::InvalidPolicy);
-        }
-        if signers.len() < policy.threshold as usize
-            || signers.len() > self.params.capacity
-            || signers.is_empty()
-            || signers
-                .windows(2)
-                .any(|w| w[0].member_index >= w[1].member_index)
-        {
-            return Err(MultisigError::InvalidSignerSet);
-        }
-        let mut slots = Vec::with_capacity(self.params.capacity);
-        for signer in signers {
-            let pk = policy
-                .members
-                .get(signer.member_index)
-                .ok_or(MultisigError::InvalidSignature)?;
-            let sig = &signer.signature;
-            if !crate::sig::verify_individual_signature(pk, message, sig) || sig.layers.len() != 1 {
-                return Err(MultisigError::InvalidSignature);
-            }
-            slots.push(Slot {
-                active: true,
-                member_index: signer.member_index,
-                policy_path: policy.path(signer.member_index),
-                pk_seed: pk.pk_seed,
-                pk_root: pk.pk_root,
-                r_rand: sig.r_rand,
-                leaf_idx: sig.stateful_leaf_idx,
-                tsw_ctr: sig.layers[0].tsw_ctr,
-                chains: sig.layers[0].wots_chains.clone(),
-                xmss_path: sig.layers[0].merkle_path.clone(),
-            });
-        }
-        // Inactive slots repeat the first signer; only their `active` bit differs.
-        let mut filler = slots[0].clone();
-        filler.active = false;
-        slots.resize(self.params.capacity, filler);
-        Ok(slots)
+        slots_for(self.params, policy, message, signers)
     }
 
     /// The assignment of the relation for a signer set (`signers` ordered by member index),
@@ -807,15 +814,15 @@ impl MultisigRelation {
         policy: &Policy,
         message: &[u8; 32],
         signers: &[MultisigSigner],
-        regime: WhirSecurityRegime,
+        profile: Profile,
         seed: &[u8; 32],
-    ) -> Result<ZkHemProof, MultisigError> {
+    ) -> Result<ZkHemV2Proof, MultisigError> {
         let assignment = self.assignment(policy, message, signers)?;
-        protocol::prove(
+        v2::prove(
             &self.shape,
             assignment,
             &self.statement_bytes(),
-            regime,
+            profile,
             seed,
         )
         .map_err(MultisigError::Proof)
@@ -826,14 +833,14 @@ impl MultisigRelation {
         &self,
         address: &Digest,
         message: &[u8; 32],
-        regime: WhirSecurityRegime,
-        proof: &ZkHemProof,
+        profile: Profile,
+        proof: &ZkHemV2Proof,
     ) -> bool {
-        protocol::verify(
+        v2::verify(
             &self.shape,
             &public_inputs(address, message),
             &self.statement_bytes(),
-            regime,
+            profile,
             proof,
         )
     }
@@ -897,18 +904,17 @@ mod tests {
         for (lc, w) in mu.iter().zip(want) {
             assert_eq!(cs.eval(lc), w);
         }
-        let (shape, z) = cs.finish();
+        let (shape, z) = cs.finish_v2();
         assert!(shape.is_satisfied(&z));
     }
 
     #[test]
     fn canonical_bits_reject_the_aliased_decomposition() {
-        // 5 and 5 + p have different 64-bit patterns; only the first is accepted.
         let mut cs = ConstraintSystem::new();
         let v: Lc = cs.alloc(f(5)).into();
         let first_bit = cs.num_rows();
         let _ = canonical_bits(&mut cs, &v);
-        let (shape, z) = cs.finish();
+        let (shape, z) = cs.finish_v2();
         assert!(shape.is_satisfied(&z));
         let alias = 5u128 + u128::from(crate::field::GOLDILOCKS_PRIME);
         assert!(alias < 1u128 << 64);
@@ -916,7 +922,6 @@ mod tests {
         for t in 0..64 {
             bad[2 + t] = f(((alias >> t) & 1) as u64);
         }
-        // The chained product of the high bits follows the aliased bits.
         let mut acc = bad[2 + 32];
         for t in 33..64 {
             acc *= bad[2 + t];
@@ -938,7 +943,6 @@ mod tests {
         let mut slots = rel
             .slots(&fx.policy, &MESSAGE, &signers(&fx, &[0]))
             .unwrap();
-        // Bypass Policy::new and derive the actual address of the malicious t=0 tree.
         let malicious = Policy {
             depth: fx.policy.depth,
             threshold: 0,
@@ -950,14 +954,14 @@ mod tests {
         assert_eq!(&shape, rel.shape());
         assert!(!shape.is_satisfied(&z));
         assert_eq!(
-            protocol::prove(
+            v2::prove(
                 &shape,
                 z,
                 &rel.statement_bytes(),
-                WhirSecurityRegime::Poseidon2Cdhz25ZeroPowQrom128,
+                Profile::TurboShakeJohnson400,
                 &[4; 32]
             ),
-            Err(ZkHemError::Unsatisfied)
+            Err(ZkHemV2Error::Unsatisfied)
         );
         let (shape, z) = synthesize(params, &fx.policy.address(), &MESSAGE, 2, &slots);
         assert_eq!(&shape, rel.shape());
@@ -988,25 +992,19 @@ mod tests {
             2
         ));
 
-        // Below the threshold: one active slot.
         let mut one = honest.clone();
         one[1].active = false;
         assert!(!run(&one, 2));
-        // The same member twice.
         let mut twice = honest.clone();
         twice[1] = twice[0].clone();
         assert!(!run(&twice, 2));
-        // Members out of order.
         let mut swapped = honest.clone();
         swapped.swap(0, 1);
         assert!(!run(&swapped, 2));
-        // A gap in the active prefix.
         let mut gap = honest.clone();
         gap[0].active = false;
         assert!(!run(&gap, 2));
-        // A different threshold changes the address.
         assert!(!run(&honest, 1));
-        // A tampered chain value, XMSS sibling, randomizer and policy sibling.
         let mut bad = honest.clone();
         bad[0].chains[17][2] += F::ONE;
         assert!(!run(&bad, 2));
@@ -1019,7 +1017,6 @@ mod tests {
         let mut bad = honest.clone();
         bad[1].policy_path[0][0] += F::ONE;
         assert!(!run(&bad, 2));
-        // A key that is not in the policy, with its own valid signature.
         let outsider = fixture(6, 1, 3);
         let mut bad = honest.clone();
         let pk = outsider.policy.members[5];
@@ -1032,7 +1029,6 @@ mod tests {
         bad[1].chains = sig.layers[0].wots_chains.clone();
         bad[1].xmss_path = sig.layers[0].merkle_path.clone();
         assert!(!run(&bad, 2));
-        // A signature of another message.
         let mut other_msg = MESSAGE;
         other_msg[0] ^= 1;
         let (shape, z) = synthesize(params, &address, &other_msg, 2, &honest);
@@ -1047,8 +1043,8 @@ mod tests {
         })
         .unwrap();
         let fx = fixture(3, 2, 2);
-        let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
-        let prove = |s: &[MultisigSigner]| rel.prove(&fx.policy, &MESSAGE, s, regime, &[1; 32]);
+        let profile = Profile::TurboShakeJohnson400;
+        let prove = |s: &[MultisigSigner]| rel.prove(&fx.policy, &MESSAGE, s, profile, &[1; 32]);
         assert_eq!(
             prove(&signers(&fx, &[1])).unwrap_err(),
             MultisigError::InvalidSignerSet
@@ -1076,39 +1072,35 @@ mod tests {
         })
         .unwrap();
         let fx = fixture(3, 2, 2);
-        let regime = WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128;
+        let profile = Profile::TurboShakeJohnson400;
         let proof = rel
             .prove(
                 &fx.policy,
                 &MESSAGE,
                 &signers(&fx, &[0, 2]),
-                regime,
+                profile,
                 &[4; 32],
             )
             .unwrap();
         let address = fx.policy.address();
-        assert!(rel.verify(&address, &MESSAGE, regime, &proof));
+        assert!(rel.verify(&address, &MESSAGE, profile, &proof));
         let mut other = MESSAGE;
         other[31] ^= 0x80;
-        assert!(!rel.verify(&address, &other, regime, &proof));
+        assert!(!rel.verify(&address, &other, profile, &proof));
         let mut wrong = address;
         wrong[2] += F::ONE;
-        assert!(!rel.verify(&wrong, &MESSAGE, regime, &proof));
-        // A policy over the same members with another threshold has another address.
+        assert!(!rel.verify(&wrong, &MESSAGE, profile, &proof));
         let lower = Policy::new(fx.policy.members.clone(), 1, 2).unwrap();
-        assert!(!rel.verify(&lower.address(), &MESSAGE, regime, &proof));
+        assert!(!rel.verify(&lower.address(), &MESSAGE, profile, &proof));
 
-        // Same capacity, different threshold, member count and subset: every length in the
-        // proof agrees except the deduplicated Merkle sibling counts, which already differ
-        // between two proofs of one statement.
-        let fixed_len = |p: &ZkHemProof| {
-            let siblings = p.opening.round0_multiproof.auth_siblings.len()
+        let fixed_len = |p: &ZkHemV2Proof| {
+            let siblings = p.opening.stage0_query.siblings.len()
                 + p.opening
-                    .folded_layers
+                    .stages
                     .iter()
-                    .map(|l| l.multiproof.auth_siblings.len())
+                    .map(|s| s.query.siblings.len())
                     .sum::<usize>();
-            p.to_bytes().len() - 32 * siblings
+            p.to_bytes().len() - 50 * siblings
         };
         let other_fx = fixture(4, 1, 2);
         let single = rel
@@ -1116,18 +1108,18 @@ mod tests {
                 &other_fx.policy,
                 &MESSAGE,
                 &signers(&other_fx, &[3]),
-                regime,
+                profile,
                 &[5; 32],
             )
             .unwrap();
-        assert!(rel.verify(&other_fx.policy.address(), &MESSAGE, regime, &single));
+        assert!(rel.verify(&other_fx.policy.address(), &MESSAGE, profile, &single));
         assert_eq!(fixed_len(&single), fixed_len(&proof));
         let again = rel
             .prove(
                 &fx.policy,
                 &MESSAGE,
                 &signers(&fx, &[0, 2]),
-                regime,
+                profile,
                 &[8; 32],
             )
             .unwrap();
@@ -1148,14 +1140,14 @@ mod tests {
             capacity: env("QSAG_MULTISIG_CAPACITY", 4),
             depth: env("QSAG_MULTISIG_DEPTH", 10),
         };
-        let regime = match env("QSAG_BENCH_REGIME", 7) {
-            4 => WhirSecurityRegime::BciksJohnsonQrom128,
-            _ => WhirSecurityRegime::Poseidon2Cdhz25JohnsonQrom128,
+        let profile = match env("QSAG_BENCH_PROFILE", 2) {
+            1 => Profile::CshakeJohnson400,
+            _ => Profile::TurboShakeJohnson400,
         };
         let t = std::time::Instant::now();
         let rel = MultisigRelation::new(params).unwrap();
         let setup_ms = t.elapsed().as_secs_f64() * 1e3;
-        let layout = protocol::Layout::new(rel.shape(), regime).unwrap();
+        let layout = v2::layout_of(rel.shape()).unwrap();
         let members = params.capacity + 3;
         let threshold = (params.capacity as u32).div_ceil(2).max(1);
         let fx = fixture(members, threshold, params.depth);
@@ -1166,7 +1158,7 @@ mod tests {
                 &fx.policy,
                 &MESSAGE,
                 &signers(&fx, &chosen),
-                regime,
+                profile,
                 &[6; 32],
             )
             .unwrap();
@@ -1177,8 +1169,8 @@ mod tests {
             let mut runs: Vec<f64> = (0..3)
                 .map(|_| {
                     let t = std::time::Instant::now();
-                    let decoded = ZkHemProof::from_bytes(&bytes, rel.shape(), regime).unwrap();
-                    assert!(rel.verify(&address, &MESSAGE, regime, &decoded));
+                    let decoded = ZkHemV2Proof::from_bytes(&bytes, rel.shape()).unwrap();
+                    assert!(rel.verify(&address, &MESSAGE, profile, &decoded));
                     t.elapsed().as_secs_f64() * 1e3
                 })
                 .collect();
@@ -1188,7 +1180,7 @@ mod tests {
         let verify_all = time_verify();
         let verify_one = crate::with_worker_limit(1, time_verify);
         std::println!(
-            "ZKHEM_MULTISIG regime={regime:?} capacity={} depth={} members={members} \
+            "ZKHEM_MULTISIG profile={profile:?} capacity={} depth={} members={members} \
              threshold={threshold} sbox_rows={} rows=2^{} vars={} nnz={} cells=2^{} \
              proof_bytes={} proof_kib={:.2} relation_setup_ms={setup_ms:.0} \
              prove_ms={prove_ms:.0} verify_ms_all_workers={verify_all:.1} \
