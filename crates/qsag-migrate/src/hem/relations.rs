@@ -2353,3 +2353,186 @@ fn build_batch_in(
 }
 
 /// The public relation of a batch. `None` for a malformed batch.
+pub fn batch_shape(batch: &BatchStatement) -> Option<Arc<Shape>> {
+    batch.is_well_formed().then(|| shape_of(&batch.relation()))
+}
+
+/// The relation of `batch` with the assignment for `witness`; see
+/// [`synthesize_ownership`].
+pub fn synthesize_batch(
+    batch: &BatchStatement,
+    witness: &OwnershipWitness,
+) -> Result<(Shape, Vec<F>), OwnershipError> {
+    let tails = check_batch(batch, witness)?;
+    let (shape, assignment, _) = build_batch(
+        batch.lock,
+        batch.root,
+        &batch.prefix,
+        &tails,
+        &batch.public_bits(),
+        &witness.secret,
+    );
+    Ok((shape, assignment))
+}
+
+/// [`synthesize_batch`] with the relation's kept shape ([`synthesize_shared`]).
+fn synthesize_batch_shared(
+    batch: &BatchStatement,
+    witness: &OwnershipWitness,
+) -> Result<(Arc<Shape>, Vec<F>), OwnershipError> {
+    let tails = check_batch(batch, witness)?;
+    let public_bits = batch.public_bits();
+    Ok(synthesize_shared(&batch.relation(), |cs| {
+        build_batch_in(
+            cs,
+            batch.lock,
+            batch.root,
+            &batch.prefix,
+            &tails,
+            &public_bits,
+            &witness.secret,
+        )
+    }))
+}
+
+/// That `batch` is well formed and `witness` produces it, natively; returns the tails.
+fn check_batch(
+    batch: &BatchStatement,
+    witness: &OwnershipWitness,
+) -> Result<Vec<Vec<u32>>, OwnershipError> {
+    if !batch.is_well_formed() {
+        return Err(OwnershipError::MalformedStatement);
+    }
+    let targets: Vec<(Vec<u32>, [u8; 32])> = batch
+        .entries
+        .iter()
+        .map(|e| (e.tail.clone(), e.pq_commitment))
+        .collect();
+    let derived = BatchStatement::derive(
+        batch.lock,
+        batch.root,
+        &batch.prefix,
+        &targets,
+        witness,
+        batch.migration_domain,
+        batch.epoch,
+    );
+    if derived.as_ref() != Some(batch) {
+        return Err(OwnershipError::WitnessMismatch);
+    }
+    Ok(targets.into_iter().map(|(tail, _)| tail).collect())
+}
+
+/// The statement bytes [`prove_batch`] and [`verify_batch`] hand to zk-Hem.
+pub fn batch_transcript(batch: &BatchStatement, regime: Profile) -> Vec<u8> {
+    with_regime(batch.to_bytes(), regime)
+}
+
+// ============================================================================
+// Proofs
+// ============================================================================
+
+/// An ownership proof, for one statement or one batch, under one regime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnershipProof {
+    pub regime: Profile,
+    pub proof: ZkHemV2Proof,
+}
+
+impl OwnershipProof {
+    /// `magic(8) || regime || zk-Hem proof`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = PROOF_MAGIC.to_vec();
+        out.push(self.regime.wire_tag());
+        out.extend_from_slice(&self.proof.to_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8], shape: Option<Arc<Shape>>) -> Option<Self> {
+        let rest = bytes.strip_prefix(PROOF_MAGIC.as_slice())?;
+        let (&regime, rest) = rest.split_first()?;
+        let regime = Profile::from_wire_tag(regime)?;
+        let proof = ZkHemV2Proof::from_bytes(rest, &*shape?)?;
+        (proof.profile == regime).then_some(Self { regime, proof })
+    }
+
+    /// Strict decoding against the statement the proof is for: a known regime and a
+    /// zk-Hem part that is canonical for the statement's relation, with no byte left over.
+    pub fn from_bytes(bytes: &[u8], statement: &OwnershipStatement) -> Option<Self> {
+        Self::decode(bytes, ownership_shape(statement))
+    }
+
+    /// [`Self::from_bytes`] for a batch proof.
+    pub fn from_bytes_batch(bytes: &[u8], batch: &BatchStatement) -> Option<Self> {
+        Self::decode(bytes, batch_shape(batch))
+    }
+}
+
+fn prove(
+    synthesized: Result<(Arc<Shape>, Vec<F>), OwnershipError>,
+    transcript: &[u8],
+    regime: Profile,
+    seed: &[u8; 32],
+) -> Result<OwnershipProof, OwnershipError> {
+    let (shape, assignment) = synthesized?;
+    let proof = protocol::prove(&shape, assignment, transcript, regime, seed)
+        .map_err(OwnershipError::Proof)?;
+    Ok(OwnershipProof { regime, proof })
+}
+
+/// Prove a statement. `seed` must be uniform and secret; it drives every mask and blinder
+/// of the proof.
+pub fn prove_ownership(
+    statement: &OwnershipStatement,
+    witness: &OwnershipWitness,
+    regime: Profile,
+    seed: &[u8; 32],
+) -> Result<OwnershipProof, OwnershipError> {
+    prove(
+        synthesize_ownership_shared(statement, witness),
+        &ownership_transcript(statement, regime),
+        regime,
+        seed,
+    )
+}
+
+/// Verify a proof against a statement under the regime the verifier requires. On `true`,
+/// [`OwnershipStatement::binding`] is what the registry should record.
+pub fn verify_ownership(
+    statement: &OwnershipStatement,
+    regime: Profile,
+    proof: &OwnershipProof,
+) -> bool {
+    let (Some(shape), Some(public_inputs)) =
+        (ownership_shape(statement), statement.public_inputs())
+    else {
+        return false;
+    };
+    proof.regime == regime
+        && proof.proof.profile == regime
+        && protocol::verify(
+            &shape,
+            &public_inputs,
+            &ownership_transcript(statement, regime),
+            regime,
+            &proof.proof,
+        )
+}
+
+/// Prove a batch; see [`prove_ownership`].
+pub fn prove_batch(
+    batch: &BatchStatement,
+    witness: &OwnershipWitness,
+    regime: Profile,
+    seed: &[u8; 32],
+) -> Result<OwnershipProof, OwnershipError> {
+    prove(
+        synthesize_batch_shared(batch, witness),
+        &batch_transcript(batch, regime),
+        regime,
+        seed,
+    )
+}
+
+/// Verify a batch proof. On `true`, [`BatchStatement::bindings`] is what the registry
+/// should record.
