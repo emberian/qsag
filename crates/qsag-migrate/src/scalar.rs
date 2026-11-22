@@ -11,6 +11,7 @@ pub(crate) const ED_ORDER: [u64; 4] = [
     0,
     0x1000_0000_0000_0000,
 ];
+#[allow(dead_code)]
 pub(crate) const ED_PRIME: [u64; 4] = [
     0xffff_ffff_ffff_ffed,
     u64::MAX,

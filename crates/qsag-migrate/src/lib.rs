@@ -1,75 +1,43 @@
 #![no_std]
 #![forbid(unsafe_code)]
 #![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
-//! Classical spending-key ownership with 438-repetition mixed-domain ZKBoo proofs
-//! (conditional challenge soundness `(2/3)^438 < 2^-256`; generic Grover search
-//! over challenges costs `> 2^128` iterations). These are not composed security
-//! bounds: 256-bit commitment digests provide about 128 classical collision bits
-//! and 85 quantum collision-query bits. Revealed curve keys do not authenticate
-//! their original owner against an attacker capable of Shor's algorithm.
-//! Replay prevention requires an external nullifier registry. See `SECURITY.md`.
+//! Proofs that the holder of a legacy credential (Bitcoin, Ethereum, Ed25519, BIP-32/SLIP-0010,
+//! BLS12-381 `0x00` withdrawal credentials, and Zcash NU7 `ZIP-2005`/`2007`, Orchard, Sapling)
+//! authorises a post-quantum address over `zk-Hem v2` (`QuinticGoldilocks`), the threshold
+//! collaborative prover (`hem::collab`), and the durable one-way nullifier registry (`hem::registry`).
 //!
-//! The distributed outer prover (`co_zk_mpc`) runs on one of two actively secure
-//! engines. Three custodians use replicated 2-of-3 sharing (`outer_mpc`): active
-//! 1-of-3 malicious multiplication verification (per-flush `< 2^-186` prime-field and
-//! `< 2^-244` Boolean `AND` soundness with two-round transcript-bound coin-flipping)
-//! and pre-open circuit output-zero verification (`all_outputs_zero`) over confidential
-//! authenticated pairwise channels, with non-identifiable abort against one actively
-//! corrupted physical custodian (`2`-of-`3` collusion reconstructs the witness).
-//! General `(t,n)` Shamir and n-of-n additive custody use MAC-authenticated additive
-//! sharing (`threshold_mpc`): every opened value passes a commit-then-open batch MAC
-//! check (`< 2^-126` per check) against any strict subset of the quorum, on
-//! witness-independent preprocessing (`threshold_prep`).
-//! See `SECURITY.md` for exact security bounds and assumptions.
+//! * [`hem::relations`]: multi-chain `Lock × KeySource` ownership statements and `zk-Hem v2` proofs.
+//! * [`hem::zcash`]: Zcash NU7 `ZIP-2005` Ironwood note recovery, Orchard & Sapling diversified
+//!   payment addresses, and `ZIP-2007` `t1` transparent P2PKH ownership.
+//! * [`hem::registry`] (`std`): crash-durable TPM/anchor-backed one-way nullifier turnstile.
+//! * [`hem::collab`]: threshold collaborative prover over MAC-authenticated shares with 9-triple
+//!   Toom-3 `Fp5` Beaver multiplication and pre-round-1 anti-rollback preprocessing burn.
+//! * [`secp256k1_ct`], [`ed25519_ct`], [`pallas`], [`bls12_381`], [`legacy`], [`scalar`]:
+//!   constant-time native curve, scalar, and commitment primitives.
 //!
+//! See `SECURITY.md` for what each statement proves and for exact security bounds.
 extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod bls12_381;
 pub mod ed25519_ct;
+pub mod hem;
 pub mod legacy;
+pub(crate) mod limbs;
 pub mod pallas;
 pub mod scalar;
-pub use scalar::{ScalarGroup, SpendingScalar};
 pub mod secp256k1_ct;
-pub mod zk_engine;
 
 pub use bls12_381::{
-    BlsG1Point, BlsMigrationRequest, BlsMigrationStatement, BlsOwnershipWitness,
-    BlsValidatorCommitment, FpBls381, FrBls381, compute_bls_0x00_withdrawal_credentials,
-    prove_bls_key_possession_in_domain, prove_bls_migration, prove_bls_migration_in_domain,
-    verify_bls_key_possession, verify_bls_key_possession_with_backend, verify_bls_migration,
-    verify_bls_migration_with_backend,
+    BlsG1Point, BlsOwnershipWitness, BlsValidatorCommitment, FpBls381, FrBls381,
+    compute_bls_0x00_withdrawal_credentials,
 };
 pub use legacy::{HardenedChainStep, LegacyCommitmentKind, LegacyOwnershipWitness};
 pub use pallas::{
-    FpPallas, FqPallas, PallasCommitmentKind, PallasMigrationRequest, PallasMigrationStatement,
-    PallasOwnershipWitness, PallasPoint, prove_pallas_migration, prove_pallas_migration_in_domain,
-    verify_pallas_migration, verify_pallas_migration_with_backend,
+    FpPallas, FqPallas, PallasCommitmentKind, PallasOwnershipWitness, PallasPoint,
 };
-mod boolean_hash;
-mod circuit;
-pub mod co_zk_mpc;
-mod limbs;
-mod ownership;
-mod proof_shape;
-pub use co_zk_mpc::CoZkCustodianShare;
-mod batch_hash;
-mod outer_mpc;
-mod parallel;
-mod secret;
-mod tape_sponge;
-pub mod threshold_mpc;
-pub use threshold_mpc::{
-    poly0x11b_to_t3_byte_ct, poly0x11b_to_t3_bytes32_ct, t3_to_poly0x11b_byte_ct,
-    t3_to_poly0x11b_bytes32_ct,
-};
-pub mod threshold_prep;
-pub use zk_engine::{
-    MIT_PARTIES, MIT_REPETITIONS, MigrateError, MigrationRequest, MigrationStatement,
-    MigrationZkProof, OpenedRepetitionView, prove_migration_in_domain, verify_migration_proof,
-};
+pub use scalar::{ScalarGroup, SpendingScalar};
 
 #[cfg(test)]
 mod tests {
@@ -222,6 +190,3 @@ mod tests {
         assert!(slip_wit.matches_commitment(&slip_comm));
     }
 }
-
-#[cfg(test)]
-mod benchmarks;

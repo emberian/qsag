@@ -157,7 +157,12 @@ impl Fp256 {
             *slot = cur as u64;
             c3 = cur >> 64;
         }
-        Self(out2).normalize()
+        let result = Self(out2).normalize();
+        ct_zeroize_u64s(&mut wide);
+        ct_zeroize_u64s(&mut acc);
+        ct_zeroize_u64s(&mut out);
+        ct_zeroize_u64s(&mut out2);
+        result
     }
 
     #[inline]
@@ -398,6 +403,7 @@ pub fn secp_scalar_add_mod_n(a_be: &[u8; 32], b_be: &[u8; 32]) -> [u8; 32] {
 /// Negate scalar `s` modulo `SECP_N` (`SECP_N - s`).
 pub fn secp_scalar_neg_mod_n(s_be: &[u8; 32]) -> [u8; 32] {
     let mut s: [u64; 4] = limbs::from_be_bytes(s_be);
+    s = limbs::reduce_once(s, false, SECP_N);
     let (mut diff, _) = limbs::sbb(SECP_N, s);
     let mut neg = limbs::ct_select(limbs::is_zero(s), [0u64; 4], diff);
     let out = limbs::to_be_bytes(neg);

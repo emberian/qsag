@@ -15,18 +15,19 @@ impl Drop for Field {
 }
 
 impl Field {
-    fn reduce(mut wide: [u128; 5]) -> Self {
+    fn reduce(wide: &mut [u128; 5]) -> Self {
         // Three complete carry sweeps bound every limb, including the wrap by 19.
         for _ in 0..3 {
             let mut carry = 0;
-            for limb in &mut wide {
+            for limb in wide.iter_mut() {
                 *limb += carry;
                 carry = *limb >> 51;
                 *limb &= MASK as u128;
             }
             wide[0] += carry * 19;
         }
-        let value = wide.map(|x| x as u64);
+        let mut value = wide.map(|x| x as u64);
+        qsag_asm::volatile_fill(wide, 0);
         let mut diff = [0u64; 5];
         let mut borrow = 0u64;
         for ((slot, &x), &p) in diff.iter_mut().zip(&value).zip(&PRIME) {
@@ -34,17 +35,20 @@ impl Field {
             borrow = d >> 63;
             *slot = d & MASK;
         }
-        Self(limbs::ct_select(borrow == 0, diff, value))
+        let result = Self(limbs::ct_select(borrow == 0, diff, value));
+        ct_zeroize_u64s(&mut diff);
+        ct_zeroize_u64s(&mut value);
+        result
     }
 
     fn add(&self, rhs: &Self) -> Self {
-        Self::reduce(core::array::from_fn(|i| {
+        Self::reduce(&mut core::array::from_fn(|i| {
             self.0[i] as u128 + rhs.0[i] as u128
         }))
     }
 
     fn sub(&self, rhs: &Self) -> Self {
-        Self::reduce(core::array::from_fn(|i| {
+        Self::reduce(&mut core::array::from_fn(|i| {
             self.0[i] as u128 + 2 * PRIME[i] as u128 - rhs.0[i] as u128
         }))
     }
@@ -57,7 +61,7 @@ impl Field {
                 wide[(i + j) % 5] += a as u128 * b as u128 * factor;
             }
         }
-        Self::reduce(wide)
+        Self::reduce(&mut wide)
     }
 
     fn inverse(&self) -> Self {
@@ -525,38 +529,9 @@ const BASE_TABLE: [[[u64; 5]; 3]; 16] = [
     ],
 ];
 
-/// Canonical four-limb arithmetic adapter for the mixed-domain circuit.
-pub(crate) fn multiply_limbs(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    fn field(x: [u64; 4]) -> Field {
-        Field(core::array::from_fn(|i| {
-            let offset = i * 51;
-            let limb = offset / 64;
-            let shift = offset % 64;
-            let low = x[limb] >> shift;
-            let high = if shift != 0 && limb + 1 < 4 {
-                x[limb + 1] << (64 - shift)
-            } else {
-                0
-            };
-            (low | high) & MASK
-        }))
-    }
-    field(a).mul(&field(b)).limbs()
-}
-
-pub(crate) fn circuit_base_table() -> [[[u64; 4]; 4]; 16] {
-    BASE_TABLE.map(|coords| {
-        let x = limbs::from_le_bytes(&Field(coords[0]).bytes());
-        let y = limbs::from_le_bytes(&Field(coords[1]).bytes());
-        let t = limbs::from_le_bytes(&Field(coords[2]).bytes());
-        [x, y, [1, 0, 0, 0], t]
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LegacyCommitmentKind, LegacyOwnershipWitness};
 
     fn bytes(hex: &str) -> [u8; 32] {
         let mut out = [0; 32];
@@ -579,11 +554,12 @@ mod tests {
                 "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
             ),
         ] {
-            let witness = LegacyOwnershipWitness::from_raw_secret(bytes(seed));
-            assert_eq!(
-                witness.compute_slip0010_commitment(),
-                LegacyCommitmentKind::Slip0010Ed25519(bytes(expected))
-            );
+            let digest = qsag_accel::sha2::sha512(&bytes(seed));
+            let mut scalar: [u8; 32] = digest[..32].try_into().unwrap();
+            scalar[0] &= 248;
+            scalar[31] &= 127;
+            scalar[31] |= 64;
+            assert_eq!(public_key_from_clamped_scalar(&scalar), bytes(expected));
         }
     }
 

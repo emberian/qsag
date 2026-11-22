@@ -4,19 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Mixed-domain ZKBoo migration ownership with replicated and authenticated general-quorum outer-MPC proving"
+description = "Zero-knowledge ownership migration proofs (`zk-Hem v2`), threshold collaborative prover (`collab`), Zcash NU7 (`ZIP-2005`/`2007`, Orchard, Sapling), and durable nullifier registry"
 
 [features]
-default = ["alloc"]
-alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
-std = ["alloc", "qsag-accel/std", "qsag-addr/std", "qsag-core/std"]
-vulkan = ["std"]
-# Deterministic single-seed preprocessing for tests and benchmarks. A build with
-# this feature contains a generator that knows every MAC key; never ship it.
-test-dealer = []
+default = ["std"]
+std = [
+    "qsag-core/std",
+    "qsag-asm/std",
+    "qsag-accel/std",
+    "qsag-addr/std",
+    "qsag-agg/std",
+    "qsag-quorum/std",
+]
 
 [dependencies]
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false }
 qsag-addr = { path = "../qsag-addr", default-features = false }
+qsag-agg = { path = "../qsag-agg", default-features = false }
+qsag-quorum = { path = "../qsag-quorum", default-features = false }
