@@ -6380,10 +6380,10 @@ theorem poseidon2ConstAt_eq (tag round lane : Nat) :
 
 /-! ## 5. Build-Time Conformance Vectors Matching `poseidon2.rs` -/
 
-example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩, ⟨Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0, Goldilocks.ofNat 0⟩⟩).toList.map (·.val) =
+theorem poseidon2Perm12_zero_kat : (poseidon2Perm12 state12Zero).toList.map (·.val) =
     [17528629447354354351, 5014055130248055117, 10679077121839038553, 431078547345611051, 7807009921345120310, 2413869689279715014, 11875300792986830377, 1872634884137602556, 15069512080271275672, 14253608580209913153, 14550618143248480092, 107036164978639472] := by decide +kernel
 
-example : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
+theorem poseidon2Perm12_counting_kat : (poseidon2Perm12 ⟨⟨Goldilocks.ofNat 0, Goldilocks.ofNat 1, Goldilocks.ofNat 2, Goldilocks.ofNat 3⟩, ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 5, Goldilocks.ofNat 6, Goldilocks.ofNat 7⟩, ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 9, Goldilocks.ofNat 10, Goldilocks.ofNat 11⟩⟩).toList.map (·.val) =
     [13782584570844608145, 13136387643152332171, 7171133015474200819, 7643370872200861694, 14144755201299840503, 16470027036684692562, 1748465969625202405, 1718729118078964347, 6141020819996733037, 16322330185628708898, 11650380702735067362, 2734959974607798415] := by decide +kernel
 
 example : poseidon2Hash32 [] =
@@ -7384,6 +7384,19 @@ theorem compactJortsVerify1_hybrid_rogue1 :
   Qsag.compactJortsVerify1_hybrid_rogue1
 end CompactJortsKats
 end CompositionInstancesPoseidon2Kats
+
+end Qsag
+end
+
+public section
+namespace Qsag
+#export_eqns state12Sum poseidon2InitialExtConsts poseidon2InternalConsts poseidon2TerminalExtConsts poseidon2ExtRoundConst
+
+theorem runRounds_eq_foldl {α σ : Type} (step : α → σ → σ) (cs : List α) (s : σ) :
+    runRounds step cs s = cs.foldl (fun acc c => step c acc) s := by
+  induction cs generalizing s with
+  | nil => rfl
+  | cons c cs ih => exact ih _
 
 end Qsag
 end
